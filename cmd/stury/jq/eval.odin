@@ -27,7 +27,12 @@ Item :: struct {
 Path_Step :: struct {
 	parent: ^Path_Step,
 	key:    Value,
+	depth:  int, // steps from the root to this one
 }
+
+// A path as a value, read as an array of its keys from the root: the array is made when something reads
+// it. Never the root itself, whose path is an empty array.
+Path :: distinct ^Path_Step
 
 // Where an evaluation's outputs go: `emit` takes one, and its `Signal` steers the generator.
 Sink :: struct {

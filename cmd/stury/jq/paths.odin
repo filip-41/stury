@@ -1,18 +1,17 @@
 package jq
 
+import "base:runtime"
+
 // Path tracking: the path an output was read at, kept beside it while a path expression runs.
 
 extend :: proc(p: ^Path_Step, key: Value) -> ^Path_Step {
 	s := new(Path_Step)
-	s.parent, s.key = p, key
+	s.parent, s.key, s.depth = p, key, 1 + p.depth if p != nil else 1
 	return s
 }
 
 path_array :: proc(p: ^Path_Step) -> ^Array {
-	n := 0
-	for s := p; s != nil; s = s.parent {
-		n += 1
-	}
+	n := p.depth if p != nil else 0
 	a := new_array(n)
 	resize(&a.items, n)
 	for s := p; s != nil; s = s.parent {
@@ -20,6 +19,39 @@ path_array :: proc(p: ^Path_Step) -> ^Array {
 		a.items[n] = s.key
 	}
 	return a
+}
+
+PATH_KEYS_ON_STACK :: 32
+
+// `compare` of two arrays one of which is a path, whose keys are read into the stack or a heap block that
+// is freed on return, as a sort compares paths often and an arena frees no block.
+@(cold)
+compare_path_members :: proc(a, b: Value, depth: int, eq: bool) -> int {
+	bufs: [2][PATH_KEYS_ON_STACK]Value
+	xs: [2][]Value
+	for v, i in ([2]Value{a, b}) {
+		if p, is_path := v.(Path); is_path {
+			s := (^Path_Step)(p)
+			xs[i] = bufs[i][:s.depth] if s.depth <= PATH_KEYS_ON_STACK else make([]Value, s.depth, runtime.heap_allocator())
+			for n := s.depth; s != nil; s = s.parent {
+				n -= 1
+				xs[i][n] = s.key
+			}
+		} else {
+			xs[i] = elements(v)
+		}
+	}
+	defer for v, i in ([2]Value{a, b}) {
+		if _, is_path := v.(Path); is_path && len(xs[i]) > PATH_KEYS_ON_STACK {
+			delete(xs[i], runtime.heap_allocator())
+		}
+	}
+	return compare_items(xs[0], xs[1], depth, eq)
+}
+
+// The path as a value that reads as its array of keys without making it.
+path_value :: proc(p: ^Path_Step) -> Value {
+	return Path(p) if p != nil else path_array(nil)
 }
 
 // The path of a value no path leads to, made by an expression that is not a path: a path expression
@@ -107,6 +139,9 @@ identical :: proc(a, b: Value) -> bool {
 	case ^Array:
 		y, is_arr := b.(^Array)
 		return is_arr && x == y
+	case Path:
+		y, is_path := b.(Path)
+		return is_path && x == y
 	case ^Object:
 		y, is_obj := b.(^Object)
 		return is_obj && x == y
@@ -121,11 +156,11 @@ emit_made :: proc(out: ^Sink, input: Item, v: Value, track: bool) -> Signal {
 }
 
 // The path a path expression output `it` by, or jq's error for a value no path leads to.
-path_of :: proc(ip: ^Interp, it: Item) -> (^Array, Signal) {
+path_of :: proc(ip: ^Interp, it: Item) -> (^Path_Step, Signal) {
 	if pathless(it.path) {
 		return nil, fail(ip, "Invalid path expression with result %s", brief(it.v))
 	}
-	return path_array(it.path), .Go
+	return it.path, .Go
 }
 
 // `it` after a pattern's match left the path state `st` (nil if not tracking): pathless, unless no index

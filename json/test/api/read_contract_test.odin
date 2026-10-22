@@ -55,7 +55,7 @@ test_request_answers_out_of_range_and_reinit :: proc(t: ^testing.T) {
 	}
 	out, err := json.answers(&req, 1)
 	testing.expect(t, err == nil && len(out) == 1)
-	json.request_init(&req)
+	testing.expect(t, json.request_init(&req) == nil)
 	testing.expect_value(t, len(req.answers), 0)
 	out, err = json.answers(&req, 0)
 	testing.expect(t, err == nil && len(out) == 0)

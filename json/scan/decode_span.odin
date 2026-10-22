@@ -15,7 +15,7 @@ Null :: struct {}
 Digits :: distinct string
 
 // The authored text of one JSON value. `marshal` copies it verbatim after checking it is exactly one strict
-// value. `unmarshal` fills it with a value's source span.
+// value; an empty one marshals as `null`. `unmarshal` fills it with a value's source span.
 Raw :: distinct string
 
 // One decoded scalar. `i64` holds an integer token that fits and is not `-0`. `u64` holds an integer

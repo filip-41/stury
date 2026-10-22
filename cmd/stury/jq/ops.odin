@@ -83,6 +83,11 @@ add :: proc(ip: ^Interp, a, b: Value, owned: ^Owned = nil) -> (Value, Signal) {
 	case ka == .Array && kb == .Array:
 		if owned != nil {
 			r := owned_copy(a, owned).(^Array)
+			// `. + .` on the state itself is left to the loop, which reads the array as it grows.
+			if x, is_array := b.(^Array); is_array && x != r {
+				append(&r.items, ..x.items[:])
+				return r, .Go
+			}
 			it := iterate(b)
 			for _, m in next_member(&it) {
 				append(&r.items, m)

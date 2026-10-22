@@ -244,7 +244,7 @@ fill_table :: proc() {
 		{"erfc", proc(x: f64) -> f64 {return libc.erfc(x)}},
 		{"exp10", proc(x: f64) -> f64 {return libc.pow(10, x)}},
 		{"significand", proc(x: f64) -> f64 {return libc.scalbn(x, -libc.ilogb(x)) if x != 0 && !math.is_inf(x) else x}},
-		{"gamma", proc(x: f64) -> f64 {return libc.tgamma(x)}},
+		{"gamma", proc(x: f64) -> f64 {return libc.lgamma(x)}}, // libm's `gamma` is log-gamma (glibc, jq on Linux)
 		{"lgamma", proc(x: f64) -> f64 {return libc.lgamma(x)}},
 		{"j0", proc(x: f64) -> f64 {return bessel_j0(x)}},
 		{"j1", proc(x: f64) -> f64 {return bessel_j1(x)}},
@@ -616,6 +616,9 @@ defined_path :: proc(x: ^Args_Sink) -> (sig: Signal, done: bool) {
 elements :: proc(v: Value) -> []Value {
 	if a, is_arr := v.(^Array); is_arr {
 		return a.items[:]
+	}
+	if p, is_path := v.(Path); is_path {
+		return path_array((^Path_Step)(p)).items[:]
 	}
 	out := make([dynamic]Value, 0, length_of(v))
 	it := iterate(v)

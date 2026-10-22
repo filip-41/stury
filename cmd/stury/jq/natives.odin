@@ -33,7 +33,7 @@ native_path :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, 
 				if sig != .Go {
 					return sig
 				}
-				return emit_value(x.ip, x.out, p, x.track)
+				return emit_value(x.ip, x.out, path_value(p), x.track)
 			}}, ip = ip, track = track, out = out}
 	return eval(ip, n.args[0], {v = input.v}, env, true, &s)
 }

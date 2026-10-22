@@ -20,6 +20,7 @@ Value :: union {
 	^Array,
 	^Object,
 	Ref,
+	Path,
 }
 
 // `lit` is the number as written, for a number read from input or the program and not yet computed on:
@@ -71,7 +72,7 @@ kind :: proc(v: Value) -> Kind {
 		return .Number
 	case string:
 		return .String
-	case ^Array:
+	case ^Array, Path:
 		return .Array
 	case ^Object:
 		return .Object
@@ -149,6 +150,8 @@ length_of :: proc(v: Value) -> int {
 	switch x in v {
 	case ^Array:
 		return len(x.items)
+	case Path:
+		return x.depth
 	case ^Object:
 		return len(x.keys)
 	case Ref:
@@ -195,6 +198,15 @@ array_at :: proc(v: Value, i: int) -> Value {
 			return nil
 		}
 		return Ref{x.doc, json.child(x.doc, x.node, i)}
+	case Path:
+		if i < 0 || i >= x.depth {
+			return nil
+		}
+		s := (^Path_Step)(x)
+		for s.depth > i + 1 {
+			s = s.parent
+		}
+		return s.key
 	case nil, bool, Number, string, ^Object:
 	}
 	return nil
@@ -215,7 +227,7 @@ object_get :: proc(v: Value, k: string) -> (Value, bool) {
 			return nil, false
 		}
 		return Ref{x.doc, row}, true
-	case nil, bool, Number, string, ^Array:
+	case nil, bool, Number, string, ^Array, Path:
 	}
 	return nil, false
 }
@@ -433,13 +445,17 @@ repeats_in_table :: proc(r: Ref) -> bool {
 	return false
 }
 
-next_member :: proc(it: ^Members) -> (key: string, v: Value, ok: bool) {
+next_member :: #force_inline proc(it: ^Members) -> (key: string, v: Value, ok: bool) {
 	for it.i < it.n {
 		i := it.i
 		it.i += 1
 		switch x in it.v {
 		case ^Array:
 			return "", x.items[i], true
+		case Path:
+			a := path_array((^Path_Step)(x)) // made at the first member, read as an array from then on
+			it.v = a
+			return "", a.items[i], true
 		case ^Object:
 			return x.keys[i], x.vals[i], true
 		case Ref:
@@ -663,6 +679,16 @@ compare :: proc(a, b: Value, depth := 0, eq := false) -> int {
 		y, _ := string_of(b)
 		return text_order(x, y)
 	case .Array:
+		if x, a_arr := a.(^Array); a_arr {
+			if y, b_arr := b.(^Array); b_arr {
+				return compare_items(x.items[:], y.items[:], depth, eq)
+			}
+		}
+		_, a_path := a.(Path)
+		_, b_path := b.(Path)
+		if a_path || b_path {
+			return compare_path_members(a, b, depth, eq)
+		}
 		na, nb := length_of(a), length_of(b)
 		ia, ib := iterate(a), iterate(b)
 		for _ in 0 ..< min(na, nb) {
@@ -706,6 +732,16 @@ text_order :: proc(a, b: string) -> int {
 	return strings.compare(a, b)
 }
 
+// `compare` of two arrays' members, then of their lengths.
+compare_items :: proc(xs, ys: []Value, depth: int, eq: bool) -> int {
+	for i in 0 ..< min(len(xs), len(ys)) {
+		if c := compare(xs[i], ys[i], depth + 1, eq); c != 0 {
+			return c
+		}
+	}
+	return -1 if len(xs) < len(ys) else (1 if len(xs) > len(ys) else 0)
+}
+
 equal :: proc(a, b: Value) -> bool {
 	return compare(a, b, eq = true) == 0
 }
@@ -716,6 +752,9 @@ same :: proc(a, b: Value) -> bool {
 	#partial switch x in a {
 	case ^Array:
 		y, ok := b.(^Array)
+		return ok && x == y
+	case Path:
+		y, ok := b.(Path)
 		return ok && x == y
 	case ^Object:
 		y, ok := b.(^Object)

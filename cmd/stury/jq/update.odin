@@ -379,7 +379,7 @@ path_update_emit :: proc(s: ^Sink, it: Item) -> Signal {
 		clear(&x.gone)
 		x.gone_null = x.n.op != .Assign
 	}
-	if sig = x.step(x, p.items[:]); sig != .Go {
+	if sig = x.step(x, path_array(p).items[:]); sig != .Go {
 		x.failed = true
 	}
 	return sig

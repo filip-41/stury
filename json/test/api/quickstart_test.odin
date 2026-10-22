@@ -121,21 +121,15 @@ test_quickstart_query :: proc(t: ^testing.T) {
 	reached := false
 	defer testing.expect(t, reached, "the snippet returned early")
 
-	req: json.Request({.Path})
-	defer json.destroy(&req)
-	if json.request_init(&req, ".tags[1]") != nil || json.scan(src, &req) != nil {
+	a, err := json.find(src, ".tags[1]")
+	if err != nil {
 		return
 	}
-	found, _ := json.answers(&req, 0) // one path: nothing to group, so no error
-	for a in found {
-		if a.outcome == .Found {
-			fmt.println(string(src[a.lo:a.hi])) // "engines", quotes and all
-		}
+	if a.outcome == .Found {
+		fmt.println(string(src[a.lo:a.hi])) // "engines", quotes and all
 	}
 
 	reached = true
-	testing.expect_value(t, len(req.answers), 1)
-	a := req.answers[0]
 	testing.expect_value(t, a.outcome, json.Path_Outcome.Found)
 	testing.expect_value(t, string(src[a.lo:a.hi]), `"engines"`)
 }

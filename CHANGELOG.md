@@ -8,7 +8,8 @@ linux, on amd64 and arm64).
 ### Library (`stury:json`, `stury:host`)
 
 - Validation: check a text against RFC 8259 without allocating, with the line and column of the first fault.
-- Path queries: read the values at one or more paths without parsing the rest of the text.
+- Path queries: read the values at one or more paths without parsing the rest of the text (`find` for one
+  path's first answer, a `Request` for more).
 - Parsed documents: build a document once and query it, numbers are checked when it is built and decoded when
   read, so the input must outlive the document.
 - Typed `unmarshal` and `marshal`: read JSON into Odin structs, slices, maps, unions and `any`, and write Odin
@@ -18,7 +19,9 @@ linux, on amd64 and arm64).
 - JSONC: read comments and trailing commas, and write the comments back.
 - Parallel validation and per-record work take threads from `stury:host` (`Batch_Pool`), and the library starts no
   thread of its own.
-- One error convention and fixed limits throughout. Each public name's doc comment describes it.
+- One error convention and fixed limits throughout. Each public name's doc comment describes it. A
+  procedure whose result is its only output carries `@(require_results)`, so a dropped result is a compile
+  error.
 - On amd64 the floor is x86-64-v2, long strings are scanned 64 bytes at a time where the processor has
   AVX-512BW.
 

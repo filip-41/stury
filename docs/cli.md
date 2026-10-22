@@ -339,6 +339,8 @@ outside `--jsonc` they give `null`.
 - `scalb` and `scalbln` cut a fractional exponent toward zero and saturate a huge one on every OS, as jq on
   macOS does: `[scalb(1;2.5), scalbln(1;1e30)]` is `[4,1.7976931348623157e+308]`. glibc's jq gives
   `[null,0]`.
+- `gamma` is log-gamma on every OS, as glibc's `gamma` is (so jq on Linux): `[1, 2] | map(gamma)` is `[0,0]`.
+  macOS has no `gamma` in libm, and jq there answers `tgamma`, `[1,1]`.
 - `strptime` gives, on every OS, the weekday and yearday as the calendar's values for the array's own year,
   month and day. A day the format does not read is taken as day 0 (`"12:30:00" | strptime("%T")` is weekday
   0, yearday -1: 1899-12-31 was a Sunday). jq's weekday on macOS does not match the calendar for dates in or

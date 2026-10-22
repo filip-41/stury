@@ -1,4 +1,4 @@
-// Read one value by path with `scan`, without building a document.
+// Read one value by path with `find`, and every value of a path with a `Request`, without building a document.
 //
 // Run from the repository root: odin run examples/scan -collection:stury=.
 package main
@@ -10,15 +10,23 @@ import "core:os"
 main :: proc() {
 	src := transmute([]byte)string(`{"name": "ada", "tags": ["math", "engines"]}`)
 
-	// One walk answers the request; no document is built.
+	// One walk answers one path, and nothing is kept.
+	a, err := json.find(src, ".tags[1]")
+	if err != nil {
+		os.exit(1)
+	}
+	if a.outcome == .Found {
+		fmt.println(string(src[a.lo:a.hi])) // "engines", quotes and all
+	}
+
+	// A request holds every answer of its paths, and can be scanned again over other records.
 	req: json.Request({.Path})
 	defer json.destroy(&req)
-	if json.request_init(&req, ".tags[1]") != nil || json.scan(src, &req) != nil {
+	if json.request_init(&req, ".tags[]") != nil || json.scan(src, &req) != nil {
 		os.exit(1)
 	}
-	found, _ := json.answers(&req, 0)
-	if len(found) != 1 || found[0].outcome != .Found {
-		os.exit(1)
+	tags, _ := json.answers(&req, 0) // one path: nothing to group, so no error
+	for t in tags {
+		fmt.println(string(src[t.lo:t.hi])) // "math", then "engines"
 	}
-	fmt.println(string(src[found[0].lo:found[0].hi])) // "engines", quotes and all
 }

@@ -36,6 +36,7 @@ Record_Fault :: struct {
 //	  `err` when its task returns.
 //	- Under `.Root_Entries` a scalar root has no pieces, and its fault under `validate` is returned.
 //	- Scratch is `context.allocator`'s, from the calling thread only.
+@(require_results)
 each_record :: proc(
 	src: []byte,
 	framing: Framing,
@@ -83,6 +84,7 @@ each_record :: proc(
 //	  entry.
 //	- A framing fault is `err`, the first in `src`, and `faults` are then only the records before it.
 //	- Records are validated on `runner`'s threads as `each_record` hands them out.
+@(require_results)
 validate_records :: proc(
 	src: []byte,
 	framing: Framing,

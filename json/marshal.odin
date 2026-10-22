@@ -35,7 +35,7 @@ marshal_to_writer :: proc {
 
 // Write `v` as JSON into a new buffer from `allocator`. With `plan` nil the plan is this thread's cached one for
 // `v`'s type.
-@(private)
+@(private, require_results)
 marshal_value :: proc(v: any, opts := Encode_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> (out: []byte, err: Encode_Error) {
 	buf, aerr := make([dynamic]u8, 0, MARSHAL_BUF_START, allocator)
 	if aerr != nil {
@@ -59,7 +59,7 @@ MARSHAL_BUF_START :: 256
 
 // Write `v` as JSON to `w` as it is made, through a buffer of about `SINK_FLUSH_AT` bytes from
 // `allocator`, freed before return.
-@(private)
+@(private, require_results)
 marshal_value_to_writer :: proc(w: io.Writer, v: any, opts := Encode_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> Encode_Error {
 	buf, aerr := make([dynamic]u8, 0, 2 * enc.SINK_FLUSH_AT, allocator)
 	if aerr != nil {
@@ -100,6 +100,7 @@ Marshal_Out :: struct {
 
 // From inside a `Marshal_Hook`: write `value` as the hooked value, as `marshal` writes a value of its type by
 // the call's plan, hooks included. A hook writes exactly one value, and a second call is `.Bad_State`.
+@(require_results)
 marshal_into :: proc(out: ^Marshal_Out, value: any) -> Encode_Error {
 	if !out.hook_open {
 		return .Bad_State
@@ -528,13 +529,14 @@ put_wide :: proc(dst: ^[dynamic]u8, x: u128, signed: bool) -> Encode_Error {
 	return enc.put_bytes(dst, strconv.write_bits_128(buf[:], x, 10, signed, 128, strconv.digits, {}))
 }
 
-// A `Raw` is exactly one value of `st.dialect`, strict JSON unless an edit writes it into JSONC: it begins
-// with a value's first byte (so no whitespace, BOM or comment) and ends on the value's last byte (no
-// whitespace, and under JSONC no comment). Its containers nest inside the open ones, all within MAX_DEPTH.
+// An empty `Raw` is `null`. Otherwise a `Raw` is exactly one value of `st.dialect`, strict JSON unless an edit
+// writes it into JSONC: it begins with a value's first byte (so no whitespace, BOM or comment) and ends on the
+// value's last byte (no whitespace, and under JSONC no comment). Its containers nest inside the open ones, all
+// within MAX_DEPTH.
 @(private)
 put_raw :: proc(st: ^Marshal_Out, s: string) -> Encode_Error {
 	if len(s) == 0 {
-		return .Bad_Raw
+		return enc.put_bytes(st.out, "null")
 	}
 	switch s[0] {
 	case '{', '[':

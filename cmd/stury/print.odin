@@ -195,7 +195,7 @@ source_text :: proc(run: ^Run, v: jq.Value) -> (text: []byte, large: bool) {
 		if rawptr(x) == run.pieces_root.root {
 			text = run.pieces_root.text
 		}
-	case nil, bool, jq.Number, string:
+	case nil, bool, jq.Number, string, jq.Path:
 	}
 	o := &run.opts
 	large = len(text) >= 2 * BATCH_BYTES_PER_FIRST_WORKERS && !run.held && !o.ascii && !o.sort_keys && !o.seq && !o.raw0

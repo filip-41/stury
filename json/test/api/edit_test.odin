@@ -55,6 +55,7 @@ test_set :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	testing.expect_value(t, set_text(t, `{"a":1,"b":{"c":2}}`, ".b.c", "x"), `{"a":1,"b":{"c":"x"}}`)
 	testing.expect_value(t, set_text(t, `{ "a" : 1 }`, ".a", 2), `{ "a" : 2 }`)
+	testing.expect_value(t, set_text(t, `{"a":1}`, ".a", json.Raw("")), `{"a":null}`)
 	testing.expect_value(t, set_text(t, `[1, 2, 3]`, ".[]", 0), `[0, 0, 0]`)
 	testing.expect_value(t, set_text(t, `{"a":1,"a":2}`, ".a", 9), `{"a":1,"a":9}`)
 	testing.expect_value(t, set_text(t, ` 1 `, ".", []int{1}), ` [1] `)

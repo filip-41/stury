@@ -117,6 +117,7 @@ MAX_WALK_QUERIES :: len(scan_pkg.Walk_Kind) - 1 + core_pkg.MAX_PATH_QUERIES
 //	- A text that does not parse is `.Bad_Path`, naming it and the byte it stopped on, and leaves
 //	  `req.paths` empty. A refused allocation is `.Out_Of_Memory`.
 //	- Calling it again replaces the paths, drops the last scan's answers, and the request may be rescanned.
+@(require_results)
 request_init :: proc(
 	req: ^Request($Q),
 	paths: ..Path_Spec,
@@ -192,7 +193,7 @@ scan :: proc {
 	scan_prepared,
 }
 
-@(private)
+@(private, require_results)
 scan_plain :: #force_inline proc(src: []byte, req: ^Request($Q)) -> Scan_Error {
 	return scan_request(src, req, planned = false)
 }
@@ -263,6 +264,7 @@ Prepared :: struct($Q: bit_set[Query]) {
 //	  does.
 //	- Allocates only what `scan` would, the storage for more than `MAX_PATH_QUERIES` names, with the
 //	  request's allocator.
+@(require_results)
 prepare :: proc(req: ^Request($Q)) -> (p: Prepared(Q), err: Maybe(Request_Error)) {
 	p.req = req
 	if err = request_fault(nil, req, request_allocator(req)); err == nil {
@@ -282,7 +284,7 @@ prepared_plan :: proc(req: ^Request($Q)) -> bool {
 		#force_inline route_paths(&req.route, plan_src, req.paths, req.duplicates, request_allocator(req), automaton_only(req)) == nil
 }
 
-@(private)
+@(private, require_results)
 scan_prepared :: proc(src: []byte, p: ^Prepared($Q)) -> Scan_Error {
 	req := p.req
 	// `request_fault`'s one check of the source.
@@ -332,6 +334,7 @@ scan_error :: proc(verdict: Maybe(Error), fault: scan_pkg.Walk_Fault) -> Scan_Er
 //	  sort. A one-path request's answers are all `path` 0's.
 //	- The grouping allocates with the request's allocator. A refusal is `.Out_Of_Memory`, with no answers
 //	  and `req.answers` as the scan left it, and a later call tries again.
+@(require_results)
 answers :: proc(req: ^Request($Q), path: int) -> (out: []Path_Answer, err: Maybe(Error)) {
 	if path < 0 || path >= max(len(req.paths), 1) {
 		return nil, nil
@@ -422,6 +425,44 @@ scan_refuse :: #force_no_inline proc(src: []byte, req: ^Request($Q), $WALK: bit_
 	return scan_walk(src, req, WALK + {.Unique}, alloc)
 }
 
+// The first answer to one path in `src`: one scan, and no `Request` to keep. A `.Found` answer's `lo` and
+// `hi` bound the value in `src`; otherwise it is `.Missing` or `.Type_Mismatch` (`Path_Answer`).
+//
+//	- `path` is text in the jq subset or a built `Path`. Its `limit` becomes 1, so `.logs[].id` answers the
+//	  first id. `per_element` is kept, so the first element decides, as jq's `first(.[].x)` may be null.
+//	- The result is `scan`'s: nil, the text's fault, or a refusal. On a non-nil result the answer is
+//	  `.Missing` and bounds nothing.
+//	- The request's storage comes from `allocator` and is freed before return. For several paths, every
+//	  answer, or many sources, keep a `Request` (`request_init`, `scan`, `answers`, `prepare`).
+//	- `strictness = .Lazy` with `duplicates = .First` lets the walk stop once the answer is final.
+@(require_results)
+find :: proc(
+	src: []byte,
+	path: Path_Spec,
+	strictness := Strictness.Strict,
+	dialect := Dialect.Json,
+	duplicates := Duplicates.Last,
+	limits := Limits{},
+	allocator := context.allocator,
+) -> (a: Path_Answer, err: Scan_Error) {
+	a = Path_Answer{outcome = .Missing, owner = core_pkg.NO_OWNER, node = NO_NODE}
+	req: Request({.Path})
+	defer destroy(&req)
+	if refused, bad := request_init(&req, path, strictness = strictness, dialect = dialect, duplicates = duplicates, limits = limits, allocator = allocator).?; bad {
+		return a, refused
+	}
+	req.paths[0].limit = 1
+	if err = scan(src, &req); err != nil {
+		return a, err
+	}
+	// One path: `answers` groups nothing and cannot fail.
+	out, _ := answers(&req, 0)
+	if len(out) > 0 {
+		a = out[0]
+	}
+	return a, nil
+}
+
 // The whole-document result over the bytes the last scan read. `nil` is the only claim "this document is
 // valid".
 //
@@ -432,6 +473,7 @@ scan_refuse :: #force_no_inline proc(src: []byte, req: ^Request($Q), $WALK: bit_
 //	  the no-op.
 //	- Under `Duplicates.Refuse` the re-walk refuses a repeated key too. A refused spill of its keys is
 //	  `.Out_Of_Memory` at offset 0.
+@(require_results)
 validate_remaining :: proc(req: ^Request($Q)) -> Maybe(Error) {
 	// The key check keeps its spilled keys in `context.allocator`, as `scan` does, given back
 	// on return.

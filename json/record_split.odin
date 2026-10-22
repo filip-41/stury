@@ -10,6 +10,7 @@ import core_pkg "../core"
 // The first complete JSON text at the start of `rec`, when `rec` holds one and more bytes follow it. `value`
 // is that text and `fault` is what follows it, at its offset in `rec`. `split` is false for a record that is
 // one text, valid or not, and the caller validates it whole.
+@(require_results)
 split_record :: proc(
 	rec: []byte,
 	dialect := Dialect.Json,

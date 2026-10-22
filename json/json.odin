@@ -5,7 +5,7 @@ package json
 //
 //	json.odin           the shared types (aliases of scan/ and core/ names), `validate`, `parse_path`,
 //	                    `decode_span`, `error_position` and `render_error`
-//	request.odin        `Request`, `request_init`, `scan`, `prepare`, `answers`, `Duplicates`
+//	request.odin        `Request`, `request_init`, `scan`, `prepare`, `answers`, `find`, `Duplicates`
 //	document.odin       `Document`, `build`, `query`, `pointer`, `child`, `children`, `members`, the `get_*` readers
 //	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Unmarshal_Error`
 //	marshal.odin        `marshal` and its writer and append forms (marshal_struct.odin writes structs)
@@ -89,6 +89,7 @@ Error_Kind :: core_pkg.Error_Kind
 
 // The 1-based line and column `err` points at in `src`. Columns count bytes. It is (0, 0) when `err` points
 // at no byte: an offset past `src`, a `.Source_Too_Wide` (a limit), an `.Out_Of_Memory` or a `.Bad_Option`.
+@(require_results)
 error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 	if err.kind == .Source_Too_Wide || err.kind == .Out_Of_Memory || err.kind == .Bad_Option {
 		return 0, 0
@@ -113,6 +114,7 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 //	- A `Request_Error` as its kind (`Bad_Path` with `path I` and `offset N`, `Over_Capacity` with its
 //	  `Capacity`), for which `src` is not read.
 //	- A `Parse_Fault` as `line:col: <Parse_Error>` in `src`, the path text.
+@(require_results)
 render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
 	b := strings.builder_make(allocator)
 	render_error_to_writer(strings.to_writer(&b), src, err)
@@ -251,6 +253,7 @@ Parse_Fault :: core_pkg.Parse_Fault
 //	- It allocates nothing. The path borrows `steps`, `text`, and `names`, into which a quoted name's
 //	  escapes decode (`len(text)` bytes always suffice, a lone surrogate is `.Bad_Escape`).
 //	- A fault is the zero `Path` and a `Parse_Fault` and `steps` or `names` too small is `.Out_Of_Room`
+@(require_results)
 parse_path :: #force_inline proc(text: string, steps: []Step, names: []u8 = nil) -> (p: Path, err: Maybe(Parse_Fault)) {
 	return core_pkg.parse_path(text, steps, names)
 }
@@ -314,7 +317,8 @@ Exactness :: core_pkg.Exactness
 Number :: scan_pkg.Number
 
 // The authored text of one JSON value. `unmarshal` fills it with a value's span of the source (borrowed),
-// and `marshal` copies it after checking it is exactly one strict value (`.Bad_Raw` otherwise)
+// and `marshal` copies it after checking it is exactly one strict value (`.Bad_Raw` otherwise); an empty
+// `Raw` marshals as `null`.
 Raw :: scan_pkg.Raw
 
 // The grammar a source is read in.
@@ -352,6 +356,7 @@ Digits :: scan_pkg.Digits
 //	  finished one, a span holding a BOM.
 //	- `ok` is false too for an escaped string `allocator` refuses.
 //	- A lone surrogate escape (a high half no low half follows, or a low half alone) is a malformed escape.
+@(require_results)
 decode_span :: #force_inline proc(
 	src: []byte,
 	lo, hi: u64,
@@ -375,6 +380,7 @@ decode_span :: #force_inline proc(
 //	- A lone surrogate escape (`"\uD800"` with no low half right after it, or a low half such as `"\uDC00"`
 //	  alone) is `.Bad_Escape` at its backslash wherever escapes are validated: it writes no Unicode scalar,
 //	  so no reader could return it as UTF-8.
+@(require_results)
 validate :: #force_inline proc(
 	src: []byte,
 	dialect := Dialect.Json,

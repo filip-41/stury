@@ -21,7 +21,8 @@ main :: proc() {
 		os.exit(1)
 	}
 	for n in nodes {
-		v, _ := json.get_int(&doc, n)
-		fmt.println(v)
+		if v, ok := json.get_int(&doc, n); ok {
+			fmt.println(v)
+		}
 	}
 }

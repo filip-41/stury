@@ -56,7 +56,8 @@ scan_records :: proc(run: ^Run, ins: ^Inputs, from: int) -> (stop: int) {
 	defer virtual.arena_destroy(&job.arena)
 	defer delete(job.wbuf)
 	reserve(&job.wbuf, cap(run.out))
-	json.each_record(src, .NDJSON, scan_piece, &job, runner)
+	// The fault it returns is a piece's `err`, which `scan_piece` turns into a stop for the main thread's read.
+	_ = json.each_record(src, .NDJSON, scan_piece, &job, runner)
 	// A write a pool thread met failing ends the run here.
 	check_output()
 	return from + job.stop if job.stop >= 0 else len(ins.data)

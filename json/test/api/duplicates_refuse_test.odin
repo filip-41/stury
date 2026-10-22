@@ -54,8 +54,7 @@ expect_refuse_scan :: proc(
 	first: json.Request(Q)
 	defer json.destroy(&first)
 	first.strictness, first.dialect, first.duplicates, first.paths = strictness, dialect, .First, paths
-	json.scan(src, &first)
-	same := len(req.answers) == len(first.answers) && len(req.doc.rows) == len(first.doc.rows)
+	same := json.scan(src, &first) == nil && len(req.answers) == len(first.answers) && len(req.doc.rows) == len(first.doc.rows)
 	for a, k in req.answers {
 		same &&= k < len(first.answers) && a == first.answers[k]
 	}

@@ -38,6 +38,7 @@ Record_Reader :: struct {
 // The records of `r` under `.NDJSON` or `.JSON_Seq`, read `chunk` bytes at a time. `.Root_Entries` needs the
 // whole root, so it reads nothing and is `.Bad_Option` on `err`. The window is allocated with `allocator`
 // and freed by `destroy`. It holds the longest record and a chunk, grown by doubling, so at most twice that.
+@(require_results)
 records_from :: proc(r: io.Reader, framing: Framing, allocator := context.allocator) -> Record_Reader {
 	rr := Record_Reader{reader = r, allocator = allocator, chunk = READER_CHUNK, it = {framing = framing}}
 	if framing == .Root_Entries {
@@ -46,7 +47,7 @@ records_from :: proc(r: io.Reader, framing: Framing, allocator := context.alloca
 	return rr
 }
 
-@(private)
+@(private, require_results)
 next_reader_record :: proc(rr: ^Record_Reader) -> (rec: Record, ok: bool) {
 	for rr.err == nil {
 		if rec, ok = next_slice_record(&rr.it); ok {

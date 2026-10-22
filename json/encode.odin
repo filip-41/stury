@@ -34,7 +34,7 @@ Encode_Error :: enc.Encode_Error
 // trailing commas (`encode_rows_jsonc`). `out` is allocated with `allocator` and owned by the caller.
 // `.Bad_State` for a document with no rows. `.Too_Deep` for one nested past `MAX_DEPTH`, which only a
 // document read under a raised `max_depth` can be.
-@(private)
+@(private, require_results)
 marshal_document :: proc(doc: ^Document, opts := Encode_Opts{}, allocator := context.allocator) -> (out: []byte, err: Encode_Error) {
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return nil, .Too_Deep
@@ -62,7 +62,7 @@ marshal_document_append :: proc(dst: ^[dynamic]u8, doc: ^Document, opts: Encode_
 
 // `marshal_document` written to `w` as it is made, through a buffer of about 64 KiB from `allocator`, freed
 // before return.
-@(private)
+@(private, require_results)
 marshal_document_to_writer :: proc(w: io.Writer, doc: ^Document, opts := Encode_Opts{}, allocator := context.allocator) -> Encode_Error {
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return .Too_Deep

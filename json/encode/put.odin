@@ -28,7 +28,7 @@ Encode_Error :: enum u8 {
 	Too_Deep,      // nesting past MAX_DEPTH
 	Cycle,         // marshal: a pointer met again on its own open path
 	Unsupported,   // marshal: a type with no JSON form
-	Bad_Raw,       // marshal: a `Raw` that is not exactly one strict JSON value
+	Bad_Raw,       // marshal: a `Raw` that is not exactly one strict JSON value (an empty one is `null`)
 	Plan_Mismatch, // marshal: the plan was made for another root type
 	Not_A_Member,  // marshal: an enum, written by name, holding a value none of its members has
 	Write_Failed,  // the `io.Writer` refused (what it took before is written)

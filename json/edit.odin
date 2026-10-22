@@ -50,6 +50,7 @@ Edit_Error :: struct {
 //	- Under `.Jsonc` an edit whose bytes open a comment that runs on into source bytes it did not replace
 //	  (an unterminated `//` or `/*`) is `.Bad_Result` at the comment, with no `syntax`: the comment would
 //	  swallow the values there.
+@(require_results)
 splice :: proc(src: []byte, edits: []Edit, allocator := context.allocator, dialect := Dialect.Json) -> (out: []byte, err: Maybe(Edit_Error)) {
 	if !edits_ordered(src, edits) {
 		return nil, Edit_Error{kind = .Bad_Edit}
@@ -126,6 +127,7 @@ judged :: proc(out: []byte, err: Maybe(Edit_Error), allocator: runtime.Allocator
 //	- `.Jsonc` reads the source as JSONC. A member it adds goes after the last entry's comments.
 //	- Every path edit takes the path as text or as a parsed `Path` (`Path_Spec`). Text that does not parse
 //	  is `.Bad_Path` at the byte the parser stopped on.
+@(require_results)
 set :: proc(src: []byte, path: Path_Spec, value: any, allocator := context.allocator, upsert := false, dialect := Dialect.Json) -> (out: []byte, err: Maybe(Edit_Error)) {
 	watch := Refusal_Watch{backing = allocator}
 	out, err = watched_set(src, path, value, watched(&watch), upsert, dialect)
@@ -203,6 +205,7 @@ APPEND :: max(int)
 //	- Duplicate keys resolve `.Last`.
 //	- `.Jsonc` reads the source as JSONC and places the entry between its neighbours' extents, each entry's
 //	  comments and comma included (`entry_at`). The result is validated as JSONC.
+@(require_results)
 insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, allocator := context.allocator, dialect := Dialect.Json) -> (out: []byte, err: Maybe(Edit_Error)) {
 	watch := Refusal_Watch{backing = allocator}
 	out, err = watched_insert(src, path, at, value, watched(&watch), dialect)
@@ -227,6 +230,7 @@ watched_insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, 
 //	- The root is `.Unplaceable`.
 //	- `.Jsonc` reads the source as JSONC and removes each entry with the comments attached to it
 //	  (`remove_in`). The result is validated as JSONC.
+@(require_results)
 remove :: proc(src: []byte, path: Path_Spec, allocator := context.allocator, dialect := Dialect.Json) -> (out: []byte, err: Maybe(Edit_Error)) {
 	watch := Refusal_Watch{backing = allocator}
 	out, err = watched_remove(src, path, watched(&watch), dialect)

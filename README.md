@@ -54,9 +54,9 @@ each archive has a `.sha256` beside it), unpack it, and put it on your `PATH`. O
 
 - **Validate without allocating.** One pass, no allocation, and the first fault's line and column (`validate`,
   `error_position`, `render_error`).
-- **Answer paths without parsing the rest.** Ask for one or more paths such as `.tags[1]` in a single pass
-  over the input. Each answer is a range of bytes in your input (`Request`, `scan`, `answers`). A request can
-  be prepared once and run over many records.
+- **Answer paths without parsing the rest.** Ask for one path such as `.tags[1]` (`find`) or several
+  (`Request`, `scan`, `answers`) in a single pass over the input. Each answer is a range of bytes in your
+  input. A request can be prepared once and run over many records.
 - **Build a document once.** A `Document` holds the structure of a text, and you read it through `Node`
   handles, small values that each point at one value in the document (`build`, `child`, `query`, `pointer`).
   Strings point into the input unless they contain escapes. Numbers are decoded when you read them.
@@ -83,6 +83,11 @@ each archive has a `.sha256` beside it), unpack it, and put it on your `PATH`. O
   make escape-free strings and `Raw` values slice the input instead.
 - `unmarshal` never frees what it allocates, even when it refuses the input. Give it an arena and free the
   arena.
+- `destroy` frees a value that owns several allocations: a `Document`, a `Request`, a `Type_Plan`, a
+  `Record_Reader`. A slice a procedure returns, such as `set`'s output, is one allocation: `delete` it as
+  you would any Odin slice.
+- A procedure whose result is its only output carries `@(require_results)`: a call that drops the result
+  does not compile, so an error cannot go unnoticed by accident.
 - A document can address 4 GiB - 2 bytes of input (`MAX_ROW_SOURCE`), `validate` has no limit.
 - Nesting deeper than 1024 levels is refused by default. You can raise the limit to 2^20.
 - Only 64-bit little-endian targets are supported (see [Requirements](#requirements)).
@@ -135,8 +140,8 @@ main :: proc() {
 
 ## Usage
 
-The snippets below are cut from the programs in `examples/`, and the programs add the error checks. Run one
-from the repository root, for example `odin run examples/scan -collection:stury=.`. The examples are:
+The snippets below are cut from the programs in `examples/`. Run one from the repository root, for example
+`odin run examples/scan -collection:stury=.`. The examples are:
 
 - `examples/quickstart`: validate, `unmarshal` into a struct, `marshal` back.
 - `examples/scan`: read one value by path.
@@ -148,38 +153,66 @@ from the repository root, for example `odin run examples/scan -collection:stury=
 `make test` builds and runs all of them.
 
 ### Get one field without building a document (`examples/scan`)
-A `Request` says what to read. Its type parameter lists the kinds of answer wanted. `{.Path}` asks for the
-bytes of the values at some paths (the other kinds ask for a whole document). `json.scan` answers it in one
-pass over the input, and each answer is a range (`lo`, `hi`) of `src`, not a copy.
+`json.find` answers one path in one pass over the input and keeps nothing. The answer is a range (`lo`, `hi`)
+of `src`, not a copy, and its `outcome` says whether the path landed.
 
 ```odin
 src := transmute([]byte)string(`{"name": "ada", "tags": ["math", "engines"]}`)
-req: json.Request({.Path})
-defer json.destroy(&req)
-json.request_init(&req, ".tags[1]")
-json.scan(src, &req)
-found, _ := json.answers(&req, 0) // the answers for path 0
-if len(found) == 1 && found[0].outcome == .Found {
-	fmt.println(string(src[found[0].lo:found[0].hi])) // "engines", quotes and all
+a, err := json.find(src, ".tags[1]")
+if err != nil {
+	os.exit(1)
+}
+if a.outcome == .Found {
+	fmt.println(string(src[a.lo:a.hi])) // "engines", quotes and all
 }
 ```
 
 A path that is not in the input still gives one answer, with outcome `.Missing`, so check `outcome` before you
 read `lo` and `hi`.
 
+A path is text in the jq subset, or a `json.Path` built from `json.Step` values, so a program can build one
+without a string that is parsed at run time. Every procedure that takes a path takes either form:
+
+```odin
+json.Path{steps = {json.Name("tags"), json.Index(1)}} // the same request as ".tags[1]"
+```
+
+For every answer of a path, several paths, or one request run over many records, a `Request` says what to
+read and `json.scan` fills it. Its type parameter lists the kinds of answer wanted: `{.Path}` asks for the
+bytes of the values at some paths, the other kinds ask for a whole document. `json.answers` reads one
+path's answers.
+
+```odin
+req: json.Request({.Path})
+defer json.destroy(&req)
+if json.request_init(&req, ".tags[]") != nil || json.scan(src, &req) != nil {
+	os.exit(1)
+}
+tags, _ := json.answers(&req, 0) // one path: nothing to group, so no error
+for t in tags {
+	fmt.println(string(src[t.lo:t.hi])) // "math", then "engines"
+}
+```
+
 ### Build and query a document (`examples/roundtrip`)
 `json.build` makes a `Document`, and `json.query` collects the `Node` handles a path reaches.
 
 ```odin
 src := transmute([]byte)string(`{"name":"ada","n":1,"skip":[1,2,3]}`)
-doc, _ := json.build(src)
+doc, err := json.build(src)
+if err != nil {
+	os.exit(1)
+}
 defer json.destroy(&doc)
 nodes: [dynamic]json.Node
 defer delete(nodes)
-json.query(&doc, json.ROOT, ".skip[]", &nodes)
+if json.query(&doc, json.ROOT, ".skip[]", &nodes) != nil {
+	os.exit(1)
+}
 for n in nodes {
-	v, _ := json.get_int(&doc, n)
-	fmt.println(v)
+	if v, ok := json.get_int(&doc, n); ok {
+		fmt.println(v)
+	}
 }
 ```
 
@@ -188,7 +221,10 @@ for n in nodes {
 
 ```odin
 src := transmute([]byte)string(`{"name": "ada",  "tags": ["math"]}`)
-out, _ := json.set(src, ".name", "grace")
+out, err := json.set(src, ".name", "grace")
+if err != nil {
+	os.exit(1)
+}
 defer delete(out)
 fmt.println(string(out)) // {"name": "grace",  "tags": ["math"]}
 ```

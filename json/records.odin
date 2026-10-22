@@ -61,6 +61,7 @@ Records :: struct {
 }
 
 // The records of `src`. Allocates nothing.
+@(require_results)
 records :: proc(src: []byte, framing: Framing) -> Records {
 	return {src = src, framing = framing}
 }
@@ -72,7 +73,7 @@ next_record :: proc {
 	next_reader_record,
 }
 
-@(private)
+@(private, require_results)
 next_slice_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 	if it.err != nil {
 		return

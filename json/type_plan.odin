@@ -136,6 +136,7 @@ Type_Plan :: struct {
 }
 
 // A plan for values of type `T`, mapped by `opts`, which it copies. Nothing is compiled until first use.
+@(require_results)
 type_plan_init :: proc(T: typeid, opts := Plan_Opts{}, allocator := context.allocator) -> Type_Plan {
 	p := Type_Plan{
 		root = T,

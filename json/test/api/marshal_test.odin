@@ -209,8 +209,26 @@ test_marshal_raw :: proc(t: ^testing.T) {
 	testing.expect_value(t, marshal_text(t, R{r = `[1, 2]`}), `{"r":[1, 2]}`)
 	testing.expect_value(t, marshal_text(t, json.Raw(`"x"`)), `"x"`)
 	testing.expect_value(t, marshal_text(t, R{r = `[1, 2]`}, {pretty = true}), "{\n\t\"r\": [1, 2]\n}")
-	for bad in ([]json.Raw{``, `[1,`, ` 1`, `1 `, "\xef\xbb\xbf1", `1 2`}) {
+	for bad in ([]json.Raw{`[1,`, ` 1`, `1 `, "\xef\xbb\xbf1", `1 2`}) {
 		marshal_refused(t, R{r = bad}, .Bad_Raw)
+	}
+	// An empty `Raw` is `null`; `omitempty` still omits it.
+	testing.expect_value(t, marshal_text(t, R{}), `{"r":null}`)
+	testing.expect_value(t, marshal_text(t, json.Raw("")), `null`)
+	Omit :: struct {
+		r: json.Raw `json:",omitempty"`,
+	}
+	testing.expect_value(t, marshal_text(t, Omit{}), `{}`)
+	// An absent member leaves the `Raw` empty, which marshals as `null`.
+	Round :: struct {
+		a: int,
+		r: json.Raw,
+	}
+	for src in ([]string{`{"a":1}`, `{"a":1,"r":null}`}) {
+		v: Round
+		_, bad := json.unmarshal(transmute([]byte)src, &v, allocator = context.temp_allocator).?
+		testing.expect(t, !bad)
+		testing.expect_value(t, marshal_text(t, v), `{"a":1,"r":null}`)
 	}
 	// A `Raw` nests inside the object that holds it, all within MAX_DEPTH.
 	deep := json.MAX_DEPTH - 1

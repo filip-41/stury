@@ -495,14 +495,20 @@ def check_stdin_file(stury, diff, offset, text, filter):
 # and in order, over the paths that write the output in pieces (a record batch, an array's chunks) as over the
 # plain one.
 def check_stdout_closed(stury, diff, filter):
-    p = subprocess.run([stury] + filter, input=b'{"a":1}\n', stderr=subprocess.PIPE, stdout=None,
-                       preexec_fn=lambda: os.close(1), timeout=TIMEOUT)
+    # fd 1 is a read-only /dev/null rather than closed: a closed fd 1 is the next descriptor a start-up open
+    # takes (CI's macOS 15 ASan build then wrote its output there), and a read-only one fails every write
+    # with the same EBADF.
+    def run(argv):
+        fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            return subprocess.run(argv, input=b'{"a":1}\n', stderr=subprocess.PIPE, stdout=fd, timeout=TIMEOUT)
+        finally:
+            os.close(fd)
+    p = run([stury] + filter)
     want = b"jq: error: writing output failed: Bad file descriptor\n"
     got = (p.returncode, as_jq(p.stderr))
     if diff:
-        j = subprocess.run(["jq"] + filter, input=b'{"a":1}\n', stderr=subprocess.PIPE, stdout=None,
-                           preexec_fn=lambda: os.close(1), timeout=TIMEOUT)
-        want = j.stderr
+        want = run(["jq"] + filter).stderr
     why = None if got == (2, want) else f"exit {got[0]} err {got[1]!r}, want exit 2 err {want!r}"
     return "stdout closed", f"stdout closed: stury {' '.join(filter)}", why
 
@@ -814,8 +820,12 @@ def check_cli(stury, diff, case):
         jq = list(run_cli("jq", case))
     got, want, who = ([code, out, err], enc(own), "stury") if own else ([code, out, as_jq(err)], jq, "jq")
     why = None if got == want else f"stury: exit {code} out {out!r} err {err!r}\n     {who + ':':6} exit {want[0]} out {want[1]!r} err {want[2]!r}"
-    if why is None and diff and not on_platform_jq and jq[0] is not None and list(run_cli("jq", case)) != jq:
-        why = "the recorded answer is not jq's: run --record"
+    if why is None and diff and not on_platform_jq and jq[0] is not None:
+        ref = list(run_cli("jq", case))
+        if ref[0] == "timeout":
+            area += f" (jq past {TIMEOUT:g} s, not run)"
+        elif ref != jq:
+            why = "the recorded answer is not jq's: run --record"
     return area, what, why
 
 

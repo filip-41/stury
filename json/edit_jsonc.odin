@@ -198,6 +198,7 @@ Comment_Op :: enum u8 {
 // Edit the comments at `place` on every value the path finds, as `op` says. The source is read as JSONC.
 // The path is text or a `Path`, as `set`'s. A comment that is not one `//` line or one `/* */` block is
 // `.Bad_Comment`. `.Remove` ignores `comment`.
+@(require_results)
 edit_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, allocator := context.allocator) -> (out: []byte, err: Maybe(Edit_Error)) {
 	watch := Refusal_Watch{backing = allocator}
 	out, err = watched_comment(src, path, place, comment, op, watched(&watch))

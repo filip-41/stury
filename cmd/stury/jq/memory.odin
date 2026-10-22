@@ -315,9 +315,22 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 				if len(t.lit) > 0 {
 					m = copy_value(c, m)
 				}
-			case string, ^Array, ^Object, Ref:
+			case string, ^Array, ^Object, Ref, Path:
 				m = copy_value(c, m)
 			}
+		}
+		c.made[{x, -1}] = a
+		if c.owned != nil {
+			c.owned[a] = true
+		}
+		return a
+	case Path:
+		if m, ok := c.made[{x, -1}]; ok {
+			return m
+		}
+		a := path_array((^Path_Step)(x))
+		for &m in a.items {
+			m = copy_value(c, m)
 		}
 		c.made[{x, -1}] = a
 		if c.owned != nil {

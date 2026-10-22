@@ -65,6 +65,7 @@ Document :: struct {
 //	.Bad_Option       `duplicates` is `.First` or `.All`, which choose among a path's answers, and a
 //	                  document has none, or `.Refuse` in a build with `-define:REFUSE_DUPLICATES=false`.
 //	                  `offset` is 0, refused before any byte is read.
+@(require_results)
 build :: proc(
 	src: []byte,
 	allocator := context.allocator,
@@ -122,6 +123,7 @@ document_destroy :: proc(doc: ^Document) {
 }
 
 // The kind of value `n`. `ok` is false, and the kind `.Null`, when `n` is no value, such as `NO_NODE`.
+@(require_results)
 kind :: proc(doc: ^Document, n: Node) -> (k: Kind, ok: bool) {
 	if !has(doc, n) {
 		return .Null, false
@@ -132,6 +134,7 @@ kind :: proc(doc: ^Document, n: Node) -> (k: Kind, ok: bool) {
 // The integer number `n` writes, when it fits `i64` (`decode_span`'s `i64` arm). `-0` is 0, as `unmarshal`
 // reads it into an integer. `ok` is also false for an integer past `max(i64)` and for a fraction or exponent
 // notation (`get_number`).
+@(require_results)
 get_int :: #force_inline proc(doc: ^Document, n: Node) -> (v: i64, ok: bool) {
 	if !has(doc, n) {
 		return 0, false
@@ -141,6 +144,7 @@ get_int :: #force_inline proc(doc: ^Document, n: Node) -> (v: i64, ok: bool) {
 
 // The binary64 value of number `n`, correctly rounded. `ok` is also false for a number with no binary64
 // value (`1e400`); `get_number` tells how the value relates to the authored one.
+@(require_results)
 get_float :: proc(doc: ^Document, n: Node) -> (v: f64, ok: bool) {
 	num, is_number := get_number(doc, n)
 	return num.value, is_number && num.exactness != .None
@@ -154,6 +158,7 @@ get_float :: proc(doc: ^Document, n: Node) -> (v: f64, ok: bool) {
 //	  wants one many times keeps it itself.
 //	- Inlined, so the decoding the caller does not read is dropped (`get_float` asks only whether there is a
 //	  value).
+@(require_results)
 get_number :: #force_inline proc(doc: ^Document, n: Node) -> (v: Number, ok: bool) {
 	if !has(doc, n) || doc.rows[n].kind != .Number {
 		return {}, false
@@ -170,6 +175,7 @@ get_number :: #force_inline proc(doc: ^Document, n: Node) -> (v: Number, ok: boo
 //	  be read from any number of threads.
 //	- `ok` is false for a value that is not a string, and when an escaped string's decode could not be
 //	  allocated. A `.Dom` build decodes every escaped string up front, so its reads do not allocate.
+@(require_results)
 get_string :: proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
 	lazy := has(doc, n) && doc.rows[n].kind == .String &&
 		doc.rows[n].flags & {.Str_Escaped, .Decoded} == {.Str_Escaped}
@@ -194,6 +200,7 @@ get_string :: proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
 // into the arena once and kept, as `get_string` keeps a string, under the same caveat. Valid until
 // `destroy`. `ok` is false when `n` is not an object's member, and when an escaped key's decode could not
 // be allocated.
+@(require_results)
 get_key :: proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
 	if s, ok = doc.keys[n]; ok {
 		return
@@ -212,6 +219,7 @@ get_key :: proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
 
 // The authored text of value `n`, a slice of `doc.src`: a string with its quotes, a container with its
 // brackets and everything between. Nil for `NO_NODE`.
+@(require_results)
 get_raw :: proc(doc: ^Document, n: Node) -> []byte {
 	if !has(doc, n) {
 		return nil
@@ -228,7 +236,7 @@ child :: proc {
 
 // The last member of object `n` whose key decodes to `name`, or `NO_NODE`. An array answers none. The same
 // reading as a path's default `.Last`.
-@(private)
+@(private, require_results)
 child_by_key :: proc(doc: ^Document, n: Node, name: string) -> Node {
 	return core_pkg.dom_find_key(doc.rows[:], doc.src, n, name, &scan_pkg.FORMAT_HOOKS)
 }
@@ -236,7 +244,7 @@ child_by_key :: proc(doc: ^Document, n: Node, name: string) -> Node {
 // Member `i` of container `n`, 0-based (from the end when negative), or `NO_NODE`. O(1) over an array of
 // scalars, and over any other container once a call has reached NTH_WALK members into it, which lists its
 // members once.
-@(private)
+@(private, require_results)
 child_by_index :: proc(doc: ^Document, n: Node, index: int) -> Node {
 	i := index
 	if i < 0 {
@@ -295,6 +303,7 @@ list_members :: proc(doc: ^Document, n: Node) -> (at: int, ok: bool) {
 }
 
 // The member count of container `n`; zero on a scalar.
+@(require_results)
 child_count :: proc(doc: ^Document, n: Node) -> int {
 	return core_pkg.dom_child_count(doc.rows[:], n)
 }
@@ -335,7 +344,7 @@ members :: proc {
 	members_next,
 }
 
-@(private)
+@(private, require_results)
 members_of :: proc(doc: ^Document, n: Node) -> Members {
 	first := first_child(doc, n)
 	if first == NO_NODE {
@@ -344,7 +353,7 @@ members_of :: proc(doc: ^Document, n: Node) -> Members {
 	return {doc = doc, node = first, end = n + Node(doc.rows[n].subtree_size)}
 }
 
-@(private)
+@(private, require_results)
 children_next :: proc(it: ^Members) -> (n: Node, ok: bool) {
 	if it.node >= it.end {
 		return NO_NODE, false
@@ -377,6 +386,7 @@ members_next :: proc(it: ^Members) -> (k: string, n: Node, ok: bool) {
 //	- A URI fragment pointer is the caller's to strip of `#` and percent-decode.
 //	- It allocates nothing but for a token with a `~` longer than 256 bytes, decoded in the document's
 //	  allocator and freed before return; a refusal there answers `NO_NODE`.
+@(require_results)
 pointer :: proc(doc: ^Document, n: Node, ptr: string) -> Node {
 	if !has(doc, n) || (ptr != "" && ptr[0] != '/') {
 		return NO_NODE
@@ -456,6 +466,7 @@ pointer_member :: proc(doc: ^Document, n: Node, token: string) -> Node {
 //	- Besides `out` it allocates only for a text longer than 256 bytes with an escaped quoted name, and for
 //	  the keys of an object past QUERY_SMALL members that `Any` reads, both in the document's allocator and
 //	  freed before return; a refusal there is `.Out_Of_Room` too.
+@(require_results)
 query :: proc(doc: ^Document, n: Node, path: Path_Spec, out: ^[dynamic]Node) -> (err: Maybe(Parse_Fault)) {
 	steps: [core_pkg.MAX_PATH_STEPS]Step
 	stack: [SCRATCH_BYTES]u8 = ---
@@ -655,6 +666,7 @@ query_distinct :: proc(w: ^Query_Walk, n: Node, steps: []Step) -> bool {
 QUERY_SMALL :: 16
 
 // The facts attached to `n`, sorted by place (`Fact_Place`) then source order. Empty for a JSON document.
+@(require_results)
 facts :: proc(doc: ^Document, n: Node) -> []Fact {
 	all := doc.facts[:]
 	lo, _ := slice.binary_search_by(all, n, proc(f: Fact, n: Node) -> slice.Ordering {
@@ -668,6 +680,7 @@ facts :: proc(doc: ^Document, n: Node) -> []Fact {
 }
 
 // The text of fact `f`, a slice of `doc.src`: a comment without its `//`, or its `/*` and `*/`.
+@(require_results)
 fact_text :: proc(doc: ^Document, f: Fact) -> string {
 	text := string(doc.src[f.lo:f.hi])
 	if strings.has_prefix(text, "/*") {

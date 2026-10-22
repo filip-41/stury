@@ -158,7 +158,7 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 			return nil, .Go
 		}
 		return nil, fail(ip, "Cannot index %s with number (%s)", type_name(t), brief(key))
-	case ^Object, ^Array, Ref:
+	case ^Object, ^Array, Ref, Path:
 		#partial switch kind(key) {
 		case .Object:
 			if tk == .Null {

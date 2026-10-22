@@ -6,6 +6,7 @@ package json
 
 // `src` validated strictly and written again as `opts` says (compact by default). A `.Jsonc` document keeps
 // its comments. The result is a new buffer from `allocator`, and `src` is not kept.
+@(require_results)
 format :: proc(
 	src: []byte,
 	opts := Encode_Opts{},

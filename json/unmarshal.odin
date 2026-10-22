@@ -122,6 +122,7 @@ Unmarshal_Error :: struct {
 //	  arena freed whole.
 //	- With `plan` nil the plan is this thread's cached one for `T`, as `marshal` takes it. A kept plan must
 //	  have been made for `T`.
+@(require_results)
 unmarshal :: proc(
 	src: []byte,
 	ptr: ^$T,
@@ -141,6 +142,7 @@ unmarshal :: proc(
 //	- With no target, it allocates nothing but the plan (and `.Refuse`'s spilled keys, given back).
 //	- With `plan` nil the plan is this thread's cached one for `T`, as `marshal` takes it. A kept plan
 //	  allocates nothing after its first use, which lowers the read shape in the plan's allocator.
+@(require_results)
 unmarshal_check :: proc(src: []byte, $T: typeid, opts := Unmarshal_Opts{}, plan: ^Type_Plan = nil) -> (err: Maybe(Unmarshal_Error)) {
 	return read_typed(src, nil, T, opts, plan, runtime.nil_allocator())
 }

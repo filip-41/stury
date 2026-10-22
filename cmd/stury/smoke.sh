@@ -149,6 +149,7 @@ capped group_by 60 100 -n '[range(20000) | {k: (. % 100), v: .}] | group_by(.k) 
 capped unique_by 58 1000 -n '[range(20000) | {k: (. % 1000), v: .}] | unique_by(.k) | length'
 capped paths 86 40000 -n '[range(20000) | {a: .}] | [paths] | length'
 capped paths_streamed 51 40000 -n 'reduce ([range(20000) | {a: .}] | paths) as $p (0; . + 1)'
+capped paths_deep 30 6000 -n 'reduce range(6000) as $i (1; [.]) | reduce paths as $p (0; . + 1)'
 capped setpath_reduce 14 3000 -n 'reduce range(3000) as $i ({}; setpath([$i|tostring]; $i)) | length'
 capped del_reduce 15 0 -n 'reduce range(3000) as $i ([range(3000)]; del(.[0])) | length'
 capped del_wide 94 0 -n '[range(20000) | {(tostring): .}] | add | del(.[]) | length'
@@ -196,7 +197,7 @@ polls=40
 early() {
 	name=$1 want=$2 first=$3 rest=$4
 	shift 4
-	rm -f "$T/early"
+	rm -f "$T/early" "$T/out" # the last answer left in out would end the wait before stury truncates it
 	{ printf "$first"; i=0; while [ ! -s "$T/out" ] && [ $i -lt $polls ]; do sleep 0.05; i=$((i + 1)); done; [ -s "$T/out" ] && : >"$T/early"; printf "$rest"; } | "$S" "$@" >"$T/out" 2>&1
 	if [ ! -e "$T/early" ] || [ "$(cat "$T/out")" != "$want" ]; then
 		printf 'FAIL %s: first answer %s\n got: %s\nwant: %s\n' "$name" "$([ -e "$T/early" ] && echo in time || echo late)" "$(cat "$T/out")" "$want"
