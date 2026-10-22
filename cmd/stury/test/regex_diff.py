@@ -2,7 +2,7 @@
 """Random regular expressions and texts run through build/stury and jq 1.8.2 (Oniguruma), reporting where
 they differ.
 
-    python3 cmd/stury/regex_diff.py [build/stury] [--seed 1] [--cases 20000] [--show 20] [--jq jq]
+    python3 cmd/stury/test/regex_diff.py [build/stury] [--seed 1] [--cases 20000] [--show 20] [--jq jq]
 
 jq_diff.py's sibling for the regex builtins: a seeded grammar makes each pattern from Oniguruma's syntax as
 jq compiles it (look-around, backreferences and conditions, named groups, greedy, lazy and possessive

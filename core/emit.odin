@@ -246,7 +246,7 @@ emit_dom_string :: #force_inline proc(
 		at, ok := value_bytes_reserve(q.value_bytes, int(dec_len), len(src) - int(lo))
 		if ok {
 			slot := q.value_bytes[at:]
-			// `.Dom` implies `.Nodes` (json/request.odin's `WALK`), so
+			// `.Dom` implies `.Nodes` (json/request_scan.odin's `WALK`), so
 			// `str_first_esc` is live: the offset of this token's first
 			// backslash, a lower bound once saturated at
 			// `FIRST_ESC_SATURATED`. The decoder reads `[lo+1, lo+off)` as a

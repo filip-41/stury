@@ -394,6 +394,8 @@ shape_refused :: proc(p: ^Type_Plan, i: u32, visited: []bool, err: ^Unmarshal_Er
 	case .Unsupported:
 		if p.ops[i].kind == .Union {
 			err.kind = .Ambiguous_Union
+		} else if p.ops[i].refused {
+			unmarshal_path_prepend(err, Name(p.sources[p.ops[i].key].name))
 		}
 		return true
 	case .Union:

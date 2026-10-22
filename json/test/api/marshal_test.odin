@@ -189,10 +189,23 @@ test_marshal_unions_and_any :: proc(t: ^testing.T) {
 	testing.expect_value(t, marshal_text(t, json.Decoded(u64(max(u64)))), "18446744073709551615")
 	testing.expect_value(t, marshal_text(t, json.Decoded(json.Digits("1e400"))), "1e400")
 	// `Digits` is one number token, checked as a `Raw` is.
-	for bad in ([]json.Digits{"", "abc", `"1"`, "1 ", "1,2", "01", "-", "[1]"}) {
+	for bad in ([]json.Digits{"abc", `"1"`, "1 ", "1,2", "01", "-", "[1]"}) {
 		marshal_refused(t, json.Decoded(bad), .Bad_Raw)
 		marshal_refused(t, bad, .Bad_Raw)
 	}
+	// An empty `Digits` is `null`, as an empty `Raw` is, wherever it is written.
+	Empty :: struct {
+		d:  json.Digits,
+		ds: []json.Digits,
+		m:  map[string]json.Digits,
+		a:  any,
+	}
+	elems := [2]json.Digits{"", "1e400"}
+	empty := Empty{ds = elems[:], a = json.Digits("")}
+	empty.m = make(map[string]json.Digits, context.temp_allocator)
+	empty.m["k"] = ""
+	testing.expect_value(t, marshal_text(t, empty), `{"d":null,"ds":[null,1e400],"m":{"k":null},"a":null}`)
+	testing.expect_value(t, marshal_text(t, json.Digits("")), `null`)
 	Holder :: struct {
 		x: any,
 	}

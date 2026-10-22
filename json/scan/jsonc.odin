@@ -3,7 +3,7 @@ package scan
 import "core:bytes"
 import "core:simd"
 import "core:slice"
-import c "../../core"
+import core_pkg "../../core"
 import lex "lex"
 
 // The grammar a source is read in. `.Jsonc` is JSON with comments and trailing commas. Its walk is a
@@ -220,14 +220,14 @@ jsonc_validate :: proc(src: []byte, facts: ^[dynamic]Fact, limits := Limits{}) -
 
 // JSON's hooks for a JSONC scan: a path re-entry re-reads its array on the JSONC walk.
 @(rodata)
-FORMAT_HOOKS_JSONC := c.Format_Hooks{
+FORMAT_HOOKS_JSONC := core_pkg.Format_Hooks{
 	escaped_key_equals = name_equals,
 	path_subwalk = path_subwalk_jsonc,
 	dom_unescape_into = dom_unescape_into,
 }
 
 @(private = "file")
-path_subwalk_jsonc :: proc(s: ^c.Scanner, ctx: ^c.Query_Ctx, max_depth: u64, halted: ^bool) -> Maybe(Error) {
+path_subwalk_jsonc :: proc(s: ^core_pkg.Scanner, ctx: ^core_pkg.Query_Ctx, max_depth: u64, halted: ^bool) -> Maybe(Error) {
 	if max_depth > MAX_DEPTH {
 		return walk_deep(s, ctx, max_depth, .Values, {.Path}, &Jsonc_Cursor{}, true, halted)
 	}
@@ -290,7 +290,7 @@ jsonc_attach :: proc(nodes: []Row, src: []byte, facts: []Fact) -> bool {
 		case depth > 0 && cm.lo < u64(nodes[stack[depth - 1].row].lo):
 			// The container's key came before the comment and its open bracket comes after.
 			cm.node, cm.place = stack[depth - 1].row, .Inline
-		case last >= 0 && nodes[last].key_lo != c.NO_KEY && cm.lo < u64(nodes[last].lo):
+		case last >= 0 && nodes[last].key_lo != core_pkg.NO_KEY && cm.lo < u64(nodes[last].lo):
 			cm.node, cm.place = last, .Inline
 		case last >= 0 && (!bytes.contains_any(src[nodes[last].hi:cm.lo], {'\r', '\n'}) || comma_follows(src, facts, k)):
 			cm.node, cm.place = last, .Trail
@@ -353,5 +353,5 @@ comma_follows :: proc(src: []byte, facts: []Fact, k: int) -> bool {
 
 // Where row `n`'s entry starts in its container: its key, or its value when it has none.
 entry_lo :: #force_inline proc(n: Row) -> u32 {
-	return n.lo if n.key_lo == c.NO_KEY else n.key_lo
+	return n.lo if n.key_lo == core_pkg.NO_KEY else n.key_lo
 }

@@ -5,9 +5,9 @@ package encode
 // the length. Nothing is committed on a refusal.
 
 import "base:intrinsics"
-import c "../../core"
+import core_pkg "../../core"
 
-MAX_DEPTH :: c.MAX_DEPTH
+MAX_DEPTH :: core_pkg.MAX_DEPTH
 
 Encode_Opts :: struct {
 	pretty:           bool,          // false (the zero value) is compact
@@ -47,7 +47,7 @@ put_reserve :: #force_inline proc(dst: ^[dynamic]u8, n: int) -> [^]u8 {
 // bytes before it survive the move.
 put_room :: #force_inline proc(dst: ^[dynamic]u8, w, n: int) -> [^]u8 {
 	if w + n > cap(dst^) {
-		c.edge_publish(dst, w)
+		core_pkg.edge_publish(dst, w)
 		if non_zero_reserve(dst, max(w + n, 2 * cap(dst^))) != nil {
 			return nil
 		}
@@ -57,7 +57,7 @@ put_room :: #force_inline proc(dst: ^[dynamic]u8, w, n: int) -> [^]u8 {
 
 // Say that `n` more bytes were written past `len(dst)`. Legal only after a `put_reserve` that covers them.
 put_commit :: #force_inline proc(dst: ^[dynamic]u8, n: int) {
-	c.edge_publish(dst, len(dst^) + n)
+	core_pkg.edge_publish(dst, len(dst^) + n)
 }
 
 put_byte :: #force_inline proc(dst: ^[dynamic]u8, x: u8) -> Encode_Error {

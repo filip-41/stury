@@ -14,8 +14,8 @@ TAPE_MAX_PATHS :: core_pkg.MAX_PATH_QUERIES
 // Whether `req` is one the tape route answers: at least two gated columns sharing one gate, on `.Strict`
 // JSON. One path loses to the scan, so it is not routed.
 @(private)
-tape_routable :: proc(req: ^Request($Q)) -> bool {
-	when Q != {.Path} {
+tape_routable :: proc(req: ^Request($KINDS)) -> bool {
+	when KINDS != {.Path} {
 		return false
 	}
 	if FORCE_AUTOMATON || req.strictness != .Strict || req.dialect != .Json || req.duplicates == .Refuse ||
@@ -43,7 +43,7 @@ Tape_Walk :: struct {
 
 // Answer `req` from its built rows. False leaves no answers, and the caller scans.
 @(private)
-scan_tape :: proc(src: []byte, req: ^Request($Q), alloc: runtime.Allocator) -> bool {
+scan_tape :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> bool {
 	if u64(len(src)) > MAX_ROW_SOURCE {
 		return false
 	}

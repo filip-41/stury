@@ -328,7 +328,8 @@ Each Odin type has one JSON form.
 | enums | the member's name; a value no member has is `Not_A_Member`. With `enums = .Int`, the backing integer. A map key is the name, or the integer in quotes. An enum backed by a 128-bit integer is written as its integer. |
 | `f16`, `f32`, `f64` | [§3.3](#33-floats) |
 | `string`, `cstring`, `rune` | [§3.1](#31-strings) (`rune` is a one-codepoint string; an invalid rune is `Bad_Utf8`) |
-| `Raw` | its bytes, verbatim ([§5.5](#55-raw)) |
+| `Raw` | its bytes, verbatim; an empty one is `null` ([§5.5](#55-raw)) |
+| `Digits` | its number text, checked as a `Raw` is; an empty one is `null` |
 | `Decoded`, `Number` | the arm, or `.value` ([§3.3](#33-floats)) |
 | array, slice, dynamic array, enumerated array, fixed-capacity dynamic array | JSON array; a nil slice is `[]`; `[]u8` is an array of numbers; an enumerated array is its elements in index order, holes included |
 | `map` with `string`, `cstring`, enum or integer keys | JSON object, keys sorted ([§5.3](#53-objects)) |
@@ -367,7 +368,7 @@ is written twice. Nesting past `MAX_DEPTH`, counting containers, pointers and `a
 
 A `Raw` holds the authored text of one JSON value. `marshal` validates it (`.Strict`, with the nesting left
 below `MAX_DEPTH` at its position as the depth limit) and copies it unchanged, in pretty mode too. An invalid
-`Raw` is `Bad_Raw`, and so is one with leading or trailing whitespace: the text must be exactly the value.
+`Raw` is `Bad_Raw`, and so is one with leading or trailing whitespace: the text must be exactly the value. An empty `Raw` (and an empty `Digits`) is `null`.
 `unmarshal` fills a `Raw` with the value's source span.
 
 So a struct can carry a subtree it does not model and write it back byte for byte, in the dialect it was read

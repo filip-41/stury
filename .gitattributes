@@ -1,5 +1,5 @@
 # `git archive` ships the library (json/, core/, host/), the command line (cmd/stury), the examples, the
-# public suites (core/test, json/test) with the CLI's test assets (smoke.sh, jq_suite.py, cli.tsv,
+# public suites (core/test, json/test) with the CLI's test assets (cmd/stury/test: smoke.sh, jq_suite.py, cli.tsv,
 # jq 1.8.2's tests and modules), the mutable-globals guard (tools/), the docs (docs/), the Makefile and the
 # licences. From it `make lint test` and `make build-cli` run.
 /.github/ export-ignore

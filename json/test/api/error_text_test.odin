@@ -91,10 +91,35 @@ render_error_other_refusals :: proc(t: ^testing.T) {
 	v: V
 	src := "{\n \"a\": \"x\"}"
 	uerr, _ := json.unmarshal(transmute([]byte)src, &v, allocator = context.temp_allocator).?
-	same(t, src, uerr, "2:7: Wrong_Kind")
+	same(t, src, uerr, "2:7: Wrong_Kind at .a")
 	bad := "{\"a\":,}"
 	uerr, _ = json.unmarshal(transmute([]byte)bad, &v, allocator = context.temp_allocator).?
-	same(t, bad, uerr, "1:6: Syntax: Bad_Char")
+	same(t, bad, uerr, "1:6: Syntax: Bad_Char at .a")
+	// The path reads as jq spells one: names, indexes, a quoted name, and `…` where outer steps were dropped.
+	Deep :: struct {
+		a: struct {
+			b: int,
+		},
+	}
+	deep: Deep
+	nested := `{"a":{"b":"x"}}`
+	uerr, _ = json.unmarshal(transmute([]byte)nested, &deep, allocator = context.temp_allocator).?
+	same(t, nested, uerr, "1:11: Wrong_Kind at .a.b")
+	Keyed :: struct {
+		m: map[string][]int,
+	}
+	keyed: Keyed
+	odd := `{"m":{"a b":[1,"x"]}}`
+	uerr, _ = json.unmarshal(transmute([]byte)odd, &keyed, allocator = context.temp_allocator).?
+	same(t, odd, uerr, `1:16: Wrong_Kind at .m."a b"[1]`)
+	uerr.truncated = true
+	same(t, odd, uerr, `1:16: Wrong_Kind at ….m."a b"[1]`)
+	Quoted :: struct {
+		n: i64 `json:"n,string"`,
+	}
+	quoted: Quoted
+	uerr, _ = json.unmarshal(transmute([]byte)string("{}"), &quoted, allocator = context.temp_allocator).?
+	same(t, "{}", uerr, "Unsupported at .n")
 	uerr, _ = json.unmarshal(transmute([]byte)src, (^V)(nil), allocator = context.temp_allocator).?
 	same(t, src, uerr, "Bad_Option")
 

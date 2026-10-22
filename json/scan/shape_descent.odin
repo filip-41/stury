@@ -1,6 +1,6 @@
 package scan
 
-import c "../../core"
+import core_pkg "../../core"
 import "base:intrinsics"
 import "base:runtime"
 import lex "lex"
@@ -28,11 +28,11 @@ import number "./number"
 
 // Read `src` into `root` along `run.shape` by descent: true, or false for the walk to read it, or the
 // `Out_Of_Memory` typed fault the walk would answer, `run.fault_steps` frames of `run.frames` deep.
-shape_descend :: proc(src: []byte, run: ^c.Shape_Run, root: rawptr, limits: Limits) -> (bool, Maybe(Error)) #no_bounds_check {
+shape_descend :: proc(src: []byte, run: ^core_pkg.Shape_Run, root: rawptr, limits: Limits) -> (bool, Maybe(Error)) #no_bounds_check {
 	Q :: bit_set[Walk_Kind]{.Shape}
 	ctx_words: [size_of(Query_Ctx) / 8]u64 = ---
 	q := (^Query_Ctx)(&ctx_words)
-	c.query_ctx_zero(q, Q)
+	core_pkg.query_ctx_zero(q, Q)
 	q.hooks = &FORMAT_HOOKS
 	q.shape = run
 	run.ops, run.fields = raw_data(run.shape.ops), raw_data(run.shape.fields)
@@ -53,14 +53,14 @@ shape_descend :: proc(src: []byte, run: ^c.Shape_Run, root: rawptr, limits: Limi
 // The allocation the value at `at`, at walk depth `steps`, needs failed: the walk's fault there. Each container
 // the descent unwinds through then writes its frame (`descend_frame_out_of_memory`).
 @(private = "file")
-descend_out_of_memory :: #force_no_inline proc(r: ^c.Shape_Run, at, steps: u64) -> bool {
+descend_out_of_memory :: #force_no_inline proc(r: ^core_pkg.Shape_Run, at, steps: u64) -> bool {
 	r.fault, r.fault_steps, r.fault_at = .Out_Of_Memory, u32(steps), at
 	return false
 }
 
 // A leaf's fault at the value at `at`, at walk depth `sp`: the walk's to answer, but for `Out_Of_Memory`.
 @(private = "file")
-descend_leaf_fault :: #force_no_inline proc(r: ^c.Shape_Run, fault: c.Shape_Fault, at, sp: u64) -> bool {
+descend_leaf_fault :: #force_no_inline proc(r: ^core_pkg.Shape_Run, fault: core_pkg.Shape_Fault, at, sp: u64) -> bool {
 	if fault == .Out_Of_Memory {
 		descend_out_of_memory(r, at, sp)
 	}
@@ -70,9 +70,9 @@ descend_leaf_fault :: #force_no_inline proc(r: ^c.Shape_Run, fault: c.Shape_Faul
 // The frame the walk holds for the container op `op` at walk depth `sp` while it reads field `field` or
 // element `n - 1`, when the descent unwinds from `Out_Of_Memory`, and false either way.
 @(private = "file")
-descend_frame_out_of_memory :: #force_no_inline proc(r: ^c.Shape_Run, op: ^c.Shape_Op, sp: u64, field, n: u32) -> bool {
+descend_frame_out_of_memory :: #force_no_inline proc(r: ^core_pkg.Shape_Run, op: ^core_pkg.Shape_Op, sp: u64, field, n: u32) -> bool {
 	if r.fault == .Out_Of_Memory {
-		r.frames[sp] = c.Shape_Frame{op = u32(intrinsics.ptr_sub(op, &r.ops[0])), field = field, n = n}
+		r.frames[sp] = core_pkg.Shape_Frame{op = u32(intrinsics.ptr_sub(op, &r.ops[0])), field = field, n = n}
 	}
 	return false
 }
@@ -81,7 +81,7 @@ descend_frame_out_of_memory :: #force_no_inline proc(r: ^c.Shape_Run, op: ^c.Sha
 // is read in place, since a call per scalar costs more than its leaf. A container is read by its own proc on
 // `walk_s`, the scanner `s` copies.
 @(private = "file")
-descend_member :: #force_inline proc(s, walk_s: ^Scanner, q: ^Query_Ctx, op_i: u32, op: ^c.Shape_Op, dest: rawptr, sp: u64) -> bool #no_bounds_check {
+descend_member :: #force_inline proc(s, walk_s: ^Scanner, q: ^Query_Ctx, op_i: u32, op: ^core_pkg.Shape_Op, dest: rawptr, sp: u64) -> bool #no_bounds_check {
 	if s.pos >= u64(len(s.src)) {
 		return false
 	}
@@ -108,7 +108,7 @@ descend_member :: #force_inline proc(s, walk_s: ^Scanner, q: ^Query_Ctx, op_i: u
 @(private = "file")
 descend_scalar :: #force_inline proc(s, walk_s: ^Scanner, q: ^Query_Ctx, op_i: u32, dest: rawptr, vc: u8, sp: u64) -> bool {
 	v := s.pos
-	fault: c.Shape_Fault
+	fault: core_pkg.Shape_Fault
 	switch vc {
 	case VC_STRING:
 		if lex.parse_string_q(s, q, v, false, {.Shape}) != nil {
@@ -270,7 +270,7 @@ descend_unread_container :: #force_no_inline proc(s: ^Scanner, room: u64) -> boo
 // `shape_take_members` matches them: the field after the last one matched first, by its compact `"name":`
 // words, then by the decoded key.
 @(private = "file")
-descend_struct :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^c.Shape_Op, dest: rawptr, sp: u64) -> bool #no_bounds_check {
+descend_struct :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^core_pkg.Shape_Op, dest: rawptr, sp: u64) -> bool #no_bounds_check {
 	sc := walk_s^
 	defer walk_s.pos = sc.pos
 	s := &sc
@@ -305,7 +305,7 @@ descend_struct :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^c.Shape_Op, dest: r
 				w1 := intrinsics.unaligned_load((^u64)(&src[key_lo + 8]))
 				colon_taken = (w0 ~ fl.colon_key[0]) & fl.colon_mask[0] | (w1 ~ fl.colon_key[1]) & fl.colon_mask[1] == 0
 			}
-			if colon_taken || spelled && key_hi <= n && src[key_hi - 1] == '"' && c.key_equals_hooked(q.hooks, src, key_lo, key_hi, false, fl.name) {
+			if colon_taken || spelled && key_hi <= n && src[key_hi - 1] == '"' && core_pkg.key_equals_hooked(q.hooks, src, key_lo, key_hi, false, fl.name) {
 				i = int(next)
 			}
 		}
@@ -370,7 +370,7 @@ DESCEND_REFUSED :: -2
 // prediction misses is the rare one in a struct read whole, and its lexer inline spills the member loop's
 // state. One call takes a whole run of unknown members.
 @(private = "file")
-descend_unread_members :: #force_no_inline proc(walk_s: ^Scanner, q: ^Query_Ctx, fields: []c.Shape_Field, op: ^c.Shape_Op, sp: u64) -> int #no_bounds_check {
+descend_unread_members :: #force_no_inline proc(walk_s: ^Scanner, q: ^Query_Ctx, fields: []core_pkg.Shape_Field, op: ^core_pkg.Shape_Op, sp: u64) -> int #no_bounds_check {
 	sc := walk_s^
 	defer walk_s.pos = sc.pos
 	s := &sc
@@ -407,7 +407,7 @@ descend_unread_members :: #force_no_inline proc(walk_s: ^Scanner, q: ^Query_Ctx,
 		escaped := q.key_saw_escape
 		if escaped || shape_first_has(op.first, src[key_lo + 1]) {
 			for field, k in fields {
-				if c.key_equals_hooked(q.hooks, src, key_lo, s.pos, escaped, field.name) {
+				if core_pkg.key_equals_hooked(q.hooks, src, key_lo, s.pos, escaped, field.name) {
 					return k
 				}
 			}
@@ -449,7 +449,7 @@ descend_unread_members :: #force_no_inline proc(walk_s: ^Scanner, q: ^Query_Ctx,
 // `shape_list_grow` grows it, so a `[dynamic]T` gets the walk's capacity. A fixed array's elements are read
 // over in place, and a list's start from zero unless their leaf writes every byte.
 @(private = "file")
-descend_list :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^c.Shape_Op, dest: rawptr, sp: u64) -> bool {
+descend_list :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^core_pkg.Shape_Op, dest: rawptr, sp: u64) -> bool {
 	elem := &q.shape.ops[op.elem]
 	if elem.width == 8 {
 		#partial switch elem.kind {
@@ -466,7 +466,7 @@ descend_list :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^c.Shape_Op, dest: raw
 // 8-byte element), as a number in place. A list of numbers is the common one, and the general element read
 // keeps every class's lexer live in the loop, spilling the list's own state around each element.
 @(private = "file")
-descend_elements :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^c.Shape_Op, dest: rawptr, sp: u64, $leaf: c.Shape_Kind) -> bool #no_bounds_check {
+descend_elements :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^core_pkg.Shape_Op, dest: rawptr, sp: u64, $leaf: core_pkg.Shape_Kind) -> bool #no_bounds_check {
 	sc := walk_s^
 	defer walk_s.pos = sc.pos
 	s := &sc
@@ -476,7 +476,7 @@ descend_elements :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^c.Shape_Op, dest:
 	kind, elem_i, stride, limit := op.kind, op.elem, uintptr(op.stride), op.count
 	elem := &r.ops[elem_i]
 	fixed := kind == .Array || kind == .Fixed_List
-	zero := kind != .Array && elem.kind not_in c.SHAPE_WHOLE_LEAVES
+	zero := kind != .Array && elem.kind not_in core_pkg.SHAPE_WHOLE_LEAVES
 	data := dest if fixed else nil
 	count, cap: u32
 	when leaf == .Int {
@@ -511,7 +511,7 @@ descend_elements :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^c.Shape_Op, dest:
 					}
 					if aerr != nil || raw_data(buf) == nil {
 						descend_out_of_memory(r, s.pos, sp + 1)
-						return descend_frame_out_of_memory(r, op, sp, c.NO_FIELD, count + 1)
+						return descend_frame_out_of_memory(r, op, sp, core_pkg.NO_FIELD, count + 1)
 					}
 					data, cap = raw_data(buf), new_cap
 				}
@@ -522,7 +522,7 @@ descend_elements :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^c.Shape_Op, dest:
 			}
 			when leaf == .Unsupported {
 				if !descend_member(s, walk_s, q, elem_i, elem, slot, sp + 1) {
-					return descend_frame_out_of_memory(r, op, sp, c.NO_FIELD, count + 1)
+					return descend_frame_out_of_memory(r, op, sp, core_pkg.NO_FIELD, count + 1)
 				}
 			} else {
 				v := s.pos

@@ -133,7 +133,9 @@ run_root_pieces :: proc(run: ^Run, data: []byte, at: int, arena: ^virtual.Arena)
 	ready_interpreter(run)
 	virtual.arena_free_all(arena)
 	context.allocator = virtual.arena_allocator(arena)
-	v := build_root_pieces(run, data, at, run.prog) or_return
+	// A `select` reads its path alone, and prints the root from the text when it keeps it.
+	reads := run.prog.args[0].a if run.select.op != .None else run.prog
+	v := build_root_pieces(run, data, at, reads) or_return
 	run_once(run, v)
 	return true
 }

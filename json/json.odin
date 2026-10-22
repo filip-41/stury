@@ -5,7 +5,8 @@ package json
 //
 //	json.odin           the shared types (aliases of scan/ and core/ names), `validate`, `parse_path`,
 //	                    `decode_span`, `error_position` and `render_error`
-//	request.odin        `Request`, `request_init`, `scan`, `prepare`, `answers`, `find`, `Duplicates`
+//	request.odin        `Request`, `request_init`, `answers`, `find`, `validate_remaining`, `Duplicates`
+//	request_scan.odin   `scan` and `prepare`
 //	document.odin       `Document`, `build`, `query`, `pointer`, `child`, `children`, `members`, the `get_*` readers
 //	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Unmarshal_Error`
 //	marshal.odin        `marshal` and its writer and append forms (marshal_struct.odin writes structs)
@@ -19,7 +20,7 @@ package json
 //	encode.odin         `Encode_Opts` and `marshal_document`
 //	format.odin         `format`
 //
-// The other files (read_shape.odin, route*.odin) are internal.
+// The other files (request_walk.odin, read_shape.odin, route*.odin) are internal.
 
 import "core:io"
 import "core:reflect"
@@ -107,7 +108,8 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 // The other refusals read the same way, with `src` the text the fault's offset is into:
 //
 //	- An `Unmarshal_Error` as `line:col: <kind>` (`: <syntax>` after a `.Syntax`), bare where it points at
-//	  no byte.
+//	  no byte, then ` at .a[3]."b c"` for its path (`[]` for a map value or element of any index, a leading
+//	  `…` when `truncated`).
 //	- An `Edit_Error` located in the source for `.Bad_Source`, `offset N` for `.Bad_Path` (into the path
 //	  text) and `.Bad_Result` (into the edited text), bare otherwise, with the `syntax` or `encode` result
 //	  after it.
@@ -149,7 +151,55 @@ render_unmarshal_error_to_writer :: proc(w: io.Writer, src: []byte, err: Unmarsh
 	if err.kind == .Syntax {
 		write_detail(w, reflect.enum_string(err.syntax)) or_return
 	}
+	if err.n_steps > 0 {
+		io.write_string(w, " at ") or_return
+		if err.truncated {
+			io.write_string(w, "…") or_return
+		}
+		for i in 0 ..< int(err.n_steps) {
+			write_step(w, err.steps[i]) or_return
+		}
+	}
 	return nil
+}
+
+// A path step as jq spells it: `.name` (`."quoted"` where the name is not an identifier), `[3]`, `[]` for any.
+@(private)
+write_step :: proc(w: io.Writer, step: Step) -> io.Error {
+	switch s in step {
+	case Name:
+		if is_identifier(string(s)) {
+			io.write_byte(w, '.') or_return
+			_, err := io.write_string(w, string(s))
+			return err
+		}
+		io.write_byte(w, '.') or_return
+		_, err := io.write_quoted_string(w, string(s))
+		return err
+	case Index:
+		io.write_byte(w, '[') or_return
+		if _, err := io.write_i64(w, i64(s)); err != nil {
+			return err
+		}
+		return io.write_byte(w, ']')
+	case Any:
+		_, err := io.write_string(w, "[]")
+		return err
+	}
+	return nil
+}
+
+@(private)
+is_identifier :: proc(s: string) -> bool {
+	for c, i in transmute([]u8)s {
+		switch {
+		case c == '_', 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z':
+		case '0' <= c && c <= '9' && i > 0:
+		case:
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 @(private)
@@ -342,7 +392,7 @@ Null :: scan_pkg.Null
 Decoded :: scan_pkg.Decoded
 
 // The authored text of a finished number no `i64`, `u64` or binary64 holds, as a slice of `src`. `marshal`
-// writes it as that number, and as an `unmarshal` target it takes any number's text.
+// writes it as that number (an empty one as `null`), and as an `unmarshal` target it takes any number's text.
 Digits :: scan_pkg.Digits
 
 // Decode one scalar from its span `[lo, hi)` of `src`, `kind` being the kind a scan read off its first byte

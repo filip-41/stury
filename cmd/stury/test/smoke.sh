@@ -1,7 +1,7 @@
 #!/bin/sh
 # The stury CLI end to end on what jq has not: its own options and subcommands, and the CPU and memory
 # guards. jq's command line is pinned byte for byte by cli.tsv (jq_suite.py).
-#   sh cmd/stury/smoke.sh build/stury
+#   sh cmd/stury/test/smoke.sh build/stury
 S=${1:-build/stury}
 T=$(mktemp -d)
 # A hung case stalls the gate: a watchdog ends the script, and any child still running, after a wall budget

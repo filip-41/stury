@@ -188,7 +188,8 @@ test_marshal_hooks_quoted_numbers :: proc(t: ^testing.T) {
 		n: i64 `json:"n,string"`,
 	}
 	marshal_refused(t, Go_Quoted{n = 1}, .Unsupported)
-	um_refused(t, `{"n":"1"}`, Go_Quoted, .Unsupported, 0)
+	err := um_refused(t, `{"n":"1"}`, Go_Quoted, .Unsupported, 0)
+	testing.expect_value(t, json.render_error(nil, err, context.temp_allocator), "Unsupported at .n")
 }
 
 Hook_Circle :: struct {

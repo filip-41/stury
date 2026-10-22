@@ -36,11 +36,10 @@ package main
 //	platform_windows.odin            the calls into the system, one file per platform
 //	jq/                              the jq interpreter (package `jq`)
 //	regex/                           the Oniguruma-compatible matcher behind `test`, `match` and `sub`
-//	modules/                         the modules jq's own suite imports with `-L`, remade for jq_suite.py
-//	cli.tsv                          the command-line cases, each with jq 1.8.2's answer beside stury's
-//	smoke.sh                         the CLI end to end on its own options, subcommands and guards
-//	jq-1.8.2/                        jq's own test files, which jq_suite.py runs
-//	jq_diff.py, regex_diff.py        random filters and patterns compared with jq
+//	test/                            the CLI's test assets: smoke.sh (end to end on its own options and guards),
+//	                                 jq_suite.py with cli.tsv, jq-1.8.2/ and modules/ (jq's own cases and the
+//	                                 command-line cases, each with jq's answer beside stury's), and jq_diff.py,
+//	                                 regex_diff.py (random filters and patterns compared with jq)
 
 import "core:fmt"
 import "core:os"

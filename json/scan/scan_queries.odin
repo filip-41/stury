@@ -1,6 +1,6 @@
 package scan
 
-import c "../../core"
+import core_pkg "../../core"
 import index "index"
 import lex "lex"
 
@@ -187,7 +187,7 @@ scan_queries :: proc(
 	kept: ^Resolved_Queries = nil,
 ) -> (err: Maybe(Error), fault: Walk_Fault) {
 	when .Nodes in Q {
-		qerr: Maybe(c.Request_Error)
+		qerr: Maybe(core_pkg.Request_Error)
 		err, qerr = scan_queries_tape(src, queries, strictness, limits, Q, stop_byte, validity, resolution)
 		if q, refused := qerr.?; refused {
 			fault = Walk_Fault{capacity = q.capacity, oom = q.kind == .Out_Of_Memory}
@@ -211,9 +211,9 @@ scan_queries_tape :: #force_no_inline proc(
 	stop_byte: ^Maybe(u64),
 	validity: ^Validity,
 	resolution: Resolution,
-) -> (err: Maybe(Error), qerr: Maybe(c.Request_Error)) {
+) -> (err: Maybe(Error), qerr: Maybe(core_pkg.Request_Error)) {
 	return scan_queries_in(
-		src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Maybe(c.Request_Error), false,
+		src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Maybe(core_pkg.Request_Error), false,
 	)
 }
 
@@ -248,20 +248,20 @@ resolve_refusal :: #force_no_inline proc(
 	axes: Strictness_Axes,
 	ctx: ^Query_Ctx,
 	$Q: bit_set[Walk_Kind],
-) -> Maybe(c.Request_Error) {
+) -> Maybe(core_pkg.Request_Error) {
 	if e := resolve_queries(queries, mode, axes, ctx, Q); e != .None {
-		return c.Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = e}
+		return core_pkg.Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = e}
 	}
 	return nil
 }
 
 // A refusal before the walk, in the walk's return shape `F`: `Walk_Fault`, or `scan_queries_tape`'s.
 @(private = "file")
-capacity_fault :: #force_inline proc($F: typeid, e: c.Capacity) -> F {
+capacity_fault :: #force_inline proc($F: typeid, e: core_pkg.Capacity) -> F {
 	when F == Walk_Fault {
 		return Walk_Fault{capacity = e}
 	} else {
-		return c.Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = e}
+		return core_pkg.Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = e}
 	}
 }
 
@@ -272,7 +272,7 @@ sink_fault :: #force_inline proc($F: typeid, ctx: ^Query_Ctx) -> F {
 		return Walk_Fault{oom = ctx.oom}
 	} else {
 		if ctx.oom {
-			return c.Request_Error{kind = .Out_Of_Memory, query_kind = c.query_of(ctx.oom_kind)}
+			return core_pkg.Request_Error{kind = .Out_Of_Memory, query_kind = core_pkg.query_of(ctx.oom_kind)}
 		}
 		return nil
 	}
@@ -315,7 +315,7 @@ scan_queries_in :: #force_inline proc(
 	when .Demand in Q {
 		// Before anything is resolved or written.
 		for q in queries {
-			if q.kind == .Demand && c.names_over_capacity(q.demand.keys) {
+			if q.kind == .Demand && core_pkg.names_over_capacity(q.demand.keys) {
 				return nil, capacity_fault(F, .Repeated_Names)
 			}
 		}
@@ -328,7 +328,7 @@ scan_queries_in :: #force_inline proc(
 	// Words rather than a `Query_Ctx` local: `resolve_queries` zeroes only the fields this query set reads
 	// (`query_ctx_zero`).
 	ctx_words: [size_of(Query_Ctx) / 8]u64 = ---
-	unlent: c.Scan_Query_Sink = --- // counted into, never read: for a demand walk that lends no sink
+	unlent: core_pkg.Scan_Query_Sink = --- // counted into, never read: for a demand walk that lends no sink
 	_ = unlent
 	ctx := (^Query_Ctx)(&ctx_words)
 	when F == Walk_Fault {
@@ -435,7 +435,7 @@ scan_queries_in :: #force_inline proc(
 	if werr != nil {
 		// A `.Last` candidate parked before the fault is an answer about bytes the walk did check,
 		// as on the routes that emit it at once. The fault, not a dropped answer, says the rest is unread.
-		c.auto_flush_last(ctx, Q)
+		core_pkg.auto_flush_last(ctx, Q)
 		return werr, sink_fault(F, ctx)
 	}
 	// A negative `Index`'s re-read that found its answer malformed (`path_reenter_from_end`) stops a walk
@@ -443,7 +443,7 @@ scan_queries_in :: #force_inline proc(
 	// Tested on these two exits only: a test on the walk's result, or on its fault exit, costs the walk
 	// inlined above its register allocation.
 	if stopped {
-		if e, bad := c.reread_verdict(ctx, Q, nil).?; bad {
+		if e, bad := core_pkg.reread_verdict(ctx, Q, nil).?; bad {
 			return e, sink_fault(F, ctx)
 		}
 		if stop_byte != nil {
@@ -452,7 +452,7 @@ scan_queries_in :: #force_inline proc(
 		return nil, sink_fault(F, ctx)
 	}
 	when .Path in Q {
-		if e, bad := c.reread_verdict(ctx, Q, nil).?; bad {
+		if e, bad := core_pkg.reread_verdict(ctx, Q, nil).?; bad {
 			return e, sink_fault(F, ctx)
 		}
 		// An empty path is the node itself, and its extent is the root value's.
@@ -464,13 +464,13 @@ scan_queries_in :: #force_inline proc(
 			if len(run.steps) == 0 {
 				// `emit_path` returns the refusal rather than taking the context. This caller has no run
 				// loop around it.
-				if emit_path(run, c.path_answer_of(run, .Found, ctx.root_lo, root_hi, c.NO_OWNER, c.kind_at(src, ctx.root_lo))) {
+				if emit_path(run, core_pkg.path_answer_of(run, .Found, ctx.root_lo, root_hi, core_pkg.NO_OWNER, core_pkg.kind_at(src, ctx.root_lo))) {
 					note_oom(ctx, .Path)
 				}
 				run.settled = true
 			}
 		}
-		if c.finish_paths(&ctx.path_runs, ctx.n_paths, Q) {
+		if core_pkg.finish_paths(&ctx.path_runs, ctx.n_paths, Q) {
 			note_oom(ctx, .Path)
 		}
 	}

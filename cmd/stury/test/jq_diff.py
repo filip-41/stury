@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Random filters and inputs run through build/stury and jq 1.8.2, reporting where they differ.
 
-    python3 cmd/stury/jq_diff.py [build/stury] [--seed 1] [--cases 20000] [--show 20] [--jq jq]
+    python3 cmd/stury/test/jq_diff.py [build/stury] [--seed 1] [--cases 20000] [--show 20] [--jq jq]
 
 A seeded grammar makes each case: a small JSON input, a filter of paths, operators, literals, bindings,
 reduce/foreach, try, assignments and builtins over it, and a few of jq's options. The same seed makes the

@@ -123,69 +123,86 @@ jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_
 	k, _ := kind(doc, n)
 	switch k {
 	case .Null, .False, .True:
-		enc.put_bytes(buf, string(get_raw(doc, n))) or_return
+		return enc.put_bytes(buf, string(get_raw(doc, n)))
 	case .Number:
-		lit := string(get_raw(doc, n))
-		if !opts.jq_spelling {
-			return enc.put_bytes(buf, lit)
-		}
-		// The written form is at most a few bytes longer than the literal (or a double's 40): room for it first,
-		// so its appends cannot be refused.
-		if enc.put_room(buf, len(buf^), len(lit) + 64) == nil {
-			return .Out_Of_Memory
-		}
-		enc.put_jq_literal(buf, lit)
+		return jq_number(buf, doc, n, opts)
 	case .String:
-		if !opts.jq_spelling {
-			return enc.put_bytes(buf, string(get_raw(doc, n)))
-		}
-		s, _ := get_string(doc, n)
-		return enc.put_string_escaping_del(buf, s)
+		return jq_string(buf, doc, n, opts)
 	case .Array, .Object:
-		open, close := u8('['), u8(']')
-		if k == .Object {
-			open, close = '{', '}'
-		}
-		if child_count(doc, n) == 0 {
-			enc.put_byte(buf, open) or_return
-			if enc.put_feet(buf, cl, facts(doc, n), depth) or_return {
-				enc.put_line_break(buf, cl, depth) or_return
-			}
-			return enc.put_byte(buf, close)
-		}
-		entries, ok := document_members(doc, n, opts, allocator)
-		defer delete(entries)
-		if !ok {
-			return .Out_Of_Memory
-		}
-		enc.put_byte(buf, open) or_return
-		own: []Fact // the entry written last's, whose trailing comments follow its comma
-		for e, i in entries {
-			v := e.val
-			if i > 0 {
-				enc.put_byte(buf, ',') or_return
-				enc.put_trails(buf, cl, own, depth + 1) or_return
-			}
-			enc.put_line_break(buf, cl, depth + 1) or_return
-			own = facts(doc, v)
-			enc.put_leads(buf, cl, own, depth + 1) or_return
-			if k == .Object {
-				if opts.jq_spelling {
-					enc.put_string_escaping_del(buf, e.key) or_return
-				} else {
-					enc.put_bytes(buf, string(doc.src[doc.rows[v].key_lo:doc.rows[v].key_hi])) or_return
-				}
-				enc.put_colon(buf, cl.pretty) or_return
-				enc.put_inlines(buf, cl, own, depth + 1) or_return
-			}
-			jq_value(buf, doc, v, cl, opts, depth + 1, allocator) or_return
-		}
-		enc.put_trails(buf, cl, own, depth + 1) or_return
-		enc.put_feet(buf, cl, facts(doc, n), depth) or_return
-		enc.put_line_break(buf, cl, depth) or_return
-		enc.put_byte(buf, close) or_return
+		return jq_container(buf, doc, n, k, cl, opts, depth, allocator)
 	}
 	return .None
+}
+
+@(private = "file")
+jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Encode_Opts) -> Encode_Error {
+	lit := string(get_raw(doc, n))
+	if !opts.jq_spelling {
+		return enc.put_bytes(buf, lit)
+	}
+	// The written form is at most a few bytes longer than the literal (or a double's 40): room for it first,
+	// so its appends cannot be refused.
+	if enc.put_room(buf, len(buf^), len(lit) + 64) == nil {
+		return .Out_Of_Memory
+	}
+	enc.put_jq_literal(buf, lit)
+	return .None
+}
+
+@(private = "file")
+jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Encode_Opts) -> Encode_Error {
+	if !opts.jq_spelling {
+		return enc.put_bytes(buf, string(get_raw(doc, n)))
+	}
+	s, _ := get_string(doc, n)
+	return enc.put_string_escaping_del(buf, s)
+}
+
+// An array or object `n` of kind `k`: its members in `document_members` order, each with its comments.
+@(private = "file")
+jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: ^enc.Comment_Layout, opts: Encode_Opts, depth: int, allocator: mem.Allocator) -> Encode_Error {
+	open, close := u8('['), u8(']')
+	if k == .Object {
+		open, close = '{', '}'
+	}
+	if child_count(doc, n) == 0 {
+		enc.put_byte(buf, open) or_return
+		if enc.put_feet(buf, cl, facts(doc, n), depth) or_return {
+			enc.put_line_break(buf, cl, depth) or_return
+		}
+		return enc.put_byte(buf, close)
+	}
+	entries, ok := document_members(doc, n, opts, allocator)
+	defer delete(entries)
+	if !ok {
+		return .Out_Of_Memory
+	}
+	enc.put_byte(buf, open) or_return
+	own: []Fact // the entry written last's, whose trailing comments follow its comma
+	for e, i in entries {
+		v := e.val
+		if i > 0 {
+			enc.put_byte(buf, ',') or_return
+			enc.put_trails(buf, cl, own, depth + 1) or_return
+		}
+		enc.put_line_break(buf, cl, depth + 1) or_return
+		own = facts(doc, v)
+		enc.put_leads(buf, cl, own, depth + 1) or_return
+		if k == .Object {
+			if opts.jq_spelling {
+				enc.put_string_escaping_del(buf, e.key) or_return
+			} else {
+				enc.put_bytes(buf, string(doc.src[doc.rows[v].key_lo:doc.rows[v].key_hi])) or_return
+			}
+			enc.put_colon(buf, cl.pretty) or_return
+			enc.put_inlines(buf, cl, own, depth + 1) or_return
+		}
+		jq_value(buf, doc, v, cl, opts, depth + 1, allocator) or_return
+	}
+	enc.put_trails(buf, cl, own, depth + 1) or_return
+	enc.put_feet(buf, cl, facts(doc, n), depth) or_return
+	enc.put_line_break(buf, cl, depth) or_return
+	return enc.put_byte(buf, close)
 }
 
 // One member of a container as `document_members` lists it (`key` is empty for an array's element).

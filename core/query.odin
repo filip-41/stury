@@ -8,8 +8,8 @@ Query :: enum {
 	Path, // where a `Path` lands. Answers go to `Request.answers` (path_answer.odin)
 	Nodes, // one row per value, written at its open and patched at its close. Answers go to
 	       // `Request.doc.rows`.
-	Dom, // `.Nodes` with each payload decoded (numbers to binary64, strings unescaped). The
-	     // walk always carries `.Nodes` beside it.
+	Dom, // `.Nodes` with escaped strings unescaped at build. A number is decoded each time it is read, the
+	     // walk only checks it. The walk always carries `.Nodes` beside it.
 }
 
 // What one walk is wired for: every `Query` under the same name and value, then the walk selectors the

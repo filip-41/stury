@@ -432,7 +432,7 @@ native_stderr :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool
 gen_halt_error :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
 	code, ok := number_of(args[0])
 	if !ok {
-		return fail(ip, "halt_error/1: number required")
+		return fail(ip, "%s (%s) halt_error/1: number required", type_name(input.v), brief(input.v))
 	}
 	// jq's main prints a string as it is and null not at all.
 	if s, is_str := string_of(input.v); is_str {

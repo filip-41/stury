@@ -1,3 +1,9 @@
+// Package regex is the Oniguruma-syntax engine behind jq's `test`, `match`, `sub` and the like.
+// A pattern goes: parse.odin (`parse`: source to a tree of Nodes, with Oniguruma's error messages),
+// call.odin (`check_calls`: \g<...> calls checked for endless recursion), compile.odin (`compile`:
+// the tree to a Regex holding a program of Insts plus the literals a search can skip by), then match.odin (`search`: the
+// backtracking matcher over that program). unicode.odin supplies character classes and case folds to all
+// of them, from the generated unicode_tables.odin.
 package regex
 
 // A pattern's tree as a program for the backtracking matcher (match.odin), with what the search can skip

@@ -157,35 +157,48 @@ write_flat_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comm
 		case .Bool:
 			w += n + (spell_scalar(p[n:], .Bool, at, f.size) or_return)
 		case .Enum_Int, .Enum_Uint:
-			// A value no member has is refused, as `put_enum_int` refuses it.
-			m := enum_member(st.plan, st.plan.ops[f.op], at) or_return
-			if st.enum_ints {
-				if st.plan.ops[f.op].kind == .Enum_Int {
-					w += n + enc.spell_i64(p[n:], read_int(at, f.size))
-				} else {
-					w += n + enc.spell_u64(p[n:], read_uint(at, f.size))
-				}
-				continue
-			}
-			name := st.plan.keys[m.lo:m.hi]
-			if len(name) > FIELD_VALUE_ROOM {
-				// Growing keeps only the bytes before `w`, so the key is copied again.
-				p = enc.put_room(out, w, n + len(name))
-				if p == nil {
-					return .Out_Of_Memory
-				}
-				enc.copy_lead(p, key, n)
-			}
-			if len(name) >= 4 {
-				enc.copy_lead(p[n:], raw_data(name), len(name))
-			} else {
-				// `"x"`, the one form shorter than a word.
-				p[n], p[n + 1], p[n + 2] = name[0], name[1], name[2]
-			}
-			w += n + len(name)
+			w = spell_flat_enum(st, f, key, p, n, w, at) or_return
 		}
 	}
 	return close_object(out, start, w, op.count > 0, then_comma)
+}
+
+// An enum field of a flat struct after its key at `w`: the member's name, or its number under `enum_ints`.
+// `p` is the room put for the key. A value no member has is refused, as `put_enum_int` refuses it. Returns the
+// end of the field.
+@(private = "file")
+spell_flat_enum :: #force_inline proc(st: ^Marshal_Out, f: Plan_Field, key, p: [^]u8, n, w: int, at: rawptr) -> (end: int, err: Encode_Error) #no_bounds_check {
+	m := enum_member(st.plan, st.plan.ops[f.op], at) or_return
+	if st.enum_ints {
+		if st.plan.ops[f.op].kind == .Enum_Int {
+			return w + n + enc.spell_i64(p[n:], read_int(at, f.size)), .None
+		}
+		return w + n + enc.spell_u64(p[n:], read_uint(at, f.size)), .None
+	}
+	name := st.plan.keys[m.lo:m.hi]
+	if len(name) > FIELD_VALUE_ROOM {
+		return spell_flat_enum_long(st, key, n, w, name)
+	}
+	if len(name) >= 4 {
+		enc.copy_lead(p[n:], raw_data(name), len(name))
+	} else {
+		// `"x"`, the one form shorter than a word.
+		p[n], p[n + 1], p[n + 2] = name[0], name[1], name[2]
+	}
+	return w + n + len(name), .None
+}
+
+// A member name longer than the room put for the key. Growing keeps only the bytes before `w`, so the key is
+// copied again.
+@(private = "file")
+spell_flat_enum_long :: #force_no_inline proc(st: ^Marshal_Out, key: [^]u8, n, w: int, name: []u8) -> (end: int, err: Encode_Error) {
+	p := enc.put_room(st.out, w, n + len(name))
+	if p == nil {
+		return 0, .Out_Of_Memory
+	}
+	enc.copy_lead(p, key, n)
+	enc.copy_lead(p[n:], raw_data(name), len(name))
+	return w + n + len(name), .None
 }
 
 // After an object's last member at `w`: the `}` and, with `then_comma`, a `,`, committed. With `opened`

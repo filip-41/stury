@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- `Request` and `Prepared` name their type parameter `$KINDS` (was `$Q`), as the generic procedures that take
+  them do. Callers that write `Request({.Path})` are unaffected.
+- `marshal` writes an empty `json.Digits` as `null`, as it writes an empty `json.Raw`, instead of failing with
+  `.Bad_Raw`.
+- `render_error` of an `Unmarshal_Error` ends with its path (`1:11: Wrong_Kind at .a.b`), with `…` when the path
+  was truncated.
+- `unmarshal`'s `.Unsupported` for a `,string` field, or for two fields writing one key, names that field in the
+  error path.
+- CLI: `halt_error/1` with a non-number argument names its input as jq does (`number (1) halt_error/1: number
+  required`).
+- CLI: `select(PATH OP literal)` on a large single document reads only its path, and prints the text only when it
+  keeps it, instead of building the whole document.
+
 ## 0.0.1 (2026-10-22)
 
 The first release. It builds with Odin `dev-2026-10` and targets 64-bit little-endian systems (darwin and

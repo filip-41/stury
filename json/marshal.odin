@@ -396,10 +396,10 @@ write_decoded :: proc(st: ^Marshal_Out, d: Decoded) -> Encode_Error {
 	return enc.put_bytes(st.out, "null")
 }
 
-// A `Digits`: one number token, checked as a `Raw` is.
+// A `Digits`: one number token, checked as a `Raw` is; an empty one is `null`.
 @(private)
 put_digits :: proc(st: ^Marshal_Out, s: string) -> Encode_Error {
-	if len(s) == 0 || (s[0] != '-' && (s[0] < '0' || s[0] > '9')) {
+	if len(s) != 0 && s[0] != '-' && (s[0] < '0' || s[0] > '9') {
 		return .Bad_Raw
 	}
 	return put_raw(st, s)

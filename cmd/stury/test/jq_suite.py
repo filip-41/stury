@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """jq 1.8.2's own test suites, and stury's command line cases, run through build/stury.
 
-    python3 cmd/stury/jq_suite.py [build/stury] [--diff] [--record]
+    python3 cmd/stury/test/jq_suite.py [build/stury] [--diff] [--record]
 
 Each case of jq-1.8.2/jq.test and jq-1.8.2/onig.test (jq's tests/, verbatim at tag jq-1.8.2) runs as
 `stury -L modules -c PROGRAM` with its input line on stdin, and passes as it does under `jq --run-tests`: each

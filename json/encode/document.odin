@@ -17,7 +17,7 @@ package encode
 import "base:intrinsics"
 import "core:io"
 import "core:mem"
-import c "../../core"
+import core_pkg "../../core"
 
 // Bytes a span copy or an indent may store past its end: short spans and indents move as 16-byte blocks.
 @(private = "file")
@@ -31,7 +31,7 @@ ROWS_WALK_BYTES :: 128
 // `.Bad_State` when `nodes` is not one whole document: empty, or a root whose subtree is not every row.
 encode_rows :: proc(
 	src: []byte,
-	nodes: []c.Row,
+	nodes: []core_pkg.Row,
 	opts: Encode_Opts,
 	allocator := context.allocator,
 ) -> (
@@ -98,7 +98,7 @@ reescape_bytes :: proc(buf: []byte, n: int, flags: Reescape, allocator: mem.Allo
 pretty_rows :: #force_inline proc(
 	out: []byte,
 	src: []byte,
-	nodes: []c.Row,
+	nodes: []core_pkg.Row,
 	span: int,
 	ind: ^Indent,
 	tabs: bool,
@@ -113,7 +113,7 @@ pretty_rows :: #force_inline proc(
 }
 
 // `encode_rows` written to `w` as it is made, from a buffer of about SINK_FLUSH_AT bytes in `allocator`.
-encode_rows_to_writer :: proc(w: io.Writer, src: []byte, nodes: []c.Row, opts: Encode_Opts, allocator := context.allocator) -> Encode_Error {
+encode_rows_to_writer :: proc(w: io.Writer, src: []byte, nodes: []core_pkg.Row, opts: Encode_Opts, allocator := context.allocator) -> Encode_Error {
 	if len(nodes) == 0 || nodes[0].subtree_size != u32(len(nodes)) {
 		return .Bad_State
 	}
@@ -227,7 +227,7 @@ Open_Container :: struct {
 // `COPY_SLACK`. Returns the count written. With STREAM `out` is `k.buf`, handed to the writer as it fills, and the
 // count is what is left in it.
 @(private)
-rows_compact :: proc(out: [^]u8, src: []byte, nodes: []c.Row, k: ^Doc_Sink, $STREAM: bool) -> (n: int, err: Encode_Error) #no_bounds_check {
+rows_compact :: proc(out: [^]u8, src: []byte, nodes: []core_pkg.Row, k: ^Doc_Sink, $STREAM: bool) -> (n: int, err: Encode_Error) #no_bounds_check {
 	r := Compact_Run{out = out, src = src, shift = int(nodes[0].lo)}
 	stack: [MAX_DEPTH]Open_Container = ---
 	depth := 0
@@ -238,7 +238,7 @@ rows_compact :: proc(out: [^]u8, src: []byte, nodes: []c.Row, k: ^Doc_Sink, $STR
 		leaf := nd.subtree_size == 1
 		// A scalar's span is its text, and so is an empty container's when nothing sits between its brackets.
 		whole := leaf && (nd.kind < .Array || nd.hi - nd.lo == 2)
-		first := nd.lo if nd.key_lo == c.NO_KEY else nd.key_lo
+		first := nd.lo if nd.key_lo == core_pkg.NO_KEY else nd.key_lo
 		when STREAM {
 			// The row's own bytes, a comma, and a close for every container the row may end.
 			need := int((nd.hi if leaf else nd.lo + 1) - first) + 1 + depth + COPY_SLACK
@@ -250,14 +250,14 @@ rows_compact :: proc(out: [^]u8, src: []byte, nodes: []c.Row, k: ^Doc_Sink, $STR
 			}
 		}
 		// The common row: comma, key, colon and value already sit in the source as the output needs them.
-		if int(first) == r.w + np + r.shift && (nd.key_lo == c.NO_KEY || nd.lo == nd.key_hi + 1) {
+		if int(first) == r.w + np + r.shift && (nd.key_lo == core_pkg.NO_KEY || nd.lo == nd.key_hi + 1) {
 			r.w += np + int((nd.hi if whole else nd.lo + 1) - first)
 			if !whole && leaf {
 				compact_token(&r, 0, nd.hi - 1, nd.hi)
 			}
 		} else {
 			punct: u8 = ',' if np != 0 else 0
-			if nd.key_lo != c.NO_KEY {
+			if nd.key_lo != core_pkg.NO_KEY {
 				compact_token(&r, punct, nd.key_lo, nd.key_hi)
 				punct = ':'
 			}
@@ -289,7 +289,7 @@ rows_compact :: proc(out: [^]u8, src: []byte, nodes: []c.Row, k: ^Doc_Sink, $STR
 // The exact length `rows_pretty` writes, `unit` indent bytes per level. Every row but the root starts a line
 // indented by its depth, and every open container ends one indented by its own.
 @(private)
-pretty_size :: proc(nodes: []c.Row, unit: int) -> int #no_bounds_check {
+pretty_size :: proc(nodes: []core_pkg.Row, unit: int) -> int #no_bounds_check {
 	ends: [MAX_DEPTH]u32 = ---
 	depth := 0
 	n := -1 // the root starts no line
@@ -297,7 +297,7 @@ pretty_size :: proc(nodes: []c.Row, unit: int) -> int #no_bounds_check {
 		nd := &nodes[i]
 		i += 1
 		n += 1 + depth * unit
-		if nd.key_lo != c.NO_KEY {
+		if nd.key_lo != core_pkg.NO_KEY {
 			n += int(nd.key_hi - nd.key_lo) + 2
 		}
 		if nd.kind < .Array {
@@ -320,7 +320,7 @@ pretty_size :: proc(nodes: []c.Row, unit: int) -> int #no_bounds_check {
 
 // Whether a container in `nodes` sits more than MAX_DEPTH containers deep, as the scan counts depth: past
 // what the walks here hold. Only rows read under a `max_depth` past MAX_DEPTH can.
-rows_too_deep :: proc(nodes: []c.Row) -> bool #no_bounds_check {
+rows_too_deep :: proc(nodes: []core_pkg.Row) -> bool #no_bounds_check {
 	ends: [MAX_DEPTH]u32 = ---
 	depth := 0
 	for i := 0; i < len(nodes); {
@@ -370,7 +370,7 @@ pretty_bound :: proc(span, rows, depth, unit: int) -> int {
 rows_pretty :: #force_no_inline proc(
 	out: []byte,
 	src: []byte,
-	nodes: []c.Row,
+	nodes: []core_pkg.Row,
 	span: int,
 	ind: ^Indent,
 	k: ^Doc_Sink,
@@ -379,7 +379,7 @@ rows_pretty :: #force_no_inline proc(
 ) -> (n: int, grown: []byte, err: Encode_Error) #no_bounds_check {
 	// ends[d] is the row the container at depth d ends before. ends[0] is nil, a row no walk reaches, so the
 	// close loop needs no depth test. Rows are walked by address so the loop holds no index and no length.
-	ends: [MAX_DEPTH + 1][^]c.Row = ---
+	ends: [MAX_DEPTH + 1][^]core_pkg.Row = ---
 	shut: [MAX_DEPTH]u8 = ---
 	ends[0] = nil
 	depth, covered := 0, PRETTY_DEPTH_START
@@ -395,7 +395,7 @@ rows_pretty :: #force_no_inline proc(
 		when STREAM {
 			// A comma, the line break, the key with its colon and space, and a scalar or a bracket pair.
 			need := 2 + depth * ind.unit + 2 + COPY_SLACK + 2
-			if nd.key_lo != c.NO_KEY {
+			if nd.key_lo != core_pkg.NO_KEY {
 				need += int(nd.key_hi - nd.key_lo)
 			}
 			if nd.kind < .Array {
@@ -412,7 +412,7 @@ rows_pretty :: #force_no_inline proc(
 			w += int(comma)
 			w += put_indent(p[w:], depth, ind, TABS)
 		}
-		if nd.key_lo != c.NO_KEY {
+		if nd.key_lo != core_pkg.NO_KEY {
 			w += copy_span(p[w:], src, nd.key_lo, nd.key_hi)
 			p[w] = ':'
 			p[w + 1] = ' '
@@ -469,7 +469,7 @@ rows_pretty :: #force_no_inline proc(
 // now covers, or nil (with `buf` released) when the allocator refuses. The bound for twice that depth, unless
 // that dwarfs the span: then the exact size, which no depth can outgrow.
 @(private)
-widen_rows :: #force_no_inline proc(buf: []byte, nodes: []c.Row, span, depth, unit: int, allocator: mem.Allocator) -> ([]byte, int) {
+widen_rows :: #force_no_inline proc(buf: []byte, nodes: []core_pkg.Row, span, depth, unit: int, allocator: mem.Allocator) -> ([]byte, int) {
 	covered := min(2 * depth, MAX_DEPTH)
 	size := pretty_bound(span, len(nodes), covered, unit)
 	if size > 8 * span * unit + (1 << 20) {

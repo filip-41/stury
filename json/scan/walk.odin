@@ -11,9 +11,8 @@ package scan
 // memory. A cap raised past MAX_DEPTH moves the frames to the heap once the input nests past MAX_DEPTH.
 // Every Values-ok input is Locate-ok, and every Locate error is a Values error.
 
-import "base:intrinsics"
 import "base:runtime"
-import c "../../core"
+import core_pkg "../../core"
 import index "index"
 import lex "lex"
 import number "./number"
@@ -116,38 +115,6 @@ walk_deep :: #force_no_inline proc(
 	return err
 }
 
-// The frames past MAX_DEPTH: `limit` of them in `spill`, the fixed array's copied in. Nil when the allocator
-// refuses.
-@(private = "file", cold)
-spill_frames :: proc(spill: ^[]byte, fixed: [^]Open_Frame, limit: u64, alloc: runtime.Allocator) -> [^]Open_Frame {
-	buf, err := runtime.mem_alloc_non_zeroed(int(limit) * size_of(Open_Frame), align_of(Open_Frame), alloc)
-	if err != nil {
-		return nil
-	}
-	spill^ = buf
-	frames := ([^]Open_Frame)(raw_data(buf))
-	copy(frames[:MAX_DEPTH], fixed[:MAX_DEPTH])
-	return frames
-}
-
-// A push with `sp` at the cap `max_depth`: `.Too_Deep`, or under `$deep`, short of `limit`, the frames move off
-// the stack into the spill.
-@(private = "file")
-depth_cap_hit :: #force_inline proc(s: ^Scanner, $deep: bool, spill: ^[]byte, frames: ^$F, max_depth: ^u64, limit: u64) -> Maybe(Error) {
-	when deep {
-		if max_depth^ == limit {
-			return Error{offset = s.pos, kind = .Too_Deep}
-		}
-		spilled := (^[^]Open_Frame)(frames)
-		if spilled^ = spill_frames(spill, spilled^, limit, s.alloc); spilled^ == nil {
-			return Error{offset = s.pos, kind = .Out_Of_Memory}
-		}
-		max_depth^ = limit
-		return nil
-	} else {
-		return Error{offset = s.pos, kind = .Too_Deep}
-	}
-}
 
 // The walk itself. Each pass of `descend` takes one value, in this order: value-start hooks (path, shape),
 // the skip of a value no query reads (`may_skip`), a container below every armed level checked whole
@@ -323,7 +290,7 @@ walk_frames :: #force_inline proc(
 					}
 				}
 				when .Demand in Q {
-					c.demand_wild_open(q, Q, sp, vc)
+					core_pkg.demand_wild_open(q, Q, sp, vc)
 				}
 				// Run-length push: consecutive `[` open one frame each without a VCLASS load and dispatch
 				// per level. Objects cannot fuse (a key sits between `{` and its value), and whitespace
@@ -375,7 +342,7 @@ walk_frames :: #force_inline proc(
 					cursor_advance(cur)
 					// Per fused level, so rows come out parent-first and each `]` patches its own row.
 					when .Nodes in Q {
-						c.dom_run_open(q, Q, fr2, fr2.lo, &run_rows)
+						core_pkg.dom_run_open(q, Q, fr2, fr2.lo, &run_rows)
 					}
 					when .Path in Q {
 						if auto_frame_open(q, Q, may_stop, stopped, int(sp) - 1, 2, fr2.lo) {
@@ -467,50 +434,12 @@ walk_frames :: #force_inline proc(
 				}
 				continue descend // the member value this level opened onto
 			case VC_STRING:
-				known := false
-				when Q <= EXTENT_ONLY {
-					known = cursor_string_known(s, cur, check, Q, false)
-				}
-				if !known {
-					when check == .Values {
-						if err := lex.parse_string_q(s, q, lo, false, Q); err != nil {
-							return err
-						}
-					} else {
-						if err := lex.skip_string_q(s, q, lo, false, Q); err != nil {
-							return err
-						}
-					}
-					cursor_advance(cur)
-				}
-				emit_scalar(q, Q, lo, s.pos, .String)
-				when .Shape in Q {
-					if err := shape_scalar(s, q, lo, sp, VC_STRING); err != nil {
-						return err
-					}
+				if err := walk_string(s, q, cur, check, Q, lo, sp); err != nil {
+					return err
 				}
 			case VC_LITERAL: // true / false / null
-				known := false
-				when Q <= EXTENT_ONLY && check == .Locate {
-					known = cursor_scalar_known(s, cur, Q)
-				}
-				if !known {
-					when check == .Values {
-						// The literal leaf emits its own row: it knows which literal it accepted.
-						if err := lex.parse_literal_q(s, q, lo, Q); err != nil {
-							return err
-						}
-					} else {
-						if err := lex.skip_alpha_q(s, q, lo, Q); err != nil {
-							return err
-						}
-					}
-					cursor_advance(cur)
-				}
-				when .Shape in Q {
-					if err := shape_scalar(s, q, lo, sp, VC_LITERAL); err != nil {
-						return err
-					}
+				if err := walk_literal(s, q, cur, check, Q, lo, sp); err != nil {
+					return err
 				}
 			case VC_NUMBER:
 				known := false
@@ -690,6 +619,63 @@ walk_frames :: #force_inline proc(
 	}
 }
 
+// The string at `s.pos`, as a value of the walk. A string whose extent the cursor already knows is passed
+// without its leaf.
+@(private = "file")
+walk_string :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, cur: ^$C, $check: Check_Level, $Q: bit_set[Walk_Kind], lo, sp: u64) -> Maybe(Error) {
+	known := false
+	when Q <= EXTENT_ONLY {
+		known = cursor_string_known(s, cur, check, Q, false)
+	}
+	if !known {
+		when check == .Values {
+			if err := lex.parse_string_q(s, q, lo, false, Q); err != nil {
+				return err
+			}
+		} else {
+			if err := lex.skip_string_q(s, q, lo, false, Q); err != nil {
+				return err
+			}
+		}
+		cursor_advance(cur)
+	}
+	emit_scalar(q, Q, lo, s.pos, .String)
+	when .Shape in Q {
+		if err := shape_scalar(s, q, lo, sp, VC_STRING); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// The `true`, `false` or `null` at `s.pos`, as a value of the walk.
+@(private = "file")
+walk_literal :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, cur: ^$C, $check: Check_Level, $Q: bit_set[Walk_Kind], lo, sp: u64) -> Maybe(Error) {
+	known := false
+	when Q <= EXTENT_ONLY && check == .Locate {
+		known = cursor_scalar_known(s, cur, Q)
+	}
+	if !known {
+		when check == .Values {
+			// The literal leaf emits its own row: it knows which literal it accepted.
+			if err := lex.parse_literal_q(s, q, lo, Q); err != nil {
+				return err
+			}
+		} else {
+			if err := lex.skip_alpha_q(s, q, lo, Q); err != nil {
+				return err
+			}
+		}
+		cursor_advance(cur)
+	}
+	when .Shape in Q {
+		if err := shape_scalar(s, q, lo, sp, VC_LITERAL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // The container at `s.pos` on the validate walk, `limit` levels deep at most. Out of line, so the path walk's
 // registers stay its own.
 @(private = "file")
@@ -699,114 +685,6 @@ walk_unarmed :: #force_no_inline proc(s: ^Scanner, limit: u64, $check: Check_Lev
 	err := walk_value_q(&sc, nil, min(limit, MAX_DEPTH), check, {}, &cur, false, false)
 	s.pos = sc.pos
 	return err
-}
-
-// The innermost open frame. `sp - 1` names a frame a checked push wrote, so it needs no second check.
-@(private = "file")
-top_frame :: proc {
-	top_frame_fixed,
-	top_frame_deep,
-}
-
-@(private = "file")
-top_frame_fixed :: #force_inline proc(frames: ^[MAX_DEPTH]Open_Frame, sp: u64) -> ^Open_Frame {
-	#no_bounds_check {
-		return &frames[sp - 1]
-	}
-}
-
-@(private = "file")
-top_frame_deep :: #force_inline proc(frames: ^[^]Open_Frame, sp: u64) -> ^Open_Frame {
-	return &frames[sp - 1]
-}
-
-// A long run of brackets on a walk that writes rows and nothing else (`BRACKET_RUNS`). Out of line, so the run
-// keeps its cursor, depth and row count in registers the walk has no room for. It is entered only past eight
-// brackets in a row, so its call is paid on deeply nested input alone.
-@(private = "file")
-BRACKET_RUN_MIN :: 8
-@(private = "file")
-OPEN_RUN_WORD :: 0x5b5b_5b5b_5b5b_5b5b // eight `[`
-@(private = "file")
-CLOSE_RUN_WORD :: 0x5d5d_5d5d_5d5d_5d5d // eight `]`
-
-// Whether eight bytes at `s.pos` all equal the bracket in `word`.
-@(private = "file")
-bracket_run_ahead :: #force_inline proc(s: ^Scanner, word: u64) -> bool {
-	#no_bounds_check {
-		return s.pos + BRACKET_RUN_MIN <= u64(len(s.src)) && intrinsics.unaligned_load((^u64le)(&s.src[s.pos])) == u64le(word)
-	}
-}
-
-// The fused `[` loop's levels, while the depth cap and the row capacity leave room: each `[` pushes a frame
-// and writes its row as `dom_run_open` does. What is left (a cap reached, a full edge, the run's end) is
-// the caller's loop's.
-@(private = "file")
-open_run :: #force_no_inline proc(
-	src: []byte,
-	pos: u64,
-	frames: [^]Open_Frame,
-	sp, max_depth: u64,
-	base: [^]c.Row,
-	rows, room: int,
-	$dom: bool,
-) -> (pos_after, sp_after: u64, rows_after: int) {
-	n := u64(len(src))
-	pos, depth, at := pos, sp, rows
-	flags: c.Row_Flags
-	when dom {
-		flags = {.Decoded}
-	}
-	// The row goes out as four words, two paired stores, where field stores take five: the words of a
-	// template whose only per-row fields, `lo` and `subtree_size`, each start a zero word's low half (the
-	// layout `core/tape.odin` asserts).
-	tw := transmute([4]u64)c.Row{key_lo = c.NO_KEY, key_hi = c.NO_KEY, kind = .Array, flags = flags}
-	// One bound for the loop: the run stops at the depth cap, the end of the row block or the end of input.
-	end := pos + min(max_depth - depth, u64(room - at), n - pos)
-	#no_bounds_check for pos < end && src[pos] == '[' {
-		frames[depth] = Open_Frame{lo = pos, row = u32(at)}
-		w := ([^]u64)(&base[at])
-		w[0] = u64(u32(pos))
-		w[1] = tw[1]
-		w[2] = tw[2] | u64(u32(at))
-		w[3] = tw[3]
-		at += 1
-		depth += 1
-		pos += 1
-	}
-	return pos, depth, at
-}
-
-// The closes of a run of `]`, the first of which closes `frames[sp - 1]`, an array: each patches its row as
-// `close_frame` does and counts itself into its parent, while the parent is an array the next `]` closes.
-// Leaves the walk just past a close with that close not yet counted into its parent, as `close_frame` does.
-@(private = "file")
-close_run :: #force_no_inline proc(src: []byte, pos: u64, frames: [^]Open_Frame, sp: u64, base: [^]c.Row, rows: int) -> (pos_after, sp_after: u64) {
-	n := u64(len(src))
-	pos, depth := pos, sp
-	// A close inside the run counts into the frame the next close pops, so it rides along to that row
-	// instead of being stored into a frame about to die.
-	carry: u64
-	#no_bounds_check for {
-		fr := &frames[depth - 1]
-		pos += 1
-		if fr.row != c.NO_ROW {
-			r := &base[fr.row]
-			r.hi = u32(pos)
-			r.subtree_size = u32(rows) - fr.row
-			r.cnt = u32(fr.members + carry)
-		}
-		depth -= 1
-		if depth == 0 || pos >= n || src[pos] != ']' {
-			break
-		}
-		parent := &frames[depth - 1]
-		if parent.is_obj {
-			break
-		}
-		carry = 1
-	}
-	return pos, depth
 }
 
 // How much of a value the queries read: nothing past its extent, some of its
@@ -825,231 +703,20 @@ value_use :: #force_inline proc(q: ^Query_Ctx, $Q: bit_set[Walk_Kind], sp: u64, 
 	}
 	use := Value_Use.Unread
 	when .Demand in Q {
-		if c.demand_answers_value(sp, pend) {
+		if core_pkg.demand_answers_value(sp, pend) {
 			return .Whole
 		}
-		if vc <= VC_ARRAY && c.demand_reaches_into(q, Q, sp) {
+		if vc <= VC_ARRAY && core_pkg.demand_reaches_into(q, Q, sp) {
 			use = .Partly
 		}
 	}
 	when .Path in Q {
-		if c.path_answers_member(q, int(sp) - 1) {
+		if core_pkg.path_answers_member(q, int(sp) - 1) {
 			return .Whole
 		}
-		if vc <= VC_ARRAY && c.path_reaches_into(q, int(sp) - 1) {
+		if vc <= VC_ARRAY && core_pkg.path_reaches_into(q, int(sp) - 1) {
 			use = .Partly
 		}
 	}
 	return use
-}
-
-// Consume the closing bracket and record the container.
-@(private = "file")
-close_frame :: #force_inline proc(
-	s: ^Scanner,
-	q: ^Query_Ctx,
-	$check: Check_Level,
-	$Q: bit_set[Walk_Kind],
-	fr: ^Open_Frame,
-	idx: u64,
-	pend: ^Demand_Pend,
-	$may_stop: bool,
-	stopped: ^bool,
-) {
-	s.pos += 1
-	// The `.Nodes` row was written at the open, with its key. This patches it.
-	dom_container_close(q, Q, fr, s.pos, fr.members)
-	when .Path in Q {
-		// Two transitions. `frames[idx]` was a member of `frames[idx-1]` at step `idx-1`, so unless it is
-		// the root its extent is final here: the answer a terminal step was waiting for. It was also read
-		// at step `idx`, so its close settles the miss, resolves a negative `Index` and, at the root,
-		// flushes the `.Last` slots.
-		//
-		// No stop test: callers check `stopped` right after, and a re-entry inside `auto_frame_closed`
-		// carries its own halt flag.
-		if idx >= 1 {
-			auto_member_closed(q, Q, may_stop, stopped, int(idx) - 1, fr.lo, s.pos)
-		}
-		auto_frame_closed(s, q, Q, may_stop, stopped, int(idx), fr.lo, s.pos)
-	}
-	when .Demand in Q {
-		// The root is nobody's member.
-		if idx != 0 {
-			c.demand_value_closed(s, q, Q, idx, pend, may_stop, stopped)
-		}
-	}
-	when .Unique in Q {
-		key_set_close(q.keys, u32(idx + 1))
-	} else when .Path in Q {
-		if q.wild_keys {
-			wild_close(q, u32(idx + 1))
-		}
-	}
-}
-
-// A key and its colon, skipping whitespace around each. A missing key faults at the byte that cannot
-// start one, a missing colon at the byte that cannot be one. `next` is the byte the value starts with.
-@(private = "file")
-object_key :: #force_inline proc(
-	s: ^Scanner,
-	cur: ^$C,
-	q: ^Query_Ctx,
-	$check: Check_Level,
-	$Q: bit_set[Walk_Kind],
-	sp: u64,
-	// The enclosing object's frame: its `lo` names the object a demand row belongs to.
-	owner: ^Open_Frame,
-	pend: ^Demand_Pend,
-) -> (next: int, err: Maybe(Error)) {
-	if lex.peek(s) != '"' {
-		when C == Byte_Cursor && .Nodes in Q {
-			lex.skip_indent(s)
-		}
-		cursor_skip(s, cur)
-		if at := lex.peek(s); at != '"' {
-			if at == -1 {
-				return -1, Error{offset = s.pos, kind = .Truncated}
-			}
-			return -1, Error{offset = s.pos, kind = .Bad_Char}
-		}
-	}
-	key_lo := s.pos
-	// The key's parse records whether its text carried an escape, so no consumer rescans the key.
-	when Q & lex.KEY_ESC_KINDS != {} {
-		q.key_esc_live = true
-		q.key_saw_escape = false
-	}
-	perr: Maybe(Error)
-	known := false
-	when Q <= EXTENT_ONLY {
-		known = cursor_string_known(s, cur, check, Q, true)
-	}
-	if !known {
-		when check == .Values {
-			perr = lex.parse_string_q(s, q, key_lo, true, Q)
-		} else {
-			perr = lex.skip_string_q(s, q, key_lo, true, Q)
-		}
-		cursor_advance(cur)
-	}
-	when Q & lex.KEY_ESC_KINDS != {} {
-		q.key_esc_live = false
-	}
-	if perr != nil {
-		return -1, perr
-	}
-	when Q & lex.KEY_ESC_KINDS != {} {
-		key_hi := s.pos
-		// Latched before the colon is consumed. The next row written is the member value's, so the two
-		// spans and the escape bit have one candidate row. `emit_node` consumes all three together.
-		when .Nodes in Q {
-			q.node_key_lo = key_lo
-			q.node_key_hi = key_hi
-			q.node_key_escaped = q.key_saw_escape
-		}
-		next, err = expect_colon(s, cur, Q)
-		if err != nil {
-			return
-		}
-		when .Shape in Q {
-			if serr := shape_key(s, q, key_lo, key_hi, sp, .Unique in Q); serr != nil {
-				return -1, serr
-			}
-		} else when .Unique in Q {
-			if uerr := walk_key_unique(q, s.src, key_lo, key_hi, sp); uerr != nil {
-				return -1, uerr
-			}
-		}
-		when .Demand in Q {
-			// Bound now, resolved when the value closes (half the answer is its extent). `owner.lo` names
-			// the object an appended row belongs to.
-			c.demand_key(q, Q, key_lo, key_hi, s.pos, sp, owner.lo, pend)
-		}
-		when .Path in Q {
-			// `sp` is the object's frame index, so the step that reads its members is `sp - 1`.
-			if auto_key(s, q, Q, int(sp) - 1, key_lo, key_hi) {
-				wild_key(q, s.src, key_lo, key_hi, sp)
-			}
-		}
-	} else {
-		next, err = expect_colon(s, cur, Q)
-	}
-	return
-}
-
-// The colon between a key and its value, and the whitespace around it. A missing colon is Truncated at end
-// of input and Bad_Char otherwise. `next` is the byte after the whitespace.
-@(private = "file")
-expect_colon :: #force_inline proc(s: ^Scanner, cur: ^$C, $Q: bit_set[Walk_Kind]) -> (next: int, err: Maybe(Error)) {
-	// Fast path for a colon flush against its value, as in a compact document: `s.pos + 1 < n` keeps the
-	// next byte in bounds and a byte above 0x20 is not whitespace. Every other shape falls through, which
-	// keeps the error offsets unchanged. A JSONC `/` there may open a comment, so that walk skips it.
-	when C != Jsonc_Cursor {
-		#no_bounds_check {
-			n := u64(len(s.src))
-			if s.pos + 1 < n && s.src[s.pos] == ':' {
-				after := s.src[s.pos + 1]
-				if after > ' ' {
-					s.pos += 1
-					cursor_advance(cur)
-					return int(after), nil
-				}
-				// A pretty printer's `": "`.
-				when C == Byte_Cursor && .Nodes in Q {
-					if after == ' ' && s.pos + 2 < n {
-						after = s.src[s.pos + 2]
-						if after > ' ' {
-							s.pos += 2
-							cursor_advance(cur)
-							return int(after), nil
-						}
-					}
-				}
-			}
-		}
-	}
-	cursor_skip(s, cur)
-	if lex.peek(s) != ':' {
-		if lex.peek(s) == -1 {
-			return -1, Error{offset = s.pos, kind = .Truncated}
-		}
-		return -1, Error{offset = s.pos, kind = .Bad_Char}
-	}
-	s.pos += 1
-	cursor_advance(cur)
-	return cursor_skip_peek(s, cur), nil
-}
-
-// A comma and then a number start: the next element of a compact array of numbers.
-@(private = "file")
-number_follows :: #force_inline proc(s: ^Scanner) -> bool {
-	#no_bounds_check {
-		if s.pos + 1 >= u64(len(s.src)) || s.src[s.pos] != ',' {
-			return false
-		}
-		b := s.src[s.pos + 1]
-		return b - '0' <= 9 || b == '-'
-	}
-}
-
-// `cursor_skip_peek` where a pretty printer puts a newline and an indent: the byte cursor passes the indent
-// two spaces a step first (`lex.skip_indent`). Only the row-writing walks do, as with `": "` in `expect_colon`
-// and the indent before a key in `object_key`: in the other walks the extra code adds instructions to every
-// compact input.
-@(private = "file")
-indent_skip_peek :: #force_inline proc(s: ^Scanner, cur: ^$C, $Q: bit_set[Walk_Kind]) -> int {
-	when C == Byte_Cursor && .Nodes in Q {
-		#no_bounds_check {
-			if s.pos < u64(len(s.src)) {
-				b := s.src[s.pos]
-				if b > ' ' {
-					return int(b)
-				}
-				if b == '\n' {
-					lex.skip_indent(s)
-				}
-			}
-		}
-	}
-	return cursor_skip_peek(s, cur)
 }

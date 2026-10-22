@@ -340,7 +340,9 @@ and keeps its parser and allocator.
 | nested, 16 MB | **1.94** | 0.67 | 0.85 | 0.77 | 1.66 |
 
 Validate, DOM and get-one-field. The simdjson column is its DOM parser for validate and DOM, and On-Demand for
-get-one-field.
+get-one-field. The DOM rows are not the same work for every tool: the other libraries convert every number
+while they parse, and stury checks each number and converts it only when it is read. A program that reads
+every number of a stury DOM pays for those conversions on top of its row.
 
 | Job | Input | stury | simdjson | yyjson | sonic-rs | serde_json |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |

@@ -13,7 +13,7 @@ package encode
 
 import "base:intrinsics"
 import "core:simd"
-import c "../../core"
+import core_pkg "../../core"
 import lex "../scan/lex"
 
 // What each byte is written as inside a string, low byte first: itself, `\` and a letter, or `\u00XX`. One
@@ -121,7 +121,7 @@ put_string_escaping_del :: proc(dst: ^[dynamic]u8, s: string) -> Encode_Error {
 put_string_as :: #force_inline proc(dst: ^[dynamic]u8, s: string, $del: bool) -> Encode_Error {
 	mark := len(dst^)
 	end, err := spell_led_string(dst, mark, nil, 0, s, del)
-	c.edge_publish(dst, end if err == .None else mark)
+	core_pkg.edge_publish(dst, end if err == .None else mark)
 	return err
 }
 
@@ -393,7 +393,7 @@ escape_room :: proc(dst: ^[dynamic]u8, out: [^]u8, w, rest: int) -> [^]u8 {
 	if w + need <= cap(dst^) {
 		return out
 	}
-	c.edge_publish(dst, w)
+	core_pkg.edge_publish(dst, w)
 	if put_reserve(dst, need) == nil {
 		return nil
 	}

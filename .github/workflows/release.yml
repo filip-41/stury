@@ -62,7 +62,7 @@ jobs:
           fi
       - name: Smoke the release binary
         if: matrix.name != 'darwin-amd64'
-        run: sh cmd/stury/smoke.sh build/stury
+        run: sh cmd/stury/test/smoke.sh build/stury
       - name: Package
         run: |
           d="stury-${VERSION#v}-${{ matrix.name }}"

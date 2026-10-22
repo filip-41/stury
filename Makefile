@@ -64,8 +64,8 @@ build-cli:
 test: build-cli
 	$(call odin_each,test,$(TEST_PKGS),$(TEST_OPT),)
 	@echo "== cmd/stury"
-	sh cmd/stury/smoke.sh build/stury
-	@if [ -n "$(JQ_SUITE_IN_DIFF)" ] && [ "$$(jq --version 2>/dev/null)" = jq-1.8.2 ]; then echo "(jq suite: run by diff)"; else python3 cmd/stury/jq_suite.py build/stury || exit 1; fi
+	sh cmd/stury/test/smoke.sh build/stury
+	@if [ -n "$(JQ_SUITE_IN_DIFF)" ] && [ "$$(jq --version 2>/dev/null)" = jq-1.8.2 ]; then echo "(jq suite: run by diff)"; else python3 cmd/stury/test/jq_suite.py build/stury || exit 1; fi
 	@n=$$(wc -c < build/stury); [ $$n -le $(CLI_MAX_BYTES) ] || { echo "build/stury is $$n B, over the $(CLI_MAX_BYTES) B cap"; exit 1; }
 	@for e in examples/*/; do e=$${e%/}; echo "== $$e"; d=$$(mktemp -d) && $(ODIN) build $$e $(TEST_OPT) -collection:stury=. -out:$$d/x && $$d/x; s=$$?; rm -rf $$d; [ $$s -eq 0 ] || exit 1; done
 
@@ -95,10 +95,10 @@ diff:
 	@echo "== diff: no jq 1.8.2 on PATH, skipped"
 endif
 diff-suite: build-cli
-	STURY_TEST_TIMEOUT=60 python3 cmd/stury/jq_suite.py build/stury --diff
+	STURY_TEST_TIMEOUT=60 python3 cmd/stury/test/jq_suite.py build/stury --diff
 $(DIFF_SEED_TARGETS): diff-seed-%: build-cli
-	python3 cmd/stury/jq_diff.py build/stury --seed $*
-	python3 cmd/stury/regex_diff.py build/stury --seed $*
+	python3 cmd/stury/test/jq_diff.py build/stury --seed $*
+	python3 cmd/stury/test/regex_diff.py build/stury --seed $*
 
 # The engines a default build routes around
 test-modes:
@@ -127,13 +127,13 @@ SAN_STACK := ulimit -s 65520 2>/dev/null || ulimit -s unlimited
 define sanitized
 	$(call odin_each,test,$(TEST_PKGS),-o:minimal -debug -sanitize:$(1) -collection:stury=., ($(1)))
 	$(call odin_build,cmd/stury $(OPT) -debug -sanitize:$(1) $(CLI_DEFINES) $(if $(filter thread,$(1)),-define:BATCH_START_BUDGET_US=100000),build/stury-$(1))
-	$(SAN_STACK); $(SAN_ENV) sh cmd/stury/smoke.sh build/stury-$(1)
+	$(SAN_STACK); $(SAN_ENV) sh cmd/stury/test/smoke.sh build/stury-$(1)
 endef
 
 # AddressSanitizer: out-of-bounds reads and writes, use after free, stack overflow past a guard.
 test-asan:
 	$(call sanitized,address)
-	$(SAN_STACK); $(SAN_ENV) python3 cmd/stury/jq_suite.py build/stury-address
+	$(SAN_STACK); $(SAN_ENV) python3 cmd/stury/test/jq_suite.py build/stury-address
 
 # ThreadSanitizer
 test-tsan:

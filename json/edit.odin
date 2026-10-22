@@ -306,7 +306,7 @@ edit_parse :: proc(path: Path_Spec, steps: []Step, allocator: runtime.Allocator)
 
 // The `.Strict` scan for `paths` every path edit starts from, its refusals and faults as edit errors.
 @(private)
-edit_scan :: proc(src: []byte, req: ^Request($Q), paths: []Path, dialect: Dialect, allocator: runtime.Allocator) -> Maybe(Edit_Error) {
+edit_scan :: proc(src: []byte, req: ^Request($KINDS), paths: []Path, dialect: Dialect, allocator: runtime.Allocator) -> Maybe(Edit_Error) {
 	req.paths = paths
 	req.dialect = dialect
 	req.strictness = .Strict

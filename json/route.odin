@@ -268,44 +268,85 @@ route_paths :: proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplic
 	return route_general(plan, src, paths, duplicates, alloc, automaton_only)
 }
 
+// What `route_general` counts over the paths: the plain names, the columns at the depth `wild` (the first
+// column's, -1 with none).
+@(private = "file")
+Path_Tally :: struct {
+	n_single, n_column, wild: int,
+}
+
 // Any request. Out of line: the common request never reaches it.
 @(private = "file")
 route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, alloc: runtime.Allocator, automaton_only: bool) -> Maybe(Request_Error) {
 	force := FORCE_AUTOMATON || automaton_only
-	n_single, n_column := 0, 0
-	wild := -1
+	tally, refused := route_tally(paths, force)
+	if err, bad := refused.?; bad {
+		return err
+	}
+	served := route_serve(plan, src, paths, duplicates, force, tally)
+	n_keys := 0
+	#partial switch served {
+	case .Column:       n_keys = tally.n_column
+	case .Single_Name:  n_keys = tally.n_single
+	case .Gated_Column: n_keys = len(paths)
+	}
+	if n_keys > MAX_ROUTED {
+		if !spill_to(&plan.spill.keys, n_keys, alloc) || !spill_to(&plan.spill.row_keys, n_keys, alloc) ||
+		   !spill_to(&plan.spill.fields, n_keys, alloc) {
+			return Request_Error{kind = .Out_Of_Memory, query_kind = .Path}
+		}
+	}
+	if err, bad := route_assign(plan, paths, served, tally.wild, n_keys).?; bad {
+		return err
+	}
+	if plan.any_limit && len(paths) > MAX_ROUTED {
+		if !spill_to(&plan.spill.counts, len(paths), alloc) {
+			return Request_Error{kind = .Out_Of_Memory, query_kind = .Path}
+		}
+	}
+	return {}
+}
+
+// Count the paths by shape. Refused when a path is longer than the one step bound: a long column would
+// otherwise be served by the row matcher, which has none.
+@(private = "file")
+route_tally :: proc(paths: []Path, force: bool) -> (t: Path_Tally, refused: Maybe(Request_Error)) {
+	t.wild = -1
 	for p, i in paths {
-		// The one step bound: a long column would otherwise be served by the row matcher, which has none.
 		if len(p.steps) > core_pkg.MAX_PATH_STEPS {
-			return Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = .Path_Steps, path = i}
+			return t, Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = .Path_Steps, path = i}
 		}
 		shape, k := path_shape(p)
 		switch shape {
 		case .Column:
 			// The matcher reads one wildcard depth, the first column's. A column of another depth runs on
 			// the automaton.
-			if wild < 0 && !force {
-				wild = k
+			if t.wild < 0 && !force {
+				t.wild = k
 			}
-			if k == wild {
-				n_column += 1
+			if k == t.wild {
+				t.n_column += 1
 			}
 		case .Single_Name:
-			n_single += 1
+			t.n_single += 1
 		case .Automaton, .Gated_Column:
 		}
 	}
+	return
+}
 
-	// The shape the matcher serves, and with no matcher `.Automaton` takes every path. A gated column takes it
-	// only when every path shares one gate, compiled into the demand-only walk alone. A slot holds one
-	// extent per key, so `.All` reads plain names in rows instead. A root that is not an object stays with
-	// the automaton (it owes `Type_Mismatch`).
-	served := Path_Shape.Automaton
-	if wild >= 0 {
+// Pick the matcher and set the plan's depth, gate and root, and return the shape it serves; with no matcher
+// `.Automaton` takes every path. A gated column takes it only when every path shares one gate, compiled
+// into the demand-only walk alone. A slot holds one extent per key, so `.All` reads plain names in rows
+// instead. A root that is not an object stays with the automaton (it owes `Type_Mismatch`).
+@(private = "file")
+route_serve :: proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, force: bool, t: Path_Tally) -> Path_Shape {
+	if t.wild >= 0 {
 		plan.matcher = .Rows
-		plan.depth = u64(wild + 1)
-		served = .Column
-	} else if !force && all_gated(paths) {
+		plan.depth = u64(t.wild + 1)
+		return .Column
+	}
+	if !force && all_gated(paths) {
 		ref := paths[0].steps
 		plan.matcher = .Rows
 		plan.depth = u64(len(ref))
@@ -316,28 +357,23 @@ route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path,
 				plan.gate.names[d + 1] = string(name)
 			}
 		}
-		served = .Gated_Column
-	} else if n_single != 0 && !force {
+		return .Gated_Column
+	}
+	if t.n_single != 0 && !force {
 		if lo, is_object := root_object(src); is_object {
 			plan.matcher = .Names if duplicates == .All else .Slots
 			plan.depth = 1
 			plan.root_lo = lo
-			served = .Single_Name
+			return .Single_Name
 		}
 	}
-	n_keys := 0
-	#partial switch served {
-	case .Column:       n_keys = n_column
-	case .Single_Name:  n_keys = n_single
-	case .Gated_Column: n_keys = len(paths)
-	}
-	if n_keys > MAX_ROUTED {
-		if !spill_to(&plan.spill.keys, n_keys, alloc) || !spill_to(&plan.spill.row_keys, n_keys, alloc) ||
-		   !spill_to(&plan.spill.fields, n_keys, alloc) {
-			return Request_Error{kind = .Out_Of_Memory, query_kind = .Path}
-		}
-	}
+	return .Automaton
+}
 
+// Hand each path to the matcher's keys when it has the `served` shape, else to the automaton, and
+// record `n_keys`.
+@(private = "file")
+route_assign :: proc(plan: ^Route, paths: []Path, served: Path_Shape, wild, n_keys: int) -> Maybe(Request_Error) {
 	store := route_store(plan, n_keys)
 	j := 0
 	for p, i in paths {
@@ -360,12 +396,7 @@ route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path,
 	if core_pkg.names_over_capacity(store.keys) {
 		return Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = .Repeated_Names}
 	}
-	if plan.any_limit && len(paths) > MAX_ROUTED {
-		if !spill_to(&plan.spill.counts, len(paths), alloc) {
-			return Request_Error{kind = .Out_Of_Memory, query_kind = .Path}
-		}
-	}
-	return {}
+	return nil
 }
 
 // A slot's answer: a found key is a `Found`, a key the document lacked is `Missing`. The matcher writes a

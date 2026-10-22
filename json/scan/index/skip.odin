@@ -14,7 +14,7 @@ package index
 // block's 64 brackets, which `Bracket_Kinds` holds.
 
 import "base:intrinsics"
-import c "../../../core"
+import core_pkg "../../../core"
 import lex "../lex"
 
 // Open brackets matched so far, innermost at `kinds[depth]`. Faults collect in
@@ -34,7 +34,7 @@ Bracket_Stack :: struct {
 #assert(size_of(Bracket_Stack) == 2 * size_of(int) + 1 + size_of(Bracket_Kinds))
 
 @(private = "file")
-Bracket_Kinds :: [c.MAX_DEPTH + 64 + 7]u8
+Bracket_Kinds :: [core_pkg.MAX_DEPTH + 64 + 7]u8
 
 // Brackets per block taken whether or not they exist, the way `flatten`
 // writes, so a varying bracket count costs no misprediction.
@@ -93,7 +93,7 @@ skip_stacked :: proc(ix: ^Index($F), r: Reader, open: int, room: int) -> (int, R
 		return -1, r
 	}
 	st: Bracket_Stack = ---
-	st.depth, st.room, st.bad = 1, min(room, c.MAX_DEPTH), 0
+	st.depth, st.room, st.bad = 1, min(room, core_pkg.MAX_DEPTH), 0
 	st.kinds[1] = ix.src[open]
 	// The rest of the current region is listed already: walking its positions
 	// costs less than classifying it again.

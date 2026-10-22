@@ -16,7 +16,7 @@ import enc "encode"
 Plan_Op :: struct {
 	info:       ^runtime.Type_Info, // read at write time by Union and Map
 	elem:       u32, // Slice/Dynamic/Array/Fixed_List/Pointer/Bit_Set: the element op; Map: the value op; Struct: first field; Union: first arm; Enum_*: first member; Hook: the hook
-	key:        u32, // Map: the key op
+	key:        u32, // Map: the key op; a refused Struct: the index in `fields` of the offending field
 	count:      u32, // Array/Fixed_List: element capacity; Struct: field count; Union: arm count; Enum_*: member count
 	stride:     u32, // Slice/Dynamic/Array/Fixed_List: element size
 	len_offset: u32, // Fixed_List
@@ -24,6 +24,7 @@ Plan_Op :: struct {
 	kind:       core_pkg.Shape_Kind,
 	flat:       bool, // Struct: every field is a Bool, Int, Uint, Float, String or Enum_* without omitempty; Enum_*: member k is k
 	tagged:     bool, // Union: two or more arms are named structs, which `union_tag` tells apart by name
+	refused:    bool, // an `.Unsupported` Struct: field `key` is the one that refused it
 }
 
 // An enum member: its value, and its name written with quotes as `keys[lo:hi]`.
@@ -475,8 +476,10 @@ compile_struct_op :: proc(p: ^Type_Plan, v: runtime.Type_Info_Struct, op: ^Plan_
 		op.elem = u32(len(p.fields))
 		refused := lay_out_run(p, v, 0, op.elem) or_return
 		op.count = u32(len(p.fields)) - op.elem
-		if refused {
+		if at, bad := refused.?; bad {
 			op.kind = .Unsupported
+			op.refused = true
+			op.key = at
 			return
 		}
 		op.kind = .Struct
@@ -545,12 +548,12 @@ hook_of :: proc(p: ^Type_Plan, T: typeid) -> (k: int, hooked: bool) {
 
 // Lay the fields that take part (all but `json:"-"`) out as one run in `p.fields` from `first`, `base` bytes
 // into the struct the run is for, keys pre-written with their leading comma, each type in `p.sources` for
-// `compile_field_types`. `refused` when two of them write one key, which no object can hold twice, or a field
-// asks for `,string`. The run is laid out before any field type compiles, so a nested struct's run lands
+// `compile_field_types`. `refused` is the index in `p.fields` of the field that makes the struct unsupported: the
+// second of two writing one key, which no object can hold twice, or one asking for `,string`. The run is laid out before any field type compiles, so a nested struct's run lands
 // after it. A `using` field of a struct type its tag gives no name, and no hook writes, is flattened, as Go
 // flattens an embedded struct: its fields join the run in its place.
 @(private)
-lay_out_run :: proc(p: ^Type_Plan, v: runtime.Type_Info_Struct, base: uintptr, first: u32) -> (refused: bool, err: Encode_Error) {
+lay_out_run :: proc(p: ^Type_Plan, v: runtime.Type_Info_Struct, base: uintptr, first: u32) -> (refused: Maybe(u32), err: Encode_Error) {
 	for i in 0 ..< int(v.field_count) {
 		tag := field_spelling(v.names[i], v.tags[i])
 		if !tag.keep {
@@ -558,11 +561,17 @@ lay_out_run :: proc(p: ^Type_Plan, v: runtime.Type_Info_Struct, base: uintptr, f
 		}
 		if inner, ok := runtime.type_info_base(v.types[i]).variant.(runtime.Type_Info_Struct); ok && v.usings[i] && !tag.named {
 			if _, hooked := hook_of(p, v.types[i].id); !hooked && .raw_union not_in inner.flags && inner.soa_kind == .None {
-				refused |= lay_out_run(p, inner, base + v.offsets[i], first) or_return
+				inner_refused := lay_out_run(p, inner, base + v.offsets[i], first) or_return
+				if refused == nil {
+					refused = inner_refused
+				}
 				continue
 			}
 		}
-		refused ||= tag.quoted
+		at := u32(len(p.fields))
+		if tag.quoted && refused == nil {
+			refused = at
+		}
 		key_lo := u32(len(p.keys))
 		enc.put_byte(&p.keys, ',') or_return
 		enc.put_string(&p.keys, tag.key) or_return
@@ -570,13 +579,15 @@ lay_out_run :: proc(p: ^Type_Plan, v: runtime.Type_Info_Struct, base: uintptr, f
 		f := Plan_Field{offset = base + v.offsets[i], key_lo = key_lo, key_hi = u32(len(p.keys)), omitempty = tag.omitempty, required = tag.required}
 		// Keys are written canonically, so two fields name one key exactly when their written forms are equal.
 		for g in p.fields[first:] {
-			refused ||= string(p.keys[g.key_lo:g.key_hi]) == string(p.keys[f.key_lo:f.key_hi])
+			if refused == nil && string(p.keys[g.key_lo:g.key_hi]) == string(p.keys[f.key_lo:f.key_hi]) {
+				refused = at
+			}
 		}
 		if _, aerr := append(&p.fields, f); aerr != nil {
-			return false, .Out_Of_Memory
+			return nil, .Out_Of_Memory
 		}
 		if _, aerr := append(&p.sources, Field_Source{tag.key, v.types[i]}); aerr != nil {
-			return false, .Out_Of_Memory
+			return nil, .Out_Of_Memory
 		}
 	}
 	return

@@ -145,9 +145,9 @@ SOFTWARE.
 ----------------------------------------------------------------------------------------------------
 jq 1.8.2 — https://jqlang.github.io/jq/
 
-    cmd/stury/jq-1.8.2/jq.test and onig.test (jq's own suites, verbatim) and the parser tables
+    cmd/stury/test/jq-1.8.2/jq.test and onig.test (jq's own suites, verbatim) and the parser tables
     cmd/stury/jq/grammar_tables.odin derives from jq's src/parser.c. jq's licence text ships beside the
-    suites, in cmd/stury/jq-1.8.2/COPYING. (cmd/stury/modules is stury's own, remade from what jq.test's
+    suites, in cmd/stury/test/jq-1.8.2/COPYING. (cmd/stury/test/modules is stury's own, remade from what jq.test's
     module cases require.)
 
 JSONTestSuite — https://github.com/nst/JSONTestSuite

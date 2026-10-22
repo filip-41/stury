@@ -131,7 +131,7 @@ test_unmarshal_refusal_matrix :: proc(t: ^testing.T) {
 		{into(Um_Logs), LOGS_FIRST_UNKNOWN, .Unknown_Field, `"zz"`, `.logs[0].zz: Unknown_Field`, refuse},
 		{into(Um_Outer), `{"id":1,"inner":{"name":"n"},"tail":"t"}`, .Syntax, `{"name"`, `.inner: Syntax(Too_Deep)`, {limits = {max_depth = 1}}},
 		{into(Um_Bits), `{`, .Unsupported, ``, `.b: Unsupported`, {}},
-		{into(Um_Clash), `{`, .Unsupported, ``, `Unsupported`, {}},
+		{into(Um_Clash), `{`, .Unsupported, ``, `.a: Unsupported`, {}},
 		{into([]Um_Bits), `[`, .Unsupported, ``, `[*].b: Unsupported`, {}},
 		{into(map[string]Um_Bits), `{`, .Unsupported, ``, `[*].b: Unsupported`, {}},
 		{into(^Um_Bits), `{`, .Unsupported, ``, `.b: Unsupported`, {}},
