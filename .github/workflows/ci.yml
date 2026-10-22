@@ -1,0 +1,98 @@
+name: ci
+
+# The gate, in stages: lint, then the suites on every target, then the sanitizers and Windows. A `v*` tag runs
+# it through release.yml before any binary is built.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-odin
+      - run: make lint
+
+  test:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-odin
+      - run: make test test-modes
+      # Odin no longer publishes a macOS Intel toolchain. Cross-compile the
+      # x86 suites from the arm64 runner and run them under Rosetta instead.
+      - if: matrix.os == 'macos-15'
+        run: make test-x86
+
+  # The jq 1.8.2 differential: jq_suite in diff mode, jq_diff and regex_diff
+  # over every seed. The other test job runs the corpus but cannot compare
+  # against jq itself.
+  diff:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-odin
+      - name: Install jq 1.8.2
+        run: |
+          curl -fsSL -o /tmp/jq \
+            https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64
+          sudo install -m 0755 /tmp/jq /usr/local/bin/jq
+          jq --version | grep -qx 'jq-1.8.2'
+      - run: make diff
+
+  # The sanitizer runs are checked where they were made to pass: macOS on Apple silicon.
+  sanitizers:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [test-asan, test-tsan]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-odin
+      - run: make ${{ matrix.target }}
+
+  # Windows is built here and nowhere else: the CLI's Windows code was written without a Windows host, so this
+  # job is its first link and run. It builds the library suites and the CLI, then runs a few answers end to end.
+  windows:
+    needs: lint
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-odin
+      - shell: bash
+        run: |
+          odin test core/test -collection:stury=.
+          odin test json/test/api -collection:stury=.
+          odin build cmd/stury -o:speed -collection:stury=. -define:REFUSE_DUPLICATES=false -out:stury.exe
+      - name: Answers through files and pipes
+        shell: bash
+        run: |
+          set -e
+          [ "$(echo '{"a":[1,2]}' | ./stury.exe -c '.a')" = "[1,2]" ]
+          # Output is bytes as written, LF and no CR, with jq's -b or without it.
+          [ "$(echo '[1,2]' | ./stury.exe -c '.[]' | od -An -tx1 | tr -d ' \n')" = "310a320a" ]
+          [ "$(echo '[1,2]' | ./stury.exe -b -c '.[]' | od -An -tx1 | tr -d ' \n')" = "310a320a" ]
+          printf '{"a":1}\n{"a":2}\n' > two.json
+          [ "$(./stury.exe -c '.a' two.json | tr -d '\r' | paste -sd, -)" = "1,2" ]
+          [ "$(echo '"2015-03-05T23:51:47Z"' | ./stury.exe -r 'fromdate | todate')" = "2015-03-05T23:51:47Z" ]
+          [ "$(./stury.exe -n '[limit(3; recurse(.+1))] | length' <<< 0)" = "3" ]
+          ! echo '{' | ./stury.exe . 2>/dev/null

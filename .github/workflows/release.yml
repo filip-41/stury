@@ -1,0 +1,97 @@
+name: release
+
+# A `v*` tag runs the whole gate (ci.yml), then builds the CLI for each target, tests it there, and opens a
+# draft GitHub release with the binaries and the tag's CHANGELOG section. The draft is published by hand.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build:
+    needs: gate
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # ponytail: Ubuntu 22.04 sets the Linux binaries' glibc floor at 2.35; a musl static build if older
+          # distributions ask for it.
+          - os: ubuntu-22.04
+            name: linux-amd64
+          - os: ubuntu-22.04-arm
+            name: linux-arm64
+          - os: macos-15
+            name: darwin-arm64
+          # Odin has no macOS Intel toolchain; build the Intel binary on the
+          # arm64 runner with -target:darwin_amd64.
+          - os: macos-15
+            name: darwin-amd64
+            opt: -o:speed -target:darwin_amd64
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-odin
+      - name: Test
+        if: matrix.name != 'darwin-amd64'
+        run: make test
+      - name: Build
+        env:
+          TARGET_OPT: ${{ matrix.opt }}
+        run: |
+          if [ -n "$TARGET_OPT" ]; then
+            make build-cli STURY_VERSION="${VERSION#v}" OPT="$TARGET_OPT"
+          else
+            make build-cli STURY_VERSION="${VERSION#v}"
+          fi
+      - name: Check
+        run: |
+          set -e
+          [ "$(build/stury --version)" = "stury-${VERSION#v}" ]
+          [ "$(echo '{"a":[1,2]}' | build/stury -c .a)" = "[1,2]" ]
+          if [ "${{ matrix.name }}" = "darwin-amd64" ]; then
+            file build/stury | grep -q x86_64
+          fi
+      - name: Smoke the release binary
+        if: matrix.name != 'darwin-amd64'
+        run: sh cmd/stury/smoke.sh build/stury
+      - name: Package
+        run: |
+          d="stury-${VERSION#v}-${{ matrix.name }}"
+          mkdir "$d"
+          cp build/stury LICENSE THIRD_PARTY_NOTICES README.md CHANGELOG.md "$d/"
+          cp -R docs "$d/"
+          tar -czf "$d.tar.gz" "$d"
+          shasum -a 256 "$d.tar.gz" > "$d.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: stury-*.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Notes from the CHANGELOG
+        run: |
+          # The section under `## <version>`, up to the next `## ` heading; a tag without one is refused.
+          awk -v v="${VERSION#v}" '$1 == "##" { if (found) exit; found = ($2 == v) } found && !/^## /' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no '## ${VERSION#v}' section"; exit 1; }
+      - name: Draft release
+        run: gh release create "$VERSION" dist/* --draft --title "stury ${VERSION#v}" --notes-file notes.md

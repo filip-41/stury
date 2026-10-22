@@ -1,0 +1,81 @@
+name: Set up Odin
+description: >
+  Odin at a pinned release, cached, and the LLVM it was built with: its clang links Odin's objects on
+  Linux, and on macOS supplies the sanitizer runtimes and libFuzzer.
+inputs:
+  version:
+    description: Odin release tag
+    default: dev-2026-10
+  llvm:
+    description: LLVM major version Odin's release is built with
+    default: "22"
+runs:
+  using: composite
+  steps:
+    - name: LLVM (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        curl -fsSL -o "$RUNNER_TEMP/llvm.sh" https://apt.llvm.org/llvm.sh
+        sudo bash "$RUNNER_TEMP/llvm.sh" "${{ inputs.llvm }}"
+        # GNU time: smoke.sh reads a run's peak RSS from `/usr/bin/time -f %M`.
+        sudo apt-get install -y time
+        echo "/usr/lib/llvm-${{ inputs.llvm }}/bin" >> "$GITHUB_PATH"
+
+    - name: LLVM (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        brew install "llvm@${{ inputs.llvm }}" "lld@${{ inputs.llvm }}"
+        echo "$(brew --prefix "llvm@${{ inputs.llvm }}")/bin" >> "$GITHUB_PATH"
+
+    - name: Odin asset name
+      id: asset
+      shell: bash
+      run: |
+        case "${{ runner.os }}-${{ runner.arch }}" in
+          Linux-X64)   os=linux-amd64 ;;
+          Linux-ARM64) os=linux-arm64 ;;
+          macOS-ARM64) os=macos-arm64 ;;
+          # Odin publishes no macOS Intel toolchain: Intel targets are
+          # cross-compiled from the arm64 runner.
+          Windows-X64) os=windows-amd64 ;;
+          *) echo "no Odin release for ${{ runner.os }}-${{ runner.arch }}"; exit 1 ;;
+        esac
+        echo "name=odin-$os-${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+        # Windows releases are zips, the others tarballs.
+        [ "${{ runner.os }}" = Windows ] && ext=zip || ext=tar.gz
+        echo "ext=$ext" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Odin
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/odin
+        key: ${{ steps.asset.outputs.name }}
+
+    - name: Download Odin
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        mkdir -p ~/odin
+        archive="$RUNNER_TEMP/odin.${{ steps.asset.outputs.ext }}"
+        curl -fsSL -o "$archive" \
+          "https://github.com/odin-lang/Odin/releases/download/${{ inputs.version }}/${{ steps.asset.outputs.name }}.${{ steps.asset.outputs.ext }}"
+        openssl dgst -sha256 "$archive"
+        case "$archive" in
+          *.zip) unzip -q "$archive" -d ~/odin ;;
+          *) tar -xzf "$archive" -C ~/odin ;;
+        esac
+
+    - name: Put Odin on PATH
+      shell: bash
+      run: |
+        # The archive may or may not wrap its files in a directory of its own.
+        bin=$(find ~/odin -type f \( -name odin -o -name odin.exe \) -perm -u+x | head -n 1)
+        [ -n "$bin" ] || { echo "no odin executable in the release archive"; exit 1; }
+        dir=$(dirname "$bin")
+        # GITHUB_PATH takes a native path, which Git Bash's /c/... is not on Windows.
+        if command -v cygpath >/dev/null; then dir=$(cygpath -w "$dir"); fi
+        echo "$dir" >> "$GITHUB_PATH"
+        "$bin" version

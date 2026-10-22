@@ -1,0 +1,47 @@
+.TH STURY 1 "2026-10" "stury 0.0.1" "General Commands Manual"
+.SH NAME
+stury \- JSON codec with a jq 1.8.2\-compatible command line
+.SH SYNOPSIS
+.B stury
+[\-cCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream] [\-\-ndjson] [\-\-jsonc] [\-\-max\-depth n] [stury options] <jq filter> [file...]
+.br
+.B stury
+.B check
+[\-\-ndjson|\-\-seq] [\-\-jsonc] [\-\-strict\-limits] [\-\-max\-depth n] [file...]
+.br
+.B stury
+\-h | \-V | \-\-build\-configuration
+.SH DESCRIPTION
+stury applies a jq 1.8 filter to JSON inputs and gives jq's results and exit codes. Its messages start with stury: and are worded its own way. It accepts all of jq 1.8's options except \-\-run\-tests, a test\-file runner it does not have. The filter language and those options are described in
+.BR jq (1).
+The synopsis lists the common ones. This page covers what is specific to stury: how its input handling differs from jq's, and its own options.
+.PP
+.B stury check
+(or
+.BR validate )
+validates its inputs, accepting any input that
+.B stury .
+reads without error, and prints nothing when they are valid. It requires at least one JSON text: an empty or whitespace-only input is "No JSON text" and exits 5. It is the subcommand when it is the first argument that is not an option. With no file on a terminal it prints the short usage and exits 2.
+.SH OPTIONS
+.TP
+.B \-\-jsonc
+Read JSONC (comments and trailing commas), also for \-\-argjson, \-\-jsonargs, \-\-slurpfile (one document per file) and fromjson. Values print with their comments.
+.TP
+.B \-\-ndjson
+Read one JSON text per line.
+.TP
+.BI \-\-max\-depth " n"
+Refuse nesting past n levels (default 1024; jq's is 10000).
+.TP
+.B \-\-strict\-limits
+With \fBcheck\fR, keep the library's limits: numbers of at most 256 digits and a scale of at most 4096.
+.TP
+.B \-V
+Print stury\- and the version it was built with: a release version, or the short commit hash from a source build (dev outside a checkout).
+.SH INPUT DIFFERENCES FROM JQ
+stury reads strict RFC 8259 JSON. It rejects, with exit 5, these inputs that jq accepts: 01, 1., NaN, nan, Infinity, invalid UTF\-8 in a string, a lone low surrogate escape, a NUL after a value, and nesting past \-\-max\-depth. A parse error names the fault and the position of the byte where it was found. In a file after the first, it reads NAME:LINE:COLUMN: FAULT, counted in that file, as check prints it. A trailing comma, a comment or nesting past the cap is followed by the source line, a caret and the flag that would read it. \-\-argjson and \-\-jsonargs keep jq's message and append the fault. Each file ends its texts. The full list is in docs/cli.md, "Differences from jq".
+.SH EXIT STATUS
+As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error, 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input.
+.SH SEE ALSO
+.BR jq (1),
+docs/cli.md in stury's source.
