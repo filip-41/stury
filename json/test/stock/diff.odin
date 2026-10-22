@@ -33,9 +33,10 @@ Diff :: struct {
 }
 
 // Deepest nesting stock is handed. Its parser recurses once per level on an
-// `odin test` worker thread, so this is a stack bound. Stury's own cap is the
-// largest depth both sides accept, so past it a document is a crash oracle only.
-STOCK_MAX_DEPTH :: 1024
+// `odin test` worker thread, so this is a stack bound: a level costs over a
+// kilobyte and a Windows thread has 1 MB. Elsewhere it is stury's own cap, the
+// largest depth both sides accept. Past it a document is a crash oracle only.
+STOCK_MAX_DEPTH :: 1024 when ODIN_OS != .Windows else 256
 STOCK_MAX_BYTES :: 65536
 
 // Stock's `unquote_string` sizes its buffer at `len(s) + 8` and writes the

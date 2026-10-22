@@ -55,7 +55,9 @@ jobs:
             https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64
           sudo install -m 0755 /tmp/jq /usr/local/bin/jq
           jq --version | grep -qx 'jq-1.8.2'
-      - run: make diff
+      # The four diff targets at once: one script's Python driver holds a core, so one at a time leaves most
+      # of the runner idle.
+      - run: make -j -O diff
 
   # The sanitizer runs are checked where they were made to pass: macOS on Apple silicon.
   sanitizers:
