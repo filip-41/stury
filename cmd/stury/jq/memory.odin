@@ -196,11 +196,16 @@ empty_recycled :: proc(ip: ^Interp, i: int) {
 }
 
 // `inputs` into a reduce or a foreach `x` through sinks that keep nothing: each input, and what is made of
-// it, in the scratch once it is on, and the state copied out of it between inputs, not between the updates
-// an input runs, which may read it (`reduce (inputs | select(.ok)) as $x (0; . + $x.n)`).
+// it, in the scratch, and the state copied out of it between inputs, not between the updates an input runs,
+// which may read it (`reduce (inputs | select(.ok)) as $x (0; . + $x.n)`). The scratch is on from the first
+// input: each is a document, and those a source drops before the REDUCE_SCOPED_FROM updates that would start
+// it are otherwise held for the run.
 @(private = "file")
 scratch_inputs :: proc(ip: ^Interp, input: Item, out: ^Sink, x: ^Bind_Sink) -> Signal {
 	outside := context.allocator
+	if sc := x.scratch; sc != nil && !sc.on && !start_scratch(x) {
+		x.scratch = nil // out of memory for the arenas: the reduce goes on unscoped
+	}
 	for {
 		sc := x.scratch
 		on := sc != nil && sc.on

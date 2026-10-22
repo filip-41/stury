@@ -259,7 +259,7 @@ capped foreach_inputs_extract 48 '[400000,399999]' -nc 'foreach inputs as $x (0;
 capped first_inputs 48 399999 -n 'first(inputs | select(.id == 399999)) | .id' "$T/big.ndjson"
 capped last_inputs 48 399999 -n 'last(inputs | select(.level == "info")) | .id' "$T/big.ndjson"
 capped all_inputs 48 true -n 'all(inputs; .id >= 0)' "$T/big.ndjson"
-capped reduce_inputs_select 48 40000 -n 'reduce (inputs | select(.level == "error")) as $x (0; . + 1)' "$T/big.ndjson"
+capped reduce_inputs_select 48 400 -n 'reduce (inputs | select(.id % 1000 == 0)) as $x (0; . + 1)' "$T/big.ndjson"
 capped outputs_scoped 20 '{"a":"1999999"}' -nc 'range(2000000) | tostring | {a: .} | select(.a == "1999999")'
 # Each faulty --seq record is placed by line and column from the last, not from the start.
 "$S" -nr 'range(200000) | "\u001e{\"a\":tru}"' >"$T/seq_errors.seq"

@@ -1,2 +1,3 @@
 https://github.com/nst/JSONTestSuite
 1ef36fa01286573e846ac449e8683f8833c5b26a
+n_structure_trailing_#.json is vendored as n_structure_trailing_hash.json: Odin on Windows refuses # in a #load_directory file name.

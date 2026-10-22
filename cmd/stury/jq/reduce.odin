@@ -64,7 +64,8 @@ reduce_emit :: proc(s: ^Sink, it: Item) -> Signal {
 // under a byte of garbage (looked at again each REDUCE_SCOPED_FROM updates), one whose garbage since the last copy is
 // under 16 times its state's growth, and any update under path(), whose state's path outlives it. Nothing but the
 // state outlives an update: an input read in the scratch (`item_arena`) and an error are copied out with the state. A
-// foreach whose outputs are printed (`Interp.printer`) runs its updates and extracts so too.
+// foreach whose outputs are printed (`Interp.printer`) runs its updates and extracts so too. One over `inputs` is
+// scoped from its first input (`scratch_inputs`).
 REDUCE_SCOPED_FROM :: 1024
 REDUCE_SCRATCH_MIN :: 1 << 20
 
@@ -159,7 +160,7 @@ collect_scratch :: proc(x: ^Bind_Sink) {
 	}
 }
 
-@(private = "file")
+@(private)
 start_scratch :: proc(x: ^Bind_Sink) -> bool {
 	sc := x.scratch
 	if virtual.arena_init_growing(&sc.scratch) != nil {
