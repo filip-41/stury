@@ -10,7 +10,7 @@ package json
 //	document.odin       `Document`, `build`, `query`, `pointer`, `child`, `children`, `members`, the `get_*` readers
 //	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Unmarshal_Error`
 //	marshal.odin        `marshal` and its writer and append forms (marshal_struct.odin writes structs)
-//	type_plan.odin      `Type_Plan` and its options and hooks, for `marshal` and `unmarshal`
+//	type_plan.odin      `Type_Plan` and its options and hooks, for `marshal` and `unmarshal`, `plan_cache_clear`
 //	edit.odin           `set`, `insert`, `remove` and `splice` (the geometry is in edit_ops.odin and
 //	                    edit_jsonc.odin)
 //	records.odin        `records`, `next_record`, `Framing`, `Record`
@@ -20,7 +20,7 @@ package json
 //	encode.odin         `Encode_Opts` and `marshal_document`
 //	format.odin         `format`
 //
-// The other files (request_walk.odin, read_shape.odin, route*.odin) are internal.
+// The other files (request_walk.odin, route*.odin) are internal.
 
 import "core:io"
 import "core:reflect"

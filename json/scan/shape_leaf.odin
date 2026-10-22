@@ -12,8 +12,9 @@ import number "./number"
 import "core:unicode/utf8"
 
 // The shape walk's leaf decoders. Each takes a token the walk has already checked, `src[lo:hi]`, and writes
-// it into `dest` as the target type holds it, or only checks it when `dest` is nil. A value of the wrong
-// JSON kind is `.Wrong_Kind`. One of the right kind the target cannot hold is `.Out_Of_Range`.
+// it into `dest` as the target type holds it (`core/shape_store.odin`), or only checks it when `dest` is nil.
+// A value of the wrong JSON kind is `.Wrong_Kind`. One of the right kind the target cannot hold is
+// `.Out_Of_Range`.
 //
 // The `#no_bounds_check` leaves read `src[lo]` and slice `src[lo + 1:hi - 1]` unchecked: the token is one
 // the walk checked, so `lo < hi <= len(src)` and a string holds both quotes. `dest` is written at the op's
@@ -32,14 +33,7 @@ shape_leaf_bool :: proc(src: []byte, lo: u64, dest: rawptr, width: u8) -> core_p
 	case:
 		return .Wrong_Kind
 	}
-	if dest != nil {
-		switch width {
-		case 1: (^b8)(dest)^ = b8(v)
-		case 2: (^b16)(dest)^ = b16(v)
-		case 4: (^b32)(dest)^ = b32(v)
-		case 8: (^b64)(dest)^ = b64(v)
-		}
-	}
+	core_pkg.shape_bool_store(v, dest, width)
 	return .None
 }
 
@@ -75,7 +69,7 @@ shape_leaf_int :: proc(src: []byte, lo, hi: u64, dest: rawptr, width: u8, signed
 	if over {
 		return .Out_Of_Range
 	}
-	return shape_int_store(mag, neg, dest, width, signed)
+	return core_pkg.shape_int_store(mag, neg, dest, width, signed)
 }
 
 // The checked number token `src[lo:hi]` into a `width`-byte integer, as `shape_leaf_int` reads it, from the
@@ -89,36 +83,7 @@ shape_leaf_number_int :: #force_inline proc(r: ^core_pkg.Shape_Run, lo, hi: u64,
 	if r.num.int_digits > 19 {
 		return shape_leaf_int(r.src, lo, hi, dest, width, signed)
 	}
-	return shape_int_store(r.num.mant, neg, dest, width, signed)
-}
-
-// An integer's magnitude and sign into a `width`-byte integer, or `.Out_Of_Range` when it does not fit.
-shape_int_store :: #force_inline proc(mag: u64, neg: bool, dest: rawptr, width: u8, signed: bool) -> core_pkg.Shape_Fault {
-	bits := u32(width) * 8
-	if signed {
-		// The magnitude of the most negative value. The most positive is one less.
-		limit := u64(1) << (bits - 1)
-		if mag > limit || (!neg && mag == limit) {
-			return .Out_Of_Range
-		}
-	} else if neg {
-		if mag != 0 {
-			return .Out_Of_Range
-		}
-	} else if bits < 64 && mag >> bits != 0 {
-		return .Out_Of_Range
-	}
-	if dest != nil {
-		// Two's complement: the low `width` bytes of the negated magnitude are the signed value.
-		v := 0 - mag if neg else mag
-		switch width {
-		case 1: (^u8)(dest)^ = u8(v)
-		case 2: (^u16)(dest)^ = u16(v)
-		case 4: (^u32)(dest)^ = u32(v)
-		case 8: (^u64)(dest)^ = v
-		}
-	}
-	return .None
+	return core_pkg.shape_int_store(r.num.mant, neg, dest, width, signed)
 }
 
 // A number written as an integer into a 128-bit integer, checked as `shape_leaf_int` checks one into 64 bits.
@@ -132,14 +97,7 @@ shape_leaf_wide :: proc(src: []byte, lo, hi: u64, dest: rawptr, signed: bool) ->
 	if !digits {
 		return .Wrong_Kind
 	}
-	limit := u128(1) << 127
-	if over || (signed && (mag > limit || (!neg && mag == limit))) || (!signed && neg && mag != 0) {
-		return .Out_Of_Range
-	}
-	if dest != nil {
-		(^u128)(dest)^ = 0 - mag if neg else mag
-	}
-	return .None
+	return core_pkg.shape_wide_store(mag, over, neg, dest, signed)
 }
 
 // The decimal digits of `src[p:hi]` folded into a `T`, `over` once the value passed it. The run is read to
@@ -166,20 +124,7 @@ shape_leaf_enum :: proc(src: []byte, lo, hi: u64, dest: rawptr, op: ^core_pkg.Sh
 	if fault := shape_leaf_int(src, lo, hi, &v, op.width, op.kind == .Enum_Int); fault != .None {
 		return fault
 	}
-	// Declared values are i64: a signed backing integer is sign-extended from its width to compare.
-	x := i64(v)
-	if op.kind == .Enum_Int {
-		shift := 64 - u64(op.width) * 8
-		x = i64(v << shift) >> shift
-	}
-	// A linear scan of the members.
-	if !slice.contains(op.enum_info.values, runtime.Type_Info_Enum_Value(x)) {
-		return .Not_A_Member
-	}
-	if dest != nil {
-		runtime.mem_copy_non_overlapping(dest, &v, int(op.width))
-	}
-	return .None
+	return core_pkg.shape_enum_store(v, dest, op)
 }
 
 // A string token `src[lo:hi]`, quotes included, into an enum: the value of the member it names, compared by
@@ -192,10 +137,7 @@ shape_leaf_enum_name :: proc(src: []byte, lo, hi: u64, dest: rawptr, op: ^core_p
 	// A linear scan of the names.
 	for name, i in e.names {
 		if name_equals(src, lo, hi, name) {
-			if dest != nil {
-				v := e.values[i]
-				runtime.mem_copy_non_overlapping(dest, &v, int(op.width))
-			}
+			core_pkg.shape_enum_member_store(op, i, dest)
 			return .None
 		}
 	}
@@ -227,21 +169,9 @@ shape_leaf_float :: proc(r: ^core_pkg.Shape_Run, lo, hi: u64, dest: rawptr, widt
 	}
 	switch width {
 	case 4:
-		v := f32(shape_off_halfway(src[lo:hi], n, 24, -126))
-		if abs(v) > max(f32) {
-			return .Out_Of_Range
-		}
-		if dest != nil {
-			(^f32)(dest)^ = v
-		}
+		return core_pkg.shape_f32_store(shape_off_halfway(src[lo:hi], n, 24, -126), dest)
 	case 2:
-		v := f64_to_f16(shape_off_halfway(src[lo:hi], n, 11, -14))
-		if abs(v) > max(f16) {
-			return .Out_Of_Range
-		}
-		if dest != nil {
-			(^f16)(dest)^ = v
-		}
+		return core_pkg.shape_f16_store(shape_off_halfway(src[lo:hi], n, 11, -14), dest)
 	}
 	return .None
 }
@@ -281,34 +211,6 @@ shape_number_lexed :: #force_inline proc(r: ^core_pkg.Shape_Run, lo, hi: u64, $s
 		}
 	}
 	return lexed
-}
-
-// `x` rounded once to the nearest f16, ties to even. A value that rounds past the widest finite f16 is
-// infinity. Not the cast `f16(x)`: on x86-64 that is the runtime's software conversion, which rounds through
-// f32 and then ties up, so a value at or near an f16 halfway point comes out one unit high. `x` is finite.
-f64_to_f16 :: proc(x: f64) -> f16 {
-	bits := transmute(u64)x
-	sign := u16(bits >> 48) & 0x8000
-	e := i64((bits >> 52) & 0x7ff) - 1023
-	if e >= 16 {
-		return transmute(f16)(sign | 0x7c00)
-	}
-	// Below 2^-25, half the least subnormal, everything rounds to zero.
-	if e < -25 {
-		return transmute(f16)sign
-	}
-	m := (bits & (1 << 52 - 1)) | 1 << 52
-	// The significand bits below the f16's last one: 42 for a normal, more below 2^-14.
-	drop := u64(42 + max(0, -14 - e))
-	q := m >> drop
-	rest := m & (1 << drop - 1)
-	half := u64(1) << (drop - 1)
-	if rest > half || (rest == half && q & 1 == 1) {
-		q += 1
-	}
-	// `q` carries its leading bit into the exponent field, so a carry out of the significand bumps the
-	// exponent, and one out of the widest finite f16 makes infinity.
-	return transmute(f16)(sign | (u16(max(e, -14) + 14) << 10 + u16(q)))
 }
 
 // The binary64 value `n` of the number token `t`, made safe to narrow to a float of `sig` significant bits and

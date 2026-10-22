@@ -280,7 +280,7 @@ write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Encode_Error {
 // around it, and must write exactly one value.
 @(private)
 write_hooked :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
-	write := st.plan.opts.hooks[op.elem].write
+	write := st.plan.writes[op.elem]
 	if write == nil {
 		return .Unsupported
 	}

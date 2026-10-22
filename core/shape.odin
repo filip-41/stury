@@ -86,8 +86,8 @@ Shape_Field :: struct {
 	colon_mask: [2]u64,
 }
 
-// A type's own reading (`json.Unmarshal_Hook`): `text`, one value as authored and validated, into `dest`. It
-// answers nil or a `json.Unmarshal_Error_Kind`, which `Shape_Fault` numbers alike.
+// A type's own reading (`Plan_Hook.read`): `text`, one value as authored and validated, into `dest`. It
+// answers nil or an `Unmarshal_Error_Kind`, which `Shape_Fault` numbers alike.
 Shape_Hook :: #type proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) -> Maybe(Shape_Fault)
 
 Read_Shape :: struct {
@@ -119,7 +119,7 @@ read_shape_destroy :: proc(r: ^Read_Shape) {
 TYPED_FAULT :: Error_Kind.None
 
 // Why the shape walk refused a value. `Shape_Run.fault` holds it when the walk returns `TYPED_FAULT`. Each is
-// numbered as `json.Unmarshal_Error_Kind` numbers its namesake, so a hook's answer passes through unchanged,
+// numbered as `Unmarshal_Error_Kind` numbers its namesake, so a hook's answer passes through unchanged,
 // a kind with no namesake here included. Keep this order: the leaves answer with these small numbers.
 Shape_Fault :: enum u8 {
 	None,

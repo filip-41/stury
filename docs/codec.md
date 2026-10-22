@@ -299,6 +299,8 @@ value are what make reflective marshallers slow.
 - A plan is a flat array of ops, one per type or field.
 - Each op holds the kind, the size, the field offset, and the index of its element or field ops.
 - Each key is pre-written as `"name":` in a byte arena.
+- The plan is format-neutral (`core/type_plan.odin`). JSON supplies its tag key, its key spelling and its own
+  types as a `Plan_Format` (`json/type_plan.odin`).
 - A map from `typeid` to op makes recursive types (a struct holding `^Self`) refer back to an op that already
   exists.
 - Types known only at run time (`any`, union arms) are added the first time a value of that type is met.
@@ -307,7 +309,7 @@ value are what make reflective marshallers slow.
   use.
 - A plan that reported `Out_Of_Memory` is unusable.
 - With `plan` nil, a call takes this thread's cached plan for the type: most recently used first, the least
-  recently used destroyed to make room.
+  recently used destroyed to make room (`core/plan_cache.odin`).
 - A call nested inside a hook misses without evicting (the plan it would destroy may be the one an outer call
   is using).
 - It builds a temporary plan in the heap allocator and destroys it before the outer call returns.
@@ -433,10 +435,11 @@ target, and it reports the same errors. With a kept plan, nothing is allocated a
 Under `.Lazy`, above a size gate ([§7.3](#73-strictness)), the walk may build a structural skip index on the
 stack. Where the pieces live:
 
-- `json/unmarshal.odin`: the package-level names.
-- `json/read_shape.odin`: the lowering. `core/shape.odin`: the plain-data shape.
+- `json/unmarshal.odin`: the package-level names. `core/unmarshal_error.odin`: the error and its kinds.
+- `core/read_shape_lower.odin`: the lowering. `core/shape.odin`: the plain-data shape.
 - `json/scan/walk_shape.odin`: the walk. `json/scan/shape_entry.odin`: the entry and the `.Lazy` skip gate.
-- `json/scan/shape_leaf.odin`: the leaves. `json/scan/shape_fused.odin`: the fused loops.
+- `json/scan/shape_leaf.odin`: the leaves, their stores in `core/shape_store.odin`. `json/scan/shape_fused.odin`:
+  the fused loops.
 
 ### 7.1 The type table
 
