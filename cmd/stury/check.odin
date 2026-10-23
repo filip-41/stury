@@ -6,6 +6,8 @@ package main
 // record as one text, and --jsonc reads JSONC as the library does, which jq does not.
 
 import "core:bytes"
+import "core:fmt"
+import "core:strings"
 import json "../../json"
 import "jq"
 
@@ -29,6 +31,10 @@ check_files :: proc(run: ^Run, files: []string) -> (failures: int) {
 @(private = "file")
 check_input :: proc(run: ^Run, ins: ^Inputs) {
 	run.name, run.whole = ins.name, ins.data
+	if reads_cells(&run.opts) {
+		check_cells(run, ins)
+		return
+	}
 	// No text: no JSON document, as the library's `.Truncated` for an empty one. Under --seq an empty input is
 	// no records, as jq reads it.
 	blank := !run.opts.seq
@@ -42,14 +48,36 @@ check_input :: proc(run: ^Run, ins: ^Inputs) {
 		fail_input(run, {kind = .Truncated, offset = u64(len(ins.data))}, "No JSON text")
 	}
 	switch {
-	case run.opts.ndjson || run.opts.seq:
+	case run.opts.from == .Ndjson || run.opts.seq:
 		check_records(run, ins.data)
-	case run.opts.jsonc:
+	case run.opts.from == .Jsonc:
 		if e, bad := json.validate(ins.data, .Jsonc, limits = check_limits(run)).?; bad {
 			fail_input(run, e)
 		}
 	case:
 		check_texts(run, ins)
+	}
+}
+
+// Runs `check` on one CSV input. An input of only a byte order mark fails as an input with no JSON
+// text does. A fault is reported with the message a filter run gives.
+@(private = "file")
+check_cells :: proc(run: ^Run, ins: ^Inputs) {
+	dialect := FORMATS[run.opts.from].dialect
+	msg: string
+	if len(bytes.trim_prefix(ins.data, UTF8_BOM[:])) == 0 {
+		e := json.Error {
+			kind   = .Truncated,
+			offset = u64(len(ins.data)),
+		}
+		msg = fault_in_file(ins.name, ins.data, e, fmt.tprintf("No %s text", strings.to_upper(FORMATS[run.opts.from].name, context.temp_allocator)))
+	} else {
+		msg = check_cells_text(ins, dialect, batch_runner(run, len(ins.data)))
+	}
+	if msg != "" {
+		flush_some(run, force = true)
+		fmt.eprintf("stury: error: %s\n", msg)
+		finish(run, EXIT_USAGE if run.unopened else EXIT_INPUT)
 	}
 }
 
@@ -87,10 +115,10 @@ check_texts :: proc(run: ^Run, ins: ^Inputs) {
 // refuses is validated again against check's, and the first fault that stands ends the run.
 @(private = "file")
 check_records :: proc(run: ^Run, src: []byte) {
-	framing := json.Framing.NDJSON if run.opts.ndjson else .JSON_Seq
+	framing := json.Framing.NDJSON if run.opts.from == .Ndjson else .JSON_Seq
 	// A buffer of one NDJSON record has nothing to share among workers: the caller validates it alone.
 	nl := bytes.index_byte(src, '\n')
-	lone := run.opts.ndjson && (nl < 0 || nl + 1 == len(src))
+	lone := run.opts.from == .Ndjson && (nl < 0 || nl + 1 == len(src))
 	faults, err := json.validate_records(src, framing, nil if lone else batch_runner(run, len(src)))
 	defer delete(faults)
 	limits := check_limits(run)

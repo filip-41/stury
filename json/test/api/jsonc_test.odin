@@ -292,7 +292,7 @@ test_jsonc_edits_lay_out_as_json :: proc(t: ^testing.T) {
 		want:      string,
 	}
 	REMOVE :: -2
-	run :: proc(c: Case, d: json.Dialect) -> ([]byte, Maybe(json.Edit_Error)) {
+	run :: proc(c: Case, d: json.Dialect) -> ([]byte, Maybe(json.Path_Error)) {
 		if c.at == REMOVE {
 			return json.remove(raw(c.src), c.path, context.temp_allocator, d)
 		}

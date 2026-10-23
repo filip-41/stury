@@ -15,7 +15,7 @@ import "core:math"
 import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
-import core_pkg "../../../core"
+import "../../../json/scan/walk"
 import json "../../../json"
 import enc "../../../json/encode"
 import lex "../../../json/scan/lex"
@@ -32,8 +32,8 @@ Parse_Status :: enum u8 {
 // `--max-depth`, `json.MAX_DEPTH` unless the command line raises it, which it does before any input is read.
 lifted := json.Limits {
 	max_depth         = json.MAX_DEPTH,
-	max_scalar_digits = core_pkg.MAX_SCALAR_DIGITS_REPRESENTABLE,
-	max_scalar_scale  = core_pkg.MAX_SCALAR_SCALE_REPRESENTABLE,
+	max_scalar_digits = walk.MAX_SCALAR_DIGITS_REPRESENTABLE,
+	max_scalar_scale  = walk.MAX_SCALAR_SCALE_REPRESENTABLE,
 }
 
 // The grammar the CLI reads option JSON and `fromjson` in: `.Jsonc` under --jsonc, which the command line sets
@@ -41,7 +41,7 @@ lifted := json.Limits {
 read_dialect := json.Dialect.Json
 
 // JSON's whitespace.
-is_space :: core_pkg.is_space
+is_space :: walk.is_space
 
 // json.build's document without its decoding: a `.Nodes` scan's rows, whose escaped strings and keys the
 // readers decode on first read, so a filter pays only for those it reads. Its refusals are build's errors,
@@ -254,6 +254,9 @@ FAULT_TEXT := [json.Error_Kind]string {
 	.Out_Of_Memory = "Out of memory",
 	.Duplicate_Key = "Duplicate key",
 	.Bad_Option = "Unsupported option",
+	.Field_Count = "Record has the wrong number of fields",
+	.Limit_Fields = "Record has too many fields",
+	.Limit_Record = "Record is too long",
 }
 
 // `text` as decNumber reads a number (jv_number_with_literal): a sign, then digits with a point and an exponent,

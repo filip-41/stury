@@ -100,10 +100,14 @@ Print_Sink :: struct {
 	run:        ^Run,
 }
 
-// jq's process(): the filter on one input, its outputs printed, its error reported.
-run_once :: proc(run: ^Run, v: jq.Value) {
+// Runs the filter on one input and prints its outputs. Returns the signal the run ended with.
+eval_input :: proc(run: ^Run, v: jq.Value) -> jq.Signal {
 	s := Print_Sink{sink = {emit = proc(s: ^jq.Sink, it: jq.Item) -> jq.Signal {
 				run := ((^Print_Sink)(s)).run
+				if sel := run.selected; sel != nil {
+					print_cells(run, sel.cols, sel.rec, sel.dialect)
+					return .Go
+				}
 				if !print_jq(run, it.v) {
 					run.ip.err = "Cannot dump a string containing NUL with --raw-output0 option"
 					return .Fail
@@ -117,6 +121,13 @@ run_once :: proc(run: ^Run, v: jq.Value) {
 	sig := jq.eval(ip, run.prog, {v = v}, ip.globals, false, &s)
 	ip.printer = nil
 	run.pieces_root = {}
+	return sig
+}
+
+// Runs the filter on one input, prints its outputs and reports its error, as jq's process() does.
+run_once :: proc(run: ^Run, v: jq.Value) {
+	ip := &run.ip
+	sig := eval_input(run, v)
 	if len(ip.messages) > 0 {
 		flush_some(run, force = true)
 		os.write(os.stderr, ip.messages[:])

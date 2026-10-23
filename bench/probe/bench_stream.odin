@@ -1,8 +1,8 @@
 package main
 
-// The streaming lane (`streaming_records`): NDJSON windows through `validate_records`, against one call on
-// the whole file, each timed from open to verdict. `main` runs it before it loads any fixture, so the RSS it
-// reports is the process's own high-water mark, not growth over a loaded copy.
+// The streaming lane (`streaming_records`) times NDJSON windows through `validate_records` against one call
+// on the whole file, each from open to verdict. `main` runs it before loading any fixture, so its RSS is the
+// process's own high-water mark, not growth over a loaded copy.
 
 import host "stury:host"
 import json "stury:json"
@@ -12,9 +12,9 @@ import "core:io"
 import "core:os"
 import "core:time"
 
-// The stream arm runs every iteration before the whole arm, because RSS is a high-water mark: the stream's
-// reading is taken before the whole file has ever been resident. `peak_rss_mb` is the stream's, in MiB.
-// The separate passes mean the two throughputs are not drift-compensated against each other.
+// Times the stream arm, then the whole-file arm. The stream arm runs all its iterations first because RSS is
+// a high-water mark, so its reading is taken before the whole file has been resident. `peak_rss_mb` is the
+// stream arm's, in MiB. The arms run in separate passes, so drift between them is not compensated.
 bench_stream :: proc(file: string) -> bool {
 	path, found := fixture_path(file)
 	if !found {
@@ -56,8 +56,8 @@ bench_stream :: proc(file: string) -> bool {
 // A line wider than this fails the lane rather than doubling the window forever.
 STREAM_MAX_WINDOW :: 1024 * 1024 * 1024
 
-// The NDJSON file at `path` judged a window of whole lines at a time: 4 MiB wide, grown to hold a longer line
-// up to STREAM_MAX_WINDOW.
+// Validates the NDJSON file at `path` one window of whole lines at a time. The window is 4 MiB and doubles to
+// hold a longer line, up to STREAM_MAX_WINDOW. Returns the bytes validated, or false on a read error or fault.
 stream_pass :: proc(path: string, runner: ^json.Batch_Runner) -> (n: int, ok: bool) {
 	f, ferr := os.open(path)
 	if ferr != nil {

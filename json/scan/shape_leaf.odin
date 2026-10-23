@@ -1,6 +1,7 @@
 package scan
 
 import core_pkg "../../core"
+import "walk"
 import "base:intrinsics"
 import "base:runtime"
 import "core:bytes"
@@ -19,7 +20,7 @@ import "core:unicode/utf8"
 // The `#no_bounds_check` leaves read `src[lo]` and slice `src[lo + 1:hi - 1]` unchecked: the token is one
 // the walk checked, so `lo < hi <= len(src)` and a string holds both quotes. `dest` is written at the op's
 // width, the type's size. A decode fits a buffer as long as the escaped text, since no escape decodes
-// longer (json/scan/unescape.odin). `fold_digits`'s `$T` is u64, or u128 for the wide integers. The
+// longer (json/scan/unescape.odin). `core_pkg.fold_digits` runs with `$T` as u64, or u128 for the wide integers. The
 // differential tests against a reference decoder check it, and the unmarshal tests pin the range edges.
 
 // `true` or `false` into a `width`-byte boolean.
@@ -62,7 +63,7 @@ shape_leaf_int :: proc(src: []byte, lo, hi: u64, dest: rawptr, width: u8, signed
 		}
 	} else {
 		digits: bool
-		if mag, over, digits = fold_digits(src, p, hi, u64); !digits {
+		if mag, over, digits = core_pkg.fold_digits(src, p, hi, u64); !digits {
 			return .Wrong_Kind
 		}
 	}
@@ -74,7 +75,7 @@ shape_leaf_int :: proc(src: []byte, lo, hi: u64, dest: rawptr, width: u8, signed
 
 // The checked number token `src[lo:hi]` into a `width`-byte integer, as `shape_leaf_int` reads it, from the
 // digits the walk folded (`r.num`) where they fit a u64.
-shape_leaf_number_int :: #force_inline proc(r: ^core_pkg.Shape_Run, lo, hi: u64, dest: rawptr, width: u8, signed: bool) -> core_pkg.Shape_Fault #no_bounds_check {
+shape_leaf_number_int :: #force_inline proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr, width: u8, signed: bool) -> core_pkg.Shape_Fault #no_bounds_check {
 	neg := r.src[lo] == '-'
 	if lo + u64(neg) + r.num.int_digits != hi {
 		// A fraction or an exponent.
@@ -93,29 +94,11 @@ shape_leaf_wide :: proc(src: []byte, lo, hi: u64, dest: rawptr, signed: bool) ->
 		return .Wrong_Kind
 	}
 	neg := b == '-'
-	mag, over, digits := fold_digits(src, lo + u64(neg), hi, u128)
+	mag, over, digits := core_pkg.fold_digits(src, lo + u64(neg), hi, u128)
 	if !digits {
 		return .Wrong_Kind
 	}
 	return core_pkg.shape_wide_store(mag, over, neg, dest, signed)
-}
-
-// The decimal digits of `src[p:hi]` folded into a `T`, `over` once the value passed it. The run is read to
-// `hi` past an overflow, so a fraction or exponent after one is still the wrong kind: `digits = false` at the
-// first non-digit. Sign and range are the caller's.
-@(private)
-fold_digits :: #force_inline proc(src: []byte, p, hi: u64, $T: typeid) -> (mag: T, over, digits: bool) {
-	for i in p ..< hi {
-		d := src[i] - '0'
-		if d > 9 {
-			return mag, over, false
-		}
-		m, o1 := intrinsics.overflow_mul(mag, 10)
-		a, o2 := intrinsics.overflow_add(m, T(d))
-		over ||= o1 || o2
-		mag = a
-	}
-	return mag, over, true
 }
 
 // A number written as an integer into an enum: its backing integer, which must be one of the declared values.
@@ -147,7 +130,7 @@ shape_leaf_enum_name :: proc(src: []byte, lo, hi: u64, dest: rawptr, op: ^core_p
 // The checked number token `src[lo:hi]` into a `width`-byte float, correctly rounded. A finite value that
 // rounds to infinity in the target width, or has no binary64 value at all (`1e400`), is out of range. An
 // underflow rounds to zero.
-shape_leaf_float :: proc(r: ^core_pkg.Shape_Run, lo, hi: u64, dest: rawptr, width: u8) -> core_pkg.Shape_Fault #no_bounds_check {
+shape_leaf_float :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr, width: u8) -> core_pkg.Shape_Fault #no_bounds_check {
 	src := r.src
 	b := src[lo]
 	if !number_starts_with(b) {
@@ -179,14 +162,14 @@ shape_leaf_float :: proc(r: ^core_pkg.Shape_Run, lo, hi: u64, dest: rawptr, widt
 // The binary64 value of the checked number token `src[lo:hi]`, by the `.Dom` row's decoder over the digits the
 // walk folded as it checked the token (`r.num`). Its exactness may under-claim where `number_span` proves
 // `.Exact`, but the value is the same correctly rounded one.
-shape_number_judged :: #force_inline proc(r: ^core_pkg.Shape_Run, lo, hi: u64) -> core_pkg.Number #no_bounds_check {
+shape_number_judged :: #force_inline proc(r: ^walk.Shape_Run, lo, hi: u64) -> core_pkg.Number #no_bounds_check {
 	v, flags := number.dom_number_value(r.src, lo, hi, shape_number_lexed(r, lo, hi, false))
 	return {v, number.dom_flag_state(flags)}
 }
 
 // The checked number token `src[lo:hi]` as `lex_number_value` lexes it, from the digits the walk folded
 // (`r.num`). Its `spelling` is the sign's alone unless `$spelled`.
-shape_number_lexed :: #force_inline proc(r: ^core_pkg.Shape_Run, lo, hi: u64, $spelled: bool) -> number.Number_Lex #no_bounds_check {
+shape_number_lexed :: #force_inline proc(r: ^walk.Shape_Run, lo, hi: u64, $spelled: bool) -> number.Number_Lex #no_bounds_check {
 	n := &r.num
 	neg := r.src[lo] == '-'
 	int_at := lo + u64(neg)
@@ -329,7 +312,7 @@ shape_decimal_cmp :: proc(t: []byte, digits: []byte, point: i64) -> int {
 // A string token into a `string`. An escape-free one is borrowed from `src` when the run allows it and
 // copied otherwise. An escaped one is decoded into the run's allocator. `first_esc` is as in
 // `dom_unescape_copy`.
-shape_leaf_string :: proc(r: ^core_pkg.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr, escaped: bool, first_esc: u64) -> core_pkg.Shape_Fault #no_bounds_check {
+shape_leaf_string :: proc(r: ^walk.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr, escaped: bool, first_esc: u64) -> core_pkg.Shape_Fault #no_bounds_check {
 	if src[lo] != '"' {
 		return .Wrong_Kind
 	}
@@ -361,7 +344,7 @@ shape_leaf_string :: proc(r: ^core_pkg.Shape_Run, src: []byte, lo, hi: u64, dest
 
 // A member key `src[lo:hi]` into a map's key type: a string as the string or cstring leaf reads one, or an
 // integer written inside the quotes in JSON's integer grammar. An escaped key is decoded first.
-shape_leaf_map_key :: proc(r: ^core_pkg.Shape_Run, escaped: bool, lo, hi: u64, kop: ^core_pkg.Shape_Op, dest: rawptr) -> core_pkg.Shape_Fault {
+shape_leaf_map_key :: proc(r: ^walk.Shape_Run, escaped: bool, lo, hi: u64, kop: ^core_pkg.Shape_Op, dest: rawptr) -> core_pkg.Shape_Fault {
 	// A key's escape offset is not latched, so the decode finds it.
 	#partial switch kop.kind {
 	case .String:
@@ -409,7 +392,7 @@ shape_leaf_map_key :: proc(r: ^core_pkg.Shape_Run, escaped: bool, lo, hi: u64, k
 
 // A string token into a `cstring`, always copied with a NUL after it, so a `\u0000` inside is out of range.
 // `null` is nil.
-shape_leaf_cstring :: proc(r: ^core_pkg.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr, escaped: bool, first_esc: u64) -> core_pkg.Shape_Fault {
+shape_leaf_cstring :: proc(r: ^walk.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr, escaped: bool, first_esc: u64) -> core_pkg.Shape_Fault {
 	if src[lo] == 'n' {
 		if dest != nil {
 			(^cstring)(dest)^ = nil
@@ -477,7 +460,7 @@ shape_leaf_rune :: proc(src: []byte, lo, hi: u64, dest: rawptr, escaped: bool) -
 }
 
 // The value `src[lo:hi]`, verbatim, into a `Raw` or `Digits`: borrowed from `src` when the run allows it, else copied.
-shape_leaf_raw :: proc(r: ^core_pkg.Shape_Run, lo, hi: u64, dest: rawptr) -> core_pkg.Shape_Fault {
+shape_leaf_raw :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr) -> core_pkg.Shape_Fault {
 	if dest == nil {
 		return .None
 	}
@@ -496,7 +479,7 @@ shape_leaf_raw :: proc(r: ^core_pkg.Shape_Run, lo, hi: u64, dest: rawptr) -> cor
 
 // The value `src[lo:hi]`, checked, handed to the caller's hook for the type at `dest`. Checked only, it is not.
 // Forced inline: unwrapping the hook's `Maybe` tipped LLVM into an outlined call per hooked value.
-shape_leaf_hook :: #force_inline proc(r: ^core_pkg.Shape_Run, lo, hi: u64, dest: rawptr, op: ^core_pkg.Shape_Op) -> core_pkg.Shape_Fault {
+shape_leaf_hook :: #force_inline proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr, op: ^core_pkg.Shape_Op) -> core_pkg.Shape_Fault {
 	if dest == nil {
 		return .None
 	}
@@ -506,8 +489,8 @@ shape_leaf_hook :: #force_inline proc(r: ^core_pkg.Shape_Run, lo, hi: u64, dest:
 // Any scalar into a `Decoded`, in the arm `decode_span` gives it. A string is borrowed or copied as the string
 // leaf does. A number with no binary64 value is the `Digits` arm, not a refusal. `judged`: a number is one the
 // walk just checked, so `r.num` holds its digits.
-shape_leaf_decoded :: proc(r: ^core_pkg.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr, escaped: bool, first_esc: u64, judged: bool) -> core_pkg.Shape_Fault {
-	kind := core_pkg.kind_at(src, lo)
+shape_leaf_decoded :: proc(r: ^walk.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr, escaped: bool, first_esc: u64, judged: bool) -> core_pkg.Shape_Fault {
+	kind := walk.kind_at(src, lo)
 	if kind == .String {
 		// Not through `decode_span`, so a checked-only string decodes nothing.
 		str: string
@@ -536,7 +519,7 @@ shape_leaf_decoded :: proc(r: ^core_pkg.Shape_Run, src: []byte, lo, hi: u64, des
 // The container `src[lo:hi]` read whole, into the `Raw`, bit_set or hooked value at `r.cur_dest`, or into the
 // tree boxed for the `any` there. The bit_set and `any` readers re-read the span the walk checked, and read
 // no byte past `hi`: a span that ends early is `.Wrong_Kind`.
-shape_leaf_container :: proc(r: ^core_pkg.Shape_Run, lo, hi: u64) -> core_pkg.Shape_Fault {
+shape_leaf_container :: proc(r: ^walk.Shape_Run, lo, hi: u64) -> core_pkg.Shape_Fault {
 	dest := r.cur_dest
 	op := &r.ops[r.cur_op]
 	if op.kind == .Bit_Set {
@@ -558,7 +541,7 @@ shape_leaf_container :: proc(r: ^core_pkg.Shape_Run, lo, hi: u64) -> core_pkg.Sh
 }
 
 // Any scalar into the `any` at `dest`: `null` as nil, any other as its `Decoded` arm, boxed in `r.allocator`.
-shape_leaf_any :: proc(r: ^core_pkg.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr, escaped: bool, first_esc: u64, judged: bool) -> core_pkg.Shape_Fault {
+shape_leaf_any :: proc(r: ^walk.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr, escaped: bool, first_esc: u64, judged: bool) -> core_pkg.Shape_Fault {
 	if src[lo] == 'n' {
 		if dest != nil {
 			(^any)(dest)^ = nil
@@ -583,7 +566,7 @@ shape_leaf_any :: proc(r: ^core_pkg.Shape_Run, src: []byte, lo, hi: u64, dest: r
 
 // The checked array at `src[lo]` into the bit_set op `op` at `dest`: each element one of its enum's member names
 // (under `enums = .Int`, a member's integer), or an integer of its range. A repeat sets its bit again.
-shape_leaf_bit_set :: proc(r: ^core_pkg.Shape_Run, src: []byte, lo: int, dest: rawptr, op: ^core_pkg.Shape_Op) -> core_pkg.Shape_Fault {
+shape_leaf_bit_set :: proc(r: ^walk.Shape_Run, src: []byte, lo: int, dest: rawptr, op: ^core_pkg.Shape_Op) -> core_pkg.Shape_Fault {
 	names := op.enum_info != nil && !r.enum_ints
 	bits: u128
 	p := shape_skip_space(src, lo + 1)
@@ -632,7 +615,7 @@ shape_leaf_bit_set :: proc(r: ^core_pkg.Shape_Run, src: []byte, lo: int, dest: r
 // a scalar as `shape_leaf_any` boxes it, all of it in `context.allocator`. A repeated key keeps the occurrence
 // `r.keep_first` says. `src` ends where the value's container does, and a value running into its end is
 // `.Wrong_Kind`.
-shape_any_tree :: proc(r: ^core_pkg.Shape_Run, src: []byte, p: int) -> (v: any, end: int, fault: core_pkg.Shape_Fault) {
+shape_any_tree :: proc(r: ^walk.Shape_Run, src: []byte, p: int) -> (v: any, end: int, fault: core_pkg.Shape_Fault) {
 	p := p
 	if p >= len(src) {
 		return nil, p, .Wrong_Kind
@@ -738,7 +721,7 @@ shape_skip_space :: proc(src: []byte, p: int) -> int {
 
 // A checked number token into a `Number`: the binary64 value and exactness `number_span` gives it, from the
 // digits the walk folded (`r.num`) rather than a second lex.
-shape_leaf_number :: proc(r: ^core_pkg.Shape_Run, lo, hi: u64, dest: rawptr) -> core_pkg.Shape_Fault {
+shape_leaf_number :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr) -> core_pkg.Shape_Fault {
 	b := r.src[lo]
 	if !number_starts_with(b) {
 		return .Wrong_Kind

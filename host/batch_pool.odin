@@ -7,16 +7,16 @@ import "core:os"
 import "core:sync"
 import "core:thread"
 import "core:time"
-import json "../json"
+import core_pkg "../core"
 
 // Threads kept between batches, so a caller that runs many pays for starting them once. Pass `&pool.runner`
-// to `json.each_record` or `json.validate_records`.
+// to `json.each_record`, `json.validate_records`, `csv.each_record` or `csv.validate`.
 //
 //	- They spin briefly (200 microseconds) after a batch, then sleep.
 //	- The caller owns the pool: `batch_pool_init` starts the threads and `batch_pool_destroy` joins them.
 //	- It must not move between the two, and runs one batch at a time.
 Batch_Pool :: struct {
-	runner:      json.Batch_Runner,
+	runner:      core_pkg.Batch_Runner,
 	helpers:     []Batch_Helper,
 	max_helpers: int,
 	// The current call, and how many helpers it was handed to.

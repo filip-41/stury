@@ -12,7 +12,7 @@ package scan
 // Every Values-ok input is Locate-ok, and every Locate error is a Values error.
 
 import "base:runtime"
-import core_pkg "../../core"
+import "walk"
 import index "index"
 import lex "lex"
 import number "./number"
@@ -291,7 +291,7 @@ walk_frames :: #force_inline proc(
 					}
 				}
 				when .Demand in Q {
-					core_pkg.demand_wild_open(q, Q, sp, vc)
+					walk.demand_wild_open(q, Q, sp, vc)
 				}
 				// Run-length push: consecutive `[` open one frame each without a VCLASS load and dispatch
 				// per level. Objects cannot fuse (a key sits between `{` and its value), and whitespace
@@ -343,7 +343,7 @@ walk_frames :: #force_inline proc(
 					cursor_advance(cur)
 					// Per fused level, so rows come out parent-first and each `]` patches its own row.
 					when .Nodes in Q {
-						core_pkg.dom_run_open(q, Q, fr2, fr2.lo, &run_rows)
+						walk.dom_run_open(q, Q, fr2, fr2.lo, &run_rows)
 					}
 					when .Path in Q {
 						if auto_frame_open(q, Q, may_stop, stopped, int(sp) - 1, 2, fr2.lo) {
@@ -704,18 +704,18 @@ value_use :: #force_inline proc(q: ^Query_Ctx, $Q: bit_set[Walk_Kind], sp: u64, 
 	}
 	use := Value_Use.Unread
 	when .Demand in Q {
-		if core_pkg.demand_answers_value(sp, pend) {
+		if walk.demand_answers_value(sp, pend) {
 			return .Whole
 		}
-		if vc <= VC_ARRAY && core_pkg.demand_reaches_into(q, Q, sp) {
+		if vc <= VC_ARRAY && walk.demand_reaches_into(q, Q, sp) {
 			use = .Partly
 		}
 	}
 	when .Path in Q {
-		if core_pkg.path_answers_member(q, int(sp) - 1) {
+		if walk.path_answers_member(q, int(sp) - 1) {
 			return .Whole
 		}
-		if vc <= VC_ARRAY && core_pkg.path_reaches_into(q, int(sp) - 1) {
+		if vc <= VC_ARRAY && walk.path_reaches_into(q, int(sp) - 1) {
 			use = .Partly
 		}
 	}

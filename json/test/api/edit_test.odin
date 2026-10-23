@@ -75,15 +75,15 @@ test_set :: proc(t: ^testing.T) {
 	edit_err(t, long, .Over_Capacity)
 }
 
-// An `Edit_Error` locates its refusal: the offset into the text it names, and the walk's result or
-// marshal's refusal behind it.
+// A `Path_Error` reports the offset into the text it names, and the walk's result or marshal's error that
+// caused it.
 @(test)
 test_edit_error_locates_the_refusal :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	cases := []struct {
 		src, path: string,
 		value:     any,
-		want:      json.Edit_Error,
+		want:      json.Path_Error,
 	} {
 		{"{\n\"a\":1", ".a", 1, {kind = .Bad_Source, syntax = .Truncated, offset = 7}},
 		{`{"a":1}`, ".[", 1, {kind = .Bad_Path, offset = 1}},
@@ -96,11 +96,11 @@ test_edit_error_locates_the_refusal :: proc(t: ^testing.T) {
 	}
 	// The offset of a refused result is into the edited text, which `splice` never returns.
 	_, err := json.splice(raw(`{"a":1}`), []json.Edit{{lo = 5, hi = 6, bytes = raw(`1,`)}})
-	testing.expect_value(t, err, json.Edit_Error{kind = .Bad_Result, syntax = .Bad_Char, offset = 7})
+	testing.expect_value(t, err, json.Path_Error{kind = .Bad_Result, syntax = .Bad_Char, offset = 7})
 }
 
 @(private)
-edit_err :: proc(t: ^testing.T, got: Maybe(json.Edit_Error), want: json.Edit_Error_Kind, loc := #caller_location) -> json.Edit_Error {
+edit_err :: proc(t: ^testing.T, got: Maybe(json.Path_Error), want: json.Path_Error_Kind, loc := #caller_location) -> json.Path_Error {
 	e, refused := got.?
 	testing.expectf(t, refused && e.kind == want, "%v, want %v", got, want, loc = loc)
 	return e
@@ -244,7 +244,7 @@ test_edit_out_of_memory :: proc(t: ^testing.T) {
 		{.Remove, .Jsonc, "[[1, /* x */ 2,3],[4,5,6]]", ".[][1]"},
 		{.Comment, .Jsonc, `{"a":1,"b":2}`, ".[]"},
 	}
-	run :: proc(c: Case, allocator: mem.Allocator) -> ([]byte, Maybe(json.Edit_Error)) {
+	run :: proc(c: Case, allocator: mem.Allocator) -> ([]byte, Maybe(json.Path_Error)) {
 		switch c.op {
 		case .Set:
 			return json.set(raw(c.src), c.path, 0, allocator, dialect = c.dialect)
@@ -303,3 +303,4 @@ test_splice_refuses_a_comment_that_swallows_values :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(out), "[1, /* c */ 2\n]")
 	delete(out)
 }
+

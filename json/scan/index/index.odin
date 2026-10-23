@@ -53,8 +53,8 @@ Index :: struct($F: Facts) {
 	// Whether every scalar run in the current region holds only the bytes its
 	// first byte allows (`scalar_shape`). It is false unless requested.
 	chunk_scalar_ok: b64,
-	// Regions classified, and skipped blocks read, that failed the wire check since `init`. Counted only for
-	// `.Wire_On_Skip`: a skip compares it before and after, so no byte is judged twice.
+	// The number of classified regions and skipped blocks that failed the wire check since `init`. It is
+	// counted only for `.Wire_On_Skip`. A skip compares it before and after, so no byte is checked twice.
 	wire_bad: int,
 	buf:      [CHUNK + SLACK]u16,
 }

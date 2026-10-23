@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:slice"
 import "core:strings"
 import core_pkg "../core"
+import "scan/walk"
 import enc "encode"
 import scan_pkg "scan"
 
@@ -44,7 +45,7 @@ comma_after :: proc(src: []byte, pos: u64) -> (at: u64, ok: bool) {
 	n := u64(len(src))
 	for i < n {
 		switch {
-		case core_pkg.is_space(src[i]):
+		case walk.is_space(src[i]):
 			i += 1
 		case src[i] == '/' && i + 1 < n && src[i + 1] == '/':
 			for i < n && !is_line_break(src[i]) {
@@ -199,19 +200,19 @@ Comment_Op :: enum u8 {
 // The path is text or a `Path`, as `set`'s. A comment that is not one `//` line or one `/* */` block is
 // `.Bad_Comment`. `.Remove` ignores `comment`.
 @(require_results)
-edit_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, allocator := context.allocator) -> (out: []byte, err: Maybe(Edit_Error)) {
-	watch := Refusal_Watch{backing = allocator}
-	out, err = watched_comment(src, path, place, comment, op, watched(&watch))
-	return unless_refused(&watch, out, err)
+edit_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	watch := core_pkg.Refusal_Watch{backing = allocator}
+	out, err = watched_comment(src, path, place, comment, op, core_pkg.watched(&watch))
+	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
 @(private = "file")
-watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Edit_Error)) {
+watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	steps: [core_pkg.MAX_PATH_STEPS]Step
 	p, names := edit_parse(path, steps[:], allocator) or_return
 	defer delete(names, allocator)
 	if op != .Remove && !comment_ok(comment) {
-		return nil, Edit_Error{kind = .Bad_Comment}
+		return nil, Path_Error{kind = .Bad_Comment}
 	}
 	paths := [1]Path{p}
 	req: Request({.Path, .Nodes})
@@ -231,7 +232,7 @@ watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment
 		r := a.node
 		if op == .Insert {
 			if !comment_insert(&text, &places, doc, r, place, comment) {
-				return nil, Edit_Error{kind = .Unplaceable}
+				return nil, Path_Error{kind = .Unplaceable}
 			}
 			continue
 		}
@@ -254,18 +255,18 @@ watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment
 			first = false
 		}
 		if first && op == .Set {
-			return nil, Edit_Error{kind = .Not_Found}
+			return nil, Path_Error{kind = .Not_Found}
 		}
 	}
 	if !any_found || len(places) == 0 {
-		return nil, Edit_Error{kind = .Not_Found}
+		return nil, Path_Error{kind = .Not_Found}
 	}
 	slice.sort_by(places[:], proc(a, b: Place) -> bool {
 		return a.at < b.at
 	})
 	for i in 1 ..< len(places) {
 		if places[i].at < places[i - 1].cut {
-			return nil, Edit_Error{kind = .Unplaceable}
+			return nil, Path_Error{kind = .Unplaceable}
 		}
 	}
 	return judged(places_apply(src, places[:], text[:], allocator), allocator, .Jsonc)
@@ -305,7 +306,7 @@ comment_insert :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, doc: ^Docume
 			append_string(text, "\n", comment, "\n")
 		}
 	case .Inline:
-		if nd.key_lo == core_pkg.NO_KEY {
+		if nd.key_lo == walk.NO_KEY {
 			return false
 		}
 		at = u64(nd.lo)

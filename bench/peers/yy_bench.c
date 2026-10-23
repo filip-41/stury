@@ -27,14 +27,15 @@ static int cmp_ll(const void *a, const void *b) {
 	return (x > y) - (x < y);
 }
 
-// Warm in-process timing jobs for bench/compare.py, mirroring stury's lanes: WARMUP + RUNS reads
-// of one input, the median printed as key=value tokens. The allocator is kept across reads; a typed read builds
-// its records afresh, as a generic decoder's value is, and the previous read's are freed outside the clock, as
-// is file I/O.
+// Timing jobs for bench/compare.py that match stury's bench lanes. Each job makes WARMUP + RUNS reads of one
+// input and prints the median as key=value tokens. The allocator persists across reads. A typed read builds
+// new records, as a generic decoder does; the previous read's records are freed outside the clock, as is file
+// I/O.
 //   dom FILE           yyjson_read alone
-//   typed SHAPE FILE   yyjson_read, then the DOM read into the shapes of stury's bench_unmarshal.odin
-//                      (logs, logs_subset, nested, config): every member visited, the last duplicate kept,
-//                      every field required. STURY_DUMP names a file for the decoded value as JSON.
+//   typed SHAPE FILE   yyjson_read, then a read of the DOM into the shapes of stury's bench_unmarshal.odin
+//                      (logs, logs_subset, nested, config). Every member is visited, the last duplicate wins,
+//                      and every field is required. STURY_DUMP names a file to receive the decoded value as
+//                      JSON.
 #define WARMUP 2
 
 typedef struct {
@@ -72,8 +73,8 @@ typedef struct {
 
 typedef enum { LOGS, LOGS_SUBSET, NESTED, CONFIG } shape_t;
 
-// One typed read: the records (log_record, log_subset or nested_rec), or the config head, allocated by the read
-// that fills them.
+// One typed read's output: the records (log_record, log_subset or nested_rec) or the config head. The read
+// that fills the records allocates them.
 typedef struct {
 	void *recs;
 	size_t n, cap;
@@ -98,7 +99,7 @@ static bool get_str(yyjson_val *v, str_t *out) {
 	return true;
 }
 
-// An integer in int64 range; a fraction or exponent is a real, refused.
+// Reads an integer in int64 range. A number with a fraction or exponent is a real and is refused.
 static bool get_i64(yyjson_val *v, int64_t *out) {
 	if (yyjson_is_sint(v)) return *out = yyjson_get_sint(v), true;
 	if (yyjson_is_uint(v) && yyjson_get_uint(v) <= INT64_MAX) return *out = (int64_t)yyjson_get_uint(v), true;
@@ -317,7 +318,7 @@ static char *load(const char *path, long *n) {
 	return buf;
 }
 
-// BENCH_RUNS if set, else 10; exits 2 unless it is an integer >= 1.
+// Returns BENCH_RUNS if set, else 10. Exits 2 unless BENCH_RUNS is an integer >= 1.
 static int timed_runs(void) {
 	const char *s = getenv("BENCH_RUNS");
 	if (!s) return 10;
@@ -330,13 +331,12 @@ static int timed_runs(void) {
 	return (int)v;
 }
 
-// `typed` false times yyjson_read alone.
+// Times yyjson_read, followed by the typed read of `shape` when `typed` is true.
 static int read_job(const char *path, bool typed, shape_t shape) {
 	long n;
 	char *buf = load(path, &n);
 	if (!buf) return 1;
 	yyjson_alc *alc = yyjson_alc_dyn_new();
-	// BENCH_RUNS overrides the timed iteration count.
 	int timed = timed_runs();
 	long long *ns = malloc(timed * sizeof *ns);
 	if (!alc || !ns) {

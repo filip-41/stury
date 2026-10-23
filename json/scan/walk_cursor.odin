@@ -16,26 +16,26 @@ import lex "lex"
 // that is neither whitespace nor an operator, so the cursor stays put and the walk faults there.
 Byte_Cursor :: struct {}
 
-// The byte cursor of a document that looks pretty-printed (`pretty_head`), chosen once per walk: after a
-// structural token it jumps a newline and the indent it predicts (`pretty_skip_peek`), and `object_key` and
-// `expect_colon` take the pretty printer's layout first. Any document still reads right; a compact one
-// only pays more.
+// The byte cursor for a document that looks pretty-printed (`pretty_head`), chosen once per walk. After a
+// structural token it skips a newline and the predicted indent (`pretty_skip_peek`). `object_key` and
+// `expect_colon` try the pretty printer's layout first. Any document reads correctly; a compact one reads slower.
 Pretty_Cursor :: struct {
-	ind:  u64, // the indent of the last line the cursor passed
-	step: u64, // the spaces one level of nesting adds
+	ind:  u64, // the indent of the last line passed
+	step: u64, // the spaces added per nesting level
 }
 
-// Where a newline sits in the walk, which says the next line's indent under a pretty printer: one step
-// deeper after an open bracket, the same after a comma, one step out before a close bracket.
+// The position of a newline in the walk, which determines the next line's indent under a pretty printer: one
+// step deeper after an open bracket, the same after a comma, one step out before a close bracket.
 Indent_At :: enum {
 	Open,
 	Member,
 	Close,
 }
 
-// `lex.skip_peek_pretty` with a newline's indent predicted from `at` rather than counted. The jump's target
-// is known before the bytes load, so the next token's load does not wait on them: they feed only the
-// branch that checks the prediction. A line that breaks it is counted, and teaches the cursor its width.
+// `lex.skip_peek_pretty` with a newline's indent predicted from `at` instead of counted. The jump target is
+// known before the indent bytes load, so the next token's load does not depend on them; they feed only the branch
+// that checks the prediction. On a misprediction the indent is counted, and after an open bracket the extra
+// indent becomes `step`.
 pretty_skip_peek :: #force_inline proc(s: ^Scanner, cur: ^Pretty_Cursor, $at: Indent_At) -> int {
 	#no_bounds_check {
 		n := u64(len(s.src))
@@ -53,7 +53,7 @@ pretty_skip_peek :: #force_inline proc(s: ^Scanner, cur: ^Pretty_Cursor, $at: In
 				return int(s.src[s.pos])
 			}
 			c := lex.skip_peek_pretty(s)
-			// Off a pretty printer's layout the width is junk, which only costs the next prediction.
+			// On input a pretty printer did not lay out, `step` may be wrong; that costs only mispredictions.
 			when at == .Open {
 				cur.step = s.pos - line - cur.ind
 			}
@@ -64,14 +64,13 @@ pretty_skip_peek :: #force_inline proc(s: ^Scanner, cur: ^Pretty_Cursor, $at: In
 	return lex.skip_peek_pretty(s)
 }
 
-// The longest first indent `pretty_head` takes; a longer or other whitespace run reads as irregular.
+// The longest first indent `pretty_head` accepts. A longer run, or other whitespace, is not pretty-printed.
 PRETTY_INDENT_MAX :: 16
-// The shortest document `pretty_head` looks at: below it the pretty walk saves less than the look costs a
-// small record.
+// The shortest document `pretty_head` checks. Below it the check costs more than the pretty walk saves.
 PRETTY_MIN_BYTES :: 1024
 
-// Whether the root at `at` is followed by a newline, 1 to PRETTY_INDENT_MAX spaces and a token: the shape
-// `json.dumps(indent=n)` and `jq` write.
+// Reports whether the root's opening bracket at `at` is followed by a newline, 1 to PRETTY_INDENT_MAX spaces
+// and a token, as `json.dumps(indent=n)` and `jq` write.
 pretty_head :: #force_inline proc(src: []byte, at: int) -> bool {
 	#no_bounds_check {
 		n := len(src)
@@ -169,10 +168,10 @@ cursor_scalar_known :: proc {
 	jsonc_cursor_scalar_known,
 }
 
-// Passes the value starting at `s.pos`, ending it where `lex.value_end` does, with none of its grammar
-// checked. At `.Locate` its wire UTF-8 is judged on the way, as a visited token's is; `.Values` leaves a
-// skipped value unread. False leaves the walk where it was, to read the value instead: by those rules it
-// has no end, or a byte in it needs the fault the read gives.
+// Skips the value at `s.pos` to where `lex.value_end` ends it, without checking its grammar. At `.Locate` its
+// wire UTF-8 is checked on the way, as for a visited token; at `.Values` a skipped value is not read. Returns false,
+// with the walk unmoved, when the value has no end under these rules or contains a byte that needs the read's
+// fault; the caller then reads the value.
 cursor_skip_value :: proc {
 	byte_cursor_skip_value,
 	pretty_cursor_skip_value,
@@ -317,13 +316,12 @@ index_cursor_scalar_known :: #force_inline proc(s: ^Scanner, cur: ^Index_Cursor(
 	}
 }
 
-// A container is skipped by its brackets alone (`index.skip_container`), and a string or scalar by the
-// next token start. Otherwise, and off the cursor's token, the bytes decide. The index takes the reader by
-// address, so it gets a copy: the cursor's own would keep it out of registers in every walk that can skip.
-// At `.Locate` the index judges the wire UTF-8 of every region it classifies and of every block a container
-// skip crosses (`wire_bad`), so a skip is clean when its start region was and nothing the skip reached was
-// not. A region beside the value that was not clean refuses it too, which only costs the read the fault
-// needs.
+// Skips a container by its brackets alone (`index.skip_container`), and a string or scalar to the next token
+// start. Otherwise, and away from the cursor's token, the byte path decides. The index takes the reader by
+// address, so it gets a copy; passing the cursor's own would keep it out of registers in every walk that can skip.
+// At `.Locate` the index checks the wire UTF-8 of every region it classifies and of every block a container skip
+// crosses (`wire_bad`). A skip is clean when its start region was clean and no fault was found in what it crossed.
+// A faulty region beside the value also refuses the skip, and the value is read instead.
 @(private = "file")
 index_cursor_skip_value :: #force_inline proc(s: ^Scanner, cur: ^Index_Cursor($F), vc: u8, room: int, $check: Check_Level) -> bool {
 	when check == .Locate {

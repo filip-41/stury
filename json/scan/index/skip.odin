@@ -14,7 +14,7 @@ package index
 // block's 64 brackets, which `Bracket_Kinds` holds.
 
 import "base:intrinsics"
-import core_pkg "../../../core"
+import "../walk"
 import lex "../lex"
 
 // Open brackets matched so far, innermost at `kinds[depth]`. Faults collect in
@@ -34,7 +34,7 @@ Bracket_Stack :: struct {
 #assert(size_of(Bracket_Stack) == 2 * size_of(int) + 1 + size_of(Bracket_Kinds))
 
 @(private = "file")
-Bracket_Kinds :: [core_pkg.MAX_DEPTH + 64 + 7]u8
+Bracket_Kinds :: [walk.MAX_DEPTH + 64 + 7]u8
 
 // Brackets per block taken whether or not they exist, the way `flatten`
 // writes, so a varying bracket count costs no misprediction.
@@ -93,7 +93,7 @@ skip_stacked :: proc(ix: ^Index($F), r: Reader, open: int, room: int) -> (int, R
 		return -1, r
 	}
 	st: Bracket_Stack = ---
-	st.depth, st.room, st.bad = 1, min(room, core_pkg.MAX_DEPTH), 0
+	st.depth, st.room, st.bad = 1, min(room, walk.MAX_DEPTH), 0
 	st.kinds[1] = ix.src[open]
 	// The rest of the current region is listed already: walking its positions
 	// costs less than classifying it again.
@@ -132,7 +132,7 @@ skip_stacked :: proc(ix: ^Index($F), r: Reader, open: int, room: int) -> (int, R
 @(private = "file")
 skip_chunk :: proc(ix: ^Index($F), lo, hi: int, st: ^Bracket_Stack) -> (at: int, ok: bool) {
 	src := raw_data(ix.src)
-	// The blocks' wire faults, counted once the chunk is left, however it is left.
+	// The blocks' wire faults. They are counted when the chunk is left, on every exit.
 	err: V
 	defer when .Wire_On_Skip in F {
 		ix.wire_bad += int(lex.any_lane(err))
@@ -156,16 +156,16 @@ skip_chunk :: proc(ix: ^Index($F), lo, hi: int, st: ^Bracket_Stack) -> (at: int,
 	return -1, true
 }
 
-// The offset of the outermost close bracket in the block at `p`, or -1. Only the string carries move: the
-// block's other carries are a read's. Its wire faults are collected under `.Wire_On_Skip`, which a `.Locate`
-// walk asks for.
+// Returns the offset of the outermost close bracket in the block at `p`, or -1. Only the string carries
+// advance; the block's other carries belong to a read. The block's wire faults are collected under
+// `.Wire_On_Skip`, which a `.Locate` walk requests.
 @(private = "file")
 skip_block :: #force_inline proc(p: [^]u8, cy: ^Carry, st: ^Bracket_Stack, err: ^V, $F: Facts) -> (k: int, ok: bool) {
 	v, instr, open, close := classify_brackets(p, &cy.prev_odd, &cy.in_string)
 	when .Wire_On_Skip not_in F {
 		_ = v
 	} else {
-		// The wire check of `string_bits`: a window continues the one before, across blocks and chunks.
+		// The wire check of `string_bits`. Each window continues the previous one, across blocks and chunks.
 		prev := transmute(V)cy.prev
 		cy.prev = transmute([16]u8)v[3]
 		if lex.any_high(prev | v[0] | v[1] | v[2] | v[3]) {

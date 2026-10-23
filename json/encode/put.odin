@@ -6,8 +6,10 @@ package encode
 
 import "base:intrinsics"
 import core_pkg "../../core"
+import "../scan/walk"
+import "../../core/spell"
 
-MAX_DEPTH :: core_pkg.MAX_DEPTH
+MAX_DEPTH :: walk.MAX_DEPTH
 
 Encode_Opts :: struct {
 	pretty:           bool,          // false (the zero value) is compact
@@ -19,21 +21,9 @@ Encode_Opts :: struct {
 	sort_keys:        bool,          // `marshal` of a `Document` with each object's keys in byte order, as `stury -S`, ignored for an `any`
 }
 
-// A canonical-writer refusal. `.None` is success.
-Encode_Error :: enum u8 {
-	None,
-	Bad_State,     // marshal: a hook that writes other than one value
-	Bad_Utf8,      // a string that is not valid UTF-8, or a rune that is not a Unicode scalar value
-	Non_Finite,    // a NaN or an infinity
-	Too_Deep,      // nesting past MAX_DEPTH
-	Cycle,         // marshal: a pointer met again on its own open path
-	Unsupported,   // marshal: a type with no JSON form
-	Bad_Raw,       // marshal: a `Raw` that is not exactly one strict JSON value (an empty one is `null`)
-	Plan_Mismatch, // marshal: the plan was made for another root type
-	Not_A_Member,  // marshal: an enum, written by name, holding a value none of its members has
-	Write_Failed,  // the `io.Writer` refused (what it took before is written)
-	Out_Of_Memory, // the allocator refused
-}
+// The reason the canonical writer refused a value (core's `Marshal_Error`). `.None` is success. JSON never
+// reports `Bad_Option` or `Unwritable`.
+Encode_Error :: core_pkg.Marshal_Error
 
 // Room for `n` more bytes past `len(dst)`: the address of the first, or nil when the allocator refused.
 // Growth at least doubles, so a run of appends costs amortized O(1) each.
@@ -47,7 +37,7 @@ put_reserve :: #force_inline proc(dst: ^[dynamic]u8, n: int) -> [^]u8 {
 // bytes before it survive the move.
 put_room :: #force_inline proc(dst: ^[dynamic]u8, w, n: int) -> [^]u8 {
 	if w + n > cap(dst^) {
-		core_pkg.edge_publish(dst, w)
+		walk.edge_publish(dst, w)
 		if non_zero_reserve(dst, max(w + n, 2 * cap(dst^))) != nil {
 			return nil
 		}
@@ -57,7 +47,7 @@ put_room :: #force_inline proc(dst: ^[dynamic]u8, w, n: int) -> [^]u8 {
 
 // Say that `n` more bytes were written past `len(dst)`. Legal only after a `put_reserve` that covers them.
 put_commit :: #force_inline proc(dst: ^[dynamic]u8, n: int) {
-	core_pkg.edge_publish(dst, len(dst^) + n)
+	walk.edge_publish(dst, len(dst^) + n)
 }
 
 put_byte :: #force_inline proc(dst: ^[dynamic]u8, x: u8) -> Encode_Error {
@@ -142,20 +132,32 @@ put_colon :: #force_inline proc(dst: ^[dynamic]u8, pretty: bool) -> Encode_Error
 }
 
 put_i64 :: proc(dst: ^[dynamic]u8, v: i64) -> Encode_Error {
-	p := put_reserve(dst, 20)
+	p := put_reserve(dst, spell.INT_ROOM)
 	if p == nil {
 		return .Out_Of_Memory
 	}
-	put_commit(dst, spell_i64(p, v))
+	put_commit(dst, spell.spell_i64(p, v))
 	return .None
 }
 
 put_u64 :: proc(dst: ^[dynamic]u8, v: u64) -> Encode_Error {
-	p := put_reserve(dst, 20)
+	p := put_reserve(dst, spell.INT_ROOM)
 	if p == nil {
 		return .Out_Of_Memory
 	}
-	put_commit(dst, spell_u64(p, v))
+	put_commit(dst, spell.spell_u64(p, v))
+	return .None
+}
+
+put_f64 :: proc(dst: ^[dynamic]u8, f: f64) -> Encode_Error {
+	if spell.is_non_finite(f) {
+		return .Non_Finite
+	}
+	p := put_reserve(dst, spell.F64_ROOM)
+	if p == nil {
+		return .Out_Of_Memory
+	}
+	put_commit(dst, spell.spell_f64(p, f))
 	return .None
 }
 

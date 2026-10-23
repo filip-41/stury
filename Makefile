@@ -3,12 +3,12 @@ OPT  ?= -o:speed
 
 # Library packages and test packages. Library packages have
 # no entry point, and the test packages pull in the libraries they exercise.
-LIB_PKGS  := host core core/path json json/encode json/scan json/scan/lex json/scan/number json/scan/index json/test/stock
-TEST_PKGS := core/test json/test/api
+LIB_PKGS  := host core core/bits core/path core/spell csv json json/encode json/scan json/scan/walk json/scan/lex json/scan/number json/scan/index json/test/stock
+TEST_PKGS := core/test csv/test json/test/api
 # `make test` builds the suites at -o:minimal because the build is most of their run time.
 TEST_OPT := -o:minimal
 # The CLI's size cap for detecting changes bloating the binary, allowed to move for incremental feature development.
-CLI_MAX_BYTES := 2883584
+CLI_MAX_BYTES := 3014656
 
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500

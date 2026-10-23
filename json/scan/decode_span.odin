@@ -1,6 +1,7 @@
 package scan
 
 import "base:intrinsics"
+import core_pkg "../../core"
 import "base:runtime"
 import "core:unicode/utf8"
 import lex "lex"
@@ -214,7 +215,7 @@ decode_integer :: proc(src: []byte, n: number.Number_Lex) -> Decoded {
 	if !n.ok || n.spelling & {.Has_Fraction, .Has_Exponent} != {} {
 		return nil
 	}
-	mag, over, _ := fold_digits(src, n.int_at, n.int_at + n.int_digits, u64)
+	mag, over, _ := core_pkg.fold_digits(src, n.int_at, n.int_at + n.int_digits, u64)
 	if over {
 		return nil
 	}

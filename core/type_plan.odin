@@ -82,7 +82,7 @@ Plan_Hook :: struct {
 	read: Shape_Hook,
 }
 
-// Why a plan could not compile a type, numbered as `json.Encode_Error` numbers its namesakes.
+// Why a plan could not compile a type. Each member has the value of its `Marshal_Error` namesake.
 Plan_Error :: enum u8 {
 	None          = 0,
 	Bad_Name      = 2,  // the format cannot spell a field's, member's or arm's name
@@ -109,11 +109,9 @@ Plan_Format :: struct {
 	// Appends `name` to `keys` as the format spells it in `role`.
 	spell:   proc(keys: ^[dynamic]u8, name: string, role: Key_Role) -> Plan_Error,
 	types:   []Format_Type,
-	// Sets field `f`'s `colon_key` and `colon_mask` words, and its name's bit in its struct's `op.first`.
-	key_words: proc(op: ^Shape_Op, f: ^Shape_Field),
-	// Whether a member key equal byte for byte to `name` is that name's whole token, so the fused loop may
-	// match keys by their raw bytes.
-	plain_name: proc(name: string) -> bool,
+	// Annotates the read shape for the format's walk after every op is lowered, and resets to `.Unsupported`
+	// any op the walk cannot read. Runs before the shape reachable from the root is checked. Nil for none.
+	lowered: proc(r: ^Read_Shape) -> runtime.Allocator_Error,
 }
 
 // A type's fields, tags and forms, compiled once per `typeid` for both directions (`type_plan_init`).
@@ -158,6 +156,56 @@ type_plan_init :: proc(T: typeid, opts: Plan_Opts, format: Plan_Format, allocato
 	}
 	p.opts_lost = plan_opts_copy(&p.opts, opts, allocator) != nil
 	return p
+}
+
+// Reads `text`, the fully validated source text of one value, into `dest`, a value of the hook's type,
+// allocating from `allocator`. `dest` holds the target's previous value. `text` is the source bytes, or a copy
+// freed after the call, so copy anything that must outlive it. Return nil on success, or an error kind, which is
+// reported at the value.
+Unmarshal_Hook :: #type proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) -> Maybe(Unmarshal_Error_Kind)
+
+// A caller-defined reader and writer for one type. For every value of exactly `type`, these procs run instead
+// of the plan. `W` is the format's writing proc type. A nil proc makes that direction `.Unsupported`.
+Type_Hook :: struct($W: typeid) {
+	type:  typeid,
+	write: W,
+	read:  Unmarshal_Hook,
+}
+
+// A plan whose hooks also write; `W` is the format's writing proc type (`hooked_plan_init`).
+Hooked_Plan :: struct($W: typeid) {
+	using base: Type_Plan,
+	// The hooks' write procs, at the same indices as `opts.hooks`.
+	writes: []W,
+}
+
+// Calls `type_plan_init` with `hooks` in place of `opts.hooks`. The hooks' read procs become the plan's
+// `opts.hooks` and their write procs its `writes`. `hooked_plan_destroy` frees the plan.
+@(require_results)
+hooked_plan_init :: proc(T: typeid, opts: Plan_Opts, hooks: []Type_Hook($W), format: Plan_Format, allocator: runtime.Allocator) -> (p: Hooked_Plan(W)) {
+	reads, rerr := make([]Plan_Hook, len(hooks), allocator)
+	werr: runtime.Allocator_Error
+	p.writes, werr = make([]W, len(hooks), allocator)
+	lost := rerr != nil || werr != nil
+	mapping := opts
+	if !lost {
+		for h, k in hooks {
+			// `Shape_Fault` and `Unmarshal_Error_Kind` share member values, so the cast is exact.
+			reads[k] = {h.type, cast(Shape_Hook)h.read}
+			p.writes[k] = h.write
+		}
+		mapping.hooks = reads
+	}
+	p.base = type_plan_init(T, mapping, format, allocator)
+	delete(reads, allocator)
+	p.opts_lost ||= lost
+	return
+}
+
+hooked_plan_destroy :: proc(p: ^Hooked_Plan($W)) {
+	delete(p.writes, p.ops.allocator)
+	type_plan_destroy(&p.base)
+	p^ = {}
 }
 
 // `o` into `c`, its strings and slices copied from `a`. A refusal leaves in `c` what was copied, every string

@@ -2,7 +2,6 @@ package core_tests
 
 import "core:slice"
 import "core:testing"
-import core "../"
 import p "../path"
 
 N :: p.Name
@@ -226,18 +225,4 @@ test_parse_decodes_escaped_names :: proc(t: ^testing.T) {
 	buf: [4]p.Step
 	got, _, ok := parse(`."plain"`, buf[:])
 	testing.expect(t, ok && len(got.steps) == 1 && string(got.steps[0].(p.Name)) == "plain")
-}
-
-// A `.Last` run settles early only when no step is a `Name`: an index-then-name path parks its answer until
-// the root closes (`path_prefix_is_deterministic`), so a stop test for it would wait on a promise it cannot keep.
-@(test)
-test_last_settles_early_on_indices_only :: proc(t: ^testing.T) {
-	Case :: struct {
-		steps: []p.Step,
-		want:  bool,
-	}
-	for c in ([]Case{{{I(0), I(1)}, true}, {{I(0), N("a")}, false}, {{N("a"), I(0)}, false}}) {
-		run := core.Path_Run{steps = c.steps, mode = .Last}
-		testing.expectf(t, core.path_run_may_settle_early(&run) == c.want, "%v: want %v", c.steps, c.want)
-	}
 }

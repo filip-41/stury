@@ -5,7 +5,7 @@ package scan
 
 import "base:intrinsics"
 import "base:runtime"
-import core_pkg "../../core"
+import "walk"
 
 // The frames past MAX_DEPTH: `limit` of them in `spill`, the fixed array's copied in. Nil when the allocator
 // refuses.
@@ -86,20 +86,20 @@ open_run :: #force_no_inline proc(
 	pos: u64,
 	frames: [^]Open_Frame,
 	sp, max_depth: u64,
-	base: [^]core_pkg.Row,
+	base: [^]walk.Row,
 	rows, room: int,
 	$dom: bool,
 ) -> (pos_after, sp_after: u64, rows_after: int) {
 	n := u64(len(src))
 	pos, depth, at := pos, sp, rows
-	flags: core_pkg.Row_Flags
+	flags: walk.Row_Flags
 	when dom {
 		flags = {.Decoded}
 	}
-	// The row goes out as four words, two paired stores, where field stores take five: the words of a
-	// template whose only per-row fields, `lo` and `subtree_size`, each start a zero word's low half (the
-	// layout `core/tape.odin` asserts).
-	tw := transmute([4]u64)core_pkg.Row{key_lo = core_pkg.NO_KEY, key_hi = core_pkg.NO_KEY, kind = .Array, flags = flags}
+	// The row is written as four words in two paired stores; field stores would take five. The words come from
+	// a template whose only per-row fields, `lo` and `subtree_size`, each occupy the low half of a zero word
+	// (the layout `walk/tape.odin` asserts).
+	tw := transmute([4]u64)walk.Row{key_lo = walk.NO_KEY, key_hi = walk.NO_KEY, kind = .Array, flags = flags}
 	// One bound for the loop: the run stops at the depth cap, the end of the row block or the end of input.
 	end := pos + min(max_depth - depth, u64(room - at), n - pos)
 	#no_bounds_check for pos < end && src[pos] == '[' {
@@ -120,7 +120,7 @@ open_run :: #force_no_inline proc(
 // `close_frame` does and counts itself into its parent, while the parent is an array the next `]` closes.
 // Leaves the walk just past a close with that close not yet counted into its parent, as `close_frame` does.
 @(private)
-close_run :: #force_no_inline proc(src: []byte, pos: u64, frames: [^]Open_Frame, sp: u64, base: [^]core_pkg.Row, rows: int) -> (pos_after, sp_after: u64) {
+close_run :: #force_no_inline proc(src: []byte, pos: u64, frames: [^]Open_Frame, sp: u64, base: [^]walk.Row, rows: int) -> (pos_after, sp_after: u64) {
 	n := u64(len(src))
 	pos, depth := pos, sp
 	// A close inside the run counts into the frame the next close pops, so it rides along to that row
@@ -129,7 +129,7 @@ close_run :: #force_no_inline proc(src: []byte, pos: u64, frames: [^]Open_Frame,
 	#no_bounds_check for {
 		fr := &frames[depth - 1]
 		pos += 1
-		if fr.row != core_pkg.NO_ROW {
+		if fr.row != walk.NO_ROW {
 			r := &base[fr.row]
 			r.hi = u32(pos)
 			r.subtree_size = u32(rows) - fr.row
@@ -180,7 +180,7 @@ close_frame :: #force_inline proc(
 	when .Demand in Q {
 		// The root is nobody's member.
 		if idx != 0 {
-			core_pkg.demand_value_closed(s, q, Q, idx, pend, may_stop, stopped)
+			walk.demand_value_closed(s, q, Q, idx, pend, may_stop, stopped)
 		}
 	}
 	when .Unique in Q {

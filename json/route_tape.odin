@@ -6,10 +6,10 @@ package json
 // answers are the matcher's. What the walk cannot settle (a document fault, an escaped key) goes to the scan.
 
 import "base:runtime"
-import core_pkg "../core"
+import "scan/walk"
 
 @(private = "file")
-TAPE_MAX_PATHS :: core_pkg.MAX_PATH_QUERIES
+TAPE_MAX_PATHS :: walk.MAX_PATH_QUERIES
 
 // Whether `req` is one the tape route answers: at least two gated columns sharing one gate, on `.Strict`
 // JSON. One path loses to the scan, so it is not routed.
@@ -27,7 +27,7 @@ tape_routable :: proc(req: ^Request($KINDS)) -> bool {
 
 @(private = "file")
 Tape_Walk :: struct {
-	rows:    []core_pkg.Row,
+	rows:    []walk.Row,
 	src:     []byte,
 	steps:   []Step,
 	mode:    Duplicates,
@@ -50,7 +50,7 @@ scan_tape :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) 
 	if fault := scan_rows(src, req, alloc); fault != {} || req.verdict != nil || len(req.doc.rows) == 0 {
 		return false
 	}
-	core_pkg.adopt_allocator(&req.answers, alloc)
+	walk.adopt_allocator(&req.answers, alloc)
 	clear(&req.answers)
 	w := Tape_Walk{
 		rows = req.doc.rows[:], src = src, steps = req.paths[0].steps, mode = req.duplicates,
@@ -161,7 +161,7 @@ tape_members :: proc(w: ^Tape_Walk, i: int) -> bool {
 				continue
 			}
 			at[k] = len(w.answers)
-			if !core_pkg.row_append(w.answers, a) {
+			if !walk.row_append(w.answers, a) {
 				return false
 			}
 		}

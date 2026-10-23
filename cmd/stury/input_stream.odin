@@ -27,7 +27,7 @@ open_next :: proc(ins: ^Inputs) -> bool {
 	place_past(ins, len(ins.data))
 	retire(ins, ins.data)
 	ins.data, ins.mapped, ins.lines_before, ins.window_lines = nil, false, 0, 0
-	ins.skip, ins.pos, ins.seen, ins.lines, ins.open, ins.texts_follow, ins.lines_tried, ins.line_records = 0, 0, 0, {}, true, false, false, ins.run.opts.ndjson
+	ins.skip, ins.pos, ins.seen, ins.lines, ins.open, ins.texts_follow, ins.lines_tried, ins.line_records = 0, 0, 0, {}, true, false, false, ins.run.opts.from == .Ndjson
 	ins.fault_at, ins.seq_head = {}, .Unread
 	file, ok := open_file(ins)
 	if !ok {
@@ -59,16 +59,16 @@ open_next :: proc(ins: ^Inputs) -> bool {
 	return true
 }
 
-// Whether file `f` is read a window at a time: one that is not a regular file, whose end is not known until
-// it comes, a regular file of records past STREAM_FILE_MIN bytes, stdin under --unbuffered, and any under
-// -n, where `input` reads it and each window read past is freed (`retire`).
-@(private = "file")
-streams :: proc(ins: ^Inputs, f: ^os.File) -> bool {
+// Reports whether file `f` is read a window at a time. That holds for a file that is not regular (its end is
+// unknown until reached), for a regular file larger than STREAM_FILE_MIN bytes (for JSON, only when its first line
+// looks like one record, unless `records` is false), for stdin under --unbuffered, and for any file under -n, where
+// `input` reads it. Each window read past is freed (`retire`).
+streams :: proc(ins: ^Inputs, f: ^os.File, records := true) -> bool {
 	if f == os.stdin && ins.run.opts.unbuffered || ins.run.opts.null_input || !is_regular_file(f) {
 		return true
 	}
 	size, err := os.file_size(f)
-	return err == nil && size > STREAM_FILE_MIN && starts_with_record(f)
+	return err == nil && size > STREAM_FILE_MIN && (!records || starts_with_record(f))
 }
 
 // A regular file of records past this is read in windows. Below it, windows cost more than they save.
@@ -259,7 +259,6 @@ make_unzeroed :: proc(cap: int) -> [dynamic]byte {
 }
 
 // The newlines in `b`: a search per line, which finds each at the speed of a memory scan.
-@(private = "file")
 count_newlines :: proc(b: []byte) -> (n: int) {
 	for rest := b; ; n += 1 {
 		i := bytes.index_byte(rest, '\n')
@@ -308,7 +307,7 @@ read_on :: proc(ins: ^Inputs, at: int) -> bool {
 // --seq a record runs to the next separator, so one with none after it in the window is cut short.
 @(private = "file")
 unfinished :: proc(ins: ^Inputs, at: int) -> bool {
-	if ins.reader == nil || ins.run.opts.ndjson {
+	if ins.reader == nil || ins.run.opts.from == .Ndjson {
 		return false
 	}
 	if ins.run.opts.seq {

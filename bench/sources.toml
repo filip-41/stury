@@ -1,10 +1,9 @@
-# What bench/fetch.py downloads: each file by URL and SHA-256, so a run reads exactly these bytes.
+# Files bench/fetch.py downloads, pinned by URL and SHA-256 so every run reads the same bytes.
 #
-# kind = "corpus": real-world JSON other parsers' benchmarks use, from simdjson-data at one commit (the
-# files carry their publishers' terms, so they are fetched, never committed). They land in
-# bench/fixtures/corpus/<name>.
-# kind = "source": another library, built from source with the bench's own flags (compare.py build).
-# A file lands in build/bench/deps/<name>/; a .tar.gz unpacks there without its top directory.
+# kind = "corpus": real-world JSON used by other parsers' benchmarks, from simdjson-data at one commit, saved
+# as bench/fixtures/corpus/<name>. The files carry their publishers' terms, so they are fetched, not committed.
+# kind = "source": another library's source, built with the bench's flags by `compare.py build`. It is saved
+# in build/bench/deps/<name>/; a .tar.gz unpacks there without its top directory.
 # The Rust libraries are pinned by bench/peers/rust/Cargo.lock instead.
 
 [[pin]]

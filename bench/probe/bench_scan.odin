@@ -7,21 +7,20 @@ import json "stury:json"
 import "core:fmt"
 import "core:time"
 
-// The duplicates pair: both readings walk the same bytes and differ in what they may skip. `.Last_Wins`
-// resolves each repeated key by comparing decoded text and keeps the last; `.Skip` locates members
-// without resolving a winner. Neither is "the" number, and collapsing the gap would be a semantics change.
+// The two duplicate-key lanes walk the same bytes and differ in what they may skip. `.Last_Wins` resolves
+// each repeated key by comparing decoded text and keeps the last; `.Skip` locates members without resolving
+// a winner.
 Dup_Mode :: enum { Last_Wins, Skip }
 
-// The keys the dups fixture repeats. Kept small on purpose: the lane measures
-// the COST of resolving a repeated key, and asking for 4096 keys would make the
-// harness's own compare loop the dominant term.
+// The repeated keys of the dups fixture that `.Last_Wins` asks for. Asking for all 4096 would make the
+// harness's own compare loop dominate the cost of resolving a key.
 DUP_KEYS :: []string{"k0000", "k0001", "k0002", "k0003", "k0004", "k0005", "k0006", "k0007"}
 
 DUP_REQ: json.Request({.Path})
 DUP_STEPS: [8]json.Step
 DUP_PATHS: [8]json.Path
 
-// One single-name path per key, in the caller's storage: the paths a keys list asks for.
+// Fills `paths`, with their steps in `steps`, with one single-name path per key.
 name_paths :: proc(keys: []string, steps: []json.Step, paths: []json.Path) {
 	for k, i in keys {
 		steps[i] = json.Name(k)
@@ -29,7 +28,7 @@ name_paths :: proc(keys: []string, steps: []json.Step, paths: []json.Path) {
 	}
 }
 
-// How many of a request's path answers landed on a value.
+// Returns how many path answers found a value.
 found_answers :: proc(answers: []json.Path_Answer) -> int {
 	n := 0
 	for a in answers {
@@ -42,14 +41,14 @@ found_answers :: proc(answers: []json.Path_Answer) -> int {
 
 dup_read :: proc(data: []byte, mode: Dup_Mode) -> bool {
 	if mode == .Last_Wins {
-		// The verdict and the answers in one walk: a `.Structural` scan whose paths name the keys.
+		// One `.Structural` scan with a path per key gives the verdict and the answers in one walk.
 		name_paths(DUP_KEYS, DUP_STEPS[:], DUP_PATHS[:])
 		DUP_REQ.strictness = .Structural
 		DUP_REQ.paths = DUP_PATHS[:]
 		return scan_ok(data, &DUP_REQ)
 	}
-	// The skip reading: a `.Structural` validate walks every member without resolving a key, so no
-	// decoded-text compare happens at all. That compare is the work last-wins does not get to skip.
+	// `.Skip`: a `.Structural` validate walks every member without resolving a key, so it compares no
+	// decoded text.
 	return json.validate(data, .Json, .Structural) == nil
 }
 
@@ -59,8 +58,7 @@ bench_dups :: proc(data: []byte, mode: Dup_Mode) -> bool {
 	if !timed {
 		return false
 	}
-	// Last-wins must find every repeated key, or the fixture is not exercising
-	// duplicates and the lane is measuring nothing.
+	// Last-wins must find every repeated key, or the fixture does not exercise duplicates.
 	found := found_answers(DUP_REQ.answers[:])
 	if mode == .Last_Wins && found != len(DUP_KEYS) {
 		return false
@@ -70,11 +68,9 @@ bench_dups :: proc(data: []byte, mode: Dup_Mode) -> bool {
 	return true
 }
 
-// The reject path: one invalid wire byte 10 from the end of an otherwise
-// valid document. The walk judges ~the whole document before refusing, so this
-// measures full-walk-then-reject, not an early exit. The verdict AND the
-// offset are asserted every iteration: a lane that stopped timing rejects
-// would report a fast number for a document it accepted.
+// Times the refusal of a document whose one invalid wire byte is 10 bytes from the end, so almost the whole
+// document is validated first. Every iteration asserts the verdict and the offset, so a scan that accepts
+// the document fails the lane.
 bench_fault :: proc(data: []byte) -> bool {
 	fault_once :: proc(data: []byte, _: struct{}) -> bool {
 		err, has := json.validate(data, .Json, .Strict).?
@@ -93,17 +89,17 @@ bench_fault :: proc(data: []byte) -> bool {
 	return true
 }
 
-// `.Dom` over a fixture it must refuse; counted on `refusals`, not GB/s. Not bench_query, which fails the
-// lane on refusal. `scan` empties the rows before it walks, so no teardown runs between iterations.
+// Times `.Dom` over a fixture it must refuse, reported as `refusals`, not GB/s; bench_query would fail the
+// lane on the refusal. `scan` empties the rows before it walks, so no teardown runs between iterations.
 bench_dom_refusal :: proc(data: []byte, level: json.Strictness) -> bool {
 	req: json.Request({.Dom})
 	req.strictness = level
 	defer json.destroy(&req)
 
-	// `false` means the scan did NOT refuse, which is the failure this lane exists to catch.
+	// Returns false, failing the lane, when the scan does not refuse.
 	refused :: proc(data: []byte, req: ^json.Request({.Dom})) -> bool {
-		// Two distinct refusals count equally: the request being refused by
-		// name (`Request_Error`), and the document being refused as a fault (`Error`).
+		// Either refusal counts: a `Request_Error` for the request or an `Error`
+		// for a fault in the document.
 		return json.scan(data, req) != nil
 	}
 
@@ -123,10 +119,9 @@ bench_dom_refusal :: proc(data: []byte, level: json.Strictness) -> bool {
 	return true
 }
 
-// The small-document lane: a ~2 KB scan reported in ns, not GB/s. At this
+// Times a strict validate of a ~2 KB document, reported in ns, not GB/s. At this
 // size per-call setup (frame array, entry checks, fixture touch) is a visible
-// share of the measurement and GB/s arithmetic would flatter or condemn on
-// division rather than on the walk.
+// share of the time.
 bench_tiny :: proc(data: []byte) -> bool {
 	median_ns, timed := time_median(data, json.Strictness.Strict, validates_clean)
 	if !timed {
@@ -137,12 +132,12 @@ bench_tiny :: proc(data: []byte) -> bool {
 	return true
 }
 
-// Query-path A/B: `.Lazy` + `.First` (early stop) against `.Strict` + `.First` (constant baseline) on one
-// key, interleaved round by round with the order alternating so a load swing cannot favour one arm. The
-// byte column is the result: a stopped walk's GB/s is dominated by per-call setup. `.Strict` reads the
-// whole fixture; `.Lazy` reads to the answer's close, and an absent key settles only at the item's end.
-// `lazy_ns` and `strict_ns` are per call (a sample's PATH_BATCH scans divided by the count). `emit` names
-// the arm, "lazy" or "strict", whose per-call time is also printed as `ns`, the token bench/compare.py reads.
+// Query-path A/B on one key: `.Lazy` + `.First` (early stop) against `.Strict` + `.First` (constant
+// baseline). The arm order alternates each round so a load swing cannot favour one arm. Compare the bytes
+// read, not GB/s, which per-call setup dominates for a stopped walk. `.Strict` reads the whole fixture;
+// `.Lazy` reads to the answer's close, and an absent key settles only at the item's end. `lazy_ns` and
+// `strict_ns` are per call (a sample's PATH_BATCH scans divided by the count). `emit` ("lazy" or "strict")
+// names the arm whose per-call time is also printed as `ns`, the token bench/compare.py reads.
 PATH_REQ: json.Request({.Path})
 PATH_QUERY: [1]json.Path
 
@@ -160,8 +155,8 @@ path_run :: proc(data: []byte, steps: []json.Step, level: json.Strictness, stop:
 	return err == nil
 }
 
-// One timed sample is PATH_BATCH scans back to back: an early stop takes a few timer ticks alone. The
-// other libraries' get-one arms (bench/peers) batch by the same count, so a sample is the same number of calls.
+// Scans per timed sample, since one early stop takes only a few timer ticks. The other libraries' GetOne
+// arms (bench/peers) use the same count.
 PATH_BATCH :: 256
 
 path_time :: proc(data: []byte, steps: []json.Step, level: json.Strictness, out: ^i64) -> bool {
@@ -187,8 +182,7 @@ bench_path_ab :: proc(data: []byte, key, emit: string) -> bool {
 	steps := []json.Step{json.Name(key)}
 	stop: Maybe(u64)
 
-	// Both arms must answer the same thing, or the stop changed the answer and
-	// the timing is beside the point.
+	// Both arms must give the same answer, or the early stop changed it.
 	lazy_answers := make([dynamic]json.Path_Answer, 0, 4, context.temp_allocator)
 	defer delete(lazy_answers)
 	if !path_run(data, steps, .Lazy, &stop) {

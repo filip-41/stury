@@ -1,6 +1,6 @@
 package scan
 
-import core_pkg "../../core"
+import "walk"
 import index "index"
 import lex "lex"
 
@@ -11,18 +11,18 @@ import lex "lex"
 // walk's own result, at the offset `validate` gives. `unique` refuses a repeated key (`.Duplicate_Key`), in
 // every object the walk reads. Keys past the first KEY_SCRATCH open at once are remembered in
 // `context.allocator`, and given back before the return.
-scan_shape :: proc(src: []byte, run: ^core_pkg.Shape_Run, root: rawptr, lazy: bool, limits: Limits, $dialect: Dialect, $unique: bool) -> Maybe(Error) {
+scan_shape :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, lazy: bool, limits: Limits, $dialect: Dialect, $unique: bool) -> Maybe(Error) {
 	return shape_read(src, run, root, lazy, limits, dialect, unique, false)
 }
 
 // `scan_shape`, or with `pass_unread` the walk of `shape_walk_passing`.
 @(private = "file")
-shape_read :: proc(src: []byte, run: ^core_pkg.Shape_Run, root: rawptr, lazy: bool, limits: Limits, $dialect: Dialect, $unique, $pass_unread: bool) -> Maybe(Error) {
+shape_read :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, lazy: bool, limits: Limits, $dialect: Dialect, $unique, $pass_unread: bool) -> Maybe(Error) {
 	Q :: bit_set[Walk_Kind]{.Shape} + (bit_set[Walk_Kind]{.Unique} when unique else {}) + (bit_set[Walk_Kind]{.Pass_Unread} when pass_unread else {})
 	// Words rather than a `Query_Ctx` local, as in `scan_queries` (`query_ctx_zero`).
 	ctx_words: [size_of(Query_Ctx) / 8]u64 = ---
 	ctx := (^Query_Ctx)(&ctx_words)
-	core_pkg.query_ctx_zero(ctx, Q)
+	walk.query_ctx_zero(ctx, Q)
 	ctx.hooks = &FORMAT_HOOKS
 	ctx.shape = run
 	run.sp = 0
@@ -72,7 +72,7 @@ shape_read :: proc(src: []byte, run: ^core_pkg.Shape_Run, root: rawptr, lazy: bo
 // `scan_shape` under `.Lazy`, for JSON. Above the gate, when the probe declines the skipping walk, the complete
 // walk passes unread strings unchecked (`.Pass_Unread`), in its own proc with its own context, since a third
 // walk in `scan_shape` moves the spills of its complete walk.
-scan_shape_lazy :: proc(src: []byte, run: ^core_pkg.Shape_Run, root: rawptr, limits: Limits, $unique: bool) -> Maybe(Error) {
+scan_shape_lazy :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, limits: Limits, $unique: bool) -> Maybe(Error) {
 	s := enter_document(src, limits, MAX_DEPTH)
 	lex.skip_ws(&s)
 	if u64(len(src)) - s.pos >= SHAPE_LAZY_MIN_BYTES {
@@ -89,7 +89,7 @@ scan_shape_lazy :: proc(src: []byte, run: ^core_pkg.Shape_Run, root: rawptr, lim
 // Whether a `.Lazy` read of `src` has nothing worth skipping: it is under the gate, or the probe declines the
 // skipping walk. The descent then reads it, checking every value, faster than the walk that passes unread
 // strings. A probe that chose the skipping walk is kept for `scan_shape_lazy`.
-shape_lazy_reads_all :: proc(src: []byte, run: ^core_pkg.Shape_Run, limits: Limits) -> bool {
+shape_lazy_reads_all :: proc(src: []byte, run: ^walk.Shape_Run, limits: Limits) -> bool {
 	s := enter_document(src, limits, MAX_DEPTH)
 	lex.skip_ws(&s)
 	if u64(len(src)) - s.pos < SHAPE_LAZY_MIN_BYTES {
@@ -101,7 +101,7 @@ shape_lazy_reads_all :: proc(src: []byte, run: ^core_pkg.Shape_Run, limits: Limi
 }
 
 @(private = "file")
-shape_walk_passing :: #force_no_inline proc(src: []byte, run: ^core_pkg.Shape_Run, root: rawptr, limits: Limits, $unique: bool) -> Maybe(Error) {
+shape_walk_passing :: #force_no_inline proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, limits: Limits, $unique: bool) -> Maybe(Error) {
 	return shape_read(src, run, root, false, limits, .Json, unique, true)
 }
 
@@ -126,7 +126,7 @@ SHAPE_SKIP_READ_EIGHTHS :: 5
 @(private = "file")
 Shape_Probe :: struct {
 	s:       Scanner,
-	run:     ^core_pkg.Shape_Run,
+	run:     ^walk.Shape_Run,
 	past:    []byte, // the head and as much again, for an unread container the head cuts
 	give_up: u64, // the position, less the bytes below, past which they can no longer reach their share
 	skipped: u64, // bytes of containers nothing reads
@@ -139,7 +139,7 @@ Shape_Probe :: struct {
 // enough share of it, of short values, and either hold many values or outweigh what is read. A scalar nothing
 // reads, and whitespace, count neither as skipped nor as read. The answer only picks a walk, since `.Lazy`
 // permits skipping and does not require it: a head holding no whole value keeps the index.
-shape_skip_walk_pays :: #force_no_inline proc(run: ^core_pkg.Shape_Run, src: []byte, root, max_depth: u64) -> bool {
+shape_skip_walk_pays :: #force_no_inline proc(run: ^walk.Shape_Run, src: []byte, root, max_depth: u64) -> bool {
 	if run.skip_pays {
 		return true
 	}

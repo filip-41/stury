@@ -131,6 +131,9 @@ print_text :: proc(run: ^Run, text: []byte, respell := true) {
 // -a, its JSON in ASCII). After it a newline, but under -j, and a NUL under --raw-output0, which refuses a
 // string that holds one: false then, with nothing printed.
 print_jq :: proc(run: ^Run, v: jq.Value, respell := true) -> bool {
+	if run.table != nil {
+		return print_row(run, v)
+	}
 	o := &run.opts
 	if text, large := source_text(run, v); large && print_root_pieces(run, text) {
 		return true
@@ -161,7 +164,7 @@ print_jq :: proc(run: ^Run, v: jq.Value, respell := true) -> bool {
 			l.spill = &run.spill
 		}
 		jq.write_answer(&run.out, v, l, respell)
-		ended = o.jsonc && run.out[len(run.out) - 1] == '\n'
+		ended = o.to == .Jsonc && run.out[len(run.out) - 1] == '\n'
 	}
 	if !o.join && !ended {
 		append(&run.out, '\n')
@@ -205,7 +208,7 @@ source_text :: proc(run: ^Run, v: jq.Value) -> (text: []byte, large: bool) {
 // How jq prints the outputs.
 output_layout :: proc(run: ^Run) -> jq.Layout {
 	o := run.opts
-	return {pretty = !o.compact, indent = int(o.indent), sort_keys = o.sort_keys, ascii = o.ascii, colors = &run.colors if o.color else nil}
+	return {pretty = !o.compact, indent = int(o.indent), sort_keys = o.sort_keys, ascii = o.ascii, colors = &run.colors if o.color else nil, drop_comments = o.to != .Jsonc}
 }
 
 // The output held so far written, when it passes FLUSH_AT bytes, when `force`d, and under --unbuffered.

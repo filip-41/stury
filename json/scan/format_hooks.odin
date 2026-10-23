@@ -1,17 +1,17 @@
 package scan
 
-import core_pkg "../../core"
+import "walk"
 
-// JSON's format hooks, the table core calls into. Every scan's context points at it.
+// The table of JSON procedures that the walk's matchers call. Every JSON scan's context points at it.
 @(rodata)
-FORMAT_HOOKS := core_pkg.Format_Hooks{
+FORMAT_HOOKS := walk.Format_Hooks{
 	escaped_key_equals = name_equals,
 	path_subwalk = path_subwalk_for_core,
 	dom_unescape_into = dom_unescape_into,
 }
 
 @(private = "file")
-path_subwalk_for_core :: proc(s: ^core_pkg.Scanner, ctx: ^core_pkg.Query_Ctx, max_depth: u64, halted: ^bool) -> Maybe(Error) {
+path_subwalk_for_core :: proc(s: ^walk.Scanner, ctx: ^walk.Query_Ctx, max_depth: u64, halted: ^bool) -> Maybe(Error) {
 	// Under a raised cap the re-entry reads at the level of the walk that reached it.
 	if max_depth > MAX_DEPTH {
 		if ctx.walk_judged {

@@ -3,7 +3,7 @@ package scan
 // The tokens between values that the walks step over: a key and its colon, the whitespace around them, the
 // comma of a compact array of numbers.
 
-import core_pkg "../../core"
+import "walk"
 import lex "lex"
 
 // A key and its colon, skipping whitespace around each. A missing key faults at the byte that cannot
@@ -21,7 +21,7 @@ object_key :: #force_inline proc(
 	pend: ^Demand_Pend,
 ) -> (next: int, err: Maybe(Error)) {
 	if lex.peek(s) != '"' {
-		// `pretty_skip_peek` passes all the whitespace, so the pretty cursor skips nothing after it.
+		// `pretty_skip_peek` skips all the whitespace, so the pretty cursor skips nothing after it.
 		when C == Pretty_Cursor {
 			pretty_skip_peek(s, cur, .Member)
 		} else {
@@ -87,7 +87,7 @@ object_key :: #force_inline proc(
 		when .Demand in Q {
 			// Bound now, resolved when the value closes (half the answer is its extent). `owner.lo` names
 			// the object an appended row belongs to.
-			core_pkg.demand_key(q, Q, key_lo, key_hi, s.pos, sp, owner.lo, pend)
+			walk.demand_key(q, Q, key_lo, key_hi, s.pos, sp, owner.lo, pend)
 		}
 		when .Path in Q {
 			// `sp` is the object's frame index, so the step that reads its members is `sp - 1`.
@@ -161,11 +161,11 @@ number_follows :: #force_inline proc(s: ^Scanner) -> bool {
 	}
 }
 
-// `cursor_skip_peek` where a pretty printer puts a newline and an indent: the byte cursor passes the indent
-// two spaces a step first (`lex.skip_indent`). Only the row-writing walks do, as with `": "` in `expect_colon`
-// and the indent before a key in `object_key`: in the other walks the extra code adds instructions to every
-// compact input. A `Pretty_Cursor` walk, chosen for a document that opens like a pretty printer's, predicts the
-// indent from `at` everywhere.
+// Runs `cursor_skip_peek` where a pretty printer puts a newline and an indent. The byte cursor first skips the
+// indent two spaces at a time (`lex.skip_indent`). Only the row-writing walks do this, as with `": "` in
+// `expect_colon` and the indent before a key in `object_key`; in the other walks the extra code adds
+// instructions on every compact input. A `Pretty_Cursor` walk, chosen for a document that starts like
+// pretty-printed output, predicts the indent from `at` everywhere.
 @(private)
 indent_skip_peek :: #force_inline proc(s: ^Scanner, cur: ^$C, $Q: bit_set[Walk_Kind], $at: Indent_At) -> int {
 	when C == Pretty_Cursor {

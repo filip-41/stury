@@ -38,7 +38,7 @@ selects :: proc(run: ^Run, src: []byte, a: json.Path_Answer) -> bool {
 // Answer the path over each text of the stream. From a text the scan cannot answer or that does not parse, the
 // interpreter reads the rest of the stream, and tells the fault as jq does.
 scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
-	pieces := !run.opts.jsonc && !run.held && run.req.dialect == .Json
+	pieces := run.opts.from != .Jsonc && !run.held && run.req.dialect == .Json
 	built: virtual.Arena // the last text built in pieces, emptied once another is
 	// As jq's main loop, each text is read only while no file has failed.
 	for ins.failures == 0 {
@@ -67,7 +67,7 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 		}
 		// A JSONC text's comments print with the values they are attached to, which only the interpreter's
 		// values know: a text with a `/` in it, a comment's or a string's, is the interpreter's.
-		if run.opts.jsonc && bytes.index_byte(src, '/') >= 0 {
+		if run.opts.from == .Jsonc && bytes.index_byte(src, '/') >= 0 {
 			run_filter(run, ins)
 			return
 		}
@@ -85,7 +85,7 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 				run_filter(run, ins)
 				return
 			}
-			if (ins.resume || !ins.lines_tried) && !run.opts.jsonc {
+			if (ins.resume || !ins.lines_tried) && run.opts.from != .Jsonc {
 				ins.resume = false
 				records_after(run, ins)
 			}
@@ -94,7 +94,7 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 		if read_on(ins, at) {
 			continue
 		}
-		if run.opts.jsonc {
+		if run.opts.from == .Jsonc {
 			jsonc_fault(ins, err.?, at)
 		}
 		run_filter(run, ins)

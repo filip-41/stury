@@ -6,7 +6,7 @@ package json
 // which holds the keys. The paths without one keep the walk's answers.
 
 import "base:runtime"
-import core_pkg "../core"
+import "scan/walk"
 
 // Answer the `Any` paths of `req` from its rows, building them first when `$KINDS` holds none. The build is
 // `.Strict`. A document it refuses (one a `.Structural` or `.Lazy` walk passed) keeps the walk's answers and
@@ -37,7 +37,7 @@ settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator
 	clear(&req.answers)
 	req.src, req.stop, req.coverage = src, nil, .Full
 	req.groups.grouped = false
-	core_pkg.adopt_allocator(&req.answers, alloc)
+	walk.adopt_allocator(&req.answers, alloc)
 	if _, err := append(&req.answers, ..kept[:]); err != nil {
 		return Error{kind = .Out_Of_Memory}
 	}
@@ -98,7 +98,7 @@ wild_path_answers :: proc(req: ^Request($KINDS), p: Path, i: int, nodes, holders
 		return false
 	}
 	for n, j in nodes {
-		owner := core_pkg.NO_OWNER if holders[j] == NO_NODE else u64(req.doc.rows[holders[j]].lo)
+		owner := walk.NO_OWNER if holders[j] == NO_NODE else u64(req.doc.rows[holders[j]].lo)
 		found := Path_Answer{owner = owner, query = u32(i), node = NO_NODE, outcome = .Found if n != NO_NODE else outcomes[j]}
 		if n != NO_NODE {
 			row := req.doc.rows[n]

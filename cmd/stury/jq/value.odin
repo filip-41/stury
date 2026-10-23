@@ -321,6 +321,17 @@ new_object :: proc() -> ^Object {
 	return new(Object)
 }
 
+// Returns an object of `keys` and their `vals`, one value per key, taking ownership of both. The keys must be
+// distinct.
+object_from :: proc(keys: [dynamic]string, vals: [dynamic]Value) -> ^Object {
+	o := new(Object)
+	o.keys, o.vals = keys, vals
+	if len(keys) >= INDEX_FROM {
+		reindex(o)
+	}
+	return o
+}
+
 // A container's own copy, one level deep: its members are shared. Scalars are returned as they are.
 own :: proc(v: Value) -> Value {
 	switch kind(v) {

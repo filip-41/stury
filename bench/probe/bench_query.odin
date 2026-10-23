@@ -1,45 +1,45 @@
 package main
 
-// Query lanes (`query_nodes`, `query_dom`): one reused request, as a program that scans many documents
-// keeps one. The warmup passes grow its output, so the timed scans append into capacity they already hold.
-// `scan` empties its output before it walks, so a rescan needs no teardown between iterations.
+// Query lanes (`query_nodes`, `query_dom`). Each reuses one request, as a program that scans many documents
+// would. The warm-up passes grow its output, so the timed scans append into existing capacity. `scan` empties
+// its output before it walks, so a rescan needs no teardown between iterations.
 
 import json "stury:json"
 import "core:fmt"
 import "core:os"
 import "core:time"
 
-// One scan; false for a configuration fault or a fault in the document.
+// Scans `data` once. Returns false on a configuration fault or a fault in the document.
 scan_ok :: proc(data: []byte, req: ^json.Request($Q)) -> bool {
 	return json.scan(data, req) == nil
 }
 
-// A fold of every value under `n`, read through the public readers: `get_number` on a number, `get_string` on a
-// string, `kind` alone on the rest. `.Dom` checks a number's grammar when it builds and converts it only
-// here, and borrows an unescaped string; this is the work a parser that converts while it parses has done
-// by the time its tree is built.
-read_every_value :: proc(doc: ^json.Document, n: json.Node) -> (acc: u64, ok: bool) {
-	switch kd := json.kind(doc, n) or_return; kd {
-	case .Number:
-		num := json.get_number(doc, n) or_return
-		return transmute(u64)num.value, true
-	case .String:
-		s := json.get_string(doc, n) or_return
-		return u64(len(s)), true
-	case .Object, .Array:
-		it := json.children(doc, n)
-		for c in json.children(&it) {
-			acc += read_every_value(doc, c) or_return
+// Folds every value of `doc` into `acc` through the public readers: `get_number` on a number, `get_string` on
+// a string, `kind` alone on the rest. `.Dom` checks a number's grammar when it builds but converts it only
+// here, and borrows an unescaped string, so the fold adds the conversions that a parser converting as it
+// parses has already done. Nodes are numbered from `ROOT` in document order up to the first one `kind`
+// refuses, so one loop reads them all. A recursive walk would also time the CPU's return prediction, which
+// costs more than the reads on a deep document.
+read_every_value :: proc(doc: ^json.Document) -> (acc: u64, ok: bool) {
+	for n := json.ROOT; ; n += 1 {
+		kd := json.kind(doc, n) or_break
+		switch kd {
+		case .Number:
+			num := json.get_number(doc, n) or_return
+			acc += transmute(u64)num.value
+		case .String:
+			s := json.get_string(doc, n) or_return
+			acc += u64(len(s))
+		case .Object, .Array:
+		case .True, .False, .Null:
+			acc += u64(kd)
 		}
-		return acc, true
-	case .True, .False, .Null:
-		return u64(kd), true
 	}
-	return 0, false
+	return acc, true
 }
 
-// One query lane: build the request, warm up, time TIMED_ITERS scans, print the tokens. With `read_all` (a
-// `.Dom` lane) each timed sample also reads every value of the built document.
+// Times one query lane: builds the request, warms up, times TIMED_ITERS scans and prints the tokens. With
+// `read_all` (a `.Dom` lane) each timed sample also reads every value of the built document.
 bench_query :: proc(data: []byte, level: json.Strictness, $Q: bit_set[json.Query], read_all := false) -> bool {
 	req: json.Request(Q)
 	req.strictness = level
@@ -60,7 +60,7 @@ bench_query :: proc(data: []byte, level: json.Strictness, $Q: bit_set[json.Query
 		}
 		when .Dom in Q {
 			if read_all {
-				acc, read := read_every_value(&req.doc, json.ROOT)
+				acc, read := read_every_value(&req.doc)
 				if !read {
 					return false
 				}

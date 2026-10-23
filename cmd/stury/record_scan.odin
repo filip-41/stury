@@ -11,35 +11,12 @@ package main
 // is printed in place of answers.
 
 import "base:runtime"
-import "core:mem/virtual"
-import "core:sync"
 import json "../../json"
 
-Record_Piece :: struct {
-	out:      [dynamic]byte,
-	ret:      int, // jq's result for the piece's last record, when it answered one
-	answered: bool,
-	done:     bool,
-	stop:     int, // the record the piece left to `scan_inputs`, or -1
-}
-
 Record_Scan :: struct {
-	run:     ^Run,
-	src:     []byte, // the file's records: its data from where they start
-	more:    bool, // another file follows
-	// The pieces by `json.each_record`'s number, each printed once those before it are, up to the first
-	// record left to `scan_inputs`, `stop`, or -1. A printed piece's buffer is a spare for another piece,
-	// since a fresh one costs more than a piece of small answers.
-	lock:    sync.Mutex,
-	arena:   virtual.Arena,
-	pieces:  [dynamic]Record_Piece,
-	spare:   [dynamic][dynamic]byte,
-	printed: int,
-	stop:    int,
-	// The output written while the lock is let go: its holder owns `writing`, with the held output swapped into
-	// `wbuf`, so that one thread writes at a time and in order, and the others go on appending to the run's.
-	writing: bool,
-	wbuf:    [dynamic]byte,
+	using output: Piece_Output,
+	src:          []byte, // the file's data from the first record on
+	more:         bool, // another file follows
 }
 
 // Answer the open file's records from byte `from` on, on the pool, up to the first record `scan_inputs` must
@@ -50,15 +27,12 @@ scan_records :: proc(run: ^Run, ins: ^Inputs, from: int) -> (stop: int) {
 	if runner == nil {
 		return from
 	}
-	job := Record_Scan{run = run, src = src, more = ins.next_file < len(ins.files), stop = -1}
-	job.pieces.allocator = virtual.arena_allocator(&job.arena)
-	job.spare.allocator = job.pieces.allocator
-	defer virtual.arena_destroy(&job.arena)
-	defer delete(job.wbuf)
-	reserve(&job.wbuf, cap(run.out))
+	job := Record_Scan{src = src, more = ins.next_file < len(ins.files)}
+	start_pieces(&job, run)
+	defer end_pieces(&job)
 	// The fault it returns is a piece's `err`, which `scan_piece` turns into a stop for the main thread's read.
 	_ = json.each_record(src, .NDJSON, scan_piece, &job, runner)
-	// A write a pool thread met failing ends the run here.
+	// A write that failed on a pool thread ends the run here.
 	check_output()
 	return from + job.stop if job.stop >= 0 else len(ins.data)
 }
@@ -69,12 +43,7 @@ scan_records :: proc(run: ^Run, ins: ^Inputs, from: int) -> (stop: int) {
 scan_piece :: proc(data: rawptr, piece: ^json.Records, k: int) -> bool {
 	job := (^Record_Scan)(data)
 	p := Record_Piece{done = true, stop = -1}
-	// Copied under the lock, as another piece may be printing through the run.
-	sync.lock(&job.lock)
-	run := job.run^
-	run.out = pop_safe(&job.spare) or_else make([dynamic]byte, 0, len(piece.src) - piece.pos, job.pieces.allocator)
-	sync.unlock(&job.lock)
-	run.held = true
+	run := begin_piece(job, k, len(piece.src) - piece.pos)
 	req: json.Request({.Path})
 	req.dialect, req.limits, req.paths = run.req.dialect, run.req.limits, run.req.paths
 	req.allocator = runtime.heap_allocator()
@@ -118,34 +87,7 @@ scan_piece :: proc(data: rawptr, piece: ^json.Records, k: int) -> bool {
 		p.stop = int(e.offset)
 	}
 	p.out, p.ret = run.out, run.ret
-	sync.lock(&job.lock)
-	defer sync.unlock(&job.lock)
-	if k >= len(job.pieces) {
-		resize(&job.pieces, k + 1)
-	}
-	job.pieces[k] = p
-	for ; job.stop < 0 && job.printed < len(job.pieces) && job.pieces[job.printed].done; job.printed += 1 {
-		q := &job.pieces[job.printed]
-		if q.answered {
-			append(&job.run.out, ..q.out[:])
-			job.run.ret = q.ret
-		}
-		clear(&q.out)
-		append(&job.spare, q.out)
-		job.stop = q.stop
-	}
-	// The held output is written with the lock let go, so another piece can be printed meanwhile, and only by
-	// one thread at a time, so that what is written stays in order.
-	for !job.writing && output_due(job.run) {
-		job.writing = true
-		job.run.out, job.wbuf = job.wbuf, job.run.out
-		sync.unlock(&job.lock)
-		write_out(job.wbuf[:], worker = true, pool = &job.run.pool)
-		clear(&job.wbuf)
-		sync.lock(&job.lock)
-		job.writing = false
-	}
-	return p.stop < 0
+	return publish_piece(job, k, p)
 }
 
 @(private = "file")

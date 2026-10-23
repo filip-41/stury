@@ -1,16 +1,17 @@
-"""jq_compare.sh's report: whether every tool printed stury's answer, then the timings.
+"""Writes the report for jq_compare.sh and csv_compare.sh: whether every tool printed stury's answer, then
+the timings.
 
     python3 bench/cli/jq_report.py OUT_DIR
 
 OUT_DIR/answers holds CASE.TOOL.txt, one file per tool's stdout. A case whose name ends in `_raw` prints raw
-strings, compared line by line. Every other case prints JSON values, compact or pretty, compared decoded,
-so a tool's own spelling of the same value (escapes, `1E+2` for `1e2`, yq's `396` for `396.0`) agrees. A
-tool whose values agree only as a multiset is reported as reordered (gojq iterates an object's members in
-key order) and passes, and so is one whose numbers agree only once read as float64 (yq respells
-`43.420273000000009` as `43.42027300000001`, the same double with the literal's digits lost).
-OUT_DIR/CASE.roundN.json are hyperfine's exports, one per round; the table is each tool's median over every
-round's timings and its ratio to stury's. The summary gives, per tool, the geometric mean and the smallest of
-those ratios over the cases it answered as stury did, and how many cases it did not.
+strings, compared line by line. Every other case prints JSON values, compact or pretty, compared after
+decoding, so different spellings of one value (escapes, `1E+2` for `1e2`, yq's `396` for `396.0`) are equal.
+A tool whose values match only as a multiset passes as "reordered" (gojq iterates an object's members in key
+order). A tool whose numbers match only when read as float64 passes as "same as float64" (yq writes
+`43.420273000000009` as `43.42027300000001`: the same double, without the literal's digits).
+OUT_DIR/CASE.roundN.json are hyperfine's exports, one per round. The table gives each tool's median over all
+rounds and its ratio to stury's. The summary gives, per tool, the geometric mean and the minimum of those
+ratios over the cases where it matched stury, and the number of cases where it did not.
 Writes OUT_DIR/report.md and exits 1 when any tool's answer differs.
 """
 import collections
@@ -46,15 +47,15 @@ def as_float(d):
 
 
 def number(d):
-    """A number by its value: every spelling of one value is one string. The context is wide enough to keep
-    every digit, so two long numbers that differ late do not round to one."""
+    """Returns one string for every spelling of D's value. The context keeps every digit, so two long numbers
+    that differ only in late digits stay distinct."""
     digits = len(d.as_tuple().digits)
     ctx = decimal.Context(prec=digits + 1, Emax=decimal.MAX_EMAX, Emin=decimal.MIN_EMIN)
     return "number:" + str(d.normalize(ctx))
 
 
 def check(root):
-    """{case: {tool: verdict}}, and whether every tool agreed with stury."""
+    """Returns ({case: {tool: verdict}}, whether every tool matched stury)."""
     files = collections.defaultdict(dict)
     for name in sorted(os.listdir(root)):
         case, tool, _ = name.rsplit(".", 2)
@@ -84,7 +85,7 @@ def check(root):
 
 
 def medians(out, case):
-    """{tool: median seconds} over every round of CASE."""
+    """Returns {tool: median seconds} over every round of CASE."""
     times = collections.defaultdict(list)
     for path in glob.glob(os.path.join(out, case + ".round*.json")):
         with open(path) as f:

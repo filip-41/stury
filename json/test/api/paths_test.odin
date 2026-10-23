@@ -465,7 +465,7 @@ test_path_step_bound_is_one_refusal :: proc(t: ^testing.T) {
 
 				_, set_err := json.set(src, spec, 2, context.temp_allocator)
 				_, remove_err := json.remove(src, spec, context.temp_allocator)
-				for edit_result, op in ([]Maybe(json.Edit_Error){set_err, remove_err}) {
+				for edit_result, op in ([]Maybe(json.Path_Error){set_err, remove_err}) {
 					if over {
 						edit_err(t, edit_result, .Over_Capacity)
 					} else {

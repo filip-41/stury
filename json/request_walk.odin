@@ -3,18 +3,18 @@ package json
 // The walk over a request: its outputs reset, its queries built, the scanner run, its answers settled.
 
 import "base:runtime"
-import core_pkg "../core"
+import "scan/walk"
 import scan_pkg "scan"
 
 // The most queries one scan hands the walk: every walk kind once but `.Unique`, which answers none, plus
 // the repeatable `.Path`.
 @(private = "file")
-MAX_WALK_QUERIES :: len(scan_pkg.Walk_Kind) - 1 + core_pkg.MAX_PATH_QUERIES
+MAX_WALK_QUERIES :: len(scan_pkg.Walk_Kind) - 1 + walk.MAX_PATH_QUERIES
 
 @(private = "file")
 duplicates_resolution :: proc(d: Duplicates) -> scan_pkg.Resolution {
 	switch d {
-	case .Last:  return .Last
+	case .Default, .Last: return .Last
 	case .First: return .First
 	case .All:   return .All
 	// Every repeat refuses, so the first occurrence is the answer whenever there is one.
@@ -27,7 +27,7 @@ duplicates_resolution :: proc(d: Duplicates) -> scan_pkg.Resolution {
 // follow the walk. The rest of the sink is left unset, and the walk never reads it. An out-parameter: a
 // sink returned by value is zeroed whole.
 @(private = "file")
-sink_of :: #force_inline proc(req: ^Request($KINDS), sink: ^core_pkg.Scan_Query_Sink, $K: bit_set[scan_pkg.Walk_Kind]) {
+sink_of :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query_Sink, $K: bit_set[scan_pkg.Walk_Kind]) {
 	when .Path in K {
 		sink.paths = req.answers
 		sink.paths_retracted = 0
@@ -38,13 +38,13 @@ sink_of :: #force_inline proc(req: ^Request($KINDS), sink: ^core_pkg.Scan_Query_
 }
 
 @(private = "file")
-sink_store :: #force_inline proc(req: ^Request($KINDS), sink: core_pkg.Scan_Query_Sink, $K: bit_set[scan_pkg.Walk_Kind]) {
+sink_store :: #force_inline proc(req: ^Request($KINDS), sink: walk.Scan_Query_Sink, $K: bit_set[scan_pkg.Walk_Kind]) {
 	when .Path in K { req.answers = sink.paths }
 	when .Nodes in K { req.doc.rows = sink.nodes }
 	when .Dom in K {
 		// `req` still holds the header the scan started from.
 		values := sink.value_bytes
-		core_pkg.value_bytes_trim(&values, cap(req.doc.values))
+		walk.value_bytes_trim(&values, cap(req.doc.values))
 		req.doc.values = values
 	}
 }
@@ -62,7 +62,7 @@ output_reset :: #force_inline proc(req: ^Request($KINDS), $K: bit_set[scan_pkg.W
 		clear(&doc.members)
 		clear(&doc.member_at)
 		clear(&doc.facts)
-		core_pkg.name_arena_reset(&doc.arena)
+		walk.name_arena_reset(&doc.arena)
 	}
 	when .Dom in K { clear(&req.doc.values) }
 }
@@ -73,8 +73,8 @@ output_reset :: #force_inline proc(req: ^Request($KINDS), $K: bit_set[scan_pkg.W
 scan_rows :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> scan_pkg.Walk_Fault {
 	req.route.matcher, req.route.n_auto, req.route.gate.gated = .None, 0, 0
 	// Sized to the document's usual density, before the scan seeds it larger (`seed_row_cap`).
-	core_pkg.adopt_allocator(&req.doc.rows, alloc)
-	_ = core_pkg.edge_reserve(&req.doc.rows, len(src) / core_pkg.SEEDED_ROW_BYTES)
+	walk.adopt_allocator(&req.doc.rows, alloc)
+	_ = walk.edge_reserve(&req.doc.rows, len(src) / walk.SEEDED_ROW_BYTES)
 	return scan_walk(src, req, {.Nodes}, alloc)
 }
 
@@ -95,10 +95,10 @@ scan_walk :: proc(src: []byte, req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Wa
 	// The matcher writes its rows, and the slots' answers, into `answers`. `outputs_fault` agreed its
 	// allocator.
 	if plan.matcher != .None {
-		core_pkg.adopt_allocator(&req.answers, alloc)
+		walk.adopt_allocator(&req.answers, alloc)
 	}
 
-	sink: core_pkg.Scan_Query_Sink = ---
+	sink: walk.Scan_Query_Sink = ---
 	sink_of(req, &sink, K)
 	queries: [MAX_WALK_QUERIES]scan_pkg.Scan_Query = ---
 	nq := walk_queries(req, &sink, &queries, WALK, alloc)
@@ -121,7 +121,7 @@ scan_walk :: proc(src: []byte, req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Wa
 // Fill `queries` with what `$WALK` asks of the scanner, and return how many: each automaton path under its
 // own index in `req.paths`, then the rows, the decoded values, and the demand matcher.
 @(private = "file")
-walk_queries :: #force_inline proc(req: ^Request($KINDS), sink: ^core_pkg.Scan_Query_Sink, queries: ^[MAX_WALK_QUERIES]scan_pkg.Scan_Query, $WALK: bit_set[scan_pkg.Walk_Kind], alloc: runtime.Allocator) -> (nq: int) {
+walk_queries :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query_Sink, queries: ^[MAX_WALK_QUERIES]scan_pkg.Scan_Query, $WALK: bit_set[scan_pkg.Walk_Kind], alloc: runtime.Allocator) -> (nq: int) {
 	plan := &req.route
 	for pi in plan.auto[:plan.n_auto] {
 		queries[nq] = scan_pkg.Scan_Query{kind = .Path, allocator = alloc, sink = sink, path = req.paths[pi], tag = pi}
@@ -137,7 +137,7 @@ walk_queries :: #force_inline proc(req: ^Request($KINDS), sink: ^core_pkg.Scan_Q
 	}
 	when .Demand in WALK {
 		store := route_store(plan, plan.n_keys)
-		spec := core_pkg.Demand_Spec{keys = store.keys, depth = plan.depth}
+		spec := walk.Demand_Spec{keys = store.keys, depth = plan.depth}
 		when .Gate in WALK {
 			spec.gate = &plan.gate
 		}
@@ -158,7 +158,7 @@ walk_queries :: #force_inline proc(req: ^Request($KINDS), sink: ^core_pkg.Scan_Q
 walk_facts :: #force_inline proc(req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Walk_Kind], alloc: runtime.Allocator) -> ^[dynamic]Fact {
 	when .Nodes in WALK {
 		if req.dialect == .Jsonc {
-			core_pkg.adopt_allocator(&req.doc.facts, alloc)
+			walk.adopt_allocator(&req.doc.facts, alloc)
 			return &req.doc.facts
 		}
 	}
@@ -219,7 +219,7 @@ walk_attach_facts :: #force_inline proc(req: ^Request($KINDS), src: []byte, fact
 // The answers the matcher and the sweep owe after the walk: the slots' and names' misses, then the pass that
 // drops retracted rows, cuts limits and fills nodes.
 @(private = "file")
-walk_answers :: #force_inline proc(req: ^Request($KINDS), sink: ^core_pkg.Scan_Query_Sink, $WALK: bit_set[scan_pkg.Walk_Kind], err: Maybe(Error), fault: ^scan_pkg.Walk_Fault) {
+walk_answers :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query_Sink, $WALK: bit_set[scan_pkg.Walk_Kind], err: Maybe(Error), fault: ^scan_pkg.Walk_Fault) {
 	plan := &req.route
 	if plan.matcher == .Slots {
 		// The automaton owes a miss only to a walk that reached the end.

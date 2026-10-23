@@ -22,8 +22,8 @@ Terms such as *walk*, *lane*, *frame* and *type plan* are defined in the [Vocabu
 - [**§6 Edits**](#6-edits) — `splice`, why `set` needs no re-validation, and `insert`/`remove`.
 - [**§7 `unmarshal`**](#7-unmarshal) — the type table, fields and duplicates, strictness, ownership, errors,
   and the walk engine.
-- [**§8 Across formats**](#8-across-formats-forward-design-not-built) — the forward design for a second output
-  format.
+- [**§8 Across formats**](#8-across-formats) — how `core` is shared, how `stury:csv` is built on it, and the
+  design for further formats.
 - [**§9 How the CLI runs a filter**](#9-how-the-cli-runs-a-filter) — path scan versus interpreter, and large
   inputs.
 - [**§10 Build-time options**](#10-build-time-options) — the `-define:` knobs.
@@ -61,8 +61,8 @@ other byte is copied. The read direction pairs with `marshal`: `unmarshal` reads
 the same `Type_Plan`. Tags, field order and `omitempty` therefore cannot drift between the two directions.
 
 The rows are the format-neutral layer. A writer receives structure (open, key, value, close) and scalars. The
-JSON writer is the only one. [§8](#8-across-formats-forward-design-not-built) is the forward design that keeps
-a second writer possible without reworking this one.
+JSON and CSV have writers. [§8](#8-across-formats) says what they share and how a further one is added
+without reworking either.
 
 ### Vocabulary
 
@@ -195,6 +195,8 @@ That is checked over random strings and every byte value in every position of a 
 
 ### 3.2 Integers
 
+Integer and float spelling lives in `core/spell`, which the JSON and CSV writers share.
+
 `i64` and `u64` write left to right straight into the destination, in groups of eight digits from a two-digits
 table. `i128` and `u128` (marshal only) use `strconv.write_bits_128` (base 10, no leading `+`). The output is
 decimal digits with an optional leading `-`: no exponent, no fraction, no leading zeros.
@@ -206,7 +208,7 @@ Non-finite values are `Non_Finite` and write nothing. A finite value is written 
 1. **Digits.** The shortest decimal that round-trips, from a line-by-line port of zmij's `to_decimal`.
    - zmij is the `zmij` crate 1.0.23 (MIT), itself a port of vitaut/zmij (a Schubfach variant).
    - Its `POW10_SIG`, `EXP_SHIFT` and `EXP_STRING` tables are generated exactly by
-     `json/encode/zmij_tables.py`.
+     `core/spell/zmij_tables.py`.
    - The generator also repeats the crate's own table rebuild and checks every entry against the exact one.
    - Subnormals take a separate arm.
    - `core:strconv.write_float` is not used on this path: it formats through multi-precision decimal
@@ -675,9 +677,81 @@ framer.
 - A reader failure other than `.EOF` is `read_err`. Records framed before it are yielded, the bytes after them
   are not.
 
-## 8. Across formats (forward design, not built)
+## 8. Across formats
 
-The one forward note: how a later format (TOML, CSV) joins without reworking this one.
+`core` holds what the formats share and what a caller who works with several of them names once: `Strictness`,
+paths (`Path`, `Step`, `MAX_PATH_STEPS`), `Duplicates`, `Enum_Spelling`, `Unknown_Fields`, `Tag_Name`, the hooks
+(`Unmarshal_Hook`, `Type_Hook(W)` over a format's writer proc), the type plan (`Type_Plan`, `Hooked_Plan(W)`,
+`Plan_Cache`), the read shape and its lowering, the judged scalar stores, `Number`, `Batch_Runner`,
+`Stream_Window`, and the errors and their rendering. A format aliases the names it exposes. JSON's walk
+substrate is JSON's own and lives in `json/scan/walk`: the scan cursor and its caps (`Limits`, `MAX_DEPTH`),
+the rows, the query context and its matchers (path automaton, demand) and the typed walk's state
+(`Shape_Run`). A format annotates the lowered shape for its walk (`Plan_Format.lowered`). Before the shape is
+checked, it may set an op its walk cannot read back to `.Unsupported`. The union lowering picks an arm per
+`Value_Class`; the JSON walk's first-byte classes number the classes.
+
+A format plugs into `core` in four places:
+
+- **Its plan.** A `Plan_Format` says the struct tag key a field is named by (`json`, `csv`), how a name is
+  spelled in a role (`spell`: `.Member`, `.Value`, `.Tag`; a name it cannot spell is `.Bad_Name`), its own types
+  (`types`, each compiled to a `Shape_Kind`) and the annotation of the lowered shape for its walk (`lowered`,
+  nil for none). `hooked_plan_init(T, opts, hooks, format, allocator)` compiles a `Type_Plan` from it, and the
+  format keeps a thread-local `Plan_Cache` that `plan_for` and `plan_done` serve.
+- **Its reader.** `read_shape_of(&plan.base)` lowers the plan to a `Read_Shape`. The format's walk fills values
+  by it through the judged stores in `core` (`shape_int_store` and the rest). A cell and a JSON number are
+  therefore refused for the same reasons, with the same `Unmarshal_Error` and path.
+- **Its errors.** The faults of a text are `core.Error` and `Error_Kind`, one enum for all formats. A format
+  reports only the kinds it has (CSV never reports `Bad_Number` or `Too_Deep`, JSON never `Field_Count`), and
+  each format's docs list them. `Unmarshal_Error`, `Path_Error` and `Marshal_Error` are core types the format
+  aliases. `core.render_error` writes any of them as `line:col: kind at path`.
+- **Its policies.** A repeated key is `core.Duplicates`. Its zero value `.Default` means the format's default.
+  JSON resolves it to `.Last` (as jq does) at the request's pre-flight, so no walk sees it. CSV treats it as
+  `.Refuse` where it matches the header's names to fields (`read_header`). A format documents its default and
+  the scope the policy covers (a JSON object, a CSV header).
+
+`stury:csv` is the second format. It shares the typed codec's neutral half in `core`: the type plan, compiled
+through a `Plan_Format` (`csv` tag key, names spelled as written, no format types, no `lowered`), the read-shape
+lowering, the judged scalar stores and `Unmarshal_Error`. It owns its scanner (`csv/scan.odin`: quote,
+separator and LF masks per 64-byte block, with every byte judged) and its cell reader and writer. It builds no
+rows. A record is a list of field spans, and a typed row is filled cell by cell from the header's column map.
+
+A dialect is a scan mode (`Scan_Mode`: unquoted, escapes, comments, no UTF-8 check), a compile-time parameter
+of `scan_block` picked once per call, so the RFC 4180 scan has no code for the other modes. An unquoted
+mode drops the quote masks. Escapes are judged by a cold scalar pass in a block that holds a backslash, and a
+comment dialect reads a block that holds the comment byte, or opens inside a comment line, a byte at a time.
+`unmarshal` under `.Lazy` keeps the UTF-8 gate but defers its fault (`Carry.utf8`), judged per record over the
+cells a field reads. The writer is generic over quoting and a comment byte the same way.
+
+A `Document` (`csv/document.odin`) is `records` kept: the header's spans and every row's, flat, 16 bytes a
+field, sized from the first row so that the array grows once. A cell is decoded when it is read, and one that
+holds a `""` or an escape is decoded once and kept by the document. `find` and `find_column` (`csv/find.odin`)
+take core's path syntax (`.[3].name`, `.[3][1]`, `.[].name`) and run `records` to the end of the named record.
+A path reads the bytes before it and keeps no row. The edits (`csv/edit.odin`) build their result from the
+source and the spans of a record scan. A cell is respelled by the writer `marshal` uses (`edit_spell.odin`),
+and every other byte is copied. The source is validated first, so a fault is located in it. The result is not
+validated again: a respelled cell is one field, and a removed or inserted record leaves whole records. An edit
+whose result would not read back as the same table (a lone empty field, a first field starting with the
+comment byte, a new BOM) is refused as `.Unplaceable`. `splice` takes arbitrary spans, so it validates its
+result.
+
+A cell hook is a core `.Hook` op, as in JSON: the plan holds the user's `Unmarshal_Hook` in the neutral hook
+table and its `Marshal_Hook` beside it. The writer sends the kinds `put_cell` has no case for to a cold
+`put_other`, so hooks add no cost to the plain kinds. `unmarshal_check` is `unmarshal` instantiated with a
+`$CHECK` parameter that judges every cell and stores none. `marshal_to_writer` writes records in chunks sized
+by the previous chunk, keeping the last break byte so a non-empty buffer marks the output as begun.
+
+`csv.each_record` and a threaded `csv.validate` cut the text into pieces that each start after an LF outside
+quotes. There the scan's state equals its state at the input's start, so a piece is judged alone, with the
+first record's field count, which is read before the pieces. Under `Quoting.None` every LF is such a break.
+Under `Quoting.Quotes`, up to the text's first fault, a byte is inside quotes exactly when an odd number of
+quotes precedes it, since every quote opens or closes one (`""` is a close and an open). A first pass counts
+the quotes of each 32 KiB slice, and a piece starts at the first LF after its slice's offset with an even count
+before it. The first fault found in piece order is the text's first fault. A comment byte under quotes
+leaves one piece, since a comment line's quotes do not open fields. `records_from` runs the same `Records` over a
+window that holds the open line and a chunk: a block is scanned once the window holds it and the three bytes a
+UTF-8 check reads past it, and `Limits.max_record_bytes` bounds the open line.
+
+The rest is forward design: how a later format (TOML) joins, and how formats would share rows.
 
 - **Shared:** the rows (structure plus spans), the query engine, and the writer protocol (open, key, scalar,
   close).
@@ -721,6 +795,26 @@ then painted.
 is answered in pieces on a `host.Batch_Pool` kept for the run. The pieces start with the first line. `stury
 check --ndjson` validates the same lines with `validate_records`. `--jsonc` reads with `dialect = .Jsonc` and
 prints answers as JSONC.
+
+**CSV and TSV.** A filter that is only columns (`.name`, `.a, .b`, `[.a, .b]` under `-c`; `choose_columns`) skips
+the interpreter. Each record's cells are decoded and written from their spans (`print_cells`), and the header's
+columns are resolved once per file. A whole file larger than two workers' worth is printed by `csv.each_record`'s
+pieces on the batch pool, through the same ordered per-piece buffers as line-delimited JSON (`Piece_Output`). On a
+fault in a piece, the file is read again sequentially from its start, so the message is the sequential read's.
+An object of columns (`{a, b: .c}`, `.` under `-c`, or `--to csv|tsv`) is printed the same way. The piece that
+prints first writes the table's header (`Piece_Output.table_due`). `select(F)`, when F reads only `.name` keys
+of the record (`only_columns`), runs the interpreter on an object of just those cells and prints the whole
+record for each output. The pieces do this on the pool, each with its own arena. A record whose filter fails
+stops its piece, and the main thread runs that record and the rest of the file, so the message is the
+interpreter's. Other filters take the interpreter over `csv.records` (a whole file) or `csv.records_from` (a stream).
+
+`--to csv|tsv` makes every output a record. The interpreter's `print_jq` passes each output to `print_row`
+(`output_cells.odin`), which converts it to cells and appends the record with `csv.write_record`, the writer
+`marshal` uses. The header is written with the first object; `--grow-header` holds the rows until the end of the
+input. The column route writes through the same `put_row`, so the bytes agree. The record writer refuses a
+record it cannot write. The BOM check applies only to the output's first cell: the pool is skipped when that
+cell starts with a BOM (`opens_with_bom`), and `rows_begun` carries the state across pieces and flushes. `stury check
+--from csv|tsv` is `csv.validate` with the sequential read run again over the fault it found, for the message.
 
 **Streams.** A pipe or an `--unbuffered` stdin is read by a thread in 64 KiB blocks, up to 8 MiB ahead, and
 each window of whole lines that has come is answered before the next (line-delimited records run on the batch

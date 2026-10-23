@@ -12,6 +12,7 @@ package lex
 
 import "base:intrinsics"
 import "core:simd"
+import bits "../../../core/bits"
 
 // Sixteen-byte window at p. Caller guarantees p + 16 <= len(src).
 // `p` is a cursor, so the load is unaligned. Callers gate on that bound
@@ -22,38 +23,10 @@ load16 :: #force_inline proc(src: []byte, p: u64) -> #simd[16]u8 {
 	}
 }
 
-// The utf8_lookup4 tables, expressed on portable core:simd: nibble lookup via
-// `simd.runtime_swizzle` (hardware `tbl` on ARM, `pshufb` on x86, one source),
-// then the multibyte length check. Bit meanings: 0 too-short, 1 too-long,
-// 2 overlong-3, 3 too-large, 4 surrogate, 5 overlong-2, 6
-// too-large-1000/overlong-4, 7 two-continuations.
-@(rodata) UTF8_TBL_A: #simd[16]u8 = {2,2,2,2,2,2,2,2, 128,128,128,128, 33,1,21,73}
-@(rodata) UTF8_TBL_B: #simd[16]u8 = {231,163,131,131, 139,203,203,203, 203,203,203,203, 203,219,203,203}
-@(rodata) UTF8_TBL_C: #simd[16]u8 = {1,1,1,1,1,1,1,1, 230,174,186,186, 1,1,1,1}
-
-// The part of `utf8_err` that reads each byte against the one before it. It is the whole result when no
-// byte of `v` and none of the last three of `prev` is 0xE0 or more: only a three- or four-byte lead makes
-// the bytes two and three back matter.
-utf8_pairs_err :: #force_inline proc(prev, v: #simd[16]u8) -> #simd[16]u8 {
-	m0f : #simd[16]u8 = 0x0f
-	p1 := simd.shuffle(prev, v, 15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30)
-	return simd.runtime_swizzle(UTF8_TBL_A, simd.shr(p1, 4)) &
-		simd.runtime_swizzle(UTF8_TBL_B, simd.bit_and(p1, m0f)) &
-		simd.runtime_swizzle(UTF8_TBL_C, simd.shr(v, 4))
-}
-
-// RFC 3629 consistency of the window `v`, whose first byte the span guarantees
-// is a character boundary. A refused window is not a result: the byte loop
-// re-derives any fault from the same bytes.
-utf8_err :: #force_inline proc(prev, v: #simd[16]u8) -> #simd[16]u8 {
-	b80 : #simd[16]u8 = 0x80
-	s60 : #simd[16]u8 = 0x60
-	s70 : #simd[16]u8 = 0x70
-	p2 := simd.shuffle(prev, v, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29)
-	p3 := simd.shuffle(prev, v, 13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28)
-	must23 := simd.saturating_sub(p2, s60) | simd.saturating_sub(p3, s70)
-	return simd.bit_and(must23, b80) ~ utf8_pairs_err(prev, v)
-}
+utf8_pairs_err :: bits.utf8_pairs_err
+utf8_err :: bits.utf8_err
+any_lane :: bits.any_lane
+any_high :: bits.any_high
 
 // Lane of the first stop byte in a 16-byte window, from that window's own stop mask (never empty: the
 // caller knows the window holds a stop). The mask must be the chosen window's, not the fold of three: a
@@ -178,25 +151,6 @@ Span_Judge :: enum u8 {
 	Clean,
 	Stop,
 	Fault,
-}
-
-// Whether any lane is non-zero. `reduce_any` lowers on NEON to an OR tree through the scalar side (nine
-// instructions on the branch's path). `reduce_max` is one `umaxv`. On x86 the OR is one `ptest`, where the
-// maximum takes seven instructions through `phminposuw`.
-any_lane :: #force_inline proc "contextless" (v: #simd[16]u8) -> bool {
-	when ODIN_ARCH == .amd64 {
-		return simd.reduce_or(v) != 0
-	}
-	return simd.reduce_max(v) != 0
-}
-
-// Whether any lane is 0x80 or above: `umaxv` on NEON, the lanes' top bits (`pmovmskb`) on x86, where the
-// maximum is a shuffle tree.
-any_high :: #force_inline proc "contextless" (v: #simd[16]u8) -> bool {
-	when ODIN_ARCH == .amd64 {
-		return simd.extract_msbs(v) != {}
-	}
-	return simd.reduce_max(v) >= 0x80
 }
 
 // `prev` is the window before `v` (zero where `v` follows a character boundary), `stop` the stop lanes of

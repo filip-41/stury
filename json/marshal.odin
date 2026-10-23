@@ -1,23 +1,24 @@
 package json
 
-// `marshal`: an Odin value written canonically, by running its type plan. The plan owns structure, so
+// `marshal` writes an Odin value as canonical JSON by running its type plan. The plan fixes the structure, so
 // writes go through the put layer with no per-value state check.
 //
-// Every `data` is the address of a value of the type its op was compiled for: the root is `v`'s type (a
-// plan for another is `.Plan_Mismatch`), a field sits at its type-info offset, an element `stride` apart
-// below its count. The `#no_bounds_check` writers store only into room `enc.put_room` reserved: the key plus
-// FIELD_VALUE_ROOM for a scalar, which covers an integer's MAX_INT_DIGITS bytes, F64_ROOM and the 8-byte
-// `true`/`false` word, and 3 bytes for `close_object`. `ptrs` has MAX_DEPTH slots, and a target is pushed only below that
-// depth.
+// Every `data` is the address of a value of the type its op was compiled for. The root has `v`'s type; a
+// plan for another type is `.Plan_Mismatch`. A field is at its type-info offset, and the elements are `stride`
+// apart, up to their count. The `#no_bounds_check` writers store only into room that `enc.put_room` reserved.
+// For a scalar that is the key plus FIELD_VALUE_ROOM, which covers `spell.INT_ROOM`, `spell.F64_ROOM` and the
+// 8-byte `true`/`false` word; `close_object` takes 3 bytes. `ptrs` has MAX_DEPTH slots, and a target is pushed
+// only below that depth.
 
 import "base:intrinsics"
 import "base:runtime"
 import "core:io"
 import "core:reflect"
-import "core:strconv"
 import "core:unicode/utf8"
 import enc "encode"
 import core_pkg "../core"
+import "scan/walk"
+import "../core/spell"
 
 // Write a value as JSON into a new buffer from `allocator`: a `^Document` as `marshal_document` writes it
 // (a `Document` met as an `any` too), any other value by its type plan (`marshal_value`). A refusal returns
@@ -61,7 +62,7 @@ MARSHAL_BUF_START :: 256
 // `allocator`, freed before return.
 @(private, require_results)
 marshal_value_to_writer :: proc(w: io.Writer, v: any, opts := Encode_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> Encode_Error {
-	buf, aerr := make([dynamic]u8, 0, 2 * enc.SINK_FLUSH_AT, allocator)
+	buf, aerr := make([dynamic]u8, 0, 2 * spell.SINK_FLUSH_AT, allocator)
 	if aerr != nil {
 		return .Out_Of_Memory
 	}
@@ -147,7 +148,7 @@ marshal_append :: proc(dst: ^[dynamic]u8, v: any, opts: Encode_Opts, plan: ^Type
 		err = enc.reescape_tail(dst, mark, flags)
 	}
 	if err != .None {
-		core_pkg.edge_publish(dst, min(mark, len(dst^)))
+		walk.edge_publish(dst, min(mark, len(dst^)))
 	}
 	return err
 }
@@ -203,10 +204,8 @@ write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Encode_Error {
 		return enc.put_bytes(st.out, "null")
 	case .Bool, .Int, .Uint, .Float:
 		return put_scalar(st.out, op.kind, data, op.size)
-	case .Wide_Int:
-		return put_wide(st.out, (^u128)(data)^, true)
-	case .Wide_Uint:
-		return put_wide(st.out, (^u128)(data)^, false)
+	case .Wide_Int, .Wide_Uint:
+		return put_wide(st.out, data, op.kind == .Wide_Int)
 	case .String:
 		return enc.put_string(st.out, (^string)(data)^)
 	case .Cstring, .Rune, .Union, .Any, .Enum_Int, .Enum_Uint:
@@ -241,10 +240,10 @@ write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Encode_Error {
 	return .None
 }
 
-// The arms of `write_value` with locals of their own: a rune's bytes, a union's arm, an `any`'s plan, an enum's
-// member. Every level of a nested write holds a `write_value` frame, and a value nested MAX_DEPTH deep must fit
-// a Windows thread's 1 MB stack, so these arms stay out of that frame, as do the callees marked
-// `#force_no_inline` for it (`write_map`, `write_bit_set`, `write_decoded`, `put_wide`).
+// Writes the `write_value` cases that need locals of their own: a rune's bytes, a union's variant, an `any`'s
+// plan and an enum's member. Each level of a nested write holds a `write_value` frame, and a value nested
+// MAX_DEPTH deep must fit a Windows thread's 1 MB stack. These cases therefore stay out of that frame, as do
+// the callees marked `#force_no_inline` (`write_map`, `write_bit_set`, `write_decoded`, `put_wide`).
 @(private = "file")
 write_rare_value :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
 	#partial switch op.kind {
@@ -314,8 +313,7 @@ write_hooked :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Erro
 write_bit_set :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
 	lower := runtime.type_info_base(op.info).variant.(runtime.Type_Info_Bit_Set).lower
 	elem := st.plan.ops[op.elem]
-	bits: u128
-	runtime.mem_copy_non_overlapping(&bits, data, int(op.size))
+	bits := bit_set_bits(op, data)
 	open_container(st, '[') or_return
 	n := 0
 	for ; bits != 0; bits &= bits - 1 {
@@ -337,6 +335,13 @@ write_bit_set :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawp
 	return close_container(st, ']', n)
 }
 
+// Returns the `op.size` bytes of the bit_set `op` at `data`.
+@(private)
+bit_set_bits :: proc(op: Plan_Op, data: rawptr) -> (bits: u128) {
+	runtime.mem_copy_non_overlapping(&bits, data, int(op.size))
+	return
+}
+
 // The arm the union `op` at `data` holds, as an index into its arm run, or -1 for nil.
 @(private)
 union_arm_of :: proc(op: Plan_Op, data: rawptr) -> int {
@@ -348,7 +353,7 @@ union_arm_of :: proc(op: Plan_Op, data: rawptr) -> int {
 	if reflect.type_info_union_is_pure_maybe(u) {
 		return 0 if (^rawptr)(data)^ != nil else -1
 	}
-	tag := int(read_uint(rawptr(uintptr(data) + u.tag_offset), u8(u.tag_type.size)))
+	tag := int(core_pkg.shape_uint_load(rawptr(uintptr(data) + u.tag_offset), u8(u.tag_type.size)))
 	return tag if u.no_nil else tag - 1
 }
 
@@ -357,35 +362,22 @@ union_arm_of :: proc(op: Plan_Op, data: rawptr) -> int {
 put_enum_int :: proc(dst: ^[dynamic]u8, p: ^Type_Plan, op: Plan_Op, data: rawptr) -> Encode_Error {
 	enum_member(p, op, data) or_return
 	if op.kind == .Enum_Int {
-		return enc.put_i64(dst, read_int(data, op.size))
+		return enc.put_i64(dst, core_pkg.shape_int_load(data, op.size))
 	}
-	return enc.put_u64(dst, read_uint(data, op.size))
+	return enc.put_u64(dst, core_pkg.shape_uint_load(data, op.size))
 }
 
 // The member an enum value is: the first declared with its value.
 @(private)
 enum_member :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, data: rawptr) -> (Plan_Member, Encode_Error) {
-	v := read_int(data, op.size) if op.kind == .Enum_Int else i64(read_uint(data, op.size))
-	return enum_member_of(p, op, v)
+	return enum_member_of(p, op, core_pkg.plan_enum_value(op, data))
 }
 
 // The first member declared with value `v`.
 @(private)
 enum_member_of :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, v: i64) -> (Plan_Member, Encode_Error) {
-	members := p.members[op.elem:][:op.count]
-	if op.flat {
-		if u64(v) < u64(op.count) {
-			return members[v], .None
-		}
-		return {}, .Not_A_Member
-	}
-	// A linear scan of a sparse enum's members.
-	for m in members {
-		if m.value == v {
-			return m, .None
-		}
-	}
-	return {}, .Not_A_Member
+	m, ok := core_pkg.plan_enum_member(p, op, v)
+	return m, .None if ok else .Not_A_Member
 }
 
 @(private)
@@ -432,7 +424,7 @@ open_container :: proc(st: ^Marshal_Out, open: u8) -> Encode_Error {
 // Streaming, this is where `out` goes to the writer: every open object already has its `{`.
 @(private)
 element :: proc(st: ^Marshal_Out, k: int) -> Encode_Error {
-	if st.sink != nil && len(st.out^) >= enc.SINK_FLUSH_AT {
+	if st.sink != nil && len(st.out^) >= spell.SINK_FLUSH_AT {
 		enc.sink_drain(st.sink, st.out) or_return
 	}
 	if k > 0 {
@@ -483,63 +475,11 @@ write_target :: proc(st: ^Marshal_Out, idx: u32, target: rawptr) -> Encode_Error
 	return err
 }
 
+// Writes the 128-bit integer at `data`.
 @(private)
-read_int :: proc(data: rawptr, size: u8) -> i64 {
-	switch size {
-	case 1:
-		return i64((^i8)(data)^)
-	case 2:
-		return i64((^i16)(data)^)
-	case 4:
-		return i64((^i32)(data)^)
-	}
-	return (^i64)(data)^
-}
-
-@(private)
-read_uint :: proc(data: rawptr, size: u8) -> u64 {
-	switch size {
-	case 1:
-		return u64((^u8)(data)^)
-	case 2:
-		return u64((^u16)(data)^)
-	case 4:
-		return u64((^u32)(data)^)
-	}
-	return (^u64)(data)^
-}
-
-// The value at `data` as the binary64 that `spell_f64` prints with the field's own shortest round-trip
-// digits. An f16 or f32 widens exactly, but its widened value's shortest digits are a binary64's
-// (`f32(0.1)` is 0.10000000149011612), so a narrow float goes through its shortest digits at its own
-// width. Those have at most 9 significant digits, so the nearest binary64 writes them back unchanged.
-@(private)
-read_float :: proc(data: rawptr, size: u8) -> f64 {
-	switch size {
-	case 2:
-		return narrow_float(f64((^f16)(data)^), 16)
-	case 4:
-		return narrow_float(f64((^f32)(data)^), 32)
-	}
-	return (^f64)(data)^
-}
-
-@(private)
-narrow_float :: proc(x: f64, bit_size: int) -> f64 {
-	// Zero keeps its sign, and a non-finite value is the caller's to refuse.
-	if x == 0 || enc.is_non_finite(x) {
-		return x
-	}
-	buf: [32]u8
-	shortest, ok := strconv.parse_f64(strconv.write_float(buf[:], x, 'e', -1, bit_size))
-	assert(ok, "strconv's own spelling of a finite float parses")
-	return shortest
-}
-
-@(private)
-put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, x: u128, signed: bool) -> Encode_Error {
+put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, data: rawptr, signed: bool) -> Encode_Error {
 	buf: [48]u8
-	return enc.put_bytes(dst, strconv.write_bits_128(buf[:], x, 10, signed, 128, strconv.digits, {}))
+	return enc.put_bytes(dst, spell.spell_u128(buf[:], (^u128)(data)^, signed))
 }
 
 // An empty `Raw` is `null`. Otherwise a `Raw` is exactly one value of `st.dialect`, strict JSON unless an edit

@@ -4,7 +4,7 @@ package lex
 
 import "base:intrinsics"
 import "core:simd"
-import core_pkg "../../../core"
+import "../walk"
 
 peek :: #force_inline proc(s: ^Scanner) -> int {
 	if s.pos >= u64(len(s.src)) {
@@ -46,13 +46,14 @@ skip_indent :: #force_inline proc(s: ^Scanner) {
 	}
 }
 
-// The widest indent `spaces_lead` judges, and the bytes it reads.
+// The widest indent `spaces_lead` checks, and the number of bytes it reads.
 LEAD_MAX :: 32
 @(rodata, private = "file")
 LEAD_MASK := [2 * LEAD_MAX]u8{0 ..< LEAD_MAX = 0xFF}
 
-// Whether the `k` bytes at `at` are all spaces, for `k < LEAD_MAX` and LEAD_MAX bytes readable there. A
-// mask compare with no count, so the bytes feed only the caller's branch and no address waits on them.
+// Reports whether the `k` bytes at `at` are all spaces. Requires `k < LEAD_MAX` and LEAD_MAX readable bytes at
+// `at`. It is a mask compare without a count, so the loaded bytes feed only the caller's branch and no address
+// depends on them.
 spaces_lead :: #force_inline proc(src: []byte, at, k: u64) -> bool {
 	V :: #simd[16]u8
 	#no_bounds_check {
@@ -60,14 +61,14 @@ spaces_lead :: #force_inline proc(src: []byte, at, k: u64) -> bool {
 		m := ([^]u8)(&LEAD_MASK[LEAD_MAX - k])
 		a := simd.bit_and(simd.bit_xor(intrinsics.unaligned_load((^V)(p)), V(' ')), intrinsics.unaligned_load((^V)(m)))
 		b := simd.bit_and(simd.bit_xor(intrinsics.unaligned_load((^V)(p[16:])), V(' ')), intrinsics.unaligned_load((^V)(m[16:])))
-		// `reduce_max`, not `reduce_or`: NEON has a max across lanes, where an or folds through scalar shifts.
+		// `reduce_max` rather than `reduce_or`: NEON has a cross-lane max, while an OR folds through scalar shifts.
 		return simd.reduce_max(simd.bit_or(a, b)) == 0
 	}
 }
 
-// `skip_peek` for a pretty-printed document: the first non-whitespace byte, or -1 at end of input. A
-// byte above a space returns at once. A newline is followed by its indent (`skip_indent`), a space by one
-// more byte; what is left is `skip_ws`'s.
+// `skip_peek` for a pretty-printed document: returns the first non-whitespace byte, or -1 at end of input. A byte
+// above a space returns immediately. After a newline the indent is skipped (`skip_indent`); after a space, one
+// byte is skipped. If the next byte is still whitespace, `skip_peek` handles the rest.
 skip_peek_pretty :: #force_inline proc(s: ^Scanner) -> int {
 	#no_bounds_check {
 		n := u64(len(s.src))
@@ -221,23 +222,23 @@ value_end :: #force_inline proc(src: []u8, lo: int, vc: u8, room: int) -> int {
 	return value_end_at(src, lo, vc, room, .Values)
 }
 
-// `value_end` at the check level `check`. At `.Locate` a string or scalar byte >= 0x80 is judged where it is
-// passed, and a malformed sequence leaves the value with no end, for the read to fault on. That is the byte
-// loops alone, so only the byte cursor asks for it (`SCAN_FORCE_SLOW`); the index judges the bytes it
+// `value_end` at check level `check`. At `.Locate`, each string or scalar byte >= 0x80 is checked as it is
+// passed, and a malformed sequence leaves the value with no end, so the read faults on it. Only the byte loops
+// check here, so only the byte cursor (`SCAN_FORCE_SLOW`) uses `.Locate`. The index checks the bytes it
 // classifies.
 value_end_at :: proc(src: []u8, lo: int, vc: u8, room: int, $check: Check_Level) -> int {
 	switch vc {
 	case VC_OBJECT, VC_ARRAY:
-		return container_end(src, lo, min(room, core_pkg.MAX_DEPTH), check)
+		return container_end(src, lo, min(room, walk.MAX_DEPTH), check)
 	case VC_STRING:
 		return string_end_at(src, lo, check)
 	}
 	return scalar_end(src, lo, check)
 }
 
-// Past the string opened at `open`, its bytes unchecked, or -1 when no quote closes it. Sixteen bytes at a
-// time while they remain: a window with no quote or backslash is string, and at the first one a backslash
-// takes the byte after it. `string_end_at` at `.Locate` also judges UTF-8, a byte at a time.
+// Returns the offset past the string opened at `open`, without checking its bytes, or -1 when no quote closes
+// it. It reads sixteen bytes at a time while they remain: a window with no quote or backslash is all string, and
+// a backslash also covers the byte after it. `string_end_at` at `.Locate` also checks UTF-8, one byte at a time.
 string_end :: #force_inline proc(src: []u8, open: int) -> int {
 	return string_end_at(src, open, .Values)
 }
@@ -245,7 +246,7 @@ string_end :: #force_inline proc(src: []u8, open: int) -> int {
 @(private = "file")
 string_end_at :: proc(src: []u8, open: int, $check: Check_Level) -> int {
 	when check == .Locate {
-		#assert(SCAN_FORCE_SLOW, "the vector loop does not judge UTF-8")
+		#assert(SCAN_FORCE_SLOW, "the vector loop does not check UTF-8")
 	}
 	i := open + 1
 	when !SCAN_FORCE_SLOW {
@@ -313,7 +314,7 @@ scalar_end :: proc(src: []u8, lo: int, $check: Check_Level) -> int {
 
 @(private = "file")
 container_end :: proc(src: []u8, open: int, room: int, $check: Check_Level) -> int {
-	is_obj: [core_pkg.MAX_DEPTH]bool = ---
+	is_obj: [walk.MAX_DEPTH]bool = ---
 	depth := 0
 	esc := false
 	i := open

@@ -3,7 +3,7 @@ package json
 // `scan` and `prepare`: the request checked, routed, and handed to the walk (request_walk.odin).
 
 import "base:runtime"
-import core_pkg "../core"
+import "scan/walk"
 import scan_pkg "scan"
 
 // Scan `src` for what the request asks and fill its outputs. The request is a `^Request` or a `^Prepared`
@@ -78,7 +78,7 @@ Prepared :: struct($KINDS: bit_set[Query]) {
 	// plan for every source, scans as `scan(src, req)` does every time.
 	planned: bool,
 	// The walk's resolution of the plan's queries, kept by the first planned scan for the rest.
-	kept:    core_pkg.Resolved_Queries,
+	kept:    walk.Resolved_Queries,
 }
 
 // Prepare `req` for many scans.
@@ -194,6 +194,10 @@ scan_refuse :: #force_no_inline proc(src: []byte, req: ^Request($KINDS), $WALK: 
 // decide it, so no refusal follows a write. The walk's own checks (`resolve_queries`) only restate these.
 @(private = "file")
 request_fault :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> Maybe(Request_Error) {
+	// Every scan and `prepare` pass through this check, so no walk sees `.Default`.
+	if req.duplicates == .Default {
+		req.duplicates = .Last
+	}
 	when !REFUSE_DUPLICATES {
 		if req.duplicates == .Refuse {
 			return Request_Error{kind = .Refuse_Compiled_Out}
@@ -233,21 +237,21 @@ outputs_fault :: #force_inline proc(req: ^Request($KINDS), paths_used: bool, all
 	mismatch :: proc(k: Query) -> Request_Error {
 		return Request_Error{kind = .Allocator_Mismatch, query_kind = k}
 	}
-	if paths_used && !core_pkg.allocator_ok(req.answers.allocator, alloc) {
+	if paths_used && !walk.allocator_ok(req.answers.allocator, alloc) {
 		return mismatch(.Path)
 	}
 	// The plan's spill arrays are bound together, so one speaks for all.
-	if !core_pkg.allocator_ok(req.route.spill.keys.allocator, alloc) {
+	if !walk.allocator_ok(req.route.spill.keys.allocator, alloc) {
 		return mismatch(.Path)
 	}
 	when .Nodes in KINDS || .Dom in KINDS {
-		if !core_pkg.allocator_ok(req.doc.rows.allocator, alloc) {
+		if !walk.allocator_ok(req.doc.rows.allocator, alloc) {
 			return mismatch(.Dom if .Dom in KINDS else .Nodes)
 		}
 	}
 	// Decoded strings live in the document's arena.
 	when .Dom in KINDS {
-		if !core_pkg.allocator_ok(req.doc.values.allocator, alloc) || !core_pkg.allocator_ok(req.doc.arena.blocks.allocator, alloc) {
+		if !walk.allocator_ok(req.doc.values.allocator, alloc) || !walk.allocator_ok(req.doc.arena.blocks.allocator, alloc) {
 			return mismatch(.Dom)
 		}
 	}

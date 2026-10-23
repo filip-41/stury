@@ -2,6 +2,10 @@ package core
 
 import "core:io"
 
+// One enum for every format, so code using several formats handles one `Error`, `Unmarshal_Error` and
+// `Path_Error`. A kind marked CSV is reported only by CSV; the others are JSON's or shared. Each format's docs list
+// the kinds it never reports.
+//
 // A syntax fault reports the first byte that cannot extend the construct, or
 // `len(src)` when input ended (`Truncated`: appending bytes could still make it
 // valid). A budget fault (`Limit_*`, `Too_Deep`) reports the construct's first
@@ -11,7 +15,7 @@ Error_Kind :: enum {
 	None,
 	Truncated, // input ended mid-construct — SYNTAX, at len(src)
 	Bad_Char, // unexpected byte — SYNTAX
-	Bad_Escape, // illegal escape inside a string, or a lone surrogate half (at its backslash) — SYNTAX
+	Bad_Escape, // illegal escape inside a string, or a lone surrogate half (at its backslash); CSV: a backslash escape other than `\t` `\n` `\r` `\\` — SYNTAX
 	Bad_Literal, // malformed true/false/null — SYNTAX
 	Bad_Number, // malformed number — SYNTAX
 	Limit_Digits, // mantissa digit count past MAX_SCALAR_DIGITS — BUDGET
@@ -23,6 +27,9 @@ Error_Kind :: enum {
 	Out_Of_Memory, // `build`: the allocator refused a row or a decoded string. `offset` is 0, since the walk reads on past a refused append. Any walk under a `max_depth` past MAX_DEPTH: it refused the frames past MAX_DEPTH, at the bracket that needed them
 	Duplicate_Key, // `Duplicates.Refuse`: a member key that, decoded, repeats an earlier key of its own object (at the repeat's opening quote)
 	Bad_Option, // `build`: a `duplicates` it does not take (`.First`, `.All`), refused before any byte is read. No byte is at it, and `offset` is 0
+	Field_Count, // CSV: a record with more or fewer fields than the first (at the record's first byte)
+	Limit_Fields, // CSV: a record with more fields than `Limits.max_fields` (at the record's first byte) — BUDGET
+	Limit_Record, // CSV: a line longer than `Limits.max_record_bytes` (at the line's first byte) — BUDGET
 }
 
 Error :: struct {

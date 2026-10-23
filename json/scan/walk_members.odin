@@ -1,7 +1,7 @@
 package scan
 
 import "base:intrinsics"
-import core_pkg "../../core"
+import "walk"
 import index "index"
 import lex "lex"
 
@@ -64,12 +64,12 @@ take_members :: #force_inline proc(
 	// Whether a demand reads members of this object, and whether one reads
 	// into its containers: both hold for every member.
 	keyed := sp == q.demand.depth && len(q.demand.keys) > 0
-	reaches := core_pkg.demand_reaches_into(q, Q, sp)
+	reaches := walk.demand_reaches_into(q, Q, sp)
 	when .Gate in Q {
 		// A skipping walk takes whole every member a shut gate guards, so `keyed` needs no gate test.
 		// The gate is shut at every key (`Demand_Gate.open`), so `reaches` is false at a gated depth and
 		// a member that passes is handed to the walk below.
-		gated := core_pkg.demand_gated_at(q, sp)
+		gated := walk.demand_gated_at(q, sp)
 	}
 	// Every `continue` below follows a skipped member, so a member past the first iteration means one was
 	// skipped, and the walk keeps no count. Only the exits that return right after a skip say so themselves.
@@ -101,7 +101,7 @@ take_members :: #force_inline proc(
 				if src[at] != '"' || src[colon] != ':' || lex.VCLASS[src[val]] < VC_STRING || src[sep] != ',' {
 					break
 				}
-				if keyed && core_pkg.demand_first_byte_wanted(q, src[at + 1]) && core_pkg.demand_head_may_match(q, src, u64(at)) {
+				if keyed && walk.demand_first_byte_wanted(q, src[at + 1]) && walk.demand_head_may_match(q, src, u64(at)) {
 					break
 				}
 				at = rd.lo + int(w >> 48)
@@ -125,9 +125,9 @@ take_members :: #force_inline proc(
 		v := index.next(cur.ix, &r)
 		// The key has no escape, as the region holds no backslash, so the first-byte and head tests are
 		// `demand_key_filtered`.
-		if keyed && core_pkg.demand_first_byte_wanted(q, src[key + 1]) {
-			if core_pkg.demand_head_may_match(q, src, u64(key)) &&
-			   core_pkg.demand_key_at_depth(q, Q, u64(key), u64(token_end(src, colon)), u64(v), sp, owner_lo, pend, false, false) {
+		if keyed && walk.demand_first_byte_wanted(q, src[key + 1]) {
+			if walk.demand_head_may_match(q, src, u64(key)) &&
+			   walk.demand_key_at_depth(q, Q, u64(key), u64(token_end(src, colon)), u64(v), sp, owner_lo, pend, false, false) {
 				cur.p = v
 				cur.r = r
 				s.pos = u64(v)
@@ -144,7 +144,7 @@ take_members :: #force_inline proc(
 				// Nothing below a scalar is read, but a repeat of the gate's name must still see this
 				// occurrence. Checked only once the member is taken, so the walk never meets its key again.
 				if gated {
-					_ = core_pkg.demand_gate_passes(q, u64(key), u64(token_end(src, colon)), false, sp, owner_lo)
+					_ = walk.demand_gate_passes(q, u64(key), u64(token_end(src, colon)), false, sp, owner_lo)
 				}
 			}
 			if src[sep] == ',' && index.next_is_buffered(&r) {
@@ -169,8 +169,8 @@ take_members :: #force_inline proc(
 		cur.r = r
 		s.pos = u64(v)
 		when .Gate in Q {
-			if gated && core_pkg.demand_gate_passes(q, u64(key), u64(token_end(src, colon)), false, sp, owner_lo) {
-				core_pkg.demand_gate_open(q, sp)
+			if gated && walk.demand_gate_passes(q, u64(key), u64(token_end(src, colon)), false, sp, owner_lo) {
+				walk.demand_gate_open(q, sp)
 				return .Value
 			}
 		}
@@ -236,8 +236,8 @@ demand_skip_walk_pays :: #force_no_inline proc(q: ^Query_Ctx, src: []u8, root: i
 			// Compared by text: an escaped key may be treated as unwanted, which only keeps the skipping walk.
 			if sp == depth {
 				pend: Demand_Pend
-				filtered := core_pkg.demand_key_filtered(q, u64(lo), u64(end), false)
-				if !core_pkg.demand_key_at_depth(q, MEMBER_RUN_KINDS, u64(lo), u64(end), 0, u64(sp), 0, &pend, false, filtered) {
+				filtered := walk.demand_key_filtered(q, u64(lo), u64(end), false)
+				if !walk.demand_key_at_depth(q, MEMBER_RUN_KINDS, u64(lo), u64(end), 0, u64(sp), 0, &pend, false, filtered) {
 					return true
 				}
 			}

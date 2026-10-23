@@ -102,8 +102,8 @@ test_structural_judges_framing_not_scalars :: proc(t: ^testing.T) {
 	}
 }
 
-// A path scan at `.Structural` walks every byte of the item, so a value no path reads is judged for wire
-// UTF-8 as `validate` judges it, wherever it sits and however large the input is. `.Lazy` may leave it unread.
+// A path scan at `.Structural` walks every byte of the item, so a value no path reads is checked for wire UTF-8
+// as `validate` checks it, at any position and input size. `.Lazy` may leave it unread.
 @(test)
 test_structural_path_scan_checks_skipped_utf8 :: proc(t: ^testing.T) {
 	filler := strings.repeat("1000000,", 20000)
@@ -162,7 +162,7 @@ test_structural_path_scan_checks_skipped_utf8 :: proc(t: ^testing.T) {
 		req.duplicates = .First
 		testing.expect_value(t, json.scan(transmute([]byte)string("{\"a\":1,\"z\":\"\xff\"}"), &req), nil)
 	}
-	// The same across the index's first regions and its 16 KB chunk edges.
+	// The same faults across the index's first regions and at its 16 KB chunk edges.
 	for edge in ([]int{64, 192, 448, 960, 16384, 32768}) {
 		for pad in edge - 20 ..< edge + 4 {
 			spaces := strings.repeat("x", pad)
@@ -182,7 +182,7 @@ test_structural_path_scan_checks_skipped_utf8 :: proc(t: ^testing.T) {
 			}
 		}
 	}
-	// Sequences at every offset across the 16- and 64-byte windows the check reads by.
+	// Sequences at every offset across the check's 16- and 64-byte windows.
 	for pad in 0 ..< 70 {
 		spaces := strings.repeat("x", pad)
 		defer delete(spaces)
@@ -430,11 +430,11 @@ check_wire_sweep :: proc(t: ^testing.T, body: []u8, doc: ^[dynamic]u8, filler: s
 	}
 }
 
-// A document that opens like a pretty printer's is validated and built on the pretty cursor, and it answers as the
-// compact walk does: the same text with a tab in its first indent, which the sniff passes over, gets the same
-// verdict at every fault planted in it, at both levels that read every value, and builds the same document. A
-// planted space or newline breaks the indent the pretty cursor predicts, and the nest under "deep" indents past
-// one 16-byte vector.
+// A document that starts like pretty-printer output is validated and built on the pretty cursor, with the same
+// results as the compact walk. The compact copy has a tab in its first indent, so `pretty_head` rejects it. Both
+// copies get the same verdict for every planted fault, at both levels that read every value, and build the same
+// document. A planted space or newline breaks the predicted indent, and the nesting under "deep" indents past one
+// 16-byte vector.
 @(test)
 test_pretty_walk_agrees_with_the_compact_walk :: proc(t: ^testing.T) {
 	item := "    {\n      \"id\": 1,\n      \"name\": \"a \\\"b\\\" \\\\ c\",\n      \"tags\": [\n        \"x\",\n        \"y\"\n      ],\n      \"deep\": {\n        \"a\": {\n          \"b\": {\n            \"c\": {\n              \"d\": [\n                {\n                  \"e\": 1\n                }\n              ]\n            }\n          }\n        }\n      },\n      \"ok\": true,\n      \"none\": null,\n      \"empty\": {},\n      \"list\": [],\n      \"n\": -12.5e3\n    }"
@@ -454,8 +454,8 @@ test_pretty_walk_agrees_with_the_compact_walk :: proc(t: ^testing.T) {
 	testing.expect(t, len(pretty) >= 1024)
 	for level in ([]json.Strictness{.Strict, .Structural}) {
 		testing.expect_value(t, json.validate(pretty, .Json, level), nil)
-		// From byte 3: the tab at byte 2 stays, so the compact copy is never taken for pretty, and no fault
-		// before it opens a string the tab would sit in.
+		// Faults start at byte 3, so the tab at byte 2 stays: the compact copy is never detected as pretty, and
+		// no earlier fault opens a string that would contain the tab.
 		for i in 3 ..< len(pretty) {
 			was := pretty[i]
 			for bad in ([]byte{'x', 0x01, '"', ']', '}', ',', ':', 0xff, ' ', '\n'}) {
@@ -471,8 +471,8 @@ test_pretty_walk_agrees_with_the_compact_walk :: proc(t: ^testing.T) {
 	}
 }
 
-// The DOM walk of `pretty`, on the pretty cursor, and of `plain`, on the byte cursor, fail at the same byte or
-// write the same rows: the two texts differ only in a byte of the same width.
+// Checks that the DOM walks of `pretty` (pretty cursor) and `plain` (byte cursor) fail at the same byte or write
+// the same rows. The two texts differ only in one byte of whitespace.
 builds_agree :: proc(t: ^testing.T, pretty, plain: []byte, i: int, bad: byte) {
 	got, gerr := json.build(pretty)
 	defer json.destroy(&got)

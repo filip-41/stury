@@ -1,6 +1,6 @@
 package scan
 
-import core_pkg "../../core"
+import "walk"
 import index "index"
 import lex "lex"
 
@@ -43,16 +43,16 @@ dispatch_walk_cursor :: #force_inline proc(
 	$Q: bit_set[Walk_Kind],
 	stopped: ^bool,
 	$skip: bool,
-	// The document opens like a pretty printer's (`pretty_head`): a walk that reads every token takes the pretty cursor.
+	// The document starts like pretty-printed output (`pretty_head`). A walk that reads every token then uses the
+	// pretty cursor.
 	$pretty: bool,
 ) -> Maybe(Error) {
 	// One index per arm keeps a single buffer in the frame.
 	when SCAN_FORCE_SLOW {
 		cur: Byte_Cursor
 	} else when check == .Locate && skip {
-		// Every unread scalar is skipped and the few left are passed by their leaf, so a per-block shape
-		// fact would cost more than it saves. `.Wire_On_Skip` is the one fact a skip needs, to judge the
-		// blocks it crosses.
+		// Every unread scalar is skipped and the others are passed by their leaf, so no per-block shape fact
+		// is collected. A skip needs only `.Wire_On_Skip`, to check the blocks it crosses.
 		ix: index.Index(index.Facts{.Wire_On_Skip}) = ---
 		cur := index_cursor(&ix, s, axes.termination == .Complete)
 	} else when check == .Locate {
@@ -193,7 +193,7 @@ scan_queries :: proc(
 	kept: ^Resolved_Queries = nil,
 ) -> (err: Maybe(Error), fault: Walk_Fault) {
 	when .Nodes in Q {
-		qerr: Maybe(core_pkg.Request_Error)
+		qerr: Maybe(walk.Request_Error)
 		err, qerr = scan_queries_tape(src, queries, strictness, limits, Q, stop_byte, validity, resolution)
 		if q, refused := qerr.?; refused {
 			fault = Walk_Fault{capacity = q.capacity, oom = q.kind == .Out_Of_Memory}
@@ -217,20 +217,20 @@ scan_queries_tape :: #force_no_inline proc(
 	stop_byte: ^Maybe(u64),
 	validity: ^Validity,
 	resolution: Resolution,
-) -> (err: Maybe(Error), qerr: Maybe(core_pkg.Request_Error)) {
-	// Decided before the walk's scanner exists, as `scan_plain` decides, so the compact walk compiles as it would
-	// without the pretty one.
+) -> (err: Maybe(Error), qerr: Maybe(walk.Request_Error)) {
+	// The cursor is chosen before the walk's scanner exists, as in `scan_plain`, so the compact walk compiles as
+	// it would without the pretty one.
 	s := enter_document(src, limits, MAX_DEPTH)
 	lex.skip_ws(&s)
 	if pretty_head(src, int(s.pos)) {
 		return scan_queries_tape_pretty(src, queries, strictness, limits, Q, stop_byte, validity, resolution)
 	}
 	return scan_queries_in(
-		src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Maybe(core_pkg.Request_Error), false, nil, false,
+		src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Maybe(walk.Request_Error), false, nil, false,
 	)
 }
 
-// `scan_queries_tape` for a document that opens like a pretty printer's, on the pretty cursor.
+// Runs `scan_queries_tape` on the pretty cursor, for a document that starts like pretty-printed output.
 @(private = "file")
 scan_queries_tape_pretty :: #force_no_inline proc(
 	src: []byte,
@@ -241,9 +241,9 @@ scan_queries_tape_pretty :: #force_no_inline proc(
 	stop_byte: ^Maybe(u64),
 	validity: ^Validity,
 	resolution: Resolution,
-) -> (err: Maybe(Error), qerr: Maybe(core_pkg.Request_Error)) {
+) -> (err: Maybe(Error), qerr: Maybe(walk.Request_Error)) {
 	return scan_queries_in(
-		src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Maybe(core_pkg.Request_Error), false, nil, true,
+		src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Maybe(walk.Request_Error), false, nil, true,
 	)
 }
 
@@ -278,20 +278,20 @@ resolve_refusal :: #force_no_inline proc(
 	axes: Strictness_Axes,
 	ctx: ^Query_Ctx,
 	$Q: bit_set[Walk_Kind],
-) -> Maybe(core_pkg.Request_Error) {
+) -> Maybe(walk.Request_Error) {
 	if e := resolve_queries(queries, mode, axes, ctx, Q); e != .None {
-		return core_pkg.Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = e}
+		return walk.Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = e}
 	}
 	return nil
 }
 
 // A refusal before the walk, in the walk's return shape `F`: `Walk_Fault`, or `scan_queries_tape`'s.
 @(private = "file")
-capacity_fault :: #force_inline proc($F: typeid, e: core_pkg.Capacity) -> F {
+capacity_fault :: #force_inline proc($F: typeid, e: walk.Capacity) -> F {
 	when F == Walk_Fault {
 		return Walk_Fault{capacity = e}
 	} else {
-		return core_pkg.Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = e}
+		return walk.Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = e}
 	}
 }
 
@@ -302,7 +302,7 @@ sink_fault :: #force_inline proc($F: typeid, ctx: ^Query_Ctx) -> F {
 		return Walk_Fault{oom = ctx.oom}
 	} else {
 		if ctx.oom {
-			return core_pkg.Request_Error{kind = .Out_Of_Memory, query_kind = core_pkg.query_of(ctx.oom_kind)}
+			return walk.Request_Error{kind = .Out_Of_Memory, query_kind = walk.query_of(ctx.oom_kind)}
 		}
 		return nil
 	}
@@ -346,7 +346,7 @@ scan_queries_in :: #force_inline proc(
 	when .Demand in Q {
 		// Before anything is resolved or written.
 		for q in queries {
-			if q.kind == .Demand && core_pkg.names_over_capacity(q.demand.keys) {
+			if q.kind == .Demand && walk.names_over_capacity(q.demand.keys) {
 				return nil, capacity_fault(F, .Repeated_Names)
 			}
 		}
@@ -359,7 +359,7 @@ scan_queries_in :: #force_inline proc(
 	// Words rather than a `Query_Ctx` local: `resolve_queries` zeroes only the fields this query set reads
 	// (`query_ctx_zero`).
 	ctx_words: [size_of(Query_Ctx) / 8]u64 = ---
-	unlent: core_pkg.Scan_Query_Sink = --- // counted into, never read: for a demand walk that lends no sink
+	unlent: walk.Scan_Query_Sink = --- // counted into, never read: for a demand walk that lends no sink
 	_ = unlent
 	ctx := (^Query_Ctx)(&ctx_words)
 	when F == Walk_Fault {
@@ -466,7 +466,7 @@ scan_queries_in :: #force_inline proc(
 	if werr != nil {
 		// A `.Last` candidate parked before the fault is an answer about bytes the walk did check,
 		// as on the routes that emit it at once. The fault, not a dropped answer, says the rest is unread.
-		core_pkg.auto_flush_last(ctx, Q)
+		walk.auto_flush_last(ctx, Q)
 		return werr, sink_fault(F, ctx)
 	}
 	// A negative `Index`'s re-read that found its answer malformed (`path_reenter_from_end`) stops a walk
@@ -474,7 +474,7 @@ scan_queries_in :: #force_inline proc(
 	// Tested on these two exits only: a test on the walk's result, or on its fault exit, costs the walk
 	// inlined above its register allocation.
 	if stopped {
-		if e, bad := core_pkg.reread_verdict(ctx, Q, nil).?; bad {
+		if e, bad := walk.reread_verdict(ctx, Q, nil).?; bad {
 			return e, sink_fault(F, ctx)
 		}
 		if stop_byte != nil {
@@ -483,7 +483,7 @@ scan_queries_in :: #force_inline proc(
 		return nil, sink_fault(F, ctx)
 	}
 	when .Path in Q {
-		if e, bad := core_pkg.reread_verdict(ctx, Q, nil).?; bad {
+		if e, bad := walk.reread_verdict(ctx, Q, nil).?; bad {
 			return e, sink_fault(F, ctx)
 		}
 		// An empty path is the node itself, and its extent is the root value's.
@@ -495,13 +495,13 @@ scan_queries_in :: #force_inline proc(
 			if len(run.steps) == 0 {
 				// `emit_path` returns the refusal rather than taking the context. This caller has no run
 				// loop around it.
-				if emit_path(run, core_pkg.path_answer_of(run, .Found, ctx.root_lo, root_hi, core_pkg.NO_OWNER, core_pkg.kind_at(src, ctx.root_lo))) {
+				if emit_path(run, walk.path_answer_of(run, .Found, ctx.root_lo, root_hi, walk.NO_OWNER, walk.kind_at(src, ctx.root_lo))) {
 					note_oom(ctx, .Path)
 				}
 				run.settled = true
 			}
 		}
-		if core_pkg.finish_paths(&ctx.path_runs, ctx.n_paths, Q) {
+		if walk.finish_paths(&ctx.path_runs, ctx.n_paths, Q) {
 			note_oom(ctx, .Path)
 		}
 	}
@@ -566,11 +566,4 @@ finish :: #force_inline proc(s: ^Scanner) -> Maybe(Error) {
 		return Error{offset = s.pos, kind = .Trailing}
 	}
 	return nil
-}
-
-// The wire policy: one leading UTF-8 BOM is tolerated on a document, and only
-// there — not after whitespace, not twice, and not at an interior value start.
-// Offsets stay absolute in src, so nothing a caller sees is shifted. The BOM's length: 3, or 0 for none.
-bom_len :: #force_inline proc(src: []byte) -> int {
-	return 3 if len(src) >= 3 && src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF else 0
 }

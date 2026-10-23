@@ -32,14 +32,6 @@ dom_flag_state :: #force_inline proc(f: Row_Flags) -> Exactness {
 	return .None
 }
 
-// The powers of ten a binary64 represents exactly. The Clinger arms scale by them: `mant * 10^e`
-// for `0 <= e <= 22` is correctly rounded when `mant` is an exact f64, and `mant / 10^-e` likewise.
-@(rodata)
-DOM_POW10 := [23]f64{
-	1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
-	1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
-}
-
 // `DOM_MANT_MAX5[e] = ceil(2^53 / 5^e)`: the positive side of `dom_exact_scale`, asked by
 // comparison instead of a `u128` product. For integers `o, e >= 0`,
 // `o * 5^e < 2^53  <=>  o < ceil(2^53 / 5^e)`, an identity over the integers.

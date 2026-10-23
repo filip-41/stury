@@ -8,6 +8,8 @@ import "base:runtime"
 import "core:slice"
 import enc "encode"
 import core_pkg "../core"
+import "scan/walk"
+import "../core/spell"
 
 @(private)
 write_elems :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, n: int) -> Encode_Error {
@@ -23,14 +25,10 @@ write_elems :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, n: int) -> Enco
 	return close_container(st, ']', n)
 }
 
-// The most bytes an integer is written in: `-9223372036854775808` and `18446744073709551615` are 20.
-@(private)
-MAX_INT_DIGITS :: 20
-
 // Room past a field's key for its value when the value is written inline: an integer, a float, or the
 // `true`/`false` word (one u64 store).
 @(private)
-FIELD_VALUE_ROOM :: max(MAX_INT_DIGITS, enc.F64_ROOM, size_of(u64))
+FIELD_VALUE_ROOM :: max(spell.INT_ROOM, spell.F64_ROOM, size_of(u64))
 
 // `true` and `false`, low byte first.
 @(private)
@@ -44,17 +42,17 @@ FALSE_WORD :: u64(0x65_73_6c_61_66)
 spell_scalar :: #force_inline proc(p: [^]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> (int, Encode_Error) #no_bounds_check {
 	#partial switch kind {
 	case .Int:
-		return enc.spell_i64(p, read_int(at, size)), .None
+		return spell.spell_i64(p, core_pkg.shape_int_load(at, size)), .None
 	case .Uint:
-		return enc.spell_u64(p, read_uint(at, size)), .None
+		return spell.spell_u64(p, core_pkg.shape_uint_load(at, size)), .None
 	case .Float:
-		x := read_float(at, size)
-		if enc.is_non_finite(x) {
+		x := core_pkg.shape_float_load(at, size)
+		if spell.is_non_finite(x) {
 			return 0, .Non_Finite
 		}
-		return enc.spell_f64(p, x), .None
+		return spell.spell_f64(p, x), .None
 	}
-	yes := read_uint(at, size) != 0
+	yes := core_pkg.shape_uint_load(at, size) != 0
 	intrinsics.unaligned_store((^u64)(p), TRUE_WORD if yes else FALSE_WORD)
 	return 5 - int(yes), .None
 }
@@ -171,9 +169,9 @@ spell_flat_enum :: #force_inline proc(st: ^Marshal_Out, f: Plan_Field, key, p: [
 	m := enum_member(st.plan, st.plan.ops[f.op], at) or_return
 	if st.enum_ints {
 		if st.plan.ops[f.op].kind == .Enum_Int {
-			return w + n + enc.spell_i64(p[n:], read_int(at, f.size)), .None
+			return w + n + spell.spell_i64(p[n:], core_pkg.shape_int_load(at, f.size)), .None
 		}
-		return w + n + enc.spell_u64(p[n:], read_uint(at, f.size)), .None
+		return w + n + spell.spell_u64(p[n:], core_pkg.shape_uint_load(at, f.size)), .None
 	}
 	name := st.plan.keys[m.lo:m.hi]
 	if len(name) > FIELD_VALUE_ROOM {
@@ -219,7 +217,7 @@ close_object :: #force_inline proc(out: ^[dynamic]u8, start, w: int, opened, the
 	}
 	p[0] = '}'
 	p[1] = ','
-	core_pkg.edge_publish(out, end + 1 + int(then_comma))
+	walk.edge_publish(out, end + 1 + int(then_comma))
 	return .None
 }
 
@@ -337,13 +335,11 @@ spell_map_key :: proc(dst: ^[dynamic]u8, st: ^Marshal_Out, key: Plan_Op, data: r
 	enc.put_byte(dst, '"') or_return
 	#partial switch key.kind {
 	case .Int:
-		enc.put_i64(dst, read_int(data, key.size)) or_return
+		enc.put_i64(dst, core_pkg.shape_int_load(data, key.size)) or_return
 	case .Uint:
-		enc.put_u64(dst, read_uint(data, key.size)) or_return
-	case .Wide_Int:
-		put_wide(dst, (^u128)(data)^, true) or_return
-	case .Wide_Uint:
-		put_wide(dst, (^u128)(data)^, false) or_return
+		enc.put_u64(dst, core_pkg.shape_uint_load(data, key.size)) or_return
+	case .Wide_Int, .Wide_Uint:
+		put_wide(dst, data, key.kind == .Wide_Int) or_return
 	case .Enum_Int, .Enum_Uint:
 		put_enum_int(dst, st.plan, key, data) or_return
 	}
@@ -377,9 +373,7 @@ is_empty :: proc(p: ^Type_Plan, idx: u32, data: rawptr) -> bool {
 	case .Map:
 		return (^runtime.Raw_Map)(data).len == 0
 	case .Bit_Set:
-		bits: u128
-		runtime.mem_copy_non_overlapping(&bits, data, int(op.size))
-		return bits == 0
+		return bit_set_bits(op, data) == 0
 	case .Hook:
 		// As its representation would be unhooked.
 		#partial switch v in runtime.type_info_base(op.info).variant {
