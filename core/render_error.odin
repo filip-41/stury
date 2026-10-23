@@ -1,14 +1,13 @@
 package core
 
-// Where a fault of a text is, and how it reads: `line:col: kind`, shared by the formats whose faults are an
-// `Error`, an `Unmarshal_Error` or a `Path_Error`.
+// Fault positions and messages (`line:col: kind`) for every format's `Error`, `Unmarshal_Error` and `Path_Error`.
 
 import "core:io"
 import "core:reflect"
 import "core:strings"
 
-// The 1-based line and column `err` points at in `src`. Columns count bytes. It is (0, 0) when `err` points
-// at no byte: an offset past `src`, a `.Source_Too_Wide` (a limit), an `.Out_Of_Memory` or a `.Bad_Option`.
+// Returns the 1-based line and column of `err` in `src`. Columns count bytes. Returns (0, 0) when `err` has no
+// byte position: an offset past `src`, `.Source_Too_Wide` (a limit), `.Out_Of_Memory` or `.Bad_Option`.
 @(require_results)
 error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 	if err.kind == .Source_Too_Wide || err.kind == .Out_Of_Memory || err.kind == .Bad_Option {
@@ -18,10 +17,10 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 	return
 }
 
-// `err` as `line:col: <kind>`, the kind written as its enum name, or `offset N: <kind>` where it has no
-// position (`error_position`). An `Unmarshal_Error` reads the same way, with `src` the text its offset is into
-// (`render_unmarshal_error_to_writer`), and a `Path_Error` too (`render_path_error_to_writer`). The text is
-// allocated with `allocator`.
+// Formats `err` as `line:col: <kind>`, with the kind's enum name, or as `offset N: <kind>` when it has no
+// position (`error_position`). An `Unmarshal_Error` (`render_unmarshal_error_to_writer`) and a `Path_Error`
+// (`render_path_error_to_writer`) are formatted the same way, with `src` the text their offset refers to. The
+// text is allocated with `allocator`.
 @(require_results)
 render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
 	b := strings.builder_make(allocator)
@@ -29,8 +28,8 @@ render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> st
 	return strings.to_string(b)
 }
 
-// `render_error`'s text written to `w`, allocating nothing; `w`'s failure is the `io.Error`, with a prefix of
-// the text possibly written.
+// Writes `render_error`'s text to `w` without allocating. Returns `w`'s error, after which part of the text may
+// have been written.
 render_error_to_writer :: proc {
 	render_syntax_error_to_writer,
 	render_unmarshal_error_to_writer,
@@ -42,8 +41,9 @@ render_syntax_error_to_writer :: proc(w: io.Writer, src: []byte, err: Error) -> 
 	return write_fault(w, line, col, err.offset, reflect.enum_string(err.kind))
 }
 
-// `line:col: <kind>` (`: <syntax>` after a `.Syntax`), bare where it points at no byte, then ` at .a[3]."b c"`
-// for its path (`[]` for a map value or element of any index, a leading `…` when `truncated`).
+// Writes `line:col: <kind>`, followed by `: <syntax>` for `.Syntax`, or the bare kind when there is no byte
+// position. Then writes the path as ` at .a[3]."b c"`, with `[]` for a map value or for an element of any index,
+// and a leading `…` when `truncated`.
 render_unmarshal_error_to_writer :: proc(w: io.Writer, src: []byte, err: Unmarshal_Error) -> io.Error {
 	name := reflect.enum_string(err.kind)
 	#partial switch err.kind {
@@ -67,10 +67,11 @@ render_unmarshal_error_to_writer :: proc(w: io.Writer, src: []byte, err: Unmarsh
 	return nil
 }
 
-// A `Path_Error` as its kind's name, led by the position it has: `line:col: ` in `src` for `.Bad_Source`, and
-// for `.Encode` and `.Unplaceable` where `offset` is not 0; `offset N: ` for `.Bad_Path` and `.Bad_Result`
-// (into the path or the edited text, which `src` is not); ` (N)` after `.Bad_Row`. The scan's `syntax` follows
-// `.Bad_Source` and `.Bad_Result` unless it is `.None`, and the `encode` fault follows `.Encode`.
+// Writes a `Path_Error` as its kind's name with its position. The prefix is `line:col: ` in `src` for
+// `.Bad_Source`, and for `.Encode` and `.Unplaceable` when `offset` is not 0. It is `offset N: ` for `.Bad_Path`
+// and `.Bad_Result`, whose offsets are into the path or the edited text rather than `src`. `.Bad_Row` is followed
+// by ` (N)`. `.Bad_Source` and `.Bad_Result` are followed by the scan's `syntax` unless it is `.None`, and
+// `.Encode` by the `encode` error.
 render_path_error_to_writer :: proc(w: io.Writer, src: []byte, err: Path_Error) -> io.Error {
 	name := reflect.enum_string(err.kind)
 	#partial switch err.kind {
@@ -103,20 +104,20 @@ render_path_error_to_writer :: proc(w: io.Writer, src: []byte, err: Path_Error) 
 	return nil
 }
 
-// `line:col: text` for the byte `offset` of `src`, `offset N: text` where `src` has none.
+// Writes `line:col: text` for byte `offset` of `src`, or `offset N: text` when `src` has no such byte.
 write_fault_at :: proc(w: io.Writer, src: []byte, offset: u64, text: string) -> io.Error {
 	line, col, _ := line_col(src, offset)
 	return write_fault(w, line, col, offset, text)
 }
 
-// `: text`, after a fault's kind.
+// Writes `: text` after a fault's kind.
 write_detail :: proc(w: io.Writer, text: string) -> io.Error {
 	io.write_string(w, ": ") or_return
 	_, err := io.write_string(w, text)
 	return err
 }
 
-// A path step as jq spells it: `.name` (`."quoted"` where the name is not an identifier), `[3]`, `[]` for any.
+// Writes a path step as jq does: `.name` (`."quoted"` when the name is not an identifier), `[3]`, or `[]` for any.
 @(private = "file")
 write_step :: proc(w: io.Writer, step: Step) -> io.Error {
 	switch s in step {

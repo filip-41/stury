@@ -56,7 +56,7 @@ test_render_error :: proc(t: ^testing.T) {
 	nerr = read(t, "", &rows, {dialect = {delimiter = '"'}})
 	testing.expect_value(t, csv.render_error(bytes, nerr.?, context.temp_allocator), "Bad_Option")
 
-	// A path of a name that is no identifier is quoted, one past the steps kept is marked.
+	// A name that is not an identifier is quoted. A path longer than the steps kept is marked.
 	quoted := csv.Unmarshal_Error {
 		kind      = .Wrong_Kind,
 		offset    = 3,
@@ -66,7 +66,7 @@ test_render_error :: proc(t: ^testing.T) {
 	quoted.steps[0], quoted.steps[1] = csv.Index(4), csv.Name("full name")
 	testing.expect_value(t, csv.render_error(bytes, quoted, context.temp_allocator), "1:4: Wrong_Kind at …[4].\"full name\"")
 
-	// The writer form writes the same text, and passes the writer's failure on.
+	// The writer form writes the same text and returns the writer's failure.
 	b := strings.builder_make(context.temp_allocator)
 	testing.expect_value(t, csv.render_error_to_writer(strings.to_writer(&b), bytes, err), nil)
 	testing.expect_value(t, strings.to_string(b), text)
@@ -96,7 +96,7 @@ test_render_path_error :: proc(t: ^testing.T) {
 	// Located in the source, then the scan's fault.
 	_, err := csv.set(ragged, ".[0].a", 1)
 	text(t, ragged, err, "2:1: Bad_Source: Field_Count")
-	// Into the path text, and into the edited text, neither of which is the source.
+	// Offsets into the path text and into the edited text, not the source.
 	_, err = csv.set(src, ".[", 1)
 	text(t, src, err, "offset 1: Bad_Path")
 	_, err = csv.splice(src, []csv.Edit{{lo = 4, hi = 5, bytes = transmute([]byte)string("1,9")}})
@@ -112,7 +112,7 @@ test_render_path_error :: proc(t: ^testing.T) {
 	text(t, src, err, "Bad_Edit")
 	_, err = csv.splice(src, nil, csv.Dialect{delimiter = '"'})
 	text(t, src, err, "Bad_Option")
-	// The cell count, or the field, behind a row that does not fit.
+	// The cell count or the field index of a row that does not fit.
 	_, err = csv.insert(src, 0, []string{"1"})
 	text(t, src, err, "Bad_Row (1)")
 	// What marshal refused, and the record it was for where there is one.

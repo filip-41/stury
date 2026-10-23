@@ -4,20 +4,19 @@ import "core:bytes"
 import "core:io"
 import core_pkg "../core"
 
-// How far past its block's end the scan reads a UTF-8 sequence that opens in the block.
+// How far past its block's end the scan reads a UTF-8 sequence that starts in the block.
 @(private)
 READ_AHEAD :: 3
 
 // A pull over the records of an `io.Reader` (`next_record`).
 //
-//	- `records` over a window of the stream, so the records, their offsets (from the stream's first byte) and
-//	  the fault are those `records` gives the whole input, whatever the sizes of the reads.
+//	- It runs `records` over a window of the stream. The records, their offsets (from the stream's first byte)
+//	  and the fault are the ones `records` gives for the whole input, whatever the read sizes.
 //	- A record's fields index its `src`, the window, which moves at the next `next_record`.
-//	- The fields are the iterator's own but `chunk`, `err` and `read_err`.
+//	- Every field is internal except `chunk`, `err` and `read_err`.
 Record_Reader :: struct {
-	// The window, `buf[:hi]`. The bytes read before a failure of the reader (`read_err`) are read as the
-	// input, but for those past their last LF: the record they end is not yielded, and a fault among them is
-	// not reported.
+	// The window, `buf[:hi]`. The bytes read before a reader failure (`read_err`) are input, except those past
+	// the last LF: their record is not yielded and a fault in them is not reported.
 	using window: core_pkg.Stream_Window,
 	begun:        bool,
 	// The records of the window.
@@ -29,7 +28,7 @@ Record_Reader :: struct {
 
 // The records of `r` as `records` reads them, `chunk` bytes at a time. The window and the fields are
 // allocated with `allocator` and freed by `records_destroy`. The window holds the line being read, from its
-// first byte, and a chunk, grown by doubling; `limits.max_record_bytes` caps the line, and so the window.
+// first byte, plus one chunk, and grows by doubling. `limits.max_record_bytes` caps the line and so the window.
 @(require_results)
 records_from :: proc(
 	r: io.Reader,
@@ -93,8 +92,8 @@ reader_destroy :: proc(rr: ^Record_Reader) {
 	rr.buf = nil
 }
 
-// Read the stream's first bytes, enough to see a BOM, and start the window's records. A reader that fails
-// first leaves the bytes it handed over as the input. False when the window could not grow.
+// Reads the stream's first bytes, enough to see a BOM, and starts the window's records. If the reader fails
+// first, the bytes it returned are the input. False when the window could not grow.
 @(private)
 reader_begin :: proc(rr: ^Record_Reader) -> bool {
 	rr.begun = true
@@ -109,8 +108,8 @@ reader_begin :: proc(rr: ^Record_Reader) -> bool {
 	return true
 }
 
-// Drop the bytes before the line being read, which no later block reads, make room for a chunk (doubling the
-// window if need be), and read once. False once a read failed, or the stream had ended.
+// Drops the bytes before the line being read, which no later block reads, makes room for a chunk (doubling
+// the window if needed), and reads once. False once a read has failed or the stream has ended.
 @(private)
 reader_fill :: proc(rr: ^Record_Reader) -> bool {
 	if rr.eof || rr.read_err != nil {

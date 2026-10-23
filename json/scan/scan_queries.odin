@@ -43,16 +43,16 @@ dispatch_walk_cursor :: #force_inline proc(
 	$Q: bit_set[Walk_Kind],
 	stopped: ^bool,
 	$skip: bool,
-	// The document opens like a pretty printer's (`pretty_head`): a walk that reads every token takes the pretty cursor.
+	// The document starts like pretty-printed output (`pretty_head`). A walk that reads every token then uses the
+	// pretty cursor.
 	$pretty: bool,
 ) -> Maybe(Error) {
 	// One index per arm keeps a single buffer in the frame.
 	when SCAN_FORCE_SLOW {
 		cur: Byte_Cursor
 	} else when check == .Locate && skip {
-		// Every unread scalar is skipped and the few left are passed by their leaf, so a per-block shape
-		// fact would cost more than it saves. `.Wire_On_Skip` is the one fact a skip needs, to judge the
-		// blocks it crosses.
+		// Every unread scalar is skipped and the others are passed by their leaf, so no per-block shape fact
+		// is collected. A skip needs only `.Wire_On_Skip`, to check the blocks it crosses.
 		ix: index.Index(index.Facts{.Wire_On_Skip}) = ---
 		cur := index_cursor(&ix, s, axes.termination == .Complete)
 	} else when check == .Locate {
@@ -218,8 +218,8 @@ scan_queries_tape :: #force_no_inline proc(
 	validity: ^Validity,
 	resolution: Resolution,
 ) -> (err: Maybe(Error), qerr: Maybe(walk.Request_Error)) {
-	// Decided before the walk's scanner exists, as `scan_plain` decides, so the compact walk compiles as it would
-	// without the pretty one.
+	// The cursor is chosen before the walk's scanner exists, as in `scan_plain`, so the compact walk compiles as
+	// it would without the pretty one.
 	s := enter_document(src, limits, MAX_DEPTH)
 	lex.skip_ws(&s)
 	if pretty_head(src, int(s.pos)) {
@@ -230,7 +230,7 @@ scan_queries_tape :: #force_no_inline proc(
 	)
 }
 
-// `scan_queries_tape` for a document that opens like a pretty printer's, on the pretty cursor.
+// Runs `scan_queries_tape` on the pretty cursor, for a document that starts like pretty-printed output.
 @(private = "file")
 scan_queries_tape_pretty :: #force_no_inline proc(
 	src: []byte,

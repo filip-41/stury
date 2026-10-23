@@ -1,7 +1,7 @@
 package json
 
-// The JSON codec's public surface. The scanner is placed in the scan/ package. The aliases below keep the
-// surface written `json.*`. Where the public names live:
+// The JSON codec's public surface. The scanner is in the scan/ package; the aliases below spell the surface
+// `json.*`. The public names live in these files:
 //
 //	json.odin           the shared types (aliases of scan/, scan/walk/ and core/ names), `validate`, `parse_path`,
 //	                    `decode_span`, `error_position` and `render_error`
@@ -87,8 +87,8 @@ Error :: scan_pkg.Error
 //	- A cap: `Limit_Digits`, `Limit_Scale`, `Too_Deep`.
 //	- A repeated key under `Duplicates.Refuse`: `Duplicate_Key`.
 //	- A refusal no byte is at: `Source_Too_Wide`, `Out_Of_Memory`, `Bad_Option`.
-//	- `Field_Count`, `Limit_Fields` and `Limit_Record` are a CSV record's: JSON never reports them. The
-//	  one enum is core's, so that code over several formats reads one `Error` and one `Unmarshal_Error`.
+//	- `Field_Count`, `Limit_Fields` and `Limit_Record` are CSV record errors; JSON never reports them. The
+//	  enum is core's, so code over several formats reads one `Error` and one `Unmarshal_Error`.
 Error_Kind :: core_pkg.Error_Kind
 
 // The 1-based line and column `err` points at in `src`. Columns count bytes. It is (0, 0) when `err` points

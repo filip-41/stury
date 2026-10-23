@@ -15,7 +15,7 @@ import json "../../json"
 
 Record_Scan :: struct {
 	using output: Piece_Output,
-	src:          []byte, // the file's records: its data from where they start
+	src:          []byte, // the file's data from the first record on
 	more:         bool, // another file follows
 }
 
@@ -32,7 +32,7 @@ scan_records :: proc(run: ^Run, ins: ^Inputs, from: int) -> (stop: int) {
 	defer end_pieces(&job)
 	// The fault it returns is a piece's `err`, which `scan_piece` turns into a stop for the main thread's read.
 	_ = json.each_record(src, .NDJSON, scan_piece, &job, runner)
-	// A write a pool thread met failing ends the run here.
+	// A write that failed on a pool thread ends the run here.
 	check_output()
 	return from + job.stop if job.stop >= 0 else len(ins.data)
 }

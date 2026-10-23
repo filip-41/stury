@@ -1,7 +1,7 @@
 package csv
 
-// The document: the span of every field of a CSV text, and the readers over them. A text is read once, by the
-// same scanner `records` runs; a cell's text is decoded when it is read.
+// The document: the span of every field of a CSV text, with readers over them. The text is scanned once, by
+// the scanner `records` runs. A cell's text is decoded when it is read.
 
 import "core:math"
 import "core:mem"
@@ -9,39 +9,40 @@ import "core:strconv"
 import "core:unicode/utf8"
 import core_pkg "../core"
 
-// A parsed CSV text: the spans of its fields, over your source bytes. Make one with `build` and read it through
-// the procedures in this file; its fields are internal.
+// A parsed CSV text: the spans of its fields in the source bytes. Make one with `build` and read it through
+// the procedures in this file. Its fields are internal.
 //
 //	- `src` is borrowed and must outlive every read: a cell's text is a slice of it unless it holds a `""` or an
 //	  escape.
 //	- Rows count from the first record after the header (from the first record when there is no header), as
 //	  `unmarshal`'s paths do.
-//	- Everything else is owned by whoever built it, and `document_destroy` is the only teardown.
-//	- Spans are 16 bytes per field: a document of a large text is large.
+//	- The rest is owned by the caller that built it and freed by `document_destroy`.
+//	- Each field's span takes 16 bytes.
 Document :: struct {
 	src:        []byte,
 	dialect:    Dialect,
 	// The header's fields, none without a header.
 	names:      [dynamic]Field,
-	// The fields of every row in order: `width` apiece, or, in a `ragged` dialect, row `i`'s from `starts[i]` to
-	// `starts[i + 1]`.
+	// The fields of every row in order: `width` per row, or in a `ragged` dialect row `i`'s from `starts[i]`
+	// to `starts[i + 1]`.
 	fields:     [dynamic]Field,
 	starts:     [dynamic]int,
 	rows:       int,
 	width:      int,
 	// Built `.Lazy`: a string is judged as UTF-8 when it is read.
 	judge_utf8: bool,
-	// The strings that held a `""` or an escape, decoded once each into `arena`. `decoded_at` is made at the first
-	// decode, a slot per name and then per field: 0 until its text is decoded, then 1 + its index in `decoded`.
+	// The strings that held a `""` or an escape, each decoded once into `arena`. `decoded_at` is allocated at the
+	// first decode, with one slot per header name and then per field: 0 until its text is decoded, then 1 + its
+	// index in `decoded`.
 	decoded_at: []u32,
 	decoded:    [dynamic]string,
 	arena:      mem.Dynamic_Arena,
 }
 
 // Read `src` in `dialect` and keep the span of every field. `header` takes the first record as the column
-// names. `strictness` and `limits` are `records`'; `.Lazy` additionally judges the UTF-8 of each string
-// `get_string` reads. `err` is the first fault of the text, `.Bad_Option` for a dialect or limit the scanner
-// refuses, or `.Out_Of_Memory`, with `Document` the zero value.
+// names. `strictness` and `limits` are as for `records`; under `.Lazy`, `get_string` also judges the UTF-8 of
+// each string it reads. `err` is the text's first fault, `.Bad_Option` for a dialect or limit the scanner
+// refuses, or `.Out_Of_Memory`; the `Document` is then the zero value.
 @(require_results)
 build :: proc(
 	src: []byte,
@@ -96,9 +97,9 @@ build :: proc(
 	return
 }
 
-// Room in the iterator's list for the fields the rest of the text will hold, judged by the first row `rec`:
-// what the first row's bytes hold, scaled to the text's. A guess that is short costs a regrow and one that is
-// long costs address space nobody touches. A reserve that fails is no error: the list grows as it needs.
+// Reserves room in the iterator's list for the rest of the text's fields, estimated from the first row `rec`:
+// its fields per byte, scaled to the text's length. Too small an estimate costs a regrow; too large costs
+// untouched address space. A failed reserve is not an error: the list grows as needed.
 @(private)
 reserve_rest :: proc(it: ^Records, rec: Record) {
 	row_bytes := int(rec.fields[len(rec.fields) - 1].hi - rec.at) + 1
@@ -185,11 +186,12 @@ get_name :: proc(doc: ^Document, col: int) -> (s: string, ok: bool) {
 	return read_text(doc, doc.names[col], col)
 }
 
-// The decoded text of a cell, valid until `document_destroy`: a quoted cell's without its quotes and with each
-// `""` as one quote, an escaped cell's with each escape as the byte it spells (`field_text`).
+// The decoded text of a cell, valid until `document_destroy` (`field_text`): a quoted cell without its quotes
+// and with each `""` as one quote, an escaped cell with each escape as the byte it spells.
 //
-//	- Text that holds neither is a slice of `doc.src`. Any other is decoded once and kept by the document.
-//	- Reads of such cells write the document, so they must not run on several threads at once.
+//	- Text with neither is a slice of `doc.src`. Other text is decoded once and kept by the document.
+//	- Reading a cell that needs decoding writes to the document, so such reads must not run on several
+//	  threads at once.
 //	- `ok` is false for a row or column the document lacks, when a decoded string could not be allocated, and,
 //	  for a document built `.Lazy`, when the cell is not UTF-8. An empty cell is `""` with `ok` true.
 @(require_results)
@@ -199,8 +201,8 @@ get_string :: proc(doc: ^Document, row, col: int) -> (s: string, ok: bool) {
 	return read_text(doc, f, len(doc.names) + i)
 }
 
-// The integer a cell spells, read as `unmarshal` reads one into an `i64`: `[+-]?digits`, a quoted cell's
-// without its quotes. `ok` is false for an empty cell, any other text, and a value `i64` does not hold.
+// The integer a cell spells, read as `unmarshal` reads one into an `i64`: `[+-]?digits`, with a quoted cell's
+// quotes removed. `ok` is false for an empty cell, any other text, and a value `i64` does not hold.
 @(require_results)
 get_int :: proc(doc: ^Document, row, col: int) -> (v: i64, ok: bool) {
 	text := present_text(doc, row, col) or_return
@@ -237,8 +239,8 @@ get_bool :: proc(doc: ^Document, row, col: int) -> (v: bool, ok: bool) {
 	return false, false
 }
 
-// The cell's text as `unmarshal` reads a scalar from it (`authored`): a quoted cell's without its quotes, none
-// for an empty cell, which `unmarshal` reads as absent.
+// The cell's text as `unmarshal` reads a scalar from it (`authored`): with a quoted cell's quotes removed, or
+// none for an empty cell, which `unmarshal` reads as absent.
 @(private)
 present_text :: proc(doc: ^Document, row, col: int) -> (text: string, ok: bool) {
 	f := get_field(doc, row, col) or_return
@@ -282,7 +284,8 @@ read_decoded :: proc(doc: ^Document, text: []byte, key: int) -> (s: string, ok: 
 	if err != nil {
 		return "", false
 	}
-	// Past `max(u32)` decoded strings a text is decoded again at each read; each copy lives as long as the arena.
+	// Past `max(u32)` decoded strings, a text is decoded again at each read, and each copy lives as long as the
+	// arena.
 	if len(doc.decoded) < int(max(u32)) {
 		if _, aerr := append(&doc.decoded, string(out)); aerr != nil {
 			return "", false
@@ -305,7 +308,7 @@ text_is :: proc(src: []byte, f: Field, dialect: Dialect, name: string) -> bool {
 				return false
 			}
 			j += 1
-			// The scanner passed only doubled quotes inside the field.
+			// The scanner accepted only doubled quotes inside the field.
 			if inner[i] == '"' {
 				i += 1
 			}

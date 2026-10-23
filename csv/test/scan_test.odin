@@ -47,7 +47,7 @@ test_validate_cases :: proc(t: ^testing.T) {
 	check_cases(t, cases)
 }
 
-// Each case as written and with blank lines in front, which move every construct across the block edges.
+// Each case as written and with blank lines in front, which shift every construct across the block edges.
 check_cases :: proc(t: ^testing.T, cases: []Case) {
 	for c in cases {
 		check(t, transmute([]byte)c.src, c, 0)
@@ -107,8 +107,8 @@ test_field_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, recs[1].at, 17)
 }
 
-// Cells past one 16-byte window, with `""` and escapes on, before and across window edges, and a short last
-// cell at the input's end, decode as a byte-at-a-time reading does.
+// Cells longer than one 16-byte window, with `""` and escapes before and across window edges, and a short last
+// cell at the input's end, decode as a byte-at-a-time reader does.
 @(test)
 test_field_text_long :: proc(t: ^testing.T) {
 	Long_Case :: struct {

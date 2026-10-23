@@ -14,7 +14,7 @@ test_marshal_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(out), "1;plain\r\n")
 }
 
-// Every length up to past four 16-byte windows, plain and with a quote at each window's edge, reads back.
+// Every length up to past four 16-byte windows reads back, plain and with a quote at each window's edge.
 @(test)
 test_marshal_text_lengths :: proc(t: ^testing.T) {
 	alphabet := "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"

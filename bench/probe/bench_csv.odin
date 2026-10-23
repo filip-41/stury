@@ -1,14 +1,14 @@
 package main
 
-// CSV lanes: `csv_<job>[_<shape>]`, over the fixtures gen.py writes (`table.csv`, `text.csv`, `wide.csv`,
-// `table.tsv`; `--fixture` picks another, a `.tsv` name reads as `csv.TSV`). Every lane prints `gb_per_s` and
-// `ns` over the fixture's bytes. The lanes that walk records also print what they saw, `records`, `fields` and
-// `bytes` (the decoded cells' total, the header record counted), for bench/compare.py to hold every other
-// library's tally against. With STURY_DUMP set, a typed lane writes the rows it read as JSON there and a
-// marshal lane the CSV it wrote.
+// CSV lanes, named `csv_<job>[_<shape>]`, over gen.py's fixtures (`table.csv`, `text.csv`, `wide.csv`,
+// `table.tsv`). `--fixture` picks another file; a `.tsv` name is read as `csv.TSV`. Every lane prints
+// `gb_per_s` and `ns` over the fixture's bytes. The lanes that walk records also print `records`, `fields`
+// and `bytes` (the decoded cells' total length, header record included), which bench/compare.py checks the
+// other libraries' totals against. With STURY_DUMP set, a typed lane writes the rows it read there as JSON
+// and a marshal lane writes the CSV it produced.
 //
 //	csv_validate              `validate` at `.Strict`
-//	csv_records               every record's every field, decoded
+//	csv_records               every field of every record, decoded
 //	csv_document              `build`
 //	csv_document_read         `build`, then every cell read as a string
 //	csv_unmarshal_<shape>     `unmarshal` into []Csv_<Shape>_Row, strings copied; `_borrow`: strings slice the input
@@ -22,7 +22,7 @@ import "core:os"
 import "core:strings"
 import "core:time"
 
-// table.csv's row: the numeric-heavy shape.
+// A row of table.csv (numeric).
 Csv_Table_Row :: struct {
 	id, ts:         i64,
 	lat, lon:       f64,
@@ -32,13 +32,13 @@ Csv_Table_Row :: struct {
 	code:           string,
 }
 
-// text.csv's row: quoted cells, UTF-8, an LF inside a cell.
+// A row of text.csv (quoted cells, UTF-8, LFs inside cells).
 Csv_Text_Row :: struct {
 	id:                        i64,
 	name, city, quote, note:   string,
 }
 
-// What a pass over a document saw. `bytes` is the decoded cells' total.
+// Totals from one pass over a document. `bytes` is the decoded cells' total length.
 Csv_Tally :: struct {
 	records, fields, bytes: u64,
 }
@@ -55,8 +55,8 @@ csv_tally_text :: proc(t: Csv_Tally) -> string {
 	return fmt.tprintf("records=%d fields=%d bytes=%d", t.records, t.fields, t.bytes)
 }
 
-// Every field of every record, decoded: a quoted cell's text is a slice of the input unless it holds a `""`,
-// which `field_text` decodes into `scratch`, reset after each such cell.
+// Decodes every field of every record. A quoted cell's text slices the input unless it contains `""`; then
+// `field_text` decodes it into `scratch`, which is reset after each such cell.
 csv_walk_records :: proc(data: []byte, dialect: csv.Dialect, scratch: ^mem.Arena) -> (t: Csv_Tally, ok: bool) {
 	it := csv.records(data, dialect)
 	defer csv.records_destroy(&it)
@@ -78,7 +78,7 @@ csv_walk_records :: proc(data: []byte, dialect: csv.Dialect, scratch: ^mem.Arena
 	return t, it.err == nil
 }
 
-// The header's cells and every row's, read through `get_name` and `get_string`.
+// Reads the header's cells through `get_name` and every row's cells through `get_string`.
 csv_read_document :: proc(doc: ^csv.Document) -> (t: Csv_Tally, ok: bool) {
 	t.records = u64(csv.row_count(doc)) + 1
 	t.fields = t.records * u64(csv.column_count(doc))
@@ -153,7 +153,7 @@ bench_csv_document :: proc(data: []byte, dialect: csv.Dialect, read: bool) -> bo
 	return true
 }
 
-// Frees what `unmarshal` copied: a string that does not slice the input.
+// Frees `s` when `unmarshal` copied it, that is, when it does not slice `data`.
 csv_free_string :: proc(s: string, data: []byte) {
 	p, lo := uintptr(raw_data(s)), uintptr(raw_data(data))
 	if len(s) > 0 && (p < lo || p >= lo + uintptr(len(data))) {
@@ -175,7 +175,7 @@ csv_release :: proc(rows: []$T, data: []byte) {
 	delete(rows)
 }
 
-// `unmarshal` of `data` into `[]T` from the heap, the previous rows freed after the clock stops.
+// Times `unmarshal` of `data` into a heap `[]T`. The previous rows are freed outside the clock.
 bench_csv_unmarshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid, borrow: bool) -> bool {
 	opts := csv.Unmarshal_Opts{dialect = dialect, borrow_strings = borrow}
 	plan := csv.type_plan_init([]T)
@@ -204,7 +204,7 @@ bench_csv_unmarshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid, borr
 	return true
 }
 
-// `marshal` of the rows `unmarshal` reads from `data`, the output freed after the clock stops.
+// Times `marshal` of the rows read from `data` before timing. Each output is freed outside the clock.
 bench_csv_marshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid) -> bool {
 	rows: []T
 	if err := csv.unmarshal(data, &rows, {dialect = dialect, borrow_strings = true}); err != nil {
@@ -234,7 +234,7 @@ bench_csv_marshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid) -> boo
 	return true
 }
 
-// A `csv_` lane over `data`, the bytes of `fixture`.
+// Runs a `csv_` lane over `data`, the bytes of `fixture`. `known` is false for an unknown lane name.
 bench_csv :: proc(lane: string, data: []byte, fixture: string) -> (ok: bool, known: bool) {
 	dialect := csv_dialect(fixture)
 	switch lane {

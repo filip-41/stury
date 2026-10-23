@@ -1,5 +1,5 @@
-// One struct, two formats: read CSV, write JSON, read the JSON back, write CSV, and tell a fault of either
-// format with the same code.
+// Reads CSV into a struct, writes it as JSON, reads the JSON back and writes CSV. One procedure reports a
+// fault of either format.
 //
 // Run from the repository root: odin run examples/crossformat -collection:stury=.
 package main
@@ -63,9 +63,9 @@ main :: proc() {
 		fmt.eprintln(cerr)
 		os.exit(1)
 	}
-	fmt.println(string(as_csv) == string(table)) // true: the same table comes back
+	fmt.println(string(as_csv) == string(table)) // true
 
-	// The same mistake, a population that is not a number, in each format:
+	// A population that is not a number, in each format.
 	bad_csv := transmute([]byte)string("City,population,lat,lon\nOslo,lots,59.91,10.75\n")
 	bad_json := transmute([]byte)string(`[{"city":"Oslo","population":"lots","lat":59.91,"lon":10.75}]`)
 	if err, bad := load(.Csv, bad_csv, &cities).?; bad {

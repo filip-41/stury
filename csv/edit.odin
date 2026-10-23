@@ -1,7 +1,7 @@
 package csv
 
-// The edits `set`, `insert`, `remove` and the span edit `splice`. Each returns a new buffer holding every byte
-// of the source it did not target, as it was.
+// The edits `set`, `insert`, `remove` and the span edit `splice`. Each returns a new buffer that keeps every
+// byte of the source it did not target unchanged.
 
 import "base:runtime"
 import core_pkg "../core"
@@ -15,8 +15,8 @@ APPEND :: core_pkg.APPEND
 // `src` with every edit applied.
 //
 //	- Edits must be sorted by `lo` and disjoint (`edits[i].hi <= edits[i+1].lo`, every `hi <= len(src)`).
-//	- The result is validated `.Strict` in `dialect`, since an arbitrary span need not be a whole field: a
-//	  result that is not CSV is `.Bad_Result`, with the scan's fault in `syntax` and `offset`.
+//	- The result is validated `.Strict` in `dialect`, since a span need not be a whole field. A result that
+//	  is not CSV is `.Bad_Result`, with the scan's fault in `syntax` and `offset`.
 @(require_results)
 splice :: proc(src: []byte, edits: []Edit, dialect := Dialect{}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	if _, ok := scan_setup(dialect, {}); !ok {
@@ -36,17 +36,17 @@ splice :: proc(src: []byte, edits: []Edit, dialect := Dialect{}, allocator := co
 	return out, nil
 }
 
-// Replace the cell `path` names, or the cells of the column it names in every row, with `value` spelled as
-// `marshal` spells a cell: a bool, an integer, a float, a string, an enum, a rune, or a `Maybe` of one.
+// Replace the cell `path` names, or that column's cell in every row, with `value`, spelled as `marshal` spells
+// a cell. `value` is a bool, integer, float, string, enum, rune, or a `Maybe` of one.
 //
 //	- The source must be CSV in `dialect`, judged `.Strict` throughout (`.Bad_Source`).
-//	- The cell is quoted or escaped as the dialect needs, and an empty string is `""` where cells are quoted.
-//	  A value the dialect cannot spell is `.Encode`, with `Marshal_Error.Unwritable` for a delimiter, CR or LF
-//	  in a value that has no quotes or escape for it, and for an empty cell that would leave a record of one
-//	  empty field, which reads back as no record.
-//	- A first cell that opens with the comment byte is quoted or escaped, or `.Encode`.
-//	- A path that names no row or column the text has is `.Not_Found`. `.[row].name` needs the header: `header`
-//	  is false for a text whose first record is data.
+//	- The cell is quoted or escaped as the dialect needs. An empty string is `""` where cells are quoted.
+//	- A value the dialect cannot spell is `.Encode` with `Marshal_Error.Unwritable`: a delimiter, CR or LF the
+//	  dialect can neither quote nor escape, or an empty cell that would leave a record of one empty field,
+//	  which reads back as no record.
+//	- A first cell starting with the comment byte is quoted or escaped, or else `.Encode`.
+//	- A path naming a row or column the text lacks is `.Not_Found`. `.[row].name` needs the header; set
+//	  `header` false for a text whose first record is data.
 @(require_results)
 set :: proc(
 	src: []byte,
@@ -96,7 +96,7 @@ watched_set :: proc(
 	}
 	w, _ := spell_writer(dialect, p, allocator)
 	defer delete(w.buf)
-	// Only the text's first field can open it with a BOM.
+	// Only the text's first field can start the text with a BOM.
 	w.at_start = sites[0].field.lo == u64(core_pkg.bom_len(src))
 	if merr = put_value(&w, op, value.data); merr == .None && sites[0].col == 0 {
 		merr = guard_record(&w, 0)
@@ -115,17 +115,17 @@ watched_set :: proc(
 	return edited(src, edits[:], allocator)
 }
 
-// Add `row` as data row `at`: before the row now there, or after the last when `at` is the row count or
-// `APPEND`. The record ends in the line break the text's first record ends in, LF when that has none.
+// Add `row` as data row `at`: before the row now at `at`, or after the last row when `at` is the row count or
+// `APPEND`. The record ends with the same line break as the text's first record, or LF when that has none.
 //
-//	- `row` is a struct, whose fields fill the header's columns by name (`csv:"name"`, or the field's own
-//	  name), an empty cell for a column with no field; or a `[]string`, one cell per column. Without a header
-//	  (`header` false) a struct's fields are the columns in order.
-//	- Cells are spelled as `set` spells them. A first cell that opens with the comment byte is quoted or
-//	  escaped, or `.Encode`.
-//	- A record of other cells than the columns' (a `[]string` of another length, a struct field no column names)
-//	  is `.Bad_Row`, with the cell count or the field's index in `offset`. A `[]string` of another length is
-//	  fine in a `ragged` dialect.
+//	- `row` is a struct or a `[]string`. A struct's fields fill the header's columns by name (`csv:"name"` or
+//	  the field's name), with an empty cell for a column no field names. Without a header (`header` false) its
+//	  fields are the columns in order. A `[]string` gives one cell per column.
+//	- Cells are spelled as `set` spells them. A first cell starting with the comment byte is quoted or
+//	  escaped, or else `.Encode`.
+//	- A record whose cells do not match the columns (a `[]string` of another length, a struct field no column
+//	  names) is `.Bad_Row`, with the cell count or the field's index in `offset`. A `ragged` dialect accepts a
+//	  `[]string` of any length.
 //	- A negative `at`, one past the row count, and a text with no header record when `header` is set are
 //	  `.Unplaceable`.
 //	- Appended to a text that does not end in a line break, the record gets a break before it and none after.
@@ -160,13 +160,14 @@ watched_insert :: proc(
 	return edited(src, {{lo = spot.pos, hi = spot.pos, bytes = text}}, allocator)
 }
 
-// Remove the record `path` names (`.[row]`) with its line break, or the field the path names (`.[].name`,
-// `.[][col]`) from every record, the header's too, with one delimiter beside it.
+// Remove the record `path` names (`.[row]`) with its line break, or remove the field it names (`.[].name`,
+// `.[][col]`) from every record, the header included, with one adjacent delimiter.
 //
 //	- A record with no such field keeps its bytes. A row or column the text lacks is `.Not_Found`.
 //	- Removing a record that is the last leaves the one before it as the text's end.
-//	- A column removal that would leave a record reading as no record is `.Unplaceable` (`offset` is the
-//	  record): the only column, a lone field left empty, and a first field left opening with the comment byte.
+//	- A column removal that would leave a record reading as no record is `.Unplaceable`, with the record in
+//	  `offset`. That happens when removing the only column, when one empty field is left, or when the new first
+//	  field starts with the comment byte.
 @(require_results)
 remove :: proc(
 	src: []byte,
@@ -219,7 +220,7 @@ watched_remove :: proc(
 	return edited(src, edits[:], allocator)
 }
 
-// Whether the field `f` of `src` opens with comment byte `comment`, which a record's first field must not.
+// Whether the field `f` of `src` starts with the comment byte `comment`, which a record's first field must not.
 @(private)
 opens_comment :: proc(src: []byte, f: Field, comment: byte) -> bool {
 	return comment != 0 && f.lo < f.hi && src[f.lo] == comment
@@ -232,7 +233,7 @@ leaves_blank :: proc(s: Site) -> bool {
 	return s.n == 2 && rest.lo == rest.hi
 }
 
-// A field of one record, with what removing or replacing it needs of the record.
+// A field of one record, with what removing or replacing it needs to know about the record.
 @(private)
 Site :: struct {
 	field:  Field,
@@ -246,8 +247,8 @@ Site :: struct {
 	col:    int,
 }
 
-// The sites of what `t` names: the field of column `col` in the data row (or in every row, with the header's
-// when `with_header`). A path of a row only (`COL_NONE`) names its first field.
+// The sites of what `t` names: the field of column `col` in the data row, or in every row (with the header
+// when `with_header`). A row-only path (`COL_NONE`) names the row's first field.
 @(private)
 sites_of :: proc(src: []byte, t: Target, dialect: Dialect, header, with_header: bool, out: ^[dynamic]Site) -> Maybe(Path_Error) {
 	it := records(src, dialect, .Strict, {}, out.allocator)
@@ -297,7 +298,7 @@ Spot :: struct {
 	crlf:     bool,    // the first record ends in CRLF
 	width:    int,     // the first record's field count, 0 for no record
 	columns:  []Field, // the header's fields, nil without a header
-	// The record goes at the end of a text that ends in no break: the break goes before it, not after.
+	// The record goes at the end of a text with no final line break: the break goes before the record.
 	unbroken: bool,
 }
 
@@ -384,7 +385,7 @@ spell_record :: proc(row: any, src: []byte, dialect: Dialect, spot: Spot, alloca
 	return w.buf[:], nil
 }
 
-// The record of `cells`, which must be the columns' number.
+// The record of `cells`, whose count must equal the column count.
 @(private)
 put_cells :: proc(w: ^Writer, cells: []string, dialect: Dialect, spot: Spot) -> Maybe(Path_Error) {
 	if len(cells) != spot.width && spot.width > 0 && !dialect.ragged {
@@ -396,7 +397,7 @@ put_cells :: proc(w: ^Writer, cells: []string, dialect: Dialect, spot: Spot) -> 
 	return nil
 }
 
-// The struct at `row.data` as a record of the header's columns, or without a header of its fields in order.
+// The struct at `row.data` as a record of the header's columns, or of its fields in order without a header.
 @(private)
 put_struct_row :: proc(w: ^Writer, row: any, src: []byte, dialect: Dialect, spot: Spot) -> Maybe(Path_Error) {
 	op, merr := struct_op(w.plan, row.id)
@@ -433,7 +434,7 @@ is_oom :: proc(err: Maybe(Path_Error)) -> bool {
 	return faulted && (e.kind == .Out_Of_Memory || e.kind == .Encode && e.encode == .Out_Of_Memory)
 }
 
-// `src` is CSV in `dialect`, judged `.Strict`.
+// The path error when `src` is not CSV in `dialect`, judged `.Strict`, or nil.
 @(private)
 check_source :: proc(src: []byte, dialect: Dialect) -> Maybe(Path_Error) {
 	if e, bad := validate(src, dialect).?; bad {
@@ -460,8 +461,8 @@ line_break :: proc(crlf: bool) -> string {
 	return "\r\n" if crlf else "\n"
 }
 
-// `edits` applied to `src`. A result that opens with a BOM `src` did not have would read as the text's own, so
-// an edit that makes one is refused.
+// `edits` applied to `src`. An edit that makes the result start with a BOM `src` did not have is refused,
+// since the BOM would be read as the text's own.
 @(private)
 edited :: proc(src: []byte, edits: []Edit, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	out, err = core_pkg.edits_apply(src, edits, allocator, core_pkg.PATH_OUT_OF_MEMORY)

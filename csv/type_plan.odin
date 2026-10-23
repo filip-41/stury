@@ -4,8 +4,8 @@ import "base:runtime"
 import "core:unicode/utf8"
 import core_pkg "../core"
 
-// How a plan maps types to cells. `marshal` writes by it and `unmarshal` reads by it, so the text one plan
-// writes reads back with a plan made with the same opts. A call without a plan maps by the zero value.
+// How a plan maps types to cells. `marshal` writes and `unmarshal` reads by it, so text written with one plan
+// reads back with a plan made from the same opts. A call without a plan uses the zero value.
 Plan_Opts :: struct {
 	enums: Enum_Spelling,
 	// Types read and written by the caller's procs, each as one cell.
@@ -15,29 +15,29 @@ Plan_Opts :: struct {
 // How an enum is written and read: `.Name` as its member's name (the default), `.Int` as its backing integer.
 Enum_Spelling :: core_pkg.Enum_Spelling
 
-// A type the caller reads and writes as one cell: a struct field of exactly `type` is a column whatever its
-// kind, and its procs run in place of the plan's.
+// A type the caller reads and writes as one cell. A struct field of exactly `type` is a column whatever its
+// kind, and the hook's procs run in place of the plan's.
 //
 //	- A nil proc leaves that direction `.Unsupported`.
 //	- It applies to a field of the row, and to the arm of a `Maybe` field. `unmarshal_check` does not run `read`.
 Type_Hook :: core_pkg.Type_Hook(Marshal_Hook)
 
-// Append the text of the value at `v`, of the hook's type, to `out`, empty on entry. `marshal` quotes or
-// escapes it as it does a string (`.Unwritable` where the dialect cannot), and an empty text as an empty
-// string. A refusal is the hook's `Marshal_Error`, which `marshal` returns as it is.
+// Appends the text of the value at `v`, of the hook's type, to `out`, which is empty on entry. `marshal`
+// quotes or escapes the text as it does a string (`.Unwritable` where the dialect cannot), and writes an
+// empty text as an empty string. To refuse, return a `Marshal_Error`; `marshal` returns it unchanged.
 Marshal_Hook :: #type proc(out: ^[dynamic]u8, v: rawptr) -> Marshal_Error
 
-// Read `text`, the cell's text (`field_text`) of a present cell, into the value at `dest`, of the hook's type,
-// allocating from `allocator`.
+// Reads `text`, a present cell's text (`field_text`), into the value at `dest`, of the hook's type, allocating
+// from `allocator`.
 //
-//	- `dest` holds what the target held, which is zero for a new record.
-//	- `text` is `src`'s bytes or a copy `unmarshal` frees after the call: copy what must outlive it.
-//	- A kind refuses the cell with that kind, at the cell. Nil reads it.
+//	- `dest` holds the target's previous value, zero for a new record.
+//	- `text` is either `src`'s bytes or a copy `unmarshal` frees after the call: copy what must outlive it.
+//	- Returning a kind refuses the cell with that kind, at the cell. Nil accepts it.
 Unmarshal_Hook :: core_pkg.Unmarshal_Hook
 
 // A type's columns, compiled once per `typeid` for `unmarshal` and `marshal` (`type_plan_init`). A column is
 // a struct field, named by its `csv:"name"` tag or its own name. `type_plan_destroy` frees it. Its fields are
-// the plan's own: read none of them.
+// internal.
 Type_Plan :: core_pkg.Hooked_Plan(Marshal_Hook)
 
 // A plan for values of type `T`, mapped by `opts`, which it copies. Nothing is compiled until first use.
@@ -50,7 +50,7 @@ type_plan_destroy :: proc(p: ^Type_Plan) {
 	core_pkg.hooked_plan_destroy(p)
 }
 
-// CSV spells a name as it is: quoting is the writer's, per cell.
+// CSV writes a name unchanged; the writer quotes per cell.
 @(private)
 csv_plan_format :: proc() -> core_pkg.Plan_Format {
 	return {
@@ -75,7 +75,7 @@ type_plan_default :: proc(T: typeid, a: runtime.Allocator) -> Type_Plan {
 	return type_plan_init(T, {}, a)
 }
 
-// Frees every plan this thread's cache holds, in the heap allocator they were made in. It does nothing while a
+// Frees every plan in this thread's cache, with the heap allocator they were made in. Does nothing while a
 // call on this thread is using the cache.
 plan_cache_clear :: proc() {
 	core_pkg.plan_cache_clear(&plan_cache, type_plan_destroy)
@@ -97,7 +97,7 @@ plan_done :: #force_inline proc(p, given, tmp: ^Type_Plan, out_of_memory: bool) 
 	core_pkg.plan_done(&plan_cache, p, given, tmp, out_of_memory, type_plan_destroy)
 }
 
-// `core_pkg.plan_op`, its refusal as `marshal` names it.
+// `core_pkg.plan_op`, with its refusal as a `Marshal_Error`.
 @(private)
 plan_op :: proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (idx: u32, err: Marshal_Error) {
 	perr: core_pkg.Plan_Error
@@ -105,7 +105,7 @@ plan_op :: proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (idx: u32, err: Marsha
 	return idx, Marshal_Error(perr)
 }
 
-// The kinds a column may be: one cell each.
+// The kinds a column may have, each one cell.
 @(private)
 CELL_KINDS :: bit_set[core_pkg.Shape_Kind]{.Bool, .Int, .Uint, .Enum_Int, .Enum_Uint, .Wide_Int, .Wide_Uint, .Float, .String, .Cstring, .Rune, .Hook}
 

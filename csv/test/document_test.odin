@@ -140,8 +140,8 @@ test_document_lazy_judges_strings :: proc(t: ^testing.T) {
 	testing.expect_value(t, strict, csv.Error{kind = .Bad_Char, offset = 7})
 }
 
-// The reserve for the rest of the text is a guess: a first row far shorter than the rest, in a heap too small to
-// hold the guess, must not fail the build.
+// The reserve for the rest of the text is an estimate. A first row far shorter than the rest, in a heap too
+// small for the estimate, must not fail the build.
 @(test)
 test_document_build_without_room_for_the_guess :: proc(t: ^testing.T) {
 	b := strings.builder_make(context.temp_allocator)
@@ -158,8 +158,8 @@ test_document_build_without_room_for_the_guess :: proc(t: ^testing.T) {
 	testing.expect_value(t, csv.row_count(&doc), 41)
 }
 
-// A decoded text is decoded once: a second read returns the same string, for a name and for a cell of a
-// regular and of a ragged document.
+// A text is decoded once: a second read returns the same string, for a header name and for a cell, in a
+// regular and in a ragged document.
 @(test)
 test_document_decoded_once :: proc(t: ^testing.T) {
 	for ragged in ([]bool{false, true}) {

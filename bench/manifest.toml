@@ -1,7 +1,7 @@
 # Bench manifest, read by bench/gen.py --check and bench/compare.py.
 #
-# [fixtures] is each fixture's SHA-256 as `python3 bench/gen.py --full` prints it; a mismatch
-# means the generator changed, and a run on other bytes is not quotable.
+# [fixtures] holds each fixture's SHA-256 as `python3 bench/gen.py --full` prints it. A mismatch
+# means the generator changed; a run on other bytes is not quotable.
 
 [fixtures]
 "batch_131072.json" = "c56477fc4e49db7d803e0520dd6944ec389a6baf80a7422d88c18dfa715af863"

@@ -1,9 +1,9 @@
 package walk
 
-// The JSON walk's substrate, below the lexer: the scan cursor and its caps, the per-scan query context and
-// the matchers it carries (path automaton, demand), the rows a scan writes and the stores behind them, and the
-// typed walk's state. Every walk in `json/scan` and its lexers run on it. The aliases are core's names, in the
-// spelling the files of this package use.
+// The package below the JSON lexer that every walk in `json/scan` and its lexers run on. It holds the scan
+// cursor and its caps, the per-scan query context and its matchers (path automaton, demand), the rows a scan
+// writes and their stores, and the typed walk's state. The aliases below give core's names the spelling this
+// package's files use.
 
 import core_pkg "../../../core"
 
@@ -21,8 +21,8 @@ Shape_Op :: core_pkg.Shape_Op
 Shape_Field :: core_pkg.Shape_Field
 Shape_Fault :: core_pkg.Shape_Fault
 
-// A union's arm is picked by `arm_of[vc]`, so the scan classes number core's: `true` and `false` are the
-// `Bool` class, and `null`, which the walk tells apart from them, reads `arm_of[0]`.
+// A union's variant is selected by `arm_of[vc]`, so the scan classes use core's numbering. `true` and `false`
+// are the `Bool` class. The walk classifies `null` separately, and it reads `arm_of[0]`.
 #assert(VC_OBJECT == int(core_pkg.Value_Class.Object))
 #assert(VC_ARRAY == int(core_pkg.Value_Class.Array))
 #assert(VC_STRING == int(core_pkg.Value_Class.String))

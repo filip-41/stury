@@ -49,8 +49,8 @@ scan_plain :: proc(
 	return finish(&s)
 }
 
-// `scan_plain` for a document that opens like a pretty printer's (`pretty_head`): the walk on the pretty
-// cursor, in its own function and on its own scanner, so the compact walk's scanner stays in registers.
+// Runs `scan_plain` on the pretty cursor, for a document that starts like pretty-printed output
+// (`pretty_head`). It has its own function and scanner so the compact walk's scanner stays in registers.
 @(private = "file")
 scan_plain_pretty :: #force_no_inline proc(src: []byte, strictness: Strictness, limits: Limits) -> Maybe(Error) {
 	s := enter_document(src, limits, MAX_DEPTH)

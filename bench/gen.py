@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Deterministic bench fixtures: writes bench/fixtures/<name> and prints each one's SHA-256.
+"""Writes the bench fixtures to bench/fixtures/<name> and prints each one's SHA-256.
 
-No clock, no network, no randomness beyond seeded PRNGs, so two runs are byte-identical and
-bench/manifest.toml's [fixtures] hashes hold. Most generators draw from
-CPython's `random` module, so the hashes hold for the interpreter's `random` as tested (CPython 3.14);
-a different release may change the bytes. A plain run writes every fixture; NAME... writes only those.
-After a generator change, paste the printed hashes into the manifest.
+The output is deterministic (no clock, no network, only seeded PRNGs), so it matches bench/manifest.toml's
+[fixtures] hashes. Most generators use CPython's `random` module; the hashes are tested on CPython 3.14, and
+another release may change the bytes. With no NAME every fixture is written. After a generator change, paste
+the printed hashes into the manifest.
 
-Every fixture is strictly valid JSON (the `.csv` and `.tsv` ones, strictly valid CSV in their dialect)
-unless its docstring says otherwise, and each generator checks that by parsing its own output.
+Every fixture is strictly valid JSON (the `.csv` and `.tsv` ones strictly valid CSV in their dialect) unless
+its docstring says otherwise. Each generator parses its own output to check this.
 
     python3 bench/gen.py [NAME...] [--check]
 """
@@ -25,12 +24,12 @@ import tomllib
 
 MIB = 1024 * 1024
 HERE = os.path.dirname(os.path.abspath(__file__))
-# Where the probe and the other libraries' arms read them.
+# The probe and the other libraries' arms read the fixtures from here.
 OUT = os.path.join(HERE, "fixtures")
 
 
 def gen_config_json(target: int) -> bytes:
-    """Large flat object; the two demanded keys sit at the end."""
+    """Returns a large flat object whose two demanded keys are last."""
     rnd = random.Random(20260929)
     parts = []
     i = 0
@@ -78,8 +77,8 @@ def gen_ndjson(target: int, record_bytes: int = 512) -> bytes:
 
 
 def gen_escape_json(target: int) -> bytes:
-    """Escape- and number-heavy: the fixture where the Strict-vs-Structural
-    dial matters (clean fixtures never trigger the content checks Structural skips)."""
+    """Returns an escape- and number-heavy array. It is the only fixture whose content
+    `.Structural` does not check, so `.Strict` and `.Structural` differ on it."""
     rnd = random.Random(777)
     escapes = ['\\"', '\\\\', '\\/', '\\b', '\\f', '\\n', '\\r', '\\t',
                '\\u00e9', '\\u0022', '\\ud83d\\ude00', '\\u0000']
@@ -111,7 +110,7 @@ def gen_escape_json(target: int) -> bytes:
 
 
 def gen_longtext_json(target: int) -> bytes:
-    """KB-scale string values: the long-string regime (strings of 32 bytes or more)."""
+    """Returns an array of KB-scale strings, for the long-string path (32 bytes or more)."""
     rnd = random.Random(20240)
     words = ["lorem", "ipsum", "dolor", "sit", "amet", "consectetur",
              "adipiscing", "elit", "sed", "do", "eiusmod", "tempor"]
@@ -134,10 +133,9 @@ def gen_longtext_json(target: int) -> bytes:
 
 
 def gen_utf8_json(target: int) -> bytes:
-    """gen_longtext_json's shape with non-ASCII text: the controlled
-    ASCII-vs-UTF-8 pair, where substrate_longtext is the ASCII control.
-    Every strictness level validates wire UTF-8, so the ASCII fixtures never
-    exercise this path. Widths are mixed 2/3/4-byte."""
+    """Returns gen_longtext_json's shape with non-ASCII text; longtext.json is its
+    ASCII control. Every strictness level validates wire UTF-8, and the ASCII
+    fixtures never reach that path. Characters are mixed 2-, 3- and 4-byte."""
     rnd = random.Random(20241001)
     pools = [
         "áéíóúàèìòùâêîôûäëïöüñç",  # 2-byte Latin
@@ -167,11 +165,9 @@ def gen_utf8_json(target: int) -> bytes:
 
 
 def gen_utf8_sparse_json(target: int) -> bytes:
-    """The density the other two miss: gen_longtext_json's shape again, but with
-    only ~2% of bytes non-ASCII -- an accented name in a config, a stray emoji in
-    a log. Throughput is very non-linear in the non-ASCII share, so this
-    common case sits in its own regime. Widths are ~90% 2-byte / 10% 4-byte,
-    which is what prose looks like."""
+    """Returns gen_longtext_json's shape with ~2% of bytes non-ASCII (an accented
+    name, an emoji). Throughput is non-linear in the non-ASCII share, so this
+    density has its own fixture. Characters are ~90% 2-byte, 10% 4-byte."""
     rnd = random.Random(20241002)
     twobyte = "áéíóúàèìòùâêîôûäëïöüñçαβγδεζηθικλμνξοπρστυφχψ"
     fourbyte = "😀🎉🚀🔥✨🌈🍕🎸🐙🌍"
@@ -204,7 +200,7 @@ def gen_utf8_sparse_json(target: int) -> bytes:
 
 
 def gen_wide_json(target: int) -> bytes:
-    """One object with tens of thousands of keys: reading 2 of N keys."""
+    """Returns one object with tens of thousands of keys, for reading 2 of N keys."""
     rnd = random.Random(31339)
     out = bytearray(b'{')
     i = 0
@@ -220,8 +216,7 @@ def gen_wide_json(target: int) -> bytes:
 
 
 def gen_pretty_json(target: int) -> bytes:
-    """Pretty-printed (indent=2, ~45% whitespace bytes) array of records:
-    the regime missing from every compact fixture."""
+    """Returns a pretty-printed array of records (indent=2, ~45% whitespace bytes)."""
     rnd = random.Random(5150)
     recs = []
     size = 0
@@ -238,10 +233,10 @@ def gen_pretty_json(target: int) -> bytes:
 
 
 def gen_bignum_json(target: int) -> bytes:
-    """Every token a number whose digits or exponent run at the caps rather than
-    at binary64's width. Widths straddle 19/20 digits (the u64 edge), 38/39 (the
-    u128 edge) and reach 255 (the last width under the digit cap); exponents
-    308/309 (binary64's range) against 4095/4096 (the scale cap)."""
+    """Returns an array of numbers whose digits or exponent reach the caps rather
+    than binary64's width. Widths straddle 19/20 digits (the u64 edge) and 38/39
+    (the u128 edge) and reach 255 (the widest under the digit cap). Exponents
+    straddle 308/309 (binary64's range) and 4095/4096 (the scale cap)."""
     rnd = random.Random(20261003)
     widths = [19, 20, 38, 39, 39, 39, 128, 255]
     out = bytearray(b"[")
@@ -271,16 +266,15 @@ def gen_bignum_json(target: int) -> bytes:
 
 
 def gen_dups_json() -> bytes:
-    """ONE object with many repeated top-level keys: a last-wins read and a skip
-    read differ in work done, not in answer.
+    """Returns one flat object with repeated top-level keys, on which a last-wins
+    read and a skip read give the same answer for different work.
 
     The members are written by hand because a Python dict collapses repeated
-    keys. It is one flat object, not a record list, because a named-member read
-    covers the top-level object's members only.
+    keys. The object is flat because a named-member read covers only the
+    top-level object's members.
 
-    Keys repeat 6 times each across 4096 distinct keys, so a last-wins read has
-    6 candidates per key to compare and a skip read has 24576 members to step
-    over. The size follows from those counts."""
+    4096 distinct keys repeat 6 times each, so a last-wins read compares 6
+    candidates per key and a skip read steps over 24576 members."""
     rnd = random.Random(20261004)
     n_keys = 4096
     repeats = 6
@@ -294,7 +288,7 @@ def gen_dups_json() -> bytes:
     out += b"}"
     data = bytes(out)
     json.loads(data)
-    # json.loads collapses repeats, so the check reads the bytes.
+    # json.loads collapses repeats, so count them in the bytes.
     assert data.count(b'"k0000":') == repeats, "duplicates did not survive"
     assert data.count(b'"k0001":') == repeats
     return data
@@ -315,10 +309,9 @@ def gen_splice_json(target: int) -> bytes:
 
 
 def gen_deep_json(target: int) -> bytes:
-    """Array of 256-deep array chains: the deep-nesting regime (the other
-    fixtures nest at most 8 deep; depthwide_* varies depth in a grid). 256 is
-    well under the 1024 depth cap and under CPython's recursion limit for the
-    self-check."""
+    """Returns an array of 256-deep array chains. The other fixtures nest at most
+    8 deep; depthwide_* varies depth in a grid. 256 is under the 1024 depth cap
+    and under CPython's recursion limit for the self-check."""
     rnd = random.Random(20261010)
     depth = 256
     out = bytearray(b"[")
@@ -337,11 +330,11 @@ def gen_deep_json(target: int) -> bytes:
 
 
 def gen_findesc_json(target: int) -> bytes:
-    """Flat object whose keys are escape-spelled: a named-member read has to
-    decode each key to compare it. Every key is `k%06d` decoded but `\\u006b%06d`
+    """Returns a flat object whose keys are escape-spelled, so a named-member read
+    decodes each key to compare it. Every key is `k%06d` decoded but `\\u006b%06d`
     on the wire, so a raw-bytes compare never matches. `wide.json` has the same
-    shape with plain keys; the pair isolates what decoding costs. The first
-    keys are asserted present so the lanes' lookups hit."""
+    shape with plain keys. The first keys are asserted present so the lanes'
+    lookups hit."""
     rnd = random.Random(20261011)
     out = bytearray(b"{")
     first = True
@@ -361,12 +354,10 @@ def gen_findesc_json(target: int) -> bytes:
 
 
 def gen_fault_json(target: int) -> bytes:
-    """Valid nested records with one invalid wire byte 10 bytes from the end:
-    the reject path. Every other fixture is strictly valid, so the
-    fault-return path (kind + exact offset) is never timed. The fault sits
-    near the end so the walk judges ~the whole document before refusing: the
-    number measures full-walk-then-reject, not an early exit. Deliberately
-    invalid: the generator asserts that it fails to parse."""
+    """Returns valid nested records with one invalid wire byte 10 bytes from the
+    end, for the error path (kind and exact offset). It is the only fixture that
+    is not strictly valid. A reader validates almost the whole document before
+    refusing it. The generator asserts that it fails to parse."""
     rnd = random.Random(20261012)
     out = bytearray(b"[")
     first = True
@@ -393,9 +384,8 @@ def gen_fault_json(target: int) -> bytes:
 
 
 def gen_tiny_json(target: int) -> bytes:
-    """~2 KB array of records: the small-document regime. Every other fixture is
-    hundreds of KB or more; a 2 KB document pays per-call setup that GB/s
-    arithmetic hides, which is why its lane reports ns."""
+    """Returns a ~2 KB array of records; every other fixture is hundreds of KB or
+    more. Per-call setup dominates at this size, so its lane reports ns, not GB/s."""
     rnd = random.Random(20261013)
     out = bytearray(b"[")
     first = True
@@ -429,7 +419,7 @@ _LOG_WORDS = [
 
 
 class _Lcg:
-    """64-bit LCG (Knuth's MMIX constants), so logs.json does not depend on Python's `random`."""
+    """64-bit LCG (Knuth's MMIX constants), so the fixtures drawn from it do not depend on Python's `random`."""
 
     def __init__(self, seed: int) -> None:
         self.s = seed & 0xFFFFFFFFFFFFFFFF
@@ -446,7 +436,7 @@ class _Lcg:
 
 
 # CSV and TSV fixtures. Every row has the header's width, no cell is empty (a typed read treats an empty cell
-# as absent), and the numbers are written with a fixed number of decimals so every reader parses the same value.
+# as absent), and numbers have a fixed number of decimals so every reader parses the same value.
 _CSV_FIRST = ["Ada", "Boris", "Chen", "Dalia", "Emre", "Farah", "Goran", "Hana", "Ivo", "Jun", "Zoë",
               "Łukasz", "Søren", "Amélie", "Renée"]
 _CSV_LAST = ["Nowak", "Okafor", "Lindqvist", "Tanaka", "Müller", "Haddad", "Silva", "Kowalski", "Dubois",
@@ -458,14 +448,14 @@ _CSV_WORDS = ["the", "quick", "ledger", "closes", "on", "friday", "after", "audi
 
 
 def _csv_cell(s: str, delimiter: str = ",") -> str:
-    """RFC 4180's minimal quoting: quote a cell holding the delimiter, a quote, CR or LF."""
+    """Quotes S, per RFC 4180's minimal quoting, only when it contains the delimiter, a quote, CR or LF."""
     if delimiter in s or any(c in s for c in '"\r\n'):
         return '"' + s.replace('"', '""') + '"'
     return s
 
 
 def _check_csv(data: bytes, delimiter: str, quoting: int, columns: int) -> bytes:
-    """`data` when it parses strictly into rows all `columns` wide; a generation bug otherwise."""
+    """Returns DATA when it parses strictly into rows all COLUMNS wide; asserts otherwise."""
     rows = list(csv.reader(io.StringIO(data.decode("utf-8"), newline=""), delimiter=delimiter,
                            quoting=quoting, strict=True))
     assert rows and all(len(r) == columns for r in rows), "ragged or empty csv fixture"
@@ -473,7 +463,7 @@ def _check_csv(data: bytes, delimiter: str, quoting: int, columns: int) -> bytes
 
 
 def gen_table_csv(target: int, delimiter: str = ",") -> bytes:
-    """Numeric-heavy table (~70 B a row, unquoted): 4 integers, 4 decimals, a bool, a 3-letter code."""
+    """Returns a numeric table (~70 B a row, unquoted) of 4 integers, 4 decimals, a bool and a 3-letter code."""
     rng = _Lcg(0xC5F0001)
     out = [delimiter.join(["id", "ts", "lat", "lon", "qty", "price", "score", "ok", "code"]) + "\n"]
     size, i = len(out[0]), 0
@@ -492,8 +482,8 @@ def gen_table_csv(target: int, delimiter: str = ",") -> bytes:
 
 
 def gen_text_csv(target: int) -> bytes:
-    """Text with quoting: UTF-8 names, cities holding a comma, and a free-text column that is quoted when it holds a
-    comma (1 in 3), a doubled quote (1 in 4) or an LF (1 in 12)."""
+    """Returns a text table with quoting: UTF-8 names, cities containing a comma, and a free-text column quoted when
+    it contains a comma (1 row in 3), a doubled quote (1 in 4) or an LF (1 in 12)."""
     rng = _Lcg(0xC5F0002)
     out = ["id,name,city,quote,note\n"]
     size, i = len(out[0]), 0
@@ -516,7 +506,7 @@ def gen_text_csv(target: int) -> bytes:
 
 
 def gen_wide_csv(target: int) -> bytes:
-    """200 columns (~1.2 KB a row): integers, every fifth column a 2-decimal number."""
+    """Returns a 200-column table (~1.2 KB a row) of integers, with every fifth column a 2-decimal number."""
     rng = _Lcg(0xC5F0003)
     out = [",".join("c%03d" % c for c in range(200)) + "\n"]
     size = len(out[0])
@@ -529,8 +519,8 @@ def gen_wide_csv(target: int) -> bytes:
 
 
 def gen_batch_json(n: int) -> bytes:
-    """`[{"i","s","f","n"}, ...]`: n small flat records, each with a 40-character base64url string, for the
-    jq comparison's `.[].s` case."""
+    """Returns N small flat records `[{"i","s","f","n"}, ...]`, each `s` a 40-character base64url string, for
+    the jq comparison's `.[].s` case."""
     rnd = _Lcg(n)
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
     rows = []
@@ -542,7 +532,7 @@ def gen_batch_json(n: int) -> bytes:
 
 
 def gen_logs_json(target: int) -> bytes:
-    """`{"logs":[{...}, ...]}`: the array-of-records majority case. Flat 8-member log records
+    """Returns `{"logs":[{...}, ...]}`, the common array-of-records shape: flat 8-member log records
     (~227 B each), ASCII, no escapes, messages of 20-60 bytes."""
     rng = _Lcg(0x5EED10C5)
     out = bytearray(b'{"logs":[')
@@ -588,8 +578,8 @@ _DOC_KEY_POOL = ["id", "ts", "level", "msg", "src", "dur_ms", "user", "ip",
 
 
 def _wire_string(rnd, want, escape_p):
-    """A JSON string whose DECODED body is `want` characters, `escape_p` of
-    them spelled as escapes."""
+    """Returns a JSON string whose decoded body is WANT characters, a share
+    ESCAPE_P of them spelled as escapes."""
     parts = ['"']
     got = 0
     while got < want:
@@ -605,9 +595,9 @@ def _wire_string(rnd, want, escape_p):
 
 
 def _num_token(rnd, sig_lo, sig_hi, frac_p=0.0, exp_p=0.0, skew=1.0):
-    """A JSON number with `sig_lo..sig_hi` significant digits; `frac_p` of
-    tokens are fractional and `exp_p` carry an exponent inside binary64's range,
-    so no token is refused."""
+    """Returns a JSON number with SIG_LO..SIG_HI significant digits. A share
+    FRAC_P of tokens are fractional and EXP_P carry an exponent inside
+    binary64's range, so no token is refused."""
     span = sig_hi - sig_lo + 1
     sig = sig_lo + min(span - 1, int((rnd.random() ** skew) * span))
     digs = str(rnd.randrange(1, 10)) + "".join(
@@ -619,7 +609,7 @@ def _num_token(rnd, sig_lo, sig_hi, frac_p=0.0, exp_p=0.0, skew=1.0):
     if rnd.random() < frac_p:
         if sig == 1:
             return "0." + digs
-        # Half `0.x`: a leading zero is a decoder branch of its own.
+        # Half are `0.x`, since a leading zero takes its own decoder branch.
         if rnd.randrange(2):
             return "0." + digs
         return digs[0] + "." + digs[1:]
@@ -627,17 +617,17 @@ def _num_token(rnd, sig_lo, sig_hi, frac_p=0.0, exp_p=0.0, skew=1.0):
 
 
 def gen_documents_json(target: int) -> bytes:
-    """Documents with structure and no period: each document draws its own
-    field->class binding, so values cluster the way a real payload's do while the
-    class stream stays aperiodic. Nesting depth 1..8, string bodies filling the
-    8..23 byte band, ~20% escaped strings."""
+    """Returns documents with structure and no period. Each document draws its own
+    field->class binding, so values cluster as in a real payload while the class
+    stream stays aperiodic. Nesting depth 1..8, string body lengths covering every
+    value in 8..23, ~20% escaped strings."""
     rnd = random.Random(20261022)
     key_pool = list(_DOC_KEY_POOL)
     bands = ([0, 1, 2, 3, 4, 5, 6, 7] + list(range(8, 24)) +
              [24, 26, 31, 33, 40, 55, 64, 96, 128])
 
     def pick_class(w):
-        """A class index drawn from a document's weight vector."""
+        """Returns a class index drawn from the weight vector W."""
         r = rnd.random() * sum(w)
         acc = 0.0
         for i, wi in enumerate(w):
@@ -647,9 +637,9 @@ def gen_documents_json(target: int) -> bytes:
         return len(w) - 1
 
     def schema():
-        """One document's field->class binding, shared by every object in it.
-        Redrawn per document: one global binding would make the class stream
-        periodic, like nested.json's."""
+        """Returns one document's field->class binding, shared by every object in
+        it. It is drawn per document because one global binding would make the
+        class stream periodic, like nested.json's."""
         w = [rnd.random() + 0.12 for _ in range(5)]
         s = sum(w)
         w = [x / s for x in w]
@@ -673,9 +663,7 @@ def gen_documents_json(target: int) -> bytes:
             if depth < 8 and rnd.random() < 0.22:
                 members.append('"%s":%s' % (k, nested(depth + 1, w, s)))
                 continue
-            # 25% of members ignore the binding: a document whose fields are
-            # mostly typed but not rigidly so, which is what a real payload
-            # looks like after a few optional fields.
+            # 25% of members ignore the binding, as optional fields do in a real payload.
             cls = s[k] if rnd.random() < 0.75 else pick_class(w)
             members.append('"%s":%s' % (k, scalar(cls)))
         return "{" + ",".join(members) + "}"
@@ -701,10 +689,10 @@ def gen_documents_json(target: int) -> bytes:
 
 
 def gen_decode_json(target: int) -> bytes:
-    """Wide mantissas inside keyed documents, where decode is the work.
-    Unlike bignum.json's bare tokens, the numbers sit among keys, arrays, strings
-    and literals. Widths 16..38 straddle the u64 (19/20) edge and reach the u128
-    (38) edge without crossing it; half the fractionals are `0.x`."""
+    """Returns keyed documents with wide mantissas, where number decoding is the
+    work. Unlike bignum.json's bare tokens, the numbers sit among keys, arrays,
+    strings and literals. Widths 16..38 straddle the u64 edge (19/20) and reach
+    the u128 edge (38) without crossing it. Half the fractionals are `0.x`."""
     rnd = random.Random(20261023)
     keys = ["px", "py", "pz", "acc", "vel", "mass", "rate", "lambda_k",
             "integral", "energy", "momentum", "delta", "sigma", "mu", "eps",
@@ -747,8 +735,8 @@ def gen_decode_json(target: int) -> bytes:
 
 
 def _padded_object(members, size):
-    """`{"m1":v1,...,"p":"xxx"}` of exactly `size` bytes; the pad member makes
-    the size exact."""
+    """Returns `{"m1":v1,...,"p":"xxx"}` of exactly SIZE bytes; the length of the
+    pad member `p` sets the size."""
     def build(pad):
         body = ",".join(members + ['"p":"%s"' % ("x" * pad)])
         return "{" + body + "}"
@@ -762,9 +750,10 @@ def _padded_object(members, size):
 
 
 def _fixed_cost_records(docs, rec_bytes, seed, short_last=0):
-    """The `docs` records both halves of the byte-matched NDJSON pair are
-    built from: same generator and seed, so the two files differ only in how many
-    documents the bytes arrive as. 4-7 members, one nested container, no escapes."""
+    """Returns the DOCS records that both files of the byte-matched NDJSON pair
+    are built from. Both use this generator and seed, so the files differ only in
+    how many documents the bytes form. 4-7 members, one nested container, no
+    escapes."""
     rnd = random.Random(seed)
     out = []
     for i in range(docs):
@@ -795,8 +784,8 @@ def _fixed_cost_records(docs, rec_bytes, seed, short_last=0):
 
 
 def gen_manysmall_ndjson(docs: int, rec_bytes: int) -> bytes:
-    """`docs` separate records of exactly `rec_bytes` B, one per line;
-    the file is exactly `docs * (rec_bytes + 1)` bytes."""
+    """Returns DOCS records of exactly REC_BYTES bytes, one per line. The file is
+    exactly `docs * (rec_bytes + 1)` bytes."""
     recs = _fixed_cost_records(docs, rec_bytes, 20261025)
     data = "".join(r + "\n" for r in recs).encode()
     assert len(data) == docs * (rec_bytes + 1), len(data)
@@ -806,9 +795,9 @@ def gen_manysmall_ndjson(docs: int, rec_bytes: int) -> bytes:
 
 
 def gen_onebig_ndjson(docs: int, rec_bytes: int) -> bytes:
-    """The same records as ONE array, byte-matched to
-    `gen_manysmall_ndjson`'s file: the last record is 2 B shorter to pay for
-    the `[`/`]` and commas, so the pair prices per-document entry alone."""
+    """Returns the same records as one array, the same size as
+    `gen_manysmall_ndjson`'s file. The last record is 2 B shorter to make room for
+    `[`, `]` and the commas, so the pair differs only in per-document start cost."""
     recs = _fixed_cost_records(docs, rec_bytes, 20261025, short_last=2)
     data = ("[" + ",".join(recs) + "]\n").encode()
     assert len(data) == docs * (rec_bytes + 1), len(data)
@@ -816,16 +805,16 @@ def gen_onebig_ndjson(docs: int, rec_bytes: int) -> bytes:
     return data
 
 
-# The three ws_* documents hold one value mix (asserted equal after whitespace
-# removal), so whitespace density is the only variable.
+# The three ws_* documents hold the same values (asserted equal after whitespace
+# removal); only the whitespace density differs.
 _WS_MODES = ("ws_none", "ws_60", "ws_85")
 _WS_RATIO = {"ws_none": 0.0, "ws_60": 0.62, "ws_85": 0.86}
 _WS_CHARS = (b" ", b"\n", b"\t", b"\r", b"  ", b"\n\n")
 
 
 def gen_ws_heavy_json(n_records):
-    """Three documents of `n_records` records, one per whitespace mode,
-    with long whitespace runs (tens to hundreds of bytes) between tokens."""
+    """Returns three documents of N_RECORDS records, one per whitespace mode,
+    with whitespace runs of tens to hundreds of bytes between tokens."""
     outs = {}
     for mode in _WS_MODES:
         rnd = random.Random(20261103)
@@ -867,16 +856,16 @@ def gen_ws_heavy_json(n_records):
     return outs
 
 
-# Equal bytes across the depth x width grid with a fixed 8-digit element, so
-# depth is not confounded with value density as in deep.json.
+# Every depth x width fixture has the same size and 8-digit elements, so depth
+# does not change value density as it does in deep.json.
 def gen_depthwide_json(target, depth, width):
-    """An array of `width`-wide array chains of 8-digit numbers; `depth`
-    is the document's maximum nesting, top-level array included."""
+    """Returns an array of WIDTH-wide array chains of 8-digit numbers. DEPTH is
+    the document's maximum nesting, top-level array included."""
     assert depth >= 2, "depth 1 has no chain; the top-level array is depth 1"
     rnd = random.Random(20261104)
     inner = depth - 1
     chain = b"[" * inner
-    # From 10**7: a leading zero would make the number invalid.
+    # Starts at 10**7 because a leading zero would make the number invalid.
     chain += b",".join(b"%08d" % rnd.randrange(10000000, 100000000)
                        for _ in range(width))
     chain += b"]" * inner
@@ -895,15 +884,15 @@ def gen_depthwide_json(target, depth, width):
     return data
 
 
-# Each numstr pair is byte-identical in length: the number arm emits an L-byte
-# token and the string arm `"` + digits[:L-2] + `"`, so only the value class
-# differs between them.
+# In a numstr pair the number arm writes an L-byte token where the string arm
+# writes `"` + digits[:L-2] + `"`, so the two files have the same length and
+# differ only in value class.
 _NUMSTR_CLASSES = ("num_short", "str_short", "num_wide", "str_wide",
                    "num_45", "bool")
 
 
 def gen_numstr_json(target, klass):
-    """One numstr arm: identical structure within a pair, one value class."""
+    """Returns one numstr arm: values of class KLASS only, in the same structure as its pair."""
     assert klass in _NUMSTR_CLASSES, "unknown numstr class %r" % (klass,)
     wide = klass.endswith("wide")
     as_string = klass.startswith("str")
@@ -924,19 +913,18 @@ def gen_numstr_json(target, klass):
             digs = str(rnd.randrange(1, 10)) + "".join(
                 str(rnd.randrange(10)) for _ in range(L - 1))
             # Every arm draws the same values in the same order, so pairs stay
-            # byte-matched; the `0.x` coin is drawn before the class branch.
+            # byte-matched. That is why the `0.x` coin is drawn before the class branch.
             cluster = wide and rnd.random() < 0.5
             if as_string:
                 tok = '"' + digs[:L - 2] + '"'
             elif klass == "bool":
                 # `true`/`null` are 4 B and `false` is 5 B, so a byte-matched
-                # literal only exists at L in {4,5} -- which is exactly why the
-                # boolean arm pairs with `num_45` and not with `num_short`.
+                # literal exists only at L in {4,5}. The boolean arm pairs with `num_45`.
                 tok = "true" if L == 4 else "false"
             elif cluster:
-                # `0.x` clusters: a leading zero is a decoder branch of its own,
-                # and `gen_decode_json` only mixes them in at 42%. The `0.` is
-                # 2 B and the body is L-2, so the token is still exactly L.
+                # Half the wide tokens are `0.x`: a leading zero takes its own
+                # decoder branch, and `gen_decode_json` mixes them in at only 42%.
+                # `0.` is 2 B and the body L-2 B, so the token is still L bytes.
                 tok = "0." + digs[:L - 2]
             else:
                 tok = digs
@@ -1004,8 +992,8 @@ def main() -> int:
     names = sorted(a.names or FIXTURES)
     with open(os.path.join(HERE, "manifest.toml"), "rb") as f:
         pinned = tomllib.load(f)["fixtures"]
-    # The generators' own `json.loads` self-check recurses once per level of the depth-1023 fixtures, past
-    # the default limit of CPython 3.11 and 3.12.
+    # The `json.loads` self-check recurses once per nesting level; the depth-1023 fixtures exceed the default
+    # limit of CPython 3.11 and 3.12.
     sys.setrecursionlimit(max(sys.getrecursionlimit(), 4000))
     os.makedirs(OUT, exist_ok=True)
     off = []

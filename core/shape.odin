@@ -18,8 +18,8 @@ Shape_Kind :: enum u8 {
 	String,
 	Cstring,
 	Rune,
-	// A format's own types (`Plan_Format.types`): a value as authored, a scalar decoded whatever its kind, a
-	// number, a number as its authored text.
+	// A format's own types (`Plan_Format.types`): `Raw` is a value's source text, `Decoded` a scalar of any
+	// kind, `Number` a number, and `Digits` a number's source text.
 	Raw,
 	Decoded,
 	Number,
@@ -31,14 +31,14 @@ Shape_Kind :: enum u8 {
 	Map,
 	Struct,
 	Pointer,
-	Union,      // a union: the arm a value's class picks (`Maybe` is the one-arm case)
+	Union,      // a union; the value's class selects the arm (`Maybe` is the one-arm case)
 	Any,        // an `any`: a scalar as its `Decoded` arm, a container as a tree (or `Raw`), boxed in the allocator
 	Bit_Set,    // a `bit_set`: an array of its elements, read whole at its `]`
 	Hook,       // a type the caller reads: any value, validated whole, handed to `Read_Shape.hooks[elem]`
 }
 
-// The kinds of a tree format's values, which pick a union's arm (`Shape_Op.arm_of`). A format's walk indexes
-// `arm_of` by its own class of a value's first token, numbered as these.
+// The classes of a tree format's values, used to select a union's arm (`Shape_Op.arm_of`). A format's walk
+// indexes `arm_of` by the class of a value's first token, numbered as here.
 Value_Class :: enum u8 {
 	Null,
 	Object,
@@ -71,20 +71,20 @@ Shape_Op :: struct {
 	arm_of:     [SHAPE_CLASSES]u8,
 	width:      u8,  // Int/Uint/Enum_*/Float: byte width. Bit_Set: 8, an element's value read as an i64
 	kind:       Shape_Kind,
-	// Union: some arm is a named struct, which an object may name in its `Plan_Opts.union_tag` member. With
-	// no arm at `.Object`, two or more such arms take an object, and only the tag tells them apart.
+	// Union: some arm is a named struct, which an object may select through its `Plan_Opts.union_tag` member.
+	// When no arm is at `.Object`, two or more such arms accept an object and only the tag distinguishes them.
 	tagged:     bool,
-	// Struct: some field is a whole leaf and every name is plain printable ASCII, so a walk may read its
-	// members in one loop, matching a key by its raw bytes. Set by `Plan_Format.lowered`.
+	// Struct: some field is a whole leaf and every name is plain printable ASCII, so a walk may read the members
+	// in one loop and match keys by their raw bytes. Set by `Plan_Format.lowered`.
 	members_fused:  bool,
-	// Slice/Dynamic: the element is a whole leaf, so a walk may read its elements in one loop.
+	// Slice/Dynamic: the element is a whole leaf, so a walk may read the elements in one loop.
 	// Set by `Plan_Format.lowered`.
 	elements_fused: bool,
 }
 
 // One field of a struct op (at the index of its `Plan_Field`) or one arm of a union op (after every field).
 Shape_Field :: struct {
-	name:   string, // the decoded name, or a named struct arm's type name (borrowed from type info or the tag)
+	name:   string, // the decoded name, or a named struct arm's type name (borrowed from type info or the tag text)
 	offset: u32,    // a field's offset, or an arm's tag value
 	op:     u32,
 	// A member's compact form, `"name":`, as two little-endian words and the masks of the bytes it fills,
@@ -94,11 +94,11 @@ Shape_Field :: struct {
 	colon_mask: [2]u64,
 }
 
-// What a typed read does with a member or column the target type does not name. Each format says how it judges
-// one it ignores.
+// What a typed read does with a member or column that the target type does not name. Each format documents how
+// it validates an ignored one.
 Unknown_Fields :: enum u8 {
 	Ignore,
-	Refuse, // `.Unknown_Field` at its name
+	Refuse, // an `.Unknown_Field` error at its name
 }
 
 // A type's own reading (`Plan_Hook.read`): `text`, one value as authored and validated, into `dest`. It
@@ -115,10 +115,9 @@ Read_Shape :: struct {
 	// Zeroed bytes as wide as the widest map value in the shape: the value a new map entry is inserted with.
 	zero:   []u8,
 	root:   u32,
-	// Every op reachable from the root is a fused struct, a sequence or a scalar leaf with no container arm,
-	// and no list is of flat records, which a walk reads faster: the format's walk may read the document by
-	// descent instead.
-	// Set by `Plan_Format.lowered`.
+	// Every op reachable from the root is a fused struct, a sequence or a scalar leaf with no container arm, and
+	// no list holds flat records (those have a faster loop). The format's walk may then read the document by
+	// descent. Set by `Plan_Format.lowered`.
 	descends: bool,
 }
 
@@ -131,8 +130,8 @@ read_shape_destroy :: proc(r: ^Read_Shape) {
 	r^ = {}
 }
 
-// Whether field `k` of the struct op `op` must appear: bit `k` of `op.required` for the first 64 fields, and
-// past them of the words from `op.key` in `r.wide`.
+// Reports whether field `k` of the struct op `op` is required. The first 64 fields use bit `k` of `op.required`;
+// later fields use the words of `r.wide` starting at `op.key`.
 shape_field_required :: proc(r: ^Read_Shape, op: ^Shape_Op, k: int) -> bool {
 	if k < 64 {
 		return op.required >> uint(k) & 1 != 0
@@ -140,7 +139,7 @@ shape_field_required :: proc(r: ^Read_Shape, op: ^Shape_Op, k: int) -> bool {
 	return r.wide[int(op.key) + (k - 64) / 64] >> uint((k - 64) % 64) & 1 != 0
 }
 
-// Why a format's shape walk refused a value; the walk's run state holds it. Each is
+// Why a format's shape walk refused a value; the walk's run state stores it. Each is
 // numbered as `Unmarshal_Error_Kind` numbers its namesake, so a hook's answer passes through unchanged,
 // a kind with no namesake here included. Keep this order: the leaves answer with these small numbers.
 Shape_Fault :: enum u8 {
@@ -156,6 +155,6 @@ Shape_Fault :: enum u8 {
 	Out_Of_Memory,
 }
 
-// A walk frame's field when no field is open: before the first key, or after an unknown one; a column no field
-// takes.
+// A walk frame's field when no field is open: before the first key, after an unknown key, or at a column no field
+// reads.
 NO_FIELD :: max(u32)

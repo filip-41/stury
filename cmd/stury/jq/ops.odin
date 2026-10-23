@@ -399,7 +399,7 @@ delimited :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 		switch kind(m) {
 		case .Null:
 		case .Number:
-			// jq spells NaN as an empty cell, as it spells null.
+			// jq writes NaN as an empty cell, like null.
 			if n, _ := number_of(m); !math.is_nan(n.f) {
 				strings.write_string(&b, to_json(m))
 			}

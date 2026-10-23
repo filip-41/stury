@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
-"""stury's read side against other libraries, job by job: typed decode, validate, DOM and GetOne for JSON, and for
-CSV (the `csv` job group) validate, records, document, typed decode and marshal.
+"""Times stury's read side against other libraries, job by job. The JSON jobs are typed decode, validate, DOM and
+GetOne; the CSV jobs (the `csv` group) are validate, records, document, typed decode and marshal.
 
 Typed decode has two kinds of arm: generic decoders (stury's unmarshal, serde_json and sonic-rs derive) and
-readers hand-written per shape on a parser API (simdjson On-Demand, yyjson's DOM), labelled `hand-written`.
+readers written by hand per shape on a parser API (simdjson On-Demand, yyjson's DOM), labelled `hand-written`.
 
-Every arm is a process that times its job in process (2 warm-up calls, then the median of 10) and prints
-key=value tokens; stury's arms are its bench lanes. This script runs every arm of a job RUNS times, interleaved
-round by round with the arm order rotated, keeps the median, and prints one markdown table per input.
+Each arm is a process that times its job itself (2 warm-up calls, then the median of 10) and prints key=value
+tokens. stury's arms are its bench lanes. This script runs every arm of a job RUNS times, round by round with the
+arm order rotated, keeps the median, and prints one markdown table per input.
 
-  check   before any timing: each typed arm's decoded value must equal stury's unmarshal (compared as JSON
-          values), every arm is run over the strictness probes (faulty documents), printing who accepts what,
-          and every GetOne arm must agree on whether the key is there and on the size of its value. Exits 1
-          when a typed arm differs or fails, when stury itself gives a wrong strictness verdict, or when the
-          GetOne arms disagree. For CSV: every arm that walks records must tally the same records, fields and
-          decoded bytes as stury's, every typed arm must decode the same rows, every marshal arm must write
-          a text that reads back as the input's cells, and the arms are run over faulty CSV (who accepts what).
-  time    the timings. --jobs picks among typed, validate, dom, getone and csv; --out DIR writes DIR/results.json
-          (every sample) and DIR/report.md (the tables under the run's commit, machine and library versions).
-  cycles  for close calls: one iteration's retired instructions and cycles (`/usr/bin/time -l` on macOS, `perf
-          stat` on Linux) on the same arm at 10 and at 50 timed iterations, differenced over 40, so loading and
-          checking cancel.
-          It counts what each iteration does outside the clock as well (an arena reset, a free, a drop).
-          stury's 50-iteration build: build/probe50 (`compare.py build` builds both)
-
-  build   compiles every arm into build/: stury's probes, then each other library whose sources or toolchain are
-          here (bench/README.md says where they come from). A library that cannot be built is reported and
-          left out of the tables, never dropped silently.
+  check   runs before any timing. Each typed arm's decoded value must equal stury's unmarshal, compared as JSON
+          values. Every arm runs over the strictness probes (faulty documents) and the table shows which it
+          accepts. Every GetOne arm must agree on whether the key is present and on the size of its value. For
+          CSV, every arm that walks records must count the same records, fields and decoded bytes as stury's,
+          every typed arm must decode the same rows, every marshal arm must write text that reads back as the
+          input's cells, and every arm runs over faulty CSV. Exits 1 when a typed arm differs or fails, when
+          stury gives a wrong strictness verdict, or when the GetOne arms disagree.
+  time    times the jobs. --jobs picks among typed, validate, dom, getone and csv. --out DIR writes
+          DIR/results.json (every sample) and DIR/report.md (the tables, headed by the commit, machine and
+          library versions).
+  cycles  counts one iteration's retired instructions and cycles, for results too close to call on time
+          (`/usr/bin/time -l` on macOS, `perf stat` on Linux). Each arm runs at 10 and at 50 timed iterations
+          and the difference is divided by 40, so loading and checking cancel. The count includes work done
+          outside the clock (an arena reset, a free, a drop). stury's 50-iteration build is build/probe50;
+          `compare.py build` builds both.
+  build   compiles every arm into build/: stury's probes, then each other library whose sources or toolchain
+          are present (bench/README.md says where they come from). A library that does not build is reported
+          and left out of the tables.
 
 Usage (any working directory; inputs come from `python3 bench/gen.py` and `python3 bench/fetch.py`):
   python3 bench/compare.py build
@@ -68,7 +68,7 @@ def sha256_of(path):
 
 
 def parse_measurement(text):
-    """An arm's whitespace-separated `key=value` tokens, finite numeric values only."""
+    """Returns an arm's whitespace-separated `key=value` tokens as {key: float}, keeping finite numbers only."""
     vals = {}
     for tok in text.split():
         k, eq, v = tok.partition("=")
@@ -83,7 +83,8 @@ def parse_measurement(text):
 
 
 def run(cmd, env=None):
-    """One process: (its tokens, None), or (None, why it failed: its last output line or its exit status)."""
+    """Runs one process. Returns (tokens, None), or (None, reason) where reason is the last output line or the
+    exit status."""
     p = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if p.returncode != 0:
         last = (p.stderr or p.stdout).strip().splitlines()[-1:]
@@ -92,9 +93,9 @@ def run(cmd, env=None):
 
 
 def ns_of(tok, size):
-    """One run's time in ns, or None when the arm printed no timing. The other libraries' arms print their exact `ns`
-    (per call, for GetOne); stury's GetOne lane prints it for the arm `--emit` names, every other stury lane
-    gb_per_s."""
+    """Returns one run's time in ns, or None when the arm printed no timing. The other libraries' arms print `ns`
+    (per call for GetOne). stury's GetOne lane prints `ns` for the side `--emit` names; every other stury lane
+    prints gb_per_s."""
     if tok.get("ns", 0) > 0:
         return tok["ns"]
     if tok.get("gb_per_s", 0) > 0:
@@ -106,7 +107,7 @@ _reported = set()
 
 
 def built(arms):
-    """ARMS without those whose binary is not built; each missing binary is reported once as left out."""
+    """Returns ARMS without the arms whose binary is not built, and reports each missing binary once."""
     for cmd in arms.values():
         if not os.path.exists(cmd[0]) and cmd[0] not in _reported:
             _reported.add(cmd[0])
@@ -115,9 +116,8 @@ def built(arms):
 
 
 def measure(arms, runs, size):
-    """Runs every arm RUNS times, round by round with the arm order rotated each round, so drift lands on every
-    arm alike. An arm that fails, or prints no timing, is not run again. Returns ({arm: [ns, one per run]},
-    {arm: why it failed})."""
+    """Runs every arm RUNS times; the arm order rotates each round so machine drift affects every arm equally. An
+    arm that fails or prints no timing is not run again. Returns ({arm: [ns per run]}, {arm: failure reason})."""
     samples = {a: [] for a in arms}
     failed = {}
     names = list(arms)
@@ -137,8 +137,9 @@ def measure(arms, runs, size):
 
 
 def counters(cmd, env=None):
-    """One run's retired instructions and cycles, or None when the command fails. `/usr/bin/time -l` on macOS,
-    `perf stat` on Linux; anywhere else, or where the tool reports neither, a RuntimeError rather than a blank."""
+    """Returns one run's retired instructions and cycles, or None when the command fails. Uses `/usr/bin/time -l`
+    on macOS and `perf stat` on Linux. Raises RuntimeError on any other system or when the tool reports neither
+    count."""
     if sys.platform == "darwin":
         p = subprocess.run(["/usr/bin/time", "-l"] + cmd, capture_output=True, text=True, env=env)
         pat = r"^\s*(\d+)\s+(instructions) retired|^\s*(\d+)\s+(cycles) elapsed"
@@ -177,7 +178,7 @@ def _cpu():
 
 
 def _rust_crates(names):
-    """Locked versions from rust_bench's Cargo.lock."""
+    """Returns {crate: version} for NAMES from rust_bench's Cargo.lock."""
     try:
         with open(os.path.join(BENCH, "peers/rust/Cargo.lock"), "rb") as f:
             lock = tomllib.load(f)
@@ -187,7 +188,7 @@ def _rust_crates(names):
 
 
 def _yyjson_src_version(src):
-    """The version in `src/yyjson.h`, for a yyjson built from source as bench/README.md says."""
+    """Returns the version in SRC/yyjson.h, for a yyjson built from source as bench/README.md describes."""
     try:
         with open(os.path.join(src, "yyjson.h")) as f:
             m = re.search(r'#define YYJSON_VERSION_STRING\s+"([^"]+)"', f.read())
@@ -197,7 +198,7 @@ def _yyjson_src_version(src):
 
 
 def fixture_hashes(fixtures):
-    """({name: sha256 of the file on disk, None when it is absent}, the names whose hash is not the manifest's)."""
+    """Returns ({name: sha256 of the file, or None when absent}, [names whose hash differs from the manifest])."""
     with open(MANIFEST, "rb") as f:
         pinned = dict(tomllib.load(f)["fixtures"], **pinned_corpus())
     got = {n: sha256_of(fx(n)) if os.path.exists(fx(n)) else None for n in sorted(set(fixtures))}
@@ -205,19 +206,19 @@ def fixture_hashes(fixtures):
 
 
 def binary_hashes():
-    """{arm binary: sha256 of the file, None when it is not built}, so a report names the exact binaries."""
+    """Returns {arm binary: sha256, or None when not built}, so a report names the exact binaries."""
     bins = {"probe": STURY, "probe50": os.path.join(ROOT, "build", "probe50"), "cpp_bench": CPP,
             "yy_bench": YY, "read": RUST, "csv_bench": CSV_BENCH}
     return {n: sha256_of(p) if os.path.exists(p) else None for n, p in bins.items()}
 
 
 def metadata(fixtures=()):
-    """Where a run came from: the commit (dirty when tracked files differ from it), the machine, the compilers,
-    the other libraries' versions where the system says, and the hash of every fixture file the run read,
-    with the names of those that are not the manifest's."""
+    """Returns the run's provenance: the commit (dirty when tracked files differ from it), the machine, the
+    compilers, the other libraries' versions where known, and the sha256 of every fixture the run read, with the
+    names of those that differ from the manifest."""
     status = _out(["git", "status", "--porcelain", "--untracked-files=no"])
-    # The versions bench/sources.toml pins, unless the library's source variable points elsewhere: then pkg-config
-    # (and, for yyjson, its header) says, and a library neither knows has no version.
+    # A library's version is the one bench/sources.toml pins. When its source variable is set, pkg-config gives
+    # the version instead (yyjson's header, for yyjson), or None when neither knows it.
     pinned = source_versions()
     libs = {}
     for name, var in (("simdjson", "SIMDJSON_SRC"), ("yyjson", "YYJSON_SRC"), ("RapidJSON", "RAPIDJSON_INC")):
@@ -242,11 +243,11 @@ def metadata(fixtures=()):
     }
 
 
-LOAD_MAX = 2.0  # the quiet-box bound on the 1-minute load average
+LOAD_MAX = 2.0  # highest 1-minute load average at which a run is quotable
 
 
 def quotable(meta):
-    """'yes', or 'no: <reasons>' when the run cannot back a published figure."""
+    """Returns 'yes', or 'no: <reasons>' when the run cannot back a published figure."""
     why = []
     if meta.get("dirty") is not False:
         why.append("uncommitted changes")
@@ -260,7 +261,8 @@ def quotable(meta):
 
 
 def write_report(out_dir, title, meta, results, body):
-    """results.json (the metadata and every result) and report.md (the metadata as a header, then BODY)."""
+    """Writes OUT_DIR/results.json (the metadata and every result) and OUT_DIR/report.md (the metadata as a
+    header, then BODY)."""
     os.makedirs(out_dir, exist_ok=True)
     meta = dict(meta, quotable=quotable(meta))
     with open(os.path.join(out_dir, "results.json"), "w") as f:
@@ -289,7 +291,8 @@ def fx(name):
     return os.path.join(FIX, name)
 
 
-# Typed decode: (shape, fixture, stury unmarshal lane, other stury lanes, the other libraries' arms).
+# Typed decode: (shape, fixture, stury unmarshal lane, other stury lanes, whether the shape has skipped members).
+# A shape with skipped members also gets simdjson's `strict` arm, which validates them.
 TYPED = [
     ("logs", "logs.json", "unmarshal_logs", ["check_logs", "tape_unmarshal_logs"], True),
     ("logs_subset", "logs.json", "unmarshal_logs_subset", ["unmarshal_logs_subset_lazy", "tape_unmarshal_logs_subset"], True),
@@ -305,7 +308,7 @@ def typed_arms(shape, path, skips):
         "simdjson od, hand-written": [CPP, path, "typed", shape],
         "yyjson dom, hand-written": [YY, "typed", shape, path],
     }
-    # The counterpart of stury's arena arm: the output containers keep their capacity across reads.
+    # Matches stury's arena arm: the output containers keep their capacity across reads.
     arms["simdjson od, hand-written, reused containers"] = [CPP, path, "typed", shape, "reuse"]
     if skips:
         arms["simdjson od, hand-written, skips judged"] = [CPP, path, "typed", shape, "strict"]
@@ -313,9 +316,9 @@ def typed_arms(shape, path, skips):
 
 
 def stury_typed_arms(lane, extra):
-    """stury's typed arms for one shape: the heap arm (head), the arena arm, then the other lanes. Only the
-    heap arm allocates as the other libraries do (`malloc`, the previous value freed outside the clock); the tape
-    lanes read into the arena."""
+    """Returns stury's typed arms for one shape, in order: the heap arm (the head), the arena arm, the other
+    lanes. Only the heap arm allocates like the other libraries (`malloc`, the previous value freed outside the
+    clock). The tape lanes read into the arena."""
     arms = {"stury %s (heap)" % lane: stury(lane), "stury, arena reset": stury(lane + "_arena")}
     for l in extra:
         where = " (arena reset)" if l.startswith("tape_") else " (heap)" if l.startswith("unmarshal_") else ""
@@ -323,8 +326,8 @@ def stury_typed_arms(lane, extra):
     return arms
 
 
-# Validate and DOM inputs. The synthetic fixtures gen.py writes, each with its stury validate and DOM lanes:
-# shapes chosen to stress one thing each (numbers, escapes, long strings, UTF-8, depth, width).
+# Validate and DOM inputs: {gen.py fixture: (stury validate lane, stury DOM lane)}. Each fixture stresses one
+# thing (numbers, escapes, long strings, UTF-8, depth, width).
 SYNTHETIC = {
     "logs.json": ("substrate_logs", "query_dom_logs"),
     "nested.json": ("substrate", "query_dom"),
@@ -344,54 +347,54 @@ def pins():
 
 
 def pinned_corpus():
-    """{fixture name under bench/fixtures: sha256} of the real-world documents bench/fetch.py downloads."""
+    """Returns {fixture name under bench/fixtures: sha256} for the real-world documents bench/fetch.py downloads."""
     return {"corpus/" + p["name"]: p["sha256"] for p in pins() if p["kind"] == "corpus"}
 
 
 def source_versions():
-    """{library: version} of the other libraries' sources bench/fetch.py downloads."""
+    """Returns {library: version} for the library sources bench/fetch.py downloads."""
     return {p["name"]: p["version"] for p in pins() if p["kind"] == "source"}
 
 
 def docs():
-    """[(fixture, stury validate cmd, stury DOM cmd, stury DOM + read-every-value cmd)]: the synthetic fixtures,
-    then the corpus."""
+    """Returns [(fixture, stury validate cmd, stury DOM cmd, stury DOM + read-every-value cmd)] for the synthetic
+    fixtures, then the corpus."""
     out = [(f, stury(v), stury(d), stury("dom_read", fx(f))) for f, (v, d) in SYNTHETIC.items()]
     out += [(f, stury("substrate", fx(f)), stury("query_dom", fx(f)), stury("dom_read", fx(f)))
             for f in sorted(pinned_corpus())]
     return out
 
 
-# (label, fixture, key, stury's lane). The config.json keys sit early, in the middle, late and nowhere in a
-# synthetic root object; twitter.json's last root key is a real document's late key.
+# (label, fixture, key, stury lane). In config.json's synthetic root object the keys sit early, in the middle,
+# late, or are absent. search_metadata is twitter.json's last root key.
 GETONE = [("early", "config.json", "k0000000", "path_ab_early"), ("middle", "config.json", "k0024000", "path_ab_middle"),
           ("late", "config.json", "k0048000", "path_ab_late"), ("absent", "config.json", "nope", "path_ab_absent"),
           ("search_metadata", "corpus/twitter.json", "search_metadata", "path_ab_late")]
 
-# The guarantee each get-one arm gives. stury `.Strict` judges every byte of the input; simdjson On-Demand
-# validates UTF-8 and indexes the structure of the whole input, but reads (and so judges) only the values it
-# visits; `.Lazy` and sonic-rs stop at the match.
+# What each GetOne arm checks. stury `.Strict` validates every byte of the input. simdjson On-Demand checks UTF-8
+# and indexes the structure of the whole input, but validates only the values it visits. `.Lazy` and sonic-rs
+# stop at the match.
 WHOLE, INDEXED, STOPS = "whole input judged", "whole input indexed, UTF-8 checked", "stops at the match"
 
 
 # ---- CSV ----
 
-# (fixture, the typed shape its rows read as; None: walked only). `table.tsv` is the TSV dialect.
+# (fixture, typed shape of its rows, or None when it is only walked). `table.tsv` is the TSV dialect.
 CSV_INPUTS = [("table.csv", "table"), ("text.csv", "text"), ("wide.csv", None), ("table.tsv", None)]
 CSV_JOBS = ("csv_validate", "csv_records", "csv_dom", "csv_typed", "csv_marshal")
-# `--jobs csv` names the group.
+# `--jobs csv` selects every CSV job.
 GROUPS = {"csv": set(CSV_JOBS)}
 
 
 def peer(tool, arm, path, shape=None):
-    """A csv_bench arm: `csv` is the csv crate, `simd` simd-csv."""
+    """Returns a csv_bench command. TOOL is `csv` (the csv crate) or `simd` (simd-csv)."""
     return [CSV_BENCH, tool, arm] + ([shape] if shape else []) + [path]
 
 
-# What each CSV reader guarantees, in the arm labels. stury's `.Strict` judges every byte (RFC 4180 quoting, UTF-8,
-# one field count for all records). The csv crate checks UTF-8 only through `StringRecord`, checks field counts
-# unless made flexible, and takes a quote inside an unquoted field as text. simd-csv's `Reader` checks UTF-8
-# (`StringRecord`) and field counts; its `TotalReader` and `Splitter` check neither.
+# The arm labels name what each CSV reader checks. stury's `.Strict` checks every byte: RFC 4180 quoting, UTF-8,
+# and one field count for all records. The csv crate checks UTF-8 only through `StringRecord`, checks field
+# counts unless set flexible, and reads a quote inside an unquoted field as text. simd-csv's `Reader` checks
+# UTF-8 (`StringRecord`) and field counts; its `TotalReader` and `Splitter` check neither.
 def csv_validate_arms(path):
     return {
         "stury .Strict (structure, UTF-8, field counts)": stury("csv_validate", path),
@@ -412,8 +415,8 @@ def csv_records_arms(path):
     }
 
 
-# Every peer decodes every field while it reads, so stury's head arm reads every cell of the document it built;
-# the build alone is its own arm.
+# The other libraries decode every field as they read, so stury's head arm reads every cell of the Document it
+# built. The build alone is a separate arm.
 CSV_DOM_HEAD = "stury Document + read every cell"
 
 
@@ -447,7 +450,7 @@ def csv_marshal_arms(path, shape):
 
 
 def csv_jobs():
-    """The CSV tables, in `jobs()`'s shape."""
+    """Returns the CSV tables in the form `jobs()` returns."""
     out = []
     for fixture, _ in CSV_INPUTS:
         arms = csv_validate_arms(fx(fixture))
@@ -468,7 +471,7 @@ def csv_jobs():
 
 
 def jobs():
-    """Every timed table: (job, label, fixture, {arm: cmd}, stury's headline arm)."""
+    """Returns every timed table as (job, label, fixture, {arm: cmd}, stury's head arm)."""
     out = []
     for shape, fixture, lane, extra, skips in TYPED:
         arms = stury_typed_arms(lane, extra)
@@ -483,7 +486,7 @@ def jobs():
         del arms["simdjson od (every value read)"]
         out.append(("dom", fixture, fixture, arms, "stury DOM + read every value"))
     for where, fixture, key, lane in GETONE:
-        # `--emit` names the arm of the A/B lane whose per-call time is this arm's `ns`.
+        # `--emit` picks the side of stury's A/B lane whose per-call time is printed as `ns`.
         path = fx(fixture)
         stury_args = (path, "--key", key) if fixture != "config.json" else (None,)
         head = "stury .Strict (%s)" % WHOLE
@@ -496,7 +499,7 @@ def jobs():
 
 
 def time_jobs(selected, runs):
-    """Every selected table's results, and the tables as markdown (printed as each one finishes)."""
+    """Times every selected table and prints each as it finishes. Returns (results, the tables as markdown)."""
     results, tables = [], []
     for job, inp, fixture, arms, head in jobs():
         if job not in selected:
@@ -520,7 +523,7 @@ def time_jobs(selected, runs):
 
 def table(r):
     head_ns = r["median_ns"].get(r["head"])
-    per_call = r["job"] == "getone"  # a get-one answer's time is per call; GB/s of the whole file means nothing
+    per_call = r["job"] == "getone"  # GetOne reports ns per call, since GB/s over the whole file is meaningless
     lines = ["", "### %s: %s (%d bytes)" % (r["job"], r["input"], r["bytes"]), "",
              "| arm | ns per call (median) | spread min–max ns | time ÷ head arm's |" if per_call else
              "| arm | GB/s (median) | spread min–max GB/s | time ÷ head arm's |", "|---|---:|---:|---:|"]
@@ -541,8 +544,9 @@ def table(r):
 PROBE_REC = {"ts": "t", "level": "l", "service": "s", "msg": "m", "status": 200, "bytes": 1,
              "duration_ms": 1.5, "id": "x"}
 
-# (name, member, raw value text): the member's value is replaced by the raw bytes. `status` and `id` are read
-# by both shapes; `bytes` and `msg` only by `logs`, so for `logs_subset` they are skipped members.
+# (name, value class, raw value). probes() puts an S fault in a string member and an N fault in a number member,
+# once in a member both shapes read (`id`, `status`) and once in one only `logs` reads (`msg`, `bytes`), which
+# `logs_subset` skips.
 FAULTS = [
     ("utf8_invalid", "S", b'"m\xff"'),
     ("ctrl_char", "S", b'"m\x01"'),
@@ -565,7 +569,8 @@ def probe_doc(member, raw):
 
 
 def probes():
-    """(name, bytes, expected): None = must refuse; a dict = must accept and read that record."""
+    """Returns [(name, document, expected)]. Expected None means the arm must refuse; a dict means it must accept
+    and read those fields."""
     out = []
     for name, cls, raw in FAULTS:
         read, skipped = ("id", "msg") if cls == "S" else ("status", "bytes")
@@ -583,7 +588,8 @@ def probes():
     return out
 
 
-# Whole-document probes for the validate and DOM arms: (name, document, whether a strict reader accepts it).
+# Whole-document probes for the validate and DOM arms: (name, document, whether a strict reader accepts it, or
+# None when RFC 8259 leaves it to the parser).
 DOC_PROBES = [
     ("clean", b'[{"a":"x","b":1.5,"c":[true,false,null]}]', True),
     ("invalid UTF-8", b'[{"a":"x\xff","b":1}]', False),
@@ -609,7 +615,8 @@ def doc_arms(path):
 
 
 def run_dump(cmd, dump, raw=False):
-    """What the arm wrote to STURY_DUMP: decoded JSON, or with RAW its bytes; None when the arm fails."""
+    """Returns what the arm wrote to STURY_DUMP, decoded as JSON or, with RAW, as bytes. Returns None when the
+    arm fails."""
     env = dict(os.environ, STURY_DUMP=dump)
     if os.path.exists(dump):
         os.remove(dump)
@@ -622,8 +629,8 @@ def run_dump(cmd, dump, raw=False):
 
 
 def getone_disagreement(arms):
-    """None when the arms agree, else why not. Stury's lane reports how many answers it found, the other libraries
-    the byte size of the value (0 when absent)."""
+    """Returns None when the arms agree, else the disagreement. stury's lane reports how many answers it found;
+    the other libraries report the value's byte size (0 when absent)."""
     present, sizes = {}, {}
     for a, cmd in built(arms).items():
         tok, why = run(cmd)
@@ -720,16 +727,16 @@ def check():
 
 # ---- CSV check ----
 
-# Each typed shape's columns and the type each reads as, to hold stury's decoded rows against the file's own cells.
+# {shape: {column: cell parser}}, for comparing the decoded rows with the file's cells.
 CSV_COLUMNS = {
     "table": {"id": int, "ts": int, "lat": float, "lon": float, "qty": int, "price": float, "score": float,
               "ok": lambda t: {"true": True, "false": False}[t], "code": str},
     "text": {"id": int, "name": str, "city": str, "quote": str, "note": str},
 }
 
-# (name, document, whether a strict reader accepts it; None: the format leaves it to the reader). The expectations
-# are RFC 4180's grammar (quotes only around a whole field, `""` inside one, CR only before LF, one field count
-# throughout) and stury's `.Strict` contract for UTF-8, which the RFC does not speak of.
+# (name, document, whether a strict reader accepts it, or None when the format leaves it to the reader). The
+# expectations follow RFC 4180's grammar (quotes only around a whole field, `""` inside one, CR only before LF,
+# one field count throughout) and, for UTF-8, which the RFC does not cover, stury's `.Strict` rules.
 CSV_PROBES = [
     ("clean, quoted cells", b'id,name\n1,"a,b"\n2,"say ""hi"""\n', True),
     ("CRLF line ends", b"a,b\r\n1,2\r\n", True),
@@ -746,13 +753,13 @@ CSV_PROBES = [
 
 
 def csv_rows(data, tsv):
-    """A CSV text's rows of cell strings, read by Python's csv module."""
+    """Returns a CSV text's rows of cell strings, read by Python's csv module."""
     kw = dict(delimiter="\t", quoting=csv.QUOTE_NONE) if tsv else {}
     return list(csv.reader(io.StringIO(data.decode("utf-8"), newline=""), **kw))
 
 
 def same_cell(a, b):
-    """Equal as text, or as numbers (a writer may drop a decimal's trailing zero)."""
+    """Returns whether two cells are equal as text or as numbers (a writer may drop a decimal's trailing zero)."""
     if a == b:
         return True
     try:
@@ -762,7 +769,7 @@ def same_cell(a, b):
 
 
 def check_tallies(env):
-    """Failures among the arms that walk records: each must tally the records, fields and decoded bytes stury's does."""
+    """Counts the record-walking arms whose record, field or decoded-byte totals differ from stury's."""
     bad = 0
     for fixture, _ in CSV_INPUTS:
         path = fx(fixture)
@@ -785,7 +792,7 @@ def check_tallies(env):
 
 
 def check_typed(dump):
-    """Failures among the typed arms: each must decode the rows the file holds."""
+    """Counts the typed arms that do not decode the rows the file holds."""
     bad = 0
     for fixture, shape in CSV_INPUTS:
         if not shape:
@@ -804,7 +811,7 @@ def check_typed(dump):
 
 
 def check_marshal(dump):
-    """Failures among the marshal arms: the text each writes must read back as the file's cells."""
+    """Counts the marshal arms whose output does not read back as the file's cells."""
     bad = 0
     for fixture, shape in CSV_INPUTS:
         if not shape:
@@ -823,7 +830,7 @@ def check_marshal(dump):
 
 
 def check_faults(tmp, env):
-    """Failures of stury's verdict over faulty CSV; the other arms' verdicts are printed beside it."""
+    """Runs every validate arm over faulty CSV and prints the verdicts. Counts only stury's wrong verdicts."""
     bad = 0
     names = list(csv_validate_arms("P"))
     print("| probe | " + " | ".join(names) + " |")
@@ -846,7 +853,7 @@ def check_faults(tmp, env):
 
 
 def check_csv():
-    """The CSV arms' answers: 0, or the number of failures."""
+    """Checks the CSV arms' answers. Returns the number of failures."""
     env = dict(os.environ, BENCH_RUNS="1")
     with tempfile.TemporaryDirectory() as tmp:
         dump = os.path.join(tmp, "dump.out")
@@ -888,7 +895,7 @@ def cycles(selected, inputs, reps):
 
 # ---- build ----
 
-# Where each other library's sources are: an environment variable, else what bench/fetch.py put in build/bench/deps.
+# Each library's sources: its environment variable if set, else bench/fetch.py's download in build/bench/deps.
 DEPS = os.path.join(BUILD, "deps")
 SIMDJSON_SRC = os.environ.get("SIMDJSON_SRC") or os.path.join(DEPS, "simdjson")
 RAPIDJSON_INC = os.environ.get("RAPIDJSON_INC") or os.path.join(DEPS, "rapidjson", "include")
@@ -896,27 +903,28 @@ YYJSON_SRC = os.environ.get("YYJSON_SRC") or os.path.join(DEPS, "yyjson")
 
 
 def native_flags():
-    """The C and C++ arms' tuning for this CPU. On x86 RapidJSON needs SSE4.2 named to use it."""
+    """Returns (C and C++ flags, C++-only flags) tuned for this CPU. On x86 RapidJSON uses SSE4.2 only when
+    RAPIDJSON_SSE42 is defined."""
     if platform.machine().lower() in ("arm64", "aarch64"):
         return ["-mcpu=native"], []
     return ["-march=native"], ["-DRAPIDJSON_SSE42"]
 
 
 def build():
-    """Builds every arm it can; exits 1 when stury's probe does not build, and names every library left out."""
+    """Builds every arm it can and names each library left out. Returns 1 when stury's probe does not build."""
     os.makedirs(BUILD, exist_ok=True)
     tune, cpp_only = native_flags()
     steps = [
         ("stury probe", None, ["odin", "build", "bench/probe", "-collection:stury=.", "-o:speed", "-out:build/probe"]),
         ("stury probe50", None, ["odin", "build", "bench/probe", "-collection:stury=.", "-o:speed",
                                  "-define:TIMED_ITERS=50", "-out:build/probe50"]),
-        # simdjson from its single-header amalgamation, with the same flags as the other C and C++ code.
+        # simdjson's single-header amalgamation, built with the same flags as the other C and C++ code.
         ("simdjson + RapidJSON", [os.path.join(SIMDJSON_SRC, "simdjson.cpp"), os.path.join(RAPIDJSON_INC, "rapidjson")],
          ["c++", "-std=c++20", "-O3", "-DNDEBUG", *tune, *cpp_only, "-Wno-deprecated-declarations",
           "-Wno-nontrivial-memcall", "-Wno-unknown-warning-option", "-I" + SIMDJSON_SRC, "-I" + RAPIDJSON_INC,
           "bench/peers/cpp_bench.cpp", os.path.join(SIMDJSON_SRC, "simdjson.cpp"), "-o", CPP]),
-        # yyjson compiled with the arm, as its documentation suggests: a prebuilt shared yyjson cannot specialize
-        # `yyjson_read_opts` for the flags and allocator it is called with.
+        # yyjson is compiled into the arm, as its documentation suggests. A prebuilt shared yyjson cannot
+        # specialize `yyjson_read_opts` for the flags and allocator the arm passes.
         ("yyjson", [os.path.join(YYJSON_SRC, "yyjson.c")],
          ["cc", "-O3", "-DNDEBUG", "-flto", *tune, "-I" + YYJSON_SRC, "bench/peers/yy_bench.c",
           os.path.join(YYJSON_SRC, "yyjson.c"), "-o", YY]),
@@ -942,7 +950,7 @@ def build():
 
 
 def selected_jobs(spec):
-    """The job names a `--jobs` list picks, a group name standing for its jobs."""
+    """Returns the job names a `--jobs` list selects. A group name stands for its jobs."""
     out = set()
     for j in spec.split(","):
         out |= GROUPS.get(j, {j})
@@ -972,7 +980,7 @@ def main(argv):
     selected = selected_jobs(a.jobs)
     meta = dict(metadata(fx for job, _, fx, _, _ in jobs() if job in selected), runs=a.runs)
     print(meta)
-    # Nothing is timed until every arm has shown it answers as stury does.
+    # Timing runs only after check passes.
     if not a.skip_check and check() != 0:
         print("check failed: no timings (--skip-check times anyway, and the report says so)")
         return 1
@@ -984,5 +992,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    os.chdir(ROOT)  # the probe finds its fixtures from the stury checkout's root
+    os.chdir(ROOT)  # the probe resolves fixture paths from the checkout root
     sys.exit(main(sys.argv[1:]))

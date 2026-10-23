@@ -1,12 +1,12 @@
 package core
 
-// What every codec's text edits share: the byte-span edit, its ordering rule, its application, and the
-// allocator that tells a refused allocation from an edit that found nothing.
+// The parts of text editing shared by every codec: the byte-span edit, its ordering rule, its application, and
+// an allocator wrapper that distinguishes a refused allocation from an edit that found nothing.
 
 import "base:runtime"
 import "core:mem"
 
-// One edit: `src[lo:hi]` becomes `bytes`.
+// One edit: `src[lo:hi]` is replaced by `bytes`.
 Edit :: struct {
 	lo, hi: u64,
 	bytes:  []u8,
@@ -27,8 +27,8 @@ edits_ordered :: proc(src: []byte, edits: []Edit) -> bool {
 	return true
 }
 
-// `src` with sorted, disjoint edits applied: one copy per gap and one per replacement into an exact,
-// uninitialized allocation. A refused allocation is `oom`.
+// Returns `src` with sorted, disjoint edits applied, built with one copy per gap and one per replacement into an
+// exact, uninitialized allocation. Returns `oom` when the allocation is refused.
 edits_apply :: proc(src: []byte, edits: []Edit, allocator: runtime.Allocator, oom: $E) -> (out: []byte, err: Maybe(E)) {
 	n := len(src)
 	for e in edits {
@@ -49,8 +49,8 @@ edits_apply :: proc(src: []byte, edits: []Edit, allocator: runtime.Allocator, oo
 	return buf, nil
 }
 
-// The allocator of a path edit: `backing`, remembering a refusal, so that an edit whose scratch lost an
-// entry to one answers out of memory (`unless_refused`) rather than a result missing an edit.
+// Refusal_Watch wraps a path edit's allocator `backing` and records any refusal. An edit whose scratch lost an
+// entry to a refusal then returns out of memory (`unless_refused`) instead of a result missing an edit.
 Refusal_Watch :: struct {
 	backing: runtime.Allocator,
 	refused: bool,
@@ -80,7 +80,7 @@ watch_proc :: proc(
 	return out, err
 }
 
-// The edit's answer, or `oom` with `out` freed when the watch saw a refusal.
+// Returns the edit's result, or frees `out` and returns `oom` when the watch recorded a refusal.
 unless_refused :: proc(w: ^Refusal_Watch, out: []byte, err: Maybe($E), oom: E) -> ([]byte, Maybe(E)) {
 	if w.refused {
 		delete(out, w.backing)

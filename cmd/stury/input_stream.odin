@@ -59,10 +59,10 @@ open_next :: proc(ins: ^Inputs) -> bool {
 	return true
 }
 
-// Whether file `f` is read a window at a time: one that is not a regular file, whose end is not known until
-// it comes, a regular file past STREAM_FILE_MIN bytes (JSON only when its first line looks like one record,
-// unless `records` is false), stdin under --unbuffered, and any under -n, where `input` reads it and each window
-// read past is freed (`retire`).
+// Reports whether file `f` is read a window at a time. That holds for a file that is not regular (its end is
+// unknown until reached), for a regular file larger than STREAM_FILE_MIN bytes (for JSON, only when its first line
+// looks like one record, unless `records` is false), for stdin under --unbuffered, and for any file under -n, where
+// `input` reads it. Each window read past is freed (`retire`).
 streams :: proc(ins: ^Inputs, f: ^os.File, records := true) -> bool {
 	if f == os.stdin && ins.run.opts.unbuffered || ins.run.opts.null_input || !is_regular_file(f) {
 		return true

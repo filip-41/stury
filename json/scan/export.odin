@@ -1,7 +1,7 @@
 package scan
 
-// Re-exports the names of `walk`, the substrate this package's walks run on, and of core, so the files here and the packages that
-// import scan use one spelling.
+// Re-exports the names of `walk` (the package this package's walks run on) and of core, so the files here and
+// the packages that import scan use one spelling.
 
 import core_pkg "../../core"
 import "walk"

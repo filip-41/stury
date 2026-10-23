@@ -71,18 +71,18 @@ each archive has a `.sha256` beside it), unpack it, and put it on your `PATH`. O
   entries, and `records_from` frames a stream from an `io.Reader`.
 - **Parallel when you ask.** `validate_records` and `each_record` run on threads from `stury:host`. The
   library itself starts no thread and keeps no global state.
-- **CSV, checked strictly.** `stury:csv` judges RFC 4180 text byte by byte (quote placement, CR before LF,
-  UTF-8, one field count throughout) with `validate` and `records`. `records_from` frames the records of an
-  `io.Reader` in bounded memory, and `each_record` and a threaded `validate` use threads from `stury:host`.
-- **CSV dialects.** A `Dialect` reads TSV (`csv.TSV`, the escapes jq's `@tsv` writes), another delimiter,
-  `Quoting.None` where a quote is text, backslash escapes (`\t`, `\n`, `\r`, `\0`, `\\`), comment lines,
-  ragged records, and text with or without a header, through the same calls.
-- **CSV on the same type plans.** `unmarshal` and `marshal` map rows to a list of structs with the field
-  tags, hooks and `Duplicates` policy the JSON codec uses, each cell judged against its field's type.
-  `unmarshal_check` judges a text the same way and keeps nothing.
-- **CSV documents and edits.** `build` keeps where every cell is, `find` and `find_column` read a cell or a
-  column by path (`.[3].name`) without building a document, and `set`, `insert`, `remove` and `splice` keep
-  every byte they do not target. `write_record` appends one record of text cells to a buffer.
+- **Strict CSV.** `stury:csv` checks RFC 4180 text with `validate` and `records`: quote placement, a CR outside quotes
+  only before LF, UTF-8, and the same field count in every record. `records_from` reads records from an
+  `io.Reader` in bounded memory. `each_record` and `validate` with a runner use threads from `stury:host`.
+- **CSV dialects.** A `Dialect` sets TSV (`csv.TSV`, with the escapes jq's `@tsv` writes), another delimiter,
+  `Quoting.None` (a quote is text), backslash escapes (`\t`, `\n`, `\r`, `\0`, `\\`), comment lines, ragged
+  records, and whether there is a header.
+- **CSV into structs.** `unmarshal` and `marshal` map rows to a list of structs with the same field tags,
+  hooks and `Duplicates` policy as JSON. Each cell is checked against its field's type. `unmarshal_check`
+  runs the same checks without storing anything.
+- **CSV documents and edits.** `build` records where every cell is. `find` and `find_column` read a cell or a
+  column by path (`.[3].name`) without building a document. `set`, `insert`, `remove` and `splice` keep every
+  byte they do not target. `write_record` appends one record of text cells to a buffer.
 - **Duplicate keys are a policy**: keep the last, the first, all of them, or refuse the text.
 - **A jq 1.8 command line.** `stury` runs jq filters with jq's answers and exit codes as the baseline,
   with its own `stury:` messages, and differs where jq loses data or misreports an error ([listed in
@@ -316,7 +316,7 @@ if err, bad := csv.unmarshal(src, &cities).?; bad {
 }
 fmt.println(cities[1].name, cities[1].population) // Ho, Chi Minh nil
 
-out, err := csv.marshal(cities) // the same text back: the comma keeps its quotes, the missing population stays empty
+out, err := csv.marshal(cities) // src again: "Ho, Chi Minh" keeps its quotes and the absent population stays empty
 ```
 
 A cell the struct cannot hold is refused, and `render_error` locates it (`2:6: Wrong_Kind at [0].population`).
@@ -369,8 +369,8 @@ fmt.print(string(added)[len(src):]) // Bergen,,60.39,5.32
 trimmed, _ := csv.remove(src, ".[].population") // the column, header included
 ```
 
-`records_from` frames records from an `io.Reader` in bounded memory, with the offsets and the fault that
-`records` gives the whole text. `each_record` hands pieces of a text to a task on the threads of a
+`records_from` reads records from an `io.Reader` in bounded memory, with the same offsets and fault as
+`records` on the whole text. `each_record` runs a task on pieces of a text on the threads of a
 `host.Batch_Pool`, and `csv.validate` takes the same runner. `write_record` appends one record of text cells
 to a buffer:
 
@@ -399,12 +399,11 @@ _ = csv.write_record(&line, []Maybe(string){"Tromsø", nil, "69.65", "18.96"})
 fmt.print(string(line[:])) // Tromsø,,69.65,18.96
 ```
 
-### One struct, two formats (`examples/crossformat`)
-A struct can carry a tag for each format: Odin allows several `key:"value"` pairs in one tag string, and each
-format reads its own key (`csv:"City"`, `json:"city"`). A field with no tag uses its own name in both.
-`stury:core` holds what the formats share, so code that handles several of them names it once:
-`core.Unmarshal_Error` is the type `csv.unmarshal` and `json.unmarshal` both return, and `core.render_error`
-writes a fault of either, or of `validate` (`core.Error`) or an edit (`core.Path_Error`).
+### CSV and JSON with one struct (`examples/crossformat`)
+A tag string can hold several `key:"value"` pairs, and each format reads its own key (`csv:"City"`,
+`json:"city"`). A field with no tag uses its own name in both. `csv.unmarshal` and `json.unmarshal` both
+return `core.Unmarshal_Error`. `core.render_error` writes it for either format, and also writes a `validate`
+fault (`core.Error`) and an edit refusal (`core.Path_Error`).
 
 ```odin
 import "stury:core"
@@ -453,10 +452,10 @@ fmt.println(string(as_json)) // [{"city":"Oslo","population":709000,"lat":59.91,
 back: []City
 _, _ = load(.Json, as_json, &back).?
 as_csv, _ := csv.marshal(back)
-fmt.println(string(as_csv) == string(table)) // true: the same table comes back
+fmt.println(string(as_csv) == string(table)) // true
 ```
 
-The same wrong cell, in either format, is told the same way:
+A population that is not a number, reported for each format:
 
 ```odin
 bad_csv := transmute([]byte)string("City,population,lat,lon\nOslo,lots,59.91,10.75\n")
@@ -470,8 +469,8 @@ if err, bad := load(.Json, bad_json, &cities).?; bad {
 ```
 
 A program that uses several formats imports `stury:core` for the shared types and each format's package for its
-calls. `json.Error`, `csv.Error`, `json.Unmarshal_Error` and `csv.Unmarshal_Error` are aliases of core's, so
-they compare and pass to each other without conversion. `core/aliases.odin` maps what the formats share.
+calls. `json.Error`, `csv.Error`, `json.Unmarshal_Error` and `csv.Unmarshal_Error` are aliases of core's types
+and need no conversion. `core/aliases.odin` lists what the formats share.
 
 ## Command line
 `stury` is a drop-in replacement for [jq](https://jqlang.org) 1.8: it runs jq filters and gives jq's results
@@ -499,8 +498,8 @@ What differs from jq:
 ### CSV and TSV
 `--from` chooses how the input is read and `--to` how each output is written: `json`, `jsonc`, `ndjson`, `csv`
 or `tsv`. The first record of a CSV or TSV file names the fields, and each later record is one input, an object
-of strings (a cell is never a number unless you say `tonumber`; an empty cell with no quotes is `null`). These
-were run on a `cities.csv` of
+of strings. A cell is a number only after `tonumber`. An empty cell with no quotes is `null`. The examples
+read this `cities.csv`:
 
 ```
 city,country,population
@@ -534,9 +533,9 @@ $ printf 'a,b\n1,2\n3\n' | stury check --from csv
 stury: error: <stdin>:3:1: Record has the wrong number of fields (the header has 2)
 ```
 
-`--csv` and `--tsv` set both sides, so a filter's objects come back as rows under a header. An object that
-brings a key the header lacks ends the run unless `--grow-header` holds the output and writes every key. A
-file up to 64 MiB is read whole, and a larger one or a pipe a window at a time. [docs/cli.md](docs/cli.md#csv-and-tsv-recipes)
+`--csv` and `--tsv` set both sides, so a filter's objects are written as rows under a header. An object with a
+key the header lacks ends the run, unless `--grow-header` is given: it holds the output and writes a header of
+every key. A file up to 64 MiB is read whole. A larger file or a pipe is read a window at a time. [docs/cli.md](docs/cli.md#csv-and-tsv-recipes)
 has more recipes (aggregating with `group_by`, columns, TSV) and the exact rules for cells, faults and output.
 
 ## Documentation
@@ -556,8 +555,7 @@ has more recipes (aggregating with `group_by`, columns, TSV) and the exact rules
 ## Benchmark
 
 These numbers were measured on one machine (Apple M5 Max, macOS 26.5, Odin dev-2026-10 at `-o:speed`) with
-the harness in [bench/](bench/README.md), which says how to run it, what each arm does and the fairness
-rules. Other data, filters and hardware will give other numbers, and no x86 results are published here;
+the harness in [bench/](bench/README.md), which documents how to run it, each arm and the fairness rules. Other data, filters and hardware will give other numbers, and no x86 results are published here;
 simdjson's AVX-512 paths make the gaps narrower there.
 
 **Against Odin's `core:encoding/json`**, in ms (lower is better). Median of 21 runs, both libraries in one
@@ -591,8 +589,8 @@ and keeps its parser and allocator.
 | config, 1 MB | **4.85** | 1.28 | 1.44 | 3.33 | 2.63 |
 | nested, 16 MB | **1.78** | 0.70 | 0.85 | 0.82 | 1.67 |
 
-Validate. The simdjson column is its DOM parser, which validates as it builds; it refuses `escape.json` for
-its integers wider than 64 bits.
+Validate. The simdjson column is its DOM parser, which validates as it builds. It refuses `escape.json`, whose
+integers are wider than 64 bits.
 
 | Input | stury | simdjson |
 | --- | ---: | ---: |
@@ -604,12 +602,12 @@ its integers wider than 64 bits.
 | utf8, 8 MB | **9.18** | 5.52 |
 
 On the eleven real-world files most parser benchmarks use (64 KB–3.3 MB, pretty-printed), stury validates
-faster on seven; simdjson is faster on apache_builds (5.89 against 4.56), update-center (5.10 against 4.33),
+faster on seven. simdjson is faster on apache_builds (5.89 against 4.56), update-center (5.10 against 4.33),
 github_events and twitter (within 5%).
 
-DOM. The other libraries convert every number while they parse; stury checks each number while it builds
-and converts it when it is read. So stury's column builds the DOM and then reads every value once, which is
-the same work; the build alone is the second column.
+DOM. The other libraries convert every number while they parse. stury checks each number while it builds
+and converts it when it is read, so its first column builds the DOM and reads every value once, the same work
+as the others. The second column is the build alone.
 
 | Input | stury, every value read | stury, build only | yyjson | sonic-rs | simdjson | serde_json |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -621,12 +619,12 @@ the same work; the build alone is the second column.
 | longtext, 8 MB | **19.8** | 20.2 | 5.37 | 14.2 | 8.36 | 6.83 |
 | utf8, 8 MB | **8.01** | 8.13 | 1.33 | 7.77 | 5.55 | 1.01 |
 
-Where stury loses: with every value read, yyjson builds the DOM of number-heavy, nested and deep input faster,
-and on the real-world files yyjson or simdjson is ahead on every file but gsoc-2018. A program that reads only
-some of the values pays only for those, and the build alone leads on every synthetic input but `pretty`.
+With every value read, yyjson builds the DOM of number-heavy, nested and deep input faster,
+and yyjson or simdjson is ahead on every real-world file but gsoc-2018. A program that reads only some values
+pays only for those. The build alone leads on every synthetic input but `pretty`.
 
 Get one field from `config.json` (1 MB), in µs per call (lower is better). stury's `.Lazy` stops at the match,
-like sonic-rs; simdjson's On-Demand indexes the whole input first.
+like sonic-rs. simdjson's On-Demand indexes the whole input first.
 
 | Key | stury | simdjson | sonic-rs |
 | --- | ---: | ---: | ---: |
@@ -635,7 +633,7 @@ like sonic-rs; simdjson's On-Demand indexes the whole input first.
 | last | **142** | 224 | 702 |
 
 **CSV**, in GB/s, against the Rust `csv` 1.4 and `simd-csv` 0.14 crates. stury refuses quote misuse,
-unterminated quotes and ragged rows, and checks UTF-8; the peers' columns say what each checks.
+unterminated quotes and ragged rows, and checks UTF-8. The other columns name what each crate checks.
 
 | Job | Input | stury | simd-csv | csv |
 | --- | --- | ---: | ---: | ---: |
@@ -649,8 +647,8 @@ unterminated quotes and ragged rows, and checks UTF-8; the peers' columns say wh
 | Marshal structs | table | **1.00** | | 0.43 (serde) |
 | Marshal structs | text | 1.04 | | **1.22** |
 
-stury validates CSV faster than either crate reads it, but its record and document readers trail simd-csv,
-and its writer trails the `csv` crate on quoted text.
+stury validates CSV faster than either crate reads it. Its record and document readers are slower than
+simd-csv, and its writer is slower than the `csv` crate on quoted text.
 
 **Command line**, with `bench/cli/jq_compare.sh`: 24 jq filters over the synthetic fixtures and three of the
 real-world files, end to end with process start-up, against jq 1.8.2, jaq 3.0.0, gojq 0.12.19 and yq 4.53.2
@@ -665,11 +663,11 @@ means stury took half the time. Every tool gave the same answers.
 | yq | 56× | 8.5× |
 
 The smallest gaps are on the real-world files (0.6–2.2 MB), where every tool finishes in 2–20 ms and
-start-up weighs most; on the 6–11 MB fixtures stury is 6–100× faster than jq, jaq and gojq.
+start-up dominates. On the 6–11 MB fixtures stury is 6–100× faster than jq, jaq and gojq.
 
 On CSV, with `bench/cli/csv_compare.sh` (two columns picked, rows filtered, quoted cells, CSV to JSON lines on
-16 MB files), stury is 1.4–3.3× faster than Miller and 3.9–10× faster than jq's `-R` recipe, and qsv 20.1 is
-faster than stury: stury takes 1.4–1.9× its time.
+16 MB files), stury is 1.4–3.3× faster than Miller and 3.9–10× faster than jq's `-R` recipe. qsv 20.1 is
+1.4–1.9× faster than stury.
 
 ## Development
 ```sh

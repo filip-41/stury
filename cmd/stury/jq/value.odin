@@ -321,7 +321,8 @@ new_object :: proc() -> ^Object {
 	return new(Object)
 }
 
-// An object of `keys`, all different, and their `vals`: both taken over, one value to a key.
+// Returns an object of `keys` and their `vals`, one value per key, taking ownership of both. The keys must be
+// distinct.
 object_from :: proc(keys: [dynamic]string, vals: [dynamic]Value) -> ^Object {
 	o := new(Object)
 	o.keys, o.vals = keys, vals

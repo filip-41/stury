@@ -21,17 +21,17 @@ Number :: struct {
 	exactness: Exactness,
 }
 
-// The powers of ten a binary64 represents exactly. A Clinger fast path scales by them: `mant * 10^e`
-// for `0 <= e <= 22` is correctly rounded when `mant` is an exact f64, and `mant / 10^-e` likewise.
+// The powers of ten that a binary64 represents exactly, for the Clinger fast path. `mant * 10^e` for
+// `0 <= e <= 22` is correctly rounded when `mant` is an exact f64, and so is `mant / 10^-e`.
 @(rodata)
 POW10_F64 := [23]f64{
 	1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
 	1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
 }
 
-// The decimal digits of `src[p:hi]` folded into a `T`, `over` once the value passed it. The run is read to
-// `hi` past an overflow, so a fraction or exponent after one is still the wrong kind: `digits = false` at the
-// first non-digit. Sign and range are the caller's.
+// Folds the decimal digits of `src[p:hi]` into a `T`; `over` is set once the value overflows `T`. Scanning
+// continues to `hi` after an overflow, so a later fraction or exponent still returns `digits = false` at the
+// first non-digit. The caller handles sign and range.
 fold_digits :: #force_inline proc(src: []byte, p, hi: u64, $T: typeid) -> (mag: T, over, digits: bool) {
 	for i in p ..< hi {
 		d := src[i] - '0'

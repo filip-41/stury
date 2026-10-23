@@ -1,8 +1,8 @@
 package main
 
-// stury against Odin's own core:encoding/json, in one process, on the same fixtures and the same arena.
-// Each lane times both arms interleaved, the order flipped every round, so load drift lands on both alike;
-// it prints the median of the timed rounds as a markdown table.
+// Times stury against Odin's core:encoding/json in one process, on the same fixtures and the same arena.
+// Each lane alternates the two arms' order every round so load drift affects both equally, and prints the
+// median of the timed rounds as a markdown table.
 //
 //   odin build bench/core_compare -o:speed -collection:stury=. -out:build/core_compare
 //   build/core_compare [fixtures_dir] [rounds]
@@ -17,8 +17,8 @@ import "core:strconv"
 import "core:time"
 import json "stury:json"
 
-// One static arena serves every arm: a reset faults no pages in, and a lane that outgrows the reserve fails
-// instead of growing without bound.
+// Reserve of the static arena every arm uses. A reset faults no pages in, and a lane that outgrows the reserve
+// fails instead of growing without bound.
 ARENA_RESERVE :: 4 << 30
 WARMUP :: 2
 
@@ -155,7 +155,7 @@ time_lane :: proc(src: []byte, lane: Lane, rounds: int) -> (stury, core: time.Du
 	return median(st), median(ct), true
 }
 
-// The middle sample, or the mean of the two middle ones when the count is even.
+// Returns the middle sample of `sorted`, or the mean of the two middle ones when the count is even.
 median :: proc(sorted: []time.Duration) -> time.Duration {
 	n := len(sorted)
 	if n % 2 == 1 {
@@ -176,9 +176,9 @@ core_validate :: proc(src: []byte, _: runtime.Allocator) -> bool {
 	return core_json.is_valid(src, .JSON)
 }
 
-// A `.Dom` scan checks every number's grammar but converts one only when it is read, and borrows an unescaped
-// string; core's parse converts every number and copies every string. So this arm reads every value once, in
-// document order, as core's parse has by the time it returns; the strings stay borrowed.
+// Builds a `.Dom` and reads every value once, in document order. A `.Dom` scan checks every number's grammar
+// but converts it only when read, and borrows an unescaped string, while core's parse converts every number
+// and copies every string; the reads add the conversions. The strings stay borrowed.
 stury_load :: proc(src: []byte, alloc: runtime.Allocator) -> bool {
 	req: json.Request({.Dom})
 	if json.request_init(&req, allocator = alloc) != nil || json.scan(src, &req) != nil {
@@ -215,7 +215,7 @@ core_unmarshal :: proc($T: typeid) -> Arm {
 	}
 }
 
-// The marshal arms write a value decoded once, outside the timed region, so both arms spell the same value.
+// The marshal arms write a value decoded once, outside the clock, so both arms write the same value.
 stury_marshal :: proc($T: typeid) -> Arm {
 	@(static) value: T
 	@(static) decoded: bool
@@ -252,8 +252,9 @@ decode_once :: proc($T: typeid, src: []byte, value: ^T, decoded: ^bool) -> bool 
 	return true
 }
 
-// Both readers must decode the same value, or the lanes are not timed; whether core's writer output reads
-// back to that value is reported. Values compare by stury's canonical spelling, equal exactly when they are.
+// Reports whether both readers decode the same value (the lanes are timed only when they do) and whether
+// core's marshal output reads back as that value. Values are compared by stury's marshal output, which is
+// equal exactly when the values are.
 agrees :: proc($T: typeid) -> proc(src: []byte) -> (decodes_same, round_trips: bool) {
 	return proc(src: []byte) -> (decodes_same, round_trips: bool) {
 		defer virtual.arena_free_all(&arena)

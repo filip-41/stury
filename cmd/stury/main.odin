@@ -23,8 +23,8 @@ package main
 //
 //	options.odin                     the command line
 //	input.odin, input_stream.odin    reading files and stdin as jq does, whole or in line windows
-//	input_csv.odin                   --csv and --tsv: a file's records, each one an object
-//	scan_cells.odin                  a filter of columns of a --csv or --tsv file, printed from the cells
+//	input_csv.odin                   --csv and --tsv input: each record after the header as an object
+//	scan_cells.odin                  column-only filters on --csv and --tsv input, answered from the cells
 //	scan_inputs.odin                 the path scan over the input stream
 //	record_scan.odin                 a file's one-per-line records scanned on the batch pool
 //	root_pieces.odin,
@@ -73,10 +73,10 @@ Run :: struct {
 	pool:        host.Batch_Pool,
 	pool_width:  int, // the workers `pool` was started for, 0 before it is
 	scanning:    bool, // the filter is a path the scan answers
-	selected:    ^Selected, // while `select_cell` runs the filter: the record its outputs print
-	columns:     ^Columns, // the filter is only columns of a --from csv or tsv file: `scan_cells` answers it
-	table:       ^Table, // --to csv or tsv: the outputs are records (nil otherwise)
-	rows_begun:  bool, // a record has been put into the output, so a later one does not open it
+	selected:    ^Selected, // while `select_cell` runs the filter: the record each output prints
+	columns:     ^Columns, // set when `scan_cells` answers a column-only filter on --from csv or tsv
+	table:       ^Table, // --to csv or tsv output table (nil otherwise)
+	rows_begun:  bool, // a record has been written, so later records are not at the output's start
 	// select(P op LITERAL): the scan answers P, and a record is printed when its answer compares so. `op` is .None
 	// for any other filter.
 	select:      struct {

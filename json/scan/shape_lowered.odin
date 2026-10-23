@@ -4,13 +4,13 @@ import core_pkg "../../core"
 import "walk"
 import "base:runtime"
 
-// What the JSON walk reads a lowered shape by, set once on the shape when the plan lowers it
-// (`Plan_Format.lowered`): the key words and first-byte filters its member matching compares, which structs and
-// lists its fused loops read (`shape_take_members`, `shape_take_elements`), and whether the typed descent reads
-// the whole shape (`Read_Shape.descends`). A reader of another format leaves all of it unset.
+// JSON's annotations on a lowered shape, set once when the plan lowers it (`Plan_Format.lowered`): the key words
+// and first-byte filters for member matching, the structs and lists read by the fused loops (`shape_take_members`,
+// `shape_take_elements`), and whether the typed descent reads the whole shape (`Read_Shape.descends`). Readers of
+// other formats leave all of these unset.
 
-// `r` annotated for the walk, and a struct with more fields than the walk's seen words cover set back to
-// `.Unsupported`.
+// Annotates `r` for the JSON walk, and resets to `.Unsupported` any struct with more fields than the walk's seen
+// words cover.
 shape_lowered :: proc(r: ^core_pkg.Read_Shape) -> runtime.Allocator_Error {
 	for &op in r.ops {
 		#partial switch op.kind {
@@ -27,7 +27,8 @@ shape_lowered :: proc(r: ^core_pkg.Read_Shape) -> runtime.Allocator_Error {
 			op.elements_fused = r.ops[op.elem].kind in SHAPE_WHOLE_LEAVES
 		}
 	}
-	// The arm a union's tag picked reads every unknown key in `shape_key`, which tells the tag apart.
+	// A tagged union's arms are not fused: the arm reads every unknown key through `shape_key`, which recognizes
+	// the tag member.
 	for op in r.ops {
 		if op.kind == .Union && op.tagged {
 			for arm in r.fields[op.elem:][:op.count] {
@@ -41,11 +42,11 @@ shape_lowered :: proc(r: ^core_pkg.Read_Shape) -> runtime.Allocator_Error {
 	return nil
 }
 
-// `f.colon_key` and `f.colon_mask`: `"name":` in two little-endian words, or the zero word no key matches
-// when it takes more than sixteen bytes. And the bit in `op.first` of the byte after the key's opening quote.
+// Sets `f.colon_key` and `f.colon_mask` to `"name":` in two little-endian words, or to the zero word, which no
+// key matches, when it exceeds sixteen bytes. Also sets the bit in `op.first` for the byte after the opening quote.
 @(private = "file")
 colon_key_words :: proc(op: ^core_pkg.Shape_Op, f: ^core_pkg.Shape_Field) {
-	// An empty key's byte after the opening quote is the closing one.
+	// For an empty key, the byte after the opening quote is the closing quote.
 	first := f.name[0] if len(f.name) > 0 else '"'
 	op.first[first >> 6] |= u64(1) << (first & 63)
 	spelled := len(f.name) + 3
@@ -65,8 +66,9 @@ colon_key_words :: proc(op: ^core_pkg.Shape_Op, f: ^core_pkg.Shape_Field) {
 	}
 }
 
-// Whether a struct op's members can be read by the fused loop: at most 64 fields, so `Shape_Frame.seen` marks
-// each, and every name plain, so a key whose bytes equal a name is that name's whole token.
+// Reports whether the fused loop can read a struct op's members. It needs at most 64 fields, so that
+// `Shape_Frame.seen` has a bit for each, and only plain names, so that a key whose bytes equal a name is that
+// name's whole token.
 @(private = "file")
 struct_fuses :: proc(r: ^core_pkg.Read_Shape, op: ^core_pkg.Shape_Op) -> bool {
 	if op.count > 64 {
@@ -80,7 +82,7 @@ struct_fuses :: proc(r: ^core_pkg.Read_Shape, op: ^core_pkg.Shape_Op) -> bool {
 	return true
 }
 
-// Whether `name` is written in printable ASCII with no quote or backslash, so a key whose bytes equal it is its
+// Reports whether `name` is printable ASCII without a quote or backslash, so a key whose bytes equal it is the
 // whole unescaped token.
 @(private = "file")
 plain_key_name :: proc(name: string) -> bool {
@@ -92,8 +94,8 @@ plain_key_name :: proc(name: string) -> bool {
 	return true
 }
 
-// Whether every op reachable from op `i` is one `shape_descend` reads: a fused struct, a sequence, or a scalar
-// leaf that takes no container. `visited` stops a recursive type.
+// Reports whether `shape_descend` can read every op reachable from op `i`: fused structs, sequences, and scalar
+// leaves that accept no container. `visited` stops at a recursive type.
 @(private = "file")
 shape_descends :: proc(r: ^core_pkg.Read_Shape, i: u32, visited: []bool) -> bool {
 	if visited[i] {
@@ -115,8 +117,7 @@ shape_descends :: proc(r: ^core_pkg.Read_Shape, i: u32, visited: []bool) -> bool
 		}
 		return true
 	case .Slice, .Dynamic, .Array, .Fixed_List:
-		// A list of flat records the walk reads in one loop (`shape_next_record`), which beats a call per
-		// record.
+		// A list of flat records is read by the walk's record loop (`shape_next_record`), not by descent.
 		elem := r.ops[op.elem]
 		if op.kind != .Array && op.kind != .Fixed_List && elem.kind == .Struct && shape_flat(r, elem) {
 			return false
@@ -126,7 +127,7 @@ shape_descends :: proc(r: ^core_pkg.Read_Shape, i: u32, visited: []bool) -> bool
 	return false
 }
 
-// Whether every field of struct op `op` is a scalar.
+// Reports whether every field of struct op `op` is a scalar.
 @(private = "file")
 shape_flat :: proc(r: ^core_pkg.Read_Shape, op: core_pkg.Shape_Op) -> bool {
 	nested :: bit_set[core_pkg.Shape_Kind]{.Struct, .Slice, .Dynamic, .Array, .Fixed_List, .Map, .Bit_Set}
@@ -138,5 +139,5 @@ shape_flat :: proc(r: ^core_pkg.Read_Shape, op: core_pkg.Shape_Op) -> bool {
 	return true
 }
 
-// The ops whose leaf writes every byte of its target, so a slot holding one needs no zeros first.
+// The ops whose leaf writes every byte of its target, so their slots need no zeroing first.
 SHAPE_WHOLE_LEAVES :: bit_set[core_pkg.Shape_Kind]{.Bool, .Int, .Uint, .Float, .String}

@@ -9,7 +9,7 @@ import "core:sync"
 import host "../../host"
 import json "../../json"
 
-// Input bytes per worker of a record batch: 320 KiB per worker for the first four, 1 MiB per worker past them.
+// Input bytes per worker of a record batch: 320 KiB for each of the first four workers, 1 MiB for each one after.
 BATCH_BYTES_PER_WORKER :: 1 << 20
 BATCH_BYTES_PER_FIRST_WORKERS :: 320 * 1024
 
@@ -61,48 +61,49 @@ fan_out :: proc(r: ^json.Batch_Runner, n: int, task: proc(job: ^$T, k: int) -> b
 	return !c.failed
 }
 
-// What one piece of a job printed (`Piece_Output`).
+// The output of one piece of a job (`Piece_Output`).
 Record_Piece :: struct {
 	out:      [dynamic]byte,
-	ret:      int, // jq's result for the piece's last record, when it answered one
+	ret:      int, // jq's exit result for the piece's last record with an output
 	answered: bool,
-	records:  int, // the records the piece took in, but the one it stopped at
+	records:  int, // records the piece completed, excluding the one it stopped at
 	done:     bool,
-	stop:     int, // where the piece left the rest to the main thread, or -1
+	stop:     int, // where (JSON: an offset) or why (CSV: a `*_STOP` code) the main thread takes over, or -1
 }
 
-// The output of a job's pieces, `json.each_record`'s or `csv.each_record`'s: each piece prints into a buffer of its
-// own, and a buffer is written as soon as the pieces before it are.
+// The output of a job's pieces from `json.each_record` or `csv.each_record`. Each piece prints into its own buffer.
+// A buffer is written once every earlier piece has been written.
 Piece_Output :: struct {
 	run:     ^Run,
-	// The pieces by the library's number, each printed once those before it are, up to the first that left the rest
-	// to the main thread, `stop`, or -1. A printed piece's buffer is a spare for another piece, since a fresh one
-	// costs more than a piece of small answers.
+	// `pieces` is indexed by the library's piece number. Pieces are appended to the output in order, up to the
+	// first piece that hands off to the main thread; `stop` is its stop value, or -1. A written piece's buffer is
+	// reused for a later piece.
 	lock:    sync.Mutex,
-	// Signalled when `printed` moves or `stop` is set, for a piece waiting in `begin_piece`.
+	// Signalled when `printed` advances or `stop` is set, to wake a piece waiting in `begin_piece`.
 	moved:   sync.Cond,
 	arena:   virtual.Arena,
 	pieces:  [dynamic]Record_Piece,
 	spare:   [dynamic][dynamic]byte,
 	printed: int,
 	stop:    int,
-	// The records of the pieces printed so far, and for an object table the keys of the header that the first
-	// answer opens the table with (`table_due`).
+	// The record count of the pieces appended so far. For an object table, `keys` is the header written before
+	// the first output while `table_due` is set.
 	records:   int,
 	table_due: bool,
 	keys:      []string,
-	// The output written while the lock is let go: its holder owns `writing`, with the held output swapped into
-	// `wbuf`, so that one thread writes at a time and in order, and the others go on appending to the run's.
+	// The output being written while the lock is released. The thread that set `writing` swaps the pending output
+	// into `wbuf`, so only one thread writes at a time and output stays in order. Other threads keep appending to
+	// the run's output.
 	writing: bool,
 	wbuf:    [dynamic]byte,
 }
 
-// Pieces per lane that may be answered and not yet printed, and the bytes printed and not yet written that hold
-// the pieces after them back while a write is under way.
+// `PIECES_IN_FLIGHT` is the number of pieces per lane that may be finished but not yet appended. `HELD_AT` is the
+// number of appended, unwritten bytes at which later pieces wait for a write in progress.
 PIECES_IN_FLIGHT :: 2
 HELD_AT :: 2 * FLUSH_AT
 
-// Ready `po` to print `run`'s pieces, until `end_pieces`.
+// Prepares `po` to print `run`'s pieces until `end_pieces`.
 start_pieces :: proc(po: ^Piece_Output, run: ^Run) {
 	po.run, po.stop = run, -1
 	po.pieces.allocator = virtual.arena_allocator(&po.arena)
@@ -115,13 +116,13 @@ end_pieces :: proc(po: ^Piece_Output) {
 	delete(po.wbuf)
 }
 
-// A copy of the run for piece `k`, whose output goes into a buffer of its own: a spare, or one with room for
-// `size` bytes of answers. Copied under the lock, as another piece may be printing through the run.
+// Returns a copy of the run for piece `k`, with its own output buffer: a spare, or a new one with room for `size`
+// bytes. The copy is made under the lock, because another piece may be appending through the run.
 //
-// The piece waits while it is `PIECES_IN_FLIGHT` per lane ahead of the first piece not yet printed, and while a
-// write is under way with `HELD_AT` bytes held behind it, so that the output held is a bounded count of pieces
-// and bytes however slow the writer is. The first unprinted piece waits only for the writer, and every piece
-// before `k` is claimed, so the wait ends when the write does.
+// The piece waits while it is `PIECES_IN_FLIGHT` per lane ahead of the first unappended piece, and while a write
+// is in progress with `HELD_AT` bytes pending. This bounds the held output in pieces and bytes, however slow the
+// writer is. The first unappended piece waits only for the writer, and every piece before `k` is already claimed,
+// so the wait ends when the write does.
 begin_piece :: proc(po: ^Piece_Output, k, size: int) -> (run: Run) {
 	sync.guard(&po.lock)
 	window := PIECES_IN_FLIGHT * max(po.run.pool_width, 1)
@@ -134,8 +135,8 @@ begin_piece :: proc(po: ^Piece_Output, k, size: int) -> (run: Run) {
 	return
 }
 
-// Piece `k`, answered as `p`, and then the pieces now in turn printed. It returns false once a piece has left the
-// rest to the main thread.
+// Stores piece `k`'s result `p`, then appends and writes every piece whose turn has come. Returns false once a
+// piece has handed the rest of the input to the main thread.
 publish_piece :: proc(po: ^Piece_Output, k: int, p: Record_Piece) -> bool {
 	sync.guard(&po.lock)
 	if k >= len(po.pieces) {
@@ -159,8 +160,8 @@ publish_piece :: proc(po: ^Piece_Output, k: int, p: Record_Piece) -> bool {
 		po.stop = q.stop
 	}
 	sync.cond_broadcast(&po.moved)
-	// The held output is written with the lock let go, so another piece can be printed meanwhile, and only by
-	// one thread at a time, so that what is written stays in order.
+	// The pending output is written with the lock released, so other pieces can append meanwhile. Only one thread
+	// writes at a time, which keeps the output in order.
 	for !po.writing && output_due(po.run) {
 		po.writing = true
 		po.run.out, po.wbuf = po.wbuf, po.run.out

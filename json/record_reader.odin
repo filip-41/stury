@@ -10,11 +10,11 @@ import core_pkg "../core"
 //	  and the framing fault are those `records` gives the whole input, whatever the sizes of the reads.
 //	- The fields are the iterator's own but `chunk`, `err` and `read_err`.
 Record_Reader :: struct {
-	// The window: `read_err` is the reader's failure. The records framed before it are yielded, the bytes
-	// after them are not.
+	// `read_err` is the reader's failure. The records framed before it are yielded; the bytes after them are
+	// not.
 	using window: core_pkg.Stream_Window,
-	// The bytes not yet framed are `buf[lo:hi]`, and the first `scanned` of them have been searched for a
-	// place to cut.
+	// The bytes not yet framed are `buf[lo:hi]`. The first `scanned` of them have been searched for a record
+	// boundary.
 	lo:       int,
 	scanned:  int,
 	// The framed part of the window.

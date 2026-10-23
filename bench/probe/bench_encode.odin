@@ -1,8 +1,9 @@
 package main
 
-// Encode lanes. Document lanes report source bytes per second, so they compare with the
-// scan lanes of the same fixture. Number and marshal lanes report output bytes per second, as yy_bench does.
-// `set_*` and `splice_*` report `ratio`: their median over the median of the job they are held to.
+// Encode lanes. The document lanes report source bytes per second, comparable with the scan lanes on the
+// same fixture. The number and marshal lanes report output bytes per second, as yy_bench does. The edit lanes
+// (`set_*`, `remove_*`, `insert_*`, `splice_*`) also report `ratio`: their median divided by the median of a
+// reference job.
 
 import json "stury:json"
 import "core:bytes"
@@ -16,7 +17,7 @@ import "core:time"
 ENCODE_NUMBERS :: 1_000_000
 ENCODE_SEED :: 20261008
 
-// SplitMix64, the stream yy_bench.c also runs, so both writers spell the same values.
+// SplitMix64, the same generator as yy_bench.c, so both writers format the same values.
 splitmix64 :: proc(s: ^u64) -> u64 {
 	s^ += 0x9E3779B97F4A7C15
 	z := s^
@@ -25,7 +26,8 @@ splitmix64 :: proc(s: ^u64) -> u64 {
 	return z ~ (z >> 31)
 }
 
-// A writer that keeps nothing: the streaming lanes time the encoder, not a sink. `n` counts the bytes written.
+// A writer that discards its input, so the streaming lanes time the encoder, not a sink. `n` counts the bytes
+// written.
 Discard :: struct {
 	n: int,
 }
@@ -45,8 +47,8 @@ discard_proc :: proc(data: rawptr, mode: io.Stream_Mode, p: []byte, _: i64, _: i
 	return 0, .Unsupported
 }
 
-// `copy_gb_per_s` is a plain copy of the same bytes into a warm buffer: the baseline of the document lanes. With `to_writer`
-// the document streams into a discarding writer.
+// Times `marshal` of the built document at `opts`; with `to_writer` it streams into a `Discard` writer.
+// `copy_gb_per_s`, the baseline, times a plain copy of the same bytes into a warm buffer.
 bench_encode_doc :: proc(data: []byte, opts: json.Encode_Opts, to_writer := false) -> bool {
 	doc, berr := json.build(data)
 	if berr != nil {
@@ -91,8 +93,8 @@ bench_encode_doc :: proc(data: []byte, opts: json.Encode_Opts, to_writer := fals
 	return true
 }
 
-// Every string value of the document, decoded once outside the timed region, marshalled as one array;
-// reports the decoded string bytes marshalled per second.
+// Times `marshal` of every string value of the document as one array. The strings are decoded once,
+// outside the clock. Reports decoded string bytes per second.
 bench_encode_string :: proc(data: []byte) -> bool {
 	doc, berr := json.build(data)
 	if berr != nil {
@@ -128,8 +130,8 @@ bench_encode_string :: proc(data: []byte) -> bool {
 	return true
 }
 
-// ENCODE_NUMBERS values from SplitMix64 marshalled as one array; output bytes per second. Non-finite f64 patterns are
-// drawn again, as yy_bench does.
+// Times `marshal` of ENCODE_NUMBERS SplitMix64 values as one array, in output bytes per second. A non-finite
+// f64 bit pattern is redrawn, as yy_bench does.
 bench_encode_numbers :: proc($T: typeid) -> bool where T == f64 || T == i64 {
 	vals := make([]T, ENCODE_NUMBERS)
 	defer delete(vals)
@@ -167,7 +169,7 @@ Log_Record :: struct {
 	id:                      string,
 }
 
-// logs.json's records read off the document, outside the timed region.
+// Reads logs.json's records from the built document; called outside the clock.
 load_log_records :: proc(doc: ^json.Document) -> (records: [dynamic]Log_Record, ok: bool) {
 	logs := json.child(doc, json.ROOT, "logs")
 	if logs == json.NO_NODE {
@@ -201,7 +203,7 @@ log_number :: proc(doc: ^json.Document, rec: json.Node, name: string) -> (f64, b
 	return json.get_float(doc, json.child(doc, rec, name))
 }
 
-// logs.json's records with `level` and `service` as enums, which marshal spells by name.
+// logs.json's records with `level` and `service` as enums, which marshal writes by name.
 Log_Level :: enum u8 {
 	trace,
 	debug,
@@ -232,8 +234,8 @@ Log_Enum_Record :: struct {
 	id:          string,
 }
 
-// `marshal` of logs.json's records with a kept plan; output bytes per second. `enums` marshals them as
-// Log_Enum_Record; `to_writer` streams into a discarding writer.
+// Times `marshal` of logs.json's records with a reused plan, in output bytes per second. `enums` marshals
+// them as Log_Enum_Record; `to_writer` streams into a `Discard` writer.
 bench_marshal_logs :: proc(data: []byte, enums := false, to_writer := false) -> bool {
 	doc, berr := json.build(data)
 	if berr != nil {
@@ -300,7 +302,7 @@ Bench_Edit :: enum {
 	Insert,
 }
 
-// A fresh copy of `data`: the copy half of the job each edit is held to.
+// Returns a fresh copy of `data`, the copy half of each edit lane's reference job.
 copy_of :: proc(data: []byte) -> (fresh: []byte, ok: bool) {
 	aerr: mem.Allocator_Error
 	fresh, aerr = mem.alloc_bytes_non_zeroed(len(data))
@@ -345,7 +347,8 @@ edit_timed :: proc(data: []byte, op: Bench_Edit, path: string, value: any) -> (n
 	return ns, true
 }
 
-// One untimed edit, checked to have happened: the output differs from the source and is valid JSON.
+// Runs one untimed edit and checks that it took effect: the output differs from the source and is valid
+// JSON.
 edit_took_effect :: proc(data: []byte, op: Bench_Edit, path: string, value: any) -> bool {
 	out, err := apply_edit(data, op, path, value)
 	if err != nil {
@@ -356,7 +359,7 @@ edit_took_effect :: proc(data: []byte, op: Bench_Edit, path: string, value: any)
 	return !bad && !bytes.equal(out, data)
 }
 
-// A path edit against the job it is held to: the same `.Strict` path scan, plus one fresh copy of the
+// Times a path edit against its reference job: the same `.Strict` path scan plus one fresh copy of the
 // source. The two arms alternate which runs first, so a load swing cannot favour one.
 bench_edit :: proc(data: []byte, op: Bench_Edit, path: string, value: any = nil) -> bool {
 	steps: [32]json.Step
@@ -416,7 +419,8 @@ splice_timed :: proc(data: []byte, edits: []json.Edit) -> (ns: i64, ok: bool) {
 	return ns, true
 }
 
-// `splice` of the first record's `level` value against a fresh copy of the source plus `validate` of it.
+// Times `splice` of the first record's `level` value against a reference job: a fresh copy of the source
+// plus `validate` of the copy.
 bench_splice_logs :: proc(data: []byte) -> bool {
 	text := string(data)
 	at := strings.index(text, `"level":"`)

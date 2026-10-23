@@ -2,13 +2,14 @@ package core
 
 import "core:sync"
 
-// Threads a caller lends the formats' parallel procedures (`json.each_record`, `json.validate_records`,
-// `csv.each_record`, `csv.validate`), which start none of their own. `stury:host`'s `Batch_Pool` is one.
+// Batch_Runner is a set of caller-owned threads for the parallel procedures (`json.each_record`,
+// `json.validate_records`, `csv.each_record`, `csv.validate`), which start no threads of their own.
+// `stury:host`'s `Batch_Pool` implements it.
 //
-//	- `start` runs `task(arg)` on up to `n` of the `threads`, each as its own call, which may begin late or
+//	- `start` runs `task(arg)` as a separate call on each of up to `n` of the `threads`. A call may start late or
 //	  not at all.
-//	- `finish` returns once no call that has not begun will begin and every one that has has returned.
-//	- `start` and `finish` alternate and run on the calling thread.
+//	- `finish` returns once no further call will start and every started call has returned.
+//	- `start` and `finish` alternate, and both run on the calling thread.
 Batch_Runner :: struct {
 	data:    rawptr,
 	threads: int,
@@ -16,23 +17,25 @@ Batch_Runner :: struct {
 	finish:  proc(data: rawptr),
 }
 
-// The most bytes a worker claims at a time. A claim starts at the first record boundary at or past its offset.
+// The most bytes a worker claims at a time. A claim starts at the first record boundary at or after its offset.
 BATCH_CHUNK :: 128 * 1024
 
-// Claims shrink toward the end of a batch, down to one slice, so the last pieces finish together.
+// The smallest claim. Claims shrink toward the end of a batch, down to one slice, so the last pieces finish
+// together.
 BATCH_SLICE :: BATCH_CHUNK / 4
 
-// The slices `n` bytes are cut into: a piece claims at least one.
+// Returns the number of slices in `n` bytes. A piece claims at least one slice.
 batch_slices :: proc(n: int) -> int {
 	return (n + BATCH_SLICE - 1) / BATCH_SLICE
 }
 
-// The threads a batch of `n` bytes takes: the caller and the runner's, each with at least a chunk.
+// Returns the number of threads for a batch of `n` bytes, counting the caller, with at least one chunk each.
 batch_lanes :: proc(runner: ^Batch_Runner, n: int) -> int {
 	return clamp(runner.threads + 1 if runner != nil else 1, 1, max(1, (n + BATCH_CHUNK - 1) / BATCH_CHUNK))
 }
 
-// A batch's slices, claimed a piece at a time in source order by the caller and the runner's threads.
+// Batch_Cursor is the claim state of a batch's slices. The caller and the runner's threads claim one piece at a
+// time, in source order.
 Batch_Cursor :: struct {
 	runner:  ^Batch_Runner,
 	lanes:   int,
@@ -42,7 +45,7 @@ Batch_Cursor :: struct {
 	stopped: bool,
 }
 
-// `task(arg)` on the runner's threads and the caller, until each returns.
+// Runs `task(arg)` on the runner's threads and on the caller, and returns when every call has returned.
 batch_fan :: proc(c: ^Batch_Cursor, task: proc(arg: rawptr), arg: rawptr) {
 	if c.lanes > 1 {
 		c.runner.start(c.runner.data, c.lanes - 1, task, arg)
@@ -53,15 +56,15 @@ batch_fan :: proc(c: ^Batch_Cursor, task: proc(arg: rawptr), arg: rawptr) {
 	}
 }
 
-// The next slice number of a pass over the `slices` that every thread of a `batch_fan` takes a share of through
-// `counted`, a counter that starts at 0. False once none are left.
+// Returns the next slice number of a pass over `slices` shared by every thread of a `batch_fan`. `counted` is
+// the shared counter and starts at 0. Returns false once no slice is left.
 slice_next :: proc(counted: ^int, slices: int) -> (k: int, ok: bool) {
 	k = sync.atomic_add(counted, 1)
 	return k, k < slices
 }
 
-// The next piece: its first slice, how many slices it takes, and its number. False once none are left or
-// the cursor is stopped.
+// Claims the next piece and returns its first slice, its slice count and its number. Returns false once no
+// slice is left or the cursor is stopped.
 cursor_next :: proc(c: ^Batch_Cursor) -> (slice_no, count, piece_no: int, ok: bool) {
 	for !sync.atomic_load(&c.stopped) {
 		cur := sync.atomic_load(&c.next)
@@ -77,8 +80,8 @@ cursor_next :: proc(c: ^Batch_Cursor) -> (slice_no, count, piece_no: int, ok: bo
 	return
 }
 
-// Move the cursor's slice up to `slice_no` when it is behind, keeping its piece number: the slices a piece
-// ran past are its own.
+// Advances the cursor's next slice to `slice_no` when it is behind, keeping the piece number. A piece that read
+// past its claim owns the slices it covered.
 cursor_skip_to :: proc(c: ^Batch_Cursor, slice_no: int) {
 	for {
 		seen := sync.atomic_load(&c.next)
@@ -91,12 +94,12 @@ cursor_skip_to :: proc(c: ^Batch_Cursor, slice_no: int) {
 	}
 }
 
-// No further piece is claimed.
+// Stops the cursor: no further piece is claimed.
 cursor_stop :: proc(c: ^Batch_Cursor) {
 	sync.atomic_store(&c.stopped, true)
 }
 
-// The noted fault of least `order`.
+// The noted fault with the lowest `order`.
 First_Fault :: struct {
 	lock:  sync.Mutex,
 	error: Maybe(Error),

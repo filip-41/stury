@@ -7,8 +7,8 @@ import "base:runtime"
 import lex "lex"
 
 // The shape walk: `walk_value_q` over `{.Shape}`, whose hooks read each value into the target its read shape
-// names (`walk.Shape_Run`). The hooks act only on values at the run's depth. Everything deeper belongs to a
-// container nothing reads, which the walk checks (or, under `.Lazy`, skips) on its own.
+// names (`walk.Shape_Run`). The hooks act only on values at the run's depth. Anything deeper is inside a
+// container nothing reads, and the walk checks it (or, under `.Lazy`, skips it) without the hooks.
 //
 // The unchecked accesses rest on the walk and the plan. A frame is pushed only below the walk's depth cap,
 // which `resolve` holds to MAX_DEPTH, the slots `r.frames` has. A target is the root the plan was made for

@@ -100,7 +100,7 @@ Print_Sink :: struct {
 	run:        ^Run,
 }
 
-// The filter on one input, its outputs printed: the signal it ended with.
+// Runs the filter on one input and prints its outputs. Returns the signal the run ended with.
 eval_input :: proc(run: ^Run, v: jq.Value) -> jq.Signal {
 	s := Print_Sink{sink = {emit = proc(s: ^jq.Sink, it: jq.Item) -> jq.Signal {
 				run := ((^Print_Sink)(s)).run
@@ -124,7 +124,7 @@ eval_input :: proc(run: ^Run, v: jq.Value) -> jq.Signal {
 	return sig
 }
 
-// jq's process(): the filter on one input, its outputs printed, its error reported.
+// Runs the filter on one input, prints its outputs and reports its error, as jq's process() does.
 run_once :: proc(run: ^Run, v: jq.Value) {
 	ip := &run.ip
 	sig := eval_input(run, v)

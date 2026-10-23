@@ -10,19 +10,19 @@ import "../core/bits"
 // Threads a caller lends `each_record` and `validate` (`stury:host`'s `Batch_Pool` is one).
 Batch_Runner :: core_pkg.Batch_Runner
 
-// `task` on every piece of `src`, each a `Records` over whole records of `src` in `dialect`, judged at
-// `strictness` and capped by `limits` as `records` judges the whole.
+// Runs `task` on every piece of `src`. Each piece is a `Records` over whole records of `src` in `dialect`,
+// judged at `strictness` and capped by `limits` as `records` judges the whole input.
 //
-//	- Pieces are numbered `k` from 0 in source order and handed out once each, possibly with no record.
-//	- The caller and `runner`'s threads claim the pieces in turn. Without `runner` the caller has one piece,
-//	  the whole input, and so does a dialect with quotes and a comment byte, whose comment lines only a read
-//	  from the start tells from a quoted field's lines.
-//	- A piece's records carry offsets into `src`, and `src` is their `src`.
-//	- The fault returned is the one `records` ends on, the first piece's that holds one. A piece's own is on
-//	  its `err` when its task has read it to the end.
+//	- Pieces are numbered `k` from 0 in source order. Each is handed out once and may hold no record.
+//	- The caller and `runner`'s threads claim pieces in turn. Without `runner` there is one piece, the whole
+//	  input. A dialect with quotes and a comment byte also gets one piece: only a read from the start can tell
+//	  a comment line from a line inside a quoted field.
+//	- A piece's records carry offsets into `src`, and their `src` is `src`.
+//	- The returned fault is the one `records` would end on: that of the first piece holding a fault. A piece's
+//	  own fault is on its `err` once its task has read it to the end.
 //	- Once a task returns false or a piece ends on a fault, no further piece is claimed. Pieces past the
-//	  faulty one that were claimed before it ended still run, over records `records` never reaches.
-//	- A piece's fields are held in the heap, until its task returns.
+//	  faulty one that were already claimed still run, over records `records` would never reach.
+//	- A piece's fields live on the heap until its task returns.
 @(require_results)
 each_record :: proc(
 	src: []byte,
@@ -44,7 +44,7 @@ each_record :: proc(
 	return run.first.error
 }
 
-// `validate` on `runner`'s threads and the caller, a piece each at a time.
+// `validate` split across `runner`'s threads and the caller, one piece per claim.
 @(private)
 validate_pieces :: proc(src: []byte, s: Scan, runner: ^Batch_Runner) -> Maybe(Error) {
 	run := Batch_Run{src = src, scan = s, cursor = {runner = runner}}
@@ -58,9 +58,9 @@ validate_pieces :: proc(src: []byte, s: Scan, runner: ^Batch_Runner) -> Maybe(Er
 Batch_Run :: struct {
 	src:     []byte,
 	scan:    Scan,
-	// Every record's field count, the first record's, read before the pieces are: 0 when ragged.
+	// The field count every record must have: the first record's, read before the pieces. 0 when ragged.
 	width:   int,
-	// `each_record`'s, nil for `validate`.
+	// `each_record`'s task, nil for `validate`.
 	task:    proc(data: rawptr, piece: ^Records, k: int) -> bool,
 	data:    rawptr,
 	cursor:  core_pkg.Batch_Cursor,
@@ -71,16 +71,16 @@ Batch_Run :: struct {
 	first:   core_pkg.First_Fault,
 }
 
-// How many lanes the run takes, and where its pieces may start. One piece, the whole input, when there is
-// no runner, too little input, a dialect no split can serve, no first record to take the width from, or no
-// memory for the quote parities.
+// How many lanes the run takes, and where its pieces may start. There is one piece, the whole input, when
+// there is no runner, too little input, a dialect that cannot be split, no first record to read the width
+// from, or no memory for the quote parities.
 //
-// A piece starts past an LF outside quotes, where the scan's state is the input's start's: a field and a
-// line start there, and no quote, CR or escape is open. Under `Quoting.None` every LF is one. Under
-// `Quoting.Quotes` the scan's quote state at a byte is the parity of the quotes before it, on any input up
-// to its first fault, since every quote opens or closes (a doubled `""` is a close and an open): so an LF
-// after an even count of quotes is one. A comment line holds quotes that count for nothing, so a comment
-// byte under quotes leaves only the whole input.
+// A piece starts just past an LF outside quotes, where the scan state equals the state at the input's start:
+// a field and a line start there, and no quote, CR or escape is open. Under `Quoting.None` every LF
+// qualifies. Under `Quoting.Quotes` every quote opens or closes (a doubled `""` is a close then an open), so
+// up to the first fault the quote state at a byte is the parity of the quotes before it, and an LF after an
+// even count of quotes qualifies. Quotes in a comment line do not count, so a comment byte under quotes
+// forces one piece.
 @(private)
 batch_plan :: proc(run: ^Batch_Run) {
 	run.cursor.lanes, run.cursor.slices = 1, 1
@@ -146,9 +146,9 @@ quote_parity :: proc(src: []byte) -> u8 {
 	return u8(odd & 1)
 }
 
-// Claim pieces until none are left. A piece whose last record reaches past the slices after it moves the
-// counter past them, since no record starts there. `VALIDATE` is constant so that `each_record` links no
-// `validate_span`.
+// Claims pieces until none are left. A piece whose last record reaches past the slices after it moves the
+// counter past them, since no record starts there. `VALIDATE` is a constant so that `each_record` does not
+// link `validate_span`.
 @(private)
 batch_claim :: proc(run: ^Batch_Run, $VALIDATE: bool) {
 	fields := make([dynamic]Field, runtime.heap_allocator())
@@ -178,9 +178,9 @@ batch_claim :: proc(run: ^Batch_Run, $VALIDATE: bool) {
 	}
 }
 
-// Where the records from slice `k` on start: past the first LF outside quotes at or after the slice's
-// offset's previous byte, or the input's end when there is none. Slice 0 starts at the input's first byte
-// past its BOM.
+// Where the records from slice `k` on start: just past the first LF outside quotes at or after the byte before
+// the slice's offset, or the input's end when there is none. Slice 0 starts at the input's first byte past
+// its BOM.
 @(private)
 batch_boundary :: proc(run: ^Batch_Run, k: int) -> int {
 	src := run.src
@@ -203,7 +203,7 @@ batch_boundary :: proc(run: ^Batch_Run, k: int) -> int {
 	return i + 1 if i >= 0 else len(src)
 }
 
-// The first LF at or after `from` outside quotes, where `odd` says `from` is inside them, or -1.
+// The first LF outside quotes at or after `from`, or -1. `odd` says whether `from` is inside quotes.
 @(private)
 outside_lf :: proc(src: []byte, from: int, odd: bool) -> int {
 	in_quote := ~u64(0) if odd else 0

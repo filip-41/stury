@@ -1,11 +1,11 @@
 package core
 
-// The read halves of a writer's scalar leaves: the value of a field of the op's width, widened to the
-// 64-bit type every format spells. A writer calls them per value.
+// Scalar loads for writers. Each reads a field of the op's width and widens it to the 64-bit type that every
+// format writes. A writer calls them once per value.
 
 import "core:strconv"
 
-// A signed integer of `size` bytes.
+// Loads a signed integer of `size` bytes.
 shape_int_load :: proc(data: rawptr, size: u8) -> i64 {
 	switch size {
 	case 1:
@@ -18,7 +18,7 @@ shape_int_load :: proc(data: rawptr, size: u8) -> i64 {
 	return (^i64)(data)^
 }
 
-// An unsigned integer, or a boolean or a union tag, of `size` bytes.
+// Loads an unsigned integer, boolean or union tag of `size` bytes.
 shape_uint_load :: proc(data: rawptr, size: u8) -> u64 {
 	switch size {
 	case 1:
@@ -31,10 +31,10 @@ shape_uint_load :: proc(data: rawptr, size: u8) -> u64 {
 	return (^u64)(data)^
 }
 
-// The float of `size` bytes as the binary64 whose shortest round-trip digits are the field's own. An f16 or
-// f32 widens exactly, but its widened value's shortest digits are a binary64's (`f32(0.1)` is
-// 0.10000000149011612), so a narrow float goes through its shortest digits at its own width. Those have at
-// most 9 significant digits, so the nearest binary64 writes them back unchanged.
+// Loads the float of `size` bytes as the binary64 with the same shortest round-trip digits. An f16 or f32 widens
+// exactly, but the widened value has a binary64's shortest digits (`f32(0.1)` widens to 0.10000000149011612). A
+// narrow float is therefore converted through its shortest digits at its own width. Those have at most 9
+// significant digits, so the nearest binary64 prints them unchanged.
 shape_float_load :: proc(data: rawptr, size: u8) -> f64 {
 	switch size {
 	case 2:
@@ -47,7 +47,7 @@ shape_float_load :: proc(data: rawptr, size: u8) -> f64 {
 
 @(private)
 narrow_float :: proc(x: f64, bit_size: int) -> f64 {
-	// Zero keeps its sign, and a non-finite value (every exponent bit set) is the caller's to refuse.
+	// Zero keeps its sign. A non-finite value (every exponent bit set) is returned as is; the caller refuses it.
 	if x == 0 || transmute(u64)x >> 52 & 0x7ff == 0x7ff {
 		return x
 	}

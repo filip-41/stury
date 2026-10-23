@@ -194,7 +194,7 @@ scan_refuse :: #force_no_inline proc(src: []byte, req: ^Request($KINDS), $WALK: 
 // decide it, so no refusal follows a write. The walk's own checks (`resolve_queries`) only restate these.
 @(private = "file")
 request_fault :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> Maybe(Request_Error) {
-	// Resolved here, the one pre-flight every scan and `prepare` pass, so no walk sees `.Default`.
+	// Every scan and `prepare` pass through this check, so no walk sees `.Default`.
 	if req.duplicates == .Default {
 		req.duplicates = .Last
 	}

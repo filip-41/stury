@@ -6,8 +6,8 @@ package spell
 //
 // Stores are unchecked and may run past the count returned: `spell_lead8` always stores 8 bytes, the low
 // sixteen digits of a 17- to 20-digit value go in one 16-byte store, and `spell_i64` writes its `-` either
-// way. None reaches past 20 bytes, which every caller reserves. `spell_u64`'s split keeps each group below 10^8,
-// so `spell_pair` indexes DIGITS2 with a pair below 100.
+// way. No store reaches past 20 bytes, which every caller reserves. `spell_u64`'s split keeps each group below
+// 10^8, so `spell_pair` indexes DIGITS2 with a pair below 100.
 
 import "base:intrinsics"
 import "core:simd"
@@ -21,10 +21,10 @@ DIGITS2 := "0001020304050607080910111213141516171819" +
 	"6061626364656667686970717273747576777879" +
 	"8081828384858687888990919293949596979899"
 
-// Room `spell_u64` and `spell_i64` need at `dst`: `-9223372036854775808` and `18446744073709551615` are 20 bytes.
+// The room `spell_u64` and `spell_i64` need at `dst`: `-9223372036854775808` and `18446744073709551615` are 20 bytes.
 INT_ROOM :: 20
 
-// Write `u` in decimal at `dst`, which has room for `INT_ROOM` bytes. Returns the count written.
+// Writes `u` in decimal at `dst`, which has room for `INT_ROOM` bytes. Returns the count written.
 spell_u64 :: #force_inline proc "contextless" (dst: [^]u8, u: u64) -> int {
 	if u < 100_000_000 {
 		return spell_lead8(dst, u)
@@ -44,7 +44,7 @@ spell_u64 :: #force_inline proc "contextless" (dst: [^]u8, u: u64) -> int {
 	return n + 16
 }
 
-// Write `v` in decimal at `dst`, which has room for `INT_ROOM` bytes. Returns the count written.
+// Writes `v` in decimal at `dst`, which has room for `INT_ROOM` bytes. Returns the count written.
 spell_i64 :: #force_inline proc "contextless" (dst: [^]u8, v: i64) -> int {
 	// The sign is stored either way and kept only when negative. Negation in u64 is exact for every i64,
 	// min(i64) included.
@@ -54,8 +54,8 @@ spell_i64 :: #force_inline proc "contextless" (dst: [^]u8, v: i64) -> int {
 	return neg + spell_u64(dst[neg:], 0 - u if neg != 0 else u)
 }
 
-// The bits `x` of a 128-bit integer, an `i128` when `signed`, in decimal at the start of `buf`, which has room
-// for 40 bytes. Returns the text.
+// Writes the 128-bit integer with bits `x` (an `i128` when `signed`) in decimal at the start of `buf`, which has
+// room for 40 bytes. Returns the text.
 spell_u128 :: proc(buf: []u8, x: u128, signed: bool) -> string {
 	return strconv.write_bits_128(buf, x, 10, signed, 128, strconv.digits, {})
 }

@@ -181,7 +181,8 @@ get_string :: #force_inline proc(doc: ^Document, n: Node) -> (s: string, ok: boo
 	if has(doc, n) {
 		r := &doc.rows[n]
 		lo, hi := u64(r.lo), u64(r.hi)
-		// A borrowed text: the slice below is in range once `hi` is, and a row no walk decoded has its quotes checked.
+		// The text is borrowed from `src`. The slice below is in range once `hi` is, and the quotes are checked
+		// when no walk decoded the row.
 		if r.kind == .String && .Str_Escaped not_in r.flags && hi >= lo + 2 && hi <= u64(len(doc.src)) &&
 		   (.Decoded in r.flags || (doc.src[lo] == '"' && doc.src[hi - 1] == '"')) {
 			return string(doc.src[lo + 1:hi - 1]), true
@@ -190,7 +191,7 @@ get_string :: #force_inline proc(doc: ^Document, n: Node) -> (s: string, ok: boo
 	return get_string_decoded(doc, n)
 }
 
-// `get_string` for everything but an escape-free text.
+// Runs `get_string` for every value except an escape-free string.
 @(private)
 get_string_decoded :: #force_no_inline proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
 	lazy := has(doc, n) && doc.rows[n].kind == .String &&

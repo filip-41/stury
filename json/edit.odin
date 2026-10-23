@@ -11,13 +11,13 @@ import "core:slice"
 // One value-replacing edit: `src[lo:hi]` becomes `bytes`.
 Edit :: core_pkg.Edit
 
-// Why a path edit refused: core's `Path_Error_Kind`, the kinds shared with CSV. JSON never reports
+// The reason a path edit was refused. The kinds are core's and shared with CSV. JSON never reports
 // `Unsupported_Path`, `Bad_Option` or `Bad_Row`.
 Path_Error_Kind :: core_pkg.Path_Error_Kind
 
-// An edit's refusal, located as `Unmarshal_Error` is. `offset` and `syntax` are set for `.Bad_Source` and
-// `.Bad_Result` (`syntax` may stay `.None` there), `offset` alone for `.Bad_Path`, `encode` for `.Encode`.
-// `render_error` writes it, and so does CSV's.
+// A refused edit, located as an `Unmarshal_Error` is. `offset` and `syntax` are set for `.Bad_Source` and
+// `.Bad_Result` (`syntax` may stay `.None` there), `offset` alone for `.Bad_Path`, and `encode` for `.Encode`.
+// Both JSON's and CSV's `render_error` write it.
 Path_Error :: core_pkg.Path_Error
 
 // `src` with every edit applied.

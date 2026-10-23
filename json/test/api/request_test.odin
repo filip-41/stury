@@ -240,7 +240,7 @@ test_lazy_without_first_is_refused :: proc(t: ^testing.T) {
 	}
 }
 
-// The zero value is `.Last`, on every route: a named path and one through `Any`.
+// The zero value means `.Last` on every route, for a named path and for one through `Any`.
 @(test)
 test_default_duplicates_is_last :: proc(t: ^testing.T) {
 	src := `{"z":1,"z":2,"z":3}`

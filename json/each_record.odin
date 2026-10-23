@@ -6,7 +6,7 @@ import core_pkg "../core"
 import scan_pkg "scan"
 import index_pkg "scan/index"
 
-// Threads a caller lends `each_record` and `validate_records` (`stury:host`'s `Batch_Pool` is one).
+// Caller-owned threads for `each_record` and `validate_records`; `stury:host`'s `Batch_Pool` implements it.
 Batch_Runner :: core_pkg.Batch_Runner
 
 // A record `validate_records` refuses: its bytes are src[lo:hi], and `err`'s offset is into `src`.
@@ -220,10 +220,10 @@ batch_settle :: proc(states: []Slice_State) {
 batch_claim :: proc(arg: rawptr) {
 	run := (^Batch_Run)(arg)
 	for s, n, k in core_pkg.cursor_next(&run.cursor) {
-		// Past the span's end: lines end at the input's end, the root's entries past its close bracket.
+		// The offset past the span's end: the input's end for lines, one past the close bracket for root entries.
 		none := run.end + int(run.framing == .Root_Entries)
-		// A claim inside one long record starts none, and its search ends with the claim, so only the claim
-		// the record starts in reads it out, looking for its end.
+		// A claim inside a long record starts no record, and its boundary search stops at the claim's end, so
+		// only the claim the record starts in searches for that record's end.
 		lo, hi := batch_boundary(run, s, slice_start(run, s + n)), none
 		if lo < 0 {
 			lo = none
@@ -249,10 +249,10 @@ batch_claim :: proc(arg: rawptr) {
 	}
 }
 
-// Where the records from slice `k` on start, looking before `stop`. For lines, past the first line feed at or
-// after its offset's previous byte. For `0x1E`, at the first run that starts at or after its offset. For the root's
-// entries, past the first comma of the root's at or after it. Slice 0 starts at the span's start. With no boundary
-// found, the result is -1.
+// Returns the offset where the records of slice `k` onward start, searching before `stop`. For lines, it is past
+// the first line feed at or after the byte before the slice's offset. For `0x1E`, it is the first separator run
+// starting at or after the offset. For root entries, it is past the first top-level comma at or after the offset.
+// Slice 0 starts at the span's start. Returns -1 when no boundary is found.
 @(private)
 batch_boundary :: proc(run: ^Batch_Run, k, stop: int) -> int {
 	src := run.src

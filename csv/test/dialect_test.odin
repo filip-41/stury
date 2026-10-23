@@ -122,7 +122,8 @@ test_max_fields :: proc(t: ^testing.T) {
 		{"a,b\n#c,d,e\n", COMMENTS, 2, nil},
 		{strings.repeat("f,", 19, context.temp_allocator), {}, 20, nil},
 		{strings.repeat("f,", 20, context.temp_allocator), {}, 20, csv.Error{0, .Limit_Fields}},
-		// Rows past the first's at the cap, then one past it: a document counts each record's own fields.
+		// Later rows wider than the first, up to the cap and then one past it: a document checks each
+		// record's own field count.
 		{strings.repeat("a,b,c\n", 200, context.temp_allocator), {}, 3, nil},
 		{strings.concatenate({strings.repeat("a,b,c\n", 200, context.temp_allocator), "a,b,c,d\n"}, context.temp_allocator), {ragged = true}, 3, csv.Error{1200, .Limit_Fields}},
 	}
@@ -160,7 +161,7 @@ test_strictness :: proc(t: ^testing.T) {
 	testing.expect_value(t, csv.validate(transmute([]byte)string("a\\\xFF"), csv.TSV, .Structural), csv.Error{1, .Bad_Escape})
 }
 
-// `.Lazy` judges the UTF-8 of the cells a field reads, and of the header, and of no other byte.
+// `.Lazy` judges the UTF-8 of the header and of the cells a field reads, and of no other byte.
 @(test)
 test_unmarshal_lazy :: proc(t: ^testing.T) {
 	Lazy_Case :: struct {
@@ -174,7 +175,7 @@ test_unmarshal_lazy :: proc(t: ^testing.T) {
 	Text :: struct {
 		a: string,
 	}
-	// Rows whose ignored column holds a fault, past several blocks, then a fault in the read one.
+	// Rows whose ignored column holds a UTF-8 fault, over several blocks, then a fault in the column that is read.
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, "a,b\n")
 	for _ in 0 ..< 6 {
@@ -232,7 +233,7 @@ test_unmarshal_ragged :: proc(t: ^testing.T) {
 	testing.expect(t, refused && e.kind == .Missing_Field && e.offset == 5 && path_text(e) == "[0].b")
 }
 
-// Without a header, column k reads field k whatever the first record's width, in a ragged text.
+// Without a header in a ragged text, column k reads field k whatever the first record's width.
 @(test)
 test_unmarshal_ragged_without_header :: proc(t: ^testing.T) {
 	Row :: struct {

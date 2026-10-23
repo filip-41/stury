@@ -157,7 +157,7 @@ Opts :: struct {
 	stream_errors:    bool, // and an error as a [message, path] event
 	from:             Format, // how the input is read
 	to:               Format, // how the outputs are written
-	grow_header:      bool, // --grow-header: --to csv or tsv holds the output and writes a header of every key
+	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
 	strict_limits:    bool, // check: the library's depth, digit and scale caps hold
 	max_depth_given:  bool, // --max-depth was on the command line
 }
@@ -174,11 +174,11 @@ Cli :: struct {
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
 	mono:       bool, // -M
-	// --from, --to and the alias (`--csv`) as the command line gave them, which `parse_args` settles into `Opts`.
+	// --from, --to and the alias (`--csv`) as given on the command line. `parse_args` resolves them into `Opts`.
 	formats:    struct {
 		from, to, alias: Maybe(Format),
 	},
-	// The first option that is only for JSON output (-r, -c, --indent...), and the first that lays JSON out.
+	// The first JSON-output-only option given (-r, -c, --indent...), and the first JSON layout option given.
 	json_flag, layout_flag: string,
 }
 
@@ -192,7 +192,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		Args,
 		Json_Args,
 	}
-	// --max-depth and the formats are read first: an --argjson ahead of them on the line is validated under them too.
+	// --max-depth and the formats are read first, so an earlier --argjson is validated under them too.
 	for i := 0; i < len(args) && args[i] != "--"; i += 1 + option_arity(args[i]) {
 		format_option(&cli, args, i)
 		if args[i] == "--max-depth" && i + 1 < len(args) {
@@ -308,8 +308,8 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	return
 }
 
-// `--from NAME`, `--to NAME` and `--NAME` of a format at `args[i]`, kept in `cli.formats`: a later `--from` or `--to`
-// stands over an earlier one, and two aliases of different formats are refused.
+// Records a `--from NAME`, `--to NAME` or `--NAME` format option at `args[i]` in `cli.formats`. A later `--from`
+// or `--to` overrides an earlier one. Two aliases of different formats are refused.
 @(private = "file")
 format_option :: proc(cli: ^Cli, args: []string, i: int) {
 	a := args[i]
@@ -342,7 +342,7 @@ format_option :: proc(cli: ^Cli, args: []string, i: int) {
 	}
 }
 
-// The format an option gives: the explicit `--from` or `--to`, else the alias, else JSON.
+// Returns the explicit `--from` or `--to` format, else the alias, else JSON.
 @(private = "file")
 settle_format :: proc(explicit, alias: Maybe(Format)) -> Format {
 	if f, ok := explicit.?; ok {
@@ -354,7 +354,7 @@ settle_format :: proc(explicit, alias: Maybe(Format)) -> Format {
 	return .Json
 }
 
-// `flag` is an option only JSON output has (`layout`: one that lays it out), noted for the first.
+// Records `flag` as the first JSON-output-only option, and as the first layout option when `layout` is set.
 @(private = "file")
 note_json_flag :: proc(cli: ^Cli, flag: string, layout := false) {
 	if cli.json_flag == "" {

@@ -21,8 +21,8 @@ Encode_Opts :: struct {
 	sort_keys:        bool,          // `marshal` of a `Document` with each object's keys in byte order, as `stury -S`, ignored for an `any`
 }
 
-// A canonical-writer refusal, core's `Marshal_Error`. `.None` is success. JSON never reports `Bad_Option` or
-// `Unwritable`.
+// The reason the canonical writer refused a value (core's `Marshal_Error`). `.None` is success. JSON never
+// reports `Bad_Option` or `Unwritable`.
 Encode_Error :: core_pkg.Marshal_Error
 
 // Room for `n` more bytes past `len(dst)`: the address of the first, or nil when the allocator refused.

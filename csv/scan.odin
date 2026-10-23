@@ -5,8 +5,8 @@ import "core:simd"
 import "core:unicode/utf8"
 import "../core/bits"
 
-// What a scan mode leaves out of, or adds to, the RFC 4180 scan. Each mode is its own `scan_block`, picked once
-// per call, so the default one (`{}`) holds none of the others' work.
+// What a scan mode removes from, or adds to, the RFC 4180 scan. Each mode compiles to its own `scan_block`,
+// chosen once per call, so the default mode (`{}`) does none of the others' work.
 @(private)
 Scan_Flag :: enum u8 {
 	Unquoted,  // a quote is text (`Quoting.None`)
@@ -72,8 +72,9 @@ Carry :: struct {
 	line:     u64,    // `.Comments`: 1 when it ended in an LF outside quotes, so the next byte starts a line
 	comment:  u64,    // `.Comments`: 1 when it ended inside a comment line
 	esc:      u64,    // `.Escapes`: 1 when it ended in a backslash that opens an escape
-	// The first UTF-8 fault the scan has passed and not reported, or max(int): -1 reports each one as the
-	// block's fault, as `.Strict` does. `unmarshal` under `.Lazy` sets max(int) and judges it per cell.
+	// The first UTF-8 fault the scan passed without reporting, or max(int) for none. -1 reports each UTF-8
+	// fault as the block's fault, as under `.Strict`. `unmarshal` under `.Lazy` starts it at max(int) and
+	// judges UTF-8 per cell.
 	utf8:     int,
 }
 
@@ -81,16 +82,16 @@ Carry :: struct {
 @(private)
 CARRY_START :: Carry{start = 1, line = 1, utf8 = -1}
 
-// The block at `pos`: its separators outside quotes, of which `lfs` end records, and its first fault, or -1.
-// The bytes past `src` read as zeros. The fault may be before `pos`, at a CR, backslash or UTF-8 lead the block
-// before left unanswered, and no separator at or past it is a result.
+// Scans the block at `pos`. `seps` are its separators outside quotes, `lfs` the subset that end records, and
+// `fault` its first fault, or -1. Bytes past `src` read as zeros. The fault may be before `pos`, at a CR,
+// backslash or UTF-8 lead the previous block left open. Separators at or past the fault are not valid.
 //
-// A quote opens a quoted field only at a field's first byte, or right after a closing quote, where the pair is
-// one quote of the field's text. A closing quote is followed by a quote, the delimiter, LF, CR or the input's
-// end. A CR outside quotes is followed by LF. Every byte is RFC 3629 UTF-8.
+// A quote opens a quoted field only at a field's first byte. A quote right after a closing quote makes the
+// pair one quote of the field's text. A closing quote must be followed by a quote, the delimiter, LF, CR or
+// the input's end. A CR outside quotes must be followed by LF. Every byte must be RFC 3629 UTF-8.
 @(private)
 scan_block :: #force_inline proc(src: []byte, pos: int, delim, comment: byte, cy: ^Carry, $M: Scan_Mode) -> (seps, lfs: u64, fault: int, kind: Error_Kind) {
-	// `bits.block_at` by hand: through the helper this loop compiles to different code.
+	// Inlines `bits.block_at`: calling the helper compiles this loop to different code.
 	tail: [64]u8 = ---
 	p := raw_data(src[pos:])
 	valid := ~u64(0)
@@ -111,8 +112,8 @@ scan_block :: #force_inline proc(src: []byte, pos: int, delim, comment: byte, cy
 	} else {
 		seps, lfs, fault, kind = scan_masks(src, pos, v, valid, delim, cy, M)
 	}
-	// The window before the block joins the gate: a sequence the edge cuts is refused by an ASCII block's first
-	// window.
+	// The check includes the previous block's last 16 bytes, so a sequence cut by the block edge is refused
+	// even when this block is all ASCII.
 	when .Skip_Utf8 not_in M {
 		if bits.any_high(cy.prev | v[0] | v[1] | v[2] | v[3]) && bits.any_lane(bits.utf8_block(cy.prev, v)) {
 			if at, k := utf8_block_fault(src, pos, cy); at >= 0 && (fault < 0 || at < fault) {
@@ -137,7 +138,7 @@ scan_masks :: #force_inline proc(src: []byte, pos: int, v: [4]bits.V, valid: u64
 		seps = d | n
 		lfs = n
 		cr := r
-		// A CR in bit 63 is answered by the next block's first byte.
+		// A CR in bit 63 is checked against the next block's first byte.
 		bad := cr & ~(n >> 1) & (1 << 63 - 1)
 	} else {
 		q, d := bits.pack4x2(bits.eq4(v, '"'), bits.eq4(v, delim))
@@ -152,7 +153,7 @@ scan_masks :: #force_inline proc(src: []byte, pos: int, v: [4]bits.V, valid: u64
 		after_close := close << 1 | cy.close
 		bad := open & ~(seps << 1 | cy.start | after_close)
 		bad |= after_close & ~(q | d | n | r | ~valid)
-		// A CR in bit 63 is answered by the next block's first byte.
+		// A CR in bit 63 is checked against the next block's first byte.
 		bad |= cr & ~(n >> 1) & (1 << 63 - 1)
 	}
 
@@ -180,7 +181,7 @@ scan_masks :: #force_inline proc(src: []byte, pos: int, v: [4]bits.V, valid: u64
 	return
 }
 
-// The first backslash in the block at `pos` that opens no escape, or -1. A backslash in bit 63 is answered by
+// The first backslash in the block at `pos` that opens no escape, or -1. A backslash in bit 63 is checked by
 // the next block (`cy.esc`).
 @(cold, private)
 escape_fault :: proc(src: []byte, pos: int, cy: ^Carry) -> int {
@@ -215,9 +216,8 @@ escaped :: #force_inline proc(c: byte) -> bool {
 	return c == 't' || c == 'n' || c == 'r' || c == '0' || c == '\\'
 }
 
-// `scan_block`'s structure a byte at a time, in a block that holds the comment byte or opens inside a comment
-// line: the masks, fault and carry `scan_masks` gives where no line is a comment, but for every comment line
-// a text up to its LF.
+// `scan_block`'s structure one byte at a time, for a block that holds the comment byte or starts inside a
+// comment line. It returns what `scan_masks` would, except that a comment line holds no separator but its LF.
 @(cold, private)
 scan_bytes :: proc(src: []byte, pos: int, delim, comment: byte, cy: ^Carry, $M: Scan_Mode) -> (seps, lfs: u64, fault: int, kind: Error_Kind) {
 	fault, kind = -1, .Bad_Char
@@ -297,8 +297,8 @@ scan_bytes :: proc(src: []byte, pos: int, delim, comment: byte, cy: ^Carry, $M: 
 	return
 }
 
-// The faults only the input's end shows, past its last block: a CR, escape or UTF-8 sequence that block left
-// open, or a quoted field that never closed. -1 when there is none.
+// The faults only the input's end shows: a CR, escape or UTF-8 sequence the last block left open, or a quoted
+// field that never closed. -1 for none.
 @(private)
 scan_end :: proc(src: []byte, cy: ^Carry) -> (fault: int, kind: Error_Kind) {
 	n := len(src)
@@ -319,7 +319,7 @@ scan_end :: proc(src: []byte, cy: ^Carry) -> (fault: int, kind: Error_Kind) {
 	return -1, .None
 }
 
-// The UTF-8 fault the block at `pos` reports: `utf8_fault`'s, or -1 when the scan leaves it for the reader
+// The UTF-8 fault the block at `pos` reports: `utf8_fault`'s, or -1 when the scan defers it to the reader
 // (`cy.utf8`).
 @(cold, private)
 utf8_block_fault :: proc(src: []byte, pos: int, cy: ^Carry) -> (fault: int, kind: Error_Kind) {
@@ -331,9 +331,9 @@ utf8_block_fault :: proc(src: []byte, pos: int, cy: ^Carry) -> (fault: int, kind
 	return
 }
 
-// The first malformed UTF-8 sequence that starts before `end`, from the sequence `pos` falls in: `Bad_Char` at
-// its lead, or `Truncated` at `len(src)` when the input ends inside a sequence every byte of which could still
-// continue it. -1 when there is none.
+// The first malformed UTF-8 sequence that starts before `end`, searching from the start of the sequence that
+// holds `pos`. `Bad_Char` at its lead, or `Truncated` at `len(src)` when the input ends inside a sequence that
+// is valid so far. -1 for none.
 @(cold, private)
 utf8_fault :: proc(src: []byte, pos, end: int) -> (fault: int, kind: Error_Kind) {
 	i := pos
@@ -366,10 +366,10 @@ delimiter_ok :: proc(delim: byte) -> bool {
 	return delim != 0 && delim != '"' && delim != '\r' && delim != '\n' && delim < 0x80
 }
 
-// Where a scan whose block at `pos` opens inside the line from `rec_lo` must next look for a line past `cap`
-// bytes: the block, on the grid of `pos`, that holds the line's first byte past the cap, or `n`, the input's
-// end, when there is no cap or the input ends first. A line that ends sooner leaves the next one to be looked
-// for there.
+// The next block that must check the line cap, for a scan at block `pos` inside the line starting at
+// `rec_lo`: the block on `pos`'s 64-byte grid that holds the line's first byte past `cap`. `n`, the input's
+// end, when there is no cap or the input ends first. If the line ends sooner, that block checks the next
+// line instead.
 @(private)
 line_cap_stop :: proc(pos, rec_lo, cap, n: int) -> int {
 	if cap == 0 || cap >= n - rec_lo {
@@ -378,9 +378,9 @@ line_cap_stop :: proc(pos, rec_lo, cap, n: int) -> int {
 	return pos + (rec_lo + cap - pos) / 64 * 64
 }
 
-// The first byte, in the block at `pos` whose record ends are `lfs`, of a line that holds more than `cap`
-// bytes before its LF, and that line's first byte: (-1, -1) for none. The line open at the block's start
-// began at `rec_lo`, and its byte past the cap is not before the block.
+// In the block at `pos` with record ends `lfs`: the first byte past `cap` of a line longer than `cap`, and
+// that line's first byte, or (-1, -1) for none. The line open at the block's start began at `rec_lo`, and
+// its first byte past the cap is not before the block.
 @(private)
 line_cap_fault :: proc(lfs: u64, pos, rec_lo, cap, n: int) -> (at, line_lo: int) {
 	if cap == 0 {

@@ -114,7 +114,7 @@ test_hook_refusals :: proc(t: ^testing.T) {
 		{"when\n2026-10-23\nnot a date\n", .Wrong_Kind, 16, "[1].when"},
 		{"name,when\nx,2026-13-01\n", .Out_Of_Range, 12, "[0].when"},
 		{"when,until\n2026-10-23,2026\n", .Wrong_Kind, 22, "[0].until"},
-		// A quoted empty cell is present: the hook reads "", an absent one is not read.
+		// A quoted empty cell is present and the hook reads "". An absent cell is not read.
 		{"when\n\"\"\n", .Wrong_Kind, 5, "[0].when"},
 	}
 	for c in cases {

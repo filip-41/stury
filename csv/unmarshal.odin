@@ -9,11 +9,11 @@ import "core:unicode/utf8"
 import core_pkg "../core"
 import "../core/bits"
 
-// What `unmarshal` does with a column the struct does not name: `.Ignore` checks its cells as CSV and does not
-// read them; `.Refuse` refuses it, `.Unknown_Field` at its header cell.
+// What `unmarshal` does with a column the struct does not name. `.Ignore` checks its cells as CSV and does not
+// read them. `.Refuse` refuses it with `.Unknown_Field` at its header cell.
 Unknown_Fields :: core_pkg.Unknown_Fields
 
-// What `unmarshal` does with a header name that two columns spell: core's `Duplicates`.
+// What `unmarshal` does with a header name that two columns share: core's `Duplicates`.
 //
 //	.Default  `.Refuse`
 //	.Refuse   `.Duplicate_Key` at the second column's header cell
@@ -27,11 +27,11 @@ Duplicates :: core_pkg.Duplicates
 // refuses a repeated header name, ignores unknown columns and copies strings.
 Unmarshal_Opts :: struct {
 	dialect:        Dialect,
-	// `.Lazy` judges the UTF-8 of every cell a field reads, and of the header, and not of the others.
+	// `.Lazy` judges the UTF-8 of the header and of every cell a field reads, and of no other cell.
 	strictness:     Strictness,
 	limits:         Limits,
-	// Which column a repeated header name fills. A column the field does not take is read as unknown
-	// (`unknown_fields`: `.Refuse` refuses only a name the struct lacks).
+	// Which column a repeated header name fills. A column the field does not take is read as unknown, but
+	// `unknown_fields = .Refuse` refuses only a name the struct lacks.
 	duplicates:     Duplicates,
 	// The first record is data: column k is the struct's field k, and columns past its last field are unknown.
 	no_header:      bool,
@@ -41,33 +41,34 @@ Unmarshal_Opts :: struct {
 	borrow_strings: bool,
 }
 
-// What `unmarshal` refused: its kinds are JSON's. A cell's fault is at the cell, its path `[row].field`, the
-// row counted from the first record after the header. A header's fault has the field alone.
+// What `unmarshal` refused. The kinds are shared with JSON. A cell's fault is at the cell, with path
+// `[row].field`, the row counted from the first record after the header. A header's fault has the field alone
+// as its path.
 Unmarshal_Error_Kind :: core_pkg.Unmarshal_Error_Kind
 Unmarshal_Error :: core_pkg.Unmarshal_Error
 
-// Read the records of `src` into `ptr^`, a slice or dynamic array of a struct: one element per record, from
-// zero, replacing what `ptr^` held. The header names each column's field (`csv:"name"`, or the field's own
-// name).
+// Read the records of `src` into `ptr^`, a slice or dynamic array of a struct: one element per record from
+// index zero, replacing what `ptr^` held. The header names each column's field (`csv:"name"`, or the field's
+// own name).
 //
-// What a cell is:
+// Cells:
 //
-//	- An empty cell, not quoted, is absent: its field keeps its zero, or is `.Missing_Field` when tagged
-//	  `csv:",required"`, as is a required field no column names (at the header). A quoted `""` is a present
-//	  empty text. Under `Quoting.None` every empty cell is absent. In a `ragged` dialect a record's cells past
-//	  the header's are unknown columns, and the cells it lacks are absent.
-//	- A field reads the cell's text (`field_text`), a quoted cell's without its quotes and with each `""` as
-//	  one quote, an escaped cell's with each escape as the byte it spells:
+//	- An unquoted empty cell is absent: its field keeps its zero value, or is `.Missing_Field` when tagged
+//	  `csv:",required"`. A required field no column names is `.Missing_Field` at the header. A quoted `""` is
+//	  a present empty text. Under `Quoting.None` every empty cell is absent. In a `ragged` dialect a record's
+//	  cells past the header's are unknown columns, and the cells it lacks are absent.
+//	- A field reads the cell's text (`field_text`): a quoted cell without its quotes and with each `""` as one
+//	  quote, an escaped cell with each escape as the byte it spells. It accepts
 //	  `true` or `false` into a bool, `[+-]?digits` into an integer (`.Out_Of_Range` when it does not fit),
 //	  a decimal (`1.5`, `.5` or `1.`, with an optional exponent) into an f32 or f64, an enum's member name (or, under
 //	  `Plan_Opts.enums = .Int`, its integer), one code point into a rune, any text into a string. Other text is
 //	  `.Wrong_Kind`.
 //	- A `Maybe` of one of those is set when its cell is present.
 //
-// A refusal before the read starts (`.Bad_Option`, `.Plan_Mismatch`, `.Unsupported` for a field of any other
-// type, `.Out_Of_Memory` lowering the plan) leaves `ptr^` untouched. A later one leaves the records read
-// before it, the one refused last. Everything is allocated from `allocator` and nothing is freed: read into an
-// arena freed whole. With `plan` nil the plan is this thread's cached one for `T`.
+// A refusal before reading starts (`.Bad_Option`, `.Plan_Mismatch`, `.Unsupported` for a field of any other
+// type, `.Out_Of_Memory` lowering the plan) leaves `ptr^` untouched. A later refusal leaves the records read
+// before it, the refused one last. Everything is allocated from `allocator` and nothing is freed, so read into
+// an arena and free it whole. With `plan` nil the plan is this thread's cached one for `T`.
 @(require_results)
 unmarshal :: proc(
 	src: []byte,
@@ -82,10 +83,9 @@ unmarshal :: proc(
 	return read_records(src, ptr, T, opts, plan, allocator, false)
 }
 
-// Whether `src` reads as a `T` under `opts`: the same judgements and results as `unmarshal`, but that no hook
-// runs. It keeps nothing: one record's cells are read into one scratch element, so it allocates the
-// element, the record's fields and the column table, whatever the input's size, and the plan with
-// `plan` nil.
+// Whether `src` reads as a `T` under `opts`, with the same checks and results as `unmarshal` except that no
+// hook runs. It keeps nothing: each record is read into one scratch element. Whatever the input's size, it
+// allocates only that element, one record's fields, the column table, and the plan when `plan` is nil.
 @(require_results)
 unmarshal_check :: proc(
 	src: []byte,
@@ -108,7 +108,8 @@ read_records :: proc(
 	allocator: runtime.Allocator,
 	$CHECK: bool,
 ) -> (err: Maybe(Unmarshal_Error)) {
-	// A lazy read has the scan find the UTF-8 faults and refuses only those in the cells it reads (`judge_utf8`).
+	// Under `.Lazy` the scan finds the UTF-8 faults, and only those in cells a field reads are refused
+	// (`judge_utf8`).
 	s, dialect_ok := scan_setup(opts.dialect, opts.limits, .Structural if opts.strictness == .Structural else .Strict)
 	if !dialect_ok {
 		return Unmarshal_Error{kind = .Bad_Option}
@@ -149,7 +150,7 @@ read_records :: proc(
 		read_header(&r, header, refuse, opts.duplicates) or_return
 	}
 	when CHECK {
-		// One element for every record to be read over.
+		// One element, reused for every record.
 		scratch_bytes, aerr := runtime.mem_alloc(int(r.row.size), int(r.shape.ops[r.shape.root].align), context.allocator)
 		if aerr != nil {
 			return Unmarshal_Error{kind = .Out_Of_Memory}
@@ -221,7 +222,7 @@ Reader :: struct {
 	check:     bool,
 }
 
-// The plan's read shape, held to a list of a struct whose fields are cells.
+// The plan's read shape, which must be a list of a struct whose fields are cells.
 @(private)
 row_reader :: proc(r: ^Reader, p: ^Type_Plan) -> Maybe(Unmarshal_Error) {
 	shape, serr := core_pkg.read_shape_of(&p.base)
@@ -331,8 +332,8 @@ make_columns :: proc(n: int, at: u64) -> (columns: []u32, err: Maybe(Unmarshal_E
 	return
 }
 
-// Each required field and its column: one no column reads is `.Missing_Field` at the header. A field several
-// columns read (`.All`) is present when any of them is, so its later columns go to `req_more`.
+// Each required field and its column. A required field no column reads is `.Missing_Field` at the header. A
+// field several columns read (`.All`) is present when any of them is, so its later columns go to `req_more`.
 @(private)
 required_columns :: proc(r: ^Reader, at: u64) -> Maybe(Unmarshal_Error) {
 	fields := r.shape.fields[r.row.elem:][:r.row.count]
@@ -364,7 +365,7 @@ required_columns :: proc(r: ^Reader, at: u64) -> Maybe(Unmarshal_Error) {
 	return nil
 }
 
-// How `read_row` reads a column's cells without `read_cell`: the field types that most cells are.
+// The field types most cells have, which `read_row` reads without `read_cell`.
 @(private)
 Fast :: enum u8 {
 	None,
@@ -438,8 +439,8 @@ small_int :: #force_inline proc(text: []byte) -> (v: i64, ok: bool) {
 	return -i64(m) if neg else i64(m), true
 }
 
-// `-?digits(.digits)?` of at most 15 digits, which is exact in an f64 as the digits over a power of ten
-// (Clinger's fast path), so the quotient is the correctly rounded value.
+// `-?digits(.digits)?` with at most 15 digits. Those digits and the power of ten are exact in an f64
+// (Clinger's fast path), so their quotient is correctly rounded.
 @(private)
 short_decimal :: #force_inline proc(text: []byte) -> (v: f64, ok: bool) {
 	digits := text
@@ -477,8 +478,8 @@ short_decimal :: #force_inline proc(text: []byte) -> (v: f64, ok: bool) {
 	return -v if neg else v, true
 }
 
-// One record's cells, no more than the columns, into the struct at `dest`, or why the cell at `at` of field
-// `name` was refused. A ragged record's missing cells are absent, at its end.
+// Reads one record's cells, at most one per column, into the struct at `dest`, or returns why the cell at `at`
+// of field `name` was refused. A ragged record's missing cells, at its end, are absent.
 @(private)
 read_row :: proc(r: ^Reader, cells: []Field, dest: rawptr) -> (kind: Unmarshal_Error_Kind, at: u64, name: string, refused: bool) {
 	for cell, c in cells {
@@ -537,7 +538,7 @@ read_by_later_column :: proc(r: ^Reader, cells: []Field, field: u32) -> bool {
 	return false
 }
 
-// A lazy or ragged record's cells: its UTF-8 judged when lazy, cut to the columns when ragged.
+// A lazy or ragged record's cells: UTF-8 is judged when lazy, and the cells are cut to the columns when ragged.
 @(cold, private)
 record_cells :: proc(r: ^Reader, it: ^Records, rec: Record, row: int, lazy, refuse: bool) -> (cells: []Field, err: Maybe(Unmarshal_Error)) {
 	cells = rec.fields
@@ -553,8 +554,8 @@ record_cells :: proc(r: ^Reader, it: ^Records, rec: Record, row: int, lazy, refu
 	return cells, nil
 }
 
-// Under `.Lazy`: the UTF-8 fault the scan passed is refused when it is in `rec`, in a cell a field reads (or
-// any cell of the header, `row` -1). The scan is then pointed at its next fault past `rec`.
+// Under `.Lazy`: refuses the UTF-8 fault the scan passed when it lies in `rec`, in a cell a field reads (or in
+// any header cell, `row` -1). The scan is then pointed at its next fault past `rec`.
 @(cold, private)
 judge_utf8 :: proc(r: ^Reader, it: ^Records, rec: Record, row: int) -> Maybe(Unmarshal_Error) {
 	for cell, c in rec.fields {
@@ -569,7 +570,7 @@ judge_utf8 :: proc(r: ^Reader, it: ^Records, rec: Record, row: int) -> Maybe(Unm
 			return err
 		}
 	}
-	// The scan kept only the first fault of the bytes it read, which run to its block's end.
+	// The scan kept only the first fault in the bytes it read, which run to the end of its block.
 	from := int(rec.fields[len(rec.fields) - 1].hi) + 1
 	it.carry.utf8 = max(int)
 	if from < len(r.src) {
@@ -612,7 +613,7 @@ cell_error :: proc(kind: Unmarshal_Error_Kind, at: u64, row: int, name: Maybe(co
 	return err
 }
 
-// A cell's text as written, a quoted one's without its quotes: what a path names it by.
+// A cell's text as written, without a quoted cell's quotes: the name a path uses for it.
 @(private)
 authored :: proc(r: ^Reader, cell: Field) -> string {
 	text := r.src[cell.lo:cell.hi]
@@ -622,8 +623,8 @@ authored :: proc(r: ^Reader, cell: Field) -> string {
 	return string(text)
 }
 
-// A present cell into the field op `op` at `dest`. The common kinds have their own small procs, so a cell
-// pays for the frame of the one kind it is.
+// Reads a present cell into the field op `op` at `dest`. The common kinds have their own small procs, so a
+// cell pays only for its own kind's frame.
 @(private)
 read_cell :: proc(r: ^Reader, op: ^core_pkg.Shape_Op, cell: Field, dest: rawptr) -> core_pkg.Shape_Fault {
 	#partial switch op.kind {
@@ -772,7 +773,7 @@ read_rare_cell :: proc(r: ^Reader, op: ^core_pkg.Shape_Op, cell: Field, dest: ra
 	return .None
 }
 
-// A quote in the text of a quoted cell is a `""`: only a string, a cstring or the rune `"` holds one.
+// A quote in a quoted cell's text comes from a `""`. Only a string, a cstring or the rune `"` can hold one.
 @(private)
 has_pair :: #force_inline proc(cell: Field, text: string) -> bool {
 	return cell.hi - cell.lo != u64(len(text)) && holds(text, '"')
@@ -801,7 +802,7 @@ holds :: #force_inline proc(text: string, c: byte) -> bool {
 		}
 		return false
 	}
-	// 16-byte windows, the last one overlapping its neighbour.
+	// 16-byte windows, the last one overlapping the one before.
 	for i := 0; i + 16 < n; i += 16 {
 		if bits.any_eq(bits.load(p[i:]), c) {
 			return true
@@ -823,7 +824,7 @@ cell_string :: proc(r: ^Reader, cell: Field, text: string, quote, borrow: bool) 
 	return strings.clone(text, r.allocator)
 }
 
-// `[+-]?digits` as a magnitude and a sign. `over`: it passed 128 bits. A text that is not one is `.Wrong_Kind`.
+// `[+-]?digits` as a magnitude and a sign. `over` is set past 128 bits. Any other text is `.Wrong_Kind`.
 @(private)
 read_int :: proc(text: string) -> (mag: u128, over, neg: bool, fault: core_pkg.Shape_Fault) {
 	digits := text
@@ -835,7 +836,7 @@ read_int :: proc(text: string) -> (mag: u128, over, neg: bool, fault: core_pkg.S
 		return 0, false, false, .Wrong_Kind
 	}
 	if len(digits) <= 19 {
-		// 19 digits are below 10^19, which a u64 holds: no overflow to track.
+		// 19 digits stay below 10^19, which fits a u64, so no overflow check is needed.
 		small: u64
 		for c in transmute([]byte)digits {
 			d := c - '0'
@@ -853,8 +854,8 @@ read_int :: proc(text: string) -> (mag: u128, over, neg: bool, fault: core_pkg.S
 	return mag, over, neg, .None
 }
 
-// `[+-]?(digits(.digits?)?|.digits)([eE][+-]?digits)?`: what a float cell may be, `.5` and `1.` as other
-// writers spell them.
+// `[+-]?(digits(.digits?)?|.digits)([eE][+-]?digits)?`: what a float cell may be. `.5` and `1.` are accepted
+// because other writers spell floats that way.
 @(private)
 is_decimal :: proc(text: string) -> bool {
 	i := 0

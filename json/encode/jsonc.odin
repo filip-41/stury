@@ -1,9 +1,9 @@
 package encode
 
-// A JSONC document's comments written where they are attached, by one printer the library's writers and the
-// command line share. The printer places comments only: its caller walks the values (rows, or the CLI's
-// values), writes keys and scalars, and orders keys. It hands each entry's own comments (`walk.Fact`s, sorted by
-// place) to the procedures below at the points of its walk they name.
+// Writes a JSONC document's comments where they are attached. The library's writers and the command line share
+// this printer. It places comments only. Its caller walks the values (rows, or the CLI's values), writes keys
+// and scalars, and orders keys. The caller passes each entry's own comments (`walk.Fact`s, sorted by place) to
+// the procedures below at the points of its walk that they name.
 // A comment sits where it was attached: a `.Lead` on the line before its entry, an `.Inline` between the key
 // and the value, a `.Trail` after its entry and its comma, a `.Foot` on the line before its container's
 // close. Compact output ends each line comment with a newline, the one place it keeps a line break, and

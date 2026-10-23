@@ -82,7 +82,7 @@ Plan_Hook :: struct {
 	read: Shape_Hook,
 }
 
-// Why a plan could not compile a type, numbered as `Marshal_Error` numbers its namesakes.
+// Why a plan could not compile a type. Each member has the value of its `Marshal_Error` namesake.
 Plan_Error :: enum u8 {
 	None          = 0,
 	Bad_Name      = 2,  // the format cannot spell a field's, member's or arm's name
@@ -109,8 +109,8 @@ Plan_Format :: struct {
 	// Appends `name` to `keys` as the format spells it in `role`.
 	spell:   proc(keys: ^[dynamic]u8, name: string, role: Key_Role) -> Plan_Error,
 	types:   []Format_Type,
-	// Annotates the read shape for the format's walk once every op is lowered, and sets back to `.Unsupported`
-	// an op the walk cannot read, before the shape reachable from the root is checked. Nil for none.
+	// Annotates the read shape for the format's walk after every op is lowered, and resets to `.Unsupported`
+	// any op the walk cannot read. Runs before the shape reachable from the root is checked. Nil for none.
 	lowered: proc(r: ^Read_Shape) -> runtime.Allocator_Error,
 }
 
@@ -158,29 +158,29 @@ type_plan_init :: proc(T: typeid, opts: Plan_Opts, format: Plan_Format, allocato
 	return p
 }
 
-// Read `text`, one value as authored and checked in full, into the value at `dest`, of the hook's type,
-// allocating from `allocator`. `dest` holds what the target held. `text` is the source's bytes, or a copy the
-// read frees after the call: copy what must outlive it. A kind refuses the value with that kind, at the value;
-// nil reads it.
+// Reads `text`, the fully validated source text of one value, into `dest`, a value of the hook's type,
+// allocating from `allocator`. `dest` holds the target's previous value. `text` is the source bytes, or a copy
+// freed after the call, so copy anything that must outlive it. Return nil on success, or an error kind, which is
+// reported at the value.
 Unmarshal_Hook :: #type proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) -> Maybe(Unmarshal_Error_Kind)
 
-// A type the caller writes and reads: wherever a value of exactly `type` is met, its procs run instead of the
-// plan. `W` is the format's writing proc. A nil proc leaves that direction `.Unsupported`.
+// A caller-defined reader and writer for one type. For every value of exactly `type`, these procs run instead
+// of the plan. `W` is the format's writing proc type. A nil proc makes that direction `.Unsupported`.
 Type_Hook :: struct($W: typeid) {
 	type:  typeid,
 	write: W,
 	read:  Unmarshal_Hook,
 }
 
-// A plan whose hooks also write, `W` being the format's writing proc (`hooked_plan_init`).
+// A plan whose hooks also write; `W` is the format's writing proc type (`hooked_plan_init`).
 Hooked_Plan :: struct($W: typeid) {
 	using base: Type_Plan,
-	// The writing half of the hooks, at the indices of `opts.hooks`.
+	// The hooks' write procs, at the same indices as `opts.hooks`.
 	writes: []W,
 }
 
-// `type_plan_init` with `hooks` in place of `opts.hooks`: their reading halves are the plan's `opts.hooks`
-// and their writing halves its `writes`. `hooked_plan_destroy` frees it.
+// Calls `type_plan_init` with `hooks` in place of `opts.hooks`. The hooks' read procs become the plan's
+// `opts.hooks` and their write procs its `writes`. `hooked_plan_destroy` frees the plan.
 @(require_results)
 hooked_plan_init :: proc(T: typeid, opts: Plan_Opts, hooks: []Type_Hook($W), format: Plan_Format, allocator: runtime.Allocator) -> (p: Hooked_Plan(W)) {
 	reads, rerr := make([]Plan_Hook, len(hooks), allocator)
@@ -190,7 +190,7 @@ hooked_plan_init :: proc(T: typeid, opts: Plan_Opts, hooks: []Type_Hook($W), for
 	mapping := opts
 	if !lost {
 		for h, k in hooks {
-			// `Shape_Fault` numbers the kinds of `Unmarshal_Error_Kind` alike.
+			// `Shape_Fault` and `Unmarshal_Error_Kind` share member values, so the cast is exact.
 			reads[k] = {h.type, cast(Shape_Hook)h.read}
 			p.writes[k] = h.write
 		}

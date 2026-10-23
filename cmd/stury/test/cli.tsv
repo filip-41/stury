@@ -2247,9 +2247,9 @@ differential	["-c", "[.,.]|group_by({\"b\":\"x\"})"]	"0\nfalse"	{}	0	"[[0,0]]\n[
 differential	["-c", "[.,.]|unique_by({\"b\":\"x\"})"]	"0\nfalse"	{}	0	"[0]\n[false]\n"	""
 differential	["-c", "[.,.]|min_by({\"b\":\"x\"})"]	"0\nfalse\n1"	{}	0	"0\nfalse\n1\n"	""
 differential	["-c", "--stream", "reduce .[0] as $z (unique_by(reduce . as $z (.; {\"b\":\"x y\"})); @base64)"]	"0\nfalse\n"	{}	0	"\"W1tdXQ==\"\n\"W1tdXQ==\"\n"	""
-# --csv and --tsv: the first record of each file names the fields, and each later record is an input object of
-# strings (never numbers). jq has neither option, so its columns are null. A fault is told FILE:LINE:COLUMN, as
-# a fault in a later JSON file is.
+# --csv and --tsv: each file's first record is the header, and each later record is an input object of strings
+# (never numbers). jq has neither option, so its columns are null. A fault is reported as FILE:LINE:COLUMN, like a
+# fault in a later JSON file.
 csv	["--from", "csv", "-c", "."]	"a,b\n1,2\n3,4\n"	{}	null	null	null	0	"{\"a\":\"1\",\"b\":\"2\"}\n{\"a\":\"3\",\"b\":\"4\"}\n"	""
 csv	["--from", "csv", "-c", "."]	"a,b\r\n1,2\r\n3,4\r\n"	{}	null	null	null	0	"{\"a\":\"1\",\"b\":\"2\"}\n{\"a\":\"3\",\"b\":\"4\"}\n"	""
 csv	["--from", "csv", "-c", "."]	"a,b\n1,2\n3,4"	{}	null	null	null	0	"{\"a\":\"1\",\"b\":\"2\"}\n{\"a\":\"3\",\"b\":\"4\"}\n"	""
@@ -2313,8 +2313,8 @@ csv	["--from", "tsv", "-c", "."]	"﻿a\tb\n1\t2\n"	{}	null	null	null	0	"{\"a\":\
 csv	["--from", "tsv", "-c", "[.a]|@tsv"]	"a\n1\\t2\n"	{}	null	null	null	0	"\"1\\\\t2\"\n"	""
 csv	["--from", "tsv", "-r", ".a"]	"a\n1\\t2\n"	{}	null	null	null	0	"1\t2\n"	""
 csv	["--from", "csv", "-c", "."]	"a,b\n1\t2,3\n"	{}	null	null	null	0	"{\"a\":\"1\\t2\",\"b\":\"3\"}\n"	""
-# A filter of columns (`.a`, `.a, .b`, `[.a, .b]` under -c) is printed from the cells; each is beside the same filter on the
-# interpreter (`| .`), and both print the same bytes.
+# A column-only filter (`.a`, `.a, .b`, `[.a, .b]` under -c) is answered from the cells. Each case is followed by
+# the same filter on the interpreter (`| .`), with the same output bytes.
 csv	["--from", "csv", ".a"]	"a,b\n1,\"x,y\"\n\"he said \"\"hi\"\"\",2\n"	{}	null	null	null	0	"\"1\"\n\"he said \\\"hi\\\"\"\n"	""
 csv	["--from", "csv", ".a | ."]	"a,b\n1,\"x,y\"\n\"he said \"\"hi\"\"\",2\n"	{}	null	null	null	0	"\"1\"\n\"he said \\\"hi\\\"\"\n"	""
 csv	["--from", "csv", ".b"]	"a,b\n1,\"x,y\"\n\"he said \"\"hi\"\"\",2\n"	{}	null	null	null	0	"\"x,y\"\n\"2\"\n"	""
@@ -2390,8 +2390,8 @@ csv	["--csv", "--seq", "."]	""	{}	null	null	null	2	""	"stury: --from csv cannot 
 csv	["--csv", "--ndjson", "."]	""	{}	null	null	null	2	""	"stury: --csv and --ndjson each choose the format\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
 csv	["--tsv", "--jsonc", "."]	""	{}	null	null	null	2	""	"stury: --tsv and --jsonc each choose the format\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
 csv	["--csv", "--stream", "."]	""	{}	null	null	null	2	""	"stury: --from csv cannot be combined with --stream\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
-# An object of columns (`{a, b: .c}`), `.` and `select(F)` of columns are answered from the cells too, and their pieces on
-# the pool; each is beside the same filter on the interpreter (`| .`), and both print the same bytes.
+# An object of columns (`{a, b: .c}`), `.` and `select(F)` over columns are also answered from the cells, and in
+# pieces on the pool. Each case is followed by the same filter on the interpreter (`| .`), with the same output bytes.
 csv	["--csv", "{id,name}"]	"id,name,note\n1,Ada,\"x,y\"\n2,,\"he said \"\"hi\"\"\"\n3,Cy,\n"	{}	null	null	null	0	"id,name\n1,Ada\n2,\n3,Cy\n"	""
 csv	["--csv", "{id,name} | ."]	"id,name,note\n1,Ada,\"x,y\"\n2,,\"he said \"\"hi\"\"\"\n3,Cy,\n"	{}	null	null	null	0	"id,name\n1,Ada\n2,\n3,Cy\n"	""
 csv	["--csv", "{id, who: .name, nope}"]	"id,name,note\n1,Ada,\"x,y\"\n2,,\"he said \"\"hi\"\"\"\n3,Cy,\n"	{}	null	null	null	0	"id,who,nope\n1,Ada,\n2,,\n3,Cy,\n"	""
@@ -2422,8 +2422,8 @@ csv	["--csv", "select(.nope)"]	"id,name,note\n1,Ada,\"x,y\"\n2,,\"he said \"\"hi
 csv	["--csv", "select(.nope) | ."]	"id,name,note\n1,Ada,\"x,y\"\n2,,\"he said \"\"hi\"\"\"\n3,Cy,\n"	{}	null	null	null	0	""	""
 csv	["--csv", "select(.v | tonumber > 0)"]	"id,v\n1,2\n2,x\n3,4\n"	{}	null	null	null	0	"id,v\n1,2\n3,4\n"	"stury: error (at <stdin>:3): string (\"x\") cannot be parsed as a number\n"
 csv	["--csv", "select(.v | tonumber > 0) | ."]	"id,v\n1,2\n2,x\n3,4\n"	{}	null	null	null	0	"id,v\n1,2\n3,4\n"	"stury: error (at <stdin>:3): string (\"x\") cannot be parsed as a number\n"
-# --from and --to name the formats, and --jsonc, --ndjson, --csv and --tsv name both halves; an explicit --from or
-# --to overrides the alias's half whichever comes first. --to ndjson is -c, and only --to jsonc prints comments.
+# --from and --to name the formats. --jsonc, --ndjson, --csv and --tsv set both. An explicit --from or --to
+# overrides the alias in either order. --to ndjson implies -c. Only --to jsonc prints comments.
 csv	["--from", "jsonc", "-c", "."]	"{\"a\": /* c */ 1}\n"	{}	null	null	null	0	"{\"a\":1}\n"	""
 csv	["--jsonc", "-c", "."]	"{\"a\": /* c */ 1}\n"	{}	null	null	null	0	"{\"a\":/* c */1}\n"	""
 csv	["--from", "jsonc", "--to", "jsonc", "-c", "."]	"{\"a\": /* c */ 1}\n"	{}	null	null	null	0	"{\"a\":/* c */1}\n"	""
@@ -2452,7 +2452,7 @@ csv	["--from", "jsonc", "--stream", "."]	""	{}	null	null	null	2	""	"stury: --fro
 csv	["--grow-header", "."]	""	{}	null	null	null	2	""	"stury: --grow-header applies to --to csv or tsv\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
 csv	["--to", "json", "--grow-header", "."]	""	{}	null	null	null	2	""	"stury: --grow-header applies to --to csv or tsv\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
 csv	["--to", "csv", "check"]	""	{}	null	null	null	2	""	"stury: check writes nothing: --to csv has no use there\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
-# An unquoted empty cell is null, a quoted "" the empty string; in TSV every empty cell is null.
+# An unquoted empty cell is null and a quoted "" is the empty string. In TSV every empty cell is null.
 csv	["--from", "csv", "-r", ".a"]	"a,b,c\n,\"\",x\n"	{}	null	null	null	0	"null\n"	""
 csv	["--from", "csv", "-r", ".a | ."]	"a,b,c\n,\"\",x\n"	{}	null	null	null	0	"null\n"	""
 csv	["--from", "csv", "-c", "[.a, .b, .c]"]	"a,b,c\n,\"\",x\n"	{}	null	null	null	0	"[null,\"\",\"x\"]\n"	""
@@ -2461,9 +2461,9 @@ csv	["--from", "csv", "-c", ".a == null, (.b | length)"]	"a,b,c\n,\"\",x\n"	{}	n
 csv	["--from", "csv", "-c", "[.[] | type]"]	"a,b,c\n,\"\",x\n"	{}	null	null	null	0	"[\"null\",\"string\",\"string\"]\n"	""
 csv	["--from", "tsv", "-c", "[.a, .b]"]	"a\tb\n\t\"\"\n"	{}	null	null	null	0	"[null,\"\\\"\\\"\"]\n"	""
 csv	["--from", "csv", "-c", "."]	"a,b\n,\n"	{}	null	null	null	0	"{\"a\":null,\"b\":null}\n"	""
-# --to csv and --to tsv: each output is one record. Objects are rows under the first object's keys as the header
-# (sorted under -S), a missing key is an empty cell and an extra key ends the run, unless --grow-header holds the
-# rows and writes a header of all the keys in the order first seen. Arrays and scalars are rows with no header.
+# --to csv and --to tsv: each output is one record. Objects are rows under a header of the first object's keys
+# (sorted under -S). A missing key is an empty cell. An extra key ends the run, unless --grow-header is set: then
+# all rows are held and the header lists every key in first-seen order. Arrays and scalars are rows without a header.
 csv	["--to", "csv", "."]	"{\"a\":1,\"b\":\"x,y\"}\n{\"a\":2,\"b\":null}\n"	{}	null	null	null	0	"a,b\n1,\"x,y\"\n2,\n"	""
 csv	["--to", "tsv", "."]	"{\"a\":1,\"b\":\"x,y\"}\n{\"a\":2,\"b\":null}\n"	{}	null	null	null	0	"a\tb\n1\tx,y\n2\t\n"	""
 csv	["--to", "csv", "-S", "."]	"{\"b\":1,\"a\":2}\n{\"a\":3,\"b\":4}\n"	{}	null	null	null	0	"a,b\n2,1\n3,4\n"	""
@@ -2522,8 +2522,8 @@ csv	["--to", "csv", "--grow-header", ".", "x.json", "missing.json", "y.json"]	""
 csv	["--to", "csv", "--stream", "-c", "."]	"[1]"	{}	null	null	null	2	""	"stury: -c cannot be combined with --to csv\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
 csv	["--to", "csv", "--stream", "."]	"{\"a\":[1]}"	{}	null	null	null	5	""	"stury: error: output 1 has an array at cell 1: a cell is a text, a number, true, false or null; tojson makes text of an array\n"
 csv	["--to", "csv", "--stream", "select(length == 2) | .[0] |= tojson"]	"{\"a\":[1]}"	{}	null	null	null	0	"\"[\"\"a\"\",0]\",1\n"	""
-# Round trips: what --csv reads it writes back, modulo normalization (an unquoted empty cell is null and is written
-# as one; a quoted "" is the empty string and is written quoted). TSV cannot tell the two apart.
+# Round trips: --csv writes back what it reads, after normalization. An unquoted empty cell is null and is written
+# unquoted; a quoted "" is the empty string and is written quoted. TSV does not distinguish the two.
 csv	["--csv", "."]	"a,b\n1,\n\"\",x\n"	{}	null	null	null	0	"a,b\n1,\n\"\",x\n"	""
 csv	["--csv", "."]	"a,b,c\n1,\"x,y\",3\n4,\"he said \"\"hi\"\"\",\n7,\"line1\nline2\r\nline3\",9\n"	{}	null	null	null	0	"a,b,c\n1,\"x,y\",3\n4,\"he said \"\"hi\"\"\",\n7,\"line1\nline2\r\nline3\",9\n"	""
 csv	["--csv", "."]	"a,b\r\n1,2\r\n3,4\r\n"	{}	null	null	null	0	"a,b\n1,2\n3,4\n"	""
@@ -2563,7 +2563,7 @@ csv	["--csv", "--from", "json", "."]	"{\"a\":1}\n"	{}	null	null	null	0	"a\n1\n"	
 csv	["--csv", "--to", "json", "-c", "."]	"a\n1\n"	{}	null	null	null	0	"{\"a\":\"1\"}\n"	""
 csv	["--to", "json", "--csv", "-c", "."]	"a\n1\n"	{}	null	null	null	0	"{\"a\":\"1\"}\n"	""
 csv	["--tsv", "--to", "csv", "."]	"a\tb\n1\t2\n"	{}	null	null	null	0	"a,b\n1,2\n"	""
-# The options that lay a JSON text out have no use in a table.
+# Options for JSON text output are refused with --to csv and --to tsv, and layout options with --to ndjson.
 csv	["--to", "csv", "-r", "."]	""	{}	null	null	null	2	""	"stury: -r cannot be combined with --to csv\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
 csv	["--to", "csv", "-j", "."]	""	{}	null	null	null	2	""	"stury: -j cannot be combined with --to csv\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
 csv	["--to", "tsv", "-a", "."]	""	{}	null	null	null	2	""	"stury: -a cannot be combined with --to tsv\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
@@ -2580,7 +2580,7 @@ csv	["--to", "csv", "--from", "csv", "-r", "."]	""	{}	null	null	null	2	""	"stury
 csv	["-r", "--to", "csv", "."]	""	{}	null	null	null	2	""	"stury: -r cannot be combined with --to csv\nUse stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n"
 csv	["--to", "csv", "-M", "."]	"{\"a\":1}\n"	{}	null	null	null	0	"a\n1\n"	""
 csv	["--to", "csv", "--unbuffered", "."]	"{\"a\":1}\n"	{}	null	null	null	0	"a\n1\n"	""
-# stury check takes --from and the aliases: csv and tsv go through csv.validate, and a fault is told as a filter run tells it.
+# stury check accepts --from and the aliases. CSV and TSV are checked by csv.validate, and a fault is reported as a filter run reports it.
 csv	["check", "--from", "csv"]	"a,b\n1,2\n3,4\n"	{}	null	null	null	0	""	""
 csv	["check", "--csv"]	"a,b\r\n1,\r\n\"\",x\r\n"	{}	null	null	null	0	""	""
 csv	["check", "--from", "tsv"]	"a\tb\n1\t\n\\n\t2\n"	{}	null	null	null	0	""	""

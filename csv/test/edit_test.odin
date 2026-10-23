@@ -14,13 +14,12 @@ test_set_values :: proc(t: ^testing.T) {
 	expect_set(t, src, ".[0].b", "", "a,b,c\n1,\"\",3\n4,5,6\n")
 	expect_set(t, src, ".[].c", "z", "a,b,c\n1,2,z\n4,5,z\n")
 	expect_set(t, src, ".[].a", Maybe(int)(7), "a,b,c\n7,2,3\n7,5,6\n")
-	// A comma in a number's spelling in a `,` dialect cannot occur; a delimiter that is a digit's neighbour can.
 	crlf := transmute([]byte)string("a,b\r\n1,2\r\n")
 	expect_set(t, crlf, ".[0].b", "q\r\nr", "a,b\r\n1,\"q\r\nr\"\r\n")
 	// A text with no final break keeps none.
 	bare := transmute([]byte)string("a,b\n1,2")
 	expect_set(t, bare, ".[0].b", 3, "a,b\n1,3")
-	// The header is the only one whose cells a path cannot name by row.
+	// A path cannot name the header's cells by row.
 	_, err := csv.set(src, ".[].a", 1, header = false)
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unsupported_Path})
 }
@@ -36,7 +35,7 @@ test_set_dialects :: proc(t: ^testing.T) {
 	commented := transmute([]byte)string("# note\na,b\n1,2\n")
 	expect_set_in(t, csv.Dialect{comment = '#'}, commented, ".[0].a", "#x", "# note\na,b\n\"#x\",2\n")
 	expect_set_in(t, csv.Dialect{comment = '#'}, commented, ".[0].b", "#x", "# note\na,b\n1,#x\n")
-	// A BOM stays the text's own, and a value that opens one does not make a second.
+	// The text's BOM stays, and a value starting with a BOM does not add a second one.
 	bom := transmute([]byte)string("\xEF\xBB\xBFa,b\n1,2\n")
 	expect_set(t, bom, ".[0].a", "\xEF\xBB\xBFz", "\xEF\xBB\xBFa,b\n\xEF\xBB\xBFz,2\n")
 	out, serr := csv.set(bom, ".[0][0]", "\xEF\xBB\xBFz", header = false)
@@ -45,7 +44,7 @@ test_set_dialects :: proc(t: ^testing.T) {
 	delete(out)
 }
 
-// A cell opening with a BOM is data except where it opens the text.
+// A cell starting with a BOM is data, except at the start of the text.
 @(test)
 test_edits_with_a_bom_cell :: proc(t: ^testing.T) {
 	tsv := transmute([]byte)string("a\tb\n1\t2\n")
@@ -62,7 +61,7 @@ test_edits_with_a_bom_cell :: proc(t: ^testing.T) {
 	delete(out)
 }
 
-// A text that is only a BOM is empty of records: a row goes after the BOM, with no break before it.
+// A text that is only a BOM has no records: a row goes after the BOM, with no break before it.
 @(test)
 test_insert_into_a_bom_only_text :: proc(t: ^testing.T) {
 	bom := transmute([]byte)string("\xEF\xBB\xBF")
@@ -132,7 +131,7 @@ test_insert_rows :: proc(t: ^testing.T) {
 	// Fields match columns by name, wherever the columns are; a column with no field is empty.
 	reordered := transmute([]byte)string("name,x,id\nz,y,1\n")
 	expect_insert(t, reordered, csv.APPEND, Seat_Named{"q", 9}, "name,x,id\nz,y,1\nq,,9\n")
-	// The new record ends as the first record does, and a text with no final break gets it before the record.
+	// The new record ends with the first record's line break. A text with no final break gets it before the record.
 	crlf := transmute([]byte)string("id,name,ok\r\n1,a,true")
 	expect_insert(t, crlf, csv.APPEND, Seat{2, "b", false}, "id,name,ok\r\n1,a,true\r\n2,b,false")
 	expect_insert(t, crlf, 0, Seat{2, "b", false}, "id,name,ok\r\n2,b,false\r\n1,a,true")
@@ -179,7 +178,7 @@ test_insert_refusals :: proc(t: ^testing.T) {
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, string(out), "id,name\n1\n1,a\n")
 	delete(out)
-	// A comment line cannot be a record: a first cell opening with the comment byte is guarded or refused.
+	// A comment line cannot be a record: a first cell starting with the comment byte is quoted, escaped or refused.
 	out, rerr = csv.insert(src, 0, []string{"#x", "a"}, csv.Dialect{comment = '#'})
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, string(out), "id,name\n\"#x\",a\n1,a\n")
@@ -200,7 +199,7 @@ test_remove_rows_and_columns :: proc(t: ^testing.T) {
 	expect_remove(t, src, ".[].b", "a,c\n1,3\n4,6\n")
 	expect_remove(t, src, ".[].c", "a,b\n1,2\n4,5\n")
 	expect_remove(t, src, ".[][1]", "a,c\n1,3\n4,6\n")
-	// The last record without a break: the one before it becomes the end, with its break.
+	// Removing the last record in a text with no final break: the record before it becomes the end, with its break.
 	bare := transmute([]byte)string("a,b\n1,2\n3,4")
 	expect_remove(t, bare, ".[1]", "a,b\n1,2\n")
 	expect_remove(t, bare, ".[0]", "a,b\n3,4")
@@ -242,10 +241,10 @@ test_remove_refusals :: proc(t: ^testing.T) {
 	// The only column cannot go: no record would be left.
 	_, err := csv.remove(transmute([]byte)string("a\n1\n"), ".[].a")
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unplaceable, offset = 0})
-	// A second column that opens with the comment byte would make its record a comment.
+	// A second column starting with the comment byte would make its record a comment.
 	_, err = csv.remove(transmute([]byte)string("a,b\n1,#2\n"), ".[].a", csv.Dialect{comment = '#'})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unplaceable, offset = 4})
-	// A removal that would put a BOM at the front refuses.
+	// A removal that would put a BOM at the front is refused.
 	_, err = csv.remove(transmute([]byte)string("a,\xEF\xBB\xBFb\n"), ".[].a")
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unplaceable})
 	_, err = csv.remove(transmute([]byte)string("a,b\n1\n"), ".[0]")

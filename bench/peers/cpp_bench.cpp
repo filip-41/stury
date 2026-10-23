@@ -13,19 +13,19 @@
 #include <rapidjson/error/en.h>
 #include <simdjson.h>
 
-// Warm in-process timing jobs for bench/compare.py, mirroring stury's lanes: WARMUP + RUNS calls
-// on one input, the median printed as key=value tokens. Parsers, allocators and output buffers are kept
-// across calls; file I/O is outside the clock.
+// Timing jobs for bench/compare.py that match stury's bench lanes. Each job makes WARMUP + RUNS calls on one
+// input and prints the median as key=value tokens. Parsers, allocators and output buffers persist across
+// calls; file I/O is outside the clock.
 //   typed SHAPE [strict] [reuse]
-//                          simdjson ondemand into the shapes of stury's bench_unmarshal.odin (logs,
-//                          logs_subset, nested, config): every member visited, last duplicate kept, keys
-//                          matched unescaped, every field required. `strict` also judges the members the
-//                          shape skips; `reuse` keeps the output containers' capacity across reads.
-//                          STURY_DUMP names a file for the decoded value as JSON.
-//   validate               ondemand, every value read
+//                          reads with simdjson On-Demand into the shapes of stury's bench_unmarshal.odin
+//                          (logs, logs_subset, nested, config). Every member is visited, the last duplicate
+//                          wins, keys are compared unescaped, and every field is required. `strict` also
+//                          validates the members the shape skips; `reuse` keeps the output containers'
+//                          capacity across reads. STURY_DUMP names a file to receive the decoded value as JSON.
+//   validate               On-Demand, reading every value
 //   simd_dom | rapid_dom_warm   simdjson DOM, RapidJSON DOM (UTF-8 validated, full-precision floats)
-//   get KEY                ondemand find_field on one root member, its raw text taken; one sample is
-//                          GET_BATCH calls and the time printed is per call
+//   get KEY                On-Demand find_field on one root member, taking its raw text. One sample is
+//                          GET_BATCH calls; the printed time is per call.
 namespace od = simdjson::ondemand;
 using clk = std::chrono::steady_clock;
 using simdjson::error_code;
@@ -37,13 +37,14 @@ using simdjson::SUCCESS;
     } while (0)
 
 static const int WARMUP = 2;
-// Calls per get-one sample: an early key answers in a few timer ticks. The same count as the other get-one arms.
+// Calls per GetOne sample, since one early-key call takes only a few timer ticks. The other GetOne arms use
+// the same count.
 static const int GET_BATCH = 256;
 // BENCH_RUNS overrides the timed iteration count.
 static int RUNS = 10;
 static bool g_judge_skipped = false;
 
-// Exit 2 unless BENCH_RUNS, when set, is an integer >= 1.
+// Sets RUNS from BENCH_RUNS. Exits 2 unless BENCH_RUNS, when set, is an integer >= 1.
 static void read_runs() {
     const char* s = getenv("BENCH_RUNS");
     if (!s) return;
@@ -64,14 +65,15 @@ static int64_t since(clk::time_point t0) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(clk::now() - t0).count();
 }
 
-// The member's key, unescaped only when it holds a backslash, so an escaped spelling of a field name matches.
+// Sets `k` to the member's key, unescaped only when it contains a backslash, so an escaped spelling of a field
+// name matches.
 static error_code field_key(od::field& f, std::string_view& k) {
     k = f.escaped_key();
     if (k.find('\\') != std::string_view::npos) TRY(f.unescaped_key().get(k));
     return SUCCESS;
 }
 
-// Reads every value under `v`, which judges it in full.
+// Reads every value under `v`, so all of `v` is validated.
 static error_code judge(od::value v) {
     od::json_type t;
     TRY(v.type().get(t));
@@ -187,7 +189,7 @@ static error_code read_record(od::object o, LogSubset& r) {
     return seen == 3 ? SUCCESS : simdjson::NO_SUCH_FIELD;
 }
 
-// The records of the root object's last `logs` member.
+// Reads the records of the root object's last `logs` member into `out`.
 template <class Rec>
 static error_code read_logs(od::document& doc, std::vector<Rec>& out) {
     od::object root;
@@ -217,7 +219,7 @@ static error_code read_logs(od::document& doc, std::vector<Rec>& out) {
     return found ? SUCCESS : simdjson::NO_SUCH_FIELD;
 }
 
-// No sizing pass: On-Demand learns an array's length only by reading it, so `out` grows as push_back grows it.
+// Has no sizing pass: On-Demand knows an array's length only after reading it, so `out` grows by push_back.
 template <class T>
 static error_code read_array(od::value v, std::vector<T>& out) {
     od::array a;
@@ -315,8 +317,8 @@ static error_code read_doc(od::document& doc, std::vector<LogSubset>& out) { ret
 static error_code read_doc(od::document& doc, std::vector<NestedRec>& out) { return read_nested(doc, out); }
 static error_code read_doc(od::document& doc, ConfigHead& out) { return read_config(doc, out); }
 
-// The value as JSON, for the driver to compare with stury's: strings are escape-free in these fixtures but
-// are escaped anyway, and floats print in enough digits to read back to the same binary64.
+// Writes the value as JSON for compare.py to compare with stury's. Strings are escaped although these
+// fixtures have no escapes; floats print enough digits to read back as the same binary64.
 static void dump_str(std::string& o, std::string_view s) {
     o += '"';
     for (unsigned char ch : s) {
@@ -414,7 +416,8 @@ static size_t records(const ConfigHead&) { return 1; }
 template <class T>
 static size_t records(const std::vector<T>& v) { return v.size(); }
 
-// Median nanoseconds of RUNS timed calls after WARMUP; `once` returns one call's nanoseconds, or -1.
+// Returns the median nanoseconds of RUNS timed calls after WARMUP calls, or -1 when a call fails. `once`
+// returns one call's nanoseconds, or -1.
 template <class F>
 static int64_t median_ns(F&& once) {
     std::vector<int64_t> times;
@@ -434,16 +437,16 @@ static int report(size_t len, int64_t ns, const std::string& extra) {
     return 0;
 }
 
-// With `reuse` the output containers keep their capacity across reads (the readers clear them), as a C++ user
-// who keeps one result object would; stury's arena arm is the counterpart.
+// Times the typed read of one shape. With `reuse` the output containers keep their capacity across reads (the
+// readers clear them), as when a caller keeps one result object; this matches stury's arena arm.
 template <class Out>
 static int typed_job(const simdjson::padded_string& in, bool reuse) {
     od::parser parser;
     Out out{};
     error_code err = SUCCESS;
     int64_t ns = median_ns([&]() -> int64_t {
-        // Each read builds its records afresh, as a generic decoder's value is; the previous read's are freed
-        // here, outside the clock. The parser keeps its buffers.
+        // Without `reuse` each read builds new records, as a generic decoder does; the previous read's records
+        // are freed here, outside the clock. The parser keeps its buffers.
         if (!reuse) out = Out{};
         auto t0 = clk::now();
         od::document doc;
@@ -466,13 +469,13 @@ static int typed_job(const simdjson::padded_string& in, bool reuse) {
     return report(in.size(), ns, "records=" + std::to_string(records(out)));
 }
 
-// RapidJSON's DOM with one pool allocator and one Document kept across iterations. Clear() frees every chunk
-// but a user-supplied buffer, so the pool is one buffer sized from an untimed first parse and the timed
-// parses never call malloc; the parse stack stays with the Document.
+// Times RapidJSON's DOM with one pool allocator and one Document kept across iterations. Clear() frees every
+// chunk except a user-supplied buffer, so the pool is one buffer sized by an untimed first parse, and the
+// timed parses never call malloc. The parse stack stays with the Document.
 static int rapid_dom_job(const std::string& text) {
-    // The flags that give RapidJSON the guarantee the other arms have: UTF-8 validated (without it invalid
-    // bytes pass) and numbers parsed to the correctly rounded double (without it the default is faster and
-    // may be off by a few ulps).
+    // These flags give RapidJSON the other arms' checks. kParseValidateEncodingFlag rejects invalid UTF-8,
+    // which passes by default. kParseFullPrecisionFlag parses numbers to the correctly rounded double; the
+    // faster default may be off by a few ulps.
     constexpr unsigned flags = rapidjson::kParseValidateEncodingFlag | rapidjson::kParseFullPrecisionFlag;
     size_t need;
     {

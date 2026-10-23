@@ -13,7 +13,7 @@ import "../core/spell"
 // Why `marshal` refused: core's `Marshal_Error`. CSV reports `Bad_Utf8` (a string or field name), `Non_Finite`,
 // `Unsupported` (a root that is not a list of a struct, or a field whose type `unmarshal` cannot read),
 // `Plan_Mismatch`, `Not_A_Member`, `Bad_Option`, `Unwritable` (`Quoting.None`), `Write_Failed`
-// (`marshal_to_writer`) and `Out_Of_Memory`; never `Bad_State`, `Too_Deep`, `Cycle` or `Bad_Raw`.
+// (`marshal_to_writer`) and `Out_Of_Memory`. It never reports `Bad_State`, `Too_Deep`, `Cycle` or `Bad_Raw`.
 Marshal_Error :: core_pkg.Marshal_Error
 
 // How `marshal` writes: the zero value writes RFC 4180 with a header and LF after each record.
@@ -26,13 +26,13 @@ Marshal_Opts :: struct {
 // Write `v`, a slice or dynamic array of a struct, as CSV that `unmarshal` reads back into equal values: a
 // header of the field names, then one record per element, into a new buffer from `allocator`.
 //
-//	- Under `Quoting.Quotes` a cell is quoted when it holds the delimiter, a quote, CR or LF, each quote doubled,
-//	  and an empty string is `""`, so it reads back present. A nil `Maybe` is an empty cell.
-//	- Under `Quoting.None` a cell is written as it is, and an empty string is an empty cell, which reads back
-//	  absent: the zero string, or `.Unwritable` in a `Maybe`. Under `.Backslash` each delimiter, CR, LF, NUL and
-//	  backslash in it is escaped. A cell holding one of them the dialect cannot escape is `.Unwritable`.
-//	- A first cell that opens with the comment byte, and a BOM opening the output, are quoted, or escaped, or
-//	  `.Unwritable`, as is a number holding the delimiter.
+//	- Under `Quoting.Quotes` a cell holding the delimiter, a quote, CR or LF is quoted, with each quote
+//	  doubled. An empty string is `""` and reads back present. A nil `Maybe` is an empty cell.
+//	- Under `Quoting.None` a cell is written unchanged. An empty string is an empty cell, which reads back
+//	  absent: as the zero string, so in a `Maybe` it is `.Unwritable`. Under `.Backslash` each delimiter, CR,
+//	  LF, NUL and backslash is escaped. A cell holding one the dialect cannot escape is `.Unwritable`.
+//	- A first cell starting with the comment byte, a BOM at the start of the output, and a number holding the
+//	  delimiter are quoted or escaped, or else `.Unwritable`.
 //	- A float is its shortest round-trip digits, an enum its member's name (or, under `Plan_Opts.enums =
 //	  .Int`, its integer), a bool `true` or `false`.
 //
@@ -54,9 +54,9 @@ marshal :: proc(
 	return buf[:], .None
 }
 
-// `marshal` appended to `out`, as the text of its own: the bytes `out` held are not part of it, and a BOM
-// guard applies only to an empty `out`. On a refusal `out` is as it was on entry (its capacity may have
-// grown).
+// `marshal` appended to `out` as a text of its own: the bytes already in `out` are not part of it, and the
+// BOM guard applies only when `out` is empty. On a refusal `out` is as it was on entry; its capacity may have
+// grown.
 @(require_results)
 marshal_append :: proc(
 	out: ^[dynamic]u8,
@@ -123,8 +123,9 @@ marshal_run :: proc(buf: ^[dynamic]u8, v: $T, opts: Marshal_Opts, plan: ^Type_Pl
 	return .None
 }
 
-// The header and the records of `v`: at once, or with `to` set in chunks of records, each written to `to`
-// before the next is made. A chunk is sized to about `spell.SINK_FLUSH_AT` bytes by the one before it.
+// The header and the records of `v`, all at once, or with `to` set in chunks of records, each written to `to`
+// before the next is made. Each chunk's record count is set from the one before it to fill about
+// `spell.SINK_FLUSH_AT` bytes.
 @(private)
 write_chunks :: proc(w: ^Writer, v: $T, row: Plan_Op, opts: Marshal_Opts, to: io.Writer, $Q, $C: bool) -> Marshal_Error {
 	if to.procedure == nil {
@@ -137,8 +138,8 @@ write_chunks :: proc(w: ^Writer, v: $T, row: Plan_Op, opts: Marshal_Opts, to: io
 		o.no_header ||= !first
 		write_records_of(w, v[at:hi], row, o, Q, C) or_return
 		written := len(w.buf)
-		// Unless it is the last, the chunk's final break stays: a writer with bytes in its buffer has begun its
-		// output, where an empty one is at the start (`put_text`'s BOM guard).
+		// Every chunk but the last keeps its final line break in the buffer. `put_text`'s BOM guard treats an
+		// empty buffer as the output's start, so the buffer must not be empty after the first chunk.
 		keep := 0 if hi == len(v) else 1
 		if _, err := io.write_full(to, w.buf[:written - keep]); err != nil {
 			return .Write_Failed
@@ -151,9 +152,9 @@ write_chunks :: proc(w: ^Writer, v: $T, row: Plan_Op, opts: Marshal_Opts, to: io
 }
 
 // The header (unless `opts.no_header`) and the records of `v`, in a dialect that quotes cells (`$Q`) or not, with a
-// comment byte (`$C`) or none. A record that wrote nothing is a blank line, which reads back as no record, so it
-// is `.Unwritable`: `$N` is set for a plan of fewer than two fields, the only one that can write nothing, since
-// two write a delimiter.
+// comment byte (`$C`) or none. A record that writes nothing would be a blank line, which reads back as no
+// record, so it is `.Unwritable`. Only a plan of fewer than two fields can write nothing, since two fields
+// write a delimiter; `$N` is set for such a plan.
 @(private)
 write_records :: proc(w: ^Writer, v: $T, row: Plan_Op, opts: Marshal_Opts, $Q, $C, $N: bool) -> Marshal_Error {
 	p := w.plan
@@ -215,7 +216,7 @@ Writer :: struct {
 	buf:        [dynamic]u8,
 	delim:      byte,
 	comment:    byte, // 0 for none
-	// An empty `buf` is the output's start, where a cell opening with a BOM would read as the input's.
+	// An empty `buf` is the output's start, where a cell starting with a BOM would read as the text's BOM.
 	at_start:   bool,
 	quotes:     bool,
 	escapes:    bool,
@@ -249,8 +250,8 @@ spell_writer :: proc(dialect: Dialect, plan: ^Type_Plan, allocator: runtime.Allo
 	return w, true
 }
 
-// Quotes the cell written from `at` when it is a number holding the delimiter: every other cell is quoted by
-// `put_text` already.
+// Quotes the cell written from `at` when it is a number holding the delimiter. `put_text` already quotes every
+// other cell that needs it.
 @(private)
 quote_number :: proc(w: ^Writer, at: int) -> Marshal_Error {
 	n := len(w.buf) - at
@@ -381,7 +382,7 @@ put_cell :: proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool) -> Marshal_Er
 	return put_other(w, op, data, Q)
 }
 
-// The kinds `put_cell` has no case for, kept out of its switch so a hook costs the plain kinds nothing.
+// The kinds `put_cell` has no case for, kept out of its switch so that hooks cost the plain kinds nothing.
 @(cold, private)
 put_other ::proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool) -> Marshal_Error {
 	if op.kind == .Hook {
@@ -390,8 +391,8 @@ put_other ::proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool) -> Marshal_Er
 	return .Unsupported
 }
 
-// The text of the value at `data`, written by the hook of `op`, as one cell: an empty text is an empty string
-// (`maybe`: the value of a `Maybe`, which cannot be empty where no cell is quoted).
+// The text the hook of `op` writes for the value at `data`, as one cell. An empty text is an empty string.
+// When `maybe` (the value of a `Maybe`) and no cell is quoted, an empty text is `.Unwritable`.
 @(private)
 put_hooked :: proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool, maybe: bool) -> Marshal_Error {
 	clear(&w.hook_text)
@@ -418,13 +419,13 @@ put_empty :: proc(w: ^Writer, $Q: bool) -> Marshal_Error {
 	}
 }
 
-// `s` as one cell: quoted when it holds the delimiter, a quote, CR or LF, or, where no cell is quoted, written
-// by `put_unquoted` when it holds the delimiter, a backslash, CR or LF.
+// `s` as one cell. Where cells are quoted, it is quoted when it holds the delimiter, a quote, CR or LF.
+// Where they are not, `put_unquoted` writes it when it holds the delimiter, a backslash, CR or LF.
 @(private)
 put_text :: proc(w: ^Writer, s: string, $Q: bool) -> Marshal_Error {
 	p := room(w, 2 * len(s) + 2) or_return
 	special, high := scan_text(w, s, Q)
-	// A BOM opening the output would read as the input's, not the cell's.
+	// A BOM at the start of the output would read as the text's BOM, not the cell's.
 	special |= len(w.buf) == 0 && w.at_start && core_pkg.bom_len(transmute([]byte)s) > 0
 	if high && !utf8.valid_string(s) {
 		return .Bad_Utf8
@@ -437,8 +438,8 @@ put_text :: proc(w: ^Writer, s: string, $Q: bool) -> Marshal_Error {
 	when !Q {
 		return put_unquoted(w, s, p)
 	}
-	// A 16-byte window with no quote is stored whole: `p` has room for twice `s` and two quotes, so a window's
-	// store stays inside it however many quotes came before.
+	// A 16-byte window with no quote is stored whole. `p` has room for twice `s` plus two quotes, so the store
+	// stays inside it however many quotes came before.
 	p[0] = '"'
 	src := raw_data(s)
 	i, n := 0, 1
@@ -475,8 +476,8 @@ put_doubled :: #force_inline proc(p: [^]u8, n: int, src: [^]u8, i, end: int) -> 
 	return n
 }
 
-// `s` copied to `p`, which has room for it: a short text by two overlapping loads and stores of its size
-// class, a longer one by 16-byte windows, the last overlapping its neighbour.
+// `s` copied to `p`, which has room for it. A short text is copied by two overlapping loads and stores of its
+// size class, a longer one by 16-byte windows, the last overlapping the one before.
 @(private)
 copy_text :: #force_inline proc(p: [^]u8, s: string) {
 	n := len(s)
@@ -502,9 +503,9 @@ copy_text :: #force_inline proc(p: [^]u8, s: string) {
 	}
 }
 
-// `s` as a cell of a dialect with no quotes: under `.Backslash` each delimiter, CR, LF, NUL and backslash
-// escaped. A delimiter, CR or LF the dialect cannot escape, or a BOM opening the output, is `.Unwritable`. `p`
-// has room for twice `s`.
+// `s` as a cell of a dialect with no quotes. Under `.Backslash` each delimiter, CR, LF, NUL and backslash is
+// escaped. A delimiter, CR or LF the dialect cannot escape, or a BOM at the start of the output, is
+// `.Unwritable`. `p` has room for twice `s`.
 @(cold, private)
 put_unquoted :: proc(w: ^Writer, s: string, p: [^]u8) -> Marshal_Error {
 	if len(w.buf) == 0 && w.at_start && core_pkg.bom_len(transmute([]byte)s) > 0 {
@@ -545,8 +546,9 @@ escape_letter :: proc(c: byte) -> byte {
 	return 0
 }
 
-// The record written from `at`, whose first cell opens with the comment byte, made to read back as a record:
-// that cell quoted, or its opening tab escaped, or `.Unwritable`. The cell holds nothing `put_text` quotes.
+// Makes the record written from `at`, whose first cell starts with the comment byte, read back as a record:
+// quotes that cell, escapes its first byte when the comment byte is a tab, or returns `.Unwritable`. The cell
+// holds nothing `put_text` quotes.
 @(cold, private)
 guard_comment :: proc(w: ^Writer, at: int) -> Marshal_Error {
 	switch {
@@ -572,7 +574,7 @@ guard_comment :: proc(w: ^Writer, at: int) -> Marshal_Error {
 	return .None
 }
 
-// The record opening at `from` in `w.buf`, made to read back as a record if its first cell opens with the
+// Makes the record starting at `from` in `w.buf` read back as a record when its first cell starts with the
 // comment byte (`guard_comment`).
 @(private)
 guard_record :: #force_inline proc(w: ^Writer, from: int) -> Marshal_Error {
@@ -582,8 +584,8 @@ guard_record :: #force_inline proc(w: ^Writer, from: int) -> Marshal_Error {
 	return .None
 }
 
-// Whether `s` holds the delimiter, CR, LF, or a quote (`$Q`) or else a backslash or NUL, and whether it holds
-// a non-ASCII byte. A short text is read through `w.class`, a byte a step.
+// Whether `s` holds the delimiter, CR, LF, and a quote (under `$Q`) or a backslash or NUL (otherwise), and
+// whether it holds a non-ASCII byte. A short text is read one byte at a time through `w.class`.
 @(private)
 scan_text :: #force_inline proc(w: ^Writer, s: string, $Q: bool) -> (special, high: bool) {
 	n := len(s)
@@ -597,7 +599,7 @@ scan_text :: #force_inline proc(w: ^Writer, s: string, $Q: bool) -> (special, hi
 		return class & SPECIAL != 0, class & HIGH != 0
 	}
 	dv, qv, cv, lv := bits.V(delim), bits.V('"' when Q else '\\'), bits.V('\r'), bits.V('\n')
-	// 16-byte windows, the last one overlapping its neighbour.
+	// 16-byte windows, the last one overlapping the one before.
 	for k := 0; ; k += 16 {
 		i := min(k, n - 16)
 		v := bits.load(p[i:])

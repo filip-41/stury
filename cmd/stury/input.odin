@@ -80,7 +80,7 @@ Inputs :: struct {
 	fault_next:         int,
 	slurp_tail:         bool, // -s --stream-errors: the fault's error event comes after the slurped array, not in it
 	bom_broken:         bool, // --seq --stream-errors: the stream began with a cut byte order mark, so jq's parser starts afresh at every call
-	cells:              ^Cells, // --csv, --tsv: the open file's window and header
+	cells:              ^Cells, // --csv, --tsv: the open file's text and header
 	seq_head:           enum u8 {
 		Unread, // --seq: the open file's first text is yet to be found
 		Bare, // found with no separator before it, and yet to be refused
@@ -310,7 +310,7 @@ text_fault :: proc(ins: ^Inputs, at, limit: int, found: json.Error, what := "") 
 		at_error := e
 		at_error.offset += u64(at)
 		msg = fault_in_file(ins.name, ins.data, at_error, what, ins.lines_before)
-	} else if ins.run.opts.from == .Ndjson { // a line is a whole text: a fault at its end is at EOF, past its newline
+	} else if ins.run.opts.from == .Ndjson { // each line is one text, so a fault at its end is reported at EOF, past the newline
 		msg = jq.parse_message(ins.data[at:min(limit + 1, len(ins.data))], e, line, column, what, limit - at)
 	} else {
 		msg = jq.parse_message(ins.data[at:], e, line, column, what)

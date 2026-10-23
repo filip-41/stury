@@ -14,10 +14,10 @@ Layout :: struct {
 	indent:        int, // spaces per level; -1 is a tab
 	sort_keys:     bool,
 	ascii:         bool,
-	colors:        ^[8]string, // jq's colours, in its order (null, false, true, numbers, strings, arrays, objects, keys); nil for none
-	comments:      ^enc.Comment_Layout, // a JSONC document's comments printed where they are attached (`write_answer`); nil for none
-	drop_comments: bool, // `write_answer` prints no comments though the value has some (output other than JSONC)
-	spill:         ^Spill, // where the output written so far goes once it is `at` bytes, as a deep value's layout would otherwise hold it whole; nil for nowhere
+	colors:        ^[8]string, // jq's colours in jq's order (null, false, true, numbers, strings, arrays, objects, keys); nil for none
+	comments:      ^enc.Comment_Layout, // a JSONC document's comments, printed at their attachment points (`write_answer`); nil for none
+	drop_comments: bool, // `write_answer` prints no comments even when the value has some (output other than JSONC)
+	spill:         ^Spill, // receives the output once it reaches `at` bytes, so a deep value is not held whole; nil for none
 }
 
 // A layout's way to empty the output it is written into, the dynamic array `write_value` is given.

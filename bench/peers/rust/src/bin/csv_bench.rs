@@ -1,13 +1,14 @@
-// Warm in-process CSV timing jobs for bench/compare.py, mirroring stury's `csv_` lanes (bench/probe/bench_csv.odin):
-// WARMUP + RUNS calls on one input, the median printed as key=value tokens. File I/O is outside the clock, as is
-// dropping each built value. A `.tsv` file reads with a tab delimiter (csv crate: quoting off).
+// CSV timing jobs for bench/compare.py that match stury's `csv_` lanes (bench/probe/bench_csv.odin). Each job
+// makes WARMUP + RUNS calls on one input and prints the median as key=value tokens. File I/O and dropping each
+// built value are outside the clock. A `.tsv` file is read with a tab delimiter; the csv crate also turns
+// quoting off.
 //   csv_bench csv  validate-str|validate-bytes|records-str|records-bytes|dom-str|dom-bytes FILE
 //   csv_bench csv  typed|marshal table|text FILE      serde derive; typed reads owned Strings
 //   csv_bench simd validate-str|validate-split|records-str|records-total|dom-str|dom-total FILE
-// The `-str` arms check every field as UTF-8, the `-bytes` and `-total` arms do not. Every arm reads the first
-// record as data, so `records` counts the header, as stury's `records` lane does. The records and dom arms print
-// `records fields bytes` (the decoded fields' total); a failing read exits nonzero. With STURY_DUMP set, a typed
-// arm writes its rows as JSON there and a marshal arm the CSV it wrote.
+// The `-str` arms check that every field is UTF-8; the `-bytes` and `-total` arms do not. Every arm reads the
+// first record as data, so `records` counts the header, as stury's `records` lane does. The records and dom arms
+// print `records`, `fields` and `bytes` (the decoded fields' total length). A failing read exits nonzero. With
+// STURY_DUMP set, a typed arm writes its rows there as JSON and a marshal arm writes the CSV it produced.
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::hint::black_box;
@@ -72,7 +73,7 @@ fn csv_reader(data: &[u8], tsv: bool, headers: bool) -> csv::Reader<&[u8]> {
     b.from_reader(data)
 }
 
-// simd-csv cannot switch quoting off: the TSV fixture holds no quote byte, so its answer is the same.
+// simd-csv cannot switch quoting off. The TSV fixture has no quote byte, so the answer is the same.
 fn simd_reader(data: &[u8], tsv: bool) -> simd_csv::Reader<&[u8]> {
     let mut b = simd_csv::ReaderBuilder::new();
     b.has_headers(false);
@@ -112,7 +113,8 @@ fn simd_total_records(data: &[u8], tsv: bool) -> Vec<simd_csv::ByteRecord> {
     out
 }
 
-// Reads every record as the csv crate's `StringRecord` or `ByteRecord`, touching only the field counts.
+// Times reading every record as a `StringRecord` or `ByteRecord` (csv crate or simd-csv), or counting records
+// with simd-csv's `Splitter`. Only the field counts are used.
 fn validate(tool: &str, how: &str, data: &[u8], tsv: bool) -> Result<(), String> {
     let (ns, _) = time_runs(|| {
         let mut n = 0u64;
@@ -150,7 +152,7 @@ fn validate(tool: &str, how: &str, data: &[u8], tsv: bool) -> Result<(), String>
     Ok(())
 }
 
-// A pass over every record's every field.
+// Times one pass over every field of every record.
 fn records(tool: &str, how: &str, data: &[u8], tsv: bool) -> Result<(), String> {
     let (ns, t) = time_runs(|| {
         let mut t = Tally::default();
@@ -191,8 +193,8 @@ fn records(tool: &str, how: &str, data: &[u8], tsv: bool) -> Result<(), String> 
     Ok(())
 }
 
-// Every record kept in memory, then every field read once, inside the clock: stury's head arm reads every cell of
-// its Document, which decodes a quoted cell only when it is read.
+// Times reading every record into memory and then every field once, both inside the clock. stury's head arm
+// reads every cell of its Document, which decodes a quoted cell only when it is read.
 fn dom(tool: &str, how: &str, data: &[u8], tsv: bool) -> Result<(), String> {
     let (ns, t) = match (tool, how) {
         ("csv", "dom-str") => time_runs(|| csv_str_records(data, tsv).map(|v| tally(&v, |t, r| t.add(r.iter().map(str::len)))))?,
@@ -220,7 +222,7 @@ fn dump(path: Result<String, std::env::VarError>, bytes: impl FnOnce() -> Result
     }
 }
 
-// The csv crate's serde reader into owned rows, as `Vec<T>` (stury's unmarshal also builds the whole list).
+// Times the csv crate's serde reader into owned rows as a `Vec<T>`; stury's unmarshal also builds the whole list.
 fn typed<T: DeserializeOwned + Serialize>(data: &[u8], tsv: bool) -> Result<(), String> {
     let (ns, rows) = time_runs(|| csv_reader(data, tsv, true).deserialize::<T>().collect::<Result<Vec<T>, _>>().map_err(err))?;
     dump(std::env::var("STURY_DUMP"), || serde_json::to_vec(&rows).map_err(err))?;
@@ -228,7 +230,7 @@ fn typed<T: DeserializeOwned + Serialize>(data: &[u8], tsv: bool) -> Result<(), 
     Ok(())
 }
 
-// The csv crate's serde writer over the rows it reads from `data`, into a `Vec<u8>`.
+// Times the csv crate's serde writer into a `Vec<u8>`, over the rows read from `data` before timing.
 fn marshal<T: DeserializeOwned + Serialize>(data: &[u8], tsv: bool) -> Result<(), String> {
     let rows = csv_reader(data, tsv, true).deserialize::<T>().collect::<Result<Vec<T>, _>>().map_err(err)?;
     let (ns, out) = time_runs(|| {

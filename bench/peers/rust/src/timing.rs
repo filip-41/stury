@@ -1,5 +1,5 @@
-// The timing protocol the Rust arms share (`#[path]`-included by each bin): WARMUP untimed calls and RUNS
-// timed ones, the median printed as key=value tokens. BENCH_RUNS overrides the timed iteration count.
+// The timing protocol shared by the Rust arms; each bin includes it with `#[path]`. A job makes WARMUP untimed
+// calls and RUNS timed ones and prints the median as key=value tokens. BENCH_RUNS overrides RUNS.
 #![allow(dead_code)]
 
 use std::sync::OnceLock;
@@ -8,7 +8,8 @@ use std::time::Instant;
 pub const WARMUP: usize = 2;
 static RUNS: OnceLock<usize> = OnceLock::new();
 
-// BENCH_RUNS if set, else 10; an integer >= 1 or an error. Call once before any job.
+// Sets RUNS to BENCH_RUNS if set, else 10. Returns an error unless BENCH_RUNS is an integer >= 1. Call once
+// before any job.
 pub fn init() -> Result<(), String> {
     let n = match std::env::var("BENCH_RUNS") {
         Err(_) => 10,
@@ -25,8 +26,8 @@ pub fn runs() -> usize {
     *RUNS.get().expect("init validates BENCH_RUNS before any job")
 }
 
-// Median of RUNS timed calls of `f` after WARMUP untimed ones; the last value is kept, and each earlier one is
-// dropped after its clock stops.
+// Returns the median ns of RUNS timed calls of `f` after WARMUP untimed ones, and the last call's value. Each
+// earlier value is dropped after its clock stops.
 pub fn time_runs<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<(u128, T), String> {
     let runs = runs();
     let mut times = Vec::with_capacity(runs);

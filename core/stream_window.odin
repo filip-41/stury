@@ -3,34 +3,34 @@ package core
 import "core:io"
 import "core:mem"
 
-// The bytes a streamed reader (`records_from`) asks of its `io.Reader` at a time, unless `chunk` says otherwise.
+// The default bytes per read that a streamed reader (`records_from`) requests from its `io.Reader`; `chunk`
+// overrides it.
 READER_CHUNK :: 64 * 1024
 
-// The bytes of a stream held in memory: `buf[:hi]` is what is read and not yet dropped, and `base` is the
-// stream offset of `buf[0]`. The buffer is `allocator`'s, grown by doubling.
+// Stream_Window holds part of a stream in memory. `buf[:hi]` is read and not yet dropped, and `base` is the
+// stream offset of `buf[0]`. The buffer is allocated with `allocator` and grows by doubling.
 Stream_Window :: struct {
 	reader:    io.Reader,
 	allocator: mem.Allocator,
-	// The bytes asked of the reader at a read.
+	// The bytes requested from the reader per read.
 	chunk:     int,
 	buf:       []byte,
 	hi:        int,
 	base:      u64,
 	eof:       bool,
-	// The reader's failure other than `.EOF` (`.No_Progress` for a read of no bytes and no error). The bytes
-	// read before it stay in the window.
+	// The reader's error other than `.EOF`; `.No_Progress` for a read that returned no bytes and no error. Bytes
+	// read before the error stay in the window.
 	read_err:  io.Error,
 }
 
-// Drop `buf[:keep]`: the bytes after it move to the front.
+// Drops `buf[:keep]` and moves the remaining bytes to the front.
 window_drop :: proc(w: ^Stream_Window, keep: int) {
 	w.hi = copy(w.buf, w.buf[keep:w.hi])
 	w.base += u64(keep)
 }
 
-// Make room for a chunk (doubling the buffer if need be) and read once. `progress` is false once the read
-// failed without handing over a byte, or `err` is `.Out_Of_Memory` at the stream offset where the buffer could
-// not grow.
+// Makes room for a chunk, doubling the buffer if needed, and reads once. `progress` is false when the read failed
+// without returning a byte. `err` is `.Out_Of_Memory`, at the stream offset where the buffer could not grow.
 window_fill :: proc(w: ^Stream_Window) -> (progress: bool, err: Maybe(Error)) {
 	chunk := max(w.chunk, 1)
 	if len(w.buf) - w.hi < chunk {

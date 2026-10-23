@@ -75,8 +75,8 @@ test_set :: proc(t: ^testing.T) {
 	edit_err(t, long, .Over_Capacity)
 }
 
-// A `Path_Error` locates its refusal: the offset into the text it names, and the walk's result or
-// marshal's refusal behind it.
+// A `Path_Error` reports the offset into the text it names, and the walk's result or marshal's error that
+// caused it.
 @(test)
 test_edit_error_locates_the_refusal :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)

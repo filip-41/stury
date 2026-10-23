@@ -20,7 +20,7 @@ import "core:unicode/utf8"
 // The `#no_bounds_check` leaves read `src[lo]` and slice `src[lo + 1:hi - 1]` unchecked: the token is one
 // the walk checked, so `lo < hi <= len(src)` and a string holds both quotes. `dest` is written at the op's
 // width, the type's size. A decode fits a buffer as long as the escaped text, since no escape decodes
-// longer (json/scan/unescape.odin). `core_pkg.fold_digits`'s `$T` is u64, or u128 for the wide integers. The
+// longer (json/scan/unescape.odin). `core_pkg.fold_digits` runs with `$T` as u64, or u128 for the wide integers. The
 // differential tests against a reference decoder check it, and the unmarshal tests pin the range edges.
 
 // `true` or `false` into a `width`-byte boolean.

@@ -304,9 +304,8 @@ array_chunks :: proc(run: ^Run, data: []byte, at, z: int, levels: int, piece := 
 	if data[z] != ']' || u64(z - at) >= json.MAX_ROW_SOURCE {
 		return
 	}
-	// No top-level comma in the first quarter means one entry holds most of the array, and the cuts would leave
-	// one piece to read it. Finding that out on every thread costs about the pass the read would, so the cuts are
-	// not looked for.
+	// No top-level comma in the first quarter: one entry holds most of the array, so it is not cut. Finding the
+	// cuts would cost about as much as reading it.
 	commas := index.comma_cursor(at + 1)
 	if index.next_top_comma(&commas, data[:min(z, at + 1 + (z - at) / 4)]) < 0 {
 		return

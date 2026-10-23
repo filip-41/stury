@@ -4,8 +4,8 @@ package walk
 // each visited token is validated, and whether the walk may stop early. Nothing else about a preset reaches
 // the walk.
 
-// A `Strictness` is a preset over the scan axis and termination (`axes_for`). The walk is routed from the scan
-// axis alone, onto one of two levels:
+// A `Strictness` is a preset of the scan axis and termination (`axes_for`). The walk is chosen by the scan
+// axis alone, which has two levels:
 //
 //	 .Strict      .Values   every visited token gets a grammar + UTF-8 check
 //	 .Structural  .Locate   framing, wire UTF-8 and the depth cap only

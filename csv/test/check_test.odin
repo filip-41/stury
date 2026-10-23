@@ -6,8 +6,8 @@ import "core:strings"
 import "core:testing"
 import csv "../"
 
-// What `unmarshal` refuses, `unmarshal_check` refuses alike: `read` compares them on every case of the other
-// suites. These cases are the ones only a check can get wrong.
+// `unmarshal_check` refuses what `unmarshal` refuses: `read` compares them on every case of the other suites.
+// These cases cover what only a check can get wrong.
 
 // A check keeps no record: its memory does not grow with the input.
 @(test)

@@ -96,9 +96,9 @@ open_run :: #force_no_inline proc(
 	when dom {
 		flags = {.Decoded}
 	}
-	// The row goes out as four words, two paired stores, where field stores take five: the words of a
-	// template whose only per-row fields, `lo` and `subtree_size`, each start a zero word's low half (the
-	// layout `walk/tape.odin` asserts).
+	// The row is written as four words in two paired stores; field stores would take five. The words come from
+	// a template whose only per-row fields, `lo` and `subtree_size`, each occupy the low half of a zero word
+	// (the layout `walk/tape.odin` asserts).
 	tw := transmute([4]u64)walk.Row{key_lo = walk.NO_KEY, key_hi = walk.NO_KEY, kind = .Array, flags = flags}
 	// One bound for the loop: the run stops at the depth cap, the end of the row block or the end of input.
 	end := pos + min(max_depth - depth, u64(room - at), n - pos)

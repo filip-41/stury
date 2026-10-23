@@ -23,26 +23,25 @@ package csv
 //
 // The scanner (scan.odin) and the edits' cell writer (edit_spell.odin) are internal.
 //
-// What the scanner reads, in every dialect: records end at LF, or CRLF, which is one break, and fields at the
-// delimiter. A CR outside a quoted field that is not before an LF is refused. One leading UTF-8 BOM is
-// stepped over, a line holding nothing (or only a CR) is no record, and a final LF ends the last record,
-// starting none. Every record has as many fields as the first, unless the dialect is `ragged`, and at most
-// `Limits.max_fields`. Under `.Strict` every byte is UTF-8.
+// In every dialect a record ends at LF or CRLF, and a field ends at the delimiter. A CR outside a quoted
+// field must be followed by LF. One leading UTF-8 BOM is skipped. A line that is empty or holds only a CR is
+// not a record. A final LF ends the last record and starts no new one. Every record has as many fields as
+// the first, unless the dialect is `ragged`, and at most `Limits.max_fields`. Under `.Strict` every byte
+// must be UTF-8.
 //
-//	- `Quoting.Quotes` (RFC 4180): a field is quoted when its first byte is `"`, and then runs to the matching
-//	  closing quote, a doubled `""` inside it reading as one quote, and holds the delimiter, CR and LF as text.
-//	  A quote anywhere else is refused.
+//	- `Quoting.Quotes` (RFC 4180): a field whose first byte is `"` is quoted. It runs to its closing quote,
+//	  reads `""` as one quote, and may hold the delimiter, CR and LF. A quote anywhere else is refused.
 //	- `Quoting.None`: a quote is text, and a field cannot hold the delimiter, CR or LF.
 //	- `Escapes.Backslash` (with `Quoting.None`): `\t`, `\n`, `\r`, `\0` and `\\` read as a tab, LF, CR, NUL and backslash.
 //	  Any other byte after a backslash, or a backslash ending a field, is refused (`.Bad_Escape`).
-//	- `comment`: a line whose first byte is the comment byte is no record, whatever it holds up to its LF. The
-//	  byte anywhere else, or inside a quoted field, is text.
+//	- `comment`: a line whose first byte is the comment byte is not a record. Elsewhere, or inside a quoted
+//	  field, the byte is text.
 
 import "base:intrinsics"
 import core_pkg "../core"
 
-// A fault in the text: the offset of the first byte that cannot extend it, or `len(src)` when it ended inside
-// a quoted field (`.Truncated`).
+// A fault in the text: the offset of the first byte that is invalid where it stands, or `len(src)` when the
+// text ends inside a quoted field (`.Truncated`).
 Error :: core_pkg.Error
 
 // What an `Error` is: `Bad_Char` at a misplaced quote, CR or malformed UTF-8 lead, `Truncated` where a quoted
@@ -50,9 +49,9 @@ Error :: core_pkg.Error
 // first byte of a record with more or fewer fields than the first, `Limit_Fields` at the first byte of a record
 // with more than `Limits.max_fields`, `Limit_Record` at the first byte of a line longer than
 // `Limits.max_record_bytes`, `Bad_Option` (at no byte) for a dialect or limit the scanner refuses, and
-// `Out_Of_Memory` where `next_record` could not hold a record's fields or `records_from` its window. The one
-// enum is core's, so that code over several formats reads one `Error`; CSV never reports `Bad_Literal`,
-// `Bad_Number`, `Limit_Digits`, `Limit_Scale`, `Too_Deep`, `Trailing`, `Source_Too_Wide` or `Duplicate_Key`.
+// `Out_Of_Memory` where `next_record` could not hold a record's fields or `records_from` its window. The enum
+// is core's and shared by every format. CSV never reports `Bad_Literal`, `Bad_Number`, `Limit_Digits`,
+// `Limit_Scale`, `Too_Deep`, `Trailing`, `Source_Too_Wide` or `Duplicate_Key`.
 Error_Kind :: core_pkg.Error_Kind
 
 // The 1-based line and column `err` points at in `src`, counting bytes, or (0, 0) where it points at no byte
@@ -62,20 +61,24 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 	return core_pkg.error_position(src, err)
 }
 
-// `err`, an `Error`, an `Unmarshal_Error` or a `Path_Error`, as `line:col: <kind>`, the kind written as its enum
-// name, or `offset N: <kind>` where it has no position. `src` is the text the offset is into, the input the
-// faulting call read. An `Unmarshal_Error` is bare where it points at no byte (`.Unsupported`, `.Bad_Option`,
-// `.Plan_Mismatch`), has `: <syntax>` after a `.Syntax`, then ` at [3].name` for its path. A `Path_Error` is
-// located in the source for `.Bad_Source` and for an `.Encode` or `.Unplaceable` with a record, `offset N` for
-// `.Bad_Path` (into the path text) and `.Bad_Result` (into the edited text), ` (N)` after `.Bad_Row`, with the
-// `syntax` or `encode` result after it. The text is allocated with `allocator`.
+// `err` (an `Error`, `Unmarshal_Error` or `Path_Error`) as text: `line:col: <kind>` with the kind's enum name,
+// or `offset N: <kind>` when it has no position. `src` is the input the failing call read.
+//
+// An `Unmarshal_Error` that points at no byte (`.Unsupported`, `.Bad_Option`, `.Plan_Mismatch`) has no
+// position prefix. A `.Syntax` one is followed by `: <syntax>`. Its path follows as ` at [3].name`.
+//
+// A `Path_Error` has a source position for `.Bad_Source`, and for `.Encode` or `.Unplaceable` when it has a
+// record. `.Bad_Path` has `offset N` into the path text, `.Bad_Result` into the edited text. `.Bad_Row` is
+// followed by ` (N)`. The `syntax` or `encode` result comes last.
+//
+// The text is allocated with `allocator`.
 @(require_results)
 render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
 	return core_pkg.render_error(src, err, allocator)
 }
 
-// `render_error`'s text written to `w`, allocating nothing; `w`'s failure is the `io.Error`, with a prefix of
-// the text possibly written.
+// `render_error`'s text written to `w`. Allocates nothing. A failure of `w` is returned as the `io.Error`;
+// part of the text may have been written.
 render_error_to_writer :: proc {
 	core_pkg.render_syntax_error_to_writer,
 	core_pkg.render_unmarshal_error_to_writer,
@@ -100,15 +103,17 @@ Escapes :: enum u8 {
 	Backslash, // `\t`, `\n`, `\r`, `\0`, `\\`; needs `Quoting.None`
 }
 
-// How a text spells its records. The zero value is RFC 4180 with `,` between fields. `.Bad_Option` refuses a
-// delimiter that is a quote, CR, LF or not ASCII; a comment byte that is a quote (under `.Quotes`), CR, LF,
-// the delimiter or not ASCII; `.Backslash` escapes under `.Quotes`; and, under `.Backslash`, a delimiter or
-// comment byte that is a backslash, or a delimiter that is `t`, `n`, `r` or `0`.
+// How a text spells its records. The zero value is RFC 4180 with `,` between fields. `.Bad_Option` refuses:
+//
+//	- a delimiter that is a quote, CR, LF or not ASCII
+//	- a comment byte that is CR, LF, the delimiter, not ASCII, or a quote under `.Quotes`
+//	- `.Backslash` escapes under `.Quotes`
+//	- under `.Backslash`, a backslash as delimiter or comment byte, or `t`, `n`, `r` or `0` as delimiter
 Dialect :: struct {
 	delimiter: byte, // 0 is `,`
 	quoting:   Quoting,
 	escapes:   Escapes,
-	comment:   byte, // 0 is none: a line whose first byte, outside quotes, is this is no record
+	comment:   byte, // 0 for none; a line whose first byte is this is not a record
 	ragged:    bool, // records may hold different field counts (no `.Field_Count`)
 }
 
@@ -123,14 +128,14 @@ Strictness :: core_pkg.Strictness
 // Caps on what a text may hold. The zero value caps nothing.
 Limits :: struct {
 	max_fields:       int, // a record with more fields is refused (`.Limit_Fields`), 0 for no cap
-	// A line (a record, or a blank or comment line) with more bytes than this before its LF is refused at its
-	// first byte (`.Limit_Record`), once its first byte past the cap is read; 0 for no cap. It bounds the
-	// window `records_from` holds.
+	// A line (record, blank or comment) with more bytes than this before its LF is refused with
+	// `.Limit_Record` at its first byte, as soon as the first byte past the cap is read. 0 for no cap. It also
+	// bounds the window `records_from` holds.
 	max_record_bytes: int,
 }
 
-// Whether `src` is CSV in `dialect`. Allocates nothing without `runner`. With one, the text is cut into pieces
-// that `runner`'s threads and the caller validate at once (`each_record`), and the answer is the same.
+// Whether `src` is CSV in `dialect`. Allocates nothing without `runner`. With a runner, the text is split into
+// pieces that its threads and the caller validate in parallel (`each_record`), with the same result.
 @(require_results)
 validate :: proc(
 	src: []byte,
@@ -182,8 +187,8 @@ validate_span :: proc(src: []byte, lo, width: int, s: Scan) -> Maybe(Error) {
 	unreachable()
 }
 
-// Where `validate` stands between blocks: the block at `pos` is next, and the line open there starts at
-// `rec_lo` with `fields` fields so far. Every record must have `width`, the first's (0 until it is read).
+// `validate`'s state between blocks. The next block starts at `pos`. The open line starts at `rec_lo` and
+// has `fields` fields so far. `width` is the first record's field count, 0 until it is read.
 @(private)
 Validate_Walk :: struct {
 	pos, rec_lo:   int,
@@ -191,8 +196,8 @@ Validate_Walk :: struct {
 	cy:            Carry,
 }
 
-// `validate_span` in one scan mode. Blocks before `stop` cannot hold the byte past an open line's cap, so only
-// the block at `stop` looks for it.
+// `validate_span` in one scan mode. Only the block at `stop` can hold the first byte past the open line's
+// cap, so only that block checks the cap.
 @(private)
 validate_in :: proc(src: []byte, lo, start_width: int, s: Scan, $M: Scan_Mode) -> Maybe(Error) {
 	delimiter, comment := s.delim, s.comment
@@ -236,7 +241,8 @@ validate_in :: proc(src: []byte, lo, start_width: int, s: Scan, $M: Scan_Mode) -
 	return nil
 }
 
-// The block at `w.pos`, which holds the byte past an open line's cap. `done` with the text's fault.
+// Validates the block at `w.pos`, which holds the first byte past the open line's cap. `done` is true when
+// the text has a fault, returned in `err`.
 @(private, cold)
 validate_capped_block :: proc(src: []byte, w: ^Validate_Walk, s: Scan, $M: Scan_Mode) -> (err: Maybe(Error), done: bool) {
 	pos := w.pos
@@ -262,7 +268,8 @@ validate_capped_block :: proc(src: []byte, w: ^Validate_Walk, s: Scan, $M: Scan_
 	return nil, false
 }
 
-// The lines the block at `pos` ends (`lfs`) judged, and its separators (`seps`) counted into the open line's.
+// Judges each line that ends in the block at `pos` (`lfs`), and adds the block's separators (`seps`) to the
+// open line's field count.
 @(private)
 validate_lines :: #force_inline proc(src: []byte, pos: int, seps, lfs: u64, rec_lo, fields, width: ^int, s: Scan, $M: Scan_Mode) -> (err: Error, bad: bool) {
 	seps, lfs := seps, lfs
@@ -286,9 +293,9 @@ validate_lines :: #force_inline proc(src: []byte, pos: int, seps, lfs: u64, rec_
 	return {}, false
 }
 
-// The fault `validate` reports at `fault` inside the line opening at `rec_lo`, `fields` of which are open:
-// `.Limit_Fields` when the separators before the fault already closed more than the cap, as `next_record`
-// refuses them. A `.Limit_Record` is the line's, at its first byte.
+// The error `validate` reports for a fault at `fault` in the line starting at `rec_lo`, which has `fields`
+// fields so far. It is `.Limit_Fields` when the fields before the fault already exceed the cap, as in
+// `next_record`. A `.Limit_Record` points at the line's first byte.
 @(private)
 open_record_fault :: proc(fields, rec_lo: int, s: Scan, fault: int, kind: Error_Kind) -> Error {
 	if fields - 1 > s.max_fields {
@@ -310,8 +317,8 @@ no_record :: #force_inline proc(src: []byte, lo, hi: int, comment: byte, $M: Sca
 	}
 }
 
-// The fault of a record of `fields` fields where `width` were expected, and the width from then on: no fault
-// when it is the first record, which sets the width, or when the dialect is ragged.
+// The fault of a record with `fields` fields where `width` were expected, and the width from then on. The
+// first record sets the width. A ragged dialect has no `.Field_Count` fault.
 @(private)
 record_fault :: proc(width, fields: int, s: Scan) -> (kind: Error_Kind, width_after: int) {
 	if fields > s.max_fields {

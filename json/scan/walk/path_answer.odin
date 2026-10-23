@@ -36,8 +36,9 @@ Path_Answer :: struct {
 // serves take no run.
 MAX_PATH_QUERIES :: 16
 
-// A path the automaton serves has at most `MAX_PATH_STEPS` steps, refused before the walk (`Over_Capacity`,
-// `Path_Steps`). The negative-`Index` re-entry nests one frame array per step, so the cap bounds stack use.
+// A path the automaton serves has at most `MAX_PATH_STEPS` steps; a longer one is refused before the walk
+// (`Over_Capacity`, `Path_Steps`). The negative-`Index` re-entry nests one frame array per step, so the cap
+// bounds stack use.
 
 // How many member starts each level remembers (`Query_Ctx.member_starts`): one per group of a stride's
 // members (`Path_Auto.ring_shift`), the group's latest, for the last `MEMBER_RING` groups. The level's

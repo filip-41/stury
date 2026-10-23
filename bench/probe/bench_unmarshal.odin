@@ -1,9 +1,9 @@
 package main
 
-// Unmarshal lanes. Every lane reports input bytes per second. The tape arm is the
-// baseline the walk is held to: on logs and nested, `build` the node tape, then one pass per record that
-// predicts the next name the way `unmarshal` does, so the comparison is walk against tape and not matcher
-// against matcher; on logs_subset and config, which read a few fields, a `.Path` scan of those fields.
+// Unmarshal lanes. Every lane reports input bytes per second. The tape arm is the walk's baseline. On logs
+// and nested it builds the node tape, then makes one pass per record that predicts the next name as
+// `unmarshal` does, so both arms match names the same way. On logs_subset and config, which read a few
+// fields, it is a `.Path` scan of those fields.
 
 import "base:intrinsics"
 import json "stury:json"
@@ -13,9 +13,9 @@ import "core:mem/virtual"
 import "core:os"
 import "core:time"
 
-// One static arena holds every read of an arena lane: a reset faults no pages in, and a read past the reserve
-// fails the lane instead of growing a block that each reset would free. The `Unmarshal` arm does not use it
-// for the timed reads; it reads from `context.allocator` as the other libraries' decoders read from malloc.
+// Reserve of the static arena that holds every read of an arena lane. A reset faults no pages in, and a read
+// past the reserve fails the lane instead of growing a block that each reset would free. The `Unmarshal`
+// arm's timed reads allocate from `context.allocator` instead, as the other libraries' decoders use malloc.
 READ_ARENA_RESERVE :: 1 << 30
 
 Read_Arm :: enum {
@@ -62,10 +62,10 @@ Config_Head :: struct {
 	port: i64,
 }
 
-// `arm`'s read of `data` as a `T`, one per timed iteration with a kept plan: into a reset arena (`Unmarshal_Arena`,
-// `Tape`), or from `context.allocator` with `release` freeing the last value after the clock (`Unmarshal`). Before
-// timing, `unmarshal` and `tape` each read once and must marshal to the same bytes, so both arms do one job;
-// `unmarshal_check` must refuse what `unmarshal` refuses for `.Check`.
+// Times `arm`'s read of `data` as a `T`, once per timed iteration with a reused plan. `Unmarshal_Arena` and
+// `Tape` read into a reset arena; `Unmarshal` reads from `context.allocator`, and `release` frees each value
+// outside the clock. Before timing, `unmarshal` and `tape` each read once and must marshal to the same bytes,
+// so both arms do the same job. For `.Check`, `unmarshal_check` must refuse what `unmarshal` refuses.
 bench_read :: proc(
 	data: []byte,
 	$T: typeid,
@@ -93,12 +93,12 @@ bench_read :: proc(
 	if werr != .None || terr != .None || string(walk_bytes) != string(tape_bytes) {
 		return false
 	}
-	// The value read, for bench/compare.py to hold every other library's typed read against.
+	// bench/compare.py checks every other library's typed read against this dump.
 	if path, found := os.lookup_env("STURY_DUMP", a); found && os.write_entire_file(path, walk_bytes) != nil {
 		return false
 	}
 	if arm == .Check {
-		// A string root, which every lane's type refuses.
+		// Every lane's type refuses a string root.
 		bad := transmute([]byte)string(`"x"`)
 		refused: T
 		want, refused_ok := json.unmarshal(bad, &refused, opts, &plan, a).?
@@ -157,7 +157,8 @@ bench_unmarshal_config :: proc(data: []byte, arm: Read_Arm, opts: json.Unmarshal
 	return bench_read(data, Config_Head, arm, opts, tape_config, proc(_: ^Config_Head) -> int {return 1}, proc(_: ^Config_Head) {})
 }
 
-// Frees what an `unmarshal` of `[]Nested_Rec` made. The strings are borrowed from the input: the fixture has no escapes.
+// Frees what an `unmarshal` of `[]Nested_Rec` allocated. The strings borrow the input, since the fixture has no
+// escapes.
 release_nested :: proc(v: ^[]Nested_Rec) {
 	for &r in v^ {
 		delete(r.tags)
@@ -166,7 +167,7 @@ release_nested :: proc(v: ^[]Nested_Rec) {
 	delete(v^)
 }
 
-// A record's field names, and bit b of `first` set when one starts with byte b, as `unmarshal` keeps them.
+// A record's field names, with bit b of `first` set when a name starts with byte b, as `unmarshal` keeps them.
 Tape_Names :: struct {
 	names: []string,
 	first: [4]u64,
@@ -181,7 +182,7 @@ tape_names :: proc(names: []string) -> (t: Tape_Names) {
 	return
 }
 
-// Member `c`'s key, decoded into the document's arena when it is escaped.
+// Returns member `c`'s key, decoded into the document's arena when it is escaped.
 tape_key :: #force_inline proc(doc: ^json.Document, c: json.Node) -> (key: string, ok: bool) {
 	r := doc.rows[c]
 	if .Key_Escaped in r.flags {
@@ -190,8 +191,8 @@ tape_key :: #force_inline proc(doc: ^json.Document, c: json.Node) -> (key: strin
 	return string(doc.src[r.key_lo + 1:r.key_hi - 1]), true
 }
 
-// One pass over a record's members: the predicted name first, then the rest, past a first-byte filter.
-// Returns the field index or -1.
+// Returns member `c`'s field index, or -1. Tries the predicted name `next` first, then the other names that
+// pass the first-byte filter.
 tape_field :: #force_inline proc(doc: ^json.Document, c: json.Node, t: ^Tape_Names, next: ^int) -> int {
 	key, ok := tape_key(doc, c)
 	if !ok {
@@ -214,7 +215,7 @@ tape_field :: #force_inline proc(doc: ^json.Document, c: json.Node, t: ^Tape_Nam
 	return -1
 }
 
-// The array of records under the root object's member `name` (the last one), or false.
+// Returns the array under the root object's last member `name`, or false.
 tape_records :: proc(doc: ^json.Document, name: string) -> (json.Node, bool) {
 	if kd, _ := json.kind(doc, 0); kd != .Object {
 		return json.NO_NODE, false
@@ -404,7 +405,7 @@ tape_config :: proc(data: []byte, out: ^Config_Head, a: mem.Allocator) -> bool {
 	return true
 }
 
-// A found string answer, borrowed unless it is escaped.
+// Returns a found string answer, borrowed unless it is escaped.
 span_string :: proc(src: []byte, ans: json.Path_Answer, a: mem.Allocator) -> (string, bool) {
 	if ans.outcome != .Found || ans.kind != .String {
 		return "", false
@@ -413,7 +414,7 @@ span_string :: proc(src: []byte, ans: json.Path_Answer, a: mem.Allocator) -> (st
 	return d.(string) or_else "", ok
 }
 
-// A found integer answer in the `i64` range, read as unmarshal reads one.
+// Returns a found integer answer in the `i64` range, read as unmarshal reads one.
 span_int :: proc(src: []byte, ans: json.Path_Answer) -> (i64, bool) {
 	if ans.outcome != .Found || ans.kind != .Number {
 		return 0, false
@@ -423,8 +424,8 @@ span_int :: proc(src: []byte, ans: json.Path_Answer) -> (i64, bool) {
 	return v, ok && is
 }
 
-// An integer row the way unmarshal reads one: integer spelling (no fraction, no exponent) and in range, its
-// digits read from the span (a row holds no number's value).
+// Reads an integer row as unmarshal does: integer syntax (no fraction, no exponent) and in range. The digits
+// come from the span, since a row holds no number's value.
 tape_int :: proc(doc: ^json.Document, c: json.Node) -> (i64, bool) {
 	r := doc.rows[c]
 	if r.kind != .Number {
@@ -457,7 +458,7 @@ tape_float :: proc(doc: ^json.Document, c: json.Node) -> (f64, bool) {
 	return json.get_float(doc, c)
 }
 
-// An array of integer rows.
+// Reads an array of integer rows.
 tape_ints :: proc(doc: ^json.Document, arr: json.Node, a: mem.Allocator) -> (out: []i64, ok: bool) {
 	if kd, _ := json.kind(doc, arr); kd != .Array {
 		return

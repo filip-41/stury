@@ -1,11 +1,10 @@
 package main
 
-// --from csv and --from tsv: each file's first record names the fields, and every later record is one input, an
-// object of the header's names and the cells' text as strings, null for a cell with no bytes (a quoted `""` is
-// the empty string). A regular file is read whole (`csv.records`); a pipe, a
-// terminal, a file past STREAM_FILE_MIN and any file under -n are read through `csv.records_from`, whose window
-// holds the longest record. Each file has its own header; a duplicated header name, a record of another width
-// and a fault in the text end the file, reported as `FILE:LINE:COLUMN: fault`.
+// Reads --from csv and --from tsv input. Each file's first record is its header. Every later record is one input:
+// an object mapping header names to the cells' text as strings. An empty cell is null; a quoted `""` is the empty
+// string. A regular file is read whole (`csv.records`). A pipe, a terminal, a file larger than STREAM_FILE_MIN and
+// any file under -n are read through `csv.records_from`, whose window holds the longest record. A duplicate header
+// name, a record of a different width and a syntax fault end the file and are reported as `FILE:LINE:COLUMN: fault`.
 
 import "base:runtime"
 import "core:bytes"
@@ -16,11 +15,11 @@ import core_pkg "../../core"
 import csv "../../csv"
 import "jq"
 
-// The bytes a regular file adds to a window at a time.
+// The bytes read from a regular file into the window per read.
 CELLS_CHUNK :: 1 << 20
 
-// The stream a window is read from: it counts the newlines it hands over, which a fault's place and
-// `input_line_number` need once the window has moved past them.
+// The stream a window is read from. It counts the newlines it has returned, because fault positions and
+// `input_line_number` need them after the window has dropped those bytes.
 Cells_Source :: struct {
 	ins:      ^Inputs,
 	file:     ^os.File,
@@ -29,8 +28,8 @@ Cells_Source :: struct {
 	err:      os.Error, // the read that failed
 }
 
-// The cells of the file being read. Everything it holds but the arena's values is the heap's: a header's names
-// outlive their file, as the objects built from them may (-s, -n).
+// The state of the CSV file being read. Everything except the arena's values is heap-allocated, because header
+// names outlive their file, as the objects built from them may (-s, -n).
 Cells :: struct {
 	dialect:  csv.Dialect,
 	file:     ^os.File, // nil between files
@@ -40,14 +39,14 @@ Cells :: struct {
 	whole:    csv.Records,
 	rr:       csv.Record_Reader,
 	source:   Cells_Source,
-	it:       ^csv.Records, // `whole` or `rr`'s: the iterator whose `field_lo` says where a quoted field began
+	it:       ^csv.Records, // `whole`, or `rr`'s iterator; its `field_lo` is where a quoted field began
 	header:   []string, // nil until the file's first record is read
-	line_at:  int, // the last line count `cells_line` told: its stream offset and the count
+	line_at:  int, // the stream offset `cells_line` last counted to; `line_no` is the line count there
 	line_no:  int,
 }
 
-// The next input of the files read as records of cells (jq's next_input with the file's header applied), or its
-// parse error: the fault told with its file, line and column.
+// Returns the next input object of the CSV files (jq's next_input with the file's header applied), or a parse
+// error with the fault's file, line and column.
 next_cells :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 	rec, msg, status := next_row(ins)
 	if status != .Value {
@@ -56,7 +55,7 @@ next_cells :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 	return record_object(ins.cells, rec), "", .Value
 }
 
-// The next record of the files past its file's header, or `.Error` with the fault that ended the file, or
+// Returns the next record after the current file's header. Returns `.Error` with the fault that ended the file, or
 // `.More` when no file is left.
 next_row :: proc(ins: ^Inputs) -> (rec: csv.Record, msg: string, status: jq.Parse_Status) {
 	c := cells_of(ins)
@@ -75,7 +74,7 @@ next_row :: proc(ins: ^Inputs) -> (rec: csv.Record, msg: string, status: jq.Pars
 	}
 }
 
-// The cells of the files, made on first use.
+// Returns the CSV read state, creating it on first use.
 cells_of :: proc(ins: ^Inputs) -> ^Cells {
 	if ins.cells == nil {
 		ins.cells = new(Cells, runtime.heap_allocator())
@@ -84,7 +83,7 @@ cells_of :: proc(ins: ^Inputs) -> ^Cells {
 	return ins.cells
 }
 
-// The next record of the open file's text.
+// Returns the next record of the open file.
 next_cell :: proc(c: ^Cells) -> (csv.Record, bool) {
 	if c.streamed {
 		return csv.next_record(&c.rr)
@@ -92,7 +91,7 @@ next_cell :: proc(c: ^Cells) -> (csv.Record, bool) {
 	return csv.next_record(&c.whole)
 }
 
-// Open the next file that opens and has a header, and read the header. `.More` when no file is left.
+// Opens the next readable file that has a header, and reads the header. Returns `.More` when no file is left.
 open_cells :: proc(ins: ^Inputs, c: ^Cells) -> (msg: string, status: jq.Parse_Status) {
 	for ins.next_file < len(ins.files) {
 		f, ok := open_file(ins)
@@ -115,7 +114,7 @@ open_cells :: proc(ins: ^Inputs, c: ^Cells) -> (msg: string, status: jq.Parse_St
 	return "", .More
 }
 
-// Ready `c` to read file `f`. It returns false, with `f` closed, when `f` cannot be read.
+// Prepares `c` to read file `f`. Returns false and closes `f` when `f` cannot be read.
 @(private = "file")
 start_cells :: proc(ins: ^Inputs, c: ^Cells, f: ^os.File) -> bool {
 	heap := runtime.heap_allocator()
@@ -151,8 +150,8 @@ start_cells :: proc(ins: ^Inputs, c: ^Cells, f: ^os.File) -> bool {
 	return true
 }
 
-// What `records_from` reads the open file through. A stream that may be a while coming has the output so far
-// written first.
+// The `io.Stream` procedure `records_from` reads the open file through. Before each read of a non-regular file,
+// pending output is flushed.
 @(private = "file")
 cells_read :: proc(data: rawptr, mode: io.Stream_Mode, p: []byte, _: i64, _: io.Seek_From) -> (n: i64, err: io.Error) {
 	s := (^Cells_Source)(data)
@@ -177,7 +176,7 @@ cells_read :: proc(data: rawptr, mode: io.Stream_Mode, p: []byte, _: i64, _: io.
 	return 0, .Empty
 }
 
-// The file's names from its first record, `.Error`'s message when one is repeated.
+// Reads the header names from the file's first record. Returns an error message when a name repeats.
 @(private = "file")
 read_header :: proc(ins: ^Inputs, c: ^Cells, rec: csv.Record) -> string {
 	heap := runtime.heap_allocator()
@@ -200,8 +199,8 @@ read_header :: proc(ins: ^Inputs, c: ^Cells, rec: csv.Record) -> string {
 	return ""
 }
 
-// The object of the header's names and the record's cells, the text of each in the arena: a cell's bytes are
-// copied together, and one with a doubled quote or an escape is decoded into it. A cell of no bytes is null.
+// Returns an object mapping header names to the record's cells, with the cell text in the arena. All cell bytes
+// are copied in one block; a cell with a doubled quote or an escape is decoded into it. An empty cell is null.
 @(private = "file")
 record_object :: proc(c: ^Cells, rec: csv.Record) -> jq.Value {
 	n, total := len(rec.fields), 0
@@ -227,10 +226,10 @@ record_object :: proc(c: ^Cells, rec: csv.Record) -> jq.Value {
 	return jq.object_from(keys, vals)
 }
 
-// `check` on a whole text of records of cells: the message a filter run on it gives, or "" when it reads through. The
-// text is judged by `csv.validate`, which does not allocate and, with a `runner`, reads in parallel; the header is
-// read for its repeated names, which validate leaves to the reader, and the text is read again only for the fault
-// validate found, so that it is told as a filter run tells it.
+// Runs `check` on a whole CSV text. Returns the message a filter run would give, or "" when the text is valid.
+// `csv.validate` checks the text without allocating, in parallel when `runner` is set. The header is read
+// separately for repeated names, which validate does not check. The text is read again only after a fault, to
+// report it as a filter run does.
 check_cells_text :: proc(ins: ^Inputs, dialect: csv.Dialect, runner: ^csv.Batch_Runner) -> string {
 	c := Cells{dialect = dialect, data = ins.data}
 	c.whole = csv.records(c.data, dialect, allocator = runtime.heap_allocator())
@@ -252,8 +251,8 @@ check_cells_text :: proc(ins: ^Inputs, dialect: csv.Dialect, runner: ^csv.Batch_
 	return cells_fault(ins, &c, e)
 }
 
-// The open file's records have ended: the message of the fault that ended them, "" when they were read through
-// or a read failed (reported here), and the file closed either way.
+// Closes the open file after its last record. Returns the message of the fault that ended the records, or "" when
+// they were all read or a read failed. A read failure is reported here.
 cells_ended :: proc(ins: ^Inputs, c: ^Cells) -> (msg: string) {
 	if e, bad := cells_err(c); bad {
 		msg = cells_fault(ins, c, e)
@@ -264,7 +263,7 @@ cells_ended :: proc(ins: ^Inputs, c: ^Cells) -> (msg: string) {
 	return
 }
 
-// The fault that ended the open file's records, at its place in the window.
+// Returns the fault that ended the open file's records, with its offset into the window.
 @(private = "file")
 cells_err :: proc(c: ^Cells) -> (e: csv.Error, bad: bool) {
 	if !c.streamed {
@@ -277,32 +276,32 @@ cells_err :: proc(c: ^Cells) -> (e: csv.Error, bad: bool) {
 	return
 }
 
-// The window the open file's records are read in: its text whole, or what `records_from` holds.
+// Returns the bytes the open file's records are read from: the whole text, or the `records_from` window.
 @(private = "file")
 cells_text :: proc(c: ^Cells) -> []byte {
 	return c.rr.buf[:c.rr.hi] if c.streamed else c.data
 }
 
-// The lines of the open file before `window`.
+// Returns the number of lines of the open file before `window`.
 @(private = "file")
 cells_lines_before :: proc(c: ^Cells, window: []byte) -> int {
 	return c.source.newlines - count_newlines(window) if c.streamed else 0
 }
 
-// The fault `e` of the open file's text as a message.
+// Formats the fault `e` of the open file as a message.
 @(private = "file")
 cells_fault :: proc(ins: ^Inputs, c: ^Cells, e: csv.Error) -> string {
 	e, window := e, cells_text(c)
 	what := cells_fault_text(c, window, e)
-	// A quoted field that never ends is told where it begins.
+	// An unterminated quoted field is reported at its opening quote.
 	if f := c.it.field_lo; e.kind == .Truncated && c.dialect.quoting == .Quotes && f < len(window) && window[f] == '"' {
 		e.offset, what = u64(f), "Unfinished quoted field"
 	}
 	return cells_message(ins, c, e, what)
 }
 
-// `what` told at `e`'s place in the open file: `FILE:LINE:COLUMN: what`. The place counts from past a byte order
-// mark, as the JSON reader's does.
+// Formats `what` at `e`'s position in the open file as `FILE:LINE:COLUMN: what`. Columns on the first line
+// exclude a byte order mark, as in the JSON reader.
 @(private = "file")
 cells_message :: proc(ins: ^Inputs, c: ^Cells, e: csv.Error, what: string) -> string {
 	window := cells_text(c)
@@ -312,7 +311,7 @@ cells_message :: proc(ins: ^Inputs, c: ^Cells, e: csv.Error, what: string) -> st
 	return fault_in_file(ins.name, window[skip:], at, what, cells_lines_before(c, window))
 }
 
-// What is wrong at the fault `e`, in CSV's words.
+// Returns the CSV-specific description of the fault `e`.
 @(private = "file")
 cells_fault_text :: proc(c: ^Cells, window: []byte, e: csv.Error) -> string {
 	#partial switch e.kind {
@@ -336,7 +335,7 @@ cells_fault_text :: proc(c: ^Cells, window: []byte, e: csv.Error) -> string {
 	return jq.FAULT_TEXT[e.kind]
 }
 
-// The file read through, or given up on at a fault: closed, and its text and header dropped.
+// Closes the open file and frees its text and header.
 @(private = "file")
 end_cells_file :: proc(c: ^Cells) {
 	if c.streamed {
@@ -349,8 +348,8 @@ end_cells_file :: proc(c: ^Cells) {
 	c.file, c.header, c.data, c.streamed = nil, nil, nil, false
 }
 
-// The line `input_line_number` tells: the newlines up to the end of the record read last. Asked again, it counts
-// on from the last answer.
+// Returns the line number for `input_line_number`: the newlines before the end of the last record read. A repeated
+// call counts on from the previous answer.
 cells_line :: proc(ins: ^Inputs) -> int {
 	c := ins.cells
 	if c == nil || c.file == nil {

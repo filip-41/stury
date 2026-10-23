@@ -59,8 +59,8 @@ check_input :: proc(run: ^Run, ins: ^Inputs) {
 	}
 }
 
-// check on one input of records of cells: an input with no bytes but a byte order mark fails as one with no JSON
-// text does, and a fault is told as a filter run tells it.
+// Runs `check` on one CSV input. An input of only a byte order mark fails as an input with no JSON
+// text does. A fault is reported with the message a filter run gives.
 @(private = "file")
 check_cells :: proc(run: ^Run, ins: ^Inputs) {
 	dialect := FORMATS[run.opts.from].dialect

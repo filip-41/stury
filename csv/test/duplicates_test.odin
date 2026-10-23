@@ -30,7 +30,7 @@ test_duplicate_header_names :: proc(t: ^testing.T) {
 	err = read(t, "id,id\n1\n", &rows, {duplicates = .First})
 	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Syntax)
 
-	// Three of a name; a repeat is not an unknown field; a required field is still found.
+	// Three columns share a name. A repeat is not an unknown field, and a required field is still found.
 	testing.expect_value(t, read(t, "id,id,id\n1,2,3\n", &rows, {duplicates = .First}), nil)
 	testing.expect_value(t, rows[0].id, 1)
 	testing.expect_value(t, read(t, "id,id,id\n1,2,3\n", &rows, {duplicates = .Last}), nil)

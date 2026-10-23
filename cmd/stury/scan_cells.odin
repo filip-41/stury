@@ -1,13 +1,14 @@
 package main
 
-// A filter that is only columns of a --from csv or --from tsv file (`.name`, `.a, .b`, `[.a, .b]` under -c or --to
-// csv or tsv; `{a, b: .c}` under -c or --to csv or tsv, and `.` under -c) answers from each record's cells, printed
-// as the interpreter prints the same filter on the record's object: no object is built.
-// `select(F)`, when F reads only named columns, runs the interpreter on an object of just those, and prints the
-// whole record for each output (`select_cell`).
-// A whole file past two workers' worth is read in `csv.each_record`'s pieces on the batch pool, each piece printed
-// into a buffer of its own and written as soon as the pieces before it are. Any other filter runs on the interpreter
-// (`next_cells`).
+// Answers a filter that selects only columns of a --from csv or --from tsv file directly from each record's cells,
+// without building an object. The filters are `.name`, `.a, .b` and `[.a, .b]` under -c or --to csv/tsv,
+// `{a, b: .c}` under -c or --to csv/tsv, and `.` under -c. The output bytes equal the interpreter's on the record's
+// object.
+// For `select(F)` where F reads only named columns, the interpreter runs F on an object of those columns, and each
+// output prints the whole record (`select_cell`).
+// A whole file larger than two workers' share is read in `csv.each_record` pieces on the batch pool. Each piece
+// prints into its own buffer, which is written once all earlier pieces are written. Any other filter runs on the
+// interpreter (`next_cells`).
 
 import "base:runtime"
 import "core:bytes"
@@ -22,29 +23,29 @@ Columns :: struct {
 	names:  []string,
 	array:  bool, // `[...]`: one output, an array of the cells
 	object: bool, // `{...}` or `.`: one output, an object of the cells under `keys`
-	all:    bool, // `.`: the object of every column of the open file, `names` and `keys` its header
-	// An object's member keys, in the order printed (sorted under -S), and each one's `"key":` as it is printed.
+	all:    bool, // `.`: an object of every column of the open file; `names` and `keys` are its header
+	// The object's member keys in output order (sorted under -S), and each key's printed `"key":`.
 	keys:   []string,
 	heads:  []string,
-	// Each name's place in the open file's header, -1 when the header lacks it (the output is then null).
+	// The index of each name in the open file's header, or -1 when the header lacks it (the output is null).
 	at:     []int,
 	sorted: bool, // -S: `all` prints the header's names in byte order
-	// `select(F)`: F's columns, which the interpreter sees as the record's object, and where they are in the header.
+	// `select(F)`: the columns F reads, which form the object F runs on, and their indices in the header.
 	selecting: bool,
 	watch:     []string,
 	watch_at:  []int,
 	arena:     virtual.Arena, // the interpreter's memory for one record
 }
 
-// The record `select(F)` has found an output for, which the sink prints whole.
+// A record for which `select(F)` produced an output. The sink prints the whole record.
 Selected :: struct {
 	cols:    ^Columns,
 	rec:     csv.Record,
 	dialect: csv.Dialect,
 }
 
-// Whether the filter `text` is only columns, kept in `run.columns` when it is, with a command line that prints
-// strings as `print_cells` does.
+// Sets `run.columns` when the filter `text` selects only columns and the options print strings as `print_cells`
+// does.
 choose_columns :: proc(run: ^Run, text: string, files: int) {
 	o := &run.opts
 	if !reads_cells(o) || o.null_input || o.slurp || o.exit_status || o.color || o.ascii || o.raw0 {
@@ -74,10 +75,9 @@ choose_columns :: proc(run: ^Run, text: string, files: int) {
 	run.columns = new_clone(Columns{names = names[:], array = array, at = make([]int, len(names))})
 }
 
-// The columns of `{...}`, whose members are each a constant key and the input's member of that name or of another
-// (`{a, b: .c}`), or of `.`, which is all of them: nil when `body` is not either, or the output is not one that is
-// printed here. A table's header is the keys, so --grow-header (which holds the rows) and a key twice (which the
-// interpreter keeps once) are left to the interpreter, as is any layout of JSON but the compact one.
+// Returns the columns of `.` (all of them) or of `{...}` whose members each pair a constant key with a field of
+// the input (`{a, b: .c}`). Returns nil for any other `body` or an output not printed here. A table's header is
+// the keys, so the interpreter handles --grow-header, a repeated key and any JSON layout but the compact one.
 @(private = "file")
 object_columns :: proc(o: ^Opts, body: ^jq.Node) -> ^Columns {
 	if writes_cells(o) ? o.grow_header : !o.compact {
@@ -121,8 +121,9 @@ object_columns :: proc(o: ^Opts, body: ^jq.Node) -> ^Columns {
 	return new_clone(cols)
 }
 
-// `select(F)` whose F reads only columns of the record, so that the interpreter can run F on an object of those and
-// the record, printed as `.` is, stands for the output. A table's header is the file's, so a table is of one file.
+// Returns the columns of `select(F)` when F reads only columns of the record. The interpreter then runs F on an
+// object of those columns, and each output prints the record as `.` would. A table takes its header from the file,
+// so --to csv/tsv applies only to a single file.
 @(private = "file")
 select_columns :: proc(run: ^Run, body: ^jq.Node, files: int) -> ^Columns {
 	o := &run.opts
@@ -138,9 +139,10 @@ select_columns :: proc(run: ^Run, body: ^jq.Node, files: int) -> ^Columns {
 	return new_clone(cols)
 }
 
-// Whether the expression `n`, run on a record, reads the record only as `.name`, appending the names to `watch`.
-// What a `|` pipes on is not the record, so its right side is not looked at; any other use of `.`, a call that takes
-// it implicitly, a binding or an else-less `if` is refused. A `select` passes on its input, so its argument is `n`'s.
+// Reports whether the expression `n`, run on a record, reads the record only as `.name`, and appends those names
+// to `watch`. The right side of a `|` does not run on the record and is not inspected. Any other use of `.`, a call
+// that reads `.` implicitly, a binding, or an `if` without `else` fails the check. A nested `select` runs its
+// argument on the same input as `n`.
 @(private = "file")
 only_columns :: proc(n: ^jq.Node, watch: ^[dynamic]string) -> bool {
 	if n == nil {
@@ -173,7 +175,7 @@ only_columns :: proc(n: ^jq.Node, watch: ^[dynamic]string) -> bool {
 	return false
 }
 
-// Each key as an object prints it before its value.
+// Returns each key printed as `"key":`.
 @(private = "file")
 object_heads :: proc(keys: []string) -> []string {
 	heads := make([]string, len(keys))
@@ -188,7 +190,7 @@ object_heads :: proc(keys: []string) -> []string {
 	return heads
 }
 
-// The names of the columns `n` is, in order, appended to `names`: false when `n` is anything else.
+// Appends the column names of `n` (`.a` or `.a, .b`) to `names` in order. Returns false for any other `n`.
 @(private = "file")
 add_columns :: proc(names: ^[dynamic]string, n: ^jq.Node) -> bool {
 	switch {
@@ -202,7 +204,7 @@ add_columns :: proc(names: ^[dynamic]string, n: ^jq.Node) -> bool {
 	return false
 }
 
-// Where `cols`' names are in `header`.
+// Sets the header indices of `cols`' names.
 @(private = "file")
 place_columns :: proc(cols: ^Columns, header: []string) {
 	if cols.all {
@@ -230,7 +232,7 @@ place_columns :: proc(cols: ^Columns, header: []string) {
 	}
 }
 
-// Where `name` is in `header`, or -1.
+// Returns the index of `name` in `header`, or -1.
 @(private = "file")
 column_of :: proc(header: []string, name: string) -> int {
 	for h, j in header {
@@ -241,8 +243,8 @@ column_of :: proc(header: []string, name: string) -> int {
 	return -1
 }
 
-// Print the columns of the files' records, as `run_filter` runs the filter on them: until a file has failed to
-// open (after the record that met it), a file's fault ends the run, and a halt.
+// Prints the columns of the files' records with the same results as `run_filter`. The run stops at a fault in a
+// file, at a halt, and after the first record read once a file has failed to open.
 scan_cells :: proc(run: ^Run, ins: ^Inputs) {
 	c, cols := cells_of(ins), run.columns
 	fetched := false
@@ -260,7 +262,7 @@ scan_cells :: proc(run: ^Run, ins: ^Inputs) {
 				if runner := batch_runner(run, len(c.data)); runner != nil && (cols.object || !opens_with_bom(run, c, cols)) && table_openable(run, cols) {
 					fetched = true
 					if print_cells_in_pieces(run, c, cols, runner) {
-						continue // the rest of the file is the main thread's
+						continue // the main thread reads the rest of the file
 					}
 					if msg = cells_ended(ins, c); msg != "" {
 						cells_failed(run, msg)
@@ -284,7 +286,7 @@ scan_cells :: proc(run: ^Run, ins: ^Inputs) {
 	}
 }
 
-// The object of the record's watched columns, in the context allocator.
+// Returns an object of the record's watched columns, allocated in the context allocator.
 @(private = "file")
 watched_object :: proc(cols: ^Columns, rec: csv.Record, dialect: csv.Dialect) -> jq.Value {
 	keys := make([dynamic]string, len(cols.watch))
@@ -299,7 +301,7 @@ watched_object :: proc(cols: ^Columns, rec: csv.Record, dialect: csv.Dialect) ->
 	return jq.object_from(keys, vals)
 }
 
-// The filter on the record's watched columns, as `run_filter` runs it on the record: each output prints the record.
+// Runs the filter on the record's watched columns as `run_filter` would. Each output prints the whole record.
 @(private = "file")
 select_cell :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv.Dialect) {
 	if cols.arena.curr_block == nil && virtual.arena_init_growing(&cols.arena) != nil {
@@ -316,10 +318,10 @@ select_cell :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv.Dia
 
 Select_Result :: enum {
 	Done,
-	Failed, // an error, a halt, or a message the main thread tells in its place: the record's outputs are not kept
+	Failed, // an error, a halt, or a message the main thread reports instead; the record's outputs are dropped
 }
 
-// `select_cell` for a pool thread's copy of the run, which tells nothing: a failure is the caller's to stop at.
+// Runs `select_cell` on a pool thread's copy of the run. It reports nothing; the caller stops at a failure.
 @(private = "file")
 select_record :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv.Dialect, arena: ^virtual.Arena) -> Select_Result {
 	context.allocator = virtual.arena_allocator(arena)
@@ -332,8 +334,8 @@ select_record :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv.D
 	return .Failed if failed else .Done
 }
 
-// Whether the output's first record opens with a byte order mark, which only the sequential print guards: the first
-// cell of the first record after the header, when the table has not begun.
+// Reports whether the first output record would start with a byte order mark: the first cell of the first record
+// after the header, when the table has not begun. Only the sequential print handles that case.
 @(private = "file")
 opens_with_bom :: proc(run: ^Run, c: ^Cells, cols: ^Columns) -> bool {
 	if run.table == nil || run.rows_begun || cols.at[0] < 0 {
@@ -350,7 +352,7 @@ opens_with_bom :: proc(run: ^Run, c: ^Cells, cols: ^Columns) -> bool {
 	return bytes.has_prefix(text, UTF8_BOM[:])
 }
 
-// A fault in the text ends the run with jq's parse error.
+// Ends the run on a fault in the text, with jq's parse error message.
 @(private = "file")
 cells_failed :: proc(run: ^Run, msg: string) {
 	flush_some(run, force = true)
@@ -358,9 +360,9 @@ cells_failed :: proc(run: ^Run, msg: string) {
 	run.ret = EXIT_INPUT
 }
 
-// The record's output, as `print_jq` prints the interpreter's: each cell its own line, or all in one array. Under
-// --to csv or tsv each is a record of the table. False when a record of it is refused in a pool thread's copy, which
-// leaves the run to the main thread.
+// Prints the record's output as `print_jq` would: each cell on its own line, or all cells in one array or object.
+// Under --to csv/tsv each output is a table record. Returns false when a pool thread's copy refuses a record; the
+// main thread then takes over the run.
 print_cells :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv.Dialect) -> bool {
 	if run.table != nil {
 		return print_cell_rows(run, cols, rec, dialect)
@@ -404,8 +406,8 @@ print_cells :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv.Dia
 	return true
 }
 
-// The cell of column `at` of `rec`, in the temporary allocator: nil when the header lacks the column or the cell has
-// no bytes.
+// Returns the cell of column `at` of `rec`, allocated in the temporary allocator. Returns nil when the header lacks
+// the column or the cell is empty.
 @(private = "file")
 column_cell :: proc(rec: csv.Record, at: int, dialect: csv.Dialect) -> Maybe(string) {
 	if at < 0 || rec.fields[at].lo == rec.fields[at].hi {
@@ -415,7 +417,7 @@ column_cell :: proc(rec: csv.Record, at: int, dialect: csv.Dialect) -> Maybe(str
 	return string(text)
 }
 
-// The record's columns as rows of the table: one row of all the cells, or a row of one cell for each.
+// Writes the record's columns as table rows: one row of all cells, or one row per cell.
 @(private = "file")
 print_cell_rows :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv.Dialect) -> bool {
 	defer free_all(context.temp_allocator)
@@ -448,34 +450,34 @@ Cells_Scan :: struct {
 	dialect:      csv.Dialect,
 }
 
-// What a piece leaves in `Record_Piece.stop` for a record the filter failed on, which the main thread runs again.
+// The `Record_Piece.stop` value for a record the filter failed on. The main thread runs that record again.
 SELECT_STOP :: 2
 
-// Whether a table of objects the pieces print can begin with the header `cols` gives it.
+// Reports whether a table of objects printed by the pieces can start with the header from `cols`.
 @(private = "file")
 table_openable :: proc(run: ^Run, cols: ^Columns) -> bool {
 	return !cols.object || run.table == nil || run.table.shape != .Unset || header_writable(run, cols.keys)
 }
 
-// Print the open whole file's records, on the pool, in order. A fault the pieces meet is found again by reading the
-// file through from its start (printing nothing), so that `cells_ended` tells it as a read of the file does.
+// Prints the records of the open, whole file on the pool, in order. On a fault, the file is read again from its
+// start without printing, so that `cells_ended` reports the fault as a sequential read does.
 @(private = "file")
 print_cells_in_pieces :: proc(run: ^Run, c: ^Cells, cols: ^Columns, runner: ^csv.Batch_Runner) -> (resumed: bool) {
 	job := Cells_Scan{cols = cols, dialect = c.dialect}
 	start_pieces(&job, run)
 	defer end_pieces(&job)
-	// A table of objects begins with the header, put before the first answer.
+	// A table of objects starts with the header, written before the first output.
 	if cols.object && run.table != nil && run.table.shape == .Unset {
 		job.table_due, job.keys = true, cols.keys
 	}
 	fault := csv.each_record(c.data, c.dialect, print_cells_piece, &job, runner)
-	// A write a pool thread met failing ends the run here.
+	// A write that failed on a pool thread ends the run here.
 	check_output()
 	if job.stop == TABLE_STOP {
 		table_fail(run, "%s", row_refusal(run.table, .Unwritable))
 	}
 	if job.stop == SELECT_STOP {
-		// The filter failed on the next record: the main thread runs it, and what follows, as a read of the file does.
+		// The filter failed on the next record. The main thread reruns it and reads the rest sequentially.
 		for _ in 0 ..< job.records {
 			_, _ = csv.next_record(&c.whole)
 		}
@@ -490,15 +492,15 @@ print_cells_in_pieces :: proc(run: ^Run, c: ^Cells, cols: ^Columns, runner: ^csv
 	return false
 }
 
-// Piece `k`'s records, printed into its buffer by a copy of the run, then the pieces now in turn written. A
-// fault in the piece's text ends it, and the pieces after it are not printed. Piece 0 starts at the header.
+// Prints piece `k`'s records into its buffer with a copy of the run, then writes every piece whose turn has come.
+// A fault in the piece's text ends the piece, and later pieces are not printed. Piece 0 starts at the header.
 @(private = "file")
 print_cells_piece :: proc(data: rawptr, piece: ^csv.Records, k: int) -> bool {
 	job := (^Cells_Scan)(data)
 	run := begin_piece(job, k, len(piece.src) - piece.rec_lo)
 	p := Record_Piece{done = true, stop = -1}
 	header := k == 0
-	run.rows_begun = true // the output's first record is `opens_with_bom`'s: no piece opens it
+	run.rows_begun = true // `opens_with_bom` checked the output's first record, so no piece opens the output
 	arena: virtual.Arena
 	selecting := job.cols.selecting
 	if selecting {

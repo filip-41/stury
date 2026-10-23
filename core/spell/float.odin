@@ -1,7 +1,7 @@
 package spell
 
-// A binary64 written as the shortest decimal that reads back as the same bits: zmij's digits laid out by
-// ECMAScript's Number::toString, except that -0 is `-0` (ECMAScript prints `0` and loses the sign bit).
+// Writes a binary64 as the shortest decimal that reads back as the same bits: zmij's digits in ECMAScript's
+// Number::toString layout, except that -0 is `-0` (ECMAScript prints `0` and loses the sign bit).
 //
 // The digits d1..d17 are stored at p[1..18) behind the sign, '0' past the last significant one. Each layout
 // then moves them with whole-word stores, which is why the caller's room exceeds the longest output.
@@ -14,7 +14,7 @@ F64_ROOM :: 1 + 17 + 16
 @(private)
 F64_EXPONENT_MASK :: u64(0x7ff) << DOUBLE_MANTISSA_BITS
 
-// Whether `f` is an infinity or a NaN, which this layout cannot write.
+// Reports whether `f` is an infinity or a NaN, which this layout cannot write.
 is_non_finite :: #force_inline proc "contextless" (f: f64) -> bool {
 	return transmute(u64)f & F64_EXPONENT_MASK == F64_EXPONENT_MASK
 }

@@ -2,9 +2,10 @@ package walk
 
 import "base:intrinsics"
 
-// The helpers this package's matchers reach through into the scanner above it, which this package cannot
-// import: one read-only table per dialect (`json/scan/format_hooks.odin`, `FORMAT_HOOKS_JSONC`), and each scan
-// carries a pointer to its own (`Query_Ctx.hooks`), so concurrent scans share it without writing it.
+// Format_Hooks is the table of scanner procedures that this package's matchers call; this package cannot import
+// the scanner. There is one read-only table per dialect (`json/scan/format_hooks.odin`, `FORMAT_HOOKS_JSONC`).
+// Each scan holds a pointer to its dialect's table (`Query_Ctx.hooks`), so concurrent scans share it without
+// writing it.
 Format_Hooks :: struct {
 	escaped_key_equals: proc(src: []byte, lo, hi: u64, want: string) -> bool,
 	// Validates values when `ctx.walk_judged`, else only locates. A refused append is on `ctx.oom`.

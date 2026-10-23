@@ -26,7 +26,7 @@ Row :: struct {
 	skip:  int `csv:"-"`,
 }
 
-// `unmarshal`, and `unmarshal_check` of the same text must have answered as it did.
+// `unmarshal`, also checking that `unmarshal_check` of the same text gives the same answer.
 read :: proc(t: ^testing.T, src: string, out: ^$T, opts := csv.Unmarshal_Opts{}, loc := #caller_location) -> Maybe(csv.Unmarshal_Error) {
 	err := csv.unmarshal(transmute([]byte)src, out, opts, allocator = context.temp_allocator)
 	expect_check_agrees(t, transmute([]byte)src, T, opts, err, loc)

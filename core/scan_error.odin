@@ -2,9 +2,9 @@ package core
 
 import "core:io"
 
-// One enum for every format, so that code over several reads one `Error`, `Unmarshal_Error` and `Path_Error`: a
-// kind marked CSV is CSV's only, the others are JSON's or shared, and each format's docs list the kinds it never
-// reports.
+// One enum for every format, so code using several formats handles one `Error`, `Unmarshal_Error` and
+// `Path_Error`. A kind marked CSV is reported only by CSV; the others are JSON's or shared. Each format's docs list
+// the kinds it never reports.
 //
 // A syntax fault reports the first byte that cannot extend the construct, or
 // `len(src)` when input ended (`Truncated`: appending bytes could still make it

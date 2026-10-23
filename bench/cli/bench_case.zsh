@@ -1,8 +1,9 @@
 # Sourced by jq_compare.sh and csv_compare.sh, which set OUT first.
 #
-# bench_case NAME -n TOOL CMD ...: keep each tool's answer, then time them all, round by round. A case is ROUNDS
-# hyperfine runs (default 5) of RUNS timings per tool each (default 3), the tools' order rotated every round, so
-# a drift in machine load reaches every tool alike; jq_report.py takes each tool's median over all its timings.
+# bench_case NAME -n TOOL CMD ...
+# Saves each tool's output to OUT/answers/NAME.TOOL.txt, then runs hyperfine ROUNDS times (default 5) with RUNS
+# timings per tool (default 3). The tool order rotates each round so changes in machine load affect every tool
+# equally. jq_report.py takes each tool's median over all its timings.
 bench_case() {
 	local name=$1 i r k
 	shift

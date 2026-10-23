@@ -1,8 +1,9 @@
 package main
 
-// Bench probe: `probe --lane <name> [--fixture <name or path>]` times one lane and prints key=value
-// tokens; a lane this binary cannot measure exits nonzero.
-// Timing: warm, -o:speed, serial, N=10 timed iterations, median.
+// Bench probe. `probe --lane <name> [--fixture <name or path>] [--key <key>] [--emit lazy|strict]` times one
+// lane and prints key=value tokens. Exits 2 on a usage error or an unknown lane, and 1 when the fixture is
+// missing or the lane fails.
+// Timing: warm, -o:speed, serial, median of TIMED_ITERS timed iterations after WARMUP_ITERS untimed ones.
 
 import host "stury:host"
 import json "stury:json"
@@ -12,16 +13,16 @@ import "core:strings"
 import "core:sys/posix"
 import "core:time"
 
-// `-define:TIMED_ITERS=50` beside the default build lets bench/compare.py's `cycles` take one
-// iteration's cost as the difference of two whole-process counter readings.
+// bench/compare.py's `cycles` also builds the probe with `-define:TIMED_ITERS=50` and takes one iteration's
+// cost from the difference between the two builds' whole-process counters.
 TIMED_ITERS :: #config(TIMED_ITERS, 10)
 #assert(TIMED_ITERS % 2 == 0, "median averages the two middle samples")
 WARMUP_ITERS :: 2
 
-// Peak RSS taken once the fixture is loaded, so a lane reports what its own timed work added.
+// Peak RSS after the fixture is loaded. A lane reports its growth past this mark.
 RSS_MARK: u64
 
-// The lanes whose fixture or strictness the naming rules in `lane_fixture` do not give.
+// Fixture and strictness of each lane that `lane_fixture`'s naming rules do not cover.
 LANE_FIXTURES := [?]struct {
 	lane, file: string,
 	level:      json.Strictness,
@@ -37,27 +38,27 @@ LANE_FIXTURES := [?]struct {
 	{"path_ab_middle", "config.json", .Structural},
 	{"path_ab_late", "config.json", .Structural},
 	{"path_ab_absent", "config.json", .Structural},
-	// Query lanes: one query kind each, so the number is the cost of that kind alone.
+	// Query lanes, each timing one query kind alone.
 	{"query_nodes", "nested.json", .Strict},
 	{"query_dom", "nested.json", .Strict},
 	{"dom_read", "nested.json", .Strict},
-	// A fixture the `.Dom` refuses: the lane counts refusals, not bytes per second.
+	// `.Dom` refuses this fixture. The lane counts refusals, not bytes per second.
 	{"query_dom_records_ndjson", "records.ndjson", .Strict},
-	// Both files hold the same 32,768 records, one per line against one array, so the pair's time difference
-	// is what the per-line framing costs.
+	// Both files hold the same 32,768 records, one per line or in one array. The time difference is the cost
+	// of per-line framing.
 	{"records_scan_manysmall", "manysmall.ndjson", .Strict},
 	{"records_scan_onebig", "onebig.ndjson", .Strict},
 	{"streaming_records", "records.ndjson", .Strict},
-	// Wildcard paths on the `substrate_logs` bytes, both on the path automaton: `.logs[].id` is
-	// name-gated (one answer per record), `.logs[][]` answers every member value.
+	// Wildcard paths over logs.json, both on the path automaton. `.logs[].id` matches by name, one answer
+	// per record; `.logs[][]` answers every member value.
 	{"path_wild_logs_id", "logs.json", .Structural},
 	{"path_wild_logs_all", "logs.json", .Structural},
-	// Negative indices on a non-root array, `.logs[-1]` and `.logs[-20]`: each answers once the array's
-	// length is known, by a re-read of its tail, so the pair costs about what the forward index does.
+	// Negative indices on a non-root array, `.logs[-1]` and `.logs[-20]`. Each is answered by re-reading the
+	// array's tail once its length is known, so both cost about as much as a forward index.
 	{"path_logs_last", "logs.json", .Strict},
 	{"path_logs_back", "logs.json", .Strict},
-	// Encode lanes. Document lanes take `--fixture` for the other fixtures. The number lanes generate
-	// their values and only load tiny.json.
+	// Encode lanes. The document lanes accept `--fixture`. The number lanes generate their values and load
+	// only tiny.json.
 	{"encode_doc", "logs.json", .Strict},
 	{"encode_doc_pretty", "logs.json", .Strict},
 	{"encode_doc_indent2", "logs.json", .Strict},
@@ -106,9 +107,10 @@ LANE_FIXTURES := [?]struct {
 	{"csv_marshal_text", "text.csv", .Strict},
 }
 
-// `<lane>_structural` is `<lane>` at `.Structural`. `query_dom_<f>`, `query_nodes_<f>` and `substrate_<f>` read
-// `<f>.json` (`dom_read_<f>` too), at `.Strict`: a `.Structural` scan refuses `.Nodes` and `.Dom` (`Nodes_Need_Strict`), and accepts
-// refusal documents stury must refuse. Every other lane is in `LANE_FIXTURES`.
+// Returns a lane's fixture and strictness. A lane in `LANE_FIXTURES` takes its entry; `<lane>_structural` is
+// `<lane>` at `.Structural`. `query_dom_<f>`, `query_nodes_<f>`, `dom_read_<f>` and `substrate_<f>` read
+// `<f>.json` at `.Strict`, because a `.Structural` scan refuses `.Nodes` and `.Dom` (`Nodes_Need_Strict`) and
+// accepts documents stury must refuse.
 lane_fixture :: proc(lane: string) -> (file: string, level: json.Strictness, ok: bool) {
 	for e in LANE_FIXTURES {
 		if e.lane == lane {
@@ -127,7 +129,8 @@ lane_fixture :: proc(lane: string) -> (file: string, level: json.Strictness, ok:
 	return "", .Strict, false
 }
 
-// A name with a `/` is a path; any other names a file in bench/fixtures.
+// Resolves a fixture name and reports whether the file exists. A name containing `/` is a path; any other
+// name is a file in bench/fixtures.
 fixture_path :: proc(name: string) -> (string, bool) {
 	path := strings.contains_rune(name, '/') ? name : fmt.tprintf("bench/fixtures/%s", name)
 	return path, os.exists(path)
@@ -154,14 +157,15 @@ median :: proc(xs: [TIMED_ITERS]i64) -> i64 {
 	return (sorted[TIMED_ITERS / 2 - 1] + sorted[TIMED_ITERS / 2]) / 2
 }
 
-// Iteration `i` of a WARMUP_ITERS + TIMED_ITERS loop: its time `d` is kept once the warmup is over.
+// Stores the time `d` of iteration `i` of a WARMUP_ITERS + TIMED_ITERS loop, skipping the warm-up iterations.
 keep_timed :: proc(times: ^[TIMED_ITERS]i64, i: int, d: i64) {
 	if i >= WARMUP_ITERS {
 		times[i - WARMUP_ITERS] = d
 	}
 }
 
-// The median of TIMED_ITERS runs of `once` after WARMUP_ITERS untimed ones; false when `once` ever fails.
+// Returns the median ns of TIMED_ITERS runs of `once` after WARMUP_ITERS untimed ones, or false when any run
+// fails.
 time_median :: proc(data: []byte, ctx: $C, once: proc(data: []byte, ctx: C) -> bool) -> (ns: i64, ok: bool) {
 	for _ in 0 ..< WARMUP_ITERS {
 		if !once(data, ctx) {
@@ -180,15 +184,15 @@ time_median :: proc(data: []byte, ctx: $C, once: proc(data: []byte, ctx: C) -> b
 	return median(times), true
 }
 
-// A validate at `level` of a document that must be valid.
+// Validates `data` at `level`. Returns false when it is refused.
 validates_clean :: proc(data: []byte, level: json.Strictness) -> bool {
 	_, refused := json.validate(data, .Json, level).?
 	return !refused
 }
 
-// Peak resident set size in bytes (`ru_maxrss` counts bytes on macOS and KiB elsewhere).
-// It is a high-water mark, so growth since `RSS_MARK` is an upper bound and never a footprint, and it is
-// capacity-dominated: it charges the harness's array doubling, not only the bytes the product holds.
+// Returns the peak resident set size in bytes (`ru_maxrss` counts bytes on macOS and KiB elsewhere).
+// It is a high-water mark, so growth since `RSS_MARK` is an upper bound, not a footprint. It counts
+// allocated capacity, including the harness's array doubling, not only the bytes stury holds.
 rss_peak :: proc() -> u64 {
 	ru: posix.rusage
 	if posix.getrusage(.SELF, &ru) != .OK {
@@ -201,7 +205,7 @@ rss_peak :: proc() -> u64 {
 	return peak
 }
 
-// Growth since the fixture was loaded, which is the part the lane owns.
+// Returns the peak RSS growth past `mark`, the peak taken after the fixture was loaded.
 rss_growth :: proc(mark: u64) -> u64 {
 	now := rss_peak()
 	if now <= mark {
@@ -221,13 +225,12 @@ bench_substrate :: proc(data: []byte, level: json.Strictness) -> bool {
 	return true
 }
 
-// Per-record strict scan: the small-record density regime (framing cost per
-// record, tiny strings) that big-document lanes don't exercise. Counts framing
-// bytes in the denominator — they are part of the record format's cost.
+// One record's byte range in an NDJSON stream. The records lanes validate small records (tiny strings) one
+// by one, for the framing cost per record; the framing bytes count toward GB/s as part of the format's cost.
 Record_Span :: struct { lo, hi: u64 }
 
-// Split the stream once, outside the clock: the newline search is harness work, not scanner work, and
-// sonic-rs splits first too, so the two stay comparable.
+// Splits the stream into records once, outside the clock. The newline search is harness work, not scanner
+// work, and sonic-rs also splits first, so the two stay comparable.
 split_records :: proc(data: []byte, spans: ^[dynamic]Record_Span) {
 	start := u64(0)
 	for b, i in data {
@@ -243,7 +246,7 @@ split_records :: proc(data: []byte, spans: ^[dynamic]Record_Span) {
 	}
 }
 
-// The timed body: one strict scan per precomputed record.
+// Validates each record strictly. Returns the record count, or false at the first refusal.
 scan_records :: proc(data: []byte, spans: []Record_Span) -> (count: int, ok: bool) {
 	for s in spans {
 		if _, h := json.validate(data[s.lo:s.hi], .Json, .Strict).?; h {
@@ -254,7 +257,7 @@ scan_records :: proc(data: []byte, spans: []Record_Span) -> (count: int, ok: boo
 	return count, true
 }
 
-// One strict scan per pre-split line.
+// Times a strict validate of every pre-split line.
 bench_records :: proc(data: []byte) -> bool {
 	spans := make([dynamic]Record_Span, 0, 1 << 16)
 	defer delete(spans)
@@ -280,11 +283,11 @@ bench_records :: proc(data: []byte) -> bool {
 	return true
 }
 
-// `validate_records` over NDJSON on a kept pool, at each width in `BATCH_WIDTHS`, the default (the pool's
-// threads and the caller) last. One sample is `BATCH_REPS` calls back to back, as a stream of windows runs;
-// a single call on a small file is about 100 µs, too short to time alone. The widths alternate inside every
-// iteration so drift lands on all of them alike, and every call must find the file free of faults.
-// `speedup_vs_serial` is the one-worker median over the default's.
+// Times `validate_records` over NDJSON on one pool at each width in `BATCH_WIDTHS`. Width 0 is the default
+// (the pool's threads and the caller) and runs last. One sample is `BATCH_REPS` back-to-back calls, as a
+// stream of windows makes them, because one call on a small file is too short to time alone. The widths
+// alternate inside every iteration so drift affects them equally. Every call must report no faults.
+// `speedup_vs_serial` is the one-worker median divided by the default's.
 BATCH_WIDTHS :: [?]int{1, 2, 3, 6, 0}
 BATCH_REPS :: 8
 
@@ -302,12 +305,12 @@ bench_record_batch :: proc(data: []byte) -> bool {
 	learned := pool.widths
 	for iter in -WARMUP_ITERS ..< TIMED_ITERS {
 		for w, k in widths {
-			// Width `w`: the pool's runner lending `w - 1` of its threads, or none.
+			// Width `w` uses the pool's runner with `w - 1` of its threads; width 1 uses no runner.
 			view := pool.runner
 			view.threads = min(w - 1, pool.runner.threads)
 			runner := &pool.runner if w == 0 else &view if w > 1 else nil
-			// Every view shares the task's learned width, which caps what a call hands out: a set width
-			// starts from none learned, and the default from what it learned itself.
+			// Every view shares the pool's learned widths, which cap how many threads a call uses. A set
+			// width starts with none learned; the default starts from what its own earlier calls learned.
 			pool.widths = learned if w == 0 else {}
 			t := time.tick_now()
 			for _ in 0 ..< BATCH_REPS {
@@ -337,8 +340,8 @@ bench_record_batch :: proc(data: []byte) -> bool {
 	return true
 }
 
-// One wildcard path over the whole document. `answers=N` counts the matches, so a lane that answers
-// less than its fixture holds is visibly wrong.
+// Times one path query over the whole document. `answers=N` counts the matches, so a lane that misses
+// answers shows it.
 bench_path_wild :: proc(data: []byte, level: json.Strictness, steps: []json.Step) -> bool {
 	paths := [1]json.Path{{steps = steps}}
 	req: json.Request({.Path})
@@ -354,7 +357,7 @@ bench_path_wild :: proc(data: []byte, level: json.Strictness, steps: []json.Step
 	return true
 }
 
-// Run a lane and, if it reports failure, name the lane on stderr and exit 1.
+// Exits 1, naming the lane on stderr, when `ok` is false.
 lane_ok :: proc(lane: string, ok: bool) {
 	if !ok {
 		fmt.fprintf(os.stderr, "probe: %s failed\n", lane)
@@ -364,8 +367,8 @@ lane_ok :: proc(lane: string, ok: bool) {
 
 main :: proc() {
 	lane := ""
-	// `--fixture` runs a lane against another document: the lane still selects
-	// the strictness and the query shape, the fixture name selects the bytes.
+	// `--fixture` runs a lane on another document. The lane still sets the
+	// strictness and the query shape.
 	fixture := ""
 	// `--key` replaces a `path_ab_*` lane's key; `--emit lazy|strict` also prints that arm's per-call time as `ns`.
 	key, emit := "", ""
@@ -415,7 +418,7 @@ main :: proc() {
 	defer delete(data)
 	RSS_MARK = rss_peak()
 
-	// `-o:minimal` is the compiler's default, so every lane states its profile first.
+	// Every lane prints its optimization profile first, since `-o:minimal` is the compiler's default.
 	fmt.printf("profile=%v ", ODIN_OPTIMIZATION_MODE)
 
 	switch lane {
@@ -440,8 +443,8 @@ main :: proc() {
 	case "ndjson_records":
 		lane_ok(lane, bench_record_batch(data))
 	case "records_scan_manysmall", "records_scan_onebig":
-		// `records_scan`'s own proc: the claim is a difference of two timings of the same scan, so both
-		// halves need one protocol. `records=N` reads 32,768 here and 1 on the other half.
+		// The same proc as `records_scan`, so both halves of the pair share one protocol. `records=N`
+		// prints 32,768 for manysmall and 1 for onebig.
 		lane_ok(lane, bench_records(data))
 	case "encode_doc":
 		lane_ok(lane, bench_encode_doc(data, {}))
@@ -526,12 +529,12 @@ main :: proc() {
 	case "dom_read":
 		lane_ok(lane, bench_query(data, level, {.Dom}, read_all = true))
 	case "query_dom_fault", "query_dom_records_ndjson":
-		// Not `bench_query`: it fails the lane when the scan refuses, which is the correct answer for these two.
+		// Not `bench_query`, which fails the lane on a refusal: refusing is the correct answer for these two.
 		lane_ok(lane, bench_dom_refusal(data, level))
 	case:
-		// Every other lane is named for its fixture (`lane_fixture`): `substrate` (nested.json) and
-		// `substrate_<f>` validate it and fail the lane if it is refused; `query_dom_<f>` and `query_nodes_<f>`
-		// build it, and `bench_query` fails the lane on a refusal.
+		// Every other lane is named for its fixture (`lane_fixture`). `substrate` (nested.json) and
+		// `substrate_<f>` validate it; `query_dom_<f>`, `dom_read_<f>` and `query_nodes_<f>` build it. Each
+		// fails the lane when the fixture is refused.
 		switch {
 		case lane == "substrate" || strings.has_prefix(lane, "substrate_"):
 			lane_ok(lane, bench_substrate(data, level))

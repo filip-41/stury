@@ -1,8 +1,8 @@
 package json
 
-// The type plan `marshal` runs, and that unmarshal lowers into its read shape (`core_pkg.Type_Plan`), as JSON
-// maps types: its options and hooks, how JSON spells the plan's names, and this thread's cache of
-// the plans calls made without one use.
+// JSON's side of the type plan (`core_pkg.Type_Plan`) that `marshal` runs and `unmarshal` lowers into its read
+// shape. This file holds the plan's options and hooks, how JSON spells the plan's names, and the thread's cache
+// of plans for calls made without one.
 
 import "base:runtime"
 import core_pkg "../core"

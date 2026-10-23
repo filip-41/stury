@@ -1,6 +1,6 @@
-// Read CSV rows into structs, write them back, and report a cell the struct cannot hold. Then the rest of
-// the package: dialects, a document and path reads, edits that keep every other byte, and records read one
-// at a time, from a reader, and on threads.
+// Reads CSV rows into structs, writes them back and reports a cell the struct cannot hold. Also shows
+// dialects, a document, path reads, edits that keep every other byte, and records read from an io.Reader
+// and on threads.
 //
 // Run from the repository root: odin run examples/csv -collection:stury=.
 package main
@@ -33,7 +33,7 @@ main :: proc() {
 		fmt.eprintln(err)
 		os.exit(1)
 	}
-	fmt.print(string(out)) // the same text back: the comma keeps its quotes, the missing population stays empty
+	fmt.print(string(out)) // src again: "Ho, Chi Minh" keeps its quotes and the absent population stays empty
 
 	bad := transmute([]byte)string("City,population,lat,lon\nOslo,lots,59.91,10.75\n")
 	e, refused := csv.unmarshal(bad, &cities).?
@@ -64,7 +64,7 @@ dialects :: proc(cities: ^[]City) {
 	fmt.println(len(cities^), cities[0].lat) // 1 59.91
 }
 
-// A Document keeps where every cell is, `find` reads one cell without building anything, and the edits return
+// A Document keeps the span of every cell. `find` reads one cell without building a document. An edit returns
 // the text with only the targeted bytes changed.
 document_and_edits :: proc(src: []byte) {
 	doc, derr := csv.build(src)
@@ -109,7 +109,7 @@ document_and_edits :: proc(src: []byte) {
 	//                            "Ho, Chi Minh",10.82,106.63
 }
 
-// Records one at a time from a reader, on threads, and a record written by hand.
+// Records read from an io.Reader and on threads, and one record written with write_record.
 streaming :: proc(src: []byte) {
 	r: strings.Reader
 	strings.reader_init(&r, string(src))

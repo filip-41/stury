@@ -53,8 +53,8 @@ same_record :: proc(got, want: csv.Record) -> bool {
 	return true
 }
 
-// `records_from` yields the records, offsets and fault `records` yields over the whole, however the reader
-// hands the bytes out and whether or not it ends with its last bytes.
+// `records_from` yields the records, offsets and fault that `records` yields over the whole input, whatever
+// the read sizes and whether or not the reader returns `.EOF` with its last bytes.
 @(test)
 test_records_from_agrees_with_records :: proc(t: ^testing.T) {
 	long := strings.repeat("x", 300, context.temp_allocator)
@@ -185,9 +185,9 @@ test_record_cap :: proc(t: ^testing.T) {
 	}
 }
 
-// `each_record` hands each piece of a text past its slices to the task, and `validate` takes the same runner: with
-// a runner whose helpers never come, so the caller claims the pieces in order, and with a pool of threads, the
-// records are the whole's in order and the fault is the whole's.
+// `each_record` and `validate` over a text longer than its slices, with a runner whose helpers never start (so
+// the caller claims the pieces in order) and with a thread pool. The records and the fault are the whole
+// input's, in order.
 @(test)
 test_each_record_pieces :: proc(t: ^testing.T) {
 	Tally :: struct {

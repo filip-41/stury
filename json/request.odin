@@ -7,8 +7,8 @@ import core_pkg "../core"
 import "scan/walk"
 import scan_pkg "scan"
 
-// Which occurrence of a key repeated within one object answers a path: core's `Duplicates`. A path through
-// `Any` still answers once per match, each holder object resolving its own repeats.
+// Duplicates selects which occurrence of a key repeated within one object answers a path (core's
+// `Duplicates`). A path through `Any` still answers once per match, and each object resolves its own repeats.
 //
 //	.Default `.Last`
 //	.Last    the last occurrence (no prefix settles it)

@@ -89,7 +89,7 @@ shape_enum_member_store :: #force_inline proc(op: ^Shape_Op, k: int, dest: rawpt
 	}
 }
 
-// Set the tag of the union at `dest` to `tag`. A pure maybe has no tag: its non-nil pointer is the mark.
+// Sets the tag of the union at `dest` to `tag`. A pure maybe has no tag; a non-nil pointer marks the variant.
 shape_union_tag :: proc(dest: rawptr, op: ^Shape_Op, tag: u32) {
 	at := rawptr(uintptr(dest) + uintptr(op.tag_offset))
 	switch op.tag_size {

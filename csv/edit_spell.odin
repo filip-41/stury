@@ -1,9 +1,10 @@
 package csv
 
 // What the edits write: a value or a record spelled as `marshal` spells it, by the same cell writers. A cell
-// opening with a BOM is quoted, or refused where nothing quotes, only where it opens the text.
+// starting with a BOM is quoted, or refused when the dialect cannot quote, only at the start of the text.
 
-// The op for values of type `id` in `p`, a plan made for `id`: a scalar `put_cell` writes.
+// The op for values of type `id` in `p`, a plan made for `id`. `.Unsupported` unless `put_cell` writes it as
+// one cell.
 @(private)
 value_op :: proc(p: ^Type_Plan, id: typeid) -> (op: ^Plan_Op, err: Marshal_Error) {
 	if id == nil {
@@ -16,7 +17,7 @@ value_op :: proc(p: ^Type_Plan, id: typeid) -> (op: ^Plan_Op, err: Marshal_Error
 	return &p.ops[idx], .None
 }
 
-// The struct op for `id`, a plan made for `id`, every field one `put_cell` writes.
+// The struct op for `id` in `p`, a plan made for `id`. Every field must be one cell `put_cell` writes.
 @(private)
 struct_op :: proc(p: ^Type_Plan, id: typeid) -> (op: Plan_Op, err: Marshal_Error) {
 	return cell_struct(p, plan_op(p, type_info_of(id)) or_return)
@@ -59,9 +60,10 @@ put_strings :: proc(w: ^Writer, cells: []string) -> Marshal_Error {
 	return guard_record(w, from)
 }
 
-// The record of the struct at `data` written from `w.buf`'s end, one cell per column: the field `row` has for
-// the column's name (`columns`, header fields of `src`), an empty cell for a column no field names. Without
-// `columns`, the struct's fields in order. `unnamed` is the index of the first field no column names, or -1.
+// The record of the struct at `data` written from `w.buf`'s end, one cell per column. `columns` are header
+// fields of `src`; each cell is the field of `row` with the column's name, or empty when no field has it.
+// Without `columns`, the struct's fields are written in order. `unnamed` is the index of the first field no
+// column names, or -1.
 @(private)
 put_struct :: proc(w: ^Writer, row: Plan_Op, data: rawptr, src: []byte, dialect: Dialect, columns: []Field, matched: []bool) -> (err: Marshal_Error) {
 	p := w.plan

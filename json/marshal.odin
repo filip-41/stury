@@ -1,14 +1,14 @@
 package json
 
-// `marshal`: an Odin value written canonically, by running its type plan. The plan owns structure, so
+// `marshal` writes an Odin value as canonical JSON by running its type plan. The plan fixes the structure, so
 // writes go through the put layer with no per-value state check.
 //
-// Every `data` is the address of a value of the type its op was compiled for: the root is `v`'s type (a
-// plan for another is `.Plan_Mismatch`), a field sits at its type-info offset, an element `stride` apart
-// below its count. The `#no_bounds_check` writers store only into room `enc.put_room` reserved: the key plus
-// FIELD_VALUE_ROOM for a scalar, which covers `spell.INT_ROOM`, `spell.F64_ROOM` and the 8-byte
-// `true`/`false` word, and 3 bytes for `close_object`. `ptrs` has MAX_DEPTH slots, and a target is pushed only below that
-// depth.
+// Every `data` is the address of a value of the type its op was compiled for. The root has `v`'s type; a
+// plan for another type is `.Plan_Mismatch`. A field is at its type-info offset, and the elements are `stride`
+// apart, up to their count. The `#no_bounds_check` writers store only into room that `enc.put_room` reserved.
+// For a scalar that is the key plus FIELD_VALUE_ROOM, which covers `spell.INT_ROOM`, `spell.F64_ROOM` and the
+// 8-byte `true`/`false` word; `close_object` takes 3 bytes. `ptrs` has MAX_DEPTH slots, and a target is pushed
+// only below that depth.
 
 import "base:intrinsics"
 import "base:runtime"
@@ -240,10 +240,10 @@ write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Encode_Error {
 	return .None
 }
 
-// The arms of `write_value` with locals of their own: a rune's bytes, a union's arm, an `any`'s plan, an enum's
-// member. Every level of a nested write holds a `write_value` frame, and a value nested MAX_DEPTH deep must fit
-// a Windows thread's 1 MB stack, so these arms stay out of that frame, as do the callees marked
-// `#force_no_inline` for it (`write_map`, `write_bit_set`, `write_decoded`, `put_wide`).
+// Writes the `write_value` cases that need locals of their own: a rune's bytes, a union's variant, an `any`'s
+// plan and an enum's member. Each level of a nested write holds a `write_value` frame, and a value nested
+// MAX_DEPTH deep must fit a Windows thread's 1 MB stack. These cases therefore stay out of that frame, as do
+// the callees marked `#force_no_inline` (`write_map`, `write_bit_set`, `write_decoded`, `put_wide`).
 @(private = "file")
 write_rare_value :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
 	#partial switch op.kind {
@@ -335,7 +335,7 @@ write_bit_set :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawp
 	return close_container(st, ']', n)
 }
 
-// The bits of the bit_set `op` at `data`, `op.size` bytes of them.
+// Returns the `op.size` bytes of the bit_set `op` at `data`.
 @(private)
 bit_set_bits :: proc(op: Plan_Op, data: rawptr) -> (bits: u128) {
 	runtime.mem_copy_non_overlapping(&bits, data, int(op.size))
@@ -475,7 +475,7 @@ write_target :: proc(st: ^Marshal_Out, idx: u32, target: rawptr) -> Encode_Error
 	return err
 }
 
-// The 128-bit integer at `data`.
+// Writes the 128-bit integer at `data`.
 @(private)
 put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, data: rawptr, signed: bool) -> Encode_Error {
 	buf: [48]u8

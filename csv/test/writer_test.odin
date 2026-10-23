@@ -23,7 +23,7 @@ test_marshal_append :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(out[:]), before)
 }
 
-// A BOM opening the output is quoted only when the output opens with it.
+// A cell starting with a BOM is quoted only at the start of the output.
 @(test)
 test_marshal_append_bom :: proc(t: ^testing.T) {
 	Cell :: struct {
@@ -55,7 +55,7 @@ test_marshal_to_writer :: proc(t: ^testing.T) {
 	for &r, k in rows {
 		r = {"name, with comma" if k % 7 == 0 else "plain", k, "" if k % 3 == 0 else "q\"uote"}
 	}
-	// Rows opening with a BOM, one of which opens each chunk the stream writes.
+	// Rows starting with a BOM, one of which starts each chunk the stream writes.
 	for &r, k in rows {
 		if k % 2 == 0 {
 			r.name = "\xEF\xBB\xBFbom"
@@ -95,7 +95,7 @@ test_write_record :: proc(t: ^testing.T) {
 	testing.expect_value(t, csv.write_record(&out, cells[:2], crlf = true), csv.Marshal_Error.None)
 	testing.expect_value(t, string(out[:]), "a,\r\n")
 
-	// What it writes reads back as the cells: a nil cell and an empty one are told apart in CSV.
+	// The output reads back as the cells: CSV tells a nil cell from an empty one.
 	clear(&out)
 	testing.expect_value(t, csv.write_record(&out, cells), csv.Marshal_Error.None)
 	rs := csv.records(out[:], allocator = context.temp_allocator)
@@ -122,7 +122,7 @@ test_write_record_unwritable :: proc(t: ^testing.T) {
 	testing.expect_value(t, csv.write_record(&out, {"\xff"}), csv.Marshal_Error.Bad_Utf8)
 	testing.expect_value(t, string(out[:]), "kept\n\"\"\n\t\n")
 
-	// A first cell opening with the comment byte is quoted, and where no cell is quoted the record is refused.
+	// A first cell starting with the comment byte is quoted. Where no cell is quoted the record is refused.
 	clear(&out)
 	testing.expect_value(t, csv.write_record(&out, {"#x", "y"}, {comment = '#'}), csv.Marshal_Error.None)
 	testing.expect_value(t, string(out[:]), "\"#x\",y\n")
@@ -161,7 +161,7 @@ test_backslash_escapes_nul :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(set), "s\np\\0q\n")
 }
 
-// A BOM opens the output only at its start: `at_start` says whether an empty `out` is it.
+// A BOM is guarded only at the output's start: `at_start` says whether an empty `out` is that start.
 @(test)
 test_write_record_bom :: proc(t: ^testing.T) {
 	out := make([dynamic]u8, context.temp_allocator)

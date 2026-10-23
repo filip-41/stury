@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `stury:core` is the interface the formats share; JSON's walk substrate moved out of it to
+- `stury:core` holds what the formats share. JSON's walk substrate moved from it to
   `stury:json/scan/walk`: the rows and their stores (`Node`, `Capacity`, `Number_Spelling`), the caps (`Limits`,
   `MAX_DEPTH`, `MAX_SCALAR_DIGITS`), the scan cursor, the query context and its matchers, and the typed walk's
   state (`Shape_Run`, `Shape_Frame`). `json`'s names for them are unchanged.
@@ -25,32 +25,32 @@
   under `-S` (memory holds all the output). An array or scalar is a row with no header, and the two kinds do not mix. A string is its text, a
   number is spelled as jq spells it, `null` is an empty cell, and an array or object in a cell ends the run.
   `-r`, `-j`, `-a`, `-C`, `-c`, `--indent`, `--tab`, `--seq` and `--raw-output0` are a usage error with it. A
-  filter that is only columns is still printed in pieces and gives what the interpreter gives.
+  filter that is only columns is printed in pieces, with the same output as the interpreter.
 - CLI: `@tsv`, `@csv` and `@sh` write a NUL as `\0`, and `@csv`, `@tsv` and `--to csv` write NaN as an empty
-  cell, as jq does; they wrote the raw byte and `null`.
+  cell, as jq does. They wrote the raw byte and `null`.
 - CLI: reading CSV, an empty cell with no quotes is `null` and a quoted `""` is `""`; every empty TSV cell is
-  `null`. `stury --csv .` writes back what it read, up to normalisation; TSV cannot tell `null`
+  `null`. `stury --csv .` writes back what it read, up to normalisation. TSV cannot tell `null`
   from `""`.
-- CLI: `stury check` takes `--from` and the aliases; CSV and TSV go through `csv.validate` and a fault is told as
-  a filter run tells it.
+- CLI: `stury check` takes `--from` and the aliases; CSV and TSV go through `csv.validate`, and a fault is reported
+  as in a filter run.
 - CLI: `--csv` and `--tsv` read CSV (RFC 4180) and TSV (jq's `@tsv` escapes). The first record of each file names
   the fields, and each later record is one input, an object of strings (`stury --from csv -r '[.a, .b] | @csv'`
   writes back what it read). A repeated header name, a record of another width and a fault in the text end the
-  file, told as `FILE:LINE:COLUMN: fault` with exit 5. A file up to 64 MiB is read whole; a larger file, a pipe and
-  a file under `-n` are read in windows, so memory holds a window and the longest record. A filter that is only
+  file, reported as `FILE:LINE:COLUMN: fault` with exit 5. A file up to 64 MiB is read whole. A larger file, a pipe
+  and a file under `-n` are read in windows, so memory holds a window and the longest record. A filter that is only
   columns (`.name`, `.a, .b`, `[.a, .b]` under `--from csv -c`, an object of columns, `.`, and `select(F)` of columns)
   is printed from the cells, in pieces on every core for a whole file. Not with `-R`, `--seq`, `--ndjson`, `--jsonc`, `--stream` or each other.
-- `stury:csv`, a CSV codec: `validate` and a `records` iterator over RFC 4180 text, every byte checked (quote
-  placement, CR before LF, UTF-8, one field count throughout), with `field_text` reading a field's text, and
-  `unmarshal` of records into a list of structs on the shared type plan, columns named by a header or taken in
-  order, each cell judged against its field's type, and `marshal` of such a list back to text that `unmarshal`
-  reads into equal values.
-- CSV dialects: a `Dialect` (delimiter, `Quoting.None` for text where a quote is text, `Escapes.Backslash`, a
-  comment byte, ragged records) on `validate`, `records`, `field_text`, `unmarshal` and `marshal`, with `TSV`
-  for tab-separated values with backslash escapes (`\t`, `\n`, `\r`, `\0`, `\\`); a `Strictness` (`.Structural` skips the UTF-8 check, and
-  `unmarshal` under `.Lazy` judges only the cells it reads); and `Limits.max_fields`. `marshal` refuses a cell
-  its dialect cannot spell so that it reads back, and a record that would be a blank line, with `.Unwritable`. The `delimiter` options are now
-  `dialect.delimiter`.
+- `stury:csv`, a CSV codec. `validate` and the `records` iterator check every byte of RFC 4180 text (quote
+  placement, CR before LF, UTF-8, one field count throughout). `field_text` reads a field's text. `unmarshal`
+  reads records into a list of structs on the shared type plan, with columns named by a header or taken in
+  order, and judges each cell against its field's type. `marshal` writes such a list as text that `unmarshal`
+  reads back into equal values.
+- CSV dialects. `validate`, `records`, `field_text`, `unmarshal` and `marshal` take a `Dialect` (delimiter,
+  `Quoting.None` where a quote is text, `Escapes.Backslash`, a comment byte, ragged records). `TSV` is
+  tab-separated values with backslash escapes (`\t`, `\n`, `\r`, `\0`, `\\`). They also take a `Strictness`
+  (`.Structural` skips the UTF-8 check; `unmarshal` under `.Lazy` judges only the cells it reads) and
+  `Limits.max_fields`. `marshal` refuses with `.Unwritable` a cell its dialect cannot spell so that it reads
+  back, and a record that would be a blank line. The `delimiter` options are now `dialect.delimiter`.
 - CSV documents and edits: `build` keeps the field spans of a text as a `Document` (`row_count`, `column`,
   `get_string`, `get_int`, `get_float`, `get_bool`, `get_name`), `find` and `find_column` read one cell or one
   column by path (`.[3].name`, `.[3][1]`, `.[].name`) off the front of the text, and `set`, `insert`, `remove`
@@ -74,17 +74,18 @@
   `json.Path_Error` and `json.Path_Error_Kind`, whose kinds are renumbered and gain CSV's `Unsupported_Path`,
   `Bad_Option` and `Bad_Row`.
 - `Marshal_Error`: one marshal refusal for every format; `json.Encode_Error` and `csv.Marshal_Error` are its
-  aliases, so `json.Encode_Error` gains CSV's `Bad_Option` and `Unwritable`, which JSON never reports, and a path refusal's `encode` field is one. `render_error` and `render_error_to_writer`
+  aliases. `json.Encode_Error` gains CSV's `Bad_Option` and `Unwritable`, which JSON never reports. A path
+  refusal's `encode` field is a `Marshal_Error`. `render_error` and `render_error_to_writer`
   write it for CSV as for JSON.
 - `Duplicates`: one policy for repeated keys in every format, in core. Its new zero value `.Default` is the
-  format's default (JSON `.Last`, CSV `.Refuse`), so a zero-valued option reads as before; `json.Duplicates`
-  and `csv.Duplicates` are its aliases, and JSON's is now a `u8`.
+  format's default (JSON `.Last`, CSV `.Refuse`), so a zero-valued option reads as before. `json.Duplicates`
+  and `csv.Duplicates` are its aliases. JSON's is now a `u8`.
 - `Error_Kind.Field_Count`, the CSV fault of a record whose field count is not the first record's, and
   `Error_Kind.Limit_Fields`, of a record with more fields than `Limits.max_fields`. JSON never reports them.
 - CSV streaming and threads: `csv.records_from` reads the records of an `io.Reader` a chunk at a time, with the
-  records, offsets and fault `records` gives the whole; `csv.each_record` hands pieces of a text to a task on a
-  `Batch_Runner`'s threads, and `csv.validate` takes one too, with the answer `validate` gives alone.
-  `Limits.max_record_bytes` caps a line (`Error_Kind.Limit_Record`), and so the window `records_from` holds. A
+  same records, offsets and fault as `records` on the whole text. `csv.each_record` runs a task on pieces of a
+  text on a `Batch_Runner`'s threads. `csv.validate` takes a runner too and gives the same answer as without one.
+  `Limits.max_record_bytes` caps a record (`Error_Kind.Limit_Record`) and so bounds the window `records_from` holds. A
   `Record` carries the `src` its fields index. `Batch_Runner` is defined in `stury:core`; `json.Batch_Runner`
   names it.
 - `Request` and `Prepared` name their type parameter `$KINDS` (was `$Q`), as the generic procedures that take

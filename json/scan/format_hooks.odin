@@ -2,7 +2,7 @@ package scan
 
 import "walk"
 
-// JSON's hooks, the table the walk's matchers call into. Every JSON scan's context points at it.
+// The table of JSON procedures that the walk's matchers call. Every JSON scan's context points at it.
 @(rodata)
 FORMAT_HOOKS := walk.Format_Hooks{
 	escaped_key_equals = name_equals,

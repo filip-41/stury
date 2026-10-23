@@ -2,8 +2,8 @@ package core
 
 // Lowering a `Type_Plan` into the read shape a typed reader walks (`Read_Shape`): one shape op per plan op and
 // one shape field per plan field, at the same indices, so tags, field order and omitempty are the ones the
-// writer writes by. A type the reader cannot read lowers to `.Unsupported`, and a shape that reaches one is
-// refused before any byte is read. A format annotates the shape for its own walk with `Plan_Format.lowered`.
+// writer uses. A type the reader cannot read lowers to `.Unsupported`, and a shape that reaches one is refused
+// before any byte is read. A format annotates the shape for its own walk with `Plan_Format.lowered`.
 
 import "base:runtime"
 import "core:reflect"
@@ -198,9 +198,9 @@ lower_union :: proc(p: ^Type_Plan, i: u32, u: runtime.Type_Info_Union, size: u32
 	out.size = size
 }
 
-// The non-null value classes plan op `i` reads. `null` reads as a pointer's or a
-// union's nil, never as an arm. `depth` stops a union that holds a pointer to itself: past 16 pointers or
-// unions in a row an arm takes nothing more.
+// Returns the non-null value classes that plan op `i` reads. `null` reads as a pointer's or a union's nil, never
+// as an arm. `depth` bounds a union that holds a pointer to itself: past 16 nested pointers or unions, an arm
+// accepts no further class.
 @(private = "file")
 value_classes :: proc(p: ^Type_Plan, i: u32, depth: int) -> (classes: bit_set[Value_Class]) {
 	if depth > 16 {
@@ -236,8 +236,8 @@ value_classes :: proc(p: ^Type_Plan, i: u32, depth: int) -> (classes: bit_set[Va
 	return
 }
 
-// A struct op: its field names and the required masks. Two fields writing one name left the plan op
-// `.Unsupported` already.
+// Lowers a struct op: its field names and required-field masks. Two fields with the same name have already made
+// the plan op `.Unsupported`.
 @(private = "file")
 lower_struct :: proc(p: ^Type_Plan, i: u32, size: u32) -> runtime.Allocator_Error {
 	op := p.ops[i]
@@ -304,7 +304,7 @@ shape_refused :: proc(p: ^Type_Plan, i: u32, visited: []bool, err: ^Unmarshal_Er
 	case .Pointer:
 		return shape_refused(p, op.elem, visited, err)
 	case .Map:
-		// The kinds a map key's text is read as.
+		// The kinds a map key's text can be read as.
 		keys :: bit_set[Shape_Kind]{.String, .Cstring, .Int, .Uint, .Enum_Int, .Enum_Uint, .Wide_Int, .Wide_Uint}
 		if r.ops[op.key].kind not_in keys {
 			return true

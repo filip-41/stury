@@ -1,6 +1,6 @@
 package index
 
-// The flatten that lists set bits as offsets, over the 64-byte block machinery of `core/bits`.
+// Lists the set bits of 64-byte blocks as offsets, using the block procedures of `core/bits`.
 
 import "base:intrinsics"
 import bits "../../../core/bits"

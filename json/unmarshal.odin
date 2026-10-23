@@ -5,8 +5,9 @@ import core_pkg "../core"
 import "scan/walk"
 import scan_pkg "scan"
 
-// What `unmarshal` does with a member the target type does not name: `.Ignore` checks it (`.Strict`), or may
-// skip it unchecked (`.Lazy`, see `strictness`); `.Refuse` refuses it, `.Unknown_Field` at its key.
+// Unknown_Fields selects what `unmarshal` does with a member the target type does not name. `.Ignore` checks
+// it under `.Strict` and may skip it unchecked under `.Lazy` (see `strictness`). `.Refuse` refuses it with
+// `.Unknown_Field` at its key.
 Unknown_Fields :: core_pkg.Unknown_Fields
 
 // How `unmarshal` and `unmarshal_check` read: the zero value is `.Strict`, `.Last`, unknown members ignored,
@@ -18,8 +19,8 @@ Unmarshal_Opts :: struct {
 	// on the fault. `.Structural` is `.Bad_Option`: a typed read stores what it reads, so it checks it. Under
 	// `dialect = .Jsonc`, which reads every byte whatever `strictness` says, it reads the document strictly.
 	strictness:     Strictness,
-	// What to do with a key that appears twice in one object. `.Default` is `.Last`, which keeps the last occurrence only: a struct member is reset to
-	// zero before it is read again, so nothing of the earlier one survives, and a map entry or an `any` is
+	// What to do with a key that appears twice in one object. `.Default` is `.Last`, which keeps only the last
+	// occurrence. A struct member is reset to zero before it is read again, so nothing of the earlier one survives, and a map entry or an `any` is
 	// replaced. `.First` reads the first occurrence and checks the later ones as `strictness` says, without
 	// storing them. `.All` reads every occurrence over the one before: struct fields and map entries merge,
 	// and a list is read from its start over the earlier one. `.Refuse` refuses a key that, decoded, repeats
