@@ -43,6 +43,7 @@ take_members :: #force_inline proc(
 	cur: ^Index_Cursor($F),
 	q: ^Query_Ctx,
 	$Q: bit_set[Walk_Kind],
+	$check: Check_Level,
 	sp: u64,
 	owner_lo: u64,
 	pend: ^Demand_Pend,
@@ -173,7 +174,7 @@ take_members :: #force_inline proc(
 				return .Value
 			}
 		}
-		if reaches || !cursor_skip_value(s, cur, vc, room) {
+		if reaches || !cursor_skip_value(s, cur, vc, room, check) {
 			return .Value
 		}
 		// The skip may have left the region, and the next key is checked by the

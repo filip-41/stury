@@ -278,7 +278,7 @@ Map_Entry :: struct {
 // Keys sorted by their written bytes between the quotes, so the output depends only on the map's contents.
 // The scratch lives in `st.out.allocator` and is freed before return.
 @(private)
-write_map :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
+write_map :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
 	m := (^runtime.Raw_Map)(data)^
 	open_container(st, '{') or_return
 	n := int(m.len)

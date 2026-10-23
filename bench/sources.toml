@@ -1,0 +1,109 @@
+# What bench/fetch.py downloads: each file by URL and SHA-256, so a run reads exactly these bytes.
+#
+# kind = "corpus": real-world JSON other parsers' benchmarks use, from simdjson-data at one commit (the
+# files carry their publishers' terms, so they are fetched, never committed). They land in
+# bench/fixtures/corpus/<name>.
+# kind = "source": another library, built from source with the bench's own flags (compare.py build).
+# A file lands in build/bench/deps/<name>/; a .tar.gz unpacks there without its top directory.
+# The Rust libraries are pinned by bench/peers/rust/Cargo.lock instead.
+
+[[pin]]
+kind = "corpus"
+name = "twitter.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/twitter.json"
+sha256 = "30721e496a8d73cfc50658923c34eb2c0fbe15ee6835005e43ee624d8dedf200"
+
+[[pin]]
+kind = "corpus"
+name = "citm_catalog.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/citm_catalog.json"
+sha256 = "a73e7a883f6ea8de113dff59702975e60119b4b58d451d518a929f31c92e2059"
+
+[[pin]]
+kind = "corpus"
+name = "canada.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/canada.json"
+sha256 = "f83b3b354030d5dd58740c68ac4fecef64cb730a0d12a90362a7f23077f50d78"
+
+[[pin]]
+kind = "corpus"
+name = "github_events.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/github_events.json"
+sha256 = "c9eebb2cf2d46649059e9d48700919bacb3e8e0fb58452065a1a9de7778fd22e"
+
+[[pin]]
+kind = "corpus"
+name = "gsoc-2018.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/gsoc-2018.json"
+sha256 = "72f1ef4898d88049da856c2ab8f4ec3e2c968ce209b2bbfd16cef842eb2e185f"
+
+[[pin]]
+kind = "corpus"
+name = "marine_ik.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/marine_ik.json"
+sha256 = "61590a397542ae274ccd8a47ba9f64e7c9216a223a5e7e702dea5b2375411d62"
+
+[[pin]]
+kind = "corpus"
+name = "mesh.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/mesh.json"
+sha256 = "45bc8bf429340a874a7af8ea7056d60497402f80f55dba1e6ecc4ca8f1e46aff"
+
+[[pin]]
+kind = "corpus"
+name = "numbers.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/numbers.json"
+sha256 = "82e9ddfe00963110ed8a0704e7df4d1ad1af9c0f336d1b24431ebc63cf430a2b"
+
+[[pin]]
+kind = "corpus"
+name = "instruments.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/instruments.json"
+sha256 = "f3069235d4e2695d36c0c7735a435a7abb279fc4d64bbcf4ed9f888b8da1fdb9"
+
+[[pin]]
+kind = "corpus"
+name = "apache_builds.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/apache_builds.json"
+sha256 = "f8e3422ac7d3c3550674afcb37e979e4e9bbeccffdb66933423495d55b6f5c74"
+
+[[pin]]
+kind = "corpus"
+name = "update-center.json"
+url = "https://raw.githubusercontent.com/simdjson/simdjson-data/4197c425e857f0ec38e89822fdd0bd9ea21f4daf/jsonexamples/update-center.json"
+sha256 = "e7b6a037bfdb5abdf122fa3445ddfacea78522a23df31c4799884c4ebf4c01fa"
+
+[[pin]]
+kind = "source"
+name = "simdjson"
+version = "5.0.5"
+url = "https://raw.githubusercontent.com/simdjson/simdjson/v5.0.5/singleheader/simdjson.h"
+sha256 = "869e8a4ff285cec36bc79d4a671a433158391a4f1898bb1c3b1f6e654b9547ae"
+
+[[pin]]
+kind = "source"
+name = "simdjson"
+version = "5.0.5"
+url = "https://raw.githubusercontent.com/simdjson/simdjson/v5.0.5/singleheader/simdjson.cpp"
+sha256 = "97d622441079fae86c7c342508880168bd7bf9e3342b1f4c565077da0155ca79"
+
+[[pin]]
+kind = "source"
+name = "yyjson"
+version = "0.13.0"
+url = "https://raw.githubusercontent.com/ibireme/yyjson/0.13.0/src/yyjson.h"
+sha256 = "ef803cda5c06b8962face6dfa39c3284b3bcf3e73f4d7317664690cc779679ca"
+
+[[pin]]
+kind = "source"
+name = "yyjson"
+version = "0.13.0"
+url = "https://raw.githubusercontent.com/ibireme/yyjson/0.13.0/src/yyjson.c"
+sha256 = "d2d58ef0a3b2267862dc363832c4f3185fd375aea933d5d3419d1a940d6ece2e"
+
+[[pin]]
+kind = "source"
+name = "rapidjson"
+version = "1.1.0"
+url = "https://github.com/Tencent/rapidjson/archive/refs/tags/v1.1.0.tar.gz"
+sha256 = "bf7ced29704a1e696fbccf2a2b4ea068e7774fa37f6d7dd4039d0787f8bed98e"

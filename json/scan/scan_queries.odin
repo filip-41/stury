@@ -18,16 +18,17 @@ dispatch_walk :: #force_inline proc(
 	axes: Strictness_Axes,
 	$Q: bit_set[Walk_Kind],
 	stopped: ^bool,
+	$pretty: bool,
 ) -> Maybe(Error) {
 	// Only path and demand queries can tell which values nothing reads, so only they let a locating or
 	// may-stop reading leave values unvisited. With no query the walk is a validation and never skips.
 	SKIP :: Q != {} && Q <= bit_set[Walk_Kind]{.Path, .Demand, .Gate}
 	switch axes_check_level(axes) {
 	case .Values:
-		return dispatch_walk_cursor(s, ctx, axes, .Values, Q, stopped, SKIP)
+		return dispatch_walk_cursor(s, ctx, axes, .Values, Q, stopped, SKIP, pretty)
 	case .Locate:
 		when !(TAPE_BESIDE_PATHS <= Q) {
-			return dispatch_walk_cursor(s, ctx, axes, .Locate, Q, stopped, SKIP)
+			return dispatch_walk_cursor(s, ctx, axes, .Locate, Q, stopped, SKIP, pretty)
 		}
 	}
 	return nil
@@ -42,14 +43,17 @@ dispatch_walk_cursor :: #force_inline proc(
 	$Q: bit_set[Walk_Kind],
 	stopped: ^bool,
 	$skip: bool,
+	// The document opens like a pretty printer's (`pretty_head`): a walk that reads every token takes the pretty cursor.
+	$pretty: bool,
 ) -> Maybe(Error) {
 	// One index per arm keeps a single buffer in the frame.
 	when SCAN_FORCE_SLOW {
 		cur: Byte_Cursor
 	} else when check == .Locate && skip {
 		// Every unread scalar is skipped and the few left are passed by their leaf, so a per-block shape
-		// fact would cost more than it saves.
-		ix: index.Index(index.Facts{}) = ---
+		// fact would cost more than it saves. `.Wire_On_Skip` is the one fact a skip needs, to judge the
+		// blocks it crosses.
+		ix: index.Index(index.Facts{.Wire_On_Skip}) = ---
 		cur := index_cursor(&ix, s, axes.termination == .Complete)
 	} else when check == .Locate {
 		ix: index.Index(LOCATE_FACTS) = ---
@@ -57,6 +61,8 @@ dispatch_walk_cursor :: #force_inline proc(
 	} else when skip {
 		ix: index.Index(VALUES_FACTS) = ---
 		cur: Byte_Cursor
+	} else when pretty {
+		cur: Pretty_Cursor
 	} else {
 		cur: Byte_Cursor
 	}
@@ -194,7 +200,7 @@ scan_queries :: proc(
 		}
 		return
 	} else {
-		return scan_queries_in(src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Walk_Fault, false, kept)
+		return scan_queries_in(src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Walk_Fault, false, kept, false)
 	}
 }
 
@@ -212,8 +218,32 @@ scan_queries_tape :: #force_no_inline proc(
 	validity: ^Validity,
 	resolution: Resolution,
 ) -> (err: Maybe(Error), qerr: Maybe(core_pkg.Request_Error)) {
+	// Decided before the walk's scanner exists, as `scan_plain` decides, so the compact walk compiles as it would
+	// without the pretty one.
+	s := enter_document(src, limits, MAX_DEPTH)
+	lex.skip_ws(&s)
+	if pretty_head(src, int(s.pos)) {
+		return scan_queries_tape_pretty(src, queries, strictness, limits, Q, stop_byte, validity, resolution)
+	}
 	return scan_queries_in(
-		src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Maybe(core_pkg.Request_Error), false,
+		src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Maybe(core_pkg.Request_Error), false, nil, false,
+	)
+}
+
+// `scan_queries_tape` for a document that opens like a pretty printer's, on the pretty cursor.
+@(private = "file")
+scan_queries_tape_pretty :: #force_no_inline proc(
+	src: []byte,
+	queries: []Scan_Query,
+	strictness: Strictness,
+	limits: Limits,
+	$Q: bit_set[Walk_Kind],
+	stop_byte: ^Maybe(u64),
+	validity: ^Validity,
+	resolution: Resolution,
+) -> (err: Maybe(Error), qerr: Maybe(core_pkg.Request_Error)) {
+	return scan_queries_in(
+		src, queries, strictness, limits, Q, stop_byte, validity, resolution, .Json, nil, Maybe(core_pkg.Request_Error), false, nil, true,
 	)
 }
 
@@ -233,11 +263,11 @@ scan_queries_deep :: #force_no_inline proc(
 	facts: ^[dynamic]Fact,
 ) -> (err: Maybe(Error), fault: Walk_Fault) {
 	if dialect == .Jsonc {
-		return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Jsonc, facts, Walk_Fault, true)
+		return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Jsonc, facts, Walk_Fault, true, nil, false)
 	}
 	// `.Lazy` is read as `.Strict`: its stop is not taken here, and `axes_for` would arm one.
 	level := Strictness.Structural if strictness == .Structural else Strictness.Strict
-	return scan_queries_in(src, queries, level, limits, Q, nil, validity, resolution, .Json, nil, Walk_Fault, true)
+	return scan_queries_in(src, queries, level, limits, Q, nil, validity, resolution, .Json, nil, Walk_Fault, true, nil, false)
 }
 
 // `resolve_queries` behind an out-of-line `Maybe(Request_Error)` return, for `scan_queries_tape`.
@@ -289,7 +319,7 @@ scan_queries_jsonc :: #force_no_inline proc(
 	resolution := Resolution.All,
 	facts: ^[dynamic]Fact = nil,
 ) -> (err: Maybe(Error), fault: Walk_Fault) {
-	return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Jsonc, facts, Walk_Fault, false)
+	return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Jsonc, facts, Walk_Fault, false, nil, false)
 }
 
 @(private = "file")
@@ -307,6 +337,7 @@ scan_queries_in :: #force_inline proc(
 	$F: typeid,
 	$deep: bool,
 	kept: ^Resolved_Queries = nil,
+	$pretty: bool,
 ) -> (err: Maybe(Error), fault: F) {
 	axes := axes_for(strictness, resolution)
 	when TAPE_BESIDE_PATHS <= Q {
@@ -430,7 +461,7 @@ scan_queries_in :: #force_inline proc(
 			}
 		}
 	} else {
-		werr := dispatch_walk(&s, ctx, axes, Q, &stopped)
+		werr := dispatch_walk(&s, ctx, axes, Q, &stopped, pretty)
 	}
 	if werr != nil {
 		// A `.Last` candidate parked before the fault is an answer about bytes the walk did check,

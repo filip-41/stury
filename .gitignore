@@ -16,7 +16,7 @@
 # Their debug symbols, which `make test-asan` and `test-tsan` (built with -debug) leave on macOS.
 *.dSYM/
 
-# Generated benchmark fixtures, written here by the private checkout's bench/gen.py.
+# Benchmark inputs: bench/gen.py writes the synthetic fixtures, bench/fetch.py the pinned corpus under corpus/.
 /bench/fixtures/
 __pycache__/
 
