@@ -9,6 +9,7 @@ package lex
 import "base:intrinsics"
 import "core:simd"
 import "core:sys/info"
+import bits "../../../core/bits"
 
 Block64 :: #simd[64]u8
 
@@ -65,9 +66,9 @@ utf8_err_wide :: #force_inline proc "contextless" (prev, v: Block64) -> Block64 
 	p3 := simd.shuffle(prev, v,
 		61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
 		93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124)
-	pairs := pshufb_wide(table_wide(UTF8_TBL_A), simd.shr(p1, 4)) &
-		pshufb_wide(table_wide(UTF8_TBL_B), simd.bit_and(p1, Block64(0x0f))) &
-		pshufb_wide(table_wide(UTF8_TBL_C), simd.shr(v, 4))
+	pairs := pshufb_wide(table_wide(bits.UTF8_TBL_A), simd.shr(p1, 4)) &
+		pshufb_wide(table_wide(bits.UTF8_TBL_B), simd.bit_and(p1, Block64(0x0f))) &
+		pshufb_wide(table_wide(bits.UTF8_TBL_C), simd.shr(v, 4))
 	must23 := simd.saturating_sub(p2, Block64(0x60)) | simd.saturating_sub(p3, Block64(0x70))
 	return simd.bit_and(must23, Block64(0x80)) ~ pairs
 }

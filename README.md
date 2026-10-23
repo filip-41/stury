@@ -1,6 +1,6 @@
 # stury
 
-stury is a structural data processing library currently supporting JSON for [Odin](https://odin-lang.org),
+stury is a structural data processing library currently supporting JSON and CSV for [Odin](https://odin-lang.org),
 plus a command line that runs jq filters on top of the data.
 
 It is built for programs that read a lot of data and want to do little work per byte. You can check a text for
@@ -25,8 +25,8 @@ git clone https://github.com/filip-41/stury vendor/stury
 odin build . -collection:stury=vendor/stury -o:speed
 ```
 
-`-collection:stury=PATH` makes `import "stury:json"` and `import "stury:host"` resolve to the directories
-under PATH. Keep `json/`, `core/` and `host/` together in the copy. For the
+`-collection:stury=PATH` makes `import "stury:json"`, `import "stury:csv"` and `import "stury:host"` resolve
+to the directories under PATH. Keep `json/`, `csv/`, `core/` and `host/` together in the copy. For the
 [ols](https://github.com/DanielGavin/ols) language server, add the same collection to your `ols.json`:
 
 ```json
@@ -71,10 +71,13 @@ each archive has a `.sha256` beside it), unpack it, and put it on your `PATH`. O
   entries, and `records_from` frames a stream from an `io.Reader`.
 - **Parallel when you ask.** `validate_records` and `each_record` run on threads from `stury:host`. The
   library itself starts no thread and keeps no global state.
+- **CSV on the same type plans.** `stury:csv` checks RFC 4180 text strictly (quote placement, CR before LF,
+  UTF-8, one field count throughout) with `validate` and `records`, and `unmarshal` and `marshal` map its
+  rows to a list of structs, each cell judged against its field's type.
 - **Duplicate keys are a policy**: keep the last, the first, all of them, or refuse the text.
 - **A jq 1.8 command line.** `stury` runs jq filters with jq's answers and exit codes as the baseline,
   with its own `stury:` messages, and differs where jq loses data or misreports an error ([listed in
-  docs/cli.md](docs/cli.md#differences-from-jq)). It adds `check`, `--ndjson` and `--jsonc`.
+  docs/cli.md](docs/cli.md#differences-from-jq)). It adds `check`, `--from` and `--to`.
 
 ## Things to know
 
@@ -272,6 +275,26 @@ _, strict_bad := json.validate(src).?
 fmt.println(jsonc_bad, strict_bad) // false true: only strict JSON refuses the comment
 ```
 
+### CSV (`examples/csv`)
+`stury:csv` reads rows into structs by the header's column names and writes them back.
+
+```odin
+City :: struct {
+	name:       string `csv:"City"`,
+	population: Maybe(i64),
+	lat, lon:   f64,
+}
+
+src := transmute([]byte)string("City,population,lat,lon\nOslo,709000,59.91,10.75\n\"Ho, Chi Minh\",,10.82,106.63\n")
+cities: []City
+_ = csv.unmarshal(src, &cities)
+fmt.println(cities[1].name, cities[1].population) // Ho, Chi Minh nil
+out, _ := csv.marshal(cities) // the same text back
+```
+
+A `Dialect` reads other delimited text: another delimiter, no quoting, backslash escapes (`csv.TSV`), comment
+lines and ragged records, each through the same calls (`csv.unmarshal(src, &cities, {dialect = csv.TSV})`).
+
 ## Command line
 `stury` is a drop-in replacement for [jq](https://jqlang.org) 1.8: it runs jq filters and gives jq's results
 and exit codes. Its messages start with `stury:` and are worded its own way; [docs/cli.md](docs/cli.md) lists
@@ -289,7 +312,9 @@ What differs from jq:
 - Input is strict RFC 8259 JSON by default, so `01`, `NaN` and invalid UTF-8 are errors where jq accepts them,
   and an error names the fault and its line and column.
 - `stury check FILE` only validates and prints nothing when the file is valid.
-- `--ndjson` reads one JSON value per line; `--jsonc` reads JSONC and prints comments back.
+- `--ndjson` reads and prints one JSON value per line; `--jsonc` reads JSONC and prints comments back;
+  `--csv` and `--tsv` read records as objects and write each output as a row. `--from` and `--to` choose the
+  two sides apart (`stury --from csv --to json . people.csv`).
 
 [docs/cli.md](docs/cli.md) lists every flag, and [each difference from jq](docs/cli.md#differences-from-jq).
 

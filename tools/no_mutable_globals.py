@@ -2,7 +2,7 @@
 """No mutable package-level state in the library packages.
 
 WHAT THIS IS. The batch-parallel driver runs scans on many threads. That is only
-safe when no library package under `core/`, `host/` or `json/` holds a
+safe when no library package under `core/`, `csv/`, `host/` or `json/` holds a
 package-level variable: a global written by one scan is read by the next, on
 another thread.
 This finds every file-scope variable declaration there and exits non-zero naming
@@ -25,7 +25,7 @@ declaration), then brackets are counted char by char, because indentation lies
 and brace depth alone does not see `proc(\\n  s: ^Scanner,\\n)`. A statement ends
 at a newline while file scope is open.
 
-WHICH PACKAGES. Every `.odin` file under `core/` and `json/` except those below a
+WHICH PACKAGES. Every `.odin` file under `core/`, `csv/` and `json/` except those below a
 directory named `test`, found by walking the tree and NOT by reading the
 Makefile's LIB_PKGS. The Makefile list is a hand-kept registry: a package added
 and forgotten there would be silently exempt, which is the failure this guards
@@ -43,7 +43,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PKG_ROOTS = ("core", "host", "json")
+PKG_ROOTS = ("core", "csv", "host", "json")
 SKIP_DIR = "test"
 
 NAMES = r"[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*"

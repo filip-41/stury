@@ -1,12 +1,13 @@
 package scan
 
 import core_pkg "../../core"
+import "walk"
 import "base:intrinsics"
 import "base:runtime"
 import lex "lex"
 
 // The shape walk: `walk_value_q` over `{.Shape}`, whose hooks read each value into the target its read shape
-// names (`core_pkg.Shape_Run`). The hooks act only on values at the run's depth. Everything deeper belongs to a
+// names (`walk.Shape_Run`). The hooks act only on values at the run's depth. Everything deeper belongs to a
 // container nothing reads, which the walk checks (or, under `.Lazy`, skips) on its own.
 //
 // The unchecked accesses rest on the walk and the plan. A frame is pushed only below the walk's depth cap,
@@ -57,10 +58,10 @@ shape_resize :: proc(ptr: rawptr, old_size, new_size, align: int, allocator: run
 	return buf, err
 }
 
-TYPED_FAULT :: core_pkg.TYPED_FAULT
+TYPED_FAULT :: walk.TYPED_FAULT
 
 // The shape walk's one way out on a typed fault. Cold: a refusal happens at most once per call.
-shape_fault :: #force_no_inline proc(r: ^core_pkg.Shape_Run, kind: core_pkg.Shape_Fault, at: u64, steps: u64) -> Maybe(Error) {
+shape_fault :: #force_no_inline proc(r: ^walk.Shape_Run, kind: core_pkg.Shape_Fault, at: u64, steps: u64) -> Maybe(Error) {
 	r.fault = kind
 	r.fault_steps = u32(steps)
 	return Error{offset = at, kind = TYPED_FAULT}
@@ -125,7 +126,7 @@ shape_value_open :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, sp: u64, vc: 
 		// A list is replaced, its elements starting from zero: a grown slot holds what the allocator left (an
 		// allocator's zeroing is not relied on), and a fixed-capacity one what the list held before. A fixed
 		// array's element is read over in place, as Go's is.
-		if dest != nil && fop.kind != .Array && r.ops[fop.elem].kind not_in core_pkg.SHAPE_WHOLE_LEAVES {
+		if dest != nil && fop.kind != .Array && r.ops[fop.elem].kind not_in SHAPE_WHOLE_LEAVES {
 			shape_zero(dest, fop.stride)
 		}
 		f.n += 1
@@ -208,14 +209,14 @@ shape_value_open :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, sp: u64, vc: 
 		r.cur_op, r.cur_dest, r.cur_live = op_i, dest, true
 		return nil
 	}
-	r.frames[sp] = core_pkg.Shape_Frame{dest = dest, data = aside, op = op_i, field = core_pkg.NO_FIELD, n = u32(tagged)}
+	r.frames[sp] = walk.Shape_Frame{dest = dest, data = aside, op = op_i, field = core_pkg.NO_FIELD, n = u32(tagged)}
 	r.sp = sp + 1
 	return nil
 }
 
 // Room for one more element in the full list open in `f`, at walk depth `sp - 1`, whose element opens at
 // `at`. A fault names the element that found no room.
-shape_list_grow :: proc(r: ^core_pkg.Shape_Run, f: ^core_pkg.Shape_Frame, fop: ^core_pkg.Shape_Op, at, sp: u64) -> Maybe(Error) {
+shape_list_grow :: proc(r: ^walk.Shape_Run, f: ^walk.Shape_Frame, fop: ^core_pkg.Shape_Op, at, sp: u64) -> Maybe(Error) {
 	// `n` and `cap` are u32: a list that would outgrow them is refused, never wrapped, read or not.
 	if f.cap > max(u32) / 2 {
 		f.n += 1
@@ -249,14 +250,14 @@ shape_list_grow :: proc(r: ^core_pkg.Shape_Run, f: ^core_pkg.Shape_Frame, fop: ^
 // A container read whole into the `Raw`, `any`, bit_set or hooked value (op `op_i`) at `dest`. It pushes no frame, so `r.sp` stays
 // put and nothing inside it is read on its own, while `raw_open` keeps `r.reads` set so the walk checks all of
 // it. `shape_close` takes its span.
-shape_raw_open :: #force_inline proc(r: ^core_pkg.Shape_Run, lo, sp: u64, dest: rawptr, op_i: u32) {
+shape_raw_open :: #force_inline proc(r: ^walk.Shape_Run, lo, sp: u64, dest: rawptr, op_i: u32) {
 	r.raw_open, r.raw_lo, r.raw_sp, r.cur_dest, r.cur_op = true, lo, sp, dest, op_i
 }
 
 // The arm of the union op `op` that a value of class `vc`, opening at `at`, reads into, tagged at `dest`: an
 // object's by its tag member when it has one, else by the class. `.Wrong_Kind` when no arm takes the class.
 // Out of line: a union is rare in a read shape, and the walk inlines its caller everywhere.
-shape_union_arm :: #force_no_inline proc(r: ^core_pkg.Shape_Run, op: ^core_pkg.Shape_Op, dest: rawptr, vc: u8, at: u64) -> (arm: u32, fault: core_pkg.Shape_Fault) {
+shape_union_arm :: #force_no_inline proc(r: ^walk.Shape_Run, op: ^core_pkg.Shape_Op, dest: rawptr, vc: u8, at: u64) -> (arm: u32, fault: core_pkg.Shape_Fault) {
 	k := op.arm_of[vc]
 	if vc == VC_OBJECT && op.tagged && len(r.union_tag) > 0 {
 		tag_k, tag_fault := shape_tag_arm(r, op, at)
@@ -277,7 +278,7 @@ shape_union_arm :: #force_no_inline proc(r: ^core_pkg.Shape_Run, op: ^core_pkg.S
 		// A union present is replaced, even one holding a pointer (Go would read through it): no arm reads over
 		// another's bytes.
 		runtime.mem_zero(dest, int(op.size))
-		shape_union_tag(dest, op, f.offset)
+		core_pkg.shape_union_tag(dest, op, f.offset)
 	}
 	return f.op, .None
 }
@@ -285,7 +286,7 @@ shape_union_arm :: #force_no_inline proc(r: ^core_pkg.Shape_Run, op: ^core_pkg.S
 // Under `.First`, a map that already holds entries reads the object into a fresh map, so that only the object's
 // own repeats count as earlier occurrences. `shape_map_merge` sets its entries into the map at the close. Nil
 // when the allocator refuses.
-shape_map_aside :: #force_no_inline proc(r: ^core_pkg.Shape_Run) -> rawptr {
+shape_map_aside :: #force_no_inline proc(r: ^walk.Shape_Run) -> rawptr {
 	buf, aerr := shape_alloc(size_of(runtime.Raw_Map), align_of(runtime.Raw_Map), r.allocator)
 	if aerr != nil || raw_data(buf) == nil {
 		return nil
@@ -322,7 +323,7 @@ shape_map_merge :: #force_no_inline proc(op: ^core_pkg.Shape_Op, fresh, into: ^r
 // when it has none. The walk has not checked the object yet: this pre-scan reads its members by their spans, and
 // one it cannot read ends the scan as if the tag were absent, so the walk's own result on it comes next. A
 // tag that is no arm's name is `.Not_A_Member`. The key and the name compare decoded, as every key does.
-shape_tag_arm :: proc(r: ^core_pkg.Shape_Run, op: ^core_pkg.Shape_Op, at: u64) -> (k: u8, fault: core_pkg.Shape_Fault) {
+shape_tag_arm :: proc(r: ^walk.Shape_Run, op: ^core_pkg.Shape_Op, at: u64) -> (k: u8, fault: core_pkg.Shape_Fault) {
 	p, end, found := shape_tag_span(r, at)
 	if !found {
 		return
@@ -336,7 +337,7 @@ shape_tag_arm :: proc(r: ^core_pkg.Shape_Run, op: ^core_pkg.Shape_Op, at: u64) -
 }
 
 // The extent `src[p:end]` of the `r.union_tag` member's value in the object opening at `at`, read by spans.
-shape_tag_span :: proc(r: ^core_pkg.Shape_Run, at: u64) -> (p, end: int, found: bool) {
+shape_tag_span :: proc(r: ^walk.Shape_Run, at: u64) -> (p, end: int, found: bool) {
 	src := r.src
 	p = shape_skip_space(src, int(at) + 1)
 	for p < len(src) && src[p] == '"' {
@@ -353,7 +354,7 @@ shape_tag_span :: proc(r: ^core_pkg.Shape_Run, at: u64) -> (p, end: int, found: 
 		if p >= len(src) || lex.VCLASS[src[p]] == VC_NONE {
 			return
 		}
-		end = lex.value_end(src, p, lex.VCLASS[src[p]], core_pkg.MAX_DEPTH)
+		end = lex.value_end(src, p, lex.VCLASS[src[p]], walk.MAX_DEPTH)
 		if end < 0 {
 			return
 		}
@@ -374,7 +375,7 @@ shape_tag_span :: proc(r: ^core_pkg.Shape_Run, at: u64) -> (p, end: int, found: 
 // before it is refused. The value is checked with the byte after it, which finishes a literal or a number as the
 // walk sees it. A well-formed value there is only `.Trailing`. Called after the walk, with the refusal.
 @(cold)
-shape_tag_verdict :: proc(r: ^core_pkg.Shape_Run, at: u64) -> Maybe(Error) {
+shape_tag_verdict :: proc(r: ^walk.Shape_Run, at: u64) -> Maybe(Error) {
 	p, end, found := shape_tag_span(r, at)
 	if !found {
 		return nil
@@ -385,17 +386,6 @@ shape_tag_verdict :: proc(r: ^core_pkg.Shape_Run, at: u64) -> Maybe(Error) {
 	}
 	err.offset += u64(p)
 	return err
-}
-
-// Set the tag of the union at `dest` to `tag`. A pure maybe has no tag: its non-nil pointer is the mark.
-shape_union_tag :: proc(dest: rawptr, op: ^core_pkg.Shape_Op, tag: u32) {
-	at := rawptr(uintptr(dest) + uintptr(op.tag_offset))
-	switch op.tag_size {
-	case 1: (^u8)(at)^ = u8(tag)
-	case 2: (^u16)(at)^ = u16(tag)
-	case 4: (^u32)(at)^ = tag
-	case 8: (^u64)(at)^ = u64(tag)
-	}
 }
 
 // A member key of the object open at walk depth `sp - 1`: latch the field it names as the target of the
@@ -424,11 +414,11 @@ shape_key :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, key_lo, key_hi: u64,
 	fields := r.fields[op.elem:][:op.count]
 	escaped := q.key_saw_escape
 	i := -1
-	if f.cap < op.count && core_pkg.key_equals_hooked(q.hooks, r.src, key_lo, key_hi, escaped, fields[f.cap].name) {
+	if f.cap < op.count && walk.key_equals_hooked(q.hooks, r.src, key_lo, key_hi, escaped, fields[f.cap].name) {
 		i = int(f.cap)
 	} else if escaped || shape_first_has(op.first, r.src[key_lo + 1]) {
 		for field, k in fields {
-			if core_pkg.key_equals_hooked(q.hooks, r.src, key_lo, key_hi, escaped, field.name) {
+			if walk.key_equals_hooked(q.hooks, r.src, key_lo, key_hi, escaped, field.name) {
 				i = k
 				break
 			}
@@ -443,7 +433,7 @@ shape_key :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, key_lo, key_hi: u64,
 		}
 		// The tag that picked this arm is no field of it, and an object names its arm once: the pre-scan
 		// took the first.
-		if f.n != 0 && core_pkg.key_equals_hooked(q.hooks, r.src, key_lo, key_hi, escaped, r.union_tag) {
+		if f.n != 0 && walk.key_equals_hooked(q.hooks, r.src, key_lo, key_hi, escaped, r.union_tag) {
 			if f.n == 2 {
 				return shape_fault(r, .Repeated_Tag, key_lo, sp)
 			}
@@ -484,7 +474,7 @@ shape_key :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, key_lo, key_hi: u64,
 // survives and the later one reads into a fresh value. `.All` leaves it, to be read over. Out of line: a repeat
 // is rare, and the walk inlines its caller everywhere.
 @(private = "file")
-shape_repeat :: #force_no_inline proc(r: ^core_pkg.Shape_Run, field: ^core_pkg.Shape_Field) {
+shape_repeat :: #force_no_inline proc(r: ^walk.Shape_Run, field: ^core_pkg.Shape_Field) {
 	if r.keep_first {
 		r.pend_dest = nil
 	} else if !r.read_over && r.pend_dest != nil {
@@ -495,7 +485,7 @@ shape_repeat :: #force_no_inline proc(r: ^core_pkg.Shape_Run, field: ^core_pkg.S
 // `.Unique`'s check of a key no seen bit covers: one of a map, one the struct does not name, or one in a value
 // the shape does not read (`sp > r.sp`). A refused spill is the shape's `.Out_Of_Memory`.
 @(private = "file")
-shape_key_unique :: proc(r: ^core_pkg.Shape_Run, q: ^Query_Ctx, key_lo, key_hi: u64, sp: u64) -> Maybe(Error) {
+shape_key_unique :: proc(r: ^walk.Shape_Run, q: ^Query_Ctx, key_lo, key_hi: u64, sp: u64) -> Maybe(Error) {
 	unique, oom := key_set_add(q.keys, r.src, key_lo, key_hi, q.key_saw_escape, u32(sp))
 	if oom {
 		return shape_fault(r, .Out_Of_Memory, key_lo, min(sp, r.sp))
@@ -508,7 +498,7 @@ shape_key_unique :: proc(r: ^core_pkg.Shape_Run, q: ^Query_Ctx, key_lo, key_hi: 
 
 // Mark field `i`, past the first 64, of the struct frame `f` seen, claiming the frame's seen words on its first
 // such field, and answers whether it was seen before.
-shape_wide_seen :: proc(r: ^core_pkg.Shape_Run, f: ^core_pkg.Shape_Frame, op: ^core_pkg.Shape_Op, i: u32) -> (repeat: bool, fault: core_pkg.Shape_Fault) {
+shape_wide_seen :: proc(r: ^walk.Shape_Run, f: ^walk.Shape_Frame, op: ^core_pkg.Shape_Op, i: u32) -> (repeat: bool, fault: core_pkg.Shape_Fault) {
 	if f.data == nil {
 		n := (op.count - 1) / 64
 		if int(r.wide_top + n) > len(r.wide) {
@@ -528,7 +518,7 @@ shape_wide_seen :: proc(r: ^core_pkg.Shape_Run, f: ^core_pkg.Shape_Frame, op: ^c
 
 // At the close of a struct frame past 64 fields: the first required field past the first 64 it has not seen,
 // or ok. Its seen words are given back.
-shape_wide_close :: proc(r: ^core_pkg.Shape_Run, f: ^core_pkg.Shape_Frame, op: ^core_pkg.Shape_Op) -> (missing: u32, ok: bool) {
+shape_wide_close :: proc(r: ^walk.Shape_Run, f: ^walk.Shape_Frame, op: ^core_pkg.Shape_Op) -> (missing: u32, ok: bool) {
 	n := (op.count - 1) / 64
 	need := r.shape.wide[op.key:][:n]
 	seen := ([^]u64)(f.data)
@@ -547,7 +537,7 @@ shape_wide_close :: proc(r: ^core_pkg.Shape_Run, f: ^core_pkg.Shape_Frame, op: ^
 // A member key of a map: parse it into the key type, then insert it, so the member value fills the new
 // entry. A repeat overwrites the entry with zero under `.Last`, is read over the entry under `.All`, and under
 // `.First` is found and checked only.
-shape_map_key :: proc(r: ^core_pkg.Shape_Run, q: ^Query_Ctx, f: ^core_pkg.Shape_Frame, op: ^core_pkg.Shape_Op, key_lo, key_hi, sp: u64) -> Maybe(Error) {
+shape_map_key :: proc(r: ^walk.Shape_Run, q: ^Query_Ctx, f: ^walk.Shape_Frame, op: ^core_pkg.Shape_Op, key_lo, key_hi, sp: u64) -> Maybe(Error) {
 	// Wide and aligned enough for every key kind: a string's header, a cstring, or an integer up to 128 bits,
 	// whose map compares keys as 16-aligned values.
 	key: u128
@@ -609,7 +599,7 @@ shape_scalar :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, lo: u64, sp: u64,
 
 // The scalar token `src[lo:hi]` of class `vc`, just checked by the walk, decoded into `dest` as op `op_i` reads
 // it. The commonest leaf of the token's class is taken without the dispatch.
-shape_leaf_token :: #force_inline proc(r: ^core_pkg.Shape_Run, q: ^Query_Ctx, op_i: u32, dest: rawptr, lo, hi: u64, $vc: u8) -> core_pkg.Shape_Fault #no_bounds_check {
+shape_leaf_token :: #force_inline proc(r: ^walk.Shape_Run, q: ^Query_Ctx, op_i: u32, dest: rawptr, lo, hi: u64, $vc: u8) -> core_pkg.Shape_Fault #no_bounds_check {
 	when vc == VC_STRING {
 		if r.ops[op_i].kind == .String && !q.str_escaped && r.borrow {
 			if dest != nil {
@@ -630,7 +620,7 @@ shape_leaf_token :: #force_inline proc(r: ^core_pkg.Shape_Run, q: ^Query_Ctx, op
 }
 
 // One scalar leaf per op kind. Lowering refuses every kind without one.
-shape_decode_scalar :: proc(r: ^core_pkg.Shape_Run, q: ^Query_Ctx, op_i: u32, dest: rawptr, lo, hi: u64) -> core_pkg.Shape_Fault #no_bounds_check {
+shape_decode_scalar :: proc(r: ^walk.Shape_Run, q: ^Query_Ctx, op_i: u32, dest: rawptr, lo, hi: u64) -> core_pkg.Shape_Fault #no_bounds_check {
 	op := &r.ops[op_i]
 	// A token starting with `-` or a digit is a number the walk just checked, so `r.num` holds its digits.
 	is_number := r.src[lo] == '-' || (r.src[lo] >= '0' && r.src[lo] <= '9')
@@ -685,7 +675,7 @@ shape_decode_scalar :: proc(r: ^core_pkg.Shape_Run, q: ^Query_Ctx, op_i: u32, de
 				return .Wrong_Kind
 			}
 			if dest != nil {
-				shape_union_tag(dest, op, r.fields[op.elem + u32(op.arm_of[0]) - 1].offset)
+				core_pkg.shape_union_tag(dest, op, r.fields[op.elem + u32(op.arm_of[0]) - 1].offset)
 			}
 			return .None
 		}

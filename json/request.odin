@@ -4,11 +4,13 @@ package json
 
 import "base:runtime"
 import core_pkg "../core"
+import "scan/walk"
 import scan_pkg "scan"
 
-// Which occurrence of a key repeated within one object answers a path. A path through
+// Which occurrence of a key repeated within one object answers a path: core's `Duplicates`. A path through
 // `Any` still answers once per match, each holder object resolving its own repeats.
 //
+//	.Default `.Last`
 //	.Last    the last occurrence (no prefix settles it)
 //	.First   the first occurrence (with `.Refuse`, the only readings `.Lazy` accepts)
 //	.All     every occurrence answers
@@ -16,12 +18,7 @@ import scan_pkg "scan"
 //	         (`.Duplicate_Key` at the repeat). `.Strict` and `.Structural` check every object, and `.Lazy` reads
 //	         as under `.First` and may stop before a repeat. Keys past the first 64 open at once are
 //	         remembered in the request's allocator, given back before the scan returns.
-Duplicates :: enum {
-	Last,
-	First,
-	All,
-	Refuse,
-}
+Duplicates :: core_pkg.Duplicates
 
 // What to read from a text and where the answers go. `scan` fills it in one pass. `$KINDS` lists the kinds of
 // answer wanted, and a kind left out costs nothing.
@@ -201,7 +198,7 @@ answers :: proc(req: ^Request($KINDS), path: int) -> (out: []Path_Answer, err: M
 
 @(private = "file")
 answers_group :: proc(answers: ^[dynamic]Path_Answer, g: ^Answer_Groups, n_paths: int, alloc: runtime.Allocator) -> bool {
-	core_pkg.adopt_allocator(&g.at, alloc)
+	walk.adopt_allocator(&g.at, alloc)
 	if resize(&g.at, n_paths + 1) != nil {
 		return false
 	}
@@ -218,7 +215,7 @@ answers_group :: proc(answers: ^[dynamic]Path_Answer, g: ^Answer_Groups, n_paths
 		g.at[i] += g.at[i - 1]
 	}
 	if !sorted {
-		core_pkg.adopt_allocator(&g.spare, alloc)
+		walk.adopt_allocator(&g.spare, alloc)
 		if resize(&g.spare, len(answers)) != nil {
 			return false
 		}
@@ -257,7 +254,7 @@ find :: proc(
 	limits := Limits{},
 	allocator := context.allocator,
 ) -> (a: Path_Answer, err: Scan_Error) {
-	a = Path_Answer{outcome = .Missing, owner = core_pkg.NO_OWNER, node = NO_NODE}
+	a = Path_Answer{outcome = .Missing, owner = walk.NO_OWNER, node = NO_NODE}
 	req: Request({.Path})
 	defer destroy(&req)
 	if refused, bad := request_init(&req, path, strictness = strictness, dialect = dialect, duplicates = duplicates, limits = limits, allocator = allocator).?; bad {

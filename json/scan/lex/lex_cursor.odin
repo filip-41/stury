@@ -4,7 +4,7 @@ package lex
 
 import "base:intrinsics"
 import "core:simd"
-import core_pkg "../../../core"
+import "../walk"
 
 peek :: #force_inline proc(s: ^Scanner) -> int {
 	if s.pos >= u64(len(s.src)) {
@@ -177,7 +177,7 @@ utf8_step_checked :: #force_inline proc(s: ^Scanner) -> Maybe(Error) {
 value_end :: proc(src: []u8, lo: int, vc: u8, room: int) -> int {
 	switch vc {
 	case VC_OBJECT, VC_ARRAY:
-		return container_end(src, lo, min(room, core_pkg.MAX_DEPTH))
+		return container_end(src, lo, min(room, walk.MAX_DEPTH))
 	case VC_STRING:
 		return string_end(src, lo)
 	}
@@ -235,7 +235,7 @@ scalar_end :: proc(src: []u8, lo: int) -> int {
 
 @(private = "file")
 container_end :: proc(src: []u8, open: int, room: int) -> int {
-	is_obj: [core_pkg.MAX_DEPTH]bool = ---
+	is_obj: [walk.MAX_DEPTH]bool = ---
 	depth := 0
 	esc := false
 	i := open

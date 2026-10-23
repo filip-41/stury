@@ -80,6 +80,7 @@ Inputs :: struct {
 	fault_next:         int,
 	slurp_tail:         bool, // -s --stream-errors: the fault's error event comes after the slurped array, not in it
 	bom_broken:         bool, // --seq --stream-errors: the stream began with a cut byte order mark, so jq's parser starts afresh at every call
+	cells:              ^Cells, // --csv, --tsv: the open file's window and header
 	seq_head:           enum u8 {
 		Unread, // --seq: the open file's first text is yet to be found
 		Bare, // found with no separator before it, and yet to be refused
@@ -155,6 +156,9 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 	if run.opts.raw_input {
 		return next_raw(ins)
 	}
+	if reads_cells(&run.opts) {
+		return next_cells(ins)
+	}
 	if ins.events != nil {
 		if v, ok := jq.next_event(ins.events); ok {
 			return v, "", .Value
@@ -200,7 +204,7 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 		if run.opts.seq && truncated_number(ins.data[at:limit]) {
 			return text_fault(ins, at, limit, json.Error{kind = .Truncated, offset = u64(limit - at)}, jq.TRUNCATED_NUMBER_NOTE)
 		}
-		if trailing && !run.opts.jsonc && limit == len(ins.data) && !own && !run.opts.stream {
+		if trailing && run.opts.from != .Jsonc && limit == len(ins.data) && !own && !run.opts.stream {
 			if v, ok := build_root_pieces(run, ins.data, at, prog); ok {
 				ins.pos, ins.seen, ins.pinned = limit, last_read(ins.data, at, limit), true
 				return v, "", .Value
@@ -259,7 +263,7 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 		if read_on(ins, at) {
 			continue
 		}
-		if run.opts.jsonc {
+		if run.opts.from == .Jsonc {
 			jsonc_fault(ins, err.?, at)
 		}
 		return text_fault(ins, at, limit, err.?)
@@ -306,12 +310,12 @@ text_fault :: proc(ins: ^Inputs, at, limit: int, found: json.Error, what := "") 
 		at_error := e
 		at_error.offset += u64(at)
 		msg = fault_in_file(ins.name, ins.data, at_error, what, ins.lines_before)
-	} else if ins.run.opts.ndjson { // a line is a whole text: a fault at its end is at EOF, past its newline
+	} else if ins.run.opts.from == .Ndjson { // a line is a whole text: a fault at its end is at EOF, past its newline
 		msg = jq.parse_message(ins.data[at:min(limit + 1, len(ins.data))], e, line, column, what, limit - at)
 	} else {
 		msg = jq.parse_message(ins.data[at:], e, line, column, what)
 	}
-	if ins.run.opts.stream_errors && !ins.run.opts.ndjson {
+	if ins.run.opts.stream_errors && ins.run.opts.from != .Ndjson {
 		return stream_errors_fault(ins, at, limit, line, column)
 	}
 	whole_error := e
@@ -476,6 +480,9 @@ input_position :: proc(ins: ^Inputs) -> (string, int) {
 	if run.opts.raw_input {
 		return ins.name, ins.line
 	}
+	if reads_cells(&run.opts) {
+		return ins.name, cells_line(ins)
+	}
 	_, count := fgets_lines(ins, ins.seen)
 	return ins.name, count
 }
@@ -485,7 +492,7 @@ input_position :: proc(ins: ^Inputs) -> (string, int) {
 // first space, quote or bracket, under --seq a record to the next separator, under --ndjson a line, and under --jsonc
 // the whole input, one document.
 next_text :: proc(ins: ^Inputs) -> (at, limit: int, trailing, found: bool) {
-	seq, ndjson := ins.run.opts.seq, ins.run.opts.ndjson
+	seq, ndjson := ins.run.opts.seq, ins.run.opts.from == .Ndjson
 	for {
 		if !ins.open && !open_next(ins) {
 			return 0, 0, false, false
@@ -504,7 +511,7 @@ next_text :: proc(ins: ^Inputs) -> (at, limit: int, trailing, found: bool) {
 		}
 		limit = len(data)
 		switch {
-		case ins.run.opts.jsonc:
+		case ins.run.opts.from == .Jsonc:
 			return at, limit, false, true
 		case seq:
 			if ins.seq_head == .Unread {

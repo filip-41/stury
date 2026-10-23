@@ -2,13 +2,12 @@ package json
 
 import "base:runtime"
 import core_pkg "../core"
+import "scan/walk"
 import scan_pkg "scan"
 
-// What `unmarshal` does with a member the target type does not name.
-Unknown_Fields :: enum u8 {
-	Ignore, // the member is checked (`.Strict`), or may be skipped unchecked (`.Lazy`, see `strictness`)
-	Refuse, // `.Unknown_Field` at its key
-}
+// What `unmarshal` does with a member the target type does not name: `.Ignore` checks it (`.Strict`), or may
+// skip it unchecked (`.Lazy`, see `strictness`); `.Refuse` refuses it, `.Unknown_Field` at its key.
+Unknown_Fields :: core_pkg.Unknown_Fields
 
 // How `unmarshal` and `unmarshal_check` read: the zero value is `.Strict`, `.Last`, unknown members ignored,
 // strings copied, default `Limits`, strict JSON.
@@ -19,7 +18,7 @@ Unmarshal_Opts :: struct {
 	// on the fault. `.Structural` is `.Bad_Option`: a typed read stores what it reads, so it checks it. Under
 	// `dialect = .Jsonc`, which reads every byte whatever `strictness` says, it reads the document strictly.
 	strictness:     Strictness,
-	// What to do with a key that appears twice in one object. `.Last` keeps the last occurrence only: a struct member is reset to
+	// What to do with a key that appears twice in one object. `.Default` is `.Last`, which keeps the last occurrence only: a struct member is reset to
 	// zero before it is read again, so nothing of the earlier one survives, and a map entry or an `any` is
 	// replaced. `.First` reads the first occurrence and checks the later ones as `strictness` says, without
 	// storing them. `.All` reads every occurrence over the one before: struct fields and map entries merge,
@@ -140,9 +139,9 @@ read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Typ
 	if serr != nil {
 		return serr
 	}
-	frames: [MAX_DEPTH]core_pkg.Shape_Frame = ---
-	wide: [core_pkg.SHAPE_WIDE_WORDS]u64 = ---
-	run := core_pkg.Shape_Run{
+	frames: [MAX_DEPTH]walk.Shape_Frame = ---
+	wide: [walk.SHAPE_WIDE_WORDS]u64 = ---
+	run := walk.Shape_Run{
 		shape          = shape,
 		frames         = &frames,
 		wide           = wide[:],
@@ -185,11 +184,11 @@ read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Typ
 // The walk's refusal with its path: one step per live frame that names one. A typed fault names
 // `run.fault_steps` frames. The walk's own result names every frame the shape walk has open.
 @(private)
-unmarshal_error_of :: proc(run: ^core_pkg.Shape_Run, e: Error) -> (err: Unmarshal_Error) {
+unmarshal_error_of :: proc(run: ^walk.Shape_Run, e: Error) -> (err: Unmarshal_Error) {
 	err.offset = e.offset
 	steps := run.sp
 	#partial switch e.kind {
-	case core_pkg.TYPED_FAULT:
+	case walk.TYPED_FAULT:
 		err.kind = Unmarshal_Error_Kind(run.fault)
 		steps = u64(run.fault_steps)
 		// A union's tag that is not well-formed is the walk's syntax fault at its byte: a value that is read is

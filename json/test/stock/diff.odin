@@ -138,7 +138,7 @@ is_stock_lax :: proc(src: []byte, e: json.Error) -> bool {
 		return is_bad_number_at(src, int(e.offset))
 	case .Bad_Escape:
 		return is_bad_escape_at(src, int(e.offset)) || is_lone_surrogate_at(src, int(e.offset))
-	case .None, .Truncated, .Bad_Literal, .Limit_Digits, .Limit_Scale, .Too_Deep, .Source_Too_Wide, .Out_Of_Memory, .Duplicate_Key, .Bad_Option:
+	case .None, .Truncated, .Bad_Literal, .Limit_Digits, .Limit_Scale, .Too_Deep, .Source_Too_Wide, .Out_Of_Memory, .Duplicate_Key, .Bad_Option, .Field_Count, .Limit_Fields, .Limit_Record:
 	}
 	return false
 }

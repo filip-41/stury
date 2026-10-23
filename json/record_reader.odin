@@ -2,11 +2,7 @@ package json
 
 import "core:bytes"
 import "core:io"
-import "core:mem"
-
-// The bytes `records_from` asks of its reader at a time, unless `chunk` says otherwise.
-@(private)
-READER_CHUNK :: 64 * 1024
+import core_pkg "../core"
 
 // A pull over the records of an `io.Reader` (`next_record`).
 //
@@ -14,25 +10,18 @@ READER_CHUNK :: 64 * 1024
 //	  and the framing fault are those `records` gives the whole input, whatever the sizes of the reads.
 //	- The fields are the iterator's own but `chunk`, `err` and `read_err`.
 Record_Reader :: struct {
-	reader:   io.Reader,
-	allocator: mem.Allocator,
-	// The bytes asked of the reader at a read.
-	chunk:    int,
-	// The window: the bytes not yet framed are `buf[lo:hi]`, `base` is the stream offset of `buf[0]`, and
-	// the first `scanned` of them have been searched for a place to cut.
-	buf:      []byte,
-	lo, hi:   int,
+	// The window: `read_err` is the reader's failure. The records framed before it are yielded, the bytes
+	// after them are not.
+	using window: core_pkg.Stream_Window,
+	// The bytes not yet framed are `buf[lo:hi]`, and the first `scanned` of them have been searched for a
+	// place to cut.
+	lo:       int,
 	scanned:  int,
-	base:     u64,
-	eof:      bool,
 	// The framed part of the window.
 	it:       Records,
 	// The framing fault, `.Bad_Option` for `.Root_Entries`, or `.Out_Of_Memory` at the stream's offset where
 	// the window could not grow.
 	err:      Maybe(Error),
-	// The reader's failure other than `.EOF` (`.No_Progress` for a read of no bytes and no error). The
-	// records framed before it are yielded, the bytes after them are not.
-	read_err: io.Error,
 }
 
 // The records of `r` under `.NDJSON` or `.JSON_Seq`, read `chunk` bytes at a time. `.Root_Entries` needs the
@@ -40,7 +29,7 @@ Record_Reader :: struct {
 // and freed by `destroy`. It holds the longest record and a chunk, grown by doubling, so at most twice that.
 @(require_results)
 records_from :: proc(r: io.Reader, framing: Framing, allocator := context.allocator) -> Record_Reader {
-	rr := Record_Reader{reader = r, allocator = allocator, chunk = READER_CHUNK, it = {framing = framing}}
+	rr := Record_Reader{window = {reader = r, allocator = allocator, chunk = core_pkg.READER_CHUNK}, it = {framing = framing}}
 	if framing == .Root_Entries {
 		rr.err = Error{kind = .Bad_Option}
 	}
@@ -119,29 +108,12 @@ reader_cut :: proc(framing: Framing, rest: []byte, scanned: int) -> int {
 @(private)
 reader_fill :: proc(rr: ^Record_Reader) -> bool {
 	if rr.lo > 0 {
-		rr.hi = copy(rr.buf, rr.buf[rr.lo:rr.hi])
-		rr.base += u64(rr.lo)
+		core_pkg.window_drop(rr, rr.lo)
 		rr.lo = 0
 	}
-	if len(rr.buf) - rr.hi < rr.chunk {
-		grown, aerr := mem.alloc_bytes_non_zeroed(max(2 * len(rr.buf), rr.hi + rr.chunk), allocator = rr.allocator)
-		if aerr != nil {
-			rr.err = Error{kind = .Out_Of_Memory, offset = rr.base + u64(rr.hi)}
-			return false
-		}
-		copy(grown, rr.buf[:rr.hi])
-		delete(rr.buf, rr.allocator)
-		rr.buf = grown
+	progress, oom := core_pkg.window_fill(rr)
+	if oom != nil {
+		rr.err = oom
 	}
-	n, rerr := io.read(rr.reader, rr.buf[rr.hi:])
-	rr.hi += n
-	switch {
-	case rerr == .EOF:
-		rr.eof = true
-	case rerr == nil && n == 0:
-		rr.read_err = .No_Progress
-	case rerr != nil:
-		rr.read_err = rerr
-	}
-	return n > 0 || rr.read_err == nil
+	return progress
 }

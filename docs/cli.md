@@ -5,18 +5,19 @@ messages start with `stury:`, and parse errors are worded its own way ([Errors a
 codes](#errors-and-exit-codes)). On top of jq it:
 
 - validates JSON without running a filter (`stury check`);
-- reads JSONC (`--jsonc`) and NDJSON (`--ndjson`);
+- reads and writes JSONC, NDJSON, CSV and TSV (`--from FORMAT`, `--to FORMAT`, [Formats](#formats));
 - reads input strictly, as RFC 8259 says ([Differences from jq](#differences-from-jq)).
 
 The examples below assume `stury` is on your `PATH`; otherwise use `build/stury` (`make build-cli`).
 
 ```sh
 stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unbuffered] [-b]
-      [-n] [-R] [-s] [-e] [-f FILE] [-L DIR] [--seq] [--stream|--stream-errors] [--ndjson] [--jsonc]
+      [-n] [-R] [-s] [-e] [-f FILE] [-L DIR] [--seq] [--stream|--stream-errors]
+      [--from FORMAT] [--to FORMAT] [--grow-header] [--ndjson|--jsonc|--csv|--tsv]
       [--max-depth N]
       [--arg NAME VALUE] [--argjson NAME JSON] [--slurpfile NAME FILE] [--rawfile NAME FILE]
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
-stury check [--ndjson|--seq] [--jsonc] [--strict-limits] [--max-depth N] [FILE...]
+stury check [--from FORMAT|--ndjson|--seq|--jsonc|--csv|--tsv] [--strict-limits] [--max-depth N] [FILE...]
 stury -h | -V | --build-configuration
 ```
 
@@ -75,8 +76,10 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 | Option | Behaviour |
 | --- | --- |
 | `check`, `validate` | A subcommand, recognised when it is the first argument that is not an option, before any `--` (`stury -c check FILE`); under `-f` that argument is the program file. See [`check`](#check). |
-| `--ndjson` | Read one JSON text per line. A blank line is no text, and a line that is not one text, or holds two, is a parse error where jq would read on. |
-| `--jsonc` | Read JSONC with its comments and trailing commas. Values print as JSONC, including their comments ([Comments in the CLI](#comments-in-the-cli)). |
+| `--from FORMAT` | Read `json` (the default), `jsonc`, `ndjson`, `csv` or `tsv` ([Formats](#formats)). |
+| `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv` or `tsv` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output)). |
+| `--ndjson`, `--jsonc`, `--csv`, `--tsv` | Each is `--from` and `--to` of that format. An explicit `--from` or `--to` overrides its half, given before or after. |
+| `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output, in the order first seen. It holds all the output until the input ends ([CSV and TSV output](#csv-and-tsv-output)). |
 | `--max-depth N` | Refuse nesting past N levels (1024 by default, up to 2^20, where jq's limit is 10000). |
 | `--strict-limits` | `check` only. Keep the library's limits: numbers of at most 256 digits and a scale of at most 4096. |
 
@@ -94,7 +97,7 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 
 - Plain paths such as `.a.b[]` are answered without building the document. These options switch to the
   general interpreter, which may be slower on large inputs: `-n`, `-s`, `-S`, `-a`, `-e`, `-R`,
-  `--raw-output0`, `--seq`, `--stream`.
+  `--raw-output0`, `--seq`, `--stream`, `--from csv`, `--from tsv`, `--to csv`, `--to tsv`.
 - A key repeated in one object is read as jq reads it: the last value wins.
 - A scalar result is printed as jq prints it, not as its source text (`1E2` is `1E+2`, `"\/"` is `"/"`).
 
@@ -111,11 +114,36 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 | --- | --- |
 | `--ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence. |
 | `--jsonc` | Validate JSONC as `stury --jsonc .` reads it, to the same limits. A comment's text holds no escape. |
+| `--from FORMAT`, `--csv`, `--tsv` | Validate as `stury --from FORMAT .` reads. CSV and TSV are judged by `csv.validate`, and a fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An input with no record fails with `No CSV text` or `No TSV text`. |
 | `--strict-limits` | Keep the library's limits (numbers of at most 256 digits and a scale of at most 4096), for input bound for the library. Nesting follows `--max-depth` either way. |
 | `--max-depth N` | Refuse nesting past N levels, as for the filter. |
 | `FILE...` | One file per argument, read as the filter reads them. |
 
+`check` writes nothing, so `--to` (and the aliases' output half) with a format other than the default is a usage error.
+
 Exit codes: 0 on success, 5 for invalid input, 2 for a usage or file error.
+
+## Formats
+
+`--from` chooses how the input is cut into values, and `--to` how the outputs are written.
+
+| Format | `--from` | `--to` |
+| --- | --- | --- |
+| `json` | One JSON text after another, as jq reads (the default). | Pretty-printed, or as `-c`, `--tab` and `--indent` say (the default). |
+| `jsonc` | JSONC: comments and trailing commas ([Comments in the CLI](#comments-in-the-cli)). | Each value with the comments it was read with. |
+| `ndjson` | One JSON text per line. A blank line is no text, and a line that is not one text, or holds two, is a parse error where jq would read on. | One compact value per line, as `-c`. |
+| `csv`, `tsv` | The first record names the fields; each later record is one input ([CSV and TSV](#csv-and-tsv)). | Each output is one record ([CSV and TSV output](#csv-and-tsv-output)). |
+
+- `--ndjson`, `--jsonc`, `--csv` and `--tsv` set both halves: `--csv` is `--from csv --to csv`. An explicit
+  `--from` or `--to` replaces its half of an alias, before or after it: `--csv --to json` reads CSV and
+  prints JSON, and `--to json --csv` does the same. Two aliases that disagree (`--csv --tsv`) are a usage error.
+- `--ndjson` prints compact, one value per line, so it is a usage error with `--indent`, `--tab` and `--seq`
+  (the option used to leave the layout alone). `--from ndjson` alone reads lines and prints as `-c`, `--indent`
+  and `--tab` say. A refusal under an alias says that the alias set the output format too.
+- Reading CSV or TSV is a usage error with `-R`, `--seq` and `--stream`. Writing it is one with `-r`, `-j`,
+  `-a`, `-C`, `-c`, `--indent`, `--tab`, `--seq` and `--raw-output0`: the output is not JSON text, so none of
+  them has a meaning. `-S`, `-e`, `-n`, `-s`, `--arg` and the rest still apply. `--to ndjson` takes the place
+  of `-c`, so it is refused with `--indent`, `--tab` and `--seq`.
 
 ## Input
 
@@ -151,6 +179,89 @@ Every input is read by one grammar, the library's: `validate` with `dialect = .J
 | `--seq` | Passes over a record that does not parse with `stury: ignoring parse error: ...` and puts `0x1E` before each output. |
 | `--stream` | Gives jq's `[path, leaf]` and `[path]` events of each text once it parses whole, and refuses a text that does not parse, as any input. |
 | `--stream-errors` | Gives what jq gives of a faulty text: the events before the fault, then `[message, path]`. `[1,` gives `[0],1` and then `["Unfinished JSON term at EOF at line 1, column 3",[1]]`. Its messages, positions, exit code and `--seq` resync are jq's. |
+
+### CSV and TSV
+
+`--csv` reads RFC 4180; `--tsv` reads tab-separated values as jq's `@tsv` writes them. The first record of each
+file is the header, and every later record is one input: an object whose keys are the header's names, in
+order, and whose values are the cells' text as strings.
+
+```sh
+$ printf 'name,age\nAda,36\n"Grace ""Amazing"" Hopper",85\n' | stury --from csv -c .
+{"name":"Ada","age":"36"}
+{"name":"Grace \"Amazing\" Hopper","age":"85"}
+$ stury --from csv -r '[.name, .age] | @csv' people.csv
+```
+
+- **Cells are strings, or null.** A cell is never read as a number or a boolean: `tonumber` is explicit
+  (`.age | tonumber`). A quoted field is its text without the quotes, a doubled `""` read as one quote, and may
+  hold the delimiter and line breaks. An empty cell with no quotes is `null`, a quoted `""` is `""`, and in
+  TSV, which has no quotes, every empty cell is `null`; `// ""` or `.a // empty` turns one back. A line
+  holding nothing is no record, so a one-column file spells an empty cell `""`.
+- **CSV** (`--csv`) ends records at LF or CRLF, and a quote opens a field only as its first byte. **TSV**
+  (`--tsv`) has no quoting: a quote is text, and `\t`, `\n`, `\r`, `\0` and `\\` read as a tab, LF, CR, NUL and backslash.
+  Any other escape, or a backslash ending a cell, is a fault. A UTF-8 byte order mark at a file's start is
+  stepped over.
+- **Each file has its own header**, so the files may have different columns. `-s` slurps every record of
+  every file into one array, and `-n` with `input` and `inputs` reads the records.
+- **Faults.** A header name given twice, a record with a field count other than the header's, a quote or
+  carriage return where it cannot be, an unfinished quoted field, a bad escape and a byte that is not UTF-8
+  end the file, told as `FILE:LINE:COLUMN: fault` (`<stdin>` for standard input) with exit 5. The records
+  before the fault have been answered.
+
+  ```
+  $ printf 'a,b\n1,2\n3\n' | stury --from csv -c .
+  {"a":"1","b":"2"}
+  stury: parse error: <stdin>:3:1: Record has the wrong number of fields (the header has 2)
+  ```
+- **Memory.** A regular file up to 64 MiB is read whole, except under `-n`. A larger file, a file under `-n`
+  and a pipe are read a window at a time, and memory holds a window and the longest record. A pipe is answered
+  as it comes, a record once the reader holds the 64 bytes it ends in and three bytes past them.
+- **Columns are quicker.** A filter that is only columns, `.name`, `.a, .b` or, under `--from csv -c`, `[.a, .b]` (a
+  key is a name `.name` can spell, or `.["any text"]`), prints each cell straight from the text, with no
+  object built, and the bytes the interpreter prints for the same filter: a name the header lacks prints
+  `null`. A whole file of a few hundred KiB or more is printed in pieces on every core, in file order. Any
+  other filter, and `-n`, `-s`, `-e`, `-a`, `-C` and `--raw-output0`, run on the interpreter.
+- **Combinations.** Records of cells are not read with `-R`, `--seq` or `--stream`, and one input has one
+  format: `--csv --tsv` is a usage error (exit 2).
+  `input_filename` and `input_line_number` name the file and the line the last record ends at.
+
+### CSV and TSV output
+
+`--to csv` and `--to tsv` write each output as one record. The header is not an output of its own: it is the
+first object's keys, written once before the first row.
+
+```sh
+$ printf '{"a":1,"b":"x,y"}\n{"a":2,"b":null}\n' | stury --to csv .
+a,b
+1,"x,y"
+2,
+$ stury --csv 'select(.n | tonumber > 1)' people.csv
+```
+
+- **Objects are rows.** The header is the first object's keys in their order, or sorted under `-S`. A later
+  object with a key the header lacks ends the run: `output 2 has the key "z", which the header lacks`, exit 5,
+  after the rows before it. A key the object lacks is an empty cell.
+- **`--grow-header`** holds every output until the input ends, then writes a header of every key in the order
+  first seen (in byte order under `-S`), and a row for each object with an empty cell for each key it lacks. Memory holds all the output,
+  which is the cost of knowing the last key before writing the first row. It is a usage error without
+  `--to csv` or `--to tsv`.
+- **Arrays and scalars are rows with no header**: an array's elements are the cells, a scalar is a row of one.
+  Objects and the other kinds do not mix: the output that breaks the pattern ends the run.
+- **Cells.** A string is its text, a number is spelled as jq spells it (`1E+3`), `true` and `false` are
+  themselves, and `null` is an empty cell. An array or object in a cell ends the run and names `tojson`, which
+  makes text of it. CSV quotes a cell that holds the delimiter, a quote or a line break, and writes the empty
+  string as `""`; TSV escapes tab, LF, CR, NUL and backslash as `@tsv` does.
+- **Null and the empty string.** CSV writes `null` as an empty cell and `""` as `""`, so `stury --csv .` gives
+  back what it read, up to normalisation (a quoted field that needed no quotes is written without). TSV writes
+  both as an empty cell and reads every empty cell as null, so `""` becomes `null` there.
+- **Refused records.** A record that cannot be spelled (no cell, or one empty cell: a lone `null`, `[]`, or `{}` under a one-key header; or, in TSV, which has no
+  quotes, a first cell that opens with a byte order mark) ends the run with the reason. A lone `null`
+  would read back as a line holding nothing.
+- **One table.** All the files of a run and all its inputs share one header.
+- **Streaming.** Rows are written as the outputs come, as the other formats are, except under `--grow-header`.
+  A filter that is only columns, on CSV or TSV input, is still printed in pieces on every core, and prints
+  what the interpreter prints.
 
 ### Files and pipes
 
@@ -273,9 +384,9 @@ Each file ends its texts. jq reads `1` in one file and `2` in the next as `12`, 
 file's end in the next file. A parse error in a file after the first names the file and counts its line and
 column in that file (`b.json:1:4: Unexpected character`), where jq counts on across the files it joins.
 
-#### `check`, `--ndjson` and `--jsonc` are new
+#### `check`, `--from` and `--to` are new
 
-jq has no `check`, and `--ndjson` and `--jsonc` read formats jq does not. `.@comment`, `.@comment_inline` and
+jq has no `check`, and `--from` and `--to` (with the aliases `--ndjson`, `--jsonc`, `--csv` and `--tsv`) read and write formats jq does not. `.@comment`, `.@comment_inline` and
 `.@comment_foot`, a syntax error in jq, read a value's comments ([Comments in the CLI](#comments-in-the-cli));
 outside `--jsonc` they give `null`.
 

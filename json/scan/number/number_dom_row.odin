@@ -1,6 +1,7 @@
 package number
 
 import "core:strconv"
+import core_pkg "../../../core"
 
 // `fast_float_compute_float`'s overflow: +Inf, which JSON has no value for.
 F64_INF_BITS :: u64(0x7FF) << 52
@@ -40,7 +41,7 @@ dom_number_value :: #force_inline proc(src: []byte, lo, hi: u64, n: Number_Lex) 
 			// The Clinger window: an exact f64 times or over an exact power of
 			// ten, one rounding. A nonzero mantissa here cannot underflow.
 			f := f64(mant)
-			v := f * DOM_POW10[e] if e > 0 else f / DOM_POW10[-e]
+			v := f * core_pkg.POW10_F64[e] if e > 0 else f / core_pkg.POW10_F64[-e]
 			return (-v if neg else v), (EXACT if dom_exact_scale(mant, e) else INEXACT)
 		}
 		b := #force_inline strconv.fast_float_compute_float(f64, int(e), mant)
@@ -76,7 +77,7 @@ f64_number_value :: #force_inline proc(src: []byte, lo, hi: u64, n: Number_Lex) 
 		}
 		if digits <= 15 && e >= -22 && e <= 22 {
 			f := f64(n.mant)
-			v := f * DOM_POW10[e] if e > 0 else f / DOM_POW10[-e]
+			v := f * core_pkg.POW10_F64[e] if e > 0 else f / core_pkg.POW10_F64[-e]
 			return (-v if neg else v), true
 		}
 		b := #force_inline strconv.fast_float_compute_float(f64, int(e), n.mant)
@@ -182,7 +183,7 @@ number_token :: #force_inline proc(src: []byte, lo, hi: u64, digits: u16) -> Num
 			// overflow or an underflow cannot happen.
 			bits: u64
 			if int_digits + frac_digits <= 15 {
-				bits = transmute(u64)(f64(mant) / DOM_POW10[frac_digits])
+				bits = transmute(u64)(f64(mant) / core_pkg.POW10_F64[frac_digits])
 			} else {
 				bits = strconv.fast_float_compute_float(f64, -int(frac_digits), mant)
 			}

@@ -33,7 +33,7 @@ HELP_HEAD :: "stury - commandline JSON processor [version " + VERSION + `]
 Usage:	stury [options] <jq filter> [file...]
 	stury [options] --args <jq filter> [strings...]
 	stury [options] --jsonargs <jq filter> [JSON_TEXTS...]
-	stury check [--ndjson|--seq] [--jsonc] [--strict-limits] [--max-depth n] [file...]
+	stury check [--from format|--seq] [--strict-limits] [--max-depth n] [file...]
 
 stury is a tool for processing JSON inputs, applying the given filter to
 its JSON text inputs and producing the filter's results as JSON on
@@ -85,14 +85,28 @@ HELP_OPTIONS :: `Command options:
       --stream-errors       implies --stream and report parse error as
                             an array;
       --seq                 parse input/output as application/json-seq;
-      --ndjson              read one JSON text per line (a line of two
-                            texts is a parse error, unlike a JSON stream);
+      --from format         read json (the default), jsonc (comments and
+                            trailing commas), ndjson (one JSON text per line;
+                            a line of two texts is a parse error, unlike a
+                            JSON stream), csv (RFC 4180) or tsv (jq's @tsv
+                            escapes); csv and tsv take the first record as
+                            the field names, and each later one is an input
+                            object of strings, null for an empty unquoted
+                            cell;
+      --to format           write json (the default), jsonc (an input value
+                            is printed with its comments, which .@comment,
+                            .@comment_inline and .@comment_foot read),
+                            ndjson (like -c) or csv or tsv (each output is a
+                            record: an object a row under the first object's
+                            keys as the header, an array or scalar a row
+                            with none);
+      --grow-header         with --to csv or tsv, hold the output and write
+                            a header of every key, in the order first seen;
+      --ndjson, --csv, --tsv, --jsonc
+                            --from and --to of that format, either of which
+                            an explicit --from or --to overrides;
       --max-depth n         refuse nesting past n levels (default 1024;
                             jq's is 10000);
-      --jsonc               read JSONC: comments and trailing commas;
-                            print each input value with its comments,
-                            which .@comment, .@comment_inline and
-                            .@comment_foot read;
   -f, --from-file           load the filter from a file;
   -L, --library-path dir    search modules from the directory;
       --arg name value      set $name to the string value;
@@ -117,7 +131,8 @@ stury check also takes --strict-limits, which keeps the library's
 limits: numbers of at most 256 digits and a scale of at most 4096. A
 filter reads numbers as far as they can be held.
 
-stury check, --ndjson, --jsonc, --max-depth and --strict-limits are
+stury check, --from, --to, --grow-header, --max-depth, --strict-limits and the
+format aliases (--csv, --tsv, --jsonc, --ndjson) are
 stury's own; stury(1) and docs/cli.md in stury's source
 document them and the input differences from jq in full.
 `
@@ -137,11 +152,12 @@ Opts :: struct {
 	null_input:       bool,
 	slurp:            bool,
 	exit_status:      bool,
-	jsonc:            bool,
 	seq:              bool, // jq's --seq: texts after record separators, and outputs too
 	stream:           bool, // jq's --stream: each input as [path, leaf] events
 	stream_errors:    bool, // and an error as a [message, path] event
-	ndjson:           bool, // --ndjson: one JSON text per line, a fault where a line is not one
+	from:             Format, // how the input is read
+	to:               Format, // how the outputs are written
+	grow_header:      bool, // --grow-header: --to csv or tsv holds the output and writes a header of every key
 	strict_limits:    bool, // check: the library's depth, digit and scale caps hold
 	max_depth_given:  bool, // --max-depth was on the command line
 }
@@ -158,6 +174,12 @@ Cli :: struct {
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
 	mono:       bool, // -M
+	// --from, --to and the alias (`--csv`) as the command line gave them, which `parse_args` settles into `Opts`.
+	formats:    struct {
+		from, to, alias: Maybe(Format),
+	},
+	// The first option that is only for JSON output (-r, -c, --indent...), and the first that lays JSON out.
+	json_flag, layout_flag: string,
 }
 
 // The command line `args` (os.args without the program) into `o`, as jq reads it.
@@ -170,17 +192,19 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		Args,
 		Json_Args,
 	}
-	// --max-depth and --jsonc are read first: an --argjson ahead of them on the line is validated under them too.
+	// --max-depth and the formats are read first: an --argjson ahead of them on the line is validated under them too.
 	for i := 0; i < len(args) && args[i] != "--"; i += 1 + option_arity(args[i]) {
-		if args[i] == "--jsonc" {
-			jq.read_dialect = .Jsonc
-		}
+		format_option(&cli, args, i)
 		if args[i] == "--max-depth" && i + 1 < len(args) {
 			if n, ok := parse_max_depth(args[i + 1]); ok {
 				jq.lifted.max_depth = n
 				o.max_depth_given = true
 			}
 		}
+	}
+	o.from, o.to = settle_format(cli.formats.from, cli.formats.alias), settle_format(cli.formats.to, cli.formats.alias)
+	if o.from == .Jsonc {
+		jq.read_dialect = .Jsonc
 	}
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
@@ -212,6 +236,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		switch name := a[2:]; name {
 		case "tab":
 			o.compact, o.indent = false, -1
+			note_json_flag(&cli, "--tab", layout = true)
 		case "indent":
 			if i + 1 >= len(args) {
 				usage_error("--indent takes one parameter")
@@ -221,6 +246,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 				usage_error("--indent takes a number between -1 and 7")
 			}
 			o.compact, o.indent = false, n
+			note_json_flag(&cli, "--indent", layout = true)
 			i += option_arity(a)
 		case "max-depth":
 			if i + 1 >= len(args) {
@@ -232,6 +258,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			i += option_arity(a)
 		case "raw-output0":
 			o.raw, o.join, o.raw0 = true, true, true
+			note_json_flag(&cli, "--raw-output0")
 		case "unbuffered":
 			o.unbuffered = true
 		case "arg", "argjson", "slurpfile", "rawfile":
@@ -246,19 +273,23 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			os.exit(0)
 		case "library-path":
 			i = lib_dir_arg(&cli, args, i)
-		case "jsonc":
-			o.jsonc = true
+		case "from", "to":
+			i += option_arity(a)
+		case "grow-header":
+			o.grow_header = true
 		case "strict-limits":
 			o.strict_limits = true
-		case "ndjson":
-			o.ndjson = true
 		case "seq":
 			o.seq = true
+			note_json_flag(&cli, "--seq")
 		case "stream":
 			o.stream = true
 		case "stream-errors":
 			o.stream, o.stream_errors = true, true
 		case:
+			if _, is_alias := format_alias(name); is_alias {
+				break
+			}
 			c: byte
 			for l in LONG_LETTERS {
 				if l.name == name {
@@ -271,7 +302,67 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			}
 		}
 	}
+	if o.to == .Ndjson {
+		o.compact = true
+	}
 	return
+}
+
+// `--from NAME`, `--to NAME` and `--NAME` of a format at `args[i]`, kept in `cli.formats`: a later `--from` or `--to`
+// stands over an earlier one, and two aliases of different formats are refused.
+@(private = "file")
+format_option :: proc(cli: ^Cli, args: []string, i: int) {
+	a := args[i]
+	if len(a) < 3 || a[:2] != "--" {
+		return
+	}
+	switch name := a[2:]; name {
+	case "from", "to":
+		if i + 1 >= len(args) {
+			usage_error("%s takes one parameter", a)
+		}
+		f, ok := format_named(args[i + 1])
+		if !ok {
+			usage_error("%s takes one of %s, not %q", a, format_names(), args[i + 1])
+		}
+		if name == "from" {
+			cli.formats.from = f
+		} else {
+			cli.formats.to = f
+		}
+	case:
+		f, ok := format_alias(name)
+		if !ok {
+			return
+		}
+		if earlier, set := cli.formats.alias.?; set && earlier != f {
+			usage_error("--%s and --%s each choose the format", FORMATS[earlier].name, name)
+		}
+		cli.formats.alias = f
+	}
+}
+
+// The format an option gives: the explicit `--from` or `--to`, else the alias, else JSON.
+@(private = "file")
+settle_format :: proc(explicit, alias: Maybe(Format)) -> Format {
+	if f, ok := explicit.?; ok {
+		return f
+	}
+	if f, ok := alias.?; ok {
+		return f
+	}
+	return .Json
+}
+
+// `flag` is an option only JSON output has (`layout`: one that lays it out), noted for the first.
+@(private = "file")
+note_json_flag :: proc(cli: ^Cli, flag: string, layout := false) {
+	if cli.json_flag == "" {
+		cli.json_flag = flag
+	}
+	if layout && cli.layout_flag == "" {
+		cli.layout_flag = flag
+	}
 }
 
 // The short options in `args[i]` (`-nr`, `-Ldir`, `-L dir`), as `letter_option` reads each letter. Answers the
@@ -369,7 +460,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -408,16 +499,21 @@ letter_option :: proc(o: ^Opts, cli: ^Cli, c: byte) -> bool {
 		o.slurp = true
 	case 'r':
 		o.raw = true
+		note_json_flag(cli, "-r")
 	case 'j':
 		o.raw, o.join = true, true
+		note_json_flag(cli, "-j")
 	case 'c':
 		o.compact = true
+		note_json_flag(cli, "-c")
 	case 'C':
 		cli.color_set = true
+		note_json_flag(cli, "-C")
 	case 'M':
 		cli.mono = true
 	case 'a':
 		o.ascii = true
+		note_json_flag(cli, "-a")
 	case 'S':
 		o.sort_keys = true
 	case 'R':

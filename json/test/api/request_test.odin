@@ -232,11 +232,23 @@ refuse_all :: proc(data: rawptr, mode: mem.Allocator_Mode, size, alignment: int,
 // the item ends, so the request is refused before the walk.
 @(test)
 test_lazy_without_first_is_refused :: proc(t: ^testing.T) {
-	for mode in ([]json.Duplicates{.Last, .All}) {
+	for mode in ([]json.Duplicates{.Default, .Last, .All}) {
 		got := paths_run(raw(`{"t":[7],"z":1,"z":2,"z":3}`), []json.Path{{steps = []json.Step{json.Name("z")}}}, .Lazy, mode)
 		defer json.destroy(&got.req)
 		request_refused(t, got.err, .Lazy_Needs_First)
 		testing.expect_value(t, len(got.answers), 0)
+	}
+}
+
+// The zero value is `.Last`, on every route: a named path and one through `Any`.
+@(test)
+test_default_duplicates_is_last :: proc(t: ^testing.T) {
+	src := `{"z":1,"z":2,"z":3}`
+	for path in ([]json.Path{{steps = []json.Step{json.Name("z")}}, {steps = []json.Step{json.Any{}}}}) {
+		got := paths_run(raw(src), []json.Path{path}, duplicates = .Default)
+		defer json.destroy(&got.req)
+		testing.expect_value(t, got.err, nil)
+		testing.expect_value(t, answer_texts(got.answers, src), `3`)
 	}
 }
 

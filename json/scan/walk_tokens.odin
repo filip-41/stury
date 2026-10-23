@@ -3,7 +3,7 @@ package scan
 // The tokens between values that the walks step over: a key and its colon, the whitespace around them, the
 // comma of a compact array of numbers.
 
-import core_pkg "../../core"
+import "walk"
 import lex "lex"
 
 // A key and its colon, skipping whitespace around each. A missing key faults at the byte that cannot
@@ -82,7 +82,7 @@ object_key :: #force_inline proc(
 		when .Demand in Q {
 			// Bound now, resolved when the value closes (half the answer is its extent). `owner.lo` names
 			// the object an appended row belongs to.
-			core_pkg.demand_key(q, Q, key_lo, key_hi, s.pos, sp, owner.lo, pend)
+			walk.demand_key(q, Q, key_lo, key_hi, s.pos, sp, owner.lo, pend)
 		}
 		when .Path in Q {
 			// `sp` is the object's frame index, so the step that reads its members is `sp - 1`.

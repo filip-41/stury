@@ -7,6 +7,7 @@ import "core:math"
 import "core:strconv"
 import "core:strings"
 import number "../scan/number"
+import "../../core/spell"
 
 // A number literal as a decimal: 0.(head ++ tail) × 10^point, without leading or trailing zeros.
 // `head` and `tail` slice the literal on either side of its `.`, so no buffer is allocated.
@@ -210,8 +211,8 @@ put_jq_double :: proc(out: ^[dynamic]byte, f: f64) {
 	if g < 0 {
 		append(out, '-')
 	}
-	buf: [F64_ROOM]byte
-	nd, decpt := shortest_digits(&buf[0], g)
+	buf: [spell.F64_ROOM]byte
+	nd, decpt := spell.shortest_digits(&buf[0], g)
 	d := string(buf[1:1 + nd])
 	if decpt <= -4 || decpt > len(d) + 15 {
 		append(out, d[0])

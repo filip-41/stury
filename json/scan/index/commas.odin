@@ -24,7 +24,8 @@ bracket_balance :: proc(s: []byte) -> (b: Bracket_Balance) #no_bounds_check {
 	prev_odd, in_string: u64
 	tail: [64]u8 = ---
 	for lo := 0; lo < len(s); lo += 64 {
-		_, instr, open, close := classify_brackets(block_at(s, lo, &tail), &prev_odd, &in_string)
+		p, _ := block_at(s, lo, &tail)
+		_, instr, open, close := classify_brackets(p, &prev_odd, &in_string)
 		b.outside += int(intrinsics.count_ones(open & ~instr)) - int(intrinsics.count_ones(close & ~instr))
 		b.inside += int(intrinsics.count_ones(open & instr)) - int(intrinsics.count_ones(close & instr))
 	}
@@ -55,7 +56,8 @@ next_top_comma :: #force_inline proc(c: ^Comma_Cursor, s: []byte) -> int #no_bou
 			return -1
 		}
 		tail: [64]u8 = ---
-		v, instr, open, close := classify_brackets(block_at(s, c.at, &tail), &c.prev_odd, &c.in_string)
+		p, _ := block_at(s, c.at, &tail)
+		v, instr, open, close := classify_brackets(p, &c.prev_odd, &c.in_string)
 		open &= ~instr
 		close &= ~instr
 		comma := pack4(simd.lanes_eq(v[0], V(',')), simd.lanes_eq(v[1], V(',')), simd.lanes_eq(v[2], V(',')), simd.lanes_eq(v[3], V(','))) & ~instr
@@ -76,17 +78,6 @@ next_top_comma :: #force_inline proc(c: ^Comma_Cursor, s: []byte) -> int #no_bou
 	bit := int(intrinsics.count_trailing_zeros(c.top))
 	c.top &= c.top - 1
 	return c.at - 64 + bit
-}
-
-// The 64 bytes of `s` from `lo`, or the rest of `s` copied into `tail`, zeroed past it.
-@(private = "file")
-block_at :: #force_inline proc(s: []byte, lo: int, tail: ^[64]u8) -> [^]u8 #no_bounds_check {
-	if len(s) - lo < 64 {
-		tail^ = {}
-		copy(tail[:], s[lo:])
-		return raw_data(tail[:])
-	}
-	return raw_data(s[lo:])
 }
 
 // The block of 64 bytes at `b`: which of its bytes are inside strings, from the carries of the block

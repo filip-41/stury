@@ -9,14 +9,15 @@ import "base:runtime"
 import "core:slice"
 import "core:strings"
 import core_pkg "../core"
+import "scan/walk"
 import scan_pkg "scan"
 
 // A handle to one value of a `Document`, valid while the document is.
-Node :: core_pkg.Node
+Node :: walk.Node
 // "No such value": what every lookup answers on a miss.
-NO_NODE :: core_pkg.NO_NODE
+NO_NODE :: walk.NO_NODE
 // The root value.
-ROOT :: core_pkg.ROOT
+ROOT :: walk.ROOT
 
 // A parsed JSON text: one row per value over your source bytes. Make one with `build` (or a `Request`'s
 // `doc`) and read it through the procedures in this file; its fields are internal.
@@ -28,7 +29,7 @@ ROOT :: core_pkg.ROOT
 Document :: struct {
 	src:       []byte,
 	// One row per value, in the order the values appear in `src`.
-	rows:      [dynamic]core_pkg.Row,
+	rows:      [dynamic]walk.Row,
 	// Escaped strings the `.Dom` scan decoded, addressed by the rows.
 	values:    [dynamic]u8,
 	// Escaped strings and keys decoded on demand; `keys` and `strings` cache them by node.
@@ -118,7 +119,7 @@ document_destroy :: proc(doc: ^Document) {
 	delete(doc.members)
 	delete(doc.member_at)
 	delete(doc.facts)
-	core_pkg.name_arena_destroy(&doc.arena)
+	walk.name_arena_destroy(&doc.arena)
 	doc^ = {}
 }
 
@@ -238,7 +239,7 @@ child :: proc {
 // reading as a path's default `.Last`.
 @(private, require_results)
 child_by_key :: proc(doc: ^Document, n: Node, name: string) -> Node {
-	return core_pkg.dom_find_key(doc.rows[:], doc.src, n, name, &scan_pkg.FORMAT_HOOKS)
+	return walk.dom_find_key(doc.rows[:], doc.src, n, name, &scan_pkg.FORMAT_HOOKS)
 }
 
 // Member `i` of container `n`, 0-based (from the end when negative), or `NO_NODE`. O(1) over an array of
@@ -256,14 +257,14 @@ child_by_index :: proc(doc: ^Document, n: Node, index: int) -> Node {
 	if i == 0 {
 		return first_child(doc, n)
 	}
-	if i < NTH_WALK || i >= child_count(doc, n) || core_pkg.dom_flat_array(doc.rows[n]) {
-		return core_pkg.dom_nth_member(doc.rows[:], n, i)
+	if i < NTH_WALK || i >= child_count(doc, n) || walk.dom_flat_array(doc.rows[n]) {
+		return walk.dom_nth_member(doc.rows[:], n, i)
 	}
 	at, listed := doc.member_at[n]
 	if !listed {
 		at, listed = list_members(doc, n)
 		if !listed {
-			return core_pkg.dom_nth_member(doc.rows[:], n, i)
+			return walk.dom_nth_member(doc.rows[:], n, i)
 		}
 	}
 	return doc.members[at + i]
@@ -305,7 +306,7 @@ list_members :: proc(doc: ^Document, n: Node) -> (at: int, ok: bool) {
 // The member count of container `n`; zero on a scalar.
 @(require_results)
 child_count :: proc(doc: ^Document, n: Node) -> int {
-	return core_pkg.dom_child_count(doc.rows[:], n)
+	return walk.dom_child_count(doc.rows[:], n)
 }
 
 // The position of a walk over one container's members (`children`, `members`). A value, owning nothing; it
@@ -599,7 +600,7 @@ query_fail :: proc(w: ^Query_Walk, n, holder: Node, steps: []Step, missed: bool,
 	if w.outcomes == nil {
 		return true
 	}
-	return query_out(w, NO_NODE, n if missed else holder, core_pkg.per_element_outcome(steps, missed, met))
+	return query_out(w, NO_NODE, n if missed else holder, walk.per_element_outcome(steps, missed, met))
 }
 
 // The members of object `n` that `Any` reads, `steps` next: a repeated key once, at its first place, with the
@@ -691,11 +692,11 @@ fact_text :: proc(doc: ^Document, f: Fact) -> string {
 
 @(private = "file")
 has :: #force_inline proc(doc: ^Document, n: Node) -> bool {
-	return core_pkg.dom_has(doc.rows[:], n)
+	return walk.dom_has(doc.rows[:], n)
 }
 
 // The first member of container `n` in document order, or `NO_NODE`.
 @(private)
 first_child :: proc(doc: ^Document, n: Node) -> Node {
-	return core_pkg.dom_first_member(doc.rows[:], n)
+	return walk.dom_first_member(doc.rows[:], n)
 }

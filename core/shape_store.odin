@@ -89,6 +89,17 @@ shape_enum_member_store :: #force_inline proc(op: ^Shape_Op, k: int, dest: rawpt
 	}
 }
 
+// Set the tag of the union at `dest` to `tag`. A pure maybe has no tag: its non-nil pointer is the mark.
+shape_union_tag :: proc(dest: rawptr, op: ^Shape_Op, tag: u32) {
+	at := rawptr(uintptr(dest) + uintptr(op.tag_offset))
+	switch op.tag_size {
+	case 1: (^u8)(at)^ = u8(tag)
+	case 2: (^u16)(at)^ = u16(tag)
+	case 4: (^u32)(at)^ = tag
+	case 8: (^u64)(at)^ = u64(tag)
+	}
+}
+
 // A binary64 value, made safe to narrow with one more rounding, into an f32. A finite value that rounds to
 // infinity is out of range.
 shape_f32_store :: #force_inline proc(x: f64, dest: rawptr) -> Shape_Fault {

@@ -20,6 +20,7 @@ package json
 import "base:runtime"
 import "core:slice"
 import core_pkg "../core"
+import "scan/walk"
 import scan_pkg "scan"
 
 // Compile every single-name path and column to the automaton, so a test document is checked across both
@@ -29,7 +30,7 @@ import scan_pkg "scan"
 FORCE_AUTOMATON :: #config(FORCE_AUTOMATON, false)
 
 @(private = "file")
-MAX_ROUTED :: core_pkg.MAX_PATH_QUERIES
+MAX_ROUTED :: walk.MAX_PATH_QUERIES
 
 @(private)
 Route_Matcher :: enum u8 {
@@ -52,15 +53,15 @@ Route :: struct {
 	root_lo:   u64,
 	// A gated column's names and the walk's state (`Demand_Spec.gate`). `gate.gated` is zero for any
 	// other plan.
-	gate:      core_pkg.Demand_Gate,
+	gate:      walk.Demand_Gate,
 	// The paths the automaton runs, as indices into `Request.paths`, ascending. At most `MAX_ROUTED`:
 	// the automaton's own bound.
 	auto:      [MAX_ROUTED]u32,
 	// The matcher's keys: `row_keys[i].tag` is the path key i answers, in rows or in slots.
 	// Read them through `route_store`: past `MAX_ROUTED` they live in `spill`.
 	keys:      [MAX_ROUTED]string,
-	row_keys:  [MAX_ROUTED]core_pkg.Demand_Row_Key,
-	fields:    [MAX_ROUTED]core_pkg.Field_Value,
+	row_keys:  [MAX_ROUTED]walk.Demand_Row_Key,
+	fields:    [MAX_ROUTED]walk.Field_Value,
 	spill:     Route_Spill,
 	// Whether the last walk met an object a `.First` or `.Last` `Any` step must resolve key by key
 	// (`settle_wild`).
@@ -69,7 +70,7 @@ Route :: struct {
 	// all whatever `duplicates` says.
 	every_member: bool,
 	// The walk's resolution a prepared scan keeps for the next (`Prepared`), set only for its scan.
-	kept:      ^core_pkg.Resolved_Queries,
+	kept:      ^walk.Resolved_Queries,
 }
 
 // What a plan holds past `MAX_ROUTED`, allocated with the request's allocator, resized per call and
@@ -78,8 +79,8 @@ Route :: struct {
 @(private)
 Route_Spill :: struct {
 	keys:      [dynamic]string,
-	row_keys:  [dynamic]core_pkg.Demand_Row_Key,
-	fields:    [dynamic]core_pkg.Field_Value,
+	row_keys:  [dynamic]walk.Demand_Row_Key,
+	fields:    [dynamic]walk.Field_Value,
 	counts:    [dynamic]int,
 }
 
@@ -87,8 +88,8 @@ Route_Spill :: struct {
 @(private)
 Route_Store :: struct {
 	keys:      []string,
-	row_keys:  []core_pkg.Demand_Row_Key,
-	fields:    []core_pkg.Field_Value,
+	row_keys:  []walk.Demand_Row_Key,
+	fields:    []walk.Field_Value,
 }
 
 @(private)
@@ -113,7 +114,7 @@ route_destroy :: proc(plan: ^Route) {
 // allocator, so adopting it only binds an array that has none yet.
 @(private = "file")
 spill_to :: proc(arr: ^[dynamic]$T, n: int, alloc: runtime.Allocator) -> bool {
-	core_pkg.adopt_allocator(arr, alloc)
+	walk.adopt_allocator(arr, alloc)
 	return resize(arr, n) == nil
 }
 
@@ -191,7 +192,7 @@ root_object :: #force_inline proc(src: []byte) -> (lo: u64, ok: bool) {
 @(private = "file")
 root_object_padded :: #force_no_inline proc(src: []byte) -> (lo: u64, ok: bool) {
 	i := scan_pkg.bom_len(src)
-	for i < len(src) && core_pkg.is_space(src[i]) {
+	for i < len(src) && walk.is_space(src[i]) {
 		i += 1
 	}
 	return u64(i), i < len(src) && src[i] == '{'
@@ -381,10 +382,10 @@ route_assign :: proc(plan: ^Route, paths: []Path, served: Path_Shape, wild, n_ke
 			store.keys[j] = string(p.steps[len(p.steps) - 1].(Name))
 			// A slot holds one answer per key, so a limit never cuts a slot-served path.
 			plan.any_limit ||= plan.matcher != .Slots && p.limit > 0
-			store.row_keys[j] = core_pkg.Demand_Row_Key{tag = u32(i), limit = u32(clamp(p.limit, 0, int(max(u32))))}
+			store.row_keys[j] = walk.Demand_Row_Key{tag = u32(i), limit = u32(clamp(p.limit, 0, int(max(u32))))}
 			j += 1
 		} else {
-			if plan.n_auto == core_pkg.MAX_PATH_QUERIES {
+			if plan.n_auto == walk.MAX_PATH_QUERIES {
 				return Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = .Path_Runs, path = i}
 			}
 			plan.any_limit ||= p.limit > 0
@@ -393,7 +394,7 @@ route_assign :: proc(plan: ^Route, paths: []Path, served: Path_Shape, wild, n_ke
 		}
 	}
 	plan.n_keys = n_keys
-	if core_pkg.names_over_capacity(store.keys) {
+	if walk.names_over_capacity(store.keys) {
 		return Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = .Repeated_Names}
 	}
 	return nil
@@ -402,7 +403,7 @@ route_assign :: proc(plan: ^Route, paths: []Path, served: Path_Shape, wild, n_ke
 // A slot's answer: a found key is a `Found`, a key the document lacked is `Missing`. The matcher writes a
 // slot whole or not at all, so a miss is all zero and the span and kind copy without a branch.
 @(private = "file")
-slot_answer :: #force_inline proc(root_lo: u64, path: u32, f: core_pkg.Field_Value) -> Path_Answer {
+slot_answer :: #force_inline proc(root_lo: u64, path: u32, f: walk.Field_Value) -> Path_Answer {
 	return Path_Answer{
 		lo = f.lo, hi = f.hi, owner = root_lo, query = path, node = NO_NODE, kind = f.kind,
 		outcome = .Found if f.found else .Missing,
@@ -420,7 +421,7 @@ route_slots :: #force_inline proc(answers: ^[dynamic]Path_Answer, plan: ^Route, 
 		for f, i in store.fields {
 			#no_bounds_check answers[n + i] = slot_answer(plan.root_lo, store.row_keys[i].tag, f)
 		}
-		core_pkg.edge_publish(answers, n + len(store.fields))
+		walk.edge_publish(answers, n + len(store.fields))
 		return true
 	}
 	return route_slots_append(answers, plan, reached_end)
@@ -435,7 +436,7 @@ route_slots_append :: #force_no_inline proc(answers: ^[dynamic]Path_Answer, plan
 			continue
 		}
 		n := len(answers^)
-		core_pkg.row_append(answers, slot_answer(plan.root_lo, store.row_keys[i].tag, f))
+		walk.row_append(answers, slot_answer(plan.root_lo, store.row_keys[i].tag, f))
 		if len(answers^) == n {
 			return false
 		}
@@ -452,11 +453,11 @@ route_missing :: #force_no_inline proc(answers: ^[dynamic]Path_Answer, plan: ^Ro
 		return true
 	}
 	for k in route_store(plan, plan.n_keys).row_keys {
-		if k.owner != core_pkg.NO_OWNER {
+		if k.owner != walk.NO_OWNER {
 			continue
 		}
 		n := len(answers^)
-		core_pkg.row_append(answers, Path_Answer{owner = core_pkg.NO_OWNER, query = k.tag, node = NO_NODE, outcome = .Missing})
+		walk.row_append(answers, Path_Answer{owner = walk.NO_OWNER, query = k.tag, node = NO_NODE, outcome = .Missing})
 		if len(answers^) == n {
 			return false
 		}
@@ -468,7 +469,7 @@ route_missing :: #force_no_inline proc(answers: ^[dynamic]Path_Answer, plan: ^Ro
 // pass can fill: one sweep over `answers` that drops every retracted row, cuts each path to its `limit`, and
 // fills the field the walk does not (every `node`). Plain slot, column or automaton answers skip it.
 @(private)
-finish_answers :: proc(answers: ^[dynamic]Path_Answer, nodes: []core_pkg.Row, plan: ^Route, paths: []Path, has_nodes: bool) {
+finish_answers :: proc(answers: ^[dynamic]Path_Answer, nodes: []walk.Row, plan: ^Route, paths: []Path, has_nodes: bool) {
 	inline_counts: [MAX_ROUTED]int
 	counts := inline_counts[:]
 	if len(paths) > MAX_ROUTED {
@@ -478,7 +479,7 @@ finish_answers :: proc(answers: ^[dynamic]Path_Answer, nodes: []core_pkg.Row, pl
 	kept := 0
 	for answer in answers^ {
 		a := answer
-		if a.query == core_pkg.RETRACTED_TAG {
+		if a.query == walk.RETRACTED_TAG {
 			continue
 		}
 		// A limit counts what jq would output, the `Found` answers (every answer, `per_element`). Whatever comes
@@ -503,8 +504,8 @@ finish_answers :: proc(answers: ^[dynamic]Path_Answer, nodes: []core_pkg.Row, pl
 // The row of `nodes` that starts at `lo`: rows are preorder, so `lo` ascends and a binary search finds it.
 // `NO_NODE` when the tape has no row there.
 @(private)
-node_at :: proc(nodes: []core_pkg.Row, lo: u64) -> Node {
-	i, found := slice.binary_search_by(nodes, lo, proc(r: core_pkg.Row, lo: u64) -> slice.Ordering {
+node_at :: proc(nodes: []walk.Row, lo: u64) -> Node {
+	i, found := slice.binary_search_by(nodes, lo, proc(r: walk.Row, lo: u64) -> slice.Ordering {
 		return slice.cmp(u64(r.lo), lo)
 	})
 	return Node(i) if found else NO_NODE

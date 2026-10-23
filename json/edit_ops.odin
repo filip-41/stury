@@ -7,6 +7,7 @@ import "base:runtime"
 import "core:slice"
 import "core:strings"
 import core_pkg "../core"
+import "scan/walk"
 import scan_pkg "scan"
 
 // A JSONC path edit's scan: its entries and their comments are read off the rows.
@@ -16,7 +17,7 @@ EDIT_QUERIES :: bit_set[Query]{.Path, .Nodes}
 // `insert` of the written value `repl`. With `upsert`, a member `at` the object already has has its value
 // replaced instead (`set` with `upsert`).
 @(private)
-insert_at :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, dialect: Dialect, upsert := false) -> (out: []byte, err: Maybe(Edit_Error)) {
+insert_at :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, dialect: Dialect, upsert := false) -> (out: []byte, err: Maybe(Path_Error)) {
 	if dialect == .Jsonc {
 		return insert_in(src, p, at, repl, allocator, true, upsert)
 	}
@@ -25,7 +26,7 @@ insert_at :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 
 // `$jsonc` is a compile-time parameter, so the JSON edit compiles without the JSONC branches.
 @(private = "file")
-insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, $jsonc: bool, upsert: bool) -> (out: []byte, err: Maybe(Edit_Error)) {
+insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, $jsonc: bool, upsert: bool) -> (out: []byte, err: Maybe(Path_Error)) {
 	key := make([dynamic]u8, allocator)
 	defer delete(key)
 	// Path 0 finds the containers. Under JSON path 1 their entries, which JSONC reads off its rows. The last
@@ -36,7 +37,7 @@ insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 	member_q := u32(n_paths)
 	if name, is_name := at.(string); is_name {
 		if merr := marshal_append(&key, name, {}, nil); merr != .None {
-			return nil, Edit_Error{kind = .Encode, encode = merr}
+			return nil, Path_Error{kind = .Encode, encode = merr}
 		}
 		paths[n_paths] = extend(member_buf[:], p.steps, Name(name))
 		n_paths += 1
@@ -91,7 +92,7 @@ insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 // foot comments) the interior goes. `$jsonc` is a compile-time parameter, so the JSON edit compiles without
 // the JSONC branches.
 @(private)
-remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $jsonc: bool) -> (out: []byte, err: Maybe(Edit_Error)) {
+remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $jsonc: bool) -> (out: []byte, err: Maybe(Path_Error)) {
 	// Path 0 finds the values. Under JSON path 1 is every entry of the containers holding them, which JSONC
 	// reads off its rows.
 	kids_buf: [core_pkg.MAX_PATH_STEPS]Step
@@ -105,7 +106,7 @@ remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $jsonc: bo
 	defer delete(gone)
 	defer delete(kids)
 	if len(gone) == 0 {
-		return nil, Edit_Error{kind = .Not_Found}
+		return nil, Path_Error{kind = .Not_Found}
 	}
 	edits := make([dynamic]Edit, allocator)
 	defer delete(edits)
@@ -138,12 +139,12 @@ remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $jsonc: bo
 		slice.sort_by(edits[:], proc(a, b: Edit) -> bool {
 			return a.lo < b.lo
 		})
-		if !edits_ordered(src, edits[:]) {
-			return nil, Edit_Error{kind = .Bad_Result}
+		if !core_pkg.edits_ordered(src, edits[:]) {
+			return nil, Path_Error{kind = .Bad_Result}
 		}
-		return judged(edits_apply(src, edits[:], allocator), allocator, .Jsonc)
+		return judged(core_pkg.edits_apply(src, edits[:], allocator, core_pkg.PATH_OUT_OF_MEMORY), allocator, .Jsonc)
 	} else {
-		return edits_apply(src, edits[:], allocator)
+		return core_pkg.edits_apply(src, edits[:], allocator, core_pkg.PATH_OUT_OF_MEMORY)
 	}
 }
 
@@ -198,7 +199,7 @@ trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer
 			lo = own[kept].hi
 		} else {
 			lo = owner + 1
-			for core_pkg.is_space(src[hi]) {
+			for walk.is_space(src[hi]) {
 				hi += 1
 			}
 		}
@@ -212,11 +213,11 @@ trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer
 key_span :: proc(src: []byte, value_lo: u64) -> (lo, hi: u64) {
 	// The source was validated, so each step back finds what it names and the opening quote exists.
 	i := value_lo
-	for core_pkg.is_space(src[i - 1]) {
+	for walk.is_space(src[i - 1]) {
 		i -= 1
 	}
 	i -= 1 // the colon
-	for core_pkg.is_space(src[i - 1]) {
+	for walk.is_space(src[i - 1]) {
 		i -= 1
 	}
 	hi = i
@@ -333,7 +334,7 @@ commented_at_spot :: proc(src: []byte, doc: ^Document, c: Path_Answer, own: []Pa
 // (`entry_between_extents`). Without one, JSONC lays the entry out as JSON does. `.Unplaceable` when the
 // separator holds anything else.
 @(private = "file")
-entry_at :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, key, value: []u8, $jsonc: bool) -> Maybe(Edit_Error) {
+entry_at :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, key, value: []u8, $jsonc: bool) -> Maybe(Path_Error) {
 	n := len(own)
 	from := len(text)
 	if n == 0 {
@@ -356,12 +357,12 @@ entry_at :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: 
 	for b in gap {
 		if b == ',' && !comma {
 			commas += 1
-		} else if !core_pkg.is_space(b) {
-			return Edit_Error{kind = .Unplaceable}
+		} else if !walk.is_space(b) {
+			return Path_Error{kind = .Unplaceable}
 		}
 	}
 	if commas != (0 if comma else 1) {
-		return Edit_Error{kind = .Unplaceable}
+		return Path_Error{kind = .Unplaceable}
 	}
 	if appending {
 		if comma {
@@ -386,7 +387,7 @@ entry_at :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: 
 // comma adds one at its value's end, and starts a new line after a line comment. `.Unplaceable` when those
 // bytes hold more than blanks, `.Bad_Result` when two extents overlap.
 @(private = "file")
-entry_between_extents :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, key: []u8, between: string, value: []u8) -> Maybe(Edit_Error) {
+entry_between_extents :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, key: []u8, between: string, value: []u8) -> Maybe(Path_Error) {
 	n := len(own)
 	from := len(text)
 	gap_lo, gap_hi := c.lo + 1, extent_lo(doc, own[0].node)
@@ -395,12 +396,12 @@ entry_between_extents :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: 
 		gap_lo, gap_hi = extent_hi(doc, own[j - 1].node), extent_lo(doc, own[j].node)
 	}
 	if gap_lo > gap_hi {
-		return Edit_Error{kind = .Bad_Result}
+		return Path_Error{kind = .Bad_Result}
 	}
 	gap := src[gap_lo:gap_hi]
 	for b in gap {
-		if !core_pkg.is_space(b) {
-			return Edit_Error{kind = .Unplaceable}
+		if !walk.is_space(b) {
+			return Path_Error{kind = .Unplaceable}
 		}
 	}
 	if k == APPEND || k == n {
@@ -434,20 +435,20 @@ entry_between_extents :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: 
 // array, an index for an object, or an index past either end is `.Unplaceable`, a member the object has (in
 // `members`, from cursor `mc`) `.Exists`.
 @(private = "file")
-insert_slot :: proc(at: Insert_At, c: Path_Answer, n: int, members: []Path_Answer, mc: ^int) -> (k: int, err: Maybe(Edit_Error)) {
+insert_slot :: proc(at: Insert_At, c: Path_Answer, n: int, members: []Path_Answer, mc: ^int) -> (k: int, err: Maybe(Path_Error)) {
 	switch v in at {
 	case string:
 		if c.kind != .Object {
-			return 0, Edit_Error{kind = .Unplaceable}
+			return 0, Path_Error{kind = .Unplaceable}
 		}
 		if len(held_by(members, mc, c.lo)) > 0 {
-			return 0, Edit_Error{kind = .Exists}
+			return 0, Path_Error{kind = .Exists}
 		}
 		return APPEND, nil
 	case int:
 		k = v + n if v < 0 else v
 		if c.kind != .Array || (k != APPEND && (k < 0 || k > n)) {
-			return 0, Edit_Error{kind = .Unplaceable}
+			return 0, Path_Error{kind = .Unplaceable}
 		}
 		return k, nil
 	}

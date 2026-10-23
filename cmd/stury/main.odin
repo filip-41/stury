@@ -23,6 +23,8 @@ package main
 //
 //	options.odin                     the command line
 //	input.odin, input_stream.odin    reading files and stdin as jq does, whole or in line windows
+//	input_csv.odin                   --csv and --tsv: a file's records, each one an object
+//	scan_cells.odin                  a filter of columns of a --csv or --tsv file, printed from the cells
 //	scan_inputs.odin                 the path scan over the input stream
 //	record_scan.odin                 a file's one-per-line records scanned on the batch pool
 //	root_pieces.odin,
@@ -71,6 +73,9 @@ Run :: struct {
 	pool:        host.Batch_Pool,
 	pool_width:  int, // the workers `pool` was started for, 0 before it is
 	scanning:    bool, // the filter is a path the scan answers
+	columns:     ^Columns, // the filter is only columns of a --from csv or tsv file: `scan_cells` answers it
+	table:       ^Table, // --to csv or tsv: the outputs are records (nil otherwise)
+	rows_begun:  bool, // a record has been put into the output, so a later one does not open it
 	// select(P op LITERAL): the scan answers P, and a record is printed when its answer compares so. `op` is .None
 	// for any other filter.
 	select:      struct {
@@ -117,22 +122,16 @@ main :: proc() {
 	validating := cli.validating
 	set_colors(&run, cli)
 	o := &run.opts
+	refuse_format_clashes(o, &cli)
 	switch {
-	case o.jsonc && (o.ndjson || o.seq):
-		usage_error("--jsonc reads one document per input, not records")
-	case o.ndjson && o.seq:
-		usage_error("--ndjson and --seq each cut the input into records")
-	case o.jsonc && o.stream:
-		usage_error("--stream reads JSON, not JSONC")
 	case o.stream && validating:
 		usage_error("--stream makes jq's events of each input; check only judges it")
 	case o.strict_limits && !validating:
 		usage_error("--strict-limits is check's: a filter reads numbers as far as they can be held")
-	case o.raw_input && (validating || o.jsonc || o.ndjson):
-		what := "check" if validating else "--jsonc" if o.jsonc else "--ndjson"
-		usage_error("%s reads JSON texts, not -R's lines", what)
+	case o.raw_input && validating:
+		usage_error("check reads JSON texts, not -R's lines")
 	}
-	run.req.dialect = o.jsonc ? .Jsonc : .Json
+	run.req.dialect = .Jsonc if o.from == .Jsonc else .Json
 	run.req.limits = jq.lifted
 	names := cli.files[:] if len(cli.files) > 0 else STDIN_ONLY
 	if validating {
@@ -174,19 +173,25 @@ main :: proc() {
 		ready_interpreter(&run)
 	}
 	choose_scan(&run, text)
-	if !run.scanning {
+	choose_columns(&run, text)
+	if !run.scanning && run.columns == nil {
 		ready_interpreter(&run)
 	}
 	ins: Inputs
 	inputs_init(&ins, &run, names)
 	// A pipe is read as it comes, but by -s, which needs it all, and --jsonc, whose faults count lines in it whole.
-	ins.may_stream = !o.slurp && !o.jsonc
+	ins.may_stream = !o.slurp && o.from != .Jsonc
 	bind_inputs(&run, &ins)
 	// Here, not in the interpreter's arena, which each input empties.
 	reserve(&run.out, FLUSH_AT * 2)
+	if writes_cells(o) {
+		run.table = table_make(o)
+	}
 	run.spill = {at = FLUSH_AT, flush = spill_out, data = &run}
 	reserve(&run.ip.messages, 1 << 12)
-	if run.scanning && jq.lifted.max_depth <= json.MAX_DEPTH {
+	if run.columns != nil {
+		scan_cells(&run, &ins)
+	} else if run.scanning && jq.lifted.max_depth <= json.MAX_DEPTH {
 		scan_inputs(&run, &ins)
 	} else {
 		// The interpreter recurses, and so does printing an answer: past MAX_DEPTH, the scan's too.
@@ -297,7 +302,7 @@ bind_cli_vars :: proc(run: ^Run) {
 choose_scan :: proc(run: ^Run, text: string) {
 	run.any_at = -1
 	o := run.opts
-	if o.null_input || o.slurp || o.sort_keys || o.ascii || o.exit_status || o.seq || o.stream || o.raw_input || o.raw0 {
+	if o.null_input || o.slurp || o.sort_keys || o.ascii || o.exit_status || o.seq || o.stream || o.raw_input || o.raw0 || reads_cells(&o) || writes_cells(&o) {
 		return
 	}
 	@(static) steps: [json.MAX_PATH_STEPS]json.Step
@@ -333,7 +338,7 @@ choose_scan :: proc(run: ^Run, text: string) {
 // filter is checked here, so `select` is known to be jq's.
 selected_path :: proc(run: ^Run, text: string, steps: []json.Step) -> (p: json.Path, ok: bool) {
 	o := run.opts
-	if o.jsonc {
+	if o.from == .Jsonc {
 		return
 	}
 	ready_interpreter(run)
@@ -383,7 +388,7 @@ fault_in_file :: proc(name: string, src: []byte, e: json.Error, what := "", line
 // fault), and a nesting past the cap is raised by --max-depth, which the hint asks for only when it was not given.
 // The text ends in a newline.
 fault_context :: proc(src: []byte, e: json.Error, opts: ^Opts) -> string {
-	jsonc := opts.jsonc
+	jsonc := opts.from == .Jsonc
 	at := int(e.offset)
 	hint: string
 	switch {
@@ -429,6 +434,10 @@ fail_input :: proc(run: ^Run, e: json.Error, what := "") -> ! {
 }
 
 finish :: proc(run: ^Run, code: int) -> ! {
+	code := code
+	if !write_held_rows(run) {
+		code = EXIT_INPUT
+	}
 	flush_some(run, force = true)
 	check_output()
 	os.exit(code)

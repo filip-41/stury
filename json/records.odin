@@ -3,7 +3,7 @@ package json
 import "core:bytes"
 import scan_pkg "scan"
 import index_pkg "scan/index"
-import core_pkg "../core"
+import "scan/walk"
 
 // How an input is cut into records. The iterator checks the framing only: whatever the caller runs on a
 // record's bytes (`validate`, `build`, `unmarshal`, `scan`) checks the record.
@@ -112,7 +112,7 @@ next_ndjson :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 			end -= 1
 		}
 		p := start
-		for p < end && core_pkg.is_space(src[p]) {
+		for p < end && walk.is_space(src[p]) {
 			p += 1
 		}
 		if p < end {
@@ -131,7 +131,7 @@ next_json_seq :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 	if it.pos == 0 && it.base == 0 {
 		it.pos = scan_pkg.bom_len(src)
 	}
-	for it.pos < len(src) && core_pkg.is_space(src[it.pos]) {
+	for it.pos < len(src) && walk.is_space(src[it.pos]) {
 		it.pos += 1
 	}
 	if it.pos >= len(src) {
@@ -145,7 +145,7 @@ next_json_seq :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 	for start < len(src) {
 		// A record's first byte is above a space. The separators and whitespace are not.
 		c := src[start]
-		if c != 0x1E && (c > ' ' || !core_pkg.is_space(c)) {
+		if c != 0x1E && (c > ' ' || !walk.is_space(c)) {
 			break
 		}
 		start += 1
@@ -180,10 +180,10 @@ next_entry :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 		it.owed = true
 	}
 	it.pos = hi + 1
-	for lo < hi && core_pkg.is_space(src[lo]) {
+	for lo < hi && walk.is_space(src[lo]) {
 		lo += 1
 	}
-	for hi > lo && core_pkg.is_space(src[hi - 1]) {
+	for hi > lo && walk.is_space(src[hi - 1]) {
 		hi -= 1
 	}
 	if lo == hi && !it.owed {
@@ -218,19 +218,19 @@ entry_key :: proc(it: ^Records, lo, hi: int) -> (key: []byte, value: int) {
 		return nil, 0
 	}
 	p := lo + len(key)
-	for p < hi && core_pkg.is_space(src[p]) {
+	for p < hi && walk.is_space(src[p]) {
 		p += 1
 	}
 	if p == hi || src[p] != ':' {
 		// Past the key there is only space before the entry's comma or the root's close.
-		for p < it.end && core_pkg.is_space(src[p]) {
+		for p < it.end && walk.is_space(src[p]) {
 			p += 1
 		}
 		entry_fault(it, p, .Bad_Char)
 		return nil, 0
 	}
 	p += 1
-	for p < hi && core_pkg.is_space(src[p]) {
+	for p < hi && walk.is_space(src[p]) {
 		p += 1
 	}
 	return key, p
@@ -249,11 +249,11 @@ open_root :: proc(it: ^Records) -> bool {
 	src := it.src
 	it.opened = true
 	p := scan_pkg.bom_len(src)
-	for p < len(src) && core_pkg.is_space(src[p]) {
+	for p < len(src) && walk.is_space(src[p]) {
 		p += 1
 	}
 	z := len(src) - 1
-	for z > p && core_pkg.is_space(src[z]) {
+	for z > p && walk.is_space(src[z]) {
 		z -= 1
 	}
 	if p < z && (src[p] == '[' || src[p] == '{') && src[z] == src[p] + 2 {

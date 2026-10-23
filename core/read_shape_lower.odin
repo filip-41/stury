@@ -3,8 +3,7 @@ package core
 // Lowering a `Type_Plan` into the read shape a typed reader walks (`Read_Shape`): one shape op per plan op and
 // one shape field per plan field, at the same indices, so tags, field order and omitempty are the ones the
 // writer writes by. A type the reader cannot read lowers to `.Unsupported`, and a shape that reaches one is
-// refused before any byte is read. The format matches member keys its own way (`Plan_Format.key_words`,
-// `Plan_Format.plain_name`).
+// refused before any byte is read. A format annotates the shape for its own walk with `Plan_Format.lowered`.
 
 import "base:runtime"
 import "core:reflect"
@@ -51,34 +50,15 @@ read_shape_of :: proc(p: ^Type_Plan) -> (shape: ^Read_Shape, err: Maybe(Unmarsha
 			widest = max(widest, int(r.ops[i].stride))
 		}
 	}
-	for &op in r.ops {
-		#partial switch op.kind {
-		case .Struct:
-			op.members_fused = struct_fuses(p, &op)
-		case .Slice, .Dynamic:
-			op.elements_fused = r.ops[op.elem].kind in SHAPE_WHOLE_LEAVES
-		}
-	}
-	// The arm a union's tag picked reads every unknown key in `shape_key`, which tells the tag apart.
-	for op in r.ops {
-		if op.kind == .Union && op.tagged {
-			for arm in r.fields[op.elem:][:op.count] {
-				r.ops[arm.op].members_fused = false
-			}
-		}
-	}
-	descent_seen, derr := make([]bool, len(r.ops), alloc)
-	if derr != nil {
-		return nil, Unmarshal_Error{kind = .Out_Of_Memory}
-	}
-	r.descends = shape_descends(r, root, descent_seen)
-	delete(descent_seen, alloc)
 	if widest >= 0 {
 		zero, zerr := make([]u8, widest, alloc)
 		if zerr != nil {
 			return nil, Unmarshal_Error{kind = .Out_Of_Memory}
 		}
 		r.zero = zero
+	}
+	if lowered := p.format.lowered; lowered != nil && lowered(r) != nil {
+		return nil, Unmarshal_Error{kind = .Out_Of_Memory}
 	}
 	visited, verr := make([]bool, len(r.ops), alloc)
 	if verr != nil {
@@ -179,35 +159,35 @@ lower_union :: proc(p: ^Type_Plan, i: u32, u: runtime.Type_Info_Union, size: u32
 	if u.no_nil {
 		out.arm_of[0] = UNION_NO_NIL
 	}
-	taken: bit_set[0 ..< SHAPE_CLASSES]
+	taken: bit_set[Value_Class]
 	tagged := op.tagged && len(p.opts.union_tag) > 0
 	// Objects taken by an arm the tag does not name.
 	untagged_objects := 0
 	for arm, k in p.fields[op.elem:][:op.count] {
 		classes := value_classes(p, arm.op, 0)
 		if u.no_nil && arm.kind == .Null {
-			classes = {0}
+			classes = {.Null}
 		}
 		into := &p.read.fields[op.elem + u32(k)]
 		into^ = {offset = u32(arm.offset), op = arm.op}
 		if tagged && arm.key_hi > arm.key_lo {
 			into.name = arm_tag_name(p, u.variants[k].id, u.variants[k].variant.(runtime.Type_Info_Named).name)
-		} else if 1 in classes {
+		} else if .Object in classes {
 			untagged_objects += 1
 		}
-		if classes & taken - {1} != {} {
+		if classes & taken - {.Object} != {} {
 			return
 		}
 		taken |= classes
 		for class in classes {
-			out.arm_of[class] = u8(k + 1)
+			out.arm_of[u8(class)] = u8(k + 1)
 		}
 	}
 	if tagged {
 		if untagged_objects > 0 {
 			return
 		}
-		out.arm_of[1] = 0
+		out.arm_of[u8(Value_Class.Object)] = 0
 		out.tagged = true
 	} else if untagged_objects > 1 {
 		return
@@ -218,11 +198,11 @@ lower_union :: proc(p: ^Type_Plan, i: u32, u: runtime.Type_Info_Union, size: u32
 	out.size = size
 }
 
-// The non-null value classes (`core.Shape_Op.arm_of`) plan op `i` reads. `null` reads as a pointer's or a
+// The non-null value classes plan op `i` reads. `null` reads as a pointer's or a
 // union's nil, never as an arm. `depth` stops a union that holds a pointer to itself: past 16 pointers or
 // unions in a row an arm takes nothing more.
 @(private = "file")
-value_classes :: proc(p: ^Type_Plan, i: u32, depth: int) -> (classes: bit_set[0 ..< SHAPE_CLASSES]) {
+value_classes :: proc(p: ^Type_Plan, i: u32, depth: int) -> (classes: bit_set[Value_Class]) {
 	if depth > 16 {
 		return
 	}
@@ -230,22 +210,22 @@ value_classes :: proc(p: ^Type_Plan, i: u32, depth: int) -> (classes: bit_set[0 
 	switch op.kind {
 	case .Unsupported, .Null:
 	case .Bool:
-		classes = {4}
+		classes = {.Bool}
 	case .Int, .Uint, .Wide_Int, .Wide_Uint, .Float, .Number, .Digits:
-		classes = {5}
+		classes = {.Number}
 	case .String, .Cstring, .Rune:
-		classes = {3}
+		classes = {.String}
 	case .Struct, .Map:
-		classes = {1}
+		classes = {.Object}
 	case .Slice, .Dynamic, .Array, .Fixed_List, .Bit_Set:
-		classes = {2}
+		classes = {.Array}
 	case .Enum_Int, .Enum_Uint:
 		// A name or, under `enums = .Int`, a number: the plan serves both, so the arm takes both.
-		classes = {3, 5}
+		classes = {.String, .Number}
 	case .Decoded:
-		classes = {3, 4, 5}
+		classes = {.String, .Bool, .Number}
 	case .Raw, .Any, .Hook:
-		classes = {1, 2, 3, 4, 5}
+		classes = {.Object, .Array, .String, .Bool, .Number}
 	case .Pointer:
 		classes = value_classes(p, op.elem, depth + 1)
 	case .Union:
@@ -256,17 +236,13 @@ value_classes :: proc(p: ^Type_Plan, i: u32, depth: int) -> (classes: bit_set[0 
 	return
 }
 
-// A struct op: its field names, the first-byte filter and the required masks. More fields than the walk's
-// seen words cover leave it `.Unsupported`. Two fields writing one name left the plan op so already.
+// A struct op: its field names and the required masks. Two fields writing one name left the plan op
+// `.Unsupported` already.
 @(private = "file")
 lower_struct :: proc(p: ^Type_Plan, i: u32, size: u32) -> runtime.Allocator_Error {
 	op := p.ops[i]
 	out := &p.read.ops[i]
-	wide := (op.count - 1) / 64 if op.count > 64 else 0
-	if wide > SHAPE_WIDE_WORDS {
-		return nil
-	}
-	if wide > 0 {
+	if wide := (op.count - 1) / 64 if op.count > 64 else 0; wide > 0 {
 		out.key = u32(len(p.read.wide))
 		resize(&p.read.wide, len(p.read.wide) + int(wide)) or_return
 	}
@@ -274,7 +250,6 @@ lower_struct :: proc(p: ^Type_Plan, i: u32, size: u32) -> runtime.Allocator_Erro
 	for pf, k in p.fields[op.elem:][:op.count] {
 		name := p.sources[int(op.elem) + k].name
 		fields[k] = Shape_Field{name = name, offset = u32(pf.offset), op = pf.op}
-		p.format.key_words(out, &fields[k])
 		if pf.required && k < 64 {
 			out.required |= u64(1) << uint(k)
 		} else if pf.required {
@@ -286,68 +261,6 @@ lower_struct :: proc(p: ^Type_Plan, i: u32, size: u32) -> runtime.Allocator_Erro
 	out.count = op.count
 	out.size = size
 	return nil
-}
-
-// Whether a struct op's members can be read by the walk's fused loop: at most 64 fields, so `Shape_Frame.seen`
-// marks each, and every name plain (`Plan_Format.plain_name`), so a key whose bytes equal a name is that name's
-// whole token.
-@(private = "file")
-struct_fuses :: proc(p: ^Type_Plan, op: ^Shape_Op) -> bool {
-	if op.count > 64 {
-		return false
-	}
-	for f in p.read.fields[op.elem:][:op.count] {
-		if !p.format.plain_name(f.name) {
-			return false
-		}
-	}
-	return true
-}
-
-// Whether every op reachable from op `i` is one `json/scan.shape_descend` reads: a fused struct, a sequence,
-// or a scalar leaf that takes no container. `visited` stops a recursive type.
-@(private = "file")
-shape_descends :: proc(r: ^Read_Shape, i: u32, visited: []bool) -> bool {
-	if visited[i] {
-		return true
-	}
-	visited[i] = true
-	op := r.ops[i]
-	#partial switch op.kind {
-	case .Null, .Bool, .Int, .Uint, .Enum_Int, .Enum_Uint, .Wide_Int, .Wide_Uint, .Float, .String, .Cstring, .Rune, .Decoded, .Number, .Digits:
-		return true
-	case .Struct:
-		if !op.members_fused {
-			return false
-		}
-		for f in r.fields[op.elem:][:op.count] {
-			if !shape_descends(r, f.op, visited) {
-				return false
-			}
-		}
-		return true
-	case .Slice, .Dynamic, .Array, .Fixed_List:
-		// A list of flat records the walk reads in one loop (`json/scan.shape_next_record`), which beats a call
-		// per record.
-		elem := r.ops[op.elem]
-		if op.kind != .Array && op.kind != .Fixed_List && elem.kind == .Struct && shape_flat(r, elem) {
-			return false
-		}
-		return shape_descends(r, op.elem, visited)
-	}
-	return false
-}
-
-// Whether every field of struct op `op` is a scalar.
-@(private = "file")
-shape_flat :: proc(r: ^Read_Shape, op: Shape_Op) -> bool {
-	nested :: bit_set[Shape_Kind]{.Struct, .Slice, .Dynamic, .Array, .Fixed_List, .Map, .Bit_Set}
-	for f in r.fields[op.elem:][:op.count] {
-		if r.ops[f.op].kind in nested {
-			return false
-		}
-	}
-	return true
 }
 
 // Whether the shape reachable from op `i` holds an `.Unsupported` op, which an ambiguous union is too.
@@ -391,7 +304,7 @@ shape_refused :: proc(p: ^Type_Plan, i: u32, visited: []bool, err: ^Unmarshal_Er
 	case .Pointer:
 		return shape_refused(p, op.elem, visited, err)
 	case .Map:
-		// The keys `json/scan.shape_leaf_map_key` parses.
+		// The kinds a map key's text is read as.
 		keys :: bit_set[Shape_Kind]{.String, .Cstring, .Int, .Uint, .Enum_Int, .Enum_Uint, .Wide_Int, .Wide_Uint}
 		if r.ops[op.key].kind not_in keys {
 			return true

@@ -2,22 +2,12 @@ package json
 
 import "base:runtime"
 import "core:bytes"
-import "core:sync"
+import core_pkg "../core"
 import scan_pkg "scan"
 import index_pkg "scan/index"
 
-// Threads a caller lends `each_record` and `validate_records`, which start none of their own.
-//
-//	- `start` runs `task(arg)` on up to `n` of the `threads`, each as its own call, which may begin late or
-//	  not at all.
-//	- `finish` returns once no call that has not begun will begin and every one that has has returned.
-//	- `start` and `finish` alternate and run on the calling thread.
-Batch_Runner :: struct {
-	data:    rawptr,
-	threads: int,
-	start:   proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr),
-	finish:  proc(data: rawptr),
-}
+// Threads a caller lends `each_record` and `validate_records` (`stury:host`'s `Batch_Pool` is one).
+Batch_Runner :: core_pkg.Batch_Runner
 
 // A record `validate_records` refuses: its bytes are src[lo:hi], and `err`'s offset is into `src`.
 Record_Fault :: struct {
@@ -44,7 +34,7 @@ each_record :: proc(
 	data: rawptr,
 	runner: ^Batch_Runner = nil,
 ) -> Maybe(Error) {
-	run := Batch_Run{src = src, framing = framing, task = task, data = data, runner = runner, end = len(src)}
+	run := Batch_Run{src = src, framing = framing, task = task, data = data, cursor = {runner = runner}, end = len(src)}
 	if framing == .Root_Entries {
 		root := records(src, .Root_Entries)
 		if !open_root(&root) {
@@ -59,22 +49,21 @@ each_record :: proc(
 	if n <= 0 {
 		return nil
 	}
-	run.slices = batch_pieces_max(n)
-	run.width = runner != nil ? runner.threads + 1 : 1
-	run.width = clamp(run.width, 1, (n + BATCH_CHUNK - 1) / BATCH_CHUNK)
+	run.cursor.slices = core_pkg.batch_slices(n)
+	run.cursor.lanes = core_pkg.batch_lanes(runner, n)
 	// Freed once the claims below have read them.
 	defer delete(run.states)
-	if framing == .Root_Entries && run.width > 1 {
-		states, serr := make([]Slice_State, run.slices)
+	if framing == .Root_Entries && run.cursor.lanes > 1 {
+		states, serr := make([]Slice_State, run.cursor.slices)
 		if serr != nil {
 			return Error{kind = .Out_Of_Memory}
 		}
 		run.states = states
-		batch_fan(&run, batch_classify)
+		core_pkg.batch_fan(&run.cursor, batch_classify, &run)
 		batch_settle(states)
 	}
-	batch_fan(&run, batch_claim)
-	return run.fault
+	core_pkg.batch_fan(&run.cursor, batch_claim, &run)
+	return run.first.error
 }
 
 // Validate every record of `src` as `validate` checks it alone: the records it refuses, in source order,
@@ -95,7 +84,7 @@ validate_records :: proc(
 	err: Maybe(Error),
 ) {
 	// One list per piece, in the heap: pieces run on every thread, and `allocator` may not be safe to share.
-	lists, lerr := make([][dynamic]Record_Fault, batch_pieces_max(len(src)), runtime.heap_allocator())
+	lists, lerr := make([][dynamic]Record_Fault, core_pkg.batch_slices(len(src)), runtime.heap_allocator())
 	if lerr != nil {
 		return nil, Error{kind = .Out_Of_Memory}
 	}
@@ -162,40 +151,20 @@ validate_record :: proc(piece: ^Records, rec: Record, limits: Limits) -> Maybe(E
 	return nil
 }
 
-// The most bytes a worker claims at a time. A claim starts at the first record boundary at or past its offset.
-@(private)
-BATCH_CHUNK :: 128 * 1024
-
-// Claims shrink toward the end of a batch, down to one slice, so the last pieces finish together.
-@(private)
-BATCH_SLICE :: BATCH_CHUNK / 4
-
-// The most pieces `each_record` cuts `n` bytes into: each claims at least a slice.
-@(private)
-batch_pieces_max :: proc(n: int) -> int {
-	return (n + BATCH_SLICE - 1) / BATCH_SLICE
-}
-
 @(private)
 Batch_Run :: struct {
 	src:        []byte,
 	framing:    Framing,
 	task:       proc(data: rawptr, piece: ^Records, k: int) -> bool,
 	data:       rawptr,
-	runner:     ^Batch_Runner,
-	width:      int,
+	cursor:     core_pkg.Batch_Cursor,
 	// The records' span: the input, or the root's entries from after its open bracket to its close.
 	lo, end:    int,
 	keyed:      bool,
-	slices:     int,
 	// `.Root_Entries` on several threads: where strings and depth stand at each slice's start.
 	states:     []Slice_State,
 	classified: int,
-	// The next slice to claim in the low 32 bits, the next piece's number in the high 32.
-	next:       u64,
-	stopped:    bool,
-	lock:       sync.Mutex,
-	fault:      Maybe(Error),
+	first:      core_pkg.First_Fault,
 }
 
 @(private)
@@ -205,23 +174,11 @@ Slice_State :: struct {
 	depth:     int,
 }
 
-// `task` on the runner's threads and the caller, until each returns.
-@(private)
-batch_fan :: proc(run: ^Batch_Run, task: proc(arg: rawptr)) {
-	if run.width > 1 {
-		run.runner.start(run.runner.data, run.width - 1, task, run)
-	}
-	task(run)
-	if run.width > 1 {
-		run.runner.finish(run.runner.data)
-	}
-}
-
 // Where slice `k` starts: at its offset, moved past backslashes, since the classes read a slice as though
 // none precedes it. Past the last slice, the span's end.
 @(private)
 slice_start :: proc(run: ^Batch_Run, k: int) -> int {
-	at := run.lo + k * BATCH_SLICE
+	at := run.lo + k * core_pkg.BATCH_SLICE
 	if at >= run.end {
 		return run.end
 	}
@@ -236,11 +193,7 @@ slice_start :: proc(run: ^Batch_Run, k: int) -> int {
 @(private)
 batch_classify :: proc(arg: rawptr) {
 	run := (^Batch_Run)(arg)
-	for {
-		k := sync.atomic_add(&run.classified, 1)
-		if k >= run.slices {
-			return
-		}
+	for k in core_pkg.slice_next(&run.classified, run.cursor.slices) {
 		run.states[k].balance = index_pkg.bracket_balance(run.src[slice_start(run, k):slice_start(run, k + 1)])
 	}
 }
@@ -266,20 +219,10 @@ batch_settle :: proc(states: []Slice_State) {
 @(private)
 batch_claim :: proc(arg: rawptr) {
 	run := (^Batch_Run)(arg)
-	for !sync.atomic_load(&run.stopped) {
-		cur := sync.atomic_load(&run.next)
-		s, k := cursor_unpack(cur)
-		if s >= run.slices {
-			return
-		}
-		n := run.slices if run.width == 1 else clamp((run.slices - s) / (2 * run.width), 1, BATCH_CHUNK / BATCH_SLICE)
-		if _, took := sync.atomic_compare_exchange_weak(&run.next, cur, cursor_pack(s + n, k + 1)); !took {
-			continue
-		}
+	for s, n, k in core_pkg.cursor_next(&run.cursor) {
 		lo := batch_boundary(run, s)
 		hi := batch_boundary(run, s + n)
-		skip := batch_skip(run, s + n, hi)
-		cursor_skip_to(run, skip)
+		core_pkg.cursor_skip_to(&run.cursor, batch_skip(run, s + n, hi))
 		piece := Records{src = run.src[:hi], pos = lo, framing = run.framing}
 		if run.framing == .Root_Entries {
 			// A piece's entries end at its last comma, or at the root's close bracket, `hi - 1` either way.
@@ -288,41 +231,10 @@ batch_claim :: proc(arg: rawptr) {
 			piece.commas = index_pkg.comma_cursor(lo)
 		}
 		if !run.task(run.data, &piece, k) {
-			sync.atomic_store(&run.stopped, true)
+			core_pkg.cursor_stop(&run.cursor)
 		}
 		if e, bad := piece.err.(Error); bad {
-			sync.lock(&run.lock)
-			if f, has := run.fault.?; !has || e.offset < f.offset {
-				run.fault = e
-			}
-			sync.unlock(&run.lock)
-		}
-	}
-}
-
-// `Batch_Run.next` packs the next slice to claim (low 32 bits) with the next piece's number (high 32).
-@(private = "file")
-cursor_pack :: #force_inline proc "contextless" (slice_no, piece_no: int) -> u64 {
-	return u64(piece_no) << 32 | u64(slice_no)
-}
-
-@(private = "file")
-cursor_unpack :: #force_inline proc "contextless" (cur: u64) -> (slice_no, piece_no: int) {
-	return int(cur & 0xFFFF_FFFF), int(cur >> 32)
-}
-
-// Move the cursor's slice up to `slice_no` when it is behind, keeping its piece number: the slices a piece
-// ran past are its own.
-@(private = "file")
-cursor_skip_to :: proc(run: ^Batch_Run, slice_no: int) {
-	for {
-		seen := sync.atomic_load(&run.next)
-		s, k := cursor_unpack(seen)
-		if s >= slice_no {
-			return
-		}
-		if _, swapped := sync.atomic_compare_exchange_weak(&run.next, seen, cursor_pack(slice_no, k)); swapped {
-			return
+			core_pkg.first_fault_note(&run.first, int(e.offset), e)
 		}
 	}
 }
@@ -376,10 +288,10 @@ batch_boundary :: proc(run: ^Batch_Run, k: int) -> int {
 @(private)
 batch_skip :: proc(run: ^Batch_Run, from, hi: int) -> int {
 	if run.framing != .Root_Entries {
-		return (hi - run.lo) / BATCH_SLICE
+		return (hi - run.lo) / core_pkg.BATCH_SLICE
 	}
 	// Slice `skip` must start at or before the comma at `hi - 1`, which a run of backslashes may move it past.
-	skip := (hi - 1 - run.lo) / BATCH_SLICE
+	skip := (hi - 1 - run.lo) / core_pkg.BATCH_SLICE
 	for skip > from && slice_start(run, skip) > hi - 1 {
 		skip -= 1
 	}

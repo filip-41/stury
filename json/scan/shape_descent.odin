@@ -1,6 +1,7 @@
 package scan
 
 import core_pkg "../../core"
+import "walk"
 import "base:intrinsics"
 import "base:runtime"
 import lex "lex"
@@ -28,11 +29,11 @@ import number "./number"
 
 // Read `src` into `root` along `run.shape` by descent: true, or false for the walk to read it, or the
 // `Out_Of_Memory` typed fault the walk would answer, `run.fault_steps` frames of `run.frames` deep.
-shape_descend :: proc(src: []byte, run: ^core_pkg.Shape_Run, root: rawptr, limits: Limits) -> (bool, Maybe(Error)) #no_bounds_check {
+shape_descend :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, limits: Limits) -> (bool, Maybe(Error)) #no_bounds_check {
 	Q :: bit_set[Walk_Kind]{.Shape}
 	ctx_words: [size_of(Query_Ctx) / 8]u64 = ---
 	q := (^Query_Ctx)(&ctx_words)
-	core_pkg.query_ctx_zero(q, Q)
+	walk.query_ctx_zero(q, Q)
 	q.hooks = &FORMAT_HOOKS
 	q.shape = run
 	run.ops, run.fields = raw_data(run.shape.ops), raw_data(run.shape.fields)
@@ -53,14 +54,14 @@ shape_descend :: proc(src: []byte, run: ^core_pkg.Shape_Run, root: rawptr, limit
 // The allocation the value at `at`, at walk depth `steps`, needs failed: the walk's fault there. Each container
 // the descent unwinds through then writes its frame (`descend_frame_out_of_memory`).
 @(private = "file")
-descend_out_of_memory :: #force_no_inline proc(r: ^core_pkg.Shape_Run, at, steps: u64) -> bool {
+descend_out_of_memory :: #force_no_inline proc(r: ^walk.Shape_Run, at, steps: u64) -> bool {
 	r.fault, r.fault_steps, r.fault_at = .Out_Of_Memory, u32(steps), at
 	return false
 }
 
 // A leaf's fault at the value at `at`, at walk depth `sp`: the walk's to answer, but for `Out_Of_Memory`.
 @(private = "file")
-descend_leaf_fault :: #force_no_inline proc(r: ^core_pkg.Shape_Run, fault: core_pkg.Shape_Fault, at, sp: u64) -> bool {
+descend_leaf_fault :: #force_no_inline proc(r: ^walk.Shape_Run, fault: core_pkg.Shape_Fault, at, sp: u64) -> bool {
 	if fault == .Out_Of_Memory {
 		descend_out_of_memory(r, at, sp)
 	}
@@ -70,9 +71,9 @@ descend_leaf_fault :: #force_no_inline proc(r: ^core_pkg.Shape_Run, fault: core_
 // The frame the walk holds for the container op `op` at walk depth `sp` while it reads field `field` or
 // element `n - 1`, when the descent unwinds from `Out_Of_Memory`, and false either way.
 @(private = "file")
-descend_frame_out_of_memory :: #force_no_inline proc(r: ^core_pkg.Shape_Run, op: ^core_pkg.Shape_Op, sp: u64, field, n: u32) -> bool {
+descend_frame_out_of_memory :: #force_no_inline proc(r: ^walk.Shape_Run, op: ^core_pkg.Shape_Op, sp: u64, field, n: u32) -> bool {
 	if r.fault == .Out_Of_Memory {
-		r.frames[sp] = core_pkg.Shape_Frame{op = u32(intrinsics.ptr_sub(op, &r.ops[0])), field = field, n = n}
+		r.frames[sp] = walk.Shape_Frame{op = u32(intrinsics.ptr_sub(op, &r.ops[0])), field = field, n = n}
 	}
 	return false
 }
@@ -305,7 +306,7 @@ descend_struct :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^core_pkg.Shape_Op, 
 				w1 := intrinsics.unaligned_load((^u64)(&src[key_lo + 8]))
 				colon_taken = (w0 ~ fl.colon_key[0]) & fl.colon_mask[0] | (w1 ~ fl.colon_key[1]) & fl.colon_mask[1] == 0
 			}
-			if colon_taken || spelled && key_hi <= n && src[key_hi - 1] == '"' && core_pkg.key_equals_hooked(q.hooks, src, key_lo, key_hi, false, fl.name) {
+			if colon_taken || spelled && key_hi <= n && src[key_hi - 1] == '"' && walk.key_equals_hooked(q.hooks, src, key_lo, key_hi, false, fl.name) {
 				i = int(next)
 			}
 		}
@@ -407,7 +408,7 @@ descend_unread_members :: #force_no_inline proc(walk_s: ^Scanner, q: ^Query_Ctx,
 		escaped := q.key_saw_escape
 		if escaped || shape_first_has(op.first, src[key_lo + 1]) {
 			for field, k in fields {
-				if core_pkg.key_equals_hooked(q.hooks, src, key_lo, s.pos, escaped, field.name) {
+				if walk.key_equals_hooked(q.hooks, src, key_lo, s.pos, escaped, field.name) {
 					return k
 				}
 			}
@@ -476,7 +477,7 @@ descend_elements :: proc(walk_s: ^Scanner, q: ^Query_Ctx, op: ^core_pkg.Shape_Op
 	kind, elem_i, stride, limit := op.kind, op.elem, uintptr(op.stride), op.count
 	elem := &r.ops[elem_i]
 	fixed := kind == .Array || kind == .Fixed_List
-	zero := kind != .Array && elem.kind not_in core_pkg.SHAPE_WHOLE_LEAVES
+	zero := kind != .Array && elem.kind not_in SHAPE_WHOLE_LEAVES
 	data := dest if fixed else nil
 	count, cap: u32
 	when leaf == .Int {

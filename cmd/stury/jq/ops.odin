@@ -407,7 +407,7 @@ delimited :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 				write_escaped(&b, s, `"`, {`""`})
 				strings.write_byte(&b, '"')
 			} else {
-				write_escaped(&b, s, "\\\t\n\r", {`\\`, `\t`, `\n`, `\r`})
+				write_escaped(&b, s, "\\\t\n\r\x00", {`\\`, `\t`, `\n`, `\r`, `\0`})
 			}
 		case .Array, .Object:
 			return nil, fail(ip, "%s (%s) is not valid in a csv row", type_name(m), brief(m))

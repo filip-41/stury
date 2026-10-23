@@ -1,6 +1,7 @@
 package scan
 
 import core_pkg "../../core"
+import "walk"
 import "base:intrinsics"
 import lex "lex"
 import number "./number"
@@ -74,7 +75,7 @@ shape_take_members :: #force_inline proc(walk_s: ^Scanner, q: ^Query_Ctx, sp: u6
 				w1 := intrinsics.unaligned_load((^u64)(&src[key_lo + 8]))
 				colon_taken = (w0 ~ fl.colon_key[0]) & fl.colon_mask[0] | (w1 ~ fl.colon_key[1]) & fl.colon_mask[1] == 0
 			}
-			if colon_taken || spelled && key_hi <= n && src[key_hi - 1] == '"' && core_pkg.key_equals_hooked(q.hooks, src, key_lo, key_hi, false, fl.name) {
+			if colon_taken || spelled && key_hi <= n && src[key_hi - 1] == '"' && walk.key_equals_hooked(q.hooks, src, key_lo, key_hi, false, fl.name) {
 				i = int(f.cap)
 			}
 		}
@@ -89,7 +90,7 @@ shape_take_members :: #force_inline proc(walk_s: ^Scanner, q: ^Query_Ctx, sp: u6
 			key_hi = s.pos
 			if shape_first_has(op.first, src[key_lo + 1]) {
 				for field, k in fields {
-					if core_pkg.key_equals_hooked(q.hooks, src, key_lo, key_hi, false, field.name) {
+					if walk.key_equals_hooked(q.hooks, src, key_lo, key_hi, false, field.name) {
 						i = k
 						break
 					}
@@ -130,7 +131,7 @@ shape_take_members :: #force_inline proc(walk_s: ^Scanner, q: ^Query_Ctx, sp: u6
 		}
 		v := s.pos
 		vc := lex.VCLASS[src[v]] if v < n else 0
-		if vc < VC_STRING || (op_i != core_pkg.NO_FIELD && r.ops[op_i].kind not_in core_pkg.SHAPE_WHOLE_LEAVES) {
+		if vc < VC_STRING || (op_i != core_pkg.NO_FIELD && r.ops[op_i].kind not_in SHAPE_WHOLE_LEAVES) {
 			r.pend_op, r.pend_dest, r.pend_live = op_i, dest, op_i != core_pkg.NO_FIELD
 			return .Value
 		}
@@ -189,7 +190,7 @@ shape_take_members :: #force_inline proc(walk_s: ^Scanner, q: ^Query_Ctx, sp: u6
 // does, keeps one frame for the run of records. Otherwise nothing changes, and the walk closes the record. A
 // fused struct has at most 64 fields and is no tagged arm, so its frame holds no wide words and no tag count.
 @(private = "file")
-shape_next_record :: #force_inline proc(s: ^Scanner, r: ^core_pkg.Shape_Run, f: ^core_pkg.Shape_Frame, sp: u64) -> bool #no_bounds_check {
+shape_next_record :: #force_inline proc(s: ^Scanner, r: ^walk.Shape_Run, f: ^walk.Shape_Frame, sp: u64) -> bool #no_bounds_check {
 	if sp < 2 {
 		return false
 	}
@@ -215,7 +216,7 @@ shape_next_record :: #force_inline proc(s: ^Scanner, r: ^core_pkg.Shape_Run, f: 
 					shape_zero(dest, lop.stride)
 				}
 				lf.n += 1
-				f^ = core_pkg.Shape_Frame{dest = dest, op = f.op, field = core_pkg.NO_FIELD}
+				f^ = walk.Shape_Frame{dest = dest, op = f.op, field = core_pkg.NO_FIELD}
 				return true
 			}
 		}
@@ -276,7 +277,7 @@ shape_take_elements :: #force_inline proc(walk_s: ^Scanner, q: ^Query_Ctx, sp: u
 // it as op `op_i`: `.After` past it, `.Value` for a token the walk refuses, or `.Fault` once its leaf's fault
 // is in the run.
 @(private = "file")
-shape_take_leaf :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, r: ^core_pkg.Shape_Run, v: u64, vc: u8, op_i: u32, dest: rawptr, sp: u64) -> Shape_Take {
+shape_take_leaf :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, r: ^walk.Shape_Run, v: u64, vc: u8, op_i: u32, dest: rawptr, sp: u64) -> Shape_Take {
 	fault: core_pkg.Shape_Fault
 	switch vc {
 	case VC_STRING:

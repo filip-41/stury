@@ -321,6 +321,16 @@ new_object :: proc() -> ^Object {
 	return new(Object)
 }
 
+// An object of `keys`, all different, and their `vals`: both taken over, one value to a key.
+object_from :: proc(keys: [dynamic]string, vals: [dynamic]Value) -> ^Object {
+	o := new(Object)
+	o.keys, o.vals = keys, vals
+	if len(keys) >= INDEX_FROM {
+		reindex(o)
+	}
+	return o
+}
+
 // A container's own copy, one level deep: its members are shared. Scalars are returned as they are.
 own :: proc(v: Value) -> Value {
 	switch kind(v) {

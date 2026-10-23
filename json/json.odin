@@ -3,12 +3,12 @@ package json
 // The JSON codec's public surface. The scanner is placed in the scan/ package. The aliases below keep the
 // surface written `json.*`. Where the public names live:
 //
-//	json.odin           the shared types (aliases of scan/ and core/ names), `validate`, `parse_path`,
+//	json.odin           the shared types (aliases of scan/, scan/walk/ and core/ names), `validate`, `parse_path`,
 //	                    `decode_span`, `error_position` and `render_error`
 //	request.odin        `Request`, `request_init`, `answers`, `find`, `validate_remaining`, `Duplicates`
 //	request_scan.odin   `scan` and `prepare`
 //	document.odin       `Document`, `build`, `query`, `pointer`, `child`, `children`, `members`, the `get_*` readers
-//	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Unmarshal_Error`
+//	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Unknown_Fields`, `Unmarshal_Error`
 //	marshal.odin        `marshal` and its writer and append forms (marshal_struct.odin writes structs)
 //	type_plan.odin      `Type_Plan` and its options and hooks, for `marshal` and `unmarshal`, `plan_cache_clear`
 //	edit.odin           `set`, `insert`, `remove` and `splice` (the geometry is in edit_ops.odin and
@@ -27,6 +27,7 @@ import "core:reflect"
 import "core:strings"
 import scan_pkg "scan"
 import core_pkg "../core"
+import "scan/walk"
 
 // How much of each value a read checks, and whether a scan may stop early.
 //
@@ -86,17 +87,15 @@ Error :: scan_pkg.Error
 //	- A cap: `Limit_Digits`, `Limit_Scale`, `Too_Deep`.
 //	- A repeated key under `Duplicates.Refuse`: `Duplicate_Key`.
 //	- A refusal no byte is at: `Source_Too_Wide`, `Out_Of_Memory`, `Bad_Option`.
+//	- `Field_Count`, `Limit_Fields` and `Limit_Record` are a CSV record's: JSON never reports them. The
+//	  one enum is core's, so that code over several formats reads one `Error` and one `Unmarshal_Error`.
 Error_Kind :: core_pkg.Error_Kind
 
 // The 1-based line and column `err` points at in `src`. Columns count bytes. It is (0, 0) when `err` points
 // at no byte: an offset past `src`, a `.Source_Too_Wide` (a limit), an `.Out_Of_Memory` or a `.Bad_Option`.
 @(require_results)
 error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
-	if err.kind == .Source_Too_Wide || err.kind == .Out_Of_Memory || err.kind == .Bad_Option {
-		return 0, 0
-	}
-	line, col, _ = core_pkg.line_col(src, err.offset)
-	return
+	return core_pkg.error_position(src, err)
 }
 
 // `err` as `line:col: <kind>`, the kind written as its enum name, or `offset N: <kind>` where it has no
@@ -110,7 +109,7 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 //	- An `Unmarshal_Error` as `line:col: <kind>` (`: <syntax>` after a `.Syntax`), bare where it points at
 //	  no byte, then ` at .a[3]."b c"` for its path (`[]` for a map value or element of any index, a leading
 //	  `…` when `truncated`).
-//	- An `Edit_Error` located in the source for `.Bad_Source`, `offset N` for `.Bad_Path` (into the path
+//	- A `Path_Error` located in the source for `.Bad_Source`, `offset N` for `.Bad_Path` (into the path
 //	  text) and `.Bad_Result` (into the edited text), bare otherwise, with the `syntax` or `encode` result
 //	  after it.
 //	- A `Request_Error` as its kind (`Bad_Path` with `path I` and `offset N`, `Over_Capacity` with its
@@ -126,102 +125,11 @@ render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> st
 // `render_error`'s text written to `w`, allocating nothing; `w`'s failure is the `io.Error`, with a prefix of
 // the text possibly written.
 render_error_to_writer :: proc {
-	render_syntax_error_to_writer,
-	render_unmarshal_error_to_writer,
-	render_edit_error_to_writer,
+	core_pkg.render_syntax_error_to_writer,
+	core_pkg.render_unmarshal_error_to_writer,
+	core_pkg.render_path_error_to_writer,
 	render_request_error_to_writer,
 	render_parse_fault_to_writer,
-}
-
-@(private)
-render_syntax_error_to_writer :: proc(w: io.Writer, src: []byte, err: Error) -> io.Error {
-	line, col := error_position(src, err)
-	return core_pkg.write_fault(w, line, col, err.offset, reflect.enum_string(err.kind))
-}
-
-@(private)
-render_unmarshal_error_to_writer :: proc(w: io.Writer, src: []byte, err: Unmarshal_Error) -> io.Error {
-	name := reflect.enum_string(err.kind)
-	#partial switch err.kind {
-	case .Unsupported, .Ambiguous_Union, .Bad_Option, .Plan_Mismatch: // before any byte
-		io.write_string(w, name) or_return
-	case:
-		write_fault_at(w, src, err.offset, name) or_return
-	}
-	if err.kind == .Syntax {
-		write_detail(w, reflect.enum_string(err.syntax)) or_return
-	}
-	if err.n_steps > 0 {
-		io.write_string(w, " at ") or_return
-		if err.truncated {
-			io.write_string(w, "…") or_return
-		}
-		for i in 0 ..< int(err.n_steps) {
-			write_step(w, err.steps[i]) or_return
-		}
-	}
-	return nil
-}
-
-// A path step as jq spells it: `.name` (`."quoted"` where the name is not an identifier), `[3]`, `[]` for any.
-@(private)
-write_step :: proc(w: io.Writer, step: Step) -> io.Error {
-	switch s in step {
-	case Name:
-		if is_identifier(string(s)) {
-			io.write_byte(w, '.') or_return
-			_, err := io.write_string(w, string(s))
-			return err
-		}
-		io.write_byte(w, '.') or_return
-		_, err := io.write_quoted_string(w, string(s))
-		return err
-	case Index:
-		io.write_byte(w, '[') or_return
-		if _, err := io.write_i64(w, i64(s)); err != nil {
-			return err
-		}
-		return io.write_byte(w, ']')
-	case Any:
-		_, err := io.write_string(w, "[]")
-		return err
-	}
-	return nil
-}
-
-@(private)
-is_identifier :: proc(s: string) -> bool {
-	for c, i in transmute([]u8)s {
-		switch {
-		case c == '_', 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z':
-		case '0' <= c && c <= '9' && i > 0:
-		case:
-			return false
-		}
-	}
-	return len(s) > 0
-}
-
-@(private)
-render_edit_error_to_writer :: proc(w: io.Writer, src: []byte, err: Edit_Error) -> io.Error {
-	name := reflect.enum_string(err.kind)
-	#partial switch err.kind {
-	case .Bad_Source:
-		write_fault_at(w, src, err.offset, name) or_return
-	case .Bad_Path, .Bad_Result:
-		core_pkg.write_fault(w, 0, 0, err.offset, name) or_return
-	case:
-		io.write_string(w, name) or_return
-	}
-	#partial switch err.kind {
-	case .Bad_Source, .Bad_Result:
-		if err.syntax != .None {
-			write_detail(w, reflect.enum_string(err.syntax)) or_return
-		}
-	case .Encode:
-		write_detail(w, reflect.enum_string(err.encode)) or_return
-	}
-	return nil
 }
 
 // `src` is not read, since a request's refusal is at no byte of a document.
@@ -238,7 +146,7 @@ render_request_error_to_writer :: proc(w: io.Writer, src: []byte, err: Request_E
 		return io.write_byte(w, ')')
 	case .Over_Capacity:
 		io.write_string(w, name) or_return
-		return write_detail(w, reflect.enum_string(err.capacity))
+		return core_pkg.write_detail(w, reflect.enum_string(err.capacity))
 	}
 	_, werr := io.write_string(w, name)
 	return werr
@@ -246,21 +154,7 @@ render_request_error_to_writer :: proc(w: io.Writer, src: []byte, err: Request_E
 
 @(private)
 render_parse_fault_to_writer :: proc(w: io.Writer, src: []byte, err: Parse_Fault) -> io.Error {
-	return write_fault_at(w, src, err.offset, reflect.enum_string(err.error))
-}
-
-// `line:col: text` for the byte `offset` of `src`, `offset N: text` where `src` has none.
-@(private)
-write_fault_at :: proc(w: io.Writer, src: []byte, offset: u64, text: string) -> io.Error {
-	line, col, _ := core_pkg.line_col(src, offset)
-	return core_pkg.write_fault(w, line, col, offset, text)
-}
-
-@(private)
-write_detail :: proc(w: io.Writer, text: string) -> io.Error {
-	io.write_string(w, ": ") or_return
-	_, err := io.write_string(w, text)
-	return err
+	return core_pkg.write_fault_at(w, src, err.offset, reflect.enum_string(err.error))
 }
 
 // How much of the item a result covers. `.Full` means the scan read the whole item and skipped
@@ -309,10 +203,7 @@ parse_path :: #force_inline proc(text: string, steps: []Step, names: []u8 = nil)
 }
 
 // A path as `query`, `request_init` and the edits take it.
-Path_Spec :: union {
-	string,
-	Path,
-}
+Path_Spec :: core_pkg.Path_Spec
 
 // A path query's answer, one per occurrence.
 //
@@ -322,11 +213,11 @@ Path_Spec :: union {
 //	lo, hi   the value's span in the scanned source
 //	owner    the offset of the container holding the value (`max(u64)` when none does)
 //	node     the value in `Request.doc` under `.Nodes` (`NO_NODE` otherwise)
-Path_Answer :: core_pkg.Path_Answer
+Path_Answer :: walk.Path_Answer
 
 // Whether a path landed. Gives `.Found`, `.Missing` (no such member or element), or `.Type_Mismatch` (a step met
 // a value of another kind, such as a name on an array).
-Path_Outcome :: core_pkg.Path_Outcome
+Path_Outcome :: walk.Path_Outcome
 
 // The kinds of answer a `Request` is specialized over (`Request` says what each fills):
 //
@@ -336,7 +227,7 @@ Path_Outcome :: core_pkg.Path_Outcome
 Query :: scan_pkg.Query
 
 // A request refused before its scan, with nothing written.
-Request_Error :: core_pkg.Request_Error
+Request_Error :: walk.Request_Error
 
 // Why a request was refused.
 //
@@ -348,12 +239,12 @@ Request_Error :: core_pkg.Request_Error
 //	Allocator_Mismatch   an output made with another allocator than the request's
 //	Out_Of_Memory        the request's own storage
 //	Refuse_Compiled_Out  `Duplicates.Refuse` in a build with `-define:REFUSE_DUPLICATES=false`
-Request_Error_Kind :: core_pkg.Request_Error_Kind
+Request_Error_Kind :: walk.Request_Error_Kind
 
 // The fixed limit an `.Over_Capacity` refusal hit: `Path_Runs` (more than 16 paths in a request),
 // `Path_Steps` (a path past `MAX_PATH_STEPS`), `Repeated_Names` (more than 16 byte-identical wanted
 // names) or `Node_Source_Bytes` (a `.Nodes`/`.Dom` source past `MAX_ROW_SOURCE`). `None` otherwise.
-Capacity :: core_pkg.Capacity
+Capacity :: walk.Capacity
 
 // What a JSON value is: `Null`, `False`, `True`, `Number`, `String`, `Array` or `Object`.
 Kind :: scan_pkg.Kind
