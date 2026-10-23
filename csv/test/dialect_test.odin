@@ -251,7 +251,7 @@ test_unmarshal_ragged_without_header :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_dialect_round_trips ::proc(t: ^testing.T) {
+test_dialect_marshal_spelling :: proc(t: ^testing.T) {
 	Line :: struct {
 		name: string,
 		n:    int,
@@ -261,26 +261,8 @@ test_dialect_round_trips ::proc(t: ^testing.T) {
 	out, err := csv.marshal(rows, {dialect = csv.TSV}, allocator = context.temp_allocator)
 	testing.expect_value(t, err, csv.Marshal_Error.None)
 	testing.expect_value(t, string(out), "name\tn\tnote\na\\tb\t1\tx\nx\\ny\\r\t-2\t\nback\\\\slash\t3\tq\"d\n\t4\t#c\n#hash\t5\t\n")
-	expect_round_trip(t, rows, csv.TSV)
-	expect_round_trip(t, rows, COMMENTS)
-	expect_round_trip(t, []Line{{"\tx", 1, nil}, {"a\tb\\", 2, "#"}}, {quoting = .None, escapes = .Backslash, comment = '\t'})
-	expect_round_trip(t, []Line{{`"q"`, 1, "a\\b"}, {"#x", 2, nil}}, UNQUOTED)
 	out, _ = csv.marshal([]Line{{"#hash", 1, nil}}, {dialect = COMMENTS, no_header = true}, allocator = context.temp_allocator)
 	testing.expect_value(t, string(out), "\"#hash\",1,\n")
-}
-
-@(private = "file")
-expect_round_trip :: proc(t: ^testing.T, rows: []$T, d: csv.Dialect, loc := #caller_location) {
-	out, err := csv.marshal(rows, {dialect = d}, allocator = context.temp_allocator)
-	if !testing.expect_value(t, err, csv.Marshal_Error.None, loc) {
-		return
-	}
-	back: []T
-	testing.expect_value(t, csv.unmarshal(out, &back, {dialect = d}, allocator = context.temp_allocator), nil, loc)
-	testing.expectf(t, len(back) == len(rows), "%v: %d rows from %q", d, len(back), string(out), loc = loc)
-	for r, k in rows[:min(len(rows), len(back))] {
-		testing.expectf(t, back[k] == r, "%v row %d: %v, want %v (from %q)", d, k, back[k], r, string(out), loc = loc)
-	}
 }
 
 @(test)

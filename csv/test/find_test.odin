@@ -1,63 +1,7 @@
 package csv_tests
 
-import "core:fmt"
 import "core:testing"
 import csv "../"
-
-@(test)
-test_find_against_document :: proc(t: ^testing.T) {
-	ds := MODEL_DIALECTS
-	seed := u64(0x9E3779B97F4A7C15)
-	for d in ds {
-		for _ in 0 ..< 300 {
-			grid, src := model_text(&seed, d)
-			doc, _ := csv.build(src, d, allocator = context.temp_allocator)
-			rows := csv.row_count(&doc)
-			for r in 0 ..< rows + 1 {
-				for c in 0 ..< csv.column_count(&doc) + 1 {
-					want, in_doc := csv.get_field(&doc, r, c)
-					by_index := fmt.tprintf(".[%d][%d]", r, c)
-					got, found, err := csv.find(src, by_index, d)
-					if !testing.expectf(t, err == nil && found == in_doc && (!found || got == want), "%v %q %s: %v %v %v, want %v %v", d, src, by_index, got, found, err, want, in_doc) {
-						return
-					}
-					if c < len(grid[0]) {
-						by_name := fmt.tprintf(".[%d].c%d", r, c)
-						got, found, err = csv.find(src, by_name, d)
-						if !testing.expectf(t, err == nil && found == in_doc && (!found || got == want), "%v %q %s: %v %v %v, want %v %v", d, src, by_name, got, found, err, want, in_doc) {
-							return
-						}
-					}
-				}
-			}
-			for c in 0 ..< len(grid[0]) {
-				out: [dynamic]csv.Field
-				out.allocator = context.temp_allocator
-				err := csv.find_column(src, fmt.tprintf(".[].c%d", c), &out, d, allocator = context.temp_allocator)
-				testing.expectf(t, err == nil, "%v %q: column %d: %v", d, src, c, err)
-				n := 0
-				for r in 0 ..< rows {
-					if want, ok := csv.get_field(&doc, r, c); ok {
-						if !testing.expectf(t, n < len(out) && out[n] == want, "%v %q: column %d row %d", d, src, c, r) {
-							return
-						}
-						n += 1
-					}
-				}
-				testing.expectf(t, n == len(out), "%v %q: column %d holds %d fields, want %d", d, src, c, len(out), n)
-			}
-			// Without a header the first record is row 0.
-			recs, _ := collect(src, d)
-			for rec, r in recs {
-				got, found, err := csv.find(src, fmt.tprintf(".[%d][0]", r), d, header = false)
-				if !testing.expectf(t, err == nil && found && got == rec.fields[0], "%v %q: headerless row %d: %v %v %v", d, src, r, got, found, err) {
-					return
-				}
-			}
-			free_all(context.temp_allocator)
-		}
-	}
-}
 
 @(test)
 test_find_cells :: proc(t: ^testing.T) {

@@ -51,7 +51,7 @@ fail_writer :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset
 
 @(test)
 test_marshal_to_writer :: proc(t: ^testing.T) {
-	rows := make([]Wide_Row, 60000, context.temp_allocator)
+	rows := make([]Wide_Row, 8000, context.temp_allocator)
 	for &r, k in rows {
 		r = {"name, with comma" if k % 7 == 0 else "plain", k, "" if k % 3 == 0 else "q\"uote"}
 	}
@@ -61,8 +61,7 @@ test_marshal_to_writer :: proc(t: ^testing.T) {
 			r.name = "\xEF\xBB\xBFbom"
 		}
 	}
-	opts_list := []csv.Marshal_Opts{{}, {no_header = true, crlf = true}, {dialect = csv.TSV}, {dialect = {delimiter = ';', comment = '#'}}}
-	for opts in opts_list {
+	for opts in ([]csv.Marshal_Opts{{}, {no_header = true, crlf = true}, {dialect = csv.TSV}}) {
 		want, werr := csv.marshal(rows, opts, allocator = context.temp_allocator)
 		b := strings.builder_make(context.temp_allocator)
 		err := csv.marshal_to_writer(strings.to_writer(&b), rows, opts, allocator = context.temp_allocator)

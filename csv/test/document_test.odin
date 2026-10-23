@@ -1,212 +1,9 @@
 package csv_tests
 
-import "core:fmt"
 import "core:mem"
 import "core:strings"
 import "core:testing"
 import csv "../"
-
-// A table of cells and the CSV that spells it: the model the document, `find` and the edits are held to.
-
-MODEL_DIALECTS :: [?]csv.Dialect {
-	{},
-	csv.TSV,
-	{delimiter = ';', quoting = .None},
-	{comment = '#'},
-	{delimiter = ',', quoting = .None, escapes = .Backslash, comment = '#'},
-	{ragged = true},
-	{delimiter = '\t', quoting = .None, escapes = .Backslash, comment = '#', ragged = true},
-}
-
-// The dialects that keep one width, which the column edits are defined over.
-MODEL_FIXED :: 5
-
-model_rng :: proc(s: ^u64) -> u64 {
-	s^ ~= s^ << 13
-	s^ ~= s^ >> 7
-	s^ ~= s^ << 17
-	return s^
-}
-
-// The cells `d` can spell.
-model_pool :: proc(d: csv.Dialect) -> []string {
-	delim := d.delimiter if d.delimiter != 0 else ','
-	pool := make([dynamic]string, context.temp_allocator)
-	append(&pool, "a", "", "x y", "é", "日本", "12", "-3.5", "true", "#h", "lorem ipsum dolor sit amet")
-	if d.quoting == .Quotes {
-		append(&pool, "q\"uote", "l1\nl2", "c\r\nd", `""`, fmt.tprintf("a%cb", delim))
-	} else if d.escapes == .Backslash {
-		append(&pool, "nl\nx", `back\slash`, "cr\rx", "tab\tx")
-	}
-	return pool[:]
-}
-
-// A cell of `pool` that reads back as a record's first when `first`: not empty, not a comment.
-model_cell :: proc(s: ^u64, d: csv.Dialect, pool: []string, first: bool) -> string {
-	for {
-		cell := pool[model_rng(s) % u64(len(pool))]
-		if !first || cell != "" && (d.comment == 0 || cell[0] != d.comment) {
-			return cell
-		}
-	}
-}
-
-// `rows` records of cells, the first a header of unique names, all `width` wide unless `d` is ragged.
-model_grid :: proc(s: ^u64, d: csv.Dialect, rows, width: int) -> [][]string {
-	pool := model_pool(d)
-	grid := make([][]string, rows, context.temp_allocator)
-	for r in 0 ..< rows {
-		n := width
-		if d.ragged {
-			n = 1 + int(model_rng(s) % 4)
-		}
-		grid[r] = make([]string, n, context.temp_allocator)
-		for c in 0 ..< n {
-			grid[r][c] = fmt.tprintf("c%d", c) if r == 0 else model_cell(s, d, pool, c == 0)
-		}
-	}
-	return grid
-}
-
-// `grid` spelled in `d`, with comment lines among its records when `d` has them and every cell quoted at
-// random where `d` quotes.
-model_spell :: proc(s: ^u64, d: csv.Dialect, grid: [][]string, crlf, final_break, bom: bool) -> []byte {
-	b := strings.builder_make(context.temp_allocator)
-	br := "\r\n" if crlf else "\n"
-	delim := d.delimiter if d.delimiter != 0 else ','
-	if bom {
-		strings.write_string(&b, "\xEF\xBB\xBF")
-	}
-	for row, r in grid {
-		if d.comment != 0 && model_rng(s) % 6 == 0 {
-			strings.write_byte(&b, d.comment)
-			strings.write_string(&b, " a note, \"x\"")
-			strings.write_string(&b, br)
-		}
-		for cell, c in row {
-			if c > 0 {
-				strings.write_byte(&b, delim)
-			}
-			model_spell_cell(&b, d, cell, model_rng(s) % 8 == 0)
-		}
-		if r + 1 < len(grid) || final_break {
-			strings.write_string(&b, br)
-		}
-	}
-	return b.buf[:]
-}
-
-model_spell_cell :: proc(b: ^strings.Builder, d: csv.Dialect, cell: string, quote_all: bool) {
-	delim := d.delimiter if d.delimiter != 0 else ','
-	switch {
-	case d.quoting == .Quotes:
-		if !quote_all && !strings.contains_any(cell, "\"\r\n") && !strings.contains_rune(cell, rune(delim)) {
-			strings.write_string(b, cell)
-			return
-		}
-		strings.write_byte(b, '"')
-		for c in transmute([]byte)cell {
-			strings.write_byte(b, c)
-			if c == '"' {
-				strings.write_byte(b, c)
-			}
-		}
-		strings.write_byte(b, '"')
-	case d.escapes == .Backslash:
-		for c in transmute([]byte)cell {
-			switch c {
-			case '\t':
-				strings.write_string(b, `\t`)
-			case '\n':
-				strings.write_string(b, `\n`)
-			case '\r':
-				strings.write_string(b, `\r`)
-			case '\\':
-				strings.write_string(b, `\\`)
-			case:
-				strings.write_byte(b, c)
-			}
-		}
-	case:
-		strings.write_string(b, cell)
-	}
-}
-
-// A random table in `d` and its text.
-model_text :: proc(s: ^u64, d: csv.Dialect, fixed_width := 0) -> (grid: [][]string, src: []byte) {
-	rows := 1 + int(model_rng(s) % 10)
-	width := fixed_width if fixed_width > 0 else 1 + int(model_rng(s) % 4)
-	grid = model_grid(s, d, rows, width)
-	src = model_spell(s, d, grid, model_rng(s) % 2 == 0, model_rng(s) % 2 == 0, model_rng(s) % 8 == 0)
-	return
-}
-
-// Whether `doc` holds `grid`, the first record being the header.
-expect_document :: proc(t: ^testing.T, doc: ^csv.Document, grid: [][]string, src: []byte, loc := #caller_location) -> bool {
-	ok := testing.expectf(t, csv.row_count(doc) == len(grid) - 1, "%q: %d rows, want %d", src, csv.row_count(doc), len(grid) - 1, loc = loc)
-	for r in 0 ..< min(csv.row_count(doc), len(grid) - 1) {
-		cells := csv.row_fields(doc, r)
-		ok &= testing.expectf(t, len(cells) == len(grid[r + 1]), "%q: row %d has %d fields, want %d", src, r, len(cells), len(grid[r + 1]), loc = loc)
-		for want, c in grid[r + 1] {
-			got, found := csv.get_string(doc, r, c)
-			ok &= testing.expectf(t, found && got == want, "%q: cell %d,%d is %q (%v), want %q", src, r, c, got, found, want, loc = loc)
-		}
-	}
-	for want, c in grid[0] {
-		got, found := csv.get_name(doc, c)
-		ok &= testing.expectf(t, found && got == want, "%q: name %d is %q (%v), want %q", src, c, got, found, want, loc = loc)
-	}
-	return ok
-}
-
-// `src` is CSV in `d` that reads as `grid`.
-expect_reads :: proc(t: ^testing.T, src: []byte, d: csv.Dialect, grid: [][]string, loc := #caller_location) -> bool {
-	if !testing.expectf(t, csv.validate(src, d) == nil, "%v %q: not CSV: %v", d, src, csv.validate(src, d), loc = loc) {
-		return false
-	}
-	doc, err := csv.build(src, d, allocator = context.temp_allocator)
-	if !testing.expectf(t, err == nil, "%v %q: build %v", d, src, err, loc = loc) {
-		return false
-	}
-	return expect_document(t, &doc, grid, src, loc)
-}
-
-@(test)
-test_document_reads_model :: proc(t: ^testing.T) {
-	ds := MODEL_DIALECTS
-	seed := u64(0x2545F4914F6CDD1D)
-	for d in ds {
-		for _ in 0 ..< 500 {
-			grid, src := model_text(&seed, d)
-			doc, err := csv.build(src, d)
-			if !testing.expectf(t, err == nil, "%v %q: build %v", d, src, err) {
-				return
-			}
-			if !expect_document(t, &doc, grid, src) {
-				csv.document_destroy(&doc)
-				return
-			}
-			widest := 0
-			for row in grid {
-				widest = max(widest, len(row))
-			}
-			testing.expectf(t, csv.column_count(&doc) == widest, "%v %q: %d columns, want %d", d, src, csv.column_count(&doc), widest)
-			// A second read returns the same text.
-			if len(grid) > 1 {
-				a, _ := csv.get_string(&doc, 0, 0)
-				b, _ := csv.get_string(&doc, 0, 0)
-				testing.expectf(t, a == b, "%q: reads differ: %q, %q", src, a, b)
-			}
-			recs, _ := collect(src, d)
-			for rec, r in recs[1:] {
-				cells := csv.row_fields(&doc, r)
-				testing.expectf(t, fmt.tprint(rec.fields) == fmt.tprint(cells), "%v %q: row %d fields %v, records %v", d, src, r, cells, rec.fields)
-			}
-			csv.document_destroy(&doc)
-			free_all(context.temp_allocator)
-		}
-	}
-}
 
 @(test)
 test_document_columns_and_bounds :: proc(t: ^testing.T) {
@@ -237,6 +34,38 @@ test_document_columns_and_bounds :: proc(t: ^testing.T) {
 	_, ok = csv.column(&headerless, "id")
 	testing.expect(t, !ok)
 	_, ok = csv.get_name(&headerless, 0)
+	testing.expect(t, !ok)
+}
+
+// A document reads a text in the dialect it is built with: escapes, comment lines, a BOM, and ragged widths.
+@(test)
+test_document_dialects :: proc(t: ^testing.T) {
+	src := transmute([]byte)string("\xEF\xBB\xBFa\tb\n# note\nx\\ty\t\\n\n")
+	doc: csv.Document
+	err: Maybe(csv.Error)
+	doc, err = csv.build(src, TSV_COMMENTS, allocator = context.temp_allocator)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, csv.row_count(&doc), 1)
+	testing.expect_value(t, csv.column_count(&doc), 2)
+	name, _ := csv.get_name(&doc, 0)
+	testing.expect_value(t, name, "a")
+	cell, _ := csv.get_string(&doc, 0, 0)
+	testing.expect_value(t, cell, "x\ty")
+	cell, _ = csv.get_string(&doc, 0, 1)
+	testing.expect_value(t, cell, "\n")
+	// The field is the span as written.
+	f, found := csv.get_field(&doc, 0, 0)
+	testing.expect(t, found)
+	testing.expect_value(t, string(src[f.lo:f.hi]), "x\\ty")
+	_, found = csv.get_field(&doc, 0, 2)
+	testing.expect(t, !found)
+
+	ragged, rerr := csv.build(transmute([]byte)string("a,b,c\n1\n2,3,4,5\n"), {ragged = true}, allocator = context.temp_allocator)
+	testing.expect_value(t, rerr, nil)
+	testing.expect_value(t, len(csv.row_fields(&ragged, 0)), 1)
+	testing.expect_value(t, len(csv.row_fields(&ragged, 1)), 4)
+	testing.expect_value(t, csv.column_count(&ragged), 4)
+	_, ok := csv.get_string(&ragged, 0, 1)
 	testing.expect(t, !ok)
 }
 

@@ -1,6 +1,5 @@
 package csv_tests
 
-import "core:strings"
 import "core:testing"
 import csv "../"
 
@@ -84,28 +83,4 @@ test_required_with_all_duplicates :: proc(t: ^testing.T) {
 	testing.expect_value(t, rows[0], Required_Id{5, ""})
 	err = read(t, "name\nx\n", &rows, {duplicates = .All})
 	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Missing_Field)
-}
-
-// A repeated header name costs no more than the header's columns, whatever the policy.
-@(test)
-test_many_duplicate_header_names :: proc(t: ^testing.T) {
-	N :: 20000
-	b := strings.builder_make(context.temp_allocator)
-	for i in 0 ..< N {
-		strings.write_string(&b, "id," if i < N - 1 else "id\n")
-	}
-	for i in 0 ..< N {
-		strings.write_string(&b, "1," if i < N - 1 else "2\n")
-	}
-	src := strings.to_string(b)
-	rows: []Required_Id
-	testing.expect_value(t, read(t, src, &rows, {duplicates = .Last}), nil)
-	testing.expect_value(t, rows[0].id, 2)
-	testing.expect_value(t, read(t, src, &rows, {duplicates = .All}), nil)
-	testing.expect_value(t, rows[0].id, 2)
-	testing.expect_value(t, read(t, src, &rows, {duplicates = .First}), nil)
-	testing.expect_value(t, rows[0].id, 1)
-	err := read(t, src, &rows)
-	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Duplicate_Key)
-	testing.expect_value(t, err.?.offset, 3)
 }

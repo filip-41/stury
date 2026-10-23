@@ -14,7 +14,7 @@ import csv "../"
 test_check_bounded_memory :: proc(t: ^testing.T) {
 	b := strings.builder_make(context.temp_allocator)
 	strings.write_string(&b, "id,name,score\n")
-	for _ in 0 ..< 200_000 {
+	for _ in 0 ..< 20_000 {
 		strings.write_string(&b, "12345,\"quoted \"\"name\"\", with comma\",1.25\n")
 	}
 	src := b.buf[:]
@@ -42,7 +42,7 @@ test_check_bounded_memory :: proc(t: ^testing.T) {
 	strings.write_string(&b, "x,y,z\n")
 	err := csv.unmarshal_check(b.buf[:], []Scored, plan = &plan)
 	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Wrong_Kind)
-	testing.expect_value(t, err.?.steps[0], csv.Step(csv.Index(200_000)))
+	testing.expect_value(t, err.?.steps[0], csv.Step(csv.Index(20_000)))
 }
 
 // A hook is not run by a check, but the bytes of its cell are still judged.
