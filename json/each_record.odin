@@ -220,9 +220,19 @@ batch_settle :: proc(states: []Slice_State) {
 batch_claim :: proc(arg: rawptr) {
 	run := (^Batch_Run)(arg)
 	for s, n, k in core_pkg.cursor_next(&run.cursor) {
-		lo := batch_boundary(run, s)
-		hi := batch_boundary(run, s + n)
-		core_pkg.cursor_skip_to(&run.cursor, batch_skip(run, s + n, hi))
+		// Past the span's end: lines end at the input's end, the root's entries past its close bracket.
+		none := run.end + int(run.framing == .Root_Entries)
+		// A claim inside one long record starts none, and its search ends with the claim, so only the claim
+		// the record starts in reads it out, looking for its end.
+		lo, hi := batch_boundary(run, s, slice_start(run, s + n)), none
+		if lo < 0 {
+			lo = none
+		} else {
+			if h := batch_boundary(run, s + n, run.end); h >= 0 {
+				hi = h
+			}
+			core_pkg.cursor_skip_to(&run.cursor, batch_skip(run, s + n, hi))
+		}
 		piece := Records{src = run.src[:hi], pos = lo, framing = run.framing}
 		if run.framing == .Root_Entries {
 			// A piece's entries end at its last comma, or at the root's close bracket, `hi - 1` either way.
@@ -239,12 +249,12 @@ batch_claim :: proc(arg: rawptr) {
 	}
 }
 
-// Where the records from slice `k` on start. For lines, past the first line feed at or after its offset's
-// previous byte. For `0x1E`, at the first run that starts at or after its offset. For the root's entries,
-// past the first comma of the root's at or after it. Slice 0 starts at the span's start. With no boundary
-// found, the result is the input's end, or past the root's close bracket.
+// Where the records from slice `k` on start, looking before `stop`. For lines, past the first line feed at or
+// after its offset's previous byte. For `0x1E`, at the first run that starts at or after its offset. For the root's
+// entries, past the first comma of the root's at or after it. Slice 0 starts at the span's start. With no boundary
+// found, the result is -1.
 @(private)
-batch_boundary :: proc(run: ^Batch_Run, k: int) -> int {
+batch_boundary :: proc(run: ^Batch_Run, k, stop: int) -> int {
 	src := run.src
 	if k == 0 {
 		return run.lo
@@ -252,14 +262,14 @@ batch_boundary :: proc(run: ^Batch_Run, k: int) -> int {
 	at := slice_start(run, k)
 	switch run.framing {
 	case .NDJSON:
-		if at < run.end {
-			if i := bytes.index_byte(src[at - 1:run.end], '\n'); i >= 0 {
+		if at < stop {
+			if i := bytes.index_byte(src[at - 1:stop], '\n'); i >= 0 {
 				return at + i
 			}
 		}
 	case .JSON_Seq:
-		for at < run.end {
-			i := bytes.index_byte(src[at:run.end], 0x1E)
+		for at < stop {
+			i := bytes.index_byte(src[at:stop], 0x1E)
 			if i < 0 {
 				break
 			}
@@ -272,16 +282,15 @@ batch_boundary :: proc(run: ^Batch_Run, k: int) -> int {
 			}
 		}
 	case .Root_Entries:
-		if at < run.end {
+		if at < stop {
 			st := run.states[k]
 			c := index_pkg.comma_cursor(at, st.in_string, st.depth)
-			if i := index_pkg.next_top_comma(&c, src[:run.end]); i >= 0 {
+			if i := index_pkg.next_top_comma(&c, src[:stop]); i >= 0 {
 				return i + 1
 			}
 		}
-		return run.end + 1
 	}
-	return run.end
+	return -1
 }
 
 // The first slice past `from` whose boundary is still `hi`, the boundary of slice `from`.

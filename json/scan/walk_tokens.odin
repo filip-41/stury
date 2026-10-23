@@ -21,10 +21,15 @@ object_key :: #force_inline proc(
 	pend: ^Demand_Pend,
 ) -> (next: int, err: Maybe(Error)) {
 	if lex.peek(s) != '"' {
-		when C == Byte_Cursor && .Nodes in Q {
-			lex.skip_indent(s)
+		// `pretty_skip_peek` passes all the whitespace, so the pretty cursor skips nothing after it.
+		when C == Pretty_Cursor {
+			pretty_skip_peek(s, cur, .Member)
+		} else {
+			when C == Byte_Cursor && .Nodes in Q {
+				lex.skip_indent(s)
+			}
+			cursor_skip(s, cur)
 		}
-		cursor_skip(s, cur)
 		if at := lex.peek(s); at != '"' {
 			if at == -1 {
 				return -1, Error{offset = s.pos, kind = .Truncated}
@@ -106,6 +111,11 @@ expect_colon :: #force_inline proc(s: ^Scanner, cur: ^$C, $Q: bit_set[Walk_Kind]
 	when C != Jsonc_Cursor {
 		#no_bounds_check {
 			n := u64(len(s.src))
+			when C == Pretty_Cursor {
+				if s.pos < n && s.src[s.pos] == ' ' {
+					s.pos += 1
+				}
+			}
 			if s.pos + 1 < n && s.src[s.pos] == ':' {
 				after := s.src[s.pos + 1]
 				if after > ' ' {
@@ -114,7 +124,7 @@ expect_colon :: #force_inline proc(s: ^Scanner, cur: ^$C, $Q: bit_set[Walk_Kind]
 					return int(after), nil
 				}
 				// A pretty printer's `": "`.
-				when C == Byte_Cursor && .Nodes in Q {
+				when (C == Byte_Cursor && .Nodes in Q) || C == Pretty_Cursor {
 					if after == ' ' && s.pos + 2 < n {
 						after = s.src[s.pos + 2]
 						if after > ' ' {
@@ -154,10 +164,13 @@ number_follows :: #force_inline proc(s: ^Scanner) -> bool {
 // `cursor_skip_peek` where a pretty printer puts a newline and an indent: the byte cursor passes the indent
 // two spaces a step first (`lex.skip_indent`). Only the row-writing walks do, as with `": "` in `expect_colon`
 // and the indent before a key in `object_key`: in the other walks the extra code adds instructions to every
-// compact input.
+// compact input. A `Pretty_Cursor` walk, chosen for a document that opens like a pretty printer's, predicts the
+// indent from `at` everywhere.
 @(private)
-indent_skip_peek :: #force_inline proc(s: ^Scanner, cur: ^$C, $Q: bit_set[Walk_Kind]) -> int {
-	when C == Byte_Cursor && .Nodes in Q {
+indent_skip_peek :: #force_inline proc(s: ^Scanner, cur: ^$C, $Q: bit_set[Walk_Kind], $at: Indent_At) -> int {
+	when C == Pretty_Cursor {
+		return pretty_skip_peek(s, cur, at)
+	} else when C == Byte_Cursor && .Nodes in Q {
 		#no_bounds_check {
 			if s.pos < u64(len(s.src)) {
 				b := s.src[s.pos]

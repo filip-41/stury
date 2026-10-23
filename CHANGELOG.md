@@ -94,6 +94,8 @@
   was truncated.
 - `unmarshal`'s `.Unsupported` for a `,string` field, or for two fields writing one key, names that field in the
   error path.
+- `scan` at `.Structural` checks the UTF-8 of values no path reads, as `validate` does: invalid UTF-8 anywhere
+  in the document now fails the scan.
 - CLI: `halt_error/1` with a non-number argument names its input as jq does (`number (1) halt_error/1: number
   required`).
 - CLI: `select(PATH OP literal)` on a large single document reads only its path, and prints the text only when it

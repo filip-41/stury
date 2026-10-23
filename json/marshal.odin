@@ -208,19 +208,8 @@ write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Encode_Error {
 		return put_wide(st.out, data, op.kind == .Wide_Int)
 	case .String:
 		return enc.put_string(st.out, (^string)(data)^)
-	case .Cstring:
-		cs := (^cstring)(data)^
-		if cs == nil {
-			return enc.put_bytes(st.out, "null")
-		}
-		return enc.put_string(st.out, string(cs))
-	case .Rune:
-		r := (^rune)(data)^
-		if !utf8.valid_rune(r) {
-			return .Bad_Utf8
-		}
-		bytes, n := utf8.encode_rune(r)
-		return enc.put_string(st.out, string(bytes[:n]))
+	case .Cstring, .Rune, .Union, .Any, .Enum_Int, .Enum_Uint:
+		return write_rare_value(st, op, data)
 	case .Raw:
 		return put_raw(st, string((^Raw)(data)^))
 	case .Number:
@@ -243,6 +232,34 @@ write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Encode_Error {
 		return write_struct(st, op, data)
 	case .Pointer:
 		return write_pointer(st, op, data)
+	case .Bit_Set:
+		return write_bit_set(st, op, data)
+	case .Hook:
+		return write_hooked(st, op, data)
+	}
+	return .None
+}
+
+// The arms of `write_value` with locals of their own: a rune's bytes, a union's arm, an `any`'s plan, an enum's
+// member. Every level of a nested write holds a `write_value` frame, and a value nested MAX_DEPTH deep must fit
+// a Windows thread's 1 MB stack, so these arms stay out of that frame, as do the callees marked
+// `#force_no_inline` for it (`write_map`, `write_bit_set`, `write_decoded`, `put_wide`).
+@(private = "file")
+write_rare_value :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
+	#partial switch op.kind {
+	case .Cstring:
+		cs := (^cstring)(data)^
+		if cs == nil {
+			return enc.put_bytes(st.out, "null")
+		}
+		return enc.put_string(st.out, string(cs))
+	case .Rune:
+		r := (^rune)(data)^
+		if !utf8.valid_rune(r) {
+			return .Bad_Utf8
+		}
+		bytes, n := utf8.encode_rune(r)
+		return enc.put_string(st.out, string(bytes[:n]))
 	case .Union:
 		k := union_arm_of(op, data)
 		if k < 0 {
@@ -267,10 +284,6 @@ write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Encode_Error {
 		}
 		m := enum_member(st.plan, op, data) or_return
 		return enc.put_bytes(st.out, string(st.plan.keys[m.lo:m.hi]))
-	case .Bit_Set:
-		return write_bit_set(st, op, data)
-	case .Hook:
-		return write_hooked(st, op, data)
 	}
 	return .None
 }
@@ -297,7 +310,7 @@ write_hooked :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Erro
 // A bit_set as an array of its elements in ascending order: an enum's member names (or, under `enums = .Int`,
 // their integers), a range's integers.
 @(private)
-write_bit_set :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
+write_bit_set :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
 	lower := runtime.type_info_base(op.info).variant.(runtime.Type_Info_Bit_Set).lower
 	elem := st.plan.ops[op.elem]
 	bits := bit_set_bits(op, data)
@@ -368,7 +381,7 @@ enum_member_of :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, v: i64) -> (Pla
 }
 
 @(private)
-write_decoded :: proc(st: ^Marshal_Out, d: Decoded) -> Encode_Error {
+write_decoded :: #force_no_inline proc(st: ^Marshal_Out, d: Decoded) -> Encode_Error {
 	switch x in d {
 	case Null:
 		return enc.put_bytes(st.out, "null")
@@ -464,7 +477,7 @@ write_target :: proc(st: ^Marshal_Out, idx: u32, target: rawptr) -> Encode_Error
 
 // The 128-bit integer at `data`.
 @(private)
-put_wide :: proc(dst: ^[dynamic]u8, data: rawptr, signed: bool) -> Encode_Error {
+put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, data: rawptr, signed: bool) -> Encode_Error {
 	buf: [48]u8
 	return enc.put_bytes(dst, spell.spell_u128(buf[:], (^u128)(data)^, signed))
 }

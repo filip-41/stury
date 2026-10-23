@@ -1,0 +1,15 @@
+[package]
+name = "rust_bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: correctly rounded floats, as the other arms parse them.
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+sonic-rs = "0.5.10"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

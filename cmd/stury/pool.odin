@@ -9,9 +9,9 @@ import "core:sync"
 import host "../../host"
 import json "../../json"
 
-// Input bytes per worker of a record batch: 128 KiB per worker for the first four, 1 MiB per worker past them.
+// Input bytes per worker of a record batch: 320 KiB per worker for the first four, 1 MiB per worker past them.
 BATCH_BYTES_PER_WORKER :: 1 << 20
-BATCH_BYTES_PER_FIRST_WORKERS :: 1 << 17
+BATCH_BYTES_PER_FIRST_WORKERS :: 320 * 1024
 
 // The threads for a `json.each_record` over `n` bytes: none, the caller alone, below two workers' worth, else the
 // kept pool, with workers for the largest batch so far, up to one per core: a batch wider than the pool starts it

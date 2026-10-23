@@ -125,7 +125,7 @@ document_destroy :: proc(doc: ^Document) {
 
 // The kind of value `n`. `ok` is false, and the kind `.Null`, when `n` is no value, such as `NO_NODE`.
 @(require_results)
-kind :: proc(doc: ^Document, n: Node) -> (k: Kind, ok: bool) {
+kind :: #force_inline proc(doc: ^Document, n: Node) -> (k: Kind, ok: bool) {
 	if !has(doc, n) {
 		return .Null, false
 	}
@@ -177,7 +177,22 @@ get_number :: #force_inline proc(doc: ^Document, n: Node) -> (v: Number, ok: boo
 //	- `ok` is false for a value that is not a string, and when an escaped string's decode could not be
 //	  allocated. A `.Dom` build decodes every escaped string up front, so its reads do not allocate.
 @(require_results)
-get_string :: proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
+get_string :: #force_inline proc(doc: ^Document, n: Node) -> (s: string, ok: bool) #no_bounds_check {
+	if has(doc, n) {
+		r := &doc.rows[n]
+		lo, hi := u64(r.lo), u64(r.hi)
+		// A borrowed text: the slice below is in range once `hi` is, and a row no walk decoded has its quotes checked.
+		if r.kind == .String && .Str_Escaped not_in r.flags && hi >= lo + 2 && hi <= u64(len(doc.src)) &&
+		   (.Decoded in r.flags || (doc.src[lo] == '"' && doc.src[hi - 1] == '"')) {
+			return string(doc.src[lo + 1:hi - 1]), true
+		}
+	}
+	return get_string_decoded(doc, n)
+}
+
+// `get_string` for everything but an escape-free text.
+@(private)
+get_string_decoded :: #force_no_inline proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
 	lazy := has(doc, n) && doc.rows[n].kind == .String &&
 		doc.rows[n].flags & {.Str_Escaped, .Decoded} == {.Str_Escaped}
 	if lazy {
@@ -355,7 +370,7 @@ members_of :: proc(doc: ^Document, n: Node) -> Members {
 }
 
 @(private, require_results)
-children_next :: proc(it: ^Members) -> (n: Node, ok: bool) {
+children_next :: #force_inline proc(it: ^Members) -> (n: Node, ok: bool) {
 	if it.node >= it.end {
 		return NO_NODE, false
 	}

@@ -31,6 +31,9 @@ scan_plain :: proc(
 ) -> Maybe(Error) {
 	s := enter_document(src, limits, MAX_DEPTH)
 	lex.skip_ws(&s)
+	if pretty_head(src, int(s.pos)) {
+		return scan_plain_pretty(src, strictness, limits)
+	}
 	// One literal per arm: the walk's check level is a polymorphic parameter and must be constant. No
 	// `case:` default, so a new `Check_Level` member fails to compile instead of being swallowed.
 	switch axes_check_level(axes_for(strictness, .All)) {
@@ -40,6 +43,26 @@ scan_plain :: proc(
 		}
 	case .Locate:
 		if err := walk_value(&s, s.limits.max_depth, .Locate); err != nil {
+			return err
+		}
+	}
+	return finish(&s)
+}
+
+// `scan_plain` for a document that opens like a pretty printer's (`pretty_head`): the walk on the pretty
+// cursor, in its own function and on its own scanner, so the compact walk's scanner stays in registers.
+@(private = "file")
+scan_plain_pretty :: #force_no_inline proc(src: []byte, strictness: Strictness, limits: Limits) -> Maybe(Error) {
+	s := enter_document(src, limits, MAX_DEPTH)
+	lex.skip_ws(&s)
+	cur: Pretty_Cursor
+	switch axes_check_level(axes_for(strictness, .All)) {
+	case .Values:
+		if err := walk_value_q(&s, nil, s.limits.max_depth, .Values, {}, &cur, false, false); err != nil {
+			return err
+		}
+	case .Locate:
+		if err := walk_value_q(&s, nil, s.limits.max_depth, .Locate, {}, &cur, false, false); err != nil {
 			return err
 		}
 	}

@@ -13,7 +13,7 @@ CLI_MAX_BYTES := 2883584
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: build-cli test test-x86 test-modes diff test-asan test-tsan lint
+.PHONY: build-cli test test-x86 test-modes diff test-asan test-tsan lint bench-compare bench-cli
 
 # `$(call odin_each,VERB,PACKAGES,FLAGS,LABEL)` runs `odin VERB` over each package and stops at the first failure.
 define odin_each
@@ -38,7 +38,7 @@ ifndef GATE
 $(PRIVATE_TARGETS):
 	@if [ -f Makefile.gate ]; then exec $(MAKE) -f Makefile.gate $@; fi; \
 	echo "make $@ is the private gate: it needs Makefile.gate and the private checkout, which are not published." >&2; \
-	echo "This file's targets are: lint test test-modes test-x86 test-asan test-tsan diff build-cli." >&2; \
+	echo "This file's targets are: lint test test-modes test-x86 test-asan test-tsan diff build-cli bench-compare bench-cli." >&2; \
 	exit 1
 endif
 
@@ -108,7 +108,7 @@ test-modes:
 
 lint:
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS),-no-entry-point -collection:stury=. $(LINT_FLAGS),)
-	@for e in examples/*/; do echo "== $${e%/}"; $(ODIN) check $${e%/} -collection:stury=. $(LINT_FLAGS) || exit 1; done
+	@for e in examples/*/ bench/probe/ bench/core_compare/; do echo "== $${e%/}"; $(ODIN) check $${e%/} -collection:stury=. $(LINT_FLAGS) || exit 1; done
 	@echo "== cmd/stury"
 	@$(ODIN) check cmd/stury $(LINT_FLAGS)
 	@echo "== cmd/stury (linux_amd64)"
@@ -118,6 +118,20 @@ lint:
 	@d=$$(mktemp -d) && $(ODIN) build cmd/stury -build-mode:obj -target:windows_amd64 -windows-sdk-root:$$d $(LINT_FLAGS) -out:$$d/stury.obj; s=$$?; rm -rf $$d; exit $$s
 	@# The code guard reads source text alone: a release archive runs it like a checkout does.
 	@echo "== no mutable globals"; python3 tools/no_mutable_globals.py
+
+# The comparison with other libraries and with other jq-like command lines (bench/README.md). bench-compare
+# downloads its pinned inputs and the other libraries first; bench-cli fetches the corpus and needs jq, jaq, gojq and yq
+# installed. Neither result is quotable unless the machine is idle.
+bench-compare:
+	python3 bench/fetch.py
+	python3 bench/gen.py --check
+	python3 bench/compare.py build
+	python3 bench/compare.py time --out build/bench/report
+
+bench-cli: build-cli
+	python3 bench/fetch.py corpus
+	python3 bench/gen.py --check
+	zsh bench/cli/jq_compare.sh
 
 # The public suites and the command line under a sanitizer
 SAN_ENV := STURY_SANITIZED=1 STURY_TEST_TIMEOUT=300 ASAN_OPTIONS=use_sigaltstack=0:detect_leaks=0
