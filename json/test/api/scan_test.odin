@@ -2,6 +2,7 @@ package json_tests
 
 import "base:runtime"
 import json "../.."
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "core:unicode/utf8"
@@ -98,6 +99,106 @@ test_structural_judges_framing_not_scalars :: proc(t: ^testing.T) {
 	for src in ([]string{`[tru]`, `[truefalse]`, `[01]`, `[1.]`, `[-]`, `[1e5000]`, `["a\qb"]`, "[\"a\x01b\"]"}) {
 		testing.expectf(t, json.validate(transmute([]byte)src, strictness = .Structural) == nil, "%q: .Structural refused", src)
 		testing.expectf(t, json.validate(transmute([]byte)src) != nil, "%q: .Strict accepted", src)
+	}
+}
+
+// A path scan at `.Structural` walks every byte of the item, so a value no path reads is judged for wire
+// UTF-8 as `validate` judges it, wherever it sits and however large the input is. `.Lazy` may leave it unread.
+@(test)
+test_structural_path_scan_checks_skipped_utf8 :: proc(t: ^testing.T) {
+	filler := strings.repeat("1000000,", 20000)
+	defer delete(filler)
+	long := strings.repeat("abcdefghijklmnopqrstuvwxyz0123456789", 4000)
+	defer delete(long)
+	big_array := strings.concatenate({`{"a":1,"p":[`, filler, `0],"z":"`, "\xff", `"}`})
+	defer delete(big_array)
+	big_inside := strings.concatenate({`{"a":1,"p":[`, filler, "\"\xff\"],\"q\":2}"})
+	defer delete(big_inside)
+	big_string := strings.concatenate({`{"a":1,"z":"`, long, "\xff", `"}`})
+	defer delete(big_string)
+	docs := []string{
+		"{\"a\":1,\"z\":\"\xff\"}",
+		"{\"z\":\"\xff\",\"a\":1}",
+		"{\"a\":1,\"z\":{\"y\":[\"\xff\"]}}",
+		"{\"b\":1,\"z\":\"\xff\"}",
+		"{\"a\":1,\"z\":\"\xe2\x82\"}", // a cut sequence
+		"{\"a\":1,\"z\":[\"ok\",\"\xed\xa0\x80\"]}", // a surrogate
+		"{\"a\":1,\"z\":\xff}", // a bare scalar
+		"{\"a\":1,\"\xff\":2}",
+		big_array,
+		big_inside,
+		big_string,
+	}
+	accepted := []string{
+		"{\"a\":1,\"z\":\"\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80\",\"y\":[\"\xc3\xa9\"]}",
+		`{"a":1,"z":"\u00ff"}`,
+	}
+	for dialect in ([]json.Dialect{.Json, .Jsonc}) {
+		for src in docs {
+			req: json.Request({.Path})
+			defer json.destroy(&req)
+			req.paths = []json.Path{{steps = {json.Name("a")}}}
+			req.strictness = .Structural
+			req.dialect = dialect
+			got := json.scan(transmute([]byte)src, &req)
+			want := json.validate(transmute([]byte)src, .Json, .Structural)
+			testing.expectf(t, want != nil, "%.30q: validate accepted", src)
+			testing.expectf(t, got == json.Scan_Error(want.?), "%.30q (%v): scan %v, validate %v", src, dialect, got, want)
+		}
+		for src in accepted {
+			req: json.Request({.Path})
+			defer json.destroy(&req)
+			req.paths = []json.Path{{steps = {json.Name("a")}}}
+			req.strictness = .Structural
+			req.dialect = dialect
+			testing.expect_value(t, json.scan(transmute([]byte)src, &req), nil)
+		}
+	}
+	{
+		req: json.Request({.Path})
+		defer json.destroy(&req)
+		req.paths = []json.Path{{steps = {json.Name("a")}}}
+		req.strictness = .Lazy
+		req.duplicates = .First
+		testing.expect_value(t, json.scan(transmute([]byte)string("{\"a\":1,\"z\":\"\xff\"}"), &req), nil)
+	}
+	// The same across the index's first regions and its 16 KB chunk edges.
+	for edge in ([]int{64, 192, 448, 960, 16384, 32768}) {
+		for pad in edge - 20 ..< edge + 4 {
+			spaces := strings.repeat("x", pad)
+			defer delete(spaces)
+			for c in ([]struct {
+				tail: string,
+				ok:   bool,
+			}{{"\xc3\xa9\xe2\x82\xac", true}, {"\xc3", false}, {"\xe2\x82\xff", false}}) {
+				src := strings.concatenate({`{"a":1,"z":["`, spaces, c.tail, `"],"y":[1]}`})
+				defer delete(src)
+				req: json.Request({.Path})
+				defer json.destroy(&req)
+				req.paths = []json.Path{{steps = {json.Name("a")}}}
+				req.strictness = .Structural
+				got := json.scan(transmute([]byte)src, &req)
+				testing.expectf(t, (got == nil) == c.ok, "edge %d pad %d, tail %q: scan %v", edge, pad, c.tail, got)
+			}
+		}
+	}
+	// Sequences at every offset across the 16- and 64-byte windows the check reads by.
+	for pad in 0 ..< 70 {
+		spaces := strings.repeat("x", pad)
+		defer delete(spaces)
+		for c in ([]struct {
+			tail: string,
+			ok:   bool,
+		}{{"\xc3\xa9\xe2\x82\xac\xf0\x9f\x98\x80", true}, {"\xe2\x82", false}, {"\xf0\x9f\x98", false}, {"\x80", false}, {"\xc3\xa9\xff", false}}) {
+			src := strings.concatenate({`{"a":1,"z":"`, spaces, c.tail, `"}`})
+			defer delete(src)
+			req: json.Request({.Path})
+			defer json.destroy(&req)
+			req.paths = []json.Path{{steps = {json.Name("a")}}}
+			req.strictness = .Structural
+			got := json.scan(transmute([]byte)src, &req)
+			testing.expectf(t, (got == nil) == c.ok, "pad %d, tail %q: scan %v", pad, c.tail, got)
+		}
 	}
 }
 
@@ -326,5 +427,59 @@ check_wire_sweep :: proc(t: ^testing.T, body: []u8, doc: ^[dynamic]u8, filler: s
 		// Structural does not stop on a control byte, so only the encoding decides.
 		structural_ok := json.validate(doc[:], .Json, .Structural) == nil
 		testing.expectf(t, structural_ok == clean_utf8, "sweep %q (long %v): structural says %v", string(body), long, structural_ok)
+	}
+}
+
+// A document that opens like a pretty printer's is validated and built on the pretty cursor, and it answers as the
+// compact walk does: the same text with a tab in its first indent, which the sniff passes over, gets the same
+// verdict at every fault planted in it, at both levels that read every value, and builds the same document. A
+// planted space or newline breaks the indent the pretty cursor predicts, and the nest under "deep" indents past
+// one 16-byte vector.
+@(test)
+test_pretty_walk_agrees_with_the_compact_walk :: proc(t: ^testing.T) {
+	item := "    {\n      \"id\": 1,\n      \"name\": \"a \\\"b\\\" \\\\ c\",\n      \"tags\": [\n        \"x\",\n        \"y\"\n      ],\n      \"deep\": {\n        \"a\": {\n          \"b\": {\n            \"c\": {\n              \"d\": [\n                {\n                  \"e\": 1\n                }\n              ]\n            }\n          }\n        }\n      },\n      \"ok\": true,\n      \"none\": null,\n      \"empty\": {},\n      \"list\": [],\n      \"n\": -12.5e3\n    }"
+	items: [12]string
+	for &s in items {
+		s = item
+	}
+	body := strings.join(items[:], ",\n")
+	defer delete(body)
+	text := strings.concatenate({"{\n  \"items\": [\n", body, "\n  ],\n  \"last\": \"end\"\n}\n"})
+	defer delete(text)
+	pretty := transmute([]byte)strings.clone(text)
+	defer delete(pretty)
+	plain := transmute([]byte)strings.clone(text)
+	defer delete(plain)
+	plain[2] = '\t'
+	testing.expect(t, len(pretty) >= 1024)
+	for level in ([]json.Strictness{.Strict, .Structural}) {
+		testing.expect_value(t, json.validate(pretty, .Json, level), nil)
+		// From byte 3: the tab at byte 2 stays, so the compact copy is never taken for pretty, and no fault
+		// before it opens a string the tab would sit in.
+		for i in 3 ..< len(pretty) {
+			was := pretty[i]
+			for bad in ([]byte{'x', 0x01, '"', ']', '}', ',', ':', 0xff, ' ', '\n'}) {
+				pretty[i], plain[i] = bad, bad
+				got, want := json.validate(pretty, .Json, level), json.validate(plain, .Json, level)
+				testing.expectf(t, got == want, "%v: byte %d set to %q: pretty %v, compact %v", level, i, bad, got, want)
+				if level == .Strict {
+					builds_agree(t, pretty, plain, i, bad)
+				}
+			}
+			pretty[i], plain[i] = was, was
+		}
+	}
+}
+
+// The DOM walk of `pretty`, on the pretty cursor, and of `plain`, on the byte cursor, fail at the same byte or
+// write the same rows: the two texts differ only in a byte of the same width.
+builds_agree :: proc(t: ^testing.T, pretty, plain: []byte, i: int, bad: byte) {
+	got, gerr := json.build(pretty)
+	defer json.destroy(&got)
+	want, werr := json.build(plain)
+	defer json.destroy(&want)
+	testing.expectf(t, gerr == werr, "build: byte %d set to %q: pretty %v, compact %v", i, bad, gerr, werr)
+	if gerr == nil && werr == nil {
+		testing.expectf(t, slice.equal(got.rows[:], want.rows[:]) && slice.equal(got.values[:], want.values[:]), "build: byte %d set to %q: the rows differ", i, bad)
 	}
 }

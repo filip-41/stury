@@ -159,9 +159,10 @@ walk_frames :: #force_inline proc(
 	sp: u64 = 0
 	// Q is only the kinds that touch a value through its row (`.Nodes`, `.Dom`), nothing else at its start or
 	// end, on a walk that visits every value.
-	NUMBER_RUN :: .Dom in Q && Q <= {.Nodes, .Dom} && C == Byte_Cursor && !may_skip
+	BYTES :: C == Byte_Cursor || C == Pretty_Cursor
+	NUMBER_RUN :: .Dom in Q && Q <= {.Nodes, .Dom} && BYTES && !may_skip
 	// The same walks, row-writing, take long bracket runs out of line (`open_run`, `close_run`).
-	BRACKET_RUNS :: .Nodes in Q && Q <= {.Nodes, .Dom} && C == Byte_Cursor && !may_skip && !deep
+	BRACKET_RUNS :: .Nodes in Q && Q <= {.Nodes, .Dom} && BYTES && !may_skip && !deep
 	// Held in the walk, not `Query_Ctx`, so the key-to-close handoff stays in registers (`Demand_Pend`).
 	demand_pend: Demand_Pend
 
@@ -226,7 +227,7 @@ walk_frames :: #force_inline proc(
 					switch value_use(q, Q, sp, &demand_pend, vc) {
 					case .Unread:
 						lo := s.pos
-						if cursor_skip_value(s, cur, vc, int(max_depth - sp)) {
+						if cursor_skip_value(s, cur, vc, int(max_depth - sp), check) {
 							q.skipped = true
 							if after_scalar(s, q, lo, sp, &demand_pend, Q, may_stop, stopped) {
 								return nil
@@ -243,7 +244,7 @@ walk_frames :: #force_inline proc(
 			}
 			// A container below every level that may be armed answers nothing and arms nothing, so the plain
 			// walk checks it whole and it closes as a scalar would.
-			when Q == {.Path} && C == Byte_Cursor && !may_skip {
+			when Q == {.Path} && BYTES && !may_skip {
 				if vc - VC_OBJECT < 2 && sp >= u64(q.path_top) {
 					lo := s.pos
 					if err := walk_unarmed(s, max_depth - sp, check); err != nil {
@@ -359,7 +360,7 @@ walk_frames :: #force_inline proc(
 						q.nodes_edge.len = run_rows
 					}
 				}
-				skip_peek_open := indent_skip_peek(s, cur, Q)
+				skip_peek_open := indent_skip_peek(s, cur, Q, .Open)
 				// Not `fr`: the run-length loop advances `sp` once per extra `[`.
 				top := top_frame(&frames, sp)
 				if skip_peek_open == closer {
@@ -389,7 +390,7 @@ walk_frames :: #force_inline proc(
 					break descend
 				}
 				b = skip_peek_open
-				when .Shape in Q && C == Byte_Cursor && !may_skip {
+				when .Shape in Q && BYTES && !may_skip {
 					if closer == ']' {
 						switch shape_take_elements(s, q, sp) {
 						case .Key, .Value:
@@ -402,7 +403,7 @@ walk_frames :: #force_inline proc(
 					}
 				}
 				if closer == '}' {
-					when .Shape in Q && C == Byte_Cursor && !may_skip {
+					when .Shape in Q && BYTES && !may_skip {
 						switch shape_take_members(s, q, sp, .Unique in Q, .Pass_Unread in Q) {
 						case .Key:
 						case .Value:
@@ -414,9 +415,9 @@ walk_frames :: #force_inline proc(
 							return Error{offset = s.pos, kind = TYPED_FAULT}
 						}
 					}
-					when Q - {.Gate} == MEMBER_RUN_KINDS && C != Byte_Cursor && may_skip {
+					when Q - {.Gate} == MEMBER_RUN_KINDS && !BYTES && may_skip {
 						if sp <= whole_sp {
-							switch take_members(s, cur, q, Q, sp, fr.lo, &demand_pend, int(max_depth - sp), stopped) {
+							switch take_members(s, cur, q, Q, check, sp, fr.lo, &demand_pend, int(max_depth - sp), stopped) {
 							case .Key:
 							case .Value:
 								b = lex.peek(s)
@@ -506,7 +507,7 @@ walk_frames :: #force_inline proc(
 			// Tested before whitespace: in a compact document a comma or the close follows every value.
 			c := lex.peek(s)
 			if c != ',' && c != closer {
-				c = indent_skip_peek(s, cur, Q)
+				c = indent_skip_peek(s, cur, Q, .Close)
 			}
 			if c == ',' {
 				s.pos += 1
@@ -530,8 +531,8 @@ walk_frames :: #force_inline proc(
 					c = closer
 				} else {
 					if closer == ']' {
-						b = indent_skip_peek(s, cur, Q)
-						when .Shape in Q && C == Byte_Cursor && !may_skip {
+						b = indent_skip_peek(s, cur, Q, .Member)
+						when .Shape in Q && BYTES && !may_skip {
 							switch shape_take_elements(s, q, sp) {
 							case .Key, .Value:
 								b = lex.peek(s)
@@ -542,7 +543,7 @@ walk_frames :: #force_inline proc(
 							}
 						}
 					} else {
-						when .Shape in Q && C == Byte_Cursor && !may_skip {
+						when .Shape in Q && BYTES && !may_skip {
 							lex.skip_ws(s)
 							switch shape_take_members(s, q, sp, .Unique in Q, .Pass_Unread in Q) {
 							case .Key:
@@ -555,10 +556,10 @@ walk_frames :: #force_inline proc(
 								return Error{offset = s.pos, kind = TYPED_FAULT}
 							}
 						}
-						when Q - {.Gate} == MEMBER_RUN_KINDS && C != Byte_Cursor && may_skip {
+						when Q - {.Gate} == MEMBER_RUN_KINDS && !BYTES && may_skip {
 							cursor_skip(s, cur)
 							if sp <= whole_sp {
-								switch take_members(s, cur, q, Q, sp, top.lo, &demand_pend, int(max_depth - sp), stopped) {
+								switch take_members(s, cur, q, Q, check, sp, top.lo, &demand_pend, int(max_depth - sp), stopped) {
 								case .Key:
 								case .Value:
 									b = lex.peek(s)

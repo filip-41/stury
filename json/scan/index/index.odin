@@ -30,6 +30,7 @@ SLACK :: FLATTEN_STEP
 Fact :: enum {
 	Ctrl_In_String, // `chunk_wire_ok`, from `acc.ctrl`
 	Scalar_Shape, // `chunk_scalar_ok`
+	Wire_On_Skip, // `wire_bad`: a skip judges the UTF-8 of every block it crosses
 }
 Facts :: bit_set[Fact]
 
@@ -52,6 +53,9 @@ Index :: struct($F: Facts) {
 	// Whether every scalar run in the current region holds only the bytes its
 	// first byte allows (`scalar_shape`). It is false unless requested.
 	chunk_scalar_ok: b64,
+	// Regions classified, and skipped blocks read, that failed the wire check since `init`. Counted only for
+	// `.Wire_On_Skip`: a skip compares it before and after, so no byte is judged twice.
+	wire_bad: int,
 	buf:      [CHUNK + SLACK]u16,
 }
 
@@ -66,6 +70,7 @@ init :: proc(ix: ^Index($F), src: []u8, lo: int, reads_all := false) {
 	ix.chunk_bs = false
 	ix.chunk_wire_ok = false
 	ix.chunk_scalar_ok = false
+	ix.wire_bad = 0
 }
 
 // Where a consumer reads in the classified region. It lives with the consumer
@@ -99,6 +104,9 @@ next_is_buffered :: #force_inline proc(r: ^Reader) -> bool {
 refill :: proc(ix: ^Index($F)) -> (int, Reader) {
 	for ix.next_lo < len(ix.src) {
 		classify(ix, ix.next_lo, min(ix.next_lo + ix.span, len(ix.src)))
+		when .Wire_On_Skip in F {
+			ix.wire_bad += int(!ix.chunk_wire_ok)
+		}
 		ix.span = min(ix.span * 2, CHUNK)
 		if ix.n > 0 {
 			return ix.chunk_lo + int(ix.buf[0]), Reader{i = 1, n = ix.n, lo = ix.chunk_lo}

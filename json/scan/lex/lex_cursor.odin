@@ -46,6 +46,49 @@ skip_indent :: #force_inline proc(s: ^Scanner) {
 	}
 }
 
+// The widest indent `spaces_lead` judges, and the bytes it reads.
+LEAD_MAX :: 32
+@(rodata, private = "file")
+LEAD_MASK := [2 * LEAD_MAX]u8{0 ..< LEAD_MAX = 0xFF}
+
+// Whether the `k` bytes at `at` are all spaces, for `k < LEAD_MAX` and LEAD_MAX bytes readable there. A
+// mask compare with no count, so the bytes feed only the caller's branch and no address waits on them.
+spaces_lead :: #force_inline proc(src: []byte, at, k: u64) -> bool {
+	V :: #simd[16]u8
+	#no_bounds_check {
+		p := ([^]u8)(&src[at])
+		m := ([^]u8)(&LEAD_MASK[LEAD_MAX - k])
+		a := simd.bit_and(simd.bit_xor(intrinsics.unaligned_load((^V)(p)), V(' ')), intrinsics.unaligned_load((^V)(m)))
+		b := simd.bit_and(simd.bit_xor(intrinsics.unaligned_load((^V)(p[16:])), V(' ')), intrinsics.unaligned_load((^V)(m[16:])))
+		// `reduce_max`, not `reduce_or`: NEON has a max across lanes, where an or folds through scalar shifts.
+		return simd.reduce_max(simd.bit_or(a, b)) == 0
+	}
+}
+
+// `skip_peek` for a pretty-printed document: the first non-whitespace byte, or -1 at end of input. A
+// byte above a space returns at once. A newline is followed by its indent (`skip_indent`), a space by one
+// more byte; what is left is `skip_ws`'s.
+skip_peek_pretty :: #force_inline proc(s: ^Scanner) -> int {
+	#no_bounds_check {
+		n := u64(len(s.src))
+		if s.pos < n {
+			b := s.src[s.pos]
+			if b > ' ' {
+				return int(b)
+			}
+			if b == '\n' {
+				skip_indent(s)
+			} else if b == ' ' {
+				s.pos += 1
+			}
+			if s.pos < n && s.src[s.pos] > ' ' {
+				return int(s.src[s.pos])
+			}
+		}
+	}
+	return skip_peek(s)
+}
+
 // `skip_ws` then `peek`: the first non-whitespace byte, or -1 at end of input.
 skip_peek :: #force_inline proc(s: ^Scanner) -> int {
 	skip_ws(s)
@@ -174,20 +217,36 @@ utf8_step_checked :: #force_inline proc(s: ^Scanner) -> Maybe(Error) {
 // A container ends at its matching bracket. It has none when the source ends
 // first, a bracket of the other kind closes first, or nesting passes `room`
 // levels counting its own.
-value_end :: proc(src: []u8, lo: int, vc: u8, room: int) -> int {
+value_end :: #force_inline proc(src: []u8, lo: int, vc: u8, room: int) -> int {
+	return value_end_at(src, lo, vc, room, .Values)
+}
+
+// `value_end` at the check level `check`. At `.Locate` a string or scalar byte >= 0x80 is judged where it is
+// passed, and a malformed sequence leaves the value with no end, for the read to fault on. That is the byte
+// loops alone, so only the byte cursor asks for it (`SCAN_FORCE_SLOW`); the index judges the bytes it
+// classifies.
+value_end_at :: proc(src: []u8, lo: int, vc: u8, room: int, $check: Check_Level) -> int {
 	switch vc {
 	case VC_OBJECT, VC_ARRAY:
-		return container_end(src, lo, min(room, core_pkg.MAX_DEPTH))
+		return container_end(src, lo, min(room, core_pkg.MAX_DEPTH), check)
 	case VC_STRING:
-		return string_end(src, lo)
+		return string_end_at(src, lo, check)
 	}
-	return scalar_end(src, lo)
+	return scalar_end(src, lo, check)
 }
 
 // Past the string opened at `open`, its bytes unchecked, or -1 when no quote closes it. Sixteen bytes at a
 // time while they remain: a window with no quote or backslash is string, and at the first one a backslash
-// takes the byte after it.
-string_end :: proc(src: []u8, open: int) -> int {
+// takes the byte after it. `string_end_at` at `.Locate` also judges UTF-8, a byte at a time.
+string_end :: #force_inline proc(src: []u8, open: int) -> int {
+	return string_end_at(src, open, .Values)
+}
+
+@(private = "file")
+string_end_at :: proc(src: []u8, open: int, $check: Check_Level) -> int {
+	when check == .Locate {
+		#assert(SCAN_FORCE_SLOW, "the vector loop does not judge UTF-8")
+	}
 	i := open + 1
 	when !SCAN_FORCE_SLOW {
 		qv: #simd[16]u8 = '"'
@@ -213,6 +272,16 @@ string_end :: proc(src: []u8, open: int) -> int {
 		case '"':
 			return i + 1
 		case:
+			when check == .Locate {
+				if src[i] >= 0x80 {
+					length, outcome := utf8_step(src, u64(i), u64(len(src)))
+					if outcome != .Ok {
+						return -1
+					}
+					i += int(length)
+					continue
+				}
+			}
 			i += 1
 		}
 	}
@@ -220,7 +289,7 @@ string_end :: proc(src: []u8, open: int) -> int {
 }
 
 @(private = "file")
-scalar_end :: proc(src: []u8, lo: int) -> int {
+scalar_end :: proc(src: []u8, lo: int, $check: Check_Level) -> int {
 	esc := false
 	i := lo
 	#no_bounds_check for ; i < len(src); i += 1 {
@@ -228,13 +297,22 @@ scalar_end :: proc(src: []u8, lo: int) -> int {
 		if CHAR_FLAGS[b] & (F_WS | F_BRACKET) != 0 || b == ',' || b == ':' || (b == '"' && !esc) {
 			break
 		}
+		when check == .Locate {
+			if b >= 0x80 {
+				length, outcome := utf8_step(src, u64(i), u64(len(src)))
+				if outcome != .Ok {
+					return -1
+				}
+				i += int(length) - 1
+			}
+		}
 		esc = b == '\\' && !esc
 	}
 	return i
 }
 
 @(private = "file")
-container_end :: proc(src: []u8, open: int, room: int) -> int {
+container_end :: proc(src: []u8, open: int, room: int, $check: Check_Level) -> int {
 	is_obj: [core_pkg.MAX_DEPTH]bool = ---
 	depth := 0
 	esc := false
@@ -244,7 +322,7 @@ container_end :: proc(src: []u8, open: int, room: int) -> int {
 	#no_bounds_check for i < len(src) {
 		b := src[i]
 		if b == '"' && !esc {
-			i = string_end(src, i)
+			i = string_end_at(src, i, check)
 			if i < 0 {
 				return -1
 			}
