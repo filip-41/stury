@@ -683,17 +683,35 @@ framer.
 paths (`Path`, `Step`, `MAX_PATH_STEPS`), `Duplicates`, `Enum_Spelling`, `Unknown_Fields`, `Tag_Name`, the hooks
 (`Unmarshal_Hook`, `Type_Hook(W)` over a format's writer proc), the type plan (`Type_Plan`, `Hooked_Plan(W)`,
 `Plan_Cache`), the read shape and its lowering, the judged scalar stores, `Number`, `Batch_Runner`,
-`Stream_Window`, and the errors and their rendering. A format aliases the names it exposes. `Duplicates`'s
-zero value, `.Default`, is the format's own default: the last occurrence for JSON (as jq keeps it), resolved at the
-request's pre-flight so no walk sees it, and a refusal for CSV. JSON's walk substrate is JSON's own and lives below its lexers in `json/scan/walk`: the scan
+`Stream_Window`, and the errors and their rendering. A format aliases the names it exposes. JSON's walk substrate is JSON's own and lives below its lexers in `json/scan/walk`: the scan
 cursor and its caps (`Limits`, `MAX_DEPTH`), the rows, the query context and its matchers (path automaton,
 demand) and the typed walk's state (`Shape_Run`). A format annotates the lowered shape for its walk
 (`Plan_Format.lowered`), and may set back to `.Unsupported` an op its walk cannot read, before the shape is
 checked; the union lowering picks an arm per `Value_Class`, which the JSON walk's first-byte classes number.
 
+A format plugs into `core` in four places:
+
+- **Its plan.** A `Plan_Format` says the struct tag key a field is named by (`json`, `csv`), how a name is
+  spelled in a role (`spell`: `.Member`, `.Value`, `.Tag`; a name it cannot spell is `.Bad_Name`), its own types
+  (`types`, each compiled to a `Shape_Kind`) and the annotation of the lowered shape for its walk (`lowered`,
+  nil for none). `hooked_plan_init(T, opts, hooks, format, allocator)` compiles a `Type_Plan` from it, and the
+  format keeps a thread-local `Plan_Cache` that `plan_for` and `plan_done` serve.
+- **Its reader.** `read_shape_of(&plan.base)` lowers the plan to a `Read_Shape`; the format's walk fills values by
+  it, through the judged stores in `core` (`shape_int_store` and the rest), so a cell and a JSON number are
+  refused for the same reasons and a refusal is the same `Unmarshal_Error` with the same path.
+- **Its errors.** The faults of a text are `core.Error` and `Error_Kind`, one enum for all formats: a format
+  reports the kinds it has (CSV never reports `Bad_Number` or `Too_Deep`, JSON never `Field_Count`), and each
+  format's docs list which. `Unmarshal_Error`, `Path_Error` and `Marshal_Error` are core's types the format
+  aliases, and `core.render_error` writes any of them as `line:col: kind at path`, so code over several
+  formats has one error path.
+- **Its policies.** A repeated key is `core.Duplicates`. Its zero value `.Default` is the format's own: JSON
+  (as jq keeps it) resolves it to `.Last` at the request's pre-flight, so no walk sees it, and CSV treats it as `.Refuse` where it matches the header's names to
+  fields (`read_header`), so a zero-valued option reads as it always has in each format. A format documents
+  what its default is and which scope the policy covers (a JSON object, a CSV header).
+
 `stury:csv` is the second format. It shares the typed codec's neutral half in `core`: the type plan, compiled
-through a `Plan_Format` (`csv` tag key, names spelled as written), the read-shape lowering, the judged scalar
-stores and `Unmarshal_Error`. It owns its scanner (`csv/scan.odin`: per 64-byte block, quote, separator and
+through a `Plan_Format` (`csv` tag key, names spelled as written, no format types, no `lowered`), the read-shape
+lowering, the judged scalar stores and `Unmarshal_Error`. It owns its scanner (`csv/scan.odin`: per 64-byte block, quote, separator and
 LF masks with every byte judged) and its cell reader and writer, and builds no rows: a record is a list of
 field spans, and a typed row is filled cell by cell from the header's column map.
 
@@ -783,7 +801,12 @@ the interpreter: each record's cells are decoded and written from their spans (`
 columns are placed once per file. A whole file past two workers' worth is printed by `csv.each_record`'s pieces
 on the batch pool, through the same ordered per-piece buffers as line-delimited JSON (`Piece_Output`). A fault a
 piece meets is found again by reading the file through from its start, so the message is the sequential read's.
-Other filters take the interpreter over `csv.records` (a whole file) or `csv.records_from` (a stream).
+An object of columns (`{a, b: .c}`, `.` under `-c`, or `--to csv|tsv`) is printed the same way, a table's header put
+before the first answer by whichever piece prints first (`Piece_Output.table_due`). `select(F)`, when F reads
+only `.name` of the record (`only_columns`), runs the interpreter on an object of just those cells and prints the
+whole record for each output; the pieces do it on the pool, each on its own arena. A record whose filter fails
+stops its piece, and the main thread runs that record and the rest of the file, so the message is the
+interpreter's. Other filters take the interpreter over `csv.records` (a whole file) or `csv.records_from` (a stream).
 
 `--to csv|tsv` makes every output a record. The interpreter's `print_jq` hands each output to `print_row`
 (`output_cells.odin`), which turns it into cells and appends the record with `csv.write_record`, the writer

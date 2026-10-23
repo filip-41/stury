@@ -7,14 +7,16 @@ CPython's `random` module, so the hashes hold for the interpreter's `random` as 
 a different release may change the bytes. A plain run writes every fixture; NAME... writes only those.
 After a generator change, paste the printed hashes into the manifest.
 
-Every fixture is strictly valid JSON unless its docstring says otherwise, and each generator
-checks that by parsing its own output.
+Every fixture is strictly valid JSON (the `.csv` and `.tsv` ones, strictly valid CSV in their dialect)
+unless its docstring says otherwise, and each generator checks that by parsing its own output.
 
     python3 bench/gen.py [NAME...] [--check]
 """
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import os
 import random
@@ -441,6 +443,89 @@ class _Lcg:
 
     def pick(self, xs):
         return xs[self.below(len(xs))]
+
+
+# CSV and TSV fixtures. Every row has the header's width, no cell is empty (a typed read treats an empty cell
+# as absent), and the numbers are written with a fixed number of decimals so every reader parses the same value.
+_CSV_FIRST = ["Ada", "Boris", "Chen", "Dalia", "Emre", "Farah", "Goran", "Hana", "Ivo", "Jun", "Zoë",
+              "Łukasz", "Søren", "Amélie", "Renée"]
+_CSV_LAST = ["Nowak", "Okafor", "Lindqvist", "Tanaka", "Müller", "Haddad", "Silva", "Kowalski", "Dubois",
+             "O'Neil", "Petrov", "Ngu"]
+_CSV_CITIES = ["Oslo", "Lagos", "Kraków", "Osaka", "Lima", "Washington, DC", "St. John's", "Zürich", "Hanoi",
+               "Perth", "Quito", "Reykjavík"]
+_CSV_WORDS = ["the", "quick", "ledger", "closes", "on", "friday", "after", "audit", "review", "of", "returns",
+              "and", "refunds", "pending", "carrier", "dispute", "escalated", "to", "billing", "team"]
+
+
+def _csv_cell(s: str, delimiter: str = ",") -> str:
+    """RFC 4180's minimal quoting: quote a cell holding the delimiter, a quote, CR or LF."""
+    if delimiter in s or any(c in s for c in '"\r\n'):
+        return '"' + s.replace('"', '""') + '"'
+    return s
+
+
+def _check_csv(data: bytes, delimiter: str, quoting: int, columns: int) -> bytes:
+    """`data` when it parses strictly into rows all `columns` wide; a generation bug otherwise."""
+    rows = list(csv.reader(io.StringIO(data.decode("utf-8"), newline=""), delimiter=delimiter,
+                           quoting=quoting, strict=True))
+    assert rows and all(len(r) == columns for r in rows), "ragged or empty csv fixture"
+    return data
+
+
+def gen_table_csv(target: int, delimiter: str = ",") -> bytes:
+    """Numeric-heavy table (~70 B a row, unquoted): 4 integers, 4 decimals, a bool, a 3-letter code."""
+    rng = _Lcg(0xC5F0001)
+    out = [delimiter.join(["id", "ts", "lat", "lon", "qty", "price", "score", "ok", "code"]) + "\n"]
+    size, i = len(out[0]), 0
+    while size < target:
+        row = delimiter.join([
+            str(i), str(1790000000 + i * 3 + rng.below(3)),
+            "%.5f" % ((rng.below(18000000) - 9000000) / 1e5), "%.5f" % ((rng.below(36000000) - 18000000) / 1e5),
+            str(rng.below(10000)), "%d.%02d" % (rng.below(100000), rng.below(100)),
+            "%.4f" % (rng.below(10000000) / 1e4), "true" if rng.below(2) else "false",
+            "".join(chr(65 + rng.below(26)) for _ in range(3))]) + "\n"
+        out.append(row)
+        size += len(row)
+        i += 1
+    data = "".join(out).encode("ascii")
+    return _check_csv(data, delimiter, csv.QUOTE_NONE if delimiter == "\t" else csv.QUOTE_MINIMAL, 9)
+
+
+def gen_text_csv(target: int) -> bytes:
+    """Text with quoting: UTF-8 names, cities holding a comma, and a free-text column that is quoted when it holds a
+    comma (1 in 3), a doubled quote (1 in 4) or an LF (1 in 12)."""
+    rng = _Lcg(0xC5F0002)
+    out = ["id,name,city,quote,note\n"]
+    size, i = len(out[0]), 0
+    while size < target:
+        words = [rng.pick(_CSV_WORDS) for _ in range(4 + rng.below(10))]
+        if rng.below(3) == 0:
+            words[1] += ","
+        if rng.below(4) == 0:
+            words[2] = '"%s"' % words[2]
+        if rng.below(12) == 0:
+            words[3] += "\n"
+        row = ",".join([
+            str(i), _csv_cell(rng.pick(_CSV_FIRST) + " " + rng.pick(_CSV_LAST)), _csv_cell(rng.pick(_CSV_CITIES)),
+            _csv_cell(" ".join(words)), _csv_cell("n%d%s" % (rng.below(100000), ", ok" if rng.below(6) == 0 else ""))
+        ]) + "\n"
+        out.append(row)
+        size += len(row.encode())
+        i += 1
+    return _check_csv("".join(out).encode("utf-8"), ",", csv.QUOTE_MINIMAL, 5)
+
+
+def gen_wide_csv(target: int) -> bytes:
+    """200 columns (~1.2 KB a row): integers, every fifth column a 2-decimal number."""
+    rng = _Lcg(0xC5F0003)
+    out = [",".join("c%03d" % c for c in range(200)) + "\n"]
+    size = len(out[0])
+    while size < target:
+        row = ",".join("%d.%02d" % (rng.below(1000), rng.below(100)) if c % 5 == 4 else str(rng.below(100000))
+                       for c in range(200)) + "\n"
+        out.append(row)
+        size += len(row)
+    return _check_csv("".join(out).encode("ascii"), ",", csv.QUOTE_MINIMAL, 200)
 
 
 def gen_batch_json(n: int) -> bytes:
@@ -881,6 +966,10 @@ FIXTURES = {
     "batch_131072.json": (gen_batch_json, [131072]),
     "pretty.json": (gen_pretty_json, [8 * MIB]),
     "records.ndjson": (gen_ndjson, [5800000]),
+    "table.csv": (gen_table_csv, [16 * MIB]),
+    "text.csv": (gen_text_csv, [16 * MIB]),
+    "wide.csv": (gen_wide_csv, [8 * MIB]),
+    "table.tsv": (gen_table_csv, [8 * MIB, "\t"]),
     # Past the CLI's STREAM_FILE_MIN (64 MiB), so `stury -c .v` reads it as a stream.
     "stream.ndjson": (gen_ndjson, [72 * MIB]),
     "dups.json": (gen_dups_json, []),

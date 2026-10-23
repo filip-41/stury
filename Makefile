@@ -8,7 +8,7 @@ TEST_PKGS := core/test csv/test json/test/api
 # `make test` builds the suites at -o:minimal because the build is most of their run time.
 TEST_OPT := -o:minimal
 # The CLI's size cap for detecting changes bloating the binary, allowed to move for incremental feature development.
-CLI_MAX_BYTES := 2883584
+CLI_MAX_BYTES := 3014656
 
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500

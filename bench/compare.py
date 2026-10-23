@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""stury's read side against other libraries, job by job: typed decode, validate, DOM and GetOne.
+"""stury's read side against other libraries, job by job: typed decode, validate, DOM and GetOne for JSON, and for
+CSV (the `csv` job group) validate, records, document, typed decode and marshal.
 
 Typed decode has two kinds of arm: generic decoders (stury's unmarshal, serde_json and sonic-rs derive) and
 readers hand-written per shape on a parser API (simdjson On-Demand, yyjson's DOM), labelled `hand-written`.
@@ -12,8 +13,10 @@ round by round with the arm order rotated, keeps the median, and prints one mark
           values), every arm is run over the strictness probes (faulty documents), printing who accepts what,
           and every GetOne arm must agree on whether the key is there and on the size of its value. Exits 1
           when a typed arm differs or fails, when stury itself gives a wrong strictness verdict, or when the
-          GetOne arms disagree.
-  time    the timings. --jobs picks among typed, validate, dom, getone; --out DIR writes DIR/results.json
+          GetOne arms disagree. For CSV: every arm that walks records must tally the same records, fields and
+          decoded bytes as stury's, every typed arm must decode the same rows, every marshal arm must write
+          a text that reads back as the input's cells, and the arms are run over faulty CSV (who accepts what).
+  time    the timings. --jobs picks among typed, validate, dom, getone and csv; --out DIR writes DIR/results.json
           (every sample) and DIR/report.md (the tables under the run's commit, machine and library versions).
   cycles  for close calls: one iteration's retired instructions and cycles (`/usr/bin/time -l` on macOS, `perf
           stat` on Linux) on the same arm at 10 and at 50 timed iterations, differenced over 40, so loading and
@@ -28,11 +31,13 @@ round by round with the arm order rotated, keeps the median, and prints one mark
 Usage (any working directory; inputs come from `python3 bench/gen.py` and `python3 bench/fetch.py`):
   python3 bench/compare.py build
   python3 bench/compare.py check
-  python3 bench/compare.py time --runs 11 [--jobs typed,dom] [--out DIR]
+  python3 bench/compare.py time --runs 11 [--jobs typed,dom,csv] [--out DIR]
   python3 bench/compare.py cycles --jobs dom --inputs nested.json,logs.json
 """
 import argparse
+import csv
 import hashlib
+import io
 import json
 import math
 import os
@@ -202,7 +207,7 @@ def fixture_hashes(fixtures):
 def binary_hashes():
     """{arm binary: sha256 of the file, None when it is not built}, so a report names the exact binaries."""
     bins = {"probe": STURY, "probe50": os.path.join(ROOT, "build", "probe50"), "cpp_bench": CPP,
-            "yy_bench": YY, "read": RUST}
+            "yy_bench": YY, "read": RUST, "csv_bench": CSV_BENCH}
     return {n: sha256_of(p) if os.path.exists(p) else None for n, p in bins.items()}
 
 
@@ -219,7 +224,7 @@ def metadata(fixtures=()):
         libs[name] = _out(["pkg-config", "--modversion", name]) if os.environ.get(var) else pinned.get(name.lower())
     if os.environ.get("YYJSON_SRC"):
         libs["yyjson"] = _yyjson_src_version(os.environ["YYJSON_SRC"])
-    libs.update(_rust_crates({"serde_json", "sonic-rs"}))
+    libs.update(_rust_crates({"serde_json", "sonic-rs", "csv", "simd-csv"}))
     hashes, off_manifest = fixture_hashes(fixtures)
     return {
         "commit": _out(["git", "rev-parse", "HEAD"]),
@@ -273,6 +278,7 @@ STURY = os.environ.get("STURY_PROBE") or os.path.join(ROOT, "build", "probe")
 CPP = os.path.join(BUILD, "cpp_bench")
 YY = os.path.join(BUILD, "yy_bench")
 RUST = os.path.join(BUILD, "rust", "release", "read")
+CSV_BENCH = os.path.join(BUILD, "rust", "release", "csv_bench")
 
 
 def stury(lane, fixture=None, *extra):
@@ -368,6 +374,99 @@ GETONE = [("early", "config.json", "k0000000", "path_ab_early"), ("middle", "con
 WHOLE, INDEXED, STOPS = "whole input judged", "whole input indexed, UTF-8 checked", "stops at the match"
 
 
+# ---- CSV ----
+
+# (fixture, the typed shape its rows read as; None: walked only). `table.tsv` is the TSV dialect.
+CSV_INPUTS = [("table.csv", "table"), ("text.csv", "text"), ("wide.csv", None), ("table.tsv", None)]
+CSV_JOBS = ("csv_validate", "csv_records", "csv_dom", "csv_typed", "csv_marshal")
+# `--jobs csv` names the group.
+GROUPS = {"csv": set(CSV_JOBS)}
+
+
+def peer(tool, arm, path, shape=None):
+    """A csv_bench arm: `csv` is the csv crate, `simd` simd-csv."""
+    return [CSV_BENCH, tool, arm] + ([shape] if shape else []) + [path]
+
+
+# What each CSV reader guarantees, in the arm labels. stury's `.Strict` judges every byte (RFC 4180 quoting, UTF-8,
+# one field count for all records). The csv crate checks UTF-8 only through `StringRecord`, checks field counts
+# unless made flexible, and takes a quote inside an unquoted field as text. simd-csv's `Reader` checks UTF-8
+# (`StringRecord`) and field counts; its `TotalReader` and `Splitter` check neither.
+def csv_validate_arms(path):
+    return {
+        "stury .Strict (structure, UTF-8, field counts)": stury("csv_validate", path),
+        "csv StringRecord (UTF-8, field counts; quote in a bare field is text)": peer("csv", "validate-str", path),
+        "csv ByteRecord (field counts; no UTF-8 check)": peer("csv", "validate-bytes", path),
+        "simd-csv Reader StringRecord (UTF-8, field counts)": peer("simd", "validate-str", path),
+        "simd-csv Splitter count_records (record boundaries only)": peer("simd", "validate-split", path),
+    }
+
+
+def csv_records_arms(path):
+    return {
+        "stury records + field_text (UTF-8, field counts)": stury("csv_records", path),
+        "csv StringRecord (UTF-8, field counts)": peer("csv", "records-str", path),
+        "csv ByteRecord (no UTF-8 check)": peer("csv", "records-bytes", path),
+        "simd-csv Reader StringRecord (UTF-8, field counts)": peer("simd", "records-str", path),
+        "simd-csv TotalReader ByteRecord (no UTF-8, no field-count check)": peer("simd", "records-total", path),
+    }
+
+
+# Every peer decodes every field while it reads, so stury's head arm reads every cell of the document it built;
+# the build alone is its own arm.
+CSV_DOM_HEAD = "stury Document + read every cell"
+
+
+def csv_dom_arms(path):
+    return {
+        CSV_DOM_HEAD: stury("csv_document_read", path),
+        "stury Document build": stury("csv_document", path),
+        "csv Vec<StringRecord> (UTF-8, field counts)": peer("csv", "dom-str", path),
+        "csv Vec<ByteRecord> (no UTF-8 check)": peer("csv", "dom-bytes", path),
+        "simd-csv Vec<StringRecord> (UTF-8, field counts)": peer("simd", "dom-str", path),
+        "simd-csv TotalReader Vec<ByteRecord> (no UTF-8, no field-count check)": peer("simd", "dom-total", path),
+    }
+
+
+CSV_TYPED_HEAD = "stury unmarshal (heap, strings copied)"
+
+
+def csv_typed_arms(path, shape):
+    return {
+        CSV_TYPED_HEAD: stury("csv_unmarshal_" + shape, path),
+        "stury unmarshal (heap, strings borrowed)": stury("csv_unmarshal_%s_borrow" % shape, path),
+        "csv serde derive (owned Strings)": peer("csv", "typed", path, shape),
+    }
+
+
+def csv_marshal_arms(path, shape):
+    return {
+        "stury marshal": stury("csv_marshal_" + shape, path),
+        "csv serde Writer": peer("csv", "marshal", path, shape),
+    }
+
+
+def csv_jobs():
+    """The CSV tables, in `jobs()`'s shape."""
+    out = []
+    for fixture, _ in CSV_INPUTS:
+        arms = csv_validate_arms(fx(fixture))
+        out.append(("csv_validate", fixture, fixture, arms, next(iter(arms))))
+    for fixture, _ in CSV_INPUTS:
+        arms = csv_records_arms(fx(fixture))
+        out.append(("csv_records", fixture, fixture, arms, next(iter(arms))))
+    for fixture, _ in CSV_INPUTS:
+        out.append(("csv_dom", fixture, fixture, csv_dom_arms(fx(fixture)), CSV_DOM_HEAD))
+    for fixture, shape in CSV_INPUTS:
+        if shape:
+            out.append(("csv_typed", fixture, fixture, csv_typed_arms(fx(fixture), shape), CSV_TYPED_HEAD))
+    for fixture, shape in CSV_INPUTS:
+        if shape:
+            arms = csv_marshal_arms(fx(fixture), shape)
+            out.append(("csv_marshal", fixture, fixture, arms, next(iter(arms))))
+    return out
+
+
 def jobs():
     """Every timed table: (job, label, fixture, {arm: cmd}, stury's headline arm)."""
     out = []
@@ -382,7 +481,7 @@ def jobs():
     for fixture, _, dcmd, rcmd in docs():
         arms = {"stury .Dom build": dcmd, "stury DOM + read every value": rcmd, **doc_arms(fx(fixture))}
         del arms["simdjson od (every value read)"]
-        out.append(("dom", fixture, fixture, arms, "stury .Dom build"))
+        out.append(("dom", fixture, fixture, arms, "stury DOM + read every value"))
     for where, fixture, key, lane in GETONE:
         # `--emit` names the arm of the A/B lane whose per-call time is this arm's `ns`.
         path = fx(fixture)
@@ -393,7 +492,7 @@ def jobs():
                 "simdjson od find_field (%s)" % INDEXED: [CPP, path, "get", key],
                 "sonic-rs get (%s)" % STOPS: [RUST, "sonic", "get", path, key]}
         out.append(("getone", "%s %s" % (fixture, where), fixture, arms, head))
-    return out
+    return out + csv_jobs()
 
 
 def time_jobs(selected, runs):
@@ -509,7 +608,8 @@ def doc_arms(path):
     }
 
 
-def run_dump(cmd, dump):
+def run_dump(cmd, dump, raw=False):
+    """What the arm wrote to STURY_DUMP: decoded JSON, or with RAW its bytes; None when the arm fails."""
     env = dict(os.environ, STURY_DUMP=dump)
     if os.path.exists(dump):
         os.remove(dump)
@@ -517,7 +617,8 @@ def run_dump(cmd, dump):
     if p.returncode != 0 or not os.path.exists(dump):
         return None
     with open(dump, "rb") as f:
-        return json.loads(f.read())
+        data = f.read()
+    return data if raw else json.loads(data)
 
 
 def getone_disagreement(arms):
@@ -606,6 +707,8 @@ def check():
                 cells.append(verdict if expect is None else (verdict + " ok" if ok == expect else "**%s**" % verdict))
                 bad += i < 3 and expect is not None and ok != expect  # the first three are stury's
             print("| %s | %s |" % (name, " | ".join(cells)))
+    print("\n## CSV\n")
+    bad += check_csv()
     print("\n## GetOne (every arm agrees on whether the key is there and, among the other libraries, on its value's size)\n")
     for job, inp, _, arms, _ in jobs():
         if job == "getone":
@@ -613,6 +716,149 @@ def check():
             bad += why is not None
             print("- %s: %s" % (inp, why or "agree"))
     return 1 if bad else 0
+
+
+# ---- CSV check ----
+
+# Each typed shape's columns and the type each reads as, to hold stury's decoded rows against the file's own cells.
+CSV_COLUMNS = {
+    "table": {"id": int, "ts": int, "lat": float, "lon": float, "qty": int, "price": float, "score": float,
+              "ok": lambda t: {"true": True, "false": False}[t], "code": str},
+    "text": {"id": int, "name": str, "city": str, "quote": str, "note": str},
+}
+
+# (name, document, whether a strict reader accepts it; None: the format leaves it to the reader). The expectations
+# are RFC 4180's grammar (quotes only around a whole field, `""` inside one, CR only before LF, one field count
+# throughout) and stury's `.Strict` contract for UTF-8, which the RFC does not speak of.
+CSV_PROBES = [
+    ("clean, quoted cells", b'id,name\n1,"a,b"\n2,"say ""hi"""\n', True),
+    ("CRLF line ends", b"a,b\r\n1,2\r\n", True),
+    ("blank line (no record)", b"a,b\n\n1,2\n", None),
+    ("no final line end", b"a,b\n1,2", True),
+    ("invalid UTF-8", b"a,b\n1,x\xff\n", False),
+    ("quote inside a bare field", b'a,b\n1,x"y\n', False),
+    ("text after a closing quote", b'a,b\n1,"x"y\n', False),
+    ("unterminated quote", b'a,b\n1,"x\n', False),
+    ("short record", b"a,b\n1\n", False),
+    ("long record", b"a,b\n1,2,3\n", False),
+    ("bare CR", b"a,b\n1,x\ry\n", False),
+]
+
+
+def csv_rows(data, tsv):
+    """A CSV text's rows of cell strings, read by Python's csv module."""
+    kw = dict(delimiter="\t", quoting=csv.QUOTE_NONE) if tsv else {}
+    return list(csv.reader(io.StringIO(data.decode("utf-8"), newline=""), **kw))
+
+
+def same_cell(a, b):
+    """Equal as text, or as numbers (a writer may drop a decimal's trailing zero)."""
+    if a == b:
+        return True
+    try:
+        return float(a) == float(b)
+    except ValueError:
+        return False
+
+
+def check_tallies(env):
+    """Failures among the arms that walk records: each must tally the records, fields and decoded bytes stury's does."""
+    bad = 0
+    for fixture, _ in CSV_INPUTS:
+        path = fx(fixture)
+        want, why = run(stury("csv_records", path), env)
+        if want is None:
+            print("- %s: stury's lane failed: %s" % (fixture, why))
+            return bad + 1
+        want = {k: want[k] for k in ("records", "fields", "bytes")}
+        arms = {**csv_records_arms(path), **csv_dom_arms(path)}
+        for arm, cmd in built(arms).items():
+            tok, why = run(cmd, env)
+            if tok is None:
+                verdict = "FAILED: %s" % why
+            else:
+                seen = {k: tok[k] for k in want if k in tok}
+                verdict = "equal" if all(want[k] == v for k, v in seen.items()) else "DIFFERS %s" % seen
+            bad += verdict != "equal"
+            print("- %s, %s: %s" % (fixture, arm, verdict))
+    return bad
+
+
+def check_typed(dump):
+    """Failures among the typed arms: each must decode the rows the file holds."""
+    bad = 0
+    for fixture, shape in CSV_INPUTS:
+        if not shape:
+            continue
+        path = fx(fixture)
+        with open(path, "rb") as f:
+            cells = csv_rows(f.read(), fixture.endswith(".tsv"))
+        cols = CSV_COLUMNS[shape]
+        file_rows = [{n: cols[n](c) for n, c in zip(cells[0], r)} for r in cells[1:]]
+        for arm, cmd in built(csv_typed_arms(path, shape)).items():
+            got = run_dump(cmd, dump)
+            verdict = "equal" if got == file_rows else ("FAILED" if got is None else "DIFFERS")
+            bad += verdict != "equal"
+            print("- %s, %s: %s" % (fixture, arm, verdict))
+    return bad
+
+
+def check_marshal(dump):
+    """Failures among the marshal arms: the text each writes must read back as the file's cells."""
+    bad = 0
+    for fixture, shape in CSV_INPUTS:
+        if not shape:
+            continue
+        path = fx(fixture)
+        with open(path, "rb") as f:
+            want = csv_rows(f.read(), False)
+        for arm, cmd in built(csv_marshal_arms(path, shape)).items():
+            out = run_dump(cmd, dump, raw=True)
+            got = csv_rows(out, False) if out is not None else None
+            ok = got is not None and len(got) == len(want) and all(
+                len(g) == len(w) and all(same_cell(a, b) for a, b in zip(g, w)) for g, w in zip(got, want))
+            bad += not ok
+            print("- %s, %s: %s" % (fixture, arm, "reads back" if ok else "FAILED" if got is None else "DIFFERS"))
+    return bad
+
+
+def check_faults(tmp, env):
+    """Failures of stury's verdict over faulty CSV; the other arms' verdicts are printed beside it."""
+    bad = 0
+    names = list(csv_validate_arms("P"))
+    print("| probe | " + " | ".join(names) + " |")
+    print("|---|" + "---|" * len(names))
+    for i, (name, doc, expect) in enumerate(CSV_PROBES):
+        path = os.path.join(tmp, "probe_%02d.csv" % i)
+        with open(path, "wb") as f:
+            f.write(doc)
+        cells = []
+        for j, cmd in enumerate(csv_validate_arms(path).values()):
+            if not os.path.exists(cmd[0]):
+                cells.append("not built")
+                continue
+            ok = subprocess.run(cmd, capture_output=True, env=env).returncode == 0
+            verdict = "accepts" if ok else "refuses"
+            cells.append(verdict if expect is None else (verdict + " ok" if ok == expect else "**%s**" % verdict))
+            bad += j == 0 and expect is not None and ok != expect
+        print("| %s | %s |" % (name, " | ".join(cells)))
+    return bad
+
+
+def check_csv():
+    """The CSV arms' answers: 0, or the number of failures."""
+    env = dict(os.environ, BENCH_RUNS="1")
+    with tempfile.TemporaryDirectory() as tmp:
+        dump = os.path.join(tmp, "dump.out")
+        print("### Record tallies (records, fields and decoded bytes, as stury's records lane counts them)\n")
+        bad = check_tallies(env)
+        print("\n### Typed rows (every arm decodes the rows the file holds)\n")
+        bad += check_typed(dump)
+        print("\n### Marshal (the text each arm writes reads back as the file's cells)\n")
+        bad += check_marshal(dump)
+        print("\n### Faulty CSV (`ok` = the expected verdict, a bare verdict = the format leaves it to the reader; only stury's gates)\n")
+        bad += check_faults(tmp, env)
+    return bad
 
 
 def cycles(selected, inputs, reps):
@@ -695,11 +941,20 @@ def build():
     return 0
 
 
+def selected_jobs(spec):
+    """The job names a `--jobs` list picks, a group name standing for its jobs."""
+    out = set()
+    for j in spec.split(","):
+        out |= GROUPS.get(j, {j})
+    return out
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["build", "check", "time", "cycles"])
     ap.add_argument("--runs", type=int, default=11)
-    ap.add_argument("--jobs", default="typed,validate,dom,getone")
+    ap.add_argument("--jobs", default="typed,validate,dom,getone,csv", help="typed, validate, dom, getone, csv "
+                    "(csv_validate, csv_records, csv_dom, csv_typed, csv_marshal)")
     ap.add_argument("--out", help="time: the directory for results.json and report.md")
     ap.add_argument("--inputs", default="", help="cycles: the tables to count, by input label (comma-separated)")
     ap.add_argument("--reps", type=int, default=5, help="cycles: differences per arm")
@@ -712,9 +967,9 @@ def main(argv):
     if a.cmd == "check":
         return check()
     if a.cmd == "cycles":
-        cycles(set(a.jobs.split(",")), set(filter(None, a.inputs.split(","))), a.reps)
+        cycles(selected_jobs(a.jobs), set(filter(None, a.inputs.split(","))), a.reps)
         return 0
-    selected = set(a.jobs.split(","))
+    selected = selected_jobs(a.jobs)
     meta = dict(metadata(fx for job, _, fx, _, _ in jobs() if job in selected), runs=a.runs)
     print(meta)
     # Nothing is timed until every arm has shown it answers as stury does.

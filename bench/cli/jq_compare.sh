@@ -9,8 +9,8 @@
 #   zsh bench/cli/jq_compare.sh [out_dir]         # default build/bench/jq_compare
 #
 # A case is ROUNDS hyperfine runs (default 5) of RUNS timings per tool each (default 3), the tools' order
-# rotated every round, so a drift in machine load reaches every tool alike; the report takes each tool's
-# median over all its timings.
+# rotated every round (bench_case.zsh), so a drift in machine load reaches every tool alike; the report takes
+# each tool's median over all its timings.
 set -e
 setopt no_glob # the answers are captured with eval, where `.logs[]` would glob
 HERE=${0:A:h} # resolved before the cd below makes a relative $0 point elsewhere
@@ -54,26 +54,7 @@ exec perl -0777 -pe 's{^//[^\n]*\n}{}mg; s/,(\s*[\]}])/$1/g' "$1"
 EOF
 chmod +x "$STRIP"
 
-# bench_case NAME -n TOOL CMD ...: keep each tool's answer, then time them all, round by round.
-bench_case() {
-	local name=$1 i r k
-	shift
-	local tools=() cmds=()
-	for ((i = 1; i < $#; i += 3)); do
-		tools+=(${@[i+1]})
-		cmds+=(${@[i+2]})
-		eval "${@[i+2]}" >"$OUT/answers/$name.${@[i+1]}.txt"
-	done
-	for ((r = 0; r < ${ROUNDS:-5}; r++)); do
-		local args=()
-		for ((i = 0; i < ${#tools}; i++)); do
-			k=$(( (i + r) % ${#tools} + 1 ))
-			args+=(-n ${tools[k]} ${cmds[k]})
-		done
-		hyperfine -N -w 1 -r ${RUNS:-3} --style none --export-json "$OUT/$name.round$r.json" "${args[@]}" >/dev/null
-	done
-	echo "$name: timed" >&2
-}
+source "$HERE/bench_case.zsh"
 
 # ask NAME FLAGS FILTER FILE [YQ_FLAGS]: one question to stury, jq, jaq and gojq, and to yq when it is given
 # its spelling of FLAGS ("-" for none). STURY_FLAGS are added to stury's FLAGS alone.

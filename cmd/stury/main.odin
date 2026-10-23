@@ -73,6 +73,7 @@ Run :: struct {
 	pool:        host.Batch_Pool,
 	pool_width:  int, // the workers `pool` was started for, 0 before it is
 	scanning:    bool, // the filter is a path the scan answers
+	selected:    ^Selected, // while `select_cell` runs the filter: the record its outputs print
 	columns:     ^Columns, // the filter is only columns of a --from csv or tsv file: `scan_cells` answers it
 	table:       ^Table, // --to csv or tsv: the outputs are records (nil otherwise)
 	rows_begun:  bool, // a record has been put into the output, so a later one does not open it
@@ -173,8 +174,8 @@ main :: proc() {
 		ready_interpreter(&run)
 	}
 	choose_scan(&run, text)
-	choose_columns(&run, text)
-	if !run.scanning && run.columns == nil {
+	choose_columns(&run, text, len(names))
+	if !run.scanning && (run.columns == nil || run.columns.selecting) {
 		ready_interpreter(&run)
 	}
 	ins: Inputs

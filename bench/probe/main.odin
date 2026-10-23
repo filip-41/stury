@@ -93,6 +93,17 @@ LANE_FIXTURES := [?]struct {
 	{"unmarshal_logs_subset_arena", "logs.json", .Strict},
 	{"unmarshal_config_arena", "config.json", .Strict},
 	{"tape_unmarshal_config", "config.json", .Strict},
+	// CSV lanes (bench_csv.odin); `--fixture` reads another file.
+	{"csv_validate", "table.csv", .Strict},
+	{"csv_records", "table.csv", .Strict},
+	{"csv_document", "table.csv", .Strict},
+	{"csv_document_read", "table.csv", .Strict},
+	{"csv_unmarshal_table", "table.csv", .Strict},
+	{"csv_unmarshal_table_borrow", "table.csv", .Strict},
+	{"csv_unmarshal_text", "text.csv", .Strict},
+	{"csv_unmarshal_text_borrow", "text.csv", .Strict},
+	{"csv_marshal_table", "table.csv", .Strict},
+	{"csv_marshal_text", "text.csv", .Strict},
 }
 
 // `<lane>_structural` is `<lane>` at `.Structural`. `query_dom_<f>`, `query_nodes_<f>` and `substrate_<f>` read
@@ -530,6 +541,13 @@ main :: proc() {
 			lane_ok(lane, bench_query(data, level, {.Dom}, read_all = true))
 		case strings.has_prefix(lane, "query_nodes_"):
 			lane_ok(lane, bench_query(data, level, {.Nodes}))
+		case strings.has_prefix(lane, "csv_"):
+			ok, csv_lane := bench_csv(lane, data, file)
+			if !csv_lane {
+				fmt.eprintf("probe: unknown lane '%s'\n", lane)
+				os.exit(2)
+			}
+			lane_ok(lane, ok)
 		case:
 			fmt.eprintf("probe: unknown lane '%s'\n", lane)
 			os.exit(2)

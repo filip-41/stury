@@ -8,6 +8,9 @@ serde = { version = "1", features = ["derive"] }
 # float_roundtrip: correctly rounded floats, as the other arms parse them.
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 sonic-rs = "0.5.10"
+csv = "1.4.0"
+# `str`: StringRecord and Reader::read_record, which check each record as UTF-8.
+simd-csv = { version = "0.14.0", features = ["str"] }
 
 [profile.release]
 lto = "fat"

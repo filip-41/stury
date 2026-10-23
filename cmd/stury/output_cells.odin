@@ -9,6 +9,7 @@ package main
 
 import "base:runtime"
 import "core:fmt"
+import "core:math"
 import "core:slice"
 import "core:strings"
 import csv "../../csv"
@@ -55,6 +56,45 @@ put_row :: proc(run: ^Run, cells: []Maybe(string)) -> csv.Marshal_Error {
 		run.rows_begun = true
 	}
 	return err
+}
+
+// The row of an object's `cells` under `keys` appended to the output, the first putting the header before it: neither
+// is left when the row is refused. False when a held copy's is, for its caller to stop at; the main thread ends the run.
+put_object_row :: proc(run: ^Run, keys: []string, cells: []Maybe(string)) -> bool {
+	t, mark := run.table, len(run.out)
+	if !run.held && t.shape == .Unset {
+		open_object_table(run, keys)
+	}
+	err := put_row(run, cells)
+	if err == .None {
+		return true
+	}
+	resize(&run.out, mark)
+	if run.held {
+		run.faulted = true
+		return false
+	}
+	table_fail(run, "%s", row_refusal(t, err))
+}
+
+// The table of objects under a header of `keys` begun: its record put into the output.
+open_object_table :: proc(run: ^Run, keys: []string) {
+	t := run.table
+	t.shape = .Objects
+	for k in keys {
+		add_column(t, k)
+	}
+	put_header(run, t)
+}
+
+// Whether the header of `keys` can be written.
+header_writable :: proc(run: ^Run, keys: []string) -> bool {
+	names := make([]Maybe(string), len(keys), context.temp_allocator)
+	for k, i in keys {
+		names[i] = k
+	}
+	scratch := make([dynamic]byte, context.temp_allocator)
+	return csv.write_record(&scratch, names, run.table.dialect, at_start = !run.rows_begun) == .None
 }
 
 // Why a row was refused, for the message of the run that ends on it.
@@ -131,6 +171,10 @@ cell_of :: proc(v: jq.Value) -> (cell: Maybe(string), nested: bool) {
 		s, _ := jq.string_of(v)
 		return s, false
 	case .Number:
+		// NaN is an empty cell, as jq's @csv spells it.
+		if n, _ := jq.number_of(v); math.is_nan(n.f) {
+			return nil, false
+		}
 		return jq.to_json(v), false
 	case .Array, .Object:
 		return nil, true

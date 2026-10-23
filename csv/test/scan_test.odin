@@ -1,5 +1,6 @@
 package csv_tests
 
+import "core:strings"
 import "core:testing"
 import csv "../"
 
@@ -104,6 +105,42 @@ test_field_text :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, recs[0].at, 3)
 	testing.expect_value(t, recs[1].at, 17)
+}
+
+// Cells past one 16-byte window, with `""` and escapes on, before and across window edges, and a short last
+// cell at the input's end, decode as a byte-at-a-time reading does.
+@(test)
+test_field_text_long :: proc(t: ^testing.T) {
+	Long_Case :: struct {
+		dialect:   csv.Dialect,
+		src, want: string,
+	}
+	cases := []Long_Case{
+		{{}, "\"0123456789abcde\"\"f0123456789abcdef\"\"\"\"x\",\"\"\"\"", "0123456789abcde\"f0123456789abcdef\"\"x|\""},
+		{{}, "\"\"\"0123456789abcdef0123456789abcdef\",a\"", ""},
+		{{}, "\"0123456789abcdef0123456789abcdef\"\"\",\"a\"\"\"", "0123456789abcdef0123456789abcdef\"|a\""},
+		{csv.TSV, "0123456789abcde\\tf0123456789abcdef\\\\\\n\t\\0", "0123456789abcde\tf0123456789abcdef\\\n|\x00"},
+		{csv.TSV, "0123456789abcdef0123456789abcdef\\r\tplain", "0123456789abcdef0123456789abcdef\r|plain"},
+	}
+	for c in cases {
+		src := transmute([]byte)c.src
+		recs, err := collect(src, c.dialect)
+		if c.want == "" {
+			testing.expect(t, err != nil)
+			continue
+		}
+		if !testing.expect_value(t, err, nil) || !testing.expect_value(t, len(recs), 1) {
+			continue
+		}
+		got: [dynamic]string
+		got.allocator = context.temp_allocator
+		for f in recs[0].fields {
+			text, _, aerr := csv.field_text(src, f, c.dialect, context.temp_allocator)
+			testing.expect_value(t, aerr, nil)
+			append(&got, string(text))
+		}
+		testing.expect_value(t, strings.join(got[:], "|", context.temp_allocator), c.want)
+	}
 }
 
 // Every record of `src`, its fields copied, and the iterator's fault.

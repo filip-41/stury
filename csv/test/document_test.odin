@@ -157,3 +157,26 @@ test_document_build_without_room_for_the_guess :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, csv.row_count(&doc), 41)
 }
+
+// A decoded text is decoded once: a second read returns the same string, for a name and for a cell of a
+// regular and of a ragged document.
+@(test)
+test_document_decoded_once :: proc(t: ^testing.T) {
+	for ragged in ([]bool{false, true}) {
+		doc, err := csv.build(transmute([]byte)string("\"a\"\"b\",c\nx,\"y\"\"\"\n\"\"\"z\",w\n"), {ragged = ragged})
+		defer csv.document_destroy(&doc)
+		testing.expect_value(t, err, nil)
+		name, _ := csv.get_name(&doc, 0)
+		again, _ := csv.get_name(&doc, 0)
+		testing.expect_value(t, name, "a\"b")
+		testing.expect_value(t, raw_data(again), raw_data(name))
+		cell, _ := csv.get_string(&doc, 0, 1)
+		testing.expect_value(t, cell, "y\"")
+		cell, _ = csv.get_string(&doc, 1, 0)
+		testing.expect_value(t, cell, "\"z")
+		again, _ = csv.get_string(&doc, 1, 0)
+		testing.expect_value(t, raw_data(again), raw_data(cell))
+		cell, _ = csv.get_string(&doc, 1, 1)
+		testing.expect_value(t, cell, "w")
+	}
+}

@@ -177,14 +177,23 @@ core_validate :: proc(src: []byte, _: runtime.Allocator) -> bool {
 }
 
 // A `.Dom` scan checks every number's grammar but converts one only when it is read, and borrows an unescaped
-// string; core's parse converts every number and copies every string. This arm therefore does less work than
-// core_load; `.Nodes` would keep spans.
+// string; core's parse converts every number and copies every string. So this arm reads every value once, in
+// document order, as core's parse has by the time it returns; the strings stay borrowed.
 stury_load :: proc(src: []byte, alloc: runtime.Allocator) -> bool {
 	req: json.Request({.Dom})
-	if json.request_init(&req, allocator = alloc) != nil {
+	if json.request_init(&req, allocator = alloc) != nil || json.scan(src, &req) != nil {
 		return false
 	}
-	return json.scan(src, &req) == nil
+	for n := json.ROOT; ; n += 1 {
+		kd := json.kind(&req.doc, n) or_break
+		#partial switch kd {
+		case .Number:
+			_ = json.get_number(&req.doc, n) or_return
+		case .String:
+			_ = json.get_string(&req.doc, n) or_return
+		}
+	}
+	return true
 }
 
 core_load :: proc(src: []byte, alloc: runtime.Allocator) -> bool {

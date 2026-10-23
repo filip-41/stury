@@ -221,7 +221,14 @@ Writer :: struct {
 	escapes:    bool,
 	in_numbers: bool, // the delimiter is a byte a spelled number may hold
 	hook_text:  [dynamic]u8, // the text a write hook made, before it is quoted
+	// Per byte: `SPECIAL` when `put_text` quotes or escapes a cell holding it, `HIGH` when it is not ASCII.
+	class:      [256]u8,
 }
+
+@(private)
+SPECIAL :: 1
+@(private)
+HIGH :: 2
 
 // A writer over `plan` for `dialect`. `ok` is false for a dialect the scanner refuses.
 @(private)
@@ -229,6 +236,15 @@ spell_writer :: proc(dialect: Dialect, plan: ^Type_Plan, allocator: runtime.Allo
 	s := scan_setup(dialect, {}) or_return
 	w = Writer{plan = plan, delim = s.delim, quotes = .Unquoted not_in s.mode, escapes = .Escapes in s.mode, comment = s.comment, at_start = true}
 	w.in_numbers = strings.index_byte("0123456789+-.eE", w.delim) >= 0
+	for c in 0x80 ..< 0x100 {
+		w.class[c] = HIGH
+	}
+	w.class[w.delim], w.class['\r'], w.class['\n'] = SPECIAL, SPECIAL, SPECIAL
+	if w.quotes {
+		w.class['"'] = SPECIAL
+	} else {
+		w.class['\\'], w.class[0] = SPECIAL, SPECIAL
+	}
 	w.buf = make([dynamic]u8, allocator)
 	return w, true
 }
@@ -407,24 +423,48 @@ put_empty :: proc(w: ^Writer, $Q: bool) -> Marshal_Error {
 @(private)
 put_text :: proc(w: ^Writer, s: string, $Q: bool) -> Marshal_Error {
 	p := room(w, 2 * len(s) + 2) or_return
-	special, high := scan_text(s, w.delim, Q)
+	special, high := scan_text(w, s, Q)
 	// A BOM opening the output would read as the input's, not the cell's.
 	special |= len(w.buf) == 0 && w.at_start && core_pkg.bom_len(transmute([]byte)s) > 0
 	if high && !utf8.valid_string(s) {
 		return .Bad_Utf8
 	}
 	if !special {
-		copy(p[:len(s)], s)
+		copy_text(p, s)
 		commit(w, len(s))
 		return .None
 	}
 	when !Q {
 		return put_unquoted(w, s, p)
 	}
-	n := 0
+	// A 16-byte window with no quote is stored whole: `p` has room for twice `s` and two quotes, so a window's
+	// store stays inside it however many quotes came before.
+	p[0] = '"'
+	src := raw_data(s)
+	i, n := 0, 1
+	for i + 16 <= len(s) {
+		v := bits.load(src[i:])
+		intrinsics.unaligned_store((^bits.V)(p[n:]), v)
+		if !bits.any_eq(v, '"') {
+			i += 16
+			n += 16
+			continue
+		}
+		n = put_doubled(p, n, src, i, i + 16)
+		i += 16
+	}
+	n = put_doubled(p, n, src, i, len(s))
 	p[n] = '"'
-	n += 1
-	for c in transmute([]byte)s {
+	commit(w, n + 1)
+	return .None
+}
+
+// `src[i:end]` written to `p` from `n`, each quote doubled; where the write ends.
+@(private)
+put_doubled :: #force_inline proc(p: [^]u8, n: int, src: [^]u8, i, end: int) -> int {
+	n := n
+	for k in i ..< end {
+		c := src[k]
 		p[n] = c
 		n += 1
 		if c == '"' {
@@ -432,9 +472,34 @@ put_text :: proc(w: ^Writer, s: string, $Q: bool) -> Marshal_Error {
 			n += 1
 		}
 	}
-	p[n] = '"'
-	commit(w, n + 1)
-	return .None
+	return n
+}
+
+// `s` copied to `p`, which has room for it: a short text by two overlapping loads and stores of its size
+// class, a longer one by 16-byte windows, the last overlapping its neighbour.
+@(private)
+copy_text :: #force_inline proc(p: [^]u8, s: string) {
+	n := len(s)
+	src := raw_data(s)
+	switch {
+	case n > 64:
+		intrinsics.mem_copy_non_overlapping(p, src, n)
+	case n >= 16:
+		for i := 0; i < n - 16; i += 16 {
+			intrinsics.unaligned_store((^bits.V)(p[i:]), bits.load(src[i:]))
+		}
+		intrinsics.unaligned_store((^bits.V)(p[n - 16:]), bits.load(src[n - 16:]))
+	case n >= 8:
+		a, b := intrinsics.unaligned_load((^u64)(src)), intrinsics.unaligned_load((^u64)(src[n - 8:]))
+		intrinsics.unaligned_store((^u64)(p), a)
+		intrinsics.unaligned_store((^u64)(p[n - 8:]), b)
+	case n >= 4:
+		a, b := intrinsics.unaligned_load((^u32)(src)), intrinsics.unaligned_load((^u32)(src[n - 4:]))
+		intrinsics.unaligned_store((^u32)(p), a)
+		intrinsics.unaligned_store((^u32)(p[n - 4:]), b)
+	case n > 0:
+		p[0], p[n / 2], p[n - 1] = src[0], src[n / 2], src[n - 1]
+	}
 }
 
 // `s` as a cell of a dialect with no quotes: under `.Backslash` each delimiter, CR, LF, NUL and backslash
@@ -518,20 +583,18 @@ guard_record :: #force_inline proc(w: ^Writer, from: int) -> Marshal_Error {
 }
 
 // Whether `s` holds the delimiter, CR, LF, or a quote (`$Q`) or else a backslash or NUL, and whether it holds
-// a non-ASCII byte.
+// a non-ASCII byte. A short text is read through `w.class`, a byte a step.
 @(private)
-scan_text :: #force_inline proc(s: string, delim: byte, $Q: bool) -> (special, high: bool) {
+scan_text :: #force_inline proc(w: ^Writer, s: string, $Q: bool) -> (special, high: bool) {
 	n := len(s)
 	p := raw_data(s)
+	delim := w.delim
 	if n < 16 {
+		class: u8
 		for c in transmute([]byte)s {
-			special |= c == delim || c == ('"' when Q else '\\') || c == '\r' || c == '\n'
-			when !Q {
-				special |= c == 0
-			}
-			high |= c >= 0x80
+			class |= w.class[c]
 		}
-		return
+		return class & SPECIAL != 0, class & HIGH != 0
 	}
 	dv, qv, cv, lv := bits.V(delim), bits.V('"' when Q else '\\'), bits.V('\r'), bits.V('\n')
 	// 16-byte windows, the last one overlapping its neighbour.
@@ -583,7 +646,7 @@ put_bytes :: proc(w: ^Writer, b: []byte) -> Marshal_Error {
 @(private)
 room :: #force_inline proc(w: ^Writer, n: int) -> (p: [^]u8, err: Marshal_Error) {
 	if cap(w.buf) - len(w.buf) < n {
-		if reserve(&w.buf, max(2 * cap(w.buf), len(w.buf) + n, 4096)) != nil {
+		if non_zero_reserve(&w.buf, max(2 * cap(w.buf), len(w.buf) + n, 4096)) != nil {
 			return nil, .Out_Of_Memory
 		}
 	}

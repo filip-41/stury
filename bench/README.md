@@ -1,10 +1,13 @@
 # stury's benchmarks
 
-Two comparisons, both runnable from this tree:
+Three comparisons, all runnable from this tree:
 
-- **Libraries** (`compare.py`): stury's read side against simdjson, yyjson, RapidJSON, serde_json and
+- **JSON libraries** (`compare.py`): stury's read side against simdjson, yyjson, RapidJSON, serde_json and
   sonic-rs: validate, build a DOM, decode into typed values, get one field.
-- **Command lines** (`cli/jq_compare.sh`): the `stury` CLI against jq, jaq, gojq and yq, end to end.
+- **CSV libraries** (`compare.py`, the `csv` jobs): stury's CSV codec against the Rust `csv` and `simd-csv`
+  crates: validate, read records, build a document, decode into typed rows, write them.
+- **Command lines** (`cli/jq_compare.sh`, `cli/csv_compare.sh`): the `stury` CLI against jq, jaq, gojq and yq
+  on JSON, and against qsv, Miller and jq on CSV, end to end.
 
 Each result says what it measured and under which guarantee. In the library comparison, a number taken on a
 loaded machine, from a dirty tree, or without the answer check, is marked as not quotable in its own report.
@@ -30,15 +33,16 @@ python3 bench/compare.py time --runs 11 --out build/bench/report
 ```
 
 You need Odin (the version in the top README), a C++20 compiler, a C compiler, Cargo, Python 3.11+, and for
-the CLI comparison zsh, perl, hyperfine, jq, jaq, gojq and yq. The fixture hashes in `manifest.toml` were checked on
+the CLI comparisons zsh, perl, hyperfine, jq, jaq, gojq and yq (JSON) and qsv and Miller (`mlr`) (CSV). The fixture hashes in `manifest.toml` were checked on
 CPython 3.14; another release's `random` may change the bytes, so `gen.py --check` can fail there.
 
 Another library whose toolchain, sources or binary are missing is reported as left out, never dropped
 silently. The CLI comparison stops before timing when a tool it runs is not installed.
-`compare.py time --jobs typed,dom` picks jobs; `compare.py cycles` counts retired instructions and cycles for
+`compare.py time --jobs typed,dom` picks jobs, and `--jobs csv` is the group of the five CSV jobs
+(`csv_validate`, `csv_records`, `csv_dom`, `csv_typed`, `csv_marshal`); `compare.py cycles` counts retired instructions and cycles for
 close calls. `compare.py time --out DIR` writes `DIR/results.json` and `DIR/report.md`, with the run's
 metadata and whether it is quotable; `make bench-compare` uses `build/bench/report`, and the CLI comparison writes
-`build/bench/jq_compare/report.md`.
+`build/bench/jq_compare/report.md` (`cli/csv_compare.sh`: `build/bench/csv_compare/report.md`).
 
 Environment variables:
 
@@ -46,7 +50,7 @@ Environment variables:
 | --- | --- |
 | `SIMDJSON_SRC`, `RAPIDJSON_INC`, `YYJSON_SRC` | where `compare.py build` finds each library's sources (default: what `fetch.py` put in `build/bench/deps`). Setting one makes the report take that library's version from `pkg-config` (yyjson: from its header) instead of `sources.toml` |
 | `STURY_PROBE` | the stury probe binary `compare.py` times (default `build/probe`) |
-| `ROUNDS`, `RUNS` | `cli/jq_compare.sh`: hyperfine rounds per case (default 5), timings per tool in each (default 3) |
+| `ROUNDS`, `RUNS` | `cli/jq_compare.sh` and `cli/csv_compare.sh`: hyperfine rounds per case (default 5), timings per tool in each (default 3) |
 
 ## What is in here
 
@@ -55,10 +59,10 @@ Environment variables:
 | `gen.py`, `manifest.toml` | the synthetic fixtures, deterministic, each pinned by SHA-256 |
 | `fetch.py`, `sources.toml` | the real-world corpus and the other libraries' C/C++ sources, each pinned by URL and SHA-256 |
 | `probe/` | stury's arms: one Odin program, one lane per run (`build/probe --lane NAME --fixture F`). The lanes `compare.py` does not run (encode, marshal, edit, record streaming, wildcard paths, duplicate-key and fault handling) are stury-only measurements with no arm from another library |
-| `peers/` | the other libraries' arms: `cpp_bench.cpp` (simdjson, RapidJSON), `yy_bench.c` (yyjson), `rust/` (serde_json, sonic-rs, versions in `Cargo.lock`) |
+| `peers/` | the other libraries' arms: `cpp_bench.cpp` (simdjson, RapidJSON), `yy_bench.c` (yyjson), `rust/` (serde_json, sonic-rs, csv, simd-csv, versions in `Cargo.lock`; `read.rs` is the JSON arm, `csv_bench.rs` the CSV one) |
 | `core_compare/` | stury against Odin's own `core:encoding/json`: `odin build bench/core_compare -o:speed -collection:stury=. -out:build/core_compare && build/core_compare [fixtures_dir] [rounds]` |
 | `compare.py` | builds the arms, checks their answers, times them, writes the report |
-| `cli/` | the CLI comparison and its answer check |
+| `cli/` | the CLI comparisons and their answer check |
 
 ## Inputs
 
@@ -68,6 +72,11 @@ Environment variables:
   github_events, gsoc-2018, marine_ik, mesh, numbers, instruments, apache_builds, update-center), from
   simdjson-data at one commit. They are smaller (64 KB–3.3 MB), pretty-printed and mixed, so per-document
   setup and whitespace weigh more.
+
+- **CSV** (`gen.py`): four synthetic files, deterministic and pinned in `manifest.toml`: `table.csv` (16 MB,
+  numeric columns and a short code), `text.csv` (16 MB, UTF-8 names and quoted cells holding commas, doubled
+  quotes and LFs), `wide.csv` (8 MB, 200 columns) and `table.tsv` (8 MB, tab-separated, no quoting). Every
+  row has the header's width. The `csv` crate's own bench files are not copied here and not read at run time.
 
 The two sets can rank tools differently. Report both, and say which set a number comes from.
 
@@ -95,8 +104,10 @@ Each pair does the same work under the same guarantee, or the table names the di
   structure); only stury's verdicts gate the run, so read that table beside the timings. stury's `.Lazy`
   level judges only what it reads, so it appears only as a separately labelled arm, never as the head.
 - **Deferred work.** stury's DOM checks every number but converts it only when read, and its strings are
-  views into the input when they hold no escape. The other libraries convert numbers while parsing. So each DOM table
-  also has a `stury DOM + read every value` arm that builds and then reads every value.
+  views into the input when they hold no escape. The other libraries convert numbers while parsing. So each DOM
+  table's head arm is `stury DOM + read every value`, which builds and then reads every value in one pass in
+  document order (a recursive walk would add a cost the other arms do not pay); `stury .Dom build` is the
+  build alone.
 - **Allocation.** Every arm reuses what its API lets a user reuse across calls (a parser, a document
   buffer). stury's typed head arm allocates on the heap like the other libraries; its arena-reset variant, and
   simdjson's output-reuse variant, are separate labelled arms.
@@ -106,9 +117,46 @@ Each pair does the same work under the same guarantee, or the table names the di
   clock; RapidJSON parses with `kParseValidateEncodingFlag | kParseFullPrecisionFlag`, which is the
   guarantee the others give.
 - **GetOne** times a batch of calls per sample, so each sample sits well above the timer's resolution.
-- **`core_compare`'s load (DOM) arm is not like for like:** stury's `.Dom` scan checks every number but converts
-  none and borrows unescaped strings, while `core:encoding/json` converts every number and copies every
-  string, so stury does less work there.
+- **`core_compare`'s load (DOM) arm** builds a `.Dom` document and reads every value once in document order, as
+  `core:encoding/json` has converted every number by the time it returns. stury's strings stay borrowed while
+  core copies each one, so that much less work remains.
+
+## The CSV comparison
+
+`compare.py` runs five jobs on each fixture it fits; the head of each table is stury, and each table gives
+the other arms' time over stury's:
+
+- **validate**: stury's `.Strict` `csv.validate` (structure, UTF-8, field counts) against the `csv` crate's
+  `StringRecord` and `ByteRecord` reads and `simd-csv`'s `Reader` and `Splitter`.
+- **records**: stury's `records` with `field_text` on every field against the same peers reading every record.
+- **dom**: stury's `Document` build plus a read of every cell (the head), and the build alone, against peers
+  that keep every record in a `Vec` and then read every field once, inside the clock: stury decodes a quoted
+  cell only when it is read, so each side reads every cell.
+- **typed**: `unmarshal` into `[]Row` (strings copied, and strings borrowed from the input) against the `csv`
+  crate's serde `Deserialize`, on `table.csv` and `text.csv`.
+- **marshal**: `marshal` of those rows against the `csv` crate's serde `Writer`.
+
+What each peer guarantees is part of the arm's label, because the peers differ from stury and from each other:
+
+- The `csv` crate's `StringRecord` checks UTF-8 and field counts; `ByteRecord` checks neither UTF-8. Both take a
+  quote inside an unquoted field as text, and accept an unterminated quote, where stury refuses.
+- `simd-csv`'s `Reader` checks UTF-8 and field counts but accepts a bare CR and quote misuse; `TotalReader`
+  checks neither UTF-8 nor field counts; `Splitter` only finds record boundaries and so does the least work.
+  It cannot switch quoting off, so on `table.tsv` it runs with the tab delimiter and quoting still on.
+- `check` shows each arm's verdict on faulty CSV beside the timings; only stury's gate the run. It also
+  compares every record and field count across the arms, every typed arm's rows with the file's own cells,
+  and reads each marshalled output back.
+
+Run `python3 bench/compare.py time --jobs csv --runs 11 --out build/bench/report_csv` on a clean, quiet tree,
+after `fetch.py`, `gen.py --check`, `build` and `check`. The `csv` jobs need neither the C/C++ sources nor the
+corpus, so `build` and `check` run for them with only Odin and Cargo; the JSON jobs whose inputs are missing
+are reported as left out.
+
+`cli/csv_compare.sh` times four cases on `table.csv` and `text.csv`: two columns picked, rows filtered
+(`qty >= 9000`), two columns picked from quoted cells, and CSV to JSON lines. Each tool's output is kept first and
+`jq_report.py` compares it with stury's line by line (`*_raw` cases) or as decoded JSON. The jq arm splits at
+the commas, so it takes only the two cases on `table.csv` where no cell is quoted. qsv has no JSON-lines
+arm because it types the values it converts (numbers, booleans) where stury and Miller's `-S` keep strings.
 
 ## The CLI comparison
 
@@ -124,5 +172,6 @@ earlier run.
 
 ## Not covered
 
-Writing (marshal and output), parallel record reads, and inputs larger than memory are not compared here.
+Writing is compared only for CSV (marshal against the `csv` crate); JSON marshal and output, parallel record
+reads, and inputs larger than memory are not compared here.
 Typed decode is compared only on the synthetic shapes, not on the corpus.

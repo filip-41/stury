@@ -14,28 +14,28 @@ scan_ok :: proc(data: []byte, req: ^json.Request($Q)) -> bool {
 	return json.scan(data, req) == nil
 }
 
-// A fold of every value under `n`, read through the public readers: `get_number` on a number, `get_string` on a
-// string, `kind` alone on the rest. `.Dom` checks a number's grammar when it builds and converts it only
-// here, and borrows an unescaped string; this is the work a parser that converts while it parses has done
-// by the time its tree is built.
-read_every_value :: proc(doc: ^json.Document, n: json.Node) -> (acc: u64, ok: bool) {
-	switch kd := json.kind(doc, n) or_return; kd {
-	case .Number:
-		num := json.get_number(doc, n) or_return
-		return transmute(u64)num.value, true
-	case .String:
-		s := json.get_string(doc, n) or_return
-		return u64(len(s)), true
-	case .Object, .Array:
-		it := json.children(doc, n)
-		for c in json.children(&it) {
-			acc += read_every_value(doc, c) or_return
+// A fold of every value of `doc`, read through the public readers: `get_number` on a number, `get_string` on a
+// string, `kind` alone on the rest. `.Dom` checks a number's grammar when it builds and converts it only here,
+// and borrows an unescaped string; this is the work a parser that converts while it parses has done by the time
+// its tree is built, and no more. Nodes count up from `ROOT` in document order to the first one `kind` refuses,
+// so one pass reads them all; a recursive walk would also time the CPU's return prediction, which on a deep
+// document costs more than the reads.
+read_every_value :: proc(doc: ^json.Document) -> (acc: u64, ok: bool) {
+	for n := json.ROOT; ; n += 1 {
+		kd := json.kind(doc, n) or_break
+		switch kd {
+		case .Number:
+			num := json.get_number(doc, n) or_return
+			acc += transmute(u64)num.value
+		case .String:
+			s := json.get_string(doc, n) or_return
+			acc += u64(len(s))
+		case .Object, .Array:
+		case .True, .False, .Null:
+			acc += u64(kd)
 		}
-		return acc, true
-	case .True, .False, .Null:
-		return u64(kd), true
 	}
-	return 0, false
+	return acc, true
 }
 
 // One query lane: build the request, warm up, time TIMED_ITERS scans, print the tokens. With `read_all` (a
@@ -60,7 +60,7 @@ bench_query :: proc(data: []byte, level: json.Strictness, $Q: bit_set[json.Query
 		}
 		when .Dom in Q {
 			if read_all {
-				acc, read := read_every_value(&req.doc, json.ROOT)
+				acc, read := read_every_value(&req.doc)
 				if !read {
 					return false
 				}

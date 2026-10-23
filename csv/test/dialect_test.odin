@@ -122,6 +122,9 @@ test_max_fields :: proc(t: ^testing.T) {
 		{"a,b\n#c,d,e\n", COMMENTS, 2, nil},
 		{strings.repeat("f,", 19, context.temp_allocator), {}, 20, nil},
 		{strings.repeat("f,", 20, context.temp_allocator), {}, 20, csv.Error{0, .Limit_Fields}},
+		// Rows past the first's at the cap, then one past it: a document counts each record's own fields.
+		{strings.repeat("a,b,c\n", 200, context.temp_allocator), {}, 3, nil},
+		{strings.concatenate({strings.repeat("a,b,c\n", 200, context.temp_allocator), "a,b,c,d\n"}, context.temp_allocator), {ragged = true}, 3, csv.Error{1200, .Limit_Fields}},
 	}
 	for c in cases {
 		src := transmute([]byte)c.src
@@ -129,6 +132,9 @@ test_max_fields :: proc(t: ^testing.T) {
 		testing.expectf(t, got == c.want, "%q: validate %v, want %v", c.src, got, c.want)
 		_, rerr := collect(src, c.dialect, limits = {max_fields = c.max})
 		testing.expectf(t, rerr == c.want, "%q: records %v, want %v", c.src, rerr, c.want)
+		doc, derr := csv.build(src, c.dialect, header = false, limits = {max_fields = c.max})
+		testing.expectf(t, derr == c.want, "%q: build %v, want %v", c.src, derr, c.want)
+		csv.document_destroy(&doc)
 	}
 	Text :: struct {
 		a: string,

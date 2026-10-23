@@ -66,6 +66,7 @@ Record_Piece :: struct {
 	out:      [dynamic]byte,
 	ret:      int, // jq's result for the piece's last record, when it answered one
 	answered: bool,
+	records:  int, // the records the piece took in, but the one it stopped at
 	done:     bool,
 	stop:     int, // where the piece left the rest to the main thread, or -1
 }
@@ -85,6 +86,11 @@ Piece_Output :: struct {
 	spare:   [dynamic][dynamic]byte,
 	printed: int,
 	stop:    int,
+	// The records of the pieces printed so far, and for an object table the keys of the header that the first
+	// answer opens the table with (`table_due`).
+	records:   int,
+	table_due: bool,
+	keys:      []string,
 	// The output written while the lock is let go: its holder owns `writing`, with the held output swapped into
 	// `wbuf`, so that one thread writes at a time and in order, and the others go on appending to the run's.
 	writing: bool,
@@ -138,7 +144,12 @@ publish_piece :: proc(po: ^Piece_Output, k: int, p: Record_Piece) -> bool {
 	po.pieces[k] = p
 	for ; po.stop < 0 && po.printed < len(po.pieces) && po.pieces[po.printed].done; po.printed += 1 {
 		q := &po.pieces[po.printed]
+		po.records += q.records
 		if q.answered {
+			if po.table_due {
+				po.table_due = false
+				open_object_table(po.run, po.keys)
+			}
 			append(&po.run.out, ..q.out[:])
 			po.run.ret = q.ret
 			po.run.rows_begun = po.run.rows_begun || po.run.table != nil

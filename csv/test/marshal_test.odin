@@ -14,6 +14,31 @@ test_marshal_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(out), "1;plain\r\n")
 }
 
+// Every length up to past four 16-byte windows, plain and with a quote at each window's edge, reads back.
+@(test)
+test_marshal_text_lengths :: proc(t: ^testing.T) {
+	alphabet := "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+	for n in 0 ..< len(alphabet) {
+		for quote in ([]int{-1, 0, 15, 16, 31, n - 1}) {
+			b := make([]byte, n, context.temp_allocator)
+			copy(b, alphabet[:n])
+			if quote >= 0 && quote < n {
+				b[quote] = '"'
+			}
+			rows := []Strict{{n, string(b)}}
+			out, err := csv.marshal(rows, allocator = context.temp_allocator)
+			if !testing.expect_value(t, err, csv.Marshal_Error.None) {
+				return
+			}
+			back: []Strict
+			testing.expect_value(t, read(t, string(out), &back), nil)
+			if testing.expect_value(t, len(back), 1) {
+				testing.expectf(t, back[0] == rows[0], "%q read back as %q from %q", rows[0].name, back[0].name, string(out))
+			}
+		}
+	}
+}
+
 @(test)
 test_marshal_round_trip :: proc(t: ^testing.T) {
 	rows := []Row {

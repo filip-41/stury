@@ -781,7 +781,12 @@ has_pair :: #force_inline proc(cell: Field, text: string) -> bool {
 // Whether the cell's text holds a `""` or an escape, which `field_text` decodes.
 @(private)
 needs_decoding :: #force_inline proc(r: ^Reader, cell: Field, text: string) -> bool {
-	return has_pair(cell, text) || r.dialect.escapes == .Backslash && holds(text, '\\')
+	// `text` is `authored`'s, a slice of `src`.
+	lo := int(uintptr(raw_data(text)) - uintptr(raw_data(r.src)))
+	if cell.hi - cell.lo != u64(len(text)) && holds_span(r.src, lo, len(text), '"') {
+		return true
+	}
+	return r.dialect.escapes == .Backslash && holds_span(r.src, lo, len(text), '\\')
 }
 
 @(private)

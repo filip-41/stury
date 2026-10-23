@@ -4,6 +4,7 @@ package csv
 // same scanner `records` runs; a cell's text is decoded when it is read.
 
 import "core:math"
+import "core:mem"
 import "core:strconv"
 import "core:unicode/utf8"
 import core_pkg "../core"
@@ -30,8 +31,11 @@ Document :: struct {
 	width:      int,
 	// Built `.Lazy`: a string is judged as UTF-8 when it is read.
 	judge_utf8: bool,
-	// The strings that held a `""` or an escape, decoded once each: by field index, and by `-1 - column` for a name.
-	decoded:    map[int]string,
+	// The strings that held a `""` or an escape, decoded once each into `arena`. `decoded_at` is made at the first
+	// decode, a slot per name and then per field: 0 until its text is decoded, then 1 + its index in `decoded`.
+	decoded_at: []u32,
+	decoded:    [dynamic]string,
+	arena:      mem.Dynamic_Arena,
 }
 
 // Read `src` in `dialect` and keep the span of every field. `header` takes the first record as the column
@@ -69,54 +73,48 @@ build :: proc(
 			return {}, Error{kind = .Out_Of_Memory}
 		}
 	}
-	for rec in next_record(&it) {
-		if !add_row(&doc, rec.fields) {
-			document_destroy(&doc)
-			return {}, Error{kind = .Out_Of_Memory}
+	// The rows' fields stay in the iterator's list, which the document takes.
+	it.keep = true
+	for rec in next_kept_record(&it) {
+		doc.width = max(doc.width, len(rec.fields))
+		doc.rows += 1
+		if dialect.ragged {
+			if _, aerr := append(&doc.starts, it.base); aerr != nil {
+				document_destroy(&doc)
+				return {}, Error{kind = .Out_Of_Memory}
+			}
 		}
 		if doc.rows == 1 {
-			reserve_rest(&doc, rec)
+			reserve_rest(&it, rec)
 		}
 	}
 	if it.err != nil {
 		document_destroy(&doc)
 		return {}, it.err
 	}
+	doc.fields, it.fields = it.fields, {}
 	return
 }
 
-// Room for the fields the rest of the text will hold, judged by the first row `rec`: what the first row's
-// bytes hold, scaled to the text's. A guess that is short costs a regrow and one that is long costs address
-// space nobody touches. A reserve that fails is no error: the appends grow the list as they need.
+// Room in the iterator's list for the fields the rest of the text will hold, judged by the first row `rec`:
+// what the first row's bytes hold, scaled to the text's. A guess that is short costs a regrow and one that is
+// long costs address space nobody touches. A reserve that fails is no error: the list grows as it needs.
 @(private)
-reserve_rest :: proc(doc: ^Document, rec: Record) {
+reserve_rest :: proc(it: ^Records, rec: Record) {
 	row_bytes := int(rec.fields[len(rec.fields) - 1].hi - rec.at) + 1
-	guess := len(doc.src) / row_bytes * len(rec.fields)
-	guess = min(guess + guess / 8, len(doc.src) / 2 + 1)
-	_ = reserve(&doc.fields, guess)
-}
-
-@(private)
-add_row :: proc(doc: ^Document, fields: []Field) -> bool {
-	doc.width = max(doc.width, len(fields))
-	if _, err := append(&doc.fields, ..fields); err != nil {
-		return false
-	}
-	if doc.dialect.ragged {
-		if _, err := append(&doc.starts, len(doc.fields)); err != nil {
-			return false
-		}
-	}
-	doc.rows += 1
-	return true
+	guess := len(it.src) / row_bytes * len(rec.fields)
+	guess = min(guess + guess / 8, len(it.src) / 2 + 1)
+	_ = reserve(&it.fields, guess)
+	set_limit(it)
 }
 
 // Free everything a document owns, and empty it. Strings read from it dangle after.
 document_destroy :: proc(doc: ^Document) {
-	for _, s in doc.decoded {
-		delete(s, doc.fields.allocator)
+	if doc.decoded_at != nil {
+		mem.dynamic_arena_destroy(&doc.arena)
+		delete(doc.decoded_at, doc.fields.allocator)
+		delete(doc.decoded)
 	}
-	delete(doc.decoded)
 	delete(doc.names)
 	delete(doc.fields)
 	delete(doc.starts)
@@ -159,11 +157,23 @@ row_fields :: proc(doc: ^Document, row: int) -> []Field {
 // The field at `row` and `col` as written (`Field`). `ok` is false for a row or column the document lacks.
 @(require_results)
 get_field :: proc(doc: ^Document, row, col: int) -> (f: Field, ok: bool) {
-	cells := row_fields(doc, row)
-	if col < 0 || col >= len(cells) {
-		return {}, false
+	i := field_index(doc, row, col) or_return
+	#no_bounds_check return doc.fields[i], true
+}
+
+// The index in `doc.fields` of the field at `row` and `col`, false for a row or column the document lacks.
+@(private)
+field_index :: #force_inline proc(doc: ^Document, row, col: int) -> (i: int, ok: bool) {
+	if !doc.dialect.ragged {
+		// Every row holds `width` fields: `fields` holds `rows * width`.
+		return row * doc.width + col, uint(row) < uint(doc.rows) && uint(col) < uint(doc.width)
 	}
-	return cells[col], true
+	if uint(row) >= uint(doc.rows) {
+		return
+	}
+	// `starts` holds `rows + 1` ascending indexes into `fields`.
+	#no_bounds_check lo, hi := doc.starts[row], doc.starts[row + 1]
+	return lo + col, uint(col) < uint(hi - lo)
 }
 
 // The decoded text of header column `col` (`get_string`'s rules), valid until `document_destroy`.
@@ -172,7 +182,7 @@ get_name :: proc(doc: ^Document, col: int) -> (s: string, ok: bool) {
 	if col < 0 || col >= len(doc.names) {
 		return "", false
 	}
-	return read_text(doc, doc.names[col], -1 - col)
+	return read_text(doc, doc.names[col], col)
 }
 
 // The decoded text of a cell, valid until `document_destroy`: a quoted cell's without its quotes and with each
@@ -184,8 +194,9 @@ get_name :: proc(doc: ^Document, col: int) -> (s: string, ok: bool) {
 //	  for a document built `.Lazy`, when the cell is not UTF-8. An empty cell is `""` with `ok` true.
 @(require_results)
 get_string :: proc(doc: ^Document, row, col: int) -> (s: string, ok: bool) {
-	f := get_field(doc, row, col) or_return
-	return read_text(doc, f, row_start(doc, row) + col)
+	i := field_index(doc, row, col) or_return
+	#no_bounds_check f := doc.fields[i]
+	return read_text(doc, f, len(doc.names) + i)
 }
 
 // The integer a cell spells, read as `unmarshal` reads one into an `i64`: `[+-]?digits`, a quoted cell's
@@ -238,36 +249,47 @@ present_text :: proc(doc: ^Document, row, col: int) -> (text: string, ok: bool) 
 	return authored(&r, f), true
 }
 
-// The index in `doc.fields` of the first field of `row`.
+// The decoded text of `f`, kept in slot `key` of `decoded_at` when it had to be decoded.
 @(private)
-row_start :: #force_inline proc(doc: ^Document, row: int) -> int {
-	return doc.starts[row] if doc.dialect.ragged else row * doc.width
-}
-
-// The decoded text of `f`, kept under `key` when it had to be decoded.
-@(private)
-read_text :: proc(doc: ^Document, f: Field, key: int) -> (s: string, ok: bool) {
+read_text :: #force_inline proc(doc: ^Document, f: Field, key: int) -> (s: string, ok: bool) {
 	if doc.judge_utf8 && !utf8.valid_string(string(doc.src[f.lo:f.hi])) {
 		return "", false
 	}
-	if kept, hit := doc.decoded[key]; hit {
-		return kept, true
+	text, decode := field_view(doc.src, f, doc.dialect)
+	if !decode {
+		return string(text), true
 	}
-	allocator := doc.fields.allocator
-	text, escaped, err := field_text(doc.src, f, doc.dialect, allocator)
+	return read_decoded(doc, text, key)
+}
+
+// The decoded text of `text`, a `field_view` that needs decoding, kept in slot `key` once decoded.
+@(private)
+read_decoded :: proc(doc: ^Document, text: []byte, key: int) -> (s: string, ok: bool) {
+	if doc.decoded_at == nil {
+		allocator := doc.fields.allocator
+		slots, err := make([]u32, len(doc.names) + len(doc.fields), allocator)
+		if err != nil {
+			return "", false
+		}
+		doc.decoded_at = slots
+		doc.decoded.allocator = allocator
+		mem.dynamic_arena_init(&doc.arena, allocator, allocator)
+	}
+	if at := doc.decoded_at[key]; at != 0 {
+		return doc.decoded[at - 1], true
+	}
+	out, _, err := field_decode(text, doc.dialect, mem.dynamic_arena_allocator(&doc.arena))
 	if err != nil {
 		return "", false
 	}
-	if escaped {
-		if doc.decoded == nil {
-			doc.decoded.allocator = allocator
-		}
-		if map_insert(&doc.decoded, key, string(text)) == nil {
-			delete(text, allocator)
+	// Past `max(u32)` decoded strings a text is decoded again at each read; each copy lives as long as the arena.
+	if len(doc.decoded) < int(max(u32)) {
+		if _, aerr := append(&doc.decoded, string(out)); aerr != nil {
 			return "", false
 		}
+		doc.decoded_at[key] = u32(len(doc.decoded))
 	}
-	return string(text), true
+	return string(out), true
 }
 
 // Whether the text of `f` in `src`, read in `dialect`, is `name`: `field_text` compared without decoding.

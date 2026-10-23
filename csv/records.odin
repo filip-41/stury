@@ -2,8 +2,9 @@ package csv
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:bytes"
+import "core:simd"
 import core_pkg "../core"
+import "../core/bits"
 
 // One field's bytes as written, `src[lo:hi]`: a quoted field's quotes included, a CR before the record's LF
 // not. `field_text` reads its text.
@@ -36,6 +37,12 @@ Records :: struct {
 	field_lo: int,
 	rec_lo:   int,
 	fields:   [dynamic]Field,
+	// `fields[:base]` are records already yielded that `build` keeps: under `keep` a yielded record's fields
+	// stay, and the next record's start past them.
+	base:     int,
+	keep:     bool,
+	// How long `fields` may grow without a check (`set_limit`): its capacity, at most `max_fields` past `base`.
+	limit:    int,
 	width:    int, // the first record's field count, 0 until it is read
 	scan:     Scan,
 	// Blocks at or past `stop` are read by `records_past_stop`: the input's end, the block that holds an open
@@ -100,6 +107,19 @@ next_record :: proc {
 // goes on with the record it was reading.
 @(private, require_results)
 next_slice_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
+	return records_step(it, false)
+}
+
+// `next_slice_record` for `build`, which keeps every yielded record's fields in the list.
+@(private, require_results)
+next_kept_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
+	return records_step(it, true)
+}
+
+// Under `KEEP` the record open now starts at `base` and its fields reach `limit` unchecked; without it the
+// list holds that record alone and its capacity never passes `max_fields`.
+@(private, require_results)
+records_step :: #force_inline proc(it: ^Records, $KEEP: bool) -> (rec: Record, ok: bool) {
 	if it.err != nil {
 		return
 	}
@@ -141,16 +161,46 @@ next_slice_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 		seps, lfs, field_lo, block := it.seps, it.lfs, it.field_lo, it.block
 		fields := (^runtime.Raw_Dynamic_Array)(&it.fields)
 		data, n := ([^]Field)(fields.data), fields.len
+		base, limit := 0, fields.cap
+		when KEEP {
+			base, limit = it.base, it.limit
+		}
 		for seps != 0 {
-			b := u64(intrinsics.count_trailing_zeros(seps))
+			// The delimiters before the record's LF, or the block's end, all fields of the record open now: room
+			// for them is made once, and each is a store.
+			end := lfs & seps
+			before := (end & -end) - 1
+			if delims := seps & before; delims != 0 {
+				if k := int(intrinsics.count_ones(delims)); limit - n < k {
+					fields.len = n
+					if !reserve_fields(it, n + k) {
+						return
+					}
+					data = ([^]Field)(fields.data)
+					limit = fields.cap
+					when KEEP {
+						limit = it.limit
+					}
+				}
+				for delims != 0 {
+					at := block + int(intrinsics.count_trailing_zeros(delims))
+					delims &= delims - 1
+					data[n] = {u64(field_lo), u64(at)}
+					n += 1
+					field_lo = at + 1
+				}
+				seps &= ~before
+			}
+			if seps == 0 {
+				break
+			}
+			at := block + int(intrinsics.count_trailing_zeros(seps))
 			seps &= seps - 1
-			at := block + int(b)
-			lf := lfs >> b & 1 != 0
 			hi := at
-			if lf && hi > field_lo && src[hi - 1] == '\r' {
+			if hi > field_lo && src[hi - 1] == '\r' {
 				hi -= 1
 			}
-			if n < fields.cap {
+			if n < limit {
 				data[n] = {u64(field_lo), u64(hi)}
 				n += 1
 			} else {
@@ -159,20 +209,21 @@ next_slice_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 					return
 				}
 				data, n = ([^]Field)(fields.data), fields.len
+				limit = fields.cap
+				when KEEP {
+					limit = it.limit
+				}
 			}
 			field_lo = at + 1
-			if !lf {
-				continue
-			}
 			fields.len = n
 			it.seps, it.field_lo = seps, field_lo
 			lo := it.rec_lo
 			it.rec_lo = at + 1
-			if n == 1 && skip_line(it, lo, at) {
-				n = 0
+			if n - base == 1 && skip_line(it, lo, at) {
+				n = base
 				continue
 			}
-			return yield(it, lo)
+			return yield(it, lo, KEEP)
 		}
 		fields.len = n
 		it.seps, it.field_lo = 0, field_lo
@@ -269,15 +320,18 @@ last_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 	if it.rec_lo == len(it.src) || !add_field(it, it.field_lo, len(it.src)) {
 		return
 	}
-	if len(it.fields) == 1 && skip_line(it, it.rec_lo, len(it.src)) {
+	if len(it.fields) - it.base == 1 && skip_line(it, it.rec_lo, len(it.src)) {
 		return
 	}
-	return yield(it, it.rec_lo)
+	if it.keep {
+		return yield(it, it.rec_lo, true)
+	}
+	return yield(it, it.rec_lo, false)
 }
 
 @(private)
 add_field :: #force_inline proc(it: ^Records, lo, hi: int) -> bool {
-	if n := len(it.fields); n < cap(it.fields) {
+	if n := len(it.fields); n < it.limit {
 		(^runtime.Raw_Dynamic_Array)(&it.fields).len = n + 1
 		it.fields[n] = {u64(lo), u64(hi)}
 		return true
@@ -285,21 +339,44 @@ add_field :: #force_inline proc(it: ^Records, lo, hi: int) -> bool {
 	return grow_fields(it, lo, hi)
 }
 
-// `add_field` past the fields' capacity, which never passes `max_fields`: the field past it is refused.
+// `add_field` past the fields' capacity, which never passes `max_fields` past `base`: the field past it is
+// refused.
 @(private)
 grow_fields :: proc(it: ^Records, lo, hi: int) -> bool {
 	n := len(it.fields)
-	if n >= it.scan.max_fields {
+	if n - it.base >= it.scan.max_fields {
 		it.err = Error{offset = u64(it.rec_lo), kind = .Limit_Fields}
 		return false
 	}
-	if reserve(&it.fields, min(max(2 * n, 16), it.scan.max_fields)) != nil {
+	if n == cap(it.fields) && reserve(&it.fields, it.base + min(max(2 * n, 16) - it.base, it.scan.max_fields)) != nil {
 		it.err = Error{kind = .Out_Of_Memory}
 		return false
 	}
+	set_limit(it)
 	(^runtime.Raw_Dynamic_Array)(&it.fields).len = n + 1
 	it.fields[n] = {u64(lo), u64(hi)}
 	return true
+}
+
+// Room for `need` fields of the record open now, which never passes `max_fields`: a record that would hold more
+// is refused.
+@(cold, private)
+reserve_fields :: proc(it: ^Records, need: int) -> bool {
+	if need - it.base > it.scan.max_fields {
+		it.err = Error{offset = u64(it.rec_lo), kind = .Limit_Fields}
+		return false
+	}
+	if need > cap(it.fields) && reserve(&it.fields, it.base + min(max(2 * cap(it.fields), need, 16) - it.base, it.scan.max_fields)) != nil {
+		it.err = Error{kind = .Out_Of_Memory}
+		return false
+	}
+	set_limit(it)
+	return true
+}
+
+@(private)
+set_limit :: #force_inline proc(it: ^Records) {
+	it.limit = it.base + min(cap(it.fields) - it.base, it.scan.max_fields)
 }
 
 // Whether the one-field line `src[lo:hi]` holds no record: it is blank, or a comment.
@@ -309,16 +386,26 @@ skip_line :: #force_inline proc(it: ^Records, lo, hi: int) -> bool {
 }
 
 @(private)
-yield :: proc(it: ^Records, lo: int) -> (rec: Record, ok: bool) {
-	if len(it.fields) != it.width {
+yield :: #force_inline proc(it: ^Records, lo: int, $KEEP: bool) -> (rec: Record, ok: bool) {
+	base := 0
+	when KEEP {
+		base = it.base
+	}
+	if n := len(it.fields) - base; n != it.width {
 		k: Error_Kind
-		if k, it.width = record_fault(it.width, len(it.fields), it.scan); k != .None {
+		if k, it.width = record_fault(it.width, n, it.scan); k != .None {
 			it.err = Error{offset = u64(lo), kind = k}
 			return
 		}
 	}
-	rec = {fields = it.fields[:], at = u64(lo), src = it.src}
-	clear(&it.fields)
+	// `base` is at most the list's length: it is set to the length only.
+	#no_bounds_check rec = {fields = it.fields[base:], at = u64(lo), src = it.src}
+	when KEEP {
+		it.base = len(it.fields)
+		set_limit(it)
+	} else {
+		clear(&it.fields)
+	}
 	return rec, true
 }
 
@@ -327,53 +414,79 @@ yield :: proc(it: ^Records, lo: int) -> (rec: Record, ok: bool) {
 // decode is a slice of `src` with `escaped` false. One with `""` or an escape is decoded into `allocator`,
 // `escaped` true, and the caller frees it.
 @(require_results)
-field_text :: proc(src: []byte, f: Field, dialect := Dialect{}, allocator := context.allocator) -> (text: []byte, escaped: bool, err: runtime.Allocator_Error) {
-	text = src[f.lo:f.hi]
-	if dialect.quoting == .None {
-		if dialect.escapes == .Backslash {
-			return unescape(text, allocator)
-		}
-		return text, false, nil
+field_text :: #force_inline proc(src: []byte, f: Field, dialect := Dialect{}, allocator := context.allocator) -> (text: []byte, escaped: bool, err: runtime.Allocator_Error) {
+	// `src[f.lo:f.hi]`'s bounds check, in two unsigned compares.
+	if f.lo > f.hi || f.hi > u64(len(src)) {
+		runtime.slice_expr_error_lo_hi_loc(lo = int(f.lo), hi = int(f.hi), len = len(src))
 	}
-	if len(text) == 0 || text[0] != '"' {
-		return text, false, nil
+	decode: bool
+	if text, decode = field_view(src, f, dialect); decode {
+		return field_decode(text, dialect, allocator)
 	}
-	text = text[1:len(text) - 1]
-	k := bytes.index_byte(text, '"')
-	if k < 0 {
-		return text, false, nil
-	}
-	out := make([]byte, len(text) - bytes.count(text, {'"'}) / 2, allocator) or_return
-	n := copy(out, text[:k + 1])
-	for i := k + 2; i < len(text); i += 1 {
-		out[n] = text[i]
-		n += 1
-		// The scanner passed only doubled quotes inside the field.
-		if text[i] == '"' {
-			i += 1
-		}
-	}
-	return out[:n], true, nil
+	return text, false, nil
 }
 
-// `text` with each backslash escape read as the byte it spells, decoded into `allocator` when it holds one.
+// The text of `f` as written, a quoted field's without its quotes, and whether it holds a `""` or an escape
+// for `field_decode` to read. It is inline so that a field with nothing to decode pays no call. `f` is a field
+// the scanner read from `src`: inside it, and a quoted one at least its two quotes long.
 @(private)
-unescape :: proc(text: []byte, allocator: runtime.Allocator) -> (out: []byte, escaped: bool, err: runtime.Allocator_Error) {
-	k := bytes.index_byte(text, '\\')
-	if k < 0 {
-		return text, false, nil
+field_view :: #force_inline proc(src: []byte, f: Field, dialect: Dialect) -> (text: []byte, decode: bool) #no_bounds_check {
+	text = src[f.lo:f.hi]
+	switch {
+	case dialect.quoting == .Quotes && len(text) > 0 && text[0] == '"':
+		return text[1:len(text) - 1], holds_span(src, int(f.lo) + 1, len(text) - 2, '"')
+	case dialect.quoting == .None && dialect.escapes == .Backslash:
+		return text, holds_span(src, int(f.lo), len(text), '\\')
 	}
-	out = make([]byte, len(text), allocator) or_return
-	n := copy(out, text[:k])
-	for i := k; i < len(text); i += 1 {
-		c := text[i]
-		// The scanner passed only the five escapes, each whole inside its field.
-		if c == '\\' {
-			i += 1
-			c = unescaped(text[i])
+	return text, false
+}
+
+// Whether `src[lo:][:n]` holds `c`. A span of at most 16 bytes with 16 bytes of `src` from `lo` is judged by
+// one masked load, with no loop exit to mispredict per field.
+@(private)
+holds_span :: #force_inline proc(src: []byte, lo, n: int, c: byte) -> bool {
+	if n <= 16 && len(src) - lo >= 16 {
+		LANES :: bits.V{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+		v := bits.load(raw_data(src)[lo:])
+		return bits.any_lane(simd.lanes_eq(v, bits.V(c)) & simd.lanes_lt(LANES, bits.V(u8(n))))
+	}
+	return holds(string(src[lo:][:n]), c)
+}
+
+// `text`, a `field_view` holding a `""` or an escape, decoded into `allocator`: each `""` read as one quote,
+// or under `Quoting.None` each backslash escape as the byte it spells. A 16-byte window with no quote or
+// backslash is copied whole; the decoded text is never longer than `text`, so the store stays inside `out`.
+@(private)
+field_decode :: proc(text: []byte, dialect: Dialect, allocator: runtime.Allocator) -> (out: []byte, escaped: bool, err: runtime.Allocator_Error) {
+	out = runtime.mem_alloc_non_zeroed(len(text), 1, allocator) or_return
+	mark := byte('\\') if dialect.quoting == .None else '"'
+	src, dst := raw_data(text), raw_data(out)
+	i, n := 0, 0
+	step :: #force_inline proc(src, dst: [^]byte, i, n: ^int, mark: byte) {
+		c := src[i^]
+		i^ += 1
+		// The scanner passed only doubled quotes, and the five escapes, each whole inside its field.
+		if c == mark {
+			c = unescaped(src[i^]) if mark == '\\' else c
+			i^ += 1
 		}
-		out[n] = c
-		n += 1
+		dst[n^] = c
+		n^ += 1
+	}
+	for i + 16 <= len(text) {
+		v := bits.load(src[i:])
+		if !bits.any_eq(v, mark) {
+			intrinsics.unaligned_store((^bits.V)(dst[n:]), v)
+			i += 16
+			n += 16
+			continue
+		}
+		for end := i + 16; i < end; {
+			step(src, dst, &i, &n, mark)
+		}
+	}
+	for i < len(text) {
+		step(src, dst, &i, &n, mark)
 	}
 	return out[:n], true, nil
 }

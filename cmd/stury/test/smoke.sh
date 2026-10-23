@@ -339,9 +339,30 @@ done
 [ "$?" = 5 ] && [ "$(tail -n 1 "$T/col.got")" = 599999 ] || { echo "FAIL csv_columns_refused: exit $?"; fails=$((fails + 1)); }
 printf '"\357\273\277x"\n' >"$T/bom.want"
 "$S" --from csv --to csv .id "$T/bom.csv" | head -n 1 | cmp -s - "$T/bom.want" || { echo "FAIL csv_columns_bom"; fails=$((fails + 1)); }
+# An object of columns, `.` and `select(F)` of columns are answered in pieces too, the interpreter's bytes: with a
+# record the dialect cannot spell, a wrong width, and a filter error in the middle of the file that the next
+# record goes on after.
+awk -F, 'BEGIN{OFS=","} NR == 300000 {$1 = "x"} {print}' "$T/big.csv" >"$T/mid.csv"
+{ head -n 300000 "$T/big.csv"; printf '1,2\n'; } >"$T/bad.csv"
+for f in '{id}' '{id, m: .msg}' 'select(.id | tonumber % 100000 == 0)' 'select(.level == "error" and .id != "10")' 'select(.id | test("77$"))'; do
+	for to in csv json; do
+		for src in big nul bom mid bad; do
+			flags="--from csv --to $to"
+			[ $to = json ] && flags="$flags -c"
+			"$S" $flags "$f" "$T/$src.csv" >"$T/col.got" 2>"$T/col.err"
+			code=$?
+			"$S" $flags "$f | ." "$T/$src.csv" >"$T/col.want" 2>"$T/col.want.err"
+			want=$?
+			[ "$code" = "$want" ] && cmp -s "$T/col.got" "$T/col.want" && cmp -s "$T/col.err" "$T/col.want.err" || { echo "FAIL ${to}_object_$src $f: exit $code, interpreter $want"; fails=$((fails + 1)); }
+		done
+	done
+done
+"$S" --from csv --to json -c . "$T/big.csv" >"$T/col.got"
+"$S" --from csv --to json -c '. | .' "$T/big.csv" >"$T/col.want"
+cmp -s "$T/col.got" "$T/col.want" || { echo "FAIL json_all_columns"; fails=$((fails + 1)); }
 # A JSON stream is answered as it comes, a header and first row at once, a later row as it arrives.
 early pipe_to_csv "$(printf 'a,b\n1,2\n3,4')" '{"a":1,"b":2}\n' '{"a":3,"b":4}\n' --to csv .
 early pipe_to_tsv "$(printf 'x\n1\n2')" '{"x":1}\n' '{"x":2}\n' --to tsv .
-rm -f "$T/big.csv" "$T/bad.csv" "$T/nul.csv" "$T/bom.csv" "$T/bom.want" "$T/col.got" "$T/col.want" "$T/col.err" "$T/col.want.err"
+rm -f "$T/mid.csv" "$T/big.csv" "$T/bad.csv" "$T/nul.csv" "$T/bom.csv" "$T/bom.want" "$T/col.got" "$T/col.want" "$T/col.err" "$T/col.want.err"
 
 [ "$fails" = 0 ] && echo "stury CLI smoke: ok" || { echo "stury CLI smoke: $fails failed"; exit 1; }

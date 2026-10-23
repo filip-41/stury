@@ -398,13 +398,18 @@ delimited :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 		}
 		switch kind(m) {
 		case .Null:
-		case .False, .True, .Number:
+		case .Number:
+			// jq spells NaN as an empty cell, as it spells null.
+			if n, _ := number_of(m); !math.is_nan(n.f) {
+				strings.write_string(&b, to_json(m))
+			}
+		case .False, .True:
 			strings.write_string(&b, to_json(m))
 		case .String:
 			s, _ := string_of(m)
 			if name == "csv" {
 				strings.write_byte(&b, '"')
-				write_escaped(&b, s, `"`, {`""`})
+				write_escaped(&b, s, "\"\x00", {`""`, `\0`})
 				strings.write_byte(&b, '"')
 			} else {
 				write_escaped(&b, s, "\\\t\n\r\x00", {`\\`, `\t`, `\n`, `\r`, `\0`})
@@ -427,7 +432,7 @@ shell_quote :: proc(ip: ^Interp, v: Value) -> (Value, Signal) {
 		case .String:
 			s, _ := string_of(m)
 			strings.write_byte(&b, '\'')
-			write_escaped(&b, s, "'", {`'\''`})
+			write_escaped(&b, s, "'\x00", {`'\''`, `\0`})
 			strings.write_byte(&b, '\'')
 		case .Null, .False, .True, .Number:
 			strings.write_string(&b, to_json(m))

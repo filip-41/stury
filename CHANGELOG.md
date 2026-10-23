@@ -26,7 +26,8 @@
   number is spelled as jq spells it, `null` is an empty cell, and an array or object in a cell ends the run.
   `-r`, `-j`, `-a`, `-C`, `-c`, `--indent`, `--tab`, `--seq` and `--raw-output0` are a usage error with it. A
   filter that is only columns is still printed in pieces and gives what the interpreter gives.
-- CLI: `@tsv` writes a NUL as `\0`, as jq does; it wrote the raw byte.
+- CLI: `@tsv`, `@csv` and `@sh` write a NUL as `\0`, and `@csv`, `@tsv` and `--to csv` write NaN as an empty
+  cell, as jq does; they wrote the raw byte and `null`.
 - CLI: reading CSV, an empty cell with no quotes is `null` and a quoted `""` is `""`; every empty TSV cell is
   `null`. `stury --csv .` writes back what it read, up to normalisation; TSV cannot tell `null`
   from `""`.
@@ -37,8 +38,8 @@
   writes back what it read). A repeated header name, a record of another width and a fault in the text end the
   file, told as `FILE:LINE:COLUMN: fault` with exit 5. A file up to 64 MiB is read whole; a larger file, a pipe and
   a file under `-n` are read in windows, so memory holds a window and the longest record. A filter that is only
-  columns (`.name`, `.a, .b`, `[.a, .b]` under `--from csv -c`) is printed from the cells, in pieces on every core for a
-  whole file. Not with `-R`, `--seq`, `--ndjson`, `--jsonc`, `--stream` or each other.
+  columns (`.name`, `.a, .b`, `[.a, .b]` under `--from csv -c`, an object of columns, `.`, and `select(F)` of columns)
+  is printed from the cells, in pieces on every core for a whole file. Not with `-R`, `--seq`, `--ndjson`, `--jsonc`, `--stream` or each other.
 - `stury:csv`, a CSV codec: `validate` and a `records` iterator over RFC 4180 text, every byte checked (quote
   placement, CR before LF, UTF-8, one field count throughout), with `field_text` reading a field's text, and
   `unmarshal` of records into a list of structs on the shared type plan, columns named by a header or taken in

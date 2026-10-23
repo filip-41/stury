@@ -12,28 +12,13 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::hint::black_box;
-use std::sync::OnceLock;
-use std::time::Instant;
 
-const WARMUP: usize = 2;
+#[path = "../timing.rs"]
+mod timing;
+use timing::{report, report_ns, time_runs};
+
 // Calls per get-one sample: an early key answers in a few timer ticks. The same count as the other get-one arms.
 const GET_BATCH: usize = 256;
-static RUNS: OnceLock<usize> = OnceLock::new();
-
-// BENCH_RUNS if set, else 10; an integer >= 1 or an error.
-fn bench_runs() -> Result<usize, String> {
-    match std::env::var("BENCH_RUNS") {
-        Err(_) => Ok(10),
-        Ok(s) => match s.parse::<usize>() {
-            Ok(n) if n >= 1 => Ok(n),
-            _ => Err(format!("BENCH_RUNS must be an integer >= 1, got {s:?}")),
-        },
-    }
-}
-
-fn runs() -> usize {
-    *RUNS.get().expect("main validates BENCH_RUNS before any job")
-}
 
 #[derive(Serialize, Deserialize)]
 struct LogRecord<'a> {
@@ -105,26 +90,6 @@ enum Tool {
     Sonic,
 }
 
-// Median of RUNS timed calls of `f` after WARMUP untimed ones; the last value is kept, and each earlier one is
-// dropped after its clock stops.
-fn time_runs<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<(u128, T), String> {
-    let runs = runs();
-    let mut times = Vec::with_capacity(runs);
-    let mut kept = None;
-    for i in 0..WARMUP + runs {
-        let t0 = Instant::now();
-        let v = f()?;
-        let ns = t0.elapsed().as_nanos();
-        kept = Some(v);
-        if i >= WARMUP {
-            times.push(ns);
-        }
-    }
-    times.sort();
-    // The mean of the two middle samples.
-    Ok(((times[(runs - 1) / 2] + times[runs / 2]) / 2, kept.unwrap()))
-}
-
 fn decode<'a, T: Deserialize<'a>>(tool: Tool, data: &'a [u8]) -> Result<T, String> {
     let data = black_box(data);
     let v = match tool {
@@ -176,14 +141,6 @@ fn get(data: &[u8], key: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn report(len: usize, ns: u128, extra: &str) {
-    println!("gb_per_s={:.4} ns={} {}", len as f64 / ns as f64, ns, extra);
-}
-
-fn report_ns(len: usize, ns: f64, extra: &str) {
-    println!("gb_per_s={:.4} ns={:.1} {}", len as f64 / ns, ns, extra);
-}
-
 fn run(args: &[String]) -> Result<(), String> {
     let tool = match args.get(1).map(String::as_str) {
         Some("serde") => Tool::Serde,
@@ -214,12 +171,9 @@ fn run(args: &[String]) -> Result<(), String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    match bench_runs() {
-        Ok(n) => RUNS.set(n).expect("set once"),
-        Err(e) => {
-            eprintln!("read: {e}");
-            std::process::exit(2);
-        }
+    if let Err(e) = timing::init() {
+        eprintln!("read: {e}");
+        std::process::exit(2);
     }
     if let Err(e) = run(&args) {
         eprintln!("read: {e}");

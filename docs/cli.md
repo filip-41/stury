@@ -207,7 +207,8 @@ $ stury --from csv -r '[.name, .age] | @csv' people.csv
 - **Faults.** A header name given twice, a record with a field count other than the header's, a quote or
   carriage return where it cannot be, an unfinished quoted field, a bad escape and a byte that is not UTF-8
   end the file, told as `FILE:LINE:COLUMN: fault` (`<stdin>` for standard input) with exit 5. The records
-  before the fault have been answered.
+  before the fault have been answered. An unfinished quoted field is told at its opening quote; the library's
+  `.Truncated` is at the end of the text.
 
   ```
   $ printf 'a,b\n1,2\n3\n' | stury --from csv -c .
@@ -220,7 +221,10 @@ $ stury --from csv -r '[.name, .age] | @csv' people.csv
 - **Columns are quicker.** A filter that is only columns, `.name`, `.a, .b` or, under `--from csv -c`, `[.a, .b]` (a
   key is a name `.name` can spell, or `.["any text"]`), prints each cell straight from the text, with no
   object built, and the bytes the interpreter prints for the same filter: a name the header lacks prints
-  `null`. A whole file of a few hundred KiB or more is printed in pieces on every core, in file order. Any
+  `null`. The same holds for an object of columns (`{id, q: .qty}`, under `-c` or `--to csv|tsv`; not
+  with `--grow-header`), for `.` under `-c`, and for `select(F)` when F reads only `.name` of the record
+  (`select(.qty | tonumber >= 9000)`): the interpreter sees just those cells, and each output prints the
+  record. A whole file of a few hundred KiB or more is printed in pieces on every core, in file order. Any
   other filter, and `-n`, `-s`, `-e`, `-a`, `-C` and `--raw-output0`, run on the interpreter.
 - **Combinations.** Records of cells are not read with `-R`, `--seq` or `--stream`, and one input has one
   format: `--csv --tsv` is a usage error (exit 2).
@@ -249,7 +253,7 @@ $ stury --csv 'select(.n | tonumber > 1)' people.csv
 - **Arrays and scalars are rows with no header**: an array's elements are the cells, a scalar is a row of one.
   Objects and the other kinds do not mix: the output that breaks the pattern ends the run.
 - **Cells.** A string is its text, a number is spelled as jq spells it (`1E+3`), `true` and `false` are
-  themselves, and `null` is an empty cell. An array or object in a cell ends the run and names `tojson`, which
+  themselves, and `null` and NaN are an empty cell. An array or object in a cell ends the run and names `tojson`, which
   makes text of it. CSV quotes a cell that holds the delimiter, a quote or a line break, and writes the empty
   string as `""`; TSV escapes tab, LF, CR, NUL and backslash as `@tsv` does.
 - **Null and the empty string.** CSV writes `null` as an empty cell and `""` as `""`, so `stury --csv .` gives
@@ -274,6 +278,102 @@ $ stury --csv 'select(.n | tonumber > 1)' people.csv
   those of the whole read. Memory holds a block, what is read ahead and the longest text.
 - `-s` and `--jsonc` read stdin whole, as `check` does. `-n` with `inputs` keeps what it has read.
 - Texts with no newline between them wait for one, as jq's line reads do.
+
+## CSV and TSV recipes
+
+Each command below was run on this file, `cities.csv`. The last city has no population, and quotes protect its
+comma:
+
+```
+city,country,population
+Oslo,NO,709000
+Bergen,NO,286000
+Uppsala,SE,177000
+"Ho, Chi Minh",VN,
+```
+
+**Convert.** CSV to JSON, one object per record, every cell a string and the empty one `null`. `--csv --to json`
+is the same, and `--to csv` goes back. `-c` and `-r` shape JSON output, so `--csv -c` is a usage error: use
+`--from csv -c`.
+
+```sh
+$ stury --from csv -c . cities.csv
+{"city":"Oslo","country":"NO","population":"709000"}
+{"city":"Bergen","country":"NO","population":"286000"}
+{"city":"Uppsala","country":"SE","population":"177000"}
+{"city":"Ho, Chi Minh","country":"VN","population":null}
+$ stury --from csv -c 'select(.population) | .population |= tonumber' cities.csv
+{"city":"Oslo","country":"NO","population":709000}
+{"city":"Bergen","country":"NO","population":286000}
+{"city":"Uppsala","country":"SE","population":177000}
+$ printf '{"a":1}\n{"b":2}\n' | stury --to csv --grow-header .
+a,b
+1,
+,2
+```
+
+Without `--grow-header`, the second object would end the run: `b` is a key the first object's header lacks.
+
+**Filter rows.** The default output of `--csv` is CSV, header included, so a filter that keeps whole objects
+gives a smaller table.
+
+```sh
+$ stury --csv 'select(.country == "NO")' cities.csv
+city,country,population
+Oslo,NO,709000
+Bergen,NO,286000
+```
+
+**Select columns.** An object with fewer keys is a table with fewer columns, and an array is a row with no
+header.
+
+```sh
+$ stury --csv '{city, population}' cities.csv
+city,population
+Oslo,709000
+Bergen,286000
+Uppsala,177000
+"Ho, Chi Minh",
+$ stury --from csv --to csv '[.city, .population]' cities.csv
+Oslo,709000
+Bergen,286000
+Uppsala,177000
+"Ho, Chi Minh",
+```
+
+**Aggregate.** `-s` slurps every record into one array, which `group_by` and `add` work on. The cells are
+text, so convert before adding.
+
+```sh
+$ stury --from csv --to csv -s 'group_by(.country)[] | {country: .[0].country, cities: length, people: (map(.population | tonumber? // 0) | add)}' cities.csv
+country,cities,people
+NO,2,995000
+SE,1,177000
+VN,1,0
+```
+
+**TSV.** `--tsv` reads and writes jq's `@tsv` text. `--from` and `--to` mix the formats.
+
+```sh
+$ stury --from csv --to tsv '{city, country}' cities.csv
+city	country
+Oslo	NO
+Bergen	NO
+Uppsala	SE
+Ho, Chi Minh	VN
+$ printf 'name\tage\nAda\t36\nGrace\t85\n' | stury --tsv 'select(.age | tonumber > 40)'
+name	age
+Grace	85
+```
+
+**Check.** `check` prints nothing for a valid file, and the fault with its line and column for a faulty one,
+exit 5.
+
+```sh
+$ stury check --from csv cities.csv
+$ printf 'a,b\n1,2\n3\n' | stury check --from csv
+stury: error: <stdin>:3:1: Record has the wrong number of fields (the header has 2)
+```
 
 ## Errors and exit codes
 
