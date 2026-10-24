@@ -253,7 +253,7 @@ scan_cells :: proc(run: ^Run, ins: ^Inputs) {
 			msg, status := open_cells(ins, c)
 			if status != .Value {
 				if status == .Error {
-					cells_failed(run, msg)
+					parse_failed(run, msg)
 				}
 				return
 			}
@@ -265,7 +265,7 @@ scan_cells :: proc(run: ^Run, ins: ^Inputs) {
 						continue // the main thread reads the rest of the file
 					}
 					if msg = cells_ended(ins, c); msg != "" {
-						cells_failed(run, msg)
+						parse_failed(run, msg)
 						return
 					}
 					continue
@@ -280,7 +280,7 @@ scan_cells :: proc(run: ^Run, ins: ^Inputs) {
 			}
 			fetched = true
 		} else if msg := cells_ended(ins, c); msg != "" {
-			cells_failed(run, msg)
+			parse_failed(run, msg)
 			return
 		}
 	}
@@ -350,14 +350,6 @@ opens_with_bom :: proc(run: ^Run, c: ^Cells, cols: ^Columns) -> bool {
 	}
 	text, _, _ := csv.field_text(rec.src, rec.fields[cols.at[0]], c.dialect, context.temp_allocator)
 	return bytes.has_prefix(text, UTF8_BOM[:])
-}
-
-// Ends the run on a fault in the text, with jq's parse error message.
-@(private = "file")
-cells_failed :: proc(run: ^Run, msg: string) {
-	flush_some(run, force = true)
-	fmt.eprintf("stury: parse error: %s\n", msg)
-	run.ret = EXIT_INPUT
 }
 
 // Prints the record's output as `print_jq` would: each cell on its own line, or all cells in one array or object.

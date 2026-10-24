@@ -82,10 +82,6 @@ Strictness_Axes :: struct {
 
 // The preset table. A stop is legal only where the first occurrence is final, so `.Lazy` may stop only
 // under `.First`. Under `.All` and `.Last` it reads the whole item, like `.Strict`.
-//
-//	Strict      Full    Complete
-//	Structural  Locate  Complete
-//	Lazy        Full    First_Wins_May_Stop under .First, else Complete
 axes_for :: #force_inline proc(strictness: Strictness, resolution: Resolution) -> Strictness_Axes {
 	axes: Strictness_Axes
 	switch strictness {

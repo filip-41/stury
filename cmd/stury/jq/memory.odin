@@ -319,11 +319,7 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 				m = copy_value(c, m)
 			}
 		}
-		c.made[{x, -1}] = a
-		if c.owned != nil {
-			c.owned[a] = true
-		}
-		return a
+		return made_container(c, x, a)
 	case Path:
 		if m, ok := c.made[{x, -1}]; ok {
 			return m
@@ -332,11 +328,7 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 		for &m in a.items {
 			m = copy_value(c, m)
 		}
-		c.made[{x, -1}] = a
-		if c.owned != nil {
-			c.owned[a] = true
-		}
-		return a
+		return made_container(c, rawptr(x), a)
 	case ^Object:
 		if !held(c, x) {
 			return v
@@ -357,13 +349,19 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 				o.index[k] = i
 			}
 		}
-		c.made[{x, -1}] = o
-		if c.owned != nil {
-			c.owned[o] = true
-		}
-		return o
+		return made_container(c, x, o)
 	}
 	return v
+}
+
+// The container `made` for `from`, which `owned` records when the copy is for a reduce or foreach.
+@(private = "file")
+made_container :: proc(c: ^Copier, from: rawptr, made: $T) -> T {
+	c.made[{from, -1}] = made
+	if c.owned != nil {
+		c.owned[rawptr(made)] = true
+	}
+	return made
 }
 
 @(private = "file")

@@ -8,7 +8,7 @@ import "core:strconv"
 import "core:strings"
 import "core:testing"
 
-// A token's exactness, `2.5`, `0.0` and `1e2` (once `.Inexact` from a span) included, read alone and behind
+// A token's exactness, `2.5`, `0.0` and `1e2` included, read alone and behind
 // `PAD`, where the read folds its digits from the counts the build kept (`number_token`).
 @(test)
 test_number_exactness_is_one_verdict :: proc(t: ^testing.T) {

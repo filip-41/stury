@@ -32,7 +32,6 @@ FORMATS := [Format]Format_Spec {
 	.Tsv    = {name = "tsv", alias = true, cells = true, dialect = csv.TSV},
 }
 
-// Returns the format that `--from` and `--to` call `name`.
 format_named :: proc(name: string) -> (f: Format, ok: bool) {
 	for spec, k in FORMATS {
 		if spec.name == name {
@@ -42,7 +41,6 @@ format_named :: proc(name: string) -> (f: Format, ok: bool) {
 	return
 }
 
-// Returns the format that the alias `--name` stands for.
 format_alias :: proc(name: string) -> (f: Format, ok: bool) {
 	f, ok = format_named(name)
 	return f, ok && FORMATS[f].alias

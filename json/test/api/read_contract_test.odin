@@ -86,7 +86,7 @@ test_union_tag_is_judged_before_it_is_refused :: proc(t: ^testing.T) {
 }
 
 // A repeat in a member the type never reads is still a repeat under `.Duplicates.Refuse`, above the lazy
-// shape walk's gate too, where it used to skip the member.
+// shape walk's gate too.
 @(test)
 test_lazy_refuse_judges_a_duplicate_in_an_unread_member :: proc(t: ^testing.T) {
 	Keep :: struct {

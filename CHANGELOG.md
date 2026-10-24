@@ -1,109 +1,74 @@
 # Changelog
 
+## Unreleased
+
+### Library
+
+- `marshal` refuses a `Number` that is `.None` (`1e400`) with `.Non_Finite`; it used to write `0`. `Digits`
+  and `Raw` keep such a number. `Exact` is now `Exactness`'s zero value, so an unset `Number` writes `0`.
+- `edit_comment` accepts bare text, the form `fact_text` returns, and writes it as a `//` line.
+- `NO_OWNER`, the `Path_Answer.owner` of an answer no container holds, is exported.
+
 ## 0.0.2 (2026-10-24)
 
 Adds the CSV and TSV codec (`stury:csv`), the shared `stury:core` package, and the CLI's `--from` and `--to`.
 
-- `stury:core` holds what the formats share. JSON's walk substrate moved from it to
-  `stury:json/scan/walk`: the rows and their stores (`Node`, `Capacity`, `Number_Spelling`), the caps (`Limits`,
-  `MAX_DEPTH`, `MAX_SCALAR_DIGITS`), the scan cursor, the query context and its matchers, and the typed walk's
-  state (`Shape_Run`, `Shape_Frame`). `json`'s names for them are unchanged.
-- `stury:core/spell` spells integers and floats for every format's writer (`spell_i64`, `spell_u64`, `spell_f64`,
-  `shortest_digits`, `is_non_finite`), moved from `stury:json/encode`; `stury:core/bits` holds the shared bit
-  and UTF-8 kernels.
-- `core` declares `Unknown_Fields`, `Unmarshal_Hook`, `Type_Hook(W)` and `Hooked_Plan(W)` (with
-  `hooked_plan_init` and `hooked_plan_destroy`); `json` and `csv` alias them,
-  so their `Type_Hook` and `Type_Plan` are `core.Type_Hook(Marshal_Hook)` and `core.Hooked_Plan(Marshal_Hook)`
-  with the same fields. `core.Value_Class` names the classes a union's arm is picked by.
+### Library
 
-- CLI: `--from FORMAT` and `--to FORMAT` (`json`, `jsonc`, `ndjson`, `csv`, `tsv`) choose how the input is read
-  and the output written. `--ndjson`, `--jsonc`, `--csv` and `--tsv` set both halves, and an explicit `--from`
-  or `--to` replaces its half, in either order. Behaviour change: `--ndjson` now prints compact, one value per
-  line (it left the layout alone), so `--ndjson --indent N` and `--ndjson --tab`, which printed indented JSON, are
-  now a usage error (exit 2); `--to ndjson` is `-c`.
-- CLI: `--to csv` and `--to tsv` write each output as one record. An object is a row under a header of the first
-  object's keys (sorted under `-S`); a missing key is an empty cell and an extra key ends the run with exit 5.
-  `--grow-header` holds the output and writes a header of every key in the order first seen, or in byte order
-  under `-S` (memory holds all the output). An array or scalar is a row with no header, and the two kinds do not mix. A string is its text, a
-  number is spelled as jq spells it, `null` is an empty cell, and an array or object in a cell ends the run.
-  `-r`, `-j`, `-a`, `-C`, `-c`, `--indent`, `--tab`, `--seq` and `--raw-output0` are a usage error with it. A
-  filter that is only columns is printed in pieces, with the same output as the interpreter.
-- CLI: `@tsv`, `@csv` and `@sh` write a NUL as `\0`, and `@csv`, `@tsv` and `--to csv` write NaN as an empty
-  cell, as jq does. They wrote the raw byte and `null`.
-- CLI: reading CSV, an empty cell with no quotes is `null` and a quoted `""` is `""`; every empty TSV cell is
-  `null`. `stury --csv .` writes back what it read, up to normalisation. TSV cannot tell `null`
-  from `""`.
-- CLI: `stury check` takes `--from` and the aliases; CSV and TSV go through `csv.validate`, and a fault is reported
-  as in a filter run.
-- CLI: `--csv` and `--tsv` read CSV (RFC 4180) and TSV (jq's `@tsv` escapes). The first record of each file names
-  the fields, and each later record is one input, an object of strings (`stury --from csv -r '[.a, .b] | @csv'`
-  writes back what it read). A repeated header name, a record of another width and a fault in the text end the
-  file, reported as `FILE:LINE:COLUMN: fault` with exit 5. A file up to 64 MiB is read whole. A larger file, a pipe
-  and a file under `-n` are read in windows, so memory holds a window and the longest record. A filter that is only
-  columns (`.name`, `.a, .b`, `[.a, .b]` under `--from csv -c`, an object of columns, `.`, and `select(F)` of columns)
-  is printed from the cells, in pieces on every core for a whole file. Not with `-R`, `--seq`, `--ndjson`, `--jsonc`, `--stream` or each other.
-- `stury:csv`, a CSV codec. `validate` and the `records` iterator check every byte of RFC 4180 text (quote
-  placement, CR before LF, UTF-8, one field count throughout). `field_text` reads a field's text. `unmarshal`
-  reads records into a list of structs on the shared type plan, with columns named by a header or taken in
-  order, and judges each cell against its field's type. `marshal` writes such a list as text that `unmarshal`
-  reads back into equal values.
-- CSV dialects. `validate`, `records`, `field_text`, `unmarshal` and `marshal` take a `Dialect` (delimiter,
-  `Quoting.None` where a quote is text, `Escapes.Backslash`, a comment byte, ragged records). `TSV` is
-  tab-separated values with backslash escapes (`\t`, `\n`, `\r`, `\0`, `\\`). They also take a `Strictness`
-  (`.Structural` skips the UTF-8 check; `unmarshal` under `.Lazy` judges only the cells it reads) and
-  `Limits.max_fields`. `marshal` refuses with `.Unwritable` a cell its dialect cannot spell so that it reads
-  back, and a record that would be a blank line. The `delimiter` options are now `dialect.delimiter`.
-- CSV documents and edits: `build` keeps the field spans of a text as a `Document` (`row_count`, `column`,
-  `get_string`, `get_int`, `get_float`, `get_bool`, `get_name`), `find` and `find_column` read one cell or one
-  column by path (`.[3].name`, `.[3][1]`, `.[].name`) off the front of the text, and `set`, `insert`, `remove`
-  and `splice` return the text with a cell, a column, a record or a span changed and every other byte kept. A
-  refusal is a `Path_Error`; the edits spell values as `marshal` does and refuse what would not read back as the
-  same table.
-- CSV `Plan_Opts.hooks`: a `Type_Hook` gives a type a `Marshal_Hook` (appends the cell's text, which `marshal`
-  quotes) and an `Unmarshal_Hook` (gets the decoded cell text, never an absent cell, and may refuse it); a field
-  of a hooked type is a cell whatever its type.
-- CSV `Unmarshal_Opts.duplicates` (`Duplicates`: `Refuse`, `First`, `Last`, `All`) for a header that names a column
-  twice, and `unmarshal_check`, which judges a text exactly as `unmarshal` would and keeps nothing.
-- CSV `marshal_append` (appends to a buffer, which a refusal leaves as it was) and `marshal_to_writer` (streams
-  in bounded chunks; adds `Marshal_Error.Write_Failed`). `marshal` is a wrapper over the same writer.
-- CSV `write_record` appends one record of text cells (`[]Maybe(string)`, nil an empty cell that reads back absent)
-  to a buffer in a dialect, spelling each cell as `marshal` does. A blank line, which reads back as no record, is
-  `.Unwritable`.
-- `error_position`, `render_error` and `render_error_to_writer` for CSV, sharing JSON's implementation through
-  `core`; JSON's names and outputs are unchanged.
-- `Path_Error` and `Path_Error_Kind`: one refusal type for the path procedures of every format, with each
-  format's docs listing the kinds it reports. `json.Edit_Error` and `json.Edit_Error_Kind` are now
-  `json.Path_Error` and `json.Path_Error_Kind`, whose kinds are renumbered and gain CSV's `Unsupported_Path`,
-  `Bad_Option` and `Bad_Row`.
-- `Marshal_Error`: one marshal refusal for every format; `json.Encode_Error` and `csv.Marshal_Error` are its
-  aliases. `json.Encode_Error` gains CSV's `Bad_Option` and `Unwritable`, which JSON never reports. A path
-  refusal's `encode` field is a `Marshal_Error`. `render_error` and `render_error_to_writer`
-  write it for CSV as for JSON.
-- `Duplicates`: one policy for repeated keys in every format, in core. Its new zero value `.Default` is the
-  format's default (JSON `.Last`, CSV `.Refuse`), so a zero-valued option reads as before. `json.Duplicates`
-  and `csv.Duplicates` are its aliases. JSON's is now a `u8`.
-- `Error_Kind.Field_Count`, the CSV fault of a record whose field count is not the first record's, and
-  `Error_Kind.Limit_Fields`, of a record with more fields than `Limits.max_fields`. JSON never reports them.
-- CSV streaming and threads: `csv.records_from` reads the records of an `io.Reader` a chunk at a time, with the
-  same records, offsets and fault as `records` on the whole text. `csv.each_record` runs a task on pieces of a
-  text on a `Batch_Runner`'s threads. `csv.validate` takes a runner too and gives the same answer as without one.
-  `Limits.max_record_bytes` caps a record (`Error_Kind.Limit_Record`) and so bounds the window `records_from` holds. A
-  `Record` carries the `src` its fields index. `Batch_Runner` is defined in `stury:core`; `json.Batch_Runner`
-  names it.
-- `Request` and `Prepared` name their type parameter `$KINDS` (was `$Q`), as the generic procedures that take
-  them do. Callers that write `Request({.Path})` are unaffected.
-- `marshal` writes an empty `json.Digits` as `null`, as it writes an empty `json.Raw`, instead of failing with
-  `.Bad_Raw`.
-- `render_error` of an `Unmarshal_Error` ends with its path (`1:11: Wrong_Kind at .a.b`), with `…` when the path
-  was truncated.
-- `unmarshal`'s `.Unsupported` for a `,string` field, or for two fields writing one key, names that field in the
-  error path.
-- `scan` at `.Structural` checks the UTF-8 of values no path reads, as `validate` does: invalid UTF-8 anywhere
-  in the document now fails the scan.
-- CLI: `halt_error/1` with a non-number argument names its input as jq does (`number (1) halt_error/1: number
-  required`).
-- CLI: `select(PATH OP literal)` on a large single document reads only its path, and prints the text only when it
-  keeps it, instead of building the whole document.
+- `stury:csv`: `validate` and `records` check RFC 4180 text (quote placement, CR before LF, UTF-8, one field
+  count); `field_text` reads a field. `unmarshal` reads records into a list of structs by header name or by
+  order, judging each cell against its field's type; `marshal` writes text that reads back into equal values.
+- CSV `Dialect`: delimiter, `Quoting.None`, `Escapes.Backslash`, a comment byte, ragged records, and `TSV`
+  (`\t`, `\n`, `\r`, `\0`, `\\`). The `delimiter` options are now `dialect.delimiter`.
+- CSV `Strictness` (`.Structural` skips the UTF-8 check; `.Lazy` `unmarshal` judges only the cells it reads)
+  and `Limits.max_fields` and `Limits.max_record_bytes`.
+- CSV `build` and the `Document` readers (`row_count`, `column`, `get_string`, `get_int`, `get_float`,
+  `get_bool`, `get_name`); `find` and `find_column` by path (`.[3].name`, `.[3][1]`, `.[].name`).
+- CSV edits: `set`, `insert`, `remove` and `splice` keep every other byte and refuse a result that would not
+  read back as the same table.
+- CSV hooks (`Plan_Opts.hooks`), `Unmarshal_Opts.duplicates` for a repeated header name, and `unmarshal_check`.
+- CSV `marshal_append`, `marshal_to_writer` (adds `Marshal_Error.Write_Failed`) and `write_record`; `marshal`
+  refuses with `.Unwritable` a cell its dialect cannot spell and a record that would be a blank line.
+- CSV `records_from` (an `io.Reader`, bounded memory), `each_record` and a threaded `validate`, with the same
+  answers as the sequential read. A `Record` carries the `src` its fields index.
+- CSV `error_position`, `render_error` and `render_error_to_writer`.
+- `stury:core` holds what the formats share: `Strictness`, paths, `Duplicates`, `Unknown_Fields`, the hooks
+  (`Unmarshal_Hook`, `Type_Hook(W)`), `Hooked_Plan(W)` with `hooked_plan_init` and `hooked_plan_destroy`,
+  `Value_Class`, `Batch_Runner` and the errors. `json` and `csv` alias them; `json`'s names are unchanged.
+- JSON's walk types (`Node`, `Capacity`, `Number_Spelling`, `Limits`, `MAX_DEPTH`, `MAX_SCALAR_DIGITS`,
+  `Shape_Run`, `Shape_Frame`) live in `stury:json/scan/walk`; `json` still exports them.
+- `stury:core/spell` spells integers and floats for every writer (`spell_i64`, `spell_u64`, `spell_f64`,
+  `shortest_digits`, `is_non_finite`), moved from `stury:json/encode`.
+- `json.Edit_Error` and `json.Edit_Error_Kind` are now `Path_Error` and `Path_Error_Kind`, shared by every
+  format; the kinds are renumbered and gain `Unsupported_Path`, `Bad_Option` and `Bad_Row`.
+- `Marshal_Error` is shared by every format; `json.Encode_Error` is its alias and gains `Bad_Option` and
+  `Unwritable`. A path refusal's `encode` field is a `Marshal_Error`.
+- `Duplicates` gains a zero value `.Default` (JSON `.Last`, CSV `.Refuse`); `json.Duplicates` is now a `u8`.
+- `Error_Kind` gains `Field_Count`, `Limit_Fields` and `Limit_Record` (CSV only).
+- `Request` and `Prepared` name their type parameter `$KINDS` (was `$Q`).
+- `marshal` writes an empty `json.Digits` as `null` instead of failing with `.Bad_Raw`.
+- `render_error` of an `Unmarshal_Error` ends with its path (`1:11: Wrong_Kind at .a.b`, `…` when truncated).
+- `unmarshal`'s `.Unsupported` for a `,string` field, or two fields writing one key, names that field.
+- `scan` at `.Structural` checks the UTF-8 of values no path reads, as `validate` does.
+
+### Command line
+
+- `--from FORMAT` and `--to FORMAT` (`json`, `jsonc`, `ndjson`, `csv`, `tsv`). `--ndjson`, `--jsonc`, `--csv`
+  and `--tsv` set both; an explicit `--from` or `--to` replaces its half, in either order.
+- `--ndjson` now prints compact, one value per line, so `--ndjson --indent N` and `--ndjson --tab` are a usage
+  error (exit 2). `--to ndjson` is `-c`.
+- `--csv` and `--tsv` read each record after the header as an object of strings; an empty unquoted cell is
+  `null`, a quoted `""` is `""`, every empty TSV cell is `null`. A fault ends the file with
+  `FILE:LINE:COLUMN: fault` and exit 5. Files past 64 MiB, pipes and `-n` are read in windows.
+- `--to csv` and `--to tsv` write each output as one record, objects under a header of the first object's keys
+  (sorted under `-S`); an extra key ends the run with exit 5. `--grow-header` writes a header of every key.
+- Filters that are only columns, an object of columns, `.` or `select` of columns print CSV from the cells,
+  on every core for a whole file.
+- `stury check` takes `--from` and the aliases; CSV and TSV go through `csv.validate`.
+- `@tsv`, `@csv` and `@sh` write a NUL as `\0`, and `@csv`, `@tsv` and `--to csv` write NaN as an empty cell,
+  as jq does.
+- `halt_error/1` with a non-number argument names its input as jq does.
+- `select(PATH OP literal)` on a large single document reads only its path instead of building the document.
 
 ## 0.0.1 (2026-10-22)
 
@@ -124,9 +89,7 @@ linux, on amd64 and arm64).
 - JSONC: read comments and trailing commas, and write the comments back.
 - Parallel validation and per-record work take threads from `stury:host` (`Batch_Pool`), and the library starts no
   thread of its own.
-- One error convention and fixed limits throughout. Each public name's doc comment describes it. A
-  procedure whose result is its only output carries `@(require_results)`, so a dropped result is a compile
-  error.
+- A procedure whose result is its only output carries `@(require_results)`.
 - On amd64 the floor is x86-64-v2, long strings are scanned 64 bytes at a time where the processor has
   AVX-512BW.
 

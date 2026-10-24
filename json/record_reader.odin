@@ -9,6 +9,9 @@ import core_pkg "../core"
 //	- `records` over a window of the stream, so the records, their offsets (from the stream's first byte)
 //	  and the framing fault are those `records` gives the whole input, whatever the sizes of the reads.
 //	- The fields are the iterator's own but `chunk`, `err` and `read_err`.
+//	- A `Record`'s `bytes` is a slice of the window, valid until the next `next_record`; its `at` is the offset
+//	  in the stream. An offset a read of `bytes` reports is into `bytes`: do not add `at` to render it against
+//	  `bytes` (see `Record`).
 Record_Reader :: struct {
 	// `read_err` is the reader's failure. The records framed before it are yielded; the bytes after them are
 	// not.

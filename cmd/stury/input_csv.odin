@@ -83,7 +83,6 @@ cells_of :: proc(ins: ^Inputs) -> ^Cells {
 	return ins.cells
 }
 
-// Returns the next record of the open file.
 next_cell :: proc(c: ^Cells) -> (csv.Record, bool) {
 	if c.streamed {
 		return csv.next_record(&c.rr)
@@ -282,13 +281,11 @@ cells_text :: proc(c: ^Cells) -> []byte {
 	return c.rr.buf[:c.rr.hi] if c.streamed else c.data
 }
 
-// Returns the number of lines of the open file before `window`.
 @(private = "file")
 cells_lines_before :: proc(c: ^Cells, window: []byte) -> int {
 	return c.source.newlines - count_newlines(window) if c.streamed else 0
 }
 
-// Formats the fault `e` of the open file as a message.
 @(private = "file")
 cells_fault :: proc(ins: ^Inputs, c: ^Cells, e: csv.Error) -> string {
 	e, window := e, cells_text(c)

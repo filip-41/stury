@@ -7,7 +7,7 @@ LIB_PKGS  := host core core/bits core/path core/spell csv json json/encode json/
 TEST_PKGS := core/test csv/test json/test/api
 # `make test` builds the suites at -o:minimal because the build is most of their run time.
 TEST_OPT := -o:minimal
-# The CLI's size cap for detecting changes bloating the binary, allowed to move for incremental feature development.
+# The CLI's size cap; raise it deliberately when a feature earns the bytes.
 CLI_MAX_BYTES := 3014656
 
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -strict-style
@@ -42,14 +42,14 @@ $(PRIVATE_TARGETS):
 	exit 1
 endif
 
-# `make` with no target is the release gate
-.DEFAULT_GOAL := all
+# `make` with no target is the release gate where Makefile.gate is present, and `test` elsewhere.
+.DEFAULT_GOAL := $(if $(wildcard Makefile.gate),all,test)
 
 ifeq ($(shell uname -s),Darwin)
 CLI_LINK := "-extra-linker-flags:-L$(shell xcrun --show-sdk-path)/usr/lib/system -lsystem_m -lsystem_c -lsystem_kernel -lsystem_pthread -lsystem_malloc"
 else ifeq ($(shell uname -s),Linux)
-# ponytail: not position-independent, as test-x86's linux_amd64 link is: a PIE carries ~137 KB of relocations
-# over CLI_MAX_BYTES and gains ASLR for the binary itself; build PIE if a distribution asks for it.
+# Not position-independent, as test-x86's linux_amd64 link is: a PIE's relocations put the binary over
+# CLI_MAX_BYTES. Build PIE if a distribution asks for it.
 CLI_LINK := -reloc-mode:static
 endif
 
@@ -100,15 +100,20 @@ $(DIFF_SEED_TARGETS): diff-seed-%: build-cli
 	python3 cmd/stury/test/jq_diff.py build/stury --seed $*
 	python3 cmd/stury/test/regex_diff.py build/stury --seed $*
 
-# The engines a default build routes around
+# The engines a default build routes around, and the build the CLI ships (REFUSE_DUPLICATES=false), each under the
+# whole api suite. csv/test has no mode: none of these defines reaches package csv.
 test-modes:
 	$(call odin_each,test,json/test/api,$(OPT) -collection:stury=. -define:FORCE_AUTOMATON=true, (FORCE_AUTOMATON))
 	$(call odin_each,test,json/test/api,$(OPT) -collection:stury=. -define:SCAN_FORCE_SLOW=true, (SCAN_FORCE_SLOW))
-	$(call odin_each,test,json/test/api,$(TEST_OPT) -collection:stury=. -define:REFUSE_DUPLICATES=false -define:ODIN_TEST_NAMES=json_tests.test_refuse_compiled_out, (REFUSE_DUPLICATES=false))
+	$(call odin_each,test,json/test/api,$(TEST_OPT) -collection:stury=. -define:REFUSE_DUPLICATES=false, (REFUSE_DUPLICATES=false))
 
 lint:
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS),-no-entry-point -collection:stury=. $(LINT_FLAGS),)
 	@for e in examples/*/ bench/probe/ bench/core_compare/; do echo "== $${e%/}"; $(ODIN) check $${e%/} -collection:stury=. $(LINT_FLAGS) || exit 1; done
+	@# A program that uses the library builds under plain -vet (unused imports included, which $(VET) leaves out).
+	@echo "== examples/quickstart (-vet, host and x86-64)"
+	@$(ODIN) check examples/quickstart -collection:stury=. -vet -terse-errors || exit 1
+	@$(ODIN) check examples/quickstart -collection:stury=. -vet -terse-errors -target:linux_amd64 || exit 1
 	@echo "== cmd/stury"
 	@$(ODIN) check cmd/stury $(LINT_FLAGS)
 	@echo "== cmd/stury (linux_amd64)"

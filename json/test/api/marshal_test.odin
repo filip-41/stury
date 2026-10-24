@@ -39,6 +39,44 @@ List_Node :: struct {
 
 Color :: enum u8 {Red, Green}
 
+// A `Number` writes its binary64 value, or is refused when it holds none: `1e400` reads as `.None`, which `Digits`
+// keeps and `Number` cannot, so a read-then-write round trip never turns it into `0`. `1e-400` is +-0, its rounding.
+@(test)
+test_marshal_number_round_trips_or_refuses :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Holder :: struct {
+		n: json.Number,
+	}
+	for c in ([]struct {
+		src:  string,
+		want: string,
+		err:  json.Encode_Error,
+	}{
+		{`{"n":1e400}`, "", .Non_Finite},
+		{`{"n":-1e400}`, "", .Non_Finite},
+		{`{"n":1e-400}`, `{"n":0}`, .None},
+		{`{"n":-1e-400}`, `{"n":-0}`, .None},
+		{`{"n":-0}`, `{"n":-0}`, .None},
+		{`{"n":5e-324}`, `{"n":5e-324}`, .None},
+		{`{"n":2.5}`, `{"n":2.5}`, .None},
+	}) {
+		v: Holder
+		um_ok(t, c.src, &v)
+		out, err := json.marshal(v, {}, nil, context.temp_allocator)
+		testing.expect_value(t, err, c.err)
+		testing.expect_value(t, string(out), c.want)
+	}
+	// The zero `Number` is the exact value 0; a `Number` with no binary64 value is refused.
+	testing.expect_value(t, marshal_text(t, json.Number{}), `0`)
+	testing.expect_value(t, marshal_text(t, Holder{}), `{"n":0}`)
+	marshal_refused(t, json.Decoded(json.Number{exactness = .None}), .Non_Finite)
+	d: struct {
+		n: json.Digits,
+	}
+	um_ok(t, `{"n":1e400}`, &d)
+	testing.expect_value(t, marshal_text(t, d), `{"n":1e400}`)
+}
+
 @(test)
 test_marshal_scalars :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)

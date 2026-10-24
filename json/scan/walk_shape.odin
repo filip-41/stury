@@ -15,8 +15,7 @@ import lex "lex"
 // (`plan_for` refuses another type's), a field at its type-info offset, an element below an array's `count`
 // or a list buffer's `cap`, or a nil target, checked only. `shape_key` and `shape_scalar` see a token only
 // once the walk has checked it. `shape_tag_arm`, which reads an object before the walk does, keeps its bounds
-// checks. `$unique` adds the key set, `$dialect` the JSONC walk, and `$vc` a scalar's class. The differential
-// tests against a reference decoder check it.
+// checks. `$unique` adds the key set, `$dialect` the JSONC walk, and `$vc` a scalar's class.
 
 // The destination `off` bytes into `dest`. A checked-only container's children are checked only.
 shape_at :: #force_inline proc(dest: rawptr, off: uintptr) -> rawptr {
@@ -67,7 +66,6 @@ shape_fault :: #force_no_inline proc(r: ^walk.Shape_Run, kind: core_pkg.Shape_Fa
 	return Error{offset = at, kind = TYPED_FAULT}
 }
 
-// The ops whose value is an array.
 SHAPE_SEQUENCES :: bit_set[core_pkg.Shape_Kind]{.Slice, .Dynamic, .Array, .Fixed_List}
 // The ops whose value is a container: a scalar token on one is the wrong kind.
 SHAPE_CONTAINERS :: SHAPE_SEQUENCES + {.Struct, .Map, .Bit_Set}
@@ -105,7 +103,6 @@ shape_value_open :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, sp: u64, vc: 
 		op_i, dest = r.pend_op, r.pend_dest
 		r.pend_live = false
 	} else {
-		// An element: the next slot of the sequence open above.
 		f := &r.frames[sp - 1]
 		fop := &r.ops[f.op]
 		if fop.kind == .Array || fop.kind == .Fixed_List {
@@ -228,7 +225,6 @@ shape_list_grow :: proc(r: ^walk.Shape_Run, f: ^walk.Shape_Frame, fop: ^core_pkg
 		f.cap = 1 << 31
 		return nil
 	}
-	// Doubling, never shrunk.
 	new_cap := max(8, 2 * f.cap)
 	old_size, new_size := int(f.cap) * int(fop.stride), int(new_cap) * int(fop.stride)
 	// The first buffer is allocated, not resized from nil: `_mem_resize`'s generic path costs a short list.

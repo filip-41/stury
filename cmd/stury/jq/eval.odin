@@ -136,7 +136,6 @@ fresh_label :: proc(ip: ^Interp) -> int {
 	return ip.labels - 1
 }
 
-// The error `break` to label `id` raises.
 break_error :: proc(id: int) -> Value {
 	o := new_object()
 	object_put(o, "__jq", num(f64(id)))
@@ -328,7 +327,6 @@ eval_if :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, 
 	return eval(ip, n.a, input, env, false, &s)
 }
 
-// `def fn; ...`'s scope.
 define :: #force_no_inline proc(ip: ^Interp, n: ^Node, env: ^Env) -> ^Env {
 	e := new_env(ip)
 	e^ = {parent = env, kind = .Func, name = n.fn.name, arity = len(n.fn.params), fn = n.fn}

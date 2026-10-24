@@ -20,7 +20,7 @@ settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator
 	kept := make([dynamic]Path_Answer, 0, len(req.answers), alloc)
 	defer delete(kept)
 	for a in req.answers {
-		if !path_has_any(req.paths[a.query].steps) {
+		if !walk.steps_have_any(req.paths[a.query].steps) {
 			append(&kept, a)
 		}
 	}
@@ -48,7 +48,7 @@ settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator
 	defer delete(holders)
 	defer delete(outcomes)
 	for p, i in req.paths {
-		if !path_has_any(p.steps) {
+		if !walk.steps_have_any(p.steps) {
 			continue
 		}
 		clear(&nodes)
@@ -110,15 +110,4 @@ wild_path_answers :: proc(req: ^Request($KINDS), p: Path, i: int, nodes, holders
 		}
 	}
 	return true
-}
-
-// Whether `steps` has an `Any` step, whose answers the tape settles.
-@(private = "file")
-path_has_any :: proc(steps: []Step) -> bool {
-	for st in steps {
-		if _, is_any := st.(Any); is_any {
-			return true
-		}
-	}
-	return false
 }

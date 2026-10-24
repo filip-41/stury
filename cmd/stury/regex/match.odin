@@ -151,7 +151,6 @@ decode :: #force_inline proc(s: string, pos: int) -> (rune, int) {
 	return utf8.decode_rune_in_string(s[pos:])
 }
 
-// Where the character holding byte `p` starts.
 @(private = "file")
 char_start :: #force_inline proc(s: string, p: int) -> int {
 	p := p

@@ -39,7 +39,6 @@ Table :: struct {
 	held:    [dynamic][dynamic]Maybe(string),
 }
 
-// Returns a new table for a run with --to csv or tsv.
 table_make :: proc(o: ^Opts) -> ^Table {
 	heap := runtime.heap_allocator()
 	t := new(Table, heap)
@@ -89,7 +88,6 @@ open_object_table :: proc(run: ^Run, keys: []string) {
 	put_header(run, t)
 }
 
-// Reports whether the header of `keys` can be written.
 header_writable :: proc(run: ^Run, keys: []string) -> bool {
 	names := make([]Maybe(string), len(keys), context.temp_allocator)
 	for k, i in keys {
@@ -99,7 +97,6 @@ header_writable :: proc(run: ^Run, keys: []string) -> bool {
 	return csv.write_record(&scratch, names, run.table.dialect, at_start = !run.rows_begun) == .None
 }
 
-// Returns the error message for a refused row.
 row_refusal :: proc(t: ^Table, err: csv.Marshal_Error) -> string {
 	#partial switch err {
 	case .Unwritable:
@@ -183,7 +180,6 @@ cell_of :: proc(v: jq.Value) -> (cell: Maybe(string), nested: bool) {
 	return nil, false
 }
 
-// Ends the run on an array or object in a cell.
 @(private = "file")
 nested_cell :: proc(run: ^Run, v: jq.Value, where_: string) -> ! {
 	what := "an object" if jq.kind(v) == .Object else "an array"
@@ -265,7 +261,6 @@ object_row :: proc(run: ^Run, t: ^Table, v: jq.Value) {
 	}
 }
 
-// Appends a column to the header and returns its index.
 @(private = "file")
 add_column :: proc(t: ^Table, name: string) -> int {
 	at := len(t.header)
@@ -285,7 +280,6 @@ drop_columns_from :: proc(t: ^Table, columns: int) {
 	resize(&t.header, columns)
 }
 
-// Writes the header record.
 @(private = "file")
 put_header :: proc(run: ^Run, t: ^Table) {
 	names := make([]Maybe(string), len(t.header), context.temp_allocator)

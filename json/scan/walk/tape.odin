@@ -22,8 +22,8 @@ Row_Str :: struct {
 
 // An escaped string's decoded value, under `.Decoded`. An escape-free string has none: its
 // text is its source text, `src[lo + 1:hi - 1]`. A number has none either: each read decodes its source
-// text (`dom_number`), which the walk only checks, as folding and converting every number cost a `.Dom`
-// build a quarter of its time on number-heavy input.
+// text (`dom_number`), which the walk only checks, since folding and converting every number slows a `.Dom`
+// build on number-heavy input.
 Row_Payload :: struct #raw_union {
 	str: Row_Str,
 }
@@ -50,7 +50,6 @@ Row_Flag :: enum u8 {
 	Str_Escaped,
 }
 
-// The flags on a `.Nodes` row (`Row.flags`).
 Row_Flags :: distinct bit_set[Row_Flag; u8]
 
 // A handle to one value of a document: the index of its row. Distinct, so a count or an offset is never
@@ -60,7 +59,6 @@ Node :: distinct i32
 // "No such value": what every lookup answers on a miss, and `Path_Answer.node` without a row.
 NO_NODE :: Node(-1)
 
-// The root value, the first row.
 ROOT :: Node(0)
 
 // One row per value, in preorder: the value's spans, payload and topology. 32 bytes
@@ -75,7 +73,7 @@ Row :: struct {
 	subtree_size: u32,
 	kind:         Kind,
 	flags:        Row_Flags,
-	// A string's escape latch (`first_escape_offset`), or a number's digit counts (`number_digits`).
+	// A string's escape latch (`first_escape_offset`), or a number's digit counts (`number_digits_pack`).
 	first_esc:    u16,
 	// The last word is a scalar's payload or a container's member count: only a
 	// scalar is decoded, and only a container has members.
@@ -141,12 +139,6 @@ number_digits_pack :: #force_inline proc(int_digits, frac_digits: u64) -> u16 {
 	return u16(min(int_digits, 255)) | u16(min(frac_digits, 255)) << 8
 }
 
-// The digit counts of number row `r` (`number_digits_pack`). A checked token has an integer digit, so
-// `int_digits == 0` is a row no walk counted. 255 is a lower bound.
-number_digits :: #force_inline proc(r: Row) -> (int_digits, frac_digits: u64) {
-	return u64(r.first_esc & 0xFF), u64(r.first_esc >> 8)
-}
-
 Number_Spelling_Flag :: enum u8 {
 	Negative,     // token began '-'
 	Has_Exponent, // authored 'e'/'E'
@@ -201,7 +193,6 @@ Fact :: struct {
 // On a tape missing rows (a refused append), every accessor stays inside one container's run and
 // answers `NO_NODE` past it. A value whose parent has no row reads back as a root.
 
-// Whether `n` names a row of `nodes`.
 dom_has :: #force_inline proc(nodes: []Row, n: Node) -> bool {
 	return n >= 0 && int(n) < len(nodes)
 }

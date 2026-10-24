@@ -17,7 +17,7 @@ F64_INF_BITS :: u64(0x7FF) << 52
 // never read.
 //
 // The arm is chosen by facts the walk has before the fold finishes (digit count, decimal scale):
-// a branch on the folded `mant` is a coin flip on 16-19 digit significands and resolves only
+// a branch on the folded `mant` is unpredictable on 16-19 digit significands and resolves only
 // after the whole digit chain. So the Clinger arm takes only significands of at most 15 digits
 // (`10^15 < 2^53`, exact by count alone), Eisel-Lemire (strconv's fast_float) takes the rest and refuses
 // an overflow, and every other token calls `dom_number_value_cold`. Both arms are correctly rounded, so
@@ -64,8 +64,8 @@ dom_number_value :: #force_inline proc(src: []byte, lo, hi: u64, n: Number_Lex) 
 }
 
 // `dom_number_value`'s binary64 alone, for a reader that needs no exactness: false only for a token with no
-// binary64 value. It keeps the arms by digit count: taking every significand below 2^53 to Clinger runs
-// fewer instructions but runs slower, the branch on `mant` mispredicting on 16-digit values.
+// binary64 value. It keeps the arms by digit count: a `mant` test to route below 2^53 mispredicts on 16-digit
+// values.
 f64_number_value :: #force_inline proc(src: []byte, lo, hi: u64, n: Number_Lex) -> (f64, bool) {
 	digits := n.int_digits + n.frac_digits
 	e := n.exp - i64(n.frac_digits)
@@ -126,7 +126,7 @@ dom_number_value_cold :: proc(
 // the walk gives a `.Dom` row (`dom_number_value`), so a span and a row answer alike. A zero mantissa is
 // `.Exact`. A nonzero one is `.Exact` when its binary64 is the authored value (`dom_number_value` says how
 // that is proved). A zero from a nonzero mantissa digit is `.Underflowed`. A token with no binary64 value,
-// or a span that is not a finished number, is the zero `Number` (`.None`). Everything else is `.Inexact`: a
+// or a span that is not a finished number, is `NO_NUMBER` (`.None`). Everything else is `.Inexact`: a
 // significand past 19 digits is under-claimed rather than proved exact.
 //
 // The span is the caller's to have checked. This checks only that it is a finished number extent.
@@ -219,7 +219,7 @@ number_token :: #force_inline proc(src: []byte, lo, hi: u64, digits: u16) -> Num
 	}
 	v, flags := dom_number_value(src, lo, hi, n)
 	if .Decoded not_in flags {
-		return {}
+		return NO_NUMBER
 	}
 	return {v, dom_flag_state(flags)}
 }
@@ -278,11 +278,11 @@ POW10_U64 := [20]u64{
 // `number_span` of a span its caller already lexed (`lex_number_value`).
 number_lexed :: #force_inline proc(src: []byte, lo, hi: u64, n: Number_Lex) -> Number {
 	if !n.ok {
-		return {}
+		return NO_NUMBER
 	}
 	v, flags := dom_number_value(src, lo, hi, n)
 	if .Decoded not_in flags {
-		return {}
+		return NO_NUMBER
 	}
 	return {v, dom_flag_state(flags)}
 }

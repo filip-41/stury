@@ -20,8 +20,7 @@ import "core:unicode/utf8"
 // The `#no_bounds_check` leaves read `src[lo]` and slice `src[lo + 1:hi - 1]` unchecked: the token is one
 // the walk checked, so `lo < hi <= len(src)` and a string holds both quotes. `dest` is written at the op's
 // width, the type's size. A decode fits a buffer as long as the escaped text, since no escape decodes
-// longer (json/scan/unescape.odin). `core_pkg.fold_digits` runs with `$T` as u64, or u128 for the wide integers. The
-// differential tests against a reference decoder check it, and the unmarshal tests pin the range edges.
+// longer (json/scan/unescape.odin). `core_pkg.fold_digits` runs with `$T` as u64, or u128 for the wide integers.
 
 // `true` or `false` into a `width`-byte boolean.
 shape_leaf_bool :: proc(src: []byte, lo: u64, dest: rawptr, width: u8) -> core_pkg.Shape_Fault #no_bounds_check {
@@ -38,7 +37,6 @@ shape_leaf_bool :: proc(src: []byte, lo: u64, dest: rawptr, width: u8) -> core_p
 	return .None
 }
 
-// Whether `b` can open a JSON number.
 @(private = "file")
 number_starts_with :: #force_inline proc "contextless" (b: u8) -> bool {
 	return b == '-' || (b >= '0' && b <= '9')
@@ -117,7 +115,6 @@ shape_leaf_enum_name :: proc(src: []byte, lo, hi: u64, dest: rawptr, op: ^core_p
 		return .Wrong_Kind
 	}
 	e := op.enum_info
-	// A linear scan of the names.
 	for name, i in e.names {
 		if name_equals(src, lo, hi, name) {
 			core_pkg.shape_enum_member_store(op, i, dest)
@@ -690,7 +687,6 @@ shape_string_end :: proc(src: []byte, p: int) -> (end: int, fault: core_pkg.Shap
 	return end, .None
 }
 
-// Whether the string token `src[lo:hi]` holds an escape.
 @(private = "file")
 shape_has_escape :: proc(src: []byte, lo, hi: int) -> bool {
 	return bytes.index_byte(src[lo + 1:hi - 1], '\\') >= 0

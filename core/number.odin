@@ -3,19 +3,20 @@ package core
 import "base:intrinsics"
 
 // What a number's binary64 projection is relative to its authored value. One result per token,
-// whoever reads it: a row, a span, or a decode.
+// whoever reads it: a row, a span, or a decode. The zero value is `Exact`, so a zero `Number` is 0.
 Exactness :: enum u8 {
-	// No binary64 value: not a number, out of range (`1e400`), a malformed span. The value is 0.
-	None,
-	// The authored value is nonzero and the result is +-0 (`1e-400`).
-	Underflowed,
-	// The correctly rounded value. The span is the number.
-	Inexact,
 	// The authored value bit for bit: `0`, `-0`, `2.5`, `1e2`.
 	Exact,
+	// The correctly rounded value. The span is the number.
+	Inexact,
+	// The authored value is nonzero and the result is +-0 (`1e-400`).
+	Underflowed,
+	// No binary64 value: not a number, out of range (`1e400`), a malformed span. The value is 0.
+	None,
 }
 
-// A binary64 projection and its exactness. Two words, so a reader returns it in registers.
+// A binary64 projection and its exactness. Two words, so a reader returns it in registers. The zero `Number` is
+// the exact value 0.
 Number :: struct {
 	value:     f64,
 	exactness: Exactness,

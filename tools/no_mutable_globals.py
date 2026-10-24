@@ -21,12 +21,12 @@ are a proc signature's parameters.
 
 HOW. Odin has no cheap parser here, so this is a small scanner: comments and
 string/rune literals are blanked first (a `:=` inside either is not a
-declaration), then brackets are counted char by char, because indentation lies
+declaration), then brackets are counted char by char, because indentation does not show it
 and brace depth alone does not see `proc(\\n  s: ^Scanner,\\n)`. A statement ends
 at a newline while file scope is open.
 
-WHICH PACKAGES. Every `.odin` file under `core/`, `csv/` and `json/` except those below a
-directory named `test`, found by walking the tree and NOT by reading the
+WHICH PACKAGES. Every `.odin` file under `core/`, `csv/`, `host/` and `json/` except those below a
+directory named `test`, found by walking the tree and not by reading the
 Makefile's LIB_PKGS. The Makefile list is a hand-kept registry: a package added
 and forgotten there would be silently exempt, which is the failure this guards
 against. `json/test/stock` is in LIB_PKGS but is the differential test harness,

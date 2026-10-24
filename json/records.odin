@@ -35,6 +35,11 @@ Framing :: enum u8 {
 
 // One record: its JSON text, its member's key under `.Root_Entries` of an object (nil otherwise), and the
 // offset of `bytes` from the input's first byte. The slices are the caller's source.
+//
+// What a read of `bytes` (`validate`, `scan`, `build`, `unmarshal`) reports is an offset into `bytes`, not into
+// the input. To say where it is in the input, add `at`. To render an error with `render_error`, pass `bytes` and
+// the offset as it is. The input also works from `records`, with `at` added to the offset; from `records_from`
+// it is gone, so `bytes` (valid until the next `next_record`) is the text to pass.
 Record :: struct {
 	bytes: []byte,
 	key:   []byte,

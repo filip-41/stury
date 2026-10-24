@@ -34,7 +34,7 @@ test_any_repeated_key :: proc(t: ^testing.T) {
 		last, first, all:    string,
 	}
 	cases := []Case{
-		// The brief's object: the repeat sits in the first `a`'s place.
+		// The repeat sits in the first `a`'s place.
 		{`{"a":1,"b":0,"a":2}`, {ANY}, `2,0`, `1,0`, `1,0,2`},
 		// The repeat is nested under the second `Any`, and the outer key repeats too.
 		{`{"x":{"a":1,"b":0,"a":2},"y":[5]}`, {ANY, ANY}, `2,0,5`, `1,0,5`, `1,0,2,5`},
@@ -103,6 +103,9 @@ test_any_repeated_key_trailing :: proc(t: ^testing.T) {
 // `.Refuse` faults at the repeat, wherever the `Any` meets it.
 @(test)
 test_any_repeated_key_refused :: proc(t: ^testing.T) {
+	when !REFUSE_DUPLICATES {
+		return // `.Refuse` is compiled out; test_refuse_compiled_out pins that
+	}
 	defer free_all(context.temp_allocator)
 	Case :: struct {
 		src:    string,

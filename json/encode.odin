@@ -24,7 +24,8 @@ import enc "encode"
 //	  a struct keeps its declaration order).
 Encode_Opts :: enc.Encode_Opts
 
-// A writer refusal (`.None` is success). `marshal`'s: `Bad_Utf8`, `Non_Finite`, `Too_Deep` (past `MAX_DEPTH`),
+// A writer refusal (`.None` is success). `marshal`'s: `Bad_Utf8`, `Non_Finite` (a NaN, an infinity, or a `Number` that is `.None` or
+// `.Underflowed`), `Too_Deep` (past `MAX_DEPTH`),
 // `Cycle`, `Unsupported`, `Bad_Raw`, `Plan_Mismatch`, `Not_A_Member`, `Bad_State` (a hook writing other than
 // one value), `Write_Failed` (the `io.Writer`, after a prefix written) and `Out_Of_Memory`.
 Encode_Error :: enc.Encode_Error
@@ -36,6 +37,9 @@ Encode_Error :: enc.Encode_Error
 // document read under a raised `max_depth` can be.
 @(private, require_results)
 marshal_document :: proc(doc: ^Document, opts := Encode_Opts{}, allocator := context.allocator) -> (out: []byte, err: Encode_Error) {
+	when ODIN_DEBUG {
+		check_document(doc)
+	}
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return nil, .Too_Deep
 	}

@@ -4,7 +4,7 @@ package index
 // `classify` in two 32-byte registers per block, for amd64 processors with AVX2 and no AVX-512BW. Each lane
 // mask is two compares and two movemasks where the 16-byte windows take four of each, and the prefix XOR is
 // a carry-less multiply. The UTF-8 check stays `utf8_block`'s, out of line. It lists the same positions and
-// leaves the same carries and region flags as `classify_narrow`, which the scan tests check.
+// leaves the same carries and region flags as `classify_narrow`.
 
 import "base:intrinsics"
 import "core:simd"

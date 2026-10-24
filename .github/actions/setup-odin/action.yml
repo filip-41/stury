@@ -37,7 +37,7 @@ runs:
           Linux-X64)   os=linux-amd64 ;;
           Linux-ARM64) os=linux-arm64 ;;
           macOS-ARM64) os=macos-arm64 ;;
-          # Odin publishes no macOS Intel toolchain: Intel targets are
+          # Odin has no macOS Intel toolchain: Intel targets are
           # cross-compiled from the arm64 runner.
           Windows-X64) os=windows-amd64 ;;
           *) echo "no Odin release for ${{ runner.os }}-${{ runner.arch }}"; exit 1 ;;

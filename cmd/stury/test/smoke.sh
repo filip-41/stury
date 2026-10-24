@@ -26,6 +26,18 @@ check() {
 	fi
 }
 
+# agree NAME FILTER FILE STURY_OPTIONS...: FILTER on FILE answers (stdout, stderr, exit status; the status is left in
+# $code) as `FILTER | .` does, which the cell scan and the record pool do not take.
+agree() {
+	name=$1 f=$2 file=$3
+	shift 3
+	"$S" "$@" "$f" "$file" >"$T/col.got" 2>"$T/col.err"
+	code=$?
+	"$S" "$@" "$f | ." "$file" >"$T/col.want" 2>"$T/col.want.err"
+	want=$?
+	[ "$code" = "$want" ] && cmp -s "$T/col.got" "$T/col.want" && cmp -s "$T/col.err" "$T/col.want.err" || { echo "FAIL $name: exit $code, interpreter $want"; fails=$((fails + 1)); }
+}
+
 # check accepts what `stury .` accepts, the library's grammar, with nesting to 1024 and the digit and exponent
 # caps lifted, which --strict-limits holds (the small cases are cli.tsv's; these files are too long for it).
 "$S" -nr '"[" * 1024 + "]" * 1024' >"$T/deep1024.json"
@@ -74,7 +86,7 @@ for i in 1 2 3; do
 done
 
 # Work that grows faster than the input: each case runs under a 2 s CPU limit, at a size where the
-# quadratic reading it guards against took 10 s or more. Under a sanitizer (STURY_SANITIZED set, as
+# quadratic reading it guards against would run far past it. Under a sanitizer (STURY_SANITIZED set, as
 # `make test-asan` sets it) this cap and the memory cap below measure the sanitizer, so only answers count.
 quick() {
 	if [ -n "$STURY_SANITIZED" ]; then check "$@"; return; fi
@@ -128,7 +140,7 @@ lean reduce_string 100000 -n 'reduce range(100000) as $i (""; . + "x") | length'
 lean reduce_path_string 100000 -n 'reduce range(100000) as $i ({a: ""}; .a += "x") | .a | length'
 lean reduce_merge 20000 -n 'reduce range(20000) as $i ({}; . * {($i | tostring): $i}) | length'
 # Idioms that build, take apart or loop over something big, each under about four times jq's own peak at
-# the same size (a floor of 11 MB): any of them going quadratic again lands far past its cap.
+# the same size (a floor of 11 MB): any of them going quadratic lands far past its cap.
 capped reduce_array 14 8000 -n 'reduce range(8000) as $i ([]; . + [$i]) | length'
 capped reduce_object 14 3000 -n 'reduce range(3000) as $i ({}; . + {($i|tostring): $i}) | length'
 capped reduce_merge_nested 15 3000 -n 'reduce range(3000) as $i ({}; . * {a: {($i|tostring): $i}}) | .a | length'
@@ -315,10 +327,8 @@ got=$(peak_mb --from csv -r '.msg, .id' "$T/big.csv")
 "$S" --from csv -r '(.msg, .id) | .' "$T/big.csv" >"$T/col.want"
 cmp -s "$T/out" "$T/col.want" && [ "${got:-999}" -lt 80 ] || { echo "FAIL csv_columns_pieces: $got MB"; fails=$((fails + 1)); }
 { cat "$T/big.csv"; printf '1,2\n'; } >"$T/bad.csv"
-"$S" --from csv -r .msg "$T/bad.csv" >"$T/col.got" 2>"$T/col.err"
-code=$?
-"$S" --from csv -r '.msg | .' "$T/bad.csv" >"$T/col.want" 2>"$T/col.want.err"
-[ "$code" = 5 ] && cmp -s "$T/col.got" "$T/col.want" && cmp -s "$T/col.err" "$T/col.want.err" || { echo "FAIL csv_columns_fault: exit $code"; fails=$((fails + 1)); }
+agree csv_columns_fault .msg "$T/bad.csv" --from csv -r
+[ "$code" = 5 ] || { echo "FAIL csv_columns_fault: exit $code"; fails=$((fails + 1)); }
 # --to csv and --to tsv write those columns as records on the pool, with the interpreter's output. A record the
 # dialect cannot write (a lone null) in the last piece ends the run after every earlier record. A first cell that
 # starts with a byte order mark is quoted at the start of the output.
@@ -327,11 +337,7 @@ code=$?
 for to in csv tsv; do
 	for f in '.id' '[.msg, .id]' '.id, .msg'; do
 		for src in big nul bom; do
-			"$S" --from csv --to $to "$f" "$T/$src.csv" >"$T/col.got" 2>"$T/col.err"
-			code=$?
-			"$S" --from csv --to $to "$f | ." "$T/$src.csv" >"$T/col.want" 2>"$T/col.want.err"
-			want=$?
-			[ "$code" = "$want" ] && cmp -s "$T/col.got" "$T/col.want" && cmp -s "$T/col.err" "$T/col.want.err" || { echo "FAIL ${to}_columns_$src $f: exit $code, interpreter $want"; fails=$((fails + 1)); }
+			agree "${to}_columns_$src $f" "$f" "$T/$src.csv" --from csv --to $to
 		done
 	done
 done
@@ -349,17 +355,11 @@ for f in '{id}' '{id, m: .msg}' 'select(.id | tonumber % 100000 == 0)' 'select(.
 		for src in big nul bom mid bad; do
 			flags="--from csv --to $to"
 			[ $to = json ] && flags="$flags -c"
-			"$S" $flags "$f" "$T/$src.csv" >"$T/col.got" 2>"$T/col.err"
-			code=$?
-			"$S" $flags "$f | ." "$T/$src.csv" >"$T/col.want" 2>"$T/col.want.err"
-			want=$?
-			[ "$code" = "$want" ] && cmp -s "$T/col.got" "$T/col.want" && cmp -s "$T/col.err" "$T/col.want.err" || { echo "FAIL ${to}_object_$src $f: exit $code, interpreter $want"; fails=$((fails + 1)); }
+			agree "${to}_object_$src $f" "$f" "$T/$src.csv" $flags
 		done
 	done
 done
-"$S" --from csv --to json -c . "$T/big.csv" >"$T/col.got"
-"$S" --from csv --to json -c '. | .' "$T/big.csv" >"$T/col.want"
-cmp -s "$T/col.got" "$T/col.want" || { echo "FAIL json_all_columns"; fails=$((fails + 1)); }
+agree json_all_columns . "$T/big.csv" --from csv --to json -c
 # --to csv on a JSON stream writes the header and first row as soon as the first input arrives, and each later row
 # as its input arrives.
 early pipe_to_csv "$(printf 'a,b\n1,2\n3,4')" '{"a":1,"b":2}\n' '{"a":3,"b":4}\n' --to csv .

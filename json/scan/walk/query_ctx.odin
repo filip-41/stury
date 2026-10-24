@@ -42,7 +42,7 @@ Query_Ctx :: struct {
 	// Whether a demand was asked for (one per scan).
 	demand_asked: bool,
 	// An append the caller's allocator refused. The row is lost, but the walk continues to reach the result.
-	// the run reports the shortfall and `oom_kind` names the collection.
+	// The run reports the shortfall and `oom_kind` names the collection.
 	oom:      bool,
 	oom_kind: Walk_Kind,
 	// A negative `Index`'s re-read found its answer malformed (`reread_fault`): the walk's result.

@@ -158,8 +158,6 @@ auto_frame_kinds :: #force_no_inline proc(
 // a scalar), and `lo` its first byte. A `Name` match was decided by `auto_key`, and an `Index` match is decided
 // here, where the ordinal is known. An `Index` step does not check `vc`: an element may be any kind, so
 // `[1,2]` under `[Index(0)]` is `Found`.
-//
-// Inlined into the walk up to the run loop, which runs out of line.
 auto_member_open :: #force_inline proc(
 	q: ^Query_Ctx,
 	$Q: bit_set[Walk_Kind],
@@ -209,7 +207,6 @@ auto_member_runs :: #force_no_inline proc(
 		lv := &q.auto.levels[d]
 		ord := lv.idx - 1
 		decided := false
-		// An `Any` step matches every member.
 		if wild := armed & lv.wild; wild != 0 {
 			lv.matched |= wild
 		}
@@ -393,8 +390,6 @@ wild_last_key :: proc(q: ^Query_Ctx, i, d: int, repeated: bool) {
 
 // A member closed over `[lo, hi)`. A `Found` is emitted here, as an extent is final only at the value's
 // close. The matched member's level is consumed. The container's stays armed for its remaining members.
-//
-// Inlined into the walk up to the answers, which are written out of line.
 auto_member_closed :: #force_inline proc(
 	q: ^Query_Ctx,
 	$Q: bit_set[Walk_Kind],

@@ -5,10 +5,10 @@ import number "./number"
 
 // The decoded number of row `i`, and what it is relative to the authored value, decoded from its source
 // text at each call (`number_token`): a row holds no number's value (`Row_Payload`), and a read must not
-// mutate the tape. A row that is not a number, or has no binary64 value (`1e400`), is the zero `Number`.
+// mutate the tape. A row that is not a number, or has no binary64 value (`1e400`), is `NO_NUMBER`.
 dom_number :: #force_inline proc(nodes: []Row, src: []byte, i: Node) -> Number {
 	if i < 0 || int(i) >= len(nodes) || nodes[i].kind != .Number {
-		return {}
+		return number.NO_NUMBER
 	}
 	n := nodes[i]
 	return number.number_token(src, u64(n.lo), u64(n.hi), n.first_esc)

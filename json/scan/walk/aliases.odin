@@ -15,6 +15,9 @@ Name :: core_pkg.Name
 Index :: core_pkg.Index
 Any :: core_pkg.Any
 Path :: core_pkg.Path
+// A path the automaton serves has at most `MAX_PATH_STEPS` steps; a longer one is refused before the walk
+// (`Over_Capacity`, `Path_Steps`). The negative-`Index` re-entry nests one frame array per step, so the cap
+// bounds stack use.
 MAX_PATH_STEPS :: core_pkg.MAX_PATH_STEPS
 Read_Shape :: core_pkg.Read_Shape
 Shape_Op :: core_pkg.Shape_Op

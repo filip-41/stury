@@ -1,8 +1,7 @@
 package jq
 
-// The Windows build's own calendar time (the `_windows` suffix keeps it out of other builds; it is not UI
-// windows): gmtime_r, timegm and strptime, which the UCRT lacks (its _gmtime64_s refuses a time before 1970), as
-// glibc's behave: the proleptic Gregorian calendar, no leap seconds, and strptime's C-locale conversions.
+// The Windows build's own calendar time (the `_windows` suffix builds it on Windows only): gmtime_r, timegm and
+// strptime, which the UCRT lacks (its _gmtime64_s refuses a time before 1970), as glibc's behave: the proleptic Gregorian calendar, no leap seconds, and strptime's C-locale conversions.
 
 import "core:c/libc"
 import "core:math"

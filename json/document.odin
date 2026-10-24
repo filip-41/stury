@@ -46,6 +46,49 @@ Document :: struct {
 	deep:      bool,
 }
 
+// A debug build's check of what the readers and the writer trust of a `Document` (its fields are exported, so
+// a caller can break them). `check_document` walks every row (a scoped request's rows may be several roots):
+// preorder, each run `[i, i + subtree_size)` and each span inside `src` and inside its parent's. `check_node`
+// checks the one row `n` and its run. Compiled out unless `ODIN_DEBUG`.
+when ODIN_DEBUG {
+	check_document :: proc(doc: ^Document, loc := #caller_location) {
+		// Open runs, on the stack, since a test may leave no allocator but the caller's. Rows nested past
+		// MAX_DEPTH (a document read under a raised `max_depth`) are not checked.
+		ends: [MAX_DEPTH]int
+		parents: [MAX_DEPTH]int
+		open := 0
+		rows := doc.rows[:]
+		for r, i in rows {
+			for open > 0 && ends[open - 1] <= i {
+				open -= 1
+			}
+			ok := row_ok(doc, i)
+			ok &&= i == 0 || r.lo > rows[i - 1].lo
+			if open > 0 {
+				p := rows[parents[open - 1]]
+				ok &&= i + int(r.subtree_size) <= ends[open - 1] && r.lo >= p.lo && r.hi <= p.hi
+			}
+			assert(ok, "Document is corrupt: a row breaks the preorder, a run or a span", loc)
+			if open == MAX_DEPTH {
+				return
+			}
+			ends[open], parents[open] = i + int(r.subtree_size), i
+			open += 1
+		}
+	}
+
+	check_node :: proc(doc: ^Document, n: Node, loc := #caller_location) {
+		assert(!walk.dom_has(doc.rows[:], n) || row_ok(doc, int(n)), "Document is corrupt: a row's run or span is out of range", loc)
+	}
+
+	@(private = "file")
+	row_ok :: proc(doc: ^Document, i: int) -> bool {
+		r := doc.rows[i]
+		return r.subtree_size >= 1 && i + int(r.subtree_size) <= len(doc.rows) && r.lo <= r.hi && int(r.hi) <= len(doc.src) &&
+			(r.kind == .Array || r.kind == .Object || r.subtree_size == 1)
+	}
+}
+
 // Validate `src` at `.Strict` and decode every value onto a row, allocating with `allocator`. The result is
 // exactly a `Request({.Dom})` scan's rows.
 //
@@ -56,6 +99,11 @@ Document :: struct {
 //	- `.Refuse` refuses a key that, decoded, repeats one of its own object's (`.Duplicate_Key` at the
 //	  repeat). Keys past the first 64 open at once are remembered in `allocator`, and a refusal there is
 //	  `.Out_Of_Memory`.
+//
+// The rows are reserved up front, one per 8 bytes of `src` (a 32-byte row each, so 4 times `src`), without
+// touching the pages, and grown by 4 past that for a denser text. The reserve stops at 2^21 rows (64 MiB) from
+// an arena or any allocator but the heap, and at 2^24 rows (512 MiB of address space, a 128 MiB `src`) from
+// the heap, so a sparse text reserves more than it fills.
 //
 // `err` is a document fault or one of `build`'s own, with `Document` the zero value.
 //
@@ -153,7 +201,7 @@ get_float :: proc(doc: ^Document, n: Node) -> (v: f64, ok: bool) {
 
 // The binary64 projection of number `n` and its `exactness` against the authored value.
 //
-//	- `ok` is false only where `n` is no number, so one past binary64's range (`1e400`) is the zero `Number`
+//	- `ok` is false only where `n` is no number, so one past binary64's range (`1e400`) is `Number{0, .None}`
 //	  (`value` +0, `.None`) with `ok` true, where `get_float` answers false.
 //	- Decoded from the number's text at each call: a document keeps no number's value, so a reader that
 //	  wants one many times keeps it itself.
@@ -172,7 +220,7 @@ get_number :: #force_inline proc(doc: ^Document, n: Node) -> (v: Number, ok: boo
 //	- Escape-free text is a slice of `doc.src`, escaped text is what the `.Dom` scan decoded, or, where it
 //	  decoded nothing (a `.Nodes` scan), unescaped into the document's arena on the first read and kept.
 //	- Reads of escaped strings a scan left undecoded write that arena, so on such a document they must not
-//	  run on several threads at once. Every other read writes nothing, so an `.Eager` `build`'s strings may
+//	  run on several threads at once. Every other read writes nothing, so a `build` document's strings may
 //	  be read from any number of threads.
 //	- `ok` is false for a value that is not a string, and when an escaped string's decode could not be
 //	  allocated. A `.Dom` build decodes every escaped string up front, so its reads do not allocate.
@@ -363,6 +411,9 @@ members :: proc {
 
 @(private, require_results)
 members_of :: proc(doc: ^Document, n: Node) -> Members {
+	when ODIN_DEBUG {
+		check_node(doc, n)
+	}
 	first := first_child(doc, n)
 	if first == NO_NODE {
 		return {doc = doc}
@@ -485,6 +536,9 @@ pointer_member :: proc(doc: ^Document, n: Node, token: string) -> Node {
 //	  freed before return; a refusal there is `.Out_Of_Room` too.
 @(require_results)
 query :: proc(doc: ^Document, n: Node, path: Path_Spec, out: ^[dynamic]Node) -> (err: Maybe(Parse_Fault)) {
+	when ODIN_DEBUG {
+		check_node(doc, n)
+	}
 	steps: [core_pkg.MAX_PATH_STEPS]Step
 	stack: [SCRATCH_BYTES]u8 = ---
 	text, is_text := path.(string)

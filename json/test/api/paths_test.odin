@@ -9,8 +9,7 @@ import "core:testing"
 ANY :: json.Any{}
 
 // Query path resolution. Each test pins answers and the stop byte against a
-// hand-computed offset, because a resolution rule nobody checked is
-// indistinguishable from a rule that is wrong.
+// hand-computed offset.
 
 // One path query against `src`, at `mode` and `level`. The returned answers are
 // the caller's to free. A scan fault is reported so a test cannot read answers
@@ -149,9 +148,9 @@ test_path_answers :: proc(t: ^testing.T) {
 		{`{}`, {a}, {.First}, {MISS}},
 		{`[[]]`, {i0}, {.First}, {hit(1, 3)}},
 		// An `Index` step is defined against the container it lands IN, and the walk counts each container's own
-		// members (`Auto_Level.idx`), bumped at every value's start, fusion loop included. Pinned: a per-scan
-		// count resolved an `Index` through another array against the root's count, and one that skipped the
-		// fused `[` bracket never counted the root's first element on `[[..],[..]]`.
+		// members (`Auto_Level.idx`), bumped at every value's start, fusion loop included. A per-scan
+		// count would resolve an `Index` through another array against the root's count, and a count that skips the
+		// fused `[` bracket would miss the root's first element on `[[..],[..]]`.
 		//
 		// Byte offsets in `[[1,2,3],[4,5,6]]`:
 		//   0 '['   1 '['   2 '1'   3 ','   4 '2'   5 ','   6 '3'   7 ']'
@@ -193,11 +192,11 @@ test_path_answers :: proc(t: ^testing.T) {
 		{`{"a":[{"b":1}]}`, {a, i0, b}, {.First}, {hit(11, 12)}},
 		// A chain of negative `Index` steps. A negative position depends on its container's length, so it
 		// resolves on that container's close via one bounded re-read (`path_reenter_from_end`), two negative
-		// steps re-enter twice, each counting its OWN container. The re-read once carried the already-resolved
-		// position (`Path_Run.head_pos`), so every negative step below it answered `Missing`.
+		// steps re-enter twice, each counting its OWN container. The re-read must not carry the
+		// already-resolved position (`Path_Run.head_pos`) down, or every negative step below it answers `Missing`.
 		{`[[1,2,3],[4,5,6]]`, {m1, m1}, EVERY, {hit(14, 15)}},
 		{`[[1,2,3],[4,5,6]]`, {m2, m1}, EVERY, {hit(6, 7)}},
-		// Controls: a non-negative step under a negative one, and a negative one out of range, were always right.
+		// Controls: a non-negative step under a negative one, and a negative one out of range.
 		{`[[1,2,3],[4,5,6]]`, {m1, i0}, EVERY, {hit(10, 11)}},
 		{`[[1,2,3],[4,5,6]]`, {json.Index(-3)}, EVERY, {MISS}},
 		// A miss one level down is decided by THAT array's length: `[-2]` names past the one-member `[3]`.
@@ -242,8 +241,8 @@ READINGS := [?]Reading{{.Lazy, .First}, {.Strict, .First}, {.Strict, .Last}, {.S
 
 // A negative `Index` is answered by a re-read at its array's close, but its answer is read all the same, so
 // it is checked as the forward index naming the same member checks it: `.[k]` and `.[k-len]` give the same
-// result and the same answer. Under `.Lazy` the owning walk skipped the member, and a re-read that dropped
-// its faults once answered `tru` with no error.
+// result and the same answer. Under `.Lazy` the owning walk skipped the member, and a re-read that drops
+// its faults would answer `tru` with no error.
 @(test)
 test_path_negative_index_judges_its_answer :: proc(t: ^testing.T) {
 	Case :: struct {

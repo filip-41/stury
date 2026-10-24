@@ -113,9 +113,8 @@ prefix_xor :: #force_inline proc(x: u64) -> u64 {
 	return x
 }
 
-// Reports whether any lane is non-zero. On NEON, `reduce_or` lowers to an OR tree through scalar registers (nine
-// instructions on the branch's path), while `reduce_max` is one `umaxv`. On x86 the OR is one `ptest`, while the
-// maximum takes seven instructions through `phminposuw`.
+// Reports whether any lane is non-zero. On NEON, `reduce_or` lowers to an OR tree through scalar registers, while
+// `reduce_max` is one `umaxv`. On x86 the OR is one `ptest`, while the maximum goes through `phminposuw`.
 any_lane :: #force_inline proc "contextless" (v: V) -> bool {
 	when ODIN_ARCH == .amd64 {
 		return simd.reduce_or(v) != 0

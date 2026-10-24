@@ -6,7 +6,7 @@ import "core:simd"
 // to themselves, so the decoded length `.Dom` reserves exactly from the arena is the text's length less
 // this, and only an escape unit charges it (`escape_step`). A surrogate pair is one escape unit and a lone
 // half is refused (`escape_unit`), so every unit's bytes are known where it is read. A short reserve is a
-// heap overflow. A test checks the decoded length against the reserved one.
+// heap overflow.
 // `skip_string_q` keeps no count: the locate route keeps the text and `.Decoded` stays clear, so no
 // arena reserve is taken.
 Dec_Count :: struct {

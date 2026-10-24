@@ -38,19 +38,22 @@ each_record :: proc(
 		return Error{kind = .Bad_Option}
 	}
 	run := Batch_Run{src = src, scan = s, task = task, data = data, cursor = {runner = runner}}
-	defer delete(run.parity, runtime.heap_allocator())
-	batch_plan(&run)
-	core_pkg.batch_fan(&run.cursor, proc(arg: rawptr) {batch_claim((^Batch_Run)(arg), false)}, &run)
-	return run.first.error
+	return run_batch(&run, false)
 }
 
 // `validate` split across `runner`'s threads and the caller, one piece per claim.
 @(private)
 validate_pieces :: proc(src: []byte, s: Scan, runner: ^Batch_Runner) -> Maybe(Error) {
 	run := Batch_Run{src = src, scan = s, cursor = {runner = runner}}
+	return run_batch(&run, true)
+}
+
+// Plans `run` and claims its pieces on the caller and the runner's threads; the first piece's fault.
+@(private)
+run_batch :: proc(run: ^Batch_Run, $VALIDATE: bool) -> Maybe(Error) {
 	defer delete(run.parity, runtime.heap_allocator())
-	batch_plan(&run)
-	core_pkg.batch_fan(&run.cursor, proc(arg: rawptr) {batch_claim((^Batch_Run)(arg), true)}, &run)
+	batch_plan(run)
+	core_pkg.batch_fan(&run.cursor, proc(arg: rawptr) {batch_claim((^Batch_Run)(arg), VALIDATE)}, run)
 	return run.first.error
 }
 

@@ -286,7 +286,6 @@ split_string :: proc(s, sep: string) -> Value {
 	return a
 }
 
-// `@name` applied to `v`.
 format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 	switch name {
 	case "text":
@@ -295,7 +294,7 @@ format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 		return to_json(v), .Go
 	case "html":
 		b := strings.builder_make()
-		write_escaped(&b, text_of(v), `<>&'"`, {"&lt;", "&gt;", "&amp;", "&apos;", "&quot;"})
+		write_escaped(&b, text_of(v), "<>&'\"\x00", {"&lt;", "&gt;", "&amp;", "&apos;", "&quot;", `\0`})
 		return strings.to_string(b), .Go
 	case "uri":
 		HEX := "0123456789ABCDEF"

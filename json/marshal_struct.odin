@@ -57,7 +57,6 @@ spell_scalar :: #force_inline proc(p: [^]u8, kind: core_pkg.Shape_Kind, at: rawp
 	return 5 - int(yes), .None
 }
 
-// `spell_scalar` appended to `dst`.
 @(private)
 put_scalar :: proc(dst: ^[dynamic]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> Encode_Error {
 	p := enc.put_room(dst, len(dst^), FIELD_VALUE_ROOM)

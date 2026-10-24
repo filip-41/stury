@@ -230,7 +230,7 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 			}
 			d, err = jq.build_rows(ins.data[at:end], run.req.dialect, allocator = doc_allocator)
 		}
-		// A --seq record may hold a complete value and then bytes that belong to no record — `[1]` followed by `]`
+		// A --seq record may hold a complete value and then bytes that belong to no record, as `[1]` followed by `]`
 		// before the next separator. The library's `split_record` names the value. The walk's fault is the bytes
 		// after it, which the next read reports and resyncs past.
 		if e, bad := err.?; bad && run.opts.seq && e.offset > 0 {
@@ -453,7 +453,7 @@ stream_ended :: proc(ins: ^Inputs) -> bool {
 
 // Where the text at data[at:] ends, when another may follow it before `limit`. `limit` when the text is faulty, which
 // build_rows then reports. Once a file has shown a second text, the end of each that does not end its line is found
-// so: a build sizes its rows by its source, so building the rest of the file to find the end cost every text the rest
+// so: a build sizes its rows by its source, so building the rest of the file to find the end would cost every text the rest
 // of the file. A file of one text is built once, unchecked.
 @(private = "file")
 text_end :: proc(ins: ^Inputs, at, limit: int) -> int {

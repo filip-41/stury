@@ -4,8 +4,7 @@ import "base:intrinsics"
 import "core:math/bits"
 
 // `DOM_INV5[k]` is the modular inverse of `5^k` mod 2^64 and `DOM_DIV5_MAX[k] = floor((2^64-1) / 5^k)`,
-// for `dom_exact_scale`'s divisibility test. A test recomputes both tables
-// from division.
+// for `dom_exact_scale`'s divisibility test.
 @(rodata)
 DOM_INV5 := [23]u64 {
 	0x1,
@@ -65,8 +64,8 @@ DOM_EXACT_MANT :: u64(1) << 53
 
 // Whether `mant * 10^e` is exactly a binary64, not merely correctly rounded, for any `mant`. The Clinger
 // window (`mant <= 2^53`, `|e| <= 22`) guarantees correct rounding, but `9007199254740991e1` is inside it
-// and its value needs 54 significand bits: calling it exact would be the pretend-exact the never-truncate
-// law forbids. Past 2^53 an integer can still be exact: `9007199254740994` is `4503599627370497 * 2`.
+// and its value needs 54 significand bits: calling it exact would break the never-truncate
+// law. Past 2^53 an integer can still be exact: `9007199254740994` is `4503599627370497 * 2`.
 //
 // So this asks representability from the odd part `o` of `mant = 2^t * o`:
 //

@@ -7,7 +7,7 @@ import "base:runtime"
 import "core:strings"
 import core_pkg "../core"
 
-// A path as the path procedures take it: a step chain, or its text.
+// A built path: a chain of steps.
 Path :: core_pkg.Path
 
 // A path as `find`, `find_column` and the path edits take it: text in core's path syntax, or a built `Path`.

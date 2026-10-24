@@ -62,8 +62,7 @@ put_strings :: proc(w: ^Writer, cells: []string) -> Marshal_Error {
 
 // The record of the struct at `data` written from `w.buf`'s end, one cell per column. `columns` are header
 // fields of `src`; each cell is the field of `row` with the column's name, or empty when no field has it.
-// Without `columns`, the struct's fields are written in order. `unnamed` is the index of the first field no
-// column names, or -1.
+// Without `columns`, the struct's fields are written in order. `matched[k]` is set for each field written.
 @(private)
 put_struct :: proc(w: ^Writer, row: Plan_Op, data: rawptr, src: []byte, dialect: Dialect, columns: []Field, matched: []bool) -> (err: Marshal_Error) {
 	p := w.plan

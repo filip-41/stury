@@ -612,7 +612,6 @@ defined_path :: proc(x: ^Args_Sink) -> (sig: Signal, done: bool) {
 	return .Go, false
 }
 
-// A container's members as a slice.
 elements :: proc(v: Value) -> []Value {
 	if a, is_arr := v.(^Array); is_arr {
 		return a.items[:]

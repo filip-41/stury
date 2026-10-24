@@ -44,8 +44,7 @@ read_dialect := json.Dialect.Json
 is_space :: walk.is_space
 
 // json.build's document without its decoding: a `.Nodes` scan's rows, whose escaped strings and keys the
-// readers decode on first read, so a filter pays only for those it reads. Its refusals are build's errors,
-// and nothing in the tool calls build.
+// readers decode on first read, so a filter pays only for those it reads. Its refusals are build's errors.
 build_rows :: proc(
 	src: []byte,
 	dialect := json.Dialect.Json,
@@ -354,7 +353,6 @@ valid_utf8 :: proc(s: string) -> string {
 	return strings.to_string(b)
 }
 
-// `valid_utf8(s)` written to `b`.
 write_valid_utf8 :: proc(b: ^strings.Builder, s: string) {
 	for i := 0; i < len(s); {
 		n, ok := utf8_next(s[i:])

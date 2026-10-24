@@ -46,13 +46,13 @@ SUITE = os.path.join(HERE, "jq-1.8.2")
 # Seconds a case may take; STURY_TEST_TIMEOUT raises it for a sanitized build (make test-asan).
 TIMEOUT = float(os.environ.get("STURY_TEST_TIMEOUT", "10"))
 sys.setrecursionlimit(100000)
-# Megabytes a case may hold; macOS enforces no RLIMIT_AS, so a runaway case such as `[repeat(1)]` (about
-# 3 GB a second) would otherwise take tens of GB before TIMEOUT stops it.
+# Megabytes a case may hold; macOS enforces no RLIMIT_AS, so a runaway case such as `[repeat(1)]` would
+# otherwise take tens of GB before TIMEOUT stops it.
 MEM_CAP_MB = int(os.environ.get("STURY_TEST_MEM_MB", "3000"))
 
 
 def resident_mb(pid):
-    """Process `pid`'s resident megabytes, read without starting a process (a `ps` per poll stalled the suite's
+    """Process `pid`'s resident megabytes, read without starting a process (a `ps` per poll would stall the suite's
     stdin feeds); 0 when it is gone or the platform has no reader."""
     if sys.platform == "darwin":
         info = (ctypes.c_uint64 * 12)()  # struct proc_taskinfo; pti_resident_size is its second field
@@ -69,7 +69,7 @@ _libproc = ctypes.CDLL("/usr/lib/libproc.dylib") if sys.platform == "darwin" els
 
 
 # Cases running at once, and the resident megabytes all live children may hold before a new case waits to start:
-# a pool of one worker per core (22 here) with each child allowed MEM_CAP_MB starved the cases of wall time.
+# one worker per core with each child allowed MEM_CAP_MB would starve the cases of wall time.
 MAX_WORKERS = min(8, os.cpu_count() or 1)
 RSS_BUDGET_MB = int(os.environ.get("STURY_TEST_RSS_BUDGET_MB", "5000"))
 _live = set()
@@ -445,7 +445,7 @@ def check_repeated_root(stury, diff, filter, text):
 
 
 # A reduce whose update rebuilds or regrows its whole state each step frees the state it replaces, as jq's
-# reference counts do: each takes a few MB, where one that kept every step's state took GB.
+# reference counts do: each takes a few MB, where one that keeps every step's state takes GB.
 REDUCE_MEMORY = [
     ('reduce range(50000) as $i (""; . + "abcdefghij" + " ") | length', "550000"),
     ('reduce range(50000) as $i ([]; . + [$i] + [$i]) | length', "100000"),
@@ -496,8 +496,7 @@ def check_stdin_file(stury, diff, offset, text, filter):
 # plain one.
 def check_stdout_closed(stury, diff, filter):
     # fd 1 is a read-only /dev/null rather than closed: a closed fd 1 is the next descriptor a start-up open
-    # takes (CI's macOS 15 ASan build then wrote its output there), and a read-only one fails every write
-    # with the same EBADF.
+    # takes, so the output would land there, and a read-only one fails every write with the same EBADF.
     def run(argv):
         fd = os.open(os.devnull, os.O_RDONLY)
         try:

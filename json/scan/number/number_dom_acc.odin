@@ -35,8 +35,6 @@ dom_flag_state :: #force_inline proc(f: Row_Flags) -> Exactness {
 // `DOM_MANT_MAX5[e] = ceil(2^53 / 5^e)`: the positive side of `dom_exact_scale`, asked by
 // comparison instead of a `u128` product. For integers `o, e >= 0`,
 // `o * 5^e < 2^53  <=>  o < ceil(2^53 / 5^e)`, an identity over the integers.
-// A test re-checks it against the product, exhaustively. The tight ends pin the table: `C[0] = 2^53` and `C[22] = 4`, so at `e = 22` only odd parts 1 and 3
-// survive (`dom_exact_scale(3, 22)` is true, `(5, 22)` false).
 @(rodata)
 DOM_MANT_MAX5: [23]u64 = {
 	9007199254740992, 1801439850948199, 360287970189640, 72057594037928,

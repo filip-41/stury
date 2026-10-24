@@ -5,7 +5,7 @@ package index
 // the runtime check). A block is one register, so each lane mask is one compare into a mask register where
 // four 16-byte windows take a compare and a movemask each, and the string region's prefix XOR is one
 // carry-less multiply where the shift chain takes twelve operations in a row. It lists the same positions and
-// leaves the same carries and region flags as `classify_narrow`, which the scan tests check.
+// leaves the same carries and region flags as `classify_narrow`.
 
 import "base:intrinsics"
 import "core:simd"

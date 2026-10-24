@@ -232,7 +232,6 @@ bind_each :: proc(b: ^Binder, todo: ^Pending, env: ^Env, st: ^Path_State) -> Sig
 	return .Go
 }
 
-// Whether a variable `name` is bound in `env` below `base`.
 bound_since :: proc(env, base: ^Env, name: string) -> bool {
 	for e := env; e != base; e = e.parent {
 		if e.name == name {

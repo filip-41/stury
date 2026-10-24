@@ -1,51 +1,17 @@
 # stury codec internals
 
-Notes for contributors, not a user guide. This page explains how the writer (`marshal`, `marshal(&doc)`, the
-edits), the typed reader (`unmarshal`, `unmarshal_check`) and the command line's filter handling work, and why
-they are built that way. The public names and their contracts are their doc comments (start at
-`json/json.odin`). This page does not repeat them. Where a claim is a design reason rather than a measurement,
-it says so.
+Notes for contributors on how the writer (`marshal`, `marshal(&doc)`, the edits), the typed reader
+(`unmarshal`, `unmarshal_check`) and the command line's filter handling work, and why. The public names'
+contracts are their doc comments (start at `json/json.odin`) and are not repeated here. Terms such as *walk*,
+*lane*, *frame* and *type plan* are defined in the [Vocabulary](#vocabulary).
 
-## At a glance
+Sections: [1 Encode jobs and the shared plan](#1-encode-jobs-and-the-shared-plan), [2 The writer](#2-the-writer),
+[3 Writing scalars](#3-writing-scalars), [4 `marshal` of a `Document`](#4-marshal-of-a-document),
+[5 `marshal`](#5-marshal), [6 Edits](#6-edits), [7 `unmarshal`](#7-unmarshal),
+[8 Across formats](#8-across-formats), [9 How the CLI runs a filter](#9-how-the-cli-runs-a-filter),
+[10 Build-time options](#10-build-time-options).
 
-Terms such as *walk*, *lane*, *frame* and *type plan* are defined in the [Vocabulary](#vocabulary) in §1.
-
-- [**§1 Two directions, one plan**](#1-two-directions-one-plan) — encode's three jobs, how each one writes
-  scalars, and how the read direction pairs with `marshal`.
-- [**§2 The writer**](#2-the-writer) — the put layer, punctuation, re-escaping, and streaming to an
-  `io.Writer`.
-- [**§3 Writing scalars**](#3-writing-scalars) — how strings, integers and floats are written.
-- [**§4 `marshal` of a `Document`**](#4-marshal-of-a-document) — the row walk that copies authored spans, and
-  its compact and pretty engines.
-- [**§5 `marshal`**](#5-marshal) — the type plan, the types and objects it writes, cycles and depth, and
-  `Raw`.
-- [**§6 Edits**](#6-edits) — `splice`, why `set` needs no re-validation, and `insert`/`remove`.
-- [**§7 `unmarshal`**](#7-unmarshal) — the type table, fields and duplicates, strictness, ownership, errors,
-  and the walk engine.
-- [**§8 Across formats**](#8-across-formats) — how `core` is shared, how `stury:csv` is built on it, and the
-  design for further formats.
-- [**§9 How the CLI runs a filter**](#9-how-the-cli-runs-a-filter) — path scan versus interpreter, and large
-  inputs.
-- [**§10 Build-time options**](#10-build-time-options) — the `-define:` knobs.
-
-## What `unmarshal` accepts and refuses, in short
-
-`unmarshal` reads one JSON value into an Odin value, checking it against the target's type as it goes (details
-in [§7.1](#71-the-type-table)).
-
-- **Accepts:** `null`, booleans, integers in range, floats, strings, arrays and objects into the matching Odin
-  types (structs, slices, dynamic and fixed arrays, maps with string, enum or integer keys, pointers, unions,
-  `Maybe`, bit sets, enums, `any`, `Raw`).
-- **Refuses, with an error that names the byte and the path:** a value of the wrong JSON kind, an integer out
-  of range or written with a fraction, a float no binary64 holds, an enum name no member has, a fixed array of
-  the wrong length, a missing `required` field, an unknown key under `unknown_fields = .Refuse`, and ambiguous
-  unions.
-- **Refuses before reading a byte (`.Unsupported`):** types with no JSON form, such as `#raw_union`, `#soa`,
-  complex numbers and UTF-16 strings.
-- **Never frees** what it allocates, and a refused input may leave the target partly written
-  ([§7.4](#74-ownership-and-zeroing)).
-
-## 1. Two directions, one plan
+## 1. Encode jobs and the shared plan
 
 Encode has three jobs, and how a scalar is written follows from where the value came from.
 
@@ -60,13 +26,10 @@ from a document keeps its bytes. Editing mixes the two: a new value is written c
 other byte is copied. The read direction pairs with `marshal`: `unmarshal` reads into the same types through
 the same `Type_Plan`. Tags, field order and `omitempty` therefore cannot drift between the two directions.
 
-The rows are the format-neutral layer. A writer receives structure (open, key, value, close) and scalars. The
-JSON and CSV have writers. [§8](#8-across-formats) says what they share and how a further one is added
-without reworking either.
+The rows are the format-neutral layer. A writer receives structure (open, key, value, close) and scalars.
+JSON and CSV each have a writer; [§8](#8-across-formats) says what they share and how a further one is added.
 
 ### Vocabulary
-
-Terms used throughout, defined once:
 
 - **Row**: one 32-byte entry of a `Document` for one JSON value, holding its kind, its key and value spans,
   and where its subtree ends. Rows are stored in the order the values appear in the text (preorder).
@@ -107,7 +70,7 @@ The writer builds JSON text through a put layer that never checks container stat
 
 ### 2.1 The put layer
 
-The put layer's callers own structure, so a state machine per value would only slow `marshal` and `marshal(&doc)`.
+The put layer's callers own structure, so it keeps no per-value state machine.
 
 - The writer is `put_*`, in package `json/encode`. Package `json` does not forward it. It works on a
   `^[dynamic]u8`.
@@ -141,7 +104,6 @@ keys, as `stury -S` does.
 - A JSONC member's comments move with it.
 - Like `jq_spelling` it is not applied to a `marshal` of an `any`: a map is already sorted
   ([§5.3](#53-objects)) and a struct keeps its declaration order.
-- Any unsorted `Document` marshal takes the same path as before.
 
 ### 2.3 Re-escaping
 
@@ -205,15 +167,15 @@ decimal digits with an optional leading `-`: no exponent, no fraction, no leadin
 
 Non-finite values are `Non_Finite` and write nothing. A finite value is written in three steps.
 
-1. **Digits.** The shortest decimal that round-trips, from a line-by-line port of zmij's `to_decimal`.
+1. **Digits:** the shortest decimal that round-trips, from a line-by-line port of zmij's `to_decimal`.
    - zmij is the `zmij` crate 1.0.23 (MIT), itself a port of vitaut/zmij (a Schubfach variant).
    - Its `POW10_SIG`, `EXP_SHIFT` and `EXP_STRING` tables are generated exactly by
      `core/spell/zmij_tables.py`.
    - The generator also repeats the crate's own table rebuild and checks every entry against the exact one.
    - Subnormals take a separate arm.
-   - `core:strconv.write_float` is not used on this path: it formats through multi-precision decimal
-     arithmetic and is several times slower.
-2. **Layout.** ECMAScript's `Number::toString` rules, which give the text `JSON.stringify` produces, except
+   - `core:strconv.write_float` is not used on this path; it formats through multi-precision decimal
+     arithmetic.
+2. **Layout:** ECMAScript's `Number::toString` rules, which give the text `JSON.stringify` produces, except
    for negative zero.
 
    With `k` digits `d1…dk` and `n = k + exponent`:
@@ -224,11 +186,10 @@ Non-finite values are `Non_Finite` and write nothing. A finite value is written 
    - otherwise: `d1`, then `.d2…dk` when `k > 1`, then `e`, a sign, and `n − 1` (`1e+21`, `1.5e-7`).
    - `-0.0` is written `-0`. ECMAScript prints `0`, which would lose the sign bit, and the output must read
      back to the same `f64` bits.
-3. **Round trip.** The scanner's `number_span` on the written bytes returns the same `f64` bits, sign of zero
+3. **Round trip:** the scanner's `number_span` on the written bytes returns the same `f64` bits, sign of zero
    included.
    - An integer-valued float is written without a fraction (`1.0` is written `1`), so `decode_span` may read
-     it back in
-     the `i64` arm.
+     it back in the `i64` arm.
    - What is guaranteed is the `f64` bits, not which arm reads them.
    - The round trip is checked on the special set and on 10⁶ random bit patterns, and `make test` checks the
      layout goldens.
@@ -284,10 +245,9 @@ Refusals:
   tree is one JSON text.
 - `Too_Deep` for one nested past `MAX_DEPTH`, which only a document built under a raised `max_depth` can be.
 
-**Boundary for later writers.** The row walk calls only these: open a container, write a key, write a scalar
-span, close. It does not inspect JSON bytes. Minify is the JSON-to-JSON shortcut and stays in `json/encode`.
-When a second output format arrives, the walk moves out of `json/encode` and takes the writer as a
-compile-time parameter (`$W`). Until then there is one writer, and no interface.
+**Boundary for later writers.** The row walk only opens a container, writes a key, writes a scalar span and
+closes, and does not inspect JSON bytes. Minify is JSON to JSON and stays in `json/encode`. A second writer of
+rows would move the walk out of `json/encode` and take the writer as a compile-time parameter (`$W`).
 
 ## 5. `marshal`
 
@@ -427,15 +387,11 @@ same bytes.
 
 ## 7. `unmarshal`
 
-`unmarshal` reads one JSON value into an Odin value in one forward pass, checking it against the target's type
-while it reads. Its two strictness levels, `.Strict` and `.Lazy`, are defined in [§7.3](#73-strictness). It
-checks the JSON kind each
-target accepts, required fields, integer and float ranges, fixed array lengths, enum membership and unknown
-keys. It builds no document and no rows ([§7.6](#76-the-engine)). `unmarshal_check` is the same walk with no
-target, and it reports the same errors. With a kept plan, nothing is allocated after the plan's first use.
-
-Under `.Lazy`, above a size gate ([§7.3](#73-strictness)), the walk may build a structural skip index on the
-stack. Where the pieces live:
+`unmarshal` reads one JSON value into an Odin value in one forward pass, checking the JSON kind each target
+accepts, required fields, integer and float ranges, fixed array lengths, enum membership and unknown keys. It
+builds no document and no rows ([§7.6](#76-the-engine)). `unmarshal_check` is the same walk with no target and
+reports the same errors. With a kept plan, nothing is allocated after the plan's first use. `.Strict` and
+`.Lazy` are in [§7.3](#73-strictness). Where the pieces live:
 
 - `json/unmarshal.odin`: the package-level names. `core/unmarshal_error.odin`: the error and its kinds.
 - `core/read_shape_lower.odin`: the lowering. `core/shape.odin`: the plain-data shape.
@@ -636,8 +592,8 @@ loop does what the walk and its hooks would do, in the same order, so every erro
 path. Whatever a loop cannot take (an escaped, repeated or unknown key, a container value, a malformed scalar)
 is handed back at the same byte with the same frames, for the walk to check again.
 
-The loops share the walk's leaf decoding and list growth and return no `Error`: carried out of every value, it
-cost the loop its registers.
+The loops share the walk's leaf decoding and list growth. They return no `Error`, so that their state stays in
+registers.
 
 **Liveness.** The hooks keep a stack of live frames, the containers that have a target, which are exactly the
 walk's innermost open containers. A value is read only at the live depth, and a deeper value belongs to a
@@ -650,7 +606,7 @@ Every value is therefore read, checked only (under `.Strict`), or skipped withou
 padded struct even then.
 
 **Why forward.** A type usually reads every record's fields, so a backward locate has no tail to skip. The
-framing pass a backward locate needs costs what the skipping walk costs (a design reason, not measured).
+framing pass a backward locate needs costs what the skipping walk costs.
 `.Last` is served forward by overwriting.
 
 **Why no rows.** A type reads members by name and elements in order, which the forward walk serves. Rows only
@@ -774,8 +730,8 @@ The rest is forward design: how a later format (TOML) joins, and how formats wou
 A filter runs by one of two routes: a path scan or the interpreter.
 
 **Path scan.** A path in `parse_path`'s subset, or `select(PATH OP literal)` with no `[]`, is one `.Path` scan
-per input. These options send the filter to the interpreter instead: `-n`, `-s`, `-S`, `-a`, `-e`, `-R`,
-`--raw-output0`, `--seq`, `--stream`.
+per input. The options that send a filter to the interpreter instead are listed in
+[cli.md](cli.md#behaviour-notes).
 
 A path with `[]` is scanned `per_element`. An element in which the rest of the path misses a member prints
 `null`, as in jq. A text on which jq would error is handed to the interpreter before any of its outputs print:
@@ -786,10 +742,6 @@ batch pool.
 **Interpreter.** Any other filter runs on the interpreter, over each input built whole into a `Document`.
 Duplicate keys are `.Last`, as in jq. A JSONC text with a `/` in it runs on the interpreter, which tracks
 where each value came from, and JSONC without one keeps the path scan.
-
-**Printing.** A scalar result is printed as jq prints it, not as its source text (`1E2` is `1E+2`, `"\/"` is
-`"/"`). A container is printed as jq prints it. In colour (a terminal, `-C`) it is built from the text and
-then painted.
 
 **Line-delimited input.** It needs no flag: the filter route detects it, and a path or a compact `.` over it
 is answered in pieces on a `host.Batch_Pool` kept for the run. The pieces start with the first line. `stury
@@ -816,9 +768,8 @@ record it cannot write. The BOM check applies only to the output's first cell: t
 cell starts with a BOM (`opens_with_bom`), and `rows_begun` carries the state across pieces and flushes. `stury check
 --from csv|tsv` is `csv.validate` with the sequential read run again over the fault it found, for the message.
 
-**Streams.** A pipe or an `--unbuffered` stdin is read by a thread in 64 KiB blocks, up to 8 MiB ahead, and
-each window of whole lines that has come is answered before the next (line-delimited records run on the batch
-pool).
+**Streams.** A pipe or an `--unbuffered` stdin is read by a thread ([cli.md](cli.md#files-and-pipes)), and
+line-delimited records in each window run on the batch pool.
 
 ## 10. Build-time options
 

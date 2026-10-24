@@ -5,7 +5,6 @@ package json
 import "base:runtime"
 import core_pkg "../core"
 import "scan/walk"
-import scan_pkg "scan"
 
 // Duplicates selects which occurrence of a key repeated within one object answers a path (core's
 // `Duplicates`). A path through `Any` still answers once per match, and each object resolves its own repeats.
@@ -270,28 +269,6 @@ find :: proc(
 		a = out[0]
 	}
 	return a, nil
-}
-
-// The whole-document result over the bytes the last scan read. `nil` is the only claim "this document is
-// valid".
-//
-//	- A no-op when that scan covered them (`coverage == .Full`, no stop), else a `.Strict` re-walk under the
-//	  request's limits.
-//	- A refused scan covered nothing.
-//	- The result is committed to the request: `coverage` becomes `.Full`, `stop` nil, so a second call is
-//	  the no-op.
-//	- Under `Duplicates.Refuse` the re-walk refuses a repeated key too. A refused spill of its keys is
-//	  `.Out_Of_Memory` at offset 0.
-@(require_results)
-validate_remaining :: proc(req: ^Request($KINDS)) -> Maybe(Error) {
-	// The key check keeps its spilled keys in `context.allocator`, as `scan` does, given back
-	// on return.
-	prev := context.allocator
-	context.allocator = request_allocator(req)
-	defer context.allocator = prev
-	err, validity := scan_pkg.validate_remaining(req.src, req.verdict, req.coverage, req.stop, req.limits, REFUSE_DUPLICATES && req.duplicates == .Refuse)
-	req.verdict, req.coverage, req.stop = err, validity, nil
-	return err
 }
 
 // Free everything the request holds, the document and the parsed paths included, and empty it. The inputs

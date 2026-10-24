@@ -430,8 +430,8 @@ scan_queries_in :: #force_inline proc(
 	// The edge lives on the context and is read by the emit procs directly: threading it through the
 	// walk as a parameter would cost it registers across every inlined proc.
 	when .Nodes in Q {
-		// Cold sinks otherwise grow 256, x4, x4, copying every rung: reserve once before the edge is
-		// borrowed. A refused reserve is ignored. The ladder still runs.
+		// Reserve once before the edge is borrowed, rather than grow a cold sink rung by rung. A refused
+		// reserve is ignored.
 		seed_row_cap(ctx.nodes_sink, len(src))
 		ctx.nodes_edge = take_edge(ctx, ctx.nodes_sink, .Nodes)
 	}
@@ -493,8 +493,6 @@ scan_queries_in :: #force_inline proc(
 		for i in 0 ..< ctx.n_paths {
 			run := &ctx.path_runs[i]
 			if len(run.steps) == 0 {
-				// `emit_path` returns the refusal rather than taking the context. This caller has no run
-				// loop around it.
 				if emit_path(run, walk.path_answer_of(run, .Found, ctx.root_lo, root_hi, walk.NO_OWNER, walk.kind_at(src, ctx.root_lo))) {
 					note_oom(ctx, .Path)
 				}
@@ -558,8 +556,7 @@ validate_remaining :: proc(
 	return scan_plain_deep(src, .Strict, limits) if deep else scan_plain(src, .Strict, limits), .Full
 }
 
-// Last-byte framing, shared by both document entries: whatever the level, bytes
-// past the document are Trailing at the first of them.
+// Bytes past the document are `Trailing` at the first of them, at every level.
 finish :: #force_inline proc(s: ^Scanner) -> Maybe(Error) {
 	lex.skip_ws(s)
 	if s.pos != u64(len(s.src)) {

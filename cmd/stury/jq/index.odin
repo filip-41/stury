@@ -3,7 +3,6 @@ package jq
 // Indexing: `.name`, `.[e]`, `.[e:f]` and `.[]`, and the index and slice of a value.
 
 import "core:math"
-import "core:strings"
 
 // `.name`, `.[e]`, `.[e:f]` and `.[]`: `n.a`'s outputs indexed.
 @(private)
@@ -276,7 +275,7 @@ indices_of :: proc(t: Value, sub: Value) -> Value {
 
 // `indices_of` when `sub` holds only scalars: every element is read into its atom once, and a window is
 // compared by atoms, not by equal() on rows. The all-matching window (zeros in zeros) stays n * m, a ceiling.
-// The result is false when `sub` holds an array or object, which `indices_of` compares as before.
+// The result is false when `sub` holds an array or object, which `indices_of` compares.
 @(private = "file")
 scalar_indices :: proc(t, sub: Value, out: ^Array) -> (fast: bool) {
 	ss := make([]Sort_Atom, length_of(sub))

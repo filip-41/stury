@@ -484,7 +484,6 @@ walk_frames :: #force_inline proc(
 			case:
 				return Error{offset = s.pos, kind = .Bad_Char}
 			}
-			// A scalar ended at `s.pos`.
 			when .Path in Q || .Demand in Q {
 				if after_scalar(s, q, lo, sp, &demand_pend, Q, may_stop, stopped) {
 					return nil
@@ -512,8 +511,8 @@ walk_frames :: #force_inline proc(
 			if c == ',' {
 				s.pos += 1
 				cursor_advance(cur)
-				// Strict cursors keep the original comma body. `Jsonc_Cursor` is not one of them:
-				// `walk_value` never builds it, so this arm is not in the strict walk.
+				// Strict cursors take the `else` arm. `walk_value` never builds a `Jsonc_Cursor`, so this arm is
+				// not in the strict walk.
 				when C == Jsonc_Cursor {
 					// Tested second: only a comma before the closer reads the grammar.
 					if cursor_skip_peek(s, cur) != closer || cur.json {
@@ -649,7 +648,6 @@ walk_string :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, cur: ^$C, $check: 
 	return nil
 }
 
-// The `true`, `false` or `null` at `s.pos`, as a value of the walk.
 @(private = "file")
 walk_literal :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, cur: ^$C, $check: Check_Level, $Q: bit_set[Walk_Kind], lo, sp: u64) -> Maybe(Error) {
 	known := false

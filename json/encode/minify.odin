@@ -173,8 +173,8 @@ minify_dense :: #force_no_inline proc(out: [^]u8, span: []byte, state: ^Minify_S
 }
 
 // The whole 64-byte blocks at the start of `span` up to the first that holds a byte below 0x21, copied to
-// `out`. Returns their length. A run of CLEAN_CHUNK bytes with none is copied by `memcpy`, which stores faster than
-// a loop of vector moves does.
+// `out`. Returns their length. A run of CLEAN_CHUNK bytes with none is copied by `memcpy`, which stores faster
+// than a loop of vector moves does.
 @(private = "file")
 copy_unblank :: proc(out: [^]u8, span: []byte) -> int #no_bounds_check {
 	V :: #simd[16]u8

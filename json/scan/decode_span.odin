@@ -61,7 +61,6 @@ decode_span :: proc(
 	}
 	switch kind {
 	case .Null, .True, .False:
-		// The span must have the kind it was read as.
 		literal := "null"
 		if kind != .Null {
 			literal = "true" if kind == .True else "false"
@@ -171,7 +170,6 @@ decode_short_int :: #force_inline proc(src: []byte, lo, hi: u64) -> (v: i64, ok:
 	return -v if neg else v, true
 }
 
-// `decode_span`'s `.Number` arm for the token `src[lo:hi]`, lexed as `lexed`.
 @(private)
 decode_number_lexed :: proc(src: []byte, lo, hi: u64, lexed: number.Number_Lex) -> (d: Decoded, ok: bool) {
 	if !lexed.ok {

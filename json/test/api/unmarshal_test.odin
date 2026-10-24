@@ -217,7 +217,7 @@ Um_Logs :: struct {
 	logs: []Um_Flat,
 }
 
-// `null` is not an empty string or list, as Go would take it: it is the wrong kind for both (owner, 2026-10-14).
+// `null` is not an empty string or list, as Go would take it: it is the wrong kind for both.
 @(test)
 test_unmarshal_null_into_string_or_list :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)

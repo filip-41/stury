@@ -12,7 +12,7 @@ import "base:runtime"
 // a slot's low bits are its entry's index + 1. Slots start zeroed. Key bytes load as unchecked words:
 // `key_hash_short` reads 16 bytes from the key's first, which the inline gate's `lo + 17 <= len(src)`
 // proves, and `key_hash` reads whole words before the closing quote, then one more only while eight bytes
-// remain in `src`. A differential test against the reference refuse law checks it.
+// remain in `src`.
 
 KEY_SCRATCH :: 64
 

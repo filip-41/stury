@@ -48,7 +48,6 @@ Root_Chunk :: struct {
 	alone:  bool,
 }
 
-// Chunk `k` of the job's text, and its bytes.
 chunk_text :: proc(job: ^Root_Job, k: int) -> (c: Root_Chunk, text: []byte) {
 	c = job.chunks[k]
 	return c, job.src[c.lo:c.hi]

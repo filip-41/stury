@@ -23,8 +23,6 @@ stury -h | -V | --build-configuration
 
 ## Quick examples
 
-Each example is a real invocation of the built binary.
-
 ```sh
 $ echo '{"foo": 0}' | stury .
 {
@@ -78,10 +76,10 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 | `check`, `validate` | A subcommand, recognised when it is the first argument that is not an option, before any `--` (`stury -c check FILE`); under `-f` that argument is the program file. See [`check`](#check). |
 | `--from FORMAT` | Read `json` (the default), `jsonc`, `ndjson`, `csv` or `tsv` ([Formats](#formats)). |
 | `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv` or `tsv` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output)). |
-| `--ndjson`, `--jsonc`, `--csv`, `--tsv` | Each is `--from` and `--to` of that format. An explicit `--from` or `--to` overrides its half, given before or after. |
-| `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output, in the order first seen. It holds all the output until the input ends ([CSV and TSV output](#csv-and-tsv-output)). |
+| `--ndjson`, `--jsonc`, `--csv`, `--tsv` | Each is `--from` and `--to` of that format ([Formats](#formats)). |
+| `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output ([CSV and TSV output](#csv-and-tsv-output)). |
 | `--max-depth N` | Refuse nesting past N levels (1024 by default, up to 2^20, where jq's limit is 10000). |
-| `--strict-limits` | `check` only. Keep the library's limits: numbers of at most 256 digits and a scale of at most 4096. |
+| `--strict-limits` | `check` only. Keep the library's limits, for input bound for the library: numbers of at most 256 digits and a scale of at most 4096. Nesting follows `--max-depth` either way. |
 
 ### Options that differ from jq
 
@@ -97,7 +95,10 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 
 - Plain paths such as `.a.b[]` are answered without building the document. These options switch to the
   general interpreter, which may be slower on large inputs: `-n`, `-s`, `-S`, `-a`, `-e`, `-R`,
-  `--raw-output0`, `--seq`, `--stream`, `--from csv`, `--from tsv`, `--to csv`, `--to tsv`.
+  `--raw-output0`, `--seq`, `--stream`.
+- Under `--from csv` or `--from tsv`, a filter that only picks columns (`.name`, `.a, .b`, `[.a, .b]`,
+  `{a, b: .c}`, `.`, or `select(F)` where `F` reads named columns) is answered from each record's cells,
+  without building an object, and on threads for a large file. Any other filter runs on the interpreter.
 - A key repeated in one object is read as jq reads it: the last value wins.
 - A scalar result is printed as jq prints it, not as its source text (`1E2` is `1E+2`, `"\/"` is `"/"`).
 
@@ -115,11 +116,11 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 | `--ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence. |
 | `--jsonc` | Validate JSONC as `stury --jsonc .` reads it, to the same limits. A comment's text holds no escape. |
 | `--from FORMAT`, `--csv`, `--tsv` | Validate as `stury --from FORMAT .` reads. CSV and TSV are judged by `csv.validate`, and a fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An input with no record fails with `No CSV text` or `No TSV text`. |
-| `--strict-limits` | Keep the library's limits (numbers of at most 256 digits and a scale of at most 4096), for input bound for the library. Nesting follows `--max-depth` either way. |
-| `--max-depth N` | Refuse nesting past N levels, as for the filter. |
+| `--strict-limits`, `--max-depth N` | As [above](#sturys-own-options). |
 | `FILE...` | One file per argument, read as the filter reads them. |
 
-`check` writes nothing, so `--to` (and the aliases' output half) with a format other than the default is a usage error.
+`check` writes nothing, so `--to` with a format other than the default is a usage error. `--csv` and `--tsv`
+set only the input format there.
 
 Exit codes: 0 on success, 5 for invalid input, 2 for a usage or file error.
 
@@ -137,16 +138,15 @@ Exit codes: 0 on success, 5 for invalid input, 2 for a usage or file error.
 - `--ndjson`, `--jsonc`, `--csv` and `--tsv` set both halves: `--csv` is `--from csv --to csv`. An explicit
   `--from` or `--to` replaces its half of an alias, before or after it: `--csv --to json` reads CSV and
   prints JSON, and `--to json --csv` does the same. Two aliases that disagree (`--csv --tsv`) are a usage error.
-- `--ndjson` prints compact, one value per line, so it is a usage error with `--indent`, `--tab` and `--seq`
-  (the option used to leave the layout alone). `--from ndjson` alone reads lines and prints as `-c`, `--indent`
-  and `--tab` say. A refusal under an alias says that the alias set the output format too.
+- `--ndjson` prints compact, one value per line, so it is a usage error with `--indent`, `--tab` and `--seq`.
+  `--from ndjson` alone reads lines and prints as `-c`, `--indent` and `--tab` say. A refusal under an alias says that the alias set the output format too.
 - Reading CSV or TSV is a usage error with `-R`, `--seq` and `--stream`. Writing it is one with `-r`, `-j`,
   `-a`, `-C`, `-c`, `--indent`, `--tab`, `--seq` and `--raw-output0`, which shape JSON text. `-S`, `-e`, `-n`,
   `-s`, `--arg` and the rest still apply. `--to ndjson` takes the place of `-c`, so it is refused with `--indent`, `--tab` and `--seq`.
 
 ## Input
 
-### One grammar
+### Grammar
 
 Every input is read by one grammar, the library's: `validate` with `dialect = .Json`, or `.Jsonc` under
 `--jsonc`.
@@ -161,9 +161,8 @@ Every input is read by one grammar, the library's: `validate` with `dialect = .J
 ### Line-delimited and large input
 
 - NDJSON needs no flag: stury detects it, and answers a path or a compact `.` over it on several threads.
-- `--ndjson` declares the input line-delimited. Each line is one text (a blank one is none), and a line that
-  is not one text, or holds two, is a parse error where jq would read on. `stury check --ndjson` validates
-  the same lines.
+  `--ndjson` makes each line one text ([Formats](#formats)), and `stury check --ndjson` validates the same
+  lines.
 - Over a large top-level array, `.[] PATH` and `.key[] PATH` also run on several threads. When a path with
   `[]` meets an element where the rest of the path has no match, it prints `null`, as in jq.
 - A text on which jq would error is run through the general interpreter before any of its outputs print, so
@@ -202,7 +201,8 @@ $ stury --from csv -r '[.name, .age] | @csv' people.csv
   Any other escape, or a backslash ending a cell, is a fault. A UTF-8 byte order mark at a file's start is
   skipped.
 - **Each file has its own header**, and files may have different columns. `-s` slurps every record of
-  every file into one array, and `-n` with `input` and `inputs` reads the records.
+  every file into one array, and `-n` with `input` and `inputs` reads the records. `input_filename` and
+  `input_line_number` name the file and the line the last record ends at.
 - **Faults.** A header name given twice, a record with a field count other than the header's, a quote or
   carriage return where it cannot be, an unfinished quoted field, a bad escape and a byte that is not UTF-8
   end the file. The message is `FILE:LINE:COLUMN: fault` (`<stdin>` for standard input), with exit 5. The
@@ -225,9 +225,6 @@ $ stury --from csv -r '[.name, .age] | @csv' people.csv
   (`select(.qty | tonumber >= 9000)`). There the interpreter is given only those cells, and each output prints
   the record. A whole file of a few hundred KiB or more is split across all cores and printed in file order.
   Any other filter, and `-n`, `-s`, `-e`, `-a`, `-C` and `--raw-output0`, run on the interpreter.
-- **Combinations.** CSV and TSV are not read with `-R`, `--seq` or `--stream`. One input has one format:
-  `--csv --tsv` is a usage error (exit 2).
-  `input_filename` and `input_line_number` name the file and the line the last record ends at.
 
 ### CSV and TSV output
 
@@ -247,8 +244,7 @@ $ stury --csv 'select(.n | tonumber > 1)' people.csv
   after the rows before it. A key the object lacks is an empty cell.
 - **`--grow-header`** holds every output until the input ends, then writes a header of every key in the order
   first seen (in byte order under `-S`), and a row for each object with an empty cell for each key it lacks.
-  Memory holds all the output. It is a usage error without
-  `--to csv` or `--to tsv`.
+  Memory holds all the output. It is a usage error without `--to csv` or `--to tsv`.
 - **Arrays and scalars are rows with no header.** An array's elements are the cells; a scalar is a row of one
   cell. Objects and the other kinds do not mix. The first output of the other kind ends the run.
 - **Cells.** A string is its text, a number is spelled as jq spells it (`1E+3`), `true` and `false` are
@@ -262,8 +258,7 @@ $ stury --csv 'select(.n | tonumber > 1)' people.csv
   cell (a lone `null`, `[]`, or `{}` under a one-key header), which would read back as an empty line; and in
   TSV, a first cell that starts with a byte order mark.
 - **One table.** All the files of a run and all its inputs share one header.
-- **Streaming.** Rows are written as the outputs come, except under `--grow-header`. A column filter on CSV
-  or TSV input is still split across all cores, with the interpreter's output.
+- **Streaming.** Rows are written as the outputs come, except under `--grow-header`.
 
 ### Files and pipes
 
@@ -279,8 +274,7 @@ $ stury --csv 'select(.n | tonumber > 1)' people.csv
 
 ## CSV and TSV recipes
 
-Each command below runs on this file, `cities.csv`. The last city has no population, and its name, which holds
-a comma, is quoted:
+Each command below runs on this `cities.csv`:
 
 ```
 city,country,population
@@ -364,8 +358,7 @@ name	age
 Grace	85
 ```
 
-**Check.** `check` prints nothing for a valid file. For a faulty one it prints the fault with its line and
-column, and exits 5.
+**Check.** A faulty file exits 5.
 
 ```sh
 $ stury check --from csv cities.csv
@@ -380,6 +373,7 @@ The exit codes are jq's, but the messages are stury's.
 | Fault | Message |
 | --- | --- |
 | A file that cannot be opened | `stury: error: Could not open file NAME: REASON` |
+| A directory given as a file | `stury: error: Is a directory` (as jq) |
 | A text that does not parse | `stury: parse error: MSG at line L, column C` |
 | The same, in a file after the first | `stury: parse error: NAME:L:C: SENTENCE`, counted in that file |
 | Any fault under `check` or `--jsonc` | `stury: error: NAME:L:C: SENTENCE`, such as `<stdin>:1:7: Invalid numeric literal` |
@@ -444,7 +438,7 @@ these places:
 stury reads strict RFC 8259 JSON and reports faults its own way. The rest of the language and the options are
 jq's.
 
-### Most users will notice
+### Common differences
 
 #### Stricter input
 
@@ -466,6 +460,7 @@ Nesting past 1024 levels (jq: 10000) is refused, `fromjson` included, unless `--
 A parse error names the fault (`Invalid numeric literal`, `Unexpected character`, `Unfinished JSON term`,
 `Invalid escape`, `Unexpected text after the JSON value`, `Exceeds depth limit for parsing`, ...) at the line
 and column of the byte it was found at, or one past the last byte when the input ended.
+`--stream-errors` is the exception: its positions are jq's, so at the end of input one column less.
 
 | | stury | jq |
 | --- | --- | --- |
@@ -476,7 +471,7 @@ and column of the byte it was found at, or one past the last byte when the input
 
 `fromjson` keeps jq's `Expected JSON value` and `Unexpected extra JSON values`.
 
-#### Each file stands alone
+#### Files are read separately
 
 Each file ends its texts. jq reads `1` in one file and `2` in the next as `12`, and continues a text cut at a
 file's end in the next file. A parse error in a file after the first names the file and counts its line and
@@ -586,6 +581,5 @@ differs from the library on purpose:
   pretty = true, indent = 2, trailing_newline = true`.
 - A JSONC `Document` keeps its comments as `stury --jsonc` prints them (a repeated key with its last value's).
   That does not apply to `marshal` of an `any`.
-- The jq spelling of numbers and strings and the placement of comments are each implemented once, in
-  `json/encode`, which the CLI calls.
+- The CLI prints through the library's writer in `json/encode`.
 - How the CLI runs a filter is described in [docs/codec.md](codec.md#9-how-the-cli-runs-a-filter).

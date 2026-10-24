@@ -17,8 +17,7 @@ parse :: proc(text: string, steps: []p.Step, names: []u8 = nil) -> (got: p.Path,
 }
 
 // Every text path must lower to exactly the steps (and limit) a caller would write by hand, so nothing
-// downstream can tell which form produced the path. The first block is one of each form of the jq subset
-// the parser takes: bare and quoted names, an index, a negative index, `[]` and the root.
+// downstream can tell which form produced the path.
 @(test)
 test_parse_lowers_to_hand_built_steps :: proc(t: ^testing.T) {
 	cases := []struct {
@@ -26,7 +25,6 @@ test_parse_lowers_to_hand_built_steps :: proc(t: ^testing.T) {
 		want:  []p.Step,
 		limit: int,
 	}{
-		// One of each form.
 		{".a.b", {N("a"), N("b")}, 0},
 		{`."a-b"`, {N("a-b")}, 0},
 		{`.["a-b"]`, {N("a-b")}, 0},
@@ -37,7 +35,6 @@ test_parse_lowers_to_hand_built_steps :: proc(t: ^testing.T) {
 		{`.a[""]`, {N("a"), N("")}, 0},
 		{".a[]", {N("a"), A{}}, 0},
 		{".", {}, 0}, // the root
-		// More of the subset.
 		{".port", {N("port")}, 0},
 		{".a.b.c.d.e", {N("a"), N("b"), N("c"), N("d"), N("e")}, 0},
 		{"._x1.Y_2", {N("_x1"), N("Y_2")}, 0},

@@ -302,8 +302,8 @@ HEAD_MEMBERS :: 64
 
 // Whether a path's skipping walk pays on the item's head: the root holds a container, which the walk may
 // leave unvisited, or enough whitespace for its index cursor to jump. Otherwise every value it would skip
-// is a scalar, which its index cursor passes slower than the byte walk reads it, so
-// `dispatch_walk_cursor` takes the byte walk. The probe reads at most HEAD_MEMBERS root members within the
+// is a scalar, which the index cursor passes slower than the byte walk, so `dispatch_walk_cursor` takes the
+// byte walk. The probe reads at most HEAD_MEMBERS root members within the
 // first sixteenth of the item. The answer only picks a walk: a head it cannot read keeps the skipping walk.
 path_skip_walk_pays :: #force_no_inline proc(src: []u8, root: int) -> bool {
 	p := Scanner{src = src[:root + (len(src) - root) >> 4], pos = u64(root)}

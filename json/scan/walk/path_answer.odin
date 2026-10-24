@@ -36,10 +36,6 @@ Path_Answer :: struct {
 // serves take no run.
 MAX_PATH_QUERIES :: 16
 
-// A path the automaton serves has at most `MAX_PATH_STEPS` steps; a longer one is refused before the walk
-// (`Over_Capacity`, `Path_Steps`). The negative-`Index` re-entry nests one frame array per step, so the cap
-// bounds stack use.
-
 // How many member starts each level remembers (`Query_Ctx.member_starts`): one per group of a stride's
 // members (`Path_Auto.ring_shift`), the group's latest, for the last `MEMBER_RING` groups. The level's
 // deepest negative `Index` sizes the stride, so its re-read resumes within one stride of the member it
@@ -365,7 +361,6 @@ path_stop_now :: #force_inline proc(
 	return false
 }
 
-// The run bit for a run index.
 @(private)
 run_bit :: #force_inline proc(i: int) -> u16 {
 	return u16(1) << u16(i)

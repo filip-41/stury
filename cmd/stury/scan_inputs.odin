@@ -141,7 +141,7 @@ records_from :: proc(run: ^Run, ins: ^Inputs, from: int) -> (stop: int) {
 // The lines of the open file after the text just answered, read as NDJSON records, in parallel, when
 // that text ends its line and the next line holds a text of its own: jq reads such lines as texts one after
 // another, so the answers are the same. The records go up to one that is anything else (`scan_records`),
-// and the stream goes on from there as before.
+// and the stream goes on from there.
 records_after :: proc(run: ^Run, ins: ^Inputs) {
 	data := ins.data
 	// The scan may have read on through the space after the text.

@@ -38,10 +38,8 @@ package main
 //	platform_windows.odin            the calls into the system, one file per platform
 //	jq/                              the jq interpreter (package `jq`)
 //	regex/                           the Oniguruma-compatible matcher behind `test`, `match` and `sub`
-//	test/                            the CLI's test assets: smoke.sh (end to end on its own options and guards),
-//	                                 jq_suite.py with cli.tsv, jq-1.8.2/ and modules/ (jq's own cases and the
-//	                                 command-line cases, each with jq's answer beside stury's), and jq_diff.py,
-//	                                 regex_diff.py (random filters and patterns compared with jq)
+//	test/                            smoke.sh, jq_suite.py with cli.tsv, jq-1.8.2/ and modules/, and the
+//	                                 jq_diff.py and regex_diff.py comparisons with jq
 
 import "core:fmt"
 import "core:os"
@@ -222,7 +220,12 @@ compile_errors :: proc(text: string, errors: []jq.Compile_Error) {
 	for e in errors {
 		fmt.eprintf("stury: error: %s\n", jq.locate(text, e))
 	}
-	fmt.eprintf("stury: %d compile error%s\n", len(errors), "" if len(errors) == 1 else "s")
+	exit_compile(len(errors))
+}
+
+// jq's count of compile errors, then exit as it does.
+exit_compile :: proc(count: int) -> ! {
+	fmt.eprintf("stury: %d compile error%s\n", count, "" if count == 1 else "s")
 	os.exit(EXIT_COMPILE)
 }
 
@@ -232,8 +235,7 @@ parse_program :: proc(text: string) -> jq.Program {
 	compile_errors(text, errors)
 	if parsed.body == nil {
 		fmt.eprintln(`stury: error: Top-level program not given (try ".")`)
-		fmt.eprintln("stury: 1 compile error")
-		os.exit(EXIT_COMPILE)
+		exit_compile(1)
 	}
 	return parsed
 }
@@ -246,8 +248,7 @@ link_program :: proc(run: ^Run, parsed: jq.Program) -> (linked: jq.Linked) {
 	linked = jq.link(&run.ip, parsed.deps, jq.program_origin(&run.ip))
 	if linked.errors > 0 {
 		fmt.eprint(linked.messages)
-		fmt.eprintf("stury: %d compile error%s\n", linked.errors, "" if linked.errors == 1 else "s")
-		os.exit(EXIT_COMPILE)
+		exit_compile(linked.errors)
 	}
 	return
 }

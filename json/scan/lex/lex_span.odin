@@ -14,9 +14,7 @@ import "base:intrinsics"
 import "core:simd"
 import bits "../../../core/bits"
 
-// Sixteen-byte window at p. Caller guarantees p + 16 <= len(src).
-// `p` is a cursor, so the load is unaligned. Callers gate on that bound
-// before loading.
+// Sixteen-byte window at `p`, loaded unaligned. PRE: `p + 16 <= len(src)`.
 load16 :: #force_inline proc(src: []byte, p: u64) -> #simd[16]u8 {
 	#no_bounds_check {
 		return intrinsics.unaligned_load((^#simd[16]u8)(&src[p]))
@@ -45,8 +43,7 @@ first_stop_lane :: #force_inline proc(stop: #simd[16]u8) -> u64 {
 }
 
 // The scalar tail of a span: the residue after the vector body is short, so one direct check per byte. This
-// is the stop rule written out. The probes read the same rule from `SPAN_STOP`, and the span head tests pin
-// the two against each other at both check levels.
+// is the stop rule written out. The probes read the same rule from `SPAN_STOP`.
 @(private = "file")
 span_tail :: #force_inline proc(s: ^Scanner, $check: Check_Level) {
 	for s.pos < u64(len(s.src)) {
@@ -73,9 +70,9 @@ span_stop_bit :: #force_inline proc($check: Check_Level) -> u8 {
 }
 
 // `span_tail` over a window the caller has bounded: PRE `s.pos + 16 <= len`.
-// Resolve with the byte walk, not ctz(hit): on short-string documents this exit IS the span loop, and
-// `span_tail` lands on the first stop byte by construction. One `SPAN_STOP` probe per byte at a fixed
-// offset, so each exit sets the cursor from a constant and nothing waits on a lane count.
+// Resolve with the byte walk, not ctz(hit): `span_tail` lands on the first stop byte by construction. One
+// `SPAN_STOP` probe per byte at a fixed offset, so each exit sets the cursor from a constant and nothing
+// waits on a lane count.
 @(private = "file")
 span_land16 :: #force_inline proc(s: ^Scanner, $check: Check_Level) -> int {
 	p := s.pos
@@ -345,7 +342,6 @@ span_advance :: #force_inline proc(s: ^Scanner, $check: Check_Level, $land_by_co
 				adv := u64(16)
 				if any_lane(hit) {
 					if any_lane(span_stops(v, qv, bv, check)) {
-						// The span ends in this window.
 						when land_by_count {
 							s.pos += first_stop_lane(hit)
 							return int(s.src[s.pos])

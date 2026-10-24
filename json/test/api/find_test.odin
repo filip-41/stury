@@ -22,6 +22,10 @@ test_find_reports_a_miss_and_a_mismatch :: proc(t: ^testing.T) {
 	m, err := json.find(src, ".b")
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, m.outcome, json.Path_Outcome.Missing)
+	testing.expect_value(t, m.owner, u64(0)) // the object lacking `b` starts the source
+	root, rerr := json.find(src, ".")
+	testing.expect_value(t, rerr, nil)
+	testing.expect_value(t, root.owner, json.NO_OWNER)
 	x, xerr := json.find(src, ".a.b")
 	testing.expect_value(t, xerr, nil)
 	testing.expect_value(t, x.outcome, json.Path_Outcome.Type_Mismatch)
@@ -44,6 +48,7 @@ test_find_returns_the_scan_result_and_an_empty_answer :: proc(t: ^testing.T) {
 	bad, err := json.find(raw(`{"a": 01}`), ".a")
 	_, is_fault := err.(json.Error)
 	testing.expectf(t, is_fault && bad.outcome == .Missing, "%v %v", err, bad)
+	testing.expect_value(t, bad.owner, json.NO_OWNER)
 	_, perr := json.find(raw(`{}`), ".a-b")
 	r, refused := perr.(json.Request_Error)
 	testing.expectf(t, refused && r.kind == .Bad_Path, "%v", perr)

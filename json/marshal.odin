@@ -213,7 +213,7 @@ write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Encode_Error {
 	case .Raw:
 		return put_raw(st, string((^Raw)(data)^))
 	case .Number:
-		return enc.put_f64(st.out, (^Number)(data).value)
+		return put_number(st, (^Number)(data)^)
 	case .Digits:
 		return put_digits(st, string((^Digits)(data)^))
 	case .Decoded:
@@ -335,7 +335,6 @@ write_bit_set :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawp
 	return close_container(st, ']', n)
 }
 
-// Returns the `op.size` bytes of the bit_set `op` at `data`.
 @(private)
 bit_set_bits :: proc(op: Plan_Op, data: rawptr) -> (bits: u128) {
 	runtime.mem_copy_non_overlapping(&bits, data, int(op.size))
@@ -392,13 +391,23 @@ write_decoded :: #force_no_inline proc(st: ^Marshal_Out, d: Decoded) -> Encode_E
 	case u64:
 		return enc.put_u64(st.out, x)
 	case Number:
-		return enc.put_f64(st.out, x.value)
+		return put_number(st, x)
 	case Digits:
 		return put_digits(st, string(x))
 	case string:
 		return enc.put_string(st.out, x)
 	}
 	return enc.put_bytes(st.out, "null")
+}
+
+// A `Number`: its binary64 value (`1e-400`, `.Underflowed`, is +-0, its correctly rounded value), or
+// `.Non_Finite` when it holds none (`.None`, such as `1e400`). `Digits` writes the authored text.
+@(private)
+put_number :: proc(st: ^Marshal_Out, n: Number) -> Encode_Error {
+	if n.exactness == .None {
+		return .Non_Finite
+	}
+	return enc.put_f64(st.out, n.value)
 }
 
 // A `Digits`: one number token, checked as a `Raw` is; an empty one is `null`.
@@ -475,7 +484,6 @@ write_target :: proc(st: ^Marshal_Out, idx: u32, target: rawptr) -> Encode_Error
 	return err
 }
 
-// Writes the 128-bit integer at `data`.
 @(private)
 put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, data: rawptr, signed: bool) -> Encode_Error {
 	buf: [48]u8

@@ -3,7 +3,6 @@ package number
 // JSON number lexing: the strict and the skip leaf, and the digit-run fold.
 
 import "base:intrinsics"
-import "core:simd"
 import lex "../lex"
 
 @(rodata)
@@ -22,68 +21,31 @@ digit8_gap :: #force_inline proc(w: u64) -> u64 {
 	return ((w - 0x3030_3030_3030_3030) | (w + 0x4646_4646_4646_4646)) & 0x8080_8080_8080_8080
 }
 
-// `digit8_gap` of a word already XORed with `DIGIT8_ZEROS`, where a digit lane is 0..9: a lane is
-// a digit when its high nibble is clear and adding 6 leaves it clear. A lane sets one of its bits
-// 4..7 rather than bit 7, so `tz >> 3` is its index as before. A carry leaves only a non-digit lane.
-digit8_gap_xored :: #force_inline proc(x: u64) -> u64 {
-	return ((x + 0x0606_0606_0606_0606) | x) & 0xF0F0_F0F0_F0F0_F0F0
-}
-
-DIGIT8_ZEROS :: u64(0x3030_3030_3030_3030)
-
-// How `digit_run_fold` folds its digits into `mant`. `.Masked` keeps each word's low nibbles for the fold
-// and tests the raw word. `.Xored` XORs `DIGIT8_ZEROS` out of the word once, and both the test and the
-// fold read it, which spares the `.Dom` walk the gap test's two wide constants and the 10^8 one. The
-// shape walk keeps `.Masked`: `.Xored` moves its register allocation for the worse.
-Digit_Fold :: enum u8 {
-	None,
-	Masked,
-	Xored,
-}
-
-// End of the digit run at `p`, and when `$fold`, `digit_run_fold`'s `.Masked` fold of it into `mant`.
-digit_run :: #force_inline proc(src: []byte, p: u64, mant: ^u64, $fold: bool) -> u64 {
-	return digit_run_fold(src, p, mant, Digit_Fold.Masked when fold else Digit_Fold.None)
-}
-
 // End of the digit run at `p`. The 8-byte load runs only while eight bytes remain. The tail, and
 // the whole run under `lex.SCAN_FORCE_SLOW`, is scalar.
 //
-// Unless `$fold` is `.None`, the same words fold the run into `mant`, continuing what it holds. The fold has
+// When `$fold`, the same words fold the run into `mant`, continuing what it holds. The fold has
 // no cap: past 19 digits `mant` wraps and the caller's digit count says so. A k-digit head is
 // `digits8_value` of the word shifted up by `64 - 8k` bits. The shift is taken in two steps so
 // `k == 0` shifts the whole word out and folds nothing, with no branch on `k`.
-digit_run_fold :: #force_inline proc(src: []byte, p: u64, mant: ^u64, $fold: Digit_Fold) -> u64 {
+digit_run :: #force_inline proc(src: []byte, p: u64, mant: ^u64, $fold: bool) -> u64 {
 	n := u64(len(src))
 	q := p
 	when !lex.SCAN_FORCE_SLOW {
 		#no_bounds_check {
 			for q + 8 <= n {
 				w := load8_le(src, q)
-				when fold == .Xored {
-					w ~= DIGIT8_ZEROS
-					m := digit8_gap_xored(w)
-				} else {
-					m := digit8_gap(w)
-				}
+				m := digit8_gap(w)
 				if m != 0 {
-					// The gap's lowest set bit is in lane k's top half, `8k + 4 .. 8k + 7`, so
-					// `~tz & 0x38` is `56 - 8k`.
+					// The gap's lowest set bit is lane k's bit 7, so `~tz & 0x38` is `56 - 8k`.
 					tz := intrinsics.count_trailing_zeros(m)
 					k := tz >> 3
-					when fold == .Xored {
-						hi, lo := digits8_quads((w << (~tz & 0x38)) << 8)
-						mant^ = mant^ * DIGIT8_POW10[k] + hi * 10000 + lo
-					} else when fold == .Masked {
+					when fold {
 						mant^ = mant^ * DIGIT8_POW10[k] + digits8_value((w << (~tz & 0x38)) << 8)
 					}
 					return q + k
 				}
-				when fold == .Xored {
-					// `mant * 10^8 + hi * 10^4 + lo`, with no 10^8 to load.
-					hi, lo := digits8_quads(w)
-					mant^ = (mant^ * 10000 + hi) * 10000 + lo
-				} else when fold == .Masked {
+				when fold {
 					mant^ = mant^ * DIGIT8_POW10[8] + digits8_value(w)
 				}
 				q += 8
@@ -96,7 +58,7 @@ digit_run_fold :: #force_inline proc(src: []byte, p: u64, mant: ^u64, $fold: Dig
 			if d < '0' || d > '9' {
 				break
 			}
-			when fold != .None {
+			when fold {
 				mant^ = mant^ * 10 + u64(d - '0')
 			}
 			q += 1
@@ -133,7 +95,7 @@ parse_number_q :: #force_inline proc(
 		n := u64(len(src))
 		p := s.pos
 		// The shape walk decodes the value from the folded digits (`Shape_Number`).
-		FOLD :: Digit_Fold.Masked when .Shape in Q else Digit_Fold.None
+		FOLD :: .Shape in Q
 		// `s.pos` is the walk's dispatch byte for this number, which `peek` proved is in `src`.
 		if src[p] == '-' {
 			p += 1
@@ -150,7 +112,7 @@ parse_number_q :: #force_inline proc(
 				return Error{offset = p, kind = .Bad_Number}
 			}
 		} else {
-			p = digit_run_fold(src, p, &mant, FOLD)
+			p = digit_run(src, p, &mant, FOLD)
 			if p == int_at {
 				return Error{offset = p, kind = .Bad_Number}
 			}
@@ -175,7 +137,7 @@ parse_number_q :: #force_inline proc(
 		if has_frac {
 			p += 1
 			frac_at = p
-			p = digit_run_fold(src, p, &mant, FOLD)
+			p = digit_run(src, p, &mant, FOLD)
 			frac_digits = p - frac_at
 			if frac_digits == 0 {
 				s.pos = p
@@ -252,7 +214,7 @@ plain_int_end :: #force_inline proc(src: []byte, v, max_digits: u64) -> (end: u6
 		// NEON keeps the words, since its lane count waits on a vector-to-scalar move.
 		nine: #simd[16]u8 = 9
 		zeros: #simd[16]u8 = '0'
-		k := lex.first_stop_lane(simd.lanes_gt(lex.load16(src, v) - zeros, nine))
+		k := lex.first_stop_lane(intrinsics.simd_lanes_gt(lex.load16(src, v) - zeros, nine))
 		if k == 16 {
 			return
 		}

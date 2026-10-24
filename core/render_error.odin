@@ -6,6 +6,12 @@ import "core:io"
 import "core:reflect"
 import "core:strings"
 
+// The builder `render_error` writes through. The alias is the file's non-generic use of `core:strings`: a
+// generic's body is checked only when it is instantiated, so without this a plain `-vet` build of a program
+// that never calls `render_error` rejects the import.
+@(private)
+Text_Builder :: strings.Builder
+
 // Returns the 1-based line and column of `err` in `src`. Columns count bytes. Returns (0, 0) when `err` has no
 // byte position: an offset past `src`, `.Source_Too_Wide` (a limit), `.Out_Of_Memory` or `.Bad_Option`.
 @(require_results)
@@ -23,7 +29,7 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 // text is allocated with `allocator`.
 @(require_results)
 render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
-	b := strings.builder_make(allocator)
+	b: Text_Builder = strings.builder_make(allocator)
 	render_error_to_writer(strings.to_writer(&b), src, err)
 	return strings.to_string(b)
 }

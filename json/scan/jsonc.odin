@@ -197,8 +197,8 @@ jsonc_finish :: proc(s: ^Scanner, cur: ^Jsonc_Cursor) -> Maybe(Error) {
 	return nil
 }
 
-// Check `src` as JSONC: comments and trailing commas, full grammar otherwise. `walk_value` is not this
-// procedure. `facts` receives each comment, attached to nothing, and nil records none.
+// Check `src` as JSONC: comments and trailing commas, full grammar otherwise. `facts` receives each comment,
+// attached to nothing, and nil records none.
 jsonc_validate :: proc(src: []byte, facts: ^[dynamic]Fact, limits := Limits{}) -> Maybe(Error) {
 	s := enter_document(src, limits, DEPTH_CEILING)
 	cur := Jsonc_Cursor{facts = facts}

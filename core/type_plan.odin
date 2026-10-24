@@ -424,7 +424,6 @@ compile_struct_op :: proc(p: ^Type_Plan, v: runtime.Type_Info_Struct, op: ^Plan_
 	return .None
 }
 
-// A bit_set's op in `op`.
 @(private = "file")
 compile_bit_set_op :: proc(p: ^Type_Plan, v: runtime.Type_Info_Bit_Set, op: ^Plan_Op) -> (err: Plan_Error) {
 	// An enum's names or a range's integers. A 128-bit enum lowers to its integer kind, refused here, and
@@ -443,7 +442,6 @@ compile_bit_set_op :: proc(p: ^Type_Plan, v: runtime.Type_Info_Bit_Set, op: ^Pla
 	return .None
 }
 
-// A union's op in `op`.
 @(private = "file")
 compile_union_op :: proc(p: ^Type_Plan, v: runtime.Type_Info_Union, op: ^Plan_Op) -> (err: Plan_Error) {
 	op.kind = .Union

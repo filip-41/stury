@@ -55,8 +55,7 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 // refused, where, and the path to it. How strict the read is, how repeated keys and unknown members are
 // treated and whether strings are copied: see `Unmarshal_Opts`.
 //
-// The value is read over what `ptr^` already holds, as Go's and core's unmarshal do. That read-over rule is
-// all stury takes from Go: where Go is lenient, stury refuses.
+// The value is read over what `ptr^` already holds, as Go's and core's unmarshal do.
 //
 // What a read leaves and replaces:
 //
@@ -83,7 +82,8 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 //	- Strings are copied unless `borrow_strings` (an escaped one and a `cstring` always are).
 //	- Everything it creates comes from `allocator`, a dynamic array's own `allocator` field included, and
 //	  nothing is freed, not what a refused read made nor the list or string a read replaced: read into an
-//	  arena freed whole.
+//	  arena freed whole. With the default allocator a refusal therefore leaks its partial result; run
+//	  `unmarshal_check` first to refuse without allocating the target.
 //	- With `plan` nil the plan is this thread's cached one for `T`, as `marshal` takes it. A kept plan must
 //	  have been made for `T`.
 @(require_results)

@@ -17,8 +17,7 @@ import number "./number"
 // and the compact `,"` pair only with 2. A fused struct has at most 64 fields and plain ASCII names. A leaf
 // writes to a field at its type-info offset or a list slot below the buffer's `cap`, grown first, and only
 // after the walk's lexer checked its token. `$unique` leaves unknown keys to the walk's key set, and
-// `$pass_unread` passes an unread string unchecked. The differential tests read fused
-// structs and a fused `[]i16` against a reference decoder.
+// `$pass_unread` passes an unread string unchecked.
 
 // Where a fused loop left the walk. No loop returns the walk's `Error`: carried out of every value, it would
 // cost the loop its registers.
@@ -57,9 +56,9 @@ shape_take_members :: #force_inline proc(walk_s: ^Scanner, q: ^Query_Ctx, sp: u6
 		if key_lo >= n || src[key_lo] != '"' {
 			return .Key
 		}
-		// The field is found as `shape_key` finds it, but not by it: `shape_key` latches the key before its colon
-		// is seen, and a key the loop hands back must be untouched. The predicted field: a name written in plain ASCII and matched byte for
-		// byte is the key's whole token.
+		// Not `shape_key`, which latches the key before its colon is seen; a key the loop hands back must be
+		// untouched. The predicted field: a name written in plain ASCII and matched byte for byte is the key's
+		// whole token.
 		i := -1
 		key_hi: u64
 		// Past the colon already: the predicted member written compactly, `"name":`, matched as two words.

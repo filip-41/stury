@@ -53,7 +53,7 @@ decimal_digits :: #force_inline proc "contextless" (p: [^]u8, bits: u64) -> (k, 
 	lo8 := sig - hi8 * 100_000_000
 	intrinsics.unaligned_store((^#simd[16]u8)(&p[extra]), bcd16(hi8, lo8) | 0x30)
 	intrinsics.unaligned_store((^u16)(&p[extra + 16]), u16('0' + (last if has_last else 0)) | u16('0') << 8)
-	// k significant digits, d1 at p[1]. Branch-free: `has_last` is a coin flip on random input. k is the
+	// k significant digits, d1 at p[1]. Branch-free: `has_last` is unpredictable on random input. k is the
 	// count written, which the caller's next store waits on, so it comes from a scalar bcd8 of the half
 	// that ends the digits, not off the vector.
 	tail := lo8 if lo8 != 0 else hi8

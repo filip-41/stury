@@ -292,7 +292,6 @@ unquote :: proc(text: string, lo: int, dst: []u8) -> (n, next: int, escaped: boo
 	return 0, i, escaped, Parse_Fault{error = .Unclosed_Quote, offset = u64(lo - 1)}, false
 }
 
-// The four hex digits at `at`, if `text` has them there.
 @(private)
 hex4 :: proc(text: string, at: int) -> (v: u32, ok: bool) {
 	if at + 4 > len(text) {
@@ -390,7 +389,7 @@ scan_limit :: proc(text: string, lo: int) -> (limit, next: int, fault: Parse_Fau
 }
 
 // The magnitude of a run of digits, clamped one past `2^63` so an overlong run stays distinguishable from
-// one form `2^63`. It clamps rather than wraps.
+// one form `2^63`.
 @(private)
 magnitude :: proc(digits: string) -> u64 {
 	mag_cap := u64(max(i64)) + 2

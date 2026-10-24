@@ -7,7 +7,7 @@ package main
 // of its own and written as soon as the pieces before it are. A record that is anything but a well-formed text whose
 // answers are found or missing (a fault, a byte order mark, a lone high surrogate, a step that does not apply, a
 // literal that may run on into the next file) ends its piece there, and the records from it on are left to
-// `scan_inputs`, one at a time, as before. `select(P op LITERAL)` is scanned as P, and each record its answer keeps
+// `scan_inputs`, one at a time. `select(P op LITERAL)` is scanned as P, and each record its answer keeps
 // is printed in place of answers.
 
 import "base:runtime"

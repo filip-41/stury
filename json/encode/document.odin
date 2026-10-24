@@ -11,8 +11,8 @@ package encode
 // output has the root span plus MINIFY_SLACK. Pretty output has `pretty_bound` with STORE_SLACK, regrown by
 // `widen_rows` when the walk opens a container deeper than it covers. Streamed (`$STREAM`) output has a room
 // check per row. Loads stay in `src`: `copy_span` takes 16 bytes only inside it, and `minify_dense` copies a
-// last, shorter block into spaces. `$TABS` picks the tab indent. The law: compact output is the source
-// without whitespace, and output under random options reads back as the same value.
+// last, shorter block into spaces. `$TABS` picks the tab indent. Invariants: compact output is the source
+// without whitespace, and output under any options reads back as the same value.
 
 import "base:intrinsics"
 import "core:io"

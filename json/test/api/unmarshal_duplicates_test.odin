@@ -105,7 +105,7 @@ test_unmarshal_duplicates_check_takes_every_mode :: proc(t: ^testing.T) {
 	}
 }
 
-// A member that holds data before the read: `.Last` and `.All` read the first occurrence over it, as ever.
+// A member that holds data before the read: `.Last` and `.All` read the first occurrence over it.
 @(test)
 test_unmarshal_duplicates_first_occurrence_reads_over_the_target :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)

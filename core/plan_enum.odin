@@ -1,7 +1,5 @@
 package core
 
-// Enum lookups for writers: an enum's value at an address, and the member with that value.
-
 // Returns the enum at `data` as the integer its members are compared by.
 plan_enum_value :: #force_inline proc(op: Plan_Op, data: rawptr) -> i64 {
 	return shape_int_load(data, op.size) if op.kind == .Enum_Int else i64(shape_uint_load(data, op.size))

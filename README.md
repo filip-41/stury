@@ -1,123 +1,53 @@
 # stury
 
-stury is a structural data processing library currently supporting JSON and CSV for [Odin](https://odin-lang.org),
-plus a command line that runs jq filters on top of the data.
+stury is a JSON and CSV library for [Odin](https://odin-lang.org), with a command line, `stury`, that runs jq
+filters over JSON and CSV.
 
-It is built for programs that read a lot of data and want to do little work per byte. You can check a text for
-errors without allocating, pull one value out by path without parsing the rest, load a whole text into a
-queryable document, read it straight into your own structs, or edit it while keeping every byte you did not
-touch.
+Input is checked strictly by default: JSON against RFC 8259 (no `01`, no `NaN`, no invalid UTF-8, no lone
+surrogate), CSV against RFC 4180. On one arm64 machine stury is 10 to 40 times faster than Odin's
+`core:encoding/json`, faster than simdjson at validation, and faster than simdjson, yyjson and sonic-rs at
+decoding into structs ([benchmarks](docs/benchmarks.md)).
 
-Input is checked strictly against its `dialect`. The default, JSON, follows RFC 8259: no `01`, no `NaN`, no
-invalid UTF-8, no lone surrogate. stury also reads JSONC, NDJSON and RFC 7464 text sequences. In the
-[benchmarks](#benchmark) below it runs 10 to 40 times faster than Odin's `core:encoding/json`, and ahead of
-simdjson, yyjson and sonic-rs on validation and typed decode (measured on one machine with the harness in
-[bench/](bench/README.md); tuning may differ between architectures at this stage of the project).
+**Status:** version 0.0.2. The API may still change between releases ([CHANGELOG.md](CHANGELOG.md)).
 
-**Status:** version 0.0.2. The API may still change between releases (see [CHANGELOG.md](CHANGELOG.md)).
+## Features
+
+- **Validate** JSON without allocating, with the line and column of the first fault.
+- **Read one value by path** (`.tags[1]`) without parsing the rest of the input, or answer several paths in
+  one pass.
+- **Decode into Odin types and encode them back** (`unmarshal`, `marshal`): structs, slices, maps, unions,
+  bit sets and `any`, from the type alone. Field tags and hooks cover custom names and types.
+- **Build a document** and query it by path, with strings that point into the input.
+- **Edit a text**: change, insert or remove a value and keep every other byte, formatting and comments
+  included.
+- **JSONC, NDJSON and RFC 7464** text sequences, with JSONC comments kept and written back.
+- **CSV and TSV** through the same struct mapping, documents and edits as JSON, with dialects for other
+  delimiters, quoting, escapes, comment lines and files without a header.
+- **Optional threads**: validate or process records in parallel on a `stury:host` pool. The
+  library starts no thread and keeps no global state.
+- **A jq 1.8 command line** that gives jq's answers and exit codes, reads and writes CSV and TSV, and reports
+  faults with their line and column.
 
 ## Install
 
-**Library.** Clone the repository into your project:
+**Library.** stury needs [Odin](https://odin-lang.org/docs/install/) `dev-2026-10` and a 64-bit little-endian
+target (darwin or linux, amd64 or arm64; the command line also builds on Windows). Clone it into your project
+and add it as a collection:
 
 ```sh
 git clone https://github.com/filip-41/stury vendor/stury
 odin build . -collection:stury=vendor/stury -o:speed
 ```
 
-`-collection:stury=PATH` makes `import "stury:json"`, `import "stury:csv"` and `import "stury:host"` resolve
-to the directories under PATH. Keep `json/`, `csv/`, `core/` and `host/` together in the copy. For the
-[ols](https://github.com/DanielGavin/ols) language server, add the same collection to your `ols.json`:
+Then `import "stury:json"`, `import csv "stury:csv"` and `import "stury:host"`. Keep `json/`, `csv/`, `core/`
+and `host/` together. For the [ols](https://github.com/DanielGavin/ols) language server, add the same
+collection to `ols.json`: `{"collections": [{"name": "stury", "path": "vendor/stury"}]}`.
 
-```json
-{"collections": [{"name": "stury", "path": "vendor/stury"}]}
-```
-
-**Command line.** Download the `stury` binary for linux or darwin on amd64 or arm64 from the [GitHub
-Releases](https://github.com/filip-41/stury/releases) page (for example `stury-0.0.2-darwin-arm64.tar.gz`;
-each archive has a `.sha256` beside it), unpack it, and put it on your `PATH`. Or build it yourself with
-`make build-cli`, which writes `build/stury`. The manual page is `man ./docs/stury.1`.
-
-## Requirements
-
-- [Odin](https://odin-lang.org/docs/install/) `dev-2026-10`. stury follows Odin's monthly releases closely.
-- 64-bit little-endian targets: darwin and linux, on amd64 and arm64. The command line also builds on Windows.
-- On amd64 the floor is x86-64-v2 (SSSE3, SSE4.1, POPCNT). On processors with AVX-512BW, long strings are
-  scanned 64 bytes at a time, chosen at run time.
-- To build the command line: `make` and `git`. To run `make test`: also `python3` (the jq conformance suite
-  runs on it). If `jq` 1.8.2 is on your `PATH`, `make diff` also compares answers against it.
-- Optimization level: any works (the test suites build at `-o:minimal`), but the speeds on this page were
-  measured at `-o:speed`, so build your program with it. The `make` targets that build the command line use it
-  too.
-
-## Features
-
-- **Validate without allocating.** One pass, no allocation, and the first fault's line and column (`validate`,
-  `error_position`, `render_error`).
-- **Answer paths without parsing the rest.** Ask for one path such as `.tags[1]` (`find`) or several
-  (`Request`, `scan`, `answers`) in a single pass over the input. Each answer is a range of bytes in your
-  input. A request can be prepared once and run over many records.
-- **Build a document once.** A `Document` holds the structure of a text, and you read it through `Node`
-  handles, small values that each point at one value in the document (`build`, `child`, `query`, `pointer`).
-  Strings point into the input unless they contain escapes. Numbers are decoded when you read them.
-- **Map to Odin types from the type alone.** `unmarshal` fills structs, slices, maps, unions, bit sets and
-  `any` with no per-type code and `marshal` writes any Odin value back as JSON. Struct field tags, hook
-  procedures for your own types, and prepared type plans cover the rest.
-- **Edit without reformatting.** `set`, `insert`, `remove` and `splice` change the bytes of the target and
-  keep every other byte, indentation and comments included.
-- **JSONC with its comments.** `dialect = .Jsonc` reads comments and trailing commas, keeps each comment
-  attached to its value, and writes them back.
-- **Records without allocation.** `records` and `next_record` iterate NDJSON, RFC 7464 sequences and a root's
-  entries, and `records_from` frames a stream from an `io.Reader`.
-- **Parallel when you ask.** `validate_records` and `each_record` run on threads from `stury:host`. The
-  library itself starts no thread and keeps no global state.
-- **Strict CSV.** `stury:csv` checks RFC 4180 text with `validate` and `records`: quote placement, a CR outside quotes
-  only before LF, UTF-8, and the same field count in every record. `records_from` reads records from an
-  `io.Reader` in bounded memory. `each_record` and `validate` with a runner use threads from `stury:host`.
-- **CSV dialects.** A `Dialect` sets TSV (`csv.TSV`, with the escapes jq's `@tsv` writes), another delimiter,
-  `Quoting.None` (a quote is text), backslash escapes (`\t`, `\n`, `\r`, `\0`, `\\`), comment lines, ragged
-  records, and whether there is a header.
-- **CSV into structs.** `unmarshal` and `marshal` map rows to a list of structs with the same field tags,
-  hooks and `Duplicates` policy as JSON. Each cell is checked against its field's type. `unmarshal_check`
-  runs the same checks without storing anything.
-- **CSV documents and edits.** `build` records where every cell is. `find` and `find_column` read a cell or a
-  column by path (`.[3].name`) without building a document. `set`, `insert`, `remove` and `splice` keep every
-  byte they do not target. `write_record` appends one record of text cells to a buffer.
-- **Duplicate keys are a policy**: keep the last, the first, all of them, or refuse the text.
-- **A jq 1.8 command line.** `stury` runs jq filters with jq's answers and exit codes as the baseline,
-  with its own `stury:` messages, and differs where jq loses data or misreports an error ([listed in
-  docs/cli.md](docs/cli.md#differences-from-jq)). It adds `check`, `--from` and `--to`.
-
-## Things to know
-
-- Keep your input buffer alive while you use answers or a document: both point into it. `unmarshal` copies
-  strings into its allocator, so you can free the input after it returns, unless you set `borrow_strings` to
-  make escape-free strings and `Raw` values slice the input instead.
-- `unmarshal` never frees what it allocates, even when it refuses the input. Give it an arena and free the
-  arena.
-- `destroy` frees a value that owns several allocations: a `Document`, a `Request`, a `Type_Plan`, a
-  `Record_Reader`. A slice a procedure returns, such as `set`'s output, is one allocation: `delete` it as
-  you would any Odin slice.
-- A procedure whose result is its only output carries `@(require_results)`: a call that drops the result
-  does not compile, so an error cannot go unnoticed by accident.
-- A document can address 4 GiB - 2 bytes of input (`MAX_ROW_SOURCE`), `validate` has no limit.
-- Nesting deeper than 1024 levels is refused by default. You can raise the limit to 2^20.
-- CSV cells are text. `csv.unmarshal` reads a cell as its field's type (`007` into a `string` stays `007`, into
-  an `int` is `7`), and a cell the type cannot hold is refused. The command line has no field types, so every
-  cell there is a string until you `tonumber` it.
-- An empty cell with no quotes is absent: its field keeps its zero value (`nil` for a `Maybe`), or is
-  `.Missing_Field` when tagged `csv:",required"`. A quoted `""` is a present empty string. Under
-  `Quoting.None`, which TSV uses, every empty cell is absent. On the command line the two are `null` and `""`.
-- The first record names the columns unless `no_header` is set. A file without a header read as if it had one
-  loses its first record, and names that match no field are ignored, so the result can be zero values or no
-  rows and no error. `unknown_fields = .Refuse` or a `csv:",required"` field makes that an error.
-- A repeated key is a policy (`Duplicates`), and its default depends on the format: JSON keeps the last value,
-  and CSV refuses a header that names a column twice. Set `duplicates` to choose another for either.
-- Only 64-bit little-endian targets are supported (see [Requirements](#requirements)).
+**Command line.** Download a binary for linux or darwin, amd64 or arm64, from
+[GitHub Releases](https://github.com/filip-41/stury/releases) and put it on your `PATH`. Each archive has a
+`.sha256` beside it. To build it yourself, run `make build-cli`, which writes `build/stury`.
 
 ## Quick start
-Import `stury:json` (see [Install](#install) for the collection flag). This is the body of
-`examples/quickstart/main.odin`:
 
 ```odin
 package main
@@ -161,538 +91,92 @@ main :: proc() {
 }
 ```
 
-## Usage
+This is [examples/quickstart](examples/quickstart/main.odin). Run it from the repository root with
+`odin run examples/quickstart -collection:stury=.`.
 
-The snippets below are cut from the programs in `examples/`. Run one from the repository root, for example
-`odin run examples/scan -collection:stury=.`. The examples are:
+## Examples
 
-- `examples/quickstart`: validate, `unmarshal` into a struct, `marshal` back.
-- `examples/scan`: read one value by path.
-- `examples/roundtrip`: build a document and query it.
-- `examples/edit`: change one value in place.
-- `examples/records`: walk NDJSON records.
-- `examples/jsonc`: read JSONC.
-- `examples/csv`: CSV rows into structs and back, dialects, a document, edits, streaming.
-- `examples/crossformat`: one struct read from CSV, written as JSON and back, with one error path for both.
-
-`make test` builds and runs all of them.
-
-### Get one field without building a document (`examples/scan`)
-`json.find` answers one path in one pass over the input and keeps nothing. The answer is a range (`lo`, `hi`)
-of `src`, not a copy, and its `outcome` says whether the path landed.
+Read one value by path. The answer is a byte range of `src`, not a copy:
 
 ```odin
 src := transmute([]byte)string(`{"name": "ada", "tags": ["math", "engines"]}`)
 a, err := json.find(src, ".tags[1]")
-if err != nil {
-	os.exit(1)
-}
-if a.outcome == .Found {
-	fmt.println(string(src[a.lo:a.hi])) // "engines", quotes and all
+if err == nil && a.outcome == .Found {
+	fmt.println(string(src[a.lo:a.hi])) // "engines"
 }
 ```
 
-A path that is not in the input still gives one answer, with outcome `.Missing`, so check `outcome` before you
-read `lo` and `hi`.
-
-A path is text in the jq subset, or a `json.Path` built from `json.Step` values, so a program can build one
-without a string that is parsed at run time. Every procedure that takes a path takes either form:
+Change one value and keep every other byte:
 
 ```odin
-json.Path{steps = {json.Name("tags"), json.Index(1)}} // the same request as ".tags[1]"
+out, err := json.set(src, ".name", "grace") // {"name": "grace", "tags": ["math", "engines"]}
 ```
 
-For every answer of a path, several paths, or one request run over many records, a `Request` says what to
-read and `json.scan` fills it. Its type parameter lists the kinds of answer wanted: `{.Path}` asks for the
-bytes of the values at some paths, the other kinds ask for a whole document. `json.answers` reads one
-path's answers.
-
-```odin
-req: json.Request({.Path})
-defer json.destroy(&req)
-if json.request_init(&req, ".tags[]") != nil || json.scan(src, &req) != nil {
-	os.exit(1)
-}
-tags, _ := json.answers(&req, 0) // one path: nothing to group, so no error
-for t in tags {
-	fmt.println(string(src[t.lo:t.hi])) // "math", then "engines"
-}
-```
-
-### Build and query a document (`examples/roundtrip`)
-`json.build` makes a `Document`, and `json.query` collects the `Node` handles a path reaches.
-
-```odin
-src := transmute([]byte)string(`{"name":"ada","n":1,"skip":[1,2,3]}`)
-doc, err := json.build(src)
-if err != nil {
-	os.exit(1)
-}
-defer json.destroy(&doc)
-nodes: [dynamic]json.Node
-defer delete(nodes)
-if json.query(&doc, json.ROOT, ".skip[]", &nodes) != nil {
-	os.exit(1)
-}
-for n in nodes {
-	if v, ok := json.get_int(&doc, n); ok {
-		fmt.println(v)
-	}
-}
-```
-
-### Edit in place (`examples/edit`)
-`json.set` replaces the value at a path and keeps every other byte of the source.
-
-```odin
-src := transmute([]byte)string(`{"name": "ada",  "tags": ["math"]}`)
-out, err := json.set(src, ".name", "grace")
-if err != nil {
-	os.exit(1)
-}
-defer delete(out)
-fmt.println(string(out)) // {"name": "grace",  "tags": ["math"]}
-```
-
-### NDJSON records (`examples/records`)
-`json.records` and `json.next_record` walk the records of an NDJSON text (one JSON value per line) without
-allocating.
-
-```odin
-src := transmute([]byte)string("{\"a\":1}\n{\"a\":tru}\n")
-it := json.records(src, .NDJSON)
-for rec in json.next_record(&it) {
-	if e, bad := json.validate(rec.bytes).?; bad {
-		e.offset += rec.at
-		fmt.println(json.render_error(src, e)) // 2:9: Bad_Literal
-	}
-}
-if e, bad := it.err.(json.Error); bad { // the framing itself failed, so the loop stopped early
-	fmt.println(json.render_error(src, e))
-}
-```
-
-To read a stream from an `io.Reader` in bounded memory, use `json.records_from`. To use several threads, start
-a `host.Batch_Pool` from `stury:host` and pass its `runner` to `validate_records` (or `each_record`). Add
-`import "stury:host"` at the top of the file:
-
-```odin
-pool: host.Batch_Pool
-host.batch_pool_init(&pool) // one worker per core
-defer host.batch_pool_destroy(&pool)
-faults, _ := json.validate_records(src, .NDJSON, &pool.runner)
-defer delete(faults)
-for f in faults {
-	fmt.println(json.render_error(src, f.err)) // 2:9: Bad_Literal
-}
-```
-
-### JSONC (`examples/jsonc`)
-`dialect = .Jsonc` reads comments and trailing commas, and strict JSON still refuses them.
-
-```odin
-src := transmute([]byte)string("{\n\t\"a\": 1 // one\n}\n")
-_, jsonc_bad := json.validate(src, dialect = .Jsonc).?
-_, strict_bad := json.validate(src).?
-fmt.println(jsonc_bad, strict_bad) // false true: only strict JSON refuses the comment
-```
-
-### CSV (`examples/csv`)
-`stury:csv` reads rows into structs by the header's column names and writes them back. Add
-`import csv "stury:csv"`.
+Read CSV rows into structs by the header's column names:
 
 ```odin
 City :: struct {
 	name:       string `csv:"City"`,
 	population: Maybe(i64),
-	lat, lon:   f64,
 }
 
-src := transmute([]byte)string("City,population,lat,lon\nOslo,709000,59.91,10.75\n\"Ho, Chi Minh\",,10.82,106.63\n")
 cities: []City
-if err, bad := csv.unmarshal(src, &cities).?; bad {
-	fmt.eprintln(err.kind, "at byte", err.offset)
-	os.exit(1)
-}
-fmt.println(cities[1].name, cities[1].population) // Ho, Chi Minh nil
-
-out, err := csv.marshal(cities) // src again: "Ho, Chi Minh" keeps its quotes and the absent population stays empty
+err := csv.unmarshal(transmute([]byte)string("City,population\nOslo,709000\n"), &cities)
 ```
 
-A cell the struct cannot hold is refused, and `render_error` locates it (`2:6: Wrong_Kind at [0].population`).
-The columns are the header's names, so their order does not matter, and a column the struct lacks is read and
-ignored unless `unknown_fields = .Refuse`.
+The [library guide](docs/guide.md) covers each of these in full, with allocation and limits. The complete
+programs are in [examples/](examples):
 
-A `Dialect` reads other delimited text through the same calls. `csv.TSV` is tab-separated values with the
-backslash escapes jq's `@tsv` writes. `no_header` takes the first record as data, with column k filling the
-struct's field k:
-
-```odin
-tsv := transmute([]byte)string("City\tpopulation\tlat\tlon\nOslo\t709000\t59.91\t10.75\n")
-_, _ = csv.unmarshal(tsv, &cities, {dialect = csv.TSV}).?
-
-// No header: column k is the struct's field k. A semicolon delimiter, and lines starting with # skipped.
-plain := transmute([]byte)string("# name;population;lat;lon\nOslo;709000;59.91;10.75\n")
-opts := csv.Unmarshal_Opts{dialect = {delimiter = ';', comment = '#'}, no_header = true}
-_, _ = csv.unmarshal(plain, &cities, opts).?
-```
-
-`build` keeps the span of every cell as a `Document`, and `find` reads one cell off the front of the text
-without building anything. A path counts rows from the first record after the header, and columns by index or
-by the header's name:
-
-```odin
-doc, _ := csv.build(src)
-defer csv.document_destroy(&doc)
-col, _ := csv.column(&doc, "lat")
-lat, _ := csv.get_float(&doc, 0, col)
-fmt.println(csv.row_count(&doc), lat) // 2 59.91
-
-field, found, _ := csv.find(src, ".[1].City")
-text, _, _ := csv.field_text(src, field)
-fmt.println(string(text)) // Ho, Chi Minh
-```
-
-`set`, `insert`, `remove` and `splice` return the text with the target changed and every other byte kept,
-quoting included. A cell is spelled as `marshal` spells it, and an edit that would not read back as the same
-table is refused:
-
-```odin
-edited, _ := csv.set(src, ".[0].population", 710000)
-fmt.print(string(edited)) // City,population,lat,lon
-//                           Oslo,710000,59.91,10.75
-//                           "Ho, Chi Minh",,10.82,106.63
-
-added, _ := csv.insert(src, csv.APPEND, City{name = "Bergen", lat = 60.39, lon = 5.32})
-fmt.print(string(added)[len(src):]) // Bergen,,60.39,5.32
-
-trimmed, _ := csv.remove(src, ".[].population") // the column, header included
-```
-
-`records_from` reads records from an `io.Reader` in bounded memory, with the same offsets and fault as
-`records` on the whole text. `each_record` runs a task on pieces of a text on the threads of a
-`host.Batch_Pool`, and `csv.validate` takes the same runner. `write_record` appends one record of text cells
-to a buffer:
-
-```odin
-r: strings.Reader
-strings.reader_init(&r, string(src))
-rr := csv.records_from(io.to_reader(strings.reader_to_stream(&r)))
-defer csv.records_destroy(&rr)
-for rec in csv.next_record(&rr) {
-	text, _, _ := csv.field_text(rec.src, rec.fields[0])
-	fmt.println(rec.at, len(rec.fields), string(text)) // 0 4 City, then 24 4 Oslo, then 48 4 Ho, Chi Minh
-}
-
-count := proc(data: rawptr, piece: ^csv.Records, k: int) -> bool {
-	for _ in csv.next_record(piece) {
-		sync.atomic_add((^int)(data), 1)
-	}
-	return true
-}
-rows: int
-_, _ = csv.each_record(src, {}, count, &rows, &pool.runner).? // pool as for validate_records above
-fmt.println(rows) // 3: the header and two rows
-
-line: [dynamic]u8
-_ = csv.write_record(&line, []Maybe(string){"Tromsø", nil, "69.65", "18.96"})
-fmt.print(string(line[:])) // Tromsø,,69.65,18.96
-```
-
-### CSV and JSON with one struct (`examples/crossformat`)
-A tag string can hold several `key:"value"` pairs, and each format reads its own key (`csv:"City"`,
-`json:"city"`). A field with no tag uses its own name in both. `csv.unmarshal` and `json.unmarshal` both
-return `core.Unmarshal_Error`. `core.render_error` writes it for either format, and also writes a `validate`
-fault (`core.Error`) and an edit refusal (`core.Path_Error`).
-
-```odin
-import "stury:core"
-import csv "stury:csv"
-import json "stury:json"
-
-City :: struct {
-	name:       string `csv:"City" json:"city"`,
-	population: Maybe(i64),
-	lat, lon:   f64,
-}
-
-Format :: enum {
-	Csv,
-	Json,
-}
-
-// Both formats return core's Unmarshal_Error, so one function handles either.
-load :: proc(format: Format, src: []byte, cities: ^[]City) -> Maybe(core.Unmarshal_Error) {
-	switch format {
-	case .Csv:
-		return csv.unmarshal(src, cities)
-	case .Json:
-		return json.unmarshal(src, cities)
-	}
-	unreachable()
-}
-
-// core.render_error writes the fault of either format as `line:col: kind at path`.
-report :: proc(src: []byte, err: core.Unmarshal_Error) {
-	fmt.println(core.render_error(src, err))
-}
-```
-
-Read CSV, write JSON, read that back and write CSV again:
-
-```odin
-cities: []City
-if err, bad := load(.Csv, table, &cities).?; bad {
-	report(table, err)
-	os.exit(1)
-}
-as_json, _ := json.marshal(cities)
-fmt.println(string(as_json)) // [{"city":"Oslo","population":709000,"lat":59.91,"lon":10.75},{"city":"Ho, Chi Minh","population":null,"lat":10.82,"lon":106.63}]
-
-back: []City
-_, _ = load(.Json, as_json, &back).?
-as_csv, _ := csv.marshal(back)
-fmt.println(string(as_csv) == string(table)) // true
-```
-
-A population that is not a number, reported for each format:
-
-```odin
-bad_csv := transmute([]byte)string("City,population,lat,lon\nOslo,lots,59.91,10.75\n")
-bad_json := transmute([]byte)string(`[{"city":"Oslo","population":"lots","lat":59.91,"lon":10.75}]`)
-if err, bad := load(.Csv, bad_csv, &cities).?; bad {
-	report(bad_csv, err) // 2:6: Wrong_Kind at [0].population
-}
-if err, bad := load(.Json, bad_json, &cities).?; bad {
-	report(bad_json, err) // 1:30: Wrong_Kind at [0].population
-}
-```
-
-A program that uses several formats imports `stury:core` for the shared types and each format's package for its
-calls. `json.Error`, `csv.Error`, `json.Unmarshal_Error` and `csv.Unmarshal_Error` are aliases of core's types
-and need no conversion. `core/aliases.odin` lists what the formats share.
+| Program | Shows |
+| --- | --- |
+| [scan](examples/scan/main.odin) | one value, or every value of a path, without building a document |
+| [roundtrip](examples/roundtrip/main.odin) | building a document and querying it |
+| [edit](examples/edit/main.odin) | changing a value in place |
+| [records](examples/records/main.odin) | NDJSON records, sequentially and on threads |
+| [jsonc](examples/jsonc/main.odin) | JSON with comments |
+| [csv](examples/csv/main.odin) | CSV into structs and back, dialects, documents, edits, streaming |
+| [crossformat](examples/crossformat/main.odin) | one struct read from CSV and JSON, with one error type |
 
 ## Command line
-`stury` is a drop-in replacement for [jq](https://jqlang.org) 1.8: it runs jq filters and gives jq's results
-and exit codes. Its messages start with `stury:` and are worded its own way; [docs/cli.md](docs/cli.md) lists
-every place they differ. Install it as described in [Install](#install). With `make build-cli` the
-binary is `build/stury`, so either copy it to a directory on your `PATH` or run it by that path.
+
+`stury` runs [jq](https://jqlang.org) 1.8 filters with jq's results and exit codes. Input is strict JSON by
+default, so `01`, `NaN` and invalid UTF-8 are errors, reported with their line and column. `--from` and `--to`
+choose `json`, `jsonc`, `ndjson`, `csv` or `tsv`, and `--csv` sets both.
 
 ```sh
-echo '{"logs":[{"id":1}]}' | stury -c '.logs[].id'   # prints 1
-stury check FILE
-stury check --ndjson log.ndjson   # or --seq, or --jsonc
-```
-
-What differs from jq:
-
-- Input is strict RFC 8259 JSON by default, so `01`, `NaN` and invalid UTF-8 are errors where jq accepts them,
-  and an error names the fault and its line and column.
-- `stury check FILE` only validates and prints nothing when the file is valid.
-- `--ndjson` reads and prints one JSON value per line; `--jsonc` reads JSONC and prints comments back;
-  `--csv` and `--tsv` read records as objects and write each output as a row. `--from` and `--to` choose the
-  two sides apart (`stury --from csv --to json . people.csv`).
-
-[docs/cli.md](docs/cli.md) lists every flag, and [each difference from jq](docs/cli.md#differences-from-jq).
-
-### CSV and TSV
-`--from` chooses how the input is read and `--to` how each output is written: `json`, `jsonc`, `ndjson`, `csv`
-or `tsv`. The first record of a CSV or TSV file names the fields, and each later record is one input, an object
-of strings. A cell is a number only after `tonumber`. An empty cell with no quotes is `null`. The examples
-read this `cities.csv`:
-
-```
-city,country,population
-Oslo,NO,709000
-Bergen,NO,286000
-Uppsala,SE,177000
-"Ho, Chi Minh",VN,
-```
-
-```sh
-$ stury --from csv -c 'select(.population) | .population |= tonumber' cities.csv   # CSV to JSON
-{"city":"Oslo","country":"NO","population":709000}
-{"city":"Bergen","country":"NO","population":286000}
-{"city":"Uppsala","country":"SE","population":177000}
-$ stury --csv 'select(.country == "NO") | {city, population}' cities.csv           # filter rows and columns
+$ echo '{"logs":[{"id":1}]}' | stury -c '.logs[].id'
+1
+$ stury check --ndjson log.ndjson    # prints nothing when valid
+$ stury --csv 'select(.country == "NO") | {city, population}' cities.csv
 city,population
 Oslo,709000
 Bergen,286000
-$ printf '{"a":1}\n{"b":2}\n' | stury --to csv --grow-header .                     # JSON to CSV
-a,b
-1,
-,2
-$ stury --from csv --to tsv '{city, country}' cities.csv                           # CSV to TSV
-city	country
-Oslo	NO
-Bergen	NO
-Uppsala	SE
-Ho, Chi Minh	VN
-$ stury check --from csv cities.csv                                                # prints nothing when valid
-$ printf 'a,b\n1,2\n3\n' | stury check --from csv
-stury: error: <stdin>:3:1: Record has the wrong number of fields (the header has 2)
 ```
 
-`--csv` and `--tsv` set both sides, so a filter's objects are written as rows under a header. An object with a
-key the header lacks ends the run, unless `--grow-header` is given: it holds the output and writes a header of
-every key. A file up to 64 MiB is read whole. A larger file or a pipe is read a window at a time. [docs/cli.md](docs/cli.md#csv-and-tsv-recipes)
-has more recipes (aggregating with `group_by`, columns, TSV) and the exact rules for cells, faults and output.
+Over 24 filters, process start-up included, it is 14.5 times faster than jq and 6.7 times faster than jaq
+(geometric mean). [docs/cli.md](docs/cli.md) lists every option, the CSV rules and recipes, and
+[each difference from jq](docs/cli.md#differences-from-jq).
 
 ## Documentation
-- The API's entry points, each a header that maps the package's public names to the files that hold them. The
-  doc comment on each public name is its contract.
-  - [json/json.odin](https://github.com/filip-41/stury/blob/main/json/json.odin): `stury:json`.
-  - [csv/csv.odin](https://github.com/filip-41/stury/blob/main/csv/csv.odin): `stury:csv`, and what its
-    scanner reads in every dialect.
-  - [core/aliases.odin](https://github.com/filip-41/stury/blob/main/core/aliases.odin): `stury:core`, what the
-    formats share (errors and their rendering, `Strictness`, `Duplicates`, paths, the type plan, `Batch_Runner`).
-- [docs/cli.md](docs/cli.md): the command line, every flag and each difference from jq.
-- [docs/stury.1](docs/stury.1): the command line's manual page (`man ./docs/stury.1`).
-- [docs/codec.md](docs/codec.md): stury codec internals, for contributors: how the writer, the typed reader
-  and the filter runner work.
-- [CHANGELOG.md](CHANGELOG.md): what changed.
 
-## Benchmark
-
-These numbers were measured on one machine (Apple M5 Max, macOS 26.5, Odin dev-2026-10 at `-o:speed`) with
-the harness in [bench/](bench/README.md), which documents how to run it, each arm and the fairness rules.
-Other data, filters and hardware will give other numbers. No x86 results are published here; simdjson's
-AVX-512 paths make the gaps narrower there.
-
-**Against Odin's `core:encoding/json`**, in ms (lower is better). Median of 11 runs, both libraries in one
-process with the same arena. Both decode the same values before any lane is timed. The load row builds a stury
-DOM and reads every value once, since core has converted every number by the time it returns.
-
-| Job | Input | stury | core:encoding/json | Speedup (core ÷ stury) |
-| --- | --- | ---: | ---: | ---: |
-| Validate | logs, 8 MB | **2.12** | 26.59 | 12.5× |
-| Load into a DOM | logs, 8 MB | **2.41** | 42.13 | 17.5× |
-| Unmarshal into structs | logs, 8 MB | **4.65** | 99.67 | 21.4× |
-| Marshal structs | logs, 8 MB | **1.44** | 55.55 | 38.7× |
-| Validate | nested, 16 MB | **4.89** | 50.30 | 10.3× |
-| Load into a DOM | nested, 16 MB | **7.32** | 76.53 | 10.5× |
-| Unmarshal into structs | nested, 16 MB | **9.36** | 227.99 | 24.3× |
-| Marshal structs | nested, 16 MB | **9.29** | 106.11 | 11.4× |
-
-("DOM" means a whole parsed document you can query.)
-
-**Against other libraries**, in GB/s (higher is better). Median of 11 runs, interleaved. Every tool checks
-UTF-8 and validates the whole input, and every arm's answer is checked against stury's before it is timed.
-
-Typed decode into structs. serde_json and sonic-rs decode through `#[derive(Deserialize)]`, generic like
-stury's `unmarshal`. simdjson and yyjson have no typed decode, so their columns are readers written by hand
-for each struct, on simdjson's On-Demand API and on yyjson's DOM. Every arm builds a new value on each read
-and keeps its parser and allocator.
-
-| Input | stury | serde_json | sonic-rs | simdjson, hand-written | yyjson, hand-written |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| logs, 8 MB | **3.53** | 1.34 | 1.88 | 2.36 | 2.94 |
-| config, 1 MB | **4.73** | 1.24 | 1.41 | 3.27 | 2.53 |
-| nested, 16 MB | **1.76** | 0.69 | 0.84 | 0.80 | 1.67 |
-
-Validate. The simdjson column is its DOM parser, which validates as it builds. It refuses `escape.json`, whose
-integers are wider than 64 bits.
-
-| Input | stury | simdjson |
-| --- | ---: | ---: |
-| logs, 8 MB | **3.80** | 2.96 |
-| nested, 16 MB | **3.37** | 1.57 |
-| wide, 8 MB | **4.84** | 1.95 |
-| pretty, 12 MB | **4.49** | 2.39 |
-| deep, 8 MB | **1.70** | 0.66 |
-| utf8, 8 MB | **9.13** | 5.49 |
-
-On the eleven real-world files most parser benchmarks use (64 KB–3.3 MB, pretty-printed), stury validates
-faster on eight. simdjson is faster on apache_builds (5.90 against 4.80), update-center (5.09 against 4.14)
-and twitter (within 3%).
-
-DOM. The other libraries convert every number while they parse. stury checks each number while it builds
-and converts it when it is read, so its first column builds the DOM and reads every value once, the same work
-as the others. The second column is the build alone.
-
-| Input | stury, every value read | stury, build only | yyjson | sonic-rs | simdjson | serde_json |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| logs, 8 MB | 3.19 | 3.93 | **3.38** | 3.16 | 2.91 | 0.68 |
-| nested, 16 MB | 1.75 | 2.82 | **2.29** | 1.67 | 1.57 | 0.46 |
-| wide, 8 MB | **3.21** | 4.56 | 2.93 | 2.12 | 1.94 | 0.18 |
-| pretty, 12 MB | 2.85 | 3.49 | **3.54** | 1.74 | 2.39 | 0.68 |
-| deep, 8 MB | 0.86 | 1.26 | **1.15** | 0.22 | 0.67 | |
-| longtext, 8 MB | **19.0** | 19.9 | 5.27 | 13.8 | 8.29 | 6.57 |
-| utf8, 8 MB | **7.90** | 7.96 | 1.26 | 7.67 | 5.49 | 0.95 |
-
-With every value read, yyjson builds the DOM of logs, nested, pretty and deep input faster, and yyjson or
-simdjson is ahead on every real-world file but gsoc-2018. A program that reads only some values pays only for
-those. The build alone leads on every synthetic input but `pretty`, and on four of the real-world files
-(canada, citm_catalog, gsoc-2018, numbers).
-
-Get one field from `config.json` (1 MB), in µs per call (lower is better). stury's `.Lazy` stops at the match,
-like sonic-rs. simdjson's On-Demand indexes the whole input first.
-
-| Key | stury | simdjson | sonic-rs |
-| --- | ---: | ---: | ---: |
-| early | 0.064 | 112 | **0.028** |
-| middle | **73** | 166 | 359 |
-| last | **145** | 223 | 718 |
-| absent | **137** | 164 | 950 |
-
-**CSV**, in GB/s, against the Rust `csv` 1.4 and `simd-csv` 0.14 crates. stury refuses quote misuse,
-unterminated quotes and ragged rows, and checks UTF-8 and field counts. The other columns name what each crate
-checks: `TotalReader` and `Splitter` check neither UTF-8 nor field counts, `Reader` checks both.
-
-| Job | Input | stury | simd-csv | csv |
-| --- | --- | ---: | ---: | ---: |
-| Validate | table, 16 MB | **13.3** | 6.59 (`Splitter`, boundaries only) | 1.28 (`StringRecord`) |
-| Validate | text, quoted, 16 MB | **6.18** | 2.92 (`Splitter`) | 0.90 |
-| Validate | wide, 200 columns, 8 MB | 16.9 | **27.3** (`Splitter`) | 1.42 |
-| Read every field | table | **3.86** | 3.77 (`TotalReader`) / 3.04 (`Reader`) | 1.21 |
-| Read every field | text | **2.16** | 1.92 / 1.41 | 0.89 |
-| Read every field | wide | 3.33 | **3.48** / 2.92 | 1.33 |
-| Read every field | tsv, 8 MB | 3.22 | **3.58** / 2.89 | 1.20 |
-| Document, every cell read | table | **2.59** | 1.24 (`TotalReader`) | 0.60 |
-| Document, every cell read | text | **1.56** | 1.04 | 0.58 |
-| Document, every cell read | wide | 2.23 | **2.54** | 1.17 |
-| Unmarshal into structs | table | **0.76** | | 0.53 (serde) |
-| Unmarshal into structs | text | **0.72** | | 0.50 |
-| Marshal structs | table | **1.06** | | 0.43 (serde) |
-| Marshal structs | text | **1.32** | | 1.19 |
-
-The unmarshal rows copy every string. With `borrow_strings` stury reads table at 0.90 and text at 1.51. Where
-stury trails, the faster arm is one that checks neither UTF-8 nor field counts.
-
-**Command line**, with `bench/cli/jq_compare.sh`: 24 jq filters over the synthetic fixtures and three of the
-real-world files, end to end with process start-up, against jq 1.8.2, jaq 3.0.0, gojq 0.12.19 and yq 4.53.2
-(on the 11 filters yq can spell). Each figure is the other tool's median wall time divided by stury's, so 2.0×
-means stury took half the time. Every tool gave the same answers.
-
-| Tool | Geometric mean | Smallest |
-| --- | ---: | ---: |
-| jq | 14.5× | 4.9× |
-| jaq | 6.7× | 2.3× |
-| gojq | 10.2× | 3.4× |
-| yq | 55× | 8.4× |
-
-The smallest gaps are on the real-world files (0.6–2.2 MB), where every tool but yq finishes in 1.4–25 ms and
-start-up dominates. On the 6–11 MB fixtures stury is 6–99× faster than jq, jaq and gojq.
-
-On CSV, with `bench/cli/csv_compare.sh` on 16 MB files, in ms (lower is better). The jq column splits lines
-at commas, so it runs only on `table.csv`, which has no quoted cells. qsv has no CSV-to-JSON-lines arm because
-it types the values it converts. Every tool gave the same answers.
-
-| Case | stury | qsv 20.1 | Miller | jq `-R` |
-| --- | ---: | ---: | ---: | ---: |
-| two columns | **3.8** | 33.3 | 170 | 612 |
-| rows filtered (`qty >= 9000`) | **6.0** | 33.8 | 168 | 248 |
-| two columns of quoted cells | **4.1** | 36.2 | 75.3 | |
-| CSV to JSON lines | **7.6** | | 243 | |
+- [Library guide](docs/guide.md): usage, allocation and ownership, limits, CSV specifics.
+- API reference: the doc comment on each public name. [json/json.odin](json/json.odin),
+  [csv/csv.odin](csv/csv.odin) and [core/aliases.odin](core/aliases.odin) list the names and their files.
+- [Command line](docs/cli.md), and its manual page [docs/stury.1](docs/stury.1) (`man ./docs/stury.1`).
+- [Benchmarks](docs/benchmarks.md), measured with the harness in [bench/](bench/README.md).
+- [Internals](docs/codec.md), for contributors.
 
 ## Development
+
 ```sh
-make test        # build and run the suites and the examples
+make test        # the suites, the CLI tests and the examples (needs python3)
 make lint        # the vet set, with warnings as errors
 make test-modes  # the api suite with the alternative engines forced on
 make test-asan   # the suites and the CLI under AddressSanitizer
 make test-tsan   # the suites and the CLI under ThreadSanitizer
+make diff        # compare answers with jq 1.8.2 on PATH
 ```
 
 ## License
+
 MIT. See [LICENSE](LICENSE). Third-party notices are in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).

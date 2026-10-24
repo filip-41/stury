@@ -8,7 +8,6 @@ package core
 import "base:runtime"
 import "core:slice"
 
-// A boolean into a `width`-byte boolean.
 shape_bool_store :: #force_inline proc(v: bool, dest: rawptr, width: u8) {
 	if dest != nil {
 		switch width {

@@ -84,9 +84,8 @@ emit_literal :: #force_inline proc(
 	}
 }
 
-// The preorder open hook, called at both container-open sites (the single push
-// and the fused `[` run). It is the only place a container's `.Nodes` row is written.
-// The row is stored twice:
+// A container's `.Nodes` row at its open, in preorder (a fused `[` past the run's first has
+// `dom_run_open`). The row is stored twice:
 //
 //   at open    hi = 0, cnt = 0, subtree_size = the row's own index
 //   at close   hi = one past `]`, cnt = the frame's `members`,

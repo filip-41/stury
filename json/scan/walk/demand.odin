@@ -236,7 +236,6 @@ demand_gate_prepare :: proc(ctx: ^Query_Ctx, spec: Demand_Spec) {
 	demand_gate_reset(g)
 }
 
-// Empty a gate's walk state.
 demand_gate_reset :: proc(g: ^Demand_Gate) {
 	g.open = 0
 	g.retracted = false
@@ -286,7 +285,6 @@ demand_key :: #force_inline proc(
 					return
 				}
 			}
-			// The key's own parse already knows whether it saw a backslash.
 			esc := q.key_saw_escape
 			demand_key_at_depth(q, Q, key_lo, key_hi, vlo, sp, owner_lo, pend, esc, demand_key_filtered(q, key_lo, key_hi, esc))
 			return
@@ -412,7 +410,6 @@ demand_key_at_depth :: #force_inline proc(
 		pend.live = true
 		pend.vlo = vlo
 		pend.frame = sp
-		// The owning object's identity for the row this member writes.
 		pend.owner_lo = owner_lo
 		pend.n_latch = n
 		return true
@@ -473,8 +470,8 @@ demand_reaches_into :: #force_inline proc(q: ^Query_Ctx, $Q: bit_set[Walk_Kind],
 	}
 }
 
-// The pending member's value closed at `s.pos`. One match per member, run here because the value's extent —
-// half the answer — does not exist until now.
+// The pending member's value closed at `s.pos`. One match per member, run here because the value's extent
+// does not exist until now.
 demand_value_closed :: #force_inline proc(
 	s: ^Scanner,
 	q: ^Query_Ctx,

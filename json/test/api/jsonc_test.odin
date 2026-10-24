@@ -141,7 +141,22 @@ test_jsonc_comment_edits :: proc(t: ^testing.T) {
 		testing.expect(t, hit, string(out))
 	}
 
-	_, err := json.edit_comment(src, ".name", .Trail, "// two", .Insert, context.temp_allocator)
+	// Text without markers is what `fact_text` reads: it writes as a `//` line, and reads back as itself.
+	for bare in ([]string{"human", " human"}) {
+		out, berr := json.edit_comment(src, ".depth", .Lead, bare, .Insert, context.temp_allocator)
+		testing.expect_value(t, berr, nil)
+		doc, derr := json.build(out, context.temp_allocator, dialect = .Jsonc)
+		testing.expect(t, derr == nil, string(out))
+		hit := false
+		for cm in doc.facts {
+			hit ||= cm.place == .Lead && json.fact_text(&doc, cm) == " human"
+		}
+		testing.expect(t, hit, string(out))
+	}
+	_, err := json.edit_comment(src, ".depth", .Lead, "two\nlines", .Insert, context.temp_allocator)
+	edit_err(t, err, .Bad_Comment)
+
+	_, err = json.edit_comment(src, ".name", .Trail, "// two", .Insert, context.temp_allocator)
 	edit_err(t, err, .Unplaceable)
 	_, err = json.edit_comment(src, ".depth", .Foot, "// x", .Insert, context.temp_allocator)
 	edit_err(t, err, .Unplaceable)

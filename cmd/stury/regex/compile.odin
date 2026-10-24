@@ -1,9 +1,9 @@
 // Package regex is the Oniguruma-syntax engine behind jq's `test`, `match`, `sub` and the like.
 // A pattern goes: parse.odin (`parse`: source to a tree of Nodes, with Oniguruma's error messages),
 // call.odin (`check_calls`: \g<...> calls checked for endless recursion), compile.odin (`compile`:
-// the tree to a Regex holding a program of Insts plus the literals a search can skip by), then match.odin (`search`: the
-// backtracking matcher over that program). unicode.odin supplies character classes and case folds to all
-// of them, from the generated unicode_tables.odin.
+// the tree to a Regex holding a program of Insts plus the literals a search can skip by), then match.odin
+// (`search`: the backtracking matcher over that program). unicode.odin supplies character classes and case
+// folds to all of them, from the generated unicode_tables.odin.
 package regex
 
 // A pattern's tree as a program for the backtracking matcher (match.odin), with what the search can skip
@@ -14,7 +14,7 @@ import "core:strings"
 import "core:unicode/utf8"
 
 // The most instructions a program may have: short counted repeats are written out, so many of them would
-// otherwise take any memory they like. Oniguruma has no such limit.
+// otherwise take unbounded memory. Oniguruma has no such limit.
 MAX_INSTS :: 1 << 21
 
 Op :: enum u8 {
@@ -152,8 +152,8 @@ compile :: proc(pattern: string, flags: Flags) -> (re: Regex, err: string) {
 	return re, ""
 }
 
-// The called groups no call has emitted in place, as a group under `{0}` is, each after the program, then each call's
-// address.
+// The called groups no call has emitted in place (as a group under `{0}` is), each after the program, then each
+// call's address.
 @(private = "file")
 emit_subroutines :: proc(c: ^Compiler) {
 	// By index: emitting a group grows c.insts, and the loop reaches the calls it emits.

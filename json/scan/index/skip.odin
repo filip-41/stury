@@ -85,7 +85,6 @@ skip_container :: #force_inline proc(ix: ^Index($F), r: Reader, open: int, room:
 	return skip_stacked(ix, r, open, room)
 }
 
-// `skip_container`'s answer for any container, by the bracket stack.
 @(private = "file")
 skip_stacked :: proc(ix: ^Index($F), r: Reader, open: int, room: int) -> (int, Reader) {
 	r := r

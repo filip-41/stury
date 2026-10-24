@@ -80,7 +80,6 @@ Detached :: struct {
 	path:       ^Path_Step,
 }
 
-// Whether no path leads to an item.
 pathless :: proc(p: ^Path_Step) -> bool {
 	return p == &no_path || p != nil && p.parent == &no_path
 }
@@ -92,7 +91,6 @@ state_of :: proc(it: Item) -> Path_State {
 	return {it.path, it.v}
 }
 
-// The path of `v` made in state `st`.
 placed :: proc(st: Path_State, v: Value) -> ^Path_Step {
 	if st.path == &no_path || identical(v, st.at) {
 		return st.path

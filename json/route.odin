@@ -9,7 +9,7 @@ package json
 //	demand matcher   a column path `Any^k Name` (every record's member at one depth), plain
 //	                 single-name paths over a root object, and gated columns `(Name|Any)+ Name`
 //	                 (`.logs[].id`: a column under named members) when they are the request's only
-//	                 paths: the fastest reader of named members
+//	                 paths
 //
 // The automaton is bounded: `MAX_PATH_QUERIES` paths of at most `MAX_PATH_STEPS` steps each, refused as
 // `Over_Capacity` before the walk. The demand matcher is not: any number of keys, a

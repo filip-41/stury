@@ -53,12 +53,11 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 			run_once(run, v)
 			ran = true
 		case .Error:
-			flush_some(run, force = true)
 			if !run.opts.seq {
-				fmt.eprintf("stury: parse error: %s\n%s", msg, ins.fault_note)
-				run.ret = EXIT_INPUT
+				parse_failed(run, msg, ins.fault_note)
 				return
 			}
+			flush_some(run, force = true)
 			fmt.eprintf("stury: ignoring parse error: %s\n%s", msg, ins.fault_note)
 			ins.fault_note = ""
 			ran = ins.slurped == nil // the message's memory goes back before the next input, as a value's does
@@ -66,6 +65,13 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 			return
 		}
 	}
+}
+
+// Ends the run on a fault in the input: the output so far, then jq's parse error message and the note after it.
+parse_failed :: proc(run: ^Run, msg: string, note := "") {
+	flush_some(run, force = true)
+	fmt.eprintf("stury: parse error: %s\n%s", msg, note)
+	run.ret = EXIT_INPUT
 }
 
 // The interpreter's stack: 4 GiB of address space reserved, committed only as far as a filter recurses

@@ -35,8 +35,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-odin
       - run: make test test-modes
-      # Odin no longer publishes a macOS Intel toolchain. Cross-compile the
-      # x86 suites from the arm64 runner and run them under Rosetta instead.
+      # Odin has no macOS Intel toolchain: cross-compile the x86 suites from the
+      # arm64 runner and run them under Rosetta.
       - if: matrix.os == 'macos-15'
         run: make test-x86
 
@@ -59,7 +59,7 @@ jobs:
       # of the runner idle.
       - run: make -j -O diff
 
-  # The sanitizer runs are checked where they were made to pass: macOS on Apple silicon.
+  # Sanitizer runs are gated on macOS on Apple silicon only.
   sanitizers:
     needs: test
     strategy:
@@ -72,8 +72,7 @@ jobs:
       - uses: ./.github/actions/setup-odin
       - run: make ${{ matrix.target }}
 
-  # Windows is built here and nowhere else: the CLI's Windows code was written without a Windows host, so this
-  # job is its first link and run. It builds the library suites and the CLI, then runs a few answers end to end.
+  # Windows is built only here. It builds the library suites and the CLI, then runs a few answers end to end.
   windows:
     needs: lint
     runs-on: windows-latest

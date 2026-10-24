@@ -130,7 +130,6 @@ Index_Cursor :: struct($F: index.Facts) {
 	p:  int, // the first token start the walk has not consumed, or -1 past the last
 }
 
-// The walk consumed the token it stands on.
 cursor_advance :: proc {
 	byte_cursor_advance,
 	pretty_cursor_advance,

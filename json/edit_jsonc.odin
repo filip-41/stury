@@ -8,7 +8,7 @@ import "scan/walk"
 import enc "encode"
 import scan_pkg "scan"
 
-// The JSONC geometry of the path edits (edit.odin's engine with `jsonc`, on the rows of a JSONC scan, whose
+// The JSONC geometry of the path edits (edit_ops.odin's engine with `jsonc`, on the rows of a JSONC scan, whose
 // comments move with the entries they are attached to), and the comment edits. Every result is validated as
 // JSONC before it is returned.
 //
@@ -197,8 +197,9 @@ Comment_Op :: enum u8 {
 }
 
 // Edit the comments at `place` on every value the path finds, as `op` says. The source is read as JSONC.
-// The path is text or a `Path`, as `set`'s. A comment that is not one `//` line or one `/* */` block is
-// `.Bad_Comment`. `.Remove` ignores `comment`.
+// The path is text or a `Path`, as `set`'s. `comment` is one `//` line or one `/* */` block; text with neither
+// marker is the bare text `fact_text` reads, written as a `//` line (`human` as `// human`, and ` human`, as
+// `fact_text` returns it, as `// human`). Any other comment is `.Bad_Comment`. `.Remove` ignores `comment`.
 @(require_results)
 edit_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
@@ -211,6 +212,13 @@ watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment
 	steps: [core_pkg.MAX_PATH_STEPS]Step
 	p, names := edit_parse(path, steps[:], allocator) or_return
 	defer delete(names, allocator)
+	comment, marked := comment, ""
+	defer delete(marked, allocator)
+	if op != .Remove && !strings.has_prefix(comment, "//") && !strings.has_prefix(comment, "/*") {
+		lead := "//" if strings.has_prefix(comment, " ") else "// "
+		marked, _ = strings.concatenate({lead, comment}, allocator)
+		comment = marked
+	}
 	if op != .Remove && !comment_ok(comment) {
 		return nil, Path_Error{kind = .Bad_Comment}
 	}

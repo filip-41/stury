@@ -96,6 +96,11 @@ test_tape_route_is_gated :: proc(t: ^testing.T) {
 		{two, .Strict, .Refuse, false},
 	}
 	for c, i in cases {
+		when !REFUSE_DUPLICATES {
+			if c.dups == .Refuse {
+				continue
+			}
+		}
 		r := paths_run(src, c.paths, c.strictness, c.dups)
 		defer json.destroy(&r.req)
 		testing.expectf(t, r.err == nil, "row %d: %v", i, r.err)

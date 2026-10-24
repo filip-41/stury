@@ -413,10 +413,11 @@ put_hooked :: proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool, maybe: bool
 @(private)
 put_empty :: proc(w: ^Writer, $Q: bool) -> Marshal_Error {
 	when Q {
-		return put_bytes(w, {'"', '"'})
-	} else {
-		return .None
+		p := room(w, 2) or_return
+		p[0], p[1] = '"', '"'
+		commit(w, 2)
 	}
+	return .None
 }
 
 // `s` as one cell. Where cells are quoted, it is quoted when it holds the delimiter, a quote, CR or LF.
@@ -633,14 +634,6 @@ put :: #force_inline proc(w: ^Writer, c: byte) -> Marshal_Error {
 	p := room(w, 1) or_return
 	p[0] = c
 	commit(w, 1)
-	return .None
-}
-
-@(private)
-put_bytes :: proc(w: ^Writer, b: []byte) -> Marshal_Error {
-	p := room(w, len(b)) or_return
-	copy(p[:len(b)], b)
-	commit(w, len(b))
 	return .None
 }
 

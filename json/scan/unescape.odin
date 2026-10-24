@@ -35,7 +35,7 @@ dom_unescape_tail :: #force_inline proc(dst: []u8, src: []byte, start, end: u64,
 	return out
 }
 
-// The whole token by the byte-at-a-time loop: what `dom_unescape_copy` is checked against.
+// The whole token by the byte-at-a-time loop.
 dom_unescape_scalar :: proc(dst: []u8, src: []byte, lo, hi: u64) -> int {
 	// `lo` and `hi` bound the token including both quotes.
 	return dom_unescape_tail(dst, src, lo + 1, hi - 1, 0)

@@ -117,10 +117,15 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 //	- A `Parse_Fault` as `line:col: <Parse_Error>` in `src`, the path text.
 @(require_results)
 render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
-	b := strings.builder_make(allocator)
+	b: Text_Builder = strings.builder_make(allocator)
 	render_error_to_writer(strings.to_writer(&b), src, err)
 	return strings.to_string(b)
 }
+
+// The builder `render_error` writes through. The alias is this file's non-generic use of `core:strings`, so a
+// plain `-vet` build of a program that never calls `render_error` accepts the import.
+@(private)
+Text_Builder :: strings.Builder
 
 // `render_error`'s text written to `w`, allocating nothing; `w`'s failure is the `io.Error`, with a prefix of
 // the text possibly written.
@@ -211,9 +216,14 @@ Path_Spec :: core_pkg.Path_Spec
 //	outcome  the `Path_Outcome`
 //	kind     the value's kind
 //	lo, hi   the value's span in the scanned source
-//	owner    the offset of the container holding the value (`max(u64)` when none does)
+//	owner    the offset of the container the answer is about: the one holding the value, or the one lacking a
+//	         `.Missing` member (offset 0 for the root container). `NO_OWNER` when there is none: the root
+//	         value, or a miss of the document as a whole (`find` on a refused scan)
 //	node     the value in `Request.doc` under `.Nodes` (`NO_NODE` otherwise)
 Path_Answer :: walk.Path_Answer
+
+// `Path_Answer.owner` of an answer no container holds.
+NO_OWNER :: walk.NO_OWNER
 
 // Whether a path landed. Gives `.Found`, `.Missing` (no such member or element), or `.Type_Mismatch` (a step met
 // a value of another kind, such as a name on an array).
@@ -251,10 +261,12 @@ Kind :: scan_pkg.Kind
 
 // How a number's binary64 value relates to the authored one: `Exact` (bit for bit), `Inexact` (correctly
 // rounded), `Underflowed` (nonzero, read as +-0), or `None` (no binary64 value, such as `1e400`, the value
-// is 0).
+// is 0). `Exact` is the zero value.
 Exactness :: core_pkg.Exactness
 
-// A number as binary64 (`value`) and its `exactness`.
+// A number as binary64 (`value`) and its `exactness`. This is the f64 view: `Digits` keeps the authored text.
+// `marshal` writes `value`, and refuses `.None` with `.Non_Finite` (use `Digits` or `Raw` to carry `1e400`
+// through). The zero value is the exact 0, so an unset `Number` marshals as `0`.
 Number :: scan_pkg.Number
 
 // The authored text of one JSON value. `unmarshal` fills it with a value's span of the source (borrowed),

@@ -5,7 +5,7 @@ Marshal_Error :: enum u8 {
 	None,
 	Bad_State,     // JSON: a hook wrote other than exactly one value
 	Bad_Utf8,      // a string or name that is not valid UTF-8, or a rune that is not a Unicode scalar value
-	Non_Finite,    // a NaN or an infinity
+	Non_Finite,    // a NaN or an infinity; JSON: also a `Number` with no binary64 value (`.None`)
 	Too_Deep,      // JSON: nesting past MAX_DEPTH
 	Cycle,         // JSON: a pointer reached again inside its own value
 	Unsupported,   // a type the format cannot write

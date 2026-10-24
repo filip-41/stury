@@ -21,8 +21,8 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          # ponytail: Ubuntu 22.04 sets the Linux binaries' glibc floor at 2.35; a musl static build if older
-          # distributions ask for it.
+          # Ubuntu 22.04 sets the Linux binaries' glibc floor at 2.35; older systems would need a musl static build,
+          # not made unless a distribution asks for it.
           - os: ubuntu-22.04
             name: linux-amd64
           - os: ubuntu-22.04-arm

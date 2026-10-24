@@ -39,7 +39,6 @@ resolve_queries :: #force_no_inline proc(
 	query_ctx_zero(ctx, Q)
 	// A `.Locate` scan validates nothing it locates. Resolved once for every `.Dom` emit site.
 	ctx^.walk_judged = axes.scan == .Full
-	// Every kind the first pass accepted.
 	resolved: bit_set[Walk_Kind]
 
 	for q in queries {

@@ -13,10 +13,8 @@ peek :: #force_inline proc(s: ^Scanner) -> int {
 	return int(s.src[s.pos])
 }
 
-// Skip JSON whitespace. One byte at a time, through `CHAR_FLAGS`: the set is
-// exactly {9, 10, 13, 32}, so a control byte is a fault and is not skipped.
-// Every whitespace byte is <= 0x20, so a byte above that ends the run without
-// the table load.
+// Skip JSON whitespace, exactly {9, 10, 13, 32} through `CHAR_FLAGS`: a control byte is a fault and is not
+// skipped. Every whitespace byte is <= 0x20, so a byte above that ends the run without the table load.
 skip_ws :: #force_inline proc(s: ^Scanner) {
 	#no_bounds_check {
 		n := u64(len(s.src))
@@ -98,8 +96,8 @@ skip_peek :: #force_inline proc(s: ^Scanner) -> int {
 
 // Strict UTF-8 scalar step (RFC 3629): validates the one character starting
 // at pos. Caller guarantees pos < n and src[pos] >= 0x80. Wire-level validity
-// holds at every strictness level — only grammar is strictness-gated,
-// so Structural and skip paths validate bytes exactly like Strict does.
+// holds at every strictness level; only grammar is strictness-gated, so Structural and skip paths validate
+// bytes exactly like Strict does.
 //
 // The first read, `c := src[pos]`, stays checked: its bound is the caller's
 // promise, so a caller that got `pos < n` wrong traps here instead of reading

@@ -144,6 +144,9 @@ expect_refuse_everywhere :: proc(t: ^testing.T, src: []byte, want: Maybe(json.Er
 
 @(test)
 test_refuse_offsets :: proc(t: ^testing.T) {
+	when !REFUSE_DUPLICATES {
+		return // `.Refuse` is compiled out; test_refuse_compiled_out pins that
+	}
 	defer free_all(context.temp_allocator)
 	Case :: struct {
 		src:    string,
@@ -229,7 +232,7 @@ test_build_refuses_first_and_all :: proc(t: ^testing.T) {
 	testing.expect_value(t, text, "offset 0: Bad_Option")
 }
 
-@(private = "file")
+// Whether `Duplicates.Refuse` is compiled in; the tests of its refusals run only where it is.
 REFUSE_DUPLICATES :: #config(REFUSE_DUPLICATES, true)
 
 // Built without the key-checking walks (`-define:REFUSE_DUPLICATES=false`, `make test-modes`), `.Refuse` is
@@ -259,6 +262,9 @@ test_refuse_compiled_out :: proc(t: ^testing.T) {
 // Objects past the key set's scratch, alone, nested and side by side, at every size the table doubles through.
 @(test)
 test_refuse_big_objects :: proc(t: ^testing.T) {
+	when !REFUSE_DUPLICATES {
+		return // `.Refuse` is compiled out; test_refuse_compiled_out pins that
+	}
 	defer free_all(context.temp_allocator)
 	for n in ([?]int{63, 64, 65, 129, 1001, 5000}) {
 		b := strings.builder_make(context.temp_allocator)
@@ -293,6 +299,9 @@ test_refuse_big_objects :: proc(t: ^testing.T) {
 // finds it. A repeat before the answer settles is read and refused.
 @(test)
 test_refuse_under_lazy :: proc(t: ^testing.T) {
+	when !REFUSE_DUPLICATES {
+		return // `.Refuse` is compiled out; test_refuse_compiled_out pins that
+	}
 	defer free_all(context.temp_allocator)
 	src := `{"a":1,"b":{"x":1,"x":2}}`
 	req: json.Request({.Path})
