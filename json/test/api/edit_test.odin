@@ -13,7 +13,7 @@ test_splice :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := raw(`{"a":1,"b":[2,3]}`)
 	edits := []json.Edit{{lo = 5, hi = 6, bytes = raw(`"x"`)}, {lo = 14, hi = 15, bytes = raw(`[]`)}}
-	out, err := json.splice(src, edits, context.temp_allocator)
+	out, err := json.splice(src, edits, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), `{"a":"x","b":[2,[]]}`)
 
@@ -28,12 +28,12 @@ test_splice :: proc(t: ^testing.T) {
 	edit_err(t, e3, .Bad_Edit)
 	backwards := []json.Edit{{lo = 7, hi = 5, bytes = raw(`1`)}}
 	// A refused edit list allocates nothing: the panic allocator would abort the test.
-	_, e5 := json.splice(src, backwards, mem.panic_allocator())
+	_, e5 := json.splice(src, backwards, allocator = mem.panic_allocator())
 	edit_err(t, e5, .Bad_Edit)
 
 	// Adjacent edits are disjoint.
 	adjacent := []json.Edit{{lo = 12, hi = 13, bytes = raw(`[]`)}, {lo = 13, hi = 14, bytes = raw(`,`)}}
-	joined, e6 := json.splice(src, adjacent, context.temp_allocator)
+	joined, e6 := json.splice(src, adjacent, allocator = context.temp_allocator)
 	testing.expect_value(t, e6, nil)
 	testing.expect_value(t, string(joined), `{"a":1,"b":[[],3]}`)
 
@@ -45,7 +45,7 @@ test_splice :: proc(t: ^testing.T) {
 
 @(private)
 set_text :: proc(t: ^testing.T, src, path: string, value: any, loc := #caller_location) -> string {
-	out, err := json.set(raw(src), path, value, context.temp_allocator)
+	out, err := json.set(raw(src), path, value, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil, loc = loc)
 	return string(out)
 }
@@ -68,9 +68,9 @@ test_set :: proc(t: ^testing.T) {
 	testing.expect_value(t, edit_err(t, bs, .Bad_Source).syntax, json.Error_Kind.Truncated)
 	p: rawptr
 	_, en := json.set(raw(`{"a":1}`), ".a", p)
-	testing.expect_value(t, edit_err(t, en, .Encode).encode, json.Encode_Error.Unsupported)
+	testing.expect_value(t, edit_err(t, en, .Encode).encode, json.Marshal_Error.Unsupported)
 	_, mid := json.set(raw(`{"a":1}`), ".a", []f64{1, math.inf_f64(1)})
-	testing.expect_value(t, edit_err(t, mid, .Encode).encode, json.Encode_Error.Non_Finite)
+	testing.expect_value(t, edit_err(t, mid, .Encode).encode, json.Marshal_Error.Non_Finite)
 	_, long := json.set(raw(`{"a":1}`), strings.repeat(".a", 33, context.temp_allocator), 1)
 	edit_err(t, long, .Over_Capacity)
 }
@@ -91,7 +91,7 @@ test_edit_error_locates_the_refusal :: proc(t: ^testing.T) {
 		{`{"a":1}`, ".a", math.inf_f64(1), {kind = .Encode, encode = .Non_Finite}},
 	}
 	for c in cases {
-		_, err := json.set(raw(c.src), c.path, c.value, context.temp_allocator)
+		_, err := json.set(raw(c.src), c.path, c.value, allocator = context.temp_allocator)
 		testing.expectf(t, err == c.want, "set %q %s: %v, want %v", c.src, c.path, err, c.want)
 	}
 	// The offset of a refused result is into the edited text, which `splice` never returns.
@@ -108,7 +108,7 @@ edit_err :: proc(t: ^testing.T, got: Maybe(json.Path_Error), want: json.Path_Err
 
 @(private)
 remove_text :: proc(t: ^testing.T, src, path: string, loc := #caller_location) -> string {
-	out, err := json.remove(raw(src), path, context.temp_allocator)
+	out, err := json.remove(raw(src), path, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil, loc = loc)
 	return string(out)
 }
@@ -148,7 +148,7 @@ test_remove :: proc(t: ^testing.T) {
 
 @(private)
 insert_text :: proc(t: ^testing.T, src, path: string, at: json.Insert_At, value: any, loc := #caller_location) -> string {
-	out, err := json.insert(raw(src), path, at, value, context.temp_allocator)
+	out, err := json.insert(raw(src), path, at, value, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil, loc = loc)
 	return string(out)
 }
@@ -199,7 +199,7 @@ test_insert :: proc(t: ^testing.T) {
 test_set_upsert :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	upsert :: proc(t: ^testing.T, src, path: string, value: any, loc := #caller_location) -> string {
-		out, err := json.set(raw(src), path, value, context.temp_allocator, upsert = true)
+		out, err := json.set(raw(src), path, value, upsert = true, allocator = context.temp_allocator)
 		testing.expect_value(t, err, nil, loc = loc)
 		return string(out)
 	}
@@ -247,13 +247,13 @@ test_edit_out_of_memory :: proc(t: ^testing.T) {
 	run :: proc(c: Case, allocator: mem.Allocator) -> ([]byte, Maybe(json.Path_Error)) {
 		switch c.op {
 		case .Set:
-			return json.set(raw(c.src), c.path, 0, allocator, dialect = c.dialect)
+			return json.set(raw(c.src), c.path, 0, dialect = c.dialect, allocator = allocator)
 		case .Upsert:
-			return json.set(raw(c.src), c.path, 0, allocator, upsert = true, dialect = c.dialect)
+			return json.set(raw(c.src), c.path, 0, upsert = true, dialect = c.dialect, allocator = allocator)
 		case .Insert:
-			return json.insert(raw(c.src), c.path, 0, "x", allocator, c.dialect)
+			return json.insert(raw(c.src), c.path, 0, "x", c.dialect, allocator)
 		case .Remove:
-			return json.remove(raw(c.src), c.path, allocator, c.dialect)
+			return json.remove(raw(c.src), c.path, c.dialect, allocator)
 		case .Comment:
 			return json.edit_comment(raw(c.src), c.path, .Lead, "// x", .Insert, allocator)
 		}
@@ -295,10 +295,10 @@ test_set_names_a_type_mismatch :: proc(t: ^testing.T) {
 @(test)
 test_splice_refuses_a_comment_that_swallows_values :: proc(t: ^testing.T) {
 	src := raw("[1, 2\n]")
-	_, err := json.splice(src, []json.Edit{{lo = 2, hi = 3, bytes = raw(" //")}}, dialect = .Jsonc)
+	_, err := json.splice(src, []json.Edit{{lo = 2, hi = 3, bytes = raw(" //")}}, .Jsonc)
 	edit_err(t, err, .Bad_Result)
 	// A comment that ends inside the edit is fine.
-	out, ok := json.splice(src, []json.Edit{{lo = 2, hi = 3, bytes = raw(", /* c */")}}, dialect = .Jsonc)
+	out, ok := json.splice(src, []json.Edit{{lo = 2, hi = 3, bytes = raw(", /* c */")}}, .Jsonc)
 	testing.expect_value(t, ok, nil)
 	testing.expect_value(t, string(out), "[1, /* c */ 2\n]")
 	delete(out)

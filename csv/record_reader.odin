@@ -27,17 +27,11 @@ Record_Reader :: struct {
 }
 
 // The records of `r` as `records` reads them, `chunk` bytes at a time. The window and the fields are
-// allocated with `allocator` and freed by `records_destroy`. The window holds the line being read, from its
-// first byte, plus one chunk, and grows by doubling. `limits.max_record_bytes` caps the line and so the window.
+// allocated with `allocator` and freed by `destroy`. The window holds the line being read, from its
+// first byte, plus one chunk, and grows by doubling. `opts.limits.max_record_bytes` caps the line and so the window.
 @(require_results)
-records_from :: proc(
-	r: io.Reader,
-	dialect := Dialect{},
-	strictness := Strictness.Strict,
-	limits := Limits{},
-	allocator := context.allocator,
-) -> Record_Reader {
-	s, ok := scan_setup(dialect, limits, strictness)
+records_from :: proc(r: io.Reader, opts := Read_Opts{}, allocator := context.allocator) -> Record_Reader {
+	s, ok := scan_setup(opts.dialect, opts.limits, opts.strictness)
 	rr := Record_Reader{window = {reader = r, allocator = allocator, chunk = core_pkg.READER_CHUNK}}
 	rr.it = records_of(nil, s, allocator)
 	if !ok {

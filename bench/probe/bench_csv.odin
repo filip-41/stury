@@ -58,8 +58,8 @@ csv_tally_text :: proc(t: Csv_Tally) -> string {
 // Decodes every field of every record. A quoted cell's text slices the input unless it contains `""`; then
 // `field_text` decodes it into `scratch`, which is reset after each such cell.
 csv_walk_records :: proc(data: []byte, dialect: csv.Dialect, scratch: ^mem.Arena) -> (t: Csv_Tally, ok: bool) {
-	it := csv.records(data, dialect)
-	defer csv.records_destroy(&it)
+	it := csv.records(data, {dialect = dialect})
+	defer csv.destroy(&it)
 	a := mem.arena_allocator(scratch)
 	for rec in csv.next_record(&it) {
 		t.records += 1
@@ -97,7 +97,7 @@ csv_read_document :: proc(doc: ^csv.Document) -> (t: Csv_Tally, ok: bool) {
 
 bench_csv_validate :: proc(data: []byte, dialect: csv.Dialect) -> bool {
 	once :: proc(data: []byte, dialect: csv.Dialect) -> bool {
-		return csv.validate(data, dialect) == nil
+		return csv.validate(data, {dialect = dialect}) == nil
 	}
 	ns, ok := time_median(data, dialect, once)
 	if ok {
@@ -132,7 +132,7 @@ bench_csv_document :: proc(data: []byte, dialect: csv.Dialect, read: bool) -> bo
 	times: [TIMED_ITERS]i64
 	for i in 0 ..< WARMUP_ITERS + TIMED_ITERS {
 		t := time.tick_now()
-		doc, err := csv.build(data, dialect)
+		doc, err := csv.build(data, {dialect = dialect})
 		ok := err == nil
 		if ok && read {
 			tally, ok = csv_read_document(&doc)
@@ -142,7 +142,7 @@ bench_csv_document :: proc(data: []byte, dialect: csv.Dialect, read: bool) -> bo
 			tally.records = u64(csv.row_count(&doc)) + 1
 			tally.fields = tally.records * u64(csv.column_count(&doc))
 		}
-		csv.document_destroy(&doc)
+		csv.destroy(&doc)
 		if !ok {
 			return false
 		}
@@ -179,7 +179,7 @@ csv_release :: proc(rows: []$T, data: []byte) {
 bench_csv_unmarshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid, borrow: bool) -> bool {
 	opts := csv.Unmarshal_Opts{dialect = dialect, borrow_strings = borrow}
 	plan := csv.type_plan_init([]T)
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	rows: []T
 	times: [TIMED_ITERS]i64
 	for i in 0 ..< WARMUP_ITERS + TIMED_ITERS {
@@ -212,7 +212,7 @@ bench_csv_marshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid) -> boo
 		return false
 	}
 	plan := csv.type_plan_init([]T)
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	times: [TIMED_ITERS]i64
 	out_len := 0
 	dump, dumping := os.lookup_env("STURY_DUMP", context.temp_allocator)

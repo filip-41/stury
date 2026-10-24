@@ -108,17 +108,17 @@ BLOCK_SLACK :: 16
 
 // Append `s` as a JSON string, quotes included. `.Bad_Utf8` when `s` is not valid UTF-8. Nothing is then
 // committed.
-put_string :: proc(dst: ^[dynamic]u8, s: string) -> Encode_Error {
+put_string :: proc(dst: ^[dynamic]u8, s: string) -> Marshal_Error {
 	return put_string_as(dst, s, false)
 }
 
 // `put_string` that also escapes DEL, as `\u007f`: the form jq 1.8 prints.
-put_string_escaping_del :: proc(dst: ^[dynamic]u8, s: string) -> Encode_Error {
+put_string_escaping_del :: proc(dst: ^[dynamic]u8, s: string) -> Marshal_Error {
 	return put_string_as(dst, s, true)
 }
 
 @(private)
-put_string_as :: #force_inline proc(dst: ^[dynamic]u8, s: string, $del: bool) -> Encode_Error {
+put_string_as :: #force_inline proc(dst: ^[dynamic]u8, s: string, $del: bool) -> Marshal_Error {
 	mark := len(dst^)
 	end, err := spell_led_string(dst, mark, nil, 0, s, del)
 	walk.edge_publish(dst, end if err == .None else mark)
@@ -130,7 +130,7 @@ put_string_as :: #force_inline proc(dst: ^[dynamic]u8, s: string, $del: bool) ->
 // `copy_lead`). The length of `dst` is committed only to grow, so on a refusal the caller truncates to
 // `mark`. A short ASCII string with nothing to escape is written in line. `$del` escapes DEL as well, in this
 // and each proc below that takes it.
-spell_led_string :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $del: bool) -> (int, Encode_Error) #no_bounds_check {
+spell_led_string :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
 	if len(s) < 16 {
 		v := tail_block(raw_data(s), 0, len(s))
 		if block_is_plain(v, del) {
@@ -151,7 +151,7 @@ spell_led_string :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8
 }
 
 @(private)
-spell_any_string :: proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $del: bool) -> (int, Encode_Error) #no_bounds_check {
+spell_any_string :: proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
 	n := len(s)
 	// Clean text is written as itself plus two quotes. This path makes no call, so it keeps no frame. A buffer
 	// that must grow, a string under 16 bytes (`spell_led_string` has taken the plain ones) and any block
@@ -190,7 +190,7 @@ spell_any_string :: proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int,
 // `spell_any_string` from byte `i` of `s`: every block before `i` is plain ASCII, so no UTF-8 sequence is
 // open, and the plain prefix may already be written. The lead and the opening quote are written here too.
 @(private)
-spell_mixed :: #force_no_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $del: bool) -> (int, Encode_Error) #no_bounds_check {
+spell_mixed :: #force_no_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
 	// A string with less than a 64-byte step left has no use for the step's bookkeeping. The DEL-escaping
 	// speller (the CLI's) takes no step.
 	if !del && len(s) - i_in >= 64 {
@@ -201,7 +201,7 @@ spell_mixed :: #force_no_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, 
 
 // The body of `spell_mixed`; `wide` adds the 64-byte step, for a string with room for one.
 @(private)
-spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $wide, $del: bool) -> (int, Encode_Error) #no_bounds_check {
+spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $wide, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
 	n := len(s)
 	if put_room(dst, mark, lead_n + n + 2 + BLOCK_SLACK) == nil {
 		return mark, .Out_Of_Memory

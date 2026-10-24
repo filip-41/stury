@@ -80,7 +80,7 @@ test_quickstart_unmarshal_marshal :: proc(t: ^testing.T) {
 	// out is `{"name":"ada","tags":["math","engines"]}`
 
 	testing.expect_value(t, p.name, "ada")
-	testing.expect_value(t, merr, json.Encode_Error.None)
+	testing.expect_value(t, merr, json.Marshal_Error.None)
 	testing.expect_value(t, string(out), `{"name":"ada","tags":["math","engines"]}`)
 }
 
@@ -100,7 +100,7 @@ test_quickstart_marshal_values :: proc(t: ^testing.T) {
 	defer delete(compact)
 	// compact is `{"name":"ada","tags":["math","engines"]}`: the document as authored, without whitespace
 
-	testing.expect_value(t, err, json.Encode_Error.None)
+	testing.expect_value(t, err, json.Marshal_Error.None)
 	testing.expect_value(t, string(mixed), `[1,"two",{"three":3}]`)
 	testing.expect_value(t, string(compact), `{"name":"ada","tags":["math","engines"]}`)
 	defer free_all(context.temp_allocator)

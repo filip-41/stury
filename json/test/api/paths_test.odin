@@ -358,7 +358,7 @@ expect_twins :: proc(
 	mode: json.Duplicates,
 	limits := json.Limits{},
 	loc := #caller_location,
-) -> json.Scan_Error {
+) -> Maybe(json.Error) {
 	f := paths_run(raw(src), fwd, strictness, mode, limits)
 	n := paths_run(raw(src), neg, strictness, mode, limits)
 	defer json.destroy(&f.req)
@@ -403,8 +403,7 @@ test_path_empty_judges_the_root :: proc(t: ^testing.T) {
 }
 
 // A path past `MAX_PATH_STEPS` is refused by every entry point that takes one, text or built, whichever
-// engine would serve it: `query` as `Out_Of_Room`, the scan and the edits as `Over_Capacity` (their structs
-// have no `Out_Of_Room`). The bound itself still answers. A name chain goes to the automaton, a column
+// engine would serve it, as `Over_Capacity`. The bound itself still answers. A name chain goes to the automaton, a column
 // (`[]` then a name) would go to the row matcher, which has no bound of its own.
 // `n` steps of `.a` (all but the last `.[]` when `column`), as path text, as steps, and a document they reach,
 // whose innermost value is `leaf`.
@@ -445,7 +444,7 @@ test_path_step_bound_is_one_refusal :: proc(t: ^testing.T) {
 				json.destroy(&d)
 				if over {
 					fault, _ := qerr.?
-					testing.expectf(t, fault.error == .Out_Of_Room, "%s: query %v", label, qerr)
+					testing.expectf(t, fault.kind == .Over_Capacity, "%s: query %v", label, qerr)
 					testing.expectf(t, len(found) == 0, "%s: query appended %d", label, len(found))
 				} else {
 					testing.expectf(t, qerr == nil && len(found) == 1, "%s: query %v, %d found", label, qerr, len(found))
@@ -456,14 +455,14 @@ test_path_step_bound_is_one_refusal :: proc(t: ^testing.T) {
 				testing.expectf(t, json.request_init(&req, spec) == nil, "%s: request_init", label)
 				serr := json.scan(src, &req)
 				if over {
-					refusal, _ := serr.(json.Request_Error)
-					testing.expectf(t, refusal.kind == .Over_Capacity && refusal.capacity == .Path_Steps, "%s: scan %v", label, serr)
+					refusal, _ := serr.?
+					testing.expectf(t, refusal.kind == .Over_Capacity, "%s: scan %v", label, serr)
 				} else {
 					testing.expectf(t, serr == nil && len(req.answers) == 1, "%s: scan %v", label, serr)
 				}
 
-				_, set_err := json.set(src, spec, 2, context.temp_allocator)
-				_, remove_err := json.remove(src, spec, context.temp_allocator)
+				_, set_err := json.set(src, spec, 2, allocator = context.temp_allocator)
+				_, remove_err := json.remove(src, spec, allocator = context.temp_allocator)
 				for edit_result, op in ([]Maybe(json.Path_Error){set_err, remove_err}) {
 					if over {
 						edit_err(t, edit_result, .Over_Capacity)
@@ -480,7 +479,7 @@ test_path_step_bound_is_one_refusal :: proc(t: ^testing.T) {
 	for n in ([]int{json.MAX_PATH_STEPS - 1, json.MAX_PATH_STEPS + 1}) {
 		text, doc, steps := step_chain(n, "{}")
 		for spec in ([]json.Path_Spec{text, json.Path{steps = steps}}) {
-			_, err := json.insert(raw(doc), spec, "x", 2, context.temp_allocator)
+			_, err := json.insert(raw(doc), spec, "x", 2, allocator = context.temp_allocator)
 			if n > json.MAX_PATH_STEPS {
 				edit_err(t, err, .Over_Capacity)
 			} else {
@@ -536,29 +535,24 @@ test_path_capacity :: proc(t: ^testing.T) {
 	Case :: struct {
 		src:     []byte,
 		paths:   []json.Path,
-		refused: Maybe(json.Capacity),
+		refused: bool,
 	}
 	cases := []Case{
-		{object[:], named[:16], nil},
+		{object[:], named[:16], false},
 		// Over a root object the matcher would serve them all, so the automaton's cap is pinned over an array.
-		{raw(`[0]`), named[:], .Path_Runs},
-		{raw(`[[1]]`), wild_pairs[:16], nil},
-		{raw(`[[1]]`), wild_pairs[:], .Path_Runs},
-		{deep[:], {{steps = indexes[:32]}}, nil},
-		{deep[:], {{steps = indexes[:]}}, .Path_Steps},
-		{deep[:], {{steps = anys[:32]}}, nil},
-		{deep[:], {{steps = anys[:]}}, .Path_Steps},
+		{raw(`[0]`), named[:], true},
+		{raw(`[[1]]`), wild_pairs[:16], false},
+		{raw(`[[1]]`), wild_pairs[:], true},
+		{deep[:], {{steps = indexes[:32]}}, false},
+		{deep[:], {{steps = indexes[:]}}, true},
+		{deep[:], {{steps = anys[:32]}}, false},
+		{deep[:], {{steps = anys[:]}}, true},
 	}
 	for c, i in cases {
 		r := paths_run(c.src, c.paths, duplicates = .All)
 		defer json.destroy(&r.req)
-		if bound, refused := c.refused.?; refused {
-			refusal, _ := r.err.(json.Request_Error)
-			testing.expectf(t, refusal.kind == .Over_Capacity && refusal.capacity == bound,
-				"row %d: %v, want Over_Capacity{%v}", i, r.err, bound)
-			testing.expect_value(t, refusal.query_kind, Maybe(json.Query)(.Path))
-			// The culprit: the one long path, or the first path past the run bound.
-			testing.expect_value(t, refusal.path, len(c.paths) - 1)
+		if c.refused {
+			request_refused(t, r.err, .Over_Capacity)
 			testing.expect_value(t, len(r.answers), 0)
 			continue
 		}

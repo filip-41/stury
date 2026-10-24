@@ -186,7 +186,7 @@ time_median :: proc(data: []byte, ctx: $C, once: proc(data: []byte, ctx: C) -> b
 
 // Validates `data` at `level`. Returns false when it is refused.
 validates_clean :: proc(data: []byte, level: json.Strictness) -> bool {
-	_, refused := json.validate(data, .Json, level).?
+	_, refused := json.validate(data, {strictness = level}).?
 	return !refused
 }
 
@@ -249,7 +249,7 @@ split_records :: proc(data: []byte, spans: ^[dynamic]Record_Span) {
 // Validates each record strictly. Returns the record count, or false at the first refusal.
 scan_records :: proc(data: []byte, spans: []Record_Span) -> (count: int, ok: bool) {
 	for s in spans {
-		if _, h := json.validate(data[s.lo:s.hi], .Json, .Strict).?; h {
+		if _, h := json.validate(data[s.lo:s.hi], {strictness = .Strict}).?; h {
 			return count, false
 		}
 		count += 1

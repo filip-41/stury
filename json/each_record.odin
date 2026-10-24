@@ -144,7 +144,7 @@ validate_piece :: proc(data: rawptr, piece: ^Records, k: int) -> bool {
 // `.Bad_Literal`: so it is validated with that byte, which shifts no offset.
 @(private)
 validate_record :: proc(piece: ^Records, rec: Record, limits: Limits) -> Maybe(Error) {
-	if e, bad := validate(rec.bytes, limits = limits).?; bad {
+	if e, bad := validate(rec.bytes, {limits = limits}).?; bad {
 		at := int(rec.at - piece.base)
 		return scan_pkg.cut_by_next_byte(piece.src, at, at + len(rec.bytes), e, limits = limits)
 	}

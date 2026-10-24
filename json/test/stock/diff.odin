@@ -50,7 +50,7 @@ STOCK_MAX_INVALID_UTF8 :: 4
 // of every document it rejects, and frees through `context.allocator` whatever
 // allocator it was handed.
 diff_document :: proc(src: []byte, allocator := context.allocator) -> Diff {
-	doc, stury_err := json.build(src, allocator)
+	doc, stury_err := json.build(src, allocator = allocator)
 	defer json.destroy(&doc)
 	d := Diff{stury_err = stury_err}
 	depth, _ := scan_structure(src)
@@ -138,7 +138,7 @@ is_stock_lax :: proc(src: []byte, e: json.Error) -> bool {
 		return is_bad_number_at(src, int(e.offset))
 	case .Bad_Escape:
 		return is_bad_escape_at(src, int(e.offset)) || is_lone_surrogate_at(src, int(e.offset))
-	case .None, .Truncated, .Bad_Literal, .Limit_Digits, .Limit_Scale, .Too_Deep, .Source_Too_Wide, .Out_Of_Memory, .Duplicate_Key, .Bad_Option, .Field_Count, .Limit_Fields, .Limit_Record:
+	case .None, .Truncated, .Bad_Literal, .Limit_Digits, .Limit_Scale, .Too_Deep, .Source_Too_Wide, .Out_Of_Memory, .Duplicate_Key, .Bad_Option, .Field_Count, .Limit_Fields, .Limit_Record, .Bad_Path, .Over_Capacity:
 	}
 	return false
 }

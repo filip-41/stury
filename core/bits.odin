@@ -1,4 +1,4 @@
-package bits
+package core
 
 // Format-neutral bit operations on 64-byte blocks: loads, lane masks packed to u64, the prefix XOR that turns
 // quote bits into quoted regions, and RFC 3629 checks of 16-byte windows. No code here depends on a format's

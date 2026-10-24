@@ -26,10 +26,13 @@ Error_Kind :: enum {
 	Source_Too_Wide, // `build`: source past TAPE_MAX_SOURCE, which node offsets cannot address. `offset` is that limit
 	Out_Of_Memory, // `build`: the allocator refused a row or a decoded string. `offset` is 0, since the walk reads on past a refused append. Any walk under a `max_depth` past MAX_DEPTH: it refused the frames past MAX_DEPTH, at the bracket that needed them
 	Duplicate_Key, // `Duplicates.Refuse`: a member key that, decoded, repeats an earlier key of its own object (at the repeat's opening quote)
-	Bad_Option, // `build`: a `duplicates` it does not take (`.First`, `.All`), refused before any byte is read. No byte is at it, and `offset` is 0
+	Bad_Option, // an option the call does not take, refused before any byte is read (`build`: `duplicates` `.First` or `.All`; a `Request`: see `scan`). No byte is at it, and `offset` is 0
 	Field_Count, // CSV: a record with more or fewer fields than the first (at the record's first byte)
 	Limit_Fields, // CSV: a record with more fields than `Limits.max_fields` (at the record's first byte) — BUDGET
 	Limit_Record, // CSV: a line longer than `Limits.max_record_bytes` (at the line's first byte) — BUDGET
+	// The next two arms are JSON request refusals, raised before any byte is read.
+	Bad_Path, // `request_init`: a path text that does not parse. `offset` is the byte of that text the parser stopped on
+	Over_Capacity, // a fixed engine limit (paths per request, steps per path, repeated names) refused the request. `offset` is 0
 }
 
 Error :: struct {

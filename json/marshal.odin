@@ -37,7 +37,7 @@ marshal_to_writer :: proc {
 // Write `v` as JSON into a new buffer from `allocator`. With `plan` nil the plan is this thread's cached one for
 // `v`'s type.
 @(private, require_results)
-marshal_value :: proc(v: any, opts := Encode_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> (out: []byte, err: Encode_Error) {
+marshal_value :: proc(v: any, opts := Marshal_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> (out: []byte, err: Marshal_Error) {
 	buf, aerr := make([dynamic]u8, 0, MARSHAL_BUF_START, allocator)
 	if aerr != nil {
 		return nil, .Out_Of_Memory
@@ -61,7 +61,7 @@ MARSHAL_BUF_START :: 256
 // Write `v` as JSON to `w` as it is made, through a buffer of about `SINK_FLUSH_AT` bytes from
 // `allocator`, freed before return.
 @(private, require_results)
-marshal_value_to_writer :: proc(w: io.Writer, v: any, opts := Encode_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> Encode_Error {
+marshal_value_to_writer :: proc(w: io.Writer, v: any, opts := Marshal_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> Marshal_Error {
 	buf, aerr := make([dynamic]u8, 0, 2 * spell.SINK_FLUSH_AT, allocator)
 	if aerr != nil {
 		return .Out_Of_Memory
@@ -102,7 +102,7 @@ Marshal_Out :: struct {
 // From inside a `Marshal_Hook`: write `value` as the hooked value, as `marshal` writes a value of its type by
 // the call's plan, hooks included. A hook writes exactly one value, and a second call is `.Bad_State`.
 @(require_results)
-marshal_into :: proc(out: ^Marshal_Out, value: any) -> Encode_Error {
+marshal_into :: proc(out: ^Marshal_Out, value: any) -> Marshal_Error {
 	if !out.hook_open {
 		return .Bad_State
 	}
@@ -128,7 +128,7 @@ Open_Target :: struct {
 // Append `v` to `dst`, or with `sink` stream it through `dst`. A `Raw` in it is validated under `dialect`, the
 // grammar of the text it is written into. On a refusal `dst` is truncated back to its length on entry.
 @(private)
-marshal_append :: proc(dst: ^[dynamic]u8, v: any, opts: Encode_Opts, plan: ^Type_Plan, sink: ^enc.Sink = nil, dialect := Dialect.Json) -> Encode_Error {
+marshal_append :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, plan: ^Type_Plan, sink: ^enc.Sink = nil, dialect := Dialect.Json) -> Marshal_Error {
 	if v.data != nil {
 		switch v.id {
 		case Document:
@@ -154,7 +154,7 @@ marshal_append :: proc(dst: ^[dynamic]u8, v: any, opts: Encode_Opts, plan: ^Type
 }
 
 @(private)
-marshal_root :: proc(dst: ^[dynamic]u8, v: any, opts: Encode_Opts, plan: ^Type_Plan, sink: ^enc.Sink, dialect: Dialect) -> Encode_Error {
+marshal_root :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, plan: ^Type_Plan, sink: ^enc.Sink, dialect: Dialect) -> Marshal_Error {
 	if v.id == nil || v.data == nil {
 		return enc.put_bytes(dst, "null")
 	}
@@ -169,7 +169,7 @@ marshal_root :: proc(dst: ^[dynamic]u8, v: any, opts: Encode_Opts, plan: ^Type_P
 }
 
 @(private)
-marshal_planned :: proc(dst: ^[dynamic]u8, v: any, opts: Encode_Opts, p: ^Type_Plan, sink: ^enc.Sink, dialect: Dialect) -> Encode_Error {
+marshal_planned :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, p: ^Type_Plan, sink: ^enc.Sink, dialect: Dialect) -> Marshal_Error {
 	// The root is the first op a plan compiles.
 	root := u32(0)
 	if len(p.ops) == 0 {
@@ -194,7 +194,7 @@ marshal_planned :: proc(dst: ^[dynamic]u8, v: any, opts: Encode_Opts, p: ^Type_P
 }
 
 @(private)
-write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Encode_Error {
+write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Marshal_Error {
 	// A copy: compiling a union arm or an `any` below may move `ops`.
 	op := st.plan.ops[idx]
 	switch op.kind {
@@ -245,7 +245,7 @@ write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Encode_Error {
 // MAX_DEPTH deep must fit a Windows thread's 1 MB stack. These cases therefore stay out of that frame, as do
 // the callees marked `#force_no_inline` (`write_map`, `write_bit_set`, `write_decoded`, `put_wide`).
 @(private = "file")
-write_rare_value :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
+write_rare_value :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Marshal_Error {
 	#partial switch op.kind {
 	case .Cstring:
 		cs := (^cstring)(data)^
@@ -291,7 +291,7 @@ write_rare_value :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: r
 // A hooked value: the caller's proc writes it through `marshal_into`, nested as deep as the containers open
 // around it, and must write exactly one value.
 @(private)
-write_hooked :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
+write_hooked :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Marshal_Error {
 	write := st.plan.writes[op.elem]
 	if write == nil {
 		return .Unsupported
@@ -310,7 +310,7 @@ write_hooked :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Erro
 // A bit_set as an array of its elements in ascending order: an enum's member names (or, under `enums = .Int`,
 // their integers), a range's integers.
 @(private)
-write_bit_set :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
+write_bit_set :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Marshal_Error {
 	lower := runtime.type_info_base(op.info).variant.(runtime.Type_Info_Bit_Set).lower
 	elem := st.plan.ops[op.elem]
 	bits := bit_set_bits(op, data)
@@ -358,7 +358,7 @@ union_arm_of :: proc(op: Plan_Op, data: rawptr) -> int {
 
 // An enum's backing integer. A value no member has is refused, as unmarshal refuses it.
 @(private)
-put_enum_int :: proc(dst: ^[dynamic]u8, p: ^Type_Plan, op: Plan_Op, data: rawptr) -> Encode_Error {
+put_enum_int :: proc(dst: ^[dynamic]u8, p: ^Type_Plan, op: Plan_Op, data: rawptr) -> Marshal_Error {
 	enum_member(p, op, data) or_return
 	if op.kind == .Enum_Int {
 		return enc.put_i64(dst, core_pkg.shape_int_load(data, op.size))
@@ -368,19 +368,19 @@ put_enum_int :: proc(dst: ^[dynamic]u8, p: ^Type_Plan, op: Plan_Op, data: rawptr
 
 // The member an enum value is: the first declared with its value.
 @(private)
-enum_member :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, data: rawptr) -> (Plan_Member, Encode_Error) {
+enum_member :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, data: rawptr) -> (Plan_Member, Marshal_Error) {
 	return enum_member_of(p, op, core_pkg.plan_enum_value(op, data))
 }
 
 // The first member declared with value `v`.
 @(private)
-enum_member_of :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, v: i64) -> (Plan_Member, Encode_Error) {
+enum_member_of :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, v: i64) -> (Plan_Member, Marshal_Error) {
 	m, ok := core_pkg.plan_enum_member(p, op, v)
 	return m, .None if ok else .Not_A_Member
 }
 
 @(private)
-write_decoded :: #force_no_inline proc(st: ^Marshal_Out, d: Decoded) -> Encode_Error {
+write_decoded :: #force_no_inline proc(st: ^Marshal_Out, d: Decoded) -> Marshal_Error {
 	switch x in d {
 	case Null:
 		return enc.put_bytes(st.out, "null")
@@ -403,7 +403,7 @@ write_decoded :: #force_no_inline proc(st: ^Marshal_Out, d: Decoded) -> Encode_E
 // A `Number`: its binary64 value (`1e-400`, `.Underflowed`, is +-0, its correctly rounded value), or
 // `.Non_Finite` when it holds none (`.None`, such as `1e400`). `Digits` writes the authored text.
 @(private)
-put_number :: proc(st: ^Marshal_Out, n: Number) -> Encode_Error {
+put_number :: proc(st: ^Marshal_Out, n: Number) -> Marshal_Error {
 	if n.exactness == .None {
 		return .Non_Finite
 	}
@@ -412,7 +412,7 @@ put_number :: proc(st: ^Marshal_Out, n: Number) -> Encode_Error {
 
 // A `Digits`: one number token, checked as a `Raw` is; an empty one is `null`.
 @(private)
-put_digits :: proc(st: ^Marshal_Out, s: string) -> Encode_Error {
+put_digits :: proc(st: ^Marshal_Out, s: string) -> Marshal_Error {
 	if len(s) != 0 && s[0] != '-' && (s[0] < '0' || s[0] > '9') {
 		return .Bad_Raw
 	}
@@ -420,7 +420,7 @@ put_digits :: proc(st: ^Marshal_Out, s: string) -> Encode_Error {
 }
 
 @(private)
-open_container :: proc(st: ^Marshal_Out, open: u8) -> Encode_Error {
+open_container :: proc(st: ^Marshal_Out, open: u8) -> Marshal_Error {
 	if st.depth == MAX_DEPTH {
 		return .Too_Deep
 	}
@@ -432,7 +432,7 @@ open_container :: proc(st: ^Marshal_Out, open: u8) -> Encode_Error {
 // Before element `k` of the open container: a comma unless it is the first, then the pretty line break.
 // Streaming, this is where `out` goes to the writer: every open object already has its `{`.
 @(private)
-element :: proc(st: ^Marshal_Out, k: int) -> Encode_Error {
+element :: proc(st: ^Marshal_Out, k: int) -> Marshal_Error {
 	if st.sink != nil && len(st.out^) >= spell.SINK_FLUSH_AT {
 		enc.sink_drain(st.sink, st.out) or_return
 	}
@@ -446,7 +446,7 @@ element :: proc(st: ^Marshal_Out, k: int) -> Encode_Error {
 }
 
 @(private)
-close_container :: proc(st: ^Marshal_Out, close: u8, count: int) -> Encode_Error {
+close_container :: proc(st: ^Marshal_Out, close: u8, count: int) -> Marshal_Error {
 	st.depth -= 1
 	st.nest -= 1
 	if st.pretty && count > 0 {
@@ -456,7 +456,7 @@ close_container :: proc(st: ^Marshal_Out, close: u8, count: int) -> Encode_Error
 }
 
 @(private)
-write_pointer :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
+write_pointer :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Marshal_Error {
 	target := (^rawptr)(data)^
 	if target == nil {
 		return enc.put_bytes(st.out, "null")
@@ -466,7 +466,7 @@ write_pointer :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Err
 
 // The value a pointer or an `any` refers to, counted toward the depth and checked against the open path.
 @(private)
-write_target :: proc(st: ^Marshal_Out, idx: u32, target: rawptr) -> Encode_Error {
+write_target :: proc(st: ^Marshal_Out, idx: u32, target: rawptr) -> Marshal_Error {
 	for k in 0 ..< st.n_ptrs {
 		if st.ptrs[k] == {target, idx} {
 			return .Cycle
@@ -485,7 +485,7 @@ write_target :: proc(st: ^Marshal_Out, idx: u32, target: rawptr) -> Encode_Error
 }
 
 @(private)
-put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, data: rawptr, signed: bool) -> Encode_Error {
+put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, data: rawptr, signed: bool) -> Marshal_Error {
 	buf: [48]u8
 	return enc.put_bytes(dst, spell.spell_u128(buf[:], (^u128)(data)^, signed))
 }
@@ -495,7 +495,7 @@ put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, data: rawptr, signed: bool)
 // value's last byte (no whitespace, and under JSONC no comment). Its containers nest inside the open ones, all
 // within MAX_DEPTH.
 @(private)
-put_raw :: proc(st: ^Marshal_Out, s: string) -> Encode_Error {
+put_raw :: proc(st: ^Marshal_Out, s: string) -> Marshal_Error {
 	if len(s) == 0 {
 		return enc.put_bytes(st.out, "null")
 	}
@@ -513,7 +513,7 @@ put_raw :: proc(st: ^Marshal_Out, s: string) -> Encode_Error {
 		return .Bad_Raw
 	}
 	limits := Limits{max_depth = u64(MAX_DEPTH - st.nest)}
-	fault, bad := validate(transmute([]byte)s, .Json, .Strict, limits).?
+	fault, bad := validate(transmute([]byte)s, {limits = limits}).?
 	if bad && st.dialect == .Jsonc {
 		fault, bad = jsonc_raw_fault(s, limits).?
 	}
@@ -535,7 +535,7 @@ put_raw :: proc(st: ^Marshal_Out, s: string) -> Encode_Error {
 jsonc_raw_fault :: proc(s: string, limits: Limits) -> Maybe(Error) {
 	comments := make([dynamic]Fact)
 	defer delete(comments)
-	if fault, bad := validate(transmute([]byte)s, .Jsonc, limits = limits, facts = &comments).?; bad {
+	if fault, bad := validate(transmute([]byte)s, {dialect = .Jsonc, limits = limits}, &comments).?; bad {
 		return fault
 	}
 	if n := len(comments); n > 0 && comments[n - 1].hi == u64(len(s)) {

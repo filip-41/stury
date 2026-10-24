@@ -91,7 +91,7 @@ test_records_from_agrees_with_records :: proc(t: ^testing.T) {
 test_records_from_reports_the_readers_failure :: proc(t: ^testing.T) {
 	tr := Trickle{src = transmute([]byte)string("a,b\nc,d\ne,"), step = 3, fail = .Unexpected_EOF}
 	it := csv.records_from({procedure = trickle_proc, data = &tr})
-	defer csv.records_destroy(&it)
+	defer csv.destroy(&it)
 	n := 0
 	for _ in csv.next_record(&it) {
 		n += 1
@@ -119,7 +119,7 @@ test_records_from_reads_what_a_failing_reader_gave :: proc(t: ^testing.T) {
 			testing.expectf(t, n == c.records, "%q step %d: %d records, want %d", c.src, step, n, c.records)
 			testing.expect_value(t, it.err, nil)
 			testing.expect_value(t, it.read_err, io.Error.Unexpected_EOF)
-			csv.records_destroy(&it)
+			csv.destroy(&it)
 		}
 	}
 }
@@ -127,15 +127,15 @@ test_records_from_reads_what_a_failing_reader_gave :: proc(t: ^testing.T) {
 @(test)
 test_records_from_refuses_a_bad_dialect :: proc(t: ^testing.T) {
 	tr := Trickle{src = transmute([]byte)string("a"), step = 1}
-	it := csv.records_from({procedure = trickle_proc, data = &tr}, {delimiter = '"'})
-	defer csv.records_destroy(&it)
+	it := csv.records_from({procedure = trickle_proc, data = &tr}, {dialect = {delimiter = '"'}})
+	defer csv.destroy(&it)
 	_, ok := csv.next_record(&it)
 	testing.expect(t, !ok)
 	testing.expect_value(t, it.err, csv.Error{kind = .Bad_Option})
 	testing.expect_value(t, tr.pos, 0)
 	tr.src = transmute([]byte)string("a")
-	bad := csv.records_from({procedure = trickle_proc, data = &tr}, {}, .Strict, {max_record_bytes = -1})
-	defer csv.records_destroy(&bad)
+	bad := csv.records_from({procedure = trickle_proc, data = &tr}, {limits = {max_record_bytes = -1}})
+	defer csv.destroy(&bad)
 	testing.expect_value(t, bad.err, csv.Error{kind = .Bad_Option})
 }
 
@@ -171,7 +171,7 @@ test_record_cap :: proc(t: ^testing.T) {
 		}
 		src := transmute([]byte)c.src
 		limits := csv.Limits{max_record_bytes = c.cap}
-		testing.expectf(t, csv.validate(src, c.d, .Strict, limits) == want, "%q cap %d: validate %v, want %v", c.src, c.cap, csv.validate(src, c.d, .Strict, limits), want)
+		testing.expectf(t, csv.validate(src, {dialect = c.d, limits = limits}) == want, "%q cap %d: validate %v, want %v", c.src, c.cap, csv.validate(src, {dialect = c.d, limits = limits}), want)
 		_, err := collect(src, c.d, .Strict, limits)
 		testing.expectf(t, err == want, "%q cap %d: records %v, want %v", c.src, c.cap, err, want)
 	}
@@ -180,8 +180,8 @@ test_record_cap :: proc(t: ^testing.T) {
 	for at in ([]int{0, 62, 63, 64, 65, 138}) {
 		src := transmute([]byte)strings.concatenate({strings.repeat("a\n", at / 2, context.temp_allocator), long, "\n"}, context.temp_allocator)
 		want := csv.Error{offset = u64(at / 2 * 2), kind = .Limit_Record}
-		testing.expect_value(t, csv.validate(src, {}, .Strict, {max_record_bytes = 199}), want)
-		testing.expect_value(t, csv.validate(src, {}, .Strict, {max_record_bytes = 200}), nil)
+		testing.expect_value(t, csv.validate(src, {limits = {max_record_bytes = 199}}), want)
+		testing.expect_value(t, csv.validate(src, {limits = {max_record_bytes = 200}}), nil)
 	}
 }
 
@@ -217,16 +217,16 @@ test_each_record_pieces :: proc(t: ^testing.T) {
 	defer host.batch_pool_destroy(&pool)
 	for runner in ([]^csv.Batch_Runner{nil, &alone, &pool.runner}) {
 		tally: Tally
-		testing.expect_value(t, csv.each_record(src, {}, count, &tally, runner), nil)
+		testing.expect_value(t, csv.each_record(src, count, &tally, {}, runner), nil)
 		testing.expect_value(t, tally.records, 20_000)
-		testing.expect_value(t, csv.validate(src, {}, .Strict, {}, runner), nil)
+		testing.expect_value(t, csv.validate(src, runner = runner), nil)
 	}
 	// A fault is reported once, at its offset, by whichever piece holds it.
 	bad := strings.concatenate({strings.to_string(b), "a,\"open"}, context.temp_allocator)
 	want := csv.Error{offset = u64(len(bad)), kind = .Truncated}
 	for runner in ([]^csv.Batch_Runner{nil, &alone, &pool.runner}) {
 		tally: Tally
-		testing.expect_value(t, csv.each_record(transmute([]byte)bad, {}, count, &tally, runner), want)
-		testing.expect_value(t, csv.validate(transmute([]byte)bad, {}, .Strict, {}, runner), want)
+		testing.expect_value(t, csv.each_record(transmute([]byte)bad, count, &tally, {}, runner), want)
+		testing.expect_value(t, csv.validate(transmute([]byte)bad, runner = runner), want)
 	}
 }

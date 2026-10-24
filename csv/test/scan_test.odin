@@ -67,7 +67,7 @@ check_cases :: proc(t: ^testing.T, cases: []Case) {
 
 @(private = "file")
 check :: proc(t: ^testing.T, src: []byte, c: Case, shift: u64) {
-	got := csv.validate(src, c.dialect)
+	got := csv.validate(src, {dialect = c.dialect})
 	want: Maybe(csv.Error)
 	if c.kind != .None {
 		want = csv.Error{offset = c.at + shift, kind = c.kind}
@@ -80,9 +80,9 @@ check :: proc(t: ^testing.T, src: []byte, c: Case, shift: u64) {
 @(test)
 test_bad_delimiter :: proc(t: ^testing.T) {
 	for d in ([]byte{'"', '\r', '\n', 0x80}) {
-		testing.expect_value(t, csv.validate(transmute([]byte)string("a"), {delimiter = d}), csv.Error{kind = .Bad_Option})
+		testing.expect_value(t, csv.validate(transmute([]byte)string("a"), {dialect = {delimiter = d}}), csv.Error{kind = .Bad_Option})
 	}
-	testing.expect_value(t, csv.validate(transmute([]byte)string("a;b\nc;d"), {delimiter = ';'}), nil)
+	testing.expect_value(t, csv.validate(transmute([]byte)string("a;b\nc;d"), {dialect = {delimiter = ';'}}), nil)
 }
 
 @(test)
@@ -146,8 +146,8 @@ test_field_text_long :: proc(t: ^testing.T) {
 // Every record of `src`, its fields copied, and the iterator's fault.
 collect :: proc(src: []byte, dialect: csv.Dialect, strictness := csv.Strictness.Strict, limits := csv.Limits{}) -> (out: [dynamic]csv.Record, err: Maybe(csv.Error)) {
 	out.allocator = context.temp_allocator
-	it := csv.records(src, dialect, strictness, limits)
-	defer csv.records_destroy(&it)
+	it := csv.records(src, {dialect = dialect, strictness = strictness, limits = limits})
+	defer csv.destroy(&it)
 	for r in csv.next_record(&it) {
 		append(&out, csv.Record{fields = clone(r.fields), at = r.at})
 	}

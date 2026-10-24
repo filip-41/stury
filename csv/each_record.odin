@@ -5,13 +5,12 @@ import "base:runtime"
 import "core:bytes"
 import "core:simd"
 import core_pkg "../core"
-import "../core/bits"
 
 // Threads a caller lends `each_record` and `validate` (`stury:host`'s `Batch_Pool` is one).
 Batch_Runner :: core_pkg.Batch_Runner
 
-// Runs `task` on every piece of `src`. Each piece is a `Records` over whole records of `src` in `dialect`,
-// judged at `strictness` and capped by `limits` as `records` judges the whole input.
+// Runs `task` on every piece of `src`. Each piece is a `Records` over whole records of `src`, read with `opts` as
+// `records` reads the whole input.
 //
 //	- Pieces are numbered `k` from 0 in source order. Each is handed out once and may hold no record.
 //	- The caller and `runner`'s threads claim pieces in turn. Without `runner` there is one piece, the whole
@@ -26,14 +25,12 @@ Batch_Runner :: core_pkg.Batch_Runner
 @(require_results)
 each_record :: proc(
 	src: []byte,
-	dialect: Dialect,
 	task: proc(data: rawptr, piece: ^Records, k: int) -> bool,
 	data: rawptr,
+	opts := Read_Opts{},
 	runner: ^Batch_Runner = nil,
-	strictness := Strictness.Strict,
-	limits := Limits{},
 ) -> Maybe(Error) {
-	s, ok := scan_setup(dialect, limits, strictness)
+	s, ok := scan_setup(opts.dialect, opts.limits, opts.strictness)
 	if !ok {
 		return Error{kind = .Bad_Option}
 	}
@@ -135,14 +132,14 @@ batch_count_quotes :: proc(arg: rawptr) {
 // 1 when `src` holds an odd count of quotes.
 @(private)
 quote_parity :: proc(src: []byte) -> u8 {
-	acc: bits.V
-	q := bits.V('"')
+	acc: core_pkg.V
+	q := core_pkg.V('"')
 	i := 0
 	for ; i + 64 <= len(src); i += 64 {
 		p := raw_data(src[i:])
-		acc ~= simd.lanes_eq(bits.load(p), q) ~ simd.lanes_eq(bits.load(p[16:]), q) ~ simd.lanes_eq(bits.load(p[32:]), q) ~ simd.lanes_eq(bits.load(p[48:]), q)
+		acc ~= simd.lanes_eq(core_pkg.load(p), q) ~ simd.lanes_eq(core_pkg.load(p[16:]), q) ~ simd.lanes_eq(core_pkg.load(p[32:]), q) ~ simd.lanes_eq(core_pkg.load(p[48:]), q)
 	}
-	odd := intrinsics.count_ones(bits.pack4(acc, {}, {}, {}))
+	odd := intrinsics.count_ones(core_pkg.pack4(acc, {}, {}, {}))
 	for ; i < len(src); i += 1 {
 		odd += u64(src[i] == '"')
 	}
@@ -212,10 +209,10 @@ outside_lf :: proc(src: []byte, from: int, odd: bool) -> int {
 	in_quote := ~u64(0) if odd else 0
 	tail: [64]u8 = ---
 	for pos := from; pos < len(src); pos += 64 {
-		p, _ := bits.block_at(src, pos, &tail)
-		v := [4]bits.V{bits.load(p), bits.load(p[16:]), bits.load(p[32:]), bits.load(p[48:])}
-		q, n := bits.pack4x2(bits.eq4(v, '"'), bits.eq4(v, '\n'))
-		instr := bits.prefix_xor(q) ~ in_quote
+		p, _ := core_pkg.block_at(src, pos, &tail)
+		v := [4]core_pkg.V{core_pkg.load(p), core_pkg.load(p[16:]), core_pkg.load(p[32:]), core_pkg.load(p[48:])}
+		q, n := core_pkg.pack4x2(core_pkg.eq4(v, '"'), core_pkg.eq4(v, '\n'))
+		instr := core_pkg.prefix_xor(q) ~ in_quote
 		if lf := n & ~instr; lf != 0 {
 			return pos + int(intrinsics.count_trailing_zeros(lf))
 		}

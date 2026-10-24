@@ -90,7 +90,7 @@ when ODIN_DEBUG {
 }
 
 // Validate `src` at `.Strict` and decode every value onto a row, allocating with `allocator`. The result is
-// exactly a `Request({.Dom})` scan's rows.
+// exactly a `Request({.Dom})` scan's rows. `opts.strictness` is not read: a document is always built `.Strict`.
 //
 //	- Numbers are the exception: a number is checked and its digits counted here, and decoded when it is
 //	  read (`get_number`).
@@ -115,33 +115,15 @@ when ODIN_DEBUG {
 //	                  document has none, or `.Refuse` in a build with `-define:REFUSE_DUPLICATES=false`.
 //	                  `offset` is 0, refused before any byte is read.
 @(require_results)
-build :: proc(
-	src: []byte,
-	allocator := context.allocator,
-	limits := Limits{},
-	dialect := Dialect.Json,
-	duplicates := Duplicates.Last,
-) -> (doc: Document, err: Maybe(Error)) {
-	if duplicates == .First || duplicates == .All {
+build :: proc(src: []byte, opts := Read_Opts{}, allocator := context.allocator) -> (doc: Document, err: Maybe(Error)) {
+	if opts.duplicates == .First || opts.duplicates == .All {
 		return {}, Error{kind = .Bad_Option}
 	}
 	req: Request({.Dom})
+	req.read = opts
+	req.strictness = .Strict
 	req.allocator = allocator
-	req.limits = limits
-	req.dialect = dialect
-	req.duplicates = duplicates
-	switch e in scan(src, &req) {
-	case Error:
-		err = e
-	case Request_Error:
-		// The request is fresh and holds no paths. A capacity it can hit is the source's width, and any other
-		// refusal is of an option, `.Refuse` in a build without it.
-		#partial switch e.kind {
-		case .Over_Capacity: err = Error{kind = .Source_Too_Wide, offset = MAX_ROW_SOURCE}
-		case .Out_Of_Memory: err = Error{kind = .Out_Of_Memory}
-		case:                err = Error{kind = .Bad_Option}
-		}
-	}
+	err = scan(src, &req)
 	if err == nil {
 		doc = req.doc
 		req.doc = {}
@@ -528,14 +510,15 @@ pointer_member :: proc(doc: ^Document, n: Node, token: string) -> Node {
 //	  every member, an object's repeated key once, at its first place with its last value, as jq reads it,
 //	  and a step that does not land yields nothing.
 //	- An empty path is `n` itself, and `NO_NODE` reaches nothing.
-//	- Text that does not parse is its `Parse_Fault`; a path of more than `MAX_PATH_STEPS` steps, text or a
-//	  built `Path`, is `.Out_Of_Room` with nothing appended, as the scan and the edits refuse it.
-//	- `.Out_Of_Room` is also `out` refusing to grow; the values appended before that stay.
+//	- Text that does not parse is `.Bad_Path` at the byte the parser stopped on; a path of more than
+//	  `MAX_PATH_STEPS` steps, text or a built `Path`, is `.Over_Capacity` with nothing appended, as the scan and
+//	  the edits refuse it.
+//	- `.Out_Of_Memory` is `out` refusing to grow; the values appended before that stay.
 //	- Besides `out` it allocates only for a text longer than 256 bytes with an escaped quoted name, and for
 //	  the keys of an object past QUERY_SMALL members that `Any` reads, both in the document's allocator and
-//	  freed before return; a refusal there is `.Out_Of_Room` too.
+//	  freed before return; a refusal there is `.Out_Of_Memory` too.
 @(require_results)
-query :: proc(doc: ^Document, n: Node, path: Path_Spec, out: ^[dynamic]Node) -> (err: Maybe(Parse_Fault)) {
+query :: proc(doc: ^Document, n: Node, path: Path_Spec, out: ^[dynamic]Node) -> (err: Maybe(Path_Error)) {
 	when ODIN_DEBUG {
 		check_node(doc, n)
 	}
@@ -545,7 +528,7 @@ query :: proc(doc: ^Document, n: Node, path: Path_Spec, out: ^[dynamic]Node) -> 
 	heap := len(text) > len(stack) && strings.index_byte(text, '\\') >= 0
 	names := make([]u8, len(text), doc.rows.allocator) if heap else stack[:]
 	if names == nil {
-		return Parse_Fault{error = .Out_Of_Room}
+		return core_pkg.PATH_OUT_OF_MEMORY
 	}
 	defer if heap {
 		delete(names, doc.rows.allocator)
@@ -554,14 +537,14 @@ query :: proc(doc: ^Document, n: Node, path: Path_Spec, out: ^[dynamic]Node) -> 
 	if is_text {
 		p = parse_path(text, steps[:], names) or_return
 	} else if len(p.steps) > core_pkg.MAX_PATH_STEPS {
-		return Parse_Fault{error = .Out_Of_Room}
+		return Path_Error{kind = .Over_Capacity}
 	}
 	if !has(doc, n) {
 		return nil
 	}
 	w := Query_Walk{doc = doc, mode = .Last, out = out, left = p.limit if p.limit > 0 else max(int)}
 	if !query_from(&w, n, NO_NODE, p.steps) {
-		return Parse_Fault{error = .Out_Of_Room}
+		return core_pkg.PATH_OUT_OF_MEMORY
 	}
 	return nil
 }

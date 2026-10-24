@@ -777,7 +777,7 @@ These are `#config` defines, passed with `-define:NAME=value`. None is part of t
 
 | Define | Default | What it does | Who sets it |
 | --- | --- | --- | --- |
-| `REFUSE_DUPLICATES` | `true` | Compiles in the key-checking copy of each scan walk that `Duplicates.Refuse` needs. `false` drops it; `.Refuse` is then refused with `.Refuse_Compiled_Out` (`.Bad_Option` for `build`). | The CLI build (`make build-cli`) sets `false`; `make test-modes` also tests it. |
+| `REFUSE_DUPLICATES` | `true` | Compiles in the key-checking copy of each scan walk that `Duplicates.Refuse` needs. `false` drops it; `.Refuse` is then refused with `.Bad_Option`. | The CLI build (`make build-cli`) sets `false`; `make test-modes` also tests it. |
 | `FORCE_AUTOMATON` | `false` | Compiles every single-name path to the general path matcher, so tests cross-check both matchers. | `make test-modes` |
 | `SCAN_FORCE_SLOW` | `false` | Compiles out the optimised scanner routes so tests can compare them with scalar reference code. | `make test-modes` |
 | `SCAN_WIDE` | `true` | Allows the AVX-512 string scanner. `false` keeps it unused, to time or test the x86-64-v2 routes on a machine that has AVX-512. | Nobody by default; used for timing and testing. |

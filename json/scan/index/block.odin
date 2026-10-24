@@ -1,9 +1,9 @@
 package index
 
-// Lists the set bits of 64-byte blocks as offsets, using the block procedures of `core/bits`.
+// Lists the set bits of 64-byte blocks as offsets, using the bit kernels of `core` (bits.odin).
 
 import "base:intrinsics"
-import bits "../../../core/bits"
+import bits "../../../core"
 
 V :: bits.V
 load :: bits.load

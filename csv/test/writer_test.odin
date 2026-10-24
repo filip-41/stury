@@ -156,7 +156,7 @@ test_backslash_escapes_nul :: proc(t: ^testing.T) {
 	testing.expect_value(t, aerr, nil)
 	testing.expect_value(t, escaped, true)
 	testing.expect_value(t, string(text), "a\x00b")
-	set, serr := csv.set(transmute([]byte)string("s\nx\n"), ".[0].s", "p\x00q", csv.TSV, allocator = context.temp_allocator)
+	set, serr := csv.set(transmute([]byte)string("s\nx\n"), ".[0].s", "p\x00q", {dialect = csv.TSV}, context.temp_allocator)
 	testing.expect_value(t, serr, nil)
 	testing.expect_value(t, string(set), "s\np\\0q\n")
 }

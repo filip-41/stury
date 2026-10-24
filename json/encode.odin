@@ -22,13 +22,13 @@ import enc "encode"
 //	  (a stable sort), and a JSONC member's comments move with it.
 //	- Neither `jq_spelling` nor `sort_keys` is applied to a `marshal` of an `any` (a map is already sorted,
 //	  a struct keeps its declaration order).
-Encode_Opts :: enc.Encode_Opts
+Marshal_Opts :: enc.Marshal_Opts
 
 // A writer refusal (`.None` is success). `marshal`'s: `Bad_Utf8`, `Non_Finite` (a NaN, an infinity, or a `Number` that is `.None` or
 // `.Underflowed`), `Too_Deep` (past `MAX_DEPTH`),
 // `Cycle`, `Unsupported`, `Bad_Raw`, `Plan_Mismatch`, `Not_A_Member`, `Bad_State` (a hook writing other than
 // one value), `Write_Failed` (the `io.Writer`, after a prefix written) and `Out_Of_Memory`.
-Encode_Error :: enc.Encode_Error
+Marshal_Error :: enc.Marshal_Error
 
 // Write `doc` as JSON text: every key and scalar as authored, whitespace removed (compact) or re-indented
 // (pretty, `opts.indent`). A JSONC document keeps its comments where they are attached and drops its
@@ -36,7 +36,7 @@ Encode_Error :: enc.Encode_Error
 // `.Bad_State` for a document with no rows. `.Too_Deep` for one nested past `MAX_DEPTH`, which only a
 // document read under a raised `max_depth` can be.
 @(private, require_results)
-marshal_document :: proc(doc: ^Document, opts := Encode_Opts{}, allocator := context.allocator) -> (out: []byte, err: Encode_Error) {
+marshal_document :: proc(doc: ^Document, opts := Marshal_Opts{}, allocator := context.allocator) -> (out: []byte, err: Marshal_Error) {
 	when ODIN_DEBUG {
 		check_document(doc)
 	}
@@ -55,7 +55,7 @@ marshal_document :: proc(doc: ^Document, opts := Encode_Opts{}, allocator := con
 // A `Document`, or a pointer to one, met as an `any` (a `marshal` of its value, or the value of `set` or `insert`):
 // appended to `dst` as `marshal_document` writes it, not reflected over as a struct.
 @(private)
-marshal_document_append :: proc(dst: ^[dynamic]u8, doc: ^Document, opts: Encode_Opts) -> Encode_Error {
+marshal_document_append :: proc(dst: ^[dynamic]u8, doc: ^Document, opts: Marshal_Opts) -> Marshal_Error {
 	out := marshal_document(doc, opts, dst.allocator) or_return
 	defer delete(out, dst.allocator)
 	if _, aerr := append(dst, ..out); aerr != nil {
@@ -67,7 +67,7 @@ marshal_document_append :: proc(dst: ^[dynamic]u8, doc: ^Document, opts: Encode_
 // `marshal_document` written to `w` as it is made, through a buffer of about 64 KiB from `allocator`, freed
 // before return.
 @(private, require_results)
-marshal_document_to_writer :: proc(w: io.Writer, doc: ^Document, opts := Encode_Opts{}, allocator := context.allocator) -> Encode_Error {
+marshal_document_to_writer :: proc(w: io.Writer, doc: ^Document, opts := Marshal_Opts{}, allocator := context.allocator) -> Marshal_Error {
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return .Too_Deep
 	}
@@ -86,13 +86,13 @@ marshal_document_to_writer :: proc(w: io.Writer, doc: ^Document, opts := Encode_
 	return enc.encode_rows_to_writer(w, doc.src, doc.rows[:], opts, allocator)
 }
 
-// `marshal_document` under `Encode_Opts.jq_spelling` or `sort_keys`: the document walked by its accessors. Under
+// `marshal_document` under `Marshal_Opts.jq_spelling` or `sort_keys`: the document walked by its accessors. Under
 // `jq_spelling` each scalar is written by `enc.put_jq_literal` and `enc.put_string_escaping_del`, the implementation
 // the command line prints with, and each object's repeated key once with its last value's comments
 // (`document_members`). Without it scalars and keys are copied as authored. A JSONC document's comments
 // are placed by the printer the command line shares (`enc.put_leads` and the rest).
 @(private = "file")
-marshal_document_jq :: proc(doc: ^Document, opts: Encode_Opts, allocator: mem.Allocator) -> (out: []byte, err: Encode_Error) {
+marshal_document_jq :: proc(doc: ^Document, opts: Marshal_Opts, allocator: mem.Allocator) -> (out: []byte, err: Marshal_Error) {
 	if len(doc.rows) == 0 || doc.rows[0].subtree_size != u32(len(doc.rows)) {
 		return nil, .Bad_State
 	}
@@ -111,7 +111,7 @@ marshal_document_jq :: proc(doc: ^Document, opts: Encode_Opts, allocator: mem.Al
 
 // The root with its comments, then the `trailing_newline`, which a line comment ending the output has made.
 @(private = "file")
-jq_root :: proc(buf: ^[dynamic]byte, doc: ^Document, cl: ^enc.Comment_Layout, opts: Encode_Opts, allocator: mem.Allocator) -> Encode_Error {
+jq_root :: proc(buf: ^[dynamic]byte, doc: ^Document, cl: ^enc.Comment_Layout, opts: Marshal_Opts, allocator: mem.Allocator) -> Marshal_Error {
 	own := facts(doc, ROOT)
 	enc.put_leads(buf, cl, own, 0, root = true) or_return
 	jq_value(buf, doc, ROOT, cl, opts, 0, allocator) or_return
@@ -123,7 +123,7 @@ jq_root :: proc(buf: ^[dynamic]byte, doc: ^Document, cl: ^enc.Comment_Layout, op
 }
 
 @(private = "file")
-jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_Layout, opts: Encode_Opts, depth: int, allocator: mem.Allocator) -> Encode_Error {
+jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_Layout, opts: Marshal_Opts, depth: int, allocator: mem.Allocator) -> Marshal_Error {
 	k, _ := kind(doc, n)
 	switch k {
 	case .Null, .False, .True:
@@ -139,7 +139,7 @@ jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_
 }
 
 @(private = "file")
-jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Encode_Opts) -> Encode_Error {
+jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts) -> Marshal_Error {
 	lit := string(get_raw(doc, n))
 	if !opts.jq_spelling {
 		return enc.put_bytes(buf, lit)
@@ -154,7 +154,7 @@ jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Encode_Opt
 }
 
 @(private = "file")
-jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Encode_Opts) -> Encode_Error {
+jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts) -> Marshal_Error {
 	if !opts.jq_spelling {
 		return enc.put_bytes(buf, string(get_raw(doc, n)))
 	}
@@ -164,7 +164,7 @@ jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Encode_Opt
 
 // An array or object `n` of kind `k`: its members in `document_members` order, each with its comments.
 @(private = "file")
-jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: ^enc.Comment_Layout, opts: Encode_Opts, depth: int, allocator: mem.Allocator) -> Encode_Error {
+jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: ^enc.Comment_Layout, opts: Marshal_Opts, depth: int, allocator: mem.Allocator) -> Marshal_Error {
 	open, close := u8('['), u8(']')
 	if k == .Object {
 		open, close = '{', '}'
@@ -221,7 +221,7 @@ Entry :: struct {
 // byte order of their decoded keys, repeated keys (without `jq_spelling`) in source order. Made in `allocator`,
 // and `ok` is false when the allocator refused.
 @(private = "file")
-document_members :: proc(doc: ^Document, n: Node, opts: Encode_Opts, allocator: mem.Allocator) -> (entries: [dynamic]Entry, ok: bool) {
+document_members :: proc(doc: ^Document, n: Node, opts: Marshal_Opts, allocator: mem.Allocator) -> (entries: [dynamic]Entry, ok: bool) {
 	entries = make([dynamic]Entry, allocator)
 	if kd, _ := kind(doc, n); kd == .Array {
 		it := children(doc, n)

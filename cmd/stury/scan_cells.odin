@@ -341,7 +341,7 @@ opens_with_bom :: proc(run: ^Run, c: ^Cells, cols: ^Columns) -> bool {
 	if run.table == nil || run.rows_begun || cols.at[0] < 0 {
 		return false
 	}
-	probe := csv.records(c.data, c.dialect, allocator = context.temp_allocator)
+	probe := csv.records(c.data, {dialect = c.dialect}, context.temp_allocator)
 	defer free_all(context.temp_allocator)
 	_, _ = csv.next_record(&probe)
 	rec, ok := csv.next_record(&probe)
@@ -462,7 +462,7 @@ print_cells_in_pieces :: proc(run: ^Run, c: ^Cells, cols: ^Columns, runner: ^csv
 	if cols.object && run.table != nil && run.table.shape == .Unset {
 		job.table_due, job.keys = true, cols.keys
 	}
-	fault := csv.each_record(c.data, c.dialect, print_cells_piece, &job, runner)
+	fault := csv.each_record(c.data, print_cells_piece, &job, {dialect = c.dialect}, runner)
 	// A write that failed on a pool thread ends the run here.
 	check_output()
 	if job.stop == TABLE_STOP {
@@ -476,8 +476,8 @@ print_cells_in_pieces :: proc(run: ^Run, c: ^Cells, cols: ^Columns, runner: ^csv
 		return true
 	}
 	if _, bad := fault.?; bad {
-		csv.records_destroy(&c.whole)
-		c.whole = csv.records(c.data, c.dialect, allocator = runtime.heap_allocator())
+		csv.destroy(&c.whole)
+		c.whole = csv.records(c.data, {dialect = c.dialect}, runtime.heap_allocator())
 		c.it = &c.whole
 		for _ in csv.next_record(&c.whole) {}
 	}

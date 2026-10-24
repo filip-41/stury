@@ -10,7 +10,7 @@ import "core:os"
 main :: proc() {
 	src := transmute([]byte)string("{\n\t\"a\": 1 // one\n}\n")
 
-	if err, bad := json.validate(src, dialect = .Jsonc).?; bad {
+	if err, bad := json.validate(src, {dialect = .Jsonc}).?; bad {
 		fmt.eprintln(json.render_error(src, err))
 		os.exit(1)
 	}

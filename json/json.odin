@@ -17,14 +17,11 @@ package json
 //	record_reader.odin  `records_from` over an `io.Reader`
 //	record_split.odin   `split_record`
 //	each_record.odin    `each_record`, `validate_records` and `Batch_Runner`, for threads from `stury:host`
-//	encode.odin         `Encode_Opts` and `marshal_document`
+//	encode.odin         `Marshal_Opts` and `marshal_document`
 //	format.odin         `format`
 //
 // The other files (request_walk.odin, route*.odin) are internal.
 
-import "core:io"
-import "core:reflect"
-import "core:strings"
 import scan_pkg "scan"
 import core_pkg "../core"
 import "scan/walk"
@@ -65,6 +62,16 @@ Strictness :: scan_pkg.Strictness
 //	  `.Too_Deep`.
 Limits :: scan_pkg.Limits
 
+// How a read takes its source: one struct for `validate`, `find`, `build`, `request_init` and `split_record`,
+// embedded in `Request` and `Unmarshal_Opts`. The zero value is strict RFC 8259 JSON with no raised caps, the last
+// of a repeated key answering. A procedure that does not read a field says so.
+Read_Opts :: struct {
+	dialect:    Dialect,
+	strictness: Strictness,
+	duplicates: Duplicates,
+	limits:     Limits,
+}
+
 // The default nesting cap. A scan refuses deeper input unless `Limits.max_depth` raises it, and the
 // writer refuses to open a container past it.
 MAX_DEPTH :: scan_pkg.MAX_DEPTH
@@ -86,13 +93,15 @@ Error :: scan_pkg.Error
 //	- A syntax fault: `Truncated`, `Bad_Char`, `Bad_Escape`, `Bad_Literal`, `Bad_Number`, `Trailing`.
 //	- A cap: `Limit_Digits`, `Limit_Scale`, `Too_Deep`.
 //	- A repeated key under `Duplicates.Refuse`: `Duplicate_Key`.
-//	- A refusal no byte is at: `Source_Too_Wide`, `Out_Of_Memory`, `Bad_Option`.
+//	- A refusal no byte is at: `Source_Too_Wide`, `Out_Of_Memory`, `Bad_Option`, `Over_Capacity`.
+//	- `Bad_Path`: a path text `request_init` could not parse, at the byte of that text the parser stopped on.
 //	- `Field_Count`, `Limit_Fields` and `Limit_Record` are CSV record errors; JSON never reports them. The
 //	  enum is core's, so code over several formats reads one `Error` and one `Unmarshal_Error`.
 Error_Kind :: core_pkg.Error_Kind
 
 // The 1-based line and column `err` points at in `src`. Columns count bytes. It is (0, 0) when `err` points
-// at no byte: an offset past `src`, a `.Source_Too_Wide` (a limit), an `.Out_Of_Memory` or a `.Bad_Option`.
+// at no byte of `src`: an offset past `src`, a `.Source_Too_Wide` (a limit), an `.Out_Of_Memory`, a `.Bad_Option`,
+// an `.Over_Capacity` or a `.Bad_Path`.
 @(require_results)
 error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 	return core_pkg.error_position(src, err)
@@ -112,54 +121,9 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 //	- A `Path_Error` located in the source for `.Bad_Source`, `offset N` for `.Bad_Path` (into the path
 //	  text) and `.Bad_Result` (into the edited text), bare otherwise, with the `syntax` or `encode` result
 //	  after it.
-//	- A `Request_Error` as its kind (`Bad_Path` with `path I` and `offset N`, `Over_Capacity` with its
-//	  `Capacity`), for which `src` is not read.
-//	- A `Parse_Fault` as `line:col: <Parse_Error>` in `src`, the path text.
 @(require_results)
 render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
-	b: Text_Builder = strings.builder_make(allocator)
-	render_error_to_writer(strings.to_writer(&b), src, err)
-	return strings.to_string(b)
-}
-
-// The builder `render_error` writes through. The alias is this file's non-generic use of `core:strings`, so a
-// plain `-vet` build of a program that never calls `render_error` accepts the import.
-@(private)
-Text_Builder :: strings.Builder
-
-// `render_error`'s text written to `w`, allocating nothing; `w`'s failure is the `io.Error`, with a prefix of
-// the text possibly written.
-render_error_to_writer :: proc {
-	core_pkg.render_syntax_error_to_writer,
-	core_pkg.render_unmarshal_error_to_writer,
-	core_pkg.render_path_error_to_writer,
-	render_request_error_to_writer,
-	render_parse_fault_to_writer,
-}
-
-// `src` is not read, since a request's refusal is at no byte of a document.
-@(private)
-render_request_error_to_writer :: proc(w: io.Writer, src: []byte, err: Request_Error) -> io.Error {
-	name := reflect.enum_string(err.kind)
-	#partial switch err.kind {
-	case .Bad_Path:
-		core_pkg.write_fault(w, 0, 0, err.offset, name) or_return
-		io.write_string(w, " (path ") or_return
-		if _, ierr := io.write_int(w, err.path); ierr != nil {
-			return ierr
-		}
-		return io.write_byte(w, ')')
-	case .Over_Capacity:
-		io.write_string(w, name) or_return
-		return core_pkg.write_detail(w, reflect.enum_string(err.capacity))
-	}
-	_, werr := io.write_string(w, name)
-	return werr
-}
-
-@(private)
-render_parse_fault_to_writer :: proc(w: io.Writer, src: []byte, err: Parse_Fault) -> io.Error {
-	return core_pkg.write_fault_at(w, src, err.offset, reflect.enum_string(err.error))
+	return core_pkg.render_error(src, err, allocator)
 }
 
 // How much of the item a result covers. `.Full` means the scan read the whole item and skipped
@@ -188,22 +152,15 @@ Any :: core_pkg.Any
 // and the most steps a path may have in a `Request`.
 MAX_PATH_STEPS :: core_pkg.MAX_PATH_STEPS
 
-// Why a text path did not parse: `Unclosed_Bracket`, `Unclosed_Quote`, `Bad_Escape`, `Empty_Key`,
-// `Bad_Index`, `Limit_Index` (an index or limit past `i64`), `Out_Of_Room` (a buffer too small, a path past
-// `MAX_PATH_STEPS` given to `query`, or `query`'s `out` refusing to grow) or `Unsupported_Syntax`.
-Parse_Error :: core_pkg.Parse_Error
-
-// A `Parse_Error` and the byte of the text the parser stopped on.
-Parse_Fault :: core_pkg.Parse_Fault
-
 // Parse `text` that is a path in the jq path subset: `.a.b`, `.[0]`, `.[-1]`, `.[]`,
 // `."quoted"`, `first(P)`, `limit(N; P)`.
 //
 //	- It allocates nothing. The path borrows `steps`, `text`, and `names`, into which a quoted name's
 //	  escapes decode (`len(text)` bytes always suffice, a lone surrogate is `.Bad_Escape`).
-//	- A fault is the zero `Path` and a `Parse_Fault` and `steps` or `names` too small is `.Out_Of_Room`
+//	- A fault is the zero `Path` and a `Path_Error`: `.Bad_Path` at the byte of `text` the parser stopped on, or
+//	  `.Over_Capacity` when `steps` or `names` is too small.
 @(require_results)
-parse_path :: #force_inline proc(text: string, steps: []Step, names: []u8 = nil) -> (p: Path, err: Maybe(Parse_Fault)) {
+parse_path :: #force_inline proc(text: string, steps: []Step, names: []u8 = nil) -> (p: Path, err: Maybe(Path_Error)) {
 	return core_pkg.parse_path(text, steps, names)
 }
 
@@ -235,26 +192,6 @@ Path_Outcome :: walk.Path_Outcome
 //	.Nodes  a document, in `Request.doc`
 //	.Dom    a document with decoded values
 Query :: scan_pkg.Query
-
-// A request refused before its scan, with nothing written.
-Request_Error :: walk.Request_Error
-
-// Why a request was refused.
-//
-//	Bad_Path             a path text that does not parse (`path` and `offset` say which and where)
-//	Query_Not_In_Set     paths without `.Path`, or `.Path` without paths
-//	Nodes_Need_Strict    `.Nodes` or `.Dom` with `.Structural` strictness
-//	Lazy_Needs_First     `.Lazy` with `duplicates` other than `.First` or `.Refuse`
-//	Over_Capacity        a fixed limit was passed
-//	Allocator_Mismatch   an output made with another allocator than the request's
-//	Out_Of_Memory        the request's own storage
-//	Refuse_Compiled_Out  `Duplicates.Refuse` in a build with `-define:REFUSE_DUPLICATES=false`
-Request_Error_Kind :: walk.Request_Error_Kind
-
-// The fixed limit an `.Over_Capacity` refusal hit: `Path_Runs` (more than 16 paths in a request),
-// `Path_Steps` (a path past `MAX_PATH_STEPS`), `Repeated_Names` (more than 16 byte-identical wanted
-// names) or `Node_Source_Bytes` (a `.Nodes`/`.Dom` source past `MAX_ROW_SOURCE`). `None` otherwise.
-Capacity :: walk.Capacity
 
 // What a JSON value is: `Null`, `False`, `True`, `Number`, `String`, `Array` or `Object`.
 Kind :: scan_pkg.Kind
@@ -324,6 +261,7 @@ decode_span :: #force_inline proc(
 //
 //	- No allocation but the deep reading's frames (`Limits`), which only input nesting past MAX_DEPTH under
 //	  a raised cap takes.
+//	- `opts.duplicates` is not read: a repeated key is not a fault here.
 //	- `.Jsonc` validates comments and trailing commas as well, every other byte as `.Strict` does whatever
 //	  `strictness` is, and appends each comment to `facts` when it is not nil, attached to nothing (`node`
 //	  is `NO_NODE`), an append its allocator refuses being `.Out_Of_Memory`; a `.Json` source has none.
@@ -334,18 +272,12 @@ decode_span :: #force_inline proc(
 //	  alone) is `.Bad_Escape` at its backslash wherever escapes are validated: it writes no Unicode scalar,
 //	  so no reader could return it as UTF-8.
 @(require_results)
-validate :: #force_inline proc(
-	src: []byte,
-	dialect := Dialect.Json,
-	strictness := Strictness.Strict,
-	limits := Limits{},
-	facts: ^[dynamic]Fact = nil,
-) -> Maybe(Error) {
-	if dialect == .Jsonc {
-		return scan_pkg.jsonc_validate(src, facts, limits)
+validate :: #force_inline proc(src: []byte, opts := Read_Opts{}, facts: ^[dynamic]Fact = nil) -> Maybe(Error) {
+	if opts.dialect == .Jsonc {
+		return scan_pkg.jsonc_validate(src, facts, opts.limits)
 	}
-	if limits.max_depth > MAX_DEPTH {
-		return scan_pkg.scan_plain_deep(src, strictness, limits)
+	if opts.limits.max_depth > MAX_DEPTH {
+		return scan_pkg.scan_plain_deep(src, opts.strictness, opts.limits)
 	}
-	return scan_pkg.scan_plain(src, strictness, limits)
+	return scan_pkg.scan_plain(src, opts.strictness, opts.limits)
 }

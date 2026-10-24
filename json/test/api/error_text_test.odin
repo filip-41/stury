@@ -3,6 +3,7 @@ package json_tests
 // `error_position`, `render_error` and `render_error_to_writer`: a scan fault located as `line:col` in the source.
 
 import json "../.."
+import core "../../../core"
 import "core:io"
 import "core:strings"
 import "core:testing"
@@ -51,7 +52,7 @@ render_error_text :: proc(t: ^testing.T) {
 	text :: proc(t: ^testing.T, src: string, err: json.Error, loc := #caller_location) -> string {
 		b: strings.Builder
 		strings.builder_init(&b, context.temp_allocator)
-		werr := json.render_error_to_writer(strings.to_writer(&b), transmute([]byte)src, err)
+		werr := core.render_error_to_writer(strings.to_writer(&b), transmute([]byte)src, err)
 		testing.expectf(t, werr == .None, "render_error_to_writer: %v", werr, loc = loc)
 		rendered := json.render_error(transmute([]byte)src, err, context.temp_allocator)
 		testing.expect_value(t, rendered, strings.to_string(b), loc = loc)
@@ -80,7 +81,7 @@ render_error_other_refusals :: proc(t: ^testing.T) {
 	same :: proc(t: ^testing.T, src: string, err: $E, want: string, loc := #caller_location) {
 		b: strings.Builder
 		strings.builder_init(&b, context.temp_allocator)
-		testing.expect_value(t, json.render_error_to_writer(strings.to_writer(&b), transmute([]byte)src, err), io.Error.None, loc = loc)
+		testing.expect_value(t, core.render_error_to_writer(strings.to_writer(&b), transmute([]byte)src, err), io.Error.None, loc = loc)
 		testing.expect_value(t, strings.to_string(b), want, loc = loc)
 		testing.expect_value(t, json.render_error(transmute([]byte)src, err, context.temp_allocator), want, loc = loc)
 	}
@@ -123,19 +124,19 @@ render_error_other_refusals :: proc(t: ^testing.T) {
 	uerr, _ = json.unmarshal(transmute([]byte)src, (^V)(nil), allocator = context.temp_allocator).?
 	same(t, src, uerr, "Bad_Option")
 
-	_, eerr := json.set(transmute([]byte)bad, ".a", 1, context.temp_allocator)
+	_, eerr := json.set(transmute([]byte)bad, ".a", 1, allocator = context.temp_allocator)
 	same(t, bad, eerr.?, "1:6: Bad_Source: Bad_Char")
-	_, eerr = json.set(transmute([]byte)string("{}"), ".a[", 1, context.temp_allocator)
+	_, eerr = json.set(transmute([]byte)string("{}"), ".a[", 1, allocator = context.temp_allocator)
 	same(t, "{}", eerr.?, "offset 2: Bad_Path")
-	_, eerr = json.set(transmute([]byte)string("{}"), ".a", 1, context.temp_allocator)
+	_, eerr = json.set(transmute([]byte)string("{}"), ".a", 1, allocator = context.temp_allocator)
 	same(t, "{}", eerr.?, "Not_Found")
 
 	req: json.Request(bit_set[json.Query]{.Path})
 	rerr, _ := json.request_init(&req, ".a[", allocator = context.temp_allocator).?
-	same(t, "", rerr, "offset 2: Bad_Path (path 0)")
-	same(t, "", json.Request_Error{kind = .Over_Capacity, capacity = .Path_Steps}, "Over_Capacity: Path_Steps")
+	same(t, "", rerr, "offset 2: Bad_Path")
+	same(t, "", json.Error{kind = .Over_Capacity}, "offset 0: Over_Capacity")
 
 	steps: [4]json.Step
 	_, perr := json.parse_path(".a[", steps[:])
-	same(t, ".a[", perr.?, "1:3: Unclosed_Bracket")
+	same(t, ".a[", perr.?, "offset 2: Bad_Path")
 }

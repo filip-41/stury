@@ -29,7 +29,7 @@ splice :: proc(src: []byte, edits: []Edit, dialect := Dialect{}, allocator := co
 	if err != nil {
 		return nil, err
 	}
-	if e, bad := validate(out, dialect).?; bad {
+	if e, bad := validate(out, {dialect = dialect}).?; bad {
 		delete(out, allocator)
 		return nil, Path_Error{kind = .Bad_Result, syntax = e.kind, offset = e.offset}
 	}
@@ -52,12 +52,11 @@ set :: proc(
 	src: []byte,
 	path: Path_Spec,
 	value: any,
-	dialect := Dialect{},
-	header := true,
+	opts := Read_Opts{},
 	allocator := context.allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_set(src, path, value, dialect, header, core_pkg.watched(&watch))
+	out, err = watched_set(src, path, value, opts.dialect, !opts.no_header, core_pkg.watched(&watch))
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
@@ -134,12 +133,11 @@ insert :: proc(
 	src: []byte,
 	at: int,
 	row: any,
-	dialect := Dialect{},
-	header := true,
+	opts := Read_Opts{},
 	allocator := context.allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_insert(src, at, row, dialect, header, core_pkg.watched(&watch))
+	out, err = watched_insert(src, at, row, opts.dialect, !opts.no_header, core_pkg.watched(&watch))
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
@@ -172,12 +170,11 @@ watched_insert :: proc(
 remove :: proc(
 	src: []byte,
 	path: Path_Spec,
-	dialect := Dialect{},
-	header := true,
+	opts := Read_Opts{},
 	allocator := context.allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_remove(src, path, dialect, header, core_pkg.watched(&watch))
+	out, err = watched_remove(src, path, opts.dialect, !opts.no_header, core_pkg.watched(&watch))
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
@@ -251,8 +248,8 @@ Site :: struct {
 // when `with_header`). A row-only path (`COL_NONE`) names the row's first field.
 @(private)
 sites_of :: proc(src: []byte, t: Target, dialect: Dialect, header, with_header: bool, out: ^[dynamic]Site) -> Maybe(Path_Error) {
-	it := records(src, dialect, .Strict, {}, out.allocator)
-	defer records_destroy(&it)
+	it := records(src, {dialect = dialect}, out.allocator)
+	defer destroy(&it)
 	col, head, has_col := seek_header(&it, t, header, dialect)
 	if has_col && header && with_header {
 		add_site(out, head, col) or_return
@@ -309,8 +306,8 @@ insert_spot :: proc(src: []byte, at: int, dialect: Dialect, header: bool, alloca
 	if at < 0 {
 		return {}, Path_Error{kind = .Unplaceable}
 	}
-	it := records(src, dialect, .Strict, {}, allocator)
-	defer records_destroy(&it)
+	it := records(src, {dialect = dialect}, allocator)
+	defer destroy(&it)
 	rows, first := 0, true
 	for rec in next_record(&it) {
 		if first {
@@ -437,7 +434,7 @@ is_oom :: proc(err: Maybe(Path_Error)) -> bool {
 // The path error when `src` is not CSV in `dialect`, judged `.Strict`, or nil.
 @(private)
 check_source :: proc(src: []byte, dialect: Dialect) -> Maybe(Path_Error) {
-	if e, bad := validate(src, dialect).?; bad {
+	if e, bad := validate(src, {dialect = dialect}).?; bad {
 		return path_error_of(e)
 	}
 	return nil

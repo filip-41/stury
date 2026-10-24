@@ -1,6 +1,6 @@
 package encode
 
-// jq's number notation, shared by the command line and `Encode_Opts.jq_spelling`: a literal as decNumber's
+// jq's number notation, shared by the command line and `Marshal_Opts.jq_spelling`: a literal as decNumber's
 // scientific string (`1e2` is `1E+2`), a computed number as jq's dtoa lays it out.
 
 import "core:math"

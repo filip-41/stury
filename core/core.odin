@@ -3,7 +3,7 @@ package core
 // The types and procedures shared by every format, so a caller using several formats writes them once. Each
 // format aliases the names it exposes. Files:
 //
-//	aliases.odin          paths: `Path`, `Path_Spec`, `Step`, `parse_path`, `MAX_PATH_STEPS` (syntax in path/)
+//	core.odin             `Path_Spec`, `MAX_PATH_STEPS`, `parse_path`; path_parse.odin the path syntax: `Path`, `Step`
 //	strictness.odin       `Strictness`; duplicates.odin `Duplicates`
 //	input.odin            the supported targets, `bom_len`
 //	number.odin           `Number`, `Exactness`, `fold_digits`
@@ -20,19 +20,17 @@ package core
 //	path_error.odin       `Path_Error`, `Path_Error_Kind`: path procedure (find, set, splice) errors
 //	marshal_error.odin    `Marshal_Error`: marshal errors
 //
-// spell/ formats integers and floats for the writers; bits/ holds the bit and UTF-8 kernels.
+// spell/ formats integers and floats for the writers; bits.odin and bits_utf8.odin hold the bit and UTF-8 kernels.
 
-import p "path"
-
-Step :: p.Step
-Name :: p.Name
-Index :: p.Index
-Any :: p.Any
-Path :: p.Path
-Parse_Error :: p.Parse_Error
-Parse_Fault :: p.Parse_Fault
-
-parse_path :: p.parse_path
+// `parse_path_fault` with its fault as a `Path_Error`: `.Over_Capacity` when `steps` or `names` cannot hold the
+// path, else `.Bad_Path` at the byte of `text` the parser stopped on.
+parse_path :: proc(text: string, steps: []Step, names: []u8 = nil) -> (out: Path, err: Maybe(Path_Error)) {
+	parsed, fault := parse_path_fault(text, steps, names)
+	if f, bad := fault.?; bad {
+		return {}, Path_Error{kind = .Over_Capacity if f.error == .Out_Of_Room else .Bad_Path, offset = f.offset}
+	}
+	return parsed, nil
+}
 
 // A path argument: text in the path syntax, or a built `Path`.
 Path_Spec :: union {

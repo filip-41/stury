@@ -69,14 +69,14 @@ test_find_refusals :: proc(t: ^testing.T) {
 		testing.expectf(t, !found && faulted && e.kind == c.want, "find %q: %v %v, want %v", c.path, found, err, c.want)
 	}
 	// A name needs a header; find_column takes only the whole-column path.
-	_, found, err := csv.find(src, ".[0].a", header = false)
+	_, found, err := csv.find(src, ".[0].a", {no_header = true})
 	e, _ := err.?
 	testing.expect(t, !found && e.kind == .Unsupported_Path)
 	out: [dynamic]csv.Field
 	defer delete(out)
 	e, _ = csv.find_column(src, ".[0].a", &out).?
 	testing.expect_value(t, e.kind, csv.Path_Error_Kind.Unsupported_Path)
-	_, _, err = csv.find(src, ".[0].a", csv.Dialect{delimiter = '"'})
+	_, _, err = csv.find(src, ".[0].a", {dialect = csv.Dialect{delimiter = '"'}})
 	e, _ = err.?
 	testing.expect_value(t, e.kind, csv.Path_Error_Kind.Bad_Option)
 }

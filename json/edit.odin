@@ -29,7 +29,7 @@ Path_Error :: core_pkg.Path_Error
 //	  (an unterminated `//` or `/*`) is `.Bad_Result` at the comment, with no `syntax`: the comment would
 //	  swallow the values there.
 @(require_results)
-splice :: proc(src: []byte, edits: []Edit, allocator := context.allocator, dialect := Dialect.Json) -> (out: []byte, err: Maybe(Path_Error)) {
+splice :: proc(src: []byte, edits: []Edit, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	if !core_pkg.edits_ordered(src, edits) {
 		return nil, Path_Error{kind = .Bad_Edit}
 	}
@@ -57,7 +57,7 @@ judged_jsonc_splice :: proc(out: []byte, edits: []Edit, allocator: runtime.Alloc
 		return core_pkg.PATH_OUT_OF_MEMORY
 	}
 	defer delete(facts)
-	if e, bad := validate(out, .Jsonc, facts = &facts).?; bad {
+	if e, bad := validate(out, {dialect = .Jsonc}, &facts).?; bad {
 		return Path_Error{kind = e.kind == .Out_Of_Memory ? .Out_Of_Memory : .Bad_Result, syntax = e.kind, offset = e.offset}
 	}
 	// Each edit's bytes sit at `lo + shift` in `out`, the source's bytes between edits as they were.
@@ -85,7 +85,7 @@ judged :: proc(out: []byte, err: Maybe(Path_Error), allocator: runtime.Allocator
 	if err != nil {
 		return nil, err
 	}
-	if e, bad := validate(out, dialect).?; bad {
+	if e, bad := validate(out, {dialect = dialect}).?; bad {
 		delete(out, allocator)
 		return nil, Path_Error{kind = .Bad_Result, syntax = e.kind, offset = e.offset}
 	}
@@ -106,7 +106,7 @@ judged :: proc(out: []byte, err: Maybe(Path_Error), allocator: runtime.Allocator
 //	- Every path edit takes the path as text or as a parsed `Path` (`Path_Spec`). Text that does not parse
 //	  is `.Bad_Path` at the byte the parser stopped on.
 @(require_results)
-set :: proc(src: []byte, path: Path_Spec, value: any, allocator := context.allocator, upsert := false, dialect := Dialect.Json) -> (out: []byte, err: Maybe(Path_Error)) {
+set :: proc(src: []byte, path: Path_Spec, value: any, upsert := false, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
 	out, err = watched_set(src, path, value, core_pkg.watched(&watch), upsert, dialect)
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
@@ -184,7 +184,7 @@ APPEND :: core_pkg.APPEND
 //	- `.Jsonc` reads the source as JSONC and places the entry between its neighbours' extents, each entry's
 //	  comments and comma included (`entry_at`). The result is validated as JSONC.
 @(require_results)
-insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, allocator := context.allocator, dialect := Dialect.Json) -> (out: []byte, err: Maybe(Path_Error)) {
+insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
 	out, err = watched_insert(src, path, at, value, core_pkg.watched(&watch), dialect)
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
@@ -209,7 +209,7 @@ watched_insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, 
 //	- `.Jsonc` reads the source as JSONC and removes each entry with the comments attached to it
 //	  (`remove_in`). The result is validated as JSONC.
 @(require_results)
-remove :: proc(src: []byte, path: Path_Spec, allocator := context.allocator, dialect := Dialect.Json) -> (out: []byte, err: Maybe(Path_Error)) {
+remove :: proc(src: []byte, path: Path_Spec, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
 	out, err = watched_remove(src, path, core_pkg.watched(&watch), dialect)
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
@@ -244,7 +244,7 @@ canonical :: proc(value: any, depth: int, allocator: runtime.Allocator, dialect:
 		delete(repl)
 		return nil, Path_Error{kind = .Encode, encode = merr}
 	}
-	if e, bad := validate(repl[:], dialect, limits = Limits{max_depth = u64(max(MAX_DEPTH - depth, 0))}).?; bad {
+	if e, bad := validate(repl[:], {dialect = dialect, limits = {max_depth = u64(max(MAX_DEPTH - depth, 0))}}).?; bad {
 		delete(repl)
 		if e.kind == .Too_Deep {
 			return nil, Path_Error{kind = .Too_Deep}
@@ -270,14 +270,10 @@ edit_parse :: proc(path: Path_Spec, steps: []Step, allocator: runtime.Allocator)
 	if names, aerr = make([]u8, len(text), allocator); aerr != nil {
 		return {}, nil, core_pkg.PATH_OUT_OF_MEMORY
 	}
-	perr: Maybe(Parse_Fault)
-	if p, perr = parse_path(text, steps, names); perr != nil {
+	// `names` holds every escaped name, so `.Over_Capacity` is the steps: a path past the bound.
+	if p, err = parse_path(text, steps, names); err != nil {
 		delete(names, allocator)
-		// `names` holds every escaped name, so a buffer too small is the steps: a path past the bound.
-		if perr.?.error == .Out_Of_Room {
-			return {}, nil, Path_Error{kind = .Over_Capacity}
-		}
-		return {}, nil, Path_Error{kind = .Bad_Path, offset = perr.?.offset}
+		return {}, nil, err
 	}
 	return
 }
@@ -289,24 +285,20 @@ edit_scan :: proc(src: []byte, req: ^Request($KINDS), paths: []Path, dialect: Di
 	req.dialect = dialect
 	req.strictness = .Strict
 	req.allocator = allocator
-	switch e in scan(src, req) {
-	case Error:
-		if e.kind == .Out_Of_Memory {
-			return core_pkg.PATH_OUT_OF_MEMORY
-		}
-		return Path_Error{kind = .Bad_Source, syntax = e.kind, offset = e.offset}
-	case Request_Error:
-		#partial switch e.kind {
-		case .Out_Of_Memory:
-			return core_pkg.PATH_OUT_OF_MEMORY
-		case .Over_Capacity:
-			return Path_Error{kind = .Over_Capacity}
-		case:
-			// Unreachable, as the edits build their own requests. An error beats a panic in the caller.
-			return Path_Error{kind = .Internal}
-		}
+	e, bad := scan(src, req).?
+	if !bad {
+		return nil
 	}
-	return nil
+	#partial switch e.kind {
+	case .Out_Of_Memory:
+		return core_pkg.PATH_OUT_OF_MEMORY
+	case .Over_Capacity:
+		return Path_Error{kind = .Over_Capacity}
+	case .Bad_Option, .Bad_Path, .Source_Too_Wide:
+		// Unreachable, as the edits build their own requests. An error beats a panic in the caller.
+		return Path_Error{kind = .Internal}
+	}
+	return Path_Error{kind = .Bad_Source, syntax = e.kind, offset = e.offset}
 }
 
 // `base` and one more step, in `buf`.

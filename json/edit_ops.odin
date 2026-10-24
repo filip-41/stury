@@ -43,7 +43,7 @@ insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 		n_paths += 1
 	}
 	req: Request(EDIT_QUERIES when jsonc else {.Path})
-	req.route.every_member = true
+	req.state.route.every_member = true
 	defer request_destroy(&req)
 	edit_scan(src, &req, paths[:n_paths], .Jsonc if jsonc else .Json, allocator) or_return
 	targets, members := found(req.answers[:], 0, allocator), found(req.answers[:], member_q, allocator)

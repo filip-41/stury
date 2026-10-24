@@ -5,6 +5,7 @@ package json_tests
 
 import "base:runtime"
 import json "../.."
+import core "../../../core"
 import "core:io"
 import "core:math"
 import "core:strings"
@@ -67,7 +68,7 @@ test_encode_f64_goldens :: proc(t: ^testing.T) {
 @(test)
 test_encode_f64_non_finite :: proc(t: ^testing.T) {
 	for f in ([]f64{math.inf_f64(1), math.inf_f64(-1), math.nan_f64()}) {
-		marshal_refused(t, f, json.Encode_Error.Non_Finite)
+		marshal_refused(t, f, json.Marshal_Error.Non_Finite)
 	}
 }
 
@@ -81,7 +82,7 @@ test_encode_jq_spelling :: proc(t: ^testing.T) {
 	doc := build_ok(t, text)
 	defer json.destroy(&doc)
 	got, err := json.marshal(&doc, {jq_spelling = true}, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None)
+	testing.expect_value(t, err, json.Marshal_Error.None)
 	testing.expect_value(t, string(got), want)
 	plain, _ := json.marshal(&doc, {}, context.temp_allocator)
 	testing.expect_value(t, string(plain), `[1E2,-0,1e1000,0.1,100000000000000000000,"\/","é","\u0001\u007f\n\t\"\\",{"a":1,"b":2,"a":3},{"k":{"z":[],"y":{}}}]`)
@@ -92,7 +93,7 @@ test_encode_jq_spelling :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(string(ascii), "\"\\u00e9\""), string(ascii))
 	sb := strings.builder_make(context.temp_allocator)
 	err = json.marshal_to_writer(strings.to_writer(&sb), &doc, {jq_spelling = true}, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None)
+	testing.expect_value(t, err, json.Marshal_Error.None)
 	testing.expect_value(t, strings.to_string(sb), want)
 }
 
@@ -102,14 +103,14 @@ test_encode_jq_spelling :: proc(t: ^testing.T) {
 test_encode_jq_spelling_jsonc :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	text := "// head\n{\n  // lead a\n  \"a\": /* in a */ 1E2, // trail a\n  \"b\": [1, /* two */ 2, // after 2\n  ],\n  \"c\": // in c\n    /* in c2 */ [],\n  \"e\": {\n    // empty\n  },\n  // lead a again\n  \"a\": \"\\/\" /* last a */\n  // foot\n} /* end */ // end2\n"
-	doc, err := json.build(raw(text), dialect = .Jsonc)
+	doc, err := json.build(raw(text), {dialect = .Jsonc})
 	testing.expect_value(t, err, nil)
 	defer json.destroy(&doc)
 	compact, cerr := json.marshal(&doc, {jq_spelling = true, trailing_newline = true}, context.temp_allocator)
-	testing.expect_value(t, cerr, json.Encode_Error.None)
+	testing.expect_value(t, cerr, json.Marshal_Error.None)
 	testing.expect_value(t, string(compact), "// head\n{// lead a again\n\"a\":\"/\",/* last a */\"b\":[1,/* two */2// after 2\n],\"c\":// in c\n/* in c2 */[],\"e\":{// empty\n}// foot\n}/* end */// end2\n")
 	pretty, perr := json.marshal(&doc, {jq_spelling = true, pretty = true, indent = 2, trailing_newline = true}, context.temp_allocator)
-	testing.expect_value(t, perr, json.Encode_Error.None)
+	testing.expect_value(t, perr, json.Marshal_Error.None)
 	testing.expect_value(t, string(pretty), "// head\n{\n  // lead a again\n  \"a\": \"/\", /* last a */\n  \"b\": [\n    1, /* two */\n    2 // after 2\n  ],\n  \"c\": // in c\n  /* in c2 */ [],\n  \"e\": {\n    // empty\n  }\n  // foot\n} /* end */ // end2\n")
 }
 
@@ -119,10 +120,10 @@ test_encode_jq_spelling_jsonc :: proc(t: ^testing.T) {
 test_encode_jq_spelling_refused_allocator :: proc(t: ^testing.T) {
 	doc := build_ok(t, `{"a":[1E2,{"b":0.1e1,"b":2}],"c":"x\/y","d":{"e":[]}}`)
 	defer json.destroy(&doc)
-	opts := json.Encode_Opts{jq_spelling = true, pretty = true, indent = 2, trailing_newline = true}
+	opts := json.Marshal_Opts{jq_spelling = true, pretty = true, indent = 2, trailing_newline = true}
 	want, werr := json.marshal(&doc, opts)
 	defer delete(want)
-	testing.expect_value(t, werr, json.Encode_Error.None)
+	testing.expect_value(t, werr, json.Marshal_Error.None)
 	sweep := Budget_Sweep{limit = 1000}
 	for b, k in next_budget(&sweep) {
 		out, err := json.marshal(&doc, opts, budget_allocator(b))
@@ -163,25 +164,25 @@ refusing_writer_proc :: proc(data: rawptr, mode: io.Stream_Mode, p: []byte, offs
 // `render_error_to_writer`.
 @(test)
 test_writer_that_refuses_is_write_failed :: proc(t: ^testing.T) {
-	jsonc, jerr := json.build(raw("{\"a\": [1, 2] /* c */}"), dialect = .Jsonc)
+	jsonc, jerr := json.build(raw("{\"a\": [1, 2] /* c */}"), {dialect = .Jsonc})
 	defer json.destroy(&jsonc)
 	testing.expect_value(t, jerr, nil)
 	big := make([]int, 100000)
 	defer delete(big)
 	small := []int{1, 2, 3}
 	for left in ([]int{0, 3}) {
-		for opts in ([]json.Encode_Opts{{}, {pretty = true, indent = 2}}) {
+		for opts in ([]json.Marshal_Opts{{}, {pretty = true, indent = 2}}) {
 			w := Refusing_Writer{left}
-			testing.expect_value(t, json.marshal_to_writer(io.Writer{refusing_writer_proc, &w}, small, opts), json.Encode_Error.Write_Failed)
+			testing.expect_value(t, json.marshal_to_writer(io.Writer{refusing_writer_proc, &w}, small, opts), json.Marshal_Error.Write_Failed)
 		}
 		w := Refusing_Writer{left}
-		testing.expect_value(t, json.marshal_to_writer(io.Writer{refusing_writer_proc, &w}, &jsonc), json.Encode_Error.Write_Failed)
+		testing.expect_value(t, json.marshal_to_writer(io.Writer{refusing_writer_proc, &w}, &jsonc), json.Marshal_Error.Write_Failed)
 		w = Refusing_Writer{left}
-		err := json.render_error_to_writer(io.Writer{refusing_writer_proc, &w}, raw("[1,"), json.Error{kind = .Truncated, offset = 3})
+		err := core.render_error_to_writer(io.Writer{refusing_writer_proc, &w}, raw("[1,"), json.Error{kind = .Truncated, offset = 3})
 		testing.expectf(t, err != nil, "render_error_to_writer with %d bytes accepted", left)
 	}
 	w := Refusing_Writer{1000}
-	testing.expect_value(t, json.marshal_to_writer(io.Writer{refusing_writer_proc, &w}, big), json.Encode_Error.Write_Failed)
+	testing.expect_value(t, json.marshal_to_writer(io.Writer{refusing_writer_proc, &w}, big), json.Marshal_Error.Write_Failed)
 }
 
 @(test)
@@ -197,6 +198,6 @@ test_jq_spelling_uses_only_passed_allocator :: proc(t: ^testing.T) {
 	context.allocator = saved_alloc
 	context.temp_allocator = saved_temp
 	defer delete(out, alloc)
-	testing.expect_value(t, err, json.Encode_Error.None)
+	testing.expect_value(t, err, json.Marshal_Error.None)
 	testing.expect_value(t, string(out), `[123.4,1.234E-10,-0.5,1.00]`)
 }

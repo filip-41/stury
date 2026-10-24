@@ -60,13 +60,7 @@ build_rows :: proc(
 	if len(src) < 2 * 256 {
 		reserve(&req.doc.rows, len(src) / 2 + 1)
 	}
-	switch e in json.scan(src, &req) {
-	case json.Error:
-		err = e
-	case json.Request_Error:
-		assert(e.capacity == .Node_Source_Bytes, "build_rows: an unexpected scan refusal")
-		err = json.Error{kind = .Source_Too_Wide, offset = json.MAX_ROW_SOURCE}
-	}
+	err = json.scan(src, &req)
 	if err == nil {
 		doc = req.doc
 		req.doc = {}
@@ -199,7 +193,7 @@ read_json :: proc(src: string) -> (Value, string) {
 	switch {
 	case len(strings.trim(src, " \t\n\r")) == 0:
 		msg = "Expected JSON value"
-	case e.kind == .Trailing && json.validate(text[e.offset:], read_dialect, limits = lifted) == nil:
+	case e.kind == .Trailing && json.validate(text[e.offset:], {dialect = read_dialect, limits = lifted}) == nil:
 		msg = "Unexpected extra JSON values"
 	case:
 		msg = parse_message(text, e)
@@ -256,6 +250,8 @@ FAULT_TEXT := [json.Error_Kind]string {
 	.Field_Count = "Record has the wrong number of fields",
 	.Limit_Fields = "Record has too many fields",
 	.Limit_Record = "Record is too long",
+	.Bad_Path = "Invalid path",
+	.Over_Capacity = "Exceeds a fixed limit of the path scan",
 }
 
 // `text` as decNumber reads a number (jv_number_with_literal): a sign, then digits with a point and an exponent,

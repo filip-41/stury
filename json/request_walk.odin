@@ -71,7 +71,7 @@ output_reset :: #force_inline proc(req: ^Request($KINDS), $K: bit_set[scan_pkg.W
 // request keeps it): the tape and wildcard routes answer from the rows.
 @(private)
 scan_rows :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> scan_pkg.Walk_Fault {
-	req.route.matcher, req.route.n_auto, req.route.gate.gated = .None, 0, 0
+	req.state.route.matcher, req.state.route.n_auto, req.state.route.gate.gated = .None, 0, 0
 	// Sized to the document's usual density, before the scan seeds it larger (`seed_row_cap`).
 	walk.adopt_allocator(&req.doc.rows, alloc)
 	_ = walk.edge_reserve(&req.doc.rows, len(src) / walk.SEEDED_ROW_BYTES)
@@ -82,7 +82,7 @@ scan_rows :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) 
 // `req`. The steps below are inlined: one specialization is one body.
 @(private)
 scan_walk :: proc(src: []byte, req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Walk_Kind], alloc: runtime.Allocator) -> (fault: scan_pkg.Walk_Fault) {
-	plan := &req.route
+	plan := &req.state.route
 	// The router gates only a demand-only walk. A gate is a walk of its own, so no other walk compiles one.
 	when .Demand in WALK && .Path not_in WALK && .Gate not_in WALK {
 		if plan.gate.gated != 0 {
@@ -105,9 +105,9 @@ scan_walk :: proc(src: []byte, req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Wa
 	facts := walk_facts(req, WALK, alloc)
 	err: Maybe(Error)
 	err, fault = walk_run(src, req, queries[:nq], walk_strictness(req), WALK, facts)
-	req.verdict = err
+	req.state.verdict = err
 	when .Path in K {
-		req.route.unresolved = sink.paths_unresolved > 0
+		req.state.route.unresolved = sink.paths_unresolved > 0
 	}
 	sink_store(req, sink, K)
 	req.doc.src = src
@@ -122,7 +122,7 @@ scan_walk :: proc(src: []byte, req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Wa
 // own index in `req.paths`, then the rows, the decoded values, and the demand matcher.
 @(private = "file")
 walk_queries :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query_Sink, queries: ^[MAX_WALK_QUERIES]scan_pkg.Scan_Query, $WALK: bit_set[scan_pkg.Walk_Kind], alloc: runtime.Allocator) -> (nq: int) {
-	plan := &req.route
+	plan := &req.state.route
 	for pi in plan.auto[:plan.n_auto] {
 		queries[nq] = scan_pkg.Scan_Query{kind = .Path, allocator = alloc, sink = sink, path = req.paths[pi], tag = pi}
 		nq += 1
@@ -196,7 +196,7 @@ walk_run :: #force_inline proc(src: []byte, req: ^Request($KINDS), queries: []sc
 	}
 	return scan_pkg.scan_queries(
 		src, queries, strictness, req.limits, WALK,
-		&req.stop, &req.coverage, duplicates_resolution(req.duplicates), req.route.kept,
+		&req.stop, &req.coverage, duplicates_resolution(req.duplicates), req.state.route.kept,
 	)
 }
 
@@ -220,7 +220,7 @@ walk_attach_facts :: #force_inline proc(req: ^Request($KINDS), src: []byte, fact
 // drops retracted rows, cuts limits and fills nodes.
 @(private = "file")
 walk_answers :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query_Sink, $WALK: bit_set[scan_pkg.Walk_Kind], err: Maybe(Error), fault: ^scan_pkg.Walk_Fault) {
-	plan := &req.route
+	plan := &req.state.route
 	if plan.matcher == .Slots {
 		// The automaton owes a miss only to a walk that reached the end.
 		reached_end := req.stop == nil

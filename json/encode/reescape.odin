@@ -22,7 +22,7 @@ Reescape_Flag :: enum u8 {
 @(private)
 Reescape :: bit_set[Reescape_Flag; u8]
 
-reescape_of :: proc(opts: Encode_Opts) -> (r: Reescape) {
+reescape_of :: proc(opts: Marshal_Opts) -> (r: Reescape) {
 	if opts.ascii_only {
 		r += {.Non_Ascii}
 	}
@@ -137,7 +137,7 @@ reescape_run :: proc(dst: [^]u8, text: []u8, $FLAGS: Reescape) -> int #no_bounds
 }
 
 // Rewrite `dst[lo:]` in place, growing `dst` by exactly the bytes the rewrite adds when they do not fit.
-reescape_tail :: proc(dst: ^[dynamic]u8, lo: int, flags: Reescape) -> Encode_Error {
+reescape_tail :: proc(dst: ^[dynamic]u8, lo: int, flags: Reescape) -> Marshal_Error {
 	extra := reescape_extra(dst[lo:], flags)
 	if extra == 0 {
 		return .None

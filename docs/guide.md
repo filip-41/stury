@@ -2,7 +2,7 @@
 
 How to use `stury:json` and `stury:csv`, with snippets from the programs in `examples/`. Each public name's
 doc comment is its contract. [json/json.odin](../json/json.odin), [csv/csv.odin](../csv/csv.odin) and
-[core/aliases.odin](../core/aliases.odin) map the names to their files.
+[core/core.odin](../core/core.odin) map the names to their files.
 
 ## Requirements
 
@@ -163,7 +163,7 @@ for f in faults {
 
 ```odin
 src := transmute([]byte)string("{\n\t\"a\": 1 // one\n}\n")
-_, jsonc_bad := json.validate(src, dialect = .Jsonc).?
+_, jsonc_bad := json.validate(src, {dialect = .Jsonc}).?
 _, strict_bad := json.validate(src).?
 fmt.println(jsonc_bad, strict_bad) // false true: only strict JSON refuses the comment
 ```
@@ -211,7 +211,7 @@ counts rows from the first record after the header, and columns by index or by t
 
 ```odin
 doc, _ := csv.build(src)
-defer csv.document_destroy(&doc)
+defer csv.destroy(&doc)
 col, _ := csv.column(&doc, "lat")
 lat, _ := csv.get_float(&doc, 0, col)
 fmt.println(csv.row_count(&doc), lat) // 2 59.91
@@ -244,7 +244,7 @@ appends one record of text cells to a buffer:
 r: strings.Reader
 strings.reader_init(&r, string(src))
 rr := csv.records_from(io.to_reader(strings.reader_to_stream(&r)))
-defer csv.records_destroy(&rr)
+defer csv.destroy(&rr)
 for rec in csv.next_record(&rr) {
 	text, _, _ := csv.field_text(rec.src, rec.fields[0])
 	fmt.println(rec.at, len(rec.fields), string(text)) // 0 4 City, then 24 4 Oslo, then 48 4 Ho, Chi Minh
@@ -257,7 +257,7 @@ count := proc(data: rawptr, piece: ^csv.Records, k: int) -> bool {
 	return true
 }
 rows: int
-_, _ = csv.each_record(src, {}, count, &rows, &pool.runner).? // pool as for validate_records above
+_, _ = csv.each_record(src, count, &rows, runner = &pool.runner).? // pool as for validate_records above
 fmt.println(rows) // 3: the header and two rows
 
 line: [dynamic]u8
@@ -269,7 +269,7 @@ fmt.print(string(line[:])) // Tromsø,,69.65,18.96
 Each format reads its own tag key (`csv:"City" json:"city"`); a field with no tag uses its own name in both.
 Both `unmarshal`s return `core.Unmarshal_Error`, and `core.render_error` writes it, a `validate` fault
 (`core.Error`) or an edit refusal (`core.Path_Error`) for either format. `json.Error`, `csv.Error` and the
-packages' `Unmarshal_Error` are aliases of core's types; `core/aliases.odin` lists what the formats share.
+packages' `Unmarshal_Error` are aliases of core's types; `core/core.odin` lists what the formats share.
 
 ```odin
 import "stury:core"

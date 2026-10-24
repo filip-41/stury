@@ -236,8 +236,7 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 		if e, bad := err.?; bad && run.opts.seq && e.offset > 0 {
 			if value, _, split := json.split_record(
 				ins.data[at:limit],
-				run.req.dialect,
-				limits = run.req.limits,
+				{dialect = run.req.dialect, limits = run.req.limits},
 			); split {
 				if d2, err2 := jq.build_rows(value, run.req.dialect, allocator = doc_allocator); err2 == nil {
 					end = at + len(value)
@@ -458,7 +457,7 @@ stream_ended :: proc(ins: ^Inputs) -> bool {
 @(private = "file")
 text_end :: proc(ins: ^Inputs, at, limit: int) -> int {
 	src := ins.data[at:limit]
-	err := json.validate(src, ins.run.req.dialect, limits = ins.run.req.limits)
+	err := json.validate(src, {dialect = ins.run.req.dialect, limits = ins.run.req.limits})
 	if e, bad := err.?; bad && e.kind == .Trailing {
 		return at + int(e.offset)
 	}

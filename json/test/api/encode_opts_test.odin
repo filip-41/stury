@@ -1,6 +1,6 @@
 package json_tests
 
-// Encode_Opts past `pretty` (indent, ascii_only, escape_html, trailing_newline) and a plan's enum text on
+// Marshal_Opts past `pretty` (indent, ascii_only, escape_html, trailing_newline) and a plan's enum text on
 // every writer, and the writers that stream to an `io.Writer`.
 
 import json "../.."
@@ -41,15 +41,15 @@ reescape_ref :: proc(text: string, ascii, html: bool) -> string {
 
 // What every writer writes for one value. Its compact text is `doc`.
 @(private = "file")
-writers_agree :: proc(t: ^testing.T, doc: string, opts: json.Encode_Opts, want: string, loc := #caller_location) {
+writers_agree :: proc(t: ^testing.T, doc: string, opts: json.Marshal_Opts, want: string, loc := #caller_location) {
 	parsed := build_ok(t, doc, loc)
 	defer json.destroy(&parsed)
 	got, err := json.marshal(&parsed, opts, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None, loc = loc)
+	testing.expect_value(t, err, json.Marshal_Error.None, loc = loc)
 	testing.expect_value(t, string(got), want, loc = loc)
 	sb := strings.builder_make(context.temp_allocator)
 	err = json.marshal_to_writer(strings.to_writer(&sb), &parsed, opts, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None, loc = loc)
+	testing.expect_value(t, err, json.Marshal_Error.None, loc = loc)
 	testing.expect_value(t, strings.to_string(sb), want, loc = loc)
 }
 
@@ -61,12 +61,12 @@ test_encode_opts_indent_deep :: proc(t: ^testing.T) {
 	text := nested_arrays(depth)
 	parsed := build_ok(t, text)
 	defer json.destroy(&parsed)
-	opts := json.Encode_Opts{pretty = true, indent = 255}
+	opts := json.Marshal_Opts{pretty = true, indent = 255}
 	got, err := json.marshal(&parsed, opts, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None)
+	testing.expect_value(t, err, json.Marshal_Error.None)
 	sb := strings.builder_make(context.temp_allocator)
 	err = json.marshal_to_writer(strings.to_writer(&sb), &parsed, opts, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None)
+	testing.expect_value(t, err, json.Marshal_Error.None)
 	testing.expect(t, string(got) == strings.to_string(sb), "streamed pretty differs")
 	innermost := strings.concatenate({"\n", strings.repeat(" ", 255 * (depth - 1), context.temp_allocator), "[]\n"}, context.temp_allocator)
 	testing.expect(t, strings.contains(string(got), innermost), "the innermost line is indented 255 spaces per level")
@@ -79,7 +79,7 @@ test_encode_opts_reescape :: proc(t: ^testing.T) {
 	compact := marshal_text(t, s)
 	for ascii in ([]bool{false, true}) {
 		for html in ([]bool{false, true}) {
-			opts := json.Encode_Opts{ascii_only = ascii, escape_html = html}
+			opts := json.Marshal_Opts{ascii_only = ascii, escape_html = html}
 			want := reescape_ref(compact, ascii, html)
 			testing.expect_value(t, marshal_text(t, s, opts), want)
 			writers_agree(t, compact, opts, want)
@@ -109,7 +109,7 @@ test_encode_opts_streams :: proc(t: ^testing.T) {
 	}
 	v := Wide{big = strings.repeat("ab€", 50_000, context.temp_allocator), rows = rows}
 	cases := []struct {
-		opts:  json.Encode_Opts,
+		opts:  json.Marshal_Opts,
 		enums: json.Enum_Spelling,
 	}{
 		{{}, .Name},
@@ -123,7 +123,7 @@ test_encode_opts_streams :: proc(t: ^testing.T) {
 		plan := json.type_plan_init(Wide, {enums = c.enums}, context.temp_allocator)
 		want := marshal_text(t, v, c.opts, &plan)
 		sb := strings.builder_make(context.temp_allocator)
-		testing.expect_value(t, json.marshal_to_writer(strings.to_writer(&sb), v, c.opts, &plan, context.temp_allocator), json.Encode_Error.None)
+		testing.expect_value(t, json.marshal_to_writer(strings.to_writer(&sb), v, c.opts, &plan, context.temp_allocator), json.Marshal_Error.None)
 		testing.expectf(t, strings.to_string(sb) == want, "marshal_to_writer %v %v: %d bytes, want %d", c.opts, c.enums, len(sb.buf), len(want))
 		// The document writer re-emits the names in the compact text.
 		writers_agree(t, marshal_text(t, v), c.opts, marshal_text(t, v, c.opts))
@@ -213,12 +213,12 @@ test_encode_opts_sort_keys_matches_cli :: proc(t: ^testing.T) {
 		},
 	}
 	for c in cases {
-		doc, err := json.build(transmute([]byte)c.src, dialect = c.dialect)
+		doc, err := json.build(transmute([]byte)c.src, {dialect = c.dialect})
 		defer json.destroy(&doc)
 		testing.expect(t, err == nil)
 		for pretty in ([2]bool{false, true}) {
 			got, merr := json.marshal(&doc, {jq_spelling = true, sort_keys = true, pretty = pretty, indent = 2, trailing_newline = true}, context.temp_allocator)
-			testing.expect_value(t, merr, json.Encode_Error.None)
+			testing.expect_value(t, merr, json.Marshal_Error.None)
 			testing.expect_value(t, string(got), strings.concatenate({c.pretty if pretty else c.compact, "\n"}, context.temp_allocator))
 		}
 	}
@@ -242,14 +242,14 @@ test_encode_opts_sort_keys_alone_changes_only_the_order :: proc(t: ^testing.T) {
 		{src = "{ \"a\" : [ 1 , 2 ] ,\n \"b\":{ } }"},
 		{src = "// h\n{\n  /* ib */ \"a\": /* in */ 2, // ta\n  \"m\": {\"x\":2 /* tx */\n  // foot\n  },\n} // end\n", dialect = .Jsonc},
 	}
-	opts := []json.Encode_Opts {
+	opts := []json.Marshal_Opts {
 		{},
 		{pretty = true},
 		{pretty = true, indent = 2, trailing_newline = true},
 		{ascii_only = true, escape_html = true},
 	}
 	for c in cases {
-		doc, err := json.build(transmute([]byte)c.src, dialect = c.dialect)
+		doc, err := json.build(transmute([]byte)c.src, {dialect = c.dialect})
 		defer json.destroy(&doc)
 		testing.expect(t, err == nil)
 		for o in opts {

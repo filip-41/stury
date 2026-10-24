@@ -234,7 +234,7 @@ tape_records :: proc(doc: ^json.Document, name: string) -> (json.Node, bool) {
 LOG_NAMES :: [?]string{"ts", "level", "service", "msg", "status", "bytes", "duration_ms", "id"}
 
 tape_logs :: proc(data: []byte, out: ^Logs_Doc, a: mem.Allocator) -> bool {
-	doc, berr := json.build(data, a)
+	doc, berr := json.build(data, allocator = a)
 	if berr != nil {
 		return false
 	}
@@ -304,7 +304,7 @@ NESTED_INNER_NAMES :: [?]string{"a", "b"}
 NESTED_B_NAMES :: [?]string{"c"}
 
 tape_nested :: proc(data: []byte, out: ^[]Nested_Rec, a: mem.Allocator) -> bool {
-	doc, berr := json.build(data, a)
+	doc, berr := json.build(data, allocator = a)
 	root_kind, _ := json.kind(&doc, 0)
 	if berr != nil || root_kind != .Array {
 		return false

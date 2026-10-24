@@ -10,14 +10,14 @@ import "core:strings"
 import "core:testing"
 
 @(private)
-marshal_text :: proc(t: ^testing.T, v: any, opts := json.Encode_Opts{}, plan: ^json.Type_Plan = nil, loc := #caller_location) -> string {
+marshal_text :: proc(t: ^testing.T, v: any, opts := json.Marshal_Opts{}, plan: ^json.Type_Plan = nil, loc := #caller_location) -> string {
 	out, err := json.marshal(v, opts, plan, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None, loc = loc)
+	testing.expect_value(t, err, json.Marshal_Error.None, loc = loc)
 	return string(out)
 }
 
 @(private)
-marshal_refused :: proc(t: ^testing.T, v: any, want: json.Encode_Error, loc := #caller_location) {
+marshal_refused :: proc(t: ^testing.T, v: any, want: json.Marshal_Error, loc := #caller_location) {
 	out, err := json.marshal(v, {}, nil, context.temp_allocator)
 	testing.expect_value(t, err, want, loc = loc)
 	testing.expect(t, out == nil, "a refusal returns a nil slice", loc = loc)
@@ -50,7 +50,7 @@ test_marshal_number_round_trips_or_refuses :: proc(t: ^testing.T) {
 	for c in ([]struct {
 		src:  string,
 		want: string,
-		err:  json.Encode_Error,
+		err:  json.Marshal_Error,
 	}{
 		{`{"n":1e400}`, "", .Non_Finite},
 		{`{"n":-1e400}`, "", .Non_Finite},
@@ -202,7 +202,7 @@ test_marshal_pointers_cycles_depth :: proc(t: ^testing.T) {
 	}
 	head := &nodes[1]
 	out, err := json.marshal(head, {}, nil, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None)
+	testing.expect_value(t, err, json.Marshal_Error.None)
 	_, invalid := json.validate(out).?
 	testing.expect(t, !invalid)
 	marshal_refused(t, nodes[0], .Too_Deep)
@@ -285,7 +285,7 @@ test_marshal_raw :: proc(t: ^testing.T) {
 	deep := json.MAX_DEPTH - 1
 	fits := nested_arrays(deep)
 	out, err := json.marshal(R{r = json.Raw(fits)}, {}, nil, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None)
+	testing.expect_value(t, err, json.Marshal_Error.None)
 	_, invalid := json.validate(out).?
 	testing.expect(t, !invalid)
 	marshal_refused(t, R{r = json.Raw(strings.concatenate({"[", fits, "]"}, context.temp_allocator))}, .Too_Deep)
@@ -339,11 +339,11 @@ test_marshal_unsupported :: proc(t: ^testing.T) {
 }
 
 @(private)
-encode_text :: proc(t: ^testing.T, text: string, opts := json.Encode_Opts{}, loc := #caller_location) -> string {
+encode_text :: proc(t: ^testing.T, text: string, opts := json.Marshal_Opts{}, loc := #caller_location) -> string {
 	doc := build_ok(t, text, loc)
 	defer json.destroy(&doc)
 	out, err := json.marshal(&doc, opts, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None, loc = loc)
+	testing.expect_value(t, err, json.Marshal_Error.None, loc = loc)
 	return string(out)
 }
 
@@ -367,12 +367,12 @@ test_marshal_document_by_value :: proc(t: ^testing.T) {
 	defer json.destroy(&doc)
 	want, _ := json.marshal(&doc, {pretty = true}, context.temp_allocator)
 	got, err := json.marshal(doc, {pretty = true}, allocator = context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None)
+	testing.expect_value(t, err, json.Marshal_Error.None)
 	testing.expect_value(t, string(got), string(want))
 	sb: strings.Builder
 	strings.builder_init(&sb, context.temp_allocator)
 	err = json.marshal_to_writer(strings.to_writer(&sb), doc, {pretty = true}, allocator = context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.None)
+	testing.expect_value(t, err, json.Marshal_Error.None)
 	testing.expect_value(t, strings.to_string(sb), string(want))
 }
 
@@ -398,13 +398,13 @@ test_set_and_insert_document_value :: proc(t: ^testing.T) {
 	doc := build_ok(t, `{"k": [1, 2.50]}`)
 	defer json.destroy(&doc)
 	src := transmute([]byte)string(`{"a":0,"b":[]}`)
-	by_ptr, e1 := json.set(src, ".a", &doc, context.temp_allocator)
-	by_val, e2 := json.set(src, ".a", doc, context.temp_allocator)
+	by_ptr, e1 := json.set(src, ".a", &doc, allocator = context.temp_allocator)
+	by_val, e2 := json.set(src, ".a", doc, allocator = context.temp_allocator)
 	testing.expect(t, e1 == nil && e2 == nil)
 	testing.expect_value(t, string(by_val), string(by_ptr))
 	testing.expect_value(t, string(by_val), `{"a":{"k":[1,2.50]},"b":[]}`)
-	by_ptr, e1 = json.insert(src, ".b", json.APPEND, &doc, context.temp_allocator)
-	by_val, e2 = json.insert(src, ".b", json.APPEND, doc, context.temp_allocator)
+	by_ptr, e1 = json.insert(src, ".b", json.APPEND, &doc, allocator = context.temp_allocator)
+	by_val, e2 = json.insert(src, ".b", json.APPEND, doc, allocator = context.temp_allocator)
 	testing.expect(t, e1 == nil && e2 == nil)
 	testing.expect_value(t, string(by_val), string(by_ptr))
 	testing.expect_value(t, string(by_val), `{"a":0,"b":[{"k":[1,2.50]}]}`)
@@ -414,7 +414,7 @@ test_set_and_insert_document_value :: proc(t: ^testing.T) {
 test_marshal_document_refuses_non_trees :: proc(t: ^testing.T) {
 	doc: json.Document
 	out, err := json.marshal(&doc)
-	testing.expect_value(t, err, json.Encode_Error.Bad_State)
+	testing.expect_value(t, err, json.Marshal_Error.Bad_State)
 	testing.expect(t, out == nil)
 
 	// Rows that are not one tree, as a scoped request's document can be: the two elements of `[1,2]`.
@@ -425,7 +425,7 @@ test_marshal_document_refuses_non_trees :: proc(t: ^testing.T) {
 	append(&part.rows, whole.rows[1], whole.rows[2])
 	defer free_all(context.temp_allocator)
 	out, err = json.marshal(&part)
-	testing.expect_value(t, err, json.Encode_Error.Bad_State)
+	testing.expect_value(t, err, json.Marshal_Error.Bad_State)
 	testing.expect(t, out == nil)
 }
 
@@ -452,8 +452,8 @@ test_marshal_map_uses_only_passed_allocator :: proc(t: ^testing.T) {
 	defer delete(out_m, alloc)
 	defer delete(out_ir, alloc)
 
-	testing.expect_value(t, err_m, json.Encode_Error.None)
+	testing.expect_value(t, err_m, json.Marshal_Error.None)
 	testing.expect_value(t, string(out_m), `{"a":1,"b":2}`)
-	testing.expect_value(t, err_ir, json.Encode_Error.None)
+	testing.expect_value(t, err_ir, json.Marshal_Error.None)
 	testing.expect_value(t, string(out_ir), `{"10":1,"2":2}`)
 }

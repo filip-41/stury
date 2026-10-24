@@ -35,7 +35,7 @@ expect_refuse_scan :: proc(
 	defer json.destroy(&req)
 	req.strictness, req.dialect, req.duplicates, req.paths = strictness, dialect, .Refuse, paths
 	err := json.scan(src, &req)
-	if refusal, refused := err.(json.Request_Error); refused {
+	if refusal, refused := err.?; refused && (refusal.kind == .Bad_Option || refusal.kind == .Over_Capacity || refusal.kind == .Bad_Path) {
 		testing.expectf(t, false, "%v %v %v: refused %v\n%s", Q, strictness, dialect, refusal, string(src), loc = loc)
 		return false
 	}
@@ -131,7 +131,7 @@ expect_refuse_everywhere :: proc(t: ^testing.T, src: []byte, want: Maybe(json.Er
 	expect_refuse_scan(t, src, want, {.Dom}, nil, .Strict, .Jsonc, loc) or_return
 	expect_refuse_scan(t, src, want, {.Path, .Nodes}, path_sets[2], .Strict, .Json, loc) or_return
 	for dialect in json.Dialect {
-		doc, err := json.build(src, limits = {}, dialect = dialect, duplicates = .Refuse)
+		doc, err := json.build(src, {dialect = dialect, duplicates = .Refuse})
 		json.destroy(&doc)
 		testing.expectf(t, dup_verdict_is(err, want), "build %v: %v, want %v\n%s", dialect, err, want, string(src), loc = loc) or_return
 	}
@@ -193,16 +193,16 @@ test_refuse_offsets :: proc(t: ^testing.T) {
 		for paths in ([?][]json.Path{{{steps = {json.Name("a")}}}, {{steps = {json.Name("a"), json.Any{}}}}}) {
 			expect_refuse_scan(t, src, want, {.Path}, paths, .Strict, .Json)
 		}
-		_, err := json.build(src, duplicates = .Refuse)
+		_, err := json.build(src, {duplicates = .Refuse})
 		testing.expectf(t, dup_verdict_is(err, want), "build %s: %v, want %v", text, err, want)
 	}
 	// JSONC: comments around the repeat's key.
 	jsonc := `{"a":1, /* c */ "a" // d
 	: 2}`
-	_, err := json.build(raw(jsonc), dialect = .Jsonc, duplicates = .Refuse)
+	_, err := json.build(raw(jsonc), {dialect = .Jsonc, duplicates = .Refuse})
 	testing.expectf(t, dup_verdict_is(err, json.Error{offset = at(jsonc, `"a" //`), kind = .Duplicate_Key}), "jsonc: %v", err)
 	// `.Last` keeps a repeat, and `child` reads it.
-	doc, berr := json.build(raw(`{"a":1,"a":2}`), duplicates = .Last)
+	doc, berr := json.build(raw(`{"a":1,"a":2}`), {duplicates = .Last})
 	testing.expectf(t, berr == nil, ".Last: %v", berr)
 	a, _ := json.get_int(&doc, json.child(&doc, json.ROOT, "a"))
 	testing.expect_value(t, a, 2)
@@ -216,12 +216,12 @@ test_build_refuses_first_and_all :: proc(t: ^testing.T) {
 	src := raw(`{"a":1,"a":2}`)
 	for mode in ([?]json.Duplicates{.First, .All}) {
 		for dialect in ([?]json.Dialect{.Json, .Jsonc}) {
-			doc, err := json.build(src, dialect = dialect, duplicates = mode)
+			doc, err := json.build(src, {dialect = dialect, duplicates = mode})
 			testing.expectf(t, err == json.Error{kind = .Bad_Option}, "%v %v: %v", mode, dialect, err)
 			testing.expectf(t, len(doc.rows) == 0, "%v %v: a refused build holds rows", mode, dialect)
 		}
 		// Before any byte: an invalid source is the same refusal.
-		_, err := json.build(raw(`{`), duplicates = mode)
+		_, err := json.build(raw(`{`), {duplicates = mode})
 		testing.expectf(t, err == json.Error{kind = .Bad_Option}, "%v on bad input: %v", mode, err)
 	}
 	refusal := json.Error{kind = .Bad_Option}
@@ -236,7 +236,7 @@ test_build_refuses_first_and_all :: proc(t: ^testing.T) {
 REFUSE_DUPLICATES :: #config(REFUSE_DUPLICATES, true)
 
 // Built without the key-checking walks (`-define:REFUSE_DUPLICATES=false`, `make test-modes`), `.Refuse` is
-// refused before any byte is read: `scan` as `.Refuse_Compiled_Out`, `build` as `.Bad_Option`. `unmarshal`
+// refused before any byte is read: `scan` and `build` as `.Bad_Option`. `unmarshal`
 // keeps it.
 @(test)
 test_refuse_compiled_out :: proc(t: ^testing.T) {
@@ -244,11 +244,11 @@ test_refuse_compiled_out :: proc(t: ^testing.T) {
 		src := raw(`{"a":1,"a":2}`)
 		req := json.Request({.Path}){duplicates = .Refuse}
 		req.paths = []json.Path{{steps = []json.Step{json.Name("a")}}}
-		request_refused(t, json.scan(src, &req), .Refuse_Compiled_Out)
+		request_refused(t, json.scan(src, &req), .Bad_Option)
 		testing.expect_value(t, len(req.answers), 0)
 		json.destroy(&req)
 		for dialect in json.Dialect {
-			doc, err := json.build(src, dialect = dialect, duplicates = .Refuse)
+			doc, err := json.build(src, {dialect = dialect, duplicates = .Refuse})
 			testing.expectf(t, err == json.Error{kind = .Bad_Option}, "%v: %v", dialect, err)
 			testing.expect_value(t, len(doc.rows), 0)
 		}

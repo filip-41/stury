@@ -3,7 +3,7 @@ package csv
 import "base:intrinsics"
 import "core:simd"
 import "core:unicode/utf8"
-import "../core/bits"
+import bits "../core"
 
 // What a scan mode removes from, or adds to, the RFC 4180 scan. Each mode compiles to its own `scan_block`,
 // chosen once per call, so the default mode (`{}`) does none of the others' work.

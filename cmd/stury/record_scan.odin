@@ -50,24 +50,24 @@ scan_piece :: proc(data: rawptr, piece: ^json.Records, k: int) -> bool {
 	defer json.destroy(&req)
 	// Planned once for the piece's records. A refusal is each record's scan's too, which leaves the record to
 	// `scan_inputs`.
-	prepared, _ := json.prepare(&req)
-	// The path without `per_element`, tried first as `scan_outputs` tries it. On the heap, as a request and plan
-	// zeroed on the stack cost each piece of a path with no trial.
-	trial: ^Record_Trial
+	_ = json.prepare(&req)
+	// The path without `per_element`, tried first as `scan_outputs` tries it. On the heap, as a request zeroed on
+	// the stack cost each piece of a path with no trial.
+	trial: ^json.Request({.Path})
 	if run.tried {
-		trial = new(Record_Trial, req.allocator)
-		trial.req = {dialect = req.dialect, limits = req.limits, paths = run.paths[1:], allocator = req.allocator}
-		trial.prepared, _ = json.prepare(&trial.req)
+		trial = new(json.Request({.Path}), req.allocator)
+		trial^ = {dialect = req.dialect, limits = req.limits, paths = run.paths[1:], allocator = req.allocator}
+		_ = json.prepare(trial)
 	}
 	defer if trial != nil {
-		json.destroy(&trial.req)
+		json.destroy(trial)
 		free(trial, req.allocator)
 	}
 	src := job.src
 	for rec in json.next_record(piece) {
 		lo := int(rec.at)
 		hi := lo + len(rec.bytes)
-		answers, settled := answers_settled(&prepared, &trial.prepared if trial != nil else nil, src[lo:hi], job.more && hi == len(src))
+		answers, settled := answers_settled(&req, trial, src[lo:hi], job.more && hi == len(src))
 		if !settled {
 			p.stop = lo
 			break
@@ -90,27 +90,21 @@ scan_piece :: proc(data: rawptr, piece: ^json.Records, k: int) -> bool {
 	return publish_piece(job, k, p)
 }
 
-@(private = "file")
-Record_Trial :: struct {
-	req:      json.Request({.Path}),
-	prepared: json.Prepared({.Path}),
-}
-
-// Scan `record` into `p`'s request, or first `trial`'s (`trial_answered`): its outputs (`jq_outputs`), and whether it
+// Scan `record` into `req`, or first `trial`'s (`trial_answered`): its outputs (`jq_outputs`), and whether it
 // is a text the scan reads whole with every output found or missing, which print as `scan_inputs` would print them,
 // `last` when it ends the file and another file follows.
 @(private = "file")
-answers_settled :: proc(p, trial: ^json.Prepared({.Path}), record: []byte, last: bool) -> (answers: []json.Path_Answer, ok: bool) {
+answers_settled :: proc(req, trial: ^json.Request({.Path}), record: []byte, last: bool) -> (answers: []json.Path_Answer, ok: bool) {
 	if record[0] == UTF8_BOM[0] || last && is_literal_byte(record[len(record) - 1]) {
 		return
 	}
 	if trial != nil && trial_answered(trial, record) {
-		return trial.req.answers[:], true
+		return trial.answers[:], true
 	}
-	if #force_inline json.scan(record, p) != nil {
+	if json.scan(record, req) != nil {
 		return
 	}
-	answers = jq_outputs(p.req.answers[:])
+	answers = jq_outputs(req.answers[:])
 	for a in answers {
 		if a.outcome != .Found && a.outcome != .Missing {
 			return
@@ -120,8 +114,8 @@ answers_settled :: proc(p, trial: ^json.Prepared({.Path}), record: []byte, last:
 }
 
 // Whether `trial`'s scan of `record`, the path without `per_element`, answers each entry of its root array, as
-// `scan_outputs` tries a text. Out of line, so `answers_settled` inlines only its own scan.
+// `scan_outputs` tries a text.
 @(private = "file")
-trial_answered :: #force_no_inline proc(trial: ^json.Prepared({.Path}), record: []byte) -> bool {
-	return json.scan(record, trial) == nil && array_entries_answered(trial.req.answers[:], record)
+trial_answered :: proc(trial: ^json.Request({.Path}), record: []byte) -> bool {
+	return json.scan(record, trial) == nil && array_entries_answered(trial.answers[:], record)
 }

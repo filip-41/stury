@@ -22,7 +22,7 @@ Comment_Layout :: struct {
 
 // The comments before an entry, `.Lead` (and, at the `root` of an output, which has no key, `.Inline`),
 // each on its own line `depth` levels in.
-put_leads :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int, root := false) -> Encode_Error {
+put_leads :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int, root := false) -> Marshal_Error {
 	for f in own {
 		if f.place == .Lead || root && f.place == .Inline {
 			put_comment(buf, cl, f) or_return
@@ -34,7 +34,7 @@ put_leads :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, dept
 
 // The comments between a member's key (and its colon) and its value: a line comment ends its line, a block
 // comment is followed by a space when pretty.
-put_inlines :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int) -> Encode_Error {
+put_inlines :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int) -> Marshal_Error {
 	for f in own {
 		if f.place != .Inline {
 			continue
@@ -52,7 +52,7 @@ put_inlines :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, de
 // The comments after an entry and its comma, on its line. A line comment runs to the end of its line, so a
 // trailing comment after one starts the next. At the `root` of an output, a line comment last ends the
 // output's line itself, pretty or compact, so whatever follows the output is not read into it.
-put_trails :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int, root := false) -> Encode_Error {
+put_trails :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int, root := false) -> Marshal_Error {
 	after_line := false
 	for f in own {
 		if f.place != .Trail {
@@ -73,7 +73,7 @@ put_trails :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, dep
 }
 
 // The comments of a container `depth` levels in after its last entry, each on its own line one level in, and whether there were any. The caller breaks the line before the close.
-put_feet :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int) -> (wrote: bool, err: Encode_Error) {
+put_feet :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int) -> (wrote: bool, err: Marshal_Error) {
 	for f in own {
 		if f.place == .Foot {
 			put_line_break(buf, cl, depth + 1) or_return
@@ -85,7 +85,7 @@ put_feet :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth
 }
 
 // A line break indented to `depth` when pretty, nothing when compact.
-put_line_break :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, depth: int) -> Encode_Error {
+put_line_break :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, depth: int) -> Marshal_Error {
 	if !cl.pretty {
 		return .None
 	}
@@ -94,7 +94,7 @@ put_line_break :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, depth: int) -> En
 
 // A comment's text, markers and all. Compact output ends a line comment with the newline it needs.
 @(private = "file")
-put_comment :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, f: walk.Fact) -> Encode_Error {
+put_comment :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, f: walk.Fact) -> Marshal_Error {
 	mark := len(buf)
 	put_bytes(buf, string(cl.src[f.lo:f.hi])) or_return
 	if cl.ascii {
@@ -119,11 +119,11 @@ encode_rows_jsonc :: proc(
 	src: []byte,
 	nodes: []walk.Row,
 	comments: []walk.Fact,
-	opts: Encode_Opts,
+	opts: Marshal_Opts,
 	allocator := context.allocator,
 ) -> (
 	out: []byte,
-	err: Encode_Error,
+	err: Marshal_Error,
 ) {
 	if len(nodes) == 0 || nodes[0].subtree_size != u32(len(nodes)) {
 		return nil, .Bad_State
@@ -156,7 +156,7 @@ Jsonc_Writer :: struct {
 // Row `i` and its subtree at `depth`, with its comma when it is not the `last` of its container. Returns the row
 // after its subtree.
 @(private = "file")
-jsonc_entry :: proc(w: ^Jsonc_Writer, i, depth: int, last: bool) -> (next: int, err: Encode_Error) {
+jsonc_entry :: proc(w: ^Jsonc_Writer, i, depth: int, last: bool) -> (next: int, err: Marshal_Error) {
 	nd := w.nodes[i]
 	lo := w.next
 	for w.next < len(w.comments) && int(w.comments[w.next].node) == i {

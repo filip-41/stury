@@ -71,7 +71,7 @@ document_and_edits :: proc(src: []byte) {
 	if derr != nil {
 		os.exit(1)
 	}
-	defer csv.document_destroy(&doc)
+	defer csv.destroy(&doc)
 	col, _ := csv.column(&doc, "lat")
 	lat, _ := csv.get_float(&doc, 0, col)
 	fmt.println(csv.row_count(&doc), lat) // 2 59.91
@@ -114,7 +114,7 @@ streaming :: proc(src: []byte) {
 	r: strings.Reader
 	strings.reader_init(&r, string(src))
 	rr := csv.records_from(io.to_reader(strings.reader_to_stream(&r)))
-	defer csv.records_destroy(&rr)
+	defer csv.destroy(&rr)
 	for rec in csv.next_record(&rr) {
 		text, _, _ := csv.field_text(rec.src, rec.fields[0])
 		fmt.println(rec.at, len(rec.fields), string(text)) // 0 4 City, then 24 4 Oslo, then 48 4 Ho, Chi Minh
@@ -133,7 +133,7 @@ streaming :: proc(src: []byte) {
 		}
 		return true
 	}
-	if _, bad := csv.each_record(src, {}, count, &rows, &pool.runner).?; bad {
+	if _, bad := csv.each_record(src, count, &rows, runner = &pool.runner).?; bad {
 		os.exit(1)
 	}
 	fmt.println(rows) // 3: the header and two rows

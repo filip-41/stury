@@ -31,23 +31,19 @@ Duplicates :: core_pkg.Duplicates
 //	- `request_init` sets the inputs and parses text paths. A caller that prebuilds its `Path`s may set the
 //	  fields and assign `paths` directly, and allocates nothing for them. `destroy` frees what the request
 //	  holds.
-//	- A field filled for a kind outside `$KINDS` is refused (`.Query_Not_In_Set`), and so is a `.Path` in `$KINDS`
+//	- `paths` filled without `.Path` in `$KINDS` is refused (`.Bad_Option`), and so is a `.Path` in `$KINDS`
 //	  with no `paths`.
 //	- A request is limited to `MAX_PATH_QUERIES` (16) paths, `MAX_PATH_STEPS` (32) steps in a path, and 16
 //	  identical key names among its paths. Past a limit it may be refused as `.Over_Capacity` before any
-//	  byte is read, and `Request_Error.capacity` says which. Some simple paths are answered another way and
-//	  are not counted.
+//	  byte is read. Some simple paths are answered another way and are not counted.
 //	- `dialect == .Jsonc` reads comments and trailing commas, checked as `.Strict` whatever `strictness`
 //	  says, and with `.Nodes` each comment is attached to its value. A JSON request never pays for this.
 //	- `allocator` must not change once the request has been scanned.
 //
-// `strictness` is documented at `Strictness`. `.Lazy` here needs `duplicates` `.First` or `.Refuse`
-// (`.Lazy_Needs_First`), and `.Structural` is refused beside `.Nodes` or `.Dom` (`.Nodes_Need_Strict`).
+// `strictness` is documented at `Strictness`. `.Lazy` here needs `duplicates` `.First` or `.Refuse`, and
+// `.Structural` is refused beside `.Nodes` or `.Dom`, both as `.Bad_Option`.
 Request :: struct($KINDS: bit_set[Query]) {
-	strictness: Strictness,
-	dialect:    Dialect,
-	duplicates: Duplicates,
-	limits:     Limits,
+	using read: Read_Opts,
 	allocator:  runtime.Allocator,
 	// The paths `.Path` answers. An answer's `query` is its path's index here.
 	paths:      []Path,
@@ -66,22 +62,25 @@ Request :: struct($KINDS: bit_set[Query]) {
 	coverage:   Validity,
 	stop:       Maybe(u64),
 
-	// The request's own: the last scan's source and result (for `validate_remaining`), the router's plan
-	// (route.odin, kept so routing allocates nothing in steady state), the paths `request_init` parsed,
-	// and `answers`' grouping.
-	src:        []byte,
-	verdict:    Maybe(Error),
-	route:      Route,
-	parsed:     Parsed_Paths,
-	groups:     Answer_Groups,
+	// The request's own, which the scans keep between calls.
+	state:      Request_State,
 }
 
-// A scan's result: `nil` means valid over what the scan visited (`Request.coverage`). An `Error` is the
-// document's fault, or `.Out_Of_Memory` when the scan ran but an output could not grow (a document fault
-// comes first). A `Request_Error` is a refusal, and nothing was scanned.
-Scan_Error :: union {
-	Error,
-	Request_Error,
+// The last scan's source and result (for `validate_remaining`), the router's plan (route.odin, kept so routing
+// allocates nothing in steady state), the paths `request_init` parsed, `answers`' grouping, and what `prepare`
+// planned.
+@(private)
+Request_State :: struct {
+	src:     []byte,
+	verdict: Maybe(Error),
+	route:   Route,
+	parsed:  Parsed_Paths,
+	groups:  Answer_Groups,
+	// Whether the plan on `route` is `prepare`'s, for every source whose root is an object. Cleared by a
+	// request `prepare` refuses, or one it cannot plan for every source: those scan unplanned every time.
+	planned: bool,
+	// The walk's resolution of the plan's queries, kept by the first planned scan for the rest.
+	kept:    walk.Resolved_Queries,
 }
 
 // The storage of the paths `request_init` parsed: each text copied, with room for its escaped names, and
@@ -105,28 +104,23 @@ Answer_Groups :: struct {
 // Set `req`'s inputs, and parse each text path into storage the request owns (a `Path` is kept as it is, its
 // steps the caller's).
 //
-//	- A text that does not parse is `.Bad_Path`, naming it and the byte it stopped on, and leaves
+//	- A text that does not parse is `.Bad_Path` at the byte of that text the parser stopped on, and leaves
 //	  `req.paths` empty. A refused allocation is `.Out_Of_Memory`.
 //	- Calling it again replaces the paths, drops the last scan's answers, and the request may be rescanned.
 @(require_results)
 request_init :: proc(
 	req: ^Request($KINDS),
 	paths: ..Path_Spec,
-	strictness := Strictness.Strict,
-	dialect := Dialect.Json,
-	duplicates := Duplicates.Last,
-	limits := Limits{},
+	opts := Read_Opts{},
 	allocator := context.allocator,
-) -> Maybe(Request_Error) {
-	req.strictness = strictness
-	req.dialect = dialect
-	req.duplicates = duplicates
-	req.limits = limits
+) -> Maybe(Error) {
+	req.read = opts
 	req.allocator = allocator
 	req.paths = nil
-	parsed_destroy(&req.parsed)
+	parsed_destroy(&req.state.parsed)
 	clear(&req.answers)
-	req.groups.grouped = false
+	req.state.groups.grouped = false
+	req.state.planned = false
 
 	n_text := 0
 	for spec in paths {
@@ -134,8 +128,8 @@ request_init :: proc(
 			n_text += len(text)
 		}
 	}
-	oom := Request_Error{kind = .Out_Of_Memory, query_kind = .Path}
-	p := &req.parsed
+	oom := Error{kind = .Out_Of_Memory}
+	p := &req.state.parsed
 	if make_into(&p.paths, len(paths), allocator) != nil {
 		return oom
 	}
@@ -156,7 +150,7 @@ request_init :: proc(
 			text_used += 2 * len(s)
 			path, fault := parse_path(string(text), p.steps[steps_used:], names)
 			if f, bad := fault.?; bad {
-				return Request_Error{kind = .Bad_Path, query_kind = .Path, path = i, offset = f.offset}
+				return Error{kind = .Bad_Path, offset = f.offset}
 			}
 			steps_used += len(path.steps)
 			p.paths[i] = path
@@ -189,10 +183,10 @@ answers :: proc(req: ^Request($KINDS), path: int) -> (out: []Path_Answer, err: M
 	if len(req.paths) <= 1 {
 		return req.answers[:], nil
 	}
-	if !req.groups.grouped && !answers_group(&req.answers, &req.groups, len(req.paths), request_allocator(req)) {
+	if !req.state.groups.grouped && !answers_group(&req.answers, &req.state.groups, len(req.paths), request_allocator(req)) {
 		return nil, Error{kind = .Out_Of_Memory}
 	}
-	return req.answers[req.groups.at[path]:req.groups.at[path + 1]], nil
+	return req.answers[req.state.groups.at[path]:req.state.groups.at[path + 1]], nil
 }
 
 @(private = "file")
@@ -238,8 +232,8 @@ answers_group :: proc(answers: ^[dynamic]Path_Answer, g: ^Answer_Groups, n_paths
 //
 //	- `path` is text in the jq subset or a built `Path`. Its `limit` becomes 1, so `.logs[].id` answers the
 //	  first id. `per_element` is kept, so the first element decides, as jq's `first(.[].x)` may be null.
-//	- The result is `scan`'s: nil, the text's fault, or a refusal. On a non-nil result the answer is
-//	  `.Missing` and bounds nothing.
+//	- The result is `request_init`'s or `scan`'s: nil, the text's fault, or a refusal. On a non-nil result the
+//	  answer is `.Missing` and bounds nothing.
 //	- The request's storage comes from `allocator` and is freed before return. For several paths, every
 //	  answer, or many sources, keep a `Request` (`request_init`, `scan`, `answers`, `prepare`).
 //	- `strictness = .Lazy` with `duplicates = .First` lets the walk stop once the answer is final.
@@ -247,16 +241,13 @@ answers_group :: proc(answers: ^[dynamic]Path_Answer, g: ^Answer_Groups, n_paths
 find :: proc(
 	src: []byte,
 	path: Path_Spec,
-	strictness := Strictness.Strict,
-	dialect := Dialect.Json,
-	duplicates := Duplicates.Last,
-	limits := Limits{},
+	opts := Read_Opts{},
 	allocator := context.allocator,
-) -> (a: Path_Answer, err: Scan_Error) {
+) -> (a: Path_Answer, err: Maybe(Error)) {
 	a = Path_Answer{outcome = .Missing, owner = walk.NO_OWNER, node = NO_NODE}
 	req: Request({.Path})
 	defer destroy(&req)
-	if refused, bad := request_init(&req, path, strictness = strictness, dialect = dialect, duplicates = duplicates, limits = limits, allocator = allocator).?; bad {
+	if refused, bad := request_init(&req, path, opts = opts, allocator = allocator).?; bad {
 		return a, refused
 	}
 	req.paths[0].limit = 1
@@ -271,23 +262,22 @@ find :: proc(
 	return a, nil
 }
 
-// Free everything the request holds, the document and the parsed paths included, and empty it. The inputs
-// stay set, and `paths` too when the caller assigned them.
+// Free everything the request holds (the document, the parsed paths and what `prepare` planned) and empty
+// it. The inputs stay set, and `paths` too when the caller assigned them.
 @(private)
 request_destroy :: proc(req: ^Request($KINDS)) {
-	if raw_data(req.paths) == raw_data(req.parsed.paths) {
+	if raw_data(req.paths) == raw_data(req.state.parsed.paths) {
 		req.paths = nil
 	}
-	parsed_destroy(&req.parsed)
+	parsed_destroy(&req.state.parsed)
 	delete(req.answers)
 	destroy(&req.doc)
-	route_destroy(&req.route)
-	delete(req.groups.at)
-	delete(req.groups.spare)
+	route_destroy(&req.state.route)
+	delete(req.state.groups.at)
+	delete(req.state.groups.spare)
 	req.answers = {}
-	req.route = {}
-	req.groups = {}
-	req.src, req.verdict, req.coverage, req.stop = nil, nil, .Partial, nil
+	req.state = {}
+	req.coverage, req.stop = .Partial, nil
 }
 
 @(private = "file")

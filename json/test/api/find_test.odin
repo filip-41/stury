@@ -46,14 +46,15 @@ test_find_takes_the_first_answer_of_an_any_path :: proc(t: ^testing.T) {
 @(test)
 test_find_returns_the_scan_result_and_an_empty_answer :: proc(t: ^testing.T) {
 	bad, err := json.find(raw(`{"a": 01}`), ".a")
-	_, is_fault := err.(json.Error)
+	e, is_fault := err.?
+	is_fault = is_fault && e.kind == .Bad_Number
 	testing.expectf(t, is_fault && bad.outcome == .Missing, "%v %v", err, bad)
 	testing.expect_value(t, bad.owner, json.NO_OWNER)
 	_, perr := json.find(raw(`{}`), ".a-b")
-	r, refused := perr.(json.Request_Error)
+	r, refused := perr.?
 	testing.expectf(t, refused && r.kind == .Bad_Path, "%v", perr)
 	src := raw(`{"a":1,"b":[1,2,3]}`)
-	a, lerr := json.find(src, ".a", strictness = .Lazy, duplicates = .First)
+	a, lerr := json.find(src, ".a", {strictness = .Lazy, duplicates = .First})
 	testing.expect_value(t, lerr, nil)
 	testing.expectf(t, a.outcome == .Found && string(src[a.lo:a.hi]) == "1", "%v", a)
 }

@@ -7,7 +7,6 @@ import "core:simd"
 import "core:strings"
 import "core:unicode/utf8"
 import core_pkg "../core"
-import "../core/bits"
 import "../core/spell"
 
 // Why `marshal` refused: core's `Marshal_Error`. CSV reports `Bad_Utf8` (a string or field name), `Non_Finite`,
@@ -445,9 +444,9 @@ put_text :: proc(w: ^Writer, s: string, $Q: bool) -> Marshal_Error {
 	src := raw_data(s)
 	i, n := 0, 1
 	for i + 16 <= len(s) {
-		v := bits.load(src[i:])
-		intrinsics.unaligned_store((^bits.V)(p[n:]), v)
-		if !bits.any_eq(v, '"') {
+		v := core_pkg.load(src[i:])
+		intrinsics.unaligned_store((^core_pkg.V)(p[n:]), v)
+		if !core_pkg.any_eq(v, '"') {
 			i += 16
 			n += 16
 			continue
@@ -488,9 +487,9 @@ copy_text :: #force_inline proc(p: [^]u8, s: string) {
 		intrinsics.mem_copy_non_overlapping(p, src, n)
 	case n >= 16:
 		for i := 0; i < n - 16; i += 16 {
-			intrinsics.unaligned_store((^bits.V)(p[i:]), bits.load(src[i:]))
+			intrinsics.unaligned_store((^core_pkg.V)(p[i:]), core_pkg.load(src[i:]))
 		}
-		intrinsics.unaligned_store((^bits.V)(p[n - 16:]), bits.load(src[n - 16:]))
+		intrinsics.unaligned_store((^core_pkg.V)(p[n - 16:]), core_pkg.load(src[n - 16:]))
 	case n >= 8:
 		a, b := intrinsics.unaligned_load((^u64)(src)), intrinsics.unaligned_load((^u64)(src[n - 8:]))
 		intrinsics.unaligned_store((^u64)(p), a)
@@ -599,17 +598,17 @@ scan_text :: #force_inline proc(w: ^Writer, s: string, $Q: bool) -> (special, hi
 		}
 		return class & SPECIAL != 0, class & HIGH != 0
 	}
-	dv, qv, cv, lv := bits.V(delim), bits.V('"' when Q else '\\'), bits.V('\r'), bits.V('\n')
+	dv, qv, cv, lv := core_pkg.V(delim), core_pkg.V('"' when Q else '\\'), core_pkg.V('\r'), core_pkg.V('\n')
 	// 16-byte windows, the last one overlapping the one before.
 	for k := 0; ; k += 16 {
 		i := min(k, n - 16)
-		v := bits.load(p[i:])
+		v := core_pkg.load(p[i:])
 		m := simd.lanes_eq(v, dv) | simd.lanes_eq(v, qv) | simd.lanes_eq(v, cv) | simd.lanes_eq(v, lv)
 		when !Q {
-			m |= simd.lanes_eq(v, bits.V(0))
+			m |= simd.lanes_eq(v, core_pkg.V(0))
 		}
-		special |= bits.any_lane(m)
-		high |= bits.any_high(v)
+		special |= core_pkg.any_lane(m)
+		high |= core_pkg.any_high(v)
 		if i == n - 16 {
 			return
 		}

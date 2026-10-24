@@ -5,17 +5,17 @@ package csv
 //
 //	csv.odin            `Error`, `Error_Kind`, the path `Step`s (`Name`, `Index`, `Any`), `Dialect`, `Quoting`,
 //	                    `Escapes`, `TSV`, `Strictness`, `Limits`,
-//	                    `validate`, `error_position`, `render_error` and `render_error_to_writer`
-//	records.odin        `records`, `next_record`, `records_destroy`, `Records`, `Record`, `Field` and `field_text`
+//	                    `Read_Opts`, `validate`, `error_position` and `render_error`
+//	records.odin        `records`, `next_record`, `Records`, `Record`, `Field` and `field_text`
 //	record_reader.odin  `records_from` and `Record_Reader`
 //	each_record.odin    `each_record` and `Batch_Runner`
 //	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Duplicates`,
 //	                    `Unknown_Fields`, `Unmarshal_Error`, `Unmarshal_Error_Kind`
 //	marshal.odin        `marshal`, `marshal_append`, `marshal_to_writer`, `Marshal_Opts`, `Marshal_Error`
 //	record_writer.odin  `write_record`
-//	type_plan.odin      `Type_Plan`, `type_plan_init`, `type_plan_destroy`, `Plan_Opts`, `Enum_Spelling`,
+//	type_plan.odin      `Type_Plan`, `type_plan_init`, `Plan_Opts`, `Enum_Spelling`,
 //	                    `Type_Hook`, `Marshal_Hook`, `Unmarshal_Hook`, `plan_cache_clear`
-//	document.odin       `Document`, `build`, `document_destroy`, `row_count`, `column_count`, `column`,
+//	document.odin       `Document`, `build`, `destroy`, `row_count`, `column_count`, `column`,
 //	                    `row_fields`, `get_field`, `get_name`, `get_string`, `get_int`, `get_float`, `get_bool`
 //	find.odin           `Path`, `Path_Spec`, `Path_Error`, `Path_Error_Kind`, `find`,
 //	                    `find_column`
@@ -77,14 +77,6 @@ render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> st
 	return core_pkg.render_error(src, err, allocator)
 }
 
-// `render_error`'s text written to `w`. Allocates nothing. A failure of `w` is returned as the `io.Error`;
-// part of the text may have been written.
-render_error_to_writer :: proc {
-	core_pkg.render_syntax_error_to_writer,
-	core_pkg.render_unmarshal_error_to_writer,
-	core_pkg.render_path_error_to_writer,
-}
-
 // A step of an `Unmarshal_Error`'s path.
 Step :: core_pkg.Step
 Name :: core_pkg.Name
@@ -134,17 +126,25 @@ Limits :: struct {
 	max_record_bytes: int,
 }
 
-// Whether `src` is CSV in `dialect`. Allocates nothing without `runner`. With a runner, the text is split into
-// pieces that its threads and the caller validate in parallel (`each_record`), with the same result.
+// How a read takes its text: one struct for `validate`, `records`, `records_from`, `each_record`, `build`, `find`,
+// `find_column` and the path edits, embedded in `Unmarshal_Opts`. The zero value is RFC 4180 with a header,
+// every byte judged, no caps. A procedure that does not read a field says so.
+Read_Opts :: struct {
+	dialect:    Dialect,
+	strictness: Strictness,
+	// `unmarshal`'s reading of a header name two columns share (`Duplicates`). Only `unmarshal` reads it.
+	duplicates: Duplicates,
+	limits:     Limits,
+	// The first record is data, not column names.
+	no_header:  bool,
+}
+
+// Whether `src` is CSV in `opts.dialect`. `opts.duplicates` and `opts.no_header` are not read: the header is a
+// record like the others. Allocates nothing without `runner`. With a runner, the text is split into pieces that
+// its threads and the caller validate in parallel (`each_record`), with the same result.
 @(require_results)
-validate :: proc(
-	src: []byte,
-	dialect := Dialect{},
-	strictness := Strictness.Strict,
-	limits := Limits{},
-	runner: ^Batch_Runner = nil,
-) -> Maybe(Error) {
-	s, ok := scan_setup(dialect, limits, strictness)
+validate :: proc(src: []byte, opts := Read_Opts{}, runner: ^Batch_Runner = nil) -> Maybe(Error) {
+	s, ok := scan_setup(opts.dialect, opts.limits, opts.strictness)
 	if !ok {
 		return Error{kind = .Bad_Option}
 	}

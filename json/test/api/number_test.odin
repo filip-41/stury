@@ -238,7 +238,7 @@ test_a_300_digit_token_reads_under_a_raised_cap :: proc(t: ^testing.T) {
 	limits := json.Limits{max_scalar_digits = 1000}
 	tok := strings.repeat("7", 300, context.temp_allocator)
 	for src in ([]string{tok, strings.concatenate({tok, ".25e-4"}, context.temp_allocator)}) {
-		doc, err := json.build(raw(src), limits = limits)
+		doc, err := json.build(raw(src), {limits = limits})
 		_, has_err := err.?
 		if !testing.expectf(t, !has_err, "a 300-digit token under max_scalar_digits=1000 must build, got %v", err) {
 			continue

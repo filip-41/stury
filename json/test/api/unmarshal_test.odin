@@ -127,7 +127,7 @@ um_refused :: proc(
 um_round_trip :: proc(t: ^testing.T, v: $T, opts := json.Unmarshal_Opts{}, mapping := json.Plan_Opts{}, loc := #caller_location) {
 	plan := um_plan(T, mapping)
 	text, merr := json.marshal(v, {}, plan, context.temp_allocator)
-	testing.expect_value(t, merr, json.Encode_Error.None, loc = loc)
+	testing.expect_value(t, merr, json.Marshal_Error.None, loc = loc)
 	back: T
 	err, refused := json.unmarshal(text, &back, opts, plan, context.temp_allocator).?
 	testing.expectf(t, !refused, "%s: %v at %d", string(text), err.kind, err.offset, loc = loc)
@@ -422,7 +422,7 @@ test_unmarshal_holds_max_depth_to_max_depth :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	limits := json.Limits{max_depth = 5000}
 	past := strings.concatenate({strings.repeat("[", json.MAX_DEPTH + 1, context.temp_allocator), strings.repeat("]", json.MAX_DEPTH + 1, context.temp_allocator)}, context.temp_allocator)
-	testing.expect(t, json.validate(transmute([]byte)past, limits = limits) == nil)
+	testing.expect(t, json.validate(transmute([]byte)past, {limits = limits}) == nil)
 	v: any
 	e, bad := json.unmarshal(transmute([]byte)past, &v, {limits = limits}, allocator = context.temp_allocator).?
 	testing.expectf(t, bad && e.kind == .Syntax && e.syntax == .Too_Deep && e.offset == json.MAX_DEPTH, "%v", e)

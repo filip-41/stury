@@ -36,7 +36,7 @@ Marshal_Hook :: #type proc(out: ^[dynamic]u8, v: rawptr) -> Marshal_Error
 Unmarshal_Hook :: core_pkg.Unmarshal_Hook
 
 // A type's columns, compiled once per `typeid` for `unmarshal` and `marshal` (`type_plan_init`). A column is
-// a struct field, named by its `csv:"name"` tag or its own name. `type_plan_destroy` frees it. Its fields are
+// a struct field, named by its `csv:"name"` tag or its own name. `destroy` frees it. Its fields are
 // internal.
 Type_Plan :: core_pkg.Hooked_Plan(Marshal_Hook)
 
@@ -46,6 +46,7 @@ type_plan_init :: proc(T: typeid, opts := Plan_Opts{}, allocator := context.allo
 	return core_pkg.hooked_plan_init(T, {enums = opts.enums}, opts.hooks, csv_plan_format(), allocator)
 }
 
+@(private)
 type_plan_destroy :: proc(p: ^Type_Plan) {
 	core_pkg.hooked_plan_destroy(p)
 }

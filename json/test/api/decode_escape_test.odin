@@ -8,7 +8,7 @@ import "core:testing"
 @(test)
 test_decode_span_refuses_malformed_escapes :: proc(t: ^testing.T) {
 	zz := transmute([]byte)string(`["\uZZZZ"]`)
-	testing.expect(t, json.validate(zz, .Json, .Structural) == nil, `structural accepts ["\uZZZZ"]`)
+	testing.expect(t, json.validate(zz, {strictness = .Structural}) == nil, `structural accepts ["\uZZZZ"]`)
 	_, _, ok := json.decode_span(zz, 1, u64(len(zz) - 1), .String, context.temp_allocator)
 	testing.expect(t, !ok, `decode_span refuses ["\uZZZZ"]`)
 
@@ -23,7 +23,7 @@ test_decode_span_refuses_malformed_escapes :: proc(t: ^testing.T) {
 	testing.expect(t, !ok, `decode_span refuses "\u12"`)
 
 	bad := transmute([]byte)string(`["\x"]`)
-	testing.expect(t, json.validate(bad, .Json, .Structural) == nil, `structural accepts ["\x"]`)
+	testing.expect(t, json.validate(bad, {strictness = .Structural}) == nil, `structural accepts ["\x"]`)
 	_, _, ok = json.decode_span(bad, 1, u64(len(bad) - 1), .String, context.temp_allocator)
 	testing.expect(t, !ok, `decode_span refuses ["\x"]`)
 
@@ -127,7 +127,7 @@ test_lone_surrogates_are_refused :: proc(t: ^testing.T) {
 			want = json.Error{kind = .Bad_Escape, offset = u64(c.at)}
 		}
 		testing.expectf(t, json.validate(src) == want, "%s: validate %v, want %v", c.src, json.validate(src), want)
-		doc, berr := json.build(src, context.temp_allocator)
+		doc, berr := json.build(src, allocator = context.temp_allocator)
 		testing.expectf(t, berr == want, "%s: build %v, want %v", c.src, berr, want)
 		v: any
 		uerr, refused := json.unmarshal(src, &v, {}, nil, context.temp_allocator).?
@@ -144,7 +144,7 @@ test_lone_surrogates_are_refused :: proc(t: ^testing.T) {
 	}
 	// `.Structural` checks no escape, and the decode is what refuses there.
 	lone := raw(`["\uDC00"]`)
-	testing.expect_value(t, json.validate(lone, strictness = .Structural), nil)
+	testing.expect_value(t, json.validate(lone, {strictness = .Structural}), nil)
 	_, _, ok := json.decode_span(lone, 1, u64(len(lone) - 1), .String, context.temp_allocator)
 	testing.expect(t, !ok, `decode_span refuses ["\uDC00"]`)
 	// A path scan checks the values it passes over, so a lone half outside every answer is refused too.
@@ -152,7 +152,7 @@ test_lone_surrogates_are_refused :: proc(t: ^testing.T) {
 	req: json.Request({.Path})
 	defer json.destroy(&req)
 	testing.expect_value(t, json.request_init(&req, ".v"), nil)
-	lone_at: json.Scan_Error = json.Error{kind = .Bad_Escape, offset = 6}
+	lone_at: Maybe(json.Error) = json.Error{kind = .Bad_Escape, offset = 6}
 	testing.expect_value(t, json.scan(unread, &req), lone_at)
 	// An input cut inside the low half is truncated, not refused.
 	testing.expect_value(t, json.validate(raw(`"\uD800\uDC`)), json.Error{kind = .Truncated, offset = 11})

@@ -80,7 +80,7 @@ test_a_deep_walk_frees_its_spill_with_the_scanner_allocator :: proc(t: ^testing.
 
 	saved := context.allocator
 	defer context.allocator = saved
-	testing.expect_value(t, json.validate(src, limits = {max_depth = u64(depth)}), nil)
+	testing.expect_value(t, json.validate(src, {limits = {max_depth = u64(depth)}}), nil)
 	testing.expect(
 		t,
 		same_allocator(context.allocator, saved),

@@ -19,7 +19,7 @@ test_limits_dial :: proc(t: ^testing.T) {
 	src := transmute([]byte)token
 
 	// Default: 300 mantissa digits is past MAX_SCALAR_DIGITS (256).
-	err, has_err := json.validate(src, .Json, .Strict).?
+	err, has_err := json.validate(src).?
 	testing.expect(t, has_err, "300 digits refuses at the default cap")
 	if has_err {
 		testing.expect_value(t, err.kind, json.Error_Kind.Limit_Digits)
@@ -41,7 +41,7 @@ test_limits_dial :: proc(t: ^testing.T) {
 
 	// Depth cap, both directions.
 	deep_ok := transmute([]byte)nested_arrays(40)
-	_, d_ok := json.validate(deep_ok, .Json, .Strict).?
+	_, d_ok := json.validate(deep_ok).?
 	testing.expect(t, !d_ok, "40 levels is within the default depth cap")
 	derr, d_low := verdict_under(deep_ok, .Strict, json.Limits{max_depth = 8}).?
 	testing.expect(t, d_low, "40 levels refuses at a depth cap of 8")
@@ -92,12 +92,12 @@ test_structural_judges_framing_not_scalars :: proc(t: ^testing.T) {
 		{deep, .Too_Deep},
 	}
 	for c in refused {
-		e, bad := json.validate(transmute([]byte)c.src, strictness = .Structural).?
+		e, bad := json.validate(transmute([]byte)c.src, {strictness = .Structural}).?
 		testing.expectf(t, bad && e.kind == c.kind, "%.20q: %v, want %v", c.src, e, c.kind)
 		testing.expectf(t, json.validate(transmute([]byte)c.src) != nil, "%.20q: .Strict accepted", c.src)
 	}
 	for src in ([]string{`[tru]`, `[truefalse]`, `[01]`, `[1.]`, `[-]`, `[1e5000]`, `["a\qb"]`, "[\"a\x01b\"]"}) {
-		testing.expectf(t, json.validate(transmute([]byte)src, strictness = .Structural) == nil, "%q: .Structural refused", src)
+		testing.expectf(t, json.validate(transmute([]byte)src, {strictness = .Structural}) == nil, "%q: .Structural refused", src)
 		testing.expectf(t, json.validate(transmute([]byte)src) != nil, "%q: .Strict accepted", src)
 	}
 }
@@ -141,9 +141,9 @@ test_structural_path_scan_checks_skipped_utf8 :: proc(t: ^testing.T) {
 			req.strictness = .Structural
 			req.dialect = dialect
 			got := json.scan(transmute([]byte)src, &req)
-			want := json.validate(transmute([]byte)src, .Json, .Structural)
+			want := json.validate(transmute([]byte)src, {strictness = .Structural})
 			testing.expectf(t, want != nil, "%.30q: validate accepted", src)
-			testing.expectf(t, got == json.Scan_Error(want.?), "%.30q (%v): scan %v, validate %v", src, dialect, got, want)
+			testing.expectf(t, got == Maybe(json.Error)(want.?), "%.30q (%v): scan %v, validate %v", src, dialect, got, want)
 		}
 		for src in accepted {
 			req: json.Request({.Path})
@@ -229,17 +229,17 @@ test_raised_depth_cap :: proc(t: ^testing.T) {
 		at := nested_open(CAP, objects)
 		for dialect in ([]json.Dialect{.Json, .Jsonc}) {
 			for strictness in json.Strictness {
-				testing.expectf(t, json.validate(fits, dialect, strictness, limits) == nil, "%v %v: %d levels fit", dialect, strictness, CAP)
-				e, bad := json.validate(past, dialect, strictness, limits).?
+				testing.expectf(t, json.validate(fits, {dialect = dialect, strictness = strictness, limits = limits}) == nil, "%v %v: %d levels fit", dialect, strictness, CAP)
+				e, bad := json.validate(past, {dialect = dialect, strictness = strictness, limits = limits}).?
 				testing.expectf(t, bad && e.kind == .Too_Deep && e.offset == at, "%v %v: one past is Too_Deep at %d, got %v", dialect, strictness, at, e)
 			}
-			doc, err := json.build(fits, context.temp_allocator, limits, dialect)
+			doc, err := json.build(fits, {dialect = dialect, limits = limits}, context.temp_allocator)
 			testing.expectf(t, err == nil, "%v: build at the cap, got %v", dialect, err)
 			testing.expect_value(t, len(doc.rows), CAP + 1 if objects else CAP)
 			// marshal holds MAX_DEPTH.
 			_, merr := json.marshal(&doc, {}, context.temp_allocator)
-			testing.expect_value(t, merr, json.Encode_Error.Too_Deep)
-			_, berr := json.build(past, context.temp_allocator, limits, dialect)
+			testing.expect_value(t, merr, json.Marshal_Error.Too_Deep)
+			_, berr := json.build(past, {dialect = dialect, limits = limits}, context.temp_allocator)
 			e, bad := berr.?
 			testing.expectf(t, bad && e.kind == .Too_Deep && e.offset == at, "%v: build one past, got %v", dialect, berr)
 		}
@@ -263,7 +263,7 @@ test_raised_depth_cap :: proc(t: ^testing.T) {
 	}
 	// A JSONC comment past MAX_DEPTH is attached to the container it is in.
 	commented := strings.concatenate({string(nested(2000, false)[:2000]), "/*c*/", string(nested(2000, false)[2000:])}, context.temp_allocator)
-	doc, err := json.build(transmute([]byte)commented, context.temp_allocator, limits, .Jsonc)
+	doc, err := json.build(transmute([]byte)commented, {dialect = .Jsonc, limits = limits}, context.temp_allocator)
 	testing.expect(t, err == nil && len(doc.facts) == 1)
 	if len(doc.facts) == 1 {
 		testing.expect_value(t, doc.facts[0].node, json.Node(1999))
@@ -278,8 +278,8 @@ test_raised_depth_cap :: proc(t: ^testing.T) {
 test_raised_depth_ceiling_clamps :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	limits := json.Limits{max_depth = 2 * json.DEPTH_CEILING}
-	testing.expect(t, json.validate(nested(json.DEPTH_CEILING, false), limits = limits) == nil)
-	e, bad := json.validate(nested(json.DEPTH_CEILING + 1, false), limits = limits).?
+	testing.expect(t, json.validate(nested(json.DEPTH_CEILING, false), {limits = limits}) == nil)
+	e, bad := json.validate(nested(json.DEPTH_CEILING + 1, false), {limits = limits}).?
 	testing.expect(t, bad && e.kind == .Too_Deep && e.offset == json.DEPTH_CEILING)
 }
 
@@ -295,16 +295,16 @@ test_raised_depth_allocates_only_past_max_depth :: proc(t: ^testing.T) {
 		context.allocator = runtime.panic_allocator()
 		for dialect in ([]json.Dialect{.Json, .Jsonc}) {
 			for strictness in json.Strictness {
-				testing.expect(t, json.validate(shallow, dialect, strictness, limits) == nil)
-				testing.expect(t, json.validate(at_max, dialect, strictness, limits) == nil)
+				testing.expect(t, json.validate(shallow, {dialect = dialect, strictness = strictness, limits = limits}) == nil)
+				testing.expect(t, json.validate(at_max, {dialect = dialect, strictness = strictness, limits = limits}) == nil)
 			}
 		}
 	}
 	context.allocator = runtime.nil_allocator()
-	e, bad := json.validate(deep, limits = limits).?
+	e, bad := json.validate(deep, {limits = limits}).?
 	testing.expect(t, bad && e.kind == .Out_Of_Memory && e.offset == nested_open(json.MAX_DEPTH, true), "a refused spill")
 	// The fused array push spills at the same bracket.
-	e, bad = json.validate(nested(json.MAX_DEPTH + 1, false), limits = limits).?
+	e, bad = json.validate(nested(json.MAX_DEPTH + 1, false), {limits = limits}).?
 	testing.expect(t, bad && e.kind == .Out_Of_Memory && e.offset == nested_open(json.MAX_DEPTH, false), "a refused spill of an array nest")
 }
 
@@ -313,9 +313,9 @@ test_raised_depth_allocates_only_past_max_depth :: proc(t: ^testing.T) {
 @(test)
 test_fraction_scale_cap_is_limit_scale :: proc(t: ^testing.T) {
 	limits := json.Limits{max_scalar_digits = 20, max_scalar_scale = 3}
-	e, bad := json.validate(raw("0.0001"), limits = limits).?
+	e, bad := json.validate(raw("0.0001"), {limits = limits}).?
 	testing.expect(t, bad && e.kind == .Limit_Scale && e.offset == 0, "four fraction digits at a cap of 3")
-	testing.expect(t, json.validate(raw("0.001"), limits = limits) == nil, "three fit")
+	testing.expect(t, json.validate(raw("0.001"), {limits = limits}) == nil, "three fit")
 }
 
 // Wire UTF-8 and control bytes inside long strings, against a byte-at-a-time oracle: a fault or a stop lands
@@ -367,8 +367,8 @@ test_string_wire_against_oracle :: proc(t: ^testing.T) {
 			append(&doc, `["`)
 			for len(doc) < n { append(&doc, 'a') }
 			append(&doc, piece)
-			testing.expectf(t, json.validate(doc[:], .Json, .Strict) != nil, "unterminated, %d bytes then %q: strict accepts", n, piece)
-			testing.expectf(t, json.validate(doc[:], .Json, .Structural) != nil, "unterminated, %d bytes then %q: structural accepts", n, piece)
+			testing.expectf(t, json.validate(doc[:]) != nil, "unterminated, %d bytes then %q: strict accepts", n, piece)
+			testing.expectf(t, json.validate(doc[:], {strictness = .Structural}) != nil, "unterminated, %d bytes then %q: structural accepts", n, piece)
 		}
 	}
 	// Random strings, of any length up to about 3 KB.
@@ -400,9 +400,9 @@ test_string_wire_against_oracle :: proc(t: ^testing.T) {
 		append(&doc, `["`)
 		append(&doc, ..body[:])
 		append(&doc, `", 1, "tail"]`)
-		strict_ok := json.validate(doc[:], .Json, .Strict) == nil
+		strict_ok := json.validate(doc[:]) == nil
 		testing.expectf(t, strict_ok == (clean_utf8 && !has_ctrl), "round %d (%d bytes): strict says %v", round, len(doc), strict_ok)
-		structural_ok := json.validate(doc[:], .Json, .Structural) == nil
+		structural_ok := json.validate(doc[:], {strictness = .Structural}) == nil
 		testing.expectf(t, structural_ok == clean_utf8, "round %d (%d bytes): structural says %v", round, len(doc), structural_ok)
 	}
 }
@@ -422,10 +422,10 @@ check_wire_sweep :: proc(t: ^testing.T, body: []u8, doc: ^[dynamic]u8, filler: s
 		append(doc, `", "`)
 		append(doc, filler if long else filler[:80])
 		append(doc, `"]`)
-		strict_ok := json.validate(doc[:], .Json, .Strict) == nil
+		strict_ok := json.validate(doc[:]) == nil
 		testing.expectf(t, strict_ok == (clean_utf8 && !has_ctrl), "sweep %q (long %v): strict says %v", string(body), long, strict_ok)
 		// Structural does not stop on a control byte, so only the encoding decides.
-		structural_ok := json.validate(doc[:], .Json, .Structural) == nil
+		structural_ok := json.validate(doc[:], {strictness = .Structural}) == nil
 		testing.expectf(t, structural_ok == clean_utf8, "sweep %q (long %v): structural says %v", string(body), long, structural_ok)
 	}
 }
@@ -453,14 +453,14 @@ test_pretty_walk_agrees_with_the_compact_walk :: proc(t: ^testing.T) {
 	plain[2] = '\t'
 	testing.expect(t, len(pretty) >= 1024)
 	for level in ([]json.Strictness{.Strict, .Structural}) {
-		testing.expect_value(t, json.validate(pretty, .Json, level), nil)
+		testing.expect_value(t, json.validate(pretty, {strictness = level}), nil)
 		// Faults start at byte 3, so the tab at byte 2 stays: the compact copy is never detected as pretty, and
 		// no earlier fault opens a string that would contain the tab.
 		for i in 3 ..< len(pretty) {
 			was := pretty[i]
 			for bad in ([]byte{'x', 0x01, '"', ']', '}', ',', ':', 0xff, ' ', '\n'}) {
 				pretty[i], plain[i] = bad, bad
-				got, want := json.validate(pretty, .Json, level), json.validate(plain, .Json, level)
+				got, want := json.validate(pretty, {strictness = level}), json.validate(plain, {strictness = level})
 				testing.expectf(t, got == want, "%v: byte %d set to %q: pretty %v, compact %v", level, i, bad, got, want)
 				if level == .Strict {
 					builds_agree(t, pretty, plain, i, bad)

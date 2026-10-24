@@ -195,8 +195,8 @@ for opt in -V --version -h --help --build-configuration; do
 	"$S" "$opt" >/dev/null 2>&1 </dev/null || { echo "FAIL $opt: exit $? (want 0)"; fails=$((fails + 1)); }
 done
 check build_configuration_var 0 '"string"' -n '$JQ_BUILD_CONFIGURATION | type'
-"$S" --help | grep -q '^      --ndjson,' || { echo "FAIL --help lists --ndjson"; fails=$((fails + 1)); }
-"$S" --help | grep -q '^stury.s own; stury(1) and docs/cli.md in stury.s source$' || { echo "FAIL --help points to docs/cli.md"; fails=$((fails + 1)); }
+"$S" --help | grep -q '^      --ndjson, --csv,' || { echo "FAIL --help lists --ndjson"; fails=$((fails + 1)); }
+"$S" --help | grep -q 'docs/cli.md in stury.s source' || { echo "FAIL --help points to docs/cli.md"; fails=$((fails + 1)); }
 "$S" -h | head -1 | grep -q '^stury - commandline JSON processor \[version ' || { echo "FAIL -h"; fails=$((fails + 1)); }
 "$S" -f </dev/null 2>"$T/err"
 [ $? = 2 ] && tail -1 "$T/err" | grep -qx 'For listing the command options, use stury --help.' || { echo "FAIL -f with no file"; fails=$((fails + 1)); }

@@ -20,7 +20,7 @@ test_set_values :: proc(t: ^testing.T) {
 	bare := transmute([]byte)string("a,b\n1,2")
 	expect_set(t, bare, ".[0].b", 3, "a,b\n1,3")
 	// A path cannot name the header's cells by row.
-	_, err := csv.set(src, ".[].a", 1, header = false)
+	_, err := csv.set(src, ".[].a", 1, {no_header = true})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unsupported_Path})
 }
 
@@ -30,7 +30,7 @@ test_set_dialects :: proc(t: ^testing.T) {
 	expect_set_in(t, csv.TSV, tsv, ".[0].b", "x\ty\nz\\", "a\tb\n1\tx\\ty\\nz\\\\\n")
 	semi := transmute([]byte)string("a;b\n1;2\n")
 	expect_set_in(t, csv.Dialect{delimiter = ';', quoting = .None}, semi, ".[0].b", "p,q", "a;b\n1;p,q\n")
-	_, err := csv.set(semi, ".[0].b", "p;q", csv.Dialect{delimiter = ';', quoting = .None})
+	_, err := csv.set(semi, ".[0].b", "p;q", {dialect = csv.Dialect{delimiter = ';', quoting = .None}})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Encode, encode = .Unwritable})
 	commented := transmute([]byte)string("# note\na,b\n1,2\n")
 	expect_set_in(t, csv.Dialect{comment = '#'}, commented, ".[0].a", "#x", "# note\na,b\n\"#x\",2\n")
@@ -38,7 +38,7 @@ test_set_dialects :: proc(t: ^testing.T) {
 	// The text's BOM stays, and a value starting with a BOM does not add a second one.
 	bom := transmute([]byte)string("\xEF\xBB\xBFa,b\n1,2\n")
 	expect_set(t, bom, ".[0].a", "\xEF\xBB\xBFz", "\xEF\xBB\xBFa,b\n\xEF\xBB\xBFz,2\n")
-	out, serr := csv.set(bom, ".[0][0]", "\xEF\xBB\xBFz", header = false)
+	out, serr := csv.set(bom, ".[0][0]", "\xEF\xBB\xBFz", {no_header = true})
 	testing.expect_value(t, serr, nil)
 	testing.expect_value(t, string(out), "\xEF\xBB\xBF\"\xEF\xBB\xBFz\",b\n1,2\n")
 	delete(out)
@@ -51,11 +51,11 @@ test_edits_with_a_bom_cell :: proc(t: ^testing.T) {
 	expect_set_in(t, csv.TSV, tsv, ".[0][1]", "\xEF\xBB\xBFy", "a\tb\n1\t\xEF\xBB\xBFy\n")
 	expect_set_in(t, csv.TSV, tsv, ".[0].b", "\xEF\xBB\xBFy", "a\tb\n1\t\xEF\xBB\xBFy\n")
 	expect_set(t, transmute([]byte)string("a,b\n1,2\n"), ".[0][1]", "\xEF\xBB\xBFy", "a,b\n1,\xEF\xBB\xBFy\n")
-	_, err := csv.set(tsv, ".[0][0]", "\xEF\xBB\xBFy", csv.TSV, header = false)
+	_, err := csv.set(tsv, ".[0][0]", "\xEF\xBB\xBFy", {dialect = csv.TSV, no_header = true})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Encode, encode = .Unwritable})
-	_, err = csv.insert(nil, csv.APPEND, []string{"\xEF\xBB\xBFy"}, csv.TSV, false)
+	_, err = csv.insert(nil, csv.APPEND, []string{"\xEF\xBB\xBFy"}, {dialect = csv.TSV, no_header = true})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Encode, encode = .Unwritable})
-	out, ierr := csv.insert(tsv, csv.APPEND, []string{"x", "\xEF\xBB\xBFy"}, csv.TSV)
+	out, ierr := csv.insert(tsv, csv.APPEND, []string{"x", "\xEF\xBB\xBFy"}, {dialect = csv.TSV})
 	testing.expect_value(t, ierr, nil)
 	testing.expect_value(t, string(out), "a\tb\n1\t2\nx\t\xEF\xBB\xBFy\n")
 	delete(out)
@@ -65,7 +65,7 @@ test_edits_with_a_bom_cell :: proc(t: ^testing.T) {
 @(test)
 test_insert_into_a_bom_only_text :: proc(t: ^testing.T) {
 	bom := transmute([]byte)string("\xEF\xBB\xBF")
-	out, err := csv.insert(bom, csv.APPEND, []string{"a", "b"}, header = false)
+	out, err := csv.insert(bom, csv.APPEND, []string{"a", "b"}, {no_header = true})
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), "\xEF\xBB\xBFa,b\n")
 	delete(out)
@@ -101,9 +101,9 @@ test_set_refusals :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Source, syntax = .Field_Count, offset = 4})
 	// One empty field alone reads back as no record.
 	one := transmute([]byte)string("a\nx\n")
-	_, err = csv.set(one, ".[0].a", "", csv.Dialect{quoting = .None})
+	_, err = csv.set(one, ".[0].a", "", {dialect = csv.Dialect{quoting = .None}})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Encode, encode = .Unwritable, offset = 2})
-	out, err2 := csv.set(one, ".[0].a", "", csv.Dialect{})
+	out, err2 := csv.set(one, ".[0].a", "", {dialect = csv.Dialect{}})
 	testing.expect_value(t, err2, nil)
 	testing.expect_value(t, string(out), "a\n\"\"\n")
 	delete(out)
@@ -138,11 +138,11 @@ test_insert_rows :: proc(t: ^testing.T) {
 	only_header := transmute([]byte)string("id,name,ok")
 	expect_insert(t, only_header, 0, []string{"1", "a", "true"}, "id,name,ok\n1,a,true")
 	headerless := transmute([]byte)string("1,a\n2,b\n")
-	out, err := csv.insert(headerless, 1, []string{"9", "z"}, header = false)
+	out, err := csv.insert(headerless, 1, []string{"9", "z"}, {no_header = true})
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), "1,a\n9,z\n2,b\n")
 	delete(out)
-	out, err = csv.insert(nil, csv.APPEND, []string{"9", "z"}, header = false)
+	out, err = csv.insert(nil, csv.APPEND, []string{"9", "z"}, {no_header = true})
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), "9,z\n")
 	delete(out)
@@ -174,16 +174,16 @@ test_insert_refusals :: proc(t: ^testing.T) {
 	_, err := csv.insert(nil, 0, []string{"a"})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unplaceable})
 	// Ragged texts take rows of any width.
-	out, rerr := csv.insert(src, 0, []string{"1"}, csv.Dialect{ragged = true})
+	out, rerr := csv.insert(src, 0, []string{"1"}, {dialect = csv.Dialect{ragged = true}})
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, string(out), "id,name\n1\n1,a\n")
 	delete(out)
 	// A comment line cannot be a record: a first cell starting with the comment byte is quoted, escaped or refused.
-	out, rerr = csv.insert(src, 0, []string{"#x", "a"}, csv.Dialect{comment = '#'})
+	out, rerr = csv.insert(src, 0, []string{"#x", "a"}, {dialect = csv.Dialect{comment = '#'}})
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, string(out), "id,name\n\"#x\",a\n1,a\n")
 	delete(out)
-	_, rerr = csv.insert(src, 0, []string{"#x", "a"}, csv.Dialect{quoting = .None, comment = '#'})
+	_, rerr = csv.insert(src, 0, []string{"#x", "a"}, {dialect = csv.Dialect{quoting = .None, comment = '#'}})
 	testing.expect_value(t, rerr, csv.Path_Error{kind = .Encode, encode = .Unwritable})
 	// A bad source is refused with the scan's location.
 	_, rerr = csv.insert(transmute([]byte)string("a,b\n1\n"), 0, []string{"1", "2"})
@@ -211,7 +211,7 @@ test_remove_rows_and_columns :: proc(t: ^testing.T) {
 	expect_remove(t, quoted, ".[].a", "\"b,c\",d\n\"2\n3\",4\n")
 	// Comment lines stay where they were.
 	commented := transmute([]byte)string("# top\na,b\n# mid\n1,2\n# low\n3,4\n")
-	out, err := csv.remove(commented, ".[0]", csv.Dialect{comment = '#'})
+	out, err := csv.remove(commented, ".[0]", {dialect = csv.Dialect{comment = '#'}})
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), "# top\na,b\n# mid\n# low\n3,4\n")
 	delete(out)
@@ -242,7 +242,7 @@ test_remove_refusals :: proc(t: ^testing.T) {
 	_, err := csv.remove(transmute([]byte)string("a\n1\n"), ".[].a")
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unplaceable, offset = 0})
 	// A second column starting with the comment byte would make its record a comment.
-	_, err = csv.remove(transmute([]byte)string("a,b\n1,#2\n"), ".[].a", csv.Dialect{comment = '#'})
+	_, err = csv.remove(transmute([]byte)string("a,b\n1,#2\n"), ".[].a", {dialect = csv.Dialect{comment = '#'}})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unplaceable, offset = 4})
 	// A removal that would put a BOM at the front is refused.
 	_, err = csv.remove(transmute([]byte)string("a,\xEF\xBB\xBFb\n"), ".[].a")
@@ -257,14 +257,14 @@ test_edits_in_ragged_texts :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("a,b,c\n1\n2,3\n4,5,6\n")
 	expect_set_in(t, d, src, ".[].c", "z", "a,b,c\n1\n2,3\n4,5,z\n")
 	expect_set_in(t, d, src, ".[1].b", 9, "a,b,c\n1\n2,9\n4,5,6\n")
-	_, err := csv.set(src, ".[0].b", 9, d)
+	_, err := csv.set(src, ".[0].b", 9, {dialect = d})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Not_Found})
 	// A removal skips a record too short for the column.
-	out, rerr := csv.remove(src, ".[].b", d)
+	out, rerr := csv.remove(src, ".[].b", {dialect = d})
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, string(out), "a,c\n1\n2\n4,6\n")
 	delete(out)
-	out, rerr = csv.remove(src, ".[].c", d)
+	out, rerr = csv.remove(src, ".[].c", {dialect = d})
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, string(out), "a,b\n1\n2,3\n4,5\n")
 	delete(out)
@@ -306,7 +306,7 @@ expect_set :: proc(t: ^testing.T, src: []byte, path: string, value: any, want: s
 }
 
 expect_set_in :: proc(t: ^testing.T, d: csv.Dialect, src: []byte, path: string, value: any, want: string, loc := #caller_location) {
-	out, err := csv.set(src, path, value, d)
+	out, err := csv.set(src, path, value, {dialect = d})
 	testing.expectf(t, err == nil && string(out) == want, "set %s of %q: %q %v, want %q", path, src, out, err, want, loc = loc)
 	delete(out)
 }
@@ -322,7 +322,7 @@ expect_remove :: proc(t: ^testing.T, src: []byte, path: string, want: string, lo
 }
 
 expect_remove_in :: proc(t: ^testing.T, d: csv.Dialect, src: []byte, path: string, want: string, loc := #caller_location) {
-	out, err := csv.remove(src, path, d)
+	out, err := csv.remove(src, path, {dialect = d})
 	testing.expectf(t, err == nil && string(out) == want, "remove %s of %q: %q %v, want %q", path, src, out, err, want, loc = loc)
 	delete(out)
 }

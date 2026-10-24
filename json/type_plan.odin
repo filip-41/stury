@@ -42,8 +42,8 @@ Type_Hook :: core_pkg.Type_Hook(Marshal_Hook)
 
 // Write the value at `v`, of the hook's type, as exactly one JSON value: one `marshal_into(out, x)`, where `x`
 // is any value `marshal` writes (a `Raw` for text the hook writes itself). None, or a second, is
-// `.Bad_State`. Its indentation and re-escaping follow the call's `Encode_Opts`.
-Marshal_Hook :: #type proc(out: ^Marshal_Out, v: rawptr) -> Encode_Error
+// `.Bad_State`. Its indentation and re-escaping follow the call's `Marshal_Opts`.
+Marshal_Hook :: #type proc(out: ^Marshal_Out, v: rawptr) -> Marshal_Error
 
 // Read `text`, one JSON value as authored and checked in full, into the value at `dest`, of the hook's type,
 // allocating from `allocator`.
@@ -81,9 +81,9 @@ type_plan_destroy :: proc(p: ^Type_Plan) {
 }
 
 @(private)
-plan_op :: #force_inline proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (u32, Encode_Error) {
+plan_op :: #force_inline proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (u32, Marshal_Error) {
 	idx, err := core_pkg.plan_op(&p.base, ti)
-	return idx, Encode_Error(err)
+	return idx, Marshal_Error(err)
 }
 
 @(private, rodata)

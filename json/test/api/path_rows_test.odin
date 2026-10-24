@@ -70,6 +70,6 @@ test_query_answers :: proc(t: ^testing.T) {
 	rows: [dynamic]json.Node
 	defer delete(rows)
 	fault, faulted := json.query(&doc, json.ROOT, ".[", &rows).?
-	testing.expectf(t, faulted && fault.error == .Unclosed_Bracket, "query .[: %v", fault)
+	testing.expectf(t, faulted && fault.kind == .Bad_Path, "query .[: %v", fault)
 	testing.expect_value(t, len(rows), 0)
 }

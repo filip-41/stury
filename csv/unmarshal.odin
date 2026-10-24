@@ -7,7 +7,6 @@ import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
 import core_pkg "../core"
-import "../core/bits"
 
 // What `unmarshal` does with a column the struct does not name. `.Ignore` checks its cells as CSV and does not
 // read them. `.Refuse` refuses it with `.Unknown_Field` at its header cell.
@@ -24,17 +23,15 @@ Unknown_Fields :: core_pkg.Unknown_Fields
 Duplicates :: core_pkg.Duplicates
 
 // How `unmarshal` and `unmarshal_check` read: the zero value reads RFC 4180 with a header, judges every byte,
-// refuses a repeated header name, ignores unknown columns and copies strings.
+// refuses a repeated header name, ignores unknown columns and copies strings. Of the `Read_Opts` fields:
+//
+//	strictness  `.Lazy` judges the UTF-8 of the header and of every cell a field reads, and of no other cell.
+//	duplicates  which column a repeated header name fills. A column the field does not take is read as unknown,
+//	            but `unknown_fields = .Refuse` refuses only a name the struct lacks.
+//	no_header   the first record is data: column k is the struct's field k, and columns past its last field
+//	            are unknown.
 Unmarshal_Opts :: struct {
-	dialect:        Dialect,
-	// `.Lazy` judges the UTF-8 of the header and of every cell a field reads, and of no other cell.
-	strictness:     Strictness,
-	limits:         Limits,
-	// Which column a repeated header name fills. A column the field does not take is read as unknown, but
-	// `unknown_fields = .Refuse` refuses only a name the struct lacks.
-	duplicates:     Duplicates,
-	// The first record is data: column k is the struct's field k, and columns past its last field are unknown.
-	no_header:      bool,
+	using read:     Read_Opts,
 	unknown_fields: Unknown_Fields,
 	// A string with no `""` or escape slices `src` instead of being copied. One with either is decoded into the
 	// allocator, and a `cstring` is always copied.
@@ -129,7 +126,7 @@ read_records :: proc(
 	row_reader(&r, p) or_return
 
 	it := records_of(src, s, context.allocator)
-	defer records_destroy(&it)
+	defer destroy(&it)
 	defer delete(r.columns)
 	defer delete(r.cols)
 	defer delete(r.required)
@@ -804,11 +801,11 @@ holds :: #force_inline proc(text: string, c: byte) -> bool {
 	}
 	// 16-byte windows, the last one overlapping the one before.
 	for i := 0; i + 16 < n; i += 16 {
-		if bits.any_eq(bits.load(p[i:]), c) {
+		if core_pkg.any_eq(core_pkg.load(p[i:]), c) {
 			return true
 		}
 	}
-	return bits.any_eq(bits.load(p[n - 16:]), c)
+	return core_pkg.any_eq(core_pkg.load(p[n - 16:]), c)
 }
 
 // The cell's text as a string: decoded when it holds a `""` or an escape, else borrowed or copied.
@@ -824,7 +821,7 @@ cell_string :: proc(r: ^Reader, cell: Field, text: string, quote, borrow: bool) 
 	return strings.clone(text, r.allocator)
 }
 
-// `[+-]?digits` as a magnitude and a sign. `over` is set past 128 bits. Any other text is `.Wrong_Kind`.
+// `[+-]?digits` as a magnitude and a sign. `over` is set past 128 core_pkg. Any other text is `.Wrong_Kind`.
 @(private)
 read_int :: proc(text: string) -> (mag: u128, over, neg: bool, fault: core_pkg.Shape_Fault) {
 	digits := text

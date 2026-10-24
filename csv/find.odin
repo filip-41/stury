@@ -35,29 +35,27 @@ Path_Error :: core_pkg.Path_Error
 //
 // The scan stops at the end of the named record, so the cost is the bytes before it, and nothing is kept for
 // the rows it passes. The text after that record is not judged. The record's own bytes are judged at
-// `strictness` as `records` judges them. A fault before the named record is `.Bad_Source`.
+// `opts.strictness` as `records` judges them; `opts.duplicates` is not read. A fault before the named record is `.Bad_Source`.
 @(require_results)
 find :: proc(
 	src: []byte,
 	path: Path_Spec,
-	dialect := Dialect{},
-	header := true,
-	strictness := Strictness.Strict,
-	limits := Limits{},
+	opts := Read_Opts{},
 	allocator := context.allocator,
 ) -> (field: Field, found: bool, err: Maybe(Path_Error)) {
 	buf: Path_Buf
 	t := parse_target(path, &buf, allocator) or_return
 	defer delete(t.scratch, allocator)
+	header := !opts.no_header
 	if t.every_row || t.col == COL_NONE || t.col == COL_NAME && !header {
 		return {}, false, Path_Error{kind = .Unsupported_Path}
 	}
-	it := records(src, dialect, strictness, limits, allocator)
-	defer records_destroy(&it)
+	it := records(src, opts, allocator)
+	defer destroy(&it)
 	if it.err != nil {
 		return {}, false, finished(&it)
 	}
-	col, _, has_col := seek_header(&it, t, header, dialect)
+	col, _, has_col := seek_header(&it, t, header, opts.dialect)
 	if !has_col {
 		return {}, false, finished(&it)
 	}
@@ -79,24 +77,22 @@ find_column :: proc(
 	src: []byte,
 	path: Path_Spec,
 	out: ^[dynamic]Field,
-	dialect := Dialect{},
-	header := true,
-	strictness := Strictness.Strict,
-	limits := Limits{},
+	opts := Read_Opts{},
 	allocator := context.allocator,
 ) -> (err: Maybe(Path_Error)) {
 	buf: Path_Buf
 	t := parse_target(path, &buf, allocator) or_return
 	defer delete(t.scratch, allocator)
+	header := !opts.no_header
 	if !t.every_row || t.col == COL_NONE || t.col == COL_NAME && !header {
 		return Path_Error{kind = .Unsupported_Path}
 	}
-	it := records(src, dialect, strictness, limits, allocator)
-	defer records_destroy(&it)
+	it := records(src, opts, allocator)
+	defer destroy(&it)
 	if it.err != nil {
 		return finished(&it)
 	}
-	col, _, has_col := seek_header(&it, t, header, dialect)
+	col, _, has_col := seek_header(&it, t, header, opts.dialect)
 	if !has_col {
 		return finished(&it)
 	}
@@ -148,15 +144,14 @@ parse_target :: proc(path: Path_Spec, buf: ^Path_Buf, allocator: runtime.Allocat
 			}
 			t.scratch, names = heap, heap
 		}
-		perr: Maybe(core_pkg.Parse_Fault)
+		perr: Maybe(Path_Error)
 		if p, perr = core_pkg.parse_path(v, buf.steps[:], names); perr != nil {
 			delete(t.scratch, allocator)
-			fault := perr.?
 			// A path with more steps than the buffer holds is not a CSV path.
-			if fault.error == .Out_Of_Room {
+			if perr.?.kind == .Over_Capacity {
 				return {}, Path_Error{kind = .Unsupported_Path}
 			}
-			return {}, Path_Error{kind = .Bad_Path, offset = fault.offset}
+			return {}, perr
 		}
 	case Path:
 		p = v

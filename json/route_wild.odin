@@ -12,9 +12,9 @@ import "scan/walk"
 // `.Strict`. A document it refuses (one a `.Structural` or `.Lazy` walk passed) keeps the walk's answers and
 // result, which settled no repeat.
 @(private)
-settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> Scan_Error {
+settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> Maybe(Error) {
 	if u64(len(src)) > MAX_ROW_SOURCE {
-		return Request_Error{kind = .Over_Capacity, query_kind = .Path, capacity = .Node_Source_Bytes}
+		return Error{kind = .Over_Capacity}
 	}
 	// The walk's answers for the paths the tape does not answer.
 	kept := make([dynamic]Path_Answer, 0, len(req.answers), alloc)
@@ -35,8 +35,8 @@ settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator
 		}
 	}
 	clear(&req.answers)
-	req.src, req.stop, req.coverage = src, nil, .Full
-	req.groups.grouped = false
+	req.state.src, req.stop, req.coverage = src, nil, .Full
+	req.state.groups.grouped = false
 	walk.adopt_allocator(&req.answers, alloc)
 	if _, err := append(&req.answers, ..kept[:]); err != nil {
 		return Error{kind = .Out_Of_Memory}
@@ -64,22 +64,21 @@ settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator
 // Build `req.doc.rows` for `settle_wild`. `done` says the settling ends here with `result`: the build's own
 // refusal, or nil when the document is one the build refuses and the walk's answers stand.
 @(private = "file")
-wild_build_rows :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> (done: bool, result: Scan_Error) {
+wild_build_rows :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> (done: bool, result: Maybe(Error)) {
 	// The build walks without the plan, which a prepared request keeps for its next scan.
-	route, strictness := req.route, req.strictness
-	verdict, coverage, stop := req.verdict, req.coverage, req.stop
-	defer req.route.matcher, req.route.n_auto, req.route.gate.gated = route.matcher, route.n_auto, route.gate.gated
+	route, strictness := req.state.route, req.strictness
+	verdict, coverage, stop := req.state.verdict, req.coverage, req.stop
+	defer req.state.route.matcher, req.state.route.n_auto, req.state.route.gate.gated = route.matcher, route.n_auto, route.gate.gated
 	req.strictness = .Strict
 	fault := scan_rows(src, req, alloc)
 	req.strictness = strictness
 	// The first of several texts builds whole, and `.Trailing` is the scan's own result.
-	if err := scan_error(req.verdict, fault); err != nil {
-		e, is_fault := err.(Error)
-		if !is_fault || e.kind == .Out_Of_Memory {
-			return true, err
+	if e, bad := scan_error(req.state.verdict, fault).?; bad {
+		if e.kind == .Over_Capacity || e.kind == .Out_Of_Memory {
+			return true, e
 		}
 		if e.kind != .Trailing {
-			req.verdict, req.coverage, req.stop = verdict, coverage, stop
+			req.state.verdict, req.coverage, req.stop = verdict, coverage, stop
 			return true, nil
 		}
 	}

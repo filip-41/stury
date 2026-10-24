@@ -2,7 +2,7 @@ package core_tests
 
 import "core:slice"
 import "core:testing"
-import p "../path"
+import p ".."
 
 N :: p.Name
 I :: p.Index
@@ -11,7 +11,7 @@ A :: p.Any
 // `parse_path` with its fault unwrapped, as these tables read it.
 parse :: proc(text: string, steps: []p.Step, names: []u8 = nil) -> (got: p.Path, fault: p.Parse_Fault, ok: bool) {
 	perr: Maybe(p.Parse_Fault)
-	got, perr = p.parse_path(text, steps, names)
+	got, perr = p.parse_path_fault(text, steps, names)
 	fault, ok = perr.?
 	return got, fault, !ok
 }

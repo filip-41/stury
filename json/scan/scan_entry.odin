@@ -24,27 +24,34 @@ enter_document :: #force_inline proc(src: []byte, limits: Limits, $ceiling: u64)
 //
 // Always a whole-item result (no query can settle early), so it has no `validity` out-parameter. A cap past
 // MAX_DEPTH is held to it: `scan_plain_deep` reads deeper.
-scan_plain :: proc(
+//
+// Inlined, so a caller's constant strictness picks one walk at compile time: a `.Locate` walk is linked only
+// into a program that can ask for one.
+scan_plain :: #force_inline proc(
 	src: []byte,
 	strictness := Strictness.Strict,
 	limits := Limits{},
 ) -> Maybe(Error) {
-	s := enter_document(src, limits, MAX_DEPTH)
-	lex.skip_ws(&s)
-	if pretty_head(src, int(s.pos)) {
-		return scan_plain_pretty(src, strictness, limits)
-	}
 	// One literal per arm: the walk's check level is a polymorphic parameter and must be constant. No
 	// `case:` default, so a new `Check_Level` member fails to compile instead of being swallowed.
 	switch axes_check_level(axes_for(strictness, .All)) {
 	case .Values:
-		if err := walk_value(&s, s.limits.max_depth, .Values); err != nil {
-			return err
-		}
+		return scan_plain_at(src, limits, .Values)
 	case .Locate:
-		if err := walk_value(&s, s.limits.max_depth, .Locate); err != nil {
-			return err
-		}
+		return scan_plain_at(src, limits, .Locate)
+	}
+	unreachable()
+}
+
+@(private = "file")
+scan_plain_at :: proc(src: []byte, limits: Limits, $check: Check_Level) -> Maybe(Error) {
+	s := enter_document(src, limits, MAX_DEPTH)
+	lex.skip_ws(&s)
+	if pretty_head(src, int(s.pos)) {
+		return scan_plain_pretty(src, limits, check)
+	}
+	if err := walk_value(&s, s.limits.max_depth, check); err != nil {
+		return err
 	}
 	return finish(&s)
 }
@@ -52,38 +59,35 @@ scan_plain :: proc(
 // Runs `scan_plain` on the pretty cursor, for a document that starts like pretty-printed output
 // (`pretty_head`). It has its own function and scanner so the compact walk's scanner stays in registers.
 @(private = "file")
-scan_plain_pretty :: #force_no_inline proc(src: []byte, strictness: Strictness, limits: Limits) -> Maybe(Error) {
+scan_plain_pretty :: #force_no_inline proc(src: []byte, limits: Limits, $check: Check_Level) -> Maybe(Error) {
 	s := enter_document(src, limits, MAX_DEPTH)
 	lex.skip_ws(&s)
 	cur: Pretty_Cursor
-	switch axes_check_level(axes_for(strictness, .All)) {
-	case .Values:
-		if err := walk_value_q(&s, nil, s.limits.max_depth, .Values, {}, &cur, false, false); err != nil {
-			return err
-		}
-	case .Locate:
-		if err := walk_value_q(&s, nil, s.limits.max_depth, .Locate, {}, &cur, false, false); err != nil {
-			return err
-		}
+	if err := walk_value_q(&s, nil, s.limits.max_depth, check, {}, &cur, false, false); err != nil {
+		return err
 	}
 	return finish(&s)
 }
 
 // `scan_plain` under a cap past MAX_DEPTH, on `walk_deep`: `.Structural` keeps its level, and `.Strict` and
 // `.Lazy` (which has nothing to stop at) check every value. The caller picks it before the walk, so
-// `scan_plain` compiles as if it did not exist.
-scan_plain_deep :: #force_no_inline proc(src: []byte, strictness: Strictness, limits: Limits) -> Maybe(Error) {
+// `scan_plain` compiles as if it did not exist. Inlined as `scan_plain` is.
+scan_plain_deep :: #force_inline proc(src: []byte, strictness: Strictness, limits: Limits) -> Maybe(Error) {
+	switch axes_check_level(axes_for(strictness, .All)) {
+	case .Values:
+		return scan_plain_deep_at(src, limits, .Values)
+	case .Locate:
+		return scan_plain_deep_at(src, limits, .Locate)
+	}
+	unreachable()
+}
+
+@(private = "file")
+scan_plain_deep_at :: #force_no_inline proc(src: []byte, limits: Limits, $check: Check_Level) -> Maybe(Error) {
 	s := enter_document(src, limits, DEPTH_CEILING)
 	lex.skip_ws(&s)
 	cur := Jsonc_Cursor{json = true}
-	err: Maybe(Error)
-	switch axes_check_level(axes_for(strictness, .All)) {
-	case .Values:
-		err = walk_deep(&s, nil, s.limits.max_depth, .Values, {}, &cur, false, nil)
-	case .Locate:
-		err = walk_deep(&s, nil, s.limits.max_depth, .Locate, {}, &cur, false, nil)
-	}
-	if err != nil {
+	if err := walk_deep(&s, nil, s.limits.max_depth, check, {}, &cur, false, nil); err != nil {
 		return err
 	}
 	return finish(&s)

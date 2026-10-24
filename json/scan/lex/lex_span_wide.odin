@@ -9,7 +9,7 @@ package lex
 import "base:intrinsics"
 import "core:simd"
 import "core:sys/info"
-import bits "../../../core/bits"
+import bits "../../../core"
 
 Block64 :: #simd[64]u8
 

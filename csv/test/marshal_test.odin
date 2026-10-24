@@ -63,7 +63,7 @@ test_marshal_round_trip :: proc(t: ^testing.T) {
 @(test)
 test_marshal_enum_ints :: proc(t: ^testing.T) {
 	plan := csv.type_plan_init([]Row, {enums = .Int})
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	rows := []Row{{color = .Blue}}
 	out, err := csv.marshal(rows, plan = &plan, allocator = context.temp_allocator)
 	testing.expect_value(t, err, csv.Marshal_Error.None)
@@ -153,7 +153,7 @@ test_marshal_reads_back :: proc(t: ^testing.T) {
 		b: Big,
 	}
 	plan := csv.type_plan_init([]Wide, {enums = .Int})
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	out, err = csv.marshal([]Wide{{.Y}}, plan = &plan, allocator = context.temp_allocator)
 	testing.expect_value(t, string(out), "b\n18446744073709551615\n")
 	wide: []Wide

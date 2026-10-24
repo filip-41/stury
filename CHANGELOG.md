@@ -8,6 +8,36 @@
   and `Raw` keep such a number. `Exact` is now `Exactness`'s zero value, so an unset `Number` writes `0`.
 - `edit_comment` accepts bare text, the form `fact_text` returns, and writes it as a `//` line.
 - `NO_OWNER`, the `Path_Answer.owner` of an answer no container holds, is exported.
+- `json.Encode_Error` and `json.Encode_Opts` are now `json.Marshal_Error` and `json.Marshal_Opts`, as in `csv` and
+  `core`. No alias is kept.
+- `csv.document_destroy`, `csv.records_destroy` and `csv.type_plan_destroy` are one `csv.destroy` group, as in
+  `json`.
+- `core/bits` and `core/path` are folded into `package core` (`core.Step`, `core.parse_path`, the bit kernels);
+  `core/core.odin` no longer aliases them.
+- `json.Read_Opts` (`dialect`, `strictness`, `duplicates`, `limits`) and `csv.Read_Opts` (the same and
+  `no_header`) are the read options. A procedure that honours two or more of them takes `opts := Read_Opts{}`
+  before its allocator; its docs name the fields it does not read. `json`: `validate(src, opts, facts)`,
+  `find(src, path, opts, allocator)`, `request_init(req, ..paths, opts, allocator)`,
+  `build(src, opts, allocator)`, `split_record(rec, opts)`. `csv`: `validate(src, opts, runner)`,
+  `records(src, opts, allocator)`, `records_from(r, opts, allocator)`, `each_record(src, task, data, opts,
+  runner)`, `build`, `find`, `find_column`, `set`, `insert` and `remove` (`opts` before `allocator`).
+  `Request` and both `Unmarshal_Opts` embed `Read_Opts` (`using read`), so `{dialect = .Jsonc}` literals and
+  `req.dialect` read as before. Behaviour change: CSV's `header: bool` (default `true`) is now
+  `no_header: bool`.
+- The JSON edits take `dialect` before `allocator`: `set(src, path, value, upsert, dialect, allocator)`,
+  `insert(src, path, at, value, dialect, allocator)`, `remove(src, path, dialect, allocator)`,
+  `splice(src, edits, dialect, allocator)`.
+- One read error. `scan`, `find`, `request_init` and `build` return `Maybe(Error)`: a request refusal is
+  `.Bad_Option` (an option the request cannot honour), `.Bad_Path` (offset into the path text),
+  `.Over_Capacity` (a fixed engine limit) or `.Source_Too_Wide`. `parse_path` and `query` return
+  `Maybe(Path_Error)` (`.Bad_Path`, `.Over_Capacity`). Removed: `Scan_Error`, `Request_Error`,
+  `Request_Error_Kind`, `Capacity`, `Parse_Error`, `Parse_Fault`, and the public `render_error_to_writer`
+  of `json` and `csv` (`render_error` takes every error; `core.render_error_to_writer` writes without
+  allocating).
+- `json.Prepared` is gone. `prepare(&req) -> Maybe(Error)` plans the request itself, and `scan(src, &req)`
+  takes the planned route while the plan holds (`request_init` drops it, `destroy` frees it). `scan` has one
+  overload.
+- `Request`'s internal fields (`src`, `verdict`, `route`, `parsed`, `groups`) are grouped in one `state` field.
 
 ## 0.0.2 (2026-10-24)
 

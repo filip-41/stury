@@ -47,7 +47,7 @@ scan_tape :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) 
 	if u64(len(src)) > MAX_ROW_SOURCE {
 		return false
 	}
-	if fault := scan_rows(src, req, alloc); fault != {} || req.verdict != nil || len(req.doc.rows) == 0 {
+	if fault := scan_rows(src, req, alloc); fault != {} || req.state.verdict != nil || len(req.doc.rows) == 0 {
 		return false
 	}
 	walk.adopt_allocator(&req.answers, alloc)
@@ -67,10 +67,10 @@ scan_tape :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) 
 		return false
 	}
 	if limited {
-		finish_answers(&req.answers, nil, &req.route, req.paths, false)
+		finish_answers(&req.answers, nil, &req.state.route, req.paths, false)
 	}
-	req.src, req.stop, req.coverage = src, nil, .Full
-	req.groups.grouped = false
+	req.state.src, req.stop, req.coverage = src, nil, .Full
+	req.state.groups.grouped = false
 	return true
 }
 

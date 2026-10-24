@@ -4,6 +4,7 @@ import "core:io"
 import "core:strings"
 import "core:testing"
 import csv "../"
+import core "../../core"
 
 @(test)
 test_error_position :: proc(t: ^testing.T) {
@@ -68,12 +69,12 @@ test_render_error :: proc(t: ^testing.T) {
 
 	// The writer form writes the same text and returns the writer's failure.
 	b := strings.builder_make(context.temp_allocator)
-	testing.expect_value(t, csv.render_error_to_writer(strings.to_writer(&b), bytes, err), nil)
+	testing.expect_value(t, core.render_error_to_writer(strings.to_writer(&b), bytes, err), nil)
 	testing.expect_value(t, strings.to_string(b), text)
 	failing := io.Writer {
 		procedure = fail_writer,
 	}
-	testing.expect_value(t, csv.render_error_to_writer(failing, bytes, quoted), io.Error.Unexpected_EOF)
+	testing.expect_value(t, core.render_error_to_writer(failing, bytes, quoted), io.Error.Unexpected_EOF)
 }
 
 @(test)
@@ -88,7 +89,7 @@ test_render_path_error :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(t, csv.render_error(src, e, context.temp_allocator), want, loc = loc)
 		b := strings.builder_make(context.temp_allocator)
-		testing.expect_value(t, csv.render_error_to_writer(strings.to_writer(&b), src, e), nil, loc = loc)
+		testing.expect_value(t, core.render_error_to_writer(strings.to_writer(&b), src, e), nil, loc = loc)
 		testing.expect_value(t, strings.to_string(b), want, loc = loc)
 	}
 	defer free_all(context.temp_allocator)
@@ -118,10 +119,10 @@ test_render_path_error :: proc(t: ^testing.T) {
 	// What marshal refused, and the record it was for where there is one.
 	_, err = csv.set(src, ".[0].a", []int{1})
 	text(t, src, err, "Encode: Unsupported")
-	_, err = csv.set(one, ".[0].a", "", csv.Dialect{quoting = .None})
+	_, err = csv.set(one, ".[0].a", "", {dialect = csv.Dialect{quoting = .None}})
 	text(t, one, err, "2:1: Encode: Unwritable")
 	semi := transmute([]byte)string("a;b\n1;2\n")
-	_, err = csv.set(semi, ".[0].b", "p;q", csv.Dialect{quoting = .None, delimiter = ';'})
+	_, err = csv.set(semi, ".[0].b", "p;q", {dialect = csv.Dialect{quoting = .None, delimiter = ';'}})
 	text(t, semi, err, "Encode: Unwritable")
 }
 

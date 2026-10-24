@@ -313,7 +313,7 @@ unfinished :: proc(ins: ^Inputs, at: int) -> bool {
 	if ins.run.opts.seq {
 		return bytes.index_byte(ins.data[at:], RS) < 0
 	}
-	e, bad := json.validate(ins.data[at:], ins.run.req.dialect, limits = ins.run.req.limits).?
+	e, bad := json.validate(ins.data[at:], {dialect = ins.run.req.dialect, limits = ins.run.req.limits}).?
 	return bad && e.kind == .Truncated
 }
 

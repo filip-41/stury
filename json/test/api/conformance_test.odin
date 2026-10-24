@@ -77,7 +77,7 @@ test_jsontestsuite_y_and_n_files_are_judged_as_the_suite_says :: proc(t: ^testin
 		testing.expectf(t, (by_scan == nil) == want_accept, "%s: scan(.Strict) gave %v, want accept=%v", f.name, by_scan, want_accept)
 		testing.expectf(t, by_validate == by_scan, "%s: validate %v, scan %v", f.name, by_validate, by_scan)
 		// The deep reading a raised cap takes agrees, but where the default cap refused first.
-		raised := json.validate(src, limits = {max_depth = json.DEPTH_CEILING})
+		raised := json.validate(src, {limits = {max_depth = json.DEPTH_CEILING}})
 		if e, bad := by_validate.?; bad && e.kind == .Too_Deep {
 			testing.expectf(t, raised != nil, "%s: refused past MAX_DEPTH, but accepted under a raised cap", f.name)
 		} else {

@@ -1,4 +1,4 @@
-package path
+package core
 
 import "core:strconv"
 import "core:strings"
@@ -93,7 +93,7 @@ Parse_Fault :: struct {
 //
 // All-or-nothing: a fault reports an empty path. `steps` must hold every step `text` names and `names`
 // every escaped name decoded. A buffer too small reports `Out_Of_Room` and never truncates.
-parse_path :: proc(text: string, steps: []Step, names: []u8 = nil) -> (p: Path, err: Maybe(Parse_Fault)) {
+parse_path_fault :: proc(text: string, steps: []Step, names: []u8 = nil) -> (p: Path, err: Maybe(Parse_Fault)) {
 	i := skip_space(text, 0)
 	limit, n: int
 	fault: Parse_Fault

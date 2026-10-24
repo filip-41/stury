@@ -46,7 +46,7 @@ date_hooks :: []csv.Type_Hook{{type = Date, write = date_write, read = date_read
 @(test)
 test_hook_struct_cell :: proc(t: ^testing.T) {
 	plan := csv.type_plan_init([]Event, {hooks = date_hooks})
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	src := "when,name,until\n2026-10-23,a,\n2027-01-02,\"b, \"\"c\"\"\",2028-03-04\n"
 	events: []Event
 	testing.expect_value(t, csv.unmarshal(transmute([]byte)src, &events, plan = &plan, allocator = context.temp_allocator), nil)
@@ -89,7 +89,7 @@ test_hook_overrides_scalar :: proc(t: ^testing.T) {
 		},
 	}
 	plan := csv.type_plan_init([]Flags, {hooks = yes_no})
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	rows: []Flags
 	src := "a,b,n\nyes,no,3\n"
 	testing.expect_value(t, csv.unmarshal(transmute([]byte)src, &rows, plan = &plan, allocator = context.temp_allocator), nil)
@@ -109,7 +109,7 @@ test_hook_overrides_scalar :: proc(t: ^testing.T) {
 @(test)
 test_hook_refusals :: proc(t: ^testing.T) {
 	plan := csv.type_plan_init([]Event, {hooks = date_hooks})
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	cases := []Refusal {
 		{"when\n2026-10-23\nnot a date\n", .Wrong_Kind, 16, "[1].when"},
 		{"name,when\nx,2026-13-01\n", .Out_Of_Range, 12, "[0].when"},
@@ -134,14 +134,14 @@ test_hook_refusals :: proc(t: ^testing.T) {
 
 	// A write-only hook cannot be read, and a read-only hook cannot be written.
 	write_only := csv.type_plan_init([]Event, {hooks = {{type = Date, write = date_write}}})
-	defer csv.type_plan_destroy(&write_only)
+	defer csv.destroy(&write_only)
 	src := "when\n2026-10-23\n"
 	err := csv.unmarshal(transmute([]byte)src, &events, plan = &write_only, allocator = context.temp_allocator)
 	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Unsupported)
 	_, merr := csv.marshal(events, plan = &write_only, allocator = context.temp_allocator)
 	testing.expect_value(t, merr, csv.Marshal_Error.None)
 	read_only := csv.type_plan_init([]Event, {hooks = {{type = Date, read = date_read}}})
-	defer csv.type_plan_destroy(&read_only)
+	defer csv.destroy(&read_only)
 	_, merr = csv.marshal(events, plan = &read_only, allocator = context.temp_allocator)
 	testing.expect_value(t, merr, csv.Marshal_Error.Unsupported)
 }
@@ -177,7 +177,7 @@ raw_text_plan :: proc(text: string) -> (plan: csv.Type_Plan, rows: []Tagged) {
 @(test)
 test_hook_write_quoting :: proc(t: ^testing.T) {
 	plan, rows := raw_text_plan("a,b\"c\nd")
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	out, err := csv.marshal(rows, plan = &plan, allocator = context.temp_allocator)
 	testing.expect_value(t, err, csv.Marshal_Error.None)
 	testing.expect_value(t, string(out), "text,n\n\"a,b\"\"c\nd\",1\n")
@@ -218,7 +218,7 @@ test_hook_write_refusal :: proc(t: ^testing.T) {
 		},
 	}
 	plan := csv.type_plan_init([]Event, {hooks = refuse})
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	events := []Event{{when_ = {2026, 1, 1}}, {}}
 	out := make([dynamic]u8, context.temp_allocator)
 	testing.expect_value(t, csv.marshal_append(&out, events, plan = &plan), csv.Marshal_Error.Non_Finite)

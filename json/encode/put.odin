@@ -11,7 +11,7 @@ import "../../core/spell"
 
 MAX_DEPTH :: walk.MAX_DEPTH
 
-Encode_Opts :: struct {
+Marshal_Opts :: struct {
 	pretty:           bool,          // false (the zero value) is compact
 	indent:           u8,            // pretty: 0 indents one tab per open container, N indents N spaces
 	ascii_only:       bool,          // every character past U+007F as `\uXXXX`, a surrogate pair past U+FFFF
@@ -23,7 +23,7 @@ Encode_Opts :: struct {
 
 // The reason the canonical writer refused a value (core's `Marshal_Error`). `.None` is success. JSON never
 // reports `Bad_Option` or `Unwritable`.
-Encode_Error :: core_pkg.Marshal_Error
+Marshal_Error :: core_pkg.Marshal_Error
 
 // Room for `n` more bytes past `len(dst)`: the address of the first, or nil when the allocator refused.
 // Growth at least doubles, so a run of appends costs amortized O(1) each.
@@ -50,7 +50,7 @@ put_commit :: #force_inline proc(dst: ^[dynamic]u8, n: int) {
 	walk.edge_publish(dst, len(dst^) + n)
 }
 
-put_byte :: #force_inline proc(dst: ^[dynamic]u8, x: u8) -> Encode_Error {
+put_byte :: #force_inline proc(dst: ^[dynamic]u8, x: u8) -> Marshal_Error {
 	p := put_reserve(dst, 1)
 	if p == nil {
 		return .Out_Of_Memory
@@ -60,7 +60,7 @@ put_byte :: #force_inline proc(dst: ^[dynamic]u8, x: u8) -> Encode_Error {
 	return .None
 }
 
-put_bytes :: proc(dst: ^[dynamic]u8, s: string) -> Encode_Error {
+put_bytes :: proc(dst: ^[dynamic]u8, s: string) -> Marshal_Error {
 	p := put_reserve(dst, len(s))
 	if p == nil {
 		return .Out_Of_Memory
@@ -71,7 +71,7 @@ put_bytes :: proc(dst: ^[dynamic]u8, s: string) -> Encode_Error {
 }
 
 // A line break and `ind`'s indent for `depth` open containers. Writes run up to INDENT_SLACK bytes past it.
-put_newline :: proc(dst: ^[dynamic]u8, depth: u32, ind: ^Indent) -> Encode_Error {
+put_newline :: proc(dst: ^[dynamic]u8, depth: u32, ind: ^Indent) -> Marshal_Error {
 	p := put_reserve(dst, 1 + int(depth) * ind.unit + INDENT_SLACK)
 	if p == nil {
 		return .Out_Of_Memory
@@ -88,7 +88,7 @@ Indent :: struct {
 }
 
 // One tab per container when `opts.indent` is 0, else that many spaces.
-indent_of :: proc(opts: Encode_Opts) -> Indent {
+indent_of :: proc(opts: Marshal_Opts) -> Indent {
 	if opts.indent == 0 {
 		return {INDENT_HEAD, INDENT_TABS, 1}
 	}
@@ -124,14 +124,14 @@ put_indent :: #force_inline proc "contextless" (p: [^]u8, depth: int, ind: ^Inde
 }
 
 // What follows a key: `:`, and one space when pretty.
-put_colon :: #force_inline proc(dst: ^[dynamic]u8, pretty: bool) -> Encode_Error {
+put_colon :: #force_inline proc(dst: ^[dynamic]u8, pretty: bool) -> Marshal_Error {
 	if pretty {
 		return put_bytes(dst, ": ")
 	}
 	return put_byte(dst, ':')
 }
 
-put_i64 :: proc(dst: ^[dynamic]u8, v: i64) -> Encode_Error {
+put_i64 :: proc(dst: ^[dynamic]u8, v: i64) -> Marshal_Error {
 	p := put_reserve(dst, spell.INT_ROOM)
 	if p == nil {
 		return .Out_Of_Memory
@@ -140,7 +140,7 @@ put_i64 :: proc(dst: ^[dynamic]u8, v: i64) -> Encode_Error {
 	return .None
 }
 
-put_u64 :: proc(dst: ^[dynamic]u8, v: u64) -> Encode_Error {
+put_u64 :: proc(dst: ^[dynamic]u8, v: u64) -> Marshal_Error {
 	p := put_reserve(dst, spell.INT_ROOM)
 	if p == nil {
 		return .Out_Of_Memory
@@ -149,7 +149,7 @@ put_u64 :: proc(dst: ^[dynamic]u8, v: u64) -> Encode_Error {
 	return .None
 }
 
-put_f64 :: proc(dst: ^[dynamic]u8, f: f64) -> Encode_Error {
+put_f64 :: proc(dst: ^[dynamic]u8, f: f64) -> Marshal_Error {
 	if spell.is_non_finite(f) {
 		return .Non_Finite
 	}

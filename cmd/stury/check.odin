@@ -51,7 +51,7 @@ check_input :: proc(run: ^Run, ins: ^Inputs) {
 	case run.opts.from == .Ndjson || run.opts.seq:
 		check_records(run, ins.data)
 	case run.opts.from == .Jsonc:
-		if e, bad := json.validate(ins.data, .Jsonc, limits = check_limits(run)).?; bad {
+		if e, bad := json.validate(ins.data, {dialect = .Jsonc, limits = check_limits(run)}).?; bad {
 			fail_input(run, e)
 		}
 	case:
@@ -98,7 +98,7 @@ check_texts :: proc(run: ^Run, ins: ^Inputs) {
 		}
 		src := ins.data[at:limit]
 		end := len(src)
-		e, bad := json.validate(src, limits = limits).?
+		e, bad := json.validate(src, {limits = limits}).?
 		if bad && e.kind == .Trailing && trailing {
 			end, bad = int(e.offset), false
 		}
@@ -126,7 +126,7 @@ check_records :: proc(run: ^Run, src: []byte) {
 	// separator or the input's end may have cut.
 	first := err
 	for f in faults {
-		if e, bad := json.validate(src[f.lo:f.hi], limits = limits).?; bad {
+		if e, bad := json.validate(src[f.lo:f.hi], {limits = limits}).?; bad {
 			e = cut_by_next_byte(src, int(f.lo), int(f.hi), e, .Json, limits)
 			e.offset += f.lo
 			first = e

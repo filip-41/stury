@@ -207,7 +207,7 @@ test_unmarshal_checks_unread_numbers_as_validate_does :: proc(t: ^testing.T) {
 			src := transmute([]byte)doc
 			for limits in ([]json.Limits{{}, digits_cap}) {
 				opts := json.Unmarshal_Opts{limits = limits}
-				want, refused := json.validate(src, limits = limits).?
+				want, refused := json.validate(src, {limits = limits}).?
 				v: Um_Head
 				read := um_err(json.unmarshal(src, &v, opts, nil, context.temp_allocator))
 				checked := um_err(json.unmarshal_check(src, Um_Head, opts))

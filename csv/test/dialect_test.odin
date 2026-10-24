@@ -70,7 +70,7 @@ test_dialect_options :: proc(t: ^testing.T) {
 		{delimiter = '\t', quoting = .None, escapes = .Backslash, comment = '\\'},
 	}
 	for d in refused {
-		testing.expectf(t, csv.validate(src, d) == csv.Error{kind = .Bad_Option}, "%v: validate accepted", d)
+		testing.expectf(t, csv.validate(src, {dialect = d}) == csv.Error{kind = .Bad_Option}, "%v: validate accepted", d)
 		_, rerr := collect(src, d)
 		testing.expectf(t, rerr == csv.Error{kind = .Bad_Option}, "%v: records %v", d, rerr)
 		rows: []Text
@@ -82,9 +82,9 @@ test_dialect_options :: proc(t: ^testing.T) {
 	}
 	accepted := []csv.Dialect{csv.TSV, {quoting = .None, comment = '"'}, {comment = '#', ragged = true}, {quoting = .None, escapes = .Backslash, comment = '\t'}}
 	for d in accepted {
-		testing.expectf(t, csv.validate(src, d) == nil, "%v: validate refused", d)
+		testing.expectf(t, csv.validate(src, {dialect = d}) == nil, "%v: validate refused", d)
 	}
-	testing.expect_value(t, csv.validate(src, limits = {max_fields = -1}), csv.Error{kind = .Bad_Option})
+	testing.expect_value(t, csv.validate(src, {limits = {max_fields = -1}}), csv.Error{kind = .Bad_Option})
 }
 
 @(test)
@@ -129,13 +129,13 @@ test_max_fields :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		src := transmute([]byte)c.src
-		got := csv.validate(src, c.dialect, limits = {max_fields = c.max})
+		got := csv.validate(src, {dialect = c.dialect, limits = {max_fields = c.max}})
 		testing.expectf(t, got == c.want, "%q: validate %v, want %v", c.src, got, c.want)
 		_, rerr := collect(src, c.dialect, limits = {max_fields = c.max})
 		testing.expectf(t, rerr == c.want, "%q: records %v, want %v", c.src, rerr, c.want)
-		doc, derr := csv.build(src, c.dialect, header = false, limits = {max_fields = c.max})
+		doc, derr := csv.build(src, {dialect = c.dialect, limits = {max_fields = c.max}, no_header = true})
 		testing.expectf(t, derr == c.want, "%q: build %v, want %v", c.src, derr, c.want)
-		csv.document_destroy(&doc)
+		csv.destroy(&doc)
 	}
 	Text :: struct {
 		a: string,
@@ -150,15 +150,15 @@ test_max_fields :: proc(t: ^testing.T) {
 test_strictness :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("a,\xFF\n")
 	testing.expect_value(t, csv.validate(src), csv.Error{2, .Bad_Char})
-	testing.expect_value(t, csv.validate(src, strictness = .Structural), nil)
-	testing.expect_value(t, csv.validate(src, strictness = .Lazy), nil)
+	testing.expect_value(t, csv.validate(src, {strictness = .Structural}), nil)
+	testing.expect_value(t, csv.validate(src, {strictness = .Lazy}), nil)
 	recs, err := collect(src, {}, .Structural)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(recs), 1)
 	// The structure is judged whatever the strictness.
-	testing.expect_value(t, csv.validate(transmute([]byte)string("a\xFF\"b"), strictness = .Structural), csv.Error{2, .Bad_Char})
-	testing.expect_value(t, csv.validate(transmute([]byte)string("\"a\"\xFF"), strictness = .Structural), csv.Error{3, .Bad_Char})
-	testing.expect_value(t, csv.validate(transmute([]byte)string("a\\\xFF"), csv.TSV, .Structural), csv.Error{1, .Bad_Escape})
+	testing.expect_value(t, csv.validate(transmute([]byte)string("a\xFF\"b"), {strictness = .Structural}), csv.Error{2, .Bad_Char})
+	testing.expect_value(t, csv.validate(transmute([]byte)string("\"a\"\xFF"), {strictness = .Structural}), csv.Error{3, .Bad_Char})
+	testing.expect_value(t, csv.validate(transmute([]byte)string("a\\\xFF"), {dialect = csv.TSV, strictness = .Structural}), csv.Error{1, .Bad_Escape})
 }
 
 // `.Lazy` judges the UTF-8 of the header and of the cells a field reads, and of no other byte.

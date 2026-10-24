@@ -23,7 +23,7 @@ test_jsonc_comments_attach_to_rows :: proc(t: ^testing.T) {
   // foot of root
 } // tail
 `)
-	doc, err := json.build(src, dialect = .Jsonc)
+	doc, err := json.build(src, {dialect = .Jsonc})
 	defer json.destroy(&doc)
 	testing.expect(t, err == nil)
 	Want :: struct {
@@ -66,18 +66,18 @@ test_jsonc_comments_attach_to_rows :: proc(t: ^testing.T) {
 @(test)
 test_jsonc_marshal_document_keeps_comments :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("// head\n{\n  // about a\n  \"a\": /* in a */ 1, // after a\n  \"b\": [1, 2,],\n  \"e\": {\n    // empty\n  },\n} // tail\n")
-	doc, err := json.build(src, dialect = .Jsonc)
+	doc, err := json.build(src, {dialect = .Jsonc})
 	defer json.destroy(&doc)
 	testing.expect(t, err == nil)
 	pretty, perr := json.marshal(&doc, {pretty = true}, context.temp_allocator)
-	testing.expect_value(t, perr, json.Encode_Error.None)
+	testing.expect_value(t, perr, json.Marshal_Error.None)
 	testing.expect_value(t, string(pretty), "// head\n{\n\t// about a\n\t\"a\": /* in a */ 1, // after a\n\t\"b\": [\n\t\t1,\n\t\t2\n\t],\n\t\"e\": {\n\t\t// empty\n\t}\n} // tail\n")
 	compact, cerr := json.marshal(&doc, {}, context.temp_allocator)
-	testing.expect_value(t, cerr, json.Encode_Error.None)
+	testing.expect_value(t, cerr, json.Marshal_Error.None)
 	testing.expect_value(t, string(compact), "// head\n{// about a\n\"a\":/* in a */1,// after a\n\"b\":[1,2],\"e\":{// empty\n}}// tail\n")
 	// Both read back as the same JSONC document.
 	for out in ([]string{string(pretty), string(compact)}) {
-		again, aerr := json.build(transmute([]byte)out, dialect = .Jsonc)
+		again, aerr := json.build(transmute([]byte)out, {dialect = .Jsonc})
 		testing.expect(t, aerr == nil, out)
 		testing.expect_value(t, len(again.facts), len(doc.facts))
 		for cm, i in again.facts {
@@ -91,7 +91,7 @@ test_jsonc_marshal_document_keeps_comments :: proc(t: ^testing.T) {
 
 	// Two trailing line comments: the second starts its own line, or it would read as part of the first.
 	trail := transmute([]byte)string("[] // c\n// d\n")
-	tdoc, _ := json.build(trail, dialect = .Jsonc)
+	tdoc, _ := json.build(trail, {dialect = .Jsonc})
 	defer json.destroy(&tdoc)
 	tout, _ := json.marshal(&tdoc, {pretty = true}, context.temp_allocator)
 	testing.expect_value(t, string(tout), "[] // c\n// d\n")
@@ -132,7 +132,7 @@ test_jsonc_comment_edits :: proc(t: ^testing.T) {
 	for c in cases {
 		out, err := json.edit_comment(src, c.path, c.place, c.text, .Insert, context.temp_allocator)
 		testing.expect_value(t, err, nil)
-		doc, berr := json.build(out, context.temp_allocator, dialect = .Jsonc)
+		doc, berr := json.build(out, {dialect = .Jsonc}, context.temp_allocator)
 		testing.expect(t, berr == nil, string(out))
 		hit := false
 		for cm in doc.facts {
@@ -145,7 +145,7 @@ test_jsonc_comment_edits :: proc(t: ^testing.T) {
 	for bare in ([]string{"human", " human"}) {
 		out, berr := json.edit_comment(src, ".depth", .Lead, bare, .Insert, context.temp_allocator)
 		testing.expect_value(t, berr, nil)
-		doc, derr := json.build(out, context.temp_allocator, dialect = .Jsonc)
+		doc, derr := json.build(out, {dialect = .Jsonc}, context.temp_allocator)
 		testing.expect(t, derr == nil, string(out))
 		hit := false
 		for cm in doc.facts {
@@ -175,7 +175,7 @@ test_jsonc_comment_edits :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(out[:30]), "{\n  \"name\": \"stury\", // short\n")
 	out, err = json.edit_comment(src, ".tags[]", .Trail, "", .Remove, context.temp_allocator)
 	testing.expect_value(t, err, nil)
-	testing.expect(t, json.validate(out, .Jsonc) == nil)
+	testing.expect(t, json.validate(out, {dialect = .Jsonc}) == nil)
 	testing.expect(t, strings.has_suffix(string(out), "\"a\",\n    \"b\"\n    // end of tags\n  ]\n}\n"), string(out))
 }
 
@@ -189,8 +189,8 @@ test_jsonc_line_comment_ends_at_cr :: proc(t: ^testing.T) {
 	}
 	for c in ([]Trail{{"1 // c\r2", 7}, {"1 // c\n2", 7}, {"1 // c\r\n2", 8}}) {
 		src := transmute([]byte)c.src
-		testing.expect_value(t, json.validate(src, .Jsonc), json.Error{offset = c.at, kind = .Trailing})
-		doc, err := json.build(src, dialect = .Jsonc)
+		testing.expect_value(t, json.validate(src, {dialect = .Jsonc}), json.Error{offset = c.at, kind = .Trailing})
+		doc, err := json.build(src, {dialect = .Jsonc})
 		testing.expect_value(t, err, json.Error{offset = c.at, kind = .Trailing})
 		json.destroy(&doc)
 	}
@@ -198,7 +198,7 @@ test_jsonc_line_comment_ends_at_cr :: proc(t: ^testing.T) {
 	for brk in ([]string{"\r", "\n", "\r\n"}) {
 		src_text, _ := strings.replace_all("{|// head|\"a\": 1 // note|}|", "|", brk, context.temp_allocator)
 		src := transmute([]byte)src_text
-		doc, err := json.build(src, dialect = .Jsonc)
+		doc, err := json.build(src, {dialect = .Jsonc})
 		defer json.destroy(&doc)
 		testing.expect_value(t, err, nil)
 		testing.expect_value(t, len(doc.rows), 2)
@@ -219,7 +219,7 @@ test_jsonc_line_comment_ends_at_cr :: proc(t: ^testing.T) {
 
 		// An entry on the line after a line comment goes with its own line and break.
 		two, _ := strings.replace_all("{|\"a\": 1, // x|\"b\": 2|}", "|", brk, context.temp_allocator)
-		out, eerr = json.remove(transmute([]byte)two, ".b", context.temp_allocator, .Jsonc)
+		out, eerr = json.remove(transmute([]byte)two, ".b", .Jsonc, context.temp_allocator)
 		testing.expect_value(t, eerr, nil)
 		want, _ = strings.replace_all("{|\"a\": 1, // x|}", "|", brk, context.temp_allocator)
 		testing.expect_value(t, string(out), want)
@@ -233,12 +233,12 @@ test_jsonc_refused_comment_is_out_of_memory :: proc(t: ^testing.T) {
 	src := raw("1 // c")
 	budget := Budget{backing = context.allocator}
 	facts := make([dynamic]json.Fact, budget_allocator(&budget))
-	testing.expect_value(t, json.validate(src, .Jsonc, facts = &facts), json.Error{kind = .Out_Of_Memory})
+	testing.expect_value(t, json.validate(src, {dialect = .Jsonc}, &facts), json.Error{kind = .Out_Of_Memory})
 	delete(facts)
 
 	sweep := Budget_Sweep{limit = 100}
 	for b, k in next_budget(&sweep) {
-		doc, err := json.build(src, budget_allocator(b), dialect = .Jsonc)
+		doc, err := json.build(src, {dialect = .Jsonc}, budget_allocator(b))
 		json.destroy(&doc)
 		if !b.refused {
 			testing.expect_value(t, err, nil)
@@ -263,10 +263,10 @@ test_jsonc_comment_bytes_judged_as_string_bytes :: proc(t: ^testing.T) {
 			for open in ([]string{"1 //", "1 /*"}) {
 				for pad in pads {
 					src := strings.concatenate({open, pad, body, room}, context.temp_allocator)
-					e, bad := json.validate(raw(src), .Jsonc).?
+					e, bad := json.validate(raw(src), {dialect = .Jsonc}).?
 					at := want.offset + u64(len(open) + len(pad) - 1) if want.kind == .Bad_Char else u64(len(src))
 					testing.expectf(t, bad && e.kind == want.kind && e.offset == at, "%q: %v, string %v", src, e, want)
-					doc, berr := json.build(raw(src), dialect = .Jsonc)
+					doc, berr := json.build(raw(src), {dialect = .Jsonc})
 					testing.expectf(t, berr == e, "%q: build %v, validate %v", src, berr, e)
 					json.destroy(&doc)
 				}
@@ -274,7 +274,7 @@ test_jsonc_comment_bytes_judged_as_string_bytes :: proc(t: ^testing.T) {
 		}
 	}
 	for src in ([]string{"1 // tab\there é \x7f\n", "1 /* a\r\nb\tc é 𝄞 */", "1 // a\r", "1 // é", "1 /* 0123456789abcdef é * / 0123456789abcdef \t\r\n**/                  ", "1 // 0123456789abcdef é \t 0123456789abcdef\r\n                  "}) {
-		testing.expectf(t, json.validate(raw(src), .Jsonc) == nil, "%q", src)
+		testing.expectf(t, json.validate(raw(src), {dialect = .Jsonc}) == nil, "%q", src)
 	}
 }
 
@@ -287,11 +287,11 @@ test_jsonc_marshal_trailing_newline_after_line_comment :: proc(t: ^testing.T) {
 		want:   string,
 	}
 	for c in ([]Case{{"[1] // trail\n", false, "[1]// trail\n"}, {"[1] // trail\n", true, "[\n\t1\n] // trail\n"}, {"[1] /* t */", false, "[1]/* t */\n"}}) {
-		doc, err := json.build(raw(c.src), dialect = .Jsonc)
+		doc, err := json.build(raw(c.src), {dialect = .Jsonc})
 		defer json.destroy(&doc)
 		testing.expect_value(t, err, nil)
 		out, merr := json.marshal(&doc, {pretty = c.pretty, trailing_newline = true}, context.temp_allocator)
-		testing.expect_value(t, merr, json.Encode_Error.None)
+		testing.expect_value(t, merr, json.Marshal_Error.None)
 		testing.expect_value(t, string(out), c.want)
 	}
 }
@@ -309,9 +309,9 @@ test_jsonc_edits_lay_out_as_json :: proc(t: ^testing.T) {
 	REMOVE :: -2
 	run :: proc(c: Case, d: json.Dialect) -> ([]byte, Maybe(json.Path_Error)) {
 		if c.at == REMOVE {
-			return json.remove(raw(c.src), c.path, context.temp_allocator, d)
+			return json.remove(raw(c.src), c.path, d, context.temp_allocator)
 		}
-		return json.insert(raw(c.src), c.path, c.at, 9, context.temp_allocator, d)
+		return json.insert(raw(c.src), c.path, c.at, 9, d, context.temp_allocator)
 	}
 	plain := []Case{
 		{"[1 , 2]", ".", 1, "[1 , 9 , 2]"},
@@ -330,7 +330,7 @@ test_jsonc_edits_lay_out_as_json :: proc(t: ^testing.T) {
 			testing.expectf(t, err == nil && string(out) == c.want, "%v %q %s %d: %q %v, want %q", d, c.src, c.path, c.at, out, err, c.want)
 		}
 	}
-	obj, oerr := json.insert(raw("{\"a\" : 1 ,\n \"b\" : 2}"), ".", "c", 3, context.temp_allocator, .Jsonc)
+	obj, oerr := json.insert(raw("{\"a\" : 1 ,\n \"b\" : 2}"), ".", "c", 3, .Jsonc, context.temp_allocator)
 	testing.expect_value(t, oerr, nil)
 	testing.expect_value(t, string(obj), "{\"a\" : 1 ,\n \"b\" : 2 ,\n \"c\" : 3}")
 
@@ -343,7 +343,7 @@ test_jsonc_edits_lay_out_as_json :: proc(t: ^testing.T) {
 	}
 	for c in commented {
 		out, err := run(c, .Jsonc)
-		testing.expectf(t, err == nil && json.validate(out, .Jsonc) == nil, "%q %s %d: %q %v", c.src, c.path, c.at, out, err)
+		testing.expectf(t, err == nil && json.validate(out, {dialect = .Jsonc}) == nil, "%q %s %d: %q %v", c.src, c.path, c.at, out, err)
 		testing.expectf(t, string(out) == c.want, "%q %s %d: %q, want %q", c.src, c.path, c.at, out, c.want)
 	}
 }
@@ -359,18 +359,18 @@ test_jsonc_raw_is_judged_as_jsonc :: proc(t: ^testing.T) {
 	r: R
 	testing.expect_value(t, json.unmarshal(raw(`{"r":[1, /*c*/ 2,]}`), &r, {dialect = .Jsonc}, nil, context.temp_allocator), nil)
 	testing.expect_value(t, string(r.r), `[1, /*c*/ 2,]`)
-	out, err := json.set(raw(`{"x": /*k*/ 0}`), ".x", r.r, context.temp_allocator, dialect = .Jsonc)
+	out, err := json.set(raw(`{"x": /*k*/ 0}`), ".x", r.r, dialect = .Jsonc, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), `{"x": /*k*/ [1, /*c*/ 2,]}`)
-	out, err = json.insert(raw(`[0]`), ".", 0, json.Raw("[1,]"), context.temp_allocator, .Jsonc)
+	out, err = json.insert(raw(`[0]`), ".", 0, json.Raw("[1,]"), .Jsonc, context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), `[[1,],0]`)
 
-	_, err = json.set(raw(`{"x":0}`), ".x", r.r, context.temp_allocator)
-	testing.expect_value(t, edit_err(t, err, .Encode).encode, json.Encode_Error.Bad_Raw)
+	_, err = json.set(raw(`{"x":0}`), ".x", r.r, allocator = context.temp_allocator)
+	testing.expect_value(t, edit_err(t, err, .Encode).encode, json.Marshal_Error.Bad_Raw)
 	for swallows in ([]json.Raw{"1 // c", "1 /* c */"}) {
-		_, err = json.set(raw(`[0, 1]`), ".[0]", swallows, context.temp_allocator, dialect = .Jsonc)
-		testing.expect_value(t, edit_err(t, err, .Encode).encode, json.Encode_Error.Bad_Raw)
+		_, err = json.set(raw(`[0, 1]`), ".[0]", swallows, dialect = .Jsonc, allocator = context.temp_allocator)
+		testing.expect_value(t, edit_err(t, err, .Encode).encode, json.Marshal_Error.Bad_Raw)
 	}
 }
 
@@ -381,7 +381,7 @@ test_jsonc_lone_slash_is_bad_char :: proc(t: ^testing.T) {
 		src: string,
 		at:  u64,
 	}{{"1/", 1}, {"1/2", 1}, {"/", 0}}) {
-		e, bad := json.validate(raw(c.src), .Jsonc).?
+		e, bad := json.validate(raw(c.src), {dialect = .Jsonc}).?
 		testing.expectf(t, bad && e.kind == .Bad_Char && e.offset == c.at, "%q: %v", c.src, e)
 	}
 }
@@ -390,7 +390,7 @@ test_jsonc_lone_slash_is_bad_char :: proc(t: ^testing.T) {
 @(test)
 test_jsonc_trailing_comma_behind_a_comment :: proc(t: ^testing.T) {
 	for src in ([]string{"[1, /*c*/]", `{ "a": 1, /*c*/ }`, "[1, // c\n]"}) {
-		testing.expectf(t, json.validate(raw(src), .Jsonc) == nil, "%q", src)
+		testing.expectf(t, json.validate(raw(src), {dialect = .Jsonc}) == nil, "%q", src)
 	}
 }
 
@@ -403,7 +403,7 @@ test_jsonc_refused_attach_stack_is_out_of_memory :: proc(t: ^testing.T) {
 	limits := json.Limits{max_depth = 5000}
 	sweep := Budget_Sweep{limit = 200}
 	for b, k in next_budget(&sweep) {
-		doc, err := json.build(raw(src), budget_allocator(b), limits, .Jsonc)
+		doc, err := json.build(raw(src), {dialect = .Jsonc, limits = limits}, budget_allocator(b))
 		json.destroy(&doc)
 		if !b.refused {
 			testing.expect_value(t, err, nil)

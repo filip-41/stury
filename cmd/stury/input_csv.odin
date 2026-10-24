@@ -135,13 +135,13 @@ start_cells :: proc(ins: ^Inputs, c: ^Cells, f: ^os.File) -> bool {
 			}
 			c.data = all
 		}
-		c.whole = csv.records(c.data, c.dialect, allocator = heap)
+		c.whole = csv.records(c.data, {dialect = c.dialect}, heap)
 		c.it = &c.whole
 		return true
 	}
 	c.streamed = true
 	c.source = {ins, f, is_regular_file(f), 0, nil}
-	c.rr = csv.records_from({cells_read, &c.source}, c.dialect, allocator = heap)
+	c.rr = csv.records_from({cells_read, &c.source}, {dialect = c.dialect}, heap)
 	if c.source.regular {
 		c.rr.chunk = CELLS_CHUNK
 	}
@@ -231,15 +231,15 @@ record_object :: proc(c: ^Cells, rec: csv.Record) -> jq.Value {
 // report it as a filter run does.
 check_cells_text :: proc(ins: ^Inputs, dialect: csv.Dialect, runner: ^csv.Batch_Runner) -> string {
 	c := Cells{dialect = dialect, data = ins.data}
-	c.whole = csv.records(c.data, dialect, allocator = runtime.heap_allocator())
+	c.whole = csv.records(c.data, {dialect = dialect}, runtime.heap_allocator())
 	c.it = &c.whole
-	defer csv.records_destroy(&c.whole)
+	defer csv.destroy(&c.whole)
 	if rec, ok := csv.next_record(&c.whole); ok {
 		if msg := read_header(ins, &c, rec); msg != "" {
 			return msg
 		}
 	}
-	e, bad := csv.validate(c.data, dialect, runner = runner).?
+	e, bad := csv.validate(c.data, {dialect = dialect}, runner).?
 	if !bad {
 		return ""
 	}
@@ -336,9 +336,9 @@ cells_fault_text :: proc(c: ^Cells, window: []byte, e: csv.Error) -> string {
 @(private = "file")
 end_cells_file :: proc(c: ^Cells) {
 	if c.streamed {
-		csv.records_destroy(&c.rr)
+		csv.destroy(&c.rr)
 	} else {
-		csv.records_destroy(&c.whole)
+		csv.destroy(&c.whole)
 		free_data({c.data, c.mapped})
 	}
 	close_file(c.file)

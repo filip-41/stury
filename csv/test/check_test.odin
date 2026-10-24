@@ -24,7 +24,7 @@ test_check_bounded_memory :: proc(t: ^testing.T) {
 		score: f64,
 	}
 	plan := csv.type_plan_init([]Scored)
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	// The plan lowers on first use, in its own allocator.
 	testing.expect_value(t, csv.unmarshal_check(src, []Scored, plan = &plan), nil)
 
@@ -61,7 +61,7 @@ test_check_runs_no_hooks :: proc(t: ^testing.T) {
 			},
 		},
 	)
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	src := "when,name\nanything,x\n"
 	events: []Event
 	err := csv.unmarshal(transmute([]byte)src, &events, plan = &plan, allocator = context.temp_allocator)
@@ -78,7 +78,7 @@ test_check_refusals_before_the_read :: proc(t: ^testing.T) {
 	testing.expect_value(t, csv.unmarshal_check(nil, []Row, {dialect = {delimiter = '"'}}).?.kind, csv.Unmarshal_Error_Kind.Bad_Option)
 	testing.expect_value(t, csv.unmarshal_check(nil, []int).?.kind, csv.Unmarshal_Error_Kind.Unsupported)
 	plan := csv.type_plan_init([]Strict)
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	testing.expect_value(t, csv.unmarshal_check(nil, []Row, plan = &plan).?.kind, csv.Unmarshal_Error_Kind.Plan_Mismatch)
 	// An empty text has no records.
 	testing.expect_value(t, csv.unmarshal_check(nil, []Strict), nil)

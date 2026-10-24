@@ -13,10 +13,12 @@ import "core:strings"
 Text_Builder :: strings.Builder
 
 // Returns the 1-based line and column of `err` in `src`. Columns count bytes. Returns (0, 0) when `err` has no
-// byte position: an offset past `src`, `.Source_Too_Wide` (a limit), `.Out_Of_Memory` or `.Bad_Option`.
+// byte position in `src`: an offset past `src`, `.Source_Too_Wide` (a limit), `.Out_Of_Memory`, `.Bad_Option`,
+// `.Over_Capacity` or `.Bad_Path` (whose offset is into the path text).
 @(require_results)
 error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
-	if err.kind == .Source_Too_Wide || err.kind == .Out_Of_Memory || err.kind == .Bad_Option {
+	#partial switch err.kind {
+	case .Source_Too_Wide, .Out_Of_Memory, .Bad_Option, .Over_Capacity, .Bad_Path:
 		return 0, 0
 	}
 	line, col, _ = line_col(src, err.offset)

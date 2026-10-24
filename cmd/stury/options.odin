@@ -35,29 +35,10 @@ Usage:	stury [options] <jq filter> [file...]
 	stury [options] --jsonargs <jq filter> [JSON_TEXTS...]
 	stury check [--from format|--seq] [--strict-limits] [--max-depth n] [file...]
 
-stury is a tool for processing JSON inputs, applying the given filter to
-its JSON text inputs and producing the filter's results as JSON on
-standard output, as jq 1.8.2 does; stury check only judges its inputs,
-accepting every text stury . accepts, but requiring at least one.
-
-Unlike jq, stury reads JSON strictly (RFC 8259): 01, 1., NaN, nan,
+stury applies the filter to its JSON text inputs and writes the results as
+JSON, as jq 1.8.2 does, but reads strictly (RFC 8259): 01, 1., NaN, nan,
 Infinity, invalid UTF-8 in a string, a NUL after a value and nesting past
---max-depth (1024) are parse errors, and a parse error names the fault
-found and where.
-
-The simplest filter is ., which copies stury's input to its output
-unmodified except for formatting. For more advanced filters see
-the jq(1) manpage ("man jq") and/or https://jqlang.org/.
-
-Example:
-
-	$ echo '{"foo": 0}' | stury .
-	{
-	  "foo": 0
-	}
-
-	$ echo '{"foo": 01}' | stury .
-	stury: parse error: Invalid numeric literal at line 1, column 10
+--max-depth are parse errors. For filters see jq(1) and https://jqlang.org/.
 
 `
 
@@ -85,28 +66,6 @@ HELP_OPTIONS :: `Command options:
       --stream-errors       implies --stream and report parse error as
                             an array;
       --seq                 parse input/output as application/json-seq;
-      --from format         read json (the default), jsonc (comments and
-                            trailing commas), ndjson (one JSON text per line;
-                            a line of two texts is a parse error, unlike a
-                            JSON stream), csv (RFC 4180) or tsv (jq's @tsv
-                            escapes); csv and tsv take the first record as
-                            the field names, and each later one is an input
-                            object of strings, null for an empty unquoted
-                            cell;
-      --to format           write json (the default), jsonc (an input value
-                            is printed with its comments, which .@comment,
-                            .@comment_inline and .@comment_foot read),
-                            ndjson (like -c) or csv or tsv (each output is a
-                            record: an object a row under the first object's
-                            keys as the header, an array or scalar a row
-                            with none);
-      --grow-header         with --to csv or tsv, hold the output and write
-                            a header of every key, in the order first seen;
-      --ndjson, --csv, --tsv, --jsonc
-                            --from and --to of that format, either of which
-                            an explicit --from or --to overrides;
-      --max-depth n         refuse nesting past n levels (default 1024;
-                            jq's is 10000);
   -f, --from-file           load the filter from a file;
   -L, --library-path dir    search modules from the directory;
       --arg name value      set $name to the string value;
@@ -124,17 +83,19 @@ HELP_OPTIONS :: `Command options:
   -h, --help                show the help;
   --                        terminates argument processing;
 
-Named arguments are also available as $ARGS.named[], while
-positional arguments are available as $ARGS.positional[].
+stury's own options:
+  check                     judge the inputs, print nothing when valid;
+      --from format         read json (default), jsonc, ndjson, csv or tsv;
+      --to format           write json (default), jsonc, ndjson, csv or tsv;
+      --ndjson, --csv, --tsv, --jsonc
+                            --from and --to of that format;
+      --grow-header         with --to csv or tsv, write a header of every key;
+      --max-depth n         refuse nesting past n levels (default 1024);
+      --strict-limits       with check, keep the library's number limits.
 
-stury check also takes --strict-limits, which keeps the library's
-limits: numbers of at most 256 digits and a scale of at most 4096. A
-filter reads numbers as far as they can be held.
-
-stury check, --from, --to, --grow-header, --max-depth, --strict-limits and the
-format aliases (--csv, --tsv, --jsonc, --ndjson) are
-stury's own; stury(1) and docs/cli.md in stury's source
-document them and the input differences from jq in full.
+Named arguments are also available as $ARGS.named[], positional ones as
+$ARGS.positional[]. The input differences from jq and each stury option in
+full: docs/cli.md in stury's source, or man stury.
 `
 
 Opts :: struct {
@@ -626,7 +587,7 @@ load_file :: proc(path: string, raw: bool) -> (v: jq.Value, msg: string) {
 		if jq.read_dialect == .Jsonc { // one document per input, as for the files
 			end, trailing = len(data), false
 		}
-		if e, bad := json.validate(data[at:end], jq.read_dialect, limits = jq.lifted).?; bad && e.kind == .Trailing && trailing {
+		if e, bad := json.validate(data[at:end], {dialect = jq.read_dialect, limits = jq.lifted}).?; bad && e.kind == .Trailing && trailing {
 			end = at + int(e.offset)
 		}
 		x, err := jq.read_text(data[at:end])

@@ -33,11 +33,11 @@ ROWS_WALK_BYTES :: 128
 encode_rows :: proc(
 	src: []byte,
 	nodes: []walk.Row,
-	opts: Encode_Opts,
+	opts: Marshal_Opts,
 	allocator := context.allocator,
 ) -> (
 	out: []byte,
-	err: Encode_Error,
+	err: Marshal_Error,
 ) {
 	if len(nodes) == 0 || nodes[0].subtree_size != u32(len(nodes)) {
 		return nil, .Bad_State
@@ -85,7 +85,7 @@ encode_rows :: proc(
 
 // `buf[:n]` re-escaped, in `buf` grown to fit, and on a refusal `buf` is released.
 @(private)
-reescape_bytes :: proc(buf: []byte, n: int, flags: Reescape, allocator: mem.Allocator) -> ([]byte, Encode_Error) {
+reescape_bytes :: proc(buf: []byte, n: int, flags: Reescape, allocator: mem.Allocator) -> ([]byte, Marshal_Error) {
 	text := transmute([dynamic]u8)mem.Raw_Dynamic_Array{raw_data(buf), n, len(buf), allocator}
 	if err := reescape_tail(&text, 0, flags); err != .None {
 		delete(text)
@@ -106,7 +106,7 @@ pretty_rows :: #force_inline proc(
 	k: ^Doc_Sink,
 	allocator: mem.Allocator,
 	$STREAM: bool,
-) -> (n: int, grown: []byte, err: Encode_Error) {
+) -> (n: int, grown: []byte, err: Marshal_Error) {
 	if tabs {
 		return rows_pretty(out, src, nodes, span, ind, k, allocator, true, STREAM)
 	}
@@ -114,7 +114,7 @@ pretty_rows :: #force_inline proc(
 }
 
 // `encode_rows` written to `w` as it is made, from a buffer of about SINK_FLUSH_AT bytes in `allocator`.
-encode_rows_to_writer :: proc(w: io.Writer, src: []byte, nodes: []walk.Row, opts: Encode_Opts, allocator := context.allocator) -> Encode_Error {
+encode_rows_to_writer :: proc(w: io.Writer, src: []byte, nodes: []walk.Row, opts: Marshal_Opts, allocator := context.allocator) -> Marshal_Error {
 	if len(nodes) == 0 || nodes[0].subtree_size != u32(len(nodes)) {
 		return .Bad_State
 	}
@@ -126,7 +126,7 @@ encode_rows_to_writer :: proc(w: io.Writer, src: []byte, nodes: []walk.Row, opts
 	defer mem.free(raw_data(k.buf), allocator)
 	root := nodes[0]
 	n: int
-	err: Encode_Error
+	err: Marshal_Error
 	switch {
 	case opts.pretty:
 		ind := indent_of(opts)
@@ -149,7 +149,7 @@ encode_rows_to_writer :: proc(w: io.Writer, src: []byte, nodes: []walk.Row, opts
 
 // The span minified in SINK_FLUSH_AT pieces, each handed to the writer. Returns the offset left in the buffer.
 @(private)
-minify_to :: proc(k: ^Doc_Sink, span: []byte) -> (left: int, err: Encode_Error) {
+minify_to :: proc(k: ^Doc_Sink, span: []byte) -> (left: int, err: Marshal_Error) {
 	state: Minify_State
 	w := 0
 	for at := 0; at < len(span); at += spell.SINK_FLUSH_AT {
@@ -228,7 +228,7 @@ Open_Container :: struct {
 // `COPY_SLACK`. Returns the count written. With STREAM `out` is `k.buf`, handed to the writer as it fills, and the
 // count is what is left in it.
 @(private)
-rows_compact :: proc(out: [^]u8, src: []byte, nodes: []walk.Row, k: ^Doc_Sink, $STREAM: bool) -> (n: int, err: Encode_Error) #no_bounds_check {
+rows_compact :: proc(out: [^]u8, src: []byte, nodes: []walk.Row, k: ^Doc_Sink, $STREAM: bool) -> (n: int, err: Marshal_Error) #no_bounds_check {
 	r := Compact_Run{out = out, src = src, shift = int(nodes[0].lo)}
 	stack: [MAX_DEPTH]Open_Container = ---
 	depth := 0
@@ -377,7 +377,7 @@ rows_pretty :: #force_no_inline proc(
 	k: ^Doc_Sink,
 	allocator: mem.Allocator,
 	$TABS, $STREAM: bool,
-) -> (n: int, grown: []byte, err: Encode_Error) #no_bounds_check {
+) -> (n: int, grown: []byte, err: Marshal_Error) #no_bounds_check {
 	// ends[d] is the row the container at depth d ends before. ends[0] is nil, a row no walk reaches, so the
 	// close loop needs no depth test. Rows are walked by address so the loop holds no index and no length.
 	ends: [MAX_DEPTH + 1][^]walk.Row = ---

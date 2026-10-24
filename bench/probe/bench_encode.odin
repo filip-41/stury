@@ -49,7 +49,7 @@ discard_proc :: proc(data: rawptr, mode: io.Stream_Mode, p: []byte, _: i64, _: i
 
 // Times `marshal` of the built document at `opts`; with `to_writer` it streams into a `Discard` writer.
 // `copy_gb_per_s`, the baseline, times a plain copy of the same bytes into a warm buffer.
-bench_encode_doc :: proc(data: []byte, opts: json.Encode_Opts, to_writer := false) -> bool {
+bench_encode_doc :: proc(data: []byte, opts: json.Marshal_Opts, to_writer := false) -> bool {
 	doc, berr := json.build(data)
 	if berr != nil {
 		return false

@@ -1,4 +1,4 @@
-package bits
+package core
 
 import "core:simd"
 

@@ -16,7 +16,7 @@ import core_pkg "../core"
 //	  escape.
 //	- Rows count from the first record after the header (from the first record when there is no header), as
 //	  `unmarshal`'s paths do.
-//	- The rest is owned by the caller that built it and freed by `document_destroy`.
+//	- The rest is owned by the caller that built it and freed by `destroy`.
 //	- Each field's span takes 16 bytes.
 Document :: struct {
 	src:        []byte,
@@ -39,38 +39,32 @@ Document :: struct {
 	arena:      mem.Dynamic_Arena,
 }
 
-// Read `src` in `dialect` and keep the span of every field. `header` takes the first record as the column
-// names. `strictness` and `limits` are as for `records`; under `.Lazy`, `get_string` also judges the UTF-8 of
+// Read `src` in `opts.dialect` and keep the span of every field. Unless `opts.no_header`, the first record is the
+// column names. `strictness` and `limits` are as for `records`, and `duplicates` is not read; under `.Lazy`, `get_string` also judges the UTF-8 of
 // each string it reads. `err` is the text's first fault, `.Bad_Option` for a dialect or limit the scanner
 // refuses, or `.Out_Of_Memory`; the `Document` is then the zero value.
 @(require_results)
-build :: proc(
-	src: []byte,
-	dialect := Dialect{},
-	header := true,
-	strictness := Strictness.Strict,
-	limits := Limits{},
-	allocator := context.allocator,
-) -> (doc: Document, err: Maybe(Error)) {
-	it := records(src, dialect, strictness, limits, allocator)
-	defer records_destroy(&it)
+build :: proc(src: []byte, opts := Read_Opts{}, allocator := context.allocator) -> (doc: Document, err: Maybe(Error)) {
+	dialect := opts.dialect
+	it := records(src, opts, allocator)
+	defer destroy(&it)
 	if it.err != nil {
 		return {}, it.err
 	}
-	doc = {src = src, dialect = dialect, judge_utf8 = strictness == .Lazy}
+	doc = {src = src, dialect = dialect, judge_utf8 = opts.strictness == .Lazy}
 	doc.names.allocator, doc.fields.allocator, doc.starts.allocator = allocator, allocator, allocator
-	if header {
+	if !opts.no_header {
 		if rec, more := next_record(&it); more {
 			doc.width = len(rec.fields)
 			if _, aerr := append(&doc.names, ..rec.fields); aerr != nil {
-				document_destroy(&doc)
+				destroy(&doc)
 				return {}, Error{kind = .Out_Of_Memory}
 			}
 		}
 	}
 	if dialect.ragged {
 		if _, aerr := append(&doc.starts, 0); aerr != nil {
-			document_destroy(&doc)
+			destroy(&doc)
 			return {}, Error{kind = .Out_Of_Memory}
 		}
 	}
@@ -81,7 +75,7 @@ build :: proc(
 		doc.rows += 1
 		if dialect.ragged {
 			if _, aerr := append(&doc.starts, it.base); aerr != nil {
-				document_destroy(&doc)
+				destroy(&doc)
 				return {}, Error{kind = .Out_Of_Memory}
 			}
 		}
@@ -90,7 +84,7 @@ build :: proc(
 		}
 	}
 	if it.err != nil {
-		document_destroy(&doc)
+		destroy(&doc)
 		return {}, it.err
 	}
 	doc.fields, it.fields = it.fields, {}
@@ -109,7 +103,16 @@ reserve_rest :: proc(it: ^Records, rec: Record) {
 	set_limit(it)
 }
 
-// Free everything a document owns, and empty it. Strings read from it dangle after.
+// Free everything an owner holds, and empty it: a `Document`, the `Records` of `records`, a `Record_Reader` or a
+// `Type_Plan`. Strings read from a document dangle after.
+destroy :: proc {
+	document_destroy,
+	records_free,
+	reader_destroy,
+	type_plan_destroy,
+}
+
+@(private)
 document_destroy :: proc(doc: ^Document) {
 	if doc.decoded_at != nil {
 		mem.dynamic_arena_destroy(&doc.arena)
@@ -177,7 +180,7 @@ field_index :: #force_inline proc(doc: ^Document, row, col: int) -> (i: int, ok:
 	return lo + col, uint(col) < uint(hi - lo)
 }
 
-// The decoded text of header column `col` (`get_string`'s rules), valid until `document_destroy`.
+// The decoded text of header column `col` (`get_string`'s rules), valid until `destroy`.
 @(require_results)
 get_name :: proc(doc: ^Document, col: int) -> (s: string, ok: bool) {
 	if col < 0 || col >= len(doc.names) {
@@ -186,7 +189,7 @@ get_name :: proc(doc: ^Document, col: int) -> (s: string, ok: bool) {
 	return read_text(doc, doc.names[col], col)
 }
 
-// The decoded text of a cell, valid until `document_destroy` (`field_text`): a quoted cell without its quotes
+// The decoded text of a cell, valid until `destroy` (`field_text`): a quoted cell without its quotes
 // and with each `""` as one quote, an escaped cell with each escape as the byte it spells.
 //
 //	- Text with neither is a slice of `doc.src`. Other text is decoded once and kept by the document.

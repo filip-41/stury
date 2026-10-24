@@ -9,7 +9,7 @@ import csv "../"
 test_document_columns_and_bounds :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("id,\"na,me\",id\n1,a,b\n2,c,d\n")
 	doc, err := csv.build(src)
-	defer csv.document_destroy(&doc)
+	defer csv.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	col, ok := csv.column(&doc, "id")
 	testing.expect_value(t, col, 0)
@@ -27,8 +27,8 @@ test_document_columns_and_bounds :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 	testing.expect_value(t, csv.row_fields(&doc, 5) == nil, true)
 
-	headerless, herr := csv.build(src, header = false)
-	defer csv.document_destroy(&headerless)
+	headerless, herr := csv.build(src, {no_header = true})
+	defer csv.destroy(&headerless)
 	testing.expect_value(t, herr, nil)
 	testing.expect_value(t, csv.row_count(&headerless), 3)
 	_, ok = csv.column(&headerless, "id")
@@ -43,7 +43,7 @@ test_document_dialects :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("\xEF\xBB\xBFa\tb\n# note\nx\\ty\t\\n\n")
 	doc: csv.Document
 	err: Maybe(csv.Error)
-	doc, err = csv.build(src, TSV_COMMENTS, allocator = context.temp_allocator)
+	doc, err = csv.build(src, {dialect = TSV_COMMENTS}, context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, csv.row_count(&doc), 1)
 	testing.expect_value(t, csv.column_count(&doc), 2)
@@ -60,7 +60,7 @@ test_document_dialects :: proc(t: ^testing.T) {
 	_, found = csv.get_field(&doc, 0, 2)
 	testing.expect(t, !found)
 
-	ragged, rerr := csv.build(transmute([]byte)string("a,b,c\n1\n2,3,4,5\n"), {ragged = true}, allocator = context.temp_allocator)
+	ragged, rerr := csv.build(transmute([]byte)string("a,b,c\n1\n2,3,4,5\n"), {dialect = {ragged = true}}, context.temp_allocator)
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, len(csv.row_fields(&ragged, 0)), 1)
 	testing.expect_value(t, len(csv.row_fields(&ragged, 1)), 4)
@@ -73,7 +73,7 @@ test_document_dialects :: proc(t: ^testing.T) {
 test_document_scalars :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("i,f,b,s\n42,1.5,true,x\n-7,.5,false,\"1\"\n,,,\n+8,1e3,yes,\n9223372036854775808,1e999,TRUE,\n")
 	doc, err := csv.build(src)
-	defer csv.document_destroy(&doc)
+	defer csv.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	i, ok := csv.get_int(&doc, 0, 0)
 	testing.expect(t, ok && i == 42)
@@ -115,22 +115,22 @@ test_document_scalars :: proc(t: ^testing.T) {
 test_document_refusals :: proc(t: ^testing.T) {
 	_, err := csv.build(transmute([]byte)string("a,b\n1\n"))
 	testing.expect_value(t, err, csv.Error{kind = .Field_Count, offset = 4})
-	_, err = csv.build(nil, csv.Dialect{delimiter = '"'})
+	_, err = csv.build(nil, {dialect = csv.Dialect{delimiter = '"'}})
 	testing.expect_value(t, err, csv.Error{kind = .Bad_Option})
-	_, err = csv.build(transmute([]byte)string("a,b\n1,2\n"), limits = {max_fields = 1})
+	_, err = csv.build(transmute([]byte)string("a,b\n1,2\n"), {limits = {max_fields = 1}})
 	testing.expect_value(t, err, csv.Error{kind = .Limit_Fields})
 	// A document of nothing is a document with no rows.
 	doc, eerr := csv.build(nil)
 	testing.expect_value(t, eerr, nil)
 	testing.expect_value(t, csv.row_count(&doc), 0)
-	csv.document_destroy(&doc)
+	csv.destroy(&doc)
 }
 
 @(test)
 test_document_lazy_judges_strings :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("a,b\nok,\xFF\n")
-	doc, err := csv.build(src, strictness = .Lazy)
-	defer csv.document_destroy(&doc)
+	doc, err := csv.build(src, {strictness = .Lazy})
+	defer csv.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	s, ok := csv.get_string(&doc, 0, 0)
 	testing.expect(t, ok && s == "ok")
@@ -163,8 +163,8 @@ test_document_build_without_room_for_the_guess :: proc(t: ^testing.T) {
 @(test)
 test_document_decoded_once :: proc(t: ^testing.T) {
 	for ragged in ([]bool{false, true}) {
-		doc, err := csv.build(transmute([]byte)string("\"a\"\"b\",c\nx,\"y\"\"\"\n\"\"\"z\",w\n"), {ragged = ragged})
-		defer csv.document_destroy(&doc)
+		doc, err := csv.build(transmute([]byte)string("\"a\"\"b\",c\nx,\"y\"\"\"\n\"\"\"z\",w\n"), {dialect = {ragged = ragged}})
+		defer csv.destroy(&doc)
 		testing.expect_value(t, err, nil)
 		name, _ := csv.get_name(&doc, 0)
 		again, _ := csv.get_name(&doc, 0)

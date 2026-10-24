@@ -194,7 +194,7 @@ test_each_record_matches_the_serial_iterator :: proc(t: ^testing.T) {
 			k := 0
 			for w in want {
 				limits := json.Limits{max_depth = json.MAX_DEPTH - 1} if framing == .Root_Entries else {}
-				e, bad := json.validate(w.bytes, limits = limits).?
+				e, bad := json.validate(w.bytes, {limits = limits}).?
 				if !bad {
 					continue
 				}

@@ -163,7 +163,7 @@ records_after :: proc(run: ^Run, ins: ^Inputs) {
 	if ins.reader != nil && n >= 2 * BATCH_BYTES_PER_FIRST_WORKERS {
 		n = max(n, 2 * READ_AHEAD)
 	}
-	if !found || json.validate(rec.bytes, limits = jq.lifted) != nil || batch_runner(run, n) == nil {
+	if !found || json.validate(rec.bytes, {limits = jq.lifted}) != nil || batch_runner(run, n) == nil {
 		return
 	}
 	ins.lines_tried, ins.line_records = true, true
@@ -192,18 +192,17 @@ scan_outputs :: proc(run: ^Run, src: []byte, trailing: bool) -> (answers: []json
 // it at all (a fixed limit of its engine), which leaves the text to the interpreter.
 scan_text :: proc(run: ^Run, src: []byte, trailing: bool) -> (end: int, err: Maybe(json.Error), refused: bool) {
 	end = len(src)
-	switch e in json.scan(src, &run.req) {
-	case json.Request_Error:
-		return 0, nil, true
-	case json.Error:
-		// Short answers say nothing about the text: the interpreter reads it.
-		if e.kind == .Out_Of_Memory {
+	if e, bad := json.scan(src, &run.req).?; bad {
+		#partial switch e.kind {
+		// A refusal, or short answers that say nothing about the text: the interpreter reads it.
+		case .Over_Capacity, .Bad_Option, .Source_Too_Wide, .Out_Of_Memory:
 			return 0, nil, true
+		case .Trailing:
+			if trailing {
+				return int(e.offset), nil, false
+			}
 		}
-		if e.kind != .Trailing || !trailing {
-			return 0, e, false
-		}
-		end = int(e.offset)
+		return 0, e, false
 	}
 	return end, nil, false
 }

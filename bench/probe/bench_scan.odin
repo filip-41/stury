@@ -49,7 +49,7 @@ dup_read :: proc(data: []byte, mode: Dup_Mode) -> bool {
 	}
 	// `.Skip`: a `.Structural` validate walks every member without resolving a key, so it compares no
 	// decoded text.
-	return json.validate(data, .Json, .Structural) == nil
+	return json.validate(data, {strictness = .Structural}) == nil
 }
 
 bench_dups :: proc(data: []byte, mode: Dup_Mode) -> bool {
@@ -73,7 +73,7 @@ bench_dups :: proc(data: []byte, mode: Dup_Mode) -> bool {
 // the document fails the lane.
 bench_fault :: proc(data: []byte) -> bool {
 	fault_once :: proc(data: []byte, _: struct{}) -> bool {
-		err, has := json.validate(data, .Json, .Strict).?
+		err, has := json.validate(data, {strictness = .Strict}).?
 		if !has {
 			return false // must refuse: the fixture is invalid by construction
 		}
@@ -98,7 +98,7 @@ bench_dom_refusal :: proc(data: []byte, level: json.Strictness) -> bool {
 
 	// Returns false, failing the lane, when the scan does not refuse.
 	refused :: proc(data: []byte, req: ^json.Request({.Dom})) -> bool {
-		// Either refusal counts: a `Request_Error` for the request or an `Error`
+		// Either refusal counts: a request refusal or a syntax `Error`
 		// for a fault in the document.
 		return json.scan(data, req) != nil
 	}

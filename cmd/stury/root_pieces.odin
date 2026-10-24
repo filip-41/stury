@@ -426,7 +426,7 @@ chunk_readable :: proc(c: Root_Chunk, text: []byte) -> bool {
 // What `build_chunk` checks in a chunk, without building it.
 @(private)
 chunk_well_formed :: proc(job: ^Root_Job, c: Root_Chunk, text: []byte) -> bool {
-	if !chunk_readable(c, text) || json.validate(text, limits = chunk_limits(chunk_levels(job, c))) != nil {
+	if !chunk_readable(c, text) || json.validate(text, {limits = chunk_limits(chunk_levels(job, c))}) != nil {
 		return false
 	}
 	if c.alone {

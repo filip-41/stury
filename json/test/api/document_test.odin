@@ -114,7 +114,7 @@ test_child_by_index_deep_agrees_with_the_walk :: proc(t: ^testing.T) {
 // one past the last row.
 @(test)
 test_readers_are_total_over_no_row :: proc(t: ^testing.T) {
-	doc, err := json.build(raw(`{"a":[1,"s"]}`), dialect = .Jsonc)
+	doc, err := json.build(raw(`{"a":[1,"s"]}`), {dialect = .Jsonc})
 	defer json.destroy(&doc)
 	testing.expect(t, err == nil)
 	for i in ([]json.Node{json.NO_NODE, json.Node(len(doc.rows))}) {

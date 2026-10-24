@@ -9,15 +9,13 @@ import "scan/walk"
 
 // The first complete JSON text at the start of `rec`, when `rec` holds one and more bytes follow it. `value`
 // is that text and `fault` is what follows it, at its offset in `rec`. `split` is false for a record that is
-// one text, valid or not, and the caller validates it whole.
+// one text, valid or not, and the caller validates it whole. `opts.duplicates` is not read.
 @(require_results)
 split_record :: proc(
 	rec: []byte,
-	dialect := Dialect.Json,
-	strictness := Strictness.Strict,
-	limits := Limits{},
+	opts := Read_Opts{},
 ) -> (value: []byte, fault: Maybe(Error), split: bool) {
-	e, bad := validate(rec, dialect = dialect, strictness = strictness, limits = limits).?
+	e, bad := validate(rec, opts).?
 	if !bad || e.offset == 0 || e.offset > u64(len(rec)) {
 		return
 	}
@@ -32,7 +30,7 @@ split_record :: proc(
 	if end == 0 || (rec[end - 1] != ']' && rec[end - 1] != '}' && rec[end - 1] != '"') {
 		return
 	}
-	if _, prefix_bad := validate(rec[:int(e.offset)], dialect = dialect, strictness = strictness, limits = limits).?; prefix_bad {
+	if _, prefix_bad := validate(rec[:int(e.offset)], opts).?; prefix_bad {
 		return
 	}
 	return rec[:int(e.offset)], e, true

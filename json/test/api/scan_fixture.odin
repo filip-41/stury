@@ -29,9 +29,13 @@ verdict_under :: proc(src: []byte, strictness: json.Strictness, limits: json.Lim
 
 // The document's fault in a scan's result, or nil (a refusal is not one).
 @(private)
-scan_fault :: proc(err: json.Scan_Error) -> Maybe(json.Error) {
-	e, is_fault := err.(json.Error)
-	if !is_fault {
+scan_fault :: proc(err: Maybe(json.Error)) -> Maybe(json.Error) {
+	e, faulted := err.?
+	if !faulted {
+		return nil
+	}
+	#partial switch e.kind {
+	case .Bad_Option, .Over_Capacity, .Bad_Path:
 		return nil
 	}
 	return e
@@ -41,7 +45,7 @@ scan_fault :: proc(err: json.Scan_Error) -> Maybe(json.Error) {
 @(private)
 Path_Run :: struct {
 	req:     json.Request({.Path}),
-	err:     json.Scan_Error,
+	err:     Maybe(json.Error),
 	answers: []json.Path_Answer, // borrowed from `req`
 }
 
@@ -81,8 +85,8 @@ answer_texts :: proc(answers: []json.Path_Answer, src: string, query: u32 = 0) -
 
 // Expect `err` to be a refusal of kind `want`, and answer it.
 @(private)
-request_refused :: proc(t: ^testing.T, err: json.Scan_Error, want: json.Request_Error_Kind, loc := #caller_location) -> json.Request_Error {
-	r, refused := err.(json.Request_Error)
+request_refused :: proc(t: ^testing.T, err: Maybe(json.Error), want: json.Error_Kind, loc := #caller_location) -> json.Error {
+	r, refused := err.?
 	testing.expectf(t, refused && r.kind == want, "%v, want %v", err, want, loc = loc)
 	return r
 }

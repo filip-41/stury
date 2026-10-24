@@ -161,7 +161,7 @@ Over 24 filters, process start-up included, it is 14.5 times faster than jq and 
 
 - [Library guide](docs/guide.md): usage, allocation and ownership, limits, CSV specifics.
 - API reference: the doc comment on each public name. [json/json.odin](json/json.odin),
-  [csv/csv.odin](csv/csv.odin) and [core/aliases.odin](core/aliases.odin) list the names and their files.
+  [csv/csv.odin](csv/csv.odin) and [core/core.odin](core/core.odin) list the names and their files.
 - [Command line](docs/cli.md), and its manual page [docs/stury.1](docs/stury.1) (`man ./docs/stury.1`).
 - [Benchmarks](docs/benchmarks.md), measured with the harness in [bench/](bench/README.md).
 - [Internals](docs/codec.md), for contributors.

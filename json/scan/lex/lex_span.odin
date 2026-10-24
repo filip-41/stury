@@ -12,7 +12,7 @@ package lex
 
 import "base:intrinsics"
 import "core:simd"
-import bits "../../../core/bits"
+import bits "../../../core"
 
 // Sixteen-byte window at `p`, loaded unaligned. PRE: `p + 16 <= len(src)`.
 load16 :: #force_inline proc(src: []byte, p: u64) -> #simd[16]u8 {

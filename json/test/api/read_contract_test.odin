@@ -8,7 +8,7 @@ import "core:strings"
 import "core:testing"
 
 @(private = "file")
-scan_verdict :: proc(t: ^testing.T, src: string, path: string, strictness: json.Strictness, duplicates := json.Duplicates.First, limits := json.Limits{}) -> (err: json.Scan_Error, answers: int) {
+scan_verdict :: proc(t: ^testing.T, src: string, path: string, strictness: json.Strictness, duplicates := json.Duplicates.First, limits := json.Limits{}) -> (err: Maybe(json.Error), answers: int) {
 	steps: [json.MAX_PATH_STEPS]json.Step
 	names := make([]u8, len(path), context.temp_allocator)
 	p, fault := json.parse_path(path, steps[:], names)
@@ -24,7 +24,7 @@ scan_verdict :: proc(t: ^testing.T, src: string, path: string, strictness: json.
 test_negative_index_reread_reports_its_fault :: proc(t: ^testing.T) {
 	for strictness in ([]json.Strictness{.Strict, .Structural, .Lazy}) {
 		got, n := scan_verdict(t, `[[0],[1 2]]`, ".[-1]", strictness)
-		testing.expectf(t, got == json.Scan_Error(json.Error{kind = .Bad_Char, offset = 8}), "%v: %v", strictness, got)
+		testing.expectf(t, got == Maybe(json.Error)(json.Error{kind = .Bad_Char, offset = 8}), "%v: %v", strictness, got)
 		testing.expect_value(t, n, 0)
 	}
 }
@@ -105,9 +105,9 @@ test_lazy_refuse_judges_a_duplicate_in_an_unread_member :: proc(t: ^testing.T) {
 @(test)
 test_deep_cap_keeps_the_strictness :: proc(t: ^testing.T) {
 	deep := json.Limits{max_depth = json.MAX_DEPTH + 1}
-	testing.expect_value(t, json.validate(raw(`[tru]`), .Json, .Structural), nil)
-	testing.expect_value(t, json.validate(raw(`[tru]`), .Json, .Structural, deep), nil)
-	testing.expect_value(t, json.validate(raw(`[tru]`), .Json, .Strict, deep), json.Error{kind = .Bad_Literal, offset = 4})
+	testing.expect_value(t, json.validate(raw(`[tru]`), {strictness = .Structural}), nil)
+	testing.expect_value(t, json.validate(raw(`[tru]`), {strictness = .Structural, limits = deep}), nil)
+	testing.expect_value(t, json.validate(raw(`[tru]`), {strictness = .Strict, limits = deep}), json.Error{kind = .Bad_Literal, offset = 4})
 	for lim in ([]json.Limits{{}, deep}) {
 		got, n := scan_verdict(t, `{"a":1,"b":tru}`, ".a", .Structural, limits = lim)
 		testing.expectf(t, got == nil && n == 1, "structural %v: %v %d", lim.max_depth, got, n)
@@ -115,6 +115,6 @@ test_deep_cap_keeps_the_strictness :: proc(t: ^testing.T) {
 	// Lazy past the cap has no early stop: it reads the whole item and checks it, which says so in its docs.
 	got, n := scan_verdict(t, `{"a":1,"b":tru}`, ".a", .Lazy, limits = deep)
 	testing.expectf(t, n == 1, "lazy deep answers %d", n)
-	testing.expect_value(t, got, json.Scan_Error(json.Error{kind = .Bad_Literal, offset = 14}))
+	testing.expect_value(t, got, Maybe(json.Error)(json.Error{kind = .Bad_Literal, offset = 14}))
 }
 

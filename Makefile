@@ -3,7 +3,7 @@ OPT  ?= -o:speed
 
 # Library packages and test packages. Library packages have
 # no entry point, and the test packages pull in the libraries they exercise.
-LIB_PKGS  := host core core/bits core/path core/spell csv json json/encode json/scan json/scan/walk json/scan/lex json/scan/number json/scan/index json/test/stock
+LIB_PKGS  := host core core/spell csv json json/encode json/scan json/scan/walk json/scan/lex json/scan/number json/scan/index json/test/stock
 TEST_PKGS := core/test csv/test json/test/api
 # `make test` builds the suites at -o:minimal because the build is most of their run time.
 TEST_OPT := -o:minimal
@@ -13,7 +13,7 @@ CLI_MAX_BYTES := 3014656
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: build-cli test test-x86 test-modes diff test-asan test-tsan lint bench-compare bench-cli
+.PHONY: build-cli test test-lib test-one test-cli test-jq test-examples test-x86 test-modes diff test-asan test-tsan lint bench-compare bench-cli
 
 # `$(call odin_each,VERB,PACKAGES,FLAGS,LABEL)` runs `odin VERB` over each package and stops at the first failure.
 define odin_each
@@ -61,12 +61,25 @@ CLI_DEFINES := -define:STURY_VERSION='"$(CLI_VERSION)"' -define:REFUSE_DUPLICATE
 build-cli:
 	$(call odin_build,cmd/stury $(OPT) $(CLI_LINK) $(CLI_DEFINES),build/stury)
 
-test: build-cli
+test: test-lib test-cli test-jq test-examples
+
+test-lib:
 	$(call odin_each,test,$(TEST_PKGS),$(TEST_OPT),)
+
+# `make test-one P=json/test/api T=test_name` runs one test of one test package.
+test-one:
+	@[ -n "$(P)" ] && [ -n "$(T)" ] || { echo "usage: make test-one P=<package dir> T=<test name>" >&2; exit 2; }
+	$(call odin_each,test,$(P),$(TEST_OPT) -collection:stury=. -define:ODIN_TEST_NAMES=$(T),)
+
+test-cli: build-cli
 	@echo "== cmd/stury"
 	sh cmd/stury/test/smoke.sh build/stury
-	@if [ -n "$(JQ_SUITE_IN_DIFF)" ] && [ "$$(jq --version 2>/dev/null)" = jq-1.8.2 ]; then echo "(jq suite: run by diff)"; else python3 cmd/stury/test/jq_suite.py build/stury || exit 1; fi
 	@n=$$(wc -c < build/stury); [ $$n -le $(CLI_MAX_BYTES) ] || { echo "build/stury is $$n B, over the $(CLI_MAX_BYTES) B cap"; exit 1; }
+
+test-jq: build-cli
+	python3 cmd/stury/test/jq_suite.py build/stury
+
+test-examples:
 	@for e in examples/*/; do e=$${e%/}; echo "== $$e"; d=$$(mktemp -d) && $(ODIN) build $$e $(TEST_OPT) -collection:stury=. -out:$$d/x && $$d/x; s=$$?; rm -rf $$d; [ $$s -eq 0 ] || exit 1; done
 
 # The suites built for x86-64, which takes the portable paths arm64 never runs, and the runtime's software
@@ -83,7 +96,7 @@ test-x86:
 	else n=$$(wc -c < $$b); [ $$n -le $(CLI_MAX_BYTES) ] || { echo "$$b is $$n B, over the $(CLI_MAX_BYTES) B cap"; exit 1; }; fi
 
 # The CLI against jq 1.8.2: its suite, and jq_diff with regex_diff over each seed, a target per seed so that
-# `make -j` runs the seeds at once. Without jq 1.8.2 on PATH it is skipped.
+# `make -j` runs the seeds at once. Without jq 1.8.2 on PATH only the jq suite runs.
 DIFF_SEEDS ?= 77 1016 5
 DIFF_SEED_TARGETS := $(DIFF_SEEDS:%=diff-seed-%)
 JQ_VERSION := $(shell jq --version 2>/dev/null)
@@ -91,8 +104,8 @@ JQ_VERSION := $(shell jq --version 2>/dev/null)
 ifeq ($(JQ_VERSION),jq-1.8.2)
 diff: diff-suite $(DIFF_SEED_TARGETS)
 else
-diff:
-	@echo "== diff: no jq 1.8.2 on PATH, skipped"
+diff: test-jq
+	@echo "== diff: no jq 1.8.2 on PATH, only the jq suite ran"
 endif
 diff-suite: build-cli
 	STURY_TEST_TIMEOUT=60 python3 cmd/stury/test/jq_suite.py build/stury --diff

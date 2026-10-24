@@ -9,7 +9,7 @@ Path_Error_Kind :: enum u8 {
 	Bad_Edit,         // `splice`: an edit out of range, or edits unsorted or overlapping
 	Bad_Path,         // the path text does not parse (`offset` is where in the text the parser stopped)
 	Unsupported_Path, // CSV: the path parses but this procedure does not accept it (a negative index, `limit(...)`, a name without a header)
-	Over_Capacity,    // JSON: a fixed scan limit (`Capacity`) refused the path (for example more than MAX_PATH_STEPS steps) or the source
+	Over_Capacity,    // JSON: a fixed scan limit refused the path (for example more than MAX_PATH_STEPS steps) or the source
 	Bad_Option,       // CSV: the scanner refuses the dialect
 	Bad_Source,       // the source is not valid in the format (`syntax` and `offset` give the scan's fault)
 	Bad_Result,       // the edited text, or the value's text, is not valid (`syntax`, and `offset` into that text)

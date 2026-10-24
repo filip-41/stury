@@ -92,31 +92,13 @@ Walk_Fault :: struct {
 	oom:      bool,
 }
 
-// Why a request was refused: raised before the scan, with nothing read and nothing written. Not a
-// document fault, so it travels apart from `Error`. An output a scan that ran could not grow is
-// `Error{kind = .Out_Of_Memory}`.
+// What a node-tape walk could not do, as it returns it (`scan_queries_tape`); `json` reports either as an `Error`.
+// The values are fixed: renumbering them changes the tape walks' code generation for the worse.
 Request_Error_Kind :: enum {
-	// Text `request_init` could not parse as a path: `path` names it, and `offset` is the byte of its text
-	// the parser stopped on.
-	Bad_Path,
-	// `paths` filled without `.Path` in `$Q`, or a `.Path` in `$Q` with no `paths`. `query_kind` is `.Path`.
-	Query_Not_In_Set,
-	// `.Nodes`/`.Dom` under `Strictness.Structural`: a node row's kind and payload are claims no check
-	// stands behind. Never upgraded silently.
-	Nodes_Need_Strict,
-	// `Strictness.Lazy` under `duplicates` other than `.First` or `.Refuse`: no other reading is final
-	// before the item ends, so there is nothing to stop at.
-	Lazy_Needs_First,
-	// A fixed engine limit. Each is a function of the request (and, for `.Node_Source_Bytes`, `len(src)`) and
-	// is refused before the scan.
-	Over_Capacity,
-	// An output array or arena was made with another allocator than the request's. `query_kind` names it.
-	Allocator_Mismatch,
-	// The request's allocator refused the request's own storage: its parsed paths (`request_init`), or the
-	// plan of more than `MAX_PATH_QUERIES` paths. `query_kind` is `.Path`.
-	Out_Of_Memory,
-	// `Duplicates.Refuse` in a build without its walks (`-define:REFUSE_DUPLICATES=false`).
-	Refuse_Compiled_Out,
+	// A fixed engine limit (`capacity`), restating the caller's pre-flight.
+	Over_Capacity = 4,
+	// An output could not grow. `query_kind` names it.
+	Out_Of_Memory = 6,
 }
 
 // Which limit an `Over_Capacity` refusal hit.
@@ -128,9 +110,8 @@ Capacity :: enum u8 {
 	Node_Source_Bytes, // a `.Nodes`/`.Dom` source longer than `Row`'s `u32` offsets address
 }
 
-// `query_kind` and `path` (an index into `Request.paths`) are set only where they name a culprit: `path`
-// for `.Bad_Path`, and for `.Path_Steps` and `.Path_Runs` (there the first path past the bound). `offset`
-// is `.Bad_Path`'s, into that path's text.
+// The node-tape walks' refusal. Its layout is the walk's return shape, which register allocation follows; `path`
+// and `offset` are not set.
 Request_Error :: struct {
 	kind:       Request_Error_Kind,
 	query_kind: Maybe(Query),

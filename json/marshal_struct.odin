@@ -12,7 +12,7 @@ import "scan/walk"
 import "../core/spell"
 
 @(private)
-write_elems :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, n: int) -> Encode_Error {
+write_elems :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, n: int) -> Marshal_Error {
 	elem := st.plan.ops[op.elem]
 	if elem.kind == .Struct && !st.eager && n > 0 {
 		return write_struct_elems(st, op, elem, data, n)
@@ -39,7 +39,7 @@ FALSE_WORD :: u64(0x65_73_6c_61_66)
 // Write the `.Int`, `.Uint`, `.Float` or `.Bool` scalar of `size` bytes at `at` into `p`, which has
 // FIELD_VALUE_ROOM bytes. Returns the count written.
 @(private)
-spell_scalar :: #force_inline proc(p: [^]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> (int, Encode_Error) #no_bounds_check {
+spell_scalar :: #force_inline proc(p: [^]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> (int, Marshal_Error) #no_bounds_check {
 	#partial switch kind {
 	case .Int:
 		return spell.spell_i64(p, core_pkg.shape_int_load(at, size)), .None
@@ -58,7 +58,7 @@ spell_scalar :: #force_inline proc(p: [^]u8, kind: core_pkg.Shape_Kind, at: rawp
 }
 
 @(private)
-put_scalar :: proc(dst: ^[dynamic]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> Encode_Error {
+put_scalar :: proc(dst: ^[dynamic]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> Marshal_Error {
 	p := enc.put_room(dst, len(dst^), FIELD_VALUE_ROOM)
 	if p == nil {
 		return .Out_Of_Memory
@@ -71,7 +71,7 @@ put_scalar :: proc(dst: ^[dynamic]u8, kind: core_pkg.Shape_Kind, at: rawptr, siz
 // written at a cursor kept out of `st.out`'s length, which is committed only around a nested value and at
 // the end.
 @(private)
-write_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma := false) -> Encode_Error #no_bounds_check {
+write_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma := false) -> Marshal_Error #no_bounds_check {
 	// A flat struct holds no element boundary, so a streaming write needs no `{` before its members.
 	if st.eager && (st.pretty || !op.flat) {
 		return write_struct_eager(st, op, data)
@@ -126,7 +126,7 @@ write_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma := 
 // A flat struct (see `Plan_Op.flat`) in compact form: nothing nested is written, so no plan array moves
 // and nothing is opened below it.
 @(private)
-write_flat_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma: bool) -> Encode_Error #no_bounds_check {
+write_flat_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma: bool) -> Marshal_Error #no_bounds_check {
 	out := st.out
 	keys := raw_data(st.plan.keys)
 	start := len(out^)
@@ -164,7 +164,7 @@ write_flat_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comm
 // `p` is the room put for the key. A value no member has is refused, as `put_enum_int` refuses it. Returns the
 // end of the field.
 @(private = "file")
-spell_flat_enum :: #force_inline proc(st: ^Marshal_Out, f: Plan_Field, key, p: [^]u8, n, w: int, at: rawptr) -> (end: int, err: Encode_Error) #no_bounds_check {
+spell_flat_enum :: #force_inline proc(st: ^Marshal_Out, f: Plan_Field, key, p: [^]u8, n, w: int, at: rawptr) -> (end: int, err: Marshal_Error) #no_bounds_check {
 	m := enum_member(st.plan, st.plan.ops[f.op], at) or_return
 	if st.enum_ints {
 		if st.plan.ops[f.op].kind == .Enum_Int {
@@ -188,7 +188,7 @@ spell_flat_enum :: #force_inline proc(st: ^Marshal_Out, f: Plan_Field, key, p: [
 // A member name longer than the room put for the key. Growing keeps only the bytes before `w`, so the key is
 // copied again.
 @(private = "file")
-spell_flat_enum_long :: #force_no_inline proc(st: ^Marshal_Out, key: [^]u8, n, w: int, name: []u8) -> (end: int, err: Encode_Error) {
+spell_flat_enum_long :: #force_no_inline proc(st: ^Marshal_Out, key: [^]u8, n, w: int, name: []u8) -> (end: int, err: Marshal_Error) {
 	p := enc.put_room(st.out, w, n + len(name))
 	if p == nil {
 		return 0, .Out_Of_Memory
@@ -201,7 +201,7 @@ spell_flat_enum_long :: #force_no_inline proc(st: ^Marshal_Out, key: [^]u8, n, w
 // After an object's last member at `w`: the `}` and, with `then_comma`, a `,`, committed. With `opened`
 // the first key's comma at `start` becomes the `{`. Otherwise the object is `{}`.
 @(private)
-close_object :: #force_inline proc(out: ^[dynamic]u8, start, w: int, opened, then_comma: bool) -> Encode_Error #no_bounds_check {
+close_object :: #force_inline proc(out: ^[dynamic]u8, start, w: int, opened, then_comma: bool) -> Marshal_Error #no_bounds_check {
 	p := enc.put_room(out, w, 3)
 	if p == nil {
 		return .Out_Of_Memory
@@ -222,7 +222,7 @@ close_object :: #force_inline proc(out: ^[dynamic]u8, start, w: int, opened, the
 
 // Compact elements that are all structs: each closes as `},`, and the last comma becomes the `]`.
 @(private)
-write_struct_elems :: proc(st: ^Marshal_Out, op, elem: Plan_Op, data: rawptr, n: int) -> Encode_Error {
+write_struct_elems :: proc(st: ^Marshal_Out, op, elem: Plan_Op, data: rawptr, n: int) -> Marshal_Error {
 	open_container(st, '[') or_return
 	for k in 0 ..< n {
 		write_struct(st, elem, rawptr(uintptr(data) + uintptr(k) * uintptr(op.stride)), true) or_return
@@ -236,7 +236,7 @@ write_struct_elems :: proc(st: ^Marshal_Out, op, elem: Plan_Op, data: rawptr, n:
 // A struct opened before its members: pretty, streaming, or a tagged union's arm. A `tag` is that arm's
 // tag name written as a JSON string, written first as the `union_tag` member.
 @(private)
-write_struct_eager :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, tag := "") -> Encode_Error {
+write_struct_eager :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, tag := "") -> Marshal_Error {
 	open_container(st, '{') or_return
 	written := 0
 	if len(tag) > 0 {
@@ -275,7 +275,7 @@ Map_Entry :: struct {
 // Keys sorted by their written bytes between the quotes, so the output depends only on the map's contents.
 // The scratch lives in `st.out.allocator` and is freed before return.
 @(private)
-write_map :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Encode_Error {
+write_map :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Marshal_Error {
 	m := (^runtime.Raw_Map)(data)^
 	open_container(st, '{') or_return
 	n := int(m.len)
@@ -319,7 +319,7 @@ write_map :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) 
 // A map key as a JSON string: a string key as written (§5.1), an enum key's name, an integer key's digits in
 // quotes.
 @(private)
-spell_map_key :: proc(dst: ^[dynamic]u8, st: ^Marshal_Out, key: Plan_Op, data: rawptr) -> Encode_Error {
+spell_map_key :: proc(dst: ^[dynamic]u8, st: ^Marshal_Out, key: Plan_Op, data: rawptr) -> Marshal_Error {
 	#partial switch key.kind {
 	case .String:
 		return enc.put_string(dst, (^string)(data)^)

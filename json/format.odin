@@ -9,11 +9,11 @@ package json
 @(require_results)
 format :: proc(
 	src: []byte,
-	opts := Encode_Opts{},
+	opts := Marshal_Opts{},
 	dialect := Dialect.Json,
 	allocator := context.allocator,
 ) -> (out: []byte, err: Maybe(Error)) {
-	doc, perr := build(src, allocator, {}, dialect)
+	doc, perr := build(src, {dialect = dialect}, allocator)
 	if e, bad := perr.?; bad {
 		return nil, e
 	}

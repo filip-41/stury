@@ -134,8 +134,7 @@ test_request_init_bad_path :: proc(t: ^testing.T) {
 	testing.expect(t, faulted)
 	err, refused := json.request_init(&req, ".a", ".b[").?
 	testing.expect(t, refused)
-	testing.expect_value(t, err.kind, json.Request_Error_Kind.Bad_Path)
-	testing.expect_value(t, err.path, 1)
+	testing.expect_value(t, err.kind, json.Error_Kind.Bad_Path)
 	testing.expect_value(t, err.offset, u64(f.offset))
 	testing.expect_value(t, len(req.paths), 0)
 }
@@ -160,8 +159,8 @@ test_request_refused_rescan_keeps_state :: proc(t: ^testing.T) {
 	src := raw(`{"a":1}`)
 	testing.expect_value(t, json.scan(src, &req), nil)
 	req.strictness = .Lazy
-	request_refused(t, json.scan(raw(`{"a":`), &req), .Lazy_Needs_First)
-	testing.expect_value(t, string(req.src), string(src))
+	request_refused(t, json.scan(raw(`{"a":`), &req), .Bad_Option)
+	testing.expect_value(t, string(req.state.src), string(src))
 	testing.expect_value(t, req.coverage, json.Validity.Full)
 	testing.expect_value(t, len(req.answers), 1)
 	testing.expect_value(t, json.validate_remaining(&req), nil)
@@ -175,10 +174,10 @@ test_request_out_of_memory :: proc(t: ^testing.T) {
 	req: json.Request({.Path, .Nodes})
 	err, refused := json.request_init(&req, ".a", allocator = refuse).?
 	testing.expect(t, refused)
-	testing.expect_value(t, err.kind, json.Request_Error_Kind.Out_Of_Memory)
+	testing.expect_value(t, err.kind, json.Error_Kind.Out_Of_Memory)
 
 	req.paths = []json.Path{{steps = []json.Step{json.Name("a")}}}
-	testing.expect_value(t, json.scan(raw(`{"a":[1,2]}`), &req), json.Scan_Error(json.Error{kind = .Out_Of_Memory}))
+	testing.expect_value(t, json.scan(raw(`{"a":[1,2]}`), &req), Maybe(json.Error)(json.Error{kind = .Out_Of_Memory}))
 	fault, is_fault := json.scan(raw(`{"a":[1,2]`), &req).(json.Error)
 	testing.expect(t, is_fault && fault.kind != .Out_Of_Memory, "the document's fault comes first")
 	json.destroy(&req)
@@ -186,7 +185,7 @@ test_request_out_of_memory :: proc(t: ^testing.T) {
 	// The miss `.All` owes at the document's end is an output too.
 	miss := json.Request({.Path}){duplicates = .All, allocator = refuse}
 	miss.paths = []json.Path{{steps = []json.Step{json.Index(-2)}}}
-	testing.expect_value(t, json.scan(raw(`[1]`), &miss), json.Scan_Error(json.Error{kind = .Out_Of_Memory}))
+	testing.expect_value(t, json.scan(raw(`[1]`), &miss), Maybe(json.Error)(json.Error{kind = .Out_Of_Memory}))
 	json.destroy(&miss)
 }
 
@@ -235,7 +234,7 @@ test_lazy_without_first_is_refused :: proc(t: ^testing.T) {
 	for mode in ([]json.Duplicates{.Default, .Last, .All}) {
 		got := paths_run(raw(`{"t":[7],"z":1,"z":2,"z":3}`), []json.Path{{steps = []json.Step{json.Name("z")}}}, .Lazy, mode)
 		defer json.destroy(&got.req)
-		request_refused(t, got.err, .Lazy_Needs_First)
+		request_refused(t, got.err, .Bad_Option)
 		testing.expect_value(t, len(got.answers), 0)
 	}
 }
@@ -259,7 +258,7 @@ test_fault_building_needs_strict :: proc(t: ^testing.T) {
 		defer json.destroy(&req)
 		req.strictness = .Structural
 		err := json.scan(raw(`[1]`), &req)
-		request_refused(t, err, .Nodes_Need_Strict)
+		request_refused(t, err, .Bad_Option)
 		testing.expect_value(t, len(req.doc.rows), 0)
 	}
 	{
@@ -267,7 +266,7 @@ test_fault_building_needs_strict :: proc(t: ^testing.T) {
 		defer json.destroy(&req)
 		req.strictness = .Structural
 		err := json.scan(raw(`[1]`), &req)
-		request_refused(t, err, .Nodes_Need_Strict)
+		request_refused(t, err, .Bad_Option)
 	}
 	{
 		// A path answer carries no value, so it is fine at the lower level.
@@ -312,7 +311,7 @@ test_fault_a_refusal_writes_nothing :: proc(t: ^testing.T) {
 	}
 	req.paths = []json.Path{{steps = steps[:]}}
 	err = json.scan(raw(`[1,2,3]`), &req)
-	testing.expect_value(t, request_refused(t, err, .Over_Capacity).query_kind, Maybe(json.Query)(.Path))
+	request_refused(t, err, .Over_Capacity)
 	testing.expect_value(t, len(req.doc.rows), 3)
 	testing.expect_value(t, len(req.answers), 1)
 	req.paths = []json.Path{{steps = []json.Step{json.Index(1)}}}
@@ -320,14 +319,14 @@ test_fault_a_refusal_writes_nothing :: proc(t: ^testing.T) {
 	// An allocator mismatch on the answers, after the node rows agreed.
 	req.answers.allocator = context.temp_allocator
 	err = json.scan(raw(`[1,2,3]`), &req)
-	testing.expect_value(t, request_refused(t, err, .Allocator_Mismatch).query_kind, Maybe(json.Query)(.Path))
+	request_refused(t, err, .Bad_Option)
 	testing.expect_value(t, len(req.doc.rows), 3)
 	req.answers.allocator = context.allocator
 
 	// The documented misuse: `allocator` changed after a scan, while the outputs are bound to the old one.
 	req.allocator = context.temp_allocator
 	err = json.scan(raw(`[1,2,3]`), &req)
-	request_refused(t, err, .Allocator_Mismatch)
+	request_refused(t, err, .Bad_Option)
 	testing.expect_value(t, len(req.doc.rows), 3)
 	req.allocator = context.allocator
 }

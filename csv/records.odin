@@ -4,7 +4,6 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:simd"
 import core_pkg "../core"
-import "../core/bits"
 
 // One field's bytes as written, `src[lo:hi]`. A quoted field's quotes are included; a CR before the record's
 // LF is not. `field_text` reads its text.
@@ -56,18 +55,12 @@ Records :: struct {
 	err:      Maybe(Error),
 }
 
-// The records of `src` in `dialect`, judged at `strictness` (`.Lazy` is `.Structural`) and capped by `limits`.
-// A dialect or limit the scanner refuses is `.Bad_Option` on `err`. Record fields are allocated with
-// `allocator`; `records_destroy` frees them.
+// The records of `src` in `opts.dialect`, judged at `opts.strictness` (`.Lazy` is `.Structural`) and capped by
+// `opts.limits`; `opts.duplicates` and `opts.no_header` are not read. A dialect or limit the scanner refuses is
+// `.Bad_Option` on `err`. Record fields are allocated with `allocator`; `destroy` frees them.
 @(require_results)
-records :: proc(
-	src: []byte,
-	dialect := Dialect{},
-	strictness := Strictness.Strict,
-	limits := Limits{},
-	allocator := context.allocator,
-) -> (it: Records) {
-	s, ok := scan_setup(dialect, limits, strictness)
+records :: proc(src: []byte, opts := Read_Opts{}, allocator := context.allocator) -> (it: Records) {
+	s, ok := scan_setup(opts.dialect, opts.limits, opts.strictness)
 	it = records_of(src, s, allocator)
 	if !ok {
 		it.err = Error{kind = .Bad_Option}
@@ -82,12 +75,6 @@ records_of :: proc(src: []byte, s: Scan, allocator: runtime.Allocator) -> (it: R
 	it.stop = len(src) if s.max_bytes == 0 else 0
 	it.fields.allocator = allocator
 	return
-}
-
-// Free what `records` or `records_from` allocated.
-records_destroy :: proc {
-	records_free,
-	reader_destroy,
 }
 
 @(private)
@@ -446,9 +433,9 @@ field_view :: #force_inline proc(src: []byte, f: Field, dialect: Dialect) -> (te
 @(private)
 holds_span :: #force_inline proc(src: []byte, lo, n: int, c: byte) -> bool {
 	if n <= 16 && len(src) - lo >= 16 {
-		LANES :: bits.V{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
-		v := bits.load(raw_data(src)[lo:])
-		return bits.any_lane(simd.lanes_eq(v, bits.V(c)) & simd.lanes_lt(LANES, bits.V(u8(n))))
+		LANES :: core_pkg.V{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+		v := core_pkg.load(raw_data(src)[lo:])
+		return core_pkg.any_lane(simd.lanes_eq(v, core_pkg.V(c)) & simd.lanes_lt(LANES, core_pkg.V(u8(n))))
 	}
 	return holds(string(src[lo:][:n]), c)
 }
@@ -474,9 +461,9 @@ field_decode :: proc(text: []byte, dialect: Dialect, allocator: runtime.Allocato
 		n^ += 1
 	}
 	for i + 16 <= len(text) {
-		v := bits.load(src[i:])
-		if !bits.any_eq(v, mark) {
-			intrinsics.unaligned_store((^bits.V)(dst[n:]), v)
+		v := core_pkg.load(src[i:])
+		if !core_pkg.any_eq(v, mark) {
+			intrinsics.unaligned_store((^core_pkg.V)(dst[n:]), v)
 			i += 16
 			n += 16
 			continue

@@ -197,7 +197,7 @@ test_unmarshal_unsupported :: proc(t: ^testing.T) {
 @(test)
 test_unmarshal_enum_ints :: proc(t: ^testing.T) {
 	plan := csv.type_plan_init([]Row, {enums = .Int})
-	defer csv.type_plan_destroy(&plan)
+	defer csv.destroy(&plan)
 	rows: []Row
 	src := "color\n7\n1\n"
 	testing.expect_value(t, csv.unmarshal(transmute([]byte)src, &rows, plan = &plan, allocator = context.temp_allocator), nil)

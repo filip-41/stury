@@ -11,31 +11,30 @@ import scan_pkg "scan"
 Unknown_Fields :: core_pkg.Unknown_Fields
 
 // How `unmarshal` and `unmarshal_check` read: the zero value is `.Strict`, `.Last`, unknown members ignored,
-// strings copied, default `Limits`, strict JSON.
+// strings copied, default `Limits`, strict JSON. The `Read_Opts` fields read as follows here:
+//
+//	strictness  `.Strict` checks every byte. `.Lazy` checks every value the type reads, and may skip, unchecked,
+//	            the members and values it does not read, so under `.Lazy` an unread malformed value may be
+//	            accepted or refused. Use `.Strict` to refuse every one. Which it is depends on the document's
+//	            size and shape, not on the fault. `.Structural` is `.Bad_Option` under `.Json`: a typed read stores what it
+//	            reads, so it checks it.
+//	duplicates  what to do with a key that appears twice in one object. `.Default` is `.Last`, which keeps
+//	            only the last occurrence. A struct member is reset to zero before it is read again, so nothing
+//	            of the earlier one survives, and a map entry or an `any` is replaced. `.First` reads the first
+//	            occurrence and checks the later ones as `strictness` says, without storing them. `.All` reads
+//	            every occurrence over the one before: struct fields and map entries merge, and a list is read
+//	            from its start over the earlier one. `.Refuse` refuses a key that, decoded, repeats one of its
+//	            own object's (`.Duplicate_Key` at the repeat), in any object, read or not, under `.Lazy` too:
+//	            the walk skips nothing while it is set. Its keys past the first 64 open at once are remembered
+//	            in `context.allocator`, given back before the return.
+//	limits      a `max_depth` past MAX_DEPTH is held to MAX_DEPTH: the shape walk's frames do not spill.
+//	dialect     `.Jsonc` reads comments and trailing commas, every byte checked whatever `strictness` says.
 Unmarshal_Opts :: struct {
-	// `.Strict` checks every byte. `.Lazy` checks every value the type reads, and may skip, unchecked, the
-	// members and values it does not read, so under `.Lazy` an unread malformed value may be accepted or
-	// refused. Use `.Strict` to refuse every one. Which it is depends on the document's size and shape, not
-	// on the fault. `.Structural` is `.Bad_Option`: a typed read stores what it reads, so it checks it. Under
-	// `dialect = .Jsonc`, which reads every byte whatever `strictness` says, it reads the document strictly.
-	strictness:     Strictness,
-	// What to do with a key that appears twice in one object. `.Default` is `.Last`, which keeps only the last
-	// occurrence. A struct member is reset to zero before it is read again, so nothing of the earlier one survives, and a map entry or an `any` is
-	// replaced. `.First` reads the first occurrence and checks the later ones as `strictness` says, without
-	// storing them. `.All` reads every occurrence over the one before: struct fields and map entries merge,
-	// and a list is read from its start over the earlier one. `.Refuse` refuses a key that, decoded, repeats
-	// one of its own object's (`.Duplicate_Key` at the repeat), in any object, read or not, under `.Lazy` too:
-	// the walk skips nothing while it is set. Its keys past the first 64 open at once are remembered in
-	// `context.allocator`, given back before the return. Every occurrence is checked.
-	duplicates:     Duplicates,
+	using read:     Read_Opts,
 	unknown_fields: Unknown_Fields,
 	// Escape-free strings and `Raw` values slice `src` instead of being copied, so they live as long as
 	// `src`. An escaped string is decoded into the allocator either way. A `cstring` is always copied.
 	borrow_strings: bool,
-	// A `max_depth` past MAX_DEPTH is held to MAX_DEPTH: the shape walk's frames do not spill.
-	limits:         Limits,
-	// `.Jsonc` reads comments and trailing commas, every byte checked whatever `strictness` says.
-	dialect:        Dialect,
 }
 
 // What `unmarshal` refused. A hook's refusal uses the same numbers. `.Bad_Option` is also `.Structural`

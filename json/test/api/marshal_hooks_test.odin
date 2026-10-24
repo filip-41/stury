@@ -22,7 +22,7 @@ hook_unquote :: proc(text: []byte) -> (s: string, ok: bool) {
 }
 
 @(private = "file")
-write_time :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Encode_Error {
+write_time :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Marshal_Error {
 	text, ok := time.time_to_rfc3339((^time.Time)(v)^, include_nanos = false, allocator = context.temp_allocator)
 	if !ok {
 		return .Unsupported
@@ -45,7 +45,7 @@ read_time :: proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) -> M
 }
 
 @(private = "file")
-write_base64 :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Encode_Error {
+write_base64 :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Marshal_Error {
 	text, err := base64.encode((^[]u8)(v)^, allocator = context.temp_allocator)
 	if err != nil {
 		return .Out_Of_Memory
@@ -73,7 +73,7 @@ read_base64 :: proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) ->
 Hook_Quoted :: distinct i64
 
 @(private = "file")
-write_quoted :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Encode_Error {
+write_quoted :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Marshal_Error {
 	digits: [24]u8
 	return json.marshal_into(out, strconv.write_int(digits[:], i64((^Hook_Quoted)(v)^), 10))
 }
@@ -231,7 +231,7 @@ test_marshal_union_tag_names :: proc(t: ^testing.T) {
 	}
 	clash_plan := json.type_plan_init(Clash, {union_tag = "type"}, context.temp_allocator)
 	_, err := json.marshal(Clash(Hook_Circle{}), {}, &clash_plan, context.temp_allocator)
-	testing.expect_value(t, err, json.Encode_Error.Unsupported)
+	testing.expect_value(t, err, json.Marshal_Error.Unsupported)
 	um_refused(t, `{"r":1}`, Clash, .Unsupported, 0, mapping = {union_tag = "type"})
 	// Under another tag the field is the arm's own.
 	um_round_trip(t, Clash(Hook_Typed{type = "x"}), mapping = {union_tag = "kind"})
