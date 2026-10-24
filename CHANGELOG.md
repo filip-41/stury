@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.0.2 (2026-10-24)
+
+Adds the CSV and TSV codec (`stury:csv`), the shared `stury:core` package, and the CLI's `--from` and `--to`.
 
 - `stury:core` holds what the formats share. JSON's walk substrate moved from it to
   `stury:json/scan/walk`: the rows and their stores (`Node`, `Capacity`, `Number_Spelling`), the caps (`Limits`,

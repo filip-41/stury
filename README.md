@@ -14,7 +14,7 @@ invalid UTF-8, no lone surrogate. stury also reads JSONC, NDJSON and RFC 7464 te
 simdjson, yyjson and sonic-rs on validation and typed decode (measured on one machine with the harness in
 [bench/](bench/README.md); tuning may differ between architectures at this stage of the project).
 
-**Status:** version 0.0.1. The API may still change between releases (see [CHANGELOG.md](CHANGELOG.md)).
+**Status:** version 0.0.2. The API may still change between releases (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Install
 
@@ -34,7 +34,7 @@ to the directories under PATH. Keep `json/`, `csv/`, `core/` and `host/` togethe
 ```
 
 **Command line.** Download the `stury` binary for linux or darwin on amd64 or arm64 from the [GitHub
-Releases](https://github.com/filip-41/stury/releases) page (for example `stury-0.0.1-darwin-arm64.tar.gz`;
+Releases](https://github.com/filip-41/stury/releases) page (for example `stury-0.0.2-darwin-arm64.tar.gz`;
 each archive has a `.sha256` beside it), unpack it, and put it on your `PATH`. Or build it yourself with
 `make build-cli`, which writes `build/stury`. The manual page is `man ./docs/stury.1`.
 
