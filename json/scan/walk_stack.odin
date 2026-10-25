@@ -7,33 +7,40 @@ import "base:intrinsics"
 import "base:runtime"
 import "walk"
 
-// The frames past MAX_DEPTH: `limit` of them in `spill`, the fixed array's copied in. Nil when the allocator
-// refuses.
+// The frames past MAX_DEPTH: the `have` frames in hand copied into a spill of `room` frames, `have` doubling
+// up to `room`. The old spill, if any, is freed after the copy. Nil when the allocator refuses, and the
+// frames in hand stand.
 @(private, cold)
-spill_frames :: proc(spill: ^[]byte, fixed: [^]Open_Frame, limit: u64, alloc: runtime.Allocator) -> [^]Open_Frame {
-	buf, err := runtime.mem_alloc_non_zeroed(int(limit) * size_of(Open_Frame), align_of(Open_Frame), alloc)
+spill_frames :: proc(spill: ^[]byte, frames: [^]Open_Frame, have, room: u64, alloc: runtime.Allocator) -> [^]Open_Frame {
+	cap := min(2 * have, room)
+	buf, err := runtime.mem_alloc_non_zeroed(int(cap) * size_of(Open_Frame), align_of(Open_Frame), alloc)
 	if err != nil {
 		return nil
 	}
+	out := ([^]Open_Frame)(raw_data(buf))
+	copy(out[:have], frames[:have])
+	if spill^ != nil {
+		runtime.mem_free(raw_data(spill^), alloc)
+	}
 	spill^ = buf
-	frames := ([^]Open_Frame)(raw_data(buf))
-	copy(frames[:MAX_DEPTH], fixed[:MAX_DEPTH])
-	return frames
+	return out
 }
 
 // A push with `sp` at the cap `max_depth`: `.Too_Deep`, or under `$deep`, short of `limit`, the frames move off
-// the stack into the spill.
+// the stack into a spill that doubles as the input nests deeper. The cap the frames in hand hold is the walk's
+// `max_depth`, so a document costs about its own depth, not the limit.
 @(private)
 depth_cap_hit :: #force_inline proc(s: ^Scanner, $deep: bool, spill: ^[]byte, frames: ^$F, max_depth: ^u64, limit: u64) -> Maybe(Error) {
 	when deep {
 		if max_depth^ == limit {
 			return Error{offset = s.pos, kind = .Too_Deep}
 		}
+		next := min(2 * max_depth^, limit)
 		spilled := (^[^]Open_Frame)(frames)
-		if spilled^ = spill_frames(spill, spilled^, limit, s.alloc); spilled^ == nil {
+		if spilled^ = spill_frames(spill, spilled^, max_depth^, next, s.alloc); spilled^ == nil {
 			return Error{offset = s.pos, kind = .Out_Of_Memory}
 		}
-		max_depth^ = limit
+		max_depth^ = next
 		return nil
 	} else {
 		return Error{offset = s.pos, kind = .Too_Deep}

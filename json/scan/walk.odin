@@ -91,7 +91,7 @@ walk_value_q :: #force_inline proc(
 
 // The walk under a `limit` past MAX_DEPTH: a complete walk at `$check` on the JSONC cursor (JSON's grammar
 // when `cur.json`) that never skips and never stops, on frames that spill to the scanner's allocator at the
-// first push past MAX_DEPTH, freed here with the same one. Only two readings reach it: `.Locate` for
+// first push past MAX_DEPTH and double there as the input nests deeper, freed here with the same one. Only two readings reach it: `.Locate` for
 // `.Structural` (a raised cap is a depth limit, not a grammar switch) and `.Values` for the rest, so `.Lazy`
 // loses its early stop and its skips past MAX_DEPTH. It is built for size: a raised cap is the rare reading,
 // and these twins are what it costs the binary.

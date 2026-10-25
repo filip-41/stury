@@ -33,7 +33,7 @@ compare_failed :: proc(ip: ^Interp, eq: bool) -> Signal {
 	return fail(ip, "Equality check too deep" if eq else "Comparison too deep")
 }
 
-// With `owned`, `+` and `*` change `a` in place where `a` is or holds a container the set names (update.odin).
+// With `owned`, `+` and `*` change `a` in place where `a` is or holds a container the set names (modify.odin).
 binary_op :: proc(ip: ^Interp, op: Op, a, b: Value, owned: ^Owned = nil) -> (Value, Signal) {
 	#partial switch op {
 	case .Eq, .Ne, .Lt, .Le, .Gt, .Ge:

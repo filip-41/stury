@@ -105,8 +105,8 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 
 `check` (or `validate`) validates its inputs and prints nothing when they are valid.
 
-- It accepts every input that `stury .` reads without error, several texts included, except under `--seq`,
-  where it reads each file on its own: a record cut at a file's end is a fault there ([Records and
+- It accepts every input that `stury .` reads without error, several texts included. Under `--seq` its files
+  are one stream, as `stury .` reads them: a record cut at a file's end is joined ([Records and
   events](#records-and-events)).
 - It requires at least one JSON text. An empty or whitespace-only input fails with `No JSON text` and exit 5,
   where `stury .` reads it as a stream of no texts and exits 0.

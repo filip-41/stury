@@ -273,11 +273,22 @@ plan_mark :: proc(p: ^Type_Plan) -> Plan_Mark {
 
 // Take the plan back to `m`: the failed compile's ops leave the index, every run loses its bytes, and the names
 // it copied are freed. A retry compiles the same types again, and nothing of the failed attempt is left behind.
+// The index is rebuilt rather than pruned: `delete_key` on a `map[typeid]` hangs the Odin compiler's checker at
+// `-o:speed` (dev-2026-10), and a failed compile is cold, so a fresh map is the cheaper constraint to live with.
+// An `.Out_Of_Memory` from the rebuild is returned, so the plan cache evicts a plan it could not repair.
 @(private = "file")
-plan_rollback :: proc(p: ^Type_Plan, m: Plan_Mark) {
-	for op in p.ops[m.ops:] {
-		delete_key(&p.index, op.info.id)
+plan_rollback :: proc(p: ^Type_Plan, m: Plan_Mark) -> Plan_Error {
+	fresh, aerr := make(map[typeid]u32, len(p.index), p.ops.allocator)
+	if aerr != nil {
+		return .Out_Of_Memory
 	}
+	for id, idx in p.index {
+		if idx < u32(m.ops) {
+			fresh[id] = idx
+		}
+	}
+	delete(p.index)
+	p.index = fresh
 	resize(&p.ops, m.ops)
 	resize(&p.fields, m.fields)
 	resize(&p.sources, m.sources)
@@ -291,6 +302,7 @@ plan_rollback :: proc(p: ^Type_Plan, m: Plan_Mark) {
 		// The tag's spelled key was the failed compile's; the next compile spells it again.
 		p.tag_lo, p.tag_hi = 0, 0
 	}
+	return .None
 }
 
 // The op for `ti`. A type already in the plan, including one still being compiled further up this call (a
@@ -308,12 +320,16 @@ plan_op :: proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (idx: u32, err: Plan_E
 		return 0, .Out_Of_Memory
 	}
 	if map_insert(&p.index, ti.id, idx) == nil {
-		plan_rollback(p, mark)
+		if rerr := plan_rollback(p, mark); rerr != .None {
+			return 0, rerr
+		}
 		return 0, .Out_Of_Memory
 	}
 	op, cerr := compile_op(p, ti, idx)
 	if cerr != .None {
-		plan_rollback(p, mark)
+		if rerr := plan_rollback(p, mark); rerr != .None {
+			return 0, rerr
+		}
 		return 0, cerr
 	}
 	// Indexed after the call: compiling element types may have moved `p.ops`.

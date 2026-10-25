@@ -149,11 +149,11 @@ test_document_duplicate_columns :: proc(t: ^testing.T) {
 		ok:     bool,
 	}
 	cases := []Case {
-		{.Default, -1, false},
-		{.Refuse, -1, false},
+		{.Default, 0, true}, // `column` names the first, whatever the policy: the path edits read the policy.
+		{.Refuse, 0, true},
 		{.First, 0, true},
-		{.Last, 2, true},
-		{.All, 2, true}, // `unmarshal` reads the later column over the earlier.
+		{.Last, 0, true},
+		{.All, 0, true},
 	}
 	for c in cases {
 		doc, err := csv.build(src, {duplicates = c.policy})

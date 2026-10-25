@@ -311,9 +311,9 @@ text_fault :: proc(ins: ^Inputs, at, limit: int, found: json.Error, what := "") 
 		at_error.offset += u64(at)
 		msg = fault_in_file(ins.name, ins.data, at_error, what, ins.lines_before)
 	} else if ins.run.opts.from == .Ndjson { // each line is one text, so a fault at its end is reported at EOF, past the newline
-		msg = fault_message(ins.data[at:min(limit + 1, len(ins.data))], e, line, column, what, limit - at)
+		msg = jq.parse_message(ins.data[at:min(limit + 1, len(ins.data))], e, line, column, what, limit - at)
 	} else {
-		msg = fault_message(ins.data[at:], e, line, column, what)
+		msg = jq.parse_message(ins.data[at:], e, line, column, what)
 	}
 	if ins.run.opts.stream_errors && ins.run.opts.from != .Ndjson {
 		return stream_errors_fault(ins, at, limit, line, column)
@@ -330,21 +330,6 @@ text_fault :: proc(ins: ^Inputs, at, limit: int, found: json.Error, what := "") 
 		}
 	}
 	return nil, msg, .Error
-}
-
-// The plain path's message for the faulty text `src`, which starts at `line` and `column` of the stream. A fault
-// inside the text is jq.parse_message's: the byte it is at, as the library counts it. A text that ends at its last
-// byte is jq's too, but jq's parser stands on that byte, one column back from the library's one past it (the
-// position --stream-errors gives).
-@(private = "file")
-fault_message :: proc(src: []byte, e: json.Error, line, column: int, what := "", text_end := -1) -> string {
-	at := min(int(e.offset), len(src))
-	if at < (len(src) if text_end < 0 else text_end) {
-		return jq.parse_message(src, e, line, column, what, text_end)
-	}
-	l, c := line, column
-	jq.advance(&l, &c, src[:at])
-	return fmt.aprintf("%s%s at line %d, column %d", what if what != "" else jq.FAULT_TEXT[e.kind], " at EOF", l, c)
 }
 
 // A text that ends inside a literal is `.Truncated` alone, but when a byte follows it (a space, a newline, the

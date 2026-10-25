@@ -269,7 +269,8 @@ value are what make reflective marshallers slow.
 - So a plan grows while it is in use, and calls take `^Type_Plan`.
 - Compilation is lazy: `type_plan_init` records the root type and copies the options, and ops compile on first
   use.
-- A plan that reported `Out_Of_Memory` is unusable.
+- A compile that fails is rolled back to the plan it was, and every later call answers the same fault. Only
+  `.Out_Of_Memory` is retryable, and a rolled-back plan is sound whether or not the cache evicts it.
 - With `plan` nil, a call takes this thread's cached plan for the type: most recently used first, the least
   recently used destroyed to make room (`core/plan_cache.odin`).
 - A call nested inside a hook misses without evicting (the plan it would destroy may be the one an outer call
@@ -314,7 +315,8 @@ Structs and maps are both written as objects, each with its own ordering rule.
     `false` and `Null` stay.
   - A `using` field of a struct type with no JSON name is flattened, as Go flattens an embedded struct.
   - A struct in which two fields have the same JSON key, or with Go's `,string` flag, is `Unsupported` in both
-    directions. Other flags are ignored.
+    directions. A flag other than `omitempty`, `required` or `string` is refused (`Bad_Utf8`) in both
+    directions, and a backslash in a name escapes the byte after it (`csv:"Last\\, First"`).
 - **Maps.** Keys are sorted by the bytes written between the quotes.
   - An integer key is written out first, then compared as text, so `10` sorts before `9`.
   - Odin's map iteration order depends on hashing and capacity, so sorting makes the output a function of the
@@ -349,7 +351,7 @@ An edit replaces the values a path finds and keeps every other byte.
 ### 6.1 `splice`
 
 The output is the source with each `[lo, hi)` replaced. It is built with one copy per gap and one per
-replacement. Unsorted, overlapping and out-of-range edits are refused. `splice` cannot know that an arbitrary
+replacement. Unsorted, overlapping and out-of-range edits are refused as `.Bad_Edit`. `splice` cannot know that an arbitrary
 `[lo, hi)` was a whole value, so it validates the result. A fault is `Bad_Result` with its offset into the
 edited text.
 

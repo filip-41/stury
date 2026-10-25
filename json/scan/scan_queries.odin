@@ -408,10 +408,39 @@ scan_queries_in :: #force_inline proc(
 			validity^ = covered ? .Full : .Partial
 		}
 	}
-	// The keys of the open objects past the first KEY_SCRATCH are scan-owned scratch, in `context.allocator`,
-	// freed on every exit. A wildcard run under `.First` or `.Last` remembers the keys of the objects it
-	// reads, in the same scratch.
+	// A demand reads the members of objects, so a root with none settles every demand query before the walk:
+	// nothing below it can answer. A `.Lazy` reading that may stop stops at the root, where the automaton's
+	// own root hooks stop; one that may not reads on and validates the root. A request with a path run as
+	// well keeps that run's settlement, and the demand's own stop test (`stop_capable`) settles the call.
+	when .Demand in Q {
+		if axes.termination == .First_Wins_May_Stop {
+			if at, settles := demand_root_settles(&s, ctx, Q); settles {
+				// Final at the root: its answers cannot change, and a call beside a path run needs the
+				// stop test its other queries would not ask for on their own (`stop_capable`).
+				ctx.demand.settled, ctx.demand.can_settle = true, true
+				if .Path not_in Q {
+					if stop_byte != nil {
+						stop_byte^ = at
+					}
+					return nil, sink_fault(F, ctx)
+				}
+			}
+		}
+	}
+
+	// The keys of the open objects past the first KEY_SCRATCH are scan-owned scratch in the request's
+	// allocator (`Scan_Query.allocator`), freed on every exit. A wildcard run under `.First` or `.Last`
+	// remembers the keys of the objects it reads, in the same scratch; a key it cannot remember counts as
+	// unresolved, and the json layer answers that path from the tape. A walk with no queries of its own
+	// (`validate_remaining`'s `.Unique`) keeps the ambient allocator.
 	when .Unique in Q || .Path in Q {
+		key_alloc := context.allocator
+		for q in queries {
+			if q.allocator.procedure != nil {
+				key_alloc = q.allocator
+				break
+			}
+		}
 		key_scratch: Key_Scratch = ---
 		keys: Key_Set
 		when .Unique in Q {
@@ -420,7 +449,7 @@ scan_queries_in :: #force_inline proc(
 			keyed := ctx.wild_keys
 		}
 		if keyed {
-			key_set_init(&keys, &key_scratch, context.allocator)
+			key_set_init(&keys, &key_scratch, key_alloc)
 		}
 		defer if keyed {
 			key_set_destroy(&keys)
@@ -563,4 +592,27 @@ finish :: #force_inline proc(s: ^Scanner) -> Maybe(Error) {
 		return Error{offset = s.pos, kind = .Trailing}
 	}
 	return nil
+}
+
+// Whether the root value the scanner sits on has no members a demand could read: a scalar's, or an array's
+// when a first step names a member (the `1` bit of a gate, `route_serve`). `at` is where the automaton's own
+// root settlement stops: before a scalar, past an array's `[`. False at the end of input (the walk reports
+// `Truncated`) and for an object root.
+@(private, cold)
+demand_root_settles :: proc(s: ^Scanner, ctx: ^Query_Ctx, $Q: bit_set[Walk_Kind]) -> (at: u64, settles: bool) {
+	if s.pos >= u64(len(s.src)) {
+		return 0, false
+	}
+	vc := lex.VCLASS[s.src[s.pos]]
+	switch {
+	case vc >= VC_STRING:
+		return s.pos, true
+	case vc == VC_ARRAY:
+		when .Gate in Q {
+			if ctx.gate.gated & 2 != 0 {
+				return s.pos + 1, true
+			}
+		}
+	}
+	return 0, false
 }

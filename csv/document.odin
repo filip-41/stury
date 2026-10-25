@@ -26,8 +26,6 @@ Document :: struct {
 	starts:     [dynamic]int,
 	rows:       int,
 	width:      int,
-	// The policy `column` applies to a header name two columns share.
-	duplicates: Duplicates,
 	// Built `.Lazy`: a string is judged as UTF-8 when it is read.
 	judge_utf8: bool,
 	// The strings that held a `""` or an escape, each decoded once into `arena`. `decoded_at` is allocated at the
@@ -39,10 +37,9 @@ Document :: struct {
 }
 
 // Read `src` in `opts.dialect` and keep the span of every field. Unless `opts.no_header`, the first record is the
-// column names. `strictness` and `limits` are as for `records`; `duplicates` is the policy `column` applies to a
-// header name two columns share. Under `.Lazy`, `get_string` also judges the UTF-8 of each string it reads. `err`
-// is the text's first fault, `.Bad_Option` for a dialect or limit the scanner refuses, or `.Out_Of_Memory`; the
-// `Document` is then the zero value.
+// column names. `strictness` and `limits` are as for `records`. Under `.Lazy`, `get_string` also judges the UTF-8
+// of each string it reads. `err` is the text's first fault, `.Bad_Option` for a dialect or limit the scanner
+// refuses, or `.Out_Of_Memory`; the `Document` is then the zero value.
 @(require_results)
 build :: proc(src: []byte, opts := Read_Opts{}, allocator := context.allocator) -> (doc: Document, err: Maybe(Error)) {
 	dialect := opts.dialect
@@ -51,7 +48,7 @@ build :: proc(src: []byte, opts := Read_Opts{}, allocator := context.allocator) 
 	if it.err != nil {
 		return {}, it.err
 	}
-	doc = {src = src, dialect = dialect, judge_utf8 = opts.strictness == .Lazy, duplicates = opts.duplicates}
+	doc = {src = src, dialect = dialect, judge_utf8 = opts.strictness == .Lazy}
 	doc.names.allocator, doc.fields.allocator, doc.starts.allocator = allocator, allocator, allocator
 	if !opts.no_header {
 		if rec, more := next_record(&it); more {
@@ -138,17 +135,17 @@ column_count :: proc(doc: ^Document) -> int {
 	return doc.width
 }
 
-// The column the header names `name`, chosen by the document's `duplicates` policy: `.First` and `.Last` name the
-// first or last of two columns that share it, `.All` the last (`unmarshal` reads the later one over the earlier),
-// and `.Default`/`.Refuse` answer nothing when several do. `ok` is false for a name the header lacks, a refused
-// repeat, and a document with no header.
+// The column the header names `name`, the first of them when several do. `ok` is false for a name the header
+// lacks and for a document with no header. The path edits read `duplicates` instead, and refuse a name two
+// columns share under `.Default`/`.Refuse`.
 @(require_results)
 column :: proc(doc: ^Document, name: string) -> (col: int, ok: bool) {
-	c, _, repeated := named_column(doc.src, doc.names[:], doc.dialect, name, doc.duplicates)
-	if repeated {
-		return -1, false
+	for f, c in doc.names {
+		if text_is(doc.src, f, doc.dialect, name) {
+			return c, true
+		}
 	}
-	return c, c >= 0
+	return -1, false
 }
 
 // The column `name` names in a header's fields (`text_is`), under `duplicates`. `col` is -1 when no field names it.

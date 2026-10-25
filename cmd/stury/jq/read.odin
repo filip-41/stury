@@ -202,17 +202,19 @@ read_json :: proc(src: string) -> (Value, string) {
 }
 
 // The library's fault `e` in `src` as jq tells a parse error: its message (`what`, where jq words it its own way, and
-// `at EOF` when the text ended), then the line and 1-based column of the byte the fault is at, or one past the last
-// byte at the end, counting on from `line` and `column` (the bytes of its line before `src`): the one position `stury
-// check` and the library's `error_position` report, a faulty newline's own line and column. jq's is where its parser
-// stands having read that byte: the last byte's at the end, and the next line's column 0 for a newline. A text ends
-// at `text_end` in `src` (default: all of it), `src` may run on past it by the newline that ends its line.
+// `at EOF` when the text ended), then the line and 1-based column where jq's parser stands having read that byte,
+// counting on from `line` and `column` (the bytes of its line before `src`): the byte the fault is at, or, at the end
+// of the text, that last byte itself (one column back from the library's `error_position`, which `check` prints). A
+// faulty newline is told at its own line and column, where jq's parser stands on the next line's column 0. A text
+// ends at `text_end` in `src` (default: all of it), `src` may run on past it by the newline that ends its line.
 parse_message :: proc(src: []byte, e: json.Error, line := 1, column := 0, what := "", text_end := -1) -> string {
 	at := min(int(e.offset), len(src))
 	eof := at >= (len(src) if text_end < 0 else text_end)
 	l, c := line, column
 	advance(&l, &c, src[:at])
-	c += 1
+	if !eof {
+		c += 1
+	}
 	return fmt.aprintf("%s%s at line %d, column %d", what if what != "" else FAULT_TEXT[e.kind], " at EOF" if eof else "", l, c)
 }
 

@@ -32,7 +32,8 @@ PLAN_Bad_Name :: struct {
 // `\,` is a literal comma, and the header a CSV writer quotes. Both formats read the name back.
 PLAN_Comma :: struct {
 	last: string `json:"Last\, First" csv:"Last\, First"`,
-	age:  int    `json:"Age\, years" csv:"Age\, years"`,
+	// An escape and a flag in one tag: the name ends at the comma the escape does not quote.
+	age: int `json:"Age\, years,required" csv:"Age\, years,required"`,
 }
 
 // `\\` is one backslash, the byte that names an escape elsewhere: a tag can name it too.

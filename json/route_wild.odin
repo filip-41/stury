@@ -35,7 +35,9 @@ settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator
 		}
 	}
 	clear(&req.answers)
-	req.state.src, req.stop, req.coverage = src, nil, .Full
+	// The walk's coverage and stop stand: the settling build answered the wildcard paths, it did not replace
+	// the request's own reading.
+	req.state.src = src
 	req.state.groups.grouped = false
 	walk.adopt_allocator(&req.answers, alloc)
 	if _, err := append(&req.answers, ..kept[:]); err != nil {
@@ -72,13 +74,16 @@ wild_build_rows :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Alloc
 	req.strictness = .Strict
 	fault := scan_rows(src, req, alloc)
 	req.strictness = strictness
+	// The bytes the build validated are its own reading, needed to answer the wildcard paths from rows: the
+	// request's result covers what its walk read, as when the build refuses the document.
+	req.coverage, req.stop = coverage, stop
 	// The first of several texts builds whole, and `.Trailing` is the scan's own result.
 	if e, bad := scan_error(req.state.verdict, fault).?; bad {
 		if e.kind == .Over_Capacity || e.kind == .Out_Of_Memory {
 			return true, e
 		}
 		if e.kind != .Trailing {
-			req.state.verdict, req.coverage, req.stop = verdict, coverage, stop
+			req.state.verdict = verdict
 			return true, nil
 		}
 	}

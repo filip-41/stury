@@ -5,7 +5,33 @@
 ### Library
 
 - `Record_Read` reads each record of one type with the plan and the shape resolved once
-  (`record_read_init`, then `unmarshal`). A fault's offset is into that record's bytes.
+  (`record_read_init`, then `unmarshal`). A fault's offset is into that record's bytes. It is a handle now:
+  the state lives on the heap, `destroy` frees it, a copy shares it (destroy once), and its options are read
+  on every read, so `duplicates`, `limits`, `borrow_strings` and `strictness` set after init apply to the next
+  record. It used to be a 70,160-byte value holding pointers into itself, so returning one by value left a
+  frame that was gone.
+- A type plan whose compile fails is rolled back and answers the same fault on every later call; a tag the
+  format cannot spell is no longer reported as `.Out_Of_Memory`. Only `.Out_Of_Memory` is retryable.
+- A tag's name may hold a literal comma or backslash (`csv:"Last\, First"`), and a flag other than
+  `omitempty`, `required` or `string` refuses with `.Bad_Utf8` instead of being ignored.
+- An edit list that is unsorted or overlapping is `.Bad_Edit`, where it used to index out of bounds; JSONC
+  `remove` answered `.Bad_Result` for the same list.
+- A fault at no byte of the source renders one way: `offset N: Kind` when the offset locates it, bare
+  otherwise. `Unmarshal_Error` no longer invents a `1:1`.
+- `csv.get_float` is false for a cell that is not a number, has no binary64, or is a nonzero value that
+  underflows to zero; `1e-400` used to answer `0, true`. A rounded decimal (`0.1`) still reads, and the
+  Document readers and `unmarshal` share one cell reader.
+- `csv` path edits honour `duplicates`, `strictness` and `limits`: an edit of a name two columns share refuses
+  under `.Default`/`.Refuse` instead of silently editing the first, and a source `records` accepts is not refused
+  by `set`. `column` keeps its contract and names the first of them.
+- `.Lazy` `.Path` answers report the same `coverage` and `stop` with and without `FORCE_AUTOMATON`. A `.Path`
+  scan's wildcard key scratch allocates from the request's allocator, and the deep-frame spill grows with the
+  document instead of allocating the depth cap (24 MiB for a 1,100-deep document is now 48 KiB).
+- `get_string`'s contract names the reads that write the document: `get_key`, and `child` past 64 members,
+  fill a cache from the document's allocator, so only a `.Dom` build's `get_string` may run on several threads.
+- Split by responsibility, with no name changed: `json/document_build|walk|query`, `csv/cell` and
+  `csv/unmarshal_columns|row|cells`, `json/scan/walk/path_reread`, `json/scan/shape_tag|shape_round`,
+  `cmd/stury/regex/class|analyze`, and `cmd/stury/jq/lex|actions`, with the update sinks in `jq/modify`.
 - `marshal` refuses a `Number` that is `.None` (`1e400`) with `.Non_Finite`; it used to write `0`. `Digits`
   and `Raw` keep such a number. `Exact` is now `Exactness`'s zero value, so an unset `Number` writes `0`.
 - `edit_comment` accepts bare text, the form `fact_text` returns, and writes it as a `//` line.
@@ -48,6 +74,12 @@
 
 - The format aliases `--csv`, `--tsv`, `--ndjson` and `--jsonc` are removed. Spell both halves:
   `--from csv --to csv`. `--from` alone reads the format and writes JSON, as before.
+- A parse error at the end of the input names the same column jq and `--stream-errors` name, also through
+  `fromjson`, `--argjson`, `--jsonargs`, `--slurpfile` and module data. `check` keeps the library's position.
+- `--seq` reads its files as one byte stream, as jq does: a record cut at a file end continues in the next
+  file, and `check --seq` joins the same way, so neither reports `Text before the first RS` for a continuation.
+- `debug` and `stderr` lines flush with the output they follow instead of at the end of the input, and the
+  buffer is freed per input, so RSS no longer grows with the input.
 
 ## 0.0.2 (2026-10-24)
 

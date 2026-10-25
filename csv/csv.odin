@@ -132,7 +132,8 @@ Limits :: struct {
 Read_Opts :: struct {
 	dialect:    Dialect,
 	strictness: Strictness,
-	// `unmarshal`'s reading of a header name two columns share (`Duplicates`). Only `unmarshal` reads it.
+	// How `unmarshal` and the path edits read a header name two columns share (`Duplicates`); `column` names the
+	// first of them.
 	duplicates: Duplicates,
 	limits:     Limits,
 	// The first record is data, not column names.
