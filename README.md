@@ -4,11 +4,10 @@ stury is a JSON and CSV library for [Odin](https://odin-lang.org), with a comman
 filters over JSON and CSV.
 
 Input is checked strictly by default: JSON against RFC 8259 (no `01`, no `NaN`, no invalid UTF-8, no lone
-surrogate), CSV against RFC 4180. On one arm64 machine stury is 10 to 40 times faster than Odin's
-`core:encoding/json`, faster than simdjson at validation, and faster than simdjson, yyjson and sonic-rs at
-decoding into structs ([benchmarks](docs/benchmarks.md)).
+surrogate), CSV against RFC 4180.
 
-**Status:** version 0.0.2. The API may still change between releases ([CHANGELOG.md](CHANGELOG.md)).
+**Status:** pre-1.0. The API may still change between releases; [CHANGELOG.md](CHANGELOG.md) lists what is
+released and what is not.
 
 ## Features
 

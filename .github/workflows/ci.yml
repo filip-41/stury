@@ -83,7 +83,8 @@ jobs:
         run: |
           odin test core/test -collection:stury=.
           odin test json/test/api -collection:stury=.
-          odin build cmd/stury -o:speed -collection:stury=. -define:REFUSE_DUPLICATES=false -out:stury.exe
+          odin test csv/test -collection:stury=.
+          odin build cmd/stury -o:speed -collection:stury=. -define:REFUSE_DUPLICATES=false -define:STURY_VERSION='"ci"' -out:stury.exe
       - name: Answers through files and pipes
         shell: bash
         run: |
@@ -97,3 +98,8 @@ jobs:
           [ "$(echo '"2015-03-05T23:51:47Z"' | ./stury.exe -r 'fromdate | todate')" = "2015-03-05T23:51:47Z" ]
           [ "$(./stury.exe -n '[limit(3; recurse(.+1))] | length' <<< 0)" = "3" ]
           ! echo '{' | ./stury.exe . 2>/dev/null
+          # The CSV codec, both halves, through a file and a pipe.
+          printf 'a,b\n1,2\n' > two.csv
+          [ "$(./stury.exe --from csv -c '.b' two.csv)" = '"2"' ]
+          [ "$(./stury.exe --from csv --to csv 'select(.a == "1")' two.csv | tr -d '\r' | paste -sd, -)" = "a,b,1,2" ]
+          [ "$(printf 'a,b\n3,4\n' | ./stury.exe --from csv -c '.a')" = '"3"' ]
