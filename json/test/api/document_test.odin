@@ -302,3 +302,19 @@ test_document_arena_keeps_decoded_bytes_only :: proc(t: ^testing.T) {
 	testing.expect_value(t, second, "\td")
 	testing.expect(t, raw_data(second) == raw_data(first)[len(first):], "the unfilled tail is handed back")
 }
+
+// A rescan reuses the decoded-string store, so a request scanning many documents holds the largest one's
+// decoded strings, not their sum.
+@(test)
+test_rescan_reuses_the_decoded_strings :: proc(t: ^testing.T) {
+	big := strings.concatenate({"[", strings.repeat(`"a\nb",`, 60_000, context.temp_allocator), `"x"]`}, context.temp_allocator)
+	req: json.Request({.Dom})
+	defer json.destroy(&req)
+	testing.expect(t, json.scan(raw(big), &req) == nil)
+	grown := cap(req.doc.values)
+	testing.expectf(t, grown >= 3 * 60_000, "%d bytes hold the decoded strings", grown)
+	for src in ([]string{`{"a":"b\tc"}`, big, `[1]`, big}) {
+		testing.expect(t, json.scan(raw(src), &req) == nil)
+		testing.expectf(t, cap(req.doc.values) == grown, "%d bytes after a rescan, want %d", cap(req.doc.values), grown)
+	}
+}

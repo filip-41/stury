@@ -13,7 +13,7 @@ CLI_MAX_BYTES := 3014656
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: build-cli test test-lib test-one test-cli test-jq test-examples test-x86 test-modes diff test-asan test-tsan lint bench-compare bench-cli
+.PHONY: build-cli test test-lib test-one test-cli test-jq test-examples test-x86 test-modes diff test-asan test-tsan lint probe fixtures bench-compare bench-cli
 
 # `$(call odin_each,VERB,PACKAGES,FLAGS,LABEL)` runs `odin VERB` over each package and stops at the first failure.
 define odin_each
@@ -32,13 +32,13 @@ mv $$d/$(notdir $(2)) $(2)
 endef
 
 # The private targets requiring internal, not published, machinery.
-PRIVATE_TARGETS := all probe fixtures bench selftest test-diff test-private lint-gate
+PRIVATE_TARGETS := all bench selftest test-diff test-private lint-gate
 ifndef GATE
 .PHONY: $(PRIVATE_TARGETS)
 $(PRIVATE_TARGETS):
 	@if [ -f Makefile.gate ]; then exec $(MAKE) -f Makefile.gate $@; fi; \
 	echo "make $@ is the private gate: it needs Makefile.gate and the private checkout, which are not published." >&2; \
-	echo "This file's targets are: lint test test-modes test-x86 test-asan test-tsan diff build-cli bench-compare bench-cli." >&2; \
+	echo "This file's targets are: lint test test-modes test-x86 test-asan test-tsan diff build-cli probe fixtures bench-compare bench-cli." >&2; \
 	exit 1
 endif
 
@@ -137,18 +137,25 @@ lint:
 	@# The code guard reads source text alone: a release archive runs it like a checkout does.
 	@echo "== no mutable globals"; python3 tools/no_mutable_globals.py
 
+# The bench probe (`build/probe --lane NAME`, bench/README.md), and build/probe50, which times 50 iterations.
+probe:
+	$(call odin_build,bench/probe -collection:stury=. $(OPT),build/probe)
+	$(call odin_build,bench/probe -collection:stury=. $(OPT) -define:TIMED_ITERS=50,build/probe50)
+
+# Every generated fixture, checked against bench/manifest.toml.
+fixtures:
+	python3 bench/gen.py --check
+
 # The comparison with other libraries and with other jq-like command lines (bench/README.md). bench-compare
 # downloads its pinned inputs and the other libraries first; bench-cli fetches the corpus and needs jq, jaq, gojq and yq
 # installed. Neither result is quotable unless the machine is idle.
-bench-compare:
+bench-compare: fixtures
 	python3 bench/fetch.py
-	python3 bench/gen.py --check
 	python3 bench/compare.py build
 	python3 bench/compare.py time --out build/bench/report
 
-bench-cli: build-cli
+bench-cli: build-cli fixtures
 	python3 bench/fetch.py corpus
-	python3 bench/gen.py --check
 	zsh bench/cli/jq_compare.sh
 
 # The public suites and the command line under a sanitizer

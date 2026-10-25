@@ -915,9 +915,7 @@ def build():
     os.makedirs(BUILD, exist_ok=True)
     tune, cpp_only = native_flags()
     steps = [
-        ("stury probe", None, ["odin", "build", "bench/probe", "-collection:stury=.", "-o:speed", "-out:build/probe"]),
-        ("stury probe50", None, ["odin", "build", "bench/probe", "-collection:stury=.", "-o:speed",
-                                 "-define:TIMED_ITERS=50", "-out:build/probe50"]),
+        ("stury probes", None, ["make", "probe"]),
         # simdjson's single-header amalgamation, built with the same flags as the other C and C++ code.
         ("simdjson + RapidJSON", [os.path.join(SIMDJSON_SRC, "simdjson.cpp"), os.path.join(RAPIDJSON_INC, "rapidjson")],
          ["c++", "-std=c++20", "-O3", "-DNDEBUG", *tune, *cpp_only, "-Wno-deprecated-declarations",

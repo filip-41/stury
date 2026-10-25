@@ -26,7 +26,7 @@ Or step by step:
 
 ```bash
 python3 bench/fetch.py              # the pinned corpus and the other libraries' sources (sources.toml)
-python3 bench/gen.py --check        # the synthetic fixtures, checked against manifest.toml
+make fixtures                       # the synthetic fixtures, checked against manifest.toml
 python3 bench/compare.py build      # every arm, into build/bench
 python3 bench/compare.py check      # every arm must answer as stury does
 python3 bench/compare.py time --runs 11 --out build/bench/report
@@ -62,7 +62,7 @@ Environment variables:
 | --- | --- |
 | `gen.py`, `manifest.toml` | the synthetic fixtures, deterministic, each pinned by SHA-256 |
 | `fetch.py`, `sources.toml` | the real-world corpus and the other libraries' C/C++ sources, each pinned by URL and SHA-256 |
-| `probe/` | stury's arms: one Odin program, one lane per run (`build/probe --lane NAME --fixture F`). The lanes `compare.py` does not run (encode, marshal, edit, record streaming, wildcard paths, duplicate-key and fault handling) measure stury alone |
+| `probe/` | stury's arms: one Odin program, one lane per run (`make probe`, then `build/probe --lane NAME --fixture F`). The lanes `compare.py` does not run (encode, marshal, edit, record streaming, wildcard paths, duplicate-key and fault handling) measure stury alone |
 | `peers/` | the other libraries' arms: `cpp_bench.cpp` (simdjson, RapidJSON), `yy_bench.c` (yyjson), `rust/` (serde_json, sonic-rs, csv, simd-csv, versions in `Cargo.lock`; `read.rs` is the JSON arm, `csv_bench.rs` the CSV one) |
 | `core_compare/` | stury against Odin's own `core:encoding/json`: `odin build bench/core_compare -o:speed -collection:stury=. -out:build/core_compare && build/core_compare [fixtures_dir] [rounds]` |
 | `compare.py` | builds the arms, checks their answers, times them, writes the report |
