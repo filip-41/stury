@@ -87,8 +87,6 @@ stury's own options:
   check                     judge the inputs, print nothing when valid;
       --from format         read json (default), jsonc, ndjson, csv or tsv;
       --to format           write json (default), jsonc, ndjson, csv or tsv;
-      --ndjson, --csv, --tsv, --jsonc
-                            --from and --to of that format;
       --grow-header         with --to csv or tsv, write a header of every key;
       --max-depth n         refuse nesting past n levels (default 1024);
       --strict-limits       with check, keep the library's number limits.
@@ -135,9 +133,9 @@ Cli :: struct {
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
 	mono:       bool, // -M
-	// --from, --to and the alias (`--csv`) as given on the command line. `parse_args` resolves them into `Opts`.
+	// --from and --to as given on the command line. `parse_args` resolves them into `Opts`.
 	formats:    struct {
-		from, to, alias: Maybe(Format),
+		from, to: Maybe(Format),
 	},
 	// The first JSON-output-only option given (-r, -c, --indent...), and the first JSON layout option given.
 	json_flag, layout_flag: string,
@@ -163,7 +161,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			}
 		}
 	}
-	o.from, o.to = settle_format(cli.formats.from, cli.formats.alias), settle_format(cli.formats.to, cli.formats.alias)
+	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
 	if o.from == .Jsonc {
 		jq.read_dialect = .Jsonc
 	}
@@ -248,9 +246,6 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		case "stream-errors":
 			o.stream, o.stream_errors = true, true
 		case:
-			if _, is_alias := format_alias(name); is_alias {
-				break
-			}
 			c: byte
 			for l in LONG_LETTERS {
 				if l.name == name {
@@ -269,50 +264,25 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	return
 }
 
-// Records a `--from NAME`, `--to NAME` or `--NAME` format option at `args[i]` in `cli.formats`. A later `--from`
-// or `--to` overrides an earlier one. Two aliases of different formats are refused.
+// Records a `--from NAME` or `--to NAME` option at `args[i]` in `cli.formats`. A later one overrides an earlier one.
 @(private = "file")
 format_option :: proc(cli: ^Cli, args: []string, i: int) {
 	a := args[i]
-	if len(a) < 3 || a[:2] != "--" {
+	if a != "--from" && a != "--to" {
 		return
 	}
-	switch name := a[2:]; name {
-	case "from", "to":
-		if i + 1 >= len(args) {
-			usage_error("%s takes one parameter", a)
-		}
-		f, ok := format_named(args[i + 1])
-		if !ok {
-			usage_error("%s takes one of %s, not %q", a, format_names(), args[i + 1])
-		}
-		if name == "from" {
-			cli.formats.from = f
-		} else {
-			cli.formats.to = f
-		}
-	case:
-		f, ok := format_alias(name)
-		if !ok {
-			return
-		}
-		if earlier, set := cli.formats.alias.?; set && earlier != f {
-			usage_error("--%s and --%s each choose the format", FORMATS[earlier].name, name)
-		}
-		cli.formats.alias = f
+	if i + 1 >= len(args) {
+		usage_error("%s takes one parameter", a)
 	}
-}
-
-// Returns the explicit `--from` or `--to` format, else the alias, else JSON.
-@(private = "file")
-settle_format :: proc(explicit, alias: Maybe(Format)) -> Format {
-	if f, ok := explicit.?; ok {
-		return f
+	f, ok := format_named(args[i + 1])
+	if !ok {
+		usage_error("%s takes one of %s, not %q", a, format_names(), args[i + 1])
 	}
-	if f, ok := alias.?; ok {
-		return f
+	if a == "--from" {
+		cli.formats.from = f
+	} else {
+		cli.formats.to = f
 	}
-	return .Json
 }
 
 // Records `flag` as the first JSON-output-only option, and as the first layout option when `layout` is set.

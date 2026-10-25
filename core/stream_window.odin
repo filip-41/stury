@@ -3,7 +3,7 @@ package core
 import "core:io"
 import "core:mem"
 
-// The default bytes per read that a streamed reader (`records_from`) requests from its `io.Reader`; `chunk`
+// The default bytes per read that a streamed reader (`csv.records_from`) requests from its `io.Reader`; `chunk`
 // overrides it.
 READER_CHUNK :: 64 * 1024
 

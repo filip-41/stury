@@ -22,7 +22,7 @@ doc comment is its contract. [json/json.odin](../json/json.odin), [csv/csv.odin]
 - `unmarshal` never frees what it allocates, even when it refuses the input. Give it an arena and free the
   arena.
 - `destroy` frees a value that owns several allocations: a `Document`, a `Request`, a `Type_Plan`, a
-  `Record_Reader`. A slice a procedure returns, such as `set`'s output, is one allocation: `delete` it as
+  CSV `Record_Reader`. A slice a procedure returns, such as `set`'s output, is one allocation: `delete` it as
   you would any Odin slice.
 - A procedure whose result is its only output carries `@(require_results)`, so a call that drops the result
   does not compile.
@@ -144,8 +144,7 @@ if e, bad := it.err.(json.Error); bad { // the framing itself failed, so the loo
 }
 ```
 
-`json.records_from` reads a stream from an `io.Reader` in bounded memory. For threads, pass a
-`host.Batch_Pool`'s `runner` (`import "stury:host"`) to `validate_records` or `each_record`:
+For threads, pass a `host.Batch_Pool`'s `runner` (`import "stury:host"`) to `validate_records` or `each_record`:
 
 ```odin
 pool: host.Batch_Pool
@@ -236,9 +235,9 @@ fmt.print(string(added)[len(src):]) // Bergen,,60.39,5.32
 trimmed, _ := csv.remove(src, ".[].population") // the column, header included
 ```
 
-`records_from` gives the same records, offsets and fault as `records` on the whole text. `each_record` runs a
-task on pieces of a text on a `host.Batch_Pool`, and `csv.validate` takes the same runner. `write_record`
-appends one record of text cells to a buffer:
+`records_from` reads a stream from an `io.Reader` in bounded memory, with the same records, offsets and fault
+as `records` on the whole text. `each_record` runs a task on pieces of a text on a `host.Batch_Pool`, and
+`csv.validate` takes the same runner. `write_record` appends one record of text cells to a buffer:
 
 ```odin
 r: strings.Reader

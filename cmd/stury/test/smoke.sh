@@ -57,20 +57,20 @@ for f in deep1100 deep10000 deep10001 digits300; do
 	check "check_strict_$f" 5 '' check --strict-limits "$T/$f.json"
 done
 check check_strict_deep1024 0 '' check --strict-limits "$T/deep1024.json"
-# --jsonc validates against the same caps.
+# --from jsonc validates against the same caps.
 for f in deep1024 digits300; do
-	check "check_jsonc_$f" 0 '' check --jsonc "$T/$f.json"
+	check "check_jsonc_$f" 0 '' check --from jsonc "$T/$f.json"
 done
 for f in deep1100 deep10001; do
-	check "check_jsonc_$f" 5 '' check --jsonc "$T/$f.json"
+	check "check_jsonc_$f" 5 '' check --from jsonc "$T/$f.json"
 done
-check check_jsonc_strict_deep1100 5 '' check --jsonc --strict-limits "$T/deep1100.json"
-check check_jsonc_strict_digits300 5 '' check --jsonc --strict-limits "$T/digits300.json"
+check check_jsonc_strict_deep1100 5 '' check --from jsonc --strict-limits "$T/deep1100.json"
+check check_jsonc_strict_digits300 5 '' check --from jsonc --strict-limits "$T/digits300.json"
 check check_deep10001 5 '' check "$T/deep10001.json"
 check dot_deep10001 5 '' -c . "$T/deep10001.json"
 { cat "$T/digits300.json"; echo '[1e5000]'; cat "$T/deep1024.json"; } >"$T/big.ndjson"
-check check_ndjson_caps 0 '' check --ndjson "$T/big.ndjson"
-check check_ndjson_strict 5 '' check --ndjson --strict-limits "$T/big.ndjson"
+check check_ndjson_caps 0 '' check --from ndjson "$T/big.ndjson"
+check check_ndjson_strict 5 '' check --from ndjson --strict-limits "$T/big.ndjson"
 # One text of 300-digit numbers through a pipe, over more than one window: it is read on past each window's
 # end, as a file is.
 "$S" -nr '"[" + ("1" * 300 + ",\n") * 40000 + "1]"' >"$T/digits_lines.json"
@@ -195,7 +195,7 @@ for opt in -V --version -h --help --build-configuration; do
 	"$S" "$opt" >/dev/null 2>&1 </dev/null || { echo "FAIL $opt: exit $? (want 0)"; fails=$((fails + 1)); }
 done
 check build_configuration_var 0 '"string"' -n '$JQ_BUILD_CONFIGURATION | type'
-"$S" --help | grep -q '^      --ndjson, --csv,' || { echo "FAIL --help lists --ndjson"; fails=$((fails + 1)); }
+"$S" --help | grep -q '^      --from format' || { echo "FAIL --help lists --from"; fails=$((fails + 1)); }
 "$S" --help | grep -q 'docs/cli.md in stury.s source' || { echo "FAIL --help points to docs/cli.md"; fails=$((fails + 1)); }
 "$S" -h | head -1 | grep -q '^stury - commandline JSON processor \[version ' || { echo "FAIL -h"; fails=$((fails + 1)); }
 "$S" -f </dev/null 2>"$T/err"

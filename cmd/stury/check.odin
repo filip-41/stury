@@ -2,8 +2,8 @@ package main
 
 // `stury check` validates each input as `stury .` reads it and prints nothing. An input of no text fails, as the
 // library refuses an empty document. Its caps are the library's with the digit and scale caps lifted (`jq.lifted`),
-// or held under --strict-limits, and nesting is capped at --max-depth either way. --ndjson and --seq validate each
-// record as one text, and --jsonc reads JSONC as the library does, which jq does not.
+// or held under --strict-limits, and nesting is capped at --max-depth either way. --from ndjson and --seq validate each
+// record as one text, and --from jsonc reads JSONC as the library does, which jq does not.
 
 import "core:bytes"
 import "core:fmt"

@@ -80,7 +80,7 @@ Inputs :: struct {
 	fault_next:         int,
 	slurp_tail:         bool, // -s --stream-errors: the fault's error event comes after the slurped array, not in it
 	bom_broken:         bool, // --seq --stream-errors: the stream began with a cut byte order mark, so jq's parser starts afresh at every call
-	cells:              ^Cells, // --csv, --tsv: the open file's text and header
+	cells:              ^Cells, // --from csv or tsv: the open file's text and header
 	seq_head:           enum u8 {
 		Unread, // --seq: the open file's first text is yet to be found
 		Bare, // found with no separator before it, and yet to be refused
@@ -464,7 +464,7 @@ text_end :: proc(ins: ^Inputs, at, limit: int) -> int {
 	return limit
 }
 
-// A JSONC text the library refuses, which ends the run as `check --jsonc` reports it.
+// A JSONC text the library refuses, which ends the run as `check --from jsonc` reports it.
 jsonc_fault :: proc(ins: ^Inputs, e: json.Error, at: int) -> ! {
 	e := e
 	e.offset += u64(at)
@@ -488,7 +488,7 @@ input_position :: proc(ins: ^Inputs) -> (string, int) {
 
 // The next text of the stream: where it starts in data, how far it may reach, and whether another text may follow it
 // within that. It returns false at the end of the stream. A text reaches to the end of its file, a literal to the
-// first space, quote or bracket, under --seq a record to the next separator, under --ndjson a line, and under --jsonc
+// first space, quote or bracket, under --seq a record to the next separator, under --from ndjson a line, and under --from jsonc
 // the whole input, one document.
 next_text :: proc(ins: ^Inputs) -> (at, limit: int, trailing, found: bool) {
 	seq, ndjson := ins.run.opts.seq, ins.run.opts.from == .Ndjson

@@ -3,12 +3,12 @@ package main
 // The stury command line: a jq filter over JSON, NDJSON, JSON text sequences or JSONC files.
 //
 //	stury [OPTIONS] [FILTER] [FILE...]
-//	stury check [--ndjson|--seq] [--jsonc] [--strict-limits] [FILE...]
+//	stury check [--from format|--seq] [--strict-limits] [FILE...]
 //
 // FILTER is a jq program, and the output is what jq 1.8 prints for it. The options are listed in HELP_OPTIONS
 // (options.odin). With no FILE it reads stdin, and with no FILTER it runs `.` unless stdin and stdout are both a
 // terminal. The files are read as jq reads them, one stream, and a fault gets jq's message (input.odin). Texts one
-// per line are read in parallel with or without `--ndjson`, which says they are.
+// per line are read in parallel with or without `--from ndjson`, which says they are.
 //
 // A filter that is a path (`json.parse_path`'s jq subset) with at most one `[]` is answered by the path scan,
 // which reads only what it needs (a `[]`'s outputs settled as jq's in `iterate_root_pieces`, root_spine.odin
@@ -23,8 +23,8 @@ package main
 //
 //	options.odin                     the command line
 //	input.odin, input_stream.odin    reading files and stdin as jq does, whole or in line windows
-//	input_csv.odin                   --csv and --tsv input: each record after the header as an object
-//	scan_cells.odin                  column-only filters on --csv and --tsv input, answered from the cells
+//	input_csv.odin                   --from csv and tsv input: each record after the header as an object
+//	scan_cells.odin                  column-only filters on --from csv and tsv input, answered from the cells
 //	scan_inputs.odin                 the path scan over the input stream
 //	record_scan.odin                 a file's one-per-line records scanned on the batch pool
 //	root_pieces.odin,
@@ -178,7 +178,7 @@ main :: proc() {
 	}
 	ins: Inputs
 	inputs_init(&ins, &run, names)
-	// A pipe is read as it comes, but by -s, which needs it all, and --jsonc, whose faults count lines in it whole.
+	// A pipe is read as it comes, but by -s, which needs it all, and --from jsonc, whose faults count lines in it whole.
 	ins.may_stream = !o.slurp && o.from != .Jsonc
 	bind_inputs(&run, &ins)
 	// Here, not in the interpreter's arena, which each input empties.
@@ -399,7 +399,7 @@ fault_context :: proc(src: []byte, e: json.Error, opts: ^Opts) -> string {
 	case e.kind != .Bad_Char || at >= len(src) || jsonc:
 		return ""
 	case src[at] == '/' && at + 1 < len(src) && (src[at + 1] == '/' || src[at + 1] == '*'):
-		hint = "--jsonc reads comments"
+		hint = "--from jsonc reads comments"
 	case src[at] == ']' || src[at] == '}':
 		before := at
 		for before > 0 && jq.is_space(src[before - 1]) {
@@ -408,7 +408,7 @@ fault_context :: proc(src: []byte, e: json.Error, opts: ^Opts) -> string {
 		if before == 0 || src[before - 1] != ',' {
 			return ""
 		}
-		hint = "--jsonc reads a trailing comma"
+		hint = "--from jsonc reads a trailing comma"
 	case:
 		return ""
 	}

@@ -38,8 +38,7 @@ Framing :: enum u8 {
 //
 // What a read of `bytes` (`validate`, `scan`, `build`, `unmarshal`) reports is an offset into `bytes`, not into
 // the input. To say where it is in the input, add `at`. To render an error with `render_error`, pass `bytes` and
-// the offset as it is. The input also works from `records`, with `at` added to the offset; from `records_from`
-// it is gone, so `bytes` (valid until the next `next_record`) is the text to pass.
+// the offset as it is. The input also works, with `at` added to the offset.
 Record :: struct {
 	bytes: []byte,
 	key:   []byte,
@@ -71,15 +70,9 @@ records :: proc(src: []byte, framing: Framing) -> Records {
 	return {src = src, framing = framing}
 }
 
-// The next record, or false at the end or on a fault in `it.err`. From a `Record_Reader` it is valid until the next
-// call, and also false on a failure of the reader in `read_err`.
-next_record :: proc {
-	next_slice_record,
-	next_reader_record,
-}
-
-@(private, require_results)
-next_slice_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
+// The next record, or false at the end or on a fault in `it.err`.
+@(require_results)
+next_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 	if it.err != nil {
 		return
 	}

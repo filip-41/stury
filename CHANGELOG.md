@@ -38,6 +38,14 @@
   takes the planned route while the plan holds (`request_init` drops it, `destroy` frees it). `scan` has one
   overload.
 - `Request`'s internal fields (`src`, `verdict`, `route`, `parsed`, `groups`) are grouped in one `state` field.
+- `json.records_from` and `json.Record_Reader` are removed; `next_record` and `destroy` lose their reader
+  overloads. Read the stream into memory and use `records`.
+  `csv.records_from` stays: the CLI streams CSV through it.
+
+### Command line
+
+- The format aliases `--csv`, `--tsv`, `--ndjson` and `--jsonc` are removed. Spell both halves:
+  `--from csv --to csv`. `--from` alone reads the format and writes JSON, as before.
 
 ## 0.0.2 (2026-10-24)
 

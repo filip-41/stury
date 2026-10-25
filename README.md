@@ -141,13 +141,13 @@ programs are in [examples/](examples):
 
 `stury` runs [jq](https://jqlang.org) 1.8 filters with jq's results and exit codes. Input is strict JSON by
 default, so `01`, `NaN` and invalid UTF-8 are errors, reported with their line and column. `--from` and `--to`
-choose `json`, `jsonc`, `ndjson`, `csv` or `tsv`, and `--csv` sets both.
+choose `json`, `jsonc`, `ndjson`, `csv` or `tsv`.
 
 ```sh
 $ echo '{"logs":[{"id":1}]}' | stury -c '.logs[].id'
 1
-$ stury check --ndjson log.ndjson    # prints nothing when valid
-$ stury --csv 'select(.country == "NO") | {city, population}' cities.csv
+$ stury check --from ndjson log.ndjson    # prints nothing when valid
+$ stury --from csv --to csv 'select(.country == "NO") | {city, population}' cities.csv
 city,population
 Oslo,709000
 Bergen,286000

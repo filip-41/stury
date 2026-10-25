@@ -302,16 +302,16 @@ FAST_ROUTE = [
     (["-c", '.["a"]'], '{"a":{"x":true}}'),
     (["-c", ".a"], '{"a":1} tru'),
     (["-c", ".a"], '{"a":1'),
-    (["--ndjson", "-c", ".v"], '{"v":1}\n{"v":[2,3]}\n\n{"v":"s"}\n'),
-    (["--ndjson", "-c", "."], '{"v":1}\n{ "v" : [2, 3] }\n'),
-    (["--ndjson", "-c", ".v"], '{"v":1}\n{"v":\n'),
-    (["--ndjson", "-c", ".v.w"], '{"v":1}\n'),
-    (["--ndjson", "-c", "."], '{"v":1}\n{"v":\n'),
+    (["--from", "ndjson", "-c", ".v"], '{"v":1}\n{"v":[2,3]}\n\n{"v":"s"}\n'),
+    (["--from", "ndjson", "-c", "."], '{"v":1}\n{ "v" : [2, 3] }\n'),
+    (["--from", "ndjson", "-c", ".v"], '{"v":1}\n{"v":\n'),
+    (["--from", "ndjson", "-c", ".v.w"], '{"v":1}\n'),
+    (["--from", "ndjson", "-c", "."], '{"v":1}\n{"v":\n'),
     # The record scan's compact encoding is the source's text, which jq's often is not.
-    (["--ndjson", "-c", "."], '"a\x7fb"\n{"x":1e2}\n"\\u0041\\/"\n[0.0000001,-0,1.0,"\\u00e9\\t"]\n'),
-    (["--ndjson", "-c", "."], '[1e-3]\n{"a":"0.0000001","b":2E+2}\n["1e5","4ef",0.5e1]\n' + '{"long":"%s","n":1e-3}\n' % ("x" * 40)),
-    (["--ndjson", "-r", "-c", "."], '"a"\n{"b":1}\n'),
-    (["--ndjson", "-j", "-c", "."], '"a"\n{"b":1}\n'),
+    (["--from", "ndjson", "-c", "."], '"a\x7fb"\n{"x":1e2}\n"\\u0041\\/"\n[0.0000001,-0,1.0,"\\u00e9\\t"]\n'),
+    (["--from", "ndjson", "-c", "."], '[1e-3]\n{"a":"0.0000001","b":2E+2}\n["1e5","4ef",0.5e1]\n' + '{"long":"%s","n":1e-3}\n' % ("x" * 40)),
+    (["--from", "ndjson", "-r", "-c", "."], '"a"\n{"b":1}\n'),
+    (["--from", "ndjson", "-j", "-c", "."], '"a"\n{"b":1}\n'),
 ]
 
 # Past two batch workers' worth (2 MB), where an answer's array is laid out in pieces on the batch pool: plain
@@ -409,7 +409,7 @@ FAST_ROUTE += [(opts, stdin, WHOLE + opts[-1]) for opts, stdin in [
     (["-c", ".[15], .[-15], .[2].n, .[-3].n"], "[" + ",".join('{"n":%d,"s":"%s"}' % (i, "x" * 300000) for i in range(12)) + "]"),
 ]]
 
-# Texts one per line past 2 MB, without --ndjson: once a text ends its line and the next line holds one, the
+# Texts one per line past 2 MB, without --from ndjson: once a text ends its line and the next line holds one, the
 # lines are read as records on the batch pool, up to one that is anything else, and the stream goes on from
 # there as jq reads it. Mid-stream: a parse error, texts that are no object, two texts on a line, a text over
 # lines, a lone surrogate, a repeated key; and a first text over lines.
@@ -661,17 +661,13 @@ def check_spine_fault(stury, diff, text, path, filter, depth=None):
     return "fast route", f"spine fault: stury {' '.join(argv)} <<< {text[:40]!r}...{text[-40:]!r}", why
 
 
-# Options only stury has; jq reads the same inputs without them (and without --max-depth's number).
-STURY_ONLY = {"--ndjson"}
-
-
 def jq_args(args):
-    """`args` as jq takes them: without the options only stury has."""
+    """`args` as jq takes them: without the options only stury has (--max-depth, --from, --to) and their values."""
     out, k = [], 0
     while k < len(args):
-        if args[k] == "--max-depth":
+        if args[k] in ("--max-depth", "--from", "--to"):
             k += 1
-        elif args[k] not in STURY_ONLY:
+        else:
             out.append(args[k])
         k += 1
     return out

@@ -62,7 +62,7 @@ JSON and CSV each have a writer; [§8](#8-across-formats) says what they share a
   ([§7.3](#73-strictness)), so the walk can jump over values the type does not read.
 - **Plan op** (`Plan_Op`): one flat entry of a `Type_Plan`, for one type ([§5.1](#51-the-type-plan)).
 - **Batch pool** (`host.Batch_Pool`): threads kept between batches, which `each_record` and `validate_records`
-  run on ([§7.7](#77-records-from-an-ioreader)).
+  run on ([§10](#10-build-time-options) sets its start budget).
 
 ## 2. The writer
 
@@ -615,24 +615,6 @@ pay for random access, which a type never asks for.
 **End of input.** The walk always runs to the end of the document, since bytes after the value are checked
 under both strictnesses. Only a fault stops it early.
 
-### 7.7 Records from an `io.Reader`
-
-`records_from` frames `.NDJSON` and `.JSON_Seq` over a stream with the framer `records` uses, so there is one
-framer.
-
-- A window holds the bytes not yet framed. After each read of `chunk` bytes it is cut after the last line feed
-  (NDJSON) or where the last run of `0x1E` starts (JSON text sequence), and `records` runs over the part
-  before the cut.
-- A cut never splits a record, so a record is framed whole and offsets, faults and the RFC 7464 §2.4 truncated
-  number match `records` over the whole input, whatever the reads' sizes.
-- Only the bytes a read added are searched for a cut, so a long record is not rescanned per read.
-- The framed bytes are dropped before the next read. The window doubles when a record and a chunk do not fit:
-  at most twice the longest record plus a chunk.
-- A record is valid until the next `next_record`.
-- `.Root_Entries` needs the whole root and is `.Bad_Option` on `err`. Read the root and use `records`.
-- A reader failure other than `.EOF` is `read_err`. Records framed before it are yielded, the bytes after them
-  are not.
-
 ## 8. Across formats
 
 `core` holds what the formats share and what a caller who works with several of them names once: `Strictness`,
@@ -703,7 +685,7 @@ Under `Quoting.Quotes`, up to the text's first fault, a byte is inside quotes ex
 quotes precedes it, since every quote opens or closes one (`""` is a close and an open). A first pass counts
 the quotes of each 32 KiB slice, and a piece starts at the first LF after its slice's offset with an even count
 before it. The first fault found in piece order is the text's first fault. A comment byte under quotes
-leaves one piece, since a comment line's quotes do not open fields. `records_from` runs the same `Records` over a
+leaves one piece, since a comment line's quotes do not open fields. `csv.records_from` runs the same `Records` over a
 window that holds the open line and a chunk: a block is scanned once the window holds it and the three bytes a
 UTF-8 check reads past it, and `Limits.max_record_bytes` bounds the open line.
 
@@ -745,8 +727,8 @@ where each value came from, and JSONC without one keeps the path scan.
 
 **Line-delimited input.** It needs no flag: the filter route detects it, and a path or a compact `.` over it
 is answered in pieces on a `host.Batch_Pool` kept for the run. The pieces start with the first line. `stury
-check --ndjson` validates the same lines with `validate_records`. `--jsonc` reads with `dialect = .Jsonc` and
-prints answers as JSONC.
+check --from ndjson` validates the same lines with `validate_records`. `--from jsonc` reads with `dialect = .Jsonc`,
+and `--to jsonc` prints answers as JSONC.
 
 **CSV and TSV.** A filter that is only columns (`.name`, `.a, .b`, `[.a, .b]` under `-c`; `choose_columns`) skips
 the interpreter. Each record's cells are decoded and written from their spans (`print_cells`), and the header's

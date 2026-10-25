@@ -93,12 +93,12 @@ ask logs_pretty '' '.logs[]' logs.json -
 ask logs_msg_raw -r '.logs[].msg' logs.json -r
 
 # NDJSON: one member of every record, and every record re-emitted compact.
-STURY_FLAGS=--ndjson ask ndjson_v -c .v records.ndjson -I0
-STURY_FLAGS=--ndjson ask ndjson_all -c . records.ndjson -I0
+STURY_FLAGS="--from ndjson" ask ndjson_v -c .v records.ndjson -I0
+STURY_FLAGS="--from ndjson" ask ndjson_all -c . records.ndjson -I0
 
 # JSONC: stury reads it; the others read it after strip_jsonc.sh.
 bench_case jsonc_id \
-	-n stury "$S --jsonc -c .logs[].id $J" \
+	-n stury "$S --from jsonc -c .logs[].id $J" \
 	-n jq "sh -c '$STRIP $J | jq -c .logs[].id'" \
 	-n jaq "sh -c '$STRIP $J | jaq -c .logs[].id'" \
 	-n gojq "sh -c '$STRIP $J | gojq -c .logs[].id'" \

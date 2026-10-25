@@ -189,7 +189,7 @@ test_compact_encode_clean_stretches :: proc(t: ^testing.T) {
 	}
 }
 
-// `sort_keys` with `jq_spelling` writes the bytes `stury -S` prints, newline and all (`-c` and the default pretty layout, `--jsonc` for
+// `sort_keys` with `jq_spelling` writes the bytes `stury -S` prints, newline and all (`-c` and the default pretty layout, `--from jsonc` for
 // a JSONC text): nested, escaped, repeated and non-ASCII keys in byte order, an empty object, and comments with
 // their members.
 @(test)

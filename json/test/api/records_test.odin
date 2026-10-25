@@ -78,7 +78,7 @@ test_json_seq_blank_records_are_none :: proc(t: ^testing.T) {
 	testing.expect_value(t, expect_records(t, raw("\xef\xbb\xbf1\n"), .JSON_Seq, {}).err, json.Error{kind = .Bad_Char, offset = 3})
 }
 
-// A line of JSON whitespace only, CRs among it, is blank, as the CLI's --ndjson filter reads it.
+// A line of JSON whitespace only, CRs among it, is blank, as the CLI's --from ndjson reads it.
 @(test)
 test_ndjson_whitespace_lines_are_blank :: proc(t: ^testing.T) {
 	src := raw("1\n\r\r\n \r\t\n\r\n2\n")

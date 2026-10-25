@@ -35,27 +35,27 @@ source "$HERE/bench_case.zsh"
 
 # Two columns of every record. The jq arm keeps the header line and takes the fields by position.
 bench_case cols_raw \
-	-n stury "$S --csv '{id,qty}' table.csv" \
+	-n stury "$S --from csv --to csv '{id,qty}' table.csv" \
 	-n mlr "mlr --csv cut -o -f id,qty table.csv" \
 	-n qsv "qsv select id,qty table.csv" \
 	-n jq "jq -R -r 'split(\",\") | [.[0], .[4]] | join(\",\")' table.csv"
 
 # Records with qty >= 9000. Every qty is below 10000, so qsv's regex selects the same records.
 bench_case filter_raw \
-	-n stury "$S --csv 'select(.qty | tonumber >= 9000)' table.csv" \
+	-n stury "$S --from csv --to csv 'select(.qty | tonumber >= 9000)' table.csv" \
 	-n mlr "mlr --csv filter '\$qty >= 9000' table.csv" \
 	-n qsv "qsv search -s qty '^9[0-9]{3}\$' table.csv" \
 	-n jq "jq -R -r 'select(startswith(\"id,\") or (split(\",\")[4] | tonumber >= 9000))' table.csv"
 
 # Two columns with quoted cells (commas, doubled quotes, LFs inside cells). Each tool quotes its output.
 bench_case cols_quoted_raw \
-	-n stury "$S --csv '{id,quote}' text.csv" \
+	-n stury "$S --from csv --to csv '{id,quote}' text.csv" \
 	-n mlr "mlr --csv cut -o -f id,quote text.csv" \
 	-n qsv "qsv select id,quote text.csv"
 
 # CSV to JSON lines, every cell a string.
 bench_case to_json \
-	-n stury "$S --csv --to json -c . table.csv" \
+	-n stury "$S --from csv -c . table.csv" \
 	-n mlr "mlr --icsv --ojsonl -S cat table.csv"
 
 python3 "$HERE/jq_report.py" "$OUT"

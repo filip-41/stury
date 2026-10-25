@@ -97,7 +97,7 @@ test_encode_jq_spelling :: proc(t: ^testing.T) {
 	testing.expect_value(t, strings.to_string(sb), want)
 }
 
-// `jq_spelling` writes a JSONC Document as `stury --jsonc` prints it, comments included (the wants are that
+// `jq_spelling` writes a JSONC Document as `stury --from jsonc` prints it, comments included (the wants are that
 // binary's `-c .` and `.` output): a repeated key keeps its last value's comments at its first place.
 @(test)
 test_encode_jq_spelling_jsonc :: proc(t: ^testing.T) {
