@@ -5,8 +5,10 @@ package jq
 // `halt_error`, `@comment*`, `test`, `match`, `capture`, `split/2`, `sub`, `gsub`). The builtins themselves are here.
 // Compiling a pattern and finding its matches is regex.odin's.
 
+import "base:runtime"
 import "core:math"
 import "core:mem/virtual"
+import "core:os"
 import "core:strings"
 import json "../../../json"
 
@@ -410,12 +412,35 @@ native_inputs :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool
 	}
 }
 
+// Messages held before they are written: a run's memory holds a chunk of its `debug` and `stderr` output, not
+// all of it. The bytes and their order are jq's either way.
+MESSAGE_FLUSH :: 1 << 16
+
+// Writes the `debug` and `stderr` messages held so far to stderr and empties the buffer. The caller flushes
+// before an output so the two streams interleave as jq's do, and this file flushes a bounded chunk so a long
+// run's memory stays flat.
+flush_messages :: proc(ip: ^Interp) {
+	if len(ip.messages) > 0 {
+		os.write(os.stderr, ip.messages[:])
+		clear(&ip.messages)
+	}
+}
+
 // `["DEBUG:", .]`, printed as jq's debug callback prints it: with the output's options, compact.
 native_debug :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	msg := new_array(2)
+	// The message alone, freed here: a long run's debug messages must not grow the input's arena with the
+	// arrays that print them.
+	heap := runtime.heap_allocator()
+	msg := new(Array, heap)
+	msg.items = make([dynamic]Value, 0, 2, heap)
 	append(&msg.items, "DEBUG:", input.v)
 	write_value(&ip.messages, msg, ip.debug_layout)
 	append(&ip.messages, '\n')
+	delete(msg.items) // the heap allocator it was made with
+	free(msg, heap)
+	if len(ip.messages) >= MESSAGE_FLUSH {
+		flush_messages(ip)
+	}
 	return out.emit(out, input)
 }
 
@@ -425,6 +450,9 @@ native_stderr :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool
 		append(&ip.messages, s)
 	} else {
 		write_value(&ip.messages, input.v, {})
+	}
+	if len(ip.messages) >= MESSAGE_FLUSH {
+		flush_messages(ip)
 	}
 	return out.emit(out, input)
 }

@@ -81,6 +81,7 @@ Inputs :: struct {
 	slurp_tail:         bool, // -s --stream-errors: the fault's error event comes after the slurped array, not in it
 	bom_broken:         bool, // --seq --stream-errors: the stream began with a cut byte order mark, so jq's parser starts afresh at every call
 	cells:              ^Cells, // --from csv or tsv: the open file's text and header
+	seq_joined:         bool, // --seq: data is a record and the texts after it, read on from the files after its own (`seq_join`)
 	seq_head:           enum u8 {
 		Unread, // --seq: the open file's first text is yet to be found
 		Bare, // found with no separator before it, and yet to be refused
@@ -305,14 +306,14 @@ text_fault :: proc(ins: ^Inputs, at, limit: int, found: json.Error, what := "") 
 	e := cut_by_next_byte(ins.data, at, limit, found, ins.run.req.dialect, ins.run.req.limits)
 	line, column := text_place(ins, at)
 	msg: string
-	if ins.next_file > 1 { // a later file is told at its own line and column, as check tells it
+	if ins.next_file > 1 && !ins.seq_joined { // a later file is told at its own line and column, as check tells it
 		at_error := e
 		at_error.offset += u64(at)
 		msg = fault_in_file(ins.name, ins.data, at_error, what, ins.lines_before)
 	} else if ins.run.opts.from == .Ndjson { // each line is one text, so a fault at its end is reported at EOF, past the newline
-		msg = jq.parse_message(ins.data[at:min(limit + 1, len(ins.data))], e, line, column, what, limit - at)
+		msg = fault_message(ins.data[at:min(limit + 1, len(ins.data))], e, line, column, what, limit - at)
 	} else {
-		msg = jq.parse_message(ins.data[at:], e, line, column, what)
+		msg = fault_message(ins.data[at:], e, line, column, what)
 	}
 	if ins.run.opts.stream_errors && ins.run.opts.from != .Ndjson {
 		return stream_errors_fault(ins, at, limit, line, column)
@@ -329,6 +330,21 @@ text_fault :: proc(ins: ^Inputs, at, limit: int, found: json.Error, what := "") 
 		}
 	}
 	return nil, msg, .Error
+}
+
+// The plain path's message for the faulty text `src`, which starts at `line` and `column` of the stream. A fault
+// inside the text is jq.parse_message's: the byte it is at, as the library counts it. A text that ends at its last
+// byte is jq's too, but jq's parser stands on that byte, one column back from the library's one past it (the
+// position --stream-errors gives).
+@(private = "file")
+fault_message :: proc(src: []byte, e: json.Error, line, column: int, what := "", text_end := -1) -> string {
+	at := min(int(e.offset), len(src))
+	if at < (len(src) if text_end < 0 else text_end) {
+		return jq.parse_message(src, e, line, column, what, text_end)
+	}
+	l, c := line, column
+	jq.advance(&l, &c, src[:at])
+	return fmt.aprintf("%s%s at line %d, column %d", what if what != "" else jq.FAULT_TEXT[e.kind], " at EOF", l, c)
 }
 
 // A text that ends inside a literal is `.Truncated` alone, but when a byte follows it (a space, a newline, the
@@ -493,8 +509,17 @@ input_position :: proc(ins: ^Inputs) -> (string, int) {
 next_text :: proc(ins: ^Inputs) -> (at, limit: int, trailing, found: bool) {
 	seq, ndjson := ins.run.opts.seq, ins.run.opts.from == .Ndjson
 	for {
-		if !ins.open && !open_next(ins) {
-			return 0, 0, false, false
+		if !ins.open {
+			// A separator seen in an earlier file leaves every later file's text a record, not text before the
+			// stream's first separator: --seq reads the files as one stream.
+			head := ins.seq_head
+			if !open_next(ins) {
+				return 0, 0, false, false
+			}
+			ins.seq_joined = false
+			if seq && head == .Read {
+				ins.seq_head = .Read
+			}
 		}
 		data := ins.data
 		at = ins.pos
@@ -520,6 +545,8 @@ next_text :: proc(ins: ^Inputs) -> (at, limit: int, trailing, found: bool) {
 				limit = at + k
 			} else if read_on(ins, at) {
 				continue
+			} else if ins.seq_head == .Read && !seq_text_ends(ins, at) && seq_join(ins, at) {
+				continue
 			}
 			return at, limit, false, true
 		case ndjson:
@@ -535,6 +562,76 @@ next_text :: proc(ins: ^Inputs) -> (at, limit: int, trailing, found: bool) {
 		limit, trailing = text_span(data, at)
 		return at, limit, trailing, true
 	}
+}
+
+// Whether the --seq text at data[at:] completes where the file does, so that no byte of the next file can belong
+// to it: it reads whole, and its last byte closes it (a container's or string's) or is whitespace. A number or a
+// literal with nothing after it may go on in the next file, which is why jq reads on past those.
+@(private = "file")
+seq_text_ends :: proc(ins: ^Inputs, at: int) -> bool {
+	src := ins.data[at:]
+	if len(src) == 0 {
+		return false
+	}
+	switch src[len(src) - 1] {
+	case ']', '}', '"', ' ', '\t', '\n', '\r':
+	case:
+		return false
+	}
+	_, bad := json.validate(src, {dialect = ins.run.req.dialect, limits = ins.run.req.limits}).?
+	return !bad
+}
+
+// --seq reads its files as one byte stream, as jq does: a record that no separator ends in the open file goes on
+// in the next file, and the next, whose bytes continue the record rather than begin a text before the stream's
+// first separator. Those files are read now, into one buffer from the record's first byte, which data becomes; the
+// texts after the record are read from it too. Nothing is read up front: each file is opened as it is reached, and
+// a stream a window at a time. It returns false when no file followed, the data left to the caller.
+@(private = "file")
+seq_join :: proc(ins: ^Inputs, at: int) -> bool {
+	// The record's place in the stream, which jq counts across the files it joins.
+	start_line, start_column := text_place(ins, at)
+	joined := make([dynamic]byte, 0, len(ins.data) - at + READ_BLOCK, runtime.heap_allocator())
+	append(&joined, ..ins.data[at:])
+	read_any := false
+	last_start := 0 // where the file read last begins in `joined`: `input_line_number` counts from there, as jq does
+	for ins.next_file < len(ins.files) && bytes.index_byte(joined[:], RS) < 0 {
+		if !open_next(ins) {
+			break
+		}
+		read_any, last_start = true, len(joined)
+		if ins.reader == nil {
+			append(&joined, ..ins.data)
+			continue
+		}
+		// A file read a window at a time: on until a separator comes or the file ends.
+		for {
+			append(&joined, ..ins.data)
+			if bytes.index_byte(joined[:], RS) >= 0 || ins.reader == nil {
+				break
+			}
+			next_window(ins, len(ins.data), len(ins.data))
+		}
+	}
+	if !read_any {
+		return false
+	}
+	if ins.data != nil { // its bytes are in `joined`; freed or kept as any data read past is (`retire`)
+		if ins.run.opts.null_input && !ins.pinned {
+			free_data({ins.data, ins.mapped})
+		} else {
+			append(&ins.spent, Spent{ins.data, ins.mapped})
+		}
+		ins.pinned = false
+	}
+	ins.data, ins.mapped = joined[:], false
+	ins.open, ins.seq_joined = true, true
+	ins.skip, ins.pos, ins.seen, ins.window_lines, ins.texts_follow = 0, 0, 0, 0, false
+	ins.at_line, ins.at_column, ins.fault_at = start_line, start_column, {}
+	// jq counts `input_line_number` in the file it reads last, from that file's first line.
+	ins.lines_before, ins.lines = 0, {start = last_start, end = last_start}
+	ins.seq_head = .Read
+	return true
 }
 
 // How far the text at data[at:] may reach, and whether another may follow it within that: a string, array

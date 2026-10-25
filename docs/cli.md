@@ -105,14 +105,16 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 
 `check` (or `validate`) validates its inputs and prints nothing when they are valid.
 
-- It accepts every input that `stury .` reads without error, several texts included.
+- It accepts every input that `stury .` reads without error, several texts included, except under `--seq`,
+  where it reads each file on its own: a record cut at a file's end is a fault there ([Records and
+  events](#records-and-events)).
 - It requires at least one JSON text. An empty or whitespace-only input fails with `No JSON text` and exit 5,
   where `stury .` reads it as a stream of no texts and exits 0.
 - With no `FILE` on a terminal it prints the short usage and exits 2, as `stury` with no filter does.
 
 | Flag | Effect |
 | --- | --- |
-| `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence. |
+| `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence, and reads `FILE` one at a time: a text cut at a file's end is a fault, where the filter reads the files as one stream. |
 | `--from jsonc` | Validate JSONC as `stury --from jsonc .` reads it, to the same limits. A comment's text holds no escape. |
 | `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. CSV and TSV are judged by `csv.validate`, and a fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An input with no record fails with `No CSV text` or `No TSV text`. |
 | `--strict-limits`, `--max-depth N` | As [above](#sturys-own-options). |
@@ -169,7 +171,7 @@ Every input is read by one grammar, the library's: `validate` with `dialect = .J
 
 | Option | Behaviour |
 | --- | --- |
-| `--seq` | Passes over a record that does not parse with `stury: ignoring parse error: ...` and puts `0x1E` before each output. |
+| `--seq` | Passes over a record that does not parse with `stury: ignoring parse error: ...` and puts `0x1E` before each output. The files are one byte stream, a text cut at a file's end read on in the next ([`--seq` reads each record as one text](#--seq-reads-each-record-as-one-text)). |
 | `--stream` | Gives jq's `[path, leaf]` and `[path]` events of each text once it parses whole, and refuses a text that does not parse, as any input. |
 | `--stream-errors` | Gives what jq gives of a faulty text: the events before the fault, then `[message, path]`. `[1,` gives `[0],1` and then `["Unfinished JSON term at EOF at line 1, column 3",[1]]`. Its messages, positions, exit code and `--seq` resync are jq's. |
 
@@ -263,7 +265,9 @@ $ stury --from csv --to csv 'select(.n | tonumber > 1)' people.csv
   8 MiB ahead. Each run of whole lines that has arrived is answered before the next.
 - Output is written whenever the reader waits, so `tail -f log | stury .msg` answers each line as it lands.
 - A text that runs past a block is read on until it ends. Answers, messages, positions and exit codes are
-  those of the whole read. Memory holds a block, what is read ahead and the longest text.
+  those of the whole read. Memory holds a block, what is read ahead and the longest text. Under `--seq` a text
+  that runs past a file's end is read on into the next file, a window at a time and only up to the separator
+  that ends it; the files are never read up front.
 - `-s` and `--from jsonc` read stdin whole, as `check` does. `-n` with `inputs` keeps what it has read.
 - Texts with no newline between them wait for one, as jq's line reads do.
 
@@ -369,11 +373,13 @@ The exit codes are jq's, but the messages are stury's.
 | A file that cannot be opened | `stury: error: Could not open file NAME: REASON` |
 | A directory given as a file | `stury: error: Is a directory` (as jq) |
 | A text that does not parse | `stury: parse error: MSG at line L, column C` |
-| The same, in a file after the first | `stury: parse error: NAME:L:C: SENTENCE`, counted in that file |
+| The same, in a file after the first | `stury: parse error: NAME:L:C: SENTENCE`, counted in that file (a `--seq` text that runs between files has the stream's position instead) |
 | Any fault under `check` or `--from jsonc` | `stury: error: NAME:L:C: SENTENCE`, such as `<stdin>:1:7: Invalid numeric literal` |
 
-L and C are the line and 1-based byte column of the byte the fault is at, or one past the last byte when the
-input ended. That is the position `check` prints and the library's `error_position` gives.
+L and C are the line and 1-based byte column of the byte the fault is at. A text that ends mid-value is told at
+its last byte, as jq tells it (the position `--stream-errors` gives). One past the last byte instead is the
+library's `error_position`, which `check` prints, and so do `fromjson`, `--argjson`, `--jsonargs`, `--slurpfile`
+and a module's data file.
 
 A trailing comma, a comment or nesting past `--max-depth` is followed by the source line, a caret under the
 byte, and the flag that would read it (`--from jsonc`, `--max-depth N`), in a filter run and under `check` alike.
@@ -453,23 +459,27 @@ Nesting past 1024 levels (jq: 10000) is refused, `fromjson` included, unless `--
 
 A parse error names the fault (`Invalid numeric literal`, `Unexpected character`, `Unfinished JSON term`,
 `Invalid escape`, `Unexpected text after the JSON value`, `Exceeds depth limit for parsing`, ...) at the line
-and column of the byte it was found at, or one past the last byte when the input ended.
-`--stream-errors` is the exception: its positions are jq's, so at the end of input one column less.
+and column of the byte it was found at. A text that ends mid-value is told at its last byte, which is jq's
+position, so the plain path and `--stream-errors` agree at the end of the input. `check`, `fromjson`, the option
+JSON and a module's data file keep the library's one past it ([Errors and exit codes](#errors-and-exit-codes)).
 
 | | stury | jq |
 | --- | --- | --- |
 | Message | names the fault | jq's own wording |
 | Position | the byte the fault is at | where its parser stood after that byte |
-| At the end of input | one past the last byte | one column less |
+| At the end of input | the last byte | the last byte |
 | At a newline (`1e` then a newline) | line 1, column 3 | line 2, column 0 |
 
 `fromjson` keeps jq's `Expected JSON value` and `Unexpected extra JSON values`.
 
 #### Files are read separately
 
-Each file ends its texts. jq reads `1` in one file and `2` in the next as `12`, and continues a text cut at a
-file's end in the next file. A parse error in a file after the first names the file and counts its line and
-column in that file (`b.json:1:4: Unexpected character`), where jq counts on across the files it joins.
+Each file ends its texts, except under `--seq`, which reads them as one stream ([`--seq` reads each record as
+one text](#--seq-reads-each-record-as-one-text)). jq reads `1` in one file and `2` in the next as `12`, and
+continues a text cut at a file's end in the next file. A parse error in a file after the first names the file
+and counts its line and column in that file (`b.json:1:4: Unexpected character`), where jq counts on across the
+files it joins; a text that runs from one file into the next under `--seq` is the exception, and is told at its
+line and column in the stream, without a file's name.
 
 #### `check`, `--from` and `--to` are new
 
@@ -481,8 +491,14 @@ outside `--from jsonc` they give `null`.
 
 - The bytes up to the next `0x1E` are one text. A record of two texts is a parse error, where jq reads several
   texts in a record and passes silently over an unfinished array or object.
-- A file's first text with no `0x1E` before it is refused like any faulty record (`ignoring parse error: Text
-  before the first RS at line L, column C`, and the stream reads on), where jq drops it silently.
+- The files are one byte stream: a text cut at a file's end goes on in the next file, and a separator in a later
+  file ends it, as jq reads them. A text that is whole where its file ends is not read on: `1` and a newline in
+  one file and `2` in the next are two texts. A number or literal with nothing after it is read on, as it may go
+  on (`1` then `2` in the next file is `12`). The files are opened as the text reaches them, a window at a time
+  for a stream, never all up front.
+- Before the stream's first `0x1E` no text is a record: it is refused like any faulty record (`ignoring parse
+  error: Text before the first RS at line L, column C`, and the stream reads on), where jq drops it silently.
+  Once a separator has been seen, a later file's text is a record, whatever its first byte.
 
 ### Edge cases
 
