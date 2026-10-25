@@ -139,12 +139,9 @@ remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $jsonc: bo
 		slice.sort_by(edits[:], proc(a, b: Edit) -> bool {
 			return a.lo < b.lo
 		})
-		if !core_pkg.edits_ordered(src, edits[:]) {
-			return nil, Path_Error{kind = .Bad_Result}
-		}
-		return judged(core_pkg.edits_apply(src, edits[:], allocator, core_pkg.PATH_OUT_OF_MEMORY), allocator, .Jsonc)
+		return judged(edits_apply_checked(src, edits[:], allocator), allocator, .Jsonc)
 	} else {
-		return core_pkg.edits_apply(src, edits[:], allocator, core_pkg.PATH_OUT_OF_MEMORY)
+		return edits_apply_checked(src, edits[:], allocator)
 	}
 }
 
@@ -199,8 +196,14 @@ trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer
 			lo = own[kept].hi
 		} else {
 			lo = owner + 1
-			for walk.is_space(src[hi]) {
+			// The last entry's value ends before the container's close bracket, so `hi` starts inside `src` and
+			// the skip stops on that bracket. The bound is checked anyway: a scan bug must not read past the
+			// source, and a debug build says so instead of cutting bytes the rows do not cover.
+			for hi < u64(len(src)) && walk.is_space(src[hi]) {
 				hi += 1
+			}
+			when ODIN_DEBUG {
+				assert(hi < u64(len(src)) && (src[hi] == '}' || src[hi] == ']'), "trailing_cut: no close bracket after the container's last entry")
 			}
 		}
 	}
@@ -209,32 +212,53 @@ trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer
 
 // The quoted key before an object member's value at `value_lo`, read backwards over strict JSON: blanks,
 // `:`, blanks, then the string, whose opening quote is the first `"` behind an even run of backslashes.
+// Every step back is checked: a value the scan placed where no key precedes it answers `no_key` rather than
+// reading below the source.
 @(private = "file")
 key_span :: proc(src: []byte, value_lo: u64) -> (lo, hi: u64) {
-	// The source was validated, so each step back finds what it names and the opening quote exists.
+	if value_lo > u64(len(src)) {
+		return no_key(value_lo)
+	}
 	i := value_lo
-	for walk.is_space(src[i - 1]) {
+	for i > 0 && walk.is_space(src[i - 1]) {
 		i -= 1
 	}
+	if i == 0 {
+		return no_key(value_lo)
+	}
 	i -= 1 // the colon
-	for walk.is_space(src[i - 1]) {
+	for i > 0 && walk.is_space(src[i - 1]) {
 		i -= 1
 	}
 	hi = i
-	lo = hi - 1
-	for {
+	if hi < 2 {
+		return no_key(value_lo)
+	}
+	lo = hi - 1 // the key's closing quote: the loop's first step goes behind it
+	for lo >= 2 {
 		lo -= 1
 		if src[lo] != '"' {
 			continue
 		}
 		slashes := u64(0)
-		for src[lo - 1 - slashes] == '\\' {
+		for slashes < lo && src[lo - 1 - slashes] == '\\' {
 			slashes += 1
 		}
 		if slashes % 2 == 0 {
 			return lo, hi
 		}
 	}
+	return no_key(value_lo)
+}
+
+// The span `key_span` answers when the bytes before a member's value are not a key: the value's own start, which
+// cuts nothing. A debug build stops on the broken invariant.
+@(private = "file")
+no_key :: proc(value_lo: u64) -> (lo, hi: u64) {
+	when ODIN_DEBUG {
+		assert(false, "key_span: an object member's value is not preceded by its key")
+	}
+	return value_lo, value_lo
 }
 
 // Where entry `e` starts: under JSONC its extent (`extent_lo`), else its head (`entry_head`).

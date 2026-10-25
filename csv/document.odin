@@ -3,11 +3,8 @@ package csv
 // The document: the span of every field of a CSV text, with readers over them. The text is scanned once, by
 // the scanner `records` runs. A cell's text is decoded when it is read.
 
-import "core:math"
 import "core:mem"
-import "core:strconv"
 import "core:unicode/utf8"
-import core_pkg "../core"
 
 // A parsed CSV text: the spans of its fields in the source bytes. Make one with `build` and read it through
 // the procedures in this file. Its fields are internal.
@@ -29,6 +26,8 @@ Document :: struct {
 	starts:     [dynamic]int,
 	rows:       int,
 	width:      int,
+	// The policy `column` applies to a header name two columns share.
+	duplicates: Duplicates,
 	// Built `.Lazy`: a string is judged as UTF-8 when it is read.
 	judge_utf8: bool,
 	// The strings that held a `""` or an escape, each decoded once into `arena`. `decoded_at` is allocated at the
@@ -40,9 +39,10 @@ Document :: struct {
 }
 
 // Read `src` in `opts.dialect` and keep the span of every field. Unless `opts.no_header`, the first record is the
-// column names. `strictness` and `limits` are as for `records`, and `duplicates` is not read; under `.Lazy`, `get_string` also judges the UTF-8 of
-// each string it reads. `err` is the text's first fault, `.Bad_Option` for a dialect or limit the scanner
-// refuses, or `.Out_Of_Memory`; the `Document` is then the zero value.
+// column names. `strictness` and `limits` are as for `records`; `duplicates` is the policy `column` applies to a
+// header name two columns share. Under `.Lazy`, `get_string` also judges the UTF-8 of each string it reads. `err`
+// is the text's first fault, `.Bad_Option` for a dialect or limit the scanner refuses, or `.Out_Of_Memory`; the
+// `Document` is then the zero value.
 @(require_results)
 build :: proc(src: []byte, opts := Read_Opts{}, allocator := context.allocator) -> (doc: Document, err: Maybe(Error)) {
 	dialect := opts.dialect
@@ -51,7 +51,7 @@ build :: proc(src: []byte, opts := Read_Opts{}, allocator := context.allocator) 
 	if it.err != nil {
 		return {}, it.err
 	}
-	doc = {src = src, dialect = dialect, judge_utf8 = opts.strictness == .Lazy}
+	doc = {src = src, dialect = dialect, judge_utf8 = opts.strictness == .Lazy, duplicates = opts.duplicates}
 	doc.names.allocator, doc.fields.allocator, doc.starts.allocator = allocator, allocator, allocator
 	if !opts.no_header {
 		if rec, more := next_record(&it); more {
@@ -138,11 +138,47 @@ column_count :: proc(doc: ^Document) -> int {
 	return doc.width
 }
 
-// The column the header names `name`, the first of them when several do. `ok` is false for a name the header
-// lacks, and for a document with no header.
+// The column the header names `name`, chosen by the document's `duplicates` policy: `.First` and `.Last` name the
+// first or last of two columns that share it, `.All` the last (`unmarshal` reads the later one over the earlier),
+// and `.Default`/`.Refuse` answer nothing when several do. `ok` is false for a name the header lacks, a refused
+// repeat, and a document with no header.
 @(require_results)
 column :: proc(doc: ^Document, name: string) -> (col: int, ok: bool) {
-	return column_of(doc.src, doc.names[:], doc.dialect, name)
+	c, _, repeated := named_column(doc.src, doc.names[:], doc.dialect, name, doc.duplicates)
+	if repeated {
+		return -1, false
+	}
+	return c, c >= 0
+}
+
+// The column `name` names in a header's fields (`text_is`), under `duplicates`. `col` is -1 when no field names it.
+// `repeated` is set, with `at` the repeated column's header field, when `.Default`/`.Refuse` meets a second
+// field of that name.
+@(private)
+named_column :: proc(src: []byte, names: []Field, dialect: Dialect, name: string, duplicates: Duplicates) -> (col: int, at: u64, repeated: bool) {
+	first := -1
+	last := -1
+	for f, c in names {
+		if !text_is(src, f, dialect, name) {
+			continue
+		}
+		if first < 0 {
+			first, last = c, c
+			if duplicates == .First {
+				return c, 0, false
+			}
+			continue
+		}
+		switch duplicates {
+		case .Default, .Refuse:
+			return -1, f.lo, true
+		case .First:
+			// Unreachable: the first match already returned.
+		case .Last, .All:
+			last = c
+		}
+	}
+	return last, 0, false
 }
 
 // The fields of `row`, nil past the last row. A row of a `ragged` dialect may be shorter or longer than
@@ -204,29 +240,26 @@ get_string :: proc(doc: ^Document, row, col: int) -> (s: string, ok: bool) {
 	return read_text(doc, f, len(doc.names) + i)
 }
 
-// The integer a cell spells, read as `unmarshal` reads one into an `i64`: `[+-]?digits`, with a quoted cell's
-// quotes removed. `ok` is false for an empty cell, any other text, and a value `i64` does not hold.
+// The integer a cell spells, read by `unmarshal`'s own integer store (`store_int`): `[+-]?digits`, with a quoted
+// cell's quotes removed. `ok` is false for an empty cell, any other text, and a value `i64` does not hold.
 @(require_results)
 get_int :: proc(doc: ^Document, row, col: int) -> (v: i64, ok: bool) {
 	text := present_text(doc, row, col) or_return
-	mag, over, neg, fault := read_int(text)
-	if fault != .None || over || mag > u128(max(u64)) {
+	if store_int(text, &v, u8(size_of(i64)), true) != .None {
 		return 0, false
 	}
-	stored := core_pkg.shape_int_store(u64(mag), neg, &v, size_of(i64), true)
-	return v, stored == .None
+	return v, true
 }
 
-// The decimal a cell spells, read as `unmarshal` reads one into an `f64` (`1.5`, `.5`, `1.`, with an optional
-// exponent), correctly rounded. `ok` is false for an empty cell, any other text, and a value past `f64`'s range.
+// The binary64 a cell spells, read by `unmarshal`'s own float reader (`read_float_value`) and correctly
+// rounded, as `unmarshal` reads a float. `ok` is false for an empty cell, any other text, a nonzero value that
+// underflows to zero (`1e-400`, where returning `0, true` hid the loss), or a value with no binary64 (`1e400`).
+// A rounded significand (`0.1`, `1e23`) is accepted: it is the value `unmarshal` stores, not an error.
 @(require_results)
 get_float :: proc(doc: ^Document, row, col: int) -> (v: f64, ok: bool) {
 	text := present_text(doc, row, col) or_return
-	if !is_decimal(text) {
-		return 0, false
-	}
-	v, _ = strconv.parse_f64(text)
-	return v, !math.is_inf(v)
+	n := read_float_value(text)
+	return n.value, n.exactness == .Exact || n.exactness == .Inexact
 }
 
 // `true` or `false`, as `unmarshal` reads a bool. `ok` is false for an empty cell and any other text.

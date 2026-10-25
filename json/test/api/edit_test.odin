@@ -3,6 +3,7 @@ package json_tests
 // `splice` (§6.1, law 7), `set` (§6.2, law 6), `insert` and `remove` (§6.3).
 
 import json "../.."
+import core "../../../core"
 import "core:math"
 import "core:mem"
 import "core:strings"
@@ -17,19 +18,21 @@ test_splice :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), `{"a":"x","b":[2,[]]}`)
 
-	unsorted := []json.Edit{edits[1], edits[0]}
-	_, e1 := json.splice(src, unsorted)
-	edit_err(t, e1, .Bad_Edit)
-	overlap := []json.Edit{{lo = 5, hi = 7, bytes = raw(`1`)}, {lo = 6, hi = 8, bytes = raw(`2`)}}
-	_, e2 := json.splice(src, overlap)
-	edit_err(t, e2, .Bad_Edit)
-	past := []json.Edit{{lo = 5, hi = 99, bytes = raw(`1`)}}
-	_, e3 := json.splice(src, past)
-	edit_err(t, e3, .Bad_Edit)
-	backwards := []json.Edit{{lo = 7, hi = 5, bytes = raw(`1`)}}
-	// A refused edit list allocates nothing: the panic allocator would abort the test.
-	_, e5 := json.splice(src, backwards, allocator = mem.panic_allocator())
-	edit_err(t, e5, .Bad_Edit)
+	// A list out of order, overlapping, past the source or backwards is `.Bad_Edit`, never a panic in the
+	// apply the path edits share: both dialects refuse it, and a refused list allocates nothing (the panic
+	// allocator would abort the test).
+	unordered := [][](json.Edit) {
+		{edits[1], edits[0]}, // unsorted
+		{{lo = 5, hi = 7, bytes = raw(`1`)}, {lo = 6, hi = 8, bytes = raw(`2`)}}, // overlapping
+		{{lo = 5, hi = 99, bytes = raw(`1`)}}, // past the source
+		{{lo = 7, hi = 5, bytes = raw(`1`)}}, // backwards
+	}
+	for dialect in ([?]json.Dialect{.Json, .Jsonc}) {
+		for list in unordered {
+			_, bad := json.splice(src, list, dialect, allocator = mem.panic_allocator())
+			edit_err(t, bad, .Bad_Edit)
+		}
+	}
 
 	// Adjacent edits are disjoint.
 	adjacent := []json.Edit{{lo = 12, hi = 13, bytes = raw(`[]`)}, {lo = 13, hi = 14, bytes = raw(`,`)}}
@@ -304,3 +307,27 @@ test_splice_refuses_a_comment_that_swallows_values :: proc(t: ^testing.T) {
 	delete(out)
 }
 
+// Every refusal at no byte of the source renders one way: `offset N: <kind>`, the kind's offset standing where
+// there is no byte, and never a position the fault does not have. A fault that is at a byte keeps its
+// `line:col`.
+@(test)
+test_refusals_at_no_byte_render_one_way :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	render :: proc(src: string, err: $E) -> string {
+		return json.render_error(raw(src), err, context.temp_allocator)
+	}
+	testing.expect_value(t, render("", json.Path_Error{kind = .Out_Of_Memory}), "offset 0: Out_Of_Memory")
+	testing.expect_value(t, render("", core.Unmarshal_Error{kind = .Out_Of_Memory}), "offset 0: Out_Of_Memory")
+	testing.expect_value(t, render("", json.Error{kind = .Out_Of_Memory}), "offset 0: Out_Of_Memory")
+	// An allocation refused while a value was being read is at that value.
+	testing.expect_value(t, render("abcd", core.Unmarshal_Error{kind = .Out_Of_Memory, offset = 4}), "1:5: Out_Of_Memory")
+	// The path still follows.
+	at_no_byte := core.Unmarshal_Error{kind = .Out_Of_Memory}
+	at_no_byte.steps[0] = json.Name("a")
+	at_no_byte.n_steps = 1
+	testing.expect_value(t, render("", at_no_byte), "offset 0: Out_Of_Memory at .a")
+	// A kind raised before any byte, with no offset to show, stays bare, and a located fault keeps its offset.
+	testing.expect_value(t, render("", core.Unmarshal_Error{kind = .Bad_Option}), "Bad_Option")
+	testing.expect_value(t, render("", json.Path_Error{kind = .Not_Found}), "Not_Found")
+	testing.expect_value(t, render("{}", json.Path_Error{kind = .Bad_Path, offset = 2}), "offset 2: Bad_Path")
+}

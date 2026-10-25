@@ -4,7 +4,8 @@ package core
 // type, its kind the read shape's (`Shape_Kind`), struct fields and union arms as runs with their keys
 // pre-written in the format's spelling (`Plan_Format`), compiled once per type and on first use. An `any`'s
 // dynamic type is compiled the first time a value of it is met, so a plan holding one grows while it is used.
-// A plan that reported `.Out_Of_Memory` is unusable, so destroy it.
+// A compile that fails leaves the plan as it was and fails the same way on every later call, so a plan is never
+// half-built.
 
 import "base:runtime"
 import "core:reflect"
@@ -42,8 +43,8 @@ Plan_Field :: struct {
 	required:  bool, // the typed reader refuses an object without it as `.Missing_Field`
 }
 
-// Where a struct field's `Plan_Field` came from, kept beside it: the field's name, as its tag or name gives
-// it, and its type. Empty beside a union arm.
+// Where a struct field's `Plan_Field` came from, kept beside it: the field's name, as its tag or name gives it,
+// and its type. Empty beside a union arm.
 Field_Source :: struct {
 	name: string,
 	info: ^runtime.Type_Info,
@@ -85,7 +86,7 @@ Plan_Hook :: struct {
 // Why a plan could not compile a type. Each member has the value of its `Marshal_Error` namesake.
 Plan_Error :: enum u8 {
 	None          = 0,
-	Bad_Name      = 2,  // the format cannot spell a field's, member's or arm's name
+	Bad_Name      = 2,  // the format cannot spell a field's, member's or arm's name, or does not know a field tag's flag
 	Out_Of_Memory = 11, // the allocator refused
 }
 
@@ -125,7 +126,10 @@ Type_Plan :: struct {
 	sources: [dynamic]Field_Source,
 	keys:    [dynamic]u8,
 	members: [dynamic]Plan_Member,
-	index:   map[typeid]u32,
+	// The field names a tag escaped, unescaped and allocated here: the tag text is read-only, and a name without
+	// an escape is borrowed from it or the field, so `sources[k].name` outlives the call either way.
+	unescaped: [dynamic]string,
+	index:     map[typeid]u32,
 	// The typed reader's read shape, lowered on first use (`read_shape_of`). Empty until then.
 	read:   Read_Shape,
 	// Why the type has no read shape, once lowering refused it.
@@ -151,6 +155,7 @@ type_plan_init :: proc(T: typeid, opts: Plan_Opts, format: Plan_Format, allocato
 		sources = make([dynamic]Field_Source, allocator = allocator),
 		keys = make([dynamic]u8, allocator = allocator),
 		members = make([dynamic]Plan_Member, allocator = allocator),
+		unescaped = make([dynamic]string, allocator = allocator),
 		index = make(map[typeid]u32, allocator = allocator),
 		format = format,
 	}
@@ -237,25 +242,80 @@ type_plan_destroy :: proc(p: ^Type_Plan) {
 	delete(p.sources)
 	delete(p.keys)
 	delete(p.members)
+	for s in p.unescaped {
+		delete(s, a)
+	}
+	delete(p.unescaped)
 	delete(p.index)
 	read_shape_destroy(&p.read)
 	p^ = {}
 }
 
+// The plan's own state before a type compiles, which `plan_rollback` restores.
+@(private = "file")
+Plan_Mark :: struct {
+	ops, fields, sources, keys, members, unescaped: int,
+	tag_hi: u32, // the union tag's spelled key, which `keys` must still hold
+}
+
+@(private = "file")
+plan_mark :: proc(p: ^Type_Plan) -> Plan_Mark {
+	return {
+		ops = len(p.ops),
+		fields = len(p.fields),
+		sources = len(p.sources),
+		keys = len(p.keys),
+		members = len(p.members),
+		unescaped = len(p.unescaped),
+		tag_hi = p.tag_hi,
+	}
+}
+
+// Take the plan back to `m`: the failed compile's ops leave the index, every run loses its bytes, and the names
+// it copied are freed. A retry compiles the same types again, and nothing of the failed attempt is left behind.
+@(private = "file")
+plan_rollback :: proc(p: ^Type_Plan, m: Plan_Mark) {
+	for op in p.ops[m.ops:] {
+		delete_key(&p.index, op.info.id)
+	}
+	resize(&p.ops, m.ops)
+	resize(&p.fields, m.fields)
+	resize(&p.sources, m.sources)
+	resize(&p.keys, m.keys)
+	resize(&p.members, m.members)
+	for s in p.unescaped[m.unescaped:] {
+		delete(s, p.ops.allocator)
+	}
+	resize(&p.unescaped, m.unescaped)
+	if p.tag_hi > u32(m.keys) {
+		// The tag's spelled key was the failed compile's; the next compile spells it again.
+		p.tag_lo, p.tag_hi = 0, 0
+	}
+}
+
 // The op for `ti`. A type already in the plan, including one still being compiled further up this call (a
-// recursive type), answers its existing index.
+// recursive type), answers its existing index. A compile that fails is rolled back before the error returns, so
+// no half-built op, field, index entry or name stays: the plan is the plan it was before, the next call compiles
+// the same type again, and every call answers the same error. The plan cache evicts only a plan that reported
+// `.Out_Of_Memory`, and a rolled-back plan is sound whether or not it is evicted.
 plan_op :: proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (idx: u32, err: Plan_Error) {
 	if found, ok := p.index[ti.id]; ok {
 		return found, .None
 	}
+	mark := plan_mark(p)
 	idx = u32(len(p.ops))
 	if _, aerr := append(&p.ops, Plan_Op{info = ti}); aerr != nil {
 		return 0, .Out_Of_Memory
 	}
 	if map_insert(&p.index, ti.id, idx) == nil {
+		plan_rollback(p, mark)
 		return 0, .Out_Of_Memory
 	}
-	op := compile_op(p, ti, idx) or_return
+	op, cerr := compile_op(p, ti, idx)
+	if cerr != .None {
+		plan_rollback(p, mark)
+		return 0, cerr
+	}
 	// Indexed after the call: compiling element types may have moved `p.ops`.
 	p.ops[idx] = op
 	return idx, .None
@@ -478,7 +538,17 @@ hook_of :: proc(p: ^Type_Plan, T: typeid) -> (k: int, hooked: bool) {
 @(private = "file")
 lay_out_run :: proc(p: ^Type_Plan, v: runtime.Type_Info_Struct, base: uintptr, first: u32) -> (refused: Maybe(u32), err: Plan_Error) {
 	for i in 0 ..< int(v.field_count) {
-		tag := field_spelling(v.names[i], v.tags[i], p.format.tag_key)
+		tag, terr := field_spelling(v.names[i], v.tags[i], p.format.tag_key, p.ops.allocator)
+		if terr != .None {
+			return nil, terr
+		}
+		if tag.owned {
+			// The plan owns an unescaped name: `destroy` frees it, and so does a rollback of this compile.
+			if _, aerr := append(&p.unescaped, tag.key); aerr != nil {
+				delete(tag.key, p.ops.allocator)
+				return nil, .Out_Of_Memory
+			}
+		}
 		if !tag.keep {
 			continue
 		}
@@ -595,37 +665,91 @@ Field_Tag :: struct {
 	quoted:    bool, // Go's `,string`
 	named:     bool, // the tag gave a name
 	keep:      bool, // false for a tag of `-`
+	owned:     bool, // `key` is an allocation in the plan's allocator, which `destroy` and a rollback free
 }
 
 // A field's name and flags from its tag under `tag_key`: `name,omitempty,required`, `-` to omit, an empty
-// name keeps the field's own and is not `named`. `quoted` is Go's `,string`, a number or bool written inside
-// a string, which the plan refuses. A hook on a distinct type writes it. Other flags are ignored.
+// name keeps the field's own and is not `named`. `quoted` is Go's `,string`, a number or bool written inside a
+// string, which the plan refuses. A hook on a distinct type writes it. In the name a backslash makes the byte
+// after it literal, so a name holding a comma or a backslash is written `\,` or `\\` (`csv:"Last\, First"`
+// names the column `Last, First`); a flag that is not one of those three is `.Bad_Name`, never dropped. A name
+// that escapes a byte is allocated in `allocator` (`owned`); any other is the tag's or the field's own.
 @(private = "file")
-field_spelling :: proc(name, tag, tag_key: string) -> (t: Field_Tag) {
+field_spelling :: proc(name, tag, tag_key: string, allocator: runtime.Allocator) -> (t: Field_Tag, err: Plan_Error) {
 	value, ok := reflect.struct_tag_lookup(reflect.Struct_Tag(tag), tag_key)
 	if !ok {
-		return {key = name, keep = true}
+		return {key = name, keep = true}, .None
 	}
 	if value == "-" {
-		return {}
+		return {}, .None
 	}
-	t.key = value
-	flags := ""
-	if comma := strings.index_byte(value, ','); comma >= 0 {
-		t.key, flags = value[:comma], value[comma + 1:]
+	raw := transmute([]u8)value
+	// The name runs to the first comma no backslash escapes.
+	end, flags_at := len(raw), len(raw)
+	i := 0
+	for i < len(raw) {
+		if raw[i] == '\\' && i + 1 < len(raw) {
+			i += 2
+		} else if raw[i] == ',' {
+			end, flags_at = i, i + 1
+			break
+		} else {
+			i += 1
+		}
 	}
-	t.named = t.key != ""
-	if !t.named {
+	// Its length once each escape stands for the one byte it quotes, and whether any byte is escaped.
+	length, escaped := 0, false
+	j := 0
+	for j < end {
+		if raw[j] == '\\' && j + 1 < end {
+			j += 1
+			escaped = true
+		}
+		j += 1
+		length += 1
+	}
+	switch {
+	case length == 0:
+		// An empty name keeps the field's own.
 		t.key = name
+	case !escaped:
+		t.key = string(raw[:end])
+	case:
+		buf, aerr := make([]u8, length, allocator)
+		if aerr != nil {
+			return {}, .Out_Of_Memory
+		}
+		k := 0
+		j = 0
+		for j < end {
+			if raw[j] == '\\' && j + 1 < end {
+				j += 1
+			}
+			buf[k] = raw[j]
+			k += 1
+			j += 1
+		}
+		t.key, t.owned = string(buf), true
 	}
-	for flag in strings.split_iterator(&flags, ",") {
-		switch flag {
-		case "omitempty":
-			t.omitempty = true
-		case "required":
-			t.required = true
-		case "string":
-			t.quoted = true
+	t.named = length > 0
+	if flags_at < len(raw) {
+		flags := string(raw[flags_at:])
+		for flag in strings.split_iterator(&flags, ",") {
+			switch flag {
+			case "":
+				// A comma with no flag after it names no flag.
+			case "omitempty":
+				t.omitempty = true
+			case "required":
+				t.required = true
+			case "string":
+				t.quoted = true
+			case:
+				if t.owned {
+					delete(t.key, allocator)
+				}
+				return {}, .Bad_Name
+			}
 		}
 	}
 	t.keep = true

@@ -30,10 +30,7 @@ Path_Error :: core_pkg.Path_Error
 //	  swallow the values there.
 @(require_results)
 splice :: proc(src: []byte, edits: []Edit, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	if !core_pkg.edits_ordered(src, edits) {
-		return nil, Path_Error{kind = .Bad_Edit}
-	}
-	applied, aerr := core_pkg.edits_apply(src, edits, allocator, core_pkg.PATH_OUT_OF_MEMORY)
+	applied, aerr := edits_apply_checked(src, edits, allocator)
 	if aerr != nil {
 		return nil, aerr
 	}
@@ -46,6 +43,19 @@ splice :: proc(src: []byte, edits: []Edit, dialect := Dialect.Json, allocator :=
 		return applied, nil
 	}
 	return judged(applied, nil, allocator, dialect)
+}
+
+// `core_pkg.edits_apply` behind the order rule an edit list must meet: sorted by `lo`, disjoint, inside `src`.
+// `splice` and every path edit apply through here, so a list a scan or a placement bug left unordered is
+// refused as `.Bad_Edit` in both dialects rather than panicking in `edits_apply`'s `src[at:e.lo]`. The check is
+// always on, not a debug assert: it is one pass over a list the caller already sorted and that `edits_apply`
+// copies once, and the panic it prevents is in both builds.
+@(private)
+edits_apply_checked :: proc(src: []byte, edits: []Edit, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	if !core_pkg.edits_ordered(src, edits) {
+		return nil, Path_Error{kind = .Bad_Edit}
+	}
+	return core_pkg.edits_apply(src, edits, allocator, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
 // `out` validated as `.Jsonc`, and `.Bad_Result` at any comment that an edit's bytes open and the source bytes
@@ -157,7 +167,7 @@ watched_set :: proc(src: []byte, path: Path_Spec, value: any, allocator: runtime
 	slice.sort_by(edits[:], proc(a, b: Edit) -> bool {
 		return a.lo < b.lo
 	})
-	return core_pkg.edits_apply(src, edits[:], allocator, core_pkg.PATH_OUT_OF_MEMORY)
+	return edits_apply_checked(src, edits[:], allocator)
 }
 
 // Where `insert` puts its entry: a member name for an object, an element index for an array. An index
@@ -359,5 +369,5 @@ places_apply :: proc(src: []byte, places: []Place, text: []u8, allocator: runtim
 	for p, i in places {
 		edits[i] = {lo = p.at, hi = p.cut, bytes = text[p.from:p.to]}
 	}
-	return core_pkg.edits_apply(src, edits, allocator, core_pkg.PATH_OUT_OF_MEMORY)
+	return edits_apply_checked(src, edits, allocator)
 }

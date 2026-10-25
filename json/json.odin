@@ -7,7 +7,10 @@ package json
 //	                    `decode_span`, `error_position` and `render_error`
 //	request.odin        `Request`, `request_init`, `answers`, `find`, `validate_remaining`, `Duplicates`
 //	request_scan.odin   `scan` and `prepare`
-//	document.odin       `Document`, `build`, `query`, `pointer`, `child`, `children`, `members`, the `get_*` readers
+//	document.odin       `Document`, `Node`, `NO_NODE`, `ROOT`, the `get_*` readers, `kind`, `facts`, `fact_text`
+//	document_build.odin `build` and `destroy`
+//	document_walk.odin  `child`, `child_count`, `children`, `members`, `Members`, `pointer`
+//	document_query.odin `query`
 //	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Unknown_Fields`, `Unmarshal_Error`
 //	marshal.odin        `marshal` and its writer and append forms (marshal_struct.odin writes structs)
 //	type_plan.odin      `Type_Plan` and its options and hooks, for `marshal` and `unmarshal`, `plan_cache_clear`
@@ -115,12 +118,13 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 //
 // The other refusals read the same way, with `src` the text the fault's offset is into:
 //
-//	- An `Unmarshal_Error` as `line:col: <kind>` (`: <syntax>` after a `.Syntax`), bare where it points at
-//	  no byte, then ` at .a[3]."b c"` for its path (`[]` for a map value or element of any index, a leading
-//	  `…` when `truncated`).
+//	- An `Unmarshal_Error` as `line:col: <kind>` (`: <syntax>` after a `.Syntax`), then ` at .a[3]."b c"` for
+//	  its path (`[]` for a map value or element of any index, a leading `…` when `truncated`). A kind raised
+//	  before any byte reads bare; `.Out_Of_Memory` reads `offset N`, its offset 0 when the plan was refused
+//	  and the value's when a value was.
 //	- A `Path_Error` located in the source for `.Bad_Source`, `offset N` for `.Bad_Path` (into the path
-//	  text) and `.Bad_Result` (into the edited text), bare otherwise, with the `syntax` or `encode` result
-//	  after it.
+//	  text), `.Bad_Result` (into the edited text) and `.Out_Of_Memory` (at 0), bare otherwise, with the
+//	  `syntax` or `encode` result after it.
 @(require_results)
 render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
 	return core_pkg.render_error(src, err, allocator)

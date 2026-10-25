@@ -66,6 +66,35 @@ test_unmarshal_rows :: proc(t: ^testing.T) {
 	testing.expect_value(t, rows[1].r, '"')
 }
 
+// An f64 cell is the correctly rounded projection, not the exactness `get_float` asks for: an underflow and a
+// rounding are values, and only a number with no binary64 is out of range.
+Um_Score :: struct {
+	score: f64,
+}
+
+@(test)
+test_unmarshal_float_projection :: proc(t: ^testing.T) {
+	rows: []Um_Score
+	testing.expect_value(t, read(t, "score\n1e-400\n", &rows), nil)
+	if testing.expect_value(t, len(rows), 1) {
+		testing.expect_value(t, rows[0].score, 0)
+	}
+	rows = nil
+	testing.expect_value(t, read(t, "score\n0.1\n", &rows), nil)
+	if testing.expect_value(t, len(rows), 1) {
+		testing.expect_value(t, rows[0].score, 0.1)
+	}
+	// An underflow keeps its sign: `-1e-400` is -0.
+	rows = nil
+	testing.expect_value(t, read(t, "score\n-1e-400\n", &rows), nil)
+	if testing.expect_value(t, len(rows), 1) {
+		testing.expect(t, rows[0].score == 0 && transmute(u64)rows[0].score >> 63 == 1)
+	}
+	err := read(t, "score\n1e400\n", &rows)
+	e, refused := err.?
+	testing.expect(t, refused && e.kind == .Out_Of_Range && e.offset == 6)
+}
+
 Refusal :: struct {
 	src:  string,
 	kind: csv.Unmarshal_Error_Kind,

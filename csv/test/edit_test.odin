@@ -271,6 +271,67 @@ test_edits_in_ragged_texts :: proc(t: ^testing.T) {
 	expect_remove_in(t, d, src, ".[1]", "a,b,c\n1\n4,5,6\n")
 }
 
+// `set` and `remove` resolve a header name by `opts.duplicates`, as `unmarshal` does, and refuse the repeat
+// under the CSV default.
+@(test)
+test_edits_follow_duplicate_columns :: proc(t: ^testing.T) {
+	src := transmute([]byte)string("a,b,a\n1,2,3\n4,5,6\n")
+	_, err := csv.set(src, ".[0].a", 9)
+	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Source, syntax = .Duplicate_Key, offset = 4})
+	_, err = csv.remove(src, ".[].a")
+	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Source, syntax = .Duplicate_Key, offset = 4})
+	out, serr := csv.set(src, ".[0].a", 9, {duplicates = .First})
+	testing.expect_value(t, serr, nil)
+	testing.expect_value(t, string(out), "a,b,a\n9,2,3\n4,5,6\n")
+	delete(out)
+	out, serr = csv.set(src, ".[0].a", 9, {duplicates = .Last})
+	testing.expect_value(t, serr, nil)
+	testing.expect_value(t, string(out), "a,b,a\n1,2,9\n4,5,6\n")
+	delete(out)
+	// `.All` names the column `unmarshal` reads last, so the edited cell is the one its value ends in.
+	out, serr = csv.set(src, ".[0].a", 9, {duplicates = .All})
+	testing.expect_value(t, serr, nil)
+	testing.expect_value(t, string(out), "a,b,a\n1,2,9\n4,5,6\n")
+	delete(out)
+	out, serr = csv.remove(src, ".[].a", {duplicates = .First})
+	testing.expect_value(t, serr, nil)
+	testing.expect_value(t, string(out), "b,a\n2,3\n5,6\n")
+	delete(out)
+	out, serr = csv.remove(src, ".[].a", {duplicates = .Last})
+	testing.expect_value(t, serr, nil)
+	testing.expect_value(t, string(out), "a,b\n1,2\n4,5\n")
+	delete(out)
+	// An index path names no column name, so no duplicate is read.
+	out, serr = csv.set(src, ".[0][1]", 9)
+	testing.expect_value(t, serr, nil)
+	testing.expect_value(t, string(out), "a,b,a\n1,9,3\n4,5,6\n")
+	delete(out)
+}
+
+// An edit judges its source as `records` reads it under `opts`, so `.Lazy` accepts a UTF-8 fault in a cell the
+// edit leaves alone, and `limits` are the caller's.
+@(test)
+test_edits_judge_source_as_records :: proc(t: ^testing.T) {
+	src := transmute([]byte)string("a,b\nok,\xFF\n")
+	_, err := csv.set(src, ".[0].a", 7)
+	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Source, syntax = .Bad_Char, offset = 7})
+	out, serr := csv.set(src, ".[0].a", 7, {strictness = .Lazy})
+	testing.expect_value(t, serr, nil)
+	testing.expect_value(t, string(out), "a,b\n7,\xFF\n")
+	delete(out)
+	out, serr = csv.insert(src, csv.APPEND, []string{"x", "y"}, {strictness = .Lazy})
+	testing.expect_value(t, serr, nil)
+	testing.expect_value(t, string(out), "a,b\nok,\xFF\nx,y\n")
+	delete(out)
+	out, serr = csv.remove(src, ".[0]", {strictness = .Lazy})
+	testing.expect_value(t, serr, nil)
+	testing.expect_value(t, string(out), "a,b\n")
+	delete(out)
+	// A cap the caller set is judged as `records` judges it.
+	_, serr = csv.set(src, ".[0].a", 7, {limits = {max_fields = 1}})
+	testing.expect_value(t, serr, csv.Path_Error{kind = .Bad_Source, syntax = .Limit_Fields, offset = 0})
+}
+
 @(test)
 test_splice :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("a,b\n1,2\n")

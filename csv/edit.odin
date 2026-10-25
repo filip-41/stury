@@ -39,14 +39,17 @@ splice :: proc(src: []byte, edits: []Edit, dialect := Dialect{}, allocator := co
 // Replace the cell `path` names, or that column's cell in every row, with `value`, spelled as `marshal` spells
 // a cell. `value` is a bool, integer, float, string, enum, rune, or a `Maybe` of one.
 //
-//	- The source must be CSV in `dialect`, judged `.Strict` throughout (`.Bad_Source`).
+//	- The source is judged as `records` reads it under `opts`: `dialect`, `strictness` and `limits` (`.Bad_Source`).
+//	  `opts.duplicates` picks the column a name two header columns share: `.First`, `.Last` or `.All` (the last, as
+//	  `unmarshal` reads it), while `.Default`/`.Refuse` refuses the repeat as `.Bad_Source` with
+//	  `syntax = .Duplicate_Key` at the repeated header cell. `opts.no_header` says the first record is data.
 //	- The cell is quoted or escaped as the dialect needs. An empty string is `""` where cells are quoted.
 //	- A value the dialect cannot spell is `.Encode` with `Marshal_Error.Unwritable`: a delimiter, CR or LF the
 //	  dialect can neither quote nor escape, or an empty cell that would leave a record of one empty field,
 //	  which reads back as no record.
 //	- A first cell starting with the comment byte is quoted or escaped, or else `.Encode`.
 //	- A path naming a row or column the text lacks is `.Not_Found`. `.[row].name` needs the header; set
-//	  `header` false for a text whose first record is data.
+//	  `no_header` for a text whose first record is data.
 @(require_results)
 set :: proc(
 	src: []byte,
@@ -56,7 +59,7 @@ set :: proc(
 	allocator := context.allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_set(src, path, value, opts.dialect, !opts.no_header, core_pkg.watched(&watch))
+	out, err = watched_set(src, path, value, opts, core_pkg.watched(&watch))
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
@@ -65,10 +68,10 @@ watched_set :: proc(
 	src: []byte,
 	path: Path_Spec,
 	value: any,
-	dialect: Dialect,
-	header: bool,
+	opts: Read_Opts,
 	allocator: runtime.Allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
+	dialect, header := opts.dialect, !opts.no_header
 	buf: Path_Buf
 	t := parse_target(path, &buf, allocator) or_return
 	defer delete(t.scratch, allocator)
@@ -78,10 +81,10 @@ watched_set :: proc(
 	if value.id == nil {
 		return nil, Path_Error{kind = .Encode, encode = .Unsupported}
 	}
-	check_source(src, dialect) or_return
+	check_source(src, opts) or_return
 	sites := make([dynamic]Site, allocator)
 	defer delete(sites)
-	sites_of(src, t, dialect, header, false, &sites) or_return
+	sites_of(src, t, opts, header, false, &sites) or_return
 	if len(sites) == 0 {
 		return nil, Path_Error{kind = .Not_Found}
 	}
@@ -128,6 +131,9 @@ watched_set :: proc(
 //	- A negative `at`, one past the row count, and a text with no header record when `header` is set are
 //	  `.Unplaceable`.
 //	- Appended to a text that does not end in a line break, the record gets a break before it and none after.
+//	- The source is judged as `records` reads it under `opts`: `dialect`, `strictness`, `limits` and `no_header`.
+//	  `opts.duplicates` is not read: the row's fields find their columns by name, and every column of that name is
+//	  written.
 @(require_results)
 insert :: proc(
 	src: []byte,
@@ -137,7 +143,7 @@ insert :: proc(
 	allocator := context.allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_insert(src, at, row, opts.dialect, !opts.no_header, core_pkg.watched(&watch))
+	out, err = watched_insert(src, at, row, opts, core_pkg.watched(&watch))
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
@@ -146,12 +152,12 @@ watched_insert :: proc(
 	src: []byte,
 	at: int,
 	row: any,
-	dialect: Dialect,
-	header: bool,
+	opts: Read_Opts,
 	allocator: runtime.Allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
-	check_source(src, dialect) or_return
-	spot := insert_spot(src, at, dialect, header, allocator) or_return
+	dialect := opts.dialect
+	check_source(src, opts) or_return
+	spot := insert_spot(src, at, opts, allocator) or_return
 	defer delete(spot.columns, allocator)
 	text := spell_record(row, src, dialect, spot, allocator) or_return
 	defer delete(text, allocator)
@@ -166,6 +172,10 @@ watched_insert :: proc(
 //	- A column removal that would leave a record reading as no record is `.Unplaceable`, with the record in
 //	  `offset`. That happens when removing the only column, when one empty field is left, or when the new first
 //	  field starts with the comment byte.
+//	- The source is judged as `records` reads it under `opts`: `dialect`, `strictness` and `limits` (`.Bad_Source`).
+//	  `opts.duplicates` picks the column a name two header columns share (`.First`, `.Last`, or `.All` as the last);
+//	  `.Default`/`.Refuse` refuses the repeat as `.Bad_Source` with `syntax = .Duplicate_Key` at the repeated header
+//	  cell. `opts.no_header` says the first record is data.
 @(require_results)
 remove :: proc(
 	src: []byte,
@@ -174,7 +184,7 @@ remove :: proc(
 	allocator := context.allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_remove(src, path, opts.dialect, !opts.no_header, core_pkg.watched(&watch))
+	out, err = watched_remove(src, path, opts, core_pkg.watched(&watch))
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
@@ -182,10 +192,10 @@ remove :: proc(
 watched_remove :: proc(
 	src: []byte,
 	path: Path_Spec,
-	dialect: Dialect,
-	header: bool,
+	opts: Read_Opts,
 	allocator: runtime.Allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
+	dialect, header := opts.dialect, !opts.no_header
 	buf: Path_Buf
 	t := parse_target(path, &buf, allocator) or_return
 	defer delete(t.scratch, allocator)
@@ -193,10 +203,10 @@ watched_remove :: proc(
 	if !whole_record && !(t.every_row && t.col != COL_NONE) || t.col == COL_NAME && !header {
 		return nil, Path_Error{kind = .Unsupported_Path}
 	}
-	check_source(src, dialect) or_return
+	check_source(src, opts) or_return
 	sites := make([dynamic]Site, allocator)
 	defer delete(sites)
-	sites_of(src, t, dialect, header, !whole_record, &sites) or_return
+	sites_of(src, t, opts, header, !whole_record, &sites) or_return
 	if len(sites) == 0 {
 		return nil, Path_Error{kind = .Not_Found}
 	}
@@ -247,10 +257,11 @@ Site :: struct {
 // The sites of what `t` names: the field of column `col` in the data row, or in every row (with the header
 // when `with_header`). A row-only path (`COL_NONE`) names the row's first field.
 @(private)
-sites_of :: proc(src: []byte, t: Target, dialect: Dialect, header, with_header: bool, out: ^[dynamic]Site) -> Maybe(Path_Error) {
-	it := records(src, {dialect = dialect}, out.allocator)
+sites_of :: proc(src: []byte, t: Target, opts: Read_Opts, header, with_header: bool, out: ^[dynamic]Site) -> Maybe(Path_Error) {
+	it := records(src, opts, out.allocator)
 	defer destroy(&it)
-	col, head, has_col := seek_header(&it, t, header, dialect)
+	col, head, has_col, serr := seek_target(&it, t, opts, header)
+	serr or_return
 	if has_col && header && with_header {
 		add_site(out, head, col) or_return
 	}
@@ -264,6 +275,33 @@ sites_of :: proc(src: []byte, t: Target, dialect: Dialect, header, with_header: 
 		}
 	}
 	return finished(&it)
+}
+
+// Reads the header record when there is one, and resolves `t`'s column as `unmarshal` would: a name two columns
+// share follows `opts.duplicates`, and `.Default`/`.Refuse` reports the repeat. `has_col` is false when the header
+// lacks the name or there is no record.
+@(private)
+seek_target :: proc(it: ^Records, t: Target, opts: Read_Opts, header: bool) -> (col: int, head: Record, has_col: bool, err: Maybe(Path_Error)) {
+	col = max(t.col, 0)
+	if !header {
+		return col, {}, true, nil
+	}
+	rec, more := next_record(it)
+	if !more {
+		return 0, {}, false, nil
+	}
+	head = rec
+	if t.col == COL_NAME {
+		c, at, repeated := named_column(it.src, head.fields, opts.dialect, t.name, opts.duplicates)
+		if repeated {
+			return 0, {}, false, Path_Error{kind = .Bad_Source, syntax = .Duplicate_Key, offset = at}
+		}
+		if c < 0 {
+			return 0, {}, false, nil
+		}
+		col = c
+	}
+	return col, head, true, nil
 }
 
 @(private)
@@ -299,14 +337,15 @@ Spot :: struct {
 	unbroken: bool,
 }
 
-// The place for a new data row `at` in `src`, whose first record is a header when `header`. The caller frees
-// `columns`.
+// The place for a new data row `at` in `src`, whose first record is a header when `opts.no_header` is false. The
+// caller frees `columns`.
 @(private)
-insert_spot :: proc(src: []byte, at: int, dialect: Dialect, header: bool, allocator: runtime.Allocator) -> (spot: Spot, err: Maybe(Path_Error)) {
+insert_spot :: proc(src: []byte, at: int, opts: Read_Opts, allocator: runtime.Allocator) -> (spot: Spot, err: Maybe(Path_Error)) {
 	if at < 0 {
 		return {}, Path_Error{kind = .Unplaceable}
 	}
-	it := records(src, {dialect = dialect}, allocator)
+	header := !opts.no_header
+	it := records(src, opts, allocator)
 	defer destroy(&it)
 	rows, first := 0, true
 	for rec in next_record(&it) {
@@ -431,10 +470,11 @@ is_oom :: proc(err: Maybe(Path_Error)) -> bool {
 	return faulted && (e.kind == .Out_Of_Memory || e.kind == .Encode && e.encode == .Out_Of_Memory)
 }
 
-// The path error when `src` is not CSV in `dialect`, judged `.Strict`, or nil.
+// The path error when `src` is not CSV as `records` reads it under `opts`: the dialect, `strictness` and `limits`
+// the caller passed, and no other field.
 @(private)
-check_source :: proc(src: []byte, dialect: Dialect) -> Maybe(Path_Error) {
-	if e, bad := validate(src, {dialect = dialect}).?; bad {
+check_source :: proc(src: []byte, opts: Read_Opts) -> Maybe(Path_Error) {
+	if e, bad := validate(src, opts).?; bad {
 		return path_error_of(e)
 	}
 	return nil

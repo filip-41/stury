@@ -87,7 +87,8 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 //	  have been made for `T`.
 //
 // A `^Record_Read` reads one record's bytes the same way. `record_read_init` resolves the plan and the shape
-// once; a fault's offset stays into those bytes.
+// once and holds them on the heap (`destroy` frees them); a fault's offset stays into those bytes, and the
+// reader's options are read again at each record.
 unmarshal :: proc {
 	unmarshal_value,
 	unmarshal_record,

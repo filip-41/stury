@@ -1,7 +1,8 @@
 package json_tests
 
 // `Record_Read`: each record matches `unmarshal` of that record's bytes. A fault's offset is into the
-// record, blank lines are not records, and a trailing record with no newline counts.
+// record, blank lines are not records, and a trailing record with no newline counts. The handle survives a
+// return by value, and the options it holds are applied at each read.
 
 import json "../.."
 import "core:fmt"
@@ -132,4 +133,113 @@ test_unmarshal_record_walks_a_shape_it_does_not_descend :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, n, 2)
 	testing.expect(t, json.unmarshal(&rd, nil, (^Read_Rec)(nil)) != nil)
+}
+
+// At least the size a `Record_Read` held before it became a handle: a frame this large is written over, so a
+// returned handle that still pointed into the callee's frame would read the wrong bytes.
+@(private = "file")
+RETURNED_FRAME_BYTES :: 70 * 1024
+
+@(private = "file")
+clobber_bytes :: #force_no_inline proc(buf: ^[RETURNED_FRAME_BYTES]u8) {
+	for i in 0 ..< len(buf) {
+		buf[i] = u8(i * 31 + 7)
+	}
+}
+
+@(private = "file")
+clobber_returned_frame :: #force_no_inline proc() {
+	buf: [RETURNED_FRAME_BYTES]u8 = ---
+	clobber_bytes(&buf)
+}
+
+@(private = "file")
+returned_record_reader :: proc() -> (rd: json.Record_Read, ok: bool) {
+	ok = json.record_read_init(&rd, Read_Rec, allocator = context.temp_allocator) == nil
+	return
+}
+
+@(test)
+test_record_read_handle_survives_return :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	rd, ok := returned_record_reader()
+	testing.expect(t, ok)
+	defer json.destroy(&rd)
+	clobber_returned_frame()
+	got: Read_Rec
+	testing.expect_value(t, json.unmarshal(&rd, raw(`{"id":5,"name":"returned","v":1,"flag":true}`), &got), nil)
+	testing.expect_value(t, got.id, i64(5))
+	testing.expect_value(t, got.name, "returned")
+	testing.expect_value(t, got.v, i64(1))
+	testing.expect_value(t, got.flag, true)
+}
+
+@(private = "file")
+string_is_in :: proc(s: string, src: []byte) -> bool {
+	lo := uintptr(raw_data(src))
+	p := uintptr(raw_data(s))
+	return p >= lo && p + uintptr(len(s)) <= lo + uintptr(len(src))
+}
+
+@(test)
+test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	rd: json.Record_Read
+	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, allocator = context.temp_allocator), nil)
+	defer json.destroy(&rd)
+
+	// `.Last` from init; `.First` on the state after it keeps the first occurrence.
+	dup := raw(`{"id":1,"name":"a","v":2,"flag":true,"id":9}`)
+	got: Read_Rec
+	testing.expect_value(t, json.unmarshal(&rd, dup, &got), nil)
+	testing.expect_value(t, got.id, i64(9))
+	rd.state.opts.duplicates = .First
+	testing.expect_value(t, json.unmarshal(&rd, dup, &got), nil)
+	testing.expect_value(t, got.id, i64(1))
+
+	// `.Refuse` is live too.
+	rd.state.opts.duplicates = .Refuse
+	testing.expect_value(t, um_err(json.unmarshal(&rd, dup, &got)).kind, .Duplicate_Key)
+
+	// `limits` is re-bound at each read: a digit cap that refuses the second read does not refuse the first.
+	digits := raw(`{"id":10,"name":"n","v":2,"flag":true}`)
+	testing.expect_value(t, json.unmarshal(&rd, digits, &got), nil)
+	rd.state.opts.limits.max_scalar_digits = 1
+	limit_err := um_err(json.unmarshal(&rd, digits, &got))
+	testing.expect_value(t, limit_err.kind, .Syntax)
+	testing.expect_value(t, limit_err.syntax, .Limit_Digits)
+	rd.state.opts.limits.max_scalar_digits = 0
+	testing.expect_value(t, json.unmarshal(&rd, digits, &got), nil)
+
+	// `borrow_strings` is live: the copied string does not point into the source, the borrowed one does.
+	rd.state.opts.duplicates = .Last
+	buf: [64]u8
+	src := `{"id":1,"name":"borrow","v":2,"flag":true}`
+	copy(buf[:], src)
+	text := buf[:len(src)]
+	testing.expect_value(t, json.unmarshal(&rd, text, &got), nil)
+	testing.expect(t, !string_is_in(got.name, text))
+	rd.state.opts.borrow_strings = true
+	testing.expect_value(t, json.unmarshal(&rd, text, &got), nil)
+	testing.expect(t, string_is_in(got.name, text))
+}
+
+@(test)
+test_record_read_destroy_twice :: proc(t: ^testing.T) {
+	rd: json.Record_Read
+	testing.expect_value(t, json.record_read_init(&rd, Read_Rec), nil)
+	json.destroy(&rd)
+	json.destroy(&rd)
+	got: Read_Rec
+	testing.expect_value(t, um_err(json.unmarshal(&rd, raw(`{}`), &got)).kind, .Bad_Option)
+
+	// A handle that was never initialized is empty, and destroying it is not a read of its state.
+	empty: json.Record_Read
+	json.destroy(&empty)
+	testing.expect_value(t, um_err(json.unmarshal(&empty, raw(`{}`), &got)).kind, .Bad_Option)
+}
+
+@(test)
+test_record_read_handle_is_one_pointer :: proc(t: ^testing.T) {
+	testing.expect_value(t, size_of(json.Record_Read), size_of(rawptr))
 }

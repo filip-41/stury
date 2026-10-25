@@ -8,7 +8,7 @@ import csv "../"
 @(test)
 test_document_columns_and_bounds :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("id,\"na,me\",id\n1,a,b\n2,c,d\n")
-	doc, err := csv.build(src)
+	doc, err := csv.build(src, {duplicates = .First})
 	defer csv.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	col, ok := csv.column(&doc, "id")
@@ -138,6 +138,92 @@ test_document_lazy_judges_strings :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 	_, strict := csv.build(src)
 	testing.expect_value(t, strict, csv.Error{kind = .Bad_Char, offset = 7})
+}
+
+@(test)
+test_document_duplicate_columns :: proc(t: ^testing.T) {
+	src := transmute([]byte)string("id,\"na,me\",id\n1,a,b\n")
+	Case :: struct {
+		policy: csv.Duplicates,
+		col:    int,
+		ok:     bool,
+	}
+	cases := []Case {
+		{.Default, -1, false},
+		{.Refuse, -1, false},
+		{.First, 0, true},
+		{.Last, 2, true},
+		{.All, 2, true}, // `unmarshal` reads the later column over the earlier.
+	}
+	for c in cases {
+		doc, err := csv.build(src, {duplicates = c.policy})
+		testing.expect_value(t, err, nil)
+		col, ok := csv.column(&doc, "id")
+		testing.expectf(t, ok == c.ok && col == c.col, "%v: col %d, ok %v; want %d, %v", c.policy, col, ok, c.col, c.ok)
+		csv.destroy(&doc)
+	}
+}
+
+@(test)
+test_document_scalar_exactness :: proc(t: ^testing.T) {
+	src := transmute([]byte)string("v\n" +
+		"1e-400\n" +
+		"1e400\n" +
+		"0\n" +
+		"-0\n" +
+		"1.5\n" +
+		"\"5\"\n" +
+		"+5\n" +
+		"0.1\n" +
+		"9007199254740992\n" +
+		"9007199254740993\n" +
+		"1e23\n" +
+		"9223372036854775808\n" +
+		"-9223372036854775808\n")
+	doc, err := csv.build(src)
+	defer csv.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	Float_Case :: struct {
+		row: int,
+		v:   f64,
+		ok:  bool,
+	}
+	floats := []Float_Case {
+		{0, 0, false}, // underflow: a nonzero value that rounds to zero
+		{1, 0, false}, // overflow: no binary64 value
+		{2, 0, true},
+		{3, 0, true}, // -0 is exact, and keeps its sign
+		{4, 1.5, true},
+		{5, 5, true}, // a quoted cell reads as unmarshal reads it
+		{6, 5, true}, // a leading + is CSV's spelling, not JSON's
+		{7, 0.1, true}, // a rounded significand is the value unmarshal stores
+		{8, 9007199254740992, true},
+		{9, 9007199254740992, true}, // 9007199254740993 rounds to a binary64
+		{10, 1e23, true}, // a rounding
+	}
+	for c in floats {
+		v, ok := csv.get_float(&doc, c.row, 0)
+		testing.expectf(t, ok == c.ok && (v == c.v || !c.ok), "row %d: %v %v, want %v %v", c.row, v, ok, c.v, c.ok)
+	}
+	v, ok := csv.get_float(&doc, 3, 0)
+	testing.expect(t, ok && v == 0 && transmute(u64)v >> 63 == 1)
+	Int_Case :: struct {
+		row: int,
+		v:   i64,
+		ok:  bool,
+	}
+	ints := []Int_Case {
+		{5, 5, true},
+		{6, 5, true},
+		{11, 0, false}, // past max(i64)
+		{12, min(i64), true},
+		{0, 0, false},
+		{4, 0, false},
+	}
+	for c in ints {
+		iv, iok := csv.get_int(&doc, c.row, 0)
+		testing.expectf(t, iok == c.ok && iv == c.v, "row %d: %v %v, want %v %v", c.row, iv, iok, c.v, c.ok)
+	}
 }
 
 // The reserve for the rest of the text is an estimate. A first row far shorter than the rest, in a heap too
