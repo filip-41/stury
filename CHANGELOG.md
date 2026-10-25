@@ -4,6 +4,8 @@
 
 ### Library
 
+- `Record_Read` reads each record of one type with the plan and the shape resolved once
+  (`record_read_init`, then `unmarshal`). A fault's offset is into that record's bytes.
 - `marshal` refuses a `Number` that is `.None` (`1e400`) with `.Non_Finite`; it used to write `0`. `Digits`
   and `Raw` keep such a number. `Exact` is now `Exactness`'s zero value, so an unset `Number` writes `0`.
 - `edit_comment` accepts bare text, the form `fact_text` returns, and writes it as a `//` line.

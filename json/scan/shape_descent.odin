@@ -30,25 +30,39 @@ import number "./number"
 // Read `src` into `root` along `run.shape` by descent: true, or false for the walk to read it, or the
 // `Out_Of_Memory` typed fault the walk would answer, `run.fault_steps` frames of `run.frames` deep.
 shape_descend :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, limits: Limits) -> (bool, Maybe(Error)) #no_bounds_check {
-	Q :: bit_set[Walk_Kind]{.Shape}
 	ctx_words: [size_of(Query_Ctx) / 8]u64 = ---
 	q := (^Query_Ctx)(&ctx_words)
-	walk.query_ctx_zero(q, Q)
+	s := shape_bind(run, q, src, limits)
+	return shape_descend_value(&s, q, root)
+}
+
+// Zero the `{.Shape}` prefix of `q` and point it at `run`. One zeroing for every value `shape_descend_value`
+// then reads. The scanner's limits are resolved; its source is `src`, position past a BOM.
+shape_bind :: #force_inline proc(run: ^walk.Shape_Run, q: ^Query_Ctx, src: []byte, limits: Limits) -> Scanner {
+	walk.query_ctx_zero(q, {.Shape})
 	q.hooks = &FORMAT_HOOKS
 	q.shape = run
 	run.ops, run.fields = raw_data(run.shape.ops), raw_data(run.shape.fields)
 	s := enter_document(src, limits, MAX_DEPTH)
 	q.max_depth = s.limits.max_depth
-	lex.skip_ws(&s)
-	walk_s := s
-	op_i := run.shape.root
-	if !descend_member(&s, &walk_s, q, op_i, &run.ops[op_i], root, 0) {
-		if run.fault == .Out_Of_Memory {
-			return false, Error{offset = run.fault_at, kind = TYPED_FAULT}
+	return s
+}
+
+// The value at `s.pos`, `q` and `run` already bound by `shape_bind`, `run.src` the same bytes as `s.src`.
+// True when the value and the bytes after it are accepted. A typed `Out_Of_Memory` is the error the walk
+// would answer; any other refusal is false and no error, for the walk to read the value again.
+shape_descend_value :: #force_inline proc(s: ^Scanner, q: ^Query_Ctx, root: rawptr) -> (bool, Maybe(Error)) #no_bounds_check {
+	lex.skip_ws(s)
+	walk_s := s^
+	r := q.shape
+	op_i := r.shape.root
+	if !descend_member(s, &walk_s, q, op_i, &r.ops[op_i], root, 0) {
+		if r.fault == .Out_Of_Memory {
+			return false, Error{offset = r.fault_at, kind = TYPED_FAULT}
 		}
 		return false, nil
 	}
-	return finish(&s) == nil, nil
+	return finish(s) == nil, nil
 }
 
 // The allocation the value at `at`, at walk depth `steps`, needs failed: the walk's fault there. Each container

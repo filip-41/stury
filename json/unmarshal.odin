@@ -85,8 +85,16 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 //	  `unmarshal_check` first to refuse without allocating the target.
 //	- With `plan` nil the plan is this thread's cached one for `T`, as `marshal` takes it. A kept plan must
 //	  have been made for `T`.
+//
+// A `^Record_Read` reads one record's bytes the same way. `record_read_init` resolves the plan and the shape
+// once; a fault's offset stays into those bytes.
+unmarshal :: proc {
+	unmarshal_value,
+	unmarshal_record,
+}
+
 @(require_results)
-unmarshal :: proc(
+unmarshal_value :: proc(
 	src: []byte,
 	ptr: ^$T,
 	opts := Unmarshal_Opts{},

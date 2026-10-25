@@ -137,6 +137,7 @@ destroy :: proc {
 	document_destroy,
 	request_destroy,
 	type_plan_destroy,
+	record_read_destroy,
 }
 
 @(private)
