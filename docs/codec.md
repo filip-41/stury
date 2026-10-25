@@ -617,13 +617,34 @@ pay for random access, which a type never asks for.
 **End of input.** The walk always runs to the end of the document, since bytes after the value are checked
 under both strictnesses. Only a fault stops it early.
 
+### 7.7 The record reader
+
+A reader of many records resolves the plan once. `record_read_init` (`core`, aliased by `json` and `csv`) makes
+or borrows the plan, lowers the read shape on it, and returns a `Record_Read`; `unmarshal` of that handle pulls
+the source's next record and reads it with the same walk `unmarshal` of the record's bytes runs.
+
+- **The source is the format half** (`Record_Source`): a state pointer, a `read` that pulls one record and fills
+  a value of the root type, and a `destroy`. One indirect call reads a record, and no per-byte code crosses it.
+  JSON's source holds its `Records` iterator, the shape run, the frames, the wide words and the query context,
+  allocated once at init, so the walk's scratch is not per record.
+- **The handle is a value.** It holds the plan, the format's options, the source, and whether it owns the plan.
+  A copy shares the source and the plan, so destroy it once; `destroy` frees an owned plan and the source's
+  state and empties the handle. A source reads its options from the handle at every record, so `.Lazy`,
+  duplicates, limits and borrowing changed between records apply to the next one. The source also receives the
+  plan, because the handle may be copied or returned by value: a state that held the plan's address would hold
+  a dead caller's.
+- **Its faults are the record's**, as `unmarshal` of that record's bytes reports them, with the offset into
+  those bytes; `record_read_at` gives the record's offset in the input, which places it. A fault that frames no
+  record (a JSON framing fault) is `.Syntax` at its input offset, and no record left is `.Bad_Option`.
+
 ## 8. Across formats
 
 `core` holds what the formats share and what a caller who works with several of them names once: `Strictness`,
 paths (`Path`, `Step`, `MAX_PATH_STEPS`), `Duplicates`, `Enum_Spelling`, `Unknown_Fields`, `Tag_Name`, the hooks
 (`Unmarshal_Hook`, `Type_Hook(W)` over a format's writer proc), the type plan (`Type_Plan`, `Hooked_Plan(W)`,
 `Plan_Cache`), the read shape and its lowering, the judged scalar stores, `Number`, `Batch_Runner`,
-`Stream_Window`, and the errors and their rendering. A format aliases the names it exposes. JSON's walk
+`Stream_Window`, the typed per-record reader (`Record_Read`, `Record_Source`), and the errors and their
+rendering. A format aliases the names it exposes. JSON's walk
 substrate is JSON's own and lives in `json/scan/walk`: the scan cursor and its caps (`Limits`, `MAX_DEPTH`),
 the rows, the query context and its matchers (path automaton, demand) and the typed walk's state
 (`Shape_Run`). A format annotates the lowered shape for its walk (`Plan_Format.lowered`). Before the shape is
@@ -653,7 +674,10 @@ A format plugs into `core` in four places:
 through a `Plan_Format` (`csv` tag key, names spelled as written, no format types, no `lowered`), the read-shape
 lowering, the judged scalar stores and `Unmarshal_Error`. It owns its scanner (`csv/scan.odin`: quote,
 separator and LF masks per 64-byte block, with every byte judged) and its cell reader and writer. It builds no
-rows. A record is a list of field spans, and a typed row is filled cell by cell from the header's column map.
+rows. A record is a list of field spans, and a typed row is filled cell by cell from the header's column map. The
+per-record reader (`csv/record_read.odin`) binds that map, the row shape and the plan once, then reads one row
+per call over a `Records` or a `Record_Reader`; a row's fault is rebased into that row's bytes, as JSON's is
+into its record's.
 
 A dialect is a scan mode (`Scan_Mode`: unquoted, escapes, comments, no UTF-8 check), a compile-time parameter
 of `scan_block` picked once per call, so the RFC 4180 scan has no code for the other modes. An unquoted
@@ -680,16 +704,34 @@ table and its `Marshal_Hook` beside it. The writer sends the kinds `put_cell` ha
 `$CHECK` parameter that judges every cell and stores none. `marshal_to_writer` writes records in chunks sized
 by the previous chunk, keeping the last break byte so a non-empty buffer marks the output as begun.
 
+Both `json.each_record` and `csv.each_record` run one claim loop from `core` (`Batch_Driver`): the caller and
+the runner's threads claim the planned pieces in source order, find each piece's bounds through the format's
+boundary search, run it, and note its fault under the format's rank. A task that returns false stops the
+claims. JSON keeps claiming after a framing fault and ranks faults by their offset in the input, so a fault a
+later piece finds never hides an earlier one. CSV stops claiming at the first faulty piece, since a fault ends
+the text's records, and ranks by piece number; the pieces already claimed still run.
+
+`validate_records` lists the records a batch refuses, one `core.Record_Fault` each: the record's bytes
+`src[lo:hi]` and its `Error`, whose offset is into `src`. The lists are `core`'s `Fault_List` — one
+`[dynamic]` list per piece in the heap, since the pieces run on every thread and the caller's allocator need
+not be shared, each piece appending only to its own — merged once into an exact-size slice in the caller's
+allocator. JSON's pieces each validate their records, so every refused record is listed; a framing fault
+belongs to no record, so it is `err` and only the records that start before it stand. A CSV fault ends its
+piece and leaves the quote state the pieces are cut by unknown, so `csv.validate_records` takes the first
+fault from `csv.validate`, whose pieces are reliable up to it, and then reads the text on the calling thread,
+resuming at the line after each refused record; `faults[0].err` is `validate`'s fault.
+
 `csv.each_record` and a threaded `csv.validate` cut the text into pieces that each start after an LF outside
 quotes. There the scan's state equals its state at the input's start, so a piece is judged alone, with the
 first record's field count, which is read before the pieces. Under `Quoting.None` every LF is such a break.
 Under `Quoting.Quotes`, up to the text's first fault, a byte is inside quotes exactly when an odd number of
 quotes precedes it, since every quote opens or closes one (`""` is a close and an open). A first pass counts
 the quotes of each 32 KiB slice, and a piece starts at the first LF after its slice's offset with an even count
-before it. The first fault found in piece order is the text's first fault. A comment byte under quotes
-leaves one piece, since a comment line's quotes do not open fields. `csv.records_from` runs the same `Records` over a
-window that holds the open line and a chunk: a block is scanned once the window holds it and the three bytes a
-UTF-8 check reads past it, and `Limits.max_record_bytes` bounds the open line.
+before it. Past the first fault that count no longer says where a record starts, which is why the batch stops
+there. A comment byte under quotes leaves one piece, since a comment line's quotes do not open fields.
+`csv.records_from` runs the same `Records` over a window that holds the open line and a chunk: a block is
+scanned once the window holds it and the three bytes a UTF-8 check reads past it, and `Limits.max_record_bytes`
+bounds the open line.
 
 The rest is forward design: how a later format (TOML) joins, and how formats would share rows.
 

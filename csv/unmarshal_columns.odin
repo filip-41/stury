@@ -10,7 +10,8 @@ import core_pkg "../core"
 @(private)
 Reader :: struct {
 	src:       []byte,
-	shape:     ^core_pkg.Read_Shape,
+	// The plan's read shape, copied: it is the reader's, and a per-row reader's handle may be moved after init.
+	shape:     core_pkg.Read_Shape,
 	row:       ^core_pkg.Shape_Op, // the element's struct op
 	// The field each column reads (`core_pkg.NO_FIELD` for none), and the required fields, each with its
 	// column.
@@ -26,27 +27,33 @@ Reader :: struct {
 	check:     bool,
 }
 
-// The plan's read shape, which must be a list of a struct whose fields are cells.
+// The plan's read shape, whose row must be a struct of cells: `LIST` reads the element of `unmarshal`'s list,
+// and without it the struct itself, which the per-row reader reads.
 @(private)
-row_reader :: proc(r: ^Reader, p: ^Type_Plan) -> Maybe(Unmarshal_Error) {
-	shape, serr := core_pkg.read_shape_of(&p.base)
+row_reader :: proc(r: ^Reader, p: ^core_pkg.Type_Plan, $LIST: bool) -> Maybe(Unmarshal_Error) {
+	shape, serr := core_pkg.read_shape_of(p)
 	if serr != nil {
 		return serr
 	}
-	root := &shape.ops[shape.root]
-	row := &shape.ops[root.elem]
+	// Copied: the shape's ops and fields are the plan's heap, and the reader's rows must outlive a move of the
+	// handle that owns the plan.
+	r.shape = shape^
+	row := &r.shape.ops[r.shape.root]
+	when LIST {
+		row = &r.shape.ops[row.elem]
+	}
 	if row.kind != .Struct {
 		return Unmarshal_Error{kind = .Unsupported}
 	}
-	for f in shape.fields[row.elem:][:row.count] {
-		if !is_cell(shape, &shape.ops[f.op]) {
+	for f in r.shape.fields[row.elem:][:row.count] {
+		if !is_cell(&r.shape, &r.shape.ops[f.op]) {
 			err := Unmarshal_Error{kind = .Unsupported}
 			core_pkg.unmarshal_path_prepend(&err, core_pkg.Name(f.name))
 			core_pkg.unmarshal_path_prepend(&err, core_pkg.Any{})
 			return err
 		}
 	}
-	r.shape, r.row = shape, row
+	r.row = row
 	r.required.allocator, r.req_more.allocator = context.allocator, context.allocator
 	return nil
 }
@@ -149,14 +156,14 @@ required_columns :: proc(r: ^Reader, at: u64) -> Maybe(Unmarshal_Error) {
 		}
 		if first[k] == core_pkg.NO_FIELD {
 			first[k] = u32(c)
-		} else if core_pkg.shape_field_required(r.shape, r.row, int(k)) {
+		} else if core_pkg.shape_field_required(&r.shape, r.row, int(k)) {
 			if _, err := append(&r.req_more, [2]u32{k, u32(c)}); err != nil {
 				return Unmarshal_Error{kind = .Out_Of_Memory, offset = at}
 			}
 		}
 	}
 	for f, k in fields {
-		if !core_pkg.shape_field_required(r.shape, r.row, k) {
+		if !core_pkg.shape_field_required(&r.shape, r.row, k) {
 			continue
 		}
 		if first[k] == core_pkg.NO_FIELD {

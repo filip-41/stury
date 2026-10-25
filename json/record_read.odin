@@ -5,32 +5,25 @@ import core_pkg "../core"
 import scan_pkg "scan"
 import "scan/walk"
 
-// A typed read of many values of one type. `record_read_init` resolves the plan and the shape once.
-// Each `unmarshal` of it reads one value, a record's bytes, as `unmarshal` of those bytes would, and a
-// fault's offset is into those bytes. Add `Record.at` to place it in the input the record was framed from.
+// A typed read of many JSON records of one type. `record_read_init` resolves the plan and the read shape once,
+// and each `unmarshal` of it pulls the next record of a `Records` and reads that record's bytes as `unmarshal`
+// of those bytes would. A fault's offset is into those bytes; `record_read_at` gives the record's offset in the
+// input, so a caller places it as `Record.at` was.
 //
-// The handle is one pointer: `record_read_init` allocates the reader's state on the heap, and `destroy`
-// frees it. The state is not inside the handle, so a handle can be returned from a procedure or copied. A
-// copy shares its state, and a state is destroyed once.
-//
-// `state.opts` is applied at the start of every read, so an option changed between records takes effect on
-// the next one. A plan passed in is borrowed; a plan the reader made is freed by `destroy`.
-Record_Read :: struct {
-	state: ^Record_State,
-}
+// It is a value: `record_read_init` allocates the pull's state on the heap, and `destroy` frees it with the plan
+// the reader made. A copy shares both, so destroy a reader once. `opts` is read again at every record, so an
+// option changed between records takes effect on the next one.
+Record_Read :: core_pkg.Record_Read(Unmarshal_Opts)
 
-// What a `Record_Read` points at: the resolved plan and shape, the walk's frames, and the options. Its fields
-// are the reader's own except `opts`, which every read applies: read none of the others.
+// What a `Record_Read`'s source holds: the records it pulls, the walk's frames and query context, and the last
+// record's offset. The shape is bound to the resolved plan at each read, so no pointer into the handle is kept.
+// Its fields are the reader's own.
 @(private)
 Record_State :: struct {
 	run:       walk.Shape_Run,
 	q:         ^scan_pkg.Query_Ctx,
-	plan:      ^Type_Plan,
-	root:      typeid,
-	opts:      Unmarshal_Opts,
-	ready:     bool,
-	owns:      bool,
-	owned:     Type_Plan,
+	it:        ^Records,
+	at:        u64,
 	ctx_words: [size_of(scan_pkg.Query_Ctx) / 8]u64,
 	frames:    [MAX_DEPTH]walk.Shape_Frame,
 	wide:      [walk.SHAPE_WIDE_WORDS]u64,
@@ -44,126 +37,126 @@ record_state_new :: proc() -> ^Record_State {
 }
 
 @(private)
-record_state_free :: proc(state: ^Record_State) {
-	free(state, runtime.heap_allocator())
-}
-
-// These two keep the imports of `record_read_init` out of its body: that procedure is polymorphic in `T`, and
-// `-vet` reads a name used only inside a polymorphic procedure as unused.
-@(private)
-record_owned_plan_init :: proc(plan: ^Type_Plan, T: typeid) {
-	plan^ = type_plan_init(T, {}, runtime.heap_allocator())
-}
-
-@(private)
-record_shape_of :: proc(plan: ^Type_Plan) -> (shape: ^walk.Read_Shape, err: Maybe(Unmarshal_Error)) {
-	return core_pkg.read_shape_of(&plan.base)
+record_state_free :: proc(state: rawptr) {
+	free((^Record_State)(state), runtime.heap_allocator())
 }
 
 // Resolve the plan and the shape for `T` under `opts`, the same refusal `unmarshal` gives before any byte
 // (`.Bad_Option`, `.Plan_Mismatch`, `.Unsupported`, or `.Out_Of_Memory` for the state or lowering the plan).
-// `allocator` is the one each value is read with. A plan made here is freed by `destroy`.
+// `allocator` is the one each record is read with; the state and the plan the reader makes are the heap's. A
+// plan made here is freed by `destroy`.
 @(require_results)
 record_read_init :: proc(
 	rd: ^Record_Read,
 	$T: typeid,
+	it: ^Records,
 	opts := Unmarshal_Opts{},
 	plan: ^Type_Plan = nil,
 	allocator := context.allocator,
 ) -> Maybe(Unmarshal_Error) {
-	if rd == nil {
+	if rd == nil || it == nil {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	record_read_destroy(rd)
 	if opts.strictness == .Structural && opts.dialect != .Jsonc {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
-	if plan != nil && plan.root != T {
-		return Unmarshal_Error{kind = .Plan_Mismatch}
-	}
 	state := record_state_new()
 	if state == nil {
 		return Unmarshal_Error{kind = .Out_Of_Memory}
 	}
-	rd.state = state
-	state.opts = opts
-	state.root = T
-	if plan != nil {
-		state.plan = plan
-	} else {
-		record_owned_plan_init(&state.owned, T)
-		state.plan = &state.owned
-		state.owns = true
+	state.it = it
+	source := core_pkg.Record_Source(Unmarshal_Opts){
+		state = state,
+		read = record_source_read,
+		destroy = record_state_free,
+		format = json_plan_format(),
 	}
-	shape, serr := record_shape_of(state.plan)
-	if serr != nil {
-		record_read_destroy(rd)
-		return serr
+	base: ^core_pkg.Type_Plan
+	if plan != nil {
+		base = &plan.base
+	}
+	if err := core_pkg.record_read_init(rd, T, source, opts, base, runtime.heap_allocator()); err != nil {
+		return err
 	}
 	state.run = walk.Shape_Run{
-		shape     = shape,
-		frames    = &state.frames,
-		wide      = state.wide[:],
+		frames = &state.frames,
+		wide = state.wide[:],
 		allocator = allocator,
 	}
 	state.q = (^scan_pkg.Query_Ctx)(&state.ctx_words)
-	state.ready = true
 	return nil
 }
 
+// The offset of the record the last read pulled, from the input's first byte: the `Record.at` of that record.
+// A reader that has pulled none is at 0. A fault's offset is into the record's bytes, so it says where the
+// fault is in the input.
 @(require_results)
-unmarshal_record :: #force_inline proc(rd: ^Record_Read, src: []byte, ptr: ^$T) -> (err: Maybe(Unmarshal_Error)) {
-	if rd == nil || rd.state == nil || ptr == nil || !rd.state.ready {
-		return Unmarshal_Error{kind = .Bad_Option}
+record_read_at :: proc(rd: ^Record_Read) -> u64 {
+	if rd == nil {
+		return 0
 	}
-	if rd.state.opts.strictness == .Structural && rd.state.opts.dialect != .Jsonc {
-		return Unmarshal_Error{kind = .Bad_Option}
-	}
-	if rd.state.root != T {
-		return Unmarshal_Error{kind = .Plan_Mismatch}
-	}
-	return read_record(rd, src, ptr)
+	state := (^Record_State)(rd.source.state)
+	return state == nil ? 0 : state.at
 }
 
-// Free the plan `record_read_init` made and the state, and clear the handle. A copy of the handle shares the
-// state, so destroy a handle once; destroying this one twice finds no state the second time.
+// Pull the next record and read it. A fault that framed no record is `.Syntax` at its offset in the input; the
+// end of the input is `.Bad_Option`.
 @(private)
-record_read_destroy :: proc(rd: ^Record_Read) {
-	if rd == nil || rd.state == nil {
-		return
+record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, plan: ^core_pkg.Type_Plan, dest: rawptr) -> Maybe(Unmarshal_Error) {
+	st := (^Record_State)(state)
+	rec, ok := next_record(st.it)
+	if !ok {
+		if e, faulted := st.it.err.?; faulted {
+			return record_framing_error(e)
+		}
+		return Unmarshal_Error{kind = .Bad_Option}
 	}
-	if rd.state.owns {
-		type_plan_destroy(&rd.state.owned)
-	}
-	record_state_free(rd.state)
-	rd.state = nil
+	st.at = rec.at
+	return read_record(st, rec.bytes, opts, plan, dest)
 }
 
-// One value. `state.opts` is applied here, and the shape is bound to the read's limits again, so an option
-// changed after `record_read_init` takes effect on the next read. A record starts with no typed fault, no
-// open key and no lazy probe carried over. A string's escape facts are reset by the string leaf.
+// The iterator's framing fault, which no record holds.
 @(private)
-read_record :: #force_inline proc(rd: ^Record_Read, src: []byte, dest: rawptr) -> Maybe(Unmarshal_Error) {
-	state := rd.state
-	run := &state.run
-	opts := state.opts
+record_framing_error :: proc(e: Error) -> Maybe(Unmarshal_Error) {
+	#partial switch e.kind {
+	case .Out_Of_Memory:
+		return Unmarshal_Error{kind = .Out_Of_Memory}
+	case .Bad_Option:
+		return Unmarshal_Error{kind = .Bad_Option}
+	}
+	return Unmarshal_Error{kind = .Syntax, syntax = e.kind, offset = e.offset}
+}
+
+// One record. `opts` is applied here, and the shape is bound to the read's limits again, so an option changed
+// after `record_read_init` takes effect on the next record. A record starts with no typed fault, no open key
+// and no lazy probe carried over. A string's escape facts are reset by the string leaf.
+@(private)
+read_record :: #force_inline proc(st: ^Record_State, src: []byte, opts: ^Unmarshal_Opts, plan: ^core_pkg.Type_Plan, dest: rawptr) -> Maybe(Unmarshal_Error) {
+	run := &st.run
+	o := opts^
+	// `.Structural` stores what it reads, so a JSON read refuses it unless the dialect checks the rest (JSONC).
+	if o.strictness == .Structural && o.dialect != .Jsonc {
+		return Unmarshal_Error{kind = .Bad_Option}
+	}
+	run.shape = &plan.read
 	run.src = src
 	run.fault = .None
 	run.skip_pays = false
-	run.borrow = opts.borrow_strings
-	run.refuse_unknown = opts.unknown_fields == .Refuse
-	run.keep_first = opts.duplicates == .First
-	run.read_over = opts.duplicates == .All
-	run.enum_ints = state.plan.opts.enums == .Int
-	run.union_tag = state.plan.opts.union_tag
-	s := scan_pkg.shape_bind(run, state.q, src, opts.limits)
-	lazy := opts.strictness == .Lazy
-	if run.shape.descends && opts.dialect == .Json && opts.duplicates != .Refuse {
+	run.borrow = o.borrow_strings
+	run.refuse_unknown = o.unknown_fields == .Refuse
+	run.keep_first = o.duplicates == .First
+	run.read_over = o.duplicates == .All
+	run.enum_ints = plan.opts.enums == .Int
+	run.union_tag = plan.opts.union_tag
+	s := scan_pkg.shape_bind(run, st.q, src, o.limits)
+	lazy := o.strictness == .Lazy
+	if run.shape.descends && o.dialect == .Json && o.duplicates != .Refuse {
 		// Under the lazy gate the probe is the same one `read_planned` runs; below it, nothing is skipped.
 		small := u64(len(src)) < scan_pkg.SHAPE_LAZY_MIN_BYTES
-		if !lazy || small || scan_pkg.shape_lazy_reads_all(src, run, opts.limits) {
-			state.q.key_esc_live, state.q.key_saw_escape = false, false
-			read, oom := scan_pkg.shape_descend_value(&s, state.q, dest)
+		if !lazy || small || scan_pkg.shape_lazy_reads_all(src, run, o.limits) {
+			st.q.key_esc_live, st.q.key_saw_escape = false, false
+			read, oom := scan_pkg.shape_descend_value(&s, st.q, dest)
 			if e, refused := oom.?; refused {
 				return unmarshal_error_of(run, e)
 			}
@@ -172,15 +165,13 @@ read_record :: #force_inline proc(rd: ^Record_Read, src: []byte, dest: rawptr) -
 			}
 		}
 	}
-	return record_walk(rd, src, dest)
+	return record_walk(st, src, o, dest)
 }
 
 // The shape walk, for a value the descent does not take. The same dispatch as `read_planned`.
 @(private)
-record_walk :: #force_no_inline proc(rd: ^Record_Read, src: []byte, dest: rawptr) -> Maybe(Unmarshal_Error) {
-	state := rd.state
-	run := &state.run
-	opts := state.opts
+record_walk :: #force_no_inline proc(st: ^Record_State, src: []byte, opts: Unmarshal_Opts, dest: rawptr) -> Maybe(Unmarshal_Error) {
+	run := &st.run
 	run.sp = 0
 	run.wide_top = 0
 	run.cur_live = false
@@ -200,4 +191,10 @@ record_walk :: #force_no_inline proc(rd: ^Record_Read, src: []byte, dest: rawptr
 		return unmarshal_error_of(run, e)
 	}
 	return nil
+}
+
+// `core_pkg.record_read_destroy`, for `destroy`'s overload set, which names this package's procedures.
+@(private)
+record_read_destroy :: proc(rd: ^Record_Read) {
+	core_pkg.record_read_destroy(rd)
 }

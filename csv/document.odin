@@ -106,6 +106,7 @@ destroy :: proc {
 	document_destroy,
 	records_free,
 	reader_destroy,
+	record_read_destroy,
 	type_plan_destroy,
 }
 

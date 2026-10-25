@@ -8,7 +8,9 @@ package csv
 //	                    `Read_Opts`, `validate`, `error_position` and `render_error`
 //	records.odin        `records`, `next_record`, `Records`, `Record`, `Field` and `field_text`
 //	record_reader.odin  `records_from` and `Record_Reader`
-//	each_record.odin    `each_record` and `Batch_Runner`
+//	record_read.odin    `Record_Read`, `record_read_init`, `record_read_at`, `record_read_destroy` and
+//	                    `unmarshal` of one row
+//	each_record.odin    `each_record`, `validate_records`, `Record_Fault` and `Batch_Runner`
 //	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Duplicates`,
 //	                    `Unknown_Fields`, `Unmarshal_Error`, `Unmarshal_Error_Kind`
 //	marshal.odin        `marshal`, `marshal_append`, `marshal_to_writer`, `Marshal_Opts`, `Marshal_Error`

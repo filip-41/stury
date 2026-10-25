@@ -15,7 +15,9 @@ package core
 //	read_shape_lower.odin `read_shape_of`
 //	shape_store.odin      the judged scalar stores; shape_load.odin their loads
 //	scan_error.odin       `Error`, `Error_Kind`; unmarshal_error.odin `Unmarshal_Error`; render_error.odin their text
-//	batch_runner.odin     `Batch_Runner`, `Batch_Cursor`; stream_window.odin `Stream_Window`
+//	batch_runner.odin     `Batch_Runner`, `Batch_Cursor`, `Batch_Driver`, `Record_Fault`, `Fault_List`;
+//	                      stream_window.odin `Stream_Window`
+//	record_read.odin      `Record_Read`, `Record_Source`, `record_read_init`, `unmarshal` of one record
 //	edit.odin             `Edit`, the byte-span edit that every format's text edits use
 //	path_error.odin       `Path_Error`, `Path_Error_Kind`: path procedure (find, set, splice) errors
 //	marshal_error.odin    `Marshal_Error`: marshal errors

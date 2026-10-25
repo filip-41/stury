@@ -62,8 +62,18 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 // type, `.Out_Of_Memory` lowering the plan) leaves `ptr^` untouched. A later refusal leaves the records read
 // before it, the refused one last. Everything is allocated from `allocator` and nothing is freed, so read into
 // an arena and free it whole. With `plan` nil the plan is this thread's cached one for `T`.
+//
+// A `^Record_Read` reads one row of a `Records` or a `Record_Reader` the caller made, the same way:
+// `record_read_init` resolves the plan, the row shape and the header once, and each `unmarshal` of it pulls one
+// row into a struct. A fault's offset stays into that row's bytes (`record_read_at` places it), and the
+// reader's options apply at every row.
+unmarshal :: proc {
+	unmarshal_records,
+	unmarshal_record,
+}
+
 @(require_results)
-unmarshal :: proc(
+unmarshal_records :: proc(
 	src: []byte,
 	ptr: ^$T,
 	opts := Unmarshal_Opts{},
@@ -74,6 +84,12 @@ unmarshal :: proc(
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	return read_records(src, ptr, T, opts, plan, allocator, false)
+}
+
+// One row of the reader's input, into `ptr^`, as `unmarshal` reads a row's cells.
+@(require_results)
+unmarshal_record :: proc(rd: ^Record_Read, ptr: ^$T) -> Maybe(Unmarshal_Error) {
+	return core_pkg.unmarshal(rd, ptr)
 }
 
 // Whether `src` reads as a `T` under `opts`, with the same checks and results as `unmarshal` except that no
@@ -119,7 +135,7 @@ read_records :: proc(
 	r: Reader
 	r.src, r.borrow, r.enum_ints, r.allocator = src, opts.borrow_strings || CHECK, p.opts.enums == .Int, allocator
 	r.dialect, r.check = opts.dialect, CHECK
-	row_reader(&r, p) or_return
+	row_reader(&r, &p.base, true) or_return
 
 	it := records_of(src, s, context.allocator)
 	defer destroy(&it)

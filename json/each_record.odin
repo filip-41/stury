@@ -1,6 +1,5 @@
 package json
 
-import "base:runtime"
 import "core:bytes"
 import core_pkg "../core"
 import scan_pkg "scan"
@@ -9,11 +8,9 @@ import index_pkg "scan/index"
 // Caller-owned threads for `each_record` and `validate_records`; `stury:host`'s `Batch_Pool` implements it.
 Batch_Runner :: core_pkg.Batch_Runner
 
-// A record `validate_records` refuses: its bytes are src[lo:hi], and `err`'s offset is into `src`.
-Record_Fault :: struct {
-	lo, hi: u64,
-	err:    Error,
-}
+// A record `validate_records` refuses: its bytes are src[lo:hi], and `err`'s offset is into `src` (`core`'s
+// type, so a caller using several formats writes one fault).
+Record_Fault :: core_pkg.Record_Fault
 
 // `task` on every piece of `src`, each a `Records` over whole records under `framing`.
 //
@@ -34,7 +31,7 @@ each_record :: proc(
 	data: rawptr,
 	runner: ^Batch_Runner = nil,
 ) -> Maybe(Error) {
-	run := Batch_Run{src = src, framing = framing, task = task, data = data, cursor = {runner = runner}, end = len(src)}
+	run := Batch_Run{src = src, framing = framing, task = task, data = data, end = len(src)}
 	if framing == .Root_Entries {
 		root := records(src, .Root_Entries)
 		if !open_root(&root) {
@@ -49,21 +46,32 @@ each_record :: proc(
 	if n <= 0 {
 		return nil
 	}
-	run.cursor.slices = core_pkg.batch_slices(n)
-	run.cursor.lanes = core_pkg.batch_lanes(runner, n)
+	run.driver = {
+		data = &run,
+		// The offset past the span's end: the input's end for lines, one past the close bracket for root
+		// entries.
+		none = run.end + int(framing == .Root_Entries),
+		boundary = batch_boundary,
+		skip = batch_skip,
+		piece = batch_piece,
+		// A piece's fault is ranked by its offset in `src`: the first in byte order wins.
+		fault_rank = batch_fault_rank,
+		// A framing fault ends that piece's records, not the batch: the pieces after it are still claimed.
+		stop_on_fault = false,
+	}
+	core_pkg.batch_plan(&run.driver.cursor, runner, n)
 	// Freed once the claims below have read them.
 	defer delete(run.states)
-	if framing == .Root_Entries && run.cursor.lanes > 1 {
-		states, serr := make([]Slice_State, run.cursor.slices)
+	if framing == .Root_Entries && run.driver.cursor.lanes > 1 {
+		states, serr := make([]Slice_State, run.driver.cursor.slices)
 		if serr != nil {
 			return Error{kind = .Out_Of_Memory}
 		}
 		run.states = states
-		core_pkg.batch_fan(&run.cursor, batch_classify, &run)
+		core_pkg.batch_fan(&run.driver.cursor, batch_classify, &run)
 		batch_settle(states)
 	}
-	core_pkg.batch_fan(&run.cursor, batch_claim, &run)
-	return run.first.error
+	return core_pkg.batch_run(&run.driver)
 }
 
 // Validate every record of `src` as `validate` checks it alone: the records it refuses, in source order,
@@ -83,57 +91,32 @@ validate_records :: proc(
 	faults: []Record_Fault,
 	err: Maybe(Error),
 ) {
-	// One list per piece, in the heap: pieces run on every thread, and `allocator` may not be safe to share.
-	lists, lerr := make([][dynamic]Record_Fault, core_pkg.batch_slices(len(src)), runtime.heap_allocator())
+	lists, lerr := core_pkg.fault_list_init(core_pkg.batch_slices(len(src)))
 	if lerr != nil {
-		return nil, Error{kind = .Out_Of_Memory}
+		return nil, lerr
 	}
-	defer {
-		for &l in lists {
-			delete(l)
-		}
-		delete(lists, runtime.heap_allocator())
-	}
+	defer core_pkg.fault_list_destroy(&lists)
 	err = each_record(src, framing, validate_piece, &lists, runner)
-	before := max(u64)
+	// A framing fault ends the records a whole-text `validate` reaches, so only the records before it stand.
+	through := max(u64)
 	if e, bad := err.?; bad {
-		before = e.offset
+		through = e.offset
 	}
-	total := 0
-	for l in lists {
-		for f in l {
-			total += int(f.lo < before)
-		}
+	merged, merr := core_pkg.fault_list_merge(&lists, through, allocator)
+	if merr != nil {
+		return nil, merr
 	}
-	if total == 0 {
-		return
-	}
-	faults, lerr = make([]Record_Fault, total, allocator)
-	if lerr != nil {
-		return nil, Error{kind = .Out_Of_Memory}
-	}
-	at := 0
-	for l in lists {
-		for f in l {
-			if f.lo < before {
-				faults[at] = f
-				at += 1
-			}
-		}
-	}
-	return
+	return merged, err
 }
 
 @(private)
 validate_piece :: proc(data: rawptr, piece: ^Records, k: int) -> bool {
-	lists := (^[][dynamic]Record_Fault)(data)^
-	list := &lists[k]
-	list.allocator = runtime.heap_allocator()
+	lists := (^core_pkg.Fault_List)(data)
 	limits := Limits{max_depth = MAX_DEPTH - 1} if piece.framing == .Root_Entries else {}
 	for rec in next_record(piece) {
 		if e, bad := validate_record(piece, rec, limits).?; bad {
 			e.offset += rec.at
-			append(list, Record_Fault{lo = rec.at, hi = rec.at + u64(len(rec.bytes)), err = e})
+			core_pkg.fault_list_add(lists, k, Record_Fault{lo = rec.at, hi = rec.at + u64(len(rec.bytes)), err = e})
 		}
 	}
 	return true
@@ -157,14 +140,13 @@ Batch_Run :: struct {
 	framing:    Framing,
 	task:       proc(data: rawptr, piece: ^Records, k: int) -> bool,
 	data:       rawptr,
-	cursor:     core_pkg.Batch_Cursor,
+	driver:     core_pkg.Batch_Driver,
 	// The records' span: the input, or the root's entries from after its open bracket to its close.
 	lo, end:    int,
 	keyed:      bool,
 	// `.Root_Entries` on several threads: where strings and depth stand at each slice's start.
 	states:     []Slice_State,
 	classified: int,
-	first:      core_pkg.First_Fault,
 }
 
 @(private)
@@ -193,7 +175,7 @@ slice_start :: proc(run: ^Batch_Run, k: int) -> int {
 @(private)
 batch_classify :: proc(arg: rawptr) {
 	run := (^Batch_Run)(arg)
-	for k in core_pkg.slice_next(&run.classified, run.cursor.slices) {
+	for k in core_pkg.slice_next(&run.classified, run.driver.cursor.slices) {
 		run.states[k].balance = index_pkg.bracket_balance(run.src[slice_start(run, k):slice_start(run, k + 1)])
 	}
 }
@@ -214,52 +196,40 @@ batch_settle :: proc(states: []Slice_State) {
 	}
 }
 
-// Claim pieces until none are left. A piece whose last record reaches past the slices after it moves the
-// counter past them, since no record starts there.
+// The piece of records from `lo` up to `hi`, numbered `k`, run by the caller's task.
 @(private)
-batch_claim :: proc(arg: rawptr) {
-	run := (^Batch_Run)(arg)
-	for s, n, k in core_pkg.cursor_next(&run.cursor) {
-		// The offset past the span's end: the input's end for lines, one past the close bracket for root entries.
-		none := run.end + int(run.framing == .Root_Entries)
-		// A claim inside a long record starts no record, and its boundary search stops at the claim's end, so
-		// only the claim the record starts in searches for that record's end.
-		lo, hi := batch_boundary(run, s, slice_start(run, s + n)), none
-		if lo < 0 {
-			lo = none
-		} else {
-			if h := batch_boundary(run, s + n, run.end); h >= 0 {
-				hi = h
-			}
-			core_pkg.cursor_skip_to(&run.cursor, batch_skip(run, s + n, hi))
-		}
-		piece := Records{src = run.src[:hi], pos = lo, framing = run.framing}
-		if run.framing == .Root_Entries {
-			// A piece's entries end at its last comma, or at the root's close bracket, `hi - 1` either way.
-			piece = {src = run.src, pos = lo, framing = .Root_Entries, opened = true, end = hi - 1, keyed = run.keyed}
-			piece.owed = lo != run.lo || hi - 1 != run.end
-			piece.commas = index_pkg.comma_cursor(lo)
-		}
-		if !run.task(run.data, &piece, k) {
-			core_pkg.cursor_stop(&run.cursor)
-		}
-		if e, bad := piece.err.(Error); bad {
-			core_pkg.first_fault_note(&run.first, int(e.offset), e)
-		}
+batch_piece :: proc(data: rawptr, lo, hi, k: int) -> (fault: Maybe(Error), go_on: bool) {
+	run := (^Batch_Run)(data)
+	piece := Records{src = run.src[:hi], pos = lo, framing = run.framing}
+	if run.framing == .Root_Entries {
+		// A piece's entries end at its last comma, or at the root's close bracket, `hi - 1` either way.
+		piece = {src = run.src, pos = lo, framing = .Root_Entries, opened = true, end = hi - 1, keyed = run.keyed}
+		piece.owed = lo != run.lo || hi - 1 != run.end
+		piece.commas = index_pkg.comma_cursor(lo)
 	}
+	go_on = run.task(run.data, &piece, k)
+	return piece.err, go_on
 }
 
-// Returns the offset where the records of slice `k` onward start, searching before `stop`. For lines, it is past
-// the first line feed at or after the byte before the slice's offset. For `0x1E`, it is the first separator run
-// starting at or after the offset. For root entries, it is past the first top-level comma at or after the offset.
-// Slice 0 starts at the span's start. Returns -1 when no boundary is found.
+// The rank of a framing fault: its offset in `src`, so the batch returns the first in byte order.
 @(private)
-batch_boundary :: proc(run: ^Batch_Run, k, stop: int) -> int {
+batch_fault_rank :: proc(_: rawptr, _: int, e: Error) -> int {
+	return int(e.offset)
+}
+
+// Where the records of slice `k` on start, searching before slice `stop`. For lines, it is past the first line
+// feed at or after the byte before the slice's offset. For `0x1E`, it is the first separator run starting at or
+// after the offset. For root entries, it is past the first top-level comma at or after the offset. Slice 0
+// starts at the span's start. Returns -1 when no boundary is found.
+@(private)
+batch_boundary :: proc(data: rawptr, k, stop_slice: int) -> int {
+	run := (^Batch_Run)(data)
 	src := run.src
 	if k == 0 {
 		return run.lo
 	}
 	at := slice_start(run, k)
+	stop := slice_start(run, stop_slice)
 	switch run.framing {
 	case .NDJSON:
 		if at < stop {
@@ -295,7 +265,8 @@ batch_boundary :: proc(run: ^Batch_Run, k, stop: int) -> int {
 
 // The first slice past `from` whose boundary is still `hi`, the boundary of slice `from`.
 @(private)
-batch_skip :: proc(run: ^Batch_Run, from, hi: int) -> int {
+batch_skip :: proc(data: rawptr, from, hi: int) -> int {
+	run := (^Batch_Run)(data)
 	if run.framing != .Root_Entries {
 		return (hi - run.lo) / core_pkg.BATCH_SLICE
 	}

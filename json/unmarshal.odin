@@ -86,12 +86,20 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 //	- With `plan` nil the plan is this thread's cached one for `T`, as `marshal` takes it. A kept plan must
 //	  have been made for `T`.
 //
-// A `^Record_Read` reads one record's bytes the same way. `record_read_init` resolves the plan and the shape
-// once and holds them on the heap (`destroy` frees them); a fault's offset stays into those bytes, and the
-// reader's options are read again at each record.
+// A `^Record_Read` reads the next record of a `Records` the same way: `record_read_init` resolves the plan and
+// the shape once and holds them on the heap (`destroy` frees them), and `unmarshal` of the reader pulls one
+// record. A fault's offset stays into that record's bytes, and the reader's options are read again at each
+// record. The end of the input is `.Bad_Option`.
 unmarshal :: proc {
 	unmarshal_value,
 	unmarshal_record,
+}
+
+// One record of the reader's input, into `ptr^`. The reader's options apply, so a change since the last record
+// takes effect here; its plan and shape are the ones `record_read_init` resolved.
+@(require_results)
+unmarshal_record :: proc(rd: ^Record_Read, ptr: ^$T) -> Maybe(Unmarshal_Error) {
+	return core_pkg.unmarshal(rd, ptr)
 }
 
 @(require_results)
