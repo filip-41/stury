@@ -125,7 +125,6 @@ Opts :: struct {
 	stream:           bool, // jq's --stream: each input as [path, leaf] events
 	stream_errors:    bool, // and an error as a [message, path] event
 	from:             Format, // how the input is read
-	json5:            bool, // --from json5: `from` is .Jsonc, and each input is transcoded to JSONC first
 	to:               Format, // how the outputs are written
 	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
 	strict_limits:    bool, // check: the library's depth, digit and scale caps hold
@@ -182,12 +181,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
-	if o.from == .Json5 {
-		o.from, o.json5 = .Jsonc, true
-	}
-	if o.from == .Jsonc {
-		jq.read_dialect = .Jsonc
-	}
+	jq.read_dialect = read_dialect(o.from)
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
 		a := args[i]
@@ -293,7 +287,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	// fmt writes each input as its own format unless --to says otherwise, so its --to follows --from when --to
 	// was not given. `--to ndjson` is what sets the compact layout here, since fmt refuses -c.
 	if cli.formatting && cli.formats.to == nil {
-		o.to = o.from
+		o.to = reads_as(o.from)
 	}
 	if o.to == .Ndjson {
 		o.compact = true
@@ -601,7 +595,7 @@ load_file :: proc(path: string, raw: bool) -> (v: jq.Value, msg: string) {
 			return all, ""
 		}
 		end, trailing := text_span(data, at)
-		if jq.read_dialect == .Jsonc { // one document per input, as for the files
+		if !json.plain_json(jq.read_dialect) { // one document per input, as for the files
 			end, trailing = len(data), false
 		}
 		if e, bad := json.validate(data[at:end], {dialect = jq.read_dialect, limits = jq.lifted}).?; bad && e.kind == .Trailing && trailing {

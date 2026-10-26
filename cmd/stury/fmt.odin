@@ -79,9 +79,9 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	switch {
 	case o.in_place && o.check:
 		usage_error("--in-place rewrites each file; --check only reads it")
-	case o.in_place && o.json5:
+	case o.in_place && transcoded(o.from):
 		usage_error("--in-place writes each file back as its own format, and json5 is read only")
-	case o.check && o.json5:
+	case o.check && transcoded(o.from):
 		usage_error("--check compares each file with its own format, and json5 is read only")
 	case o.in_place && o.to != o.from:
 		usage_error("--in-place writes each file back as its own format: --from %s and --to %s differ",
@@ -98,7 +98,7 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 			}
 		}
 	}
-	run.req.dialect = .Jsonc if o.from == .Jsonc else .Json
+	run.req.dialect = read_dialect(o.from)
 	run.req.limits = jq.lifted
 	run.name_faults = true
 	run.verbatim = !reads_cells(o) && !writes_cells(o)
@@ -218,7 +218,7 @@ fmt_texts :: proc(run: ^Run, ins: ^Inputs) {
 @(private = "file")
 fmt_pieces :: proc(run: ^Run, ins: ^Inputs) -> bool {
 	at, limit, trailing, found := next_text(ins)
-	if !found || !trailing || limit != len(ins.data) || run.opts.from == .Jsonc || jq.lifted.max_depth > json.MAX_DEPTH {
+	if !found || !trailing || limit != len(ins.data) || !json.plain_json(run.req.dialect) || jq.lifted.max_depth > json.MAX_DEPTH {
 		return false
 	}
 	if !print_root_pieces(run, ins.data[at:]) {

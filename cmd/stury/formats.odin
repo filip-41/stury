@@ -4,6 +4,7 @@ package main
 // (splitting the input into texts) and one in print.odin or output_cells.odin (writing the outputs).
 
 import csv "../../csv"
+import json "../../json"
 
 Format :: enum u8 {
 	Json,
@@ -16,6 +17,10 @@ Format :: enum u8 {
 
 Format_Spec :: struct {
 	name:    string,
+	// The grammar the text is spelled in, for a JSON-like format.
+	source:  json.Dialect,
+	// The format a transcode of the input is read as, where the input is not read as itself.
+	transcoded_to: Maybe(Format),
 	// A CSV-like format: the first record is the header, and each later record is an object keyed by it.
 	cells:   bool,
 	dialect: csv.Dialect, // for a format with `cells`
@@ -24,8 +29,8 @@ Format_Spec :: struct {
 @(rodata)
 FORMATS := [Format]Format_Spec {
 	.Json   = {name = "json"},
-	.Jsonc  = {name = "jsonc"},
-	.Json5  = {name = "json5"},
+	.Jsonc  = {name = "jsonc", source = .Jsonc},
+	.Json5  = {name = "json5", source = .Json5, transcoded_to = .Jsonc},
 	.Ndjson = {name = "ndjson"},
 	.Csv    = {name = "csv", cells = true},
 	.Tsv    = {name = "tsv", cells = true, dialect = csv.TSV},
@@ -55,6 +60,21 @@ format_names :: proc(writing: bool) -> string {
 	return string(b[:])
 }
 
+// The format an input of `f` is read as: `f`, or what its transcode gives.
+reads_as :: proc(f: Format) -> Format {
+	return FORMATS[f].transcoded_to.? or_else f
+}
+
+// Whether an input of `f` is transcoded before it is read.
+transcoded :: proc(f: Format) -> bool {
+	return FORMATS[f].transcoded_to != nil
+}
+
+// The grammar the reader of `f` reads its texts in, which `Run.req.dialect` and `jq.read_dialect` hold.
+read_dialect :: proc(f: Format) -> json.Dialect {
+	return FORMATS[reads_as(f)].source
+}
+
 // Reports whether the input format is CSV-like.
 reads_cells :: #force_inline proc(o: ^Opts) -> bool {
 	return FORMATS[o.from].cells
@@ -68,7 +88,7 @@ writes_cells :: #force_inline proc(o: ^Opts) -> bool {
 // Refuses options that conflict with the chosen formats. A non-JSON input format splits the input itself, so -R,
 // --seq and --stream do not apply. A CSV-like output writes no JSON text, so JSON layout options do not apply.
 refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
-	from, to := FORMATS[.Json5 if o.json5 else o.from].name, FORMATS[o.to].name
+	from, to := FORMATS[o.from].name, FORMATS[o.to].name
 	if o.from != .Json {
 		other := "--seq" if o.seq else "-R" if o.raw_input else "--stream" if o.stream && o.from != .Ndjson else ""
 		if other != "" {

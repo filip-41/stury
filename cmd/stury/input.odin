@@ -214,7 +214,7 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 		if run.opts.seq && truncated_number(ins.data[at:limit]) {
 			return text_fault(ins, at, limit, json.Error{kind = .Truncated, offset = u64(limit - at)}, jq.TRUNCATED_NUMBER_NOTE)
 		}
-		if trailing && run.opts.from != .Jsonc && limit == len(ins.data) && !own && !run.opts.stream && !run.verbatim {
+		if trailing && json.plain_json(run.req.dialect) && limit == len(ins.data) && !own && !run.opts.stream && !run.verbatim {
 			if v, ok := build_root_pieces(run, ins.data, at, prog); ok {
 				ins.pos, ins.seen, ins.pinned = limit, last_read(ins.data, at, limit), true
 				return v, "", .Value
@@ -272,7 +272,7 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 		if read_on(ins, at) {
 			continue
 		}
-		if run.opts.from == .Jsonc {
+		if !json.plain_json(run.req.dialect) {
 			jsonc_fault(ins, err.?, at)
 		}
 		return text_fault(ins, at, limit, err.?)
@@ -598,7 +598,7 @@ next_text :: proc(ins: ^Inputs) -> (at, limit: int, trailing, found: bool) {
 		}
 		limit = len(data)
 		switch {
-		case ins.run.opts.from == .Jsonc:
+		case !json.plain_json(ins.run.req.dialect):
 			return at, limit, false, true
 		case seq:
 			if ins.seq_head == .Unread {

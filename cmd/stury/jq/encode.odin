@@ -207,7 +207,7 @@ write_answer :: proc(out: ^[dynamic]byte, v: Value, l: Layout, respell := true) 
 			return
 		}
 	case .Object, .Array:
-		if respell && r.doc.dialect == .Json && write_spelled(out, text, l) {
+		if respell && json.plain_json(r.doc.dialect) && write_spelled(out, text, l) {
 			return
 		}
 	}

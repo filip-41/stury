@@ -150,7 +150,7 @@ main :: proc() {
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
-	run.req.dialect = .Jsonc if o.from == .Jsonc else .Json
+	run.req.dialect = read_dialect(o.from)
 	run.req.limits = jq.lifted
 	names := cli.files[:] if len(cli.files) > 0 else STDIN_ONLY
 	if validating {
@@ -202,7 +202,7 @@ main :: proc() {
 	ins: Inputs
 	inputs_init(&ins, &run, names)
 	// A pipe is read as it comes, but by -s, which needs it all, and --from jsonc, whose faults count lines in it whole.
-	ins.may_stream = !o.slurp && o.from != .Jsonc
+	ins.may_stream = !o.slurp && json.plain_json(run.req.dialect)
 	bind_inputs(&run, &ins)
 	// Here, not in the interpreter's arena, which each input empties.
 	reserve(&run.out, FLUSH_AT * 2)
@@ -337,16 +337,16 @@ choose_scan :: proc(run: ^Run, text: string) {
 	@(static) steps: [json.MAX_PATH_STEPS]json.Step
 	p, perr := json.parse_path(text, steps[:], make([]u8, len(text)))
 	if perr != nil {
-		// `select` is the interpreter's under JSONC, whose texts print with their comments.
-		jsonc := o.from == .Jsonc
-		if jsonc && !explain_why(run, {.Jsonc_Select}) {
+		// `select` is the interpreter's under a dialect, whose texts print with their comments.
+		dialect := !json.plain_json(run.req.dialect)
+		if dialect && !explain_why(run, {.Jsonc_Select}) {
 			return
 		}
 		sel: Select
 		why: Explain_Whys
 		p, sel, why = selected_path(run, text, steps[:])
 		explain_why(run, why)
-		if why != {} || jsonc || stops != {} {
+		if why != {} || dialect || stops != {} {
 			return
 		}
 		run.select = sel
@@ -424,12 +424,12 @@ fault_in_file :: proc(name: string, src: []byte, e: json.Error, what := "", line
 // fault), and a nesting past the cap is raised by --max-depth, which the hint asks for only when it was not given.
 // The text ends in a newline.
 fault_context :: proc(src: []byte, e: json.Error, opts: ^Opts) -> string {
-	jsonc := opts.from == .Jsonc
+	jsonc := !json.plain_json(read_dialect(opts.from))
 	at := int(e.offset)
 	hint: string
 	switch {
-	case e.kind == .Too_Deep && opts.json5 && jq.lifted.max_depth >= json.MAX_DEPTH:
-		hint = fmt.tprintf("--from json5 reads nesting to depth %d at most", json.MAX_DEPTH)
+	case e.kind == .Too_Deep && transcoded(opts.from) && jq.lifted.max_depth >= json.MAX_DEPTH:
+		hint = fmt.tprintf("--from %s reads nesting to depth %d at most", FORMATS[opts.from].name, json.MAX_DEPTH)
 	case e.kind == .Too_Deep:
 		hint = "a larger --max-depth reads it" if opts.max_depth_given else "--max-depth N raises the nesting limit"
 	case e.kind != .Bad_Char || at >= len(src) || jsonc:
