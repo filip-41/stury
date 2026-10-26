@@ -1,7 +1,8 @@
 package csv
 
-// Paths into a CSV text. `find` and `find_column` read the fields a path names from the start of the text.
-// The path edits (edit.odin) locate their targets the same way.
+// Paths into a CSV text. `query` answers a path over a `Document`'s field spans; `find` and `find_column`
+// stream a path over the text from its start, with no document. The path edits (edit.odin) locate their
+// targets the same way.
 
 import "base:runtime"
 import "core:strings"
@@ -10,100 +11,153 @@ import core_pkg "../core"
 // A built path: a chain of steps.
 Path :: core_pkg.Path
 
-// A path as `find`, `find_column` and the path edits take it: text in core's path syntax, or a built `Path`.
+// A path as `query`, `find`, `find_column` and the path edits take it: text in core's path syntax, or a built
+// `Path`.
 //
 //	.[3].name   row 3, the column the header names `name`
 //	.[3][1]     row 3, column 1
+//	.[], .[3]   every row, or row 3: the record's own span
 //	.[].name    that column of every row
-//	.[3]        the record of row 3 (`remove` only)
 //
-// Rows count from the first record after the header, columns from 0. A step that is not one of these (a
-// negative index, `limit(...)`, a name without a header) is `.Unsupported_Path`.
+// Rows count from the first record after the header, columns from 0. `query`, `find` and `find_column` take
+// `limit(...)`. A step that is not one of these (a negative index, `.[][]`, a name without a header) is
+// `.Unsupported_Path` from `query` and `.Bad_Option` from `find` and `find_column`.
 Path_Spec :: core_pkg.Path_Spec
 
-// Why a path procedure refused: core's `Path_Error_Kind`, shared with JSON. CSV never reports
-// `Over_Capacity`, `Type_Mismatch`, `Too_Deep`, `Exists`, `Bad_Comment` or `Internal`.
+// Why a path procedure refused: core's `Path_Error_Kind`, shared with JSON. `query` reports `.Bad_Path`,
+// `.Unsupported_Path`, `.Over_Capacity` and `.Out_Of_Memory`; the edits report only the kinds their docs list.
 Path_Error_Kind :: core_pkg.Path_Error_Kind
 
 // A refusal. `syntax` and `offset` are set for `.Bad_Source` and `.Bad_Result`. `offset` is set for
-// `.Bad_Path` and `.Bad_Row`, and for `.Unplaceable` and `.Encode` (the record, or 0). `encode` is set for
-// `.Encode`. Both this package's and JSON's `render_error` write it.
+// `.Bad_Path` and `.Bad_Row` (the byte of the path text), and for `.Unplaceable` and `.Encode` (the record, or
+// 0). `encode` is set for `.Encode`. Both this package's and JSON's `render_error` write it.
 Path_Error :: core_pkg.Path_Error
 
-// The field a path names. `found` is false, with no fault, when the text has no such row or column. `path`
-// names one cell: `.[row].name` or `.[row][col]`.
+// One answer: a span of the text a path procedure read, the record whose span holds it (`NO_OWNER` when none
+// does), and how the path landed. It is core's `Answer`, the shape JSON's `Path_Answer` carries beside its node
+// row and value kind, so a caller that reads offsets writes one answer type for both formats.
+Answer :: core_pkg.Answer
+
+// `Answer.owner` of an answer no record holds: a miss of the header or of the text as a whole.
+NO_OWNER :: core_pkg.NO_OWNER
+
+// The first answer `path` gives in `src`: the cell `.[row].name` or `.[row][col]` names, the record `.[row]`
+// names, or the first of the rows `.[].name`, `.[][col]` and `.[]` read. One scan, no document, and nothing
+// kept.
 //
-// The scan stops at the end of the named record, so the cost is the bytes before it, and nothing is kept for
-// the rows it passes. The text after that record is not judged. The record's own bytes are judged at
-// `opts.strictness` as `records` judges them; `opts.duplicates` is not read. A fault before the named record is `.Bad_Source`.
+//	- The result is the path's or the scan's: nil, a path refusal, or the text's fault, with the kind and offset
+//	  it was found at. On a fault the answer is `.Missing` and bounds nothing.
+//	- The answer is `.Found` with `lo` and `hi` bounding the value in `src`, else `.Missing`. A miss names its
+//	  container in `owner` where one holds it (a row too short for the column), and `NO_OWNER` when none does
+//	  (no such row, or a header without the name).
+//	- `query` is 0: one path is answered. `limit` is read as 1, so a path over every row answers its first.
+//	- The scan stops at the answer, so the bytes after it are not judged. The answer borrows `src`.
 @(require_results)
 find :: proc(
 	src: []byte,
 	path: Path_Spec,
 	opts := Read_Opts{},
 	allocator := context.allocator,
-) -> (field: Field, found: bool, err: Maybe(Path_Error)) {
+) -> (a: Answer, err: Maybe(Error)) {
+	a = Answer{outcome = .Missing, owner = NO_OWNER}
 	buf: Path_Buf
-	t := parse_target(path, &buf, allocator) or_return
+	t, perr := parse_target(path, &buf, allocator, reader = true)
 	defer delete(t.scratch, allocator)
-	header := !opts.no_header
-	if t.every_row || t.col == COL_NONE || t.col == COL_NAME && !header {
-		return {}, false, Path_Error{kind = .Unsupported_Path}
+	if e, bad := perr.?; bad {
+		return a, reader_refusal(e)
 	}
-	it := records(src, opts, allocator)
-	defer destroy(&it)
-	if it.err != nil {
-		return {}, false, finished(&it)
+	if t.col == COL_NAME && opts.no_header {
+		return a, Error{kind = .Bad_Option}
 	}
-	col, _, has_col := seek_header(&it, t, header, opts.dialect)
-	if !has_col {
-		return {}, false, finished(&it)
-	}
-	rec, has_row := seek_row(&it, t.row)
-	if !has_row || col >= len(rec.fields) {
-		return {}, false, finished(&it)
-	}
-	return rec.fields[col], true, nil
+	t.limit = 1
+	return stream_target(src, t, nil, opts, allocator, single = true)
 }
 
-// Append to `out` the field of the column `path` names, from every row that has one: `.[].name` or
-// `.[][col]`. A ragged row too short for the column adds nothing.
+// Append to `out` every answer `path` gives in `src`'s records: one per row that has the named or indexed
+// column, or, for `.[]`, one per row. A ragged row too short for the column adds nothing.
 //
-// The fields go in `out`, not in an allocation of the call, so the caller bounds the result and can reuse
-// the buffer across calls. The whole text is scanned. A fault is `.Bad_Source` and leaves in `out` the fields before it. A
-// header that lacks the name leaves `out` unchanged.
+//	- `out` is the caller's buffer, reused across calls, and answers borrow `src`.
+//	- A fault is the scan's, with the kind and offset it was found at, and leaves in `out` the answers before
+//	  it. A header without the name leaves `out` unchanged; a name with no header is `.Bad_Option`.
+//	- `limit` cuts the answers, and the walk then stops at the last of them. Otherwise it stops after the
+//	  target's rows, so no byte past a single row is read.
 @(require_results)
 find_column :: proc(
 	src: []byte,
 	path: Path_Spec,
-	out: ^[dynamic]Field,
+	out: ^[dynamic]Answer,
 	opts := Read_Opts{},
+	allocator := context.allocator,
+) -> (err: Maybe(Error)) {
+	buf: Path_Buf
+	t, perr := parse_target(path, &buf, allocator, reader = true)
+	defer delete(t.scratch, allocator)
+	if e, bad := perr.?; bad {
+		return reader_refusal(e)
+	}
+	if t.col == COL_NAME && opts.no_header {
+		return Error{kind = .Bad_Option}
+	}
+	_, err = stream_target(src, t, out, opts, allocator, single = false)
+	return err
+}
+
+// Append to `out` every answer `path` gives in `doc`, in row order: the cell `.[row].name` or `.[row][col]`
+// names, the record `.[row]` names, or every matching row of `.[].name`, `.[][col]` and `.[]`.
+//
+//	- The answers are read from `doc`'s field spans; the text is never scanned again. `lo` and `hi` index
+//	  `doc.src`, and `owner` is the record's first byte, valid until the document is destroyed.
+//	- A path that lands nothing appends nothing: no such row, no such name in the header, or a ragged row too
+//	  short for the column. A name with no header at all is `.Unsupported_Path`.
+//	- `limit` cuts the answers (0 is every one). `.Out_Of_Memory` is `out` refusing to grow; the answers
+//	  appended before that stay.
+//	- It allocates only for a text path longer than 256 bytes that holds an escaped name, in `allocator`.
+@(require_results)
+query :: proc(
+	doc: ^Document,
+	path: Path_Spec,
+	out: ^[dynamic]Answer,
 	allocator := context.allocator,
 ) -> (err: Maybe(Path_Error)) {
 	buf: Path_Buf
-	t := parse_target(path, &buf, allocator) or_return
+	t, perr := parse_target(path, &buf, allocator, reader = true)
 	defer delete(t.scratch, allocator)
-	header := !opts.no_header
-	if !t.every_row || t.col == COL_NONE || t.col == COL_NAME && !header {
-		return Path_Error{kind = .Unsupported_Path}
+	if e, bad := perr.?; bad {
+		return e
 	}
-	it := records(src, opts, allocator)
-	defer destroy(&it)
-	if it.err != nil {
-		return finished(&it)
+	col := t.col
+	if col == COL_NAME {
+		if len(doc.names) == 0 {
+			return Path_Error{kind = .Unsupported_Path}
+		}
+		c, ok := column(doc, t.name)
+		if !ok {
+			return nil
+		}
+		col = c
 	}
-	col, _, has_col := seek_header(&it, t, header, opts.dialect)
-	if !has_col {
-		return finished(&it)
+	first, last := 0, doc.rows
+	if !t.every_row {
+		if t.row >= doc.rows {
+			return nil
+		}
+		first, last = t.row, t.row + 1
 	}
-	for rec in next_record(&it) {
-		if col < len(rec.fields) {
-			if _, aerr := append(out, rec.fields[col]); aerr != nil {
-				return core_pkg.PATH_OUT_OF_MEMORY
-			}
+	counted := 0
+	for row in first ..< last {
+		fields := row_fields(doc, row)
+		// A ragged row too short for the column answers nothing, as every row's fields end where its record does.
+		if col >= len(fields) {
+			continue
+		}
+		if core_pkg.answer_cut(t.limit, &counted, .Found, false) {
+			break
+		}
+		if _, aerr := append(out, record_answer(fields, col)); aerr != nil {
+			return core_pkg.PATH_OUT_OF_MEMORY
 		}
 	}
-	return finished(&it)
+	return nil
 }
 
 // `COL_NONE`: the path stops at a row. `COL_NAME`: the column is the one `Target.name` names.
@@ -119,36 +173,51 @@ Target :: struct {
 	every_row: bool,
 	col:       int, // an index, `COL_NONE` or `COL_NAME`
 	name:      string, // `COL_NAME`: borrowed from the path text or the buffer a parse decoded into
+	limit:     int, // the `Path.limit`, 0 for every answer
 	scratch:   []u8, // the heap buffer a long escaped name decoded into, if any: the caller frees it
 }
 
 // Where a text path is parsed into: its steps and its decoded escaped names. Decoded names never need more
-// than `len(text)` bytes.
+// than `len(text)` bytes. `text` holds a rewritten path (`rooted_text`): the empty bracket step and its
+// wrapper, whose rewritten form always fits.
 @(private)
 Path_Buf :: struct {
 	steps: [core_pkg.MAX_PATH_STEPS]Step,
 	names: [256]u8,
+	text:  [64]u8,
 }
 
 // The target of `path`, borrowing `buf`. A path of one step names a row, of two a cell or a column.
+//
+// `reader` is how the streaming readers read a path: `limit(...)` is kept (an edit refuses it), and a path past
+// `MAX_PATH_STEPS` keeps its `.Over_Capacity` (an edit reports `.Unsupported_Path`).
 @(private)
-parse_target :: proc(path: Path_Spec, buf: ^Path_Buf, allocator: runtime.Allocator) -> (t: Target, err: Maybe(Path_Error)) {
+parse_target :: proc(
+	path: Path_Spec,
+	buf: ^Path_Buf,
+	allocator: runtime.Allocator,
+	reader := false,
+) -> (t: Target, err: Maybe(Path_Error)) {
 	p: Path
 	switch v in path {
 	case string:
+		text := v
+		if rewritten, ok := rooted_text(v, buf); ok {
+			text = rewritten
+		}
 		names := buf.names[:]
-		if len(v) > len(names) && strings.index_byte(v, '\\') >= 0 {
-			heap, aerr := make([]u8, len(v), allocator)
+		if len(text) > len(names) && strings.index_byte(text, '\\') >= 0 {
+			heap, aerr := make([]u8, len(text), allocator)
 			if aerr != nil {
 				return {}, core_pkg.PATH_OUT_OF_MEMORY
 			}
 			t.scratch, names = heap, heap
 		}
 		perr: Maybe(Path_Error)
-		if p, perr = core_pkg.parse_path(v, buf.steps[:], names); perr != nil {
+		if p, perr = core_pkg.parse_path(text, buf.steps[:], names); perr != nil {
 			delete(t.scratch, allocator)
 			// A path with more steps than the buffer holds is not a CSV path.
-			if perr.?.kind == .Over_Capacity {
+			if e, bad := perr.?; bad && e.kind == .Over_Capacity && !reader {
 				return {}, Path_Error{kind = .Unsupported_Path}
 			}
 			return {}, perr
@@ -157,10 +226,11 @@ parse_target :: proc(path: Path_Spec, buf: ^Path_Buf, allocator: runtime.Allocat
 		p = v
 	}
 	t.col = COL_NONE
-	if p.limit != 0 || p.per_element || len(p.steps) < 1 || len(p.steps) > 2 {
+	if p.per_element || len(p.steps) < 1 || len(p.steps) > 2 || p.limit != 0 && !reader {
 		delete(t.scratch, allocator)
 		return {}, Path_Error{kind = .Unsupported_Path}
 	}
+	t.limit = p.limit
 	supported := true
 	switch s in p.steps[0] {
 	case Index:
@@ -187,22 +257,161 @@ parse_target :: proc(path: Path_Spec, buf: ^Path_Buf, allocator: runtime.Allocat
 	return
 }
 
-// Reads the header record from `it` when there is one, and returns the index of the column `t` names, or
-// false when the header lacks the name or there is no record. The header record is `head`, valid until the
-// next record. Without a header the column is `t`'s index. A row-only path (`COL_NONE`) names column 0.
+// `text` with core's root `.` added when its body is jq's `[]`, the every-element filter (core spells the same
+// path `.[]`). The `first(` and `limit(` wrappers are kept, so `limit(2; [])` reads a path. `ok` is false when
+// the text needs no rewrite, names a step after `[]` (which would need its own dot), or leaves no room.
 @(private)
-seek_header :: proc(it: ^Records, t: Target, header: bool, dialect: Dialect) -> (col: int, head: Record, ok: bool) {
-	col = max(t.col, 0)
-	if header {
-		head = next_record(it) or_return
-		if t.col == COL_NAME {
-			col = column_of(it.src, head.fields, dialect, t.name) or_return
+rooted_text :: proc(text: string, buf: ^Path_Buf) -> (out: string, ok: bool) {
+	i := 0
+	for i < len(text) && path_space(text[i]) {
+		i += 1
+	}
+	at := i
+	if at < len(text) && text[at] == '.' {
+		return "", false
+	}
+	switch {
+	case at < len(text) && text[at] == '[':
+	case strings.has_prefix(text[at:], "first("):
+		at += len("first(")
+		for at < len(text) && path_space(text[at]) {
+			at += 1
+		}
+	case strings.has_prefix(text[at:], "limit("):
+		at += len("limit(")
+		for at < len(text) && (path_space(text[at]) || text[at] >= '0' && text[at] <= '9') {
+			at += 1
+		}
+		for at < len(text) && path_space(text[at]) {
+			at += 1
+		}
+		if at >= len(text) || text[at] != ';' {
+			return "", false
+		}
+		at += 1
+		for at < len(text) && path_space(text[at]) {
+			at += 1
+		}
+	case:
+		return "", false
+	}
+	// The rewritten path has no escaped name, so it cannot need the names buffer.
+	if at + 2 > len(text) || text[at] != '[' || text[at + 1] != ']' {
+		return "", false
+	}
+	for end := at + 2; end < len(text); end += 1 {
+		if text[end] != ')' && !path_space(text[end]) {
+			return "", false
 		}
 	}
-	return col, head, true
+	if len(text) + 1 > len(buf.text) {
+		return "", false
+	}
+	dst := buf.text[:len(text) + 1]
+	copy(dst, text[:at])
+	dst[at] = '.'
+	copy(dst[at + 1:], text[at:])
+	return string(dst), true
 }
 
-// The data row `row` of `it`, reading on from where `seek_header` left it.
+@(private = "file")
+path_space :: #force_inline proc(c: byte) -> bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// The answers `t` names, read from `src`'s records. `out` receives every one, or, under `$single`, the walk
+// stops at the first and returns it in `first`; `limit` cuts the answers either way. The header is read
+// before the rows, and a name it lacks answers nothing.
+@(private)
+stream_target :: proc(
+	src: []byte,
+	t: Target,
+	out: ^[dynamic]Answer,
+	opts: Read_Opts,
+	allocator: runtime.Allocator,
+	$single: bool,
+) -> (first: Answer, err: Maybe(Error)) {
+	first = Answer{outcome = .Missing, owner = NO_OWNER}
+	it := records(src, opts, allocator)
+	defer destroy(&it)
+	if it.err != nil {
+		return first, it.err
+	}
+	col := t.col
+	if t.col == COL_NAME {
+		head, more := next_record(&it)
+		if !more {
+			return first, it.err
+		}
+		c, ok := column_of(src, head.fields, opts.dialect, t.name)
+		if !ok {
+			return first, it.err
+		}
+		col = c
+	} else if !opts.no_header {
+		if _, more := next_record(&it); !more {
+			return first, it.err
+		}
+	}
+	counted := 0
+	if t.every_row {
+		for rec in next_record(&it) {
+			if col >= len(rec.fields) {
+				continue
+			}
+			answer := record_answer(rec.fields, col)
+			if core_pkg.answer_cut(t.limit, &counted, .Found, false) {
+				break
+			}
+			when single {
+				return answer, nil
+			} else {
+				if _, aerr := append(out, answer); aerr != nil {
+					return first, Error{kind = .Out_Of_Memory}
+				}
+			}
+		}
+		return first, it.err
+	}
+	for row := 0; ; row += 1 {
+		rec, more := next_record(&it)
+		if !more {
+			return first, it.err
+		}
+		if row < t.row {
+			continue
+		}
+		if col >= len(rec.fields) {
+			return Answer{outcome = .Missing, owner = rec.at}, nil
+		}
+		answer := record_answer(rec.fields, col)
+		if core_pkg.answer_cut(t.limit, &counted, .Found, false) {
+			return first, nil
+		}
+		when single {
+			return answer, nil
+		} else {
+			if _, aerr := append(out, answer); aerr != nil {
+				return first, Error{kind = .Out_Of_Memory}
+			}
+			return first, it.err
+		}
+	}
+}
+
+// The answer about a record whose fields are `fields`: field `col`'s span, or the whole record's for
+// `COL_NONE`. `owner` is the record's first byte, which is its first field's. The caller checked `col` is one
+// of the record's fields, or `COL_NONE`.
+@(private)
+record_answer :: #force_inline proc(fields: []Field, col: int) -> Answer {
+	if col == COL_NONE {
+		return Answer{lo = fields[0].lo, hi = fields[len(fields) - 1].hi, owner = fields[0].lo, outcome = .Found}
+	}
+	f := fields[col]
+	return Answer{lo = f.lo, hi = f.hi, owner = fields[0].lo, outcome = .Found}
+}
+
+// The data row `row` of `it`, reading on from where the header left it.
 @(private)
 seek_row :: proc(it: ^Records, row: int) -> (rec: Record, ok: bool) {
 	for _ in 0 ..= row {
@@ -220,6 +429,21 @@ column_of :: proc(src: []byte, names: []Field, dialect: Dialect, name: string) -
 		}
 	}
 	return -1, false
+}
+
+// A path reading refusal as the `Error` `find` and `find_column` return: the path's own fault keeps its kind
+// and offset, a shape CSV cannot answer is `.Bad_Option`, and a fixed cap is `.Over_Capacity`.
+@(private)
+reader_refusal :: proc(e: Path_Error) -> Error {
+	#partial switch e.kind {
+	case .Bad_Path:
+		return Error{kind = .Bad_Path, offset = e.offset}
+	case .Over_Capacity:
+		return Error{kind = .Over_Capacity, offset = e.offset}
+	case .Out_Of_Memory:
+		return Error{kind = .Out_Of_Memory}
+	}
+	return Error{kind = .Bad_Option}
 }
 
 // The scan's fault on `it`, as a path error, or nil when it ended without one.

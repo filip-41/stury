@@ -1,14 +1,12 @@
 package walk
 
-// How a path query landed.
-Path_Outcome :: enum u8 {
-	Found, // the path resolved (lo/hi bound the value in src)
-	Missing, // the path does not land
-	Type_Mismatch, // a step was applied to the wrong container kind
-}
+import core_pkg "../../../core"
+
+// How a path query landed: core's `Answer_Outcome`, shared with every format's answer.
+Path_Outcome :: core_pkg.Answer_Outcome
 
 // "No container": `Path_Answer.owner` of an answer no single container holds.
-NO_OWNER :: max(u64)
+NO_OWNER :: core_pkg.NO_OWNER
 
 // The `query` of a retracted answer (`path_supersede`, a gated `.Last` repeat), which the caller drops.
 RETRACTED_TAG :: max(u32)

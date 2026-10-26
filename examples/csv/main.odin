@@ -76,11 +76,11 @@ document_and_edits :: proc(src: []byte) {
 	lat, _ := csv.get_float(&doc, 0, col)
 	fmt.println(csv.row_count(&doc), lat) // 2 59.91
 
-	field, found, ferr := csv.find(src, ".[1].City")
-	if ferr != nil || !found {
+	a, ferr := csv.find(src, ".[1].City")
+	if ferr != nil || a.outcome != .Found {
 		os.exit(1)
 	}
-	text, _, _ := csv.field_text(src, field)
+	text, _, _ := csv.field_text(src, csv.Field{lo = a.lo, hi = a.hi})
 	fmt.println(string(text)) // Ho, Chi Minh
 
 	edited, eerr := csv.set(src, ".[0].population", 710000)

@@ -215,8 +215,8 @@ col, _ := csv.column(&doc, "lat")
 lat, _ := csv.get_float(&doc, 0, col)
 fmt.println(csv.row_count(&doc), lat) // 2 59.91
 
-field, found, _ := csv.find(src, ".[1].City")
-text, _, _ := csv.field_text(src, field)
+a, _ := csv.find(src, ".[1].City")
+text, _, _ := csv.field_text(src, csv.Field{lo = a.lo, hi = a.hi})
 fmt.println(string(text)) // Ho, Chi Minh
 ```
 

@@ -19,8 +19,8 @@ package csv
 //	                    `Type_Hook`, `Marshal_Hook`, `Unmarshal_Hook`, `plan_cache_clear`
 //	document.odin       `Document`, `build`, `destroy`, `row_count`, `column_count`, `column`,
 //	                    `row_fields`, `get_field`, `get_name`, `get_string`, `get_int`, `get_float`, `get_bool`
-//	find.odin           `Path`, `Path_Spec`, `Path_Error`, `Path_Error_Kind`, `find`,
-//	                    `find_column`
+//	find.odin           `Path`, `Path_Spec`, `Path_Error`, `Path_Error_Kind`, `Answer`, `NO_OWNER`, `query`,
+//	                    `find`, `find_column`
 //	edit.odin           `Edit`, `APPEND`, `splice`, `set`, `insert`, `remove`
 //
 // The scanner (scan.odin) and the edits' cell writer (edit_spell.odin) are internal.
@@ -128,9 +128,9 @@ Limits :: struct {
 	max_record_bytes: int,
 }
 
-// How a read takes its text: one struct for `validate`, `records`, `records_from`, `each_record`, `build`, `find`,
-// `find_column` and the path edits, embedded in `Unmarshal_Opts`. The zero value is RFC 4180 with a header,
-// every byte judged, no caps. A procedure that does not read a field says so.
+// How a read takes its text: one struct for `validate`, `records`, `records_from`, `each_record`, `build`,
+// `find`, `find_column` and the path edits, embedded in `Unmarshal_Opts`. The zero value is RFC 4180 with a
+// header, every byte judged, no caps. A procedure that does not read a field says so.
 Read_Opts :: struct {
 	dialect:    Dialect,
 	strictness: Strictness,

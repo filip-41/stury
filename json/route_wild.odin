@@ -95,7 +95,7 @@ wild_build_rows :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Alloc
 @(private = "file")
 wild_path_answers :: proc(req: ^Request($KINDS), p: Path, i: int, nodes, holders: ^[dynamic]Node, outcomes: ^[dynamic]Path_Outcome) -> bool {
 	w := Query_Walk{
-		doc = &req.doc, mode = req.duplicates, out = nodes, holders = holders, left = p.limit if p.limit > 0 else max(int),
+		doc = &req.doc, mode = req.duplicates, out = nodes, holders = holders, limit = p.limit,
 		outcomes = outcomes if p.per_element else nil,
 	}
 	if !query_from(&w, ROOT, NO_NODE, p.steps) {

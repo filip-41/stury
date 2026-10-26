@@ -18,6 +18,7 @@ package core
 //	batch_runner.odin     `Batch_Runner`, `Batch_Cursor`, `Batch_Driver`, `Record_Fault`, `Fault_List`;
 //	                      stream_window.odin `Stream_Window`
 //	record_read.odin      `Record_Read`, `Record_Source`, `record_read_init`, `unmarshal` of one record
+//	answer.odin           `Answer`, `Answer_Outcome`, `NO_OWNER`, `answer_cut`: one path query's answer
 //	edit.odin             `Edit`, the byte-span edit that every format's text edits use
 //	path_error.odin       `Path_Error`, `Path_Error_Kind`: path procedure (find, set, splice) errors
 //	marshal_error.odin    `Marshal_Error`: marshal errors

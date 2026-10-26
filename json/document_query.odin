@@ -47,7 +47,7 @@ query :: proc(doc: ^Document, n: Node, path: Path_Spec, out: ^[dynamic]Node) -> 
 	if !has(doc, n) {
 		return nil
 	}
-	w := Query_Walk{doc = doc, mode = .Last, out = out, left = p.limit if p.limit > 0 else max(int)}
+	w := Query_Walk{doc = doc, mode = .Last, out = out, limit = p.limit}
 	if !query_from(&w, n, NO_NODE, p.steps) {
 		return core_pkg.PATH_OUT_OF_MEMORY
 	}
@@ -55,10 +55,10 @@ query :: proc(doc: ^Document, n: Node, path: Path_Spec, out: ^[dynamic]Node) -> 
 }
 
 // A path's walk over a document: the values reached go to `out`, each beside the container it was met in (`NO_NODE`
-// for the root) when `holders` is not nil, until `left` more are wanted. `mode` is the occurrence of a repeated
-// key that answers. With `outcomes`, the walk answers as a `per_element` path does: a step that does not apply
-// is an answer too, `NO_NODE` in `out` beside the container that lacks its member or holds the value it met,
-// and `outcomes` holds each answer's `Path_Outcome`.
+// for the root) when `holders` is not nil, until `limit` more counted answers are wanted (0: every one).
+// `mode` is the occurrence of a repeated key that answers. With `outcomes`, the walk answers as a `per_element`
+// path does: a step that does not apply is an answer too, `NO_NODE` in `out` beside the container that lacks
+// its member or holds the value it met, and `outcomes` holds each answer's `Path_Outcome`.
 @(private)
 Query_Walk :: struct {
 	doc:      ^Document,
@@ -66,12 +66,14 @@ Query_Walk :: struct {
 	out:      ^[dynamic]Node,
 	holders:  ^[dynamic]Node,
 	outcomes: ^[dynamic]Path_Outcome,
-	left:     int,
+	// The `Path.limit` and the counted answers written so far (`answer_cut`).
+	limit:    int,
+	counted:  int,
 }
 
 @(private)
 query_from :: proc(w: ^Query_Walk, n, holder: Node, steps: []Step) -> bool {
-	if w.left <= 0 {
+	if w.limit > 0 && w.counted >= w.limit {
 		return true
 	}
 	doc := w.doc
@@ -134,6 +136,9 @@ query_from :: proc(w: ^Query_Walk, n, holder: Node, steps: []Step) -> bool {
 // One answer, `n` met in `holder` (`NO_NODE` for a step that does not apply, under `outcomes`).
 @(private = "file")
 query_out :: proc(w: ^Query_Walk, n, holder: Node, outcome: Path_Outcome) -> bool {
+	if core_pkg.answer_cut(w.limit, &w.counted, outcome, w.outcomes != nil) {
+		return true
+	}
 	if _, err := append(w.out, n); err != nil {
 		return false
 	}
@@ -147,7 +152,6 @@ query_out :: proc(w: ^Query_Walk, n, holder: Node, outcome: Path_Outcome) -> boo
 			return false
 		}
 	}
-	w.left -= 1
 	return true
 }
 

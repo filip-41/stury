@@ -483,13 +483,11 @@ finish_answers :: proc(answers: ^[dynamic]Path_Answer, nodes: []walk.Row, plan: 
 			continue
 		}
 		// A limit counts what jq would output, the `Found` answers (every answer, `per_element`). Whatever comes
-		// after the last is cut.
+		// after the last is cut. The `limit` test comes first, so a plan with no limit keeps `counts` unsized
+		// (`route_general`).
 		if limit := paths[a.query].limit; limit > 0 {
-			if counts[a.query] >= limit {
+			if core_pkg.answer_cut(limit, &counts[a.query], a.outcome, paths[a.query].per_element) {
 				continue
-			}
-			if a.outcome == .Found || paths[a.query].per_element {
-				counts[a.query] += 1
 			}
 		}
 		if has_nodes && a.outcome == .Found {

@@ -640,7 +640,8 @@ the source's next record and reads it with the same walk `unmarshal` of the reco
 ## 8. Across formats
 
 `core` holds what the formats share and what a caller who works with several of them names once: `Strictness`,
-paths (`Path`, `Step`, `MAX_PATH_STEPS`), `Duplicates`, `Enum_Spelling`, `Unknown_Fields`, `Tag_Name`, the hooks
+paths (`Path`, `Step`, `MAX_PATH_STEPS`), the path answer (`Answer`, `Answer_Outcome`, `NO_OWNER`, `answer_cut`),
+`Duplicates`, `Enum_Spelling`, `Unknown_Fields`, `Tag_Name`, the hooks
 (`Unmarshal_Hook`, `Type_Hook(W)` over a format's writer proc), the type plan (`Type_Plan`, `Hooked_Plan(W)`,
 `Plan_Cache`), the read shape and its lowering, the judged scalar stores, `Number`, `Batch_Runner`,
 `Stream_Window`, the typed per-record reader (`Record_Read`, `Record_Source`), and the errors and their
@@ -688,10 +689,14 @@ cells a field reads. The writer is generic over quoting and a comment byte the s
 
 A `Document` (`csv/document.odin`) is `records` kept: the header's spans and every row's, flat, 16 bytes a
 field, sized from the first row so that the array grows once. A cell is decoded when it is read, and one that
-holds a `""` or an escape is decoded once and kept by the document. `find` and `find_column` (`csv/find.odin`)
-take core's path syntax (`.[3].name`, `.[3][1]`, `.[].name`) and run `records` to the end of the named record.
-A path reads the bytes before it and keeps no row. The edits (`csv/edit.odin`) build their result from the
-source and the spans of a record scan. A cell is respelled by the writer `marshal` uses (`edit_spell.odin`),
+holds a `""` or an escape is decoded once and kept by the document. The path readers (`csv/find.odin`) take
+core's path syntax (`.[3].name`, `.[3][1]`, `.[].name`, `.[]`, jq's `[]`) and `limit(...)`. `query` answers a
+path over a document's field spans and never scans the text again; `find` and `find_column` stream `records`
+from the start, keep no row, and stop at the first answer (`find`) or after the target's rows. All three append
+core's `Answer`: the value's span in the source, its `owner` (the record's first byte), and `query` 0. A path
+that lands nothing appends no `query` answer and is a `.Missing` `find` answer. The edits (`csv/edit.odin`)
+build their result from the source and the spans of a record scan. A cell is respelled by the writer `marshal`
+uses (`edit_spell.odin`),
 and every other byte is copied. The source is validated first, so a fault is located in it. The result is not
 validated again: a respelled cell is one field, and a removed or inserted record leaves whole records. An edit
 whose result would not read back as the same table (a lone empty field, a first field starting with the
