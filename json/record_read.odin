@@ -184,7 +184,7 @@ record_bind :: #force_no_inline proc(st: ^Record_State, plan: ^core_pkg.Type_Pla
 	run.read_over = opts.duplicates == .All
 	st.base = scan_pkg.shape_bind(run, st.q, nil, opts.limits)
 	st.lazy = opts.strictness == .Lazy
-	st.descends = run.shape.descends && opts.dialect == .Json && opts.duplicates != .Refuse
+	st.descends = run.shape.descends && scan_pkg.plain_json(opts.dialect) && opts.duplicates != .Refuse
 	st.bound_plan = plan
 	(^[size_of(Unmarshal_Opts) / size_of(u64)]u64)(&st.bound_opts)^ = (^[size_of(Unmarshal_Opts) / size_of(u64)]u64)(opts)^
 }
@@ -211,16 +211,11 @@ record_read_destroy :: proc(rd: ^Record_Read) {
 }
 
 // Whether a record read refuses `opts`. `.Structural` stores what it reads, so a JSON read refuses it unless
-// the dialect checks the rest (JSONC); `.Json5` has no record walk.
+// the dialect checks the rest; a dialect `records_read` refuses has no record walk.
 @(private = "file")
 record_opts_refused :: proc(opts: Unmarshal_Opts) -> bool {
-	switch opts.dialect {
-	case .Json:
-		return opts.strictness == .Structural
-	case .Jsonc:
-		return false
-	case .Json5:
+	if !scan_pkg.records_read(opts.dialect) {
 		return true
 	}
-	return true
+	return opts.strictness == .Structural && scan_pkg.plain_json(opts.dialect)
 }

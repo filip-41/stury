@@ -8,6 +8,20 @@ import lex "lex"
 // A dialect is a set of grammar features (`GRAMMAR`), and its walk is the JSON walk specialized on that set
 // through the cursor type (`Dialect_Cursor`): the strict cursors carry no grammar, so the strict walk compiles
 // without any dialect code.
+//
+// Code asks what a dialect reads in one of three ways:
+//
+//	- In the walk, a feature is tested at compile time with `when .Feature in G`.
+//	- A runtime `Dialect` reaches a compiled walk through one exhaustive `switch` over `Dialect`, `.Json` first,
+//	  each dialect's arm passing only its constant. The strict arm is empty where the strict walk takes
+//	  arguments a dialect walk does not, and the code after the switch is that walk. A dialect the site's
+//	  predicate refuses has an empty arm, and the code after the switch answers it.
+//	- Any other question is a predicate below, which asks the grammar (`grammar_of`). A capability is a
+//	  grammar's containment in the grammar the code reads (`EDIT_GRAMMAR`), so a new dialect whose features
+//	  are covered gets it without an edit at the site. A dialect is never compared with `==` or `!=`.
+//
+// A dialect is named outside a dispatch arm only as the target of a transcode or a validation that is that
+// dialect. A predicate is not asked per row or per value: ask it once for the document or the call.
 Dialect :: enum u8 {
 	Json,
 	Jsonc,
@@ -49,6 +63,46 @@ grammar_of :: proc "contextless" (dialect: Dialect) -> Grammar {
 		return GRAMMAR[.Json5]
 	}
 	unreachable()
+}
+
+// The grammar the edits read (`edits_read`), the record walk (`records_read`) and the typed shape walk
+// (`shape_reads`): JSON's with comments and trailing commas.
+EDIT_GRAMMAR :: Grammar{.Comments, .Trailing_Commas}
+RECORD_GRAMMAR :: Grammar{.Comments, .Trailing_Commas}
+SHAPE_GRAMMAR :: Grammar{.Comments, .Trailing_Commas}
+
+// The features that spell a token other than as JSON does.
+OWN_SPELLING :: Grammar{.Json5_Keys, .Json5_Scalars}
+
+// Whether `d` reads exactly RFC 8259's grammar.
+plain_json :: #force_inline proc "contextless" (d: Dialect) -> bool {
+	return grammar_of(d) == {}
+}
+
+// Whether `d` reads comments, so that a `/` may begin one.
+has_comments :: #force_inline proc "contextless" (d: Dialect) -> bool {
+	return .Comments in grammar_of(d)
+}
+
+// Whether `d` spells a string, key or number in a way JSON does not, so a token of it is decoded by its own
+// escapes and written out in JSON's spelling.
+own_spelling :: #force_inline proc "contextless" (d: Dialect) -> bool {
+	return grammar_of(d) & OWN_SPELLING != {}
+}
+
+// Whether the path edits and `splice` read `d`; they refuse any other as `.Bad_Option`.
+edits_read :: #force_inline proc "contextless" (d: Dialect) -> bool {
+	return grammar_of(d) <= EDIT_GRAMMAR
+}
+
+// Whether the record walk (`Record_Read`) reads `d` natively.
+records_read :: #force_inline proc "contextless" (d: Dialect) -> bool {
+	return grammar_of(d) <= RECORD_GRAMMAR
+}
+
+// Whether the typed shape walk reads `d` natively; a text of another dialect is read through its JSON spelling.
+shape_reads :: #force_inline proc "contextless" (d: Dialect) -> bool {
+	return grammar_of(d) <= SHAPE_GRAMMAR
 }
 
 // The cursor of a dialect walk: whitespace is `dialect_skip`, and `G` is the grammar the walk compiles in. A

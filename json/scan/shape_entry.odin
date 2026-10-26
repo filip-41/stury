@@ -38,7 +38,7 @@ shape_read :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, lazy: bool, 
 	s := enter_document(src, limits, MAX_DEPTH)
 	ctx.max_depth = s.limits.max_depth
 	// A dialect reads every byte: `lazy` does not apply.
-	when dialect != .Json {
+	when GRAMMAR[dialect] != {} {
 		dialect_cur: Dialect_Cursor(GRAMMAR[dialect])
 		dialect_skip(&s, &dialect_cur)
 		if err := dialect_walk(&s, ctx, Q, &dialect_cur); err != nil {

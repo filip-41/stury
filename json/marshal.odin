@@ -17,6 +17,7 @@ import "core:reflect"
 import "core:unicode/utf8"
 import enc "encode"
 import core_pkg "../core"
+import scan_pkg "scan"
 import "scan/walk"
 import "../core/spell"
 
@@ -85,7 +86,7 @@ Marshal_Out :: struct {
 	// goes back before a point `out` may be handed over at: pretty, or streaming.
 	eager:  bool,
 	enum_ints: bool,
-	// The grammar a `Raw` is validated by: `.Jsonc` only for an edit of a JSONC text.
+	// The grammar a `Raw` is validated by: a dialect that reads comments only for an edit of a text in it.
 	dialect:   Dialect,
 	// A hook is running and has not yet written its one value.
 	hook_open: bool,
@@ -515,8 +516,8 @@ put_raw :: proc(st: ^Marshal_Out, s: string) -> Marshal_Error {
 	limits := Limits{max_depth = u64(MAX_DEPTH - st.nest)}
 	fault, bad := validate(transmute([]byte)s, {limits = limits}).?
 	if bad {
-		if jsonc, _ := edit_grammar(st.dialect); jsonc {
-			fault, bad = jsonc_raw_fault(s, limits).?
+		if scan_pkg.has_comments(st.dialect) {
+			fault, bad = commented_raw_fault(s, limits, st.dialect).?
 		}
 	}
 	if bad {
@@ -531,13 +532,13 @@ put_raw :: proc(st: ^Marshal_Out, s: string) -> Marshal_Error {
 	return enc.put_bytes(st.out, s)
 }
 
-// `s` validated as JSONC, a comment ending it refused (`.Trailing`): what follows the value would be inside it.
+// `s` validated as `dialect`, which reads comments, a comment ending it refused (`.Trailing`): what follows the value would be inside it.
 // Its comments are listed in `context.allocator`.
 @(private = "file")
-jsonc_raw_fault :: proc(s: string, limits: Limits) -> Maybe(Error) {
+commented_raw_fault :: proc(s: string, limits: Limits, dialect: Dialect) -> Maybe(Error) {
 	comments := make([dynamic]Fact)
 	defer delete(comments)
-	if fault, bad := validate(transmute([]byte)s, {dialect = .Jsonc, limits = limits}, &comments).?; bad {
+	if fault, bad := validate(transmute([]byte)s, {dialect = dialect, limits = limits}, &comments).?; bad {
 		return fault
 	}
 	if n := len(comments); n > 0 && comments[n - 1].hi == u64(len(s)) {

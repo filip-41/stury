@@ -46,16 +46,12 @@ marshal_document :: proc(doc: ^Document, opts := Marshal_Opts{}, allocator := co
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return nil, .Too_Deep
 	}
-	if opts.jq_spelling || opts.sort_keys {
+	// A dialect with its own spelling has its tokens respelled one at a time.
+	if opts.jq_spelling || opts.sort_keys || scan_pkg.own_spelling(doc.dialect) {
 		return marshal_document_jq(doc, opts, allocator)
 	}
-	switch doc.dialect {
-	case .Json:
-	case .Jsonc:
+	if scan_pkg.has_comments(doc.dialect) {
 		return enc.encode_rows_jsonc(doc.src, doc.rows[:], doc.facts[:], opts, allocator)
-	case .Json5:
-		// Its tokens are respelled one at a time.
-		return marshal_document_jq(doc, opts, allocator)
 	}
 	return enc.encode_rows(doc.src, doc.rows[:], opts, allocator)
 }
@@ -79,7 +75,7 @@ marshal_document_to_writer :: proc(w: io.Writer, doc: ^Document, opts := Marshal
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return .Too_Deep
 	}
-	if doc.dialect != .Json || opts.jq_spelling || opts.sort_keys {
+	if !scan_pkg.plain_json(doc.dialect) || opts.jq_spelling || opts.sort_keys {
 		// A dialect's document, or one in jq's notation or with sorted keys, is made whole, then written.
 		out, err := marshal_document(doc, opts, allocator)
 		if err != .None {
@@ -106,7 +102,7 @@ marshal_document_jq :: proc(doc: ^Document, opts: Marshal_Opts, allocator: mem.A
 	}
 	buf := make([dynamic]byte, 0, len(doc.src) + 1, allocator)
 	cl := enc.Comment_Layout{src = doc.src, pretty = opts.pretty, indent = enc.indent_of(opts)}
-	err = jq_root(&buf, doc, &cl, opts, allocator)
+	err = jq_root(&buf, doc, &cl, opts, allocator, scan_pkg.own_spelling(doc.dialect))
 	if err == .None {
 		err = enc.reescape_tail(&buf, 0, enc.reescape_of(opts))
 	}
@@ -119,10 +115,10 @@ marshal_document_jq :: proc(doc: ^Document, opts: Marshal_Opts, allocator: mem.A
 
 // The root with its comments, then the `trailing_newline`, which a line comment ending the output has made.
 @(private = "file")
-jq_root :: proc(buf: ^[dynamic]byte, doc: ^Document, cl: ^enc.Comment_Layout, opts: Marshal_Opts, allocator: mem.Allocator) -> Marshal_Error {
+jq_root :: proc(buf: ^[dynamic]byte, doc: ^Document, cl: ^enc.Comment_Layout, opts: Marshal_Opts, allocator: mem.Allocator, respell: bool) -> Marshal_Error {
 	own := facts(doc, ROOT)
 	enc.put_leads(buf, cl, own, 0, root = true) or_return
-	jq_value(buf, doc, ROOT, cl, opts, 0, allocator) or_return
+	jq_value(buf, doc, ROOT, cl, opts, 0, allocator, respell) or_return
 	enc.put_trails(buf, cl, own, 0, root = true) or_return
 	if opts.trailing_newline && buf[len(buf) - 1] != '\n' {
 		return enc.put_byte(buf, '\n')
@@ -131,25 +127,25 @@ jq_root :: proc(buf: ^[dynamic]byte, doc: ^Document, cl: ^enc.Comment_Layout, op
 }
 
 @(private = "file")
-jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_Layout, opts: Marshal_Opts, depth: int, allocator: mem.Allocator) -> Marshal_Error {
+jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_Layout, opts: Marshal_Opts, depth: int, allocator: mem.Allocator, respell: bool) -> Marshal_Error {
 	k, _ := kind(doc, n)
 	switch k {
 	case .Null, .False, .True:
 		return enc.put_bytes(buf, string(get_raw(doc, n)))
 	case .Number:
-		return jq_number(buf, doc, n, opts)
+		return jq_number(buf, doc, n, opts, respell)
 	case .String:
-		return jq_string(buf, doc, n, opts)
+		return jq_string(buf, doc, n, opts, respell)
 	case .Array, .Object:
-		return jq_container(buf, doc, n, k, cl, opts, depth, allocator)
+		return jq_container(buf, doc, n, k, cl, opts, depth, allocator, respell)
 	}
 	return .None
 }
 
 @(private = "file")
-jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts) -> Marshal_Error {
+jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts, respell: bool) -> Marshal_Error {
 	lit := string(get_raw(doc, n))
-	if .Json5_Scalars in scan_pkg.grammar_of(doc.dialect) && doc.rows[n].first_esc == scan_pkg.DIALECT_SPELLED {
+	if respell && doc.rows[n].first_esc == scan_pkg.DIALECT_SPELLED {
 		return json5_number_as_json(buf, doc, n, lit)
 	}
 	if !opts.jq_spelling {
@@ -165,9 +161,9 @@ jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Op
 }
 
 @(private = "file")
-jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts) -> Marshal_Error {
-	// A JSON5 string is plain only double-quoted with no escape.
-	if !opts.jq_spelling && (.Json5_Scalars not_in scan_pkg.grammar_of(doc.dialect) || .Str_Escaped not_in doc.rows[n].flags) {
+jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts, respell: bool) -> Marshal_Error {
+	// A string of a dialect with its own spelling is plain only double-quoted with no escape.
+	if !opts.jq_spelling && (!respell || .Str_Escaped not_in doc.rows[n].flags) {
 		return enc.put_bytes(buf, string(get_raw(doc, n)))
 	}
 	s, _ := get_string(doc, n)
@@ -176,7 +172,7 @@ jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Op
 
 // An array or object `n` of kind `k`: its members in `document_members` order, each with its comments.
 @(private = "file")
-jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: ^enc.Comment_Layout, opts: Marshal_Opts, depth: int, allocator: mem.Allocator) -> Marshal_Error {
+jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: ^enc.Comment_Layout, opts: Marshal_Opts, depth: int, allocator: mem.Allocator, respell: bool) -> Marshal_Error {
 	open, close := u8('['), u8(']')
 	if k == .Object {
 		open, close = '{', '}'
@@ -205,7 +201,7 @@ jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: 
 		own = facts(doc, v)
 		enc.put_leads(buf, cl, own, depth + 1) or_return
 		if k == .Object {
-			if opts.jq_spelling || (.Json5_Keys in scan_pkg.grammar_of(doc.dialect) && .Key_Escaped in doc.rows[v].flags) {
+			if opts.jq_spelling || (respell && .Key_Escaped in doc.rows[v].flags) {
 				enc.put_string_escaping_del(buf, e.key) or_return
 			} else {
 				enc.put_bytes(buf, string(doc.src[doc.rows[v].key_lo:doc.rows[v].key_hi])) or_return
@@ -213,7 +209,7 @@ jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: 
 			enc.put_colon(buf, cl.pretty) or_return
 			enc.put_inlines(buf, cl, own, depth + 1) or_return
 		}
-		jq_value(buf, doc, v, cl, opts, depth + 1, allocator) or_return
+		jq_value(buf, doc, v, cl, opts, depth + 1, allocator, respell) or_return
 	}
 	enc.put_trails(buf, cl, own, depth + 1) or_return
 	enc.put_feet(buf, cl, facts(doc, n), depth) or_return

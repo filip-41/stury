@@ -393,7 +393,7 @@ scan_queries_in :: #force_inline proc(
 		s := enter_document(src, limits, MAX_DEPTH)
 	}
 	ctx.max_depth = s.limits.max_depth
-	when dialect != .Json {
+	when GRAMMAR[dialect] != {} {
 		dialect_cur := Dialect_Cursor(GRAMMAR[dialect]){facts = facts}
 		ctx.hooks = hooks_of(dialect)
 		dialect_skip(&s, &dialect_cur)
@@ -446,7 +446,6 @@ scan_queries_in :: #force_inline proc(
 		}
 		if keyed {
 			key_set_init(&keys, &key_scratch, key_alloc)
-			keys.json5 = .Json5_Keys in GRAMMAR[dialect]
 		}
 		defer if keyed {
 			key_set_destroy(&keys)
@@ -467,7 +466,7 @@ scan_queries_in :: #force_inline proc(
 	when .Nodes in Q {
 		defer publish_nodes(ctx)
 	}
-	when dialect != .Json {
+	when GRAMMAR[dialect] != {} {
 		when deep {
 			werr := dialect_walk_deep(&s, ctx, Q, &dialect_cur)
 		} else {
@@ -537,7 +536,7 @@ scan_queries_in :: #force_inline proc(
 	// The one exit that consumed the item. `finish` may still report `Trailing`, a whole-document result,
 	// so coverage is `.Full` then too, unless the walk skipped a region.
 	covered = !ctx.skipped
-	when dialect != .Json {
+	when GRAMMAR[dialect] != {} {
 		ferr := dialect_finish(&s, &dialect_cur)
 		if dialect_cur.oom {
 			note_oom(ctx, .Nodes)

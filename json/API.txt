@@ -83,6 +83,7 @@ get_key :: proc(doc: ^Document, n: Node) -> (s: string, ok: bool)
 get_number :: proc(doc: ^Document, n: Node) -> (v: Number, ok: bool)
 get_raw :: proc(doc: ^Document, n: Node) -> []byte
 get_string :: proc(doc: ^Document, n: Node) -> (s: string, ok: bool)
+has_comments :: proc(d: Dialect) -> bool
 insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error))
 kind :: proc(doc: ^Document, n: Node) -> (k: Kind, ok: bool)
 marshal :: proc{proc(doc: ^Document, opts := Marshal_Opts{}, allocator := context.allocator) -> (out: []byte, err: Marshal_Error), proc(v: any, opts := Marshal_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> (out: []byte, err: Marshal_Error)}
@@ -91,6 +92,7 @@ marshal_to_writer :: proc{proc(w: io.Writer, doc: ^Document, opts := Marshal_Opt
 members :: proc{proc(doc: ^Document, n: Node) -> Members, proc(it: ^Members) -> (k: string, n: Node, ok: bool)}
 next_record :: proc(it: ^Records) -> (rec: Record, ok: bool)
 parse_path :: proc(text: string, steps: []Step, names: []u8 = nil) -> (p: Path, err: Maybe(Path_Error))
+plain_json :: proc(d: Dialect) -> bool
 plan_cache_clear :: proc()
 pointer :: proc(doc: ^Document, n: Node, ptr: string) -> Node
 prepare :: proc(req: ^Request($KINDS)) -> Maybe(Error)

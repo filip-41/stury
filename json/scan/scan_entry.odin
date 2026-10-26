@@ -115,15 +115,7 @@ seq_truncated_number :: proc(text: []byte) -> bool {
 cut_by_next_byte :: proc(data: []byte, at, limit: int, e: Error, dialect := Dialect.Json, limits := Limits{}) -> Error {
 	if e.kind == .Truncated && e.offset == u64(limit - at) && limit < len(data) {
 		slice := data[at:limit + 1]
-		with_err: Maybe(Error)
-		if dialect != .Json {
-			with_err = validate_dialect(slice, dialect, nil, limits)
-		} else if limits.max_depth > MAX_DEPTH {
-			with_err = scan_plain_deep(slice, .Strict, limits)
-		} else {
-			with_err = scan_plain(slice, .Strict, limits)
-		}
-		if with, bad := with_err.?; bad && with.kind == .Bad_Literal {
+		if with, bad := validate_dialect(slice, dialect, nil, limits).?; bad && with.kind == .Bad_Literal {
 			return with
 		}
 	}

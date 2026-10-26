@@ -157,7 +157,7 @@ walk_queries :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query
 @(private = "file")
 walk_facts :: #force_inline proc(req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Walk_Kind], alloc: runtime.Allocator) -> ^[dynamic]Fact {
 	when .Nodes in WALK {
-		if req.dialect != .Json {
+		if !scan_pkg.plain_json(req.dialect) {
 			walk.adopt_allocator(&req.doc.facts, alloc)
 			return &req.doc.facts
 		}

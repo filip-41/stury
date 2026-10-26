@@ -5,6 +5,7 @@ package json
 
 import "base:runtime"
 import core_pkg "../core"
+import scan_pkg "scan"
 import "scan/walk"
 import "core:slice"
 
@@ -20,25 +21,10 @@ Path_Error_Kind :: core_pkg.Path_Error_Kind
 // Both JSON's and CSV's `render_error` write it.
 Path_Error :: core_pkg.Path_Error
 
-// How the edits read `dialect`: as JSONC or as JSON. `ok` is false for a dialect they do not read (`.Json5`), which
-// every edit entry refuses.
-@(private)
-edit_grammar :: proc(dialect: Dialect) -> (jsonc, ok: bool) {
-	switch dialect {
-	case .Json:
-		return false, true
-	case .Jsonc:
-		return true, true
-	case .Json5:
-		return false, false
-	}
-	return
-}
-
 // `.Bad_Option` for a dialect the edits do not read.
 @(private)
 edit_refused :: proc(dialect: Dialect) -> Maybe(Path_Error) {
-	if _, ok := edit_grammar(dialect); !ok {
+	if !scan_pkg.edits_read(dialect) {
 		return Path_Error{kind = .Bad_Option}
 	}
 	return nil
@@ -60,8 +46,8 @@ splice :: proc(src: []byte, edits: []Edit, dialect := Dialect.Json, allocator :=
 	if aerr != nil {
 		return nil, aerr
 	}
-	if jsonc, _ := edit_grammar(dialect); jsonc {
-		err = judged_jsonc_splice(applied, edits, allocator)
+	if scan_pkg.has_comments(dialect) {
+		err = judged_jsonc_splice(applied, edits, allocator, dialect)
 		if err != nil {
 			delete(applied, allocator)
 			return nil, err
@@ -82,16 +68,16 @@ edits_apply_checked :: proc(src: []byte, edits: []Edit, allocator: runtime.Alloc
 	return core_pkg.edits_apply(src, edits, allocator, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
-// `out` validated as `.Jsonc`, and `.Bad_Result` at any comment that an edit's bytes open and the source bytes
+// `out` validated as `dialect`, which reads comments, and `.Bad_Result` at any comment that an edit's bytes open and the source bytes
 // after them close: it swallows what stood there, which the edit did not replace.
 @(private = "file")
-judged_jsonc_splice :: proc(out: []byte, edits: []Edit, allocator: runtime.Allocator) -> Maybe(Path_Error) {
+judged_jsonc_splice :: proc(out: []byte, edits: []Edit, allocator: runtime.Allocator, dialect: Dialect) -> Maybe(Path_Error) {
 	facts, ferr := make([dynamic]Fact, allocator)
 	if ferr != nil {
 		return core_pkg.PATH_OUT_OF_MEMORY
 	}
 	defer delete(facts)
-	if e, bad := validate(out, {dialect = .Jsonc}, &facts).?; bad {
+	if e, bad := validate(out, {dialect = dialect}, &facts).?; bad {
 		return Path_Error{kind = e.kind == .Out_Of_Memory ? .Out_Of_Memory : .Bad_Result, syntax = e.kind, offset = e.offset}
 	}
 	// Each edit's bytes sit at `lo + shift` in `out`, the source's bytes between edits as they were.
@@ -261,10 +247,14 @@ watched_remove :: proc(src: []byte, path: Path_Spec, allocator: runtime.Allocato
 	if n == 0 {
 		return nil, Path_Error{kind = .Unplaceable}
 	}
-	if jsonc, _ := edit_grammar(dialect); jsonc {
-		return remove_in(src, p, allocator, true)
+	switch dialect {
+	case .Json:
+		return remove_in(src, p, allocator, .Json)
+	case .Jsonc:
+		return remove_in(src, p, allocator, .Jsonc)
+	case .Json5: // `edits_read` refuses it before any edit
 	}
-	return remove_in(src, p, allocator, false)
+	return nil, Path_Error{kind = .Bad_Option}
 }
 
 // `value`'s canonical text, a `Raw` in it validated under `dialect`, refused past the depth left below `depth`

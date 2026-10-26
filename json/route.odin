@@ -33,7 +33,7 @@ FORCE_AUTOMATON :: #config(FORCE_AUTOMATON, false)
 // `FORCE_AUTOMATON` test build sends every path to it.
 @(private)
 automaton_forced :: #force_inline proc(dialect: Dialect, duplicates: Duplicates) -> bool {
-	return FORCE_AUTOMATON || dialect != .Json || duplicates == .Refuse
+	return FORCE_AUTOMATON || !scan_pkg.plain_json(dialect) || duplicates == .Refuse
 }
 
 @(private = "file")

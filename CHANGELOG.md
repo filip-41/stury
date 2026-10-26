@@ -10,6 +10,7 @@
   JSON5 document marshals in JSON's spelling, comments kept; `Infinity` and `NaN` are refused
   (`.Non_Finite` in `marshal`, `.Out_Of_Range` in `unmarshal`). The edits and `Record_Read` refuse it
   (`.Bad_Option`).
+- `plain_json(dialect)` and `has_comments(dialect)` ask what a dialect reads without comparing it.
 
 ### Command line
 
