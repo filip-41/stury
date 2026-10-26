@@ -92,7 +92,7 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 | `-C`, `-M` | `-C` colours output with jq's defaults or `JQ_COLORS`. It is on by default when stdout is a terminal and `NO_COLOR` is unset; `-M` turns it off. |
 | `--tab`, `--indent N` | `--indent 0` prints each line with no indent, as jq does. N is -1 to 7; -1 is `--tab`. |
 | `-b` | Does nothing outside Windows. |
-| `-V` | Prints `stury-` and the version it was built with: the release version (for example `0.0.2`), or the short commit hash from a source build (`dev` outside a checkout). |
+| `-V` | Prints `stury-` and the version it was built with: the release version (for example `0.0.3`), or the short commit hash from a source build (`dev` outside a checkout). |
 | `--help` | It and the short usage point to stury(1) (`docs/stury.1`) and this page. |
 
 ### Behaviour notes

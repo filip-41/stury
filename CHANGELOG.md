@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.0.3 (2026-10-26)
+
+Adds typed CSV streaming (`Record_Read`), CSV path answers and record faults like JSON's, and the CLI's `fmt`
+verb. One `Read_Opts` per format and one read error replace the per-call options and error types.
 
 ### Library
 

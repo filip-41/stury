@@ -1,6 +1,6 @@
 # Benchmarks
 
-These numbers were measured on one machine (Apple M5 Max, macOS 26.5, Odin dev-2026-10 at `-o:speed`) with
+These numbers were measured on one machine (Apple M5 Max, macOS 26.5.1, Odin dev-2026-10 at `-o:speed`) with
 the harness in [bench/](../bench/README.md), which documents how to run it, each arm and the fairness rules.
 Other data, filters and hardware will give other numbers. No x86 results are published here; simdjson's
 AVX-512 paths make the gaps narrower there.
@@ -11,16 +11,30 @@ DOM and reads every value once, since core has converted every number by the tim
 
 | Job | Input | stury | core:encoding/json | Speedup (core ÷ stury) |
 | --- | --- | ---: | ---: | ---: |
-| Validate | logs, 8 MB | **2.12** | 26.59 | 12.5× |
-| Load into a DOM | logs, 8 MB | **2.41** | 42.13 | 17.5× |
-| Unmarshal into structs | logs, 8 MB | **4.65** | 99.67 | 21.4× |
-| Marshal structs | logs, 8 MB | **1.44** | 55.55 | 38.7× |
-| Validate | nested, 16 MB | **4.89** | 50.30 | 10.3× |
-| Load into a DOM | nested, 16 MB | **7.32** | 76.53 | 10.5× |
-| Unmarshal into structs | nested, 16 MB | **9.36** | 227.99 | 24.3× |
-| Marshal structs | nested, 16 MB | **9.29** | 106.11 | 11.4× |
+| Validate | logs, 8 MB | **2.22** | 27.83 | 12.6× |
+| Load into a DOM | logs, 8 MB | **2.42** | 43.99 | 18.2× |
+| Unmarshal into structs | logs, 8 MB | **4.71** | 104.16 | 22.1× |
+| Marshal structs | logs, 8 MB | **1.49** | 57.68 | 38.8× |
+| Validate | nested, 16 MB | **5.33** | 53.29 | 10.0× |
+| Load into a DOM | nested, 16 MB | **7.74** | 82.67 | 10.7× |
+| Unmarshal into structs | nested, 16 MB | **9.79** | 239.67 | 24.5× |
+| Marshal structs | nested, 16 MB | **9.70** | 109.01 | 11.2× |
 
 ("DOM" means a whole parsed document you can query.)
+
+The same against `core:encoding/csv`, in the same process. Both readers must read the same fields before any
+lane is timed. Core makes no UTF-8 check; stury checks every byte. The load row is core's `read_all` against a
+stury `Document` with every cell read. The write row writes the same records with core's `Writer` and with
+stury's `write_record`.
+
+| Job | Input | stury | core:encoding/csv | Speedup (core ÷ stury) |
+| --- | --- | ---: | ---: | ---: |
+| Read every field | table, 16 MB | **4.29** | 24.07 | 5.6× |
+| Load all records | table, 16 MB | **6.58** | 50.08 | 7.6× |
+| Write all records | table, 16 MB | **14.28** | 21.42 | 1.5× |
+| Read every field | text, quoted, 16 MB | **8.14** | 20.41 | 2.5× |
+| Load all records | text, quoted, 16 MB | **9.53** | 34.47 | 3.6× |
+| Write all records | text, quoted, 16 MB | **12.57** | 17.55 | 1.4× |
 
 **Against other libraries**, in GB/s (higher is better). Median of 11 runs, interleaved. Every tool checks
 UTF-8 and validates the whole input, and every arm's answer is checked against stury's before it is timed.
@@ -32,25 +46,25 @@ and keeps its parser and allocator.
 
 | Input | stury | serde_json | sonic-rs | simdjson, hand-written | yyjson, hand-written |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| logs, 8 MB | **3.53** | 1.34 | 1.88 | 2.36 | 2.94 |
-| config, 1 MB | **4.73** | 1.24 | 1.41 | 3.27 | 2.53 |
-| nested, 16 MB | **1.76** | 0.69 | 0.84 | 0.80 | 1.67 |
+| logs, 8 MB | **3.57** | 1.33 | 1.90 | 2.32 | 2.93 |
+| config, 1 MB | **4.81** | 1.23 | 1.39 | 3.32 | 2.44 |
+| nested, 16 MB | **1.77** | 0.69 | 0.84 | 0.79 | 1.66 |
 
 Validate. The simdjson column is its DOM parser, which validates as it builds. It refuses `escape.json`, whose
 integers are wider than 64 bits.
 
 | Input | stury | simdjson |
 | --- | ---: | ---: |
-| logs, 8 MB | **3.80** | 2.96 |
-| nested, 16 MB | **3.37** | 1.57 |
-| wide, 8 MB | **4.84** | 1.95 |
-| pretty, 12 MB | **4.49** | 2.39 |
-| deep, 8 MB | **1.70** | 0.66 |
-| utf8, 8 MB | **9.13** | 5.49 |
+| logs, 8 MB | **3.85** | 2.96 |
+| nested, 16 MB | **3.36** | 1.55 |
+| wide, 8 MB | **4.83** | 1.94 |
+| pretty, 12 MB | **4.26** | 2.37 |
+| deep, 8 MB | **1.71** | 0.67 |
+| utf8, 8 MB | **9.09** | 5.45 |
 
 On the eleven real-world files most parser benchmarks use (64 KB–3.3 MB, pretty-printed), stury validates
-faster on eight. simdjson is faster on apache_builds (5.90 against 4.80), update-center (5.09 against 4.14)
-and twitter (within 3%).
+faster on eight. simdjson is faster on apache_builds (5.89 against 5.27), update-center (5.15 against 4.23)
+and twitter (5.20 against 4.83).
 
 DOM. The other libraries convert every number while they parse. stury checks each number while it builds
 and converts it when it is read, so its first column builds the DOM and reads every value once, the same work
@@ -58,28 +72,28 @@ as the others. The second column is the build alone.
 
 | Input | stury, every value read | stury, build only | yyjson | sonic-rs | simdjson | serde_json |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| logs, 8 MB | 3.19 | 3.93 | **3.38** | 3.16 | 2.91 | 0.68 |
-| nested, 16 MB | 1.75 | 2.82 | **2.29** | 1.67 | 1.57 | 0.46 |
-| wide, 8 MB | **3.21** | 4.56 | 2.93 | 2.12 | 1.94 | 0.18 |
-| pretty, 12 MB | 2.85 | 3.49 | **3.54** | 1.74 | 2.39 | 0.68 |
-| deep, 8 MB | 0.86 | 1.26 | **1.15** | 0.22 | 0.67 | |
-| longtext, 8 MB | **19.0** | 19.9 | 5.27 | 13.8 | 8.29 | 6.57 |
-| utf8, 8 MB | **7.90** | 7.96 | 1.26 | 7.67 | 5.49 | 0.95 |
+| logs, 8 MB | 3.24 | 3.97 | **3.40** | 3.13 | 2.93 | 0.67 |
+| nested, 16 MB | 1.74 | 2.85 | **2.26** | 1.67 | 1.57 | 0.46 |
+| wide, 8 MB | **3.25** | 4.72 | 2.97 | 2.16 | 1.99 | 0.19 |
+| pretty, 12 MB | 2.82 | 3.56 | **3.49** | 1.71 | 2.37 | 0.66 |
+| deep, 8 MB | 0.94 | 1.30 | **1.17** | 0.22 | 0.65 | |
+| longtext, 8 MB | **19.1** | 20.1 | 5.24 | 13.7 | 8.24 | 6.56 |
+| utf8, 8 MB | **7.80** | 7.94 | 1.25 | 7.59 | 5.47 | 0.94 |
 
 With every value read, yyjson builds the DOM of logs, nested, pretty and deep input faster, and yyjson or
-simdjson is ahead on every real-world file but gsoc-2018. A program that reads only some values pays only for
-those. The build alone leads on every synthetic input but `pretty`, and on four of the real-world files
-(canada, citm_catalog, gsoc-2018, numbers).
+simdjson is ahead on every real-world file but gsoc-2018 and citm_catalog. A program that reads only some values
+pays only for those. The build alone leads on every synthetic input, and on five of the real-world files
+(canada, citm_catalog, gsoc-2018, marine_ik, numbers).
 
 Get one field from `config.json` (1 MB), in µs per call (lower is better). stury's `.Lazy` stops at the match,
 like sonic-rs. simdjson's On-Demand indexes the whole input first.
 
 | Key | stury | simdjson | sonic-rs |
 | --- | ---: | ---: | ---: |
-| early | 0.064 | 112 | **0.028** |
-| middle | **73** | 166 | 359 |
-| last | **145** | 223 | 718 |
-| absent | **137** | 164 | 950 |
+| early | 0.064 | 110 | **0.028** |
+| middle | **69** | 166 | 351 |
+| last | **136** | 217 | 699 |
+| absent | **131** | 165 | 915 |
 
 **CSV**, in GB/s, against the Rust `csv` 1.4 and `simd-csv` 0.14 crates. stury refuses quote misuse,
 unterminated quotes and ragged rows, and checks UTF-8 and field counts. The other columns name what each crate
@@ -87,22 +101,22 @@ checks: `TotalReader` and `Splitter` check neither UTF-8 nor field counts, `Read
 
 | Job | Input | stury | simd-csv | csv |
 | --- | --- | ---: | ---: | ---: |
-| Validate | table, 16 MB | **13.3** | 6.59 (`Splitter`, boundaries only) | 1.28 (`StringRecord`) |
-| Validate | text, quoted, 16 MB | **6.18** | 2.92 (`Splitter`) | 0.90 |
-| Validate | wide, 200 columns, 8 MB | 16.9 | **27.3** (`Splitter`) | 1.42 |
-| Read every field | table | **3.86** | 3.77 (`TotalReader`) / 3.04 (`Reader`) | 1.21 |
-| Read every field | text | **2.16** | 1.92 / 1.41 | 0.89 |
-| Read every field | wide | 3.33 | **3.48** / 2.92 | 1.33 |
-| Read every field | tsv, 8 MB | 3.22 | **3.58** / 2.89 | 1.20 |
-| Document, every cell read | table | **2.59** | 1.24 (`TotalReader`) | 0.60 |
-| Document, every cell read | text | **1.56** | 1.04 | 0.58 |
-| Document, every cell read | wide | 2.23 | **2.54** | 1.17 |
-| Unmarshal into structs | table | **0.76** | | 0.53 (serde) |
-| Unmarshal into structs | text | **0.72** | | 0.50 |
-| Marshal structs | table | **1.06** | | 0.43 (serde) |
-| Marshal structs | text | **1.32** | | 1.19 |
+| Validate | table, 16 MB | **13.4** | 6.53 (`Splitter`, boundaries only) | 1.30 (`StringRecord`) |
+| Validate | text, quoted, 16 MB | **6.31** | 3.06 (`Splitter`) | 0.94 |
+| Validate | wide, 200 columns, 8 MB | 17.0 | **27.7** (`Splitter`) | 1.45 |
+| Read every field | table | **3.91** | 3.78 (`TotalReader`) / 3.05 (`Reader`) | 1.24 |
+| Read every field | text | **2.16** | 1.87 / 1.42 | 0.89 |
+| Read every field | wide | 3.36 | **3.53** / 2.94 | 1.31 |
+| Read every field | tsv, 8 MB | 3.34 | **3.59** / 2.87 | 1.23 |
+| Document, every cell read | table | **2.59** | 1.27 (`TotalReader`) | 0.62 |
+| Document, every cell read | text | **1.65** | 1.07 | 0.59 |
+| Document, every cell read | wide | 2.27 | **2.38** | 1.17 |
+| Unmarshal into structs | table | **0.79** | | 0.54 (serde) |
+| Unmarshal into structs | text | **0.75** | | 0.51 |
+| Marshal structs | table | **1.09** | | 0.44 (serde) |
+| Marshal structs | text | **1.42** | | 1.25 |
 
-The unmarshal rows copy every string. With `borrow_strings` stury reads table at 0.90 and text at 1.51. Where
+The unmarshal rows copy every string. With `borrow_strings` stury reads table at 0.94 and text at 1.57. Where
 stury trails, the faster arm is one that checks neither UTF-8 nor field counts.
 
 **Command line**, with `bench/cli/jq_compare.sh`: 24 jq filters over the synthetic fixtures and three of the
@@ -112,13 +126,13 @@ means stury took half the time. Every tool gave the same answers.
 
 | Tool | Geometric mean | Smallest |
 | --- | ---: | ---: |
-| jq | 14.5× | 4.9× |
-| jaq | 6.7× | 2.3× |
-| gojq | 10.2× | 3.4× |
-| yq | 55× | 8.4× |
+| jq | 15.0× | 4.9× |
+| jaq | 6.9× | 2.2× |
+| gojq | 10.4× | 3.4× |
+| yq | 57× | 8.6× |
 
-The smallest gaps are on the real-world files (0.6–2.2 MB), where every tool but yq finishes in 1.4–25 ms and
-start-up dominates. On the 6–11 MB fixtures stury is 6–99× faster than jq, jaq and gojq.
+The smallest gaps are on the real-world files (0.6–2.2 MB), where every tool but yq finishes in 1.3–24 ms and
+start-up dominates. On the 6–11 MB fixtures stury is 6–100× faster than jq, jaq and gojq.
 
 On CSV, with `bench/cli/csv_compare.sh` on 16 MB files, in ms (lower is better). The jq column splits lines
 at commas, so it runs only on `table.csv`, which has no quoted cells. qsv has no CSV-to-JSON-lines arm because
@@ -126,7 +140,7 @@ it types the values it converts. Every tool gave the same answers.
 
 | Case | stury | qsv 20.1 | Miller | jq `-R` |
 | --- | ---: | ---: | ---: | ---: |
-| two columns | **3.8** | 33.3 | 170 | 612 |
-| rows filtered (`qty >= 9000`) | **6.0** | 33.8 | 168 | 248 |
-| two columns of quoted cells | **4.1** | 36.2 | 75.3 | |
-| CSV to JSON lines | **7.6** | | 243 | |
+| two columns | **3.5** | 32.5 | 165 | 604 |
+| rows filtered (`qty >= 9000`) | **5.8** | 33.0 | 164 | 247 |
+| two columns of quoted cells | **3.9** | 34.6 | 71.9 | |
+| CSV to JSON lines | **7.1** | | 237 | |
