@@ -79,6 +79,13 @@ enable_color :: proc() {
 	}
 }
 
+// The command line in UTF-8. os.args is the C runtime's argv, in the ANSI code page, which spells no character
+// outside it.
+command_args :: proc() -> []string {
+	info, err := os.current_process_info({.Command_Args}, context.allocator)
+	return info.command_args if err == nil else os.args
+}
+
 // Windows keeps no owner or group to give.
 keep_owner :: proc(f: ^os.File, path: string) {}
 

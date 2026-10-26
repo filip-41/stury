@@ -351,7 +351,7 @@ search_dirs :: proc(ip: ^Interp, search: Value, origin: Maybe(string)) -> (dirs:
 			dir = fmt.aprintf("%s/%s", o, dir[2:])
 		case strings.has_prefix(dir, "$ORIGIN/"):
 			dir = fmt.aprintf("%s/%s", jq_origin(), dir[len("$ORIGIN/"):])
-		case has_origin && (len(dir) == 0 || dir[0] != '/'):
+		case has_origin && !os.is_absolute_path(dir):
 			dir = fmt.aprintf("%s/%s", o, dir)
 		}
 		append(&dirs, dir)

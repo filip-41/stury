@@ -2,102 +2,31 @@
 
 ## 0.0.3 (2026-10-26)
 
-Adds typed CSV streaming (`Record_Read`), CSV path answers and record faults like JSON's, and the CLI's `fmt`
-verb. One `Read_Opts` per format and one read error replace the per-call options and error types.
-
 ### Library
 
-- `json.Record_Read` and `csv.Record_Read` read each record of one type (`record_read_init`, then
-  `unmarshal(&rd, ptr)`, which replaces json's `unmarshal(&rd, bytes, ptr)`). A fault's offset is into that
-  record's bytes, and `record_read_at` gives the record's offset. It is a handle: the state is on the heap,
-  `destroy` frees it, a copy shares it (destroy once), and its options are read on every read, so `duplicates`,
-  `limits`, `borrow_strings` and `strictness` set after init apply to the next record. CSV reads an in-memory
-  `Records` or a streaming `Record_Reader`, so a CSV stream can be decoded one record at a time (it could not
-  before).
-- `csv.record_read_init` refuses an iterator whose dialect, limits or strictness differ from the reader's
-  (`.Bad_Option`; a `.Lazy` reader also takes a `.Strict` one). A fault that frames no record, and a
-  `Record_Reader` whose reader failed (`.Syntax` `.Truncated`, instead of the end of the rows), have an offset
-  in the input with `record_read_at` 0, in json and csv alike.
-- A type plan that fails to compile reports the same fault on every call; a tag the format cannot spell is
-  `.Unsupported` or `.Bad_Tag`, no longer `.Out_Of_Memory`.
-- A tag's name may hold a literal comma or backslash (`csv:"Last\, First"`), and a flag other than
-  `omitempty`, `required` or `string` refuses with `.Bad_Tag`, a new member of `Marshal_Error` and
-  `Unmarshal_Error_Kind`, instead of being ignored.
-- An edit list that is unsorted or overlapping is `.Bad_Edit`, where it used to index out of bounds; JSONC
-  `remove` answered `.Bad_Result` for the same list.
-- A fault at no byte of the source renders one way: `offset N: Kind` when the offset locates it, bare
-  otherwise. `Unmarshal_Error` no longer invents a `1:1`.
-- `csv.get_float` is false for a cell that is not a number, has no binary64, or is a nonzero value that
-  underflows to zero; `1e-400` used to answer `0, true`. A rounded decimal (`0.1`) still reads, and the
-  Document readers and `unmarshal` share one cell reader.
-- `csv` path edits honour `duplicates`, `strictness` and `limits`: an edit of a name two columns share refuses
-  under `.Default`/`.Refuse` instead of silently editing the first, and a source `records` accepts is not refused
-  by `set`. `column` keeps its contract and names the first of them.
-- A `.Path` scan at `.Structural` that reads to the end reports `coverage` `.Partial`, where it reported `.Full`.
-- `core.Record_Fault` is the refused record (`lo`, `hi`, `err`) for every format.
-  `csv.validate_records(src, opts, runner, allocator)` lists one fault per refused record in
-  source order, so a caller sees every bad row where it saw one. A record ends at the LF that closes it
-  outside quotes, so a quoted LF is not its end, and a CR before the LF is not in its bytes. As in
-  `json.validate_records`, `err` is only the call's failure (`.Bad_Option`, `.Out_Of_Memory`); a fault of the
-  text is a record in `faults`.
-- `core.Answer` (`lo`, `hi`, `owner`, `query`, `outcome`), `Answer_Outcome` and `NO_OWNER` are the path answer
-  every format returns; `json.Path_Outcome` and `json.NO_OWNER` are core's. `csv.query(doc, path, out)` answers
-  paths over a built `Document` without rescanning the text, and `csv.find`/`csv.find_column` return answers:
-  `(Answer, Maybe(Error))`, wildcard `[]` and `limit` included.
-- `csv.find`, `find_column` and `query` read a repeated header name under `duplicates`: `.Default` and `.First`
-  take the first column, `.Last` and `.All` the last, and `.Refuse` is `.Duplicate_Key` at the repeated header
-  cell (`.Bad_Source` from `query`). `query` of a name on a document built from an empty text answers nothing,
-  as `find` does. A text path starts at the root `.` as in `json`: the bare `[]` is `.Bad_Path`.
-- `marshal` refuses a `Number` that is `.None` (`1e400`) with `.Non_Finite`; it used to write `0`. `Digits`
-  and `Raw` keep such a number. `Exact` is now `Exactness`'s zero value, so an unset `Number` writes `0`.
-- `edit_comment` accepts bare text, the form `fact_text` returns, and writes it as a `//` line.
-- `json.Encode_Error` and `json.Encode_Opts` are now `json.Marshal_Error` and `json.Marshal_Opts`, as in `csv` and
-  `core`. No alias is kept.
-- `csv.document_destroy`, `csv.records_destroy` and `csv.type_plan_destroy` are one `csv.destroy` group, as in
-  `json`.
-- `core/bits` and `core/path` are folded into `package core` (`core.Step`, `core.parse_path`, the bit kernels).
-- `json.Read_Opts` (`dialect`, `strictness`, `duplicates`, `limits`) and `csv.Read_Opts` (the same and
-  `no_header`) are the read options. A procedure that honours two or more of them takes `opts := Read_Opts{}`
-  before its allocator; its docs name the fields it does not read. `json`: `validate(src, opts, facts)`,
-  `find(src, path, opts, allocator)`, `request_init(req, ..paths, opts, allocator)`,
-  `build(src, opts, allocator)`, `split_record(rec, opts)`. `csv`: `validate(src, opts, runner)`,
-  `records(src, opts, allocator)`, `records_from(r, opts, allocator)`, `each_record(src, task, data, opts,
-  runner)`, `build`, `find`, `find_column`, `set`, `insert` and `remove` (`opts` before `allocator`).
-  `Request` and both `Unmarshal_Opts` embed `Read_Opts` (`using read`), so `{dialect = .Jsonc}` literals and
-  `req.dialect` read as before. Behaviour change: CSV's `header: bool` (default `true`) is now
-  `no_header: bool`.
-- The JSON edits take `dialect` before `allocator`: `set(src, path, value, upsert, dialect, allocator)`,
-  `insert(src, path, at, value, dialect, allocator)`, `remove(src, path, dialect, allocator)`,
-  `splice(src, edits, dialect, allocator)`.
-- One read error. `scan`, `find`, `request_init` and `build` return `Maybe(Error)`: a request refusal is
-  `.Bad_Option` (an option the request cannot honour), `.Bad_Path` (offset into the path text),
-  `.Over_Capacity` (a fixed engine limit) or `.Source_Too_Wide`. `parse_path` and `query` return
-  `Maybe(Path_Error)` (`.Bad_Path`, `.Over_Capacity`). Removed: `Scan_Error`, `Request_Error`,
-  `Request_Error_Kind`, `Capacity`, `Parse_Error`, `Parse_Fault`, and the public `render_error_to_writer`
-  of `json` and `csv` (`render_error` takes every error; `core.render_error_to_writer` writes without
-  allocating).
-- `json.Prepared` is gone. `prepare(&req) -> Maybe(Error)` plans the request itself, and `scan(src, &req)`
-  takes the planned route while the plan holds (`request_init` drops it, `destroy` frees it). `scan` has one
-  overload.
-- `json.records_from` and `json.Record_Reader` are removed; `next_record` and `destroy` lose their reader
-  overloads. Read the stream into memory and use `records`. `csv.records_from` stays: the CLI streams CSV
-  through it.
+- `Record_Read` (json and csv) reads each record of one type; CSV can now decode a stream one record at a time.
+- `csv.validate_records` lists every refused record, as `json.validate_records` does (`core.Record_Fault`).
+- `csv.query`, `find` and `find_column` answer paths like JSON's (`core.Answer`), honouring `duplicates`.
+- One `Read_Opts` per format (`dialect`, `strictness`, `duplicates`, `limits`, and CSV's `no_header`, which
+  replaces `header`) is taken before the allocator. The JSON edits take `dialect` before the allocator.
+- One read error: `scan`, `find`, `request_init` and `build` return `Maybe(Error)`; `parse_path` and `query`
+  return `Maybe(Path_Error)`. `Scan_Error`, `Request_Error`, `Capacity`, `Parse_Error`, `Prepared` and the
+  public `render_error_to_writer` are removed.
+- Renamed: `Encode_Error`/`Encode_Opts` to `Marshal_Error`/`Marshal_Opts`; the csv destroy procedures are one
+  `csv.destroy`. `core/bits` and `core/path` are folded into `core`. `json.records_from` and
+  `json.Record_Reader` are removed.
+- Refused instead of misread: an unknown tag flag or unspellable tag (`.Bad_Tag`), an unsorted or overlapping
+  edit list (`.Bad_Edit`), a `Number` with no finite value in `marshal` (`.Non_Finite`), a CSV cell that
+  underflows in `get_float`, and an edit of a CSV column name two columns share.
 
 ### Command line
 
-- `stury fmt [--from F] [--to F] [--in-place|--check] [--indent N|--tab] FILE...` formats or transcodes each
-  file, with no filter. JSON, JSONC and NDJSON are written with every number, string and key as written and
-  every member of an object, a repeated key included, so only the layout changes; JSONC keeps its comments.
-  CSV/TSV is a header and one record per row, each file its own table. It is idempotent; `--check` exits 1
-  when a file would change; `--in-place` rewrites each file atomically and leaves already-formatted ones
-  untouched.
-- The format aliases `--csv`, `--tsv`, `--ndjson` and `--jsonc` are removed. Spell both halves:
-  `--from csv --to csv`. `--from` alone reads the format and writes JSON, as before.
-- A parse error at the end of the input names the same column jq and `--stream-errors` name, also through
-  `fromjson`, `--argjson`, `--jsonargs`, `--slurpfile` and module data. `check` and `fmt` keep the library's
-  position.
-- `--seq` reads its files as one byte stream, as jq does: a record cut at a file end continues in the next file.
-- `debug` and `stderr` lines flush with the output they follow instead of at the end of the input.
+- `stury fmt` formats or transcodes files, keeping every number, string, key and comment as written
+  (`--check`, `--in-place`).
+- `--csv`, `--tsv`, `--ndjson` and `--jsonc` are removed: use `--from` and `--to`.
+- Parse errors at the end of the input name jq's column; `--seq` reads its files as one stream; `debug` and
+  `stderr` lines flush in order with the output.
+- Windows: filter arguments are read as UTF-8, `-L` takes an absolute path, and `strftime` gives `%s`, `%k` and `%l`.
 
 ## 0.0.2 (2026-10-24)
 

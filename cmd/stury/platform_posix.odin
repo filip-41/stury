@@ -114,6 +114,10 @@ is_terminal :: proc(f: ^os.File) -> bool {
 // Colour needs nothing set up here.
 enable_color :: proc() {}
 
+command_args :: proc() -> []string {
+	return os.args
+}
+
 // Gives the file `f` the owner and group of the file at `path`, or only the group where the owner cannot be given, or
 // neither: the temporary file `fmt --in-place` writes is the user's own.
 keep_owner :: proc(f: ^os.File, path: string) {

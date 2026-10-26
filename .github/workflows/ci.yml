@@ -135,6 +135,8 @@ jobs:
           printf '{"a":1}\n{"a":2}\n' > two.json
           [ "$(./stury.exe -c '.a' two.json | tr -d '\r' | paste -sd, -)" = "1,2" ]
           [ "$(echo '"2015-03-05T23:51:47Z"' | ./stury.exe -r 'fromdate | todate')" = "2015-03-05T23:51:47Z" ]
+          # The UCRT's strftime has no %s, %k or %l; the jq suite's libc rows are not run here.
+          [ "$(./stury.exe -nr '1425599621 | strftime("%s %k %l %V %r")')" = "1425599621 23 11 10 11:53:41 PM" ]
           [ "$(./stury.exe -n '[limit(3; recurse(.+1))] | length' <<< 0)" = "3" ]
           # `! cmd` does not trip errexit: a command that must fail exits the script when it succeeds.
           echo '{' | ./stury.exe . 2>/dev/null && exit 1

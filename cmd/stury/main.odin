@@ -123,7 +123,7 @@ main :: proc() {
 	run: Run
 	run.opts.indent = 2
 	run.ret, run.last_result = JQ_OK_NO_OUTPUT, -1
-	cli := parse_args(&run.opts, os.args[1:])
+	cli := parse_args(&run.opts, command_args()[1:])
 	validating := cli.validating
 	set_colors(&run, cli)
 	o := &run.opts

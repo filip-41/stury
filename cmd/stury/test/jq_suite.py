@@ -823,12 +823,12 @@ def jq_here():
 
 
 def posix_only(case):
-    """Whether a cli.tsv row's answer is POSIX's: a `$DIR` path or HOME (module search paths), a directory opened
+    """Whether a cli.tsv row's answer is POSIX's: a `$DIR` path, HOME or get_search_list (module search paths, which Windows makes absolute), a directory opened
     as a file, local time (the rows name their zone as tzdata does), the program's `/` origin, or an argument or
     variable that is not valid UTF-8 (Windows has UTF-16 only)."""
     asked = "\0".join(case["args"] + list(case["env"]) + [v for v in case["env"].values() if v])
     said = [w for w in case["want"] if isinstance(w, str)]
-    return ("$DIR" in asked or "HOME" in case["env"] or re.search("[\ud800-\udfff]|localtime|get_prog_origin|get_jq_origin", asked)
+    return ("$DIR" in asked or "HOME" in case["env"] or re.search("[\ud800-\udfff]|localtime|get_prog_origin|get_jq_origin|get_search_list", asked)
             or any("Is a directory" in w for w in said))
 
 
@@ -841,6 +841,8 @@ def check_cli(stury, diff, case):
     on_platform_jq = case["area"] == "libc" and sys.platform != "darwin"
     if os.name == "nt" and posix_only(case):
         return f"{area} (POSIX only, not run)", what, None
+    if on_platform_jq and os.name == "nt":  # jq's Windows build reads TZ and fills tm_yday wrong: no reference
+        return f"{area} (no reference jq on Windows, not run)", what, None
     if on_platform_jq and not jq_here():
         return f"{area} (no jq 1.8.2 here, not run)", what, None
     code, out, err = run_cli(stury, case)
