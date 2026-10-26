@@ -29,6 +29,13 @@ import scan_pkg "scan"
 @(private)
 FORCE_AUTOMATON :: #config(FORCE_AUTOMATON, false)
 
+// Whether the automaton is the one engine a walk has: a JSONC walk and a `.Refuse` walk carry no other, and the
+// `FORCE_AUTOMATON` test build sends every path to it.
+@(private)
+automaton_forced :: #force_inline proc(dialect: Dialect, duplicates: Duplicates) -> bool {
+	return FORCE_AUTOMATON || dialect == .Jsonc || duplicates == .Refuse
+}
+
 @(private = "file")
 MAX_ROUTED :: walk.MAX_PATH_QUERIES
 
@@ -129,10 +136,10 @@ Path_Shape :: enum u8 {
 }
 
 // The shape of path `p`, and for a column its wildcard count: a `per_element` path, which owes its misses, is
-// the automaton's. A one-step path, the common one, reads one step. `why` is the step that sends a path to the
-// automaton (`route_of` reports it), `.None` for a shape the matcher can serve.
+// the automaton's. A one-step path, the common one, reads one step. `why` is what sends a path of the
+// `.Automaton` shape to the automaton, `.Matcher` for a shape the matcher can serve.
 @(private)
-path_shape :: #force_inline proc(p: Path) -> (shape: Path_Shape, wild: int, why: Path_Why) {
+path_shape :: #force_inline proc(p: Path) -> (shape: Path_Shape, wild: int, why: Path_Route) {
 	steps := p.steps
 	n := len(steps)
 	for wild < n {
@@ -146,8 +153,8 @@ path_shape :: #force_inline proc(p: Path) -> (shape: Path_Shape, wild: int, why:
 		_, ends_named = steps[n - 1].(Name)
 	}
 	switch {
-	case wild == 0 && n == 1 && ends_named:  return .Single_Name, 0, .None
-	case wild == n - 1 && ends_named && n > 1 && !p.per_element: return .Column, wild, .None
+	case wild == 0 && n == 1 && ends_named:  return .Single_Name, 0, .Matcher
+	case wild == n - 1 && ends_named && n > 1 && !p.per_element: return .Column, wild, .Matcher
 	case p.per_element: return .Automaton, wild, .Per_Element
 	case n == 0 || n > core_pkg.MAX_PATH_STEPS: return .Automaton, wild, .Other_Shape
 	case !ends_named:
@@ -165,7 +172,7 @@ path_shape :: #force_inline proc(p: Path) -> (shape: Path_Shape, wild: int, why:
 		}
 	}
 	if has_any && has_name {
-		return .Gated_Column, 0, .None
+		return .Gated_Column, 0, .Matcher
 	}
 	return .Automaton, wild, .Deep_Name
 }
@@ -259,10 +266,10 @@ all_gated :: proc(paths: []Path) -> bool {
 	return len(paths) > 0
 }
 
-// Plan `paths` into `plan`. `automaton_only` gives every path to the automaton, the one engine a JSONC
-// walk and a `.Refuse` walk carry. Touches nothing but the plan.
+// Plan `paths` into `plan`. `forced` (`automaton_forced`) gives every path to the automaton. Touches nothing
+// but the plan.
 @(private)
-route_paths :: proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, alloc: runtime.Allocator, automaton_only := false) -> Maybe(Error) {
+route_paths :: proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, alloc: runtime.Allocator, forced := false) -> Maybe(Error) {
 	plan.matcher = .None
 	plan.gate.gated = 0
 	plan.any_limit = false
@@ -270,10 +277,10 @@ route_paths :: proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplic
 	plan.n_auto = 0
 
 	// The common request fits the inline arrays and plans in one pass.
-	if !FORCE_AUTOMATON && !automaton_only && duplicates != .All && len(paths) > 0 && len(paths) <= MAX_ROUTED && route_all_named(plan, src, paths) {
+	if !forced && duplicates != .All && len(paths) > 0 && len(paths) <= MAX_ROUTED && route_all_named(plan, src, paths) {
 		return {}
 	}
-	return route_general(plan, src, paths, duplicates, alloc, automaton_only)
+	return route_general(plan, src, paths, duplicates, alloc, forced)
 }
 
 // What `route_general` counts over the paths: the plain names, the columns at the depth `wild` (the first
@@ -285,13 +292,12 @@ Path_Tally :: struct {
 
 // Any request. Out of line: the common request never reaches it.
 @(private = "file")
-route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, alloc: runtime.Allocator, automaton_only: bool) -> Maybe(Error) {
-	force := FORCE_AUTOMATON || automaton_only
-	tally, refused := route_tally(paths, force)
+route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, alloc: runtime.Allocator, forced: bool) -> Maybe(Error) {
+	tally, refused := route_tally(paths, forced)
 	if err, bad := refused.?; bad {
 		return err
 	}
-	served := route_serve(plan, src, paths, duplicates, force, tally)
+	served := route_serve(plan, src, paths, duplicates, forced, tally)
 	n_keys := 0
 	#partial switch served {
 	case .Column:       n_keys = tally.n_column
@@ -318,7 +324,7 @@ route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path,
 // Count the paths by shape. Refused when a path is longer than the one step bound: a long column would
 // otherwise be served by the row matcher, which has none.
 @(private)
-route_tally :: proc(paths: []Path, force: bool) -> (t: Path_Tally, refused: Maybe(Error)) {
+route_tally :: proc(paths: []Path, forced: bool) -> (t: Path_Tally, refused: Maybe(Error)) {
 	t.wild = -1
 	for p in paths {
 		if len(p.steps) > core_pkg.MAX_PATH_STEPS {
@@ -329,7 +335,7 @@ route_tally :: proc(paths: []Path, force: bool) -> (t: Path_Tally, refused: Mayb
 		case .Column:
 			// The matcher reads one wildcard depth, the first column's. A column of another depth runs on
 			// the automaton.
-			if t.wild < 0 && !force {
+			if t.wild < 0 && !forced {
 				t.wild = k
 			}
 			if k == t.wild {
@@ -344,21 +350,31 @@ route_tally :: proc(paths: []Path, force: bool) -> (t: Path_Tally, refused: Mayb
 }
 
 // The shape the matcher serves, `.Automaton` when it serves none, and the root object's offset when it
-// serves plain names. A gated column takes it only when every path shares one gate, compiled into the
-// demand-only walk alone. A root that is not an object stays with the automaton (it owes `Type_Mismatch`).
+// serves plain names. A column comes first, then gated columns when every path shares one gate, then plain
+// names over a root object (a root that is not an object stays with the automaton, which owes
+// `Type_Mismatch`). `lost` is, for a path of each shape that is not the served one's, why the automaton
+// answers it: the test of its shape that failed, or `.Other_Shape` when a shape tested before it was served.
 @(private)
-route_choice :: proc(src: []byte, paths: []Path, force: bool, t: Path_Tally) -> (served: Path_Shape, root_lo: u64) {
-	switch {
-	case t.wild >= 0:
-		return .Column, 0
-	case !force && all_gated(paths):
-		return .Gated_Column, 0
-	case t.n_single != 0 && !force:
-		if lo, is_object := root_object(src); is_object {
-			return .Single_Name, lo
-		}
+route_choice :: proc(src: []byte, paths: []Path, forced: bool, t: Path_Tally) -> (served: Path_Shape, root_lo: u64, lost: [Path_Shape]Path_Route) {
+	for &why in lost {
+		why = .Forced if forced else .Other_Shape
 	}
-	return .Automaton, 0
+	switch {
+	case forced:
+		return .Automaton, 0, lost
+	case t.wild >= 0:
+		return .Column, 0, lost
+	case all_gated(paths):
+		return .Gated_Column, 0, lost
+	}
+	lost[.Gated_Column] = .Other_Gate
+	if t.n_single != 0 {
+		if lo, is_object := root_object(src); is_object {
+			return .Single_Name, lo, lost
+		}
+		lost[.Single_Name] = .Root_Not_Object
+	}
+	return .Automaton, 0, lost
 }
 
 // Whether a path of `shape` (a column of `wild` wildcards) is one the matcher answers when it serves `served`
@@ -371,8 +387,8 @@ served_by :: #force_inline proc(shape: Path_Shape, wild: int, served: Path_Shape
 // Set the plan's matcher, depth, gate and root for the shape `route_choice` picked, and return it. A slot holds
 // one extent per key, so `.All` reads plain names in rows instead.
 @(private = "file")
-route_serve :: proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, force: bool, t: Path_Tally) -> Path_Shape {
-	served, root_lo := route_choice(src, paths, force, t)
+route_serve :: proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, forced: bool, t: Path_Tally) -> Path_Shape {
+	served, root_lo, _ := route_choice(src, paths, forced, t)
 	switch served {
 	case .Column:
 		plan.matcher = .Rows

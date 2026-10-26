@@ -11,18 +11,24 @@ import "scan/walk"
 @(private = "file")
 TAPE_MAX_PATHS :: walk.MAX_PATH_QUERIES
 
-// Whether `req` is one the tape route answers: at least two gated columns sharing one gate, on `.Strict`
-// JSON. One path loses to the scan, so it is not routed.
+// Whether the tape route answers `paths` read with `read`: at least two gated columns sharing one gate, on
+// `.Strict` JSON. One path loses to the scan, so it is not routed.
+@(private)
+tape_fits :: #force_inline proc(paths: []Path, read: Read_Opts) -> bool {
+	if automaton_forced(read.dialect, read.duplicates) || read.strictness != .Strict ||
+	   read.limits.max_depth > MAX_DEPTH || len(paths) < 2 || len(paths) > TAPE_MAX_PATHS {
+		return false
+	}
+	return all_gated(paths)
+}
+
+// Whether `req` is one the tape route answers.
 @(private)
 tape_routable :: proc(req: ^Request($KINDS)) -> bool {
 	when KINDS != {.Path} {
 		return false
 	}
-	if FORCE_AUTOMATON || req.strictness != .Strict || req.dialect != .Json || req.duplicates == .Refuse ||
-	   req.limits.max_depth > MAX_DEPTH || len(req.paths) < 2 || len(req.paths) > TAPE_MAX_PATHS {
-		return false
-	}
-	return all_gated(req.paths)
+	return tape_fits(req.paths, req.read)
 }
 
 @(private = "file")

@@ -4,8 +4,8 @@
 
 ### Library
 
-- `route_of` names the engine that answers a path of a request (`Path_Engine`) and, for the automaton, why
-  not the matcher (`Path_Why`), without a scan.
+- `route_of` names the engine that answers a path of a request, or the reason the automaton does
+  (`Path_Route`), without a scan, and refuses a request as `scan` does.
 
 ### Command line
 

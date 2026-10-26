@@ -37,13 +37,11 @@ Null :: scan_pkg.Null
 Number :: scan_pkg.Number
 Path :: core_pkg.Path
 Path_Answer :: walk.Path_Answer
-Path_Engine :: enum u8 {Unknown, Matcher, Automaton}
 Path_Error :: core_pkg.Path_Error
 Path_Error_Kind :: core_pkg.Path_Error_Kind
 Path_Outcome :: walk.Path_Outcome
-Path_Route :: struct {engine: Path_Engine, why: Path_Why}
+Path_Route :: enum u8 {Matcher, Tape, Forced, Per_Element, Index, Ends_Any, Deep_Name, Other_Shape, Other_Gate, Root_Not_Object}
 Path_Spec :: core_pkg.Path_Spec
-Path_Why :: enum u8 {None, Forced, Per_Element, Index, Ends_Any, Deep_Name, Other_Shape, Other_Gate, Root_Not_Object}
 Plan_Opts :: struct {enums: Enum_Spelling, union_tag: string, tag_names: []Tag_Name, hooks: []Type_Hook}
 Query :: scan_pkg.Query
 ROOT :: walk.ROOT
