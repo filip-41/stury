@@ -2040,7 +2040,7 @@ libc	["-c", "[j0, j1, y0, y1]"]	"1\n"	{}	0	"[0.7651976865579666,0.44005058574493
 libc	["-c", "[jn(2;1.5), yn(2;1.5), jn(1.7;2), jn(-1;2), yn(0;0), jn(0;0)]"]	"null\n"	{}	0	"[0.23208767214421472,-0.9321937597629739,0.5767248077568733,-0.5767248077568733,-1.7976931348623157e+308,1]\n"	""
 conformance	["-c", "[y0, y1, yn(3;-2)]"]	"-1\n"	{}	0	"[null,null,null]\n"	""
 conformance	["-c", "[y0, y1]"]	"0\n"	{}	0	"[-1.7976931348623157e+308,-1.7976931348623157e+308]\n"	""
-conformance	["-c", "[j0, y0, jn(5;.), yn(5;.)] | map(. * 1e160 | round)"]	"1e300\n"	{}	0	"[-7860673063,-1368136045,-1368136045,7860673063]\n"	""
+libc	["-c", "[j0, y0, jn(5;.), yn(5;.)] | map(. * 1e160 | round)"]	"1e300\n"	{}	0	"[-7860673063,-1368136045,-1368136045,7860673063]\n"	""
 conformance	["-c", "j0"]	"\"a\"\n"	{}	5	""	"jq: error (at <stdin>:1): string (\"a\") number required\n"
 conformance	["-c", "y1"]	"null\n"	{}	5	""	"jq: error (at <stdin>:1): null (null) number required\n"
 conformance	["-c", "jn(\"a\";2)"]	"null\n"	{}	5	""	"jq: error (at <stdin>:1): string (\"a\") number required\n"
