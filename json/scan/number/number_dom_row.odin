@@ -134,6 +134,16 @@ number_span :: proc(src: []byte, lo, hi: u64) -> Number {
 	return number_lexed(src, lo, hi, lex_number_value(src, lo, hi))
 }
 
+// `number_token` of a row whose digit counts do not settle it: a JSON5 spelling (`DIALECT_SPELLED`) or a span
+// read from its text. Out of line, so `number_token` inlines no dialect code.
+@(cold)
+number_uncounted :: proc(src: []byte, lo, hi: u64, digits: u16) -> Number {
+	if digits == DIALECT_SPELLED && lo < hi && hi <= u64(len(src)) {
+		return json5_number_value(src, lo, hi)
+	}
+	return number_span(src, lo, hi)
+}
+
 // The `i64` the integer token of a document row writes, from the digit counts the walk kept (`number_token`):
 // `-0` is 0, an integer past `i64` and a token with a fraction or an exponent are not an `i64`. `known` is false
 // for a row the counts do not settle (none counted, past the 19 digits a word fold holds, an exponent), which the
@@ -197,10 +207,7 @@ number_token :: #force_inline proc(src: []byte, lo, hi: u64, digits: u16) -> Num
 	// Past the fraction, or past the integer run when there is none: where an exponent starts.
 	tail := frac_at + frac_digits if frac_digits != 0 else frac_at - 1
 	if int_digits == 0 || int_digits + frac_digits > EL_MAX_DIGITS || tail > hi || hi > u64(len(src)) {
-		if digits == DIALECT_SPELLED && lo < hi && hi <= u64(len(src)) {
-			return json5_number_value(src, lo, hi)
-		}
-		return number_span(src, lo, hi)
+		return number_uncounted(src, lo, hi, digits)
 	}
 	n := Number_Lex{int_at = int_at, int_digits = int_digits, frac_at = frac_at, frac_digits = frac_digits, ok = true, whole = true}
 	n.mant = fold_known(src, int_at + int_digits, int_digits)
