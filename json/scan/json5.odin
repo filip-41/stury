@@ -148,7 +148,6 @@ identifier_rune :: proc(r: rune, start: bool) -> bool {
 // The string at `s.pos` in either quote. Every escape is checked (`json5_escape_unit`), a raw LF or CR is
 // `.Bad_Char`, other raw bytes are wire UTF-8. A value string hands `.Dom` its exact decoded length.
 json5_string :: proc(s: ^Scanner, q: ^Query_Ctx, lo: u64, key: bool, $Q: bit_set[Walk_Kind]) -> Maybe(Error) {
-	#assert(.Shape not_in Q, "a JSON5 text is unmarshalled through its JSON spelling")
 	src := s.src
 	n := u64(len(src))
 	quote := src[s.pos]
@@ -327,7 +326,6 @@ json5_span_text :: proc(src: []byte, arena: ^Name_Arena, alloc: runtime.Allocato
 // (a sign `+`, a leading or trailing point, hex, `Infinity`, `NaN`) is checked here and its row carries
 // `number.DIALECT_SPELLED`. Leading zeros are refused as in JSON.
 json5_number :: proc(s: ^Scanner, q: ^Query_Ctx, lo: u64, $Q: bit_set[Walk_Kind]) -> Maybe(Error) {
-	#assert(.Shape not_in Q, "a JSON5 text is unmarshalled through its JSON spelling")
 	src := s.src
 	n := u64(len(src))
 	p := s.pos

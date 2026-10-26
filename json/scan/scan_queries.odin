@@ -394,9 +394,9 @@ scan_queries_in :: #force_inline proc(
 	}
 	ctx.max_depth = s.limits.max_depth
 	when dialect != .Json {
-		jc := Dialect_Cursor(GRAMMAR[dialect]){facts = facts}
+		dialect_cur := Dialect_Cursor(GRAMMAR[dialect]){facts = facts}
 		ctx.hooks = hooks_of(dialect)
-		dialect_skip(&s, &jc)
+		dialect_skip(&s, &dialect_cur)
 	} else {
 		lex.skip_ws(&s)
 	}
@@ -446,7 +446,7 @@ scan_queries_in :: #force_inline proc(
 		}
 		if keyed {
 			key_set_init(&keys, &key_scratch, key_alloc)
-			keys.json5 = dialect == .Json5
+			keys.json5 = .Json5_Keys in GRAMMAR[dialect]
 		}
 		defer if keyed {
 			key_set_destroy(&keys)
@@ -469,11 +469,11 @@ scan_queries_in :: #force_inline proc(
 	}
 	when dialect != .Json {
 		when deep {
-			werr := dialect_walk_deep(&s, ctx, Q, &jc)
+			werr := dialect_walk_deep(&s, ctx, Q, &dialect_cur)
 		} else {
-			werr := dialect_walk(&s, ctx, Q, &jc)
+			werr := dialect_walk(&s, ctx, Q, &dialect_cur)
 		}
-		if jc.oom {
+		if dialect_cur.oom {
 			note_oom(ctx, .Nodes)
 		}
 	} else when deep {
@@ -538,8 +538,8 @@ scan_queries_in :: #force_inline proc(
 	// so coverage is `.Full` then too, unless the walk skipped a region.
 	covered = !ctx.skipped
 	when dialect != .Json {
-		ferr := dialect_finish(&s, &jc)
-		if jc.oom {
+		ferr := dialect_finish(&s, &dialect_cur)
+		if dialect_cur.oom {
 			note_oom(ctx, .Nodes)
 		}
 		return ferr, sink_fault(F, ctx)

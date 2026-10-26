@@ -97,7 +97,7 @@ dom_span_text :: #force_inline proc(
 	first_esc: u64,
 	dialect: Dialect,
 ) -> (s: []u8, ok: bool) {
-	if escaped && dialect == .Json5 {
+	if escaped && .Json5_Scalars in grammar_of(dialect) {
 		return json5_span_text(src, arena, alloc, lo, hi)
 	}
 	if !dom_str_span_ok(src, lo, hi) {

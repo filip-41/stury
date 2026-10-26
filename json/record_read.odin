@@ -56,7 +56,7 @@ record_read_init :: proc(
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	record_read_destroy(rd)
-	if opts.dialect == .Json5 || (opts.strictness == .Structural && opts.dialect != .Jsonc) {
+	if record_opts_refused(opts) {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	state := record_state_new()
@@ -143,8 +143,7 @@ record_opts_same :: #force_inline proc(a, b: ^Unmarshal_Opts) -> bool {
 @(private)
 read_record :: #force_inline proc(st: ^Record_State, src: []byte, opts: ^Unmarshal_Opts, plan: ^core_pkg.Type_Plan, dest: rawptr) -> Maybe(Unmarshal_Error) {
 	if plan != st.bound_plan || !record_opts_same(opts, &st.bound_opts) {
-		// `.Structural` stores what it reads, so a JSON read refuses it unless the dialect checks the rest (JSONC).
-		if opts.dialect == .Json5 || (opts.strictness == .Structural && opts.dialect != .Jsonc) {
+		if record_opts_refused(opts^) {
 			return Unmarshal_Error{kind = .Bad_Option}
 		}
 		record_bind(st, plan, opts)
@@ -199,17 +198,7 @@ record_walk :: #force_no_inline proc(st: ^Record_State, src: []byte, opts: Unmar
 	run.cur_live = false
 	run.raw_open = false
 	run.pend_live = false
-	lazy := opts.strictness == .Lazy
-	refuse := opts.duplicates == .Refuse
-	verdict: Maybe(Error)
-	if opts.dialect == .Jsonc {
-		verdict = scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Jsonc, false) if !refuse else scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Jsonc, true)
-	} else if lazy {
-		verdict = scan_pkg.scan_shape_lazy(src, run, dest, opts.limits, false) if !refuse else scan_pkg.scan_shape_lazy(src, run, dest, opts.limits, true)
-	} else {
-		verdict = scan_pkg.scan_shape(src, run, dest, false, opts.limits, .Json, false) if !refuse else scan_pkg.scan_shape(src, run, dest, false, opts.limits, .Json, true)
-	}
-	if e, refused := verdict.?; refused {
+	if e, refused := shape_verdict(src, run, dest, opts).?; refused {
 		return unmarshal_error_of(run, e)
 	}
 	return nil
@@ -219,4 +208,19 @@ record_walk :: #force_no_inline proc(st: ^Record_State, src: []byte, opts: Unmar
 @(private)
 record_read_destroy :: proc(rd: ^Record_Read) {
 	core_pkg.record_read_destroy(rd)
+}
+
+// Whether a record read refuses `opts`. `.Structural` stores what it reads, so a JSON read refuses it unless
+// the dialect checks the rest (JSONC); `.Json5` has no record walk.
+@(private = "file")
+record_opts_refused :: proc(opts: Unmarshal_Opts) -> bool {
+	switch opts.dialect {
+	case .Json:
+		return opts.strictness == .Structural
+	case .Jsonc:
+		return false
+	case .Json5:
+		return true
+	}
+	return true
 }

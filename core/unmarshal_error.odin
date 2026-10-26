@@ -1,6 +1,7 @@
 package core
 
-// A typed read's refusal: what, where, and the path to it. A `Name` step borrows the source or the type info.
+// A typed read's refusal: what, where, and the path to it. A `Name` step borrows the source or the type info,
+// except a JSON5 key's decoded name, which `unmarshal` makes with its allocator.
 
 // The kinds a read itself reports come first, numbered from 1. A hook's refusal uses the same numbers.
 Unmarshal_Error_Kind :: enum u8 {

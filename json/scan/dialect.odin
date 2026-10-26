@@ -38,6 +38,19 @@ GRAMMAR :: [Dialect]Grammar {
 	.Json5 = {.Comments, .Trailing_Commas, .Json5_Space, .Json5_Keys, .Json5_Scalars},
 }
 
+// The grammar of a dialect named at run time; a new dialect is a compile error here until it is listed.
+grammar_of :: proc "contextless" (dialect: Dialect) -> Grammar {
+	switch dialect {
+	case .Json:
+		return GRAMMAR[.Json]
+	case .Jsonc:
+		return GRAMMAR[.Jsonc]
+	case .Json5:
+		return GRAMMAR[.Json5]
+	}
+	unreachable()
+}
+
 // The cursor of a dialect walk: whitespace is `dialect_skip`, and `G` is the grammar the walk compiles in. A
 // walk over a `Dialect_Cursor` is a complete `.Values` walk that never skips and never stops. `facts` receives
 // each comment, attached to nothing yet. `json` reads JSON's grammar on this cursor instead (`walk_deep` reads
@@ -50,7 +63,6 @@ Dialect_Cursor :: struct($G: Grammar) {
 }
 
 Jsonc_Cursor :: Dialect_Cursor(GRAMMAR[.Jsonc])
-Json5_Cursor :: Dialect_Cursor(GRAMMAR[.Json5])
 
 // The grammar of cursor type `C`, as a constant: write it at the top of a procedure generic over the cursor.
 //
@@ -90,66 +102,70 @@ dialect_skip :: proc(s: ^Scanner, cur: ^Dialect_Cursor($G)) {
 				continue
 			}
 		}
-		n := u64(len(s.src))
-		if s.pos >= n || s.src[s.pos] != '/' || cur.json {
-			return
-		}
-		if s.pos+1 >= n {
-			cur.fault = Error{kind = .Bad_Char, offset = s.pos}
-			return
-		}
-		lo := s.pos
-		switch s.src[s.pos+1] {
-		case '/':
-			// CR is JSON whitespace, so it ends a line as LF does.
-			s.pos += 2
-			for s.pos < n {
-				comment_run(s, n, false)
-				if s.pos >= n {
-					break
-				}
-				b := s.src[s.pos]
-				if b - 0x20 < 0x60 {
-					s.pos += 1
-				} else if b == '\n' || b == '\r' {
-					break
-				} else if !comment_char(s, cur) {
-					return
-				}
-			}
-			comment_note(cur, lo, s.pos)
-		case '*':
-			s.pos += 2
-			closed := false
-			for s.pos < n {
-				comment_run(s, n, true)
-				if s.pos >= n {
-					break
-				}
-				b := s.src[s.pos]
-				if b - 0x20 < 0x60 {
-					if b == '*' && s.pos+1 < n && s.src[s.pos+1] == '/' {
-						s.pos += 2
-						closed = true
-						break
-					}
-					s.pos += 1
-				} else if b == '\n' || b == '\r' {
-					s.pos += 1
-				} else if !comment_char(s, cur) {
-					return
-				}
-			}
-			if !closed {
-				cur.fault = Error{kind = .Truncated, offset = n}
-				s.pos = n
+		when .Comments in G {
+			n := u64(len(s.src))
+			if s.pos >= n || s.src[s.pos] != '/' || cur.json {
 				return
 			}
-			comment_note(cur, lo, s.pos)
-		case:
-			cur.fault = Error{kind = .Bad_Char, offset = s.pos}
-			return
+			if s.pos+1 >= n {
+				cur.fault = Error{kind = .Bad_Char, offset = s.pos}
+				return
+			}
+			lo := s.pos
+			switch s.src[s.pos+1] {
+			case '/':
+				// CR is JSON whitespace, so it ends a line as LF does.
+				s.pos += 2
+				for s.pos < n {
+					comment_run(s, n, false)
+					if s.pos >= n {
+						break
+					}
+					b := s.src[s.pos]
+					if b - 0x20 < 0x60 {
+						s.pos += 1
+					} else if b == '\n' || b == '\r' {
+						break
+					} else if !comment_char(s, cur) {
+						return
+					}
+				}
+				comment_note(cur, lo, s.pos)
+			case '*':
+				s.pos += 2
+				closed := false
+				for s.pos < n {
+					comment_run(s, n, true)
+					if s.pos >= n {
+						break
+					}
+					b := s.src[s.pos]
+					if b - 0x20 < 0x60 {
+						if b == '*' && s.pos+1 < n && s.src[s.pos+1] == '/' {
+							s.pos += 2
+							closed = true
+							break
+						}
+						s.pos += 1
+					} else if b == '\n' || b == '\r' {
+						s.pos += 1
+					} else if !comment_char(s, cur) {
+						return
+					}
+				}
+				if !closed {
+					cur.fault = Error{kind = .Truncated, offset = n}
+					s.pos = n
+					return
+				}
+				comment_note(cur, lo, s.pos)
+			case:
+				cur.fault = Error{kind = .Bad_Char, offset = s.pos}
+				return
+			}
+			continue
 		}
+		return
 	}
 }
 

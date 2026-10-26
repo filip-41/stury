@@ -155,7 +155,9 @@ read_typed :: proc(
 
 @(private)
 read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Type_Plan, allocator: runtime.Allocator) -> Maybe(Unmarshal_Error) {
-	if opts.dialect == .Json5 {
+	switch opts.dialect {
+	case .Json, .Jsonc:
+	case .Json5:
 		return read_json5(src, dest, opts, plan, allocator)
 	}
 	shape, serr := core_pkg.read_shape_of(&plan.base)
@@ -188,18 +190,29 @@ read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Typ
 			return nil
 		}
 	}
-	// The dialect and `refuse` (the last argument) are compile-time parameters of the walks, so each call
-	// below is a separate instance and the plain JSON read compiles without the JSONC and key-check code.
-	verdict: Maybe(Error)
-	if opts.dialect == .Jsonc {
-		verdict = scan_pkg.scan_shape(src, &run, dest, lazy, opts.limits, .Jsonc, false) if opts.duplicates != .Refuse else scan_pkg.scan_shape(src, &run, dest, lazy, opts.limits, .Jsonc, true)
-	} else if lazy {
-		verdict = scan_pkg.scan_shape_lazy(src, &run, dest, opts.limits, false) if opts.duplicates != .Refuse else scan_pkg.scan_shape_lazy(src, &run, dest, opts.limits, true)
-	} else {
-		verdict = scan_pkg.scan_shape(src, &run, dest, false, opts.limits, .Json, false) if opts.duplicates != .Refuse else scan_pkg.scan_shape(src, &run, dest, false, opts.limits, .Json, true)
-	}
-	if e, refused := verdict.?; refused {
+	if e, refused := shape_verdict(src, &run, dest, opts).?; refused {
 		return unmarshal_error_of(&run, e)
+	}
+	return nil
+}
+
+// The shape walk of `src` in `opts.dialect`. The dialect and `refuse` (the last argument) are compile-time
+// parameters of the walks, so each call below is a separate instance and the plain JSON read compiles without the
+// JSONC and key-check code. A `.Json5` text is read through its JSON spelling (`read_json5`) and never gets here.
+@(private)
+shape_verdict :: #force_inline proc(src: []byte, run: ^walk.Shape_Run, dest: rawptr, opts: Unmarshal_Opts) -> Maybe(Error) {
+	lazy := opts.strictness == .Lazy
+	refuse := opts.duplicates == .Refuse
+	switch opts.dialect {
+	case .Jsonc:
+		return scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Jsonc, false) if !refuse else scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Jsonc, true)
+	case .Json:
+		if lazy {
+			return scan_pkg.scan_shape_lazy(src, run, dest, opts.limits, false) if !refuse else scan_pkg.scan_shape_lazy(src, run, dest, opts.limits, true)
+		}
+		return scan_pkg.scan_shape(src, run, dest, false, opts.limits, .Json, false) if !refuse else scan_pkg.scan_shape(src, run, dest, false, opts.limits, .Json, true)
+	case .Json5:
+		panic("a JSON5 text is read through its JSON spelling")
 	}
 	return nil
 }

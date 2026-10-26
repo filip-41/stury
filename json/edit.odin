@@ -20,6 +20,30 @@ Path_Error_Kind :: core_pkg.Path_Error_Kind
 // Both JSON's and CSV's `render_error` write it.
 Path_Error :: core_pkg.Path_Error
 
+// How the edits read `dialect`: as JSONC or as JSON. `ok` is false for a dialect they do not read (`.Json5`), which
+// every edit entry refuses.
+@(private)
+edit_grammar :: proc(dialect: Dialect) -> (jsonc, ok: bool) {
+	switch dialect {
+	case .Json:
+		return false, true
+	case .Jsonc:
+		return true, true
+	case .Json5:
+		return false, false
+	}
+	return
+}
+
+// `.Bad_Option` for a dialect the edits do not read.
+@(private)
+edit_refused :: proc(dialect: Dialect) -> Maybe(Path_Error) {
+	if _, ok := edit_grammar(dialect); !ok {
+		return Path_Error{kind = .Bad_Option}
+	}
+	return nil
+}
+
 // `src` with every edit applied.
 //
 //	- Edits must be sorted by `lo` and disjoint (`edits[i].hi <= edits[i+1].lo`, every `hi <= len(src)`).
@@ -31,14 +55,12 @@ Path_Error :: core_pkg.Path_Error
 //	  swallow the values there.
 @(require_results)
 splice :: proc(src: []byte, edits: []Edit, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	if dialect == .Json5 {
-		return nil, Path_Error{kind = .Bad_Option}
-	}
+	edit_refused(dialect) or_return
 	applied, aerr := edits_apply_checked(src, edits, allocator)
 	if aerr != nil {
 		return nil, aerr
 	}
-	if dialect == .Jsonc {
+	if jsonc, _ := edit_grammar(dialect); jsonc {
 		err = judged_jsonc_splice(applied, edits, allocator)
 		if err != nil {
 			delete(applied, allocator)
@@ -119,9 +141,7 @@ judged :: proc(out: []byte, err: Maybe(Path_Error), allocator: runtime.Allocator
 //	  is `.Bad_Path` at the byte the parser stopped on.
 @(require_results)
 set :: proc(src: []byte, path: Path_Spec, value: any, upsert := false, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	if dialect == .Json5 {
-		return nil, Path_Error{kind = .Bad_Option}
-	}
+	edit_refused(dialect) or_return
 	watch := core_pkg.Refusal_Watch{backing = allocator}
 	out, err = watched_set(src, path, value, core_pkg.watched(&watch), upsert, dialect)
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
@@ -200,9 +220,7 @@ APPEND :: core_pkg.APPEND
 //	  comments and comma included (`entry_at`). The result is validated as JSONC.
 @(require_results)
 insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	if dialect == .Json5 {
-		return nil, Path_Error{kind = .Bad_Option}
-	}
+	edit_refused(dialect) or_return
 	watch := core_pkg.Refusal_Watch{backing = allocator}
 	out, err = watched_insert(src, path, at, value, core_pkg.watched(&watch), dialect)
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
@@ -228,9 +246,7 @@ watched_insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, 
 //	  (`remove_in`). The result is validated as JSONC.
 @(require_results)
 remove :: proc(src: []byte, path: Path_Spec, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	if dialect == .Json5 {
-		return nil, Path_Error{kind = .Bad_Option}
-	}
+	edit_refused(dialect) or_return
 	watch := core_pkg.Refusal_Watch{backing = allocator}
 	out, err = watched_remove(src, path, core_pkg.watched(&watch), dialect)
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
@@ -245,7 +261,7 @@ watched_remove :: proc(src: []byte, path: Path_Spec, allocator: runtime.Allocato
 	if n == 0 {
 		return nil, Path_Error{kind = .Unplaceable}
 	}
-	if dialect == .Jsonc {
+	if jsonc, _ := edit_grammar(dialect); jsonc {
 		return remove_in(src, p, allocator, true)
 	}
 	return remove_in(src, p, allocator, false)

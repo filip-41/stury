@@ -514,8 +514,10 @@ put_raw :: proc(st: ^Marshal_Out, s: string) -> Marshal_Error {
 	}
 	limits := Limits{max_depth = u64(MAX_DEPTH - st.nest)}
 	fault, bad := validate(transmute([]byte)s, {limits = limits}).?
-	if bad && st.dialect == .Jsonc {
-		fault, bad = jsonc_raw_fault(s, limits).?
+	if bad {
+		if jsonc, _ := edit_grammar(st.dialect); jsonc {
+			fault, bad = jsonc_raw_fault(s, limits).?
+		}
 	}
 	if bad {
 		#partial switch fault.kind {

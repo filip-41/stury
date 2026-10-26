@@ -18,7 +18,7 @@ EDIT_QUERIES :: bit_set[Query]{.Path, .Nodes}
 // replaced instead (`set` with `upsert`).
 @(private)
 insert_at :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, dialect: Dialect, upsert := false) -> (out: []byte, err: Maybe(Path_Error)) {
-	if dialect == .Jsonc {
+	if jsonc, _ := edit_grammar(dialect); jsonc {
 		return insert_in(src, p, at, repl, allocator, true, upsert)
 	}
 	return insert_in(src, p, at, repl, allocator, false, upsert)

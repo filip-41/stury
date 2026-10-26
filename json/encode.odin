@@ -46,11 +46,16 @@ marshal_document :: proc(doc: ^Document, opts := Marshal_Opts{}, allocator := co
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return nil, .Too_Deep
 	}
-	if opts.jq_spelling || opts.sort_keys || doc.dialect == .Json5 {
+	if opts.jq_spelling || opts.sort_keys {
 		return marshal_document_jq(doc, opts, allocator)
 	}
-	if doc.dialect == .Jsonc {
+	switch doc.dialect {
+	case .Json:
+	case .Jsonc:
 		return enc.encode_rows_jsonc(doc.src, doc.rows[:], doc.facts[:], opts, allocator)
+	case .Json5:
+		// Its tokens are respelled one at a time.
+		return marshal_document_jq(doc, opts, allocator)
 	}
 	return enc.encode_rows(doc.src, doc.rows[:], opts, allocator)
 }
@@ -144,7 +149,7 @@ jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_
 @(private = "file")
 jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts) -> Marshal_Error {
 	lit := string(get_raw(doc, n))
-	if doc.dialect == .Json5 && doc.rows[n].first_esc == scan_pkg.DIALECT_SPELLED {
+	if .Json5_Scalars in scan_pkg.grammar_of(doc.dialect) && doc.rows[n].first_esc == scan_pkg.DIALECT_SPELLED {
 		return json5_number_as_json(buf, doc, n, lit)
 	}
 	if !opts.jq_spelling {
@@ -162,7 +167,7 @@ jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Op
 @(private = "file")
 jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts) -> Marshal_Error {
 	// A JSON5 string is plain only double-quoted with no escape.
-	if !opts.jq_spelling && (doc.dialect != .Json5 || .Str_Escaped not_in doc.rows[n].flags) {
+	if !opts.jq_spelling && (.Json5_Scalars not_in scan_pkg.grammar_of(doc.dialect) || .Str_Escaped not_in doc.rows[n].flags) {
 		return enc.put_bytes(buf, string(get_raw(doc, n)))
 	}
 	s, _ := get_string(doc, n)
@@ -200,7 +205,7 @@ jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: 
 		own = facts(doc, v)
 		enc.put_leads(buf, cl, own, depth + 1) or_return
 		if k == .Object {
-			if opts.jq_spelling || (doc.dialect == .Json5 && .Key_Escaped in doc.rows[v].flags) {
+			if opts.jq_spelling || (.Json5_Keys in scan_pkg.grammar_of(doc.dialect) && .Key_Escaped in doc.rows[v].flags) {
 				enc.put_string_escaping_del(buf, e.key) or_return
 			} else {
 				enc.put_bytes(buf, string(doc.src[doc.rows[v].key_lo:doc.rows[v].key_hi])) or_return
