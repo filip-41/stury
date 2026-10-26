@@ -515,7 +515,7 @@ json5_to_jsonc :: proc(ins: ^Inputs) {
 	if len(bytes.trim_space(ins.data)) == 0 { // no text, as for JSONC
 		return
 	}
-	doc, err := json.build(ins.data, {dialect = .Json5, limits = jq.lifted})
+	doc, err := jq.build_rows(ins.data, .Json5)
 	defer json.destroy(&doc)
 	if e, bad := err.?; bad {
 		jsonc_fault(ins, e, 0)

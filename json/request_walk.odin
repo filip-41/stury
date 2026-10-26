@@ -189,12 +189,15 @@ walk_run :: #force_inline proc(src: []byte, req: ^Request($KINDS), queries: []sc
 			src, queries, strictness, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), req.dialect, facts,
 		)
 	}
-	switch req.dialect {
-	case .Json:
-	case .Jsonc:
-		return scan_pkg.scan_queries_dialect(src, queries, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), facts, .Jsonc)
-	case .Json5:
-		return scan_pkg.scan_queries_dialect(src, queries, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), facts, .Json5)
+	// A dialect walk has no demand matcher (`automaton_forced`), so a demand walk compiles no dialect.
+	when .Demand not_in WALK {
+		switch req.dialect {
+		case .Json:
+		case .Jsonc:
+			return scan_pkg.scan_queries_dialect(src, queries, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), facts, .Jsonc)
+		case .Json5:
+			return scan_pkg.scan_queries_dialect(src, queries, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), facts, .Json5)
+		}
 	}
 	return scan_pkg.scan_queries(
 		src, queries, strictness, req.limits, WALK,

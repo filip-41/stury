@@ -262,12 +262,15 @@ scan_queries_deep :: #force_no_inline proc(
 	dialect: Dialect,
 	facts: ^[dynamic]Fact,
 ) -> (err: Maybe(Error), fault: Walk_Fault) {
-	switch dialect {
-	case .Json:
-	case .Jsonc:
-		return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Jsonc, facts, Walk_Fault, true, nil, false)
-	case .Json5:
-		return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Json5, facts, Walk_Fault, true, nil, false)
+	// A dialect walk has no demand matcher (`json.automaton_forced`), so a demand walk compiles no dialect.
+	when .Demand not_in Q {
+		switch dialect {
+		case .Json:
+		case .Jsonc:
+			return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Jsonc, facts, Walk_Fault, true, nil, false)
+		case .Json5:
+			return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Json5, facts, Walk_Fault, true, nil, false)
+		}
 	}
 	// `.Lazy` is read as `.Strict`: its stop is not taken here, and `axes_for` would arm one.
 	level := Strictness.Structural if strictness == .Structural else Strictness.Strict
