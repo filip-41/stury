@@ -64,7 +64,7 @@ Environment variables:
 | `fetch.py`, `sources.toml` | the real-world corpus and the other libraries' C/C++ sources, each pinned by URL and SHA-256 |
 | `probe/` | stury's arms: one Odin program, one lane per run (`make probe`, then `build/probe --lane NAME --fixture F`). The lanes `compare.py` does not run (encode, marshal, edit, record streaming, wildcard paths, duplicate-key and fault handling) measure stury alone |
 | `peers/` | the other libraries' arms: `cpp_bench.cpp` (simdjson, RapidJSON), `yy_bench.c` (yyjson), `rust/` (serde_json, sonic-rs, csv, simd-csv, versions in `Cargo.lock`; `read.rs` is the JSON arm, `csv_bench.rs` the CSV one) |
-| `core_compare/` | stury against Odin's own `core:encoding/json`: `odin build bench/core_compare -o:speed -collection:stury=. -out:build/core_compare && build/core_compare [fixtures_dir] [rounds]` |
+| `core_compare/` | stury against Odin's own `core:encoding/json` and `core:encoding/csv`: `odin build bench/core_compare -o:speed -collection:stury=. -out:build/core_compare && build/core_compare [fixtures_dir] [rounds]` |
 | `compare.py` | builds the arms, checks their answers, times them, writes the report |
 | `cli/` | the CLI comparisons and their answer check |
 
@@ -124,6 +124,10 @@ Each pair does the same work under the same guarantee, or the table names the di
 - **`core_compare`'s load (DOM) arm** builds a `.Dom` document and reads every value once in document order,
   since `core:encoding/json` converts every number while parsing. stury borrows strings where core copies
   each one, so stury still does less work on this arm.
+- **`core_compare`'s CSV arms** read table.csv and text.csv. Core's Reader runs with `reuse_record` and
+  `reuse_record_buffer` and makes no UTF-8 check; stury judges every byte. The write arm loops core's
+  `Writer.write`, since `write_all` ends in a flush that a `strings.Builder` refuses, against stury's
+  `write_record` per record.
 
 ## The CSV comparison
 

@@ -1,6 +1,7 @@
 package main
 
-// Times stury against Odin's core:encoding/json in one process, on the same fixtures and the same arena.
+// Times stury against Odin's core:encoding/json and core:encoding/csv (csv.odin) in one process, on the same
+// fixtures and the same arena.
 // Each lane alternates the two arms' order every round so load drift affects both equally, and prints the
 // median of the timed rounds as a markdown table.
 //
@@ -93,6 +94,7 @@ main :: proc() {
 		{"Unmarshal", stury_unmarshal([]Nested_Rec), core_unmarshal([]Nested_Rec)},
 		{"Marshal", stury_marshal([]Nested_Rec), core_marshal([]Nested_Rec)},
 	})
+	ok &= run_csv(dir, rounds)
 	if !ok {
 		os.exit(1)
 	}
