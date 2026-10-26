@@ -21,7 +21,7 @@ Dialect :: enum u8 {
 //	.Json5_Space      `dialect_skip`: VT, FF, NBSP, BOM, U+2028, U+2029 and the Zs spaces
 //	.Json5_Keys       `object_key`: a key unquoted (an IdentifierName) or single-quoted (`json5_key`)
 //	.Json5_Scalars    the value dispatch of `walk_frames`: single quotes, JSON5 escapes, hex, `.5`, `5.`, `+1`,
-//	                  `Infinity` and `NaN` (`json5_scalar`)
+//	                  `Infinity` and `NaN` (`json5_string`, `json5_number`)
 Grammar_Feature :: enum u8 {
 	Comments,
 	Trailing_Commas,
