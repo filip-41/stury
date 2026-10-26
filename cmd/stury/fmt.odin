@@ -54,6 +54,8 @@ fmt_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 		return "-e"
 	case o.strict_limits:
 		return "--strict-limits"
+	case o.explain:
+		return "--explain"
 	case cli.binding_flag != "":
 		return cli.binding_flag
 	case o.indent == 0:

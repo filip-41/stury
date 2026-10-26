@@ -57,10 +57,12 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 			continue
 		}
 		src := ins.data[at:limit]
+		run.explain.texts += int(run.explain.on)
 		if pieces && trailing && limit == len(ins.data) {
 			// Set before the filter runs, as its error tells the line jq's reader is on (`input_position`).
 			ins.seen = last_read(ins.data, at, limit)
 			if spine_pieces(run, ins.data, at, &built) {
+				explain_text(run, .Root_Pieces, "the root array is read in pieces on the batch pool")
 				ins.pos = limit
 				continue
 			}
@@ -68,20 +70,26 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 		// A JSONC text's comments print with the values they are attached to, which only the interpreter's
 		// values know: a text with a `/` in it, a comment's or a string's, is the interpreter's.
 		if run.opts.from == .Jsonc && bytes.index_byte(src, '/') >= 0 {
+			explain_text(run, .Interpreter, "--from jsonc: the text holds a `/`: the interpreter reads the rest")
 			run_filter(run, ins)
 			return
 		}
 		answers, end, err, refused := scan_outputs(run, src, trailing)
 		if refused {
+			explain_text(run, .Interpreter, "the scan refused the text at one of its limits: the interpreter reads the rest")
 			run_filter(run, ins)
 			return
 		}
 		if err == nil {
 			ins.pos, ins.seen = at + end, last_read(ins.data, at, at + end)
-			print_answers(run, answers, src[:end], u64(at))
 			// A `[]` path's texts are alike more often than not: once jq's rules settle one, they read the rest,
 			// which the scan would only read first.
-			if run.any_at >= 0 && len(answers) == 1 && answers[0].outcome == .Type_Mismatch {
+			mismatch := run.any_at >= 0 && len(answers) == 1 && answers[0].outcome == .Type_Mismatch
+			if mismatch {
+				explain_text(run, .Interpreter, "a `[]` step met a value of another kind: the interpreter reads the rest")
+			}
+			print_answers(run, answers, src[:end], u64(at))
+			if mismatch {
 				run_filter(run, ins)
 				return
 			}
@@ -92,11 +100,13 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 			continue
 		}
 		if read_on(ins, at) {
+			run.explain.texts -= int(run.explain.on) // counted again when the text is read whole
 			continue
 		}
 		if run.opts.from == .Jsonc {
 			jsonc_fault(ins, err.?, at)
 		}
+		explain_text(run, .Interpreter, "the text does not parse as the scan reads it: the interpreter reports the fault")
 		run_filter(run, ins)
 		return
 	}

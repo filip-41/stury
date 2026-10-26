@@ -99,6 +99,7 @@ Run :: struct {
 	ip:          jq.Interp,
 	out:         [dynamic]byte,
 	held:        bool, // a pool thread's copy, whose output the caller writes
+	explain:     Explain, // --explain (explain.odin)
 	silent:      bool, // fmt --check and --in-place: the output stays in `out` for the caller
 	name_faults: bool, // fmt: a parse fault names its file
 	verbatim:    bool, // fmt between JSON-like formats: each value is written from its source text
@@ -127,6 +128,7 @@ main :: proc() {
 	run.ret, run.last_result = JQ_OK_NO_OUTPUT, -1
 	cli := parse_args(&run.opts, command_args()[1:])
 	validating := cli.validating
+	run.explain.on = run.opts.explain
 	set_colors(&run, cli)
 	o := &run.opts
 	refuse_format_clashes(o, &cli)
@@ -140,6 +142,8 @@ main :: proc() {
 		usage_error("--stream makes jq's events of each input; check only judges it")
 	case o.strict_limits && !validating:
 		usage_error("--strict-limits is check's: a filter reads numbers as far as they can be held")
+	case o.explain && validating:
+		usage_error("--explain reports a filter's route: check has no filter")
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
@@ -180,6 +184,7 @@ main :: proc() {
 	// interpreter. The interpreter otherwise, readied here. `~/.jq` is included into every filter, a path too: it is
 	// loaded first, as jq fails a run on one that is bad, and a `select` it redefines is not the scan's.
 	run.program = {text, cli.var_names[:], cli.var_values[:], cli.positional[:], named}
+	explain_filter(&run)
 	run.home_module = jq.home_module(&run.ip)
 	if run.home_module {
 		ready_interpreter(&run)
@@ -189,6 +194,7 @@ main :: proc() {
 	if !run.scanning && (run.columns == nil || run.columns.selecting) {
 		ready_interpreter(&run)
 	}
+	explain_route(&run)
 	ins: Inputs
 	inputs_init(&ins, &run, names)
 	// A pipe is read as it comes, but by -s, which needs it all, and --from jsonc, whose faults count lines in it whole.
@@ -317,7 +323,12 @@ bind_cli_vars :: proc(run: ^Run) {
 choose_scan :: proc(run: ^Run, text: string) {
 	run.any_at = -1
 	o := run.opts
-	if o.null_input || o.slurp || o.sort_keys || o.ascii || o.exit_status || o.seq || o.stream || o.raw_input || o.raw0 || reads_cells(&o) || writes_cells(&o) {
+	if reads_cells(&o) {
+		return
+	}
+	stops := scan_stops(&o)
+	explain_why(run, stops)
+	if stops != {} && !run.explain.on {
 		return
 	}
 	@(static) steps: [json.MAX_PATH_STEPS]json.Step
@@ -327,6 +338,11 @@ choose_scan :: proc(run: ^Run, text: string) {
 		if p, ok = selected_path(run, text, steps[:]); !ok {
 			return
 		}
+	}
+	if stops != {} {
+		// Only the filter's own reasons were wanted: the scan does not run, so it keeps nothing of what it read.
+		run.select = {}
+		return
 	}
 	for s, i in p.steps {
 		if _, is_any := s.(json.Any); is_any && run.any_at < 0 {
@@ -354,31 +370,38 @@ choose_scan :: proc(run: ^Run, text: string) {
 selected_path :: proc(run: ^Run, text: string, steps: []json.Step) -> (p: json.Path, ok: bool) {
 	o := run.opts
 	if o.from == .Jsonc {
+		explain_why(run, {.Jsonc_Select})
 		return
 	}
 	ready_interpreter(run)
 	n := run.prog
 	if n.kind != .Call || n.name != "select" || len(n.args) != 1 {
+		explain_why(run, {.Not_Path})
 		return
 	}
 	if b, bound := n.native.?; !bound || b.native != jq.native_select {
+		explain_why(run, {.Select_Redefined})
 		return
 	}
 	cmp := n.args[0]
 	if cmp.kind != .Binary || cmp.op < .Eq || cmp.op > .Ge || cmp.b.kind != .Literal {
+		explain_why(run, {.Select_Compare})
 		return
 	}
 	if k := jq.kind(cmp.b.value); k == .Array || k == .Object {
+		explain_why(run, {.Select_Compare})
 		return
 	}
 	for x := cmp.a; x.kind != .Identity; x = x.a {
 		if x.kind != .Field && x.kind != .Index || x.opt {
+			explain_why(run, {.Select_Path})
 			return
 		}
 	}
 	path := text[cmp.a.loc.start:cmp.a.loc.end]
 	parsed, perr := json.parse_path(path, steps, make([]u8, len(path)))
 	if perr != nil || parsed.limit != 0 || len(parsed.steps) == 0 {
+		explain_why(run, {.Select_Path})
 		return
 	}
 	run.select = {cmp.op, cmp.b.value}

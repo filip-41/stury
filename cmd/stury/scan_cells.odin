@@ -48,11 +48,17 @@ Selected :: struct {
 // does.
 choose_columns :: proc(run: ^Run, text: string, files: int) {
 	o := &run.opts
-	if !reads_cells(o) || o.null_input || o.slurp || o.exit_status || o.color || o.ascii || o.raw0 {
+	if !reads_cells(o) {
+		return
+	}
+	stops := column_stops(o)
+	explain_why(run, stops)
+	if stops != {} {
 		return
 	}
 	parsed, errors := jq.parse(text)
 	if len(errors) > 0 || len(parsed.deps) > 0 || parsed.body == nil {
+		explain_why(run, {.Imports}) // a filter that does not parse is refused before the report
 		return
 	}
 	body := parsed.body
@@ -61,7 +67,7 @@ choose_columns :: proc(run: ^Run, text: string, files: int) {
 		return
 	}
 	if body.kind == .Object || body.kind == .Identity {
-		run.columns = object_columns(o, body)
+		run.columns = object_columns(run, body)
 		return
 	}
 	array := body.kind == .Array
@@ -69,7 +75,10 @@ choose_columns :: proc(run: ^Run, text: string, files: int) {
 		body = body.a
 	}
 	names: [dynamic]string
-	if (array && !o.compact && !writes_cells(o)) || !add_columns(&names, body) {
+	laid_out := array && !o.compact && !writes_cells(o)
+	named := add_columns(&names, body)
+	if laid_out || !named {
+		explain_why(run, ({.Layout} if laid_out else {}) + ({.Not_Columns} if !named else {}))
 		return
 	}
 	run.columns = new_clone(Columns{names = names[:], array = array, at = make([]int, len(names))})
@@ -79,12 +88,18 @@ choose_columns :: proc(run: ^Run, text: string, files: int) {
 // the input (`{a, b: .c}`). Returns nil for any other `body` or an output not printed here. A table's header is
 // the keys, so the interpreter handles --grow-header, a repeated key and any JSON layout but the compact one.
 @(private = "file")
-object_columns :: proc(o: ^Opts, body: ^jq.Node) -> ^Columns {
+object_columns :: proc(run: ^Run, body: ^jq.Node) -> ^Columns {
+	o := &run.opts
 	if writes_cells(o) ? o.grow_header : !o.compact {
+		explain_why(run, {.Grow_Header} if writes_cells(o) else {.Layout})
 		return nil
 	}
 	if body.kind == .Identity {
-		return nil if writes_cells(o) else new_clone(Columns{object = true, all = true, sorted = o.sort_keys})
+		if writes_cells(o) {
+			explain_why(run, {.Dot_To_Cells})
+			return nil
+		}
+		return new_clone(Columns{object = true, all = true, sorted = o.sort_keys})
 	}
 	Member :: struct {
 		key, name: string,
@@ -94,10 +109,12 @@ object_columns :: proc(o: ^Opts, body: ^jq.Node) -> ^Columns {
 		key, value := body.args[i], body.args[i + 1]
 		k, is_key := key.value.(string)
 		if key.kind != .Literal || !is_key {
+			explain_why(run, {.Object_Key})
 			return nil
 		}
 		for m in members {
 			if m.key == k {
+				explain_why(run, {.Object_Key})
 				return nil
 			}
 		}
@@ -107,6 +124,7 @@ object_columns :: proc(o: ^Opts, body: ^jq.Node) -> ^Columns {
 		case value.kind == .Field && !value.opt && value.a.kind == .Identity:
 			append(&members, Member{k, value.name})
 		case:
+			explain_why(run, {.Object_Member})
 			return nil
 		}
 	}
@@ -127,11 +145,23 @@ object_columns :: proc(o: ^Opts, body: ^jq.Node) -> ^Columns {
 @(private = "file")
 select_columns :: proc(run: ^Run, body: ^jq.Node, files: int) -> ^Columns {
 	o := &run.opts
-	if run.home_module || len(body.args) != 1 || (writes_cells(o) ? o.grow_header || files > 1 : !o.compact) {
-		return nil
+	whys: Whys
+	if run.home_module {
+		whys += {.Home_Module}
+	}
+	if writes_cells(o) {
+		whys += ({.Grow_Header} if o.grow_header else {}) + ({.Several_Files} if files > 1 else {})
+	} else if !o.compact {
+		whys += {.Layout}
 	}
 	watch: [dynamic]string
-	if !only_columns(body.args[0], &watch) {
+	if len(body.args) != 1 {
+		whys += {.Not_Columns}
+	} else if !only_columns(body.args[0], &watch) {
+		whys += {.Select_Columns}
+	}
+	if whys != {} {
+		explain_why(run, whys)
 		return nil
 	}
 	cols := Columns{object = true, all = true, sorted = o.sort_keys, selecting = true, watch = watch[:]}
@@ -455,6 +485,7 @@ table_openable :: proc(run: ^Run, cols: ^Columns) -> bool {
 // start without printing, so that `cells_ended` reports the fault as a sequential read does.
 @(private = "file")
 print_cells_in_pieces :: proc(run: ^Run, c: ^Cells, cols: ^Columns, runner: ^csv.Batch_Runner) -> (resumed: bool) {
+	explain_note(run, .Csv_Pieces, "a CSV file's records are read in pieces on the batch pool")
 	job := Cells_Scan{cols = cols, dialect = c.dialect}
 	start_pieces(&job, run)
 	defer end_pieces(&job)

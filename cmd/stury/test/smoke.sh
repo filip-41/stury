@@ -38,6 +38,25 @@ agree() {
 	[ "$code" = "$want" ] && cmp -s "$T/col.got" "$T/col.want" && cmp -s "$T/col.err" "$T/col.want.err" || { echo "FAIL $name: exit $code, interpreter $want"; fails=$((fails + 1)); }
 }
 
+# explained NAME WANT STURY_ARGS...: --explain leaves the run as it is (stdout, exit status, and stderr but for its own
+# lines), and its text and note lines, which hold what happened while the input was read, are WANT, one to a line.
+# The pool's notes are looked for only where a pool runs: a host with one core reads everything on one thread.
+cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+explained() {
+	name=$1 want=$2
+	shift 2
+	"$S" --explain "$@" >"$T/ex.got" 2>"$T/ex.err"
+	code=$?
+	"$S" "$@" >"$T/ex.want" 2>"$T/ex.want.err"
+	was=$?
+	grep -v '^stury: explain: ' "$T/ex.err" >"$T/ex.rest"
+	seen=$(grep -E '^stury: explain: (text [0-9]+|note):' "$T/ex.err")
+	if [ "$code" != "$was" ] || ! cmp -s "$T/ex.got" "$T/ex.want" || ! cmp -s "$T/ex.rest" "$T/ex.want.err" || [ "$seen" != "$want" ]; then
+		printf 'FAIL %s: exit %s (without the flag %s)\n got: %s\nwant: %s\n' "$name" "$code" "$was" "$seen" "$want"
+		fails=$((fails + 1))
+	fi
+}
+
 # check accepts what `stury .` accepts, the library's grammar, with nesting to 1024 and the digit and exponent
 # caps lifted, which --strict-limits holds (the small cases are cli.tsv's; these files are too long for it).
 "$S" -nr '"[" * 1024 + "]" * 1024' >"$T/deep1024.json"
@@ -101,6 +120,22 @@ got=$("$S" -c .a "$T/bom.ndjson" 2>/dev/null | wc -l | tr -d ' ')
 "$S" -nc '{u: [range(200000) | {a: .}]}' >"$T/wide.json"
 quick slice_tail 0 '100000' -c '.u[100000:] | length' "$T/wide.json"
 quick index_each 0 '199999' -c 'last(range(100000; 200000) as $i | .u[$i].a)' "$T/wide.json"
+# --explain names the pool's work once, and numbers a later text by the records the pool answered.
+if [ "$cores" -ge 2 ]; then
+	note='stury: explain: note: one record per line: the records are read on the batch pool'
+	{ head -n 300000 "$T/many.ndjson"; printf '{bad\n{"a":1}\n'; } >"$T/many_bad.ndjson"
+	{ head -n 300000 "$T/many.ndjson"; printf '5\n{"a":1}\n'; } >"$T/many_step.ndjson"
+	explained explain_records "$note" -c .a "$T/many.ndjson"
+	explained explain_records_fault "$note
+stury: explain: text 300001: the text does not parse as the scan reads it: the interpreter reports the fault" -c .a "$T/many_bad.ndjson"
+	explained explain_records_step "$note
+stury: explain: text 300001: a step met a value of another kind: the interpreter answers this text" -c .a "$T/many_step.ndjson"
+	rm -f "$T/many_bad.ndjson" "$T/many_step.ndjson"
+	explained explain_root_pieces 'stury: explain: text 1: the root array is read in pieces on the batch pool' -c '.u[].a' "$T/wide.json"
+fi
+printf '{"a":1}\n' >"$T/small.json"
+explained explain_small_file '' -c .a "$T/small.json"
+explained explain_interpreter '' -c '.u | length' "$T/wide.json"
 
 # Recursion jq runs in constant memory, a million levels deep: the answer, and a peak RSS under 32 MB.
 # macOS caps no memory with ulimit, so the peak is read from time(1): BSD's -l in bytes, GNU's %M in KB; a
@@ -326,6 +361,7 @@ capped csv_slurp 600 600000 --from csv -s 'length' "$T/big.csv"
 got=$(peak_mb --from csv -r '.msg, .id' "$T/big.csv")
 "$S" --from csv -r '(.msg, .id) | .' "$T/big.csv" >"$T/col.want"
 cmp -s "$T/out" "$T/col.want" && [ "${got:-999}" -lt 80 ] || { echo "FAIL csv_columns_pieces: $got MB"; fails=$((fails + 1)); }
+[ "$cores" -lt 2 ] || explained explain_csv_pieces "stury: explain: note: a CSV file's records are read in pieces on the batch pool" --from csv -r .msg "$T/big.csv"
 { cat "$T/big.csv"; printf '1,2\n'; } >"$T/bad.csv"
 agree csv_columns_fault .msg "$T/bad.csv" --from csv -r
 [ "$code" = 5 ] || { echo "FAIL csv_columns_fault: exit $code"; fails=$((fails + 1)); }
