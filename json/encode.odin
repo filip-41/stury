@@ -264,8 +264,8 @@ document_members :: proc(doc: ^Document, n: Node, opts: Marshal_Opts, allocator:
 }
 
 // A JSON5 number spelled outside JSON's grammar (`DIALECT_SPELLED`), in JSON's spelling: a hex integer in
-// decimal (past `u64`, its nearest double), a decimal without its `+`, with a `0` before a leading point and
-// without a trailing point. `Infinity` and `NaN` have no JSON spelling and are `.Non_Finite`.
+// decimal (past 64 bits, the double its digits accumulate to, as `json5_number_value` reads it), a decimal
+// without its `+`, with a `0` before a leading point and without a trailing point. `Infinity` and `NaN` have no JSON spelling and are `.Non_Finite`.
 @(private = "file")
 json5_number_as_json :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, lit: string) -> Marshal_Error {
 	v, _ := get_number(doc, n)
@@ -281,11 +281,12 @@ json5_number_as_json :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, lit: 
 	}
 	if len(lit) > p + 1 && lit[p + 1] | 0x20 == 'x' {
 		digits: [32]u8
-		if mag, ok := strconv.parse_u64_of_base(lit[p + 2:], 16); ok {
+		mag, approx, over := scan_pkg.json5_hex(transmute([]byte)lit, u64(p + 2), u64(len(lit)))
+		if !over {
 			return enc.put_bytes(buf, strconv.write_uint(digits[:], mag, 10))
 		}
 		// `write_float` leads with the sign.
-		return enc.put_bytes(buf, strconv.write_float(digits[:], abs(v.value), 'g', -1, 64)[1:])
+		return enc.put_bytes(buf, strconv.write_float(digits[:], approx, 'g', -1, 64)[1:])
 	}
 	if lit[p] == '.' {
 		enc.put_byte(buf, '0') or_return

@@ -30,7 +30,8 @@ Unknown_Fields :: core_pkg.Unknown_Fields
 //	limits      a `max_depth` past MAX_DEPTH is held to MAX_DEPTH: the shape walk's frames do not spill.
 //	dialect     `.Jsonc` reads comments and trailing commas, every byte checked whatever `strictness` says.
 //	            `.Json5` reads JSON5 through its JSON spelling (`read_json5`): strings are always copied, and
-//	            `Infinity` and `NaN` are `.Out_Of_Range`. A record read (`Record_Read`) refuses it.
+//	            `Infinity` and `NaN` are `.Out_Of_Range`, and an error's `Name` step for a key holding an escape
+//	            is its decoded text, made with `allocator`. A record read (`Record_Read`) refuses it.
 Unmarshal_Opts :: struct {
 	using read:     Read_Opts,
 	unknown_fields: Unknown_Fields,

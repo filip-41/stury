@@ -3,14 +3,15 @@ package scan
 // JSON5 1.0.0's tokens on the dialect walk: its whitespace, its keys, its strings and its numbers. A token
 // the walk accepts in JSON's spelling is read by JSON's own leaf, so its row is a JSON row.
 //
-// Rows: a string or key token counts as plain only when it is double-quoted with no backslash. A single-quoted
-// token, an unquoted key and a token holding an escape are escaped rows, which a reader decodes by JSON5's
+// Rows: a string or key token counts as plain only when it is double-quoted with no backslash and no raw
+// control byte. A single-quoted token, an unquoted key and a token holding an escape or a control byte are escaped rows, which a reader decodes by JSON5's
 // escapes (`json5_unescape_into`, `json5_name_equals`, `Key_Bytes`). A number spelled outside JSON's grammar
 // carries the digit pack `number.DIALECT_SPELLED`, which sends its readers to `number.json5_number_value`.
 //
-// Deliberate limits: a lone surrogate escape is refused (it has no UTF-8), an identifier takes the Unicode
-// letters `unicode.is_letter` knows and not the letter numbers (Nl), and a comment's bytes are checked as
-// JSONC checks them.
+// Deliberate limits: a lone surrogate escape is refused (it has no UTF-8), an identifier takes the characters
+// `unicode.is_letter` knows (Lu, Ll, Lt, Lm, Lo) and not the letter numbers (Nl) that ES5 also allows, and
+// after its first character the decimal digits (Nd), the marks Mn and Mc, and the connectors Pc. A comment's
+// bytes are checked as JSONC checks them.
 
 import "core:unicode"
 import "core:unicode/utf8"
@@ -141,7 +142,7 @@ identifier_rune :: proc(r: rune, start: bool) -> bool {
 	case 0x200C, 0x200D, 0x203F, 0x2040, 0x2054, 0xFE33, 0xFE34, 0xFE4D ..= 0xFE4F, 0xFF3F:
 		return true
 	}
-	return unicode.is_digit(r) || unicode.is_nonspacing_mark(r) || unicode.is_spacing_mark(r)
+	return unicode.is_decimal(r) || unicode.is_nonspacing_mark(r) || unicode.is_spacing_mark(r)
 }
 
 // The string at `s.pos` in either quote. Every escape is checked (`json5_escape_unit`), a raw LF or CR is
@@ -194,6 +195,15 @@ json5_string :: proc(s: ^Scanner, q: ^Query_Ctx, lo: u64, key: bool, $Q: bit_set
 			s.pos = next
 		case c == '\n' || c == '\r':
 			return Error{offset = s.pos, kind = .Bad_Char}
+		case c < 0x20:
+			// A raw control byte is legal JSON5 but not JSON, so its token is an escaped row: a reader that
+			// respells it as JSON (`jq_string`) escapes it.
+			if !escaped {
+				escaped = true
+				first_esc = s.pos - lo
+			}
+			dec_len += 1
+			s.pos += 1
 		case c < 0x80:
 			dec_len += 1
 			s.pos += 1
@@ -235,7 +245,7 @@ json5_escape_unit :: proc(src: []byte, p, end: u64, unit: []u8) -> (n: int, next
 		if p + 4 > end {
 			return 0, p, false
 		}
-		hi, lo := hex_value(src[p + 2]), hex_value(src[p + 3])
+		hi, lo := lex.HEX_NIBBLE[src[p + 2]], lex.HEX_NIBBLE[src[p + 3]]
 		if hi > 15 || lo > 15 {
 			return 0, p, false
 		}
@@ -266,16 +276,6 @@ json5_escape_unit :: proc(src: []byte, p, end: u64, unit: []u8) -> (n: int, next
 	}
 	unit[0] = single
 	return 1, p + 2, true
-}
-
-@(private = "file")
-hex_value :: #force_inline proc(b: u8) -> u8 {
-	switch b {
-	case '0' ..= '9': return b - '0'
-	case 'a' ..= 'f': return b - 'a' + 10
-	case 'A' ..= 'F': return b - 'A' + 10
-	}
-	return 0xFF
 }
 
 // The decoded text of the JSON5 string or key token `src[lo:hi]` a dialect walk accepted, written to `dst`:
@@ -357,7 +357,7 @@ json5_number :: proc(s: ^Scanner, q: ^Query_Ctx, lo: u64, $Q: bit_set[Walk_Kind]
 		if p + 1 < n && src[p + 1] | 0x20 == 'x' {
 			at := p + 2
 			p = at
-			for p < n && hex_value(src[p]) < 16 {
+			for p < n && lex.HEX_NIBBLE[src[p]] < 16 {
 				p += 1
 			}
 			if p == at {
@@ -441,12 +441,9 @@ json5_int :: proc(src: []byte, lo, hi: u64) -> (v: i64, ok: bool) {
 		p += 1
 	}
 	if hi - p > 2 && src[p] == '0' && src[p + 1] | 0x20 == 'x' {
-		mag: u64
-		for i in p + 2 ..< hi {
-			if mag > max(u64) >> 4 {
-				return 0, false
-			}
-			mag = mag << 4 | u64(hex_value(src[i]))
+		mag, _, over := number.json5_hex(src, p + 2, hi)
+		if over {
+			return 0, false
 		}
 		if neg {
 			if mag > u64(max(i64)) + 1 {

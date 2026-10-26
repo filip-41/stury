@@ -193,7 +193,7 @@ test_json5_unmarshal :: proc(t: ^testing.T) {
 	err = json.unmarshal(raw("{a: 1, 'b\\u0063': 2}"), &u, {dialect = .Json5, unknown_fields = .Refuse}, nil, context.temp_allocator)
 	e, refused = err.?
 	testing.expectf(t, refused && e.kind == .Unknown_Field && e.offset == 7, "%v", err)
-	testing.expect(t, e.n_steps == 1 && e.steps[0] == json.Name(`b\u0063`))
+	testing.expect(t, e.n_steps == 1 && e.steps[0] == json.Name("bc"))
 
 	syn := json.unmarshal(raw("{a: 01}"), &u, {dialect = .Json5}, nil, context.temp_allocator)
 	testing.expectf(t, syn != nil && syn.?.kind == .Syntax && syn.?.syntax == .Bad_Number && syn.?.offset == 5, "%v", syn)
@@ -227,4 +227,69 @@ test_json5_marshal_respells_and_edits_refuse :: proc(t: ^testing.T) {
 	testing.expect(t, serr != nil && serr.?.kind == .Bad_Option)
 	_, rerr := json.remove(raw("{a: 1}"), ".a", .Json5, context.temp_allocator)
 	testing.expect(t, rerr != nil && rerr.?.kind == .Bad_Option)
+}
+
+// A raw control byte is legal in a JSON5 string or key but not in JSON: the readers give it as it is, and the
+// JSON spelling (`marshal`, `unmarshal`) escapes it.
+@(test)
+test_json5_control_bytes_are_escaped_in_json_spelling :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := raw("{\"a\": \"t\tx\", 'k\ty': \"\x01\"}")
+	doc, err := json.build(src, {dialect = .Json5})
+	defer json.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	a, _ := json.get_string(&doc, json.child(&doc, json.ROOT, "a"))
+	testing.expect_value(t, a, "t\tx")
+	k, kok := json.get_string(&doc, json.child(&doc, json.ROOT, "k\ty"))
+	testing.expect(t, kok && k == "\x01")
+	out, merr := json.marshal(&doc, {}, context.temp_allocator)
+	testing.expect_value(t, merr, json.Marshal_Error.None)
+	testing.expect_value(t, string(out), `{"a":"t\tx","k\ty":"\u0001"}`)
+	testing.expect_value(t, json.validate(out), nil)
+
+	T :: struct {
+		a: string,
+	}
+	v: T
+	testing.expect_value(t, json.unmarshal(src, &v, {dialect = .Json5}, nil, context.temp_allocator), nil)
+	testing.expect_value(t, v.a, "t\tx")
+}
+
+// A hex integer past 64 bits is its double in JSON's spelling, as `get_number` reads it; one that fits is exact.
+@(test)
+test_json5_wide_hex_respells_as_its_double :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	doc, err := json.build(raw("[0x10000000000000000, 0x1FFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, -0x10000000000000000]"), {dialect = .Json5})
+	defer json.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	out, merr := json.marshal(&doc, {}, context.temp_allocator)
+	testing.expect_value(t, merr, json.Marshal_Error.None)
+	testing.expect_value(t, string(out), "[1.8446744073709552e+19,3.6893488147419103e+19,18446744073709551615,-1.8446744073709552e+19]")
+	back, perr := json.build(out)
+	defer json.destroy(&back)
+	testing.expect_value(t, perr, nil)
+	for i in 1 ..= 4 {
+		wide, _ := json.get_number(&doc, json.Node(i))
+		again, _ := json.get_number(&back, json.Node(i))
+		testing.expectf(t, wide.value == again.value, "%d: %v and %v", i, wide.value, again.value)
+	}
+}
+
+// A dialect reads every byte as `.Strict` does: `strictness` changes nothing for `.Json5`.
+@(test)
+test_json5_ignores_strictness :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	bad := raw("{a: 1, b: 0x}")
+	good := raw("{a: 1, b: 2}")
+	T :: struct {
+		a: int,
+	}
+	for s in json.Strictness {
+		testing.expect(t, json.validate(bad, {dialect = .Json5, strictness = s}) != nil)
+		testing.expect_value(t, json.validate(good, {dialect = .Json5, strictness = s}), nil)
+		_, berr := json.build(bad, {dialect = .Json5, strictness = s})
+		testing.expect(t, berr != nil)
+		v: T
+		testing.expect(t, json.unmarshal(bad, &v, {dialect = .Json5, strictness = s}, nil, context.temp_allocator) != nil)
+	}
 }

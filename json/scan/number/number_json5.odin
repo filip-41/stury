@@ -1,11 +1,24 @@
 package number
 
 import "core:math"
+import lex "../lex"
 
 // The digit pack of a number row whose token is spelled outside JSON's grammar (JSON5's hex, `.5`, `5.`, `+1`,
 // `Infinity`, `NaN`). A JSON token never packs zero integer digits, so the readers test for it only on the
 // arm that already falls back to the text.
 DIALECT_SPELLED :: u16(0xFF00)
+
+// The hex digits `src[lo:hi]` of a JSON5 hex token: `mag` is their value when it fits 64 bits (`over` is set
+// when it does not, and `mag` has wrapped), and `approx` always their value accumulated as a double.
+json5_hex :: proc(src: []byte, lo, hi: u64) -> (mag: u64, approx: f64, over: bool) {
+	for i in lo ..< hi {
+		d := u64(lex.HEX_NIBBLE[src[i]])
+		over ||= mag > max(u64) >> 4
+		mag = mag << 4 | d
+		approx = approx * 16 + f64(d)
+	}
+	return
+}
 
 // The value of a JSON5 number token a dialect walk accepted with `DIALECT_SPELLED`. `Infinity` and `NaN` are
 // `.Exact`: the value is the one written. A decimal token is respelled as JSON (no `+`, a `0` before a leading
@@ -26,16 +39,7 @@ json5_number_value :: proc(src: []byte, lo, hi: u64) -> Number {
 	case src[p] == 'N':
 		return {math.nan_f64(), .Exact}
 	case hi - p > 2 && src[p] == '0' && src[p + 1] | 0x20 == 'x':
-		mag: u64
-		f: f64
-		over := false
-		for i in p + 2 ..< hi {
-			b := src[i]
-			d := u64(b - '0') if b <= '9' else u64((b | 0x20) - 'a' + 10)
-			over ||= mag > max(u64) >> 4
-			mag = mag << 4 | d
-			f = f * 16 + f64(d)
-		}
+		mag, f, over := json5_hex(src, p + 2, hi)
 		if !over {
 			f = f64(mag)
 			if f < 18446744073709551616.0 && u64(f) == mag {

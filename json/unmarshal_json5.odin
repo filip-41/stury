@@ -3,14 +3,15 @@ package json
 // `unmarshal` of a JSON5 text, through its JSON spelling.
 
 import "base:runtime"
+import "core:strings"
 import core_pkg "../core"
+import scan_pkg "scan"
 import "scan/walk"
 
 // Read the JSON5 text `src` as `read_planned` reads JSON: built as a document, written in JSON's spelling with
 // its comments (`marshal_document`), and that text read as JSONC with every string copied. A refusal's offset
 // and key names point into `src`. `Infinity` and `NaN`, which have no JSON spelling, are `.Out_Of_Range` at
 // the first of them.
-// ponytail: three passes over the text and a copy of it; a native JSON5 shape walk when typed JSON5 reads matter.
 @(private)
 read_json5 :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Type_Plan, allocator: runtime.Allocator) -> Maybe(Unmarshal_Error) {
 	// A repeat refused outranks a fault after it, as in JSON, so the build refuses it.
@@ -40,7 +41,7 @@ read_json5 :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Type_
 	as_json.borrow_strings = false
 	err := read_planned(text, dest, as_json, plan, allocator)
 	if e, refused := err.?; refused {
-		return json5_error_at(src, &doc, text, e)
+		return json5_error_at(src, &doc, text, e, allocator)
 	}
 	return nil
 }
@@ -60,9 +61,10 @@ non_finite_at :: proc(doc: ^Document) -> u64 {
 
 // `e`, a refusal of `text` (`doc` written in JSON's spelling), pointed back into `src`: the two texts have the
 // same values in the same order, so a value, key or closing bracket of row `i` in one is row `i`'s in the other.
-// A key name the path borrows from `text` borrows the same key as authored in `src`.
+// A key name the path borrows from `text` borrows the same key as authored in `src`, or, for a key that holds
+// an escape, is its decoded text made with `allocator`, which the caller owns.
 @(private = "file")
-json5_error_at :: proc(src: []byte, doc: ^Document, text: []byte, e: Unmarshal_Error) -> Unmarshal_Error {
+json5_error_at :: proc(src: []byte, doc: ^Document, text: []byte, e: Unmarshal_Error, allocator: runtime.Allocator) -> Unmarshal_Error {
 	e := e
 	spelled, err := build(text, {dialect = .Jsonc})
 	defer destroy(&spelled)
@@ -97,14 +99,26 @@ json5_error_at :: proc(src: []byte, doc: ^Document, text: []byte, e: Unmarshal_E
 			if r.key_lo == walk.NO_KEY || u64(at - text_lo) < u64(r.key_lo) || u64(at - text_lo) >= u64(r.key_hi) {
 				continue
 			}
-			s := doc.rows[i]
-			lo, hi := u64(s.key_lo), u64(s.key_hi)
-			if src[lo] == '"' || src[lo] == '\'' {
-				lo, hi = lo + 1, hi - 1
-			}
-			step = core_pkg.Name(string(src[lo:hi]))
+			step = core_pkg.Name(json5_key_name(src, doc.rows[i], allocator))
 			break
 		}
 	}
 	return e
+}
+
+// The key of `row` as authored in `src`, unquoted; decoded into `allocator` when it holds an escape.
+@(private = "file")
+json5_key_name :: proc(src: []byte, row: scan_pkg.Row, allocator: runtime.Allocator) -> string {
+	lo, hi := u64(row.key_lo), u64(row.key_hi)
+	token := string(src[lo:hi])
+	if strings.contains_rune(token, '\\') {
+		decoded := make([]byte, len(token), allocator)
+		if decoded != nil {
+			return string(decoded[:scan_pkg.json5_unescape_into(decoded, src, lo, hi, 0)])
+		}
+	}
+	if src[lo] == '"' || src[lo] == '\'' {
+		lo, hi = lo + 1, hi - 1
+	}
+	return string(src[lo:hi])
 }
