@@ -16,10 +16,20 @@ runs:
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        curl -fsSL -o "$RUNNER_TEMP/llvm.sh" https://apt.llvm.org/llvm.sh
-        sudo bash "$RUNNER_TEMP/llvm.sh" "${{ inputs.llvm }}"
+        # apt.llvm.org's repository under its signing key, pinned by fingerprint; apt then verifies every package
+        # against that key. The key file must hold exactly that one primary key.
+        want=6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+        curl -fsSL -o "$RUNNER_TEMP/llvm.asc" https://apt.llvm.org/llvm-snapshot.gpg.key
+        got=$(gpg --show-keys --with-colons "$RUNNER_TEMP/llvm.asc" | awk -F: '$1 == "pub" { p = 1; next } $1 == "fpr" && p { print $10; p = 0 }')
+        [ "$got" = "$want" ] || { echo "apt.llvm.org key fingerprint is '$got', expected $want"; exit 1; }
+        sudo install -d -m 0755 /etc/apt/keyrings
+        gpg --dearmor < "$RUNNER_TEMP/llvm.asc" | sudo tee /etc/apt/keyrings/apt.llvm.org.gpg > /dev/null
+        . /etc/os-release
+        echo "deb [signed-by=/etc/apt/keyrings/apt.llvm.org.gpg] https://apt.llvm.org/$VERSION_CODENAME/ llvm-toolchain-$VERSION_CODENAME-${{ inputs.llvm }} main" |
+          sudo tee /etc/apt/sources.list.d/apt.llvm.org.list > /dev/null
+        sudo apt-get update
         # GNU time: smoke.sh reads a run's peak RSS from `/usr/bin/time -f %M`.
-        sudo apt-get install -y time
+        sudo apt-get install -y "clang-${{ inputs.llvm }}" "lld-${{ inputs.llvm }}" "llvm-${{ inputs.llvm }}" time
         echo "/usr/lib/llvm-${{ inputs.llvm }}/bin" >> "$GITHUB_PATH"
 
     - name: LLVM (macOS)
@@ -42,14 +52,25 @@ runs:
           Windows-X64) os=windows-amd64 ;;
           *) echo "no Odin release for ${{ runner.os }}-${{ runner.arch }}"; exit 1 ;;
         esac
-        echo "name=odin-$os-${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+        name="odin-$os-${{ inputs.version }}"
+        # SHA-256 of each release asset, from the release's published digests. A version not listed here fails
+        # until its hashes are added.
+        case "$name" in
+          odin-linux-amd64-dev-2026-10)   sha=c3c8b095621fd0c75f7f73e3a0829f1b4d45324225f20ba11ed8dc4da310a8ab ;;
+          odin-linux-arm64-dev-2026-10)   sha=99c43e9670a285901d6cfee5f56197b74c7d6f7c537b35ecba0c1b44ac2e4df8 ;;
+          odin-macos-arm64-dev-2026-10)   sha=b276c6ac87c3eea17446a6ca9080089b6e9f492057fb773591775ee49d92a1cf ;;
+          odin-windows-amd64-dev-2026-10) sha=b6b2e426a8b6f147b74ec7e18bef8df27cf40fe16193159df7ca09a0cc0c2011 ;;
+          *) echo "no pinned sha256 for $name: add it to .github/actions/setup-odin/action.yml"; exit 1 ;;
+        esac
+        echo "name=$name" >> "$GITHUB_OUTPUT"
+        echo "sha256=$sha" >> "$GITHUB_OUTPUT"
         # Windows releases are zips, the others tarballs.
         [ "${{ runner.os }}" = Windows ] && ext=zip || ext=tar.gz
         echo "ext=$ext" >> "$GITHUB_OUTPUT"
 
     - name: Cache Odin
       id: cache
-      uses: actions/cache@v4
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
       with:
         path: ~/odin
         key: ${{ steps.asset.outputs.name }}
@@ -62,7 +83,9 @@ runs:
         archive="$RUNNER_TEMP/odin.${{ steps.asset.outputs.ext }}"
         curl -fsSL -o "$archive" \
           "https://github.com/odin-lang/Odin/releases/download/${{ inputs.version }}/${{ steps.asset.outputs.name }}.${{ steps.asset.outputs.ext }}"
-        openssl dgst -sha256 "$archive"
+        got=$(openssl dgst -sha256 "$archive" | awk '{ print $NF }')
+        [ "$got" = "${{ steps.asset.outputs.sha256 }}" ] ||
+          { echo "sha256 of ${{ steps.asset.outputs.name }} is $got, expected ${{ steps.asset.outputs.sha256 }}"; exit 1; }
         case "$archive" in
           *.zip) unzip -q "$archive" -d ~/odin ;;
           *) tar -xzf "$archive" -C ~/odin ;;
