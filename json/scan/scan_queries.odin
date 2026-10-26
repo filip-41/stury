@@ -446,6 +446,7 @@ scan_queries_in :: #force_inline proc(
 		}
 		if keyed {
 			key_set_init(&keys, &key_scratch, key_alloc)
+			keys.json5 = .Json5_Keys in GRAMMAR[dialect]
 		}
 		defer if keyed {
 			key_set_destroy(&keys)

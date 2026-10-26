@@ -151,6 +151,34 @@ test_json5_find_by_decoded_key :: proc(t: ^testing.T) {
 	testing.expect(t, e.outcome == .Found && string(src[e.lo:e.hi]) == "5")
 }
 
+// `.Refuse` compares keys by their decoded names, however each is spelled.
+@(test)
+test_json5_refuse_compares_decoded_keys :: proc(t: ^testing.T) {
+	when !REFUSE_DUPLICATES {
+		return // `.Refuse` is compiled out; test_refuse_compiled_out pins that
+	}
+	Case :: struct {
+		src:       string,
+		duplicate: bool,
+	}
+	cases := []Case{
+		{`{a: 1, "a": 2}`, true},
+		{`{'a': 1, a: 2}`, true},
+		{`{a: 1, "a": 2}`, true},
+		{`{a: 1, b: 2}`, false},
+		{`{ab: 1, 'a': 2, "b": 3}`, false},
+	}
+	for c in cases {
+		doc, berr := json.build(raw(c.src), {dialect = .Json5, duplicates = .Refuse})
+		json.destroy(&doc)
+		_, ferr := json.find(raw(c.src), ".a", {dialect = .Json5, duplicates = .Refuse})
+		for err in ([]Maybe(json.Error){berr, ferr}) {
+			e, refused := err.?
+			testing.expectf(t, refused == c.duplicate && (!refused || e.kind == .Duplicate_Key), "%s: %v", c.src, err)
+		}
+	}
+}
+
 // A JSON5 document keeps its comments as a JSONC one does.
 @(test)
 test_json5_comments_attach_to_rows :: proc(t: ^testing.T) {
