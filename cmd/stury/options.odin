@@ -89,7 +89,8 @@ stury's own options:
   check                     judge the inputs, print nothing when valid;
   fmt                       write each input in the printer's layout, or
                             transcode it (--from, --to);
-      --from format         read json (default), jsonc, ndjson, csv or tsv;
+      --from format         read json (default), jsonc, json5, ndjson,
+                            csv or tsv;
       --to format           write json (default), jsonc, ndjson, csv or tsv;
       --in-place            with fmt, rewrite each file in place;
       --check               with fmt, print nothing: exit 1 when a file is
@@ -124,6 +125,7 @@ Opts :: struct {
 	stream:           bool, // jq's --stream: each input as [path, leaf] events
 	stream_errors:    bool, // and an error as a [message, path] event
 	from:             Format, // how the input is read
+	json5:            bool, // --from json5: `from` is .Jsonc, and each input is transcoded to JSONC first
 	to:               Format, // how the outputs are written
 	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
 	strict_limits:    bool, // check: the library's depth, digit and scale caps hold
@@ -180,6 +182,9 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
+	if o.from == .Json5 {
+		o.from, o.json5 = .Jsonc, true
+	}
 	if o.from == .Jsonc {
 		jq.read_dialect = .Jsonc
 	}
@@ -308,10 +313,12 @@ format_option :: proc(cli: ^Cli, args: []string, i: int) {
 	}
 	f, ok := format_named(args[i + 1])
 	if !ok {
-		usage_error("%s takes one of %s, not %q", a, format_names(), args[i + 1])
+		usage_error("%s takes one of %s, not %q", a, format_names(a == "--to"), args[i + 1])
 	}
 	if a == "--from" {
 		cli.formats.from = f
+	} else if f == .Json5 {
+		usage_error("--to does not write json5: --to jsonc writes its values and comments")
 	} else {
 		cli.formats.to = f
 	}

@@ -6,11 +6,17 @@
 
 - `route_of` names the engine that answers a path of a request, or the reason the automaton does
   (`Path_Route`), without a scan, and refuses a request as `scan` does.
+- `Dialect.Json5` reads JSON5 1.0.0 in `validate`, `scan`, `find`, `query`, `build` and `unmarshal`. A
+  JSON5 document marshals in JSON's spelling, comments kept; `Infinity` and `NaN` are refused
+  (`.Non_Finite` in `marshal`, `.Out_Of_Range` in `unmarshal`). The edits and `Record_Read` refuse it
+  (`.Bad_Option`).
 
 ### Command line
 
 - `--explain` writes the filter's plan (route, path or columns, engine, refusals) and what the run did (texts scanned or
   interpreted, pieces, fallback, time, cost) to stderr, and runs the filter as without it.
+- `--from json5` reads each input as JSON5, transcoded to JSONC; `check --from json5` and `fmt --from json5`
+  too. `--to json5` is refused.
 - `--stream` gives the events of a faulty text before its fault, as jq does, and `input_line_number` and the
   error positions under `--stream` count jq's lines.
 - `--stream-errors` makes a faulty text's events as it gives them, not all before the first.

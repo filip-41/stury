@@ -46,7 +46,7 @@ read_json5 :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Type_
 }
 
 // The offset of the first number in `doc` that is `Infinity` or `NaN`.
-@(private = "file")
+@(private)
 non_finite_at :: proc(doc: ^Document) -> u64 {
 	for r, i in doc.rows {
 		if r.kind == .Number {

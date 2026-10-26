@@ -218,6 +218,10 @@ test_json5_marshal_respells_and_edits_refuse :: proc(t: ^testing.T) {
 	defer json.destroy(&nan)
 	_, nerr := json.marshal(&nan, {}, context.temp_allocator)
 	testing.expect_value(t, nerr, json.Marshal_Error.Non_Finite)
+	_, ferr := json.format(raw("[1, -Infinity]"), {}, .Json5, context.temp_allocator)
+	testing.expect_value(t, ferr, json.Error{kind = .Bad_Number, offset = 4})
+	fout, _ := json.format(raw("{a: 0x10}"), {}, .Json5, context.temp_allocator)
+	testing.expect_value(t, string(fout), `{"a":16}`)
 
 	_, serr := json.set(raw("{a: 1}"), ".a", 2, dialect = .Json5, allocator = context.temp_allocator)
 	testing.expect(t, serr != nil && serr.?.kind == .Bad_Option)

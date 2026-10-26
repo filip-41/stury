@@ -3,7 +3,7 @@ package walk
 import "base:intrinsics"
 
 // Format_Hooks is the table of scanner procedures that this package's matchers call; this package cannot import
-// the scanner. There is one read-only table per dialect (`json/scan/format_hooks.odin`, `FORMAT_HOOKS_JSONC`).
+// the scanner. There is one read-only table per dialect (`json/scan/dialect.odin`: `FORMAT_HOOKS_JSONC`, `FORMAT_HOOKS_JSON5`).
 // Each scan holds a pointer to its dialect's table (`Query_Ctx.hooks`), so concurrent scans share it without
 // writing it.
 Format_Hooks :: struct {

@@ -8,6 +8,7 @@ import csv "../../csv"
 Format :: enum u8 {
 	Json,
 	Jsonc,
+	Json5, // read only: each input is transcoded to JSONC, then read as --from jsonc
 	Ndjson,
 	Csv,
 	Tsv,
@@ -24,6 +25,7 @@ Format_Spec :: struct {
 FORMATS := [Format]Format_Spec {
 	.Json   = {name = "json"},
 	.Jsonc  = {name = "jsonc"},
+	.Json5  = {name = "json5"},
 	.Ndjson = {name = "ndjson"},
 	.Csv    = {name = "csv", cells = true},
 	.Tsv    = {name = "tsv", cells = true, dialect = csv.TSV},
@@ -38,10 +40,13 @@ format_named :: proc(name: string) -> (f: Format, ok: bool) {
 	return
 }
 
-// Returns the comma-separated format names for `--from` and `--to` messages.
-format_names :: proc() -> string {
+// Returns the comma-separated format names for `--from` and `--to` messages: json5 is only read.
+format_names :: proc(writing: bool) -> string {
 	b := make([dynamic]byte, context.temp_allocator)
 	for spec, k in FORMATS {
+		if writing && k == .Json5 {
+			continue
+		}
 		if k != .Json {
 			append(&b, ", ")
 		}
@@ -63,7 +68,7 @@ writes_cells :: #force_inline proc(o: ^Opts) -> bool {
 // Refuses options that conflict with the chosen formats. A non-JSON input format splits the input itself, so -R,
 // --seq and --stream do not apply. A CSV-like output writes no JSON text, so JSON layout options do not apply.
 refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
-	from, to := FORMATS[o.from].name, FORMATS[o.to].name
+	from, to := FORMATS[.Json5 if o.json5 else o.from].name, FORMATS[o.to].name
 	if o.from != .Json {
 		other := "--seq" if o.seq else "-R" if o.raw_input else "--stream" if o.stream && o.from != .Ndjson else ""
 		if other != "" {

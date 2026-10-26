@@ -38,7 +38,7 @@ back byte for byte.
 .SH OPTIONS
 .TP
 .BI \-\-from " format"
-Read json (the default), jsonc, ndjson, csv or tsv. With check, judge the input as that format is read.
+Read json (the default), jsonc, json5, ndjson, csv or tsv. With check, judge the input as that format is read.
 .TP
 .BI \-\-to " format"
 Write json (the default), jsonc, ndjson (as \-c), csv or tsv. csv and tsv write each output as one record. An object is a row under a header of the first object's keys (sorted under \-S). A missing key is an empty cell, and an extra key ends the run with exit 5. An array or a scalar is a row with no header, and the two kinds do not mix. A string is its text, a number is spelled as jq spells it, and null is an empty cell. csv writes "" as a quoted empty cell; tsv cannot tell the two apart. An array or object in a cell ends the run (tojson makes text of it). Not with \-r, \-j, \-a, \-C, \-c, \-\-indent, \-\-tab, \-\-seq or \-\-raw\-output0, and not with check.
@@ -51,6 +51,9 @@ Read one JSON text per line, and with \-\-to ndjson print compact, one value per
 .TP
 .BI \-\-from " jsonc"
 Read JSONC (comments and trailing commas), also for \-\-argjson, \-\-jsonargs, \-\-slurpfile (one document per file) and fromjson. Values print with their comments.
+.TP
+.BI \-\-from " json5"
+Read JSON5 1.0.0: each input is one text, transcoded to JSONC (comments kept) and then read as \-\-from jsonc. Infinity and NaN end the run, having no JSON value. Read only: not \-\-to json5, nor fmt \-\-in\-place. \-\-argjson, \-\-slurpfile and fromjson read JSONC.
 .TP
 .BI \-\-from " csv"
 Read CSV (RFC 4180). The first record of each file names the fields. Each later record is one input, an object of those names with each cell's text as a string, never a number. An empty cell with no quotes is null and a quoted "" is ""; every empty tsv cell is null. A repeated header name, a record of another width and a fault in the text end the file with NAME:LINE:COLUMN: FAULT and exit 5. A file up to 64 MiB is read whole. A larger file, a pipe and a file under \-n are read a window at a time, and a window holds the longest record. A filter that is only columns (.name, .a, .b, or [.a, .b] under \-c) is printed from the cells in pieces on every core. With \-s the records are one array. Not with \-R, \-\-seq or \-\-stream.

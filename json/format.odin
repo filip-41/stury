@@ -5,7 +5,9 @@ package json
 // Odin meaning. JSON text goes through here, or through `Raw` when a value is expected.
 
 // `src` validated strictly and written again as `opts` says (compact by default). A `.Jsonc` document keeps
-// its comments. The result is a new buffer from `allocator`, and `src` is not kept.
+// its comments. A `.Json5` one is written in JSON's spelling with its comments, and its first `Infinity` or
+// `NaN`, which JSON cannot spell, is refused as `.Bad_Number`. The result is a new buffer from `allocator`, and
+// `src` is not kept.
 @(require_results)
 format :: proc(
 	src: []byte,
@@ -18,10 +20,13 @@ format :: proc(
 		return nil, e
 	}
 	buf, eerr := marshal(&doc, opts, allocator)
+	at := non_finite_at(&doc) if eerr == .Non_Finite else 0
 	destroy(&doc)
 	#partial switch eerr {
 	case .None:
 		return buf, nil
+	case .Non_Finite:
+		return nil, Error{kind = .Bad_Number, offset = at}
 	case .Out_Of_Memory:
 		return nil, Error{kind = .Out_Of_Memory}
 	case .Too_Deep:

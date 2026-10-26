@@ -508,6 +508,40 @@ jsonc_fault :: proc(ins: ^Inputs, e: json.Error, at: int) -> ! {
 	fail_input(ins.run, e)
 }
 
+// Replaces the JSON5 input just read with its JSONC spelling (comments kept), which the run then reads as
+// --from jsonc. A text JSON5 refuses ends the run as a JSONC fault does, and so does `Infinity` or `NaN`, which
+// JSONC cannot spell, at the first of them. Later positions (`input_line_number`) count the JSONC text's lines.
+json5_to_jsonc :: proc(ins: ^Inputs) {
+	if len(bytes.trim_space(ins.data)) == 0 { // no text, as for JSONC
+		return
+	}
+	doc, err := json.build(ins.data, {dialect = .Json5, limits = jq.lifted})
+	defer json.destroy(&doc)
+	if e, bad := err.?; bad {
+		jsonc_fault(ins, e, 0)
+	}
+	text, merr := json.marshal(&doc, {}, runtime.heap_allocator())
+	if merr == .Non_Finite {
+		at: u64
+		for r, i in doc.rows {
+			if v, _ := json.get_number(&doc, json.Node(i)); r.kind == .Number && v.value - v.value != 0 {
+				at = u64(r.lo)
+				break
+			}
+		}
+		ins.run.name, ins.run.whole = ins.name, ins.data
+		fail_input(ins.run, {kind = .Bad_Literal, offset = at}, "Infinity and NaN have no JSON value")
+	}
+	if merr != nil {
+		fail_input(ins.run, {kind = .Out_Of_Memory}, "out of memory")
+	}
+	free_data({ins.data, ins.mapped})
+	ins.data, ins.mapped = text, false
+	if mapped_input_name == ins.name {
+		mapped_input_name = ""
+	}
+}
+
 // The input jq is reading, and its line: what `input_filename`, `input_line_number` and an error's
 // `(at NAME:N)` tell.
 input_position :: proc(ins: ^Inputs) -> (string, int) {
