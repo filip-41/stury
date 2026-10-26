@@ -26,7 +26,9 @@ ROOT :: walk.ROOT
 //	- `src` is borrowed and must outlive every read: a number is decoded from its text there at each read,
 //	  and an escape-free string is a slice of it.
 //	- Everything else is owned by whoever built it, and `destroy` is the only teardown.
-//	- A JSONC document (`dialect == .Jsonc`) also holds its comments, each attached to a value.
+//	- A JSONC or JSON5 document (`dialect != .Json`) also holds its comments, each attached to a value.
+//	  `marshal` writes a JSON5 one in JSON's spelling, comments kept, and refuses `Infinity` and `NaN`
+//	  (`.Non_Finite`).
 Document :: struct {
 	src:       []byte,
 	// One row per value, in the order the values appear in `src`.

@@ -38,6 +38,9 @@ Duplicates :: core_pkg.Duplicates
 //	  byte is read. Some simple paths are answered another way and are not counted.
 //	- `dialect == .Jsonc` reads comments and trailing commas, checked as `.Strict` whatever `strictness`
 //	  says, and with `.Nodes` each comment is attached to its value. A JSON request never pays for this.
+//	- `dialect == .Json5` reads JSON5 as `.Jsonc` reads JSONC. A string or key row spelled outside JSON
+//	  (single-quoted, unquoted or escaped) is decoded by JSON5's escapes, and a number row spelled outside
+//	  JSON (hex, `.5`, `5.`, `+1`, `Infinity`, `NaN`) by JSON5's numbers.
 //	- `allocator` must not change once the request has been scanned.
 //
 // `strictness` is documented at `Strictness`. `.Lazy` here needs `duplicates` `.First` or `.Refuse`, and

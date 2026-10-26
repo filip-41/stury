@@ -4,9 +4,12 @@ package json
 // is its only entry.
 
 import "core:io"
+import "core:math"
 import "core:mem"
 import "core:slice"
+import "core:strconv"
 import enc "encode"
+import scan_pkg "scan"
 
 // How the writer formats its output. The zero value is compact UTF-8 copying the source's number and string
 // text.
@@ -43,7 +46,7 @@ marshal_document :: proc(doc: ^Document, opts := Marshal_Opts{}, allocator := co
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return nil, .Too_Deep
 	}
-	if opts.jq_spelling || opts.sort_keys {
+	if opts.jq_spelling || opts.sort_keys || doc.dialect == .Json5 {
 		return marshal_document_jq(doc, opts, allocator)
 	}
 	if doc.dialect == .Jsonc {
@@ -71,8 +74,8 @@ marshal_document_to_writer :: proc(w: io.Writer, doc: ^Document, opts := Marshal
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return .Too_Deep
 	}
-	if doc.dialect == .Jsonc || opts.jq_spelling || opts.sort_keys {
-		// A JSONC document, or one in jq's notation or with sorted keys, is made whole, then written.
+	if doc.dialect != .Json || opts.jq_spelling || opts.sort_keys {
+		// A dialect's document, or one in jq's notation or with sorted keys, is made whole, then written.
 		out, err := marshal_document(doc, opts, allocator)
 		if err != .None {
 			return err
@@ -141,6 +144,9 @@ jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_
 @(private = "file")
 jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts) -> Marshal_Error {
 	lit := string(get_raw(doc, n))
+	if doc.dialect == .Json5 && doc.rows[n].first_esc == scan_pkg.DIALECT_SPELLED {
+		return json5_number_as_json(buf, doc, n, lit)
+	}
 	if !opts.jq_spelling {
 		return enc.put_bytes(buf, lit)
 	}
@@ -155,7 +161,8 @@ jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Op
 
 @(private = "file")
 jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts) -> Marshal_Error {
-	if !opts.jq_spelling {
+	// A JSON5 string is plain only double-quoted with no escape.
+	if !opts.jq_spelling && (doc.dialect != .Json5 || .Str_Escaped not_in doc.rows[n].flags) {
 		return enc.put_bytes(buf, string(get_raw(doc, n)))
 	}
 	s, _ := get_string(doc, n)
@@ -193,7 +200,7 @@ jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: 
 		own = facts(doc, v)
 		enc.put_leads(buf, cl, own, depth + 1) or_return
 		if k == .Object {
-			if opts.jq_spelling {
+			if opts.jq_spelling || (doc.dialect == .Json5 && .Key_Escaped in doc.rows[v].flags) {
 				enc.put_string_escaping_del(buf, e.key) or_return
 			} else {
 				enc.put_bytes(buf, string(doc.src[doc.rows[v].key_lo:doc.rows[v].key_hi])) or_return
@@ -254,4 +261,40 @@ document_members :: proc(doc: ^Document, n: Node, opts: Marshal_Opts, allocator:
 		slice.stable_sort_by(entries[:], proc(a, b: Entry) -> bool {return a.key < b.key})
 	}
 	return entries, true
+}
+
+// A JSON5 number spelled outside JSON's grammar (`DIALECT_SPELLED`), in JSON's spelling: a hex integer in
+// decimal (past `u64`, its nearest double), a decimal without its `+`, with a `0` before a leading point and
+// without a trailing point. `Infinity` and `NaN` have no JSON spelling and are `.Non_Finite`.
+@(private = "file")
+json5_number_as_json :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, lit: string) -> Marshal_Error {
+	v, _ := get_number(doc, n)
+	if math.is_nan(v.value) || math.is_inf(v.value) {
+		return .Non_Finite
+	}
+	p := 0
+	if lit[0] == '+' || lit[0] == '-' {
+		p = 1
+	}
+	if lit[0] == '-' {
+		enc.put_byte(buf, '-') or_return
+	}
+	if len(lit) > p + 1 && lit[p + 1] | 0x20 == 'x' {
+		digits: [32]u8
+		if mag, ok := strconv.parse_u64_of_base(lit[p + 2:], 16); ok {
+			return enc.put_bytes(buf, strconv.write_uint(digits[:], mag, 10))
+		}
+		// `write_float` leads with the sign.
+		return enc.put_bytes(buf, strconv.write_float(digits[:], abs(v.value), 'g', -1, 64)[1:])
+	}
+	if lit[p] == '.' {
+		enc.put_byte(buf, '0') or_return
+	}
+	for i in p ..< len(lit) {
+		if lit[i] == '.' && (i + 1 == len(lit) || lit[i + 1] - '0' >= 10) {
+			continue
+		}
+		enc.put_byte(buf, lit[i]) or_return
+	}
+	return .None
 }

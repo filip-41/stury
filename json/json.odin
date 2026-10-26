@@ -213,7 +213,8 @@ Number :: scan_pkg.Number
 // `Raw` marshals as `null`.
 Raw :: scan_pkg.Raw
 
-// The grammar a source is read in.
+// The grammar a source is read in: `.Json` (RFC 8259), `.Jsonc` (comments and trailing commas) or `.Json5`
+// (JSON5 1.0.0). A dialect reads every byte as `.Strict` does, whatever `strictness` says.
 Dialect :: scan_pkg.Dialect
 
 // Something attached to a value of a document (`facts`): its span in the source, the value, and where
@@ -264,8 +265,8 @@ decode_span :: #force_inline proc(
 //	- No allocation but the deep reading's frames (`Limits`), which only input nesting past MAX_DEPTH under
 //	  a raised cap takes.
 //	- `opts.duplicates` is not read: a repeated key is not a fault here.
-//	- `.Jsonc` validates comments and trailing commas as well, every other byte as `.Strict` does whatever
-//	  `strictness` is, and appends each comment to `facts` when it is not nil, attached to nothing (`node`
+//	- `.Jsonc` validates comments and trailing commas as well, `.Json5` JSON5's grammar, every other byte as
+//	  `.Strict` does whatever `strictness` is, and appends each comment to `facts` when it is not nil, attached to nothing (`node`
 //	  is `NO_NODE`), an append its allocator refuses being `.Out_Of_Memory`; a `.Json` source has none.
 //	- A fault carries its kind and an absolute offset into `src`.
 //	- One leading UTF-8 BOM is tolerated at offset 0 and nowhere else, so no caller-visible offset is

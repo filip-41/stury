@@ -161,3 +161,66 @@ test_json5_comments_attach_to_rows :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(json.facts(&doc, json.ROOT)), 1)
 	testing.expect_value(t, len(json.facts(&doc, json.child(&doc, json.ROOT, "a"))), 1)
 }
+
+// `unmarshal` reads JSON5 into typed values, and a refusal points into the JSON5 text.
+@(test)
+test_json5_unmarshal :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	T :: struct {
+		name:  string,
+		count: int,
+		ratio: f64,
+		tags:  []string,
+	}
+	v: T
+	src := raw("// config\n{name: 'st\\x75ry', count: 0x10, ratio: .5, tags: ['a', \"b\",],}")
+	testing.expect_value(t, json.unmarshal(src, &v, {dialect = .Json5}, nil, context.temp_allocator), nil)
+	testing.expect_value(t, v.name, "stury")
+	testing.expect_value(t, v.count, 16)
+	testing.expect_value(t, v.ratio, 0.5)
+	testing.expect(t, len(v.tags) == 2 && v.tags[0] == "a" && v.tags[1] == "b")
+
+	bad := raw("{name: 'x', count: 'many'}")
+	err := json.unmarshal(bad, &v, {dialect = .Json5}, nil, context.temp_allocator)
+	e, refused := err.?
+	testing.expectf(t, refused && e.kind == .Wrong_Kind && e.offset == 19, "%v", err)
+	testing.expect(t, e.n_steps == 1 && e.steps[0] == json.Name("count"))
+
+	U :: struct {
+		a: int,
+	}
+	u: U
+	err = json.unmarshal(raw("{a: 1, 'b\\u0063': 2}"), &u, {dialect = .Json5, unknown_fields = .Refuse}, nil, context.temp_allocator)
+	e, refused = err.?
+	testing.expectf(t, refused && e.kind == .Unknown_Field && e.offset == 7, "%v", err)
+	testing.expect(t, e.n_steps == 1 && e.steps[0] == json.Name(`b\u0063`))
+
+	syn := json.unmarshal(raw("{a: 01}"), &u, {dialect = .Json5}, nil, context.temp_allocator)
+	testing.expectf(t, syn != nil && syn.?.kind == .Syntax && syn.?.syntax == .Bad_Number && syn.?.offset == 5, "%v", syn)
+	inf := json.unmarshal(raw("{a: Infinity}"), &u, {dialect = .Json5}, nil, context.temp_allocator)
+	testing.expectf(t, inf != nil && inf.?.kind == .Out_Of_Range && inf.?.offset == 4, "%v", inf)
+}
+
+// `marshal` writes a JSON5 document in JSON's spelling, comments kept; the edits refuse the dialect.
+@(test)
+test_json5_marshal_respells_and_edits_refuse :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	doc, err := json.build(raw("{a: 'it\\'s', \"b\": [0x1F, .5, 5., +1, -0x2,], // c\n}"), {dialect = .Json5})
+	defer json.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	out, merr := json.marshal(&doc, {}, context.temp_allocator)
+	testing.expect_value(t, merr, json.Marshal_Error.None)
+	testing.expect_value(t, string(out), `{"a":"it's","b":[31,0.5,5,1,-2]// c
+}`)
+	testing.expect_value(t, json.validate(out, {dialect = .Jsonc}), nil)
+
+	nan, _ := json.build(raw("[NaN]"), {dialect = .Json5})
+	defer json.destroy(&nan)
+	_, nerr := json.marshal(&nan, {}, context.temp_allocator)
+	testing.expect_value(t, nerr, json.Marshal_Error.Non_Finite)
+
+	_, serr := json.set(raw("{a: 1}"), ".a", 2, dialect = .Json5, allocator = context.temp_allocator)
+	testing.expect(t, serr != nil && serr.?.kind == .Bad_Option)
+	_, rerr := json.remove(raw("{a: 1}"), ".a", .Json5, context.temp_allocator)
+	testing.expect(t, rerr != nil && rerr.?.kind == .Bad_Option)
+}

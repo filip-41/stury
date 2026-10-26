@@ -75,6 +75,7 @@ axes_for :: walk.axes_for
 str_escaped :: walk.str_escaped
 first_escape_offset :: walk.first_escape_offset
 number_span :: number.number_span
+DIALECT_SPELLED :: number.DIALECT_SPELLED
 name_arena_adopt :: walk.name_arena_adopt
 name_arena_reserve :: walk.name_arena_reserve
 name_arena_unreserve :: walk.name_arena_unreserve

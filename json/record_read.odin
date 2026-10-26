@@ -56,7 +56,7 @@ record_read_init :: proc(
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	record_read_destroy(rd)
-	if opts.strictness == .Structural && opts.dialect != .Jsonc {
+	if opts.dialect == .Json5 || (opts.strictness == .Structural && opts.dialect != .Jsonc) {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	state := record_state_new()
@@ -144,7 +144,7 @@ record_opts_same :: #force_inline proc(a, b: ^Unmarshal_Opts) -> bool {
 read_record :: #force_inline proc(st: ^Record_State, src: []byte, opts: ^Unmarshal_Opts, plan: ^core_pkg.Type_Plan, dest: rawptr) -> Maybe(Unmarshal_Error) {
 	if plan != st.bound_plan || !record_opts_same(opts, &st.bound_opts) {
 		// `.Structural` stores what it reads, so a JSON read refuses it unless the dialect checks the rest (JSONC).
-		if opts.strictness == .Structural && opts.dialect != .Jsonc {
+		if opts.dialect == .Json5 || (opts.strictness == .Structural && opts.dialect != .Jsonc) {
 			return Unmarshal_Error{kind = .Bad_Option}
 		}
 		record_bind(st, plan, opts)

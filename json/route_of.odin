@@ -7,7 +7,7 @@ Path_Route :: enum u8 {
 	Matcher,
 	Tape, // a text the tape cannot settle goes to the matcher
 	// The rest name why the automaton answers.
-	Forced, // a `.Jsonc` or `.Refuse` walk: the automaton is the only engine
+	Forced, // a dialect or `.Refuse` walk: the automaton is the only engine
 	Per_Element,
 	Index,
 	Ends_Any,

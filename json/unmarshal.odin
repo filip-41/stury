@@ -29,6 +29,8 @@ Unknown_Fields :: core_pkg.Unknown_Fields
 //	            in `context.allocator`, given back before the return.
 //	limits      a `max_depth` past MAX_DEPTH is held to MAX_DEPTH: the shape walk's frames do not spill.
 //	dialect     `.Jsonc` reads comments and trailing commas, every byte checked whatever `strictness` says.
+//	            `.Json5` reads JSON5 through its JSON spelling (`read_json5`): strings are always copied, and
+//	            `Infinity` and `NaN` are `.Out_Of_Range`. A record read (`Record_Read`) refuses it.
 Unmarshal_Opts :: struct {
 	using read:     Read_Opts,
 	unknown_fields: Unknown_Fields,
@@ -136,7 +138,7 @@ read_typed :: proc(
 	plan: ^Type_Plan,
 	allocator: runtime.Allocator,
 ) -> Maybe(Unmarshal_Error) {
-	if opts.strictness == .Structural && opts.dialect != .Jsonc {
+	if opts.strictness == .Structural && opts.dialect == .Json {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	tmp: Type_Plan = ---
@@ -152,6 +154,9 @@ read_typed :: proc(
 
 @(private)
 read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Type_Plan, allocator: runtime.Allocator) -> Maybe(Unmarshal_Error) {
+	if opts.dialect == .Json5 {
+		return read_json5(src, dest, opts, plan, allocator)
+	}
 	shape, serr := core_pkg.read_shape_of(&plan.base)
 	if serr != nil {
 		return serr
