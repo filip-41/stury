@@ -80,10 +80,19 @@ enable_color :: proc() {
 }
 
 // The command line in UTF-8. os.args is the C runtime's argv, in the ANSI code page, which spells no character
-// outside it.
+// outside it. An argument UTF-8 cannot spell (a lone surrogate) is os.args's.
 command_args :: proc() -> []string {
-	info, err := os.current_process_info({.Command_Args}, context.allocator)
-	return info.command_args if err == nil else os.args
+	argc: i32
+	argv := win.CommandLineToArgvW(win.GetCommandLineW(), &argc)
+	if argv == nil || int(argc) != len(os.args) {
+		return os.args
+	}
+	args := make([]string, argc)
+	for arg, i in argv[:argc] {
+		text, _ := win.wstring_to_utf8(arg, -1, context.allocator)
+		args[i] = text if text != "" || len(arg) == 0 else os.args[i]
+	}
+	return args
 }
 
 // Windows keeps no owner or group to give.
