@@ -113,6 +113,7 @@ read_some :: proc(f: ^os.File, p: []byte) -> (int, os.Error) {
 	if err == os.General_Error.Broken_Pipe {
 		err = io.Error.EOF
 	}
+	explain_input(n)
 	return n, err
 }
 
@@ -120,6 +121,14 @@ read_some :: proc(f: ^os.File, p: []byte) -> (int, os.Error) {
 // found, access denied) as General_Error.
 platform_error_text :: proc(e: os.Platform_Error) -> string {
 	return os.error_string(e)
+}
+
+peak_rss :: proc() -> int {
+	counters := win.PROCESS_MEMORY_COUNTERS{cb = size_of(win.PROCESS_MEMORY_COUNTERS)}
+	if !win.GetProcessMemoryInfo(win.GetCurrentProcess(), &counters, size_of(counters)) {
+		return 0
+	}
+	return int(counters.PeakWorkingSetSize)
 }
 
 // Every file is read.

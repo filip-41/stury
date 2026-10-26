@@ -14,6 +14,7 @@ package json
 //	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Unknown_Fields`, `Unmarshal_Error`
 //	marshal.odin        `marshal` and its writer and append forms (marshal_struct.odin writes structs)
 //	type_plan.odin      `Type_Plan` and its options and hooks, for `marshal` and `unmarshal`, `plan_cache_clear`
+//	route_of.odin       `route_of`, `Path_Route`: which engine answers a path, or why the automaton does
 //	edit.odin           `set`, `insert`, `remove` and `splice` (the geometry is in edit_ops.odin and
 //	                    edit_jsonc.odin)
 //	records.odin        `records`, `next_record`, `Framing`, `Record`

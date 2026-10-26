@@ -34,7 +34,9 @@ scan_records :: proc(run: ^Run, ins: ^Inputs, from: int) -> (stop: int) {
 	_ = json.each_record(src, .NDJSON, scan_piece, &job, runner)
 	// A write that failed on a pool thread ends the run here.
 	check_output()
-	return from + job.stop if job.stop >= 0 else len(ins.data)
+	stop = from + job.stop if job.stop >= 0 else len(ins.data)
+	explain_records(run, ins.data[from:stop])
+	return
 }
 
 // Piece `k`'s records, answered into its buffer by a copy of the run that holds its output, then the pieces now in

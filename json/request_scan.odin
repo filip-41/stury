@@ -44,12 +44,12 @@ scan_request :: #force_no_inline proc(src: []byte, req: ^Request($KINDS), planne
 		if err, refused := request_fault(src, req, alloc).?; refused {
 			return err
 		}
-		// `.Refuse` and JSONC walks serve every path through the automaton (`automaton_only`), so no matcher
+		// `.Refuse` and JSONC walks serve every path through the automaton (`automaton_forced`), so no matcher
 		// is planned.
 		if tape_routable(req) && scan_tape(src, req, alloc) {
 			return nil
 		}
-		if err, refused := route_paths(&req.state.route, src, req.paths, req.duplicates, alloc, automaton_only(req)).?; refused {
+		if err, refused := route_paths(&req.state.route, src, req.paths, req.duplicates, alloc, automaton_forced(req.dialect, req.duplicates)).?; refused {
 			return err
 		}
 	}
@@ -96,7 +96,7 @@ prepared_plan :: proc(req: ^Request($KINDS)) -> bool {
 	plan_src := transmute([]byte)string(PLAN_SRC)
 	// Inlined here, so `scan_request` stays their one call and inlines them too.
 	return !#force_inline tape_routable(req) &&
-		#force_inline route_paths(&req.state.route, plan_src, req.paths, req.duplicates, request_allocator(req), automaton_only(req)) == nil
+		#force_inline route_paths(&req.state.route, plan_src, req.paths, req.duplicates, request_allocator(req), automaton_forced(req.dialect, req.duplicates)) == nil
 }
 
 @(private = "file", require_results)
@@ -115,12 +115,6 @@ scan_prepared :: proc(src: []byte, req: ^Request($KINDS)) -> Maybe(Error) {
 	// A plan made again holds its keys anew.
 	req.state.planned, req.state.kept.ok = prepared_plan(req), false
 	return err
-}
-
-// The automaton is the one engine a JSONC walk and a `.Refuse` walk carry.
-@(private = "file")
-automaton_only :: #force_inline proc(req: ^Request($KINDS)) -> bool {
-	return req.dialect == .Jsonc || req.duplicates == .Refuse
 }
 
 // The public result of a walk that returned `fault` beside `verdict`.

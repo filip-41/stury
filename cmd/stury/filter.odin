@@ -48,6 +48,9 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 		}
 		v, msg, status := next_input(ins, run.prog)
 		fetched = true
+		if status != .More {
+			explain_interpreted(run)
+		}
 		switch status {
 		case .Value:
 			run_once(run, v)
@@ -91,6 +94,7 @@ Deep_Job :: struct {
 // Run the filter on one input text, `base` bytes into the input: a path whose step does not apply, which
 // the scan left to jq's rules.
 run_text :: proc(run: ^Run, src: []byte, base: u64) {
+	explain_interpreted(run)
 	ready_interpreter(run)
 	d, err := jq.build_rows(src, run.req.dialect)
 	if e, bad := err.?; bad {

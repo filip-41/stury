@@ -107,6 +107,15 @@ write_stdout :: proc(p: []byte) -> os.Error {
 	return nil
 }
 
+peak_rss :: proc() -> int {
+	usage: posix.rusage
+	if posix.getrusage(.SELF, &usage) != .OK {
+		return 0
+	}
+	// Bytes on macOS, KiB elsewhere.
+	return int(usage.ru_maxrss) * (1 when ODIN_OS == .Darwin else 1024)
+}
+
 is_terminal :: proc(f: ^os.File) -> bool {
 	return bool(posix.isatty(posix.FD(os.fd(f))))
 }
@@ -176,6 +185,7 @@ read_some :: proc(f: ^os.File, p: []byte) -> (int, os.Error) {
 	if err == io.Error.Unknown {
 		err = os.Platform_Error(i32(posix.errno()))
 	}
+	explain_input(n)
 	return n, err
 }
 
@@ -205,6 +215,7 @@ map_file :: proc(f: ^os.File) -> ([]byte, bool) {
 		return nil, false
 	}
 	posix.lseek(fd, posix.off_t(size), .SET)
+	explain_input(int(size) - int(at))
 	return ([^]byte)(p)[i64(at) - lo:size - lo], true
 }
 

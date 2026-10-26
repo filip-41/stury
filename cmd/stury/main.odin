@@ -61,6 +61,11 @@ EXIT_INPUT :: 5
 // Output is held here and written once it passes FLUSH_AT bytes, and at exit.
 FLUSH_AT :: 1 << 20
 
+Select :: struct {
+	op:      jq.Op,
+	literal: jq.Value,
+}
+
 // A pool thread works on a shallow copy of the Run (`run^`): the copy shares everything the Run points to (the
 // options, the paths' steps, the pool, the interpreter's program and values) and owns only `out`, a buffer of
 // its own, with `held` set.
@@ -82,10 +87,7 @@ Run :: struct {
 	rows_begun:  bool, // a record has been written, so later records are not at the output's start
 	// select(P op LITERAL): the scan answers P, and a record is printed when its answer compares so. `op` is .None
 	// for any other filter.
-	select:      struct {
-		op:      jq.Op,
-		literal: jq.Value,
-	},
+	select:      Select,
 	prog:        ^jq.Node, // nil until `ready_interpreter`
 	// The filter and the command line's variables, which `ready_interpreter` parses, checks and binds.
 	program:     struct {
@@ -99,6 +101,7 @@ Run :: struct {
 	ip:          jq.Interp,
 	out:         [dynamic]byte,
 	held:        bool, // a pool thread's copy, whose output the caller writes
+	explain:     Explain,
 	silent:      bool, // fmt --check and --in-place: the output stays in `out` for the caller
 	name_faults: bool, // fmt: a parse fault names its file
 	verbatim:    bool, // fmt between JSON-like formats: each value is written from its source text
@@ -127,6 +130,7 @@ main :: proc() {
 	run.ret, run.last_result = JQ_OK_NO_OUTPUT, -1
 	cli := parse_args(&run.opts, command_args()[1:])
 	validating := cli.validating
+	run.explain.on = run.opts.explain
 	set_colors(&run, cli)
 	o := &run.opts
 	refuse_format_clashes(o, &cli)
@@ -140,6 +144,8 @@ main :: proc() {
 		usage_error("--stream makes jq's events of each input; check only judges it")
 	case o.strict_limits && !validating:
 		usage_error("--strict-limits is check's: a filter reads numbers as far as they can be held")
+	case o.explain && validating:
+		usage_error("--explain reports a filter's route: check has no filter")
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
@@ -180,6 +186,7 @@ main :: proc() {
 	// interpreter. The interpreter otherwise, readied here. `~/.jq` is included into every filter, a path too: it is
 	// loaded first, as jq fails a run on one that is bad, and a `select` it redefines is not the scan's.
 	run.program = {text, cli.var_names[:], cli.var_values[:], cli.positional[:], named}
+	explain_filter(&run)
 	run.home_module = jq.home_module(&run.ip)
 	if run.home_module {
 		ready_interpreter(&run)
@@ -189,6 +196,7 @@ main :: proc() {
 	if !run.scanning && (run.columns == nil || run.columns.selecting) {
 		ready_interpreter(&run)
 	}
+	explain_route(&run)
 	ins: Inputs
 	inputs_init(&ins, &run, names)
 	// A pipe is read as it comes, but by -s, which needs it all, and --from jsonc, whose faults count lines in it whole.
@@ -317,16 +325,32 @@ bind_cli_vars :: proc(run: ^Run) {
 choose_scan :: proc(run: ^Run, text: string) {
 	run.any_at = -1
 	o := run.opts
-	if o.null_input || o.slurp || o.sort_keys || o.ascii || o.exit_status || o.seq || o.stream || o.raw_input || o.raw0 || reads_cells(&o) || writes_cells(&o) {
+	if reads_cells(&o) {
+		return
+	}
+	stops := scan_stops(&o)
+	if stops != {} && !explain_why(run, stops) {
 		return
 	}
 	@(static) steps: [json.MAX_PATH_STEPS]json.Step
 	p, perr := json.parse_path(text, steps[:], make([]u8, len(text)))
 	if perr != nil {
-		ok: bool
-		if p, ok = selected_path(run, text, steps[:]); !ok {
+		// `select` is the interpreter's under JSONC, whose texts print with their comments.
+		jsonc := o.from == .Jsonc
+		if jsonc && !explain_why(run, {.Jsonc_Select}) {
 			return
 		}
+		sel: Select
+		why: Explain_Whys
+		p, sel, why = selected_path(run, text, steps[:])
+		explain_why(run, why)
+		if why != {} || jsonc || stops != {} {
+			return
+		}
+		run.select = sel
+	}
+	if stops != {} {
+		return
 	}
 	for s, i in p.steps {
 		if _, is_any := s.(json.Any); is_any && run.any_at < 0 {
@@ -349,40 +373,35 @@ choose_scan :: proc(run: ^Run, text: string) {
 }
 
 // The path P of the filter `text` when it is `select(P op LITERAL)`, P a path the scan answers with no `[]` and
-// LITERAL no array or object, with the comparison kept in `run.select`. It returns false for any other filter. The
-// filter is checked here, so `select` is known to be jq's.
-selected_path :: proc(run: ^Run, text: string, steps: []json.Step) -> (p: json.Path, ok: bool) {
-	o := run.opts
-	if o.from == .Jsonc {
-		return
-	}
+// LITERAL no array or object, and the comparison; else why not. The filter is checked here, so `select` is known
+// to be jq's.
+selected_path :: proc(run: ^Run, text: string, steps: []json.Step) -> (p: json.Path, sel: Select, why: Explain_Whys) {
 	ready_interpreter(run)
 	n := run.prog
 	if n.kind != .Call || n.name != "select" || len(n.args) != 1 {
-		return
+		return {}, {}, {.Not_Path}
 	}
 	if b, bound := n.native.?; !bound || b.native != jq.native_select {
-		return
+		return {}, {}, {.Select_Redefined}
 	}
 	cmp := n.args[0]
 	if cmp.kind != .Binary || cmp.op < .Eq || cmp.op > .Ge || cmp.b.kind != .Literal {
-		return
+		return {}, {}, {.Select_Compare}
 	}
 	if k := jq.kind(cmp.b.value); k == .Array || k == .Object {
-		return
+		return {}, {}, {.Select_Compare}
 	}
 	for x := cmp.a; x.kind != .Identity; x = x.a {
 		if x.kind != .Field && x.kind != .Index || x.opt {
-			return
+			return {}, {}, {.Select_Path}
 		}
 	}
 	path := text[cmp.a.loc.start:cmp.a.loc.end]
 	parsed, perr := json.parse_path(path, steps, make([]u8, len(path)))
 	if perr != nil || parsed.limit != 0 || len(parsed.steps) == 0 {
-		return
+		return {}, {}, {.Select_Path}
 	}
-	run.select = {cmp.op, cmp.b.value}
-	return parsed, true
+	return parsed, {cmp.op, cmp.b.value}, {}
 }
 
 // `e` in `src`, the text of the file `name`, as `NAME:line:col: Fault` (or `what`, where it says more), with no
@@ -455,5 +474,6 @@ finish :: proc(run: ^Run, code: int) -> ! {
 	}
 	flush_some(run, force = true)
 	check_output()
+	explain_end(run)
 	os.exit(code)
 }

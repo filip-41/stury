@@ -40,6 +40,7 @@ Path_Answer :: walk.Path_Answer
 Path_Error :: core_pkg.Path_Error
 Path_Error_Kind :: core_pkg.Path_Error_Kind
 Path_Outcome :: walk.Path_Outcome
+Path_Route :: enum u8 {Matcher, Tape, Forced, Per_Element, Index, Ends_Any, Deep_Name, Other_Shape, Other_Gate, Root_Not_Object}
 Path_Spec :: core_pkg.Path_Spec
 Plan_Opts :: struct {enums: Enum_Spelling, union_tag: string, tag_names: []Tag_Name, hooks: []Type_Hook}
 Query :: scan_pkg.Query
@@ -100,6 +101,7 @@ records :: proc(src: []byte, framing: Framing) -> Records
 remove :: proc(src: []byte, path: Path_Spec, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error))
 render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string
 request_init :: proc(req: ^Request($KINDS), paths: ..Path_Spec, opts := Read_Opts{}, allocator := context.allocator) -> Maybe(Error)
+route_of :: proc(src: []byte, paths: []Path, which: int, opts := Read_Opts{}) -> (route: Path_Route, err: Maybe(Error))
 scan :: proc(src: []byte, req: ^Request($KINDS)) -> Maybe(Error)
 set :: proc(src: []byte, path: Path_Spec, value: any, upsert := false, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error))
 splice :: proc(src: []byte, edits: []Edit, dialect := Dialect.Json, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error))
