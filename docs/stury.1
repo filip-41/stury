@@ -10,6 +10,10 @@ stury \- JSON and CSV codec with a jq 1.8.2\-compatible command line
 [\-\-from format|\-\-seq] [\-\-strict\-limits] [\-\-max\-depth n] [file...]
 .br
 .B stury
+fmt
+[\-\-from format] [\-\-to format] [\-\-in\-place|\-\-check] [\-\-indent n|\-\-tab] [\-\-max\-depth n] [file...]
+.br
+.B stury
 \-h | \-V | \-\-build\-configuration
 .SH DESCRIPTION
 stury applies a jq 1.8 filter to JSON inputs and gives jq's results and exit codes. Its messages start with stury: and are worded its own way. It accepts all of jq 1.8's options except \-\-run\-tests, a test\-file runner it does not have. The filter language and those options are described in
@@ -22,6 +26,12 @@ This page covers stury's own options and how its input handling differs from jq'
 validates its inputs, accepting any input that
 .B stury .
 reads without error, and prints nothing when they are valid. It requires at least one JSON text: an empty or whitespace-only input is "No JSON text" and exits 5. It is the subcommand when it is the first argument that is not an option. With no file on a terminal it prints the short usage and exits 2.
+.PP
+.B stury fmt
+writes each input back in the printer's layout, or in another format: it runs no filter, reads each file as
+\-\-from and writes it as \-\-to (the same format by default). JSON and JSONC are printed as stury prints them,
+comments kept; ndjson is one compact value per line; csv and tsv are a header and one record per row, re-spelled
+by the cell writer. The run is idempotent, and a file already in that layout comes back byte for byte.
 .SH OPTIONS
 .TP
 .BI \-\-from " format"
@@ -45,6 +55,16 @@ Read CSV (RFC 4180). The first record of each file names the fields. Each later 
 .BI \-\-from " tsv"
 Read tab\-separated values as \-\-from csv does, with no quoting and the escapes \\t, \\n, \\r, \\0 and \\\\ that jq's @tsv writes.
 .TP
+.TP
+.B \-\-in\-place
+With \fBfmt\fR, rewrite each file: the formatted bytes go to a temporary file in the same directory and are
+renamed over it, so a reader sees the old file or the new one. A file already formatted is left untouched.
+Only when \-\-to is \-\-from, and not with \-\-check, standard input, or anything but a regular file.
+.TP
+.B \-\-check
+With \fBfmt\fR, write nothing: exit 1 when any file's formatted bytes differ from its bytes, 0 when every file
+is already formatted. A fault still exits 5.
+.TP
 .BI \-\-max\-depth " n"
 Refuse nesting past n levels (default 1024; jq's is 10000).
 .TP
@@ -56,7 +76,7 @@ Print stury\- and the version it was built with: a release version, or the short
 .SH INPUT DIFFERENCES FROM JQ
 stury reads strict RFC 8259 JSON. It rejects, with exit 5, these inputs that jq accepts: 01, 1., NaN, nan, Infinity, invalid UTF\-8 in a string, a lone low surrogate escape, a NUL after a value, and nesting past \-\-max\-depth. A parse error names the fault and the position of the byte where it was found. In a file after the first, it reads NAME:LINE:COLUMN: FAULT, counted in that file, as check prints it. A trailing comma, a comment or nesting past the cap is followed by the source line, a caret and the flag that would read it. \-\-argjson and \-\-jsonargs keep jq's message and append the fault. Each file ends its texts, except under \-\-seq, where the files are one stream as in jq. The full list is in docs/cli.md, "Differences from jq".
 .SH EXIT STATUS
-As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error, 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input.
+As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error, 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input. \fBfmt \-\-check\fR exits 1 when a file would change.
 .SH SEE ALSO
 .BR jq (1),
 docs/cli.md in stury's source.

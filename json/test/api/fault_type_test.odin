@@ -3,7 +3,7 @@ package json_tests
 // `json.Record_Fault` is `core`'s type, so a caller using several formats writes one fault type and one list.
 
 import "core:testing"
-import core "stury:core"
+import core "../../../core"
 import json "../.."
 
 @(test)

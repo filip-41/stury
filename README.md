@@ -142,6 +142,8 @@ programs are in [examples/](examples):
 default, so `01`, `NaN` and invalid UTF-8 are errors, reported with their line and column. `--from` and `--to`
 choose `json`, `jsonc`, `ndjson`, `csv` or `tsv`.
 
+`stury fmt` formats a file in place, or transcodes it (`--from csv --to tsv`), with `--check` for CI.
+
 ```sh
 $ echo '{"logs":[{"id":1}]}' | stury -c '.logs[].id'
 1

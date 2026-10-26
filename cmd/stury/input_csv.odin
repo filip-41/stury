@@ -176,7 +176,7 @@ cells_read :: proc(data: rawptr, mode: io.Stream_Mode, p: []byte, _: i64, _: io.
 }
 
 // Reads the header names from the file's first record. Returns an error message when a name repeats.
-@(private = "file")
+@(private)
 read_header :: proc(ins: ^Inputs, c: ^Cells, rec: csv.Record) -> string {
 	heap := runtime.heap_allocator()
 	names := make([]string, len(rec.fields), heap)
@@ -200,7 +200,7 @@ read_header :: proc(ins: ^Inputs, c: ^Cells, rec: csv.Record) -> string {
 
 // Returns an object mapping header names to the record's cells, with the cell text in the arena. All cell bytes
 // are copied in one block; a cell with a doubled quote or an escape is decoded into it. An empty cell is null.
-@(private = "file")
+@(private)
 record_object :: proc(c: ^Cells, rec: csv.Record) -> jq.Value {
 	n, total := len(rec.fields), 0
 	for f in rec.fields {
@@ -263,7 +263,7 @@ cells_ended :: proc(ins: ^Inputs, c: ^Cells) -> (msg: string) {
 }
 
 // Returns the fault that ended the open file's records, with its offset into the window.
-@(private = "file")
+@(private)
 cells_err :: proc(c: ^Cells) -> (e: csv.Error, bad: bool) {
 	if !c.streamed {
 		e, bad = c.whole.err.?
@@ -286,7 +286,7 @@ cells_lines_before :: proc(c: ^Cells, window: []byte) -> int {
 	return c.source.newlines - count_newlines(window) if c.streamed else 0
 }
 
-@(private = "file")
+@(private)
 cells_fault :: proc(ins: ^Inputs, c: ^Cells, e: csv.Error) -> string {
 	e, window := e, cells_text(c)
 	what := cells_fault_text(c, window, e)

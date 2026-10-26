@@ -5,7 +5,7 @@ package csv_tests
 
 import "core:sync"
 import "core:testing"
-import core "stury:core"
+import core "../../core"
 import cs ".."
 import host "../../host"
 

@@ -201,7 +201,7 @@ source_text :: proc(run: ^Run, v: jq.Value) -> (text: []byte, large: bool) {
 	case nil, bool, jq.Number, string, jq.Path:
 	}
 	o := &run.opts
-	large = len(text) >= 2 * BATCH_BYTES_PER_FIRST_WORKERS && !run.held && !o.ascii && !o.sort_keys && !o.seq && !o.raw0
+	large = len(text) >= 2 * BATCH_BYTES_PER_FIRST_WORKERS && !run.held && !run.silent && !o.ascii && !o.sort_keys && !o.seq && !o.raw0
 	return
 }
 
@@ -221,7 +221,7 @@ flush_some :: proc(run: ^Run, force := false) {
 
 // Whether the run's output is to be written now (`flush_some`).
 output_due :: #force_inline proc(run: ^Run, force := false) -> bool {
-	return !run.held && (len(run.out) >= FLUSH_AT || ((force || run.opts.unbuffered) && len(run.out) > 0))
+	return !run.held && !run.silent && (len(run.out) >= FLUSH_AT || ((force || run.opts.unbuffered) && len(run.out) > 0))
 }
 
 // What `run.spill` calls: the output held so far written, if it has passed FLUSH_AT.

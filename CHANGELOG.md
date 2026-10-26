@@ -29,6 +29,24 @@
   document instead of allocating the depth cap (24 MiB for a 1,100-deep document is now 48 KiB).
 - `get_string`'s contract names the reads that write the document: `get_key`, and `child` past 64 members,
   fill a cache from the document's allocator, so only a `.Dom` build's `get_string` may run on several threads.
+- The typed per-record reader is core's: `core.Record_Read` holds the plan resolved once and a
+  `core.Record_Source` for the format half, `record_read_init` takes the format's source, and options are
+  applied on every record. `json.Record_Read` and `csv.Record_Read` alias it; `unmarshal(&rd, ptr)` replaces
+  json's `unmarshal(&rd, bytes, ptr)`, and `record_read_at` gives the record's offset. CSV reads an in-memory
+  `Records` or a streaming `Record_Reader`, with the header resolved once, so a CSV stream can be decoded one
+  record at a time (it could not before).
+- `core.Record_Fault` is the refused record (`lo`, `hi`, `err`) for every format, and `core.Fault_List` builds a
+  list per piece. `csv.validate_records(src, opts, runner, allocator)` lists one fault per refused record in
+  source order, resuming at the line after each refusal, so a caller sees every bad row where it saw one.
+  `json.validate_records` keeps its signature and byte-order cap; `json.Record_Fault` was already core's.
+- `core.Answer` (`lo`, `hi`, `owner`, `query`, `outcome`), `Answer_Outcome` and `NO_OWNER` are the path answer
+  every format returns, and `answer_cut` is the limit rule once instead of three times. `json.Path_Outcome`
+  and `json.NO_OWNER` are core's; json's `Path_Answer` keeps its layout. `csv.query(doc, path, out)` answers
+  paths over a built `Document` without rescanning the text, and `csv.find`/`csv.find_column` return answers:
+  `(Answer, Maybe(Error))`, wildcard `[]` and `limit` included.
+- `core.Batch_Driver` is the one claim loop behind json's and csv's `each_record`, parameterised by
+  boundary/skip/piece/fault-rank callbacks. Each format keeps its present fault policy (JSON by byte offset,
+  continuing; CSV by piece, stopping).
 - Split by responsibility, with no name changed: `json/document_build|walk|query`, `csv/cell` and
   `csv/unmarshal_columns|row|cells`, `json/scan/walk/path_reread`, `json/scan/shape_tag|shape_round`,
   `cmd/stury/regex/class|analyze`, and `cmd/stury/jq/lex|actions`, with the update sinks in `jq/modify`.
@@ -72,6 +90,10 @@
 
 ### Command line
 
+- `stury fmt [--from F] [--to F] [--in-place|--check] [--indent N|--tab] FILE...` formats or transcodes each
+  file, with no filter: JSON and JSONC in the printer's layout with comments kept, NDJSON one compact value per
+  line, CSV/TSV a header and one record per row. It is idempotent; `--check` exits 1 when a file would change;
+  `--in-place` rewrites formatter files atomically and leaves already-formatted ones untouched.
 - The format aliases `--csv`, `--tsv`, `--ndjson` and `--jsonc` are removed. Spell both halves:
   `--from csv --to csv`. `--from` alone reads the format and writes JSON, as before.
 - A parse error at the end of the input names the same column jq and `--stream-errors` name, also through

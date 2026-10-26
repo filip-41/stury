@@ -5,6 +5,7 @@ messages start with `stury:`, and parse errors are worded its own way ([Errors a
 codes](#errors-and-exit-codes)). On top of jq it:
 
 - validates JSON without running a filter (`stury check`);
+- writes each input back in the printer's layout, or transcodes it (`stury fmt`);
 - reads and writes JSONC, NDJSON, CSV and TSV (`--from FORMAT`, `--to FORMAT`, [Formats](#formats));
 - reads input strictly, as RFC 8259 says ([Differences from jq](#differences-from-jq)).
 
@@ -18,6 +19,7 @@ stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unb
       [--arg NAME VALUE] [--argjson NAME JSON] [--slurpfile NAME FILE] [--rawfile NAME FILE]
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
 stury check [--from FORMAT|--seq] [--strict-limits] [--max-depth N] [FILE...]
+stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [FILE...]
 stury -h | -V | --build-configuration
 ```
 
@@ -74,8 +76,11 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 | Option | Behaviour |
 | --- | --- |
 | `check`, `validate` | A subcommand, recognised when it is the first argument that is not an option, before any `--` (`stury -c check FILE`); under `-f` that argument is the program file. See [`check`](#check). |
+| `fmt` | A subcommand, recognised as `check` is: writes each input back in the printer's layout, or in another format, and runs no filter. See [`fmt`](#fmt). |
 | `--from FORMAT` | Read `json` (the default), `jsonc`, `ndjson`, `csv` or `tsv` ([Formats](#formats)). |
-| `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv` or `tsv` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output)). |
+| `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv` or `tsv` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output)). `fmt` writes the `--from` format when `--to` is not given. |
+| `--in-place` | `fmt` only: rewrite each file through a temporary one and a rename, when `--to` is `--from` ([`fmt`](#fmt)). |
+| `--check` | `fmt` only: write nothing, and exit 1 when a file is not already formatted ([`fmt`](#fmt)). |
 | `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output ([CSV and TSV output](#csv-and-tsv-output)). |
 | `--max-depth N` | Refuse nesting past N levels (1024 by default, up to 2^20, where jq's limit is 10000). |
 | `--strict-limits` | `check` only. Keep the library's limits, for input bound for the library: numbers of at most 256 digits and a scale of at most 4096. Nesting follows `--max-depth` either way. |
@@ -124,6 +129,67 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 
 Exit codes: 0 on success, 5 for invalid input, 2 for a usage or file error.
 
+## `fmt`
+
+`fmt` writes each input back in the printer's layout, or in another format: one verb for formatting and
+transcoding. It runs no filter, so it takes no `FILTER`.
+
+```sh
+stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [FILE...]
+```
+
+| Format | What `fmt` writes |
+| --- | --- |
+| `json`, `jsonc` (the default is `json`) | Each text as `stury .` prints it: pretty by default, `--indent N` or `--tab` as given, keys in their order, strings and numbers as jq spells them. JSONC keeps its comments where `stury --from jsonc --to jsonc .` puts them, so a file already in that layout comes back byte for byte. |
+| `ndjson` | One compact value per line, as `--to ndjson` writes it. |
+| `csv`, `tsv` | The header, then one record per row, re-spelled by the CSV writer: a field that needs no quotes loses them, one that does gains them, and `""` and an empty cell stay distinct ([CSV and TSV output](#csv-and-tsv-output)). A header with no records is written. An object with a key the header lacks ends the run, as `--to csv` does. |
+
+- `--from` chooses how each file is read, and `--to` how it is written; `--to` defaults to `--from`, so a plain
+  `stury fmt FILE` formats `FILE` as JSON. Each half is chosen on its own, so `stury fmt --from csv --to json`
+  reads CSV and writes pretty JSON.
+- `fmt` is idempotent: `stury fmt` on its own output gives the same bytes.
+- `fmt` never colours its output, so `-C` is refused; so is every option that shapes a filter's reading or output
+  and not a file's format (`-c`, `-r`, `-j`, `--raw-output0`, `-a`, `-S`, `-e`, `-n`, `-s`, `-R`, `--seq`, `--stream`,
+  `--stream-errors`, `--strict-limits`, `-f`, `-L`, `--arg`, `--argjson`, `--slurpfile`, `--rawfile`, `--args`,
+  `--jsonargs`), with exit 2. `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N` and, with
+  a CSV-like `--to`, `--grow-header` apply.
+
+| Flag | Effect |
+| --- | --- |
+| `--check` | Write nothing. Exit 1 when any file's formatted bytes differ from its bytes (a compact JSON text, a CSV field that needs no quotes, a CRLF line ending), 0 when every file is already formatted. A fault still exits 5. |
+| `--in-place` | Rewrite each file: its formatted bytes are written to a temporary file in the same directory, given the file's mode, and renamed over it, so a reader sees the old file or the new one, never half of each. A file already formatted is left untouched. Only when `--to` is `--from` (a formatter, not a transcoder); refused with `--check`, with standard input, with different formats, and on anything but a regular file (a symbolic link included), as a usage error (exit 2). |
+| `FILE...` | In argument order. A fault names the file as `stury .` names a file after the first (`stury: parse error: FILE:L:C: ...`) and exits 5; later files are not read. A file that does not open is reported and the run goes on, with exit 2. |
+| no `FILE` | Reads standard input (`-`). On a terminal it prints the short usage and exits 2, as `check` does. `--in-place` refuses standard input. |
+
+```sh
+$ printf '{"a":1,"b":[1,2]}\n' | stury fmt
+{
+  "a": 1,
+  "b": [
+    1,
+    2
+  ]
+}
+$ printf '{"a":1, // inline\n"b":2}\n' | stury fmt --from jsonc
+{
+  "a": 1, // inline
+  "b": 2
+}
+$ printf 'a,b\n"Ada","36"\n"x,y",z\n' | stury fmt --from csv
+a,b
+Ada,36
+"x,y",z
+$ stury fmt --check formatted.json && echo already formatted
+$ stury fmt --in-place --tab source.json
+$ stury fmt --from ndjson --to csv records.ndjson
+```
+
+- `--check` writes nothing, and `--in-place` leaves a file already in the printer's layout untouched, its inode,
+  mode and times included.
+- CSV and TSV are read whole, as `check` reads them, so `--check` and `--in-place` see every byte of a file.
+  Under `--check` and `--in-place` a file's formatted text is held whole, to compare it or to write it; a plain run
+  writes each file out as it is formatted.
+
 ## Formats
 
 `--from` chooses how the input is cut into values, and `--to` how the outputs are written.
@@ -139,7 +205,8 @@ Exit codes: 0 on success, 5 for invalid input, 2 for a usage or file error.
   `--from ndjson` alone reads lines and prints as `-c`, `--indent` and `--tab` say.
 - Reading CSV or TSV is a usage error with `-R`, `--seq` and `--stream`. Writing it is one with `-r`, `-j`,
   `-a`, `-C`, `-c`, `--indent`, `--tab`, `--seq` and `--raw-output0`, which shape JSON text. `-S`, `-e`, `-n`,
-  `-s`, `--arg` and the rest still apply. `--to ndjson` takes the place of `-c`, so it is refused with `--indent`, `--tab` and `--seq`.
+  `-s`, `--arg` and the rest still apply to a filter run; `fmt` refuses them ([`fmt`](#fmt)). `--to ndjson` takes
+  the place of `-c`, so it is refused with `--indent`, `--tab` and `--seq`.
 
 ## Input
 
@@ -386,7 +453,7 @@ byte, and the flag that would read it (`--from jsonc`, `--max-depth N`), in a fi
 
 | Code | Meaning |
 | --- | --- |
-| 1 | Under `-e`: the last output is `false` or `null` |
+| 1 | Under `-e`: the last output is `false` or `null`; under `fmt --check`: a file is not already formatted |
 | 2 | A usage or file error |
 | 3 | A filter that does not compile |
 | 4 | Under `-e`: there is no output |
@@ -481,11 +548,11 @@ and counts its line and column in that file (`b.json:1:4: Unexpected character`)
 files it joins; a text that runs from one file into the next under `--seq` is the exception, and is told at its
 line and column in the stream, without a file's name.
 
-#### `check`, `--from` and `--to` are new
+#### `check`, `fmt`, `--from` and `--to` are new
 
-jq has no `check`. `--from` and `--to` read and write formats jq does not. `.@comment`, `.@comment_inline` and
-`.@comment_foot`, a syntax error in jq, read a value's comments ([Comments in the CLI](#comments-in-the-cli));
-outside `--from jsonc` they give `null`.
+jq has no `check` and no `fmt`. `--from` and `--to` read and write formats jq does not. `.@comment`,
+`.@comment_inline` and `.@comment_foot`, a syntax error in jq, read a value's comments ([Comments in the
+CLI](#comments-in-the-cli)); outside `--from jsonc` they give `null`.
 
 #### `--seq` reads each record as one text
 

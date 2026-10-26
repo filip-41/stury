@@ -6,7 +6,7 @@ package json_tests
 import "core:slice"
 import "core:sync"
 import "core:testing"
-import core "stury:core"
+import core "../../../core"
 import host "../../../host"
 import json "../.."
 

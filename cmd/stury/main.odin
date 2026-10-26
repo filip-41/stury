@@ -4,6 +4,7 @@ package main
 //
 //	stury [OPTIONS] [FILTER] [FILE...]
 //	stury check [--from format|--seq] [--strict-limits] [FILE...]
+//	stury fmt [--from format] [--to format] [--in-place|--check] [--indent n|--tab] [FILE...]
 //
 // FILTER is a jq program, and the output is what jq 1.8 prints for it. The options are listed in HELP_OPTIONS
 // (options.odin). With no FILE it reads stdin, and with no FILTER it runs `.` unless stdin and stdout are both a
@@ -14,10 +15,11 @@ package main
 // which reads only what it needs (a `[]`'s outputs settled as jq's in `iterate_root_pieces`, root_spine.odin
 // and root_pieces.odin). Any other filter, and a path whose step does not apply to what it reaches, runs on
 // the jq interpreter (package `jq`). `check` (or `validate`) only validates the input, as `.` reads it
-// (check.odin).
+// (check.odin), and `fmt` reads it and writes it back in the printer's layout, or in the `--to` format (fmt.odin).
 //
 // The exit codes are jq's: 2 for a usage or file error, 3 for a filter that does not compile, 5 for invalid input or
-// an error the filter raises. Under `-e`, 1 when the last output is false or null and 4 when there is none.
+// an error the filter raises. Under `-e`, 1 when the last output is false or null and 4 when there is none. `fmt
+// --check` adds 1: a file that is not already formatted.
 //
 // Where things live in cmd/stury:
 //
@@ -33,6 +35,7 @@ package main
 //	print.odin                       output as jq prints it, buffered in `Run.out`
 //	pool.odin                        the batch pool and its claims
 //	check.odin                       `stury check`
+//	fmt.odin                         `stury fmt`
 //	stream_fault.odin                --stream-errors for a text that does not parse
 //	platform_posix.odin,
 //	platform_windows.odin            the calls into the system, one file per platform
@@ -94,6 +97,11 @@ Run :: struct {
 	ip:          jq.Interp,
 	out:         [dynamic]byte,
 	held:        bool, // a pool thread's copy, whose output the caller writes
+	// fmt --check and --in-place: the output is kept in `out` for the caller (to compare with the file, or to write
+	// it), so nothing is written as it is made.
+	silent:      bool,
+	// fmt: a parse fault names its file, as one in a later file of a filter run is named.
+	name_faults: bool,
 	faulted:     bool, // a held copy met an answer it cannot print: its caller leaves that text to the main thread, which reports it
 	spill:       jq.Spill, // `spill_out`, for a layout that is written into `out`
 	unopened:    bool, // a file did not open or read, which jq's exit status says whatever comes after it
@@ -122,7 +130,12 @@ main :: proc() {
 	set_colors(&run, cli)
 	o := &run.opts
 	refuse_format_clashes(o, &cli)
+	if cli.formatting {
+		fmt_main(&run, &cli)
+	}
 	switch {
+	case o.in_place || o.check:
+		usage_error("%s is fmt's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
 	case o.stream && validating:
 		usage_error("--stream makes jq's events of each input; check only judges it")
 	case o.strict_limits && !validating:

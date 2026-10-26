@@ -306,7 +306,8 @@ text_fault :: proc(ins: ^Inputs, at, limit: int, found: json.Error, what := "") 
 	e := cut_by_next_byte(ins.data, at, limit, found, ins.run.req.dialect, ins.run.req.limits)
 	line, column := text_place(ins, at)
 	msg: string
-	if ins.next_file > 1 && !ins.seq_joined { // a later file is told at its own line and column, as check tells it
+	// A later file, or a fmt file, is told at its own line and column, as check tells it.
+	if (ins.next_file > 1 || ins.run.name_faults) && !ins.seq_joined {
 		at_error := e
 		at_error.offset += u64(at)
 		msg = fault_in_file(ins.name, ins.data, at_error, what, ins.lines_before)

@@ -34,6 +34,7 @@ Usage:	stury [options] <jq filter> [file...]
 	stury [options] --args <jq filter> [strings...]
 	stury [options] --jsonargs <jq filter> [JSON_TEXTS...]
 	stury check [--from format|--seq] [--strict-limits] [--max-depth n] [file...]
+	stury fmt [--from format] [--to format] [--in-place|--check] [--indent n|--tab] [file...]
 
 stury applies the filter to its JSON text inputs and writes the results as
 JSON, as jq 1.8.2 does, but reads strictly (RFC 8259): 01, 1., NaN, nan,
@@ -85,8 +86,13 @@ HELP_OPTIONS :: `Command options:
 
 stury's own options:
   check                     judge the inputs, print nothing when valid;
+  fmt                       write each input in the printer's layout, or
+                            transcode it (--from, --to);
       --from format         read json (default), jsonc, ndjson, csv or tsv;
       --to format           write json (default), jsonc, ndjson, csv or tsv;
+      --in-place            with fmt, rewrite each file in place;
+      --check               with fmt, print nothing: exit 1 when a file is
+                            not already formatted;
       --grow-header         with --to csv or tsv, write a header of every key;
       --max-depth n         refuse nesting past n levels (default 1024);
       --strict-limits       with check, keep the library's number limits.
@@ -119,20 +125,25 @@ Opts :: struct {
 	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
 	strict_limits:    bool, // check: the library's depth, digit and scale caps hold
 	max_depth_given:  bool, // --max-depth was on the command line
+	in_place:         bool, // fmt: rewrite each file through a temporary one and a rename
+	check:            bool, // fmt: write nothing, and exit 1 when a file is not formatted
 }
 
 // What the command line gives besides the options.
 Cli :: struct {
 	validating: bool, // `stury check`
+	formatting: bool, // `stury fmt`
 	filter:     Maybe(string), // the filter, or under -f the file it is in
 	files:      [dynamic]string,
 	// --arg, --argjson, --slurpfile and --rawfile, the first of a name standing.
 	var_names:  [dynamic]string,
 	var_values: [dynamic]jq.Value,
 	positional: [dynamic]jq.Value, // --args and --jsonargs
+	args_mode:  bool, // --args or --jsonargs was given
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
 	mono:       bool, // -M
+	compact_given: bool, // -c was given
 	// --from and --to as given on the command line. `parse_args` resolves them into `Opts`.
 	formats:    struct {
 		from, to: Maybe(Format),
@@ -145,7 +156,10 @@ Cli :: struct {
 parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	args := args
 	subcommand := subcommand_index(args)
-	cli.validating = subcommand >= 0
+	if subcommand >= 0 {
+		cli.formatting = args[subcommand] == "fmt"
+		cli.validating = !cli.formatting
+	}
 	rest_as: enum {
 		Files,
 		Args,
@@ -173,7 +187,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 		if args_done || !is_option(a) {
 			switch {
-			case !cli.validating && cli.filter == nil:
+			case !cli.validating && !cli.formatting && cli.filter == nil:
 				cli.filter = a
 			case rest_as == .Args:
 				append(&cli.positional, jq.valid_utf8(a))
@@ -225,8 +239,10 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			i += option_arity(a)
 		case "args":
 			rest_as = .Args
+			cli.args_mode = true
 		case "jsonargs":
 			rest_as = .Json_Args
+			cli.args_mode = true
 		case "build-configuration":
 			fmt.println(BUILD_CONFIGURATION)
 			os.exit(0)
@@ -238,6 +254,10 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			o.grow_header = true
 		case "strict-limits":
 			o.strict_limits = true
+		case "in-place":
+			o.in_place = true
+		case "check":
+			o.check = true
 		case "seq":
 			o.seq = true
 			note_json_flag(&cli, "--seq")
@@ -257,6 +277,11 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 				die()
 			}
 		}
+	}
+	// fmt writes each input as its own format unless --to says otherwise, so its --to follows --from when --to
+	// was not given. `--to ndjson` is what sets the compact layout here, since fmt refuses -c.
+	if cli.formatting && cli.formats.to == nil {
+		o.to = o.from
 	}
 	if o.to == .Ndjson {
 		o.compact = true
@@ -368,7 +393,7 @@ has_from_file_flag :: proc(a: string) -> bool {
 	return strings.contains_rune(flags, 'f')
 }
 
-// Where `check` (or `validate`) stands in `args`, or -1: the first argument that is not an option, before
+// Where `check` (or `validate`) or `fmt` stands in `args`, or -1: the first argument that is not an option, before
 // `--`. Under -f that argument is the program file's name, which stays a file.
 @(private = "file")
 subcommand_index :: proc(args: []string) -> int {
@@ -380,7 +405,7 @@ subcommand_index :: proc(args: []string) -> int {
 		case is_option(a):
 			i += option_arity(a)
 		case:
-			return i if a == "check" || a == "validate" else -1
+			return i if a == "check" || a == "validate" || a == "fmt" else -1
 		}
 	}
 	return -1
@@ -436,6 +461,7 @@ letter_option :: proc(o: ^Opts, cli: ^Cli, c: byte) -> bool {
 		note_json_flag(cli, "-j")
 	case 'c':
 		o.compact = true
+		cli.compact_given = true
 		note_json_flag(cli, "-c")
 	case 'C':
 		cli.color_set = true
@@ -661,16 +687,17 @@ parse_colors :: proc(spec: string) -> (colors: [8]string, ok: bool) {
 	return colors, true
 }
 
-// jq's choice of colour: with -C, or when stdout is a terminal and $NO_COLOR is unset or empty. Never with -M.
-// $JQ_COLORS is read either way, and jq's warning printed when it does not parse.
+// jq's choice of colour: with -C, or when stdout is a terminal and $NO_COLOR is unset or empty. Never with -M, and
+// never for fmt, whose output is the file's format rather than a terminal's. $JQ_COLORS is read either way, and
+// jq's warning printed when it does not parse, but fmt reads neither.
 set_colors :: proc(run: ^Run, cli: Cli) {
 	no_color := posix.getenv("NO_COLOR")
-	run.opts.color = (cli.color_set || is_terminal(os.stdout) && (no_color == nil || no_color == "")) && !cli.mono
+	run.opts.color = (cli.color_set || is_terminal(os.stdout) && (no_color == nil || no_color == "")) && !cli.mono && !cli.formatting
 	if run.opts.color {
 		enable_color()
 	}
 	run.colors = DEFAULT_COLORS
-	if spec := posix.getenv("JQ_COLORS"); spec != nil {
+	if spec := posix.getenv("JQ_COLORS"); spec != nil && !cli.formatting {
 		ok: bool
 		if run.colors, ok = parse_colors(string(spec)); !ok {
 			fmt.eprintln("Failed to set $JQ_COLORS")
