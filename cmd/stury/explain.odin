@@ -11,21 +11,8 @@ import "core:fmt"
 import "core:strings"
 import json "../../json"
 
-Route :: enum u8 {
-	Interpreter,
-	Path_Scan,
-	Csv_Columns,
-}
-
-@(rodata)
-ROUTE_TEXT := [Route]string {
-	.Interpreter = "interpreter",
-	.Path_Scan   = "path scan",
-	.Csv_Columns = "csv columns",
-}
-
 // Why the interpreter answers a filter. The report prints every reason that holds, in this order.
-Why :: enum u8 {
+Explain_Why :: enum u8 {
 	// Options that keep a filter from the scan and from the columns.
 	Null_Input,
 	Slurp,
@@ -57,10 +44,10 @@ Why :: enum u8 {
 	Several_Files,
 }
 
-Whys :: bit_set[Why;u32]
+Explain_Whys :: bit_set[Explain_Why;u32]
 
 @(rodata)
-WHY_TEXT := [Why]string {
+EXPLAIN_WHY_TEXT := [Explain_Why]string {
 	.Null_Input       = "--null-input reads no input",
 	.Slurp            = "--slurp needs the input whole",
 	.Sort_Keys        = "-S sorts keys on output",
@@ -90,7 +77,7 @@ WHY_TEXT := [Why]string {
 }
 
 // The decisions made while the run goes on, each reported once.
-Runtime :: enum u8 {
+Explain_Runtime :: enum u8 {
 	Root_Pieces,
 	Interpreter,
 	Step,
@@ -100,13 +87,13 @@ Runtime :: enum u8 {
 
 Explain :: struct {
 	on:    bool,
-	whys:  Whys,
+	whys:  Explain_Whys,
 	texts: int, // the inputs read so far, which a `text N` line numbers
-	said:  bit_set[Runtime;u8],
+	said:  bit_set[Explain_Runtime;u8],
 }
 
 // The options that keep a filter from the path scan, as `choose_scan` reads them.
-scan_stops :: proc(o: ^Opts) -> (stops: Whys) {
+scan_stops :: proc(o: ^Opts) -> (stops: Explain_Whys) {
 	if o.null_input {stops += {.Null_Input}}
 	if o.slurp {stops += {.Slurp}}
 	if o.sort_keys {stops += {.Sort_Keys}}
@@ -121,7 +108,7 @@ scan_stops :: proc(o: ^Opts) -> (stops: Whys) {
 }
 
 // The options that keep a filter from the column route, as `choose_columns` reads them.
-column_stops :: proc(o: ^Opts) -> (stops: Whys) {
+column_stops :: proc(o: ^Opts) -> (stops: Explain_Whys) {
 	if o.null_input {stops += {.Null_Input}}
 	if o.slurp {stops += {.Slurp}}
 	if o.exit_status {stops += {.Exit_Status}}
@@ -131,13 +118,19 @@ column_stops :: proc(o: ^Opts) -> (stops: Whys) {
 	return
 }
 
-explain_why :: #force_inline proc(run: ^Run, whys: Whys) {
-	run.explain.whys += whys
+// Records `whys` under --explain, which then wants every reason that holds: true there, and the caller goes on
+// to find the others. False otherwise, and the caller stops at the first.
+explain_why :: proc(run: ^Run, whys: Explain_Whys) -> (more: bool) {
+	if run.explain.on {
+		run.explain.whys += whys
+	}
+	return run.explain.on
 }
 
 @(private = "file")
 explain_line :: proc(format: string, args: ..any) {
-	fmt.eprintf("stury: explain: %s\n", fmt.tprintf(format, ..args))
+	fmt.eprint("stury: explain: ")
+	fmt.eprintfln(format, ..args)
 }
 
 // The filter, before anything can refuse it: a filter that does not compile still shows what was run.
@@ -153,15 +146,19 @@ explain_route :: proc(run: ^Run) {
 	if !e.on {
 		return
 	}
-	route := Route.Csv_Columns if run.columns != nil else .Path_Scan if run.scanning else .Interpreter
-	explain_line("route: %s", ROUTE_TEXT[route])
-	if route == .Interpreter {
-		for why in Why {
+	switch {
+	case run.columns == nil && !run.scanning:
+		explain_line("route: interpreter")
+		for why in Explain_Why {
 			if why in e.whys {
-				explain_line("why: %s", WHY_TEXT[why])
+				explain_line("why: %s", EXPLAIN_WHY_TEXT[why])
 			}
 		}
 		return
+	case run.columns != nil:
+		explain_line("route: csv columns")
+	case:
+		explain_line("route: path scan")
 	}
 	switch {
 	case run.columns != nil && run.columns.selecting:
@@ -178,15 +175,30 @@ explain_route :: proc(run: ^Run) {
 }
 
 // A decision about the input being read, once of its kind.
-explain_text :: proc(run: ^Run, kind: Runtime, what: string) {
+explain_text :: proc(run: ^Run, kind: Explain_Runtime, what: string) {
 	if run.explain.on && kind not_in run.explain.said {
 		run.explain.said += {kind}
 		explain_line("text %d: %s", run.explain.texts, what)
 	}
 }
 
+// A text the interpreter answers because a step met a value of another kind; not said once the interpreter has
+// taken the rest of the stream, which said so.
+explain_step :: proc(run: ^Run) {
+	if .Interpreter not_in run.explain.said {
+		explain_text(run, .Step, "a step met a value of another kind: the interpreter answers this text")
+	}
+}
+
+// `by` more (or fewer) inputs read, which a `text N` line numbers.
+explain_count :: proc(run: ^Run, by: int) {
+	if run.explain.on {
+		run.explain.texts += by
+	}
+}
+
 // A decision about how a file is read, once of its kind.
-explain_note :: proc(run: ^Run, kind: Runtime, what: string) {
+explain_note :: proc(run: ^Run, kind: Explain_Runtime, what: string) {
 	if run.explain.on && kind not_in run.explain.said {
 		run.explain.said += {kind}
 		explain_line("note: %s", what)

@@ -52,36 +52,43 @@ choose_columns :: proc(run: ^Run, text: string, files: int) {
 		return
 	}
 	stops := column_stops(o)
-	explain_why(run, stops)
-	if stops != {} {
+	if stops != {} && !explain_why(run, stops) {
 		return
 	}
 	parsed, errors := jq.parse(text)
-	if len(errors) > 0 || len(parsed.deps) > 0 || parsed.body == nil {
-		explain_why(run, {.Imports}) // a filter that does not parse is refused before the report
+	if len(errors) > 0 || parsed.body == nil {
 		return
 	}
-	body := parsed.body
-	if body.kind == .Call && body.name == "select" {
-		run.columns = select_columns(run, body, files)
+	imports := len(parsed.deps) > 0
+	if imports && !explain_why(run, {.Imports}) {
 		return
 	}
-	if body.kind == .Object || body.kind == .Identity {
-		run.columns = object_columns(run, body)
-		return
+	cols := columns_of(run, parsed.body, files)
+	if stops == {} && !imports {
+		run.columns = cols
 	}
-	array := body.kind == .Array
-	if array {
-		body = body.a
+}
+
+// The columns of `filter`, or nil with the reasons it has none.
+@(private = "file")
+columns_of :: proc(run: ^Run, filter: ^jq.Node, files: int) -> ^Columns {
+	o := &run.opts
+	if filter.kind == .Call && filter.name == "select" {
+		return select_columns(run, filter, files)
 	}
+	if filter.kind == .Object || filter.kind == .Identity {
+		return object_columns(run, filter)
+	}
+	array := filter.kind == .Array
+	listed := filter.a if array else filter
 	names: [dynamic]string
 	laid_out := array && !o.compact && !writes_cells(o)
-	named := add_columns(&names, body)
+	named := add_columns(&names, listed)
 	if laid_out || !named {
 		explain_why(run, ({.Layout} if laid_out else {}) + ({.Not_Columns} if !named else {}))
-		return
+		return nil
 	}
-	run.columns = new_clone(Columns{names = names[:], array = array, at = make([]int, len(names))})
+	return new_clone(Columns{names = names[:], array = array, at = make([]int, len(names))})
 }
 
 // Returns the columns of `.` (all of them) or of `{...}` whose members each pair a constant key with a field of
@@ -90,16 +97,19 @@ choose_columns :: proc(run: ^Run, text: string, files: int) {
 @(private = "file")
 object_columns :: proc(run: ^Run, body: ^jq.Node) -> ^Columns {
 	o := &run.opts
+	whys: Explain_Whys
 	if writes_cells(o) ? o.grow_header : !o.compact {
-		explain_why(run, {.Grow_Header} if writes_cells(o) else {.Layout})
-		return nil
+		whys += {.Grow_Header} if writes_cells(o) else {.Layout}
+		if !explain_why(run, whys) {
+			return nil
+		}
 	}
 	if body.kind == .Identity {
 		if writes_cells(o) {
-			explain_why(run, {.Dot_To_Cells})
-			return nil
+			whys += {.Dot_To_Cells}
 		}
-		return new_clone(Columns{object = true, all = true, sorted = o.sort_keys})
+		explain_why(run, whys)
+		return nil if whys != {} else new_clone(Columns{object = true, all = true, sorted = o.sort_keys})
 	}
 	Member :: struct {
 		key, name: string,
@@ -108,25 +118,26 @@ object_columns :: proc(run: ^Run, body: ^jq.Node) -> ^Columns {
 	for i := 0; i < len(body.args); i += 2 {
 		key, value := body.args[i], body.args[i + 1]
 		k, is_key := key.value.(string)
-		if key.kind != .Literal || !is_key {
-			explain_why(run, {.Object_Key})
-			return nil
-		}
+		constant := key.kind == .Literal && is_key
+		repeats := false
 		for m in members {
-			if m.key == k {
-				explain_why(run, {.Object_Key})
-				return nil
-			}
+			repeats ||= m.key == k
 		}
-		switch {
-		case value == nil:
-			append(&members, Member{k, k})
-		case value.kind == .Field && !value.opt && value.a.kind == .Identity:
-			append(&members, Member{k, value.name})
-		case:
-			explain_why(run, {.Object_Member})
+		if !constant || repeats {
+			whys += {.Object_Key}
+		}
+		if value != nil && (value.kind != .Field || value.opt || value.a.kind != .Identity) {
+			whys += {.Object_Member}
+		}
+		if whys != {} && !explain_why(run, whys) {
 			return nil
 		}
+		if constant {
+			append(&members, Member{k, k if value == nil else value.name})
+		}
+	}
+	if whys != {} {
+		return nil
 	}
 	if o.sort_keys {
 		slice.sort_by(members[:], proc(a, b: Member) -> bool {return a.key < b.key})
@@ -145,7 +156,7 @@ object_columns :: proc(run: ^Run, body: ^jq.Node) -> ^Columns {
 @(private = "file")
 select_columns :: proc(run: ^Run, body: ^jq.Node, files: int) -> ^Columns {
 	o := &run.opts
-	whys: Whys
+	whys: Explain_Whys
 	if run.home_module {
 		whys += {.Home_Module}
 	}
@@ -153,6 +164,9 @@ select_columns :: proc(run: ^Run, body: ^jq.Node, files: int) -> ^Columns {
 		whys += ({.Grow_Header} if o.grow_header else {}) + ({.Several_Files} if files > 1 else {})
 	} else if !o.compact {
 		whys += {.Layout}
+	}
+	if whys != {} && !explain_why(run, whys) {
+		return nil
 	}
 	watch: [dynamic]string
 	if len(body.args) != 1 {

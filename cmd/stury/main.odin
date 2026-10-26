@@ -61,6 +61,12 @@ EXIT_INPUT :: 5
 // Output is held here and written once it passes FLUSH_AT bytes, and at exit.
 FLUSH_AT :: 1 << 20
 
+// The comparison of `select(PATH op LITERAL)`, which the scan answers.
+Select :: struct {
+	op:      jq.Op, // `.None` for any other filter
+	literal: jq.Value,
+}
+
 // A pool thread works on a shallow copy of the Run (`run^`): the copy shares everything the Run points to (the
 // options, the paths' steps, the pool, the interpreter's program and values) and owns only `out`, a buffer of
 // its own, with `held` set.
@@ -82,10 +88,7 @@ Run :: struct {
 	rows_begun:  bool, // a record has been written, so later records are not at the output's start
 	// select(P op LITERAL): the scan answers P, and a record is printed when its answer compares so. `op` is .None
 	// for any other filter.
-	select:      struct {
-		op:      jq.Op,
-		literal: jq.Value,
-	},
+	select:      Select,
 	prog:        ^jq.Node, // nil until `ready_interpreter`
 	// The filter and the command line's variables, which `ready_interpreter` parses, checks and binds.
 	program:     struct {
@@ -319,7 +322,8 @@ bind_cli_vars :: proc(run: ^Run) {
 	run.ip.globals = jq.bind_var(&run.ip, run.ip.globals, "ARGS", args)
 }
 
-// Whether the path scan answers the filter `text`, and with what path.
+// Whether the path scan answers the filter `text`, and with what path. Under --explain it goes on past what
+// rules the scan out, to every reason that holds.
 choose_scan :: proc(run: ^Run, text: string) {
 	run.any_at = -1
 	o := run.opts
@@ -327,21 +331,27 @@ choose_scan :: proc(run: ^Run, text: string) {
 		return
 	}
 	stops := scan_stops(&o)
-	explain_why(run, stops)
-	if stops != {} && !run.explain.on {
+	if stops != {} && !explain_why(run, stops) {
 		return
 	}
 	@(static) steps: [json.MAX_PATH_STEPS]json.Step
 	p, perr := json.parse_path(text, steps[:], make([]u8, len(text)))
 	if perr != nil {
-		ok: bool
-		if p, ok = selected_path(run, text, steps[:]); !ok {
+		// `select` is the interpreter's under JSONC, whose texts print with their comments.
+		jsonc := o.from == .Jsonc
+		if jsonc && !explain_why(run, {.Jsonc_Select}) {
 			return
 		}
+		sel: Select
+		why: Explain_Whys
+		p, sel, why = selected_path(run, text, steps[:])
+		explain_why(run, why)
+		if why != {} || jsonc || stops != {} {
+			return
+		}
+		run.select = sel
 	}
 	if stops != {} {
-		// Only the filter's own reasons were wanted: the scan does not run, so it keeps nothing of what it read.
-		run.select = {}
 		return
 	}
 	for s, i in p.steps {
@@ -365,47 +375,35 @@ choose_scan :: proc(run: ^Run, text: string) {
 }
 
 // The path P of the filter `text` when it is `select(P op LITERAL)`, P a path the scan answers with no `[]` and
-// LITERAL no array or object, with the comparison kept in `run.select`. It returns false for any other filter. The
-// filter is checked here, so `select` is known to be jq's.
-selected_path :: proc(run: ^Run, text: string, steps: []json.Step) -> (p: json.Path, ok: bool) {
-	o := run.opts
-	if o.from == .Jsonc {
-		explain_why(run, {.Jsonc_Select})
-		return
-	}
+// LITERAL no array or object, and the comparison. The reason it is not, when it is not: `why` is empty exactly
+// when it is. The filter is checked here, so `select` is known to be jq's.
+selected_path :: proc(run: ^Run, text: string, steps: []json.Step) -> (p: json.Path, sel: Select, why: Explain_Whys) {
 	ready_interpreter(run)
 	n := run.prog
 	if n.kind != .Call || n.name != "select" || len(n.args) != 1 {
-		explain_why(run, {.Not_Path})
-		return
+		return {}, {}, {.Not_Path}
 	}
 	if b, bound := n.native.?; !bound || b.native != jq.native_select {
-		explain_why(run, {.Select_Redefined})
-		return
+		return {}, {}, {.Select_Redefined}
 	}
 	cmp := n.args[0]
 	if cmp.kind != .Binary || cmp.op < .Eq || cmp.op > .Ge || cmp.b.kind != .Literal {
-		explain_why(run, {.Select_Compare})
-		return
+		return {}, {}, {.Select_Compare}
 	}
 	if k := jq.kind(cmp.b.value); k == .Array || k == .Object {
-		explain_why(run, {.Select_Compare})
-		return
+		return {}, {}, {.Select_Compare}
 	}
 	for x := cmp.a; x.kind != .Identity; x = x.a {
 		if x.kind != .Field && x.kind != .Index || x.opt {
-			explain_why(run, {.Select_Path})
-			return
+			return {}, {}, {.Select_Path}
 		}
 	}
 	path := text[cmp.a.loc.start:cmp.a.loc.end]
 	parsed, perr := json.parse_path(path, steps, make([]u8, len(path)))
 	if perr != nil || parsed.limit != 0 || len(parsed.steps) == 0 {
-		explain_why(run, {.Select_Path})
-		return
+		return {}, {}, {.Select_Path}
 	}
-	run.select = {cmp.op, cmp.b.value}
-	return parsed, true
+	return parsed, {cmp.op, cmp.b.value}, {}
 }
 
 // `e` in `src`, the text of the file `name`, as `NAME:line:col: Fault` (or `what`, where it says more), with no

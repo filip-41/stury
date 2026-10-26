@@ -57,7 +57,7 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 			continue
 		}
 		src := ins.data[at:limit]
-		run.explain.texts += int(run.explain.on)
+		explain_count(run, 1)
 		if pieces && trailing && limit == len(ins.data) {
 			// Set before the filter runs, as its error tells the line jq's reader is on (`input_position`).
 			ins.seen = last_read(ins.data, at, limit)
@@ -100,7 +100,7 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 			continue
 		}
 		if read_on(ins, at) {
-			run.explain.texts -= int(run.explain.on) // counted again when the text is read whole
+			explain_count(run, -1) // counted again when the text is read whole
 			continue
 		}
 		if run.opts.from == .Jsonc {

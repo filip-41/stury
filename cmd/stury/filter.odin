@@ -91,10 +91,7 @@ Deep_Job :: struct {
 // Run the filter on one input text, `base` bytes into the input: a path whose step does not apply, which
 // the scan left to jq's rules.
 run_text :: proc(run: ^Run, src: []byte, base: u64) {
-	// Not after the interpreter took the rest of the stream, which said so.
-	if .Interpreter not_in run.explain.said {
-		explain_text(run, .Step, "a step met a value of another kind: the interpreter answers this text")
-	}
+	explain_step(run)
 	ready_interpreter(run)
 	d, err := jq.build_rows(src, run.req.dialect)
 	if e, bad := err.?; bad {
