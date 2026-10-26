@@ -854,6 +854,11 @@ def posix_only(case):
             or any("Is a directory" in w for w in said))
 
 
+# --explain's timings, peak memory, byte counts and worker count differ from run to run: the explain rows are compared
+# without them, and with everything else of the report byte for byte.
+EXPLAIN_VARIES = re.compile(rb"(?m)^stury: explain: (?:compile_time|run_time|cost): .*\n| workers=\d+")
+
+
 def check_cli(stury, diff, case):
     stdin = case["stdin"] if len(case["stdin"]) < 200 else case["stdin"][:200] + "..."
     files = f" files {case['files']}" if case["files"] else ""
@@ -868,6 +873,8 @@ def check_cli(stury, diff, case):
     if on_platform_jq and not jq_here():
         return f"{area} (no jq 1.8.2 here, not run)", what, None
     code, out, err = run_cli(stury, case)
+    if case["area"] == "explain":
+        err = EXPLAIN_VARIES.sub(b"", err)
     enc = lambda w: [w[0]] + [None if s is None else s.encode("utf-8", "surrogateescape") for s in w[1:]]
     jq, own = enc(case["want"][:3]), case["want"][3:]
     if on_platform_jq:
