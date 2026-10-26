@@ -174,7 +174,7 @@ publish_nodes :: #force_no_inline proc(ctx: ^Query_Ctx) {
 // settled (`stop_capable`). Bytes past it were never checked, so neither it nor `err` is a document result.
 // `validity` is written on every exit: `.Full` exactly when the walk consumed the whole item and skipped
 // nothing, else `.Partial`.
-// `dialect == .Jsonc` reads comments and trailing commas on `jsonc_walk`, whatever the strictness: a complete
+// A dialect other than `.Json` is read on `dialect_walk`, whatever the strictness: a complete
 // `.Values` walk, so its coverage is `.Full`. `facts` then receives each comment, attached to nothing, and nil records none.
 // Only a locating or may-stop reading whose queries are all path or demand ones skips a value, and its
 // `validity` is then `.Partial`. Pass that to `validate_remaining`. A cap past MAX_DEPTH is held to it:
@@ -247,7 +247,7 @@ scan_queries_tape_pretty :: #force_no_inline proc(
 	)
 }
 
-// `scan_queries` and `scan_queries_jsonc` under a cap past MAX_DEPTH, on `walk_deep`: a complete walk that
+// `scan_queries` and `scan_queries_dialect` under a cap past MAX_DEPTH, on `walk_deep`: a complete walk that
 // neither stops nor skips, at `.Structural`'s level for that strictness and checking every value for the
 // rest. So `.Lazy` has no early stop past MAX_DEPTH. The caller picks it before the walk, so the default walks
 // compile as if it did not exist.
@@ -262,8 +262,12 @@ scan_queries_deep :: #force_no_inline proc(
 	dialect: Dialect,
 	facts: ^[dynamic]Fact,
 ) -> (err: Maybe(Error), fault: Walk_Fault) {
-	if dialect == .Jsonc {
+	switch dialect {
+	case .Json:
+	case .Jsonc:
 		return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Jsonc, facts, Walk_Fault, true, nil, false)
+	case .Json5:
+		return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Json5, facts, Walk_Fault, true, nil, false)
 	}
 	// `.Lazy` is read as `.Strict`: its stop is not taken here, and `axes_for` would arm one.
 	level := Strictness.Structural if strictness == .Structural else Strictness.Strict
@@ -308,18 +312,19 @@ sink_fault :: #force_inline proc($F: typeid, ctx: ^Query_Ctx) -> F {
 	}
 }
 
-// `scan_queries` over JSONC: a complete `.Strict` walk that appends each comment to `facts` when it is not
-// nil. A procedure of its own so the JSON instantiation compiles as it would without it.
-scan_queries_jsonc :: #force_no_inline proc(
+// `scan_queries` over a dialect other than `.Json`: a complete `.Strict` walk that appends each comment to
+// `facts` when it is not nil. A procedure of its own so the JSON instantiation compiles as it would without it.
+scan_queries_dialect :: #force_no_inline proc(
 	src: []byte,
 	queries: []Scan_Query,
 	limits: Limits,
 	$Q: bit_set[Walk_Kind],
 	validity: ^Validity = nil,
 	resolution := Resolution.All,
-	facts: ^[dynamic]Fact = nil,
+	facts: ^[dynamic]Fact,
+	$dialect: Dialect,
 ) -> (err: Maybe(Error), fault: Walk_Fault) {
-	return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Jsonc, facts, Walk_Fault, false, nil, false)
+	return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, dialect, facts, Walk_Fault, false, nil, false)
 }
 
 @(private = "file")
@@ -388,10 +393,10 @@ scan_queries_in :: #force_inline proc(
 		s := enter_document(src, limits, MAX_DEPTH)
 	}
 	ctx.max_depth = s.limits.max_depth
-	when dialect == .Jsonc {
-		jc := Jsonc_Cursor{facts = facts}
-		ctx.hooks = &FORMAT_HOOKS_JSONC
-		jsonc_skip(&s, &jc)
+	when dialect != .Json {
+		jc := Dialect_Cursor(GRAMMAR[dialect]){facts = facts}
+		ctx.hooks = hooks_of(dialect)
+		dialect_skip(&s, &jc)
 	} else {
 		lex.skip_ws(&s)
 	}
@@ -441,6 +446,7 @@ scan_queries_in :: #force_inline proc(
 		}
 		if keyed {
 			key_set_init(&keys, &key_scratch, key_alloc)
+			keys.json5 = dialect == .Json5
 		}
 		defer if keyed {
 			key_set_destroy(&keys)
@@ -461,11 +467,11 @@ scan_queries_in :: #force_inline proc(
 	when .Nodes in Q {
 		defer publish_nodes(ctx)
 	}
-	when dialect == .Jsonc {
+	when dialect != .Json {
 		when deep {
-			werr := jsonc_walk_deep(&s, ctx, Q, &jc)
+			werr := dialect_walk_deep(&s, ctx, Q, &jc)
 		} else {
-			werr := jsonc_walk(&s, ctx, Q, &jc)
+			werr := dialect_walk(&s, ctx, Q, &jc)
 		}
 		if jc.oom {
 			note_oom(ctx, .Nodes)
@@ -531,8 +537,8 @@ scan_queries_in :: #force_inline proc(
 	// The one exit that consumed the item. `finish` may still report `Trailing`, a whole-document result,
 	// so coverage is `.Full` then too, unless the walk skipped a region.
 	covered = !ctx.skipped
-	when dialect == .Jsonc {
-		ferr := jsonc_finish(&s, &jc)
+	when dialect != .Json {
+		ferr := dialect_finish(&s, &jc)
 		if jc.oom {
 			note_oom(ctx, .Nodes)
 		}

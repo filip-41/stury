@@ -3,6 +3,7 @@ package scan
 // The tokens between values that the walks step over: a key and its colon, the whitespace around them, the
 // comma of a compact array of numbers.
 
+import "base:intrinsics"
 import "walk"
 import lex "lex"
 
@@ -20,21 +21,30 @@ object_key :: #force_inline proc(
 	owner: ^Open_Frame,
 	pend: ^Demand_Pend,
 ) -> (next: int, err: Maybe(Error)) {
-	if lex.peek(s) != '"' {
-		// `pretty_skip_peek` skips all the whitespace, so the pretty cursor skips nothing after it.
-		when C == Pretty_Cursor {
-			pretty_skip_peek(s, cur, .Member)
-		} else {
-			when C == Byte_Cursor && .Nodes in Q {
-				lex.skip_indent(s)
-			}
-			cursor_skip(s, cur)
+	G :: intrinsics.type_polymorphic_record_parameter_value(C, 0) when intrinsics.type_is_specialization_of(C, Dialect_Cursor) else Grammar{}
+	when .Json5_Keys in G {
+		// Any byte may start a JSON5 key's token, so `json5_key` refuses one that does not.
+		cursor_skip(s, cur)
+		if lex.peek(s) == -1 {
+			return -1, Error{offset = s.pos, kind = .Truncated}
 		}
-		if at := lex.peek(s); at != '"' {
-			if at == -1 {
-				return -1, Error{offset = s.pos, kind = .Truncated}
+	} else {
+		if lex.peek(s) != '"' {
+			// `pretty_skip_peek` skips all the whitespace, so the pretty cursor skips nothing after it.
+			when C == Pretty_Cursor {
+				pretty_skip_peek(s, cur, .Member)
+			} else {
+				when C == Byte_Cursor && .Nodes in Q {
+					lex.skip_indent(s)
+				}
+				cursor_skip(s, cur)
 			}
-			return -1, Error{offset = s.pos, kind = .Bad_Char}
+			if at := lex.peek(s); at != '"' {
+				if at == -1 {
+					return -1, Error{offset = s.pos, kind = .Truncated}
+				}
+				return -1, Error{offset = s.pos, kind = .Bad_Char}
+			}
 		}
 	}
 	key_lo := s.pos
@@ -49,7 +59,9 @@ object_key :: #force_inline proc(
 		known = cursor_string_known(s, cur, check, Q, true)
 	}
 	if !known {
-		when check == .Values {
+		when .Json5_Keys in G {
+			perr = json5_key(s, q, key_lo, Q)
+		} else when check == .Values {
 			perr = lex.parse_string_q(s, q, key_lo, true, Q)
 		} else {
 			perr = lex.skip_string_q(s, q, key_lo, true, Q)
@@ -107,8 +119,9 @@ object_key :: #force_inline proc(
 expect_colon :: #force_inline proc(s: ^Scanner, cur: ^$C, $Q: bit_set[Walk_Kind]) -> (next: int, err: Maybe(Error)) {
 	// Fast path for a colon flush against its value, as in a compact document: `s.pos + 1 < n` keeps the
 	// next byte in bounds and a byte above 0x20 is not whitespace. Every other shape falls through, which
-	// keeps the error offsets unchanged. A JSONC `/` there may open a comment, so that walk skips it.
-	when C != Jsonc_Cursor {
+	// keeps the error offsets unchanged. A dialect's `/` there may open a comment, and a JSON5 byte above 0x20
+	// may be whitespace, so a dialect walk skips it.
+	when !intrinsics.type_is_specialization_of(C, Dialect_Cursor) {
 		#no_bounds_check {
 			n := u64(len(s.src))
 			when C == Pretty_Cursor {

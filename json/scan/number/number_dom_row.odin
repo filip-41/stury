@@ -197,6 +197,9 @@ number_token :: #force_inline proc(src: []byte, lo, hi: u64, digits: u16) -> Num
 	// Past the fraction, or past the integer run when there is none: where an exponent starts.
 	tail := frac_at + frac_digits if frac_digits != 0 else frac_at - 1
 	if int_digits == 0 || int_digits + frac_digits > EL_MAX_DIGITS || tail > hi || hi > u64(len(src)) {
+		if digits == DIALECT_SPELLED && lo < hi && hi <= u64(len(src)) {
+			return json5_number_value(src, lo, hi)
+		}
 		return number_span(src, lo, hi)
 	}
 	n := Number_Lex{int_at = int_at, int_digits = int_digits, frac_at = frac_at, frac_digits = frac_digits, ok = true, whole = true}

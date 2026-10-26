@@ -17,7 +17,7 @@ child :: proc {
 // reading as a path's default `.Last`.
 @(private, require_results)
 child_by_key :: proc(doc: ^Document, n: Node, name: string) -> Node {
-	return walk.dom_find_key(doc.rows[:], doc.src, n, name, &scan_pkg.FORMAT_HOOKS)
+	return walk.dom_find_key(doc.rows[:], doc.src, n, name, scan_pkg.hooks_of(doc.dialect))
 }
 
 // Member `i` of container `n`, 0-based (from the end when negative), or `NO_NODE`. O(1) over an array of

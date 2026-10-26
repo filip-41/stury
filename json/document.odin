@@ -131,7 +131,7 @@ get_string_decoded :: #force_no_inline proc(doc: ^Document, n: Node) -> (s: stri
 		}
 	}
 	b: []u8
-	b, ok = scan_pkg.dom_get_string(doc.rows[:], doc.src, doc.values[:], &doc.arena, doc.rows.allocator, n)
+	b, ok = scan_pkg.dom_get_string(doc.rows[:], doc.src, doc.values[:], &doc.arena, doc.rows.allocator, n, doc.dialect)
 	if ok && lazy {
 		if doc.strings == nil {
 			doc.strings.allocator = doc.rows.allocator
@@ -151,7 +151,7 @@ get_key :: proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
 		return
 	}
 	b: []u8
-	b, ok = scan_pkg.dom_key(doc.rows[:], doc.src, &doc.arena, doc.rows.allocator, n)
+	b, ok = scan_pkg.dom_key(doc.rows[:], doc.src, &doc.arena, doc.rows.allocator, n, doc.dialect)
 	if ok && .Key_Escaped in doc.rows[n].flags {
 		if doc.keys == nil {
 			doc.keys.allocator = doc.rows.allocator

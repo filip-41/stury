@@ -116,8 +116,8 @@ cut_by_next_byte :: proc(data: []byte, at, limit: int, e: Error, dialect := Dial
 	if e.kind == .Truncated && e.offset == u64(limit - at) && limit < len(data) {
 		slice := data[at:limit + 1]
 		with_err: Maybe(Error)
-		if dialect == .Jsonc {
-			with_err = jsonc_validate(slice, nil, limits)
+		if dialect != .Json {
+			with_err = validate_dialect(slice, dialect, nil, limits)
 		} else if limits.max_depth > MAX_DEPTH {
 			with_err = scan_plain_deep(slice, .Strict, limits)
 		} else {

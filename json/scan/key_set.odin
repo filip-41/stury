@@ -64,13 +64,13 @@ key_set_add :: #force_inline proc(ks: ^Key_Set, src: []byte, lo, hi: u64, escape
 @(cold)
 @(private = "file")
 key_set_add_probed :: proc(ks: ^Key_Set, src: []byte, lo, hi: u64, escaped: bool, depth: u32) -> (unique: bool, oom: bool) #no_bounds_check {
-	h := key_hash(src, lo, hi, escaped, depth, ks.seed)
+	h := key_hash(src, lo, hi, escaped, depth, ks.seed, ks.json5)
 	mask := 2 * ks.cap - 1
 	i := h & mask
 	for e := ks.slots[i]; e != 0; e = ks.slots[i] {
 		if e &~ mask == h &~ mask {
 			o := &ks.entries[e & mask - 1]
-			if o.depth &~ KEY_ESCAPED == depth && key_tokens_equal(src, o^, lo, hi, escaped) {
+			if o.depth &~ KEY_ESCAPED == depth && key_tokens_equal(src, o^, lo, hi, escaped, ks.json5) {
 				return false, false
 			}
 		}
@@ -194,9 +194,9 @@ key_set_grow :: proc(ks: ^Key_Set, want: u32) -> bool #no_bounds_check {
 // The hash under `seed` of a key's decoded text and its depth: its bytes taken eight at a time, little-endian,
 // the last word zero-padded, then its length and the depth together. An escaped key's bytes are decoded first, so equal keys hash equal.
 @(private = "file")
-key_hash :: #force_inline proc(src: []byte, lo, hi: u64, escaped: bool, depth: u32, seed: u64) -> u32 #no_bounds_check {
+key_hash :: #force_inline proc(src: []byte, lo, hi: u64, escaped: bool, depth: u32, seed: u64, json5: bool) -> u32 #no_bounds_check {
 	if escaped {
-		return key_hash_escaped(src, lo, hi, depth, seed)
+		return key_hash_escaped(src, lo, hi, depth, seed, json5)
 	}
 	h := seed
 	p, end := lo + 1, hi - 1
@@ -234,10 +234,10 @@ key_hash_short :: #force_inline proc(src: []byte, lo, hi: u64, depth: u32, seed:
 }
 
 @(private = "file")
-key_hash_escaped :: proc(src: []byte, lo, hi: u64, depth: u32, seed: u64) -> u32 {
+key_hash_escaped :: proc(src: []byte, lo, hi: u64, depth: u32, seed: u64, json5: bool) -> u32 {
 	h := seed
 	n: u64
-	it := Key_Bytes{p = lo + 1, end = hi - 1}
+	it := key_bytes_of(src, lo, hi, json5)
 	w: u64
 	k: u64
 	for b in key_bytes_next(src, &it) {
@@ -263,12 +263,12 @@ key_mix :: #force_inline proc(h, w: u64) -> u64 {
 
 // Whether two key tokens decode to the same text.
 @(private = "file")
-key_tokens_equal :: proc(src: []byte, o: Key_Entry, lo, hi: u64, escaped: bool) -> bool {
+key_tokens_equal :: proc(src: []byte, o: Key_Entry, lo, hi: u64, escaped, json5: bool) -> bool {
 	if !escaped && o.depth & KEY_ESCAPED == 0 {
 		return string(src[lo + 1:hi - 1]) == string(src[o.lo + 1:o.hi - 1])
 	}
-	a := Key_Bytes{p = lo + 1, end = hi - 1}
-	b := Key_Bytes{p = o.lo + 1, end = o.hi - 1}
+	a := key_bytes_of(src, lo, hi, json5)
+	b := key_bytes_of(src, o.lo, o.hi, json5)
 	for {
 		x, x_ok := key_bytes_next(src, &a)
 		y, y_ok := key_bytes_next(src, &b)
@@ -282,33 +282,51 @@ key_tokens_equal :: proc(src: []byte, o: Key_Entry, lo, hi: u64, escaped: bool) 
 }
 
 // A key's decoded bytes, one at a time. An escape the walk did not check (`.Locate` reads keys unchecked) and
-// cannot decode stands for its backslash, so a key reads the same however often it is read.
-@(private = "file")
+// cannot decode stands for its backslash, so a key reads the same however often it is read. Under `json5` an
+// escape is JSON5's (a line continuation decodes to nothing), and an unquoted key is read whole.
 Key_Bytes :: struct {
 	p, end: u64,
 	unit:   [4]u8,
 	un, ui: int,
+	json5:  bool,
 }
 
-@(private = "file")
+// The decoded bytes of the key or string token `src[lo:hi]`.
+key_bytes_of :: proc(src: []byte, lo, hi: u64, json5: bool) -> Key_Bytes {
+	if json5 && src[lo] != '"' && src[lo] != '\'' {
+		return Key_Bytes{p = lo, end = hi, json5 = true}
+	}
+	return Key_Bytes{p = lo + 1, end = hi - 1, json5 = json5}
+}
+
 key_bytes_next :: proc(src: []byte, it: ^Key_Bytes) -> (b: u8, ok: bool) {
-	if it.ui < it.un {
-		b = it.unit[it.ui]
-		it.ui += 1
+	for {
+		if it.ui < it.un {
+			b = it.unit[it.ui]
+			it.ui += 1
+			return b, true
+		}
+		if it.p >= it.end {
+			return 0, false
+		}
+		b = src[it.p]
+		if b == '\\' {
+			n: int
+			next: u64
+			good: bool
+			if it.json5 {
+				n, next, good = json5_escape_unit(src, it.p, it.end, it.unit[:])
+			} else {
+				n, next, good = decode_escape_unit(src, it.p, it.end, it.unit[:])
+			}
+			if good {
+				it.p, it.un, it.ui = next, n, 0
+				continue
+			}
+		}
+		it.p += 1
 		return b, true
 	}
-	if it.p >= it.end {
-		return 0, false
-	}
-	b = src[it.p]
-	if b == '\\' {
-		if n, next, good := decode_escape_unit(src, it.p, it.end, it.unit[:]); good {
-			it.p, it.un, it.ui = next, n, 1
-			return it.unit[0], true
-		}
-	}
-	it.p += 1
-	return b, true
 }
 
 // The walk's hook for a key of an object a `.First` or `.Last` run reads through `Any` (`Query_Ctx.wild_keys`):

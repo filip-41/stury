@@ -275,8 +275,8 @@ decode_span :: #force_inline proc(
 //	  so no reader could return it as UTF-8.
 @(require_results)
 validate :: #force_inline proc(src: []byte, opts := Read_Opts{}, facts: ^[dynamic]Fact = nil) -> Maybe(Error) {
-	if opts.dialect == .Jsonc {
-		return scan_pkg.jsonc_validate(src, facts, opts.limits)
+	if opts.dialect != .Json {
+		return scan_pkg.validate_dialect(src, opts.dialect, facts, opts.limits)
 	}
 	if opts.limits.max_depth > MAX_DEPTH {
 		return scan_pkg.scan_plain_deep(src, opts.strictness, opts.limits)

@@ -40,11 +40,11 @@ shape_read :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, lazy: bool, 
 	// JSONC reads every byte: `lazy` does not apply.
 	when dialect == .Jsonc {
 		jc: Jsonc_Cursor
-		jsonc_skip(&s, &jc)
-		if err := jsonc_walk(&s, ctx, Q, &jc); err != nil {
+		dialect_skip(&s, &jc)
+		if err := dialect_walk(&s, ctx, Q, &jc); err != nil {
 			return err
 		}
-		return jsonc_finish(&s, &jc)
+		return dialect_finish(&s, &jc)
 	}
 	lex.skip_ws(&s)
 	// A passing walk never skips. The `when` keeps the skipping walk out of it.

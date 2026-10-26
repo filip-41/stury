@@ -11,6 +11,7 @@ package scan
 // memory. A cap raised past MAX_DEPTH moves the frames to the heap once the input nests past MAX_DEPTH.
 // Every Values-ok input is Locate-ok, and every Locate error is a Values error.
 
+import "base:intrinsics"
 import "base:runtime"
 import "walk"
 import index "index"
@@ -102,7 +103,7 @@ walk_deep :: #force_no_inline proc(
 	limit: u64,
 	$check: Check_Level,
 	$Q: bit_set[Walk_Kind],
-	cur: ^Jsonc_Cursor,
+	cur: ^Dialect_Cursor($G),
 	$may_stop: bool,
 	stopped: ^bool,
 ) -> Maybe(Error) {
@@ -157,6 +158,11 @@ walk_frames :: #force_inline proc(
 		max_depth := limit
 	}
 	sp: u64 = 0
+	// The grammar the walk reads: empty but on a dialect cursor (`Dialect_Cursor`).
+	G :: intrinsics.type_polymorphic_record_parameter_value(C, 0) when intrinsics.type_is_specialization_of(C, Dialect_Cursor) else Grammar{}
+	when .Json5_Scalars in G {
+		#assert(.Shape not_in Q, "a JSON5 text is unmarshalled through its JSON spelling")
+	}
 	// Q is only the kinds that touch a value through its row (`.Nodes`, `.Dom`), nothing else at its start or
 	// end, on a walk that visits every value.
 	BYTES :: C == Byte_Cursor || C == Pretty_Cursor
@@ -197,6 +203,11 @@ walk_frames :: #force_inline proc(
 			vc: u8
 			#no_bounds_check {
 				vc = lex.VCLASS[b]
+			}
+			when .Json5_Scalars in G {
+				if vc == VC_NONE {
+					vc = json5_class(b)
+				}
 			}
 			// Value-start hook. Step `d` reads the members of `frames[d]`, so a member of the innermost
 			// frame is offered at step `sp - 1`.
@@ -435,8 +446,15 @@ walk_frames :: #force_inline proc(
 				}
 				continue descend // the member value this level opened onto
 			case VC_STRING:
-				if err := walk_string(s, q, cur, check, Q, lo, sp); err != nil {
-					return err
+				when .Json5_Scalars in G {
+					if err := json5_string(s, q, lo, false, Q); err != nil {
+						return err
+					}
+					emit_scalar(q, Q, lo, s.pos, .String)
+				} else {
+					if err := walk_string(s, q, cur, check, Q, lo, sp); err != nil {
+						return err
+					}
 				}
 			case VC_LITERAL: // true / false / null
 				if err := walk_literal(s, q, cur, check, Q, lo, sp); err != nil {
@@ -444,6 +462,12 @@ walk_frames :: #force_inline proc(
 				}
 			case VC_NUMBER:
 				known := false
+				when .Json5_Scalars in G {
+					if err := json5_number(s, q, lo, Q); err != nil {
+						return err
+					}
+					known = true
+				}
 				when Q <= EXTENT_ONLY && check == .Locate {
 					known = cursor_scalar_known(s, cur, Q)
 				}
@@ -511,9 +535,9 @@ walk_frames :: #force_inline proc(
 			if c == ',' {
 				s.pos += 1
 				cursor_advance(cur)
-				// Strict cursors take the `else` arm. `walk_value` never builds a `Jsonc_Cursor`, so this arm is
-				// not in the strict walk.
-				when C == Jsonc_Cursor {
+				// Only a dialect walk compiles this arm. The deep walk's strict JSON, on a dialect cursor with
+				// `cur.json`, takes it too and refuses the trailing comma.
+				when .Trailing_Commas in G {
 					// Tested second: only a comma before the closer reads the grammar.
 					if cursor_skip_peek(s, cur) != closer || cur.json {
 						if closer == ']' {
