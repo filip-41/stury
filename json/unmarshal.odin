@@ -102,6 +102,7 @@ unmarshal_record :: proc(rd: ^Record_Read, ptr: ^$T) -> Maybe(Unmarshal_Error) {
 	return core_pkg.unmarshal(rd, ptr)
 }
 
+// One JSON text, `src`, into `ptr^`, as the `unmarshal` group describes. A nil `ptr` is `.Bad_Option`.
 @(require_results)
 unmarshal_value :: proc(
 	src: []byte,

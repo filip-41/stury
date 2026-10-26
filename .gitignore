@@ -57,8 +57,7 @@ tmp/
 # The internal API contract: kept locally, never committed.
 /API.md
 
-# The private release gate: its makefile, the public-surface snapshot and its checker, and the editor config.
+# The private release gate: its makefile, the public-surface checker, and the editor config.
 /Makefile.gate
-/json/API.txt
 /tools/api_surface.py
 /ols.json
