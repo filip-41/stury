@@ -150,3 +150,10 @@ jobs:
           ./stury.exe fmt --check fmt.json
           [ "$(tr -d ' \r\n' < fmt.json)" = '{"b":1e2,"b":2}' ]
           [ "$(wc -l < fmt.json | tr -d ' ')" = 4 ]
+
+      - name: jq 1.8.2 corpus and cli.tsv
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+          STURY_TEST_TIMEOUT: "30"
+        run: python cmd/stury/test/jq_suite.py ./stury.exe

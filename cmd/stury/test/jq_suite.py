@@ -18,7 +18,8 @@ them from the `jq` on PATH. A row where stury reads its input by its own grammar
 answer those instead; a stury-only row (`check`) has null for jq's. DIFFERS is the same for jq.test
 cases. The terminal cases run with no filter on a pseudo-terminal, where jq prints
 its usage and exits 2 when both stdin and stdout are terminals, and reads `.` otherwise; a host with no
-pseudo-terminal devices skips them and says so.
+pseudo-terminal devices (Windows) skips them and says so. On Windows the cases that need POSIX are not run
+either, and the report says so: the pipe and memory cases, and the cli.tsv rows `posix_only` picks.
 
 --diff also runs every case through `jq` (1.8.2 on PATH) and requires stury's stdout, stderr and exit
 status to equal jq's, byte for byte, with `stury:` read as `jq:`; for a documented difference, that jq
@@ -31,7 +32,6 @@ import ctypes
 import functools
 import json
 import os
-import pty
 import re
 import subprocess
 import sys
@@ -40,6 +40,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+
+try:
+    import pty
+except ImportError:  # Windows
+    pty = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SUITE = os.path.join(HERE, "jq-1.8.2")
@@ -58,6 +63,16 @@ def resident_mb(pid):
         info = (ctypes.c_uint64 * 12)()  # struct proc_taskinfo; pti_resident_size is its second field
         n = _libproc.proc_pidinfo(pid, 4, 0, info, ctypes.sizeof(info))  # PROC_PIDTASKINFO
         return info[1] >> 20 if n == ctypes.sizeof(info) else 0
+    if os.name == "nt":
+        counters = (ctypes.c_size_t * 9)()  # PROCESS_MEMORY_COUNTERS on 64 bits: cb and the fault count share the first slot
+        counters[0] = ctypes.sizeof(counters)
+        h = _kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return 0
+        try:
+            return counters[2] >> 20 if _kernel32.K32GetProcessMemoryInfo(h, counters, ctypes.sizeof(counters)) else 0
+        finally:
+            _kernel32.CloseHandle(h)
     try:
         with open(f"/proc/{pid}/statm") as f:
             return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") >> 20
@@ -66,6 +81,12 @@ def resident_mb(pid):
 
 
 _libproc = ctypes.CDLL("/usr/lib/libproc.dylib") if sys.platform == "darwin" else None
+_kernel32 = ctypes.WinDLL("kernel32") if os.name == "nt" else None
+if _kernel32:
+    _kernel32.OpenProcess.restype = ctypes.c_void_p
+    _kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    _kernel32.K32GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+    _kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
 
 
 # Cases running at once, and the resident megabytes all live children may hold before a new case waits to start:
@@ -217,6 +238,8 @@ def record_cli(path):
 def ptys_here():
     """Whether this host can open a pseudo-terminal. A sandbox or a minimal container without /dev/pts
     cannot: the terminal cases are then skipped and said so, not failed."""
+    if pty is None:
+        return False
     try:
         master, slave = pty.openpty()
     except OSError:
@@ -799,6 +822,16 @@ def jq_here():
         return False
 
 
+def posix_only(case):
+    """Whether a cli.tsv row's answer is POSIX's: a `$DIR` path or HOME (module search paths), a directory opened
+    as a file, local time (the rows name their zone as tzdata does), the program's `/` origin, or an argument or
+    variable that is not valid UTF-8 (Windows has UTF-16 only)."""
+    asked = "\0".join(case["args"] + list(case["env"]) + [v for v in case["env"].values() if v])
+    said = [w for w in case["want"] if isinstance(w, str)]
+    return ("$DIR" in asked or "HOME" in case["env"] or re.search("[\ud800-\udfff]|localtime|get_prog_origin|get_jq_origin", asked)
+            or any("Is a directory" in w for w in said))
+
+
 def check_cli(stury, diff, case):
     stdin = case["stdin"] if len(case["stdin"]) < 200 else case["stdin"][:200] + "..."
     files = f" files {case['files']}" if case["files"] else ""
@@ -806,6 +839,8 @@ def check_cli(stury, diff, case):
     # cli.tsv is recorded on macOS. A `libc` row's answer is the C library's (libm's last digits, the fields
     # strptime derives, timegm's range), so elsewhere it is checked against this platform's jq.
     on_platform_jq = case["area"] == "libc" and sys.platform != "darwin"
+    if os.name == "nt" and posix_only(case):
+        return f"{area} (POSIX only, not run)", what, None
     if on_platform_jq and not jq_here():
         return f"{area} (no jq 1.8.2 here, not run)", what, None
     code, out, err = run_cli(stury, case)
@@ -845,6 +880,8 @@ def main():
     # Colours are each case's own choice, not the caller's.
     os.environ.pop("JQ_COLORS", None)
     os.environ.pop("NO_COLOR", None)
+    if os.name == "nt":  # the console's code page cannot print every failure's bytes
+        sys.stdout.reconfigure(errors="backslashreplace")
     if diff or "--record" in sys.argv:
         v = subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip()
         if v != "jq-1.8.2":
@@ -861,10 +898,13 @@ def main():
     jobs += [(check_spine_root, text, ["d", "k"], f, 6) for text, _ in DEEP_SPINES for f in ("-c .", "-c P", "P | length", "-c P[-1] | {id}")]
     jobs += [(check_spine_fault, text, ["d", "k"], f, 5) for text, _ in DEEP_SPINES for f in ("-c .", "-c P", "P | length", "-c P[].id")]
     jobs += [(check_stdin_file, o, t, f) for o, t in STDIN_FILES for f in STDIN_FILTERS]
-    jobs += [(check_reduce_memory, *row) for row in REDUCE_MEMORY]
-    jobs += [(check_stdout_closed, f) for f in (["-c", "."], ["-c", ".a"], ["-c", "map(.)"], ["--unbuffered", "-c", "."])]
-    jobs += [(check_stdout_nonblocking, *row) for row in NONBLOCKING]
-    jobs += [(check_deep_pretty, 8000)]
+    if os.name == "nt":
+        print("memory, stdout closed, stdout nonblocking, deep pretty: skipped: they need POSIX descriptors or a memory reader", flush=True)
+    else:
+        jobs += [(check_reduce_memory, *row) for row in REDUCE_MEMORY]
+        jobs += [(check_stdout_closed, f) for f in (["-c", "."], ["-c", ".a"], ["-c", "map(.)"], ["--unbuffered", "-c", "."])]
+        jobs += [(check_stdout_nonblocking, *row) for row in NONBLOCKING]
+        jobs += [(check_deep_pretty, 8000)]
     jobs += [(check_cli, case) for case in parse_cli(os.path.join(HERE, "cli.tsv"))]
     if ptys_here():
         jobs += [(check_tty, *row) for row in TTY]
