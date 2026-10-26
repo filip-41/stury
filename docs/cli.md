@@ -115,9 +115,9 @@ known, so a compile error follows `filter` and a fault in the input follows the 
 
 | Key | Value |
 | --- | --- |
-| `filter` | The filter as a JSON string, written first. |
+| `filter` | The filter, quoted, written first once it is known: a `-f` file that cannot be read has no line. |
 | `route` | `path scan` (the filter is a path, or `select(PATH op LITERAL)`), `csv columns` (a column filter under `--from csv|tsv`) or `interpreter`. |
-| `why` | One line for each fact that sends the filter to the interpreter: an option (`-n`, `-s`, `-S`, `-R`, `-e`, `-a`, `-C`, `--seq`, `--stream`, `--raw-output0`, `--to csv|tsv`), a filter that is not a path, a `select` the scan cannot take, a redefined `select`, a module import or `~/.jq`, or a CSV filter that does not name only columns. |
+| `why` | Every fact that sends the filter to the interpreter, one line each. For the path scan: an option (`-n`, `-s`, `-S`, `-R`, `-e`, `-a`, `--seq`, `--stream`, `--raw-output0`, `--to csv|tsv`), a filter that is not a path, a `select` the scan cannot take or that is redefined, `--from jsonc` with a filter that is not a plain path. For the column route of `--from csv|tsv`: an option (`-n`, `-s`, `-e`, `-a`, `-C`, `--raw-output0`), a module import or `~/.jq`, a filter that does not name only columns, or an output layout the route does not print (no `-c`, `--grow-header`). |
 | `path` | What a scan gives: one answer per input, or one per element of each `[]`; for a column filter, how the cells are read and printed. |
 | `text N` | The Nth input text left the scan for the interpreter at run time, or was read on the batch pool: a text that is not an object or array where the path wants one, a `[]` over another kind, a text that does not parse, a JSONC comment, a refused limit. Each kind is written once. |
 | `note` | A fact about the whole run: records one to a line, or the cells of a CSV file, are read in pieces on the batch pool. |
