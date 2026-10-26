@@ -378,6 +378,10 @@ check fmt_in_place_again 0 '' fmt --check "$T/inplace.json"
 cp "$T/deep1100.json" "$T/inplace.deep.json"
 check fmt_in_place_deep 5 '' fmt --in-place --max-depth 2000 "$T/inplace.deep.json"
 cmp -s "$T/inplace.deep.json" "$T/deep1100.json" || { echo "FAIL fmt_in_place_deep_untouched"; fails=$((fails + 1)); }
+# A bare name's temporary file goes beside it, not to TMPDIR, which may be another device.
+printf '{"a":1}' >"$T/bare.json"
+s_abs=$(cd "$(dirname "$S")" && pwd)/$(basename "$S")
+(cd "$T" && TMPDIR="$T/absent" "$s_abs" fmt --in-place bare.json) || { echo "FAIL fmt_in_place_bare_name"; fails=$((fails + 1)); }
 
 # fmt of a large array, or of an object holding one, is written in pieces on the pool; --from jsonc reads the same
 # text whole. Repeated keys and number and escape spellings stay either way, and a text cut short writes nothing.

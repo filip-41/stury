@@ -68,7 +68,8 @@ jobs:
 
   # The AVX2 and AVX-512BW routes. A hosted x64 runner's processor varies (AVX-512BW is not guaranteed) and
   # Rosetta has neither, so the api suite is built once and run under Intel SDE emulating a Haswell and a
-  # Skylake-X; STURY_REQUIRE_WIDE makes a run without the route a failure instead of a skip.
+  # Sapphire Rapids (SDE's Skylake-X has no brand string, which core:sys/info's init indexes past);
+  # STURY_REQUIRE_WIDE makes a run without the route a failure instead of a skip.
   wide:
     needs: lint
     runs-on: ubuntu-latest
@@ -94,8 +95,8 @@ jobs:
           echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
       - name: AVX2 without AVX-512BW (Haswell)
         run: STURY_REQUIRE_WIDE=avx2 sde64 -hsw -- build/api-test
-      - name: AVX-512BW (Skylake-X)
-        run: STURY_REQUIRE_WIDE=avx512 sde64 -skx -- build/api-test
+      - name: AVX-512BW (Sapphire Rapids)
+        run: STURY_REQUIRE_WIDE=avx512 sde64 -spr -- build/api-test
 
   # Sanitizer runs are gated on macOS on Apple silicon only.
   sanitizers:

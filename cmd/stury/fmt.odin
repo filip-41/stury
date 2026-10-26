@@ -344,7 +344,10 @@ rewrite_file :: proc(path: string, text: []byte) -> bool {
 		fmt_write_failed(path, serr)
 		return false
 	}
-	f, terr := os.create_temp_file(os.dir(path), ".stury-fmt-*.tmp")
+	// A bare name's dir is "", which create_temp_file reads as the system temp dir, where the rename may cross
+	// devices.
+	dir := os.dir(path)
+	f, terr := os.create_temp_file(dir if dir != "" else ".", ".stury-fmt-*.tmp")
 	if terr != nil {
 		fmt_write_failed(path, terr)
 		return false
