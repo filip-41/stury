@@ -9,7 +9,8 @@ import index "../../scan/index"
 // region flags, under every fact set. Documents are drawn from JSON-shaped pieces and from single bytes of a
 // small alphabet, so quotes, backslash runs, faulty or cut UTF-8, control bytes and scalar runs land at every
 // offset of a block and across its edges, and the source's last block takes every length. It runs only where
-// the processor has a wide path, each one it has, and says so when it is skipped.
+// the processor has a wide path, each one it has, and says so when it is skipped (STURY_REQUIRE_WIDE turns a
+// missing path into a failure: scan_wide_required_test.odin).
 @(test)
 test_index_wide_against_narrow :: proc(t: ^testing.T) {
 	if !index.wide_ok() && !index.avx2_ok() {

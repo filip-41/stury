@@ -66,6 +66,37 @@ jobs:
       # of the runner idle.
       - run: make -j -O diff
 
+  # The AVX2 and AVX-512BW routes. A hosted x64 runner's processor varies (AVX-512BW is not guaranteed) and
+  # Rosetta has neither, so the api suite is built once and run under Intel SDE emulating a Haswell and a
+  # Skylake-X; STURY_REQUIRE_WIDE makes a run without the route a failure instead of a skip.
+  wide:
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
+      SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-odin
+      - name: Build the api suite
+        run: |
+          mkdir -p build
+          odin build json/test/api -build-mode:test -collection:stury=. -o:minimal -define:ODIN_TEST_FANCY=false -out:build/api-test
+      - name: Install Intel SDE
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/sde.tar.xz" "$SDE_URL"
+          echo "$SDE_SHA256  $RUNNER_TEMP/sde.tar.xz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/sde"
+          tar -xJf "$RUNNER_TEMP/sde.tar.xz" -C "$RUNNER_TEMP/sde" --strip-components=1
+          echo "$RUNNER_TEMP/sde" >> "$GITHUB_PATH"
+          # SDE injects itself with ptrace, which Ubuntu's yama setting forbids.
+          echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
+      - name: AVX2 without AVX-512BW (Haswell)
+        run: STURY_REQUIRE_WIDE=avx2 sde64 -hsw -- build/api-test
+      - name: AVX-512BW (Skylake-X)
+        run: STURY_REQUIRE_WIDE=avx512 sde64 -skx -- build/api-test
+
   # Sanitizer runs are gated on macOS on Apple silicon only.
   sanitizers:
     needs: test
