@@ -11,11 +11,13 @@ import core_pkg "../core"
 
 // The exponent magnitude a decimal lexes to is clamped here: one past `i32`, so an authored exponent past
 // any binary64 range still reads as out of it while the fold cannot overflow.
+@(private)
 DECIMAL_EXP_CAP :: i64(max(i32)) + 1
 
 // A decimal cell lexed once: the first 19 significant digits as `mant`, every digit counted in `digits`, and
 // the value `mant * 10^(exp - frac_digits)` when `digits` fits the fold. `nonzero` says a digit past the
 // fold was not zero, so the fold alone cannot prove the value zero.
+@(private)
 Decimal_Lex :: struct {
 	mant, digits: u64,
 	frac_digits:  u64,
@@ -27,6 +29,7 @@ Decimal_Lex :: struct {
 // `[+-]?(digits(.digits?)?|.digits)([eE][+-]?digits)?`: the decimals a float cell may spell. `.5` and `1.`
 // are accepted because other writers spell floats that way; a leading `0` past the first is a digit, not a
 // refusal.
+@(private)
 lex_decimal :: proc(text: string) -> (d: Decimal_Lex) {
 	i := 0
 	if i < len(text) && (text[i] == '-' || text[i] == '+') {
@@ -103,6 +106,7 @@ decimal_push :: #force_inline proc(d: ^Decimal_Lex, c: u8) {
 // the value is `o * 5^e * 2^(t+e)` for the odd part `o` of `mant`, representable iff `o * 5^e < 2^53`; for
 // `e < 0` it is `(o / 5^-e) * 2^(t-k)`, representable iff `5^-e` divides `mant` and the quotient's odd part
 // is below `2^53`. `5^23` is past `2^53`, so no `|e| > 22` is exact.
+@(private)
 decimal_exact :: #force_inline proc(mant: u64, e: i64) -> bool {
 	if mant == 0 {
 		return true
@@ -130,6 +134,7 @@ decimal_exact :: #force_inline proc(mant: u64, e: i64) -> bool {
 // binary64 range (`1e400`), `.Underflowed` for a nonzero value that rounds to zero (`1e-400`), `.Exact`
 // only when the binary64 is the authored value, `.Inexact` for every other rounding. A significand past 19
 // digits is under-claimed `.Inexact` as JSON's decoder under-claims it.
+@(private)
 decimal_value :: proc(d: Decimal_Lex, text: string) -> core_pkg.Number {
 	v, _ := strconv.parse_f64(text)
 	switch {
@@ -147,6 +152,7 @@ decimal_value :: proc(d: Decimal_Lex, text: string) -> core_pkg.Number {
 }
 
 // The binary64 a decimal cell spells and its exactness. `.None` for any other text.
+@(private)
 read_float_value :: proc(text: string) -> core_pkg.Number {
 	d := lex_decimal(text)
 	if !d.ok {
@@ -156,6 +162,7 @@ read_float_value :: proc(text: string) -> core_pkg.Number {
 }
 
 // `[+-]?digits` as a magnitude and a sign. `over` is set past 128 bits. Any other text is `.Wrong_Kind`.
+@(private)
 read_int :: proc(text: string) -> (mag: u128, over, neg: bool, fault: core_pkg.Shape_Fault) {
 	digits := text
 	if len(digits) > 0 && (digits[0] == '-' || digits[0] == '+') {
@@ -185,6 +192,7 @@ read_int :: proc(text: string) -> (mag: u128, over, neg: bool, fault: core_pkg.S
 }
 
 // `text`, an integer of at most 64 bits, into the `width`-byte `signed` or unsigned integer at `dest`.
+@(private)
 store_int :: #force_inline proc(text: string, dest: rawptr, width: u8, signed: bool) -> core_pkg.Shape_Fault {
 	mag, over, neg := read_int(text) or_return
 	if over || mag > u128(max(u64)) {

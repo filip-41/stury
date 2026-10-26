@@ -72,7 +72,7 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 //	- `null` into a bool, number, string, list, map or struct is `.Wrong_Kind` (Go leaves a scalar or struct
 //	  as it was and nils a slice or map).
 //	- A number with a fraction or exponent into an integer is `.Wrong_Kind`, `1.0` too.
-//	- A refusal before the read starts (`.Bad_Option`, `.Plan_Mismatch`, `.Unsupported`, or `.Out_Of_Memory`
+//	- A refusal before the read starts (`.Bad_Option`, `.Plan_Mismatch`, `.Unsupported`, `.Bad_Tag`, or `.Out_Of_Memory`
 //	  lowering the plan) leaves `ptr^` untouched. A later one leaves what was read before the fault.
 //	- Under `.Lazy` an unread malformed value may be accepted or refused. Use `.Strict` to refuse every one.
 //

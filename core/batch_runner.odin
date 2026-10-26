@@ -139,7 +139,7 @@ Batch_Fault_Rank :: proc(data: rawptr, k: int, e: Error) -> int
 
 // Batch_Driver is the claim loop of one batch: the caller and the runner's threads claim a planned
 // `Batch_Cursor`'s pieces in source order, each format supplying a piece's bounds and what running one does.
-// Every callback runs once per piece, never per record.
+// A callback runs a fixed number of times per piece (`boundary` twice, for the piece's first and last record), never per record.
 //
 //	- The caller and the runner's threads claim pieces in turn, each finding its own first and last record.
 //	- A claim inside a long record starts no record: its boundary search stops at the claim's end, so the

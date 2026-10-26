@@ -62,7 +62,7 @@ render_syntax_error_to_writer :: proc(w: io.Writer, src: []byte, err: Error) -> 
 render_unmarshal_error_to_writer :: proc(w: io.Writer, src: []byte, err: Unmarshal_Error) -> io.Error {
 	name := reflect.enum_string(err.kind)
 	#partial switch err.kind {
-	case .Unsupported, .Ambiguous_Union, .Bad_Option, .Plan_Mismatch: // before any byte, with no offset to show
+	case .Unsupported, .Ambiguous_Union, .Bad_Option, .Plan_Mismatch, .Bad_Tag: // before any byte, with no offset to show
 		write_no_byte_fault(w, name, err.offset, false) or_return
 	case .Out_Of_Memory:
 		// The refusal is at the value it could not hold, or at 0 when it is the plan's, before any byte. The
@@ -134,6 +134,7 @@ render_path_error_to_writer :: proc(w: io.Writer, src: []byte, err: Path_Error) 
 // true where the kind's offset is what says where the fault is (a limit, a byte of another text, a row count, or
 // the 0 of a refusal raised before any byte): that reads `offset N: <kind>`. A kind with no offset at all reads as
 // its bare name. No fault is given a `line:col` it does not have.
+@(private)
 write_no_byte_fault :: proc(w: io.Writer, kind: string, offset: u64, offset_locates: bool) -> io.Error {
 	if !offset_locates {
 		_, err := io.write_string(w, kind)

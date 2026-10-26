@@ -3,6 +3,7 @@ package core_tests
 // A plan is compiled once per type and shared by both directions: a type it cannot spell refuses the same way on
 // every call, leaving nothing half-built behind, and a tag's escapes name the bytes they quote.
 
+import "core:mem"
 import "core:testing"
 import csv "../../csv"
 import json "../../json"
@@ -162,20 +163,95 @@ test_plan_tag_comma_round_trip :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_tag_unknown_flag_refuses :: proc(t: ^testing.T) {
-	// `bogus` is no flag this format knows, so the plan refuses the tag instead of spelling `f` and dropping it.
+	// `bogus` is no flag this format knows, so the plan refuses the tag, by name and in both directions, instead of
+	// spelling `f` and dropping it.
 	_, jmerr := json.marshal(PLAN_Flag{1}, {}, nil, context.temp_allocator)
-	testing.expect_value(t, jmerr, json.Marshal_Error.Bad_Utf8)
+	testing.expect_value(t, jmerr, json.Marshal_Error.Bad_Tag)
 
 	jv: PLAN_Flag
 	jrf, jrefused := plan_err(json.unmarshal(transmute([]byte)string(`{"f":1}`), &jv, {}, nil, context.temp_allocator))
 	testing.expectf(t, jrefused, "json read")
-	testing.expect_value(t, jrf.kind, json.Unmarshal_Error_Kind.Unsupported)
+	testing.expect_value(t, jrf.kind, json.Unmarshal_Error_Kind.Bad_Tag)
 
 	_, cmerr := csv.marshal([]PLAN_Flag{{1}}, {}, nil, context.temp_allocator)
-	testing.expect_value(t, cmerr, csv.Marshal_Error.Bad_Utf8)
+	testing.expect_value(t, cmerr, csv.Marshal_Error.Bad_Tag)
 
 	cback: []PLAN_Flag
 	crf, crefused := plan_err(csv.unmarshal(transmute([]byte)string("f\n1\n"), &cback, {}, nil, context.temp_allocator))
 	testing.expectf(t, crefused, "csv read")
-	testing.expect_value(t, crf.kind, json.Unmarshal_Error_Kind.Unsupported)
+	testing.expect_value(t, crf.kind, json.Unmarshal_Error_Kind.Bad_Tag)
+}
+
+// Several types behind one root, so a compile has nested ops, fields, member names and index entries to roll back.
+PLAN_Leaf :: struct {
+	id:   int,
+	mode: enum {
+		Idle,
+		Busy,
+	},
+}
+
+PLAN_Tree :: struct {
+	name: string,
+	kids: []PLAN_Leaf,
+	one:  PLAN_Leaf,
+	any:  union {
+		PLAN_A,
+		string,
+	},
+}
+
+HEALED :: 1 << 40
+
+// An allocator that refuses `width` allocations from the `skip`-th on, then grants every one again.
+Flaky :: struct {
+	backing:     mem.Allocator,
+	calls, skip: int,
+	width:       int,
+}
+
+flaky_proc :: proc(data: rawptr, mode: mem.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, mem.Allocator_Error) {
+	f := (^Flaky)(data)
+	#partial switch mode {
+	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
+		n := f.calls
+		f.calls += 1
+		if n >= f.skip && n < f.skip + f.width {
+			return nil, .Out_Of_Memory
+		}
+	}
+	return f.backing.procedure(f.backing.data, mode, size, alignment, old_memory, old_size, loc)
+}
+
+// A plan that ran out of memory while compiling answers the same as a fresh one once the allocator grants again:
+// the refusal may land anywhere in the compile, including in the rollback that follows it.
+@(test)
+test_plan_recovers_after_allocator_refusals :: proc(t: ^testing.T) {
+	v := PLAN_Tree{name = "x", kids = []PLAN_Leaf{{1, .Busy}}, one = {2, .Idle}, any = PLAN_A{3}}
+	want := `{"name":"x","kids":[{"id":1,"mode":"Busy"}],"one":{"id":2,"mode":"Idle"},"any":{"a":3}}`
+	text := transmute([]byte)string(`{"name":"y","kids":[{"id":5,"mode":"Busy"}],"one":{"id":6,"mode":"Idle"}}`)
+	for width in ([?]int{1, 3, 12}) {
+		for skip in 0 ..< 80 {
+			// Armed after `type_plan_init`, whose copy of the options is a refusal no retry repairs.
+			fl := Flaky{backing = context.allocator, skip = HEALED, width = width}
+			plan := json.type_plan_init(PLAN_Tree, {}, mem.Allocator{flaky_proc, &fl})
+			defer json.destroy(&plan)
+			fl.calls, fl.skip = 0, skip
+			_, first := json.marshal(v, {}, &plan, context.temp_allocator)
+			testing.expectf(t, first == .None || first == .Out_Of_Memory, "skip %d width %d: first marshal %v", skip, width, first)
+			fl.skip = HEALED
+			out, err := json.marshal(v, {}, &plan, context.temp_allocator)
+			testing.expectf(t, err == .None, "skip %d width %d: marshal after refusals %v", skip, width, err)
+			testing.expectf(t, string(out) == want, "skip %d width %d: wrote %s", skip, width, out)
+
+			rplan := json.type_plan_init(PLAN_Tree, {}, mem.Allocator{flaky_proc, &fl})
+			defer json.destroy(&rplan)
+			fl.calls, fl.skip = 0, skip
+			back: PLAN_Tree
+			_, rfirst := plan_err(json.unmarshal(text, &back, {}, &rplan, context.temp_allocator))
+			fl.skip = HEALED
+			rerr, refused := plan_err(json.unmarshal(text, &back, {}, &rplan, context.temp_allocator))
+			testing.expectf(t, !refused && back.name == "y" && back.kids[0].id == 5, "skip %d width %d: read after refusals %v %v (first refused %v)", skip, width, rerr, back, rfirst)
+		}
+	}
 }

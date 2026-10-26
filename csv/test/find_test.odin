@@ -147,3 +147,23 @@ test_find_refusals :: proc(t: ^testing.T) {
 	e, faulted = err.?
 	testing.expect(t, faulted && e.kind == .Bad_Option)
 }
+
+// `limit` ends the walk at its last answer: the record after it is not read, so its fault is not met.
+@(test)
+test_find_column_stops_at_its_limit :: proc(t: ^testing.T) {
+	src := transmute([]byte)string("a\n1\n2\"x\n")
+	out: [dynamic]csv.Answer
+	defer delete(out)
+	testing.expect_value(t, csv.find_column(src, "limit(1; .[].a)", &out), nil)
+	testing.expect_value(t, len(out), 1)
+	testing.expect_value(t, string(src[out[0].lo:out[0].hi]), "1")
+	// Without the limit the walk reads on and meets the fault, after the answers before it.
+	clear(&out)
+	testing.expect_value(t, csv.find_column(src, ".[].a", &out), csv.Error{kind = .Bad_Char, offset = 5})
+	testing.expect_value(t, len(out), 1)
+	// A limit past the rows reads them all.
+	clear(&out)
+	good := transmute([]byte)string("a\n1\n2\n")
+	testing.expect_value(t, csv.find_column(good, "limit(5; .[].a)", &out), nil)
+	testing.expect_value(t, len(out), 2)
+}

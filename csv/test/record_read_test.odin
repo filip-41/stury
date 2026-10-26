@@ -5,6 +5,8 @@ package csv_tests
 // the reader holds apply at each row, and a reader is destroyed once.
 
 import "core:io"
+import "core:mem"
+import "core:strings"
 import "core:testing"
 import csv "../"
 
@@ -22,11 +24,14 @@ Rec :: struct {
 	ok:   bool,
 }
 
-// A reader over `src`'s bytes, a chunk a call.
+// A reader over `src`'s bytes, at most `step` bytes a call (all of them when 0), failing with `fail` instead of
+// ending when it is set.
 @(private = "file")
 Bytes :: struct {
-	src: []byte,
-	pos: int,
+	src:  []byte,
+	pos:  int,
+	step: int,
+	fail: io.Error,
 }
 
 @(private = "file")
@@ -35,9 +40,9 @@ bytes_read :: proc(data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, w
 	#partial switch mode {
 	case .Read:
 		if b.pos == len(b.src) {
-			return 0, .EOF
+			return 0, b.fail if b.fail != nil else .EOF
 		}
-		n := copy(p, b.src[b.pos:])
+		n := copy(p[:min(len(p), b.step if b.step > 0 else len(p))], b.src[b.pos:])
 		b.pos += n
 		return i64(n), nil
 	case .Query:
@@ -279,6 +284,197 @@ test_record_read_stream_fault_is_into_the_row :: proc(t: ^testing.T) {
 	testing.expect_value(t, at + err.offset, u64(len("id,full name,v,ok\n1,a,1.5,true\n2,b,")))
 }
 
+// A fault is at the same place in the row's bytes whether the rows come from the input or from a window that
+// has dropped the bytes before them.
+@(test)
+test_record_read_stream_fault_after_drop_is_into_the_row :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	head := strings.concatenate({"id,full name,v,ok\n", strings.repeat("1,a,1.5,true\n", 40, context.temp_allocator)}, context.temp_allocator)
+	src := strings.concatenate({head, "2,b,oops,false\n"}, context.temp_allocator)
+	for step in READ_STEPS {
+		bytes := Bytes{src = transmute([]byte)src, step = step}
+		rr := csv.records_from({procedure = bytes_read, data = &bytes}, allocator = context.temp_allocator)
+		defer csv.destroy(&rr)
+		rd: csv.Record_Read
+		testing.expect_value(t, csv.record_read_init(&rd, Rec, &rr, allocator = context.temp_allocator), nil)
+		defer csv.record_read_destroy(&rd)
+		got: Rec
+		for _ in 0 ..< 40 {
+			testing.expect_value(t, csv.unmarshal(&rd, &got), nil)
+		}
+		err := um_err(csv.unmarshal(&rd, &got))
+		testing.expect_value(t, err.kind, .Wrong_Kind)
+		testing.expect_value(t, csv.record_read_at(&rd), u64(len(head)))
+		testing.expect_value(t, err.offset, u64(len("2,b,")))
+	}
+}
+
+// A fault that frames no row has no row to be in: its offset is in the input, from an `Records` and from a window
+// that has dropped the bytes before it, and `record_read_at` is 0.
+@(test)
+test_record_read_framing_fault_is_into_the_input :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Id :: struct {
+		id: i64,
+	}
+	head := strings.concatenate({"id\n", strings.repeat("1\n", 40, context.temp_allocator), "2"}, context.temp_allocator)
+	src := strings.concatenate({head, "\xFF\n3\n"}, context.temp_allocator)
+	at := u64(len(head))
+	whole := csv.records(transmute([]byte)src)
+	defer csv.destroy(&whole)
+	bytes := Bytes{src = transmute([]byte)src, step = 3}
+	rr := csv.records_from({procedure = bytes_read, data = &bytes}, allocator = context.temp_allocator)
+	defer csv.destroy(&rr)
+	for pull in 0 ..< 2 {
+		rd: csv.Record_Read
+		init_err := csv.record_read_init(&rd, Id, &whole, allocator = context.temp_allocator) if pull == 0 else csv.record_read_init(&rd, Id, &rr, allocator = context.temp_allocator)
+		testing.expect_value(t, init_err, nil)
+		defer csv.record_read_destroy(&rd)
+		got: Id
+		for _ in 0 ..< 40 {
+			testing.expect_value(t, csv.unmarshal(&rd, &got), nil)
+		}
+		err := um_err(csv.unmarshal(&rd, &got))
+		testing.expectf(t, err.kind == .Syntax && err.syntax == .Bad_Char, "pull %d: %v", pull, err)
+		testing.expect_value(t, csv.record_read_at(&rd), u64(0))
+		testing.expect_value(t, err.offset, at)
+	}
+}
+
+// The end of the input is `.Bad_Option`; a reader that failed ends the rows read before it as `.Syntax`
+// `.Truncated`, at the end of the bytes it gave.
+@(test)
+test_record_read_reader_failure_is_not_the_end :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Id :: struct {
+		id: i64,
+	}
+	src := "id\n1\n2\n3"
+	for fail in ([]io.Error{nil, .Unexpected_EOF}) {
+		bytes := Bytes{src = transmute([]byte)src, step = 2, fail = fail}
+		rr := csv.records_from({procedure = bytes_read, data = &bytes}, allocator = context.temp_allocator)
+		defer csv.destroy(&rr)
+		rd: csv.Record_Read
+		testing.expect_value(t, csv.record_read_init(&rd, Id, &rr, allocator = context.temp_allocator), nil)
+		defer csv.record_read_destroy(&rd)
+		got: Id
+		testing.expect_value(t, csv.unmarshal(&rd, &got), nil)
+		testing.expect_value(t, csv.unmarshal(&rd, &got), nil)
+		if fail == nil {
+			testing.expect_value(t, csv.unmarshal(&rd, &got), nil)
+			testing.expect_value(t, got.id, i64(3))
+			testing.expect_value(t, um_err(csv.unmarshal(&rd, &got)).kind, .Bad_Option)
+		} else {
+			// The bytes after the last line feed are not a row once the reader failed.
+			err := um_err(csv.unmarshal(&rd, &got))
+			testing.expectf(t, err.kind == .Syntax && err.syntax == .Truncated, "%v", err)
+			testing.expect_value(t, err.offset, u64(len(src)))
+			testing.expect_value(t, rr.read_err, fail)
+		}
+	}
+	// A reader that fails before the header is not an empty table.
+	bytes := Bytes{fail = .Unexpected_EOF}
+	rr := csv.records_from({procedure = bytes_read, data = &bytes}, allocator = context.temp_allocator)
+	defer csv.destroy(&rr)
+	rd: csv.Record_Read
+	err := um_err(csv.record_read_init(&rd, Id, &rr, allocator = context.temp_allocator))
+	testing.expectf(t, err.kind == .Syntax && err.syntax == .Truncated, "%v", err)
+}
+
+// The column table of a `no_header` reader is made with the allocator of `record_read_init`, whatever the context
+// of the first `unmarshal`, so `record_read_destroy` frees it where it came from.
+@(test)
+test_record_read_no_header_columns_use_the_init_allocator :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Pair :: struct {
+		a: i64,
+		b: i64,
+	}
+	it := csv.records(transmute([]byte)string("1,2\n3,4\n"), {no_header = true})
+	defer csv.destroy(&it)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	rd: csv.Record_Read
+	got: Pair
+	{
+		context.allocator = mem.tracking_allocator(&track)
+		testing.expect_value(t, csv.record_read_init(&rd, Pair, &it, {read = {no_header = true}}, allocator = context.temp_allocator), nil)
+		{
+			context.allocator = context.temp_allocator
+			testing.expect_value(t, csv.unmarshal(&rd, &got), nil)
+		}
+		csv.record_read_destroy(&rd)
+	}
+	testing.expect_value(t, got, Pair{1, 2})
+	testing.expect_value(t, len(track.bad_free_array), 0)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+// The rows are framed by the iterator's scan, so a reader whose dialect, limits or strictness differ from it is
+// refused, except a `.Lazy` reader over a scan that judged UTF-8.
+@(test)
+test_record_read_refuses_a_scan_of_other_options :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Id :: struct {
+		id: i64,
+	}
+	src := transmute([]byte)string("id\n\"1\"\n\xFF\n")
+	rd: csv.Record_Read
+	defer csv.record_read_destroy(&rd)
+	Case :: struct {
+		scan:   csv.Read_Opts,
+		reader: csv.Unmarshal_Opts,
+		ok:     bool,
+	}
+	cases := []Case {
+		{scan = {strictness = .Lazy}, reader = {read = {strictness = .Strict}}, ok = false},
+		{scan = {strictness = .Structural}, reader = {read = {strictness = .Strict}}, ok = false},
+		{scan = {strictness = .Strict}, reader = {read = {strictness = .Structural}}, ok = false},
+		{scan = {dialect = csv.TSV}, reader = {}, ok = false},
+		{scan = {}, reader = {read = {dialect = csv.TSV}}, ok = false},
+		{scan = {limits = {max_fields = 4}}, reader = {}, ok = false},
+		{scan = {}, reader = {read = {dialect = {ragged = true}}}, ok = false},
+		{scan = {dialect = csv.TSV}, reader = {read = {dialect = csv.TSV}}, ok = true},
+		{scan = {strictness = .Strict}, reader = {read = {strictness = .Lazy}}, ok = true},
+		{scan = {strictness = .Lazy}, reader = {read = {strictness = .Lazy}}, ok = true},
+		{scan = {strictness = .Structural}, reader = {read = {strictness = .Structural}}, ok = true},
+	}
+	for c, k in cases {
+		it := csv.records(src, c.scan)
+		defer csv.destroy(&it)
+		err := csv.record_read_init(&rd, Id, &it, c.reader, allocator = context.temp_allocator)
+		if c.ok {
+			testing.expectf(t, err == nil, "case %d: %v", k, err)
+		} else {
+			testing.expectf(t, um_err(err).kind == .Bad_Option, "case %d: %v", k, err)
+		}
+	}
+}
+
+// A scan that skipped UTF-8 leaves it to the reader: set to `.Strict` after init, the reader judges every cell.
+@(test)
+test_record_read_strict_after_init_judges_utf8 :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Text :: struct {
+		a: string,
+	}
+	src := transmute([]byte)string("a,b\nx,y\nz,\xFF\nw,v\n")
+	for level in ([]csv.Strictness{.Lazy, .Structural}) {
+		it := csv.records(src, {strictness = level})
+		defer csv.destroy(&it)
+		rd: csv.Record_Read
+		testing.expect_value(t, csv.record_read_init(&rd, Text, &it, {read = {strictness = level}}, allocator = context.temp_allocator), nil)
+		defer csv.record_read_destroy(&rd)
+		got: Text
+		testing.expect_value(t, csv.unmarshal(&rd, &got), nil)
+		// The fault is in a column no field reads: only a strict read refuses it.
+		rd.opts.strictness = .Strict
+		err := um_err(csv.unmarshal(&rd, &got))
+		testing.expectf(t, err.kind == .Syntax && err.syntax == .Bad_Char, "%v: %v", level, err)
+	}
+}
+
 @(test)
 test_record_read_destroy_twice :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -350,6 +546,137 @@ test_record_read_lazy_utf8 :: proc(t: ^testing.T) {
 			testing.expect_value(t, u64(row), 2)
 		} else {
 			testing.expect(t, false)
+		}
+	}
+}
+
+// A refusal at the first row of a `no_header` reader leaves it ready for the next row.
+@(test)
+test_record_read_no_header_refusal_keeps_reader_ready :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Pair :: struct {
+		a: i64,
+		b: i64,
+	}
+	// The third cell of every row is an unknown column.
+	src := "1,2,3\n4,5,6\n"
+	it := csv.records(transmute([]byte)src, {no_header = true})
+	defer csv.destroy(&it)
+	rd: csv.Record_Read
+	opts := csv.Unmarshal_Opts {
+		read           = {no_header = true},
+		unknown_fields = .Refuse,
+	}
+	testing.expect_value(t, csv.record_read_init(&rd, Pair, &it, opts, allocator = context.temp_allocator), nil)
+	defer csv.record_read_destroy(&rd)
+	got: Pair
+	testing.expect_value(t, um_err(csv.unmarshal(&rd, &got)).kind, .Unknown_Field)
+	testing.expect_value(t, um_err(csv.unmarshal(&rd, &got)).kind, .Unknown_Field)
+
+	// Relaxed after the refusal, the next row reads.
+	src2 := "1,2,3\n4,5\n"
+	it2 := csv.records(transmute([]byte)src2, {no_header = true, dialect = {ragged = true}})
+	defer csv.destroy(&it2)
+	rr: csv.Record_Read
+	opts2 := csv.Unmarshal_Opts {
+		read           = {no_header = true, dialect = {ragged = true}},
+		unknown_fields = .Refuse,
+	}
+	testing.expect_value(t, csv.record_read_init(&rr, Pair, &it2, opts2, allocator = context.temp_allocator), nil)
+	defer csv.record_read_destroy(&rr)
+	testing.expect_value(t, um_err(csv.unmarshal(&rr, &got)).kind, .Unknown_Field)
+	rr.opts.unknown_fields = .Ignore
+	testing.expect_value(t, csv.unmarshal(&rr, &got), nil)
+	testing.expect_value(t, got, Pair{4, 5})
+
+	// A required field no column of the first row reads is `.Missing_Field` for it and for the rows after it.
+	Need :: struct {
+		a: i64,
+		b: i64 `csv:",required"`,
+	}
+	src3 := "1\n4\n"
+	it3 := csv.records(transmute([]byte)src3, {no_header = true})
+	defer csv.destroy(&it3)
+	rn: csv.Record_Read
+	testing.expect_value(t, csv.record_read_init(&rn, Need, &it3, {read = {no_header = true}}, allocator = context.temp_allocator), nil)
+	defer csv.record_read_destroy(&rn)
+	need: Need
+	testing.expect_value(t, um_err(csv.unmarshal(&rn, &need)).kind, .Missing_Field)
+	testing.expect_value(t, um_err(csv.unmarshal(&rn, &need)).kind, .Missing_Field)
+}
+
+@(private = "file")
+READ_STEPS :: [?]int{1, 2, 3, 7, 64}
+
+// Every row of a stream read a few bytes at a time is the row `unmarshal` reads from the whole text, at the
+// offset `records` gives it: a CRLF or a quoted line break may fall between two reads, and so may a BOM.
+@(test)
+test_record_read_stream_in_small_reads :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	block := "\"a\r\nb, \"\"q\"\"\",1,true,2.5\r\nc,2,false,3\r\n\"\xC3\xA9\",3,true,0.5\r\n"
+	body := strings.concatenate({"full name,id,ok,v\r\n", strings.repeat(block, 20, context.temp_allocator)}, context.temp_allocator)
+	for text in ([]string{body, strings.concatenate({"\xEF\xBB\xBF", body}, context.temp_allocator)}) {
+		whole := transmute([]byte)text
+		want: [dynamic]Rec
+		testing.expect_value(t, csv.unmarshal(whole, &want, {}, nil, context.temp_allocator), nil)
+		starts := make([dynamic]u64, context.temp_allocator)
+		it := csv.records(whole)
+		defer csv.destroy(&it)
+		for rec in csv.next_record(&it) {
+			append(&starts, rec.at)
+		}
+		testing.expect_value(t, len(starts), len(want) + 1)
+		for step in READ_STEPS {
+			bytes := Bytes{src = whole, step = step}
+			rr := csv.records_from({procedure = bytes_read, data = &bytes}, allocator = context.temp_allocator)
+			defer csv.destroy(&rr)
+			rd: csv.Record_Read
+			testing.expect_value(t, csv.record_read_init(&rd, Rec, &rr, allocator = context.temp_allocator), nil)
+			defer csv.record_read_destroy(&rd)
+			for w, k in want {
+				got: Rec
+				err := csv.unmarshal(&rd, &got)
+				testing.expectf(t, err == nil && got == w, "step %d row %d: %v, want %v, %v", step, k, got, w, err)
+				testing.expect_value(t, csv.record_read_at(&rd), starts[k + 1])
+			}
+			e, refused := csv.unmarshal(&rd, &Rec{}).?
+			testing.expect(t, refused && e.kind == .Bad_Option)
+		}
+	}
+}
+
+// `.Lazy` over a stream scanned `.Strict` judges the UTF-8 of the cells a field reads after the window has
+// dropped the bytes before them, at any read size.
+@(test)
+test_record_read_stream_lazy_utf8_after_drop :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Text :: struct {
+		a: string,
+	}
+	// A fault in the column no field reads, then a fault in a short line that starts just before a scan block's
+	// end: the line is read only after the window dropped the rows before it.
+	head := strings.concatenate({"a,b\n", strings.repeat("kk,qq\n", 30, context.temp_allocator), "j,\xFF\n"}, context.temp_allocator)
+	bad := "\xFE,q\nlast,q\n"
+	for lead in 58 ..= 63 {
+		pad := (lead - len(head) - len("p,\n")) % 64
+		pad += 64 if pad < 0 else 0
+		src := strings.concatenate({head, "p,", strings.repeat("z", pad, context.temp_allocator), "\n", bad}, context.temp_allocator)
+		bad_at := len(src) - len(bad)
+		testing.expect_value(t, bad_at % 64, lead)
+		for step in READ_STEPS {
+			bytes := Bytes{src = transmute([]byte)src, step = step}
+			rr := csv.records_from({procedure = bytes_read, data = &bytes}, allocator = context.temp_allocator)
+			defer csv.destroy(&rr)
+			rd: csv.Record_Read
+			testing.expect_value(t, csv.record_read_init(&rd, Text, &rr, {strictness = .Lazy}, allocator = context.temp_allocator), nil)
+			defer csv.record_read_destroy(&rd)
+			got: Text
+			for k in 0 ..< 32 {
+				testing.expectf(t, csv.unmarshal(&rd, &got) == nil, "lead %d step %d row %d", lead, step, k)
+			}
+			err := um_err(csv.unmarshal(&rd, &got))
+			testing.expectf(t, err.kind == .Syntax && err.syntax == .Bad_Char, "lead %d step %d: %v", lead, step, err)
+			testing.expect_value(t, csv.record_read_at(&rd) + err.offset, u64(bad_at))
 		}
 	}
 }

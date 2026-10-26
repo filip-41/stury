@@ -22,7 +22,7 @@ Path_Error_Kind :: enum u8 {
 	Bad_Comment,      // JSON: the comment text is not one `//` line or one `/* */` block
 	Unplaceable,      // the entry has no valid place, or the result would not read back as the edit specifies (JSON: removing the root, a value of the wrong kind, past an array's end, `upsert` below a non-object. CSV: no record, a record read as a comment, a changed BOM; `offset` is the record, or 0)
 	Out_Of_Memory,    // the allocator refused
-	Internal,         // JSON: a scan refusal no edit can cause; a bug in this package, not in the caller's request
+	Internal,         // JSON: a scan refusal no edit can cause, or a member whose value no key precedes; a bug in this package, not in the caller's request
 }
 
 // A path procedure's refusal. `syntax` and `offset` are set for `.Bad_Source` and `.Bad_Result` (`syntax` may be

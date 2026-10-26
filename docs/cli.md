@@ -140,25 +140,31 @@ stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] 
 
 | Format | What `fmt` writes |
 | --- | --- |
-| `json`, `jsonc` (the default is `json`) | Each text as `stury .` prints it: pretty by default, `--indent N` or `--tab` as given, keys in their order, strings and numbers as jq spells them. JSONC keeps its comments where `stury --from jsonc --to jsonc .` puts them, so a file already in that layout comes back byte for byte. |
-| `ndjson` | One compact value per line, as `--to ndjson` writes it. |
+| `json`, `jsonc` (the default is `json`) | Each text laid out as `stury .` lays it out: pretty by default, `--indent N` (1 to 7) or `--tab` as given, keys in their order. Only the layout changes: every number and string is written as it was (`1e2`, `"\u00e9"`, `"\/"`) and every member of an object is kept, a repeated key included. JSONC keeps its comments where `stury --from jsonc --to jsonc .` puts them and drops its trailing commas, so a file already in that layout comes back byte for byte. |
+| `ndjson` | One compact value per line, as `--to ndjson` writes it, spelled as above. |
 | `csv`, `tsv` | The header, then one record per row, re-spelled by the CSV writer: a field that needs no quotes loses them, one that does gains them, and `""` and an empty cell stay distinct ([CSV and TSV output](#csv-and-tsv-output)). A header with no records is written. An object with a key the header lacks ends the run, as `--to csv` does. |
 
 - `--from` chooses how each file is read, and `--to` how it is written; `--to` defaults to `--from`, so a plain
   `stury fmt FILE` formats `FILE` as JSON. Each half is chosen on its own, so `stury fmt --from csv --to json`
   reads CSV and writes pretty JSON.
-- `fmt` is idempotent: `stury fmt` on its own output gives the same bytes.
+- Between `json`, `jsonc` and `ndjson` the values are written as they were read, whatever the `--to`: a transcode
+  changes the layout and, from `jsonc`, drops the comments, and nothing else. To `csv` or `tsv` a value becomes
+  cells, spelled as `--to csv` spells them, a number as jq spells it.
+- `fmt` is idempotent: `stury fmt` on its own output gives the same bytes. A leading byte order mark is not written.
+- Each file is formatted as a table of its own: `stury fmt --from csv a.csv b.csv` writes each file's header,
+  where `stury --from csv --to csv . a.csv b.csv` writes one table under the first file's header.
 - `fmt` never colours its output, so `-C` is refused; so is every option that shapes a filter's reading or output
   and not a file's format (`-c`, `-r`, `-j`, `--raw-output0`, `-a`, `-S`, `-e`, `-n`, `-s`, `-R`, `--seq`, `--stream`,
   `--stream-errors`, `--strict-limits`, `-f`, `-L`, `--arg`, `--argjson`, `--slurpfile`, `--rawfile`, `--args`,
-  `--jsonargs`), with exit 2. `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N` and, with
-  a CSV-like `--to`, `--grow-header` apply.
+  `--jsonargs`, `--indent 0`), with exit 2. `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N`
+  and, with a CSV-like `--to`, `--grow-header` apply. A JSON-like output is written to 1024 levels of nesting at
+  most: `--max-depth` lets `fmt` read a deeper value, which it then refuses, with exit 5.
 
 | Flag | Effect |
 | --- | --- |
 | `--check` | Write nothing. Exit 1 when any file's formatted bytes differ from its bytes (a compact JSON text, a CSV field that needs no quotes, a CRLF line ending), 0 when every file is already formatted. A fault still exits 5. |
-| `--in-place` | Rewrite each file: its formatted bytes are written to a temporary file in the same directory, given the file's mode, and renamed over it, so a reader sees the old file or the new one, never half of each. A file already formatted is left untouched. Only when `--to` is `--from` (a formatter, not a transcoder); refused with `--check`, with standard input, with different formats, and on anything but a regular file (a symbolic link included), as a usage error (exit 2). |
-| `FILE...` | In argument order. A fault names the file as `stury .` names a file after the first (`stury: parse error: FILE:L:C: ...`) and exits 5; later files are not read. A file that does not open is reported and the run goes on, with exit 2. |
+| `--in-place` | Rewrite each file: its formatted bytes are written to a temporary file in the same directory, synced to disk, given the file's mode and, where the system allows it, its owner and group, and renamed over it, so a reader sees the old file or the new one, never half of each. The new file is another file, as with `sed -i`: a hard link to the old one keeps the old bytes, and extended attributes and ACLs are not carried over. A file already formatted is left untouched. Only when `--to` is `--from` (a formatter, not a transcoder); refused with `--check`, with standard input, with different formats, and on anything but a regular file (a symbolic link included), as a usage error (exit 2). |
+| `FILE...` | In argument order. A fault names the file and its position, as `check` does: `stury: parse error: FILE:L:C: ...`, and `stury: error: FILE:L:C: ...` under `--from jsonc`. A text that ends mid-value is told one byte past its end (`printf '[1] [2' | stury fmt` gives `<stdin>:1:7: Unfinished JSON term`), where a filter run tells it at the last byte. The run exits 5, and later files are not read. A file that does not open is reported and the run goes on, with exit 2. |
 | no `FILE` | Reads standard input (`-`). On a terminal it prints the short usage and exits 2, as `check` does. `--in-place` refuses standard input. |
 
 ```sh
@@ -440,13 +446,12 @@ The exit codes are jq's, but the messages are stury's.
 | A file that cannot be opened | `stury: error: Could not open file NAME: REASON` |
 | A directory given as a file | `stury: error: Is a directory` (as jq) |
 | A text that does not parse | `stury: parse error: MSG at line L, column C` |
-| The same, in a file after the first | `stury: parse error: NAME:L:C: SENTENCE`, counted in that file (a `--seq` text that runs between files has the stream's position instead) |
-| Any fault under `check` or `--from jsonc` | `stury: error: NAME:L:C: SENTENCE`, such as `<stdin>:1:7: Invalid numeric literal` |
+| The same, in a file after the first, and under `fmt` | `stury: parse error: NAME:L:C: SENTENCE`, counted in that file (a `--seq` text that runs between files has the stream's position instead) |
+| Any fault under `check` or `--from jsonc`, `fmt` included | `stury: error: NAME:L:C: SENTENCE`, such as `<stdin>:1:7: Invalid numeric literal` |
 
 L and C are the line and 1-based byte column of the byte the fault is at. A text that ends mid-value is told at
 its last byte, as jq tells it (the position `--stream-errors` gives). One past the last byte instead is the
-library's `error_position`, which `check` prints, and so do `fromjson`, `--argjson`, `--jsonargs`, `--slurpfile`
-and a module's data file.
+library's `error_position`, which `check` and `fmt` print.
 
 A trailing comma, a comment or nesting past `--max-depth` is followed by the source line, a caret under the
 byte, and the flag that would read it (`--from jsonc`, `--max-depth N`), in a filter run and under `check` alike.
@@ -527,8 +532,9 @@ Nesting past 1024 levels (jq: 10000) is refused, `fromjson` included, unless `--
 A parse error names the fault (`Invalid numeric literal`, `Unexpected character`, `Unfinished JSON term`,
 `Invalid escape`, `Unexpected text after the JSON value`, `Exceeds depth limit for parsing`, ...) at the line
 and column of the byte it was found at. A text that ends mid-value is told at its last byte, which is jq's
-position, so the plain path and `--stream-errors` agree at the end of the input. `check`, `fromjson`, the option
-JSON and a module's data file keep the library's one past it ([Errors and exit codes](#errors-and-exit-codes)).
+position, so the plain path and `--stream-errors` agree at the end of the input. `fromjson`, the option JSON and a
+module's data file say the same. `check` and `fmt` keep the library's one past it
+([Errors and exit codes](#errors-and-exit-codes)).
 
 | | stury | jq |
 | --- | --- | --- |

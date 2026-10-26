@@ -63,6 +63,11 @@ Um_Clash :: struct {
 	b: int `json:"a"`,
 }
 
+// A flag no format knows.
+Um_Bad_Tag :: struct {
+	a: int `json:"a,bogus"`,
+}
+
 Um_Base :: struct {
 	id:   i64 `json:",required"`,
 	note: string,

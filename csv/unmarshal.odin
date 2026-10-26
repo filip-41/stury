@@ -58,7 +58,7 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 //	  `.Wrong_Kind`.
 //	- A `Maybe` of one of those is set when its cell is present.
 //
-// A refusal before reading starts (`.Bad_Option`, `.Plan_Mismatch`, `.Unsupported` for a field of any other
+// A refusal before reading starts (`.Bad_Option`, `.Plan_Mismatch`, `.Bad_Tag`, `.Unsupported` for a field of any other
 // type, `.Out_Of_Memory` lowering the plan) leaves `ptr^` untouched. A later refusal leaves the records read
 // before it, the refused one last. Everything is allocated from `allocator` and nothing is freed, so read into
 // an arena and free it whole. With `plan` nil the plan is this thread's cached one for `T`.
@@ -66,7 +66,7 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 // A `^Record_Read` reads one row of a `Records` or a `Record_Reader` the caller made, the same way:
 // `record_read_init` resolves the plan, the row shape and the header once, and each `unmarshal` of it pulls one
 // row into a struct. A fault's offset stays into that row's bytes (`record_read_at` places it), and the
-// reader's options apply at every row.
+// reader's `strictness` and `unknown_fields` apply at every row (see `Record_Read` for the rest).
 unmarshal :: proc {
 	unmarshal_records,
 	unmarshal_record,

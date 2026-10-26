@@ -1,9 +1,11 @@
 package main
 
-// `stury fmt`: write each FILE back in the printer's layout, or transcode it (`--from`, `--to`). A file is
-// formatted whole before anything is written: a plain run writes it out before the next file, `--check` compares
-// the bytes and writes nothing, and `--in-place` replaces the file through a temporary one beside it. The readers
-// and printers are the filter's, so `fmt` and `.` spell a value the same way.
+// `stury fmt`: write each FILE back in the printer's layout, or transcode it (`--from`, `--to`). A plain run writes
+// each file's values as they are made, `--check` holds a file's output to compare it with the bytes and writes
+// nothing, and `--in-place` holds it and replaces the file through a temporary one beside it. The readers are the
+// filter's. A JSON, JSONC or NDJSON value written as one of those keeps its scalars' and keys' source spelling and
+// every member, repeated keys included, and changes only its layout (`fmt_verbatim`); a value written as CSV or TSV
+// is made of cells, as `.` makes them.
 
 import "base:runtime"
 import "core:bytes"
@@ -52,10 +54,10 @@ fmt_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
 		return "-e"
 	case o.strict_limits:
 		return "--strict-limits"
-	case len(cli.var_names) > 0:
-		return "--arg"
-	case cli.args_mode:
-		return "--args"
+	case cli.binding_flag != "":
+		return cli.binding_flag
+	case o.indent == 0:
+		return "--indent 0" // jq's layout of it, newlines without indent, is not one the formatter writes
 	case cli.lib_dirs != nil:
 		return "-L"
 	}
@@ -93,6 +95,7 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	run.req.dialect = .Jsonc if o.from == .Jsonc else .Json
 	run.req.limits = jq.lifted
 	run.name_faults = true
+	run.verbatim = !reads_cells(o) && !writes_cells(o)
 	reserve(&run.out, FLUSH_AT * 2)
 	run.spill = {at = FLUSH_AT, flush = spill_out, data = run}
 	finish(run, fmt_files(run, names))
@@ -190,8 +193,12 @@ fmt_texts :: proc(run: ^Run, ins: ^Inputs) {
 		v, msg, status := next_input(ins)
 		switch status {
 		case .Value:
-			print_jq(run, v)
-			run.pieces_root = {}
+			if run.verbatim {
+				fmt_verbatim(run, v.(jq.Ref))
+			} else {
+				print_jq(run, v)
+				run.pieces_root = {}
+			}
 			virtual.arena_free_all(&arena)
 			free_all(context.temp_allocator)
 			free_spent(ins)
@@ -202,6 +209,27 @@ fmt_texts :: proc(run: ^Run, ins: ^Inputs) {
 			return
 		}
 	}
+}
+
+// One value of the open input written in the layout of `output_layout`, from its source text: every scalar and key
+// as authored and every member of an object, by the library's `marshal` of a document. A JSONC value keeps its
+// comments under `--to jsonc` and loses them, with its trailing commas, otherwise. The text ends in one newline.
+@(private = "file")
+fmt_verbatim :: proc(run: ^Run, r: jq.Ref) {
+	l := output_layout(run)
+	if l.drop_comments {
+		clear(&r.doc.facts)
+	}
+	text, err := json.marshal(r.doc, {pretty = l.pretty, indent = u8(max(l.indent, 0)), trailing_newline = true})
+	if err == .Too_Deep {
+		fmt.eprintf("stury: error: %s: nesting past %d levels is not written in the format it was read in\n", run.name, json.MAX_DEPTH)
+		finish(run, EXIT_INPUT)
+	} else if err != .None {
+		fmt.eprintf("stury: error: %s: cannot write the value: %v\n", run.name, err)
+		finish(run, EXIT_INPUT)
+	}
+	append(&run.out, ..text)
+	flush_some(run)
 }
 
 // Formats one open CSV or TSV input. The header record is read first. A CSV-like output writes it and every record
@@ -301,7 +329,8 @@ fmt_cells_fault :: proc(run: ^Run, msg: string) -> ! {
 }
 
 // Writes `text` over `path` through a temporary file in `path`'s directory and a rename: a reader sees the old
-// file or the new one, never half of each. The temporary file takes `path`'s mode before it replaces it.
+// file or the new one, never half of each. The temporary file is synced to disk, and takes `path`'s mode, and where
+// the system allows, its owner and group, before it replaces it.
 @(private = "file")
 rewrite_file :: proc(path: string, text: []byte) -> bool {
 	info, serr := os.stat(path, context.temp_allocator)
@@ -335,8 +364,12 @@ rewrite_file :: proc(path: string, text: []byte) -> bool {
 		}
 	}
 	if ok {
+		keep_owner(f, path) // before the mode: changing the owner clears the setuid and setgid bits
 		if merr := os.fchmod(f, info.mode); merr != nil {
 			fmt_write_failed(path, merr)
+			ok = false
+		} else if yerr := os.sync(f); yerr != nil {
+			fmt_write_failed(path, yerr)
 			ok = false
 		}
 	}

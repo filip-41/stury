@@ -102,6 +102,8 @@ Run :: struct {
 	silent:      bool,
 	// fmt: a parse fault names its file, as one in a later file of a filter run is named.
 	name_faults: bool,
+	// fmt between JSON-like formats: each value is written from its source text, scalars and repeated keys as authored.
+	verbatim:    bool,
 	faulted:     bool, // a held copy met an answer it cannot print: its caller leaves that text to the main thread, which reports it
 	spill:       jq.Spill, // `spill_out`, for a layout that is written into `out`
 	unopened:    bool, // a file did not open or read, which jq's exit status says whatever comes after it

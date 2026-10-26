@@ -8,9 +8,17 @@ import core_pkg "../core"
 // `unmarshal` reads a row. A fault's offset is into that row's bytes; `record_read_at` gives the row's offset
 // in the input.
 //
-// The pull is a `^Records` or a `^Record_Reader`, both caller-owned. The iterator frames the bytes with its own
-// dialect, limits and strictness, so create it with the reader's: the reader never re-scans. Its `borrow_strings`
-// binds the column table at init. The rest of the options apply at every row.
+// The pull is a `^Records` or a `^Record_Reader`, both caller-owned: they must outlive the reader and not move,
+// since its state points at them. The iterator frames the bytes, so create it with the reader's dialect, limits
+// and strictness; `record_read_init` refuses another scan with `.Bad_Option` (a `.Lazy` reader also takes a
+// `.Strict` one), and the reader never re-scans.
+//
+// `dialect`, `limits`, `no_header`, `duplicates` and `borrow_strings` are bound at init. `strictness` and
+// `unknown_fields` apply at every row.
+//
+// No row left is `.Bad_Option`. A fault that framed no row, and a `Record_Reader` whose reader failed
+// (`.Syntax` `.Truncated` at the end of the bytes it gave; `read_err` is the cause), end the rows the same way,
+// and their offset is into the input with `record_read_at` 0. A refused row leaves the reader ready for the next.
 //
 // It is a value: `record_read_init` allocates the reader's state on the heap, and `record_read_destroy` frees it
 // with the plan the reader made. A copy shares both, so destroy it once.
@@ -65,13 +73,24 @@ record_state_records :: proc(st: ^Record_State) -> ^Records {
 	return &st.rr.it if st.rr != nil else st.it
 }
 
-// The fault that ended the pull: the window's, or the iterator's. Nil when it ended at the input's end.
+// Why the pull stopped, as a read's refusal, or nil when it ended at the input's end. A fault that framed no row
+// is `.Syntax` at its offset in the input, and a reader that failed is `.Syntax` `.Truncated` at the end of the
+// bytes it gave (`Record_Reader.read_err` says why). No row frames either, so their offset is in the input.
 @(private)
-record_state_error :: proc(st: ^Record_State) -> Maybe(Error) {
-	return st.rr.err if st.rr != nil else st.it.err
+record_state_failure :: proc(st: ^Record_State) -> Maybe(Unmarshal_Error) {
+	if st.rr == nil {
+		return record_framing_error(st.it.err.?) if st.it.err != nil else nil
+	}
+	if e, faulted := st.rr.err.?; faulted {
+		return record_framing_error(e)
+	}
+	if st.rr.read_err != nil {
+		return Unmarshal_Error{kind = .Syntax, syntax = .Truncated, offset = st.rr.base + u64(st.rr.hi)}
+	}
+	return nil
 }
 
-// The pull's fault as a read's refusal. A `.Syntax` offset is in the input, not in a row: no record framed it.
+// A framing fault as a read's refusal.
 @(private)
 record_framing_error :: proc(e: Error) -> Maybe(Unmarshal_Error) {
 	#partial switch e.kind {
@@ -141,8 +160,17 @@ record_read_init_source :: proc(
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	record_read_destroy(rd)
-	// A dialect or limit the scanner refuses is refused here, as `unmarshal` refuses it before any byte.
-	if _, ok := scan_setup(opts.dialect, opts.limits, .Structural if opts.strictness == .Structural else .Strict); !ok {
+	// A dialect or limit the scanner refuses is refused here, as `unmarshal` refuses it before any byte. The
+	// rows are framed by the iterator's scan, so it must be the one these options make; a `.Lazy` reader also
+	// takes a scan that judged UTF-8, whose faults it defers.
+	want, ok := scan_setup(opts.dialect, opts.limits, opts.strictness)
+	if !ok {
+		return Unmarshal_Error{kind = .Bad_Option}
+	}
+	have := (&rr.it if rr != nil else it).scan
+	judging := want
+	judging.mode -= {.Skip_Utf8}
+	if have != want && !(opts.strictness == .Lazy && have == judging) {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	state := record_state_new()
@@ -167,30 +195,28 @@ record_read_init_source :: proc(
 	if err := core_pkg.record_read_init(rd, T, source, opts, base, runtime.heap_allocator()); err != nil {
 		return err
 	}
-	if err := row_reader(&state.r, rd.plan, false); err != nil {
+	if err := row_reader(&state.r, core_pkg.record_read_plan(rd), false); err != nil {
 		record_read_destroy(rd)
 		return err
 	}
-	state.r.enum_ints = rd.plan.opts.enums == .Int
+	state.r.enum_ints = core_pkg.record_read_plan(rd).opts.enums == .Int
 	recs := record_state_records(state)
-	if opts.strictness == .Lazy {
-		// The scan defers its UTF-8 faults to the reader, which judges the cells a field reads. A scan that skips
-		// them carries none, so each row is judged alone.
-		if .Skip_Utf8 in recs.scan.mode {
-			state.judge_each_row = true
-		} else {
-			recs.carry.utf8 = max(int)
-		}
-		state.lazy_seen = true
+	// A scan that skips UTF-8 carries no fault, so each row is judged alone. Otherwise a `.Lazy` reader takes
+	// over the scan's UTF-8 faults, which it judges in the cells a field reads.
+	state.judge_each_row = .Skip_Utf8 in recs.scan.mode
+	if opts.strictness == .Lazy && !state.judge_each_row {
+		recs.carry.utf8 = max(int)
 	}
+	// A `.Strict` row read after either judges every cell, since the scan did not.
+	state.lazy_seen = opts.strictness == .Lazy || state.judge_each_row
 	if opts.no_header {
 		return nil
 	}
 	header, more := record_state_pull(state)
 	if !more {
-		if e, faulted := record_state_error(state).?; faulted {
+		if failure := record_state_failure(state); failure != nil {
 			record_read_destroy(rd)
-			return record_framing_error(e)
+			return failure
 		}
 		// No header and no fault: an input with no record at all is an empty table.
 		return nil
@@ -233,8 +259,10 @@ record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, _: ^core_pkg.Ty
 	st := (^Record_State)(state)
 	rec, more := record_state_pull(st)
 	if !more {
-		if e, faulted := record_state_error(st).?; faulted {
-			return record_framing_error(e)
+		// No row is read: the frame is the input's.
+		st.at = 0
+		if failure := record_state_failure(st); failure != nil {
+			return failure
 		}
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
@@ -244,7 +272,8 @@ record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, _: ^core_pkg.Ty
 	row := st.row
 	st.row += 1
 	if st.r.columns == nil {
-		// `no_header`: column k is the struct's field k.
+		// `no_header`: column k is the struct's field k, bound with the allocator the reader frees it with.
+		context.allocator = st.columns_allocator
 		if err := columns_in_order(&st.r, rec, opts.unknown_fields == .Refuse); err != nil {
 			return record_row_error(st, err)
 		}
@@ -257,7 +286,7 @@ record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, _: ^core_pkg.Ty
 		if st.judge_each_row {
 			recs.carry.utf8 = -1
 		}
-	} else if st.lazy_seen {
+	} else if opts.strictness == .Strict && st.lazy_seen {
 		if err := judge_utf8(&st.r, recs, rec, -1); err != nil {
 			return record_row_error(st, err)
 		}
@@ -276,11 +305,13 @@ record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, _: ^core_pkg.Ty
 	return nil
 }
 
-// `err`, a fault of the row just pulled, with its offset moved into the row's bytes.
+// `err`, a fault of the row just pulled, with its offset moved into the row's bytes. A cell is at a position of
+// the bytes the row's fields index: the input, or the stream's window, whose first byte is at `rr.base`.
 @(private)
 record_row_error :: proc(st: ^Record_State, err: Maybe(Unmarshal_Error)) -> Maybe(Unmarshal_Error) {
 	if e, faulted := err.?; faulted {
-		e.offset = e.offset - st.at if e.offset >= st.at else 0
+		lo := st.at - st.rr.base if st.rr != nil else st.at
+		e.offset = e.offset - lo if e.offset >= lo else 0
 		return e
 	}
 	return nil

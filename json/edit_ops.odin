@@ -128,11 +128,17 @@ remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $jsonc: bo
 		} else {
 			own := held_by(kids[:], &kc, owner)
 		}
-		first, last, kept := cut_interior_runs(&edits, src, doc, own, run, jsonc)
+		first, last, kept, keyed := cut_interior_runs(&edits, src, doc, own, run, jsonc)
+		if !keyed {
+			return nil, Path_Error{kind = .Internal}
+		}
 		if first < 0 {
 			continue
 		}
-		lo, hi := trailing_cut(src, doc, owner, own, first, last, kept, jsonc)
+		lo, hi, trailing_keyed := trailing_cut(src, doc, owner, own, first, last, kept, jsonc)
+		if !trailing_keyed {
+			return nil, Path_Error{kind = .Internal}
+		}
 		append(&edits, Edit{lo = lo, hi = hi})
 	}
 	when jsonc {
@@ -147,10 +153,11 @@ remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $jsonc: bo
 
 // Queue the cut of every run of removed entries (`run`, in order) in `own` that a survivor follows. The
 // trailing run is left to `trailing_cut`: its `first` and `last` entry indexes, or -1 when `own` ends in a
-// survivor, and `kept`, the last survivor's index or -1.
+// survivor, and `kept`, the last survivor's index or -1. `keyed` is false when an object member's key is not
+// where its value says (`key_span`), and then the cut is refused.
 @(private = "file")
-cut_interior_runs :: proc(edits: ^[dynamic]Edit, src: []byte, doc: ^Document, own, run: []Path_Answer, $jsonc: bool) -> (first, last, kept: int) {
-	first, last, kept = -1, -1, -1
+cut_interior_runs :: proc(edits: ^[dynamic]Edit, src: []byte, doc: ^Document, own, run: []Path_Answer, $jsonc: bool) -> (first, last, kept: int, keyed: bool) {
+	first, last, kept, keyed = -1, -1, -1, true
 	g := 0
 	for e, x in own {
 		for g < len(run) && run[g].lo < e.lo {
@@ -162,7 +169,12 @@ cut_interior_runs :: proc(edits: ^[dynamic]Edit, src: []byte, doc: ^Document, ow
 			continue
 		}
 		if first >= 0 {
-			append(edits, Edit{lo = entry_lo(src, doc, own[first], jsonc), hi = entry_lo(src, doc, e, jsonc)})
+			lo, lo_keyed := entry_lo(src, doc, own[first], jsonc)
+			hi, hi_keyed := entry_lo(src, doc, e, jsonc)
+			if !lo_keyed || !hi_keyed {
+				return -1, -1, -1, false
+			}
+			append(edits, Edit{lo = lo, hi = hi})
 			first = -1
 		}
 		kept = x
@@ -171,10 +183,11 @@ cut_interior_runs :: proc(edits: ^[dynamic]Edit, src: []byte, doc: ^Document, ow
 }
 
 // The bytes that go for the run at the end of container `owner`, entries `own[first]` to `own[last]`, after
-// survivor `own[kept]` (or none): see `remove_in` for what each case takes.
+// survivor `own[kept]` (or none): see `remove_in` for what each case takes. `keyed` is `cut_interior_runs`'s.
 @(private = "file")
-trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer, first, last, kept: int, $jsonc: bool) -> (lo, hi: u64) {
-	lo, hi = entry_lo(src, doc, own[first], jsonc), entry_hi(doc, own[last], jsonc)
+trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer, first, last, kept: int, $jsonc: bool) -> (lo, hi: u64, keyed: bool) {
+	lo, keyed = entry_lo(src, doc, own[first], jsonc)
+	hi = entry_hi(doc, own[last], jsonc)
 	when jsonc {
 		c := node_at(doc.rows[:], owner)
 		comma: u64
@@ -213,9 +226,9 @@ trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer
 // The quoted key before an object member's value at `value_lo`, read backwards over strict JSON: blanks,
 // `:`, blanks, then the string, whose opening quote is the first `"` behind an even run of backslashes.
 // Every step back is checked: a value the scan placed where no key precedes it answers `no_key` rather than
-// reading below the source.
+// reading below the source. `ok` is false then, and the edit that asked is refused.
 @(private = "file")
-key_span :: proc(src: []byte, value_lo: u64) -> (lo, hi: u64) {
+key_span :: proc(src: []byte, value_lo: u64) -> (lo, hi: u64, ok: bool) {
 	if value_lo > u64(len(src)) {
 		return no_key(value_lo)
 	}
@@ -245,43 +258,44 @@ key_span :: proc(src: []byte, value_lo: u64) -> (lo, hi: u64) {
 			slashes += 1
 		}
 		if slashes % 2 == 0 {
-			return lo, hi
+			return lo, hi, true
 		}
 	}
 	return no_key(value_lo)
 }
 
-// The span `key_span` answers when the bytes before a member's value are not a key: the value's own start, which
-// cuts nothing. A debug build stops on the broken invariant.
+// The span `key_span` answers when the bytes before a member's value are not a key: the value's own start, so
+// that no caller slices outside the source. A debug build stops on the broken invariant.
 @(private = "file")
-no_key :: proc(value_lo: u64) -> (lo, hi: u64) {
+no_key :: proc(value_lo: u64) -> (lo, hi: u64, ok: bool) {
 	when ODIN_DEBUG {
 		assert(false, "key_span: an object member's value is not preceded by its key")
 	}
-	return value_lo, value_lo
+	return value_lo, value_lo, false
 }
 
 // Where entry `e` starts: under JSONC its extent (`extent_lo`), else its head (`entry_head`).
 @(private = "file")
-entry_lo :: proc(src: []byte, doc: ^Document, e: Path_Answer, $jsonc: bool) -> u64 {
+entry_lo :: proc(src: []byte, doc: ^Document, e: Path_Answer, $jsonc: bool) -> (lo: u64, keyed: bool) {
 	when jsonc {
-		return extent_lo(doc, e.node)
+		return extent_lo(doc, e.node), true
 	} else {
 		return entry_head(src, doc, e, false)
 	}
 }
 
 // Where entry `e`'s own text starts, no comment before it: its key in an object, its value in an array.
+// `keyed` is false for a member whose key is not found (`key_span`).
 @(private = "file")
-entry_head :: proc(src: []byte, doc: ^Document, e: Path_Answer, $jsonc: bool) -> u64 {
+entry_head :: proc(src: []byte, doc: ^Document, e: Path_Answer, $jsonc: bool) -> (lo: u64, keyed: bool) {
 	when jsonc {
-		return u64(scan_pkg.entry_lo(doc.rows[e.node]))
+		return u64(scan_pkg.entry_lo(doc.rows[e.node])), true
 	} else {
 		if src[e.owner] == '{' {
-			lo, _ := key_span(src, e.lo)
-			return lo
+			lo, _, keyed = key_span(src, e.lo)
+			return
 		}
-		return e.lo
+		return e.lo, true
 	}
 }
 
@@ -307,9 +321,11 @@ put_entry :: proc(places: ^[dynamic]Place, at: u64, from, to: int) {
 }
 
 // The bytes between a member's key and value that a new member copies from `first`, the first member:
-// unless a comment sits there, under JSONC, where it is `": "`. Empty for an element.
+// unless a comment sits there, under JSONC, where it is `": "`. Empty for an element. `keyed` is false when
+// `first`'s key is not found.
 @(private = "file")
-member_between :: proc(src: []byte, doc: ^Document, first: Path_Answer, is_member: bool, $jsonc: bool) -> (between: string) {
+member_between :: proc(src: []byte, doc: ^Document, first: Path_Answer, is_member: bool, $jsonc: bool) -> (between: string, keyed: bool) {
+	keyed = true
 	if !is_member {
 		return
 	}
@@ -319,22 +335,25 @@ member_between :: proc(src: []byte, doc: ^Document, first: Path_Answer, is_membe
 			between = ": "
 		}
 	} else {
-		_, khi := key_span(src, first.lo)
+		khi: u64
+		_, khi, keyed = key_span(src, first.lo)
 		between = string(src[khi:first.lo])
 	}
 	return
 }
 
 // The separator a new entry before entry `k` of container `c` copies: after the open bracket for a lone
-// entry, else between the two entries around the spot.
+// entry, else between the two entries around the spot. `keyed` is `entry_head`'s.
 @(private = "file")
-separator_gap :: proc(src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, $jsonc: bool) -> (lo, hi: u64) {
+separator_gap :: proc(src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, $jsonc: bool) -> (lo, hi: u64, keyed: bool) {
 	n := len(own)
 	if n < 2 {
-		return c.lo + 1, entry_head(src, doc, own[0], jsonc)
+		hi, keyed = entry_head(src, doc, own[0], jsonc)
+		return c.lo + 1, hi, keyed
 	}
 	j := clamp(k if k != APPEND else n, 1, n - 1)
-	return own[j - 1].hi, entry_head(src, doc, own[j], jsonc)
+	hi, keyed = entry_head(src, doc, own[j], jsonc)
+	return own[j - 1].hi, hi, keyed
 }
 
 // Under JSONC, whether a comment sits where a new entry before entry `k` of `c` goes: after the last entry
@@ -343,7 +362,8 @@ separator_gap :: proc(src: []byte, doc: ^Document, c: Path_Answer, own: []Path_A
 commented_at_spot :: proc(src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, appending: bool) -> bool {
 	spot_lo, spot_hi := own[len(own) - 1].hi, c.hi - 1
 	if !appending {
-		spot_lo, spot_hi = c.lo + 1, entry_head(src, doc, own[k], true)
+		spot_lo = c.lo + 1
+		spot_hi, _ = entry_head(src, doc, own[k], true)
 		if k > 0 {
 			spot_lo = own[k - 1].hi
 		}
@@ -366,8 +386,11 @@ entry_at :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: 
 		put_entry(places, c.hi - 1, from, len(text))
 		return nil
 	}
-	between := member_between(src, doc, own[0], key != nil, jsonc)
-	gap_lo, gap_hi := separator_gap(src, doc, c, own, k, jsonc)
+	between, between_keyed := member_between(src, doc, own[0], key != nil, jsonc)
+	gap_lo, gap_hi, gap_keyed := separator_gap(src, doc, c, own, k, jsonc)
+	if !between_keyed || !gap_keyed {
+		return Path_Error{kind = .Internal}
+	}
 	appending := k == APPEND || k == n
 	when jsonc {
 		if commented(src[gap_lo:gap_hi]) || commented_at_spot(src, doc, c, own, k, appending) {
@@ -402,7 +425,11 @@ entry_at :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: 
 		append(text, ',')
 	}
 	append(text, ..gap)
-	put_entry(places, entry_head(src, doc, own[k], jsonc), from, len(text))
+	head, keyed := entry_head(src, doc, own[k], jsonc)
+	if !keyed {
+		return Path_Error{kind = .Internal}
+	}
+	put_entry(places, head, from, len(text))
 	return nil
 }
 

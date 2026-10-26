@@ -412,7 +412,9 @@ scan_queries_in :: #force_inline proc(
 	// nothing below it can answer. A `.Lazy` reading that may stop stops at the root, where the automaton's
 	// own root hooks stop; one that may not reads on and validates the root. A request with a path run as
 	// well keeps that run's settlement, and the demand's own stop test (`stop_capable`) settles the call.
-	when .Demand in Q {
+	// Rows are built by the whole walk, so a request that builds them (`.Dom` always carries `.Nodes`) never
+	// settles here.
+	when .Demand in Q && .Nodes not_in Q {
 		if axes.termination == .First_Wins_May_Stop {
 			if at, settles := demand_root_settles(&s, ctx, Q); settles {
 				// Final at the root: its answers cannot change, and a call beside a path run needs the

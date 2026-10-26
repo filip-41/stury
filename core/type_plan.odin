@@ -86,8 +86,9 @@ Plan_Hook :: struct {
 // Why a plan could not compile a type. Each member has the value of its `Marshal_Error` namesake.
 Plan_Error :: enum u8 {
 	None          = 0,
-	Bad_Name      = 2,  // the format cannot spell a field's, member's or arm's name, or does not know a field tag's flag
+	Bad_Name      = 2,  // the format cannot spell a field's, member's or arm's name
 	Out_Of_Memory = 11, // the allocator refused
+	Bad_Tag       = 14, // a field tag has a flag the format does not know
 }
 
 // What a name in `Type_Plan.keys` is spelled as.
@@ -255,7 +256,6 @@ type_plan_destroy :: proc(p: ^Type_Plan) {
 @(private = "file")
 Plan_Mark :: struct {
 	ops, fields, sources, keys, members, unescaped: int,
-	tag_hi: u32, // the union tag's spelled key, which `keys` must still hold
 }
 
 @(private = "file")
@@ -267,28 +267,25 @@ plan_mark :: proc(p: ^Type_Plan) -> Plan_Mark {
 		keys = len(p.keys),
 		members = len(p.members),
 		unescaped = len(p.unescaped),
-		tag_hi = p.tag_hi,
 	}
 }
 
+// An index entry whose op the failed compile rolled back: the type is compiled again on its next use.
+@(private = "file")
+NO_OP :: max(u32)
+
 // Take the plan back to `m`: the failed compile's ops leave the index, every run loses its bytes, and the names
 // it copied are freed. A retry compiles the same types again, and nothing of the failed attempt is left behind.
-// The index is rebuilt rather than pruned: `delete_key` on a `map[typeid]` hangs the Odin compiler's checker at
-// `-o:speed` (dev-2026-10), and a failed compile is cold, so a fresh map is the cheaper constraint to live with.
-// An `.Out_Of_Memory` from the rebuild is returned, so the plan cache evicts a plan it could not repair.
+// It allocates nothing, so it cannot fail half-way: an index entry is overwritten with `NO_OP`, since `delete_key`
+// on a `map[typeid]` hangs the Odin compiler's checker at `-o:speed` (dev-2026-10), and a shrinking resize
+// never reallocates.
 @(private = "file")
-plan_rollback :: proc(p: ^Type_Plan, m: Plan_Mark) -> Plan_Error {
-	fresh, aerr := make(map[typeid]u32, len(p.index), p.ops.allocator)
-	if aerr != nil {
-		return .Out_Of_Memory
-	}
-	for id, idx in p.index {
-		if idx < u32(m.ops) {
-			fresh[id] = idx
+plan_rollback :: proc(p: ^Type_Plan, m: Plan_Mark) {
+	for _, &idx in p.index {
+		if idx >= u32(m.ops) {
+			idx = NO_OP
 		}
 	}
-	delete(p.index)
-	p.index = fresh
 	resize(&p.ops, m.ops)
 	resize(&p.fields, m.fields)
 	resize(&p.sources, m.sources)
@@ -302,7 +299,6 @@ plan_rollback :: proc(p: ^Type_Plan, m: Plan_Mark) -> Plan_Error {
 		// The tag's spelled key was the failed compile's; the next compile spells it again.
 		p.tag_lo, p.tag_hi = 0, 0
 	}
-	return .None
 }
 
 // The op for `ti`. A type already in the plan, including one still being compiled further up this call (a
@@ -311,7 +307,7 @@ plan_rollback :: proc(p: ^Type_Plan, m: Plan_Mark) -> Plan_Error {
 // the same type again, and every call answers the same error. The plan cache evicts only a plan that reported
 // `.Out_Of_Memory`, and a rolled-back plan is sound whether or not it is evicted.
 plan_op :: proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (idx: u32, err: Plan_Error) {
-	if found, ok := p.index[ti.id]; ok {
+	if found, ok := p.index[ti.id]; ok && found != NO_OP {
 		return found, .None
 	}
 	mark := plan_mark(p)
@@ -320,16 +316,12 @@ plan_op :: proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (idx: u32, err: Plan_E
 		return 0, .Out_Of_Memory
 	}
 	if map_insert(&p.index, ti.id, idx) == nil {
-		if rerr := plan_rollback(p, mark); rerr != .None {
-			return 0, rerr
-		}
+		plan_rollback(p, mark)
 		return 0, .Out_Of_Memory
 	}
 	op, cerr := compile_op(p, ti, idx)
 	if cerr != .None {
-		if rerr := plan_rollback(p, mark); rerr != .None {
-			return 0, rerr
-		}
+		plan_rollback(p, mark)
 		return 0, cerr
 	}
 	// Indexed after the call: compiling element types may have moved `p.ops`.
@@ -688,7 +680,7 @@ Field_Tag :: struct {
 // name keeps the field's own and is not `named`. `quoted` is Go's `,string`, a number or bool written inside a
 // string, which the plan refuses. A hook on a distinct type writes it. In the name a backslash makes the byte
 // after it literal, so a name holding a comma or a backslash is written `\,` or `\\` (`csv:"Last\, First"`
-// names the column `Last, First`); a flag that is not one of those three is `.Bad_Name`, never dropped. A name
+// names the column `Last, First`); a flag that is not one of those three is `.Bad_Tag`, never dropped. A name
 // that escapes a byte is allocated in `allocator` (`owned`); any other is the tag's or the field's own.
 @(private = "file")
 field_spelling :: proc(name, tag, tag_key: string, allocator: runtime.Allocator) -> (t: Field_Tag, err: Plan_Error) {
@@ -764,7 +756,7 @@ field_spelling :: proc(name, tag, tag_key: string, allocator: runtime.Allocator)
 				if t.owned {
 					delete(t.key, allocator)
 				}
-				return {}, .Bad_Name
+				return {}, .Bad_Tag
 			}
 		}
 	}

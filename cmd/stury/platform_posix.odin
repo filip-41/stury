@@ -6,6 +6,7 @@ package main
 import "core:fmt"
 import "core:io"
 import "core:os"
+import "core:strings"
 import "core:sys/posix"
 
 @(private = "file")
@@ -112,6 +113,19 @@ is_terminal :: proc(f: ^os.File) -> bool {
 
 // Colour needs nothing set up here.
 enable_color :: proc() {}
+
+// Gives the file `f` the owner and group of the file at `path`, or only the group where the owner cannot be given
+// (not the superuser), or neither. A best effort: the temporary file `fmt --in-place` writes is the user's own.
+keep_owner :: proc(f: ^os.File, path: string) {
+	st: posix.stat_t
+	if posix.stat(strings.clone_to_cstring(path, context.temp_allocator), &st) != .OK {
+		return
+	}
+	fd := posix.FD(os.fd(f))
+	if posix.fchown(fd, st.st_uid, st.st_gid) != .OK {
+		posix.fchown(fd, posix.uid_t(max(u32)), st.st_gid)
+	}
+}
 
 is_regular_file :: proc(f: ^os.File) -> bool {
 	st: posix.stat_t

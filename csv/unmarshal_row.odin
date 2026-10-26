@@ -173,7 +173,7 @@ judge_utf8 :: proc(r: ^Reader, it: ^Records, rec: Record, row: int) -> Maybe(Unm
 @(private)
 authored :: proc(r: ^Reader, cell: Field) -> string {
 	text := r.src[cell.lo:cell.hi]
-	if len(text) > 0 && text[0] == '"' && r.dialect.quoting == .Quotes {
+	if len(text) > 1 && text[0] == '"' && r.dialect.quoting == .Quotes {
 		text = text[1 : len(text) - 1]
 	}
 	return string(text)

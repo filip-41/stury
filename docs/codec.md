@@ -315,7 +315,7 @@ Structs and maps are both written as objects, each with its own ordering rule.
     `false` and `Null` stay.
   - A `using` field of a struct type with no JSON name is flattened, as Go flattens an embedded struct.
   - A struct in which two fields have the same JSON key, or with Go's `,string` flag, is `Unsupported` in both
-    directions. A flag other than `omitempty`, `required` or `string` is refused (`Bad_Utf8`) in both
+    directions. A flag other than `omitempty`, `required` or `string` is refused (`Bad_Tag`) in both
     directions, and a backslash in a name escapes the byte after it (`csv:"Last\\, First"`).
 - **Maps.** Keys are sorted by the bytes written between the quotes.
   - An integer key is written out first, then compared as text, so `10` sorts before `9`.
@@ -543,7 +543,7 @@ allocator, an arena reusing memory) still gives those zero.
 
 **Partial writes.** A refused input may leave the destination partly written. A refusal during the walk leaves
 what was read before the fault. One before it (`.Bad_Option`, `.Plan_Mismatch`, `.Unsupported`,
-`.Out_Of_Memory` lowering the plan) leaves `ptr^` untouched. `unmarshal_check` writes nothing.
+`.Bad_Tag`, `.Out_Of_Memory` lowering the plan) leaves `ptr^` untouched. `unmarshal_check` writes nothing.
 
 **Paths.** A `Name` step in an error path borrows `src` (a map key, or an unknown key as authored) or the type
 info (a field name), so the error's path is valid only as long as `src` is.
@@ -723,8 +723,11 @@ not be shared, each piece appending only to its own — merged once into an exac
 allocator. JSON's pieces each validate their records, so every refused record is listed; a framing fault
 belongs to no record, so it is `err` and only the records that start before it stand. A CSV fault ends its
 piece and leaves the quote state the pieces are cut by unknown, so `csv.validate_records` takes the first
-fault from `csv.validate`, whose pieces are reliable up to it, and then reads the text on the calling thread,
-resuming at the line after each refused record; `faults[0].err` is `validate`'s fault.
+fault from `csv.validate`, whose pieces are reliable up to it, and then reads the text on the calling thread.
+A record the read judged whole (a field count, or a cap met at its LF) ends at the LF the read passed; one
+the read stopped inside ends at the first LF outside quotes, counted from its first byte, with the quote a
+`Bad_Char` points at taken as text. The read resumes after it, so every fault is a record and none is `err`;
+`faults[0].err` is `validate`'s fault.
 
 `csv.each_record` and a threaded `csv.validate` cut the text into pieces that each start after an LF outside
 quotes. There the scan's state equals its state at the input's start, so a piece is judged alone, with the

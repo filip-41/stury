@@ -19,13 +19,14 @@ Path :: core_pkg.Path
 //	.[], .[3]   every row, or row 3: the record's own span
 //	.[].name    that column of every row
 //
-// Rows count from the first record after the header, columns from 0. `query`, `find` and `find_column` take
-// `limit(...)`. A step that is not one of these (a negative index, `.[][]`, a name without a header) is
+// A text path starts at the root `.`, as in `json`. Rows count from the first record after the header, columns
+// from 0. `query`, `find` and `find_column` take `limit(...)`. A step that is not one of these (a negative index, `.[][]`, a name without a header) is
 // `.Unsupported_Path` from `query` and `.Bad_Option` from `find` and `find_column`.
 Path_Spec :: core_pkg.Path_Spec
 
 // Why a path procedure refused: core's `Path_Error_Kind`, shared with JSON. `query` reports `.Bad_Path`,
-// `.Unsupported_Path`, `.Over_Capacity` and `.Out_Of_Memory`; the edits report only the kinds their docs list.
+// `.Unsupported_Path`, `.Over_Capacity`, `.Bad_Source` and `.Out_Of_Memory`; the edits report only the kinds
+// their docs list.
 Path_Error_Kind :: core_pkg.Path_Error_Kind
 
 // A refusal. `syntax` and `offset` are set for `.Bad_Source` and `.Bad_Result`. `offset` is set for
@@ -51,6 +52,9 @@ NO_OWNER :: core_pkg.NO_OWNER
 //	  container in `owner` where one holds it (a row too short for the column), and `NO_OWNER` when none does
 //	  (no such row, or a header without the name).
 //	- `query` is 0: one path is answered. `limit` is read as 1, so a path over every row answers its first.
+//	- A name two header columns share follows `opts.duplicates` (`Read_Opts`): the first column under `.Default`
+//	  and `.First`, the last under `.Last` and `.All`, and `.Duplicate_Key` at the repeated header cell under
+//	  `.Refuse`.
 //	- The scan stops at the answer, so the bytes after it are not judged. The answer borrows `src`.
 @(require_results)
 find :: proc(
@@ -81,6 +85,7 @@ find :: proc(
 //	  it. A header without the name leaves `out` unchanged; a name with no header is `.Bad_Option`.
 //	- `limit` cuts the answers, and the walk then stops at the last of them. Otherwise it stops after the
 //	  target's rows, so no byte past a single row is read.
+//	- A name two header columns share follows `opts.duplicates` as `find` reads it.
 @(require_results)
 find_column :: proc(
 	src: []byte,
@@ -111,6 +116,8 @@ find_column :: proc(
 //	  short for the column. A name with no header at all is `.Unsupported_Path`.
 //	- `limit` cuts the answers (0 is every one). `.Out_Of_Memory` is `out` refusing to grow; the answers
 //	  appended before that stay.
+//	- A name two header columns share follows the `duplicates` `build` was given as `find` reads it, with
+//	  `.Bad_Source` and `syntax = .Duplicate_Key` at the repeated header cell under `.Refuse`.
 //	- It allocates only for a text path longer than 256 bytes that holds an escaped name, in `allocator`.
 @(require_results)
 query :: proc(
@@ -127,11 +134,14 @@ query :: proc(
 	}
 	col := t.col
 	if col == COL_NAME {
-		if len(doc.names) == 0 {
+		if doc.no_header {
 			return Path_Error{kind = .Unsupported_Path}
 		}
-		c, ok := column(doc, t.name)
-		if !ok {
+		c, at, repeated := named_column(doc.src, doc.names[:], doc.dialect, t.name, lookup_policy(doc.duplicates))
+		if repeated {
+			return Path_Error{kind = .Bad_Source, syntax = .Duplicate_Key, offset = at}
+		}
+		if c < 0 {
 			return nil
 		}
 		col = c
@@ -178,13 +188,11 @@ Target :: struct {
 }
 
 // Where a text path is parsed into: its steps and its decoded escaped names. Decoded names never need more
-// than `len(text)` bytes. `text` holds a rewritten path (`rooted_text`): the empty bracket step and its
-// wrapper, whose rewritten form always fits.
+// than `len(text)` bytes.
 @(private)
 Path_Buf :: struct {
 	steps: [core_pkg.MAX_PATH_STEPS]Step,
 	names: [256]u8,
-	text:  [64]u8,
 }
 
 // The target of `path`, borrowing `buf`. A path of one step names a row, of two a cell or a column.
@@ -202,9 +210,6 @@ parse_target :: proc(
 	switch v in path {
 	case string:
 		text := v
-		if rewritten, ok := rooted_text(v, buf); ok {
-			text = rewritten
-		}
 		names := buf.names[:]
 		if len(text) > len(names) && strings.index_byte(text, '\\') >= 0 {
 			heap, aerr := make([]u8, len(text), allocator)
@@ -257,66 +262,11 @@ parse_target :: proc(
 	return
 }
 
-// `text` with core's root `.` added when its body is jq's `[]`, the every-element filter (core spells the same
-// path `.[]`). The `first(` and `limit(` wrappers are kept, so `limit(2; [])` reads a path. `ok` is false when
-// the text needs no rewrite, names a step after `[]` (which would need its own dot), or leaves no room.
+// The policy `find`, `find_column` and `query` read a repeated header name under: `.Default` takes the first
+// column, as `column` does, where `unmarshal` and the path edits refuse the repeat.
 @(private)
-rooted_text :: proc(text: string, buf: ^Path_Buf) -> (out: string, ok: bool) {
-	i := 0
-	for i < len(text) && path_space(text[i]) {
-		i += 1
-	}
-	at := i
-	if at < len(text) && text[at] == '.' {
-		return "", false
-	}
-	switch {
-	case at < len(text) && text[at] == '[':
-	case strings.has_prefix(text[at:], "first("):
-		at += len("first(")
-		for at < len(text) && path_space(text[at]) {
-			at += 1
-		}
-	case strings.has_prefix(text[at:], "limit("):
-		at += len("limit(")
-		for at < len(text) && (path_space(text[at]) || text[at] >= '0' && text[at] <= '9') {
-			at += 1
-		}
-		for at < len(text) && path_space(text[at]) {
-			at += 1
-		}
-		if at >= len(text) || text[at] != ';' {
-			return "", false
-		}
-		at += 1
-		for at < len(text) && path_space(text[at]) {
-			at += 1
-		}
-	case:
-		return "", false
-	}
-	// The rewritten path has no escaped name, so it cannot need the names buffer.
-	if at + 2 > len(text) || text[at] != '[' || text[at + 1] != ']' {
-		return "", false
-	}
-	for end := at + 2; end < len(text); end += 1 {
-		if text[end] != ')' && !path_space(text[end]) {
-			return "", false
-		}
-	}
-	if len(text) + 1 > len(buf.text) {
-		return "", false
-	}
-	dst := buf.text[:len(text) + 1]
-	copy(dst, text[:at])
-	dst[at] = '.'
-	copy(dst[at + 1:], text[at:])
-	return string(dst), true
-}
-
-@(private = "file")
-path_space :: #force_inline proc(c: byte) -> bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+lookup_policy :: proc(duplicates: Duplicates) -> Duplicates {
+	return .First if duplicates == .Default else duplicates
 }
 
 // The answers `t` names, read from `src`'s records. `out` receives every one, or, under `$single`, the walk
@@ -343,8 +293,11 @@ stream_target :: proc(
 		if !more {
 			return first, it.err
 		}
-		c, ok := column_of(src, head.fields, opts.dialect, t.name)
-		if !ok {
+		c, at, repeated := named_column(src, head.fields, opts.dialect, t.name, lookup_policy(opts.duplicates))
+		if repeated {
+			return first, Error{kind = .Duplicate_Key, offset = at}
+		}
+		if c < 0 {
 			return first, it.err
 		}
 		col = c
@@ -353,22 +306,22 @@ stream_target :: proc(
 			return first, it.err
 		}
 	}
-	counted := 0
 	if t.every_row {
+		counted := 0
 		for rec in next_record(&it) {
 			if col >= len(rec.fields) {
 				continue
 			}
 			answer := record_answer(rec.fields, col)
-			if core_pkg.answer_cut(t.limit, &counted, .Found, false) {
-				break
-			}
 			when single {
 				return answer, nil
-			} else {
-				if _, aerr := append(out, answer); aerr != nil {
-					return first, Error{kind = .Out_Of_Memory}
-				}
+			}
+			if _, aerr := append(out, answer); aerr != nil {
+				return first, Error{kind = .Out_Of_Memory}
+			}
+			// The last answer ends the walk: the record after it is not read, so a fault there is not met.
+			if counted += 1; counted == t.limit {
+				return first, nil
 			}
 		}
 		return first, it.err
@@ -385,9 +338,6 @@ stream_target :: proc(
 			return Answer{outcome = .Missing, owner = rec.at}, nil
 		}
 		answer := record_answer(rec.fields, col)
-		if core_pkg.answer_cut(t.limit, &counted, .Found, false) {
-			return first, nil
-		}
 		when single {
 			return answer, nil
 		} else {
@@ -418,17 +368,6 @@ seek_row :: proc(it: ^Records, row: int) -> (rec: Record, ok: bool) {
 		rec = next_record(it) or_return
 	}
 	return rec, true
-}
-
-// The first of `names`, a header's fields, whose text is `name`.
-@(private)
-column_of :: proc(src: []byte, names: []Field, dialect: Dialect, name: string) -> (col: int, ok: bool) {
-	for f, c in names {
-		if text_is(src, f, dialect, name) {
-			return c, true
-		}
-	}
-	return -1, false
 }
 
 // A path reading refusal as the `Error` `find` and `find_column` return: the path's own fault keeps its kind

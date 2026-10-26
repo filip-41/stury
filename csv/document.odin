@@ -28,6 +28,10 @@ Document :: struct {
 	width:      int,
 	// Built `.Lazy`: a string is judged as UTF-8 when it is read.
 	judge_utf8: bool,
+	// Built without a header: no column has a name.
+	no_header:  bool,
+	// The policy `build` was given for a header name two columns share, which `query` applies.
+	duplicates: Duplicates,
 	// The strings that held a `""` or an escape, each decoded once into `arena`. `decoded_at` is allocated at the
 	// first decode, with one slot per header name and then per field: 0 until its text is decoded, then 1 + its
 	// index in `decoded`.
@@ -48,7 +52,7 @@ build :: proc(src: []byte, opts := Read_Opts{}, allocator := context.allocator) 
 	if it.err != nil {
 		return {}, it.err
 	}
-	doc = {src = src, dialect = dialect, judge_utf8 = opts.strictness == .Lazy}
+	doc = {src = src, dialect = dialect, judge_utf8 = opts.strictness == .Lazy, no_header = opts.no_header, duplicates = opts.duplicates}
 	doc.names.allocator, doc.fields.allocator, doc.starts.allocator = allocator, allocator, allocator
 	if !opts.no_header {
 		if rec, more := next_record(&it); more {
@@ -138,15 +142,11 @@ column_count :: proc(doc: ^Document) -> int {
 
 // The column the header names `name`, the first of them when several do. `ok` is false for a name the header
 // lacks and for a document with no header. The path edits read `duplicates` instead, and refuse a name two
-// columns share under `.Default`/`.Refuse`.
+// columns share under `.Default`/`.Refuse`; `query` reads the `duplicates` the document was built with.
 @(require_results)
 column :: proc(doc: ^Document, name: string) -> (col: int, ok: bool) {
-	for f, c in doc.names {
-		if text_is(doc.src, f, doc.dialect, name) {
-			return c, true
-		}
-	}
-	return -1, false
+	col, _, _ = named_column(doc.src, doc.names[:], doc.dialect, name, .First)
+	return col, col >= 0
 }
 
 // The column `name` names in a header's fields (`text_is`), under `duplicates`. `col` is -1 when no field names it.
@@ -250,8 +250,8 @@ get_int :: proc(doc: ^Document, row, col: int) -> (v: i64, ok: bool) {
 }
 
 // The binary64 a cell spells, read by `unmarshal`'s own float reader (`read_float_value`) and correctly
-// rounded, as `unmarshal` reads a float. `ok` is false for an empty cell, any other text, a nonzero value that
-// underflows to zero (`1e-400`, where returning `0, true` hid the loss), or a value with no binary64 (`1e400`).
+// rounded. `ok` is false for an empty cell, any other text, a nonzero value that underflows to zero (`1e-400`,
+// where returning `0, true` hid the loss; `unmarshal` stores that 0), or a value with no binary64 (`1e400`).
 // A rounded significand (`0.1`, `1e23`) is accepted: it is the value `unmarshal` stores, not an error.
 @(require_results)
 get_float :: proc(doc: ^Document, row, col: int) -> (v: f64, ok: bool) {

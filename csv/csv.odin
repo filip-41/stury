@@ -51,9 +51,10 @@ Error :: core_pkg.Error
 // first byte of a record with more or fewer fields than the first, `Limit_Fields` at the first byte of a record
 // with more than `Limits.max_fields`, `Limit_Record` at the first byte of a line longer than
 // `Limits.max_record_bytes`, `Bad_Option` (at no byte) for a dialect or limit the scanner refuses, and
-// `Out_Of_Memory` where `next_record` could not hold a record's fields or `records_from` its window. The enum
+// `Out_Of_Memory` where `next_record` could not hold a record's fields or `records_from` its window, and
+// `Duplicate_Key` at the second header cell of a name `find` or `find_column` refuses under `.Refuse`. The enum
 // is core's and shared by every format. CSV never reports `Bad_Literal`, `Bad_Number`, `Limit_Digits`,
-// `Limit_Scale`, `Too_Deep`, `Trailing`, `Source_Too_Wide` or `Duplicate_Key`.
+// `Limit_Scale`, `Too_Deep`, `Trailing` or `Source_Too_Wide`.
 Error_Kind :: core_pkg.Error_Kind
 
 // The 1-based line and column `err` points at in `src`, counting bytes, or (0, 0) where it points at no byte
@@ -66,7 +67,7 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 // `err` (an `Error`, `Unmarshal_Error` or `Path_Error`) as text: `line:col: <kind>` with the kind's enum name,
 // or `offset N: <kind>` when it has no position. `src` is the input the failing call read.
 //
-// An `Unmarshal_Error` that points at no byte (`.Unsupported`, `.Bad_Option`, `.Plan_Mismatch`) has no
+// An `Unmarshal_Error` that points at no byte (`.Unsupported`, `.Bad_Option`, `.Plan_Mismatch`, `.Bad_Tag`) has no
 // position prefix. A `.Syntax` one is followed by `: <syntax>`. Its path follows as ` at [3].name`.
 //
 // A `Path_Error` has a source position for `.Bad_Source`, and for `.Encode` or `.Unplaceable` when it has a
@@ -134,8 +135,9 @@ Limits :: struct {
 Read_Opts :: struct {
 	dialect:    Dialect,
 	strictness: Strictness,
-	// How `unmarshal` and the path edits read a header name two columns share (`Duplicates`); `column` names the
-	// first of them.
+	// How `unmarshal`, the path edits, `find`, `find_column` and `query` (as `build` was given it) read a header
+	// name two columns share (`Duplicates`). The last three take the first under `.Default`, where the others
+	// refuse it; `column` names the first of them.
 	duplicates: Duplicates,
 	limits:     Limits,
 	// The first record is data, not column names.

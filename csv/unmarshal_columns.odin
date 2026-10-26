@@ -112,9 +112,15 @@ read_header :: proc(r: ^Reader, header: Record, refuse: bool, duplicates: Duplic
 }
 
 // Without a header, column k reads field k. A ragged text has columns for every field, whatever the first
-// record's width, since a later record may be wider.
+// record's width, since a later record may be wider. A refusal binds nothing, so the next record binds again.
 @(private)
 columns_in_order :: proc(r: ^Reader, first: Record, refuse: bool) -> (err: Maybe(Unmarshal_Error)) {
+	defer if err != nil {
+		delete(r.columns)
+		r.columns = nil
+		clear(&r.required)
+		clear(&r.req_more)
+	}
 	width := len(first.fields)
 	if r.dialect.ragged {
 		width = max(width, int(r.row.count))

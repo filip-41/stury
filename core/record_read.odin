@@ -13,6 +13,8 @@ package core
 //	  records applies to the next.
 //	- `plan` is the reader's resolved plan. It is the handle's when the reader owns it, and a handle may be
 //	  copied or returned by value: a state that held this pointer would point into the copy's caller.
+//	- The end of the input is `.Bad_Option`, for every format. A fault no record holds is the format's own, and
+//	  its offset is into the input (`record_read_at` is then 0).
 //	- `format` spells a plan the reader makes when it is given none. Core makes a `Type_Plan` by it.
 Record_Source :: struct($O: typeid) {
 	state:   rawptr,
@@ -27,14 +29,22 @@ Record_Source :: struct($O: typeid) {
 // It is a value. A copy shares the source and the plan it owns, so destroy a reader once: `destroy` clears this
 // handle, and a second destroy finds nothing. Every field is the reader's own; read none of them.
 Record_Read :: struct($O: typeid) {
+	// The caller's plan, borrowed. Nil when the reader made its own (`owned`): a pointer into the handle would
+	// dangle in a copy, so `record_read_plan` finds it.
 	plan:   ^Type_Plan,
 	opts:   O,
 	source: Record_Source(O),
-	// The plan the reader made, when the caller gave none, and whether it owns `plan`.
+	// The plan the reader made, when the caller gave none, and whether it did.
 	owned:  Type_Plan,
 	root:   typeid,
 	owns:   bool,
 	ready:  bool,
+}
+
+// The plan `r` reads by: the caller's, or the one the reader owns.
+@(require_results)
+record_read_plan :: proc(r: ^Record_Read($O)) -> ^Type_Plan {
+	return &r.owned if r.owns else r.plan
 }
 
 // Resolve the plan for `T` and lower its read shape once. `plan` is the caller's, borrowed, or nil to make and
@@ -65,9 +75,9 @@ record_read_init :: proc(
 		r.plan = plan
 	} else {
 		r.owned = type_plan_init(T, {}, source.format, allocator)
-		r.plan, r.owns = &r.owned, true
+		r.owns = true
 	}
-	if _, err := read_shape_of(r.plan); err != nil {
+	if _, err := read_shape_of(record_read_plan(r)); err != nil {
 		record_read_destroy(r)
 		return err
 	}
@@ -86,11 +96,7 @@ unmarshal :: proc(r: ^Record_Read($O), ptr: ^$T) -> Maybe(Unmarshal_Error) {
 	if r.root != T {
 		return Unmarshal_Error{kind = .Plan_Mismatch}
 	}
-	plan := r.plan
-	if r.owns {
-		plan = &r.owned
-	}
-	return r.source.read(r.source.state, &r.opts, plan, ptr)
+	return r.source.read(r.source.state, &r.opts, record_read_plan(r), ptr)
 }
 
 // Free the plan the reader made and the source's state, and clear the handle. A copy of the handle shares both,

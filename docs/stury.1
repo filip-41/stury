@@ -1,4 +1,4 @@
-.TH STURY 1 "2026-10" "stury 0.0.2" "General Commands Manual"
+.TH STURY 1 "2026-10-26" "stury 0.0.2" "General Commands Manual"
 .SH NAME
 stury \- JSON and CSV codec with a jq 1.8.2\-compatible command line
 .SH SYNOPSIS
@@ -29,9 +29,12 @@ reads without error, and prints nothing when they are valid. It requires at leas
 .PP
 .B stury fmt
 writes each input back in the printer's layout, or in another format: it runs no filter, reads each file as
-\-\-from and writes it as \-\-to (the same format by default). JSON and JSONC are printed as stury prints them,
-comments kept; ndjson is one compact value per line; csv and tsv are a header and one record per row, re-spelled
-by the cell writer. The run is idempotent, and a file already in that layout comes back byte for byte.
+\-\-from and writes it as \-\-to (the same format by default). JSON and JSONC are laid out as stury prints them, comments kept; ndjson is
+one compact value per line. Between these formats only the layout changes: each number, string and key is written
+as it was, and every member of an object is kept, a repeated key included. csv and tsv are a header and one record
+per row, re-spelled by the cell writer, each file a table of its own. A leading byte order mark is not written, and
+nesting past 1024 levels is refused with exit 5. The run is idempotent, and a file already in that layout comes
+back byte for byte.
 .SH OPTIONS
 .TP
 .BI \-\-from " format"
@@ -55,15 +58,17 @@ Read CSV (RFC 4180). The first record of each file names the fields. Each later 
 .BI \-\-from " tsv"
 Read tab\-separated values as \-\-from csv does, with no quoting and the escapes \\t, \\n, \\r, \\0 and \\\\ that jq's @tsv writes.
 .TP
-.TP
 .B \-\-in\-place
 With \fBfmt\fR, rewrite each file: the formatted bytes go to a temporary file in the same directory and are
-renamed over it, so a reader sees the old file or the new one. A file already formatted is left untouched.
-Only when \-\-to is \-\-from, and not with \-\-check, standard input, or anything but a regular file.
+renamed over it, so a reader sees the old file or the new one. The temporary file is synced to disk first and takes
+the file's mode and, where the system allows, its owner and group. As with sed \-i, the result is a new file: a hard
+link to the old one keeps the old bytes, and extended attributes are not carried over. A file already formatted is
+left untouched. Only when \-\-to is \-\-from, and not with \-\-check, standard input, or anything but a regular file.
 .TP
 .B \-\-check
 With \fBfmt\fR, write nothing: exit 1 when any file's formatted bytes differ from its bytes, 0 when every file
-is already formatted. A fault still exits 5.
+is already formatted. A fault still exits 5. A fault is told as check tells it, with the position one byte past
+a text that ends mid\-value.
 .TP
 .BI \-\-max\-depth " n"
 Refuse nesting past n levels (default 1024; jq's is 10000).

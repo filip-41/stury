@@ -55,14 +55,20 @@ each_record :: proc(
 	return run_batch(&run)
 }
 
-// Every record of `src` that `validate` refuses, in source order, each with its bytes src[lo:hi] and its
-// fault's offset into `src`. `opts` is read as `validate` reads it.
+// Every record of `src` that `validate` refuses, in source order, each with its bytes src[lo:hi], which end
+// before the line break that closes the record, and its fault's offset into `src`. `opts` is read as `validate`
+// reads it.
 //
-//	- `err` is the first fault in `src`, which `validate` finds on the runner's threads; a clean text is that
-//	  scan and no list at all.
-//	- A refused record's bytes run from its first byte to the LF that ends its line, and the read resumes at the
-//	  line after that: a refused record's end cannot be trusted, and the quote, escape and UTF-8 state before it
-//	  is not carried over. The faults of the whole text are listed, whichever threads found the first one.
+//	- One fault per refused record, and `faults[0].err` is `validate`'s fault. A clean text is that scan and no
+//	  list at all. The faults of the whole text are listed, whichever threads found the first one.
+//	- A record ends at the LF that closes it outside quotes, or at the input's end. A fault that leaves the
+//	  record open (a misplaced quote, UTF-8 or escape, a field or line cap) is resolved by counting quotes from
+//	  the record's first byte: each one opens or closes, except the one a `.Bad_Char` points at, which is text.
+//	  A record whose quote never closes runs to the input's end.
+//	- The read resumes at the byte after the record's end, and the quote, escape and UTF-8 state before it is
+//	  not carried over.
+//	- `err` is as in `json.validate_records`: a failure of the call, `.Bad_Option` or `.Out_Of_Memory`, where
+//	  `faults` is nil. A fault of the text is never `err`: each is a record in `faults`.
 //	- Allocates the list and `faults`, the latter with `allocator`.
 @(require_results)
 validate_records :: proc(
@@ -78,8 +84,7 @@ validate_records :: proc(
 	if !ok {
 		return nil, Error{kind = .Bad_Option}
 	}
-	err = validate(src, opts, runner)
-	if err == nil {
+	if validate(src, opts, runner) == nil {
 		return
 	}
 	lists, lerr := core_pkg.fault_list_init(1)
@@ -102,27 +107,56 @@ validate_records :: proc(
 		if fault.kind != .Out_Of_Memory {
 			lo = min(lo, fault.offset)
 		}
-		// Its bytes run to the LF that ends its line, or to the fault at the input's end, which no line follows.
-		from := max(min(fault.offset, u64(len(src))), lo)
-		line := bytes.index_byte(src[from:], '\n')
-		hi := from
-		if line >= 0 {
-			hi = from + u64(line)
-		}
-		core_pkg.fault_list_add(&lists, 0, Record_Fault{lo = lo, hi = hi, err = fault})
-		if line < 0 || int(hi) + 1 >= len(src) {
+		hi, next := refused_end(&read, fault, int(lo))
+		core_pkg.fault_list_add(&lists, 0, Record_Fault{lo = lo, hi = u64(hi), err = fault})
+		if next >= len(src) {
 			break
 		}
-		resume_read(&read, src, int(hi) + 1)
+		resume_read(&read, src, next)
 	}
 	merged, merr := core_pkg.fault_list_merge(&lists, max(u64), allocator)
 	if merr != nil {
 		return nil, merr
 	}
-	return merged, err
+	return merged, nil
 }
 
-// `it`, whose read stopped on a fault, reading on from `at`, a line's first byte of a text that starts there.
+// Where the record `it` refused with `fault` ends, `lo` being its first byte: `hi`, the end of its bytes, and
+// `next`, where the read resumes. `it` has stopped on `fault`.
+@(private)
+refused_end :: proc(it: ^Records, fault: Error, lo: int) -> (hi, next: int) {
+	src := it.src
+	switch {
+	case it.ended:
+		return len(src), len(src)
+	case fault.kind != .Out_Of_Memory && int(fault.offset) < it.rec_lo:
+		// The record was read whole and judged after: `rec_lo` is the byte past its LF.
+		return record_end(src, lo, it.rec_lo - 1), it.rec_lo
+	}
+	quoted := .Unquoted not_in it.scan.mode && !(.Comments in it.scan.mode && lo < len(src) && src[lo] == it.scan.comment)
+	in_quote := false
+	for i in lo ..< len(src) {
+		switch src[i] {
+		case '"':
+			if quoted && !(fault.kind == .Bad_Char && i == int(fault.offset)) {
+				in_quote = !in_quote
+			}
+		case '\n':
+			if !in_quote {
+				return record_end(src, lo, i), i + 1
+			}
+		}
+	}
+	return len(src), len(src)
+}
+
+// The end of the record `src[lo:lf]`, `lf` being its LF: before a CR that precedes it.
+@(private)
+record_end :: #force_inline proc(src: []byte, lo, lf: int) -> int {
+	return lf - 1 if lf > lo && src[lf - 1] == '\r' else lf
+}
+
+// `it`, whose read stopped on a fault, reading on from `at`, a record's first byte of a text that starts there.
 // The field count it was judging against stands.
 @(private)
 resume_read :: proc(it: ^Records, src: []byte, at: int) {

@@ -8,12 +8,19 @@
   (`record_read_init`, then `unmarshal`). A fault's offset is into that record's bytes. It is a handle now:
   the state lives on the heap, `destroy` frees it, a copy shares it (destroy once), and its options are read
   on every read, so `duplicates`, `limits`, `borrow_strings` and `strictness` set after init apply to the next
-  record. It used to be a 70,160-byte value holding pointers into itself, so returning one by value left a
+  record. It used to be a large value holding pointers into itself, so returning one by value left a
   frame that was gone.
+- `csv.record_read_init` refuses an iterator whose dialect, limits or strictness differ from the reader's
+  (`.Bad_Option`; a `.Lazy` reader also takes a `.Strict` one). A fault that frames no record, and a
+  `Record_Reader` whose reader failed (`.Syntax` `.Truncated`, instead of the end of the rows), have an offset
+  in the input with `record_read_at` 0, in json and csv alike. A `no_header` reader refused at its first row can
+  read the next, a `.Lazy` stream judges UTF-8 after the window drops bytes, and a fault in a streamed row is
+  into that row's bytes.
 - A type plan whose compile fails is rolled back and answers the same fault on every later call; a tag the
   format cannot spell is no longer reported as `.Out_Of_Memory`. Only `.Out_Of_Memory` is retryable.
 - A tag's name may hold a literal comma or backslash (`csv:"Last\, First"`), and a flag other than
-  `omitempty`, `required` or `string` refuses with `.Bad_Utf8` instead of being ignored.
+  `omitempty`, `required` or `string` refuses with `.Bad_Tag`, a new member of `Marshal_Error` and
+  `Unmarshal_Error_Kind`, instead of being ignored.
 - An edit list that is unsorted or overlapping is `.Bad_Edit`, where it used to index out of bounds; JSONC
   `remove` answered `.Bad_Result` for the same list.
 - A fault at no byte of the source renders one way: `offset N: Kind` when the offset locates it, bare
@@ -26,7 +33,9 @@
   by `set`. `column` keeps its contract and names the first of them.
 - `.Lazy` `.Path` answers report the same `coverage` and `stop` with and without `FORCE_AUTOMATON`. A `.Path`
   scan's wildcard key scratch allocates from the request's allocator, and the deep-frame spill grows with the
-  document instead of allocating the depth cap (24 MiB for a 1,100-deep document is now 48 KiB).
+  document instead of allocating the depth cap.
+- A `.Path` scan at `.Structural` that reads to the end reports `coverage` `.Partial`, where it reported `.Full`:
+  its walk does not check the bytes of the values it passes, and `validate_remaining` upgrades it.
 - `get_string`'s contract names the reads that write the document: `get_key`, and `child` past 64 members,
   fill a cache from the document's allocator, so only a `.Dom` build's `get_string` may run on several threads.
 - The typed per-record reader is core's: `core.Record_Read` holds the plan resolved once and a
@@ -37,19 +46,24 @@
   record at a time (it could not before).
 - `core.Record_Fault` is the refused record (`lo`, `hi`, `err`) for every format, and `core.Fault_List` builds a
   list per piece. `csv.validate_records(src, opts, runner, allocator)` lists one fault per refused record in
-  source order, resuming at the line after each refusal, so a caller sees every bad row where it saw one.
-  `json.validate_records` keeps its signature and byte-order cap; `json.Record_Fault` was already core's.
+  source order, so a caller sees every bad row where it saw one. A record ends at the LF that closes it
+  outside quotes, so a quoted LF is not its end, and a CR before the LF is not in its bytes. As in
+  `json.validate_records`, `err` is only the call's failure (`.Bad_Option`, `.Out_Of_Memory`); a fault of the
+  text is a record in `faults`. `json.validate_records` keeps its signature and byte-order cap;
+  `json.Record_Fault` was already core's.
 - `core.Answer` (`lo`, `hi`, `owner`, `query`, `outcome`), `Answer_Outcome` and `NO_OWNER` are the path answer
   every format returns, and `answer_cut` is the limit rule once instead of three times. `json.Path_Outcome`
   and `json.NO_OWNER` are core's; json's `Path_Answer` keeps its layout. `csv.query(doc, path, out)` answers
   paths over a built `Document` without rescanning the text, and `csv.find`/`csv.find_column` return answers:
   `(Answer, Maybe(Error))`, wildcard `[]` and `limit` included.
+- `csv.find`, `find_column` and `query` read a repeated header name under `duplicates`: `.Default` and `.First`
+  take the first column, `.Last` and `.All` the last, and `.Refuse` is `.Duplicate_Key` at the repeated header
+  cell (`.Bad_Source` from `query`). `query` of a name on a document built from an empty text answers nothing,
+  as `find` does. `find_column` with `limit` stops at its last answer without reading the record after it. A
+  text path starts at the root `.` as in `json`: the bare `[]` is `.Bad_Path`.
 - `core.Batch_Driver` is the one claim loop behind json's and csv's `each_record`, parameterised by
   boundary/skip/piece/fault-rank callbacks. Each format keeps its present fault policy (JSON by byte offset,
   continuing; CSV by piece, stopping).
-- Split by responsibility, with no name changed: `json/document_build|walk|query`, `csv/cell` and
-  `csv/unmarshal_columns|row|cells`, `json/scan/walk/path_reread`, `json/scan/shape_tag|shape_round`,
-  `cmd/stury/regex/class|analyze`, and `cmd/stury/jq/lex|actions`, with the update sinks in `jq/modify`.
 - `marshal` refuses a `Number` that is `.None` (`1e400`) with `.Non_Finite`; it used to write `0`. `Digits`
   and `Raw` keep such a number. `Exact` is now `Exactness`'s zero value, so an unset `Number` writes `0`.
 - `edit_comment` accepts bare text, the form `fact_text` returns, and writes it as a `//` line.
@@ -91,13 +105,17 @@
 ### Command line
 
 - `stury fmt [--from F] [--to F] [--in-place|--check] [--indent N|--tab] FILE...` formats or transcodes each
-  file, with no filter: JSON and JSONC in the printer's layout with comments kept, NDJSON one compact value per
-  line, CSV/TSV a header and one record per row. It is idempotent; `--check` exits 1 when a file would change;
-  `--in-place` rewrites formatter files atomically and leaves already-formatted ones untouched.
+  file, with no filter. JSON, JSONC and NDJSON are written with every number, string and key as written and
+  every member of an object, a repeated key included, so only the layout changes; JSONC keeps its comments.
+  CSV/TSV is a header and one record per row, each file its own table. It is idempotent; `--check` exits 1
+  when a file would change; `--in-place` rewrites each file atomically, synced to disk, with its mode and, where
+  permitted, its owner and group, and leaves already-formatted ones untouched. A file that is rewritten is a new
+  file: other hard links to it keep the old bytes, and extended attributes are not carried over.
 - The format aliases `--csv`, `--tsv`, `--ndjson` and `--jsonc` are removed. Spell both halves:
   `--from csv --to csv`. `--from` alone reads the format and writes JSON, as before.
 - A parse error at the end of the input names the same column jq and `--stream-errors` name, also through
-  `fromjson`, `--argjson`, `--jsonargs`, `--slurpfile` and module data. `check` keeps the library's position.
+  `fromjson`, `--argjson`, `--jsonargs`, `--slurpfile` and module data. `check` and `fmt` keep the library's
+  position.
 - `--seq` reads its files as one byte stream, as jq does: a record cut at a file end continues in the next
   file, and `check --seq` joins the same way, so neither reports `Text before the first RS` for a continuation.
 - `debug` and `stderr` lines flush with the output they follow instead of at the end of the input, and the

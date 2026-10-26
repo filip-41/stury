@@ -115,6 +115,10 @@ reader_fill :: proc(rr: ^Record_Reader) -> bool {
 		it.block -= keep
 		it.field_lo -= keep
 		it.rec_lo -= keep
+		// A deferred UTF-8 fault is a window position too; -1 and max(int) are not.
+		if it.carry.utf8 >= 0 && it.carry.utf8 != max(int) {
+			it.carry.utf8 = max(it.carry.utf8 - keep, 0)
+		}
 		for &f in it.fields {
 			f.lo -= u64(keep)
 			f.hi -= u64(keep)

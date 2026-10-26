@@ -139,7 +139,7 @@ Cli :: struct {
 	var_names:  [dynamic]string,
 	var_values: [dynamic]jq.Value,
 	positional: [dynamic]jq.Value, // --args and --jsonargs
-	args_mode:  bool, // --args or --jsonargs was given
+	binding_flag: string, // the first of --arg, --argjson, --slurpfile, --rawfile, --args and --jsonargs given
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
 	mono:       bool, // -M
@@ -235,14 +235,15 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		case "unbuffered":
 			o.unbuffered = true
 		case "arg", "argjson", "slurpfile", "rawfile":
+			note_binding_flag(&cli, a)
 			bind_variable_option(&cli, args, i)
 			i += option_arity(a)
 		case "args":
+			note_binding_flag(&cli, a)
 			rest_as = .Args
-			cli.args_mode = true
 		case "jsonargs":
+			note_binding_flag(&cli, a)
 			rest_as = .Json_Args
-			cli.args_mode = true
 		case "build-configuration":
 			fmt.println(BUILD_CONFIGURATION)
 			os.exit(0)
@@ -318,6 +319,14 @@ note_json_flag :: proc(cli: ^Cli, flag: string, layout := false) {
 	}
 	if layout && cli.layout_flag == "" {
 		cli.layout_flag = flag
+	}
+}
+
+// Records `flag` as the first option that binds a variable or the positional arguments.
+@(private = "file")
+note_binding_flag :: proc(cli: ^Cli, flag: string) {
+	if cli.binding_flag == "" {
+		cli.binding_flag = flag
 	}
 }
 

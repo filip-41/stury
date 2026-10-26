@@ -366,4 +366,17 @@ early pipe_to_csv "$(printf 'a,b\n1,2\n3,4')" '{"a":1,"b":2}\n' '{"a":3,"b":4}\n
 early pipe_to_tsv "$(printf 'x\n1\n2')" '{"x":1}\n' '{"x":2}\n' --to tsv .
 rm -f "$T/mid.csv" "$T/big.csv" "$T/bad.csv" "$T/nul.csv" "$T/bom.csv" "$T/bom.want" "$T/col.got" "$T/col.want" "$T/col.err" "$T/col.want.err"
 
+# fmt --in-place changes only the layout: the spelling of numbers, strings and keys and a repeated key stay, a second
+# run changes nothing, the file keeps its mode, and a value fmt does not write leaves the file as it was.
+printf '{"b":1,"a":2,"b":3,"n":1e2,"s":"\\u00e9\\/"}' >"$T/inplace.json"
+chmod 640 "$T/inplace.json"
+"$S" fmt --in-place "$T/inplace.json"
+printf '{\n  "b": 1,\n  "a": 2,\n  "b": 3,\n  "n": 1e2,\n  "s": "\\u00e9\\/"\n}\n' >"$T/inplace.want"
+cmp -s "$T/inplace.json" "$T/inplace.want" || { echo "FAIL fmt_in_place_spelling"; fails=$((fails + 1)); }
+check fmt_in_place_again 0 '' fmt --check "$T/inplace.json"
+[ "$(ls -l "$T/inplace.json" | cut -c1-10)" = "-rw-r-----" ] || { echo "FAIL fmt_in_place_mode"; fails=$((fails + 1)); }
+cp "$T/deep1100.json" "$T/inplace.deep.json"
+check fmt_in_place_deep 5 '' fmt --in-place --max-depth 2000 "$T/inplace.deep.json"
+cmp -s "$T/inplace.deep.json" "$T/deep1100.json" || { echo "FAIL fmt_in_place_deep_untouched"; fails=$((fails + 1)); }
+
 [ "$fails" = 0 ] && echo "stury CLI smoke: ok" || { echo "stury CLI smoke: $fails failed"; exit 1; }

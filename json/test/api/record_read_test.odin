@@ -131,6 +131,28 @@ test_unmarshal_record_fault_is_into_the_record :: proc(t: ^testing.T) {
 	testing.expect(t, oe.offset <= u64(len(text)))
 }
 
+// A fault that frames no record has no record to be in: its offset is in the input, and `record_read_at` is 0
+// instead of the last record's.
+@(test)
+test_unmarshal_record_framing_fault_is_into_the_input :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	good := "{\"id\":1,\"name\":\"a\",\"v\":2,\"flag\":true}\n"
+	src := fmt.tprintf("%s%s\xEF\xBB\xBF%s", good, good, good)
+	rd: json.Record_Read
+	it := json.records(raw(src), .NDJSON)
+	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, allocator = context.temp_allocator), nil)
+	defer json.destroy(&rd)
+	got: Read_Rec
+	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	testing.expect_value(t, json.record_read_at(&rd), u64(len(good)))
+	err := um_err(json.unmarshal(&rd, &got))
+	testing.expect_value(t, err.kind, .Syntax)
+	testing.expect_value(t, err.syntax, .Bad_Char)
+	testing.expect_value(t, json.record_read_at(&rd), u64(0))
+	testing.expect_value(t, err.offset, u64(2 * len(good)))
+}
+
 @(test)
 test_unmarshal_record_walks_a_shape_it_does_not_descend :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -193,6 +215,25 @@ test_record_read_handle_survives_return :: proc(t: ^testing.T) {
 	testing.expect_value(t, got.name, "returned")
 	testing.expect_value(t, got.v, i64(1))
 	testing.expect_value(t, got.flag, true)
+}
+
+// A handle copied after a read binds the shape of its own plan, not the original's, which may be gone.
+@(test)
+test_record_read_copy_after_a_read :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	line := `{"id":5,"name":"copied","v":1,"flag":true}`
+	it := json.records(raw(fmt.tprintf("%s\n%s\n", line, line)), .NDJSON)
+	rd: json.Record_Read
+	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, allocator = context.temp_allocator), nil)
+	got: Read_Rec
+	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	copied := rd
+	rd = {}
+	defer json.destroy(&copied)
+	got = {}
+	testing.expect_value(t, json.unmarshal(&copied, &got), nil)
+	testing.expect_value(t, got.id, i64(5))
+	testing.expect_value(t, got.name, "copied")
 }
 
 @(private = "file")

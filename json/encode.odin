@@ -26,7 +26,7 @@ Marshal_Opts :: enc.Marshal_Opts
 
 // A writer refusal (`.None` is success). `marshal`'s: `Bad_Utf8`, `Non_Finite` (a NaN, an infinity, or a `Number` that is `.None` or
 // `.Underflowed`), `Too_Deep` (past `MAX_DEPTH`),
-// `Cycle`, `Unsupported`, `Bad_Raw`, `Plan_Mismatch`, `Not_A_Member`, `Bad_State` (a hook writing other than
+// `Cycle`, `Unsupported`, `Bad_Raw`, `Bad_Tag` (a field tag flag the format does not know), `Plan_Mismatch`, `Not_A_Member`, `Bad_State` (a hook writing other than
 // one value), `Write_Failed` (the `io.Writer`, after a prefix written) and `Out_Of_Memory`.
 Marshal_Error :: enc.Marshal_Error
 

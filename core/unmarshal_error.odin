@@ -19,6 +19,7 @@ Unmarshal_Error_Kind :: enum u8 {
 	Bad_Option,      // a nil target, or an option the read cannot take
 	Plan_Mismatch,   // the plan was made for another root type
 	Duplicate_Key,   // duplicate keys refused and a key repeating one of its object's, at the repeat's key, the path as deep as the target reads
+	Bad_Tag,         // a field tag with a flag the format does not know, before any byte, offset 0, no path
 }
 
 // A shape fault is the kind of its name, so a hook's answer passes through it as it is.

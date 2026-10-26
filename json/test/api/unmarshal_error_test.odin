@@ -135,6 +135,8 @@ test_unmarshal_refusal_matrix :: proc(t: ^testing.T) {
 		{into([]Um_Bits), `[`, .Unsupported, ``, `[*].b: Unsupported`, {}},
 		{into(map[string]Um_Bits), `{`, .Unsupported, ``, `[*].b: Unsupported`, {}},
 		{into(^Um_Bits), `{`, .Unsupported, ``, `.b: Unsupported`, {}},
+		{into(Um_Bad_Tag), `{`, .Bad_Tag, ``, `Bad_Tag`, {}},
+		{into([]Um_Bad_Tag), `[`, .Bad_Tag, ``, `Bad_Tag`, {}},
 		{into(Um_Union), `{`, .Ambiguous_Union, ``, `.u: Ambiguous_Union`, {}},
 		{into_tagged(Um_Drawing), `{"shapes":[{"r":1}],"one":"s"}`, .Missing_Tag, `{"r"`, `.shapes[0]: Missing_Tag`, {}},
 		{into_tagged(map[string]Um_Shape), `{"a":{"type":"Um_Circle","r":1},"b":{"side":2}}`, .Missing_Tag, `{"side"`, `.b: Missing_Tag`, {}},

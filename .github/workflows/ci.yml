@@ -103,3 +103,11 @@ jobs:
           [ "$(./stury.exe --from csv -c '.b' two.csv)" = '"2"' ]
           [ "$(./stury.exe --from csv --to csv 'select(.a == "1")' two.csv | tr -d '\r' | paste -sd, -)" = "a,b,1,2" ]
           [ "$(printf 'a,b\n3,4\n' | ./stury.exe --from csv -c '.a')" = '"3"' ]
+          # fmt: the layout with every spelling and member kept, --check, and --in-place over an existing file.
+          printf '{"b":1e2,"b":2}' > fmt.json
+          [ "$(./stury.exe fmt fmt.json | tr -d ' \r\n')" = '{"b":1e2,"b":2}' ]
+          ! ./stury.exe fmt --check fmt.json
+          ./stury.exe fmt --in-place fmt.json
+          ./stury.exe fmt --check fmt.json
+          [ "$(tr -d ' \r\n' < fmt.json)" = '{"b":1e2,"b":2}' ]
+          [ "$(wc -l < fmt.json | tr -d ' ')" = 4 ]

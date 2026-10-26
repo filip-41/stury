@@ -16,8 +16,10 @@ Marshal_Error :: enum u8 {
 	Out_Of_Memory, // the allocator refused
 	Bad_Option,    // CSV: a dialect the scanner refuses
 	Unwritable,    // CSV: a cell or record the dialect cannot write so that it reads back the same
+	Bad_Tag,       // a field tag with a flag the format does not know
 }
 
 // `Plan_Error` members share their values with the `Marshal_Error` members of the same meaning.
 #assert(u8(Plan_Error.Bad_Name) == u8(Marshal_Error.Bad_Utf8))
+#assert(u8(Plan_Error.Bad_Tag) == u8(Marshal_Error.Bad_Tag))
 #assert(u8(Plan_Error.Out_Of_Memory) == u8(Marshal_Error.Out_Of_Memory))
