@@ -351,7 +351,7 @@ open_file :: proc(ins: ^Inputs) -> (file: ^os.File, ok: bool) {
 	}
 	ins.name = f
 	err: os.Error
-	if file, err = os.open(f); err != nil {
+	if file, err = open_input(f); err != nil {
 		fmt.eprintf("stury: error: Could not open file %s: %s\n", f, strerror(err))
 		ins.failures += 1
 		ins.run.unopened = true

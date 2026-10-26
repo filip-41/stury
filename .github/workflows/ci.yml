@@ -60,6 +60,7 @@ jobs:
         run: |
           curl -fsSL -o /tmp/jq \
             https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64
+          echo 'b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f  /tmp/jq' | sha256sum -c -
           sudo install -m 0755 /tmp/jq /usr/local/bin/jq
           jq --version | grep -qx 'jq-1.8.2'
       # The four diff targets at once: one script's Python driver holds a core, so one at a time leaves most
@@ -98,7 +99,7 @@ jobs:
       - name: AVX-512BW (Sapphire Rapids)
         run: STURY_REQUIRE_WIDE=avx512 sde64 -spr -- build/api-test
 
-  # Sanitizer runs are gated on macOS on Apple silicon only.
+  # Sanitizer runs are checked where they were made to pass: macOS on Apple silicon.
   sanitizers:
     needs: test
     strategy:
@@ -112,6 +113,7 @@ jobs:
       - run: make ${{ matrix.target }}
 
   # Windows is built only here. It builds the library suites and the CLI, then runs a few answers end to end.
+  # smoke.sh is not run here: its CPU and memory guards need ulimit and time(1), and it uses FIFOs and modes.
   windows:
     needs: lint
     runs-on: windows-latest
@@ -148,7 +150,7 @@ jobs:
           # fmt: the layout with every spelling and member kept, --check, and --in-place over an existing file.
           printf '{"b":1e2,"b":2}' > fmt.json
           [ "$(./stury.exe fmt fmt.json | tr -d ' \r\n')" = '{"b":1e2,"b":2}' ]
-          ./stury.exe fmt --check fmt.json && exit 1
+          s=0; ./stury.exe fmt --check fmt.json || s=$?; [ "$s" = 1 ]
           ./stury.exe fmt --in-place fmt.json
           ./stury.exe fmt --check fmt.json
           [ "$(tr -d ' \r\n' < fmt.json)" = '{"b":1e2,"b":2}' ]

@@ -488,6 +488,27 @@ def check_reduce_memory(stury, diff, filter, want):
     return "memory", f"reduce frees its old state: stury -n {filter!r}", why
 
 
+# A faulty text's events before its fault are made as they are given, so the walk holds its path, not its events,
+# and moves what it holds between its arenas no more often than it doubles: (text, events under --stream-errors).
+FAULT_EVENTS = 1000000
+FAULT_TEXTS = [
+    ("[" + "1," * FAULT_EVENTS + "x]", FAULT_EVENTS + 1),
+    ('{"' + "k" * 1200000 + '":[1' + " " * 300000 + " tru]}", 1),
+]
+# A sanitizer's shadow memory takes a few times the plain build's.
+FAULT_EVENTS_MB = 300 if os.environ.get("STURY_SANITIZED") else 100
+
+
+def check_fault_events_memory(stury, diff, flag, want_code, text, events):
+    try:
+        p = run_capped([stury, "-c", flag, "."], text.encode(), TIMEOUT, cap_mb=FAULT_EVENTS_MB)
+        got = (p.returncode, p.stdout.count(b"\n"))
+        why = None if got == (want_code, events) else f"exit {got[0]}, {got[1]} events (want {events})"
+    except subprocess.TimeoutExpired:
+        why = f"past {FAULT_EVENTS_MB} MB or {TIMEOUT:g} s"
+    return "memory", f"a faulty text's events are made as given: stury -c {flag} . <<< {text[:12]!r}...", why
+
+
 # Stdin that is a regular file is mapped from its current offset; a pipe is read; an empty file is no input.
 # Each form must give what the pipe gives, and jq's output under --diff.
 STDIN_FILES = [
@@ -905,6 +926,8 @@ def main():
         print("memory, stdout closed, stdout nonblocking, deep pretty: skipped: they need POSIX descriptors or a memory reader", flush=True)
     else:
         jobs += [(check_reduce_memory, *row) for row in REDUCE_MEMORY]
+        jobs += [(check_fault_events_memory, "--stream", 5, FAULT_TEXTS[0][0], FAULT_EVENTS)]
+        jobs += [(check_fault_events_memory, "--stream-errors", 0, text, events) for text, events in FAULT_TEXTS]
         jobs += [(check_stdout_closed, f) for f in (["-c", "."], ["-c", ".a"], ["-c", "map(.)"], ["--unbuffered", "-c", "."])]
         jobs += [(check_stdout_nonblocking, *row) for row in NONBLOCKING]
         jobs += [(check_deep_pretty, 8000)]

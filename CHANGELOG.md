@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Command line
+
+- `--stream` gives the events of a faulty text before its fault, as jq does, and `input_line_number` and the
+  error positions under `--stream` count jq's lines.
+- `--stream-errors` makes a faulty text's events as it gives them, not all before the first.
+- macOS: a pipe named as a path (`/dev/stdin`, `<(...)`) is read wherever a file is: inputs, `--slurpfile`,
+  `--rawfile`, `-f`, `check` and `fmt`.
+
 ## 0.0.3 (2026-10-26)
 
 ### Library
@@ -10,8 +20,8 @@
 - One `Read_Opts` per format (`dialect`, `strictness`, `duplicates`, `limits`, and CSV's `no_header`, which
   replaces `header`) is taken before the allocator. The JSON edits take `dialect` before the allocator.
 - One read error: `scan`, `find`, `request_init` and `build` return `Maybe(Error)`; `parse_path` and `query`
-  return `Maybe(Path_Error)`. `Scan_Error`, `Request_Error`, `Capacity`, `Parse_Error`, `Prepared` and the
-  public `render_error_to_writer` are removed.
+  return `Maybe(Path_Error)`. `Scan_Error`, `Request_Error`, `Capacity`, `Parse_Error`, `Prepared` and
+  `json.render_error_to_writer` are removed; `core.render_error_to_writer` stays.
 - Renamed: `Encode_Error`/`Encode_Opts` to `Marshal_Error`/`Marshal_Opts`; the csv destroy procedures are one
   `csv.destroy`. `core/bits` and `core/path` are folded into `core`. `json.records_from` and
   `json.Record_Reader` are removed.

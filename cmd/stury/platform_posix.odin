@@ -131,6 +131,40 @@ keep_owner :: proc(f: ^os.File, path: string) {
 	}
 }
 
+// os.open for a file the user names. A pipe or socket reached by path (/dev/stdin, a process substitution's
+// /dev/fd/N) has no path of its own: core:os asks the descriptor for one (F_GETPATH on macOS), fails with
+// Invalid_File and leaks the descriptor. Such an input is opened here and its descriptor moved onto a File that
+// core:os could open. Only a path under /dev/ reaches one (a named FIFO has a path), so no other path pays the stat.
+open_input :: proc(path: string) -> (f: ^os.File, err: os.Error) {
+	if !strings.has_prefix(path, "/dev/") {
+		return os.open(path)
+	}
+	st: posix.stat_t
+	cpath := strings.clone_to_cstring(path, context.temp_allocator)
+	if posix.stat(cpath, &st) != .OK || !(posix.S_ISFIFO(st.st_mode) || posix.S_ISSOCK(st.st_mode)) {
+		return os.open(path)
+	}
+	fd := posix.open(cpath, {.NOCTTY, .CLOEXEC})
+	if fd < 0 {
+		return nil, os.Platform_Error(i32(posix.errno()))
+	}
+	if f, err = os.open("/dev/null"); err != nil {
+		posix.close(fd)
+		return nil, err
+	}
+	// dup2 replaces the stand-in's descriptor and drops its close-on-exec flag, which is set again.
+	target := posix.FD(os.fd(f))
+	if posix.dup2(fd, target) < 0 {
+		err = os.Platform_Error(i32(posix.errno()))
+		os.close(f)
+		f = nil
+	} else {
+		posix.fcntl(target, .SETFD, i32(posix.FD_CLOEXEC))
+	}
+	posix.close(fd)
+	return
+}
+
 is_regular_file :: proc(f: ^os.File) -> bool {
 	st: posix.stat_t
 	return posix.fstat(posix.FD(os.fd(f)), &st) == .OK && posix.S_ISREG(st.st_mode)

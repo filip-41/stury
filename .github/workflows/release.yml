@@ -79,6 +79,25 @@ jobs:
           mkdir "$d"
           cp build/stury LICENSE THIRD_PARTY_NOTICES README.md CHANGELOG.md "$d/"
           cp -R docs "$d/"
+          # Links to repository files the archive does not carry point at the tag on GitHub.
+          python3 - "$d" "https://github.com/${{ github.repository }}/blob/$VERSION" <<'PY'
+          import os, re, sys
+          root, base = sys.argv[1], sys.argv[2]
+          for dirpath, _, names in os.walk(root):
+              for name in names:
+                  if not name.endswith(".md"):
+                      continue
+                  path = os.path.join(dirpath, name)
+                  rel_dir = os.path.relpath(dirpath, root)
+                  def fix(m):
+                      target, anchor = m.group(1), m.group(2) or ""
+                      if os.path.exists(os.path.join(dirpath, target)):
+                          return m.group(0)
+                      return f"]({base}/{os.path.normpath(os.path.join(rel_dir, target))}{anchor})"
+                  text = open(path, encoding="utf-8").read()
+                  text = re.sub(r"\]\((?!https?:|#|mailto:)([^)#\s]+)(#[^)\s]*)?\)", fix, text)
+                  open(path, "w", encoding="utf-8").write(text)
+          PY
           tar -czf "$d.tar.gz" "$d"
           shasum -a 256 "$d.tar.gz" > "$d.tar.gz.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

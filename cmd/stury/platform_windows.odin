@@ -98,6 +98,11 @@ command_args :: proc() -> []string {
 // Windows keeps no owner or group to give.
 keep_owner :: proc(f: ^os.File, path: string) {}
 
+// os.open for a file the user names.
+open_input :: proc(path: string) -> (^os.File, os.Error) {
+	return os.open(path)
+}
+
 is_regular_file :: proc(f: ^os.File) -> bool {
 	return win.GetFileType(win.HANDLE(os.fd(f))) == win.FILE_TYPE_DISK
 }

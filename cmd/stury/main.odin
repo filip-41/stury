@@ -4,7 +4,7 @@ package main
 //
 //	stury [OPTIONS] [FILTER] [FILE...]
 //	stury check [--from format|--seq] [--strict-limits] [FILE...]
-//	stury fmt [--from format] [--to format] [--in-place|--check] [--indent n|--tab] [FILE...]
+//	stury fmt [--from format] [--to format] [--in-place|--check] [--indent n|--tab] [--max-depth n] [FILE...]
 //
 // FILTER is a jq program, and the output is what jq 1.8 prints for it. The options are listed in HELP_OPTIONS
 // (options.odin). With no FILE it reads stdin, and with no FILTER it runs `.` unless stdin and stdout are both a
@@ -24,6 +24,7 @@ package main
 // Where things live in cmd/stury:
 //
 //	options.odin                     the command line
+//	formats.odin                     the formats --from reads and --to writes
 //	input.odin, input_stream.odin    reading files and stdin as jq does, whole or in line windows
 //	input_csv.odin                   --from csv and tsv input: each record after the header as an object
 //	scan_cells.odin                  column-only filters on --from csv and tsv input, answered from the cells
@@ -33,10 +34,11 @@ package main
 //	root_spine.odin                  a large root array built, printed or scanned in pieces on the pool
 //	filter.odin                      the jq interpreter over each input
 //	print.odin                       output as jq prints it, buffered in `Run.out`
+//	output_cells.odin                --to csv and tsv output
 //	pool.odin                        the batch pool and its claims
 //	check.odin                       `stury check`
 //	fmt.odin                         `stury fmt`
-//	stream_fault.odin                --stream-errors for a text that does not parse
+//	stream_fault.odin                --stream for a text that does not parse
 //	platform_posix.odin,
 //	platform_windows.odin            the calls into the system, one file per platform
 //	jq/                              the jq interpreter (package `jq`)

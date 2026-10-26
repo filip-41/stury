@@ -11,7 +11,6 @@ package regex
 // by: a literal every match starts with, one every match holds, a start pinned to \A.
 
 import "core:slice"
-import "core:strings"
 import "core:unicode/utf8"
 
 // The most instructions a program may have: short counted repeats are written out, so many of them would

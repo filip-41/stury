@@ -19,7 +19,7 @@ stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unb
       [--arg NAME VALUE] [--argjson NAME JSON] [--slurpfile NAME FILE] [--rawfile NAME FILE]
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
 stury check [--from FORMAT|--seq] [--strict-limits] [--max-depth N] [FILE...]
-stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [FILE...]
+stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
 stury -h | -V | --build-configuration
 ```
 
@@ -133,7 +133,7 @@ Exit codes: 0 on success, 5 for invalid input, 2 for a usage or file error.
 `FILTER`.
 
 ```sh
-stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [FILE...]
+stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
 ```
 
 | Format | What `fmt` writes |
@@ -237,8 +237,8 @@ Every input is read by one grammar, the library's: `validate` with `dialect = .J
 | Option | Behaviour |
 | --- | --- |
 | `--seq` | Passes over a record that does not parse with `stury: ignoring parse error: ...` and puts `0x1E` before each output. |
-| `--stream` | Gives jq's `[path, leaf]` and `[path]` events of each text once it parses whole, and refuses a text that does not parse, as any input. |
-| `--stream-errors` | Gives what jq gives of a faulty text: the events before the fault, then `[message, path]`. `[1,` gives `[0],1` and then `["Unfinished JSON term at EOF at line 1, column 3",[1]]`. Its messages, positions, exit code and `--seq` resync are jq's. |
+| `--stream` | Gives jq's `[path, leaf]` and `[path]` events of each text. Of a text that does not parse it gives jq's events before the fault, then refuses the text as any input. |
+| `--stream-errors` | Gives what jq gives of a faulty text: the events before the fault, then `[message, path]`. `[1,` gives `[[0],1]` and then `["Unfinished JSON term at EOF at line 1, column 3",[1]]`. Its messages, positions, exit code and `--seq` resync are jq's. |
 
 ### CSV and TSV
 
@@ -574,6 +574,11 @@ line and column in the stream, without a file's name.
 - In a filter's string literal (an interpolated string and an object key included) a lone low surrogate is a
   compile error, `Invalid escape`, where jq reads U+FFFD. A lone high one is refused, as jq refuses it.
 - After a parse error, `input` reads on from the next line, where jq reads on from its next 4 KiB read.
+- `range/3` refuses a bound or step that is not a number (`Range bounds must be numeric`), as jq's `range/2`
+  does; jq's `range/3` adds it with `+` (`[range(null; 3; 1)]` is `[null,1,2]` there).
+- `range` with a NaN bound or step gives no values. jq gives none for some (`[range(0; 3; nan)]`), counts on
+  for others (`[limit(3; range(0; nan))]` is `[0,1,2]`, `[range(0; -3; nan)]` is `[0]`) and, for
+  `[range(nan)]`, aborts on an assertion.
 - jq's `--run-tests` is absent, since stury has no test-file runner.
 
 **`--stream` and `--seq`**
@@ -581,8 +586,6 @@ line and column in the stream, without a file's name.
 - `--stream` gives each scalar the full path to it, as jq does, so a value nested n levels deep gives Θ(n²)
   bytes of events (nested empty arrays: about 1 MB at depth 1000, 100 MB at 10000). There is no clamp;
   `--max-depth` bounds it.
-- `--stream` gives no events of a text that does not parse, where jq gives the events before the fault.
-  `--stream-errors` gives them, as jq does.
 - A number cut by `0x1E` or the stream's end is refused under `--stream` too (`Potentially truncated
   top-level numeric value`), where jq reads it. `check --seq` refuses it the same way.
 - `check` fails on an input of no text (`No JSON text`), but under `--seq` an empty input, like one of

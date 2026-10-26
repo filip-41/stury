@@ -1,15 +1,44 @@
 package main
 
-// --stream-errors on a text that does not parse: jq's streaming parser (jv_parse.c, `stream_token` and its scanner)
-// run over the faulty text, which gives the events of everything before the fault and then the error as an event,
-// `[message, path]`, in jq's words and count of lines and columns. The library validates a text whole and so cannot
-// say which events precede a fault. This walk is reached only for a text it has refused, so a valid stream never pays
-// for it. Plain --stream keeps the library's report (`text_fault`).
+// --stream on a text that does not parse: jq's streaming parser (jv_parse.c, `stream_token` and its scanner) run
+// over the faulty text, which gives the events of everything before the fault and then, for --stream-errors, the
+// error as an event, `[message, path]`, in jq's words and count of lines and columns. The library validates a text
+// whole and so cannot say which events precede a fault. This walk is reached only for a text it has refused, so a
+// valid stream never pays for it. Plain --stream ends the events with the library's report (`text_fault`).
 
 import "base:runtime"
 import "core:fmt"
+import "core:mem/virtual"
 import "core:strings"
 import "jq"
+
+// An event of a faulty text and the byte of the text jq's parser reads to make it, which tells the line jq's reader is on.
+Fault_Event :: struct {
+	value: jq.Value,
+	at:    int,
+	error: bool, // `[message, path]`
+	late:  bool, // an error at the end that jq gives after the event the last byte left pending, which -s therefore keeps out of its array
+}
+
+// jq's parser over a faulty text, run only as far as the events asked of it, so that what it holds is the size of the
+// path, not of the text. Once `ended`, `at` is the byte where jq read last, `errored` whether it found a fault, and
+// `line` and `column` where it counts to by then.
+Fault_Walk :: struct {
+	p:            Parser,
+	at:           int,
+	ended:        bool,
+	errored:      bool,
+	line, column: int,
+	seq, rs_follows, reset_each, late: bool,
+	given:        int, // p.events[:given] are given
+	arenas:       [2]virtual.Arena, // what the parser makes, in arenas[gen]; the other takes its state over (`renew`)
+	gen:          int,
+	held:         uint, // what renew moved: the next renew waits until the arena holds twice as much
+}
+
+// Bytes past which the walk's arena is renewed, once every event made in it is given.
+@(private = "file")
+WALK_ARENA_RENEW :: 1 << 20
 
 @(private = "file")
 Last_Seen :: enum u8 {
@@ -31,7 +60,7 @@ Lexing :: enum u8 {
 @(private = "file")
 Parser :: struct {
 	src:          []byte,
-	events:       [dynamic]jq.Value, // the events made so far, the error's last
+	events:       [dynamic]Fault_Event, // the events made and not yet given
 	staged:       [dynamic]jq.Value, // those of the byte being scanned, dropped if jq refuses it
 	path:         [dynamic]jq.Value, // an array's index, an object's key once known, else null
 	last:         Last_Seen,
@@ -51,71 +80,168 @@ Place :: struct {
 	line, column: int,
 }
 
-// The events of `src`, a faulty text that starts at `line` and `column` in jq's count, as jq's parser gives them,
-// each error as its own event. `fault` is the byte index where jq read last, `errored` whether it found one, and
-// `line` and `column` where it counts to by then. A text ends at its first fault, and the stream goes on from the
-// next line. Under --seq `src` is one record, `rs_follows` tells whether a separator ends it, and after a fault jq's
-// parser, which means to wait for the separator, starts afresh on the next byte. `reset_each` is a parser jq starts
-// afresh at every call (a cut byte order mark leaves it so under --seq). `late_error` is an error at the end that jq
-// gives after the event the last byte left pending, which -s therefore keeps out of its array. The events are the
-// heap's, to outlive the call.
-stream_fault :: proc(src: []byte, line, column: int, seq, rs_follows, reset_each: bool) -> (events: [dynamic]jq.Value, fault: int, errored: bool, at_line, at_column: int, late_error: bool) {
-	context.allocator = runtime.heap_allocator()
-	p := Parser {
-		src    = src,
-		line    = line,
-		column  = column,
-		line0   = line,
-		column0 = column,
+// The walk of `src`, a faulty text that starts at `line` and `column` in jq's count, which gives jq's events of it,
+// each error as its own event. A text ends at its first fault, and the stream goes on from the next line. Under --seq
+// `src` is one record, `rs_follows` tells whether a separator ends it, and after a fault jq's parser, which means to
+// wait for the separator, starts afresh on the next byte. `reset_each` is a parser jq starts afresh at every call (a
+// cut byte order mark leaves it so under --seq). The walk is the heap's and lives for the run, made in `spare` when
+// one is given: a walk that has ended, whose arrays and arenas' first blocks are kept.
+fault_walk :: proc(src: []byte, line, column: int, seq, rs_follows, reset_each: bool, spare: ^Fault_Walk = nil) -> ^Fault_Walk {
+	heap := runtime.heap_allocator()
+	w := spare
+	if w == nil {
+		w = new(Fault_Walk, heap)
+		w.p.events.allocator, w.p.staged.allocator, w.p.path.allocator = heap, heap, heap
 	}
-	defer delete(p.staged)
-	defer delete(p.path)
-	for fault < len(src) {
-		clear(&p.staged)
-		msg := scan(&p, fault)
-		if msg == "" {
-			late_error = len(p.staged) > 1
-			if reset_each && len(p.staged) > 0 { // jq gives one event a call, and starts the next call afresh
-				append(&p.events, p.staged[0])
-				reset(&p)
-			} else {
-				append(&p.events, ..p.staged[:])
-			}
-			fault += 1
-			continue
+	clear(&w.p.events)
+	clear(&w.p.staged)
+	clear(&w.p.path)
+	virtual.arena_free_all(&w.arenas[0])
+	virtual.arena_free_all(&w.arenas[1])
+	w^ = Fault_Walk {
+		p = Parser {
+			src = src,
+			events = w.p.events,
+			staged = w.p.staged,
+			path = w.p.path,
+			line = line,
+			column = column,
+			line0 = line,
+			column0 = column,
+		},
+		seq = seq,
+		rs_follows = rs_follows,
+		reset_each = reset_each,
+		arenas = w.arenas,
+	}
+	return w
+}
+
+// The next event, made in the context allocator, or false once the walk has ended.
+fault_event :: proc(w: ^Fault_Walk) -> (ev: Fault_Event, ok: bool) {
+	ev = fault_peek(w) or_return
+	w.given += 1
+	ev.value = clone(ev.value)
+	return ev, true
+}
+
+// The next event, as the walk holds it, without giving it.
+fault_peek :: proc(w: ^Fault_Walk) -> (Fault_Event, bool) {
+	for w.given == len(w.p.events) {
+		if w.ended {
+			return {}, false
 		}
-		errored, late_error = true, false
+		clear(&w.p.events)
+		w.given = 0
+		if w.arenas[w.gen].total_used > max(WALK_ARENA_RENEW, 2 * w.held) {
+			renew(w)
+		}
+		context.allocator = virtual.arena_allocator(&w.arenas[w.gen])
+		step(w)
+	}
+	return w.p.events[w.given], true
+}
+
+// The parser's state, all the walk keeps between bytes, moved to the other arena, and this one emptied.
+@(private = "file")
+renew :: proc(w: ^Fault_Walk) {
+	old := w.gen
+	w.gen = 1 - old
+	context.allocator = virtual.arena_allocator(&w.arenas[w.gen])
+	for &s in w.p.path {
+		s = clone(s)
+	}
+	w.p.next = clone(w.p.next)
+	w.held = w.arenas[w.gen].total_used
+	virtual.arena_free_all(&w.arenas[old])
+}
+
+// An event or what the parser holds, made anew in the context allocator. An event's container leaf is empty.
+@(private = "file")
+clone :: proc(v: jq.Value) -> jq.Value {
+	#partial switch x in v {
+	case jq.Number:
+		return jq.Number{f = x.f, lit = strings.clone(x.lit)}
+	case string:
+		return strings.clone(x)
+	case ^jq.Array:
+		a := jq.new_array(len(x.items))
+		for m in x.items {
+			append(&a.items, clone(m))
+		}
+		return a
+	case ^jq.Object:
+		return jq.new_object()
+	}
+	return v
+}
+
+// One byte of the text scanned, or once all are, its end; what events either makes go to `w.p.events`.
+@(private = "file")
+step :: proc(w: ^Fault_Walk) {
+	p := &w.p
+	defer if w.ended {
+		w.line, w.column = p.line, p.column
+	}
+	if p.lexing == .String { // a string's other bytes only move the column
+		j := w.at
+		for j < len(p.src) && p.src[j] != '"' && p.src[j] != '\\' && p.src[j] != '\n' {
+			j += 1
+		}
+		if j > w.at {
+			p.column += j - w.at
+			w.at, w.late = j, false
+		}
+	}
+	if w.at < len(p.src) {
+		clear(&p.staged)
+		msg := scan(p, w.at)
+		if msg == "" {
+			w.late = len(p.staged) > 1
+			if w.reset_each && len(p.staged) > 0 { // jq gives one event a call, and starts the next call afresh
+				append(&p.events, Fault_Event{value = p.staged[0], at = w.at})
+				reset(p)
+			} else {
+				for ev in p.staged {
+					append(&p.events, Fault_Event{value = ev, at = w.at})
+				}
+			}
+			w.at += 1
+			return
+		}
+		w.errored, w.late = true, false
 		at := Place{p.line, p.column} if p.refusal.line == 0 else p.refusal
 		p.refusal = {}
-		fail(&p, fmt.aprintf("%s at line %d, column %d%s", msg, at.line, at.column, " (need RS to resync)" if seq else ""))
-		if !seq {
-			return p.events, fault, true, p.line, p.column, false
+		fail(p, fmt.aprintf("%s at line %d, column %d%s", msg, at.line, at.column, " (need RS to resync)" if w.seq else ""), w.at)
+		if w.seq {
+			w.at += 1
+		} else {
+			w.ended = true
 		}
-		fault += 1
+		return
 	}
+	w.ended = true
 	clear(&p.staged)
-	if rs_follows {
-		if msg := at_separator(&p, fault); msg != "" {
-			fail(&p, fmt.aprintf("%s at line %d, column %d", msg, p.line, p.column))
-			errored = true
+	switch {
+	case w.rs_follows:
+		if msg := at_separator(p, w.at); msg != "" {
+			fail(p, fmt.aprintf("%s at line %d, column %d", msg, p.line, p.column), w.at)
+			w.errored = true
 		}
-		return p.events, fault, errored, p.line, p.column, false
+	case w.reset_each: // the call that finds the end begins afresh, with nothing held
+	case:
+		msg := "Unfinished string" if p.lexing != .Normal else check_literal(p, w.at)
+		if msg == "" && p.lexing == .Normal && len(p.path) != 0 {
+			msg = "Unfinished JSON term"
+		}
+		if msg != "" {
+			fail(p, fmt.aprintf("%s at EOF at line %d, column %d", msg, p.line, p.column), w.at)
+			p.events[len(p.events) - 1].late = w.late
+			w.errored = true
+		} else if p.has_next { // a literal the end of the text ends
+			append(&p.events, Fault_Event{value = event(p, p.next), at = w.at})
+		}
 	}
-	if reset_each { // the call that finds the end begins afresh, with nothing held
-		return p.events, fault, errored, p.line, p.column, false
-	}
-	msg := "Unfinished string" if p.lexing != .Normal else check_literal(&p, fault)
-	if msg == "" && p.lexing == .Normal && len(p.path) != 0 {
-		msg = "Unfinished JSON term"
-	}
-	if msg != "" {
-		fail(&p, fmt.aprintf("%s at EOF at line %d, column %d", msg, p.line, p.column))
-		return p.events, fault, true, p.line, p.column, late_error
-	}
-	if p.has_next { // a literal the end of the text ends
-		append(&p.events, event(&p, p.next))
-	}
-	return p.events, fault, errored, p.line, p.column, false
 }
 
 // A record's separator, scanned by jq as a byte of its own: what it refuses, or the value it ends.
@@ -137,17 +263,17 @@ at_separator :: proc(p: ^Parser, at: int) -> string {
 		return msg
 	}
 	if p.lexing == .Normal && len(p.path) == 0 && p.has_next {
-		append(&p.events, event(p, p.next))
+		append(&p.events, Fault_Event{value = event(p, p.next), at = at})
 	}
 	return ""
 }
 
 // The error as an event, `[message, path]`, and the parser afresh, as jq's `parser_reset` leaves it.
 @(private = "file")
-fail :: proc(p: ^Parser, text: string) {
+fail :: proc(p: ^Parser, text: string, at: int) {
 	ev := jq.new_array(2)
 	append(&ev.items, text, path_copy(p))
-	append(&p.events, ev)
+	append(&p.events, Fault_Event{value = ev, at = at, error = true})
 	reset(p)
 }
 

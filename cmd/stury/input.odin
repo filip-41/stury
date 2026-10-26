@@ -76,9 +76,11 @@ Inputs :: struct {
 	line:               int, // -R: jq's current_line, the lines it has read of the open file
 	events:             ^jq.Events, // --stream: the events of the text read last, while some are left
 	fault_note:         string, // text_fault's caret and flag hint for the message it returned ("" for none)
-	fault_events:       [dynamic]jq.Value, // --stream-errors: the events of a faulty text, from `fault_next` on
-	fault_next:         int,
-	slurp_tail:         bool, // -s --stream-errors: the fault's error event comes after the slurped array, not in it
+	fault_walk:         ^Fault_Walk, // --stream: jq's parser over the faulty text at data[fault_text:], while it has events left
+	fault_spare:        ^Fault_Walk, // the walk that ended last, made anew for the next faulty text
+	fault_text:         int,
+	fault_end:          int, // where the stream reads on: --stream-errors' record end, or plain --stream's fault
+	fault_error:        string, // plain --stream: the message the text ends with, given after its events before the fault
 	bom_broken:         bool, // --seq --stream-errors: a cut byte order mark began the stream, so jq's parser restarts at every call
 	cells:              ^Cells, // --from csv or tsv: the open file's text and header
 	seq_joined:         bool, // --seq: data is a record and the texts after it, read on from the files after its own (`seq_join`)
@@ -130,9 +132,10 @@ next_input :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 		return next_value(ins, prog, own)
 	}
 	for {
-		if ins.slurp_tail && ins.fault_next == len(ins.fault_events) - 1 {
-			ins.slurp_tail = false
-			break
+		if ins.fault_walk != nil && ins.fault_error == "" {
+			if ev, ok := fault_peek(ins.fault_walk); ok && ev.late {
+				break
+			}
 		}
 		v, msg, status := next_value(ins, own = own)
 		if status == .Error {
@@ -166,9 +169,15 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 		}
 		ins.events = nil
 	}
-	if ins.fault_next < len(ins.fault_events) {
-		ins.fault_next += 1
-		return ins.fault_events[ins.fault_next - 1], "", .Value
+	if ins.fault_walk != nil {
+		ev, ok := fault_event(ins.fault_walk)
+		if ok && (ins.fault_error == "" || !ev.error && ins.fault_text + ev.at < ins.fault_end) {
+			ins.seen = ins.fault_text + ev.at
+			return ev.value, "", .Value
+		}
+		if msg := end_fault_walk(ins); msg != "" {
+			return nil, msg, .Error
+		}
 	}
 	for {
 		at, limit, trailing, found := next_text(ins)
@@ -249,7 +258,7 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 			ins.pos, ins.seen = end, last_read(ins.data, at, end)
 			if run.opts.stream {
 				ins.pinned = true
-				ins.events = jq.events_start(d)
+				ins.events = jq.events_start(d, at)
 				v, _ := jq.next_event(ins.events)
 				return v, "", .Value
 			}
@@ -330,7 +339,42 @@ text_fault :: proc(ins: ^Inputs, at, limit: int, found: json.Error, what := "") 
 			ins.pos = fault + k + 1
 		}
 	}
+	// --stream gives jq's events of what comes before the fault first.
+	if ins.run.opts.stream && ins.run.opts.from == .Json && fault > at {
+		heap := runtime.heap_allocator()
+		ins.fault_walk = fault_walk(ins.data[at:fault], line, column, ins.run.opts.seq, false, false, ins.fault_spare)
+		ins.fault_text, ins.fault_end = at, fault
+		ins.fault_error, ins.fault_note = strings.clone(msg, heap), strings.clone(ins.fault_note, heap) // to outlive the events' arenas
+		return next_value(ins)
+	}
 	return nil, msg, .Error
+}
+
+// The faulty text's walk done with: the stream read on past the text as jq's parser goes on, from the next line, or
+// under --seq from the next record. Plain --stream's message for the text, else "".
+@(private = "file")
+end_fault_walk :: proc(ins: ^Inputs) -> string {
+	w := ins.fault_walk
+	ins.fault_walk, ins.fault_spare = nil, w
+	if ins.fault_error != "" { // text_fault has placed the stream past the text
+		heap := runtime.heap_allocator()
+		msg, note := strings.clone(ins.fault_error), strings.clone(ins.fault_note)
+		delete(ins.fault_error, heap)
+		delete(ins.fault_note, heap)
+		ins.fault_error, ins.fault_note, ins.seen = "", note, ins.fault_end
+		return msg
+	}
+	fault := ins.fault_text + w.at
+	ins.seen = fault
+	ins.pos = ins.fault_end if ins.run.opts.seq else len(ins.data)
+	if w.errored && !ins.run.opts.seq {
+		if k := bytes.index_byte(ins.data[fault:], '\n'); k >= 0 {
+			ins.pos = fault + k + 1
+		}
+		// jq drops the rest of the line unread, and does not count it.
+		ins.fault_at = {ins.pos, w.line, w.column}
+	}
+	return ""
 }
 
 // A text that ends inside a literal is `.Truncated` alone, but when a byte follows it (a space, a newline, the
@@ -361,8 +405,8 @@ cut_bom_len :: proc(data: []byte) -> int {
 }
 
 // --stream-errors: the events of the faulty text at data[at:] as jq's streaming parser makes them, the error's
-// last (`stream_fault`), the first returned now and the rest by `next_value`. The stream goes on past the
-// fault as jq's does: from the next line, or under --seq from the next record.
+// last (`fault_walk`), the first returned now and the rest by `next_value`. The stream goes on past the
+// fault as jq's does: from the next line, or under --seq from the next record (`end_fault_walk`).
 @(private = "file")
 stream_errors_fault :: proc(ins: ^Inputs, at, limit, line, column: int) -> (jq.Value, string, jq.Parse_Status) {
 	seq := ins.run.opts.seq
@@ -385,18 +429,8 @@ stream_errors_fault :: proc(ins: ^Inputs, at, limit, line, column: int) -> (jq.V
 		return next_value(ins)
 	}
 	end := limit if seq else len(ins.data)
-	events, fault, errored, fault_line, fault_column, late_error := stream_fault(ins.data[at:end], line, column, seq, seq && limit < len(ins.data), ins.bom_broken)
-	ins.fault_events, ins.fault_next = events, 0
-	ins.slurp_tail = late_error && ins.slurped != nil
-	ins.seen = at + fault
-	ins.pos = limit if seq else len(ins.data)
-	if errored && !seq {
-		if k := bytes.index_byte(ins.data[at + fault:], '\n'); k >= 0 {
-			ins.pos = at + fault + k + 1
-		}
-		// jq drops the rest of the line unread, and does not count it.
-		ins.fault_at = {ins.pos, fault_line, fault_column}
-	}
+	ins.fault_walk = fault_walk(ins.data[at:end], line, column, seq, seq && limit < len(ins.data), ins.bom_broken, ins.fault_spare)
+	ins.fault_text, ins.fault_end = at, limit
 	return next_value(ins)
 }
 
@@ -441,7 +475,7 @@ next_raw :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 // of it. It returns false whenever another value may follow.
 stream_ended :: proc(ins: ^Inputs) -> bool {
 	o := ins.run.opts
-	if ins.events != nil || ins.fault_next < len(ins.fault_events) || o.raw_input || ins.next_file < len(ins.files) || !ins.open || ins.reader != nil {
+	if ins.events != nil || ins.fault_walk != nil || o.raw_input || ins.next_file < len(ins.files) || !ins.open || ins.reader != nil {
 		return false
 	}
 	for c in ins.data[ins.pos:] {
@@ -484,7 +518,8 @@ input_position :: proc(ins: ^Inputs) -> (string, int) {
 	if reads_cells(&run.opts) {
 		return ins.name, cells_line(ins)
 	}
-	_, count := fgets_lines(ins, ins.seen)
+	seen := jq.event_trigger(ins.events) if ins.events != nil else ins.seen
+	_, count := fgets_lines(ins, seen)
 	return ins.name, count
 }
 

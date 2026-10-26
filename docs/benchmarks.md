@@ -20,7 +20,8 @@ DOM and reads every value once, since core has converted every number by the tim
 | Unmarshal into structs | nested, 16 MB | **9.79** | 239.67 | 24.5× |
 | Marshal structs | nested, 16 MB | **9.70** | 109.01 | 11.2× |
 
-("DOM" means a whole parsed document you can query.)
+("DOM" means a whole parsed document you can query.) On nested, core's marshal writes fewer float digits than
+stury's, so its output reads back to a different value: that row compares outputs that are not equal.
 
 The same against `core:encoding/csv`, in the same process. Both readers must read the same fields before any
 lane is timed. Core makes no UTF-8 check; stury checks every byte. The load row is core's `read_all` against a

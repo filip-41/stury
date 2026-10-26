@@ -34,7 +34,8 @@ Usage:	stury [options] <jq filter> [file...]
 	stury [options] --args <jq filter> [strings...]
 	stury [options] --jsonargs <jq filter> [JSON_TEXTS...]
 	stury check [--from format|--seq] [--strict-limits] [--max-depth n] [file...]
-	stury fmt [--from format] [--to format] [--in-place|--check] [--indent n|--tab] [file...]
+	stury fmt [--from format] [--to format] [--in-place|--check]
+	          [--indent n|--tab] [--max-depth n] [file...]
 
 stury applies the filter to its JSON text inputs and writes the results as
 JSON, as jq 1.8.2 does, but reads strictly (RFC 8259): 01, 1., NaN, nan,
@@ -561,7 +562,7 @@ json_arg :: proc(text, option: string) -> jq.Value {
 // jq's jv_load_file: file `path` as one string (`raw`) or as the array of its JSON texts, or jq's message
 // for why not.
 load_file :: proc(path: string, raw: bool) -> (v: jq.Value, msg: string) {
-	f, err := os.open(path)
+	f, err := open_input(path)
 	if err != nil {
 		return nil, fmt.tprintf("Could not open %s: %s", path, strerror(err))
 	}

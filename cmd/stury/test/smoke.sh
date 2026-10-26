@@ -406,4 +406,26 @@ done
 check fmt_pieces_again 0 '' fmt --check "$T/pieces.got"
 rm -f "$T"/pieces*
 
+# A path that names an anonymous pipe (/dev/stdin, a process substitution's /dev/fd/N) reads as a file does.
+# check_piped NAME WANT_STDOUT STDIN_TEXT STURY_ARGS...: stdin is a pipe.
+check_piped() {
+	name=$1 want=$2 in=$3
+	shift 3
+	got=$(printf '%s\n' "$in" | "$S" "$@" 2>"$T/err")
+	code=$?
+	if [ "$code" != 0 ] || [ "$got" != "$want" ]; then
+		printf 'FAIL %s: exit %s\n got: %s\nwant: %s\n%s\n' "$name" "$code" "$got" "$want" "$(cat "$T/err")"
+		fails=$((fails + 1))
+	fi
+}
+check_piped pipe_dev_stdin '[1]' '[1]' -c . /dev/stdin
+check_piped pipe_dev_stdin_slurpfile '[[2]]' '[2]' -nc --slurpfile x /dev/stdin '$x'
+check_piped pipe_dev_stdin_rawfile '"3\n"' '3' -nc --rawfile r /dev/stdin '$r'
+check_piped pipe_dev_stdin_check '' '[4]' check /dev/stdin
+check_piped pipe_dev_stdin_fmt "$(printf '[\n  5\n]')" '[5]' fmt /dev/stdin
+got=$(bash -c '"$0" -c . <(echo "[6]")' "$S" 2>"$T/err")
+[ "$got" = '[6]' ] || { echo "FAIL pipe_process_substitution: $got $(cat "$T/err")"; fails=$((fails + 1)); }
+got=$(bash -c '"$0" -n -f <(echo "7")' "$S" 2>"$T/err")
+[ "$got" = 7 ] || { echo "FAIL pipe_program_file: $got $(cat "$T/err")"; fails=$((fails + 1)); }
+
 [ "$fails" = 0 ] && echo "stury CLI smoke: ok" || { echo "stury CLI smoke: $fails failed"; exit 1; }

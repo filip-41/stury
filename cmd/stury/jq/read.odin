@@ -86,20 +86,26 @@ Events :: struct {
 	doc:     json.Document,
 	frames:  [dynamic]Event_Frame, // the containers open, the root first
 	started: bool,
+	base:    int, // where doc.src starts in the stream's bytes
+	last:    json.Node, // the node whose text made the event returned last,
+	closing: bool, // and whether the event closes that container,
+	after_scalar: bool, // whose last member is then a scalar
 }
 
 @(private = "file")
 Event_Frame :: struct {
+	node:  json.Node,
 	rows:  json.Members,
 	array: bool,
 	index: int, // the step of the member read last: an array's index,
 	key:   string, // or an object's key
 }
 
-// The events of `doc`, built in the heap allocator, which `next_event` frees once it has made the last.
-events_start :: proc(doc: json.Document) -> ^Events {
+// The events of `doc`, built in the heap allocator, which `next_event` frees once it has made the last. `base` is
+// where `doc.src` starts in the stream's bytes.
+events_start :: proc(doc: json.Document, base := 0) -> ^Events {
 	e := new(Events, runtime.heap_allocator())
-	e.doc = doc
+	e.doc, e.base = doc, base
 	e.frames.allocator = runtime.heap_allocator()
 	return e
 }
@@ -110,6 +116,7 @@ next_event :: proc(e: ^Events) -> (Value, bool) {
 	if !e.started {
 		e.started = true
 		if json.child_count(doc, json.ROOT) == 0 {
+			e.last = json.ROOT
 			return event(e, json.ROOT), true
 		}
 		push_frame(e, json.ROOT)
@@ -119,6 +126,9 @@ next_event :: proc(e: ^Events) -> (Value, bool) {
 		row, ok := json.children(&f.rows)
 		if !ok {
 			closing := event(e, json.NO_NODE)
+			kd, _ := json.kind(doc, e.last)
+			e.after_scalar = !e.closing && kd != .Array && kd != .Object
+			e.last, e.closing = f.node, true
 			pop(&e.frames)
 			return closing, true
 		}
@@ -128,6 +138,7 @@ next_event :: proc(e: ^Events) -> (Value, bool) {
 			f.key, _ = json.get_key(doc, row)
 		}
 		if json.child_count(doc, row) == 0 {
+			e.last, e.closing = row, false
 			return event(e, row), true
 		}
 		push_frame(e, row)
@@ -138,10 +149,32 @@ next_event :: proc(e: ^Events) -> (Value, bool) {
 	return nil, false
 }
 
+// The byte of the stream whose reading makes the event returned last, as jq's streaming parser has it: a container's
+// closing bracket for an empty container and for its closing event, or the byte after that bracket when its last member
+// is a scalar, the ',' or closing bracket after any other member,
+// the quote that ends a top-level string, else the byte after a top-level literal. Valid until the next `next_event`.
+event_trigger :: proc(e: ^Events) -> int {
+	raw := json.get_raw(&e.doc, e.last)
+	lo := int(uintptr(raw_data(raw)) - uintptr(raw_data(e.doc.src)))
+	hi := lo + len(raw)
+	switch kd, _ := json.kind(&e.doc, e.last); {
+	case e.closing:
+		return e.base + hi - 1 + int(e.after_scalar)
+	case kd == .Array || kd == .Object:
+		return e.base + hi - 1
+	case len(e.frames) == 0:
+		return e.base + hi - 1 if kd == .String else e.base + hi
+	}
+	for hi < len(e.doc.src) && is_space(e.doc.src[hi]) {
+		hi += 1
+	}
+	return e.base + hi
+}
+
 @(private = "file")
 push_frame :: proc(e: ^Events, n: json.Node) {
 	kd, _ := json.kind(&e.doc, n)
-	append(&e.frames, Event_Frame{rows = json.children(&e.doc, n), array = kd == .Array, index = -1})
+	append(&e.frames, Event_Frame{node = n, rows = json.children(&e.doc, n), array = kd == .Array, index = -1})
 }
 
 // `[path, leaf]`, or `[path]` for NO_NODE, copied whole into the context's allocator.
@@ -265,16 +298,18 @@ read_number :: proc(text: string) -> (Value, bool) {
 		neg = t[0] == '-'
 		t = t[1:]
 	}
-	lower := strings.to_lower(t, context.temp_allocator)
-	switch {
-	case lower == "inf" || lower == "infinity":
-		return Number{f = math.inf_f64(-1 if neg else 1)}, true
-	case strings.has_prefix(lower, "nan") || strings.has_prefix(lower, "snan"):
-		payload := lower[3:] if lower[0] == 'n' else lower[4:]
-		if strings.trim_left(payload, "0") != "" {
-			return nil, false
+	if len(t) > 0 && t[0] | 0x20 >= 'a' && t[0] | 0x20 <= 'z' {
+		lower := strings.to_lower(t, context.temp_allocator)
+		switch {
+		case lower == "inf" || lower == "infinity":
+			return Number{f = math.inf_f64(-1 if neg else 1)}, true
+		case strings.has_prefix(lower, "nan") || strings.has_prefix(lower, "snan"):
+			payload := lower[3:] if lower[0] == 'n' else lower[4:]
+			if strings.trim_left(payload, "0") != "" {
+				return nil, false
+			}
+			return Number{f = math.nan_f64()}, true
 		}
-		return Number{f = math.nan_f64()}, true
 	}
 	// Digits around an optional point, at least one, then an optional exponent: the library's loose number
 	// reading (`.5` and `1.` count).
@@ -291,19 +326,22 @@ read_number :: proc(text: string) -> (Value, bool) {
 decode_string :: proc(out: ^strings.Builder, in_: string, stury_only_at: ^int = nil) -> string {
 	s := transmute([]byte)in_
 	for i := 0; i < len(s); {
-		c := s[i]
-		i += 1
-		if c != '\\' {
-			if c < 0x20 {
-				return "Invalid string: control characters from U+0000 through U+001F must be escaped"
-			}
-			strings.write_byte(out, c)
-			continue
+		plain := i
+		for i < len(s) && s[i] != '\\' && s[i] >= 0x20 {
+			i += 1
 		}
+		strings.write_string(out, in_[plain:i])
+		if i == len(s) {
+			break
+		}
+		if s[i] != '\\' {
+			return "Invalid string: control characters from U+0000 through U+001F must be escaped"
+		}
+		i += 1
 		if i >= len(s) {
 			return "Expected escape character at end of string"
 		}
-		c = s[i]
+		c := s[i]
 		i += 1
 		if b := lex.ESC_BYTE[c]; b != 0 {
 			strings.write_byte(out, b)
@@ -352,15 +390,21 @@ valid_utf8 :: proc(s: string) -> string {
 }
 
 write_valid_utf8 :: proc(b: ^strings.Builder, s: string) {
+	run := 0 // s[run:i] is UTF-8 not yet written
 	for i := 0; i < len(s); {
+		if s[i] < 0x80 {
+			i += 1
+			continue
+		}
 		n, ok := utf8_next(s[i:])
-		if ok {
-			strings.write_string(b, s[i:i + n])
-		} else {
+		if !ok {
+			strings.write_string(b, s[run:i])
 			strings.write_rune(b, utf8.RUNE_ERROR)
+			run = i + n
 		}
 		i += n
 	}
+	strings.write_string(b, s[run:])
 }
 
 // The length of the sequence `s` starts with as jvp_utf8_next reads it, and whether it is UTF-8: a bad

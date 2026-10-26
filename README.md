@@ -153,7 +153,7 @@ Oslo,709000
 Bergen,286000
 ```
 
-Over 24 filters, process start-up included, it is 14.5 times faster than jq and 6.7 times faster than jaq
+Over 24 filters, process start-up included, it is 15.0 times faster than jq and 6.9 times faster than jaq
 (geometric mean). [docs/cli.md](docs/cli.md) lists every option, the CSV rules and recipes, and
 [each difference from jq](docs/cli.md#differences-from-jq).
 
