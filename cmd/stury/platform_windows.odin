@@ -123,7 +123,6 @@ platform_error_text :: proc(e: os.Platform_Error) -> string {
 	return os.error_string(e)
 }
 
-// The most resident memory the process has held, in bytes.
 peak_rss :: proc() -> int {
 	counters := win.PROCESS_MEMORY_COUNTERS{cb = size_of(win.PROCESS_MEMORY_COUNTERS)}
 	if !win.GetProcessMemoryInfo(win.GetCurrentProcess(), &counters, size_of(counters)) {

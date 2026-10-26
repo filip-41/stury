@@ -69,7 +69,6 @@ choose_columns :: proc(run: ^Run, text: string, files: int) {
 	}
 }
 
-// The columns of `filter`, or nil with the reasons it has none.
 @(private = "file")
 columns_of :: proc(run: ^Run, filter: ^jq.Node, files: int) -> ^Columns {
 	o := &run.opts

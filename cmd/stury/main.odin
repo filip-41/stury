@@ -61,9 +61,8 @@ EXIT_INPUT :: 5
 // Output is held here and written once it passes FLUSH_AT bytes, and at exit.
 FLUSH_AT :: 1 << 20
 
-// The comparison of `select(PATH op LITERAL)`, which the scan answers.
 Select :: struct {
-	op:      jq.Op, // `.None` for any other filter
+	op:      jq.Op,
 	literal: jq.Value,
 }
 
@@ -102,7 +101,7 @@ Run :: struct {
 	ip:          jq.Interp,
 	out:         [dynamic]byte,
 	held:        bool, // a pool thread's copy, whose output the caller writes
-	explain:     Explain, // --explain (explain.odin)
+	explain:     Explain,
 	silent:      bool, // fmt --check and --in-place: the output stays in `out` for the caller
 	name_faults: bool, // fmt: a parse fault names its file
 	verbatim:    bool, // fmt between JSON-like formats: each value is written from its source text
@@ -322,8 +321,7 @@ bind_cli_vars :: proc(run: ^Run) {
 	run.ip.globals = jq.bind_var(&run.ip, run.ip.globals, "ARGS", args)
 }
 
-// Whether the path scan answers the filter `text`, and with what path. Under --explain it goes on past what
-// rules the scan out, to every reason that holds.
+// Whether the path scan answers the filter `text`, and with what path.
 choose_scan :: proc(run: ^Run, text: string) {
 	run.any_at = -1
 	o := run.opts
@@ -375,8 +373,8 @@ choose_scan :: proc(run: ^Run, text: string) {
 }
 
 // The path P of the filter `text` when it is `select(P op LITERAL)`, P a path the scan answers with no `[]` and
-// LITERAL no array or object, and the comparison. The reason it is not, when it is not: `why` is empty exactly
-// when it is. The filter is checked here, so `select` is known to be jq's.
+// LITERAL no array or object, and the comparison; else why not. The filter is checked here, so `select` is known
+// to be jq's.
 selected_path :: proc(run: ^Run, text: string, steps: []json.Step) -> (p: json.Path, sel: Select, why: Explain_Whys) {
 	ready_interpreter(run)
 	n := run.prog

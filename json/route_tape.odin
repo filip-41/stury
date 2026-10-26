@@ -22,7 +22,6 @@ tape_fits :: #force_inline proc(paths: []Path, read: Read_Opts) -> bool {
 	return all_gated(paths)
 }
 
-// Whether `req` is one the tape route answers.
 @(private)
 tape_routable :: proc(req: ^Request($KINDS)) -> bool {
 	when KINDS != {.Path} {

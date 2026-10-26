@@ -854,8 +854,7 @@ def posix_only(case):
             or any("Is a directory" in w for w in said))
 
 
-# --explain's timings, peak memory, byte counts and worker count differ from run to run: the explain rows are compared
-# without them, and with everything else of the report byte for byte.
+# The --explain lines that vary from run to run.
 EXPLAIN_VARIES = re.compile(rb"(?m)^stury: explain: (?:compile_time|run_time|cost): .*\n| workers=\d+")
 
 

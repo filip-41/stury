@@ -38,10 +38,8 @@ agree() {
 	[ "$code" = "$want" ] && cmp -s "$T/col.got" "$T/col.want" && cmp -s "$T/col.err" "$T/col.want.err" || { echo "FAIL $name: exit $code, interpreter $want"; fails=$((fails + 1)); }
 }
 
-# explained NAME WANT STURY_ARGS...: --explain leaves the run as it is (stdout, exit status, and stderr but for its own
-# lines), and its run, fallback and demand lines, which hold what happened while the input was read, are WANT, one to a
-# line, without the worker count. What the pool reads in pieces is looked for only where a pool runs: a host with one
-# core reads everything on one thread.
+# explained NAME WANT STURY_ARGS...: the run is the same as without --explain, and its run, fallback and demand
+# lines are WANT, without the worker count. A one-core host reads no pieces.
 cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
 explained() {
 	name=$1 want=$2
@@ -121,8 +119,6 @@ got=$("$S" -c .a "$T/bom.ndjson" 2>/dev/null | wc -l | tr -d ' ')
 "$S" -nc '{u: [range(200000) | {a: .}]}' >"$T/wide.json"
 quick slice_tail 0 '100000' -c '.u[100000:] | length' "$T/wide.json"
 quick index_each 0 '199999' -c 'last(range(100000; 200000) as $i | .u[$i].a)' "$T/wide.json"
-# --explain counts the texts the scan answered and the interpreter ran on, names what the pool read in pieces, and gives
-# the first text the scan handed back.
 if [ "$cores" -ge 2 ]; then
 	{ head -n 300000 "$T/many.ndjson"; printf '{bad\n{"a":1}\n'; } >"$T/many_bad.ndjson"
 	{ head -n 300000 "$T/many.ndjson"; printf '5\n{"a":1}\n'; } >"$T/many_step.ndjson"

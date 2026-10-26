@@ -349,11 +349,8 @@ route_tally :: proc(paths: []Path, forced: bool) -> (t: Path_Tally, refused: May
 	return
 }
 
-// The shape the matcher serves, `.Automaton` when it serves none, and the root object's offset when it
-// serves plain names. A column comes first, then gated columns when every path shares one gate, then plain
-// names over a root object (a root that is not an object stays with the automaton, which owes
-// `Type_Mismatch`). `lost` is, for a path of each shape that is not the served one's, why the automaton
-// answers it: the test of its shape that failed, or `.Other_Shape` when a shape tested before it was served.
+// The shape the matcher serves, and for each shape it does not serve, why the automaton answers it. A root that is
+// not an object stays with the automaton, which owes `Type_Mismatch`.
 @(private)
 route_choice :: proc(src: []byte, paths: []Path, forced: bool, t: Path_Tally) -> (served: Path_Shape, root_lo: u64, lost: [Path_Shape]Path_Route) {
 	for &why in lost {
@@ -377,8 +374,6 @@ route_choice :: proc(src: []byte, paths: []Path, forced: bool, t: Path_Tally) ->
 	return .Automaton, 0, lost
 }
 
-// Whether a path of `shape` (a column of `wild` wildcards) is one the matcher answers when it serves `served`
-// (a column of `served_wild`).
 @(private)
 served_by :: #force_inline proc(shape: Path_Shape, wild: int, served: Path_Shape, served_wild: int) -> bool {
 	return shape == served && shape != .Automaton && (shape != .Column || wild == served_wild)

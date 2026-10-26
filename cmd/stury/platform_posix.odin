@@ -107,7 +107,6 @@ write_stdout :: proc(p: []byte) -> os.Error {
 	return nil
 }
 
-// The most resident memory the process has held, in bytes.
 peak_rss :: proc() -> int {
 	usage: posix.rusage
 	if posix.getrusage(.SELF, &usage) != .OK {
