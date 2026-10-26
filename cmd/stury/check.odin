@@ -51,7 +51,7 @@ check_input :: proc(run: ^Run, ins: ^Inputs) {
 	case run.opts.from == .Ndjson || run.opts.seq:
 		check_records(run, ins.data)
 	case run.opts.from == .Jsonc:
-		if e, bad := json.validate(ins.data, {dialect = .Jsonc, limits = check_limits(run)}).?; bad {
+		if e, bad := json.validate(ins.data, {dialect = .Json5 if run.opts.json5 else .Jsonc, limits = check_limits(run)}).?; bad {
 			fail_input(run, e)
 		}
 	case:

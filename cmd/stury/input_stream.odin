@@ -49,7 +49,7 @@ open_next :: proc(ins: ^Inputs) -> bool {
 		}
 		ins.data = all
 	}
-	if ins.run.opts.json5 {
+	if ins.run.opts.json5 && !ins.run.checking {
 		json5_to_jsonc(ins)
 	}
 	data := ins.data

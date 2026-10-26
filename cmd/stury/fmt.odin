@@ -81,6 +81,8 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		usage_error("--in-place rewrites each file; --check only reads it")
 	case o.in_place && o.json5:
 		usage_error("--in-place writes each file back as its own format, and json5 is read only")
+	case o.check && o.json5:
+		usage_error("--check compares each file with its own format, and json5 is read only")
 	case o.in_place && o.to != o.from:
 		usage_error("--in-place writes each file back as its own format: --from %s and --to %s differ",
 		            FORMATS[o.from].name, FORMATS[o.to].name)

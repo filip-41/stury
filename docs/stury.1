@@ -53,7 +53,7 @@ Read one JSON text per line, and with \-\-to ndjson print compact, one value per
 Read JSONC (comments and trailing commas), also for \-\-argjson, \-\-jsonargs, \-\-slurpfile (one document per file) and fromjson. Values print with their comments.
 .TP
 .BI \-\-from " json5"
-Read JSON5 1.0.0: each input is one text, transcoded to JSONC (comments kept) and then read as \-\-from jsonc. Infinity and NaN end the run, having no JSON value. Read only: not \-\-to json5, nor fmt \-\-in\-place. \-\-argjson, \-\-slurpfile and fromjson read JSONC.
+Read JSON5 1.0.0: each input is one text, transcoded to JSONC (comments kept) and then read as \-\-from jsonc. Infinity and NaN end the run, having no JSON value. Read only: not \-\-to json5, nor fmt \-\-in\-place or fmt \-\-check. A nesting past 1024 levels is refused, whatever \-\-max\-depth says. \-\-argjson, \-\-slurpfile and fromjson read JSONC.
 .TP
 .BI \-\-from " csv"
 Read CSV (RFC 4180). The first record of each file names the fields. Each later record is one input, an object of those names with each cell's text as a string, never a number. An empty cell with no quotes is null and a quoted "" is ""; every empty tsv cell is null. A repeated header name, a record of another width and a fault in the text end the file with NAME:LINE:COLUMN: FAULT and exit 5. A file up to 64 MiB is read whole. A larger file, a pipe and a file under \-n are read a window at a time, and a window holds the longest record. A filter that is only columns (.name, .a, .b, or [.a, .b] under \-c) is printed from the cells in pieces on every core. With \-s the records are one array. Not with \-R, \-\-seq or \-\-stream.

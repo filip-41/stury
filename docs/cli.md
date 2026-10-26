@@ -228,7 +228,7 @@ program that scans itself.
 | --- | --- |
 | `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence; each `FILE` is read alone, so a text cut at a file's end is a fault. |
 | `--from jsonc` | Validate JSONC as `stury --from jsonc .` reads it, to the same limits. A comment's text holds no escape. |
-| `--from json5` | Validate JSON5 as `stury --from json5 .` reads it: `Infinity` and `NaN` are refused. |
+| `--from json5` | Validate the JSON5 text itself, not its transcode: `Infinity` and `NaN` pass (a filter run refuses them), and a nesting past `--max-depth` is the only depth fault. |
 | `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. CSV and TSV are judged by `csv.validate`, and a fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An input with no record fails with `No CSV text` or `No TSV text`. |
 | `--strict-limits`, `--max-depth N` | As [above](#sturys-own-options). |
 | `FILE...` | One file per argument, read as the filter reads them. |
@@ -306,7 +306,7 @@ $ stury fmt --from ndjson --to csv records.ndjson
 | --- | --- | --- |
 | `json` | One JSON text after another, as jq reads (the default). | Pretty-printed, or as `-c`, `--tab` and `--indent` say (the default). |
 | `jsonc` | JSONC: comments and trailing commas ([Comments in the CLI](#comments-in-the-cli)). | Each value with the comments it was read with. |
-| `json5` | JSON5 1.0.0, one text per input, transcoded to JSONC (comments kept) and then read as `--from jsonc`. `Infinity` and `NaN` end the run, as they have no JSON value. Positions after the transcode (`input_line_number`) count the JSONC text; `--argjson`, `--slurpfile` and `fromjson` read JSONC. | Not written: `--to jsonc` writes the values and their comments. `fmt --in-place` is refused. |
+| `json5` | JSON5 1.0.0, one text per input, transcoded to JSONC (comments kept) and then read as `--from jsonc`. `Infinity` and `NaN` end the run, as they have no JSON value. Positions after the transcode (`input_line_number`) count the JSONC text; `--argjson`, `--slurpfile` and `fromjson` read JSONC. | Not written: `--to jsonc` writes the values and their comments. `fmt --in-place` and `fmt --check` are refused. |
 | `ndjson` | One JSON text per line. A blank line is no text, and a line that is not one text, or holds two, is a parse error where jq would read on. | One compact value per line, as `-c`. |
 | `csv`, `tsv` | The first record names the fields; each later record is one input ([CSV and TSV](#csv-and-tsv)). | Each output is one record ([CSV and TSV output](#csv-and-tsv-output)). |
 

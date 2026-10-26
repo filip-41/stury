@@ -532,6 +532,14 @@ json5_to_jsonc :: proc(ins: ^Inputs) {
 		ins.run.name, ins.run.whole = ins.name, ins.data
 		fail_input(ins.run, {kind = .Bad_Literal, offset = at}, "Infinity and NaN have no JSON value")
 	}
+	if merr == .Too_Deep {
+		// The transcode writes MAX_DEPTH levels at most: the text's first level past it is the fault.
+		limits := jq.lifted
+		limits.max_depth = json.MAX_DEPTH
+		if e, bad := json.validate(ins.data, {dialect = .Json5, limits = limits}).?; bad {
+			jsonc_fault(ins, e, 0)
+		}
+	}
 	if merr != nil {
 		fail_input(ins.run, {kind = .Out_Of_Memory}, "out of memory")
 	}

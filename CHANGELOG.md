@@ -15,8 +15,9 @@
 
 - `--explain` writes the filter's plan (route, path or columns, engine, refusals) and what the run did (texts scanned or
   interpreted, pieces, fallback, time, cost) to stderr, and runs the filter as without it.
-- `--from json5` reads each input as JSON5, transcoded to JSONC; `check --from json5` and `fmt --from json5`
-  too. `--to json5` is refused.
+- `--from json5` reads each input as JSON5, transcoded to JSONC, and `fmt --from json5` too; nesting past 1024
+  levels is refused. `check --from json5` judges the JSON5 text itself. `--to json5`, `fmt --in-place` and
+  `fmt --check` with it are refused.
 - `--stream` gives the events of a faulty text before its fault, as jq does, and `input_line_number` and the
   error positions under `--stream` count jq's lines.
 - `--stream-errors` makes a faulty text's events as it gives them, not all before the first.

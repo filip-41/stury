@@ -105,6 +105,7 @@ Run :: struct {
 	silent:      bool, // fmt --check and --in-place: the output stays in `out` for the caller
 	name_faults: bool, // fmt: a parse fault names its file
 	verbatim:    bool, // fmt between JSON-like formats: each value is written from its source text
+	checking:    bool, // check: each input is judged as it is read, JSON5 included, not transcoded
 	faulted:     bool, // a held copy met an answer it cannot print: its caller leaves that text to the main thread, which reports it
 	spill:       jq.Spill, // `spill_out`, for a layout that is written into `out`
 	unopened:    bool, // a file did not open or read, which jq's exit status says whatever comes after it
@@ -153,6 +154,7 @@ main :: proc() {
 	run.req.limits = jq.lifted
 	names := cli.files[:] if len(cli.files) > 0 else STDIN_ONLY
 	if validating {
+		run.checking = true
 		if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
 			usage(EXIT_USAGE, true) // as stury with no filter, rather than wait on the keyboard
 		}
@@ -426,6 +428,8 @@ fault_context :: proc(src: []byte, e: json.Error, opts: ^Opts) -> string {
 	at := int(e.offset)
 	hint: string
 	switch {
+	case e.kind == .Too_Deep && opts.json5 && jq.lifted.max_depth >= json.MAX_DEPTH:
+		hint = fmt.tprintf("--from json5 reads nesting to depth %d at most", json.MAX_DEPTH)
 	case e.kind == .Too_Deep:
 		hint = "a larger --max-depth reads it" if opts.max_depth_given else "--max-depth N raises the nesting limit"
 	case e.kind != .Bad_Char || at >= len(src) || jsonc:
