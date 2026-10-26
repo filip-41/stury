@@ -4,8 +4,8 @@ package main
 // each file's values as they are made, `--check` holds a file's output to compare it with the bytes and writes
 // nothing, and `--in-place` holds it and replaces the file through a temporary one beside it. The readers are the
 // filter's. A JSON, JSONC or NDJSON value written as one of those keeps its scalars' and keys' source spelling and
-// every member, repeated keys included, and changes only its layout (`fmt_verbatim`); a value written as CSV or TSV
-// is made of cells, as `.` makes them.
+// every member, repeated keys included, and changes only its layout (`fmt_verbatim`, and `fmt_pieces` for a text
+// large enough to cut); a value written as CSV or TSV is made of cells, as `.` makes them.
 
 import "base:runtime"
 import "core:bytes"
@@ -101,10 +101,6 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	finish(run, fmt_files(run, names))
 }
 
-// Formats `files` in order. A parse fault names its file and ends the run (exit 5), and the files after it are not
-// read; a file that does not open is reported and the run goes on, as `stury .` reads them. Under --check the exit
-// status is 1 when a file's bytes differ from its formatted bytes; under --in-place a file already formatted is
-// left alone.
 @(private = "file")
 fmt_files :: proc(run: ^Run, files: []string) -> (code: int) {
 	o := &run.opts
@@ -123,7 +119,6 @@ fmt_files :: proc(run: ^Run, files: []string) -> (code: int) {
 		run.name, run.whole = ins.name, ins.data
 		run.silent = check || in_place
 		clear(&run.out)
-		// Each file's output starts its own text, even when stdout carries the files before it.
 		run.rows_begun = false
 		if writes_cells(o) && !reads_cells(o) {
 			run.table = table_make(o)
@@ -142,7 +137,6 @@ fmt_files :: proc(run: ^Run, files: []string) -> (code: int) {
 		case check:
 			differ = differ || !bytes.equal(run.out[:], ins.data)
 		case in_place:
-			// A file already in the printer's layout keeps its inode, its mode and its times.
 			if !bytes.equal(run.out[:], ins.data) && !rewrite_file(ins.name, run.out[:]) {
 				failures += 1
 			}
@@ -163,7 +157,6 @@ fmt_files :: proc(run: ^Run, files: []string) -> (code: int) {
 	return 0
 }
 
-// Formats the open input with the reader its format takes.
 @(private = "file")
 fmt_input :: proc(run: ^Run, ins: ^Inputs) {
 	if reads_cells(&run.opts) {
@@ -189,6 +182,9 @@ fmt_texts :: proc(run: ^Run, ins: ^Inputs) {
 		virtual.arena_destroy(&arena)
 	}
 	context.allocator = virtual.arena_allocator(&arena)
+	if run.verbatim && fmt_pieces(run, ins) {
+		return
+	}
 	for {
 		v, msg, status := next_input(ins)
 		switch status {
@@ -209,6 +205,21 @@ fmt_texts :: proc(run: ^Run, ins: ^Inputs) {
 			return
 		}
 	}
+}
+
+// The open input written in pieces on the pool when it is one JSON text, an array or an object holding a large one
+// (`print_root_pieces`). It returns false, with nothing written, when it is not, and `fmt_texts` reads it whole.
+@(private = "file")
+fmt_pieces :: proc(run: ^Run, ins: ^Inputs) -> bool {
+	at, limit, trailing, found := next_text(ins)
+	if !found || !trailing || limit != len(ins.data) || run.opts.from == .Jsonc || jq.lifted.max_depth > json.MAX_DEPTH {
+		return false
+	}
+	if !print_root_pieces(run, ins.data[at:]) {
+		return false
+	}
+	ins.pos = limit
+	return true
 }
 
 // One value of the open input written in the layout of `output_layout`, from its source text: every scalar and key
@@ -265,14 +276,13 @@ fmt_cells :: proc(run: ^Run, ins: ^Inputs) {
 	}
 }
 
-// One CSV record re-spelled by the writer of the output format, which `--from csv --to tsv` crosses too.
 @(private = "file")
 fmt_cells_write :: proc(run: ^Run, c: ^Cells, rec: csv.Record) {
 	o := &run.opts
 	cells := make([]Maybe(string), len(rec.fields), context.temp_allocator)
 	for f, i in rec.fields {
 		if f.lo == f.hi {
-			continue // an empty unquoted cell is null
+			continue
 		}
 		text, _, _ := csv.field_text(rec.src, f, c.dialect, context.temp_allocator)
 		cells[i] = string(text)
@@ -286,7 +296,6 @@ fmt_cells_write :: proc(run: ^Run, c: ^Cells, rec: csv.Record) {
 	free_all(context.temp_allocator)
 }
 
-// Each CSV record as an object of cells, printed as JSON.
 @(private = "file")
 fmt_cells_objects :: proc(run: ^Run, c: ^Cells) {
 	arena: virtual.Arena
@@ -311,7 +320,6 @@ fmt_cells_objects :: proc(run: ^Run, c: ^Cells) {
 	}
 }
 
-// Frees what `fmt_cells` allocated: the records and the header's names. The file's bytes are the caller's.
 @(private = "file")
 fmt_cells_done :: proc(c: ^Cells) {
 	csv.destroy(&c.whole)
@@ -328,9 +336,7 @@ fmt_cells_fault :: proc(run: ^Run, msg: string) -> ! {
 	finish(run, EXIT_INPUT)
 }
 
-// Writes `text` over `path` through a temporary file in `path`'s directory and a rename: a reader sees the old
-// file or the new one, never half of each. The temporary file is synced to disk, and takes `path`'s mode, and where
-// the system allows, its owner and group, before it replaces it.
+// Replaces `path` with `text` through a temporary file beside it, so a reader sees the old file or the new one.
 @(private = "file")
 rewrite_file :: proc(path: string, text: []byte) -> bool {
 	info, serr := os.stat(path, context.temp_allocator)
@@ -386,7 +392,6 @@ rewrite_file :: proc(path: string, text: []byte) -> bool {
 	return ok
 }
 
-// The path the temporary file `f` was made at, from its descriptor.
 @(private = "file")
 temp_name :: proc(f: ^os.File) -> (string, os.Error) {
 	info, err := os.fstat(f, context.temp_allocator)

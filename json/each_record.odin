@@ -8,8 +8,7 @@ import index_pkg "scan/index"
 // Caller-owned threads for `each_record` and `validate_records`; `stury:host`'s `Batch_Pool` implements it.
 Batch_Runner :: core_pkg.Batch_Runner
 
-// A record `validate_records` refuses: its bytes are src[lo:hi], and `err`'s offset is into `src` (`core`'s
-// type, so a caller using several formats writes one fault).
+// core's `Record_Fault`.
 Record_Fault :: core_pkg.Record_Fault
 
 // `task` on every piece of `src`, each a `Records` over whole records under `framing`.
@@ -48,15 +47,11 @@ each_record :: proc(
 	}
 	run.driver = {
 		data = &run,
-		// The offset past the span's end: the input's end for lines, one past the close bracket for root
-		// entries.
 		none = run.end + int(framing == .Root_Entries),
 		boundary = batch_boundary,
 		skip = batch_skip,
 		piece = batch_piece,
-		// A piece's fault is ranked by its offset in `src`: the first in byte order wins.
 		fault_rank = batch_fault_rank,
-		// A framing fault ends that piece's records, not the batch: the pieces after it are still claimed.
 		stop_on_fault = false,
 	}
 	core_pkg.batch_plan(&run.driver.cursor, runner, n)
@@ -196,7 +191,6 @@ batch_settle :: proc(states: []Slice_State) {
 	}
 }
 
-// The piece of records from `lo` up to `hi`, numbered `k`, run by the caller's task.
 @(private)
 batch_piece :: proc(data: rawptr, lo, hi, k: int) -> (fault: Maybe(Error), go_on: bool) {
 	run := (^Batch_Run)(data)
@@ -211,16 +205,11 @@ batch_piece :: proc(data: rawptr, lo, hi, k: int) -> (fault: Maybe(Error), go_on
 	return piece.err, go_on
 }
 
-// The rank of a framing fault: its offset in `src`, so the batch returns the first in byte order.
 @(private)
 batch_fault_rank :: proc(_: rawptr, _: int, e: Error) -> int {
 	return int(e.offset)
 }
 
-// Where the records of slice `k` on start, searching before slice `stop`. For lines, it is past the first line
-// feed at or after the byte before the slice's offset. For `0x1E`, it is the first separator run starting at or
-// after the offset. For root entries, it is past the first top-level comma at or after the offset. Slice 0
-// starts at the span's start. Returns -1 when no boundary is found.
 @(private)
 batch_boundary :: proc(data: rawptr, k, stop_slice: int) -> int {
 	run := (^Batch_Run)(data)

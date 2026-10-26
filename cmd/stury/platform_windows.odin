@@ -79,7 +79,7 @@ enable_color :: proc() {
 	}
 }
 
-// Windows keeps no owner or group to give the file `f` that `fmt --in-place` writes.
+// Windows keeps no owner or group to give.
 keep_owner :: proc(f: ^os.File, path: string) {}
 
 is_regular_file :: proc(f: ^os.File) -> bool {

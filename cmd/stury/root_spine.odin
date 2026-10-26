@@ -7,6 +7,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:bytes"
 import "core:fmt"
+import "core:slice"
 import "core:sync"
 import json "../../json"
 import index "../../json/scan/index"
@@ -260,7 +261,9 @@ spine_named :: proc(s: ^Root_Spine, steps: []json.Step) -> bool {
 // of its own and written as soon as it and the chunks before it are. It returns false, with nothing printed, when the
 // text has no spine or is too small to cut, or a chunk is not well-formed, which leaves the text's fault to a reader
 // of it whole. A chunk that is not in jq's format is built and printed by jq's rules on its thread. A text that sits
-// `above` objects deep in the input is validated with their levels counted (`chunk_limits`).
+// `above` objects deep in the input is validated with their levels counted (`chunk_limits`). Under `run.verbatim`
+// (fmt) every chunk is validated and the text is written as `json.marshal` writes it, and under `run.silent` it
+// is collected in `run.out`.
 print_root_pieces :: proc(run: ^Run, text: []byte, validate := false, above := 0) -> bool {
 	spine := root_spine(text, 0) or_return
 	defer spine_free(&spine)
@@ -269,7 +272,7 @@ print_root_pieces :: proc(run: ^Run, text: []byte, validate := false, above := 0
 		return false
 	}
 	job, cuts, runner := array_chunks(run, text, spine.lo, spine.z, spine.levels + above) or_return
-	job.validate = validate
+	job.validate = validate || run.verbatim
 	job.layout = output_layout(run)
 	job.depth = spine.levels
 	job.outs = make([][dynamic]byte, len(job.chunks))
@@ -281,9 +284,17 @@ print_root_pieces :: proc(run: ^Run, text: []byte, validate := false, above := 0
 		delete(job.outs)
 		delete(job.ready)
 	}
+	head, foot: [dynamic]byte
+	defer {
+		delete(head)
+		delete(foot)
+	}
+	if run.verbatim && !verbatim_frame(run, text, &spine, &head, &foot) {
+		return false
+	}
 	stand_in(text, cuts, true)
 	// What can fail is validated before anything is written. A validated chunk prints.
-	if (validate || job.levels > 0) && !fan_out(runner, len(job.chunks), judge_chunk, &job) {
+	if (job.validate || job.levels > 0) && !fan_out(runner, len(job.chunks), judge_chunk, &job) {
 		stand_in(text, cuts, false)
 		return false
 	}
@@ -292,7 +303,12 @@ print_root_pieces :: proc(run: ^Run, text: []byte, validate := false, above := 0
 	flush_some(run, force = true)
 	tail: [dynamic]byte
 	defer delete(tail)
-	write_frame(&run.out, &tail, &spine, json.ROOT, 0, l)
+	if run.verbatim {
+		append(&run.out, ..head[:])
+		append(&tail, ..foot[:])
+	} else {
+		write_frame(&run.out, &tail, &spine, json.ROOT, 0, l)
+	}
 	jq.write_punct(&run.out, l, .Array, '[')
 	jq.newline(&run.out, l, d + 1)
 	flush_some(run, force = true)
@@ -310,6 +326,38 @@ print_root_pieces :: proc(run: ^Run, text: []byte, validate := false, above := 0
 	jq.write_punct(&run.out, l, .Array, ']')
 	append(&run.out, ..tail[:])
 	end_output(run)
+	return true
+}
+
+// The text around the spine's array as `json.marshal` writes it, `head` up to where the array goes and `foot` after
+// it, found by writing the text with a string in the array's place. False when the text does not read so or the
+// string is not found exactly once.
+@(private = "file")
+verbatim_frame :: proc(run: ^Run, text: []byte, s: ^Root_Spine, head, foot: ^[dynamic]byte) -> bool {
+	STAND :: `"stury:root-array"`
+	stand := transmute([]byte)string(STAND)
+	shell := make([dynamic]byte, 0, len(text) - (s.z + 1 - s.lo) + len(stand), runtime.heap_allocator())
+	defer delete(shell)
+	append(&shell, ..text[:s.lo])
+	append(&shell, ..stand)
+	append(&shell, ..text[s.z + 1:])
+	d, err := jq.build_rows(shell[:], run.req.dialect, allocator = runtime.heap_allocator())
+	if err != nil {
+		return false
+	}
+	defer json.destroy(&d)
+	l := output_layout(run)
+	written, merr := json.marshal(&d, {pretty = l.pretty, indent = u8(max(l.indent, 0))}, runtime.heap_allocator())
+	if merr != .None {
+		return false
+	}
+	defer delete(written)
+	at := bytes.index(written, stand)
+	if at < 0 || bytes.index(written[at + len(stand):], stand) >= 0 {
+		return false
+	}
+	append(head, ..written[:at])
+	append(foot, ..written[at + len(stand):])
 	return true
 }
 
@@ -527,7 +575,12 @@ print_chunk :: proc(job: ^Root_Job, k: int) -> bool {
 		jq.write_punct(&out, job.layout, .Array, ',')
 		jq.newline(&out, job.layout, job.depth + 1)
 	}
-	if !jq.write_spelled(&out, entries, job.layout, job.depth, items = true) {
+	if job.run.verbatim {
+		if !write_verbatim_items(&out, job, text, c.alone) {
+			delete(out)
+			return false
+		}
+	} else if !jq.write_spelled(&out, entries, job.layout, job.depth, items = true) {
 		d, err := jq.build_rows(text)
 		if err != nil {
 			delete(out)
@@ -543,6 +596,54 @@ print_chunk :: proc(job: ^Root_Job, k: int) -> bool {
 	}
 	write_in_order(job, k, out)
 	return true
+}
+
+// The entries of the chunk `text` as `json.marshal` writes them `job.depth + 1` levels in. The chunk, a lone entry
+// `alone` in brackets, is written as an array at depth 0 and cut of its brackets and their line breaks, and every
+// line is indented by the levels above it.
+@(private = "file")
+write_verbatim_items :: proc(out: ^[dynamic]byte, job: ^Root_Job, text: []byte, alone: bool) -> bool {
+	l := job.layout
+	src := text
+	if alone {
+		src = make([]byte, len(text) + 2, runtime.heap_allocator())
+		src[0], src[len(src) - 1] = '[', ']'
+		copy(src[1:], text)
+	}
+	defer if alone {
+		delete(src)
+	}
+	d, err := jq.build_rows(src, limits = chunk_limits(job.levels))
+	if err != nil {
+		return false
+	}
+	defer json.destroy(&d)
+	written, merr := json.marshal(&d, {pretty = l.pretty, indent = u8(max(l.indent, 0))}, runtime.heap_allocator())
+	if merr != .None {
+		return false
+	}
+	defer delete(written)
+	free_all(context.temp_allocator)
+	unit := max(l.indent, 1)
+	items := written[1:len(written) - 1]
+	if !l.pretty {
+		append(out, ..items)
+		return true
+	}
+	items = items[1 + unit:len(items) - 1]
+	pad := make([]byte, job.depth * unit, runtime.heap_allocator())
+	defer delete(pad)
+	slice.fill(pad, ' ' if l.indent > 0 else '\t')
+	for {
+		k := bytes.index_byte(items, '\n')
+		if k < 0 {
+			append(out, ..items)
+			return true
+		}
+		append(out, ..items[:k + 1])
+		append(out, ..pad)
+		items = items[k + 1:]
+	}
 }
 
 // Chunk `k`'s text `out` written, with the ready chunks that follow it, if every chunk before it has been, else left
@@ -561,7 +662,11 @@ write_in_order :: proc(job: ^Root_Job, k: int, out: [dynamic]byte) {
 		job.outs[job.next] = nil
 		job.next += 1
 		sync.unlock(&job.lock)
-		write_out(o[:], worker = true, pool = &job.run.pool)
+		if job.run.silent {
+			append(&job.run.out, ..o[:])
+		} else {
+			write_out(o[:], worker = true, pool = &job.run.pool)
+		}
 		delete(o)
 		sync.lock(&job.lock)
 	}

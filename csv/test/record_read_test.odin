@@ -74,7 +74,6 @@ test_record_read_header_by_name :: proc(t: ^testing.T) {
 	testing.expect_value(t, got.v, 3.0)
 	testing.expect_value(t, got.ok, false)
 	testing.expect(t, csv.record_read_at(&rd) > u64(first))
-	// No row is left.
 	e, refused := csv.unmarshal(&rd, &got).?
 	testing.expect(t, refused && e.kind == .Bad_Option)
 }
@@ -101,7 +100,6 @@ test_record_read_header_in_order :: proc(t: ^testing.T) {
 @(test)
 test_record_read_missing_and_extra_cells :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	// Ragged: a row's cells past the header's are unknown, and the cells it lacks are absent.
 	src := "id,full name,v,ok\n1,a,1.5,true,extra\n2\n"
 	it := csv.records(transmute([]byte)src, {dialect = {ragged = true}})
 	defer csv.destroy(&it)
@@ -149,11 +147,9 @@ test_record_read_duplicate_header :: proc(t: ^testing.T) {
 	defer csv.destroy(&it)
 	rd: csv.Record_Read
 	testing.expect_value(t, um_err(csv.record_read_init(&rd, Rec, &it, {duplicates = .Refuse})).kind, .Duplicate_Key)
-	// `.Refuse` is the default too, from a fresh iterator.
 	it_default := csv.records(transmute([]byte)src)
 	defer csv.destroy(&it_default)
 	testing.expect_value(t, um_err(csv.record_read_init(&rd, Rec, &it_default)).kind, .Duplicate_Key)
-	// `.First` keeps the first column.
 	it2 := csv.records(transmute([]byte)src)
 	defer csv.destroy(&it2)
 	testing.expect_value(t, csv.record_read_init(&rd, Rec, &it2, {duplicates = .First}, allocator = context.temp_allocator), nil)
@@ -161,7 +157,6 @@ test_record_read_duplicate_header :: proc(t: ^testing.T) {
 	got: Rec
 	testing.expect_value(t, csv.unmarshal(&rd, &got), nil)
 	testing.expect_value(t, got.id, i64(1))
-	// `.Last` keeps the last.
 	it3 := csv.records(transmute([]byte)src)
 	defer csv.destroy(&it3)
 	testing.expect_value(t, csv.record_read_init(&rd, Rec, &it3, {duplicates = .Last}, allocator = context.temp_allocator), nil)
@@ -189,7 +184,6 @@ test_record_read_live_options :: proc(t: ^testing.T) {
 	err := um_err(csv.unmarshal(&rd, &got))
 	testing.expect_value(t, err.kind, .Unknown_Field)
 	testing.expect_value(t, src[int(csv.record_read_at(&rd) + err.offset):], "extra\n3,c,3.5,true,extra\n")
-	// Back to `.Ignore`, the next row reads.
 	rd.opts.unknown_fields = .Ignore
 	testing.expect_value(t, csv.unmarshal(&rd, &got), nil)
 	testing.expect_value(t, got.id, i64(3))
@@ -558,7 +552,6 @@ test_record_read_no_header_refusal_keeps_reader_ready :: proc(t: ^testing.T) {
 		a: i64,
 		b: i64,
 	}
-	// The third cell of every row is an unknown column.
 	src := "1,2,3\n4,5,6\n"
 	it := csv.records(transmute([]byte)src, {no_header = true})
 	defer csv.destroy(&it)
@@ -573,7 +566,6 @@ test_record_read_no_header_refusal_keeps_reader_ready :: proc(t: ^testing.T) {
 	testing.expect_value(t, um_err(csv.unmarshal(&rd, &got)).kind, .Unknown_Field)
 	testing.expect_value(t, um_err(csv.unmarshal(&rd, &got)).kind, .Unknown_Field)
 
-	// Relaxed after the refusal, the next row reads.
 	src2 := "1,2,3\n4,5\n"
 	it2 := csv.records(transmute([]byte)src2, {no_header = true, dialect = {ragged = true}})
 	defer csv.destroy(&it2)

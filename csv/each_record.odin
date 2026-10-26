@@ -6,12 +6,9 @@ import "core:bytes"
 import "core:simd"
 import core_pkg "../core"
 
-// Threads a caller lends `each_record`, `validate` and `validate_records` (`stury:host`'s `Batch_Pool`
-// is one).
 Batch_Runner :: core_pkg.Batch_Runner
 
-// A record `validate_records` refuses: its bytes are src[lo:hi], and `err`'s offset is into `src` (`core`'s
-// type, so a caller using several formats writes one fault).
+// core's `Record_Fault`.
 Record_Fault :: core_pkg.Record_Fault
 
 // Runs `task` on every piece of `src`. Each piece is a `Records` over whole records of `src`, read with `opts` as
@@ -47,9 +44,7 @@ each_record :: proc(
 		boundary = batch_boundary,
 		skip = batch_skip,
 		piece = piece_task,
-		// A piece's fault is ranked by its number: the first faulty piece, which is the fault `records` ends on.
 		fault_rank = piece_fault_rank,
-		// A fault ends the records after it, so the pieces past it are not claimed.
 		stop_on_fault = true,
 	}
 	return run_batch(&run)
@@ -61,12 +56,7 @@ each_record :: proc(
 //
 //	- One fault per refused record, and `faults[0].err` is `validate`'s fault. A clean text is that scan and no
 //	  list at all. The faults of the whole text are listed, whichever threads found the first one.
-//	- A record ends at the LF that closes it outside quotes, or at the input's end. A fault that leaves the
-//	  record open (a misplaced quote, UTF-8 or escape, a field or line cap) is resolved by counting quotes from
-//	  the record's first byte: each one opens or closes, except the one a `.Bad_Char` points at, which is text.
-//	  A record whose quote never closes runs to the input's end.
-//	- The read resumes at the byte after the record's end, and the quote, escape and UTF-8 state before it is
-//	  not carried over.
+//	- A record ends at the LF that closes it outside quotes, or at the input's end.
 //	- `err` is as in `json.validate_records`: a failure of the call, `.Bad_Option` or `.Out_Of_Memory`, where
 //	  `faults` is nil. A fault of the text is never `err`: each is a record in `faults`.
 //	- Allocates the list and `faults`, the latter with `allocator`.
@@ -101,8 +91,6 @@ validate_records :: proc(
 		if !bad {
 			break
 		}
-		// The refused record starts at the open record's first byte; a field count or a limit names that byte
-		// itself, which the read has already left behind. `.Out_Of_Memory` names no byte.
 		lo := u64(read.rec_lo)
 		if fault.kind != .Out_Of_Memory {
 			lo = min(lo, fault.offset)
@@ -121,8 +109,6 @@ validate_records :: proc(
 	return merged, nil
 }
 
-// Where the record `it` refused with `fault` ends, `lo` being its first byte: `hi`, the end of its bytes, and
-// `next`, where the read resumes. `it` has stopped on `fault`.
 @(private)
 refused_end :: proc(it: ^Records, fault: Error, lo: int) -> (hi, next: int) {
 	src := it.src
@@ -130,7 +116,6 @@ refused_end :: proc(it: ^Records, fault: Error, lo: int) -> (hi, next: int) {
 	case it.ended:
 		return len(src), len(src)
 	case fault.kind != .Out_Of_Memory && int(fault.offset) < it.rec_lo:
-		// The record was read whole and judged after: `rec_lo` is the byte past its LF.
 		return record_end(src, lo, it.rec_lo - 1), it.rec_lo
 	}
 	quoted := .Unquoted not_in it.scan.mode && !(.Comments in it.scan.mode && lo < len(src) && src[lo] == it.scan.comment)
@@ -150,14 +135,12 @@ refused_end :: proc(it: ^Records, fault: Error, lo: int) -> (hi, next: int) {
 	return len(src), len(src)
 }
 
-// The end of the record `src[lo:lf]`, `lf` being its LF: before a CR that precedes it.
 @(private)
 record_end :: #force_inline proc(src: []byte, lo, lf: int) -> int {
 	return lf - 1 if lf > lo && src[lf - 1] == '\r' else lf
 }
 
-// `it`, whose read stopped on a fault, reading on from `at`, a record's first byte of a text that starts there.
-// The field count it was judging against stands.
+// The field count `it` was judging against stands.
 @(private)
 resume_read :: proc(it: ^Records, src: []byte, at: int) {
 	fields, width := it.fields, it.width
@@ -185,7 +168,6 @@ validate_pieces :: proc(src: []byte, s: Scan, runner: ^Batch_Runner) -> Maybe(Er
 	return run_batch(&run)
 }
 
-// Plans `run`'s pieces and claims them on the caller and the runner's threads; the first faulty piece's fault.
 @(private)
 run_batch :: proc(run: ^Batch_Run) -> Maybe(Error) {
 	defer delete(run.parity, runtime.heap_allocator())
@@ -283,8 +265,6 @@ quote_parity :: proc(src: []byte) -> u8 {
 	return u8(odd & 1)
 }
 
-// Runs the task on the piece of records from `lo` up to `hi`, numbered `k`, and frees its fields once it
-// returns.
 @(private)
 piece_task :: proc(data: rawptr, lo, hi, k: int) -> (fault: Maybe(Error), go_on: bool) {
 	run := (^Batch_Run)(data)
@@ -297,14 +277,12 @@ piece_task :: proc(data: rawptr, lo, hi, k: int) -> (fault: Maybe(Error), go_on:
 	return
 }
 
-// `validate_span` of the piece of records from `lo` up to `hi`.
 @(private)
 piece_validate :: proc(data: rawptr, lo, hi: int, _: int) -> (fault: Maybe(Error), go_on: bool) {
 	run := (^Batch_Run)(data)
 	return validate_span(run.src[:hi], lo, run.width, run.scan), true
 }
 
-// The rank of a piece's fault: its number, so the batch returns the first faulty piece's.
 @(private)
 piece_fault_rank :: proc(_: rawptr, k: int, _: Error) -> int {
 	return k
@@ -312,7 +290,7 @@ piece_fault_rank :: proc(_: rawptr, k: int, _: Error) -> int {
 
 // Where the records from slice `k` on start: just past the first LF outside quotes at or after the byte before
 // the slice's offset, or the input's end when there is none. Slice 0 starts at the input's first byte past
-// its BOM. A piece ends at the next boundary, however far past the claim that is.
+// its BOM.
 @(private)
 batch_boundary :: proc(data: rawptr, k, _: int) -> int {
 	run := (^Batch_Run)(data)
@@ -336,7 +314,6 @@ batch_boundary :: proc(data: rawptr, k, _: int) -> int {
 	return i + 1 if i >= 0 else len(src)
 }
 
-// The slice whose start is the piece's `hi`: a piece's records end at the first boundary past it.
 @(private)
 batch_skip :: proc(_: rawptr, _: int, hi: int) -> int {
 	return hi / core_pkg.BATCH_SLICE

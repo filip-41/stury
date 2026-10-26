@@ -624,15 +624,10 @@ or borrows the plan, lowers the read shape on it, and returns a `Record_Read`; `
 the source's next record and reads it with the same walk `unmarshal` of the record's bytes runs.
 
 - **The source is the format half** (`Record_Source`): a state pointer, a `read` that pulls one record and fills
-  a value of the root type, and a `destroy`. One indirect call reads a record, and no per-byte code crosses it.
-  JSON's source holds its `Records` iterator, the shape run, the frames, the wide words and the query context,
-  allocated once at init, so the walk's scratch is not per record.
-- **The handle is a value.** It holds the plan, the format's options, the source, and whether it owns the plan.
-  A copy shares the source and the plan, so destroy it once; `destroy` frees an owned plan and the source's
-  state and empties the handle. A source reads its options from the handle at every record, so `.Lazy`,
-  duplicates, limits and borrowing changed between records apply to the next one. The source also receives the
-  plan, because the handle may be copied or returned by value: a state that held the plan's address would hold
-  a dead caller's.
+  a value of the root type, and a `destroy`.
+- **The handle is a value** with the ownership and option rules of `core/record_read.odin`. The source also
+  receives the plan at every read, because the handle may be copied or returned by value: a state that held the
+  plan's address would hold a dead caller's.
 - **Its faults are the record's**, as `unmarshal` of that record's bytes reports them, with the offset into
   those bytes; `record_read_at` gives the record's offset in the input, which places it. A fault that frames no
   record (a JSON framing fault) is `.Syntax` at its input offset, and no record left is `.Bad_Option`.
@@ -689,19 +684,15 @@ cells a field reads. The writer is generic over quoting and a comment byte the s
 
 A `Document` (`csv/document.odin`) is `records` kept: the header's spans and every row's, flat, 16 bytes a
 field, sized from the first row so that the array grows once. A cell is decoded when it is read, and one that
-holds a `""` or an escape is decoded once and kept by the document. The path readers (`csv/find.odin`) take
-core's path syntax (`.[3].name`, `.[3][1]`, `.[].name`, `.[]`, jq's `[]`) and `limit(...)`. `query` answers a
-path over a document's field spans and never scans the text again; `find` and `find_column` stream `records`
-from the start, keep no row, and stop at the first answer (`find`) or after the target's rows. All three append
-core's `Answer`: the value's span in the source, its `owner` (the record's first byte), and `query` 0. A path
-that lands nothing appends no `query` answer and is a `.Missing` `find` answer. The edits (`csv/edit.odin`)
-build their result from the source and the spans of a record scan. A cell is respelled by the writer `marshal`
-uses (`edit_spell.odin`),
-and every other byte is copied. The source is validated first, so a fault is located in it. The result is not
-validated again: a respelled cell is one field, and a removed or inserted record leaves whole records. An edit
-whose result would not read back as the same table (a lone empty field, a first field starting with the
-comment byte, a new BOM) is refused as `.Unplaceable`. `splice` takes arbitrary spans, so it validates its
-result.
+holds a `""` or an escape is decoded once and kept by the document. The path readers (`csv/find.odin`, which
+holds their contract) take core's path syntax. `query` answers over a document's field spans and never scans the
+text again; `find` and `find_column` stream `records` and keep no row.
+The edits (`csv/edit.odin`) build their result from the source and the spans of a record scan. A cell is
+respelled by the writer `marshal` uses (`edit_spell.odin`), and every other byte is copied. The source is
+validated first, so a fault is located in it. The result is not validated again: a respelled cell is one field,
+and a removed or inserted record leaves whole records. An edit whose result would not read back as the same
+table (a lone empty field, a first field starting with the comment byte, a new BOM) is refused as
+`.Unplaceable`. `splice` takes arbitrary spans, so it validates its result.
 
 A cell hook is a core `.Hook` op, as in JSON: the plan holds the user's `Unmarshal_Hook` in the neutral hook
 table and its `Marshal_Hook` beside it. The writer sends the kinds `put_cell` has no case for to a cold
@@ -710,24 +701,19 @@ table and its `Marshal_Hook` beside it. The writer sends the kinds `put_cell` ha
 by the previous chunk, keeping the last break byte so a non-empty buffer marks the output as begun.
 
 Both `json.each_record` and `csv.each_record` run one claim loop from `core` (`Batch_Driver`): the caller and
-the runner's threads claim the planned pieces in source order, find each piece's bounds through the format's
-boundary search, run it, and note its fault under the format's rank. A task that returns false stops the
-claims. JSON keeps claiming after a framing fault and ranks faults by their offset in the input, so a fault a
+the runner's threads claim the planned pieces in source order, run each, and note its fault under the format's
+rank. JSON keeps claiming after a framing fault and ranks faults by their offset in the input, so a fault a
 later piece finds never hides an earlier one. CSV stops claiming at the first faulty piece, since a fault ends
 the text's records, and ranks by piece number; the pieces already claimed still run.
 
 `validate_records` lists the records a batch refuses, one `core.Record_Fault` each: the record's bytes
-`src[lo:hi]` and its `Error`, whose offset is into `src`. The lists are `core`'s `Fault_List` — one
-`[dynamic]` list per piece in the heap, since the pieces run on every thread and the caller's allocator need
-not be shared, each piece appending only to its own — merged once into an exact-size slice in the caller's
-allocator. JSON's pieces each validate their records, so every refused record is listed; a framing fault
-belongs to no record, so it is `err` and only the records that start before it stand. A CSV fault ends its
-piece and leaves the quote state the pieces are cut by unknown, so `csv.validate_records` takes the first
-fault from `csv.validate`, whose pieces are reliable up to it, and then reads the text on the calling thread.
-A record the read judged whole (a field count, or a cap met at its LF) ends at the LF the read passed; one
-the read stopped inside ends at the first LF outside quotes, counted from its first byte, with the quote a
-`Bad_Char` points at taken as text. The read resumes after it, so every fault is a record and none is `err`;
-`faults[0].err` is `validate`'s fault.
+`src[lo:hi]` and its `Error`, whose offset is into `src`. JSON's pieces each validate their records, so every
+refused record is listed; a framing fault belongs to no record, so it is `err` and only the records that start
+before it stand. A CSV fault ends its piece and leaves the quote state the pieces are cut by unknown, so
+`csv.validate_records` takes the first fault from `csv.validate` and then reads the text on the calling thread.
+A record the read judged whole ends at the LF the read passed; one the read stopped inside ends at the first LF
+outside quotes, counted from its first byte, with the quote a `Bad_Char` points at taken as text. The read
+resumes after it, so every fault is a record and none is `err`; `faults[0].err` is `validate`'s fault.
 
 `csv.each_record` and a threaded `csv.validate` cut the text into pieces that each start after an LF outside
 quotes. There the scan's state equals its state at the input's start, so a piece is judged alone, with the

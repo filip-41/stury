@@ -3,7 +3,6 @@ package core_tests
 import "core:testing"
 import p ".."
 
-// The answer row a format's path reader writes: its layout, its fields, and the owner sentinel.
 @(test)
 test_answer_row :: proc(t: ^testing.T) {
 	testing.expect_value(t, size_of(p.Answer), 32)
@@ -19,7 +18,6 @@ test_answer_row :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.query, u32(2))
 	testing.expect_value(t, a.outcome, p.Answer_Outcome.Type_Mismatch)
 	testing.expect_value(t, p.NO_OWNER, max(u64))
-	// The outcomes a reader reports, in the order `Path_Outcome` assigns them.
 	testing.expect_value(t, u8(p.Answer_Outcome.Found), u8(0))
 	testing.expect_value(t, u8(p.Answer_Outcome.Missing), u8(1))
 }

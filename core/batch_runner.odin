@@ -123,23 +123,19 @@ batch_plan :: proc(c: ^Batch_Cursor, runner: ^Batch_Runner, n: int) {
 	c.lanes = batch_lanes(runner, n)
 }
 
-// Where the records of slice `k` start, searching before slice `stop`: an offset into the input, or -1 when
-// there is none.
+// Returns where slice `k`'s records start, or -1 when none do.
 Batch_Boundary :: proc(data: rawptr, k, stop: int) -> int
 
-// The first slice past `from` whose boundary is the piece's `hi`.
 Batch_Skip :: proc(data: rawptr, from, hi: int) -> int
 
-// Builds the piece of `[lo, hi)` numbered `k` and runs the caller's task over its records. `fault` is the
-// piece's, and `go_on` false ends the claims.
 Batch_Piece :: proc(data: rawptr, lo, hi, k: int) -> (fault: Maybe(Error), go_on: bool)
 
-// The rank of a piece's fault for `First_Fault`: the note keeps the lowest.
 Batch_Fault_Rank :: proc(data: rawptr, k: int, e: Error) -> int
 
 // Batch_Driver is the claim loop of one batch: the caller and the runner's threads claim a planned
 // `Batch_Cursor`'s pieces in source order, each format supplying a piece's bounds and what running one does.
-// A callback runs a fixed number of times per piece (`boundary` twice, for the piece's first and last record), never per record.
+// A callback runs a fixed number of times per piece (`boundary` twice, for its first and last record), never
+// per record.
 //
 //	- The caller and the runner's threads claim pieces in turn, each finding its own first and last record.
 //	- A claim inside a long record starts no record: its boundary search stops at the claim's end, so the
@@ -148,7 +144,6 @@ Batch_Fault_Rank :: proc(data: rawptr, k: int, e: Error) -> int
 //	- The fault noted is the one `fault_rank` ranks lowest, whichever thread finds it first.
 Batch_Driver :: struct {
 	cursor: Batch_Cursor,
-	// The noted first fault.
 	first: First_Fault,
 	data:  rawptr,
 	// The offset where a piece's records end when its next boundary is not found: the span's one-past-end.
@@ -157,12 +152,9 @@ Batch_Driver :: struct {
 	skip:       Batch_Skip,
 	piece:      Batch_Piece,
 	fault_rank: Batch_Fault_Rank,
-	// Whether a piece's fault stops the claims.
 	stop_on_fault: bool,
 }
 
-// Claims `d`'s pieces on the caller and the runner's threads, and returns the fault that is first by
-// `d.fault_rank`.
 @(require_results)
 batch_run :: proc(d: ^Batch_Driver) -> Maybe(Error) {
 	batch_fan(&d.cursor, batch_claim, d)

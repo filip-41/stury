@@ -10,7 +10,7 @@ import core_pkg "../core"
 @(private)
 Reader :: struct {
 	src:       []byte,
-	// The plan's read shape, copied: it is the reader's, and a per-row reader's handle may be moved after init.
+	// The plan's read shape, copied (see `row_reader`).
 	shape:     core_pkg.Read_Shape,
 	row:       ^core_pkg.Shape_Op, // the element's struct op
 	// The field each column reads (`core_pkg.NO_FIELD` for none), and the required fields, each with its
@@ -27,16 +27,14 @@ Reader :: struct {
 	check:     bool,
 }
 
-// The plan's read shape, whose row must be a struct of cells: `LIST` reads the element of `unmarshal`'s list,
-// and without it the struct itself, which the per-row reader reads.
+// The plan's read shape, whose row must be a struct of cells: `LIST` reads the list's element, else the struct.
 @(private)
 row_reader :: proc(r: ^Reader, p: ^core_pkg.Type_Plan, $LIST: bool) -> Maybe(Unmarshal_Error) {
 	shape, serr := core_pkg.read_shape_of(p)
 	if serr != nil {
 		return serr
 	}
-	// Copied: the shape's ops and fields are the plan's heap, and the reader's rows must outlive a move of the
-	// handle that owns the plan.
+	// Copied so the reader survives a move of the handle that owns the plan.
 	r.shape = shape^
 	row := &r.shape.ops[r.shape.root]
 	when LIST {

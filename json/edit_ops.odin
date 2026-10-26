@@ -153,8 +153,7 @@ remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $jsonc: bo
 
 // Queue the cut of every run of removed entries (`run`, in order) in `own` that a survivor follows. The
 // trailing run is left to `trailing_cut`: its `first` and `last` entry indexes, or -1 when `own` ends in a
-// survivor, and `kept`, the last survivor's index or -1. `keyed` is false when an object member's key is not
-// where its value says (`key_span`), and then the cut is refused.
+// survivor, and `kept`, the last survivor's index or -1.
 @(private = "file")
 cut_interior_runs :: proc(edits: ^[dynamic]Edit, src: []byte, doc: ^Document, own, run: []Path_Answer, $jsonc: bool) -> (first, last, kept: int, keyed: bool) {
 	first, last, kept, keyed = -1, -1, -1, true
@@ -183,7 +182,7 @@ cut_interior_runs :: proc(edits: ^[dynamic]Edit, src: []byte, doc: ^Document, ow
 }
 
 // The bytes that go for the run at the end of container `owner`, entries `own[first]` to `own[last]`, after
-// survivor `own[kept]` (or none): see `remove_in` for what each case takes. `keyed` is `cut_interior_runs`'s.
+// survivor `own[kept]` (or none): see `remove_in` for what each case takes.
 @(private = "file")
 trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer, first, last, kept: int, $jsonc: bool) -> (lo, hi: u64, keyed: bool) {
 	lo, keyed = entry_lo(src, doc, own[first], jsonc)
@@ -209,9 +208,6 @@ trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer
 			lo = own[kept].hi
 		} else {
 			lo = owner + 1
-			// The last entry's value ends before the container's close bracket, so `hi` starts inside `src` and
-			// the skip stops on that bracket. The bound is checked anyway: a scan bug must not read past the
-			// source, and a debug build says so instead of cutting bytes the rows do not cover.
 			for hi < u64(len(src)) && walk.is_space(src[hi]) {
 				hi += 1
 			}
@@ -225,8 +221,7 @@ trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer
 
 // The quoted key before an object member's value at `value_lo`, read backwards over strict JSON: blanks,
 // `:`, blanks, then the string, whose opening quote is the first `"` behind an even run of backslashes.
-// Every step back is checked: a value the scan placed where no key precedes it answers `no_key` rather than
-// reading below the source. `ok` is false then, and the edit that asked is refused.
+// `ok` is false when no key precedes the value, and the edit that asked is refused.
 @(private = "file")
 key_span :: proc(src: []byte, value_lo: u64) -> (lo, hi: u64, ok: bool) {
 	if value_lo > u64(len(src)) {
@@ -247,7 +242,7 @@ key_span :: proc(src: []byte, value_lo: u64) -> (lo, hi: u64, ok: bool) {
 	if hi < 2 {
 		return no_key(value_lo)
 	}
-	lo = hi - 1 // the key's closing quote: the loop's first step goes behind it
+	lo = hi - 1
 	for lo >= 2 {
 		lo -= 1
 		if src[lo] != '"' {
@@ -264,8 +259,6 @@ key_span :: proc(src: []byte, value_lo: u64) -> (lo, hi: u64, ok: bool) {
 	return no_key(value_lo)
 }
 
-// The span `key_span` answers when the bytes before a member's value are not a key: the value's own start, so
-// that no caller slices outside the source. A debug build stops on the broken invariant.
 @(private = "file")
 no_key :: proc(value_lo: u64) -> (lo, hi: u64, ok: bool) {
 	when ODIN_DEBUG {
@@ -321,8 +314,7 @@ put_entry :: proc(places: ^[dynamic]Place, at: u64, from, to: int) {
 }
 
 // The bytes between a member's key and value that a new member copies from `first`, the first member:
-// unless a comment sits there, under JSONC, where it is `": "`. Empty for an element. `keyed` is false when
-// `first`'s key is not found.
+// unless a comment sits there, under JSONC, where it is `": "`. Empty for an element.
 @(private = "file")
 member_between :: proc(src: []byte, doc: ^Document, first: Path_Answer, is_member: bool, $jsonc: bool) -> (between: string, keyed: bool) {
 	keyed = true
@@ -343,7 +335,7 @@ member_between :: proc(src: []byte, doc: ^Document, first: Path_Answer, is_membe
 }
 
 // The separator a new entry before entry `k` of container `c` copies: after the open bracket for a lone
-// entry, else between the two entries around the spot. `keyed` is `entry_head`'s.
+// entry, else between the two entries around the spot.
 @(private = "file")
 separator_gap :: proc(src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, $jsonc: bool) -> (lo, hi: u64, keyed: bool) {
 	n := len(own)

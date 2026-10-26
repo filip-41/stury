@@ -4,8 +4,6 @@ package core
 // type, its kind the read shape's (`Shape_Kind`), struct fields and union arms as runs with their keys
 // pre-written in the format's spelling (`Plan_Format`), compiled once per type and on first use. An `any`'s
 // dynamic type is compiled the first time a value of it is met, so a plan holding one grows while it is used.
-// A compile that fails leaves the plan as it was and fails the same way on every later call, so a plan is never
-// half-built.
 
 import "base:runtime"
 import "core:reflect"
@@ -252,7 +250,6 @@ type_plan_destroy :: proc(p: ^Type_Plan) {
 	p^ = {}
 }
 
-// The plan's own state before a type compiles, which `plan_rollback` restores.
 @(private = "file")
 Plan_Mark :: struct {
 	ops, fields, sources, keys, members, unescaped: int,
@@ -270,15 +267,10 @@ plan_mark :: proc(p: ^Type_Plan) -> Plan_Mark {
 	}
 }
 
-// An index entry whose op the failed compile rolled back: the type is compiled again on its next use.
 @(private = "file")
 NO_OP :: max(u32)
 
-// Take the plan back to `m`: the failed compile's ops leave the index, every run loses its bytes, and the names
-// it copied are freed. A retry compiles the same types again, and nothing of the failed attempt is left behind.
-// It allocates nothing, so it cannot fail half-way: an index entry is overwritten with `NO_OP`, since `delete_key`
-// on a `map[typeid]` hangs the Odin compiler's checker at `-o:speed` (dev-2026-10), and a shrinking resize
-// never reallocates.
+// `delete_key` on a `map[typeid]` hangs the Odin checker at `-o:speed` (dev-2026-10); overwrite with `NO_OP`.
 @(private = "file")
 plan_rollback :: proc(p: ^Type_Plan, m: Plan_Mark) {
 	for _, &idx in p.index {
@@ -296,15 +288,14 @@ plan_rollback :: proc(p: ^Type_Plan, m: Plan_Mark) {
 	}
 	resize(&p.unescaped, m.unescaped)
 	if p.tag_hi > u32(m.keys) {
-		// The tag's spelled key was the failed compile's; the next compile spells it again.
 		p.tag_lo, p.tag_hi = 0, 0
 	}
 }
 
 // The op for `ti`. A type already in the plan, including one still being compiled further up this call (a
 // recursive type), answers its existing index. A compile that fails is rolled back before the error returns, so
-// no half-built op, field, index entry or name stays: the plan is the plan it was before, the next call compiles
-// the same type again, and every call answers the same error. The plan cache evicts only a plan that reported
+// no half-built op, field, index entry or name stays: the plan is as it was before, the next call compiles the
+// same type again, and every call answers the same error. The plan cache evicts only a plan that reported
 // `.Out_Of_Memory`, and a rolled-back plan is sound whether or not it is evicted.
 plan_op :: proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (idx: u32, err: Plan_Error) {
 	if found, ok := p.index[ti.id]; ok && found != NO_OP {
@@ -551,7 +542,6 @@ lay_out_run :: proc(p: ^Type_Plan, v: runtime.Type_Info_Struct, base: uintptr, f
 			return nil, terr
 		}
 		if tag.owned {
-			// The plan owns an unescaped name: `destroy` frees it, and so does a rollback of this compile.
 			if _, aerr := append(&p.unescaped, tag.key); aerr != nil {
 				delete(tag.key, p.ops.allocator)
 				return nil, .Out_Of_Memory
@@ -692,7 +682,6 @@ field_spelling :: proc(name, tag, tag_key: string, allocator: runtime.Allocator)
 		return {}, .None
 	}
 	raw := transmute([]u8)value
-	// The name runs to the first comma no backslash escapes.
 	end, flags_at := len(raw), len(raw)
 	i := 0
 	for i < len(raw) {
@@ -705,7 +694,6 @@ field_spelling :: proc(name, tag, tag_key: string, allocator: runtime.Allocator)
 			i += 1
 		}
 	}
-	// Its length once each escape stands for the one byte it quotes, and whether any byte is escaped.
 	length, escaped := 0, false
 	j := 0
 	for j < end {
@@ -718,7 +706,6 @@ field_spelling :: proc(name, tag, tag_key: string, allocator: runtime.Allocator)
 	}
 	switch {
 	case length == 0:
-		// An empty name keeps the field's own.
 		t.key = name
 	case !escaped:
 		t.key = string(raw[:end])
@@ -745,7 +732,6 @@ field_spelling :: proc(name, tag, tag_key: string, allocator: runtime.Allocator)
 		for flag in strings.split_iterator(&flags, ",") {
 			switch flag {
 			case "":
-				// A comma with no flag after it names no flag.
 			case "omitempty":
 				t.omitempty = true
 			case "required":

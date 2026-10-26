@@ -11,8 +11,8 @@ import "../core/spell"
 
 // Why `marshal` refused: core's `Marshal_Error`. CSV reports `Bad_Utf8` (a string or field name), `Non_Finite`,
 // `Unsupported` (a root that is not a list of a struct, or a field whose type `unmarshal` cannot read),
-// `Bad_Tag` (a field tag flag the format does not know), `Plan_Mismatch`, `Not_A_Member`, `Bad_Option`, `Unwritable` (`Quoting.None`), `Write_Failed`
-// (`marshal_to_writer`) and `Out_Of_Memory`. It never reports `Bad_State`, `Too_Deep`, `Cycle` or `Bad_Raw`.
+// `Bad_Tag` (a field tag flag the format does not know), `Plan_Mismatch`, `Not_A_Member`, `Bad_Option`,
+// `Unwritable` (`Quoting.None`), `Write_Failed` (`marshal_to_writer`) and `Out_Of_Memory`. It never reports `Bad_State`, `Too_Deep`, `Cycle` or `Bad_Raw`.
 Marshal_Error :: core_pkg.Marshal_Error
 
 // How `marshal` writes: the zero value writes RFC 4180 with a header and LF after each record.

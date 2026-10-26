@@ -46,7 +46,6 @@ expect_records_match :: proc(t: ^testing.T, src: string, opts: json.Unmarshal_Op
 		}
 		testing.expect_value(t, json.record_read_at(&rd), rec.at, loc = loc)
 	}
-	// The output's end, not a fault: no record is left.
 	got: Read_Rec
 	testing.expect_value(t, um_err(json.unmarshal(&rd, &got)).kind, .Bad_Option, loc = loc)
 }
@@ -173,7 +172,6 @@ test_unmarshal_record_walks_a_shape_it_does_not_descend :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(got), 1)
 	testing.expect_value(t, got["a"], i64(3))
 	testing.expect(t, um_err(json.unmarshal(&rd, &got)).kind == .Bad_Option)
-	// A nil target is refused before a record is pulled.
 	testing.expect(t, json.unmarshal(&rd, (^Read_Rec)(nil)) != nil)
 }
 
@@ -253,7 +251,6 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, allocator = context.temp_allocator), nil)
 	defer json.destroy(&rd)
 
-	// `.Last` from init; `.First` on the handle after it keeps the first occurrence.
 	got: Read_Rec
 	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
 	testing.expect_value(t, got.id, i64(9))
@@ -261,11 +258,9 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
 	testing.expect_value(t, got.id, i64(1))
 
-	// `.Refuse` is live too.
 	rd.opts.duplicates = .Refuse
 	testing.expect_value(t, um_err(json.unmarshal(&rd, &got)).kind, .Duplicate_Key)
 
-	// `limits` is re-bound at each read: a digit cap that refuses the second read does not refuse the first.
 	dline := "{\"id\":10,\"name\":\"n\",\"v\":2,\"flag\":true}\n"
 	digits := raw(fmt.tprintf("%s%s%s", dline, dline, dline))
 	dit := json.records(digits, .NDJSON)
@@ -280,7 +275,6 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 	dr.opts.limits.max_scalar_digits = 0
 	testing.expect_value(t, json.unmarshal(&dr, &got), nil)
 
-	// `borrow_strings` is live: the copied string does not point into the source, the borrowed one does.
 	buf: [128]u8
 	src := `{"id":1,"name":"borrow","v":2,"flag":true}`
 	n := len(src)
@@ -309,7 +303,6 @@ test_record_read_destroy_twice :: proc(t: ^testing.T) {
 	got: Read_Rec
 	testing.expect_value(t, um_err(json.unmarshal(&rd, &got)).kind, .Bad_Option)
 
-	// A handle that was never initialized is empty, and destroying it is not a read of its state.
 	empty: json.Record_Read
 	json.destroy(&empty)
 	testing.expect_value(t, um_err(json.unmarshal(&empty, &got)).kind, .Bad_Option)
@@ -326,12 +319,10 @@ test_record_read_refuses_structural_json :: proc(t: ^testing.T) {
 	it := json.records(src, .NDJSON)
 	rd: json.Record_Read
 	testing.expect_value(t, um_err(json.record_read_init(&rd, Lit, &it, {strictness = .Structural})).kind, .Bad_Option)
-	// `.Jsonc` reads it.
 	testing.expect_value(t, json.record_read_init(&rd, Lit, &it, {strictness = .Structural, dialect = .Jsonc}, allocator = context.temp_allocator), nil)
 	defer json.destroy(&rd)
 	got: Lit
 	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
-	// The refusal is live too: `.Structural` over plain JSON changed after init refuses the next record.
 	rd.opts.strictness = .Strict
 	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
 	rd.opts.strictness = .Structural

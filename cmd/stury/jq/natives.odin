@@ -413,7 +413,7 @@ native_inputs :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool
 }
 
 // Messages held before they are written: a run's memory holds a chunk of its `debug` and `stderr` output, not
-// all of it. The bytes and their order are jq's either way.
+// all of it.
 MESSAGE_FLUSH :: 1 << 16
 
 // Writes the `debug` and `stderr` messages held so far to stderr and empties the buffer. The caller flushes

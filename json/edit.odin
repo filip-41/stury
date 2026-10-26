@@ -47,9 +47,7 @@ splice :: proc(src: []byte, edits: []Edit, dialect := Dialect.Json, allocator :=
 
 // `core_pkg.edits_apply` behind the order rule an edit list must meet: sorted by `lo`, disjoint, inside `src`.
 // `splice` and every path edit apply through here, so a list a scan or a placement bug left unordered is
-// refused as `.Bad_Edit` in both dialects rather than panicking in `edits_apply`'s `src[at:e.lo]`. The check is
-// always on, not a debug assert: it is one pass over a list the caller already sorted and that `edits_apply`
-// copies once, and the panic it prevents is in both builds.
+// refused as `.Bad_Edit` in both dialects rather than panicking in `edits_apply`'s `src[at:e.lo]`.
 @(private)
 edits_apply_checked :: proc(src: []byte, edits: []Edit, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	if !core_pkg.edits_ordered(src, edits) {

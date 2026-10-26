@@ -97,13 +97,9 @@ Run :: struct {
 	ip:          jq.Interp,
 	out:         [dynamic]byte,
 	held:        bool, // a pool thread's copy, whose output the caller writes
-	// fmt --check and --in-place: the output is kept in `out` for the caller (to compare with the file, or to write
-	// it), so nothing is written as it is made.
-	silent:      bool,
-	// fmt: a parse fault names its file, as one in a later file of a filter run is named.
-	name_faults: bool,
-	// fmt between JSON-like formats: each value is written from its source text, scalars and repeated keys as authored.
-	verbatim:    bool,
+	silent:      bool, // fmt --check and --in-place: the output stays in `out` for the caller
+	name_faults: bool, // fmt: a parse fault names its file
+	verbatim:    bool, // fmt between JSON-like formats: each value is written from its source text
 	faulted:     bool, // a held copy met an answer it cannot print: its caller leaves that text to the main thread, which reports it
 	spill:       jq.Spill, // `spill_out`, for a layout that is written into `out`
 	unopened:    bool, // a file did not open or read, which jq's exit status says whatever comes after it

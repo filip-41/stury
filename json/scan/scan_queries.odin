@@ -410,30 +410,19 @@ scan_queries_in :: #force_inline proc(
 	}
 	// A demand reads the members of objects, so a root with none settles every demand query before the walk:
 	// nothing below it can answer. A `.Lazy` reading that may stop stops at the root, where the automaton's
-	// own root hooks stop; one that may not reads on and validates the root. A request with a path run as
-	// well keeps that run's settlement, and the demand's own stop test (`stop_capable`) settles the call.
-	// Rows are built by the whole walk, so a request that builds them (`.Dom` always carries `.Nodes`) never
-	// settles here.
+	// own root hooks stop; one that may not reads on and validates the root. Rows are built by the whole
+	// walk, so a request that builds them never settles here.
 	when .Demand in Q && .Nodes not_in Q {
 		if axes.termination == .First_Wins_May_Stop {
-			if at, settles := demand_root_settles(&s, ctx, Q); settles {
-				// Final at the root: its answers cannot change, and a call beside a path run needs the
-				// stop test its other queries would not ask for on their own (`stop_capable`).
-				ctx.demand.settled, ctx.demand.can_settle = true, true
-				if .Path not_in Q {
-					if stop_byte != nil {
-						stop_byte^ = at
-					}
-					return nil, sink_fault(F, ctx)
-				}
+			if at, stops := settle_demand_root(&s, ctx, Q); stops {
+				s.pos, stopped = at, true
 			}
 		}
 	}
 
 	// The keys of the open objects past the first KEY_SCRATCH are scan-owned scratch in the request's
 	// allocator (`Scan_Query.allocator`), freed on every exit. A wildcard run under `.First` or `.Last`
-	// remembers the keys of the objects it reads, in the same scratch; a key it cannot remember counts as
-	// unresolved, and the json layer answers that path from the tape. A walk with no queries of its own
+	// remembers the keys of the objects it reads, in the same scratch. A walk with no queries of its own
 	// (`validate_remaining`'s `.Unique`) keeps the ambient allocator.
 	when .Unique in Q || .Path in Q {
 		key_alloc := context.allocator
@@ -490,6 +479,11 @@ scan_queries_in :: #force_inline proc(
 			when !(TAPE_BESIDE_PATHS <= Q) {
 				werr = walk_deep(&s, ctx, s.limits.max_depth, .Locate, Q, &Jsonc_Cursor{json = true}, false, nil)
 			}
+		}
+	} else when .Demand in Q && .Nodes not_in Q && .Path not_in Q {
+		werr: Maybe(Error)
+		if !stopped {
+			werr = dispatch_walk(&s, ctx, axes, Q, &stopped, pretty)
 		}
 	} else {
 		werr := dispatch_walk(&s, ctx, axes, Q, &stopped, pretty)
@@ -596,25 +590,31 @@ finish :: #force_inline proc(s: ^Scanner) -> Maybe(Error) {
 	return nil
 }
 
-// Whether the root value the scanner sits on has no members a demand could read: a scalar's, or an array's
-// when a first step names a member (the `1` bit of a gate, `route_serve`). `at` is where the automaton's own
-// root settlement stops: before a scalar, past an array's `[`. False at the end of input (the walk reports
-// `Truncated`) and for an object root.
-@(private, cold)
-demand_root_settles :: proc(s: ^Scanner, ctx: ^Query_Ctx, $Q: bit_set[Walk_Kind]) -> (at: u64, settles: bool) {
+// Settles the demand at a root with no members a demand could read: a scalar, or an array when a first step
+// names a member (the `1` bit of a gate, `route_serve`). `at` is where the automaton's own root settlement
+// stops: before a scalar, past an array's `[`. Not at the end of input (the walk reports `Truncated`) or at an
+// object root. `stops` is false beside a path run, which keeps its own settlement; the demand is settled either
+// way, and a call beside a path run needs the stop test its other queries would not ask for (`stop_capable`).
+@(private = "file", cold)
+settle_demand_root :: #force_no_inline proc(s: ^Scanner, ctx: ^Query_Ctx, $Q: bit_set[Walk_Kind]) -> (at: u64, stops: bool) {
 	if s.pos >= u64(len(s.src)) {
 		return 0, false
 	}
-	vc := lex.VCLASS[s.src[s.pos]]
-	switch {
+	switch vc := lex.VCLASS[s.src[s.pos]]; {
 	case vc >= VC_STRING:
-		return s.pos, true
+		at = s.pos
 	case vc == VC_ARRAY:
 		when .Gate in Q {
-			if ctx.gate.gated & 2 != 0 {
-				return s.pos + 1, true
+			if ctx.gate.gated & 2 == 0 {
+				return 0, false
 			}
+			at = s.pos + 1
+		} else {
+			return 0, false
 		}
+	case:
+		return 0, false
 	}
-	return 0, false
+	ctx.demand.settled, ctx.demand.can_settle = true, true
+	return at, .Path not_in Q
 }

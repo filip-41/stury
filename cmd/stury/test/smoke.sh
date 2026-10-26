@@ -379,4 +379,27 @@ cp "$T/deep1100.json" "$T/inplace.deep.json"
 check fmt_in_place_deep 5 '' fmt --in-place --max-depth 2000 "$T/inplace.deep.json"
 cmp -s "$T/inplace.deep.json" "$T/deep1100.json" || { echo "FAIL fmt_in_place_deep_untouched"; fails=$((fails + 1)); }
 
+# fmt of a large array, or of an object holding one, is written in pieces on the pool; --from jsonc reads the same
+# text whole. Repeated keys and number and escape spellings stay either way, and a text cut short writes nothing.
+cat >"$T/pieces.jq" <<'EOF'
+def rows: [range(40000) | "{\"a\":1e2,\"a\":\(.).50,\"s\":\"\\u00e9\\/\",\"n\":[-0,1E5,0.10,{},[]]}"] | join(",\n");
+(if $w == "array" then "[" + rows + "]"
+ else "{\"head\": 1.0, \"x\": {\"y\": [] }, \"rows\": [" + rows + "], \"tail\": {\"k\":1e2,\"k\":2}}" end)
+| if $cut == "" then . else .[:-3] end
+EOF
+for f in array object; do
+	"$S" -nr --arg w $f --arg cut "" -f "$T/pieces.jq" >"$T/pieces.json"
+	for o in "" --tab "--indent 5"; do
+		"$S" fmt $o "$T/pieces.json" >"$T/pieces.got"
+		"$S" fmt --from jsonc $o "$T/pieces.json" >"$T/pieces.want"
+		cmp -s "$T/pieces.got" "$T/pieces.want" || { echo "FAIL fmt_pieces_$f $o"; fails=$((fails + 1)); }
+	done
+	check "fmt_pieces_${f}_check" 1 '' fmt --check "$T/pieces.json"
+	"$S" -nr --arg w $f --arg cut 1 -f "$T/pieces.jq" >"$T/pieces_cut.json"
+	check "fmt_pieces_${f}_cut" 5 '' fmt "$T/pieces_cut.json"
+done
+"$S" fmt "$T/pieces.json" >"$T/pieces.got"
+check fmt_pieces_again 0 '' fmt --check "$T/pieces.got"
+rm -f "$T"/pieces*
+
 [ "$fails" = 0 ] && echo "stury CLI smoke: ok" || { echo "stury CLI smoke: $fails failed"; exit 1; }

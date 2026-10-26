@@ -96,15 +96,15 @@ get_number :: #force_inline proc(doc: ^Document, n: Node) -> (v: Number, ok: boo
 //	- Escape-free text is a slice of `doc.src`, escaped text is what the `.Dom` scan decoded, or, where it
 //	  decoded nothing (a `.Nodes` scan), unescaped into the document's arena on the first read and kept.
 //	- Reads of escaped strings a scan left undecoded write that arena, so on such a document they must not run
-//	  on several threads at once. A `.Dom` build decoded every escaped string up front, so `get_string` writes
-//	  nothing there and may run on any number of threads.
+//	  on several threads at once. A `.Dom` build decodes every escaped string up front, so its `get_string`
+//	  writes nothing and may run on any number of threads.
 //	- The document is not otherwise read-only: `get_key` unescapes an escaped key into the arena and keeps it in
 //	  `keys`, and `child_by_index` lists the members of a container it is asked past NTH_WALK of into `members`
 //	  with `member_at` (document_walk.odin). Both write the document and allocate from its allocator, so neither
-//	  belongs on several threads, nor do `query` and `pointer` (which allocate that allocator for a name or token
+//	  belongs on several threads, nor do `query` and `pointer` (which allocate from it for a name or token
 //	  longer than their stack scratch) nor the `children`/`members` walks, which read keys.
 //	- `ok` is false for a value that is not a string, and when an escaped string's decode could not be
-//	  allocated. A `.Dom` build decodes every escaped string up front, so its reads do not allocate.
+//	  allocated.
 @(require_results)
 get_string :: #force_inline proc(doc: ^Document, n: Node) -> (s: string, ok: bool) #no_bounds_check {
 	if has(doc, n) {
@@ -142,10 +142,9 @@ get_string_decoded :: #force_no_inline proc(doc: ^Document, n: Node) -> (s: stri
 	return string(b), ok
 }
 
-// The decoded key of member `n`: an escape-free key is a slice of `doc.src`, an escaped key is unescaped into the
-// arena on the first read and kept in `keys`, a write and an allocation on any document, a `.Dom` build's
-// included. Valid until `destroy`. `ok` is false when `n` is not an object's member, and when an escaped key's
-// decode could not be allocated.
+// The decoded key of member `n`, valid until `destroy`. An escaped key is unescaped into the arena on the first
+// read and kept in `keys`: a write and an allocation on any document, a `.Dom` build's included. `ok` is false
+// when `n` is not an object's member, and when an escaped key's decode could not be allocated.
 @(require_results)
 get_key :: proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
 	if s, ok = doc.keys[n]; ok {

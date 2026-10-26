@@ -125,25 +125,25 @@ Opts :: struct {
 	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
 	strict_limits:    bool, // check: the library's depth, digit and scale caps hold
 	max_depth_given:  bool, // --max-depth was on the command line
-	in_place:         bool, // fmt: rewrite each file through a temporary one and a rename
-	check:            bool, // fmt: write nothing, and exit 1 when a file is not formatted
+	in_place:         bool,
+	check:            bool,
 }
 
 // What the command line gives besides the options.
 Cli :: struct {
-	validating: bool, // `stury check`
-	formatting: bool, // `stury fmt`
+	validating: bool,
+	formatting: bool,
 	filter:     Maybe(string), // the filter, or under -f the file it is in
 	files:      [dynamic]string,
 	// --arg, --argjson, --slurpfile and --rawfile, the first of a name standing.
 	var_names:  [dynamic]string,
 	var_values: [dynamic]jq.Value,
 	positional: [dynamic]jq.Value, // --args and --jsonargs
-	binding_flag: string, // the first of --arg, --argjson, --slurpfile, --rawfile, --args and --jsonargs given
+	binding_flag: string,
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
 	mono:       bool, // -M
-	compact_given: bool, // -c was given
+	compact_given: bool,
 	// --from and --to as given on the command line. `parse_args` resolves them into `Opts`.
 	formats:    struct {
 		from, to: Maybe(Format),
@@ -322,7 +322,6 @@ note_json_flag :: proc(cli: ^Cli, flag: string, layout := false) {
 	}
 }
 
-// Records `flag` as the first option that binds a variable or the positional arguments.
 @(private = "file")
 note_binding_flag :: proc(cli: ^Cli, flag: string) {
 	if cli.binding_flag == "" {
@@ -697,8 +696,7 @@ parse_colors :: proc(spec: string) -> (colors: [8]string, ok: bool) {
 }
 
 // jq's choice of colour: with -C, or when stdout is a terminal and $NO_COLOR is unset or empty. Never with -M, and
-// never for fmt, whose output is the file's format rather than a terminal's. $JQ_COLORS is read either way, and
-// jq's warning printed when it does not parse, but fmt reads neither.
+// never for fmt, which ignores $JQ_COLORS too.
 set_colors :: proc(run: ^Run, cli: Cli) {
 	no_color := posix.getenv("NO_COLOR")
 	run.opts.color = (cli.color_set || is_terminal(os.stdout) && (no_color == nil || no_color == "")) && !cli.mono && !cli.formatting

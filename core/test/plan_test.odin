@@ -1,14 +1,12 @@
 package core_tests
 
-// A plan is compiled once per type and shared by both directions: a type it cannot spell refuses the same way on
-// every call, leaving nothing half-built behind, and a tag's escapes name the bytes they quote.
+// A plan is shared by both directions: a type it cannot spell refuses the same way on every call.
 
 import "core:mem"
 import "core:testing"
 import csv "../../csv"
 import json "../../json"
 
-// Two named struct arms, so `union_tag` is what reads an object into the union, and the plan must spell that tag.
 PLAN_A :: struct {
 	a: int,
 }
@@ -24,25 +22,21 @@ PLAN_Shapes :: struct {
 	},
 }
 
-// A name neither format can spell: a JSON key and a CSV column must be UTF-8. A name it cannot spell is unusable
-// in both directions, so the plan must never answer differently on a second call.
+// A JSON key and a CSV column must be UTF-8.
 PLAN_Bad_Name :: struct {
 	f: int "json:\"\xff\" csv:\"\xff\"",
 }
 
-// `\,` is a literal comma, and the header a CSV writer quotes. Both formats read the name back.
 PLAN_Comma :: struct {
 	last: string `json:"Last\, First" csv:"Last\, First"`,
 	// An escape and a flag in one tag: the name ends at the comma the escape does not quote.
 	age: int `json:"Age\, years,required" csv:"Age\, years,required"`,
 }
 
-// `\\` is one backslash, the byte that names an escape elsewhere: a tag can name it too.
 PLAN_Backslash :: struct {
 	f: int `json:"a\\b" csv:"a\\b"`,
 }
 
-// A flag none of the formats knows. Dropped, it would spell `f` and lose `bogus` silently.
 PLAN_Flag :: struct {
 	f: int `json:"f,bogus" csv:"f,bogus"`,
 }
@@ -89,7 +83,6 @@ test_plan_marshal_refusal_is_stable :: proc(t: ^testing.T) {
 		testing.expectf(t, out == nil, "call %d wrote %d bytes", call, len(out))
 	}
 
-	// Reading through the same plan answers the one read kind the plan's refusal maps to.
 	src := transmute([]byte)string(`{"f":1}`)
 	for call in 0 ..< 3 {
 		back: PLAN_Bad_Name
@@ -107,7 +100,6 @@ test_plan_marshal_refusal_is_stable :: proc(t: ^testing.T) {
 		testing.expectf(t, out == nil, "csv call %d wrote %d bytes", call, len(out))
 	}
 
-	// The CSV plan answers the same read refusal, and keeps answering it.
 	cread := transmute([]byte)string("f\n1\n")
 	for call in 0 ..< 3 {
 		back: []PLAN_Bad_Name
@@ -119,7 +111,6 @@ test_plan_marshal_refusal_is_stable :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_tag_comma_round_trip :: proc(t: ^testing.T) {
-	// A JSON key and a CSV header that hold a comma: the tag escapes it, and both directions see one name.
 	row := PLAN_Comma{"Ann", 41}
 
 	jtext, jerr := json.marshal(row, {}, nil, context.temp_allocator)
@@ -130,7 +121,6 @@ test_plan_tag_comma_round_trip :: proc(t: ^testing.T) {
 	testing.expectf(t, !jrefused, "json read back: %v at %d", jrf.kind, jrf.offset)
 	testing.expect_value(t, jback, row)
 
-	// `\\` is one backslash: the byte that names an escape elsewhere names itself too.
 	slash := PLAN_Backslash{1}
 	stext, serr := json.marshal(slash, {}, nil, context.temp_allocator)
 	testing.expect_value(t, serr, json.Marshal_Error.None)
@@ -163,8 +153,6 @@ test_plan_tag_comma_round_trip :: proc(t: ^testing.T) {
 
 @(test)
 test_plan_tag_unknown_flag_refuses :: proc(t: ^testing.T) {
-	// `bogus` is no flag this format knows, so the plan refuses the tag, by name and in both directions, instead of
-	// spelling `f` and dropping it.
 	_, jmerr := json.marshal(PLAN_Flag{1}, {}, nil, context.temp_allocator)
 	testing.expect_value(t, jmerr, json.Marshal_Error.Bad_Tag)
 

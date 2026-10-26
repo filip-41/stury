@@ -6,8 +6,7 @@ filters over JSON and CSV.
 Input is checked strictly by default: JSON against RFC 8259 (no `01`, no `NaN`, no invalid UTF-8, no lone
 surrogate), CSV against RFC 4180.
 
-**Status:** pre-1.0. The API may still change between releases; [CHANGELOG.md](CHANGELOG.md) lists what is
-released and what is not.
+**Status:** pre-1.0. The API may still change between releases ([CHANGELOG.md](CHANGELOG.md)).
 
 ## Features
 

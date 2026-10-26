@@ -59,16 +59,11 @@ Read CSV (RFC 4180). The first record of each file names the fields. Each later 
 Read tab\-separated values as \-\-from csv does, with no quoting and the escapes \\t, \\n, \\r, \\0 and \\\\ that jq's @tsv writes.
 .TP
 .B \-\-in\-place
-With \fBfmt\fR, rewrite each file: the formatted bytes go to a temporary file in the same directory and are
-renamed over it, so a reader sees the old file or the new one. The temporary file is synced to disk first and takes
-the file's mode and, where the system allows, its owner and group. As with sed \-i, the result is a new file: a hard
-link to the old one keeps the old bytes, and extended attributes are not carried over. A file already formatted is
-left untouched. Only when \-\-to is \-\-from, and not with \-\-check, standard input, or anything but a regular file.
+With \fBfmt\fR, rewrite each file through a temporary file in its directory and a rename. Mode (and owner and group where permitted) are kept; other hard links keep the old bytes. Only when \-\-to is \-\-from; refused with \-\-check, with standard input, and on a non\-regular file (exit 2).
 .TP
 .B \-\-check
 With \fBfmt\fR, write nothing: exit 1 when any file's formatted bytes differ from its bytes, 0 when every file
-is already formatted. A fault still exits 5. A fault is told as check tells it, with the position one byte past
-a text that ends mid\-value.
+is already formatted. A fault still exits 5.
 .TP
 .BI \-\-max\-depth " n"
 Refuse nesting past n levels (default 1024; jq's is 10000).
@@ -79,7 +74,7 @@ With \fBcheck\fR, keep the library's limits: numbers of at most 256 digits and a
 .B \-V
 Print stury\- and the version it was built with: a release version, or the short commit hash from a source build (dev outside a checkout).
 .SH INPUT DIFFERENCES FROM JQ
-stury reads strict RFC 8259 JSON. It rejects, with exit 5, these inputs that jq accepts: 01, 1., NaN, nan, Infinity, invalid UTF\-8 in a string, a lone low surrogate escape, a NUL after a value, and nesting past \-\-max\-depth. A parse error names the fault and the position of the byte where it was found. In a file after the first, it reads NAME:LINE:COLUMN: FAULT, counted in that file, as check prints it. A trailing comma, a comment or nesting past the cap is followed by the source line, a caret and the flag that would read it. \-\-argjson and \-\-jsonargs keep jq's message and append the fault. Each file ends its texts, except under \-\-seq, where the files are one stream as in jq. The full list is in docs/cli.md, "Differences from jq".
+stury reads strict RFC 8259 JSON. It rejects, with exit 5, these inputs that jq accepts: 01, 1., NaN, nan, Infinity, invalid UTF\-8 in a string, a lone low surrogate escape, a NUL after a value, and nesting past \-\-max\-depth. A parse error names the fault and the position of the byte where it was found. Each file ends its texts, except under \-\-seq. The full list is in docs/cli.md, "Differences from jq".
 .SH EXIT STATUS
 As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error, 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input. \fBfmt \-\-check\fR exits 1 when a file would change.
 .SH SEE ALSO

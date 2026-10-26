@@ -3,21 +3,18 @@ package core
 // A path procedure's answer, shared by every format: a span of the format's source, the container the answer
 // is about, and how the path landed. A format with a tape keeps its own row type beside these fields.
 
-// How a path landed.
 Answer_Outcome :: enum u8 {
 	Found, // the path resolved (`lo`/`hi` bound the value)
 	Missing, // the path does not land
 	Type_Mismatch, // a step was applied to the wrong container kind
 }
 
-// "No container": `Answer.owner` of an answer no single container holds: a format's root value, or a miss owed
-// by the document as a whole.
+// No container: a root value or a miss owed by the whole document.
 NO_OWNER :: max(u64)
 
 // One path query's answer for a format with no tape. `lo` and `hi` bound the value's span in the source a read
 // scanned; a miss bounds nothing (`lo == hi == 0`). `owner` is the container whose span holds the answer
-// (`NO_OWNER` when none does): a CSV record's first byte, for a format that keeps no container rows. `query`
-// indexes the caller's paths, 0 where a format answers one. `outcome` is how the path landed.
+// (`NO_OWNER` when none does); `query` indexes the caller's paths, 0 where a format answers one.
 Answer :: struct {
 	lo, hi:  u64,
 	owner:   u64,

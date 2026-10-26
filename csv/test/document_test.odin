@@ -189,17 +189,17 @@ test_document_scalar_exactness :: proc(t: ^testing.T) {
 		ok:  bool,
 	}
 	floats := []Float_Case {
-		{0, 0, false}, // underflow: a nonzero value that rounds to zero
-		{1, 0, false}, // overflow: no binary64 value
+		{0, 0, false},
+		{1, 0, false},
 		{2, 0, true},
-		{3, 0, true}, // -0 is exact, and keeps its sign
+		{3, 0, true},
 		{4, 1.5, true},
-		{5, 5, true}, // a quoted cell reads as unmarshal reads it
-		{6, 5, true}, // a leading + is CSV's spelling, not JSON's
-		{7, 0.1, true}, // a rounded significand is the value unmarshal stores
+		{5, 5, true},
+		{6, 5, true},
+		{7, 0.1, true},
 		{8, 9007199254740992, true},
-		{9, 9007199254740992, true}, // 9007199254740993 rounds to a binary64
-		{10, 1e23, true}, // a rounding
+		{9, 9007199254740992, true},
+		{10, 1e23, true},
 	}
 	for c in floats {
 		v, ok := csv.get_float(&doc, c.row, 0)
@@ -215,7 +215,7 @@ test_document_scalar_exactness :: proc(t: ^testing.T) {
 	ints := []Int_Case {
 		{5, 5, true},
 		{6, 5, true},
-		{11, 0, false}, // past max(i64)
+		{11, 0, false},
 		{12, min(i64), true},
 		{0, 0, false},
 		{4, 0, false},

@@ -92,7 +92,6 @@ lex_decimal :: proc(text: string) -> (d: Decimal_Lex) {
 	return
 }
 
-// Folds one digit value into the first 19 digits, and notes every nonzero digit past them.
 @(private)
 decimal_push :: #force_inline proc(d: ^Decimal_Lex, c: u8) {
 	if d.digits < 19 {
@@ -102,10 +101,9 @@ decimal_push :: #force_inline proc(d: ^Decimal_Lex, c: u8) {
 	d.digits += 1
 }
 
-// Whether `mant * 10^e` is exactly a binary64, not merely its correctly rounded projection. For `e >= 0`
-// the value is `o * 5^e * 2^(t+e)` for the odd part `o` of `mant`, representable iff `o * 5^e < 2^53`; for
-// `e < 0` it is `(o / 5^-e) * 2^(t-k)`, representable iff `5^-e` divides `mant` and the quotient's odd part
-// is below `2^53`. `5^23` is past `2^53`, so no `|e| > 22` is exact.
+// Whether `mant * 10^e` is exactly a binary64. With `o` the odd part of `mant`, that is `o * 5^e < 2^53` for
+// `e >= 0`; for `e < 0`, `5^-e` divides `mant` and the quotient's odd part is below `2^53`. No `|e| > 22` is
+// exact, as `5^23` is past `2^53`.
 @(private)
 decimal_exact :: #force_inline proc(mant: u64, e: i64) -> bool {
 	if mant == 0 {
@@ -130,10 +128,8 @@ decimal_exact :: #force_inline proc(mant: u64, e: i64) -> bool {
 	return q >> (u64(intrinsics.count_trailing_zeros(q)) & 63) < (u64(1) << 53)
 }
 
-// The binary64 a lexed decimal spells, correctly rounded, and the exactness: `.None` for a value past the
-// binary64 range (`1e400`), `.Underflowed` for a nonzero value that rounds to zero (`1e-400`), `.Exact`
-// only when the binary64 is the authored value, `.Inexact` for every other rounding. A significand past 19
-// digits is under-claimed `.Inexact` as JSON's decoder under-claims it.
+// The binary64 a lexed decimal spells, correctly rounded, and the exactness. `.Exact` only when the binary64
+// is the authored value. A significand past 19 digits is under-claimed `.Inexact` as JSON's decoder under-claims it.
 @(private)
 decimal_value :: proc(d: Decimal_Lex, text: string) -> core_pkg.Number {
 	v, _ := strconv.parse_f64(text)
@@ -141,7 +137,6 @@ decimal_value :: proc(d: Decimal_Lex, text: string) -> core_pkg.Number {
 	case math.is_inf(v):
 		return {exactness = .None}
 	case v == 0 && d.nonzero:
-		// The sign of an underflow is still the authored one.
 		return {value = v, exactness = .Underflowed}
 	case d.nonzero && d.digits > 19:
 		return {value = v, exactness = .Inexact}
@@ -151,7 +146,6 @@ decimal_value :: proc(d: Decimal_Lex, text: string) -> core_pkg.Number {
 	return {value = v, exactness = .Inexact}
 }
 
-// The binary64 a decimal cell spells and its exactness. `.None` for any other text.
 @(private)
 read_float_value :: proc(text: string) -> core_pkg.Number {
 	d := lex_decimal(text)
@@ -161,7 +155,6 @@ read_float_value :: proc(text: string) -> core_pkg.Number {
 	return decimal_value(d, text)
 }
 
-// `[+-]?digits` as a magnitude and a sign. `over` is set past 128 bits. Any other text is `.Wrong_Kind`.
 @(private)
 read_int :: proc(text: string) -> (mag: u128, over, neg: bool, fault: core_pkg.Shape_Fault) {
 	digits := text

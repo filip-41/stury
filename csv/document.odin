@@ -140,9 +140,8 @@ column_count :: proc(doc: ^Document) -> int {
 	return doc.width
 }
 
-// The column the header names `name`, the first of them when several do. `ok` is false for a name the header
-// lacks and for a document with no header. The path edits read `duplicates` instead, and refuse a name two
-// columns share under `.Default`/`.Refuse`; `query` reads the `duplicates` the document was built with.
+// The column the header names `name`, the first of them when several do, whatever `duplicates` says. `ok` is
+// false for a name the header lacks and for a document with no header.
 @(require_results)
 column :: proc(doc: ^Document, name: string) -> (col: int, ok: bool) {
 	col, _, _ = named_column(doc.src, doc.names[:], doc.dialect, name, .First)
@@ -171,7 +170,6 @@ named_column :: proc(src: []byte, names: []Field, dialect: Dialect, name: string
 		case .Default, .Refuse:
 			return -1, f.lo, true
 		case .First:
-			// Unreachable: the first match already returned.
 		case .Last, .All:
 			last = c
 		}
@@ -238,8 +236,7 @@ get_string :: proc(doc: ^Document, row, col: int) -> (s: string, ok: bool) {
 	return read_text(doc, f, len(doc.names) + i)
 }
 
-// The integer a cell spells, read by `unmarshal`'s own integer store (`store_int`): `[+-]?digits`, with a quoted
-// cell's quotes removed. `ok` is false for an empty cell, any other text, and a value `i64` does not hold.
+// The integer a cell spells: `[+-]?digits`, with a quoted cell's quotes removed. `ok` is false for an empty cell, any other text, and a value `i64` does not hold.
 @(require_results)
 get_int :: proc(doc: ^Document, row, col: int) -> (v: i64, ok: bool) {
 	text := present_text(doc, row, col) or_return
@@ -250,8 +247,8 @@ get_int :: proc(doc: ^Document, row, col: int) -> (v: i64, ok: bool) {
 }
 
 // The binary64 a cell spells, read by `unmarshal`'s own float reader (`read_float_value`) and correctly
-// rounded. `ok` is false for an empty cell, any other text, a nonzero value that underflows to zero (`1e-400`,
-// where returning `0, true` hid the loss; `unmarshal` stores that 0), or a value with no binary64 (`1e400`).
+// rounded. `ok` is false for an empty cell, any other text, a nonzero value that underflows to zero (`1e-400`;
+// `unmarshal` stores that 0), or a value with no binary64 (`1e400`).
 // A rounded significand (`0.1`, `1e23`) is accepted: it is the value `unmarshal` stores, not an error.
 @(require_results)
 get_float :: proc(doc: ^Document, row, col: int) -> (v: f64, ok: bool) {

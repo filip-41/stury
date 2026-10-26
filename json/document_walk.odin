@@ -22,8 +22,7 @@ child_by_key :: proc(doc: ^Document, n: Node, name: string) -> Node {
 
 // Member `i` of container `n`, 0-based (from the end when negative), or `NO_NODE`. O(1) over an array of
 // scalars, and over any other container once a call has reached NTH_WALK members into it, which lists its
-// members once: that listing writes `members` with `member_at` and allocates from the document's allocator, so
-// it is not a read for several threads.
+// members once.
 @(private, require_results)
 child_by_index :: proc(doc: ^Document, n: Node, index: int) -> Node {
 	i := index

@@ -110,16 +110,14 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 
 `check` (or `validate`) validates its inputs and prints nothing when they are valid.
 
-- It accepts every input that `stury .` reads without error, several texts included. Under `--seq` its files
-  are one stream, as `stury .` reads them: a record cut at a file's end is joined ([Records and
-  events](#records-and-events)).
+- It accepts every input that `stury .` reads without error, several texts included.
 - It requires at least one JSON text. An empty or whitespace-only input fails with `No JSON text` and exit 5,
   where `stury .` reads it as a stream of no texts and exits 0.
 - With no `FILE` on a terminal it prints the short usage and exits 2, as `stury` with no filter does.
 
 | Flag | Effect |
 | --- | --- |
-| `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence, and reads `FILE` one at a time: a text cut at a file's end is a fault, where the filter reads the files as one stream. |
+| `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence; each `FILE` is read alone, so a text cut at a file's end is a fault. |
 | `--from jsonc` | Validate JSONC as `stury --from jsonc .` reads it, to the same limits. A comment's text holds no escape. |
 | `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. CSV and TSV are judged by `csv.validate`, and a fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An input with no record fails with `No CSV text` or `No TSV text`. |
 | `--strict-limits`, `--max-depth N` | As [above](#sturys-own-options). |
@@ -131,8 +129,8 @@ Exit codes: 0 on success, 5 for invalid input, 2 for a usage or file error.
 
 ## `fmt`
 
-`fmt` writes each input back in the printer's layout, or in another format: one verb for formatting and
-transcoding. It runs no filter, so it takes no `FILTER`.
+`fmt` writes each input back in the printer's layout, or in another format. It runs no filter, so it takes no
+`FILTER`.
 
 ```sh
 stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [FILE...]
@@ -147,23 +145,20 @@ stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] 
 - `--from` chooses how each file is read, and `--to` how it is written; `--to` defaults to `--from`, so a plain
   `stury fmt FILE` formats `FILE` as JSON. Each half is chosen on its own, so `stury fmt --from csv --to json`
   reads CSV and writes pretty JSON.
-- Between `json`, `jsonc` and `ndjson` the values are written as they were read, whatever the `--to`: a transcode
-  changes the layout and, from `jsonc`, drops the comments, and nothing else. To `csv` or `tsv` a value becomes
-  cells, spelled as `--to csv` spells them, a number as jq spells it.
+- A transcode from `jsonc` to `json` or `ndjson` drops the comments. To `csv` or `tsv` a value becomes cells,
+  spelled as `--to csv` spells them, a number as jq spells it.
 - `fmt` is idempotent: `stury fmt` on its own output gives the same bytes. A leading byte order mark is not written.
 - Each file is formatted as a table of its own: `stury fmt --from csv a.csv b.csv` writes each file's header,
   where `stury --from csv --to csv . a.csv b.csv` writes one table under the first file's header.
-- `fmt` never colours its output, so `-C` is refused; so is every option that shapes a filter's reading or output
-  and not a file's format (`-c`, `-r`, `-j`, `--raw-output0`, `-a`, `-S`, `-e`, `-n`, `-s`, `-R`, `--seq`, `--stream`,
-  `--stream-errors`, `--strict-limits`, `-f`, `-L`, `--arg`, `--argjson`, `--slurpfile`, `--rawfile`, `--args`,
-  `--jsonargs`, `--indent 0`), with exit 2. `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N`
-  and, with a CSV-like `--to`, `--grow-header` apply. A JSON-like output is written to 1024 levels of nesting at
-  most: `--max-depth` lets `fmt` read a deeper value, which it then refuses, with exit 5.
+- `fmt` never colours its output, and it refuses every option that shapes a filter run (`-C`, `-c`, `-r`, ...,
+  `--indent 0`): exit 2. `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N` and, with a
+  CSV-like `--to`, `--grow-header` apply. A JSON-like output is written to 1024 levels of nesting at most:
+  `--max-depth` lets `fmt` read a deeper value, which it then refuses, with exit 5.
 
 | Flag | Effect |
 | --- | --- |
 | `--check` | Write nothing. Exit 1 when any file's formatted bytes differ from its bytes (a compact JSON text, a CSV field that needs no quotes, a CRLF line ending), 0 when every file is already formatted. A fault still exits 5. |
-| `--in-place` | Rewrite each file: its formatted bytes are written to a temporary file in the same directory, synced to disk, given the file's mode and, where the system allows it, its owner and group, and renamed over it, so a reader sees the old file or the new one, never half of each. The new file is another file, as with `sed -i`: a hard link to the old one keeps the old bytes, and extended attributes and ACLs are not carried over. A file already formatted is left untouched. Only when `--to` is `--from` (a formatter, not a transcoder); refused with `--check`, with standard input, with different formats, and on anything but a regular file (a symbolic link included), as a usage error (exit 2). |
+| `--in-place` | Rewrite each file through a temporary file in its directory and a rename; mode (and owner and group where permitted) are kept; other hard links keep the old bytes. Only when `--to` is `--from`; refused with `--check`, with standard input, and on a non-regular file (exit 2). |
 | `FILE...` | In argument order. A fault names the file and its position, as `check` does: `stury: parse error: FILE:L:C: ...`, and `stury: error: FILE:L:C: ...` under `--from jsonc`. A text that ends mid-value is told one byte past its end (`printf '[1] [2' | stury fmt` gives `<stdin>:1:7: Unfinished JSON term`), where a filter run tells it at the last byte. The run exits 5, and later files are not read. A file that does not open is reported and the run goes on, with exit 2. |
 | no `FILE` | Reads standard input (`-`). On a terminal it prints the short usage and exits 2, as `check` does. `--in-place` refuses standard input. |
 
@@ -190,11 +185,8 @@ $ stury fmt --in-place --tab source.json
 $ stury fmt --from ndjson --to csv records.ndjson
 ```
 
-- `--check` writes nothing, and `--in-place` leaves a file already in the printer's layout untouched, its inode,
-  mode and times included.
+- `--in-place` leaves a file already in the printer's layout untouched, its inode, mode and times included.
 - CSV and TSV are read whole, as `check` reads them, so `--check` and `--in-place` see every byte of a file.
-  Under `--check` and `--in-place` a file's formatted text is held whole, to compare it or to write it; a plain run
-  writes each file out as it is formatted.
 
 ## Formats
 
@@ -244,7 +236,7 @@ Every input is read by one grammar, the library's: `validate` with `dialect = .J
 
 | Option | Behaviour |
 | --- | --- |
-| `--seq` | Passes over a record that does not parse with `stury: ignoring parse error: ...` and puts `0x1E` before each output. The files are one byte stream, a text cut at a file's end read on in the next ([`--seq` reads each record as one text](#--seq-reads-each-record-as-one-text)). |
+| `--seq` | Passes over a record that does not parse with `stury: ignoring parse error: ...` and puts `0x1E` before each output. |
 | `--stream` | Gives jq's `[path, leaf]` and `[path]` events of each text once it parses whole, and refuses a text that does not parse, as any input. |
 | `--stream-errors` | Gives what jq gives of a faulty text: the events before the fault, then `[message, path]`. `[1,` gives `[0],1` and then `["Unfinished JSON term at EOF at line 1, column 3",[1]]`. Its messages, positions, exit code and `--seq` resync are jq's. |
 
@@ -337,10 +329,9 @@ $ stury --from csv --to csv 'select(.n | tonumber > 1)' people.csv
 - A pipe, FIFO or socket, and stdin under `--unbuffered`, is read as it comes, in 64 KiB blocks, up to
   8 MiB ahead. Each run of whole lines that has arrived is answered before the next.
 - Output is written whenever the reader waits, so `tail -f log | stury .msg` answers each line as it lands.
-- A text that runs past a block is read on until it ends. Answers, messages, positions and exit codes are
-  those of the whole read. Memory holds a block, what is read ahead and the longest text. Under `--seq` a text
-  that runs past a file's end is read on into the next file, a window at a time and only up to the separator
-  that ends it; the files are never read up front.
+- A text that runs past a block is read on until it ends, under `--seq` into the next file. Answers, messages,
+  positions and exit codes are those of the whole read. Memory holds a block, what is read ahead and the
+  longest text.
 - `-s` and `--from jsonc` read stdin whole, as `check` does. `-n` with `inputs` keeps what it has read.
 - Texts with no newline between them wait for one, as jq's line reads do.
 
@@ -449,9 +440,8 @@ The exit codes are jq's, but the messages are stury's.
 | The same, in a file after the first, and under `fmt` | `stury: parse error: NAME:L:C: SENTENCE`, counted in that file (a `--seq` text that runs between files has the stream's position instead) |
 | Any fault under `check` or `--from jsonc`, `fmt` included | `stury: error: NAME:L:C: SENTENCE`, such as `<stdin>:1:7: Invalid numeric literal` |
 
-L and C are the line and 1-based byte column of the byte the fault is at. A text that ends mid-value is told at
-its last byte, as jq tells it (the position `--stream-errors` gives). One past the last byte instead is the
-library's `error_position`, which `check` and `fmt` print.
+L and C are the line and 1-based byte column of the byte the fault is at. Where a text that ends mid-value is
+told, in a filter run and under `check` and `fmt`, is in [Different parse errors](#different-parse-errors).
 
 A trailing comma, a comment or nesting past `--max-depth` is followed by the source line, a caret under the
 byte, and the flag that would read it (`--from jsonc`, `--max-depth N`), in a filter run and under `check` alike.
@@ -508,7 +498,9 @@ these places:
 ## Differences from jq
 
 stury reads strict RFC 8259 JSON and reports faults its own way. The rest of the language and the options are
-jq's.
+jq's. jq has no `check` and no `fmt`, and `--from` and `--to` read and write formats jq does not. `.@comment`,
+`.@comment_inline` and `.@comment_foot`, a syntax error in jq, read a value's comments ([Comments in the
+CLI](#comments-in-the-cli)); outside `--from jsonc` they give `null`.
 
 ### Common differences
 
@@ -547,18 +539,11 @@ module's data file say the same. `check` and `fmt` keep the library's one past i
 
 #### Files are read separately
 
-Each file ends its texts, except under `--seq`, which reads them as one stream ([`--seq` reads each record as
-one text](#--seq-reads-each-record-as-one-text)). jq reads `1` in one file and `2` in the next as `12`, and
-continues a text cut at a file's end in the next file. A parse error in a file after the first names the file
+Each file ends its texts, except under `--seq` ([below](#--seq-reads-each-record-as-one-text)). jq reads `1` in
+one file and `2` in the next as `12`. A parse error in a file after the first names the file
 and counts its line and column in that file (`b.json:1:4: Unexpected character`), where jq counts on across the
 files it joins; a text that runs from one file into the next under `--seq` is the exception, and is told at its
 line and column in the stream, without a file's name.
-
-#### `check`, `fmt`, `--from` and `--to` are new
-
-jq has no `check` and no `fmt`. `--from` and `--to` read and write formats jq does not. `.@comment`,
-`.@comment_inline` and `.@comment_foot`, a syntax error in jq, read a value's comments ([Comments in the
-CLI](#comments-in-the-cli)); outside `--from jsonc` they give `null`.
 
 #### `--seq` reads each record as one text
 

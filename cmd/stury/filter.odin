@@ -112,7 +112,9 @@ eval_input :: proc(run: ^Run, v: jq.Value) -> jq.Signal {
 				run := ((^Print_Sink)(s)).run
 				// jq's message goes to stderr at once and its output waits in a buffer: an output's messages
 				// come before it, never after all of the run's output.
-				jq.flush_messages(&run.ip)
+				if len(run.ip.messages) > 0 {
+					jq.flush_messages(&run.ip)
+				}
 				if sel := run.selected; sel != nil {
 					print_cells(run, sel.cols, sel.rec, sel.dialect)
 					return .Go
@@ -138,8 +140,6 @@ run_once :: proc(run: ^Run, v: jq.Value) {
 	ip := &run.ip
 	sig := eval_input(run, v)
 	if len(ip.messages) > 0 {
-		// jq's output waits in its buffer while a message goes straight to stderr: what the run held is
-		// written after the messages, as jq's buffer is.
 		jq.flush_messages(ip)
 		flush_some(run, force = true)
 	}

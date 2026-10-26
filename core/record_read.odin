@@ -1,8 +1,5 @@
 package core
 
-// The typed per-record reader's neutral half: a handle that resolves a type's plan and read shape once, and a
-// format source that pulls one record and reads it. A format supplies its own options and its own plan spelling.
-
 // The format half of a `Record_Read`: how the format pulls the next record and reads it into a value, and how it
 // frees the pull's state. `destroy` may be nil for a source that holds nothing.
 //
@@ -11,8 +8,8 @@ package core
 //	  `.Bad_Option`; a fault that frames no record is the format's own.
 //	- `opts` is the reader's options as the format spells them, read again on every call: a change made between
 //	  records applies to the next.
-//	- `plan` is the reader's resolved plan. It is the handle's when the reader owns it, and a handle may be
-//	  copied or returned by value: a state that held this pointer would point into the copy's caller.
+//	- `plan` is the reader's resolved plan, passed in because a state that held it would dangle in a copy of the
+//	  handle.
 //	- The end of the input is `.Bad_Option`, for every format. A fault no record holds is the format's own, and
 //	  its offset is into the input (`record_read_at` is then 0).
 //	- `format` spells a plan the reader makes when it is given none. Core makes a `Type_Plan` by it.
@@ -50,9 +47,8 @@ record_read_plan :: proc(r: ^Record_Read($O)) -> ^Type_Plan {
 // Resolve the plan for `T` and lower its read shape once. `plan` is the caller's, borrowed, or nil to make and
 // own one spelled by `source.format`, in `allocator`. Destroys the reader's previous reading first.
 //
-// A format refuses its own unusable options (JSON's `.Structural` without JSONC) in its `record_read_init`
-// before this, since their spelling is its own. So does a refusable option leave the handle empty, not half
-// built: a refusal frees the plan it made and the source's state.
+// A format refuses its own unusable options (JSON's `.Structural` without JSONC) before calling this. A refusal
+// frees the plan and source state it made and leaves the handle empty.
 @(require_results)
 record_read_init :: proc(
 	r: ^Record_Read($O),
@@ -85,22 +81,30 @@ record_read_init :: proc(
 	return nil
 }
 
-// Read the next record into `ptr^`, as the format's `unmarshal` reads one record's bytes. The options the reader
-// holds apply, so a change since the last record takes effect here. A refusal leaves the record's partial value
-// and the reader ready for the next record.
+// `.Bad_Option` for a reader that is not ready, `.Plan_Mismatch` for a root other than `T`, else nil. A format's
+// `unmarshal` calls it before its source.
 @(require_results)
-unmarshal :: proc(r: ^Record_Read($O), ptr: ^$T) -> Maybe(Unmarshal_Error) {
+record_read_check :: #force_inline proc(r: ^Record_Read($O), ptr: ^$T) -> Maybe(Unmarshal_Error) {
 	if r == nil || r.source.read == nil || !r.ready || ptr == nil {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	if r.root != T {
 		return Unmarshal_Error{kind = .Plan_Mismatch}
 	}
+	return nil
+}
+
+// Read the next record into `ptr^`. A refusal leaves the record's partial value and the reader ready for the
+// next record.
+@(require_results)
+unmarshal :: proc(r: ^Record_Read($O), ptr: ^$T) -> Maybe(Unmarshal_Error) {
+	if err := record_read_check(r, ptr); err != nil {
+		return err
+	}
 	return r.source.read(r.source.state, &r.opts, record_read_plan(r), ptr)
 }
 
-// Free the plan the reader made and the source's state, and clear the handle. A copy of the handle shares both,
-// so destroy it once; destroying this handle twice finds no state the second time.
+// Free the plan the reader made and the source's state, and clear the handle.
 record_read_destroy :: proc(r: ^Record_Read($O)) {
 	if r == nil {
 		return

@@ -2,6 +2,10 @@ package csv
 
 // The edits `set`, `insert`, `remove` and the span edit `splice`. Each returns a new buffer that keeps every
 // byte of the source it did not target unchanged.
+//
+// `set`, `insert` and `remove` judge the source as `records` reads it under `opts`: dialect, strictness,
+// limits and `no_header`; a fault is `.Bad_Source`. A header name two columns share follows `opts.duplicates`;
+// a refused repeat is `.Bad_Source` with `syntax = .Duplicate_Key` at the repeated header cell.
 
 import "base:runtime"
 import core_pkg "../core"
@@ -39,10 +43,6 @@ splice :: proc(src: []byte, edits: []Edit, dialect := Dialect{}, allocator := co
 // Replace the cell `path` names, or that column's cell in every row, with `value`, spelled as `marshal` spells
 // a cell. `value` is a bool, integer, float, string, enum, rune, or a `Maybe` of one.
 //
-//	- The source is judged as `records` reads it under `opts`: `dialect`, `strictness` and `limits` (`.Bad_Source`).
-//	  `opts.duplicates` picks the column a name two header columns share: `.First`, `.Last` or `.All` (the last, as
-//	  `unmarshal` reads it), while `.Default`/`.Refuse` refuses the repeat as `.Bad_Source` with
-//	  `syntax = .Duplicate_Key` at the repeated header cell. `opts.no_header` says the first record is data.
 //	- The cell is quoted or escaped as the dialect needs. An empty string is `""` where cells are quoted.
 //	- A value the dialect cannot spell is `.Encode` with `Marshal_Error.Unwritable`: a delimiter, CR or LF the
 //	  dialect can neither quote nor escape, or an empty cell that would leave a record of one empty field,
@@ -131,8 +131,7 @@ watched_set :: proc(
 //	- A negative `at`, one past the row count, and a text with no header record when `header` is set are
 //	  `.Unplaceable`.
 //	- Appended to a text that does not end in a line break, the record gets a break before it and none after.
-//	- The source is judged as `records` reads it under `opts`: `dialect`, `strictness`, `limits` and `no_header`.
-//	  `opts.duplicates` is not read: the row's fields find their columns by name, and every column of that name is
+//	- `opts.duplicates` is not read: the row's fields find their columns by name, and every column of that name is
 //	  written.
 @(require_results)
 insert :: proc(
@@ -172,10 +171,6 @@ watched_insert :: proc(
 //	- A column removal that would leave a record reading as no record is `.Unplaceable`, with the record in
 //	  `offset`. That happens when removing the only column, when one empty field is left, or when the new first
 //	  field starts with the comment byte.
-//	- The source is judged as `records` reads it under `opts`: `dialect`, `strictness` and `limits` (`.Bad_Source`).
-//	  `opts.duplicates` picks the column a name two header columns share (`.First`, `.Last`, or `.All` as the last);
-//	  `.Default`/`.Refuse` refuses the repeat as `.Bad_Source` with `syntax = .Duplicate_Key` at the repeated header
-//	  cell. `opts.no_header` says the first record is data.
 @(require_results)
 remove :: proc(
 	src: []byte,
@@ -277,9 +272,6 @@ sites_of :: proc(src: []byte, t: Target, opts: Read_Opts, header, with_header: b
 	return finished(&it)
 }
 
-// Reads the header record when there is one, and resolves `t`'s column as `unmarshal` would: a name two columns
-// share follows `opts.duplicates`, and `.Default`/`.Refuse` reports the repeat. `has_col` is false when the header
-// lacks the name or there is no record.
 @(private)
 seek_target :: proc(it: ^Records, t: Target, opts: Read_Opts, header: bool) -> (col: int, head: Record, has_col: bool, err: Maybe(Path_Error)) {
 	col = max(t.col, 0)
@@ -337,8 +329,7 @@ Spot :: struct {
 	unbroken: bool,
 }
 
-// The place for a new data row `at` in `src`, whose first record is a header when `opts.no_header` is false. The
-// caller frees `columns`.
+// The caller frees `columns`.
 @(private)
 insert_spot :: proc(src: []byte, at: int, opts: Read_Opts, allocator: runtime.Allocator) -> (spot: Spot, err: Maybe(Path_Error)) {
 	if at < 0 {
@@ -470,8 +461,7 @@ is_oom :: proc(err: Maybe(Path_Error)) -> bool {
 	return faulted && (e.kind == .Out_Of_Memory || e.kind == .Encode && e.encode == .Out_Of_Memory)
 }
 
-// The path error when `src` is not CSV as `records` reads it under `opts`: the dialect, `strictness` and `limits`
-// the caller passed, and no other field.
+// The path error when `src` is not CSV as `records` reads it under `opts`.
 @(private)
 check_source :: proc(src: []byte, opts: Read_Opts) -> Maybe(Path_Error) {
 	if e, bad := validate(src, opts).?; bad {

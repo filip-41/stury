@@ -1,10 +1,5 @@
 package csv_tests
 
-// `csv.validate_records`: the records `validate` refuses, one fault for each, in source order, each with its
-// bytes in the text and its fault's offset into the text. A record ends at the LF that closes it outside quotes,
-// the read resumes after it, and the records after a fault are listed too. `err` is the call's failure, never a
-// fault of the text.
-
 import "base:runtime"
 import "core:slice"
 import "core:strings"
@@ -24,8 +19,6 @@ caller_only :: proc() -> cs.Batch_Runner {
 
 @(test)
 test_validate_records_lists_three_bad_rows :: proc(t: ^testing.T) {
-	// A four-field record, then a record a field short, a quote inside a field, and a quote that never closes:
-	// the refused records start at offsets 8, 14 and 25 in the text.
 	src := transmute([]byte)string("1,2,3,4\n1,2,3\n1,2,3,ab\"c\n1,2,3,\"open\n")
 	want := []cs.Record_Fault {
 		{lo = 8, hi = 13, err = cs.Error{kind = .Field_Count, offset = 8}},
@@ -73,7 +66,6 @@ test_validate_records_reads_on_after_a_framing_fault :: proc(t: ^testing.T) {
 	host.batch_pool_init(&pool, 4)
 	defer host.batch_pool_destroy(&pool)
 	for c in TAIL_CASES {
-		// A two-field record, a short record, then the refused row and a clean record after it: 0, 4, 10, 14.
 		src := transmute([]byte)strings.concatenate({"a,b\n1,2,3\n3,4\n", c.row, "7,8\n"}, context.temp_allocator)
 		want := []cs.Record_Fault {
 			{lo = 4, hi = 9, err = cs.Error{kind = .Field_Count, offset = 4}},
@@ -83,13 +75,11 @@ test_validate_records_reads_on_after_a_framing_fault :: proc(t: ^testing.T) {
 		for runner in ([]^cs.Batch_Runner{nil, &caller, &pool.runner}) {
 			faults, err := cs.validate_records(src, {}, runner)
 			defer delete(faults)
-			// The refused record before the quote or UTF-8 fault stands, and the fault is listed after it.
 			testing.expectf(t, slice.equal(faults, want), "%q: %v, want %v", c.row, faults, want)
 			testing.expect_value(t, err, nil)
 			testing.expect_value(t, faults[len(faults) - 1].err, want[1].err)
 		}
 	}
-	// With no refused record before it, the fault is the only one listed.
 	for c in TAIL_CASES {
 		src := transmute([]byte)strings.concatenate({"a,b\n", c.row, "7,8\n"}, context.temp_allocator)
 		want := cs.Error{kind = .Bad_Char, offset = u64(4 + c.at)}
@@ -115,7 +105,6 @@ test_validate_records_is_empty_on_a_clean_text :: proc(t: ^testing.T) {
 		{"", {}},
 		{"\xef\xbb\xbf1,2,3,4\n5,6,7,8\n", {}},
 		{"1,2\n1,2,3\n", {dialect = {ragged = true}}},
-		// UTF-8 is not judged under `.Structural`, so the row is no fault there.
 		{"1,2,3,4\n1,2,3,\xff\n", {strictness = .Structural}},
 	}) {
 		src := transmute([]byte)c.src
@@ -214,15 +203,12 @@ SPAN_CASES :: []Span_Case {
 	{"last, too many", "a,b\n1,2\n3,4,5", {}, []cs.Record_Fault{{lo = 8, hi = 13, err = {kind = .Field_Count, offset = 8}}}},
 	{"last, quote fault", "a,b\n1,2\n3,x\"y", {}, []cs.Record_Fault{{lo = 8, hi = 13, err = {kind = .Bad_Char, offset = 11}}}},
 	{"last, open quote", "a,b\n1,2\n3,\"y\n", {}, []cs.Record_Fault{{lo = 8, hi = 13, err = {kind = .Truncated, offset = 13}}}},
-	// A CR before the record's LF is not in its bytes.
 	{"crlf, field count", "a,b,c\r\n1,2\r\n4,5,6\r\n", {}, []cs.Record_Fault{{lo = 7, hi = 10, err = {kind = .Field_Count, offset = 7}}}},
 	{"crlf, quote fault", "a,b\r\n3,x\"y\r\n5,6\r\n", {}, []cs.Record_Fault{{lo = 5, hi = 10, err = {kind = .Bad_Char, offset = 8}}}},
-	// A misplaced quote is text: the record ends at its own line, and the next two are judged on their own.
 	{"stray quote", "a,b\n3,x\"y\n4,5,6\n7,8\n", {}, []cs.Record_Fault{
 		{lo = 4, hi = 9, err = {kind = .Bad_Char, offset = 7}},
 		{lo = 10, hi = 15, err = {kind = .Field_Count, offset = 10}},
 	}},
-	// A comment line's quotes open nothing, and nor do any under `.None`.
 	{"comment line", "a,b\n#\xff\"x\n1,2\n", {dialect = {comment = '#'}}, []cs.Record_Fault{{lo = 4, hi = 8, err = {kind = .Bad_Char, offset = 5}}}},
 	{"unquoted", "a;b\n1;\"x;3\n4;5\n", {dialect = {delimiter = ';', quoting = .None}}, []cs.Record_Fault{{lo = 4, hi = 10, err = {kind = .Field_Count, offset = 4}}}},
 }

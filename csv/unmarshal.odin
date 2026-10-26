@@ -63,10 +63,7 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 // before it, the refused one last. Everything is allocated from `allocator` and nothing is freed, so read into
 // an arena and free it whole. With `plan` nil the plan is this thread's cached one for `T`.
 //
-// A `^Record_Read` reads one row of a `Records` or a `Record_Reader` the caller made, the same way:
-// `record_read_init` resolves the plan, the row shape and the header once, and each `unmarshal` of it pulls one
-// row into a struct. A fault's offset stays into that row's bytes (`record_read_at` places it), and the
-// reader's `strictness` and `unknown_fields` apply at every row (see `Record_Read` for the rest).
+// A `^Record_Read` reads one row at a time, the same way (see `Record_Read`).
 unmarshal :: proc {
 	unmarshal_records,
 	unmarshal_record,
@@ -86,7 +83,6 @@ unmarshal_records :: proc(
 	return read_records(src, ptr, T, opts, plan, allocator, false)
 }
 
-// One row of the reader's input, into `ptr^`, as `unmarshal` reads a row's cells.
 @(require_results)
 unmarshal_record :: proc(rd: ^Record_Read, ptr: ^$T) -> Maybe(Unmarshal_Error) {
 	return core_pkg.unmarshal(rd, ptr)

@@ -24,7 +24,6 @@ test_query_answers_document_spans :: proc(t: ^testing.T) {
 			"answer %d: %v, want %q at owner %d", i, a, names[i], owners[i])
 	}
 
-	// Every row, the record's own span.
 	clear(&out)
 	err = csv.query(&doc, ".[]", &out)
 	testing.expect_value(t, err, nil)
@@ -34,7 +33,6 @@ test_query_answers_document_spans :: proc(t: ^testing.T) {
 		testing.expectf(t, string(src[a.lo:a.hi]) == records[i] && a.owner == owners[i], "record %d: %v", i, a)
 	}
 
-	// One row, one cell.
 	clear(&out)
 	err = csv.query(&doc, ".[1][1]", &out)
 	testing.expect_value(t, err, nil)
@@ -47,7 +45,6 @@ test_query_answers_document_spans :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(out), 1)
 	testing.expect_value(t, string(src[out[0].lo:out[0].hi]), "2,bob")
 
-	// `limit` counts the answers.
 	clear(&out)
 	err = csv.query(&doc, "limit(2; .[].name)", &out)
 	testing.expect_value(t, err, nil)
@@ -96,22 +93,18 @@ test_query_refusals :: proc(t: ^testing.T) {
 	out: [dynamic]csv.Answer
 	defer delete(out)
 
-	// The path's own fault keeps its byte.
 	perr := csv.query(&doc, ".[", &out)
 	e, faulted := perr.?
 	testing.expect(t, faulted && e.kind == .Bad_Path && e.offset == 1)
-	// A shape CSV cannot answer.
 	perr = csv.query(&doc, ".[][]", &out)
 	e, faulted = perr.?
 	testing.expect(t, faulted && e.kind == .Unsupported_Path)
-	// A name with no header at all.
 	headerless, herr := csv.build(src, {no_header = true})
 	defer csv.destroy(&headerless)
 	testing.expect_value(t, herr, nil)
 	perr = csv.query(&headerless, ".[].name", &out)
 	e, faulted = perr.?
 	testing.expect(t, faulted && e.kind == .Unsupported_Path)
-	// Past the path's step cap.
 	long := strings.repeat(".[0]", 33, context.temp_allocator)
 	perr = csv.query(&doc, long, &out)
 	e, faulted = perr.?

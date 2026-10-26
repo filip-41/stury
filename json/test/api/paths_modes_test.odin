@@ -43,8 +43,6 @@ test_path_coverage_and_stop_are_engine_independent :: proc(t: ^testing.T) {
 		want:     [][]json.Path_Answer,
 	}
 	cases := []Case{
-		// A root with no member a demand or an automaton step can read: a scalar, and an array whose first
-		// step names a member. Both engines settle it where it stands.
 		{src = `{"a":1}`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Partial},
 		{src = `1`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Partial, stop = 0},
 		{src = `[1]`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Partial},
@@ -54,7 +52,6 @@ test_path_coverage_and_stop_are_engine_independent :: proc(t: ^testing.T) {
 		{src = `{"a":[1,2]}`, paths = axa_path, level = .Lazy, dups = .First, coverage = .Partial},
 		{src = `[[1]]`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Partial},
 		{src = `{"x":[{"a":1}]}`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Partial},
-		// A root the queries read into: every byte is checked, and the answers are the members found.
 		{src = `{"x":{"a":1}}`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Full,
 		 want = {{hit(0, 10, 11, 5, .Number)}}},
 		{src = `[{"a":1},{"a":2}]`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Full,
@@ -63,28 +60,20 @@ test_path_coverage_and_stop_are_engine_independent :: proc(t: ^testing.T) {
 		 coverage = .Full, want = {{hit(0, 5, 6, 0, .Number)}}},
 		{src = `{"a":1}`, paths = []json.Path{{steps = []json.Step{a}}}, level = .Lazy, dups = .First,
 		 coverage = .Partial, stop = 6, want = {{hit(0, 5, 6, 0, .Number)}}},
-		// A value no query reads is skipped unchecked, so the result is `.Partial` even though the walk
-		// reached the end. A limit stops the walk where the answer ends.
 		{src = `{"a":1,"b":2}`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Partial},
 		{src = `{"a":{"b":1}}`, paths = axa_path, level = .Lazy, dups = .First, coverage = .Partial},
 		{src = `{"a":{"a":1}}`, paths = axa_path, level = .Lazy, dups = .First, coverage = .Partial},
 		{src = `{"x":{"a":1}}`, paths = []json.Path{{steps = xa, limit = 1}}, level = .Lazy, dups = .First,
 		 coverage = .Partial, stop = 11, want = {{hit(0, 10, 11, 5, .Number)}}},
-		// An unread malformed value: `.Lazy` may accept or refuse it, and either way the bytes were not
-		// checked, so the coverage stays `.Partial`.
 		{src = `{"a":01}`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Partial},
-		// A request with a path run beside a demand: the demand settles at the root, and the run stops there.
 		{src = `{"a":1}`, paths = []json.Path{{steps = xa}, {steps = []json.Step{json.Index(0)}}},
 		 level = .Lazy, dups = .First, coverage = .Partial, want = {{}, {mismatch(1)}}},
 		{src = `1`, paths = []json.Path{{steps = xa}, {steps = []json.Step{json.Index(0)}}},
 		 level = .Lazy, dups = .First, coverage = .Partial, stop = 0, want = {{}, {mismatch(1)}}},
 		{src = `{"a":1}`, paths = []json.Path{{steps = []json.Step{b}}, {steps = xa}}, level = .Lazy,
 		 dups = .First, coverage = .Partial, want = {{miss(0, 0)}, {}}},
-		// The readings a whole-item walk gives are unchanged: only a skipped or stopped `.Lazy` reading is
-		// `.Partial`, and `.Strict` checks every byte.
 		{src = `{"a":1}`, paths = xa_path, level = .Strict, dups = .Last, coverage = .Full},
 		{src = `{"a":1}`, paths = xa_path, level = .Structural, dups = .Last, coverage = .Partial},
-		// A refused document is the same fault and the same `.Partial` on both engines.
 		{src = `{"a":1}x`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Partial,
 		 err = json.Error{offset = 7, kind = .Trailing}},
 		{src = `{"a":1`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Partial,
@@ -110,9 +99,7 @@ test_path_coverage_and_stop_are_engine_independent :: proc(t: ^testing.T) {
 	}
 }
 
-// An allocator over a fixed pool that counts what it grants and what it gives back, so a test can say
-// whose memory a scan took, of what size, and that every block it took was given back. Its own memory comes
-// from the test's temp allocator, so it does not depend on the runtime's allocator.
+// An allocator over a fixed pool that counts what it grants and what it gives back.
 POOL_BYTES :: 1 << 20
 
 Ledger :: struct {
@@ -147,7 +134,6 @@ ledger_proc :: proc(data: rawptr, mode: mem.Allocator_Mode, size, alignment: int
 		}
 		return mem, err
 	case .Resize, .Resize_Non_Zeroed:
-		// A block that grows in place is replaced: one block either way, the old bytes copied over.
 		mem, err := grant(l, size, alignment)
 		if err == nil {
 			if old_memory == nil {
@@ -169,7 +155,6 @@ ledger_allocator :: proc(l: ^Ledger) -> mem.Allocator {
 	return mem.Allocator{procedure = ledger_proc, data = l}
 }
 
-// A compact object of `n` members, each a number: `{"aa":0,"ab":0,...}`, on `alloc`.
 member_object :: proc(n: int, alloc: mem.Allocator) -> string {
 	letters := "abcdefghijklmnopqrstuvwxyz"
 	b: strings.Builder
@@ -215,8 +200,6 @@ test_path_wildcard_keys_use_the_request_allocator :: proc(t: ^testing.T) {
 	context.allocator = old
 	testing.expectf(t, err == nil, "%v", err)
 	testing.expectf(t, slice.equal(req.answers[:], plain.answers), "%v, want %v", req.answers, plain.answers)
-	// None of the scan's allocations went to the ambient allocator; the key set's spill and the answers
-	// came from the request's, and every one was given back.
 	testing.expectf(t, !amb.refused, "the scan allocated on the ambient allocator")
 	testing.expectf(t, led.allocs >= 2, "the key set's spill and the answers are the request's, got %d allocations", led.allocs)
 	json.destroy(&req)
@@ -239,7 +222,7 @@ test_deep_walk_spill_grows_with_the_document :: proc(t: ^testing.T) {
 	testing.expectf(t, err == nil, "%v", err)
 	testing.expectf(t, led.live == 0, "%d bytes of frames left behind", led.live)
 	// The spill's last growth holds the frames in hand, and doubling past the document's depth is the cost
-	// of not knowing that depth up front. A `max_depth`-sized array would be 24 MiB at `DEPTH_CEILING`.
+	// of not knowing that depth up front.
 	testing.expectf(t, led.biggest <= 2 * DEPTH * FRAME_BYTES, "%d bytes in one allocation, want <= %d",
 		led.biggest, 2 * DEPTH * FRAME_BYTES)
 	testing.expectf(t, led.total <= 4 * DEPTH * FRAME_BYTES, "%d bytes allocated in all, want <= %d",

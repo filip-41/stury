@@ -18,7 +18,6 @@ test_find_answers_cells_and_records :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, nil)
 	testing.expect(t, a.outcome == .Found)
 	testing.expect_value(t, string(src[a.lo:a.hi]), "2")
-	// A whole record answers its own span.
 	a, err = csv.find(src, ".[1]")
 	testing.expect_value(t, err, nil)
 	testing.expect(t, a.outcome == .Found)
@@ -129,20 +128,16 @@ test_find_refusals :: proc(t: ^testing.T) {
 		e, faulted := err.?
 		testing.expectf(t, faulted && e.kind == c.want, "find %q: %v, want %v", c.path, err, c.want)
 	}
-	// A bad path points at the byte of the path text it stopped on.
 	_, err := csv.find(src, ".[0] | limit(1)")
 	e, faulted := err.?
 	testing.expect(t, faulted && e.kind == .Bad_Path && e.offset == 5)
-	// A name needs a header.
 	_, err = csv.find(src, ".[0].a", {no_header = true})
 	e, faulted = err.?
 	testing.expect(t, faulted && e.kind == .Bad_Option)
-	// Past the path's step cap.
 	long := strings.repeat(".[0]", 33, context.temp_allocator)
 	_, err = csv.find(src, long)
 	e, faulted = err.?
 	testing.expect(t, faulted && e.kind == .Over_Capacity)
-	// A dialect the scanner refuses keeps its kind.
 	_, err = csv.find(src, ".[0].a", {dialect = csv.Dialect{delimiter = '"'}})
 	e, faulted = err.?
 	testing.expect(t, faulted && e.kind == .Bad_Option)
@@ -161,7 +156,6 @@ test_find_column_stops_at_its_limit :: proc(t: ^testing.T) {
 	clear(&out)
 	testing.expect_value(t, csv.find_column(src, ".[].a", &out), csv.Error{kind = .Bad_Char, offset = 5})
 	testing.expect_value(t, len(out), 1)
-	// A limit past the rows reads them all.
 	clear(&out)
 	good := transmute([]byte)string("a\n1\n2\n")
 	testing.expect_value(t, csv.find_column(good, "limit(5; .[].a)", &out), nil)

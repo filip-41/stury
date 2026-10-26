@@ -111,7 +111,7 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 }
 
 // `err` as `line:col: <kind>`, the kind written as its enum name, or `offset N: <kind>` where it has no
-// position (`error_position`).
+// position (`error_position`), or the bare kind where it has no offset either.
 //
 //	- The text is allocated with `allocator`.
 //	- For a fault of a `Records`, pass the input the iterator was made from.
@@ -119,12 +119,9 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 // The other refusals read the same way, with `src` the text the fault's offset is into:
 //
 //	- An `Unmarshal_Error` as `line:col: <kind>` (`: <syntax>` after a `.Syntax`), then ` at .a[3]."b c"` for
-//	  its path (`[]` for a map value or element of any index, a leading `…` when `truncated`). A kind raised
-//	  before any byte reads bare; `.Out_Of_Memory` reads `offset N`, its offset 0 when the plan was refused
-//	  and the value's when a value was.
-//	- A `Path_Error` located in the source for `.Bad_Source`, `offset N` for `.Bad_Path` (into the path
-//	  text), `.Bad_Result` (into the edited text) and `.Out_Of_Memory` (at 0), bare otherwise, with the
-//	  `syntax` or `encode` result after it.
+//	  its path (`[]` for a map value or element of any index, a leading `…` when `truncated`).
+//	- A `Path_Error` as `line:col: <kind>` for `.Bad_Source`, `offset N: <kind>` for `.Bad_Path`, `.Bad_Result`
+//	  and `.Out_Of_Memory`, with the `syntax` or `encode` result after it.
 @(require_results)
 render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
 	return core_pkg.render_error(src, err, allocator)

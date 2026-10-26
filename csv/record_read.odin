@@ -3,47 +3,39 @@ package csv
 import "base:runtime"
 import core_pkg "../core"
 
-// A typed read of many records of one struct type, one row per call: `record_read_init` resolves the plan, the
-// row shape and the header's columns once, and each `unmarshal` of it pulls the next record and reads it as
+// A typed read of many records of one struct type, core's `Record_Read`: `record_read_init` resolves the plan,
+// the row shape and the header's columns once, and each `unmarshal` of it pulls the next record and reads it as
 // `unmarshal` reads a row. A fault's offset is into that row's bytes; `record_read_at` gives the row's offset
 // in the input.
 //
-// The pull is a `^Records` or a `^Record_Reader`, both caller-owned: they must outlive the reader and not move,
-// since its state points at them. The iterator frames the bytes, so create it with the reader's dialect, limits
-// and strictness; `record_read_init` refuses another scan with `.Bad_Option` (a `.Lazy` reader also takes a
-// `.Strict` one), and the reader never re-scans.
+// The pull is a `^Records` or a `^Record_Reader`, caller-owned: they must outlive the reader and not move. The
+// iterator's records are the rows: `record_read_init` consumes its header, or leaves the first record for the
+// first read under `no_header`. Its scan must be the one the reader's dialect, limits and strictness make
+// (`.Bad_Option` otherwise; a `.Lazy` reader also takes a `.Strict` one), since the reader never re-scans.
 //
 // `dialect`, `limits`, `no_header`, `duplicates` and `borrow_strings` are bound at init. `strictness` and
 // `unknown_fields` apply at every row.
 //
-// No row left is `.Bad_Option`. A fault that framed no row, and a `Record_Reader` whose reader failed
-// (`.Syntax` `.Truncated` at the end of the bytes it gave; `read_err` is the cause), end the rows the same way,
-// and their offset is into the input with `record_read_at` 0. A refused row leaves the reader ready for the next.
-//
-// It is a value: `record_read_init` allocates the reader's state on the heap, and `record_read_destroy` frees it
-// with the plan the reader made. A copy shares both, so destroy it once.
+// A fault that framed no row, and a `Record_Reader` whose reader failed (`.Syntax` `.Truncated` at the end of
+// the bytes it gave; `read_err` is the cause), end the rows with their offset in the input and `record_read_at`
+// 0. A refused row leaves the reader ready for the next.
 Record_Read :: core_pkg.Record_Read(Unmarshal_Opts)
 
-// What a `Record_Read`'s source holds: the pull, the column-bound row reader, and the row it last read. Its
-// fields are the reader's own except `r`, which is this file's.
 @(private)
 Record_State :: struct {
 	r:                 Reader,
 	it:                ^Records, // nil for the streaming source
 	rr:                ^Record_Reader,
-	// The allocator the column table was made with: a slice freed with the allocator in force would go to a
-	// different one.
 	columns_allocator: runtime.Allocator,
 	at:                u64,
 	row:               int,
-	// The scan skipped UTF-8 at creation, so its faults are not carried: every row is judged by itself.
+	// The scan skipped UTF-8, so its faults are not carried: every row is judged by itself. A `.Lazy` reader
+	// over a scan that judged UTF-8 takes over its faults, which it judges in the cells a field reads.
 	judge_each_row:    bool,
-	// An earlier read was lazy, so a cell this row does not read may hold a fault the scan deferred: a strict
-	// read judges every cell.
+	// A lazy read happened (or the scan skipped UTF-8), so a `.Strict` read must judge every cell.
 	lazy_seen:         bool,
 }
 
-// The state's own heap. Its lifetime is the reader's, not a row's.
 @(private)
 record_state_new :: proc() -> ^Record_State {
 	return new(Record_State, runtime.heap_allocator())
@@ -59,7 +51,6 @@ record_state_free :: proc(state: rawptr) {
 	free(st, runtime.heap_allocator())
 }
 
-// The pull `next_record` reads: the stream's window when the source is a `Record_Reader`.
 @(private)
 record_state_pull :: proc(st: ^Record_State) -> (rec: Record, ok: bool) {
 	if st.rr != nil {
@@ -73,9 +64,7 @@ record_state_records :: proc(st: ^Record_State) -> ^Records {
 	return &st.rr.it if st.rr != nil else st.it
 }
 
-// Why the pull stopped, as a read's refusal, or nil when it ended at the input's end. A fault that framed no row
-// is `.Syntax` at its offset in the input, and a reader that failed is `.Syntax` `.Truncated` at the end of the
-// bytes it gave (`Record_Reader.read_err` says why). No row frames either, so their offset is in the input.
+// Why the pull stopped, as a read's refusal, or nil when it ended at the input's end.
 @(private)
 record_state_failure :: proc(st: ^Record_State) -> Maybe(Unmarshal_Error) {
 	if st.rr == nil {
@@ -90,7 +79,6 @@ record_state_failure :: proc(st: ^Record_State) -> Maybe(Unmarshal_Error) {
 	return nil
 }
 
-// A framing fault as a read's refusal.
 @(private)
 record_framing_error :: proc(e: Error) -> Maybe(Unmarshal_Error) {
 	#partial switch e.kind {
@@ -102,19 +90,14 @@ record_framing_error :: proc(e: Error) -> Maybe(Unmarshal_Error) {
 	return Unmarshal_Error{kind = .Syntax, syntax = e.kind, offset = e.offset}
 }
 
-// Resolve the plan, the row shape and the header's columns, and read one row per `unmarshal`.
-//
-//	- The iterator's records are the rows: `record_read_init` consumes its header, or leaves the first record
-//	  for the first read under `no_header`.
-//	- `allocator` is the one each row's values are read with; the state and the plan the reader makes are the
-//	  heap's. A plan made here is freed by `record_read_destroy`.
+// `allocator` is the one each row's values are read with; the state and the plan the reader makes are the
+// heap's, freed by `record_read_destroy`.
 @(require_results)
 record_read_init :: proc {
 	record_read_init_records,
 	record_read_init_reader,
 }
 
-// `record_read_init` over an input's framed records.
 @(require_results)
 record_read_init_records :: proc(
 	rd: ^Record_Read,
@@ -130,7 +113,6 @@ record_read_init_records :: proc(
 	return record_read_init_source(rd, T, it, nil, opts, plan, allocator)
 }
 
-// `record_read_init` over a stream's window.
 @(require_results)
 record_read_init_reader :: proc(
 	rd: ^Record_Read,
@@ -160,9 +142,7 @@ record_read_init_source :: proc(
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	record_read_destroy(rd)
-	// A dialect or limit the scanner refuses is refused here, as `unmarshal` refuses it before any byte. The
-	// rows are framed by the iterator's scan, so it must be the one these options make; a `.Lazy` reader also
-	// takes a scan that judged UTF-8, whose faults it defers.
+	// A dialect or limit the scanner refuses is refused here, as `unmarshal` refuses it before any byte.
 	want, ok := scan_setup(opts.dialect, opts.limits, opts.strictness)
 	if !ok {
 		return Unmarshal_Error{kind = .Bad_Option}
@@ -201,13 +181,10 @@ record_read_init_source :: proc(
 	}
 	state.r.enum_ints = core_pkg.record_read_plan(rd).opts.enums == .Int
 	recs := record_state_records(state)
-	// A scan that skips UTF-8 carries no fault, so each row is judged alone. Otherwise a `.Lazy` reader takes
-	// over the scan's UTF-8 faults, which it judges in the cells a field reads.
 	state.judge_each_row = .Skip_Utf8 in recs.scan.mode
 	if opts.strictness == .Lazy && !state.judge_each_row {
 		recs.carry.utf8 = max(int)
 	}
-	// A `.Strict` row read after either judges every cell, since the scan did not.
 	state.lazy_seen = opts.strictness == .Lazy || state.judge_each_row
 	if opts.no_header {
 		return nil
@@ -235,14 +212,11 @@ record_read_init_source :: proc(
 	return nil
 }
 
-// Free the plan the reader made, the column table and the state, and clear the handle. `csv.destroy` and a copy
-// of the handle share the reader, so destroy it once.
 record_read_destroy :: proc(rd: ^Record_Read) {
 	core_pkg.record_read_destroy(rd)
 }
 
-// The offset of the row the last read pulled, from the input's first byte. A reader that has pulled none is at
-// 0. A fault's offset is into the row's bytes, so adding this says where it is in the input.
+// The offset in the input of the row the last read pulled; 0 before any.
 @(require_results)
 record_read_at :: proc(rd: ^Record_Read) -> u64 {
 	if rd == nil {
@@ -252,14 +226,11 @@ record_read_at :: proc(rd: ^Record_Read) -> u64 {
 	return state == nil ? 0 : state.at
 }
 
-// Pull the next row and read it. The end of the input is `.Bad_Option`; a fault that framed no row is `.Syntax`
-// at its offset in the input.
 @(private)
 record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, _: ^core_pkg.Type_Plan, dest: rawptr) -> Maybe(Unmarshal_Error) {
 	st := (^Record_State)(state)
 	rec, more := record_state_pull(st)
 	if !more {
-		// No row is read: the frame is the input's.
 		st.at = 0
 		if failure := record_state_failure(st); failure != nil {
 			return failure
@@ -268,11 +239,9 @@ record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, _: ^core_pkg.Ty
 	}
 	st.at = rec.at
 	st.r.src = rec.src
-	// The row's index, for the path, counts the rows the pull has yielded, read or refused.
 	row := st.row
 	st.row += 1
 	if st.r.columns == nil {
-		// `no_header`: column k is the struct's field k, bound with the allocator the reader frees it with.
 		context.allocator = st.columns_allocator
 		if err := columns_in_order(&st.r, rec, opts.unknown_fields == .Refuse); err != nil {
 			return record_row_error(st, err)
@@ -282,7 +251,6 @@ record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, _: ^core_pkg.Ty
 	lazy := opts.strictness == .Lazy
 	if lazy {
 		st.lazy_seen = true
-		// A skipped scan carries no fault: each row is judged by itself.
 		if st.judge_each_row {
 			recs.carry.utf8 = -1
 		}

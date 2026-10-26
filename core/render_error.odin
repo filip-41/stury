@@ -25,10 +25,9 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 	return
 }
 
-// Formats `err` as `line:col: <kind>`, with the kind's enum name, or, for a fault at no byte of `src`, as
-// `offset N: <kind>` or as the kind alone (`write_no_byte_fault`). An `Unmarshal_Error`
-// (`render_unmarshal_error_to_writer`) and a `Path_Error` (`render_path_error_to_writer`) are formatted the same
-// way, with `src` the text their offset refers to. The text is allocated with `allocator`.
+// Formats `err` as `line:col: <kind>`, with the kind's enum name, or as `write_no_byte_fault` spells a fault at
+// no byte of `src`. An `Unmarshal_Error` and a `Path_Error` are formatted the same way, with `src` the text
+// their offset refers to. The text is allocated with `allocator`.
 @(require_results)
 render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
 	b: Text_Builder = strings.builder_make(allocator)
@@ -44,8 +43,7 @@ render_error_to_writer :: proc {
 	render_path_error_to_writer,
 }
 
-// Writes an `Error`. Every kind it reports without a byte of `src` keeps `offset N`: the offset is what locates
-// that kind, a limit, a byte of the path text, or the 0 of a refusal raised before any byte.
+// Writes an `Error`.
 render_syntax_error_to_writer :: proc(w: io.Writer, src: []byte, err: Error) -> io.Error {
 	name := reflect.enum_string(err.kind)
 	line, col := error_position(src, err)
@@ -55,18 +53,15 @@ render_syntax_error_to_writer :: proc(w: io.Writer, src: []byte, err: Error) -> 
 	return write_no_byte_fault(w, name, err.offset, true)
 }
 
-// Writes `line:col: <kind>`, followed by `: <syntax>` for `.Syntax`, or, at no byte of `src`, `offset N: <kind>`
-// for a refused allocation and the bare kind for one raised before any byte. Then writes the path as
-// ` at .a[3]."b c"`, with `[]` for a map value or for an element of any index, and a leading `…` when
-// `truncated`.
+// Writes `line:col: <kind>`, followed by `: <syntax>` for `.Syntax`, then the path as ` at .a[3]."b c"`, with
+// `[]` for a map value or for an element of any index, and a leading `…` when `truncated`.
 render_unmarshal_error_to_writer :: proc(w: io.Writer, src: []byte, err: Unmarshal_Error) -> io.Error {
 	name := reflect.enum_string(err.kind)
 	#partial switch err.kind {
 	case .Unsupported, .Ambiguous_Union, .Bad_Option, .Plan_Mismatch, .Bad_Tag: // before any byte, with no offset to show
 		write_no_byte_fault(w, name, err.offset, false) or_return
 	case .Out_Of_Memory:
-		// The refusal is at the value it could not hold, or at 0 when it is the plan's, before any byte. The
-		// offset never becomes a 1:1 position the fault does not have.
+		// A refused value is located; a refused plan, at offset 0, is before any byte.
 		if err.offset > 0 {
 			write_fault_at(w, src, err.offset, name) or_return
 		} else {
@@ -90,12 +85,10 @@ render_unmarshal_error_to_writer :: proc(w: io.Writer, src: []byte, err: Unmarsh
 	return nil
 }
 
-// Writes a `Path_Error` as its kind's name with its position. The prefix is `line:col: ` in `src` for
-// `.Bad_Source`, and for `.Encode` and `.Unplaceable` when `offset` is not 0. It is `offset N: ` for `.Bad_Path`
-// and `.Bad_Result`, whose offsets are into the path or the edited text, and for `.Out_Of_Memory`, whose offset is
-// 0, since the refusal is before any byte; every other kind has no position and reads as its bare name.
-// `.Bad_Row` is followed by ` (N)`. `.Bad_Source` and `.Bad_Result` are followed by the scan's `syntax` unless it
-// is `.None`, and `.Encode` by the `encode` error.
+// Writes a `Path_Error`. The kinds with an offset: `line:col: ` in `src` for `.Bad_Source`, and for `.Encode`
+// and `.Unplaceable` when `offset` is not 0; `offset N: ` for `.Bad_Path`, `.Bad_Result` and `.Out_Of_Memory`;
+// the rest read bare. `.Bad_Row` is followed by ` (N)`, `.Bad_Source` and `.Bad_Result` by the scan's `syntax`
+// unless it is `.None`, and `.Encode` by the `encode` error.
 render_path_error_to_writer :: proc(w: io.Writer, src: []byte, err: Path_Error) -> io.Error {
 	name := reflect.enum_string(err.kind)
 	#partial switch err.kind {

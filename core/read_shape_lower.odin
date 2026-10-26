@@ -9,9 +9,9 @@ import "base:runtime"
 import "core:reflect"
 
 // The plan's read shape, lowered on first use and kept on the plan, as is a refusal. A plan that cannot compile
-// its root type refuses with `.Unsupported` (`.Bad_Tag` for a tag flag the format does not know), which every
-// later call then answers too: the type has no readable form, whatever the plan's own reason was. `.Out_Of_Memory` alone leaves `read_refused` unset, so a later call
-// lowers again: that is the one failure an allocator may stop reporting.
+// its root type refuses with `.Unsupported` (`.Bad_Tag` for a tag flag the format does not know), and every
+// later call answers the same. `.Out_Of_Memory` alone leaves `read_refused` unset, so a later call lowers
+// again: it is the one failure an allocator may stop reporting.
 read_shape_of :: proc(p: ^Type_Plan) -> (shape: ^Read_Shape, err: Maybe(Unmarshal_Error)) {
 	if len(p.read.ops) > 0 {
 		return &p.read, nil
@@ -29,12 +29,9 @@ read_shape_of :: proc(p: ^Type_Plan) -> (shape: ^Read_Shape, err: Maybe(Unmarsha
 	case .Out_Of_Memory:
 		return nil, Unmarshal_Error{kind = .Out_Of_Memory}
 	case .Bad_Name:
-		// A name the read needs cannot be spelled. The plan rolled the compile back, so it no longer holds the
-		// field that refused it: the error names no path, and it is `.Unsupported` for every later call.
 		p.read_refused = Unmarshal_Error{kind = .Unsupported}
 		return nil, p.read_refused
 	case .Bad_Tag:
-		// Refused like a name, and just as stable, but named for what it is.
 		p.read_refused = Unmarshal_Error{kind = .Bad_Tag}
 		return nil, p.read_refused
 	}

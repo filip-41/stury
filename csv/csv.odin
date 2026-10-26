@@ -46,15 +46,8 @@ import core_pkg "../core"
 // text ends inside a quoted field (`.Truncated`).
 Error :: core_pkg.Error
 
-// What an `Error` is: `Bad_Char` at a misplaced quote, CR or malformed UTF-8 lead, `Truncated` where a quoted
-// field or a UTF-8 sequence never ends, `Bad_Escape` at a backslash that opens no escape, `Field_Count` at the
-// first byte of a record with more or fewer fields than the first, `Limit_Fields` at the first byte of a record
-// with more than `Limits.max_fields`, `Limit_Record` at the first byte of a line longer than
-// `Limits.max_record_bytes`, `Bad_Option` (at no byte) for a dialect or limit the scanner refuses, and
-// `Out_Of_Memory` where `next_record` could not hold a record's fields or `records_from` its window, and
-// `Duplicate_Key` at the second header cell of a name `find` or `find_column` refuses under `.Refuse`. The enum
-// is core's and shared by every format. CSV never reports `Bad_Literal`, `Bad_Number`, `Limit_Digits`,
-// `Limit_Scale`, `Too_Deep`, `Trailing` or `Source_Too_Wide`.
+// What an `Error` is. The enum is core's and shared by every format; CSV never reports `Bad_Literal`,
+// `Bad_Number`, `Limit_Digits`, `Limit_Scale`, `Too_Deep`, `Trailing` or `Source_Too_Wide`.
 Error_Kind :: core_pkg.Error_Kind
 
 // The 1-based line and column `err` points at in `src`, counting bytes, or (0, 0) where it points at no byte
@@ -67,8 +60,7 @@ error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 // `err` (an `Error`, `Unmarshal_Error` or `Path_Error`) as text: `line:col: <kind>` with the kind's enum name,
 // or `offset N: <kind>` when it has no position. `src` is the input the failing call read.
 //
-// An `Unmarshal_Error` that points at no byte (`.Unsupported`, `.Bad_Option`, `.Plan_Mismatch`, `.Bad_Tag`) has no
-// position prefix. A `.Syntax` one is followed by `: <syntax>`. Its path follows as ` at [3].name`.
+// An `Unmarshal_Error` that points at no byte has no position prefix. A `.Syntax` one is followed by `: <syntax>`. Its path follows as ` at [3].name`.
 //
 // A `Path_Error` has a source position for `.Bad_Source`, and for `.Encode` or `.Unplaceable` when it has a
 // record. `.Bad_Path` has `offset N` into the path text, `.Bad_Result` into the edited text. `.Bad_Row` is

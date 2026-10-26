@@ -79,7 +79,7 @@ Inputs :: struct {
 	fault_events:       [dynamic]jq.Value, // --stream-errors: the events of a faulty text, from `fault_next` on
 	fault_next:         int,
 	slurp_tail:         bool, // -s --stream-errors: the fault's error event comes after the slurped array, not in it
-	bom_broken:         bool, // --seq --stream-errors: the stream began with a cut byte order mark, so jq's parser starts afresh at every call
+	bom_broken:         bool, // --seq --stream-errors: a cut byte order mark began the stream, so jq's parser restarts at every call
 	cells:              ^Cells, // --from csv or tsv: the open file's text and header
 	seq_joined:         bool, // --seq: data is a record and the texts after it, read on from the files after its own (`seq_join`)
 	seq_head:           enum u8 {
@@ -550,9 +550,8 @@ next_text :: proc(ins: ^Inputs) -> (at, limit: int, trailing, found: bool) {
 	}
 }
 
-// Whether the --seq text at data[at:] completes where the file does, so that no byte of the next file can belong
-// to it: it reads whole, and its last byte closes it (a container's or string's) or is whitespace. A number or a
-// literal with nothing after it may go on in the next file, which is why jq reads on past those.
+// Whether the --seq text at data[at:] ends with its file: it reads whole and its last byte closes it or is whitespace.
+// A number or literal there may go on in the next file.
 @(private = "file")
 seq_text_ends :: proc(ins: ^Inputs, at: int) -> bool {
 	src := ins.data[at:]
@@ -568,14 +567,10 @@ seq_text_ends :: proc(ins: ^Inputs, at: int) -> bool {
 	return !bad
 }
 
-// --seq reads its files as one byte stream, as jq does: a record that no separator ends in the open file goes on
-// in the next file, and the next, whose bytes continue the record rather than begin a text before the stream's
-// first separator. Those files are read now, into one buffer from the record's first byte, which data becomes; the
-// texts after the record are read from it too. Nothing is read up front: each file is opened as it is reached, and
-// a stream a window at a time. It returns false when no file followed, the data left to the caller.
+// A --seq record that no separator ends in the open file goes on in the next file, as in jq's one byte stream: those
+// files are read now into one buffer from the record's first byte, which `data` becomes. False when no file followed.
 @(private = "file")
 seq_join :: proc(ins: ^Inputs, at: int) -> bool {
-	// The record's place in the stream, which jq counts across the files it joins.
 	start_line, start_column := text_place(ins, at)
 	joined := make([dynamic]byte, 0, len(ins.data) - at + READ_BLOCK, runtime.heap_allocator())
 	append(&joined, ..ins.data[at:])
@@ -590,7 +585,6 @@ seq_join :: proc(ins: ^Inputs, at: int) -> bool {
 			append(&joined, ..ins.data)
 			continue
 		}
-		// A file read a window at a time: on until a separator comes or the file ends.
 		for {
 			append(&joined, ..ins.data)
 			if bytes.index_byte(joined[:], RS) >= 0 || ins.reader == nil {
@@ -602,7 +596,7 @@ seq_join :: proc(ins: ^Inputs, at: int) -> bool {
 	if !read_any {
 		return false
 	}
-	if ins.data != nil { // its bytes are in `joined`; freed or kept as any data read past is (`retire`)
+	if ins.data != nil {
 		if ins.run.opts.null_input && !ins.pinned {
 			free_data({ins.data, ins.mapped})
 		} else {
@@ -614,7 +608,6 @@ seq_join :: proc(ins: ^Inputs, at: int) -> bool {
 	ins.open, ins.seq_joined = true, true
 	ins.skip, ins.pos, ins.seen, ins.window_lines, ins.texts_follow = 0, 0, 0, 0, false
 	ins.at_line, ins.at_column, ins.fault_at = start_line, start_column, {}
-	// jq counts `input_line_number` in the file it reads last, from that file's first line.
 	ins.lines_before, ins.lines = 0, {start = last_start, end = last_start}
 	ins.seq_head = .Read
 	return true
