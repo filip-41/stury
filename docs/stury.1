@@ -72,7 +72,7 @@ Refuse nesting past n levels (default 1024; jq's is 10000).
 With \fBcheck\fR, keep the library's limits: numbers of at most 256 digits and a scale of at most 4096.
 .TP
 .B \-\-explain
-Write the route the filter takes, and why, to stderr as lines \fBstury: explain: KEY: VALUE\fR, and run the filter as without it. The keys are filter, route (path scan, csv columns or interpreter), why (each fact that sends the filter to the interpreter), path, text N (an input text that left the scan or was read on the batch pool) and note. Not with check or fmt.
+Write the plan the filter runs under and what the run did to stderr, as lines \fBstury: explain: KEY: FACTS\fR of \fBkey=value\fR tokens, and run the filter as without it. The plan: program, input, route (path_scan, columns or interpreter), path or columns or refused (each reason the interpreter answers), engine, demand and compile_time. The run: run (texts scanned or interpreted, pieces read on the batch pool, workers), fallback (the first text the scan handed to the interpreter, and why), run_time and cost. The tokens are explained in docs/cli.md. Not with check or fmt.
 .TP
 .B \-V
 Print stury\- and the version it was built with: a release version, or the short commit hash from a source build (dev outside a checkout).

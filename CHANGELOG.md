@@ -9,7 +9,8 @@
 
 ### Command line
 
-- `--explain` writes the route the filter takes, and why, to stderr, and runs the filter as without it.
+- `--explain` writes the filter's plan (route, path or columns, engine, refusals) and what the run did (texts scanned or
+  interpreted, pieces, fallback, time, cost) to stderr, and runs the filter as without it.
 - `--stream` gives the events of a faulty text before its fault, as jq does, and `input_line_number` and the
   error positions under `--stream` count jq's lines.
 - `--stream-errors` makes a faulty text's events as it gives them, not all before the first.
