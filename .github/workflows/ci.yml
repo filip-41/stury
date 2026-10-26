@@ -1,7 +1,7 @@
 name: ci
 
-# The gate, in stages: lint, then the suites on every target, then the sanitizers and Windows. A `v*` tag runs
-# it through release.yml before any binary is built.
+# The gate: lint, the suites on every target, the jq differential, the sanitizers and Windows, all at once. A `v*`
+# tag runs it through release.yml before any binary is built.
 on:
   push:
     branches: [main]
@@ -32,26 +32,30 @@ jobs:
           mandoc -T lint -W warning docs/stury.1
 
   test:
-    needs: lint
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
+        target: [test test-modes]
+        include:
+          # Odin has no macOS Intel toolchain: cross-compile the x86 suites from the
+          # arm64 runner and run them under Rosetta.
+          - os: macos-15
+            target: test-x86
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
-      - run: make test test-modes
-      # Odin has no macOS Intel toolchain: cross-compile the x86 suites from the
-      # arm64 runner and run them under Rosetta.
-      - if: matrix.os == 'macos-15'
-        run: make test-x86
+      - run: make ${{ matrix.target }}
 
   # The jq 1.8.2 differential: jq_suite in diff mode, jq_diff and regex_diff
   # over every seed. The other test job runs the corpus but cannot compare
-  # against jq itself.
+  # against jq itself. A seed per runner: each driver keeps every core busy.
   diff:
-    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [77, 1016, 5]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -63,16 +67,13 @@ jobs:
           echo 'b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f  /tmp/jq' | sha256sum -c -
           sudo install -m 0755 /tmp/jq /usr/local/bin/jq
           jq --version | grep -qx 'jq-1.8.2'
-      # The four diff targets at once: one script's Python driver holds a core, so one at a time leaves most
-      # of the runner idle.
-      - run: make -j -O diff
+      - run: make -j -O diff DIFF_SEEDS=${{ matrix.seed }}
 
   # The AVX2 and AVX-512BW routes. A hosted x64 runner's processor varies (AVX-512BW is not guaranteed) and
   # Rosetta has neither, so the api suite is built once and run under Intel SDE emulating a Haswell and a
   # Sapphire Rapids (SDE's Skylake-X has no brand string, which core:sys/info's init indexes past);
   # STURY_REQUIRE_WIDE makes a run without the route a failure instead of a skip.
   wide:
-    needs: lint
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -101,7 +102,6 @@ jobs:
 
   # Sanitizer runs are checked where they were made to pass: macOS on Apple silicon.
   sanitizers:
-    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -115,7 +115,6 @@ jobs:
   # Windows is built only here. It builds the library suites and the CLI, then runs a few answers end to end.
   # smoke.sh is not run here: its CPU and memory guards need ulimit and time(1), and it uses FIFOs and modes.
   windows:
-    needs: lint
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

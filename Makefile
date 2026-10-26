@@ -158,8 +158,9 @@ bench-cli: build-cli fixtures
 	python3 bench/fetch.py corpus
 	zsh bench/cli/jq_compare.sh
 
-# The public suites and the command line under a sanitizer
-SAN_ENV := STURY_SANITIZED=1 STURY_TEST_TIMEOUT=300 ASAN_OPTIONS=use_sigaltstack=0:detect_leaks=0
+# The public suites and the command line under a sanitizer. TSan otherwise sleeps a second at every exit of a
+# process that ran threads, which is most of smoke.sh's wall time.
+SAN_ENV := STURY_SANITIZED=1 STURY_TEST_TIMEOUT=300 ASAN_OPTIONS=use_sigaltstack=0:detect_leaks=0 TSAN_OPTIONS=atexit_sleep_ms=0
 SAN_STACK := ulimit -s 65520 2>/dev/null || ulimit -s unlimited
 
 # `$(call sanitized,SANITIZER)` runs the suites and smoke.sh under -sanitize:SANITIZER.

@@ -315,12 +315,16 @@ early pipe_csv "$want" "a\n1\n$fill" '2\n' --from csv -r .a
 early pipe_csv_interp "$want" "a\n1\n$fill" '2\n' --from csv -r '.a | .'
 rm -f "$T/round.csv" "$T/round.tsv" "$T/round.got" "$T/round.want"
 # A CSV file or pipe is held in memory one window at a time, under -n as well.
-"$S" -nr '"id,msg,level", (range(600000) | "\(.),a line of text that makes each record long,\(if . % 10 == 0 then "error" else "info" end)")' >"$T/big.csv"
-capped csv_file_rss 48 599999 --from csv -r 'select(.id == "599999") | .id' "$T/big.csv"
-got=$(cat "$T/big.csv" | peak_mb --from csv -r 'select(.id == "599999") | .id')
-[ "$(tail -1 "$T/out")" = 599999 ] && [ "${got:-999}" -lt 48 ] || { echo "FAIL csv_pipe_rss: $got MB, last $(tail -1 "$T/out")"; fails=$((fails + 1)); }
-capped csv_inputs_rss 48 600000 --from csv -n 'reduce inputs as $x (0; . + 1)' "$T/big.csv"
-capped csv_slurp 600 600000 --from csv -s 'length' "$T/big.csv"
+# A sanitized build reads fewer records, which still make many pieces on the pool.
+rows=600000
+[ -n "$STURY_SANITIZED" ] && rows=100000
+last=$((rows - 1))
+"$S" -nr --argjson n $rows '"id,msg,level", (range($n) | "\(.),a line of text that makes each record long,\(if . % 10 == 0 then "error" else "info" end)")' >"$T/big.csv"
+capped csv_file_rss 48 $last --from csv -r "select(.id == \"$last\") | .id" "$T/big.csv"
+got=$(cat "$T/big.csv" | peak_mb --from csv -r "select(.id == \"$last\") | .id")
+[ "$(tail -1 "$T/out")" = $last ] && [ "${got:-999}" -lt 48 ] || { echo "FAIL csv_pipe_rss: $got MB, last $(tail -1 "$T/out")"; fails=$((fails + 1)); }
+capped csv_inputs_rss 48 $rows --from csv -n 'reduce inputs as $x (0; . + 1)' "$T/big.csv"
+capped csv_slurp 600 $rows --from csv -s 'length' "$T/big.csv"
 # A column-only filter is answered from the cells in pieces on the pool, with the interpreter's output bytes. On a
 # fault in the last piece, every earlier record is printed, followed by the interpreter's message.
 got=$(peak_mb --from csv -r '.msg, .id' "$T/big.csv")
@@ -342,14 +346,14 @@ for to in csv tsv; do
 	done
 done
 "$S" --from csv --to csv .id "$T/nul.csv" >"$T/col.got" 2>/dev/null
-[ "$?" = 5 ] && [ "$(tail -n 1 "$T/col.got")" = 599999 ] || { echo "FAIL csv_columns_refused: exit $?"; fails=$((fails + 1)); }
+[ "$?" = 5 ] && [ "$(tail -n 1 "$T/col.got")" = $last ] || { echo "FAIL csv_columns_refused: exit $?"; fails=$((fails + 1)); }
 printf '"\357\273\277x"\n' >"$T/bom.want"
 "$S" --from csv --to csv .id "$T/bom.csv" | head -n 1 | cmp -s - "$T/bom.want" || { echo "FAIL csv_columns_bom"; fails=$((fails + 1)); }
 # An object of columns, `.` and `select(F)` over columns are also answered in pieces, with the interpreter's
 # output. The inputs include a record the dialect cannot write, a record of the wrong width, and a filter error in
 # the middle of the file, after which the run continues with the next record.
-awk -F, 'BEGIN{OFS=","} NR == 300000 {$1 = "x"} {print}' "$T/big.csv" >"$T/mid.csv"
-{ head -n 300000 "$T/big.csv"; printf '1,2\n'; } >"$T/bad.csv"
+awk -F, -v mid=$((rows / 2)) 'BEGIN{OFS=","} NR == mid {$1 = "x"} {print}' "$T/big.csv" >"$T/mid.csv"
+{ head -n $((rows / 2)) "$T/big.csv"; printf '1,2\n'; } >"$T/bad.csv"
 for f in '{id}' '{id, m: .msg}' 'select(.id | tonumber % 100000 == 0)' 'select(.level == "error" and .id != "10")' 'select(.id | test("77$"))'; do
 	for to in csv json; do
 		for src in big nul bom mid bad; do
