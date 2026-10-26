@@ -52,17 +52,27 @@ jobs:
           else
             make build-cli STURY_VERSION="${VERSION#v}"
           fi
+      # The Intel binary runs under Rosetta on the arm64 runner.
       - name: Check
         run: |
           set -e
-          [ "$(build/stury --version)" = "stury-${VERSION#v}" ]
-          [ "$(echo '{"a":[1,2]}' | build/stury -c .a)" = "[1,2]" ]
+          run=""
           if [ "${{ matrix.name }}" = "darwin-amd64" ]; then
             file build/stury | grep -q x86_64
+            run="arch -x86_64"
           fi
+          [ "$($run build/stury --version)" = "stury-${VERSION#v}" ]
+          [ "$(echo '{"a":[1,2]}' | $run build/stury -c .a)" = "[1,2]" ]
       - name: Smoke the release binary
-        if: matrix.name != 'darwin-amd64'
-        run: sh cmd/stury/test/smoke.sh build/stury
+        run: |
+          bin=build/stury
+          if [ "${{ matrix.name }}" = "darwin-amd64" ]; then
+            # smoke.sh takes the binary as one word: wrap the Intel one.
+            printf '#!/bin/sh\nexec arch -x86_64 "%s/build/stury" "$@"\n' "$PWD" > build/stury-rosetta
+            chmod +x build/stury-rosetta
+            bin=build/stury-rosetta
+          fi
+          sh cmd/stury/test/smoke.sh "$bin"
       - name: Package
         run: |
           d="stury-${VERSION#v}-${{ matrix.name }}"

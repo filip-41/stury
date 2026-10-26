@@ -23,6 +23,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
       - run: make lint
+      # The fixtures against bench/manifest.toml's hashes (CPython 3.11+, writes ~480 MB under bench/fixtures),
+      # and the man page.
+      - name: Docs
+        run: |
+          python3 bench/gen.py --check > /dev/null
+          sudo apt-get install -y mandoc
+          mandoc -T lint -W warning docs/stury.1
 
   test:
     needs: lint
@@ -97,7 +104,8 @@ jobs:
           [ "$(./stury.exe -c '.a' two.json | tr -d '\r' | paste -sd, -)" = "1,2" ]
           [ "$(echo '"2015-03-05T23:51:47Z"' | ./stury.exe -r 'fromdate | todate')" = "2015-03-05T23:51:47Z" ]
           [ "$(./stury.exe -n '[limit(3; recurse(.+1))] | length' <<< 0)" = "3" ]
-          ! echo '{' | ./stury.exe . 2>/dev/null
+          # `! cmd` does not trip errexit: a command that must fail exits the script when it succeeds.
+          echo '{' | ./stury.exe . 2>/dev/null && exit 1
           # The CSV codec, both halves, through a file and a pipe.
           printf 'a,b\n1,2\n' > two.csv
           [ "$(./stury.exe --from csv -c '.b' two.csv)" = '"2"' ]
@@ -106,7 +114,7 @@ jobs:
           # fmt: the layout with every spelling and member kept, --check, and --in-place over an existing file.
           printf '{"b":1e2,"b":2}' > fmt.json
           [ "$(./stury.exe fmt fmt.json | tr -d ' \r\n')" = '{"b":1e2,"b":2}' ]
-          ! ./stury.exe fmt --check fmt.json
+          ./stury.exe fmt --check fmt.json && exit 1
           ./stury.exe fmt --in-place fmt.json
           ./stury.exe fmt --check fmt.json
           [ "$(tr -d ' \r\n' < fmt.json)" = '{"b":1e2,"b":2}' ]
