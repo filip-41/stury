@@ -476,5 +476,6 @@ finish :: proc(run: ^Run, code: int) -> ! {
 	}
 	flush_some(run, force = true)
 	check_output()
+	explain_end(run)
 	os.exit(code)
 }

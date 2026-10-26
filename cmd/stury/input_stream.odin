@@ -364,7 +364,9 @@ open_file :: proc(ins: ^Inputs) -> (file: ^os.File, ok: bool) {
 // only what is in it so far, so it reads only a regular file.
 read_whole :: proc(f: ^os.File, allocator: runtime.Allocator) -> (data: []byte, err: os.Error) {
 	if is_regular_file(f) {
-		return os.read_entire_file(f, allocator)
+		data, err = os.read_entire_file(f, allocator)
+		explain_input(len(data))
+		return
 	}
 	all := make([dynamic]byte, 0, 1 << 16, allocator)
 	chunk: [1 << 16]byte

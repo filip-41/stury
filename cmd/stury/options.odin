@@ -97,8 +97,8 @@ stury's own options:
       --grow-header         with --to csv or tsv, write a header of every key;
       --max-depth n         refuse nesting past n levels (default 1024);
       --strict-limits       with check, keep the library's number limits;
-      --explain             write the route the filter takes, and why, to
-                            stderr, and run the filter.
+      --explain             write the filter's route, its plan and what the
+                            run did to stderr, and run the filter.
 
 Named arguments are also available as $ARGS.named[], positional ones as
 $ARGS.positional[]. The input differences from jq and each stury option in
@@ -127,7 +127,7 @@ Opts :: struct {
 	to:               Format, // how the outputs are written
 	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
 	strict_limits:    bool, // check: the library's depth, digit and scale caps hold
-	explain:          bool, // --explain: write the filter's route and why to stderr
+	explain:          bool, // --explain: write the filter's plan and what the run did to stderr
 	max_depth_given:  bool, // --max-depth was on the command line
 	in_place:         bool,
 	check:            bool,

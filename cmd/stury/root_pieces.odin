@@ -93,6 +93,7 @@ Root_Job :: struct {
 build_root_pieces :: proc(run: ^Run, data: []byte, at: int, prog: ^jq.Node = nil) -> (v: jq.Value, ok: bool) {
 	spine := root_spine(data, at) or_return
 	if demand, some := jq.entry_demand(prog, spine.keys[:spine.levels]); some {
+		explain_demand(run, demand)
 		v, ok = demanded_array_pieces(run, data, spine.lo, spine.z, spine.levels, demand)
 	} else {
 		v, ok = build_array_pieces(run, data, spine.lo, spine.z, spine.levels)
@@ -101,6 +102,7 @@ build_root_pieces :: proc(run: ^Run, data: []byte, at: int, prog: ^jq.Node = nil
 		spine_free(&spine)
 		return
 	}
+	explain_piece(run, .Root)
 	run.pieces_root = {rawptr(v.(^jq.Array)), rawptr(v.(^jq.Array)), data[at:], data[spine.lo:spine.z + 1]}
 	if spine.levels == 0 {
 		return
@@ -135,6 +137,7 @@ run_root_pieces :: proc(run: ^Run, data: []byte, at: int, arena: ^virtual.Arena)
 	// A `select` reads its path alone, and prints the root from the text when it keeps it.
 	reads := run.prog.args[0].a if run.select.op != .None else run.prog
 	v := build_root_pieces(run, data, at, reads) or_return
+	explain_interpreted(run)
 	run_once(run, v)
 	return true
 }

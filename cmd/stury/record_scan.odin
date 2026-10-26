@@ -27,7 +27,6 @@ scan_records :: proc(run: ^Run, ins: ^Inputs, from: int) -> (stop: int) {
 	if runner == nil {
 		return from
 	}
-	explain_note(run, .Line_Records, "one record per line: the records are read on the batch pool")
 	job := Record_Scan{src = src, more = ins.next_file < len(ins.files)}
 	start_pieces(&job, run)
 	defer end_pieces(&job)

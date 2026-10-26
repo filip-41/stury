@@ -245,6 +245,7 @@ write_out :: proc(p: []byte, worker := false, pool: ^host.Batch_Pool = nil) {
 			host.batch_writing(pool, true)
 		}
 		err := write_stdout(p)
+		explain_output(len(p))
 		if pool != nil {
 			host.batch_writing(pool, false)
 		}

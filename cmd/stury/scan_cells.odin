@@ -302,6 +302,7 @@ scan_cells :: proc(run: ^Run, ins: ^Inputs) {
 				return
 			}
 			place_columns(cols, c.header)
+			explain_file(run)
 			if ins.failures == 0 && !c.streamed {
 				if runner := batch_runner(run, len(c.data)); runner != nil && (cols.object || !opens_with_bom(run, c, cols)) && table_openable(run, cols) {
 					fetched = true
@@ -499,7 +500,7 @@ table_openable :: proc(run: ^Run, cols: ^Columns) -> bool {
 // start without printing, so that `cells_ended` reports the fault as a sequential read does.
 @(private = "file")
 print_cells_in_pieces :: proc(run: ^Run, c: ^Cells, cols: ^Columns, runner: ^csv.Batch_Runner) -> (resumed: bool) {
-	explain_note(run, .Csv_Pieces, "a CSV file's records are read in pieces on the batch pool")
+	explain_piece(run, .Csv)
 	job := Cells_Scan{cols = cols, dialect = c.dialect}
 	start_pieces(&job, run)
 	defer end_pieces(&job)

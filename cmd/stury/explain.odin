@@ -1,17 +1,23 @@
 package main
 
-// --explain: the route a filter takes and why, on stderr, while the filter runs as it would without the flag.
+// --explain: the plan a filter runs under and what the run did, on stderr, while the filter runs as it would without
+// the flag.
 //
-// Every line is `stury: explain: KEY: VALUE` and holds nothing that varies between runs (no counts of workers,
-// timings or file names), so a test can compare the report byte for byte. The reasons are recorded by the code
-// that takes each decision (`choose_scan`, `choose_columns`, `scan_inputs`), not derived again here, so they
-// are the run's own.
+// Every line is `stury: explain: KEY: FACTS`, the facts `key=value` tokens of the code's own enum names, and each
+// token is explained in docs/cli.md. The plan block (program, input, route, path or columns or refused, compile_time)
+// is written once the route is chosen, before any input is read; engine and demand follow when the first text and the
+// first large root are met, as they depend on the bytes. The run block (run, fallback, run_time, cost) is written when
+// the run ends, by `finish`. The reasons are recorded by the code that takes each decision (`choose_scan`,
+// `choose_columns`, `scan_inputs`), not derived again here, so they are the run's own.
 
 import "core:fmt"
 import "core:strings"
+import "core:sync"
+import "core:time"
 import json "../../json"
+import "jq"
 
-// Why the interpreter answers a filter. The report prints every reason that holds, in this order.
+// Why the interpreter answers a filter. The plan block lists every reason that holds, in this order.
 Explain_Why :: enum u8 {
 	// Options that keep a filter from the scan and from the columns.
 	Null_Input,
@@ -44,52 +50,60 @@ Explain_Why :: enum u8 {
 	Several_Files,
 }
 
-Explain_Whys :: bit_set[Explain_Why;u32]
+Explain_Whys :: bit_set[Explain_Why]
 
-@(rodata)
-EXPLAIN_WHY_TEXT := [Explain_Why]string {
-	.Null_Input       = "--null-input reads no input",
-	.Slurp            = "--slurp needs the input whole",
-	.Sort_Keys        = "-S sorts keys on output",
-	.Raw_Input        = "-R reads lines as strings",
-	.Seq              = "--seq writes record separators",
-	.Stream           = "--stream reads jq's events",
-	.Exit_Status      = "-e reads each output",
-	.Raw0             = "--raw-output0 writes NUL",
-	.Ascii            = "-a writes ASCII only",
-	.Color            = "colour output is on",
-	.Cells_Out        = "--to csv|tsv writes each output as a record",
-	.Not_Path         = "the filter is not a path and not select(PATH op LITERAL)",
-	.Jsonc_Select     = "--from jsonc scans plain paths only",
-	.Select_Redefined = "select is redefined",
-	.Select_Compare   = "select(F): F is not PATH op LITERAL with a scalar LITERAL",
-	.Select_Path      = "select(F): PATH is not a path the scan answers, without []",
-	.Imports          = "the filter imports a module",
-	.Not_Columns      = "--from csv|tsv: the filter does not name only columns",
-	.Home_Module      = "~/.jq is included into the filter",
-	.Dot_To_Cells     = "`.` under --to csv|tsv has no columns of its own",
-	.Object_Key       = "an object key is not a constant, or repeats",
-	.Object_Member    = "an object member is not a column of the input",
-	.Select_Columns   = "select(F): F reads more than named columns",
-	.Layout           = "-c is absent: the interpreter lays the output out",
-	.Grow_Header      = "--grow-header writes a header of every key",
-	.Several_Files    = "select to csv|tsv over several files",
+// Why the scan handed a text back to the interpreter.
+Explain_Fallback :: enum u8 {
+	Step_Kind, // a step met a value of another kind
+	Jsonc_Slash, // --from jsonc: the text holds a `/`, which the interpreter prints with its comments
+	Scan_Limit, // the scan refused the text at one of its limits
+	Bad_Text, // the text does not parse as the scan reads it
 }
 
-// The decisions made while the run goes on, each reported once.
-Explain_Runtime :: enum u8 {
-	Root_Pieces,
-	Interpreter,
-	Step,
-	Line_Records,
-	Csv_Pieces,
+// What the batch pool read in pieces.
+Explain_Piece :: enum u8 {
+	Root, // a large root array
+	Lines, // a file of one record per line
+	Csv, // a CSV file's records
+}
+
+// The bytes the run took in and wrote out. Pool threads add to them, so they are atomic.
+Explain_Bytes :: struct {
+	input, output: int,
 }
 
 Explain :: struct {
-	on:    bool,
-	whys:  Explain_Whys,
-	texts: int, // the inputs read so far, which a `text N` line numbers
-	said:  bit_set[Explain_Runtime;u8],
+	on:          bool,
+	routed:      bool, // the plan block is written
+	whys:        Explain_Whys,
+	began, ran:  time.Tick, // the filter was known; the route was chosen
+	scanned:     int, // texts the scan answered
+	interpreted: int, // texts the interpreter ran on
+	files:       int, // CSV files opened by the columns route
+	pieces:      bit_set[Explain_Piece],
+	engines:     bool, // the engine lines are written
+	fallback:    struct {
+		text: int, // the first text the scan handed back, 1 for the first; 0 when none
+		why:  Explain_Fallback,
+		rest: bool, // the interpreter took the texts after it too
+	},
+	bytes:       Explain_Bytes,
+}
+
+// Where the threads add the bytes of input and output, set once the route is chosen: nil without --explain.
+@(private = "file")
+counted: ^Explain_Bytes
+
+explain_input :: proc(n: int) {
+	if counted != nil {
+		sync.atomic_add(&counted.input, n)
+	}
+}
+
+explain_output :: proc(n: int) {
+	if counted != nil {
+		sync.atomic_add(&counted.output, n)
+	}
 }
 
 // The options that keep a filter from the path scan, as `choose_scan` reads them.
@@ -133,85 +147,244 @@ explain_line :: proc(format: string, args: ..any) {
 	fmt.eprintfln(format, ..args)
 }
 
+// An enum value as its name in lower case: the token the report gives it.
+@(private = "file")
+token :: proc(v: $T) -> string {
+	return strings.to_lower(fmt.tprint(v), context.temp_allocator)
+}
+
+// The members of `set` as tokens, comma-joined in declaration order, or `none`.
+@(private = "file")
+tokens :: proc(set: bit_set[$E]) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	for e in E {
+		if e in set {
+			strings.write_string(&b, "," if strings.builder_len(b) > 0 else "")
+			strings.write_string(&b, token(e))
+		}
+	}
+	return strings.to_string(b) if strings.builder_len(b) > 0 else "none"
+}
+
+@(private = "file")
+yes :: proc(v: bool) -> string {
+	return "yes" if v else "no"
+}
+
 // The filter, before anything can refuse it: a filter that does not compile still shows what was run.
 explain_filter :: proc(run: ^Run) {
 	if run.explain.on {
-		explain_line("filter: %q", strings.trim_space(run.program.text))
+		run.explain.began = time.tick_now()
+		explain_line("program: %q", strings.trim_space(run.program.text))
 	}
 }
 
-// The route, its reasons and what the route does with the filter, once the route is chosen.
+// The plan block, once the route is chosen.
 explain_route :: proc(run: ^Run) {
 	e := &run.explain
 	if !e.on {
 		return
 	}
+	o := &run.opts
+	if reads_cells(o) {
+		explain_line("input: format=%s", token(o.from))
+	} else {
+		// The library's JSON default is the last of a repeated key.
+		dup := run.req.duplicates
+		explain_line("input: format=%s dialect=%s records=%s duplicates=%s", token(o.from), token(run.req.dialect), records_of(o), token(.Last if dup == .Default else dup))
+	}
 	switch {
-	case run.columns == nil && !run.scanning:
+	case run.columns != nil:
+		explain_line("route: columns")
+		explain_columns(run.columns)
+	case run.scanning:
+		explain_line("route: path_scan")
+		explain_path(run)
+	case:
 		explain_line("route: interpreter")
-		for why in Explain_Why {
-			if why in e.whys {
-				explain_line("why: %s", EXPLAIN_WHY_TEXT[why])
-			}
-		}
-		return
-	case run.columns != nil:
-		explain_line("route: csv columns")
-	case:
-		explain_line("route: path scan")
+		explain_line("refused: %s", tokens(e.whys))
 	}
+	explain_line("compile_time: %dus", i64(time.duration_microseconds(time.tick_since(e.began))))
+	e.routed, e.ran = true, time.tick_now()
+	counted = &e.bytes
+}
+
+// How the input is cut into texts, as the options say.
+@(private = "file")
+records_of :: proc(o: ^Opts) -> string {
 	switch {
-	case run.columns != nil && run.columns.selecting:
-		explain_line("path: select(F): F runs on an object of the columns it reads, and a kept record is printed from its cells")
-	case run.columns != nil:
-		explain_line("path: the columns are read from each record's cells, and no object is built")
-	case run.select.op != .None:
-		explain_line("path: select(PATH op LITERAL): the scan answers PATH, and a kept text is printed from the source")
-	case run.any_at >= 0:
-		explain_line("path: one answer per element of each []")
+	case o.null_input:
+		return "none"
+	case o.from == .Ndjson:
+		return "ndjson"
+	case o.seq:
+		return "seq"
+	case o.raw_input:
+		return "raw_lines"
+	}
+	return "whole"
+}
+
+@(private = "file")
+explain_columns :: proc(cols: ^Columns) {
+	read := cols.watch if cols.selecting else cols.names
+	shape := "all" if cols.all else "object" if cols.object else "array" if cols.array else "column"
+	explain_line("columns: read=%s shape=%s selecting=%s", strings.join(read, ",", context.temp_allocator) if len(read) > 0 else "*", shape, yes(cols.selecting))
+}
+
+@(private = "file")
+explain_path :: proc(run: ^Run) {
+	sel := "none"
+	if run.select.op != .None {
+		sel = fmt.tprintf("%s literal=%s", token(run.select.op), jq.to_json(run.select.literal))
+	}
+	any_at := fmt.tprint(run.any_at) if run.any_at >= 0 else "none"
+	explain_line("path: %s any_at=%s select=%s limit=%d tried=%s", spell(run.paths[1].steps), any_at, sel, run.paths[1].limit, yes(run.tried))
+}
+
+// A path's steps in jq's spelling: `.a`, `."a-b"`, `[0]`, `[]`.
+@(private = "file")
+spell :: proc(steps: []json.Step) -> string {
+	if len(steps) == 0 {
+		return "."
+	}
+	b := strings.builder_make(context.temp_allocator)
+	if _, named := steps[0].(json.Name); !named {
+		strings.write_byte(&b, '.')
+	}
+	for s in steps {
+		switch v in s {
+		case json.Name:
+			bare := len(v) > 0 && !('0' <= v[0] && v[0] <= '9')
+			for c in transmute([]byte)string(v) {
+				bare &&= c == '_' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9'
+			}
+			fmt.sbprintf(&b, ".%s" if bare else ".%q", string(v))
+		case json.Index:
+			fmt.sbprintf(&b, "[%d]", i64(v))
+		case json.Any:
+			strings.write_string(&b, "[]")
+		}
+	}
+	return strings.to_string(b)
+}
+
+// What `json.route_of` says of each path the scan runs, over the first text: the engine an answer comes from
+// depends on the root being an object, which only the bytes show. Written once.
+explain_engines :: proc(run: ^Run, src: []byte) {
+	e := &run.explain
+	if !e.on || e.engines {
+		return
+	}
+	e.engines = true
+	say_engine(run, src, run.paths[:1])
+	if run.tried {
+		say_engine(run, src, run.paths[1:])
+	}
+}
+
+@(private = "file")
+say_engine :: proc(run: ^Run, src: []byte, paths: []json.Path) {
+	route, err := json.route_of(src, paths, 0, run.req.read)
+	engine: string
+	switch {
+	case err != nil:
+		engine = fmt.tprintf("refused why=%s", token(err.?.kind))
+	case route == .Matcher || route == .Tape:
+		engine = token(route)
 	case:
-		explain_line("path: one answer per input")
+		engine = fmt.tprintf("automaton why=%s", token(route))
 	}
+	explain_line("engine: %s per_element=%s engine=%s", spell(paths[0].steps), yes(paths[0].per_element), engine)
 }
 
-// A decision about the input being read, once of its kind.
-explain_text :: proc(run: ^Run, kind: Explain_Runtime, what: string) {
-	if run.explain.on && kind not_in run.explain.said {
-		run.explain.said += {kind}
-		explain_line("text %d: %s", run.explain.texts, what)
-	}
-}
-
-// A text the interpreter answers because a step met a value of another kind; not said once the interpreter has
-// taken the rest of the stream, which said so.
-explain_step :: proc(run: ^Run) {
-	if .Interpreter not_in run.explain.said {
-		explain_text(run, .Step, "a step met a value of another kind: the interpreter answers this text")
-	}
-}
-
-// `by` more (or fewer) inputs read, which a `text N` line numbers.
-explain_count :: proc(run: ^Run, by: int) {
+// The entries of a large root array the filter reads (`jq.entry_demand`), when the root is built in pieces.
+explain_demand :: proc(run: ^Run, d: jq.Entry_Demand) {
 	if run.explain.on {
-		run.explain.texts += by
+		explain_line("demand: head=%d tail=%d counted=%s", d.head, d.tail, yes(d.counted))
 	}
 }
 
-// A decision about how a file is read, once of its kind.
-explain_note :: proc(run: ^Run, kind: Explain_Runtime, what: string) {
-	if run.explain.on && kind not_in run.explain.said {
-		run.explain.said += {kind}
-		explain_line("note: %s", what)
+// The scan answered a text whose `answers` are in: the interpreter runs on it when a step met a value of another
+// kind (`print_answers` hands it to `run_text`), and takes the texts after it too when `rest`.
+explain_answered :: proc(run: ^Run, answers: []json.Path_Answer, rest: bool) {
+	if !run.explain.on {
+		return
+	}
+	for a in answers {
+		if a.outcome == .Type_Mismatch {
+			explain_fallback(run, .Step_Kind, rest)
+			return
+		}
+	}
+	run.explain.scanned += 1
+}
+
+// The scan hands the text it is at back to the interpreter, the first time with its reason.
+explain_fallback :: proc(run: ^Run, why: Explain_Fallback, rest: bool) {
+	e := &run.explain
+	if e.on && e.fallback.text == 0 {
+		e.fallback = {e.scanned + e.interpreted + 1, why, rest}
 	}
 }
 
-// The records the pool answered, which later `text N` lines count as inputs read.
+// The interpreter runs on a text.
+explain_interpreted :: proc(run: ^Run) {
+	if run.explain.on {
+		run.explain.interpreted += 1
+	}
+}
+
+// The batch pool answered `answers`, one record per line: each is a text the scan answered.
 explain_records :: proc(run: ^Run, answered: []byte) {
 	if !run.explain.on {
 		return
 	}
+	run.explain.pieces += {.Lines}
 	it := json.records(answered, .NDJSON)
 	for _ in json.next_record(&it) {
-		run.explain.texts += 1
+		run.explain.scanned += 1
 	}
+}
+
+// A large root was read in pieces, and `interpreted` is the count before: the text was the scan's unless the
+// interpreter ran on it.
+explain_root :: proc(run: ^Run, interpreted: int) {
+	e := &run.explain
+	if e.on {
+		e.pieces += {.Root}
+		e.scanned += int(e.interpreted == interpreted)
+	}
+}
+
+// The batch pool read `piece` of the input.
+explain_piece :: proc(run: ^Run, piece: Explain_Piece) {
+	if run.explain.on {
+		run.explain.pieces += {piece}
+	}
+}
+
+// A CSV file opened by the columns route.
+explain_file :: proc(run: ^Run) {
+	if run.explain.on {
+		run.explain.files += 1
+	}
+}
+
+// The run block, at the end of the run. A pool thread's copy of the run writes none.
+explain_end :: proc(run: ^Run) {
+	e := &run.explain
+	if !e.on || !e.routed || run.held {
+		return
+	}
+	if run.columns != nil {
+		explain_line("run: files=%d pieces=%s workers=%d", e.files, tokens(e.pieces), run.pool_width)
+	} else {
+		explain_line("run: texts=%d scanned=%d interpreted=%d pieces=%s workers=%d", e.scanned + e.interpreted, e.scanned, e.interpreted, tokens(e.pieces), run.pool_width)
+	}
+	if f := e.fallback; f.text > 0 {
+		explain_line("fallback: text=%d why=%s rest=%s", f.text, token(f.why), yes(f.rest))
+	}
+	explain_line("run_time: %dus", i64(time.duration_microseconds(time.tick_since(e.ran))))
+	explain_line("cost: peak_rss=%d input=%d output=%d", peak_rss(), sync.atomic_load(&e.bytes.input), sync.atomic_load(&e.bytes.output))
 }
