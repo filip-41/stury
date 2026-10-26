@@ -15,7 +15,7 @@ The examples below assume `stury` is on your `PATH`; otherwise use `build/stury`
 stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unbuffered] [-b]
       [-n] [-R] [-s] [-e] [-f FILE] [-L DIR] [--seq] [--stream|--stream-errors]
       [--from FORMAT] [--to FORMAT] [--grow-header]
-      [--max-depth N]
+      [--max-depth N] [--explain]
       [--arg NAME VALUE] [--argjson NAME JSON] [--slurpfile NAME FILE] [--rawfile NAME FILE]
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
 stury check [--from FORMAT|--seq] [--strict-limits] [--max-depth N] [FILE...]
@@ -83,6 +83,7 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 | `--check` | `fmt` only: write nothing, and exit 1 when a file is not already formatted ([`fmt`](#fmt)). |
 | `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output ([CSV and TSV output](#csv-and-tsv-output)). |
 | `--max-depth N` | Refuse nesting past N levels (1024 by default, up to 2^20, where jq's limit is 10000). |
+| `--explain` | Write the route the filter takes, and why, to stderr ([`--explain`](#--explain)), and run the filter as without it. |
 | `--strict-limits` | `check` only. Keep the library's limits, for input bound for the library: numbers of at most 256 digits and a scale of at most 4096. Nesting follows `--max-depth` either way. |
 
 ### Options that differ from jq
@@ -105,6 +106,39 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
   without building an object, and on threads for a large file. Any other filter runs on the interpreter.
 - A key repeated in one object is read as jq reads it: the last value wins.
 - A scalar result is printed as jq prints it, not as its source text (`1E2` is `1E+2`, `"\/"` is `"/"`).
+
+### `--explain`
+
+`--explain` writes `stury: explain: KEY: VALUE` lines to stderr and runs the filter as it would without the
+option: the same stdout, the same exit status, the same other stderr. A line is written when its fact is
+known, so a compile error follows `filter` and a fault in the input follows the lines about its text.
+
+| Key | Value |
+| --- | --- |
+| `filter` | The filter as a JSON string, written first. |
+| `route` | `path scan` (the filter is a path, or `select(PATH op LITERAL)`), `csv columns` (a column filter under `--from csv|tsv`) or `interpreter`. |
+| `why` | One line for each fact that sends the filter to the interpreter: an option (`-n`, `-s`, `-S`, `-R`, `-e`, `-a`, `-C`, `--seq`, `--stream`, `--raw-output0`, `--to csv|tsv`), a filter that is not a path, a `select` the scan cannot take, a redefined `select`, a module import or `~/.jq`, or a CSV filter that does not name only columns. |
+| `path` | What a scan gives: one answer per input, or one per element of each `[]`; for a column filter, how the cells are read and printed. |
+| `text N` | The Nth input text left the scan for the interpreter at run time, or was read on the batch pool: a text that is not an object or array where the path wants one, a `[]` over another kind, a text that does not parse, a JSONC comment, a refused limit. Each kind is written once. |
+| `note` | A fact about the whole run: records one to a line, or the cells of a CSV file, are read in pieces on the batch pool. |
+
+```sh
+$ stury --explain -c '.logs[].id' in.json
+stury: explain: filter: ".logs[].id"
+stury: explain: route: path scan
+stury: explain: path: one answer per element of each []
+1
+2
+$ stury --explain -c '.a | tostring' in.json
+stury: explain: filter: ".a | tostring"
+stury: explain: route: interpreter
+stury: explain: why: the filter is not a path and not select(PATH op LITERAL)
+"1"
+```
+
+The report does not depend on the host or the thread count, except for the pool's `text` and `note` lines, which
+appear only where the batch pool runs (two cores or more). `check` and `fmt` refuse `--explain` as a usage
+error. The library's `json.route_of` gives the engine of a path of a request, for a program that scans itself.
 
 ## `check`
 

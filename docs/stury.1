@@ -3,7 +3,7 @@
 stury \- JSON and CSV codec with a jq 1.8.2\-compatible command line
 .SH SYNOPSIS
 .B stury
-[\-cCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream] [\-\-from format] [\-\-to format] [\-\-grow\-header] [\-\-max\-depth n] [stury options] <jq filter> [file...]
+[\-cCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream] [\-\-from format] [\-\-to format] [\-\-grow\-header] [\-\-max\-depth n] [\-\-explain] [stury options] <jq filter> [file...]
 .br
 .B stury
 .B check
@@ -70,6 +70,9 @@ Refuse nesting past n levels (default 1024; jq's is 10000).
 .TP
 .B \-\-strict\-limits
 With \fBcheck\fR, keep the library's limits: numbers of at most 256 digits and a scale of at most 4096.
+.TP
+.B \-\-explain
+Write the route the filter takes, and why, to stderr as lines \fBstury: explain: KEY: VALUE\fR, and run the filter as without it. The keys are filter, route (path scan, csv columns or interpreter), why (a fact that sends the filter to the interpreter), path, text N (an input text that left the scan or was read on the batch pool) and note. Not with check or fmt.
 .TP
 .B \-V
 Print stury\- and the version it was built with: a release version, or the short commit hash from a source build (dev outside a checkout).
