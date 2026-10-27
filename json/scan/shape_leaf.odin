@@ -592,12 +592,12 @@ shape_scalar_end :: proc(src: []byte, p: int) -> int {
 	return p
 }
 
-// Past the whitespace, and the JSONC comments, at `src[p]`: where `jsonc_skip` stops, on a `/` that opens no
+// Past the whitespace, and the JSONC comments, at `src[p]`: where `dialect_skip` stops, on a `/` that opens no
 // comment, or at the end. The cursor's fault is dropped: every caller reads a value the walk already checked,
 // or pre-scans one the walk checks next.
 shape_skip_space :: proc(src: []byte, p: int) -> int {
 	s := Scanner{src = src, pos = u64(p)}
-	jsonc_skip(&s, &Jsonc_Cursor{})
+	dialect_skip(&s, &Jsonc_Cursor{})
 	return int(s.pos)
 }
 

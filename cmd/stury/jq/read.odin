@@ -36,8 +36,8 @@ lifted := json.Limits {
 	max_scalar_scale  = walk.MAX_SCALAR_SCALE_REPRESENTABLE,
 }
 
-// The grammar the CLI reads option JSON and `fromjson` in: `.Jsonc` under --from jsonc, which the command line sets
-// before it reads any, as it does `lifted.max_depth`.
+// The grammar the CLI reads option JSON and `fromjson` in: the dialect `--from` reads its texts as, which the command
+// line sets before it reads any, as it does `lifted.max_depth`.
 read_dialect := json.Dialect.Json
 
 // JSON's whitespace.

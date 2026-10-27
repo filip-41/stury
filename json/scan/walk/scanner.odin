@@ -54,6 +54,7 @@ Key_Set :: struct {
 	cap:       u32,    // a power of two
 	seed:      u64,    // the hash's key, per scan
 	spilled:   bool,   // `entries` and `slots` came from `allocator`, not the scan entry's scratch
+	json5:     bool,   // keys are JSON5 tokens: an escaped one decodes by `json5_escape_unit`, unquoted or quoted
 	allocator: runtime.Allocator,
 }
 

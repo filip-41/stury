@@ -244,7 +244,8 @@ demand_gate_reset :: proc(g: ^Demand_Gate) {
 	}
 }
 
-// The kind of a value from its first authored byte.
+// The kind of a value from its first authored byte. A JSON5 single quote opens a string, and every other
+// byte not listed starts a number.
 kind_at :: #force_inline proc(src: []byte, lo: u64) -> Kind {
 	if lo >= u64(len(src)) {
 		return .Null
@@ -256,7 +257,7 @@ kind_at :: #force_inline proc(src: []byte, lo: u64) -> Kind {
 		return .True
 	case 'f':
 		return .False
-	case '"':
+	case '"', '\'':
 		return .String
 	case '[':
 		return .Array

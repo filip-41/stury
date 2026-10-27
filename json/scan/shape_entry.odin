@@ -37,14 +37,14 @@ shape_read :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, lazy: bool, 
 	}
 	s := enter_document(src, limits, MAX_DEPTH)
 	ctx.max_depth = s.limits.max_depth
-	// JSONC reads every byte: `lazy` does not apply.
-	when dialect == .Jsonc {
-		jc: Jsonc_Cursor
-		jsonc_skip(&s, &jc)
-		if err := jsonc_walk(&s, ctx, Q, &jc); err != nil {
+	// A dialect reads every byte: `lazy` does not apply.
+	when GRAMMAR[dialect] != {} {
+		dialect_cur: Dialect_Cursor(GRAMMAR[dialect])
+		dialect_skip(&s, &dialect_cur)
+		if err := dialect_walk(&s, ctx, Q, &dialect_cur); err != nil {
 			return err
 		}
-		return jsonc_finish(&s, &jc)
+		return dialect_finish(&s, &dialect_cur)
 	}
 	lex.skip_ws(&s)
 	// A passing walk never skips. The `when` keeps the skipping walk out of it.

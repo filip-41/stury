@@ -29,11 +29,11 @@ import scan_pkg "scan"
 @(private)
 FORCE_AUTOMATON :: #config(FORCE_AUTOMATON, false)
 
-// Whether the automaton is the one engine a walk has: a JSONC walk and a `.Refuse` walk carry no other, and the
+// Whether the automaton is the one engine a walk has: a dialect walk and a `.Refuse` walk carry no other, and the
 // `FORCE_AUTOMATON` test build sends every path to it.
 @(private)
 automaton_forced :: #force_inline proc(dialect: Dialect, duplicates: Duplicates) -> bool {
-	return FORCE_AUTOMATON || dialect == .Jsonc || duplicates == .Refuse
+	return FORCE_AUTOMATON || !scan_pkg.plain_json(dialect) || duplicates == .Refuse
 }
 
 @(private = "file")

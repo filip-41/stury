@@ -26,7 +26,9 @@ ROOT :: walk.ROOT
 //	- `src` is borrowed and must outlive every read: a number is decoded from its text there at each read,
 //	  and an escape-free string is a slice of it.
 //	- Everything else is owned by whoever built it, and `destroy` is the only teardown.
-//	- A JSONC document (`dialect == .Jsonc`) also holds its comments, each attached to a value.
+//	- A JSONC or JSON5 document (`dialect != .Json`) also holds its comments, each attached to a value.
+//	  `marshal` writes a JSON5 one in JSON's spelling, comments kept, and refuses `Infinity` and `NaN`
+//	  (`.Non_Finite`).
 Document :: struct {
 	src:       []byte,
 	// One row per value, in the order the values appear in `src`.
@@ -131,7 +133,7 @@ get_string_decoded :: #force_no_inline proc(doc: ^Document, n: Node) -> (s: stri
 		}
 	}
 	b: []u8
-	b, ok = scan_pkg.dom_get_string(doc.rows[:], doc.src, doc.values[:], &doc.arena, doc.rows.allocator, n)
+	b, ok = scan_pkg.dom_get_string(doc.rows[:], doc.src, doc.values[:], &doc.arena, doc.rows.allocator, n, doc.dialect)
 	if ok && lazy {
 		if doc.strings == nil {
 			doc.strings.allocator = doc.rows.allocator
@@ -151,7 +153,7 @@ get_key :: proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
 		return
 	}
 	b: []u8
-	b, ok = scan_pkg.dom_key(doc.rows[:], doc.src, &doc.arena, doc.rows.allocator, n)
+	b, ok = scan_pkg.dom_key(doc.rows[:], doc.src, &doc.arena, doc.rows.allocator, n, doc.dialect)
 	if ok && .Key_Escaped in doc.rows[n].flags {
 		if doc.keys == nil {
 			doc.keys.allocator = doc.rows.allocator

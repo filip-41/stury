@@ -4,10 +4,12 @@ package main
 // (splitting the input into texts) and one in print.odin or output_cells.odin (writing the outputs).
 
 import csv "../../csv"
+import json "../../json"
 
 Format :: enum u8 {
 	Json,
 	Jsonc,
+	Json5, // read only: each input is transcoded to JSONC, then read as --from jsonc
 	Ndjson,
 	Csv,
 	Tsv,
@@ -15,6 +17,10 @@ Format :: enum u8 {
 
 Format_Spec :: struct {
 	name:    string,
+	// The grammar the text is spelled in, for a JSON-like format.
+	source:  json.Dialect,
+	// The format a transcode of the input is read as, where the input is not read as itself.
+	transcoded_to: Maybe(Format),
 	// A CSV-like format: the first record is the header, and each later record is an object keyed by it.
 	cells:   bool,
 	dialect: csv.Dialect, // for a format with `cells`
@@ -23,7 +29,8 @@ Format_Spec :: struct {
 @(rodata)
 FORMATS := [Format]Format_Spec {
 	.Json   = {name = "json"},
-	.Jsonc  = {name = "jsonc"},
+	.Jsonc  = {name = "jsonc", source = .Jsonc},
+	.Json5  = {name = "json5", source = .Json5, transcoded_to = .Jsonc},
 	.Ndjson = {name = "ndjson"},
 	.Csv    = {name = "csv", cells = true},
 	.Tsv    = {name = "tsv", cells = true, dialect = csv.TSV},
@@ -38,16 +45,34 @@ format_named :: proc(name: string) -> (f: Format, ok: bool) {
 	return
 }
 
-// Returns the comma-separated format names for `--from` and `--to` messages.
-format_names :: proc() -> string {
+// Returns the comma-separated format names for `--from` and `--to` messages: json5 is only read.
+format_names :: proc(writing: bool) -> string {
 	b := make([dynamic]byte, context.temp_allocator)
 	for spec, k in FORMATS {
+		if writing && k == .Json5 {
+			continue
+		}
 		if k != .Json {
 			append(&b, ", ")
 		}
 		append(&b, spec.name)
 	}
 	return string(b[:])
+}
+
+// The format an input of `f` is read as: `f`, or what its transcode gives.
+reads_as :: proc(f: Format) -> Format {
+	return FORMATS[f].transcoded_to.? or_else f
+}
+
+// Whether an input of `f` is transcoded before it is read.
+transcoded :: proc(f: Format) -> bool {
+	return FORMATS[f].transcoded_to != nil
+}
+
+// The grammar the reader of `f` reads its texts in, which `Run.req.dialect` and `jq.read_dialect` hold.
+read_dialect :: proc(f: Format) -> json.Dialect {
+	return FORMATS[reads_as(f)].source
 }
 
 // Reports whether the input format is CSV-like.

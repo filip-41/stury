@@ -153,11 +153,11 @@ walk_queries :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query
 	return
 }
 
-// Where a JSONC document's comments go: `req.doc.facts`, nil for every other walk.
+// Where a dialect document's comments go: `req.doc.facts`, nil for a JSON walk.
 @(private = "file")
 walk_facts :: #force_inline proc(req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Walk_Kind], alloc: runtime.Allocator) -> ^[dynamic]Fact {
 	when .Nodes in WALK {
-		if req.dialect == .Jsonc {
+		if !scan_pkg.plain_json(req.dialect) {
 			walk.adopt_allocator(&req.doc.facts, alloc)
 			return &req.doc.facts
 		}
@@ -189,10 +189,15 @@ walk_run :: #force_inline proc(src: []byte, req: ^Request($KINDS), queries: []sc
 			src, queries, strictness, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), req.dialect, facts,
 		)
 	}
-	if req.dialect == .Jsonc {
-		return scan_pkg.scan_queries_jsonc(
-			src, queries, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), facts,
-		)
+	// A dialect walk has no demand matcher (`automaton_forced`), so a demand walk compiles no dialect.
+	when .Demand not_in WALK {
+		switch req.dialect {
+		case .Json:
+		case .Jsonc:
+			return scan_pkg.scan_queries_dialect(src, queries, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), facts, .Jsonc)
+		case .Json5:
+			return scan_pkg.scan_queries_dialect(src, queries, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), facts, .Json5)
+		}
 	}
 	return scan_pkg.scan_queries(
 		src, queries, strictness, req.limits, WALK,
@@ -200,7 +205,7 @@ walk_run :: #force_inline proc(src: []byte, req: ^Request($KINDS), queries: []sc
 	)
 }
 
-// Attach a JSONC walk's comments to its rows.
+// Attach a dialect walk's comments to its rows.
 @(private = "file")
 walk_attach_facts :: #force_inline proc(req: ^Request($KINDS), src: []byte, facts: ^[dynamic]Fact, err: Maybe(Error), fault: ^scan_pkg.Walk_Fault) {
 	if facts == nil {

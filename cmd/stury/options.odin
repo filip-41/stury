@@ -89,7 +89,8 @@ stury's own options:
   check                     judge the inputs, print nothing when valid;
   fmt                       write each input in the printer's layout, or
                             transcode it (--from, --to);
-      --from format         read json (default), jsonc, ndjson, csv or tsv;
+      --from format         read json (default), jsonc, json5, ndjson,
+                            csv or tsv;
       --to format           write json (default), jsonc, ndjson, csv or tsv;
       --in-place            with fmt, rewrite each file in place;
       --check               with fmt, print nothing: exit 1 when a file is
@@ -180,9 +181,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
-	if o.from == .Jsonc {
-		jq.read_dialect = .Jsonc
-	}
+	jq.read_dialect = read_dialect(o.from)
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
 		a := args[i]
@@ -288,7 +287,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	// fmt writes each input as its own format unless --to says otherwise, so its --to follows --from when --to
 	// was not given. `--to ndjson` is what sets the compact layout here, since fmt refuses -c.
 	if cli.formatting && cli.formats.to == nil {
-		o.to = o.from
+		o.to = reads_as(o.from)
 	}
 	if o.to == .Ndjson {
 		o.compact = true
@@ -308,10 +307,12 @@ format_option :: proc(cli: ^Cli, args: []string, i: int) {
 	}
 	f, ok := format_named(args[i + 1])
 	if !ok {
-		usage_error("%s takes one of %s, not %q", a, format_names(), args[i + 1])
+		usage_error("%s takes one of %s, not %q", a, format_names(a == "--to"), args[i + 1])
 	}
 	if a == "--from" {
 		cli.formats.from = f
+	} else if f == .Json5 {
+		usage_error("--to does not write json5: --to jsonc writes its values and comments")
 	} else {
 		cli.formats.to = f
 	}
@@ -594,7 +595,7 @@ load_file :: proc(path: string, raw: bool) -> (v: jq.Value, msg: string) {
 			return all, ""
 		}
 		end, trailing := text_span(data, at)
-		if jq.read_dialect == .Jsonc { // one document per input, as for the files
+		if !json.plain_json(jq.read_dialect) { // one document per input, as for the files
 			end, trailing = len(data), false
 		}
 		if e, bad := json.validate(data[at:end], {dialect = jq.read_dialect, limits = jq.lifted}).?; bad && e.kind == .Trailing && trailing {

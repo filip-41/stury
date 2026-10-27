@@ -745,6 +745,65 @@ The rest is forward design: how a later format (TOML) joins, and how formats wou
     `hi` and `key_hi` as `u32` lengths with the high offset bits packed into spare header bits.
   - `Kind` and `Row_Flags` use 10 of 16 bits.
 
+### Text dialects of JSON
+
+`Dialect` is `.Json`, `.Jsonc` (comments and trailing commas) or `.Json5` (JSON5 1.0.0). A dialect is a set of
+grammar features (`GRAMMAR` in `json/scan/dialect.odin`, each feature's owner named at `Grammar_Feature`), and
+its walk is the JSON walk compiled on a `Dialect_Cursor(G)`, so the strict cursors carry no dialect code. A
+dialect reads every byte as `.Strict` does, whatever `strictness` says (`.Lazy` and `.Structural` change
+nothing for it).
+
+- A string or key row is plain only when it is double-quoted with no backslash and no raw control byte. A
+  token spelled outside JSON, or holding an escape or a control byte, is an escaped row, decoded by the
+  dialect's escapes (`json5_unescape_into`, `Key_Bytes`). A number spelled outside JSON carries the digit pack
+  `DIALECT_SPELLED`, read by `json5_number_value` and `json5_int`.
+- `unmarshal` of JSON5 reads the text three times: it builds a `Document`, writes it in JSON's spelling
+  (`marshal_document`, comments kept) and reads that as `.Jsonc`; a refusal's offset and key names point back
+  into the JSON5 text by row index. Strings are copied. `Infinity` and `NaN` are `.Out_Of_Range`. A name step
+  for a key holding an escape is made with the caller's allocator.
+- `marshal` of a JSON5 document respells each token that is not JSON's (`jq_string`, `jq_container`,
+  `json5_number_as_json`). The edits and `Record_Read` refuse `.Json5` as `.Bad_Option`.
+- The CLI reads `--from json5` by transcoding each input to JSONC (`json5_to_jsonc`, the format's
+  `transcoded_to`) and reading it as `--from jsonc` does, so positions after the transcode (`input_line_number`,
+  runtime error lines) count the JSONC text, and nesting is held to `MAX_DEPTH`. `check` judges the JSON5 text itself.
+
+Code asks what a dialect reads in one of three ways (the header of `json/scan/dialect.odin` has the same):
+
+- In the walk, a feature is tested at compile time with `when .Feature in G`.
+- A runtime `Dialect` reaches a compiled walk through one exhaustive `switch` over `Dialect`, `.Json` first, each
+  dialect's arm passing only its constant. The strict arm is empty where the strict walk takes arguments a dialect
+  walk does not, and the code after the switch is that walk. A dialect the site's predicate refuses has an empty
+  arm, and the code after the switch answers it.
+- Any other question is a predicate in `dialect.odin` that asks the grammar: `plain_json`, `has_comments`,
+  `own_spelling` (a token spelled other than as JSON's), and the capabilities `edits_read`, `records_read` and
+  `shape_reads`, each a grammar's containment in the grammar that code reads (`EDIT_GRAMMAR`, `RECORD_GRAMMAR`,
+  `SHAPE_GRAMMAR`). A dialect whose features are covered gets a capability without an edit at the site. No site
+  compares a dialect with `==` or `!=`; in a `$dialect` walk the compile-time form is `GRAMMAR[dialect] != {}`.
+
+A dialect is named outside a dispatch arm only as the target of a transcode or a validation that is that dialect
+(`read_json5`, `check --from json5`, `edit_comment`). A predicate is not asked per row or per value: ask it once for
+the document or the call (`marshal_document_jq` asks `own_spelling` once).
+
+Adding a dialect touches these places, and each `switch` over `Dialect` in them is exhaustive, so the compiler
+names the ones missed:
+
+1. `Dialect` and its `GRAMMAR` entry; a new feature in `Grammar_Feature`, gated at its owner by
+   `when .Feature in G`, with its lexing in the dialect's own file under `json/scan/`.
+2. A token that can be spelled outside JSON: an escaped row (strings, keys) or `DIALECT_SPELLED` (numbers),
+   decoded in `dom_span_text` and the number readers.
+3. The entry dispatch: `validate_dialect` and `hooks_of` (with a `FORMAT_HOOKS_<NAME>` table) in
+   `dialect.odin`, `scan_queries_deep` in `scan_queries.odin`, `walk_run` in `json/request_walk.odin`, and
+   `path_subwalk` for a path re-entry.
+4. Typed reads: `shape_reads` and `shape_verdict` (native), or a read through a JSON spelling as `read_json5`;
+   `records_read` in `record_opts_refused`.
+5. Writing and edits: `own_spelling` and `has_comments` in `marshal_document`, the `jq_*` respell procedures,
+   and `edits_read` with the `insert_at` and `watched_remove` dispatch.
+6. The CLI: a `Format` row in `FORMATS` (`source`, and `transcoded_to` when the input is transcoded and read as
+   another format), or a native read; the run asks `Run.req.dialect` through `json.plain_json` and
+   `json.has_comments`.
+7. Tests in `json/test/api/<name>_test.odin`, rows in `cmd/stury/test/cli.tsv`, CHANGELOG, `docs/cli.md`, and
+   `json/API.txt` (`tools/api_surface.py`).
+
 ## 9. How the CLI runs a filter
 
 A filter runs by one of two routes: a path scan or the interpreter.

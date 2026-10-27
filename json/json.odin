@@ -4,7 +4,8 @@ package json
 // `json.*`. The public names live in these files:
 //
 //	json.odin           the shared types (aliases of scan/, scan/walk/ and core/ names), `validate`, `parse_path`,
-//	                    `decode_span`, `error_position` and `render_error`
+//	                    `decode_span`, `error_position`, `render_error` and the dialect predicates `plain_json` and
+//                    `has_comments`
 //	request.odin        `Request`, `request_init`, `answers`, `find`, `validate_remaining`, `Duplicates`
 //	request_scan.odin   `scan` and `prepare`
 //	document.odin       `Document`, `Node`, `NO_NODE`, `ROOT`, the `get_*` readers, `kind`, `facts`, `fact_text`
@@ -213,8 +214,19 @@ Number :: scan_pkg.Number
 // `Raw` marshals as `null`.
 Raw :: scan_pkg.Raw
 
-// The grammar a source is read in.
+// The grammar a source is read in: `.Json` (RFC 8259), `.Jsonc` (comments and trailing commas) or `.Json5`
+// (JSON5 1.0.0). A dialect reads every byte as `.Strict` does, whatever `strictness` says.
 Dialect :: scan_pkg.Dialect
+
+// Whether `d` reads exactly RFC 8259's grammar. Ask a dialect what it reads through these, not by comparing it.
+plain_json :: #force_inline proc "contextless" (d: Dialect) -> bool {
+	return scan_pkg.plain_json(d)
+}
+
+// Whether `d` reads comments, so that a `/` outside a string may begin one.
+has_comments :: #force_inline proc "contextless" (d: Dialect) -> bool {
+	return scan_pkg.has_comments(d)
+}
 
 // Something attached to a value of a document (`facts`): its span in the source, the value, and where
 // it sits relative to the value. A JSONC document's comments are its facts.
@@ -264,8 +276,8 @@ decode_span :: #force_inline proc(
 //	- No allocation but the deep reading's frames (`Limits`), which only input nesting past MAX_DEPTH under
 //	  a raised cap takes.
 //	- `opts.duplicates` is not read: a repeated key is not a fault here.
-//	- `.Jsonc` validates comments and trailing commas as well, every other byte as `.Strict` does whatever
-//	  `strictness` is, and appends each comment to `facts` when it is not nil, attached to nothing (`node`
+//	- `.Jsonc` validates comments and trailing commas as well, `.Json5` JSON5's grammar, every other byte as
+//	  `.Strict` does whatever `strictness` is, and appends each comment to `facts` when it is not nil, attached to nothing (`node`
 //	  is `NO_NODE`), an append its allocator refuses being `.Out_Of_Memory`; a `.Json` source has none.
 //	- A fault carries its kind and an absolute offset into `src`.
 //	- One leading UTF-8 BOM is tolerated at offset 0 and nowhere else, so no caller-visible offset is
@@ -275,8 +287,8 @@ decode_span :: #force_inline proc(
 //	  so no reader could return it as UTF-8.
 @(require_results)
 validate :: #force_inline proc(src: []byte, opts := Read_Opts{}, facts: ^[dynamic]Fact = nil) -> Maybe(Error) {
-	if opts.dialect == .Jsonc {
-		return scan_pkg.jsonc_validate(src, facts, opts.limits)
+	if !scan_pkg.plain_json(opts.dialect) {
+		return scan_pkg.validate_dialect(src, opts.dialect, facts, opts.limits)
 	}
 	if opts.limits.max_depth > MAX_DEPTH {
 		return scan_pkg.scan_plain_deep(src, opts.strictness, opts.limits)

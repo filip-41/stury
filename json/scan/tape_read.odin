@@ -25,6 +25,9 @@ dom_int :: #force_inline proc(nodes: []Row, src: []byte, i: Node) -> (v: i64, ok
 	if v, ok, known = number.int_token(src, u64(n.lo), u64(n.hi), n.first_esc); known {
 		return v, ok
 	}
+	if n.first_esc == number.DIALECT_SPELLED && n.lo < n.hi && int(n.hi) <= len(src) {
+		return json5_int(src, u64(n.lo), u64(n.hi))
+	}
 	return decode_int(src, u64(n.lo), u64(n.hi))
 }
 
@@ -46,6 +49,7 @@ dom_get_string :: proc(
 	arena: ^Name_Arena,
 	alloc: runtime.Allocator,
 	i: Node,
+	dialect := Dialect.Json,
 ) -> (s: []u8, ok: bool) {
 	if i < 0 || int(i) >= len(nodes) || nodes[i].kind != .String {
 		return nil, false
@@ -60,7 +64,7 @@ dom_get_string :: proc(
 	}
 	// Lets the decoder's bulk copy start at the first backslash.
 	esc, _ := first_escape_offset(n)
-	return dom_span_text(src, arena, alloc, u64(n.lo), u64(n.hi), escaped, esc)
+	return dom_span_text(src, arena, alloc, u64(n.lo), u64(n.hi), escaped, esc, dialect)
 }
 
 // The decoded key of member row `i`: an escape-free key as a slice of `src`, an escaped one unescaped into
@@ -73,11 +77,12 @@ dom_key :: proc(
 	arena: ^Name_Arena,
 	alloc: runtime.Allocator,
 	i: Node,
+	dialect := Dialect.Json,
 ) -> (s: []u8, ok: bool) {
 	if i < 0 || int(i) >= len(nodes) || nodes[i].key_lo == NO_KEY {
 		return nil, false
 	}
-	return dom_span_text(src, arena, alloc, u64(nodes[i].key_lo), u64(nodes[i].key_hi), .Key_Escaped in nodes[i].flags, 0)
+	return dom_span_text(src, arena, alloc, u64(nodes[i].key_lo), u64(nodes[i].key_hi), .Key_Escaped in nodes[i].flags, 0, dialect)
 }
 
 // The text of the string token [lo, hi): an escape-free one as a slice of `src`, an escaped one unescaped
@@ -90,7 +95,11 @@ dom_span_text :: #force_inline proc(
 	lo, hi: u64,
 	escaped: bool,
 	first_esc: u64,
+	dialect: Dialect,
 ) -> (s: []u8, ok: bool) {
+	if escaped && own_spelling(dialect) {
+		return json5_span_text(src, arena, alloc, lo, hi)
+	}
 	if !dom_str_span_ok(src, lo, hi) {
 		return nil, false
 	}

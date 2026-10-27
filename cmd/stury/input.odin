@@ -214,7 +214,7 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 		if run.opts.seq && truncated_number(ins.data[at:limit]) {
 			return text_fault(ins, at, limit, json.Error{kind = .Truncated, offset = u64(limit - at)}, jq.TRUNCATED_NUMBER_NOTE)
 		}
-		if trailing && run.opts.from != .Jsonc && limit == len(ins.data) && !own && !run.opts.stream && !run.verbatim {
+		if trailing && json.plain_json(run.req.dialect) && limit == len(ins.data) && !own && !run.opts.stream && !run.verbatim {
 			if v, ok := build_root_pieces(run, ins.data, at, prog); ok {
 				ins.pos, ins.seen, ins.pinned = limit, last_read(ins.data, at, limit), true
 				return v, "", .Value
@@ -272,7 +272,7 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 		if read_on(ins, at) {
 			continue
 		}
-		if run.opts.from == .Jsonc {
+		if !json.plain_json(run.req.dialect) {
 			jsonc_fault(ins, err.?, at)
 		}
 		return text_fault(ins, at, limit, err.?)
@@ -508,6 +508,48 @@ jsonc_fault :: proc(ins: ^Inputs, e: json.Error, at: int) -> ! {
 	fail_input(ins.run, e)
 }
 
+// Replaces the JSON5 input just read with its JSONC spelling (comments kept), which the run then reads as
+// --from jsonc. A text JSON5 refuses ends the run as a JSONC fault does, and so does `Infinity` or `NaN`, which
+// JSONC cannot spell, at the first of them. Later positions (`input_line_number`) count the JSONC text's lines.
+json5_to_jsonc :: proc(ins: ^Inputs) {
+	if len(bytes.trim_space(ins.data)) == 0 { // no text, as for JSONC
+		return
+	}
+	doc, err := jq.build_rows(ins.data, .Json5)
+	defer json.destroy(&doc)
+	if e, bad := err.?; bad {
+		jsonc_fault(ins, e, 0)
+	}
+	text, merr := json.marshal(&doc, {}, runtime.heap_allocator())
+	if merr == .Non_Finite {
+		at: u64
+		for r, i in doc.rows {
+			if v, _ := json.get_number(&doc, json.Node(i)); r.kind == .Number && v.value - v.value != 0 {
+				at = u64(r.lo)
+				break
+			}
+		}
+		ins.run.name, ins.run.whole = ins.name, ins.data
+		fail_input(ins.run, {kind = .Bad_Literal, offset = at}, "Infinity and NaN have no JSON value")
+	}
+	if merr == .Too_Deep {
+		// The transcode writes MAX_DEPTH levels at most: the text's first level past it is the fault.
+		limits := jq.lifted
+		limits.max_depth = json.MAX_DEPTH
+		if e, bad := json.validate(ins.data, {dialect = .Json5, limits = limits}).?; bad {
+			jsonc_fault(ins, e, 0)
+		}
+	}
+	if merr != nil {
+		fail_input(ins.run, {kind = .Out_Of_Memory}, "out of memory")
+	}
+	free_data({ins.data, ins.mapped})
+	ins.data, ins.mapped = text, false
+	if mapped_input_name == ins.name {
+		mapped_input_name = ""
+	}
+}
+
 // The input jq is reading, and its line: what `input_filename`, `input_line_number` and an error's
 // `(at NAME:N)` tell.
 input_position :: proc(ins: ^Inputs) -> (string, int) {
@@ -556,7 +598,7 @@ next_text :: proc(ins: ^Inputs) -> (at, limit: int, trailing, found: bool) {
 		}
 		limit = len(data)
 		switch {
-		case ins.run.opts.from == .Jsonc:
+		case !json.plain_json(ins.run.req.dialect):
 			return at, limit, false, true
 		case seq:
 			if ins.seq_head == .Unread {

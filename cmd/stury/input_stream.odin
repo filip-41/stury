@@ -49,6 +49,9 @@ open_next :: proc(ins: ^Inputs) -> bool {
 		}
 		ins.data = all
 	}
+	if transcoded(ins.run.opts.from) && !ins.run.checking {
+		json5_to_jsonc(ins)
+	}
 	data := ins.data
 	if !ins.bom_done && len(data) > 0 {
 		if bytes.has_prefix(data, UTF8_BOM[:]) {

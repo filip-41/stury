@@ -29,6 +29,9 @@ Unknown_Fields :: core_pkg.Unknown_Fields
 //	            in `context.allocator`, given back before the return.
 //	limits      a `max_depth` past MAX_DEPTH is held to MAX_DEPTH: the shape walk's frames do not spill.
 //	dialect     `.Jsonc` reads comments and trailing commas, every byte checked whatever `strictness` says.
+//	            `.Json5` reads JSON5 through its JSON spelling (`read_json5`): strings are always copied, and
+//	            `Infinity` and `NaN` are `.Out_Of_Range`, and an error's `Name` step for a key holding an escape
+//	            is its decoded text, made with `allocator`. A record read (`Record_Read`) refuses it.
 Unmarshal_Opts :: struct {
 	using read:     Read_Opts,
 	unknown_fields: Unknown_Fields,
@@ -136,7 +139,7 @@ read_typed :: proc(
 	plan: ^Type_Plan,
 	allocator: runtime.Allocator,
 ) -> Maybe(Unmarshal_Error) {
-	if opts.strictness == .Structural && opts.dialect != .Jsonc {
+	if opts.strictness == .Structural && scan_pkg.plain_json(opts.dialect) {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	tmp: Type_Plan = ---
@@ -152,6 +155,10 @@ read_typed :: proc(
 
 @(private)
 read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Type_Plan, allocator: runtime.Allocator) -> Maybe(Unmarshal_Error) {
+	// The one dialect the shape walk does not read is JSON5, which is read through its JSON spelling.
+	if !scan_pkg.shape_reads(opts.dialect) {
+		return read_json5(src, dest, opts, plan, allocator)
+	}
 	shape, serr := core_pkg.read_shape_of(&plan.base)
 	if serr != nil {
 		return serr
@@ -173,7 +180,7 @@ read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Typ
 	}
 	lazy := opts.strictness == .Lazy
 	// The descent never skips, so `.Lazy` takes it only where skipping would not pay.
-	if shape.descends && opts.dialect == .Json && opts.duplicates != .Refuse && (!lazy || scan_pkg.shape_lazy_reads_all(src, &run, opts.limits)) {
+	if shape.descends && scan_pkg.plain_json(opts.dialect) && opts.duplicates != .Refuse && (!lazy || scan_pkg.shape_lazy_reads_all(src, &run, opts.limits)) {
 		read, oom := scan_pkg.shape_descend(src, &run, dest, opts.limits)
 		if e, refused := oom.?; refused {
 			return unmarshal_error_of(&run, e)
@@ -182,20 +189,30 @@ read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Typ
 			return nil
 		}
 	}
-	// The dialect and `refuse` (the last argument) are compile-time parameters of the walks, so each call
-	// below is a separate instance and the plain JSON read compiles without the JSONC and key-check code.
-	verdict: Maybe(Error)
-	if opts.dialect == .Jsonc {
-		verdict = scan_pkg.scan_shape(src, &run, dest, lazy, opts.limits, .Jsonc, false) if opts.duplicates != .Refuse else scan_pkg.scan_shape(src, &run, dest, lazy, opts.limits, .Jsonc, true)
-	} else if lazy {
-		verdict = scan_pkg.scan_shape_lazy(src, &run, dest, opts.limits, false) if opts.duplicates != .Refuse else scan_pkg.scan_shape_lazy(src, &run, dest, opts.limits, true)
-	} else {
-		verdict = scan_pkg.scan_shape(src, &run, dest, false, opts.limits, .Json, false) if opts.duplicates != .Refuse else scan_pkg.scan_shape(src, &run, dest, false, opts.limits, .Json, true)
-	}
-	if e, refused := verdict.?; refused {
+	if e, refused := shape_verdict(src, &run, dest, opts).?; refused {
 		return unmarshal_error_of(&run, e)
 	}
 	return nil
+}
+
+// The shape walk of `src` in `opts.dialect`. The dialect and `refuse` (the last argument) are compile-time
+// parameters of the walks, so each call below is a separate instance and the plain JSON read compiles without the
+// JSONC and key-check code. A text of a dialect `shape_reads` refuses is read through its JSON spelling (`read_json5`) and never gets here.
+@(private)
+shape_verdict :: #force_inline proc(src: []byte, run: ^walk.Shape_Run, dest: rawptr, opts: Unmarshal_Opts) -> Maybe(Error) {
+	lazy := opts.strictness == .Lazy
+	refuse := opts.duplicates == .Refuse
+	if lazy && scan_pkg.plain_json(opts.dialect) {
+		return scan_pkg.scan_shape_lazy(src, run, dest, opts.limits, false) if !refuse else scan_pkg.scan_shape_lazy(src, run, dest, opts.limits, true)
+	}
+	switch opts.dialect {
+	case .Json:
+		return scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Json, false) if !refuse else scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Json, true)
+	case .Jsonc:
+		return scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Jsonc, false) if !refuse else scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Jsonc, true)
+	case .Json5: // `read_planned` sends a dialect `shape_reads` refuses elsewhere
+	}
+	unreachable()
 }
 
 // The walk's refusal with its path: one step per live frame that names one. A typed fault names

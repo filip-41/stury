@@ -52,7 +52,7 @@ print_answer :: proc(run: ^Run, src: []byte, a: json.Path_Answer) {
 	span := src[a.lo:a.hi]
 	switch a.kind {
 	case .Array, .Object:
-		if run.req.dialect == .Json {
+		if json.plain_json(run.req.dialect) {
 			print_spelled(run, span)
 		} else {
 			print_text(run, span)
@@ -187,7 +187,7 @@ source_text :: proc(run: ^Run, v: jq.Value) -> (text: []byte, large: bool) {
 			return
 		}
 		k, _ := json.kind(x.doc, x.node)
-		if x.doc.dialect == .Json && (k == .Array || k == .Object) {
+		if json.plain_json(x.doc.dialect) && (k == .Array || k == .Object) {
 			text = json.get_raw(x.doc, x.node)
 		}
 	case ^jq.Array:

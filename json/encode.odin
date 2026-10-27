@@ -4,9 +4,12 @@ package json
 // is its only entry.
 
 import "core:io"
+import "core:math"
 import "core:mem"
 import "core:slice"
+import "core:strconv"
 import enc "encode"
+import scan_pkg "scan"
 
 // How the writer formats its output. The zero value is compact UTF-8 copying the source's number and string
 // text.
@@ -43,10 +46,11 @@ marshal_document :: proc(doc: ^Document, opts := Marshal_Opts{}, allocator := co
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return nil, .Too_Deep
 	}
-	if opts.jq_spelling || opts.sort_keys {
+	// A dialect with its own spelling has its tokens respelled one at a time.
+	if opts.jq_spelling || opts.sort_keys || scan_pkg.own_spelling(doc.dialect) {
 		return marshal_document_jq(doc, opts, allocator)
 	}
-	if doc.dialect == .Jsonc {
+	if scan_pkg.has_comments(doc.dialect) {
 		return enc.encode_rows_jsonc(doc.src, doc.rows[:], doc.facts[:], opts, allocator)
 	}
 	return enc.encode_rows(doc.src, doc.rows[:], opts, allocator)
@@ -71,8 +75,8 @@ marshal_document_to_writer :: proc(w: io.Writer, doc: ^Document, opts := Marshal
 	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
 		return .Too_Deep
 	}
-	if doc.dialect == .Jsonc || opts.jq_spelling || opts.sort_keys {
-		// A JSONC document, or one in jq's notation or with sorted keys, is made whole, then written.
+	if !scan_pkg.plain_json(doc.dialect) || opts.jq_spelling || opts.sort_keys {
+		// A dialect's document, or one in jq's notation or with sorted keys, is made whole, then written.
 		out, err := marshal_document(doc, opts, allocator)
 		if err != .None {
 			return err
@@ -98,7 +102,7 @@ marshal_document_jq :: proc(doc: ^Document, opts: Marshal_Opts, allocator: mem.A
 	}
 	buf := make([dynamic]byte, 0, len(doc.src) + 1, allocator)
 	cl := enc.Comment_Layout{src = doc.src, pretty = opts.pretty, indent = enc.indent_of(opts)}
-	err = jq_root(&buf, doc, &cl, opts, allocator)
+	err = jq_root(&buf, doc, &cl, opts, allocator, scan_pkg.own_spelling(doc.dialect))
 	if err == .None {
 		err = enc.reescape_tail(&buf, 0, enc.reescape_of(opts))
 	}
@@ -111,10 +115,10 @@ marshal_document_jq :: proc(doc: ^Document, opts: Marshal_Opts, allocator: mem.A
 
 // The root with its comments, then the `trailing_newline`, which a line comment ending the output has made.
 @(private = "file")
-jq_root :: proc(buf: ^[dynamic]byte, doc: ^Document, cl: ^enc.Comment_Layout, opts: Marshal_Opts, allocator: mem.Allocator) -> Marshal_Error {
+jq_root :: proc(buf: ^[dynamic]byte, doc: ^Document, cl: ^enc.Comment_Layout, opts: Marshal_Opts, allocator: mem.Allocator, respell: bool) -> Marshal_Error {
 	own := facts(doc, ROOT)
 	enc.put_leads(buf, cl, own, 0, root = true) or_return
-	jq_value(buf, doc, ROOT, cl, opts, 0, allocator) or_return
+	jq_value(buf, doc, ROOT, cl, opts, 0, allocator, respell) or_return
 	enc.put_trails(buf, cl, own, 0, root = true) or_return
 	if opts.trailing_newline && buf[len(buf) - 1] != '\n' {
 		return enc.put_byte(buf, '\n')
@@ -123,24 +127,27 @@ jq_root :: proc(buf: ^[dynamic]byte, doc: ^Document, cl: ^enc.Comment_Layout, op
 }
 
 @(private = "file")
-jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_Layout, opts: Marshal_Opts, depth: int, allocator: mem.Allocator) -> Marshal_Error {
+jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_Layout, opts: Marshal_Opts, depth: int, allocator: mem.Allocator, respell: bool) -> Marshal_Error {
 	k, _ := kind(doc, n)
 	switch k {
 	case .Null, .False, .True:
 		return enc.put_bytes(buf, string(get_raw(doc, n)))
 	case .Number:
-		return jq_number(buf, doc, n, opts)
+		return jq_number(buf, doc, n, opts, respell)
 	case .String:
-		return jq_string(buf, doc, n, opts)
+		return jq_string(buf, doc, n, opts, respell)
 	case .Array, .Object:
-		return jq_container(buf, doc, n, k, cl, opts, depth, allocator)
+		return jq_container(buf, doc, n, k, cl, opts, depth, allocator, respell)
 	}
 	return .None
 }
 
 @(private = "file")
-jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts) -> Marshal_Error {
+jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts, respell: bool) -> Marshal_Error {
 	lit := string(get_raw(doc, n))
+	if respell && doc.rows[n].first_esc == scan_pkg.DIALECT_SPELLED {
+		return json5_number_as_json(buf, doc, n, lit)
+	}
 	if !opts.jq_spelling {
 		return enc.put_bytes(buf, lit)
 	}
@@ -154,8 +161,9 @@ jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Op
 }
 
 @(private = "file")
-jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts) -> Marshal_Error {
-	if !opts.jq_spelling {
+jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts, respell: bool) -> Marshal_Error {
+	// A string of a dialect with its own spelling is plain only double-quoted with no escape.
+	if !opts.jq_spelling && (!respell || .Str_Escaped not_in doc.rows[n].flags) {
 		return enc.put_bytes(buf, string(get_raw(doc, n)))
 	}
 	s, _ := get_string(doc, n)
@@ -164,7 +172,7 @@ jq_string :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Op
 
 // An array or object `n` of kind `k`: its members in `document_members` order, each with its comments.
 @(private = "file")
-jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: ^enc.Comment_Layout, opts: Marshal_Opts, depth: int, allocator: mem.Allocator) -> Marshal_Error {
+jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: ^enc.Comment_Layout, opts: Marshal_Opts, depth: int, allocator: mem.Allocator, respell: bool) -> Marshal_Error {
 	open, close := u8('['), u8(']')
 	if k == .Object {
 		open, close = '{', '}'
@@ -193,7 +201,7 @@ jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: 
 		own = facts(doc, v)
 		enc.put_leads(buf, cl, own, depth + 1) or_return
 		if k == .Object {
-			if opts.jq_spelling {
+			if opts.jq_spelling || (respell && .Key_Escaped in doc.rows[v].flags) {
 				enc.put_string_escaping_del(buf, e.key) or_return
 			} else {
 				enc.put_bytes(buf, string(doc.src[doc.rows[v].key_lo:doc.rows[v].key_hi])) or_return
@@ -201,7 +209,7 @@ jq_container :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, k: Kind, cl: 
 			enc.put_colon(buf, cl.pretty) or_return
 			enc.put_inlines(buf, cl, own, depth + 1) or_return
 		}
-		jq_value(buf, doc, v, cl, opts, depth + 1, allocator) or_return
+		jq_value(buf, doc, v, cl, opts, depth + 1, allocator, respell) or_return
 	}
 	enc.put_trails(buf, cl, own, depth + 1) or_return
 	enc.put_feet(buf, cl, facts(doc, n), depth) or_return
@@ -254,4 +262,41 @@ document_members :: proc(doc: ^Document, n: Node, opts: Marshal_Opts, allocator:
 		slice.stable_sort_by(entries[:], proc(a, b: Entry) -> bool {return a.key < b.key})
 	}
 	return entries, true
+}
+
+// A JSON5 number spelled outside JSON's grammar (`DIALECT_SPELLED`), in JSON's spelling: a hex integer in
+// decimal (past 64 bits, the double its digits accumulate to, as `json5_number_value` reads it), a decimal
+// without its `+`, with a `0` before a leading point and without a trailing point. `Infinity` and `NaN` have no JSON spelling and are `.Non_Finite`.
+@(private = "file")
+json5_number_as_json :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, lit: string) -> Marshal_Error {
+	v, _ := get_number(doc, n)
+	if math.is_nan(v.value) || math.is_inf(v.value) {
+		return .Non_Finite
+	}
+	p := 0
+	if lit[0] == '+' || lit[0] == '-' {
+		p = 1
+	}
+	if lit[0] == '-' {
+		enc.put_byte(buf, '-') or_return
+	}
+	if len(lit) > p + 1 && lit[p + 1] | 0x20 == 'x' {
+		digits: [32]u8
+		mag, approx, over := scan_pkg.json5_hex(transmute([]byte)lit, u64(p + 2), u64(len(lit)))
+		if !over {
+			return enc.put_bytes(buf, strconv.write_uint(digits[:], mag, 10))
+		}
+		// `write_float` leads with the sign.
+		return enc.put_bytes(buf, strconv.write_float(digits[:], approx, 'g', -1, 64)[1:])
+	}
+	if lit[p] == '.' {
+		enc.put_byte(buf, '0') or_return
+	}
+	for i in p ..< len(lit) {
+		if lit[i] == '.' && (i + 1 == len(lit) || lit[i + 1] - '0' >= 10) {
+			continue
+		}
+		enc.put_byte(buf, lit[i]) or_return
+	}
+	return .None
 }

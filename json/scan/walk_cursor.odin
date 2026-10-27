@@ -134,14 +134,14 @@ cursor_advance :: proc {
 	byte_cursor_advance,
 	pretty_cursor_advance,
 	index_cursor_advance,
-	jsonc_cursor_advance,
+	dialect_cursor_advance,
 }
 
 cursor_skip :: proc {
 	byte_cursor_skip,
 	pretty_cursor_skip,
 	index_cursor_skip,
-	jsonc_skip,
+	dialect_skip,
 }
 
 cursor_skip_peek :: #force_inline proc(s: ^Scanner, cur: ^$C) -> int {
@@ -156,7 +156,7 @@ cursor_string_known :: proc {
 	byte_cursor_string_known,
 	pretty_cursor_string_known,
 	index_cursor_string_known,
-	jsonc_cursor_string_known,
+	dialect_cursor_string_known,
 }
 
 // The same for the number or literal at `s.pos` and its Locate leaf.
@@ -164,7 +164,7 @@ cursor_scalar_known :: proc {
 	byte_cursor_scalar_known,
 	pretty_cursor_scalar_known,
 	index_cursor_scalar_known,
-	jsonc_cursor_scalar_known,
+	dialect_cursor_scalar_known,
 }
 
 // Skips the value at `s.pos` to where `lex.value_end` ends it, without checking its grammar. At `.Locate` its

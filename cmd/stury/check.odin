@@ -50,8 +50,9 @@ check_input :: proc(run: ^Run, ins: ^Inputs) {
 	switch {
 	case run.opts.from == .Ndjson || run.opts.seq:
 		check_records(run, ins.data)
-	case run.opts.from == .Jsonc:
-		if e, bad := json.validate(ins.data, {dialect = .Jsonc, limits = check_limits(run)}).?; bad {
+	case !json.plain_json(run.req.dialect):
+		// The text itself, not the transcode `run` reads.
+		if e, bad := json.validate(ins.data, {dialect = FORMATS[run.opts.from].source, limits = check_limits(run)}).?; bad {
 			fail_input(run, e)
 		}
 	case:

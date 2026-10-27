@@ -44,7 +44,7 @@ scan_request :: #force_no_inline proc(src: []byte, req: ^Request($KINDS), planne
 		if err, refused := request_fault(src, req, alloc).?; refused {
 			return err
 		}
-		// `.Refuse` and JSONC walks serve every path through the automaton (`automaton_forced`), so no matcher
+		// `.Refuse` and dialect walks serve every path through the automaton (`automaton_forced`), so no matcher
 		// is planned.
 		if tape_routable(req) && scan_tape(src, req, alloc) {
 			return nil
