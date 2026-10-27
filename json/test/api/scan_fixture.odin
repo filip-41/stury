@@ -46,7 +46,7 @@ scan_fault :: proc(err: Maybe(json.Error)) -> Maybe(json.Error) {
 Path_Run :: struct {
 	req:     json.Request({.Path}),
 	err:     Maybe(json.Error),
-	answers: []json.Path_Answer, // borrowed from `req`
+	answers: []json.Answer, // borrowed from `req`
 }
 
 @(private)
@@ -68,7 +68,7 @@ paths_run :: proc(
 
 // The text of `query`'s answers in `src`, joined with `,`.
 @(private)
-answer_texts :: proc(answers: []json.Path_Answer, src: string, query: u32 = 0) -> string {
+answer_texts :: proc(answers: []json.Answer, src: string, query: u32 = 0) -> string {
 	b: strings.Builder
 	strings.builder_init(&b, context.temp_allocator)
 	for a in answers {

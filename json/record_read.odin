@@ -20,7 +20,6 @@ Record_State :: struct {
 	run:        walk.Shape_Run,
 	q:          ^scan_pkg.Query_Ctx,
 	it:         ^Records,
-	at:         u64,
 	bound_plan: ^core_pkg.Type_Plan, // nil until the first read
 	bound_opts: Unmarshal_Opts,      // the options the run, `base` and `q` are bound under
 	lazy:       bool,
@@ -32,11 +31,6 @@ Record_State :: struct {
 }
 
 // The heap's, not the read's allocator: a caller reads records into an arena freed whole while the state outlives it.
-@(private)
-record_state_new :: proc() -> ^Record_State {
-	return new(Record_State, runtime.heap_allocator())
-}
-
 @(private)
 record_state_free :: proc(state: rawptr) {
 	free((^Record_State)(state), runtime.heap_allocator())
@@ -55,11 +49,11 @@ record_read_init :: proc(
 	if rd == nil || it == nil {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
-	record_read_destroy(rd)
+	core_pkg.record_read_destroy(rd)
 	if record_opts_refused(opts) {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
-	state := record_state_new()
+	state := new(Record_State, runtime.heap_allocator())
 	if state == nil {
 		return Unmarshal_Error{kind = .Out_Of_Memory}
 	}
@@ -70,11 +64,7 @@ record_read_init :: proc(
 		destroy = record_state_free,
 		format = json_plan_format(),
 	}
-	base: ^core_pkg.Type_Plan
-	if plan != nil {
-		base = &plan.base
-	}
-	if err := core_pkg.record_read_init(rd, T, source, opts, base, runtime.heap_allocator()); err != nil {
+	if err := core_pkg.record_read_init(rd, T, source, opts, plan, runtime.heap_allocator()); err != nil {
 		return err
 	}
 	state.run = walk.Shape_Run{
@@ -89,39 +79,23 @@ record_read_init :: proc(
 // The offset of the record the last read pulled, from the input's first byte. 0 before the first read.
 @(require_results)
 record_read_at :: proc(rd: ^Record_Read) -> u64 {
-	if rd == nil {
-		return 0
-	}
-	state := (^Record_State)(rd.source.state)
-	return state == nil ? 0 : state.at
+	return rd == nil ? 0 : rd.at
 }
 
 @(private)
-record_source_read :: #force_inline proc(state: rawptr, opts: ^Unmarshal_Opts, plan: ^core_pkg.Type_Plan, dest: rawptr) -> Maybe(Unmarshal_Error) {
+record_source_read :: #force_inline proc(state: rawptr, opts: ^Unmarshal_Opts, plan: ^core_pkg.Type_Plan, dest: rawptr, at: ^u64) -> Maybe(Unmarshal_Error) {
 	st := (^Record_State)(state)
 	rec, ok := next_record(st.it)
 	if !ok {
 		// No record is read: the frame is the input's.
-		st.at = 0
+		at^ = 0
 		if e, faulted := st.it.err.?; faulted {
-			return record_framing_error(e)
+			return core_pkg.unmarshal_error_from(e)
 		}
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
-	st.at = rec.at
+	at^ = rec.at
 	return read_record(st, rec.bytes, opts, plan, dest)
-}
-
-// The iterator's framing fault, which no record holds.
-@(private)
-record_framing_error :: proc(e: Error) -> Maybe(Unmarshal_Error) {
-	#partial switch e.kind {
-	case .Out_Of_Memory:
-		return Unmarshal_Error{kind = .Out_Of_Memory}
-	case .Bad_Option:
-		return Unmarshal_Error{kind = .Bad_Option}
-	}
-	return Unmarshal_Error{kind = .Syntax, syntax = e.kind, offset = e.offset}
 }
 
 // Whether two option values are bitwise equal. Padding is part of the compare: `bound_opts` is a bitwise copy of
@@ -174,17 +148,10 @@ read_record :: #force_inline proc(st: ^Record_State, src: []byte, opts: ^Unmarsh
 
 @(private)
 record_bind :: #force_no_inline proc(st: ^Record_State, plan: ^core_pkg.Type_Plan, opts: ^Unmarshal_Opts) {
-	run := &st.run
-	run.shape = &plan.read
-	run.enum_ints = plan.opts.enums == .Int
-	run.union_tag = plan.opts.union_tag
-	run.borrow = opts.borrow_strings
-	run.refuse_unknown = opts.unknown_fields == .Refuse
-	run.keep_first = opts.duplicates == .First
-	run.read_over = opts.duplicates == .All
-	st.base = scan_pkg.shape_bind(run, st.q, nil, opts.limits)
+	shape_run_bind(&st.run, &plan.read, plan, opts^)
+	st.base = scan_pkg.shape_bind(&st.run, st.q, nil, opts.limits)
 	st.lazy = opts.strictness == .Lazy
-	st.descends = run.shape.descends && scan_pkg.plain_json(opts.dialect) && opts.duplicates != .Refuse
+	st.descends = descent_takes(&plan.read, opts^)
 	st.bound_plan = plan
 	(^[size_of(Unmarshal_Opts) / size_of(u64)]u64)(&st.bound_opts)^ = (^[size_of(Unmarshal_Opts) / size_of(u64)]u64)(opts)^
 }
@@ -202,12 +169,6 @@ record_walk :: #force_no_inline proc(st: ^Record_State, src: []byte, opts: Unmar
 		return unmarshal_error_of(run, e)
 	}
 	return nil
-}
-
-// `core_pkg.record_read_destroy`, for `destroy`'s overload set, which names this package's procedures.
-@(private)
-record_read_destroy :: proc(rd: ^Record_Read) {
-	core_pkg.record_read_destroy(rd)
 }
 
 // Whether a record read refuses `opts`. `.Structural` stores what it reads, so a JSON read refuses it unless

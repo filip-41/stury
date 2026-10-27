@@ -1,6 +1,6 @@
 package json
 
-// Entry-level operations for `insert`, `set` (`upsert`), and `remove`: container scans, entry span resolution,
+// Entry-level operations for `insert`, `upsert` and `remove`: container scans, entry span resolution,
 // separator inference, and JSONC extent placement.
 
 import "base:runtime"
@@ -15,14 +15,14 @@ import scan_pkg "scan"
 EDIT_QUERIES :: bit_set[Query]{.Path, .Nodes}
 
 // `insert` of the written value `repl`. With `upsert`, a member `at` the object already has has its value
-// replaced instead (`set` with `upsert`).
+// replaced instead (`upsert`).
 @(private)
-insert_at :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, dialect: Dialect, upsert := false) -> (out: []byte, err: Maybe(Path_Error)) {
-	switch dialect {
+insert_at :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, opts: Read_Opts, upsert := false) -> (out: []byte, err: Maybe(Path_Error)) {
+	switch opts.dialect {
 	case .Json:
-		return insert_in(src, p, at, repl, allocator, .Json, upsert)
+		return insert_in(src, p, at, repl, allocator, opts, .Json, upsert)
 	case .Jsonc:
-		return insert_in(src, p, at, repl, allocator, .Jsonc, upsert)
+		return insert_in(src, p, at, repl, allocator, opts, .Jsonc, upsert)
 	case .Json5: // `edits_read` refuses it before any edit
 	}
 	return nil, Path_Error{kind = .Bad_Option}
@@ -30,14 +30,14 @@ insert_at :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 
 // `$dialect` is a compile-time parameter, so the JSON edit compiles without the comment branches.
 @(private = "file")
-insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, $dialect: Dialect, upsert: bool) -> (out: []byte, err: Maybe(Path_Error)) {
+insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, opts: Read_Opts, $dialect: Dialect, upsert: bool) -> (out: []byte, err: Maybe(Path_Error)) {
 	G :: scan_pkg.GRAMMAR[dialect]
 	key := make([dynamic]u8, allocator)
 	defer delete(key)
 	// Path 0 finds the containers. Under JSON path 1 their entries, which JSONC reads off its rows. The last
 	// path is an object's member `at`.
 	kids_buf, member_buf: [core_pkg.MAX_PATH_STEPS + 1]Step
-	paths := [3]Path{p, extend(kids_buf[:], p.steps, Any{}), {}}
+	paths := [3]Path{every_member_path(p, opts), extend(kids_buf[:], p.steps, Any{}), {}}
 	n_paths := 1 if .Comments in G else 2
 	member_q := u32(n_paths)
 	if name, is_name := at.(string); is_name {
@@ -50,12 +50,13 @@ insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 	req: Request(EDIT_QUERIES when .Comments in G else {.Path})
 	req.state.route.every_member = true
 	defer request_destroy(&req)
-	edit_scan(src, &req, paths[:n_paths], dialect, allocator) or_return
+	edit_scan(src, &req, paths[:n_paths], opts, allocator) or_return
 	targets, members := found(req.answers[:], 0, allocator), found(req.answers[:], member_q, allocator)
 	defer delete(targets)
 	defer delete(members)
+	keep_policy_found(&targets, src, p, opts, allocator) or_return
 	when .Comments in G {
-		kids := make([dynamic]Path_Answer, allocator)
+		kids := make([dynamic]Answer, allocator)
 	} else {
 		kids := found(req.answers[:], 1, allocator)
 		kc := 0
@@ -67,11 +68,13 @@ insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 	defer delete(places)
 	mc := 0
 	for c in targets {
-		// `set` with `upsert`: the object's member, when it has one, has its value replaced.
+		// `upsert`: the object's member, when it has one, has its value replaced.
 		if m := held_by(members[:], &mc, c.lo) if upsert else nil; len(m) > 0 {
-			from := len(text)
-			append(&text, ..repl)
-			append(&places, Place{at = m[0].lo, cut = m[0].hi, from = from, to = len(text)})
+			for v in m {
+				from := len(text)
+				append(&text, ..repl)
+				append(&places, Place{at = v.lo, cut = v.hi, from = from, to = len(text)})
+			}
 			continue
 		}
 		when .Comments in G {
@@ -90,6 +93,44 @@ insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 	}
 }
 
+// `p` as the every-member scan of `insert` and `remove` reads it: without its limit under `.First` or `.Last`,
+// so the limit counts only what `keep_policy_found` keeps.
+@(private = "file")
+every_member_path :: proc(p: Path, opts: Read_Opts) -> Path {
+	q := p
+	if opts.duplicates == .First || opts.duplicates == .Last {
+		q.limit = 0
+	}
+	return q
+}
+
+// The scans of `insert` and `remove` read every member, as their entry lists need the shadowed ones. Under
+// `.First` or `.Last` `hits` is cut to what `p` finds under that policy, as `set` finds it.
+@(private = "file")
+keep_policy_found :: proc(hits: ^[dynamic]Answer, src: []byte, p: Path, opts: Read_Opts, allocator: runtime.Allocator) -> Maybe(Path_Error) {
+	if opts.duplicates != .First && opts.duplicates != .Last {
+		return nil
+	}
+	req: Request({.Path})
+	defer request_destroy(&req)
+	paths := [1]Path{p}
+	edit_scan(src, &req, paths[:], opts, allocator) or_return
+	policy := found(req.answers[:], 0, allocator)
+	defer delete(policy)
+	kept, k := 0, 0
+	for h in hits {
+		for k < len(policy) && policy[k].lo < h.lo {
+			k += 1
+		}
+		if k < len(policy) && policy[k].lo == h.lo {
+			hits[kept] = h
+			kept += 1
+		}
+	}
+	resize(hits, kept)
+	return nil
+}
+
 // `remove` of what `p` finds, entry by entry (`entry_lo`, `entry_hi`). A run of removed entries before a
 // survivor goes up to the survivor's start. A run at the end takes the separator before it: under JSON from
 // the last survivor's end, under JSONC too when no comment sits between them. Otherwise it takes the
@@ -97,23 +138,22 @@ insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 // foot comments) the interior goes. `$dialect` is a compile-time parameter, so the JSON edit compiles without
 // the comment branches.
 @(private)
-remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $dialect: Dialect) -> (out: []byte, err: Maybe(Path_Error)) {
+remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, opts: Read_Opts, $dialect: Dialect) -> (out: []byte, err: Maybe(Path_Error)) {
 	G :: scan_pkg.GRAMMAR[dialect]
 	// Path 0 finds the values. Under JSON path 1 is every entry of the containers holding them, which JSONC
 	// reads off its rows.
 	kids_buf: [core_pkg.MAX_PATH_STEPS]Step
-	paths := [2]Path{p, extend(kids_buf[:], p.steps[:len(p.steps) - 1], Any{})}
+	paths := [2]Path{every_member_path(p, opts), extend(kids_buf[:], p.steps[:len(p.steps) - 1], Any{})}
 	req: Request(EDIT_QUERIES when .Comments in G else {.Path})
-	req.duplicates = .All
+	req.state.route.every_member = true
 	defer request_destroy(&req)
-	edit_scan(src, &req, paths[:1 if .Comments in G else 2], dialect, allocator) or_return
+	edit_scan(src, &req, paths[:1 if .Comments in G else 2], opts, allocator) or_return
 	doc := &req.doc
 	gone, kids := found(req.answers[:], 0, allocator), found(req.answers[:], 1, allocator)
 	defer delete(gone)
 	defer delete(kids)
-	if len(gone) == 0 {
-		return nil, Path_Error{kind = .Not_Found}
-	}
+	keep_policy_found(&gone, src, p, opts, allocator) or_return
+	core_pkg.edit_found(len(gone)) or_return
 	edits := make([dynamic]Edit, allocator)
 	defer delete(edits)
 	when .Comments not_in G {
@@ -151,9 +191,9 @@ remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $dialect: 
 		slice.sort_by(edits[:], proc(a, b: Edit) -> bool {
 			return a.lo < b.lo
 		})
-		return judged(edits_apply_checked(src, edits[:], allocator), allocator, dialect)
+		return judged(core_pkg.edits_apply_checked(src, edits[:], allocator), allocator, dialect)
 	} else {
-		return edits_apply_checked(src, edits[:], allocator)
+		return core_pkg.edits_apply_checked(src, edits[:], allocator)
 	}
 }
 
@@ -161,7 +201,7 @@ remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, $dialect: 
 // trailing run is left to `trailing_cut`: its `first` and `last` entry indexes, or -1 when `own` ends in a
 // survivor, and `kept`, the last survivor's index or -1.
 @(private = "file")
-cut_interior_runs :: proc(edits: ^[dynamic]Edit, src: []byte, doc: ^Document, own, run: []Path_Answer, $G: scan_pkg.Grammar) -> (first, last, kept: int, keyed: bool) {
+cut_interior_runs :: proc(edits: ^[dynamic]Edit, src: []byte, doc: ^Document, own, run: []Answer, $G: scan_pkg.Grammar) -> (first, last, kept: int, keyed: bool) {
 	first, last, kept, keyed = -1, -1, -1, true
 	g := 0
 	for e, x in own {
@@ -190,7 +230,7 @@ cut_interior_runs :: proc(edits: ^[dynamic]Edit, src: []byte, doc: ^Document, ow
 // The bytes that go for the run at the end of container `owner`, entries `own[first]` to `own[last]`, after
 // survivor `own[kept]` (or none): see `remove_in` for what each case takes.
 @(private = "file")
-trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer, first, last, kept: int, $G: scan_pkg.Grammar) -> (lo, hi: u64, keyed: bool) {
+trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Answer, first, last, kept: int, $G: scan_pkg.Grammar) -> (lo, hi: u64, keyed: bool) {
 	lo, keyed = entry_lo(src, doc, own[first], G)
 	hi = entry_hi(doc, own[last], G)
 	when .Comments in G {
@@ -214,9 +254,7 @@ trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Path_Answer
 			lo = own[kept].hi
 		} else {
 			lo = owner + 1
-			for hi < u64(len(src)) && walk.is_space(src[hi]) {
-				hi += 1
-			}
+			hi = u64(core_pkg.skip_space(src, int(hi)))
 			when ODIN_DEBUG {
 				assert(hi < u64(len(src)) && (src[hi] == '}' || src[hi] == ']'), "trailing_cut: no close bracket after the container's last entry")
 			}
@@ -233,17 +271,11 @@ key_span :: proc(src: []byte, value_lo: u64) -> (lo, hi: u64, ok: bool) {
 	if value_lo > u64(len(src)) {
 		return no_key(value_lo)
 	}
-	i := value_lo
-	for i > 0 && walk.is_space(src[i - 1]) {
-		i -= 1
-	}
+	i := u64(core_pkg.skip_space_back(src, 0, int(value_lo)))
 	if i == 0 {
 		return no_key(value_lo)
 	}
-	i -= 1 // the colon
-	for i > 0 && walk.is_space(src[i - 1]) {
-		i -= 1
-	}
+	i = u64(core_pkg.skip_space_back(src, 0, int(i) - 1)) // past the colon
 	hi = i
 	if hi < 2 {
 		return no_key(value_lo)
@@ -275,7 +307,7 @@ no_key :: proc(value_lo: u64) -> (lo, hi: u64, ok: bool) {
 
 // Where entry `e` starts: under JSONC its extent (`extent_lo`), else its head (`entry_head`).
 @(private = "file")
-entry_lo :: proc(src: []byte, doc: ^Document, e: Path_Answer, $G: scan_pkg.Grammar) -> (lo: u64, keyed: bool) {
+entry_lo :: proc(src: []byte, doc: ^Document, e: Answer, $G: scan_pkg.Grammar) -> (lo: u64, keyed: bool) {
 	when .Comments in G {
 		return extent_lo(doc, e.node), true
 	} else {
@@ -286,7 +318,7 @@ entry_lo :: proc(src: []byte, doc: ^Document, e: Path_Answer, $G: scan_pkg.Gramm
 // Where entry `e`'s own text starts, no comment before it: its key in an object, its value in an array.
 // `keyed` is false for a member whose key is not found (`key_span`).
 @(private = "file")
-entry_head :: proc(src: []byte, doc: ^Document, e: Path_Answer, $G: scan_pkg.Grammar) -> (lo: u64, keyed: bool) {
+entry_head :: proc(src: []byte, doc: ^Document, e: Answer, $G: scan_pkg.Grammar) -> (lo: u64, keyed: bool) {
 	when .Comments in G {
 		return u64(scan_pkg.entry_lo(doc.rows[e.node])), true
 	} else {
@@ -300,7 +332,7 @@ entry_head :: proc(src: []byte, doc: ^Document, e: Path_Answer, $G: scan_pkg.Gra
 
 // Where entry `e` ends: under JSONC its extent, its comma included (`extent_hi`), else its value.
 @(private = "file")
-entry_hi :: proc(doc: ^Document, e: Path_Answer, $G: scan_pkg.Grammar) -> u64 {
+entry_hi :: proc(doc: ^Document, e: Answer, $G: scan_pkg.Grammar) -> u64 {
 	when .Comments in G {
 		return extent_hi(doc, e.node)
 	} else {
@@ -322,7 +354,7 @@ put_entry :: proc(places: ^[dynamic]Place, at: u64, from, to: int) {
 // The bytes between a member's key and value that a new member copies from `first`, the first member:
 // unless a comment sits there, under JSONC, where it is `": "`. Empty for an element.
 @(private = "file")
-member_between :: proc(src: []byte, doc: ^Document, first: Path_Answer, is_member: bool, $G: scan_pkg.Grammar) -> (between: string, keyed: bool) {
+member_between :: proc(src: []byte, doc: ^Document, first: Answer, is_member: bool, $G: scan_pkg.Grammar) -> (between: string, keyed: bool) {
 	keyed = true
 	if !is_member {
 		return
@@ -343,7 +375,7 @@ member_between :: proc(src: []byte, doc: ^Document, first: Path_Answer, is_membe
 // The separator a new entry before entry `k` of container `c` copies: after the open bracket for a lone
 // entry, else between the two entries around the spot.
 @(private = "file")
-separator_gap :: proc(src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, $G: scan_pkg.Grammar) -> (lo, hi: u64, keyed: bool) {
+separator_gap :: proc(src: []byte, doc: ^Document, c: Answer, own: []Answer, k: int, $G: scan_pkg.Grammar) -> (lo, hi: u64, keyed: bool) {
 	n := len(own)
 	if n < 2 {
 		hi, keyed = entry_head(src, doc, own[0], G)
@@ -357,7 +389,7 @@ separator_gap :: proc(src: []byte, doc: ^Document, c: Path_Answer, own: []Path_A
 // Under JSONC, whether a comment sits where a new entry before entry `k` of `c` goes: after the last entry
 // when `appending`, else between entry `k - 1` (or the open bracket) and entry `k`.
 @(private = "file")
-commented_at_spot :: proc(src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, appending: bool, $G: scan_pkg.Grammar) -> bool {
+commented_at_spot :: proc(src: []byte, doc: ^Document, c: Answer, own: []Answer, k: int, appending: bool, $G: scan_pkg.Grammar) -> bool {
 	spot_lo, spot_hi := own[len(own) - 1].hi, c.hi - 1
 	if !appending {
 		spot_lo = c.lo + 1
@@ -376,7 +408,7 @@ commented_at_spot :: proc(src: []byte, doc: ^Document, c: Path_Answer, own: []Pa
 // (`entry_between_extents`). Without one, JSONC lays the entry out as JSON does. `.Unplaceable` when the
 // separator holds anything else.
 @(private = "file")
-entry_at :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, key, value: []u8, $G: scan_pkg.Grammar) -> Maybe(Path_Error) {
+entry_at :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: ^Document, c: Answer, own: []Answer, k: int, key, value: []u8, $G: scan_pkg.Grammar) -> Maybe(Path_Error) {
 	n := len(own)
 	from := len(text)
 	if n == 0 {
@@ -436,7 +468,7 @@ entry_at :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: 
 // comma adds one at its value's end, and starts a new line after a line comment. `.Unplaceable` when those
 // bytes hold more than blanks, `.Bad_Result` when two extents overlap.
 @(private = "file")
-entry_between_extents :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: ^Document, c: Path_Answer, own: []Path_Answer, k: int, key: []u8, between: string, value: []u8) -> Maybe(Path_Error) {
+entry_between_extents :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: []byte, doc: ^Document, c: Answer, own: []Answer, k: int, key: []u8, between: string, value: []u8) -> Maybe(Path_Error) {
 	n := len(own)
 	from := len(text)
 	gap_lo, gap_hi := c.lo + 1, extent_lo(doc, own[0].node)
@@ -484,7 +516,7 @@ entry_between_extents :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: 
 // array, an index for an object, or an index past either end is `.Unplaceable`, a member the object has (in
 // `members`, from cursor `mc`) `.Exists`.
 @(private = "file")
-insert_slot :: proc(at: Insert_At, c: Path_Answer, n: int, members: []Path_Answer, mc: ^int) -> (k: int, err: Maybe(Path_Error)) {
+insert_slot :: proc(at: Insert_At, c: Answer, n: int, members: []Answer, mc: ^int) -> (k: int, err: Maybe(Path_Error)) {
 	switch v in at {
 	case string:
 		if c.kind != .Object {

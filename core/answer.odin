@@ -1,7 +1,26 @@
 package core
 
 // A path procedure's answer, shared by every format: a span of the format's source, the container the answer
-// is about, and how the path landed. A format with a tape keeps its own row type beside these fields.
+// is about, the value's kind, and how the path landed.
+
+// What a value is. A container is the two kinds whose `lo`/`hi` bracket children: a CSV record is an `.Array`
+// and its cell a `.String`. Declaration order carries no meaning: nothing indexes by it or orders on it.
+Kind :: enum u8 {
+	Null,
+	False,
+	True,
+	Number,
+	String,
+	Array,
+	Object,
+}
+
+// A handle to one value of a format's document. Distinct, so a count or an offset is never passed where a value
+// is meant.
+Node :: distinct i32
+
+// "No such value": what every lookup answers on a miss, and `Answer.node` where no document holds the value.
+NO_NODE :: Node(-1)
 
 Answer_Outcome :: enum u8 {
 	Found, // the path resolved (`lo`/`hi` bound the value)
@@ -12,18 +31,25 @@ Answer_Outcome :: enum u8 {
 // No container: a root value or a miss owed by the whole document.
 NO_OWNER :: max(u64)
 
-// One path query's answer for a format with no tape. `lo` and `hi` bound the value's span in the source a read
-// scanned; a miss bounds nothing (`lo == hi == 0`). `owner` is the container whose span holds the answer
-// (`NO_OWNER` when none does); `query` indexes the caller's paths, 0 where a format answers one.
+// One path query's answer. `lo` and `hi` bound the value's span in the source a read scanned; a miss bounds
+// nothing (`lo == hi == 0`). `owner` is the offset of the container the answer is about: the one holding a
+// `.Found` value, the one lacking a `.Missing` member, the one holding the value a `.Type_Mismatch` step could
+// not read into (`NO_OWNER` when none does). `query` indexes the caller's paths, 0 where a format answers one.
+// `node` is the value in the document the read built or was given, else `NO_NODE`. `kind` is a `.Found`
+// value's kind.
 Answer :: struct {
 	lo, hi:  u64,
 	owner:   u64,
 	query:   u32,
+	node:    Node,
 	outcome: Answer_Outcome,
+	kind:    Kind,
 }
 
-// The five fields pad to one 32-byte row.
-#assert(size_of(Answer) == 32)
+#assert(size_of(Answer) == 40)
+
+// The answer of a path that does not land, owed by no container.
+MISSING :: Answer{outcome = .Missing, owner = NO_OWNER, node = NO_NODE}
 
 // Whether the next answer is past its path's `limit` (0: no limit) and so is dropped, counting it toward that
 // limit first. A `Found` counts, and a `per_element` path counts every answer, a miss or mismatch too, as jq's

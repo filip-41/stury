@@ -109,6 +109,12 @@ test_unmarshal_refusals :: proc(t: ^testing.T) {
 		{"small\n300\n", .Out_Of_Range, 6, "[0].small"},
 		{"small\n-129\n", .Out_Of_Range, 6, "[0].small"},
 		{"id\n99999999999999999999\n", .Out_Of_Range, 3, "[0].id"},
+		{"id\n18446744073709551616\n", .Out_Of_Range, 3, "[0].id"},
+		{"big\n340282366920938463463374607431768211456\n", .Out_Of_Range, 4, "[0].big"},
+		{"id\n+\n", .Wrong_Kind, 3, "[0].id"},
+		{"id\n-\n", .Wrong_Kind, 3, "[0].id"},
+		{"id\n12345678x\n", .Wrong_Kind, 3, "[0].id"},
+		{"id\n1234567890123456789x\n", .Wrong_Kind, 3, "[0].id"},
 		{"id\n\"\"\n", .Wrong_Kind, 3, "[0].id"},
 		{"id\n 1\n", .Wrong_Kind, 3, "[0].id"},
 		{"ok\nyes\n", .Wrong_Kind, 3, "[0].ok"},
@@ -121,7 +127,6 @@ test_unmarshal_refusals :: proc(t: ^testing.T) {
 		{"color\nPurple\n", .Not_A_Member, 6, "[0].color"},
 		{"r\nab\n", .Wrong_Kind, 2, "[0].r"},
 		{"note\nx\n", .Wrong_Kind, 5, "[0].note"},
-		{"id,id\n1,2\n", .Duplicate_Key, 3, ".id"},
 		{"id\n1\n2\nx\n", .Wrong_Kind, 7, "[2].id"},
 		{"id\n1\n\"2\n", .Syntax, 8, "[1]"},
 		{"id,ok\n1,true\n2\n", .Syntax, 13, "[1]"},
@@ -234,6 +239,21 @@ test_unmarshal_enum_ints :: proc(t: ^testing.T) {
 	testing.expect_value(t, rows[1].color, Color.Green)
 	src = "color\n263\n"
 	testing.expect_value(t, csv.unmarshal(transmute([]byte)src, &rows, plan = &plan, allocator = context.temp_allocator).?.kind, csv.Unmarshal_Error_Kind.Out_Of_Range)
+}
+
+// A cstring ends at a NUL, so a cell holding one is `.Out_Of_Range`, as JSON refuses `\u0000`.
+@(test)
+test_unmarshal_cstring_nul :: proc(t: ^testing.T) {
+	Named :: struct {
+		name: cstring,
+	}
+	rows: []Named
+	tsv := csv.Unmarshal_Opts{dialect = csv.TSV}
+	testing.expect_value(t, read(t, "name\na\\0b\n", &rows, tsv).?.kind, csv.Unmarshal_Error_Kind.Out_Of_Range)
+	testing.expect_value(t, read(t, "name\n\"a\x00b\"\n", &rows).?.kind, csv.Unmarshal_Error_Kind.Out_Of_Range)
+	if testing.expect_value(t, read(t, "name\na\\\\0b\n", &rows, tsv), nil) {
+		testing.expect_value(t, string(rows[0].name), `a\0b`)
+	}
 }
 
 // A run with an arena leaks nothing outside it.

@@ -9,8 +9,11 @@ import "core:math"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
+import core_pkg "../../../core"
 import json "../../../json"
 import enc "../../../json/encode"
+import "../../../json/scan"
+import number "../../../json/scan/number"
 
 // `nil` is jq's null.
 Value :: union {
@@ -41,10 +44,11 @@ Object :: struct {
 	index: map[string]int,
 }
 
-// A value of an input document.
+// A value of an input document: rows over a text in any format, read by json's readers, which decode a row the
+// document's dialect spells.
 Ref :: struct {
-	doc:  ^json.Document,
-	node: json.Node,
+	doc:  ^core_pkg.Row_Document,
+	node: core_pkg.Node,
 }
 
 // A built document as a value: its root, the document moved to the heap.
@@ -122,6 +126,11 @@ scalar :: proc(v: Value) -> Value {
 		return true
 	case .Number:
 		lit := string(r.doc.src[n.lo:n.hi])
+		if n.first_esc == number.DIALECT_SPELLED { // a JSON5 spelling is respelled as JSON's
+			spelled: [dynamic]byte
+			scan.json5_number_json(lit, &spelled)
+			lit = string(spelled[:])
+		}
 		// The library's correctly rounded value. Only one with none (`1e400`) is left to strconv's infinity.
 		if num, _ := json.get_number(r.doc, r.node); num.exactness != .None {
 			return Number{f = num.value, lit = lit}
@@ -136,13 +145,40 @@ scalar :: proc(v: Value) -> Value {
 	return v
 }
 
+// The scalar of kind `kind` spelled at src[lo:hi], by the library's reader as `scalar` reads a row's: nil also for a
+// container or a span that is not one scalar. A string with an escape decodes into `allocator`.
+span_value :: proc(src: []byte, lo, hi: u64, kind: json.Kind, allocator := context.allocator) -> Value {
+	lit := string(src[lo:hi])
+	d, _, _ := json.decode_span(src, lo, hi, kind, allocator)
+	switch x in d {
+	case json.Null:
+	case bool:
+		return x
+	case i64:
+		return Number{f = f64(x), lit = lit}
+	case u64:
+		return Number{f = f64(x), lit = lit}
+	case json.Number:
+		return Number{f = x.value, lit = lit}
+	case json.Digits:
+		f, _ := strconv.parse_f64(lit)
+		return Number{f = f, lit = lit}
+	case string:
+		return x
+	}
+	return nil
+}
+
 number_of :: proc(v: Value) -> (Number, bool) {
 	n, ok := scalar(v).(Number)
 	return n, ok
 }
 
 string_of :: proc(v: Value) -> (string, bool) {
-	s, ok := scalar(v).(string)
+	if r, is_ref := v.(Ref); is_ref {
+		return json.get_string(r.doc, r.node)
+	}
+	s, ok := v.(string)
 	return s, ok
 }
 
@@ -375,6 +411,7 @@ Members :: struct {
 	v:     Value,
 	i, n:  int,
 	rows:  json.Members,
+	array: bool, // a document's array: its rows have no keys
 	seen:  map[string]bool,
 	dupes: bool,
 }
@@ -388,6 +425,7 @@ iterate :: proc(v: Value) -> Members {
 	if it.n > 0 {
 		it.rows = json.children(r.doc, r.node)
 		kd, _ := json.kind(r.doc, r.node)
+		it.array = kd == .Array
 		it.dupes = kd == .Object && has_repeated_key(r)
 	}
 	return it
@@ -395,7 +433,7 @@ iterate :: proc(v: Value) -> Members {
 
 has_repeated_key :: proc(r: Ref) -> bool {
 	n := json.child_count(r.doc, r.node)
-	if n < 2 {
+	if n < 2 || r.doc.distinct_keys {
 		return false
 	}
 	if n <= 16 {
@@ -471,7 +509,7 @@ next_member :: #force_inline proc(it: ^Members) -> (key: string, v: Value, ok: b
 			return x.keys[i], x.vals[i], true
 		case Ref:
 			row, _ := json.children(&it.rows)
-			if kd, _ := json.kind(x.doc, x.node); kd == .Array {
+			if it.array {
 				return "", Ref{x.doc, row}, true
 			}
 			k, _ := json.get_key(x.doc, row)

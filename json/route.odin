@@ -76,6 +76,10 @@ Route :: struct {
 	// Set by the edits, whose scans want every entry of an object, a repeated key's too: `Any` then reads them
 	// all whatever `duplicates` says.
 	every_member: bool,
+	// Set by an edit under `.Default` whose path has a `Name` step before its last: the automaton serves every
+	// path. `repeat_at` is the start of the first key a `.All` walk's `Name` step met twice in one object, 0 for none.
+	walk_repeats: bool,
+	repeat_at:    u64,
 	// The walk's resolution a prepared scan keeps for the next (`prepare`), set only for its scan.
 	kept:      ^walk.Resolved_Queries,
 }
@@ -205,10 +209,7 @@ root_object :: #force_inline proc(src: []byte) -> (lo: u64, ok: bool) {
 
 @(private = "file")
 root_object_padded :: #force_no_inline proc(src: []byte) -> (lo: u64, ok: bool) {
-	i := scan_pkg.bom_len(src)
-	for i < len(src) && walk.is_space(src[i]) {
-		i += 1
-	}
+	i := core_pkg.skip_space(src, scan_pkg.bom_len(src))
 	return u64(i), i < len(src) && src[i] == '{'
 }
 
@@ -440,8 +441,8 @@ route_assign :: proc(plan: ^Route, paths: []Path, served: Path_Shape, wild, n_ke
 // A slot's answer: a found key is a `Found`, a key the document lacked is `Missing`. The matcher writes a
 // slot whole or not at all, so a miss is all zero and the span and kind copy without a branch.
 @(private = "file")
-slot_answer :: #force_inline proc(root_lo: u64, path: u32, f: walk.Field_Value) -> Path_Answer {
-	return Path_Answer{
+slot_answer :: #force_inline proc(root_lo: u64, path: u32, f: walk.Field_Value) -> Answer {
+	return Answer{
 		lo = f.lo, hi = f.hi, owner = root_lo, query = path, node = NO_NODE, kind = f.kind,
 		outcome = .Found if f.found else .Missing,
 	}
@@ -450,7 +451,7 @@ slot_answer :: #force_inline proc(root_lo: u64, path: u32, f: walk.Field_Value) 
 // Turn the slots into answers, in key order. A key the whole document lacked is owed as `Missing` only when
 // the walk reached the end, as the automaton owes it.
 @(private)
-route_slots :: #force_inline proc(answers: ^[dynamic]Path_Answer, plan: ^Route, reached_end: bool) -> bool {
+route_slots :: #force_inline proc(answers: ^[dynamic]Answer, plan: ^Route, reached_end: bool) -> bool {
 	store := route_store(plan, plan.n_keys)
 	n := len(answers^)
 	// Room for every answer, the usual case: they are written with no check of their own.
@@ -466,7 +467,7 @@ route_slots :: #force_inline proc(answers: ^[dynamic]Path_Answer, plan: ^Route, 
 
 // `route_slots` one append at a time: an array that must grow, or a walk that stopped short.
 @(private = "file")
-route_slots_append :: #force_no_inline proc(answers: ^[dynamic]Path_Answer, plan: ^Route, reached_end: bool) -> bool {
+route_slots_append :: #force_no_inline proc(answers: ^[dynamic]Answer, plan: ^Route, reached_end: bool) -> bool {
 	store := route_store(plan, plan.n_keys)
 	for f, i in store.fields {
 		if !f.found && !reached_end {
@@ -485,7 +486,7 @@ route_slots_append :: #force_no_inline proc(answers: ^[dynamic]Path_Answer, plan
 // that matched nothing, in key order, after the walk's rows. Only a walk that reached the end owes it, as the
 // automaton does. Out of line: `.All` names are the rare plan.
 @(private)
-route_missing :: #force_no_inline proc(answers: ^[dynamic]Path_Answer, plan: ^Route, stop: Maybe(u64), err: Maybe(Error)) -> bool {
+route_missing :: #force_no_inline proc(answers: ^[dynamic]Answer, plan: ^Route, stop: Maybe(u64), err: Maybe(Error)) -> bool {
 	if e, faulted := err.?; stop != nil || faulted && e.kind != .Trailing {
 		return true
 	}
@@ -494,7 +495,7 @@ route_missing :: #force_no_inline proc(answers: ^[dynamic]Path_Answer, plan: ^Ro
 			continue
 		}
 		n := len(answers^)
-		walk.row_append(answers, Path_Answer{owner = walk.NO_OWNER, query = k.tag, node = NO_NODE, outcome = .Missing})
+		walk.row_append(answers, Answer{owner = walk.NO_OWNER, query = k.tag, node = NO_NODE, outcome = .Missing})
 		if len(answers^) == n {
 			return false
 		}
@@ -506,7 +507,7 @@ route_missing :: #force_no_inline proc(answers: ^[dynamic]Path_Answer, plan: ^Ro
 // pass can fill: one sweep over `answers` that drops every retracted row, cuts each path to its `limit`, and
 // fills the field the walk does not (every `node`). Plain slot, column or automaton answers skip it.
 @(private)
-finish_answers :: proc(answers: ^[dynamic]Path_Answer, nodes: []walk.Row, plan: ^Route, paths: []Path, has_nodes: bool) {
+finish_answers :: proc(answers: ^[dynamic]Answer, nodes: []walk.Row, plan: ^Route, paths: []Path, has_nodes: bool) {
 	inline_counts: [MAX_ROUTED]int
 	counts := inline_counts[:]
 	if len(paths) > MAX_ROUTED {

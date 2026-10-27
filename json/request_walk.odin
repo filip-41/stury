@@ -3,6 +3,7 @@ package json
 // The walk over a request: its outputs reset, its queries built, the scanner run, its answers settled.
 
 import "base:runtime"
+import core_pkg "../core"
 import "scan/walk"
 import scan_pkg "scan"
 
@@ -32,6 +33,7 @@ sink_of :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query_Sink
 		sink.paths = req.answers
 		sink.paths_retracted = 0
 		sink.paths_unresolved = 0
+		sink.paths_repeat = 0
 	}
 	when .Nodes in K { sink.nodes = req.doc.rows }
 	when .Dom in K { sink.value_bytes = req.doc.values }
@@ -57,12 +59,8 @@ output_reset :: #force_inline proc(req: ^Request($KINDS), $K: bit_set[scan_pkg.W
 	when .Nodes in K {
 		doc := &req.doc
 		clear(&doc.rows)
-		clear(&doc.keys)
-		clear(&doc.strings)
-		clear(&doc.members)
-		clear(&doc.member_at)
 		clear(&doc.facts)
-		walk.name_arena_reset(&doc.arena)
+		core_pkg.row_cache_reset(doc)
 	}
 	when .Dom in K { clear(&req.doc.values) }
 }
@@ -108,6 +106,7 @@ scan_walk :: proc(src: []byte, req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Wa
 	req.state.verdict = err
 	when .Path in K {
 		req.state.route.unresolved = sink.paths_unresolved > 0
+		req.state.route.repeat_at = u64(sink.paths_repeat)
 	}
 	sink_store(req, sink, K)
 	req.doc.src = src
@@ -184,11 +183,6 @@ walk_strictness :: #force_inline proc(req: ^Request($KINDS)) -> Strictness {
 // The scanner entry the limits and dialect pick.
 @(private = "file")
 walk_run :: #force_inline proc(src: []byte, req: ^Request($KINDS), queries: []scan_pkg.Scan_Query, strictness: Strictness, $WALK: bit_set[scan_pkg.Walk_Kind], facts: ^[dynamic]Fact) -> (err: Maybe(Error), fault: scan_pkg.Walk_Fault) {
-	if req.limits.max_depth > MAX_DEPTH {
-		return scan_pkg.scan_queries_deep(
-			src, queries, strictness, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), req.dialect, facts,
-		)
-	}
 	// A dialect walk has no demand matcher (`automaton_forced`), so a demand walk compiles no dialect.
 	when .Demand not_in WALK {
 		switch req.dialect {
@@ -198,6 +192,9 @@ walk_run :: #force_inline proc(src: []byte, req: ^Request($KINDS), queries: []sc
 		case .Json5:
 			return scan_pkg.scan_queries_dialect(src, queries, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), facts, .Json5)
 		}
+	}
+	if req.limits.max_depth > MAX_DEPTH {
+		return scan_pkg.scan_queries_deep(src, queries, strictness, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates))
 	}
 	return scan_pkg.scan_queries(
 		src, queries, strictness, req.limits, WALK,

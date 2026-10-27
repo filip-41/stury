@@ -44,7 +44,7 @@ row_reader :: proc(r: ^Reader, p: ^core_pkg.Type_Plan, $LIST: bool) -> Maybe(Unm
 		return Unmarshal_Error{kind = .Unsupported}
 	}
 	for f in r.shape.fields[row.elem:][:row.count] {
-		if !is_cell(&r.shape, &r.shape.ops[f.op]) {
+		if !is_cell(p, p.ops[f.op], nil) {
 			err := Unmarshal_Error{kind = .Unsupported}
 			core_pkg.unmarshal_path_prepend(&err, core_pkg.Name(f.name))
 			core_pkg.unmarshal_path_prepend(&err, core_pkg.Any{})
@@ -54,15 +54,6 @@ row_reader :: proc(r: ^Reader, p: ^core_pkg.Type_Plan, $LIST: bool) -> Maybe(Unm
 	r.row = row
 	r.required.allocator, r.req_more.allocator = context.allocator, context.allocator
 	return nil
-}
-
-@(private)
-is_cell :: proc(shape: ^core_pkg.Read_Shape, op: ^core_pkg.Shape_Op) -> bool {
-	if op.kind == .Union {
-		// A `Maybe` of a cell: one arm, with a tag.
-		return op.count == 1 && op.tag_size > 0 && is_cell(shape, &shape.ops[shape.fields[op.elem].op])
-	}
-	return is_cell_kind(op.kind, op.width)
 }
 
 // The header's columns: each names the field it reads.
@@ -93,11 +84,11 @@ read_header :: proc(r: ^Reader, header: Record, refuse: bool, duplicates: Duplic
 		}
 		if taken[k] != core_pkg.NO_FIELD {
 			switch duplicates {
-			case .Default, .Refuse:
+			case .Refuse:
 				return cell_error(.Duplicate_Key, cell.lo, -1, core_pkg.Name(fields[k].name))
 			case .First:
 				continue column
-			case .Last:
+			case .Default, .Last:
 				r.columns[taken[k]] = core_pkg.NO_FIELD
 			case .All:
 			}

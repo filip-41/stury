@@ -219,7 +219,7 @@ test_jsonc_line_comment_ends_at_cr :: proc(t: ^testing.T) {
 
 		// An entry on the line after a line comment goes with its own line and break.
 		two, _ := strings.replace_all("{|\"a\": 1, // x|\"b\": 2|}", "|", brk, context.temp_allocator)
-		out, eerr = json.remove(transmute([]byte)two, ".b", .Jsonc, context.temp_allocator)
+		out, eerr = json.remove(transmute([]byte)two, ".b", {dialect = .Jsonc}, allocator = context.temp_allocator)
 		testing.expect_value(t, eerr, nil)
 		want, _ = strings.replace_all("{|\"a\": 1, // x|}", "|", brk, context.temp_allocator)
 		testing.expect_value(t, string(out), want)
@@ -233,7 +233,7 @@ test_jsonc_refused_comment_is_out_of_memory :: proc(t: ^testing.T) {
 	src := raw("1 // c")
 	budget := Budget{backing = context.allocator}
 	facts := make([dynamic]json.Fact, budget_allocator(&budget))
-	testing.expect_value(t, json.validate(src, {dialect = .Jsonc}, &facts), json.Error{kind = .Out_Of_Memory})
+	testing.expect_value(t, json.validate_facts(src, {dialect = .Jsonc}, &facts), json.Error{kind = .Out_Of_Memory})
 	delete(facts)
 
 	sweep := Budget_Sweep{limit = 100}
@@ -309,9 +309,9 @@ test_jsonc_edits_lay_out_as_json :: proc(t: ^testing.T) {
 	REMOVE :: -2
 	run :: proc(c: Case, d: json.Dialect) -> ([]byte, Maybe(json.Path_Error)) {
 		if c.at == REMOVE {
-			return json.remove(raw(c.src), c.path, d, context.temp_allocator)
+			return json.remove(raw(c.src), c.path, {dialect = d}, allocator = context.temp_allocator)
 		}
-		return json.insert(raw(c.src), c.path, c.at, 9, d, context.temp_allocator)
+		return json.insert(raw(c.src), c.path, c.at, 9, {dialect = d}, allocator = context.temp_allocator)
 	}
 	plain := []Case{
 		{"[1 , 2]", ".", 1, "[1 , 9 , 2]"},
@@ -330,7 +330,7 @@ test_jsonc_edits_lay_out_as_json :: proc(t: ^testing.T) {
 			testing.expectf(t, err == nil && string(out) == c.want, "%v %q %s %d: %q %v, want %q", d, c.src, c.path, c.at, out, err, c.want)
 		}
 	}
-	obj, oerr := json.insert(raw("{\"a\" : 1 ,\n \"b\" : 2}"), ".", "c", 3, .Jsonc, context.temp_allocator)
+	obj, oerr := json.insert(raw("{\"a\" : 1 ,\n \"b\" : 2}"), ".", "c", 3, {dialect = .Jsonc}, allocator = context.temp_allocator)
 	testing.expect_value(t, oerr, nil)
 	testing.expect_value(t, string(obj), "{\"a\" : 1 ,\n \"b\" : 2 ,\n \"c\" : 3}")
 
@@ -359,17 +359,17 @@ test_jsonc_raw_is_judged_as_jsonc :: proc(t: ^testing.T) {
 	r: R
 	testing.expect_value(t, json.unmarshal(raw(`{"r":[1, /*c*/ 2,]}`), &r, {dialect = .Jsonc}, nil, context.temp_allocator), nil)
 	testing.expect_value(t, string(r.r), `[1, /*c*/ 2,]`)
-	out, err := json.set(raw(`{"x": /*k*/ 0}`), ".x", r.r, dialect = .Jsonc, allocator = context.temp_allocator)
+	out, err := json.set(raw(`{"x": /*k*/ 0}`), ".x", r.r, {dialect = .Jsonc}, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), `{"x": /*k*/ [1, /*c*/ 2,]}`)
-	out, err = json.insert(raw(`[0]`), ".", 0, json.Raw("[1,]"), .Jsonc, context.temp_allocator)
+	out, err = json.insert(raw(`[0]`), ".", 0, json.Raw("[1,]"), {dialect = .Jsonc}, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), `[[1,],0]`)
 
 	_, err = json.set(raw(`{"x":0}`), ".x", r.r, allocator = context.temp_allocator)
 	testing.expect_value(t, edit_err(t, err, .Encode).encode, json.Marshal_Error.Bad_Raw)
 	for swallows in ([]json.Raw{"1 // c", "1 /* c */"}) {
-		_, err = json.set(raw(`[0, 1]`), ".[0]", swallows, dialect = .Jsonc, allocator = context.temp_allocator)
+		_, err = json.set(raw(`[0, 1]`), ".[0]", swallows, {dialect = .Jsonc}, allocator = context.temp_allocator)
 		testing.expect_value(t, edit_err(t, err, .Encode).encode, json.Marshal_Error.Bad_Raw)
 	}
 }

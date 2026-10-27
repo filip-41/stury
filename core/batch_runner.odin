@@ -126,11 +126,10 @@ batch_plan :: proc(c: ^Batch_Cursor, runner: ^Batch_Runner, n: int) {
 // Returns where slice `k`'s records start, or -1 when none do.
 Batch_Boundary :: proc(data: rawptr, k, stop: int) -> int
 
+// Returns the first slice past `from` whose boundary is still `hi`, the boundary of slice `from`.
 Batch_Skip :: proc(data: rawptr, from, hi: int) -> int
 
 Batch_Piece :: proc(data: rawptr, lo, hi, k: int) -> (fault: Maybe(Error), go_on: bool)
-
-Batch_Fault_Rank :: proc(data: rawptr, k: int, e: Error) -> int
 
 // Batch_Driver is the claim loop of one batch: the caller and the runner's threads claim a planned
 // `Batch_Cursor`'s pieces in source order, each format supplying a piece's bounds and what running one does.
@@ -141,17 +140,21 @@ Batch_Fault_Rank :: proc(data: rawptr, k: int, e: Error) -> int
 //	- A claim inside a long record starts no record: its boundary search stops at the claim's end, so the
 //	  claim the record starts in finds that record's end and skips the slices it covers.
 //	- A `go_on` of false stops the claims, and `stop_on_fault` says whether a piece's fault does.
-//	- The fault noted is the one `fault_rank` ranks lowest, whichever thread finds it first.
+//	- The fault noted is the one at the lowest offset, or of the lowest piece under `rank_by_piece`, whichever
+//	  thread finds it first.
 Batch_Driver :: struct {
 	cursor: Batch_Cursor,
 	first: First_Fault,
 	data:  rawptr,
+	// The offset of slice 0's first byte.
+	lo:     int,
 	// The offset where a piece's records end when its next boundary is not found: the span's one-past-end.
 	none:   int,
 	boundary:   Batch_Boundary,
+	// Nil when slice `k` starts at `lo + k * BATCH_SLICE`, so the slice holding `hi` is the first past it.
 	skip:       Batch_Skip,
 	piece:      Batch_Piece,
-	fault_rank: Batch_Fault_Rank,
+	rank_by_piece: bool,
 	stop_on_fault: bool,
 }
 
@@ -173,14 +176,14 @@ batch_claim :: proc(arg: rawptr) {
 			if h := d.boundary(d.data, s + n, d.cursor.slices); h >= 0 {
 				hi = h
 			}
-			cursor_skip_to(&d.cursor, d.skip(d.data, s + n, hi))
+			cursor_skip_to(&d.cursor, (hi - d.lo) / BATCH_SLICE if d.skip == nil else d.skip(d.data, s + n, hi))
 		}
 		fault, go_on := d.piece(d.data, lo, hi, k)
 		if !go_on {
 			cursor_stop(&d.cursor)
 		}
 		if e, bad := fault.?; bad {
-			first_fault_note(&d.first, d.fault_rank(d.data, k, e), e)
+			first_fault_note(&d.first, k if d.rank_by_piece else int(e.offset), e)
 			if d.stop_on_fault {
 				cursor_stop(&d.cursor)
 			}

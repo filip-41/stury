@@ -92,7 +92,7 @@ document_and_edits :: proc(src: []byte) {
 	//                           Oslo,710000,59.91,10.75
 	//                           "Ho, Chi Minh",,10.82,106.63
 
-	added, aerr := csv.insert(src, csv.APPEND, City{name = "Bergen", lat = 60.39, lon = 5.32})
+	added, aerr := csv.insert(src, ".", csv.APPEND, City{name = "Bergen", lat = 60.39, lon = 5.32})
 	if aerr != nil {
 		os.exit(1)
 	}

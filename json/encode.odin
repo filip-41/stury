@@ -4,10 +4,8 @@ package json
 // is its only entry.
 
 import "core:io"
-import "core:math"
 import "core:mem"
 import "core:slice"
-import "core:strconv"
 import enc "encode"
 import scan_pkg "scan"
 
@@ -72,9 +70,6 @@ marshal_document_append :: proc(dst: ^[dynamic]u8, doc: ^Document, opts: Marshal
 // before return.
 @(private, require_results)
 marshal_document_to_writer :: proc(w: io.Writer, doc: ^Document, opts := Marshal_Opts{}, allocator := context.allocator) -> Marshal_Error {
-	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
-		return .Too_Deep
-	}
 	if !scan_pkg.plain_json(doc.dialect) || opts.jq_spelling || opts.sort_keys {
 		// A dialect's document, or one in jq's notation or with sorted keys, is made whole, then written.
 		out, err := marshal_document(doc, opts, allocator)
@@ -86,6 +81,9 @@ marshal_document_to_writer :: proc(w: io.Writer, doc: ^Document, opts := Marshal
 			return .Write_Failed
 		}
 		return .None
+	}
+	if doc.deep && enc.rows_too_deep(doc.rows[:]) {
+		return .Too_Deep
 	}
 	return enc.encode_rows_to_writer(w, doc.src, doc.rows[:], opts, allocator)
 }
@@ -146,7 +144,13 @@ jq_value :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, cl: ^enc.Comment_
 jq_number :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, opts: Marshal_Opts, respell: bool) -> Marshal_Error {
 	lit := string(get_raw(doc, n))
 	if respell && doc.rows[n].first_esc == scan_pkg.DIALECT_SPELLED {
-		return json5_number_as_json(buf, doc, n, lit)
+		if enc.put_room(buf, len(buf^), len(lit) + 32) == nil {
+			return .Out_Of_Memory
+		}
+		if !scan_pkg.json5_number_json(lit, buf) {
+			return .Non_Finite
+		}
+		return .None
 	}
 	if !opts.jq_spelling {
 		return enc.put_bytes(buf, lit)
@@ -262,41 +266,4 @@ document_members :: proc(doc: ^Document, n: Node, opts: Marshal_Opts, allocator:
 		slice.stable_sort_by(entries[:], proc(a, b: Entry) -> bool {return a.key < b.key})
 	}
 	return entries, true
-}
-
-// A JSON5 number spelled outside JSON's grammar (`DIALECT_SPELLED`), in JSON's spelling: a hex integer in
-// decimal (past 64 bits, the double its digits accumulate to, as `json5_number_value` reads it), a decimal
-// without its `+`, with a `0` before a leading point and without a trailing point. `Infinity` and `NaN` have no JSON spelling and are `.Non_Finite`.
-@(private = "file")
-json5_number_as_json :: proc(buf: ^[dynamic]byte, doc: ^Document, n: Node, lit: string) -> Marshal_Error {
-	v, _ := get_number(doc, n)
-	if math.is_nan(v.value) || math.is_inf(v.value) {
-		return .Non_Finite
-	}
-	p := 0
-	if lit[0] == '+' || lit[0] == '-' {
-		p = 1
-	}
-	if lit[0] == '-' {
-		enc.put_byte(buf, '-') or_return
-	}
-	if len(lit) > p + 1 && lit[p + 1] | 0x20 == 'x' {
-		digits: [32]u8
-		mag, approx, over := scan_pkg.json5_hex(transmute([]byte)lit, u64(p + 2), u64(len(lit)))
-		if !over {
-			return enc.put_bytes(buf, strconv.write_uint(digits[:], mag, 10))
-		}
-		// `write_float` leads with the sign.
-		return enc.put_bytes(buf, strconv.write_float(digits[:], approx, 'g', -1, 64)[1:])
-	}
-	if lit[p] == '.' {
-		enc.put_byte(buf, '0') or_return
-	}
-	for i in p ..< len(lit) {
-		if lit[i] == '.' && (i + 1 == len(lit) || lit[i + 1] - '0' >= 10) {
-			continue
-		}
-		enc.put_byte(buf, lit[i]) or_return
-	}
-	return .None
 }

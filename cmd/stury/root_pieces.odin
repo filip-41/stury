@@ -53,6 +53,17 @@ chunk_text :: proc(job: ^Root_Job, k: int) -> (c: Root_Chunk, text: []byte) {
 	return c, job.src[c.lo:c.hi]
 }
 
+// A chunk's `text` as an array: a lone entry is copied in brackets onto the heap, which the caller deletes.
+array_text :: proc(text: []byte, alone: bool) -> []byte {
+	if !alone {
+		return text
+	}
+	src := make([]byte, len(text) + 2, runtime.heap_allocator())
+	src[0], src[len(src) - 1] = '[', ']'
+	copy(src[1:], text)
+	return src
+}
+
 Root_Job :: struct {
 	src:       []byte,
 	chunks:    []Root_Chunk,
@@ -353,7 +364,7 @@ stand_in :: proc(data: []byte, cuts: [][2]int, on: bool) {
 comma_pairs :: proc(runner: ^json.Batch_Runner, data: []byte, at, z, piece: int) -> (cuts: [][2]int, ok: bool) {
 	found := Comma_Pairs{src = data, at = at, z = z}
 	found.cuts = make([dynamic][2]int, 0, (z - at) / (32 * 1024) + 2)
-	if json.each_record(data[at:z + 1], .Root_Entries, cut_piece, &found, runner) != nil {
+	if json.each_record(data[at:z + 1], cut_piece, &found, {framing = .Root_Entries}, runner) != nil {
 		return
 	}
 	slice.sort_by(found.cuts[:], proc(a, b: [2]int) -> bool {return a[0] < b[0]})

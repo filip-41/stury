@@ -106,6 +106,8 @@ Format_Type :: struct {
 Plan_Format :: struct {
 	// The struct tag key a field's name and flags are read from.
 	tag_key: string,
+	// The format has no empty value to omit, so a tag's `omitempty` is `.Bad_Tag`.
+	refuse_omitempty: bool,
 	// Appends `name` to `keys` as the format spells it in `role`.
 	spell:   proc(keys: ^[dynamic]u8, name: string, role: Key_Role) -> Plan_Error,
 	types:   []Format_Type,
@@ -318,6 +320,12 @@ plan_op :: proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (idx: u32, err: Plan_E
 	// Indexed after the call: compiling element types may have moved `p.ops`.
 	p.ops[idx] = op
 	return idx, .None
+}
+
+// `plan_op` on a format's plan, its refusal as the `Marshal_Error` of the same value.
+plan_op_m :: #force_inline proc(p: ^Hooked_Plan($W), ti: ^runtime.Type_Info) -> (u32, Marshal_Error) {
+	idx, err := plan_op(&p.base, ti)
+	return idx, Marshal_Error(err)
 }
 
 // The op for `ti`, whose slot is `p.ops[idx]`.
@@ -546,6 +554,9 @@ lay_out_run :: proc(p: ^Type_Plan, v: runtime.Type_Info_Struct, base: uintptr, f
 				delete(tag.key, p.ops.allocator)
 				return nil, .Out_Of_Memory
 			}
+		}
+		if tag.omitempty && p.format.refuse_omitempty {
+			return nil, .Bad_Tag
 		}
 		if !tag.keep {
 			continue

@@ -16,7 +16,7 @@ Node_Facts :: struct {
 	// `Query_Ctx.dom_pending`.
 	payload: Row_Payload,
 	// Whether a payload was produced. False is the claim, not a default: a
-	// locating walk and a failed arena reserve land here, and `dom_get_string`
+	// locating walk and a failed arena reserve land here, and `get_string`
 	// reads the false as "decode the span".
 	decoded: bool,
 }
@@ -38,7 +38,7 @@ emit_node :: #force_inline proc(
 	if key_lo != NO_KEY_LATCH && q.node_key_escaped {
 		flags |= {.Key_Escaped}
 	}
-	// `request_fault` refuses a `.Nodes` source past `TAPE_MAX_SOURCE`, so the
+	// `request_fault` refuses a `.Nodes` source past `MAX_ROW_SOURCE`, so the
 	// u32 casts cannot truncate, and `NO_KEY_LATCH` narrows to `NO_KEY`.
 	row := Row{
 		lo =           u32(lo),
@@ -209,7 +209,7 @@ emit_scalar :: #force_inline proc(q: ^Query_Ctx, $Q: bit_set[Walk_Kind], lo, hi:
 			// `true`/`false`/`null` carry `.Decoded` with no payload: the bit means
 			// only "the walk validated this token". Not for `.String`: its `.Decoded`
 			// is the leaf's own answer and is false wherever the unescape did not
-			// run (e.g. a refused `value_bytes_reserve`), and `dom_get_string` trusts it,
+			// run (e.g. a refused `value_bytes_reserve`), and `get_string` trusts it,
 			// so setting it there would return a slice that still holds backslashes.
 			if kind == .True || kind == .False || kind == .Null {
 				facts.decoded = true
@@ -260,7 +260,7 @@ emit_dom_string :: #force_inline proc(
 			// Checked in every build. Under `-disable-assert` the `slot[:n]`
 			// bounds check below fires on the same condition.
 			assert(u64(n) == dec_len, "dom: the decoded length is not the reserved length")
-			// `request_fault` bounds the source by `TAPE_MAX_SOURCE`, and the decoded bytes by the source.
+			// `request_fault` bounds the source by `MAX_ROW_SOURCE`, and the decoded bytes by the source.
 			q.dom_pending.str = {u32(at), u32(len(slot[:n]))}
 			q.dom_pending.decoded = true
 		} else {

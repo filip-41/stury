@@ -10,14 +10,8 @@ import lex "lex"
 // What it reads is checked in full. A typed fault is `TYPED_FAULT` with `run.fault` set, and anything else is the
 // walk's own result, at the offset `validate` gives. `unique` refuses a repeated key (`.Duplicate_Key`), in
 // every object the walk reads. Keys past the first KEY_SCRATCH open at once are remembered in
-// `context.allocator`, and given back before the return.
-scan_shape :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, lazy: bool, limits: Limits, $dialect: Dialect, $unique: bool) -> Maybe(Error) {
-	return shape_read(src, run, root, lazy, limits, dialect, unique, false)
-}
-
-// `scan_shape`, or with `pass_unread` the walk of `shape_walk_passing`.
-@(private = "file")
-shape_read :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, lazy: bool, limits: Limits, $dialect: Dialect, $unique, $pass_unread: bool) -> Maybe(Error) {
+// `context.allocator`, and given back before the return. `pass_unread` is the walk of `shape_walk_passing`.
+scan_shape :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, lazy: bool, limits: Limits, $dialect: Dialect, $unique: bool, $pass_unread: bool) -> Maybe(Error) {
 	Q :: bit_set[Walk_Kind]{.Shape} + (bit_set[Walk_Kind]{.Unique} when unique else {}) + (bit_set[Walk_Kind]{.Pass_Unread} when pass_unread else {})
 	// Words rather than a `Query_Ctx` local, as in `scan_queries` (`query_ctx_zero`).
 	ctx_words: [size_of(Query_Ctx) / 8]u64 = ---
@@ -83,7 +77,7 @@ scan_shape_lazy :: proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, limits:
 		}
 		run.skip_pays = true
 	}
-	return scan_shape(src, run, root, true, limits, .Json, unique)
+	return scan_shape(src, run, root, true, limits, .Json, unique, false)
 }
 
 // Whether a `.Lazy` read of `src` has nothing worth skipping: it is under the gate, or the probe declines the
@@ -102,7 +96,7 @@ shape_lazy_reads_all :: proc(src: []byte, run: ^walk.Shape_Run, limits: Limits) 
 
 @(private = "file")
 shape_walk_passing :: #force_no_inline proc(src: []byte, run: ^walk.Shape_Run, root: rawptr, limits: Limits, $unique: bool) -> Maybe(Error) {
-	return shape_read(src, run, root, false, limits, .Json, unique, true)
+	return scan_shape(src, run, root, false, limits, .Json, unique, true)
 }
 
 // The smallest document the lazy shape walk may skip in. Below it the index cannot repay its build and the

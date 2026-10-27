@@ -1,7 +1,8 @@
 package main
 
-// The formats `--from` reads and `--to` writes. Adding a format takes one row of FORMATS, one case in input.odin
-// (splitting the input into texts) and one in print.odin or output_cells.odin (writing the outputs).
+// The formats `--from` reads and `--to` writes. A format is one row of FORMATS: its grammar, how its input is cut
+// into texts, whether it is cells, and who answers a filter on it. print.odin and output_cells.odin write the
+// outputs.
 
 import csv "../../csv"
 import json "../../json"
@@ -9,31 +10,44 @@ import json "../../json"
 Format :: enum u8 {
 	Json,
 	Jsonc,
-	Json5, // read only: each input is transcoded to JSONC, then read as --from jsonc
+	Json5, // read only: --to jsonc writes its values and comments
 	Ndjson,
 	Csv,
 	Tsv,
+}
+
+// How a JSON-like format's input is cut into texts: one after another as jq reads them, one a line, or the whole
+// input one document.
+Framing :: enum u8 {
+	Texts,
+	Lines,
+	Whole,
 }
 
 Format_Spec :: struct {
 	name:    string,
 	// The grammar the text is spelled in, for a JSON-like format.
 	source:  json.Dialect,
-	// The format a transcode of the input is read as, where the input is not read as itself.
-	transcoded_to: Maybe(Format),
+	framing: Framing,
+	// The format a read-only format is written as, by default and by `--to`. Such a format is not itself written.
+	written_as: Maybe(Format),
+	// Written, its values keep the comments read with them.
+	keeps_comments: bool,
 	// A CSV-like format: the first record is the header, and each later record is an object keyed by it.
 	cells:   bool,
 	dialect: csv.Dialect, // for a format with `cells`
+	// Chooses who answers the filter on an input of the format (`Run.scanning`, `Run.columns`).
+	route:   proc(run: ^Run, text: string, files: int),
 }
 
 @(rodata)
 FORMATS := [Format]Format_Spec {
-	.Json   = {name = "json"},
-	.Jsonc  = {name = "jsonc", source = .Jsonc},
-	.Json5  = {name = "json5", source = .Json5, transcoded_to = .Jsonc},
-	.Ndjson = {name = "ndjson"},
-	.Csv    = {name = "csv", cells = true},
-	.Tsv    = {name = "tsv", cells = true, dialect = csv.TSV},
+	.Json   = {name = "json", route = choose_scan},
+	.Jsonc  = {name = "jsonc", source = .Jsonc, framing = .Whole, keeps_comments = true, route = choose_scan},
+	.Json5  = {name = "json5", source = .Json5, framing = .Whole, written_as = .Jsonc, route = choose_scan},
+	.Ndjson = {name = "ndjson", framing = .Lines, route = choose_scan},
+	.Csv    = {name = "csv", cells = true, route = choose_columns},
+	.Tsv    = {name = "tsv", cells = true, dialect = csv.TSV, route = choose_columns},
 }
 
 format_named :: proc(name: string) -> (f: Format, ok: bool) {
@@ -45,11 +59,11 @@ format_named :: proc(name: string) -> (f: Format, ok: bool) {
 	return
 }
 
-// Returns the comma-separated format names for `--from` and `--to` messages: json5 is only read.
+// Returns the comma-separated format names for `--from` and `--to` messages: a read-only format is not written.
 format_names :: proc(writing: bool) -> string {
 	b := make([dynamic]byte, context.temp_allocator)
 	for spec, k in FORMATS {
-		if writing && k == .Json5 {
+		if writing && spec.written_as != nil {
 			continue
 		}
 		if k != .Json {
@@ -58,21 +72,6 @@ format_names :: proc(writing: bool) -> string {
 		append(&b, spec.name)
 	}
 	return string(b[:])
-}
-
-// The format an input of `f` is read as: `f`, or what its transcode gives.
-reads_as :: proc(f: Format) -> Format {
-	return FORMATS[f].transcoded_to.? or_else f
-}
-
-// Whether an input of `f` is transcoded before it is read.
-transcoded :: proc(f: Format) -> bool {
-	return FORMATS[f].transcoded_to != nil
-}
-
-// The grammar the reader of `f` reads its texts in, which `Run.req.dialect` and `jq.read_dialect` hold.
-read_dialect :: proc(f: Format) -> json.Dialect {
-	return FORMATS[reads_as(f)].source
 }
 
 // Reports whether the input format is CSV-like.

@@ -2,12 +2,12 @@ package json
 
 // Building a `Document` from a source and freeing it, and the debug checks of the rows a document's readers trust.
 
-import "scan/walk"
+import core_pkg "../core"
 
 // A debug build's check of what the readers and the writer trust of a `Document` (its fields are exported, so
 // a caller can break them). `check_document` walks every row (a scoped request's rows may be several roots):
-// preorder, each run `[i, i + subtree_size)` and each span inside `src` and inside its parent's. `check_node`
-// checks the one row `n` and its run. Compiled out unless `ODIN_DEBUG`.
+// preorder, each run `[i, i + subtree_size)` and each span inside `src` and inside its parent's (`core.check_node`
+// checks one row and its run). Compiled out unless `ODIN_DEBUG`.
 when ODIN_DEBUG {
 	check_document :: proc(doc: ^Document, loc := #caller_location) {
 		// Open runs, on the stack, since a test may leave no allocator but the caller's. Rows nested past
@@ -20,7 +20,7 @@ when ODIN_DEBUG {
 			for open > 0 && ends[open - 1] <= i {
 				open -= 1
 			}
-			ok := row_ok(doc, i)
+			ok := core_pkg.row_ok(doc, i)
 			ok &&= i == 0 || r.lo > rows[i - 1].lo
 			if open > 0 {
 				p := rows[parents[open - 1]]
@@ -33,17 +33,6 @@ when ODIN_DEBUG {
 			ends[open], parents[open] = i + int(r.subtree_size), i
 			open += 1
 		}
-	}
-
-	check_node :: proc(doc: ^Document, n: Node, loc := #caller_location) {
-		assert(!walk.dom_has(doc.rows[:], n) || row_ok(doc, int(n)), "Document is corrupt: a row's run or span is out of range", loc)
-	}
-
-	@(private = "file")
-	row_ok :: proc(doc: ^Document, i: int) -> bool {
-		r := doc.rows[i]
-		return r.subtree_size >= 1 && i + int(r.subtree_size) <= len(doc.rows) && r.lo <= r.hi && int(r.hi) <= len(doc.src) &&
-			(r.kind == .Array || r.kind == .Object || r.subtree_size == 1)
 	}
 }
 
@@ -94,19 +83,15 @@ build :: proc(src: []byte, opts := Read_Opts{}, allocator := context.allocator) 
 destroy :: proc {
 	document_destroy,
 	request_destroy,
-	type_plan_destroy,
-	record_read_destroy,
+	core_pkg.hooked_plan_destroy,
+	core_pkg.record_read_destroy,
 }
 
 @(private)
 document_destroy :: proc(doc: ^Document) {
 	delete(doc.rows)
 	delete(doc.values)
-	delete(doc.keys)
-	delete(doc.strings)
-	delete(doc.members)
-	delete(doc.member_at)
 	delete(doc.facts)
-	walk.name_arena_destroy(&doc.arena)
+	core_pkg.row_cache_destroy(doc)
 	doc^ = {}
 }

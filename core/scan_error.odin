@@ -23,7 +23,7 @@ Error_Kind :: enum {
 	Too_Deep, // nesting past `Limits.max_depth` (MAX_DEPTH by default) — BUDGET, with the two Limit_* arms
 	Trailing, // bytes after the document — SYNTAX
 	// The next two arms are faults no byte is at. `build` raises both.
-	Source_Too_Wide, // `build`: source past TAPE_MAX_SOURCE, which node offsets cannot address. `offset` is that limit
+	Source_Too_Wide, // `build`: source past MAX_ROW_SOURCE, which node offsets cannot address. `offset` is that limit
 	Out_Of_Memory, // `build`: the allocator refused a row or a decoded string. `offset` is 0, since the walk reads on past a refused append. Any walk under a `max_depth` past MAX_DEPTH: it refused the frames past MAX_DEPTH, at the bracket that needed them
 	Duplicate_Key, // `Duplicates.Refuse`: a member key that, decoded, repeats an earlier key of its own object (at the repeat's opening quote)
 	Bad_Option, // an option the call does not take, refused before any byte is read (`build`: `duplicates` `.First` or `.All`; a `Request`: see `scan`). No byte is at it, and `offset` is 0

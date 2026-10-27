@@ -18,7 +18,7 @@ surrogate), CSV against RFC 4180.
 - **Build a document** and query it by path, with strings that point into the input.
 - **Edit a text**: change, insert or remove a value and keep every other byte, formatting and comments
   included.
-- **JSONC, NDJSON and RFC 7464** text sequences, with JSONC comments kept and written back.
+- **JSONC, JSON5, NDJSON and RFC 7464** text sequences, with JSONC comments kept and written back.
 - **CSV and TSV** through the same struct mapping, documents and edits as JSON, with dialects for other
   delimiters, quoting, escapes, comment lines and files without a header.
 - **Optional threads**: validate or process records in parallel on a `stury:host` pool. The
@@ -139,7 +139,7 @@ programs are in [examples/](examples):
 
 `stury` runs [jq](https://jqlang.org) 1.8 filters with jq's results and exit codes. Input is strict JSON by
 default, so `01`, `NaN` and invalid UTF-8 are errors, reported with their line and column. `--from` and `--to`
-choose `json`, `jsonc`, `ndjson`, `csv` or `tsv`.
+choose `json`, `jsonc`, `json5`, `ndjson`, `csv` or `tsv`.
 
 `stury fmt` formats files, rewriting them with `--in-place`, or transcodes them (`--from csv --to tsv`), with `--check` for CI.
 

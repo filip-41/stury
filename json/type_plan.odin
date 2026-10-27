@@ -75,17 +75,6 @@ Plan_Field :: core_pkg.Plan_Field
 @(private)
 Plan_Member :: core_pkg.Plan_Member
 
-@(private)
-type_plan_destroy :: proc(p: ^Type_Plan) {
-	core_pkg.hooked_plan_destroy(p)
-}
-
-@(private)
-plan_op :: #force_inline proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (u32, Marshal_Error) {
-	idx, err := core_pkg.plan_op(&p.base, ti)
-	return idx, Marshal_Error(err)
-}
-
 @(private, rodata)
 json_plan_types := [?]core_pkg.Format_Type{
 	{Raw, .Raw},
@@ -121,12 +110,7 @@ spell_plan_key :: proc(keys: ^[dynamic]u8, name: string, role: core_pkg.Key_Role
 }
 
 @(private, thread_local)
-plan_cache: core_pkg.Plan_Cache(Type_Plan)
-
-@(private = "file")
-type_plan_default :: proc(T: typeid, a: runtime.Allocator) -> Type_Plan {
-	return type_plan_init(T, {}, a)
-}
+plan_cache: core_pkg.Plan_Cache(Marshal_Hook)
 
 // Frees every plan this thread's cache holds, as eviction frees one: in the heap allocator they were made
 // in, whatever `context.allocator` is.
@@ -135,7 +119,7 @@ type_plan_default :: proc(T: typeid, a: runtime.Allocator) -> Type_Plan {
 //	  call without a plan makes one again.
 //	- It does nothing while a call on this thread is using the cache (from inside a hook).
 plan_cache_clear :: proc() {
-	core_pkg.plan_cache_clear(&plan_cache, type_plan_destroy)
+	core_pkg.plan_cache_clear(&plan_cache)
 }
 
 @(fini, private)
@@ -148,11 +132,11 @@ plan_cache_fini :: proc "contextless" () {
 // thread's cached plan, else a temporary one made in `tmp`. `plan_done` gives it back.
 @(private)
 plan_for :: #force_inline proc(given: ^Type_Plan, T: typeid, tmp: ^Type_Plan) -> (p: ^Type_Plan, ok: bool) {
-	return core_pkg.plan_for(&plan_cache, given, T, tmp, type_plan_default, type_plan_destroy)
+	return core_pkg.plan_for(&plan_cache, given, T, tmp, json_plan_format)
 }
 
 // A call is done with `p`, the plan `plan_for` gave it for `given` and `tmp`.
 @(private)
 plan_done :: #force_inline proc(p, given, tmp: ^Type_Plan, out_of_memory: bool) {
-	core_pkg.plan_done(&plan_cache, p, given, tmp, out_of_memory, type_plan_destroy)
+	core_pkg.plan_done(&plan_cache, p, given, tmp, out_of_memory)
 }

@@ -138,14 +138,6 @@ test_readers_are_total_over_no_row :: proc(t: ^testing.T) {
 		it := json.members(&doc, i)
 		_, _, more = json.members(&it)
 		testing.expect(t, !more)
-		for text in ([]string{".", ".[0]", ".a", ".[]"}) {
-			steps: [4]json.Step
-			p, _ := json.parse_path(text, steps[:])
-			rows: [dynamic]json.Node
-			defer delete(rows)
-			testing.expect(t, json.query(&doc, i, p, &rows) == nil)
-			testing.expectf(t, len(rows) == 0, "query(%d, %s): %v", i, text, rows)
-		}
 	}
 }
 
@@ -221,12 +213,12 @@ test_pointer_and_query_leave_the_temp_allocator_alone :: proc(t: ^testing.T) {
 	testing.expect_value(t, got, 3)
 	testing.expect_value(t, json.pointer(&doc, json.ROOT, bad_ptr), json.NO_NODE)
 
-	rows: [dynamic]json.Node
+	rows: [dynamic]json.Answer
 	defer delete(rows)
-	testing.expect_value(t, json.query(&doc, json.ROOT, path, &rows), nil)
+	testing.expect_value(t, json.query(&doc, path, &rows), nil)
 	testing.expect_value(t, len(rows), 1)
 	if len(rows) == 1 {
-		got, _ = json.get_int(&doc, rows[0])
+		got, _ = json.get_int(&doc, rows[0].node)
 		testing.expect_value(t, got, 2)
 	}
 }
@@ -280,13 +272,13 @@ test_child_negative_index_counts_from_end :: proc(t: ^testing.T) {
 		for i in ([]int{-n - 1, min(int)}) {
 			testing.expectf(t, json.child(&doc, json.ROOT, i) == json.NO_NODE, "%s: child %d answered", src, i)
 		}
-		found: [dynamic]json.Node
+		found: [dynamic]json.Answer
 		defer delete(found)
-		testing.expect(t, json.query(&doc, json.ROOT, ".[-1]", &found) == nil)
-		testing.expectf(t, len(found) == 1 && found[0] == last, "%s: .[-1] answered %v, want %d", src, found[:], last)
+		testing.expect(t, json.query(&doc, ".[-1]", &found) == nil)
+		testing.expectf(t, len(found) == 1 && found[0].node == last, "%s: .[-1] answered %v, want %d", src, found[:], last)
 		clear(&found)
-		testing.expect(t, json.query(&doc, json.ROOT, fmt.tprintf(".[%d]", -n - 1), &found) == nil)
-		testing.expectf(t, len(found) == 0, "%s: .[-n-1] answered %v", src, found[:])
+		testing.expect(t, json.query(&doc, fmt.tprintf(".[%d]", -n - 1), &found) == nil)
+		testing.expectf(t, len(found) == 1 && found[0].outcome == .Missing, "%s: .[-n-1] answered %v", src, found[:])
 	}
 }
 

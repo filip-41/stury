@@ -8,7 +8,7 @@ import json "../.."
 
 @(test)
 test_record_fault_is_cores :: proc(t: ^testing.T) {
-	faults, err := json.validate_records(transmute([]byte)string("1\nx\n"), .NDJSON)
+	faults, err := json.validate_records(transmute([]byte)string("1\nx\n"), {framing = .NDJSON})
 	defer delete(faults)
 	testing.expect(t, err == nil && len(faults) == 1)
 	// The record's fault is core's without a conversion, which only an alias allows.

@@ -227,7 +227,7 @@ descend_plain_float :: #force_inline proc(src: []byte, v, max_digits, max_scale:
 		return v
 	}
 	ok: bool
-	x^, ok = number.f64_number_value(src, v, end, number.Number_Lex{
+	x^, ok = core_pkg.f64_number_value(src, v, end, core_pkg.Number_Lex{
 		int_at = int_at, int_digits = int_digits, frac_at = frac_at, frac_digits = frac_digits, mant = mant,
 		spelling = {.Negative} if neg else {}, ok = true, whole = true,
 	})
@@ -242,7 +242,7 @@ descend_float :: #force_no_inline proc(s: ^Scanner, q: ^Query_Ctx) -> (f64, bool
 	if lex.VCLASS[s.src[v]] != VC_NUMBER || number.parse_number_q(s, q, v, {.Shape}) != nil {
 		return 0, false
 	}
-	return number.f64_number_value(s.src, v, s.pos, shape_number_lexed(q.shape, v, s.pos, false))
+	return core_pkg.f64_number_value(s.src, v, s.pos, shape_number_lexed(q.shape, v, s.pos, false))
 }
 
 // A value nothing reads, at walk depth `sp`, checked as the walk checks it.

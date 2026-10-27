@@ -72,8 +72,8 @@ The writer builds JSON text through a put layer that never checks container stat
 
 The put layer's callers own structure, so it keeps no per-value state machine.
 
-- The writer is `put_*`, in package `json/encode`. Package `json` does not forward it. It works on a
-  `^[dynamic]u8`.
+- The writer is `put_*`, defined in `core/spell/put.odin`: `json/encode` aliases it and `csv` calls it.
+  Package `json` does not forward it. It works on a `^[dynamic]u8`.
 - The document writer follows preorder rows and `marshal` follows a type plan. Both always emit well-formed
   structure, because the rows and the plan already describe it.
 - The put layer reserves room once per item (`put_reserve(dst, n) -> [^]u8`). It writes through the returned
@@ -346,7 +346,9 @@ A comment before or after the value is still `Bad_Raw`, since the text must be e
 
 ## 6. Edits
 
-An edit replaces the values a path finds and keeps every other byte.
+An edit replaces the values a path finds and keeps every other byte. `Edit`, the `[lo, hi)` replacement
+`splice` takes, is `core.Edit`, shared by the formats' edits. Under `.Default` duplicates an edit refuses a key
+(JSON) or header name (CSV) repeated on its path, as `.Refuse` does.
 
 ### 6.1 `splice`
 
@@ -386,6 +388,9 @@ Under `.Jsonc` the entries come from a `.Nodes` scan instead, because an entry's
 entries an edit touches, a JSONC entry goes in or out by its extent, so no comment ends up attached to a
 different entry. Where none does, the layout is JSON's, and plain JSON edited under either dialect gives the
 same bytes.
+
+Under `.First` and `.Last`, `remove` and `insert` touch the occurrence `set` finds, not the shadowed copies of
+a key.
 
 ## 7. `unmarshal`
 
@@ -490,8 +495,8 @@ replaced). Lists are the exception: they are replaced, as core replaces them. Th
 
 **Unknown keys.** `.Ignore` keeps forward compatibility, and is the common default elsewhere (Go, serde).
 
-**Duplicates.** `.Last` reads each occurrence over what the one before left, so a repeated object or map
-merges and a repeated scalar or list keeps the last. `.First` reads the first and checks the rest. A map that
+**Duplicates.** `.Default` is `.Last`, which reads each occurrence over what the one before left, so a repeated
+object or map merges and a repeated scalar or list keeps the last. `.First` reads the first and checks the rest. A map that
 held entries reads the object into a fresh map merged in at its `}`, so only the object's own repeats count.
 Every occurrence of a known member is checked, whichever one is kept: a `.First` repeat is checked in full but
 stored nowhere.
@@ -635,14 +640,18 @@ the source's next record and reads it with the same walk `unmarshal` of the reco
 ## 8. Across formats
 
 `core` holds what the formats share and what a caller who works with several of them names once: `Strictness`,
-paths (`Path`, `Step`, `MAX_PATH_STEPS`), the path answer (`Answer`, `Answer_Outcome`, `NO_OWNER`, `answer_cut`),
+paths (`Path`, `Step`, `MAX_PATH_STEPS`), the path answer (`Answer`, `Answer_Outcome`, `Kind`, `Node`, `NO_OWNER`,
+`answer_cut`), the row tree (`Row`, `Row_Flags`, `Fact`, `NO_KEY`, `ROOT`, `MAX_ROW_SOURCE`, `Row_Document` with its
+`Row_Dialect`, its decoded and listed reads cached behind a `^Row_Cache` made on first use, and the readers
+that need no format's spelling: `kind`, `child_count`, `child_by_index`, the member walk, `get_raw`, `facts`), `Insert_At`, the capability signatures every format package gives (`Format`, which each format's
+suite fills with its procedures),
 `Duplicates`, `Enum_Spelling`, `Unknown_Fields`, `Tag_Name`, the hooks
 (`Unmarshal_Hook`, `Type_Hook(W)` over a format's writer proc), the type plan (`Type_Plan`, `Hooked_Plan(W)`,
 `Plan_Cache`), the read shape and its lowering, the judged scalar stores, `Number`, `Batch_Runner`,
-`Stream_Window`, the typed per-record reader (`Record_Read`, `Record_Source`), and the errors and their
-rendering. A format aliases the names it exposes. JSON's walk
+`Stream_Window`, `Request` and `Route` (a request's inputs and answers, and the engine that answers a path),
+the typed per-record reader (`Record_Read`, `Record_Source`), and the errors and their rendering. A format aliases the names it exposes. JSON's walk
 substrate is JSON's own and lives in `json/scan/walk`: the scan cursor and its caps (`Limits`, `MAX_DEPTH`),
-the rows, the query context and its matchers (path automaton, demand) and the typed walk's state
+the query context and its matchers (path automaton, demand) and the typed walk's state
 (`Shape_Run`). A format annotates the lowered shape for its walk (`Plan_Format.lowered`). Before the shape is
 checked, it may set an op its walk cannot read back to `.Unsupported`. The union lowering picks an arm per
 `Value_Class`; the JSON walk's first-byte classes number the classes.
@@ -662,15 +671,16 @@ A format plugs into `core` in four places:
   each format's docs list them. `Unmarshal_Error`, `Path_Error` and `Marshal_Error` are core types the format
   aliases. `core.render_error` writes any of them as `line:col: kind at path`.
 - **Its policies.** A repeated key is `core.Duplicates`. Its zero value `.Default` means the format's default.
-  JSON resolves it to `.Last` (as jq does) at the request's pre-flight, so no walk sees it. CSV treats it as
-  `.Refuse` where it matches the header's names to fields (`read_header`). A format documents its default and
-  the scope the policy covers (a JSON object, a CSV header).
+  JSON resolves it to `.Last` (as jq does) at the request's pre-flight, so no walk sees it. CSV reads it as
+  `.Last` where it matches the header's names to fields (`read_header`). Every format's edits refuse a repeated
+  key or column under `.Default`. A format documents its default and the scope the policy covers (a JSON object,
+  a CSV header).
 
 `stury:csv` is the second format. It shares the typed codec's neutral half in `core`: the type plan, compiled
 through a `Plan_Format` (`csv` tag key, names spelled as written, no format types, no `lowered`), the read-shape
 lowering, the judged scalar stores and `Unmarshal_Error`. It owns its scanner (`csv/scan.odin`: quote,
-separator and LF masks per 64-byte block, with every byte judged) and its cell reader and writer. It builds no
-rows. A record is a list of field spans, and a typed row is filled cell by cell from the header's column map. The
+separator and LF masks per 64-byte block, with every byte judged) and its cell reader and writer. The library
+builds no rows. A record is a list of field spans, and a typed row is filled cell by cell from the header's column map. The
 per-record reader (`csv/record_read.odin`) binds that map, the row shape and the plan once, then reads one row
 per call over a `Records` or a `Record_Reader`; a row's fault is rebased into that row's bytes, as JSON's is
 into its record's.
@@ -686,7 +696,8 @@ A `Document` (`csv/document.odin`) is `records` kept: the header's spans and eve
 field, sized from the first row so that the array grows once. A cell is decoded when it is read, and one that
 holds a `""` or an escape is decoded once and kept by the document. The path readers (`csv/find.odin`, which
 holds their contract) take core's path syntax. `query` answers over a document's field spans and never scans the
-text again; `find` and `find_column` stream `records` and keep no row.
+text again; `find` and a `Request` stream `records` once for all their paths and keep no row. `route_of` names
+the engine that answers a path, as JSON's does.
 The edits (`csv/edit.odin`) build their result from the source and the spans of a record scan. A cell is
 respelled by the writer `marshal` uses (`edit_spell.odin`), and every other byte is copied. The source is
 validated first, so a fault is located in it. The result is not validated again: a respelled cell is one field,
@@ -727,10 +738,10 @@ there. A comment byte under quotes leaves one piece, since a comment line's quot
 scanned once the window holds it and the three bytes a UTF-8 check reads past it, and `Limits.max_record_bytes`
 bounds the open line.
 
-The rest is forward design: how a later format (TOML) joins, and how formats would share rows.
+The rest is forward design: how a later format (TOML) joins.
 
-- **Shared:** the rows (structure plus spans), the query engine, and the writer protocol (open, key, scalar,
-  close).
+- **Shared:** the rows (structure plus spans, `core.Row_Document`), the query engine, and the writer protocol
+  (open, key, scalar, close).
 - **Each format owns** its lexer (spans in, rows out) and its writer (protocol in, bytes out).
 - **A span holds text in its source format.** A same-format writer copies it, as `marshal(&doc)` does.
   - Another format's writer decodes it and writes the value itself.
@@ -762,10 +773,12 @@ nothing for it).
   into the JSON5 text by row index. Strings are copied. `Infinity` and `NaN` are `.Out_Of_Range`. A name step
   for a key holding an escape is made with the caller's allocator.
 - `marshal` of a JSON5 document respells each token that is not JSON's (`jq_string`, `jq_container`,
-  `json5_number_as_json`). The edits and `Record_Read` refuse `.Json5` as `.Bad_Option`.
-- The CLI reads `--from json5` by transcoding each input to JSONC (`json5_to_jsonc`, the format's
-  `transcoded_to`) and reading it as `--from jsonc` does, so positions after the transcode (`input_line_number`,
-  runtime error lines) count the JSONC text, and nesting is held to `MAX_DEPTH`. `check` judges the JSON5 text itself.
+  `json5_number_json`). The edits and `Record_Read` refuse `.Json5` as `.Bad_Option`.
+- The CLI reads `--from json5` natively: its rows are read by the readers that decode a flagged row, `scalar`
+  and `write_value` take a number's JSON spelling from `json5_number_json`, and `write_answer` copies no string
+  of a dialect with its own spelling. `Infinity` and `NaN` end the run (`non_finite_at`). Positions
+  (`input_line_number`, runtime error lines) count the JSON5 text, and nesting follows `--max-depth`. A path
+  scan would print a token as written, so a JSON5 run is the interpreter's (`own_spelling` in `--explain`).
 
 Code asks what a dialect reads in one of three ways (the header of `json/scan/dialect.odin` has the same):
 
@@ -798,9 +811,8 @@ names the ones missed:
    `records_read` in `record_opts_refused`.
 5. Writing and edits: `own_spelling` and `has_comments` in `marshal_document`, the `jq_*` respell procedures,
    and `edits_read` with the `insert_at` and `watched_remove` dispatch.
-6. The CLI: a `Format` row in `FORMATS` (`source`, and `transcoded_to` when the input is transcoded and read as
-   another format), or a native read; the run asks `Run.req.dialect` through `json.plain_json` and
-   `json.has_comments`.
+6. The CLI: a `Format` row in `FORMATS` (`source`, and `written_as` for a format that is only read), or a native
+   read; the run asks `Run.req.dialect` through `json.plain_json`, `json.has_comments` and `json.own_spelling`.
 7. Tests in `json/test/api/<name>_test.odin`, rows in `cmd/stury/test/cli.tsv`, CHANGELOG, `docs/cli.md`, and
    `json/API.txt` (`tools/api_surface.py`).
 
@@ -838,6 +850,10 @@ of the record (`only_columns`), runs the interpreter on an object of just those 
 record for each output. The pieces do this on the pool, each with its own arena. A record whose filter fails
 stops its piece, and the main thread runs that record and the rest of the file, so the message is the
 interpreter's. Other filters take the interpreter over `csv.records` (a whole file) or `csv.records_from` (a stream).
+The interpreter reads a record as a `core.Row_Document` (`record_doc`): the compact JSON object of the header's
+keys and the record's cells, an empty cell null, with a row per value (`cells_object`, which `print_cells` also writes an object
+with). The keys are made once per file, a string `jq.write_string` escaped is flagged and decoded on read, and the
+document is marked as holding no repeated key.
 
 `--to csv|tsv` makes every output a record. The interpreter's `print_jq` passes each output to `print_row`
 (`output_cells.odin`), which converts it to cells and appends the record with `csv.write_record`, the writer

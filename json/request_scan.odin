@@ -3,6 +3,7 @@ package json
 // `scan` and `prepare`: the request checked, routed, and handed to the walk (request_walk.odin).
 
 import "base:runtime"
+import core_pkg "../core"
 import "scan/walk"
 import scan_pkg "scan"
 
@@ -31,7 +32,7 @@ scan :: #force_no_inline proc(src: []byte, req: ^Request($KINDS)) -> Maybe(Error
 // skipped. One body for both, so a program's scans share one copy of the walks.
 @(private = "file")
 scan_request :: #force_no_inline proc(src: []byte, req: ^Request($KINDS), planned: bool) -> Maybe(Error) {
-	alloc := request_allocator(req)
+	alloc := core_pkg.request_allocator(req)
 	// `KINDS` as walk kinds, the same names. `.Dom` decodes the `.Nodes` rows. Written out kind by kind: a
 	// conversion between two enums' bit_sets is no constant.
 	W :: bit_set[scan_pkg.Walk_Kind]
@@ -46,16 +47,17 @@ scan_request :: #force_no_inline proc(src: []byte, req: ^Request($KINDS), planne
 		}
 		// `.Refuse` and dialect walks serve every path through the automaton (`automaton_forced`), so no matcher
 		// is planned.
-		if tape_routable(req) && scan_tape(src, req, alloc) {
+		forced := automaton_forced(req.dialect, req.duplicates) || req.state.route.walk_repeats
+		if !forced && tape_routable(req) && scan_tape(src, req, alloc) {
 			return nil
 		}
-		if err, refused := route_paths(&req.state.route, src, req.paths, req.duplicates, alloc, automaton_forced(req.dialect, req.duplicates)).?; refused {
+		if err, refused := route_paths(&req.state.route, src, req.paths, req.duplicates, alloc, forced).?; refused {
 			return err
 		}
 	}
 	req.state.src, req.state.verdict, req.coverage, req.stop = src, nil, .Partial, nil
-	req.state.groups.grouped = false
-	req.state.route.unresolved = false
+	req.groups.grouped = false
+	req.state.route.unresolved, req.state.route.repeat_at = false, 0
 	err := scan_error(req.state.verdict, scan_routed(src, req, WALK, alloc))
 	if req.state.route.unresolved && !req.state.route.every_member && (req.duplicates == .First || req.duplicates == .Last) {
 		// A text another follows was read whole and answered (`.Trailing`), so its answers are settled too.
@@ -81,7 +83,7 @@ scan_request :: #force_no_inline proc(src: []byte, req: ^Request($KINDS), planne
 @(require_results)
 prepare :: proc(req: ^Request($KINDS)) -> Maybe(Error) {
 	req.state.planned, req.state.kept.ok = false, false
-	err := request_fault(nil, req, request_allocator(req))
+	err := request_fault(nil, req, core_pkg.request_allocator(req))
 	if err == nil {
 		req.state.planned = prepared_plan(req)
 	}
@@ -96,7 +98,7 @@ prepared_plan :: proc(req: ^Request($KINDS)) -> bool {
 	plan_src := transmute([]byte)string(PLAN_SRC)
 	// Inlined here, so `scan_request` stays their one call and inlines them too.
 	return !#force_inline tape_routable(req) &&
-		#force_inline route_paths(&req.state.route, plan_src, req.paths, req.duplicates, request_allocator(req), automaton_forced(req.dialect, req.duplicates)) == nil
+		#force_inline route_paths(&req.state.route, plan_src, req.paths, req.duplicates, core_pkg.request_allocator(req), automaton_forced(req.dialect, req.duplicates)) == nil
 }
 
 @(private = "file", require_results)
@@ -178,9 +180,7 @@ scan_refuse :: #force_no_inline proc(src: []byte, req: ^Request($KINDS), $WALK: 
 request_fault :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> Maybe(Error) {
 	BAD_OPTION :: Error{kind = .Bad_Option}
 	// Every scan and `prepare` pass through this check, so no walk sees `.Default`.
-	if req.duplicates == .Default {
-		req.duplicates = .Last
-	}
+	req.duplicates = core_pkg.duplicates_or(req.duplicates, .Last)
 	when !REFUSE_DUPLICATES {
 		if req.duplicates == .Refuse {
 			return BAD_OPTION
@@ -230,9 +230,9 @@ outputs_fault :: #force_inline proc(req: ^Request($KINDS), paths_used: bool, all
 			return MISMATCH
 		}
 	}
-	// Decoded strings live in the document's arena.
+	// The read cache is made in the rows' allocator, so their check covers it.
 	when .Dom in KINDS {
-		if !walk.allocator_ok(req.doc.values.allocator, alloc) || !walk.allocator_ok(req.doc.arena.blocks.allocator, alloc) {
+		if !walk.allocator_ok(req.doc.values.allocator, alloc) {
 			return MISMATCH
 		}
 	}
@@ -254,7 +254,7 @@ validate_remaining :: proc(req: ^Request($KINDS)) -> Maybe(Error) {
 	// The key check keeps its spilled keys in `context.allocator`, as `scan` does, given back
 	// on return.
 	prev := context.allocator
-	context.allocator = request_allocator(req)
+	context.allocator = core_pkg.request_allocator(req)
 	defer context.allocator = prev
 	err, validity := scan_pkg.validate_remaining(req.state.src, req.state.verdict, req.coverage, req.stop, req.limits, REFUSE_DUPLICATES && req.duplicates == .Refuse)
 	req.state.verdict, req.coverage, req.stop = err, validity, nil

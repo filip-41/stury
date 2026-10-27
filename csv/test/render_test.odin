@@ -41,7 +41,6 @@ test_render_error :: proc(t: ^testing.T) {
 		{"id\nabc\n", "2:1: Wrong_Kind at [0].id"},
 		{"id\n1\n\"2\n", "4:1: Syntax: Truncated at [1]"},
 		{"id,ok\n1,true\n2\n", "3:1: Syntax: Field_Count at [1]"},
-		{"id,id\n1,2\n", "1:4: Duplicate_Key at .id"},
 	}
 	for c in cases {
 		uerr := read(t, c.src, &rows)
@@ -51,6 +50,8 @@ test_render_error :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(t, csv.render_error(transmute([]byte)c.src, e, context.temp_allocator), c.want)
 	}
+	rerr := read(t, "id,id\n1,2\n", &rows, {duplicates = .Refuse})
+	testing.expect_value(t, csv.render_error(transmute([]byte)string("id,id\n1,2\n"), rerr.?, context.temp_allocator), "1:4: Duplicate_Key at .id")
 	nested: []Nested
 	nerr := read(t, "id,list\n1,2\n", &nested)
 	testing.expect_value(t, csv.render_error(bytes, nerr.?, context.temp_allocator), "Unsupported at [].list")
@@ -107,14 +108,14 @@ test_render_path_error :: proc(t: ^testing.T) {
 	text(t, src, err, "Unsupported_Path")
 	_, err = csv.set(src, ".[1].a", 1)
 	text(t, src, err, "Not_Found")
-	_, err = csv.insert(src, -1, []string{"1", "2"})
+	_, err = csv.insert(src, ".", -1, []string{"1", "2"})
 	text(t, src, err, "Unplaceable")
 	_, err = csv.splice(src, []csv.Edit{{lo = 5, hi = 4}})
 	text(t, src, err, "Bad_Edit")
-	_, err = csv.splice(src, nil, csv.Dialect{delimiter = '"'})
+	_, err = csv.splice(src, nil, {dialect = csv.Dialect{delimiter = '"'}})
 	text(t, src, err, "Bad_Option")
 	// The cell count or the field index of a row that does not fit.
-	_, err = csv.insert(src, 0, []string{"1"})
+	_, err = csv.insert(src, ".", 0, []string{"1"})
 	text(t, src, err, "Bad_Row (1)")
 	// What marshal refused, and the record it was for where there is one.
 	_, err = csv.set(src, ".[0].a", []int{1})

@@ -105,7 +105,6 @@ Run :: struct {
 	silent:      bool, // fmt --check and --in-place: the output stays in `out` for the caller
 	name_faults: bool, // fmt: a parse fault names its file
 	verbatim:    bool, // fmt between JSON-like formats: each value is written from its source text
-	checking:    bool, // check: each input is judged as it is read, JSON5 included, not transcoded
 	faulted:     bool, // a held copy met an answer it cannot print: its caller leaves that text to the main thread, which reports it
 	spill:       jq.Spill, // `spill_out`, for a layout that is written into `out`
 	unopened:    bool, // a file did not open or read, which jq's exit status says whatever comes after it
@@ -128,7 +127,7 @@ main :: proc() {
 	jq.set_origin()
 	run: Run
 	run.opts.indent = 2
-	run.ret, run.last_result = JQ_OK_NO_OUTPUT, -1
+	run.ret, run.last_result, run.any_at = JQ_OK_NO_OUTPUT, -1, -1
 	cli := parse_args(&run.opts, command_args()[1:])
 	validating := cli.validating
 	run.explain.on = run.opts.explain
@@ -150,11 +149,10 @@ main :: proc() {
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
-	run.req.dialect = read_dialect(o.from)
+	run.req.dialect = FORMATS[o.from].source
 	run.req.limits = jq.lifted
 	names := cli.files[:] if len(cli.files) > 0 else STDIN_ONLY
 	if validating {
-		run.checking = true
 		if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
 			usage(EXIT_USAGE, true) // as stury with no filter, rather than wait on the keyboard
 		}
@@ -193,8 +191,7 @@ main :: proc() {
 	if run.home_module {
 		ready_interpreter(&run)
 	}
-	choose_scan(&run, text)
-	choose_columns(&run, text, len(names))
+	FORMATS[o.from].route(&run, text, len(names))
 	if !run.scanning && (run.columns == nil || run.columns.selecting) {
 		ready_interpreter(&run)
 	}
@@ -324,12 +321,8 @@ bind_cli_vars :: proc(run: ^Run) {
 }
 
 // Whether the path scan answers the filter `text`, and with what path.
-choose_scan :: proc(run: ^Run, text: string) {
-	run.any_at = -1
+choose_scan :: proc(run: ^Run, text: string, _: int) {
 	o := run.opts
-	if reads_cells(&o) {
-		return
-	}
 	stops := scan_stops(&o)
 	if stops != {} && !explain_why(run, stops) {
 		return
@@ -339,7 +332,7 @@ choose_scan :: proc(run: ^Run, text: string) {
 	if perr != nil {
 		// `select` is the interpreter's under a dialect, whose texts print with their comments.
 		dialect := !json.plain_json(run.req.dialect)
-		if dialect && !explain_why(run, {.Jsonc_Select}) {
+		if dialect && !explain_why(run, {.Dialect_Select}) {
 			return
 		}
 		sel: Select
@@ -424,12 +417,10 @@ fault_in_file :: proc(name: string, src: []byte, e: json.Error, what := "", line
 // fault), and a nesting past the cap is raised by --max-depth, which the hint asks for only when it was not given.
 // The text ends in a newline.
 fault_context :: proc(src: []byte, e: json.Error, opts: ^Opts) -> string {
-	jsonc := !json.plain_json(read_dialect(opts.from))
+	jsonc := !json.plain_json(FORMATS[opts.from].source)
 	at := int(e.offset)
 	hint: string
 	switch {
-	case e.kind == .Too_Deep && transcoded(opts.from) && jq.lifted.max_depth >= json.MAX_DEPTH:
-		hint = fmt.tprintf("--from %s reads nesting to depth %d at most", FORMATS[opts.from].name, json.MAX_DEPTH)
 	case e.kind == .Too_Deep:
 		hint = "a larger --max-depth reads it" if opts.max_depth_given else "--max-depth N raises the nesting limit"
 	case e.kind != .Bad_Char || at >= len(src) || jsonc:
@@ -472,10 +463,7 @@ fail_input :: proc(run: ^Run, e: json.Error, what := "") -> ! {
 }
 
 finish :: proc(run: ^Run, code: int) -> ! {
-	code := code
-	if !write_held_rows(run) {
-		code = EXIT_INPUT
-	}
+	write_held_rows(run)
 	flush_some(run, force = true)
 	check_output()
 	explain_end(run)

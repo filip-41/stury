@@ -5,68 +5,6 @@ package number
 import "base:intrinsics"
 import lex "../lex"
 
-@(rodata)
-DIGIT8_POW10: [9]u64 = {
-	1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000,
-}
-
-// High bit set in the first lane that is not an ASCII digit. A borrow or a
-// carry moves toward higher bytes, so later lanes may be spurious. The first
-// set lane is the first non-digit. `m == 0` means eight digits.
-//
-// A lane below '0' borrows into bit 7, one in ':' ..= 0xB9 carries into it, and one from 0xBA up keeps it
-// through the subtraction. A digit lane with no borrow or carry from below sets neither. Only a non-digit
-// lane below sends one up, so the first set lane needs no third term for the high bytes.
-digit8_gap :: #force_inline proc(w: u64) -> u64 {
-	return ((w - 0x3030_3030_3030_3030) | (w + 0x4646_4646_4646_4646)) & 0x8080_8080_8080_8080
-}
-
-// End of the digit run at `p`. The 8-byte load runs only while eight bytes remain. The tail, and
-// the whole run under `lex.SCAN_FORCE_SLOW`, is scalar.
-//
-// When `$fold`, the same words fold the run into `mant`, continuing what it holds. The fold has
-// no cap: past 19 digits `mant` wraps and the caller's digit count says so. A k-digit head is
-// `digits8_value` of the word shifted up by `64 - 8k` bits. The shift is taken in two steps so
-// `k == 0` shifts the whole word out and folds nothing, with no branch on `k`.
-digit_run :: #force_inline proc(src: []byte, p: u64, mant: ^u64, $fold: bool) -> u64 {
-	n := u64(len(src))
-	q := p
-	when !lex.SCAN_FORCE_SLOW {
-		#no_bounds_check {
-			for q + 8 <= n {
-				w := load8_le(src, q)
-				m := digit8_gap(w)
-				if m != 0 {
-					// The gap's lowest set bit is lane k's bit 7, so `~tz & 0x38` is `56 - 8k`.
-					tz := intrinsics.count_trailing_zeros(m)
-					k := tz >> 3
-					when fold {
-						mant^ = mant^ * DIGIT8_POW10[k] + digits8_value((w << (~tz & 0x38)) << 8)
-					}
-					return q + k
-				}
-				when fold {
-					mant^ = mant^ * DIGIT8_POW10[8] + digits8_value(w)
-				}
-				q += 8
-			}
-		}
-	}
-	#no_bounds_check {
-		for q < n {
-			d := src[q]
-			if d < '0' || d > '9' {
-				break
-			}
-			when fold {
-				mant^ = mant^ * 10 + u64(d - '0')
-			}
-			q += 1
-		}
-	}
-	return q
-}
-
 // A required element is missing: truncation if the input simply ended (more bytes could still
 // complete the token), otherwise the stopping byte is the fault.
 @(private = "file")

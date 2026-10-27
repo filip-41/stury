@@ -406,7 +406,7 @@ tape_config :: proc(data: []byte, out: ^Config_Head, a: mem.Allocator) -> bool {
 }
 
 // Returns a found string answer, borrowed unless it is escaped.
-span_string :: proc(src: []byte, ans: json.Path_Answer, a: mem.Allocator) -> (string, bool) {
+span_string :: proc(src: []byte, ans: json.Answer, a: mem.Allocator) -> (string, bool) {
 	if ans.outcome != .Found || ans.kind != .String {
 		return "", false
 	}
@@ -415,7 +415,7 @@ span_string :: proc(src: []byte, ans: json.Path_Answer, a: mem.Allocator) -> (st
 }
 
 // Returns a found integer answer in the `i64` range, read as unmarshal reads one.
-span_int :: proc(src: []byte, ans: json.Path_Answer) -> (i64, bool) {
+span_int :: proc(src: []byte, ans: json.Answer) -> (i64, bool) {
 	if ans.outcome != .Found || ans.kind != .Number {
 		return 0, false
 	}

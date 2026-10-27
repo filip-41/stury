@@ -470,16 +470,10 @@ iterate_root_pieces :: proc(run: ^Run, data: []byte, at, z, levels: int) -> bool
 // a lone entry that is not one text) or an output is one jq's rules decide.
 @(private = "file")
 iterate_chunk :: proc(job: ^Root_Job, k: int) -> bool {
-	c, text := chunk_text(job, k)
-	alone: [dynamic]byte
-	defer delete(alone)
-	if c.alone {
-		// Scanned as an array of the one entry, as the other chunks are.
-		alone = make([dynamic]byte, 0, len(text) + 2, runtime.heap_allocator())
-		append(&alone, '[')
-		append(&alone, ..text)
-		append(&alone, ']')
-		text = alone[:]
+	c, entries := chunk_text(job, k)
+	text := array_text(entries, c.alone)
+	defer if c.alone {
+		delete(text)
 	}
 	run := job.run^
 	run.held = true
@@ -488,7 +482,8 @@ iterate_chunk :: proc(job: ^Root_Job, k: int) -> bool {
 	// The path starts at the `[]`.
 	req := json.Request({.Path}){dialect = .Json, limits = chunk_limits(job.levels), paths = job.paths[:1], allocator = runtime.heap_allocator()}
 	defer json.destroy(&req)
-	answers: []json.Path_Answer
+	answers: []json.Answer
+	settled := true
 	if len(job.paths) > 1 {
 		// Without `per_element` first, which the name matcher may answer: past the one `[]` an entry answers at
 		// most once, so with as many found answers as entries, each has its own and the per-element scan, on
@@ -506,15 +501,10 @@ iterate_chunk :: proc(job: ^Root_Job, k: int) -> bool {
 		if json.scan(text, &req) != nil {
 			return false
 		}
-		answers = jq_outputs(req.answers[:])
+		answers, settled = jq_outputs(req.answers[:])
 	}
-	if len(answers) == 0 || c.alone && len(answers) > 1 {
+	if !settled || len(answers) == 0 || c.alone && len(answers) > 1 {
 		return false
-	}
-	for a in answers {
-		if a.outcome != .Found && a.outcome != .Missing {
-			return false
-		}
 	}
 	if job.limit > 0 {
 		answers = answers[:min(len(answers), job.limit)]
@@ -534,14 +524,14 @@ iterate_chunk :: proc(job: ^Root_Job, k: int) -> bool {
 
 // Whether `answers`, the path's over the JSON text `src`, are one found answer for each entry of its root,
 // an array.
-array_entries_answered :: proc(answers: []json.Path_Answer, src: []byte) -> bool {
+array_entries_answered :: proc(answers: []json.Answer, src: []byte) -> bool {
 	text := bytes.trim_space(src)
 	return len(text) > 0 && text[0] == '[' && each_entry_answered(answers, text)
 }
 
 // Whether `answers`, the path's over the array chunk `text`, are one found answer for each of its entries.
 @(private = "file")
-each_entry_answered :: proc(answers: []json.Path_Answer, text: []byte) -> bool {
+each_entry_answered :: proc(answers: []json.Answer, text: []byte) -> bool {
 	for a in answers {
 		if a.outcome != .Found {
 			return false
@@ -604,12 +594,7 @@ print_chunk :: proc(job: ^Root_Job, k: int) -> bool {
 @(private = "file")
 write_verbatim_items :: proc(out: ^[dynamic]byte, job: ^Root_Job, text: []byte, alone: bool) -> bool {
 	l := job.layout
-	src := text
-	if alone {
-		src = make([]byte, len(text) + 2, runtime.heap_allocator())
-		src[0], src[len(src) - 1] = '[', ']'
-		copy(src[1:], text)
-	}
+	src := array_text(text, alone)
 	defer if alone {
 		delete(src)
 	}

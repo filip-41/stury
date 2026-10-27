@@ -94,7 +94,7 @@ test_ndjson_first_fault_is_in_byte_order_and_claims_on :: proc(t: ^testing.T) {
 		log: Batch_Log
 		defer delete(log.pieces)
 		defer delete(log.errors)
-		err := json.each_record(src, .NDJSON, log_piece, &log, runner)
+		err := json.each_record(src, log_piece, &log, {framing = .NDJSON}, runner)
 		// Both faults are noted: the first in byte order wins, whichever piece finishes first.
 		testing.expectf(t, err == want, "%v, want %v", err, want)
 		testing.expect(t, len(log.pieces) > 0)
@@ -114,7 +114,7 @@ test_ndjson_first_fault_is_in_byte_order_and_claims_on :: proc(t: ^testing.T) {
 			testing.expectf(t, first_faulty(&log) >= 0, "no piece reported the fault")
 		}
 
-		faults_seen, verr := json.validate_records(src, .NDJSON, runner)
+		faults_seen, verr := json.validate_records(src, {framing = .NDJSON}, runner)
 		defer delete(faults_seen)
 		testing.expectf(t, verr == want, "validate_records: %v, want %v", verr, want)
 	}
@@ -128,7 +128,7 @@ test_ndjson_task_false_ends_the_claims :: proc(t: ^testing.T) {
 	caller := caller_runner()
 	for runner in ([]^json.Batch_Runner{nil, &caller}) {
 		calls: int
-		err := json.each_record(src, .NDJSON, false_task, &calls, runner)
+		err := json.each_record(src, false_task, &calls, {framing = .NDJSON}, runner)
 		testing.expect(t, err == nil)
 		testing.expectf(t, calls == 1, "%d calls", calls)
 	}

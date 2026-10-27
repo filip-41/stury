@@ -14,14 +14,14 @@ main :: proc() {
 		os.exit(1)
 	}
 	defer json.destroy(&doc)
-	nodes: [dynamic]json.Node
-	defer delete(nodes)
-	if json.query(&doc, json.ROOT, ".skip[]", &nodes) != nil || len(nodes) != 3 {
+	answers: [dynamic]json.Answer
+	defer delete(answers)
+	if json.query(&doc, ".skip[]", &answers) != nil || len(answers) != 3 {
 		fmt.eprintln("query")
 		os.exit(1)
 	}
-	for n in nodes {
-		if v, ok := json.get_int(&doc, n); ok {
+	for a in answers {
+		if v, ok := json.get_int(&doc, a.node); ok {
 			fmt.println(v)
 		}
 	}

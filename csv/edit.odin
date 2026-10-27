@@ -4,8 +4,9 @@ package csv
 // byte of the source it did not target unchanged.
 //
 // `set`, `insert` and `remove` judge the source as `records` reads it under `opts`: dialect, strictness,
-// limits and `no_header`; a fault is `.Bad_Source`. A header name two columns share follows `opts.duplicates`;
-// a refused repeat is `.Bad_Source` with `syntax = .Duplicate_Key` at the repeated header cell.
+// limits and `no_header`; a fault is `.Bad_Source`. A header name two columns share follows `opts.duplicates`,
+// refused under `.Default` as under `.Refuse` (`.Bad_Source` with `syntax = .Duplicate_Key` at the repeated
+// header cell); `.All` edits every column of the name.
 
 import "base:runtime"
 import core_pkg "../core"
@@ -13,31 +14,24 @@ import core_pkg "../core"
 // One edit: `src[lo:hi]` becomes `bytes`.
 Edit :: core_pkg.Edit
 
+// Where `insert` puts its record: a row index (a name is `.Unplaceable`, as a CSV text's rows have none).
+Insert_At :: core_pkg.Insert_At
+
 // `insert`'s `at` for after the last row, whatever the count.
 APPEND :: core_pkg.APPEND
 
 // `src` with every edit applied.
 //
 //	- Edits must be sorted by `lo` and disjoint (`edits[i].hi <= edits[i+1].lo`, every `hi <= len(src)`).
-//	- The result is validated `.Strict` in `dialect`, since a span need not be a whole field. A result that
-//	  is not CSV is `.Bad_Result`, with the scan's fault in `syntax` and `offset`.
+//	- The result is validated `.Strict` in `opts.dialect`, since a span need not be a whole field; no other field
+//	  of `opts` is read. A result that is not CSV is `.Bad_Result`, with the scan's fault in `syntax` and `offset`.
 @(require_results)
-splice :: proc(src: []byte, edits: []Edit, dialect := Dialect{}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	if _, ok := scan_setup(dialect, {}); !ok {
+splice :: proc(src: []byte, edits: []Edit, opts := Read_Opts{}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	if _, ok := scan_setup(opts.dialect, {}); !ok {
 		return nil, Path_Error{kind = .Bad_Option}
 	}
-	if !core_pkg.edits_ordered(src, edits) {
-		return nil, Path_Error{kind = .Bad_Edit}
-	}
-	out, err = core_pkg.edits_apply(src, edits, allocator, core_pkg.PATH_OUT_OF_MEMORY)
-	if err != nil {
-		return nil, err
-	}
-	if e, bad := validate(out, {dialect = dialect}).?; bad {
-		delete(out, allocator)
-		return nil, Path_Error{kind = .Bad_Result, syntax = e.kind, offset = e.offset}
-	}
-	return out, nil
+	out = core_pkg.edits_apply_checked(src, edits, allocator) or_return
+	return core_pkg.judged_result(out, validate(out, {dialect = opts.dialect}), allocator)
 }
 
 // Replace the cell `path` names, or that column's cell in every row, with `value`, spelled as `marshal` spells
@@ -72,9 +66,9 @@ watched_set :: proc(
 	allocator: runtime.Allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
 	dialect, header := opts.dialect, !opts.no_header
-	buf: Path_Buf
+	buf: core_pkg.Path_Buf
 	t := parse_target(path, &buf, allocator) or_return
-	defer delete(t.scratch, allocator)
+	defer target_free(&t, allocator)
 	if t.col == COL_NONE || t.col == COL_NAME && !header {
 		return nil, Path_Error{kind = .Unsupported_Path}
 	}
@@ -84,10 +78,8 @@ watched_set :: proc(
 	check_source(src, opts) or_return
 	sites := make([dynamic]Site, allocator)
 	defer delete(sites)
-	sites_of(src, t, opts, header, false, &sites) or_return
-	if len(sites) == 0 {
-		return nil, Path_Error{kind = .Not_Found}
-	}
+	sites_of(src, &t, opts, header, false, &sites) or_return
+	core_pkg.edit_found(len(sites)) or_return
 	tmp: Type_Plan = ---
 	p, _ := plan_for(nil, value.id, &tmp)
 	merr: Marshal_Error
@@ -96,11 +88,11 @@ watched_set :: proc(
 	if op, merr = value_op(p, value.id); merr != .None {
 		return nil, Path_Error{kind = .Encode, encode = merr}
 	}
-	w, _ := spell_writer(dialect, p, allocator)
+	w, _ := spell_writer(dialect, p, make([dynamic]u8, allocator))
 	defer delete(w.buf)
 	// Only the text's first field can start the text with a BOM.
 	w.at_start = sites[0].field.lo == u64(core_pkg.bom_len(src))
-	if merr = put_value(&w, op, value.data); merr == .None && sites[0].col == 0 {
+	if merr = put_value_by_dialect(&w, op, value.data); merr == .None && sites[0].col == 0 {
 		merr = guard_record(&w, 0)
 	}
 	if merr != .None {
@@ -117,8 +109,9 @@ watched_set :: proc(
 	return edited(src, edits[:], allocator)
 }
 
-// Add `row` as data row `at`: before the row now at `at`, or after the last row when `at` is the row count or
-// `APPEND`. The record ends with the same line break as the text's first record, or LF when that has none.
+// Add `row` as data row `at` of the records `path` names, which is `.` (any other path is `.Unsupported_Path`):
+// before the row now at `at`, or after the last row when `at` is the row count or `APPEND`. The record ends with
+// the same line break as the text's first record, or LF when that has none.
 //
 //	- `row` is a struct or a `[]string`. A struct's fields fill the header's columns by name (`csv:"name"` or
 //	  the field's name), with an empty cell for a column no field names. Without a header (`header` false) its
@@ -128,7 +121,7 @@ watched_set :: proc(
 //	- A record whose cells do not match the columns (a `[]string` of another length, a struct field no column
 //	  names) is `.Bad_Row`, with the cell count or the field's index in `offset`. A `ragged` dialect accepts a
 //	  `[]string` of any length.
-//	- A negative `at`, one past the row count, and a text with no header record when `header` is set are
+//	- A name, a negative `at`, one past the row count, and a text with no header record when `header` is set are
 //	  `.Unplaceable`.
 //	- Appended to a text that does not end in a line break, the record gets a break before it and none after.
 //	- `opts.duplicates` is not read: the row's fields find their columns by name, and every column of that name is
@@ -136,27 +129,39 @@ watched_set :: proc(
 @(require_results)
 insert :: proc(
 	src: []byte,
-	at: int,
+	path: Path_Spec,
+	at: Insert_At,
 	row: any,
 	opts := Read_Opts{},
 	allocator := context.allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_insert(src, at, row, opts, core_pkg.watched(&watch))
+	out, err = watched_insert(src, path, at, row, opts, core_pkg.watched(&watch))
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
 @(private = "file")
 watched_insert :: proc(
 	src: []byte,
-	at: int,
+	path: Path_Spec,
+	at: Insert_At,
 	row: any,
 	opts: Read_Opts,
 	allocator: runtime.Allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
 	dialect := opts.dialect
+	buf: core_pkg.Path_Buf
+	p := core_pkg.path_resolve(path, &buf, allocator) or_return
+	delete(buf.heap, allocator)
+	if len(p.steps) > 0 || p.limit != 0 {
+		return nil, Path_Error{kind = .Unsupported_Path}
+	}
+	index, is_index := at.(int)
+	if !is_index {
+		return nil, Path_Error{kind = .Unplaceable}
+	}
 	check_source(src, opts) or_return
-	spot := insert_spot(src, at, opts, allocator) or_return
+	spot := insert_spot(src, index, opts, allocator) or_return
 	defer delete(spot.columns, allocator)
 	text := spell_record(row, src, dialect, spot, allocator) or_return
 	defer delete(text, allocator)
@@ -191,9 +196,9 @@ watched_remove :: proc(
 	allocator: runtime.Allocator,
 ) -> (out: []byte, err: Maybe(Path_Error)) {
 	dialect, header := opts.dialect, !opts.no_header
-	buf: Path_Buf
+	buf: core_pkg.Path_Buf
 	t := parse_target(path, &buf, allocator) or_return
-	defer delete(t.scratch, allocator)
+	defer target_free(&t, allocator)
 	whole_record := !t.every_row && t.col == COL_NONE
 	if !whole_record && !(t.every_row && t.col != COL_NONE) || t.col == COL_NAME && !header {
 		return nil, Path_Error{kind = .Unsupported_Path}
@@ -201,9 +206,10 @@ watched_remove :: proc(
 	check_source(src, opts) or_return
 	sites := make([dynamic]Site, allocator)
 	defer delete(sites)
-	sites_of(src, t, opts, header, !whole_record, &sites) or_return
-	if len(sites) == 0 {
-		return nil, Path_Error{kind = .Not_Found}
+	sites_of(src, &t, opts, header, !whole_record, &sites) or_return
+	core_pkg.edit_found(len(sites)) or_return
+	if len(t.cols) > 1 {
+		return remove_columns(src, t.cols, opts, allocator)
 	}
 	edits := make([dynamic]Edit, 0, len(sites), allocator)
 	defer delete(edits)
@@ -220,6 +226,23 @@ watched_remove :: proc(
 		}
 	}
 	return edited(src, edits[:], allocator)
+}
+
+// `remove` of each column in `cols` of every record, a column of a repeated name under `.All`: one pass per column,
+// the last first, so the earlier ones keep their index.
+@(private = "file")
+remove_columns :: proc(src: []byte, cols: []int, opts: Read_Opts, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	out = src
+	for i := len(cols) - 1; i >= 0; i -= 1 {
+		steps := [2]Step{Any{}, Index(cols[i])}
+		next, nerr := watched_remove(out, Path{steps = steps[:]}, opts, allocator)
+		if raw_data(out) != raw_data(src) {
+			delete(out, allocator)
+		}
+		out = next
+		nerr or_return
+	}
+	return
 }
 
 // Whether the field `f` of `src` starts with the comment byte `comment`, which a record's first field must not.
@@ -249,51 +272,41 @@ Site :: struct {
 	col:    int,
 }
 
-// The sites of what `t` names: the field of column `col` in the data row, or in every row (with the header
-// when `with_header`). A row-only path (`COL_NONE`) names the row's first field.
+// The sites of what `t` names: the fields of its columns (`target_columns`) in the data row, or in every row
+// (with the header when `with_header`). A row-only path (`COL_NONE`) names the row's first field.
 @(private)
-sites_of :: proc(src: []byte, t: Target, opts: Read_Opts, header, with_header: bool, out: ^[dynamic]Site) -> Maybe(Path_Error) {
+sites_of :: proc(src: []byte, t: ^Target, opts: Read_Opts, header, with_header: bool, out: ^[dynamic]Site) -> Maybe(Path_Error) {
 	it := records(src, opts, out.allocator)
 	defer destroy(&it)
-	col, head, has_col, serr := seek_target(&it, t, opts, header)
-	serr or_return
-	if has_col && header && with_header {
-		add_site(out, head, col) or_return
+	head: Record
+	if header {
+		more: bool
+		if head, more = next_record(&it); !more {
+			return finished(&it)
+		}
 	}
-	if has_col && t.every_row {
+	if e, bad := target_columns(t, src, head.fields, opts.dialect, opts.duplicates, .Refuse, out.allocator).?; bad {
+		return core_pkg.path_error_of(e)
+	}
+	if header && with_header {
+		add_sites(out, head, t.cols) or_return
+	}
+	if t.every_row {
 		for rec in next_record(&it) {
-			add_site(out, rec, col) or_return
+			add_sites(out, rec, t.cols) or_return
 		}
-	} else if has_col {
-		if rec, ok := seek_row(&it, t.row); ok {
-			add_site(out, rec, col) or_return
-		}
+	} else if rec, ok := seek_row(&it, t.row); ok {
+		add_sites(out, rec, t.cols) or_return
 	}
 	return finished(&it)
 }
 
 @(private)
-seek_target :: proc(it: ^Records, t: Target, opts: Read_Opts, header: bool) -> (col: int, head: Record, has_col: bool, err: Maybe(Path_Error)) {
-	col = max(t.col, 0)
-	if !header {
-		return col, {}, true, nil
+add_sites :: proc(out: ^[dynamic]Site, rec: Record, cols: []int) -> Maybe(Path_Error) {
+	for c in cols {
+		add_site(out, rec, max(c, 0)) or_return
 	}
-	rec, more := next_record(it)
-	if !more {
-		return 0, {}, false, nil
-	}
-	head = rec
-	if t.col == COL_NAME {
-		c, at, repeated := named_column(it.src, head.fields, opts.dialect, t.name, opts.duplicates)
-		if repeated {
-			return 0, {}, false, Path_Error{kind = .Bad_Source, syntax = .Duplicate_Key, offset = at}
-		}
-		if c < 0 {
-			return 0, {}, false, nil
-		}
-		col = c
-	}
-	return col, head, true, nil
+	return nil
 }
 
 @(private)
@@ -388,7 +401,7 @@ spell_record :: proc(row: any, src: []byte, dialect: Dialect, spot: Spot, alloca
 	defer if p != nil {
 		plan_done(p, nil, &tmp, is_oom(err))
 	}
-	w, _ := spell_writer(dialect, p, allocator)
+	w, _ := spell_writer(dialect, p, make([dynamic]u8, allocator))
 	w.at_start = spot.pos == u64(core_pkg.bom_len(src))
 	if spot.unbroken {
 		append(&w.buf, line_break(spot.crlf))
@@ -492,7 +505,7 @@ line_break :: proc(crlf: bool) -> string {
 // since the BOM would be read as the text's own.
 @(private)
 edited :: proc(src: []byte, edits: []Edit, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	out, err = core_pkg.edits_apply(src, edits, allocator, core_pkg.PATH_OUT_OF_MEMORY)
+	out, err = core_pkg.edits_apply_checked(src, edits, allocator)
 	if err == nil && core_pkg.bom_len(out) != core_pkg.bom_len(src) {
 		delete(out, allocator)
 		return nil, Path_Error{kind = .Unplaceable}

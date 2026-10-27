@@ -42,7 +42,7 @@ Demand_Spec :: struct {
 	// Row mode: one row per matched member, in document order, appended here and `out` left alone. A key
 	// repeated within one object resolves by the call's resolution (`.Last`, `.First`, `.All`). The
 	// objects of the depth each answer for themselves. Rows borrow `src`.
-	rows: ^[dynamic]Path_Answer,
+	rows: ^[dynamic]Answer,
 	// Row mode only, `len(keys)`: each key's tag and limit. The walk keeps the rest.
 	row_keys: []Demand_Row_Key,
 	// Row mode, read only by a walk carrying `.Gate`: the names the members above `depth` must carry, a
@@ -77,7 +77,7 @@ Demand_Pend :: struct {
 	live:  bool,
 	vlo:   u64,
 	frame: u64,
-	// The offset of the object whose member this is: the `owner` an appended `Path_Answer` names. Latched at
+	// The offset of the object whose member this is: the `owner` an appended `Answer` names. Latched at
 	// key time, not at the object's open: by the time the value closes a nested container may be open above
 	// it, and "the last container that opened" would name that one.
 	owner_lo: u64,
@@ -125,7 +125,7 @@ Demand_Run :: struct {
 	// The depth whose object members answer (see `Demand_Spec.depth`).
 	depth: u64,
 	// Row mode's sink and per-key state (see `Demand_Spec`). Nil `rows` is slot mode, which writes `out`.
-	rows:     ^[dynamic]Path_Answer,
+	rows:     ^[dynamic]Answer,
 	row_keys: []Demand_Row_Key,
 	// Keys with nothing left to read, counted only under `.First`, where "every key is final" is the
 	// condition that lets the walk stop. Under `.Last` an answer is never final until the document is,
@@ -538,7 +538,7 @@ demand_record_row :: #force_inline proc(
 ) {
 	r := &q.demand
 	k := &r.row_keys[i]
-	answer := Path_Answer{lo = vlo, hi = vhi, owner = owner, query = k.tag, node = NO_NODE, outcome = .Found, kind = kind}
+	answer := Answer{lo = vlo, hi = vhi, owner = owner, query = k.tag, node = NO_NODE, outcome = .Found, kind = kind}
 	if r.mode != .All {
 		if k.owner == owner {
 			if r.mode == .Last {

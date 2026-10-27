@@ -43,7 +43,7 @@ Tape_Walk :: struct {
 	// Bit `n` set when a key is `n` bytes long (`n < 63`, bit 63 stands for every longer). Most members
 	// are rejected by their length alone.
 	lens:    u64,
-	answers: ^[dynamic]Path_Answer,
+	answers: ^[dynamic]Answer,
 }
 
 // Answer `req` from its built rows. False leaves no answers, and the caller scans.
@@ -75,7 +75,7 @@ scan_tape :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) 
 		finish_answers(&req.answers, nil, &req.state.route, req.paths, false)
 	}
 	req.state.src, req.stop, req.coverage = src, nil, .Full
-	req.state.groups.grouped = false
+	req.groups.grouped = false
 	return true
 }
 
@@ -158,7 +158,7 @@ tape_members :: proc(w: ^Tape_Walk, i: int) -> bool {
 			if len(w.keys[k]) != klen || string(w.src[c.key_lo + 1:][:klen]) != w.keys[k] {
 				continue
 			}
-			a := Path_Answer{lo = u64(c.lo), hi = u64(c.hi), owner = owner, query = u32(k), node = NO_NODE, outcome = .Found, kind = c.kind}
+			a := Answer{lo = u64(c.lo), hi = u64(c.hi), owner = owner, query = u32(k), node = NO_NODE, outcome = .Found, kind = c.kind}
 			if w.mode != .All && at[k] >= 0 {
 				if w.mode == .Last {
 					w.answers[at[k]] = a

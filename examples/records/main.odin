@@ -11,7 +11,7 @@ main :: proc() {
 	src := transmute([]byte)string("{\"a\":1}\n{\"a\":tru}\n")
 
 	refused := 0
-	it := json.records(src, .NDJSON)
+	it := json.records(src, {framing = .NDJSON})
 	for rec in json.next_record(&it) {
 		if e, bad := json.validate(rec.bytes).?; bad {
 			e.offset += rec.at

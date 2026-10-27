@@ -109,8 +109,8 @@ LANE_FIXTURES := [?]struct {
 
 // Returns a lane's fixture and strictness. A lane in `LANE_FIXTURES` takes its entry; `<lane>_structural` is
 // `<lane>` at `.Structural`. `query_dom_<f>`, `query_nodes_<f>`, `dom_read_<f>` and `substrate_<f>` read
-// `<f>.json` at `.Strict`, because a `.Structural` scan refuses `.Nodes` and `.Dom` (`Nodes_Need_Strict`) and
-// accepts documents stury must refuse.
+// `<f>.json` at `.Strict`, because a `.Structural` scan refuses `.Nodes` and `.Dom` and accepts
+// documents stury must refuse.
 lane_fixture :: proc(lane: string) -> (file: string, level: json.Strictness, ok: bool) {
 	for e in LANE_FIXTURES {
 		if e.lane == lane {
@@ -298,7 +298,7 @@ bench_record_batch :: proc(data: []byte) -> bool {
 	defer host.batch_pool_destroy(&pool)
 	times: [len(BATCH_WIDTHS)][TIMED_ITERS]i64
 	records := 0
-	it := json.records(data, .NDJSON)
+	it := json.records(data, {framing = .NDJSON})
 	for _ in json.next_record(&it) {
 		records += 1
 	}
@@ -314,7 +314,7 @@ bench_record_batch :: proc(data: []byte) -> bool {
 			pool.widths = learned if w == 0 else {}
 			t := time.tick_now()
 			for _ in 0 ..< BATCH_REPS {
-				faults, err := json.validate_records(data, .NDJSON, runner)
+				faults, err := json.validate_records(data, {framing = .NDJSON}, runner)
 				clean := err == nil && len(faults) == 0
 				delete(faults)
 				if !clean {

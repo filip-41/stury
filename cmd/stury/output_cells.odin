@@ -49,33 +49,33 @@ table_make :: proc(o: ^Opts) -> ^Table {
 	return t
 }
 
-// Appends the record of `cells` to the run's output. On an error the output is unchanged.
-put_row :: proc(run: ^Run, cells: []Maybe(string)) -> csv.Marshal_Error {
+// Appends the record of `cells` to the run's output. A refused record cuts the output back to `mark`, when one is
+// given, and ends the run; on a pool thread's copy it sets `faulted` instead and returns false, and the caller stops
+// for the main thread to end the run.
+put_row :: proc(run: ^Run, cells: []Maybe(string), mark := -1) -> bool {
 	err := csv.write_record(&run.out, cells, run.table.dialect, at_start = !run.rows_begun)
 	if err == .None {
 		run.rows_begun = true
-	}
-	return err
-}
-
-// Appends the row of an object's `cells` under `keys` to the output; the first row is preceded by the header. A
-// refused row writes neither. Returns false when a pool thread's copy refuses the row; the caller stops and the
-// main thread ends the run.
-put_object_row :: proc(run: ^Run, keys: []string, cells: []Maybe(string)) -> bool {
-	t, mark := run.table, len(run.out)
-	if !run.held && t.shape == .Unset {
-		open_object_table(run, keys)
-	}
-	err := put_row(run, cells)
-	if err == .None {
 		return true
 	}
-	resize(&run.out, mark)
+	if mark >= 0 {
+		resize(&run.out, mark)
+	}
 	if run.held {
 		run.faulted = true
 		return false
 	}
-	table_fail(run, "%s", row_refusal(t, err))
+	table_fail(run, "%s", row_refusal(run.table, err))
+}
+
+// Appends the row of an object's `cells` under `keys` to the output; the first row is preceded by the header. A
+// refused row writes neither (`put_row`).
+put_object_row :: proc(run: ^Run, keys: []string, cells: []Maybe(string)) -> bool {
+	mark := len(run.out)
+	if !run.held && run.table.shape == .Unset {
+		open_object_table(run, keys)
+	}
+	return put_row(run, cells, mark)
 }
 
 // Starts a table of objects with a header of `keys` and writes the header record.
@@ -116,20 +116,6 @@ table_fail :: proc(run: ^Run, format: string, args: ..any) -> ! {
 	fmt.eprintf(format, ..args)
 	fmt.eprintln()
 	finish(run, EXIT_INPUT)
-}
-
-// Appends `cells` as a record to the output. On the main thread a refusal ends the run. On a pool thread's copy a
-// refusal sets `faulted` and returns false; the caller stops and the main thread ends the run.
-put_row_or_stop :: proc(run: ^Run, cells: []Maybe(string)) -> bool {
-	err := put_row(run, cells)
-	if err == .None {
-		return true
-	}
-	if run.held {
-		run.faulted = true
-		return false
-	}
-	table_fail(run, "%s", row_refusal(run.table, err))
 }
 
 // Writes the output `v` as a table row. The interpreter calls it for each output.
@@ -192,7 +178,7 @@ plain_row :: proc(run: ^Run, t: ^Table, v: jq.Value) {
 	if jq.kind(v) != .Array {
 		cell, _ := cell_of(v)
 		cells := [1]Maybe(string){cell}
-		put_checked(run, t, cells[:])
+		put_row(run, cells[:])
 		return
 	}
 	cells := make([dynamic]Maybe(string), context.temp_allocator)
@@ -204,7 +190,7 @@ plain_row :: proc(run: ^Run, t: ^Table, v: jq.Value) {
 		}
 		append(&cells, cell)
 	}
-	put_checked(run, t, cells[:])
+	put_row(run, cells[:])
 }
 
 // Writes the row of an object's values under the header. The first object's keys make the header.
@@ -255,10 +241,7 @@ object_row :: proc(run: ^Run, t: ^Table, v: jq.Value) {
 	if first {
 		put_header(run, t)
 	}
-	if err := put_row(run, cells[:]); err != .None {
-		resize(&run.out, mark)
-		table_fail(run, "%s", row_refusal(t, err))
-	}
+	put_row(run, cells[:], mark)
 }
 
 @(private = "file")
@@ -286,15 +269,7 @@ put_header :: proc(run: ^Run, t: ^Table) {
 	for h, i in t.header {
 		names[i] = h
 	}
-	put_checked(run, t, names)
-}
-
-// Writes `cells` as a record, ending the run when it is refused.
-@(private = "file")
-put_checked :: proc(run: ^Run, t: ^Table, cells: []Maybe(string)) {
-	if err := put_row(run, cells); err != .None {
-		table_fail(run, "%s", row_refusal(t, err))
-	}
+	put_row(run, names)
 }
 
 // Holds a row until the header is complete. The text is copied to the heap, because the input's arena is freed
@@ -311,16 +286,16 @@ hold_row :: proc(t: ^Table, cells: []Maybe(string)) {
 	append(&t.held, row)
 }
 
-// Writes the rows held by --grow-header under the header of every key. Returns false, after reporting, when a row
-// is refused. A second call does nothing.
-write_held_rows :: proc(run: ^Run) -> bool {
+// Writes the rows held by --grow-header under the header of every key. A refused row ends the run. A second call
+// does nothing.
+write_held_rows :: proc(run: ^Run) {
 	t := run.table
 	if t == nil || run.held || !t.grow {
-		return true
+		return
 	}
 	t.grow = false
 	if len(t.held) == 0 {
-		return true
+		return
 	}
 	// Under -S the header is every key in byte order, and each row's cells follow it.
 	order := make([]int, len(t.header), context.temp_allocator)
@@ -341,12 +316,7 @@ write_held_rows :: proc(run: ^Run) -> bool {
 		for &c, i in cells {
 			c = row[order[i]] if order[i] < len(row) else nil
 		}
-		if err := put_row(run, cells); err != .None {
-			flush_some(run, force = true)
-			fmt.eprintfln("stury: error: %s", row_refusal(t, err))
-			return false
-		}
+		put_row(run, cells)
 		flush_some(run)
 	}
-	return true
 }

@@ -7,6 +7,7 @@ import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:time"
+import core_pkg "../../core"
 import json "../../json"
 import "jq"
 
@@ -23,7 +24,7 @@ Explain_Why :: enum u8 {
 	Color,
 	Cells_Out,
 	Not_Path,
-	Jsonc_Select,
+	Dialect_Select,
 	Select_Redefined,
 	Select_Compare,
 	Select_Path,
@@ -37,13 +38,14 @@ Explain_Why :: enum u8 {
 	Layout,
 	Grow_Header,
 	Several_Files,
+	Own_Spelling,
 }
 
 Explain_Whys :: bit_set[Explain_Why]
 
 Explain_Fallback :: enum u8 {
 	Step_Kind,
-	Jsonc_Slash,
+	Comment_Slash,
 	Scan_Limit,
 	Bad_Text,
 }
@@ -104,6 +106,7 @@ scan_stops :: proc(o: ^Opts) -> (stops: Explain_Whys) {
 	if o.raw0 {stops += {.Raw0}}
 	if o.ascii {stops += {.Ascii}}
 	if writes_cells(o) {stops += {.Cells_Out}}
+	if json.own_spelling(FORMATS[o.from].source) {stops += {.Own_Spelling}}
 	return
 }
 
@@ -194,7 +197,7 @@ records_of :: proc(o: ^Opts) -> string {
 	switch {
 	case o.null_input:
 		return "none"
-	case o.from == .Ndjson:
+	case FORMATS[o.from].framing == .Lines:
 		return "ndjson"
 	case o.seq:
 		return "seq"
@@ -231,18 +234,7 @@ spell :: proc(steps: []json.Step) -> string {
 		strings.write_byte(&b, '.')
 	}
 	for s in steps {
-		switch v in s {
-		case json.Name:
-			bare := len(v) > 0 && !('0' <= v[0] && v[0] <= '9')
-			for c in transmute([]byte)string(v) {
-				bare &&= c == '_' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9'
-			}
-			fmt.sbprintf(&b, ".%s" if bare else ".%q", string(v))
-		case json.Index:
-			fmt.sbprintf(&b, "[%d]", i64(v))
-		case json.Any:
-			strings.write_string(&b, "[]")
-		}
+		core_pkg.write_step(strings.to_writer(&b), s)
 	}
 	return strings.to_string(b)
 }
@@ -263,14 +255,9 @@ explain_engines :: proc(run: ^Run, src: []byte) {
 @(private = "file")
 say_engine :: proc(run: ^Run, src: []byte, paths: []json.Path) {
 	route, err := json.route_of(src, paths, 0, run.req.read)
-	engine: string
-	switch {
-	case err != nil:
-		engine = fmt.tprintf("refused why=%s", token(err.?.kind))
-	case route == .Matcher || route == .Tape:
-		engine = token(route)
-	case:
-		engine = fmt.tprintf("automaton why=%s", token(route))
+	engine := fmt.tprintf("%s why=%s", token(route.class), token(route.why))
+	if e, refused := err.?; refused {
+		engine = fmt.tprintf("refused why=%s", token(e.kind))
 	}
 	explain_line("engine: %s per_element=%s engine=%s", spell(paths[0].steps), yes(paths[0].per_element), engine)
 }
@@ -282,7 +269,7 @@ explain_demand :: proc(run: ^Run, d: jq.Entry_Demand) {
 }
 
 // A `.Type_Mismatch` answer sends the text to the interpreter (`print_answers`).
-explain_answered :: proc(run: ^Run, answers: []json.Path_Answer, rest: bool) {
+explain_answered :: proc(run: ^Run, answers: []json.Answer, rest: bool) {
 	if !run.explain.on {
 		return
 	}
@@ -313,7 +300,7 @@ explain_records :: proc(run: ^Run, answered: []byte) {
 		return
 	}
 	run.explain.pieces += {.Lines}
-	it := json.records(answered, .NDJSON)
+	it := json.records(answered, {framing = .NDJSON})
 	for _ in json.next_record(&it) {
 		run.explain.scanned += 1
 	}

@@ -5,9 +5,13 @@ import csv "../"
 
 @(test)
 test_duplicate_header_names :: proc(t: ^testing.T) {
-	// The default refuses the repeat, at its header cell.
+	// The default takes the last column, as `.Last` does.
+	kept: []Strict
+	testing.expect_value(t, read(t, "id,name,id\n1,a,2\n", &kept), nil)
+	testing.expect_value(t, kept[0], Strict{2, "a"})
 	rows: []Strict
-	err := read(t, "id,name,id\n1,a,2\n", &rows)
+	// `.Refuse` refuses the repeat, at its header cell.
+	err := read(t, "id,name,id\n1,a,2\n", &rows, {duplicates = .Refuse})
 	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.?.offset, 8)
 	testing.expect_value(t, path_text(err.?), ".id")

@@ -1,47 +1,6 @@
-package number
+package core
 
 import "base:intrinsics"
-
-dom_state_flags :: #force_inline proc(st: Exactness) -> Row_Flags {
-	switch st {
-	case .Exact:
-		return {.Decoded, .Exact}
-	case .Inexact:
-		return {.Decoded, .Inexact}
-	case .Underflowed:
-		return {.Decoded, .Underflowed, .Inexact}
-	case .None:
-		return {.Refused}
-	}
-	// Unreachable: the switch is exhaustive, Odin still wants the epilogue.
-	return {}
-}
-
-// The exactness a decode's flags carry (`dom_number_value`): the reverse of `dom_state_flags`, and total
-// (flags with no state bit answer `.None`).
-dom_flag_state :: #force_inline proc(f: Row_Flags) -> Exactness {
-	if .Underflowed in f {
-		return .Underflowed
-	}
-	if .Inexact in f {
-		return .Inexact
-	}
-	if .Exact in f {
-		return .Exact
-	}
-	return .None
-}
-
-// `DOM_MANT_MAX5[e] = ceil(2^53 / 5^e)`: the positive side of `dom_exact_scale`, asked by
-// comparison instead of a `u128` product. For integers `o, e >= 0`,
-// `o * 5^e < 2^53  <=>  o < ceil(2^53 / 5^e)`, an identity over the integers.
-@(rodata)
-DOM_MANT_MAX5: [23]u64 = {
-	9007199254740992, 1801439850948199, 360287970189640, 72057594037928,
-	14411518807586, 2882303761518, 576460752304, 115292150461, 23058430093,
-	4611686019, 922337204, 184467441, 36893489, 7378698, 1475740, 295148,
-	59030, 11806, 2362, 473, 95, 19, 4,
-}
 
 // What `el_settle` decides a token from: a significand `m` of at most 19 digits, its decimal exponent `e`,
 // and whether a nonzero digit was dropped past it (`nz`).
@@ -137,7 +96,7 @@ digits_nonzero :: #force_inline proc(src: []byte, at, n: u64) -> bool {
 // digit. A big-endian target would fold the digits in reverse with self-consistent arithmetic,
 // so it refuses to compile.
 when ODIN_ENDIAN != .Little {
-	#panic("json/scan: digits8_value requires a little-endian target")
+	#panic("core: digits8_value requires a little-endian target")
 }
 
 // Eight bytes at `src[p..]` as one little-endian word. The load is unaligned and requires

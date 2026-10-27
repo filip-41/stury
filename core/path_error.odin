@@ -37,3 +37,12 @@ Path_Error :: struct {
 
 // The error for a refused allocation.
 PATH_OUT_OF_MEMORY :: Path_Error{kind = .Out_Of_Memory}
+
+// The scan's fault `e` on a text read as `kind`'s text (`.Bad_Source` or `.Bad_Result`). A refused allocation
+// is `PATH_OUT_OF_MEMORY` whichever text the scan read.
+path_error_of :: proc(e: Error, kind := Path_Error_Kind.Bad_Source) -> Path_Error {
+	if e.kind == .Out_Of_Memory {
+		return PATH_OUT_OF_MEMORY
+	}
+	return {kind = kind, syntax = e.kind, offset = e.offset}
+}

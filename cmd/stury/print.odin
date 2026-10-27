@@ -14,17 +14,20 @@ import "jq"
 
 // The filter's outputs over a text, from its path's `answers` (`Path.per_element`): one `.Type_Mismatch` answer
 // when jq errors on the text, which `print_answers` leaves whole to the interpreter before any of it prints.
-jq_outputs :: proc(answers: []json.Path_Answer) -> []json.Path_Answer {
+// `settled` when each output is found or missing, which a pool thread prints as the main thread would.
+jq_outputs :: proc(answers: []json.Answer) -> (outputs: []json.Answer, settled: bool) {
+	settled = true
 	for a, i in answers {
 		if a.outcome == .Type_Mismatch {
-			return answers[i:i + 1]
+			return answers[i:i + 1], false
 		}
+		settled &&= a.outcome == .Found || a.outcome == .Missing
 	}
-	return answers
+	return answers, settled
 }
 
 // Print the scan's `answers` over the text `src`, `base` bytes into the input.
-print_answers :: proc(run: ^Run, answers: []json.Path_Answer, src: []byte, base: u64) {
+print_answers :: proc(run: ^Run, answers: []json.Answer, src: []byte, base: u64) {
 	// jq's result for the text, when nothing is printed.
 	run.ret = JQ_OK_NO_OUTPUT
 	for a in answers {
@@ -48,7 +51,7 @@ print_answers :: proc(run: ^Run, answers: []json.Path_Answer, src: []byte, base:
 
 // One answer, printed as `print_jq` prints its value. A string with nothing jq would escape differently
 // and a number are copied from the source.
-print_answer :: proc(run: ^Run, src: []byte, a: json.Path_Answer) {
+print_answer :: proc(run: ^Run, src: []byte, a: json.Answer) {
 	span := src[a.lo:a.hi]
 	switch a.kind {
 	case .Array, .Object:
@@ -79,12 +82,8 @@ print_answer :: proc(run: ^Run, src: []byte, a: json.Path_Answer) {
 		print_jq(run, d.(string))
 	case .Number:
 		print_jq(run, jq.Number{lit = string(span)})
-	case .Null:
-		print_jq(run, nil)
-	case .False:
-		print_jq(run, false)
-	case .True:
-		print_jq(run, true)
+	case .Null, .False, .True:
+		print_jq(run, jq.span_value(src, a.lo, a.hi, a.kind))
 	}
 }
 
@@ -164,7 +163,7 @@ print_jq :: proc(run: ^Run, v: jq.Value, respell := true) -> bool {
 			l.spill = &run.spill
 		}
 		jq.write_answer(&run.out, v, l, respell)
-		ended = o.to == .Jsonc && run.out[len(run.out) - 1] == '\n'
+		ended = FORMATS[o.to].keeps_comments && run.out[len(run.out) - 1] == '\n'
 	}
 	if !o.join && !ended {
 		append(&run.out, '\n')
@@ -208,7 +207,7 @@ source_text :: proc(run: ^Run, v: jq.Value) -> (text: []byte, large: bool) {
 // How jq prints the outputs.
 output_layout :: proc(run: ^Run) -> jq.Layout {
 	o := run.opts
-	return {pretty = !o.compact, indent = int(o.indent), sort_keys = o.sort_keys, ascii = o.ascii, colors = &run.colors if o.color else nil, drop_comments = o.to != .Jsonc}
+	return {pretty = !o.compact, indent = int(o.indent), sort_keys = o.sort_keys, ascii = o.ascii, colors = &run.colors if o.color else nil, drop_comments = !FORMATS[o.to].keeps_comments}
 }
 
 // The output held so far written, when it passes FLUSH_AT bytes, when `force`d, and under --unbuffered.

@@ -31,9 +31,9 @@ doc comment is its contract. [json/json.odin](../json/json.odin), [csv/csv.odin]
 
 - A document can address 4 GiB - 2 bytes of input (`MAX_ROW_SOURCE`), `validate` has no limit.
 - Nesting deeper than 1024 levels is refused by default. You can raise the limit to 2^20.
-- A repeated key is a policy (`Duplicates`), and its default depends on the format: JSON keeps the last value,
-  and CSV refuses a header that names a column twice. Set `duplicates` to keep the last, the first, all of
-  them, or to refuse.
+- A repeated key or header name is a policy (`Duplicates`). Under the default the readers keep the last, and the
+  edits refuse one on the edit's path. Set `duplicates` to keep the last, the first, all of them, or to
+  refuse.
 
 ## CSV cells and headers
 
@@ -93,7 +93,8 @@ for t in tags {
 ```
 
 ### Build and query a document (`examples/roundtrip`)
-`json.build` makes a `Document`, and `json.query` collects the `Node` handles a path reaches.
+`json.build` makes a `Document`, and `json.query` collects the answers a path gives, each with the `Node` it
+reached. `json.query_in` answers a path from a given node instead of the root.
 
 ```odin
 src := transmute([]byte)string(`{"name":"ada","n":1,"skip":[1,2,3]}`)
@@ -102,13 +103,13 @@ if err != nil {
 	os.exit(1)
 }
 defer json.destroy(&doc)
-nodes: [dynamic]json.Node
-defer delete(nodes)
-if json.query(&doc, json.ROOT, ".skip[]", &nodes) != nil {
+answers: [dynamic]json.Answer
+defer delete(answers)
+if json.query(&doc, ".skip[]", &answers) != nil {
 	os.exit(1)
 }
-for n in nodes {
-	if v, ok := json.get_int(&doc, n); ok {
+for a in answers {
+	if v, ok := json.get_int(&doc, a.node); ok {
 		fmt.println(v)
 	}
 }
@@ -132,7 +133,7 @@ fmt.println(string(out)) // {"name": "grace",  "tags": ["math"]}
 
 ```odin
 src := transmute([]byte)string("{\"a\":1}\n{\"a\":tru}\n")
-it := json.records(src, .NDJSON)
+it := json.records(src, {framing = .NDJSON})
 for rec in json.next_record(&it) {
 	if e, bad := json.validate(rec.bytes).?; bad {
 		e.offset += rec.at
@@ -150,7 +151,7 @@ For threads, pass a `host.Batch_Pool`'s `runner` (`import "stury:host"`) to `val
 pool: host.Batch_Pool
 host.batch_pool_init(&pool) // one worker per core
 defer host.batch_pool_destroy(&pool)
-faults, _ := json.validate_records(src, .NDJSON, &pool.runner)
+faults, _ := json.validate_records(src, {framing = .NDJSON}, &pool.runner)
 defer delete(faults)
 for f in faults {
 	fmt.println(json.render_error(src, f.err)) // 2:9: Bad_Literal
@@ -166,6 +167,9 @@ _, jsonc_bad := json.validate(src, {dialect = .Jsonc}).?
 _, strict_bad := json.validate(src).?
 fmt.println(jsonc_bad, strict_bad) // false true: only strict JSON refuses the comment
 ```
+
+`dialect = .Json5` reads JSON5 1.0.0 in `validate`, `scan`, `find`, `query`, `build` and `unmarshal`. The edits
+refuse it with `.Bad_Option`.
 
 ### CSV (`examples/csv`)
 `stury:csv` (`import csv "stury:csv"`) reads rows into structs by the header's column names and writes them
@@ -205,7 +209,8 @@ opts := csv.Unmarshal_Opts{dialect = {delimiter = ';', comment = '#'}, no_header
 _, _ = csv.unmarshal(plain, &cities, opts).?
 ```
 
-`build` keeps the span of every cell as a `Document`, and `find` reads one cell without building one. A path
+`build` keeps the span of every cell as a `Document`, and `find` reads one cell without building one. `csv.scan`
+fills a `Request` as `json.scan` does, and `csv.query` answers a path over a `Document`. A path
 counts rows from the first record after the header, and columns by index or by the header's name:
 
 ```odin
@@ -229,7 +234,7 @@ fmt.print(string(edited)) // City,population,lat,lon
 //                           Oslo,710000,59.91,10.75
 //                           "Ho, Chi Minh",,10.82,106.63
 
-added, _ := csv.insert(src, csv.APPEND, City{name = "Bergen", lat = 60.39, lon = 5.32})
+added, _ := csv.insert(src, ".", csv.APPEND, City{name = "Bergen", lat = 60.39, lon = 5.32})
 fmt.print(string(added)[len(src):]) // Bergen,,60.39,5.32
 
 trimmed, _ := csv.remove(src, ".[].population") // the column, header included

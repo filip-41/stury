@@ -1,6 +1,7 @@
 package csv
 
 import "base:runtime"
+import "core:reflect"
 import "core:unicode/utf8"
 import core_pkg "../core"
 
@@ -46,16 +47,12 @@ type_plan_init :: proc(T: typeid, opts := Plan_Opts{}, allocator := context.allo
 	return core_pkg.hooked_plan_init(T, {enums = opts.enums}, opts.hooks, csv_plan_format(), allocator)
 }
 
-@(private)
-type_plan_destroy :: proc(p: ^Type_Plan) {
-	core_pkg.hooked_plan_destroy(p)
-}
-
 // CSV writes a name unchanged; the writer quotes per cell.
 @(private)
 csv_plan_format :: proc() -> core_pkg.Plan_Format {
 	return {
 		tag_key = "csv",
+		refuse_omitempty = true,
 		spell = proc(keys: ^[dynamic]u8, name: string, role: core_pkg.Key_Role) -> core_pkg.Plan_Error {
 			if !utf8.valid_string(name) {
 				return .Bad_Name
@@ -69,17 +66,12 @@ csv_plan_format :: proc() -> core_pkg.Plan_Format {
 }
 
 @(private, thread_local)
-plan_cache: core_pkg.Plan_Cache(Type_Plan)
-
-@(private = "file")
-type_plan_default :: proc(T: typeid, a: runtime.Allocator) -> Type_Plan {
-	return type_plan_init(T, {}, a)
-}
+plan_cache: core_pkg.Plan_Cache(Marshal_Hook)
 
 // Frees every plan in this thread's cache, with the heap allocator they were made in. Does nothing while a
 // call on this thread is using the cache.
 plan_cache_clear :: proc() {
-	core_pkg.plan_cache_clear(&plan_cache, type_plan_destroy)
+	core_pkg.plan_cache_clear(&plan_cache)
 }
 
 @(fini, private)
@@ -90,28 +82,29 @@ plan_cache_fini :: proc "contextless" () {
 
 @(private)
 plan_for :: #force_inline proc(given: ^Type_Plan, T: typeid, tmp: ^Type_Plan) -> (p: ^Type_Plan, ok: bool) {
-	return core_pkg.plan_for(&plan_cache, given, T, tmp, type_plan_default, type_plan_destroy)
+	return core_pkg.plan_for(&plan_cache, given, T, tmp, csv_plan_format)
 }
 
 @(private)
 plan_done :: #force_inline proc(p, given, tmp: ^Type_Plan, out_of_memory: bool) {
-	core_pkg.plan_done(&plan_cache, p, given, tmp, out_of_memory, type_plan_destroy)
-}
-
-// `core_pkg.plan_op`, with its refusal as a `Marshal_Error`.
-@(private)
-plan_op :: proc(p: ^Type_Plan, ti: ^runtime.Type_Info) -> (idx: u32, err: Marshal_Error) {
-	perr: core_pkg.Plan_Error
-	idx, perr = core_pkg.plan_op(&p.base, ti)
-	return idx, Marshal_Error(perr)
+	core_pkg.plan_done(&plan_cache, p, given, tmp, out_of_memory)
 }
 
 // The kinds a column may have, each one cell.
 @(private)
 CELL_KINDS :: bit_set[core_pkg.Shape_Kind]{.Bool, .Int, .Uint, .Enum_Int, .Enum_Uint, .Wide_Int, .Wide_Uint, .Float, .String, .Cstring, .Rune, .Hook}
 
-// Whether a value of `kind` and byte width `width` is one cell: not an f16, which neither direction reads.
+// Whether `op` is one cell: a `CELL_KINDS` kind, or a `Maybe` of one (a union of one arm, with a tag). A hook
+// must have the proc of the direction asked: `writes[op.elem]` when `writes` is set, else its reader.
 @(private)
-is_cell_kind :: proc(kind: core_pkg.Shape_Kind, width: u8) -> bool {
-	return kind in CELL_KINDS && !(kind == .Float && width == 2)
+is_cell :: proc(p: ^core_pkg.Type_Plan, op: Plan_Op, writes: []Marshal_Hook) -> bool {
+	#partial switch op.kind {
+	case .Hook:
+		return writes[op.elem] != nil if writes != nil else p.opts.hooks[op.elem].read != nil
+	case .Union:
+		ti := runtime.type_info_base(op.info).variant.(runtime.Type_Info_Union)
+		return op.count == 1 && !reflect.type_info_union_is_pure_maybe(ti) && is_cell(p, p.ops[p.fields[op.elem].op], writes)
+	}
+	return op.kind in CELL_KINDS
 }
+

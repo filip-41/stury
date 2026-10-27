@@ -8,7 +8,6 @@ import "core:bytes"
 import "core:reflect"
 import "core:slice"
 import lex "lex"
-import number "./number"
 import "core:unicode/utf8"
 
 // The shape walk's leaf decoders. Each takes a token the walk has already checked, `src[lo:hi]`, and writes
@@ -49,25 +48,15 @@ shape_leaf_int :: proc(src: []byte, lo, hi: u64, dest: rawptr, width: u8, signed
 		return .Wrong_Kind
 	}
 	neg := b == '-'
-	p := lo + u64(neg)
-	mag: u64
-	over := false
-	if hi - p <= 19 {
-		// Nineteen digits always fit a u64. The token is checked, so its digit run reaches `hi` exactly when it
-		// has no fraction and no exponent.
-		if number.digit_run(src, p, &mag, true) != hi {
-			return .Wrong_Kind
-		}
-	} else {
-		digits: bool
-		if mag, over, digits = core_pkg.fold_digits(src, p, hi, u64); !digits {
-			return .Wrong_Kind
-		}
+	// The token is checked, so its digits reach `hi` exactly when it has no fraction and no exponent.
+	mag, over, digits := core_pkg.fold_int(src, lo + u64(neg), hi)
+	if !digits {
+		return .Wrong_Kind
 	}
-	if over {
+	if over || mag > u128(max(u64)) {
 		return .Out_Of_Range
 	}
-	return core_pkg.shape_int_store(mag, neg, dest, width, signed)
+	return core_pkg.shape_int_store(u64(mag), neg, dest, width, signed)
 }
 
 // The checked number token `src[lo:hi]` into a `width`-byte integer, as `shape_leaf_int` reads it, from the
@@ -91,7 +80,7 @@ shape_leaf_wide :: proc(src: []byte, lo, hi: u64, dest: rawptr, signed: bool) ->
 		return .Wrong_Kind
 	}
 	neg := b == '-'
-	mag, over, digits := core_pkg.fold_digits(src, lo + u64(neg), hi, u128)
+	mag, over, digits := core_pkg.fold_int(src, lo + u64(neg), hi)
 	if !digits {
 		return .Wrong_Kind
 	}
@@ -133,7 +122,7 @@ shape_leaf_float :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr, width: u
 		return .Wrong_Kind
 	}
 	if width == 8 {
-		v, ok := number.f64_number_value(src, lo, hi, shape_number_lexed(r, lo, hi, false))
+		v, ok := core_pkg.f64_number_value(src, lo, hi, shape_number_lexed(r, lo, hi, false))
 		if !ok {
 			return .Out_Of_Range
 		}
@@ -148,9 +137,9 @@ shape_leaf_float :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr, width: u
 	}
 	switch width {
 	case 4:
-		return core_pkg.shape_f32_store(shape_off_halfway(src[lo:hi], n, 24, -126), dest)
+		return core_pkg.shape_f32_store(core_pkg.shape_off_halfway(src[lo:hi], n, 24, -126), dest)
 	case 2:
-		return core_pkg.shape_f16_store(shape_off_halfway(src[lo:hi], n, 11, -14), dest)
+		return core_pkg.shape_f16_store(core_pkg.shape_off_halfway(src[lo:hi], n, 11, -14), dest)
 	}
 	return .None
 }
@@ -159,18 +148,17 @@ shape_leaf_float :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr, width: u
 // walk folded as it checked the token (`r.num`). Its exactness may under-claim where `number_span` proves
 // `.Exact`, but the value is the same correctly rounded one.
 shape_number_judged :: #force_inline proc(r: ^walk.Shape_Run, lo, hi: u64) -> core_pkg.Number #no_bounds_check {
-	v, flags := number.dom_number_value(r.src, lo, hi, shape_number_lexed(r, lo, hi, false))
-	return {v, number.dom_flag_state(flags)}
+	return core_pkg.dom_number_value(r.src, lo, hi, shape_number_lexed(r, lo, hi, false))
 }
 
 // The checked number token `src[lo:hi]` as `lex_number_value` lexes it, from the digits the walk folded
 // (`r.num`). Its `spelling` is the sign's alone unless `$spelled`.
-shape_number_lexed :: #force_inline proc(r: ^walk.Shape_Run, lo, hi: u64, $spelled: bool) -> number.Number_Lex #no_bounds_check {
+shape_number_lexed :: #force_inline proc(r: ^walk.Shape_Run, lo, hi: u64, $spelled: bool) -> core_pkg.Number_Lex #no_bounds_check {
 	n := &r.num
 	neg := r.src[lo] == '-'
 	int_at := lo + u64(neg)
 	frac_at := int_at + n.int_digits + u64(n.frac_digits > 0)
-	lexed := number.Number_Lex{
+	lexed := core_pkg.Number_Lex{
 		int_at      = int_at,
 		int_digits  = n.int_digits,
 		frac_at     = frac_at,
@@ -608,7 +596,7 @@ shape_leaf_number :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr) -> core
 	if !number_starts_with(b) {
 		return .Wrong_Kind
 	}
-	n := number.number_lexed(r.src, lo, hi, shape_number_lexed(r, lo, hi, false))
+	n := core_pkg.number_lexed(r.src, lo, hi, shape_number_lexed(r, lo, hi, false))
 	if dest != nil {
 		(^Number)(dest)^ = n
 	}

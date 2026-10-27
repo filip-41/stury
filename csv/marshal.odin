@@ -87,7 +87,7 @@ marshal_to_writer :: proc(
 // `v` appended to `buf`, or with `to` set streamed through it.
 @(private)
 marshal_run :: proc(buf: ^[dynamic]u8, v: $T, opts: Marshal_Opts, plan: ^Type_Plan, to: io.Writer) -> (err: Marshal_Error) {
-	w, dialect_ok := spell_writer(opts.dialect, nil, buf.allocator)
+	w, dialect_ok := spell_writer(opts.dialect, nil, buf^)
 	if !dialect_ok {
 		return .Bad_Option
 	}
@@ -100,7 +100,6 @@ marshal_run :: proc(buf: ^[dynamic]u8, v: $T, opts: Marshal_Opts, plan: ^Type_Pl
 	}
 	defer plan_done(p, plan, &tmp, err == .Out_Of_Memory)
 	w.plan = p
-	w.buf = buf^
 	start := len(buf^)
 	defer {
 		buf^ = w.buf
@@ -181,11 +180,7 @@ write_records :: proc(w: ^Writer, v: $T, row: Plan_Op, opts: Marshal_Opts, $Q, $
 			if k > 0 {
 				put(w, w.delim) or_return
 			}
-			at := len(w.buf)
-			put_cell(w, &p.ops[f.op], rawptr(uintptr(&e) + f.offset), Q) or_return
-			if w.in_numbers {
-				quote_number(w, at) or_return
-			}
+			put_value(w, &p.ops[f.op], rawptr(uintptr(&e) + f.offset), Q) or_return
 		}
 		when C {
 			guard_record(w, rec_at) or_return
@@ -230,11 +225,11 @@ SPECIAL :: 1
 @(private)
 HIGH :: 2
 
-// A writer over `plan` for `dialect`. `ok` is false for a dialect the scanner refuses.
+// A writer over `plan` for `dialect` appending to `buf`. `ok` is false for a dialect the scanner refuses.
 @(private)
-spell_writer :: proc(dialect: Dialect, plan: ^Type_Plan, allocator: runtime.Allocator) -> (w: Writer, ok: bool) {
+spell_writer :: proc(dialect: Dialect, plan: ^Type_Plan, buf: [dynamic]u8) -> (w: Writer, ok: bool) {
 	s := scan_setup(dialect, {}) or_return
-	w = Writer{plan = plan, delim = s.delim, quotes = .Unquoted not_in s.mode, escapes = .Escapes in s.mode, comment = s.comment, at_start = true}
+	w = Writer{plan = plan, buf = buf, delim = s.delim, quotes = .Unquoted not_in s.mode, escapes = .Escapes in s.mode, comment = s.comment, at_start = true}
 	w.in_numbers = strings.index_byte("0123456789+-.eE", w.delim) >= 0
 	for c in 0x80 ..< 0x100 {
 		w.class[c] = HIGH
@@ -245,7 +240,6 @@ spell_writer :: proc(dialect: Dialect, plan: ^Type_Plan, allocator: runtime.Allo
 	} else {
 		w.class['\\'], w.class[0] = SPECIAL, SPECIAL
 	}
-	w.buf = make([dynamic]u8, allocator)
 	return w, true
 }
 
@@ -271,7 +265,7 @@ quote_number :: proc(w: ^Writer, at: int) -> Marshal_Error {
 // The element's struct op of the plan's list, every field one `put_cell` writes.
 @(private)
 row_op :: proc(p: ^Type_Plan) -> (row: Plan_Op, err: Marshal_Error) {
-	root := plan_op(p, type_info_of(p.root)) or_return
+	root := core_pkg.plan_op_m(p, type_info_of(p.root)) or_return
 	return cell_struct(p, p.ops[root].elem)
 }
 
@@ -283,7 +277,7 @@ cell_struct :: proc(p: ^Type_Plan, idx: u32) -> (op: Plan_Op, err: Marshal_Error
 		return {}, .Unsupported
 	}
 	for f in p.fields[op.elem:][:op.count] {
-		if !writes_cell(p, p.ops[f.op]) {
+		if !is_cell(&p.base, p.ops[f.op], p.writes) {
 			return {}, .Unsupported
 		}
 	}
@@ -294,51 +288,23 @@ cell_struct :: proc(p: ^Type_Plan, idx: u32) -> (op: Plan_Op, err: Marshal_Error
 Plan_Op :: core_pkg.Plan_Op
 
 @(private)
-writes_cell :: proc(p: ^Type_Plan, op: Plan_Op) -> bool {
-	if op.kind == .Hook {
-		return p.writes[op.elem] != nil
-	}
-	if op.kind == .Union {
-		ti := runtime.type_info_base(op.info).variant.(runtime.Type_Info_Union)
-		return op.count == 1 && ti.tag_type != nil && writes_cell(p, p.ops[p.fields[op.elem].op])
-	}
-	return is_cell_kind(op.kind, op.size)
-}
-
-@(private)
 put_cell :: proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool) -> Marshal_Error {
 	#partial switch op.kind {
 	case .Bool:
 		return put_text(w, "true" if #force_inline core_pkg.shape_uint_load(data, op.size) != 0 else "false", Q)
-	case .Int:
-		p := room(w, spell.INT_ROOM) or_return
-		commit(w, spell.spell_i64(p, #force_inline core_pkg.shape_int_load(data, op.size)))
-		return .None
-	case .Uint:
-		p := room(w, spell.INT_ROOM) or_return
-		commit(w, spell.spell_u64(p, #force_inline core_pkg.shape_uint_load(data, op.size)))
+	case .Int, .Uint, .Float:
+		p := room(w, spell.SCALAR_ROOM) or_return
+		commit(w, spell.spell_scalar(p, op.kind, data, op.size) or_return)
 		return .None
 	case .Wide_Int, .Wide_Uint:
 		buf: [48]u8
 		return put_text(w, spell.spell_u128(buf[:], (^u128)(data)^, op.kind == .Wide_Int), Q)
-	case .Float:
-		x := #force_inline core_pkg.shape_float_load(data, op.size)
-		if spell.is_non_finite(x) {
-			return .Non_Finite
-		}
-		p := room(w, spell.F64_ROOM) or_return
-		commit(w, spell.spell_f64(p, x))
-		return .None
 	case .Enum_Int, .Enum_Uint:
-		v := core_pkg.plan_enum_value(op^, data)
+		m, v := core_pkg.plan_enum_written(w.plan, op^, data) or_return
 		if w.plan.opts.enums == .Int {
 			p := room(w, spell.INT_ROOM) or_return
 			commit(w, spell.spell_i64(p, v) if op.kind == .Enum_Int else spell.spell_u64(p, u64(v)))
 			return .None
-		}
-		m, found := core_pkg.plan_enum_member(w.plan, op^, v)
-		if !found {
-			return .Not_A_Member
 		}
 		return put_text(w, string(w.plan.keys[m.lo:m.hi]), Q)
 	case .Rune:
@@ -360,10 +326,30 @@ put_cell :: proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool) -> Marshal_Er
 			return .None
 		}
 		return put_text(w, string(c), Q) if len(c) > 0 else put_empty(w, Q)
+	}
+	return put_other(w, op, data, Q)
+}
+
+// One cell written from `w.buf`'s end: the value at `data`, quoted when it is a number holding the delimiter.
+@(private)
+put_value :: #force_inline proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool) -> Marshal_Error {
+	at := len(w.buf)
+	put_cell(w, op, data, Q) or_return
+	if w.in_numbers {
+		quote_number(w, at) or_return
+	}
+	return .None
+}
+
+// The kinds `put_cell` has no case for, kept out of its switch so that hooks and a `Maybe` cost the plain kinds nothing.
+@(cold, private)
+put_other ::proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool) -> Marshal_Error {
+	#partial switch op.kind {
+	case .Hook:
+		return put_hooked(w, op, data, Q, false)
 	case .Union:
-		ti := runtime.type_info_base(op.info).variant.(runtime.Type_Info_Union)
 		arm := w.plan.fields[op.elem]
-		if #force_inline core_pkg.shape_uint_load(rawptr(uintptr(data) + ti.tag_offset), u8(ti.tag_type.size)) != u64(arm.offset) {
+		if core_pkg.plan_union_arm(op^, data) != 0 {
 			return .None
 		}
 		when !Q {
@@ -377,15 +363,6 @@ put_cell :: proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool) -> Marshal_Er
 			}
 		}
 		return put_cell(w, &w.plan.ops[arm.op], data, Q)
-	}
-	return put_other(w, op, data, Q)
-}
-
-// The kinds `put_cell` has no case for, kept out of its switch so that hooks cost the plain kinds nothing.
-@(cold, private)
-put_other ::proc(w: ^Writer, op: ^Plan_Op, data: rawptr, $Q: bool) -> Marshal_Error {
-	if op.kind == .Hook {
-		return put_hooked(w, op, data, Q, false)
 	}
 	return .Unsupported
 }
@@ -431,7 +408,7 @@ put_text :: proc(w: ^Writer, s: string, $Q: bool) -> Marshal_Error {
 		return .Bad_Utf8
 	}
 	if !special {
-		copy_text(p, s)
+		spell.copy_short(p, raw_data(s), len(s))
 		commit(w, len(s))
 		return .None
 	}
@@ -474,33 +451,6 @@ put_doubled :: #force_inline proc(p: [^]u8, n: int, src: [^]u8, i, end: int) -> 
 		}
 	}
 	return n
-}
-
-// `s` copied to `p`, which has room for it. A short text is copied by two overlapping loads and stores of its
-// size class, a longer one by 16-byte windows, the last overlapping the one before.
-@(private)
-copy_text :: #force_inline proc(p: [^]u8, s: string) {
-	n := len(s)
-	src := raw_data(s)
-	switch {
-	case n > 64:
-		intrinsics.mem_copy_non_overlapping(p, src, n)
-	case n >= 16:
-		for i := 0; i < n - 16; i += 16 {
-			intrinsics.unaligned_store((^core_pkg.V)(p[i:]), core_pkg.load(src[i:]))
-		}
-		intrinsics.unaligned_store((^core_pkg.V)(p[n - 16:]), core_pkg.load(src[n - 16:]))
-	case n >= 8:
-		a, b := intrinsics.unaligned_load((^u64)(src)), intrinsics.unaligned_load((^u64)(src[n - 8:]))
-		intrinsics.unaligned_store((^u64)(p), a)
-		intrinsics.unaligned_store((^u64)(p[n - 8:]), b)
-	case n >= 4:
-		a, b := intrinsics.unaligned_load((^u32)(src)), intrinsics.unaligned_load((^u32)(src[n - 4:]))
-		intrinsics.unaligned_store((^u32)(p), a)
-		intrinsics.unaligned_store((^u32)(p[n - 4:]), b)
-	case n > 0:
-		p[0], p[n / 2], p[n - 1] = src[0], src[n / 2], src[n - 1]
-	}
 }
 
 // `s` as a cell of a dialect with no quotes. Under `.Backslash` each delimiter, CR, LF, NUL and backslash is
@@ -630,24 +580,17 @@ put_break :: proc(w: ^Writer, crlf: bool) -> Marshal_Error {
 
 @(private)
 put :: #force_inline proc(w: ^Writer, c: byte) -> Marshal_Error {
-	p := room(w, 1) or_return
-	p[0] = c
-	commit(w, 1)
-	return .None
+	return spell.put_byte(&w.buf, c)
 }
 
 // Room for `n` more bytes past the buffer's end, whose start is returned. `commit` counts those written.
 @(private)
 room :: #force_inline proc(w: ^Writer, n: int) -> (p: [^]u8, err: Marshal_Error) {
-	if cap(w.buf) - len(w.buf) < n {
-		if non_zero_reserve(&w.buf, max(2 * cap(w.buf), len(w.buf) + n, 4096)) != nil {
-			return nil, .Out_Of_Memory
-		}
-	}
-	return raw_data(w.buf)[len(w.buf):], .None
+	p = spell.put_reserve(&w.buf, n)
+	return p, .Out_Of_Memory if p == nil else .None
 }
 
 @(private)
 commit :: #force_inline proc(w: ^Writer, n: int) {
-	(^runtime.Raw_Dynamic_Array)(&w.buf).len += n
+	spell.put_commit(&w.buf, n)
 }

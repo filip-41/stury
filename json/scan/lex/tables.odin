@@ -2,12 +2,6 @@ package lex
 
 import "base:intrinsics"
 
-// Force-route build knob, declared here once for lex, number and scan. `-define:SCAN_FORCE_SLOW=true`
-// compiles every optimized route out of the walk (vector span finders, batched digit runs, the pure-integer
-// fast path, the literal word compare, the escape nibble table), leaving the scalar semantic floor, so the
-// differential tests can build both and compare the answers.
-SCAN_FORCE_SLOW :: #config(SCAN_FORCE_SLOW, false)
-
 // Value class of each first byte: `VC_OBJECT` `{`, `VC_ARRAY` `[`, `VC_STRING` `"`, `VC_LITERAL` t/f/n,
 // `VC_NUMBER` `-`/digits, else `VC_NONE`.
 @(rodata)

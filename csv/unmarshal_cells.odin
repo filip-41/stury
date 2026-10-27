@@ -4,8 +4,6 @@ package csv
 // escaped string needs, and the rare kinds' hook.
 
 import "base:runtime"
-import "core:math"
-import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
 import core_pkg "../core"
@@ -38,24 +36,19 @@ read_int_cell :: proc(r: ^Reader, op: ^core_pkg.Shape_Op, cell: Field, dest: raw
 
 @(private)
 read_float_cell :: proc(r: ^Reader, op: ^core_pkg.Shape_Op, cell: Field, dest: rawptr) -> core_pkg.Shape_Fault {
-	text := authored(r, cell)
-	d := lex_decimal(text)
-	if !d.ok {
+	text := transmute([]byte)authored(r, cell)
+	n, ok := core_pkg.number_of_loose_text(text)
+	switch {
+	case !ok:
 		return .Wrong_Kind
+	case n.exactness == .None:
+		return .Out_Of_Range
+	case op.width == 4:
+		return core_pkg.shape_f32_store(core_pkg.shape_off_halfway(text, n, 24, -126), dest)
+	case op.width == 2:
+		return core_pkg.shape_f16_store(core_pkg.shape_off_halfway(text, n, 11, -14), dest)
 	}
-	if op.width == 4 {
-		x, _ := strconv.parse_f32(text)
-		if math.is_inf(x) {
-			return .Out_Of_Range
-		}
-		(^f32)(dest)^ = x
-	} else {
-		n := decimal_value(d, text)
-		if n.exactness == .None {
-			return .Out_Of_Range
-		}
-		(^f64)(dest)^ = n.value
-	}
+	(^f64)(dest)^ = n.value
 	return .None
 }
 
@@ -117,6 +110,9 @@ read_rare_cell :: proc(r: ^Reader, op: ^core_pkg.Shape_Op, cell: Field, dest: ra
 		}
 		(^rune)(dest)^ = c
 	case .Cstring:
+		if holds_nul(r, text) {
+			return .Out_Of_Range
+		}
 		if r.check {
 			return .None
 		}
@@ -149,6 +145,23 @@ read_rare_cell :: proc(r: ^Reader, op: ^core_pkg.Shape_Op, cell: Field, dest: ra
 		return fault if refused else .None
 	}
 	return .None
+}
+
+// Whether the cell's text decodes to one holding a NUL, a raw one or `\0`, which a cstring cannot hold.
+@(private)
+holds_nul :: proc(r: ^Reader, text: string) -> bool {
+	for i := 0; i < len(text); i += 1 {
+		if text[i] == 0 {
+			return true
+		}
+		if text[i] == '\\' && r.dialect.escapes == .Backslash && i + 1 < len(text) {
+			i += 1
+			if text[i] == '0' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // A quote in a quoted cell's text comes from a `""`. Only a string, a cstring or the rune `"` can hold one.

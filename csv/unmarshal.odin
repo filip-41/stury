@@ -10,7 +10,7 @@ Unknown_Fields :: core_pkg.Unknown_Fields
 
 // What `unmarshal` does with a header name that two columns share: core's `Duplicates`.
 //
-//	.Default  `.Refuse`
+//	.Default  `.Last`
 //	.Refuse   `.Duplicate_Key` at the second column's header cell
 //	.First    the first column fills the field, the later ones are read as unknown columns
 //	.Last     the last column fills the field, the earlier ones are read as unknown columns
@@ -19,20 +19,16 @@ Unknown_Fields :: core_pkg.Unknown_Fields
 Duplicates :: core_pkg.Duplicates
 
 // How `unmarshal` and `unmarshal_check` read: the zero value reads RFC 4180 with a header, judges every byte,
-// refuses a repeated header name, ignores unknown columns and copies strings. Of the `Read_Opts` fields:
+// keeps the last of a repeated header name, ignores unknown columns and copies strings. Of the `Read_Opts` fields:
 //
 //	strictness  `.Lazy` judges the UTF-8 of the header and of every cell a field reads, and of no other cell.
 //	duplicates  which column a repeated header name fills. A column the field does not take is read as unknown,
 //	            but `unknown_fields = .Refuse` refuses only a name the struct lacks.
 //	no_header   the first record is data: column k is the struct's field k, and columns past its last field
 //	            are unknown.
-Unmarshal_Opts :: struct {
-	using read:     Read_Opts,
-	unknown_fields: Unknown_Fields,
-	// A string with no `""` or escape slices `src` instead of being copied. One with either is decoded into the
-	// allocator, and a `cstring` is always copied.
-	borrow_strings: bool,
-}
+//
+// `borrow_strings` slices `src` for a string with no `""` or escape.
+Unmarshal_Opts :: core_pkg.Unmarshal_Opts(Read_Opts)
 
 // What `unmarshal` refused. The kinds are shared with JSON. A cell's fault is at the cell, with path
 // `[row].field`, the row counted from the first record after the header. A header's fault has the field alone
@@ -214,14 +210,8 @@ records_fault :: proc(it: ^Records, row: int) -> Maybe(Unmarshal_Error) {
 	if !faulted {
 		return nil
 	}
-	#partial switch e.kind {
-	case .Out_Of_Memory:
-		return Unmarshal_Error{kind = .Out_Of_Memory}
-	case .Bad_Option:
-		return Unmarshal_Error{kind = .Bad_Option}
-	}
-	err := Unmarshal_Error{kind = .Syntax, syntax = e.kind, offset = e.offset}
-	if row >= 0 {
+	err := core_pkg.unmarshal_error_from(e)
+	if row >= 0 && err.kind == .Syntax {
 		core_pkg.unmarshal_path_prepend(&err, core_pkg.Index(row))
 	}
 	return err

@@ -23,6 +23,18 @@ Read_Shape :: core_pkg.Read_Shape
 Shape_Op :: core_pkg.Shape_Op
 Shape_Field :: core_pkg.Shape_Field
 Shape_Fault :: core_pkg.Shape_Fault
+is_space :: core_pkg.is_space
+Row :: core_pkg.Row
+Row_Flags :: core_pkg.Row_Flags
+Row_Str :: core_pkg.Row_Str
+Row_Payload :: core_pkg.Row_Payload
+NO_KEY :: core_pkg.NO_KEY
+MAX_ROW_SOURCE :: core_pkg.MAX_ROW_SOURCE
+Fact :: core_pkg.Fact
+adopt_allocator :: core_pkg.adopt_allocator
+NAME_BLOCK_BYTES :: core_pkg.NAME_BLOCK_BYTES
+name_arena_reset :: core_pkg.name_arena_reset
+allocator_ok :: core_pkg.allocator_ok
 
 // A union's variant is selected by `arm_of[vc]`, so the scan classes use core's numbering. `true` and `false`
 // are the `Bool` class. The walk classifies `null` separately, and it reads `arm_of[0]`.

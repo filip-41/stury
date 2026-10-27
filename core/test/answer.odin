@@ -5,18 +5,23 @@ import p ".."
 
 @(test)
 test_answer_row :: proc(t: ^testing.T) {
-	testing.expect_value(t, size_of(p.Answer), 32)
+	testing.expect_value(t, size_of(p.Answer), 40)
 	testing.expect(t, offset_of(p.Answer, lo) == 0)
 	testing.expect(t, offset_of(p.Answer, hi) == 8)
 	testing.expect(t, offset_of(p.Answer, owner) == 16)
 	testing.expect(t, offset_of(p.Answer, query) == 24)
-	testing.expect(t, offset_of(p.Answer, outcome) == 28)
-	a := p.Answer{lo = 3, hi = 9, owner = 11, query = 2, outcome = .Type_Mismatch}
+	testing.expect(t, offset_of(p.Answer, node) == 28)
+	testing.expect(t, offset_of(p.Answer, outcome) == 32)
+	testing.expect(t, offset_of(p.Answer, kind) == 33)
+	a := p.Answer{lo = 3, hi = 9, owner = 11, query = 2, node = 5, outcome = .Type_Mismatch, kind = .String}
 	testing.expect_value(t, a.lo, u64(3))
 	testing.expect_value(t, a.hi, u64(9))
 	testing.expect_value(t, a.owner, u64(11))
 	testing.expect_value(t, a.query, u32(2))
+	testing.expect_value(t, a.node, p.Node(5))
 	testing.expect_value(t, a.outcome, p.Answer_Outcome.Type_Mismatch)
+	testing.expect_value(t, a.kind, p.Kind.String)
+	testing.expect_value(t, p.NO_NODE, p.Node(-1))
 	testing.expect_value(t, p.NO_OWNER, max(u64))
 	testing.expect_value(t, u8(p.Answer_Outcome.Found), u8(0))
 	testing.expect_value(t, u8(p.Answer_Outcome.Missing), u8(1))

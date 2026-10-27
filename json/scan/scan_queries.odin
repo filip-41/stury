@@ -4,8 +4,9 @@ import "walk"
 import index "index"
 import lex "lex"
 
-// A tape is built by a checking walk only (`Nodes_Need_Strict`), so a set with paths beside one has no
-// locating walk. A tape alone keeps its dead twin, which the values walk's code layout depends on.
+// A tape is built by a checking walk only (a `.Structural` scan refuses `.Nodes` and `.Dom`), so a set with
+// paths beside one has no locating walk. A tape alone keeps its dead twin, which the values walk's code layout
+// depends on.
 @(private = "file")
 TAPE_BESIDE_PATHS :: bit_set[Walk_Kind]{.Nodes, .Path}
 
@@ -165,7 +166,7 @@ publish_nodes :: #force_no_inline proc(ctx: ^Query_Ctx) {
 // `fault.oom` is an append the allocator refused mid-run. It is independent of the result in `err`. Rows already
 // appended are not rolled back: ignore the sink on error.
 // The caller owns the pre-flight of everything else about `queries` (`request_fault`): the slice must be
-// servable, a `.Nodes`/`.Dom` source must fit `TAPE_MAX_SOURCE`, and only the wanted names and the path runs'
+// servable, a `.Nodes`/`.Dom` source must fit `MAX_ROW_SOURCE`, and only the wanted names and the path runs'
 // caps are checked here.
 // `strictness` and `resolution` decide the walk's reading (`axes_for`): `.Lazy` may stop only under
 // `.First`. Under `.Last` the forward walk reads the whole item.
@@ -247,10 +248,9 @@ scan_queries_tape_pretty :: #force_no_inline proc(
 	)
 }
 
-// `scan_queries` and `scan_queries_dialect` under a cap past MAX_DEPTH, on `walk_deep`: a complete walk that
-// neither stops nor skips, at `.Structural`'s level for that strictness and checking every value for the
-// rest. So `.Lazy` has no early stop past MAX_DEPTH. The caller picks it before the walk, so the default walks
-// compile as if it did not exist.
+// `scan_queries` under a cap past MAX_DEPTH, on `walk_deep`: a complete walk that neither stops nor skips, at
+// `.Structural`'s level for that strictness and checking every value for the rest. So `.Lazy` has no early stop
+// past MAX_DEPTH. The caller picks it before the walk, so the default walks compile as if it did not exist.
 scan_queries_deep :: #force_no_inline proc(
 	src: []byte,
 	queries: []Scan_Query,
@@ -259,19 +259,7 @@ scan_queries_deep :: #force_no_inline proc(
 	$Q: bit_set[Walk_Kind],
 	validity: ^Validity,
 	resolution: Resolution,
-	dialect: Dialect,
-	facts: ^[dynamic]Fact,
 ) -> (err: Maybe(Error), fault: Walk_Fault) {
-	// A dialect walk has no demand matcher (`json.automaton_forced`), so a demand walk compiles no dialect.
-	when .Demand not_in Q {
-		switch dialect {
-		case .Json:
-		case .Jsonc:
-			return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Jsonc, facts, Walk_Fault, true, nil, false)
-		case .Json5:
-			return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, .Json5, facts, Walk_Fault, true, nil, false)
-		}
-	}
 	// `.Lazy` is read as `.Strict`: its stop is not taken here, and `axes_for` would arm one.
 	level := Strictness.Structural if strictness == .Structural else Strictness.Strict
 	return scan_queries_in(src, queries, level, limits, Q, nil, validity, resolution, .Json, nil, Walk_Fault, true, nil, false)
@@ -315,8 +303,9 @@ sink_fault :: #force_inline proc($F: typeid, ctx: ^Query_Ctx) -> F {
 	}
 }
 
-// `scan_queries` over a dialect other than `.Json`: a complete `.Strict` walk that appends each comment to
-// `facts` when it is not nil. A procedure of its own so the JSON instantiation compiles as it would without it.
+// `scan_queries` over a dialect other than `.Json`: a complete `.Strict` walk, on `walk_deep` under a cap past
+// MAX_DEPTH, that appends each comment to `facts` when it is not nil. A procedure of its own so the JSON
+// instantiation compiles as it would without it.
 scan_queries_dialect :: #force_no_inline proc(
 	src: []byte,
 	queries: []Scan_Query,
@@ -327,6 +316,9 @@ scan_queries_dialect :: #force_no_inline proc(
 	facts: ^[dynamic]Fact,
 	$dialect: Dialect,
 ) -> (err: Maybe(Error), fault: Walk_Fault) {
+	if limits.max_depth > MAX_DEPTH {
+		return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, dialect, facts, Walk_Fault, true, nil, false)
+	}
 	return scan_queries_in(src, queries, .Strict, limits, Q, nil, validity, resolution, dialect, facts, Walk_Fault, false, nil, false)
 }
 
@@ -359,10 +351,10 @@ scan_queries_in :: #force_inline proc(
 			}
 		}
 	}
-	// A row's `u32` spans cannot address a source past `TAPE_MAX_SOURCE` (one below the u32 all-ones, so
+	// A row's `u32` spans cannot address a source past `MAX_ROW_SOURCE` (one below the u32 all-ones, so
 	// `NO_KEY` cannot collide with a real span).
 	when .Nodes in Q {
-		assert(u64(len(src)) <= TAPE_MAX_SOURCE, "a node tape over a source its offsets cannot address")
+		assert(u64(len(src)) <= MAX_ROW_SOURCE, "a node tape over a source its offsets cannot address")
 	}
 	// Words rather than a `Query_Ctx` local: `resolve_queries` zeroes only the fields this query set reads
 	// (`query_ctx_zero`).
@@ -578,7 +570,7 @@ validate_remaining :: proc(
 		werr: Maybe(Error)
 		fault: Walk_Fault
 		if deep {
-			werr, fault = scan_queries_deep(src, nil, .Strict, limits, {.Unique}, nil, .All, .Json, nil)
+			werr, fault = scan_queries_deep(src, nil, .Strict, limits, {.Unique}, nil, .All)
 		} else {
 			werr, fault = scan_queries(src, nil, .Strict, limits, {.Unique})
 		}
@@ -587,7 +579,7 @@ validate_remaining :: proc(
 		}
 		return werr, .Full
 	}
-	return scan_plain_deep(src, .Strict, limits) if deep else scan_plain(src, .Strict, limits), .Full
+	return scan_plain(src, .Strict, limits), .Full
 }
 
 // Bytes past the document are `Trailing` at the first of them, at every level.

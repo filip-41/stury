@@ -20,7 +20,7 @@ Read_Rec :: struct {
 @(private = "file")
 framed_records :: proc(src: string) -> [dynamic]json.Record {
 	recs := make([dynamic]json.Record, context.temp_allocator)
-	it := json.records(raw(src), .NDJSON)
+	it := json.records(raw(src), {framing = .NDJSON})
 	for rec in json.next_record(&it) {
 		append(&recs, rec)
 	}
@@ -31,7 +31,7 @@ framed_records :: proc(src: string) -> [dynamic]json.Record {
 expect_records_match :: proc(t: ^testing.T, src: string, opts: json.Unmarshal_Opts, n: int, loc := #caller_location) {
 	expected := framed_records(src)
 	testing.expect_value(t, len(expected), n, loc = loc)
-	it := json.records(raw(src), .NDJSON)
+	it := json.records(raw(src), {framing = .NDJSON})
 	rd: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, opts, allocator = context.temp_allocator), nil, loc = loc)
 	defer json.destroy(&rd)
@@ -66,7 +66,7 @@ test_unmarshal_record_matches_unmarshal :: proc(t: ^testing.T) {
 	// A plan the caller keeps is borrowed, and still reads after the reader is destroyed.
 	plan := json.type_plan_init(Read_Rec, {}, context.temp_allocator)
 	quote := raw(`{"id":8,"name":"kept","v":1,"flag":true}`)
-	it := json.records(quote, .NDJSON)
+	it := json.records(quote, {framing = .NDJSON})
 	kept: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&kept, Read_Rec, &it, {}, &plan, context.temp_allocator), nil)
 	got: Read_Rec
@@ -85,7 +85,7 @@ test_unmarshal_record_fault_is_into_the_record :: proc(t: ^testing.T) {
 	// The bad record does not start at byte 0, and it has no newline after it.
 	src := "{\"id\":1,\"name\":\"a\",\"v\":2,\"flag\":true}\n\n{\"id\":nope,\"name\":\"b\",\"v\":0,\"flag\":false}"
 	rd: json.Record_Read
-	it := json.records(raw(src), .NDJSON)
+	it := json.records(raw(src), {framing = .NDJSON})
 	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, allocator = context.temp_allocator), nil)
 	defer json.destroy(&rd)
 	expected := framed_records(src)
@@ -117,7 +117,7 @@ test_unmarshal_record_fault_is_into_the_record :: proc(t: ^testing.T) {
 	}
 	text := raw(`{"id":1,"inner":{"n":true}}`)
 	ord: json.Record_Read
-	oit := json.records(text, .NDJSON)
+	oit := json.records(text, {framing = .NDJSON})
 	testing.expect_value(t, json.record_read_init(&ord, Outer, &oit, allocator = context.temp_allocator), nil)
 	defer json.destroy(&ord)
 	og, ow: Outer
@@ -138,7 +138,7 @@ test_unmarshal_record_framing_fault_is_into_the_input :: proc(t: ^testing.T) {
 	good := "{\"id\":1,\"name\":\"a\",\"v\":2,\"flag\":true}\n"
 	src := fmt.tprintf("%s%s\xEF\xBB\xBF%s", good, good, good)
 	rd: json.Record_Read
-	it := json.records(raw(src), .NDJSON)
+	it := json.records(raw(src), {framing = .NDJSON})
 	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, allocator = context.temp_allocator), nil)
 	defer json.destroy(&rd)
 	got: Read_Rec
@@ -157,7 +157,7 @@ test_unmarshal_record_walks_a_shape_it_does_not_descend :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	rd: json.Record_Read
 	src := "{\"a\":1,\"b\":2}\n\n{\"a\":3}"
-	it := json.records(raw(src), .NDJSON)
+	it := json.records(raw(src), {framing = .NDJSON})
 	testing.expect_value(t, json.record_read_init(&rd, map[string]i64, &it, allocator = context.temp_allocator), nil)
 	defer json.destroy(&rd)
 	got, want: map[string]i64
@@ -202,7 +202,7 @@ returned_record_reader :: proc(it: ^json.Records) -> (rd: json.Record_Read, ok: 
 @(test)
 test_record_read_handle_survives_return :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	it := json.records(raw(`{"id":5,"name":"returned","v":1,"flag":true}`), .NDJSON)
+	it := json.records(raw(`{"id":5,"name":"returned","v":1,"flag":true}`), {framing = .NDJSON})
 	rd, ok := returned_record_reader(&it)
 	testing.expect(t, ok)
 	defer json.destroy(&rd)
@@ -220,7 +220,7 @@ test_record_read_handle_survives_return :: proc(t: ^testing.T) {
 test_record_read_copy_after_a_read :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	line := `{"id":5,"name":"copied","v":1,"flag":true}`
-	it := json.records(raw(fmt.tprintf("%s\n%s\n", line, line)), .NDJSON)
+	it := json.records(raw(fmt.tprintf("%s\n%s\n", line, line)), {framing = .NDJSON})
 	rd: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, allocator = context.temp_allocator), nil)
 	got: Read_Rec
@@ -246,7 +246,7 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	line := `{"id":1,"name":"a","v":2,"flag":true,"id":9}`
 	dup := fmt.tprintf("%s\n%s\n%s\n", line, line, line)
-	it := json.records(raw(dup), .NDJSON)
+	it := json.records(raw(dup), {framing = .NDJSON})
 	rd: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, allocator = context.temp_allocator), nil)
 	defer json.destroy(&rd)
@@ -263,7 +263,7 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 
 	dline := "{\"id\":10,\"name\":\"n\",\"v\":2,\"flag\":true}\n"
 	digits := raw(fmt.tprintf("%s%s%s", dline, dline, dline))
-	dit := json.records(digits, .NDJSON)
+	dit := json.records(digits, {framing = .NDJSON})
 	dr: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&dr, Read_Rec, &dit, allocator = context.temp_allocator), nil)
 	defer json.destroy(&dr)
@@ -282,7 +282,7 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 	buf[n] = '\n'
 	copy(buf[n + 1:], src)
 	text := buf[:2 * n + 1]
-	bit := json.records(text, .NDJSON)
+	bit := json.records(text, {framing = .NDJSON})
 	br: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&br, Read_Rec, &bit, allocator = context.temp_allocator), nil)
 	defer json.destroy(&br)
@@ -295,7 +295,7 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 
 @(test)
 test_record_read_destroy_twice :: proc(t: ^testing.T) {
-	it := json.records(raw(`{"id":1,"name":"a","v":2,"flag":true}`), .NDJSON)
+	it := json.records(raw(`{"id":1,"name":"a","v":2,"flag":true}`), {framing = .NDJSON})
 	rd: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it), nil)
 	json.destroy(&rd)
@@ -316,7 +316,7 @@ test_record_read_refuses_structural_json :: proc(t: ^testing.T) {
 	}
 	line := "{\"a\":1}\n"
 	src := raw(fmt.tprintf("%s%s", line, line))
-	it := json.records(src, .NDJSON)
+	it := json.records(src, {framing = .NDJSON})
 	rd: json.Record_Read
 	testing.expect_value(t, um_err(json.record_read_init(&rd, Lit, &it, {strictness = .Structural})).kind, .Bad_Option)
 	testing.expect_value(t, json.record_read_init(&rd, Lit, &it, {strictness = .Structural, dialect = .Jsonc}, allocator = context.temp_allocator), nil)

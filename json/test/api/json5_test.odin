@@ -251,9 +251,9 @@ test_json5_marshal_respells_and_edits_refuse :: proc(t: ^testing.T) {
 	fout, _ := json.format(raw("{a: 0x10}"), {}, .Json5, context.temp_allocator)
 	testing.expect_value(t, string(fout), `{"a":16}`)
 
-	_, serr := json.set(raw("{a: 1}"), ".a", 2, dialect = .Json5, allocator = context.temp_allocator)
+	_, serr := json.set(raw("{a: 1}"), ".a", 2, {dialect = .Json5}, allocator = context.temp_allocator)
 	testing.expect(t, serr != nil && serr.?.kind == .Bad_Option)
-	_, rerr := json.remove(raw("{a: 1}"), ".a", .Json5, context.temp_allocator)
+	_, rerr := json.remove(raw("{a: 1}"), ".a", {dialect = .Json5}, allocator = context.temp_allocator)
 	testing.expect(t, rerr != nil && rerr.?.kind == .Bad_Option)
 }
 

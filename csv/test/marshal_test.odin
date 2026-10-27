@@ -1,5 +1,6 @@
 package csv_tests
 
+import "core:fmt"
 import "core:math"
 import "core:testing"
 import csv "../"
@@ -60,6 +61,37 @@ test_marshal_round_trip :: proc(t: ^testing.T) {
 	}
 }
 
+// An f16 is written in its own width's shortest digits and read back rounded once from the decimal: a midpoint
+// ties to even, a decimal past it rounds up, and one past the widest finite f16's rounding is out of range.
+@(test)
+test_marshal_f16_round_trip :: proc(t: ^testing.T) {
+	Half :: struct {
+		h: f16,
+	}
+	rows := []Half{{0.1}, {-65504}, {6.104e-5}, {5.96e-8}, {-0.0}, {1}}
+	out, err := csv.marshal(rows, allocator = context.temp_allocator)
+	if !testing.expect_value(t, err, csv.Marshal_Error.None) {
+		return
+	}
+	back: []Half
+	testing.expect_value(t, read(t, string(out), &back), nil)
+	if !testing.expect_value(t, len(back), len(rows)) {
+		return
+	}
+	for r, k in rows {
+		testing.expectf(t, transmute(u16)back[k].h == transmute(u16)r.h, "row %d: %v, want %v (from %q)", k, back[k].h, r.h, string(out))
+	}
+	cases := []struct {
+		text: string,
+		want: f16,
+	}{{"1.00048828125", 1}, {"1.000488281250001", 1.0009765625}, {"+.5", 0.5}, {"65519", 65504}}
+	for c in cases {
+		testing.expect_value(t, read(t, fmt.tprintf("h\n%s\n", c.text), &back), nil)
+		testing.expectf(t, len(back) == 1 && back[0].h == c.want, "%s: %v, want %v", c.text, back, c.want)
+	}
+	testing.expect_value(t, read(t, "h\n65520\n", &back).?.kind, csv.Unmarshal_Error_Kind.Out_Of_Range)
+}
+
 @(test)
 test_marshal_enum_ints :: proc(t: ^testing.T) {
 	plan := csv.type_plan_init([]Row, {enums = .Int})
@@ -70,6 +102,21 @@ test_marshal_enum_ints :: proc(t: ^testing.T) {
 	back: []Row
 	testing.expect_value(t, csv.unmarshal(out, &back, plan = &plan, allocator = context.temp_allocator), nil)
 	testing.expect_value(t, back[0].color, Color.Blue)
+	// A value no member has is refused as the names are, and as `unmarshal` refuses it.
+	_, err = csv.marshal([]Row{{color = Color(3)}}, plan = &plan, allocator = context.temp_allocator)
+	testing.expect_value(t, err, csv.Marshal_Error.Not_A_Member)
+}
+
+// A cell is never omitted, so a tag's `omitempty` is refused in both directions.
+@(test)
+test_omitempty_refused :: proc(t: ^testing.T) {
+	Tagged :: struct {
+		id: int `csv:"id,omitempty"`,
+	}
+	_, err := csv.marshal([]Tagged{{1}}, allocator = context.temp_allocator)
+	testing.expect_value(t, err, csv.Marshal_Error.Bad_Tag)
+	rows: []Tagged
+	testing.expect_value(t, read(t, "id\n1\n", &rows).?.kind, csv.Unmarshal_Error_Kind.Bad_Tag)
 }
 
 @(test)
@@ -87,6 +134,13 @@ test_marshal_refusals :: proc(t: ^testing.T) {
 	_, err := csv.marshal([]Strict{}, {dialect = {delimiter = '"'}})
 	testing.expect_value(t, err, csv.Marshal_Error.Bad_Option)
 	_, err = csv.marshal([]Nested{{}}, allocator = context.temp_allocator)
+	testing.expect_value(t, err, csv.Marshal_Error.Unsupported)
+	// A `Maybe` of a pointer-like cell stores no tag, so it is not one cell, as `unmarshal` refuses it.
+	Bare :: struct {
+		c: Maybe(cstring),
+		n: int,
+	}
+	_, err = csv.marshal([]Bare{{"x", 7}}, allocator = context.temp_allocator)
 	testing.expect_value(t, err, csv.Marshal_Error.Unsupported)
 }
 

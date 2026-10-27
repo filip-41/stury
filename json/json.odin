@@ -3,33 +3,39 @@ package json
 // The JSON codec's public surface. The scanner is in the scan/ package; the aliases below spell the surface
 // `json.*`. The public names live in these files:
 //
-//	json.odin           the shared types (aliases of scan/, scan/walk/ and core/ names), `validate`, `parse_path`,
-//	                    `decode_span`, `error_position`, `render_error` and the dialect predicates `plain_json` and
-//                    `has_comments`
+//	json.odin           the shared types (aliases of scan/, scan/walk/ and core/ names), `validate`,
+//	                    `validate_facts`, `parse_path`,
+//	                    `decode_span`, `error_position`, `render_error` and the dialect predicates `plain_json`,
+//	                    `has_comments` and `own_spelling`
 //	request.odin        `Request`, `request_init`, `answers`, `find`, `validate_remaining`, `Duplicates`
 //	request_scan.odin   `scan` and `prepare`
-//	document.odin       `Document`, `Node`, `NO_NODE`, `ROOT`, the `get_*` readers, `kind`, `facts`, `fact_text`
+//	document.odin       `Document` (core's `Row_Document`), `Node`, `NO_NODE`, `ROOT`, the `get_*` readers
+//	                    (`get_int`, `get_float`, `get_number`, `get_string`, `get_key`, `get_raw`), `kind`,
+//	                    `facts`, `fact_text`
 //	document_build.odin `build` and `destroy`
 //	document_walk.odin  `child`, `child_count`, `children`, `members`, `Members`, `pointer`
-//	document_query.odin `query`
-//	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Unknown_Fields`, `Unmarshal_Error`
-//	marshal.odin        `marshal` and its writer and append forms (marshal_struct.odin writes structs)
-//	type_plan.odin      `Type_Plan` and its options and hooks, for `marshal` and `unmarshal`, `plan_cache_clear`
+//	document_query.odin `query`, `query_in`
+//	unmarshal.odin      `unmarshal`, `unmarshal_value`, `unmarshal_record`, `unmarshal_check`, `Unmarshal_Opts`,
+//	                    `Unknown_Fields`, `Unmarshal_Error`, `Unmarshal_Error_Kind`
+//	marshal.odin        `marshal`, `marshal_to_writer`, `marshal_into`, `Marshal_Out` (marshal_struct.odin writes
+//	                    structs)
+//	type_plan.odin      `Type_Plan`, `type_plan_init`, `Plan_Opts`, `Enum_Spelling`, `Tag_Name`, `Type_Hook`,
+//	                    `Marshal_Hook`, `Unmarshal_Hook` and `plan_cache_clear`, for `marshal` and `unmarshal`
 //	route_of.odin       `route_of`, `Path_Route`: which engine answers a path, or why the automaton does
-//	edit.odin           `set`, `insert`, `remove` and `splice` (the geometry is in edit_ops.odin and
-//	                    edit_jsonc.odin)
+//	edit.odin           `Edit`, `Insert_At`, `APPEND`, `Path_Error`, `Path_Error_Kind`, `set`, `upsert`,
+//	                    `insert`, `remove` and `splice` (the geometry is in edit_ops.odin)
+//	edit_jsonc.odin     `edit_comment` and `Comment_Op`
 //	records.odin        `records`, `next_record`, `Framing`, `Record`
 //	record_read.odin    `Record_Read`, `record_read_init`, `record_read_at` and `unmarshal` of one record
 //	record_split.odin   `split_record`
 //	each_record.odin    `each_record`, `validate_records` and `Batch_Runner`, for threads from `stury:host`
-//	encode.odin         `Marshal_Opts` and `marshal_document`
+//	encode.odin         `Marshal_Opts` and `Marshal_Error`; the writer of a `Document` that `marshal` calls
 //	format.odin         `format`
 //
 // The other files (request_walk.odin, route*.odin) are internal.
 
 import scan_pkg "scan"
 import core_pkg "../core"
-import "scan/walk"
 
 // How much of each value a read checks, and whether a scan may stop early.
 //
@@ -67,14 +73,14 @@ Strictness :: scan_pkg.Strictness
 //	  `.Too_Deep`.
 Limits :: scan_pkg.Limits
 
-// How a read takes its source: one struct for `validate`, `find`, `build`, `request_init` and `split_record`,
-// embedded in `Request` and `Unmarshal_Opts`. The zero value is strict RFC 8259 JSON with no raised caps, the last
-// of a repeated key answering. A procedure that does not read a field says so.
+// How a read takes its source: one struct for every read and edit, embedded in `Request` and `Unmarshal_Opts`.
+// The zero value is one strict RFC 8259 JSON text with no raised caps, the last of a repeated key answering. Only
+// `records`, `each_record` and `validate_records` read `framing`. A procedure that does not read a field says so.
 Read_Opts :: struct {
-	dialect:    Dialect,
-	strictness: Strictness,
-	duplicates: Duplicates,
-	limits:     Limits,
+	using shared: core_pkg.Read_Opts,
+	dialect:      Dialect,
+	framing:      Framing,
+	limits:       Limits,
 }
 
 // The default nesting cap. A scan refuses deeper input unless `Limits.max_depth` raises it, and the
@@ -86,7 +92,7 @@ DEPTH_CEILING :: scan_pkg.DEPTH_CEILING
 
 // The longest source whose values a `Document`'s rows can address (4 GiB - 2): `build`, `.Nodes` and `.Dom` refuse a
 // longer one before reading it. `validate` has no such cap.
-MAX_ROW_SOURCE :: scan_pkg.TAPE_MAX_SOURCE
+MAX_ROW_SOURCE :: core_pkg.MAX_ROW_SOURCE
 
 // A fault in the document, or in what `build` could not hold of it. A syntax fault carries the offset of
 // the first byte that cannot extend the construct (`len(src)` when the input ended). A limit fault the
@@ -170,7 +176,7 @@ parse_path :: #force_inline proc(text: string, steps: []Step, names: []u8 = nil)
 // A path as `query`, `request_init` and the edits take it.
 Path_Spec :: core_pkg.Path_Spec
 
-// A path query's answer, one per occurrence.
+// A path query's answer, one per occurrence: core's `Answer`, the same in every format.
 //
 //	query    the path's index in `Request.paths`
 //	outcome  the `Path_Outcome`
@@ -179,15 +185,15 @@ Path_Spec :: core_pkg.Path_Spec
 //	owner    the offset of the container the answer is about: the one holding the value, or the one lacking a
 //	         `.Missing` member (offset 0 for the root container). `NO_OWNER` when there is none: the root
 //	         value, or a miss of the document as a whole (`find` on a refused scan)
-//	node     the value in `Request.doc` under `.Nodes` (`NO_NODE` otherwise)
-Path_Answer :: walk.Path_Answer
+//	node     the value in `Request.doc` under `.Nodes`, or in the document `query` read (`NO_NODE` otherwise)
+Answer :: core_pkg.Answer
 
-// `Path_Answer.owner` of an answer no container holds.
-NO_OWNER :: walk.NO_OWNER
+// `Answer.owner` of an answer no container holds.
+NO_OWNER :: core_pkg.NO_OWNER
 
 // Whether a path landed. Gives `.Found`, `.Missing` (no such member or element), or `.Type_Mismatch` (a step met
 // a value of another kind, such as a name on an array).
-Path_Outcome :: walk.Path_Outcome
+Path_Outcome :: core_pkg.Answer_Outcome
 
 // The kinds of answer a `Request` is specialized over (`Request` says what each fills):
 //
@@ -228,6 +234,12 @@ has_comments :: #force_inline proc "contextless" (d: Dialect) -> bool {
 	return scan_pkg.has_comments(d)
 }
 
+// Whether `d` spells a string, key or number in a way JSON does not, so a token of it is read by `d`'s own rules
+// and written in JSON's spelling.
+own_spelling :: #force_inline proc "contextless" (d: Dialect) -> bool {
+	return scan_pkg.own_spelling(d)
+}
+
 // Something attached to a value of a document (`facts`): its span in the source, the value, and where
 // it sits relative to the value. A JSONC document's comments are its facts.
 Fact :: scan_pkg.Fact
@@ -250,7 +262,7 @@ Decoded :: scan_pkg.Decoded
 Digits :: scan_pkg.Digits
 
 // Decode one scalar from its span `[lo, hi)` of `src`, `kind` being the kind a scan read off its first byte
-// (a `Path_Answer`'s `kind`, `lo` and `hi`).
+// (a `Answer`'s `kind`, `lo` and `hi`).
 //
 //	- An escape-free string is a slice of `src` with `escaped` false. An escaped string is decoded into
 //	  `allocator`, `escaped` true, and the caller frees it.
@@ -275,10 +287,11 @@ decode_span :: #force_inline proc(
 //
 //	- No allocation but the deep reading's frames (`Limits`), which only input nesting past MAX_DEPTH under
 //	  a raised cap takes.
-//	- `opts.duplicates` is not read: a repeated key is not a fault here.
+//	- `opts.duplicates` and `opts.framing` are not read: a repeated key is not a fault here, and `src` is one
+//	  text (`validate_records` reads framed records). `runner` is not read: one text is read on the calling
+//	  thread.
 //	- `.Jsonc` validates comments and trailing commas as well, `.Json5` JSON5's grammar, every other byte as
-//	  `.Strict` does whatever `strictness` is, and appends each comment to `facts` when it is not nil, attached to nothing (`node`
-//	  is `NO_NODE`), an append its allocator refuses being `.Out_Of_Memory`; a `.Json` source has none.
+//	  `.Strict` does whatever `strictness` is.
 //	- A fault carries its kind and an absolute offset into `src`.
 //	- One leading UTF-8 BOM is tolerated at offset 0 and nowhere else, so no caller-visible offset is
 //	  shifted.
@@ -286,12 +299,16 @@ decode_span :: #force_inline proc(
 //	  alone) is `.Bad_Escape` at its backslash wherever escapes are validated: it writes no Unicode scalar,
 //	  so no reader could return it as UTF-8.
 @(require_results)
-validate :: #force_inline proc(src: []byte, opts := Read_Opts{}, facts: ^[dynamic]Fact = nil) -> Maybe(Error) {
+validate :: #force_inline proc(src: []byte, opts := Read_Opts{}, runner: ^Batch_Runner = nil) -> Maybe(Error) {
+	return validate_facts(src, opts, nil)
+}
+
+// `validate`, appending each comment of `src` to `facts`, attached to nothing (`node` is `NO_NODE`). A `.Json`
+// source has none. An append `facts`' allocator refuses is `.Out_Of_Memory`.
+@(require_results)
+validate_facts :: #force_inline proc(src: []byte, opts: Read_Opts, facts: ^[dynamic]Fact) -> Maybe(Error) {
 	if !scan_pkg.plain_json(opts.dialect) {
 		return scan_pkg.validate_dialect(src, opts.dialect, facts, opts.limits)
-	}
-	if opts.limits.max_depth > MAX_DEPTH {
-		return scan_pkg.scan_plain_deep(src, opts.strictness, opts.limits)
 	}
 	return scan_pkg.scan_plain(src, opts.strictness, opts.limits)
 }

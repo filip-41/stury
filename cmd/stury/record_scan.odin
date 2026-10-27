@@ -31,7 +31,7 @@ scan_records :: proc(run: ^Run, ins: ^Inputs, from: int) -> (stop: int) {
 	start_pieces(&job, run)
 	defer end_pieces(&job)
 	// The fault it returns is a piece's `err`, which `scan_piece` turns into a stop for the main thread's read.
-	_ = json.each_record(src, .NDJSON, scan_piece, &job, runner)
+	_ = json.each_record(src, scan_piece, &job, {framing = .NDJSON}, runner)
 	// A write that failed on a pool thread ends the run here.
 	check_output()
 	stop = from + job.stop if job.stop >= 0 else len(ins.data)
@@ -96,7 +96,7 @@ scan_piece :: proc(data: rawptr, piece: ^json.Records, k: int) -> bool {
 // is a text the scan reads whole with every output found or missing, which print as `scan_inputs` would print them,
 // `last` when it ends the file and another file follows.
 @(private = "file")
-answers_settled :: proc(req, trial: ^json.Request({.Path}), record: []byte, last: bool) -> (answers: []json.Path_Answer, ok: bool) {
+answers_settled :: proc(req, trial: ^json.Request({.Path}), record: []byte, last: bool) -> (answers: []json.Answer, ok: bool) {
 	if record[0] == UTF8_BOM[0] || last && is_literal_byte(record[len(record) - 1]) {
 		return
 	}
@@ -106,13 +106,7 @@ answers_settled :: proc(req, trial: ^json.Request({.Path}), record: []byte, last
 	if json.scan(record, req) != nil {
 		return
 	}
-	answers = jq_outputs(req.answers[:])
-	for a in answers {
-		if a.outcome != .Found && a.outcome != .Missing {
-			return
-		}
-	}
-	return answers, true
+	return jq_outputs(req.answers[:])
 }
 
 // Whether `trial`'s scan of `record`, the path without `per_element`, answers each entry of its root array, as

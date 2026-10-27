@@ -23,13 +23,13 @@ test_path_coverage_and_stop_are_engine_independent :: proc(t: ^testing.T) {
 	xa_path := []json.Path{{steps = xa}}
 	axa_path := []json.Path{{steps = axa}}
 
-	hit :: proc(query: u32, lo, hi, owner: u64, kind: json.Kind) -> json.Path_Answer {
+	hit :: proc(query: u32, lo, hi, owner: u64, kind: json.Kind) -> json.Answer {
 		return {outcome = .Found, query = query, lo = lo, hi = hi, owner = owner, kind = kind, node = json.NO_NODE}
 	}
-	miss :: proc(query: u32, owner: u64) -> json.Path_Answer {
+	miss :: proc(query: u32, owner: u64) -> json.Answer {
 		return {outcome = .Missing, query = query, owner = owner, node = json.NO_NODE}
 	}
-	mismatch :: proc(query: u32) -> json.Path_Answer {
+	mismatch :: proc(query: u32) -> json.Answer {
 		return {outcome = .Type_Mismatch, query = query, owner = max(u64), node = json.NO_NODE}
 	}
 	Case :: struct {
@@ -40,7 +40,7 @@ test_path_coverage_and_stop_are_engine_independent :: proc(t: ^testing.T) {
 		coverage: json.Validity,
 		stop:     Maybe(u64),
 		err:      Maybe(json.Error),
-		want:     [][]json.Path_Answer,
+		want:     [][]json.Answer,
 	}
 	cases := []Case{
 		{src = `{"a":1}`, paths = xa_path, level = .Lazy, dups = .First, coverage = .Partial},
@@ -89,7 +89,7 @@ test_path_coverage_and_stop_are_engine_independent :: proc(t: ^testing.T) {
 		testing.expectf(t, r.req.stop == c.stop, "case %d %q: stop %v, want %v", i, c.src, r.req.stop, c.stop)
 		for _, pi in c.paths {
 			got, gerr := json.answers(&r.req, pi)
-			want: []json.Path_Answer
+			want: []json.Answer
 			if pi < len(c.want) {
 				want = c.want[pi]
 			}

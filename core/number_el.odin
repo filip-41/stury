@@ -1,4 +1,4 @@
-package number
+package core
 
 // The cold decode: a token's significand and exponent folded from its span, then Eisel-Lemire
 // (strconv's `fast_float_compute_float`) with fast_float's `m`/`m+1` bracket.

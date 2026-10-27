@@ -6,31 +6,18 @@ package main
 
 import "core:bytes"
 import "core:mem/virtual"
-import "core:strconv"
 import json "../../json"
 import "jq"
 
 // Whether the record `src`, whose path answer `a` was found or missing, is one `select` keeps.
-selects :: proc(run: ^Run, src: []byte, a: json.Path_Answer) -> bool {
+selects :: proc(run: ^Run, src: []byte, a: json.Answer) -> bool {
 	x: jq.Value
 	if a.outcome == .Found {
-		switch a.kind {
-		case .Null:
-		case .False:
-			x = false
-		case .True:
-			x = true
-		case .Number:
-			lit := string(src[a.lo:a.hi])
-			f, _ := strconv.parse_f64(lit)
-			x = jq.Number{f = f, lit = lit}
-		case .String:
-			s, _, _ := json.decode_span(src, a.lo, a.hi, .String, context.temp_allocator)
-			x = s.(string)
-		case .Array, .Object:
+		if a.kind == .Array || a.kind == .Object {
 			// Above every literal the filter may hold.
 			return jq.compared(run.select.op, 1)
 		}
+		x = jq.span_value(src, a.lo, a.hi, a.kind, context.temp_allocator)
 	}
 	return jq.compared(run.select.op, jq.compare(x, run.select.literal, eq = run.select.op == .Eq || run.select.op == .Ne))
 }
@@ -71,7 +58,7 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 		// A JSONC text's comments print with the values they are attached to, which only the interpreter's
 		// values know: a text with a `/` in it, a comment's or a string's, is the interpreter's.
 		if json.has_comments(run.req.dialect) && bytes.index_byte(src, '/') >= 0 {
-			explain_fallback(run, .Jsonc_Slash, rest = true)
+			explain_fallback(run, .Comment_Slash, rest = true)
 			run_filter(run, ins)
 			return
 		}
@@ -164,7 +151,7 @@ records_after :: proc(run: ^Run, ins: ^Inputs) {
 		return
 	}
 	from += 1
-	it := json.records(data[from:], .NDJSON)
+	it := json.records(data[from:], {framing = .NDJSON})
 	rec, found := json.next_record(&it)
 	n := len(data) - from
 	// A stream comes a window at a time: once a window pays for the pool, it is sized for the windows to come.
@@ -181,7 +168,7 @@ records_after :: proc(run: ^Run, ins: ^Inputs) {
 // The filter's outputs over the JSON text `src` starts with, as `scan_text` scans it. A root array's `[]`
 // path is tried first without `per_element`, as `iterate_chunk` tries a chunk's: with a found answer for
 // each entry, the per-element scan, on the automaton, has nothing to add.
-scan_outputs :: proc(run: ^Run, src: []byte, trailing: bool) -> (answers: []json.Path_Answer, end: int, err: Maybe(json.Error), refused: bool) {
+scan_outputs :: proc(run: ^Run, src: []byte, trailing: bool) -> (answers: []json.Answer, end: int, err: Maybe(json.Error), refused: bool) {
 	if run.tried {
 		run.req.paths = run.paths[1:]
 		end, err, refused = scan_text(run, src, trailing)
@@ -191,7 +178,8 @@ scan_outputs :: proc(run: ^Run, src: []byte, trailing: bool) -> (answers: []json
 		}
 	}
 	end, err, refused = scan_text(run, src, trailing)
-	return jq_outputs(run.req.answers[:]), end, err, refused
+	answers, _ = jq_outputs(run.req.answers[:])
+	return answers, end, err, refused
 }
 
 // Scan the JSON text `src` starts with for the path: where the text ends, which is before the end of `src`

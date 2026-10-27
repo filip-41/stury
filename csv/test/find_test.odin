@@ -1,6 +1,7 @@
 package csv_tests
 
 import "core:strings"
+import "core:mem/virtual"
 import "core:testing"
 import csv "../"
 
@@ -79,7 +80,7 @@ test_find_skips_a_ragged_row :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(src[a.lo:a.hi]), "3")
 }
 
-// The scan stops at the answer, so a fault after it is not met; `find_column` reads on and reports it.
+// The scan stops at the answer, so a fault after it is not met; a `Request` reads on and reports it.
 @(test)
 test_find_stops_at_its_answer_and_reports_a_fault :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("a,b\n1,2\n3\n")
@@ -98,7 +99,7 @@ test_find_stops_at_its_answer_and_reports_a_fault :: proc(t: ^testing.T) {
 	testing.expect_value(t, a.owner, csv.NO_OWNER)
 	out: [dynamic]csv.Answer
 	defer delete(out)
-	err = csv.find_column(src, ".[].a", &out)
+	err = scan_one(src, ".[].a", &out)
 	e, faulted = err.?
 	testing.expect(t, faulted && e == csv.Error{offset = 8, kind = .Field_Count})
 	testing.expect_value(t, len(out), 1)
@@ -145,19 +146,75 @@ test_find_refusals :: proc(t: ^testing.T) {
 
 // `limit` ends the walk at its last answer: the record after it is not read, so its fault is not met.
 @(test)
-test_find_column_stops_at_its_limit :: proc(t: ^testing.T) {
+test_scan_stops_at_its_limit :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("a\n1\n2\"x\n")
 	out: [dynamic]csv.Answer
 	defer delete(out)
-	testing.expect_value(t, csv.find_column(src, "limit(1; .[].a)", &out), nil)
+	testing.expect_value(t, scan_one(src, "limit(1; .[].a)", &out), nil)
 	testing.expect_value(t, len(out), 1)
 	testing.expect_value(t, string(src[out[0].lo:out[0].hi]), "1")
 	// Without the limit the walk reads on and meets the fault, after the answers before it.
 	clear(&out)
-	testing.expect_value(t, csv.find_column(src, ".[].a", &out), csv.Error{kind = .Bad_Char, offset = 5})
+	testing.expect_value(t, scan_one(src, ".[].a", &out), csv.Error{kind = .Bad_Char, offset = 5})
 	testing.expect_value(t, len(out), 1)
 	clear(&out)
 	good := transmute([]byte)string("a\n1\n2\n")
-	testing.expect_value(t, csv.find_column(good, "limit(5; .[].a)", &out), nil)
+	testing.expect_value(t, scan_one(good, "limit(5; .[].a)", &out), nil)
 	testing.expect_value(t, len(out), 2)
+}
+
+// One path through a `Request`, its answers appended to `out`.
+scan_one :: proc(src: []byte, path: csv.Path_Spec, out: ^[dynamic]csv.Answer, opts := csv.Read_Opts{}) -> Maybe(csv.Error) {
+	req: csv.Request
+	defer csv.destroy(&req)
+	csv.request_init(&req, path, opts = opts) or_return
+	err := csv.scan(src, &req)
+	append(out, ..req.answers[:])
+	return err
+}
+
+// Many paths in one pass: each path's answers in row order, a row path's miss among them, and the walk ends after
+// the last row any path names.
+@(test)
+test_request_answers_many_paths_in_one_pass :: proc(t: ^testing.T) {
+	src := transmute([]byte)string("id,name\n1,ada\n2,bob\n3\"x\n")
+	req: csv.Request
+	defer csv.destroy(&req)
+	testing.expect_value(t, csv.request_init(&req, ".[1].name", "limit(2; .[].id)", ".[0][5]", ".[0]"), nil)
+	testing.expect_value(t, csv.scan(src, &req), nil)
+	want := []string{"bob", "1 2", "", "1,ada"}
+	for w, q in want {
+		got, err := csv.answers(&req, q)
+		testing.expect_value(t, err, nil)
+		testing.expectf(t, cells(src, got) == w, "path %d: %q, want %q", q, cells(src, got), w)
+	}
+	miss, _ := csv.answers(&req, 2)
+	testing.expect_value(t, miss[0], csv.Answer{outcome = .Missing, owner = 8, query = 2, node = csv.NO_NODE})
+	// A rescan with a path over every row meets the fault after the answers before it.
+	testing.expect_value(t, csv.request_init(&req, ".[].id", ".[0].name"), nil)
+	testing.expect_value(t, csv.scan(src, &req), csv.Error{kind = .Bad_Char, offset = 21})
+	testing.expect_value(t, len(req.answers), 3)
+	testing.expect_value(t, csv.scan(src, &csv.Request{}), csv.Error{kind = .Bad_Option})
+	// The answers live in the request's allocator, so a rescan with another context allocator answers again.
+	arena: virtual.Arena
+	defer virtual.arena_destroy(&arena)
+	areq: csv.Request
+	testing.expect_value(t, csv.request_init(&areq, ".[0].id", allocator = virtual.arena_allocator(&arena)), nil)
+	testing.expect_value(t, csv.scan(src, &areq), nil)
+	testing.expect_value(t, csv.scan(src, &areq), nil)
+	testing.expect_value(t, len(areq.answers), 1)
+}
+
+// The engine of each path: one pass over the records for every path `scan` takes, and none for the rest.
+@(test)
+test_route_of_names_columns_or_unsupported :: proc(t: ^testing.T) {
+	paths := []csv.Path{{steps = {csv.Any{}, csv.Name("a")}}, {steps = {csv.Name("a")}}}
+	r, err := csv.route_of(nil, paths, 0)
+	testing.expect(t, err == nil && r.class == .Direct && r.why == "Columns")
+	r, err = csv.route_of(nil, paths, 1)
+	testing.expect(t, err == nil && r.class == .Fallback && r.why == "Unsupported_Path")
+	r, err = csv.route_of(nil, paths, 0, {no_header = true})
+	testing.expect(t, err == nil && r.class == .Fallback)
+	_, err = csv.route_of(nil, paths, 2)
+	testing.expect_value(t, err, csv.Error{kind = .Bad_Option})
 }

@@ -1,6 +1,7 @@
 package scan
 
 import "core:simd"
+import core_pkg "../../core"
 import "walk"
 import lex "lex"
 
@@ -22,11 +23,7 @@ import lex "lex"
 //
 // A dialect is named outside a dispatch arm only as the target of a transcode or a validation that is that
 // dialect. A predicate is not asked per row or per value: ask it once for the document or the call.
-Dialect :: enum u8 {
-	Json,
-	Jsonc,
-	Json5,
-}
+Dialect :: core_pkg.Row_Dialect
 
 // What a dialect adds to JSON's grammar. Each feature has one owner in the walk:
 //
@@ -336,9 +333,6 @@ validate_dialect :: proc(src: []byte, dialect: Dialect, facts: ^[dynamic]Fact, l
 		return dialect_validate(src, facts, limits, GRAMMAR[.Jsonc])
 	case .Json5:
 		return dialect_validate(src, facts, limits, GRAMMAR[.Json5])
-	}
-	if limits.max_depth > MAX_DEPTH {
-		return scan_plain_deep(src, .Strict, limits)
 	}
 	return scan_plain(src, .Strict, limits)
 }

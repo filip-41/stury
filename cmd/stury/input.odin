@@ -236,7 +236,10 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 				ins.texts_follow = true
 				end = at + int(e.offset)
 			} else {
-				end = text_end(ins, at, limit)
+				// Found by validating, as a build sizes its rows by its source: building the rest of the file to find
+				// the end would cost every text the rest of the file.
+				n, _, _ := validate_text(ins.data[at:limit], {dialect = run.req.dialect, limits = run.req.limits}, true)
+				end = at + n
 			}
 			d, err = jq.build_rows(ins.data[at:end], run.req.dialect, allocator = doc_allocator)
 		}
@@ -255,6 +258,10 @@ next_value :: proc(ins: ^Inputs, prog: ^jq.Node = nil, own := false) -> (jq.Valu
 			}
 		}
 		if err == nil {
+			if bad_at, bad := jq.non_finite_at(&d); bad {
+				ins.run.name, ins.run.whole = ins.name, ins.data
+				fail_input(ins.run, {kind = .Bad_Literal, offset = u64(at) + bad_at}, "Infinity and NaN have no JSON value")
+			}
 			ins.pos, ins.seen = end, last_read(ins.data, at, end)
 			if run.opts.stream {
 				ins.pinned = true
@@ -320,12 +327,12 @@ text_fault :: proc(ins: ^Inputs, at, limit: int, found: json.Error, what := "") 
 		at_error := e
 		at_error.offset += u64(at)
 		msg = fault_in_file(ins.name, ins.data, at_error, what, ins.lines_before)
-	} else if ins.run.opts.from == .Ndjson { // each line is one text, so a fault at its end is reported at EOF, past the newline
+	} else if FORMATS[ins.run.opts.from].framing == .Lines { // each line is one text, so a fault at its end is reported at EOF, past the newline
 		msg = jq.parse_message(ins.data[at:min(limit + 1, len(ins.data))], e, line, column, what, limit - at)
 	} else {
 		msg = jq.parse_message(ins.data[at:], e, line, column, what)
 	}
-	if ins.run.opts.stream_errors && ins.run.opts.from != .Ndjson {
+	if ins.run.opts.stream_errors && FORMATS[ins.run.opts.from].framing != .Lines {
 		return stream_errors_fault(ins, at, limit, line, column)
 	}
 	whole_error := e
@@ -486,68 +493,12 @@ stream_ended :: proc(ins: ^Inputs) -> bool {
 	return true
 }
 
-// Where the text at data[at:] ends, when another may follow it before `limit`. `limit` when the text is faulty, which
-// build_rows then reports. Once a file has shown a second text, the end of each that does not end its line is found
-// so: a build sizes its rows by its source, so building the rest of the file to find the end would cost every text the rest
-// of the file. A file of one text is built once, unchecked.
-@(private = "file")
-text_end :: proc(ins: ^Inputs, at, limit: int) -> int {
-	src := ins.data[at:limit]
-	err := json.validate(src, {dialect = ins.run.req.dialect, limits = ins.run.req.limits})
-	if e, bad := err.?; bad && e.kind == .Trailing {
-		return at + int(e.offset)
-	}
-	return limit
-}
-
-// A JSONC text the library refuses, which ends the run as `check --from jsonc` reports it.
+// A JSONC or JSON5 text the library refuses, which ends the run as `check --from jsonc` reports it.
 jsonc_fault :: proc(ins: ^Inputs, e: json.Error, at: int) -> ! {
 	e := e
 	e.offset += u64(at)
 	ins.run.name, ins.run.whole = ins.name, ins.data
 	fail_input(ins.run, e)
-}
-
-// Replaces the JSON5 input just read with its JSONC spelling (comments kept), which the run then reads as
-// --from jsonc. A text JSON5 refuses ends the run as a JSONC fault does, and so does `Infinity` or `NaN`, which
-// JSONC cannot spell, at the first of them. Later positions (`input_line_number`) count the JSONC text's lines.
-json5_to_jsonc :: proc(ins: ^Inputs) {
-	if len(bytes.trim_space(ins.data)) == 0 { // no text, as for JSONC
-		return
-	}
-	doc, err := jq.build_rows(ins.data, .Json5)
-	defer json.destroy(&doc)
-	if e, bad := err.?; bad {
-		jsonc_fault(ins, e, 0)
-	}
-	text, merr := json.marshal(&doc, {}, runtime.heap_allocator())
-	if merr == .Non_Finite {
-		at: u64
-		for r, i in doc.rows {
-			if v, _ := json.get_number(&doc, json.Node(i)); r.kind == .Number && v.value - v.value != 0 {
-				at = u64(r.lo)
-				break
-			}
-		}
-		ins.run.name, ins.run.whole = ins.name, ins.data
-		fail_input(ins.run, {kind = .Bad_Literal, offset = at}, "Infinity and NaN have no JSON value")
-	}
-	if merr == .Too_Deep {
-		// The transcode writes MAX_DEPTH levels at most: the text's first level past it is the fault.
-		limits := jq.lifted
-		limits.max_depth = json.MAX_DEPTH
-		if e, bad := json.validate(ins.data, {dialect = .Json5, limits = limits}).?; bad {
-			jsonc_fault(ins, e, 0)
-		}
-	}
-	if merr != nil {
-		fail_input(ins.run, {kind = .Out_Of_Memory}, "out of memory")
-	}
-	free_data({ins.data, ins.mapped})
-	ins.data, ins.mapped = text, false
-	if mapped_input_name == ins.name {
-		mapped_input_name = ""
-	}
 }
 
 // The input jq is reading, and its line: what `input_filename`, `input_line_number` and an error's
@@ -570,7 +521,7 @@ input_position :: proc(ins: ^Inputs) -> (string, int) {
 // first space, quote or bracket, under --seq a record to the next separator, under --from ndjson a line, and under --from jsonc
 // the whole input, one document.
 next_text :: proc(ins: ^Inputs) -> (at, limit: int, trailing, found: bool) {
-	seq, ndjson := ins.run.opts.seq, ins.run.opts.from == .Ndjson
+	seq, ndjson := ins.run.opts.seq, FORMATS[ins.run.opts.from].framing == .Lines
 	for {
 		if !ins.open {
 			// A separator seen in an earlier file leaves every later file's text a record, not text before the
@@ -712,4 +663,15 @@ text_span :: proc(data: []byte, at: int) -> (limit: int, trailing: bool) {
 		}
 	}
 	return limit, false
+}
+
+// Validates `src`, a text `text_span` found, and returns where its value ends: past it when `trailing` lets bytes
+// follow, else len(src), or the fault that refuses it.
+validate_text :: proc(src: []byte, opts: json.Read_Opts, trailing: bool) -> (end: int, e: json.Error, bad: bool) {
+	end = len(src)
+	e, bad = json.validate(src, opts).?
+	if bad && e.kind == .Trailing && trailing {
+		end, bad = int(e.offset), false
+	}
+	return
 }

@@ -289,7 +289,7 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 		}
 		// The rows and the text, and what the scan decoded. What was decoded since is decoded again.
 		d := new(json.Document)
-		d^ = {src = transmute([]byte)copy_string(c, string(x.doc.src)), dialect = x.doc.dialect, deep = x.doc.deep}
+		d^ = {src = transmute([]byte)copy_string(c, string(x.doc.src)), dialect = x.doc.dialect, deep = x.doc.deep, distinct_keys = x.doc.distinct_keys}
 		d.rows = slice.clone_to_dynamic(x.doc.rows[:])
 		d.values = slice.clone_to_dynamic(x.doc.values[:])
 		d.facts = slice.clone_to_dynamic(x.doc.facts[:])

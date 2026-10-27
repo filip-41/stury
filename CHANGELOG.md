@@ -4,24 +4,50 @@
 
 ### Library
 
-- `route_of` names the engine that answers a path of a request, or the reason the automaton does
-  (`Path_Route`), without a scan, and refuses a request as `scan` does.
-- `Dialect.Json5` reads JSON5 1.0.0 in `validate`, `scan`, `find`, `query`, `build` and `unmarshal`. A
-  JSON5 document marshals in JSON's spelling, comments kept; `Infinity` and `NaN` are refused
-  (`.Non_Finite` in `marshal`, `.Out_Of_Range` in `unmarshal`). The edits and `Record_Read` refuse it
-  (`.Bad_Option`).
-- `plain_json(dialect)` and `has_comments(dialect)` ask what a dialect reads without comparing it.
+- `Dialect.Json5` reads JSON5 1.0.0 in `validate`, `scan`, `find`, `query`, `build` and `unmarshal`. A JSON5
+  document marshals as JSON with its comments kept; `Infinity` and `NaN` are refused. The edits and
+  `Record_Read` refuse JSON5.
+- `plain_json`, `has_comments` and `own_spelling` say what a dialect reads, without comparing it.
+- csv gains `Request`, `request_init`, `scan` and `answers`, reading every path in one pass as JSON's do.
+  `csv.find_column` is removed: use a path.
+- `route_of` (json and csv) says which engine answers each path of a request, without scanning.
+- `json.query_in(doc, n, path, out)` answers a path from node `n`. `json.query` returns `Answer`s, as
+  `csv.query` does, and `csv.query` takes no allocator.
+- A path with no `Any` step that does not match gives one `.Missing` answer from `query` and a csv `Request`,
+  as `find` does.
+- `json.upsert` sets a value and adds a missing last member; `set` drops its `upsert` flag.
+- Repeated keys under `.Default`: every reader takes the last copy, csv's `unmarshal` and `Record_Read`
+  included, and the edits refuse a key or header name repeated on their path. Under `.First` and `.Last`,
+  `remove` and `insert` act on the copy `set` finds. A `.Duplicate_Key` refusal is at the repeated key's opening
+  quote.
+- CSV reads and writes `f16` fields.
+- CSV refuses what JSON refuses: an enum value no member has under `enums = .Int`, the `omitempty` tag, a NUL
+  read into a `cstring`, and a `Maybe` of a `cstring`.
+- A refused allocation while an edit's result is validated is `.Out_Of_Memory`.
+- Renamed or changed signatures:
+  - `json.Path_Answer` is `Answer` and `Path_Outcome` is `Answer_Outcome`; both formats share them with `Kind`,
+    `Node` and `NO_NODE`.
+  - JSON's framing is `Read_Opts.framing`: `records(src, opts, allocator)`,
+    `each_record(src, task, data, opts, runner)` and `validate_records(src, opts, runner, allocator)`. `.None`
+    framing keeps the whitespace after the text in its record.
+  - `json.validate(src, opts, runner)` takes a runner, as csv's does. `validate_facts` collects a JSONC text's
+    facts.
+  - The JSON edits and `csv.splice` take `opts: Read_Opts` in place of `dialect`. `csv.insert` takes the path `.`
+    and an `Insert_At` row.
+  - `Records.base` is removed: a record's `at` is its offset in the bytes iterated.
+- The types both formats share are `core`'s, and each format names them: `Read_Opts`, `Unmarshal_Opts`,
+  `Request`, `Route`, `Answer`, the row document (`json.Document` is `core.Row_Document`), `Insert_At`, the
+  writers' put layer (`core/spell`), and the decimal readers `number_of_loose_text` and `fold_int`.
 
 ### Command line
 
-- `--explain` writes the filter's plan (route, path or columns, engine, refusals) and what the run did (texts scanned or
-  interpreted, pieces, fallback, time, cost) to stderr, and runs the filter as without it.
-- `--from json5` reads each input as JSON5, transcoded to JSONC, and `fmt --from json5` too; nesting past 1024
-  levels is refused. `check --from json5` judges the JSON5 text itself. `--to json5`, `fmt --in-place` and
-  `fmt --check` with it are refused.
+- `--explain` writes the filter's plan (route, path or columns, engine, refusals) and what the run did to stderr,
+  and runs the filter as without it.
+- `--from json5` reads JSON5 in filters, `fmt` and `check`. Error lines and `input_line_number` count the
+  text's own lines. `--to json5` is refused.
 - `--stream` gives the events of a faulty text before its fault, as jq does, and `input_line_number` and the
   error positions under `--stream` count jq's lines.
-- `--stream-errors` makes a faulty text's events as it gives them, not all before the first.
+- `--stream-errors` gives a faulty text's events as it reads them, not all before the first.
 - macOS: a pipe named as a path (`/dev/stdin`, `<(...)`) is read wherever a file is: inputs, `--slurpfile`,
   `--rawfile`, `-f`, `check` and `fmt`.
 

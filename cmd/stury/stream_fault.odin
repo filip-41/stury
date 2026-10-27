@@ -121,7 +121,7 @@ fault_walk :: proc(src: []byte, line, column: int, seq, rs_follows, reset_each: 
 fault_event :: proc(w: ^Fault_Walk) -> (ev: Fault_Event, ok: bool) {
 	ev = fault_peek(w) or_return
 	w.given += 1
-	ev.value = clone(ev.value)
+	ev.value = jq.event_clone(ev.value)
 	return ev, true
 }
 
@@ -149,31 +149,11 @@ renew :: proc(w: ^Fault_Walk) {
 	w.gen = 1 - old
 	context.allocator = virtual.arena_allocator(&w.arenas[w.gen])
 	for &s in w.p.path {
-		s = clone(s)
+		s = jq.event_clone(s)
 	}
-	w.p.next = clone(w.p.next)
+	w.p.next = jq.event_clone(w.p.next)
 	w.held = w.arenas[w.gen].total_used
 	virtual.arena_free_all(&w.arenas[old])
-}
-
-// An event or what the parser holds, made anew in the context allocator. An event's container leaf is empty.
-@(private = "file")
-clone :: proc(v: jq.Value) -> jq.Value {
-	#partial switch x in v {
-	case jq.Number:
-		return jq.Number{f = x.f, lit = strings.clone(x.lit)}
-	case string:
-		return strings.clone(x)
-	case ^jq.Array:
-		a := jq.new_array(len(x.items))
-		for m in x.items {
-			append(&a.items, clone(m))
-		}
-		return a
-	case ^jq.Object:
-		return jq.new_object()
-	}
-	return v
 }
 
 // One byte of the text scanned, or once all are, its end; what events either makes go to `w.p.events`.
@@ -239,7 +219,7 @@ step :: proc(w: ^Fault_Walk) {
 			p.events[len(p.events) - 1].late = w.late
 			w.errored = true
 		} else if p.has_next { // a literal the end of the text ends
-			append(&p.events, Fault_Event{value = event(p, p.next), at = w.at})
+			append(&p.events, Fault_Event{value = jq.event_of(path_copy(p), p.next), at = w.at})
 		}
 	}
 }
@@ -263,7 +243,7 @@ at_separator :: proc(p: ^Parser, at: int) -> string {
 		return msg
 	}
 	if p.lexing == .Normal && len(p.path) == 0 && p.has_next {
-		append(&p.events, Fault_Event{value = event(p, p.next), at = at})
+		append(&p.events, Fault_Event{value = jq.event_of(path_copy(p), p.next), at = at})
 	}
 	return ""
 }
@@ -289,22 +269,6 @@ path_copy :: proc(p: ^Parser) -> ^jq.Array {
 	a := jq.new_array(len(p.path))
 	append(&a.items, ..p.path[:])
 	return a
-}
-
-// `[path, leaf]`.
-@(private = "file")
-event :: proc(p: ^Parser, leaf: jq.Value) -> jq.Value {
-	ev := jq.new_array(2)
-	append(&ev.items, path_copy(p), leaf)
-	return ev
-}
-
-// `[path]`, after a container's last member.
-@(private = "file")
-closing :: proc(p: ^Parser) -> jq.Value {
-	ev := jq.new_array(1)
-	append(&ev.items, path_copy(p))
-	return ev
 }
 
 @(private = "file")
@@ -375,7 +339,7 @@ scan :: proc(p: ^Parser, i: int) -> string {
 @(private = "file")
 emit_scalar :: proc(p: ^Parser) {
 	if len(p.path) == 0 && p.has_next {
-		append(&p.staged, event(p, p.next))
+		append(&p.staged, jq.event_of(path_copy(p), p.next))
 		p.next, p.has_next = nil, false
 	}
 }
@@ -518,7 +482,7 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 			return "Objects must consist of key:value pairs"
 		}
 		if p.has_next {
-			append(&p.staged, event(p, p.next))
+			append(&p.staged, jq.event_of(path_copy(p), p.next))
 			p.next, p.has_next = nil, false
 		}
 		if index, is_index := p.path[top].(jq.Number); is_index {
@@ -567,15 +531,15 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 close_container :: proc(p: ^Parser, empty: jq.Value) {
 	was_empty := p.last == .Open_Array || p.last == .Open_Object
 	if p.has_next {
-		append(&p.staged, event(p, p.next))
+		append(&p.staged, jq.event_of(path_copy(p), p.next))
 	}
 	if !was_empty {
-		append(&p.staged, closing(p))
+		append(&p.staged, jq.event_of(path_copy(p)))
 	}
 	p.next, p.has_next = nil, false
 	pop(&p.path)
 	if was_empty {
-		append(&p.staged, event(p, empty))
+		append(&p.staged, jq.event_of(path_copy(p), empty))
 	}
 	p.last = .None if len(p.path) == 0 else .Value
 }

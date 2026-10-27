@@ -1,8 +1,7 @@
-package scan
+package core
 
 // The binary64 rounding kernel: the halfway case a narrowing float would round twice on.
 
-import core_pkg "../../core"
 import "core:strconv/decimal"
 
 // The binary64 value `n` of the number token `t`, made safe to narrow to a float of `sig` significant bits and
@@ -11,7 +10,7 @@ import "core:strconv/decimal"
 // either side. Such a value is replaced by the neighbour the decimal rounds to, checked on its digits. A
 // decimal on the point itself is replaced by the even neighbour: the runtime narrowing cast does not tie to
 // even on x86.
-shape_off_halfway :: #force_inline proc(t: []byte, n: core_pkg.Number, sig: u64, min_exp: i64) -> f64 {
+shape_off_halfway :: #force_inline proc(t: []byte, n: Number, sig: u64, min_exp: i64) -> f64 {
 	bits := transmute(u64)n.value & (1 << 63 - 1)
 	e := i64(bits >> 52) - 1023
 	// The binary64 significand bits below the target's last one, and more below its normal range.
@@ -66,10 +65,10 @@ shape_tie_even :: proc(x: f64, e: i64, drop: u64) -> f64 {
 	return -ax if x < 0 else ax
 }
 
-// The sign of |`t`| - 0.`digits` * 10^`point`, for a number token `t` and decimal digits with no leading
-// zero. Exact at any length: the token's digits are compared once its decimal point is placed.
+// The sign of |`t`| - 0.`digits` * 10^`point`, for a decimal `t` in `number_of_loose_text`'s grammar and digits
+// with no leading zero. Exact at any length: the token's digits are compared once its decimal point is placed.
 shape_decimal_cmp :: proc(t: []byte, digits: []byte, point: i64) -> int {
-	i := int(t[0] == '-')
+	i := int(t[0] == '-' || t[0] == '+')
 	// The token is 0.d1d2... * 10^at, d1 its first nonzero digit.
 	at: i64
 	// The sign of the first digit that differs from `digits`, padded with zeros.

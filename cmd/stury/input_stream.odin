@@ -27,7 +27,7 @@ open_next :: proc(ins: ^Inputs) -> bool {
 	place_past(ins, len(ins.data))
 	retire(ins, ins.data)
 	ins.data, ins.mapped, ins.lines_before, ins.window_lines = nil, false, 0, 0
-	ins.skip, ins.pos, ins.seen, ins.lines, ins.open, ins.texts_follow, ins.lines_tried, ins.line_records = 0, 0, 0, {}, true, false, false, ins.run.opts.from == .Ndjson
+	ins.skip, ins.pos, ins.seen, ins.lines, ins.open, ins.texts_follow, ins.lines_tried, ins.line_records = 0, 0, 0, {}, true, false, false, FORMATS[ins.run.opts.from].framing == .Lines
 	ins.fault_at, ins.seq_head = {}, .Unread
 	file, ok := open_file(ins)
 	if !ok {
@@ -36,21 +36,13 @@ open_next :: proc(ins: ^Inputs) -> bool {
 	if ins.may_stream && streams(ins, file) {
 		ins.reader = start_reader(file)
 		next_window(ins, 0)
-	} else if data, mapped := map_file(file); mapped {
-		close_file(file)
-		ins.data, ins.mapped = data, true
-		mapped_input_name = ins.name
 	} else {
-		all, err := read_whole(file, runtime.heap_allocator())
+		read: bool
+		ins.data, ins.mapped, read = load_input(ins, file)
 		close_file(file)
-		if err != nil {
-			read_failed(ins, err)
+		if !read {
 			return true
 		}
-		ins.data = all
-	}
-	if transcoded(ins.run.opts.from) && !ins.run.checking {
-		json5_to_jsonc(ins)
 	}
 	data := ins.data
 	if !ins.bom_done && len(data) > 0 {
@@ -60,6 +52,20 @@ open_next :: proc(ins: ^Inputs) -> bool {
 		ins.bom_done = true
 	}
 	return true
+}
+
+// File `f`, mapped or read whole onto the heap. A read that fails is reported, and `ok` is false.
+load_input :: proc(ins: ^Inputs, f: ^os.File) -> (data: []byte, mapped, ok: bool) {
+	if data, mapped = map_file(f); mapped {
+		mapped_input_name = ins.name
+		return data, true, true
+	}
+	err: os.Error
+	if data, err = read_whole(f, runtime.heap_allocator()); err != nil {
+		read_failed(ins, err)
+		return nil, false, false
+	}
+	return data, false, true
 }
 
 // Reports whether file `f` is read a window at a time. That holds for a file that is not regular (its end is
@@ -310,7 +316,7 @@ read_on :: proc(ins: ^Inputs, at: int) -> bool {
 // --seq a record runs to the next separator, so one with none after it in the window is cut short.
 @(private = "file")
 unfinished :: proc(ins: ^Inputs, at: int) -> bool {
-	if ins.reader == nil || ins.run.opts.from == .Ndjson {
+	if ins.reader == nil || FORMATS[ins.run.opts.from].framing == .Lines {
 		return false
 	}
 	if ins.run.opts.seq {

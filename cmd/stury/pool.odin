@@ -6,6 +6,7 @@ package main
 import "core:mem/virtual"
 import "core:os"
 import "core:sync"
+import core_pkg "../../core"
 import host "../../host"
 import json "../../json"
 
@@ -41,23 +42,14 @@ fan_out :: proc(r: ^json.Batch_Runner, n: int, task: proc(job: ^$T, k: int) -> b
 	claim :: proc(arg: rawptr) {
 		c := (^Claims)(arg)
 		for !sync.atomic_load(&c.failed) {
-			k := sync.atomic_add(&c.next, 1)
-			if k >= c.n {
-				return
-			}
+			k := core_pkg.slice_next(&c.next, c.n) or_break
 			if !c.task(c.job, k) {
 				sync.atomic_store(&c.failed, true)
 			}
 		}
 	}
 	c := Claims{job = job, task = task, n = n}
-	if r.threads > 0 {
-		r.start(r.data, r.threads, claim, &c)
-		claim(&c)
-		r.finish(r.data)
-	} else {
-		claim(&c)
-	}
+	core_pkg.batch_fan(&core_pkg.Batch_Cursor{runner = r, lanes = r.threads + 1}, claim, &c)
 	return !c.failed
 }
 
@@ -108,7 +100,8 @@ start_pieces :: proc(po: ^Piece_Output, run: ^Run) {
 	po.run, po.stop = run, -1
 	po.pieces.allocator = virtual.arena_allocator(&po.arena)
 	po.spare.allocator = po.pieces.allocator
-	reserve(&po.wbuf, cap(run.out))
+	// The run's output and `wbuf` trade places, so both live as long as the run.
+	po.wbuf = make([dynamic]byte, 0, cap(run.out), run.out.allocator)
 }
 
 end_pieces :: proc(po: ^Piece_Output) {

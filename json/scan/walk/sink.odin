@@ -6,7 +6,7 @@ import "base:runtime"
 // queried leaves its field untouched. `.Path` answers are tagged with their query's index, so a
 // shared array is every query's answers in walk order.
 Scan_Query_Sink :: struct {
-	paths:           [dynamic]Path_Answer,
+	paths:           [dynamic]Answer,
 	// How many times a `.Last` repeat retracted rows of `paths` to `RETRACTED_TAG` (`path_supersede`), rows
 	// the json layer must drop. An `int`, as a `bool` would pad the struct and a padded `---` local is zeroed.
 	paths_retracted: int,
@@ -14,6 +14,9 @@ Scan_Query_Sink :: struct {
 	// (`wild_key`, `demand_wild_open`): one with a repeated key, which the json layer answers on the tape. An
 	// `int` for the reason above.
 	paths_unresolved: int,
+	// The start of the first key a `.All` run's `Name` step matched twice in one object (`auto_key_match`), 0 for
+	// none: an edit under `.Default` refuses it. An `int` for the reason above.
+	paths_repeat:    int,
 	nodes:           [dynamic]Row,
 	// The bytes of every decoded string value whose source text carried an escape, back to back. Rows
 	// address them by offset (`Row_Str`), so the store may move as it grows. An escape-free string is

@@ -1,13 +1,15 @@
 package json
 
 import "core:bytes"
+import core_pkg "../core"
 import scan_pkg "scan"
 import index_pkg "scan/index"
-import "scan/walk"
 
-// How an input is cut into records. The iterator checks the framing only: whatever the caller runs on a
-// record's bytes (`validate`, `build`, `unmarshal`, `scan`) checks the record.
+// How an input is cut into records (`Read_Opts.framing`). The iterator checks the framing only: whatever the
+// caller runs on a record's bytes (`validate`, `build`, `unmarshal`, `scan`) checks the record.
 //
+//	.None          the input is one record from its first byte that is not whitespace, unless it is whitespace
+//	               only.
 //	.NDJSON        a line of JSON whitespace only (spaces, tabs, CRs), or none, is
 //	               not a record. A record includes its line's leading spaces and excludes the line break and a
 //	               CR before it.
@@ -28,6 +30,7 @@ import "scan/walk"
 // that starts with one past it is `.Bad_Char` on `err`, since `validate` on the record alone would step over
 // it.
 Framing :: enum u8 {
+	None,
 	NDJSON,
 	JSON_Seq,
 	Root_Entries,
@@ -48,9 +51,8 @@ Record :: struct {
 // A pull over an input's records (`next_record`). The fields are the iterator's own but `err`: the framing
 // fault that ended it, as an offset from the input's first byte.
 Records :: struct {
-	// The bytes framed now, the input's offset of their first, and the next one to read.
+	// The bytes framed, a prefix of the input, and the next one to read.
 	src:     []byte,
-	base:    u64,
 	pos:     int,
 	framing: Framing,
 	// `.Root_Entries`: whether the root is open, where its entries end (its close bracket, or a piece's last
@@ -64,10 +66,10 @@ Records :: struct {
 	err:     Maybe(Error),
 }
 
-// The records of `src`. Allocates nothing.
+// The records of `src` under `opts.framing`; no other field is read. Allocates nothing: `allocator` is unused.
 @(require_results)
-records :: proc(src: []byte, framing: Framing) -> Records {
-	return {src = src, framing = framing}
+records :: proc(src: []byte, opts := Read_Opts{}, allocator := context.allocator) -> Records {
+	return {src = src, framing = opts.framing}
 }
 
 // The next record, or false at the end or on a fault in `it.err`.
@@ -77,6 +79,8 @@ next_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 		return
 	}
 	switch it.framing {
+	case .None:
+		rec, ok = next_text(it)
 	case .NDJSON:
 		rec, ok = next_ndjson(it)
 	case .JSON_Seq:
@@ -92,9 +96,23 @@ next_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 }
 
 @(private)
+next_text :: proc(it: ^Records) -> (rec: Record, ok: bool) {
+	src := it.src
+	if it.pos > 0 {
+		return
+	}
+	it.pos = len(src)
+	lo := core_pkg.skip_space(src, scan_pkg.bom_len(src))
+	if lo == len(src) {
+		return
+	}
+	return {bytes = src[lo:], at = u64(lo)}, true
+}
+
+@(private)
 next_ndjson :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 	src := it.src
-	if it.pos == 0 && it.base == 0 {
+	if it.pos == 0 {
 		it.pos = scan_pkg.bom_len(src)
 	}
 	for it.pos < len(src) {
@@ -109,12 +127,8 @@ next_ndjson :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 		if end > start && src[end - 1] == '\r' {
 			end -= 1
 		}
-		p := start
-		for p < end && walk.is_space(src[p]) {
-			p += 1
-		}
-		if p < end {
-			return {bytes = src[start:end], at = it.base + u64(start)}, true
+		if core_pkg.skip_space(src[:end], start) < end {
+			return {bytes = src[start:end], at = u64(start)}, true
 		}
 	}
 	return
@@ -126,24 +140,22 @@ next_ndjson :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 @(private)
 next_json_seq :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 	src := it.src
-	if it.pos == 0 && it.base == 0 {
+	if it.pos == 0 {
 		it.pos = scan_pkg.bom_len(src)
 	}
-	for it.pos < len(src) && walk.is_space(src[it.pos]) {
-		it.pos += 1
-	}
+	it.pos = core_pkg.skip_space(src, it.pos)
 	if it.pos >= len(src) {
 		return
 	}
 	if src[it.pos] != 0x1E {
-		it.err = Error{kind = .Bad_Char, offset = it.base + u64(it.pos)}
+		it.err = Error{kind = .Bad_Char, offset = u64(it.pos)}
 		return
 	}
 	start := it.pos
 	for start < len(src) {
 		// A record's first byte is above a space. The separators and whitespace are not.
 		c := src[start]
-		if c != 0x1E && (c > ' ' || !walk.is_space(c)) {
+		if c != 0x1E && (c > ' ' || !core_pkg.is_space(c)) {
 			break
 		}
 		start += 1
@@ -155,9 +167,9 @@ next_json_seq :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 	if k := bytes.index_byte(src[start:], 0x1E); k >= 0 {
 		it.pos = start + k
 	}
-	rec = {bytes = src[start:it.pos], at = it.base + u64(start)}
+	rec = {bytes = src[start:it.pos], at = u64(start)}
 	if scan_pkg.seq_truncated_number(rec.bytes) {
-		it.err = Error{kind = .Truncated, offset = it.base + u64(it.pos)}
+		it.err = Error{kind = .Truncated, offset = u64(it.pos)}
 		return {}, false
 	}
 	return rec, true
@@ -178,12 +190,8 @@ next_entry :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 		it.owed = true
 	}
 	it.pos = hi + 1
-	for lo < hi && walk.is_space(src[lo]) {
-		lo += 1
-	}
-	for hi > lo && walk.is_space(src[hi - 1]) {
-		hi -= 1
-	}
+	lo = core_pkg.skip_space(src[:hi], lo)
+	hi = core_pkg.skip_space_back(src, lo, hi)
 	if lo == hi && !it.owed {
 		// The root is empty.
 		return
@@ -195,7 +203,7 @@ next_entry :: proc(it: ^Records) -> (rec: Record, ok: bool) {
 			return
 		}
 	}
-	return {bytes = src[lo:hi], key = key, at = it.base + u64(lo)}, true
+	return {bytes = src[lo:hi], key = key, at = u64(lo)}, true
 }
 
 // The key of the member src[lo:hi] and where its value starts, or nil on a fault in `it.err`.
@@ -215,28 +223,18 @@ entry_key :: proc(it: ^Records, lo, hi: int) -> (key: []byte, value: int) {
 		entry_fault(it, lo + int(e.offset), e.kind)
 		return nil, 0
 	}
-	p := lo + len(key)
-	for p < hi && walk.is_space(src[p]) {
-		p += 1
-	}
+	p := core_pkg.skip_space(src[:hi], lo + len(key))
 	if p == hi || src[p] != ':' {
 		// Past the key there is only space before the entry's comma or the root's close.
-		for p < it.end && walk.is_space(src[p]) {
-			p += 1
-		}
-		entry_fault(it, p, .Bad_Char)
+		entry_fault(it, core_pkg.skip_space(src[:it.end], p), .Bad_Char)
 		return nil, 0
 	}
-	p += 1
-	for p < hi && walk.is_space(src[p]) {
-		p += 1
-	}
-	return key, p
+	return key, core_pkg.skip_space(src[:hi], p + 1)
 }
 
 @(private)
 entry_fault :: proc(it: ^Records, p: int, kind: Error_Kind) {
-	it.err = Error{kind = kind, offset = it.base + u64(p)}
+	it.err = Error{kind = kind, offset = u64(p)}
 	it.pos = it.end + 1
 }
 
@@ -246,14 +244,8 @@ entry_fault :: proc(it: ^Records, p: int, kind: Error_Kind) {
 open_root :: proc(it: ^Records) -> bool {
 	src := it.src
 	it.opened = true
-	p := scan_pkg.bom_len(src)
-	for p < len(src) && walk.is_space(src[p]) {
-		p += 1
-	}
-	z := len(src) - 1
-	for z > p && walk.is_space(src[z]) {
-		z -= 1
-	}
+	p := core_pkg.skip_space(src, scan_pkg.bom_len(src))
+	z := core_pkg.skip_space_back(src, p, len(src)) - 1
 	if p < z && (src[p] == '[' || src[p] == '{') && src[z] == src[p] + 2 {
 		it.pos, it.end, it.keyed = p + 1, z, src[p] == '{'
 		it.commas = index_pkg.comma_cursor(p + 1)

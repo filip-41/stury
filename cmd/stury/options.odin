@@ -181,7 +181,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
-	jq.read_dialect = read_dialect(o.from)
+	jq.read_dialect = FORMATS[o.from].source
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
 		a := args[i]
@@ -287,7 +287,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	// fmt writes each input as its own format unless --to says otherwise, so its --to follows --from when --to
 	// was not given. `--to ndjson` is what sets the compact layout here, since fmt refuses -c.
 	if cli.formatting && cli.formats.to == nil {
-		o.to = reads_as(o.from)
+		o.to = FORMATS[o.from].written_as.? or_else o.from
 	}
 	if o.to == .Ndjson {
 		o.compact = true
@@ -311,8 +311,8 @@ format_option :: proc(cli: ^Cli, args: []string, i: int) {
 	}
 	if a == "--from" {
 		cli.formats.from = f
-	} else if f == .Json5 {
-		usage_error("--to does not write json5: --to jsonc writes its values and comments")
+	} else if FORMATS[f].written_as != nil {
+		usage_error("--to does not write %s: --to %s writes its values and comments", args[i + 1], FORMATS[FORMATS[f].written_as.?].name)
 	} else {
 		cli.formats.to = f
 	}
@@ -598,9 +598,8 @@ load_file :: proc(path: string, raw: bool) -> (v: jq.Value, msg: string) {
 		if !json.plain_json(jq.read_dialect) { // one document per input, as for the files
 			end, trailing = len(data), false
 		}
-		if e, bad := json.validate(data[at:end], {dialect = jq.read_dialect, limits = jq.lifted}).?; bad && e.kind == .Trailing && trailing {
-			end = at + int(e.offset)
-		}
+		n, _, _ := validate_text(data[at:end], {dialect = jq.read_dialect, limits = jq.lifted}, trailing)
+		end = at + n
 		x, err := jq.read_text(data[at:end])
 		if e, bad := err.?; bad {
 			line, column := 1, 0

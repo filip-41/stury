@@ -8,6 +8,18 @@ import "core:strings"
 import "core:sync"
 import "core:testing"
 
+// `.None`: the input past its BOM is one record, whitespace and all; whitespace alone is none.
+@(test)
+test_no_framing_yields_the_text :: proc(t: ^testing.T) {
+	it := expect_records(t, transmute([]byte)string("\xEF\xBB\xBF [1,\n2] \n"), .None, {"[1,\n2] \n"})
+	testing.expect(t, it.err == nil)
+	expect_records(t, transmute([]byte)string(" \n"), .None, {})
+	faults, err := json.validate_records(transmute([]byte)string("[1,]"), {})
+	defer delete(faults)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(faults), 1)
+}
+
 @(test)
 test_ndjson_yields_one_value_per_line :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("1\n\n {\"a\":2}\r\ntrue\n")
@@ -27,7 +39,7 @@ test_json_seq_follows_rfc7464 :: proc(t: ^testing.T) {
 	cut := transmute([]byte)string("\x1egarbage!!\x1e[2]\n\x1e1\n\x1e2\nx\x1e{\"a\":")
 	it = expect_records(t, cut, .JSON_Seq, {"garbage!!", "[2]\n", "1\n", "2\nx", "{\"a\":"})
 	testing.expect(t, it.err == nil)
-	it = json.records(cut, .JSON_Seq)
+	it = json.records(cut, {framing = .JSON_Seq})
 	verdicts := []json.Error_Kind{.Bad_Char, .None, .None, .Trailing, .Truncated}
 	for n := 0;; n += 1 {
 		rec := json.next_record(&it) or_break
@@ -72,7 +84,7 @@ test_json_seq_blank_records_are_none :: proc(t: ^testing.T) {
 		{"\xef\xbb\xbf\x1e[1]\n\x1e\n", {"[1]\n"}},
 	}) {
 		testing.expectf(t, expect_records(t, raw(c.src), .JSON_Seq, c.recs).err == nil, "%q", c.src)
-		faults, err := json.validate_records(raw(c.src), .JSON_Seq)
+		faults, err := json.validate_records(raw(c.src), {framing = .JSON_Seq})
 		testing.expectf(t, err == nil && faults == nil, "%q: %v %v", c.src, faults, err)
 	}
 	testing.expect_value(t, expect_records(t, raw("\xef\xbb\xbf1\n"), .JSON_Seq, {}).err, json.Error{kind = .Bad_Char, offset = 3})
@@ -83,7 +95,7 @@ test_json_seq_blank_records_are_none :: proc(t: ^testing.T) {
 test_ndjson_whitespace_lines_are_blank :: proc(t: ^testing.T) {
 	src := raw("1\n\r\r\n \r\t\n\r\n2\n")
 	expect_records(t, src, .NDJSON, {"1", "2"})
-	faults, err := json.validate_records(src, .NDJSON)
+	faults, err := json.validate_records(src, {framing = .NDJSON})
 	testing.expectf(t, err == nil && faults == nil, "%v %v", faults, err)
 }
 
@@ -94,7 +106,7 @@ test_root_entries_yield_elements_and_members :: proc(t: ^testing.T) {
 	testing.expect(t, it.err == nil)
 
 	obj := transmute([]byte)string(`{"a": 1, "b\"c" :[2] , "a":{}}`)
-	it = json.records(obj, .Root_Entries)
+	it = json.records(obj, {framing = .Root_Entries})
 	keys := []string{`"a"`, `"b\"c"`, `"a"`}
 	values := []string{"1", "[2]", "{}"}
 	n := 0
@@ -134,7 +146,7 @@ test_root_entries_yield_elements_and_members :: proc(t: ^testing.T) {
 		want := json.Error{kind = .Bad_Char, offset = c.at}
 		it = expect_records(t, transmute([]byte)c.src, c.framing, {"1 " if c.framing == .JSON_Seq else "1"})
 		testing.expectf(t, it.err == want, "%q: %v", c.src, it.err)
-		faults, ferr := json.validate_records(transmute([]byte)c.src, c.framing)
+		faults, ferr := json.validate_records(transmute([]byte)c.src, {framing = c.framing})
 		testing.expectf(t, ferr == want && faults == nil, "%q: %v %v", c.src, ferr, faults)
 	}
 	testing.expect_value(t, json.validate(transmute([]byte)string("[1, \xef\xbb\xbf2]")), json.Error{kind = .Bad_Char, offset = 4})
@@ -144,7 +156,7 @@ test_root_entries_yield_elements_and_members :: proc(t: ^testing.T) {
 @(test)
 test_validate_records_agrees_with_validate_on_a_root :: proc(t: ^testing.T) {
 	for src in ([]string{`[1, [2], {"a": "b"}]`, `[1 2]`, `[1, tru]`, `{"a": 1, "b": [}`, "[1, \xef\xbb\xbf2]", `["a\"]`, `[1] [2]`, `[1],[2]`, `{"k": {"x": 1}, "k": 2}`}) {
-		faults, err := json.validate_records(transmute([]byte)src, .Root_Entries)
+		faults, err := json.validate_records(transmute([]byte)src, {framing = .Root_Entries})
 		defer delete(faults)
 		whole := json.validate(transmute([]byte)src)
 		testing.expectf(t, (whole == nil) == (err == nil && len(faults) == 0), "%q: validate %v, records %v %v", src, whole, err, faults)
@@ -163,7 +175,7 @@ test_each_record_matches_the_serial_iterator :: proc(t: ^testing.T) {
 		defer delete(src)
 		want: [dynamic]json.Record
 		defer delete(want)
-		it := json.records(src, framing)
+		it := json.records(src, {framing = framing})
 		for rec in json.next_record(&it) {
 			append(&want, rec)
 		}
@@ -171,7 +183,7 @@ test_each_record_matches_the_serial_iterator :: proc(t: ^testing.T) {
 		for runner in ([]^json.Batch_Runner{nil, &pool.runner}) {
 			got: Collected
 			defer delete(got.pieces)
-			err := json.each_record(src, framing, collect_piece, &got, runner)
+			err := json.each_record(src, collect_piece, &got, {framing = framing}, runner)
 			testing.expectf(t, err == nil, "%v: %v", framing, err)
 			slice.sort_by(got.pieces[:], proc(a, b: Collected_Piece) -> bool {return a.k < b.k})
 			n := 0
@@ -188,7 +200,7 @@ test_each_record_matches_the_serial_iterator :: proc(t: ^testing.T) {
 			}
 			testing.expectf(t, n == len(want), "%v: %d records, serial %d", framing, n, len(want))
 
-			faults, ferr := json.validate_records(src, framing, runner)
+			faults, ferr := json.validate_records(src, {framing = framing}, runner)
 			defer delete(faults)
 			testing.expect(t, ferr == nil)
 			k := 0
@@ -225,25 +237,25 @@ test_each_record_stops_and_reports_the_first_fault :: proc(t: ^testing.T) {
 	}
 	cut := slice.concatenate([][]byte{src[:at], transmute([]byte)string("\x1e7"), src[at:]})
 	defer delete(cut)
-	faults, err := json.validate_records(cut, .JSON_Seq, &pool.runner)
+	faults, err := json.validate_records(cut, {framing = .JSON_Seq}, &pool.runner)
 	defer delete(faults)
-	serial, serr := json.validate_records(cut, .JSON_Seq)
+	serial, serr := json.validate_records(cut, {framing = .JSON_Seq})
 	defer delete(serial)
 	testing.expectf(t, err == json.Error{kind = .Truncated, offset = u64(at + 2)}, "%v, want %d", err, at + 2)
 	testing.expect(t, serr == err && len(faults) > 0 && slice.equal(faults, serial) && slice.last(faults).lo < u64(at))
 
 	calls: int
-	stopped := json.each_record(src, .NDJSON, proc(data: rawptr, _: ^json.Records, _: int) -> bool {
+	stopped := json.each_record(src, proc(data: rawptr, _: ^json.Records, _: int) -> bool {
 		sync.atomic_add((^int)(data), 1)
 		return false
-	}, &calls, &pool.runner)
+	}, &calls, {framing = .NDJSON}, &pool.runner)
 	testing.expect(t, stopped == nil && calls >= 1 && calls <= 4)
 }
 
 @(test)
 test_render_error_counts_lines_of_a_records_input :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("\x1e1\n\x1e2\n\x1e3")
-	it := json.records(src, .JSON_Seq)
+	it := json.records(src, {framing = .JSON_Seq})
 	for _ in json.next_record(&it) {
 	}
 	e, bad := it.err.(json.Error)
@@ -279,7 +291,7 @@ collect_piece :: proc(data: rawptr, piece: ^json.Records, k: int) -> bool {
 // The records of `src` are `want`, each at its offset (the iterator is run to read its `err`).
 @(private = "file")
 expect_records :: proc(t: ^testing.T, src: []byte, framing: json.Framing, want: []string, loc := #caller_location) -> json.Records {
-	it := json.records(src, framing)
+	it := json.records(src, {framing = framing})
 	n := 0
 	for rec in json.next_record(&it) {
 		if n < len(want) {
@@ -304,7 +316,7 @@ many_records :: proc(framing: json.Framing) -> []byte {
 			append(out, "\x1e\x1e\x1e")
 		case .Root_Entries:
 			append(out, len(out) == 0 ? "[" : ",\n ")
-		case .NDJSON:
+		case .None, .NDJSON:
 		}
 		append(out, rec)
 		if framing != .Root_Entries {
@@ -349,12 +361,12 @@ many_records :: proc(framing: json.Framing) -> []byte {
 @(test)
 test_records_name_a_bad_literal_and_strip_the_ndjson_bom :: proc(t: ^testing.T) {
 	for src in ([]string{"[1, tru]", "tru\n", "1\ntru\n2\n"}) {
-		faults, err := json.validate_records(raw(src), .NDJSON)
+		faults, err := json.validate_records(raw(src), {framing = .NDJSON})
 		testing.expectf(t, err == nil && len(faults) == 1 && faults[0].err.kind == .Bad_Literal, "%q: %v %v", src, faults, err)
 		delete(faults)
 	}
 	expect_records(t, raw("\xef\xbb\xbf1\n2\n"), .NDJSON, {"1", "2"})
-	faults, err := json.validate_records(raw("\xef\xbb\xbf1\n2\n"), .NDJSON)
+	faults, err := json.validate_records(raw("\xef\xbb\xbf1\n2\n"), {framing = .NDJSON})
 	testing.expectf(t, err == nil && faults == nil, "%v %v", faults, err)
 }
 
@@ -362,7 +374,7 @@ test_records_name_a_bad_literal_and_strip_the_ndjson_bom :: proc(t: ^testing.T) 
 // `validate_records`, and the slice states `each_record` makes for `.Root_Entries` at a width past one.
 @(test)
 test_records_refused_allocation_is_out_of_memory :: proc(t: ^testing.T) {
-	faults, err := json.validate_records(raw("1\nx\n"), .NDJSON, allocator = runtime.nil_allocator())
+	faults, err := json.validate_records(raw("1\nx\n"), {framing = .NDJSON}, allocator = runtime.nil_allocator())
 	testing.expect(t, err == json.Error{kind = .Out_Of_Memory} && faults == nil, "validate_records")
 
 	pool: host.Batch_Pool
@@ -372,9 +384,9 @@ test_records_refused_allocation_is_out_of_memory :: proc(t: ^testing.T) {
 	defer delete(src)
 	calls: int
 	context.allocator = runtime.nil_allocator()
-	err = json.each_record(src, .Root_Entries, proc(data: rawptr, _: ^json.Records, _: int) -> bool {
+	err = json.each_record(src, proc(data: rawptr, _: ^json.Records, _: int) -> bool {
 		sync.atomic_add((^int)(data), 1)
 		return true
-	}, &calls, &pool.runner)
+	}, &calls, {framing = .Root_Entries}, &pool.runner)
 	testing.expect(t, err == json.Error{kind = .Out_Of_Memory} && calls == 0, "each_record")
 }

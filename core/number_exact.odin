@@ -1,4 +1,4 @@
-package number
+package core
 
 import "base:intrinsics"
 import "core:math/bits"
@@ -57,6 +57,17 @@ DOM_DIV5_MAX := [23]u64 {
 	0x2f394,
 	0x971d,
 	0x1e39,
+}
+
+// `DOM_MANT_MAX5[e] = ceil(2^53 / 5^e)`: the positive side of `dom_exact_scale`, asked by
+// comparison instead of a `u128` product. For integers `o, e >= 0`,
+// `o * 5^e < 2^53  <=>  o < ceil(2^53 / 5^e)`, an identity over the integers.
+@(rodata)
+DOM_MANT_MAX5: [23]u64 = {
+	9007199254740992, 1801439850948199, 360287970189640, 72057594037928,
+	14411518807586, 2882303761518, 576460752304, 115292150461, 23058430093,
+	4611686019, 922337204, 184467441, 36893489, 7378698, 1475740, 295148,
+	59030, 11806, 2362, 473, 95, 19, 4,
 }
 
 // 2^53: an integer is exactly a binary64 when its odd part is below this (`dom_exact_scale`).

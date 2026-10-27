@@ -13,6 +13,8 @@ package scan
 // after its first character the decimal digits (Nd), the marks Mn and Mc, and the connectors Pc. A comment's
 // bytes are checked as JSONC checks them.
 
+import "core:math"
+import "core:strconv"
 import "core:unicode"
 import "core:unicode/utf8"
 import "base:runtime"
@@ -458,4 +460,44 @@ json5_int :: proc(src: []byte, lo, hi: u64) -> (v: i64, ok: bool) {
 		return 0, false
 	}
 	return decode_int(src, p, hi)
+}
+
+// The JSON5 number token `lit`, spelled outside JSON's grammar (`DIALECT_SPELLED`), appended to `out` in JSON's
+// spelling: a hex integer in decimal (past 64 bits, the double its digits accumulate to), a decimal without its
+// `+`, with a `0` before a leading point and without a trailing point. False, with `out` as it was, for a value
+// JSON cannot spell (`Infinity`, `NaN`, a hex integer beyond a double).
+json5_number_json :: proc(lit: string, out: ^[dynamic]byte) -> bool {
+	v := number.json5_number_value(transmute([]byte)lit, 0, u64(len(lit)))
+	if math.is_nan(v.value) || math.is_inf(v.value) {
+		return false
+	}
+	reserve(out, len(out) + len(lit) + 32) // a decimal grows by a `0`; a hex integer is at most 25 bytes
+	p := 0
+	if lit[0] == '+' || lit[0] == '-' {
+		p = 1
+	}
+	if lit[0] == '-' {
+		append(out, '-')
+	}
+	if len(lit) > p + 1 && lit[p + 1] | 0x20 == 'x' {
+		digits: [32]u8
+		mag, approx, over := number.json5_hex(transmute([]byte)lit, u64(p + 2), u64(len(lit)))
+		if !over {
+			append(out, ..transmute([]byte)strconv.write_uint(digits[:], mag, 10))
+		} else {
+			// `write_float` leads with the sign.
+			append(out, ..transmute([]byte)strconv.write_float(digits[:], approx, 'g', -1, 64)[1:])
+		}
+		return true
+	}
+	if lit[p] == '.' {
+		append(out, '0')
+	}
+	for i in p ..< len(lit) {
+		if lit[i] == '.' && (i + 1 == len(lit) || lit[i + 1] - '0' >= 10) {
+			continue
+		}
+		append(out, lit[i])
+	}
+	return true
 }

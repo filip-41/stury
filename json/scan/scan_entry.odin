@@ -23,22 +23,24 @@ enter_document :: #force_inline proc(src: []byte, limits: Limits, $ceiling: u64)
 // 257 digits then `.` is `Limit_Digits` at the token start, not `Truncated`.
 //
 // Always a whole-item result (no query can settle early), so it has no `validity` out-parameter. A cap past
-// MAX_DEPTH is held to it: `scan_plain_deep` reads deeper.
+// MAX_DEPTH reads on `walk_deep`: `.Structural` keeps its level, and `.Strict` and `.Lazy` (which has nothing
+// to stop at) check every value.
 //
-// Inlined, so a caller's constant strictness picks one walk at compile time: a `.Locate` walk is linked only
-// into a program that can ask for one.
+// Inlined, so a caller's constant strictness and limits pick one walk at compile time: a `.Locate` walk, or the
+// deep one, is linked only into a program that can ask for one.
 scan_plain :: #force_inline proc(
 	src: []byte,
 	strictness := Strictness.Strict,
 	limits := Limits{},
 ) -> Maybe(Error) {
+	deep := limits.max_depth > MAX_DEPTH
 	// One literal per arm: the walk's check level is a polymorphic parameter and must be constant. No
 	// `case:` default, so a new `Check_Level` member fails to compile instead of being swallowed.
 	switch axes_check_level(axes_for(strictness, .All)) {
 	case .Values:
-		return scan_plain_at(src, limits, .Values)
+		return scan_plain_deep_at(src, limits, .Values) if deep else scan_plain_at(src, limits, .Values)
 	case .Locate:
-		return scan_plain_at(src, limits, .Locate)
+		return scan_plain_deep_at(src, limits, .Locate) if deep else scan_plain_at(src, limits, .Locate)
 	}
 	unreachable()
 }
@@ -69,19 +71,7 @@ scan_plain_pretty :: #force_no_inline proc(src: []byte, limits: Limits, $check: 
 	return finish(&s)
 }
 
-// `scan_plain` under a cap past MAX_DEPTH, on `walk_deep`: `.Structural` keeps its level, and `.Strict` and
-// `.Lazy` (which has nothing to stop at) check every value. The caller picks it before the walk, so
-// `scan_plain` compiles as if it did not exist. Inlined as `scan_plain` is.
-scan_plain_deep :: #force_inline proc(src: []byte, strictness: Strictness, limits: Limits) -> Maybe(Error) {
-	switch axes_check_level(axes_for(strictness, .All)) {
-	case .Values:
-		return scan_plain_deep_at(src, limits, .Values)
-	case .Locate:
-		return scan_plain_deep_at(src, limits, .Locate)
-	}
-	unreachable()
-}
-
+// `scan_plain` under a cap past MAX_DEPTH. Out of line, so the compact walk's caller is laid out as without it.
 @(private = "file")
 scan_plain_deep_at :: #force_no_inline proc(src: []byte, limits: Limits, $check: Check_Level) -> Maybe(Error) {
 	s := enter_document(src, limits, DEPTH_CEILING)

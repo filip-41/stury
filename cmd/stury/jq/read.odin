@@ -69,11 +69,30 @@ build_rows :: proc(
 	return
 }
 
+// The offset of the first number of `doc` that JSON cannot spell (JSON5's `Infinity` and `NaN`).
+non_finite_at :: proc(doc: ^json.Document) -> (at: u64, found: bool) {
+	if !json.own_spelling(doc.dialect) {
+		return
+	}
+	for r, i in doc.rows {
+		if r.kind == .Number && r.first_esc == number.DIALECT_SPELLED {
+			if v, _ := json.get_number(doc, json.Node(i)); v.value - v.value != 0 {
+				return u64(r.lo), true
+			}
+		}
+	}
+	return
+}
+
 // `src` as one JSON text, or the fault that it is not one.
 read_text :: proc(src: []byte) -> (Value, Maybe(json.Error)) {
 	d, err := build_rows(src, read_dialect)
 	if err != nil {
 		return nil, err
+	}
+	if at, found := non_finite_at(&d); found {
+		json.destroy(&d)
+		return nil, json.Error{kind = .Bad_Literal, offset = at}
 	}
 	return document_value(d), nil
 }
@@ -184,29 +203,43 @@ event :: proc(e: ^Events, leaf: json.Node) -> Value {
 	for f in e.frames {
 		append(&path.items, num(f64(f.index)) if f.array else Value(strings.clone(f.key)))
 	}
+	if leaf == json.NO_NODE {
+		return event_of(path)
+	}
+	#partial switch kd, _ := json.kind(&e.doc, leaf); kd {
+	case .Array:
+		return event_of(path, new_array())
+	case .Object:
+		return event_of(path, new_object())
+	}
+	return event_of(path, event_clone(scalar(Ref{&e.doc, leaf})))
+}
+
+// A `--stream` event: `[path, leaf]`, or `[path]` with no leaf, after a container's last member.
+event_of :: proc(path: ^Array, leaf: ..Value) -> Value {
 	ev := new_array(2)
 	append(&ev.items, path)
-	if leaf == json.NO_NODE {
-		return ev
-	}
-	v: Value
-	switch kd, _ := json.kind(&e.doc, leaf); kd {
-	case .Array:
-		v = new_array()
-	case .Object:
-		v = new_object()
-	case .Null, .False, .True, .Number, .String:
-		#partial switch x in scalar(Ref{&e.doc, leaf}) {
-		case Number:
-			v = Number{f = x.f, lit = strings.clone(x.lit)}
-		case string:
-			v = strings.clone(x)
-		case nil, bool:
-			v = x
-		}
-	}
-	append(&ev.items, v)
+	append(&ev.items, ..leaf)
 	return ev
+}
+
+// An event or a part of one, made anew in the context allocator. An event's container leaf is empty.
+event_clone :: proc(v: Value) -> Value {
+	#partial switch x in v {
+	case Number:
+		return Number{f = x.f, lit = strings.clone(x.lit)}
+	case string:
+		return strings.clone(x)
+	case ^Array:
+		a := new_array(len(x.items))
+		for m in x.items {
+			append(&a.items, event_clone(m))
+		}
+		return a
+	case ^Object:
+		return new_object()
+	}
+	return v
 }
 
 // `src` as one JSON text (`fromjson`), or jq's message for why it is not one.

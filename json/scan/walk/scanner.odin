@@ -2,11 +2,6 @@ package walk
 
 import "base:runtime"
 
-// JSON's whitespace, shared across the codec and the CLI.
-is_space :: #force_inline proc(c: u8) -> bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
-}
-
 // A value's class, which the first byte of a value gives (`lex.VCLASS`) and the walk dispatches on: 0 is not a
 // value's first byte. The container classes are adjacent and the scalar ones follow, so `vc <= VC_ARRAY` and
 // `vc >= VC_STRING` split them, and `vc - VC_OBJECT < 2` tests for either container (0 wraps).

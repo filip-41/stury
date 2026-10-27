@@ -1,5 +1,6 @@
 package core
 
+import "base:runtime"
 import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
@@ -410,21 +411,6 @@ unsupported :: proc(offset: int) -> Parse_Fault {
 	return Parse_Fault{error = .Unsupported_Syntax, offset = u64(offset)}
 }
 
-// JSON's whitespace, which jq's lexer shares.
-@(private = "file")
-is_space :: #force_inline proc(c: u8) -> bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
-}
-
-@(private)
-skip_space :: proc(text: string, pos: int) -> int {
-	i := pos
-	for i < len(text) && is_space(text[i]) {
-		i += 1
-	}
-	return i
-}
-
 @(private)
 is_ident_start :: proc(c: u8) -> bool {
 	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'
@@ -433,4 +419,38 @@ is_ident_start :: proc(c: u8) -> bool {
 @(private)
 is_ident_byte :: proc(c: u8) -> bool {
 	return is_ident_start(c) || (c >= '0' && c <= '9')
+}
+
+// The scratch a `Path_Spec` resolves in (`path_resolve`): its steps, and the decoded names of a text path, in
+// `heap` when the text is longer than `names` and escapes one. The caller deletes `heap`.
+Path_Buf :: struct {
+	steps: [MAX_PATH_STEPS]Step,
+	names: [256]u8,
+	heap:  []u8,
+}
+
+// `spec` as a path borrowing `buf`: a `Path` as it is, text as `parse_path` parses it, a nil spec the empty
+// path. A `Path` past `MAX_PATH_STEPS` is `.Over_Capacity`. On a refusal `buf.heap` is freed.
+path_resolve :: proc(spec: Path_Spec, buf: ^Path_Buf, allocator: runtime.Allocator) -> (p: Path, err: Maybe(Path_Error)) {
+	text, is_text := spec.(string)
+	if !is_text {
+		p, _ = spec.(Path)
+		if len(p.steps) > MAX_PATH_STEPS {
+			return {}, Path_Error{kind = .Over_Capacity}
+		}
+		return p, nil
+	}
+	names := buf.names[:]
+	if len(text) > len(names) && strings.index_byte(text, '\\') >= 0 {
+		aerr: runtime.Allocator_Error
+		if buf.heap, aerr = make([]u8, len(text), allocator); aerr != nil {
+			return {}, PATH_OUT_OF_MEMORY
+		}
+		names = buf.heap
+	}
+	if p, err = parse_path(text, buf.steps[:], names); err != nil {
+		delete(buf.heap, allocator)
+		buf.heap = nil
+	}
+	return
 }

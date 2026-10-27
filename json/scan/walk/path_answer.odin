@@ -5,29 +5,15 @@ import core_pkg "../../../core"
 // How a path query landed: core's `Answer_Outcome`, shared with every format's answer.
 Path_Outcome :: core_pkg.Answer_Outcome
 
-// "No container": `Path_Answer.owner` of an answer no single container holds.
+// "No container": `Answer.owner` of an answer no single container holds.
 NO_OWNER :: core_pkg.NO_OWNER
 
 // The `query` of a retracted answer (`path_supersede`, a gated `.Last` repeat), which the caller drops.
 RETRACTED_TAG :: max(u32)
 
-// One path query's answer. `query` indexes the path in the caller's slice. Queries may share a sink, so
-// the answers are every query's, in walk order.
-//
-// `owner` is the `{` or `[` offset of the container the answer is about: the one holding a `Found`
-// value, the one that lacks a `Missing` member, the one holding the value a `Type_Mismatch` step could
-// not read into. `NO_OWNER` when there is none: the root value, or a miss owed to the document as a
-// whole (`.All` reports its miss once the walk has ended). `kind` is the value's kind for `Found`.
-Path_Answer :: struct {
-	lo, hi:  u64,
-	owner:   u64,
-	query:   u32,
-	node:    Node,
-	outcome: Path_Outcome,
-	kind:    Kind,
-}
-
-#assert(size_of(Path_Answer) == 40)
+// One path query's answer: core's `Answer`. Queries may share a sink, so the answers are every query's, in walk
+// order. A miss owed to the document as a whole has `NO_OWNER` (`.All` reports its miss once the walk has ended).
+Answer :: core_pkg.Answer
 
 // The most runs the path automaton may carry in one scan (a fixed array, since the walk allocates
 // nothing). More are refused before the walk (`Over_Capacity`, `Path_Runs`). Paths the demand matcher
@@ -94,7 +80,7 @@ Path_Auto :: struct {
 
 // One path query's resolution state while the walk runs.
 Path_Run :: struct {
-	sink:  ^[dynamic]Path_Answer,
+	sink:  ^[dynamic]Answer,
 	query: u32,
 	steps: []Step,
 	mode:  Resolution,
@@ -108,7 +94,7 @@ Path_Run :: struct {
 
 	// `.Last` on a `Name` step: one candidate slot, overwritten by each later
 	// occurrence, so `.Last` emits exactly one answer.
-	stage:      Path_Answer,
+	stage:      Answer,
 	has_stage:  bool,
 	// True for the runs the root walk owns. A re-entry's sub-runs are `false`, and
 	// their owner copies them back (see `path_reenter_from_end`).
@@ -152,13 +138,13 @@ step_index :: #force_inline proc(st: Step) -> (idx: i64, ok: bool) {
 
 // The answer a run reports. A `Found` carries the kind its emitter read at `lo`. `node` is the request
 // layer's to stamp, as the walk does not know the node rows.
-path_answer_of :: #force_inline proc(run: ^Path_Run, outcome: Path_Outcome, lo, hi, owner: u64, kind := Kind.Null) -> Path_Answer {
-	return Path_Answer{lo = lo, hi = hi, owner = owner, query = run.query, node = NO_NODE, outcome = outcome, kind = kind}
+path_answer_of :: #force_inline proc(run: ^Path_Run, outcome: Path_Outcome, lo, hi, owner: u64, kind := Kind.Null) -> Answer {
+	return Answer{lo = lo, hi = hi, owner = owner, query = run.query, node = NO_NODE, outcome = outcome, kind = kind}
 }
 
 // One answer, appended to the run's own sink: one store while it has room. Returns the refusal for the
 // caller to record, rather than taking `^Query_Ctx`.
-emit_path :: #force_inline proc(run: ^Path_Run, answer: Path_Answer) -> (refused: bool) {
+emit_path :: #force_inline proc(run: ^Path_Run, answer: Answer) -> (refused: bool) {
 	return !row_append(run.sink, answer)
 }
 

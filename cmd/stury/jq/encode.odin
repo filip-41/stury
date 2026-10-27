@@ -8,6 +8,7 @@ import "core:math"
 import "core:simd"
 import json "../../../json"
 import enc "../../../json/encode"
+import number "../../../json/scan/number"
 
 Layout :: struct {
 	pretty:        bool,
@@ -60,7 +61,7 @@ write_value :: proc(out: ^[dynamic]byte, v: Value, l: Layout, depth := 0) {
 	case k == .True:
 		append(out, "true")
 	case k == .Number:
-		if r, is_ref := v.(Ref); is_ref {
+		if r, is_ref := v.(Ref); is_ref && r.doc.rows[r.node].first_esc != number.DIALECT_SPELLED {
 			enc.put_jq_literal(out, string(json.get_raw(r.doc, r.node)))
 			break
 		}
@@ -201,13 +202,13 @@ write_answer :: proc(out: ^[dynamic]byte, v: Value, l: Layout, respell := true) 
 	text := json.get_raw(r.doc, r.node)
 	#partial switch kd, _ := json.kind(r.doc, r.node); kd {
 	case .String:
-		// JSONC's strings are JSON's.
-		if !escaped(text) {
+		// A dialect with its own spelling writes a string unlike JSON's even where it holds no backslash.
+		if !escaped(text) && !json.own_spelling(r.doc.dialect) {
 			append(out, ..text)
 			return
 		}
 	case .Object, .Array:
-		if respell && json.plain_json(r.doc.dialect) && write_spelled(out, text, l) {
+		if respell && json.plain_json(r.doc.dialect) && write_spelled(out, text, l, unique = r.doc.distinct_keys) {
 			return
 		}
 	}
@@ -217,8 +218,8 @@ write_answer :: proc(out: ^[dynamic]byte, v: Value, l: Layout, respell := true) 
 // The well-formed JSON text of an array or object laid out onto `out` as `write_value` lays out the value it reads
 // as, when that is its own format with only the whitespace changed, else it returns false with `out` as it was
 // (always so for a layout with colours, which this paints none of). With `items`, `text` is the entries of an array
-// at `depth`, without its brackets, laid out as that array lays them out.
-write_spelled :: proc(out: ^[dynamic]byte, text: []byte, l: Layout, depth := 0, items := false) -> bool {
+// at `depth`, without its brackets, laid out as that array lays them out. With `unique`, no object repeats a key.
+write_spelled :: proc(out: ^[dynamic]byte, text: []byte, l: Layout, depth := 0, items := false, unique := false) -> bool {
 	if l.colors != nil {
 		return false
 	}
@@ -227,7 +228,7 @@ write_spelled :: proc(out: ^[dynamic]byte, text: []byte, l: Layout, depth := 0, 
 		return false
 	}
 	mark := len(out)
-	if spelled_walk(text, numbers, out, l, depth, items) {
+	if spelled_walk(text, numbers, out, l, depth, items, unique) {
 		return true
 	}
 	resize(out, mark)
@@ -251,7 +252,7 @@ SPELLED_KEYS :: 128
 // in, with `items`, the text is the entries of an array `base` levels in. Each key is compared with its object's
 // earlier ones, and objects past SPELLED_KEYS answer no (jq then respells them).
 @(private = "file")
-spelled_walk :: proc(text: []byte, numbers: bool, out: ^[dynamic]byte, l: Layout, base: int, items: bool) -> bool #no_bounds_check {
+spelled_walk :: proc(text: []byte, numbers: bool, out: ^[dynamic]byte, l: Layout, base: int, items: bool, unique: bool) -> bool #no_bounds_check {
 	// Where each open container's keys start in `keys`, -1 for an array.
 	opened: [SPELLED_DEPTH]int = ---
 	keys: [SPELLED_KEYS]string = ---
@@ -267,17 +268,19 @@ spelled_walk :: proc(text: []byte, numbers: bool, out: ^[dynamic]byte, l: Layout
 			// With no escape, the next quote ends the string.
 			end := i + 1 + bytes.index_byte(text[i + 1:], '"')
 			if key_next {
-				key := string(text[i + 1:end])
-				for k in keys[opened[depth - 1]:n] {
-					if len(k) == len(key) && k == key {
+				if !unique {
+					key := string(text[i + 1:end])
+					for k in keys[opened[depth - 1]:n] {
+						if len(k) == len(key) && k == key {
+							return false
+						}
+					}
+					if n == SPELLED_KEYS {
 						return false
 					}
+					keys[n] = key
+					n += 1
 				}
-				if n == SPELLED_KEYS {
-					return false
-				}
-				keys[n] = key
-				n += 1
 				key_next = false
 			}
 			append(out, ..text[i:end + 1])
@@ -456,6 +459,21 @@ write_string :: proc(out: ^[dynamic]byte, s: string, ascii := false) {
 	if ascii {
 		enc.reescape_tail(out, mark, enc.reescape_of({ascii_only = true}))
 	}
+}
+
+// Writes `lead` (at least 4 bytes), then `cell` as `write_string` writes it, `null` for nil, at the write cursor `w`
+// of `out` (see `enc.put_room`). Returns the cursor past it. `cell` is UTF-8 already judged by its reader. The
+// length of `out` is the caller's to set.
+write_led_cell :: proc(out: ^[dynamic]byte, w: int, lead: string, cell: Maybe(string)) -> int {
+	s, present := cell.?
+	if !present {
+		p := enc.put_room(out, w, len(lead) + 4)
+		enc.copy_lead(p, raw_data(lead), len(lead))
+		intrinsics.unaligned_store((^u32)(&p[len(lead)]), 0x6c6c756e) // "null"
+		return w + len(lead) + 4
+	}
+	end, _ := enc.spell_led_string(out, w, raw_data(lead), len(lead), s, false, true)
+	return end
 }
 
 // Whether `text` has a byte `spelled_walk` must look at: a backslash or DEL, an `e` or `E` after a digit and

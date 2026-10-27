@@ -3,27 +3,43 @@ package core
 // The types and procedures shared by every format, so a caller using several formats writes them once. Each
 // format aliases the names it exposes. Files:
 //
-//	core.odin             `Path_Spec`, `MAX_PATH_STEPS`, `parse_path`; path_parse.odin the path syntax: `Path`, `Step`
-//	strictness.odin       `Strictness`; duplicates.odin `Duplicates`
-//	input.odin            the supported targets, `bom_len`
-//	number.odin           `Number`, `Exactness`, `fold_digits`
+//	core.odin             `Path_Spec`, `MAX_PATH_STEPS`, `parse_path`; path_parse.odin the path syntax:
+//	                      `Path`, `Step`
+//	strictness.odin       `Strictness`, `Read_Opts`; duplicates.odin `Duplicates`
+//	input.odin            the supported targets, `bom_len`, `is_space`, `skip_space`, `skip_space_back`
+//	number.odin           `Number`, `Exactness`, `fold_digits`, `fold_int`, `number_span`, `number_of_loose_text`: a decimal's value
+//	number_lex.odin       `Number_Lex`, `lex_number_span`, `lex_number_value`, `SCAN_FORCE_SLOW`; number_dom_acc.odin,
+//	                      number_el.odin and number_exact.odin decode a long mantissa, Eisel-Lemire, exactness
+//	shape_round.odin      `shape_off_halfway`: a decimal's single rounding into f32 or f16
 //	type_plan.odin        `Type_Plan`, `Plan_Opts`, `Plan_Format`, `Enum_Spelling`, `Tag_Name`, `Unmarshal_Hook`,
 //	                      `Type_Hook(W)`, `Hooked_Plan(W)`
-//	plan_cache.odin       `Plan_Cache`, `plan_for`, `plan_done`, `plan_cache_clear`; plan_enum.odin enum value
-//	                      and member lookup
+//	plan_cache.odin       `Plan_Cache`, `plan_for`, `plan_done`, `plan_cache_clear`; plan_enum.odin enum value,
+//	                      member lookup, `plan_enum_written` and `plan_union_arm`
 //	shape.odin            the read shape: `Read_Shape`, `Shape_Op`, `Shape_Kind`, `Value_Class`, `Unknown_Fields`
 //	read_shape_lower.odin `read_shape_of`
 //	shape_store.odin      the judged scalar stores; shape_load.odin their loads
-//	scan_error.odin       `Error`, `Error_Kind`; unmarshal_error.odin `Unmarshal_Error`; render_error.odin their text
+//	scan_error.odin       `Error`, `Error_Kind`; unmarshal_error.odin `Unmarshal_Error`, `Unmarshal_Error_Kind`;
+//	                      render_error.odin their text
 //	batch_runner.odin     `Batch_Runner`, `Batch_Cursor`, `Batch_Driver`, `Record_Fault`, `Fault_List`;
 //	                      stream_window.odin `Stream_Window`
-//	record_read.odin      `Record_Read`, `Record_Source`, `record_read_init`, `unmarshal` of one record
-//	answer.odin           `Answer`, `Answer_Outcome`, `NO_OWNER`, `answer_cut`: one path query's answer
-//	edit.odin             `Edit`, the byte-span edit that every format's text edits use
+//	record_read.odin      `Unmarshal_Opts`, `Record_Read`, `Record_Source`, `record_read_init`, `unmarshal` of one
+//	                      record, `record_read_destroy`
+//	answer.odin           `Answer`, `Answer_Outcome`, `Kind`, `Node`, `NO_NODE`, `NO_OWNER`, `answer_cut`: one path
+//	                      query's answer
+//	rows.odin             the row tree: `Row`, `Row_Flags`, `Row_Payload`, `Row_Dialect`, `Fact`, `Fact_Place`,
+//	                      `NO_KEY`, `ROOT`, `MAX_ROW_SOURCE` and the tape navigation (`dom_*`)
+//	row_document.odin     `Row_Document`, `Row_Cache` (`row_cache`) and the format-free readers: `kind`,
+//	                      `child_count`, `child_by_index`, `members_of`, `children_next`, `Members`, `get_raw`,
+//	                      `facts`; name_arena.odin `Name_Arena`, the store of names decoded on read
+//	request.odin          `Request`, `request_init`, `answers`, `Route`, `Route_Class`: what every format's
+//	                      request shares
+//	edit.odin             `Edit`, the byte-span edit that every format's text edits use, `Insert_At`, `APPEND`;
+//	                      `Format`, the capabilities every format package gives
 //	path_error.odin       `Path_Error`, `Path_Error_Kind`: path procedure (find, set, splice) errors
 //	marshal_error.odin    `Marshal_Error`: marshal errors
 //
-// spell/ formats integers and floats for the writers; bits.odin and bits_utf8.odin hold the bit and UTF-8 kernels.
+// spell/ formats integers and floats for the writers and holds their put layer (put.odin); bits.odin and
+// bits_utf8.odin hold the bit and UTF-8 kernels.
 
 // `parse_path_fault` with its fault as a `Path_Error`: `.Over_Capacity` when `steps` or `names` cannot hold the
 // path, else `.Bad_Path` at the byte of `text` the parser stopped on.

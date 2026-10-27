@@ -21,7 +21,8 @@ Query :: walk.Query
 Scan_Query :: walk.Scan_Query
 Walk_Fault :: walk.Walk_Fault
 Kind :: walk.Kind
-Row :: walk.Row
+Row :: core_pkg.Row
+Row_Document :: core_pkg.Row_Document
 Node :: walk.Node
 NO_NODE :: walk.NO_NODE
 VC_NONE :: walk.VC_NONE
@@ -30,14 +31,14 @@ VC_ARRAY :: walk.VC_ARRAY
 VC_STRING :: walk.VC_STRING
 VC_LITERAL :: walk.VC_LITERAL
 VC_NUMBER :: walk.VC_NUMBER
-Fact :: walk.Fact
-Fact_Place :: walk.Fact_Place
+Fact :: core_pkg.Fact
+Fact_Place :: core_pkg.Fact_Place
 Number :: core_pkg.Number
 emit_path :: walk.emit_path
 bom_len :: core_pkg.bom_len
 Demand_Spec :: walk.Demand_Spec
 Field_Value :: walk.Field_Value
-Name_Arena :: walk.Name_Arena
+Name_Arena :: core_pkg.Name_Arena
 Scanner :: walk.Scanner
 Query_Ctx :: walk.Query_Ctx
 Demand_Pend :: walk.Demand_Pend
@@ -47,7 +48,7 @@ Key_Entry :: walk.Key_Entry
 KEY_ESCAPED :: walk.KEY_ESCAPED
 MAX_DEPTH :: walk.MAX_DEPTH
 DEPTH_CEILING :: walk.DEPTH_CEILING
-NO_KEY :: walk.NO_KEY
+NO_KEY :: core_pkg.NO_KEY
 
 resolve_under :: walk.resolve_under
 resolve_queries :: walk.resolve_queries
@@ -70,13 +71,13 @@ auto_member_open :: walk.auto_member_open
 auto_frame_open :: walk.auto_frame_open
 auto_member_closed :: walk.auto_member_closed
 auto_frame_closed :: walk.auto_frame_closed
-TAPE_MAX_SOURCE :: walk.TAPE_MAX_SOURCE
+MAX_ROW_SOURCE :: core_pkg.MAX_ROW_SOURCE
 axes_for :: walk.axes_for
 str_escaped :: walk.str_escaped
 first_escape_offset :: walk.first_escape_offset
 number_span :: number.number_span
 DIALECT_SPELLED :: number.DIALECT_SPELLED
-json5_hex :: number.json5_hex
-name_arena_adopt :: walk.name_arena_adopt
-name_arena_reserve :: walk.name_arena_reserve
-name_arena_unreserve :: walk.name_arena_unreserve
+name_arena_adopt :: core_pkg.name_arena_adopt
+row_cache :: core_pkg.row_cache
+name_arena_reserve :: core_pkg.name_arena_reserve
+name_arena_unreserve :: core_pkg.name_arena_unreserve

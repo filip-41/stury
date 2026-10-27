@@ -3,6 +3,7 @@ package json
 // Walks over a built document: `child` by key or index, `children` and `members` over one container, and the JSON
 // Pointer `pointer`.
 
+import core_pkg "../core"
 import scan_pkg "scan"
 import "scan/walk"
 
@@ -10,91 +11,29 @@ import "scan/walk"
 // the last member), as a path's `.[-1]` does.
 child :: proc {
 	child_by_key,
-	child_by_index,
+	core_pkg.child_by_index,
 }
 
 // The last member of object `n` whose key decodes to `name`, or `NO_NODE`. An array answers none. The same
 // reading as a path's default `.Last`.
 @(private, require_results)
 child_by_key :: proc(doc: ^Document, n: Node, name: string) -> Node {
-	return walk.dom_find_key(doc.rows[:], doc.src, n, name, scan_pkg.hooks_of(doc.dialect))
-}
-
-// Member `i` of container `n`, 0-based (from the end when negative), or `NO_NODE`. O(1) over an array of
-// scalars, and over any other container once a call has reached NTH_WALK members into it, which lists its
-// members once.
-@(private, require_results)
-child_by_index :: proc(doc: ^Document, n: Node, index: int) -> Node {
-	i := index
-	if i < 0 {
-		i += child_count(doc, n)
-		if i < 0 {
-			return NO_NODE
-		}
+	if doc.distinct_keys {
+		return walk.dom_find_key(doc.rows[:], doc.src, n, name, scan_pkg.hooks_of(doc.dialect), true)
 	}
-	if i == 0 {
-		return first_child(doc, n)
-	}
-	if i < NTH_WALK || i >= child_count(doc, n) || walk.dom_flat_array(doc.rows[n]) {
-		return walk.dom_nth_member(doc.rows[:], n, i)
-	}
-	at, listed := doc.member_at[n]
-	if !listed {
-		at, listed = list_members(doc, n)
-		if !listed {
-			return walk.dom_nth_member(doc.rows[:], n, i)
-		}
-	}
-	return doc.members[at + i]
-}
-
-// How many members `child_by_index` steps over before it lists a container's members: past that, a walk
-// per call made reading every member by index quadratic.
-@(private = "file")
-NTH_WALK :: 64
-
-// List the members of container `n` in `members`, and where they start; false when the allocator refused,
-// or a refused append left the container short of rows, and nothing is kept.
-@(private = "file")
-list_members :: proc(doc: ^Document, n: Node) -> (at: int, ok: bool) {
-	if doc.members.allocator.procedure == nil {
-		doc.members.allocator = doc.rows.allocator
-		doc.member_at.allocator = doc.rows.allocator
-	}
-	at = len(doc.members)
-	count := child_count(doc, n)
-	if reserve(&doc.members, at + count) != nil {
-		return
-	}
-	it := members_of(doc, n)
-	for j in children_next(&it) {
-		append(&doc.members, j)
-	}
-	if len(doc.members) - at != count {
-		resize(&doc.members, at)
-		return
-	}
-	if map_insert(&doc.member_at, n, at) == nil {
-		resize(&doc.members, at)
-		return
-	}
-	return at, true
+	return walk.dom_find_key(doc.rows[:], doc.src, n, name, scan_pkg.hooks_of(doc.dialect), false)
 }
 
 // The member count of container `n`; zero on a scalar.
 @(require_results)
 child_count :: proc(doc: ^Document, n: Node) -> int {
-	return walk.dom_child_count(doc.rows[:], n)
+	return core_pkg.child_count(doc, n)
 }
 
 // The position of a walk over one container's members (`children`, `members`). A value, owning nothing; it
 // borrows the document. A member's run of rows ends where the next begins, so a step is one add, bounded by
 // the container's end (`end`).
-Members :: struct {
-	doc:  ^Document,
-	node: Node,
-	end:  Node,
-}
+Members :: core_pkg.Members
 
 // Every child of a container in order, as values for `children` and as keys and values for `members`. Start
 // a walk with either and loop over the same name:
@@ -108,8 +47,8 @@ Members :: struct {
 // empty one), and `children(&it)` gives the next child, `ok` false past the last. It allocates nothing and
 // borrows `doc`, which outlives it.
 children :: proc {
-	members_of,
-	children_next,
+	core_pkg.members_of,
+	core_pkg.children_next,
 }
 
 // Every member of an object in order, as `children` but with each member's decoded key.
@@ -119,30 +58,8 @@ children :: proc {
 //	- The walk stops at a key the document's arena could not decode (`it.node < it.end` after the loop),
 //	  and over an array yields nothing: an element has no key.
 members :: proc {
-	members_of,
+	core_pkg.members_of,
 	members_next,
-}
-
-@(private, require_results)
-members_of :: proc(doc: ^Document, n: Node) -> Members {
-	when ODIN_DEBUG {
-		check_node(doc, n)
-	}
-	first := first_child(doc, n)
-	if first == NO_NODE {
-		return {doc = doc}
-	}
-	return {doc = doc, node = first, end = n + Node(doc.rows[n].subtree_size)}
-}
-
-@(private, require_results)
-children_next :: #force_inline proc(it: ^Members) -> (n: Node, ok: bool) {
-	if it.node >= it.end {
-		return NO_NODE, false
-	}
-	n = it.node
-	it.node += Node(it.doc.rows[n].subtree_size)
-	return n, true
 }
 
 // It stops at a member `get_key` refuses (an array's, or an escaped key the arena could not hold), so
@@ -153,7 +70,7 @@ members_next :: proc(it: ^Members) -> (k: string, n: Node, ok: bool) {
 		return "", NO_NODE, false
 	}
 	k = get_key(it.doc, it.node) or_return
-	n, _ = children_next(it)
+	n, _ = core_pkg.children_next(it)
 	return k, n, true
 }
 

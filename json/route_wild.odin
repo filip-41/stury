@@ -17,7 +17,7 @@ settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator
 		return Error{kind = .Over_Capacity}
 	}
 	// The walk's answers for the paths the tape does not answer.
-	kept := make([dynamic]Path_Answer, 0, len(req.answers), alloc)
+	kept := make([dynamic]Answer, 0, len(req.answers), alloc)
 	defer delete(kept)
 	for a in req.answers {
 		if !walk.steps_have_any(req.paths[a.query].steps) {
@@ -38,25 +38,18 @@ settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator
 	// The walk's coverage and stop stand: the settling build answered the wildcard paths, it did not replace
 	// the request's own reading.
 	req.state.src = src
-	req.state.groups.grouped = false
+	req.groups.grouped = false
 	walk.adopt_allocator(&req.answers, alloc)
 	if _, err := append(&req.answers, ..kept[:]); err != nil {
 		return Error{kind = .Out_Of_Memory}
 	}
-	nodes := make([dynamic]Node, alloc)
-	holders := make([dynamic]Node, alloc)
-	outcomes := make([dynamic]Path_Outcome, alloc)
-	defer delete(nodes)
-	defer delete(holders)
-	defer delete(outcomes)
 	for p, i in req.paths {
 		if !walk.steps_have_any(p.steps) {
 			continue
 		}
-		clear(&nodes)
-		clear(&holders)
-		clear(&outcomes)
-		if !wild_path_answers(req, p, i, &nodes, &holders, &outcomes) {
+		// The rows are scratch unless the request asked for them, so only then does an answer name its node.
+		w := Query_Walk{doc = &req.doc, mode = req.duplicates, out = &req.answers, path = p, query = u32(i), nodes = rows_asked}
+		if !query_from(&w, ROOT, NO_NODE, p.steps) {
 			return Error{kind = .Out_Of_Memory}
 		}
 	}
@@ -88,30 +81,4 @@ wild_build_rows :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Alloc
 		}
 	}
 	return false, nil
-}
-
-// Append the answers of path `p` (index `i`, with an `Any` step) read from the rows. False when an output
-// could not grow. `nodes`, `holders` and `outcomes` are the caller's scratch, emptied for this path.
-@(private = "file")
-wild_path_answers :: proc(req: ^Request($KINDS), p: Path, i: int, nodes, holders: ^[dynamic]Node, outcomes: ^[dynamic]Path_Outcome) -> bool {
-	w := Query_Walk{
-		doc = &req.doc, mode = req.duplicates, out = nodes, holders = holders, limit = p.limit,
-		outcomes = outcomes if p.per_element else nil,
-	}
-	if !query_from(&w, ROOT, NO_NODE, p.steps) {
-		return false
-	}
-	for n, j in nodes {
-		owner := walk.NO_OWNER if holders[j] == NO_NODE else u64(req.doc.rows[holders[j]].lo)
-		found := Path_Answer{owner = owner, query = u32(i), node = NO_NODE, outcome = .Found if n != NO_NODE else outcomes[j]}
-		if n != NO_NODE {
-			row := req.doc.rows[n]
-			found.lo, found.hi, found.kind = u64(row.lo), u64(row.hi), row.kind
-			found.node = n if .Nodes in KINDS || .Dom in KINDS else NO_NODE
-		}
-		if _, err := append(&req.answers, found); err != nil {
-			return false
-		}
-	}
-	return true
 }

@@ -25,45 +25,13 @@ write_elems :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, n: int) -> Mars
 	return close_container(st, ']', n)
 }
 
-// Room past a field's key for its value when the value is written inline: an integer, a float, or the
-// `true`/`false` word (one u64 store).
-@(private)
-FIELD_VALUE_ROOM :: max(spell.INT_ROOM, spell.F64_ROOM, size_of(u64))
-
-// `true` and `false`, low byte first.
-@(private)
-TRUE_WORD :: u64(0x65_75_72_74)
-@(private)
-FALSE_WORD :: u64(0x65_73_6c_61_66)
-
-// Write the `.Int`, `.Uint`, `.Float` or `.Bool` scalar of `size` bytes at `at` into `p`, which has
-// FIELD_VALUE_ROOM bytes. Returns the count written.
-@(private)
-spell_scalar :: #force_inline proc(p: [^]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> (int, Marshal_Error) #no_bounds_check {
-	#partial switch kind {
-	case .Int:
-		return spell.spell_i64(p, core_pkg.shape_int_load(at, size)), .None
-	case .Uint:
-		return spell.spell_u64(p, core_pkg.shape_uint_load(at, size)), .None
-	case .Float:
-		x := core_pkg.shape_float_load(at, size)
-		if spell.is_non_finite(x) {
-			return 0, .Non_Finite
-		}
-		return spell.spell_f64(p, x), .None
-	}
-	yes := core_pkg.shape_uint_load(at, size) != 0
-	intrinsics.unaligned_store((^u64)(p), TRUE_WORD if yes else FALSE_WORD)
-	return 5 - int(yes), .None
-}
-
 @(private)
 put_scalar :: proc(dst: ^[dynamic]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> Marshal_Error {
-	p := enc.put_room(dst, len(dst^), FIELD_VALUE_ROOM)
+	p := enc.put_room(dst, len(dst^), spell.SCALAR_ROOM)
 	if p == nil {
 		return .Out_Of_Memory
 	}
-	enc.put_commit(dst, spell_scalar(p, kind, at, size) or_return)
+	enc.put_commit(dst, spell.spell_scalar(p, kind, at, size) or_return)
 	return .None
 }
 
@@ -98,16 +66,16 @@ write_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma := 
 		key := raw_data(st.plan.keys[f.key_lo:])
 		start := w
 		if f.kind == .String {
-			w = enc.spell_led_string(st.out, w, key, n, (^string)(at)^, false) or_return
+			w = enc.spell_led_string(st.out, w, key, n, (^string)(at)^, true, false) or_return
 		} else {
-			p := enc.put_room(st.out, w, n + FIELD_VALUE_ROOM)
+			p := enc.put_room(st.out, w, n + spell.SCALAR_ROOM)
 			if p == nil {
 				return .Out_Of_Memory
 			}
 			enc.copy_lead(p, key, n)
 			#partial switch f.kind {
 			case .Int, .Uint, .Float, .Bool:
-				w += n + (spell_scalar(p[n:], f.kind, at, f.size) or_return)
+				w += n + (spell.spell_scalar(p[n:], f.kind, at, f.size) or_return)
 			case:
 				enc.put_commit(st.out, w + n - len(st.out^))
 				write_value(st, f.op, at) or_return
@@ -136,23 +104,23 @@ write_flat_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comm
 		n := int(f.key_hi - f.key_lo)
 		key := keys[f.key_lo:]
 		if f.kind == .String {
-			w = enc.spell_led_string(out, w, key, n, (^string)(at)^, false) or_return
+			w = enc.spell_led_string(out, w, key, n, (^string)(at)^, true, false) or_return
 			continue
 		}
-		p := enc.put_room(out, w, n + FIELD_VALUE_ROOM)
+		p := enc.put_room(out, w, n + spell.SCALAR_ROOM)
 		if p == nil {
 			return .Out_Of_Memory
 		}
 		enc.copy_lead(p, key, n)
 		#partial switch f.kind {
 		case .Int:
-			w += n + (spell_scalar(p[n:], .Int, at, f.size) or_return)
+			w += n + (spell.spell_scalar(p[n:], .Int, at, f.size) or_return)
 		case .Uint:
-			w += n + (spell_scalar(p[n:], .Uint, at, f.size) or_return)
+			w += n + (spell.spell_scalar(p[n:], .Uint, at, f.size) or_return)
 		case .Float:
-			w += n + (spell_scalar(p[n:], .Float, at, f.size) or_return)
+			w += n + (spell.spell_scalar(p[n:], .Float, at, f.size) or_return)
 		case .Bool:
-			w += n + (spell_scalar(p[n:], .Bool, at, f.size) or_return)
+			w += n + (spell.spell_scalar(p[n:], .Bool, at, f.size) or_return)
 		case .Enum_Int, .Enum_Uint:
 			w = spell_flat_enum(st, f, key, p, n, w, at) or_return
 		}
@@ -165,15 +133,15 @@ write_flat_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comm
 // end of the field.
 @(private = "file")
 spell_flat_enum :: #force_inline proc(st: ^Marshal_Out, f: Plan_Field, key, p: [^]u8, n, w: int, at: rawptr) -> (end: int, err: Marshal_Error) #no_bounds_check {
-	m := enum_member(st.plan, st.plan.ops[f.op], at) or_return
+	m, v := core_pkg.plan_enum_written(st.plan, st.plan.ops[f.op], at) or_return
 	if st.enum_ints {
-		if st.plan.ops[f.op].kind == .Enum_Int {
-			return w + n + spell.spell_i64(p[n:], core_pkg.shape_int_load(at, f.size)), .None
+		if f.kind == .Enum_Int {
+			return w + n + spell.spell_i64(p[n:], v), .None
 		}
-		return w + n + spell.spell_u64(p[n:], core_pkg.shape_uint_load(at, f.size)), .None
+		return w + n + spell.spell_u64(p[n:], u64(v)), .None
 	}
 	name := st.plan.keys[m.lo:m.hi]
-	if len(name) > FIELD_VALUE_ROOM {
+	if len(name) > spell.SCALAR_ROOM {
 		return spell_flat_enum_long(st, key, n, w, name)
 	}
 	if len(name) >= 4 {
@@ -327,7 +295,7 @@ spell_map_key :: proc(dst: ^[dynamic]u8, st: ^Marshal_Out, key: Plan_Op, data: r
 		return enc.put_string(dst, string((^cstring)(data)^))
 	case .Enum_Int, .Enum_Uint:
 		if !st.enum_ints {
-			m := enum_member(st.plan, key, data) or_return
+			m, _ := core_pkg.plan_enum_written(st.plan, key, data) or_return
 			return enc.put_bytes(dst, string(st.plan.keys[m.lo:m.hi]))
 		}
 	}
@@ -357,7 +325,7 @@ is_empty :: proc(p: ^Type_Plan, idx: u32, data: rawptr) -> bool {
 		a := (^any)(data)^
 		return a.id == nil || a.data == nil
 	case .Union:
-		return union_arm_of(op, data) < 0
+		return core_pkg.plan_union_arm(op, data) < 0
 	case .Decoded:
 		return (^Decoded)(data)^ == nil
 	case .String, .Raw, .Digits:

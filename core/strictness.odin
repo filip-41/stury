@@ -11,3 +11,9 @@ Strictness :: enum {
 	Structural,
 	Lazy,
 }
+
+// The read options every format shares, embedded first in each format's `Read_Opts`.
+Read_Opts :: struct {
+	strictness: Strictness,
+	duplicates: Duplicates,
+}

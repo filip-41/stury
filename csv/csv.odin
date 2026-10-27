@@ -11,17 +11,17 @@ package csv
 //	record_read.odin    `Record_Read`, `record_read_init`, `record_read_at`, `record_read_destroy` and
 //	                    `unmarshal` of one row
 //	each_record.odin    `each_record`, `validate_records`, `Record_Fault` and `Batch_Runner`
-//	unmarshal.odin      `unmarshal`, `unmarshal_check`, `Unmarshal_Opts`, `Duplicates`,
-//	                    `Unknown_Fields`, `Unmarshal_Error`, `Unmarshal_Error_Kind`
+//	unmarshal.odin      `unmarshal`, `unmarshal_records`, `unmarshal_record`, `unmarshal_check`,
+//	                    `Unmarshal_Opts`, `Duplicates`, `Unknown_Fields`, `Unmarshal_Error`, `Unmarshal_Error_Kind`
 //	marshal.odin        `marshal`, `marshal_append`, `marshal_to_writer`, `Marshal_Opts`, `Marshal_Error`
 //	record_writer.odin  `write_record`
 //	type_plan.odin      `Type_Plan`, `type_plan_init`, `Plan_Opts`, `Enum_Spelling`,
 //	                    `Type_Hook`, `Marshal_Hook`, `Unmarshal_Hook`, `plan_cache_clear`
 //	document.odin       `Document`, `build`, `destroy`, `row_count`, `column_count`, `column`,
 //	                    `row_fields`, `get_field`, `get_name`, `get_string`, `get_int`, `get_float`, `get_bool`
-//	find.odin           `Path`, `Path_Spec`, `Path_Error`, `Path_Error_Kind`, `Answer`, `NO_OWNER`, `query`,
-//	                    `find`, `find_column`
-//	edit.odin           `Edit`, `APPEND`, `splice`, `set`, `insert`, `remove`
+//	find.odin           `Path`, `Path_Spec`, `Path_Error`, `Path_Error_Kind`, `Answer`, `Kind`, `Node`, `NO_NODE`,
+//	                    `NO_OWNER`, `query`, `find`, `Request`, `request_init`, `scan`, `answers`, `route_of`
+//	edit.odin           `Edit`, `Insert_At`, `APPEND`, `splice`, `set`, `insert`, `remove`
 //
 // The scanner (scan.odin) and the edits' cell writer (edit_spell.odin) are internal.
 //
@@ -122,18 +122,18 @@ Limits :: struct {
 }
 
 // How a read takes its text: one struct for `validate`, `records`, `records_from`, `each_record`, `build`,
-// `find`, `find_column` and the path edits, embedded in `Unmarshal_Opts`. The zero value is RFC 4180 with a
+// `find`, `Request` and the path edits, embedded in `Unmarshal_Opts`. The zero value is RFC 4180 with a
 // header, every byte judged, no caps. A procedure that does not read a field says so.
+//
+// `duplicates` is how `unmarshal`, the path edits, `find`, `scan` and `query` (as `build` was given it)
+// read a header name two columns share. All but the path edits take the last under `.Default`, which the
+// edits refuse; `.All` reads or edits every column of the name; `column` names the first of them.
 Read_Opts :: struct {
-	dialect:    Dialect,
-	strictness: Strictness,
-	// How `unmarshal`, the path edits, `find`, `find_column` and `query` (as `build` was given it) read a header
-	// name two columns share (`Duplicates`). The last three take the first under `.Default`, where the others
-	// refuse it; `column` names the first of them.
-	duplicates: Duplicates,
-	limits:     Limits,
+	using shared: core_pkg.Read_Opts,
+	dialect:      Dialect,
+	limits:       Limits,
 	// The first record is data, not column names.
-	no_header:  bool,
+	no_header:    bool,
 }
 
 // Whether `src` is CSV in `opts.dialect`. `opts.duplicates` and `opts.no_header` are not read: the header is a

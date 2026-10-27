@@ -79,9 +79,9 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	switch {
 	case o.in_place && o.check:
 		usage_error("--in-place rewrites each file; --check only reads it")
-	case o.in_place && transcoded(o.from):
+	case o.in_place && FORMATS[o.from].written_as != nil:
 		usage_error("--in-place writes each file back as its own format, and json5 is read only")
-	case o.check && transcoded(o.from):
+	case o.check && FORMATS[o.from].written_as != nil:
 		usage_error("--check compares each file with its own format, and json5 is read only")
 	case o.in_place && o.to != o.from:
 		usage_error("--in-place writes each file back as its own format: --from %s and --to %s differ",
@@ -98,7 +98,7 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 			}
 		}
 	}
-	run.req.dialect = read_dialect(o.from)
+	run.req.dialect = FORMATS[o.from].source
 	run.req.limits = jq.lifted
 	run.name_faults = true
 	run.verbatim = !reads_cells(o) && !writes_cells(o)
@@ -126,7 +126,7 @@ fmt_files :: proc(run: ^Run, files: []string) -> (code: int) {
 		run.silent = check || in_place
 		clear(&run.out)
 		run.rows_begun = false
-		if writes_cells(o) && !reads_cells(o) {
+		if writes_cells(o) {
 			run.table = table_make(o)
 		}
 		// Past MAX_DEPTH the library and the printer recurse, so they run on the interpreter's stack, as a filter
@@ -136,9 +136,7 @@ fmt_files :: proc(run: ^Run, files: []string) -> (code: int) {
 		} else {
 			fmt_input(run, &ins)
 		}
-		if run.table != nil && run.table.grow && !write_held_rows(run) {
-			finish(run, EXIT_INPUT)
-		}
+		write_held_rows(run)
 		switch {
 		case check:
 			differ = differ || !bytes.equal(run.out[:], ins.data)
@@ -178,16 +176,8 @@ fmt_input :: proc(run: ^Run, ins: ^Inputs) {
 @(private = "file")
 fmt_texts :: proc(run: ^Run, ins: ^Inputs) {
 	arena: virtual.Arena
-	if virtual.arena_init_growing(&arena) != nil {
-		fmt.eprintln("stury: error: out of memory")
-		finish(run, EXIT_INPUT)
-	}
-	old := context.allocator
-	defer {
-		context.allocator = old
-		virtual.arena_destroy(&arena)
-	}
-	context.allocator = virtual.arena_allocator(&arena)
+	context.allocator = input_arena(run, &arena)
+	defer virtual.arena_destroy(&arena)
 	if run.verbatim && fmt_pieces(run, ins) {
 		return
 	}
@@ -266,11 +256,7 @@ fmt_cells :: proc(run: ^Run, ins: ^Inputs) {
 		}
 		if writes_cells(o) {
 			fmt_cells_write(run, &c, rec)
-			for {
-				r, more := csv.next_record(&c.whole)
-				if !more {
-					break
-				}
+			for r in csv.next_record(&c.whole) {
 				fmt_cells_write(run, &c, r)
 			}
 		} else {
@@ -284,43 +270,21 @@ fmt_cells :: proc(run: ^Run, ins: ^Inputs) {
 
 @(private = "file")
 fmt_cells_write :: proc(run: ^Run, c: ^Cells, rec: csv.Record) {
-	o := &run.opts
 	cells := make([]Maybe(string), len(rec.fields), context.temp_allocator)
-	for f, i in rec.fields {
-		if f.lo == f.hi {
-			continue
-		}
-		text, _, _ := csv.field_text(rec.src, f, c.dialect, context.temp_allocator)
-		cells[i] = string(text)
+	for &cell, i in cells {
+		cell, _ = column_cell(rec, i, c.dialect)
 	}
-	if err := csv.write_record(&run.out, cells, FORMATS[o.to].dialect, at_start = !run.rows_begun); err != .None {
-		t := Table{dialect = FORMATS[o.to].dialect, format = FORMATS[o.to].name}
-		fmt.eprintf("stury: error: %s\n", row_refusal(&t, err))
-		finish(run, EXIT_INPUT)
-	}
-	run.rows_begun = true
+	put_row(run, cells)
 	free_all(context.temp_allocator)
 }
 
 @(private = "file")
 fmt_cells_objects :: proc(run: ^Run, c: ^Cells) {
 	arena: virtual.Arena
-	if virtual.arena_init_growing(&arena) != nil {
-		fmt.eprintln("stury: error: out of memory")
-		finish(run, EXIT_INPUT)
-	}
-	old := context.allocator
-	defer {
-		context.allocator = old
-		virtual.arena_destroy(&arena)
-	}
-	context.allocator = virtual.arena_allocator(&arena)
-	for {
-		rec, more := csv.next_record(&c.whole)
-		if !more {
-			return
-		}
-		print_jq(run, record_object(c, rec))
+	context.allocator = input_arena(run, &arena)
+	defer virtual.arena_destroy(&arena)
+	for rec in csv.next_record(&c.whole) {
+		print_jq(run, record_doc(c.heads, nil, rec, c.dialect))
 		virtual.arena_free_all(&arena)
 		free_all(context.temp_allocator)
 	}

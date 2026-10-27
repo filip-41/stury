@@ -29,7 +29,7 @@ test_splice :: proc(t: ^testing.T) {
 	}
 	for dialect in ([?]json.Dialect{.Json, .Jsonc}) {
 		for list in unordered {
-			_, bad := json.splice(src, list, dialect, allocator = mem.panic_allocator())
+			_, bad := json.splice(src, list, {dialect = dialect}, allocator = mem.panic_allocator())
 			edit_err(t, bad, .Bad_Edit)
 		}
 	}
@@ -47,8 +47,8 @@ test_splice :: proc(t: ^testing.T) {
 }
 
 @(private)
-set_text :: proc(t: ^testing.T, src, path: string, value: any, loc := #caller_location) -> string {
-	out, err := json.set(raw(src), path, value, allocator = context.temp_allocator)
+set_text :: proc(t: ^testing.T, src, path: string, value: any, opts := json.Read_Opts{}, loc := #caller_location) -> string {
+	out, err := json.set(raw(src), path, value, opts, context.temp_allocator)
 	testing.expect_value(t, err, nil, loc = loc)
 	return string(out)
 }
@@ -60,7 +60,7 @@ test_set :: proc(t: ^testing.T) {
 	testing.expect_value(t, set_text(t, `{ "a" : 1 }`, ".a", 2), `{ "a" : 2 }`)
 	testing.expect_value(t, set_text(t, `{"a":1}`, ".a", json.Raw("")), `{"a":null}`)
 	testing.expect_value(t, set_text(t, `[1, 2, 3]`, ".[]", 0), `[0, 0, 0]`)
-	testing.expect_value(t, set_text(t, `{"a":1,"a":2}`, ".a", 9), `{"a":1,"a":9}`)
+	testing.expect_value(t, set_text(t, `{"a":1,"a":2}`, ".a", 9, {duplicates = .Last}), `{"a":1,"a":9}`)
 	testing.expect_value(t, set_text(t, ` 1 `, ".", []int{1}), ` [1] `)
 
 	_, nf := json.set(raw(`{"a":1}`), ".zz", 1)
@@ -110,8 +110,8 @@ edit_err :: proc(t: ^testing.T, got: Maybe(json.Path_Error), want: json.Path_Err
 }
 
 @(private)
-remove_text :: proc(t: ^testing.T, src, path: string, loc := #caller_location) -> string {
-	out, err := json.remove(raw(src), path, allocator = context.temp_allocator)
+remove_text :: proc(t: ^testing.T, src, path: string, opts := json.Read_Opts{}, loc := #caller_location) -> string {
+	out, err := json.remove(raw(src), path, opts, context.temp_allocator)
 	testing.expect_value(t, err, nil, loc = loc)
 	return string(out)
 }
@@ -135,9 +135,11 @@ test_remove :: proc(t: ^testing.T) {
 	testing.expect_value(t, remove_text(t, `[ 1, 2 ]`, ".[]"), `[]`)
 	// An `Any` path removes from every holder, a lone member and a middle one alike.
 	testing.expect_value(t, remove_text(t, `[{"a":1,"b":2},{"b":3},{"a":4}]`, ".[].a"), `[{"b":2},{"b":3},{}]`)
-	// Every occurrence of a repeated key goes: a run before a survivor and a run at the end.
-	testing.expect_value(t, remove_text(t, `{"a":1, "b":2, "a":3}`, ".a"), `{"b":2}`)
-	testing.expect_value(t, remove_text(t, `{"o":{"a":1},"o":{"a":2,"b":3}}`, ".o.a"), `{"o":{},"o":{"b":3}}`)
+	// Under `.All` every occurrence of a repeated key goes: a run before a survivor and a run at the end.
+	all := json.Read_Opts{duplicates = .All}
+	testing.expect_value(t, remove_text(t, `{"a":1, "b":2, "a":3}`, ".a", all), `{"b":2}`)
+	testing.expect_value(t, remove_text(t, `{"o":{"a":1},"o":{"a":2,"b":3}}`, ".o.a", all), `{"o":{},"o":{"b":3}}`)
+	testing.expect_value(t, remove_text(t, `{"a":1, "b":2, "a":3}`, ".a", {duplicates = .Last}), `{"a":1, "b":2}`)
 
 	_, root := json.remove(raw(`{"a":1}`), ".")
 	edit_err(t, root, .Unplaceable)
@@ -150,8 +152,15 @@ test_remove :: proc(t: ^testing.T) {
 }
 
 @(private)
-insert_text :: proc(t: ^testing.T, src, path: string, at: json.Insert_At, value: any, loc := #caller_location) -> string {
-	out, err := json.insert(raw(src), path, at, value, allocator = context.temp_allocator)
+insert_text :: proc(
+	t: ^testing.T,
+	src, path: string,
+	at: json.Insert_At,
+	value: any,
+	opts := json.Read_Opts{},
+	loc := #caller_location,
+) -> string {
+	out, err := json.insert(raw(src), path, at, value, opts, context.temp_allocator)
 	testing.expect_value(t, err, nil, loc = loc)
 	return string(out)
 }
@@ -175,11 +184,12 @@ test_insert :: proc(t: ^testing.T) {
 	testing.expect_value(t, insert_text(t, "[\n  1\n]", ".", json.APPEND, 2), "[\n  1,\n  2\n]")
 	testing.expect_value(t, insert_text(t, `{"x":[1],"y":[]}`, ".[]", json.APPEND, 9), `{"x":[1,9],"y":[9]}`)
 	// Under `.Last` the later of two repeated keys is the one the path names.
-	testing.expect_value(t, insert_text(t, `{"o":{"a":1},"o":{"b":2}}`, ".o", "c", 3), `{"o":{"a":1},"o":{"b":2,"c":3}}`)
+	last := json.Read_Opts{duplicates = .Last}
+	testing.expect_value(t, insert_text(t, `{"o":{"a":1},"o":{"b":2}}`, ".o", "c", 3, last), `{"o":{"a":1},"o":{"b":2,"c":3}}`)
 
-	testing.expect_value(t, insert_text(t, `{"a":1, "a":2}`, ".", "b", 3), `{"a":1, "a":2, "b":3}`)
+	testing.expect_value(t, insert_text(t, `{"a":1, "a":2}`, ".", "b", 3, last), `{"a":1, "a":2, "b":3}`)
 
-	_, ex := json.insert(raw(`{"a":1,"a":2}`), ".", "a", 3)
+	_, ex := json.insert(raw(`{"a":1,"a":2}`), ".", "a", 3, last)
 	edit_err(t, ex, .Exists)
 	_, kind := json.insert(raw(`[1]`), ".", "a", 3)
 	edit_err(t, kind, .Unplaceable)
@@ -201,20 +211,20 @@ test_insert :: proc(t: ^testing.T) {
 @(test)
 test_set_upsert :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	upsert :: proc(t: ^testing.T, src, path: string, value: any, loc := #caller_location) -> string {
-		out, err := json.set(raw(src), path, value, upsert = true, allocator = context.temp_allocator)
+	upsert :: proc(t: ^testing.T, src, path: string, value: any, opts := json.Read_Opts{}, loc := #caller_location) -> string {
+		out, err := json.upsert(raw(src), path, value, opts, context.temp_allocator)
 		testing.expect_value(t, err, nil, loc = loc)
 		return string(out)
 	}
 	testing.expect_value(t, upsert(t, `{"a":1}`, ".b", 2), `{"a":1,"b":2}`)
 	testing.expect_value(t, upsert(t, `{"a":1}`, ".a", 5), `{"a":5}`)
-	testing.expect_value(t, upsert(t, `{"a":1,"a":2}`, ".a", 9), `{"a":1,"a":9}`)
+	testing.expect_value(t, upsert(t, `{"a":1,"a":2}`, ".a", 9, {duplicates = .Last}), `{"a":1,"a":9}`)
 	testing.expect_value(t, upsert(t, `[{"a":1}, {}]`, ".[].a", 0), `[{"a":0}, {"a":0}]`)
-	_, idx := json.set(raw(`[1]`), ".[0]", 0, upsert = true)
+	_, idx := json.upsert(raw(`[1]`), ".[0]", 0)
 	edit_err(t, idx, .Unplaceable)
-	_, arr := json.set(raw(`[1]`), ".[].a", 0, upsert = true)
+	_, arr := json.upsert(raw(`[1]`), ".[].a", 0)
 	edit_err(t, arr, .Unplaceable)
-	_, nf := json.set(raw(`{}`), ".x.a", 0, upsert = true)
+	_, nf := json.upsert(raw(`{}`), ".x.a", 0)
 	edit_err(t, nf, .Not_Found)
 	// Off, a miss is still a miss.
 	_, off := json.set(raw(`{"a":1}`), ".b", 2)
@@ -250,13 +260,13 @@ test_edit_out_of_memory :: proc(t: ^testing.T) {
 	run :: proc(c: Case, allocator: mem.Allocator) -> ([]byte, Maybe(json.Path_Error)) {
 		switch c.op {
 		case .Set:
-			return json.set(raw(c.src), c.path, 0, dialect = c.dialect, allocator = allocator)
+			return json.set(raw(c.src), c.path, 0, {dialect = c.dialect}, allocator = allocator)
 		case .Upsert:
-			return json.set(raw(c.src), c.path, 0, upsert = true, dialect = c.dialect, allocator = allocator)
+			return json.upsert(raw(c.src), c.path, 0, {dialect = c.dialect}, allocator = allocator)
 		case .Insert:
-			return json.insert(raw(c.src), c.path, 0, "x", c.dialect, allocator)
+			return json.insert(raw(c.src), c.path, 0, "x", {dialect = c.dialect}, allocator = allocator)
 		case .Remove:
-			return json.remove(raw(c.src), c.path, c.dialect, allocator)
+			return json.remove(raw(c.src), c.path, {dialect = c.dialect}, allocator = allocator)
 		case .Comment:
 			return json.edit_comment(raw(c.src), c.path, .Lead, "// x", .Insert, allocator)
 		}
@@ -282,6 +292,26 @@ test_edit_out_of_memory :: proc(t: ^testing.T) {
 	}
 }
 
+// A refused allocation while `splice` judges its result, the comments of a JSONC one included, is the plain
+// `.Out_Of_Memory`, with no fault of the text.
+@(test)
+test_splice_judge_out_of_memory :: proc(t: ^testing.T) {
+	src := raw("[1, /* c */ 2]")
+	edits := []json.Edit{{lo = 1, hi = 2, bytes = raw("3")}}
+	sweep := Budget_Sweep{limit = 100}
+	for b, k in next_budget(&sweep) {
+		out, err := json.splice(src, edits, {dialect = .Jsonc}, allocator = budget_allocator(b))
+		if !b.refused {
+			testing.expect_value(t, string(out), "[3, /* c */ 2]")
+		} else {
+			e, _ := err.?
+			testing.expectf(t, e == json.Path_Error{kind = .Out_Of_Memory} && out == nil, "allocation %d: %v", k, err)
+		}
+		delete(out)
+	}
+	expect_swept(t, &sweep)
+}
+
 // `set` of a path every scan answered with a `Type_Mismatch` (a step the value cannot take) is
 // `.Type_Mismatch`, a path that simply is not there stays `.Not_Found`.
 @(test)
@@ -298,10 +328,10 @@ test_set_names_a_type_mismatch :: proc(t: ^testing.T) {
 @(test)
 test_splice_refuses_a_comment_that_swallows_values :: proc(t: ^testing.T) {
 	src := raw("[1, 2\n]")
-	_, err := json.splice(src, []json.Edit{{lo = 2, hi = 3, bytes = raw(" //")}}, .Jsonc)
+	_, err := json.splice(src, []json.Edit{{lo = 2, hi = 3, bytes = raw(" //")}}, {dialect = .Jsonc})
 	edit_err(t, err, .Bad_Result)
 	// A comment that ends inside the edit is fine.
-	out, ok := json.splice(src, []json.Edit{{lo = 2, hi = 3, bytes = raw(", /* c */")}}, .Jsonc)
+	out, ok := json.splice(src, []json.Edit{{lo = 2, hi = 3, bytes = raw(", /* c */")}}, {dialect = .Jsonc})
 	testing.expect_value(t, ok, nil)
 	testing.expect_value(t, string(out), "[1, /* c */ 2\n]")
 	delete(out)
@@ -330,4 +360,78 @@ test_refusals_at_no_byte_render_one_way :: proc(t: ^testing.T) {
 	testing.expect_value(t, render("", core.Unmarshal_Error{kind = .Bad_Option}), "Bad_Option")
 	testing.expect_value(t, render("", json.Path_Error{kind = .Not_Found}), "Not_Found")
 	testing.expect_value(t, render("{}", json.Path_Error{kind = .Bad_Path, offset = 2}), "offset 2: Bad_Path")
+}
+
+// The edits refuse a repeated key under `.Default`, as `.Refuse` does; a build without the refusing walks reads
+// `.Default` as `.Last`, as a reader does.
+@(test)
+test_edits_refuse_repeated_keys :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := raw(`{"a":1,"a":2,"o":{"x":[1,2]}}`)
+	repeat := json.Path_Error{kind = .Bad_Source, syntax = .Duplicate_Key, offset = 7}
+	_, serr := json.set(src, ".a", 9)
+	testing.expect_value(t, serr, repeat)
+	_, rerr := json.remove(src, ".a")
+	testing.expect_value(t, rerr, repeat)
+	// A repeat the path does not pass is kept.
+	testing.expect_value(t, set_text(t, string(src), ".o.x[]", 0), `{"a":1,"a":2,"o":{"x":[0,0]}}`)
+	testing.expect_value(t, set_text(t, string(src), ".", 0), `0`)
+	up, uerr := json.upsert(src, ".b", 9, allocator = context.temp_allocator)
+	testing.expect_value(t, uerr, nil)
+	testing.expect_value(t, string(up), `{"a":1,"a":2,"o":{"x":[1,2]},"b":9}`)
+	// A key repeated before the last step, whatever its other copy holds, and under a limit.
+	refused := [?][2]string{
+		{`{"o":{"a":1},"o":{"b":2}}`, ".o.a"},
+		{`{"a":{"b":1},"a":2}`, ".a.b"},
+		{`{"a":[1,2],"a":[3]}`, ".a[1]"},
+		{`{"a":[1],"a":[2]}`, ".a[]"},
+		{`[{"a":{"b":1},"a":{"b":2}}]`, ".[].a.b"},
+		{`{"a":1,"a":2}`, "first(.a)"},
+	}
+	for c in refused {
+		_, err := json.set(raw(c[0]), c[1], 9, allocator = context.temp_allocator)
+		testing.expectf(t, refusal(err) == .Bad_Source, "set %s on %s: %v", c[1], c[0], err)
+		_, err = json.remove(raw(c[0]), c[1], allocator = context.temp_allocator)
+		testing.expectf(t, refusal(err) == .Bad_Source, "remove %s on %s: %v", c[1], c[0], err)
+	}
+	// The offset is the repeated key's opening quote, as `.Refuse` reports it.
+	_, cerr := json.set(raw(`{"o":{"a":1},"o" /*c*/ : // d
+ {"b":2}}`), ".o.a", 9, {dialect = .Jsonc}, context.temp_allocator)
+	testing.expect_value(t, cerr, json.Path_Error{kind = .Bad_Source, syntax = .Duplicate_Key, offset = 13})
+	_, nerr := json.set(raw(`{"o":{"a":1},"x":0,"o":{"b":2}}`), ".o", 9, allocator = context.temp_allocator)
+	testing.expect_value(t, nerr, json.Path_Error{kind = .Bad_Source, syntax = .Duplicate_Key, offset = 19})
+	_, ierr := json.insert(raw(`{"o":{"a":1},"o":{"b":2}}`), ".o", "c", 9, allocator = context.temp_allocator)
+	testing.expect_value(t, refusal(ierr), json.Path_Error_Kind.Bad_Source)
+	// `.All` writes every copy.
+	all, aerr := json.upsert(raw(`[{"a":1,"a":2},{"b":0}]`), ".[].a", 9, {duplicates = .All}, context.temp_allocator)
+	testing.expect_value(t, aerr, nil)
+	testing.expect_value(t, string(all), `[{"a":9,"a":9},{"b":0,"a":9}]`)
+}
+
+// `remove` and `insert` touch what `set` touches under an explicit `.First` or `.Last`, not the shadowed copies.
+@(test)
+test_edits_agree_on_shadowed_members :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	last := json.Read_Opts{duplicates = .Last}
+	testing.expect_value(t, set_text(t, `{"a":1,"a":2}`, ".[]", 9, last), `{"a":1,"a":9}`)
+	testing.expect_value(t, remove_text(t, `{"a":1,"a":2}`, ".[]", last), `{"a":1}`)
+	testing.expect_value(t, remove_text(t, `{"x":{"a":1},"x":{"a":2}}`, ".[].a", last), `{"x":{"a":1},"x":{}}`)
+	testing.expect_value(t, remove_text(t, `{"x":{"a":1},"x":{"a":2}}`, ".[].a", {duplicates = .First}), `{"x":{},"x":{"a":2}}`)
+	out, err := json.insert(raw(`{"x":{"a":1},"x":{"a":2}}`), ".[]", "b", 0, {duplicates = .Last}, context.temp_allocator)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, string(out), `{"x":{"a":1},"x":{"a":2,"b":0}}`)
+	// A limit counts what the policy finds, as `set` counts it.
+	testing.expect_value(t, remove_text(t, `{"a":1,"a":2,"b":3}`, "first(.[])", last), `{"a":1,"b":3}`)
+	testing.expect_value(t, remove_text(t, `{"a":1,"a":2,"b":3}`, "limit(2; .[])", {duplicates = .First}), `{"a":2}`)
+	out, err = json.insert(raw(`{"x":{"a":1},"x":{"a":2},"y":{}}`), "limit(2; .[])", "b", 0, {duplicates = .Last}, context.temp_allocator)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, string(out), `{"x":{"a":1},"x":{"a":2,"b":0},"y":{"b":0}}`)
+}
+
+@(private = "file")
+refusal :: proc(err: Maybe(json.Path_Error)) -> Maybe(json.Path_Error_Kind) {
+	if e, refused := err.?; refused {
+		return e.kind
+	}
+	return nil
 }

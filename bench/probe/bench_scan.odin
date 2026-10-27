@@ -29,7 +29,7 @@ name_paths :: proc(keys: []string, steps: []json.Step, paths: []json.Path) {
 }
 
 // Returns how many path answers found a value.
-found_answers :: proc(answers: []json.Path_Answer) -> int {
+found_answers :: proc(answers: []json.Answer) -> int {
 	n := 0
 	for a in answers {
 		if a.outcome == .Found {
@@ -183,7 +183,7 @@ bench_path_ab :: proc(data: []byte, key, emit: string) -> bool {
 	stop: Maybe(u64)
 
 	// Both arms must give the same answer, or the early stop changed it.
-	lazy_answers := make([dynamic]json.Path_Answer, 0, 4, context.temp_allocator)
+	lazy_answers := make([dynamic]json.Answer, 0, 4, context.temp_allocator)
 	defer delete(lazy_answers)
 	if !path_run(data, steps, .Lazy, &stop) {
 		return false

@@ -308,7 +308,7 @@ path_reaches_into :: #force_inline proc(q: ^Query_Ctx, d: int) -> bool {
 
 // An object member's key: the one site that decides which runs wanted it, at every depth. An empty arming
 // mask exits first, and an `Any` step (`wild`) takes every member without its key. A key with no escape
-// (`q.key_saw_escape`) is its own decoded text, so `key_equals_wired` rejects a length mismatch before
+// (`q.key_saw_escape`) is its own decoded text, so `key_equals_hooked` rejects a length mismatch before
 // comparing bytes.
 auto_key :: #force_inline proc(
 	s: ^Scanner,
@@ -362,6 +362,9 @@ auto_key_match :: #force_no_inline proc(
 				continue
 			}
 			if key_equals_hooked(q.hooks, src, key_lo, key_hi, !clean, name) {
+				if lv.hit & bit != 0 && run.mode == .All && q.path_sink.paths_repeat == 0 {
+					q.path_sink.paths_repeat = int(key_lo)
+				}
 				if run.wild && run.mode == .Last {
 					wild_last_key(q, i, d, lv.hit & bit != 0)
 				}

@@ -1,8 +1,12 @@
 package json
 
+import "core:reflect"
 import "core:slice"
+import core_pkg "../core"
 
-// The engine that answers a path of a request, or why the automaton does.
+// The engine that answers a path of a request, or why the automaton does: `route_of`'s `why`, spelled as the
+// name. `.Matcher` is a `.Direct` route, `.Tape` a `.Document` one, and the rest name the automaton's
+// `.Fallback`.
 Path_Route :: enum u8 {
 	Matcher,
 	Tape, // a text the tape cannot settle goes to the matcher
@@ -17,11 +21,18 @@ Path_Route :: enum u8 {
 	Root_Not_Object,
 }
 
-// The engine that answers `paths[which]` when `paths` are scanned together over `src` with `opts`. `src` is read
-// only to its root's first value. `Bad_Option` when `which` is not one of `paths`; `Over_Capacity` where `scan`
-// would refuse the paths for the router's bounds.
+// The engine that answers `paths[which]` when `paths` are scanned together over `src` with `opts`, its `why` a
+// `Path_Route` name. `src` is read only to its root's first value. `Bad_Option` when `which` is not one of
+// `paths`; `Over_Capacity` where `scan` would refuse the paths for the router's bounds.
 @(require_results)
-route_of :: proc(src: []byte, paths: []Path, which: int, opts := Read_Opts{}) -> (route: Path_Route, err: Maybe(Error)) {
+route_of :: proc(src: []byte, paths: []Path, which: int, opts := Read_Opts{}) -> (route: core_pkg.Route, err: Maybe(Error)) {
+	r := path_route(src, paths, which, opts) or_return
+	class: core_pkg.Route_Class = .Direct if r == .Matcher else .Document if r == .Tape else .Fallback
+	return {class, reflect.enum_string(r)}, nil
+}
+
+@(private = "file")
+path_route :: proc(src: []byte, paths: []Path, which: int, opts: Read_Opts) -> (route: Path_Route, err: Maybe(Error)) {
 	if which < 0 || which >= len(paths) {
 		return {}, Error{kind = .Bad_Option}
 	}

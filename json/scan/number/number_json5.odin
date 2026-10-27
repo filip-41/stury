@@ -1,6 +1,7 @@
 package number
 
 import "core:math"
+import core_pkg "../../../core"
 import lex "../lex"
 
 // The digit pack of a number row whose token is spelled outside JSON's grammar (JSON5's hex, `.5`, `5.`, `+1`,
@@ -21,8 +22,7 @@ json5_hex :: proc(src: []byte, lo, hi: u64) -> (mag: u64, approx: f64, over: boo
 }
 
 // The value of a JSON5 number token a dialect walk accepted with `DIALECT_SPELLED`. `Infinity` and `NaN` are
-// `.Exact`: the value is the one written. A decimal token is respelled as JSON (no `+`, a `0` before a leading
-// point, no trailing point) and read as JSON reads it.
+// `.Exact`: the value is the one written. A decimal token is read by `core_pkg.number_of_loose_text`.
 json5_number_value :: proc(src: []byte, lo, hi: u64) -> Number {
 	p := lo
 	neg := src[p] == '-'
@@ -51,30 +51,6 @@ json5_number_value :: proc(src: []byte, lo, hi: u64) -> Number {
 		}
 		return {sign * f, .Inexact}
 	}
-	// One byte more than the token at most: the `0` before a leading point.
-	stack: [128]u8
-	buf := stack[:]
-	if hi - lo + 1 > len(stack) {
-		buf = make([]u8, hi - lo + 1)
-	}
-	defer if len(buf) > len(stack) {
-		delete(buf)
-	}
-	k := 0
-	if neg {
-		buf[k] = '-'
-		k += 1
-	}
-	if src[p] == '.' {
-		buf[k] = '0'
-		k += 1
-	}
-	for i in p ..< hi {
-		if src[i] == '.' && (i + 1 == hi || src[i + 1] - '0' >= 10) {
-			continue
-		}
-		buf[k] = src[i]
-		k += 1
-	}
-	return number_span(buf[:k], 0, u64(k))
+	n, _ := core_pkg.number_of_loose_text(src[lo:hi])
+	return n
 }

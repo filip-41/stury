@@ -46,6 +46,18 @@ Unmarshal_Error :: struct {
 	truncated: bool, // steps outside the innermost UNMARSHAL_PATH_STEPS were dropped
 }
 
+// A scan's fault `e` as a typed read's: `.Syntax` with the fault in `syntax`, except a refused allocation and
+// a refused option, which keep their kinds and have no offset.
+unmarshal_error_from :: proc(e: Error) -> Unmarshal_Error {
+	#partial switch e.kind {
+	case .Out_Of_Memory:
+		return {kind = .Out_Of_Memory}
+	case .Bad_Option:
+		return {kind = .Bad_Option}
+	}
+	return {kind = .Syntax, syntax = e.kind, offset = e.offset}
+}
+
 // Put `s` before the path's steps. Paths are found innermost first, so once UNMARSHAL_PATH_STEPS are held a
 // further step is an outer one, and it is dropped.
 unmarshal_path_prepend :: proc(err: ^Unmarshal_Error, s: Step) {

@@ -65,24 +65,6 @@ Scan_Query :: struct {
 	tag:       u32,
 }
 
-// Wire `want` into an array that has no allocator of its own (a never-`make`d `[dynamic]` has the zero
-// Allocator). Otherwise agree only if the array already carries that one. Writes to a caller-owned array, so
-// only the wiring pass calls it, after the pre-flight has agreed every output's allocator.
-adopt_allocator :: #force_inline proc(arr: ^[dynamic]$T, want: runtime.Allocator) -> bool {
-	if arr.allocator.procedure == nil {
-		arr.allocator = want
-		return true
-	}
-	return arr.allocator == want
-}
-
-// Whether an output made with `have` can grow under `want`: one dynamic array has one allocator, so the
-// scan cannot move it to another. An output with no allocator yet is compatible with anything. A
-// mismatch comes from changing `Request.allocator` after a scan, or from filling its outputs by hand.
-allocator_ok :: #force_inline proc(have, want: runtime.Allocator) -> bool {
-	return have.procedure == nil || have == want
-}
-
 // What a walk could not do, as the walk returns it: a refusal of its own before anything was read
 // (`capacity`, restating the caller's pre-flight), or an output that could not grow (`oom`, and the walk ran
 // on to its result). A plain value, which the automaton's walk returns cheaper than a

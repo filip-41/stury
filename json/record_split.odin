@@ -1,6 +1,6 @@
 package json
 
-import "scan/walk"
+import core_pkg "../core"
 
 // A record is one JSON text, but a `.JSON_Seq` record can hold a complete text and then bytes that belong to
 // no record: `[1]` followed by `]` before the next separator. The library's framing yields the record's
@@ -23,10 +23,7 @@ split_record :: proc(
 	// record carries a value and a fault, not one faulty text. A bare number or literal ends only where a
 	// delimiter says so: `nullx` or `true,` is one faulty token, not a value and a fault. Only a text that
 	// closes itself, an array, object or string, stands apart.
-	end := int(e.offset)
-	for end > 0 && walk.is_space(rec[end - 1]) {
-		end -= 1
-	}
+	end := core_pkg.skip_space_back(rec, 0, int(e.offset))
 	if end == 0 || (rec[end - 1] != ']' && rec[end - 1] != '}' && rec[end - 1] != '"') {
 		return
 	}

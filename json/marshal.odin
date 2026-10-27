@@ -6,14 +6,12 @@ package json
 // Every `data` is the address of a value of the type its op was compiled for. The root has `v`'s type; a
 // plan for another type is `.Plan_Mismatch`. A field is at its type-info offset, and the elements are `stride`
 // apart, up to their count. The `#no_bounds_check` writers store only into room that `enc.put_room` reserved.
-// For a scalar that is the key plus FIELD_VALUE_ROOM, which covers `spell.INT_ROOM`, `spell.F64_ROOM` and the
-// 8-byte `true`/`false` word; `close_object` takes 3 bytes. `ptrs` has MAX_DEPTH slots, and a target is pushed
+// For a scalar that is the key plus `spell.SCALAR_ROOM`; `close_object` takes 3 bytes. `ptrs` has MAX_DEPTH slots, and a target is pushed
 // only below that depth.
 
 import "base:intrinsics"
 import "base:runtime"
 import "core:io"
-import "core:reflect"
 import "core:unicode/utf8"
 import enc "encode"
 import core_pkg "../core"
@@ -112,7 +110,7 @@ marshal_into :: proc(out: ^Marshal_Out, value: any) -> Marshal_Error {
 		return enc.put_bytes(out.out, "null")
 	}
 	if value.id != out.into_id {
-		out.into_op = plan_op(out.plan, type_info_of(value.id)) or_return
+		out.into_op = core_pkg.plan_op_m(out.plan, type_info_of(value.id)) or_return
 		out.into_id = value.id
 	}
 	return write_target(out, out.into_op, value.data)
@@ -177,7 +175,7 @@ marshal_planned :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, p: ^Type_
 		if p.opts_lost {
 			return .Out_Of_Memory
 		}
-		plan_op(p, type_info_of(v.id)) or_return
+		core_pkg.plan_op_m(p, type_info_of(v.id)) or_return
 	}
 	ptrs: [MAX_DEPTH]Open_Target = ---
 	st := Marshal_Out{
@@ -262,7 +260,7 @@ write_rare_value :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: r
 		bytes, n := utf8.encode_rune(r)
 		return enc.put_string(st.out, string(bytes[:n]))
 	case .Union:
-		k := union_arm_of(op, data)
+		k := core_pkg.plan_union_arm(op, data)
 		if k < 0 {
 			return enc.put_bytes(st.out, "null")
 		}
@@ -277,13 +275,13 @@ write_rare_value :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: r
 		if a.id == nil || a.data == nil {
 			return enc.put_bytes(st.out, "null")
 		}
-		arm := plan_op(st.plan, type_info_of(a.id)) or_return
+		arm := core_pkg.plan_op_m(st.plan, type_info_of(a.id)) or_return
 		return write_target(st, arm, a.data)
 	case .Enum_Int, .Enum_Uint:
 		if st.enum_ints {
 			return put_enum_int(st.out, st.plan, op, data)
 		}
-		m := enum_member(st.plan, op, data) or_return
+		m, _ := core_pkg.plan_enum_written(st.plan, op, data) or_return
 		return enc.put_bytes(st.out, string(st.plan.keys[m.lo:m.hi]))
 	}
 	return .None
@@ -326,7 +324,10 @@ write_bit_set :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawp
 			continue
 		}
 		// A bit no member stands for is refused under either notation, as unmarshal refuses it.
-		m := enum_member_of(st.plan, elem, v) or_return
+		m, member := core_pkg.plan_enum_member(st.plan, elem, v)
+		if !member {
+			return .Not_A_Member
+		}
 		if st.enum_ints {
 			enc.put_i64(st.out, v) or_return
 		} else {
@@ -342,42 +343,11 @@ bit_set_bits :: proc(op: Plan_Op, data: rawptr) -> (bits: u128) {
 	return
 }
 
-// The arm the union `op` at `data` holds, as an index into its arm run, or -1 for nil.
-@(private)
-union_arm_of :: proc(op: Plan_Op, data: rawptr) -> int {
-	u := runtime.type_info_base(op.info).variant.(runtime.Type_Info_Union)
-	if len(u.variants) == 0 {
-		return -1
-	}
-	// A pure maybe holds its pointer arm with no tag, and nil is the pointer.
-	if reflect.type_info_union_is_pure_maybe(u) {
-		return 0 if (^rawptr)(data)^ != nil else -1
-	}
-	tag := int(core_pkg.shape_uint_load(rawptr(uintptr(data) + u.tag_offset), u8(u.tag_type.size)))
-	return tag if u.no_nil else tag - 1
-}
-
 // An enum's backing integer. A value no member has is refused, as unmarshal refuses it.
 @(private)
 put_enum_int :: proc(dst: ^[dynamic]u8, p: ^Type_Plan, op: Plan_Op, data: rawptr) -> Marshal_Error {
-	enum_member(p, op, data) or_return
-	if op.kind == .Enum_Int {
-		return enc.put_i64(dst, core_pkg.shape_int_load(data, op.size))
-	}
-	return enc.put_u64(dst, core_pkg.shape_uint_load(data, op.size))
-}
-
-// The member an enum value is: the first declared with its value.
-@(private)
-enum_member :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, data: rawptr) -> (Plan_Member, Marshal_Error) {
-	return enum_member_of(p, op, core_pkg.plan_enum_value(op, data))
-}
-
-// The first member declared with value `v`.
-@(private)
-enum_member_of :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, v: i64) -> (Plan_Member, Marshal_Error) {
-	m, ok := core_pkg.plan_enum_member(p, op, v)
-	return m, .None if ok else .Not_A_Member
+	_, v := core_pkg.plan_enum_written(p, op, data) or_return
+	return enc.put_i64(dst, v) if op.kind == .Enum_Int else enc.put_u64(dst, u64(v))
 }
 
 @(private)
@@ -538,7 +508,7 @@ put_raw :: proc(st: ^Marshal_Out, s: string) -> Marshal_Error {
 commented_raw_fault :: proc(s: string, limits: Limits, dialect: Dialect) -> Maybe(Error) {
 	comments := make([dynamic]Fact)
 	defer delete(comments)
-	if fault, bad := validate(transmute([]byte)s, {dialect = dialect, limits = limits}, &comments).?; bad {
+	if fault, bad := validate_facts(transmute([]byte)s, {dialect = dialect, limits = limits}, &comments).?; bad {
 		return fault
 	}
 	if n := len(comments); n > 0 && comments[n - 1].hi == u64(len(s)) {

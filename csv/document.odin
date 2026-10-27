@@ -5,6 +5,7 @@ package csv
 
 import "core:mem"
 import "core:unicode/utf8"
+import core_pkg "../core"
 
 // A parsed CSV text: the spans of its fields in the source bytes. Make one with `build` and read it through
 // the procedures in this file. Its fields are internal.
@@ -104,14 +105,15 @@ reserve_rest :: proc(it: ^Records, rec: Record) {
 	set_limit(it)
 }
 
-// Free everything an owner holds, and empty it: a `Document`, the `Records` of `records`, a `Record_Reader` or a
-// `Type_Plan`. Strings read from a document dangle after.
+// Free everything an owner holds, and empty it: a `Document`, the `Records` of `records`, a `Request`, a
+// `Record_Reader` or a `Type_Plan`. Strings read from a document dangle after.
 destroy :: proc {
 	document_destroy,
 	records_free,
+	request_destroy,
 	reader_destroy,
 	record_read_destroy,
-	type_plan_destroy,
+	core_pkg.hooked_plan_destroy,
 }
 
 @(private)
@@ -144,37 +146,12 @@ column_count :: proc(doc: ^Document) -> int {
 // false for a name the header lacks and for a document with no header.
 @(require_results)
 column :: proc(doc: ^Document, name: string) -> (col: int, ok: bool) {
-	col, _, _ = named_column(doc.src, doc.names[:], doc.dialect, name, .First)
-	return col, col >= 0
-}
-
-// The column `name` names in a header's fields (`text_is`), under `duplicates`. `col` is -1 when no field names it.
-// `repeated` is set, with `at` the repeated column's header field, when `.Default`/`.Refuse` meets a second
-// field of that name.
-@(private)
-named_column :: proc(src: []byte, names: []Field, dialect: Dialect, name: string, duplicates: Duplicates) -> (col: int, at: u64, repeated: bool) {
-	first := -1
-	last := -1
-	for f, c in names {
-		if !text_is(src, f, dialect, name) {
-			continue
-		}
-		if first < 0 {
-			first, last = c, c
-			if duplicates == .First {
-				return c, 0, false
-			}
-			continue
-		}
-		switch duplicates {
-		case .Default, .Refuse:
-			return -1, f.lo, true
-		case .First:
-		case .Last, .All:
-			last = c
+	for f, c in doc.names {
+		if text_is(doc.src, f, doc.dialect, name) {
+			return c, true
 		}
 	}
-	return last, 0, false
+	return -1, false
 }
 
 // The fields of `row`, nil past the last row. A row of a `ragged` dialect may be shorter or longer than
@@ -246,14 +223,14 @@ get_int :: proc(doc: ^Document, row, col: int) -> (v: i64, ok: bool) {
 	return v, true
 }
 
-// The binary64 a cell spells, read by `unmarshal`'s own float reader (`read_float_value`) and correctly
+// The binary64 a cell spells, read as `unmarshal` reads a float (`core_pkg.number_of_loose_text`) and correctly
 // rounded. `ok` is false for an empty cell, any other text, a nonzero value that underflows to zero (`1e-400`;
 // `unmarshal` stores that 0), or a value with no binary64 (`1e400`).
 // A rounded significand (`0.1`, `1e23`) is accepted: it is the value `unmarshal` stores, not an error.
 @(require_results)
 get_float :: proc(doc: ^Document, row, col: int) -> (v: f64, ok: bool) {
 	text := present_text(doc, row, col) or_return
-	n := read_float_value(text)
+	n, _ := core_pkg.number_of_loose_text(transmute([]byte)text)
 	return n.value, n.exactness == .Exact || n.exactness == .Inexact
 }
 

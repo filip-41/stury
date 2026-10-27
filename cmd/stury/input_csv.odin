@@ -13,6 +13,7 @@ import "core:io"
 import "core:os"
 import core_pkg "../../core"
 import csv "../../csv"
+import json "../../json"
 import "jq"
 
 // The bytes read from a regular file into the window per read.
@@ -41,6 +42,7 @@ Cells :: struct {
 	source:   Cells_Source,
 	it:       ^csv.Records, // `whole`, or `rr`'s iterator; its `field_lo` is where a quoted field began
 	header:   []string, // nil until the file's first record is read
+	heads:    Heads, // the header's names as `object_heads` spells them
 	line_at:  int, // the stream offset `cells_line` last counted to; `line_no` is the line count there
 	line_no:  int,
 }
@@ -52,7 +54,8 @@ next_cells :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 	if status != .Value {
 		return nil, msg, status
 	}
-	return record_object(ins.cells, rec), "", .Value
+	c := ins.cells
+	return record_doc(c.heads, nil, rec, c.dialect), "", .Value
 }
 
 // Returns the next record after the current file's header. Returns `.Error` with the fault that ended the file, or
@@ -78,7 +81,7 @@ next_row :: proc(ins: ^Inputs) -> (rec: csv.Record, msg: string, status: jq.Pars
 cells_of :: proc(ins: ^Inputs) -> ^Cells {
 	if ins.cells == nil {
 		ins.cells = new(Cells, runtime.heap_allocator())
-		ins.cells.dialect = csv.TSV if ins.run.opts.from == .Tsv else csv.Dialect{}
+		ins.cells.dialect = FORMATS[ins.run.opts.from].dialect
 	}
 	return ins.cells
 }
@@ -122,18 +125,11 @@ start_cells :: proc(ins: ^Inputs, c: ^Cells, f: ^os.File) -> bool {
 		file    = f,
 	}
 	if !streams(ins, f, records = false) {
-		if data, mapped := map_file(f); mapped {
-			c.data, c.mapped = data, true
-			mapped_input_name = ins.name
-		} else {
-			all, err := read_whole(f, heap)
-			if err != nil {
-				close_file(f)
-				c.file = nil
-				read_failed(ins, err)
-				return false
-			}
-			c.data = all
+		read: bool
+		if c.data, c.mapped, read = load_input(ins, f); !read {
+			close_file(f)
+			c.file = nil
+			return false
 		}
 		c.whole = csv.records(c.data, {dialect = c.dialect}, heap)
 		c.it = &c.whole
@@ -194,35 +190,28 @@ read_header :: proc(ins: ^Inputs, c: ^Cells, rec: csv.Record) -> string {
 		seen[name] = {}
 		names[i] = name
 	}
-	c.header = names
+	c.header, c.heads = names, object_heads(names, heap)
 	return ""
 }
 
-// Returns an object mapping header names to the record's cells, with the cell text in the arena. All cell bytes
-// are copied in one block; a cell with a doubled quote or an escape is decoded into it. An empty cell is null.
-@(private)
-record_object :: proc(c: ^Cells, rec: csv.Record) -> jq.Value {
-	n, total := len(rec.fields), 0
-	for f in rec.fields {
-		total += int(f.hi - f.lo)
+// Returns the record as the document the interpreter reads: a compact JSON object of `heads` and the cells at
+// `at` (every field when nil), an empty cell null, with a row per value. The document, its rows and its text are
+// one block of the context allocator, which is an arena: text that escapes outgrow the block is moved by the
+// arena's resize.
+record_doc :: proc(heads: Heads, at: []int, rec: csv.Record, dialect: csv.Dialect) -> jq.Value {
+	rows, room := len(heads.leads) + 1, object_room(heads, at, rec)
+	head, tail := size_of(json.Document), rows * size_of(core_pkg.Row)
+	block, _ := runtime.mem_alloc_bytes(head + tail + room, align_of(json.Document))
+	doc := (^json.Document)(raw_data(block))
+	doc.distinct_keys = true
+	doc.rows = transmute([dynamic]core_pkg.Row)runtime.Raw_Dynamic_Array{raw_data(block[head:]), 0, rows, context.allocator}
+	text := transmute([dynamic]byte)runtime.Raw_Dynamic_Array{raw_data(block[head + tail:]), 0, room, context.allocator}
+	cells_object(&text, heads, at, rec, dialect, doc)
+	doc.src = text[:]
+	when ODIN_DEBUG {
+		json.check_document(doc)
 	}
-	text := make([]byte, total)
-	keys := make([dynamic]string, n)
-	vals := make([dynamic]jq.Value, n)
-	copy(keys[:], c.header)
-	at := 0
-	for f, i in rec.fields {
-		if f.lo == f.hi {
-			continue
-		}
-		cell, decoded, _ := csv.field_text(rec.src, f, c.dialect)
-		if !decoded {
-			at += copy(text[at:], cell)
-			cell = text[at - len(cell):at]
-		}
-		vals[i] = string(cell)
-	}
-	return jq.object_from(keys, vals)
+	return jq.Ref{doc, json.ROOT}
 }
 
 // Runs `check` on a whole CSV text. Returns the message a filter run would give, or "" when the text is valid.

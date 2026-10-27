@@ -6,7 +6,6 @@ package main
 import "base:runtime"
 import "core:fmt"
 import "core:mem/virtual"
-import "core:os"
 import "core:strings"
 import json "../../json"
 import "jq"
@@ -22,11 +21,7 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 	// Each input's values live in an arena emptied once its outputs are printed, and so does the temporary
 	// allocator, which nothing holds past a call.
 	arena: virtual.Arena
-	if virtual.arena_init_growing(&arena) != nil {
-		fmt.eprintln("stury: error: out of memory")
-		os.exit(EXIT_INPUT)
-	}
-	context.allocator = virtual.arena_allocator(&arena)
+	context.allocator = input_arena(run, &arena)
 	if run.opts.null_input {
 		run_once(run, nil)
 		return
@@ -68,6 +63,15 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 			return
 		}
 	}
+}
+
+// `arena` started as a growing arena, whose allocator it returns, or the run ended for want of memory.
+input_arena :: proc(run: ^Run, arena: ^virtual.Arena) -> runtime.Allocator {
+	if virtual.arena_init_growing(arena) != nil {
+		fmt.eprintln("stury: error: out of memory")
+		finish(run, EXIT_INPUT)
+	}
+	return virtual.arena_allocator(arena)
 }
 
 // Ends the run on a fault in the input: the output so far, then jq's parse error message and the note after it.

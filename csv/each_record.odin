@@ -37,17 +37,7 @@ each_record :: proc(
 		return Error{kind = .Bad_Option}
 	}
 	run := Batch_Run{src = src, scan = s, task = task, data = data}
-	run.driver = {
-		cursor = {runner = runner},
-		data = &run,
-		none = len(src),
-		boundary = batch_boundary,
-		skip = batch_skip,
-		piece = piece_task,
-		fault_rank = piece_fault_rank,
-		stop_on_fault = true,
-	}
-	return run_batch(&run)
+	return run_batch(&run, runner, piece_task)
 }
 
 // Every record of `src` that `validate` refuses, in source order, each with its bytes src[lo:hi], which end
@@ -155,23 +145,14 @@ resume_read :: proc(it: ^Records, src: []byte, at: int) {
 @(private)
 validate_pieces :: proc(src: []byte, s: Scan, runner: ^Batch_Runner) -> Maybe(Error) {
 	run := Batch_Run{src = src, scan = s}
-	run.driver = {
-		cursor = {runner = runner},
-		data = &run,
-		none = len(src),
-		boundary = batch_boundary,
-		skip = batch_skip,
-		piece = piece_validate,
-		fault_rank = piece_fault_rank,
-		stop_on_fault = true,
-	}
-	return run_batch(&run)
+	return run_batch(&run, runner, piece_validate)
 }
 
 @(private)
-run_batch :: proc(run: ^Batch_Run) -> Maybe(Error) {
+run_batch :: proc(run: ^Batch_Run, runner: ^Batch_Runner, piece: core_pkg.Batch_Piece) -> Maybe(Error) {
+	run.driver = {data = run, none = len(run.src), boundary = batch_boundary, piece = piece, rank_by_piece = true, stop_on_fault = true}
 	defer delete(run.parity, runtime.heap_allocator())
-	batch_plan(run)
+	split_plan(run, runner)
 	return core_pkg.batch_run(&run.driver)
 }
 
@@ -201,10 +182,11 @@ Batch_Run :: struct {
 // even count of quotes qualifies. Quotes in a comment line do not count, so a comment byte under quotes
 // forces one piece.
 @(private)
-batch_plan :: proc(run: ^Batch_Run) {
+split_plan :: proc(run: ^Batch_Run, runner: ^Batch_Runner) {
 	c := &run.driver.cursor
+	core_pkg.batch_plan(c, runner, len(run.src))
+	lanes, slices := c.lanes, c.slices
 	c.lanes, c.slices = 1, 1
-	lanes := core_pkg.batch_lanes(c.runner, len(run.src))
 	if lanes == 1 || .Comments in run.scan.mode && .Unquoted not_in run.scan.mode {
 		return
 	}
@@ -215,7 +197,6 @@ batch_plan :: proc(run: ^Batch_Run) {
 		}
 		run.width = width
 	}
-	slices := core_pkg.batch_slices(len(run.src))
 	if .Unquoted not_in run.scan.mode {
 		parity, err := make([]u8, slices, runtime.heap_allocator())
 		if err != nil {
@@ -283,11 +264,6 @@ piece_validate :: proc(data: rawptr, lo, hi: int, _: int) -> (fault: Maybe(Error
 	return validate_span(run.src[:hi], lo, run.width, run.scan), true
 }
 
-@(private)
-piece_fault_rank :: proc(_: rawptr, k: int, _: Error) -> int {
-	return k
-}
-
 // Where the records from slice `k` on start: just past the first LF outside quotes at or after the byte before
 // the slice's offset, or the input's end when there is none. Slice 0 starts at the input's first byte past
 // its BOM.
@@ -312,11 +288,6 @@ batch_boundary :: proc(data: rawptr, k, _: int) -> int {
 	}
 	i := outside_lf(src, at, odd)
 	return i + 1 if i >= 0 else len(src)
-}
-
-@(private)
-batch_skip :: proc(_: rawptr, _: int, hi: int) -> int {
-	return hi / core_pkg.BATCH_SLICE
 }
 
 // The first LF outside quotes at or after `from`, or -1. `odd` says whether `from` is inside quotes.

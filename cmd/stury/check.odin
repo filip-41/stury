@@ -48,10 +48,9 @@ check_input :: proc(run: ^Run, ins: ^Inputs) {
 		fail_input(run, {kind = .Truncated, offset = u64(len(ins.data))}, "No JSON text")
 	}
 	switch {
-	case run.opts.from == .Ndjson || run.opts.seq:
+	case FORMATS[run.opts.from].framing == .Lines || run.opts.seq:
 		check_records(run, ins.data)
 	case !json.plain_json(run.req.dialect):
-		// The text itself, not the transcode `run` reads.
 		if e, bad := json.validate(ins.data, {dialect = FORMATS[run.opts.from].source, limits = check_limits(run)}).?; bad {
 			fail_input(run, e)
 		}
@@ -97,12 +96,7 @@ check_texts :: proc(run: ^Run, ins: ^Inputs) {
 		if !found {
 			return
 		}
-		src := ins.data[at:limit]
-		end := len(src)
-		e, bad := json.validate(src, {limits = limits}).?
-		if bad && e.kind == .Trailing && trailing {
-			end, bad = int(e.offset), false
-		}
+		end, e, bad := validate_text(ins.data[at:limit], {limits = limits}, trailing)
 		if bad {
 			e = cut_by_next_byte(ins.data, at, limit, e, .Json, limits)
 			e.offset += u64(at)
@@ -116,11 +110,11 @@ check_texts :: proc(run: ^Run, ins: ^Inputs) {
 // refuses is validated again against check's, and the first fault that stands ends the run.
 @(private = "file")
 check_records :: proc(run: ^Run, src: []byte) {
-	framing := json.Framing.NDJSON if run.opts.from == .Ndjson else .JSON_Seq
+	framing := json.Framing.NDJSON if FORMATS[run.opts.from].framing == .Lines else .JSON_Seq
 	// A buffer of one NDJSON record has nothing to share among workers: the caller validates it alone.
 	nl := bytes.index_byte(src, '\n')
-	lone := run.opts.from == .Ndjson && (nl < 0 || nl + 1 == len(src))
-	faults, err := json.validate_records(src, framing, nil if lone else batch_runner(run, len(src)))
+	lone := FORMATS[run.opts.from].framing == .Lines && (nl < 0 || nl + 1 == len(src))
+	faults, err := json.validate_records(src, {framing = framing}, nil if lone else batch_runner(run, len(src)))
 	defer delete(faults)
 	limits := check_limits(run)
 	// The framing fault stands unless a record before it does. Under --seq a `.Truncated` one is a number the next

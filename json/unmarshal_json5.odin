@@ -19,13 +19,10 @@ read_json5 :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Type_
 	doc, berr := build(src, {dialect = .Json5, limits = opts.limits, duplicates = refuse})
 	defer destroy(&doc)
 	if e, bad := berr.?; bad {
-		#partial switch e.kind {
-		case .Out_Of_Memory:
-			return Unmarshal_Error{kind = .Out_Of_Memory}
-		case .Duplicate_Key:
+		if e.kind == .Duplicate_Key {
 			return Unmarshal_Error{kind = .Duplicate_Key, offset = e.offset}
 		}
-		return Unmarshal_Error{kind = .Syntax, syntax = e.kind, offset = e.offset}
+		return core_pkg.unmarshal_error_from(e)
 	}
 	text, merr := marshal_document(&doc, {})
 	#partial switch merr {

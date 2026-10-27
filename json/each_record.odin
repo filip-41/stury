@@ -11,7 +11,7 @@ Batch_Runner :: core_pkg.Batch_Runner
 // core's `Record_Fault`.
 Record_Fault :: core_pkg.Record_Fault
 
-// `task` on every piece of `src`, each a `Records` over whole records under `framing`.
+// `task` on every piece of `src`, each a `Records` over whole records under `opts.framing`; no other field is read.
 //
 //	- Pieces are numbered `k` from 0 in source order and handed out once each, possibly with no record.
 //	- The caller and `runner`'s threads claim the pieces in turn, and each finds its own first and last
@@ -25,14 +25,15 @@ Record_Fault :: core_pkg.Record_Fault
 @(require_results)
 each_record :: proc(
 	src: []byte,
-	framing: Framing,
 	task: proc(data: rawptr, piece: ^Records, k: int) -> bool,
 	data: rawptr,
+	opts := Read_Opts{},
 	runner: ^Batch_Runner = nil,
 ) -> Maybe(Error) {
+	framing := opts.framing
 	run := Batch_Run{src = src, framing = framing, task = task, data = data, end = len(src)}
 	if framing == .Root_Entries {
-		root := records(src, .Root_Entries)
+		root := records(src, {framing = .Root_Entries})
 		if !open_root(&root) {
 			if e, bad := root.err.(Error); bad {
 				return e
@@ -47,12 +48,11 @@ each_record :: proc(
 	}
 	run.driver = {
 		data = &run,
+		lo = run.lo,
 		none = run.end + int(framing == .Root_Entries),
 		boundary = batch_boundary,
-		skip = batch_skip,
+		skip = batch_skip if framing == .Root_Entries else nil,
 		piece = batch_piece,
-		fault_rank = batch_fault_rank,
-		stop_on_fault = false,
 	}
 	core_pkg.batch_plan(&run.driver.cursor, runner, n)
 	// Freed once the claims below have read them.
@@ -69,17 +69,17 @@ each_record :: proc(
 	return core_pkg.batch_run(&run.driver)
 }
 
-// Validate every record of `src` as `validate` checks it alone: the records it refuses, in source order,
-// allocated with `allocator` (nil when there are none).
+// Validate every record of `src` as `validate` checks it alone under `opts`: the records it refuses, in source
+// order, allocated with `allocator` (nil when there are none).
 //
-//	- Under `.Root_Entries` a record is checked with one level less nesting, since the root holds each
-//	  entry.
+//	- Under `.Root_Entries` a record is checked with one level less nesting than `opts.limits` allows, since
+//	  the root holds each entry.
 //	- A framing fault is `err`, the first in `src`, and `faults` are then only the records before it.
 //	- Records are validated on `runner`'s threads as `each_record` hands them out.
 @(require_results)
 validate_records :: proc(
 	src: []byte,
-	framing: Framing,
+	opts := Read_Opts{},
 	runner: ^Batch_Runner = nil,
 	allocator := context.allocator,
 ) -> (
@@ -91,7 +91,11 @@ validate_records :: proc(
 		return nil, lerr
 	}
 	defer core_pkg.fault_list_destroy(&lists)
-	err = each_record(src, framing, validate_piece, &lists, runner)
+	check := Record_Check{lists = &lists, opts = opts}
+	if opts.framing == .Root_Entries {
+		check.opts.limits.max_depth = (opts.limits.max_depth if opts.limits.max_depth > 0 else MAX_DEPTH) - 1
+	}
+	err = each_record(src, validate_piece, &check, opts, runner)
 	// A framing fault ends the records a whole-text `validate` reaches, so only the records before it stand.
 	through := max(u64)
 	if e, bad := err.?; bad {
@@ -104,14 +108,20 @@ validate_records :: proc(
 	return merged, err
 }
 
+// What `validate_records` hands each piece: the fault lists, and the options a record is validated with.
+@(private)
+Record_Check :: struct {
+	lists: ^core_pkg.Fault_List,
+	opts:  Read_Opts,
+}
+
 @(private)
 validate_piece :: proc(data: rawptr, piece: ^Records, k: int) -> bool {
-	lists := (^core_pkg.Fault_List)(data)
-	limits := Limits{max_depth = MAX_DEPTH - 1} if piece.framing == .Root_Entries else {}
+	check := (^Record_Check)(data)
 	for rec in next_record(piece) {
-		if e, bad := validate_record(piece, rec, limits).?; bad {
+		if e, bad := validate_record(piece, rec, check.opts).?; bad {
 			e.offset += rec.at
-			core_pkg.fault_list_add(lists, k, Record_Fault{lo = rec.at, hi = rec.at + u64(len(rec.bytes)), err = e})
+			core_pkg.fault_list_add(check.lists, k, Record_Fault{lo = rec.at, hi = rec.at + u64(len(rec.bytes)), err = e})
 		}
 	}
 	return true
@@ -121,10 +131,10 @@ validate_piece :: proc(data: rawptr, piece: ^Records, k: int) -> bool {
 // the framing byte that finished it (when the input goes on), and `validate` of the document calls that
 // `.Bad_Literal`: so it is validated with that byte, which shifts no offset.
 @(private)
-validate_record :: proc(piece: ^Records, rec: Record, limits: Limits) -> Maybe(Error) {
-	if e, bad := validate(rec.bytes, {limits = limits}).?; bad {
-		at := int(rec.at - piece.base)
-		return scan_pkg.cut_by_next_byte(piece.src, at, at + len(rec.bytes), e, limits = limits)
+validate_record :: proc(piece: ^Records, rec: Record, opts: Read_Opts) -> Maybe(Error) {
+	if e, bad := validate(rec.bytes, opts).?; bad {
+		at := int(rec.at)
+		return scan_pkg.cut_by_next_byte(piece.src, at, at + len(rec.bytes), e, opts.dialect, opts.limits)
 	}
 	return nil
 }
@@ -206,11 +216,6 @@ batch_piece :: proc(data: rawptr, lo, hi, k: int) -> (fault: Maybe(Error), go_on
 }
 
 @(private)
-batch_fault_rank :: proc(_: rawptr, _: int, e: Error) -> int {
-	return int(e.offset)
-}
-
-@(private)
 batch_boundary :: proc(data: rawptr, k, stop_slice: int) -> int {
 	run := (^Batch_Run)(data)
 	src := run.src
@@ -220,6 +225,7 @@ batch_boundary :: proc(data: rawptr, k, stop_slice: int) -> int {
 	at := slice_start(run, k)
 	stop := slice_start(run, stop_slice)
 	switch run.framing {
+	case .None:
 	case .NDJSON:
 		if at < stop {
 			if i := bytes.index_byte(src[at - 1:stop], '\n'); i >= 0 {
@@ -252,13 +258,9 @@ batch_boundary :: proc(data: rawptr, k, stop_slice: int) -> int {
 	return -1
 }
 
-// The first slice past `from` whose boundary is still `hi`, the boundary of slice `from`.
 @(private)
 batch_skip :: proc(data: rawptr, from, hi: int) -> int {
 	run := (^Batch_Run)(data)
-	if run.framing != .Root_Entries {
-		return (hi - run.lo) / core_pkg.BATCH_SLICE
-	}
 	// Slice `skip` must start at or before the comma at `hi - 1`, which a run of backslashes may move it past.
 	skip := (hi - 1 - run.lo) / core_pkg.BATCH_SLICE
 	for skip > from && slice_start(run, skip) > hi - 1 {

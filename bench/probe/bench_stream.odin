@@ -87,7 +87,7 @@ stream_pass :: proc(path: string, runner: ^json.Batch_Runner) -> (n: int, ok: bo
 			buf = grown
 			continue
 		}
-		faults, err := json.validate_records(buf[:cut], .NDJSON, runner)
+		faults, err := json.validate_records(buf[:cut], {framing = .NDJSON}, runner)
 		clean := err == nil && len(faults) == 0
 		delete(faults)
 		if !clean {
@@ -106,7 +106,7 @@ whole_pass :: proc(path: string, runner: ^json.Batch_Runner) -> (n: int, ok: boo
 		return 0, false
 	}
 	defer delete(data)
-	faults, verr := json.validate_records(data, .NDJSON, runner)
+	faults, verr := json.validate_records(data, {framing = .NDJSON}, runner)
 	clean := verr == nil && len(faults) == 0
 	delete(faults)
 	return len(data), clean

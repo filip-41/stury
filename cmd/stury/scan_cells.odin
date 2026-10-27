@@ -12,10 +12,11 @@ package main
 
 import "base:runtime"
 import "core:bytes"
-import "core:fmt"
 import "core:mem/virtual"
 import "core:slice"
+import core_pkg "../../core"
 import csv "../../csv"
+import scan "../../json/scan"
 import "jq"
 
 // The columns a filter prints, in the order it prints them.
@@ -26,7 +27,7 @@ Columns :: struct {
 	all:    bool, // `.`: an object of every column of the open file; `names` and `keys` are its header
 	// The object's member keys in output order (sorted under -S), and each key's printed `"key":`.
 	keys:   []string,
-	heads:  []string,
+	heads:  Heads,
 	// The index of each name in the open file's header, or -1 when the header lacks it (the output is null).
 	at:     []int,
 	sorted: bool, // -S: `all` prints the header's names in byte order
@@ -34,6 +35,7 @@ Columns :: struct {
 	selecting: bool,
 	watch:     []string,
 	watch_at:  []int,
+	watch_heads: Heads, // the watched names printed as `"name":`
 	arena:     virtual.Arena, // the interpreter's memory for one record
 }
 
@@ -48,9 +50,6 @@ Selected :: struct {
 // does.
 choose_columns :: proc(run: ^Run, text: string, files: int) {
 	o := &run.opts
-	if !reads_cells(o) {
-		return
-	}
 	stops := column_stops(o)
 	if stops != {} && !explain_why(run, stops) {
 		return
@@ -218,19 +217,27 @@ only_columns :: proc(n: ^jq.Node, watch: ^[dynamic]string) -> bool {
 	return false
 }
 
-// Returns each key printed as `"key":`.
-@(private = "file")
-object_heads :: proc(keys: []string) -> []string {
-	heads := make([]string, len(keys))
+// The members' leads of the objects `cells_object` writes: each key printed, `{"key":` for the first, `,"key":` for the
+// rest.
+Heads :: struct {
+	leads:       []string,
+	key_escaped: bool, // a key's printed form has an escape
+}
+
+// Returns each key printed as the lead of its member.
+object_heads :: proc(keys: []string, allocator := context.allocator) -> (heads: Heads) {
+	heads.leads = make([]string, len(keys), allocator)
 	buf: [dynamic]byte
 	for k, i in keys {
 		clear(&buf)
+		append(&buf, '{' if i == 0 else ',')
 		jq.write_string(&buf, k)
 		append(&buf, ':')
-		heads[i] = string(slice.clone(buf[:]))
+		heads.key_escaped |= bytes.index_byte(buf[:], '\\') >= 0
+		heads.leads[i] = string(slice.clone(buf[:], allocator))
 	}
 	delete(buf)
-	return heads
+	return
 }
 
 // Appends the column names of `n` (`.a` or `.a, .b`) to `names` in order. Returns false for any other `n`.
@@ -260,30 +267,20 @@ place_columns :: proc(cols: ^Columns, header: []string) {
 			cols.keys = slice.clone(header)
 			slice.sort(cols.keys)
 			for k, i in cols.keys {
-				cols.at[i] = column_of(header, k)
+				cols.at[i], _ = slice.linear_search(header, k)
 			}
 		}
 		cols.heads = object_heads(cols.keys)
 	}
 	for name, i in cols.watch {
-		cols.watch_at[i] = column_of(header, name)
+		cols.watch_at[i], _ = slice.linear_search(header, name)
 	}
+	cols.watch_heads = object_heads(cols.watch)
 	if !cols.all {
 		for name, i in cols.names {
-			cols.at[i] = column_of(header, name)
+			cols.at[i], _ = slice.linear_search(header, name)
 		}
 	}
-}
-
-// Returns the index of `name` in `header`, or -1.
-@(private = "file")
-column_of :: proc(header: []string, name: string) -> int {
-	for h, j in header {
-		if h == name {
-			return j
-		}
-	}
-	return -1
 }
 
 // Prints the columns of the files' records with the same results as `run_filter`. The run stops at a fault in a
@@ -330,33 +327,17 @@ scan_cells :: proc(run: ^Run, ins: ^Inputs) {
 	}
 }
 
-// Returns an object of the record's watched columns, allocated in the context allocator.
-@(private = "file")
-watched_object :: proc(cols: ^Columns, rec: csv.Record, dialect: csv.Dialect) -> jq.Value {
-	keys := make([dynamic]string, len(cols.watch))
-	vals := make([dynamic]jq.Value, len(cols.watch))
-	copy(keys[:], cols.watch)
-	for at, i in cols.watch_at {
-		if at >= 0 && rec.fields[at].lo != rec.fields[at].hi {
-			text, _, _ := csv.field_text(rec.src, rec.fields[at], dialect)
-			vals[i] = string(text)
-		}
-	}
-	return jq.object_from(keys, vals)
-}
-
 // Runs the filter on the record's watched columns as `run_filter` would. Each output prints the whole record.
 @(private = "file")
 select_cell :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv.Dialect) {
-	if cols.arena.curr_block == nil && virtual.arena_init_growing(&cols.arena) != nil {
-		fmt.eprintln("stury: error: out of memory")
-		finish(run, EXIT_INPUT)
+	if cols.arena.curr_block == nil {
+		input_arena(run, &cols.arena)
 	}
 	context.allocator = virtual.arena_allocator(&cols.arena)
 	defer virtual.arena_free_all(&cols.arena)
 	selected := Selected{cols, rec, dialect}
 	run.selected = &selected
-	run_once(run, watched_object(cols, rec, dialect))
+	run_once(run, record_doc(cols.watch_heads, cols.watch_at, rec, dialect))
 	run.selected = nil
 }
 
@@ -372,7 +353,7 @@ select_record :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv.D
 	defer virtual.arena_free_all(arena)
 	selected := Selected{cols, rec, dialect}
 	run.selected = &selected
-	sig := eval_input(run, watched_object(cols, rec, dialect))
+	sig := eval_input(run, record_doc(cols.watch_heads, cols.watch_at, rec, dialect))
 	run.selected = nil
 	failed := sig == .Fail || sig == .Break || len(run.ip.messages) > 0 || run.faulted
 	return .Failed if failed else .Done
@@ -403,54 +384,134 @@ print_cells :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv.Dia
 	if run.table != nil {
 		return print_cell_rows(run, cols, rec, dialect)
 	}
-	raw, out := run.opts.raw && !cols.array && !cols.object, &run.out
+	if cols.object {
+		cells_object(&run.out, cols.heads, cols.at, rec, dialect)
+		end_output(run)
+		return true
+	}
+	raw, out := run.opts.raw && !cols.array, &run.out
 	if cols.array {
 		append(out, '[')
-	} else if cols.object {
-		append(out, '{')
 	}
 	for at, i in cols.at {
-		if i > 0 && (cols.array || cols.object) {
+		if i > 0 && cols.array {
 			append(out, ',')
 		}
-		if cols.object {
-			append(out, ..transmute([]byte)cols.heads[i])
-		}
-		null := at < 0 || rec.fields[at].lo == rec.fields[at].hi // a column the header lacks, or a cell of no bytes
-		if null {
-			append(out, "null")
-		} else {
-			text, decoded, _ := csv.field_text(rec.src, rec.fields[at], dialect, context.temp_allocator)
-			if raw {
-				append(out, ..text)
-			} else {
-				jq.write_string(out, string(text))
-			}
-			if decoded {
-				free_all(context.temp_allocator)
-			}
-		}
-		if !cols.array && !cols.object {
+		null := put_cell(out, rec, at, dialect, raw)
+		if !cols.array {
 			end_output(run)
 			run.ret = JQ_OK_NULL_KIND if null else JQ_OK
 		}
 	}
-	if cols.array || cols.object {
-		append(out, ']' if cols.array else '}')
+	if cols.array {
+		append(out, ']')
 		end_output(run)
 	}
 	return true
 }
 
-// Returns the cell of column `at` of `rec`, allocated in the temporary allocator. Returns nil when the header lacks
-// the column or the cell is empty.
+// Appends the cell at column `at` of `rec` as a JSON string, or as its text when `raw`; `null` for a column the
+// header lacks and for a cell of no bytes. Returns whether it appended null.
 @(private = "file")
-column_cell :: proc(rec: csv.Record, at: int, dialect: csv.Dialect) -> Maybe(string) {
-	if at < 0 || rec.fields[at].lo == rec.fields[at].hi {
-		return nil
+put_cell :: proc(out: ^[dynamic]byte, rec: csv.Record, at: int, dialect: csv.Dialect, raw: bool) -> (null: bool) {
+	cell, decoded := column_cell(rec, at, dialect)
+	text, present := cell.?
+	if !present {
+		append(out, "null")
+		return true
 	}
-	text, _, _ := csv.field_text(rec.src, rec.fields[at], dialect, context.temp_allocator)
-	return string(text)
+	if raw {
+		append(out, text)
+	} else {
+		jq.write_string(out, text)
+	}
+	if decoded {
+		free_all(context.temp_allocator)
+	}
+	return false
+}
+
+// The bytes of text that `cells_object` writes for the cells at `at` (every field when nil), unless escapes outgrow it.
+object_room :: proc(heads: Heads, at: []int, rec: csv.Record) -> int {
+	room := 2 + 6 * len(heads.leads)
+	for head, i in heads.leads {
+		room += len(head)
+		if k := i if at == nil else at[i]; k >= 0 {
+			room += int(rec.fields[k].hi - rec.fields[k].lo)
+		}
+	}
+	return room
+}
+
+// Writes the cells at `at` (every field when nil) as `{"key":"cell",...}` onto `out`, `heads` being the member
+// leads as `object_heads` spells them. With `doc`, also its rows for that text, spans counted from where the object
+// begins: the object's, then a member's each, and a string with an escape flagged and decoded into `doc.values`.
+// `doc.rows` has room for them, zeroed.
+cells_object :: proc(out: ^[dynamic]byte, heads: Heads, at: []int, rec: csv.Record, dialect: csv.Dialect, doc: ^core_pkg.Row_Document = nil) {
+	base, root := len(out), 0
+	row: [^]core_pkg.Row
+	if doc != nil {
+		root = len(doc.rows)
+		row = raw_data(doc.rows)[root:]
+	}
+	w := base
+	for head, i in heads.leads {
+		cell, decoded := column_cell(rec, i if at == nil else at[i], dialect)
+		lead := w
+		w = jq.write_led_cell(out, w, head, cell)
+		if doc != nil {
+			// The rest of a zeroed row is zero.
+			r := &row[i + 1]
+			lo := lead + len(head) - base
+			r.lo, r.hi, r.key_lo, r.key_hi, r.subtree_size = u32(lo), u32(w - base), u32(lead + 1 - base), u32(lo - 1), 1
+			r.kind = .String if cell != nil else .Null
+			if text, ok := cell.?; ok && int(r.hi - r.lo) != len(text) + 2 {
+				decode_escaped(doc, r, raw_data(out^)[base + lo:w], text)
+			}
+		}
+		if decoded {
+			free_all(context.temp_allocator)
+		}
+	}
+	scan.edge_publish(out, w)
+	if len(heads.leads) == 0 {
+		append(out, '{')
+	}
+	append(out, '}')
+	if doc == nil {
+		return
+	}
+	row[0] = {hi = u32(len(out) - base), key_lo = core_pkg.NO_KEY, key_hi = core_pkg.NO_KEY, subtree_size = u32(len(heads.leads) + 1), kind = .Object, cnt = u32(len(heads.leads))}
+	scan.edge_publish(&doc.rows, root + len(heads.leads) + 1)
+	if !heads.key_escaped {
+		return
+	}
+	text := out[base:]
+	for &r in doc.rows[root + 1:] {
+		if bytes.index_byte(text[r.key_lo:r.key_hi], '\\') >= 0 {
+			r.flags += {.Key_Escaped}
+		}
+	}
+}
+
+// Flags the string row `r`, whose text `token` was spelled from `decoded` and is longer than it, as an escaped
+// string whose decoding is in `doc.values`.
+@(private = "file")
+decode_escaped :: proc(doc: ^core_pkg.Row_Document, r: ^core_pkg.Row, token: []byte, decoded: string) {
+	r.first_esc = u16(min(bytes.index_byte(token, '\\'), int(max(u16))))
+	r.payload.str = {u32(len(doc.values)), u32(len(decoded))}
+	r.flags += {.Str_Escaped, .Decoded}
+	append(&doc.values, decoded)
+}
+
+// Returns the cell of column `at` of `rec`, and whether it was decoded into the temporary allocator, which the
+// caller then frees. Returns nil when the header lacks the column or the cell is empty.
+column_cell :: #force_inline proc(rec: csv.Record, at: int, dialect: csv.Dialect) -> (cell: Maybe(string), decoded: bool) {
+	if at < 0 || rec.fields[at].lo == rec.fields[at].hi {
+		return nil, false
+	}
+	text, escaped, _ := csv.field_text(rec.src, rec.fields[at], dialect, context.temp_allocator)
+	return string(text), escaped
 }
 
 // Writes the record's columns as table rows: one row of all cells, or one row per cell.
@@ -460,9 +521,9 @@ print_cell_rows :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv
 	if cols.array || cols.object {
 		cells := make([]Maybe(string), len(cols.at), context.temp_allocator)
 		for at, i in cols.at {
-			cells[i] = column_cell(rec, at, dialect)
+			cells[i], _ = column_cell(rec, at, dialect)
 		}
-		if !(put_object_row(run, cols.keys, cells) if cols.object else put_row_or_stop(run, cells)) {
+		if !(put_object_row(run, cols.keys, cells) if cols.object else put_row(run, cells)) {
 			return false
 		}
 		run.ret = JQ_OK
@@ -470,8 +531,9 @@ print_cell_rows :: proc(run: ^Run, cols: ^Columns, rec: csv.Record, dialect: csv
 		return true
 	}
 	for at in cols.at {
-		one := [1]Maybe(string){column_cell(rec, at, dialect)}
-		if !put_row_or_stop(run, one[:]) {
+		one: [1]Maybe(string)
+		one[0], _ = column_cell(rec, at, dialect)
+		if !put_row(run, one[:]) {
 			return false
 		}
 		run.ret = JQ_OK_NULL_KIND if one[0] == nil else JQ_OK

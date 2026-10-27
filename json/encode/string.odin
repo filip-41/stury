@@ -120,20 +120,19 @@ put_string_escaping_del :: proc(dst: ^[dynamic]u8, s: string) -> Marshal_Error {
 @(private)
 put_string_as :: #force_inline proc(dst: ^[dynamic]u8, s: string, $del: bool) -> Marshal_Error {
 	mark := len(dst^)
-	end, err := spell_led_string(dst, mark, nil, 0, s, del)
+	end, err := spell_led_string(dst, mark, nil, 0, s, true, del)
 	walk.edge_publish(dst, end if err == .None else mark)
 	return err
 }
 
 // `lead[:lead_n]` verbatim, then `s` as `put_string` writes it, under one reservation at the write cursor
-// `mark` (see `put_room`). Returns the cursor past the closing quote. `lead_n` is 0 or at least 4 (see
-// `copy_lead`). The length of `dst` is committed only to grow, so on a refusal the caller truncates to
-// `mark`. A short ASCII string with nothing to escape is written in line. `$del` escapes DEL as well, in this
-// and each proc below that takes it.
-spell_led_string :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
+// `mark` (see `put_room`). Returns the cursor past the closing quote. The length of `dst` is committed only to
+// grow, so on a refusal the caller truncates to `mark`. A short ASCII string with nothing to escape is written in
+// line. `$del` escapes DEL as well, in this and each proc below that takes it.
+spell_led_string :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $utf8, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
 	if len(s) < 16 {
 		v := tail_block(raw_data(s), 0, len(s))
-		if block_is_plain(v, del) {
+		if block_clean(v, utf8, del) {
 			out := put_room(dst, mark, lead_n + 16 + 2)
 			if out == nil {
 				return mark, .Out_Of_Memory
@@ -147,18 +146,18 @@ spell_led_string :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8
 			return mark + lead_n + 2 + len(s), .None
 		}
 	}
-	return spell_any_string(dst, mark, lead, lead_n, s, del)
+	return spell_any_string(dst, mark, lead, lead_n, s, utf8, del)
 }
 
 @(private)
-spell_any_string :: proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
+spell_any_string :: proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $utf8, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
 	n := len(s)
 	// Clean text is written as itself plus two quotes. This path makes no call, so it keeps no frame. A buffer
 	// that must grow, a string under 16 bytes (`spell_led_string` has taken the plain ones) and any block
 	// that is not plain ASCII go to `spell_mixed`.
 	src := raw_data(s)
-	if mark + lead_n + n + 2 + BLOCK_SLACK > cap(dst^) || n < 16 || !block_is_plain(intrinsics.unaligned_load((^#simd[16]u8)(src)), del) {
-		return spell_mixed(dst, mark, lead, lead_n, s, 0, del)
+	if mark + lead_n + n + 2 + BLOCK_SLACK > cap(dst^) || n < 16 || !block_clean(intrinsics.unaligned_load((^#simd[16]u8)(src)), utf8, del) {
+		return spell_mixed(dst, mark, lead, lead_n, s, 0, utf8, del)
 	}
 	out := raw_data(dst^)
 	w := mark
@@ -171,15 +170,15 @@ spell_any_string :: proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int,
 	i := 0
 	for ; i + 16 <= n; i += 16 {
 		v := intrinsics.unaligned_load((^#simd[16]u8)(&src[i]))
-		if !block_is_plain(v, del) {
-			return spell_mixed(dst, mark, lead, lead_n, s, i, del)
+		if !block_clean(v, utf8, del) {
+			return spell_mixed(dst, mark, lead, lead_n, s, i, utf8, del)
 		}
 		intrinsics.unaligned_store((^#simd[16]u8)(&out[w]), v)
 		w += 16
 	}
 	v := tail_block(src, i, n)
-	if !block_is_plain(v, del) {
-		return spell_mixed(dst, mark, lead, lead_n, s, i, del)
+	if !block_clean(v, utf8, del) {
+		return spell_mixed(dst, mark, lead, lead_n, s, i, utf8, del)
 	}
 	intrinsics.unaligned_store((^#simd[16]u8)(&out[w]), v)
 	w += n - i
@@ -190,18 +189,18 @@ spell_any_string :: proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int,
 // `spell_any_string` from byte `i` of `s`: every block before `i` is plain ASCII, so no UTF-8 sequence is
 // open, and the plain prefix may already be written. The lead and the opening quote are written here too.
 @(private)
-spell_mixed :: #force_no_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
+spell_mixed :: #force_no_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $utf8, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
 	// A string with less than a 64-byte step left has no use for the step's bookkeeping. The DEL-escaping
 	// speller (the CLI's) takes no step.
-	if !del && len(s) - i_in >= 64 {
-		return spell_blocks(dst, mark, lead, lead_n, s, i_in, true, del)
+	if utf8 && !del && len(s) - i_in >= 64 {
+		return spell_blocks(dst, mark, lead, lead_n, s, i_in, true, utf8, del)
 	}
-	return spell_blocks(dst, mark, lead, lead_n, s, i_in, false, del)
+	return spell_blocks(dst, mark, lead, lead_n, s, i_in, false, utf8, del)
 }
 
 // The body of `spell_mixed`; `wide` adds the 64-byte step, for a string with room for one.
 @(private)
-spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $wide, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
+spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $wide, $utf8, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
 	n := len(s)
 	if put_room(dst, mark, lead_n + n + 2 + BLOCK_SLACK) == nil {
 		return mark, .Out_Of_Memory
@@ -263,22 +262,24 @@ spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, le
 			}
 		}
 		// An ASCII block after an ASCII one ends no sequence and needs no escape.
-		if !prev_high && block_is_plain(v, del) {
+		if !prev_high && block_clean(v, utf8, del) {
 			intrinsics.unaligned_store((^#simd[16]u8)(&out[w]), v)
 			w += 16
 			prev = v
 			continue
 		}
-		// arm64 keeps its OR reduction. On x86 that is a shuffle tree, and `lex.any_high` one `pmovmskb`.
-		when ODIN_ARCH == .amd64 {
-			high := lex.any_high(v)
-		} else {
-			high := simd.reduce_or(v) >= 0x80
+		when utf8 {
+			// arm64 keeps its OR reduction. On x86 that is a shuffle tree, and `lex.any_high` one `pmovmskb`.
+			when ODIN_ARCH == .amd64 {
+				high := lex.any_high(v)
+			} else {
+				high := simd.reduce_or(v) >= 0x80
+			}
+			if high || prev_high {
+				bad |= lex.utf8_err(prev, v)
+			}
+			prev, prev_high = v, high
 		}
-		if high || prev_high {
-			bad |= lex.utf8_err(prev, v)
-		}
-		prev, prev_high = v, high
 		if !block_needs_escape(v, del) {
 			intrinsics.unaligned_store((^#simd[16]u8)(&out[w]), v)
 			w += 16
@@ -297,17 +298,19 @@ spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, le
 	// padding, which `utf8_err` refuses.
 	live := n - i
 	v := tail_block(src, i, n)
-	if !prev_high && block_is_plain(v, del) && !lex.any_lane(bad) {
+	if !prev_high && block_clean(v, utf8, del) && !lex.any_lane(bad) {
 		intrinsics.unaligned_store((^#simd[16]u8)(&out[w]), v)
 		w += live
 		out[w] = '"'
 		return w + 1, .None
 	}
-	if prev_high || lex.any_high(v) {
-		bad |= lex.utf8_err(prev, v)
-	}
-	if lex.any_lane(bad) {
-		return mark, .Bad_Utf8
+	when utf8 {
+		if prev_high || lex.any_high(v) {
+			bad |= lex.utf8_err(prev, v)
+		}
+		if lex.any_lane(bad) {
+			return mark, .Bad_Utf8
+		}
 	}
 	if !block_needs_escape(v, del) {
 		intrinsics.unaligned_store((^#simd[16]u8)(&out[w]), v)
@@ -366,6 +369,17 @@ block_is_plain :: #force_inline proc "contextless" (v: #simd[16]u8, $del: bool) 
 		special |= simd.lanes_eq(v, (#simd[16]u8)(0x7f))
 	}
 	return simd.reduce_or(special) == 0
+}
+
+// Whether `v` is stored as it is: plain ASCII, or, when `$utf8` is false because the text was judged
+// already, any block with nothing to escape.
+@(private)
+block_clean :: #force_inline proc "contextless" (v: #simd[16]u8, $utf8, $del: bool) -> bool {
+	when utf8 {
+		return block_is_plain(v, del)
+	} else {
+		return !block_needs_escape(v, del)
+	}
 }
 
 // Lanes below 0x20, `"` or `\` (or DEL).

@@ -124,11 +124,11 @@ past_break :: proc(src: []byte, i: u64) -> u64 {
 
 // The entries of container row `c`, in order, as answers with their rows, in `kids`.
 @(private)
-entries_of :: proc(doc: ^Document, c: Node, kids: ^[dynamic]Path_Answer) -> []Path_Answer {
+entries_of :: proc(doc: ^Document, c: Node, kids: ^[dynamic]Answer) -> []Answer {
 	clear(kids)
 	end := c + Node(doc.rows[c].subtree_size)
 	for k := c + 1; k < end; k += Node(doc.rows[k].subtree_size) {
-		append(kids, Path_Answer{lo = u64(doc.rows[k].lo), hi = u64(doc.rows[k].hi), owner = u64(doc.rows[c].lo), node = k})
+		append(kids, Answer{lo = u64(doc.rows[k].lo), hi = u64(doc.rows[k].hi), owner = u64(doc.rows[c].lo), node = k})
 	}
 	return kids[:]
 }
@@ -196,10 +196,11 @@ Comment_Op :: enum u8 {
 	Remove, // remove them, each with its line when it stands alone on one (`.Not_Found` when no value has one)
 }
 
-// Edit the comments at `place` on every value the path finds, as `op` says. The source is read as JSONC.
-// The path is text or a `Path`, as `set`'s. `comment` is one `//` line or one `/* */` block; text with neither
-// marker is the bare text `fact_text` reads, written as a `//` line (`human` as `// human`, and ` human`, as
-// `fact_text` returns it, as `// human`). Any other comment is `.Bad_Comment`. `.Remove` ignores `comment`.
+// Edit the comments at `place` on every value the path finds, as `op` says. The source is read as `set` reads
+// it under `.Jsonc`. The path is text or a `Path`, as `set`'s. `comment` is one `//` line or one `/* */` block;
+// text with neither marker is the bare text `fact_text` reads, written as a `//` line (`human` as `// human`,
+// and ` human`, as `fact_text` returns it, as `// human`). Any other comment is `.Bad_Comment`. `.Remove`
+// ignores `comment`.
 @(require_results)
 edit_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	watch := core_pkg.Refusal_Watch{backing = allocator}
@@ -209,9 +210,9 @@ edit_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: s
 
 @(private = "file")
 watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	steps: [core_pkg.MAX_PATH_STEPS]Step
-	p, names := edit_parse(path, steps[:], allocator) or_return
-	defer delete(names, allocator)
+	buf: core_pkg.Path_Buf
+	p := core_pkg.path_resolve(path, &buf, allocator) or_return
+	defer delete(buf.heap, allocator)
 	comment, marked := comment, ""
 	defer delete(marked, allocator)
 	if op != .Remove && !strings.has_prefix(comment, "//") && !strings.has_prefix(comment, "/*") {
@@ -225,7 +226,7 @@ watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment
 	paths := [1]Path{p}
 	req: Request({.Path, .Nodes})
 	defer request_destroy(&req)
-	edit_scan(src, &req, paths[:], .Jsonc, allocator) or_return
+	edit_scan(src, &req, paths[:], {dialect = .Jsonc}, allocator) or_return
 	doc := &req.doc
 	text := make([dynamic]u8, allocator)
 	defer delete(text)

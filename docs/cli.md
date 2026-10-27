@@ -122,7 +122,7 @@ stury: explain: input: format=json dialect=json records=whole duplicates=last
 stury: explain: route: path_scan
 stury: explain: path: .logs[].id any_at=1 select=none limit=0 tried=no
 stury: explain: compile_time: 88us
-stury: explain: engine: .logs[].id per_element=yes engine=automaton why=per_element
+stury: explain: engine: .logs[].id per_element=yes engine=fallback why=per_element
 1
 2
 stury: explain: run: texts=1 scanned=1 interpreted=0 pieces=none workers=0
@@ -143,12 +143,12 @@ stury: explain: cost: peak_rss=3096576 input=35 output=4
 | Key | Facts |
 | --- | --- |
 | `program` | The filter, quoted. Written as soon as it is known, so a compile error follows it; a `-f` file that cannot be read has no line. |
-| `input` | `format` (`json`, `jsonc`, `ndjson`, `csv`, `tsv`), and for the JSON formats `dialect` (`json`, `jsonc`), `records` and `duplicates` (a repeated key answers with its last value). `records` is how the input is cut into texts: `whole` (texts as jq reads them), `ndjson`, `seq` (`--seq`), `raw_lines` (`-R`) or `none` (`-n`). |
+| `input` | `format` (`json`, `jsonc`, `ndjson`, `csv`, `tsv`), and for the JSON formats `dialect` (`json`, `jsonc`, `json5`), `records` and `duplicates` (a repeated key answers with its last value). `records` is how the input is cut into texts: `whole` (texts as jq reads them), `ndjson`, `seq` (`--seq`), `raw_lines` (`-R`) or `none` (`-n`). |
 | `route` | `path_scan`, `columns` or `interpreter`. |
 | `path` | The path scan answers this path: `any_at` is the index of its first `[]` step or `none`; `select` is `none`, or the comparison of `select(PATH op LITERAL)` as `eq`, `ne`, `lt`, `le`, `gt` or `ge` and its `literal`, and the path is PATH; `limit` is the count of `first(P)` or `limit(N; P)`, 0 for every answer; `tried` is `yes` when a root array's path is first scanned without per-element answers, which is cheaper when every entry has one. |
 | `columns` | The column route answers: `read` the columns it reads (`*` for every column), `shape` of the output (`column`: a single column; `array`; `object`; `all`: every column of the record) and `selecting` (`yes` for `select(F)`, where F runs on an object of the columns it reads and a kept record is printed from its cells). |
 | `refused` | The interpreter answers because of these reasons, every one that holds, comma-joined. |
-| `engine` | `json.route_of`'s answer for each path the scan runs, over the first text: the path, `per_element` and `engine`: `matcher`, `tape` or `automaton`, the last with the `why` it is not the matcher (below). `refused` with a `why` of the library's error kind when the path set is refused. Written when the first text is met, as the engine depends on whether its root is an object. |
+| `engine` | `json.route_of`'s answer for each path the scan runs, over the first text: the path, `per_element`, and `engine`: the route's class (`direct`: the matcher scans; `document`: the tape built from the text answers; `fallback`: the automaton) and its `why`, `matcher`, `tape` or why the automaton answers (below). `refused` with a `why` of the library's error kind when the path set is refused. Written when the first text is met, as the engine depends on whether its root is an object. |
 | `demand` | The entries of a large root array the filter reads, found when the root is built in pieces on the batch pool: `head` from the front, `tail` from the back, `counted` when it reads how many there are. The other entries are not built. |
 | `compile_time` | From reading the filter to the route chosen. The interpreter's parse is in it only when the route needs the interpreter before the first input. |
 | `run` | Texts read: `texts` is `scanned` (the scan answered) plus `interpreted` (the interpreter ran on it). Under the interpreter the unit is what its main loop reads: a text, a `--stream` event, a CSV record. `-n` reads none of its own. The column route has `files` (CSV files opened) instead. `pieces` is what the batch pool read in pieces (`root`: a large root array, `lines`: a file of one record per line, `csv`: a CSV file's records), or `none`. `workers` is the pool's threads, 0 when it never started. |
@@ -172,7 +172,7 @@ Reasons in `refused`:
 | `color` | Colour output is on (the column route). |
 | `cells_out` | `--to csv|tsv` writes each output as a record. |
 | `not_path` | The filter is not a path and not `select(PATH op LITERAL)`. |
-| `jsonc_select` | `--from jsonc` scans plain paths only, as its texts print with their comments. |
+| `dialect_select` | `--from jsonc` scans plain paths only, as its texts print with their comments. |
 | `select_redefined` | `select` is redefined, by the filter or by `~/.jq`. |
 | `select_compare` | `select(F)`: F is not `PATH op LITERAL` with a scalar `LITERAL`. |
 | `select_path` | `select(F)`: PATH is not a path the scan answers, or has a `[]`. |
@@ -186,10 +186,11 @@ Reasons in `refused`:
 | `layout` | `-c` is absent: the interpreter lays the output out. |
 | `grow_header` | `--grow-header` writes a header of every key. |
 | `several_files` | `select` to `--to csv|tsv` over several files. |
+| `own_spelling` | `--from json5`: a path answer would print a token as written (`'a'`, `0x1F`). |
 
 `refused` lists them in this order. For `--from csv|tsv` they are the column route's, for any other input the scan's.
 
-Why the automaton, not the matcher, answers a path (`engine`'s `why`):
+Why the automaton, not the matcher, answers a path (the `why` of a `fallback` engine):
 
 | Token | Meaning |
 | --- | --- |
@@ -207,7 +208,7 @@ Why the scan handed a text back (`fallback`'s `why`):
 | Token | Meaning |
 | --- | --- |
 | `step_kind` | A step met a value of another kind (`.a` over a number, `[]` over a string): jq's rules answer the text. |
-| `jsonc_slash` | `--from jsonc`: the text holds a `/`, and its comments print with the values. |
+| `comment_slash` | `--from jsonc`: the text holds a `/`, and its comments print with the values. |
 | `scan_limit` | The scan refused the text at one of its fixed limits. |
 | `bad_text` | The text does not parse as the scan reads it: the interpreter reports the fault. |
 
@@ -228,8 +229,8 @@ program that scans itself.
 | --- | --- |
 | `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence; each `FILE` is read alone, so a text cut at a file's end is a fault. |
 | `--from jsonc` | Validate JSONC as `stury --from jsonc .` reads it, to the same limits. A comment's text holds no escape. |
-| `--from json5` | Validate the JSON5 text itself, not its transcode: `Infinity` and `NaN` pass (a filter run refuses them), and a nesting past `--max-depth` is the only depth fault. |
-| `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. CSV and TSV are judged by `csv.validate`, and a fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An input with no record fails with `No CSV text` or `No TSV text`. |
+| `--from json5` | Validate JSON5 as `stury --from json5 .` reads it, to the same limits, except that `Infinity` and `NaN` pass (a filter run refuses them). |
+| `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. CSV and TSV are judged by `csv.validate`, and a fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input fails with `No CSV text` or `No TSV text`; a header alone is valid. |
 | `--strict-limits`, `--max-depth N` | As [above](#sturys-own-options). |
 | `FILE...` | One file per argument, read as the filter reads them. |
 
@@ -306,7 +307,7 @@ $ stury fmt --from ndjson --to csv records.ndjson
 | --- | --- | --- |
 | `json` | One JSON text after another, as jq reads (the default). | Pretty-printed, or as `-c`, `--tab` and `--indent` say (the default). |
 | `jsonc` | JSONC: comments and trailing commas ([Comments in the CLI](#comments-in-the-cli)). | Each value with the comments it was read with. |
-| `json5` | JSON5 1.0.0, one text per input, transcoded to JSONC (comments kept) and then read as `--from jsonc`. `Infinity` and `NaN` end the run, as they have no JSON value. Positions after the transcode (`input_line_number`) count the JSONC text; `--argjson`, `--slurpfile` and `fromjson` read JSONC. | Not written: `--to jsonc` writes the values and their comments. `fmt --in-place` and `fmt --check` are refused. |
+| `json5` | JSON5 1.0.0, one text per input, read as written (comments kept). Numbers print in JSON's spelling. `Infinity` and `NaN` end the run, as they have no JSON value. Positions (`input_line_number`, error lines) count the JSON5 text; nesting follows `--max-depth`; `--argjson`, `--slurpfile`, `--jsonargs` and `fromjson` read JSON5. | Not written: `--to jsonc` writes the values and their comments. `fmt --in-place` and `fmt --check` are refused. |
 | `ndjson` | One JSON text per line. A blank line is no text, and a line that is not one text, or holds two, is a parse error where jq would read on. | One compact value per line, as `-c`. |
 | `csv`, `tsv` | The first record names the fields; each later record is one input ([CSV and TSV](#csv-and-tsv)). | Each output is one record ([CSV and TSV output](#csv-and-tsv-output)). |
 
@@ -413,7 +414,7 @@ $ stury --from csv --to csv 'select(.n | tonumber > 1)' people.csv
 ```
 
 - **Objects are rows.** The header is the first object's keys in their order, or sorted under `-S`. A later
-  object with a key the header lacks ends the run: `output 2 has the key "z", which the header lacks`, exit 5,
+  object with a key the header lacks ends the run: `output 2 has the key "z", which the header lacks (the header is output 1's keys; --grow-header adds keys as they come)`, exit 5,
   after the rows before it. A key the object lacks is an empty cell.
 - **`--grow-header`** holds every output until the input ends, then writes a header of every key in the order
   first seen (in byte order under `-S`), and a row for each object with an empty cell for each key it lacks.

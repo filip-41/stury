@@ -171,14 +171,14 @@ decode_short_int :: #force_inline proc(src: []byte, lo, hi: u64) -> (v: i64, ok:
 }
 
 @(private)
-decode_number_lexed :: proc(src: []byte, lo, hi: u64, lexed: number.Number_Lex) -> (d: Decoded, ok: bool) {
+decode_number_lexed :: proc(src: []byte, lo, hi: u64, lexed: core_pkg.Number_Lex) -> (d: Decoded, ok: bool) {
 	if !lexed.ok {
 		return nil, false
 	}
 	if integer := decode_integer(src, lexed); integer != nil {
 		return integer, true
 	}
-	n := number.number_lexed(src, lo, hi, lexed)
+	n := core_pkg.number_lexed(src, lo, hi, lexed)
 	if n.exactness == .None {
 		return Digits(string(src[lo:hi])), true
 	}
@@ -209,7 +209,7 @@ decode_string_inner :: proc(src: []byte, lo, hi: u64, allocator := context.alloc
 // `-0` (an integer has no negative zero), or a magnitude past both, so the caller falls through to a
 // `Number`, never to a wrapped or sign-lost value. `i64` owns every integer it fits.
 @(private)
-decode_integer :: proc(src: []byte, n: number.Number_Lex) -> Decoded {
+decode_integer :: proc(src: []byte, n: core_pkg.Number_Lex) -> Decoded {
 	if !n.ok || n.spelling & {.Has_Fraction, .Has_Exponent} != {} {
 		return nil
 	}

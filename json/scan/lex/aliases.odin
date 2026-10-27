@@ -8,6 +8,7 @@ Error :: core_pkg.Error
 Query_Ctx :: walk.Query_Ctx
 Check_Level :: walk.Check_Level
 Walk_Kind :: walk.Walk_Kind
+SCAN_FORCE_SLOW :: core_pkg.SCAN_FORCE_SLOW
 
 VC_NONE :: walk.VC_NONE
 VC_OBJECT :: walk.VC_OBJECT

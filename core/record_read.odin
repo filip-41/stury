@@ -4,8 +4,9 @@ package core
 // frees the pull's state. `destroy` may be nil for a source that holds nothing.
 //
 //	- `read` reads one record's bytes the way the format's `unmarshal` reads them, into `dest`, a value of the
-//	  reader's root type. It returns nil, or the record's refusal. A source with no record left returns
-//	  `.Bad_Option`; a fault that frames no record is the format's own.
+//	  reader's root type, and sets `at^` to the record's offset in the input, 0 when it pulled none. It returns
+//	  nil, or the record's refusal. A source with no record left returns `.Bad_Option`; a fault that frames no
+//	  record is the format's own.
 //	- `opts` is the reader's options as the format spells them, read again on every call: a change made between
 //	  records applies to the next.
 //	- `plan` is the reader's resolved plan, passed in because a state that held it would dangle in a copy of the
@@ -15,9 +16,18 @@ package core
 //	- `format` spells a plan the reader makes when it is given none. Core makes a `Type_Plan` by it.
 Record_Source :: struct($O: typeid) {
 	state:   rawptr,
-	read:    proc(state: rawptr, opts: ^O, plan: ^Type_Plan, dest: rawptr) -> Maybe(Unmarshal_Error),
+	read:    proc(state: rawptr, opts: ^O, plan: ^Type_Plan, dest: rawptr, at: ^u64) -> Maybe(Unmarshal_Error),
 	destroy: proc(state: rawptr),
 	format:  Plan_Format,
+}
+
+// A typed read's options: the format's `Read_Opts` (`R`), and what the read does beyond them.
+Unmarshal_Opts :: struct($R: typeid) {
+	using read:     R,
+	unknown_fields: Unknown_Fields,
+	// A string with nothing to decode slices `src` instead of being copied, so it lives as long as `src`. One
+	// with something to decode is decoded into the allocator, and a `cstring` is always copied.
+	borrow_strings: bool,
 }
 
 // A typed read of many records of one type: the plan and, once `record_read_init` lowers one, the read shape are
@@ -34,6 +44,8 @@ Record_Read :: struct($O: typeid) {
 	// The plan the reader made, when the caller gave none, and whether it did.
 	owned:  Type_Plan,
 	root:   typeid,
+	// The offset in the input of the record the last read pulled, 0 before the first.
+	at:     u64,
 	owns:   bool,
 	ready:  bool,
 }
@@ -55,7 +67,7 @@ record_read_init :: proc(
 	$T: typeid,
 	source: Record_Source(O),
 	opts: O,
-	plan: ^Type_Plan = nil,
+	plan: ^Hooked_Plan($W),
 	allocator := context.allocator,
 ) -> Maybe(Unmarshal_Error) {
 	if r == nil {
@@ -68,7 +80,7 @@ record_read_init :: proc(
 			record_read_destroy(r)
 			return Unmarshal_Error{kind = .Plan_Mismatch}
 		}
-		r.plan = plan
+		r.plan = &plan.base
 	} else {
 		r.owned = type_plan_init(T, {}, source.format, allocator)
 		r.owns = true
@@ -101,7 +113,7 @@ unmarshal :: proc(r: ^Record_Read($O), ptr: ^$T) -> Maybe(Unmarshal_Error) {
 	if err := record_read_check(r, ptr); err != nil {
 		return err
 	}
-	return r.source.read(r.source.state, &r.opts, record_read_plan(r), ptr)
+	return r.source.read(r.source.state, &r.opts, record_read_plan(r), ptr, &r.at)
 }
 
 // Free the plan the reader made and the source's state, and clear the handle.
@@ -118,7 +130,3 @@ record_read_destroy :: proc(r: ^Record_Read($O)) {
 	r^ = {}
 }
 
-// `record_read_destroy`, for a caller that destroys several owners through one name.
-destroy :: proc {
-	record_read_destroy,
-}

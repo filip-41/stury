@@ -150,7 +150,6 @@ write_detail :: proc(w: io.Writer, text: string) -> io.Error {
 }
 
 // Writes a path step as jq does: `.name` (`."quoted"` when the name is not an identifier), `[3]`, or `[]` for any.
-@(private = "file")
 write_step :: proc(w: io.Writer, step: Step) -> io.Error {
 	switch s in step {
 	case Name:

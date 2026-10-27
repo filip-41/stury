@@ -52,21 +52,34 @@ test_query_answers_document_spans :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(src[out[1].lo:out[1].hi]), "bob")
 }
 
-// A path that lands nothing appends nothing: a row or column the document lacks, or a header without the name.
+// A path naming one row that does not land appends one `.Missing`, owned by the row when it is too short for the
+// column; a path over every row appends nothing for a header without the name.
 @(test)
-test_query_appends_nothing_for_a_miss :: proc(t: ^testing.T) {
+test_query_answers_a_miss :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("id,name\n1,ada\n")
 	doc, derr := csv.build(src)
 	defer csv.destroy(&doc)
 	testing.expect_value(t, derr, nil)
 	out: [dynamic]csv.Answer
 	defer delete(out)
-	paths := [?]string{".[9].name", ".[0][9]", ".[].nope"}
-	for path in paths {
-		clear(&out)
-		testing.expect_value(t, csv.query(&doc, path, &out), nil)
-		testing.expectf(t, len(out) == 0, "%q appended %d answers", path, len(out))
+	Case :: struct {
+		path:  string,
+		owner: u64,
 	}
+	for c in ([]Case{{".[9].name", csv.NO_OWNER}, {".[0][9]", 8}, {".[0].nope", csv.NO_OWNER}}) {
+		clear(&out)
+		testing.expect_value(t, csv.query(&doc, c.path, &out), nil)
+		testing.expect_value(t, len(out), 1)
+		testing.expect_value(t, out[0], csv.Answer{outcome = .Missing, owner = c.owner, node = csv.NO_NODE})
+		streamed: [dynamic]csv.Answer
+		defer delete(streamed)
+		testing.expect_value(t, scan_one(src, c.path, &streamed), nil)
+		testing.expect_value(t, len(streamed), 1)
+		testing.expect_value(t, streamed[0], out[0])
+	}
+	clear(&out)
+	testing.expect_value(t, csv.query(&doc, ".[].nope", &out), nil)
+	testing.expect_value(t, len(out), 0)
 }
 
 // A ragged row too short for the column answers nothing, and the next row answers.
@@ -137,7 +150,7 @@ test_query_does_not_rescan :: proc(t: ^testing.T) {
 	}
 }
 
-// core's path syntax starts at the root `.`: a bare bracket step is `.Bad_Path` for `find`, `find_column` and
+// core's path syntax starts at the root `.`: a bare bracket step is `.Bad_Path` for `find`, a `Request` and
 // `query` alike, whatever follows it, inside `limit(` too.
 @(test)
 test_bare_bracket_paths_are_refused :: proc(t: ^testing.T) {
@@ -150,8 +163,8 @@ test_bare_bracket_paths_are_refused :: proc(t: ^testing.T) {
 	for path in ([]string{"[]", "[0]", "[].name", "[0][1]", "limit(1; [])"}) {
 		_, ferr := csv.find(src, path)
 		testing.expectf(t, ferr != nil && ferr.?.kind == .Bad_Path, "find %q: %v", path, ferr)
-		cerr := csv.find_column(src, path, &out)
-		testing.expectf(t, cerr != nil && cerr.?.kind == .Bad_Path, "find_column %q: %v", path, cerr)
+		cerr := scan_one(src, path, &out)
+		testing.expectf(t, cerr != nil && cerr.?.kind == .Bad_Path, "scan %q: %v", path, cerr)
 		perr := csv.query(&doc, path, &out)
 		testing.expectf(t, perr != nil && perr.?.kind == .Bad_Path, "query %q: %v", path, perr)
 	}
@@ -179,33 +192,32 @@ test_query_on_an_empty_document_is_a_miss :: proc(t: ^testing.T) {
 	testing.expect(t, perr != nil && perr.?.kind == .Unsupported_Path)
 }
 
-// A header name two columns share: `find`, `find_column` and `query` take the first under `.Default`, as `column`
-// does, and follow an explicit `duplicates` the way `unmarshal` and the edits do.
+// A header name two columns share: `find`, a `Request` and `query` take the last under `.Default`, as JSON's
+// readers do, and follow an explicit `duplicates`; `.All` reads every column of the name.
 @(test)
 test_lookups_follow_duplicates :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("a,a\n1,2\n3,4\n")
 	Case :: struct {
 		policy: csv.Duplicates,
 		first:  string,
-		second: string,
+		column: string,
 	}
-	for c in ([]Case{{.Default, "1", "3"}, {.First, "1", "3"}, {.Last, "2", "4"}, {.All, "2", "4"}}) {
+	cases := []Case{{.Default, "2", "2 4"}, {.First, "1", "1 3"}, {.Last, "2", "2 4"}, {.All, "1", "1 2 3 4"}}
+	for c in cases {
 		opts := csv.Read_Opts{duplicates = c.policy}
 		a, ferr := csv.find(src, ".[0].a", opts)
 		testing.expect_value(t, ferr, nil)
 		testing.expect_value(t, string(src[a.lo:a.hi]), c.first)
 		out: [dynamic]csv.Answer
 		defer delete(out)
-		testing.expect_value(t, csv.find_column(src, ".[].a", &out, opts), nil)
-		testing.expect_value(t, len(out), 2)
-		testing.expect_value(t, string(src[out[1].lo:out[1].hi]), c.second)
+		testing.expect_value(t, scan_one(src, ".[].a", &out, opts), nil)
+		testing.expect_value(t, cells(src, out[:]), c.column)
 		doc, derr := csv.build(src, opts)
 		defer csv.destroy(&doc)
 		testing.expect_value(t, derr, nil)
 		clear(&out)
 		testing.expect_value(t, csv.query(&doc, ".[].a", &out), nil)
-		testing.expect_value(t, len(out), 2)
-		testing.expect_value(t, string(src[out[1].lo:out[1].hi]), c.second)
+		testing.expect_value(t, cells(src, out[:]), c.column)
 	}
 	// `.Refuse` names the repeated header cell, in the error each reader returns.
 	refuse := csv.Read_Opts{duplicates = .Refuse}
@@ -213,7 +225,7 @@ test_lookups_follow_duplicates :: proc(t: ^testing.T) {
 	testing.expect_value(t, ferr, csv.Error{kind = .Duplicate_Key, offset = 2})
 	out: [dynamic]csv.Answer
 	defer delete(out)
-	testing.expect_value(t, csv.find_column(src, ".[].a", &out, refuse), csv.Error{kind = .Duplicate_Key, offset = 2})
+	testing.expect_value(t, scan_one(src, ".[].a", &out, refuse), csv.Error{kind = .Duplicate_Key, offset = 2})
 	doc, derr := csv.build(src, refuse)
 	defer csv.destroy(&doc)
 	testing.expect_value(t, derr, nil)
@@ -243,9 +255,22 @@ test_find_and_query_agree :: proc(t: ^testing.T) {
 	// One column of every row, through the streaming multi-answer reader.
 	streamed: [dynamic]csv.Answer
 	defer delete(streamed)
-	testing.expect_value(t, csv.find_column(src, ".[].name", &streamed), nil)
+	testing.expect_value(t, scan_one(src, ".[].name", &streamed), nil)
 	testing.expect_value(t, len(streamed), len(out))
+	// Only `query` names a cell's index among the document's fields.
 	for a, i in streamed {
-		testing.expect_value(t, a, out[i])
+		want := out[i]
+		testing.expect_value(t, want.node, csv.Node(2 * i + 1))
+		want.node = csv.NO_NODE
+		testing.expect_value(t, a, want)
 	}
+}
+
+// The answers' cells, joined by spaces.
+cells :: proc(src: []byte, answers: []csv.Answer) -> string {
+	parts := make([]string, len(answers), context.temp_allocator)
+	for a, i in answers {
+		parts[i] = string(src[a.lo:a.hi])
+	}
+	return strings.join(parts, " ", context.temp_allocator)
 }

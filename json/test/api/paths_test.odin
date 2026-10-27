@@ -20,7 +20,7 @@ expect_answers :: proc(
 	src: string,
 	steps: []json.Step,
 	mode: json.Duplicates,
-	want: []json.Path_Answer,
+	want: []json.Answer,
 	loc := #caller_location,
 ) {
 	r := paths_run(raw(src), {{steps = steps}}, .Strict, mode)
@@ -61,14 +61,14 @@ test_path_answers :: proc(t: ^testing.T) {
 		src:   string,
 		steps: []json.Step,
 		modes: bit_set[json.Duplicates],
-		want:  []json.Path_Answer,
+		want:  []json.Answer,
 	}
 	EVERY :: bit_set[json.Duplicates]{.All, .First, .Last}
-	hit :: proc(lo, hi: u64) -> json.Path_Answer {
+	hit :: proc(lo, hi: u64) -> json.Answer {
 		return {outcome = .Found, lo = lo, hi = hi}
 	}
-	MISS :: json.Path_Answer{outcome = .Missing}
-	MISMATCH :: json.Path_Answer{outcome = .Type_Mismatch}
+	MISS :: json.Answer{outcome = .Missing}
+	MISMATCH :: json.Answer{outcome = .Type_Mismatch}
 	a, b, x, y := json.Name("a"), json.Name("b"), json.Name("x"), json.Name("y")
 	i0, i1, i2 := json.Index(0), json.Index(1), json.Index(2)
 	m1, m2 := json.Index(-1), json.Index(-2)
@@ -438,9 +438,9 @@ test_path_step_bound_is_one_refusal :: proc(t: ^testing.T) {
 				label := fmt.tprintf("column=%v n=%d %v", column, n, spec)
 
 				d := build_ok(t, doc)
-				found: [dynamic]json.Node
+				found: [dynamic]json.Answer
 				defer delete(found)
-				qerr := json.query(&d, json.ROOT, spec, &found)
+				qerr := json.query(&d, spec, &found)
 				json.destroy(&d)
 				if over {
 					fault, _ := qerr.?

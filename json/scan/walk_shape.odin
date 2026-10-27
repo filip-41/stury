@@ -10,7 +10,7 @@ import "base:runtime"
 // container nothing reads, and the walk checks it (or, under `.Lazy`, skips it) without the hooks.
 //
 // The unchecked accesses rest on the walk and the plan. A frame is pushed only below the walk's depth cap,
-// which `resolve` holds to MAX_DEPTH, the slots `r.frames` has. A target is the root the plan was made for
+// which `resolve_under` holds to MAX_DEPTH, the slots `r.frames` has. A target is the root the plan was made for
 // (`plan_for` refuses another type's), a field at its type-info offset, an element below an array's `count`
 // or a list buffer's `cap`, or a nil target, checked only. `shape_key` and `shape_scalar` see a token only
 // once the walk has checked it. `shape_tag_arm`, which reads an object before the walk does, keeps its bounds

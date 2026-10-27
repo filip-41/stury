@@ -4,6 +4,7 @@ package json_tests
 // without `FORCE_AUTOMATON` (`make test-modes`), which sends every path to the automaton for that one reason.
 
 import json "../.."
+import core "../../../core"
 import "core:fmt"
 import "core:testing"
 
@@ -77,7 +78,7 @@ test_route_of_reasons :: proc(t: ^testing.T) {
 		}
 		got, err := json.route_of(raw(c.src), c.paths, c.which, c.opts)
 		testing.expectf(t, err == nil, "%q %v: %v", c.src, c.paths, err)
-		testing.expectf(t, got == want, "%q %v path %d: got %v, want %v", c.src, c.paths, c.which, got, want)
+		testing.expectf(t, got.why == route(want), "%q %v path %d: got %v, want %v", c.src, c.paths, c.which, got, want)
 	}
 }
 
@@ -99,7 +100,7 @@ test_route_of_many_names :: proc(t: ^testing.T) {
 			testing.expectf(t, bad && e.kind == .Over_Capacity, "path %d: %v %v", which, got, err)
 			continue
 		}
-		testing.expectf(t, err == nil && got == .Matcher, "path %d: got %v, %v", which, got, err)
+		testing.expectf(t, err == nil && got.why == route(.Matcher), "path %d: got %v, %v", which, got, err)
 	}
 }
 
@@ -125,7 +126,7 @@ test_route_of_refusals :: proc(t: ^testing.T) {
 	// The longest path a scan takes.
 	got, err = json.route_of(raw(`{"a":1}`), {{steps = long[:json.MAX_PATH_STEPS]}}, 0)
 	want := json.Path_Route.Forced if ROUTE_FORCE_AUTOMATON else .Deep_Name
-	testing.expectf(t, err == nil && got == want, "longest path: %v %v", got, err)
+	testing.expectf(t, err == nil && got.why == route(want), "longest path: %v %v", got, err)
 }
 
 // The refusals `scan` gives a request that does not fit the router's bounds.
@@ -145,5 +146,33 @@ test_route_of_scan_bounds :: proc(t: ^testing.T) {
 		_, err = json.route_of(raw(`{"a":{"b":1}}`), paths[:AUTOMATON_PATHS], 0)
 		e, bad = err.?
 		testing.expectf(t, !bad || e.kind != .Over_Capacity, "%d paths: %v", AUTOMATON_PATHS, err)
+	}
+}
+
+// `why` names the `Path_Route`, and the class says which kind of engine that is.
+route :: proc(r: json.Path_Route) -> string {
+	return fmt.tprint(r)
+}
+
+@(test)
+test_route_of_classes :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	A, B, C := json.Name("a"), json.Name("b"), json.Name("c")
+	Case :: struct {
+		src:   string,
+		paths: []json.Path,
+		want:  core.Route,
+	}
+	cases := []Case{
+		{`{"a":1}`, {{steps = {A}}}, {.Direct, "Matcher"}},
+		{`{"a":[{"b":1}]}`, {{steps = {A, ANY, B}}, {steps = {A, ANY, C}}}, {.Document, "Tape"}},
+		{`{"a":{"b":1}}`, {{steps = {A, B}}}, {.Fallback, "Deep_Name"}},
+	}
+	for &c in cases {
+		got, err := json.route_of(raw(c.src), c.paths, 0)
+		if ROUTE_FORCE_AUTOMATON {
+			c.want = {.Fallback, "Forced"}
+		}
+		testing.expectf(t, err == nil && got == c.want, "%q: got %v %v, want %v", c.src, got, err, c.want)
 	}
 }

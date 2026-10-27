@@ -137,10 +137,7 @@ records_step :: #force_inline proc(it: ^Records, $KEEP: bool) -> (rec: Record, o
 				it.seps, it.lfs, fault, kind = scan_dialect_block(it)
 			}
 			if fault >= 0 {
-				cut := u64(1) << u64(max(fault - it.block, 0)) - 1
-				it.seps &= cut
-				it.lfs &= cut
-				it.fault = Error{offset = u64(fault), kind = kind}
+				cut_block(it, &it.seps, &it.lfs, fault, Error{offset = u64(fault), kind = kind})
 			}
 		}
 		// The block's separators and the fields' length are kept in locals. They are written back to `it` before
@@ -243,16 +240,10 @@ records_past_stop :: proc(it: ^Records) -> Past_Stop {
 	}
 	seps, lfs, fault, kind := scan_dialect_block(it)
 	if fault >= 0 {
-		cut := u64(1) << u64(max(fault - it.block, 0)) - 1
-		seps &= cut
-		lfs &= cut
-		it.fault = Error{offset = u64(fault), kind = kind}
+		cut_block(it, &seps, &lfs, fault, Error{offset = u64(fault), kind = kind})
 	}
 	if at, lo := line_cap_fault(lfs, it.block, it.rec_lo, it.scan.max_bytes, n); at >= 0 && (fault < 0 || at < fault) {
-		cut := u64(1) << u64(at - it.block) - 1
-		seps &= cut
-		lfs &= cut
-		it.fault = Error{offset = u64(lo), kind = .Limit_Record}
+		cut_block(it, &seps, &lfs, at, Error{offset = u64(lo), kind = .Limit_Record})
 	}
 	it.seps, it.lfs = seps, lfs
 	// The next block checks the cap of the line open at its start.
@@ -293,6 +284,15 @@ scan_dialect_block :: proc(it: ^Records) -> (seps, lfs: u64, fault: int, kind: E
 	unreachable()
 }
 
+// Drops the block's separators and LFs from `at` on, where `fault` stops the read.
+@(private)
+cut_block :: #force_inline proc(it: ^Records, seps, lfs: ^u64, at: int, fault: Error) {
+	cut := u64(1) << u64(max(at - it.block, 0)) - 1
+	seps^ &= cut
+	lfs^ &= cut
+	it.fault = fault
+}
+
 // The record after the last LF, once the input's end is checked.
 @(private)
 last_record :: proc(it: ^Records) -> (rec: Record, ok: bool) {
@@ -326,20 +326,11 @@ add_field :: #force_inline proc(it: ^Records, lo, hi: int) -> bool {
 	return grow_fields(it, lo, hi)
 }
 
-// `add_field` when the list is full. Its capacity never exceeds `max_fields` past `base`; a field beyond that
-// is refused.
+// `add_field` when the list is full.
 @(private)
 grow_fields :: proc(it: ^Records, lo, hi: int) -> bool {
 	n := len(it.fields)
-	if n - it.base >= it.scan.max_fields {
-		it.err = Error{offset = u64(it.rec_lo), kind = .Limit_Fields}
-		return false
-	}
-	if n == cap(it.fields) && reserve(&it.fields, it.base + min(max(2 * n, 16) - it.base, it.scan.max_fields)) != nil {
-		it.err = Error{kind = .Out_Of_Memory}
-		return false
-	}
-	set_limit(it)
+	reserve_fields(it, n + 1) or_return
 	(^runtime.Raw_Dynamic_Array)(&it.fields).len = n + 1
 	it.fields[n] = {u64(lo), u64(hi)}
 	return true
