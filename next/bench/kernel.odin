@@ -12,6 +12,7 @@ package bench
 //                   and one three-byte character in `every` bytes, unit: a block.
 //   utf8all <every> `utf8`, every block checked in full.
 //   tail <len>      quotes counted in inputs of `len` bytes, the last partial block by `load_tail`, unit: an input.
+// `-define:TIER=n` times the tier at place n of `k.Tier`, its loops compiled with the tier's features.
 
 import "base:intrinsics"
 import "core:fmt"
@@ -21,6 +22,8 @@ import "core:os"
 import "core:strconv"
 import "core:time"
 import k "../core/kernel"
+
+T :: k.Tier(#config(TIER, 0))
 
 L1_BYTES :: 32 * 1024
 SKIP_BYTES :: 1 << 20
@@ -32,6 +35,7 @@ opaque :: #force_inline proc "contextless" (p: ^[^]u8) -> [^]u8 {
 	return intrinsics.volatile_load(p)
 }
 
+@(enable_target_feature = k.FEATURES[T])
 run_pack :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 	p := raw_data(buf)
 	for _ in 0 ..< reps {
@@ -43,6 +47,7 @@ run_pack :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 	return
 }
 
+@(enable_target_feature = k.FEATURES[T])
 run_skip :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 	p := raw_data(buf)
 	for _ in 0 ..< reps {
@@ -71,18 +76,20 @@ mix :: #force_inline proc "contextless" (m: [$N]u64) -> (x: u64) {
 	return
 }
 
+@(enable_target_feature = k.FEATURES[T])
 run_json :: #force_no_inline proc(buf: []u8, reps: int, t: k.Nibble_Table, s: [8]u8) -> (sink: u64) {
 	p := raw_data(buf)
 	for _ in 0 ..< reps {
 		q := opaque(&p)
 		for i := 0; i < len(buf); i += 64 {
-			c := k.classes(k.load(q[i:]), t)
+			c := k.classes(T, k.load(q[i:]), t)
 			sink += mix(k.pack_n([4]k.Block{k.has(c, s[0]), k.has(c, s[1]), k.has(c, s[2]), k.has(c, s[3])}))
 		}
 	}
 	return
 }
 
+@(enable_target_feature = k.FEATURES[T])
 run_csv :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 	p := raw_data(buf)
 	for _ in 0 ..< reps {
@@ -95,6 +102,7 @@ run_csv :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 	return
 }
 
+@(enable_target_feature = k.FEATURES[T])
 run_str :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 	p := raw_data(buf)
 	for _ in 0 ..< reps {
@@ -103,13 +111,14 @@ run_str :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 		for i := 0; i < len(buf); i += 64 {
 			b := k.load(q[i:])
 			m := k.pack_n([2]k.Block{k.eq(b, '"'), k.eq(b, '\\')})
-			quotes, inside := k.string_region(m[0], m[1], &s)
+			quotes, inside := k.string_region(T, m[0], m[1], &s)
 			sink += quotes ~ inside
 		}
 	}
 	return
 }
 
+@(enable_target_feature = k.FEATURES[T])
 run_utf8 :: #force_no_inline proc(buf: []u8, reps: int, t: k.Nibble_Table, s: [8]u8, skip_ascii: bool) -> (sink: u64) {
 	p := raw_data(buf)
 	for _ in 0 ..< reps {
@@ -117,7 +126,7 @@ run_utf8 :: #force_no_inline proc(buf: []u8, reps: int, t: k.Nibble_Table, s: [8
 		u: k.Utf8_State
 		for i := 0; i < len(buf); i += 64 {
 			b := k.load(q[i:])
-			c := k.classes(b, t)
+			c := k.classes(T, b, t)
 			sink += mix(k.pack_n([4]k.Block{k.has(c, s[0]), k.has(c, s[1]), k.has(c, s[2]), k.has(c, s[3])}))
 			if skip_ascii && k.is_ascii(b) {
 				k.utf8_ascii_block(&u)
@@ -136,12 +145,13 @@ count_quotes :: #force_inline proc "contextless" (src: []u8) -> (n: u64) {
 		n += u64(bits.count_ones(k.pack(k.eq(k.load(raw_data(src[lo:])), '"'))))
 	}
 	if lo < len(src) {
-		t := k.load_tail(src, lo)
+		t := k.load_tail(T, src, lo)
 		n += u64(bits.count_ones(k.align(k.pack(k.eq(t.block, '"')), t)))
 	}
 	return
 }
 
+@(enable_target_feature = k.FEATURES[T])
 run_tail :: #force_no_inline proc(buf: []u8, starts: []int, n, reps: int) -> (sink: u64) {
 	p := raw_data(buf)
 	for _ in 0 ..< reps {

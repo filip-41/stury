@@ -4,9 +4,6 @@ package kernel
 import "base:intrinsics"
 import "core:simd"
 
-// Four NEON registers, kept apart because `pack` reduces them pairwise.
-Block :: [4]#simd[16]u8
-
 @(private = "file")
 V :: #simd[16]u8
 
@@ -28,15 +25,6 @@ eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
 // The lanes of `a` or of `b`.
 either :: #force_inline proc "contextless" (a, b: Block) -> Block {
 	return {simd.bit_or(a[0], b[0]), simd.bit_or(a[1], b[1]), simd.bit_or(a[2], b[2]), simd.bit_or(a[3], b[3])}
-}
-
-// The set bits of every byte of `b`, from the table: `tbl` looks up both nibbles.
-classes :: #force_inline proc "contextless" (b: Block, t: Nibble_Table) -> (c: Block) {
-	#unroll for i in 0 ..< 4 {
-		lo := simd.runtime_swizzle(t.lo, simd.bit_and(b[i], V(0x0f)))
-		c[i] = simd.bit_and(lo, simd.runtime_swizzle(t.hi, simd.shr(b[i], V(4))))
-	}
-	return
 }
 
 // The lanes of `c`, as `classes` returns it, in a set of `bits`.
@@ -84,12 +72,6 @@ fold :: #force_inline proc "contextless" (m: Block) -> V {
 // Whether every byte of `b` is below 0x80.
 is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
 	return simd.reduce_max(simd.bit_or(simd.bit_or(b[0], b[1]), simd.bit_or(b[2], b[3]))) < 0x80
-}
-
-// The four 16-byte windows of `b`, in order.
-@(private)
-quarters :: #force_inline proc "contextless" (b: Block) -> [4]#simd[16]u8 {
-	return b
 }
 
 // Whether any lane mask is set. `umaxv` reduces a register in one instruction, an OR reduction goes through scalar

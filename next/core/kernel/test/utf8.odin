@@ -6,10 +6,11 @@ import "core:unicode/utf8"
 import k ".."
 
 // Whether `src` is UTF-8 by the kernel, block by block, ASCII blocks taken by `utf8_ascii_block` when `skip_ascii`.
+@(enable_target_feature = FEATURES)
 kernel_utf8 :: proc(src: []u8, skip_ascii: bool) -> bool {
 	s: k.Utf8_State
 	for lo := 0; lo < len(src); lo += 64 {
-		b := lo + 64 <= len(src) ? k.load(raw_data(src[lo:])) : k.load_padded(src, lo)
+		b := lo + 64 <= len(src) ? k.load(raw_data(src[lo:])) : k.load_padded(T, src, lo)
 		if skip_ascii && k.is_ascii(b) {
 			k.utf8_ascii_block(&s)
 		} else {

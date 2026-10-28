@@ -19,9 +19,8 @@ Utf8_State :: struct {
 
 // The errors of a block, after the bytes in `s.prev`.
 utf8_block :: #force_inline proc "contextless" (b: Block, s: ^Utf8_State) {
-	q := quarters(b)
-	s.err |= errors(s.prev, q[0]) | errors(q[0], q[1]) | errors(q[1], q[2]) | errors(q[2], q[3])
-	s.prev = q[3]
+	s.err |= errors(s.prev, b[0]) | errors(b[0], b[1]) | errors(b[1], b[2]) | errors(b[2], b[3])
+	s.prev = b[3]
 }
 
 // A block whose bytes are all below 0x80, as `is_ascii` reports: its only possible error is a sequence that the

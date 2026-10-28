@@ -6,6 +6,11 @@ import "core:mem/virtual"
 import "core:testing"
 import k ".."
 
+// The tier under test, by its place in `k.Tier`: `-define:TIER=2` is v4 on x86-64. The kernels run in procedures
+// compiled with the tier's features, as a caller's hot loops are.
+T :: k.Tier(#config(TIER, 0))
+FEATURES :: k.FEATURES[T]
+
 // Bit i set where `src[i] == c`.
 reference :: proc(src: []u8, c: u8) -> (m: u64) {
 	for b, i in src {
@@ -16,7 +21,7 @@ reference :: proc(src: []u8, c: u8) -> (m: u64) {
 	return
 }
 
-@(test)
+@(test, enable_target_feature = FEATURES)
 pack_every_byte_and_lane :: proc(t: ^testing.T) {
 	state := rand.create(1)
 	context.random_generator = rand.default_random_generator(&state)
@@ -62,6 +67,7 @@ reference_set :: proc(src: []u8, set: string) -> (m: u64) {
 }
 
 // Every byte value against the sets, then random blocks of their bytes and their neighbours.
+@(enable_target_feature = FEATURES)
 check_sets :: proc(t: ^testing.T, sets: []string) {
 	table, bits := k.nibble_table(sets)
 	near: [dynamic]u8
@@ -76,7 +82,7 @@ check_sets :: proc(t: ^testing.T, sets: []string) {
 		for &b, i in buf {
 			b = block < 4 ? u8(64 * block + i) : rand.choice(near[:])
 		}
-		c := k.classes(k.load(raw_data(buf[:])), table)
+		c := k.classes(T, k.load(raw_data(buf[:])), table)
 		masks: [4]k.Block
 		for set, s in sets {
 			m := k.has(c, bits[s])
@@ -121,7 +127,7 @@ classes_of_every_byte :: proc(t: ^testing.T) {
 	}
 }
 
-@(test)
+@(test, enable_target_feature = FEATURES)
 either_and_pack_n :: proc(t: ^testing.T) {
 	state := rand.create(4)
 	context.random_generator = rand.default_random_generator(&state)
@@ -161,6 +167,7 @@ reference_strings :: proc(src: []u8, quotes, inside: []u64) {
 	}
 }
 
+@(enable_target_feature = FEATURES)
 check_strings :: proc(t: ^testing.T, src: []u8) {
 	assert(len(src) % 64 == 0 && len(src) <= 64 * 8)
 	want_quotes, want_inside: [8]u64
@@ -169,7 +176,7 @@ check_strings :: proc(t: ^testing.T, src: []u8) {
 	for i in 0 ..< len(src) / 64 {
 		b := k.load(raw_data(src[64 * i:]))
 		m := k.pack_n([2]k.Block{k.eq(b, '"'), k.eq(b, '\\')})
-		quotes, inside := k.string_region(m[0], m[1], &s)
+		quotes, inside := k.string_region(T, m[0], m[1], &s)
 		testing.expectf(t, quotes == want_quotes[i] && inside == want_inside[i], "%q block %d: quotes %x inside %x, want %x %x", string(src), i, quotes, inside, want_quotes[i], want_inside[i])
 	}
 }
@@ -224,8 +231,9 @@ tail_beside_guard_page :: proc(t: ^testing.T) {
 	testing.expect(t, virtual.protect(rawptr(guard), GUARD, virtual.Protect_No_Access))
 	before := ([^]u8)(guard - 256)
 
+	@(enable_target_feature = FEATURES)
 	check :: proc(t: ^testing.T, src: []u8, lo: int) {
-		tail := k.load_tail(src, lo)
+		tail := k.load_tail(T, src, lo)
 		for c in ([2]u8{'"', 'x'}) {
 			got := k.align(k.pack(k.eq(tail.block, c)), tail)
 			testing.expectf(t, got == reference(src[lo:], c), "len %d lo %d byte %q: %x", len(src), lo, c, got)
@@ -254,12 +262,13 @@ tail_beside_guard_page :: proc(t: ^testing.T) {
 // optimizing build finds stale bytes.
 @(test)
 tail_of_small_local :: proc(t: ^testing.T) {
+	@(enable_target_feature = FEATURES)
 	quotes :: proc() -> u64 {
 		buf: [10]u8
 		for &b, i in buf {
 			b = i % 2 == 0 ? '"' : 'a'
 		}
-		tail := k.load_tail(buf[:], 0)
+		tail := k.load_tail(T, buf[:], 0)
 		return k.align(k.pack(k.eq(tail.block, '"')), tail)
 	}
 	testing.expect_value(t, quotes(), 0x155)
@@ -267,7 +276,7 @@ tail_of_small_local :: proc(t: ^testing.T) {
 
 // Tails of inputs whose surroundings an ASan build has poisoned: `load_tail` reads there and must not be reported.
 // Odin's heap does not poison past an allocation, so the test poisons the buffer around each input itself.
-@(test)
+@(test, enable_target_feature = FEATURES)
 tail_in_poisoned_memory :: proc(t: ^testing.T) {
 	buf := make([]u8, 256)
 	defer delete(buf)
@@ -283,7 +292,7 @@ tail_in_poisoned_memory :: proc(t: ^testing.T) {
 		lo := n &~ 63
 		sanitizer.address_poison_slice(buf)
 		sanitizer.address_unpoison_slice(src)
-		tail := k.load_tail(src, lo)
+		tail := k.load_tail(T, src, lo)
 		sanitizer.address_unpoison_slice(buf)
 		testing.expect_value(t, k.align(k.pack(k.eq(tail.block, '"')), tail), reference(src[lo:], '"'))
 	}

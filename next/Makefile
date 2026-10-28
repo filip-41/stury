@@ -23,11 +23,14 @@ test:
 	$(call odin_each,test,$(TEST_PKGS),$(TEST_OPT),)
 	$(call odin_each,test,$(TEST_PKGS),-o:speed, (-o:speed))
 
-# The x86-64 tiers a baseline build can be: v2 takes the SSE paths, v3 the AVX2 ones. On Apple silicon they run under
-# Rosetta; AVX-512 runs only on a machine that has it.
+# The x86-64 tiers v2 and v3 in a build for Odin's default CPU, as a caller's build is, at -o:none, where no kernel
+# is inlined into the tier's procedures, and at -o:speed. On Apple silicon they run under Rosetta. v4 runs only on a
+# machine with AVX-512 (TIER=2), and `lint` compiles it.
 test-x86:
-	$(call odin_each,test,$(TEST_PKGS),$(TEST_OPT) -target:darwin_amd64 -microarch:x86-64-v2, (x86-64-v2))
-	$(call odin_each,test,$(TEST_PKGS),$(TEST_OPT) -target:darwin_amd64 -microarch:x86-64-v3, (x86-64-v3))
+	$(call odin_each,test,$(TEST_PKGS),-o:none -target:darwin_amd64 -define:TIER=0, (v2 -o:none))
+	$(call odin_each,test,$(TEST_PKGS),-o:speed -target:darwin_amd64 -define:TIER=0, (v2))
+	$(call odin_each,test,$(TEST_PKGS),-o:none -target:darwin_amd64 -define:TIER=1, (v3 -o:none))
+	$(call odin_each,test,$(TEST_PKGS),-o:speed -target:darwin_amd64 -define:TIER=1, (v3))
 
 test-asan:
 	$(call odin_each,test,$(TEST_PKGS),-o:speed -sanitize:address -debug, (address))
@@ -37,10 +40,16 @@ lint:
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS),-no-entry-point $(LINT_FLAGS),)
 	$(ODIN) check bench $(LINT_FLAGS)
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
+	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for o in none speed; do \
+		echo "== $(TEST_PKGS) (linux_amd64 v4 -o:$$o)"; \
+		$(ODIN) test $(TEST_PKGS) -build-mode:obj -target:linux_amd64 -define:TIER=2 -o:$$o $(LINT_FLAGS) -out:$$d/t.o || exit 1; \
+	done
 	$(call odin_each,check,$(LIB_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_riscv64, (linux_riscv64))
 
-# Kernel timings at release optimization. ROUNDS, CASES and COUNT pass through to run.py.
+# Kernel timings at release optimization, of the tier at place TIER of `Tier`. ROUNDS, CASES and COUNT pass through
+# to run.py.
+TIER ?= 0
 bench:
 	@mkdir -p $(BUILD)
-	$(ODIN) build bench -o:speed -out:$(BUILD)/bench
-	python3 -I bench/run.py $(BUILD)/bench $(ROUNDS)
+	$(ODIN) build bench -o:speed -define:TIER=$(TIER) -out:$(BUILD)/bench
+	ROUNDS=$(ROUNDS) python3 -I bench/run.py $(BUILD)/bench

@@ -4,8 +4,14 @@ import "base:intrinsics"
 
 // Format-neutral kernels on 64-byte blocks: loading a block, reading the last partial block of an input in place,
 // comparing bytes, sorting bytes into sets, packing per-byte masks into one bit per byte, following quoted strings
-// across blocks, and validating UTF-8 (utf8.odin). A `Block` holds 64 input bytes, or the 64 lane masks (0x00 or
-// 0xFF) made from them. Its layout belongs to the architecture (arm64.odin, lanes64.odin).
+// across blocks, and validating UTF-8 (utf8.odin). The operations are per architecture (arm64.odin, lanes64.odin).
+// Kernels whose instructions differ by CPU take a `Tier` as `$T` (amd64.odin, single_tier.odin).
+
+// 64 input bytes, or the 64 lane masks (0x00 or 0xFF) made from them, as four 16-byte vectors. Kernels that work
+// on all 64 lanes at once reinterpret it as one 64-lane vector (lanes64.odin). An array, so that a block crosses a
+// call between procedures compiled for different x86 tiers in the same registers on both sides: a 64-lane vector
+// is returned in one register by an AVX-512 procedure and in four by an SSE one.
+Block :: [4]#simd[16]u8
 
 // The last partial block of an input. Lane j of `block` holds the input byte at `lo + j - shift`. Lanes outside the
 // input hold whatever memory is there, so a mask packed from `block` goes through `align` before anything that
@@ -16,15 +22,22 @@ Tail :: struct {
 	live:  u64,
 }
 
-// The bytes of `src` from `lo` to its end, fewer than 64, read in place: `lo < len(src) < lo + 64`. A 64-byte load
+// `load_tail` without a masked load: `lo < len(src) < lo + 64`. A 64-byte load
 // from `lo` stays in one 4 KiB page unless `lo` lies in the page's last 63 bytes. Then the input itself reaches the
 // next page, and the load that ends where the input ends, which starts in `lo`'s page, is taken instead. Either load
 // may read bytes around `src`, never a page that `src` does not touch. 4 KiB is the smallest page of any target.
 // Out of line: inlined where the compiler sees how large `src`'s allocation is, a load past its end is undefined, and
-// LLVM drops the writes that filled it. The load is written here, not through `load`, so that ASan skips it at every
-// optimization level.
-@(no_sanitize_address)
-load_tail :: #force_no_inline proc "contextless" (src: []u8, lo: int) -> (t: Tail) {
+// LLVM drops the writes that filled it. A tier with wider registers than the build's CPU reads its own copy
+// (`paged_tail_v3`), whose result the caller reloads as it was stored: a 32-byte load of a block stored 16 bytes at a
+// time waits for both stores to reach the cache.
+@(private, no_sanitize_address)
+paged_tail :: #force_no_inline proc "contextless" (src: []u8, lo: int) -> Tail {
+	return read_paged_tail(src, lo)
+}
+
+// The load is written here, not through `load`, so that ASan skips it at every optimization level.
+@(private, no_sanitize_address)
+read_paged_tail :: #force_inline proc "contextless" (src: []u8, lo: int) -> (t: Tail) {
 	rem := len(src) - lo
 	when ODIN_DEBUG {
 		assert_contextless(0 < rem && rem < 64)
@@ -35,18 +48,16 @@ load_tail :: #force_no_inline proc "contextless" (src: []u8, lo: int) -> (t: Tai
 		t.shift = u64(64 - rem)
 		p = intrinsics.ptr_offset(p, -int(t.shift))
 	}
-	// A vector load: Odin lowers an array load to a `memcpy` at -o:none, which ASan checks.
-	when intrinsics.type_is_simd_vector(Block) {
-		t.block = intrinsics.unaligned_load((^Block)(p))
-	} else {
-		t.block = transmute(Block)intrinsics.unaligned_load((^#simd[64]u8)(p))
-	}
+	// A vector load: Odin lowers an array load to a `memcpy` at -o:none, which ASan checks. Loaded into a variable
+	// first: Odin folds a `transmute` of the load into a load of `Block` at its own 16-byte alignment.
+	v := intrinsics.unaligned_load((^#simd[64]u8)(p))
+	t.block = transmute(Block)v
 	return
 }
 
-// The bytes of `src` from `lo` to its end, fewer than 64, followed by zeros: for a check that reads every lane, as
-// UTF-8 validation does, where `align` cannot clear what the lanes outside the input did.
-load_padded :: #force_inline proc "contextless" (src: []u8, lo: int) -> Block {
+// `load_padded` without a masked load: a copy.
+@(private)
+copied_tail :: #force_inline proc "contextless" (src: []u8, lo: int) -> Block {
 	buf: [64]u8
 	intrinsics.mem_copy_non_overlapping(&buf, raw_data(src[lo:]), len(src) - lo)
 	return load(raw_data(buf[:]))
@@ -85,19 +96,6 @@ nibble_table :: proc(sets: []string) -> (t: Nibble_Table, bits: [8]u8) {
 	return {transmute(#simd[16]u8)lo, transmute(#simd[16]u8)hi}, bits
 }
 
-// Bit i set where an odd number of the bits of `x` at or below i are set. With the quotes of a block in `x`, these
-// are the bytes from each opening quote up to its closing quote, the closing quote excluded.
-prefix_xor :: #force_inline proc "contextless" (x: u64) -> u64 {
-	x := x
-	x ~= x << 1
-	x ~= x << 2
-	x ~= x << 4
-	x ~= x << 8
-	x ~= x << 16
-	x ~= x << 32
-	return x
-}
-
 // Where the previous block left its strings: `inside` is all ones when it ended inside a string, `odd_escape` is 1
 // when it ended in an odd run of escape bytes, which escapes the first byte of the next block.
 String_State :: struct {
@@ -108,12 +106,12 @@ String_State :: struct {
 // The quotes of a block that no escape byte escapes, and its bytes inside a string, from its quote and escape bytes,
 // carrying `s` to the next block. An escape byte escapes the byte after it unless it is escaped itself. Blocks
 // without escape bytes are the common case and skip the escape arithmetic.
-string_region :: #force_inline proc "contextless" (quote, escape: u64, s: ^String_State) -> (quotes, inside: u64) {
+string_region :: #force_inline proc "contextless" ($T: Tier, quote, escape: u64, s: ^String_State) -> (quotes, inside: u64) {
 	quotes = quote
 	if escape != 0 || s.odd_escape != 0 {
 		quotes &~= escaped(escape, &s.odd_escape)
 	}
-	inside = prefix_xor(quotes) ~ s.inside
+	inside = prefix_xor(T, quotes) ~ s.inside
 	s.inside = u64(i64(inside) >> 63)
 	return
 }
