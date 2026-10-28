@@ -3,9 +3,9 @@ package kernel
 import "base:intrinsics"
 
 // Format-neutral kernels on 64-byte blocks: loading a block, reading the last partial block of an input in place,
-// comparing bytes, sorting bytes into sets, packing per-byte masks into one bit per byte, and following quoted strings
-// across blocks. A `Block` holds 64 input bytes, or the 64 lane masks (0x00 or 0xFF) made from them. Its layout
-// belongs to the architecture (arm64.odin, lanes64.odin).
+// comparing bytes, sorting bytes into sets, packing per-byte masks into one bit per byte, following quoted strings
+// across blocks, and validating UTF-8 (utf8.odin). A `Block` holds 64 input bytes, or the 64 lane masks (0x00 or
+// 0xFF) made from them. Its layout belongs to the architecture (arm64.odin, lanes64.odin).
 
 // The last partial block of an input. Lane j of `block` holds the input byte at `lo + j - shift`. Lanes outside the
 // input hold whatever memory is there, so a mask packed from `block` goes through `align` before anything that
@@ -42,6 +42,14 @@ load_tail :: #force_no_inline proc "contextless" (src: []u8, lo: int) -> (t: Tai
 		t.block = transmute(Block)intrinsics.unaligned_load((^#simd[64]u8)(p))
 	}
 	return
+}
+
+// The bytes of `src` from `lo` to its end, fewer than 64, followed by zeros: for a check that reads every lane, as
+// UTF-8 validation does, where `align` cannot clear what the lanes outside the input did.
+load_padded :: #force_inline proc "contextless" (src: []u8, lo: int) -> Block {
+	buf: [64]u8
+	intrinsics.mem_copy_non_overlapping(&buf, raw_data(src[lo:]), len(src) - lo)
+	return load(raw_data(buf[:]))
 }
 
 // A mask packed from `t.block`, one bit per input byte from `lo`, the bits past the input cleared.

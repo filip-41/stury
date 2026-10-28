@@ -8,6 +8,9 @@ package bench
 //   csv <per256>    CSV's three sets by compares, packed together, `per256` of their bytes in 256, unit: a block.
 //   str <every>     unescaped quotes and string bytes by `string_region`, JSON's bytes 16 in 256 and one backslash in
 //                   `every` bytes, unit: a block.
+//   utf8 <every>    JSON's sets as in `json`, and UTF-8 checked per block, ASCII blocks skipped, JSON's bytes 16 in 256
+//                   and one three-byte character in `every` bytes, unit: a block.
+//   utf8all <every> `utf8`, every block checked in full.
 //   tail <len>      quotes counted in inputs of `len` bytes, the last partial block by `load_tail`, unit: an input.
 
 import "base:intrinsics"
@@ -107,6 +110,26 @@ run_str :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 	return
 }
 
+run_utf8 :: #force_no_inline proc(buf: []u8, reps: int, t: k.Nibble_Table, s: [8]u8, skip_ascii: bool) -> (sink: u64) {
+	p := raw_data(buf)
+	for _ in 0 ..< reps {
+		q := opaque(&p)
+		u: k.Utf8_State
+		for i := 0; i < len(buf); i += 64 {
+			b := k.load(q[i:])
+			c := k.classes(b, t)
+			sink += mix(k.pack_n([4]k.Block{k.has(c, s[0]), k.has(c, s[1]), k.has(c, s[2]), k.has(c, s[3])}))
+			if skip_ascii && k.is_ascii(b) {
+				k.utf8_ascii_block(&u)
+			} else {
+				k.utf8_block(b, &u)
+			}
+		}
+		sink += u64(k.utf8_ok(u))
+	}
+	return
+}
+
 count_quotes :: #force_inline proc "contextless" (src: []u8) -> (n: u64) {
 	lo := 0
 	for ; lo + 64 <= len(src); lo += 64 {
@@ -139,7 +162,7 @@ fill :: proc(buf: []u8, per256: int, from: string) {
 
 main :: proc() {
 	if len(os.args) != 4 {
-		fmt.eprintln("usage: bench pack|json|csv|str|skip|tail <reps> <arg>")
+		fmt.eprintln("usage: bench pack|json|csv|str|utf8|utf8all|skip|tail <reps> <arg>")
 		os.exit(2)
 	}
 	reps, reps_ok := strconv.parse_int(os.args[2])
@@ -175,6 +198,18 @@ main :: proc() {
 		units = L1_BYTES / 64
 		t := time.tick_now()
 		sink = run_str(buf, reps)
+		elapsed = time.tick_since(t)
+	case "utf8", "utf8all":
+		json_sets := JSON_SETS
+		table, set_bits := k.nibble_table(json_sets[:])
+		buf := make([]u8, L1_BYTES)
+		fill(buf, 16, "\"\\,:[]{} \t\n\r")
+		for _ in 0 ..< L1_BYTES / arg {
+			copy(buf[rand.int_max(L1_BYTES - 2):], "\u20ac")
+		}
+		units = L1_BYTES / 64
+		t := time.tick_now()
+		sink = run_utf8(buf, reps, table, set_bits, os.args[1] == "utf8")
 		elapsed = time.tick_since(t)
 	case "skip":
 		buf := make([]u8, SKIP_BYTES)

@@ -53,6 +53,17 @@ pack :: #force_inline proc "contextless" (m: Block) -> u64 {
 	return transmute(u64)simd.extract_msbs(m)
 }
 
+// Whether every byte of `b` is below 0x80.
+is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
+	return simd.extract_msbs(b) == {}
+}
+
+// The four 16-byte windows of `b`, in order.
+@(private)
+quarters :: #force_inline proc "contextless" (b: Block) -> [4]#simd[16]u8 {
+	return transmute([4]#simd[16]u8)b
+}
+
 // Whether any lane mask is set. The packed mask is the test: packing costs one instruction per register, as a
 // vector test does.
 any_lane :: #force_inline proc "contextless" (m: Block) -> bool {

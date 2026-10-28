@@ -81,6 +81,17 @@ fold :: #force_inline proc "contextless" (m: Block) -> V {
 	return addp(addp(simd.min(m[0], w), simd.min(m[1], w)), addp(simd.min(m[2], w), simd.min(m[3], w)))
 }
 
+// Whether every byte of `b` is below 0x80.
+is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
+	return simd.reduce_max(simd.bit_or(simd.bit_or(b[0], b[1]), simd.bit_or(b[2], b[3]))) < 0x80
+}
+
+// The four 16-byte windows of `b`, in order.
+@(private)
+quarters :: #force_inline proc "contextless" (b: Block) -> [4]#simd[16]u8 {
+	return b
+}
+
 // Whether any lane mask is set. `umaxv` reduces a register in one instruction, an OR reduction goes through scalar
 // registers.
 any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
