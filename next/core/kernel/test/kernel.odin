@@ -250,6 +250,21 @@ tail_beside_guard_page :: proc(t: ^testing.T) {
 	}
 }
 
+// The tail of an input smaller than a block whose allocation the compiler sees. Read by a load inlined here, an
+// optimizing build finds stale bytes.
+@(test)
+tail_of_small_local :: proc(t: ^testing.T) {
+	quotes :: proc() -> u64 {
+		buf: [10]u8
+		for &b, i in buf {
+			b = i % 2 == 0 ? '"' : 'a'
+		}
+		tail := k.load_tail(buf[:], 0)
+		return k.align(k.pack(k.eq(tail.block, '"')), tail)
+	}
+	testing.expect_value(t, quotes(), 0x155)
+}
+
 // Tails of inputs whose surroundings an ASan build has poisoned: `load_tail` reads there and must not be reported.
 // Odin's heap does not poison past an allocation, so the test poisons the buffer around each input itself.
 @(test)

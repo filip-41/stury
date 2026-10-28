@@ -20,16 +20,26 @@ Tail :: struct {
 // from `lo` stays in one 4 KiB page unless `lo` lies in the page's last 63 bytes. Then the input itself reaches the
 // next page, and the load that ends where the input ends, which starts in `lo`'s page, is taken instead. Either load
 // may read bytes around `src`, never a page that `src` does not touch. 4 KiB is the smallest page of any target.
+// Out of line: inlined where the compiler sees how large `src`'s allocation is, a load past its end is undefined, and
+// LLVM drops the writes that filled it. The load is written here, not through `load`, so that ASan skips it at every
+// optimization level.
 @(no_sanitize_address)
-load_tail :: #force_inline proc "contextless" (src: []u8, lo: int) -> (t: Tail) {
+load_tail :: #force_no_inline proc "contextless" (src: []u8, lo: int) -> (t: Tail) {
 	rem := len(src) - lo
-	p := uintptr(raw_data(src)) + uintptr(lo)
+	when ODIN_DEBUG {
+		assert_contextless(0 < rem && rem < 64)
+	}
+	p := raw_data(src)[lo:]
 	t.live = u64(1) << u64(rem) - 1
-	if p & 4095 <= 4096 - 64 {
-		t.block = load(([^]u8)(p))
-	} else {
+	if uintptr(p) & 4095 > 4096 - 64 {
 		t.shift = u64(64 - rem)
-		t.block = load(([^]u8)(p - uintptr(t.shift)))
+		p = intrinsics.ptr_offset(p, -int(t.shift))
+	}
+	// A vector load: Odin lowers an array load to a `memcpy` at -o:none, which ASan checks.
+	when intrinsics.type_is_simd_vector(Block) {
+		t.block = intrinsics.unaligned_load((^Block)(p))
+	} else {
+		t.block = transmute(Block)intrinsics.unaligned_load((^#simd[64]u8)(p))
 	}
 	return
 }

@@ -18,8 +18,10 @@ define odin_each
 done
 endef
 
+# Again at -o:speed, where the optimizer reasons about loads that the walk makes past an input's end.
 test:
 	$(call odin_each,test,$(TEST_PKGS),$(TEST_OPT),)
+	$(call odin_each,test,$(TEST_PKGS),-o:speed, (-o:speed))
 
 # The x86-64 tiers a baseline build can be: v2 takes the SSE paths, v3 the AVX2 ones. On Apple silicon they run under
 # Rosetta; AVX-512 runs only on a machine that has it.
@@ -28,7 +30,7 @@ test-x86:
 	$(call odin_each,test,$(TEST_PKGS),$(TEST_OPT) -target:darwin_amd64 -microarch:x86-64-v3, (x86-64-v3))
 
 test-asan:
-	$(call odin_each,test,$(TEST_PKGS),$(TEST_OPT) -sanitize:address -debug, (address))
+	$(call odin_each,test,$(TEST_PKGS),-o:speed -sanitize:address -debug, (address))
 
 # Host, then the other architectures' sources: x86-64 and a target with neither NEON nor x86 vectors.
 lint:
