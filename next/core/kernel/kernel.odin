@@ -1,8 +1,11 @@
 package kernel
 
+import "base:intrinsics"
+
 // Format-neutral kernels on 64-byte blocks: loading a block, reading the last partial block of an input in place,
-// comparing bytes, sorting bytes into sets, and packing per-byte masks into one bit per byte. A `Block` holds 64 input bytes, or the 64 lane
-// masks (0x00 or 0xFF) made from them. Its layout belongs to the architecture (arm64.odin, lanes64.odin).
+// comparing bytes, sorting bytes into sets, packing per-byte masks into one bit per byte, and following quoted strings
+// across blocks. A `Block` holds 64 input bytes, or the 64 lane masks (0x00 or 0xFF) made from them. Its layout
+// belongs to the architecture (arm64.odin, lanes64.odin).
 
 // The last partial block of an input. Lane j of `block` holds the input byte at `lo + j - shift`. Lanes outside the
 // input hold whatever memory is there, so a mask packed from `block` goes through `align` before anything that
@@ -62,4 +65,54 @@ nibble_table :: proc(sets: []string) -> (t: Nibble_Table, bits: [8]u8) {
 		}
 	}
 	return {transmute(#simd[16]u8)lo, transmute(#simd[16]u8)hi}, bits
+}
+
+// Bit i set where an odd number of the bits of `x` at or below i are set. With the quotes of a block in `x`, these
+// are the bytes from each opening quote up to its closing quote, the closing quote excluded.
+prefix_xor :: #force_inline proc "contextless" (x: u64) -> u64 {
+	x := x
+	x ~= x << 1
+	x ~= x << 2
+	x ~= x << 4
+	x ~= x << 8
+	x ~= x << 16
+	x ~= x << 32
+	return x
+}
+
+// Where the previous block left its strings: `inside` is all ones when it ended inside a string, `odd_escape` is 1
+// when it ended in an odd run of escape bytes, which escapes the first byte of the next block.
+String_State :: struct {
+	inside:     u64,
+	odd_escape: u64,
+}
+
+// The quotes of a block that no escape byte escapes, and its bytes inside a string, from its quote and escape bytes,
+// carrying `s` to the next block. An escape byte escapes the byte after it unless it is escaped itself. Blocks
+// without escape bytes are the common case and skip the escape arithmetic.
+string_region :: #force_inline proc "contextless" (quote, escape: u64, s: ^String_State) -> (quotes, inside: u64) {
+	quotes = quote
+	if escape != 0 || s.odd_escape != 0 {
+		quotes &~= escaped(escape, &s.odd_escape)
+	}
+	inside = prefix_xor(quotes) ~ s.inside
+	s.inside = u64(i64(inside) >> 63)
+	return
+}
+
+// The bytes after an odd run of escape bytes. Adding a run's first bit to the escapes clears the run and sets the
+// bit after it, which lies an odd distance from the first bit when the run has odd length: an odd bit after a run
+// that starts on an even bit, an even bit after one that starts on an odd bit. A run that reaches the end of the
+// block has odd length only when it starts on an odd bit, so the carry out of that add is the next block's `odd`.
+// With `odd` set, bit 0 continues the previous run: it counts as an odd start, and is escaped when not an escape.
+@(private = "file")
+escaped :: #force_inline proc "contextless" (escape: u64, odd: ^u64) -> u64 {
+	EVEN :: u64(0x5555_5555_5555_5555)
+	starts := escape &~ (escape << 1)
+	even_starts_mask := EVEN ~ odd^
+	even_carries := escape + (starts & even_starts_mask)
+	odd_carries, overflow := intrinsics.overflow_add(escape, starts &~ even_starts_mask)
+	odd_carries |= odd^
+	odd^ = u64(overflow)
+	return (even_carries &~ escape & ~EVEN) | (odd_carries &~ escape & EVEN)
 }

@@ -140,6 +140,70 @@ either_and_pack_n :: proc(t: ^testing.T) {
 	}
 }
 
+// Per block of `src`, the unescaped quotes and the bytes inside a string, byte by byte: a backslash escapes the next
+// byte unless it is escaped itself, and a byte is inside from an opening quote up to its closing quote.
+reference_strings :: proc(src: []u8, quotes, inside: []u64) {
+	escaped, in_string := false, false
+	for b, i in src {
+		bit := u64(1) << u64(i % 64)
+		switch {
+		case escaped:
+			escaped = false
+		case b == '\\':
+			escaped = true
+		case b == '"':
+			quotes[i / 64] |= bit
+			in_string = !in_string
+		}
+		if in_string {
+			inside[i / 64] |= bit
+		}
+	}
+}
+
+check_strings :: proc(t: ^testing.T, src: []u8) {
+	assert(len(src) % 64 == 0 && len(src) <= 64 * 8)
+	want_quotes, want_inside: [8]u64
+	reference_strings(src, want_quotes[:], want_inside[:])
+	s: k.String_State
+	for i in 0 ..< len(src) / 64 {
+		b := k.load(raw_data(src[64 * i:]))
+		m := k.pack_n([2]k.Block{k.eq(b, '"'), k.eq(b, '\\')})
+		quotes, inside := k.string_region(m[0], m[1], &s)
+		testing.expectf(t, quotes == want_quotes[i] && inside == want_inside[i], "%q block %d: quotes %x inside %x, want %x %x", string(src), i, quotes, inside, want_quotes[i], want_inside[i])
+	}
+}
+
+@(test)
+strings_across_blocks :: proc(t: ^testing.T) {
+	state := rand.create(5)
+	context.random_generator = rand.default_random_generator(&state)
+	buf: [64 * 8]u8
+	// Backslash runs of every length up to two blocks, ending at every byte of a block, then a quote.
+	for run in 1 ..= 128 {
+		for end in 0 ..< 64 {
+			for &b in buf {
+				b = 'a'
+			}
+			at := 128 + end
+			for i in at - run ..< at {
+				buf[i] = '\\'
+			}
+			buf[at] = '"'
+			check_strings(t, buf[:256])
+		}
+	}
+	// Random blocks, dense in quotes and backslashes or with a few of them.
+	for alphabet in ([]string{"\"\\a", "\"\\\\\\aaaa", "\"aaaaaaaaaaaaaaaaaaaaaaaaaaa", "\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}) {
+		for _ in 0 ..< 2000 {
+			for &b in buf {
+				b = alphabet[rand.int_max(len(alphabet))]
+			}
+			check_strings(t, buf[:])
+		}
+	}
+}
+
 // Every tail of `src` lies just before or just after a page that faults on any access, so a load that leaves the
 // input's pages crashes the test. The memory around each input is full of the byte compared, so a lane outside the
 // input that `align` keeps shows up as a wrong bit.
