@@ -27,6 +27,13 @@ FEATURES :: [Tier]string {
 	.V4 = "avx,avx2,bmi,bmi2,popcnt,pclmul,avx512f,avx512bw,avx512vl,evex512,-slow-unaligned-mem-32",
 }
 
+// The width of each tier's vector registers.
+VECTOR_BYTES :: [Tier]int {
+	.V2 = 16,
+	.V3 = 32,
+	.V4 = 64,
+}
+
 // The best tier this CPU runs. `core:sys/info` reports AVX and AVX-512 only where the OS saves their registers.
 tier :: proc "contextless" () -> Tier {
 	f := info.cpu_features()
@@ -47,46 +54,33 @@ H :: #simd[32]u8
 @(private = "file")
 W :: #simd[64]u8
 
-// The set bits of every byte of `b`, from the table: `t` looks up both nibbles, 16, 32 or 64 bytes at a time.
-classes :: #force_inline proc "contextless" ($T: Tier, b: Block, t: Nibble_Table) -> Block {
+// Lane j is `t[i[j]]`, for indices below 16: one shuffle per vector register.
+@(private)
+lookup :: #force_inline proc "contextless" ($T: Tier, t: V, i: #simd[VECTOR_BYTES[T]]u8) -> #simd[VECTOR_BYTES[T]]u8 {
 	when T == .V4 {
-		return classes_v4(b, t)
+		return transmute(W)lookup_v4(t, transmute(Block)i)
 	} else when T == .V3 {
-		return classes_v3(b, t)
+		return transmute(H)lookup_v3(t, transmute([2]V)i)
 	} else {
-		return classes_v2(b, t)
+		return lookup_v2(t, i)
 	}
 }
 
+// The tier's instructions take and return arrays of 16-byte vectors, which cross a call in the same registers on both
+// sides of a feature boundary.
 @(private = "file", enable_target_feature = FEATURES[.V2])
-classes_v2 :: proc "contextless" (b: Block, t: Nibble_Table) -> (c: Block) {
-	lo, hi := transmute(x86.__m128i)t.lo, transmute(x86.__m128i)t.hi
-	#unroll for i in 0 ..< 4 {
-		l := x86._mm_shuffle_epi8(lo, transmute(x86.__m128i)simd.bit_and(b[i], V(0x0f)))
-		h := x86._mm_shuffle_epi8(hi, transmute(x86.__m128i)simd.shr(b[i], V(4)))
-		c[i] = transmute(V)simd.bit_and(l, h)
-	}
-	return
+lookup_v2 :: proc "contextless" (t, i: V) -> V {
+	return transmute(V)x86._mm_shuffle_epi8(transmute(x86.__m128i)t, transmute(x86.__m128i)i)
 }
 
 @(private = "file", enable_target_feature = FEATURES[.V3])
-classes_v3 :: proc "contextless" (b: Block, t: Nibble_Table) -> Block {
-	lo := transmute(H)[2]V{t.lo, t.lo}
-	hi := transmute(H)[2]V{t.hi, t.hi}
-	w := transmute([2]H)b
-	c: [2]H
-	#unroll for i in 0 ..< 2 {
-		c[i] = simd.bit_and(pshufb256(lo, simd.bit_and(w[i], H(0x0f))), pshufb256(hi, simd.shr(w[i], H(4))))
-	}
-	return transmute(Block)c
+lookup_v3 :: proc "contextless" (t: V, i: [2]V) -> [2]V {
+	return transmute([2]V)pshufb256(transmute(H)[2]V{t, t}, transmute(H)i)
 }
 
 @(private = "file", enable_target_feature = FEATURES[.V4])
-classes_v4 :: proc "contextless" (b: Block, t: Nibble_Table) -> Block {
-	lo := transmute(W)[4]V{t.lo, t.lo, t.lo, t.lo}
-	hi := transmute(W)[4]V{t.hi, t.hi, t.hi, t.hi}
-	w := transmute(W)b
-	return transmute(Block)simd.bit_and(pshufb512(lo, simd.bit_and(w, W(0x0f))), pshufb512(hi, simd.shr(w, W(4))))
+lookup_v4 :: proc "contextless" (t: V, i: Block) -> Block {
+	return transmute(Block)pshufb512(transmute(W)[4]V{t, t, t, t}, transmute(W)i)
 }
 
 // Bit i set where an odd number of the bits of `x` at or below i are set. With the quotes of a block in `x`, these

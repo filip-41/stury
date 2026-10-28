@@ -1,6 +1,7 @@
 package kernel
 
 import "base:intrinsics"
+import "core:simd"
 
 // Format-neutral kernels on 64-byte blocks: loading a block, reading the last partial block of an input in place,
 // comparing bytes, sorting bytes into sets, packing per-byte masks into one bit per byte, following quoted strings
@@ -94,6 +95,18 @@ nibble_table :: proc(sets: []string) -> (t: Nibble_Table, bits: [8]u8) {
 		}
 	}
 	return {transmute(#simd[16]u8)lo, transmute(#simd[16]u8)hi}, bits
+}
+
+// The set bits of every byte of `b`, from the table: `t` looks up both nibbles, one vector register at a time.
+classes :: #force_inline proc "contextless" ($T: Tier, b: Block, t: Nibble_Table) -> Block #no_bounds_check {
+	N :: VECTOR_BYTES[T]
+	U :: #simd[N]u8
+	w := transmute([64 / N]U)b
+	c: [64 / N]U
+	#unroll for i in 0 ..< 64 / N {
+		c[i] = simd.bit_and(lookup(T, t.lo, simd.bit_and(w[i], U(0x0f))), lookup(T, t.hi, simd.shr(w[i], U(4))))
+	}
+	return transmute(Block)c
 }
 
 // Where the previous block left its strings: `inside` is all ones when it ended inside a string, `odd_escape` is 1

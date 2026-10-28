@@ -12,9 +12,9 @@ kernel_utf8 :: proc(src: []u8, skip_ascii: bool) -> bool {
 	for lo := 0; lo < len(src); lo += 64 {
 		b := lo + 64 <= len(src) ? k.load(raw_data(src[lo:])) : k.load_padded(T, src, lo)
 		if skip_ascii && k.is_ascii(b) {
-			k.utf8_ascii_block(&s)
+			k.utf8_ascii_block(T, &s)
 		} else {
-			k.utf8_block(b, &s)
+			k.utf8_block(T, b, &s)
 		}
 	}
 	return k.utf8_ok(s)
@@ -28,7 +28,7 @@ check_utf8 :: proc(t: ^testing.T, src: []u8, loc := #caller_location) {
 	}
 }
 
-// Every pair of bytes, followed by two bytes that continue, end or break a sequence, where a 16-byte window ends,
+// Every pair of bytes, followed by two bytes that continue, end or break a sequence, where each 16 bytes end,
 // and where a block ends.
 @(test)
 utf8_every_pair :: proc(t: ^testing.T) {
@@ -36,7 +36,7 @@ utf8_every_pair :: proc(t: ^testing.T) {
 	for &b in buf {
 		b = 'a'
 	}
-	for at in ([]int{14, 15, 62, 63, 126}) {
+	for at in ([]int{14, 15, 30, 31, 46, 47, 62, 63, 126}) {
 		for a in 0 ..< 256 {
 			for b in 0 ..< 256 {
 				for c in ([]u8{'a', 0x80, 0xbf, 0xc2}) {

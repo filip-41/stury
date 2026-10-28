@@ -129,9 +129,9 @@ run_utf8 :: #force_no_inline proc(buf: []u8, reps: int, t: k.Nibble_Table, s: [8
 			c := k.classes(T, b, t)
 			sink += mix(k.pack_n([4]k.Block{k.has(c, s[0]), k.has(c, s[1]), k.has(c, s[2]), k.has(c, s[3])}))
 			if skip_ascii && k.is_ascii(b) {
-				k.utf8_ascii_block(&u)
+				k.utf8_ascii_block(T, &u)
 			} else {
-				k.utf8_block(b, &u)
+				k.utf8_block(T, b, &u)
 			}
 		}
 		sink += u64(k.utf8_ok(u))

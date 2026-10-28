@@ -13,6 +13,11 @@ FEATURES :: [Tier]string {
 	.Base = "",
 }
 
+// The width of each tier's vector registers.
+VECTOR_BYTES :: [Tier]int {
+	.Base = 16,
+}
+
 // The best tier this CPU runs.
 tier :: proc "contextless" () -> Tier {
 	return .Base
@@ -21,13 +26,10 @@ tier :: proc "contextless" () -> Tier {
 @(private = "file")
 V :: #simd[16]u8
 
-// The set bits of every byte of `b`, from the table: `t` looks up both nibbles.
-classes :: #force_inline proc "contextless" ($T: Tier, b: Block, t: Nibble_Table) -> (c: Block) {
-	#unroll for i in 0 ..< 4 {
-		lo := simd.runtime_swizzle(t.lo, simd.bit_and(b[i], V(0x0f)))
-		c[i] = simd.bit_and(lo, simd.runtime_swizzle(t.hi, simd.shr(b[i], V(4))))
-	}
-	return
+// Lane j is `t[i[j]]`, for indices below 16.
+@(private)
+lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
+	return simd.runtime_swizzle(t, i)
 }
 
 // Bit i set where an odd number of the bits of `x` at or below i are set. With the quotes of a block in `x`, these
