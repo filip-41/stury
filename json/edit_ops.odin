@@ -17,20 +17,41 @@ EDIT_QUERIES :: bit_set[Query]{.Path, .Nodes}
 // `insert` of the written value `repl`. With `upsert`, a member `at` the object already has has its value
 // replaced instead (`upsert`).
 @(private)
-insert_at :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, opts: Read_Opts, upsert := false) -> (out: []byte, err: Maybe(Path_Error)) {
+insert_at :: proc(
+	src: []byte,
+	p: Path,
+	at: Insert_At,
+	repl: []u8,
+	opts: Read_Opts,
+	text: ^[dynamic]u8,
+	places: ^[dynamic]Place,
+	allocator: runtime.Allocator,
+	upsert := false,
+) -> Maybe(Path_Error) {
 	switch opts.dialect {
 	case .Json:
-		return insert_in(src, p, at, repl, allocator, opts, .Json, upsert)
+		return insert_in(src, p, at, repl, opts, text, places, allocator, .Json, upsert)
 	case .Jsonc:
-		return insert_in(src, p, at, repl, allocator, opts, .Jsonc, upsert)
+		return insert_in(src, p, at, repl, opts, text, places, allocator, .Jsonc, upsert)
 	case .Json5: // `edits_read` refuses it before any edit
 	}
-	return nil, Path_Error{kind = .Bad_Option}
+	return Path_Error{kind = .Bad_Option}
 }
 
 // `$dialect` is a compile-time parameter, so the JSON edit compiles without the comment branches.
 @(private = "file")
-insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: runtime.Allocator, opts: Read_Opts, $dialect: Dialect, upsert: bool) -> (out: []byte, err: Maybe(Path_Error)) {
+insert_in :: proc(
+	src: []byte,
+	p: Path,
+	at: Insert_At,
+	repl: []u8,
+	opts: Read_Opts,
+	text: ^[dynamic]u8,
+	places: ^[dynamic]Place,
+	allocator: runtime.Allocator,
+	$dialect: Dialect,
+	upsert: bool,
+) -> Maybe(Path_Error) {
 	G :: scan_pkg.GRAMMAR[dialect]
 	key := make([dynamic]u8, allocator)
 	defer delete(key)
@@ -41,8 +62,8 @@ insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 	n_paths := 1 if .Comments in G else 2
 	member_q := u32(n_paths)
 	if name, is_name := at.(string); is_name {
-		if merr := marshal_append(&key, name, {}, nil); merr != .None {
-			return nil, Path_Error{kind = .Encode, encode = merr}
+		if merr := append_value(&key, name, {}, nil); merr != .None {
+			return Path_Error{kind = .Encode, encode = merr}
 		}
 		paths[n_paths] = extend(member_buf[:], p.steps, Name(name))
 		n_paths += 1
@@ -62,18 +83,14 @@ insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 		kc := 0
 	}
 	defer delete(kids)
-	text := make([dynamic]u8, allocator)
-	defer delete(text)
-	places := make([dynamic]Place, allocator)
-	defer delete(places)
 	mc := 0
 	for c in targets {
 		// `upsert`: the object's member, when it has one, has its value replaced.
 		if m := held_by(members[:], &mc, c.lo) if upsert else nil; len(m) > 0 {
 			for v in m {
 				from := len(text)
-				append(&text, ..repl)
-				append(&places, Place{at = v.lo, cut = v.hi, from = from, to = len(text)})
+				append(text, ..repl)
+				append(places, Place{at = v.lo, cut = v.hi, from = from, to = len(text)})
 			}
 			continue
 		}
@@ -83,14 +100,9 @@ insert_in :: proc(src: []byte, p: Path, at: Insert_At, repl: []u8, allocator: ru
 			own := held_by(kids[:], &kc, c.lo)
 		}
 		k := insert_slot(at, c, len(own), members[:], &mc) or_return
-		entry_at(&text, &places, src, &req.doc, c, own, k, key[:] if len(key) > 0 else nil, repl, G) or_return
+		entry_at(text, places, src, &req.doc, c, own, k, key[:] if len(key) > 0 else nil, repl, G) or_return
 	}
-	out, err = places_apply(src, places[:], text[:], allocator)
-	when .Comments in G {
-		return judged(out, err, allocator, dialect)
-	} else {
-		return
-	}
+	return core_pkg.edit_found(len(places))
 }
 
 // `p` as the every-member scan of `insert` and `remove` reads it: without its limit under `.First` or `.Last`,
@@ -138,7 +150,7 @@ keep_policy_found :: proc(hits: ^[dynamic]Answer, src: []byte, p: Path, opts: Re
 // foot comments) the interior goes. `$dialect` is a compile-time parameter, so the JSON edit compiles without
 // the comment branches.
 @(private)
-remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, opts: Read_Opts, $dialect: Dialect) -> (out: []byte, err: Maybe(Path_Error)) {
+remove_in :: proc(src: []byte, p: Path, opts: Read_Opts, places: ^[dynamic]Place, allocator: runtime.Allocator, $dialect: Dialect) -> Maybe(Path_Error) {
 	G :: scan_pkg.GRAMMAR[dialect]
 	// Path 0 finds the values. Under JSON path 1 is every entry of the containers holding them, which JSONC
 	// reads off its rows.
@@ -176,25 +188,21 @@ remove_in :: proc(src: []byte, p: Path, allocator: runtime.Allocator, opts: Read
 		}
 		first, last, kept, keyed := cut_interior_runs(&edits, src, doc, own, run, G)
 		if !keyed {
-			return nil, Path_Error{kind = .Internal}
+			return Path_Error{kind = .Internal}
 		}
 		if first < 0 {
 			continue
 		}
 		lo, hi, trailing_keyed := trailing_cut(src, doc, owner, own, first, last, kept, G)
 		if !trailing_keyed {
-			return nil, Path_Error{kind = .Internal}
+			return Path_Error{kind = .Internal}
 		}
 		append(&edits, Edit{lo = lo, hi = hi})
 	}
-	when .Comments in G {
-		slice.sort_by(edits[:], proc(a, b: Edit) -> bool {
-			return a.lo < b.lo
-		})
-		return judged(core_pkg.edits_apply_checked(src, edits[:], allocator), allocator, dialect)
-	} else {
-		return core_pkg.edits_apply_checked(src, edits[:], allocator)
+	for e in edits {
+		append(places, Place{at = e.lo, cut = e.hi})
 	}
+	return nil
 }
 
 // Queue the cut of every run of removed entries (`run`, in order) in `own` that a survivor follows. The
@@ -254,7 +262,7 @@ trailing_cut :: proc(src: []byte, doc: ^Document, owner: u64, own: []Answer, fir
 			lo = own[kept].hi
 		} else {
 			lo = owner + 1
-			hi = u64(core_pkg.skip_space(src, int(hi)))
+			hi = u64(scan_pkg.skip_space(src, int(hi)))
 			when ODIN_DEBUG {
 				assert(hi < u64(len(src)) && (src[hi] == '}' || src[hi] == ']'), "trailing_cut: no close bracket after the container's last entry")
 			}
@@ -271,11 +279,11 @@ key_span :: proc(src: []byte, value_lo: u64) -> (lo, hi: u64, ok: bool) {
 	if value_lo > u64(len(src)) {
 		return no_key(value_lo)
 	}
-	i := u64(core_pkg.skip_space_back(src, 0, int(value_lo)))
+	i := u64(scan_pkg.skip_space_back(src, 0, int(value_lo)))
 	if i == 0 {
 		return no_key(value_lo)
 	}
-	i = u64(core_pkg.skip_space_back(src, 0, int(i) - 1)) // past the colon
+	i = u64(scan_pkg.skip_space_back(src, 0, int(i) - 1)) // past the colon
 	hi = i
 	if hi < 2 {
 		return no_key(value_lo)
@@ -477,7 +485,7 @@ entry_between_extents :: proc(text: ^[dynamic]u8, places: ^[dynamic]Place, src: 
 		gap_lo, gap_hi = extent_hi(doc, own[j - 1].node), extent_lo(doc, own[j].node)
 	}
 	if gap_lo > gap_hi {
-		return Path_Error{kind = .Bad_Result}
+		return Path_Error{kind = .Unplaceable}
 	}
 	gap := src[gap_lo:gap_hi]
 	for b in gap {

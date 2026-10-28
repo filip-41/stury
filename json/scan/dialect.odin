@@ -4,6 +4,7 @@ import "core:simd"
 import core_pkg "../../core"
 import "walk"
 import lex "lex"
+import number "number"
 
 // The grammar a source is read in. `.Jsonc` is JSON with comments and trailing commas, `.Json5` is JSON5 1.0.0.
 // A dialect is a set of grammar features (`GRAMMAR`), and its walk is the JSON walk specialized on that set
@@ -23,7 +24,11 @@ import lex "lex"
 //
 // A dialect is named outside a dispatch arm only as the target of a transcode or a validation that is that
 // dialect. A predicate is not asked per row or per value: ask it once for the document or the call.
-Dialect :: core_pkg.Row_Dialect
+Dialect :: enum u8 {
+	Json,
+	Jsonc,
+	Json5,
+}
 
 // What a dialect adds to JSON's grammar. Each feature has one owner in the walk:
 //
@@ -348,6 +353,105 @@ hooks_of :: proc(d: Dialect) -> ^walk.Format_Hooks {
 		return &FORMAT_HOOKS_JSON5
 	}
 	return &FORMAT_HOOKS
+}
+
+// The spelling of dialect `d`'s documents (`Row_Spelling`).
+spelling_of :: proc "contextless" (d: Dialect) -> ^core_pkg.Row_Spelling {
+	switch d {
+	case .Json:
+	case .Jsonc:
+		return &SPELLING_JSONC
+	case .Json5:
+		return &SPELLING_JSON5
+	}
+	return &SPELLING_JSON
+}
+
+// The dialect whose documents have spelling `s`. False for another format's spelling.
+spelling_dialect :: #force_inline proc "contextless" (s: ^core_pkg.Row_Spelling) -> (d: Dialect, ok: bool) {
+	switch s {
+	case &SPELLING_JSON:
+		return .Json, true
+	case &SPELLING_JSONC:
+		return .Jsonc, true
+	case &SPELLING_JSON5:
+		return .Json5, true
+	}
+	return
+}
+
+// The dialect a JSON document was read in, JSON for a document with no spelling. A document of another format has
+// no dialect: ask `doc_own_spelling` and `doc_plain_json`.
+dialect_of :: #force_inline proc "contextless" (doc: ^Document) -> Dialect {
+	d, _ := spelling_dialect(doc.spelling)
+	return d
+}
+
+// Whether a string of `doc` may be spelled unlike JSON even without a backslash (`own_spelling`): a JSON5
+// document's, or any other format's.
+doc_own_spelling :: #force_inline proc "contextless" (doc: ^Document) -> bool {
+	if doc.spelling == nil {
+		return false
+	}
+	d, json := spelling_dialect(doc.spelling)
+	return !json || own_spelling(d)
+}
+
+// Whether `doc`'s text is RFC 8259 JSON (`plain_json`) and no member was left out of its rows, so a container's
+// span is its JSON text.
+doc_plain_json :: #force_inline proc "contextless" (doc: ^Document) -> bool {
+	if doc.spelling == nil {
+		return !doc.pruned
+	}
+	d, json := spelling_dialect(doc.spelling)
+	return !doc.pruned && json && plain_json(d)
+}
+
+@(rodata, private = "file")
+SPELLING_JSON := core_pkg.Row_Spelling{
+	decode = json_decode,
+	key_equals = name_equals,
+	number = number.json5_number_value,
+	int = json5_int,
+}
+
+@(rodata, private = "file")
+SPELLING_JSONC := core_pkg.Row_Spelling{
+	decode = json_decode,
+	key_equals = name_equals,
+	number = number.json5_number_value,
+	int = json5_int,
+}
+
+@(rodata, private = "file")
+SPELLING_JSON5 := core_pkg.Row_Spelling{
+	decode = json5_decode,
+	key_equals = json5_name_equals,
+	number = number.json5_number_value,
+	int = json5_int,
+}
+
+// An escaped JSON string token's text, unescaped into `arena`.
+@(private = "file")
+json_decode :: proc(src: []byte, lo, hi, first_esc: u64, arena: ^core_pkg.Name_Arena) -> (s: []u8, ok: bool) {
+	if !dom_str_span_ok(src, lo, hi) {
+		return nil, false
+	}
+	slot, reserved := name_arena_reserve(arena, int(hi - lo - 2))
+	if !reserved {
+		return nil, false
+	}
+	w := dom_unescape_into(slot, src, lo, hi, first_esc)
+	if w < 0 {
+		return nil, false
+	}
+	name_arena_unreserve(arena, len(slot) - w)
+	return slot[:w], true
+}
+
+@(private = "file")
+json5_decode :: proc(src: []byte, lo, hi, _: u64, arena: ^core_pkg.Name_Arena) -> (s: []u8, ok: bool) {
+	return json5_span_text(src, arena, lo, hi)
 }
 
 @(rodata, private = "file")

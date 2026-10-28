@@ -283,3 +283,104 @@ path_text :: proc(e: csv.Unmarshal_Error) -> string {
 	}
 	return strings.to_string(b)
 }
+
+// A list row reads every record, the first too, one element per cell: an absent cell is the zero value, or nil
+// in a `Maybe`. A refused cell's path is `[row][cell]`.
+@(test)
+test_unmarshal_list_rows :: proc(t: ^testing.T) {
+	src := "a,b\n1,\n\"x\"\"y\",\"\"\n"
+	rows: [][]string
+	testing.expect(t, read(t, src, &rows) == nil)
+	testing.expect_value(t, fmt.tprint(rows), `[["a", "b"], ["1", ""], ["x\"y", ""]]`)
+	maybes: [dynamic][dynamic]Maybe(string)
+	testing.expect(t, read(t, src, &maybes, {no_header = true}) == nil)
+	testing.expect_value(t, fmt.tprint(maybes), `[["a", "b"], ["1", nil], ["x\"y", ""]]`)
+	ragged: [][]int
+	testing.expect(t, read(t, "1\n2,3\n", &ragged, {dialect = {ragged = true}}) == nil)
+	testing.expect_value(t, fmt.tprint(ragged), "[[1], [2, 3]]")
+	err := read(t, "1,2\n3,x\n", &ragged)
+	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Wrong_Kind)
+	testing.expect_value(t, path_text(err.?), "[1][1]")
+	// Under `.Lazy` every cell of a list row is read, so each is judged.
+	err = read(t, "a,\xff\n", &rows, {strictness = .Lazy})
+	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Syntax)
+	testing.expect_value(t, path_text(err.?), "[0]")
+	nested: [][][]int
+	err = read(t, "1\n", &nested)
+	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Unsupported)
+	testing.expect_value(t, path_text(err.?), "[][]")
+	testing.expect(t, nested == nil)
+}
+
+// A map row's keys are the header's decoded names; an absent cell is no entry. A repeated name is read as
+// `duplicates` says, a ragged record's extra cells are unknown, and there is no map row without a header.
+@(test)
+test_unmarshal_map_rows :: proc(t: ^testing.T) {
+	rows: []map[string]string
+	testing.expect(t, read(t, "a,b\n1,\n,\"\"\n", &rows) == nil)
+	testing.expect_value(t, len(rows), 2)
+	testing.expect_value(t, len(rows[0]), 1)
+	testing.expect_value(t, rows[0]["a"], "1")
+	testing.expect_value(t, len(rows[1]), 1)
+	b, has_b := rows[1]["b"]
+	testing.expect(t, has_b && b == "")
+	testing.expect(t, read(t, "x\\ty\n1\n", &rows, {dialect = csv.TSV}) == nil)
+	testing.expect_value(t, rows[0]["x\ty"], "1")
+	Dup :: struct {
+		duplicates: csv.Duplicates,
+		src, want:  string,
+	}
+	for c in ([]Dup{{.Default, "a,a\n1,2\n", "2"}, {.First, "a,a\n1,2\n", "1"}, {.All, "a,a\n1,\n", "1"}, {.All, "a,a\n1,2\n", "2"}}) {
+		testing.expect(t, read(t, c.src, &rows, {duplicates = c.duplicates}) == nil)
+		testing.expect_value(t, rows[0]["a"], c.want)
+	}
+	err := read(t, "a,a\n1,2\n", &rows, {duplicates = .Refuse})
+	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, path_text(err.?), ".a")
+	testing.expect(t, read(t, "a\n1,2\n", &rows, {dialect = {ragged = true}}) == nil)
+	testing.expect_value(t, len(rows[0]), 1)
+	err = read(t, "a\n1,2\n", &rows, {dialect = {ragged = true}, unknown_fields = .Refuse})
+	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Unknown_Field)
+	testing.expect_value(t, read(t, "a\n1\n", &rows, {no_header = true}).?.kind, csv.Unmarshal_Error_Kind.Unsupported)
+	ints: [dynamic]map[string]Maybe(int)
+	err = read(t, "a,b\n1,\n2,x\n", &ints)
+	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Wrong_Kind)
+	testing.expect_value(t, path_text(err.?), "[1].b")
+	testing.expect_value(t, fmt.tprint(ints[0]), "map[a=1]")
+	by_int: []map[int]string
+	testing.expect_value(t, read(t, "1\n2\n", &by_int).?.kind, csv.Unmarshal_Error_Kind.Unsupported)
+}
+
+// A refused read leaves its partial rows in the allocator the caller gave, and keeps none of its own scratch:
+// an arena freed whole after the refusal leaves nothing allocated, for every row shape and strictness.
+@(test)
+test_unmarshal_refused_leaks_nothing :: proc(t: ^testing.T) {
+	Row :: struct {
+		name: string,
+		n:    int,
+	}
+	src := transmute([]byte)string("name,n\n\"a\"\"b\",1\nc,bad\n")
+	refused :: proc(t: ^testing.T, src: []byte, $T: typeid, strictness: csv.Strictness) {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		{
+			context.allocator = mem.tracking_allocator(&track)
+			plan := csv.type_plan_init(T)
+			arena: mem.Dynamic_Arena
+			mem.dynamic_arena_init(&arena)
+			rows: T
+			err := csv.unmarshal(src, &rows, {strictness = strictness}, &plan, mem.dynamic_arena_allocator(&arena))
+			testing.expectf(t, err != nil && err.?.kind == .Wrong_Kind, "%v %v: %v", typeid_of(T), strictness, err)
+			mem.dynamic_arena_destroy(&arena)
+			csv.destroy(&plan)
+		}
+		testing.expectf(t, len(track.allocation_map) == 0, "%v %v: %d allocations left", typeid_of(T), strictness, len(track.allocation_map))
+		testing.expect_value(t, len(track.bad_free_array), 0)
+	}
+	for strictness in ([]csv.Strictness{.Strict, .Lazy}) {
+		refused(t, src, []Row, strictness)
+		refused(t, src, [dynamic][]int, strictness)
+		refused(t, src, []map[string]int, strictness)
+	}
+}

@@ -2,10 +2,11 @@ package json_tests
 
 // `Record_Read`: each record matches `unmarshal` of that record's bytes. A fault's offset is into the record,
 // blank lines are not records, and a trailing record with no newline counts. The handle survives a return by
-// value, the options it holds are applied at each read, and the end of the input is `.Bad_Option`.
+// value, the options it holds are applied at each read, and the end of the input is `more` false with no error.
 
 import json "../.."
 import "core:fmt"
+import "core:strings"
 import "core:testing"
 
 @(private = "file")
@@ -14,6 +15,21 @@ Read_Rec :: struct {
 	name: string,
 	v:    i64,
 	flag: bool,
+}
+
+// One read of `rd` that pulls a record: that record's refusal.
+@(private = "file")
+pull :: proc(t: ^testing.T, rd: ^json.Record_Read, ptr: ^$T, loc := #caller_location) -> Maybe(json.Unmarshal_Error) {
+	more, err := json.unmarshal(rd, ptr)
+	testing.expect(t, more, "no record pulled", loc = loc)
+	return err
+}
+
+// The read past the last record: no record and no error.
+@(private = "file")
+expect_end :: proc(t: ^testing.T, rd: ^json.Record_Read, ptr: ^$T, loc := #caller_location) {
+	more, err := json.unmarshal(rd, ptr)
+	testing.expectf(t, !more && err == nil, "past the end: %v %v", more, err, loc = loc)
 }
 
 // The records `src` frames, so a read can be compared with `unmarshal` of each record's bytes.
@@ -37,7 +53,7 @@ expect_records_match :: proc(t: ^testing.T, src: string, opts: json.Unmarshal_Op
 	defer json.destroy(&rd)
 	for rec in expected {
 		got, want: Read_Rec
-		got_err := json.unmarshal(&rd, &got)
+		got_err := pull(t, &rd, &got)
 		want_err := json.unmarshal(rec.bytes, &want, opts, allocator = context.temp_allocator)
 		testing.expectf(t, fmt.tprint(got_err) == fmt.tprint(want_err), "%q: %v, unmarshal %v", rec.bytes, got_err, want_err, loc = loc)
 		testing.expectf(t, fmt.tprint(got) == fmt.tprint(want), "%q: %v, unmarshal %v", rec.bytes, got, want, loc = loc)
@@ -47,7 +63,7 @@ expect_records_match :: proc(t: ^testing.T, src: string, opts: json.Unmarshal_Op
 		testing.expect_value(t, json.record_read_at(&rd), rec.at, loc = loc)
 	}
 	got: Read_Rec
-	testing.expect_value(t, um_err(json.unmarshal(&rd, &got)).kind, .Bad_Option, loc = loc)
+	expect_end(t, &rd, &got, loc = loc)
 }
 
 @(test)
@@ -70,13 +86,52 @@ test_unmarshal_record_matches_unmarshal :: proc(t: ^testing.T) {
 	kept: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&kept, Read_Rec, &it, {}, &plan, context.temp_allocator), nil)
 	got: Read_Rec
-	testing.expect_value(t, json.unmarshal(&kept, &got), nil)
+	testing.expect_value(t, pull(t, &kept, &got), nil)
 	json.destroy(&kept)
 	want: Read_Rec
 	testing.expect_value(t, json.unmarshal(quote, &want, {}, &plan, context.temp_allocator), nil)
 	testing.expect_value(t, got, want)
 	other := json.type_plan_init(i64, {}, context.temp_allocator)
-	testing.expect_value(t, um_err(json.record_read_init(&kept, Read_Rec, &it, {}, &other)).kind, .Plan_Mismatch)
+	testing.expect_value(t, um_err(json.record_read_init(&kept, Read_Rec, &it, {}, &other, allocator = context.allocator)).kind, .Plan_Mismatch)
+}
+
+// Concatenated texts, pretty and packed, read as `unmarshal` reads each text, through `records` and through a
+// `Record_Reader`.
+@(test)
+test_unmarshal_record_reads_concatenated_texts :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := raw("{\n  \"id\": 1,\n  \"name\": \"}\\\"\",\n  \"v\": 2\n}{\"id\":2,\"flag\":true}\n\n{\"id\": 3,\n\"v\": [}")
+	want := make([dynamic]Read_Rec, context.temp_allocator)
+	errs := make([dynamic]Maybe(json.Unmarshal_Error), context.temp_allocator)
+	ats := make([dynamic]u64, context.temp_allocator)
+	it := json.records(src, {framing = .Concatenated})
+	for rec in json.next_record(&it) {
+		v: Read_Rec
+		append(&errs, json.unmarshal(rec.bytes, &v, allocator = context.temp_allocator))
+		append(&want, v)
+		append(&ats, rec.at)
+	}
+	testing.expect_value(t, len(want), 3)
+	src_reader: strings.Reader
+	strings.reader_init(&src_reader, string(src))
+	whole := json.records(src, {framing = .Concatenated})
+	streamed := json.records_from(strings.reader_to_stream(&src_reader), {framing = .Concatenated}, context.temp_allocator)
+	defer json.destroy(&streamed)
+	streamed.chunk = 7
+	for k in 0 ..< 2 {
+		rd: json.Record_Read
+		err := json.record_read_init(&rd, Read_Rec, &whole, allocator = context.temp_allocator) if k == 0 else json.record_read_init(&rd, Read_Rec, &streamed, allocator = context.temp_allocator)
+		testing.expect_value(t, err, nil)
+		for w, i in want {
+			got: Read_Rec
+			more, gerr := json.unmarshal(&rd, &got)
+			testing.expectf(t, more && fmt.tprint(gerr) == fmt.tprint(errs[i]) && fmt.tprint(got) == fmt.tprint(w), "%d record %d: %v %v, want %v %v", k, i, got, gerr, w, errs[i])
+			testing.expect_value(t, json.record_read_at(&rd), ats[i])
+		}
+		got: Read_Rec
+		expect_end(t, &rd, &got)
+		json.destroy(&rd)
+	}
 }
 
 @(test)
@@ -92,7 +147,7 @@ test_unmarshal_record_fault_is_into_the_record :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(expected), 2)
 	for rec, k in expected {
 		got, want: Read_Rec
-		got_err := json.unmarshal(&rd, &got)
+		got_err := pull(t, &rd, &got)
 		want_err := json.unmarshal(rec.bytes, &want, allocator = context.temp_allocator)
 		testing.expectf(t, fmt.tprint(got_err) == fmt.tprint(want_err), "at %d %q: %v, unmarshal %v", rec.at, rec.bytes, got_err, want_err)
 		if k == 1 {
@@ -102,7 +157,7 @@ test_unmarshal_record_fault_is_into_the_record :: proc(t: ^testing.T) {
 			testing.expect_value(t, json.record_read_at(&rd), rec.at)
 			testing.expect_value(t, e.kind, w.kind)
 			testing.expect_value(t, e.offset, w.offset)
-			testing.expect(t, e.kind == .Syntax && e.syntax == .Bad_Literal)
+			testing.expect(t, e.kind == .Syntax && e.syntax == .Bad_Char && json.Fault(e.detail) == .Literal)
 			testing.expectf(t, rec.at + e.offset <= u64(len(src)), "at %d + %d", rec.at, e.offset)
 		}
 	}
@@ -121,7 +176,7 @@ test_unmarshal_record_fault_is_into_the_record :: proc(t: ^testing.T) {
 	testing.expect_value(t, json.record_read_init(&ord, Outer, &oit, allocator = context.temp_allocator), nil)
 	defer json.destroy(&ord)
 	og, ow: Outer
-	got_err := json.unmarshal(&ord, &og)
+	got_err := pull(t, &ord, &og)
 	want_err := json.unmarshal(text, &ow, allocator = context.temp_allocator)
 	testing.expectf(t, fmt.tprint(got_err) == fmt.tprint(want_err), "nested")
 	oe := um_err(got_err)
@@ -142,10 +197,12 @@ test_unmarshal_record_framing_fault_is_into_the_input :: proc(t: ^testing.T) {
 	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, allocator = context.temp_allocator), nil)
 	defer json.destroy(&rd)
 	got: Read_Rec
-	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
-	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	testing.expect_value(t, pull(t, &rd, &got), nil)
+	testing.expect_value(t, pull(t, &rd, &got), nil)
 	testing.expect_value(t, json.record_read_at(&rd), u64(len(good)))
-	err := um_err(json.unmarshal(&rd, &got))
+	more, framing := json.unmarshal(&rd, &got)
+	testing.expect(t, !more)
+	err := um_err(framing)
 	testing.expect_value(t, err.kind, .Syntax)
 	testing.expect_value(t, err.syntax, .Bad_Char)
 	testing.expect_value(t, json.record_read_at(&rd), u64(0))
@@ -161,18 +218,19 @@ test_unmarshal_record_walks_a_shape_it_does_not_descend :: proc(t: ^testing.T) {
 	testing.expect_value(t, json.record_read_init(&rd, map[string]i64, &it, allocator = context.temp_allocator), nil)
 	defer json.destroy(&rd)
 	got, want: map[string]i64
-	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	testing.expect_value(t, pull(t, &rd, &got), nil)
 	testing.expect_value(t, json.unmarshal(raw(`{"a":1,"b":2}`), &want, allocator = context.temp_allocator), nil)
 	testing.expect_value(t, len(got), len(want))
 	for k, v in want {
 		testing.expectf(t, got[k] == v, "%s %d, unmarshal %d", k, got[k], v)
 	}
 	got = nil
-	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	testing.expect_value(t, pull(t, &rd, &got), nil)
 	testing.expect_value(t, len(got), 1)
 	testing.expect_value(t, got["a"], i64(3))
-	testing.expect(t, um_err(json.unmarshal(&rd, &got)).kind == .Bad_Option)
-	testing.expect(t, json.unmarshal(&rd, (^Read_Rec)(nil)) != nil)
+	expect_end(t, &rd, &got)
+	more, err := json.unmarshal(&rd, (^Read_Rec)(nil))
+	testing.expect(t, !more && um_err(err).kind == .Bad_Option)
 }
 
 // A frame this large is written over by the callee: a returned handle that pointed into it would read the wrong
@@ -208,7 +266,7 @@ test_record_read_handle_survives_return :: proc(t: ^testing.T) {
 	defer json.destroy(&rd)
 	clobber_returned_frame()
 	got: Read_Rec
-	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	testing.expect_value(t, pull(t, &rd, &got), nil)
 	testing.expect_value(t, got.id, i64(5))
 	testing.expect_value(t, got.name, "returned")
 	testing.expect_value(t, got.v, i64(1))
@@ -224,12 +282,12 @@ test_record_read_copy_after_a_read :: proc(t: ^testing.T) {
 	rd: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, allocator = context.temp_allocator), nil)
 	got: Read_Rec
-	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	testing.expect_value(t, pull(t, &rd, &got), nil)
 	copied := rd
 	rd = {}
 	defer json.destroy(&copied)
 	got = {}
-	testing.expect_value(t, json.unmarshal(&copied, &got), nil)
+	testing.expect_value(t, pull(t, &copied, &got), nil)
 	testing.expect_value(t, got.id, i64(5))
 	testing.expect_value(t, got.name, "copied")
 }
@@ -252,14 +310,14 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 	defer json.destroy(&rd)
 
 	got: Read_Rec
-	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	testing.expect_value(t, pull(t, &rd, &got), nil)
 	testing.expect_value(t, got.id, i64(9))
 	rd.opts.duplicates = .First
-	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	testing.expect_value(t, pull(t, &rd, &got), nil)
 	testing.expect_value(t, got.id, i64(1))
 
 	rd.opts.duplicates = .Refuse
-	testing.expect_value(t, um_err(json.unmarshal(&rd, &got)).kind, .Duplicate_Key)
+	testing.expect_value(t, um_err(pull(t, &rd, &got)).kind, .Duplicate_Key)
 
 	dline := "{\"id\":10,\"name\":\"n\",\"v\":2,\"flag\":true}\n"
 	digits := raw(fmt.tprintf("%s%s%s", dline, dline, dline))
@@ -267,13 +325,13 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 	dr: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&dr, Read_Rec, &dit, allocator = context.temp_allocator), nil)
 	defer json.destroy(&dr)
-	testing.expect_value(t, json.unmarshal(&dr, &got), nil)
+	testing.expect_value(t, pull(t, &dr, &got), nil)
 	dr.opts.limits.max_scalar_digits = 1
-	limit_err := um_err(json.unmarshal(&dr, &got))
+	limit_err := um_err(pull(t, &dr, &got))
 	testing.expect_value(t, limit_err.kind, .Syntax)
 	testing.expect_value(t, limit_err.syntax, .Limit_Digits)
 	dr.opts.limits.max_scalar_digits = 0
-	testing.expect_value(t, json.unmarshal(&dr, &got), nil)
+	testing.expect_value(t, pull(t, &dr, &got), nil)
 
 	buf: [128]u8
 	src := `{"id":1,"name":"borrow","v":2,"flag":true}`
@@ -286,10 +344,10 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 	br: json.Record_Read
 	testing.expect_value(t, json.record_read_init(&br, Read_Rec, &bit, allocator = context.temp_allocator), nil)
 	defer json.destroy(&br)
-	testing.expect_value(t, json.unmarshal(&br, &got), nil)
+	testing.expect_value(t, pull(t, &br, &got), nil)
 	testing.expect(t, !string_is_in(got.name, text))
 	br.opts.borrow_strings = true
-	testing.expect_value(t, json.unmarshal(&br, &got), nil)
+	testing.expect_value(t, pull(t, &br, &got), nil)
 	testing.expect(t, string_is_in(got.name, text))
 }
 
@@ -297,15 +355,17 @@ test_record_read_opts_after_init_apply :: proc(t: ^testing.T) {
 test_record_read_destroy_twice :: proc(t: ^testing.T) {
 	it := json.records(raw(`{"id":1,"name":"a","v":2,"flag":true}`), {framing = .NDJSON})
 	rd: json.Record_Read
-	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it), nil)
+	testing.expect_value(t, json.record_read_init(&rd, Read_Rec, &it, allocator = context.allocator), nil)
 	json.destroy(&rd)
 	json.destroy(&rd)
 	got: Read_Rec
-	testing.expect_value(t, um_err(json.unmarshal(&rd, &got)).kind, .Bad_Option)
+	more, err := json.unmarshal(&rd, &got)
+	testing.expect(t, !more && um_err(err).kind == .Bad_Option)
 
 	empty: json.Record_Read
 	json.destroy(&empty)
-	testing.expect_value(t, um_err(json.unmarshal(&empty, &got)).kind, .Bad_Option)
+	more, err = json.unmarshal(&empty, &got)
+	testing.expect(t, !more && um_err(err).kind == .Bad_Option)
 }
 
 @(test)
@@ -315,16 +375,16 @@ test_record_read_refuses_structural_json :: proc(t: ^testing.T) {
 		a: i64,
 	}
 	line := "{\"a\":1}\n"
-	src := raw(fmt.tprintf("%s%s", line, line))
+	src := raw(fmt.tprintf("%s%s%s", line, line, line))
 	it := json.records(src, {framing = .NDJSON})
 	rd: json.Record_Read
-	testing.expect_value(t, um_err(json.record_read_init(&rd, Lit, &it, {strictness = .Structural})).kind, .Bad_Option)
+	testing.expect_value(t, um_err(json.record_read_init(&rd, Lit, &it, {strictness = .Structural}, allocator = context.allocator)).kind, .Bad_Option)
 	testing.expect_value(t, json.record_read_init(&rd, Lit, &it, {strictness = .Structural, dialect = .Jsonc}, allocator = context.temp_allocator), nil)
 	defer json.destroy(&rd)
 	got: Lit
-	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
+	testing.expect_value(t, pull(t, &rd, &got), nil)
 	rd.opts.strictness = .Strict
-	testing.expect_value(t, json.unmarshal(&rd, &got), nil)
-	rd.opts.strictness = .Structural
-	testing.expect_value(t, um_err(json.unmarshal(&rd, &got)).kind, .Bad_Option)
+	testing.expect_value(t, pull(t, &rd, &got), nil)
+	rd.opts.strictness, rd.opts.dialect = .Structural, .Json
+	testing.expect_value(t, um_err(pull(t, &rd, &got)).kind, .Bad_Option)
 }

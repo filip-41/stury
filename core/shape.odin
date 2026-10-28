@@ -37,8 +37,8 @@ Shape_Kind :: enum u8 {
 	Hook,       // a type the caller reads: any value, validated whole, handed to `Read_Shape.hooks[elem]`
 }
 
-// The classes of a tree format's values, used to select a union's arm (`Shape_Op.arm_of`). A format's walk
-// indexes `arm_of` by the class of a value's first token, numbered as here.
+// The classes of a value's `Kind` that select a union's arm (`Shape_Op.arm_of`): its kinds with `false` and
+// `true` one class (`KIND_CLASS`). A format's walk indexes `arm_of` by its value's class, numbered as here.
 Value_Class :: enum u8 {
 	Null,
 	Object,
@@ -46,6 +46,17 @@ Value_Class :: enum u8 {
 	String,
 	Bool,
 	Number,
+}
+
+// The class of each kind. Complete, so a kind added to `Kind` is a compile error here until it has a class.
+KIND_CLASS :: [Kind]Value_Class {
+	.Null   = .Null,
+	.False  = .Bool,
+	.True   = .Bool,
+	.Number = .Number,
+	.String = .String,
+	.Array  = .Array,
+	.Object = .Object,
 }
 SHAPE_CLASSES :: len(Value_Class)
 // `arm_of[0]` of a `#no_nil` union with no `Null` arm: it has no nil to read `null` as.
@@ -101,9 +112,9 @@ Unknown_Fields :: enum u8 {
 	Refuse, // an `.Unknown_Field` error at its name
 }
 
-// A type's own reading (`Plan_Hook.read`): `text`, one value as authored and validated, into `dest`. It
-// answers nil or an `Unmarshal_Error_Kind`, which `Shape_Fault` numbers alike.
-Shape_Hook :: #type proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) -> Maybe(Shape_Fault)
+// A type's own reading (`Plan_Hook.read`): one validated value into `dest`. It answers nil or an
+// `Unmarshal_Error_Kind`, which `Shape_Fault` numbers alike.
+Shape_Hook :: #type proc(v: Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(Shape_Fault)
 
 Read_Shape :: struct {
 	ops:    [dynamic]Shape_Op,

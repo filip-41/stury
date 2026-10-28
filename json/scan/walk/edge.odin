@@ -3,6 +3,7 @@ package walk
 // The edge cursor over caller-owned row arrays.
 
 import "base:runtime"
+import "../../../core/spell"
 
 // Cursor over a caller-owned `[dynamic]`: its `{data, len, cap}` taken without copying. `edge_push` stores
 // without touching the array's header. `edge_publish` writes the length back. A nil `arr` has no storage, so
@@ -132,16 +133,9 @@ edge_grow :: proc(arr: ^[dynamic]$T, cur_cap: int) -> (base: [^]T, room: int, ok
 	return cast([^]T)raw_data(arr^), cap(arr^), true
 }
 
-// Say that `n` rows are in the array: the caller's rows first, this kind's rows after, length exactly `n`. A
-// plain length write, not `resize`, which would zero the rows the cursor just wrote. Legal because
+// Say that `n` rows are in the array: the caller's rows first, this kind's rows after. Legal because
 // `edge_reserve` secured the capacity first, so `n <= cap`.
-edge_publish :: #force_inline proc(arr: ^[dynamic]$T, n: int) {
-	when ODIN_DEBUG {
-		assert(n <= cap(arr^))
-	}
-	raw := cast(^runtime.Raw_Dynamic_Array)arr
-	raw.len = n
-}
+edge_publish :: spell.put_publish
 
 // Append `row` to a caller's array: one store while it has room, and the builtin `append`, which may grow it,
 // once it is full. False when it could not grow.

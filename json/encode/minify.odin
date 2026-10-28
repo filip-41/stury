@@ -4,7 +4,7 @@ package encode
 
 import "base:intrinsics"
 import "core:simd"
-import idx "../scan/index"
+import core_pkg "../../core"
 
 // Bytes `minify_dense` may store past its end: a block's worth.
 MINIFY_SLACK :: 64
@@ -156,10 +156,10 @@ minify_dense :: #force_no_inline proc(out: [^]u8, span: []byte, state: ^Minify_S
 			intrinsics.mem_copy_non_overlapping(&pad, p, live)
 			p = ([^]u8)(&pad)
 		}
-		v := [4]V{idx.load(p), idx.load(p[16:]), idx.load(p[32:]), idx.load(p[48:])}
-		quote, bs := idx.quotes_and_backslashes(v)
-		_, instr := idx.string_region(quote, bs, &prev_odd, &in_string)
-		blank := idx.pack4(simd.lanes_le(v[0], SPACE), simd.lanes_le(v[1], SPACE), simd.lanes_le(v[2], SPACE), simd.lanes_le(v[3], SPACE))
+		v := [4]V{core_pkg.load(p), core_pkg.load(p[16:]), core_pkg.load(p[32:]), core_pkg.load(p[48:])}
+		quote, bs := core_pkg.quote_and_escape_bits(v, '"', '\\')
+		_, instr := core_pkg.string_region(quote, bs, &prev_odd, &in_string)
+		blank := core_pkg.pack4(simd.lanes_le(v[0], SPACE), simd.lanes_le(v[1], SPACE), simd.lanes_le(v[2], SPACE), simd.lanes_le(v[3], SPACE))
 		drop := blank & ~instr
 		if drop == 0 {
 			intrinsics.unaligned_store((^[4]V)(&out[w]), v)
@@ -222,8 +222,8 @@ CLEAN_CHUNK :: 4096
 settle_strings :: #force_inline proc(blocks: []byte, in_string, prev_odd: ^u64) #no_bounds_check {
 	for i := 0; i < len(blocks); i += 64 {
 		p := raw_data(blocks[i:])
-		quote, bs := idx.quotes_and_backslashes({idx.load(p), idx.load(p[16:]), idx.load(p[32:]), idx.load(p[48:])})
-		idx.string_region(quote, bs, prev_odd, in_string)
+		quote, bs := core_pkg.quote_and_escape_bits({core_pkg.load(p), core_pkg.load(p[16:]), core_pkg.load(p[32:]), core_pkg.load(p[48:])}, '"', '\\')
+		core_pkg.string_region(quote, bs, prev_odd, in_string)
 	}
 }
 

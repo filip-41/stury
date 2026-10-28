@@ -18,6 +18,11 @@ test_duplicate_header_names :: proc(t: ^testing.T) {
 	testing.expect(t, rows == nil, "a header refusal leaves the destination")
 	err = read(t, "id,\"id\"\n1,2\n", &rows, {duplicates = .Refuse})
 	testing.expect_value(t, err.?.offset, 3)
+	// The policy covers the header, as `build`'s does: a repeated name no field takes is refused too.
+	err = read(t, "id,x,\"x\"\n1,2,3\n", &rows, {duplicates = .Refuse})
+	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, err.?.offset, 5)
+	testing.expect_value(t, path_text(err.?), ".x")
 
 	testing.expect_value(t, read(t, "id,name,id\n1,a,2\n", &rows, {duplicates = .First}), nil)
 	testing.expect_value(t, rows[0], Strict{1, "a"})
@@ -87,4 +92,20 @@ test_required_with_all_duplicates :: proc(t: ^testing.T) {
 	testing.expect_value(t, rows[0], Required_Id{5, ""})
 	err = read(t, "name\nx\n", &rows, {duplicates = .All})
 	testing.expect_value(t, err.?.kind, csv.Unmarshal_Error_Kind.Missing_Field)
+}
+
+// An explicit `.Refuse` refuses a repeated header name whatever the path reads; the edits' default refuses only
+// one on the edit's path.
+@(test)
+test_refuse_any_repeated_header_name :: proc(t: ^testing.T) {
+	src := transmute([]byte)string("a,b,b\n1,2,3\n")
+	for path in ([]string{".[0].a", ".[0][1]", ".[0]"}) {
+		_, err := csv.find(src, path, {duplicates = .Refuse})
+		testing.expectf(t, err != nil && err.?.syntax == .Duplicate_Key && err.?.offset == 4, "find %s: %v", path, err)
+	}
+	_, err := csv.set(src, ".[0].a", 5, {duplicates = .Refuse}, context.temp_allocator)
+	testing.expectf(t, err != nil && err.?.syntax == .Duplicate_Key && err.?.offset == 4, "set: %v", err)
+	out, kept := csv.set(src, ".[0].a", 5, {}, context.temp_allocator)
+	testing.expect_value(t, kept, nil)
+	testing.expect_value(t, string(out), "a,b,b\n5,2,3\n")
 }

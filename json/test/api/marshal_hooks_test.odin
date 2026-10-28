@@ -12,17 +12,14 @@ import "core:strings"
 import "core:testing"
 import "core:time"
 
-// The text inside a JSON string with no escapes (not ok for any other value).
+// A string's decoded text (not ok for any other value).
 @(private = "file")
-hook_unquote :: proc(text: []byte) -> (s: string, ok: bool) {
-	if len(text) < 2 || text[0] != '"' || strings.index_byte(string(text), '\\') >= 0 {
-		return "", false
-	}
-	return string(text[1:len(text) - 1]), true
+hook_unquote :: proc(v: json.Hook_Value) -> (s: string, ok: bool) {
+	return v.decoded, v.kind == .String
 }
 
 @(private = "file")
-write_time :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Marshal_Error {
+write_time :: proc(out: json.Marshal_Out, v: rawptr) -> json.Marshal_Error_Kind {
 	text, ok := time.time_to_rfc3339((^time.Time)(v)^, include_nanos = false, allocator = context.temp_allocator)
 	if !ok {
 		return .Unsupported
@@ -31,8 +28,8 @@ write_time :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Marshal_Error {
 }
 
 @(private = "file")
-read_time :: proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) -> Maybe(json.Unmarshal_Error_Kind) {
-	s, ok := hook_unquote(text)
+read_time :: proc(v: json.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(json.Unmarshal_Error_Kind) {
+	s, ok := hook_unquote(v)
 	if !ok {
 		return .Wrong_Kind
 	}
@@ -45,7 +42,7 @@ read_time :: proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) -> M
 }
 
 @(private = "file")
-write_base64 :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Marshal_Error {
+write_base64 :: proc(out: json.Marshal_Out, v: rawptr) -> json.Marshal_Error_Kind {
 	text, err := base64.encode((^[]u8)(v)^, allocator = context.temp_allocator)
 	if err != nil {
 		return .Out_Of_Memory
@@ -54,8 +51,8 @@ write_base64 :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Marshal_Error {
 }
 
 @(private = "file")
-read_base64 :: proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) -> Maybe(json.Unmarshal_Error_Kind) {
-	s, ok := hook_unquote(text)
+read_base64 :: proc(v: json.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(json.Unmarshal_Error_Kind) {
+	s, ok := hook_unquote(v)
 	if !ok {
 		return .Wrong_Kind
 	}
@@ -73,14 +70,14 @@ read_base64 :: proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) ->
 Hook_Quoted :: distinct i64
 
 @(private = "file")
-write_quoted :: proc(out: ^json.Marshal_Out, v: rawptr) -> json.Marshal_Error {
+write_quoted :: proc(out: json.Marshal_Out, v: rawptr) -> json.Marshal_Error_Kind {
 	digits: [24]u8
 	return json.marshal_into(out, strconv.write_int(digits[:], i64((^Hook_Quoted)(v)^), 10))
 }
 
 @(private = "file")
-read_quoted :: proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) -> Maybe(json.Unmarshal_Error_Kind) {
-	s, ok := hook_unquote(text)
+read_quoted :: proc(v: json.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(json.Unmarshal_Error_Kind) {
+	s, ok := hook_unquote(v)
 	if !ok {
 		return .Wrong_Kind
 	}
@@ -189,7 +186,7 @@ test_marshal_hooks_quoted_numbers :: proc(t: ^testing.T) {
 	}
 	marshal_refused(t, Go_Quoted{n = 1}, .Unsupported)
 	err := um_refused(t, `{"n":"1"}`, Go_Quoted, .Unsupported, 0)
-	testing.expect_value(t, json.render_error(nil, err, context.temp_allocator), "Unsupported at .n")
+	testing.expect_value(t, json.render_error(nil, err, context.temp_allocator), "Unsupported type at .n")
 }
 
 Hook_Circle :: struct {
@@ -231,8 +228,95 @@ test_marshal_union_tag_names :: proc(t: ^testing.T) {
 	}
 	clash_plan := json.type_plan_init(Clash, {union_tag = "type"}, context.temp_allocator)
 	_, err := json.marshal(Clash(Hook_Circle{}), {}, &clash_plan, context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.Unsupported)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.Unsupported)
 	um_refused(t, `{"r":1}`, Clash, .Unsupported, 0, mapping = {union_tag = "type"})
 	// Under another tag the field is the arm's own.
 	um_round_trip(t, Clash(Hook_Typed{type = "x"}), mapping = {union_tag = "kind"})
+}
+
+// A type the plan first meets inside a hook: compiling it then appends enough ops, fields and keys to move every
+// plan array the writer is walking. The plans are made in the heap allocator, whose frees the address sanitizer
+// sees: the test runner's allocator frees nothing.
+@(private = "file")
+Hook_Part :: struct {
+	f00, f01, f02, f03, f04, f05, f06, f07, f08, f09, f10, f11, f12, f13, f14, f15: int,
+}
+@(private = "file")
+Hook_Big :: struct {
+	a:          [1]int,
+	b:          [2]int,
+	c:          [3]int,
+	d:          [4]int,
+	e:          [5]int,
+	f:          [6]int,
+	g:          [7]int,
+	h:          [8]int,
+	p, q, r, s: Hook_Part,
+}
+@(private = "file")
+Hook_Grows :: distinct int
+
+@(private = "file")
+write_grows :: proc(out: json.Marshal_Out, v: rawptr) -> json.Marshal_Error_Kind {
+	return json.marshal_into(out, Hook_Big{})
+}
+
+// A hook that compiles a new type moves the plan's arrays under the struct writers, which still write the rest of
+// the struct and every element after it: compact, pretty, sorted and streamed. Each matches the same struct with
+// the hook's value in place of the hooked field.
+@(test)
+test_marshal_hook_compile_moves_plan :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Row :: struct {
+		z: int,
+		w: Hook_Grows,
+		b: string,
+		l: []int,
+	}
+	Twin :: struct {
+		z: int,
+		w: Hook_Big,
+		b: string,
+		l: []int,
+	}
+	// A struct of scalars is flat, and a flat struct is written without a hook. A hooked scalar field leaves the
+	// struct not flat: the hook writes its value.
+	Scalars :: struct {
+		z: int,
+		w: Hook_Grows,
+		b: int,
+	}
+	Scalars_Twin :: struct {
+		z: int,
+		w: Hook_Big,
+		b: int,
+	}
+	rows := []Row{{1, 2, "x", {3}}, {4, 5, "y", nil}}
+	twins := []Twin{{z = 1, b = "x", l = {3}}, {z = 4, b = "y"}}
+	scalars := []Scalars{{1, 2, 3}, {4, 5, 6}}
+	scalar_twins := []Scalars_Twin{{z = 1, b = 3}, {z = 4, b = 6}}
+	hooks := []json.Type_Hook{{type = Hook_Grows, write = write_grows}}
+	opts_set := []json.Marshal_Opts{{}, {pretty = true}, {sort_keys = true}, {pretty = true, sort_keys = true}}
+	for opts in opts_set {
+		for streamed in ([]bool{false, true}) {
+			plan := json.type_plan_init([]Row, {hooks = hooks}, runtime.heap_allocator())
+			testing.expect_value(t, marshal_hooked(t, rows, opts, &plan, streamed), marshal_text(t, twins, opts))
+			json.destroy(&plan)
+			scalar_plan := json.type_plan_init([]Scalars, {hooks = hooks}, runtime.heap_allocator())
+			testing.expect_value(t, marshal_hooked(t, scalars, opts, &scalar_plan, streamed), marshal_text(t, scalar_twins, opts))
+			json.destroy(&scalar_plan)
+		}
+	}
+}
+
+// `v` written by `plan` into a string, or with `streamed` through a writer.
+@(private = "file")
+marshal_hooked :: proc(t: ^testing.T, v: any, opts: json.Marshal_Opts, plan: ^json.Type_Plan, streamed: bool, loc := #caller_location) -> string {
+	if !streamed {
+		return marshal_text(t, v, opts, plan, loc)
+	}
+	sb := strings.builder_make(context.temp_allocator)
+	err := json.marshal_to_writer(strings.to_writer(&sb), v, opts, plan, context.temp_allocator)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None, loc = loc)
+	return strings.to_string(sb)
 }

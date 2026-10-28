@@ -26,19 +26,21 @@ Format :: enum {
 load :: proc(format: Format, src: []byte, cities: ^[]City) -> Maybe(core.Unmarshal_Error) {
 	switch format {
 	case .Csv:
-		return csv.unmarshal(src, cities)
+		return csv.unmarshal(src, cities, allocator = context.temp_allocator)
 	case .Json:
-		return json.unmarshal(src, cities)
+		return json.unmarshal(src, cities, allocator = context.temp_allocator)
 	}
 	unreachable()
 }
 
-// core.render_error writes the fault of either format as `line:col: kind at path`.
+// core.render_error writes the fault of either format as `line:col: text at path`.
 report :: proc(src: []byte, err: core.Unmarshal_Error) {
 	fmt.println(core.render_error(src, err))
 }
 
 main :: proc() {
+	// What the reads allocate, freed at once.
+	defer free_all(context.temp_allocator)
 	table := transmute([]byte)string("City,population,lat,lon\nOslo,709000,59.91,10.75\n\"Ho, Chi Minh\",,10.82,106.63\n")
 	cities: []City
 	if err, bad := load(.Csv, table, &cities).?; bad {
@@ -47,8 +49,8 @@ main :: proc() {
 	}
 
 	as_json, jerr := json.marshal(cities)
-	if jerr != .None {
-		fmt.eprintln(jerr)
+	if e, bad := jerr.?; bad {
+		fmt.eprintln(json.render_error(nil, e))
 		os.exit(1)
 	}
 	fmt.println(string(as_json)) // [{"city":"Oslo","population":709000,"lat":59.91,"lon":10.75},{"city":"Ho, Chi Minh","population":null,"lat":10.82,"lon":106.63}]
@@ -59,8 +61,8 @@ main :: proc() {
 		os.exit(1)
 	}
 	as_csv, cerr := csv.marshal(back)
-	if cerr != .None {
-		fmt.eprintln(cerr)
+	if e, bad := cerr.?; bad {
+		fmt.eprintln(csv.render_error(nil, e))
 		os.exit(1)
 	}
 	fmt.println(string(as_csv) == string(table)) // true
@@ -69,9 +71,9 @@ main :: proc() {
 	bad_csv := transmute([]byte)string("City,population,lat,lon\nOslo,lots,59.91,10.75\n")
 	bad_json := transmute([]byte)string(`[{"city":"Oslo","population":"lots","lat":59.91,"lon":10.75}]`)
 	if err, bad := load(.Csv, bad_csv, &cities).?; bad {
-		report(bad_csv, err) // 2:6: Wrong_Kind at [0].population
+		report(bad_csv, err) // 2:6: Value of the wrong kind at [0].population
 	}
 	if err, bad := load(.Json, bad_json, &cities).?; bad {
-		report(bad_json, err) // 1:30: Wrong_Kind at [0].population
+		report(bad_json, err) // 1:30: Value of the wrong kind at [0].population
 	}
 }

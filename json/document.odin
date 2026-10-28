@@ -1,13 +1,10 @@
 package json
 
-// The document: a strictly validated source plus its decoded rows, and the reads that need no walk. The `get_*`
-// readers' `ok` is false for a value of another kind or `NO_NODE`; `get_int` and `get_float` also answer false
-// for a value that does not fit, and `get_string`/`get_key` when an escaped value's decode could not be
-// allocated.
-//
-// `build` and `destroy` are in document_build.odin, the walks in document_walk.odin, and `query` in
-// document_query.odin. The row tree and its format-free readers are core's (core/row_document.odin); this
-// package decodes the rows' strings, keys and numbers.
+// The document: a strictly validated source plus its rows, and its reads. The row document and every read of it
+// are core's (core/row_document.odin, row_read.odin, row_walk.odin, row_query.odin); the procedures here forward to
+// them under JSON's names. The `get_*` readers' `ok` is false for a value of another kind or `NO_NODE`;
+// `get_int` and `get_float` also answer false for a value that does not fit, and `get_string`/`get_key` when an
+// escaped value's decode could not be allocated. `build` and `destroy` are in document_build.odin.
 
 import "core:strings"
 import core_pkg "../core"
@@ -26,32 +23,27 @@ ROOT :: core_pkg.ROOT
 //	- `src` is borrowed and must outlive every read: a number is decoded from its text there at each read,
 //	  and an escape-free string is a slice of it.
 //	- Everything else is owned by whoever built it, and `destroy` is the only teardown.
-//	- A JSONC or JSON5 document (`dialect != .Json`) also holds its comments, each attached to a value.
-//	  `marshal` writes a JSON5 one in JSON's spelling, comments kept, and refuses `Infinity` and `NaN`
-//	  (`.Non_Finite`).
-Document :: core_pkg.Row_Document
+//	- A document from `build` (a `.Dom` scan) is decoded: no read writes it, so any number of threads may read it
+//	  at once. A `.Nodes` scan's decodes an escaped string or key on its first read and keeps it, and lists the
+//	  members of a container `child` is asked deep into: one reader thread (`core.Document`).
+//	- A JSONC or JSON5 document also holds its comments, each attached to a value. `marshal` writes a JSON5 one
+//	  in JSON's spelling, comments kept, and refuses `Infinity` and `NaN` (`.Non_Finite`).
+Document :: core_pkg.Document
 
 // The kind of value `n`. `ok` is false, and the kind `.Null`, when `n` is no value, such as `NO_NODE`.
-@(require_results)
-kind :: #force_inline proc(doc: ^Document, n: Node) -> (k: Kind, ok: bool) {
-	return core_pkg.kind(doc, n)
-}
+kind :: core_pkg.kind
+
+// `true` or `false` for a boolean `n`.
+get_bool :: core_pkg.get_bool
 
 // The integer number `n` writes, when it fits `i64` (`decode_span`'s `i64` arm). `-0` is 0, as `unmarshal`
 // reads it into an integer. `ok` is also false for an integer past `max(i64)` and for a fraction or exponent
 // notation (`get_number`).
-@(require_results)
-get_int :: #force_inline proc(doc: ^Document, n: Node) -> (v: i64, ok: bool) {
-	return scan_pkg.dom_int(doc.rows[:], doc.src, n)
-}
+get_int :: core_pkg.get_int
 
 // The binary64 value of number `n`, correctly rounded. `ok` is also false for a number with no binary64
 // value (`1e400`); `get_number` tells how the value relates to the authored one.
-@(require_results)
-get_float :: proc(doc: ^Document, n: Node) -> (v: f64, ok: bool) {
-	num, is_number := get_number(doc, n)
-	return num.value, is_number && num.exactness != .None
-}
+get_float :: core_pkg.get_float
 
 // The binary64 projection of number `n` and its `exactness` against the authored value.
 //
@@ -59,117 +51,46 @@ get_float :: proc(doc: ^Document, n: Node) -> (v: f64, ok: bool) {
 //	  (`value` +0, `.None`) with `ok` true, where `get_float` answers false.
 //	- Decoded from the number's text at each call: a document keeps no number's value, so a reader that
 //	  wants one many times keeps it itself.
-//	- Inlined, so the decoding the caller does not read is dropped (`get_float` asks only whether there is a
-//	  value).
-@(require_results)
-get_number :: #force_inline proc(doc: ^Document, n: Node) -> (v: Number, ok: bool) {
-	if !has(doc, n) || doc.rows[n].kind != .Number {
-		return {}, false
-	}
-	return scan_pkg.dom_number(doc.rows[:], doc.src, n), true
-}
+get_number :: core_pkg.get_number
 
-// The decoded text of string `n`, valid until `destroy`.
-//
-//	- Escape-free text is a slice of `doc.src`, escaped text is what the `.Dom` scan decoded, or, where it
-//	  decoded nothing (a `.Nodes` scan), unescaped into the document's arena on the first read and kept.
-//	- Reads of escaped strings a scan left undecoded write that arena, so on such a document they must not run
-//	  on several threads at once. A `.Dom` build decodes every escaped string up front, so its `get_string`
-//	  writes nothing and may run on any number of threads.
-//	- The document is not otherwise read-only: `get_key` unescapes an escaped key into the arena and keeps it in
-//	  `keys`, and `child_by_index` lists the members of a container it is asked past NTH_WALK of into `members`
-//	  with `member_at` (core/row_document.odin). Both write the document and allocate from its allocator, so neither
-//	  belongs on several threads, nor do `query` and `pointer` (which allocate from it for a name or token
-//	  longer than their stack scratch) nor the `children`/`members` walks, which read keys.
-//	- `ok` is false for a value that is not a string, and when an escaped string's decode could not be
-//	  allocated.
-@(require_results)
-get_string :: #force_inline proc(doc: ^Document, n: Node) -> (s: string, ok: bool) #no_bounds_check {
-	if has(doc, n) {
-		r := &doc.rows[n]
-		lo, hi := u64(r.lo), u64(r.hi)
-		// The text is borrowed from `src`. The slice below is in range once `hi` is, and the quotes are checked
-		// when no walk decoded the row.
-		if r.kind == .String && .Str_Escaped not_in r.flags && hi >= lo + 2 && hi <= u64(len(doc.src)) &&
-		   (.Decoded in r.flags || (doc.src[lo] == '"' && doc.src[hi - 1] == '"')) {
-			return string(doc.src[lo + 1:hi - 1]), true
-		}
-	}
-	return get_string_decoded(doc, n)
-}
+// The decoded text of string `n`, valid until `destroy`: escape-free text is a slice of `doc.src`, escaped text
+// what the `.Dom` scan decoded or, on a `.Nodes` scan's document, unescaped into the document on the first read
+// and kept. `ok` is false for a value that is not a string, and when an escaped string's decode could not be
+// allocated.
+get_string :: core_pkg.get_string
 
-// Runs `get_string` for every value except an escape-free string.
-@(private)
-get_string_decoded :: #force_no_inline proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
-	if !has(doc, n) || doc.rows[n].kind != .String {
-		return "", false
-	}
-	r := doc.rows[n]
-	escaped := .Str_Escaped in r.flags
-	if .Decoded in r.flags {
-		return string(doc.values[r.payload.str.off:][:r.payload.str.len] if escaped else doc.src[r.lo + 1:r.hi - 1]), true
-	}
-	if doc.cache != nil {
-		if s, ok = doc.cache.strings[n]; ok {
-			return
-		}
-	}
-	b: []u8
-	b, ok = scan_pkg.dom_span_text(doc, u64(r.lo), u64(r.hi), escaped, u64(r.first_esc))
-	if ok && escaped {
-		// A string the map cannot hold is decoded again on the next call.
-		doc.cache.strings[n] = string(b)
-	}
-	return string(b), ok
-}
-
-// The decoded key of member `n`, valid until `destroy`. An escaped key is unescaped into the arena on the first
-// read and kept in the cache (`Row_Cache`): a write and an allocation on any document, a `.Dom` build's included. `ok` is false
-// when `n` is not an object's member, and when an escaped key's decode could not be allocated.
-@(require_results)
-get_key :: #force_inline proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
-	if !has(doc, n) || doc.rows[n].key_lo == core_pkg.NO_KEY {
-		return "", false
-	}
-	r := &doc.rows[n]
-	if .Key_Escaped not_in r.flags {
-		b: []u8
-		b, ok = scan_pkg.dom_span_text(doc, u64(r.key_lo), u64(r.key_hi), false, 0)
-		return string(b), ok
-	}
-	return get_key_escaped(doc, n)
-}
-
-// Runs `get_key` for an escaped key, which is kept.
-@(private = "file")
-get_key_escaped :: #force_no_inline proc(doc: ^Document, n: Node) -> (s: string, ok: bool) {
-	if doc.cache != nil {
-		if s, ok = doc.cache.keys[n]; ok {
-			return
-		}
-	}
-	r := doc.rows[n]
-	b: []u8
-	b, ok = scan_pkg.dom_span_text(doc, u64(r.key_lo), u64(r.key_hi), true, 0)
-	if ok {
-		// A key the map cannot hold is decoded again on the next call.
-		doc.cache.keys[n] = string(b)
-	}
-	return string(b), ok
-}
+// The decoded key of member `n`, valid until `destroy`: an escaped key is unescaped by the build of a `.Dom`
+// document, and on a `.Nodes` scan's document on its first read, and kept. `ok` is false when `n` is not an
+// object's member, and when an escaped key's decode could not be allocated.
+get_key :: core_pkg.get_key
 
 // The authored text of value `n`, a slice of `doc.src`: a string with its quotes, a container with its
 // brackets and everything between. Nil for `NO_NODE`.
+get_raw :: core_pkg.get_raw
+
+// Number `n`'s text in JSON's spelling: its authored text, or a dialect's own spelling respelled into
+// `allocator` (a JSON5 hex integer as its decimal, a decimal without `+`, with a `0` before a leading point and
+// none after a trailing one). False, with "", for a value JSON cannot spell (`Infinity`, `NaN`) and for any
+// other kind.
 @(require_results)
-get_raw :: proc(doc: ^Document, n: Node) -> []byte {
-	return core_pkg.get_raw(doc, n)
+number_text :: proc(doc: ^Document, n: Node, allocator := context.allocator) -> (text: string, ok: bool) {
+	if k, _ := kind(doc, n); k != .Number {
+		return "", false
+	}
+	lit := string(core_pkg.get_raw(doc, n))
+	if doc.rows[n].first_esc != core_pkg.SPELLED_NUMBER {
+		return lit, true
+	}
+	out := make([dynamic]byte, allocator)
+	if !scan_pkg.json5_number_json(lit, &out) {
+		delete(out)
+		return "", false
+	}
+	return string(out[:]), true
 }
 
 // The facts attached to `n`, sorted by place (`Fact_Place`) then source order. Empty for a JSON document.
-@(require_results)
-facts :: proc(doc: ^Document, n: Node) -> []Fact {
-	return core_pkg.facts(doc, n)
-}
+facts :: core_pkg.facts
 
 // The text of fact `f`, a slice of `doc.src`: a comment without its `//`, or its `/*` and `*/`.
 @(require_results)
@@ -181,11 +102,86 @@ fact_text :: proc(doc: ^Document, f: Fact) -> string {
 	return text[2:]
 }
 
+// A member of `n` by key (the last member whose key decodes to `name`, the reading of a path's default `.Last`)
+// or by 0-based index, or `NO_NODE`; a negative index counts from the end (`-1` is the last member), as a path's
+// `.[-1]` does. An array answers no key.
+child :: proc {
+	core_pkg.child_by_key,
+	core_pkg.child_by_index,
+}
+
+// The member count of container `n`; zero on a scalar.
+child_count :: core_pkg.child_count
+
+// The position of a walk over one container's members (`children`, `members`). A value, owning nothing; it
+// borrows the document. A member's run of rows ends where the next begins, so a step is one add, bounded by
+// the container's end (`end`).
+Members :: core_pkg.Members
+
+// Every child of a container in order, as values for `children` and as keys and values for `members`. Start
+// a walk with either and loop over the same name:
+//
+//	it := json.children(&doc, arr)
+//	for v in json.children(&it) {}
+//	kv := json.members(&doc, obj)
+//	for name, v in json.members(&kv) {}
+//
+// `children(&doc, n)` starts the walk (over a scalar or `NO_NODE`, an
+// empty one), and `children(&it)` gives the next child, `ok` false past the last. It allocates nothing and
+// borrows `doc`, which outlives it.
+children :: proc {
+	core_pkg.members_of,
+	core_pkg.children_next,
+}
+
+// Every member of an object in order, as `children` but with each member's decoded key.
+//
+//	- `members(&doc, n)` starts the walk, and `members(&it)` gives the next key and value.
+//	- A key is borrowed from the document.
+//	- The walk stops at a key the document could not decode (`it.node < it.end` after the loop),
+//	  and over an array yields nothing: an element has no key.
+members :: proc {
+	core_pkg.members_of,
+	core_pkg.members_next,
+}
+
+// The value JSON Pointer `ptr` (RFC 6901) names from `n`, or `NO_NODE`.
+//
+//	- `""` is `n` itself; any other pointer starts with `/`.
+//	- Each `/`-separated token, its `~1` read as `/` and its `~0` as `~`, names an object's member by decoded
+//	  key (the last duplicate, as `child` reads) or an array's element by index: `0` or a digit run without
+//	  a leading zero, in range.
+//	- `-` (past the last element), a token that is no index on an array, a scalar mid-pointer, a missing
+//	  member and a malformed pointer (no leading `/`, any other `~`) answer `NO_NODE`.
+//	- A URI fragment pointer is the caller's to strip of `#` and percent-decode.
+//	- It allocates nothing but for a token with a `~` longer than 256 bytes, decoded in the document's
+//	  allocator and freed before return; a refusal there answers `NO_NODE`.
+pointer :: core_pkg.pointer
+
+// Append to `out` the answers `path` gives in `doc` from node `n` (`query` from the root), in document order: the
+// answers a `.Path` scan gives under the default `.Last`, each `node` the value in `doc`.
+//
+//	- At most `path.limit` values are found (0 is every one).
+//	- `Name` is `child` by key (the last duplicate), `Index` counts from the end when negative, `Any` takes
+//	  every member, an object's repeated key once, at its first place with its last value, as jq reads it.
+//	- A path with no `Any` step that does not land appends one `.Missing` or `.Type_Mismatch` answer, owned by
+//	  the container it missed in; a `per_element` path answers each element a step does not apply to; any
+//	  other path that does not land appends nothing.
+//	- An empty path is `n` itself, owned by the container holding it, and `NO_NODE` or a document with no
+//	  root gives nothing.
+//	- Text that does not parse is `.Bad_Path` at the byte the parser stopped on; a path of more than
+//	  `MAX_PATH_STEPS` steps, text or a built `Path`, is `.Over_Capacity` with nothing appended, as the scan and
+//	  the edits refuse it.
+//	- `.Out_Of_Memory` is `out` refusing to grow; the answers appended before that stay.
+//	- Besides `out` it allocates only for a text longer than 256 bytes with an escaped quoted name, and for
+//	  the keys of an object past 16 members that `Any` reads, both in the document's allocator and freed
+//	  before return; a refusal there is `.Out_Of_Memory` too.
+query_in :: core_pkg.query_in
+
+// `query_in` from the root.
+query :: core_pkg.query
+
 @(private)
 has :: #force_inline proc(doc: ^Document, n: Node) -> bool {
 	return core_pkg.dom_has(doc.rows[:], n)
 }
-
-// The stack scratch `pointer` decodes an escaped token into: a longer one takes the document's allocator.
-@(private)
-SCRATCH_BYTES :: 256

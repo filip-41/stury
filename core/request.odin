@@ -8,20 +8,26 @@ import "base:runtime"
 
 // A request's inputs and answers, read and written through the format's procedures.
 //
-//	- `request_init` sets the inputs and parses each text path into storage the request owns. A caller that
-//	  builds its `Path`s may set the fields and assign `paths` directly, and allocates nothing for them.
-//	- `allocator` must not change once the request has been scanned.
+//	- `request_init` sets the inputs, and only it: a format may plan from them at a scan and keep the plan for
+//	  the next. It parses each text path into storage the request owns; a built `Path` is copied, its steps the
+//	  caller's.
+//	- `answers` is read-only to a caller, as `scan` left it.
 Request :: struct($Opts: typeid) {
-	using read: Opts,
-	allocator:  runtime.Allocator,
-	// The paths the request answers. An answer's `query` is its path's index here.
-	paths:      []Path,
 	// Every answer of the last scan, in the order the scan settles them until `answers` groups them by path.
-	// Allocated with `allocator` on first use and cleared, not freed, by a rescan. Answers borrow the source,
-	// and a rescan invalidates them.
-	answers:    [dynamic]Answer,
-	parsed:     Parsed_Paths,
-	groups:     Answer_Groups,
+	// Allocated with the request's allocator on first use and cleared, not freed, by a rescan. Answers borrow
+	// the source, and a rescan invalidates them. An answer's `query` is its path's index in the paths given.
+	answers: [dynamic]Answer,
+	inputs:  Request_Inputs(Opts),
+	groups:  Answer_Groups,
+}
+
+// What `request_init` set: the read options, the allocator, and the paths, which borrow `parsed`.
+@(private)
+Request_Inputs :: struct($Opts: typeid) {
+	read:      Opts,
+	allocator: runtime.Allocator,
+	paths:     []Path,
+	parsed:    Parsed_Paths,
 }
 
 // The storage of the paths `request_init` parsed: each text copied, with room for its escaped names, and its
@@ -46,14 +52,14 @@ Answer_Groups :: struct {
 // steps the caller's). `req` is a format's request.
 //
 //	- A text that does not parse is `.Bad_Path` at the byte of that text the parser stopped on, and leaves
-//	  `req.paths` empty. A refused allocation is `.Out_Of_Memory`.
+//	  the request with no paths. A refused allocation is `PATH_OUT_OF_MEMORY`.
 //	- Calling it again replaces the paths and drops the last scan's answers.
 @(require_results)
-request_init :: proc(req: ^$R, paths: []Path_Spec, opts: $O, allocator: runtime.Allocator) -> Maybe(Error) {
-	req.read = opts
-	req.allocator = allocator
-	req.paths = nil
-	parsed_destroy(&req.parsed)
+request_init :: proc(req: ^$R, paths: []Path_Spec, opts: $O, allocator: runtime.Allocator) -> Maybe(Path_Error) {
+	req.inputs.read = opts
+	req.inputs.allocator = allocator
+	req.inputs.paths = nil
+	parsed_destroy(&req.inputs.parsed)
 	clear(&req.answers)
 	req.groups.grouped = false
 
@@ -63,8 +69,8 @@ request_init :: proc(req: ^$R, paths: []Path_Spec, opts: $O, allocator: runtime.
 			n_text += len(text)
 		}
 	}
-	oom := Error{kind = .Out_Of_Memory}
-	p := &req.parsed
+	oom := PATH_OUT_OF_MEMORY
+	p := &req.inputs.parsed
 	if make_into(&p.paths, len(paths), allocator) != nil {
 		return oom
 	}
@@ -83,15 +89,12 @@ request_init :: proc(req: ^$R, paths: []Path_Spec, opts: $O, allocator: runtime.
 			copy(text, s)
 			names := p.text[text_used + len(s):][:len(s)]
 			text_used += 2 * len(s)
-			path, fault := parse_path(string(text), p.steps[steps_used:], names)
-			if f, bad := fault.?; bad {
-				return Error{kind = .Bad_Path, offset = f.offset}
-			}
+			path := parse_path(string(text), p.steps[steps_used:], names) or_return
 			steps_used += len(path.steps)
 			p.paths[i] = path
 		}
 	}
-	req.paths = p.paths[:]
+	req.inputs.paths = p.paths[:]
 	return nil
 }
 
@@ -106,21 +109,21 @@ make_into :: proc(arr: ^[dynamic]$T, n: int, allocator: runtime.Allocator) -> ru
 //
 //	- A path naming one value gives one answer when it does not land, with outcome `.Missing` (or
 //	  `.Type_Mismatch`).
-//	- A `path` outside `req.paths` gives no answers.
+//	- A `path` outside the request's paths gives no answers.
 //	- The first call after a scan of more than one path groups `req.answers` by path, a stable counting sort.
 //	  A one-path request's answers are all `path` 0's.
-//	- The grouping allocates with the request's allocator. A refusal is `.Out_Of_Memory`, with no answers and
+//	- The grouping allocates with the request's allocator. A refusal is `PATH_OUT_OF_MEMORY`, with no answers and
 //	  `req.answers` as the scan left it, and a later call tries again.
 @(require_results)
-answers :: proc(req: ^$R, path: int) -> (out: []Answer, err: Maybe(Error)) {
-	if path < 0 || path >= max(len(req.paths), 1) {
+answers :: proc(req: ^$R, path: int) -> (out: []Answer, err: Maybe(Path_Error)) {
+	if path < 0 || path >= max(len(req.inputs.paths), 1) {
 		return nil, nil
 	}
-	if len(req.paths) <= 1 {
+	if len(req.inputs.paths) <= 1 {
 		return req.answers[:], nil
 	}
-	if !req.groups.grouped && !answers_group(&req.answers, &req.groups, len(req.paths), request_allocator(req)) {
-		return nil, Error{kind = .Out_Of_Memory}
+	if !req.groups.grouped && !answers_group(&req.answers, &req.groups, len(req.inputs.paths), request_allocator(req)) {
+		return nil, PATH_OUT_OF_MEMORY
 	}
 	return req.answers[req.groups.at[path]:req.groups.at[path + 1]], nil
 }
@@ -163,18 +166,45 @@ answers_group :: proc(answers: ^[dynamic]Answer, g: ^Answer_Groups, n_paths: int
 	return true
 }
 
-// The first answer of a one-path request's last scan, `MISSING` when it gave none.
-request_first :: proc(req: ^$R) -> Answer {
-	return req.answers[0] if len(req.answers) > 0 else MISSING
+// The first answer to one `path` in `src`, each format's `find`: `req`, a fresh request of the format, set to
+// that path alone with `limit` 1 and scanned once by the format's `scan`. The caller frees `req`. On a non-nil
+// result the answer is `MISSING`.
+find :: proc(
+	src: []byte,
+	path: Path_Spec,
+	opts: $O,
+	allocator: runtime.Allocator,
+	req: ^$R,
+	scan: proc(src: []byte, req: ^R) -> Maybe(Path_Error),
+) -> (a: Answer, err: Maybe(Path_Error)) {
+	a = MISSING
+	paths := [1]Path_Spec{path}
+	request_init(req, paths[:], opts, allocator) or_return
+	req.inputs.paths[0].limit = 1
+	scan(src, req) or_return
+	return req.answers[0] if len(req.answers) > 0 else MISSING, nil
+}
+
+// The checks every format's `scan` makes before it reads a byte: a request with no paths when it answers paths,
+// or with paths when it does not (`paths_wanted`), or whose `answers` another allocator than `alloc` made, is
+// `.Bad_Option`; a path past `MAX_PATH_STEPS` steps is `.Over_Capacity`.
+request_preflight :: #force_inline proc(req: ^$R, paths_wanted: bool, alloc: runtime.Allocator) -> Maybe(Path_Error) {
+	if (len(req.inputs.paths) > 0) != paths_wanted || paths_wanted && !allocator_ok(req.answers.allocator, alloc) {
+		return Path_Error{kind = .Bad_Option}
+	}
+	for p in req.inputs.paths {
+		if len(p.steps) > MAX_PATH_STEPS {
+			return Path_Error{kind = .Over_Capacity}
+		}
+	}
+	return nil
 }
 
 // Free what the shared part of `req` holds (the parsed paths, the answers and their grouping) and empty it.
-// `paths` stays when the caller assigned it.
+// The read options and the allocator stay.
 request_free :: proc(req: ^$R) {
-	if raw_data(req.paths) == raw_data(req.parsed.paths) {
-		req.paths = nil
-	}
-	parsed_destroy(&req.parsed)
+	req.inputs.paths = nil
+	parsed_destroy(&req.inputs.parsed)
 	delete(req.answers)
 	delete(req.groups.at)
 	delete(req.groups.spare)
@@ -190,7 +220,7 @@ parsed_destroy :: proc(p: ^Parsed_Paths) {
 }
 
 request_allocator :: proc(req: ^$R) -> runtime.Allocator {
-	return req.allocator if req.allocator.procedure != nil else context.allocator
+	return req.inputs.allocator if req.inputs.allocator.procedure != nil else context.allocator
 }
 
 // Wire `want` into an array that has no allocator of its own (a never-`make`d `[dynamic]` has the zero

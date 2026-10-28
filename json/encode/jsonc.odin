@@ -2,14 +2,14 @@ package encode
 
 // Writes a JSONC document's comments where they are attached. The library's writers and the command line share
 // this printer. It places comments only. Its caller walks the values (rows, or the CLI's values), writes keys
-// and scalars, and orders keys. The caller passes each entry's own comments (`walk.Fact`s, sorted by place) to
+// and scalars, and orders keys. The caller passes each entry's own comments (`core.Fact`s, sorted by place) to
 // the procedures below at the points of its walk that they name.
 // A comment sits where it was attached: a `.Lead` on the line before its entry, an `.Inline` between the key
 // and the value, a `.Trail` after its entry and its comma, a `.Foot` on the line before its container's
 // close. Compact output ends each line comment with a newline, the one place it keeps a line break, and
 // a line comment that ends an output ends its line, pretty or compact.
 
-import "../scan/walk"
+import core_pkg "../../core"
 
 // How the printer lays comments out: `src` is the text the comments are spans of, and `ascii` escapes each
 // comment's characters past U+007F as it is written, for a caller that does not reescape its whole output.
@@ -22,7 +22,7 @@ Comment_Layout :: struct {
 
 // The comments before an entry, `.Lead` (and, at the `root` of an output, which has no key, `.Inline`),
 // each on its own line `depth` levels in.
-put_leads :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int, root := false) -> Marshal_Error {
+put_leads :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []core_pkg.Fact, depth: int, root := false) -> Marshal_Error_Kind {
 	for f in own {
 		if f.place == .Lead || root && f.place == .Inline {
 			put_comment(buf, cl, f) or_return
@@ -34,7 +34,7 @@ put_leads :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, dept
 
 // The comments between a member's key (and its colon) and its value: a line comment ends its line, a block
 // comment is followed by a space when pretty.
-put_inlines :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int) -> Marshal_Error {
+put_inlines :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []core_pkg.Fact, depth: int) -> Marshal_Error_Kind {
 	for f in own {
 		if f.place != .Inline {
 			continue
@@ -52,7 +52,7 @@ put_inlines :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, de
 // The comments after an entry and its comma, on its line. A line comment runs to the end of its line, so a
 // trailing comment after one starts the next. At the `root` of an output, a line comment last ends the
 // output's line itself, pretty or compact, so whatever follows the output is not read into it.
-put_trails :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int, root := false) -> Marshal_Error {
+put_trails :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []core_pkg.Fact, depth: int, root := false) -> Marshal_Error_Kind {
 	after_line := false
 	for f in own {
 		if f.place != .Trail {
@@ -73,7 +73,7 @@ put_trails :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, dep
 }
 
 // The comments of a container `depth` levels in after its last entry, each on its own line one level in, and whether there were any. The caller breaks the line before the close.
-put_feet :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth: int) -> (wrote: bool, err: Marshal_Error) {
+put_feet :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []core_pkg.Fact, depth: int) -> (wrote: bool, err: Marshal_Error_Kind) {
 	for f in own {
 		if f.place == .Foot {
 			put_line_break(buf, cl, depth + 1) or_return
@@ -85,7 +85,7 @@ put_feet :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, own: []walk.Fact, depth
 }
 
 // A line break indented to `depth` when pretty, nothing when compact.
-put_line_break :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, depth: int) -> Marshal_Error {
+put_line_break :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, depth: int) -> Marshal_Error_Kind {
 	if !cl.pretty {
 		return .None
 	}
@@ -94,7 +94,7 @@ put_line_break :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, depth: int) -> Ma
 
 // A comment's text, markers and all. Compact output ends a line comment with the newline it needs.
 @(private = "file")
-put_comment :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, f: walk.Fact) -> Marshal_Error {
+put_comment :: proc(buf: ^[dynamic]u8, cl: ^Comment_Layout, f: core_pkg.Fact) -> Marshal_Error_Kind {
 	mark := len(buf)
 	put_bytes(buf, string(cl.src[f.lo:f.hi])) or_return
 	if cl.ascii {
@@ -117,13 +117,13 @@ is_line_comment :: #force_inline proc(text: []byte) -> bool {
 // `.Bad_State` when `nodes` is not one whole document. `comments` must be sorted by node, then place.
 encode_rows_jsonc :: proc(
 	src: []byte,
-	nodes: []walk.Row,
-	comments: []walk.Fact,
+	nodes: []core_pkg.Row,
+	comments: []core_pkg.Fact,
 	opts: Marshal_Opts,
 	allocator := context.allocator,
 ) -> (
 	out: []byte,
-	err: Marshal_Error,
+	err: Marshal_Error_Kind,
 ) {
 	if len(nodes) == 0 || nodes[0].subtree_size != u32(len(nodes)) {
 		return nil, .Bad_State
@@ -147,8 +147,8 @@ encode_rows_jsonc :: proc(
 @(private = "file")
 Jsonc_Writer :: struct {
 	buf:      [dynamic]u8,
-	nodes:    []walk.Row,
-	comments: []walk.Fact,
+	nodes:    []core_pkg.Row,
+	comments: []core_pkg.Fact,
 	next:     int, // the first comment not yet written
 	cl:       Comment_Layout,
 }
@@ -156,7 +156,7 @@ Jsonc_Writer :: struct {
 // Row `i` and its subtree at `depth`, with its comma when it is not the `last` of its container. Returns the row
 // after its subtree.
 @(private = "file")
-jsonc_entry :: proc(w: ^Jsonc_Writer, i, depth: int, last: bool) -> (next: int, err: Marshal_Error) {
+jsonc_entry :: proc(w: ^Jsonc_Writer, i, depth: int, last: bool) -> (next: int, err: Marshal_Error_Kind) {
 	nd := w.nodes[i]
 	lo := w.next
 	for w.next < len(w.comments) && int(w.comments[w.next].node) == i {
@@ -165,7 +165,7 @@ jsonc_entry :: proc(w: ^Jsonc_Writer, i, depth: int, last: bool) -> (next: int, 
 	own := w.comments[lo:w.next]
 	buf, cl := &w.buf, &w.cl
 	put_leads(buf, cl, own, depth) or_return
-	if nd.key_lo != walk.NO_KEY {
+	if nd.key_lo != core_pkg.NO_KEY {
 		put_bytes(buf, string(cl.src[nd.key_lo:nd.key_hi])) or_return
 		put_colon(buf, cl.pretty) or_return
 		put_inlines(buf, cl, own, depth) or_return

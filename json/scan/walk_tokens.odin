@@ -20,6 +20,8 @@ object_key :: #force_inline proc(
 	// The enclosing object's frame: its `lo` names the object a demand row belongs to.
 	owner: ^Open_Frame,
 	pend: ^Demand_Pend,
+	// The deep walk's state; its keys are read by the deep leaf (`deep_string`).
+	deep: ^Deep_State = nil,
 ) -> (next: int, err: Maybe(Error)) {
 	G :: intrinsics.type_polymorphic_record_parameter_value(C, 0) when intrinsics.type_is_specialization_of(C, Dialect_Cursor) else Grammar{}
 	when .Json5_Keys in G {
@@ -62,7 +64,12 @@ object_key :: #force_inline proc(
 		when .Json5_Keys in G {
 			perr = json5_key(s, q, key_lo, Q)
 		} else when check == .Values {
-			perr = lex.parse_string_q(s, q, key_lo, true, Q)
+			if deep != nil {
+				// The leaf class of the walk's string values (`DEEP_LEAF`).
+				perr = deep_string(s, q, key_lo, true, (Q & {.Nodes, .Dom}) when Q & {.Nodes, .Dom} != {} else (bit_set[Walk_Kind]{.Path} when Q != {} else bit_set[Walk_Kind]{}), deep.locate)
+			} else {
+				perr = lex.parse_string_q(s, q, key_lo, true, Q)
+			}
 		} else {
 			perr = lex.skip_string_q(s, q, key_lo, true, Q)
 		}

@@ -1,16 +1,70 @@
 package walk
 
 import "base:runtime"
+import core_pkg "../../../core"
 
-// A value's class, which the first byte of a value gives (`lex.VCLASS`) and the walk dispatches on: 0 is not a
-// value's first byte. The container classes are adjacent and the scalar ones follow, so `vc <= VC_ARRAY` and
-// `vc >= VC_STRING` split them, and `vc - VC_OBJECT < 2` tests for either container (0 wraps).
-VC_NONE :: 0
-VC_OBJECT :: 1 // `{`
-VC_ARRAY :: 2 // `[`
-VC_STRING :: 3 // `"`
-VC_LITERAL :: 4 // `true`, `false` or `null`
-VC_NUMBER :: 5 // `-` or a digit
+// A value's class, which the first byte of a value gives (`lex.VCLASS`) and the walk dispatches on: core's walk
+// classes, so `vc - VC_OBJECT < 2` tests for either container (0 wraps).
+VC_NONE :: core_pkg.VC_NONE
+VC_OBJECT :: core_pkg.VC_OBJECT // `{`
+VC_ARRAY :: core_pkg.VC_ARRAY // `[`
+VC_STRING :: core_pkg.VC_STRING // `"`
+VC_LITERAL :: core_pkg.VC_LITERAL // `true`, `false` or `null`
+VC_NUMBER :: core_pkg.VC_NUMBER // `-` or a digit
+
+// JSON's faults within a neutral `Error_Kind`, carried in `Error.detail`.
+Fault :: enum u8 {
+	None,
+	Literal, // `.Bad_Char`: a byte breaking `true`, `false`, `null`, or JSON5's `Infinity` or `NaN`
+	Cut_Number, // `.Truncated`: a `.JSON_Seq` record that is a number alone, which RFC 7464 §2.4 holds may be cut short
+	Record_Too_Long, // `.Limit_Format`: a record past `Record_Opts.max_record_bytes`, at its first byte
+}
+
+// The scanner's fault: core's two-word `Walk_Error`. A JSON fault is a kind past core's last arm, and
+// `error_of` makes the `Error` callers see.
+Scan_Error :: core_pkg.Walk_Error
+
+// `.Bad_Char` with `Fault.Literal`, as a `Scan_Error` kind.
+KIND_LITERAL :: Error_Kind(int(max(Error_Kind)) + 1)
+
+// The `Error` of the scanner's fault `e`.
+error_of :: proc(e: Scan_Error) -> Public_Error {
+	if e.kind == KIND_LITERAL {
+		return {offset = e.offset, kind = .Bad_Char, detail = u8(Fault.Literal)}
+	}
+	return {offset = e.offset, kind = e.kind}
+}
+
+// `error_of` a walk's result.
+fault_of :: proc(m: Maybe(Scan_Error)) -> Maybe(Public_Error) {
+	if e, bad := m.?; bad {
+		return error_of(e)
+	}
+	return nil
+}
+
+// JSON's whitespace (RFC 8259 `ws`), which jq's lexer and the CLI share.
+is_space :: #force_inline proc(c: u8) -> bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// The index of the first byte of `src` at or past `pos` that is not `is_space`, or `len(src)`.
+skip_space :: #force_inline proc(src: []byte, pos: int) -> int {
+	i := pos
+	for i < len(src) && is_space(src[i]) {
+		i += 1
+	}
+	return i
+}
+
+// The end of `src[lo:hi]` with its trailing `is_space` bytes cut, never below `lo`.
+skip_space_back :: #force_inline proc(src: []byte, lo, hi: int) -> int {
+	i := hi
+	for i > lo && is_space(src[i - 1]) {
+		i -= 1
+	}
+	return i
+}
 
 // The walk cursor: source, position, and the resolved caps. Internal.
 Scanner :: struct {

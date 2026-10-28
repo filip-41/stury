@@ -4,26 +4,32 @@ package csv
 // live:
 //
 //	csv.odin            `Error`, `Error_Kind`, the path `Step`s (`Name`, `Index`, `Any`), `Dialect`, `Quoting`,
-//	                    `Escapes`, `TSV`, `Strictness`, `Limits`,
+//	                    `TSV`, `Strictness`, `Limits`,
 //	                    `Read_Opts`, `validate`, `error_position` and `render_error`
 //	records.odin        `records`, `next_record`, `Records`, `Record`, `Field` and `field_text`
-//	record_reader.odin  `records_from` and `Record_Reader`
+//	record_reader.odin  `records_from`, `Record_Reader`, `record_window` and `open_field_at`
 //	record_read.odin    `Record_Read`, `record_read_init`, `record_read_at`, `record_read_destroy` and
 //	                    `unmarshal` of one row
 //	each_record.odin    `each_record`, `validate_records`, `Record_Fault` and `Batch_Runner`
 //	unmarshal.odin      `unmarshal`, `unmarshal_records`, `unmarshal_record`, `unmarshal_check`,
 //	                    `Unmarshal_Opts`, `Duplicates`, `Unknown_Fields`, `Unmarshal_Error`, `Unmarshal_Error_Kind`
-//	marshal.odin        `marshal`, `marshal_append`, `marshal_to_writer`, `Marshal_Opts`, `Marshal_Error`
+//	marshal.odin        `marshal`, `marshal_append`, `marshal_to_writer`, `Marshal_Opts`, `Marshal_Error`,
+//	                    `Marshal_Error_Kind`
 //	record_writer.odin  `write_record`
+//	table.odin          `Table`, `Table_Shape`, `Table_Error`, `Table_Error_Kind`, `table_make`, `table_open`,
+//	                    `table_accepts`, `table_object`, `table_row`, `table_finish`
 //	type_plan.odin      `Type_Plan`, `type_plan_init`, `Plan_Opts`, `Enum_Spelling`,
-//	                    `Type_Hook`, `Marshal_Hook`, `Unmarshal_Hook`, `plan_cache_clear`
-//	document.odin       `Document`, `build`, `destroy`, `row_count`, `column_count`, `column`,
-//	                    `row_fields`, `get_field`, `get_name`, `get_string`, `get_int`, `get_float`, `get_bool`
+//	                    `Type_Hook`, `Marshal_Hook`, `Marshal_Out`, `marshal_into`, `Unmarshal_Hook`, `Hook_Value`
+//	document.odin       `Document`, `ROOT`, `Members`, `build`, `Header`, `header_of`, `header_pick`,
+//	                    `record_document`, `destroy`, and core's readers `kind`, `child`, `children`, `members`,
+//	                    `child_count`, `get_string`, `get_key`, `get_raw`
 //	find.odin           `Path`, `Path_Spec`, `Path_Error`, `Path_Error_Kind`, `Answer`, `Kind`, `Node`, `NO_NODE`,
-//	                    `NO_OWNER`, `query`, `find`, `Request`, `request_init`, `scan`, `answers`, `route_of`
+//	                    `NO_OWNER`, `query`, `find`, `answer_text`, `Request`, `request_init`, `scan`, `answers`,
+//	                    `route_of`
 //	edit.odin           `Edit`, `Insert_At`, `APPEND`, `splice`, `set`, `insert`, `remove`
 //
-// The scanner (scan.odin) and the edits' cell writer (edit_spell.odin) are internal.
+// The scanner (scan.odin), the edits' cell writer (edit_spell.odin) and a document's spelling (spelling.odin) are
+// internal.
 //
 // In every dialect a record ends at LF or CRLF, and a field ends at the delimiter. A CR outside a quoted
 // field must be followed by LF. One leading UTF-8 BOM is skipped. A line that is empty or holds only a CR is
@@ -34,8 +40,8 @@ package csv
 //	- `Quoting.Quotes` (RFC 4180): a field whose first byte is `"` is quoted. It runs to its closing quote,
 //	  reads `""` as one quote, and may hold the delimiter, CR and LF. A quote anywhere else is refused.
 //	- `Quoting.None`: a quote is text, and a field cannot hold the delimiter, CR or LF.
-//	- `Escapes.Backslash` (with `Quoting.None`): `\t`, `\n`, `\r`, `\0` and `\\` read as a tab, LF, CR, NUL and backslash.
-//	  Any other byte after a backslash, or a backslash ending a field, is refused (`.Bad_Escape`).
+//	- `Quoting.Backslash`: a quote is text, and `\t`, `\n`, `\r`, `\0` and `\\` read as a tab, LF, CR, NUL and
+//	  backslash. Any other byte after a backslash, or a backslash ending a field, is refused (`.Bad_Escape`).
 //	- `comment`: a line whose first byte is the comment byte is not a record. Elsewhere, or inside a quoted
 //	  field, the byte is text.
 
@@ -46,30 +52,58 @@ import core_pkg "../core"
 // text ends inside a quoted field (`.Truncated`).
 Error :: core_pkg.Error
 
-// What an `Error` is. The enum is core's and shared by every format; CSV never reports `Bad_Literal`,
-// `Bad_Number`, `Limit_Digits`, `Limit_Scale`, `Too_Deep`, `Trailing` or `Source_Too_Wide`.
+// What an `Error` is. The enum is core's and shared by every format; CSV never reports `Bad_Number`,
+// `Limit_Digits`, `Limit_Scale`, `Too_Deep` or `Trailing`; `Source_Too_Wide` only from a document. `Bad_Structure` and `Limit_Format`
+// carry a `Fault` in `detail`.
 Error_Kind :: core_pkg.Error_Kind
 
-// The 1-based line and column `err` points at in `src`, counting bytes, or (0, 0) where it points at no byte
-// (a `.Bad_Option` or an `.Out_Of_Memory`, or an offset past `src`).
-@(require_results)
-error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
-	return core_pkg.error_position(src, err)
+// CSV's faults within an `Error_Kind`, in `Error.detail`.
+Fault :: enum u8 {
+	None,
+	Field_Count,     // `.Bad_Structure`: a record with more or fewer fields than the first, at its first byte
+	Too_Many_Fields, // `.Limit_Format`: a record with more fields than `Limits.max_fields`, at its first byte
+	Record_Too_Long, // `.Limit_Format`: a line longer than `Limits.max_record_bytes`, at its first byte
 }
 
-// `err` (an `Error`, `Unmarshal_Error` or `Path_Error`) as text: `line:col: <kind>` with the kind's enum name,
-// or `offset N: <kind>` when it has no position. `src` is the input the failing call read.
+// CSV's sentence for a fault, or "" where core's `FAULT_TEXT` says it. `render_error` writes it; it is a
+// `Fault_Name`.
+fault_name :: proc(kind: Error_Kind, detail: u8) -> string {
+	switch Fault(detail) {
+	case .Field_Count:
+		return "Record has the wrong number of fields"
+	case .Too_Many_Fields:
+		return "Record has too many fields"
+	case .Record_Too_Long:
+		return "Record is too long"
+	case .None:
+	}
+	return ""
+}
+
+// The error of CSV fault `f` at `offset`, under the kind it belongs to.
+@(private)
+fault_error :: proc(offset: u64, f: Fault) -> Error {
+	return Error{offset = offset, kind = .Bad_Structure if f == .Field_Count else .Limit_Format, detail = u8(f)}
+}
+
+// The 1-based line and column an `Error`, `Unmarshal_Error`, `Path_Error` or `Marshal_Error` points at in `src`,
+// counting bytes, or (0, 0) where it points at no byte (an `Error`'s `.Bad_Option` or `.Out_Of_Memory`, a kind
+// `render_error` writes as `offset N: ` or bare, or an offset past `src`).
+error_position :: core_pkg.error_position
+
+// `err` (an `Error`, `Unmarshal_Error`, `Path_Error` or `Marshal_Error`) as text: `line:col: <text>` with the fault's text as
+// `fault_name` spells it, or `offset N: <text>` when it has no position. `src` is the input the failing call read.
 //
-// An `Unmarshal_Error` that points at no byte has no position prefix. A `.Syntax` one is followed by `: <syntax>`. Its path follows as ` at [3].name`.
+// An `Unmarshal_Error` that points at no byte has no position prefix. A `.Syntax` one reads as its fault's text. Its path follows as ` at [3].name`.
 //
-// A `Path_Error` has a source position for `.Bad_Source`, and for `.Encode` or `.Unplaceable` when it has a
-// record. `.Bad_Path` has `offset N` into the path text, `.Bad_Result` into the edited text. `.Bad_Row` is
-// followed by ` (N)`. The `syntax` or `encode` result comes last.
+// A `Path_Error` has a source position for `.Bad_Source` (read as its fault's text), and for `.Encode` or `.Unplaceable` when it has a
+// record. `.Bad_Path` has `offset N` into the path text, `.Bad_Result` into the edited text. `.Bad_Entry` is
+// followed by ` (N)`. The `syntax` or `encode` result comes last. A `Marshal_Error` reads as its kind and path.
 //
 // The text is allocated with `allocator`.
 @(require_results)
-render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
-	return core_pkg.render_error(src, err, allocator)
+render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string where E == Error || E == Unmarshal_Error || E == Path_Error || E == Marshal_Error {
+	return core_pkg.render_error(src, err, allocator, fault_name)
 }
 
 // A step of an `Unmarshal_Error`'s path.
@@ -78,34 +112,27 @@ Name :: core_pkg.Name
 Index :: core_pkg.Index
 Any :: core_pkg.Any
 
-// How a field may be quoted.
+// How a field holds a byte it cannot hold as itself: the delimiter, CR or LF.
 Quoting :: enum u8 {
-	Quotes, // RFC 4180 quoted fields
-	None,   // a quote is text
-}
-
-// How a field spells a byte it cannot hold as itself.
-Escapes :: enum u8 {
-	None,
-	Backslash, // `\t`, `\n`, `\r`, `\0`, `\\`; needs `Quoting.None`
+	Quotes,    // RFC 4180 quoted fields
+	None,      // a quote is text, and no field holds such a byte
+	Backslash, // a quote is text, and `\t`, `\n`, `\r`, `\0`, `\\` spell a tab, LF, CR, NUL and backslash
 }
 
 // How a text spells its records. The zero value is RFC 4180 with `,` between fields. `.Bad_Option` refuses:
 //
 //	- a delimiter that is a quote, CR, LF or not ASCII
 //	- a comment byte that is CR, LF, the delimiter, not ASCII, or a quote under `.Quotes`
-//	- `.Backslash` escapes under `.Quotes`
 //	- under `.Backslash`, a backslash as delimiter or comment byte, or `t`, `n`, `r` or `0` as delimiter
 Dialect :: struct {
 	delimiter: byte, // 0 is `,`
 	quoting:   Quoting,
-	escapes:   Escapes,
 	comment:   byte, // 0 for none; a line whose first byte is this is not a record
-	ragged:    bool, // records may hold different field counts (no `.Field_Count`)
+	ragged:    bool, // records may hold different field counts (no `Fault.Field_Count`)
 }
 
 // Tab-separated values as jq's `@tsv` writes them and PostgreSQL's text `COPY` reads them.
-TSV :: Dialect{delimiter = '\t', quoting = .None, escapes = .Backslash}
+TSV :: Dialect{delimiter = '\t', quoting = .Backslash}
 
 // How much of the text is judged. `.Strict` judges every byte. `.Structural` judges the structure (quotes,
 // CR, escapes, field counts) and not UTF-8. `.Lazy` is `.Structural` for `validate` and `records`; `unmarshal`
@@ -114,9 +141,9 @@ Strictness :: core_pkg.Strictness
 
 // Caps on what a text may hold. The zero value caps nothing.
 Limits :: struct {
-	max_fields:       int, // a record with more fields is refused (`.Limit_Fields`), 0 for no cap
+	max_fields:       int, // a record with more fields is refused (`Fault.Too_Many_Fields`), 0 for no cap
 	// A line (record, blank or comment) with more bytes than this before its LF is refused with
-	// `.Limit_Record` at its first byte, as soon as the first byte past the cap is read. 0 for no cap. It also
+	// `Fault.Record_Too_Long` at its first byte, as soon as the first byte past the cap is read. 0 for no cap. It also
 	// bounds the window `records_from` holds.
 	max_record_bytes: int,
 }
@@ -221,7 +248,7 @@ validate_in :: proc(src: []byte, lo, start_width: int, s: Scan, $M: Scan_Mode) -
 			break
 		}
 		w.pos, w.rec_lo, w.fields, w.width, w.cy = pos, rec_lo, fields, width, cy
-		if e, done := validate_capped_block(src, &w, s, M); done {
+		if e, done := validate_capped_block(src, &w, s, M - {.Skip_Utf8}); done {
 			return e
 		}
 		pos, rec_lo, fields, width, cy = w.pos, w.rec_lo, w.fields, w.width, w.cy
@@ -231,26 +258,31 @@ validate_in :: proc(src: []byte, lo, start_width: int, s: Scan, $M: Scan_Mode) -
 		return open_record_fault(fields, rec_lo, s, fault, kind)
 	}
 	if rec_lo < len(src) && fields != width && !no_record(src, rec_lo, len(src), comment, M) {
-		if k, _ := record_fault(width, fields, s); k != .None {
-			return Error{offset = u64(rec_lo), kind = k}
+		if f, _ := record_fault(width, fields, s); f != .None {
+			return fault_error(u64(rec_lo), f)
 		}
 	}
 	return nil
 }
 
 // Validates the block at `w.pos`, which holds the first byte past the open line's cap. `done` is true when
-// the text has a fault, returned in `err`.
+// the text has a fault, returned in `err`. `$M` leaves out `.Skip_Utf8`, which `s.mode` says at run time: the
+// block is the rare one, so the UTF-8 judgement is not compiled into every mode's copy.
 @(private, cold)
 validate_capped_block :: proc(src: []byte, w: ^Validate_Walk, s: Scan, $M: Scan_Mode) -> (err: Maybe(Error), done: bool) {
+	#assert(.Skip_Utf8 not_in M)
 	pos := w.pos
-	seps, lfs, fault, kind := scan_block(src, pos, s.delim, s.comment, &w.cy, M)
+	seps, lfs, fault, kind := scan_block(src, pos, s.delim, s.comment, &w.cy, M + {.Skip_Utf8})
+	if .Skip_Utf8 not_in s.mode {
+		fault, kind = block_utf8_fault(src, pos, &w.cy, fault, kind)
+	}
 	if fault >= 0 {
 		cut := u64(1) << u64(max(fault - pos, 0)) - 1
 		seps &= cut
 		lfs &= cut
 	}
 	if at, _ := line_cap_fault(lfs, pos, w.rec_lo, s.max_bytes, len(src)); at >= 0 && (fault < 0 || at < fault) {
-		fault, kind = at, .Limit_Record
+		fault, kind = at, .Limit_Format
 		cut := u64(1) << u64(at - pos) - 1
 		seps &= cut
 		lfs &= cut
@@ -279,9 +311,9 @@ validate_lines :: #force_inline proc(src: []byte, pos: int, seps, lfs: u64, rec_
 		lfs &= lfs - 1
 		end := pos + int(b)
 		if fields^ != width^ && !no_record(src, rec_lo^, end, s.comment, M) {
-			k: Error_Kind
-			if k, width^ = record_fault(width^, fields^, s); k != .None {
-				return Error{offset = u64(rec_lo^), kind = k}, true
+			f: Fault
+			if f, width^ = record_fault(width^, fields^, s); f != .None {
+				return fault_error(u64(rec_lo^), f), true
 			}
 		}
 		rec_lo^, fields^ = end + 1, 1
@@ -291,15 +323,15 @@ validate_lines :: #force_inline proc(src: []byte, pos: int, seps, lfs: u64, rec_
 }
 
 // The error `validate` reports for a fault at `fault` in the line starting at `rec_lo`, which has `fields`
-// fields so far. It is `.Limit_Fields` when the fields before the fault already exceed the cap, as in
-// `next_record`. A `.Limit_Record` points at the line's first byte.
+// fields so far. It is `Fault.Too_Many_Fields` when the fields before the fault already exceed the cap, as in
+// `next_record`. A `.Limit_Format` from the block scan is the line's `max_record_bytes`, at its first byte.
 @(private)
 open_record_fault :: proc(fields, rec_lo: int, s: Scan, fault: int, kind: Error_Kind) -> Error {
 	if fields - 1 > s.max_fields {
-		return Error{offset = u64(rec_lo), kind = .Limit_Fields}
+		return fault_error(u64(rec_lo), .Too_Many_Fields)
 	}
-	if kind == .Limit_Record {
-		return Error{offset = u64(rec_lo), kind = kind}
+	if kind == .Limit_Format {
+		return fault_error(u64(rec_lo), .Record_Too_Long)
 	}
 	return Error{offset = u64(fault), kind = kind}
 }
@@ -317,9 +349,9 @@ no_record :: #force_inline proc(src: []byte, lo, hi: int, comment: byte, $M: Sca
 // The fault of a record with `fields` fields where `width` were expected, and the width from then on. The
 // first record sets the width. A ragged dialect has no `.Field_Count` fault.
 @(private)
-record_fault :: proc(width, fields: int, s: Scan) -> (kind: Error_Kind, width_after: int) {
+record_fault :: proc(width, fields: int, s: Scan) -> (fault: Fault, width_after: int) {
 	if fields > s.max_fields {
-		return .Limit_Fields, width
+		return .Too_Many_Fields, width
 	}
 	if width == 0 {
 		return .None, fields

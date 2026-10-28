@@ -5,21 +5,32 @@ package json_tests
 
 import "base:runtime"
 import json "../.."
+import core_pkg "../../../core"
+import csv "../../../csv"
 import "core:fmt"
 import "core:strings"
 import "core:testing"
 
+// A refusal's kind, `.None` for none.
+@(private)
+marshal_kind :: proc(err: Maybe(json.Marshal_Error)) -> json.Marshal_Error_Kind {
+	if e, bad := err.?; bad {
+		return e.kind
+	}
+	return .None
+}
+
 @(private)
 marshal_text :: proc(t: ^testing.T, v: any, opts := json.Marshal_Opts{}, plan: ^json.Type_Plan = nil, loc := #caller_location) -> string {
 	out, err := json.marshal(v, opts, plan, context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.None, loc = loc)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None, loc = loc)
 	return string(out)
 }
 
 @(private)
-marshal_refused :: proc(t: ^testing.T, v: any, want: json.Marshal_Error, loc := #caller_location) {
+marshal_refused :: proc(t: ^testing.T, v: any, want: json.Marshal_Error_Kind, loc := #caller_location) {
 	out, err := json.marshal(v, {}, nil, context.temp_allocator)
-	testing.expect_value(t, err, want, loc = loc)
+	testing.expect_value(t, marshal_kind(err), want, loc = loc)
 	testing.expect(t, out == nil, "a refusal returns a nil slice", loc = loc)
 }
 
@@ -50,7 +61,7 @@ test_marshal_number_round_trips_or_refuses :: proc(t: ^testing.T) {
 	for c in ([]struct {
 		src:  string,
 		want: string,
-		err:  json.Marshal_Error,
+		err:  json.Marshal_Error_Kind,
 	}{
 		{`{"n":1e400}`, "", .Non_Finite},
 		{`{"n":-1e400}`, "", .Non_Finite},
@@ -63,7 +74,7 @@ test_marshal_number_round_trips_or_refuses :: proc(t: ^testing.T) {
 		v: Holder
 		um_ok(t, c.src, &v)
 		out, err := json.marshal(v, {}, nil, context.temp_allocator)
-		testing.expect_value(t, err, c.err)
+		testing.expect_value(t, marshal_kind(err), c.err)
 		testing.expect_value(t, string(out), c.want)
 	}
 	// The zero `Number` is the exact value 0; a `Number` with no binary64 value is refused.
@@ -75,6 +86,39 @@ test_marshal_number_round_trips_or_refuses :: proc(t: ^testing.T) {
 	}
 	um_ok(t, `{"n":1e400}`, &d)
 	testing.expect_value(t, marshal_text(t, d), `{"n":1e400}`)
+}
+
+// A refusal names the value refused: each field, element and string map key on the way to it, in the flat,
+// nested, pretty and streamed writers alike.
+@(test)
+test_marshal_refusal_path :: proc(t: ^testing.T) {
+	Leaf :: struct {
+		x: f64,
+	}
+	Mid :: struct {
+		name: string,
+		leaf: Leaf,
+	}
+	Top :: struct {
+		items: []Mid `json:"list"`,
+		by:    map[string]Leaf,
+	}
+	nan := transmute(f64)u64(0x7ff8000000000001)
+	items := []Mid{{"a", {1}}, {"b", {nan}}}
+	by: map[string]Leaf
+	defer delete(by)
+	by["k"] = {nan}
+	for opts in ([]json.Marshal_Opts{{}, {pretty = true}}) {
+		_, err := json.marshal(Top{items = items}, opts, nil, context.temp_allocator)
+		testing.expect_value(t, json.render_error(nil, err.?, context.temp_allocator), "Number has no finite value at .list[1].leaf.x")
+	}
+	_, err := json.marshal(Top{by = by}, {}, nil, context.temp_allocator)
+	testing.expect_value(t, json.render_error(nil, err.?, context.temp_allocator), "Number has no finite value at .by.k.x")
+	b := strings.builder_make(context.temp_allocator)
+	werr := json.marshal_to_writer(strings.to_writer(&b), []Leaf{{1}, {nan}}, allocator = context.temp_allocator)
+	testing.expect_value(t, json.render_error(nil, werr.?, context.temp_allocator), "Number has no finite value at [1].x")
+	_, rerr := json.marshal(nan, {}, nil, context.temp_allocator)
+	testing.expect_value(t, json.render_error(nil, rerr.?, context.temp_allocator), "Number has no finite value")
 }
 
 @(test)
@@ -202,7 +246,7 @@ test_marshal_pointers_cycles_depth :: proc(t: ^testing.T) {
 	}
 	head := &nodes[1]
 	out, err := json.marshal(head, {}, nil, context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None)
 	_, invalid := json.validate(out).?
 	testing.expect(t, !invalid)
 	marshal_refused(t, nodes[0], .Too_Deep)
@@ -285,7 +329,7 @@ test_marshal_raw :: proc(t: ^testing.T) {
 	deep := json.MAX_DEPTH - 1
 	fits := nested_arrays(deep)
 	out, err := json.marshal(R{r = json.Raw(fits)}, {}, nil, context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None)
 	_, invalid := json.validate(out).?
 	testing.expect(t, !invalid)
 	marshal_refused(t, R{r = json.Raw(strings.concatenate({"[", fits, "]"}, context.temp_allocator))}, .Too_Deep)
@@ -339,11 +383,11 @@ test_marshal_unsupported :: proc(t: ^testing.T) {
 }
 
 @(private)
-encode_text :: proc(t: ^testing.T, text: string, opts := json.Marshal_Opts{}, loc := #caller_location) -> string {
+encode_text :: proc(t: ^testing.T, text: string, opts := json.Document_Opts{}, loc := #caller_location) -> string {
 	doc := build_ok(t, text, loc)
 	defer json.destroy(&doc)
 	out, err := json.marshal(&doc, opts, context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.None, loc = loc)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None, loc = loc)
 	return string(out)
 }
 
@@ -367,16 +411,86 @@ test_marshal_document_by_value :: proc(t: ^testing.T) {
 	defer json.destroy(&doc)
 	want, _ := json.marshal(&doc, {pretty = true}, context.temp_allocator)
 	got, err := json.marshal(doc, {pretty = true}, allocator = context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(got), string(want))
 	sb: strings.Builder
 	strings.builder_init(&sb, context.temp_allocator)
 	err = json.marshal_to_writer(strings.to_writer(&sb), doc, {pretty = true}, allocator = context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, strings.to_string(sb), string(want))
 }
 
-// `plan_cache_clear` frees the thread's default plans. The next call makes them again.
+// `marshal_append` writes after the bytes already in the buffer what `marshal` writes, a value's and a
+// document's, and leaves the buffer as it was on a refusal.
+@(test)
+test_marshal_append :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	out := make([dynamic]u8, context.temp_allocator)
+	append(&out, "prefix:")
+	m: map[string]int
+	defer delete(m)
+	m["b"], m["a"] = 2, 1
+	testing.expect_value(t, marshal_kind(json.marshal_append(&out, m, {trailing_newline = true})), json.Marshal_Error_Kind.None)
+	testing.expect_value(t, string(out[:]), "prefix:{\"a\":1,\"b\":2}\n")
+
+	doc := build_ok(t, `{"n": 1e2, "n": 1.50}`)
+	defer json.destroy(&doc)
+	testing.expect_value(t, marshal_kind(json.marshal_append(&out, &doc, {jq_spelling = true})), json.Marshal_Error_Kind.None)
+	testing.expect_value(t, string(out[:]), "prefix:{\"a\":1,\"b\":2}\n{\"n\":1.50}")
+
+	before := strings.clone(string(out[:]), context.temp_allocator)
+	testing.expect_value(t, marshal_kind(json.marshal_append(&out, []f64{1, 0h7FF0000000000000})), json.Marshal_Error_Kind.Non_Finite)
+	testing.expect_value(t, string(out[:]), before)
+}
+
+Sorted_Inner :: struct {
+	y: int,
+	b: int,
+}
+
+Sorted_Outer :: struct {
+	zed:   Sorted_Inner,
+	gone:  []int `json:",omitempty"`,
+	alpha: map[string]int,
+	mid:   string,
+}
+
+Sorted_Arm :: struct {
+	zeta:  int,
+	alpha: int,
+}
+
+Sorted_Union :: union {
+	Sorted_Inner,
+	Sorted_Arm,
+}
+
+// `sort_keys` writes a struct's fields in byte order of their keys, a nested struct's and a union arm's with its tag
+// among them, compact and pretty; an omitted field stays omitted. A map's keys are sorted without it.
+@(test)
+test_marshal_sort_keys_typed :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	m: map[string]int
+	m["b"], m["a"] = 2, 1
+	defer delete(m)
+	v := Sorted_Outer{zed = {y = 1, b = 2}, alpha = m, mid = "x"}
+	testing.expect_value(t, marshal_text(t, v), `{"zed":{"y":1,"b":2},"alpha":{"a":1,"b":2},"mid":"x"}`)
+	testing.expect_value(t, marshal_text(t, v, {sort_keys = true}), `{"alpha":{"a":1,"b":2},"mid":"x","zed":{"b":2,"y":1}}`)
+	testing.expect_value(t, marshal_text(t, any(v), {sort_keys = true}), `{"alpha":{"a":1,"b":2},"mid":"x","zed":{"b":2,"y":1}}`)
+	pretty := marshal_text(t, v.zed, {sort_keys = true, pretty = true, indent = 2})
+	testing.expect_value(t, pretty, "{\n  \"b\": 2,\n  \"y\": 1\n}")
+	testing.expect_value(t, marshal_text(t, []Sorted_Inner{{y = 1, b = 2}, {y = 3, b = 4}}, {sort_keys = true}), `[{"b":2,"y":1},{"b":4,"y":3}]`)
+	streamed: strings.Builder
+	strings.builder_init(&streamed, context.temp_allocator)
+	testing.expect_value(t, marshal_kind(json.marshal_to_writer(strings.to_writer(&streamed), v, {sort_keys = true})), json.Marshal_Error_Kind.None)
+	testing.expect_value(t, strings.to_string(streamed), `{"alpha":{"a":1,"b":2},"mid":"x","zed":{"b":2,"y":1}}`)
+	plan := json.type_plan_init(Sorted_Union, {union_tag = "m"}, context.temp_allocator)
+	u := Sorted_Union(Sorted_Arm{zeta = 1, alpha = 2})
+	testing.expect_value(t, marshal_text(t, u, {}, &plan), `{"m":"Sorted_Arm","zeta":1,"alpha":2}`)
+	testing.expect_value(t, marshal_text(t, u, {sort_keys = true}, &plan), `{"alpha":2,"m":"Sorted_Arm","zeta":1}`)
+}
+
+// `core.plan_cache_clear` frees the thread's default plans, every format's. The next call makes them again.
 @(test)
 test_marshal_after_plan_cache_clear_remakes_the_default_plans :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -384,11 +498,79 @@ test_marshal_after_plan_cache_clear_remakes_the_default_plans :: proc(t: ^testin
 		a: int,
 		b: string,
 	}
-	json.plan_cache_clear() // nothing cached yet: no harm
+	core_pkg.plan_cache_clear() // nothing cached yet: no harm
 	for _ in 0 ..< 2 {
 		testing.expect_value(t, marshal_text(t, Pair{1, "x"}), `{"a":1,"b":"x"}`)
-		json.plan_cache_clear()
+		text, err := csv.marshal([]Pair{{1, "x"}}, allocator = context.temp_allocator)
+		testing.expect(t, err == nil)
+		testing.expect_value(t, string(text), "a,b\n1,x\n")
+		core_pkg.plan_cache_clear()
 	}
+}
+
+// One plan serves every format, each spelling names its own way, and a shared tag names a field in both.
+@(test)
+test_plan_serves_every_format :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Pair :: struct {
+		a: int `stury:"first"`,
+		b: string `stury:"second" json:"b"`,
+	}
+	plan := json.type_plan_init([]Pair)
+	defer json.destroy(&plan)
+	for _ in 0 ..< 2 {
+		text, err := csv.marshal([]Pair{{1, "x"}}, plan = &plan, allocator = context.temp_allocator)
+		testing.expect(t, err == nil)
+		testing.expect_value(t, string(text), "first,second\n1,x\n")
+		out, jerr := json.marshal([]Pair{{1, "x"}}, plan = &plan, allocator = context.temp_allocator)
+		testing.expect(t, jerr == nil)
+		testing.expect_value(t, string(out), `[{"first":1,"b":"x"}]`)
+	}
+	back: []Pair
+	testing.expect(t, csv.unmarshal(transmute([]byte)string("first,second\n2,y\n"), &back, plan = &plan, allocator = context.temp_allocator) == nil)
+	testing.expect(t, len(back) == 1 && back[0] == Pair{2, "y"})
+	_, err := csv.marshal([]int{1}, plan = &plan, allocator = context.temp_allocator)
+	e, refused := err.?
+	testing.expect(t, refused && e.kind == .Plan_Mismatch, "a plan for another type")
+}
+
+// One read hook serves both formats through `Hook_Value`: a string's decoded text, its authored text beside it.
+@(test)
+test_read_hook_is_format_neutral :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Stamp :: distinct string
+	Row :: struct {
+		s: Stamp,
+	}
+	@(static) seen: [4]core_pkg.Hook_Value
+	@(static) n: int
+	n = 0
+	read_stamp :: proc(v: core_pkg.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core_pkg.Unmarshal_Error_Kind) {
+		if v.kind != .String {
+			return .Wrong_Kind
+		}
+		seen[n] = v
+		n += 1
+		(^Stamp)(dest)^ = Stamp(strings.clone(v.decoded, allocator))
+		return nil
+	}
+	hooks := []core_pkg.Type_Hook{{type = Stamp, read = read_stamp}}
+
+	jp := json.type_plan_init([]Row, {hooks = hooks})
+	defer json.destroy(&jp)
+	rows: []Row
+	testing.expect_value(t, json.unmarshal(raw(`[{"s":"a,b"},{"s":"c"}]`), &rows, {}, &jp, context.temp_allocator), nil)
+	testing.expect(t, len(rows) == 2 && rows[0].s == "a,b" && rows[1].s == "c", "json rows")
+	testing.expect(t, n == 2 && seen[0].text == `"a,b"` && seen[1].text == `"c"`, "json text")
+	num := json.unmarshal(raw(`[{"s":1}]`), &rows, {}, &jp, context.temp_allocator)
+	testing.expect(t, num != nil && num.?.kind == .Wrong_Kind, "a number is no stamp")
+
+	n = 0
+	cp := csv.type_plan_init([]Row, {hooks = hooks})
+	defer csv.destroy(&cp)
+	testing.expect_value(t, csv.unmarshal(raw("s\n\"a,b\"\nc\n"), &rows, plan = &cp, allocator = context.temp_allocator), nil)
+	testing.expect(t, len(rows) == 2 && rows[0].s == "a,b" && rows[1].s == "c", "csv rows")
+	testing.expect(t, n == 2 && seen[0].text == `"a,b"` && seen[1].text == "c", "csv text")
 }
 
 // `set` and `insert` write a `Document` value as its text, by value as by pointer.
@@ -414,7 +596,7 @@ test_set_and_insert_document_value :: proc(t: ^testing.T) {
 test_marshal_document_refuses_non_trees :: proc(t: ^testing.T) {
 	doc: json.Document
 	out, err := json.marshal(&doc)
-	testing.expect_value(t, err, json.Marshal_Error.Bad_State)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.Bad_State)
 	testing.expect(t, out == nil)
 
 	// Rows that are not one tree, as a scoped request's document can be: the two elements of `[1,2]`.
@@ -425,7 +607,7 @@ test_marshal_document_refuses_non_trees :: proc(t: ^testing.T) {
 	append(&part.rows, whole.rows[1], whole.rows[2])
 	defer free_all(context.temp_allocator)
 	out, err = json.marshal(&part)
-	testing.expect_value(t, err, json.Marshal_Error.Bad_State)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.Bad_State)
 	testing.expect(t, out == nil)
 }
 
@@ -452,8 +634,28 @@ test_marshal_map_uses_only_passed_allocator :: proc(t: ^testing.T) {
 	defer delete(out_m, alloc)
 	defer delete(out_ir, alloc)
 
-	testing.expect_value(t, err_m, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err_m), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(out_m), `{"a":1,"b":2}`)
-	testing.expect_value(t, err_ir, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err_ir), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(out_ir), `{"10":1,"2":2}`)
+}
+
+// A JSON document of records writes as CSV: a number as its text, null an empty cell, a nested value refused at
+// its path.
+@(test)
+test_marshal_csv_of_json_document :: proc(t: ^testing.T) {
+	doc, err := json.build(transmute([]byte)string(`[{"a":1.50,"b":null},{"b":true,"a":"x"}]`), allocator = context.temp_allocator)
+	testing.expect_value(t, err, nil)
+	out, merr := csv.marshal(&doc, allocator = context.temp_allocator)
+	testing.expect_value(t, merr, nil)
+	testing.expect_value(t, string(out), "a,b\n1.50,\nx,true\n")
+
+	nested, _ := json.build(transmute([]byte)string(`[[1,2],[3,{"c":4}]]`), allocator = context.temp_allocator)
+	_, merr = csv.marshal(&nested, allocator = context.temp_allocator)
+	e, refused := merr.?
+	testing.expect(t, refused && e.kind == .Unsupported && e.n_steps == 2)
+	testing.expect(t, e.steps[0] == core_pkg.Step(core_pkg.Index(1)) && e.steps[1] == core_pkg.Step(core_pkg.Index(1)))
+	mixed, _ := json.build(transmute([]byte)string(`[{"a":1},[2]]`), allocator = context.temp_allocator)
+	_, merr = csv.marshal(&mixed, allocator = context.temp_allocator)
+	testing.expect(t, merr != nil && merr.?.kind == .Unsupported)
 }

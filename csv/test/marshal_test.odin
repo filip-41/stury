@@ -2,14 +2,24 @@ package csv_tests
 
 import "core:fmt"
 import "core:math"
+import "core:strings"
 import "core:testing"
 import csv "../"
+
+// A refusal's kind, `.None` for none.
+@(private)
+marshal_kind :: proc(err: Maybe(csv.Marshal_Error)) -> csv.Marshal_Error_Kind {
+	if e, bad := err.?; bad {
+		return e.kind
+	}
+	return .None
+}
 
 @(test)
 test_marshal_text :: proc(t: ^testing.T) {
 	rows := []Strict{{1, "plain"}, {-2, "a,b"}, {3, `q"d`}, {4, "line\nbreak"}, {5, ""}}
 	out, err := csv.marshal(rows, allocator = context.temp_allocator)
-	testing.expect_value(t, err, csv.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(out), "id,name\n1,plain\n-2,\"a,b\"\n3,\"q\"\"d\"\n4,\"line\nbreak\"\n5,\"\"\n")
 	out, err = csv.marshal(rows[:1], {dialect = {delimiter = ';'}, no_header = true, crlf = true}, allocator = context.temp_allocator)
 	testing.expect_value(t, string(out), "1;plain\r\n")
@@ -28,7 +38,7 @@ test_marshal_text_lengths :: proc(t: ^testing.T) {
 			}
 			rows := []Strict{{n, string(b)}}
 			out, err := csv.marshal(rows, allocator = context.temp_allocator)
-			if !testing.expect_value(t, err, csv.Marshal_Error.None) {
+			if !testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None) {
 				return
 			}
 			back: []Strict
@@ -48,7 +58,7 @@ test_marshal_round_trip :: proc(t: ^testing.T) {
 		{score = -2.5e-310, ratio = math.F32_MIN, name = "x\r\ny"},
 	}
 	out, err := csv.marshal(rows, allocator = context.temp_allocator)
-	if !testing.expect_value(t, err, csv.Marshal_Error.None) {
+	if !testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None) {
 		return
 	}
 	back: []Row
@@ -70,7 +80,7 @@ test_marshal_f16_round_trip :: proc(t: ^testing.T) {
 	}
 	rows := []Half{{0.1}, {-65504}, {6.104e-5}, {5.96e-8}, {-0.0}, {1}}
 	out, err := csv.marshal(rows, allocator = context.temp_allocator)
-	if !testing.expect_value(t, err, csv.Marshal_Error.None) {
+	if !testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None) {
 		return
 	}
 	back: []Half
@@ -98,13 +108,13 @@ test_marshal_enum_ints :: proc(t: ^testing.T) {
 	defer csv.destroy(&plan)
 	rows := []Row{{color = .Blue}}
 	out, err := csv.marshal(rows, plan = &plan, allocator = context.temp_allocator)
-	testing.expect_value(t, err, csv.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None)
 	back: []Row
 	testing.expect_value(t, csv.unmarshal(out, &back, plan = &plan, allocator = context.temp_allocator), nil)
 	testing.expect_value(t, back[0].color, Color.Blue)
 	// A value no member has is refused as the names are, and as `unmarshal` refuses it.
 	_, err = csv.marshal([]Row{{color = Color(3)}}, plan = &plan, allocator = context.temp_allocator)
-	testing.expect_value(t, err, csv.Marshal_Error.Not_A_Member)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.Not_A_Member)
 }
 
 // A cell is never omitted, so a tag's `omitempty` is refused in both directions.
@@ -114,16 +124,36 @@ test_omitempty_refused :: proc(t: ^testing.T) {
 		id: int `csv:"id,omitempty"`,
 	}
 	_, err := csv.marshal([]Tagged{{1}}, allocator = context.temp_allocator)
-	testing.expect_value(t, err, csv.Marshal_Error.Bad_Tag)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.Bad_Tag)
 	rows: []Tagged
 	testing.expect_value(t, read(t, "id\n1\n", &rows).?.kind, csv.Unmarshal_Error_Kind.Bad_Tag)
 }
 
+// A refusal names the record by its index in the input and the field by its name; `write_record`'s names the cell.
+@(test)
+test_marshal_refusal_path :: proc(t: ^testing.T) {
+	Cell :: struct {
+		id:    int,
+		score: f64 `csv:"points"`,
+	}
+	_, err := csv.marshal([]Cell{{1, 2}, {2, math.nan_f64()}}, allocator = context.temp_allocator)
+	testing.expect_value(t, csv.render_error(nil, err.?, context.temp_allocator), "Number has no finite value at [1].points")
+	b := strings.builder_make(context.temp_allocator)
+	rows := make([]Cell, 600, context.temp_allocator)
+	rows[555].score = math.inf_f64(1)
+	werr := csv.marshal_to_writer(strings.to_writer(&b), rows, allocator = context.temp_allocator)
+	testing.expect_value(t, csv.render_error(nil, werr.?, context.temp_allocator), "Number has no finite value at [555].points")
+	out: [dynamic]u8
+	defer delete(out)
+	rerr := csv.write_record(&out, {"a", "\xff"})
+	testing.expect_value(t, csv.render_error(nil, rerr.?, context.temp_allocator), "Invalid UTF-8 at [1]")
+}
+
 @(test)
 test_marshal_refusals :: proc(t: ^testing.T) {
-	expect_refused :: proc(t: ^testing.T, rows: []Row, want: csv.Marshal_Error, loc := #caller_location) {
+	expect_refused :: proc(t: ^testing.T, rows: []Row, want: csv.Marshal_Error_Kind, loc := #caller_location) {
 		out, err := csv.marshal(rows, allocator = context.temp_allocator)
-		testing.expect_value(t, err, want, loc)
+		testing.expect_value(t, marshal_kind(err), want, loc)
 		testing.expect(t, out == nil, loc = loc)
 	}
 	expect_refused(t, {{score = math.nan_f64()}}, .Non_Finite)
@@ -132,16 +162,16 @@ test_marshal_refusals :: proc(t: ^testing.T) {
 	expect_refused(t, {{name = "\xff"}}, .Bad_Utf8)
 	expect_refused(t, {{r = 0xd800}}, .Bad_Utf8)
 	_, err := csv.marshal([]Strict{}, {dialect = {delimiter = '"'}})
-	testing.expect_value(t, err, csv.Marshal_Error.Bad_Option)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.Bad_Option)
 	_, err = csv.marshal([]Nested{{}}, allocator = context.temp_allocator)
-	testing.expect_value(t, err, csv.Marshal_Error.Unsupported)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.Unsupported)
 	// A `Maybe` of a pointer-like cell stores no tag, so it is not one cell, as `unmarshal` refuses it.
 	Bare :: struct {
 		c: Maybe(cstring),
 		n: int,
 	}
 	_, err = csv.marshal([]Bare{{"x", 7}}, allocator = context.temp_allocator)
-	testing.expect_value(t, err, csv.Marshal_Error.Unsupported)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.Unsupported)
 }
 
 // A record that would be a blank line reads back as no record, so `marshal` refuses it as `write_record` does.
@@ -156,7 +186,7 @@ test_marshal_refuses_blank_line :: proc(t: ^testing.T) {
 	None :: struct {}
 	expect_unwritable :: proc(t: ^testing.T, rows: $T/[]$E, opts: csv.Marshal_Opts, loc := #caller_location) {
 		out, err := csv.marshal(rows, opts, allocator = context.temp_allocator)
-		testing.expect_value(t, err, csv.Marshal_Error.Unwritable, loc)
+		testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.Unwritable, loc)
 		testing.expect(t, out == nil, loc = loc)
 	}
 	expect_unwritable(t, []Note{{"x"}, {nil}}, {})
@@ -165,11 +195,11 @@ test_marshal_refuses_blank_line :: proc(t: ^testing.T) {
 	expect_unwritable(t, []None{{}}, {no_header = true})
 	// An empty string is `""` where cells are quoted, which reads back present.
 	out, err := csv.marshal([]Name{{""}, {"x"}}, allocator = context.temp_allocator)
-	testing.expect_value(t, err, csv.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(out), "name\n\"\"\nx\n")
 	b: [dynamic]u8
 	defer delete(b)
-	testing.expect_value(t, csv.marshal_append(&b, []Note{{nil}}), csv.Marshal_Error.Unwritable)
+	testing.expect_value(t, marshal_kind(csv.marshal_append(&b, []Note{{nil}})), csv.Marshal_Error_Kind.Unwritable)
 	testing.expect_value(t, len(b), 0)
 }
 
@@ -186,7 +216,7 @@ test_marshal_reads_back :: proc(t: ^testing.T) {
 		s: string,
 	}
 	out, err := csv.marshal([]Cell{{"\xEF\xBB\xBFabc"}}, {no_header = true}, allocator = context.temp_allocator)
-	testing.expect_value(t, err, csv.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None)
 	cells: []Cell
 	testing.expect_value(t, read(t, string(out), &cells, {no_header = true}), nil)
 	testing.expect_value(t, cells[0].s, "\xEF\xBB\xBFabc")
@@ -198,7 +228,7 @@ test_marshal_reads_back :: proc(t: ^testing.T) {
 	for d in ([]byte{'5', '-', '.', 'e', '+'}) {
 		nums := []Nums{{15, -1.5}, {-25, 1e30}}
 		out, err = csv.marshal(nums, {dialect = {delimiter = d}}, allocator = context.temp_allocator)
-		testing.expect_value(t, err, csv.Marshal_Error.None)
+		testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None)
 		back: []Nums
 		testing.expectf(t, read(t, string(out), &back, {dialect = {delimiter = d}}) == nil && len(back) == 2 && back[0] == nums[0] && back[1] == nums[1], "%q: %q read %v", d, string(out), back)
 	}
@@ -213,4 +243,85 @@ test_marshal_reads_back :: proc(t: ^testing.T) {
 	wide: []Wide
 	testing.expect_value(t, csv.unmarshal(out, &wide, plan = &plan, allocator = context.temp_allocator), nil)
 	testing.expect_value(t, wide[0].b, Big.Y)
+}
+
+// A map of the pairs `kv`, from the temp allocator.
+@(private)
+pairs :: proc(kv: ..[2]string) -> map[string]string {
+	m := make(map[string]string, context.temp_allocator)
+	for p in kv {
+		m[p[0]] = p[1]
+	}
+	return m
+}
+
+// A list row is one record, its elements the cells, with no header; a map row's header is every record's keys,
+// sorted, and a key a record lacks is an empty cell. Each reads back equal.
+@(test)
+test_marshal_cell_rows :: proc(t: ^testing.T) {
+	lists := [][]string{{"a", "b"}, {"1", ""}, {`x"y`, "c,d"}}
+	out, err := csv.marshal(lists, allocator = context.temp_allocator)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None)
+	testing.expect_value(t, string(out), "a,b\n1,\"\"\n\"x\"\"y\",\"c,d\"\n")
+	back: [][]string
+	testing.expect(t, csv.unmarshal(out, &back, allocator = context.temp_allocator) == nil)
+	testing.expect_value(t, fmt.tprint(back), fmt.tprint(lists))
+	out, err = csv.marshal([][]Maybe(string){{"a", nil}}, allocator = context.temp_allocator)
+	testing.expect_value(t, string(out), "a,\n")
+
+	maps := []map[string]string{pairs({"b", "2"}, {"a", "1"}), pairs({"c", "3"})}
+	out, err = csv.marshal(maps, allocator = context.temp_allocator)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None)
+	testing.expect_value(t, string(out), "a,b,c\n1,2,\n,,3\n")
+	read_maps: []map[string]string
+	testing.expect(t, csv.unmarshal(out, &read_maps, allocator = context.temp_allocator) == nil)
+	testing.expect_value(t, len(read_maps), 2)
+	testing.expect_value(t, len(read_maps[0]), 2)
+	testing.expect_value(t, read_maps[0]["b"], "2")
+	testing.expect_value(t, fmt.tprint(read_maps[1]), fmt.tprint(maps[1]))
+	out, err = csv.marshal(maps, {no_header = true}, allocator = context.temp_allocator)
+	testing.expect_value(t, string(out), "1,2,\n,,3\n")
+	out, err = csv.marshal([]map[string]string{pairs({"a", ""})}, allocator = context.temp_allocator)
+	testing.expect_value(t, string(out), "a\n\"\"\n")
+	out, err = csv.marshal([]map[string]string{}, allocator = context.temp_allocator)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None)
+	testing.expect_value(t, len(out), 0)
+
+	// Streamed in chunks, the header is written once.
+	many := make([]map[string]int, 600, context.temp_allocator)
+	for &m, i in many {
+		m = make(map[string]int, context.temp_allocator)
+		m["n"] = i
+	}
+	whole, _ := csv.marshal(many, allocator = context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	testing.expect(t, csv.marshal_to_writer(strings.to_writer(&b), many, allocator = context.temp_allocator) == nil)
+	testing.expect_value(t, strings.to_string(b), string(whole))
+}
+
+// What a list or map row cannot write: a cell type `unmarshal` cannot read, a map entry whose cell is empty
+// (read back as no entry), a blank line, and a value refused in a cell, at `[record][cell]` or `[record].key`.
+@(test)
+test_marshal_cell_rows_refused :: proc(t: ^testing.T) {
+	expect_refused :: proc(t: ^testing.T, rows: $T, opts: csv.Marshal_Opts, kind: csv.Marshal_Error_Kind, path: string, loc := #caller_location) {
+		out, err := csv.marshal(rows, opts, allocator = context.temp_allocator)
+		testing.expect_value(t, marshal_kind(err), kind, loc)
+		testing.expect(t, out == nil, loc = loc)
+		if path != "" {
+			msg := csv.render_error(nil, err.?, context.temp_allocator)
+			testing.expectf(t, strings.has_suffix(msg, path), "%q does not end in %q", msg, path, loc = loc)
+		}
+	}
+	expect_refused(t, [][][]int{{{1}}}, {}, .Unsupported, "")
+	by_int := make(map[int]string, context.temp_allocator)
+	by_int[1] = "a"
+	expect_refused(t, []map[int]string{by_int}, {}, .Unsupported, "")
+	expect_refused(t, []map[string]string{pairs({"a", ""})}, {dialect = {quoting = .None}}, .Unwritable, "at [0].a")
+	nil_entry := make(map[string]Maybe(string), context.temp_allocator)
+	nil_entry["a"] = nil
+	expect_refused(t, []map[string]Maybe(string){nil_entry}, {}, .Unwritable, "at [0].a")
+	expect_refused(t, [][]string{{"a"}, {}}, {}, .Unwritable, "at [1]")
+	expect_refused(t, [][]string{{""}}, {dialect = {quoting = .None}}, .Unwritable, "at [0]")
+	expect_refused(t, []map[string]string{{}}, {}, .Unwritable, "at [0]")
+	expect_refused(t, [][]f64{{1, math.inf_f64(1)}}, {}, .Non_Finite, "at [0][1]")
 }

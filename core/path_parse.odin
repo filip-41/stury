@@ -1,9 +1,7 @@
 package core
 
 import "base:runtime"
-import "core:strconv"
 import "core:strings"
-import "core:unicode/utf8"
 
 // Query path vocabulary, shared by every codec: a chain of steps from a node.
 //
@@ -95,7 +93,7 @@ Parse_Fault :: struct {
 // All-or-nothing: a fault reports an empty path. `steps` must hold every step `text` names and `names`
 // every escaped name decoded. A buffer too small reports `Out_Of_Room` and never truncates.
 parse_path_fault :: proc(text: string, steps: []Step, names: []u8 = nil) -> (p: Path, err: Maybe(Parse_Fault)) {
-	i := skip_space(text, 0)
+	i := skip_path_space(text, 0)
 	limit, n: int
 	fault: Parse_Fault
 	ok: bool
@@ -104,30 +102,30 @@ parse_path_fault :: proc(text: string, steps: []Step, names: []u8 = nil) -> (p: 
 	case strings.has_prefix(text[i:], "first("):
 		limit = 1
 		wrapped = true
-		i = skip_space(text, i + len("first("))
+		i = skip_path_space(text, i + len("first("))
 	case strings.has_prefix(text[i:], "limit("):
 		wrapped = true
-		i = skip_space(text, i + len("limit("))
+		i = skip_path_space(text, i + len("limit("))
 		limit, i, fault, ok = scan_limit(text, i)
 		if !ok {
 			return {}, fault
 		}
-		i = skip_space(text, i)
+		i = skip_path_space(text, i)
 		if i >= len(text) || text[i] != ';' {
 			return {}, unsupported(i)
 		}
-		i = skip_space(text, i + 1)
+		i = skip_path_space(text, i + 1)
 	}
 	n, i, fault, ok = lower_path(text, i, steps, names)
 	if !ok {
 		return {}, fault
 	}
-	i = skip_space(text, i)
+	i = skip_path_space(text, i)
 	if wrapped {
 		if i >= len(text) || text[i] != ')' {
 			return {}, unsupported(i)
 		}
-		i = skip_space(text, i + 1)
+		i = skip_path_space(text, i + 1)
 	}
 	if i < len(text) {
 		return {}, unsupported(i)
@@ -154,7 +152,7 @@ lower_path :: proc(text: string, pos: int, out: []Step, names: []u8) -> (n, next
 		is_name := c == '"' || is_ident_start(c)
 		if !is_name && c != '[' {
 			if after_dot {
-				if c == 0 || is_space(c) || c == ')' || c == ';' {
+				if c == 0 || is_path_space(c) || c == ')' || c == ';' {
 					return 0, i, Parse_Fault{error = .Empty_Key, offset = u64(i)}, false
 				}
 				return 0, i, unsupported(i), false
@@ -246,66 +244,26 @@ unquote :: proc(text: string, lo: int, dst: []u8) -> (n, next: int, escaped: boo
 			continue
 		}
 		escaped = true
-		if i + 1 >= len(text) {
-			break
-		}
-		r: rune
-		width := 2
-		switch e := text[i + 1]; e {
-		case '"', '\\', '/':
-			r = rune(e)
-		case 'b':
-			r = '\b'
-		case 'f':
-			r = '\f'
-		case 'n':
-			r = '\n'
-		case 'r':
-			r = '\r'
-		case 't':
-			r = '\t'
-		case 'u':
-			hi, hex := hex4(text, i + 2)
-			if !hex {
-				return 0, i, escaped, Parse_Fault{error = .Bad_Escape, offset = u64(i)}, false
-			}
-			r, width = rune(hi), 6
-			if hi >= 0xD800 && hi < 0xE000 {
-				low, pair := hex4(text, i + 8)
-				if !(hi < 0xDC00 && pair && text[i + 6] == '\\' && text[i + 7] == 'u' && low >= 0xDC00 && low < 0xE000) {
-					return 0, i, escaped, Parse_Fault{error = .Bad_Escape, offset = u64(i)}, false
-				}
-				r, width = rune(0x10000 + (hi - 0xD800) << 10 + (low - 0xDC00)), 12
-			}
-		case '(':
+		if i + 1 < len(text) && text[i + 1] == '(' {
 			// jq's string interpolation.
 			return 0, i, escaped, unsupported(i), false
+		}
+		unit: [4]u8
+		size, past, refused := decode_escape(transmute([]byte)text, u64(i), u64(len(text)), unit[:])
+		#partial switch refused {
+		case .None:
+		case .Truncated:
+			return 0, i, escaped, Parse_Fault{error = .Unclosed_Quote, offset = u64(lo - 1)}, false
 		case:
 			return 0, i, escaped, Parse_Fault{error = .Bad_Escape, offset = u64(i)}, false
 		}
-		bytes, size := utf8.encode_rune(r)
 		if dst != nil {
-			copy(dst[n:], bytes[:size])
+			copy(dst[n:], unit[:size])
 		}
 		n += size
-		i += width
+		i = int(past)
 	}
 	return 0, i, escaped, Parse_Fault{error = .Unclosed_Quote, offset = u64(lo - 1)}, false
-}
-
-@(private)
-hex4 :: proc(text: string, at: int) -> (v: u32, ok: bool) {
-	if at + 4 > len(text) {
-		return 0, false
-	}
-	for j in 0 ..< 4 {
-		d := strconv._digit_value(rune(text[at + j]))
-		if d >= 16 {
-			return 0, false
-		}
-		v = v << 4 | u32(d)
-	}
-	return v, true
 }
 
 // `[]`, `["key"]` or `[index]`, from the `[`.
@@ -453,4 +411,20 @@ path_resolve :: proc(spec: Path_Spec, buf: ^Path_Buf, allocator: runtime.Allocat
 		buf.heap = nil
 	}
 	return
+}
+
+// The path syntax's whitespace, as jq's lexer reads it between tokens: space, tab, line feed, carriage return.
+@(private)
+is_path_space :: #force_inline proc(c: u8) -> bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// The index of the first byte of `text` at or past `pos` that is not `is_path_space`, or `len(text)`.
+@(private)
+skip_path_space :: #force_inline proc(text: string, pos: int) -> int {
+	i := pos
+	for i < len(text) && is_path_space(text[i]) {
+		i += 1
+	}
+	return i
 }

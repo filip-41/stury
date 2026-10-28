@@ -98,9 +98,6 @@ test_demand_key_filter :: proc(t: ^testing.T) {
 				}
 				for level in ([]json.Strictness{.Strict, .Structural, .Lazy}) {
 					for mode in ([]json.Duplicates{.First, .Last}) {
-						if level == .Lazy && mode == .Last {
-							continue // a stopping walk needs the first occurrence
-						}
 						r := paths_run(raw(src), paths, level, mode)
 						defer json.destroy(&r.req)
 						want := c.want_first if mode == .First else c.want_last

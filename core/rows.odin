@@ -1,52 +1,51 @@
 package core
 
-// The row tree: one 32-byte row per value in preorder, spans into a text. A plain row's token is spelled as JSON
-// (a string or key double-quoted with no backslash, a number a JSON number token); any other token is flagged
-// and decoded by the document's dialect.
+// The row tree: one 32-byte row per value in preorder, spans into a text. A plain row's token is read by core:
+// a string or key is its span inside its quotes, or the whole span when `.Bare` (`.Key_Bare`), a number is a
+// decimal token `-?d+(.d+)?([eE][+-]?d+)?` whose digit counts are in `first_esc` (`number_digits_pack`). Any
+// other token is flagged and read through the document's spelling (`Row_Spelling`).
 
-// The JSON dialect a row tree's flagged tokens are spelled in and its facts are read from. `.Jsonc` is JSON with
-// comments and trailing commas, `.Json5` is JSON5 1.0.0.
-Row_Dialect :: enum u8 {
-	Json,
-	Jsonc,
-	Json5,
-}
+// The digit pack of a number row whose token is spelled the format's own way (hex, `.5`, `+1`, `Infinity`): no
+// decimal token packs zero integer digits, so a reader tests for it only where the counts do not settle the value.
+SPELLED_NUMBER :: u16(0xFF00)
 
 // An escaped string row's decoded text: `values[off:][:len]` of the store the walk decodes into (a
-// `Row_Document`'s `values`). Offsets rather than a slice keep the row at 32 bytes. Both fit u32 because the
+// `Document`'s `values`). Offsets rather than a slice keep the row at 32 bytes. Both fit u32 because the
 // decoded bytes never outnumber the source's (`MAX_ROW_SOURCE`).
 Row_Str :: struct {
 	off, len: u32,
 }
 
+// An escaped key a decoded document's build decoded: member `node`'s key text, `values[str.off:][:str.len]`.
+Key_Text :: struct {
+	node: Node,
+	str:  Row_Str,
+}
+
 // An escaped string's decoded value, under `.Decoded`. An escape-free string has none: its
-// text is its source text, `src[lo + 1:hi - 1]`. A number has none either: each read decodes its source
+// text is its source text. A number has none either: each read decodes its source
 // text, which the walk only checks, since folding and converting every number slows a document build on
 // number-heavy input.
 Row_Payload :: struct #raw_union {
 	str: Row_Str,
 }
 
-// A row's facts in one `u8`: decode state and escape presence.
-//
-// `.Exact`/`.Inexact`/`.Underflowed`/`.Refused` are never on a row: they are the number decoder's answer
-// (`dom_number_value`), which a reader turns into an `Exactness`.
+// A row's facts in one `u8`: decode state, escape presence and quoting. The values are fixed: renumbering the
+// escape bits changes the walks' code generation for the worse.
 Row_Flag :: enum u8 {
 	// The walk validated and decoded this value: `payload.str` is an escaped string's text (`Row_Str`).
 	// Never on a number.
-	Decoded,
-	// The decoded binary64 is the authored value, bit for bit.
-	Exact,
-	// The decoded binary64 is the correctly rounded projection. The span is the value.
-	Inexact,
-	// The authored value is nonzero and the projection is zero.
-	Underflowed,
-	// Valid grammar, no binary64 value (`1e400`).
-	Refused,
-	// The member key's source text carried at least one backslash.
-	Key_Escaped,
-	// The value token's source text carried one.
-	Str_Escaped,
+	Decoded     = 0,
+	// A string token that is not `.Str_Escaped` is its whole span, `src[lo:hi]`; without the flag it is its text
+	// between one opening and one closing byte, `src[lo + 1:hi - 1]`, so a quoted format writes no flag.
+	Bare        = 1,
+	// The member key's `.Bare`, over `key_lo`/`key_hi`.
+	Key_Bare    = 2,
+	// The member key's token is spelled the format's own way (a backslash, another quote, none): the
+	// document's spelling decodes it.
+	Key_Escaped = 5,
+	// The value token is a string spelled the format's own way, which the document's spelling decodes.
+	Str_Escaped = 6,
 }
 
 Row_Flags :: distinct bit_set[Row_Flag; u8]
@@ -66,8 +65,7 @@ Row :: struct {
 	subtree_size: u32,
 	kind:         Kind,
 	flags:        Row_Flags,
-	// A string's first backslash as an offset from `lo`, or a number's digit counts, or a dialect's own
-	// spelling of a number.
+	// A string's first backslash as an offset from `lo`, or a number's digit counts, or `SPELLED_NUMBER`.
 	first_esc:    u16,
 	// The last word is a scalar's payload or a container's member count: only a
 	// scalar is decoded, and only a container has members.

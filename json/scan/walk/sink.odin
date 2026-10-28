@@ -22,6 +22,8 @@ Scan_Query_Sink :: struct {
 	// address them by offset (`Row_Str`), so the store may move as it grows. An escape-free string is
 	// not copied: its text is a slice of the caller's `src`.
 	value_bytes:     [dynamic]u8,
+	// `.Dom`: the escaped member keys, decoded into `value_bytes` as their rows are written, by row.
+	key_texts:       [dynamic]Key_Text,
 }
 
 // Append `n` uninitialized bytes to `values` and return where they start. `bound` is the most bytes this

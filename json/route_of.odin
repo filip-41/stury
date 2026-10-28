@@ -25,17 +25,18 @@ Path_Route :: enum u8 {
 // `Path_Route` name. `src` is read only to its root's first value. `Bad_Option` when `which` is not one of
 // `paths`; `Over_Capacity` where `scan` would refuse the paths for the router's bounds.
 @(require_results)
-route_of :: proc(src: []byte, paths: []Path, which: int, opts := Read_Opts{}) -> (route: core_pkg.Route, err: Maybe(Error)) {
+route_of :: proc(src: []byte, paths: []Path, which: int, opts := Read_Opts{}) -> (route: core_pkg.Route, err: Maybe(Path_Error)) {
 	r := path_route(src, paths, which, opts) or_return
 	class: core_pkg.Route_Class = .Direct if r == .Matcher else .Document if r == .Tape else .Fallback
 	return {class, reflect.enum_string(r)}, nil
 }
 
 @(private = "file")
-path_route :: proc(src: []byte, paths: []Path, which: int, opts: Read_Opts) -> (route: Path_Route, err: Maybe(Error)) {
+path_route :: proc(src: []byte, paths: []Path, which: int, read: Read_Opts) -> (route: Path_Route, err: Maybe(Path_Error)) {
 	if which < 0 || which >= len(paths) {
-		return {}, Error{kind = .Bad_Option}
+		return {}, Path_Error{kind = .Bad_Option}
 	}
+	opts := walk_reading(read)
 	if tape_fits(paths, opts) {
 		return .Tape, nil
 	}

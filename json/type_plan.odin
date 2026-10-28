@@ -1,27 +1,15 @@
 package json
 
 // JSON's side of the type plan (`core_pkg.Type_Plan`) that `marshal` runs and `unmarshal` lowers into its read
-// shape: its options and hooks, how JSON spells its names, and the thread's cache of plans for calls made
-// without one.
+// shape: its options and hooks, and how JSON spells its names. A call made without a plan takes core's cached
+// one (`core_pkg.plan_cache_clear`).
 
-import "base:runtime"
 import core_pkg "../core"
 import enc "encode"
 import scan_pkg "scan"
 
-// How a plan maps types to JSON. `marshal` writes by it and `unmarshal` reads by it, so the text one plan
-// writes reads back with a plan made with the same opts. A call without a plan maps by the zero value.
-Plan_Opts :: struct {
-	enums:     Enum_Spelling,
-	// The member that names a struct arm of a union with two or more named struct arms: `marshal` writes it
-	// first in the arm's object and `unmarshal` picks the arm by it, falling back to the value's JSON kind
-	// for an object without it. Empty writes every arm untagged and reads every union by kind alone.
-	union_tag: string,
-	// The value `union_tag` names an arm type by, in place of its type name.
-	tag_names: []Tag_Name,
-	// Types written by the caller's procs instead of by the plan.
-	hooks:     []Type_Hook,
-}
+// How a plan maps types, in every format: JSON reads every option.
+Plan_Opts :: core_pkg.Plan_Opts
 
 // How marshal writes an enum, and how unmarshal reads one: `.Name`, the member's name, as a string (a value no
 // member has is refused), or `.Int`, the backing integer.
@@ -38,42 +26,47 @@ Tag_Name :: core_pkg.Tag_Name
 //	- A hooked type cannot be a map key or a bit_set's element.
 //	- As a union arm it takes every JSON kind, so `unmarshal` reads it only as a union's one arm, as in a
 //	  `Maybe`.
-Type_Hook :: core_pkg.Type_Hook(Marshal_Hook)
+Type_Hook :: core_pkg.Type_Hook
 
 // Write the value at `v`, of the hook's type, as exactly one JSON value: one `marshal_into(out, x)`, where `x`
 // is any value `marshal` writes (a `Raw` for text the hook writes itself). None, or a second, is
 // `.Bad_State`. Its indentation and re-escaping follow the call's `Marshal_Opts`.
-Marshal_Hook :: #type proc(out: ^Marshal_Out, v: rawptr) -> Marshal_Error
+Marshal_Hook :: core_pkg.Marshal_Hook
 
-// Read `text`, one JSON value as authored and checked in full, into the value at `dest`, of the hook's type,
-// allocating from `allocator`.
+// Read `v`, one JSON value checked in full, into the value at `dest`, of the hook's type, allocating from
+// `allocator`.
 //
 //	- `dest` holds what the target held, as any value is read over it.
-//	- `text` is the source's bytes: copy what must outlive them. Under `.Jsonc` a container's text keeps its
-//	  comments.
+//	- `v.text` is the value's JSON text as authored, `v.decoded` a string's decoded text. They live for the
+//	  call: copy what must outlive it. Under `.Jsonc` a container's text keeps its comments.
 //	- A kind refuses the value with that kind, at the value. Nil reads it.
 //	- It runs only for a value read into a target: not under `unmarshal_check`, nor for a duplicate `.First`
 //	  skips.
 Unmarshal_Hook :: core_pkg.Unmarshal_Hook
 
+// One value an `Unmarshal_Hook` reads: its kind, its text, and a string's decoded text.
+Hook_Value :: core_pkg.Hook_Value
+
 // A type's fields, tags and forms, compiled once per `typeid` for both directions (`type_plan_init`).
 // It owns every field below, in its allocator, and grows as values of new types are met. `destroy` frees it.
-// Its fields are the plan's own: read none of them.
-Type_Plan :: core_pkg.Hooked_Plan(Marshal_Hook)
+// Its fields are the plan's own: read none of them. Any format's calls take it, and ignore an option they do
+// not have; a format's first call compiles that format's spelling of it.
+Type_Plan :: core_pkg.Shared_Plan
+
+// The plan a call runs in this format: a `Type_Plan`'s, or the cached or temporary one (`plan_for`).
+@(private)
+Format_Plan :: core_pkg.Hooked_Plan
 
 // A plan for values of type `T`, mapped by `opts`, which it copies. Nothing is compiled until first use.
 @(require_results)
 type_plan_init :: proc(T: typeid, opts := Plan_Opts{}, allocator := context.allocator) -> Type_Plan {
-	mapping := core_pkg.Plan_Opts{enums = opts.enums, union_tag = opts.union_tag, tag_names = opts.tag_names}
-	return core_pkg.hooked_plan_init(T, mapping, opts.hooks, json_plan_format(), allocator)
+	return core_pkg.shared_plan_init(T, opts, json_plan_format, allocator)
 }
 
 @(private)
 Plan_Op :: core_pkg.Plan_Op
 @(private)
 Plan_Field :: core_pkg.Plan_Field
-@(private)
-Plan_Member :: core_pkg.Plan_Member
 
 @(private, rodata)
 json_plan_types := [?]core_pkg.Format_Type{
@@ -109,34 +102,15 @@ spell_plan_key :: proc(keys: ^[dynamic]u8, name: string, role: core_pkg.Key_Role
 	return core_pkg.Plan_Error(err)
 }
 
-@(private, thread_local)
-plan_cache: core_pkg.Plan_Cache(Marshal_Hook)
-
-// Frees every plan this thread's cache holds, as eviction frees one: in the heap allocator they were made
-// in, whatever `context.allocator` is.
-//
-//	- For a thread that is done with the default plan, so its cache is not left allocated at exit. The next
-//	  call without a plan makes one again.
-//	- It does nothing while a call on this thread is using the cache (from inside a hook).
-plan_cache_clear :: proc() {
-	core_pkg.plan_cache_clear(&plan_cache)
-}
-
-@(fini, private)
-plan_cache_fini :: proc "contextless" () {
-	context = runtime.default_context()
-	plan_cache_clear()
-}
-
-// The plan a call for `T` runs: `given`, which must have been made for `T` (`ok` false otherwise), else this
-// thread's cached plan, else a temporary one made in `tmp`. `plan_done` gives it back.
+// The plan a call for `T` runs: `given`, which must have been made for `T` and JSON (`ok` false otherwise),
+// else this thread's cached plan, else a temporary one made in `tmp`. `plan_done` gives it back.
 @(private)
-plan_for :: #force_inline proc(given: ^Type_Plan, T: typeid, tmp: ^Type_Plan) -> (p: ^Type_Plan, ok: bool) {
-	return core_pkg.plan_for(&plan_cache, given, T, tmp, json_plan_format)
+plan_for :: #force_inline proc(given: ^Type_Plan, T: typeid, tmp: ^Format_Plan) -> (p: ^Format_Plan, ok: bool) {
+	return core_pkg.plan_for(given, T, tmp, json_plan_format)
 }
 
 // A call is done with `p`, the plan `plan_for` gave it for `given` and `tmp`.
 @(private)
-plan_done :: #force_inline proc(p, given, tmp: ^Type_Plan, out_of_memory: bool) {
-	core_pkg.plan_done(&plan_cache, p, given, tmp, out_of_memory)
+plan_done :: #force_inline proc(p: ^Format_Plan, given: ^Type_Plan, tmp: ^Format_Plan, out_of_memory: bool) {
+	core_pkg.plan_done(p, given, tmp, out_of_memory)
 }

@@ -17,16 +17,16 @@ test_quickstart_validate :: proc(t: ^testing.T) {
 	src := transmute([]byte)string(`{"name": "ada", "tags": ["math", "engines"]}`)
 
 	if err, bad := json.validate(src).?; bad {
-		fmt.eprintln(json.render_error(src, err, context.temp_allocator)) // such as `1:10: Bad_Literal`
+		fmt.eprintln(json.render_error(src, err, context.temp_allocator)) // such as `1:10: Invalid literal`
 	}
 
 	testing.expect(t, json.validate(src) == nil)
 	bad_src := transmute([]byte)string(`{"a": tru}`)
 	err := json.validate(bad_src).?
-	testing.expect_value(t, err, json.Error{kind = .Bad_Literal, offset = 9})
+	testing.expect_value(t, err, json.Error{kind = .Bad_Char, detail = u8(json.Fault.Literal), offset = 9})
 	line, col := json.error_position(bad_src, err)
 	testing.expect_value(t, [2]int{line, col}, [2]int{1, 10})
-	testing.expect_value(t, json.render_error(bad_src, err, context.temp_allocator), "1:10: Bad_Literal")
+	testing.expect_value(t, json.render_error(bad_src, err, context.temp_allocator), "1:10: Invalid literal")
 	free_all(context.temp_allocator)
 }
 
@@ -80,7 +80,7 @@ test_quickstart_unmarshal_marshal :: proc(t: ^testing.T) {
 	// out is `{"name":"ada","tags":["math","engines"]}`
 
 	testing.expect_value(t, p.name, "ada")
-	testing.expect_value(t, merr, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(merr), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(out), `{"name":"ada","tags":["math","engines"]}`)
 }
 
@@ -100,7 +100,7 @@ test_quickstart_marshal_values :: proc(t: ^testing.T) {
 	defer delete(compact)
 	// compact is `{"name":"ada","tags":["math","engines"]}`: the document as authored, without whitespace
 
-	testing.expect_value(t, err, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(mixed), `[1,"two",{"three":3}]`)
 	testing.expect_value(t, string(compact), `{"name":"ada","tags":["math","engines"]}`)
 	defer free_all(context.temp_allocator)
@@ -130,7 +130,7 @@ test_quickstart_query :: proc(t: ^testing.T) {
 	}
 
 	reached = true
-	testing.expect_value(t, a.outcome, json.Path_Outcome.Found)
+	testing.expect_value(t, a.outcome, json.Answer_Outcome.Found)
 	testing.expect_value(t, string(src[a.lo:a.hi]), `"engines"`)
 }
 

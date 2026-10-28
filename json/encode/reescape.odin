@@ -12,7 +12,7 @@ package encode
 
 import "base:intrinsics"
 import "core:simd"
-import lex "../scan/lex"
+import core_pkg "../../core"
 
 @(private = "file")
 Reescape_Flag :: enum u8 {
@@ -137,7 +137,7 @@ reescape_run :: proc(dst: [^]u8, text: []u8, $FLAGS: Reescape) -> int #no_bounds
 }
 
 // Rewrite `dst[lo:]` in place, growing `dst` by exactly the bytes the rewrite adds when they do not fit.
-reescape_tail :: proc(dst: ^[dynamic]u8, lo: int, flags: Reescape) -> Marshal_Error {
+reescape_tail :: proc(dst: ^[dynamic]u8, lo: int, flags: Reescape) -> Marshal_Error_Kind {
 	extra := reescape_extra(dst[lo:], flags)
 	if extra == 0 {
 		return .None
@@ -180,7 +180,7 @@ utf8_seq_len :: #force_inline proc "contextless" (lead: u8) -> int {
 reescape_block :: #force_inline proc "contextless" (v: #simd[16]u8, flags: Reescape) -> bool {
 	when ODIN_ARCH != .amd64 {
 		if flags == {.Non_Ascii} {
-			return lex.any_high(v)
+			return core_pkg.any_high(v)
 		}
 	}
 	hit: #simd[16]u8
@@ -193,7 +193,7 @@ reescape_block :: #force_inline proc "contextless" (v: #simd[16]u8, flags: Reesc
 	if .Html in flags {
 		hit |= html_lanes(v)
 	}
-	return lex.any_lane(hit)
+	return core_pkg.any_lane(hit)
 }
 
 // The lanes of `v` holding `<`, `>` or `&`, the bytes `.Html` writes as escapes.

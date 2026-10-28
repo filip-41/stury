@@ -4,8 +4,8 @@ package jq
 // parses, fails, and recovers from its errors as it does in jq, with jq's messages at jq's locations.
 // lex.odin is jq's lexer (src/lexer.l) and actions.odin the rule actions of jq's parser.y.
 
-import "core:fmt"
 import "core:strings"
+import "../message"
 
 // A span of the program, in bytes.
 Loc :: struct {
@@ -91,7 +91,7 @@ locate :: proc(src: string, e: Compile_Error) -> string {
 	line_end = len(src) if line_end < 0 else offset + line_end
 	end := min(e.loc.end, max(line_end, start + 1))
 	b := strings.builder_make()
-	fmt.sbprintf(&b, "%s at %s, line %d, column %d:\n    %s\n    ", e.msg, e.file if e.file != "" else "<top-level>", strings.count(src[:start], "\n") + 1, start - offset + 1, src[offset:line_end])
+	message.write(&b, "%s at %s, line %d, column %d:\n    %s\n    ", e.msg, e.file if e.file != "" else "<top-level>", strings.count(src[:start], "\n") + 1, start - offset + 1, src[offset:line_end])
 	carets := max(end - start, 0)
 	for _ in 0 ..< max(end - offset - carets, 0) {
 		strings.write_byte(&b, ' ')

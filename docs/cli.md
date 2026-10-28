@@ -605,7 +605,7 @@ these places:
   (`.@base64 "x"`), and that still parses as jq's.
 - They only read: `path(.@comment)` and `.@comment = 1` are errors. A comment sits beside a value rather
   than inside it, so jq's paths, and `=`, `|=` and `del` with them, have nothing to address. To change the
-  comments of a file, use the library's `edit_comment`.
+  comments of a file, use the library's `insert_comment`, `set_comment` and `remove_comment`.
 
 ## Differences from jq
 
@@ -718,9 +718,15 @@ line and column in the stream, without a file's name.
 
 - A literal near decNumber's bottom exponent keeps its digits: `12.5e-1147483647` is `1.25E-1147483646` in
   stury, where jq rounds it to `1E-1147483646`.
+- An integer literal of 18 or more digits is rounded to the nearest double. jq 1.8.2 can be one unit in the last
+  place off: `712598146987295425 + 0` is `712598146987295500` in stury and `712598146987295400` in jq, and
+  `1287579022434948980 % 7` is 5 in stury and 2 in jq. Python's `float()` gives stury's values.
 
 **Dates and times**
 
+- A time past year 2^31 keeps its year: `67767976233532800 | todate` is `"2147483648-01-01T00:00:00Z"`, where jq
+  wraps the year to a negative one (`"-2147481748-01-01T00:00:00Z"`).
+- `now` has sub-microsecond resolution where the clock has it, so `now - now` need not be 0.
 - `strftime`, `todate` and `mktime` of a broken-down UTC time read it as UTC on every OS (`0 |
   strftime("%z %s")` is `+0000 0` whatever `TZ` is); jq does so on macOS only. `strflocaltime` stays local.
 - `scalb` and `scalbln` cut a fractional exponent toward zero and saturate a huge one on every OS, as jq on
@@ -758,9 +764,9 @@ differs from the library on purpose:
 | Numbers | printed as decNumber formats them (`1E2` is `1E+2`, `0.1e1` is `1`, `1e1000` is `1E+1000`); past decNumber's range, or when computed, as jq's double layout | the source text |
 | Strings | jq's escapes (`"\/"` is `"/"`, DEL is `\u007f`) | the source text |
 
-- To match `stury -c`, set `jq_spelling = true, trailing_newline = true`; the `indent`, `ascii_only` and
-  `escape_html` options still apply. To match `stury -S`, set `jq_spelling = true, sort_keys = true,
-  pretty = true, indent = 2, trailing_newline = true`.
+- To match `stury -c`, write the `Document` under `Document_Opts{jq_spelling = true, trailing_newline = true}`;
+  the `indent`, `ascii_only` and `escape_html` options still apply. To match `stury -S`, set `jq_spelling = true,
+  sort_keys = true, pretty = true, indent = 2, trailing_newline = true`.
 - A JSONC `Document` keeps its comments as `stury --from jsonc --to jsonc` prints them (a repeated key with its last value's).
   That does not apply to `marshal` of an `any`.
 - The CLI prints through the library's writer in `json/encode`.

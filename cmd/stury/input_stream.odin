@@ -5,14 +5,15 @@ package main
 
 import "base:runtime"
 import "core:bytes"
-import "core:fmt"
 import "core:io"
 import "core:os"
 import "core:sync"
 import "core:sys/posix"
 import "core:thread"
+import core_pkg "../../core"
 import json "../../json"
 import "jq"
+import "message"
 
 // Open the next file for the library and read it whole. It returns false if none is left. A file that does not open
 // or read is reported as jq reports it and counted, and the stream goes on.
@@ -27,13 +28,19 @@ open_next :: proc(ins: ^Inputs) -> bool {
 	place_past(ins, len(ins.data))
 	retire(ins, ins.data)
 	ins.data, ins.mapped, ins.lines_before, ins.window_lines = nil, false, 0, 0
-	ins.skip, ins.pos, ins.seen, ins.lines, ins.open, ins.texts_follow, ins.lines_tried, ins.line_records = 0, 0, 0, {}, true, false, false, FORMATS[ins.run.opts.from].framing == .Lines
+	ins.skip, ins.pos, ins.seen, ins.lines, ins.open, ins.texts_follow, ins.lines_tried, ins.line_records = 0, 0, 0, {}, true, false, false, reads_lines(&ins.run.opts)
 	ins.fault_at, ins.seq_head = {}, .Unread
+	ins.texts = json.records_pushed({framing = .Concatenated})
 	file, ok := open_file(ins)
 	if !ok {
 		return true
 	}
-	if ins.may_stream && streams(ins, file) {
+	cells := reads_cells(&ins.run.opts)
+	if ins.may_stream && streams(ins, file, records = !cells) {
+		if cells {
+			stream_cells(ins, file)
+			return true
+		}
 		ins.reader = start_reader(file)
 		next_window(ins, 0)
 	} else {
@@ -43,13 +50,12 @@ open_next :: proc(ins: ^Inputs) -> bool {
 		if !read {
 			return true
 		}
+		json.record_push(&ins.texts, ins.data, true)
 	}
 	data := ins.data
 	if !ins.bom_done && len(data) > 0 {
-		if bytes.has_prefix(data, UTF8_BOM[:]) {
-			ins.skip, ins.pos = len(UTF8_BOM), len(UTF8_BOM)
-		}
-		ins.bom_done = true
+		ins.skip = core_pkg.bom_len(data)
+		ins.pos, ins.bom_done = ins.skip, true
 	}
 	return true
 }
@@ -96,7 +102,7 @@ starts_with_record :: proc(f: ^os.File) -> bool {
 	if nl < 0 {
 		return false
 	}
-	line := bytes.trim_space(bytes.trim_prefix(head[:nl], UTF8_BOM[:]))
+	line := bytes.trim_space(head[core_pkg.bom_len(head[:nl]):nl])
 	if len(line) < 2 {
 		return false
 	}
@@ -197,11 +203,14 @@ abandon_reader :: proc(ins: ^Inputs) {
 	}
 }
 
-// The open stream's next window: data[from:], a text the last window cut short, then what the stream brings after it,
-// `want` bytes at least and a newline past it, and all that has come meanwhile, up to its last newline. At the
-// stream's end, all of it. With nothing cut short, the window is the reader's bytes, handed over whole. A text with
-// no newline stays in the window until one comes, as jq's fgets holds a line.
+// The open stream's next window: data[from:], a text the last window cut short from its line's start, then what the
+// stream brings after it, `want` bytes at least and a newline past it, and all that has come meanwhile, up to its last
+// newline. At the stream's end, all of it. With nothing cut short, the window is the reader's bytes, handed over whole.
+// A text with no newline stays in the window until one comes, as jq's fgets holds a line. The texts' reader (`texts`)
+// resumes at `from`, so the bytes it carries (`record_carry`) are the window's first.
 next_window :: proc(ins: ^Inputs, from: int, want := 0) {
+	json.record_skip(&ins.texts, text_offset(ins, from))
+	_, _ = json.record_carry(&ins.texts)
 	place_past(ins, from)
 	spent, cut := ins.data, ins.data[from:]
 	cut_lines := count_newlines(cut)
@@ -247,6 +256,7 @@ next_window :: proc(ins: ^Inputs, from: int, want := 0) {
 	r.newline = false
 	sync.cond_broadcast(&r.cond)
 	sync.mutex_unlock(&r.mutex)
+	json.record_push(&ins.texts, ins.data, ended)
 	if ended {
 		close_file(r.file)
 		end_stream(ins)
@@ -292,38 +302,46 @@ retire :: proc(ins: ^Inputs, data: []byte) {
 	ins.pinned = false
 }
 
-// Whether the text at data[at:], which the library did not read, may run on past the window into what the
-// stream has yet to bring: then the window is read on, from the line the text starts on, until the text
-// ends or the stream does, and the text is to be read again from `ins.pos`.
-read_on :: proc(ins: ^Inputs, at: int) -> bool {
-	at := at
-	if !unfinished(ins, at) {
-		return false
-	}
-	for {
-		from := max(bytes.last_index_byte(ins.data[:at], '\n') + 1, ins.skip) // a byte order mark stays behind
-		next_window(ins, from, 2 * (len(ins.data) - from))
-		at -= from
-		if !unfinished(ins, at) {
-			break
-		}
-	}
-	ins.pos = at
-	return true
+// The window read on, from the line the text at data[at:] starts on, for a read of the text that the window cut
+// short: the text is then at `ins.pos`, to be read again.
+read_past :: proc(ins: ^Inputs, at: int) {
+	from := max(bytes.last_index_byte(ins.data[:at], '\n') + 1, ins.skip)
+	next_window(ins, from, 2 * (len(ins.data) - from))
+	ins.pos = at - from
 }
 
-// Whether the text at data[at:] is cut short by the window's end, with more of the stream to come. Under
-// --seq a record runs to the next separator, so one with none after it in the window is cut short.
-@(private = "file")
-unfinished :: proc(ins: ^Inputs, at: int) -> bool {
-	if ins.reader == nil || FORMATS[ins.run.opts.from].framing == .Lines {
+// Whether the read of the text at data[at:], refused with `err`, ran into the window's end with more of the stream
+// to come, as the texts' reader tells (`text_read`): the window is then read on (`read_past`). A JSONC document,
+// the input's one text, runs to the window's end.
+text_cut :: proc(ins: ^Inputs, at: int, err: json.Error) -> bool {
+	if ins.reader == nil {
 		return false
 	}
-	if ins.run.opts.seq {
-		return bytes.index_byte(ins.data[at:], RS) < 0
+	cut: bool
+	if json.grammar_of(ins.run.read.dialect) != {} {
+		cut = err.kind == .Truncated && at + int(err.offset) == len(ins.data)
+	} else {
+		_, cut = text_read(ins, at, err)
 	}
-	e, bad := json.validate(ins.data[at:], {dialect = ins.run.req.dialect, limits = ins.run.req.limits}).?
-	return bad && e.kind == .Truncated
+	if cut {
+		read_past(ins, at)
+	}
+	return cut
+}
+
+// The text at data[at:] as the texts' reader ends it, given `read`, what its read reported: an array, object or
+// string where the read stopped, and `cut` when the read ran into the window's end with more of the stream to come.
+// A text read whole without a fault needs no call: its read tells its end.
+text_read :: proc(ins: ^Inputs, at: int, read: Maybe(json.Error)) -> (text: json.Record, cut: bool) {
+	json.record_skip(&ins.texts, text_offset(ins, at))
+	_, _ = json.next_record_open(&ins.texts)
+	return json.end_record(&ins.texts, read)
+}
+
+// The stream offset of data[at] as the texts' reader counts it.
+text_offset :: proc(ins: ^Inputs, at: int) -> u64 {
+	_, base := json.record_window(&ins.texts)
+	return base + u64(at)
 }
 
 // Free the files read past, once no value read from them is left.
@@ -361,7 +379,7 @@ open_file :: proc(ins: ^Inputs) -> (file: ^os.File, ok: bool) {
 	ins.name = f
 	err: os.Error
 	if file, err = open_input(f); err != nil {
-		fmt.eprintf("stury: error: Could not open file %s: %s\n", f, strerror(err))
+		message.write_stderr("stury: error: Could not open file %s: %s\n", f, strerror(err))
 		ins.failures += 1
 		ins.run.unopened = true
 		return nil, false
@@ -399,7 +417,7 @@ close_file :: proc(f: ^os.File) {
 }
 
 read_failed :: proc(ins: ^Inputs, err: os.Error) {
-	fmt.eprintf("stury: error: %s\n", strerror(err))
+	message.write_stderr("stury: error: %s\n", strerror(err))
 	ins.failures += 1
 	ins.run.unopened = true
 }

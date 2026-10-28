@@ -2,17 +2,7 @@ package lex
 
 // Walk-time escape validation and decoded-length accounting (strict string leaf).
 
-// The four hex digits at `p` as one code unit, and whether all four are hex digits. The caller guarantees
-// `p + 4 <= len(src)`.
-hex4 :: #force_inline proc(src: []byte, p: u64) -> (cp: u32, ok: bool) {
-	#no_bounds_check {
-		n0 := HEX_NIBBLE[src[p]]
-		n1 := HEX_NIBBLE[src[p + 1]]
-		n2 := HEX_NIBBLE[src[p + 2]]
-		n3 := HEX_NIBBLE[src[p + 3]]
-		return u32(n0) << 12 | u32(n1) << 8 | u32(n2) << 4 | u32(n3), (n0 | n1 | n2 | n3) & 0xF0 == 0
-	}
-}
+import core_pkg "../../../core"
 
 // One escape unit at the backslash `s.pos`, checked and stepped over. A surrogate pair is one unit, and a
 // lone surrogate half of either kind is refused (`surrogate_pair`). With `$decode`, `cp^` is what it
@@ -24,7 +14,7 @@ escape_unit :: #force_inline proc(s: ^Scanner, cp: ^u32, $decode: bool) -> Maybe
 		return Error{offset = u64(len(s.src)), kind = .Truncated}
 	}
 	e := s.src[s.pos]
-	if dec := ESC_BYTE[e]; dec != 0 {
+	if dec := core_pkg.ESC_BYTE[e]; dec != 0 {
 		s.pos += 1
 		when decode {
 			cp^ = u32(dec)
@@ -38,10 +28,10 @@ escape_unit :: #force_inline proc(s: ^Scanner, cp: ^u32, $decode: bool) -> Maybe
 		when !SCAN_FORCE_SLOW {
 			if s.pos + 4 <= u64(len(s.src)) {
 				#no_bounds_check {
-					n0 := HEX_NIBBLE[s.src[s.pos]]
-					n1 := HEX_NIBBLE[s.src[s.pos + 1]]
-					n2 := HEX_NIBBLE[s.src[s.pos + 2]]
-					n3 := HEX_NIBBLE[s.src[s.pos + 3]]
+					n0 := core_pkg.HEX_NIBBLE[s.src[s.pos]]
+					n1 := core_pkg.HEX_NIBBLE[s.src[s.pos + 1]]
+					n2 := core_pkg.HEX_NIBBLE[s.src[s.pos + 2]]
+					n3 := core_pkg.HEX_NIBBLE[s.src[s.pos + 3]]
 					if (n0 | n1 | n2 | n3) & 0xF0 != 0 {
 						if n0 == 0xFF {
 							return Error{offset = s.pos, kind = .Bad_Escape}
@@ -65,7 +55,7 @@ escape_unit :: #force_inline proc(s: ^Scanner, cp: ^u32, $decode: bool) -> Maybe
 				if s.pos >= u64(len(s.src)) {
 					return Error{offset = u64(len(s.src)), kind = .Truncated}
 				}
-				n := HEX_NIBBLE[s.src[s.pos]]
+				n := core_pkg.HEX_NIBBLE[s.src[s.pos]]
 				if n == 0xFF {
 					return Error{offset = s.pos, kind = .Bad_Escape}
 				}
@@ -124,7 +114,7 @@ surrogate_pair :: #force_no_inline proc(src: []byte, pos: u64, unit: u32) -> (sc
 			return 0, Error{offset = n, kind = .Truncated}
 		}
 		c := src[pos + i]
-		h := HEX_NIBBLE[c]
+		h := core_pkg.HEX_NIBBLE[c]
 		ok: bool
 		switch i {
 		case 0: ok = c == '\\'

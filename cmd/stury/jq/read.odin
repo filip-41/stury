@@ -10,16 +10,13 @@ package jq
 
 import "base:runtime"
 import "core:bytes"
-import "core:fmt"
 import "core:math"
 import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
-import "../../../json/scan/walk"
+import core_pkg "../../../core"
 import json "../../../json"
-import enc "../../../json/encode"
-import lex "../../../json/scan/lex"
-import number "../../../json/scan/number"
+import "../message"
 
 // What reading the next input came to.
 Parse_Status :: enum u8 {
@@ -32,8 +29,8 @@ Parse_Status :: enum u8 {
 // `--max-depth`, `json.MAX_DEPTH` unless the command line raises it, which it does before any input is read.
 lifted := json.Limits {
 	max_depth         = json.MAX_DEPTH,
-	max_scalar_digits = walk.MAX_SCALAR_DIGITS_REPRESENTABLE,
-	max_scalar_scale  = walk.MAX_SCALAR_SCALE_REPRESENTABLE,
+	max_scalar_digits = max(u64),
+	max_scalar_scale  = max(u64),
 }
 
 // The grammar the CLI reads option JSON and `fromjson` in: the dialect `--from` reads its texts as, which the command
@@ -41,7 +38,9 @@ lifted := json.Limits {
 read_dialect := json.Dialect.Json
 
 // JSON's whitespace.
-is_space :: walk.is_space
+is_space :: #force_inline proc "contextless" (c: u8) -> bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
 
 // json.build's document without its decoding: a `.Nodes` scan's rows, whose escaped strings and keys the
 // readers decode on first read, so a filter pays only for those it reads. Its refusals are build's errors.
@@ -55,13 +54,14 @@ build_rows :: proc(
 	err: Maybe(json.Error),
 ) {
 	req: json.Request({.Nodes})
-	req.dialect, req.limits, req.allocator = dialect, limits, allocator
+	_ = json.request_init(&req, opts = {dialect = dialect, limits = limits}, allocator = allocator)
 	req.doc.rows.allocator = allocator
 	if len(src) < 2 * 256 {
 		reserve(&req.doc.rows, len(src) / 2 + 1)
 	}
-	err = json.scan(src, &req)
-	if err == nil {
+	if refusal, bad := json.scan(src, &req).?; bad {
+		err, _ = core_pkg.source_error(refusal)
+	} else {
 		doc = req.doc
 		req.doc = {}
 	}
@@ -71,12 +71,12 @@ build_rows :: proc(
 
 // The offset of the first number of `doc` that JSON cannot spell (JSON5's `Infinity` and `NaN`).
 non_finite_at :: proc(doc: ^json.Document) -> (at: u64, found: bool) {
-	if !json.own_spelling(doc.dialect) {
+	if !json.own_spelling(doc) {
 		return
 	}
 	for r, i in doc.rows {
-		if r.kind == .Number && r.first_esc == number.DIALECT_SPELLED {
-			if v, _ := json.get_number(doc, json.Node(i)); v.value - v.value != 0 {
+		if r.kind == .Number && r.first_esc == core_pkg.SPELLED_NUMBER {
+			if v, _ := core_pkg.get_number(doc, json.Node(i)); v.value - v.value != 0 {
 				return u64(r.lo), true
 			}
 		}
@@ -92,7 +92,7 @@ read_text :: proc(src: []byte) -> (Value, Maybe(json.Error)) {
 	}
 	if at, found := non_finite_at(&d); found {
 		json.destroy(&d)
-		return nil, json.Error{kind = .Bad_Literal, offset = at}
+		return nil, json.Error{kind = .Bad_Char, detail = u8(json.Fault.Literal), offset = at}
 	}
 	return document_value(d), nil
 }
@@ -114,7 +114,7 @@ Events :: struct {
 @(private = "file")
 Event_Frame :: struct {
 	node:  json.Node,
-	rows:  json.Members,
+	rows:  core_pkg.Members,
 	array: bool,
 	index: int, // the step of the member read last: an array's index,
 	key:   string, // or an object's key
@@ -134,7 +134,7 @@ next_event :: proc(e: ^Events) -> (Value, bool) {
 	doc := &e.doc
 	if !e.started {
 		e.started = true
-		if json.child_count(doc, json.ROOT) == 0 {
+		if core_pkg.child_count(doc, json.ROOT) == 0 {
 			e.last = json.ROOT
 			return event(e, json.ROOT), true
 		}
@@ -142,10 +142,10 @@ next_event :: proc(e: ^Events) -> (Value, bool) {
 	}
 	for len(e.frames) > 0 {
 		f := &e.frames[len(e.frames) - 1]
-		row, ok := json.children(&f.rows)
+		row, ok := core_pkg.children(&f.rows)
 		if !ok {
 			closing := event(e, json.NO_NODE)
-			kd, _ := json.kind(doc, e.last)
+			kd, _ := core_pkg.kind(doc, e.last)
 			e.after_scalar = !e.closing && kd != .Array && kd != .Object
 			e.last, e.closing = f.node, true
 			pop(&e.frames)
@@ -154,9 +154,9 @@ next_event :: proc(e: ^Events) -> (Value, bool) {
 		if f.array {
 			f.index += 1
 		} else {
-			f.key, _ = json.get_key(doc, row)
+			f.key, _ = core_pkg.get_key(doc, row)
 		}
-		if json.child_count(doc, row) == 0 {
+		if core_pkg.child_count(doc, row) == 0 {
 			e.last, e.closing = row, false
 			return event(e, row), true
 		}
@@ -173,10 +173,10 @@ next_event :: proc(e: ^Events) -> (Value, bool) {
 // is a scalar, the ',' or closing bracket after any other member,
 // the quote that ends a top-level string, else the byte after a top-level literal. Valid until the next `next_event`.
 event_trigger :: proc(e: ^Events) -> int {
-	raw := json.get_raw(&e.doc, e.last)
+	raw := core_pkg.get_raw(&e.doc, e.last)
 	lo := int(uintptr(raw_data(raw)) - uintptr(raw_data(e.doc.src)))
 	hi := lo + len(raw)
-	switch kd, _ := json.kind(&e.doc, e.last); {
+	switch kd, _ := core_pkg.kind(&e.doc, e.last); {
 	case e.closing:
 		return e.base + hi - 1 + int(e.after_scalar)
 	case kd == .Array || kd == .Object:
@@ -192,8 +192,8 @@ event_trigger :: proc(e: ^Events) -> int {
 
 @(private = "file")
 push_frame :: proc(e: ^Events, n: json.Node) {
-	kd, _ := json.kind(&e.doc, n)
-	append(&e.frames, Event_Frame{node = n, rows = json.children(&e.doc, n), array = kd == .Array, index = -1})
+	kd, _ := core_pkg.kind(&e.doc, n)
+	append(&e.frames, Event_Frame{node = n, rows = core_pkg.children(&e.doc, n), array = kd == .Array, index = -1})
 }
 
 // `[path, leaf]`, or `[path]` for NO_NODE, copied whole into the context's allocator.
@@ -206,11 +206,12 @@ event :: proc(e: ^Events, leaf: json.Node) -> Value {
 	if leaf == json.NO_NODE {
 		return event_of(path)
 	}
-	#partial switch kd, _ := json.kind(&e.doc, leaf); kd {
+	switch kd, _ := core_pkg.kind(&e.doc, leaf); kd {
 	case .Array:
 		return event_of(path, new_array())
 	case .Object:
 		return event_of(path, new_object())
+	case .Null, .False, .True, .Number, .String:
 	}
 	return event_of(path, event_clone(scalar(Ref{&e.doc, leaf})))
 }
@@ -264,7 +265,7 @@ read_json :: proc(src: string) -> (Value, string) {
 	case:
 		msg = parse_message(text, e)
 	}
-	return nil, fmt.aprintf("%s (while parsing '%s')", msg, shown)
+	return nil, message.build("%s (while parsing '%s')", msg, shown)
 }
 
 // The library's fault `e` in `src` as jq tells a parse error: its message (`what`, where jq words it its own way, and
@@ -281,7 +282,7 @@ parse_message :: proc(src: []byte, e: json.Error, line := 1, column := 0, what :
 	if !eof {
 		c += 1
 	}
-	return fmt.aprintf("%s%s at line %d, column %d", what if what != "" else FAULT_TEXT[e.kind], " at EOF" if eof else "", l, c)
+	return message.build("%s%s at line %d, column %d", what if what != "" else fault_text(e), " at EOF" if eof else "", l, c)
 }
 
 // Move a line and column past `b`, as jq's parser counts them.
@@ -298,28 +299,9 @@ advance :: proc(line, column: ^int, b: []byte) {
 // What jq says for a top-level number in a --seq record with no whitespace or separator after it.
 TRUNCATED_NUMBER_NOTE :: "Potentially truncated top-level numeric value"
 
-// A sentence for each kind of fault the library finds in a text: jq's, where jq has one.
-@(rodata)
-FAULT_TEXT := [json.Error_Kind]string {
-	.None = "Unknown fault",
-	.Truncated = "Unfinished JSON term",
-	.Bad_Char = "Unexpected character",
-	.Bad_Escape = "Invalid escape",
-	.Bad_Literal = "Invalid literal",
-	.Bad_Number = "Invalid numeric literal",
-	.Limit_Digits = "Number has too many digits",
-	.Limit_Scale = "Number's exponent is out of range",
-	.Too_Deep = "Exceeds depth limit for parsing",
-	.Trailing = "Unexpected text after the JSON value",
-	.Source_Too_Wide = "Input is too large to read",
-	.Out_Of_Memory = "Out of memory",
-	.Duplicate_Key = "Duplicate key",
-	.Bad_Option = "Unsupported option",
-	.Field_Count = "Record has the wrong number of fields",
-	.Limit_Fields = "Record has too many fields",
-	.Limit_Record = "Record is too long",
-	.Bad_Path = "Invalid path",
-	.Over_Capacity = "Exceeds a fixed limit of the path scan",
+// The sentence the library's `render_error` writes for a fault in a JSON text: jq's, where jq has one.
+fault_text :: proc(e: json.Error) -> string {
+	return core_pkg.fault_text(e.kind, e.detail, json.fault_name)
 }
 
 // `text` as decNumber reads a number (jv_number_with_literal): a sign, then digits with a point and an exponent,
@@ -346,15 +328,15 @@ read_number :: proc(text: string) -> (Value, bool) {
 	}
 	// Digits around an optional point, at least one, then an optional exponent: the library's loose number
 	// reading (`.5` and `1.` count).
-	if lexed := number.lex_number_span(transmute([]byte)t, 0, u64(len(t))); !lexed.whole || t[0] == '-' {
+	if lexed := core_pkg.lex_number_span(transmute([]byte)t, 0, u64(len(t))); !lexed.whole || t[0] == '-' {
 		return nil, false
 	}
 	f, _ := strconv.parse_f64(text)
-	return Number{f = f, lit = enc.bounded_literal(text[1:] if text[0] == '+' else text)}, true
+	return Number{f = f, lit = json.jq_literal(text[1:] if text[0] == '+' else text)}, true
 }
 
-// The body of a JSON string decoded into `out` as jq's JSON parser decodes it, or why it cannot be. The
-// escapes and their hex digits are read with the library's tables. A lone low surrogate, which only stury
+// The body of a JSON string decoded into `out` as jq's JSON parser decodes it, or why it cannot be, in jq's
+// words. The escapes are read by the library's decoder. A lone low surrogate, which only stury
 // refuses, sets `stury_only_at` to its backslash's offset.
 decode_string :: proc(out: ^strings.Builder, in_: string, stury_only_at: ^int = nil) -> string {
 	s := transmute([]byte)in_
@@ -370,46 +352,28 @@ decode_string :: proc(out: ^strings.Builder, in_: string, stury_only_at: ^int = 
 		if s[i] != '\\' {
 			return "Invalid string: control characters from U+0000 through U+001F must be escaped"
 		}
-		i += 1
-		if i >= len(s) {
+		unit: [4]u8
+		n, next, fault := core_pkg.decode_escape(s, u64(i), u64(len(s)), unit[:])
+		switch fault {
+		case .None:
+		case .Truncated:
 			return "Expected escape character at end of string"
-		}
-		c := s[i]
-		i += 1
-		if b := lex.ESC_BYTE[c]; b != 0 {
-			strings.write_byte(out, b)
-			continue
-		}
-		if c != 'u' {
+		case .Bad_Char:
 			return "Invalid escape"
-		}
-		if i + 4 > len(s) {
+		case .Short_Hex:
 			return "Invalid \\uXXXX escape"
-		}
-		cp, hex := lex.hex4(s, u64(i))
-		if !hex {
+		case .Bad_Hex:
 			return "Invalid characters in \\uXXXX escape"
-		}
-		i += 4
-		if 0xd800 <= cp && cp <= 0xdbff {
-			low: u32
-			pair := i + 6 <= len(s) && s[i] == '\\' && s[i + 1] == 'u'
-			if pair {
-				low, pair = lex.hex4(s, u64(i + 2))
-			}
-			if !pair || !(0xdc00 <= low && low <= 0xdfff) {
-				return "Invalid \\uXXXX\\uXXXX surrogate pair escape"
-			}
-			i += 6
-			cp = 0x10000 + ((cp - 0xd800) << 10 | (low - 0xdc00))
-		}
-		if 0xdc00 <= cp && cp <= 0xdfff {
+		case .Bad_Pair:
+			return "Invalid \\uXXXX\\uXXXX surrogate pair escape"
+		case .Lone_Low:
 			if stury_only_at != nil {
-				stury_only_at^ = i - 6 // the escape's backslash, where stury reports it
+				stury_only_at^ = i // the escape's backslash, where stury reports it
 			}
 			return "Invalid escape" // a lone low surrogate: jq makes it U+FFFD, stury refuses it as its JSON reader does
 		}
-		strings.write_rune(out, rune(cp))
+		strings.write_bytes(out, unit[:n])
+		i = int(next)
 	}
 	return ""
 }

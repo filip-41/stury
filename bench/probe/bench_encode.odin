@@ -49,7 +49,7 @@ discard_proc :: proc(data: rawptr, mode: io.Stream_Mode, p: []byte, _: i64, _: i
 
 // Times `marshal` of the built document at `opts`; with `to_writer` it streams into a `Discard` writer.
 // `copy_gb_per_s`, the baseline, times a plain copy of the same bytes into a warm buffer.
-bench_encode_doc :: proc(data: []byte, opts: json.Marshal_Opts, to_writer := false) -> bool {
+bench_encode_doc :: proc(data: []byte, opts: json.Document_Opts, to_writer := false) -> bool {
 	doc, berr := json.build(data)
 	if berr != nil {
 		return false
@@ -64,7 +64,7 @@ bench_encode_doc :: proc(data: []byte, opts: json.Marshal_Opts, to_writer := fal
 			t := time.tick_now()
 			err := json.marshal_to_writer(discard_writer(&sink), &doc, opts)
 			d = i64(time.tick_since(t))
-			if err != .None {
+			if err != nil {
 				return false
 			}
 			out_len = sink.n
@@ -72,7 +72,7 @@ bench_encode_doc :: proc(data: []byte, opts: json.Marshal_Opts, to_writer := fal
 			t := time.tick_now()
 			out, err := json.marshal(&doc, opts)
 			d = i64(time.tick_since(t))
-			if err != .None {
+			if err != nil {
 				return false
 			}
 			out_len = len(out)
@@ -121,7 +121,7 @@ bench_encode_string :: proc(data: []byte) -> bool {
 		out, err := json.marshal(strs[:])
 		d := i64(time.tick_since(t))
 		delete(out)
-		if err != .None {
+		if err != nil {
 			return false
 		}
 		keep_timed(&times, i, d)
@@ -153,7 +153,7 @@ bench_encode_numbers :: proc($T: typeid) -> bool where T == f64 || T == i64 {
 		d := i64(time.tick_since(t))
 		n = len(out)
 		delete(out)
-		if err != .None {
+		if err != nil {
 			return false
 		}
 		keep_timed(&times, i, d)
@@ -275,7 +275,7 @@ time_marshal :: proc(records: []$T, to_writer: bool) -> bool {
 			t := time.tick_now()
 			err := json.marshal_to_writer(discard_writer(&sink), records, plan = &plan)
 			d = i64(time.tick_since(t))
-			if err != .None {
+			if err != nil {
 				return false
 			}
 			out_len = sink.n
@@ -283,7 +283,7 @@ time_marshal :: proc(records: []$T, to_writer: bool) -> bool {
 			t := time.tick_now()
 			out, err := json.marshal(records, plan = &plan)
 			d = i64(time.tick_since(t))
-			if err != .None {
+			if err != nil {
 				return false
 			}
 			out_len = len(out)
@@ -367,11 +367,11 @@ bench_edit :: proc(data: []byte, op: Bench_Edit, path: string, value: any = nil)
 	if perr != nil {
 		return false
 	}
-	paths := [1]json.Path{p}
 	req: json.Request({.Path})
-	req.strictness = .Strict
-	req.paths = paths[:]
 	defer json.destroy(&req)
+	if json.request_init(&req, p) != nil {
+		return false
+	}
 	if !edit_took_effect(data, op, path, value) {
 		return false
 	}

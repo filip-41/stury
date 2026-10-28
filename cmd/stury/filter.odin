@@ -4,11 +4,11 @@ package main
 // runs it, and each output is printed as jq prints it.
 
 import "base:runtime"
-import "core:fmt"
 import "core:mem/virtual"
 import "core:strings"
-import json "../../json"
+import core_pkg "../../core"
 import "jq"
+import "message"
 
 // jq's process() results, which its exit status comes from.
 JQ_OK :: 0
@@ -56,7 +56,7 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 				return
 			}
 			flush_some(run, force = true)
-			fmt.eprintf("stury: ignoring parse error: %s\n%s", msg, ins.fault_note)
+			message.write_stderr("stury: ignoring parse error: %s\n%s", msg, ins.fault_note)
 			ins.fault_note = ""
 			ran = ins.slurped == nil // the message's memory goes back before the next input, as a value's does
 		case .More:
@@ -68,16 +68,21 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 // `arena` started as a growing arena, whose allocator it returns, or the run ended for want of memory.
 input_arena :: proc(run: ^Run, arena: ^virtual.Arena) -> runtime.Allocator {
 	if virtual.arena_init_growing(arena) != nil {
-		fmt.eprintln("stury: error: out of memory")
-		finish(run, EXIT_INPUT)
+		out_of_memory(run)
 	}
 	return virtual.arena_allocator(arena)
+}
+
+// Ends the run for want of memory.
+out_of_memory :: proc(run: ^Run) -> ! {
+	message.write_stderr("stury: error: out of memory\n")
+	finish(run, EXIT_INPUT)
 }
 
 // Ends the run on a fault in the input: the output so far, then jq's parse error message and the note after it.
 parse_failed :: proc(run: ^Run, msg: string, note := "") {
 	flush_some(run, force = true)
-	fmt.eprintf("stury: parse error: %s\n%s", msg, note)
+	message.write_stderr("stury: parse error: %s\n%s", msg, note)
 	run.ret = EXIT_INPUT
 }
 
@@ -100,13 +105,13 @@ Deep_Job :: struct {
 run_text :: proc(run: ^Run, src: []byte, base: u64) {
 	explain_interpreted(run)
 	ready_interpreter(run)
-	d, err := jq.build_rows(src, run.req.dialect)
+	d, err := jq.build_rows(src, run.read.dialect)
 	if e, bad := err.?; bad {
 		e.offset += base
 		fail_input(run, e)
 	}
-	defer json.destroy(&d)
-	run_once(run, jq.Ref{&d, json.ROOT})
+	defer core_pkg.row_document_destroy(&d)
+	run_once(run, jq.Ref{&d, core_pkg.ROOT})
 }
 
 Print_Sink :: struct {
@@ -124,7 +129,7 @@ eval_input :: proc(run: ^Run, v: jq.Value) -> jq.Signal {
 					jq.flush_messages(&run.ip)
 				}
 				if sel := run.selected; sel != nil {
-					print_cells(run, sel.cols, sel.rec, sel.dialect)
+					print_cells(run, sel.cols, sel.rec)
 					return .Go
 				}
 				if !print_jq(run, it.v) {
@@ -155,15 +160,15 @@ run_once :: proc(run: ^Run, v: jq.Value) {
 	case .Fail:
 		flush_some(run, force = true)
 		name, line := ip.inputs.position(ip.inputs.data)
-		at := fmt.tprintf("%s:%d", name, line) if name != "" else "<unknown>"
+		at := message.build_temp("%s:%d", name, line) if name != "" else "<unknown>"
 		if msg, is_str := jq.string_of(ip.err); is_str {
 			// jq prints the message as a C string, so it ends at a NUL.
 			if nul := strings.index_byte(msg, 0); nul >= 0 {
 				msg = msg[:nul]
 			}
-			fmt.eprintf("stury: error (at %s): %s\n", at, msg)
+			message.write_stderr("stury: error (at %s): %s\n", at, msg)
 		} else {
-			fmt.eprintf("stury: error (at %s) (not a string): %s\n", at, jq.to_json(ip.err))
+			message.write_stderr("stury: error (at %s) (not a string): %s\n", at, jq.to_json(ip.err))
 		}
 		run.ret = EXIT_INPUT
 	case .Break:

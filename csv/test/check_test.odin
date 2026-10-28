@@ -54,7 +54,7 @@ test_check_runs_no_hooks :: proc(t: ^testing.T) {
 			hooks = {
 				{
 					type = Date,
-					read = proc(text: []byte, dest: rawptr, allocator: runtime.Allocator) -> Maybe(csv.Unmarshal_Error_Kind) {
+					read = proc(v: csv.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(csv.Unmarshal_Error_Kind) {
 						return .Wrong_Kind
 					},
 				},

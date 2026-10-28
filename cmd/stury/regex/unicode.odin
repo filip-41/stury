@@ -5,46 +5,7 @@ package regex
 
 import "core:slice"
 import "core:strings"
-import "core:sync"
 import "core:unicode"
-
-@(private = "file")
-decoded: sync.Once
-
-// Fills PROPERTY_RANGES and FOLDS from their deltas (unicode_tables.py), once, before any table is read.
-decode_tables :: proc() {
-	sync.once_do(&decoded, proc() {
-		next :: #force_inline proc(b: ^[^]byte) -> (n: u32) {
-			for shift: u32 = 0;; shift += 7 {
-				x := b[0]
-				b^ = b[1:]
-				n |= u32(x & 0x7F) << shift
-				if x < 0x80 {
-					return
-				}
-			}
-		}
-		b := raw_data(RANGE_DELTAS)
-		for t in 0 ..< len(PROPERTY_TABLES) - 1 {
-			last: u32
-			for &r in PROPERTY_RANGES[PROPERTY_TABLES[t]:PROPERTY_TABLES[t + 1]] {
-				r[0] = last + next(&b)
-				r[1] = r[0] + next(&b)
-				last = r[1]
-			}
-		}
-		b = raw_data(FOLD_DELTAS)
-		last: u32
-		for &f in FOLDS {
-			f[0] = last + next(&b)
-			for k in 1 ..= 2 {
-				z := next(&b)
-				f[k] = f[0] + (z >> 1 ~ (0 - z & 1)) // unzigzagged, wrapping below f[0]
-			}
-			last = f[0]
-		}
-	})
-}
 
 // A character type: a property table, or every character outside it.
 Prop_Item :: struct {
@@ -69,10 +30,21 @@ in_table :: proc(table: int, r: rune) -> bool {
 		return r >= 0x1F3FB && r <= 0x1F3FF || in_table(TABLE_GRAPHEME_EXTEND, r)
 	}
 	ranges := PROPERTY_RANGES[PROPERTY_TABLES[table]:PROPERTY_TABLES[table + 1]]
-	k, _ := slice.binary_search_by(ranges, u32(r), proc(x: [2]u32, c: u32) -> slice.Ordering {
-		return slice.cmp(x[1], c)
-	})
-	return k < len(ranges) && ranges[k][0] <= u32(r)
+	if len(ranges) == 0 {
+		return false
+	}
+	// The last range starting at or below r, found without a branch per step; base + n stays within the
+	// table. The key is wide enough for any rune to shift into.
+	SPAN :: 1 << RANGE_SPAN_BITS - 1
+	key := u64(u32(r)) << RANGE_SPAN_BITS | SPAN
+	base := 0
+	#no_bounds_check for n := len(ranges); n > 1; {
+		half := n >> 1
+		base = base + half if u64(ranges[base + half]) <= key else base
+		n -= half
+	}
+	e := u64(ranges[base])
+	return e <= key && u64(u32(r)) - e >> RANGE_SPAN_BITS <= e & SPAN
 }
 
 // \w, which \b reads too.
@@ -107,13 +79,13 @@ fold :: proc(r: rune) -> rune {
 		return r + 32 if r >= 'A' && r <= 'Z' else r
 	}
 	f, ok := fold_entry(r)
-	return rune(f[2]) if ok else r
+	return rune(f & (1 << FOLD_BITS - 1)) if ok else r
 }
 
 // The next rune of those `r` folds alike with, round to `r` again, `r` when it folds alone.
 fold_next :: proc(r: rune) -> rune {
 	f, ok := fold_entry(r)
-	return rune(f[1]) if ok else r
+	return rune(f >> FOLD_BITS & (1 << FOLD_BITS - 1)) if ok else r
 }
 
 // The two or three runes, folded, that (?i) matches `r` to besides those it folds alike with.
@@ -141,9 +113,9 @@ unfold :: proc(runes: []rune) -> (r: rune, ok: bool) {
 }
 
 @(private = "file")
-fold_entry :: proc(r: rune) -> (f: [3]u32, ok: bool) {
-	k := slice.binary_search_by(FOLDS[:], u32(r), proc(f: [3]u32, c: u32) -> slice.Ordering {
-		return slice.cmp(f[0], c)
+fold_entry :: proc(r: rune) -> (f: u64, ok: bool) {
+	k := slice.binary_search_by(FOLDS, u64(u32(r)), proc(f: u64, c: u64) -> slice.Ordering {
+		return slice.cmp(f >> (2 * FOLD_BITS), c)
 	}) or_return
 	return FOLDS[k], true
 }

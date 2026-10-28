@@ -99,6 +99,7 @@ resolve_queries :: #force_no_inline proc(
 			// bytes that must outlive the scan.
 			adopt_allocator(&q.sink.value_bytes, q.allocator)
 			ctx^.value_bytes = &q.sink.value_bytes
+			adopt_allocator(&q.sink.key_texts, q.allocator)
 
 		case .Path:
 			adopt_allocator(&q.sink.paths, q.allocator)

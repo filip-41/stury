@@ -295,7 +295,7 @@ bench_record_batch :: proc(data: []byte) -> bool {
 	widths := BATCH_WIDTHS
 	pool: host.Batch_Pool
 	host.batch_pool_init(&pool)
-	defer host.batch_pool_destroy(&pool)
+	defer host.destroy(&pool)
 	times: [len(BATCH_WIDTHS)][TIMED_ITERS]i64
 	records := 0
 	it := json.records(data, {framing = .NDJSON})
@@ -343,11 +343,11 @@ bench_record_batch :: proc(data: []byte) -> bool {
 // Times one path query over the whole document. `answers=N` counts the matches, so a lane that misses
 // answers shows it.
 bench_path_wild :: proc(data: []byte, level: json.Strictness, steps: []json.Step) -> bool {
-	paths := [1]json.Path{{steps = steps}}
 	req: json.Request({.Path})
-	req.strictness = level
-	req.paths = paths[:]
 	defer json.destroy(&req)
+	if json.request_init(&req, json.Path{steps = steps}, opts = {strictness = level}) != nil {
+		return false
+	}
 	median_ns, timed := time_median(data, &req, scan_ok)
 	if !timed {
 		return false

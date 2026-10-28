@@ -4,7 +4,7 @@ import core_pkg "../../../core"
 import "../walk"
 
 Scanner :: walk.Scanner
-Error :: core_pkg.Error
+Error :: walk.Scan_Error
 Query_Ctx :: walk.Query_Ctx
 Walk_Kind :: walk.Walk_Kind
 Number :: core_pkg.Number

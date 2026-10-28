@@ -3,11 +3,11 @@ package main
 
 // The command line's calls into the system on POSIX. platform_windows.odin has Windows's.
 
-import "core:fmt"
 import "core:io"
 import "core:os"
 import "core:strings"
 import "core:sys/posix"
+import "message"
 
 @(private = "file")
 STACK_GUARD :: 1 << 20
@@ -59,7 +59,7 @@ run_deep :: proc(run: ^Run, ins: ^Inputs, body: proc(run: ^Run, ins: ^Inputs)) {
 // The line a fault in the stack's guard prints (and jq's, for memory run out), then exit 2: the stack was not had.
 @(private = "file")
 out_of_memory :: proc() -> ! {
-	fmt.eprintln("stury: error: cannot allocate memory")
+	message.write_stderr("stury: error: cannot allocate memory\n")
 	os.exit(EXIT_USAGE)
 }
 
@@ -194,10 +194,10 @@ platform_error_text :: proc(e: os.Platform_Error) -> string {
 	return string(posix.strerror(posix.Errno(i32(e))))
 }
 
-// Regular file `f`, from its current offset to its end, mapped copy-on-write, as its readers may write into it
-// (`stand_in`). It returns false if it does not map (nothing left, a file system that maps none), and it is to be
-// read. Stdin is mapped too, and left at its end as a read would leave it. The mapping starts at the page before the
-// offset (`unmap_file` finds it again).
+// Regular file `f`, from its current offset to its end, mapped read-only: nothing writes into an input. It returns
+// false if it does not map (nothing left, a file system that maps none), and it is to be read. Stdin is mapped too,
+// and left at its end as a read would leave it. The mapping starts at the page before the offset (`unmap_file` finds
+// it again).
 map_file :: proc(f: ^os.File) -> ([]byte, bool) {
 	if !is_regular_file(f) {
 		return nil, false
@@ -210,7 +210,7 @@ map_file :: proc(f: ^os.File) -> ([]byte, bool) {
 	}
 	page := i64(posix.sysconf(._PAGESIZE))
 	lo := i64(at) / page * page
-	p := posix.mmap(nil, uint(size - lo), {.READ, .WRITE}, {.PRIVATE}, fd, posix.off_t(lo))
+	p := posix.mmap(nil, uint(size - lo), {.READ}, {.PRIVATE}, fd, posix.off_t(lo))
 	if p == posix.MAP_FAILED {
 		return nil, false
 	}

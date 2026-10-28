@@ -226,7 +226,7 @@ stury_marshal :: proc($T: typeid) -> Arm {
 			return false
 		}
 		_, err := json.marshal(value, allocator = alloc)
-		return err == .None
+		return err == nil
 	}
 }
 
@@ -267,7 +267,7 @@ agrees :: proc($T: typeid) -> proc(src: []byte) -> (decodes_same, round_trips: b
 		}
 		want, werr := json.marshal(ours, allocator = alloc)
 		got, gerr := json.marshal(theirs, allocator = alloc)
-		if werr != .None || gerr != .None || string(want) != string(got) {
+		if werr != nil || gerr != nil || string(want) != string(got) {
 			return
 		}
 		written, cerr := core_json.marshal(ours, {}, alloc)
@@ -275,6 +275,6 @@ agrees :: proc($T: typeid) -> proc(src: []byte) -> (decodes_same, round_trips: b
 			return true, false
 		}
 		again, aerr := json.marshal(back, allocator = alloc)
-		return true, aerr == .None && string(again) == string(want)
+		return true, aerr == nil && string(again) == string(want)
 	}
 }

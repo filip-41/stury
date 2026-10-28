@@ -152,7 +152,7 @@ test_lone_surrogates_are_refused :: proc(t: ^testing.T) {
 	req: json.Request({.Path})
 	defer json.destroy(&req)
 	testing.expect_value(t, json.request_init(&req, ".v"), nil)
-	lone_at: Maybe(json.Error) = json.Error{kind = .Bad_Escape, offset = 6}
+	lone_at := source(json.Error{kind = .Bad_Escape, offset = 6})
 	testing.expect_value(t, json.scan(unread, &req), lone_at)
 	// An input cut inside the low half is truncated, not refused.
 	testing.expect_value(t, json.validate(raw(`"\uD800\uDC`)), json.Error{kind = .Truncated, offset = 11})

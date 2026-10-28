@@ -64,8 +64,8 @@ csv_walk_records :: proc(data: []byte, dialect: csv.Dialect, scratch: ^mem.Arena
 	for rec in csv.next_record(&it) {
 		t.records += 1
 		t.fields += u64(len(rec.fields))
-		for f in rec.fields {
-			text, escaped, err := csv.field_text(data, f, dialect, a)
+		for _, k in rec.fields {
+			text, escaped, err := csv.field_text(rec, k, a)
 			if err != nil {
 				return t, false
 			}
@@ -78,17 +78,20 @@ csv_walk_records :: proc(data: []byte, dialect: csv.Dialect, scratch: ^mem.Arena
 	return t, it.err == nil
 }
 
-// Reads the header's cells through `get_name` and every row's cells through `get_string`.
+// Reads the header's names as the first record's keys, and every cell through `get_string`, a null cell as empty.
 csv_read_document :: proc(doc: ^csv.Document) -> (t: Csv_Tally, ok: bool) {
-	t.records = u64(csv.row_count(doc)) + 1
-	t.fields = t.records * u64(csv.column_count(doc))
-	for col in 0 ..< csv.column_count(doc) {
-		name := csv.get_name(doc, col) or_return
+	t.records = u64(csv.child_count(doc, csv.ROOT)) + 1
+	head := csv.members(doc, csv.child(doc, csv.ROOT, 0))
+	for name in csv.members(&head) {
+		t.fields += 1
 		t.bytes += u64(len(name))
 	}
-	for row in 0 ..< csv.row_count(doc) {
-		for col in 0 ..< csv.column_count(doc) {
-			s := csv.get_string(doc, row, col) or_return
+	all := csv.children(doc, csv.ROOT)
+	for rec in csv.children(&all) {
+		cells := csv.children(doc, rec)
+		for c in csv.children(&cells) {
+			s, _ := csv.get_string(doc, c)
+			t.fields += 1
 			t.bytes += u64(len(s))
 		}
 	}
@@ -139,8 +142,8 @@ bench_csv_document :: proc(data: []byte, dialect: csv.Dialect, read: bool) -> bo
 		}
 		d := i64(time.tick_since(t))
 		if ok && !read {
-			tally.records = u64(csv.row_count(&doc)) + 1
-			tally.fields = tally.records * u64(csv.column_count(&doc))
+			tally.records = u64(csv.child_count(&doc, csv.ROOT)) + 1
+			tally.fields = u64(len(doc.rows)) - 1
 		}
 		csv.destroy(&doc)
 		if !ok {
@@ -186,7 +189,7 @@ bench_csv_unmarshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid, borr
 		csv_release(rows, data)
 		rows = nil
 		t := time.tick_now()
-		err := csv.unmarshal(data, &rows, opts, &plan)
+		err := csv.unmarshal(data, &rows, opts, &plan, context.allocator)
 		d := i64(time.tick_since(t))
 		if err != nil {
 			fmt.eprintln("csv unmarshal:", err)
@@ -196,7 +199,7 @@ bench_csv_unmarshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid, borr
 	}
 	if path, found := os.lookup_env("STURY_DUMP", context.temp_allocator); found {
 		dump, merr := json.marshal(rows, allocator = context.temp_allocator)
-		if merr != .None || os.write_entire_file(path, dump) != nil {
+		if merr != nil || os.write_entire_file(path, dump) != nil {
 			return false
 		}
 	}
@@ -207,7 +210,7 @@ bench_csv_unmarshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid, borr
 // Times `marshal` of the rows read from `data` before timing. Each output is freed outside the clock.
 bench_csv_marshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid) -> bool {
 	rows: []T
-	if err := csv.unmarshal(data, &rows, {dialect = dialect, borrow_strings = true}); err != nil {
+	if err := csv.unmarshal(data, &rows, {dialect = dialect, borrow_strings = true}, nil, context.allocator); err != nil {
 		fmt.eprintln("csv unmarshal:", err)
 		return false
 	}
@@ -220,7 +223,7 @@ bench_csv_marshal :: proc(data: []byte, dialect: csv.Dialect, $T: typeid) -> boo
 		t := time.tick_now()
 		out, err := csv.marshal(rows, {dialect = dialect}, &plan)
 		d := i64(time.tick_since(t))
-		if err != .None {
+		if err != nil {
 			return false
 		}
 		out_len = len(out)

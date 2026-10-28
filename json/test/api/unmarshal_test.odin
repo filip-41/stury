@@ -132,7 +132,7 @@ um_refused :: proc(
 um_round_trip :: proc(t: ^testing.T, v: $T, opts := json.Unmarshal_Opts{}, mapping := json.Plan_Opts{}, loc := #caller_location) {
 	plan := um_plan(T, mapping)
 	text, merr := json.marshal(v, {}, plan, context.temp_allocator)
-	testing.expect_value(t, merr, json.Marshal_Error.None, loc = loc)
+	testing.expect_value(t, marshal_kind(merr), json.Marshal_Error_Kind.None, loc = loc)
 	back: T
 	err, refused := json.unmarshal(text, &back, opts, plan, context.temp_allocator).?
 	testing.expectf(t, !refused, "%s: %v at %d", string(text), err.kind, err.offset, loc = loc)
@@ -431,4 +431,35 @@ test_unmarshal_holds_max_depth_to_max_depth :: proc(t: ^testing.T) {
 	v: any
 	e, bad := json.unmarshal(transmute([]byte)past, &v, {limits = limits}, allocator = context.temp_allocator).?
 	testing.expectf(t, bad && e.kind == .Syntax && e.syntax == .Too_Deep && e.offset == json.MAX_DEPTH, "%v", e)
+}
+
+// A refused read leaves its partial value in the allocator the caller gave, and keeps none of its own scratch:
+// an arena freed whole after the refusal leaves nothing allocated, under every strictness.
+@(test)
+test_unmarshal_refused_leaks_nothing :: proc(t: ^testing.T) {
+	Item :: struct {
+		name: string,
+		tags: [dynamic]string,
+		by:   map[string]int,
+		n:    int,
+	}
+	src := transmute([]byte)string(`[{"name":"a\nb","tags":["x","yé"],"by":{"k":1},"n":1},{"name":"c","tags":["z"],"by":{"q":2},"n":"bad"}]`)
+	for strictness in ([]json.Strictness{.Strict, .Lazy}) {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		{
+			context.allocator = mem.tracking_allocator(&track)
+			plan := json.type_plan_init([]Item)
+			arena: mem.Dynamic_Arena
+			mem.dynamic_arena_init(&arena)
+			items: []Item
+			err := json.unmarshal(src, &items, {strictness = strictness}, &plan, mem.dynamic_arena_allocator(&arena))
+			testing.expectf(t, err != nil && err.?.kind == .Wrong_Kind, "%v: %v", strictness, err)
+			mem.dynamic_arena_destroy(&arena)
+			json.destroy(&plan)
+		}
+		testing.expectf(t, len(track.allocation_map) == 0, "%v: %d allocations left", strictness, len(track.allocation_map))
+		testing.expect_value(t, len(track.bad_free_array), 0)
+	}
 }

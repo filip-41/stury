@@ -5,7 +5,7 @@ package scan
 import "base:intrinsics"
 import "core:mem"
 import "core:simd"
-import "core:unicode/utf8"
+import core_pkg "../../core"
 import lex "lex"
 
 // The decoders write the inner bytes of a JSON string token into `dst` and return the count written, or -1
@@ -140,52 +140,12 @@ dom_unescape_into :: #force_inline proc(dst: []u8, src: []byte, lo, hi: u64, fir
 	return dom_unescape_scalar(dst, src, lo, hi)
 }
 
-// Four hex digits at `p`, or not. `end` is the first byte past the token's content.
-@(private = "file")
-hex4_at :: #force_inline proc(src: []byte, p, end: u64) -> (v: u32, ok: bool) {
-	if p > end || end - p < 4 {
-		return 0, false
-	}
-	return lex.hex4(src, p)
-}
-
-// One escape at `src[p] == '\\'`, written into `unit`. Both copy loops and `name_equals` call it. `end` is
-// exclusive, and neither the unit nor a surrogate pair's lookahead reads past it. A malformed or truncated
-// escape, or a lone surrogate half, is `ok = false`.
+// One escape at `src[p] == '\\'`, written into `unit`: core's decoder, any refusal `ok = false`. Both copy loops
+// and `name_equals` call it.
 decode_escape_unit :: #force_inline proc(src: []byte, p, end: u64, unit: []u8) -> (n: int, next: u64, ok: bool) {
-	if p + 1 >= end {
-		return 0, p, false
-	}
-	e := src[p + 1]
-	if dec := lex.ESC_BYTE[e]; dec != 0 {
-		unit[0] = dec
-		return 1, p + 2, true
-	}
-	if e != 'u' {
-		return 0, p, false
-	}
-	cp, hex_ok := hex4_at(src, p + 2, end)
-	if !hex_ok {
-		return 0, p, false
-	}
-	next = p + 6
-	if cp - 0xD800 < 0x800 {
-		if cp >= 0xDC00 || next + 6 > end || src[next] != '\\' || src[next + 1] != 'u' {
-			return 0, p, false
-		}
-		lo, lo_ok := hex4_at(src, next + 2, end)
-		if !lo_ok || lo - 0xDC00 >= 0x400 {
-			return 0, p, false
-		}
-		cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
-		next += 6
-	}
-	if cp < 0x80 {
-		unit[0] = u8(cp)
-		return 1, next, true
-	}
-	spelled, size := utf8.encode_rune(rune(cp))
-	return copy(unit, spelled[:size]), next, true
+	fault: core_pkg.Escape_Fault
+	n, next, fault = core_pkg.decode_escape(src, p, end, unit)
+	return n, next, fault == .None
 }
 
 // One object key against one step name, by decoded text. [lo,hi) includes the key's quotes and was bounded

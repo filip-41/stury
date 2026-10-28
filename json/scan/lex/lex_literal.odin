@@ -94,7 +94,7 @@ parse_literal_q :: #force_inline proc(
 				return Error{offset = u64(len(s.src)), kind = .Truncated}
 			}
 			if s.src[s.pos] != word[i] {
-				return Error{offset = s.pos, kind = .Bad_Literal}
+				return Error{offset = s.pos, kind = KIND_LITERAL}
 			}
 			s.pos += 1
 		}

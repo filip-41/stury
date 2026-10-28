@@ -1,124 +1,203 @@
 package core
 
-// Fault positions and messages (`line:col: kind`) for every format's `Error`, `Unmarshal_Error` and `Path_Error`.
+// Fault positions and messages (`line:col: text`) for every format's `Error`, `Unmarshal_Error` and `Path_Error`.
 
 import "core:io"
-import "core:reflect"
+import "core:mem"
 import "core:strings"
 
-// The builder `render_error` writes through. The alias is the file's non-generic use of `core:strings`: a
-// generic's body is checked only when it is instantiated, so without this a plain `-vet` build of a program
-// that never calls `render_error` rejects the import.
-@(private)
-Text_Builder :: strings.Builder
+// The 1-based line and column of `err` in `src`, counting bytes, or (0, 0) when `err` has no byte position in
+// `src`: an offset past `src`, or a kind whose offset is no byte of the text (`render_error` writes those
+// `offset N: ` or bare). A `Marshal_Error` has none.
+error_position :: proc {
+	syntax_error_position,
+	unmarshal_error_position,
+	path_error_position,
+	marshal_error_position,
+}
 
-// Returns the 1-based line and column of `err` in `src`. Columns count bytes. Returns (0, 0) when `err` has no
-// byte position in `src`: an offset past `src`, `.Source_Too_Wide` (a limit), `.Out_Of_Memory`, `.Bad_Option`,
-// `.Over_Capacity` or `.Bad_Path` (whose offset is into the path text).
+// An `Error`'s: none for `.Source_Too_Wide` (a limit), `.Out_Of_Memory` or `.Bad_Option`.
 @(require_results)
-error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
+syntax_error_position :: proc(src: []byte, err: Error) -> (line, col: int) {
 	#partial switch err.kind {
-	case .Source_Too_Wide, .Out_Of_Memory, .Bad_Option, .Over_Capacity, .Bad_Path:
+	case .Source_Too_Wide, .Out_Of_Memory, .Bad_Option:
 		return 0, 0
 	}
 	line, col, _ = line_col(src, err.offset)
 	return
 }
 
-// Formats `err` as `line:col: <kind>`, with the kind's enum name, or as `write_no_byte_fault` spells a fault at
-// no byte of `src`. An `Unmarshal_Error` and a `Path_Error` are formatted the same way, with `src` the text
-// their offset refers to. The text is allocated with `allocator`.
+// An `Unmarshal_Error`'s: none for a refusal before any byte, or an `.Out_Of_Memory` at offset 0.
 @(require_results)
-render_error :: proc(src: []byte, err: $E, allocator := context.allocator) -> string {
-	b: Text_Builder = strings.builder_make(allocator)
-	render_error_to_writer(strings.to_writer(&b), src, err)
-	return strings.to_string(b)
+unmarshal_error_position :: proc(src: []byte, err: Unmarshal_Error) -> (line, col: int) {
+	if unmarshal_before_any_byte(err.kind) || err.kind == .Out_Of_Memory && err.offset == 0 {
+		return 0, 0
+	}
+	line, col, _ = line_col(src, err.offset)
+	return
+}
+
+// A `Path_Error`'s: `.Bad_Source`'s, and `.Encode`'s or `.Unplaceable`'s at a nonzero offset.
+@(require_results)
+path_error_position :: proc(src: []byte, err: Path_Error) -> (line, col: int) {
+	if !path_error_at_byte(err) {
+		return 0, 0
+	}
+	line, col, _ = line_col(src, err.offset)
+	return
+}
+
+@(require_results)
+marshal_error_position :: proc(src: []byte, err: Marshal_Error) -> (line, col: int) {
+	return 0, 0
+}
+
+// The unmarshal refusals raised before any byte is read, with no offset to show.
+@(private = "file")
+unmarshal_before_any_byte :: proc(kind: Unmarshal_Error_Kind) -> bool {
+	#partial switch kind {
+	case .Unsupported, .Ambiguous_Union, .Bad_Option, .Plan_Mismatch, .Bad_Tag:
+		return true
+	}
+	return false
+}
+
+// Whether a path refusal's offset is a byte of the source it read.
+@(private = "file")
+path_error_at_byte :: proc(err: Path_Error) -> bool {
+	#partial switch err.kind {
+	case .Bad_Source:
+		return true
+	case .Encode, .Unplaceable:
+		return err.offset > 0
+	}
+	return false
+}
+
+// Formats `err` as `line:col: <text>`, with the fault's text (`fault_text`, spelled by the format's `name`), or as
+// `write_no_byte_fault` spells a fault at no byte of `src`. An `Unmarshal_Error` and a `Path_Error` are formatted
+// the same way, with `src` the text their offset refers to; a `Marshal_Error` has no text and reads as its kind
+// and path. The text is allocated with `allocator`.
+@(require_results)
+render_error :: proc(src: []byte, err: $E, allocator := context.allocator, name: Fault_Name = nil) -> string where E == Error || E == Unmarshal_Error || E == Path_Error || E == Marshal_Error {
+	text: Text
+	render_error_to_writer(text_open(&text, allocator), src, err, name)
+	return text_string(&text)
 }
 
 // Writes `render_error`'s text to `w` without allocating. Returns `w`'s error, after which part of the text may
 // have been written.
-render_error_to_writer :: proc {
-	render_syntax_error_to_writer,
-	render_unmarshal_error_to_writer,
-	render_path_error_to_writer,
+render_error_to_writer :: proc(w: io.Writer, src: []byte, err: $E, name: Fault_Name = nil) -> io.Error where E == Error || E == Unmarshal_Error || E == Path_Error || E == Marshal_Error {
+	return write_error(w, src, err, name)
+}
+
+// `render_error` builds its text here: a generic body that used `strings` alone would leave the import unused
+// under `-vet` in a package that never instantiates it.
+@(private = "file")
+Text :: strings.Builder
+
+@(private = "file")
+text_open :: proc(t: ^Text, allocator: mem.Allocator) -> io.Writer {
+	t^ = strings.builder_make(allocator)
+	return strings.to_writer(t)
+}
+
+@(private = "file")
+text_string :: proc(t: ^Text) -> string {
+	return strings.to_string(t^)
+}
+
+@(private = "file")
+write_error :: proc {
+	write_syntax_error,
+	write_unmarshal_error,
+	write_path_error,
+	write_marshal_error,
 }
 
 // Writes an `Error`.
-render_syntax_error_to_writer :: proc(w: io.Writer, src: []byte, err: Error) -> io.Error {
-	name := reflect.enum_string(err.kind)
-	line, col := error_position(src, err)
+@(private = "file")
+write_syntax_error :: proc(w: io.Writer, src: []byte, err: Error, name: Fault_Name = nil) -> io.Error {
+	text := fault_text(err.kind, err.detail, name)
+	line, col := syntax_error_position(src, err)
 	if line > 0 {
-		return write_fault(w, line, col, err.offset, name)
+		return write_fault(w, line, col, err.offset, text)
 	}
-	return write_no_byte_fault(w, name, err.offset, true)
+	return write_no_byte_fault(w, text, err.offset, true)
 }
 
-// Writes `line:col: <kind>`, followed by `: <syntax>` for `.Syntax`, then the path as ` at .a[3]."b c"`, with
-// `[]` for a map value or for an element of any index, and a leading `…` when `truncated`.
-render_unmarshal_error_to_writer :: proc(w: io.Writer, src: []byte, err: Unmarshal_Error) -> io.Error {
-	name := reflect.enum_string(err.kind)
-	#partial switch err.kind {
-	case .Unsupported, .Ambiguous_Union, .Bad_Option, .Plan_Mismatch, .Bad_Tag: // before any byte, with no offset to show
-		write_no_byte_fault(w, name, err.offset, false) or_return
-	case .Out_Of_Memory:
-		// A refused value is located; a refused plan, at offset 0, is before any byte.
-		if err.offset > 0 {
-			write_fault_at(w, src, err.offset, name) or_return
-		} else {
-			write_no_byte_fault(w, name, err.offset, true) or_return
-		}
-	case:
-		write_fault_at(w, src, err.offset, name) or_return
+// Writes `line:col: <kind>`, a `.Syntax` read as its `syntax` fault's text, then the path as ` at .a[3]."b c"`,
+// with `[]` for a map value or for an element of any index, and a leading `…` when `truncated`.
+@(private = "file")
+write_unmarshal_error :: proc(w: io.Writer, src: []byte, err: Unmarshal_Error, name: Fault_Name = nil) -> io.Error {
+	kind := "Unknown fault"
+	switch {
+	case err.kind == .Syntax:
+		kind = fault_text(err.syntax, err.detail, name)
+	case err.kind >= min(Unmarshal_Error_Kind) && err.kind <= max(Unmarshal_Error_Kind):
+		kind = UNMARSHAL_ERROR_TEXT[err.kind]
 	}
-	if err.kind == .Syntax {
-		write_detail(w, reflect.enum_string(err.syntax)) or_return
+	// A refused value is located; a refused plan, an `.Out_Of_Memory` at offset 0, is before any byte.
+	if line, col := unmarshal_error_position(src, err); line > 0 {
+		write_fault(w, line, col, err.offset, kind) or_return
+	} else {
+		write_no_byte_fault(w, kind, err.offset, !unmarshal_before_any_byte(err.kind)) or_return
 	}
-	if err.n_steps > 0 {
-		io.write_string(w, " at ") or_return
-		if err.truncated {
-			io.write_string(w, "…") or_return
-		}
-		for i in 0 ..< int(err.n_steps) {
-			write_step(w, err.steps[i]) or_return
-		}
+	return write_error_path(w, err.steps, err.n_steps, err.truncated)
+}
+
+// Writes `<kind>` and the path, as `write_unmarshal_error` writes it. `src` is not read.
+@(private = "file")
+write_marshal_error :: proc(w: io.Writer, src: []byte, err: Marshal_Error, name: Fault_Name = nil) -> io.Error {
+	io.write_string(w, MARSHAL_ERROR_TEXT[err.kind]) or_return
+	return write_error_path(w, err.steps, err.n_steps, err.truncated)
+}
+
+// ` at .a[3]."b c"`, with `[]` for `Any`, a leading `…` when `truncated`; nothing for no steps.
+@(private)
+write_error_path :: proc(w: io.Writer, steps: [ERROR_PATH_STEPS]Step, n: u8, truncated: bool) -> io.Error {
+	if n == 0 {
+		return nil
+	}
+	io.write_string(w, " at ") or_return
+	if truncated {
+		io.write_string(w, "…") or_return
+	}
+	for i in 0 ..< int(n) {
+		write_step(w, steps[i]) or_return
 	}
 	return nil
 }
 
 // Writes a `Path_Error`. The kinds with an offset: `line:col: ` in `src` for `.Bad_Source`, and for `.Encode`
 // and `.Unplaceable` when `offset` is not 0; `offset N: ` for `.Bad_Path`, `.Bad_Result` and `.Out_Of_Memory`;
-// the rest read bare. `.Bad_Row` is followed by ` (N)`, `.Bad_Source` and `.Bad_Result` by the scan's `syntax`
-// unless it is `.None`, and `.Encode` by the `encode` error.
-render_path_error_to_writer :: proc(w: io.Writer, src: []byte, err: Path_Error) -> io.Error {
-	name := reflect.enum_string(err.kind)
-	#partial switch err.kind {
-	case .Bad_Source:
-		write_fault_at(w, src, err.offset, name) or_return
-	case .Bad_Path, .Bad_Result:
-		write_no_byte_fault(w, name, err.offset, true) or_return
-	case .Encode, .Unplaceable:
-		if err.offset > 0 {
-			write_fault_at(w, src, err.offset, name) or_return
-		} else {
-			write_no_byte_fault(w, name, err.offset, false) or_return
-		}
-	case .Bad_Row:
-		io.write_string(w, name) or_return
+// the rest read bare. A `.Bad_Source` with a `syntax` reads as that fault's text. `.Bad_Entry` is followed by
+// ` (N)`, `.Bad_Result` by the scan's `syntax`, and `.Encode` by the `encode` error.
+@(private = "file")
+write_path_error :: proc(w: io.Writer, src: []byte, err: Path_Error, name: Fault_Name = nil) -> io.Error {
+	kind := PATH_ERROR_TEXT[err.kind]
+	if err.kind == .Bad_Source {
+		kind = fault_text(err.syntax, err.detail, name)
+	}
+	line, col := path_error_position(src, err)
+	switch {
+	case line > 0:
+		write_fault(w, line, col, err.offset, kind) or_return
+	case path_error_at_byte(err), err.kind == .Bad_Path, err.kind == .Bad_Result, err.kind == .Out_Of_Memory:
+		write_no_byte_fault(w, kind, err.offset, true) or_return
+	case err.kind == .Bad_Entry:
+		io.write_string(w, kind) or_return
 		io.write_string(w, " (") or_return
 		io.write_u64(w, err.offset) or_return
 		io.write_byte(w, ')') or_return
-	case .Out_Of_Memory:
-		write_no_byte_fault(w, name, err.offset, true) or_return
 	case:
-		write_no_byte_fault(w, name, err.offset, false) or_return
+		write_no_byte_fault(w, kind, err.offset, false) or_return
 	}
 	#partial switch err.kind {
-	case .Bad_Source, .Bad_Result:
-		if err.syntax != .None {
-			write_detail(w, reflect.enum_string(err.syntax)) or_return
-		}
+	case .Bad_Result:
+		write_detail(w, fault_text(err.syntax, err.detail, name)) or_return
 	case .Encode:
-		write_detail(w, reflect.enum_string(err.encode)) or_return
+		write_detail(w, MARSHAL_ERROR_TEXT[err.encode]) or_return
 	}
 	return nil
 }
@@ -134,12 +213,6 @@ write_no_byte_fault :: proc(w: io.Writer, kind: string, offset: u64, offset_loca
 		return err
 	}
 	return write_fault(w, 0, 0, offset, kind)
-}
-
-// Writes `line:col: text` for byte `offset` of `src`, or `offset N: text` when `src` has no such byte.
-write_fault_at :: proc(w: io.Writer, src: []byte, offset: u64, text: string) -> io.Error {
-	line, col, _ := line_col(src, offset)
-	return write_fault(w, line, col, offset, text)
 }
 
 // Writes `: text` after a fault's kind.

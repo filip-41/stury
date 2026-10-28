@@ -1,9 +1,11 @@
 package json_tests
 
-// `prepare`: a prepared request's scans answer as `scan` of the request does, record after record.
+// A request rescanned plans its routing at its second scan: its scans answer as a fresh request's do, record after
+// record.
 
 import json "../.."
 import "core:fmt"
+import "core:strings"
 import "core:testing"
 
 @(private = "file")
@@ -30,27 +32,35 @@ PREPARED_INPUTS := [?]string{
 	`{"v":12345678901234567890123}`,
 }
 
-// Each scan of `src` through `req`, prepared, against `scan` of `plain`, a request of the same inputs.
+// Each scan of `src` through `req`, planned, against the scan of a fresh request of the same inputs.
 @(private = "file")
-expect_same_scan :: proc(t: ^testing.T, plain, req: ^json.Request($Q), src: []byte, label: string) {
-	want := fmt.tprint(json.scan(src, plain))
+expect_same_scan :: proc(t: ^testing.T, req: ^json.Request($Q), src: []byte, label: string) {
+	fresh: json.Request(Q)
+	defer json.destroy(&fresh)
+	plain := &fresh
+	_ = request_of(plain, req.inputs.paths, req.inputs.read)
+	want_scan := json.scan(src, plain)
+	want := fmt.tprint(want_scan)
 	got := fmt.tprint(json.scan(src, req))
 	testing.expectf(t, got == want, "%s %q: scan %s, want %s", label, src, got, want)
-	testing.expectf(t, req.coverage == plain.coverage && req.stop == plain.stop,
-		"%s %q: coverage %v %v, want %v %v", label, src, req.coverage, req.stop, plain.coverage, plain.stop)
+	// A refusal writes nothing: the outputs are the last scan's, which a fresh request has none of.
+	if e, failed := want_scan.?; failed && e.kind != .Bad_Source {
+		return
+	}
+	testing.expectf(t, req.state.coverage == plain.state.coverage && req.state.stop == plain.state.stop,
+		"%s %q: coverage %v %v, want %v %v", label, src, req.state.coverage, req.state.stop, plain.state.coverage, plain.state.stop)
 	testing.expectf(t, fmt.tprint(req.answers[:]) == fmt.tprint(plain.answers[:]), "%s %q: answers %v, want %v", label, src, req.answers[:], plain.answers[:])
 	when .Nodes in Q {
 		testing.expectf(t, fmt.tprint(req.doc.rows[:]) == fmt.tprint(plain.doc.rows[:]), "%s %q: rows differ", label, src)
 	}
-	for i in 0 ..< len(plain.paths) {
+	for i in 0 ..< len(plain.inputs.paths) {
 		got_i, got_err := json.answers(req, i)
 		want_i, want_err := json.answers(plain, i)
 		testing.expectf(t, fmt.tprint(got_i, got_err) == fmt.tprint(want_i, want_err), "%s %q: path %d answers %v, want %v", label, src, i, got_i, want_i)
 	}
-	testing.expectf(t, json.validate_remaining(req) == json.validate_remaining(plain), "%s %q: validate_remaining", label, src)
 }
 
-// Every input three times over through one prepared request of `paths` under the options, against `scan`.
+// Every input three times over through one request of `paths` under the options, against fresh requests.
 @(private = "file")
 expect_prepared_as_plain :: proc(
 	t: ^testing.T,
@@ -63,25 +73,20 @@ expect_prepared_as_plain :: proc(
 	limit := 0,
 ) {
 	specs := make([]json.Path_Spec, len(paths), context.temp_allocator)
+	steps := make([]json.Step, json.MAX_PATH_STEPS * len(paths), context.temp_allocator)
 	for s, i in paths {
-		specs[i] = s
+		p, perr := json.parse_path(s, steps[i * json.MAX_PATH_STEPS:][:json.MAX_PATH_STEPS], transmute([]u8)strings.clone(s, context.temp_allocator))
+		testing.expect_value(t, perr, nil)
+		p.limit = limit
+		specs[i] = p
 	}
-	plain, prepared: json.Request(Q)
-	defer json.destroy(&plain)
-	defer json.destroy(&prepared)
-	for req in ([]^json.Request(Q){&plain, &prepared}) {
-		testing.expect_value(t, json.request_init(req, ..specs, opts = {dialect = dialect, strictness = strictness, duplicates = duplicates, limits = limits}), nil)
-		for &path in req.paths {
-			path.limit = limit
-		}
-	}
+	req: json.Request(Q)
+	defer json.destroy(&req)
+	testing.expect_value(t, json.request_init(&req, ..specs, opts = {dialect = dialect, strictness = strictness, duplicates = duplicates, limits = limits}), nil)
 	label := fmt.tprint(paths, strictness, dialect, duplicates, limits.max_depth, limit)
-	if refused := json.prepare(&prepared); refused != nil {
-		testing.expectf(t, fmt.tprint(Maybe(json.Error)(refused.?)) == fmt.tprint(json.scan(raw(`{}`), &plain)), "%s: prepare %v", label, refused)
-	}
 	for _ in 0 ..< 3 {
 		for src in PREPARED_INPUTS {
-			expect_same_scan(t, &plain, &prepared, raw(src), label)
+			expect_same_scan(t, &req, raw(src), label)
 		}
 	}
 }

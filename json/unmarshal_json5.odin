@@ -1,19 +1,19 @@
 package json
 
-// `unmarshal` of a JSON5 text, through its JSON spelling.
+// `unmarshal` of a JSON5 text, read from its rows.
 
 import "base:runtime"
-import "core:strings"
+import "core:bytes"
 import core_pkg "../core"
 import scan_pkg "scan"
 import "scan/walk"
 
-// Read the JSON5 text `src` as `read_planned` reads JSON: built as a document, written in JSON's spelling with
-// its comments (`marshal_document`), and that text read as JSONC with every string copied. A refusal's offset
-// and key names point into `src`. `Infinity` and `NaN`, which have no JSON spelling, are `.Out_Of_Range` at
-// the first of them.
+// Read the JSON5 text `src` as `read_planned` reads JSON: built as a document, then read from its rows
+// (`core_pkg.shape_rows`). A number reads as its JSON decimal spelling, and a value read whole (`Raw`, `any`,
+// a bit_set or a hook's text) as its JSON text with its comments. `Infinity` and `NaN`, which have no JSON
+// spelling, are `.Out_Of_Range` where they are read. A refusal's offset and key names point into `src`.
 @(private)
-read_json5 :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Type_Plan, allocator: runtime.Allocator) -> Maybe(Unmarshal_Error) {
+read_json5 :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Format_Plan, allocator: runtime.Allocator) -> Maybe(Unmarshal_Error) {
 	// A repeat refused outranks a fault after it, as in JSON, so the build refuses it.
 	refuse := Duplicates.Refuse if opts.duplicates == .Refuse else Duplicates.Default
 	doc, berr := build(src, {dialect = .Json5, limits = opts.limits, duplicates = refuse})
@@ -24,92 +24,107 @@ read_json5 :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Type_
 		}
 		return core_pkg.unmarshal_error_from(e)
 	}
-	text, merr := marshal_document(&doc, {})
-	#partial switch merr {
+	shape, serr := core_pkg.read_shape_of(&plan.base)
+	if serr != nil {
+		return serr
+	}
+	frames: [MAX_DEPTH]walk.Shape_Frame = ---
+	wide: [walk.SHAPE_WIDE_WORDS]u64 = ---
+	run := walk.Shape_Run{frames = &frames, wide = wide[:], src = src, allocator = allocator}
+	shape_run_bind(&run, shape, plan, opts)
+	rd := Json5_Read{doc = &doc}
+	defer delete(rd.text)
+	e, refused := core_pkg.shape_rows(&run, &doc, dest, MAX_DEPTH, &rd, json5_leaf).?
+	if !refused {
+		return nil
+	}
+	err := Unmarshal_Error{offset = e.offset}
+	steps := run.sp
+	if e.kind == walk.TYPED_FAULT {
+		err.kind = Unmarshal_Error_Kind(run.fault)
+		if at, non_finite := rd.non_finite_at.?; non_finite {
+			err.offset = at
+		}
+		steps = u64(run.fault_steps)
+	} else {
+		err.kind, err.syntax = .Syntax, e.kind
+	}
+	key := Json5_Key{src = src, allocator = allocator}
+	core_pkg.shape_error_path(&run, &err, steps, &key, json5_key_name)
+	return err
+}
+
+@(private = "file")
+Json5_Read :: struct {
+	doc:  ^Document,
+	text:          [dynamic]u8, // the JSON text of the value `json5_leaf` reads, reused
+	non_finite_at: Maybe(u64), // the `Infinity` or `NaN` that refused the value read
+}
+
+// Value `n` read by JSON's leaves from its JSON text: a number into a numeric, `Number`, `Digits` or `Decoded`
+// target, and any value into a `Raw`, `any`, bit_set or hooked one. The text lives until the next value, so
+// nothing borrows it.
+@(private = "file")
+json5_leaf :: proc(rd: ^Json5_Read, r: ^walk.Shape_Run, n: Node, op: ^core_pkg.Shape_Op, dest: rawptr) -> core_pkg.Shape_Fault {
+	clear(&rd.text)
+	#partial switch node_json(&rd.text, rd.doc, n) {
 	case .None:
 	case .Non_Finite:
-		return Unmarshal_Error{kind = .Out_Of_Range, offset = non_finite_at(&doc)}
+		rd.non_finite_at = non_finite_at(rd.doc, n)
+		return .Out_Of_Range
 	case:
-		return Unmarshal_Error{kind = .Out_Of_Memory}
+		return .Out_Of_Memory
 	}
-	defer delete(text)
-	as_json := opts
-	as_json.dialect = .Jsonc
-	as_json.borrow_strings = false
-	err := read_planned(text, dest, as_json, plan, allocator)
-	if e, refused := err.?; refused {
-		return json5_error_at(src, &doc, text, e, allocator)
-	}
-	return nil
-}
-
-// The offset of the first number in `doc` that is `Infinity` or `NaN`.
-@(private)
-non_finite_at :: proc(doc: ^Document) -> u64 {
-	for r, i in doc.rows {
-		if r.kind == .Number {
-			if v, _ := get_number(doc, Node(i)); v.value - v.value != 0 {
-				return u64(r.lo)
-			}
+	t := rd.text[:]
+	hi := u64(len(t))
+	borrow := r.borrow
+	r.borrow = false
+	defer r.borrow = borrow
+	number := core_pkg.number_starts_with(t[0])
+	#partial switch op.kind {
+	case .Int, .Uint:
+		return core_pkg.shape_leaf_int(t, 0, hi, dest, op.width, op.kind == .Int)
+	case .Wide_Int, .Wide_Uint:
+		return core_pkg.shape_leaf_wide(t, 0, hi, dest, op.kind == .Wide_Int)
+	case .Enum_Int, .Enum_Uint:
+		return core_pkg.shape_leaf_enum(t, 0, hi, dest, op)
+	case .Float:
+		if !number {
+			return .Wrong_Kind
 		}
+		return core_pkg.shape_leaf_float_lexed(t, 0, hi, core_pkg.lex_number_value(t, 0, hi), dest, op.width)
+	case .Number:
+		if !number {
+			return .Wrong_Kind
+		}
+		if dest != nil {
+			(^Number)(dest)^ = core_pkg.number_span(t, 0, hi)
+		}
+		return .None
+	case .Digits:
+		if !number {
+			return .Wrong_Kind
+		}
+		return scan_pkg.shape_leaf_raw(r, t, 0, hi, dest)
+	case .Decoded:
+		return scan_pkg.shape_leaf_decoded(r, t, 0, hi, dest, bytes.index_byte(t, '\\') >= 0, 0, false)
 	}
-	return 0
+	return scan_pkg.shape_leaf_whole(r, t, 0, hi, dest, op)
 }
 
-// `e`, a refusal of `text` (`doc` written in JSON's spelling), pointed back into `src`: the two texts have the
-// same values in the same order, so a value, key or closing bracket of row `i` in one is row `i`'s in the other.
-// A key name the path borrows from `text` borrows the same key as authored in `src`, or, for a key that holds
-// an escape, is its decoded text made with `allocator`, which the caller owns.
 @(private = "file")
-json5_error_at :: proc(src: []byte, doc: ^Document, text: []byte, e: Unmarshal_Error, allocator: runtime.Allocator) -> Unmarshal_Error {
-	e := e
-	spelled, err := build(text, {dialect = .Jsonc})
-	defer destroy(&spelled)
-	if err != nil || len(spelled.rows) != len(doc.rows) {
-		return e
-	}
-	for r, i in spelled.rows {
-		s := doc.rows[i]
-		switch {
-		case u64(r.lo) == e.offset:
-			e.offset = u64(s.lo)
-		case r.key_lo != walk.NO_KEY && u64(r.key_lo) == e.offset:
-			e.offset = u64(s.key_lo)
-		case u64(r.hi) == e.offset + 1:
-			e.offset = u64(s.hi) - 1
-		case u64(r.hi) == e.offset:
-			e.offset = u64(s.hi)
-		case:
-			continue
-		}
-		break
-	}
-	text_lo := uintptr(raw_data(text))
-	for &step in e.steps[:e.n_steps] {
-		name, is_name := step.(core_pkg.Name)
-		at := uintptr(raw_data(name))
-		if !is_name || at < text_lo || at >= text_lo + uintptr(len(text)) {
-			continue
-		}
-		step = core_pkg.Name("")
-		for r, i in spelled.rows {
-			if r.key_lo == walk.NO_KEY || u64(at - text_lo) < u64(r.key_lo) || u64(at - text_lo) >= u64(r.key_hi) {
-				continue
-			}
-			step = core_pkg.Name(json5_key_name(src, doc.rows[i], allocator))
-			break
-		}
-	}
-	return e
+Json5_Key :: struct {
+	src:       []byte,
+	allocator: runtime.Allocator,
 }
 
-// The key of `row` as authored in `src`, unquoted; decoded into `allocator` when it holds an escape.
+// The key `src[lo:hi]` as authored, unquoted; decoded into the caller's allocator when it holds an escape.
 @(private = "file")
-json5_key_name :: proc(src: []byte, row: scan_pkg.Row, allocator: runtime.Allocator) -> string {
-	lo, hi := u64(row.key_lo), u64(row.key_hi)
-	token := string(src[lo:hi])
-	if strings.contains_rune(token, '\\') {
-		decoded := make([]byte, len(token), allocator)
+json5_key_name :: proc(k: ^Json5_Key, lo, hi: u64) -> string {
+	lo, hi := lo, hi
+	src := k.src
+	if bytes.index_byte(src[lo:hi], '\\') >= 0 {
+		decoded := make([]byte, hi - lo, k.allocator)
 		if decoded != nil {
 			return string(decoded[:scan_pkg.json5_unescape_into(decoded, src, lo, hi, 0)])
 		}

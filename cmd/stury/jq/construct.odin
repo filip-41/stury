@@ -2,7 +2,7 @@ package jq
 
 // Construction: arrays, objects, string interpolation and formats from the outputs of their parts.
 
-import json "../../../json"
+import core_pkg "../../../core"
 
 @(private)
 eval_format :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, track: bool, out: ^Sink) -> Signal {
@@ -98,11 +98,11 @@ column_into :: proc(n: ^Node, v: Value, into: ^[dynamic]Value) -> bool {
 		}
 		return true
 	case Ref:
-		if kd, _ := json.kind(c.doc, c.node); kd != .Array {
+		if kd, _ := core_pkg.kind(c.doc, c.node); kd != .Array {
 			return false
 		}
-		it := json.children(c.doc, c.node)
-		for row in json.children(&it) {
+		it := core_pkg.children(c.doc, c.node)
+		for row in core_pkg.children(&it) {
 			if !append_field(into, Ref{c.doc, row}, n.name) {
 				resize(into, start)
 				return false
@@ -119,14 +119,15 @@ column_into :: proc(n: ^Node, v: Value, into: ^[dynamic]Value) -> bool {
 append_field :: #force_inline proc(into: ^[dynamic]Value, e: Value, name: string) -> bool {
 	switch y in e {
 	case Ref:
-		#partial switch kd, _ := json.kind(y.doc, y.node); kd {
+		switch kd, _ := core_pkg.kind(y.doc, y.node); kd {
 		case .Object:
-			r := json.child(y.doc, y.node, name)
-			append(into, Value(Ref{y.doc, r}) if r != json.NO_NODE else nil)
+			r := core_pkg.child(y.doc, y.node, name)
+			append(into, Value(Ref{y.doc, r}) if r != core_pkg.NO_NODE else nil)
 			return true
 		case .Null:
 			append(into, nil)
 			return true
+		case .False, .True, .Number, .String, .Array:
 		}
 	case ^Object:
 		f, _ := object_get(y, name)

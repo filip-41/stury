@@ -1,8 +1,8 @@
 package index
 
 // JSON's rules for one 64-byte block: which bytes are operators and whitespace, how a backslash escapes, and
-// where a scalar run starts. `classify` (index.odin) runs `block` over a region, and skip.odin, commas.odin and
-// encode/document.odin reuse the quote and escape masks.
+// where a scalar run starts. `classify` (index.odin) runs `block` over a region; the quote and escape masks are
+// core's (bits.odin).
 //
 // A backslash escapes the next byte everywhere, inside a string or not. Outside a string that input is
 // invalid anyway, and stage 2 rejects it.
@@ -31,9 +31,6 @@ import lex "../lex"
 @(rodata) LO_SCALAR := V{17, 25, 25, 25, 25, 29, 25, 25, 25, 25, 24, 10, 8, 10, 10, 8}
 @(rodata) HI_SCALAR := V{0, 0, 2, 1, 12, 16, 12, 16, 0, 0, 0, 0, 0, 0, 0, 0}
 
-@(private = "file")
-EVEN_BITS :: u64(0x5555_5555_5555_5555)
-
 // Everything a block needs from the bytes before it. A forward walk carries it
 // from block to block and region to region. The document start is the zero value
 // plus the bytes before it.
@@ -58,42 +55,6 @@ Chunk_Acc :: struct {
 	// The previous block's token starts, written while this block classifies.
 	pend:      u64,
 	pend_base: u16,
-}
-
-// Bytes that follow an odd-length backslash run.
-escaped_bits :: #force_inline proc(bs: u64, prev_odd: ^u64) -> u64 {
-	odd_bits := ~EVEN_BITS
-	start_edges := bs & ~(bs << 1)
-	even_start_mask := EVEN_BITS ~ prev_odd^
-	even_starts := start_edges & even_start_mask
-	odd_starts := start_edges & ~even_start_mask
-	even_carries := bs + even_starts
-	odd_carries, overflow := intrinsics.overflow_add(bs, odd_starts)
-	odd_carries |= prev_odd^
-	prev_odd^ = 1 if overflow else 0
-	even_carry_ends := even_carries & ~bs
-	odd_carry_ends := odd_carries & ~bs
-	return (even_carry_ends & odd_bits) | (odd_carry_ends & EVEN_BITS)
-}
-
-// A block's quotes that no backslash escapes, and its bytes inside a string, from the carries of the block
-// before (`prev_odd`, `in_string`), which it moves on.
-string_region :: #force_inline proc(quote, bs: u64, prev_odd, in_string: ^u64) -> (real_q, instr: u64) {
-	escaped: u64
-	if bs != 0 || prev_odd^ != 0 {
-		escaped = escaped_bits(bs, prev_odd)
-	}
-	real_q = quote & ~escaped
-	instr = prefix_xor(real_q) ~ in_string^
-	in_string^ = u64(i64(instr) >> 63)
-	return
-}
-
-quotes_and_backslashes :: #force_inline proc(v: [4]V) -> (quote, bs: u64) {
-	return pack4x2(
-		{simd.lanes_eq(v[0], V('"')), simd.lanes_eq(v[1], V('"')), simd.lanes_eq(v[2], V('"')), simd.lanes_eq(v[3], V('"'))},
-		{simd.lanes_eq(v[0], V('\\')), simd.lanes_eq(v[1], V('\\')), simd.lanes_eq(v[2], V('\\')), simd.lanes_eq(v[3], V('\\'))},
-	)
 }
 
 // The block's quotes that no backslash escapes, and the bytes inside a string,
@@ -145,7 +106,7 @@ inside_string :: #force_inline proc(v: [4]V, cy: ^Carry, acc: ^Chunk_Acc, $F: Fa
 // one block late (`acc.pend`), so the caller flushes the last ones.
 block :: #force_inline proc(p: [^]u8, base: u16, cy: ^Carry, acc: ^Chunk_Acc, out: [^]u16, n: int, $F: Facts) -> int {
 	v := [4]V{load(p), load(p[16:]), load(p[32:]), load(p[48:])}
-	quote, bs := quotes_and_backslashes(v)
+	quote, bs := quote_and_escape_bits(v, '"', '\\')
 	// Tested quote-free first: few blocks are outside a long string, so the
 	// test predicts where the carry alone would not.
 	if quote | bs == 0 && cy.in_string != 0 {

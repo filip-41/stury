@@ -57,7 +57,7 @@ Termination :: enum {
 }
 
 // How much of the item a result covers. `.Partial` comes first so the zero value refuses: a caller that never
-// established coverage cannot claim `.Full` by accident, and only `validate_remaining` upgrades it. Produced
+// established coverage cannot claim `.Full` by accident; only a walk that judged every byte earns it. Produced
 // by a `First_Wins_May_Stop` stop, a fault (nothing past the faulting byte was reached), or a region skipped
 // without checks.
 //

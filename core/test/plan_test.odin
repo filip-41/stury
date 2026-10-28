@@ -7,6 +7,15 @@ import "core:testing"
 import csv "../../csv"
 import json "../../json"
 
+// A refusal's kind, `.None` for none: both formats return core's `Marshal_Error`.
+@(private)
+marshal_kind :: proc(err: Maybe(json.Marshal_Error)) -> json.Marshal_Error_Kind {
+	if e, bad := err.?; bad {
+		return e.kind
+	}
+	return .None
+}
+
 PLAN_A :: struct {
 	a: int,
 }
@@ -66,7 +75,7 @@ test_plan_read_refusal_is_stable :: proc(t: ^testing.T) {
 	// The same plan writes: the union tag cannot be spelled either way, and the read refusal did not consume it.
 	for call in 0 ..< 3 {
 		out, err := json.marshal(PLAN_Shapes{}, {}, &plan, context.temp_allocator)
-		testing.expectf(t, err == .Bad_Utf8, "marshal call %d: %v, want Bad_Utf8", call, err)
+		testing.expectf(t, marshal_kind(err) == .Bad_Utf8, "marshal call %d: %v, want Bad_Utf8", call, err)
 		testing.expectf(t, out == nil, "marshal call %d wrote %d bytes", call, len(out))
 	}
 }
@@ -79,7 +88,7 @@ test_plan_marshal_refusal_is_stable :: proc(t: ^testing.T) {
 	v := PLAN_Bad_Name{f = 1}
 	for call in 0 ..< 3 {
 		out, err := json.marshal(v, {}, &plan, context.temp_allocator)
-		testing.expectf(t, err == .Bad_Utf8, "call %d: %v, want Bad_Utf8", call, err)
+		testing.expectf(t, marshal_kind(err) == .Bad_Utf8, "call %d: %v, want Bad_Utf8", call, err)
 		testing.expectf(t, out == nil, "call %d wrote %d bytes", call, len(out))
 	}
 
@@ -96,7 +105,7 @@ test_plan_marshal_refusal_is_stable :: proc(t: ^testing.T) {
 	rows := []PLAN_Bad_Name{{f = 1}}
 	for call in 0 ..< 3 {
 		out, err := csv.marshal(rows, {}, &cplan, context.temp_allocator)
-		testing.expectf(t, err == .Bad_Utf8, "csv call %d: %v, want Bad_Utf8", call, err)
+		testing.expectf(t, marshal_kind(err) == .Bad_Utf8, "csv call %d: %v, want Bad_Utf8", call, err)
 		testing.expectf(t, out == nil, "csv call %d wrote %d bytes", call, len(out))
 	}
 
@@ -114,7 +123,7 @@ test_plan_tag_comma_round_trip :: proc(t: ^testing.T) {
 	row := PLAN_Comma{"Ann", 41}
 
 	jtext, jerr := json.marshal(row, {}, nil, context.temp_allocator)
-	testing.expect_value(t, jerr, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(jerr), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(jtext), `{"Last, First":"Ann","Age, years":41}`)
 	jback: PLAN_Comma
 	jrf, jrefused := plan_err(json.unmarshal(jtext, &jback, {}, nil, context.temp_allocator))
@@ -123,7 +132,7 @@ test_plan_tag_comma_round_trip :: proc(t: ^testing.T) {
 
 	slash := PLAN_Backslash{1}
 	stext, serr := json.marshal(slash, {}, nil, context.temp_allocator)
-	testing.expect_value(t, serr, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(serr), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(stext), `{"a\\b":1}`)
 	sback: PLAN_Backslash
 	srf, srefused := plan_err(json.unmarshal(stext, &sback, {}, nil, context.temp_allocator))
@@ -131,7 +140,7 @@ test_plan_tag_comma_round_trip :: proc(t: ^testing.T) {
 	testing.expect_value(t, sback, slash)
 
 	shcsv, sherr := csv.marshal([]PLAN_Backslash{slash}, {}, nil, context.temp_allocator)
-	testing.expect_value(t, sherr, csv.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(sherr), csv.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(shcsv), "a\\b\n1\n")
 	shback: []PLAN_Backslash
 	shrf, shrefused := plan_err(csv.unmarshal(shcsv, &shback, {}, nil, context.temp_allocator))
@@ -141,7 +150,7 @@ test_plan_tag_comma_round_trip :: proc(t: ^testing.T) {
 	}
 
 	ctext, cerr := csv.marshal([]PLAN_Comma{row}, {}, nil, context.temp_allocator)
-	testing.expect_value(t, cerr, csv.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(cerr), csv.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(ctext), "\"Last, First\",\"Age, years\"\nAnn,41\n")
 	cback: []PLAN_Comma
 	crf, crefused := plan_err(csv.unmarshal(ctext, &cback, {}, nil, context.temp_allocator))
@@ -154,7 +163,7 @@ test_plan_tag_comma_round_trip :: proc(t: ^testing.T) {
 @(test)
 test_plan_tag_unknown_flag_refuses :: proc(t: ^testing.T) {
 	_, jmerr := json.marshal(PLAN_Flag{1}, {}, nil, context.temp_allocator)
-	testing.expect_value(t, jmerr, json.Marshal_Error.Bad_Tag)
+	testing.expect_value(t, marshal_kind(jmerr), json.Marshal_Error_Kind.Bad_Tag)
 
 	jv: PLAN_Flag
 	jrf, jrefused := plan_err(json.unmarshal(transmute([]byte)string(`{"f":1}`), &jv, {}, nil, context.temp_allocator))
@@ -162,7 +171,7 @@ test_plan_tag_unknown_flag_refuses :: proc(t: ^testing.T) {
 	testing.expect_value(t, jrf.kind, json.Unmarshal_Error_Kind.Bad_Tag)
 
 	_, cmerr := csv.marshal([]PLAN_Flag{{1}}, {}, nil, context.temp_allocator)
-	testing.expect_value(t, cmerr, csv.Marshal_Error.Bad_Tag)
+	testing.expect_value(t, marshal_kind(cmerr), csv.Marshal_Error_Kind.Bad_Tag)
 
 	cback: []PLAN_Flag
 	crf, crefused := plan_err(csv.unmarshal(transmute([]byte)string("f\n1\n"), &cback, {}, nil, context.temp_allocator))
@@ -226,10 +235,10 @@ test_plan_recovers_after_allocator_refusals :: proc(t: ^testing.T) {
 			defer json.destroy(&plan)
 			fl.calls, fl.skip = 0, skip
 			_, first := json.marshal(v, {}, &plan, context.temp_allocator)
-			testing.expectf(t, first == .None || first == .Out_Of_Memory, "skip %d width %d: first marshal %v", skip, width, first)
+			testing.expectf(t, marshal_kind(first) == .None || marshal_kind(first) == .Out_Of_Memory, "skip %d width %d: first marshal %v", skip, width, first)
 			fl.skip = HEALED
 			out, err := json.marshal(v, {}, &plan, context.temp_allocator)
-			testing.expectf(t, err == .None, "skip %d width %d: marshal after refusals %v", skip, width, err)
+			testing.expectf(t, err == nil, "skip %d width %d: marshal after refusals %v", skip, width, err)
 			testing.expectf(t, string(out) == want, "skip %d width %d: wrote %s", skip, width, out)
 
 			rplan := json.type_plan_init(PLAN_Tree, {}, mem.Allocator{flaky_proc, &fl})

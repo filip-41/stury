@@ -6,23 +6,24 @@ package jq
 //
 // Where builtin X lives, by the `Builtin` field the table below fills:
 //	native     (`Native`)     takes its arguments as filters: natives.odin (select, path, limit, the type
-//	                          selectors, sub/gsub)
-//	gen        (`Generator`)  takes values, may give several: natives.odin (getpath, range, match, capture,
-//	                          halt_error)
-//	fn         (`Function`)   takes values, gives one: natives.odin (setpath, test, split/2), math_time.odin
-//	                          (time and number functions), functions.odin and sort.odin (the rest)
+//	                          selectors), regex_natives.odin (sub/gsub)
+//	gen        (`Generator`)  takes values, may give several: natives.odin (getpath, range, halt_error),
+//	                          regex_natives.odin (match, capture)
+//	fn         (`Function`)   takes values, gives one: natives.odin (setpath), regex_natives.odin (test,
+//	                          split/2), math_time.odin (time and number functions), functions.odin and
+//	                          sort.odin (the rest)
 //	math1/math2               libm functions of one or two numbers
 //	PRELUDE                   everything jq writes in jq itself
 
 import "base:runtime"
 import "core:c/libc"
-import "core:fmt"
 import "core:math"
 import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:time"
 import "core:unicode/utf8"
+import "../message"
 
 Native :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal
 Generator :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal
@@ -502,13 +503,13 @@ fn_builtins :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 		}
 		for b, arity in row {
 			if b != {} {
-				append(&names, fmt.aprintf("%s/%d", fname, arity))
+				append(&names, message.build("%s/%d", fname, arity))
 			}
 		}
 	}
 	for d in prelude_defs() {
 		def_name, arity := def_signature(d)
-		append(&names, fmt.aprintf("%s/%d", def_name, arity))
+		append(&names, message.build("%s/%d", def_name, arity))
 	}
 	slice.sort(names[:]) // the table is a map: sorted, every run lists the same order
 	a := new_array(len(names))

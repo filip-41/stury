@@ -310,3 +310,45 @@ test_rescan_reuses_the_decoded_strings :: proc(t: ^testing.T) {
 		testing.expectf(t, cap(req.doc.values) == grown, "%d bytes after a rescan, want %d", cap(req.doc.values), grown)
 	}
 }
+
+// A built document is decoded: its escaped keys are decoded by the build, so no read adds to its cache, and
+// reading a long object by index lists none of its members.
+@(test)
+test_built_document_reads_write_nothing :: proc(t: ^testing.T) {
+	members := strings.repeat(`"k":0,`, 100, context.temp_allocator)
+	doc := build_ok(t, strings.concatenate({`{"a\u0062":"x\ny",`, members, `"\td":2}`}, context.temp_allocator))
+	defer json.destroy(&doc)
+	testing.expect(t, doc.decoded)
+	testing.expect_value(t, len(doc.key_texts), 2)
+	first, ok1 := json.get_key(&doc, json.child(&doc, json.ROOT, 0))
+	last, ok2 := json.get_key(&doc, json.child(&doc, json.ROOT, -1))
+	s, ok3 := json.get_string(&doc, json.child(&doc, json.ROOT, "ab"))
+	testing.expect(t, ok1 && ok2 && ok3)
+	testing.expect_value(t, first, "ab")
+	testing.expect_value(t, last, "\td")
+	testing.expect_value(t, s, "x\ny")
+	testing.expect(t, json.child(&doc, json.ROOT, 80) != json.NO_NODE)
+	testing.expect(t, doc.cache == nil, "no read made a cache")
+
+	// An arena holds no room ahead of the read, so the key is decoded at its close.
+	arena, aerr := json.build(raw(`{"x\u0079":1}`), {}, context.temp_allocator)
+	testing.expect_value(t, aerr, nil)
+	k, kok := json.get_key(&arena, json.child(&arena, json.ROOT, 0))
+	testing.expect(t, kok && k == "xy" && arena.cache == nil)
+}
+
+// A JSON5 document's unquoted and single-quoted keys and strings read the same on a built document.
+@(test)
+test_built_json5_document_reads_write_nothing :: proc(t: ^testing.T) {
+	doc, err := json.build(raw(`{a: 'x', 'b\'c': "y", \u0064e: 1}`), {dialect = .Json5})
+	defer json.destroy(&doc)
+	testing.expect_value(t, err, nil)
+	testing.expect(t, doc.decoded)
+	k0, _ := json.get_key(&doc, json.child(&doc, json.ROOT, 0))
+	k1, _ := json.get_key(&doc, json.child(&doc, json.ROOT, 1))
+	k2, _ := json.get_key(&doc, json.child(&doc, json.ROOT, 2))
+	v0, _ := json.get_string(&doc, json.child(&doc, json.ROOT, 0))
+	testing.expectf(t, k0 == "a" && k1 == "b'c" && k2 == "de" && v0 == "x", "%q %q %q %q", k0, k1, k2, v0)
+	testing.expect_value(t, len(doc.key_texts), 3)
+	testing.expect(t, doc.cache == nil, "no read made a cache")
+}

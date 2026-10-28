@@ -17,6 +17,8 @@ main :: proc() {
 	}
 	if a.outcome == .Found {
 		fmt.println(string(src[a.lo:a.hi])) // "engines", quotes and all
+		text, _, _ := json.answer_text(src, a) // decoded, a slice of src unless it held an escape
+		fmt.println(text) // engines
 	}
 
 	// A request holds every answer of its paths, and can be scanned again over other records.

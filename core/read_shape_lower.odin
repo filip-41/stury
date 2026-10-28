@@ -291,7 +291,7 @@ shape_refused :: proc(p: ^Type_Plan, i: u32, visited: []bool, err: ^Unmarshal_Er
 		if p.ops[i].kind == .Union {
 			err.kind = .Ambiguous_Union
 		} else if p.ops[i].refused {
-			unmarshal_path_prepend(err, Name(p.sources[p.ops[i].key].name))
+			error_path_prepend(err, Name(p.sources[p.ops[i].key].name))
 		}
 		return true
 	case .Union:
@@ -303,13 +303,13 @@ shape_refused :: proc(p: ^Type_Plan, i: u32, visited: []bool, err: ^Unmarshal_Er
 	case .Struct:
 		for f in r.fields[op.elem:][:op.count] {
 			if shape_refused(p, f.op, visited, err) {
-				unmarshal_path_prepend(err, Name(f.name))
+				error_path_prepend(err, Name(f.name))
 				return true
 			}
 		}
 	case .Slice, .Dynamic, .Array, .Fixed_List:
 		if shape_refused(p, op.elem, visited, err) {
-			unmarshal_path_prepend(err, Any{})
+			error_path_prepend(err, Any{})
 			return true
 		}
 	case .Pointer:
@@ -321,7 +321,7 @@ shape_refused :: proc(p: ^Type_Plan, i: u32, visited: []bool, err: ^Unmarshal_Er
 			return true
 		}
 		if shape_refused(p, op.elem, visited, err) {
-			unmarshal_path_prepend(err, Any{})
+			error_path_prepend(err, Any{})
 			return true
 		}
 	}

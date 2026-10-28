@@ -91,7 +91,7 @@ test_any_repeated_key_trailing :: proc(t: ^testing.T) {
 	src := `{"a":1,"b":0,"a":2} 7`
 	r := paths_run(raw(src), {{steps = {ANY}}}, .Strict, .Last)
 	defer json.destroy(&r.req)
-	e, is_error := r.err.(json.Error)
+	e, is_error := scan_fault(r.err).?
 	testing.expectf(t, is_error && e.kind == .Trailing, "%v, want Trailing", r.err)
 	testing.expect_value(t, len(r.answers), 2)
 	if len(r.answers) == 2 {
@@ -119,7 +119,7 @@ test_any_repeated_key_refused :: proc(t: ^testing.T) {
 	for c in cases {
 		r := paths_run(raw(c.src), {{steps = c.steps}}, .Strict, .Refuse)
 		defer json.destroy(&r.req)
-		e, is_error := r.err.(json.Error)
+		e, is_error := scan_fault(r.err).?
 		testing.expectf(t, is_error && e.kind == .Duplicate_Key && e.offset == c.offset, "%s: %v, want a Duplicate_Key at %d", c.src, r.err, c.offset)
 	}
 }

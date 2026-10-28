@@ -9,8 +9,8 @@ import bits "../core"
 // chosen once per call, so the default mode (`{}`) does none of the others' work.
 @(private)
 Scan_Flag :: enum u8 {
-	Unquoted,  // a quote is text (`Quoting.None`)
-	Escapes,   // a backslash opens an escape (`Escapes.Backslash`), only with `.Unquoted`
+	Unquoted,  // a quote is text (`Quoting.None`, `Quoting.Backslash`)
+	Escapes,   // a backslash opens an escape (`Quoting.Backslash`), only with `.Unquoted`
 	Comments,  // a line opening with the comment byte is no record
 	Skip_Utf8, // UTF-8 is not judged
 }
@@ -25,6 +25,8 @@ Scan :: struct {
 	delim:      byte,
 	comment:    byte, // `.Comments` only
 	ragged:     bool,
+	// The dialect the scan reads, its delimiter spelled out: what each `Record` carries.
+	dialect:    Dialect,
 	max_fields: int,  // max(int) for no cap
 	max_bytes:  int,  // a line's cap (`Limits.max_record_bytes`), 0 for none
 }
@@ -34,6 +36,8 @@ Scan :: struct {
 @(private)
 scan_setup :: proc(d: Dialect, limits: Limits, strictness := Strictness.Strict) -> (s: Scan, ok: bool) {
 	s = {delim = d.delimiter if d.delimiter != 0 else ',', comment = d.comment, ragged = d.ragged, max_fields = limits.max_fields, max_bytes = limits.max_record_bytes}
+	s.dialect = d
+	s.dialect.delimiter = s.delim
 	if strictness != .Strict {
 		s.mode += {.Skip_Utf8}
 	}
@@ -43,11 +47,11 @@ scan_setup :: proc(d: Dialect, limits: Limits, strictness := Strictness.Strict) 
 	if limits.max_fields == 0 {
 		s.max_fields = max(int)
 	}
-	if d.quoting == .None {
+	if d.quoting != .Quotes {
 		s.mode += {.Unquoted}
 	}
-	if d.escapes == .Backslash {
-		if d.quoting == .Quotes || s.delim == '\\' || s.delim == 't' || s.delim == 'n' || s.delim == 'r' || s.delim == '0' || d.comment == '\\' {
+	if d.quoting == .Backslash {
+		if s.delim == '\\' || s.delim == 't' || s.delim == 'n' || s.delim == 'r' || s.delim == '0' || d.comment == '\\' {
 			return
 		}
 		s.mode += {.Escapes}
@@ -122,6 +126,24 @@ scan_block :: #force_inline proc(src: []byte, pos: int, delim, comment: byte, cy
 		}
 		cy.prev = v[3]
 	}
+	return
+}
+
+// `scan_block`'s UTF-8 judgement alone, for the block at `pos`: `fault_before` and `kind_before` as the rest of the block
+// left them, and the earlier of that and the block's first UTF-8 fault. For a caller that scanned the block
+// under `.Skip_Utf8`.
+@(cold, private)
+block_utf8_fault :: proc(src: []byte, pos: int, cy: ^Carry, fault_before: int, kind_before: Error_Kind) -> (fault: int, kind: Error_Kind) {
+	tail: [64]u8 = ---
+	p, _ := bits.block_at(src, pos, &tail)
+	v := [4]bits.V{bits.load(p), bits.load(p[16:]), bits.load(p[32:]), bits.load(p[48:])}
+	fault, kind = fault_before, kind_before
+	if bits.any_high(cy.prev | v[0] | v[1] | v[2] | v[3]) && bits.any_lane(bits.utf8_block(cy.prev, v)) {
+		if at, k := utf8_block_fault(src, pos, cy); at >= 0 && (fault < 0 || at < fault) {
+			fault, kind = at, k
+		}
+	}
+	cy.prev = v[3]
 	return
 }
 
@@ -316,7 +338,7 @@ scan_end :: proc(src: []byte, cy: ^Carry) -> (fault: int, kind: Error_Kind) {
 	if cy.in_quote != 0 {
 		return n, .Truncated
 	}
-	return -1, .None
+	return -1, {}
 }
 
 // The UTF-8 fault the block at `pos` reports: `utf8_fault`'s, or -1 when the scan defers it to the reader
@@ -326,7 +348,7 @@ utf8_block_fault :: proc(src: []byte, pos: int, cy: ^Carry) -> (fault: int, kind
 	fault, kind = utf8_fault(src, pos, pos + 64)
 	if fault >= 0 && cy.utf8 >= 0 {
 		cy.utf8 = min(cy.utf8, fault)
-		return -1, .None
+		return -1, {}
 	}
 	return
 }
@@ -357,7 +379,7 @@ utf8_fault :: proc(src: []byte, pos, end: int) -> (fault: int, kind: Error_Kind)
 		}
 		i += size
 	}
-	return -1, .None
+	return -1, {}
 }
 
 // The bytes a delimiter may be: not a quote, CR or LF, and ASCII.

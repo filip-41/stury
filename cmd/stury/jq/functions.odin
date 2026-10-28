@@ -74,7 +74,7 @@ fn_keys :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, S
 }
 
 fn_keys_unsorted :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	#partial switch kind(v) {
+	switch kind(v) {
 	case .Object:
 		a := new_array(length_of(v))
 		it := iterate(v)
@@ -88,6 +88,7 @@ fn_keys_unsorted :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> 
 			append(&a.items, num(f64(i)))
 		}
 		return a, .Go
+	case .Null, .False, .True, .Number, .String:
 	}
 	return nil, fail(ip, "%s (%s) has no keys", type_name(v), brief(v))
 }
@@ -179,7 +180,7 @@ contains_elements :: proc(a, b: []Value, depth: int) -> bool {
 }
 
 fn_tonumber :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	#partial switch kind(v) {
+	switch kind(v) {
 	case .Number:
 		return v, .Go
 	case .String:
@@ -189,6 +190,7 @@ fn_tonumber :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 				return n, .Go
 			}
 		}
+	case .Null, .False, .True, .Array, .Object:
 	}
 	return nil, fail(ip, "%s (%s) cannot be parsed as a number", type_name(v), brief(v))
 }
@@ -362,12 +364,12 @@ fn_join :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, S
 	it := iterate(v)
 	for _, m in next_member(&it) {
 		item: Value
-		#partial switch kind(m) {
+		switch kind(m) {
 		case .False, .True, .Number:
 			item = to_json(m)
 		case .Null:
 			item = ""
-		case:
+		case .String, .Array, .Object:
 			item = m
 		}
 		left: Value = ""

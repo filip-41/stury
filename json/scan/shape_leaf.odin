@@ -35,31 +35,7 @@ shape_leaf_bool :: proc(src: []byte, lo: u64, dest: rawptr, width: u8) -> core_p
 	return .None
 }
 
-@(private = "file")
-number_starts_with :: #force_inline proc "contextless" (b: u8) -> bool {
-	return b == '-' || (b >= '0' && b <= '9')
-}
-
-// A number written as an integer into a `width`-byte integer. A fraction or an exponent is the wrong kind, not a
-// value to truncate. `-0` is 0 for every target.
-shape_leaf_int :: proc(src: []byte, lo, hi: u64, dest: rawptr, width: u8, signed: bool) -> core_pkg.Shape_Fault #no_bounds_check {
-	b := src[lo]
-	if !number_starts_with(b) {
-		return .Wrong_Kind
-	}
-	neg := b == '-'
-	// The token is checked, so its digits reach `hi` exactly when it has no fraction and no exponent.
-	mag, over, digits := core_pkg.fold_int(src, lo + u64(neg), hi)
-	if !digits {
-		return .Wrong_Kind
-	}
-	if over || mag > u128(max(u64)) {
-		return .Out_Of_Range
-	}
-	return core_pkg.shape_int_store(u64(mag), neg, dest, width, signed)
-}
-
-// The checked number token `src[lo:hi]` into a `width`-byte integer, as `shape_leaf_int` reads it, from the
+// The checked number token `src[lo:hi]` into a `width`-byte integer, as `core_pkg.shape_leaf_int` reads it, from the
 // digits the walk folded (`r.num`) where they fit a u64.
 shape_leaf_number_int :: #force_inline proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr, width: u8, signed: bool) -> core_pkg.Shape_Fault #no_bounds_check {
 	neg := r.src[lo] == '-'
@@ -68,32 +44,9 @@ shape_leaf_number_int :: #force_inline proc(r: ^walk.Shape_Run, lo, hi: u64, des
 		return .Wrong_Kind
 	}
 	if r.num.int_digits > 19 {
-		return shape_leaf_int(r.src, lo, hi, dest, width, signed)
+		return core_pkg.shape_leaf_int(r.src, lo, hi, dest, width, signed)
 	}
 	return core_pkg.shape_int_store(r.num.mant, neg, dest, width, signed)
-}
-
-// A number written as an integer into a 128-bit integer, checked as `shape_leaf_int` checks one into 64 bits.
-shape_leaf_wide :: proc(src: []byte, lo, hi: u64, dest: rawptr, signed: bool) -> core_pkg.Shape_Fault {
-	b := src[lo]
-	if !number_starts_with(b) {
-		return .Wrong_Kind
-	}
-	neg := b == '-'
-	mag, over, digits := core_pkg.fold_int(src, lo + u64(neg), hi)
-	if !digits {
-		return .Wrong_Kind
-	}
-	return core_pkg.shape_wide_store(mag, over, neg, dest, signed)
-}
-
-// A number written as an integer into an enum: its backing integer, which must be one of the declared values.
-shape_leaf_enum :: proc(src: []byte, lo, hi: u64, dest: rawptr, op: ^core_pkg.Shape_Op) -> core_pkg.Shape_Fault {
-	v: u64
-	if fault := shape_leaf_int(src, lo, hi, &v, op.width, op.kind == .Enum_Int); fault != .None {
-		return fault
-	}
-	return core_pkg.shape_enum_store(v, dest, op)
 }
 
 // A string token `src[lo:hi]`, quotes included, into an enum: the value of the member it names, compared by
@@ -116,32 +69,10 @@ shape_leaf_enum_name :: proc(src: []byte, lo, hi: u64, dest: rawptr, op: ^core_p
 // rounds to infinity in the target width, or has no binary64 value at all (`1e400`), is out of range. An
 // underflow rounds to zero.
 shape_leaf_float :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr, width: u8) -> core_pkg.Shape_Fault #no_bounds_check {
-	src := r.src
-	b := src[lo]
-	if !number_starts_with(b) {
+	if !core_pkg.number_starts_with(r.src[lo]) {
 		return .Wrong_Kind
 	}
-	if width == 8 {
-		v, ok := core_pkg.f64_number_value(src, lo, hi, shape_number_lexed(r, lo, hi, false))
-		if !ok {
-			return .Out_Of_Range
-		}
-		if dest != nil {
-			(^f64)(dest)^ = v
-		}
-		return .None
-	}
-	n := shape_number_judged(r, lo, hi)
-	if n.exactness == .None {
-		return .Out_Of_Range
-	}
-	switch width {
-	case 4:
-		return core_pkg.shape_f32_store(core_pkg.shape_off_halfway(src[lo:hi], n, 24, -126), dest)
-	case 2:
-		return core_pkg.shape_f16_store(core_pkg.shape_off_halfway(src[lo:hi], n, 11, -14), dest)
-	}
-	return .None
+	return core_pkg.shape_leaf_float_lexed(r.src, lo, hi, shape_number_lexed(r, lo, hi, false), dest, width)
 }
 
 // The binary64 value of the checked number token `src[lo:hi]`, by the `.Dom` row's decoder over the digits the
@@ -247,18 +178,7 @@ shape_leaf_map_key :: proc(r: ^walk.Shape_Run, escaped: bool, lo, hi: u64, kop: 
 		}
 		text = dst[:dom_unescape_into(dst, r.src, lo, hi)]
 	}
-	digits := text[1:] if len(text) > 0 && text[0] == '-' else text
-	if len(digits) == 0 || (digits[0] == '0' && len(digits) > 1) {
-		return .Wrong_Kind
-	}
-	n := u64(len(text))
-	#partial switch kop.kind {
-	case .Enum_Int, .Enum_Uint:
-		return shape_leaf_enum(text, 0, n, dest, kop)
-	case .Wide_Int, .Wide_Uint:
-		return shape_leaf_wide(text, 0, n, dest, kop.kind == .Wide_Int)
-	}
-	return shape_leaf_int(text, 0, n, dest, kop.width, kop.kind == .Int)
+	return core_pkg.shape_leaf_key_int(text, kop, dest)
 }
 
 // A string token into a `cstring`, always copied with a NUL after it, so a `\u0000` inside is out of range.
@@ -331,11 +251,11 @@ shape_leaf_rune :: proc(src: []byte, lo, hi: u64, dest: rawptr, escaped: bool) -
 }
 
 // The value `src[lo:hi]`, verbatim, into a `Raw` or `Digits`: borrowed from `src` when the run allows it, else copied.
-shape_leaf_raw :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr) -> core_pkg.Shape_Fault {
+shape_leaf_raw :: proc(r: ^walk.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr) -> core_pkg.Shape_Fault {
 	if dest == nil {
 		return .None
 	}
-	text := r.src[lo:hi]
+	text := src[lo:hi]
 	if !r.borrow {
 		buf, err := shape_alloc(len(text), 1, r.allocator)
 		if err != nil || buf == nil {
@@ -349,12 +269,28 @@ shape_leaf_raw :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr) -> core_pk
 }
 
 // The value `src[lo:hi]`, checked, handed to the caller's hook for the type at `dest`. Checked only, it is not.
-// Forced inline: unwrapping the hook's `Maybe` tipped LLVM into an outlined call per hooked value.
-shape_leaf_hook :: #force_inline proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr, op: ^core_pkg.Shape_Op) -> core_pkg.Shape_Fault {
+// An escaped string's decoded text lives in `r.allocator` for the call.
+shape_leaf_hook :: proc(r: ^walk.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr, op: ^core_pkg.Shape_Op) -> core_pkg.Shape_Fault {
 	if dest == nil {
 		return .None
 	}
-	return r.shape.hooks[op.elem](r.src[lo:hi], dest, r.allocator).? or_else .None
+	v := core_pkg.Hook_Value{kind = walk.kind_at(src, lo), text = string(src[lo:hi])}
+	v.decoded = v.text
+	escaped: []byte
+	if v.kind == .String {
+		v.decoded = v.text[1:len(v.text) - 1]
+		if bytes.index_byte(transmute([]byte)v.decoded, '\\') >= 0 {
+			ok: bool
+			escaped, ok = decode_string_inner(src, lo, hi, r.allocator)
+			if !ok {
+				return .Out_Of_Memory
+			}
+			v.decoded = string(escaped)
+		}
+	}
+	fault := r.shape.hooks[op.elem](v, dest, r.allocator).? or_else .None
+	delete(escaped, r.allocator)
+	return fault
 }
 
 // Any scalar into a `Decoded`, in the arm `decode_span` gives it. A string is borrowed or copied as the string
@@ -387,28 +323,31 @@ shape_leaf_decoded :: proc(r: ^walk.Shape_Run, src: []byte, lo, hi: u64, dest: r
 	return .None
 }
 
-// The container `src[lo:hi]` read whole, into the `Raw`, bit_set or hooked value at `r.cur_dest`, or into the
-// tree boxed for the `any` there. The bit_set and `any` readers re-read the span the walk checked, and read
-// no byte past `hi`: a span that ends early is `.Wrong_Kind`.
+// The container the walk just closed, read whole: `shape_leaf_whole` over the source.
 shape_leaf_container :: proc(r: ^walk.Shape_Run, lo, hi: u64) -> core_pkg.Shape_Fault {
-	dest := r.cur_dest
-	op := &r.ops[r.cur_op]
+	return shape_leaf_whole(r, r.src[:hi], lo, hi, r.cur_dest, &r.ops[r.cur_op])
+}
+
+// The checked value `src[lo:hi]` read whole, into the `Raw`, bit_set or hooked value (op `op`) at `dest`, or into
+// the tree boxed for the `any` there. The bit_set and `any` readers re-read the span, and read no byte past
+// `hi`, where `src` ends: a span that ends early is `.Wrong_Kind`.
+shape_leaf_whole :: proc(r: ^walk.Shape_Run, src: []byte, lo, hi: u64, dest: rawptr, op: ^core_pkg.Shape_Op) -> core_pkg.Shape_Fault {
 	if op.kind == .Bit_Set {
-		return shape_leaf_bit_set(r, r.src[:hi], int(lo), dest, op)
+		return shape_leaf_bit_set(r, src, int(lo), dest, op)
 	}
 	if op.kind == .Hook {
-		return shape_leaf_hook(r, lo, hi, dest, op)
+		return shape_leaf_hook(r, src, lo, hi, dest, op)
 	}
 	if op.kind == .Any && dest != nil {
 		// `shape_any_tree` allocates through the context. The request's allocator is the caller's again after.
 		prev := context.allocator
 		context.allocator = r.allocator
-		tree, _, fault := shape_any_tree(r, r.src[:hi], int(lo))
+		tree, _, fault := shape_any_tree(r, src, int(lo))
 		context.allocator = prev
 		(^any)(dest)^ = tree
 		return fault
 	}
-	return shape_leaf_raw(r, lo, hi, dest)
+	return shape_leaf_raw(r, src, lo, hi, dest)
 }
 
 // Any scalar into the `any` at `dest`: `null` as nil, any other as its `Decoded` arm, boxed in `r.allocator`.
@@ -456,7 +395,7 @@ shape_leaf_bit_set :: proc(r: ^walk.Shape_Run, src: []byte, lo: int, dest: rawpt
 			fault = shape_leaf_enum_name(src, u64(p), u64(end), &v, op)
 		case (src[p] == '-' || (src[p] >= '0' && src[p] <= '9')) && !names:
 			end = shape_scalar_end(src, p)
-			fault = shape_leaf_int(src, u64(p), u64(end), &v, 8, true)
+			fault = core_pkg.shape_leaf_int(src, u64(p), u64(end), &v, 8, true)
 			if fault == .None && op.enum_info != nil && !slice.contains(op.enum_info.values, runtime.Type_Info_Enum_Value(v)) {
 				fault = .Not_A_Member
 			}
@@ -593,7 +532,7 @@ shape_skip_space :: proc(src: []byte, p: int) -> int {
 // digits the walk folded (`r.num`) rather than a second lex.
 shape_leaf_number :: proc(r: ^walk.Shape_Run, lo, hi: u64, dest: rawptr) -> core_pkg.Shape_Fault {
 	b := r.src[lo]
-	if !number_starts_with(b) {
+	if !core_pkg.number_starts_with(b) {
 		return .Wrong_Kind
 	}
 	n := core_pkg.number_lexed(r.src, lo, hi, shape_number_lexed(r, lo, hi, false))

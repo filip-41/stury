@@ -6,6 +6,7 @@ package main
 
 import "core:bytes"
 import "core:mem/virtual"
+import core_pkg "../../core"
 import json "../../json"
 import "jq"
 
@@ -25,7 +26,7 @@ selects :: proc(run: ^Run, src: []byte, a: json.Answer) -> bool {
 // Answer the path over each text of the stream. From a text the scan cannot answer or that does not parse, the
 // interpreter reads the rest of the stream, and tells the fault as jq does.
 scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
-	pieces := json.plain_json(run.req.dialect) && !run.held
+	pieces := json.grammar_of(run.read.dialect) == {} && !run.held
 	built: virtual.Arena // the last text built in pieces, emptied once another is
 	// As jq's main loop, each text is read only while no file has failed.
 	for ins.failures == 0 {
@@ -57,7 +58,7 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 		}
 		// A JSONC text's comments print with the values they are attached to, which only the interpreter's
 		// values know: a text with a `/` in it, a comment's or a string's, is the interpreter's.
-		if json.has_comments(run.req.dialect) && bytes.index_byte(src, '/') >= 0 {
+		if .Comments in json.grammar_of(run.read.dialect) && bytes.index_byte(src, '/') >= 0 {
 			explain_fallback(run, .Comment_Slash, rest = true)
 			run_filter(run, ins)
 			return
@@ -79,16 +80,16 @@ scan_inputs :: proc(run: ^Run, ins: ^Inputs) {
 				run_filter(run, ins)
 				return
 			}
-			if (ins.resume || !ins.lines_tried) && json.plain_json(run.req.dialect) {
+			if (ins.resume || !ins.lines_tried) && json.grammar_of(run.read.dialect) == {} {
 				ins.resume = false
 				records_after(run, ins)
 			}
 			continue
 		}
-		if read_on(ins, at) {
+		if text_cut(ins, at, err.?) {
 			continue
 		}
-		if !json.plain_json(run.req.dialect) {
+		if json.grammar_of(run.read.dialect) != {} {
 			jsonc_fault(ins, err.?, at)
 		}
 		explain_fallback(run, .Bad_Text, rest = true)
@@ -166,18 +167,16 @@ records_after :: proc(run: ^Run, ins: ^Inputs) {
 }
 
 // The filter's outputs over the JSON text `src` starts with, as `scan_text` scans it. A root array's `[]`
-// path is tried first without `per_element`, as `iterate_chunk` tries a chunk's: with a found answer for
+// path is tried first without `per_element`, as `iterate_piece` tries a piece's: with a found answer for
 // each entry, the per-element scan, on the automaton, has nothing to add.
 scan_outputs :: proc(run: ^Run, src: []byte, trailing: bool) -> (answers: []json.Answer, end: int, err: Maybe(json.Error), refused: bool) {
 	if run.tried {
-		run.req.paths = run.paths[1:]
-		end, err, refused = scan_text(run, src, trailing)
-		run.req.paths = run.paths[:1]
-		if err == nil && !refused && array_entries_answered(run.req.answers[:], src[:end]) {
-			return run.req.answers[:], end, nil, false
+		end, err, refused = scan_text(&run.trial, src, trailing)
+		if err == nil && !refused && array_entries_answered(run.trial.answers[:], src[:end]) {
+			return run.trial.answers[:], end, nil, false
 		}
 	}
-	end, err, refused = scan_text(run, src, trailing)
+	end, err, refused = scan_text(&run.req, src, trailing)
 	answers, _ = jq_outputs(run.req.answers[:])
 	return answers, end, err, refused
 }
@@ -186,17 +185,21 @@ scan_outputs :: proc(run: ^Run, src: []byte, trailing: bool) -> (answers: []json
 // only if `trailing`, or why the text is refused, which leaves it to the interpreter. A scan that meets another
 // text after the first has read the first whole, and answered it. `refused` when the library will not scan
 // it at all (a fixed limit of its engine), which leaves the text to the interpreter.
-scan_text :: proc(run: ^Run, src: []byte, trailing: bool) -> (end: int, err: Maybe(json.Error), refused: bool) {
+scan_text :: proc(req: ^json.Request({.Path}), src: []byte, trailing: bool) -> (end: int, err: Maybe(json.Error), refused: bool) {
 	end = len(src)
-	if e, bad := json.scan(src, &run.req).?; bad {
+	if refusal, bad := json.scan(src, req).?; bad {
+		e, of_text := core_pkg.source_error(refusal)
 		#partial switch e.kind {
 		// A refusal, or short answers that say nothing about the text: the interpreter reads it.
-		case .Over_Capacity, .Bad_Option, .Source_Too_Wide, .Out_Of_Memory:
+		case .Bad_Option, .Source_Too_Wide, .Out_Of_Memory:
 			return 0, nil, true
 		case .Trailing:
 			if trailing {
 				return int(e.offset), nil, false
 			}
+		}
+		if !of_text {
+			return 0, nil, true
 		}
 		return 0, e, false
 	}

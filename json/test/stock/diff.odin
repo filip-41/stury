@@ -123,6 +123,9 @@ is_stock_lax :: proc(src: []byte, e: json.Error) -> bool {
 	if e.offset >= u64(len(src)) {
 		return false
 	}
+	if json.Fault(e.detail) == .Literal {
+		return false
+	}
 	at := src[e.offset]
 	switch e.kind {
 	case .Bad_Char, .Trailing:
@@ -138,7 +141,7 @@ is_stock_lax :: proc(src: []byte, e: json.Error) -> bool {
 		return is_bad_number_at(src, int(e.offset))
 	case .Bad_Escape:
 		return is_bad_escape_at(src, int(e.offset)) || is_lone_surrogate_at(src, int(e.offset))
-	case .None, .Truncated, .Bad_Literal, .Limit_Digits, .Limit_Scale, .Too_Deep, .Source_Too_Wide, .Out_Of_Memory, .Duplicate_Key, .Bad_Option, .Field_Count, .Limit_Fields, .Limit_Record, .Bad_Path, .Over_Capacity:
+	case .Truncated, .Limit_Digits, .Limit_Scale, .Too_Deep, .Source_Too_Wide, .Out_Of_Memory, .Duplicate_Key, .Bad_Option, .Bad_Structure, .Limit_Format:
 	}
 	return false
 }

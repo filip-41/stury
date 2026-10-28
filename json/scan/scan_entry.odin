@@ -101,12 +101,12 @@ seq_truncated_number :: proc(text: []byte) -> bool {
 
 // A framed record or text that ends inside a literal is `.Truncated` alone, but when a byte follows it (a
 // space, a newline, the framing's end) that byte is what ended it, and checking the text with it reports
-// `.Bad_Literal`, shifting no offset.
-cut_by_next_byte :: proc(data: []byte, at, limit: int, e: Error, dialect := Dialect.Json, limits := Limits{}) -> Error {
+// `.Bad_Char` with `Fault.Literal`, shifting no offset.
+cut_by_next_byte :: proc(data: []byte, at, limit: int, e: Public_Error, dialect := Dialect.Json, limits := Limits{}) -> Public_Error {
 	if e.kind == .Truncated && e.offset == u64(limit - at) && limit < len(data) {
 		slice := data[at:limit + 1]
-		if with, bad := validate_dialect(slice, dialect, nil, limits).?; bad && with.kind == .Bad_Literal {
-			return with
+		if with, bad := validate_dialect(slice, dialect, nil, limits).?; bad && with.kind == KIND_LITERAL {
+			return error_of(with)
 		}
 	}
 	return e

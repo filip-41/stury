@@ -12,7 +12,7 @@ import "scan/walk"
 import "../core/spell"
 
 @(private)
-write_elems :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, n: int) -> Marshal_Error {
+write_elems :: proc(st: ^Marshal_State, op: Plan_Op, data: rawptr, n: int) -> Marshal_Error_Kind {
 	elem := st.plan.ops[op.elem]
 	if elem.kind == .Struct && !st.eager && n > 0 {
 		return write_struct_elems(st, op, elem, data, n)
@@ -20,13 +20,15 @@ write_elems :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, n: int) -> Mars
 	open_container(st, '[') or_return
 	for k in 0 ..< n {
 		element(st, k) or_return
-		write_value(st, op.elem, rawptr(uintptr(data) + uintptr(k) * uintptr(op.stride))) or_return
+		if e := write_value(st, op.elem, rawptr(uintptr(data) + uintptr(k) * uintptr(op.stride))); e != .None {
+			return core_pkg.plan_refused_at_index(st, k, e)
+		}
 	}
 	return close_container(st, ']', n)
 }
 
 @(private)
-put_scalar :: proc(dst: ^[dynamic]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> Marshal_Error {
+put_scalar :: proc(dst: ^[dynamic]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> Marshal_Error_Kind {
 	p := enc.put_room(dst, len(dst^), spell.SCALAR_ROOM)
 	if p == nil {
 		return .Out_Of_Memory
@@ -39,9 +41,9 @@ put_scalar :: proc(dst: ^[dynamic]u8, kind: core_pkg.Shape_Kind, at: rawptr, siz
 // written at a cursor kept out of `st.out`'s length, which is committed only around a nested value and at
 // the end.
 @(private)
-write_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma := false) -> Marshal_Error #no_bounds_check {
+write_struct :: proc(st: ^Marshal_State, op: Plan_Op, data: rawptr, then_comma := false) -> Marshal_Error_Kind #no_bounds_check {
 	// A flat struct holds no element boundary, so a streaming write needs no `{` before its members.
-	if st.eager && (st.pretty || !op.flat) {
+	if st.eager && (st.open_flat || !op.flat) {
 		return write_struct_eager(st, op, data)
 	}
 	if st.depth == MAX_DEPTH {
@@ -66,7 +68,11 @@ write_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma := 
 		key := raw_data(st.plan.keys[f.key_lo:])
 		start := w
 		if f.kind == .String {
-			w = enc.spell_led_string(st.out, w, key, n, (^string)(at)^, true, false) or_return
+			end, e := enc.spell_led_string(st.out, w, key, n, (^string)(at)^, true, false)
+			if e != .None {
+				return core_pkg.plan_refused_at_field(st, k, e)
+			}
+			w = end
 		} else {
 			p := enc.put_room(st.out, w, n + spell.SCALAR_ROOM)
 			if p == nil {
@@ -75,10 +81,16 @@ write_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma := 
 			enc.copy_lead(p, key, n)
 			#partial switch f.kind {
 			case .Int, .Uint, .Float, .Bool:
-				w += n + (spell.spell_scalar(p[n:], f.kind, at, f.size) or_return)
+				size, e := spell.spell_scalar(p[n:], f.kind, at, f.size)
+				if e != .None {
+					return core_pkg.plan_refused_at_field(st, k, e)
+				}
+				w += n + size
 			case:
 				enc.put_commit(st.out, w + n - len(st.out^))
-				write_value(st, f.op, at) or_return
+				if e := write_value(st, f.op, at); e != .None {
+					return core_pkg.plan_refused_at_field(st, k, e)
+				}
 				w = len(st.out^)
 			}
 		}
@@ -91,20 +103,24 @@ write_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma := 
 	return close_object(st.out, first, w, first >= 0, then_comma)
 }
 
-// A flat struct (see `Plan_Op.flat`) in compact form: nothing nested is written, so no plan array moves
-// and nothing is opened below it.
+// A flat struct (see `Plan_Op.flat`) in compact form: nothing nested is written, and no field reaches a hook or
+// an `any`, so no plan array moves under the slice of `fields` it walks and nothing is opened below it.
 @(private)
-write_flat_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comma: bool) -> Marshal_Error #no_bounds_check {
+write_flat_struct :: proc(st: ^Marshal_State, op: Plan_Op, data: rawptr, then_comma: bool) -> Marshal_Error_Kind #no_bounds_check {
 	out := st.out
 	keys := raw_data(st.plan.keys)
 	start := len(out^)
 	w := start
-	for f in st.plan.fields[op.elem:][:op.count] {
+	for &f in st.plan.fields[op.elem:][:op.count] {
 		at := rawptr(uintptr(data) + f.offset)
 		n := int(f.key_hi - f.key_lo)
 		key := keys[f.key_lo:]
 		if f.kind == .String {
-			w = enc.spell_led_string(out, w, key, n, (^string)(at)^, true, false) or_return
+			end, e := enc.spell_led_string(out, w, key, n, (^string)(at)^, true, false)
+			if e != .None {
+				return core_pkg.plan_refused_at_field(st, field_index(st, &f), e)
+			}
+			w = end
 			continue
 		}
 		p := enc.put_room(out, w, n + spell.SCALAR_ROOM)
@@ -118,21 +134,35 @@ write_flat_struct :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, then_comm
 		case .Uint:
 			w += n + (spell.spell_scalar(p[n:], .Uint, at, f.size) or_return)
 		case .Float:
-			w += n + (spell.spell_scalar(p[n:], .Float, at, f.size) or_return)
+			size, e := spell.spell_scalar(p[n:], .Float, at, f.size)
+			if e != .None {
+				return core_pkg.plan_refused_at_field(st, field_index(st, &f), e)
+			}
+			w += n + size
 		case .Bool:
 			w += n + (spell.spell_scalar(p[n:], .Bool, at, f.size) or_return)
 		case .Enum_Int, .Enum_Uint:
-			w = spell_flat_enum(st, f, key, p, n, w, at) or_return
+			end, e := spell_flat_enum(st, f, key, p, n, w, at)
+			if e != .None {
+				return core_pkg.plan_refused_at_field(st, field_index(st, &f), e)
+			}
+			w = end
 		}
 	}
 	return close_object(out, start, w, op.count > 0, then_comma)
+}
+
+// The index of `f`, an element of `st.plan.fields`.
+@(private = "file")
+field_index :: #force_inline proc(st: ^Marshal_State, f: ^Plan_Field) -> u32 {
+	return u32((uintptr(f) - uintptr(raw_data(st.plan.fields))) / size_of(Plan_Field))
 }
 
 // An enum field of a flat struct after its key at `w`: the member's name, or its number under `enum_ints`.
 // `p` is the room put for the key. A value no member has is refused, as `put_enum_int` refuses it. Returns the
 // end of the field.
 @(private = "file")
-spell_flat_enum :: #force_inline proc(st: ^Marshal_Out, f: Plan_Field, key, p: [^]u8, n, w: int, at: rawptr) -> (end: int, err: Marshal_Error) #no_bounds_check {
+spell_flat_enum :: #force_inline proc(st: ^Marshal_State, f: Plan_Field, key, p: [^]u8, n, w: int, at: rawptr) -> (end: int, err: Marshal_Error_Kind) #no_bounds_check {
 	m, v := core_pkg.plan_enum_written(st.plan, st.plan.ops[f.op], at) or_return
 	if st.enum_ints {
 		if f.kind == .Enum_Int {
@@ -156,7 +186,7 @@ spell_flat_enum :: #force_inline proc(st: ^Marshal_Out, f: Plan_Field, key, p: [
 // A member name longer than the room put for the key. Growing keeps only the bytes before `w`, so the key is
 // copied again.
 @(private = "file")
-spell_flat_enum_long :: #force_no_inline proc(st: ^Marshal_Out, key: [^]u8, n, w: int, name: []u8) -> (end: int, err: Marshal_Error) {
+spell_flat_enum_long :: #force_no_inline proc(st: ^Marshal_State, key: [^]u8, n, w: int, name: []u8) -> (end: int, err: Marshal_Error_Kind) {
 	p := enc.put_room(st.out, w, n + len(name))
 	if p == nil {
 		return 0, .Out_Of_Memory
@@ -169,7 +199,7 @@ spell_flat_enum_long :: #force_no_inline proc(st: ^Marshal_Out, key: [^]u8, n, w
 // After an object's last member at `w`: the `}` and, with `then_comma`, a `,`, committed. With `opened`
 // the first key's comma at `start` becomes the `{`. Otherwise the object is `{}`.
 @(private)
-close_object :: #force_inline proc(out: ^[dynamic]u8, start, w: int, opened, then_comma: bool) -> Marshal_Error #no_bounds_check {
+close_object :: #force_inline proc(out: ^[dynamic]u8, start, w: int, opened, then_comma: bool) -> Marshal_Error_Kind #no_bounds_check {
 	p := enc.put_room(out, w, 3)
 	if p == nil {
 		return .Out_Of_Memory
@@ -190,10 +220,12 @@ close_object :: #force_inline proc(out: ^[dynamic]u8, start, w: int, opened, the
 
 // Compact elements that are all structs: each closes as `},`, and the last comma becomes the `]`.
 @(private)
-write_struct_elems :: proc(st: ^Marshal_Out, op, elem: Plan_Op, data: rawptr, n: int) -> Marshal_Error {
+write_struct_elems :: proc(st: ^Marshal_State, op, elem: Plan_Op, data: rawptr, n: int) -> Marshal_Error_Kind {
 	open_container(st, '[') or_return
 	for k in 0 ..< n {
-		write_struct(st, elem, rawptr(uintptr(data) + uintptr(k) * uintptr(op.stride)), true) or_return
+		if e := write_struct(st, elem, rawptr(uintptr(data) + uintptr(k) * uintptr(op.stride)), true); e != .None {
+			return core_pkg.plan_refused_at_index(st, k, e)
+		}
 	}
 	st.depth -= 1
 	st.nest -= 1
@@ -204,7 +236,10 @@ write_struct_elems :: proc(st: ^Marshal_Out, op, elem: Plan_Op, data: rawptr, n:
 // A struct opened before its members: pretty, streaming, or a tagged union's arm. A `tag` is that arm's
 // tag name written as a JSON string, written first as the `union_tag` member.
 @(private)
-write_struct_eager :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, tag := "") -> Marshal_Error {
+write_struct_eager :: proc(st: ^Marshal_State, op: Plan_Op, data: rawptr, tag := "") -> Marshal_Error_Kind {
+	if st.sort_keys {
+		return write_struct_sorted(st, op, data, tag)
+	}
 	open_container(st, '{') or_return
 	written := 0
 	if len(tag) > 0 {
@@ -227,23 +262,90 @@ write_struct_eager :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr, tag := "
 		if st.pretty {
 			enc.put_byte(st.out, ' ') or_return
 		}
-		write_value(st, f.op, at) or_return
+		if e := write_value(st, f.op, at); e != .None {
+			return core_pkg.plan_refused_at_field(st, k, e)
+		}
 		written += 1
 	}
 	return close_container(st, '}', written)
 }
 
+// A struct under `sort_keys`: its members in byte order of their names as written between the quotes, a tagged
+// union arm's tag among them. The order lives in `st.out.allocator` and is freed before return. It holds field
+// indices, not keys: a nested lazy compile may move `fields` and `keys`.
+@(private, cold)
+write_struct_sorted :: #force_no_inline proc(st: ^Marshal_State, op: Plan_Op, data: rawptr, tag: string) -> Marshal_Error_Kind {
+	Member :: struct {
+		name:  string, // read only while sorting
+		field: i64, // -1 for the tag
+	}
+	members, aerr := make([dynamic]Member, 0, op.count + 1, st.out.allocator)
+	defer delete(members)
+	if aerr != nil {
+		return .Out_Of_Memory
+	}
+	keys := st.plan.keys
+	// `tag` is a span of `keys`, so it is kept as its offset.
+	tag_at := 0
+	if len(tag) > 0 {
+		tag_at = int(uintptr(raw_data(tag)) - uintptr(raw_data(keys)))
+		append(&members, Member{string(keys[st.plan.tag_lo + 1:st.plan.tag_hi - 2]), -1})
+	}
+	for k in op.elem ..< op.elem + op.count {
+		f := st.plan.fields[k]
+		if f.omitempty && is_empty(st.plan, f.op, rawptr(uintptr(data) + f.offset)) {
+			continue
+		}
+		append(&members, Member{string(keys[f.key_lo + 2:f.key_hi - 2]), i64(k)})
+	}
+	slice.sort_by(members[:], proc(a, b: Member) -> bool {return a.name < b.name})
+	open_container(st, '{') or_return
+	for m, i in members {
+		element(st, i) or_return
+		if m.field < 0 {
+			enc.put_bytes(st.out, string(st.plan.keys[st.plan.tag_lo:st.plan.tag_hi])) or_return
+		} else {
+			enc.put_bytes(st.out, string(st.plan.keys[st.plan.fields[m.field].key_lo + 1:st.plan.fields[m.field].key_hi])) or_return
+		}
+		if st.pretty {
+			enc.put_byte(st.out, ' ') or_return
+		}
+		if m.field < 0 {
+			enc.put_bytes(st.out, string(st.plan.keys[tag_at:][:len(tag)])) or_return
+			continue
+		}
+		f := st.plan.fields[m.field]
+		if e := write_value(st, f.op, rawptr(uintptr(data) + f.offset)); e != .None {
+			return core_pkg.plan_refused_at_field(st, u32(m.field), e)
+		}
+	}
+	return close_container(st, '}', len(members))
+}
+
 @(private)
 Map_Entry :: struct {
-	key:    string, // the key as written between its quotes: the sort key
+	text:   string, // the key as written between its quotes: the sort key
 	lo, hi: u32, // the key as written, quotes included
+	key:    rawptr,
 	value:  rawptr,
+}
+
+// The path step to a map's value at `key`: the key when it is a string, else `Any`.
+@(private = "file")
+map_step :: proc(key_op: Plan_Op, key: rawptr) -> core_pkg.Step {
+	#partial switch key_op.kind {
+	case .String:
+		return core_pkg.Name((^string)(key)^)
+	case .Cstring:
+		return core_pkg.Name(string((^cstring)(key)^))
+	}
+	return core_pkg.Any{}
 }
 
 // Keys sorted by their written bytes between the quotes, so the output depends only on the map's contents.
 // The scratch lives in `st.out.allocator` and is freed before return.
 @(private)
-write_map :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Marshal_Error {
+write_map :: #force_no_inline proc(st: ^Marshal_State, op: Plan_Op, data: rawptr) -> Marshal_Error_Kind {
 	m := (^runtime.Raw_Map)(data)^
 	open_container(st, '{') or_return
 	n := int(m.len)
@@ -265,21 +367,26 @@ write_map :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) 
 	for bucket in 0 ..< uintptr(runtime.map_cap(m)) {
 		runtime.map_hash_is_valid(hs[bucket]) or_continue
 		lo := u32(len(keys))
-		spell_map_key(&keys, st, key_op, rawptr(runtime.map_cell_index_dynamic(ks, info.map_info.ks, bucket))) or_return
-		entries[e] = {lo = lo, hi = u32(len(keys)), value = rawptr(runtime.map_cell_index_dynamic(vs, info.map_info.vs, bucket))}
+		key := rawptr(runtime.map_cell_index_dynamic(ks, info.map_info.ks, bucket))
+		if kerr := spell_map_key(&keys, st, key_op, key); kerr != .None {
+			return core_pkg.plan_refused_in(st, map_step(key_op, key), kerr)
+		}
+		entries[e] = {lo = lo, hi = u32(len(keys)), key = key, value = rawptr(runtime.map_cell_index_dynamic(vs, info.map_info.vs, bucket))}
 		e += 1
 	}
 	for &entry in entries[:e] {
-		entry.key = string(keys[entry.lo + 1:entry.hi - 1])
+		entry.text = string(keys[entry.lo + 1:entry.hi - 1])
 	}
 	slice.sort_by(entries[:e], proc(a, b: Map_Entry) -> bool {
-		return a.key < b.key
+		return a.text < b.text
 	})
 	for entry, k in entries[:e] {
 		element(st, k) or_return
 		enc.put_bytes(st.out, string(keys[entry.lo:entry.hi])) or_return
 		enc.put_colon(st.out, st.pretty) or_return
-		write_value(st, op.elem, entry.value) or_return
+		if verr := write_value(st, op.elem, entry.value); verr != .None {
+			return core_pkg.plan_refused_in(st, map_step(key_op, entry.key), verr)
+		}
 	}
 	return close_container(st, '}', e)
 }
@@ -287,7 +394,7 @@ write_map :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) 
 // A map key as a JSON string: a string key as written (§5.1), an enum key's name, an integer key's digits in
 // quotes.
 @(private)
-spell_map_key :: proc(dst: ^[dynamic]u8, st: ^Marshal_Out, key: Plan_Op, data: rawptr) -> Marshal_Error {
+spell_map_key :: proc(dst: ^[dynamic]u8, st: ^Marshal_State, key: Plan_Op, data: rawptr) -> Marshal_Error_Kind {
 	#partial switch key.kind {
 	case .String:
 		return enc.put_string(dst, (^string)(data)^)
@@ -316,7 +423,7 @@ spell_map_key :: proc(dst: ^[dynamic]u8, st: ^Marshal_Out, key: Plan_Op, data: r
 // omitempty: a nil pointer, a nil `any` or union, an empty string, `Raw` or `Digits`, an empty slice, dynamic
 // array, fixed-capacity dynamic array, map or bit_set. `0`, `false` and `Null` are kept.
 @(private)
-is_empty :: proc(p: ^Type_Plan, idx: u32, data: rawptr) -> bool {
+is_empty :: proc(p: ^Format_Plan, idx: u32, data: rawptr) -> bool {
 	op := p.ops[idx]
 	#partial switch op.kind {
 	case .Pointer:

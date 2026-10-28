@@ -158,7 +158,7 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 		}
 		return nil, fail(ip, "Cannot index %s with number (%s)", type_name(t), brief(key))
 	case ^Object, ^Array, Ref, Path:
-		#partial switch kind(key) {
+		switch kind(key) {
 		case .Object:
 			if tk == .Null {
 				return nil, .Go
@@ -172,6 +172,7 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 			}
 		case .Number, .String: // read from the input, as getpath's keys are
 			return index_value(ip, t, scalar(key))
+		case .Null, .False, .True:
 		}
 	case nil, bool:
 	}

@@ -50,35 +50,3 @@ NO_KEY_LATCH :: u64(0xFFFF_FFFF_FFFF_FFFF)
 // "No row", in the width a row index is stored in: `Open_Frame.row` holds it when
 // `edge_push` dropped the row on a failed grow. It is never a real row index.
 NO_ROW :: u32(0xFFFF_FFFF)
-
-// The last member of object `i` whose key decodes to `name`, or `NO_NODE`.
-// An array has no keys and answers none.
-//
-// Last match is JSON object semantics, the same reading as a path's default
-// `.Last`. A member with no row is not found. With `unique`, no key repeats, so the first match is the last.
-dom_find_key :: proc(nodes: []Row, src: []byte, i: Node, name: string, hooks: ^Format_Hooks, $unique: bool) -> Node {
-	if !core_pkg.dom_has(nodes, i) || nodes[i].kind != .Object {
-		return NO_NODE
-	}
-	found := NO_NODE
-	end := i + Node(nodes[i].subtree_size)
-	j := core_pkg.dom_first_member(nodes, i)
-	for _ in 0 ..< nodes[i].cnt {
-		if !core_pkg.dom_has(nodes, j) {
-			return NO_NODE
-		}
-		r := nodes[j]
-		if r.key_lo != NO_KEY && key_equals_hooked(hooks, src, u64(r.key_lo), u64(r.key_hi), .Key_Escaped in r.flags, name) {
-			found = j
-			when unique {
-				break
-			}
-		}
-		// `dom_next_member`, with the container's end loaded once.
-		j += Node(r.subtree_size)
-		if j >= end {
-			j = NO_NODE
-		}
-	}
-	return found
-}

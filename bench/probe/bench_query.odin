@@ -42,8 +42,10 @@ read_every_value :: proc(doc: ^json.Document) -> (acc: u64, ok: bool) {
 // `read_all` (a `.Dom` lane) each timed sample also reads every value of the built document.
 bench_query :: proc(data: []byte, level: json.Strictness, $Q: bit_set[json.Query], read_all := false) -> bool {
 	req: json.Request(Q)
-	req.strictness = level
 	defer json.destroy(&req)
+	if json.request_init(&req, opts = {strictness = level}) != nil {
+		return false
+	}
 	for _ in 0 ..< WARMUP_ITERS {
 		if !scan_ok(data, &req) {
 			return false

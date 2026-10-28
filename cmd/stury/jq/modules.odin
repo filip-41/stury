@@ -19,9 +19,9 @@ package jq
 // error. A module that does not parse, or is not only definitions, or a data file that does not read, counts its
 // errors and the list goes on.
 
-import "core:fmt"
 import "core:os"
 import "core:strings"
+import "../message"
 
 // The program name jq's messages carry.
 @(private = "file")
@@ -120,7 +120,7 @@ home_dep :: proc() -> (Value, bool) {
 	if home == nil {
 		return nil, false
 	}
-	if path_kind(strings.clone_to_cstring(fmt.tprintf("%s/.jq", home), context.temp_allocator)) == .Dir {
+	if path_kind(strings.clone_to_cstring(message.build_temp("%s/.jq", home), context.temp_allocator)) == .Dir {
 		return nil, false
 	}
 	dep := new_object()
@@ -149,12 +149,12 @@ process :: proc(l: ^Linker, deps: []Value, origin: string) -> (imports: []Import
 			if optional {
 				continue
 			}
-			fmt.sbprintf(&l.messages, "%s: error: %s\n\n", NAME, msg)
+			message.write(&l.messages, "%s: error: %s\n\n", NAME, msg)
 			return imports, 1
 		}
 		for p in l.loading {
 			if p == path {
-				fmt.sbprintf(&l.messages, "%s: error: circular import of %s\n\n", NAME, path)
+				message.write(&l.messages, "%s: error: circular import of %s\n\n", NAME, path)
 				return imports, 1
 			}
 		}
@@ -184,7 +184,7 @@ cached :: proc(l: ^Linker, path: string) -> ^Library {
 load :: proc(l: ^Linker, path: string, is_data, raw: bool) -> (^Library, int) {
 	v, msg := l.ip.load_file(path, raw || !is_data)
 	if msg != "" {
-		fmt.sbprintf(&l.messages, "%s: error loading data file %s: %s\n\n", NAME, path, msg)
+		message.write(&l.messages, "%s: error loading data file %s: %s\n\n", NAME, path, msg)
 		return nil, 1
 	}
 	if is_data {
@@ -223,13 +223,13 @@ load :: proc(l: ^Linker, path: string, is_data, raw: bool) -> (^Library, int) {
 parse_library :: proc(src, path: string, messages: ^[dynamic]byte) -> (Program, int) {
 	prog, errors := parse(src, path)
 	for e in errors {
-		append(messages, ..transmute([]byte)fmt.tprintf("%s: error: %s\n", NAME, locate(src, e)))
+		append(messages, ..transmute([]byte)message.build_temp("%s: error: %s\n", NAME, locate(src, e)))
 	}
 	if len(errors) > 0 || prog.body == nil {
 		return prog, len(errors)
 	}
 	// jq's message, which carries jq's name in its text.
-	append(messages, ..transmute([]byte)fmt.tprintf("%s: error: jq: error: library should only have function definitions, not a main expression\n", NAME))
+	append(messages, ..transmute([]byte)message.build_temp("%s: error: jq: error: library should only have function definitions, not a main expression\n", NAME))
 	return prog, 1
 }
 
@@ -276,11 +276,11 @@ find_module :: proc(ip: ^Interp, relpath: string, search: Value, suffix: string,
 			try: string
 			switch alt {
 			case 0:
-				try = fmt.tprintf("%s/%s%s", dir, relpath, suffix)
+				try = message.build_temp("%s/%s%s", dir, relpath, suffix)
 			case 1:
-				try = fmt.tprintf("%s/%s/jq/main%s", dir, relpath, suffix)
+				try = message.build_temp("%s/%s/jq/main%s", dir, relpath, suffix)
 			case:
-				try = fmt.tprintf("%s/%s/%s%s", dir, relpath, base, suffix)
+				try = message.build_temp("%s/%s/%s%s", dir, relpath, base, suffix)
 			}
 			kind := path_kind(strings.clone_to_cstring(try, context.temp_allocator))
 			if kind == .File || kind == .Dir {
@@ -292,9 +292,9 @@ find_module :: proc(ip: ^Interp, relpath: string, search: Value, suffix: string,
 		}
 	}
 	if expand_error != "" {
-		return "", fmt.aprintf("module not found: %s (%s)", relpath, expand_error)
+		return "", message.build("module not found: %s (%s)", relpath, expand_error)
 	}
-	return "", fmt.aprintf("module not found: %s", relpath)
+	return "", message.build("module not found: %s", relpath)
 }
 
 // jq's checks on a module's path: no NUL, no `\`, no `..` component, no component twice in a row.
@@ -304,7 +304,7 @@ check_relpath :: proc(relpath: string) -> string {
 		return "Module path contains a NUL byte"
 	}
 	if strings.index_byte(relpath, '\\') >= 0 {
-		return fmt.aprintf("Modules must be named by relative paths using '/', not '\\' (%s)", relpath)
+		return message.build("Modules must be named by relative paths using '/', not '\\' (%s)", relpath)
 	}
 	prev: Maybe(string)
 	rest := relpath
@@ -312,10 +312,10 @@ check_relpath :: proc(relpath: string) -> string {
 		end := strings.index_byte(rest, '/')
 		part := rest if end < 0 else rest[:end]
 		if part == ".." {
-			return fmt.aprintf("Relative paths to modules may not traverse to parent directories (%s)", relpath)
+			return message.build("Relative paths to modules may not traverse to parent directories (%s)", relpath)
 		}
 		if p, has := prev.?; has && p == part {
-			return fmt.aprintf("module names must not have equal consecutive components: %s", relpath)
+			return message.build("module names must not have equal consecutive components: %s", relpath)
 		}
 		if end < 0 {
 			return ""
@@ -339,7 +339,7 @@ search_dirs :: proc(ip: ^Interp, search: Value, origin: Maybe(string)) -> (dirs:
 		if len(dir) > 1 && dir[0] == '~' && dir[1] == '/' {
 			home := home_dir()
 			if home == nil {
-				expand_error = fmt.aprintf("Could not expand %s. (Could not find home directory.)", dir)
+				expand_error = message.build("Could not expand %s. (Could not find home directory.)", dir)
 				continue
 			}
 			dir = strings.concatenate({string(home), dir[1:]})
@@ -348,11 +348,11 @@ search_dirs :: proc(ip: ^Interp, search: Value, origin: Maybe(string)) -> (dirs:
 		switch {
 		case dir == ".":
 		case strings.has_prefix(dir, "./"):
-			dir = fmt.aprintf("%s/%s", o, dir[2:])
+			dir = message.build("%s/%s", o, dir[2:])
 		case strings.has_prefix(dir, "$ORIGIN/"):
-			dir = fmt.aprintf("%s/%s", jq_origin(), dir[len("$ORIGIN/"):])
+			dir = message.build("%s/%s", jq_origin(), dir[len("$ORIGIN/"):])
 		case has_origin && !os.is_absolute_path(dir):
-			dir = fmt.aprintf("%s/%s", o, dir)
+			dir = message.build("%s/%s", o, dir)
 		}
 		append(&dirs, dir)
 	}
@@ -429,7 +429,7 @@ fn_modulemeta :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Va
 	append(&deps.items, ..prog.deps)
 	defs := new_array()
 	outer: for d := prog.defs; d != nil; d = d.a {
-		sig := fmt.aprintf("%s/%d", d.fn.name, len(d.fn.params))
+		sig := message.build("%s/%d", d.fn.name, len(d.fn.params))
 		for s in defs.items {
 			if s.(string) == sig {
 				continue outer

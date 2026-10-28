@@ -5,12 +5,13 @@ import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:testing"
+import "../../scan/walk"
 
 // One `Open_Frame` (`json/scan/walk/scanner.odin`): the scan's cost per nesting level past `MAX_DEPTH`.
 FRAME_BYTES :: 24
 
-// A path scan answers the same whichever engine the router gives it, and its coverage and stop are the
-// walk's own. The suite is built twice (`make test-modes`), with and without `FORCE_AUTOMATON`, so every
+// A path scan answers the same whichever engine the router gives it, and its coverage and stop (the request's
+// private state) are the walk's own. The suite is built twice (`make test-modes`), with and without `FORCE_AUTOMATON`, so every
 // value pinned here has to hold on the demand matcher and on the automaton.
 //
 // Each row is one request. `want[i]` is query `i`'s answers in walk order.
@@ -37,7 +38,7 @@ test_path_coverage_and_stop_are_engine_independent :: proc(t: ^testing.T) {
 		paths:    []json.Path,
 		level:    json.Strictness,
 		dups:     json.Duplicates,
-		coverage: json.Validity,
+		coverage: walk.Validity,
 		stop:     Maybe(u64),
 		err:      Maybe(json.Error),
 		want:     [][]json.Answer,
@@ -84,9 +85,9 @@ test_path_coverage_and_stop_are_engine_independent :: proc(t: ^testing.T) {
 	for c, i in cases {
 		r := paths_run(raw(c.src), c.paths, c.level, c.dups)
 		defer json.destroy(&r.req)
-		testing.expectf(t, r.err == c.err, "case %d %q: %v, want %v", i, c.src, r.err, c.err)
-		testing.expectf(t, r.req.coverage == c.coverage, "case %d %q: coverage %v, want %v", i, c.src, r.req.coverage, c.coverage)
-		testing.expectf(t, r.req.stop == c.stop, "case %d %q: stop %v, want %v", i, c.src, r.req.stop, c.stop)
+		testing.expectf(t, r.err == source(c.err), "case %d %q: %v, want %v", i, c.src, r.err, c.err)
+		testing.expectf(t, r.req.state.coverage == c.coverage, "case %d %q: coverage %v, want %v", i, c.src, r.req.state.coverage, c.coverage)
+		testing.expectf(t, r.req.state.stop == c.stop, "case %d %q: stop %v, want %v", i, c.src, r.req.state.stop, c.stop)
 		for _, pi in c.paths {
 			got, gerr := json.answers(&r.req, pi)
 			want: []json.Answer
@@ -192,10 +193,7 @@ test_path_wildcard_keys_use_the_request_allocator :: proc(t: ^testing.T) {
 	led: Ledger
 	led.pool = make([]byte, POOL_BYTES, context.temp_allocator)
 	req: json.Request({.Path})
-	req.strictness = .Lazy
-	req.duplicates = .First
-	req.paths = paths
-	req.allocator = ledger_allocator(&led)
+	_ = request_of(&req, paths, {strictness = .Lazy, duplicates = .First}, ledger_allocator(&led))
 	err := json.scan(raw(src), &req)
 	context.allocator = old
 	testing.expectf(t, err == nil, "%v", err)

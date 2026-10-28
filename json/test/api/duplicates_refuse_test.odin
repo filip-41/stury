@@ -19,7 +19,7 @@ dup_verdict_is :: proc(got: Maybe(json.Error), want: Maybe(json.Error)) -> bool 
 }
 
 // A `Request($Q)` scan of `src` under `.Refuse` gives `want`, and, accepting, the answers and rows `.First`
-// gives. `.Lazy` may stop before the repeat. `validate_remaining` then finds it.
+// gives. `.Lazy` may stop before the repeat, which a `.Strict` scan then finds.
 @(private = "file")
 expect_refuse_scan :: proc(
 	t: ^testing.T,
@@ -33,7 +33,7 @@ expect_refuse_scan :: proc(
 ) -> bool {
 	req: json.Request(Q)
 	defer json.destroy(&req)
-	req.strictness, req.dialect, req.duplicates, req.paths = strictness, dialect, .Refuse, paths
+	_ = request_of(&req, paths, {strictness = strictness, dialect = dialect, duplicates = .Refuse})
 	err := json.scan(src, &req)
 	if refusal, refused := err.?; refused && (refusal.kind == .Bad_Option || refusal.kind == .Over_Capacity || refusal.kind == .Bad_Path) {
 		testing.expectf(t, false, "%v %v %v: refused %v\n%s", Q, strictness, dialect, refusal, string(src), loc = loc)
@@ -43,7 +43,7 @@ expect_refuse_scan :: proc(
 	ok := dup_verdict_is(fault, want)
 	if strictness == .Lazy && dialect == .Json {
 		ok = ok || fault == nil
-		ok &&= dup_verdict_is(json.validate_remaining(&req), want)
+		ok &&= dup_verdict_is(strict_verdict(src, &req), want)
 	}
 	if !testing.expectf(t, ok, "%v %v %v %v: %v, want %v\n%s", Q, paths, strictness, dialect, fault, want, string(src), loc = loc) {
 		return false
@@ -53,7 +53,7 @@ expect_refuse_scan :: proc(
 	}
 	first: json.Request(Q)
 	defer json.destroy(&first)
-	first.strictness, first.dialect, first.duplicates, first.paths = strictness, dialect, .First, paths
+	_ = request_of(&first, paths, {strictness = strictness, dialect = dialect, duplicates = .First})
 	same := json.scan(src, &first) == nil && len(req.answers) == len(first.answers) && len(req.doc.rows) == len(first.doc.rows)
 	for a, k in req.answers {
 		same &&= k < len(first.answers) && a == first.answers[k]
@@ -209,27 +209,63 @@ test_refuse_offsets :: proc(t: ^testing.T) {
 	json.destroy(&doc)
 }
 
-// `.First` and `.All` choose among a path's answers, and a document has none: `build` refuses them before it
-// reads a byte, as `unmarshal` refuses `.All`, and returns no document.
+// `build` honours every `Duplicates` policy: `.Default`, `.Last` and `.All` keep every member, `.First` keeps the
+// first member of a repeated key and drops each later one with its subtree, its escaped keys and its comments,
+// and `.Refuse` refuses (above). A pruned document is written from its rows, so its text holds no dropped member.
 @(test)
-test_build_refuses_first_and_all :: proc(t: ^testing.T) {
-	src := raw(`{"a":1,"a":2}`)
-	for mode in ([?]json.Duplicates{.First, .All}) {
-		for dialect in ([?]json.Dialect{.Json, .Jsonc}) {
-			doc, err := json.build(src, {dialect = dialect, duplicates = mode})
-			testing.expectf(t, err == json.Error{kind = .Bad_Option}, "%v %v: %v", mode, dialect, err)
-			testing.expectf(t, len(doc.rows) == 0, "%v %v: a refused build holds rows", mode, dialect)
-		}
-		// Before any byte: an invalid source is the same refusal.
-		_, err := json.build(raw(`{`), {duplicates = mode})
-		testing.expectf(t, err == json.Error{kind = .Bad_Option}, "%v on bad input: %v", mode, err)
+test_build_honours_every_duplicates_policy :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	text := `{"a":1,"b":{"x":[1,2],"x":3,"y":4,"y":{"z":5}},"a":{"c":[6]},"b":7,"y":8}`
+	for mode in ([?]json.Duplicates{.Default, .Last, .All}) {
+		doc, err := json.build(raw(text), {duplicates = mode})
+		testing.expectf(t, err == nil, "%v: %v", mode, err)
+		testing.expectf(t, json.child_count(&doc, json.ROOT) == 5 && !doc.pruned, "%v: %d members", mode, json.child_count(&doc, json.ROOT))
+		b, _ := json.get_int(&doc, json.child(&doc, json.ROOT, "b"))
+		testing.expectf(t, b == 7, "%v: .b is %d", mode, b)
+		json.destroy(&doc)
 	}
+	kept := `{"a":1,"b":{"x":[1,2],"y":4},"y":8}`
+	for nested in ([?]bool{false, true}) {
+		src, want := text, kept
+		if nested {
+			src = strings.concatenate({"[", text, ",{\"a\":[", text, "]}]"}, context.temp_allocator)
+			want = strings.concatenate({"[", kept, ",{\"a\":[", kept, "]}]"}, context.temp_allocator)
+		}
+		doc, err := json.build(raw(src), {duplicates = .First})
+		testing.expectf(t, err == nil, "nested %v: %v", nested, err)
+		out, merr := json.marshal(&doc)
+		testing.expectf(t, merr == nil && string(out) == want, "nested %v: %s %v", nested, out, merr)
+		delete(out)
+		testing.expect(t, doc.distinct_keys && doc.pruned)
+		testing.expect_value(t, int(doc.rows[0].subtree_size), len(doc.rows))
+		root := json.ROOT if !nested else json.child(&doc, json.ROOT, 0)
+		testing.expect_value(t, json.child_count(&doc, root), 3)
+		y, _ := json.get_int(&doc, json.child(&doc, json.child(&doc, root, "b"), "y"))
+		testing.expect_value(t, y, 4)
+		top, _ := json.get_int(&doc, json.child(&doc, root, "y"))
+		testing.expect_value(t, top, 8)
+		json.destroy(&doc)
+	}
+	// A dropped member's comments leave with it; the kept ones stay.
+	jsonc := "{\"a\": 1, // one\n\"a\": 2 // two\n, \"b\": 3 // three\n}"
+	doc, err := json.build(raw(jsonc), {dialect = .Jsonc, duplicates = .First})
+	testing.expectf(t, err == nil, "jsonc: %v", err)
+	comments: [dynamic]string
+	defer delete(comments)
+	for f in doc.facts {
+		append(&comments, jsonc[f.lo:f.hi])
+	}
+	testing.expectf(t, slice.equal(comments[:], []string{"// one", "// three"}), "jsonc comments: %v", comments[:])
+	testing.expect_value(t, json.child_count(&doc, json.ROOT), 2)
+	json.destroy(&doc)
+
+	src := raw(`{"a":1,"a":2}`)
 	refusal := json.Error{kind = .Bad_Option}
 	line, col := json.error_position(src, refusal)
 	testing.expect(t, line == 0 && col == 0)
-	text := json.render_error(src, refusal)
-	defer delete(text)
-	testing.expect_value(t, text, "offset 0: Bad_Option")
+	rendered := json.render_error(src, refusal)
+	defer delete(rendered)
+	testing.expect_value(t, rendered, "offset 0: Unsupported option")
 }
 
 // Whether `Duplicates.Refuse` is compiled in; the tests of its refusals run only where it is.
@@ -242,8 +278,8 @@ REFUSE_DUPLICATES :: #config(REFUSE_DUPLICATES, true)
 test_refuse_compiled_out :: proc(t: ^testing.T) {
 	when !REFUSE_DUPLICATES {
 		src := raw(`{"a":1,"a":2}`)
-		req := json.Request({.Path}){duplicates = .Refuse}
-		req.paths = []json.Path{{steps = []json.Step{json.Name("a")}}}
+		req: json.Request({.Path})
+		_ = request_of(&req, {{steps = []json.Step{json.Name("a")}}}, {duplicates = .Refuse})
 		request_refused(t, json.scan(src, &req), .Bad_Option)
 		testing.expect_value(t, len(req.answers), 0)
 		json.destroy(&req)
@@ -295,7 +331,7 @@ test_refuse_big_objects :: proc(t: ^testing.T) {
 	expect_refuse_everywhere(t, raw(bad), json.Error{offset = u64(len(grid)), kind = .Duplicate_Key})
 }
 
-// `.Lazy` reads as under `.First` and may stop before a repeat: the stop is no result, and `validate_remaining`
+// `.Lazy` reads as under `.First` and may stop before a repeat: the stop is no result, and a `.Strict` scan
 // finds it. A repeat before the answer settles is read and refused.
 @(test)
 test_refuse_under_lazy :: proc(t: ^testing.T) {
@@ -306,12 +342,11 @@ test_refuse_under_lazy :: proc(t: ^testing.T) {
 	src := `{"a":1,"b":{"x":1,"x":2}}`
 	req: json.Request({.Path})
 	defer json.destroy(&req)
-	req.strictness, req.duplicates = .Lazy, .Refuse
-	req.paths = {{steps = {json.Name("a")}}}
+	_ = request_of(&req, {{steps = {json.Name("a")}}}, {strictness = .Lazy, duplicates = .Refuse})
 	testing.expect_value(t, json.scan(raw(src), &req), nil)
-	testing.expect(t, req.stop != nil, "the walk stops at the settled answer")
+	testing.expect(t, req.state.stop != nil, "the walk stops at the settled answer")
 	testing.expect_value(t, answer_texts(req.answers[:], src), `1`)
-	whole := json.validate_remaining(&req)
+	whole := strict_verdict(raw(src), &req)
 	testing.expect(t, dup_verdict_is(whole, json.Error{offset = at(src, `"x":2`), kind = .Duplicate_Key}))
 
 	early := `{"b":{"x":1,"x":2},"a":1}`

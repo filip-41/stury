@@ -3,13 +3,13 @@ package main
 // --explain writes `stury: explain: KEY: FACTS` lines to stderr (docs/cli.md lists the keys). The code that takes
 // each decision records its reason here, so the report never derives one again.
 
-import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:time"
 import core_pkg "../../core"
 import json "../../json"
 import "jq"
+import "message"
 
 Explain_Why :: enum u8 {
 	Null_Input,
@@ -106,16 +106,12 @@ scan_stops :: proc(o: ^Opts) -> (stops: Explain_Whys) {
 	if o.raw0 {stops += {.Raw0}}
 	if o.ascii {stops += {.Ascii}}
 	if writes_cells(o) {stops += {.Cells_Out}}
-	if json.own_spelling(FORMATS[o.from].source) {stops += {.Own_Spelling}}
+	if json.grammar_of(source_dialect(o)) & json.OWN_SPELLING != {} {stops += {.Own_Spelling}}
 	return
 }
 
 column_stops :: proc(o: ^Opts) -> (stops: Explain_Whys) {
-	if o.null_input {stops += {.Null_Input}}
-	if o.slurp {stops += {.Slurp}}
-	if o.exit_status {stops += {.Exit_Status}}
-	if o.raw0 {stops += {.Raw0}}
-	if o.ascii {stops += {.Ascii}}
+	stops = scan_stops(o) & {.Null_Input, .Slurp, .Exit_Status, .Raw0, .Ascii}
 	if o.color {stops += {.Color}}
 	return
 }
@@ -130,13 +126,12 @@ explain_why :: proc(run: ^Run, whys: Explain_Whys) -> (more: bool) {
 
 @(private = "file")
 explain_line :: proc(format: string, args: ..any) {
-	fmt.eprint("stury: explain: ")
-	fmt.eprintfln(format, ..args)
+	message.write_stderr("stury: explain: %s\n", message.build_temp(format, ..args))
 }
 
 @(private = "file")
 token :: proc(v: $T) -> string {
-	return strings.to_lower(fmt.tprint(v), context.temp_allocator)
+	return strings.to_lower(message.build_temp("%v", v), context.temp_allocator)
 }
 
 @(private = "file")
@@ -173,8 +168,8 @@ explain_route :: proc(run: ^Run) {
 	if reads_cells(o) {
 		explain_line("input: format=%s", token(o.from))
 	} else {
-		dup := run.req.duplicates
-		explain_line("input: format=%s dialect=%s records=%s duplicates=%s", token(o.from), token(run.req.dialect), records_of(o), token(.Last if dup == .Default else dup))
+		dup := run.read.duplicates
+		explain_line("input: format=%s dialect=%s records=%s duplicates=%s", token(o.from), token(run.read.dialect), records_of(o), token(.Last if dup == .Default else dup))
 	}
 	switch {
 	case run.columns != nil:
@@ -197,7 +192,7 @@ records_of :: proc(o: ^Opts) -> string {
 	switch {
 	case o.null_input:
 		return "none"
-	case FORMATS[o.from].framing == .Lines:
+	case reads_lines(o):
 		return "ndjson"
 	case o.seq:
 		return "seq"
@@ -218,9 +213,9 @@ explain_columns :: proc(cols: ^Columns) {
 explain_path :: proc(run: ^Run) {
 	sel := "none"
 	if run.select.op != .None {
-		sel = fmt.tprintf("%s literal=%s", token(run.select.op), jq.to_json(run.select.literal))
+		sel = message.build_temp("%s literal=%s", token(run.select.op), jq.to_json(run.select.literal))
 	}
-	any_at := fmt.tprint(run.any_at) if run.any_at >= 0 else "none"
+	any_at := message.build_temp("%v", run.any_at) if run.any_at >= 0 else "none"
 	explain_line("path: %s any_at=%s select=%s limit=%d tried=%s", spell(run.paths[1].steps), any_at, sel, run.paths[1].limit, yes(run.tried))
 }
 
@@ -254,10 +249,10 @@ explain_engines :: proc(run: ^Run, src: []byte) {
 
 @(private = "file")
 say_engine :: proc(run: ^Run, src: []byte, paths: []json.Path) {
-	route, err := json.route_of(src, paths, 0, run.req.read)
-	engine := fmt.tprintf("%s why=%s", token(route.class), token(route.why))
+	route, err := json.route_of(src, paths, 0, run.read)
+	engine := message.build_temp("%s why=%s", token(route.class), token(route.why))
 	if e, refused := err.?; refused {
-		engine = fmt.tprintf("refused why=%s", token(e.kind))
+		engine = message.build_temp("refused why=%s", token(e.kind))
 	}
 	explain_line("engine: %s per_element=%s engine=%s", spell(paths[0].steps), yes(paths[0].per_element), engine)
 }

@@ -178,7 +178,7 @@ publish_nodes :: #force_no_inline proc(ctx: ^Query_Ctx) {
 // A dialect other than `.Json` is read on `dialect_walk`, whatever the strictness: a complete
 // `.Values` walk, so its coverage is `.Full`. `facts` then receives each comment, attached to nothing, and nil records none.
 // Only a locating or may-stop reading whose queries are all path or demand ones skips a value, and its
-// `validity` is then `.Partial`. Pass that to `validate_remaining`. A cap past MAX_DEPTH is held to it:
+// `validity` is then `.Partial`: a `.Strict` walk of the whole item judges the rest. A cap past MAX_DEPTH is held to it:
 // `scan_queries_deep` reads deeper.
 // `kept`, when not nil, keeps a demand walk's resolution of `queries` for the next call over the same query
 // set, which resolves nothing (`resolve_queries`): a set whose inputs do not change between calls.
@@ -397,6 +397,8 @@ scan_queries_in :: #force_inline proc(
 	}
 	when .Path in Q {
 		ctx.root_lo = s.pos
+	}
+	when Q & {.Path, .Dom} != {} {
 		ctx.path_src = src
 	}
 	stopped := false
@@ -422,8 +424,8 @@ scan_queries_in :: #force_inline proc(
 
 	// The keys of the open objects past the first KEY_SCRATCH are scan-owned scratch in the request's
 	// allocator (`Scan_Query.allocator`), freed on every exit. A wildcard run under `.First` or `.Last`
-	// remembers the keys of the objects it reads, in the same scratch. A walk with no queries of its own
-	// (`validate_remaining`'s `.Unique`) keeps the ambient allocator.
+	// remembers the keys of the objects it reads, in the same scratch. A walk with no queries of its own keeps
+	// the ambient allocator.
 	when .Unique in Q || .Path in Q {
 		key_alloc := context.allocator
 		for q in queries {
@@ -543,44 +545,6 @@ scan_queries_in :: #force_inline proc(
 	}
 }
 
-
-// The commit call: the only way a `.Partial` result becomes a whole-document one. `err == nil` from here
-// means every byte of `src` was checked at `.Full` grammar.
-//
-// A no-op only when every channel says nothing is unchecked: `verdict == nil`, `coverage == .Full`,
-// `stop == nil`. A skipped region makes `coverage` `.Partial`. Otherwise it re-walks the whole item at `.Strict`, since a stop lands
-// mid-container. The no-op is a precondition, not a check: the result must come from a walk over these
-// same bytes with the same `limits`. `Validity`'s zero value is `.Partial`, so a caller that never
-// established coverage gets the re-walk. The returned `validity` is `.Full` on both arms and does not
-// upgrade a `.Structural` reading's level. That is `validate(src, .Json, .Strict)`. `unique` re-walks with the key
-// check (`.Duplicate_Key`), as a scan under `Duplicates.Refuse` checked. Its refused spill is `.Out_Of_Memory`.
-validate_remaining :: proc(
-	src: []byte,
-	verdict: Maybe(Error),
-	coverage: Validity,
-	stop: Maybe(u64),
-	limits := Limits{},
-	unique := false,
-) -> (err: Maybe(Error), validity: Validity) {
-	if verdict == nil && coverage == .Full && stop == nil {
-		return nil, .Full
-	}
-	deep := limits.max_depth > MAX_DEPTH
-	if unique {
-		werr: Maybe(Error)
-		fault: Walk_Fault
-		if deep {
-			werr, fault = scan_queries_deep(src, nil, .Strict, limits, {.Unique}, nil, .All)
-		} else {
-			werr, fault = scan_queries(src, nil, .Strict, limits, {.Unique})
-		}
-		if werr == nil && fault.oom {
-			return Error{kind = .Out_Of_Memory}, .Full
-		}
-		return werr, .Full
-	}
-	return scan_plain(src, .Strict, limits), .Full
-}
 
 // Bytes past the document are `Trailing` at the first of them, at every level.
 finish :: #force_inline proc(s: ^Scanner) -> Maybe(Error) {

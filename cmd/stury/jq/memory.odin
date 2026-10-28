@@ -6,7 +6,7 @@ import "base:runtime"
 import "core:mem/virtual"
 import "core:slice"
 import "core:strings"
-import json "../../../json"
+import core_pkg "../../../core"
 
 // The outputs of a pipe or a binding whose outputs are printed (`Interp.printer`): what the rest makes for each
 // output of `n` (its left side) and the output itself, if `input` read it, is made in an arena that is emptied once
@@ -288,12 +288,12 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 			return Ref{m.(Ref).doc, x.node}
 		}
 		// The rows and the text, and what the scan decoded. What was decoded since is decoded again.
-		d := new(json.Document)
-		d^ = {src = transmute([]byte)copy_string(c, string(x.doc.src)), dialect = x.doc.dialect, deep = x.doc.deep, distinct_keys = x.doc.distinct_keys}
+		d := new(core_pkg.Document)
+		d^ = {src = transmute([]byte)copy_string(c, string(x.doc.src)), spelling = x.doc.spelling, deep = x.doc.deep, distinct_keys = x.doc.distinct_keys, pruned = x.doc.pruned}
 		d.rows = slice.clone_to_dynamic(x.doc.rows[:])
 		d.values = slice.clone_to_dynamic(x.doc.values[:])
 		d.facts = slice.clone_to_dynamic(x.doc.facts[:])
-		c.made[{x.doc, -1}] = Ref{d, json.ROOT}
+		c.made[{x.doc, -1}] = Ref{d, core_pkg.ROOT}
 		return Ref{d, x.node}
 	case Number:
 		return Number{f = x.f, lit = copy_string(c, x.lit)}

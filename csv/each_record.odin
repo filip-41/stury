@@ -25,12 +25,24 @@ Record_Fault :: core_pkg.Record_Fault
 //	  faulty one that were already claimed still run, over records `records` would never reach.
 //	- A piece's fields live on the heap until its task returns.
 @(require_results)
-each_record :: proc(
+each_record :: #force_inline proc(
+	src: []byte,
+	task: proc(data: ^$D, piece: ^Records, k: int) -> bool,
+	data: ^D,
+	opts := Read_Opts{},
+	runner: ^Batch_Runner = nil,
+) -> Maybe(Error) {
+	return each_record_untyped(src, cast(proc(data: rawptr, piece: ^Records, k: int) -> bool)task, data, opts, runner)
+}
+
+// `each_record` with the task's data a `rawptr`, one body for every data type.
+@(private, require_results)
+each_record_untyped :: proc(
 	src: []byte,
 	task: proc(data: rawptr, piece: ^Records, k: int) -> bool,
 	data: rawptr,
-	opts := Read_Opts{},
-	runner: ^Batch_Runner = nil,
+	opts: Read_Opts,
+	runner: ^Batch_Runner,
 ) -> Maybe(Error) {
 	s, ok := scan_setup(opts.dialect, opts.limits, opts.strictness)
 	if !ok {
@@ -47,8 +59,9 @@ each_record :: proc(
 //	- One fault per refused record, and `faults[0].err` is `validate`'s fault. A clean text is that scan and no
 //	  list at all. The faults of the whole text are listed, whichever threads found the first one.
 //	- A record ends at the LF that closes it outside quotes, or at the input's end.
-//	- `err` is as in `json.validate_records`: a failure of the call, `.Bad_Option` or `.Out_Of_Memory`, where
-//	  `faults` is nil. A fault of the text is never `err`: each is a record in `faults`.
+//	- `err` is as in `json.validate_records`: what ended the records, with `faults` the records refused before
+//	  it. CSV's framing has no fault of its own, since every byte is in a record, so `err` is only `.Bad_Option`
+//	  (with `faults` nil) or `.Out_Of_Memory`.
 //	- Allocates the list and `faults`, the latter with `allocator`.
 @(require_results)
 validate_records :: proc(
@@ -81,10 +94,11 @@ validate_records :: proc(
 		if !bad {
 			break
 		}
-		lo := u64(read.rec_lo)
-		if fault.kind != .Out_Of_Memory {
-			lo = min(lo, fault.offset)
+		if fault.kind == .Out_Of_Memory {
+			err = fault
+			break
 		}
+		lo := min(u64(read.rec_lo), fault.offset)
 		hi, next := refused_end(&read, fault, int(lo))
 		core_pkg.fault_list_add(&lists, 0, Record_Fault{lo = lo, hi = u64(hi), err = fault})
 		if next >= len(src) {
@@ -96,7 +110,7 @@ validate_records :: proc(
 	if merr != nil {
 		return nil, merr
 	}
-	return merged, nil
+	return merged, err
 }
 
 @(private)
@@ -105,7 +119,7 @@ refused_end :: proc(it: ^Records, fault: Error, lo: int) -> (hi, next: int) {
 	switch {
 	case it.ended:
 		return len(src), len(src)
-	case fault.kind != .Out_Of_Memory && int(fault.offset) < it.rec_lo:
+	case int(fault.offset) < it.rec_lo:
 		return record_end(src, lo, it.rec_lo - 1), it.rec_lo
 	}
 	quoted := .Unquoted not_in it.scan.mode && !(.Comments in it.scan.mode && lo < len(src) && src[lo] == it.scan.comment)
@@ -137,7 +151,6 @@ resume_read :: proc(it: ^Records, src: []byte, at: int) {
 	it^ = records_of(src, it.scan, runtime.heap_allocator())
 	it.fields, it.width = fields, width
 	clear(&it.fields)
-	set_limit(it)
 	it.block, it.field_lo, it.rec_lo = at - 64, at, at
 }
 
@@ -176,7 +189,7 @@ Batch_Run :: struct {
 // from, or no memory for the quote parities.
 //
 // A piece starts just past an LF outside quotes, where the scan state equals the state at the input's start:
-// a field and a line start there, and no quote, CR or escape is open. Under `Quoting.None` every LF
+// a field and a line start there, and no quote, CR or escape is open. Without quotes every LF
 // qualifies. Under `Quoting.Quotes` every quote opens or closes (a doubled `""` is a close then an open), so
 // up to the first fault the quote state at a byte is the parity of the quotes before it, and an LF after an
 // even count of quotes qualifies. Quotes in a comment line do not count, so a comment byte under quotes

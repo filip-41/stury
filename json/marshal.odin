@@ -12,7 +12,6 @@ package json
 import "base:intrinsics"
 import "base:runtime"
 import "core:io"
-import "core:unicode/utf8"
 import enc "encode"
 import core_pkg "../core"
 import scan_pkg "scan"
@@ -27,6 +26,13 @@ marshal :: proc {
 	marshal_value,
 }
 
+// `marshal` appended to `out`, after the bytes already in it. On a refusal `out` is as it was on entry; its
+// capacity may have grown.
+marshal_append :: proc {
+	marshal_document_append,
+	marshal_value_append,
+}
+
 // `marshal` written to `w` as the text is made. On a refusal `w` may already hold a prefix of the text.
 marshal_to_writer :: proc {
 	marshal_document_to_writer,
@@ -36,21 +42,29 @@ marshal_to_writer :: proc {
 // Write `v` as JSON into a new buffer from `allocator`. With `plan` nil the plan is this thread's cached one for
 // `v`'s type.
 @(private, require_results)
-marshal_value :: proc(v: any, opts := Marshal_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> (out: []byte, err: Marshal_Error) {
+marshal_value :: proc(v: any, opts := Marshal_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> (out: []byte, err: Maybe(Marshal_Error)) {
 	buf, aerr := make([dynamic]u8, 0, MARSHAL_BUF_START, allocator)
 	if aerr != nil {
-		return nil, .Out_Of_Memory
+		return nil, Marshal_Error{kind = .Out_Of_Memory}
 	}
-	if err = marshal_append(&buf, v, opts, plan); err != .None {
+	fault: Marshal_Error
+	if kind := append_value(&buf, v, opts, plan, fault = &fault); kind != .None {
 		delete(buf)
-		return nil, err
+		return nil, core_pkg.marshal_error_of(kind, fault)
 	}
 	// Only a grown buffer is shrunk: a copy of the text, worth it only for the half a doubling may leave
 	// unused.
 	if cap(buf) > MARSHAL_BUF_START {
 		_, _ = shrink(&buf)
 	}
-	return buf[:], .None
+	return buf[:], nil
+}
+
+// `marshal_value` appended to `out`.
+@(private, require_results)
+marshal_value_append :: proc(out: ^[dynamic]u8, v: any, opts := Marshal_Opts{}, plan: ^Type_Plan = nil) -> Maybe(Marshal_Error) {
+	fault: Marshal_Error
+	return core_pkg.marshal_error_of(append_value(out, v, opts, plan, fault = &fault), fault)
 }
 
 // The capacity `marshal` starts its buffer at.
@@ -60,86 +74,82 @@ MARSHAL_BUF_START :: 256
 // Write `v` as JSON to `w` as it is made, through a buffer of about `SINK_FLUSH_AT` bytes from
 // `allocator`, freed before return.
 @(private, require_results)
-marshal_value_to_writer :: proc(w: io.Writer, v: any, opts := Marshal_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> Marshal_Error {
+marshal_value_to_writer :: proc(w: io.Writer, v: any, opts := Marshal_Opts{}, plan: ^Type_Plan = nil, allocator := context.allocator) -> Maybe(Marshal_Error) {
 	buf, aerr := make([dynamic]u8, 0, 2 * spell.SINK_FLUSH_AT, allocator)
 	if aerr != nil {
-		return .Out_Of_Memory
+		return Marshal_Error{kind = .Out_Of_Memory}
 	}
 	defer delete(buf)
 	sink := enc.Sink{w, enc.reescape_of(opts)}
-	marshal_append(&buf, v, opts, plan, &sink) or_return
-	return enc.sink_drain(&sink, &buf)
+	fault: Marshal_Error
+	if kind := append_value(&buf, v, opts, plan, &sink, fault = &fault); kind != .None {
+		return core_pkg.marshal_error_of(kind, fault)
+	}
+	return core_pkg.marshal_error_of(enc.sink_drain(&sink, &buf))
 }
 
-// Where a `Marshal_Hook` writes: the output so far and the state of the call around the hooked value. Its
-// fields are internal. A hook writes through `marshal_into`.
-Marshal_Out :: struct {
-	plan:   ^Type_Plan,
+// Where a `Marshal_Hook` writes: a handle valid for the hook's call. A hook writes through `marshal_into`.
+Marshal_Out :: core_pkg.Marshal_Out
+
+// From inside a `Marshal_Hook`: write `value` as the hooked value, as `marshal` writes a value of its type by
+// the call's plan, hooks included. A hook writes exactly one value, and a second call is `.Bad_State`.
+marshal_into :: core_pkg.marshal_into
+
+// The output so far and the state of the call: what a hook's `Marshal_Out` writes through.
+@(private)
+Marshal_State :: struct {
+	using walk: core_pkg.Plan_Writer,
 	out:    ^[dynamic]u8,
 	// Streaming: `out` goes to the writer between elements (`element`).
 	sink:   ^enc.Sink,
 	indent: enc.Indent,
 	pretty: bool,
 	// An object is opened before its members are written rather than patched open after them, so no write
-	// goes back before a point `out` may be handed over at: pretty, or streaming.
+	// goes back before a point `out` may be handed over at: pretty, or streaming. Under `sort_keys` too, whose
+	// structs are written in their own order.
 	eager:  bool,
+	// A flat struct is opened eagerly too: pretty, or `sort_keys`.
+	open_flat: bool,
+	sort_keys: bool,
 	enum_ints: bool,
 	// The grammar a `Raw` is validated by: a dialect that reads comments only for an edit of a text in it.
 	dialect:   Dialect,
-	// A hook is running and has not yet written its one value.
-	hook_open: bool,
-	// The op `marshal_into` last looked up, by type: a hook passes one type every time, so most calls skip the
-	// plan's map.
-	into_id: typeid,
-	into_op: u32,
-	depth:  u32, // containers and pointers open: the recursion ceiling
 	nest:   u32, // JSON containers open: the indent and the depth a `Raw` nests from
-	n_ptrs: u32,
-	ptrs:   [^]Open_Target, // MAX_DEPTH slots, of which ptrs[:n_ptrs] are the targets on the open path
 }
 
-// From inside a `Marshal_Hook`: write `value` as the hooked value, as `marshal` writes a value of its type by
-// the call's plan, hooks included. A hook writes exactly one value, and a second call is `.Bad_State`.
-@(require_results)
-marshal_into :: proc(out: ^Marshal_Out, value: any) -> Marshal_Error {
-	if !out.hook_open {
-		return .Bad_State
+// `marshal_into` of a hook running under the call `w`, a `^Marshal_State`.
+@(private = "file")
+hook_write :: proc(w: ^core_pkg.Plan_Writer, value: any) -> Marshal_Error_Kind {
+	st := (^Marshal_State)(w)
+	idx, null := core_pkg.plan_hook_value(st, value) or_return
+	if null {
+		return put_null(st)
 	}
-	out.hook_open = false
-	if value.id == nil || value.data == nil {
-		return enc.put_bytes(out.out, "null")
-	}
-	if value.id != out.into_id {
-		out.into_op = core_pkg.plan_op_m(out.plan, type_info_of(value.id)) or_return
-		out.into_id = value.id
-	}
-	return write_target(out, out.into_op, value.data)
+	return core_pkg.plan_write_target(st, idx, value.data, write_value)
 }
 
-// A pointer's or an `any`'s target on the open path. A cycle meets the same address as the same type
-// again. A struct and its first field share an address but not an op.
 @(private)
-Open_Target :: struct {
-	at: rawptr,
-	op: u32,
+put_null :: proc(st: ^Marshal_State) -> Marshal_Error_Kind {
+	return enc.put_bytes(st.out, "null")
 }
 
 // Append `v` to `dst`, or with `sink` stream it through `dst`. A `Raw` in it is validated under `dialect`, the
-// grammar of the text it is written into. On a refusal `dst` is truncated back to its length on entry.
+// grammar of the text it is written into. On a refusal `dst` is truncated back to its length on entry, and `fault`,
+// when set, holds the path to the value refused.
 @(private)
-marshal_append :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, plan: ^Type_Plan, sink: ^enc.Sink = nil, dialect := Dialect.Json) -> Marshal_Error {
+append_value :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, plan: ^Type_Plan, sink: ^enc.Sink = nil, dialect := Dialect.Json, fault: ^Marshal_Error = nil) -> Marshal_Error_Kind {
 	if v.data != nil {
 		switch v.id {
 		case Document:
-			return marshal_document_append(dst, (^Document)(v.data), opts)
+			return append_document(dst, (^Document)(v.data), {opts = opts})
 		case ^Document:
 			if doc := (^^Document)(v.data)^; doc != nil {
-				return marshal_document_append(dst, doc, opts)
+				return append_document(dst, doc, {opts = opts})
 			}
 		}
 	}
 	mark := len(dst^)
-	err := marshal_root(dst, v, opts, plan, sink, dialect)
+	err := marshal_root(dst, v, opts, plan, sink, dialect, fault)
 	if err == .None && opts.trailing_newline {
 		err = enc.put_byte(dst, '\n')
 	}
@@ -153,22 +163,22 @@ marshal_append :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, plan: ^Typ
 }
 
 @(private)
-marshal_root :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, plan: ^Type_Plan, sink: ^enc.Sink, dialect: Dialect) -> Marshal_Error {
+marshal_root :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, plan: ^Type_Plan, sink: ^enc.Sink, dialect: Dialect, fault: ^Marshal_Error) -> Marshal_Error_Kind {
 	if v.id == nil || v.data == nil {
 		return enc.put_bytes(dst, "null")
 	}
-	tmp: Type_Plan = ---
+	tmp: Format_Plan = ---
 	p, ok := plan_for(plan, v.id, &tmp)
 	if !ok {
 		return .Plan_Mismatch
 	}
-	err := marshal_planned(dst, v, opts, p, sink, dialect)
+	err := marshal_planned(dst, v, opts, p, sink, dialect, fault)
 	plan_done(p, plan, &tmp, err == .Out_Of_Memory)
 	return err
 }
 
 @(private)
-marshal_planned :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, p: ^Type_Plan, sink: ^enc.Sink, dialect: Dialect) -> Marshal_Error {
+marshal_planned :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, p: ^Format_Plan, sink: ^enc.Sink, dialect: Dialect, fault: ^Marshal_Error) -> Marshal_Error_Kind {
 	// The root is the first op a plan compiles.
 	root := u32(0)
 	if len(p.ops) == 0 {
@@ -177,38 +187,66 @@ marshal_planned :: proc(dst: ^[dynamic]u8, v: any, opts: Marshal_Opts, p: ^Type_
 		}
 		core_pkg.plan_op_m(p, type_info_of(v.id)) or_return
 	}
-	ptrs: [MAX_DEPTH]Open_Target = ---
-	st := Marshal_Out{
-		plan      = p,
+	ptrs: [MAX_DEPTH]core_pkg.Plan_Target = ---
+	st := Marshal_State{
+		walk      = {plan = p, ptrs = raw_data(ptrs[:]), fault = fault, hook_write = hook_write},
 		out       = dst,
 		sink      = sink,
 		indent    = enc.indent_of(opts),
 		pretty    = opts.pretty,
-		eager     = opts.pretty || sink != nil,
+		eager     = opts.pretty || sink != nil || opts.sort_keys,
+		open_flat = opts.pretty || opts.sort_keys,
+		sort_keys = opts.sort_keys,
 		enum_ints = p.opts.enums == .Int,
 		dialect   = dialect,
-		ptrs      = raw_data(ptrs[:]),
 	}
 	return write_value(&st, root, v.data)
 }
 
 @(private)
-write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Marshal_Error {
+write_value :: proc(st: ^Marshal_State, idx: u32, data: rawptr) -> Marshal_Error_Kind {
 	// A copy: compiling a union arm or an `any` below may move `ops`.
 	op := st.plan.ops[idx]
-	switch op.kind {
-	case .Unsupported:
-		return .Unsupported
-	case .Null:
-		return enc.put_bytes(st.out, "null")
-	case .Bool, .Int, .Uint, .Float:
-		return put_scalar(st.out, op.kind, data, op.size)
-	case .Wide_Int, .Wide_Uint:
-		return put_wide(st.out, data, op.kind == .Wide_Int)
-	case .String:
-		return enc.put_string(st.out, (^string)(data)^)
-	case .Cstring, .Rune, .Union, .Any, .Enum_Int, .Enum_Uint:
-		return write_rare_value(st, op, data)
+	return core_pkg.plan_write_value(st, op, data, write_value, put_null, put_scalar_of, put_wide_of, put_text, put_enum, write_arm, write_hooked, put_own, write_elems, write_struct_of, write_map, write_bit_set)
+}
+
+@(private = "file")
+put_scalar_of :: #force_inline proc(st: ^Marshal_State, op: Plan_Op, data: rawptr) -> Marshal_Error_Kind {
+	return put_scalar(st.out, op.kind, data, op.size)
+}
+
+@(private = "file")
+put_wide_of :: #force_inline proc(st: ^Marshal_State, op: Plan_Op, data: rawptr) -> Marshal_Error_Kind {
+	return put_wide(st.out, data, op.kind == .Wide_Int)
+}
+
+@(private = "file")
+put_text :: #force_inline proc(st: ^Marshal_State, s: string) -> Marshal_Error_Kind {
+	return enc.put_string(st.out, s)
+}
+
+@(private = "file")
+put_enum :: proc(st: ^Marshal_State, op: Plan_Op, data: rawptr) -> Marshal_Error_Kind {
+	if st.enum_ints {
+		return put_enum_int(st.out, st.plan, op, data)
+	}
+	m, _ := core_pkg.plan_enum_written(st.plan, op, data) or_return
+	return enc.put_bytes(st.out, string(st.plan.keys[m.lo:m.hi]))
+}
+
+// A union's arm: a struct arm of a tagged union with its tag as its first member.
+@(private = "file")
+write_arm :: proc(st: ^Marshal_State, arm: u32, data: rawptr, tag: string) -> Marshal_Error_Kind {
+	if len(tag) > 0 {
+		return write_struct_eager(st, st.plan.ops[arm], data, tag)
+	}
+	return write_value(st, arm, data)
+}
+
+// JSON's own types: `Raw`, `Number`, `Digits`, `Decoded` and `Null`.
+@(private = "file")
+put_own :: #force_inline proc(st: ^Marshal_State, op: Plan_Op, data: rawptr) -> Marshal_Error_Kind {
+	#partial switch op.kind {
 	case .Raw:
 		return put_raw(st, string((^Raw)(data)^))
 	case .Number:
@@ -217,99 +255,25 @@ write_value :: proc(st: ^Marshal_Out, idx: u32, data: rawptr) -> Marshal_Error {
 		return put_digits(st, string((^Digits)(data)^))
 	case .Decoded:
 		return write_decoded(st, (^Decoded)(data)^)
-	case .Slice, .Dynamic:
-		raw := (^runtime.Raw_Slice)(data)^
-		return write_elems(st, op, raw.data, raw.len)
-	case .Array:
-		return write_elems(st, op, data, int(op.count))
-	case .Fixed_List:
-		n := (^int)(uintptr(data) + uintptr(op.len_offset))^
-		return write_elems(st, op, data, n)
-	case .Map:
-		return write_map(st, op, data)
-	case .Struct:
-		return write_struct(st, op, data)
-	case .Pointer:
-		return write_pointer(st, op, data)
-	case .Bit_Set:
-		return write_bit_set(st, op, data)
-	case .Hook:
-		return write_hooked(st, op, data)
 	}
-	return .None
+	return put_null(st)
 }
 
-// Writes the `write_value` cases that need locals of their own: a rune's bytes, a union's variant, an `any`'s
-// plan and an enum's member. Each level of a nested write holds a `write_value` frame, and a value nested
-// MAX_DEPTH deep must fit a Windows thread's 1 MB stack. These cases therefore stay out of that frame, as do
-// the callees marked `#force_no_inline` (`write_map`, `write_bit_set`, `write_decoded`, `put_wide`).
 @(private = "file")
-write_rare_value :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Marshal_Error {
-	#partial switch op.kind {
-	case .Cstring:
-		cs := (^cstring)(data)^
-		if cs == nil {
-			return enc.put_bytes(st.out, "null")
-		}
-		return enc.put_string(st.out, string(cs))
-	case .Rune:
-		r := (^rune)(data)^
-		if !utf8.valid_rune(r) {
-			return .Bad_Utf8
-		}
-		bytes, n := utf8.encode_rune(r)
-		return enc.put_string(st.out, string(bytes[:n]))
-	case .Union:
-		k := core_pkg.plan_union_arm(op, data)
-		if k < 0 {
-			return enc.put_bytes(st.out, "null")
-		}
-		// A union's arm lives at offset 0.
-		arm := st.plan.fields[op.elem + u32(k)]
-		if op.tagged && st.plan.tag_hi > 0 && arm.key_hi > arm.key_lo {
-			return write_struct_eager(st, st.plan.ops[arm.op], data, string(st.plan.keys[arm.key_lo:arm.key_hi]))
-		}
-		return write_value(st, arm.op, data)
-	case .Any:
-		a := (^any)(data)^
-		if a.id == nil || a.data == nil {
-			return enc.put_bytes(st.out, "null")
-		}
-		arm := core_pkg.plan_op_m(st.plan, type_info_of(a.id)) or_return
-		return write_target(st, arm, a.data)
-	case .Enum_Int, .Enum_Uint:
-		if st.enum_ints {
-			return put_enum_int(st.out, st.plan, op, data)
-		}
-		m, _ := core_pkg.plan_enum_written(st.plan, op, data) or_return
-		return enc.put_bytes(st.out, string(st.plan.keys[m.lo:m.hi]))
-	}
-	return .None
+write_struct_of :: #force_inline proc(st: ^Marshal_State, op: Plan_Op, data: rawptr) -> Marshal_Error_Kind {
+	return write_struct(st, op, data)
 }
 
-// A hooked value: the caller's proc writes it through `marshal_into`, nested as deep as the containers open
-// around it, and must write exactly one value.
+// A hooked value: the caller's proc writes it through `marshal_into`.
 @(private)
-write_hooked :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Marshal_Error {
-	write := st.plan.writes[op.elem]
-	if write == nil {
-		return .Unsupported
-	}
-	// Saved: the hook's value may hold a hooked value of its own.
-	outer := st.hook_open
-	st.hook_open = true
-	err := write(st, data)
-	if err == .None && st.hook_open {
-		err = .Bad_State
-	}
-	st.hook_open = outer
-	return err
+write_hooked :: proc(st: ^Marshal_State, op: Plan_Op, data: rawptr) -> Marshal_Error_Kind {
+	return core_pkg.plan_write_hooked(st, op, data)
 }
 
 // A bit_set as an array of its elements in ascending order: an enum's member names (or, under `enums = .Int`,
 // their integers), a range's integers.
 @(private)
-write_bit_set :: #force_no_inline proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Marshal_Error {
+write_bit_set :: #force_no_inline proc(st: ^Marshal_State, op: Plan_Op, data: rawptr) -> Marshal_Error_Kind {
 	lower := runtime.type_info_base(op.info).variant.(runtime.Type_Info_Bit_Set).lower
 	elem := st.plan.ops[op.elem]
 	bits := bit_set_bits(op, data)
@@ -345,13 +309,13 @@ bit_set_bits :: proc(op: Plan_Op, data: rawptr) -> (bits: u128) {
 
 // An enum's backing integer. A value no member has is refused, as unmarshal refuses it.
 @(private)
-put_enum_int :: proc(dst: ^[dynamic]u8, p: ^Type_Plan, op: Plan_Op, data: rawptr) -> Marshal_Error {
+put_enum_int :: proc(dst: ^[dynamic]u8, p: ^Format_Plan, op: Plan_Op, data: rawptr) -> Marshal_Error_Kind {
 	_, v := core_pkg.plan_enum_written(p, op, data) or_return
 	return enc.put_i64(dst, v) if op.kind == .Enum_Int else enc.put_u64(dst, u64(v))
 }
 
 @(private)
-write_decoded :: #force_no_inline proc(st: ^Marshal_Out, d: Decoded) -> Marshal_Error {
+write_decoded :: #force_no_inline proc(st: ^Marshal_State, d: Decoded) -> Marshal_Error_Kind {
 	switch x in d {
 	case Null:
 		return enc.put_bytes(st.out, "null")
@@ -374,7 +338,7 @@ write_decoded :: #force_no_inline proc(st: ^Marshal_Out, d: Decoded) -> Marshal_
 // A `Number`: its binary64 value (`1e-400`, `.Underflowed`, is +-0, its correctly rounded value), or
 // `.Non_Finite` when it holds none (`.None`, such as `1e400`). `Digits` writes the authored text.
 @(private)
-put_number :: proc(st: ^Marshal_Out, n: Number) -> Marshal_Error {
+put_number :: proc(st: ^Marshal_State, n: Number) -> Marshal_Error_Kind {
 	if n.exactness == .None {
 		return .Non_Finite
 	}
@@ -383,7 +347,7 @@ put_number :: proc(st: ^Marshal_Out, n: Number) -> Marshal_Error {
 
 // A `Digits`: one number token, checked as a `Raw` is; an empty one is `null`.
 @(private)
-put_digits :: proc(st: ^Marshal_Out, s: string) -> Marshal_Error {
+put_digits :: proc(st: ^Marshal_State, s: string) -> Marshal_Error_Kind {
 	if len(s) != 0 && s[0] != '-' && (s[0] < '0' || s[0] > '9') {
 		return .Bad_Raw
 	}
@@ -391,7 +355,7 @@ put_digits :: proc(st: ^Marshal_Out, s: string) -> Marshal_Error {
 }
 
 @(private)
-open_container :: proc(st: ^Marshal_Out, open: u8) -> Marshal_Error {
+open_container :: proc(st: ^Marshal_State, open: u8) -> Marshal_Error_Kind {
 	if st.depth == MAX_DEPTH {
 		return .Too_Deep
 	}
@@ -403,7 +367,7 @@ open_container :: proc(st: ^Marshal_Out, open: u8) -> Marshal_Error {
 // Before element `k` of the open container: a comma unless it is the first, then the pretty line break.
 // Streaming, this is where `out` goes to the writer: every open object already has its `{`.
 @(private)
-element :: proc(st: ^Marshal_Out, k: int) -> Marshal_Error {
+element :: proc(st: ^Marshal_State, k: int) -> Marshal_Error_Kind {
 	if st.sink != nil && len(st.out^) >= spell.SINK_FLUSH_AT {
 		enc.sink_drain(st.sink, st.out) or_return
 	}
@@ -417,7 +381,7 @@ element :: proc(st: ^Marshal_Out, k: int) -> Marshal_Error {
 }
 
 @(private)
-close_container :: proc(st: ^Marshal_Out, close: u8, count: int) -> Marshal_Error {
+close_container :: proc(st: ^Marshal_State, close: u8, count: int) -> Marshal_Error_Kind {
 	st.depth -= 1
 	st.nest -= 1
 	if st.pretty && count > 0 {
@@ -427,36 +391,7 @@ close_container :: proc(st: ^Marshal_Out, close: u8, count: int) -> Marshal_Erro
 }
 
 @(private)
-write_pointer :: proc(st: ^Marshal_Out, op: Plan_Op, data: rawptr) -> Marshal_Error {
-	target := (^rawptr)(data)^
-	if target == nil {
-		return enc.put_bytes(st.out, "null")
-	}
-	return write_target(st, op.elem, target)
-}
-
-// The value a pointer or an `any` refers to, counted toward the depth and checked against the open path.
-@(private)
-write_target :: proc(st: ^Marshal_Out, idx: u32, target: rawptr) -> Marshal_Error {
-	for k in 0 ..< st.n_ptrs {
-		if st.ptrs[k] == {target, idx} {
-			return .Cycle
-		}
-	}
-	if st.depth == MAX_DEPTH {
-		return .Too_Deep
-	}
-	st.ptrs[st.n_ptrs] = {target, idx}
-	st.n_ptrs += 1
-	st.depth += 1
-	err := write_value(st, idx, target)
-	st.n_ptrs -= 1
-	st.depth -= 1
-	return err
-}
-
-@(private)
-put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, data: rawptr, signed: bool) -> Marshal_Error {
+put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, data: rawptr, signed: bool) -> Marshal_Error_Kind {
 	buf: [48]u8
 	return enc.put_bytes(dst, spell.spell_u128(buf[:], (^u128)(data)^, signed))
 }
@@ -466,7 +401,7 @@ put_wide :: #force_no_inline proc(dst: ^[dynamic]u8, data: rawptr, signed: bool)
 // value's last byte (no whitespace, and under JSONC no comment). Its containers nest inside the open ones, all
 // within MAX_DEPTH.
 @(private)
-put_raw :: proc(st: ^Marshal_Out, s: string) -> Marshal_Error {
+put_raw :: proc(st: ^Marshal_State, s: string) -> Marshal_Error_Kind {
 	if len(s) == 0 {
 		return enc.put_bytes(st.out, "null")
 	}

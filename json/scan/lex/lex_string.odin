@@ -158,7 +158,7 @@ string_q :: #force_inline proc(
 						}
 						if cap(vb^) - from >= bound {
 							r, n := dom_string_fused(s.src, ([^]u8)(raw_data(vb^))[from:], lo, s.pos)
-							if r.kind != .None {
+							if r.kind != Error_Kind(0) {
 								return r
 							}
 							edge_publish(vb, from + n)

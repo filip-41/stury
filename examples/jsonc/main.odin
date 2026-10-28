@@ -15,6 +15,6 @@ main :: proc() {
 		os.exit(1)
 	}
 	if err, bad := json.validate(src).?; bad {
-		fmt.println(json.render_error(src, err)) // 2:9: Bad_Char: strict JSON has no comments
+		fmt.println(json.render_error(src, err)) // 2:9: Unexpected character: strict JSON has no comments
 	}
 }

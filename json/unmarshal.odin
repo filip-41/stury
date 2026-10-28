@@ -29,9 +29,10 @@ Unknown_Fields :: core_pkg.Unknown_Fields
 //	            in `context.allocator`, given back before the return.
 //	limits      a `max_depth` past MAX_DEPTH is held to MAX_DEPTH: the shape walk's frames do not spill.
 //	dialect     `.Jsonc` reads comments and trailing commas, every byte checked whatever `strictness` says.
-//	            `.Json5` reads JSON5 through its JSON spelling (`read_json5`): strings are always copied, and
-//	            `Infinity` and `NaN` are `.Out_Of_Range`, and an error's `Name` step for a key holding an escape
-//	            is its decoded text, made with `allocator`. A record read (`Record_Read`) refuses it.
+//	            `.Json5` reads JSON5 from its built document's rows (`read_json5`): a number reads as its JSON
+//	            decimal spelling and a value read whole as its JSON text, `Infinity` and `NaN` are
+//	            `.Out_Of_Range` where they are read, and an error's `Name` step for a key holding an escape is
+//	            its decoded text, made with `allocator`. A record read (`Record_Read`) refuses it.
 //
 // `borrow_strings` slices `src` for an escape-free string and for a `Raw` value.
 Unmarshal_Opts :: core_pkg.Unmarshal_Opts(Read_Opts)
@@ -80,34 +81,37 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 //	- Strings are copied unless `borrow_strings` (an escaped one and a `cstring` always are).
 //	- Everything it creates comes from `allocator`, a dynamic array's own `allocator` field included, and
 //	  nothing is freed, not what a refused read made nor the list or string a read replaced: read into an
-//	  arena freed whole. With the default allocator a refusal therefore leaks its partial result; run
+//	  arena freed whole. `allocator` has no default for that reason: the value mixes what it made with
+//	  borrowed slices of `src`, kept destination values and hook results, so no walk of it can free it. Run
 //	  `unmarshal_check` first to refuse without allocating the target.
 //	- With `plan` nil the plan is this thread's cached one for `T`, as `marshal` takes it. A kept plan must
 //	  have been made for `T`.
 //
-// A `^Record_Read` reads the next record of a `Records` the same way; see `Record_Read`.
+// A `^Record_Read` reads the next record of a `Records` the same way, and says whether there was one: `more`
+// is false once no record is left, with `err` nil at the input's end (see `Record_Read`).
 unmarshal :: proc {
 	unmarshal_value,
 	unmarshal_record,
 }
 
-// The next record of the reader's input, into `ptr^`; `Record_Read` has the contract.
-@(require_results)
-unmarshal_record :: #force_inline proc(rd: ^Record_Read, ptr: ^$T) -> Maybe(Unmarshal_Error) {
-	if err := core_pkg.record_read_check(rd, ptr); err != nil {
-		return err
+// The next record of the reader's input, into `ptr^`: core's `unmarshal` of a `Record_Read`, `more` false once
+// no record is left.
+@(private, require_results)
+unmarshal_record :: #force_inline proc(rd: ^Record_Read, ptr: ^$T) -> (more: bool, err: Maybe(Unmarshal_Error)) {
+	if e := core_pkg.record_read_check(rd, ptr); e != nil {
+		return false, e
 	}
 	return record_source_read(rd.source.state, &rd.opts, core_pkg.record_read_plan(rd), ptr, &rd.at)
 }
 
 // One JSON text, `src`, into `ptr^`, as the `unmarshal` group describes. A nil `ptr` is `.Bad_Option`.
-@(require_results)
+@(private, require_results)
 unmarshal_value :: proc(
 	src: []byte,
 	ptr: ^$T,
 	opts := Unmarshal_Opts{},
 	plan: ^Type_Plan = nil,
-	allocator := context.allocator,
+	allocator: runtime.Allocator,
 ) -> (err: Maybe(Unmarshal_Error)) {
 	if ptr == nil {
 		return Unmarshal_Error{kind = .Bad_Option}
@@ -138,7 +142,7 @@ read_typed :: proc(
 	if opts.strictness == .Structural && scan_pkg.plain_json(opts.dialect) {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
-	tmp: Type_Plan = ---
+	tmp: Format_Plan = ---
 	p, ok := plan_for(plan, T, &tmp)
 	if !ok {
 		return Unmarshal_Error{kind = .Plan_Mismatch}
@@ -150,8 +154,8 @@ read_typed :: proc(
 }
 
 @(private)
-read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Type_Plan, allocator: runtime.Allocator) -> Maybe(Unmarshal_Error) {
-	// The one dialect the shape walk does not read is JSON5, which is read through its JSON spelling.
+read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Format_Plan, allocator: runtime.Allocator) -> Maybe(Unmarshal_Error) {
+	// The one dialect the shape walk does not read is JSON5, which is read from its rows.
 	if !scan_pkg.shape_reads(opts.dialect) {
 		return read_json5(src, dest, opts, plan, allocator)
 	}
@@ -167,7 +171,7 @@ read_planned :: proc(src: []byte, dest: rawptr, opts: Unmarshal_Opts, plan: ^Typ
 	if descent_takes(shape, opts) && (opts.strictness != .Lazy || scan_pkg.shape_lazy_reads_all(src, &run, opts.limits)) {
 		read, oom := scan_pkg.shape_descend(src, &run, dest, opts.limits)
 		if e, refused := oom.?; refused {
-			return unmarshal_error_of(&run, e)
+			return unmarshal_error_of(&run, scan_pkg.error_of(e))
 		}
 		if read {
 			return nil
@@ -199,19 +203,19 @@ descent_takes :: #force_inline proc(shape: ^core_pkg.Read_Shape, opts: Unmarshal
 
 // The shape walk of `src` in `opts.dialect`. The dialect and `refuse` (the last argument) are compile-time
 // parameters of the walks, so each call below is a separate instance and the plain JSON read compiles without the
-// JSONC and key-check code. A text of a dialect `shape_reads` refuses is read through its JSON spelling (`read_json5`) and never gets here.
+// JSONC and key-check code. A text of a dialect `shape_reads` refuses is read from its rows (`read_json5`) and never gets here.
 @(private)
 shape_verdict :: #force_inline proc(src: []byte, run: ^walk.Shape_Run, dest: rawptr, opts: Unmarshal_Opts) -> Maybe(Error) {
 	lazy := opts.strictness == .Lazy
 	refuse := opts.duplicates == .Refuse
 	if lazy && scan_pkg.plain_json(opts.dialect) {
-		return scan_pkg.scan_shape_lazy(src, run, dest, opts.limits, false) if !refuse else scan_pkg.scan_shape_lazy(src, run, dest, opts.limits, true)
+		return scan_pkg.fault_of(scan_pkg.scan_shape_lazy(src, run, dest, opts.limits, false) if !refuse else scan_pkg.scan_shape_lazy(src, run, dest, opts.limits, true))
 	}
 	switch opts.dialect {
 	case .Json:
-		return scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Json, false, false) if !refuse else scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Json, true, false)
+		return scan_pkg.fault_of(scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Json, false, false) if !refuse else scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Json, true, false))
 	case .Jsonc:
-		return scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Jsonc, false, false) if !refuse else scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Jsonc, true, false)
+		return scan_pkg.fault_of(scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Jsonc, false, false) if !refuse else scan_pkg.scan_shape(src, run, dest, lazy, opts.limits, .Jsonc, true, false))
 	case .Json5: // `read_planned` sends a dialect `shape_reads` refuses elsewhere
 	}
 	unreachable()
@@ -230,32 +234,23 @@ unmarshal_error_of :: proc(run: ^walk.Shape_Run, e: Error) -> (err: Unmarshal_Er
 		// A union's tag that is not well-formed is the walk's syntax fault at its byte: a value that is read is
 		// checked before it is refused.
 		if run.fault == .Not_A_Member && e.offset < u64(len(run.src)) && run.src[e.offset] == '{' {
-			if serr, bad := scan_pkg.shape_tag_verdict(run, e.offset).?; bad {
-				err.kind, err.syntax, err.offset = .Syntax, serr.kind, serr.offset
+			if fault, bad := scan_pkg.shape_tag_verdict(run, e.offset).?; bad {
+				serr := scan_pkg.error_of(fault)
+				err.kind, err.syntax, err.detail, err.offset = .Syntax, serr.kind, serr.detail, serr.offset
 			}
 		}
 	case .Duplicate_Key:
 		err.kind = .Duplicate_Key
 	case:
 		err.kind = .Syntax
-		err.syntax = e.kind
+		err.syntax, err.detail = e.kind, e.detail
 	}
-	for k := int(steps) - 1; k >= 0 && !err.truncated; k -= 1 {
-		f := &run.frames[k]
-		op := &run.shape.ops[f.op]
-		// A frame names nothing before its first key or element: a syntax fault can stop there.
-		#partial switch op.kind {
-		case .Struct, .Map:
-			if op.kind == .Struct && f.field != core_pkg.NO_FIELD {
-				core_pkg.unmarshal_path_prepend(&err, Name(run.shape.fields[op.elem + f.field].name))
-			} else if f.key_hi != 0 {
-				core_pkg.unmarshal_path_prepend(&err, Name(string(run.src[f.key_lo + 1:f.key_hi - 1])))
-			}
-		case:
-			if f.n > 0 {
-				core_pkg.unmarshal_path_prepend(&err, Index(f.n - 1))
-			}
-		}
-	}
+	core_pkg.shape_error_path(run, &err, steps, run, json_key_name)
 	return
+}
+
+// A map key's name in a refusal's path: its text in the source, unquoted.
+@(private = "file")
+json_key_name :: proc(run: ^walk.Shape_Run, lo, hi: u64) -> string {
+	return string(run.src[lo + 1:hi - 1])
 }

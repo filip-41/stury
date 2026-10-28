@@ -70,10 +70,10 @@ test_jsonc_marshal_document_keeps_comments :: proc(t: ^testing.T) {
 	defer json.destroy(&doc)
 	testing.expect(t, err == nil)
 	pretty, perr := json.marshal(&doc, {pretty = true}, context.temp_allocator)
-	testing.expect_value(t, perr, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(perr), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(pretty), "// head\n{\n\t// about a\n\t\"a\": /* in a */ 1, // after a\n\t\"b\": [\n\t\t1,\n\t\t2\n\t],\n\t\"e\": {\n\t\t// empty\n\t}\n} // tail\n")
 	compact, cerr := json.marshal(&doc, {}, context.temp_allocator)
-	testing.expect_value(t, cerr, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(cerr), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(compact), "// head\n{// about a\n\"a\":/* in a */1,// after a\n\"b\":[1,2],\"e\":{// empty\n}}// tail\n")
 	// Both read back as the same JSONC document.
 	for out in ([]string{string(pretty), string(compact)}) {
@@ -130,7 +130,7 @@ test_jsonc_comment_edits :: proc(t: ^testing.T) {
 		{".tags[1]", .Trail, "/* b */"},
 	}
 	for c in cases {
-		out, err := json.edit_comment(src, c.path, c.place, c.text, .Insert, context.temp_allocator)
+		out, err := json.insert_comment(src, c.path, c.place, c.text, allocator = context.temp_allocator)
 		testing.expect_value(t, err, nil)
 		doc, berr := json.build(out, {dialect = .Jsonc}, context.temp_allocator)
 		testing.expect(t, berr == nil, string(out))
@@ -143,7 +143,7 @@ test_jsonc_comment_edits :: proc(t: ^testing.T) {
 
 	// Text without markers is what `fact_text` reads: it writes as a `//` line, and reads back as itself.
 	for bare in ([]string{"human", " human"}) {
-		out, berr := json.edit_comment(src, ".depth", .Lead, bare, .Insert, context.temp_allocator)
+		out, berr := json.insert_comment(src, ".depth", .Lead, bare, allocator = context.temp_allocator)
 		testing.expect_value(t, berr, nil)
 		doc, derr := json.build(out, {dialect = .Jsonc}, context.temp_allocator)
 		testing.expect(t, derr == nil, string(out))
@@ -153,30 +153,45 @@ test_jsonc_comment_edits :: proc(t: ^testing.T) {
 		}
 		testing.expect(t, hit, string(out))
 	}
-	_, err := json.edit_comment(src, ".depth", .Lead, "two\nlines", .Insert, context.temp_allocator)
+	_, err := json.insert_comment(src, ".depth", .Lead, "two\nlines", allocator = context.temp_allocator)
 	edit_err(t, err, .Bad_Comment)
 
-	_, err = json.edit_comment(src, ".name", .Trail, "// two", .Insert, context.temp_allocator)
+	_, err = json.insert_comment(src, ".name", .Trail, "// two", allocator = context.temp_allocator)
 	edit_err(t, err, .Unplaceable)
-	_, err = json.edit_comment(src, ".depth", .Foot, "// x", .Insert, context.temp_allocator)
+	_, err = json.insert_comment(src, ".depth", .Foot, "// x", allocator = context.temp_allocator)
 	edit_err(t, err, .Unplaceable)
-	_, err = json.edit_comment(src, ".depth", .Lead, "/* open", .Insert, context.temp_allocator)
+	_, err = json.insert_comment(src, ".depth", .Lead, "/* open", allocator = context.temp_allocator)
 	edit_err(t, err, .Bad_Comment)
 
 	out: []byte
-	out, err = json.edit_comment(src, ".name", .Trail, "/* shorter */", .Set, context.temp_allocator)
+	out, err = json.set_comment(src, ".name", .Trail, "/* shorter */", allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect(t, strings.has_prefix(string(out), "{\n  // the name\n  \"name\": \"stury\", /* shorter */\n  \"depth\""), string(out))
-	_, err = json.edit_comment(src, ".depth", .Trail, "// x", .Set, context.temp_allocator)
+	_, err = json.set_comment(src, ".depth", .Trail, "// x", allocator = context.temp_allocator)
 	edit_err(t, err, .Not_Found)
 
-	out, err = json.edit_comment(src, ".name", .Lead, "", .Remove, context.temp_allocator)
+	out, err = json.remove_comment(src, ".name", .Lead, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out[:30]), "{\n  \"name\": \"stury\", // short\n")
-	out, err = json.edit_comment(src, ".tags[]", .Trail, "", .Remove, context.temp_allocator)
+	out, err = json.remove_comment(src, ".tags[]", .Trail, allocator = context.temp_allocator)
 	testing.expect_value(t, err, nil)
 	testing.expect(t, json.validate(out, {dialect = .Jsonc}) == nil)
 	testing.expect(t, strings.has_suffix(string(out), "\"a\",\n    \"b\"\n    // end of tags\n  ]\n}\n"), string(out))
+
+	// The comment edits read the source under `opts`: a dialect without comments, and JSON5, are refused, and
+	// the limits and repeated keys are read as `set` reads them.
+	_, err = json.insert_comment(src, ".depth", .Lead, "// x", {dialect = .Json}, context.temp_allocator)
+	edit_err(t, err, .Bad_Option)
+	_, err = json.set_comment(src, ".name", .Trail, "// x", {dialect = .Json5}, context.temp_allocator)
+	edit_err(t, err, .Bad_Option)
+	_, err = json.remove_comment(src, ".name", .Lead, {dialect = .Jsonc, limits = {max_depth = 1}}, context.temp_allocator)
+	testing.expectf(t, err != nil && err.?.kind == .Bad_Source && err.?.syntax == .Too_Deep, "%v", err)
+	twice := transmute([]byte)string("{\"a\": 1, \"a\": 2}")
+	_, err = json.insert_comment(twice, ".a", .Lead, "// x", allocator = context.temp_allocator)
+	testing.expectf(t, err != nil && err.?.syntax == .Duplicate_Key, "%v", err)
+	out, err = json.insert_comment(twice, ".a", .Lead, "// x", {dialect = .Jsonc, duplicates = .First}, context.temp_allocator)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, string(out), "{\n// x\n\"a\": 1, \"a\": 2}")
 }
 
 // CR is JSON whitespace, so a line comment ends at CR, LF or CRLF alike, and the comment's span stops
@@ -212,7 +227,7 @@ test_jsonc_line_comment_ends_at_cr :: proc(t: ^testing.T) {
 		}
 
 		// Removing the lead comment takes its line and one whole break with it.
-		out, eerr := json.edit_comment(src, ".a", .Lead, "", .Remove, context.temp_allocator)
+		out, eerr := json.remove_comment(src, ".a", .Lead, allocator = context.temp_allocator)
 		testing.expect_value(t, eerr, nil)
 		want, _ := strings.replace_all("{|\"a\": 1 // note|}|", "|", brk, context.temp_allocator)
 		testing.expect_value(t, string(out), want)
@@ -291,7 +306,7 @@ test_jsonc_marshal_trailing_newline_after_line_comment :: proc(t: ^testing.T) {
 		defer json.destroy(&doc)
 		testing.expect_value(t, err, nil)
 		out, merr := json.marshal(&doc, {pretty = c.pretty, trailing_newline = true}, context.temp_allocator)
-		testing.expect_value(t, merr, json.Marshal_Error.None)
+		testing.expect_value(t, marshal_kind(merr), json.Marshal_Error_Kind.None)
 		testing.expect_value(t, string(out), c.want)
 	}
 }
@@ -367,10 +382,10 @@ test_jsonc_raw_is_judged_as_jsonc :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(out), `[[1,],0]`)
 
 	_, err = json.set(raw(`{"x":0}`), ".x", r.r, allocator = context.temp_allocator)
-	testing.expect_value(t, edit_err(t, err, .Encode).encode, json.Marshal_Error.Bad_Raw)
+	testing.expect_value(t, edit_err(t, err, .Encode).encode, json.Marshal_Error_Kind.Bad_Raw)
 	for swallows in ([]json.Raw{"1 // c", "1 /* c */"}) {
 		_, err = json.set(raw(`[0, 1]`), ".[0]", swallows, {dialect = .Jsonc}, allocator = context.temp_allocator)
-		testing.expect_value(t, edit_err(t, err, .Encode).encode, json.Marshal_Error.Bad_Raw)
+		testing.expect_value(t, edit_err(t, err, .Encode).encode, json.Marshal_Error_Kind.Bad_Raw)
 	}
 }
 

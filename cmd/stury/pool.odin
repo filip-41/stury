@@ -6,7 +6,6 @@ package main
 import "core:mem/virtual"
 import "core:os"
 import "core:sync"
-import core_pkg "../../core"
 import host "../../host"
 import json "../../json"
 
@@ -19,38 +18,20 @@ BATCH_BYTES_PER_FIRST_WORKERS :: 320 * 1024
 // again. `per` is the bytes per worker past the first four: 1 MiB, and a batch that only validates its bytes
 // (`check`) takes the same. Only the demanded-entries array path passes half.
 batch_runner :: proc(run: ^Run, n: int, per := BATCH_BYTES_PER_WORKER) -> ^json.Batch_Runner {
-	w := min(max(min(n / BATCH_BYTES_PER_FIRST_WORKERS, 4), n / per), os.get_processor_core_count())
+	w := max(min(n / BATCH_BYTES_PER_FIRST_WORKERS, 4), n / per)
+	// The core count is a system call, so a batch too small for two workers, as a text far smaller than its
+	// window is, does not ask for it.
+	if w >= 2 {
+		w = min(w, os.get_processor_core_count())
+	}
 	if w > run.pool_width && w >= 2 {
 		if run.pool_width > 0 {
-			host.batch_pool_destroy(&run.pool)
+			host.destroy(&run.pool)
 		}
 		host.batch_pool_init(&run.pool, w)
 		run.pool_width = w
 	}
 	return &run.pool.runner if run.pool_width > 0 else nil
-}
-
-// `task` on each of the `n` pieces of `job`, numbered from 0, each claimed in turn by the caller or one of
-// the pool's threads, until all are claimed or a task returns false: whether none did.
-fan_out :: proc(r: ^json.Batch_Runner, n: int, task: proc(job: ^$T, k: int) -> bool, job: ^T) -> bool {
-	Claims :: struct {
-		job:     ^T,
-		task:    proc(job: ^T, k: int) -> bool,
-		n, next: int,
-		failed:  bool,
-	}
-	claim :: proc(arg: rawptr) {
-		c := (^Claims)(arg)
-		for !sync.atomic_load(&c.failed) {
-			k := core_pkg.slice_next(&c.next, c.n) or_break
-			if !c.task(c.job, k) {
-				sync.atomic_store(&c.failed, true)
-			}
-		}
-	}
-	c := Claims{job = job, task = task, n = n}
-	core_pkg.batch_fan(&core_pkg.Batch_Cursor{runner = r, lanes = r.threads + 1}, claim, &c)
-	return !c.failed
 }
 
 // The output of one piece of a job (`Piece_Output`).
@@ -104,19 +85,22 @@ start_pieces :: proc(po: ^Piece_Output, run: ^Run) {
 	po.wbuf = make([dynamic]byte, 0, cap(run.out), run.out.allocator)
 }
 
+// Ends the job once `each_record` has returned. A write that failed on a pool thread ends the run here.
 end_pieces :: proc(po: ^Piece_Output) {
 	virtual.arena_destroy(&po.arena)
 	delete(po.wbuf)
+	check_output()
 }
 
 // Returns a copy of the run for piece `k`, with its own output buffer: a spare, or a new one with room for `size`
-// bytes. The copy is made under the lock, because another piece may be appending through the run.
+// bytes, and the piece's result, done with no stop until its records set one. The copy is made under the lock,
+// because another piece may be appending through the run.
 //
 // The piece waits while it is `PIECES_IN_FLIGHT` per lane ahead of the first unappended piece, and while a write
 // is in progress with `HELD_AT` bytes pending. This bounds the held output in pieces and bytes, however slow the
 // writer is. The first unappended piece waits only for the writer, and every piece before `k` is already claimed,
 // so the wait ends when the write does.
-begin_piece :: proc(po: ^Piece_Output, k, size: int) -> (run: Run) {
+begin_piece :: proc(po: ^Piece_Output, k, size: int) -> (run: Run, p: Record_Piece) {
 	sync.guard(&po.lock)
 	window := PIECES_IN_FLIGHT * max(po.run.pool_width, 1)
 	for po.stop < 0 && (k - po.printed >= window || po.writing && len(po.run.out) >= HELD_AT) {
@@ -125,12 +109,15 @@ begin_piece :: proc(po: ^Piece_Output, k, size: int) -> (run: Run) {
 	run = po.run^
 	run.out = pop_safe(&po.spare) or_else make([dynamic]byte, 0, min(size, FLUSH_AT), po.pieces.allocator)
 	run.held = true
+	p = {done = true, stop = -1}
 	return
 }
 
-// Stores piece `k`'s result `p`, then appends and writes every piece whose turn has come. Returns false once a
-// piece has handed the rest of the input to the main thread.
-publish_piece :: proc(po: ^Piece_Output, k: int, p: Record_Piece) -> bool {
+// Stores piece `k`'s result `p`, with the output and exit result `run` printed it into, then appends and writes
+// every piece whose turn has come. Returns false once a piece has handed the rest of the input to the main thread.
+publish_piece :: proc(po: ^Piece_Output, k: int, p: Record_Piece, run: ^Run) -> bool {
+	p := p
+	p.out, p.ret = run.out, run.ret
 	sync.guard(&po.lock)
 	if k >= len(po.pieces) {
 		resize(&po.pieces, k + 1)

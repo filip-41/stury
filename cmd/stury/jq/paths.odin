@@ -228,6 +228,9 @@ setpath :: proc(ip: ^Interp, v: Value, path: []Value, nv: Value, owned: ^Owned) 
 		return nv, .Go
 	}
 	key := scalar(path[0])
+	if len(path) == 1 && indexes_without_error(v, key) {
+		return set_key(ip, v, key, nv, owned)
+	}
 	child, sig := index_value(ip, v, key)
 	if sig != .Go {
 		return nil, sig
@@ -244,12 +247,19 @@ setpath :: proc(ip: ^Interp, v: Value, path: []Value, nv: Value, owned: ^Owned) 
 	return set_key(ip, v, key, set, owned)
 }
 
+// Whether `index_value` of `t` at `key` cannot fail: a string key in an object, a number in an array.
+@(private = "file")
+indexes_without_error :: proc(t: Value, key: Value) -> bool {
+	tk, kk := kind(t), kind(key)
+	return tk == .Object && kk == .String || tk == .Array && kk == .Number
+}
+
 // What jq's jv_set of null at `key` in `t` refuses, which jv_setpath tries before it descends (a slice's
 // key it sets only after).
 @(private = "file")
 set_refused :: proc(ip: ^Interp, t: Value, key: Value, owned: ^Owned) -> Signal {
 	tk := kind(t)
-	#partial switch kind(key) {
+	switch kind(key) {
 	case .String:
 		if tk == .Object || tk == .Null {
 			return .Go
@@ -261,6 +271,7 @@ set_refused :: proc(ip: ^Interp, t: Value, key: Value, owned: ^Owned) -> Signal 
 		}
 	case .Object:
 		return .Go
+	case .Null, .False, .True, .Array:
 	}
 	_, sig := set_key(ip, t, key, nil, owned)
 	return sig
@@ -291,12 +302,17 @@ array_set_index :: proc(ip: ^Interp, size: int, key: Value) -> (int, Signal) {
 @(private = "file")
 set_key :: proc(ip: ^Interp, t: Value, key: Value, v: Value, owned: ^Owned) -> (Value, Signal) {
 	tk := kind(t)
-	#partial switch kind(key) {
+	switch kind(key) {
 	case .String:
 		if tk == .Object || tk == .Null {
 			k, _ := string_of(key)
-			o := new_object() if tk == .Null else owned_copy(t, owned).(^Object)
-			owned[o] = true
+			o: ^Object
+			if tk == .Null {
+				o = new_object()
+				owned[o] = true
+			} else {
+				o = owned_copy(t, owned).(^Object)
+			}
 			object_put(o, k, v)
 			return o, .Go
 		}
@@ -306,8 +322,13 @@ set_key :: proc(ip: ^Interp, t: Value, key: Value, v: Value, owned: ^Owned) -> (
 			if sig != .Go {
 				return nil, sig
 			}
-			a := new_array() if tk == .Null else owned_copy(t, owned).(^Array)
-			owned[a] = true
+			a: ^Array
+			if tk == .Null {
+				a = new_array()
+				owned[a] = true
+			} else {
+				a = owned_copy(t, owned).(^Array)
+			}
 			if cap(a.items) <= i {
 				// The holes at once, where append would grow a null at a time. Resize alone grows to the exact
 				// length, which a run of stores past the end would pay each time.
@@ -350,6 +371,7 @@ set_key :: proc(ip: ^Interp, t: Value, key: Value, v: Value, owned: ^Owned) -> (
 			a.items = items
 			return a, .Go
 		}
+	case .Null, .False, .True, .Array:
 	}
 	return nil, fail(ip, "Cannot update field at %s index of %s", type_name(key), type_name(t))
 }
@@ -423,7 +445,7 @@ delete_keys :: proc(ip: ^Interp, t: Value, keys: []Value, owned: ^Owned) -> (Val
 	if kind(t) == .Null || len(keys) == 0 {
 		return t, .Go
 	}
-	#partial switch kind(t) {
+	switch kind(t) {
 	case .Array:
 		a := owned_copy(t, owned).(^Array)
 		n := len(a.items)
@@ -431,7 +453,7 @@ delete_keys :: proc(ip: ^Interp, t: Value, keys: []Value, owned: ^Owned) -> (Val
 		// time from a long array would otherwise take memory for each element at each step.
 		gone := make([dynamic][2]int, 0, len(keys))
 		for key in keys {
-			#partial switch kind(key) {
+			switch kind(key) {
 			case .Number:
 				k, _ := number_of(key)
 				if math.is_nan(k.f) || k.f >= f64(n) || k.f < -f64(n) {
@@ -450,7 +472,7 @@ delete_keys :: proc(ip: ^Interp, t: Value, keys: []Value, owned: ^Owned) -> (Val
 					return nil, sig
 				}
 				append(&gone, [2]int{lo, hi})
-			case:
+			case .Null, .False, .True, .String, .Array:
 				return nil, fail(ip, "Cannot delete %s element of array", type_name(key))
 			}
 		}
@@ -489,6 +511,7 @@ delete_keys :: proc(ip: ^Interp, t: Value, keys: []Value, owned: ^Owned) -> (Val
 		}
 		object_delete_all(o, gone)
 		return o, .Go
+	case .Null, .False, .True, .Number, .String:
 	}
 	return nil, fail(ip, "Cannot delete fields from %s", type_name(t))
 }

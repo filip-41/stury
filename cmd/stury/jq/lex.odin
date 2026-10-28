@@ -2,8 +2,8 @@ package jq
 
 // jq's lexer, src/lexer.l: the longest match wins, then the earlier rule.
 
-import "core:fmt"
 import "core:strings"
+import "../message"
 
 @(private)
 lex :: proc(p: ^Parser) -> (Sym, Sem, Loc) {
@@ -282,7 +282,7 @@ unescape :: proc(p: ^Parser, run: string, at: Loc) -> Value {
 			line, column = line + 1, 0
 		}
 	}
-	report(p, at, fmt.aprintf("%s at line %d, column %d (while parsing '\"%s\"')", msg, line, column + 1, run))
+	report(p, at, message.build("%s at line %d, column %d (while parsing '\"%s\"')", msg, line, column + 1, run))
 	return nil
 }
 

@@ -358,7 +358,7 @@ expect_twins :: proc(
 	mode: json.Duplicates,
 	limits := json.Limits{},
 	loc := #caller_location,
-) -> Maybe(json.Error) {
+) -> Maybe(json.Path_Error) {
 	f := paths_run(raw(src), fwd, strictness, mode, limits)
 	n := paths_run(raw(src), neg, strictness, mode, limits)
 	defer json.destroy(&f.req)

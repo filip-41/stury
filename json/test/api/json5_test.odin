@@ -62,7 +62,7 @@ test_json5_refuses_with_offsets :: proc(t: ^testing.T) {
 		{`.`, .Truncated, 1},
 		{`+`, .Truncated, 1},
 		{`Infinit`, .Truncated, 7},
-		{`Infinitx`, .Bad_Literal, 0},
+		{`Infinitx`, .Bad_Char, 0},
 		{`{1a: 1}`, .Bad_Char, 1},
 		{`{a-b: 1}`, .Bad_Char, 2},
 		{`{\u0031: 1}`, .Bad_Escape, 1},
@@ -72,6 +72,8 @@ test_json5_refuses_with_offsets :: proc(t: ^testing.T) {
 		e, bad := json.validate(raw(c.src), {dialect = .Json5}).?
 		testing.expectf(t, bad && e.kind == c.kind && e.offset == c.at, "%q: %v, want %v at %d", c.src, e, c.kind, c.at)
 	}
+	literal, _ := json.validate(raw(`Infinitx`), {dialect = .Json5}).?
+	testing.expect_value(t, json.Fault(literal.detail), json.Fault.Literal)
 }
 
 // Every reader gives a JSON5 token's value: strings in either quote with JSON5's escapes, unquoted keys, and
@@ -172,7 +174,7 @@ test_json5_refuse_compares_decoded_keys :: proc(t: ^testing.T) {
 		doc, berr := json.build(raw(c.src), {dialect = .Json5, duplicates = .Refuse})
 		json.destroy(&doc)
 		_, ferr := json.find(raw(c.src), ".a", {dialect = .Json5, duplicates = .Refuse})
-		for err in ([]Maybe(json.Error){berr, ferr}) {
+		for err in ([]Maybe(json.Error){berr, scan_fault(ferr)}) {
 			e, refused := err.?
 			testing.expectf(t, refused == c.duplicate && (!refused || e.kind == .Duplicate_Key), "%s: %v", c.src, err)
 		}
@@ -227,6 +229,16 @@ test_json5_unmarshal :: proc(t: ^testing.T) {
 	testing.expectf(t, syn != nil && syn.?.kind == .Syntax && syn.?.syntax == .Bad_Number && syn.?.offset == 5, "%v", syn)
 	inf := json.unmarshal(raw("{a: Infinity}"), &u, {dialect = .Json5}, nil, context.temp_allocator)
 	testing.expectf(t, inf != nil && inf.?.kind == .Out_Of_Range && inf.?.offset == 4, "%v", inf)
+
+	R :: struct {
+		a: json.Raw,
+		b: int,
+	}
+	r: R
+	in_raw := json.unmarshal(raw("{a: [1, Infinity], b: 2}"), &r, {dialect = .Json5}, nil, context.temp_allocator)
+	testing.expectf(t, in_raw != nil && in_raw.?.kind == .Out_Of_Range && in_raw.?.offset == 8, "%v", in_raw)
+	unread := json.unmarshal(raw("{z: NaN, b: 2}"), &r, {dialect = .Json5}, nil, context.temp_allocator)
+	testing.expectf(t, unread == nil && r.b == 2, "%v", unread)
 }
 
 // `marshal` writes a JSON5 document in JSON's spelling, comments kept; the edits refuse the dialect.
@@ -237,7 +249,7 @@ test_json5_marshal_respells_and_edits_refuse :: proc(t: ^testing.T) {
 	defer json.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	out, merr := json.marshal(&doc, {}, context.temp_allocator)
-	testing.expect_value(t, merr, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(merr), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(out), `{"a":"it's","b":[31,0.5,5,1,-2]// c
 }`)
 	testing.expect_value(t, json.validate(out, {dialect = .Jsonc}), nil)
@@ -245,10 +257,10 @@ test_json5_marshal_respells_and_edits_refuse :: proc(t: ^testing.T) {
 	nan, _ := json.build(raw("[NaN]"), {dialect = .Json5})
 	defer json.destroy(&nan)
 	_, nerr := json.marshal(&nan, {}, context.temp_allocator)
-	testing.expect_value(t, nerr, json.Marshal_Error.Non_Finite)
-	_, ferr := json.format(raw("[1, -Infinity]"), {}, .Json5, context.temp_allocator)
-	testing.expect_value(t, ferr, json.Error{kind = .Bad_Number, offset = 4})
-	fout, _ := json.format(raw("{a: 0x10}"), {}, .Json5, context.temp_allocator)
+	testing.expect_value(t, marshal_kind(nerr), json.Marshal_Error_Kind.Non_Finite)
+	_, ferr := json.format(raw("[1, -Infinity]"), {dialect = .Json5}, allocator = context.temp_allocator)
+	testing.expect_value(t, ferr, json.Path_Error{kind = .Encode, encode = .Non_Finite, offset = 4})
+	fout, _ := json.format(raw("{a: 0x10}"), {dialect = .Json5}, allocator = context.temp_allocator)
 	testing.expect_value(t, string(fout), `{"a":16}`)
 
 	_, serr := json.set(raw("{a: 1}"), ".a", 2, {dialect = .Json5}, allocator = context.temp_allocator)
@@ -271,7 +283,7 @@ test_json5_control_bytes_are_escaped_in_json_spelling :: proc(t: ^testing.T) {
 	k, kok := json.get_string(&doc, json.child(&doc, json.ROOT, "k\ty"))
 	testing.expect(t, kok && k == "\x01")
 	out, merr := json.marshal(&doc, {}, context.temp_allocator)
-	testing.expect_value(t, merr, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(merr), json.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(out), `{"a":"t\tx","k\ty":"\u0001"}`)
 	testing.expect_value(t, json.validate(out), nil)
 
@@ -283,16 +295,16 @@ test_json5_control_bytes_are_escaped_in_json_spelling :: proc(t: ^testing.T) {
 	testing.expect_value(t, v.a, "t\tx")
 }
 
-// A hex integer past 64 bits is its double in JSON's spelling, as `get_number` reads it; one that fits is exact.
+// A hex integer is respelled as the exact decimal integer, past 64 bits too, and reads back as the same double.
 @(test)
-test_json5_wide_hex_respells_as_its_double :: proc(t: ^testing.T) {
+test_json5_wide_hex_respells_exactly :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	doc, err := json.build(raw("[0x10000000000000000, 0x1FFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, -0x10000000000000000]"), {dialect = .Json5})
 	defer json.destroy(&doc)
 	testing.expect_value(t, err, nil)
 	out, merr := json.marshal(&doc, {}, context.temp_allocator)
-	testing.expect_value(t, merr, json.Marshal_Error.None)
-	testing.expect_value(t, string(out), "[1.8446744073709552e+19,3.6893488147419103e+19,18446744073709551615,-1.8446744073709552e+19]")
+	testing.expect_value(t, marshal_kind(merr), json.Marshal_Error_Kind.None)
+	testing.expect_value(t, string(out), "[18446744073709551616,36893488147419103231,18446744073709551615,-18446744073709551616]")
 	back, perr := json.build(out)
 	defer json.destroy(&back)
 	testing.expect_value(t, perr, nil)
@@ -320,4 +332,27 @@ test_json5_ignores_strictness :: proc(t: ^testing.T) {
 		v: T
 		testing.expect(t, json.unmarshal(bad, &v, {dialect = .Json5, strictness = s}, nil, context.temp_allocator) != nil)
 	}
+}
+
+// What each dialect reads (`grammar_of`), and what a document of it says of its text (`plain_json`,
+// `own_spelling`): RFC 8259's own text, and a respelled one only under JSON5's keys or scalars.
+@(test)
+test_dialect_grammar :: proc(t: ^testing.T) {
+	testing.expect_value(t, json.grammar_of(.Json), json.Grammar{})
+	testing.expect_value(t, json.grammar_of(.Jsonc), json.Grammar{.Comments, .Trailing_Commas})
+	testing.expect_value(t, json.grammar_of(.Json5), json.Grammar{.Comments, .Trailing_Commas, .Json5_Space, .Json5_Keys, .Json5_Scalars})
+	testing.expect_value(t, json.OWN_SPELLING, json.Grammar{.Json5_Keys, .Json5_Scalars})
+	for d in json.Dialect {
+		doc, err := json.build(raw(`{"a":[1,2]}`), {dialect = d})
+		testing.expectf(t, err == nil, "%v: %v", d, err)
+		testing.expect_value(t, json.plain_json(&doc), json.grammar_of(d) == {})
+		testing.expect_value(t, json.own_spelling(&doc), json.grammar_of(d) & json.OWN_SPELLING != {})
+		json.destroy(&doc)
+	}
+	// A document with no spelling is JSON's; a pruned one is not plain, as its spans hold dropped members.
+	empty: json.Document
+	testing.expect(t, json.plain_json(&empty) && !json.own_spelling(&empty))
+	pruned, _ := json.build(raw(`{"a":1,"a":2}`), {duplicates = .First})
+	testing.expect(t, !json.plain_json(&pruned) && !json.own_spelling(&pruned))
+	json.destroy(&pruned)
 }

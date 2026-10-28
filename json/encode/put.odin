@@ -2,15 +2,15 @@ package encode
 
 import "base:intrinsics"
 import core_pkg "../../core"
-import "../scan/walk"
 import "../../core/spell"
 
-MAX_DEPTH :: walk.MAX_DEPTH
+MAX_DEPTH :: core_pkg.MAX_DEPTH
 
 // The put layer, by the names this package's writers use.
 put_reserve :: spell.put_reserve
 put_room :: spell.put_room
 put_commit :: spell.put_commit
+put_publish :: spell.put_publish
 put_byte :: spell.put_byte
 put_bytes :: spell.put_bytes
 put_i64 :: spell.put_i64
@@ -24,16 +24,15 @@ Marshal_Opts :: struct {
 	ascii_only:       bool,          // every character past U+007F as `\uXXXX`, a surrogate pair past U+FFFF
 	escape_html:      bool,          // `<`, `>`, `&`, U+2028 and U+2029 as `\uXXXX`
 	trailing_newline: bool,          // a `\n` after the root value
-	jq_spelling:      bool,          // `marshal` of a `Document` written as the jq-compatible CLI prints it
-	sort_keys:        bool,          // `marshal` of a `Document` with each object's keys in byte order, as `stury -S`, ignored for an `any`
+	sort_keys:        bool,          // every object's keys in byte order, as `stury -S`
 }
 
-// The reason the canonical writer refused a value (core's `Marshal_Error`). `.None` is success. JSON never
+// The reason the canonical writer refused a value (core's `Marshal_Error_Kind`). `.None` is success. JSON never
 // reports `Bad_Option` or `Unwritable`.
-Marshal_Error :: core_pkg.Marshal_Error
+Marshal_Error_Kind :: core_pkg.Marshal_Error_Kind
 
 // A line break and `ind`'s indent for `depth` open containers. Writes run up to INDENT_SLACK bytes past it.
-put_newline :: proc(dst: ^[dynamic]u8, depth: u32, ind: ^Indent) -> Marshal_Error {
+put_newline :: proc(dst: ^[dynamic]u8, depth: u32, ind: ^Indent) -> Marshal_Error_Kind {
 	p := put_reserve(dst, 1 + int(depth) * ind.unit + INDENT_SLACK)
 	if p == nil {
 		return .Out_Of_Memory
@@ -86,7 +85,7 @@ put_indent :: #force_inline proc "contextless" (p: [^]u8, depth: int, ind: ^Inde
 }
 
 // What follows a key: `:`, and one space when pretty.
-put_colon :: #force_inline proc(dst: ^[dynamic]u8, pretty: bool) -> Marshal_Error {
+put_colon :: #force_inline proc(dst: ^[dynamic]u8, pretty: bool) -> Marshal_Error_Kind {
 	if pretty {
 		return put_bytes(dst, ": ")
 	}

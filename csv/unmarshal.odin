@@ -36,15 +36,22 @@ Unmarshal_Opts :: core_pkg.Unmarshal_Opts(Read_Opts)
 Unmarshal_Error_Kind :: core_pkg.Unmarshal_Error_Kind
 Unmarshal_Error :: core_pkg.Unmarshal_Error
 
-// Read the records of `src` into `ptr^`, a slice or dynamic array of a struct: one element per record from
-// index zero, replacing what `ptr^` held. The header names each column's field (`csv:"name"`, or the field's
-// own name).
+// Read the records of `src` into `ptr^`, a slice or dynamic array of rows: one element per record from index
+// zero, replacing what `ptr^` held. A row is
+//
+//	- a struct, whose fields the header names (`csv:"name"`, or the field's own name).
+//	- a slice or dynamic array of one cell type (`[]string`, `[]Maybe(string)`, ...). Every record is a row, the
+//	  first too, and each of its cells an element: `no_header` and `unknown_fields` are not read. A refused
+//	  cell's path is `[row][cell]`.
+//	- a map of `string` keys to one cell type (`map[string]string`, ...). The header's names are the keys, and a
+//	  record's absent cell is no entry; `duplicates` is read as for a struct's fields, and `no_header` is
+//	  `.Unsupported`. A refused cell's path is `[row].name`.
 //
 // Cells:
 //
 //	- An unquoted empty cell is absent: its field keeps its zero value, or is `.Missing_Field` when tagged
 //	  `csv:",required"`. A required field no column names is `.Missing_Field` at the header. A quoted `""` is
-//	  a present empty text. Under `Quoting.None` every empty cell is absent. In a `ragged` dialect a record's
+//	  a present empty text. Where cells are not quoted every empty cell is absent. In a `ragged` dialect a record's
 //	  cells past the header's are unknown columns, and the cells it lacks are absent.
 //	- A field reads the cell's text (`field_text`): a quoted cell without its quotes and with each `""` as one
 //	  quote, an escaped cell with each escape as the byte it spells. It accepts
@@ -59,19 +66,20 @@ Unmarshal_Error :: core_pkg.Unmarshal_Error
 // before it, the refused one last. Everything is allocated from `allocator` and nothing is freed, so read into
 // an arena and free it whole. With `plan` nil the plan is this thread's cached one for `T`.
 //
-// A `^Record_Read` reads one row at a time, the same way (see `Record_Read`).
+// A `^Record_Read` reads one row at a time, the same way, and says whether there was one: `more` is false once
+// no row is left, with `err` nil at the input's end (see `Record_Read`).
 unmarshal :: proc {
 	unmarshal_records,
 	unmarshal_record,
 }
 
-@(require_results)
+@(private, require_results)
 unmarshal_records :: proc(
 	src: []byte,
 	ptr: ^$T,
 	opts := Unmarshal_Opts{},
 	plan: ^Type_Plan = nil,
-	allocator := context.allocator,
+	allocator: runtime.Allocator,
 ) -> (err: Maybe(Unmarshal_Error)) where intrinsics.type_is_slice(T) || intrinsics.type_is_dynamic_array(T) {
 	if ptr == nil {
 		return Unmarshal_Error{kind = .Bad_Option}
@@ -79,8 +87,8 @@ unmarshal_records :: proc(
 	return read_records(src, ptr, T, opts, plan, allocator, false)
 }
 
-@(require_results)
-unmarshal_record :: proc(rd: ^Record_Read, ptr: ^$T) -> Maybe(Unmarshal_Error) {
+@(private, require_results)
+unmarshal_record :: proc(rd: ^Record_Read, ptr: ^$T) -> (more: bool, err: Maybe(Unmarshal_Error)) {
 	return core_pkg.unmarshal(rd, ptr)
 }
 
@@ -94,11 +102,11 @@ unmarshal_check :: proc(
 	opts := Unmarshal_Opts{},
 	plan: ^Type_Plan = nil,
 ) -> (err: Maybe(Unmarshal_Error)) where intrinsics.type_is_slice(T) || intrinsics.type_is_dynamic_array(T) {
-	return read_records(src, (^[dynamic]u8)(nil), T, opts, plan, runtime.nil_allocator(), true)
+	return read_records(src, (^T)(nil), T, opts, plan, runtime.nil_allocator(), true)
 }
 
 // `unmarshal` into `ptr^` (a `P` whose element is the record), or with `CHECK` into a scratch element
-// and no `ptr`.
+// and no `ptr`. A record is a struct, a list of cells (`LIST_ROW`, each record one) or a map of cells (`MAP_ROW`).
 @(private)
 read_records :: proc(
 	src: []byte,
@@ -109,13 +117,16 @@ read_records :: proc(
 	allocator: runtime.Allocator,
 	$CHECK: bool,
 ) -> (err: Maybe(Unmarshal_Error)) {
+	E :: intrinsics.type_elem_type(P)
+	MAP_ROW :: intrinsics.type_is_map(E)
+	LIST_ROW :: intrinsics.type_is_slice(E) || intrinsics.type_is_dynamic_array(E)
 	// Under `.Lazy` the scan finds the UTF-8 faults, and only those in cells a field reads are refused
 	// (`judge_utf8`).
 	s, dialect_ok := scan_setup(opts.dialect, opts.limits, .Structural if opts.strictness == .Structural else .Strict)
 	if !dialect_ok {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
-	tmp: Type_Plan = ---
+	tmp: Format_Plan = ---
 	p, ok := plan_for(plan, root, &tmp)
 	if !ok {
 		return Unmarshal_Error{kind = .Plan_Mismatch}
@@ -135,12 +146,18 @@ read_records :: proc(
 	defer delete(r.cols)
 	defer delete(r.required)
 	defer delete(r.req_more)
+	defer delete(r.keys)
 	lazy := opts.strictness == .Lazy
 	if lazy {
 		it.carry.utf8 = max(int)
 	}
 	refuse := opts.unknown_fields == .Refuse
-	if !opts.no_header {
+	when MAP_ROW {
+		if opts.no_header {
+			return Unmarshal_Error{kind = .Unsupported}
+		}
+	}
+	if !LIST_ROW && !opts.no_header {
 		header, more := next_record(&it)
 		if !more {
 			return records_fault(&it, -1)
@@ -151,8 +168,12 @@ read_records :: proc(
 		read_header(&r, header, refuse, opts.duplicates) or_return
 	}
 	when CHECK {
-		// One element, reused for every record.
-		scratch_bytes, aerr := runtime.mem_alloc(int(r.row.size), int(r.shape.ops[r.shape.root].align), context.allocator)
+		// One element, reused for every record; a list or map row's, one cell.
+		size := int(r.row.size)
+		when LIST_ROW || MAP_ROW {
+			size = int(r.row.stride)
+		}
+		scratch_bytes, aerr := runtime.mem_alloc(size, 16, context.allocator)
 		if aerr != nil {
 			return Unmarshal_Error{kind = .Out_Of_Memory}
 		}
@@ -160,7 +181,7 @@ read_records :: proc(
 		defer free(scratch, context.allocator)
 		rows := 0
 	} else {
-		list := make([dynamic]intrinsics.type_elem_type(P), allocator)
+		list := make([dynamic]E, allocator)
 		defer {
 			when intrinsics.type_is_slice(P) {
 				ptr^ = list[:]
@@ -169,11 +190,15 @@ read_records :: proc(
 			}
 		}
 	}
-	// Only a lazy or ragged read has work per record past its cells.
-	per_record := lazy || opts.dialect.ragged
+	when !LIST_ROW {
+		// Only a lazy or ragged read has work per record past its cells.
+		per_record := lazy || opts.dialect.ragged
+	}
 	for rec in next_record(&it) {
-		if r.columns == nil {
-			columns_in_order(&r, rec, refuse) or_return
+		when !LIST_ROW && !MAP_ROW {
+			if r.columns == nil {
+				columns_in_order(&r, rec, refuse) or_return
+			}
 		}
 		when CHECK {
 			row := rows
@@ -183,17 +208,29 @@ read_records :: proc(
 			row := len(list)
 		}
 		cells := rec.fields
-		if per_record {
-			cells = record_cells(&r, &it, rec, row, lazy, refuse) or_return
+		when LIST_ROW {
+			if lazy && it.carry.utf8 <= int(cells[len(cells) - 1].hi) {
+				judge_utf8(&r, &it, rec, row) or_return
+			}
+		} else {
+			if per_record {
+				cells = record_cells(&r, &it, rec, row, lazy, refuse) or_return
+			}
 		}
 		when !CHECK {
-			if _, aerr := append(&list, intrinsics.type_elem_type(P){}); aerr != nil {
+			if _, aerr := append(&list, E{}); aerr != nil {
 				return Unmarshal_Error{kind = .Out_Of_Memory, offset = rec.at}
 			}
 			dest := &list[row]
 		}
-		if kind, at, name, refused := read_row(&r, cells, dest); refused {
-			return cell_error(kind, at, row, core_pkg.Name(name))
+		when LIST_ROW {
+			read_list_row(&r, cells, dest, row) or_return
+		} else when MAP_ROW {
+			read_map_row(&r, cells, dest, row) or_return
+		} else {
+			if kind, at, name, refused := read_row(&r, cells, dest); refused {
+				return cell_error(kind, at, row, core_pkg.Name(name))
+			}
 		}
 	}
 	when CHECK {
@@ -212,7 +249,7 @@ records_fault :: proc(it: ^Records, row: int) -> Maybe(Unmarshal_Error) {
 	}
 	err := core_pkg.unmarshal_error_from(e)
 	if row >= 0 && err.kind == .Syntax {
-		core_pkg.unmarshal_path_prepend(&err, core_pkg.Index(row))
+		core_pkg.error_path_prepend(&err, core_pkg.Index(row))
 	}
 	return err
 }
@@ -221,10 +258,10 @@ records_fault :: proc(it: ^Records, row: int) -> Maybe(Unmarshal_Error) {
 cell_error :: proc(kind: Unmarshal_Error_Kind, at: u64, row: int, name: Maybe(core_pkg.Name)) -> Unmarshal_Error {
 	err := Unmarshal_Error{kind = kind, offset = at}
 	if n, ok := name.?; ok {
-		core_pkg.unmarshal_path_prepend(&err, n)
+		core_pkg.error_path_prepend(&err, n)
 	}
 	if row >= 0 {
-		core_pkg.unmarshal_path_prepend(&err, core_pkg.Index(row))
+		core_pkg.error_path_prepend(&err, core_pkg.Index(row))
 	}
 	return err
 }

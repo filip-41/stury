@@ -21,7 +21,7 @@ caller_only :: proc() -> cs.Batch_Runner {
 test_validate_records_lists_three_bad_rows :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("1,2,3,4\n1,2,3\n1,2,3,ab\"c\n1,2,3,\"open\n")
 	want := []cs.Record_Fault {
-		{lo = 8, hi = 13, err = cs.Error{kind = .Field_Count, offset = 8}},
+		{lo = 8, hi = 13, err = csv_fault(8, .Field_Count)},
 		{lo = 14, hi = 24, err = cs.Error{kind = .Bad_Char, offset = 22}},
 		{lo = 25, hi = 37, err = cs.Error{kind = .Truncated, offset = 37}},
 	}
@@ -30,7 +30,7 @@ test_validate_records_lists_three_bad_rows :: proc(t: ^testing.T) {
 	caller := caller_only()
 	pool: host.Batch_Pool
 	host.batch_pool_init(&pool, 4)
-	defer host.batch_pool_destroy(&pool)
+	defer host.destroy(&pool)
 	for runner in ([]^cs.Batch_Runner{nil, &caller, &pool.runner}) {
 		faults, err := cs.validate_records(src, {}, runner)
 		defer delete(faults)
@@ -40,7 +40,7 @@ test_validate_records_lists_three_bad_rows :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(src[faults[0].lo:faults[0].hi]), "1,2,3")
 		testing.expect_value(t, string(src[faults[1].lo:faults[1].hi]), `1,2,3,ab"c`)
 		testing.expect_value(t, string(src[faults[2].lo:faults[2].hi]), "1,2,3,\"open\n")
-		testing.expect_value(t, cs.render_error(src, faults[1].err, context.temp_allocator), "3:9: Bad_Char")
+		testing.expect_value(t, cs.render_error(src, faults[1].err, context.temp_allocator), "3:9: Unexpected character")
 	}
 }
 
@@ -60,15 +60,15 @@ TAIL_CASES :: []Tail_Case {
 }
 
 @(test)
-test_validate_records_reads_on_after_a_framing_fault :: proc(t: ^testing.T) {
+test_validate_records_reads_on_after_a_refused_record :: proc(t: ^testing.T) {
 	caller := caller_only()
 	pool: host.Batch_Pool
 	host.batch_pool_init(&pool, 4)
-	defer host.batch_pool_destroy(&pool)
+	defer host.destroy(&pool)
 	for c in TAIL_CASES {
 		src := transmute([]byte)strings.concatenate({"a,b\n1,2,3\n3,4\n", c.row, "7,8\n"}, context.temp_allocator)
 		want := []cs.Record_Fault {
-			{lo = 4, hi = 9, err = cs.Error{kind = .Field_Count, offset = 4}},
+			{lo = 4, hi = 9, err = csv_fault(4, .Field_Count)},
 			{lo = 14, hi = 20, err = cs.Error{kind = .Bad_Char, offset = u64(14 + c.at)}},
 		}
 		testing.expect_value(t, cs.validate(src), want[0].err)
@@ -130,7 +130,7 @@ test_validate_records_agrees_across_runners :: proc(t: ^testing.T) {
 	}
 	pool: host.Batch_Pool
 	host.batch_pool_init(&pool, 4)
-	defer host.batch_pool_destroy(&pool)
+	defer host.destroy(&pool)
 	for src in ([][]byte{big[:], transmute([]byte)string("1,2,3,4\n1,2,3\n")}) {
 		serial, serr := cs.validate_records(src)
 		defer delete(serial)
@@ -193,24 +193,24 @@ Span_Case :: struct {
 SPAN_CASES :: []Span_Case {
 	// A quoted LF inside a record that has too few fields, too many, or too many bytes is not its end: the
 	// resume does not land in the quoted field.
-	{"field count", "a,b,c\n1,\"x\ny\"\n4,5,6\n", {}, []cs.Record_Fault{{lo = 6, hi = 13, err = {kind = .Field_Count, offset = 6}}}},
-	{"field cap", "a,b,c\n1,\"x\ny\",3,4\n4,5,6\n", {limits = {max_fields = 3}}, []cs.Record_Fault{{lo = 6, hi = 17, err = {kind = .Limit_Fields, offset = 6}}}},
-	{"record cap", "a,b\n1,\"x\ny\"\n4,5\n", {limits = {max_record_bytes = 3}}, []cs.Record_Fault{{lo = 4, hi = 11, err = {kind = .Limit_Record, offset = 4}}}},
+	{"field count", "a,b,c\n1,\"x\ny\"\n4,5,6\n", {}, []cs.Record_Fault{{lo = 6, hi = 13, err = {kind = .Bad_Structure, detail = u8(cs.Fault.Field_Count), offset = 6}}}},
+	{"field cap", "a,b,c\n1,\"x\ny\",3,4\n4,5,6\n", {limits = {max_fields = 3}}, []cs.Record_Fault{{lo = 6, hi = 17, err = {kind = .Limit_Format, detail = u8(cs.Fault.Too_Many_Fields), offset = 6}}}},
+	{"record cap", "a,b\n1,\"x\ny\"\n4,5\n", {limits = {max_record_bytes = 3}}, []cs.Record_Fault{{lo = 4, hi = 11, err = {kind = .Limit_Format, detail = u8(cs.Fault.Record_Too_Long), offset = 4}}}},
 	// A fault inside a multi-line quoted field ends at the LF past the field's close.
 	{"utf-8 in quotes", "a,b\n\"x\ny\xff\nz\",2\n4,5\n", {}, []cs.Record_Fault{{lo = 4, hi = 14, err = {kind = .Bad_Char, offset = 8}}}},
 	// A final refused record without an LF spans to the input's end.
-	{"last, field count", "a,b,c\n1,2", {}, []cs.Record_Fault{{lo = 6, hi = 9, err = {kind = .Field_Count, offset = 6}}}},
-	{"last, too many", "a,b\n1,2\n3,4,5", {}, []cs.Record_Fault{{lo = 8, hi = 13, err = {kind = .Field_Count, offset = 8}}}},
+	{"last, field count", "a,b,c\n1,2", {}, []cs.Record_Fault{{lo = 6, hi = 9, err = {kind = .Bad_Structure, detail = u8(cs.Fault.Field_Count), offset = 6}}}},
+	{"last, too many", "a,b\n1,2\n3,4,5", {}, []cs.Record_Fault{{lo = 8, hi = 13, err = {kind = .Bad_Structure, detail = u8(cs.Fault.Field_Count), offset = 8}}}},
 	{"last, quote fault", "a,b\n1,2\n3,x\"y", {}, []cs.Record_Fault{{lo = 8, hi = 13, err = {kind = .Bad_Char, offset = 11}}}},
 	{"last, open quote", "a,b\n1,2\n3,\"y\n", {}, []cs.Record_Fault{{lo = 8, hi = 13, err = {kind = .Truncated, offset = 13}}}},
-	{"crlf, field count", "a,b,c\r\n1,2\r\n4,5,6\r\n", {}, []cs.Record_Fault{{lo = 7, hi = 10, err = {kind = .Field_Count, offset = 7}}}},
+	{"crlf, field count", "a,b,c\r\n1,2\r\n4,5,6\r\n", {}, []cs.Record_Fault{{lo = 7, hi = 10, err = {kind = .Bad_Structure, detail = u8(cs.Fault.Field_Count), offset = 7}}}},
 	{"crlf, quote fault", "a,b\r\n3,x\"y\r\n5,6\r\n", {}, []cs.Record_Fault{{lo = 5, hi = 10, err = {kind = .Bad_Char, offset = 8}}}},
 	{"stray quote", "a,b\n3,x\"y\n4,5,6\n7,8\n", {}, []cs.Record_Fault{
 		{lo = 4, hi = 9, err = {kind = .Bad_Char, offset = 7}},
-		{lo = 10, hi = 15, err = {kind = .Field_Count, offset = 10}},
+		{lo = 10, hi = 15, err = {kind = .Bad_Structure, detail = u8(cs.Fault.Field_Count), offset = 10}},
 	}},
 	{"comment line", "a,b\n#\xff\"x\n1,2\n", {dialect = {comment = '#'}}, []cs.Record_Fault{{lo = 4, hi = 8, err = {kind = .Bad_Char, offset = 5}}}},
-	{"unquoted", "a;b\n1;\"x;3\n4;5\n", {dialect = {delimiter = ';', quoting = .None}}, []cs.Record_Fault{{lo = 4, hi = 10, err = {kind = .Field_Count, offset = 4}}}},
+	{"unquoted", "a;b\n1;\"x;3\n4;5\n", {dialect = {delimiter = ';', quoting = .None}}, []cs.Record_Fault{{lo = 4, hi = 10, err = {kind = .Bad_Structure, detail = u8(cs.Fault.Field_Count), offset = 4}}}},
 }
 
 // The span of a refused record is its bytes without the line break, one fault per record whatever the quotes in
@@ -220,7 +220,7 @@ test_validate_records_spans_the_refused_record :: proc(t: ^testing.T) {
 	caller := caller_only()
 	pool: host.Batch_Pool
 	host.batch_pool_init(&pool, 4)
-	defer host.batch_pool_destroy(&pool)
+	defer host.destroy(&pool)
 	for c in SPAN_CASES {
 		src := transmute([]byte)c.src
 		testing.expect_value(t, cs.validate(src, c.opts), Maybe(cs.Error)(c.want[0].err))
