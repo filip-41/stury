@@ -7,10 +7,10 @@ package main
 // valid stream never pays for it. Plain --stream ends the events with the library's report (`text_fault`).
 
 import "base:runtime"
-import "core:fmt"
 import "core:mem/virtual"
 import "core:strings"
 import "jq"
+import "message"
 
 // An event of a faulty text and the byte of the text jq's parser reads to make it, which tells the line jq's reader is on.
 Fault_Event :: struct {
@@ -192,7 +192,7 @@ step :: proc(w: ^Fault_Walk) {
 		w.errored, w.late = true, false
 		at := Place{p.line, p.column} if p.refusal.line == 0 else p.refusal
 		p.refusal = {}
-		fail(p, fmt.aprintf("%s at line %d, column %d%s", msg, at.line, at.column, " (need RS to resync)" if w.seq else ""), w.at)
+		fail(p, message.build("%s at line %d, column %d%s", msg, at.line, at.column, " (need RS to resync)" if w.seq else ""), w.at)
 		if w.seq {
 			w.at += 1
 		} else {
@@ -205,7 +205,7 @@ step :: proc(w: ^Fault_Walk) {
 	switch {
 	case w.rs_follows:
 		if msg := at_separator(p, w.at); msg != "" {
-			fail(p, fmt.aprintf("%s at line %d, column %d", msg, p.line, p.column), w.at)
+			fail(p, message.build("%s at line %d, column %d", msg, p.line, p.column), w.at)
 			w.errored = true
 		}
 	case w.reset_each: // the call that finds the end begins afresh, with nothing held
@@ -215,7 +215,7 @@ step :: proc(w: ^Fault_Walk) {
 			msg = "Unfinished JSON term"
 		}
 		if msg != "" {
-			fail(p, fmt.aprintf("%s at EOF at line %d, column %d", msg, p.line, p.column), w.at)
+			fail(p, message.build("%s at EOF at line %d, column %d", msg, p.line, p.column), w.at)
 			p.events[len(p.events) - 1].late = w.late
 			w.errored = true
 		} else if p.has_next { // a literal the end of the text ends
@@ -442,10 +442,10 @@ stream_token :: proc(p: ^Parser, ch: byte) -> string {
 			return "Expected a separator between values"
 		}
 		if p.last == .Open_Object {
-			return fmt.aprintf("%s%c'", "Expected string key after '{', not '", ch)
+			return message.build("%s%c'", "Expected string key after '{', not '", ch)
 		}
 		if p.last == .Comma && !path_is_index(p) {
-			return fmt.aprintf("Expected string key after ',' in object, not '%c'", ch)
+			return message.build("Expected string key after ',' in object, not '%c'", ch)
 		}
 		if open {
 			append(&p.path, jq.num(0))

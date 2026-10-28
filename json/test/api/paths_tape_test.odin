@@ -56,9 +56,9 @@ test_tape_route_agrees_with_scan_route :: proc(t: ^testing.T) {
 				defer json.destroy(&scan.req)
 				testing.expectf(t, tape.err == scan.err, "set %d doc %d %v: %v, scan %v", si, di, mode, tape.err, scan.err)
 				testing.expectf(t, slice.equal(tape.answers, scan.answers), "set %d doc %q %v: %v, scan %v", si, src, mode, tape.answers, scan.answers)
-				testing.expectf(t, tape.req.coverage == scan.req.coverage && tape.req.stop == scan.req.stop,
-					"set %d doc %d %v: coverage %v/%v, scan %v/%v", si, di, mode, tape.req.coverage, tape.req.stop,
-					scan.req.coverage, scan.req.stop)
+				testing.expectf(t, tape.req.state.coverage == scan.req.state.coverage && tape.req.state.stop == scan.req.state.stop,
+					"set %d doc %d %v: coverage %v/%v, scan %v/%v", si, di, mode, tape.req.state.coverage, tape.req.state.stop,
+					scan.req.state.coverage, scan.req.state.stop)
 				for i in 0 ..< len(set) {
 					a, a_err := json.answers(&tape.req, i)
 					b, b_err := json.answers(&scan.req, i)

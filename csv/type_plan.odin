@@ -5,13 +5,9 @@ import "core:reflect"
 import "core:unicode/utf8"
 import core_pkg "../core"
 
-// How a plan maps types to cells. `marshal` writes and `unmarshal` reads by it, so text written with one plan
-// reads back with a plan made from the same opts. A call without a plan uses the zero value.
-Plan_Opts :: struct {
-	enums: Enum_Spelling,
-	// Types read and written by the caller's procs, each as one cell.
-	hooks: []Type_Hook,
-}
+// How a plan maps types, in every format. CSV reads `enums` and `hooks` (each hooked type one cell), and ignores
+// the union tag: a union it reads or writes is a `Maybe` of one cell. A call without a plan uses the zero value.
+Plan_Opts :: core_pkg.Plan_Opts
 
 // How an enum is written and read: `.Name` as its member's name (the default), `.Int` as its backing integer.
 Enum_Spelling :: core_pkg.Enum_Spelling
@@ -21,30 +17,44 @@ Enum_Spelling :: core_pkg.Enum_Spelling
 //
 //	- A nil proc leaves that direction `.Unsupported`.
 //	- It applies to a field of the row, and to the arm of a `Maybe` field. `unmarshal_check` does not run `read`.
-Type_Hook :: core_pkg.Type_Hook(Marshal_Hook)
+Type_Hook :: core_pkg.Type_Hook
 
-// Appends the text of the value at `v`, of the hook's type, to `out`, which is empty on entry. `marshal`
-// quotes or escapes the text as it does a string (`.Unwritable` where the dialect cannot), and writes an
-// empty text as an empty string. To refuse, return a `Marshal_Error`; `marshal` returns it unchanged.
-Marshal_Hook :: #type proc(out: ^[dynamic]u8, v: rawptr) -> Marshal_Error
+// Write the value at `v`, of the hook's type, as one cell: one `marshal_into(out, x)`, where `x` is a string,
+// cstring, rune, bool, number or enum. `marshal` quotes or escapes the cell as it does a string (`.Unwritable`
+// where the dialect cannot), and writes an empty string as an empty string. None, or a second, is `.Bad_State`.
+// To refuse, return a `Marshal_Error_Kind`; `marshal` returns it unchanged.
+Marshal_Hook :: core_pkg.Marshal_Hook
 
-// Reads `text`, a present cell's text (`field_text`), into the value at `dest`, of the hook's type, allocating
-// from `allocator`.
+// From inside a `Marshal_Hook`: write `value` as the hooked cell.
+marshal_into :: core_pkg.marshal_into
+
+// Where a `Marshal_Hook` writes: a handle valid for the hook's call.
+Marshal_Out :: core_pkg.Marshal_Out
+
+// Reads `v`, a present cell (`.String`, its `text` as written and its `decoded` text), into the value at `dest`,
+// of the hook's type, allocating from `allocator`.
 //
 //	- `dest` holds the target's previous value, zero for a new record.
-//	- `text` is either `src`'s bytes or a copy `unmarshal` frees after the call: copy what must outlive it.
+//	- `v`'s strings live for the call: copy what must outlive it.
 //	- Returning a kind refuses the cell with that kind, at the cell. Nil accepts it.
 Unmarshal_Hook :: core_pkg.Unmarshal_Hook
 
+// One value an `Unmarshal_Hook` reads: its kind, its text, and a string's decoded text.
+Hook_Value :: core_pkg.Hook_Value
+
 // A type's columns, compiled once per `typeid` for `unmarshal` and `marshal` (`type_plan_init`). A column is
 // a struct field, named by its `csv:"name"` tag or its own name. `destroy` frees it. Its fields are
-// internal.
-Type_Plan :: core_pkg.Hooked_Plan(Marshal_Hook)
+// internal. Any format's calls take it; a format's first call compiles that format's spelling of it.
+Type_Plan :: core_pkg.Shared_Plan
+
+// The plan a call runs in this format: a `Type_Plan`'s, or the cached or temporary one (`plan_for`).
+@(private)
+Format_Plan :: core_pkg.Hooked_Plan
 
 // A plan for values of type `T`, mapped by `opts`, which it copies. Nothing is compiled until first use.
 @(require_results)
 type_plan_init :: proc(T: typeid, opts := Plan_Opts{}, allocator := context.allocator) -> Type_Plan {
-	return core_pkg.hooked_plan_init(T, {enums = opts.enums}, opts.hooks, csv_plan_format(), allocator)
+	return core_pkg.shared_plan_init(T, opts, csv_plan_format, allocator)
 }
 
 // CSV writes a name unchanged; the writer quotes per cell.
@@ -65,29 +75,14 @@ csv_plan_format :: proc() -> core_pkg.Plan_Format {
 	}
 }
 
-@(private, thread_local)
-plan_cache: core_pkg.Plan_Cache(Marshal_Hook)
-
-// Frees every plan in this thread's cache, with the heap allocator they were made in. Does nothing while a
-// call on this thread is using the cache.
-plan_cache_clear :: proc() {
-	core_pkg.plan_cache_clear(&plan_cache)
-}
-
-@(fini, private)
-plan_cache_fini :: proc "contextless" () {
-	context = runtime.default_context()
-	plan_cache_clear()
+@(private)
+plan_for :: #force_inline proc(given: ^Type_Plan, T: typeid, tmp: ^Format_Plan) -> (p: ^Format_Plan, ok: bool) {
+	return core_pkg.plan_for(given, T, tmp, csv_plan_format)
 }
 
 @(private)
-plan_for :: #force_inline proc(given: ^Type_Plan, T: typeid, tmp: ^Type_Plan) -> (p: ^Type_Plan, ok: bool) {
-	return core_pkg.plan_for(&plan_cache, given, T, tmp, csv_plan_format)
-}
-
-@(private)
-plan_done :: #force_inline proc(p, given, tmp: ^Type_Plan, out_of_memory: bool) {
-	core_pkg.plan_done(&plan_cache, p, given, tmp, out_of_memory)
+plan_done :: #force_inline proc(p: ^Format_Plan, given: ^Type_Plan, tmp: ^Format_Plan, out_of_memory: bool) {
+	core_pkg.plan_done(p, given, tmp, out_of_memory)
 }
 
 // The kinds a column may have, each one cell.

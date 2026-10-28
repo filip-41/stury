@@ -20,23 +20,25 @@ City :: struct {
 }
 
 main :: proc() {
+	// What the reads allocate, freed at once.
+	defer free_all(context.temp_allocator)
 	src := transmute([]byte)string("City,population,lat,lon\nOslo,709000,59.91,10.75\n\"Ho, Chi Minh\",,10.82,106.63\n")
 	cities: []City
-	if err, bad := csv.unmarshal(src, &cities).?; bad {
+	if err, bad := csv.unmarshal(src, &cities, allocator = context.temp_allocator).?; bad {
 		fmt.eprintln(err.kind, "at byte", err.offset)
 		os.exit(1)
 	}
 	fmt.println(cities[1].name, cities[1].population) // Ho, Chi Minh nil
 
 	out, err := csv.marshal(cities)
-	if err != .None {
-		fmt.eprintln(err)
+	if e, bad := err.?; bad {
+		fmt.eprintln(csv.render_error(nil, e))
 		os.exit(1)
 	}
 	fmt.print(string(out)) // src again: "Ho, Chi Minh" keeps its quotes and the absent population stays empty
 
 	bad := transmute([]byte)string("City,population,lat,lon\nOslo,lots,59.91,10.75\n")
-	e, refused := csv.unmarshal(bad, &cities).?
+	e, refused := csv.unmarshal(bad, &cities, allocator = context.temp_allocator).?
 	if !refused {
 		os.exit(1)
 	}
@@ -50,7 +52,7 @@ main :: proc() {
 // A Dialect reads other delimited text through the same calls.
 dialects :: proc(cities: ^[]City) {
 	tsv := transmute([]byte)string("City\tpopulation\tlat\tlon\nOslo\t709000\t59.91\t10.75\n")
-	if _, bad := csv.unmarshal(tsv, cities, {dialect = csv.TSV}).?; bad {
+	if _, bad := csv.unmarshal(tsv, cities, {dialect = csv.TSV}, allocator = context.temp_allocator).?; bad {
 		os.exit(1)
 	}
 	fmt.println(cities[0].name, cities[0].population) // Oslo 709000
@@ -58,13 +60,14 @@ dialects :: proc(cities: ^[]City) {
 	// No header: column k is the struct's field k. A semicolon delimiter, and lines starting with # skipped.
 	plain := transmute([]byte)string("# name;population;lat;lon\nOslo;709000;59.91;10.75\n")
 	opts := csv.Unmarshal_Opts{dialect = {delimiter = ';', comment = '#'}, no_header = true}
-	if _, bad := csv.unmarshal(plain, cities, opts).?; bad {
+	if _, bad := csv.unmarshal(plain, cities, opts, allocator = context.temp_allocator).?; bad {
 		os.exit(1)
 	}
 	fmt.println(len(cities^), cities[0].lat) // 1 59.91
 }
 
-// A Document keeps the span of every cell. `find` reads one cell without building a document. An edit returns
+// A Document is the text as core's rows: an array of objects keyed by the header. `find` reads one cell without
+// building a document. An edit returns
 // the text with only the targeted bytes changed.
 document_and_edits :: proc(src: []byte) {
 	doc, derr := csv.build(src)
@@ -72,16 +75,16 @@ document_and_edits :: proc(src: []byte) {
 		os.exit(1)
 	}
 	defer csv.destroy(&doc)
-	col, _ := csv.column(&doc, "lat")
-	lat, _ := csv.get_float(&doc, 0, col)
-	fmt.println(csv.row_count(&doc), lat) // 2 59.91
+	oslo := csv.child(&doc, csv.ROOT, 0)
+	lat, _ := csv.get_string(&doc, csv.child(&doc, oslo, "lat"))
+	fmt.println(csv.child_count(&doc, csv.ROOT), lat) // 2 59.91
 
 	a, ferr := csv.find(src, ".[1].City")
 	if ferr != nil || a.outcome != .Found {
 		os.exit(1)
 	}
-	text, _, _ := csv.field_text(src, csv.Field{lo = a.lo, hi = a.hi})
-	fmt.println(string(text)) // Ho, Chi Minh
+	text, _, _ := csv.answer_text(src, a)
+	fmt.println(text) // Ho, Chi Minh
 
 	edited, eerr := csv.set(src, ".[0].population", 710000)
 	if eerr != nil {
@@ -116,8 +119,8 @@ streaming :: proc(src: []byte) {
 	rr := csv.records_from(io.to_reader(strings.reader_to_stream(&r)))
 	defer csv.destroy(&rr)
 	for rec in csv.next_record(&rr) {
-		text, _, _ := csv.field_text(rec.src, rec.fields[0])
-		fmt.println(rec.at, len(rec.fields), string(text)) // 0 4 City, then 24 4 Oslo, then 48 4 Ho, Chi Minh
+		text, _, _ := csv.field_text(rec, 0)
+		fmt.println(rec.at, len(rec.fields), text) // 0 4 City, then 24 4 Oslo, then 48 4 Ho, Chi Minh
 	}
 	if _, bad := rr.err.?; bad {
 		os.exit(1)
@@ -125,11 +128,11 @@ streaming :: proc(src: []byte) {
 
 	pool: host.Batch_Pool
 	host.batch_pool_init(&pool) // one worker per core
-	defer host.batch_pool_destroy(&pool)
+	defer host.destroy(&pool)
 	rows: int
-	count := proc(data: rawptr, piece: ^csv.Records, k: int) -> bool {
+	count := proc(n: ^int, piece: ^csv.Records, k: int) -> bool {
 		for _ in csv.next_record(piece) {
-			sync.atomic_add((^int)(data), 1)
+			sync.atomic_add(n, 1)
 		}
 		return true
 	}
@@ -141,7 +144,7 @@ streaming :: proc(src: []byte) {
 	line: [dynamic]u8
 	defer delete(line)
 	cells := []Maybe(string){"Tromsø", nil, "69.65", "18.96"}
-	if csv.write_record(&line, cells) != .None {
+	if csv.write_record(&line, cells) != nil {
 		os.exit(1)
 	}
 	fmt.print(string(line[:])) // Tromsø,,69.65,18.96

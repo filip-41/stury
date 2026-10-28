@@ -80,7 +80,7 @@ Route :: struct {
 	// path. `repeat_at` is the start of the first key a `.All` walk's `Name` step met twice in one object, 0 for none.
 	walk_repeats: bool,
 	repeat_at:    u64,
-	// The walk's resolution a prepared scan keeps for the next (`prepare`), set only for its scan.
+	// The walk's resolution a prepared scan keeps for the next (`plan_request`), set only for its scan.
 	kept:      ^walk.Resolved_Queries,
 }
 
@@ -209,12 +209,12 @@ root_object :: #force_inline proc(src: []byte) -> (lo: u64, ok: bool) {
 
 @(private = "file")
 root_object_padded :: #force_no_inline proc(src: []byte) -> (lo: u64, ok: bool) {
-	i := core_pkg.skip_space(src, scan_pkg.bom_len(src))
+	i := scan_pkg.skip_space(src, scan_pkg.bom_len(src))
 	return u64(i), i < len(src) && src[i] == '{'
 }
 
 // What a plan reads of a source is whether its root is an object (`root_object`), so one made over `PLAN_SRC`
-// serves every source whose root is: a prepared plan (`prepare`).
+// serves every source whose root is: a prepared plan (`plan_request`).
 @(private)
 PLAN_SRC :: "{"
 
@@ -270,7 +270,7 @@ all_gated :: proc(paths: []Path) -> bool {
 // Plan `paths` into `plan`. `forced` (`automaton_forced`) gives every path to the automaton. Touches nothing
 // but the plan.
 @(private)
-route_paths :: proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, alloc: runtime.Allocator, forced := false) -> Maybe(Error) {
+route_paths :: proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, alloc: runtime.Allocator, forced := false) -> Maybe(Path_Error) {
 	plan.matcher = .None
 	plan.gate.gated = 0
 	plan.any_limit = false
@@ -293,7 +293,7 @@ Path_Tally :: struct {
 
 // Any request. Out of line: the common request never reaches it.
 @(private = "file")
-route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, alloc: runtime.Allocator, forced: bool) -> Maybe(Error) {
+route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplicates, alloc: runtime.Allocator, forced: bool) -> Maybe(Path_Error) {
 	tally, refused := route_tally(paths, forced)
 	if err, bad := refused.?; bad {
 		return err
@@ -308,7 +308,7 @@ route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path,
 	if n_keys > MAX_ROUTED {
 		if !spill_to(&plan.spill.keys, n_keys, alloc) || !spill_to(&plan.spill.row_keys, n_keys, alloc) ||
 		   !spill_to(&plan.spill.fields, n_keys, alloc) {
-			return Error{kind = .Out_Of_Memory}
+			return core_pkg.PATH_OUT_OF_MEMORY
 		}
 	}
 	if err, bad := route_assign(plan, paths, served, tally.wild, n_keys).?; bad {
@@ -316,7 +316,7 @@ route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path,
 	}
 	if plan.any_limit && len(paths) > MAX_ROUTED {
 		if !spill_to(&plan.spill.counts, len(paths), alloc) {
-			return Error{kind = .Out_Of_Memory}
+			return core_pkg.PATH_OUT_OF_MEMORY
 		}
 	}
 	return {}
@@ -325,11 +325,11 @@ route_general :: #force_no_inline proc(plan: ^Route, src: []byte, paths: []Path,
 // Count the paths by shape. Refused when a path is longer than the one step bound: a long column would
 // otherwise be served by the row matcher, which has none.
 @(private)
-route_tally :: proc(paths: []Path, forced: bool) -> (t: Path_Tally, refused: Maybe(Error)) {
+route_tally :: proc(paths: []Path, forced: bool) -> (t: Path_Tally, refused: Maybe(Path_Error)) {
 	t.wild = -1
 	for p in paths {
 		if len(p.steps) > core_pkg.MAX_PATH_STEPS {
-			return t, Error{kind = .Over_Capacity}
+			return t, Path_Error{kind = .Over_Capacity}
 		}
 		shape, k, _ := path_shape(p)
 		switch shape {
@@ -412,7 +412,7 @@ route_serve :: proc(plan: ^Route, src: []byte, paths: []Path, duplicates: Duplic
 // Hand each path to the matcher's keys when it has the `served` shape, else to the automaton, and
 // record `n_keys`.
 @(private = "file")
-route_assign :: proc(plan: ^Route, paths: []Path, served: Path_Shape, wild, n_keys: int) -> Maybe(Error) {
+route_assign :: proc(plan: ^Route, paths: []Path, served: Path_Shape, wild, n_keys: int) -> Maybe(Path_Error) {
 	store := route_store(plan, n_keys)
 	j := 0
 	for p, i in paths {
@@ -424,7 +424,7 @@ route_assign :: proc(plan: ^Route, paths: []Path, served: Path_Shape, wild, n_ke
 			j += 1
 		} else {
 			if plan.n_auto == walk.MAX_PATH_QUERIES {
-				return Error{kind = .Over_Capacity}
+				return Path_Error{kind = .Over_Capacity}
 			}
 			plan.any_limit ||= p.limit > 0
 			plan.auto[plan.n_auto] = u32(i)
@@ -433,7 +433,7 @@ route_assign :: proc(plan: ^Route, paths: []Path, served: Path_Shape, wild, n_ke
 	}
 	plan.n_keys = n_keys
 	if walk.names_over_capacity(store.keys) {
-		return Error{kind = .Over_Capacity}
+		return Path_Error{kind = .Over_Capacity}
 	}
 	return nil
 }

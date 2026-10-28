@@ -50,8 +50,7 @@ Batch_Log :: struct {
 
 // Reads piece `k` to its end and records its number and its fault.
 @(private = "file")
-log_piece :: proc(data: rawptr, piece: ^json.Records, k: int) -> bool {
-	log := (^Batch_Log)(data)
+log_piece :: proc(log: ^Batch_Log, piece: ^json.Records, k: int) -> bool {
 	for _ in json.next_record(piece) {}
 	sync.lock(&log.lock)
 	append(&log.pieces, k)
@@ -61,8 +60,8 @@ log_piece :: proc(data: rawptr, piece: ^json.Records, k: int) -> bool {
 }
 
 @(private = "file")
-false_task :: proc(data: rawptr, _: ^json.Records, _: int) -> bool {
-	sync.atomic_add((^int)(data), 1)
+false_task :: proc(n: ^int, _: ^json.Records, _: int) -> bool {
+	sync.atomic_add(n, 1)
 	return false
 }
 
@@ -89,7 +88,7 @@ test_ndjson_first_fault_is_in_byte_order_and_claims_on :: proc(t: ^testing.T) {
 	caller := caller_runner()
 	pool: host.Batch_Pool
 	host.batch_pool_init(&pool, 4)
-	defer host.batch_pool_destroy(&pool)
+	defer host.destroy(&pool)
 	for runner in ([]^json.Batch_Runner{nil, &caller, &pool.runner}) {
 		log: Batch_Log
 		defer delete(log.pieces)

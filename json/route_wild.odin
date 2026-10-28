@@ -6,21 +6,22 @@ package json
 // which holds the keys. The paths without one keep the walk's answers.
 
 import "base:runtime"
+import core_pkg "../core"
 import "scan/walk"
 
 // Answer the `Any` paths of `req` from its rows, building them first when `$KINDS` holds none. The build is
 // `.Strict`. A document it refuses (one a `.Structural` or `.Lazy` walk passed) keeps the walk's answers and
 // result, which settled no repeat.
 @(private)
-settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> Maybe(Error) {
+settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> Maybe(Path_Error) {
 	if u64(len(src)) > MAX_ROW_SOURCE {
-		return Error{kind = .Over_Capacity}
+		return Path_Error{kind = .Over_Capacity}
 	}
 	// The walk's answers for the paths the tape does not answer.
 	kept := make([dynamic]Answer, 0, len(req.answers), alloc)
 	defer delete(kept)
 	for a in req.answers {
-		if !walk.steps_have_any(req.paths[a.query].steps) {
+		if !walk.steps_have_any(req.inputs.paths[a.query].steps) {
 			append(&kept, a)
 		}
 	}
@@ -41,16 +42,16 @@ settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator
 	req.groups.grouped = false
 	walk.adopt_allocator(&req.answers, alloc)
 	if _, err := append(&req.answers, ..kept[:]); err != nil {
-		return Error{kind = .Out_Of_Memory}
+		return core_pkg.PATH_OUT_OF_MEMORY
 	}
-	for p, i in req.paths {
+	for p, i in req.inputs.paths {
 		if !walk.steps_have_any(p.steps) {
 			continue
 		}
 		// The rows are scratch unless the request asked for them, so only then does an answer name its node.
-		w := Query_Walk{doc = &req.doc, mode = req.duplicates, out = &req.answers, path = p, query = u32(i), nodes = rows_asked}
-		if !query_from(&w, ROOT, NO_NODE, p.steps) {
-			return Error{kind = .Out_Of_Memory}
+		w := core_pkg.Query_Walk{doc = &req.doc, mode = req.inputs.read.duplicates, out = &req.answers, path = p, query = u32(i), nodes = rows_asked}
+		if !core_pkg.query_from(&w, ROOT, NO_NODE, p.steps) {
+			return core_pkg.PATH_OUT_OF_MEMORY
 		}
 	}
 	return nil
@@ -59,23 +60,23 @@ settle_wild :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator
 // Build `req.doc.rows` for `settle_wild`. `done` says the settling ends here with `result`: the build's own
 // refusal, or nil when the document is one the build refuses and the walk's answers stand.
 @(private = "file")
-wild_build_rows :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> (done: bool, result: Maybe(Error)) {
+wild_build_rows :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) -> (done: bool, result: Maybe(Path_Error)) {
 	// The build walks without the plan, which a prepared request keeps for its next scan.
-	route, strictness := req.state.route, req.strictness
-	verdict, coverage, stop := req.state.verdict, req.coverage, req.stop
+	route, strictness := req.state.route, req.inputs.read.strictness
+	verdict, coverage, stop := req.state.verdict, req.state.coverage, req.state.stop
 	defer req.state.route.matcher, req.state.route.n_auto, req.state.route.gate.gated = route.matcher, route.n_auto, route.gate.gated
-	req.strictness = .Strict
+	req.inputs.read.strictness = .Strict
 	fault := scan_rows(src, req, alloc)
-	req.strictness = strictness
+	req.inputs.read.strictness = strictness
 	// The bytes the build validated are its own reading, needed to answer the wildcard paths from rows: the
 	// request's result covers what its walk read, as when the build refuses the document.
-	req.coverage, req.stop = coverage, stop
+	req.state.coverage, req.state.stop = coverage, stop
 	// The first of several texts builds whole, and `.Trailing` is the scan's own result.
 	if e, bad := scan_error(req.state.verdict, fault).?; bad {
 		if e.kind == .Over_Capacity || e.kind == .Out_Of_Memory {
 			return true, e
 		}
-		if e.kind != .Trailing {
+		if e.kind != .Bad_Source || e.syntax != .Trailing {
 			req.state.verdict = verdict
 			return true, nil
 		}

@@ -41,15 +41,15 @@ reescape_ref :: proc(text: string, ascii, html: bool) -> string {
 
 // What every writer writes for one value. Its compact text is `doc`.
 @(private = "file")
-writers_agree :: proc(t: ^testing.T, doc: string, opts: json.Marshal_Opts, want: string, loc := #caller_location) {
+writers_agree :: proc(t: ^testing.T, doc: string, opts: json.Document_Opts, want: string, loc := #caller_location) {
 	parsed := build_ok(t, doc, loc)
 	defer json.destroy(&parsed)
 	got, err := json.marshal(&parsed, opts, context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.None, loc = loc)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None, loc = loc)
 	testing.expect_value(t, string(got), want, loc = loc)
 	sb := strings.builder_make(context.temp_allocator)
 	err = json.marshal_to_writer(strings.to_writer(&sb), &parsed, opts, context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.None, loc = loc)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None, loc = loc)
 	testing.expect_value(t, strings.to_string(sb), want, loc = loc)
 }
 
@@ -61,12 +61,12 @@ test_encode_opts_indent_deep :: proc(t: ^testing.T) {
 	text := nested_arrays(depth)
 	parsed := build_ok(t, text)
 	defer json.destroy(&parsed)
-	opts := json.Marshal_Opts{pretty = true, indent = 255}
+	opts := json.Document_Opts{pretty = true, indent = 255}
 	got, err := json.marshal(&parsed, opts, context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None)
 	sb := strings.builder_make(context.temp_allocator)
 	err = json.marshal_to_writer(strings.to_writer(&sb), &parsed, opts, context.temp_allocator)
-	testing.expect_value(t, err, json.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None)
 	testing.expect(t, string(got) == strings.to_string(sb), "streamed pretty differs")
 	innermost := strings.concatenate({"\n", strings.repeat(" ", 255 * (depth - 1), context.temp_allocator), "[]\n"}, context.temp_allocator)
 	testing.expect(t, strings.contains(string(got), innermost), "the innermost line is indented 255 spaces per level")
@@ -79,7 +79,7 @@ test_encode_opts_reescape :: proc(t: ^testing.T) {
 	compact := marshal_text(t, s)
 	for ascii in ([]bool{false, true}) {
 		for html in ([]bool{false, true}) {
-			opts := json.Marshal_Opts{ascii_only = ascii, escape_html = html}
+			opts := json.Document_Opts{ascii_only = ascii, escape_html = html}
 			want := reescape_ref(compact, ascii, html)
 			testing.expect_value(t, marshal_text(t, s, opts), want)
 			writers_agree(t, compact, opts, want)
@@ -109,7 +109,7 @@ test_encode_opts_streams :: proc(t: ^testing.T) {
 	}
 	v := Wide{big = strings.repeat("ab€", 50_000, context.temp_allocator), rows = rows}
 	cases := []struct {
-		opts:  json.Marshal_Opts,
+		opts:  json.Document_Opts,
 		enums: json.Enum_Spelling,
 	}{
 		{{}, .Name},
@@ -123,7 +123,7 @@ test_encode_opts_streams :: proc(t: ^testing.T) {
 		plan := json.type_plan_init(Wide, {enums = c.enums}, context.temp_allocator)
 		want := marshal_text(t, v, c.opts, &plan)
 		sb := strings.builder_make(context.temp_allocator)
-		testing.expect_value(t, json.marshal_to_writer(strings.to_writer(&sb), v, c.opts, &plan, context.temp_allocator), json.Marshal_Error.None)
+		testing.expect_value(t, marshal_kind(json.marshal_to_writer(strings.to_writer(&sb), v, c.opts, &plan, context.temp_allocator)), json.Marshal_Error_Kind.None)
 		testing.expectf(t, strings.to_string(sb) == want, "marshal_to_writer %v %v: %d bytes, want %d", c.opts, c.enums, len(sb.buf), len(want))
 		// The document writer re-emits the names in the compact text.
 		writers_agree(t, marshal_text(t, v), c.opts, marshal_text(t, v, c.opts))
@@ -218,7 +218,7 @@ test_encode_opts_sort_keys_matches_cli :: proc(t: ^testing.T) {
 		testing.expect(t, err == nil)
 		for pretty in ([2]bool{false, true}) {
 			got, merr := json.marshal(&doc, {jq_spelling = true, sort_keys = true, pretty = pretty, indent = 2, trailing_newline = true}, context.temp_allocator)
-			testing.expect_value(t, merr, json.Marshal_Error.None)
+			testing.expect_value(t, marshal_kind(merr), json.Marshal_Error_Kind.None)
 			testing.expect_value(t, string(got), strings.concatenate({c.pretty if pretty else c.compact, "\n"}, context.temp_allocator))
 		}
 	}
@@ -242,7 +242,7 @@ test_encode_opts_sort_keys_alone_changes_only_the_order :: proc(t: ^testing.T) {
 		{src = "{ \"a\" : [ 1 , 2 ] ,\n \"b\":{ } }"},
 		{src = "// h\n{\n  /* ib */ \"a\": /* in */ 2, // ta\n  \"m\": {\"x\":2 /* tx */\n  // foot\n  },\n} // end\n", dialect = .Jsonc},
 	}
-	opts := []json.Marshal_Opts {
+	opts := []json.Document_Opts {
 		{},
 		{pretty = true},
 		{pretty = true, indent = 2, trailing_newline = true},
@@ -257,7 +257,39 @@ test_encode_opts_sort_keys_alone_changes_only_the_order :: proc(t: ^testing.T) {
 			sorted := o
 			sorted.sort_keys = true
 			got, gerr := json.marshal(&doc, sorted, context.temp_allocator)
-			testing.expectf(t, werr == .None && gerr == .None && string(got) == string(want), "%q %v: got %q, want %q", c.src, o, got, want)
+			testing.expectf(t, werr == nil && gerr == nil && string(got) == string(want), "%q %v: got %q, want %q", c.src, o, got, want)
 		}
 	}
+}
+
+// Keys and strings of every length up to 200 come out whole and in place when pretty, on every writer: the
+// walk moves a span in blocks that differ by its length.
+@(test)
+test_encode_opts_pretty_span_lengths :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := strings.builder_make(context.temp_allocator)
+	want := strings.builder_make(context.temp_allocator)
+	strings.write_string(&want, "{")
+	strings.write_string(&src, "{")
+	for n in 0 ..= 200 {
+		val := make([]u8, n, context.temp_allocator)
+		for i in 0 ..< n {
+			val[i] = 'a' + u8((i + n) % 26)
+		}
+		key := strings.concatenate({string(val), fmt.tprint(n)}, context.temp_allocator)
+		fmt.sbprintf(&src, "%s\"%s\":\"%s\"", "," if n > 0 else "", key, string(val))
+		fmt.sbprintf(&want, "%s\n  \"%s\": \"%s\"", "," if n > 0 else "", key, string(val))
+	}
+	strings.write_string(&src, "}")
+	strings.write_string(&want, "\n}")
+	parsed := build_ok(t, strings.to_string(src))
+	defer json.destroy(&parsed)
+	opts := json.Document_Opts{pretty = true, indent = 2}
+	got, err := json.marshal(&parsed, opts, context.temp_allocator)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None)
+	testing.expect(t, string(got) == strings.to_string(want), "pretty output differs")
+	sb := strings.builder_make(context.temp_allocator)
+	err = json.marshal_to_writer(strings.to_writer(&sb), &parsed, opts, context.temp_allocator)
+	testing.expect_value(t, marshal_kind(err), json.Marshal_Error_Kind.None)
+	testing.expect(t, strings.to_string(sb) == strings.to_string(want), "streamed pretty output differs")
 }

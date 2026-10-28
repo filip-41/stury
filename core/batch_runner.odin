@@ -57,6 +57,33 @@ batch_fan :: proc(c: ^Batch_Cursor, task: proc(arg: rawptr), arg: rawptr) {
 	}
 }
 
+// `task(job, k, scratch)` for each `k` in [0, n), claimed in turn by the caller and `runner`'s threads until all are
+// claimed or one returns false: whether none did. `scratch` is the claiming thread's, kept in the heap across its
+// claims.
+piece_fan :: proc(runner: ^Batch_Runner, n: int, task: proc(job: ^$T, k: int, scratch: ^[dynamic]byte) -> bool, job: ^T) -> bool {
+	Claims :: struct {
+		job:     ^T,
+		task:    proc(job: ^T, k: int, scratch: ^[dynamic]byte) -> bool,
+		n, next: int,
+		failed:  bool,
+	}
+	claim :: proc(arg: rawptr) {
+		c := (^Claims)(arg)
+		scratch := make([dynamic]byte, runtime.heap_allocator())
+		defer delete(scratch)
+		for !sync.atomic_load(&c.failed) {
+			k := slice_next(&c.next, c.n) or_break
+			if !c.task(c.job, k, &scratch) {
+				sync.atomic_store(&c.failed, true)
+			}
+		}
+	}
+	c := Claims{job = job, task = task, n = n}
+	lanes := clamp(runner.threads + 1 if runner != nil else 1, 1, max(n, 1))
+	batch_fan(&Batch_Cursor{runner = runner, lanes = lanes}, claim, &c)
+	return !c.failed
+}
+
 // Returns the next slice number of a pass over `slices` shared by every thread of a `batch_fan`. `counted` is
 // the shared counter and starts at 0. Returns false once no slice is left.
 slice_next :: proc(counted: ^int, slices: int) -> (k: int, ok: bool) {

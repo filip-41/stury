@@ -7,9 +7,11 @@ package walk
 
 import core_pkg "../../../core"
 
-Error :: core_pkg.Error
+Error :: Scan_Error
+Public_Error :: core_pkg.Error
 Error_Kind :: core_pkg.Error_Kind
 Strictness :: core_pkg.Strictness
+MAX_DEPTH :: core_pkg.MAX_DEPTH
 Step :: core_pkg.Step
 Name :: core_pkg.Name
 Index :: core_pkg.Index
@@ -23,10 +25,10 @@ Read_Shape :: core_pkg.Read_Shape
 Shape_Op :: core_pkg.Shape_Op
 Shape_Field :: core_pkg.Shape_Field
 Shape_Fault :: core_pkg.Shape_Fault
-is_space :: core_pkg.is_space
 Row :: core_pkg.Row
 Row_Flags :: core_pkg.Row_Flags
 Row_Str :: core_pkg.Row_Str
+Key_Text :: core_pkg.Key_Text
 Row_Payload :: core_pkg.Row_Payload
 NO_KEY :: core_pkg.NO_KEY
 MAX_ROW_SOURCE :: core_pkg.MAX_ROW_SOURCE
@@ -36,10 +38,8 @@ NAME_BLOCK_BYTES :: core_pkg.NAME_BLOCK_BYTES
 name_arena_reset :: core_pkg.name_arena_reset
 allocator_ok :: core_pkg.allocator_ok
 
-// A union's variant is selected by `arm_of[vc]`, so the scan classes use core's numbering. `true` and `false`
-// are the `Bool` class. The walk classifies `null` separately, and it reads `arm_of[0]`.
-#assert(VC_OBJECT == int(core_pkg.Value_Class.Object))
-#assert(VC_ARRAY == int(core_pkg.Value_Class.Array))
-#assert(VC_STRING == int(core_pkg.Value_Class.String))
-#assert(VC_LITERAL == int(core_pkg.Value_Class.Bool))
-#assert(VC_NUMBER == int(core_pkg.Value_Class.Number))
+Shape_Run :: core_pkg.Shape_Run
+Shape_Frame :: core_pkg.Shape_Frame
+Shape_Number :: core_pkg.Shape_Number
+SHAPE_WIDE_WORDS :: core_pkg.SHAPE_WIDE_WORDS
+TYPED_FAULT :: core_pkg.TYPED_FAULT

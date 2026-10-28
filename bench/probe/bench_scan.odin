@@ -42,9 +42,16 @@ found_answers :: proc(answers: []json.Answer) -> int {
 dup_read :: proc(data: []byte, mode: Dup_Mode) -> bool {
 	if mode == .Last_Wins {
 		// One `.Structural` scan with a path per key gives the verdict and the answers in one walk.
-		name_paths(DUP_KEYS, DUP_STEPS[:], DUP_PATHS[:])
-		DUP_REQ.strictness = .Structural
-		DUP_REQ.paths = DUP_PATHS[:]
+		if len(DUP_REQ.inputs.paths) == 0 {
+			name_paths(DUP_KEYS, DUP_STEPS[:], DUP_PATHS[:])
+			specs: [len(DUP_PATHS)]json.Path_Spec
+			for p, i in DUP_PATHS {
+				specs[i] = p
+			}
+			if json.request_init(&DUP_REQ, ..specs[:], opts = {strictness = .Structural}) != nil {
+				return false
+			}
+		}
 		return scan_ok(data, &DUP_REQ)
 	}
 	// `.Skip`: a `.Structural` validate walks every member without resolving a key, so it compares no
@@ -93,8 +100,10 @@ bench_fault :: proc(data: []byte) -> bool {
 // lane on the refusal. `scan` empties the rows before it walks, so no teardown runs between iterations.
 bench_dom_refusal :: proc(data: []byte, level: json.Strictness) -> bool {
 	req: json.Request({.Dom})
-	req.strictness = level
 	defer json.destroy(&req)
+	if json.request_init(&req, opts = {strictness = level}) != nil {
+		return false
+	}
 
 	// Returns false, failing the lane, when the scan does not refuse.
 	refused :: proc(data: []byte, req: ^json.Request({.Dom})) -> bool {
@@ -141,17 +150,15 @@ bench_tiny :: proc(data: []byte) -> bool {
 PATH_REQ: json.Request({.Path})
 PATH_QUERY: [1]json.Path
 
-path_request :: proc(steps: []json.Step, level: json.Strictness) {
+path_request :: proc(steps: []json.Step, level: json.Strictness) -> bool {
 	PATH_QUERY[0] = json.Path{steps = steps}
-	PATH_REQ.paths = PATH_QUERY[:]
-	PATH_REQ.strictness = level
-	PATH_REQ.duplicates = .First
+	return json.request_init(&PATH_REQ, PATH_QUERY[0], opts = {strictness = level, duplicates = .First}) == nil
 }
 
 path_run :: proc(data: []byte, steps: []json.Step, level: json.Strictness, stop: ^Maybe(u64)) -> bool {
-	path_request(steps, level)
+	path_request(steps, level) or_return
 	err := json.scan(data, &PATH_REQ)
-	stop^ = PATH_REQ.stop
+	stop^ = PATH_REQ.state.stop
 	return err == nil
 }
 
@@ -160,8 +167,7 @@ path_run :: proc(data: []byte, steps: []json.Step, level: json.Strictness, stop:
 PATH_BATCH :: 256
 
 path_time :: proc(data: []byte, steps: []json.Step, level: json.Strictness, out: ^i64) -> bool {
-	path_request(steps, level)
-	ok := true
+	ok := path_request(steps, level)
 	t := time.tick_now()
 	for _ in 0 ..< PATH_BATCH {
 		ok &&= json.scan(data, &PATH_REQ) == nil

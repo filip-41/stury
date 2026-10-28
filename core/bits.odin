@@ -1,8 +1,9 @@
 package core
 
 // Format-neutral bit operations on 64-byte blocks: loads, lane masks packed to u64, the prefix XOR that turns
-// quote bits into quoted regions, and RFC 3629 checks of 16-byte windows. No code here depends on a format's
-// byte meanings.
+// quote bits into quoted regions, the quoted regions of a format whose strings are quoted by one byte and escaped
+// by another, and RFC 3629 checks of 16-byte windows. No code here depends on a format's byte meanings: a caller
+// names its quote and escape bytes.
 
 import "base:intrinsics"
 import "core:simd"
@@ -129,4 +130,106 @@ any_high :: #force_inline proc "contextless" (v: V) -> bool {
 		return simd.extract_msbs(v) != {}
 	}
 	return simd.reduce_max(v) >= 0x80
+}
+
+@(private = "file")
+EVEN_BITS :: u64(0x5555_5555_5555_5555)
+
+// Bytes that follow an odd-length run of escape bytes (`bs`), carrying whether a run ends the block before in
+// `prev_odd`.
+escaped_bits :: #force_inline proc(bs: u64, prev_odd: ^u64) -> u64 {
+	odd_bits := ~EVEN_BITS
+	start_edges := bs & ~(bs << 1)
+	even_start_mask := EVEN_BITS ~ prev_odd^
+	even_starts := start_edges & even_start_mask
+	odd_starts := start_edges & ~even_start_mask
+	even_carries := bs + even_starts
+	odd_carries, overflow := intrinsics.overflow_add(bs, odd_starts)
+	odd_carries |= prev_odd^
+	prev_odd^ = 1 if overflow else 0
+	even_carry_ends := even_carries & ~bs
+	odd_carry_ends := odd_carries & ~bs
+	return (even_carry_ends & odd_bits) | (odd_carry_ends & EVEN_BITS)
+}
+
+// A block's quotes that no escape byte escapes, and its bytes inside a string, from the carries of the block
+// before (`prev_odd`, `in_string`), which it moves on.
+string_region :: #force_inline proc(quote, bs: u64, prev_odd, in_string: ^u64) -> (real_q, instr: u64) {
+	escaped: u64
+	if bs != 0 || prev_odd^ != 0 {
+		escaped = escaped_bits(bs, prev_odd)
+	}
+	real_q = quote & ~escaped
+	instr = prefix_xor(real_q) ~ in_string^
+	in_string^ = u64(i64(instr) >> 63)
+	return
+}
+
+// A block's `quote` bytes and its `escape` bytes, one bit per byte: the masks `string_region` reads, for a format
+// whose strings are quoted by one byte and escaped by another (JSON's `"` and `\\`).
+quote_and_escape_bits :: #force_inline proc(v: [4]V, $quote, $escape: u8) -> (q, esc: u64) {
+	return pack4x2(eq4(v, quote), eq4(v, escape))
+}
+
+// The 16 source bytes before `lo`, zeros before the source.
+before16 :: #force_inline proc(src: []u8, lo: int) -> (tmp: [16]u8) {
+	if lo >= 16 {
+		return (^[16]u8)(raw_data(src[lo - 16:]))^
+	}
+	copy(tmp[16 - lo:], src[:lo])
+	return
+}
+
+// Set bits of `m`, offset by `base`, appended at `out[n]`. Steps of
+// FLATTEN_STEP writes, the first unconditional, keep the per-block branch
+// predictable at both sparse and dense token rates. `out` carries
+// FLATTEN_STEP slots of slack.
+FLATTEN_STEP :: 12
+
+flatten :: #force_inline proc(out: [^]u16, n: int, m: u64, base: u16) -> int {
+	cnt := int(intrinsics.count_ones(m))
+	// x86 has trailing-zero counts (bsf/tzcnt) and no bit reverse, so it
+	// walks `m` upward instead. Slack slots past the last bit take junk.
+	// The stores are volatile only to keep each count a scalar `tzcnt`: in
+	// an AVX-512 caller LLVM otherwise packs the counts
+	// into a vector popcount sequence, which is slower.
+	w := out[n:]
+	when ODIN_ARCH == .amd64 {
+		m := m
+		#unroll for k in 0 ..< 2 {
+			if k == 0 || cnt > FLATTEN_STEP * k {
+				#unroll for i in 0 ..< FLATTEN_STEP {
+					intrinsics.volatile_store(&w[FLATTEN_STEP * k + i], base + u16(intrinsics.count_trailing_zeros(m)))
+					m &= m - 1
+				}
+			}
+		}
+		for i := 2 * FLATTEN_STEP; i < cnt; i += 1 {
+			intrinsics.volatile_store(&w[i], base + u16(intrinsics.count_trailing_zeros(m)))
+			m &= m - 1
+		}
+		return n + cnt
+	}
+	// Reversed once, so each position is a leading zero count: arm64 has no
+	// trailing-zero instruction, and counting trailing zeros reverses the
+	// bits again for every slot. Once the bits run out the count is 64 and
+	// the slot gets junk, which only slack slots take. `& 63` keeps the shift
+	// defined without a select, and the tail loop counts slots instead of
+	// testing `r`.
+	r := intrinsics.reverse_bits(m)
+	#unroll for k in 0 ..< 2 {
+		if k == 0 || cnt > FLATTEN_STEP * k {
+			#unroll for i in 0 ..< FLATTEN_STEP {
+				lz := intrinsics.count_leading_zeros(r)
+				w[FLATTEN_STEP * k + i] = base + u16(lz)
+				r ~= (u64(1) << 63) >> (lz & 63)
+			}
+		}
+	}
+	for i := 2 * FLATTEN_STEP; i < cnt; i += 1 {
+		lz := intrinsics.count_leading_zeros(r)
+		w[i] = base + u16(lz)
+		r ~= (u64(1) << 63) >> (lz & 63)
+	}
+	return n + cnt
 }

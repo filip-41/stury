@@ -4,13 +4,13 @@ package main
 // jq's format, and the interpreter's values. Output is held in `Run.out` and written in large pieces.
 
 import "base:runtime"
-import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sync"
 import host "../../host"
 import json "../../json"
 import "jq"
+import "message"
 
 // The filter's outputs over a text, from its path's `answers` (`Path.per_element`): one `.Type_Mismatch` answer
 // when jq errors on the text, which `print_answers` leaves whole to the interpreter before any of it prints.
@@ -55,7 +55,7 @@ print_answer :: proc(run: ^Run, src: []byte, a: json.Answer) {
 	span := src[a.lo:a.hi]
 	switch a.kind {
 	case .Array, .Object:
-		if json.plain_json(run.req.dialect) {
+		if json.grammar_of(run.read.dialect) == {} {
 			print_spelled(run, span)
 		} else {
 			print_text(run, span)
@@ -70,16 +70,16 @@ print_answer :: proc(run: ^Run, src: []byte, a: json.Answer) {
 		}
 		// Freed once printed: a text's answers may decode to as much as the text.
 		runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-		d, _, ok := json.decode_span(src, a.lo, a.hi, .String, context.temp_allocator)
+		text, _, ok := json.answer_text(src, a, run.read, context.temp_allocator)
 		if !ok {
 			if run.held {
 				run.faulted = true
 				return
 			}
-			fmt.eprintf("stury: error: %s: a string that does not decode\n", run.name)
+			message.write_stderr("stury: error: %s: a string that does not decode\n", run.name)
 			finish(run, EXIT_INPUT)
 		}
-		print_jq(run, d.(string))
+		print_jq(run, text)
 	case .Number:
 		print_jq(run, jq.Number{lit = string(span)})
 	case .Null, .False, .True:
@@ -113,13 +113,13 @@ end_output :: proc(run: ^Run) {
 // A JSON text the library has already read, read again and printed as `print_jq` prints it. `respell` is
 // false for a text `write_spelled` has refused.
 print_text :: proc(run: ^Run, text: []byte, respell := true) {
-	doc, err := jq.build_rows(text, run.req.dialect)
+	doc, err := jq.build_rows(text, run.read.dialect)
 	if e, bad := err.?; bad {
 		if run.held {
 			run.faulted = true
 			return
 		}
-		fmt.eprintf("stury: error: %s: an answer could not be read again: %s\n", run.name, jq.FAULT_TEXT[e.kind])
+		message.write_stderr("stury: error: %s: an answer could not be read again: %s\n", run.name, jq.fault_text(e))
 		finish(run, EXIT_INPUT)
 	}
 	defer json.destroy(&doc)
@@ -162,8 +162,8 @@ print_jq :: proc(run: ^Run, v: jq.Value, respell := true) -> bool {
 			// A deep value's layout is written as it goes (`jq.Spill`), not held whole.
 			l.spill = &run.spill
 		}
-		jq.write_answer(&run.out, v, l, respell)
-		ended = FORMATS[o.to].keeps_comments && run.out[len(run.out) - 1] == '\n'
+		jq.write_answer(&run.out, v, &l, respell)
+		ended = writes_comments(o) && run.out[len(run.out) - 1] == '\n'
 	}
 	if !o.join && !ended {
 		append(&run.out, '\n')
@@ -186,7 +186,7 @@ source_text :: proc(run: ^Run, v: jq.Value) -> (text: []byte, large: bool) {
 			return
 		}
 		k, _ := json.kind(x.doc, x.node)
-		if json.plain_json(x.doc.dialect) && (k == .Array || k == .Object) {
+		if json.plain_json(x.doc) && (k == .Array || k == .Object) {
 			text = json.get_raw(x.doc, x.node)
 		}
 	case ^jq.Array:
@@ -206,8 +206,8 @@ source_text :: proc(run: ^Run, v: jq.Value) -> (text: []byte, large: bool) {
 
 // How jq prints the outputs.
 output_layout :: proc(run: ^Run) -> jq.Layout {
-	o := run.opts
-	return {pretty = !o.compact, indent = int(o.indent), sort_keys = o.sort_keys, ascii = o.ascii, colors = &run.colors if o.color else nil, drop_comments = !FORMATS[o.to].keeps_comments}
+	o := &run.opts
+	return {pretty = !o.compact, indent = int(o.indent), sort_keys = o.sort_keys, ascii = o.ascii, colors = &run.colors if o.color else nil, drop_comments = !writes_comments(o)}
 }
 
 // The output held so far written, when it passes FLUSH_AT bytes, when `force`d, and under --unbuffered.
@@ -262,7 +262,7 @@ write_out :: proc(p: []byte, worker := false, pool: ^host.Batch_Pool = nil) {
 // End the run as jq does when its output cannot be written: its message, and the exit status of a system error.
 check_output :: proc() {
 	if sync.atomic_load(&output_failed) {
-		fmt.eprintf("stury: error: writing output failed: %s\n", strerror(output_error))
+		message.write_stderr("stury: error: writing output failed: %s\n", strerror(output_error))
 		os.exit(EXIT_USAGE)
 	}
 }

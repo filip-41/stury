@@ -22,7 +22,7 @@ bench_stream :: proc(file: string) -> bool {
 	}
 	pool: host.Batch_Pool
 	host.batch_pool_init(&pool)
-	defer host.batch_pool_destroy(&pool)
+	defer host.destroy(&pool)
 	times: [2][TIMED_ITERS]i64
 	rss: [2]u64
 	size: [2]int

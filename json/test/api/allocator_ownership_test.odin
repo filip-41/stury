@@ -29,8 +29,7 @@ test_a_call_leaves_the_callers_allocator_in_place :: proc(t: ^testing.T) {
 	// context. The caller's is the heap's again once it returns.
 	{
 		req: json.Request({.Nodes})
-		req.allocator = other
-		req.duplicates = .Refuse
+		_ = json.request_init(&req, opts = {duplicates = .Refuse}, allocator = other)
 		_ = json.scan(src, &req)
 		json.destroy(&req)
 		testing.expect(

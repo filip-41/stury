@@ -3,8 +3,8 @@ package jq
 // The rule actions of jq's parser.y, numbered as its rules, and the node builders they fold constants
 // with. `v[k]` and `l[k]` are `$k` and `@k`, `at` is `@$`.
 
-import "core:fmt"
 import "core:strings"
+import "../message"
 
 @(private)
 act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
@@ -457,7 +457,7 @@ loc_literal :: proc(p: ^Parser, at: Loc) -> ^Node {
 @(private = "file")
 check_object_key :: proc(p: ^Parser, key: ^Node, at: Loc) {
 	if is_literal(key) && kind(key.value) != .String {
-		report(p, at, fmt.aprintf("Cannot use %s (%s) as object key", type_name(key.value), brief(key.value)))
+		report(p, at, message.build("Cannot use %s (%s) as object key", type_name(key.value), brief(key.value)))
 	}
 }
 

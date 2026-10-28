@@ -6,7 +6,7 @@ import "core:encoding/base64"
 import "core:math"
 import "core:strings"
 import "core:unicode/utf8"
-import lex "../../../json/scan/lex"
+import core_pkg "../../../core"
 
 // Whether `compare`'s result `c` on two values holds the comparison `op` between them.
 compared :: proc(op: Op, c: int) -> bool {
@@ -354,7 +354,7 @@ format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 			}
 			hi, lo: u8 = 0xFF, 0xFF // not a nibble
 			if i + 2 < len(s) {
-				hi, lo = lex.HEX_NIBBLE[s[i + 1]], lex.HEX_NIBBLE[s[i + 2]]
+				hi, lo = core_pkg.HEX_NIBBLE[s[i + 1]], core_pkg.HEX_NIBBLE[s[i + 2]]
 			}
 			if hi | lo > 15 {
 				return nil, fail(ip, "string (%s) is not a valid uri encoding", brief(s))

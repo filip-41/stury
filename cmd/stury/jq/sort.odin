@@ -133,7 +133,7 @@ number_key_order :: proc(ks: []Keyed, items: []Value = nil) -> (order: []int, ti
 			return nil, nil
 		}
 		u: u64
-		#partial switch key.kind {
+		switch key.kind {
 		case .Null, .False, .True:
 			u = u64(key.kind) // below every number's bits, -inf's 0x000f_ffff_ffff_ffff
 		case .Number:
@@ -147,7 +147,7 @@ number_key_order :: proc(ks: []Keyed, items: []Value = nil) -> (order: []int, ti
 			// The bits in the numbers' order: a negative's all flipped, a positive's sign set.
 			u = transmute(u64)f
 			u ~= ~u64(0) if u >> 63 != 0 else 1 << 63
-		case:
+		case .String, .Array, .Object:
 			return nil, nil
 		}
 		a[i] = {u, i}

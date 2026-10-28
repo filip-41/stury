@@ -1,6 +1,7 @@
 package lex
 
 import "base:intrinsics"
+import core_pkg "../../../core"
 
 // .Dom: the rest of one escaped string value, decoded onto the end of the sink's value bytes while the walk
 // checks it, so no second pass reads its escapes again (`emit_dom_string`'s counted route, which a sink without
@@ -83,11 +84,11 @@ dom_fuse_escape :: #force_inline proc(f: ^Dom_Fuse, s: ^Scanner) -> Maybe(Error)
 	p := s.pos
 	#no_bounds_check if p + 6 <= u64(len(s.src)) {
 		src := s.src
-		b := u32(ESC_BYTE[src[p + 1]])
-		n0 := u32(HEX_NIBBLE[src[p + 2]])
-		n1 := u32(HEX_NIBBLE[src[p + 3]])
-		n2 := u32(HEX_NIBBLE[src[p + 4]])
-		n3 := u32(HEX_NIBBLE[src[p + 5]])
+		b := u32(core_pkg.ESC_BYTE[src[p + 1]])
+		n0 := u32(core_pkg.HEX_NIBBLE[src[p + 2]])
+		n1 := u32(core_pkg.HEX_NIBBLE[src[p + 3]])
+		n2 := u32(core_pkg.HEX_NIBBLE[src[p + 4]])
+		n3 := u32(core_pkg.HEX_NIBBLE[src[p + 5]])
 		unit := n0 << 12 | n1 << 8 | n2 << 4 | n3
 		u_ok := u32(src[p + 1] == 'u') & u32((n0 | n1 | n2 | n3) & 0xF0 == 0) & u32(unit - 0xD800 >= 0x800)
 		if b | u_ok != 0 {
@@ -114,9 +115,9 @@ dom_fuse_escape :: #force_inline proc(f: ^Dom_Fuse, s: ^Scanner) -> Maybe(Error)
 
 // The string at `lo`, whose first backslash is `bs`, decoded to its closing quote into `dst`, which holds the
 // source's remaining length (`src[lo:]`), the most it can decode to. The answer is the offset past the quote
-// with `.None`, or a fault, and the decoded length. The sink is handed over as a pointer to its spare bytes and
-// nothing else: a call that is handed the query context, or a pointer into it, makes the walk reload what it
-// keeps there.
+// with kind 0, which no fault is, or a fault, and the decoded length. The sink is handed over as a pointer to
+// its spare bytes and nothing else: a call that is handed the query context, or a pointer into it, makes the
+// walk reload what it keeps there.
 dom_string_fused :: #force_no_inline proc(src: []byte, dst: [^]u8, lo, bs: u64) -> (end: Error, n: int) {
 	f: Dom_Fuse
 	f.dst = dst

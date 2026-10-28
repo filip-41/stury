@@ -13,11 +13,11 @@ import "core:slice"
 Edit :: core_pkg.Edit
 
 // The reason a path edit was refused. The kinds are core's and shared with CSV. JSON never reports
-// `Unsupported_Path` or `Bad_Row`, and reports `Bad_Option` only for a dialect the edits do not take (`.Json5`).
+// `Unsupported_Path` or `Bad_Entry`, and reports `Bad_Option` only for a dialect the edits do not take (`.Json5`).
 Path_Error_Kind :: core_pkg.Path_Error_Kind
 
 // A refused edit, located as an `Unmarshal_Error` is. `offset` and `syntax` are set for `.Bad_Source` and
-// `.Bad_Result` (`syntax` may stay `.None` there), `offset` alone for `.Bad_Path`, and `encode` for `.Encode`.
+// `.Bad_Result`, `offset` alone for `.Bad_Path`, and `encode` for `.Encode`.
 // Both JSON's and CSV's `render_error` write it.
 Path_Error :: core_pkg.Path_Error
 
@@ -37,8 +37,8 @@ edit_refused :: proc(dialect: Dialect) -> Maybe(Path_Error) {
 //	  whole value. Of `opts`, only `dialect` is read.
 //	- `.Json5` has no edits yet: `.Bad_Option` (also `set`, `upsert`, `insert` and `remove`).
 //	- Under `.Jsonc` an edit whose bytes open a comment that runs on into source bytes it did not replace
-//	  (an unterminated `//` or `/*`) is `.Bad_Result` at the comment, with no `syntax`: the comment would
-//	  swallow the values there.
+//	  (an unterminated `//` or `/*`) is `.Unplaceable` at the edit's `lo`: the comment would swallow the
+//	  values there.
 @(require_results)
 splice :: proc(src: []byte, edits: []Edit, opts := Read_Opts{}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	dialect := opts.dialect
@@ -58,8 +58,8 @@ splice :: proc(src: []byte, edits: []Edit, opts := Read_Opts{}, allocator := con
 	return judged(applied, nil, allocator, dialect)
 }
 
-// `out` validated as `dialect`, which reads comments, and `.Bad_Result` at any comment that an edit's bytes open and the source bytes
-// after them close: it swallows what stood there, which the edit did not replace.
+// `out` validated as `dialect`, which reads comments, and `.Unplaceable` at an edit whose bytes open a comment that the source
+// bytes after them close: it swallows what stood there, which the edit did not replace.
 @(private = "file")
 judged_jsonc_splice :: proc(out: []byte, edits: []Edit, allocator: runtime.Allocator, dialect: Dialect) -> Maybe(Path_Error) {
 	facts, ferr := make([dynamic]Fact, allocator)
@@ -79,7 +79,7 @@ judged_jsonc_splice :: proc(out: []byte, edits: []Edit, allocator: runtime.Alloc
 			if int(f.lo) >= from && int(f.lo) < to && int(f.hi) > to {
 				for b in out[to:f.hi] {
 					if !walk.is_space(b) {
-						return Path_Error{kind = .Bad_Result, offset = f.lo}
+						return Path_Error{kind = .Unplaceable, offset = e.lo}
 					}
 				}
 			}
@@ -113,33 +113,46 @@ judged :: proc(out: []byte, err: Maybe(Path_Error), allocator: runtime.Allocator
 //	  is `.Bad_Path` at the byte the parser stopped on.
 @(require_results)
 set :: proc(src: []byte, path: Path_Spec, value: any, opts := Read_Opts{}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	return set_or_upsert(src, path, value, opts, allocator, false)
+	return path_edit(src, path, {op = .Set, value = value}, opts, allocator)
 }
 
 // `set`, and also add the member to each object the path's last name is missing from, as `insert` would. The
 // path must end in a name, and everything before it must find objects.
 @(require_results)
 upsert :: proc(src: []byte, path: Path_Spec, value: any, opts := Read_Opts{}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	return set_or_upsert(src, path, value, opts, allocator, true)
+	return path_edit(src, path, {op = .Upsert, value = value}, opts, allocator)
 }
 
+// A path edit under `opts`, a dialect the edits do not read refused first.
 @(private = "file")
-set_or_upsert :: proc(src: []byte, path: Path_Spec, value: any, opts: Read_Opts, allocator: runtime.Allocator, upsert: bool) -> (out: []byte, err: Maybe(Path_Error)) {
+path_edit :: proc(src: []byte, path: Path_Spec, args: core_pkg.Edit_Args, opts: Read_Opts, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	opts := opts
 	edit_refused(opts.dialect) or_return
-	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_set(src, path, value, core_pkg.watched(&watch), upsert, opts)
-	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
+	return core_pkg.path_edit(EDITS, src, path, args, opts.shared, &opts, allocator)
 }
 
+// JSON's half of the path edits: `own` is a `Read_Opts`.
+@(private)
+EDITS :: core_pkg.Edits{plan = edit_plan, judge = edit_judge, too_long = .Over_Capacity}
+
 @(private = "file")
-watched_set :: proc(src: []byte, path: Path_Spec, value: any, allocator: runtime.Allocator, upsert: bool, opts: Read_Opts) -> (out: []byte, err: Maybe(Path_Error)) {
-	buf: core_pkg.Path_Buf
-	p := core_pkg.path_resolve(path, &buf, allocator) or_return
-	defer delete(buf.heap, allocator)
-	// The target sits inside one container per step.
-	repl := canonical(value, len(p.steps), allocator, opts.dialect) or_return
-	defer delete(repl)
-	if upsert {
+edit_plan :: proc(
+	src: []byte,
+	p: Path,
+	args: core_pkg.Edit_Args,
+	shared: core_pkg.Read_Opts,
+	own: rawptr,
+	text: ^[dynamic]u8,
+	places: ^[dynamic]Place,
+	allocator: runtime.Allocator,
+) -> Maybe(Path_Error) {
+	opts := (^Read_Opts)(own)^
+	opts.shared = shared
+	edit_refused(opts.dialect) or_return
+	switch args.op {
+	case .Set:
+		return set_places(src, p, args.value, opts, text, places, allocator)
+	case .Upsert:
 		// The member the path names, inserted into or replaced in each object its container steps find.
 		n := len(p.steps)
 		name: Name
@@ -148,33 +161,60 @@ watched_set :: proc(src: []byte, path: Path_Spec, value: any, allocator: runtime
 			name, named = p.steps[n - 1].(Name)
 		}
 		if !named {
-			return nil, Path_Error{kind = .Unplaceable}
+			return Path_Error{kind = .Unplaceable}
 		}
 		if p.limit != 0 {
-			return nil, Path_Error{kind = .Bad_Path}
+			return Path_Error{kind = .Bad_Path}
 		}
-		return insert_at(src, {steps = p.steps[:n - 1]}, string(name), repl[:], allocator, opts, upsert = true)
+		repl := canonical(args.value, n, allocator, opts.dialect) or_return
+		defer delete(repl)
+		return insert_at(src, {steps = p.steps[:n - 1]}, string(name), repl[:], opts, text, places, allocator, upsert = true)
+	case .Insert:
+		repl := canonical(args.value, len(p.steps) + 1, allocator, opts.dialect) or_return
+		defer delete(repl)
+		return insert_at(src, p, args.at, repl[:], opts, text, places, allocator)
+	case .Remove:
+		return remove_at(src, p, opts, places, allocator)
 	}
+	return nil
+}
+
+// A JSONC insert or removal reads as JSONC; a `set` swaps whole values for whole canonical values, and plain
+// JSON entries are placed between whole values with their separators, so neither needs reading again.
+@(private = "file")
+edit_judge :: proc(src, out: []byte, op: core_pkg.Edit_Op, _: core_pkg.Read_Opts, own: rawptr, _: runtime.Allocator) -> Maybe(Path_Error) {
+	dialect := (^Read_Opts)(own).dialect
+	if op == .Set || !scan_pkg.has_comments(dialect) {
+		return nil
+	}
+	if e, bad := validate(out, {dialect = dialect}).?; bad {
+		return core_pkg.path_error_of(e, .Bad_Result)
+	}
+	return nil
+}
+
+// `set`'s places: every value the path finds, each replaced by `value` written once.
+@(private = "file")
+set_places :: proc(src: []byte, p: Path, value: any, opts: Read_Opts, text: ^[dynamic]u8, places: ^[dynamic]Place, allocator: runtime.Allocator) -> Maybe(Path_Error) {
+	// The target sits inside one container per step.
+	repl := canonical(value, len(p.steps), allocator, opts.dialect) or_return
+	defer delete(repl)
+	from := len(text)
+	append(text, ..repl[:])
 	paths := [1]Path{p}
 	req: Request({.Path})
 	defer request_destroy(&req)
 	edit_scan(src, &req, paths[:], opts, allocator) or_return
-	edits := make([dynamic]Edit, 0, len(req.answers), allocator)
-	defer delete(edits)
-	mismatched := 0
+	mismatched, before := 0, len(places)
 	for a in req.answers {
 		if a.outcome == .Found {
-			append(&edits, Edit{lo = a.lo, hi = a.hi, bytes = repl[:]})
+			append(places, Place{at = a.lo, cut = a.hi, from = from, to = len(text)})
 		} else if a.outcome == .Type_Mismatch {
 			mismatched += 1
 		}
 	}
-	core_pkg.edit_found(len(edits), mismatched, len(req.answers)) or_return
 	// Every answer sits at the path's depth, so answers never nest, and sorted they are disjoint.
-	slice.sort_by(edits[:], proc(a, b: Edit) -> bool {
-		return a.lo < b.lo
-	})
-	return core_pkg.edits_apply_checked(src, edits[:], allocator)
+	return core_pkg.edit_found(len(places) - before, mismatched, len(req.answers))
 }
 
 // Where `insert` puts its entry: a member name for an object, an element index for an array. An index
@@ -200,20 +240,7 @@ APPEND :: core_pkg.APPEND
 //	  comments and comma included (`entry_at`). The result is validated as JSONC.
 @(require_results)
 insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, opts := Read_Opts{}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	edit_refused(opts.dialect) or_return
-	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_insert(src, path, at, value, core_pkg.watched(&watch), opts)
-	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
-}
-
-@(private = "file")
-watched_insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, allocator: runtime.Allocator, opts: Read_Opts) -> (out: []byte, err: Maybe(Path_Error)) {
-	buf: core_pkg.Path_Buf
-	p := core_pkg.path_resolve(path, &buf, allocator) or_return
-	defer delete(buf.heap, allocator)
-	repl := canonical(value, len(p.steps) + 1, allocator, opts.dialect) or_return
-	defer delete(repl)
-	return insert_at(src, p, at, repl[:], allocator, opts)
+	return path_edit(src, path, {op = .Insert, value = value, at = at}, opts, allocator)
 }
 
 // Remove every value the path finds, with its member key, and exactly one separator beside it: the one
@@ -227,29 +254,23 @@ watched_insert :: proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, 
 //	  (`remove_in`). The result is validated as JSONC.
 @(require_results)
 remove :: proc(src: []byte, path: Path_Spec, opts := Read_Opts{}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	edit_refused(opts.dialect) or_return
-	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_remove(src, path, core_pkg.watched(&watch), opts)
-	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
+	return path_edit(src, path, {op = .Remove}, opts, allocator)
 }
 
+// `remove`'s places in the dialect it reads. The root is no entry.
 @(private = "file")
-watched_remove :: proc(src: []byte, path: Path_Spec, allocator: runtime.Allocator, opts: Read_Opts) -> (out: []byte, err: Maybe(Path_Error)) {
-	buf: core_pkg.Path_Buf
-	p := core_pkg.path_resolve(path, &buf, allocator) or_return
-	defer delete(buf.heap, allocator)
-	n := len(p.steps)
-	if n == 0 {
-		return nil, Path_Error{kind = .Unplaceable}
+remove_at :: proc(src: []byte, p: Path, opts: Read_Opts, places: ^[dynamic]Place, allocator: runtime.Allocator) -> Maybe(Path_Error) {
+	if len(p.steps) == 0 {
+		return Path_Error{kind = .Unplaceable}
 	}
 	switch opts.dialect {
 	case .Json:
-		return remove_in(src, p, allocator, opts, .Json)
+		return remove_in(src, p, opts, places, allocator, .Json)
 	case .Jsonc:
-		return remove_in(src, p, allocator, opts, .Jsonc)
+		return remove_in(src, p, opts, places, allocator, .Jsonc)
 	case .Json5: // `edits_read` refuses it before any edit
 	}
-	return nil, Path_Error{kind = .Bad_Option}
+	return Path_Error{kind = .Bad_Option}
 }
 
 // `value`'s canonical text, a `Raw` in it validated under `dialect`, refused past the depth left below `depth`
@@ -262,7 +283,7 @@ canonical :: proc(value: any, depth: int, allocator: runtime.Allocator, dialect:
 	prev := context.allocator
 	context.allocator = allocator
 	defer context.allocator = prev
-	if merr := marshal_append(&repl, value, {}, nil, nil, dialect); merr != .None {
+	if merr := append_value(&repl, value, {}, nil, nil, dialect); merr != .None {
 		delete(repl)
 		return nil, Path_Error{kind = .Encode, encode = merr}
 	}
@@ -280,31 +301,33 @@ canonical :: proc(value: any, depth: int, allocator: runtime.Allocator, dialect:
 // its refusals and faults as edit errors.
 @(private)
 edit_scan :: proc(src: []byte, req: ^Request($KINDS), paths: []Path, opts: Read_Opts, allocator: runtime.Allocator) -> Maybe(Path_Error) {
-	req.read = opts
-	req.paths = paths
-	req.strictness = .Strict
-	targeted := req.duplicates == .Default
+	req.inputs.read = opts
+	req.inputs.paths = paths
+	req.inputs.read.strictness = .Strict
+	// The scans below change the inputs between them, so none keeps a plan.
+	req.state.plan_tried = true
+	targeted := req.inputs.read.duplicates == .Default
 	// A limit is cut after the scan, which reads every occurrence. Edits ask at most three paths.
 	unlimited: [3]Path
 	if targeted {
-		req.duplicates = .All
+		req.inputs.read.duplicates = .All
 		for p, i in paths {
 			unlimited[i] = {steps = p.steps, per_element = p.per_element}
 			req.state.route.walk_repeats ||= named_inside(p.steps)
 		}
-		req.paths = unlimited[:len(paths)]
+		req.inputs.paths = unlimited[:len(paths)]
 	}
-	req.allocator = allocator
+	req.inputs.allocator = allocator
 	e, bad := scan(src, req).?
 	if !bad {
 		if !targeted {
 			return nil
 		}
-		repeat := repeated_on_path(req.answers[:], req.paths, allocator)
+		repeat := repeated_on_path(req.answers[:], req.inputs.paths, allocator)
 		if repeat != nil && req.state.route.repeat_at == 0 {
 			// Only the automaton's walk knows where the repeated key starts.
 			req.state.route.walk_repeats = true
-			req.paths = unlimited[:len(paths)]
+			req.inputs.paths = unlimited[:len(paths)]
 			_ = scan(src, req)
 		}
 		if key_lo := req.state.route.repeat_at; key_lo > 0 {
@@ -312,7 +335,7 @@ edit_scan :: proc(src: []byte, req: ^Request($KINDS), paths: []Path, opts: Read_
 				repeat = Path_Error{kind = .Bad_Source, syntax = .Duplicate_Key, offset = key_lo}
 			}
 		}
-		req.paths = paths
+		req.inputs.paths = paths
 		finish_answers(&req.answers, nil, &req.state.route, paths, false)
 		found_one := false
 		for a in req.answers {
@@ -322,19 +345,16 @@ edit_scan :: proc(src: []byte, req: ^Request($KINDS), paths: []Path, opts: Read_
 			return repeat
 		}
 		// `.All` answers a step on the wrong kind as missing; `.Last` tells the two apart.
-		req.duplicates = .Last
+		req.inputs.read.duplicates = .Last
 		if e, bad = scan(src, req).?; !bad {
 			return nil
 		}
 	}
-	#partial switch e.kind {
-	case .Over_Capacity:
-		return Path_Error{kind = .Over_Capacity}
-	case .Bad_Option, .Bad_Path, .Source_Too_Wide:
+	if e.kind == .Bad_Option || e.kind == .Bad_Path || e.kind == .Bad_Source && e.syntax == .Source_Too_Wide {
 		// Unreachable, as the edits build their own requests. An error beats a panic in the caller.
 		return Path_Error{kind = .Internal}
 	}
-	return core_pkg.path_error_of(e)
+	return e
 }
 
 // Whether `steps` pass a `Name` before their last step: a key there may repeat in its object with only one copy
@@ -412,21 +432,4 @@ held_by :: proc(rows: []Answer, at: ^int, owner: u64) -> []Answer {
 
 // One edit whose bytes live in a shared text buffer: `src[at:cut]` becomes `text[from:to]`.
 @(private)
-Place :: struct {
-	at, cut:  u64,
-	from, to: int,
-}
-
-@(private)
-places_apply :: proc(src: []byte, places: []Place, text: []u8, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	core_pkg.edit_found(len(places)) or_return
-	edits, aerr := make([]Edit, len(places), allocator)
-	if aerr != nil {
-		return nil, core_pkg.PATH_OUT_OF_MEMORY
-	}
-	defer delete(edits, allocator)
-	for p, i in places {
-		edits[i] = {lo = p.at, hi = p.cut, bytes = text[p.from:p.to]}
-	}
-	return core_pkg.edits_apply_checked(src, edits, allocator)
-}
+Place :: core_pkg.Place

@@ -27,7 +27,7 @@ plan_enum_member :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, v: i64) -> (P
 
 // The enum at `data` as a writer spells it: the first declared member with its value, and the value for a
 // writer that spells enums as integers. A value no member has is refused under either spelling.
-plan_enum_written :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, data: rawptr) -> (m: Plan_Member, v: i64, err: Marshal_Error) {
+plan_enum_written :: #force_inline proc(p: ^Type_Plan, op: Plan_Op, data: rawptr) -> (m: Plan_Member, v: i64, err: Marshal_Error_Kind) {
 	v = plan_enum_value(op, data)
 	member: bool
 	if m, member = plan_enum_member(p, op, v); !member {

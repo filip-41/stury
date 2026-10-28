@@ -4,11 +4,15 @@ import core_pkg "../../../core"
 import "../walk"
 
 Scanner :: walk.Scanner
-Error :: core_pkg.Error
+Error :: walk.Scan_Error
+Error_Kind :: walk.Error_Kind
+KIND_LITERAL :: walk.KIND_LITERAL
+Fault :: walk.Fault
 Query_Ctx :: walk.Query_Ctx
 Check_Level :: walk.Check_Level
 Walk_Kind :: walk.Walk_Kind
 SCAN_FORCE_SLOW :: core_pkg.SCAN_FORCE_SLOW
+hex4 :: core_pkg.hex4
 
 VC_NONE :: walk.VC_NONE
 VC_OBJECT :: walk.VC_OBJECT

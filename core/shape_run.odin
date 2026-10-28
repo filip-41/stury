@@ -1,10 +1,37 @@
-package walk
+package core
+
+// The typed walk's state, shared by every format that reads a value into a typed target along a read shape:
+// a format's walk calls the transitions (shape_walk.odin) as it meets each value, key and close.
 
 import "base:runtime"
 
-// The `Error` kind the shape walk returns on a typed fault; `Shape_Run.fault` holds the fault. No syntax or
-// budget fault is `.None`, so this value never collides with one.
-TYPED_FAULT :: Error_Kind.None
+// A walk's fault, two words, carried through every inlined return of a format's walk: a third field moves the
+// spills of every walk. A format may number its own faults past the last `Error_Kind`.
+Walk_Error :: struct {
+	offset: u64,
+	kind:   Error_Kind,
+}
+
+// The `Walk_Error` kind the shape walk returns on a typed fault; `Shape_Run.fault` holds the fault. No
+// `Error_Kind` is 0, so this value never collides with one.
+TYPED_FAULT :: Error_Kind(0)
+
+// A value's walk class, which the transitions dispatch on: `Value_Class`'s numbering, with `null` and the
+// booleans one literal class and 0 for no value. The container classes are adjacent and the scalar ones follow,
+// so `vc <= VC_ARRAY` and `vc >= VC_STRING` split them. A union's `arm_of` is indexed by it; `null` reads
+// `arm_of[0]`.
+VC_NONE :: 0
+VC_OBJECT :: 1
+VC_ARRAY :: 2
+VC_STRING :: 3
+VC_LITERAL :: 4
+VC_NUMBER :: 5
+#assert(VC_OBJECT == int(KIND_CLASS[.Object]))
+#assert(VC_ARRAY == int(KIND_CLASS[.Array]))
+#assert(VC_STRING == int(KIND_CLASS[.String]))
+#assert(VC_LITERAL == int(KIND_CLASS[.True]) && VC_LITERAL == int(KIND_CLASS[.False]))
+#assert(VC_NUMBER == int(KIND_CLASS[.Number]))
+#assert(int(KIND_CLASS[.Null]) == 0)
 
 // The seen-field words (`Shape_Run.wide`) shared by all open structs for their fields past the first 64. One
 // struct reads at most 64 * (1 + SHAPE_WIDE_WORDS) fields; needing more words at once is `.Out_Of_Memory`.
@@ -47,14 +74,14 @@ Shape_Run :: struct {
 	src:            []byte,
 	allocator:      runtime.Allocator,
 	sp:             u64,
-	// The target of the next value at depth `sp`, set by a member key (or for the root, by `scan_shape`).
+	// The target of the next value at depth `sp`, set by a member key (or for the root, by the format's entry).
 	pend_dest:      rawptr,
 	// The target of the open scalar, or of the container being read whole into a `Raw`; `shape_scalar` or
 	// `shape_close` writes it.
 	cur_dest:       rawptr,
 	raw_lo:         u64,    // Raw: the offset where the container being read whole opened
 	raw_sp:         u64,    // Raw: that container's walk frame index
-	num:            Shape_Number, // written by the number leaf `parse_number_q` under `.Shape`
+	num:            Shape_Number, // written by the format's number lexer as it checks a number
 	pend_op:        u32,
 	cur_op:         u32,
 	// The number of frames whose steps the error path reports: every open frame, or one fewer for a fault about
@@ -70,7 +97,7 @@ Shape_Run :: struct {
 	keep_first:     bool,
 	read_over:      bool,   // `.All`: a repeated member is read over the earlier occurrence, not into a zeroed value
 	enum_ints:      bool,   // an enum is read from its backing integer, not its name
-	skip_pays:      bool,   // `scan_shape_lazy`'s probe chose the skipping walk, so `scan_shape` stops probing
+	skip_pays:      bool,   // a format's lazy probe chose its skipping walk, so the walk stops probing
 	// The member key that selects a tagged union's struct arm. When empty, unions are selected by shape alone.
 	union_tag:      string,
 	// SHAPE_WIDE_WORDS seen words. Open wide structs claim them from the front (`Shape_Frame.data`) and release

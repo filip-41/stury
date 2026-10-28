@@ -136,6 +136,8 @@ lint:
 	@d=$$(mktemp -d) && $(ODIN) build cmd/stury -build-mode:obj -target:windows_amd64 -windows-sdk-root:$$d $(LINT_FLAGS) -out:$$d/stury.obj; s=$$?; rm -rf $$d; exit $$s
 	@# The code guard reads source text alone: a release archive runs it like a checkout does.
 	@echo "== no mutable globals"; python3 tools/no_mutable_globals.py
+	@# The CLI imports a format package only in its registry, and no format subpackage.
+	@echo "== CLI imports"; python3 tools/cli_imports.py
 
 # The bench probe (`build/probe --lane NAME`, bench/README.md), and build/probe50, which times 50 iterations.
 probe:

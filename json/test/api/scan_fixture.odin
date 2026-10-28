@@ -2,6 +2,7 @@ package json_tests
 
 // Shared happy-path scan fixtures.
 
+import core "../../../core"
 import json "../.."
 import "core:mem"
 import "core:strings"
@@ -22,30 +23,60 @@ nested_arrays :: proc(n: int, inner := "") -> string {
 @(private)
 verdict_under :: proc(src: []byte, strictness: json.Strictness, limits: json.Limits) -> Maybe(json.Error) {
 	req: json.Request({})
-	req.strictness = strictness
-	req.limits = limits
+	_ = json.request_init(&req, opts = {strictness = strictness, limits = limits})
 	return scan_fault(json.scan(src, &req))
 }
 
-// The document's fault in a scan's result, or nil (a refusal is not one).
+// `request_init` of `req` with the built `paths`.
 @(private)
-scan_fault :: proc(err: Maybe(json.Error)) -> Maybe(json.Error) {
+request_of :: proc(req: ^json.Request($Q), paths: []json.Path, opts := json.Read_Opts{}, allocator := context.allocator) -> Maybe(json.Path_Error) {
+	specs := make([]json.Path_Spec, len(paths), context.temp_allocator)
+	for p, i in paths {
+		specs[i] = p
+	}
+	return json.request_init(req, ..specs, opts = opts, allocator = allocator)
+}
+
+// The whole text's verdict under `req`'s options and paths: what a `.Strict` scan of every byte gives.
+@(private)
+strict_verdict :: proc(src: []byte, req: ^json.Request($Q)) -> Maybe(json.Error) {
+	opts := req.inputs.read
+	opts.strictness = .Strict
+	whole: json.Request(Q)
+	defer json.destroy(&whole)
+	if request_of(&whole, req.inputs.paths, opts) != nil {
+		return json.Error{kind = .Bad_Option}
+	}
+	return scan_fault(json.scan(src, &whole))
+}
+
+// The document's fault in a scan's result, or an output's `.Out_Of_Memory`, else nil (a refusal is not one).
+@(private)
+scan_fault :: proc(err: Maybe(json.Path_Error)) -> Maybe(json.Error) {
 	e, faulted := err.?
-	if !faulted {
+	if !faulted || e.kind == .Bad_Option {
 		return nil
 	}
-	#partial switch e.kind {
-	case .Bad_Option, .Over_Capacity, .Bad_Path:
-		return nil
+	if fault, of_text := core.source_error(e); of_text {
+		return fault
 	}
-	return e
+	return nil
+}
+
+// A scan's result for the scan's fault `e`, as `json.scan` reports it.
+@(private)
+source :: proc(e: Maybe(json.Error)) -> Maybe(json.Path_Error) {
+	if fault, faulted := e.?; faulted {
+		return core.path_error_of(fault)
+	}
+	return nil
 }
 
 // One scan of `.Path` queries with every part of the outcome captured. `json.destroy(&r.req)` releases it.
 @(private)
 Path_Run :: struct {
 	req:     json.Request({.Path}),
-	err:     Maybe(json.Error),
+	err:     Maybe(json.Path_Error),
 	answers: []json.Answer, // borrowed from `req`
 }
 
@@ -57,10 +88,9 @@ paths_run :: proc(
 	duplicates := json.Duplicates.Last,
 	limits := json.Limits{},
 ) -> (r: Path_Run) {
-	r.req.strictness = strictness
-	r.req.duplicates = duplicates
-	r.req.limits = limits
-	r.req.paths = paths
+	if r.err = request_of(&r.req, paths, {strictness = strictness, duplicates = duplicates, limits = limits}); r.err != nil {
+		return
+	}
 	r.err = json.scan(src, &r.req)
 	r.answers = r.req.answers[:]
 	return
@@ -85,7 +115,7 @@ answer_texts :: proc(answers: []json.Answer, src: string, query: u32 = 0) -> str
 
 // Expect `err` to be a refusal of kind `want`, and answer it.
 @(private)
-request_refused :: proc(t: ^testing.T, err: Maybe(json.Error), want: json.Error_Kind, loc := #caller_location) -> json.Error {
+request_refused :: proc(t: ^testing.T, err: Maybe(json.Path_Error), want: json.Path_Error_Kind, loc := #caller_location) -> json.Path_Error {
 	r, refused := err.?
 	testing.expectf(t, refused && r.kind == want, "%v, want %v", err, want, loc = loc)
 	return r

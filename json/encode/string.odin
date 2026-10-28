@@ -13,8 +13,7 @@ package encode
 
 import "base:intrinsics"
 import "core:simd"
-import "../scan/walk"
-import lex "../scan/lex"
+import core_pkg "../../core"
 
 // What each byte is written as inside a string, low byte first: itself, `\` and a letter, or `\u00XX`. One
 // 8-byte store writes any of them; the top byte says how many of the low bytes count, so the length comes
@@ -108,20 +107,20 @@ BLOCK_SLACK :: 16
 
 // Append `s` as a JSON string, quotes included. `.Bad_Utf8` when `s` is not valid UTF-8. Nothing is then
 // committed.
-put_string :: proc(dst: ^[dynamic]u8, s: string) -> Marshal_Error {
+put_string :: proc(dst: ^[dynamic]u8, s: string) -> Marshal_Error_Kind {
 	return put_string_as(dst, s, false)
 }
 
 // `put_string` that also escapes DEL, as `\u007f`: the form jq 1.8 prints.
-put_string_escaping_del :: proc(dst: ^[dynamic]u8, s: string) -> Marshal_Error {
+put_string_escaping_del :: proc(dst: ^[dynamic]u8, s: string) -> Marshal_Error_Kind {
 	return put_string_as(dst, s, true)
 }
 
 @(private)
-put_string_as :: #force_inline proc(dst: ^[dynamic]u8, s: string, $del: bool) -> Marshal_Error {
+put_string_as :: #force_inline proc(dst: ^[dynamic]u8, s: string, $del: bool) -> Marshal_Error_Kind {
 	mark := len(dst^)
 	end, err := spell_led_string(dst, mark, nil, 0, s, true, del)
-	walk.edge_publish(dst, end if err == .None else mark)
+	put_publish(dst, end if err == .None else mark)
 	return err
 }
 
@@ -129,7 +128,7 @@ put_string_as :: #force_inline proc(dst: ^[dynamic]u8, s: string, $del: bool) ->
 // `mark` (see `put_room`). Returns the cursor past the closing quote. The length of `dst` is committed only to
 // grow, so on a refusal the caller truncates to `mark`. A short ASCII string with nothing to escape is written in
 // line. `$del` escapes DEL as well, in this and each proc below that takes it.
-spell_led_string :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $utf8, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
+spell_led_string :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $utf8, $del: bool) -> (int, Marshal_Error_Kind) #no_bounds_check {
 	if len(s) < 16 {
 		v := tail_block(raw_data(s), 0, len(s))
 		if block_clean(v, utf8, del) {
@@ -150,7 +149,7 @@ spell_led_string :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8
 }
 
 @(private)
-spell_any_string :: proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $utf8, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
+spell_any_string :: proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, $utf8, $del: bool) -> (int, Marshal_Error_Kind) #no_bounds_check {
 	n := len(s)
 	// Clean text is written as itself plus two quotes. This path makes no call, so it keeps no frame. A buffer
 	// that must grow, a string under 16 bytes (`spell_led_string` has taken the plain ones) and any block
@@ -189,7 +188,7 @@ spell_any_string :: proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int,
 // `spell_any_string` from byte `i` of `s`: every block before `i` is plain ASCII, so no UTF-8 sequence is
 // open, and the plain prefix may already be written. The lead and the opening quote are written here too.
 @(private)
-spell_mixed :: #force_no_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $utf8, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
+spell_mixed :: #force_no_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $utf8, $del: bool) -> (int, Marshal_Error_Kind) #no_bounds_check {
 	// A string with less than a 64-byte step left has no use for the step's bookkeeping. The DEL-escaping
 	// speller (the CLI's) takes no step.
 	if utf8 && !del && len(s) - i_in >= 64 {
@@ -200,7 +199,7 @@ spell_mixed :: #force_no_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, 
 
 // The body of `spell_mixed`; `wide` adds the 64-byte step, for a string with room for one.
 @(private)
-spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $wide, $utf8, $del: bool) -> (int, Marshal_Error) #no_bounds_check {
+spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, lead_n: int, s: string, i_in: int, $wide, $utf8, $del: bool) -> (int, Marshal_Error_Kind) #no_bounds_check {
 	n := len(s)
 	if put_room(dst, mark, lead_n + n + 2 + BLOCK_SLACK) == nil {
 		return mark, .Out_Of_Memory
@@ -242,9 +241,9 @@ spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, le
 						// Below 0xE0 nothing opens a sequence longer than two bytes, so each byte need only be
 						// read against the one before it.
 						if top < 0xE0 && i == step_end && !long_prev {
-							bad |= lex.utf8_pairs_err(prev, v0) | lex.utf8_pairs_err(v0, v1) | lex.utf8_pairs_err(v1, v2) | lex.utf8_pairs_err(v2, v3)
+							bad |= core_pkg.utf8_pairs_err(prev, v0) | core_pkg.utf8_pairs_err(v0, v1) | core_pkg.utf8_pairs_err(v1, v2) | core_pkg.utf8_pairs_err(v2, v3)
 						} else {
-							bad |= lex.utf8_err(prev, v0) | lex.utf8_err(v0, v1) | lex.utf8_err(v1, v2) | lex.utf8_err(v2, v3)
+							bad |= core_pkg.utf8_err(prev, v0) | core_pkg.utf8_err(v0, v1) | core_pkg.utf8_err(v1, v2) | core_pkg.utf8_err(v2, v3)
 						}
 					}
 					long_prev = top >= 0xE0
@@ -269,14 +268,14 @@ spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, le
 			continue
 		}
 		when utf8 {
-			// arm64 keeps its OR reduction. On x86 that is a shuffle tree, and `lex.any_high` one `pmovmskb`.
+			// arm64 keeps its OR reduction. On x86 that is a shuffle tree, and `core_pkg.any_high` one `pmovmskb`.
 			when ODIN_ARCH == .amd64 {
-				high := lex.any_high(v)
+				high := core_pkg.any_high(v)
 			} else {
 				high := simd.reduce_or(v) >= 0x80
 			}
 			if high || prev_high {
-				bad |= lex.utf8_err(prev, v)
+				bad |= core_pkg.utf8_err(prev, v)
 			}
 			prev, prev_high = v, high
 		}
@@ -298,17 +297,17 @@ spell_blocks :: #force_inline proc(dst: ^[dynamic]u8, mark: int, lead: [^]u8, le
 	// padding, which `utf8_err` refuses.
 	live := n - i
 	v := tail_block(src, i, n)
-	if !prev_high && block_clean(v, utf8, del) && !lex.any_lane(bad) {
+	if !prev_high && block_clean(v, utf8, del) && !core_pkg.any_lane(bad) {
 		intrinsics.unaligned_store((^#simd[16]u8)(&out[w]), v)
 		w += live
 		out[w] = '"'
 		return w + 1, .None
 	}
 	when utf8 {
-		if prev_high || lex.any_high(v) {
-			bad |= lex.utf8_err(prev, v)
+		if prev_high || core_pkg.any_high(v) {
+			bad |= core_pkg.utf8_err(prev, v)
 		}
-		if lex.any_lane(bad) {
+		if core_pkg.any_lane(bad) {
 			return mark, .Bad_Utf8
 		}
 	}
@@ -407,7 +406,7 @@ escape_room :: proc(dst: ^[dynamic]u8, out: [^]u8, w, rest: int) -> [^]u8 {
 	if w + need <= cap(dst^) {
 		return out
 	}
-	walk.edge_publish(dst, w)
+	put_publish(dst, w)
 	if put_reserve(dst, need) == nil {
 		return nil
 	}

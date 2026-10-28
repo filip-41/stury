@@ -12,7 +12,12 @@ Edge :: walk.Edge
 Strictness :: core_pkg.Strictness
 Limits :: walk.Limits
 Check_Level :: walk.Check_Level
-Error :: core_pkg.Error
+Error :: walk.Scan_Error
+Public_Error :: walk.Public_Error
+error_of :: walk.error_of
+fault_of :: walk.fault_of
+KIND_LITERAL :: walk.KIND_LITERAL
+Fault :: walk.Fault
 Resolution :: walk.Resolution
 Strictness_Axes :: walk.Strictness_Axes
 Validity :: walk.Validity
@@ -22,7 +27,7 @@ Scan_Query :: walk.Scan_Query
 Walk_Fault :: walk.Walk_Fault
 Kind :: walk.Kind
 Row :: core_pkg.Row
-Row_Document :: core_pkg.Row_Document
+Document :: core_pkg.Document
 Node :: walk.Node
 NO_NODE :: walk.NO_NODE
 VC_NONE :: walk.VC_NONE
@@ -46,11 +51,14 @@ Open_Frame :: walk.Open_Frame
 Key_Set :: walk.Key_Set
 Key_Entry :: walk.Key_Entry
 KEY_ESCAPED :: walk.KEY_ESCAPED
-MAX_DEPTH :: walk.MAX_DEPTH
+MAX_DEPTH :: core_pkg.MAX_DEPTH
 DEPTH_CEILING :: walk.DEPTH_CEILING
 NO_KEY :: core_pkg.NO_KEY
 
 resolve_under :: walk.resolve_under
+is_space :: walk.is_space
+skip_space :: walk.skip_space
+skip_space_back :: walk.skip_space_back
 resolve_queries :: walk.resolve_queries
 Resolved_Queries :: walk.Resolved_Queries
 stop_capable :: walk.stop_capable

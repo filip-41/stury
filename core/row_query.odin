@@ -1,10 +1,8 @@
-package json
+package core
 
 // The query walk: `query` and `query_in` append every value a path reaches inside one built document.
 
 import "base:runtime"
-import core_pkg "../core"
-import "scan/walk"
 
 // Append to `out` the answers `path` gives in `doc` from node `n` (`query` from the root), in document order: the answers a `.Path` scan gives under
 // the default `.Last`, each `node` the value in `doc`.
@@ -27,17 +25,17 @@ import "scan/walk"
 @(require_results)
 query_in :: proc(doc: ^Document, n: Node, path: Path_Spec, out: ^[dynamic]Answer) -> (err: Maybe(Path_Error)) {
 	when ODIN_DEBUG {
-		core_pkg.check_node(doc, n)
+		check_node(doc, n)
 	}
-	buf: core_pkg.Path_Buf
-	p := core_pkg.path_resolve(path, &buf, doc.rows.allocator) or_return
+	buf: Path_Buf
+	p := path_resolve(path, &buf, doc.rows.allocator) or_return
 	defer delete(buf.heap, doc.rows.allocator)
-	if !has(doc, n) {
+	if !dom_has(doc.rows[:], n) {
 		return nil
 	}
 	w := Query_Walk{doc = doc, mode = .Last, out = out, path = p, nodes = true}
 	if !query_from(&w, n, holder_of(doc, n), p.steps) {
-		return core_pkg.PATH_OUT_OF_MEMORY
+		return PATH_OUT_OF_MEMORY
 	}
 	return nil
 }
@@ -49,7 +47,7 @@ query :: proc(doc: ^Document, path: Path_Spec, out: ^[dynamic]Answer) -> (err: M
 }
 
 // The container holding `n`, `NO_NODE` for the root: the nearest row before it whose run covers it.
-@(private = "file")
+@(require_results)
 holder_of :: proc(doc: ^Document, n: Node) -> Node {
 	for i := int(n) - 1; i >= 0; i -= 1 {
 		if i + int(doc.rows[i].subtree_size) > int(n) {
@@ -62,7 +60,6 @@ holder_of :: proc(doc: ^Document, n: Node) -> Node {
 // A path's walk over a document: each answer goes to `out`, owned by the container it was met in, until `limit`
 // more counted answers are wanted (`answer_cut`). `mode` is the occurrence of a repeated key that answers; under
 // `.Last` a path with no `Any` step reads one branch. `nodes` keeps each found value's row in `node`.
-@(private)
 Query_Walk :: struct {
 	doc:     ^Document,
 	mode:    Duplicates,
@@ -73,7 +70,7 @@ Query_Walk :: struct {
 	counted: int,
 }
 
-@(private)
+// Walk `steps` from `n`, held in `holder`, appending each answer; false when `out` refused to grow.
 query_from :: proc(w: ^Query_Walk, n, holder: Node, steps: []Step) -> bool {
 	if w.path.limit > 0 && w.counted >= w.path.limit {
 		return true
@@ -137,8 +134,8 @@ query_from :: proc(w: ^Query_Walk, n, holder: Node, steps: []Step) -> bool {
 
 // One answer, `n` met in `holder` (`NO_NODE` for a step that does not apply).
 @(private = "file")
-query_out :: proc(w: ^Query_Walk, n, holder: Node, outcome: Path_Outcome) -> bool {
-	if core_pkg.answer_cut(w.path.limit, &w.counted, outcome, w.path.per_element) {
+query_out :: proc(w: ^Query_Walk, n, holder: Node, outcome: Answer_Outcome) -> bool {
+	if answer_cut(w.path.limit, &w.counted, outcome, w.path.per_element) {
 		return true
 	}
 	rows := w.doc.rows[:]
@@ -157,9 +154,9 @@ query_out :: proc(w: ^Query_Walk, n, holder: Node, outcome: Path_Outcome) -> boo
 query_fail :: proc(w: ^Query_Walk, n, holder: Node, steps: []Step, missed: bool, met: Kind) -> bool {
 	owner := n if missed else holder
 	if w.path.per_element {
-		return query_out(w, NO_NODE, owner, walk.per_element_outcome(steps, missed, met))
+		return query_out(w, NO_NODE, owner, per_element_outcome(steps, missed, met))
 	}
-	if !walk.steps_have_any(w.path.steps) {
+	if !steps_have_any(w.path.steps) {
 		return query_out(w, NO_NODE, owner, .Missing if missed else .Type_Mismatch)
 	}
 	return true

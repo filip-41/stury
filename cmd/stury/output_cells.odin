@@ -1,60 +1,51 @@
 package main
 
-// Writes --to csv and --to tsv output. Each output is one record. An object is a row under a header made of the
-// first object's keys (sorted under -S). A key missing from an object is an empty cell. A key missing from the
-// header ends the run, unless --grow-header is set: then every row is held, and the header lists all keys in
-// first-seen order (sorted under -S). An array or a scalar is a row without a header; the two shapes do not mix.
-// A cell is a string's text, a number as jq prints it, true, false, or empty for null. An array or object in a
-// cell ends the run. So does a record the dialect cannot write: no cells, or one empty cell, is a blank line,
+// Writes --to csv and --to tsv output. Each output is one record of a `csv.Table`: an object a row under a header
+// made of the first object's keys (sorted under -S), a key missing from an object an empty cell. A key missing
+// from the header ends the run, unless --grow-header is set: then every row is held, and the header lists all keys
+// in first-seen order (sorted under -S). An array or a scalar is a row without a header; the two shapes do not
+// mix. A cell is a string's text, a number as jq prints it, true, false, or empty for null. An array or object in
+// a cell ends the run. So does a record the dialect cannot write: no cells, or one empty cell, is a blank line,
 // which reads back as no record.
 
 import "base:runtime"
-import "core:fmt"
 import "core:math"
-import "core:slice"
-import "core:strings"
 import csv "../../csv"
 import "jq"
+import "message"
 
 // The `Record_Piece.stop` value for a record that cannot be written. The main thread reports it as the sequential
 // run would. A fault in the text is 0.
 TABLE_STOP :: 1
 
-Table_Shape :: enum u8 {
-	Unset,
-	Objects,
-	Rows,
-}
-
-// The run's CSV output table. It is heap-allocated, except the strings of `held` and `header`, because it
-// outlives each input's arena.
+// The run's CSV output table, heap-allocated, because it outlives each input's arena.
 Table :: struct {
-	dialect: csv.Dialect,
-	format:  string,
-	grow:    bool, // --grow-header: the rows are held, and written with the finished header when the run ends
-	shape:   Table_Shape,
-	count:   int, // outputs written so far
-	header:  [dynamic]string,
-	slot:    map[string]int, // header name to cell index
-	held:    [dynamic][dynamic]Maybe(string),
+	rows:   csv.Table,
+	format: string,
+	count:  int, // outputs written so far
 }
 
 table_make :: proc(o: ^Opts) -> ^Table {
 	heap := runtime.heap_allocator()
 	t := new(Table, heap)
-	t.dialect, t.format, t.grow = FORMATS[o.to].dialect, FORMATS[o.to].name, o.grow_header
-	t.header = make([dynamic]string, heap)
-	t.slot = make(map[string]int, heap)
-	t.held = make([dynamic][dynamic]Maybe(string), heap)
+	t.rows = csv.table_make({dialect = cells_out(o), sort_keys = o.sort_keys}, o.grow_header, allocator = heap)
+	t.format = FORMATS[o.to].name
 	return t
+}
+
+table_free :: proc(t: ^Table) {
+	if t != nil {
+		csv.destroy(&t.rows)
+		free(t, runtime.heap_allocator())
+	}
 }
 
 // Appends the record of `cells` to the run's output. A refused record cuts the output back to `mark`, when one is
 // given, and ends the run; on a pool thread's copy it sets `faulted` instead and returns false, and the caller stops
 // for the main thread to end the run.
 put_row :: proc(run: ^Run, cells: []Maybe(string), mark := -1) -> bool {
-	err := csv.write_record(&run.out, cells, run.table.dialect, at_start = !run.rows_begun)
-	if err == .None {
+	fault, refused := csv.write_record(&run.out, cells, run.table.rows.opts, at_start = !run.rows_begun).?
+	if !refused {
 		run.rows_begun = true
 		return true
 	}
@@ -65,14 +56,14 @@ put_row :: proc(run: ^Run, cells: []Maybe(string), mark := -1) -> bool {
 		run.faulted = true
 		return false
 	}
-	table_fail(run, "%s", row_refusal(run.table, err))
+	table_fail(run, "%s", row_refusal(run.table, fault.kind))
 }
 
 // Appends the row of an object's `cells` under `keys` to the output; the first row is preceded by the header. A
 // refused row writes neither (`put_row`).
 put_object_row :: proc(run: ^Run, keys: []string, cells: []Maybe(string)) -> bool {
 	mark := len(run.out)
-	if !run.held && run.table.shape == .Unset {
+	if !run.held && run.table.rows.shape == .Unset {
 		open_object_table(run, keys)
 	}
 	return put_row(run, cells, mark)
@@ -80,12 +71,10 @@ put_object_row :: proc(run: ^Run, keys: []string, cells: []Maybe(string)) -> boo
 
 // Starts a table of objects with a header of `keys` and writes the header record.
 open_object_table :: proc(run: ^Run, keys: []string) {
-	t := run.table
-	t.shape = .Objects
-	for k in keys {
-		add_column(t, k)
+	if e, bad := csv.table_open(&run.table.rows, &run.out, keys, !run.rows_begun).?; bad {
+		table_refused(run, e, keys)
 	}
-	put_header(run, t)
+	run.rows_begun = true
 }
 
 header_writable :: proc(run: ^Run, keys: []string) -> bool {
@@ -94,27 +83,25 @@ header_writable :: proc(run: ^Run, keys: []string) -> bool {
 		names[i] = k
 	}
 	scratch := make([dynamic]byte, context.temp_allocator)
-	return csv.write_record(&scratch, names, run.table.dialect, at_start = !run.rows_begun) == .None
+	return csv.write_record(&scratch, names, run.table.rows.opts, at_start = !run.rows_begun) == nil
 }
 
-row_refusal :: proc(t: ^Table, err: csv.Marshal_Error) -> string {
+row_refusal :: proc(t: ^Table, err: csv.Marshal_Error_Kind) -> string {
 	#partial switch err {
 	case .Unwritable:
 		// Only a dialect without quoting cannot write a cell that starts with a BOM; CSV quotes it.
-		bom := ", and text opening with a byte order mark reads back without it" if t.dialect.quoting == .None else ""
-		return fmt.tprintf("a record cannot be written as %s: no cell, or one empty cell, is a blank line, which reads back as no record%s", t.format, bom)
+		bom := ", and text opening with a byte order mark reads back without it" if t.rows.dialect.quoting != .Quotes else ""
+		return message.build_temp("a record cannot be written as %s: no cell, or one empty cell, is a blank line, which reads back as no record%s", t.format, bom)
 	case .Bad_Utf8:
-		return fmt.tprintf("a text that is not UTF-8 cannot be written as %s", t.format)
+		return message.build_temp("a text that is not UTF-8 cannot be written as %s", t.format)
 	}
-	return fmt.tprintf("a record cannot be written as %s: %v", t.format, err)
+	return message.build_temp("a record cannot be written as %s: %v", t.format, err)
 }
 
 // Flushes the output so far, reports a row that cannot be written, and ends the run.
 table_fail :: proc(run: ^Run, format: string, args: ..any) -> ! {
 	flush_some(run, force = true)
-	fmt.eprintf("stury: error: ")
-	fmt.eprintf(format, ..args)
-	fmt.eprintln()
+	message.write_stderr("stury: error: %s\n", message.build_temp(format, ..args))
 	finish(run, EXIT_INPUT)
 }
 
@@ -123,23 +110,42 @@ print_row :: proc(run: ^Run, v: jq.Value) -> bool {
 	t := run.table
 	t.count += 1
 	run.ret = JQ_OK if jq.truthy(v) else JQ_OK_NULL_KIND
-	is_object := jq.kind(v) == .Object
-	shape := Table_Shape.Objects if is_object else .Rows
-	switch {
-	case t.shape == .Unset:
-		t.shape = shape
-	case t.shape != shape && is_object:
-		table_fail(run, "output %d is an object, after arrays or scalars: a table is all objects (under a header) or none", t.count)
-	case t.shape != shape:
-		table_fail(run, "output %d is not an object, after objects: a table is all objects (under a header) or none", t.count)
-	}
-	if is_object {
-		object_row(run, t, v)
+	mark := len(run.out)
+	keys: []string
+	err: Maybe(csv.Table_Error)
+	if jq.kind(v) == .Object {
+		keys, err = object_row(run, t, v)
 	} else {
-		plain_row(run, t, v)
+		err = plain_row(run, t, v)
 	}
+	if e, bad := err.?; bad {
+		table_refused(run, e, keys)
+	}
+	run.rows_begun = run.rows_begun || len(run.out) > mark
 	flush_some(run)
 	return true
+}
+
+// Ends the run on table error `e`, `keys` the object's keys. A refused record on a pool thread's copy sets
+// `faulted` instead, for the main thread to end the run.
+@(private = "file")
+table_refused :: proc(run: ^Run, e: csv.Table_Error, keys: []string) {
+	t := run.table
+	switch e.kind {
+	case .Mixed_Shapes:
+		if t.rows.shape == .Rows {
+			table_fail(run, "output %d is an object, after arrays or scalars: a table is all objects (under a header) or none", t.count)
+		}
+		table_fail(run, "output %d is not an object, after objects: a table is all objects (under a header) or none", t.count)
+	case .Unknown_Key:
+		table_fail(run, "output %d has the key %q, which the header lacks (the header is output 1's keys; --grow-header adds keys as they come)", t.count, keys[e.key])
+	case .Unwritable, .None:
+		if run.held {
+			run.faulted = true
+			return
+		}
+		table_fail(run, "%s", row_refusal(t, e.record))
+	}
 }
 
 // Returns the cell text for `v`: nil for null, `nested` for an array or object.
@@ -166,6 +172,16 @@ cell_of :: proc(v: jq.Value) -> (cell: Maybe(string), nested: bool) {
 	return nil, false
 }
 
+// Ends the run on the nested cell `v` of a value whose keys so far are `keys`, reporting first the refusal the
+// table gives the value before its cells (`csv.table_accepts`), as it met that refusal before the cell.
+@(private = "file")
+nested_in :: proc(run: ^Run, keys: []string, object: bool, v: jq.Value, where_: string) -> ! {
+	if e, bad := csv.table_accepts(&run.table.rows, keys, object).?; bad {
+		table_refused(run, e, keys)
+	}
+	nested_cell(run, v, where_)
+}
+
 @(private = "file")
 nested_cell :: proc(run: ^Run, v: jq.Value, where_: string) -> ! {
 	what := "an object" if jq.kind(v) == .Object else "an array"
@@ -174,149 +190,57 @@ nested_cell :: proc(run: ^Run, v: jq.Value, where_: string) -> ! {
 
 // Writes the row of an array's elements or of a scalar.
 @(private = "file")
-plain_row :: proc(run: ^Run, t: ^Table, v: jq.Value) {
+plain_row :: proc(run: ^Run, t: ^Table, v: jq.Value) -> Maybe(csv.Table_Error) {
 	if jq.kind(v) != .Array {
 		cell, _ := cell_of(v)
 		cells := [1]Maybe(string){cell}
-		put_row(run, cells[:])
-		return
+		return csv.table_row(&t.rows, &run.out, cells[:], !run.rows_begun)
 	}
 	cells := make([dynamic]Maybe(string), context.temp_allocator)
 	it := jq.iterate(v)
 	for _, e in jq.next_member(&it) {
 		cell, nested := cell_of(e)
 		if nested {
-			nested_cell(run, e, fmt.tprintf("at cell %d", len(cells) + 1))
+			nested_in(run, nil, false, e, message.build_temp("at cell %d", len(cells) + 1))
 		}
 		append(&cells, cell)
 	}
-	put_row(run, cells[:])
+	return csv.table_row(&t.rows, &run.out, cells[:], !run.rows_begun)
 }
 
-// Writes the row of an object's values under the header. The first object's keys make the header.
+// Writes the row of an object's values, returning its keys.
 @(private = "file")
-object_row :: proc(run: ^Run, t: ^Table, v: jq.Value) {
-	first := t.count == 1
-	if first {
-		names: []string
-		if run.opts.sort_keys {
-			names = jq.sorted_keys(v)
-		} else {
-			list := make([dynamic]string, context.temp_allocator)
-			it := jq.iterate(v)
-			for k in jq.next_member(&it) {
-				append(&list, k)
-			}
-			names = list[:]
-		}
-		for k in names {
-			add_column(t, k)
-		}
-	}
-	cells := make([dynamic]Maybe(string), len(t.header), context.temp_allocator)
-	columns := len(t.header)
+object_row :: proc(run: ^Run, t: ^Table, v: jq.Value) -> ([]string, Maybe(csv.Table_Error)) {
+	keys := make([dynamic]string, context.temp_allocator)
+	cells := make([dynamic]Maybe(string), context.temp_allocator)
 	it := jq.iterate(v)
 	for k, e in jq.next_member(&it) {
-		at, known := t.slot[k]
-		if !known {
-			if !t.grow {
-				table_fail(run, "output %d has the key %q, which the header lacks (the header is output 1's keys; --grow-header adds keys as they come)", t.count, k)
-			}
-			at = add_column(t, k)
-			resize(&cells, len(t.header))
-		}
+		append(&keys, k)
 		cell, nested := cell_of(e)
 		if nested {
-			drop_columns_from(t, columns)
-			nested_cell(run, e, fmt.tprintf("at key %q", k))
+			nested_in(run, keys[:], true, e, message.build_temp("at key %q", k))
 		}
-		cells[at] = cell
+		append(&cells, cell)
 	}
-	if t.grow {
-		hold_row(t, cells[:])
-		return
-	}
-	// The header and the first row are one output; a refused row writes neither.
-	mark := len(run.out)
-	if first {
-		put_header(run, t)
-	}
-	put_row(run, cells[:], mark)
-}
-
-@(private = "file")
-add_column :: proc(t: ^Table, name: string) -> int {
-	at := len(t.header)
-	owned := strings.clone(name, runtime.heap_allocator())
-	append(&t.header, owned)
-	t.slot[owned] = at
-	return at
-}
-
-// Truncates the header to `columns`, so that a key is added only with an accepted row.
-@(private = "file")
-drop_columns_from :: proc(t: ^Table, columns: int) {
-	for name in t.header[columns:] {
-		delete_key(&t.slot, name)
-		delete(name, runtime.heap_allocator())
-	}
-	resize(&t.header, columns)
-}
-
-@(private = "file")
-put_header :: proc(run: ^Run, t: ^Table) {
-	names := make([]Maybe(string), len(t.header), context.temp_allocator)
-	for h, i in t.header {
-		names[i] = h
-	}
-	put_row(run, names)
-}
-
-// Holds a row until the header is complete. The text is copied to the heap, because the input's arena is freed
-// before the run ends.
-@(private = "file")
-hold_row :: proc(t: ^Table, cells: []Maybe(string)) {
-	heap := runtime.heap_allocator()
-	row := make([dynamic]Maybe(string), len(cells), heap)
-	for c, i in cells {
-		if text, present := c.?; present {
-			row[i] = strings.clone(text, heap)
-		}
-	}
-	append(&t.held, row)
+	return keys[:], csv.table_object(&t.rows, &run.out, keys[:], cells[:], !run.rows_begun)
 }
 
 // Writes the rows held by --grow-header under the header of every key. A refused row ends the run. A second call
 // does nothing.
 write_held_rows :: proc(run: ^Run) {
 	t := run.table
-	if t == nil || run.held || !t.grow {
+	if t == nil || run.held {
 		return
 	}
-	t.grow = false
-	if len(t.held) == 0 {
-		return
-	}
-	// Under -S the header is every key in byte order, and each row's cells follow it.
-	order := make([]int, len(t.header), context.temp_allocator)
-	for &at, i in order {
-		at = i
-	}
-	if run.opts.sort_keys {
-		names := slice.clone(t.header[:], context.temp_allocator)
-		slice.sort(names)
-		for name, i in names {
-			order[i] = t.slot[name]
+	for {
+		more, err := csv.table_finish(&t.rows, &run.out, !run.rows_begun)
+		if e, bad := err.?; bad {
+			table_fail(run, "%s", row_refusal(t, e.record))
 		}
-		copy(t.header[:], names)
-	}
-	put_header(run, t)
-	cells := make([]Maybe(string), len(t.header), context.temp_allocator)
-	for row in t.held {
-		for &c, i in cells {
-			c = row[order[i]] if order[i] < len(row) else nil
+		if !more {
+			return
 		}
-		put_row(run, cells)
+		run.rows_begun = true
 		flush_some(run)
 	}
 }

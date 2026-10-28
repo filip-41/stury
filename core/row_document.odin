@@ -1,7 +1,8 @@
 package core
 
-// The row document and the reads of it that need no format: kind, members by index and in order, the
-// authored span, the facts. A format's package decodes the strings, keys and numbers of its rows.
+// The row document, the value model every format builds and every reader reads: kind, members by index and in
+// order, the authored span, the facts. The scalar reads are in row_read.odin, the walks in row_walk.odin and
+// row_query.odin; a flagged row is read through the document's spelling (row_spelling.odin).
 
 import "core:slice"
 
@@ -10,21 +11,37 @@ import "core:slice"
 //	- `src` is borrowed and must outlive every read: a number is decoded from its text there at each read,
 //	  and an escape-free string is a slice of it.
 //	- Everything else is owned by whoever built it.
-Row_Document :: struct {
+//
+// A document is one of two tiers, which its builder picks:
+//
+//	- Decoded (`decoded`, as `json.build` and a `.Strict` `.Dom` request make it): the build decoded every
+//	  flagged string and key into `values`, so no read writes and any number of threads may read it at once.
+//	- Scanned (a `.Nodes` request, a record format's rows): a flagged string or key is decoded on its first
+//	  read and kept in `cache`, and `child_by_index` lists a long container's members there, so a read may
+//	  write and the document is read by one thread at a time.
+Document :: struct {
 	src:       []byte,
 	// One row per value, in the order the values appear in `src`.
 	rows:      [dynamic]Row,
-	// Escaped strings the build decoded, addressed by the rows.
+	// Escaped strings and keys the build decoded, addressed by the rows and `key_texts`.
 	values:    [dynamic]u8,
+	// The escaped keys the build decoded, by node (`decoded` only).
+	key_texts: [dynamic]Key_Text,
 	// What reads decoded or listed, made by the first such read (`row_cache`).
 	cache:     ^Row_Cache,
 	// The comments of a document read with them.
 	facts:     [dynamic]Fact,
-	dialect:   Row_Dialect,
+	// How its flagged rows are read; nil on a document with none.
+	spelling:  ^Row_Spelling,
 	// Read under a nesting cap past the format's default, so it may nest deeper than its writer writes.
 	deep:      bool,
 	// The builder knows no object repeats a key, so a reader need not look.
 	distinct_keys: bool,
+	// The builder left members out of the rows (`json.build` under `.First`), so a container's span may hold
+	// text no row covers: it is the authored text, not the container's.
+	pruned:        bool,
+	// The decoded tier: no read writes (above).
+	decoded:   bool,
 }
 
 // What a document's reads keep, in the rows' allocator, so a document that is only built carries one pointer.
@@ -39,7 +56,7 @@ Row_Cache :: struct {
 }
 
 // The document's cache, made in the rows' allocator on the first call; nil when that allocation is refused.
-row_cache :: proc(doc: ^Row_Document) -> ^Row_Cache {
+row_cache :: proc(doc: ^Document) -> ^Row_Cache {
 	if doc.cache != nil {
 		return doc.cache
 	}
@@ -55,7 +72,7 @@ row_cache :: proc(doc: ^Row_Document) -> ^Row_Cache {
 }
 
 // Empty the cache for a rescan, keeping its storage.
-row_cache_reset :: proc(doc: ^Row_Document) {
+row_cache_reset :: proc(doc: ^Document) {
 	if c := doc.cache; c != nil {
 		clear(&c.keys)
 		clear(&c.strings)
@@ -66,7 +83,7 @@ row_cache_reset :: proc(doc: ^Row_Document) {
 }
 
 // Free the cache and everything it holds.
-row_cache_destroy :: proc(doc: ^Row_Document) {
+row_cache_destroy :: proc(doc: ^Document) {
 	if c := doc.cache; c != nil {
 		delete(c.keys)
 		delete(c.strings)
@@ -78,9 +95,19 @@ row_cache_destroy :: proc(doc: ^Row_Document) {
 	}
 }
 
+// Frees a document's arrays and cache, and empties it.
+row_document_destroy :: proc(doc: ^Document) {
+	delete(doc.rows)
+	delete(doc.values)
+	delete(doc.key_texts)
+	delete(doc.facts)
+	row_cache_destroy(doc)
+	doc^ = {}
+}
+
 // The kind of value `n`. `ok` is false, and the kind `.Null`, when `n` is no value, such as `NO_NODE`.
 @(require_results)
-kind :: #force_inline proc(doc: ^Row_Document, n: Node) -> (k: Kind, ok: bool) {
+kind :: #force_inline proc(doc: ^Document, n: Node) -> (k: Kind, ok: bool) {
 	if !dom_has(doc.rows[:], n) {
 		return .Null, false
 	}
@@ -90,7 +117,7 @@ kind :: #force_inline proc(doc: ^Row_Document, n: Node) -> (k: Kind, ok: bool) {
 // The authored text of value `n`, a slice of `doc.src`: a string with its quotes, a container with its
 // brackets and everything between. Nil for `NO_NODE`.
 @(require_results)
-get_raw :: proc(doc: ^Row_Document, n: Node) -> []byte {
+get_raw :: proc(doc: ^Document, n: Node) -> []byte {
 	if !dom_has(doc.rows[:], n) {
 		return nil
 	}
@@ -100,7 +127,7 @@ get_raw :: proc(doc: ^Row_Document, n: Node) -> []byte {
 // The facts attached to `n`, sorted by place (`Fact_Place`) then source order. Empty for a document read
 // without them.
 @(require_results)
-facts :: proc(doc: ^Row_Document, n: Node) -> []Fact {
+facts :: proc(doc: ^Document, n: Node) -> []Fact {
 	all := doc.facts[:]
 	lo, _ := slice.binary_search_by(all, n, proc(f: Fact, n: Node) -> slice.Ordering {
 		return slice.cmp(f.node, n) if f.node != n else .Greater
@@ -114,15 +141,16 @@ facts :: proc(doc: ^Row_Document, n: Node) -> []Fact {
 
 // The member count of container `n`; zero on a scalar.
 @(require_results)
-child_count :: proc(doc: ^Row_Document, n: Node) -> int {
+child_count :: proc(doc: ^Document, n: Node) -> int {
 	return dom_child_count(doc.rows[:], n)
 }
 
 // Member `i` of container `n`, 0-based (from the end when negative), or `NO_NODE`. O(1) over an array of
-// scalars, and over any other container once a call has reached NTH_WALK members into it, which lists its
-// members once in its cache (`Row_Cache`): a write and an allocation from the rows' allocator.
+// scalars. Over any other container of a scanned document, O(1) once a call has reached NTH_WALK members into
+// it, which lists its members once in its cache (`Row_Cache`): a write and an allocation from the rows'
+// allocator. A decoded document walks to the member at each call.
 @(require_results)
-child_by_index :: proc(doc: ^Row_Document, n: Node, index: int) -> Node {
+child_by_index :: proc(doc: ^Document, n: Node, index: int) -> Node {
 	i := index
 	if i < 0 {
 		i += child_count(doc, n)
@@ -133,7 +161,7 @@ child_by_index :: proc(doc: ^Row_Document, n: Node, index: int) -> Node {
 	if i == 0 {
 		return dom_first_member(doc.rows[:], n)
 	}
-	if i < NTH_WALK || i >= child_count(doc, n) || dom_flat_array(doc.rows[n]) {
+	if i < NTH_WALK || i >= child_count(doc, n) || dom_flat_array(doc.rows[n]) || doc.decoded {
 		return dom_nth_member(doc.rows[:], n, i)
 	}
 	at, listed := 0, false
@@ -157,7 +185,7 @@ NTH_WALK :: 64
 // List the members of container `n` in `members`, and where they start; false when the allocator refused,
 // or a refused append left the container short of rows, and nothing is kept.
 @(private = "file")
-list_members :: proc(doc: ^Row_Document, n: Node) -> (at: int, ok: bool) {
+list_members :: proc(doc: ^Document, n: Node) -> (at: int, ok: bool) {
 	c := row_cache(doc)
 	if c == nil {
 		return
@@ -185,14 +213,14 @@ list_members :: proc(doc: ^Row_Document, n: Node) -> (at: int, ok: bool) {
 // The position of a walk over one container's members. A value, owning nothing; it borrows the document. A
 // member's run of rows ends where the next begins, so a step is one add, bounded by the container's end (`end`).
 Members :: struct {
-	doc:  ^Row_Document,
+	doc:  ^Document,
 	node: Node,
 	end:  Node,
 }
 
 // Start a walk over the members of `n`: over a scalar or `NO_NODE`, an empty one.
 @(require_results)
-members_of :: proc(doc: ^Row_Document, n: Node) -> Members {
+members_of :: proc(doc: ^Document, n: Node) -> Members {
 	when ODIN_DEBUG {
 		check_node(doc, n)
 	}
@@ -217,11 +245,11 @@ children_next :: #force_inline proc(it: ^Members) -> (n: Node, ok: bool) {
 // A debug build's check of the one row `n` and its run, which the readers trust of a document whose fields a
 // caller can break. `row_ok` is the check of row `i`. Compiled out unless `ODIN_DEBUG`.
 when ODIN_DEBUG {
-	check_node :: proc(doc: ^Row_Document, n: Node, loc := #caller_location) {
+	check_node :: proc(doc: ^Document, n: Node, loc := #caller_location) {
 		assert(!dom_has(doc.rows[:], n) || row_ok(doc, int(n)), "Document is corrupt: a row's run or span is out of range", loc)
 	}
 
-	row_ok :: proc(doc: ^Row_Document, i: int) -> bool {
+	row_ok :: proc(doc: ^Document, i: int) -> bool {
 		r := doc.rows[i]
 		return r.subtree_size >= 1 && i + int(r.subtree_size) <= len(doc.rows) && r.lo <= r.hi && int(r.hi) <= len(doc.src) &&
 			(r.kind == .Array || r.kind == .Object || r.subtree_size == 1)

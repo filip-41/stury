@@ -13,7 +13,8 @@ READ_AHEAD :: 3
 //	- It runs `records` over a window of the stream. The records, their offsets (from the stream's first byte)
 //	  and the fault are the ones `records` gives for the whole input, whatever the read sizes.
 //	- A record's fields index its `src`, the window, which moves at the next `next_record`.
-//	- Every field is internal except `chunk`, `err` and `read_err`.
+//	- Every field is internal except `chunk`, `err` and `read_err`; `record_window` and `open_field_at` say where it
+//	  stands.
 Record_Reader :: struct {
 	// The window, `buf[:hi]`. The bytes read before a reader failure (`read_err`) are input, except those past
 	// the last LF: their record is not yielded and a fault in them is not reported.
@@ -38,6 +39,27 @@ records_from :: proc(r: io.Reader, opts := Read_Opts{}, allocator := context.all
 		rr.err = Error{kind = .Bad_Option}
 	}
 	return rr
+}
+
+// The window `rr`'s records index (`Record.src`) and the stream offset of its first byte.
+record_window :: core_pkg.record_window
+
+// Where the record being read starts in its iterator's source (the window for a `Record_Reader`), which is past
+// the last record yielded, and where its field being read starts: at the opening quote of a quoted field that the
+// iterator's fault left unterminated.
+open_field_at :: proc {
+	records_open_field_at,
+	reader_open_field_at,
+}
+
+@(private, require_results)
+records_open_field_at :: proc(it: ^Records) -> (record, field: int) {
+	return it.rec_lo, it.field_lo
+}
+
+@(private, require_results)
+reader_open_field_at :: proc(rr: ^Record_Reader) -> (record, field: int) {
+	return rr.it.rec_lo, rr.it.field_lo
 }
 
 @(private, require_results)

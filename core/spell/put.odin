@@ -31,7 +31,16 @@ put_commit :: #force_inline proc(dst: ^[dynamic]u8, n: int) {
 	(^runtime.Raw_Dynamic_Array)(dst).len += n
 }
 
-put_byte :: #force_inline proc(dst: ^[dynamic]u8, x: u8) -> core_pkg.Marshal_Error {
+// Say that `arr` holds `n` elements: a plain length write, not `resize`, which would zero what a write cursor
+// just wrote past `len(arr)`. Legal only after a reserve that covers them, so `n <= cap(arr)`.
+put_publish :: #force_inline proc(arr: ^[dynamic]$T, n: int) {
+	when ODIN_DEBUG {
+		assert(n <= cap(arr^))
+	}
+	(^runtime.Raw_Dynamic_Array)(arr).len = n
+}
+
+put_byte :: #force_inline proc(dst: ^[dynamic]u8, x: u8) -> core_pkg.Marshal_Error_Kind {
 	p := put_reserve(dst, 1)
 	if p == nil {
 		return .Out_Of_Memory
@@ -41,7 +50,7 @@ put_byte :: #force_inline proc(dst: ^[dynamic]u8, x: u8) -> core_pkg.Marshal_Err
 	return .None
 }
 
-put_bytes :: proc(dst: ^[dynamic]u8, s: string) -> core_pkg.Marshal_Error {
+put_bytes :: proc(dst: ^[dynamic]u8, s: string) -> core_pkg.Marshal_Error_Kind {
 	p := put_reserve(dst, len(s))
 	if p == nil {
 		return .Out_Of_Memory
@@ -51,7 +60,7 @@ put_bytes :: proc(dst: ^[dynamic]u8, s: string) -> core_pkg.Marshal_Error {
 	return .None
 }
 
-put_i64 :: proc(dst: ^[dynamic]u8, v: i64) -> core_pkg.Marshal_Error {
+put_i64 :: proc(dst: ^[dynamic]u8, v: i64) -> core_pkg.Marshal_Error_Kind {
 	p := put_reserve(dst, INT_ROOM)
 	if p == nil {
 		return .Out_Of_Memory
@@ -60,7 +69,7 @@ put_i64 :: proc(dst: ^[dynamic]u8, v: i64) -> core_pkg.Marshal_Error {
 	return .None
 }
 
-put_u64 :: proc(dst: ^[dynamic]u8, v: u64) -> core_pkg.Marshal_Error {
+put_u64 :: proc(dst: ^[dynamic]u8, v: u64) -> core_pkg.Marshal_Error_Kind {
 	p := put_reserve(dst, INT_ROOM)
 	if p == nil {
 		return .Out_Of_Memory
@@ -69,7 +78,7 @@ put_u64 :: proc(dst: ^[dynamic]u8, v: u64) -> core_pkg.Marshal_Error {
 	return .None
 }
 
-put_f64 :: proc(dst: ^[dynamic]u8, f: f64) -> core_pkg.Marshal_Error {
+put_f64 :: proc(dst: ^[dynamic]u8, f: f64) -> core_pkg.Marshal_Error_Kind {
 	if is_non_finite(f) {
 		return .Non_Finite
 	}
@@ -90,7 +99,7 @@ FALSE_WORD :: u64(0x65_73_6c_61_66)
 
 // Write the `.Int`, `.Uint`, `.Float` or `.Bool` scalar of `size` bytes at `at` into `p`, which has
 // SCALAR_ROOM bytes. Returns the count written.
-spell_scalar :: #force_inline proc(p: [^]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> (int, core_pkg.Marshal_Error) #no_bounds_check {
+spell_scalar :: #force_inline proc(p: [^]u8, kind: core_pkg.Shape_Kind, at: rawptr, size: u8) -> (int, core_pkg.Marshal_Error_Kind) #no_bounds_check {
 	#partial switch kind {
 	case .Int:
 		return spell_i64(p, #force_inline core_pkg.shape_int_load(at, size)), .None

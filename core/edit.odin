@@ -1,10 +1,12 @@
 package core
 
-// The parts of text editing shared by every codec: the byte-span edit, its ordering rule, its application, and
-// an allocator wrapper that distinguishes a refused allocation from an edit that found nothing.
+// The parts of text editing shared by every codec: the byte-span edit, its ordering rule, its application, an
+// allocator wrapper that distinguishes a refused allocation from an edit that found nothing, and the driver of
+// the path edits (`path_edit`) over a format's `Edits`.
 
 import "base:runtime"
 import "core:mem"
+import "core:slice"
 
 // One edit: `src[lo:hi]` is replaced by `bytes`.
 Edit :: struct {
@@ -124,24 +126,87 @@ unless_refused :: proc(w: ^Refusal_Watch, out: []byte, err: Maybe($E), oom: E) -
 	return out, err
 }
 
-// The capabilities every format package gives, one procedure type each over the format's own read options,
-// record iterator, record, document and request. A format's suite fills one with its procedures, so a signature
-// that drifts from these fails the build.
-Format :: struct($Opts, $Records, $Record, $Document, $Request: typeid) {
-	validate:         proc(src: []byte, opts: Opts, runner: ^Batch_Runner) -> Maybe(Error),
-	records:          proc(src: []byte, opts: Opts, allocator: runtime.Allocator) -> Records,
-	next_record:      proc(it: ^Records) -> (Record, bool),
-	each_record:      proc(src: []byte, task: proc(data: rawptr, piece: ^Records, k: int) -> bool, data: rawptr, opts: Opts, runner: ^Batch_Runner) -> Maybe(Error),
-	validate_records: proc(src: []byte, opts: Opts, runner: ^Batch_Runner, allocator: runtime.Allocator) -> ([]Record_Fault, Maybe(Error)),
-	find:             proc(src: []byte, path: Path_Spec, opts: Opts, allocator: runtime.Allocator) -> (Answer, Maybe(Error)),
-	build:            proc(src: []byte, opts: Opts, allocator: runtime.Allocator) -> (Document, Maybe(Error)),
-	query:            proc(doc: ^Document, path: Path_Spec, out: ^[dynamic]Answer) -> Maybe(Path_Error),
-	set:              proc(src: []byte, path: Path_Spec, value: any, opts: Opts, allocator: runtime.Allocator) -> ([]byte, Maybe(Path_Error)),
-	insert:           proc(src: []byte, path: Path_Spec, at: Insert_At, value: any, opts: Opts, allocator: runtime.Allocator) -> ([]byte, Maybe(Path_Error)),
-	remove:           proc(src: []byte, path: Path_Spec, opts: Opts, allocator: runtime.Allocator) -> ([]byte, Maybe(Path_Error)),
-	splice:           proc(src: []byte, edits: []Edit, opts: Opts, allocator: runtime.Allocator) -> ([]byte, Maybe(Path_Error)),
-	request_init:     proc(req: ^Request, paths: ..Path_Spec, opts := Opts{}, allocator := context.allocator) -> Maybe(Error),
-	scan:             proc(src: []byte, req: ^Request) -> Maybe(Error),
-	answers:          proc(req: ^Request, path: int) -> ([]Answer, Maybe(Error)),
-	route_of:         proc(src: []byte, paths: []Path, which: int, opts: Opts) -> (Route, Maybe(Error)),
+// A path edit's verb, with what it writes: `value` for all but `.Remove`, `at` for `.Insert`.
+Edit_Op :: enum u8 {
+	Set,
+	// `.Set`, and the member added to each object the path's last name is missing from.
+	Upsert,
+	Insert,
+	Remove,
+}
+
+Edit_Args :: struct {
+	op:    Edit_Op,
+	value: any,
+	at:    Insert_At,
+}
+
+// One edit whose bytes live in a shared text buffer: `src[at:cut]` becomes `text[from:to]`.
+Place :: struct {
+	at, cut:  u64,
+	from, to: int,
+}
+
+// A format's half of the path edits (`path_edit`) and its span edit. `shared` and `own`, the format's options
+// block, are the format's read options, as every capability takes them.
+Edits :: struct {
+	// The edits `args` makes at `p` in `src`, appended to `places` with their bytes in `text`. Places need not
+	// be sorted; each must be disjoint from the others. Scratch comes from `allocator`.
+	plan:     proc(src: []byte, p: Path, args: Edit_Args, shared: Read_Opts, own: rawptr, text: ^[dynamic]u8, places: ^[dynamic]Place, allocator: runtime.Allocator) -> Maybe(Path_Error),
+	// The edited text `out` of `src` judged: nil when it reads as the format reads its source.
+	judge:    proc(src, out: []byte, op: Edit_Op, shared: Read_Opts, own: rawptr, allocator: runtime.Allocator) -> Maybe(Path_Error),
+	// What a path past `MAX_PATH_STEPS` steps is refused as.
+	too_long: Path_Error_Kind,
+}
+
+// `src` with the path edit `args` at `path` made through `e`: the path resolved, the format's places applied
+// once, and the result judged. Every allocation, scratch included, is `allocator`'s; a refused one is
+// `.Out_Of_Memory` rather than a result missing an edit.
+@(require_results)
+path_edit :: proc(e: Edits, src: []byte, path: Path_Spec, args: Edit_Args, shared: Read_Opts, own: rawptr, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	watch := Refusal_Watch{backing = allocator}
+	out, err = path_edit_watched(e, src, path, args, shared, own, watched(&watch))
+	return unless_refused(&watch, out, err, PATH_OUT_OF_MEMORY)
+}
+
+@(private = "file")
+path_edit_watched :: proc(e: Edits, src: []byte, path: Path_Spec, args: Edit_Args, shared: Read_Opts, own: rawptr, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	buf: Path_Buf
+	p, perr := path_resolve(path, &buf, allocator)
+	defer delete(buf.heap, allocator)
+	if fault, bad := perr.?; bad {
+		if fault.kind == .Over_Capacity {
+			fault.kind = e.too_long
+		}
+		return nil, fault
+	}
+	text := make([dynamic]u8, allocator)
+	defer delete(text)
+	places := make([dynamic]Place, allocator)
+	defer delete(places)
+	e.plan(src, p, args, shared, own, &text, &places, allocator) or_return
+	out = places_apply(src, places[:], text[:], allocator) or_return
+	if fault := e.judge(src, out, args.op, shared, own, allocator); fault != nil {
+		delete(out, allocator)
+		return nil, fault
+	}
+	return out, nil
+}
+
+// `places` sorted and applied to `src`, their bytes from `text`; places at one byte keep their order. None is
+// `.Not_Found`; an overlap `.Bad_Edit`.
+places_apply :: proc(src: []byte, places: []Place, text: []u8, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	edit_found(len(places)) or_return
+	slice.stable_sort_by(places, proc(a, b: Place) -> bool {
+		return a.at < b.at
+	})
+	edits, aerr := make([]Edit, len(places), allocator)
+	if aerr != nil {
+		return nil, PATH_OUT_OF_MEMORY
+	}
+	defer delete(edits, allocator)
+	for p, i in places {
+		edits[i] = {lo = p.at, hi = p.cut, bytes = text[p.from:p.to]}
+	}
+	return edits_apply_checked(src, edits, allocator)
 }

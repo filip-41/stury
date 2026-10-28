@@ -90,7 +90,7 @@ bench_read :: proc(
 	}
 	walk_bytes, werr := json.marshal(walked, allocator = a)
 	tape_bytes, terr := json.marshal(taped, allocator = a)
-	if werr != .None || terr != .None || string(walk_bytes) != string(tape_bytes) {
+	if werr != nil || terr != nil || string(walk_bytes) != string(tape_bytes) {
 		return false
 	}
 	// bench/compare.py checks every other library's typed read against this dump.
@@ -117,7 +117,7 @@ bench_read :: proc(
 		t := time.tick_now()
 		switch arm {
 		case .Unmarshal:
-			ok = json.unmarshal(data, &out, opts, &plan) == nil
+			ok = json.unmarshal(data, &out, opts, &plan, context.allocator) == nil
 		case .Unmarshal_Arena:
 			ok = json.unmarshal(data, &out, opts, &plan, a) == nil
 		case .Tape:
@@ -279,8 +279,8 @@ tape_logs_subset :: proc(data: []byte, out: ^Logs_Subset_Doc, a: mem.Allocator) 
 		{steps = []json.Step{json.Name("logs"), json.Any{}, json.Name("status")}},
 		{steps = []json.Step{json.Name("logs"), json.Any{}, json.Name("id")}},
 	}
-	req := json.Request({.Path}){paths = paths[:], strictness = .Strict, allocator = a}
-	if json.scan(data, &req) != nil {
+	req: json.Request({.Path})
+	if json.request_init(&req, paths[0], paths[1], allocator = a) != nil || json.scan(data, &req) != nil {
 		return false
 	}
 	status, status_err := json.answers(&req, 0)
@@ -391,8 +391,8 @@ tape_nested_inner :: proc(doc: ^json.Document, obj: json.Node, t, bt: ^Tape_Name
 
 tape_config :: proc(data: []byte, out: ^Config_Head, a: mem.Allocator) -> bool {
 	paths := [2]json.Path{{steps = []json.Step{json.Name("name")}}, {steps = []json.Step{json.Name("port")}}}
-	req := json.Request({.Path}){paths = paths[:], strictness = .Strict, allocator = a}
-	if json.scan(data, &req) != nil {
+	req: json.Request({.Path})
+	if json.request_init(&req, paths[0], paths[1], allocator = a) != nil || json.scan(data, &req) != nil {
 		return false
 	}
 	name, name_err := json.answers(&req, 0)
@@ -410,8 +410,8 @@ span_string :: proc(src: []byte, ans: json.Answer, a: mem.Allocator) -> (string,
 	if ans.outcome != .Found || ans.kind != .String {
 		return "", false
 	}
-	d, _, ok := json.decode_span(src, ans.lo, ans.hi, .String, a)
-	return d.(string) or_else "", ok
+	text, _, ok := json.answer_text(src, ans, {}, a)
+	return text, ok
 }
 
 // Returns a found integer answer in the `i64` range, read as unmarshal reads one.

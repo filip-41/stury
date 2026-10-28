@@ -1,22 +1,24 @@
 package encode
 
-// jq's number notation, shared by the command line and `Marshal_Opts.jq_spelling`: a literal as decNumber's
+// jq's number notation, shared by the command line and `Document_Opts.jq_spelling`: a literal as decNumber's
 // scientific string (`1e2` is `1E+2`), a computed number as jq's dtoa lays it out.
 
 import "core:math"
 import "core:strconv"
 import "core:strings"
-import number "../scan/number"
+import core_pkg "../../core"
 import "../../core/spell"
 
 // A number literal as a decimal: 0.(head ++ tail) × 10^point, without leading or trailing zeros.
 // `head` and `tail` slice the literal on either side of its `.`, so no buffer is allocated.
+@(private = "file")
 Decimal :: struct {
 	neg:        bool,
 	head, tail: string, // both "" for zero
 	point:      int,
 }
 
+@(private = "file")
 decimal_of :: proc(lit: string) -> Decimal {
 	d: Decimal
 	s := lit
@@ -54,6 +56,7 @@ decimal_of :: proc(lit: string) -> Decimal {
 
 // The exponent field of a literal, the text after its `e`, as the library's lexer reads it: it saturates at
 // 2^31 however many digits it has, where a plain parse would wrap.
+@(private = "file")
 literal_exponent :: proc(field: string) -> int {
 	i := 0
 	neg := len(field) > 0 && field[0] == '-'
@@ -62,9 +65,41 @@ literal_exponent :: proc(field: string) -> int {
 	}
 	e := 0
 	for ; i < len(field) && '0' <= field[i] && field[i] <= '9'; i += 1 {
-		e = min(e * 10 + int(field[i] - '0'), int(number.EXP_SATURATED))
+		e = min(e * 10 + int(field[i] - '0'), int(core_pkg.EXP_SATURATED))
 	}
 	return -e if neg else e
+}
+
+// The order of two number literals as exact decimals (`-1` to `1`), as jq compares them: `1.0` equals `1`, and
+// `-1e-400` is below `0` though it is `-0.0` as a double.
+compare_literals :: proc(a, b: string) -> int {
+	x, y := decimal_of(a), decimal_of(b)
+	if x.neg != y.neg {
+		return -1 if x.neg else 1
+	}
+	mag: int
+	switch {
+	case x.head == "" || y.head == "":
+		mag = int(x.head != "") - int(y.head != "")
+	case x.point != y.point:
+		mag = -1 if x.point < y.point else 1
+	case x.tail == "" && y.tail == "":
+		mag = strings.compare(x.head, y.head)
+	case:
+		nx, ny := len(x.head) + len(x.tail), len(y.head) + len(y.tail)
+		for i in 0 ..< min(nx, ny) {
+			cx := x.head[i] if i < len(x.head) else x.tail[i - len(x.head)]
+			cy := y.head[i] if i < len(y.head) else y.tail[i - len(y.head)]
+			if cx != cy {
+				mag = -1 if cx < cy else 1
+				break
+			}
+		}
+		if mag == 0 {
+			mag = -1 if nx < ny else (1 if nx > ny else 0)
+		}
+	}
+	return -mag if x.neg else mag
 }
 
 // decNumber's range for a nonzero literal, which jv_number_with_literal keeps a number's text inside: past

@@ -6,15 +6,15 @@ import csv "../"
 
 UNQUOTED :: csv.Dialect{delimiter = ';', quoting = .None}
 COMMENTS :: csv.Dialect{comment = '#'}
-TSV_COMMENTS :: csv.Dialect{delimiter = '\t', quoting = .None, escapes = .Backslash, comment = '#'}
+TSV_COMMENTS :: csv.Dialect{delimiter = '\t', quoting = .Backslash, comment = '#'}
 
 @(test)
 test_dialect_cases :: proc(t: ^testing.T) {
 	check_cases(t, []Case {
-		{"a\\tb\tc\\\\d\\n\n", .None, 0, csv.TSV},
-		{"\"a\"b\t\"\n", .None, 0, csv.TSV},
-		{"a\tb\r\nc\td\r\n", .None, 0, csv.TSV},
-		{"a\\0b\t\\0\n", .None, 0, csv.TSV},
+		{"a\\tb\tc\\\\d\\n\n", nil, 0, csv.TSV},
+		{"\"a\"b\t\"\n", nil, 0, csv.TSV},
+		{"a\tb\r\nc\td\r\n", nil, 0, csv.TSV},
+		{"a\\0b\t\\0\n", nil, 0, csv.TSV},
 		{"a\\1", .Bad_Escape, 1, csv.TSV},
 		{"a\\x", .Bad_Escape, 1, csv.TSV},
 		{"a\\", .Bad_Escape, 1, csv.TSV},
@@ -24,28 +24,28 @@ test_dialect_cases :: proc(t: ^testing.T) {
 		{"a\\\"", .Bad_Escape, 1, csv.TSV},
 		{"\\\\\\", .Bad_Escape, 2, csv.TSV},
 		{"a\rb", .Bad_Char, 1, csv.TSV},
-		{"a\tb\nc\n", .Field_Count, 4, csv.TSV},
-		{"a\"b;\"\n", .None, 0, UNQUOTED},
-		{"a\\;b\n", .None, 0, UNQUOTED},
-		{"\"a;b\"\nc\n", .Field_Count, 6, UNQUOTED},
-		{"#x,y,z\na,b\n", .None, 0, COMMENTS},
-		{"a,b\n#c\nd,e\n", .None, 0, COMMENTS},
-		{"a,b\n#\"\nd,e\n", .None, 0, COMMENTS},
-		{"a,b\n#c\r\n", .None, 0, COMMENTS},
-		{"a,b\n#c", .None, 0, COMMENTS},
-		{"a,b\nc#,d\n", .None, 0, COMMENTS},
-		{"a,b\n\"#\",d\n", .None, 0, COMMENTS},
-		{"a,b\n\"x\n#y\",d\n", .None, 0, COMMENTS},
-		{"a,b\n#c\rd\n", .None, 0, COMMENTS},
-		{"a,b\n#c\r\rd\r\n1,2\n", .None, 0, COMMENTS},
-		{"a,b\n#c\r", .None, 0, COMMENTS},
-		{"a,b\n#c\r1,2\n", .None, 0, COMMENTS},
+		{"a\tb\nc\n", .Bad_Structure, 4, csv.TSV},
+		{"a\"b;\"\n", nil, 0, UNQUOTED},
+		{"a\\;b\n", nil, 0, UNQUOTED},
+		{"\"a;b\"\nc\n", .Bad_Structure, 6, UNQUOTED},
+		{"#x,y,z\na,b\n", nil, 0, COMMENTS},
+		{"a,b\n#c\nd,e\n", nil, 0, COMMENTS},
+		{"a,b\n#\"\nd,e\n", nil, 0, COMMENTS},
+		{"a,b\n#c\r\n", nil, 0, COMMENTS},
+		{"a,b\n#c", nil, 0, COMMENTS},
+		{"a,b\nc#,d\n", nil, 0, COMMENTS},
+		{"a,b\n\"#\",d\n", nil, 0, COMMENTS},
+		{"a,b\n\"x\n#y\",d\n", nil, 0, COMMENTS},
+		{"a,b\n#c\rd\n", nil, 0, COMMENTS},
+		{"a,b\n#c\r\rd\r\n1,2\n", nil, 0, COMMENTS},
+		{"a,b\n#c\r", nil, 0, COMMENTS},
+		{"a,b\n#c\r1,2\n", nil, 0, COMMENTS},
 		{"a,b\n1,2\r#c\n", .Bad_Char, 7, COMMENTS},
 		{"a,b\n#\xFF\n", .Bad_Char, 5, COMMENTS},
-		{"a,b\n #c\n", .Field_Count, 4, COMMENTS},
-		{"#\\x\na\n", .None, 0, TSV_COMMENTS},
+		{"a,b\n #c\n", .Bad_Structure, 4, COMMENTS},
+		{"#\\x\na\n", nil, 0, TSV_COMMENTS},
 		{"a\n\\#\n", .Bad_Escape, 2, TSV_COMMENTS},
-		{"a,b\nc\nd,e,f\n", .None, 0, {ragged = true}},
+		{"a,b\nc\nd,e,f\n", nil, 0, {ragged = true}},
 		{"a,b\nc\n\"d\n", .Truncated, 9, {ragged = true}},
 	})
 }
@@ -63,11 +63,10 @@ test_dialect_options :: proc(t: ^testing.T) {
 		{comment = ','},
 		{comment = 0x80},
 		{delimiter = ';', comment = ';'},
-		{escapes = .Backslash},
-		{quoting = .None, escapes = .Backslash, delimiter = '\\'},
-		{quoting = .None, escapes = .Backslash, delimiter = 't'},
-		{quoting = .None, escapes = .Backslash, delimiter = '0'},
-		{delimiter = '\t', quoting = .None, escapes = .Backslash, comment = '\\'},
+		{quoting = .Backslash, delimiter = '\\'},
+		{quoting = .Backslash, delimiter = 't'},
+		{quoting = .Backslash, delimiter = '0'},
+		{delimiter = '\t', quoting = .Backslash, comment = '\\'},
 	}
 	for d in refused {
 		testing.expectf(t, csv.validate(src, {dialect = d}) == csv.Error{kind = .Bad_Option}, "%v: validate accepted", d)
@@ -78,9 +77,9 @@ test_dialect_options :: proc(t: ^testing.T) {
 		expect_check_agrees(t, src, []Text, {dialect = d}, uerr)
 		testing.expectf(t, uerr != nil && uerr.?.kind == .Bad_Option, "%v: unmarshal %v", d, uerr)
 		_, merr := csv.marshal([]Text{{"a"}}, {dialect = d}, allocator = context.temp_allocator)
-		testing.expectf(t, merr == .Bad_Option, "%v: marshal %v", d, merr)
+		testing.expectf(t, marshal_kind(merr) == .Bad_Option, "%v: marshal %v", d, merr)
 	}
-	accepted := []csv.Dialect{csv.TSV, {quoting = .None, comment = '"'}, {comment = '#', ragged = true}, {quoting = .None, escapes = .Backslash, comment = '\t'}}
+	accepted := []csv.Dialect{csv.TSV, {quoting = .None, comment = '"'}, {comment = '#', ragged = true}, {quoting = .Backslash, comment = '\t'}}
 	for d in accepted {
 		testing.expectf(t, csv.validate(src, {dialect = d}) == nil, "%v: validate refused", d)
 	}
@@ -95,14 +94,57 @@ test_dialect_field_text :: proc(t: ^testing.T) {
 		return
 	}
 	want := []string{"a\tb", "c\\d\n\r", `"q"`}
-	for f, k in recs[0].fields {
-		text, _, aerr := csv.field_text(src, f, csv.TSV, context.temp_allocator)
+	testing.expect_value(t, recs[0].dialect, csv.TSV)
+	for _, k in recs[0].fields {
+		text, _, aerr := csv.field_text(recs[0], k, context.temp_allocator)
 		testing.expect_value(t, aerr, nil)
-		testing.expect_value(t, string(text), want[k])
-		raw, escaped, _ := csv.field_text(src, f, {delimiter = '\t', quoting = .None})
-		testing.expect(t, !escaped)
-		testing.expect_value(t, string(raw), string(src[f.lo:f.hi]))
+		testing.expect_value(t, text, want[k])
 	}
+	// The same bytes read without escapes keep every backslash: the record decodes by the dialect it was read in.
+	plain, perr := collect(src, {delimiter = '\t', quoting = .None})
+	if !testing.expect_value(t, perr, nil) || !testing.expect_value(t, len(plain), 1) {
+		return
+	}
+	for f, k in plain[0].fields {
+		raw, escaped, _ := csv.field_text(plain[0], k)
+		testing.expect(t, !escaped)
+		testing.expect_value(t, raw, string(src[f.lo:f.hi]))
+	}
+}
+
+// A record carries its dialect with the delimiter spelled out, so the zero dialect's records say `,`.
+@(test)
+test_record_dialect :: proc(t: ^testing.T) {
+	recs, err := collect(transmute([]byte)string("a,b\n"), {})
+	if testing.expect_value(t, err, nil) && testing.expect_value(t, len(recs), 1) {
+		testing.expect_value(t, recs[0].dialect, csv.Dialect{delimiter = ','})
+	}
+}
+
+// `answer_text` reads a found cell by the read's dialect, and refuses a record or a miss.
+@(test)
+test_answer_text :: proc(t: ^testing.T) {
+	src := transmute([]byte)string("name,note\n\"a \"\"b\"\"\",x\n")
+	a, err := csv.find(src, ".[0].name")
+	testing.expect_value(t, err, nil)
+	text, escaped, ok := csv.answer_text(src, a, {}, context.temp_allocator)
+	testing.expect(t, ok && escaped)
+	testing.expect_value(t, text, `a "b"`)
+	note, _ := csv.find(src, ".[0].note")
+	text, escaped, ok = csv.answer_text(src, note)
+	testing.expect(t, ok && !escaped)
+	testing.expect_value(t, text, "x")
+	row, _ := csv.find(src, ".[0]")
+	_, _, ok = csv.answer_text(src, row)
+	testing.expect(t, !ok)
+	miss, _ := csv.find(src, ".[3].name")
+	_, _, ok = csv.answer_text(src, miss)
+	testing.expect(t, !ok)
+	tsv := transmute([]byte)string("k\na\\tb\n")
+	cell, _ := csv.find(tsv, ".[0].k", {dialect = csv.TSV})
+	text, escaped, ok = csv.answer_text(tsv, cell, {dialect = csv.TSV}, context.temp_allocator)
+	testing.expect(t, ok && escaped)
+	testing.expect_value(t, text, "a\tb")
 }
 
 @(test)
@@ -115,17 +157,17 @@ test_max_fields :: proc(t: ^testing.T) {
 	}
 	cases := []Limit_Case {
 		{"a,b\nc,d\n", {}, 2, nil},
-		{"a,b,c\n", {}, 2, csv.Error{0, .Limit_Fields}},
-		{"a,b\nc,d,e\n", {}, 2, csv.Error{4, .Limit_Fields}},
-		{"a\nb,c,d\n", {ragged = true}, 2, csv.Error{2, .Limit_Fields}},
-		{"a,b,c,\"d", {}, 2, csv.Error{0, .Limit_Fields}},
+		{"a,b,c\n", {}, 2, csv_fault(0, .Too_Many_Fields)},
+		{"a,b\nc,d,e\n", {}, 2, csv_fault(4, .Too_Many_Fields)},
+		{"a\nb,c,d\n", {ragged = true}, 2, csv_fault(2, .Too_Many_Fields)},
+		{"a,b,c,\"d", {}, 2, csv_fault(0, .Too_Many_Fields)},
 		{"a,b\n#c,d,e\n", COMMENTS, 2, nil},
 		{strings.repeat("f,", 19, context.temp_allocator), {}, 20, nil},
-		{strings.repeat("f,", 20, context.temp_allocator), {}, 20, csv.Error{0, .Limit_Fields}},
+		{strings.repeat("f,", 20, context.temp_allocator), {}, 20, csv_fault(0, .Too_Many_Fields)},
 		// Later rows wider than the first, up to the cap and then one past it: a document checks each
 		// record's own field count.
 		{strings.repeat("a,b,c\n", 200, context.temp_allocator), {}, 3, nil},
-		{strings.concatenate({strings.repeat("a,b,c\n", 200, context.temp_allocator), "a,b,c,d\n"}, context.temp_allocator), {ragged = true}, 3, csv.Error{1200, .Limit_Fields}},
+		{strings.concatenate({strings.repeat("a,b,c\n", 200, context.temp_allocator), "a,b,c,d\n"}, context.temp_allocator), {ragged = true}, 3, csv_fault(1200, .Too_Many_Fields)},
 	}
 	for c in cases {
 		src := transmute([]byte)c.src
@@ -143,22 +185,22 @@ test_max_fields :: proc(t: ^testing.T) {
 	rows: []Text
 	err := read(t, "a\nx,y,z\n", &rows, {dialect = {ragged = true}, limits = {max_fields = 2}})
 	e, refused := err.?
-	testing.expect(t, refused && e.kind == .Syntax && e.syntax == .Limit_Fields && e.offset == 2 && path_text(e) == "[0]")
+	testing.expect(t, refused && e.kind == .Syntax && e.syntax == .Limit_Format && csv.Fault(e.detail) == .Too_Many_Fields && e.offset == 2 && path_text(e) == "[0]")
 }
 
 @(test)
 test_strictness :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("a,\xFF\n")
-	testing.expect_value(t, csv.validate(src), csv.Error{2, .Bad_Char})
+	testing.expect_value(t, csv.validate(src), csv.Error{offset = 2, kind = .Bad_Char})
 	testing.expect_value(t, csv.validate(src, {strictness = .Structural}), nil)
 	testing.expect_value(t, csv.validate(src, {strictness = .Lazy}), nil)
 	recs, err := collect(src, {}, .Structural)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(recs), 1)
 	// The structure is judged whatever the strictness.
-	testing.expect_value(t, csv.validate(transmute([]byte)string("a\xFF\"b"), {strictness = .Structural}), csv.Error{2, .Bad_Char})
-	testing.expect_value(t, csv.validate(transmute([]byte)string("\"a\"\xFF"), {strictness = .Structural}), csv.Error{3, .Bad_Char})
-	testing.expect_value(t, csv.validate(transmute([]byte)string("a\\\xFF"), {dialect = csv.TSV, strictness = .Structural}), csv.Error{1, .Bad_Escape})
+	testing.expect_value(t, csv.validate(transmute([]byte)string("a\xFF\"b"), {strictness = .Structural}), csv.Error{offset = 2, kind = .Bad_Char})
+	testing.expect_value(t, csv.validate(transmute([]byte)string("\"a\"\xFF"), {strictness = .Structural}), csv.Error{offset = 3, kind = .Bad_Char})
+	testing.expect_value(t, csv.validate(transmute([]byte)string("a\\\xFF"), {dialect = csv.TSV, strictness = .Structural}), csv.Error{offset = 1, kind = .Bad_Escape})
 }
 
 // `.Lazy` judges the UTF-8 of the header and of the cells a field reads, and of no other byte.
@@ -168,7 +210,7 @@ test_unmarshal_lazy :: proc(t: ^testing.T) {
 		src:        string,
 		strictness: csv.Strictness,
 		dialect:    csv.Dialect,
-		kind:       csv.Error_Kind, // `.None` when accepted
+		kind:       Maybe(csv.Error_Kind), // nil when accepted
 		at:         u64,
 		path:       string,
 	}
@@ -186,28 +228,28 @@ test_unmarshal_lazy :: proc(t: ^testing.T) {
 	far := u64(strings.builder_len(b))
 	strings.write_string(&b, "\xFE,z\n")
 	cases := []Lazy_Case {
-		{"a,b\nx,\xFF\n", .Lazy, {}, .None, 0, ""},
-		{"a,b\nx,\xFF\n", .Structural, {}, .None, 0, ""},
+		{"a,b\nx,\xFF\n", .Lazy, {}, nil, 0, ""},
+		{"a,b\nx,\xFF\n", .Structural, {}, nil, 0, ""},
 		{"a,b\nx,\xFF\n", .Strict, {}, .Bad_Char, 6, "[0]"},
 		{"a,b\n\xFF,x\n", .Lazy, {}, .Bad_Char, 4, "[0]"},
 		{"a,\xFF\n", .Lazy, {}, .Bad_Char, 2, ""},
 		{"a,b\nx,\xFF\n\xFE,y\n", .Lazy, {}, .Bad_Char, 8, "[1]"},
-		{"a,b\nx,\xC3", .Lazy, {}, .None, 0, ""},
+		{"a,b\nx,\xC3", .Lazy, {}, nil, 0, ""},
 		{"a,b\nx,\xC3", .Strict, {}, .Truncated, 7, "[0]"},
-		{"a\n#\xFF\nx\n", .Lazy, COMMENTS, .None, 0, ""},
+		{"a\n#\xFF\nx\n", .Lazy, COMMENTS, nil, 0, ""},
 		{"a\n#\xFF\nx\n", .Strict, COMMENTS, .Bad_Char, 3, "[0]"},
-		{"a\tb\nx\t\xFF\n", .Lazy, csv.TSV, .None, 0, ""},
+		{"a\tb\nx\t\xFF\n", .Lazy, csv.TSV, nil, 0, ""},
 		{strings.to_string(b), .Lazy, {}, .Bad_Char, far, "[6]"},
 	}
 	for c in cases {
 		rows: []Text
 		err := read(t, c.src, &rows, {dialect = c.dialect, strictness = c.strictness})
 		e, refused := err.?
-		if c.kind == .None {
+		if c.kind == nil {
 			testing.expectf(t, !refused && len(rows) > 0 && rows[0].a == "x", "%q %v: %v, rows %v", c.src, c.strictness, err, rows)
 			continue
 		}
-		testing.expectf(t, refused && e.kind == .Syntax && e.syntax == c.kind && e.offset == c.at && path_text(e) == c.path, "%q %v: %v (path %q), want %v at %d %q", c.src, c.strictness, err, path_text(e), c.kind, c.at, c.path)
+		testing.expectf(t, refused && e.kind == .Syntax && e.syntax == c.kind.? && e.offset == c.at && path_text(e) == c.path, "%q %v: %v (path %q), want %v at %d %q", c.src, c.strictness, err, path_text(e), c.kind, c.at, c.path)
 	}
 }
 
@@ -266,7 +308,7 @@ test_dialect_marshal_spelling :: proc(t: ^testing.T) {
 	}
 	rows := []Line{{"a\tb", 1, "x"}, {"x\ny\r", -2, nil}, {"back\\slash", 3, `q"d`}, {"", 4, "#c"}, {"#hash", 5, nil}}
 	out, err := csv.marshal(rows, {dialect = csv.TSV}, allocator = context.temp_allocator)
-	testing.expect_value(t, err, csv.Marshal_Error.None)
+	testing.expect_value(t, marshal_kind(err), csv.Marshal_Error_Kind.None)
 	testing.expect_value(t, string(out), "name\tn\tnote\na\\tb\t1\tx\nx\\ny\\r\t-2\t\nback\\\\slash\t3\tq\"d\n\t4\t#c\n#hash\t5\t\n")
 	out, _ = csv.marshal([]Line{{"#hash", 1, nil}}, {dialect = COMMENTS, no_header = true}, allocator = context.temp_allocator)
 	testing.expect_value(t, string(out), "\"#hash\",1,\n")
@@ -286,9 +328,9 @@ test_marshal_unwritable :: proc(t: ^testing.T) {
 	Num :: struct {
 		x: f64,
 	}
-	expect_out :: proc(t: ^testing.T, rows: []$T, d: csv.Dialect, want: string, want_err := csv.Marshal_Error.None, loc := #caller_location) {
+	expect_out :: proc(t: ^testing.T, rows: []$T, d: csv.Dialect, want: string, want_err := csv.Marshal_Error_Kind.None, loc := #caller_location) {
 		out, err := csv.marshal(rows, {dialect = d, no_header = true}, allocator = context.temp_allocator)
-		testing.expect_value(t, err, want_err, loc)
+		testing.expect_value(t, marshal_kind(err), want_err, loc)
 		testing.expect_value(t, string(out), want, loc)
 	}
 	plain := csv.Dialect{quoting = .None}
@@ -297,11 +339,11 @@ test_marshal_unwritable :: proc(t: ^testing.T) {
 	expect_out(t, []Text{{"x\ry"}}, csv.TSV, "x\\ry\n")
 	expect_out(t, []Text{{"a\"b\\c"}}, plain, "a\"b\\c\n")
 	expect_out(t, []Text{{"a,b"}}, csv.TSV, "a,b\n")
-	expect_out(t, []Text{{"a;b"}}, {delimiter = ';', quoting = .None, escapes = .Backslash}, "", .Unwritable)
+	expect_out(t, []Text{{"a;b"}}, {delimiter = ';', quoting = .Backslash}, "", .Unwritable)
 	expect_out(t, []Text{{"#x"}}, {quoting = .None, comment = '#'}, "", .Unwritable)
 	expect_out(t, []Text{{"#x"}}, TSV_COMMENTS, "", .Unwritable)
 	expect_out(t, []Two{{"x", "#y"}}, {quoting = .None, comment = '#'}, "x,#y\n")
-	expect_out(t, []Text{{"\tx"}}, {quoting = .None, escapes = .Backslash, comment = '\t'}, "\\tx\n")
+	expect_out(t, []Text{{"\tx"}}, {quoting = .Backslash, comment = '\t'}, "\\tx\n")
 	expect_out(t, []Text{{"\xEF\xBB\xBFabc"}}, plain, "", .Unwritable)
 	expect_out(t, []Opt{{""}}, plain, "", .Unwritable)
 	expect_out(t, []Opt{{""}}, {}, "\"\"\n")

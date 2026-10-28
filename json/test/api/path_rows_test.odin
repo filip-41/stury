@@ -79,7 +79,7 @@ test_query_answers :: proc(t: ^testing.T) {
 		found, _ := json.find(raw(src), path)
 		testing.expectf(t, len(rows) == 1 && rows[0] == found, "%s: %v, find %v", path, rows[:], found)
 	}
-	testing.expect_value(t, rows[0].outcome, json.Path_Outcome.Type_Mismatch)
+	testing.expect_value(t, rows[0].outcome, json.Answer_Outcome.Type_Mismatch)
 	clear(&rows)
 	testing.expect_value(t, json.query(&doc, ".a.b[3]", &rows), nil)
 	testing.expect_value(t, rows[0], json.Answer{owner = u64(doc.rows[b].lo), node = json.NO_NODE, outcome = .Missing})

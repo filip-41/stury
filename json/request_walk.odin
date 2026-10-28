@@ -36,7 +36,10 @@ sink_of :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query_Sink
 		sink.paths_repeat = 0
 	}
 	when .Nodes in K { sink.nodes = req.doc.rows }
-	when .Dom in K { sink.value_bytes = req.doc.values }
+	when .Dom in K {
+		sink.value_bytes = req.doc.values
+		sink.key_texts = req.doc.key_texts
+	}
 }
 
 @(private = "file")
@@ -48,6 +51,7 @@ sink_store :: #force_inline proc(req: ^Request($KINDS), sink: walk.Scan_Query_Si
 		values := sink.value_bytes
 		walk.value_bytes_trim(&values, cap(req.doc.values))
 		req.doc.values = values
+		req.doc.key_texts = sink.key_texts
 	}
 }
 
@@ -62,7 +66,10 @@ output_reset :: #force_inline proc(req: ^Request($KINDS), $K: bit_set[scan_pkg.W
 		clear(&doc.facts)
 		core_pkg.row_cache_reset(doc)
 	}
-	when .Dom in K { clear(&req.doc.values) }
+	when .Dom in K {
+		clear(&req.doc.values)
+		clear(&req.doc.key_texts)
+	}
 }
 
 // The walk of `src` that builds `req.doc.rows`, with the route's plan cleared (the caller restores it if the
@@ -110,20 +117,22 @@ scan_walk :: proc(src: []byte, req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Wa
 	}
 	sink_store(req, sink, K)
 	req.doc.src = src
-	req.doc.dialect = req.dialect
-	req.doc.deep = req.limits.max_depth > MAX_DEPTH
+	req.doc.spelling = scan_pkg.spelling_of(req.inputs.read.dialect)
+	req.doc.deep = req.inputs.read.limits.max_depth > MAX_DEPTH
+	// Only a `.Strict` walk decodes every string and key; a dialect walk is always one.
+	req.doc.decoded = .Dom in K && (walk_strictness(req) == .Strict || !scan_pkg.plain_json(req.inputs.read.dialect))
 	walk_attach_facts(req, src, facts, err, &fault)
 	walk_answers(req, &sink, WALK, err, &fault)
 	return fault
 }
 
 // Fill `queries` with what `$WALK` asks of the scanner, and return how many: each automaton path under its
-// own index in `req.paths`, then the rows, the decoded values, and the demand matcher.
+// own index in `req.inputs.paths`, then the rows, the decoded values, and the demand matcher.
 @(private = "file")
 walk_queries :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query_Sink, queries: ^[MAX_WALK_QUERIES]scan_pkg.Scan_Query, $WALK: bit_set[scan_pkg.Walk_Kind], alloc: runtime.Allocator) -> (nq: int) {
 	plan := &req.state.route
 	for pi in plan.auto[:plan.n_auto] {
-		queries[nq] = scan_pkg.Scan_Query{kind = .Path, allocator = alloc, sink = sink, path = req.paths[pi], tag = pi}
+		queries[nq] = scan_pkg.Scan_Query{kind = .Path, allocator = alloc, sink = sink, path = req.inputs.paths[pi], tag = pi}
 		nq += 1
 	}
 	when .Nodes in WALK {
@@ -156,7 +165,7 @@ walk_queries :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query
 @(private = "file")
 walk_facts :: #force_inline proc(req: ^Request($KINDS), $WALK: bit_set[scan_pkg.Walk_Kind], alloc: runtime.Allocator) -> ^[dynamic]Fact {
 	when .Nodes in WALK {
-		if !scan_pkg.plain_json(req.dialect) {
+		if !scan_pkg.plain_json(req.inputs.read.dialect) {
 			walk.adopt_allocator(&req.doc.facts, alloc)
 			return &req.doc.facts
 		}
@@ -169,15 +178,15 @@ walk_facts :: #force_inline proc(req: ^Request($KINDS), $WALK: bit_set[scan_pkg.
 @(private = "file")
 walk_strictness :: #force_inline proc(req: ^Request($KINDS)) -> Strictness {
 	when .Path in KINDS {
-		if req.strictness == .Lazy {
-			for p in req.paths {
+		if req.inputs.read.strictness == .Lazy {
+			for p in req.inputs.paths {
 				if len(p.steps) == 0 {
 					return .Strict
 				}
 			}
 		}
 	}
-	return req.strictness
+	return req.inputs.read.strictness
 }
 
 // The scanner entry the limits and dialect pick.
@@ -185,21 +194,25 @@ walk_strictness :: #force_inline proc(req: ^Request($KINDS)) -> Strictness {
 walk_run :: #force_inline proc(src: []byte, req: ^Request($KINDS), queries: []scan_pkg.Scan_Query, strictness: Strictness, $WALK: bit_set[scan_pkg.Walk_Kind], facts: ^[dynamic]Fact) -> (err: Maybe(Error), fault: scan_pkg.Walk_Fault) {
 	// A dialect walk has no demand matcher (`automaton_forced`), so a demand walk compiles no dialect.
 	when .Demand not_in WALK {
-		switch req.dialect {
+		switch req.inputs.read.dialect {
 		case .Json:
 		case .Jsonc:
-			return scan_pkg.scan_queries_dialect(src, queries, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), facts, .Jsonc)
+			e, f := scan_pkg.scan_queries_dialect(src, queries, req.inputs.read.limits, WALK, &req.state.coverage, duplicates_resolution(req.inputs.read.duplicates), facts, .Jsonc)
+			return scan_pkg.fault_of(e), f
 		case .Json5:
-			return scan_pkg.scan_queries_dialect(src, queries, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates), facts, .Json5)
+			e, f := scan_pkg.scan_queries_dialect(src, queries, req.inputs.read.limits, WALK, &req.state.coverage, duplicates_resolution(req.inputs.read.duplicates), facts, .Json5)
+			return scan_pkg.fault_of(e), f
 		}
 	}
-	if req.limits.max_depth > MAX_DEPTH {
-		return scan_pkg.scan_queries_deep(src, queries, strictness, req.limits, WALK, &req.coverage, duplicates_resolution(req.duplicates))
+	if req.inputs.read.limits.max_depth > MAX_DEPTH {
+		e, f := scan_pkg.scan_queries_deep(src, queries, strictness, req.inputs.read.limits, WALK, &req.state.coverage, duplicates_resolution(req.inputs.read.duplicates))
+		return scan_pkg.fault_of(e), f
 	}
-	return scan_pkg.scan_queries(
-		src, queries, strictness, req.limits, WALK,
-		&req.stop, &req.coverage, duplicates_resolution(req.duplicates), req.state.route.kept,
+	e, f := scan_pkg.scan_queries(
+		src, queries, strictness, req.inputs.read.limits, WALK,
+		&req.state.stop, &req.state.coverage, duplicates_resolution(req.inputs.read.duplicates), req.state.route.kept,
 	)
+	return scan_pkg.fault_of(e), f
 }
 
 // Attach a dialect walk's comments to its rows.
@@ -225,13 +238,13 @@ walk_answers :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query
 	plan := &req.state.route
 	if plan.matcher == .Slots {
 		// The automaton owes a miss only to a walk that reached the end.
-		reached_end := req.stop == nil
+		reached_end := req.state.stop == nil
 		if e, faulted := err.?; faulted && e.kind != .Trailing {
 			reached_end = false
 		}
 		fault.oom ||= !route_slots(&req.answers, plan, reached_end)
 	} else if plan.matcher == .Names {
-		fault.oom ||= !route_missing(&req.answers, plan, req.stop, err)
+		fault.oom ||= !route_missing(&req.answers, plan, req.state.stop, err)
 	}
 	// `.Last` repeats retract rows the sweep drops: a gate's, or a wildcard path's.
 	retracted := false
@@ -242,6 +255,6 @@ walk_answers :: #force_inline proc(req: ^Request($KINDS), sink: ^walk.Scan_Query
 		retracted = sink.paths_retracted > 0
 	}
 	if plan.any_limit || .Nodes in WALK || retracted {
-		finish_answers(&req.answers, req.doc.rows[:], plan, req.paths, .Nodes in WALK)
+		finish_answers(&req.answers, req.doc.rows[:], plan, req.inputs.paths, .Nodes in WALK)
 	}
 }

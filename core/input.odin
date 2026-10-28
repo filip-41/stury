@@ -17,26 +17,3 @@ when ODIN_ARCH == .amd64 && ODIN_MICROARCH_STRING == "x86-64" {
 bom_len :: #force_inline proc(src: []byte) -> int {
 	return 3 if len(src) >= 3 && src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF else 0
 }
-
-// JSON's whitespace, which the path syntax, jq's lexer and the CLI share.
-is_space :: #force_inline proc(c: u8) -> bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
-}
-
-// The index of the first byte of `src` at or past `pos` that is not `is_space`, or `len(src)`.
-skip_space :: #force_inline proc(src: $S, pos: int) -> int {
-	i := pos
-	for i < len(src) && is_space(src[i]) {
-		i += 1
-	}
-	return i
-}
-
-// The end of `src[lo:hi]` with its trailing `is_space` bytes cut, never below `lo`.
-skip_space_back :: #force_inline proc(src: []byte, lo, hi: int) -> int {
-	i := hi
-	for i > lo && is_space(src[i - 1]) {
-		i -= 1
-	}
-	return i
-}

@@ -96,14 +96,15 @@ Compact writes no spaces. Pretty changes only containers that receive at least o
 
 The indent is one tab, or `indent` spaces (1–255).
 
-`sort_keys` writes each object of a `Document` (JSON or JSONC) with its members in byte order of their decoded
-keys, as `stury -S` does.
+`sort_keys` writes each object with its members in byte order, as `stury -S` does: a `Document`'s (JSON or
+JSONC) by decoded key, a struct's by written name, a tagged union arm's tag among them. In CSV it orders the
+header: a struct row's field names, a document's or a `Table`'s keys.
 
 - With `jq_spelling` a repeated key is merged first (its last value, sorted). Without it, repeated keys keep
   their source order (a stable sort).
 - A JSONC member's comments move with it.
-- Like `jq_spelling` it is not applied to a `marshal` of an `any`: a map is already sorted
-  ([§5.3](#53-objects)) and a struct keeps its declaration order.
+- `jq_spelling` is a field of `Document_Opts`, which only a `Document` is written under: a typed value has no
+  source spelling to change. A map is always written sorted ([§5.3](#53-objects)).
 
 ### 2.3 Re-escaping
 
@@ -131,6 +132,26 @@ and hands it to the writer when it fills. Only bytes no later write changes are 
 - A single item longer than the buffer (a long string, a `Raw`) is buffered whole first.
 - A JSONC document is made whole, then written. Its rows are not streamed (`json/encode/jsonc.odin` writes the
   whole text into one buffer).
+
+### 2.5 `Writer`: JSON token by token
+
+`json.Writer` writes one value's tokens into a byte buffer in the layout of §2.2: `write_open`, `write_element`
+(the comma, line break and comments before an element), `write_key`, `write_token` (a literal), `write_number`,
+`write_float`, `write_string`, `write_close` and `write_comments`. `write_raw` lays out a well-formed JSON text
+by its whitespace alone and refuses one it would have to respell. Its options:
+
+- `pretty` and `indent`: spaces per level, `0` line breaks only, `-1` a tab.
+- `jq_spelling`: numbers through `jq_literal` and `put_jq_double`, a NaN as `null`, DEL escaped.
+- `ascii`: every character past U+007F as `\u` escapes.
+- `colors`: jq's colours, one per `Kind` in its order then the keys', each token painted and reset after.
+- `src`: the text of the `Fact` spans that `write_element`, `write_key`, `write_close` and `write_comments`
+  print.
+
+`write_led_string` is the row writers' member: a lead spelled once per column, then a cell, at a `put_room` write
+cursor.
+
+`marshal(&doc)` under `jq_spelling` or `sort_keys` and the CLI's printer are the two callers; the CLI walks its
+own values and the writer owns every layout byte.
 
 ## 3. Writing scalars
 
@@ -243,7 +264,9 @@ Refusals:
 
 - `Bad_State` for a `Document` with no rows, or one whose rows are not a single tree. Only a whole-document
   tree is one JSON text.
-- `Too_Deep` for one nested past `MAX_DEPTH`, which only a document built under a raised `max_depth` can be.
+- `Too_Deep` for one nested past `MAX_DEPTH`, which only a document built under a raised `max_depth` can be,
+  in any output but compact plain JSON: the minifier keeps no state per level, so that one is written
+  (`encode_minified`).
 
 **Boundary for later writers.** The row walk only opens a container, writes a key, writes a scalar span and
 closes, and does not inspect JSON bytes. Minify is JSON to JSON and stays in `json/encode`. A second writer of
@@ -271,7 +294,8 @@ value are what make reflective marshallers slow.
   use.
 - A compile that fails is rolled back to the plan it was, and every later call answers the same fault. Only
   `.Out_Of_Memory` is retryable, and a rolled-back plan is sound whether or not the cache evicts it.
-- With `plan` nil, a call takes this thread's cached plan for the type: most recently used first, the least
+- With `plan` nil, a call takes this thread's cached plan for the type and format (one cache for every format,
+  emptied by `core.plan_cache_clear`): most recently used first, the least
   recently used destroyed to make room (`core/plan_cache.odin`).
 - A call nested inside a hook misses without evicting (the plan it would destroy may be the one an outer call
   is using).
@@ -309,7 +333,7 @@ Each Odin type has one JSON form.
 
 Structs and maps are both written as objects, each with its own ordering rule.
 
-- **Structs.** Fields come out in declaration order.
+- **Structs.** Fields come out in declaration order, or in byte order of their names under `sort_keys`.
   - A `json` tag replaces the field name and `json:"-"` omits the field.
   - `omitempty` omits a nil pointer, a nil `any`, a nil union, an empty string, slice, map or `bit_set`. `0`,
     `false` and `Null` stay.
@@ -584,7 +608,7 @@ every shape hook is gated `when .Shape in Q`.
 - **Field selection** is the demand matcher's key set made per object type: ordered-key prediction (the field
   after the last match), then a 256-bit first-byte filter, then the shared key compare.
 - **Typed faults** leave the walk through its existing `return err` paths, as an `Error` of kind `TYPED_FAULT`
-  (`.None`, which no syntax fault is) at the offending byte, and the detail rides on `Shape_Run`.
+  (0, which no `Error_Kind` is) at the offending byte, and the detail rides on `Shape_Run`.
 - **Numbers are read once.** Under `.Shape` the number lexer folds the digits it validates into
   `Shape_Run.num`.
   - The leaves decode from that instead of reading the token again.
@@ -626,7 +650,8 @@ under both strictnesses. Only a fault stops it early.
 
 A reader of many records resolves the plan once. `record_read_init` (`core`, aliased by `json` and `csv`) makes
 or borrows the plan, lowers the read shape on it, and returns a `Record_Read`; `unmarshal` of that handle pulls
-the source's next record and reads it with the same walk `unmarshal` of the record's bytes runs.
+the source's next record and reads it with the same walk `unmarshal` of the record's bytes runs. It answers
+`more`, whether it pulled a record, and `err`.
 
 - **The source is the format half** (`Record_Source`): a state pointer, a `read` that pulls one record and fills
   a value of the root type, and a `destroy`.
@@ -635,26 +660,45 @@ the source's next record and reads it with the same walk `unmarshal` of the reco
   plan's address would hold a dead caller's.
 - **Its faults are the record's**, as `unmarshal` of that record's bytes reports them, with the offset into
   those bytes; `record_read_at` gives the record's offset in the input, which places it. A fault that frames no
-  record (a JSON framing fault) is `.Syntax` at its input offset, and no record left is `.Bad_Option`.
+  record (a JSON framing fault) is `.Syntax` at its input offset with `more` false, and no record left is
+  `more` false with no error.
 
 ## 8. Across formats
 
 `core` holds what the formats share and what a caller who works with several of them names once: `Strictness`,
 paths (`Path`, `Step`, `MAX_PATH_STEPS`), the path answer (`Answer`, `Answer_Outcome`, `Kind`, `Node`, `NO_OWNER`,
-`answer_cut`), the row tree (`Row`, `Row_Flags`, `Fact`, `NO_KEY`, `ROOT`, `MAX_ROW_SOURCE`, `Row_Document` with its
-`Row_Dialect`, its decoded and listed reads cached behind a `^Row_Cache` made on first use, and the readers
-that need no format's spelling: `kind`, `child_count`, `child_by_index`, the member walk, `get_raw`, `facts`), `Insert_At`, the capability signatures every format package gives (`Format`, which each format's
-suite fills with its procedures),
+`answer_cut`), the row tree and every read of it (below), `Insert_At`,
 `Duplicates`, `Enum_Spelling`, `Unknown_Fields`, `Tag_Name`, the hooks
-(`Unmarshal_Hook`, `Type_Hook(W)` over a format's writer proc), the type plan (`Type_Plan`, `Hooked_Plan(W)`,
-`Plan_Cache`), the read shape and its lowering, the judged scalar stores, `Number`, `Batch_Runner`,
+(`Unmarshal_Hook` reading a `Hook_Value`, `Marshal_Hook` writing through `Marshal_Out`), the type plan
+(`Type_Plan`, `Hooked_Plan`, its cache), the read shape and its lowering, the judged scalar stores, `Number`, `Batch_Runner`,
 `Stream_Window`, `Request` and `Route` (a request's inputs and answers, and the engine that answers a path),
-the typed per-record reader (`Record_Read`, `Record_Source`), and the errors and their rendering. A format aliases the names it exposes. JSON's walk
-substrate is JSON's own and lives in `json/scan/walk`: the scan cursor and its caps (`Limits`, `MAX_DEPTH`),
-the query context and its matchers (path automaton, demand) and the typed walk's state
+the typed per-record reader (`Record_Read`, `Record_Source`), the nesting cap `MAX_DEPTH`, and the errors and their rendering. A
+format aliases the names it exposes; CSV keeps its record caps in its own `Limits`. JSON's walk substrate is
+JSON's own and lives in `json/scan/walk`: the scan cursor, its caps (`Limits`, `DEPTH_CEILING`, `MAX_SCALAR_DIGITS`, `MAX_SCALAR_SCALE`), the query context and its matchers (path automaton, demand) and the typed walk's state
 (`Shape_Run`). A format annotates the lowered shape for its walk (`Plan_Format.lowered`). Before the shape is
 checked, it may set an op its walk cannot read back to `.Unsupported`. The union lowering picks an arm per
-`Value_Class`; the JSON walk's first-byte classes number the classes.
+`Value_Class`, the class of a value's `Kind` (`KIND_CLASS`); the JSON walk's first-byte classes are asserted to
+be their kinds' classes.
+
+The row tree is the value model every format builds and every reader reads. A `Document` is one 32-byte
+`Row` per value in source order, the source it spans, the escaped strings its build decoded, its facts, and
+its `Row_Spelling`: the format variant's table for reading what core cannot read alone.
+
+- **Plain and flagged rows.** A plain row is read by core inline: a key or string is its span inside its quotes,
+  or its whole span when `.Key_Bare` or `.Bare` says it has none, and a number's digit pack in `first_esc` gives its value. A
+  flagged row (`.Key_Escaped`, `.Str_Escaped`, or a number marked `SPELLED_NUMBER`, such as JSON5's `0x1F` or
+  `'single'`) is read through the spelling's `decode`, `key_equals`, `number` and `int`.
+- **The reads are core's.** `kind`, `get_bool`, `get_int`, `get_float`, `get_number`, `get_string`, `get_key`,
+  `get_raw`, `child`, `children`, `members`, `pointer`, `query`, `query_in` and `Query_Walk` read any format's
+  rows (`core/row_read.odin`, `row_walk.odin`, `row_query.odin`). `json` forwards to them; the CLI's
+  interpreter calls them directly over JSON's and CSV's records alike.
+- **Two tiers.** A decoded document (`decoded`: `json.build`, a `.Dom` request) had every flagged string and key
+  decoded by its build, so no read writes and threads may share it. CSV's documents are all decoded. A scanned document (a `.Nodes` request) decodes a flagged string or key on its first read into its `Row_Cache`, and `child_by_index`
+  lists a long container's members there; one thread reads it at a time.
+- **Building rows.** Each format writes its rows itself: the JSON walks inline, CSV's `build` and
+  `record_document` straight from a record's fields.
+- **`Kind` is closed.** Every switch over it is exhaustive and `KIND_CLASS` is a complete table, so a kind added
+  later is a compile error at each site that must handle it.
 
 A format plugs into `core` in four places:
 
@@ -662,14 +706,31 @@ A format plugs into `core` in four places:
   spelled in a role (`spell`: `.Member`, `.Value`, `.Tag`; a name it cannot spell is `.Bad_Name`), its own types
   (`types`, each compiled to a `Shape_Kind`) and the annotation of the lowered shape for its walk (`lowered`,
   nil for none). `hooked_plan_init(T, opts, hooks, format, allocator)` compiles a `Type_Plan` from it, and the
-  format keeps a thread-local `Plan_Cache` that `plan_for` and `plan_done` serve.
+  plan remembers the format it was made for: `plan_for` and `plan_done` serve it from core's one thread-local
+  cache. A caller's plan is a `Shared_Plan`, one `Hooked_Plan` per format: the one `type_plan_init` made, and
+  another format's, made from its mapping and hooks on that format's first call (`shared_plan_for`). A field with no tag under the format's
+  key is named by the shared key (`stury:"name"`, `SHARED_TAG_KEY`), then by its own name. A `Marshal_Hook`
+  writes its value through the `Marshal_Out` handle the format hands it (`marshal_into`): a JSON value, a CSV cell. The
+  handle is the format's writer, whose `Plan_Writer` holds the format's `hook_write`.
+- **Its writer.** The walk over a value's kinds is core's (`plan_write_value` in `core/plan_write.odin`), and so
+  are a pointer, an `any`, a union's arm, the depth and cycle checks and the path to a value refused. A format
+  embeds a `Plan_Writer` and passes its emit procs, fixed at compile time: how it frames a container, spells a
+  scalar or no value, and which kinds it refuses (CSV refuses every container). A format may write its hottest
+  kinds before the walk, as CSV's cell writer does for strings and numbers.
 - **Its reader.** `read_shape_of(&plan.base)` lowers the plan to a `Read_Shape`. The format's walk fills values
   by it through the judged stores in `core` (`shape_int_store` and the rest). A cell and a JSON number are
   therefore refused for the same reasons, with the same `Unmarshal_Error` and path.
 - **Its errors.** The faults of a text are `core.Error` and `Error_Kind`, one enum for all formats. A format
-  reports only the kinds it has (CSV never reports `Bad_Number` or `Too_Deep`, JSON never `Field_Count`), and
-  each format's docs list them. `Unmarshal_Error`, `Path_Error` and `Marshal_Error` are core types the format
-  aliases. `core.render_error` writes any of them as `line:col: kind at path`.
+  reports only the kinds it has (CSV never reports `Bad_Number` or `Too_Deep`), and each format's docs list
+  them. Every kind is neutral: a format's own fault is a kind plus `Error.detail`, a value of the format's
+  `Fault` enum (CSV's `.Bad_Structure` with `Fault.Field_Count`, JSON's `.Bad_Char` with `Fault.Literal`), so a
+  new format adds details without touching core. JSON's scanner carries a two-word `Scan_Error` instead, its
+  `Fault.Literal` a kind past core's last (`KIND_LITERAL`), since a third field moves the spills of every inlined
+  walk; `error_of` turns it into the `Error` callers see. `Unmarshal_Error`, `Path_Error` and `Marshal_Error` are core
+  types the format aliases. Every path procedure (`find`, `request_init`, `scan`, `query`, the edits) returns a
+  `Path_Error`; a text's fault in it is `.Bad_Source`, carrying the `Error`. `core.render_error` writes any of
+  them as `line:col: text at path`, each kind's sentence from core's tables and a fault's from the format's
+  `fault_name` (a `Fault_Name`), which the format's `render_error` passes.
 - **Its policies.** A repeated key is `core.Duplicates`. Its zero value `.Default` means the format's default.
   JSON resolves it to `.Last` (as jq does) at the request's pre-flight, so no walk sees it. CSV reads it as
   `.Last` where it matches the header's names to fields (`read_header`). Every format's edits refuse a repeated
@@ -679,11 +740,15 @@ A format plugs into `core` in four places:
 `stury:csv` is the second format. It shares the typed codec's neutral half in `core`: the type plan, compiled
 through a `Plan_Format` (`csv` tag key, names spelled as written, no format types, no `lowered`), the read-shape
 lowering, the judged scalar stores and `Unmarshal_Error`. It owns its scanner (`csv/scan.odin`: quote,
-separator and LF masks per 64-byte block, with every byte judged) and its cell reader and writer. The library
-builds no rows. A record is a list of field spans, and a typed row is filled cell by cell from the header's column map. The
+separator and LF masks per 64-byte block, with every byte judged) and its cell reader and writer. A record is a
+list of field spans, and a typed row is filled cell by cell from the header's column map; only a `Document` is rows. A
+row that is a list or a map of one cell type (`[][]string`, `[]map[string]string`) reads through the same cell
+reader, chosen at compile time from the root's element type, so a struct row pays nothing for it: a list row is
+every cell of every record, a map row the header's column map with its decoded names as keys. The
 per-record reader (`csv/record_read.odin`) binds that map, the row shape and the plan once, then reads one row
-per call over a `Records` or a `Record_Reader`; a row's fault is rebased into that row's bytes, as JSON's is
-into its record's.
+per call over a `Records` or a `Record_Reader`, the row's kind picked at run time; a map row's keys are decoded
+once into the reader, from a copy of the header that outlives a stream's window. A row's fault is rebased into
+that row's bytes, as JSON's is into its record's.
 
 A dialect is a scan mode (`Scan_Mode`: unquoted, escapes, comments, no UTF-8 check), a compile-time parameter
 of `scan_block` picked once per call, so the RFC 4180 scan has no code for the other modes. An unquoted
@@ -692,12 +757,17 @@ comment dialect reads a block that holds the comment byte, or opens inside a com
 `unmarshal` under `.Lazy` keeps the UTF-8 gate but defers its fault (`Carry.utf8`), judged per record over the
 cells a field reads. The writer is generic over quoting and a comment byte the same way.
 
-A `Document` (`csv/document.odin`) is `records` kept: the header's spans and every row's, flat, 16 bytes a
-field, sized from the first row so that the array grows once. A cell is decoded when it is read, and one that
-holds a `""` or an escape is decoded once and kept by the document. The path readers (`csv/find.odin`, which
-holds their contract) take core's path syntax. `query` answers over a document's field spans and never scans the
-text again; `find` and a `Request` stream `records` once for all their paths and keep no row. `route_of` names
-the engine that answers a path, as JSON's does.
+A `Document` (`csv/document.odin`) is a `core.Document`: the root array, then per record an object row (an
+array row without a header) and a row per cell, written straight from `records` and sized from the first record
+so that the rows grow once. A member's key is its header cell's span in the text, so no key is copied per
+record; an escaped header name is decoded once and every record's member points at that one text
+(`key_texts`). A cell that holds a `""` or an escape is decoded during the build, so the document is the decoded
+tier, and `spelling.odin` is the `Row_Spelling` that reads the flagged rows (`json_text` false: the writers spell
+a CSV value from its decoded text, never from its span). `record_document` makes one record such an object, its
+rows and a copy of the record and of the header's names in one block, the keys spans of that copy. `query` is
+core's row query. The other path readers (`csv/find.odin`, which holds their contract) take core's path syntax
+as rows and columns: `find` and a `Request` stream `records` once for all their paths and keep no row.
+`route_of` names the engine that answers a path, as JSON's does.
 The edits (`csv/edit.odin`) build their result from the source and the spans of a record scan. A cell is
 respelled by the writer `marshal` uses (`edit_spell.odin`), and every other byte is copied. The source is
 validated first, so a fault is located in it. The result is not validated again: a respelled cell is one field,
@@ -717,6 +787,23 @@ rank. JSON keeps claiming after a framing fault and ranks faults by their offset
 later piece finds never hides an earlier one. CSV stops claiming at the first faulty piece, since a fault ends
 the text's records, and ranks by piece number; the pieces already claimed still run.
 
+One large text is read in parallel through JSON's pieces (`json/pieces.odin`, `json/pieces_run.odin`).
+`find_spine` finds the container that holds most of the text (`json.Spine`: where it opens and closes, and the
+keyed containers around it), and `split_array` cuts that container into pieces, runs of whole entries, by reading it
+at `.Structural`: it finds where entries start and end and judges nothing. `frame_entries` copies a piece into a
+thread's scratch as a text of its own whose root stands for the container (`[`, the entries, `]`). `pieces_pass`
+checks every framed piece, `pieces_docs` builds each into a document whose spans are shifted into the source on
+the thread that built it, and `pieces_build` joins those rows into the one document a single build gives. They
+run on core's `piece_fan`, a parallel for over a `Batch_Runner`. A piece that fails says only that
+the threads cannot vouch for the text: the caller reads it whole on one thread, so the verdict, the offset of the
+first fault and the rows are always one thread's. Every piece passing does vouch for the container, since the
+pieces hold exactly its entries between its separators, each piece at least one, at the container's depth.
+`split_array` cuts the root array, or the array of a spine (`find_spine`) up to `json.SPINE_LEVELS` objects
+deep beside small members, at the commas `each_record`'s `.Root_Entries` claims find. Each piece reads with
+nesting one level less for every object above the array. `json.validate` on a runner validates a spine's
+members once with the array as `[]`, then the array's pieces; `json.build` on a runner builds a root array's
+pieces and joins them. A piece's facts are not joined, so a dialect with comments does not split.
+
 `validate_records` lists the records a batch refuses, one `core.Record_Fault` each: the record's bytes
 `src[lo:hi]` and its `Error`, whose offset is into `src`. JSON's pieces each validate their records, so every
 refused record is listed; a framing fault belongs to no record, so it is `err` and only the records that start
@@ -728,7 +815,7 @@ resumes after it, so every fault is a record and none is `err`; `faults[0].err` 
 
 `csv.each_record` and a threaded `csv.validate` cut the text into pieces that each start after an LF outside
 quotes. There the scan's state equals its state at the input's start, so a piece is judged alone, with the
-first record's field count, which is read before the pieces. Under `Quoting.None` every LF is such a break.
+first record's field count, which is read before the pieces. Without quotes every LF is such a break.
 Under `Quoting.Quotes`, up to the text's first fault, a byte is inside quotes exactly when an odd number of
 quotes precedes it, since every quote opens or closes one (`""` is a close and an open). A first pass counts
 the quotes of each 32 KiB slice, and a piece starts at the first LF after its slice's offset with an even count
@@ -736,11 +823,18 @@ before it. Past the first fault that count no longer says where a record starts,
 there. A comment byte under quotes leaves one piece, since a comment line's quotes do not open fields.
 `csv.records_from` runs the same `Records` over a window that holds the open line and a chunk: a block is
 scanned once the window holds it and the three bytes a UTF-8 check reads past it, and `Limits.max_record_bytes`
-bounds the open line.
+bounds the open line. `json.records_from` runs JSON's `Records` over a window too, handing them only the bytes that
+frame whole records: whole lines under `.NDJSON`, up to the last run of separators under `.JSON_Seq` (where the
+record before it ends), up to the last text that ends under `.Concatenated`, and the whole input under `.None`
+and `.Root_Entries`. A caller that reads each `.Concatenated` text ends it by that read (`end_record`), so an
+array, object or string is framed by the walk that reads it, and only `records` handing out spans and
+`each_record`'s pieces count brackets first. The byte before the next record
+stays in the window when it drops what was read, so the window's first byte is never taken for the stream's,
+where a byte order mark is stepped over, and the byte after a record, which `judge_record` reads, is always held.
 
 The rest is forward design: how a later format (TOML) joins.
 
-- **Shared:** the rows (structure plus spans, `core.Row_Document`), the query engine, and the writer protocol
+- **Shared:** the rows (structure plus spans, `core.Document`), the query engine, and the writer protocol
   (open, key, scalar, close).
 - **Each format owns** its lexer (spans in, rows out) and its writer (protocol in, bytes out).
 - **A span holds text in its source format.** A same-format writer copies it, as `marshal(&doc)` does.
@@ -754,7 +848,7 @@ The rest is forward design: how a later format (TOML) joins.
     `u64` offsets.
   - Rows over a larger source either emits a high-32-bit epoch row each time `s.pos >> 32` advances, or stores
     `hi` and `key_hi` as `u32` lengths with the high offset bits packed into spare header bits.
-  - `Kind` and `Row_Flags` use 10 of 16 bits.
+  - `Kind` and `Row_Flags` use 8 of their 16 bits.
 
 ### Text dialects of JSON
 
@@ -794,7 +888,7 @@ Code asks what a dialect reads in one of three ways (the header of `json/scan/di
   compares a dialect with `==` or `!=`; in a `$dialect` walk the compile-time form is `GRAMMAR[dialect] != {}`.
 
 A dialect is named outside a dispatch arm only as the target of a transcode or a validation that is that dialect
-(`read_json5`, `check --from json5`, `edit_comment`). A predicate is not asked per row or per value: ask it once for
+(`read_json5`, `check --from json5`, the comment edits). A predicate is not asked per row or per value: ask it once for
 the document or the call (`marshal_document_jq` asks `own_spelling` once).
 
 Adding a dialect touches these places, and each `switch` over `Dialect` in them is exhaustive, so the compiler
@@ -807,12 +901,15 @@ names the ones missed:
 3. The entry dispatch: `validate_dialect` and `hooks_of` (with a `FORMAT_HOOKS_<NAME>` table) in
    `dialect.odin`, `scan_queries_deep` in `scan_queries.odin`, `walk_run` in `json/request_walk.odin`, and
    `path_subwalk` for a path re-entry.
-4. Typed reads: `shape_reads` and `shape_verdict` (native), or a read through a JSON spelling as `read_json5`;
+4. Typed reads: `shape_reads` and `shape_verdict` (native), or a read from the built document's rows as
+   `read_json5` (`core_pkg.shape_rows`, with a leaf that reads a number or a value read whole by its JSON text);
    `records_read` in `record_opts_refused`.
 5. Writing and edits: `own_spelling` and `has_comments` in `marshal_document`, the `jq_*` respell procedures,
    and `edits_read` with the `insert_at` and `watched_remove` dispatch.
-6. The CLI: a `Format` row in `FORMATS` (`source`, and `written_as` for a format that is only read), or a native
-   read; the run asks `Run.req.dialect` through `json.plain_json`, `json.has_comments` and `json.own_spelling`.
+6. The CLI: a `Format` row in `FORMATS` (`cmd/stury/formats.odin`), named as the library variant, with the
+   variant's options block as its preset fills it (`written_as` for a format that is only read); the run reads
+   the dialect from the block (`source_dialect`) and asks its grammar (`json.grammar_of`) by set membership:
+   `== {}`, `.Comments in`, `& json.OWN_SPELLING`; of a document, `json.plain_json` and `json.own_spelling`.
 7. Tests in `json/test/api/<name>_test.odin`, rows in `cmd/stury/test/cli.tsv`, CHANGELOG, `docs/cli.md`, and
    `json/API.txt` (`tools/api_surface.py`).
 
@@ -828,7 +925,17 @@ A path with `[]` is scanned `per_element`. An element in which the rest of the p
 `null`, as in jq. A text on which jq would error is handed to the interpreter before any of its outputs print:
 a step meets a value of another kind, or the value being indexed is neither an array nor an object. Over a
 large root array, or the array of `{"key": [...]}`, `.[] B` and `.key[] B` scan the array in pieces on the
-batch pool.
+batch pool. The pieces are the library's (`json.split_array`, §8). A path that names the spine's array prints it
+from its pieces, each judged first (at `.Structural` when the input was validated already). `stury check`
+validates a large root array with `json.validate` on the pool.
+
+**Formats.** `--from` and `--to` name a row of the CLI's `FORMATS` registry (`cmd/stury/formats.odin`), named as
+the library's variant. A row carries the variant's options block, a `json.Record_Opts` or a `csv.Read_Opts`, as
+the variant's preset fills it, so an input's dialect and framing are the library's options, not the CLI's. The
+CLI calls the typed procedures. Only
+the registry should import `json` or `csv`, and no CLI file a format's subpackage: `tools/cli_imports.py` (`make
+lint`) holds the files that still do. A text the CLI cuts out of its input is judged as its framing tells it by
+`json.judge_record`, which also splits a `--seq` record's value from stray bytes after it.
 
 **Interpreter.** Any other filter runs on the interpreter, over each input built whole into a `Document`.
 Duplicate keys are `.Last`, as in jq. A JSONC text with a `/` in it runs on the interpreter, which tracks
@@ -850,21 +957,23 @@ of the record (`only_columns`), runs the interpreter on an object of just those 
 record for each output. The pieces do this on the pool, each with its own arena. A record whose filter fails
 stops its piece, and the main thread runs that record and the rest of the file, so the message is the
 interpreter's. Other filters take the interpreter over `csv.records` (a whole file) or `csv.records_from` (a stream).
-The interpreter reads a record as a `core.Row_Document` (`record_doc`): the compact JSON object of the header's
-keys and the record's cells, an empty cell null, with a row per value (`cells_object`, which `print_cells` also writes an object
-with). The keys are made once per file, a string `jq.write_string` escaped is flagged and decoded on read, and the
-document is marked as holding no repeated key.
+The interpreter reads a record as `csv.record_document` makes it, keyed by the file's `csv.Header`
+(`csv.header_of`, once per file); `select(F)` keys it by `csv.header_pick` of the columns F reads.
 
 `--to csv|tsv` makes every output a record. The interpreter's `print_jq` passes each output to `print_row`
-(`output_cells.odin`), which converts it to cells and appends the record with `csv.write_record`, the writer
-`marshal` uses. The header is written with the first object; `--grow-header` holds the rows until the end of the
-input. The column route writes through the same `put_row`, so the bytes agree. The record writer refuses a
+(`output_cells.odin`), which converts it to cells and appends the record through a `csv.Table` (`csv/table.odin`):
+the header is written with the first object, `--grow-header` holds the rows until the end of the input, and each
+record is written by `csv.write_record`, the writer `marshal` uses. The column route writes through the same `put_row`, so the bytes agree. The record writer refuses a
 record it cannot write. The BOM check applies only to the output's first cell: the pool is skipped when that
 cell starts with a BOM (`opens_with_bom`), and `rows_begun` carries the state across pieces and flushes. `stury check
 --from csv|tsv` is `csv.validate` with the sequential read run again over the fault it found, for the message.
 
 **Streams.** A pipe or an `--unbuffered` stdin is read by a thread ([cli.md](cli.md#files-and-pipes)), and
-line-delimited records in each window run on the batch pool.
+line-delimited records in each window run on the batch pool. The texts of a file or window are the library's
+`.Concatenated` records (`Inputs.texts`, a `records_pushed` reader each window is pushed to). A scalar ends where
+the reader ends it. An array, object or string runs to the window's end: a read that stops without a fault tells
+its end, and one that stops on a fault is ended by the reader (`end_record`), which says when the window cut it
+short. The window is then read on from the text's line, whose bytes the reader carries (`record_carry`).
 
 ## 10. Build-time options
 

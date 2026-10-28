@@ -23,6 +23,27 @@ Unmarshal_Error_Kind :: enum u8 {
 	Bad_Tag,         // a field tag with a flag the format does not know, before any byte, offset 0, no path
 }
 
+// A sentence for each kind, as `render_error` writes it. A `.Syntax` reads as its `syntax` fault's text.
+@(rodata)
+UNMARSHAL_ERROR_TEXT := [Unmarshal_Error_Kind]string {
+	.Wrong_Kind      = "Value of the wrong kind",
+	.Out_Of_Range    = "Value out of range",
+	.Not_A_Member    = "Not a member of the enum",
+	.Wrong_Length    = "Wrong number of elements",
+	.Missing_Field   = "Missing required field",
+	.Unknown_Field   = "Unknown field",
+	.Missing_Tag     = "Missing union tag",
+	.Repeated_Tag    = "Repeated union tag",
+	.Out_Of_Memory   = "Out of memory",
+	.Syntax          = "Invalid text",
+	.Unsupported     = "Unsupported type",
+	.Ambiguous_Union = "Ambiguous union",
+	.Bad_Option      = "Unsupported option",
+	.Plan_Mismatch   = "Plan made for another type",
+	.Duplicate_Key   = "Duplicate key",
+	.Bad_Tag         = "Unknown field tag flag",
+}
+
 // A shape fault is the kind of its name, so a hook's answer passes through it as it is.
 #assert(u8(Shape_Fault.Wrong_Kind) == u8(Unmarshal_Error_Kind.Wrong_Kind))
 #assert(u8(Shape_Fault.Out_Of_Range) == u8(Unmarshal_Error_Kind.Out_Of_Range))
@@ -34,16 +55,17 @@ Unmarshal_Error_Kind :: enum u8 {
 #assert(u8(Shape_Fault.Repeated_Tag) == u8(Unmarshal_Error_Kind.Repeated_Tag))
 #assert(u8(Shape_Fault.Out_Of_Memory) == u8(Unmarshal_Error_Kind.Out_Of_Memory))
 
-// The innermost steps an error path keeps.
-UNMARSHAL_PATH_STEPS :: 8
+// The innermost steps an error path keeps (`Unmarshal_Error`, `Marshal_Error`).
+ERROR_PATH_STEPS :: 8
 
 Unmarshal_Error :: struct {
-	steps:     [UNMARSHAL_PATH_STEPS]Step, // the path, outermost first, as `steps[:n_steps]`
+	steps:     [ERROR_PATH_STEPS]Step, // the path, outermost first, as `steps[:n_steps]`
 	offset:    u64,
 	kind:      Unmarshal_Error_Kind,
 	syntax:    Error_Kind, // `.Syntax` only
+	detail:    u8, // `syntax`'s format detail, as `Error.detail`
 	n_steps:   u8,
-	truncated: bool, // steps outside the innermost UNMARSHAL_PATH_STEPS were dropped
+	truncated: bool, // steps outside the innermost ERROR_PATH_STEPS were dropped
 }
 
 // A scan's fault `e` as a typed read's: `.Syntax` with the fault in `syntax`, except a refused allocation and
@@ -55,13 +77,13 @@ unmarshal_error_from :: proc(e: Error) -> Unmarshal_Error {
 	case .Bad_Option:
 		return {kind = .Bad_Option}
 	}
-	return {kind = .Syntax, syntax = e.kind, offset = e.offset}
+	return {kind = .Syntax, syntax = e.kind, detail = e.detail, offset = e.offset}
 }
 
-// Put `s` before the path's steps. Paths are found innermost first, so once UNMARSHAL_PATH_STEPS are held a
-// further step is an outer one, and it is dropped.
-unmarshal_path_prepend :: proc(err: ^Unmarshal_Error, s: Step) {
-	if int(err.n_steps) == UNMARSHAL_PATH_STEPS {
+// Put `s` before the path's steps of `err`, an `Unmarshal_Error` or a `Marshal_Error`. Paths are found
+// innermost first, so once ERROR_PATH_STEPS are held a further step is an outer one, and it is dropped.
+error_path_prepend :: proc(err: ^$E, s: Step) {
+	if int(err.n_steps) == ERROR_PATH_STEPS {
 		err.truncated = true
 		return
 	}

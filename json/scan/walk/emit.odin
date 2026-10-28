@@ -37,6 +37,12 @@ emit_node :: #force_inline proc(
 	flags := facts.flags
 	if key_lo != NO_KEY_LATCH && q.node_key_escaped {
 		flags |= {.Key_Escaped}
+		// .Dom: the key is decoded for this row where its leaf checked it, so the leaves keep their shape.
+		when .Dom in Q {
+			if q.walk_judged {
+				emit_dom_key(q, q.path_src, key_lo, key_hi, int(key_hi - key_lo))
+			}
+		}
 	}
 	// `request_fault` refuses a `.Nodes` source past `MAX_ROW_SOURCE`, so the
 	// u32 casts cannot truncate, and `NO_KEY_LATCH` narrows to `NO_KEY`.
@@ -62,6 +68,25 @@ emit_node :: #force_inline proc(
 		q.node_key_hi = NO_KEY_LATCH
 		q.node_key_escaped = false
 	}
+	}
+}
+
+// .Dom: the checked escaped key token `src[lo:hi]` decoded onto the sink's value bytes by the format's decoder
+// and kept for the row about to be written, the member's value. `bound` is at least its decoded length. The
+// key store sits in the sink beside `value_bytes`, so the walk state carries no pointer to it: a larger
+// `Query_Ctx` slows every walk.
+@(private = "file")
+emit_dom_key :: #force_no_inline proc(q: ^Query_Ctx, src: []byte, lo, hi: u64, bound: int) {
+	at, ok := value_bytes_reserve(q.value_bytes, bound, len(src) - int(lo))
+	if !ok {
+		note_oom(q, .Dom)
+		return
+	}
+	n := q.hooks.dom_unescape_into(q.value_bytes[at:], src, lo, hi, 0)
+	edge_publish(q.value_bytes, at + n)
+	sink := container_of(q.value_bytes, Scan_Query_Sink, "value_bytes")
+	if !row_append(&sink.key_texts, Key_Text{node = Node(q.nodes_edge.len), str = {u32(at), u32(n)}}) {
+		note_oom(q, .Dom)
 	}
 }
 

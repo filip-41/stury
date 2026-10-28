@@ -12,7 +12,7 @@ import "core:sync"
 
 // jq's `if . < 0 then - . else . end`: null and the booleans sort below 0, and cannot be negated.
 fn_abs :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	#partial switch kind(v) {
+	switch kind(v) {
 	case .Number:
 		// `. < 0` compares a literal as a decimal, so -1e-400 is below 0 though it is -0.0.
 		if n, _ := number_of(v); n.f < 0 || n.f == 0 && n.lit != "" && compare_decimals(n.lit, "0") < 0 {
@@ -20,6 +20,7 @@ fn_abs :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Si
 		}
 	case .Null, .False, .True:
 		return nil, fail(ip, "%s (%s) cannot be negated", type_name(v), brief(v))
+	case .String, .Array, .Object:
 	}
 	return v, .Go
 }

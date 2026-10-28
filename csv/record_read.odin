@@ -3,18 +3,20 @@ package csv
 import "base:runtime"
 import core_pkg "../core"
 
-// A typed read of many records of one struct type, core's `Record_Read`: `record_read_init` resolves the plan,
+// A typed read of many records of one row type, core's `Record_Read`: `record_read_init` resolves the plan,
 // the row shape and the header's columns once, and each `unmarshal` of it pulls the next record and reads it as
-// `unmarshal` reads a row. A fault's offset is into that row's bytes; `record_read_at` gives the row's offset
-// in the input.
+// `unmarshal` reads a row. A row is a struct, a list of cells or a map of cells, as `unmarshal` reads them: a
+// list row replaces `ptr^`, and a map row adds to it. A fault's offset is into that row's bytes;
+// `record_read_at` gives the row's offset in the input.
 //
 // The pull is a `^Records` or a `^Record_Reader`, caller-owned: they must outlive the reader and not move. The
 // iterator's records are the rows: `record_read_init` consumes its header, or leaves the first record for the
-// first read under `no_header`. Its scan must be the one the reader's dialect, limits and strictness make
+// first read under `no_header` or a list row. Its scan must be the one the reader's dialect, limits and strictness make
 // (`.Bad_Option` otherwise; a `.Lazy` reader also takes a `.Strict` one), since the reader never re-scans.
 //
 // `dialect`, `limits`, `no_header`, `duplicates` and `borrow_strings` are bound at init. `strictness` and
-// `unknown_fields` apply at every row.
+// `unknown_fields` apply at every row. A map row's keys are the reader's, decoded from the header once and freed
+// by `record_read_destroy`: every row's map shares them.
 //
 // A fault that framed no row, and a `Record_Reader` whose reader failed (`.Syntax` `.Truncated` at the end of
 // the bytes it gave; `read_err` is the cause), end the rows with their offset in the input and `record_read_at`
@@ -27,12 +29,15 @@ Record_State :: struct {
 	it:                ^Records, // nil for the streaming source
 	rr:                ^Record_Reader,
 	columns_allocator: runtime.Allocator,
+	// A map row's header, copied: its cells name the columns after a stream's window has moved on.
+	header:            []byte,
 	row:               int,
 	// The scan skipped UTF-8, so its faults are not carried: every row is judged by itself. A `.Lazy` reader
 	// over a scan that judged UTF-8 takes over its faults, which it judges in the cells a field reads.
 	judge_each_row:    bool,
 	// A lazy read happened (or the scan skipped UTF-8), so a `.Strict` read must judge every cell.
 	lazy_seen:         bool,
+	cell_row:          bool, // the row is a list or a map of cells
 }
 
 @(private)
@@ -42,6 +47,11 @@ record_state_free :: proc(state: rawptr) {
 	delete(st.r.cols, st.columns_allocator)
 	delete(st.r.required)
 	delete(st.r.req_more)
+	for key in st.r.keys {
+		delete(key, st.columns_allocator)
+	}
+	delete(st.r.keys, st.columns_allocator)
+	delete(st.header, st.columns_allocator)
 	free(st, runtime.heap_allocator())
 }
 
@@ -58,21 +68,6 @@ record_state_records :: proc(st: ^Record_State) -> ^Records {
 	return &st.rr.it if st.rr != nil else st.it
 }
 
-// Why the pull stopped, as a read's refusal, or nil when it ended at the input's end.
-@(private)
-record_state_failure :: proc(st: ^Record_State) -> Maybe(Unmarshal_Error) {
-	if st.rr == nil {
-		return core_pkg.unmarshal_error_from(st.it.err.?) if st.it.err != nil else nil
-	}
-	if e, faulted := st.rr.err.?; faulted {
-		return core_pkg.unmarshal_error_from(e)
-	}
-	if st.rr.read_err != nil {
-		return Unmarshal_Error{kind = .Syntax, syntax = .Truncated, offset = st.rr.base + u64(st.rr.hi)}
-	}
-	return nil
-}
-
 // `allocator` is the one each row's values are read with; the state and the plan the reader makes are the
 // heap's, freed by `record_read_destroy`.
 @(require_results)
@@ -82,7 +77,7 @@ record_read_init :: proc(
 	pull: $P,
 	opts := Unmarshal_Opts{},
 	plan: ^Type_Plan = nil,
-	allocator := context.allocator,
+	allocator: runtime.Allocator,
 ) -> Maybe(Unmarshal_Error) where P == ^Records || P == ^Record_Reader {
 	if rd == nil || pull == nil {
 		return Unmarshal_Error{kind = .Bad_Option}
@@ -119,7 +114,7 @@ record_read_init :: proc(
 		state = state,
 		read = record_source_read,
 		destroy = record_state_free,
-		format = csv_plan_format(),
+		format = csv_plan_format,
 	}
 	if err := core_pkg.record_read_init(rd, T, source, opts, plan, runtime.heap_allocator()); err != nil {
 		return err
@@ -129,18 +124,24 @@ record_read_init :: proc(
 		return err
 	}
 	state.r.enum_ints = core_pkg.record_read_plan(rd).opts.enums == .Int
+	state.cell_row = state.r.row.kind != .Struct
 	recs := record_state_records(state)
 	state.judge_each_row = .Skip_Utf8 in recs.scan.mode
 	if opts.strictness == .Lazy && !state.judge_each_row {
 		recs.carry.utf8 = max(int)
 	}
 	state.lazy_seen = opts.strictness == .Lazy || state.judge_each_row
-	if opts.no_header {
+	map_row := state.r.row.kind == .Map
+	if map_row && opts.no_header {
+		record_read_destroy(rd)
+		return Unmarshal_Error{kind = .Unsupported}
+	}
+	if opts.no_header || state.cell_row && !map_row {
 		return nil
 	}
 	header, more := record_state_pull(state)
 	if !more {
-		if failure := record_state_failure(state); failure != nil {
+		if failure := core_pkg.record_state_failure(state); failure != nil {
 			record_read_destroy(rd)
 			return failure
 		}
@@ -154,42 +155,50 @@ record_read_init :: proc(
 			return err
 		}
 	}
-	if err := read_header(&state.r, header, opts.unknown_fields == .Refuse, opts.duplicates); err != nil {
+	if map_row {
+		// The keys outlive every row's allocator, so they are made with the reader's.
+		copied, aerr := make([]byte, header.fields[len(header.fields) - 1].hi, state.columns_allocator)
+		if aerr != nil {
+			record_read_destroy(rd)
+			return Unmarshal_Error{kind = .Out_Of_Memory}
+		}
+		copy(copied, header.src)
+		state.header, state.r.src = copied, copied
+		state.r.allocator, state.r.borrow = state.columns_allocator, false
+	}
+	err := read_header(&state.r, header, opts.unknown_fields == .Refuse, opts.duplicates)
+	state.r.allocator, state.r.borrow = allocator, opts.borrow_strings
+	if err != nil {
 		record_read_destroy(rd)
 		return err
 	}
 	return nil
 }
 
+@(private)
 record_read_destroy :: proc(rd: ^Record_Read) {
 	core_pkg.record_read_destroy(rd)
 }
 
 // The offset in the input of the row the last read pulled; 0 before any.
-@(require_results)
-record_read_at :: proc(rd: ^Record_Read) -> u64 {
-	return rd == nil ? 0 : rd.at
-}
+record_read_at :: core_pkg.record_read_at
 
 @(private)
-record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, _: ^core_pkg.Type_Plan, dest: rawptr, at: ^u64) -> Maybe(Unmarshal_Error) {
+record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, _: ^core_pkg.Type_Plan, dest: rawptr, at: ^u64) -> (bool, Maybe(Unmarshal_Error)) {
 	st := (^Record_State)(state)
-	rec, more := record_state_pull(st)
-	if !more {
+	rec, pulled := record_state_pull(st)
+	if !pulled {
 		at^ = 0
-		if failure := record_state_failure(st); failure != nil {
-			return failure
-		}
-		return Unmarshal_Error{kind = .Bad_Option}
+		return false, core_pkg.record_state_failure(st)
 	}
 	at^ = rec.at
 	st.r.src = rec.src
 	row := st.row
 	st.row += 1
-	if st.r.columns == nil {
+	if st.r.columns == nil && !st.cell_row {
 		context.allocator = st.columns_allocator
 		if err := columns_in_order(&st.r, rec, opts.unknown_fields == .Refuse); err != nil {
-			return record_row_error(st, at^, err)
+			return true, record_row_error(st, at^, err)
 		}
 	}
 	recs := record_state_records(st)
@@ -201,21 +210,41 @@ record_source_read :: proc(state: rawptr, opts: ^Unmarshal_Opts, _: ^core_pkg.Ty
 		}
 	} else if opts.strictness == .Strict && st.lazy_seen {
 		if err := judge_utf8(&st.r, recs, rec, -1); err != nil {
-			return record_row_error(st, at^, err)
+			return true, record_row_error(st, at^, err)
 		}
+	}
+	if st.cell_row {
+		return true, record_row_error(st, at^, record_read_cells(st, recs, rec, row, opts, dest))
 	}
 	cells := rec.fields
 	if lazy || st.r.dialect.ragged {
 		if trimmed, err := record_cells(&st.r, recs, rec, row, lazy, opts.unknown_fields == .Refuse); err != nil {
-			return record_row_error(st, at^, err)
+			return true, record_row_error(st, at^, err)
 		} else {
 			cells = trimmed
 		}
 	}
 	if kind, cell_at, name, refused := read_row(&st.r, cells, dest); refused {
-		return record_row_error(st, at^, cell_error(kind, cell_at, row, core_pkg.Name(name)))
+		return true, record_row_error(st, at^, cell_error(kind, cell_at, row, core_pkg.Name(name)))
 	}
-	return nil
+	return true, nil
+}
+
+// Reads `rec`, record `row`, into the list or map row at `dest`.
+@(private)
+record_read_cells :: proc(st: ^Record_State, recs: ^Records, rec: Record, row: int, opts: ^Unmarshal_Opts, dest: rawptr) -> Maybe(Unmarshal_Error) {
+	lazy := opts.strictness == .Lazy
+	cells := rec.fields
+	if st.r.row.kind == .Map {
+		if lazy || st.r.dialect.ragged {
+			cells = record_cells(&st.r, recs, rec, row, lazy, opts.unknown_fields == .Refuse) or_return
+		}
+		return read_map_row(&st.r, cells, dest, row)
+	}
+	if lazy && recs.carry.utf8 <= int(cells[len(cells) - 1].hi) {
+		judge_utf8(&st.r, recs, rec, row) or_return
+	}
+	return read_list_row(&st.r, cells, dest, row)
 }
 
 // `err`, a fault of the row just pulled, with its offset moved into the row's bytes. A cell is at a position of

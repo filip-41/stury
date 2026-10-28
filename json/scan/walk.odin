@@ -5,7 +5,7 @@ package scan
 // Values (strict, RFC 8259) checks grammar: nesting, string boundaries and
 // escapes, literals, number extents, the scalar caps. Locate does not check
 // grammar. Framing, wire UTF-8 and the depth cap still bind. No Bad_Escape,
-// Bad_Number or Bad_Literal comes out of Locate.
+// Bad_Number or a literal's Bad_Char comes out of Locate.
 //
 // The walk is iterative over a fixed `Open_Frame[MAX_DEPTH]` stack array, so the depth cap bounds its
 // memory. A cap raised past MAX_DEPTH moves the frames to the heap once the input nests past MAX_DEPTH.
@@ -90,14 +90,15 @@ walk_value_q :: #force_inline proc(
 	return walk_frames(s, q, max_depth, check, Q, cur, may_skip, may_stop, stopped, false, nil)
 }
 
-// The walk under a `limit` past MAX_DEPTH: a complete walk at `$check` on the JSONC cursor (JSON's grammar
+// The walk under a `limit` past MAX_DEPTH: a complete walk at `check` on the JSONC cursor (JSON's grammar
 // when `cur.json`) that never skips and never stops, on frames that spill to the scanner's allocator at the
 // first push past MAX_DEPTH and double there as the input nests deeper, freed here with the same one. Only two
 // readings reach it: `.Locate` for `.Structural` (a raised cap is a depth limit, not a grammar switch) and
-// `.Values` for the rest, so `.Lazy` loses its early stop and its skips past MAX_DEPTH. It is built for size: a
-// raised cap is the rare reading, and these twins are what it costs the binary.
-@(optimization_mode = "favor_size")
-walk_deep :: #force_no_inline proc(
+// `.Values` for the rest, so `.Lazy` loses its early stop and its skips past MAX_DEPTH. A raised cap is the
+// rare reading, so one instance per query kind reads either level, and a `{.Path}` walk is stop-capable
+// whether or not the caller passes `stopped`. Its scalar leaves are out-of-line instances shared per leaf
+// class (`DEEP_LEAF`).
+walk_deep :: #force_inline proc(
 	s: ^Scanner,
 	q: ^Query_Ctx,
 	limit: u64,
@@ -107,15 +108,28 @@ walk_deep :: #force_no_inline proc(
 	$may_stop: bool,
 	stopped: ^bool,
 ) -> Maybe(Error) {
+	#assert(!may_stop || Q == {.Path}, "only a path walk stops")
+	return walk_deep_at(s, q, limit, check == .Locate, Q, cur, stopped)
+}
+
+@(optimization_mode = "favor_size", private = "file")
+walk_deep_at :: #force_no_inline proc(
+	s: ^Scanner,
+	q: ^Query_Ctx,
+	limit: u64,
+	locate: bool,
+	$Q: bit_set[Walk_Kind],
+	cur: ^Dialect_Cursor($G),
+	stopped: ^bool,
+) -> Maybe(Error) {
 	#assert(.Shape not_in Q, "the shape walk holds its cap to MAX_DEPTH")
-	spill: []byte
-	err := walk_frames(s, q, limit, check, Q, cur, false, may_stop, stopped, true, &spill)
-	if spill != nil {
-		runtime.mem_free(raw_data(spill), s.alloc)
+	deep := Deep_State{locate = locate}
+	err := walk_frames(s, q, limit, .Values, Q, cur, false, Q == {.Path}, stopped, true, &deep.spill)
+	if deep.spill != nil {
+		runtime.mem_free(raw_data(deep.spill), s.alloc)
 	}
 	return err
 }
-
 
 // The walk itself. Each pass of `descend` takes one value, in this order: value-start hooks (path, shape),
 // the skip of a value no query reads (`may_skip`), a container below every armed level checked whole
@@ -162,6 +176,9 @@ walk_frames :: #force_inline proc(
 	G :: intrinsics.type_polymorphic_record_parameter_value(C, 0) when intrinsics.type_is_specialization_of(C, Dialect_Cursor) else Grammar{}
 	when .Json5_Scalars in G {
 		#assert(.Shape not_in Q, "a JSON5 text is unmarshalled through its JSON spelling")
+	}
+	when deep {
+		DEEP_LEAF :: (Q & {.Nodes, .Dom}) when Q & {.Nodes, .Dom} != {} else (bit_set[Walk_Kind]{.Path} when Q != {} else bit_set[Walk_Kind]{})
 	}
 	// Q is only the kinds that touch a value through its row (`.Nodes`, `.Dom`), nothing else at its start or
 	// end, on a walk that visits every value.
@@ -438,7 +455,7 @@ walk_frames :: #force_inline proc(
 							}
 						}
 					}
-					next, err := object_key(s, cur, q, check, Q, sp, fr, &demand_pend)
+					next, err := object_key(s, cur, q, check, Q, sp, fr, &demand_pend, (^Deep_State)(spill))
 					if err != nil {
 						return err
 					}
@@ -451,14 +468,26 @@ walk_frames :: #force_inline proc(
 						return err
 					}
 					emit_scalar(q, Q, lo, s.pos, .String)
+				} else when deep {
+					// The dialect cursor knows no extent, and no shape reads here.
+					if err := deep_string(s, q, lo, false, DEEP_LEAF, deep_locate(spill)); err != nil {
+						return err
+					}
+					emit_scalar(q, Q, lo, s.pos, .String)
 				} else {
 					if err := walk_string(s, q, cur, check, Q, lo, sp); err != nil {
 						return err
 					}
 				}
 			case VC_LITERAL: // true / false / null
-				if err := walk_literal(s, q, cur, check, Q, lo, sp); err != nil {
-					return err
+				when deep {
+					if err := deep_literal(s, q, lo, DEEP_LEAF, deep_locate(spill)); err != nil {
+						return err
+					}
+				} else {
+					if err := walk_literal(s, q, cur, check, Q, lo, sp); err != nil {
+						return err
+					}
 				}
 			case VC_NUMBER:
 				known := false
@@ -488,6 +517,10 @@ walk_frames :: #force_inline proc(
 							}
 							s.pos += 1
 							lo = s.pos
+						}
+					} else when deep {
+						if err := deep_number(s, q, lo, DEEP_LEAF, deep_locate(spill)); err != nil {
+							return err
 						}
 					} else when check == .Values {
 						if err := number.parse_number_q(s, q, lo, Q); err != nil {
@@ -543,7 +576,7 @@ walk_frames :: #force_inline proc(
 						if closer == ']' {
 							b = lex.peek(s)
 						} else {
-							next, err := object_key(s, cur, q, check, Q, sp, top, &demand_pend)
+							next, err := object_key(s, cur, q, check, Q, sp, top, &demand_pend, (^Deep_State)(spill))
 							if err != nil {
 								return err
 							}
@@ -592,7 +625,7 @@ walk_frames :: #force_inline proc(
 								}
 							}
 						}
-						next, err := object_key(s, cur, q, check, Q, sp, top, &demand_pend)
+						next, err := object_key(s, cur, q, check, Q, sp, top, &demand_pend, (^Deep_State)(spill))
 						if err != nil {
 							return err
 						}
@@ -742,4 +775,45 @@ value_use :: #force_inline proc(q: ^Query_Ctx, $Q: bit_set[Walk_Kind], sp: u64, 
 		}
 	}
 	return use
+}
+
+// What the deep walk keeps beside its frames: the heap array they spill to (`spill_frames`, which the walk
+// holds by its first field), and whether its leaves check no grammar (`.Locate`; `$check` is `.Values` there).
+@(private)
+Deep_State :: struct {
+	spill:  []byte,
+	locate: bool,
+}
+
+@(private = "file")
+deep_locate :: #force_inline proc(spill: ^[]byte) -> bool {
+	return (^Deep_State)(spill).locate
+}
+
+// The deep walk's scalar leaves, out of line and generic over what they read of `Q`: whether they write rows
+// (`.Nodes`, `.Dom`) and whether they latch a key's escape. Queries of every other kind share one instance of
+// each. `DEEP_LEAF` is that class, written as a constant expression where it is used because Odin has no
+// constant call.
+@(private, optimization_mode = "favor_size")
+deep_string :: #force_no_inline proc(s: ^Scanner, q: ^Query_Ctx, lo: u64, key: bool, $Q: bit_set[Walk_Kind], locate: bool) -> Maybe(Error) {
+	if locate {
+		return lex.skip_string_q(s, q, lo, key, Q)
+	}
+	return lex.parse_string_q(s, q, lo, key, Q)
+}
+
+@(private = "file", optimization_mode = "favor_size")
+deep_literal :: #force_no_inline proc(s: ^Scanner, q: ^Query_Ctx, lo: u64, $Q: bit_set[Walk_Kind], locate: bool) -> Maybe(Error) {
+	if locate {
+		return lex.skip_alpha_q(s, q, lo, Q)
+	}
+	return lex.parse_literal_q(s, q, lo, Q)
+}
+
+@(private = "file", optimization_mode = "favor_size")
+deep_number :: #force_no_inline proc(s: ^Scanner, q: ^Query_Ctx, lo: u64, $Q: bit_set[Walk_Kind], locate: bool) -> Maybe(Error) {
+	if locate {
+		return number.skip_number_q(s, q, lo, Q)
+	}
+	return number.parse_number_q(s, q, lo, Q)
 }

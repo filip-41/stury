@@ -138,6 +138,3 @@ shape_flat :: proc(r: ^core_pkg.Read_Shape, op: core_pkg.Shape_Op) -> bool {
 	}
 	return true
 }
-
-// The ops whose leaf writes every byte of its target, so their slots need no zeroing first.
-SHAPE_WHOLE_LEAVES :: bit_set[core_pkg.Shape_Kind]{.Bool, .Int, .Uint, .Float, .String}

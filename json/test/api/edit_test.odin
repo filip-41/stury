@@ -71,9 +71,9 @@ test_set :: proc(t: ^testing.T) {
 	testing.expect_value(t, edit_err(t, bs, .Bad_Source).syntax, json.Error_Kind.Truncated)
 	p: rawptr
 	_, en := json.set(raw(`{"a":1}`), ".a", p)
-	testing.expect_value(t, edit_err(t, en, .Encode).encode, json.Marshal_Error.Unsupported)
+	testing.expect_value(t, edit_err(t, en, .Encode).encode, json.Marshal_Error_Kind.Unsupported)
 	_, mid := json.set(raw(`{"a":1}`), ".a", []f64{1, math.inf_f64(1)})
-	testing.expect_value(t, edit_err(t, mid, .Encode).encode, json.Marshal_Error.Non_Finite)
+	testing.expect_value(t, edit_err(t, mid, .Encode).encode, json.Marshal_Error_Kind.Non_Finite)
 	_, long := json.set(raw(`{"a":1}`), strings.repeat(".a", 33, context.temp_allocator), 1)
 	edit_err(t, long, .Over_Capacity)
 }
@@ -268,7 +268,7 @@ test_edit_out_of_memory :: proc(t: ^testing.T) {
 		case .Remove:
 			return json.remove(raw(c.src), c.path, {dialect = c.dialect}, allocator = allocator)
 		case .Comment:
-			return json.edit_comment(raw(c.src), c.path, .Lead, "// x", .Insert, allocator)
+			return json.insert_comment(raw(c.src), c.path, .Lead, "// x", allocator = allocator)
 		}
 		return nil, nil
 	}
@@ -329,7 +329,7 @@ test_set_names_a_type_mismatch :: proc(t: ^testing.T) {
 test_splice_refuses_a_comment_that_swallows_values :: proc(t: ^testing.T) {
 	src := raw("[1, 2\n]")
 	_, err := json.splice(src, []json.Edit{{lo = 2, hi = 3, bytes = raw(" //")}}, {dialect = .Jsonc})
-	edit_err(t, err, .Bad_Result)
+	testing.expect_value(t, err, json.Path_Error{kind = .Unplaceable, offset = 2})
 	// A comment that ends inside the edit is fine.
 	out, ok := json.splice(src, []json.Edit{{lo = 2, hi = 3, bytes = raw(", /* c */")}}, {dialect = .Jsonc})
 	testing.expect_value(t, ok, nil)
@@ -346,20 +346,20 @@ test_refusals_at_no_byte_render_one_way :: proc(t: ^testing.T) {
 	render :: proc(src: string, err: $E) -> string {
 		return json.render_error(raw(src), err, context.temp_allocator)
 	}
-	testing.expect_value(t, render("", json.Path_Error{kind = .Out_Of_Memory}), "offset 0: Out_Of_Memory")
-	testing.expect_value(t, render("", core.Unmarshal_Error{kind = .Out_Of_Memory}), "offset 0: Out_Of_Memory")
-	testing.expect_value(t, render("", json.Error{kind = .Out_Of_Memory}), "offset 0: Out_Of_Memory")
+	testing.expect_value(t, render("", json.Path_Error{kind = .Out_Of_Memory}), "offset 0: Out of memory")
+	testing.expect_value(t, render("", core.Unmarshal_Error{kind = .Out_Of_Memory}), "offset 0: Out of memory")
+	testing.expect_value(t, render("", json.Error{kind = .Out_Of_Memory}), "offset 0: Out of memory")
 	// An allocation refused while a value was being read is at that value.
-	testing.expect_value(t, render("abcd", core.Unmarshal_Error{kind = .Out_Of_Memory, offset = 4}), "1:5: Out_Of_Memory")
+	testing.expect_value(t, render("abcd", core.Unmarshal_Error{kind = .Out_Of_Memory, offset = 4}), "1:5: Out of memory")
 	// The path still follows.
 	at_no_byte := core.Unmarshal_Error{kind = .Out_Of_Memory}
 	at_no_byte.steps[0] = json.Name("a")
 	at_no_byte.n_steps = 1
-	testing.expect_value(t, render("", at_no_byte), "offset 0: Out_Of_Memory at .a")
+	testing.expect_value(t, render("", at_no_byte), "offset 0: Out of memory at .a")
 	// A kind raised before any byte, with no offset to show, stays bare, and a located fault keeps its offset.
-	testing.expect_value(t, render("", core.Unmarshal_Error{kind = .Bad_Option}), "Bad_Option")
-	testing.expect_value(t, render("", json.Path_Error{kind = .Not_Found}), "Not_Found")
-	testing.expect_value(t, render("{}", json.Path_Error{kind = .Bad_Path, offset = 2}), "offset 2: Bad_Path")
+	testing.expect_value(t, render("", core.Unmarshal_Error{kind = .Bad_Option}), "Unsupported option")
+	testing.expect_value(t, render("", json.Path_Error{kind = .Not_Found}), "Path matched nothing")
+	testing.expect_value(t, render("{}", json.Path_Error{kind = .Bad_Path, offset = 2}), "offset 2: Invalid path")
 }
 
 // The edits refuse a repeated key under `.Default`, as `.Refuse` does; a build without the refusing walks reads

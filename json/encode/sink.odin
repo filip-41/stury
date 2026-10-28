@@ -16,7 +16,7 @@ Sink :: struct {
 // Write `text`, re-escaped when the sink says so. Returns the count of `text` consumed. Re-escaping stops before
 // a UTF-8 sequence cut off at the end, which the caller keeps for the next write.
 @(private)
-sink_write :: proc(s: ^Sink, text: []u8) -> (int, Marshal_Error) #no_bounds_check {
+sink_write :: proc(s: ^Sink, text: []u8) -> (int, Marshal_Error_Kind) #no_bounds_check {
 	if s.reescape == {} {
 		if _, err := io.write_full(s.w, text); err != nil {
 			return 0, .Write_Failed
@@ -42,7 +42,7 @@ sink_write :: proc(s: ^Sink, text: []u8) -> (int, Marshal_Error) #no_bounds_chec
 }
 
 // Write `buf`'s bytes and empty it, keeping what `sink_write` left.
-sink_drain :: proc(s: ^Sink, buf: ^[dynamic]u8) -> Marshal_Error {
+sink_drain :: proc(s: ^Sink, buf: ^[dynamic]u8) -> Marshal_Error_Kind {
 	n := sink_write(s, buf[:]) or_return
 	remove_range(buf, 0, n)
 	return .None
@@ -59,7 +59,7 @@ Doc_Sink :: struct {
 // Hand `k.buf[:w]` to the writer. What it left (a cut UTF-8 sequence) moves to the front, and its length is
 // the new write offset.
 @(private)
-sink_flush :: proc(k: ^Doc_Sink, w: int) -> (left: int, err: Marshal_Error) {
+sink_flush :: proc(k: ^Doc_Sink, w: int) -> (left: int, err: Marshal_Error_Kind) {
 	done := sink_write(&k.sink, k.buf[:w]) or_return
 	copy(k.buf, k.buf[done:w])
 	return w - done, .None
@@ -68,7 +68,7 @@ sink_flush :: proc(k: ^Doc_Sink, w: int) -> (left: int, err: Marshal_Error) {
 // The write offset after making room for `need` bytes from `w`: flushed when the buffer is short, then grown
 // when it is still short.
 @(private)
-sink_room :: #force_no_inline proc(k: ^Doc_Sink, w, need: int) -> (at: int, err: Marshal_Error) {
+sink_room :: #force_no_inline proc(k: ^Doc_Sink, w, need: int) -> (at: int, err: Marshal_Error_Kind) {
 	at = sink_flush(k, w) or_return
 	if at + need > len(k.buf) {
 		grown, aerr := mem.resize_bytes_non_zeroed(k.buf, at + need, allocator = k.allocator)

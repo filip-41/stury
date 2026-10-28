@@ -81,8 +81,8 @@ Query_Ctx :: struct {
 	// A gated demand (`Demand_Spec.gate`), read only by a walk carrying `.Gate`. Never zeroed:
 	// `demand_gate_prepare` sets it.
 	gate:           ^Demand_Gate,
-	// The document a `.Path` walk reads, for the kind of each `Found` it writes. Never zeroed: the walk
-	// sets it before any hook runs.
+	// The document a `.Path` or `.Dom` walk reads: for the kind of each `Found` a path writes, and the escaped
+	// keys `.Dom` decodes as their rows are written. Never zeroed: the walk sets it before any hook runs.
 	path_src:       []u8,
 	// The format's hooks (`Format_Hooks`). Never zeroed: the scan entry sets it before the walk.
 	hooks:          ^Format_Hooks,

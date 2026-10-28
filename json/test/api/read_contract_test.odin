@@ -8,7 +8,7 @@ import "core:strings"
 import "core:testing"
 
 @(private = "file")
-scan_verdict :: proc(t: ^testing.T, src: string, path: string, strictness: json.Strictness, duplicates := json.Duplicates.First, limits := json.Limits{}) -> (err: Maybe(json.Error), answers: int) {
+scan_verdict :: proc(t: ^testing.T, src: string, path: string, strictness: json.Strictness, duplicates := json.Duplicates.First, limits := json.Limits{}) -> (err: Maybe(json.Path_Error), answers: int) {
 	steps: [json.MAX_PATH_STEPS]json.Step
 	names := make([]u8, len(path), context.temp_allocator)
 	p, fault := json.parse_path(path, steps[:], names)
@@ -24,7 +24,7 @@ scan_verdict :: proc(t: ^testing.T, src: string, path: string, strictness: json.
 test_negative_index_reread_reports_its_fault :: proc(t: ^testing.T) {
 	for strictness in ([]json.Strictness{.Strict, .Structural, .Lazy}) {
 		got, n := scan_verdict(t, `[[0],[1 2]]`, ".[-1]", strictness)
-		testing.expectf(t, got == Maybe(json.Error)(json.Error{kind = .Bad_Char, offset = 8}), "%v: %v", strictness, got)
+		testing.expectf(t, got == source(json.Error{kind = .Bad_Char, offset = 8}), "%v: %v", strictness, got)
 		testing.expect_value(t, n, 0)
 	}
 }
@@ -47,7 +47,7 @@ test_request_answers_out_of_range_and_reinit :: proc(t: ^testing.T) {
 	req: json.Request({.Path})
 	defer json.destroy(&req)
 	paths := []json.Path{{steps = []json.Step{json.Name("a")}}, {steps = []json.Step{json.Name("b")}}}
-	req.paths = paths
+	_ = request_of(&req, paths)
 	testing.expect_value(t, json.scan(raw(`{"a":1,"b":2}`), &req), nil)
 	for i in ([]int{-1, 2, 7}) {
 		out, err := json.answers(&req, i)
@@ -75,7 +75,7 @@ test_union_tag_is_judged_before_it_is_refused :: proc(t: ^testing.T) {
 	for strictness in ([]json.Strictness{.Strict, .Lazy}) {
 		opts := json.Unmarshal_Opts{strictness = strictness}
 		e := um_refused(t, `{"type":tru,"r":1}`, Tagged_Shape, .Syntax, 11, opts, mapping)
-		testing.expect_value(t, e.syntax, json.Error_Kind.Bad_Literal)
+		testing.expect(t, e.syntax == .Bad_Char && json.Fault(e.detail) == .Literal)
 		e = um_refused(t, `{"type":"Um_Circle\q","r":1}`, Tagged_Shape, .Syntax, 19, opts, mapping)
 		testing.expect_value(t, e.syntax, json.Error_Kind.Bad_Escape)
 		um_refused(t, `{"type":1,"r":1}`, Tagged_Shape, .Not_A_Member, 0, opts, mapping)
@@ -107,7 +107,7 @@ test_deep_cap_keeps_the_strictness :: proc(t: ^testing.T) {
 	deep := json.Limits{max_depth = json.MAX_DEPTH + 1}
 	testing.expect_value(t, json.validate(raw(`[tru]`), {strictness = .Structural}), nil)
 	testing.expect_value(t, json.validate(raw(`[tru]`), {strictness = .Structural, limits = deep}), nil)
-	testing.expect_value(t, json.validate(raw(`[tru]`), {strictness = .Strict, limits = deep}), json.Error{kind = .Bad_Literal, offset = 4})
+	testing.expect_value(t, json.validate(raw(`[tru]`), {strictness = .Strict, limits = deep}), json.Error{kind = .Bad_Char, detail = u8(json.Fault.Literal), offset = 4})
 	for lim in ([]json.Limits{{}, deep}) {
 		got, n := scan_verdict(t, `{"a":1,"b":tru}`, ".a", .Structural, limits = lim)
 		testing.expectf(t, got == nil && n == 1, "structural %v: %v %d", lim.max_depth, got, n)
@@ -115,6 +115,6 @@ test_deep_cap_keeps_the_strictness :: proc(t: ^testing.T) {
 	// Lazy past the cap has no early stop: it reads the whole item and checks it, which says so in its docs.
 	got, n := scan_verdict(t, `{"a":1,"b":tru}`, ".a", .Lazy, limits = deep)
 	testing.expectf(t, n == 1, "lazy deep answers %d", n)
-	testing.expect_value(t, got, Maybe(json.Error)(json.Error{kind = .Bad_Literal, offset = 14}))
+	testing.expect_value(t, got, source(json.Error{kind = .Bad_Char, detail = u8(json.Fault.Literal), offset = 14}))
 }
 

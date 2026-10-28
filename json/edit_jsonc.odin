@@ -187,29 +187,53 @@ comment_ok :: proc(comment: string) -> bool {
 	return false
 }
 
-// What `edit_comment` does with the comments at its place.
-Comment_Op :: enum u8 {
-	// Add `comment` after the comments already there. `.Inline` needs a member and `.Foot` a container
-	// (`.Unplaceable` otherwise), and so does a `.Trail` after a line comment trailing the same value.
-	Insert,
-	Set,    // replace the comments there with `comment` (`.Not_Found` when a value has none there)
-	Remove, // remove them, each with its line when it stands alone on one (`.Not_Found` when no value has one)
+// Add `comment` at `place` on every value the path finds, after the comments already there. `.Inline` needs a
+// member and `.Foot` a container (`.Unplaceable` otherwise), and so does a `.Trail` after a line comment trailing
+// the same value.
+//
+// Every comment edit reads the source as `set` reads it under `opts`, whose dialect must hold comments: `.Jsonc`,
+// the default (`.Bad_Option` otherwise). The path is text or a `Path`, as `set`'s. `comment` is one `//` line or
+// one `/* */` block; text with neither marker is the bare text `fact_text` reads, written as a `//` line (`human`
+// as `// human`, and ` human`, as `fact_text` returns it, as `// human`). Any other comment is `.Bad_Comment`.
+@(require_results)
+insert_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, opts := Read_Opts{dialect = .Jsonc}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	return comment_edit(src, path, place, comment, .Insert, opts, allocator)
 }
 
-// Edit the comments at `place` on every value the path finds, as `op` says. The source is read as `set` reads
-// it under `.Jsonc`. The path is text or a `Path`, as `set`'s. `comment` is one `//` line or one `/* */` block;
-// text with neither marker is the bare text `fact_text` reads, written as a `//` line (`human` as `// human`,
-// and ` human`, as `fact_text` returns it, as `// human`). Any other comment is `.Bad_Comment`. `.Remove`
-// ignores `comment`.
+// Replace the comments at `place` on every value the path finds with `comment`, as `insert_comment` reads it.
+// A value with none there is `.Not_Found`.
 @(require_results)
-edit_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+set_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, opts := Read_Opts{dialect = .Jsonc}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	return comment_edit(src, path, place, comment, .Set, opts, allocator)
+}
+
+// Remove the comments at `place` on every value the path finds, each with its line when it stands alone on one.
+// `.Not_Found` when no value has one there.
+@(require_results)
+remove_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, opts := Read_Opts{dialect = .Jsonc}, allocator := context.allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	return comment_edit(src, path, place, "", .Remove, opts, allocator)
+}
+
+@(private = "file")
+Comment_Op :: enum u8 {
+	Insert,
+	Set,
+	Remove,
+}
+
+@(private = "file")
+comment_edit :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, opts: Read_Opts, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+	edit_refused(opts.dialect) or_return
+	if !scan_pkg.has_comments(opts.dialect) {
+		return nil, Path_Error{kind = .Bad_Option}
+	}
 	watch := core_pkg.Refusal_Watch{backing = allocator}
-	out, err = watched_comment(src, path, place, comment, op, core_pkg.watched(&watch))
+	out, err = watched_comment(src, path, place, comment, op, opts, core_pkg.watched(&watch))
 	return core_pkg.unless_refused(&watch, out, err, core_pkg.PATH_OUT_OF_MEMORY)
 }
 
 @(private = "file")
-watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
+watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment: string, op: Comment_Op, opts: Read_Opts, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
 	buf: core_pkg.Path_Buf
 	p := core_pkg.path_resolve(path, &buf, allocator) or_return
 	defer delete(buf.heap, allocator)
@@ -226,7 +250,7 @@ watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment
 	paths := [1]Path{p}
 	req: Request({.Path, .Nodes})
 	defer request_destroy(&req)
-	edit_scan(src, &req, paths[:], {dialect = .Jsonc}, allocator) or_return
+	edit_scan(src, &req, paths[:], opts, allocator) or_return
 	doc := &req.doc
 	text := make([dynamic]u8, allocator)
 	defer delete(text)
@@ -278,7 +302,7 @@ watched_comment :: proc(src: []byte, path: Path_Spec, place: Fact_Place, comment
 			return nil, Path_Error{kind = .Unplaceable}
 		}
 	}
-	return judged(places_apply(src, places[:], text[:], allocator), allocator, .Jsonc)
+	return judged(core_pkg.places_apply(src, places[:], text[:], allocator), allocator, opts.dialect)
 }
 
 // What removing `cm` deletes: its line, line break before it included, when it stands alone on one, else

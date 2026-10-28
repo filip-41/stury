@@ -6,26 +6,26 @@ import csv "../"
 
 Case :: struct {
 	src:     string,
-	kind:    csv.Error_Kind,
-	at:      u64, // the fault's offset, when `kind` is not `.None`
+	kind:    Maybe(csv.Error_Kind), // nil when accepted
+	at:      u64, // the fault's offset
 	dialect: csv.Dialect,
 }
 
 @(test)
 test_validate_cases :: proc(t: ^testing.T) {
 	cases := []Case {
-		{"", .None, 0, {}},
-		{"a", .None, 0, {}},
-		{"a,b\nc,d\n", .None, 0, {}},
-		{"a,b\r\nc,d\r\n", .None, 0, {}},
-		{"a,b\nc,d", .None, 0, {}},
-		{"\xEF\xBB\xBFa,b\n", .None, 0, {}},
-		{"a,b\n\n\r\nc,d\n", .None, 0, {}},
-		{`"a,b","c""d"` + "\n" + `"e` + "\r\n" + `f",g` + "\n", .None, 0, {}},
-		{`""`, .None, 0, {}},
-		{`"",""""`, .None, 0, {}},
-		{",\n,\n", .None, 0, {}},
-		{"é,ü\n", .None, 0, {}},
+		{"", nil, 0, {}},
+		{"a", nil, 0, {}},
+		{"a,b\nc,d\n", nil, 0, {}},
+		{"a,b\r\nc,d\r\n", nil, 0, {}},
+		{"a,b\nc,d", nil, 0, {}},
+		{"\xEF\xBB\xBFa,b\n", nil, 0, {}},
+		{"a,b\n\n\r\nc,d\n", nil, 0, {}},
+		{`"a,b","c""d"` + "\n" + `"e` + "\r\n" + `f",g` + "\n", nil, 0, {}},
+		{`""`, nil, 0, {}},
+		{`"",""""`, nil, 0, {}},
+		{",\n,\n", nil, 0, {}},
+		{"é,ü\n", nil, 0, {}},
 		{`a,"b"x`, .Bad_Char, 5, {}},
 		{`a,"b`, .Truncated, 4, {}},
 		{`b"c`, .Bad_Char, 1, {}},
@@ -33,16 +33,16 @@ test_validate_cases :: proc(t: ^testing.T) {
 		{`"a" ,b`, .Bad_Char, 3, {}},
 		{"a\rb", .Bad_Char, 1, {}},
 		{"a\r", .Bad_Char, 1, {}},
-		{"a,b\nc\n", .Field_Count, 4, {}},
-		{"a\nb,c\n", .Field_Count, 2, {}},
-		{"a,b\nc,d,e", .Field_Count, 4, {}},
+		{"a,b\nc\n", .Bad_Structure, 4, {}},
+		{"a\nb,c\n", .Bad_Structure, 2, {}},
+		{"a,b\nc,d,e", .Bad_Structure, 4, {}},
 		{"a\xFFb", .Bad_Char, 1, {}},
 		{"a\xC3", .Truncated, 2, {}},
 		{"a\xE2\x82", .Truncated, 3, {}},
 		{"a\xE2\x28\xA1", .Bad_Char, 1, {}},
 		{"\xED\xA0\x80", .Bad_Char, 0, {}},
 		{"\xC0\xAF", .Bad_Char, 0, {}},
-		{"a\xEF\xBB\xBF", .None, 0, {}},
+		{"a\xEF\xBB\xBF", nil, 0, {}},
 	}
 	check_cases(t, cases)
 }
@@ -65,12 +65,25 @@ check_cases :: proc(t: ^testing.T, cases: []Case) {
 	}
 }
 
+// The error of CSV fault `f` at `offset`.
+csv_fault :: proc(offset: u64, f: csv.Fault) -> csv.Error {
+	return {offset = offset, kind = .Bad_Structure if f == .Field_Count else .Limit_Format, detail = u8(f)}
+}
+
+// A case's error: `.Bad_Structure` is a validate's only structure fault, `Fault.Field_Count`.
+case_error :: proc(c: Case, shift: u64) -> csv.Error {
+	if c.kind.? == .Bad_Structure {
+		return csv_fault(c.at + shift, .Field_Count)
+	}
+	return {offset = c.at + shift, kind = c.kind.?}
+}
+
 @(private = "file")
 check :: proc(t: ^testing.T, src: []byte, c: Case, shift: u64) {
 	got := csv.validate(src, {dialect = c.dialect})
 	want: Maybe(csv.Error)
-	if c.kind != .None {
-		want = csv.Error{offset = c.at + shift, kind = c.kind}
+	if c.kind != nil {
+		want = case_error(c, shift)
 	}
 	testing.expectf(t, got == want, "%q (shift %d): validate %v, want %v", c.src, shift, got, want)
 	_, rerr := collect(src, c.dialect)
@@ -94,10 +107,10 @@ test_field_text :: proc(t: ^testing.T) {
 	want := [][]string{{"a", `b,"c"`}, {"x\ny", ""}}
 	for r, i in recs {
 		testing.expect_value(t, len(r.fields), 2)
-		for f, k in r.fields {
-			text, escaped, aerr := csv.field_text(src, f)
+		for _, k in r.fields {
+			text, escaped, aerr := csv.field_text(r, k)
 			testing.expect_value(t, aerr, nil)
-			testing.expect_value(t, string(text), want[i][k])
+			testing.expect_value(t, text, want[i][k])
 			if escaped {
 				delete(text)
 			}
@@ -134,10 +147,10 @@ test_field_text_long :: proc(t: ^testing.T) {
 		}
 		got: [dynamic]string
 		got.allocator = context.temp_allocator
-		for f in recs[0].fields {
-			text, _, aerr := csv.field_text(src, f, c.dialect, context.temp_allocator)
+		for _, k in recs[0].fields {
+			text, _, aerr := csv.field_text(recs[0], k, context.temp_allocator)
 			testing.expect_value(t, aerr, nil)
-			append(&got, string(text))
+			append(&got, text)
 		}
 		testing.expect_value(t, strings.join(got[:], "|", context.temp_allocator), c.want)
 	}
@@ -149,7 +162,7 @@ collect :: proc(src: []byte, dialect: csv.Dialect, strictness := csv.Strictness.
 	it := csv.records(src, {dialect = dialect, strictness = strictness, limits = limits})
 	defer csv.destroy(&it)
 	for r in csv.next_record(&it) {
-		append(&out, csv.Record{fields = clone(r.fields), at = r.at})
+		append(&out, csv.Record{fields = clone(r.fields), at = r.at, src = r.src, dialect = r.dialect})
 	}
 	return out, it.err
 }

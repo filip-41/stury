@@ -10,7 +10,7 @@ import core "../../core"
 test_error_position :: proc(t: ^testing.T) {
 	src := "a,b\r\n1,2\r\n3\r\n"
 	err := csv.validate(transmute([]byte)src).?
-	testing.expect_value(t, err, csv.Error{offset = 10, kind = .Field_Count})
+	testing.expect_value(t, err, csv_fault(10, .Field_Count))
 	line, col := csv.error_position(transmute([]byte)src, err)
 	testing.expect_value(t, line, 3)
 	testing.expect_value(t, col, 1)
@@ -29,18 +29,18 @@ test_render_error :: proc(t: ^testing.T) {
 	bytes := transmute([]byte)src
 	err := csv.validate(bytes).?
 	text := csv.render_error(bytes, err, context.temp_allocator)
-	testing.expect_value(t, text, "3:1: Field_Count")
-	testing.expect_value(t, csv.render_error(bytes, csv.Error{kind = .Bad_Option}, context.temp_allocator), "offset 0: Bad_Option")
-	testing.expect_value(t, csv.render_error(bytes, csv.Error{offset = 99, kind = .Truncated}, context.temp_allocator), "offset 99: Truncated")
+	testing.expect_value(t, text, "3:1: Record has the wrong number of fields")
+	testing.expect_value(t, csv.render_error(bytes, csv.Error{kind = .Bad_Option}, context.temp_allocator), "offset 0: Unsupported option")
+	testing.expect_value(t, csv.render_error(bytes, csv.Error{offset = 99, kind = .Truncated}, context.temp_allocator), "offset 99: Unfinished input")
 
 	rows: []Row
 	cases := []struct {
 		src:  string,
 		want: string,
 	} {
-		{"id\nabc\n", "2:1: Wrong_Kind at [0].id"},
-		{"id\n1\n\"2\n", "4:1: Syntax: Truncated at [1]"},
-		{"id,ok\n1,true\n2\n", "3:1: Syntax: Field_Count at [1]"},
+		{"id\nabc\n", "2:1: Value of the wrong kind at [0].id"},
+		{"id\n1\n\"2\n", "4:1: Unfinished input at [1]"},
+		{"id,ok\n1,true\n2\n", "3:1: Record has the wrong number of fields at [1]"},
 	}
 	for c in cases {
 		uerr := read(t, c.src, &rows)
@@ -51,12 +51,12 @@ test_render_error :: proc(t: ^testing.T) {
 		testing.expect_value(t, csv.render_error(transmute([]byte)c.src, e, context.temp_allocator), c.want)
 	}
 	rerr := read(t, "id,id\n1,2\n", &rows, {duplicates = .Refuse})
-	testing.expect_value(t, csv.render_error(transmute([]byte)string("id,id\n1,2\n"), rerr.?, context.temp_allocator), "1:4: Duplicate_Key at .id")
+	testing.expect_value(t, csv.render_error(transmute([]byte)string("id,id\n1,2\n"), rerr.?, context.temp_allocator), "1:4: Duplicate key at .id")
 	nested: []Nested
 	nerr := read(t, "id,list\n1,2\n", &nested)
-	testing.expect_value(t, csv.render_error(bytes, nerr.?, context.temp_allocator), "Unsupported at [].list")
+	testing.expect_value(t, csv.render_error(bytes, nerr.?, context.temp_allocator), "Unsupported type at [].list")
 	nerr = read(t, "", &rows, {dialect = {delimiter = '"'}})
-	testing.expect_value(t, csv.render_error(bytes, nerr.?, context.temp_allocator), "Bad_Option")
+	testing.expect_value(t, csv.render_error(bytes, nerr.?, context.temp_allocator), "Unsupported option")
 
 	// A name that is not an identifier is quoted. A path longer than the steps kept is marked.
 	quoted := csv.Unmarshal_Error {
@@ -66,11 +66,11 @@ test_render_error :: proc(t: ^testing.T) {
 		truncated = true,
 	}
 	quoted.steps[0], quoted.steps[1] = csv.Index(4), csv.Name("full name")
-	testing.expect_value(t, csv.render_error(bytes, quoted, context.temp_allocator), "1:4: Wrong_Kind at …[4].\"full name\"")
+	testing.expect_value(t, csv.render_error(bytes, quoted, context.temp_allocator), "1:4: Value of the wrong kind at …[4].\"full name\"")
 
 	// The writer form writes the same text and returns the writer's failure.
 	b := strings.builder_make(context.temp_allocator)
-	testing.expect_value(t, core.render_error_to_writer(strings.to_writer(&b), bytes, err), nil)
+	testing.expect_value(t, core.render_error_to_writer(strings.to_writer(&b), bytes, err, csv.fault_name), nil)
 	testing.expect_value(t, strings.to_string(b), text)
 	failing := io.Writer {
 		procedure = fail_writer,
@@ -90,40 +90,40 @@ test_render_path_error :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(t, csv.render_error(src, e, context.temp_allocator), want, loc = loc)
 		b := strings.builder_make(context.temp_allocator)
-		testing.expect_value(t, core.render_error_to_writer(strings.to_writer(&b), src, e), nil, loc = loc)
+		testing.expect_value(t, core.render_error_to_writer(strings.to_writer(&b), src, e, csv.fault_name), nil, loc = loc)
 		testing.expect_value(t, strings.to_string(b), want, loc = loc)
 	}
 	defer free_all(context.temp_allocator)
 
 	// Located in the source, then the scan's fault.
 	_, err := csv.set(ragged, ".[0].a", 1)
-	text(t, ragged, err, "2:1: Bad_Source: Field_Count")
+	text(t, ragged, err, "2:1: Record has the wrong number of fields")
 	// Offsets into the path text and into the edited text, not the source.
 	_, err = csv.set(src, ".[", 1)
-	text(t, src, err, "offset 1: Bad_Path")
+	text(t, src, err, "offset 1: Invalid path")
 	_, err = csv.splice(src, []csv.Edit{{lo = 4, hi = 5, bytes = transmute([]byte)string("1,9")}})
-	text(t, src, err, "offset 4: Bad_Result: Field_Count")
+	text(t, src, err, "offset 4: Invalid result text: Record has the wrong number of fields")
 	// No position.
 	_, err = csv.set(src, ".[0]", 1)
-	text(t, src, err, "Unsupported_Path")
+	text(t, src, err, "Unsupported path")
 	_, err = csv.set(src, ".[1].a", 1)
-	text(t, src, err, "Not_Found")
-	_, err = csv.insert(src, ".", -1, []string{"1", "2"})
-	text(t, src, err, "Unplaceable")
+	text(t, src, err, "Path matched nothing")
+	_, err = csv.insert(src, ".", -1, []Maybe(string){"1", "2"})
+	text(t, src, err, "Entry has no valid place")
 	_, err = csv.splice(src, []csv.Edit{{lo = 5, hi = 4}})
-	text(t, src, err, "Bad_Edit")
+	text(t, src, err, "Edits out of range, unsorted or overlapping")
 	_, err = csv.splice(src, nil, {dialect = csv.Dialect{delimiter = '"'}})
-	text(t, src, err, "Bad_Option")
+	text(t, src, err, "Unsupported option")
 	// The cell count or the field index of a row that does not fit.
-	_, err = csv.insert(src, ".", 0, []string{"1"})
-	text(t, src, err, "Bad_Row (1)")
+	_, err = csv.insert(src, ".", 0, []Maybe(string){"1"})
+	text(t, src, err, "Entry does not fit its destination (1)")
 	// What marshal refused, and the record it was for where there is one.
 	_, err = csv.set(src, ".[0].a", []int{1})
-	text(t, src, err, "Encode: Unsupported")
+	text(t, src, err, "Value cannot be written: Unsupported type")
 	_, err = csv.set(one, ".[0].a", "", {dialect = csv.Dialect{quoting = .None}})
-	text(t, one, err, "2:1: Encode: Unwritable")
+	text(t, one, err, "2:1: Value cannot be written: Dialect cannot write it unchanged")
 	semi := transmute([]byte)string("a;b\n1;2\n")
 	_, err = csv.set(semi, ".[0].b", "p;q", {dialect = csv.Dialect{quoting = .None, delimiter = ';'}})
-	text(t, semi, err, "Encode: Unwritable")
+	text(t, semi, err, "Value cannot be written: Dialect cannot write it unchanged")
 }
 

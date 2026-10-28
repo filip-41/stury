@@ -4,7 +4,7 @@ import "core:strings"
 import "core:testing"
 import csv "../"
 
-// `query`: a path answered over a built document's field spans, in row order.
+// `query`: a path answered over a built document's rows, in row order, as over any format's.
 @(test)
 test_query_answers_document_spans :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("id,name\n1,ada\n2,bob\n3,cy\n")
@@ -30,15 +30,15 @@ test_query_answers_document_spans :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(out), 3)
 	records := [?]string{"1,ada", "2,bob", "3,cy"}
 	for a, i in out {
-		testing.expectf(t, string(src[a.lo:a.hi]) == records[i] && a.owner == owners[i], "record %d: %v", i, a)
+		testing.expectf(t, string(src[a.lo:a.hi]) == records[i] && a.owner == 8, "record %d: %v", i, a)
 	}
 
+	// A record under a header is an object: an index into it does not apply.
 	clear(&out)
 	err = csv.query(&doc, ".[1][1]", &out)
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, len(out), 1)
-	testing.expect_value(t, string(src[out[0].lo:out[0].hi]), "bob")
-	testing.expect_value(t, out[0].owner, u64(14))
+	testing.expect_value(t, out[0], csv.Answer{outcome = .Type_Mismatch, owner = 8, node = csv.NO_NODE})
 	clear(&out)
 	err = csv.query(&doc, ".[1]", &out)
 	testing.expect_value(t, err, nil)
@@ -52,8 +52,8 @@ test_query_answers_document_spans :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(src[out[1].lo:out[1].hi]), "bob")
 }
 
-// A path naming one row that does not land appends one `.Missing`, owned by the row when it is too short for the
-// column; a path over every row appends nothing for a header without the name.
+// A path naming one row that does not land appends one `.Missing`, owned by the container it missed in; a path
+// over every row appends nothing for a header without the name.
 @(test)
 test_query_answers_a_miss :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("id,name\n1,ada\n")
@@ -66,16 +66,11 @@ test_query_answers_a_miss :: proc(t: ^testing.T) {
 		path:  string,
 		owner: u64,
 	}
-	for c in ([]Case{{".[9].name", csv.NO_OWNER}, {".[0][9]", 8}, {".[0].nope", csv.NO_OWNER}}) {
+	for c in ([]Case{{".[9].name", 8}, {".[0].nope", 8}}) {
 		clear(&out)
 		testing.expect_value(t, csv.query(&doc, c.path, &out), nil)
 		testing.expect_value(t, len(out), 1)
 		testing.expect_value(t, out[0], csv.Answer{outcome = .Missing, owner = c.owner, node = csv.NO_NODE})
-		streamed: [dynamic]csv.Answer
-		defer delete(streamed)
-		testing.expect_value(t, scan_one(src, c.path, &streamed), nil)
-		testing.expect_value(t, len(streamed), 1)
-		testing.expect_value(t, streamed[0], out[0])
 	}
 	clear(&out)
 	testing.expect_value(t, csv.query(&doc, ".[].nope", &out), nil)
@@ -91,7 +86,7 @@ test_query_ragged_row :: proc(t: ^testing.T) {
 	testing.expect_value(t, derr, nil)
 	out: [dynamic]csv.Answer
 	defer delete(out)
-	testing.expect_value(t, csv.query(&doc, ".[][1]", &out), nil)
+	testing.expect_value(t, csv.query(&doc, ".[].b", &out), nil)
 	testing.expect_value(t, len(out), 1)
 	testing.expect_value(t, string(src[out[0].lo:out[0].hi]), "3")
 	testing.expect_value(t, out[0].owner, u64(6))
@@ -109,15 +104,6 @@ test_query_refusals :: proc(t: ^testing.T) {
 	perr := csv.query(&doc, ".[", &out)
 	e, faulted := perr.?
 	testing.expect(t, faulted && e.kind == .Bad_Path && e.offset == 1)
-	perr = csv.query(&doc, ".[][]", &out)
-	e, faulted = perr.?
-	testing.expect(t, faulted && e.kind == .Unsupported_Path)
-	headerless, herr := csv.build(src, {no_header = true})
-	defer csv.destroy(&headerless)
-	testing.expect_value(t, herr, nil)
-	perr = csv.query(&headerless, ".[].name", &out)
-	e, faulted = perr.?
-	testing.expect(t, faulted && e.kind == .Unsupported_Path)
 	long := strings.repeat(".[0]", 33, context.temp_allocator)
 	perr = csv.query(&doc, long, &out)
 	e, faulted = perr.?
@@ -137,13 +123,13 @@ test_query_does_not_rescan :: proc(t: ^testing.T) {
 	src[9] = ';'
 	out: [dynamic]csv.Answer
 	defer delete(out)
-	testing.expect_value(t, csv.query(&doc, ".[][1]", &out), nil)
+	testing.expect_value(t, csv.query(&doc, ".[].name", &out), nil)
 	testing.expect_value(t, len(out), 2)
 	testing.expect_value(t, string(src[out[0].lo:out[0].hi]), "ada")
 	testing.expect_value(t, string(src[out[1].lo:out[1].hi]), "bob")
 	again: [dynamic]csv.Answer
 	defer delete(again)
-	testing.expect_value(t, csv.query(&doc, ".[][1]", &again), nil)
+	testing.expect_value(t, csv.query(&doc, ".[].name", &again), nil)
 	testing.expect_value(t, len(again), len(out))
 	for a, i in again {
 		testing.expect_value(t, a, out[i])
@@ -171,8 +157,8 @@ test_bare_bracket_paths_are_refused :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(out), 0)
 }
 
-// A text with a header and no record has no row for any path: `query` answers nothing, as `find` does, and a
-// document built without a header still cannot resolve a name.
+// A text with a header and no record has no row for any path: `query` answers nothing, as `find` does. A
+// document built without a header is an array of arrays, where a name does not apply.
 @(test)
 test_query_on_an_empty_document_is_a_miss :: proc(t: ^testing.T) {
 	doc, derr := csv.build(nil)
@@ -188,12 +174,12 @@ test_query_on_an_empty_document_is_a_miss :: proc(t: ^testing.T) {
 	bare, berr := csv.build(nil, {no_header = true})
 	defer csv.destroy(&bare)
 	testing.expect_value(t, berr, nil)
-	perr := csv.query(&bare, ".[].a", &out)
-	testing.expect(t, perr != nil && perr.?.kind == .Unsupported_Path)
+	testing.expect_value(t, csv.query(&bare, ".[].a", &out), nil)
+	testing.expect_value(t, len(out), 0)
 }
 
 // A header name two columns share: `find`, a `Request` and `query` take the last under `.Default`, as JSON's
-// readers do, and follow an explicit `duplicates`; `.All` reads every column of the name.
+// readers do. `find` and a `Request` follow an explicit `duplicates`; `.All` reads every column of the name.
 @(test)
 test_lookups_follow_duplicates :: proc(t: ^testing.T) {
 	src := transmute([]byte)string("a,a\n1,2\n3,4\n")
@@ -212,27 +198,23 @@ test_lookups_follow_duplicates :: proc(t: ^testing.T) {
 		defer delete(out)
 		testing.expect_value(t, scan_one(src, ".[].a", &out, opts), nil)
 		testing.expect_value(t, cells(src, out[:]), c.column)
-		doc, derr := csv.build(src, opts)
-		defer csv.destroy(&doc)
-		testing.expect_value(t, derr, nil)
-		clear(&out)
-		testing.expect_value(t, csv.query(&doc, ".[].a", &out), nil)
-		testing.expect_value(t, cells(src, out[:]), c.column)
 	}
+	doc, derr := csv.build(src)
+	defer csv.destroy(&doc)
+	testing.expect_value(t, derr, nil)
+	answers: [dynamic]csv.Answer
+	defer delete(answers)
+	testing.expect_value(t, csv.query(&doc, ".[].a", &answers), nil)
+	testing.expect_value(t, cells(src, answers[:]), "2 4")
 	// `.Refuse` names the repeated header cell, in the error each reader returns.
 	refuse := csv.Read_Opts{duplicates = .Refuse}
 	_, ferr := csv.find(src, ".[0].a", refuse)
-	testing.expect_value(t, ferr, csv.Error{kind = .Duplicate_Key, offset = 2})
+	testing.expect_value(t, ferr, source({kind = .Duplicate_Key, offset = 2}))
 	out: [dynamic]csv.Answer
 	defer delete(out)
-	testing.expect_value(t, scan_one(src, ".[].a", &out, refuse), csv.Error{kind = .Duplicate_Key, offset = 2})
-	doc, derr := csv.build(src, refuse)
-	defer csv.destroy(&doc)
-	testing.expect_value(t, derr, nil)
-	testing.expect_value(t, csv.query(&doc, ".[].a", &out), csv.Path_Error{kind = .Bad_Source, syntax = .Duplicate_Key, offset = 2})
-	// `column` names the first whatever the policy.
-	col, ok := csv.column(&doc, "a")
-	testing.expect(t, ok && col == 0)
+	testing.expect_value(t, scan_one(src, ".[].a", &out, refuse), source({kind = .Duplicate_Key, offset = 2}))
+	_, rerr := csv.build(src, refuse)
+	testing.expect_value(t, rerr, csv.Error{kind = .Duplicate_Key, offset = 2})
 }
 
 // The same path through `find` and `query` lands on the same span: one streaming reader and one document
@@ -257,10 +239,10 @@ test_find_and_query_agree :: proc(t: ^testing.T) {
 	defer delete(streamed)
 	testing.expect_value(t, scan_one(src, ".[].name", &streamed), nil)
 	testing.expect_value(t, len(streamed), len(out))
-	// Only `query` names a cell's index among the document's fields.
+	// Only `query` names a cell's row in the document.
 	for a, i in streamed {
 		want := out[i]
-		testing.expect_value(t, want.node, csv.Node(2 * i + 1))
+		testing.expect_value(t, want.node, csv.Node(3 * i + 3))
 		want.node = csv.NO_NODE
 		testing.expect_value(t, a, want)
 	}

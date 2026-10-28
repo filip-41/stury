@@ -9,8 +9,11 @@ import "scan/walk"
 // its bytes as `unmarshal` of those bytes would. The contract is `core.Record_Read`'s. `record_read_at` gives the
 // record's offset in the input, as `Record.at` does.
 //
-// The `Records` must outlive the reader and not move: the reader's state points at it. A fault that framed no
-// record is `.Syntax`.
+// The pull is a `^Records` or a `^Record_Reader`, caller-owned: it must outlive the reader and not move, as the
+// reader's state points at it. A fault that framed no record is `.Syntax`, and a `Record_Reader` whose reader
+// failed ends the records with `.Syntax` `.Truncated` at the end of the bytes it gave (`read_err` is the cause),
+// both with their offset in the input and `record_read_at` 0. Over a pushed reader (`records_pushed`) `more` is also
+// false, with no `err`, where it wants a window (`record_carry`); once pushed, the reads go on.
 Record_Read :: core_pkg.Record_Read(Unmarshal_Opts)
 
 // What a `Record_Read`'s source holds. The run, `base` and `q` are bound to `bound_plan` and `bound_opts`, so no
@@ -19,7 +22,8 @@ Record_Read :: core_pkg.Record_Read(Unmarshal_Opts)
 Record_State :: struct {
 	run:        walk.Shape_Run,
 	q:          ^scan_pkg.Query_Ctx,
-	it:         ^Records,
+	it:         ^Records, // nil for a `Record_Reader`
+	rr:         ^Record_Reader,
 	bound_plan: ^core_pkg.Type_Plan, // nil until the first read
 	bound_opts: Unmarshal_Opts,      // the options the run, `base` and `q` are bound under
 	lazy:       bool,
@@ -41,12 +45,12 @@ record_state_free :: proc(state: rawptr) {
 record_read_init :: proc(
 	rd: ^Record_Read,
 	$T: typeid,
-	it: ^Records,
+	pull: $P,
 	opts := Unmarshal_Opts{},
 	plan: ^Type_Plan = nil,
-	allocator := context.allocator,
-) -> Maybe(Unmarshal_Error) {
-	if rd == nil || it == nil {
+	allocator: runtime.Allocator,
+) -> Maybe(Unmarshal_Error) where P == ^Records || P == ^Record_Reader {
+	if rd == nil || pull == nil {
 		return Unmarshal_Error{kind = .Bad_Option}
 	}
 	core_pkg.record_read_destroy(rd)
@@ -57,12 +61,16 @@ record_read_init :: proc(
 	if state == nil {
 		return Unmarshal_Error{kind = .Out_Of_Memory}
 	}
-	state.it = it
+	when P == ^Records {
+		state.it = pull
+	} else {
+		state.rr = pull
+	}
 	source := core_pkg.Record_Source(Unmarshal_Opts){
 		state = state,
 		read = record_source_read,
 		destroy = record_state_free,
-		format = json_plan_format(),
+		format = json_plan_format,
 	}
 	if err := core_pkg.record_read_init(rd, T, source, opts, plan, runtime.heap_allocator()); err != nil {
 		return err
@@ -77,25 +85,25 @@ record_read_init :: proc(
 }
 
 // The offset of the record the last read pulled, from the input's first byte. 0 before the first read.
-@(require_results)
-record_read_at :: proc(rd: ^Record_Read) -> u64 {
-	return rd == nil ? 0 : rd.at
-}
+record_read_at :: core_pkg.record_read_at
 
 @(private)
-record_source_read :: #force_inline proc(state: rawptr, opts: ^Unmarshal_Opts, plan: ^core_pkg.Type_Plan, dest: rawptr, at: ^u64) -> Maybe(Unmarshal_Error) {
+record_source_read :: #force_inline proc(state: rawptr, opts: ^Unmarshal_Opts, plan: ^core_pkg.Type_Plan, dest: rawptr, at: ^u64) -> (more: bool, err: Maybe(Unmarshal_Error)) {
 	st := (^Record_State)(state)
-	rec, ok := next_record(st.it)
+	rec: Record
+	ok: bool
+	if st.rr != nil {
+		rec, ok = next_record(st.rr)
+	} else {
+		rec, ok = next_record(st.it)
+	}
 	if !ok {
 		// No record is read: the frame is the input's.
 		at^ = 0
-		if e, faulted := st.it.err.?; faulted {
-			return core_pkg.unmarshal_error_from(e)
-		}
-		return Unmarshal_Error{kind = .Bad_Option}
+		return false, core_pkg.record_state_failure(st)
 	}
 	at^ = rec.at
-	return read_record(st, rec.bytes, opts, plan, dest)
+	return true, read_record(st, rec.bytes, opts, plan, dest)
 }
 
 // Whether two option values are bitwise equal. Padding is part of the compare: `bound_opts` is a bitwise copy of
@@ -136,7 +144,7 @@ read_record :: #force_inline proc(st: ^Record_State, src: []byte, opts: ^Unmarsh
 			s.alloc = context.allocator
 			read, oom := scan_pkg.shape_descend_value(&s, st.q, dest)
 			if e, refused := oom.?; refused {
-				return unmarshal_error_of(run, e)
+				return unmarshal_error_of(run, scan_pkg.error_of(e))
 			}
 			if read {
 				return nil

@@ -1,7 +1,6 @@
 package csv
 
-// The integer cell readers `Document`'s `get_int` shares with `unmarshal`, so both judge a cell's text the same
-// way. A float cell is read by `core_pkg.number_of_loose_text`.
+// The integer cell reader of `unmarshal`. A float cell is read by `core_pkg.number_of_loose_text`.
 
 import core_pkg "../core"
 

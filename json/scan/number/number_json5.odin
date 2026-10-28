@@ -2,18 +2,16 @@ package number
 
 import "core:math"
 import core_pkg "../../../core"
-import lex "../lex"
 
-// The digit pack of a number row whose token is spelled outside JSON's grammar (JSON5's hex, `.5`, `5.`, `+1`,
-// `Infinity`, `NaN`). A JSON token never packs zero integer digits, so the readers test for it only on the
-// arm that already falls back to the text.
-DIALECT_SPELLED :: u16(0xFF00)
+// The digit pack of a number row whose token JSON5 spells outside JSON's grammar (hex, `.5`, `5.`, `+1`,
+// `Infinity`, `NaN`).
+DIALECT_SPELLED :: core_pkg.SPELLED_NUMBER
 
 // The hex digits `src[lo:hi]` of a JSON5 hex token: `mag` is their value when it fits 64 bits (`over` is set
 // when it does not, and `mag` has wrapped), and `approx` always their value accumulated as a double.
 json5_hex :: proc(src: []byte, lo, hi: u64) -> (mag: u64, approx: f64, over: bool) {
 	for i in lo ..< hi {
-		d := u64(lex.HEX_NIBBLE[src[i]])
+		d := u64(core_pkg.HEX_NIBBLE[src[i]])
 		over ||= mag > max(u64) >> 4
 		mag = mag << 4 | d
 		approx = approx * 16 + f64(d)

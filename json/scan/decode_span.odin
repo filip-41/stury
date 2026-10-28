@@ -232,17 +232,4 @@ decode_integer :: proc(src: []byte, n: core_pkg.Number_Lex) -> Decoded {
 
 // Exact integer decode of the token `src[lo:hi]`: `decode_span`'s `i64` arm, and `-0` as 0, as every integer
 // target reads it. ok=false for any other token.
-decode_int :: proc(src: []byte, lo, hi: u64) -> (v: i64, ok: bool) {
-	v, ok = decode_whole(src, lo, hi).(i64)
-	return
-}
-
-// `decode_integer` of the token `src[lo:hi]`, but `-0` is `i64(0)`: an integer has no negative zero.
-@(private = "file")
-decode_whole :: proc(src: []byte, lo, hi: u64) -> Decoded {
-	n := number.lex_number_value(src, lo, hi)
-	if n.ok && n.spelling & {.Has_Fraction, .Has_Exponent} == {} && n.int_digits == 1 && src[n.int_at] == '0' {
-		return i64(0)
-	}
-	return decode_integer(src, n)
-}
+decode_int :: core_pkg.int_span

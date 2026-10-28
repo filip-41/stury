@@ -56,7 +56,7 @@ test_limits_dial :: proc(t: ^testing.T) {
 	for refused in ([]struct {
 		src:  string,
 		kind: json.Error_Kind,
-	}{{`[01]`, .Bad_Number}, {`["\x"]`, .Bad_Escape}, {`[truX]`, .Bad_Literal}, {`[1e]`, .Bad_Number}}) {
+	}{{`[01]`, .Bad_Number}, {`["\x"]`, .Bad_Escape}, {`[truX]`, .Bad_Char}, {`[1e]`, .Bad_Number}}) {
 		got, has := json.validate(transmute([]byte)refused.src).?
 		testing.expectf(t, has, "validate(%q) with no strictness argument must refuse", refused.src)
 		testing.expect_value(t, got.kind, refused.kind)
@@ -137,29 +137,23 @@ test_structural_path_scan_checks_skipped_utf8 :: proc(t: ^testing.T) {
 		for src in docs {
 			req: json.Request({.Path})
 			defer json.destroy(&req)
-			req.paths = []json.Path{{steps = {json.Name("a")}}}
-			req.strictness = .Structural
-			req.dialect = dialect
+			_ = request_of(&req, []json.Path{{steps = {json.Name("a")}}}, {strictness = .Structural, dialect = dialect})
 			got := json.scan(transmute([]byte)src, &req)
 			want := json.validate(transmute([]byte)src, {strictness = .Structural})
 			testing.expectf(t, want != nil, "%.30q: validate accepted", src)
-			testing.expectf(t, got == Maybe(json.Error)(want.?), "%.30q (%v): scan %v, validate %v", src, dialect, got, want)
+			testing.expectf(t, got == source(want), "%.30q (%v): scan %v, validate %v", src, dialect, got, want)
 		}
 		for src in accepted {
 			req: json.Request({.Path})
 			defer json.destroy(&req)
-			req.paths = []json.Path{{steps = {json.Name("a")}}}
-			req.strictness = .Structural
-			req.dialect = dialect
+			_ = request_of(&req, []json.Path{{steps = {json.Name("a")}}}, {strictness = .Structural, dialect = dialect})
 			testing.expect_value(t, json.scan(transmute([]byte)src, &req), nil)
 		}
 	}
 	{
 		req: json.Request({.Path})
 		defer json.destroy(&req)
-		req.paths = []json.Path{{steps = {json.Name("a")}}}
-		req.strictness = .Lazy
-		req.duplicates = .First
+		_ = request_of(&req, []json.Path{{steps = {json.Name("a")}}}, {strictness = .Lazy, duplicates = .First})
 		testing.expect_value(t, json.scan(transmute([]byte)string("{\"a\":1,\"z\":\"\xff\"}"), &req), nil)
 	}
 	// The same faults across the index's first regions and at its 16 KB chunk edges.
@@ -175,8 +169,7 @@ test_structural_path_scan_checks_skipped_utf8 :: proc(t: ^testing.T) {
 				defer delete(src)
 				req: json.Request({.Path})
 				defer json.destroy(&req)
-				req.paths = []json.Path{{steps = {json.Name("a")}}}
-				req.strictness = .Structural
+				_ = request_of(&req, []json.Path{{steps = {json.Name("a")}}}, {strictness = .Structural})
 				got := json.scan(transmute([]byte)src, &req)
 				testing.expectf(t, (got == nil) == c.ok, "edge %d pad %d, tail %q: scan %v", edge, pad, c.tail, got)
 			}
@@ -194,8 +187,7 @@ test_structural_path_scan_checks_skipped_utf8 :: proc(t: ^testing.T) {
 			defer delete(src)
 			req: json.Request({.Path})
 			defer json.destroy(&req)
-			req.paths = []json.Path{{steps = {json.Name("a")}}}
-			req.strictness = .Structural
+			_ = request_of(&req, []json.Path{{steps = {json.Name("a")}}}, {strictness = .Structural})
 			got := json.scan(transmute([]byte)src, &req)
 			testing.expectf(t, (got == nil) == c.ok, "pad %d, tail %q: scan %v", pad, c.tail, got)
 		}
@@ -236,9 +228,16 @@ test_raised_depth_cap :: proc(t: ^testing.T) {
 			doc, err := json.build(fits, {dialect = dialect, limits = limits}, context.temp_allocator)
 			testing.expectf(t, err == nil, "%v: build at the cap, got %v", dialect, err)
 			testing.expect_value(t, len(doc.rows), CAP + 1 if objects else CAP)
-			// marshal holds MAX_DEPTH.
-			_, merr := json.marshal(&doc, {}, context.temp_allocator)
-			testing.expect_value(t, merr, json.Marshal_Error.Too_Deep)
+			// marshal writes plain JSON past MAX_DEPTH compact, its source without whitespace, and holds every
+			// other output to MAX_DEPTH.
+			out, merr := json.marshal(&doc, {}, context.temp_allocator)
+			if dialect == .Json {
+				testing.expectf(t, marshal_kind(merr) == .None && len(out) == len(fits), "%v: %v", dialect, merr)
+			} else {
+				testing.expect_value(t, marshal_kind(merr), json.Marshal_Error_Kind.Too_Deep)
+			}
+			_, perr := json.marshal(&doc, {pretty = true}, context.temp_allocator)
+			testing.expect_value(t, marshal_kind(perr), json.Marshal_Error_Kind.Too_Deep)
 			_, berr := json.build(past, {dialect = dialect, limits = limits}, context.temp_allocator)
 			e, bad := berr.?
 			testing.expectf(t, bad && e.kind == .Too_Deep && e.offset == at, "%v: build one past, got %v", dialect, berr)
@@ -247,16 +246,13 @@ test_raised_depth_cap :: proc(t: ^testing.T) {
 		for strictness in json.Strictness {
 			req: json.Request({.Path})
 			defer json.destroy(&req)
-			req.strictness = strictness
-			req.duplicates = .First if strictness == .Lazy else .Last
-			req.limits = limits
-			req.paths = []json.Path{{steps = []json.Step{json.Name("a") if objects else json.Index(0)}}}
+			_ = request_of(&req, []json.Path{{steps = []json.Step{json.Name("a") if objects else json.Index(0)}}}, {strictness = strictness, duplicates = .First if strictness == .Lazy else .Last, limits = limits})
 			testing.expect_value(t, json.scan(fits, &req), nil)
-			testing.expect_value(t, req.answers[0].outcome, json.Path_Outcome.Found)
-			testing.expect(t, json.validate_remaining(&req) == nil)
+			testing.expect_value(t, req.answers[0].outcome, json.Answer_Outcome.Found)
+			testing.expect(t, strict_verdict(fits, &req) == nil)
 			e, bad := scan_fault(json.scan(past, &req)).?
 			if !bad {
-				e, bad = json.validate_remaining(&req).?
+				e, bad = strict_verdict(past, &req).?
 			}
 			testing.expectf(t, bad && e.kind == .Too_Deep && e.offset == at, "%v: path scan one past, got %v", strictness, e)
 		}

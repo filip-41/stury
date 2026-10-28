@@ -53,9 +53,9 @@ test_edits_with_a_bom_cell :: proc(t: ^testing.T) {
 	expect_set(t, transmute([]byte)string("a,b\n1,2\n"), ".[0][1]", "\xEF\xBB\xBFy", "a,b\n1,\xEF\xBB\xBFy\n")
 	_, err := csv.set(tsv, ".[0][0]", "\xEF\xBB\xBFy", {dialect = csv.TSV, no_header = true})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Encode, encode = .Unwritable})
-	_, err = csv.insert(nil, ".", csv.APPEND, []string{"\xEF\xBB\xBFy"}, {dialect = csv.TSV, no_header = true})
+	_, err = csv.insert(nil, ".", csv.APPEND, []Maybe(string){"\xEF\xBB\xBFy"}, {dialect = csv.TSV, no_header = true})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Encode, encode = .Unwritable})
-	out, ierr := csv.insert(tsv, ".", csv.APPEND, []string{"x", "\xEF\xBB\xBFy"}, {dialect = csv.TSV})
+	out, ierr := csv.insert(tsv, ".", csv.APPEND, []Maybe(string){"x", "\xEF\xBB\xBFy"}, {dialect = csv.TSV})
 	testing.expect_value(t, ierr, nil)
 	testing.expect_value(t, string(out), "a\tb\n1\t2\nx\t\xEF\xBB\xBFy\n")
 	delete(out)
@@ -65,7 +65,7 @@ test_edits_with_a_bom_cell :: proc(t: ^testing.T) {
 @(test)
 test_insert_into_a_bom_only_text :: proc(t: ^testing.T) {
 	bom := transmute([]byte)string("\xEF\xBB\xBF")
-	out, err := csv.insert(bom, ".", csv.APPEND, []string{"a", "b"}, {no_header = true})
+	out, err := csv.insert(bom, ".", csv.APPEND, []Maybe(string){"a", "b"}, {no_header = true})
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), "\xEF\xBB\xBFa,b\n")
 	delete(out)
@@ -98,7 +98,7 @@ test_set_refusals :: proc(t: ^testing.T) {
 	}
 	// A source that is not CSV is refused whole, whatever the path.
 	_, err := csv.set(transmute([]byte)string("a,b\n1\n"), ".[0].a", 1)
-	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Source, syntax = .Field_Count, offset = 4})
+	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Source, syntax = .Bad_Structure, detail = u8(csv.Fault.Field_Count), offset = 4})
 	// One empty field alone reads back as no record.
 	one := transmute([]byte)string("a\nx\n")
 	_, err = csv.set(one, ".[0].a", "", {dialect = csv.Dialect{quoting = .None}})
@@ -127,7 +127,8 @@ test_insert_rows :: proc(t: ^testing.T) {
 	expect_insert(t, src, 1, Seat{3, "c,d", false}, "id,name,ok\n1,a,true\n3,\"c,d\",false\n2,b,false\n")
 	expect_insert(t, src, 2, Seat{3, "c", true}, "id,name,ok\n1,a,true\n2,b,false\n3,c,true\n")
 	expect_insert(t, src, csv.APPEND, Seat{3, "c", true}, "id,name,ok\n1,a,true\n2,b,false\n3,c,true\n")
-	expect_insert(t, src, csv.APPEND, []string{"3", "c", ""}, "id,name,ok\n1,a,true\n2,b,false\n3,c,\"\"\n")
+	expect_insert(t, src, csv.APPEND, []Maybe(string){"3", "c", ""}, "id,name,ok\n1,a,true\n2,b,false\n3,c,\"\"\n")
+	expect_insert(t, src, csv.APPEND, []Maybe(string){"3", nil, "x"}, "id,name,ok\n1,a,true\n2,b,false\n3,,x\n")
 	// Fields match columns by name, wherever the columns are; a column with no field is empty.
 	reordered := transmute([]byte)string("name,x,id\nz,y,1\n")
 	expect_insert(t, reordered, csv.APPEND, Seat_Named{"q", 9}, "name,x,id\nz,y,1\nq,,9\n")
@@ -136,13 +137,13 @@ test_insert_rows :: proc(t: ^testing.T) {
 	expect_insert(t, crlf, csv.APPEND, Seat{2, "b", false}, "id,name,ok\r\n1,a,true\r\n2,b,false")
 	expect_insert(t, crlf, 0, Seat{2, "b", false}, "id,name,ok\r\n2,b,false\r\n1,a,true")
 	only_header := transmute([]byte)string("id,name,ok")
-	expect_insert(t, only_header, 0, []string{"1", "a", "true"}, "id,name,ok\n1,a,true")
+	expect_insert(t, only_header, 0, []Maybe(string){"1", "a", "true"}, "id,name,ok\n1,a,true")
 	headerless := transmute([]byte)string("1,a\n2,b\n")
-	out, err := csv.insert(headerless, ".", 1, []string{"9", "z"}, {no_header = true})
+	out, err := csv.insert(headerless, ".", 1, []Maybe(string){"9", "z"}, {no_header = true})
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), "1,a\n9,z\n2,b\n")
 	delete(out)
-	out, err = csv.insert(nil, ".", csv.APPEND, []string{"9", "z"}, {no_header = true})
+	out, err = csv.insert(nil, ".", csv.APPEND, []Maybe(string){"9", "z"}, {no_header = true})
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, string(out), "9,z\n")
 	delete(out)
@@ -157,11 +158,13 @@ test_insert_refusals :: proc(t: ^testing.T) {
 		want: csv.Path_Error,
 	}
 	cases := []Case {
-		{-1, []string{"1", "a"}, {kind = .Unplaceable}},
-		{2, []string{"1", "a"}, {kind = .Unplaceable}},
-		{0, []string{"1"}, {kind = .Bad_Row, offset = 1}},
-		{0, []string{"1", "a", "b"}, {kind = .Bad_Row, offset = 3}},
-		{0, Seat{}, {kind = .Bad_Row, offset = 2}}, // `ok` names no column
+		{-1, []Maybe(string){"1", "a"}, {kind = .Unplaceable}},
+		{2, []Maybe(string){"1", "a"}, {kind = .Unplaceable}},
+		{0, []Maybe(string){"1"}, {kind = .Bad_Entry, offset = 1}},
+		{0, []Maybe(string){"1", "a", "b"}, {kind = .Bad_Entry, offset = 3}},
+		// Cells are `Maybe(string)`, so a `[]string` is a value no record spells.
+		{0, []string{"1", "a"}, {kind = .Encode, encode = .Unsupported}},
+		{0, Seat{}, {kind = .Bad_Entry, offset = 2}}, // `ok` names no column
 		{0, 5, {kind = .Encode, encode = .Unsupported}},
 		{0, nil, {kind = .Encode, encode = .Unsupported}},
 	}
@@ -171,28 +174,28 @@ test_insert_refusals :: proc(t: ^testing.T) {
 		delete(out)
 	}
 	// The path names the records, which have no names.
-	_, err := csv.insert(src, ".[0]", 0, []string{"1", "a"})
+	_, err := csv.insert(src, ".[0]", 0, []Maybe(string){"1", "a"})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unsupported_Path})
-	_, err = csv.insert(src, ".", "id", []string{"1", "a"})
+	_, err = csv.insert(src, ".", "id", []Maybe(string){"1", "a"})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unplaceable})
 	// A header is needed to place a row, but not to be found by one.
-	_, err = csv.insert(nil, ".", 0, []string{"a"})
+	_, err = csv.insert(nil, ".", 0, []Maybe(string){"a"})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unplaceable})
 	// Ragged texts take rows of any width.
-	out, rerr := csv.insert(src, ".", 0, []string{"1"}, {dialect = csv.Dialect{ragged = true}})
+	out, rerr := csv.insert(src, ".", 0, []Maybe(string){"1"}, {dialect = csv.Dialect{ragged = true}})
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, string(out), "id,name\n1\n1,a\n")
 	delete(out)
 	// A comment line cannot be a record: a first cell starting with the comment byte is quoted, escaped or refused.
-	out, rerr = csv.insert(src, ".", 0, []string{"#x", "a"}, {dialect = csv.Dialect{comment = '#'}})
+	out, rerr = csv.insert(src, ".", 0, []Maybe(string){"#x", "a"}, {dialect = csv.Dialect{comment = '#'}})
 	testing.expect_value(t, rerr, nil)
 	testing.expect_value(t, string(out), "id,name\n\"#x\",a\n1,a\n")
 	delete(out)
-	_, rerr = csv.insert(src, ".", 0, []string{"#x", "a"}, {dialect = csv.Dialect{quoting = .None, comment = '#'}})
+	_, rerr = csv.insert(src, ".", 0, []Maybe(string){"#x", "a"}, {dialect = csv.Dialect{quoting = .None, comment = '#'}})
 	testing.expect_value(t, rerr, csv.Path_Error{kind = .Encode, encode = .Unwritable})
 	// A bad source is refused with the scan's location.
-	_, rerr = csv.insert(transmute([]byte)string("a,b\n1\n"), ".", 0, []string{"1", "2"})
-	testing.expect_value(t, rerr, csv.Path_Error{kind = .Bad_Source, syntax = .Field_Count, offset = 4})
+	_, rerr = csv.insert(transmute([]byte)string("a,b\n1\n"), ".", 0, []Maybe(string){"1", "2"})
+	testing.expect_value(t, rerr, csv.Path_Error{kind = .Bad_Source, syntax = .Bad_Structure, detail = u8(csv.Fault.Field_Count), offset = 4})
 }
 
 @(test)
@@ -253,7 +256,7 @@ test_remove_refusals :: proc(t: ^testing.T) {
 	_, err = csv.remove(transmute([]byte)string("a,\xEF\xBB\xBFb\n"), ".[].a")
 	testing.expect_value(t, err, csv.Path_Error{kind = .Unplaceable})
 	_, err = csv.remove(transmute([]byte)string("a,b\n1\n"), ".[0]")
-	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Source, syntax = .Field_Count, offset = 4})
+	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Source, syntax = .Bad_Structure, detail = u8(csv.Fault.Field_Count), offset = 4})
 }
 
 @(test)
@@ -332,7 +335,7 @@ test_edits_judge_source_as_records :: proc(t: ^testing.T) {
 	testing.expect_value(t, serr, nil)
 	testing.expect_value(t, string(out), "a,b\n7,\xFF\n")
 	delete(out)
-	out, serr = csv.insert(src, ".", csv.APPEND, []string{"x", "y"}, {strictness = .Lazy})
+	out, serr = csv.insert(src, ".", csv.APPEND, []Maybe(string){"x", "y"}, {strictness = .Lazy})
 	testing.expect_value(t, serr, nil)
 	testing.expect_value(t, string(out), "a,b\nok,\xFF\nx,y\n")
 	delete(out)
@@ -342,7 +345,7 @@ test_edits_judge_source_as_records :: proc(t: ^testing.T) {
 	delete(out)
 	// A cap the caller set is judged as `records` judges it.
 	_, serr = csv.set(src, ".[0].a", 7, {limits = {max_fields = 1}})
-	testing.expect_value(t, serr, csv.Path_Error{kind = .Bad_Source, syntax = .Limit_Fields, offset = 0})
+	testing.expect_value(t, serr, csv.Path_Error{kind = .Bad_Source, syntax = .Limit_Format, detail = u8(csv.Fault.Too_Many_Fields), offset = 0})
 }
 
 @(test)
@@ -369,7 +372,7 @@ test_splice :: proc(t: ^testing.T) {
 	}
 	// An edit that leaves a text that is not CSV is refused, with the fault located in the result.
 	_, err = csv.splice(src, []csv.Edit{{lo = 4, hi = 5, bytes = transmute([]byte)string("1,9")}})
-	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Result, syntax = .Field_Count, offset = 4})
+	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Result, syntax = .Bad_Structure, detail = u8(csv.Fault.Field_Count), offset = 4})
 	_, err = csv.splice(src, []csv.Edit{{lo = 0, hi = 0}}, {dialect = csv.Dialect{delimiter = '"'}})
 	testing.expect_value(t, err, csv.Path_Error{kind = .Bad_Option})
 }

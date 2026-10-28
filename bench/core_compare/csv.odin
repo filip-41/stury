@@ -118,12 +118,12 @@ stury_csv_read_tally :: proc(src: []byte, alloc: runtime.Allocator, $DIGEST: boo
 	a := mem.arena_allocator(&scratch)
 	for rec in csv.next_record(&it) {
 		t.records += 1
-		for f in rec.fields {
-			text, escaped, err := csv.field_text(src, f, {}, a)
+		for _, k in rec.fields {
+			text, escaped, err := csv.field_text(rec, k, a)
 			if err != nil {
 				return t, false
 			}
-			tally_field(&t, string(text), DIGEST)
+			tally_field(&t, text, DIGEST)
 			if escaped {
 				mem.arena_free_all(&scratch)
 			}
@@ -154,13 +154,17 @@ stury_csv_load_tally :: proc(src: []byte, alloc: runtime.Allocator, $DIGEST: boo
 	if err != nil {
 		return t, false
 	}
-	t.records = u64(csv.row_count(&doc)) + 1
-	for col in 0 ..< csv.column_count(&doc) {
-		tally_field(&t, csv.get_name(&doc, col) or_return, DIGEST)
+	t.records = u64(csv.child_count(&doc, csv.ROOT)) + 1
+	head := csv.members(&doc, csv.child(&doc, csv.ROOT, 0))
+	for name in csv.members(&head) {
+		tally_field(&t, name, DIGEST)
 	}
-	for row in 0 ..< csv.row_count(&doc) {
-		for col in 0 ..< csv.column_count(&doc) {
-			tally_field(&t, csv.get_string(&doc, row, col) or_return, DIGEST)
+	all := csv.children(&doc, csv.ROOT)
+	for rec in csv.children(&all) {
+		cells := csv.children(&doc, rec)
+		for c in csv.children(&cells) {
+			s, _ := csv.get_string(&doc, c) // a null cell reads as empty
+			tally_field(&t, s, DIGEST)
 		}
 	}
 	return t, true
@@ -189,7 +193,7 @@ stury_csv_written :: proc(alloc: runtime.Allocator) -> (out: []byte, ok: bool) {
 		for s, k in record {
 			cells[k] = s if len(s) > 0 else nil
 		}
-		if csv.write_record(&buf, cells[:], at_start = i == 0) != .None {
+		if csv.write_record(&buf, cells[:], at_start = i == 0) != nil {
 			return nil, false
 		}
 	}

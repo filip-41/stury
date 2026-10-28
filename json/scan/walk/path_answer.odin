@@ -18,7 +18,7 @@ Answer :: core_pkg.Answer
 // The most runs the path automaton may carry in one scan (a fixed array, since the walk allocates
 // nothing). More are refused before the walk (`Over_Capacity`, `Path_Runs`). Paths the demand matcher
 // serves take no run.
-MAX_PATH_QUERIES :: 16
+MAX_PATH_QUERIES :: core_pkg.MAX_PATH_QUERIES
 
 // How many member starts each level remembers (`Query_Ctx.member_starts`): one per group of a stride's
 // members (`Path_Auto.ring_shift`), the group's latest, for the last `MEMBER_RING` groups. The level's
@@ -219,12 +219,7 @@ path_fail :: proc(q: ^Query_Ctx, run: ^Path_Run, d, fail: int, outcome: Path_Out
 	return false
 }
 
-// A `per_element` path's answer where step `rest[0]` does not apply, having `missed` its member or element or
-// met a `met`: `.Missing`, jq's null, when no `Any` step is still to come and it missed or met null, else
-// `.Type_Mismatch`, jq's error.
-per_element_outcome :: proc(rest: []Step, missed: bool, met: Kind) -> Path_Outcome {
-	return .Missing if (missed || met == .Null) && !steps_have_any(rest) else .Type_Mismatch
-}
+per_element_outcome :: core_pkg.per_element_outcome
 
 // Retract the answers `run` wrote from sink row `from` on: a key repeated within one object resolves to its
 // last occurrence, which supersedes whatever the earlier ones produced. The rows stay where they are, as
@@ -293,14 +288,7 @@ steps_have_name :: proc(steps: []Step) -> bool {
 	return false
 }
 
-steps_have_any :: proc(steps: []Step) -> bool {
-	for st in steps {
-		if _, is_any := st.(Any); is_any {
-			return true
-		}
-	}
-	return false
-}
+steps_have_any :: core_pkg.steps_have_any
 
 // Whether this run can settle before the item ends. It must agree with how a
 // match binds, or the stop test fires on a promise the run cannot keep.

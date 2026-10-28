@@ -144,30 +144,30 @@ test_record_cap :: proc(t: ^testing.T) {
 	Cap_Case :: struct {
 		src:  string,
 		cap:  int,
-		kind: csv.Error_Kind,
+		kind: Maybe(csv.Error_Kind),
 		at:   u64,
 		d:    csv.Dialect,
 	}
 	cases := []Cap_Case {
-		{"abc\nde\n", 3, .None, 0, {}},
-		{"abc", 3, .None, 0, {}},
-		{"abcd", 3, .Limit_Record, 0, {}},
-		{"abcd\n", 3, .Limit_Record, 0, {}},
-		{"ab\nabcd\n", 3, .Limit_Record, 3, {}},
-		{"abc\r\n", 3, .Limit_Record, 0, {}},
-		{"abc\r\n", 4, .None, 0, {}},
-		{"\"a\nb\"\n", 4, .Limit_Record, 0, {}},
-		{"\"a\nb\"\n", 5, .None, 0, {}},
-		{"a\n\n\n\nb\n", 1, .None, 0, {}},
-		{"a\n#xyz\nb\n", 3, .Limit_Record, 2, {comment = '#'}},
+		{"abc\nde\n", 3, nil, 0, {}},
+		{"abc", 3, nil, 0, {}},
+		{"abcd", 3, .Limit_Format, 0, {}},
+		{"abcd\n", 3, .Limit_Format, 0, {}},
+		{"ab\nabcd\n", 3, .Limit_Format, 3, {}},
+		{"abc\r\n", 3, .Limit_Format, 0, {}},
+		{"abc\r\n", 4, nil, 0, {}},
+		{"\"a\nb\"\n", 4, .Limit_Format, 0, {}},
+		{"\"a\nb\"\n", 5, nil, 0, {}},
+		{"a\n\n\n\nb\n", 1, nil, 0, {}},
+		{"a\n#xyz\nb\n", 3, .Limit_Format, 2, {comment = '#'}},
 		{"ab\"c\n", 2, .Bad_Char, 2, {}},
-		{"ab\"c\n", 1, .Limit_Record, 0, {}},
-		{"a,b\nc,d\ne\n", 2, .Limit_Record, 0, {}},
+		{"ab\"c\n", 1, .Limit_Format, 0, {}},
+		{"a,b\nc,d\ne\n", 2, .Limit_Format, 0, {}},
 	}
 	for c in cases {
 		want: Maybe(csv.Error)
-		if c.kind != .None {
-			want = csv.Error{offset = c.at, kind = c.kind}
+		if k, bad := c.kind.?; bad {
+			want = csv_fault(c.at, .Record_Too_Long) if k == .Limit_Format else csv.Error{offset = c.at, kind = k}
 		}
 		src := transmute([]byte)c.src
 		limits := csv.Limits{max_record_bytes = c.cap}
@@ -179,9 +179,30 @@ test_record_cap :: proc(t: ^testing.T) {
 	long := strings.repeat("y", 200, context.temp_allocator)
 	for at in ([]int{0, 62, 63, 64, 65, 138}) {
 		src := transmute([]byte)strings.concatenate({strings.repeat("a\n", at / 2, context.temp_allocator), long, "\n"}, context.temp_allocator)
-		want := csv.Error{offset = u64(at / 2 * 2), kind = .Limit_Record}
+		want := csv_fault(u64(at / 2 * 2), .Record_Too_Long)
 		testing.expect_value(t, csv.validate(src, {limits = {max_record_bytes = 199}}), want)
 		testing.expect_value(t, csv.validate(src, {limits = {max_record_bytes = 200}}), nil)
+	}
+}
+
+// A line past its cap whose capped block also holds an invalid UTF-8 byte: the earlier fault wins, the cap
+// byte itself being judged as UTF-8 first, and a scan that does not judge UTF-8 reports the cap.
+@(test)
+test_record_cap_block_utf8 :: proc(t: ^testing.T) {
+	for dialect in ([]csv.Dialect{{}, {comment = '#'}, {quoting = .None}, {quoting = .Backslash, comment = '#'}}) {
+		for strictness in ([]csv.Strictness{.Strict, .Lazy}) {
+			// The cap falls at byte 100, in the block that starts at 64.
+			for bad_at in ([]int{70, 99, 100, 101, 127}) {
+				line := transmute([]byte)strings.repeat("y", 200, context.temp_allocator)
+				line[bad_at] = 0xFF
+				opts := csv.Read_Opts{dialect = dialect, strictness = strictness, limits = {max_record_bytes = 100}}
+				want := csv_fault(0, .Record_Too_Long)
+				if strictness == .Strict && bad_at <= 100 {
+					want = csv.Error{offset = u64(bad_at), kind = .Bad_Char}
+				}
+				testing.expectf(t, csv.validate(line, opts) == want, "%v %v bad at %d: %v, want %v", dialect, strictness, bad_at, csv.validate(line, opts), want)
+			}
+		}
 	}
 }
 
@@ -194,8 +215,7 @@ test_each_record_pieces :: proc(t: ^testing.T) {
 		records: int,
 		pieces:  int,
 	}
-	count :: proc(data: rawptr, piece: ^csv.Records, k: int) -> bool {
-		tally := (^Tally)(data)
+	count :: proc(tally: ^Tally, piece: ^csv.Records, k: int) -> bool {
 		sync.atomic_add(&tally.pieces, 1)
 		for _ in csv.next_record(piece) {
 			sync.atomic_add(&tally.records, 1)
@@ -214,7 +234,7 @@ test_each_record_pieces :: proc(t: ^testing.T) {
 	}
 	pool: host.Batch_Pool
 	host.batch_pool_init(&pool, 4)
-	defer host.batch_pool_destroy(&pool)
+	defer host.destroy(&pool)
 	for runner in ([]^csv.Batch_Runner{nil, &alone, &pool.runner}) {
 		tally: Tally
 		testing.expect_value(t, csv.each_record(src, count, &tally, {}, runner), nil)
@@ -229,4 +249,27 @@ test_each_record_pieces :: proc(t: ^testing.T) {
 		testing.expect_value(t, csv.each_record(transmute([]byte)bad, count, &tally, {}, runner), want)
 		testing.expect_value(t, csv.validate(transmute([]byte)bad, runner = runner), want)
 	}
+}
+
+@(test)
+test_record_window_and_open_field_at :: proc(t: ^testing.T) {
+	src := "a,b\n1,2\n3,\"x"
+	tr := Trickle{src = transmute([]byte)src, step = 4}
+	rr := csv.records_from({procedure = trickle_proc, data = &tr}, allocator = context.temp_allocator)
+	defer csv.destroy(&rr)
+	n := 0
+	for rec in csv.next_record(&rr) {
+		window, base := csv.record_window(&rr)
+		testing.expect(t, raw_data(rec.src) == raw_data(window))
+		record, _ := csv.open_field_at(&rr)
+		testing.expect_value(t, base + u64(record), rec.at + 4)
+		n += 1
+	}
+	testing.expect_value(t, n, 2)
+	e, bad := rr.err.?
+	testing.expect(t, bad && e.kind == .Truncated)
+	window, base := csv.record_window(&rr)
+	_, field := csv.open_field_at(&rr)
+	testing.expect(t, field < len(window) && window[field] == '"')
+	testing.expect_value(t, base + u64(field), 10)
 }

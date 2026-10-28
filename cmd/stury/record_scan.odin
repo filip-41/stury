@@ -29,11 +29,9 @@ scan_records :: proc(run: ^Run, ins: ^Inputs, from: int) -> (stop: int) {
 	}
 	job := Record_Scan{src = src, more = ins.next_file < len(ins.files)}
 	start_pieces(&job, run)
-	defer end_pieces(&job)
 	// The fault it returns is a piece's `err`, which `scan_piece` turns into a stop for the main thread's read.
 	_ = json.each_record(src, scan_piece, &job, {framing = .NDJSON}, runner)
-	// A write that failed on a pool thread ends the run here.
-	check_output()
+	end_pieces(&job)
 	stop = from + job.stop if job.stop >= 0 else len(ins.data)
 	explain_records(run, ins.data[from:stop])
 	return
@@ -42,28 +40,24 @@ scan_records :: proc(run: ^Run, ins: ^Inputs, from: int) -> (stop: int) {
 // Piece `k`'s records, answered into its buffer by a copy of the run that holds its output, then the pieces now in
 // turn printed. It returns false once a record is left to `scan_inputs`.
 @(private = "file")
-scan_piece :: proc(data: rawptr, piece: ^json.Records, k: int) -> bool {
-	job := (^Record_Scan)(data)
-	p := Record_Piece{done = true, stop = -1}
-	run := begin_piece(job, k, len(piece.src) - piece.pos)
+scan_piece :: proc(job: ^Record_Scan, piece: ^json.Records, k: int) -> bool {
+	run, p := begin_piece(job, k, len(piece.src) - piece.pos)
 	req: json.Request({.Path})
-	req.dialect, req.limits, req.paths = run.req.dialect, run.req.limits, run.req.paths
-	req.allocator = runtime.heap_allocator()
 	defer json.destroy(&req)
-	// Planned once for the piece's records. A refusal is each record's scan's too, which leaves the record to
-	// `scan_inputs`.
-	_ = json.prepare(&req)
+	// A refusal is each record's scan's too, which leaves the record to `scan_inputs`; the request plans itself
+	// from its second record.
+	heap := runtime.heap_allocator()
+	_ = json.request_init(&req, run.paths[0], opts = run.read, allocator = heap)
 	// The path without `per_element`, tried first as `scan_outputs` tries it. On the heap, as a request zeroed on
 	// the stack cost each piece of a path with no trial.
 	trial: ^json.Request({.Path})
 	if run.tried {
-		trial = new(json.Request({.Path}), req.allocator)
-		trial^ = {dialect = req.dialect, limits = req.limits, paths = run.paths[1:], allocator = req.allocator}
-		_ = json.prepare(trial)
+		trial = new(json.Request({.Path}), heap)
+		_ = json.request_init(trial, run.paths[1], opts = run.read, allocator = heap)
 	}
 	defer if trial != nil {
 		json.destroy(trial)
-		free(trial, req.allocator)
+		free(trial, heap)
 	}
 	src := job.src
 	for rec in json.next_record(piece) {
@@ -88,8 +82,7 @@ scan_piece :: proc(data: rawptr, piece: ^json.Records, k: int) -> bool {
 	if e, bad := piece.err.?; bad && p.stop < 0 {
 		p.stop = int(e.offset)
 	}
-	p.out, p.ret = run.out, run.ret
-	return publish_piece(job, k, p)
+	return publish_piece(job, k, p, &run)
 }
 
 // Scan `record` into `req`, or first `trial`'s (`trial_answered`): its outputs (`jq_outputs`), and whether it

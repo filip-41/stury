@@ -17,7 +17,7 @@ import "core:math"
 import "core:strconv"
 import "core:unicode"
 import "core:unicode/utf8"
-import "base:runtime"
+import core_pkg "../../core"
 import "walk"
 import lex "lex"
 import number "./number"
@@ -246,7 +246,7 @@ json5_escape_unit :: proc(src: []byte, p, end: u64, unit: []u8) -> (n: int, next
 		if p + 4 > end {
 			return 0, p, false
 		}
-		hi, lo := lex.HEX_NIBBLE[src[p + 2]], lex.HEX_NIBBLE[src[p + 3]]
+		hi, lo := core_pkg.HEX_NIBBLE[src[p + 2]], core_pkg.HEX_NIBBLE[src[p + 3]]
 		if hi > 15 || lo > 15 {
 			return 0, p, false
 		}
@@ -307,9 +307,9 @@ json5_name_equals :: proc(src: []byte, lo, hi: u64, name: string) -> bool {
 	return at == len(name)
 }
 
-// The decoded text of an escaped JSON5 token, unescaped into `arena` (`dom_span_text`'s JSON5 arm).
-json5_span_text :: proc(src: []byte, arena: ^Name_Arena, alloc: runtime.Allocator, lo, hi: u64) -> (s: []u8, ok: bool) {
-	if hi <= lo || hi > u64(len(src)) || !name_arena_adopt(arena, alloc) {
+// The decoded text of an escaped JSON5 token, unescaped into `arena` (its spelling's `decode`).
+json5_span_text :: proc(src: []byte, arena: ^Name_Arena, lo, hi: u64) -> (s: []u8, ok: bool) {
+	if hi <= lo || hi > u64(len(src)) {
 		return nil, false
 	}
 	slot, reserved := name_arena_reserve(arena, int(hi - lo))
@@ -345,10 +345,10 @@ json5_number :: proc(s: ^Scanner, q: ^Query_Ctx, lo: u64, $Q: bit_set[Walk_Kind]
 			if string(src[p:]) == word[:n - p] {
 				return Error{offset = n, kind = .Truncated}
 			}
-			return Error{offset = p, kind = .Bad_Literal}
+			return Error{offset = p, kind = KIND_LITERAL}
 		}
 		if string(src[p:][:len(word)]) != word {
-			return Error{offset = p, kind = .Bad_Literal}
+			return Error{offset = p, kind = KIND_LITERAL}
 		}
 		s.pos = p + u64(len(word))
 		walk.emit_number(q, Q, lo, s.pos, number.DIALECT_SPELLED)
@@ -357,7 +357,7 @@ json5_number :: proc(s: ^Scanner, q: ^Query_Ctx, lo: u64, $Q: bit_set[Walk_Kind]
 		if p + 1 < n && src[p + 1] | 0x20 == 'x' {
 			at := p + 2
 			p = at
-			for p < n && lex.HEX_NIBBLE[src[p]] < 16 {
+			for p < n && core_pkg.HEX_NIBBLE[src[p]] < 16 {
 				p += 1
 			}
 			if p == at {
@@ -463,31 +463,28 @@ json5_int :: proc(src: []byte, lo, hi: u64) -> (v: i64, ok: bool) {
 }
 
 // The JSON5 number token `lit`, spelled outside JSON's grammar (`DIALECT_SPELLED`), appended to `out` in JSON's
-// spelling: a hex integer in decimal (past 64 bits, the double its digits accumulate to), a decimal without its
-// `+`, with a `0` before a leading point and without a trailing point. False, with `out` as it was, for a value
-// JSON cannot spell (`Infinity`, `NaN`, a hex integer beyond a double).
+// spelling: a hex integer as the exact decimal integer, a decimal without its `+`, with a `0` before a leading
+// point and without a trailing point. False, with `out` as it was, for a value JSON cannot spell (`Infinity`,
+// `NaN`).
 json5_number_json :: proc(lit: string, out: ^[dynamic]byte) -> bool {
-	v := number.json5_number_value(transmute([]byte)lit, 0, u64(len(lit)))
-	if math.is_nan(v.value) || math.is_inf(v.value) {
-		return false
-	}
-	reserve(out, len(out) + len(lit) + 32) // a decimal grows by a `0`; a hex integer is at most 25 bytes
 	p := 0
 	if lit[0] == '+' || lit[0] == '-' {
 		p = 1
 	}
+	hex := len(lit) > p + 1 && lit[p + 1] | 0x20 == 'x'
+	if !hex {
+		v := number.json5_number_value(transmute([]byte)lit, 0, u64(len(lit)))
+		if math.is_nan(v.value) || math.is_inf(v.value) {
+			return false
+		}
+	}
+	// A decimal grows by a `0`; a hex integer has at most 1.21 decimal digits per hex digit, plus one.
+	reserve(out, len(out) + len(lit) + len(lit) / 4 + 2)
 	if lit[0] == '-' {
 		append(out, '-')
 	}
-	if len(lit) > p + 1 && lit[p + 1] | 0x20 == 'x' {
-		digits: [32]u8
-		mag, approx, over := number.json5_hex(transmute([]byte)lit, u64(p + 2), u64(len(lit)))
-		if !over {
-			append(out, ..transmute([]byte)strconv.write_uint(digits[:], mag, 10))
-		} else {
-			// `write_float` leads with the sign.
-			append(out, ..transmute([]byte)strconv.write_float(digits[:], approx, 'g', -1, 64)[1:])
-		}
+	if hex {
+		hex_decimal(lit[p + 2:], out)
 		return true
 	}
 	if lit[p] == '.' {
@@ -500,4 +497,37 @@ json5_number_json :: proc(lit: string, out: ^[dynamic]byte) -> bool {
 		append(out, lit[i])
 	}
 	return true
+}
+
+// Append the hex digits `hex` as the exact decimal integer they write, at any length. The value is kept in base
+// 10^9 words, least significant first, in `out`'s allocator.
+@(private = "file")
+hex_decimal :: proc(hex: string, out: ^[dynamic]byte) {
+	BASE :: 1_000_000_000
+	// ponytail: quadratic in the digit count; the scalar length cap bounds it.
+	words := make([dynamic]u32, 0, len(hex) / 7 + 1, out.allocator)
+	defer delete(words)
+	for c in transmute([]byte)hex {
+		carry := u64(core_pkg.HEX_NIBBLE[c])
+		for &w in words {
+			x := u64(w) * 16 + carry
+			w, carry = u32(x % BASE), x / BASE
+		}
+		if carry > 0 {
+			append(&words, u32(carry))
+		}
+	}
+	if len(words) == 0 {
+		append(out, '0')
+		return
+	}
+	buf: [16]u8
+	append(out, strconv.write_uint(buf[:], u64(words[len(words) - 1]), 10))
+	#reverse for w in words[:len(words) - 1] {
+		s := strconv.write_uint(buf[:], u64(w), 10)
+		for _ in len(s) ..< 9 {
+			append(out, '0')
+		}
+		append(out, s)
+	}
 }

@@ -65,3 +65,20 @@ answer_cut :: #force_inline proc(limit: int, count: ^int, outcome: Answer_Outcom
 	count^ += 1
 	return false
 }
+
+// A `per_element` path's answer where step `rest[0]` does not apply, having `missed` its member or element or
+// met a `met`: `.Missing`, jq's null, when no `Any` step is still to come and it missed or met null, else
+// `.Type_Mismatch`, jq's error.
+per_element_outcome :: proc(rest: []Step, missed: bool, met: Kind) -> Answer_Outcome {
+	return .Missing if (missed || met == .Null) && !steps_have_any(rest) else .Type_Mismatch
+}
+
+// Whether `steps` holds an `Any` step.
+steps_have_any :: proc(steps: []Step) -> bool {
+	for st in steps {
+		if _, is_any := st.(Any); is_any {
+			return true
+		}
+	}
+	return false
+}

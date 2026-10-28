@@ -18,14 +18,14 @@ test_lazy_rows_built_under_name_first_path_on_array_root :: proc(t: ^testing.T) 
 		{
 			req: json.Request({.Path, .Nodes})
 			defer json.destroy(&req)
-			req.paths, req.strictness, req.duplicates = paths, .Lazy, .First
+			_ = request_of(&req, paths, {strictness = .Lazy, duplicates = .First})
 			err := json.scan(raw(c.src), &req)
 			testing.expectf(t, (err == nil) == (c.rows > 0), "nodes %q: %v", c.src, err)
 			testing.expectf(t, len(req.doc.rows) >= c.rows, "nodes %q: %d rows, want %d", c.src, len(req.doc.rows), c.rows)
 		}
 		req: json.Request({.Path, .Dom})
 		defer json.destroy(&req)
-		req.paths, req.strictness, req.duplicates = paths, .Lazy, .First
+		_ = request_of(&req, paths, {strictness = .Lazy, duplicates = .First})
 		err := json.scan(raw(c.src), &req)
 		testing.expectf(t, (err == nil) == (c.rows > 0), "dom %q: %v", c.src, err)
 		testing.expectf(t, len(req.doc.rows) >= c.rows, "dom %q: %d rows, want %d", c.src, len(req.doc.rows), c.rows)

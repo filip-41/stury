@@ -27,7 +27,7 @@ tape_routable :: proc(req: ^Request($KINDS)) -> bool {
 	when KINDS != {.Path} {
 		return false
 	}
-	return tape_fits(req.paths, req.read)
+	return tape_fits(req.inputs.paths, req.inputs.read)
 }
 
 @(private = "file")
@@ -58,11 +58,11 @@ scan_tape :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) 
 	walk.adopt_allocator(&req.answers, alloc)
 	clear(&req.answers)
 	w := Tape_Walk{
-		rows = req.doc.rows[:], src = src, steps = req.paths[0].steps, mode = req.duplicates,
-		depth = len(req.paths[0].steps), n_keys = len(req.paths), answers = &req.answers,
+		rows = req.doc.rows[:], src = src, steps = req.inputs.paths[0].steps, mode = req.inputs.read.duplicates,
+		depth = len(req.inputs.paths[0].steps), n_keys = len(req.inputs.paths), answers = &req.answers,
 	}
 	limited := false
-	for p, i in req.paths {
+	for p, i in req.inputs.paths {
 		w.keys[i] = string(p.steps[len(p.steps) - 1].(Name))
 		limited ||= p.limit > 0
 		w.lens |= u64(1) << min(u64(len(w.keys[i])), 63)
@@ -72,9 +72,9 @@ scan_tape :: proc(src: []byte, req: ^Request($KINDS), alloc: runtime.Allocator) 
 		return false
 	}
 	if limited {
-		finish_answers(&req.answers, nil, &req.state.route, req.paths, false)
+		finish_answers(&req.answers, nil, &req.state.route, req.inputs.paths, false)
 	}
-	req.state.src, req.stop, req.coverage = src, nil, .Full
+	req.state.src, req.state.stop, req.state.coverage = src, nil, .Full
 	req.groups.grouped = false
 	return true
 }

@@ -7,7 +7,7 @@ package main
 //	stury fmt [--from format] [--to format] [--in-place|--check] [--indent n|--tab] [--max-depth n] [FILE...]
 //
 // FILTER is a jq program, and the output is what jq 1.8 prints for it. The options are listed in HELP_OPTIONS
-// (options.odin). With no FILE it reads stdin, and with no FILTER it runs `.` unless stdin and stdout are both a
+// (usage.odin). With no FILE it reads stdin, and with no FILTER it runs `.` unless stdin and stdout are both a
 // terminal. The files are read as jq reads them, one stream, and a fault gets jq's message (input.odin). Texts one
 // per line are read in parallel with or without `--from ndjson`, which says they are.
 //
@@ -24,8 +24,12 @@ package main
 // Where things live in cmd/stury:
 //
 //	options.odin                     the command line
-//	formats.odin                     the formats --from reads and --to writes
+//	usage.odin                       the help, the version and the usage error
+//	load_values.odin                 JSON texts and files the options name, and the -f program
+//	colors.odin                      jq's output colours and when a run uses them
+//	formats.odin                     the formats --from reads and --to writes, with their library options
 //	input.odin, input_stream.odin    reading files and stdin as jq does, whole or in line windows
+//	input_fault.odin                 where a faulty text is, jq's message for it and where the stream goes on
 //	input_csv.odin                   --from csv and tsv input: each record after the header as an object
 //	scan_cells.odin                  column-only filters on --from csv and tsv input, answered from the cells
 //	scan_inputs.odin                 the path scan over the input stream
@@ -39,6 +43,7 @@ package main
 //	check.odin                       `stury check`
 //	fmt.odin                         `stury fmt`
 //	stream_fault.odin                --stream for a text that does not parse
+//	message/                         the text of every message, built from a format and its values (package `message`)
 //	platform_posix.odin,
 //	platform_windows.odin            the calls into the system, one file per platform
 //	jq/                              the jq interpreter (package `jq`)
@@ -46,13 +51,13 @@ package main
 //	test/                            smoke.sh, jq_suite.py with cli.tsv, jq-1.8.2/ and modules/, and the
 //	                                 jq_diff.py and regex_diff.py comparisons with jq
 
-import "core:fmt"
 import "core:os"
 import "core:slice"
 import "core:strings"
 import host "../../host"
 import json "../../json"
 import "jq"
+import "message"
 
 EXIT_USAGE :: 2
 EXIT_COMPILE :: 3
@@ -71,15 +76,23 @@ Select :: struct {
 // its own, with `held` set.
 Run :: struct {
 	opts:        Opts,
-	// paths[0] is `req`'s path, scanned `per_element` for jq-shaped output. paths[1], when `tried`, is the same path
-	// without `per_element`, scanned first (`scan_outputs`).
+	// paths[0] is `req`'s path, scanned `per_element` for jq-shaped output. paths[1], when `tried`, is `trial`'s:
+	// the same path without `per_element`, scanned first (`scan_outputs`).
 	paths:       [2]json.Path,
 	tried:       bool,
 	// The step of its first `[]`, -1 when it has none.
 	any_at:      int,
+	// The read options of every scan and build of the run's texts.
+	read:        json.Read_Opts,
 	req:         json.Request({.Path}),
+	trial:       json.Request({.Path}),
 	pool:        host.Batch_Pool,
 	pool_width:  int, // the workers `pool` was started for, 0 before it is
+	// The addresses of the last array cut into pieces, `[` to `]`, and from where another cut to its `]` is tried
+	// (`array_pieces`).
+	cut:         struct {
+		open, close, again: uintptr,
+	},
 	scanning:    bool, // the filter is a path the scan answers
 	selected:    ^Selected, // while `select_cell` runs the filter: the record each output prints
 	columns:     ^Columns, // set when `scan_cells` answers a column-only filter on --from csv or tsv
@@ -134,6 +147,8 @@ main :: proc() {
 	set_colors(&run, cli)
 	o := &run.opts
 	refuse_format_clashes(o, &cli)
+	run.read.dialect = source_dialect(o)
+	run.read.limits = jq.lifted
 	if cli.formatting {
 		fmt_main(&run, &cli)
 	}
@@ -149,8 +164,6 @@ main :: proc() {
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
-	run.req.dialect = FORMATS[o.from].source
-	run.req.limits = jq.lifted
 	names := cli.files[:] if len(cli.files) > 0 else STDIN_ONLY
 	if validating {
 		if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
@@ -199,7 +212,8 @@ main :: proc() {
 	ins: Inputs
 	inputs_init(&ins, &run, names)
 	// A pipe is read as it comes, but by -s, which needs it all, and --from jsonc, whose faults count lines in it whole.
-	ins.may_stream = !o.slurp && json.plain_json(run.req.dialect)
+	// A CSV fault ends its file, so CSV is read as it comes under -s too.
+	ins.may_stream = reads_cells(o) || !o.slurp && json.grammar_of(run.read.dialect) == {}
 	bind_inputs(&run, &ins)
 	// Here, not in the interpreter's arena, which each input empties.
 	reserve(&run.out, FLUSH_AT * 2)
@@ -238,14 +252,14 @@ compile_errors :: proc(text: string, errors: []jq.Compile_Error) {
 		return
 	}
 	for e in errors {
-		fmt.eprintf("stury: error: %s\n", jq.locate(text, e))
+		message.write_stderr("stury: error: %s\n", jq.locate(text, e))
 	}
 	exit_compile(len(errors))
 }
 
 // jq's count of compile errors, then exit as it does.
 exit_compile :: proc(count: int) -> ! {
-	fmt.eprintf("stury: %d compile error%s\n", count, "" if count == 1 else "s")
+	message.write_stderr("stury: %d compile error%s\n", count, "" if count == 1 else "s")
 	os.exit(EXIT_COMPILE)
 }
 
@@ -254,7 +268,7 @@ parse_program :: proc(text: string) -> jq.Program {
 	parsed, errors := jq.parse(text)
 	compile_errors(text, errors)
 	if parsed.body == nil {
-		fmt.eprintln(`stury: error: Top-level program not given (try ".")`)
+		message.write_stderr("stury: error: Top-level program not given (try \".\")\n")
 		exit_compile(1)
 	}
 	return parsed
@@ -267,7 +281,7 @@ link_program :: proc(run: ^Run, parsed: jq.Program) -> (linked: jq.Linked) {
 	}
 	linked = jq.link(&run.ip, parsed.deps, jq.program_origin(&run.ip))
 	if linked.errors > 0 {
-		fmt.eprint(linked.messages)
+		message.write_stderr("%s", linked.messages)
 		exit_compile(linked.errors)
 	}
 	return
@@ -331,7 +345,7 @@ choose_scan :: proc(run: ^Run, text: string, _: int) {
 	p, perr := json.parse_path(text, steps[:], make([]u8, len(text)))
 	if perr != nil {
 		// `select` is the interpreter's under a dialect, whose texts print with their comments.
-		dialect := !json.plain_json(run.req.dialect)
+		dialect := json.grammar_of(run.read.dialect) != {}
 		if dialect && !explain_why(run, {.Dialect_Select}) {
 			return
 		}
@@ -364,7 +378,11 @@ choose_scan :: proc(run: ^Run, text: string, _: int) {
 	}
 	p.per_element = true
 	run.paths[0] = p
-	run.req.paths = run.paths[:1]
+	// A refusal leaves a request with no path, whose scans are refused and leave each text to the interpreter.
+	_ = json.request_init(&run.req, run.paths[0], opts = run.read)
+	if run.tried {
+		_ = json.request_init(&run.trial, run.paths[1], opts = run.read)
+	}
 }
 
 // The path P of the filter `text` when it is `select(P op LITERAL)`, P a path the scan answers with no `[]` and
@@ -405,10 +423,10 @@ fault_in_file :: proc(name: string, src: []byte, e: json.Error, what := "", line
 	b := strings.builder_make()
 	strings.write_string(&b, name)
 	if line, col := json.error_position(src, e); line > 0 {
-		fmt.sbprintf(&b, ":%d:%d", line + lines_before, col)
+		message.write(&b, ":%d:%d", line + lines_before, col)
 	}
 	strings.write_string(&b, ": ")
-	strings.write_string(&b, what if what != "" else jq.FAULT_TEXT[e.kind])
+	strings.write_string(&b, what if what != "" else jq.fault_text(e))
 	return strings.to_string(b)
 }
 
@@ -417,7 +435,7 @@ fault_in_file :: proc(name: string, src: []byte, e: json.Error, what := "", line
 // fault), and a nesting past the cap is raised by --max-depth, which the hint asks for only when it was not given.
 // The text ends in a newline.
 fault_context :: proc(src: []byte, e: json.Error, opts: ^Opts) -> string {
-	jsonc := !json.plain_json(FORMATS[opts.from].source)
+	jsonc := json.grammar_of(source_dialect(opts)) != {}
 	at := int(e.offset)
 	hint: string
 	switch {
@@ -452,13 +470,18 @@ fault_context :: proc(src: []byte, e: json.Error, opts: ^Opts) -> string {
 	for i in 0 ..< len(pad) {
 		pad[i] = '\t' if src[first + i] == '\t' else ' '
 	}
-	return fmt.aprintf("%s\n%s^\n(%s)\n", src[first:last], pad, hint)
+	return message.build("%s\n%s^\n(%s)\n", src[first:last], pad, hint)
 }
 
 // `e` as `fault_in_file` tells it, then exit as jq does for input it cannot read.
 fail_input :: proc(run: ^Run, e: json.Error, what := "") -> ! {
+	fail_message(run, fault_in_file(run.name, run.whole, e, what), fault_context(run.whole, e, &run.opts))
+}
+
+// `msg` and the `note` after it as the input's error, then exit as `fail_input` does.
+fail_message :: proc(run: ^Run, msg: string, note := "") -> ! {
 	flush_some(run, force = true)
-	fmt.eprintf("stury: error: %s\n%s", fault_in_file(run.name, run.whole, e, what), fault_context(run.whole, e, &run.opts))
+	message.write_stderr("stury: error: %s\n%s", msg, note)
 	finish(run, EXIT_USAGE if run.unopened else EXIT_INPUT)
 }
 

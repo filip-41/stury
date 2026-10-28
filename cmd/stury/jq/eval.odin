@@ -8,8 +8,8 @@ package jq
 // Path expressions run the same code with `track` set: every output also carries the path it was read
 // at, which `path`, `paths`, `del` and the assignments build on.
 
-import "core:fmt"
 import "core:strings"
+import "../message"
 
 Signal :: enum u8 {
 	Go,
@@ -97,7 +97,7 @@ Interp :: struct {
 }
 
 fail :: proc(ip: ^Interp, format: string, args: ..any) -> Signal {
-	ip.err = fmt.aprintf(format, ..args)
+	ip.err = message.build(format, ..args)
 	ip.raised += 1
 	return .Fail
 }

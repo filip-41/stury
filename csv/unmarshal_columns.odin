@@ -4,6 +4,7 @@ package csv
 // and the per-column op the row read writes through.
 
 import "base:runtime"
+import "core:strings"
 import core_pkg "../core"
 
 // What one `unmarshal` reads with.
@@ -12,11 +13,12 @@ Reader :: struct {
 	src:       []byte,
 	// The plan's read shape, copied (see `row_reader`).
 	shape:     core_pkg.Read_Shape,
-	row:       ^core_pkg.Shape_Op, // the element's struct op
+	row:       ^core_pkg.Shape_Op, // the element's op: a struct, or a list or map of cells
 	// The field each column reads (`core_pkg.NO_FIELD` for none), and the required fields, each with its
 	// column.
 	columns:   []u32,
-	cols:      []Col, // `columns`, bound to what each column's field reads
+	cols:      []Col, // `columns`, bound to what each column's field reads; a map row's columns
+	keys:      []string, // a map row's key per column, empty when `check`
 	required:  [dynamic][2]u32,
 	req_more:  [dynamic][2]u32, // the later columns of a required field that several columns read, each with its field
 	allocator: runtime.Allocator,
@@ -27,7 +29,8 @@ Reader :: struct {
 	check:     bool,
 }
 
-// The plan's read shape, whose row must be a struct of cells: `LIST` reads the list's element, else the struct.
+// The plan's read shape, whose row is a struct of cells, a slice or dynamic array of cells, or a map of string
+// keys to cells: `LIST` reads the list's element as the row, else the root.
 @(private)
 row_reader :: proc(r: ^Reader, p: ^core_pkg.Type_Plan, $LIST: bool) -> Maybe(Unmarshal_Error) {
 	shape, serr := core_pkg.read_shape_of(p)
@@ -40,14 +43,24 @@ row_reader :: proc(r: ^Reader, p: ^core_pkg.Type_Plan, $LIST: bool) -> Maybe(Unm
 	when LIST {
 		row = &r.shape.ops[row.elem]
 	}
+	if row.kind == .Slice || row.kind == .Dynamic || row.kind == .Map && r.shape.ops[row.key].kind == .String {
+		if !is_cell(p, p.ops[row.elem], nil) {
+			err := Unmarshal_Error{kind = .Unsupported}
+			core_pkg.error_path_prepend(&err, core_pkg.Any{})
+			core_pkg.error_path_prepend(&err, core_pkg.Any{})
+			return err
+		}
+		r.row = row
+		return nil
+	}
 	if row.kind != .Struct {
 		return Unmarshal_Error{kind = .Unsupported}
 	}
 	for f in r.shape.fields[row.elem:][:row.count] {
 		if !is_cell(p, p.ops[f.op], nil) {
 			err := Unmarshal_Error{kind = .Unsupported}
-			core_pkg.unmarshal_path_prepend(&err, core_pkg.Name(f.name))
-			core_pkg.unmarshal_path_prepend(&err, core_pkg.Any{})
+			core_pkg.error_path_prepend(&err, core_pkg.Name(f.name))
+			core_pkg.error_path_prepend(&err, core_pkg.Any{})
 			return err
 		}
 	}
@@ -56,48 +69,101 @@ row_reader :: proc(r: ^Reader, p: ^core_pkg.Type_Plan, $LIST: bool) -> Maybe(Unm
 	return nil
 }
 
-// The header's columns: each names the field it reads.
+// The header's columns: each names the field it reads, or a map row's key.
 @(private)
 read_header :: proc(r: ^Reader, header: Record, refuse: bool, duplicates: Duplicates) -> (err: Maybe(Unmarshal_Error)) {
+	if r.row.kind == .Map {
+		return map_columns(r, header, duplicates)
+	}
 	fields := r.shape.fields[r.row.elem:][:r.row.count]
 	r.columns = make_columns(len(header.fields), header.at) or_return
-	// The column that last took each field, so a repeated name is found without a scan of the columns.
-	taken := make_columns(len(fields), header.at) or_return
-	defer delete(taken)
-	column: for cell, c in header.fields {
-		text, escaped, aerr := field_text(r.src, cell, r.dialect, context.allocator)
-		if aerr != nil {
-			return Unmarshal_Error{kind = .Out_Of_Memory, offset = cell.lo}
-		}
-		defer if escaped {
-			delete(text)
-		}
+	names := unmarshal_header_names(r, header) or_return
+	defer header_names_destroy(&names, context.allocator)
+	for name, c in names.names {
+		cell := header.fields[c]
 		k := 0
-		for k < len(fields) && fields[k].name != string(text) {
+		for k < len(fields) && fields[k].name != name {
 			k += 1
 		}
-		if k == len(fields) {
-			if refuse {
-				return cell_error(.Unknown_Field, cell.lo, -1, core_pkg.Name(authored(r, cell)))
-			}
-			continue
+		if k == len(fields) && refuse {
+			return cell_error(.Unknown_Field, cell.lo, -1, core_pkg.Name(authored(r, cell)))
 		}
-		if taken[k] != core_pkg.NO_FIELD {
+		if prev := names.repeats[c]; prev >= 0 {
 			switch duplicates {
 			case .Refuse:
-				return cell_error(.Duplicate_Key, cell.lo, -1, core_pkg.Name(fields[k].name))
+				return cell_error(.Duplicate_Key, cell.lo, -1, core_pkg.Name(fields[k].name if k < len(fields) else authored(r, cell)))
 			case .First:
-				continue column
+				continue
 			case .Default, .Last:
-				r.columns[taken[k]] = core_pkg.NO_FIELD
+				r.columns[prev] = core_pkg.NO_FIELD
 			case .All:
 			}
 		}
-		taken[k] = u32(c)
-		r.columns[c] = u32(k)
+		if k < len(fields) {
+			r.columns[c] = u32(k)
+		}
 	}
 	required_columns(r, header.at) or_return
 	return bind_cols(r)
+}
+
+// A map row's columns: each header cell's decoded text is the key its column reads. Of the columns that share a
+// key, `duplicates` picks the one read, or with `.All` reads each in order.
+@(private, cold)
+map_columns :: proc(r: ^Reader, header: Record, duplicates: Duplicates) -> Maybe(Unmarshal_Error) {
+	n := len(header.fields)
+	cols, cerr := make([]Col, n, context.allocator)
+	if cerr != nil {
+		return Unmarshal_Error{kind = .Out_Of_Memory, offset = header.at}
+	}
+	r.cols = cols
+	if !r.check {
+		keys, kerr := make([]string, n, context.allocator)
+		if kerr != nil {
+			return Unmarshal_Error{kind = .Out_Of_Memory, offset = header.at}
+		}
+		r.keys = keys
+	}
+	names := unmarshal_header_names(r, header) or_return
+	defer header_names_destroy(&names, context.allocator)
+	value := &r.shape.ops[r.row.elem]
+	for cell, c in header.fields {
+		if prev := names.repeats[c]; prev >= 0 {
+			switch duplicates {
+			case .Refuse:
+				return cell_error(.Duplicate_Key, cell.lo, -1, core_pkg.Name(authored(r, cell)))
+			case .First:
+				continue
+			case .Default, .Last:
+				cols[prev].op = nil
+			case .All:
+			}
+		}
+		cols[c] = {op = value, name = authored(r, cell)}
+		if r.check {
+			continue
+		}
+		// A key is `r.allocator`'s, or under `borrow` a slice of `src` when it has nothing to decode.
+		key, escaped, aerr := cell_text(r.src, cell, r.dialect, r.allocator)
+		if aerr == nil && !escaped && !r.borrow {
+			key, aerr = strings.clone(key, r.allocator)
+		}
+		if aerr != nil {
+			return Unmarshal_Error{kind = .Out_Of_Memory, offset = cell.lo}
+		}
+		r.keys[c] = key
+	}
+	return nil
+}
+
+// `header`'s `Header_Names`, in `context.allocator`.
+@(private = "file")
+unmarshal_header_names :: proc(r: ^Reader, header: Record) -> (Header_Names, Maybe(Unmarshal_Error)) {
+	names, err := header_names(r.src, header.fields, r.dialect, context.allocator)
+	if err != nil {
+		return {}, Unmarshal_Error{kind = .Out_Of_Memory, offset = header.at}
+	}
+	return names, nil
 }
 
 // Without a header, column k reads field k. A ragged text has columns for every field, whatever the first
@@ -209,7 +275,7 @@ bind_cols :: proc(r: ^Reader) -> Maybe(Unmarshal_Error) {
 			col.fast = .Int64
 		case op.kind == .Float && op.width == 8:
 			col.fast = .Float64
-		case op.kind == .String && r.borrow && r.dialect.escapes == .None:
+		case op.kind == .String && r.borrow && r.dialect.quoting != .Backslash:
 			col.fast = .String
 		case op.kind == .Union:
 			arm := &r.shape.fields[op.elem]

@@ -96,7 +96,6 @@ Compiler :: struct {
 
 // `pattern` compiled as jq compiles it, or Oniguruma's message for why not.
 compile :: proc(pattern: string, flags: Flags) -> (re: Regex, err: string) {
-	decode_tables()
 	pat: Pattern
 	if pat, err = parse(pattern, flags); err != "" {
 		return

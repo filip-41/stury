@@ -34,8 +34,8 @@ main :: proc() {
 		os.exit(1)
 	}
 	out, merr := json.marshal(person, allocator = alloc)
-	if merr != .None {
-		fmt.eprintln(merr)
+	if e, bad := merr.?; bad {
+		fmt.eprintln(json.render_error(nil, e))
 		os.exit(1)
 	}
 	fmt.println(string(out)) // {"name":"ada","n":1}

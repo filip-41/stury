@@ -93,7 +93,7 @@ read_rare_cell :: proc(r: ^Reader, op: ^core_pkg.Shape_Op, cell: Field, dest: ra
 		}
 		return .Not_A_Member
 	case .Rune:
-		if r.dialect.escapes == .Backslash && len(text) == 2 && text[0] == '\\' {
+		if r.dialect.quoting == .Backslash && len(text) == 2 && text[0] == '\\' {
 			(^rune)(dest)^ = rune(unescaped(text[1]))
 			return .None
 		}
@@ -138,7 +138,7 @@ read_rare_cell :: proc(r: ^Reader, op: ^core_pkg.Shape_Op, cell: Field, dest: ra
 		if err != nil {
 			return .Out_Of_Memory
 		}
-		fault, refused := r.shape.hooks[op.elem](transmute([]byte)s, dest, r.allocator).?
+		fault, refused := r.shape.hooks[op.elem]({kind = .String, text = string(r.src[cell.lo:cell.hi]), decoded = s}, dest, r.allocator).?
 		if quote {
 			delete(s, r.allocator)
 		}
@@ -154,7 +154,7 @@ holds_nul :: proc(r: ^Reader, text: string) -> bool {
 		if text[i] == 0 {
 			return true
 		}
-		if text[i] == '\\' && r.dialect.escapes == .Backslash && i + 1 < len(text) {
+		if text[i] == '\\' && r.dialect.quoting == .Backslash && i + 1 < len(text) {
 			i += 1
 			if text[i] == '0' {
 				return true
@@ -170,7 +170,7 @@ has_pair :: #force_inline proc(cell: Field, text: string) -> bool {
 	return cell.hi - cell.lo != u64(len(text)) && holds(text, '"')
 }
 
-// Whether the cell's text holds a `""` or an escape, which `field_text` decodes.
+// Whether the cell's text holds a `""` or an escape, which `cell_text` decodes.
 @(private)
 needs_decoding :: #force_inline proc(r: ^Reader, cell: Field, text: string) -> bool {
 	// `text` is `authored`'s, a slice of `src`.
@@ -178,7 +178,7 @@ needs_decoding :: #force_inline proc(r: ^Reader, cell: Field, text: string) -> b
 	if cell.hi - cell.lo != u64(len(text)) && holds_span(r.src, lo, len(text), '"') {
 		return true
 	}
-	return r.dialect.escapes == .Backslash && holds_span(r.src, lo, len(text), '\\')
+	return r.dialect.quoting == .Backslash && holds_span(r.src, lo, len(text), '\\')
 }
 
 @(private)
@@ -206,8 +206,8 @@ holds :: #force_inline proc(text: string, c: byte) -> bool {
 @(private)
 cell_string :: proc(r: ^Reader, cell: Field, text: string, quote, borrow: bool) -> (string, runtime.Allocator_Error) {
 	if quote && !r.check {
-		decoded, _, err := field_text(r.src, cell, r.dialect, r.allocator)
-		return string(decoded), err
+		decoded, _, err := cell_text(r.src, cell, r.dialect, r.allocator)
+		return decoded, err
 	}
 	if borrow {
 		return text, nil

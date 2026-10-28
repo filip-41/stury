@@ -3,8 +3,8 @@ package core
 import "core:io"
 import "core:mem"
 
-// The default bytes per read that a streamed reader (`csv.records_from`) requests from its `io.Reader`; `chunk`
-// overrides it.
+// The default bytes per read that a streamed reader (`records_from` of a format) requests from its `io.Reader`;
+// `chunk` overrides it.
 READER_CHUNK :: 64 * 1024
 
 // Stream_Window holds part of a stream in memory. `buf[:hi]` is read and not yet dropped, and `base` is the
@@ -21,6 +21,12 @@ Stream_Window :: struct {
 	// The reader's error other than `.EOF`; `.No_Progress` for a read that returned no bytes and no error. Bytes
 	// read before the error stay in the window.
 	read_err:  io.Error,
+}
+
+// The window the records of a streamed reader are slices of, and the stream offset of its first byte.
+@(require_results)
+record_window :: proc(w: ^Stream_Window) -> (window: []byte, base: u64) {
+	return w.buf[:w.hi], w.base
 }
 
 // Drops `buf[:keep]` and moves the remaining bytes to the front.

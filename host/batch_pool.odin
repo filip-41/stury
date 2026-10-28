@@ -13,7 +13,7 @@ import core_pkg "../core"
 // to `json.each_record`, `json.validate_records`, `csv.each_record` or `csv.validate`.
 //
 //	- They spin briefly (200 microseconds) after a batch, then sleep.
-//	- The caller owns the pool: `batch_pool_init` starts the threads and `batch_pool_destroy` joins them.
+//	- The caller owns the pool: `batch_pool_init` starts the threads and `destroy` joins them.
 //	- It must not move between the two, and runs one batch at a time.
 Batch_Pool :: struct {
 	runner:      core_pkg.Batch_Runner,
@@ -153,7 +153,7 @@ batch_spawn_one :: proc(pool: ^Batch_Pool) -> bool {
 
 // Stop the pool's helper threads and free what `batch_pool_init` allocated. Call it once, after the last
 // batch has returned. The pool is not usable afterwards.
-batch_pool_destroy :: proc(pool: ^Batch_Pool) {
+destroy :: proc(pool: ^Batch_Pool) {
 	pool.task = nil
 	for &h in pool.helpers {
 		sync.atomic_store(&h.ready, BATCH_HANDED)

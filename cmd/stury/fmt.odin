@@ -9,12 +9,12 @@ package main
 
 import "base:runtime"
 import "core:bytes"
-import "core:fmt"
 import "core:mem/virtual"
 import "core:os"
 import csv "../../csv"
 import json "../../json"
 import "jq"
+import "message"
 
 // fmt --check's exit status: a file is not already in the printer's layout.
 FMT_EXIT_DIFFERS :: 1
@@ -98,8 +98,6 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 			}
 		}
 	}
-	run.req.dialect = FORMATS[o.from].source
-	run.req.limits = jq.lifted
 	run.name_faults = true
 	run.verbatim = !reads_cells(o) && !writes_cells(o)
 	reserve(&run.out, FLUSH_AT * 2)
@@ -147,6 +145,7 @@ fmt_files :: proc(run: ^Run, files: []string) -> (code: int) {
 		case:
 			flush_some(run, force = true)
 		}
+		table_free(run.table)
 		run.silent, run.table = false, nil
 		clear(&run.out)
 		free_data({ins.data, ins.mapped})
@@ -195,8 +194,7 @@ fmt_texts :: proc(run: ^Run, ins: ^Inputs) {
 			free_all(context.temp_allocator)
 			free_spent(ins)
 		case .Error:
-			parse_failed(run, msg, ins.fault_note)
-			finish(run, EXIT_INPUT)
+			fmt_failed(run, msg, ins.fault_note)
 		case .More:
 			return
 		}
@@ -208,7 +206,7 @@ fmt_texts :: proc(run: ^Run, ins: ^Inputs) {
 @(private = "file")
 fmt_pieces :: proc(run: ^Run, ins: ^Inputs) -> bool {
 	at, limit, trailing, found := next_text(ins)
-	if !found || !trailing || limit != len(ins.data) || !json.plain_json(run.req.dialect) || jq.lifted.max_depth > json.MAX_DEPTH {
+	if !found || !trailing || limit != len(ins.data) || json.grammar_of(run.read.dialect) != {} || jq.lifted.max_depth > json.MAX_DEPTH {
 		return false
 	}
 	if !print_root_pieces(run, ins.data[at:]) {
@@ -228,15 +226,22 @@ fmt_verbatim :: proc(run: ^Run, r: jq.Ref) {
 		clear(&r.doc.facts)
 	}
 	text, err := json.marshal(r.doc, {pretty = l.pretty, indent = u8(max(l.indent, 0)), trailing_newline = true})
-	if err == .Too_Deep {
-		fmt.eprintf("stury: error: %s: nesting past %d levels is not written in the format it was read in\n", run.name, json.MAX_DEPTH)
+	if e, bad := err.?; bad && e.kind == .Too_Deep {
+		message.write_stderr("stury: error: %s: nesting past %d levels is not written in the format it was read in\n", run.name, json.MAX_DEPTH)
 		finish(run, EXIT_INPUT)
-	} else if err != .None {
-		fmt.eprintf("stury: error: %s: cannot write the value: %v\n", run.name, err)
+	} else if bad {
+		message.write_stderr("stury: error: %s: cannot write the value: %v\n", run.name, e.kind)
 		finish(run, EXIT_INPUT)
 	}
 	append(&run.out, ..text)
 	flush_some(run)
+}
+
+// A fault in an input ends the run as a filter run tells it: `stury: parse error: FILE:LINE:COLUMN: what`.
+@(private = "file")
+fmt_failed :: proc(run: ^Run, msg: string, note := "") -> ! {
+	parse_failed(run, msg, note)
+	finish(run, EXIT_INPUT)
 }
 
 // Formats one open CSV or TSV input. The header record is read first. A CSV-like output writes it and every record
@@ -245,15 +250,13 @@ fmt_verbatim :: proc(run: ^Run, r: jq.Ref) {
 @(private = "file")
 fmt_cells :: proc(run: ^Run, ins: ^Inputs) {
 	o := &run.opts
-	c := Cells{dialect = FORMATS[o.from].dialect, data = ins.data}
-	c.whole = csv.records(c.data, {dialect = c.dialect}, runtime.heap_allocator())
-	c.it = &c.whole
+	c := Cells{dialect = cells_in(o), whole = csv.records(ins.data, {dialect = cells_in(o)}, runtime.heap_allocator())}
 	defer fmt_cells_done(&c)
-	rec, ok := csv.next_record(&c.whole)
+	rec, ok, msg := read_header(ins, &c)
+	if msg != "" {
+		fmt_failed(run, msg)
+	}
 	if ok {
-		if msg := read_header(ins, &c, rec); msg != "" {
-			fmt_cells_fault(run, msg)
-		}
 		if writes_cells(o) {
 			fmt_cells_write(run, &c, rec)
 			for r in csv.next_record(&c.whole) {
@@ -264,7 +267,7 @@ fmt_cells :: proc(run: ^Run, ins: ^Inputs) {
 		}
 	}
 	if e, bad := cells_err(&c); bad {
-		fmt_cells_fault(run, cells_fault(ins, &c, e))
+		fmt_failed(run, cells_fault(ins, &c, e))
 	}
 }
 
@@ -272,7 +275,7 @@ fmt_cells :: proc(run: ^Run, ins: ^Inputs) {
 fmt_cells_write :: proc(run: ^Run, c: ^Cells, rec: csv.Record) {
 	cells := make([]Maybe(string), len(rec.fields), context.temp_allocator)
 	for &cell, i in cells {
-		cell, _ = column_cell(rec, i, c.dialect)
+		cell, _ = column_cell(rec, i)
 	}
 	put_row(run, cells)
 	free_all(context.temp_allocator)
@@ -284,7 +287,7 @@ fmt_cells_objects :: proc(run: ^Run, c: ^Cells) {
 	context.allocator = input_arena(run, &arena)
 	defer virtual.arena_destroy(&arena)
 	for rec in csv.next_record(&c.whole) {
-		print_jq(run, record_doc(c.heads, nil, rec, c.dialect))
+		print_jq(run, record_value(run, rec, &c.header))
 		virtual.arena_free_all(&arena)
 		free_all(context.temp_allocator)
 	}
@@ -293,17 +296,7 @@ fmt_cells_objects :: proc(run: ^Run, c: ^Cells) {
 @(private = "file")
 fmt_cells_done :: proc(c: ^Cells) {
 	csv.destroy(&c.whole)
-	for name in c.header {
-		delete(name, runtime.heap_allocator())
-	}
-	delete(c.header, runtime.heap_allocator())
-}
-
-// A fault in a CSV input ends the run as a filter run tells it: `stury: parse error: FILE:LINE:COLUMN: what`.
-@(private = "file")
-fmt_cells_fault :: proc(run: ^Run, msg: string) -> ! {
-	parse_failed(run, msg)
-	finish(run, EXIT_INPUT)
+	csv.destroy(&c.header)
 }
 
 // Replaces `path` with `text` through a temporary file beside it, so a reader sees the old file or the new one.
@@ -336,7 +329,7 @@ rewrite_file :: proc(path: string, text: []byte) -> bool {
 			fmt_write_failed(path, werr)
 			ok = false
 		case n == 0:
-			fmt.eprintf("stury: error: Could not write file %s: Short write\n", path)
+			message.write_stderr("stury: error: Could not write file %s: Short write\n", path)
 			ok = false
 		case:
 			at += n
@@ -373,5 +366,5 @@ temp_name :: proc(f: ^os.File) -> (string, os.Error) {
 
 @(private = "file")
 fmt_write_failed :: proc(path: string, err: os.Error) {
-	fmt.eprintf("stury: error: Could not write file %s: %s\n", path, strerror(err))
+	message.write_stderr("stury: error: Could not write file %s: %s\n", path, strerror(err))
 }
