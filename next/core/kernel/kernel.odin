@@ -5,14 +5,21 @@ import "core:simd"
 
 // Format-neutral kernels on 64-byte blocks: loading a block, reading the last partial block of an input in place,
 // comparing bytes, sorting bytes into sets, packing per-byte masks into one bit per byte, following quoted strings
-// across blocks, and validating UTF-8 (utf8.odin). The operations are per architecture (arm64.odin, lanes64.odin).
-// Kernels whose instructions differ by CPU take a `Tier` as `$T` (amd64.odin, single_tier.odin).
+// and runs of bytes across blocks, listing the positions in a mask, and validating UTF-8 (utf8.odin). The operations
+// are per architecture (arm64.odin, lanes64.odin). Kernels whose instructions differ by CPU take a `Tier` as `$T`
+// (amd64.odin, single_tier.odin).
 
 // 64 input bytes, or the 64 lane masks (0x00 or 0xFF) made from them, as four 16-byte vectors. Kernels that work
 // on all 64 lanes at once reinterpret it as one 64-lane vector (lanes64.odin). An array, so that a block crosses a
 // call between procedures compiled for different x86 tiers in the same registers on both sides: a 64-lane vector
 // is returned in one register by an AVX-512 procedure and in four by an SSE one.
 Block :: [4]#simd[16]u8
+
+// A block's vector registers on NEON and SSE, and the whole block as one vector.
+@(private)
+V :: #simd[16]u8
+@(private)
+W :: #simd[64]u8
 
 // The last partial block of an input. Lane j of `block` holds the input byte at `lo + j - shift`. Lanes outside the
 // input hold whatever memory is there, so a mask packed from `block` goes through `align` before anything that
@@ -145,3 +152,17 @@ escaped :: #force_inline proc "contextless" (escape: u64, odd: ^u64) -> u64 {
 	odd^ = u64(overflow)
 	return (even_carries &~ escape & ~EVEN) | (odd_carries &~ escape & EVEN)
 }
+
+// The bytes of the runs in `runs` that start at a bit of `starts`, and of the run that `carry` (0 or 1) says goes on
+// from the block before, carrying to the next block whether such a run reaches the end of this one. `starts` holds
+// only first bits of runs. Adding a run's first bit carries through the run, so the bits the sum clears are the run.
+run_bytes :: #force_inline proc "contextless" (runs, starts: u64, carry: ^u64) -> u64 {
+	sum, out := intrinsics.overflow_add(runs, starts | carry^)
+	carry^ = u64(out)
+	return (sum ~ runs) & runs
+}
+
+// `flatten` writes positions in steps of this many slots, the first step whatever the count, so that its branch is
+// taken alike at sparse and dense rates: a mask with few bits pays for a step's slots, one with many saves the
+// mispredicted exit of a loop per bit. The slots after the last position take junk: `out` holds this many past it.
+FLATTEN_STEP :: 12

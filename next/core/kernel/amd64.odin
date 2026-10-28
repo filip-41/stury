@@ -1,6 +1,7 @@
 #+build amd64
 package kernel
 
+import "base:intrinsics"
 import "core:simd"
 import "core:simd/x86"
 import "core:sys/info"
@@ -48,11 +49,7 @@ tier :: proc "contextless" () -> Tier {
 }
 
 @(private = "file")
-V :: #simd[16]u8
-@(private = "file")
 H :: #simd[32]u8
-@(private = "file")
-W :: #simd[64]u8
 
 // Lane j is `t[i[j]]`, for indices below 16: one shuffle per vector register.
 @(private)
@@ -95,6 +92,28 @@ prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64 {
 clmul_prefix_xor :: proc "contextless" (x: u64) -> u64 {
 	p := x86._mm_clmulepi64_si128(x86.__m128i{i64(x), 0}, x86.__m128i{-1, -1}, 0)
 	return u64(simd.extract(p, 0))
+}
+
+// The positions of the set bits of `m`, plus `base`, written from `out[n]` on, and the count after them. x86 counts
+// trailing zeros, so the walk goes up `m`. The stores are volatile only to keep each count a scalar `tzcnt`: in an
+// AVX-512 caller LLVM otherwise packs the counts into a vector popcount sequence, which is slower.
+flatten :: #force_inline proc "contextless" (out: [^]u16, n: int, m: u64, base: u16) -> int #no_bounds_check {
+	cnt := int(intrinsics.count_ones(m))
+	w := out[n:]
+	m := m
+	#unroll for k in 0 ..< 2 {
+		if k == 0 || cnt > FLATTEN_STEP * k {
+			#unroll for i in 0 ..< FLATTEN_STEP {
+				intrinsics.volatile_store(&w[FLATTEN_STEP * k + i], base + u16(intrinsics.count_trailing_zeros(m)))
+				m &= m - 1
+			}
+		}
+	}
+	for i := 2 * FLATTEN_STEP; i < cnt; i += 1 {
+		intrinsics.volatile_store(&w[i], base + u16(intrinsics.count_trailing_zeros(m)))
+		m &= m - 1
+	}
+	return n + cnt
 }
 
 // The bytes of `src` from `lo` to its end, fewer than 64, read in place: `lo < len(src) < lo + 64`. On v4 a masked

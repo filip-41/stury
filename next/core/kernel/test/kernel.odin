@@ -297,3 +297,126 @@ tail_in_poisoned_memory :: proc(t: ^testing.T) {
 		testing.expect_value(t, k.align(k.pack(k.eq(tail.block, '"')), tail), reference(src[lo:], '"'))
 	}
 }
+
+@(test, enable_target_feature = FEATURES)
+below_every_byte_and_lane :: proc(t: ^testing.T) {
+	buf: [64]u8
+	for v in 0 ..< 256 {
+		c := u8(v)
+		for &b in buf {
+			b = c
+		}
+		testing.expect_value(t, k.pack(k.below(k.load(raw_data(buf[:])), c)), 0)
+		testing.expect(t, !k.any_below(k.load(raw_data(buf[:])), c))
+		if c == 0 {
+			continue
+		}
+		// Every lane, holding the largest byte below `c` and a byte with its top bit flipped.
+		for low in ([2]u8{c - 1, (c - 1) ~ 0x80}) {
+			for lane in 0 ..< 64 {
+				buf[lane] = low
+				want := low < c ? u64(1) << u64(lane) : 0
+				b := k.load(raw_data(buf[:]))
+				testing.expect_value(t, k.pack(k.below(b, c)), want)
+				testing.expect_value(t, k.any_below(b, c), want != 0)
+				buf[lane] = c
+			}
+		}
+	}
+}
+
+// The positions of `m`, plus `base`, from `out[n]` on, and no slot written before `n` or past `FLATTEN_STEP` slots
+// after the last position.
+check_flatten :: proc(t: ^testing.T, m: u64, n: int, base: u16, loc := #caller_location) {
+	SENTINEL :: 0xffff
+	out: [32 + 64 + k.FLATTEN_STEP + 1]u16
+	for &o in out {
+		o = SENTINEL
+	}
+	end := k.flatten(raw_data(out[:]), n, m, base)
+	testing.expect_value(t, end, n + int(count_ones(m)), loc = loc)
+	i := n
+	for bit in 0 ..< 64 {
+		if m >> u64(bit) & 1 != 0 {
+			testing.expectf(t, out[i] == base + u16(bit), "mask %x slot %d: %d, want %d", m, i, out[i], base + u16(bit), loc = loc)
+			i += 1
+		}
+	}
+	for j in 0 ..< n {
+		testing.expectf(t, out[j] == SENTINEL, "mask %x wrote slot %d before %d", m, j, n, loc = loc)
+	}
+	for j in end + k.FLATTEN_STEP ..< len(out) {
+		testing.expectf(t, out[j] == SENTINEL, "mask %x wrote slot %d past the slack", m, j, loc = loc)
+	}
+}
+
+count_ones :: proc(m: u64) -> (c: int) {
+	for x := m; x != 0; x &= x - 1 {
+		c += 1
+	}
+	return
+}
+
+@(test, enable_target_feature = FEATURES)
+flatten_every_count :: proc(t: ^testing.T) {
+	state := rand.create(6)
+	context.random_generator = rand.default_random_generator(&state)
+	check_flatten(t, 0, 0, 0)
+	check_flatten(t, ~u64(0), 3, 100)
+	check_flatten(t, u64(1) << 63, 0, 65535 - 63)
+	// Every count, around the step boundaries above all, at random positions.
+	for count in 0 ..= 64 {
+		for _ in 0 ..< 50 {
+			m: u64
+			for count_ones(m) < count {
+				m |= u64(1) << u64(rand.int_max(64))
+			}
+			check_flatten(t, m, rand.int_max(32), u16(rand.int_max(1 << 15)))
+		}
+	}
+}
+
+// Per block, the bytes of the runs of `runs` that start at a byte of `starts`, a run going on across block edges.
+reference_runs :: proc(runs, starts: []u64, out: []u64) {
+	inside := false
+	for i in 0 ..< 64 * len(runs) {
+		bit := u64(1) << u64(i % 64)
+		in_run := runs[i / 64] & bit != 0
+		if !in_run {
+			inside = false
+		} else if starts[i / 64] & bit != 0 {
+			inside = true
+		}
+		if in_run && inside {
+			out[i / 64] |= bit
+		}
+	}
+}
+
+@(test)
+run_bytes_across_blocks :: proc(t: ^testing.T) {
+	state := rand.create(7)
+	context.random_generator = rand.default_random_generator(&state)
+	BLOCKS :: 4
+	for _ in 0 ..< 5000 {
+		// Runs of random lengths, the long ones crossing blocks, some of them started.
+		runs, starts, want: [BLOCKS]u64
+		for i := 0; i < 64 * BLOCKS; {
+			length := rand.int_max(4) == 0 ? rand.int_max(100) : rand.int_max(6)
+			started := rand.int_max(2) == 0
+			for j in i ..< min(i + length, 64 * BLOCKS) {
+				runs[j / 64] |= u64(1) << u64(j % 64)
+				if j == i && started {
+					starts[j / 64] |= u64(1) << u64(j % 64)
+				}
+			}
+			i += length + 1
+		}
+		reference_runs(runs[:], starts[:], want[:])
+		carry: u64
+		for b in 0 ..< BLOCKS {
+			got := k.run_bytes(runs[b], starts[b], &carry)
+			testing.expectf(t, got == want[b], "runs %x starts %x block %d: %x, want %x", runs, starts, b, got, want[b])
+		}
+	}
+}

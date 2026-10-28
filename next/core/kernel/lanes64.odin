@@ -7,8 +7,6 @@ import "core:simd"
 // Operations on all 64 lanes of a block at once, as one vector that LLVM splits to the target's width: four registers
 // on SSE, two on AVX2, one on AVX-512, where a compare writes a mask register and `pack` is one move out of it.
 // Written at 16 lanes, the AVX-512 code instead merges 16-lane mask registers one OR at a time.
-@(private = "file")
-W :: #simd[64]u8
 
 // Loaded into a variable first: Odin folds a `transmute` of the load into a load of `Block` at its own alignment.
 load :: #force_inline proc "contextless" (p: [^]u8) -> Block {
@@ -19,6 +17,11 @@ load :: #force_inline proc "contextless" (p: [^]u8) -> Block {
 // The lanes of `b` equal to `c`.
 eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
 	return transmute(Block)simd.lanes_eq(transmute(W)b, W(c))
+}
+
+// The lanes of `b` below `c`.
+below :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
+	return transmute(Block)simd.lanes_lt(transmute(W)b, W(c))
 }
 
 // The lanes of `a` or of `b`.
@@ -53,4 +56,10 @@ is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
 // vector test does.
 any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
 	return pack(m) != 0
+}
+
+// Whether any byte of `b` is below `c`: the packed mask is the test, as in `any_lane`. x86 has no byte minimum across
+// a register.
+any_below :: #force_inline proc "contextless" (b: Block, c: u8) -> bool {
+	return pack(below(b, c)) != 0
 }

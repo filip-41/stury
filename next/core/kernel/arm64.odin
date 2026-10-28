@@ -4,9 +4,6 @@ package kernel
 import "base:intrinsics"
 import "core:simd"
 
-@(private = "file")
-V :: #simd[16]u8
-
 load :: #force_inline proc "contextless" (p: [^]u8) -> Block {
 	return {
 		intrinsics.unaligned_load((^V)(p)),
@@ -20,6 +17,12 @@ load :: #force_inline proc "contextless" (p: [^]u8) -> Block {
 eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
 	k := V(c)
 	return {simd.lanes_eq(b[0], k), simd.lanes_eq(b[1], k), simd.lanes_eq(b[2], k), simd.lanes_eq(b[3], k)}
+}
+
+// The lanes of `b` below `c`.
+below :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
+	k := V(c)
+	return {simd.lanes_lt(b[0], k), simd.lanes_lt(b[1], k), simd.lanes_lt(b[2], k), simd.lanes_lt(b[3], k)}
 }
 
 // The lanes of `a` or of `b`.
@@ -72,6 +75,11 @@ fold :: #force_inline proc "contextless" (m: Block) -> V {
 // Whether every byte of `b` is below 0x80.
 is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
 	return simd.reduce_max(simd.bit_or(simd.bit_or(b[0], b[1]), simd.bit_or(b[2], b[3]))) < 0x80
+}
+
+// Whether any byte of `b` is below `c`: one `uminv` over the block, where the lane masks take a compare per register.
+any_below :: #force_inline proc "contextless" (b: Block, c: u8) -> bool {
+	return simd.reduce_min(simd.min(simd.min(b[0], b[1]), simd.min(b[2], b[3]))) < c
 }
 
 // Whether any lane mask is set. `umaxv` reduces a register in one instruction, an OR reduction goes through scalar

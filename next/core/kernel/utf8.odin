@@ -9,11 +9,6 @@ import "core:simd"
 // byte say whether it must be a continuation. The work is one vector register of the tier at a time: written on all
 // 64 lanes, the 16-byte tiers keep every step's four registers live at once and spill.
 
-@(private = "file")
-V :: #simd[16]u8
-@(private = "file")
-W :: #simd[64]u8
-
 // The block before, zeros after an ASCII block, and the errors found so far, which only the first register holds.
 // Vectors, not blocks: LLVM carries a block from one iteration to the next as four 16-byte vectors, and rebuilds the
 // wider register from them each time.

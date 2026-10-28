@@ -20,6 +20,7 @@ CASES = [("pack 16/256", "pack", 20000, 16), ("json 16/256", "json", 20000, 16),
 CASES += [("str none", "str", 20000, 1 << 30), ("str 1/4096", "str", 20000, 4096), ("str 1/64", "str", 20000, 64)]
 CASES += [("utf8 none", "utf8", 20000, 1 << 30)] + [(f"utf8 1/{every}", "utf8", 20000, every) for every in (4096, 256, 16)]
 CASES += [("utf8all 1/256", "utf8all", 20000, 256)]
+CASES += [(f"flatten {per256}/256", "flatten", 20000, per256) for per256 in (4, 16, 64)]
 CASES += [(f"skip 1/{every}", "skip", 2048, every) for every in (256, 1024, 4096)]
 CASES += [(f"tail {n}", "tail", max(1, (1 << 28) // (4096 * n)), n) for n in (24, 72, 200, 1000)]
 CASES = [c for c in CASES if KEEP.search(c[0])]
