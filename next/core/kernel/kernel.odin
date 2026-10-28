@@ -1,7 +1,7 @@
 package kernel
 
 // Format-neutral kernels on 64-byte blocks: loading a block, reading the last partial block of an input in place,
-// comparing bytes, and packing per-byte masks into one bit per byte. A `Block` holds 64 input bytes, or the 64 lane
+// comparing bytes, sorting bytes into sets, and packing per-byte masks into one bit per byte. A `Block` holds 64 input bytes, or the 64 lane
 // masks (0x00 or 0xFF) made from them. Its layout belongs to the architecture (arm64.odin, lanes64.odin).
 
 // The last partial block of an input. Lane j of `block` holds the input byte at `lo + j - shift`. Lanes outside the
@@ -34,4 +34,32 @@ load_tail :: #force_inline proc "contextless" (src: []u8, lo: int) -> (t: Tail) 
 // A mask packed from `t.block`, one bit per input byte from `lo`, the bits past the input cleared.
 align :: #force_inline proc "contextless" (m: u64, t: Tail) -> u64 {
 	return m >> t.shift & t.live
+}
+
+// A table that sorts bytes into up to eight sets: byte `b` is in set k when `lo[b & 15] & hi[b >> 4]` shares a bit
+// with `bits[k]`, as `nibble_table` returns it. Each pair of a set and a high nibble owns one bit, so membership is
+// exact while the sets have at most eight such pairs between them.
+Nibble_Table :: struct {
+	lo, hi: #simd[16]u8,
+}
+
+nibble_table :: proc(sets: []string) -> (t: Nibble_Table, bits: [8]u8) {
+	assert(len(sets) <= 8, "more than eight sets")
+	lo, hi: [16]u8
+	next: uint
+	for set, k in sets {
+		pair: [16]u8
+		for c in transmute([]u8)set {
+			h := c >> 4
+			if pair[h] == 0 {
+				assert(next < 8, "more than eight pairs of a set and a high nibble")
+				pair[h] = 1 << next
+				next += 1
+			}
+			hi[h] |= pair[h]
+			lo[c & 15] |= pair[h]
+			bits[k] |= pair[h]
+		}
+	}
+	return {transmute(#simd[16]u8)lo, transmute(#simd[16]u8)hi}, bits
 }

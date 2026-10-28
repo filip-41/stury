@@ -25,14 +25,60 @@ eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
 	return {simd.lanes_eq(b[0], k), simd.lanes_eq(b[1], k), simd.lanes_eq(b[2], k), simd.lanes_eq(b[3], k)}
 }
 
+// The lanes of `a` or of `b`.
+either :: #force_inline proc "contextless" (a, b: Block) -> Block {
+	return {simd.bit_or(a[0], b[0]), simd.bit_or(a[1], b[1]), simd.bit_or(a[2], b[2]), simd.bit_or(a[3], b[3])}
+}
+
+// The set bits of every byte of `b`, from the table: `tbl` looks up both nibbles.
+classes :: #force_inline proc "contextless" (b: Block, t: Nibble_Table) -> (c: Block) {
+	#unroll for i in 0 ..< 4 {
+		lo := simd.runtime_swizzle(t.lo, simd.bit_and(b[i], V(0x0f)))
+		c[i] = simd.bit_and(lo, simd.runtime_swizzle(t.hi, simd.shr(b[i], V(4))))
+	}
+	return
+}
+
+// The lanes of `c`, as `classes` returns it, in a set of `bits`.
+has :: #force_inline proc "contextless" (c: Block, bits: u8) -> (m: Block) {
+	k := V(bits)
+	#unroll for i in 0 ..< 4 {
+		m[i] = simd.lanes_ne(simd.bit_and(c[i], k), V(0))
+	}
+	return
+}
+
 // One bit per lane mask. NEON has no instruction that gathers lane bits, each lane keeps its bit of a byte (1, 2 ..
 // 128), and three rounds of pairwise adds fold the 64 lanes into 8 bytes. The bits never overlap, so the adds are
 // ORs. LLVM's portable lowering of the same packing sums each register across its lanes and moves it out on its
 // own, which takes more cycles.
 pack :: #force_inline proc "contextless" (m: Block) -> u64 {
-	w := V{1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128}
-	s := addp(addp(simd.bit_and(m[0], w), simd.bit_and(m[1], w)), addp(simd.bit_and(m[2], w), simd.bit_and(m[3], w)))
+	s := fold(m)
 	return (transmute([2]u64)addp(s, s))[0]
+}
+
+// `pack` of each mask. The last round of pairwise adds takes two masks at once, so masks packed together cost less
+// than masks packed one by one.
+pack_n :: #force_inline proc "contextless" (m: [$N]Block) -> (r: [N]u64) where 2 <= N && N <= 4 {
+	ab := transmute([2]u64)addp(fold(m[0]), fold(m[1]))
+	r[0], r[1] = ab[0], ab[1]
+	when N == 3 {
+		c := fold(m[2])
+		r[2] = (transmute([2]u64)addp(c, c))[0]
+	} else when N == 4 {
+		cd := transmute([2]u64)addp(fold(m[2]), fold(m[3]))
+		r[2], r[3] = cd[0], cd[1]
+	}
+	return
+}
+
+// The 64 lane masks of `m` weighted and folded into 16 bytes: the first two of the three rounds of pairwise adds.
+// A lane mask is 0x00 or 0xFF, so `min` weights it as `and` would. With `and`, LLVM merges the weighting into the
+// compare that made the mask, `has` costs and, cmeq and bic per register instead of cmtst, and the walk is slower.
+@(private = "file")
+fold :: #force_inline proc "contextless" (m: Block) -> V {
+	w := V{1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128}
+	return addp(addp(simd.min(m[0], w), simd.min(m[1], w)), addp(simd.min(m[2], w), simd.min(m[3], w)))
 }
 
 // Whether any lane mask is set. `umaxv` reduces a register in one instruction, an OR reduction goes through scalar

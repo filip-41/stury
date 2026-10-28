@@ -4,6 +4,8 @@ package bench
 // and the units per rep, which run.py reads. Cases:
 //   pack <per256>   eq and pack per block of an L1-resident buffer, `per256` quotes in 256 bytes, unit: a block.
 //   skip <every>    blocks with no quote skipped by `any_lane`, one quote in `every` bytes, unit: a block.
+//   json <per256>   JSON's four sets by the nibble table, packed together, `per256` of their bytes in 256, unit: a block.
+//   csv <per256>    CSV's three sets by compares, packed together, `per256` of their bytes in 256, unit: a block.
 //   tail <len>      quotes counted in inputs of `len` bytes, the last partial block by `load_tail`, unit: an input.
 
 import "base:intrinsics"
@@ -53,6 +55,41 @@ run_skip :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 	return
 }
 
+JSON_SETS :: [4]string{"\"", "\\", ",:[]{}", " \t\n\r"}
+CSV_BYTES :: ",\"\n\r"
+
+// The masks folded into one word, so that every mask reaches the sink.
+mix :: #force_inline proc "contextless" (m: [$N]u64) -> (x: u64) {
+	#unroll for i in 0 ..< N {
+		x ~= bits.rotate_left64(m[i], 16 * i)
+	}
+	return
+}
+
+run_json :: #force_no_inline proc(buf: []u8, reps: int, t: k.Nibble_Table, s: [8]u8) -> (sink: u64) {
+	p := raw_data(buf)
+	for _ in 0 ..< reps {
+		q := opaque(&p)
+		for i := 0; i < len(buf); i += 64 {
+			c := k.classes(k.load(q[i:]), t)
+			sink += mix(k.pack_n([4]k.Block{k.has(c, s[0]), k.has(c, s[1]), k.has(c, s[2]), k.has(c, s[3])}))
+		}
+	}
+	return
+}
+
+run_csv :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
+	p := raw_data(buf)
+	for _ in 0 ..< reps {
+		q := opaque(&p)
+		for i := 0; i < len(buf); i += 64 {
+			b := k.load(q[i:])
+			sink += mix(k.pack_n([3]k.Block{k.eq(b, ','), k.eq(b, '"'), k.either(k.eq(b, '\n'), k.eq(b, '\r'))}))
+		}
+	}
+	return
+}
+
 count_quotes :: #force_inline proc "contextless" (src: []u8) -> (n: u64) {
 	lo := 0
 	for ; lo + 64 <= len(src); lo += 64 {
@@ -76,16 +113,16 @@ run_tail :: #force_no_inline proc(buf: []u8, starts: []int, n, reps: int) -> (si
 	return
 }
 
-// `buf` filled with lowercase letters and, on average, `per256` quotes in every 256 bytes.
-fill :: proc(buf: []u8, per256: int) {
+// `buf` filled with lowercase letters and, on average, `per256` bytes of `from` in every 256 bytes.
+fill :: proc(buf: []u8, per256: int, from: string) {
 	for &b in buf {
-		b = rand.int_max(256) < per256 ? '"' : u8('a' + rand.int_max(26))
+		b = rand.int_max(256) < per256 ? from[rand.int_max(len(from))] : u8('a' + rand.int_max(26))
 	}
 }
 
 main :: proc() {
 	if len(os.args) != 4 {
-		fmt.eprintln("usage: bench pack|skip|tail <reps> <arg>")
+		fmt.eprintln("usage: bench pack|json|csv|skip|tail <reps> <arg>")
 		os.exit(2)
 	}
 	reps, reps_ok := strconv.parse_int(os.args[2])
@@ -99,16 +136,22 @@ main :: proc() {
 	units: int
 	elapsed: time.Duration
 	switch os.args[1] {
-	case "pack":
+	case "pack", "json", "csv":
+		json_sets := JSON_SETS
+		table, set_bits := k.nibble_table(json_sets[:])
 		buf := make([]u8, L1_BYTES)
-		fill(buf, arg)
+		fill(buf, arg, os.args[1] == "pack" ? "\"" : os.args[1] == "json" ? "\"\\,:[]{} \t\n\r" : CSV_BYTES)
 		units = L1_BYTES / 64
 		t := time.tick_now()
-		sink = run_pack(buf, reps)
+		switch os.args[1] {
+		case "pack": sink = run_pack(buf, reps)
+		case "json": sink = run_json(buf, reps, table, set_bits)
+		case "csv": sink = run_csv(buf, reps)
+		}
 		elapsed = time.tick_since(t)
 	case "skip":
 		buf := make([]u8, SKIP_BYTES)
-		fill(buf, 0)
+		fill(buf, 0, "")
 		// Placed at random: at a fixed stride the branch predictor learns which blocks to skip.
 		for _ in 0 ..< SKIP_BYTES / arg {
 			buf[rand.int_max(SKIP_BYTES)] = '"'
@@ -123,7 +166,7 @@ main :: proc() {
 			os.exit(2)
 		}
 		buf := make([]u8, TAIL_BYTES)
-		fill(buf, 16)
+		fill(buf, 16, "\"")
 		starts := make([]int, TAIL_INPUTS)
 		for &s in starts {
 			s = rand.int_max(TAIL_BYTES - arg + 1)
