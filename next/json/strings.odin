@@ -74,6 +74,13 @@ string_probe :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, e
 	return nil, false
 }
 
+// `string_stops` over a 64-byte block, so a block needs no separate test for the bytes past 0x7F or below 0x20:
+// both are stops, and the reader that cannot take them answers nil for `string_long` to settle.
+@(private)
+string_stops_block :: #force_inline proc "contextless" (b: kernel.Block) -> kernel.Block {
+	return {string_stops(b[0]), string_stops(b[1]), string_stops(b[2]), string_stops(b[3])}
+}
+
 // The string at `p` while it is plain ASCII, 64 bytes a step with no UTF-8 state, within 64 bytes of the text's end:
 // one past its closing quote. Else nil, and `escape` the block whose first stop is a backslash, which
 // `string_escaped` reads on from, or nil when the string is not this reader's.
@@ -82,10 +89,7 @@ string_lean :: #force_inline proc "contextless" (p, end: [^]u8) -> (q, escape: [
 	bs := p[1:]
 	for intrinsics.ptr_sub(end, bs) >= 64 {
 		b := kernel.load(bs)
-		if !kernel.is_ascii(b) {
-			return nil, nil
-		}
-		sv := kernel.either(kernel.either(kernel.eq(b, '"'), kernel.eq(b, '\\')), kernel.below(b, 0x20))
+		sv := string_stops_block(b)
 		if !kernel.any_lane(sv) {
 			bs = bs[64:]
 			continue
@@ -110,12 +114,14 @@ string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8) -> [^]u8 #no
 	odd: u64
 	for intrinsics.ptr_sub(end, bs) >= 64 {
 		b := kernel.load(bs)
-		if !kernel.is_ascii(b) {
-			return nil
-		}
-		if odd == 0 && !kernel.any_lane(kernel.either(kernel.either(kernel.eq(b, '"'), kernel.eq(b, '\\')), kernel.below(b, 0x20))) {
+		sv := string_stops_block(b)
+		if odd == 0 && !kernel.any_lane(sv) {
 			bs = bs[64:]
 			continue
+		}
+		// A stop the mask paths below do not read: a byte past 0x7F, which `string_long` validates.
+		if !kernel.is_ascii(b) {
+			return nil
 		}
 		m := kernel.pack_n([3]kernel.Block{kernel.eq(b, '"'), kernel.eq(b, '\\'), kernel.below(b, 0x20)})
 		quote, slash, ctl := m[0], m[1], m[2]

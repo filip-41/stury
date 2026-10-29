@@ -1,6 +1,7 @@
 package json
 
 import "base:intrinsics"
+import "core:simd"
 import core "../core"
 import kernel "../core/kernel"
 
@@ -62,26 +63,34 @@ LEAD_MAX :: 32
 @(private, rodata)
 LEAD_MASK := [2 * LEAD_MAX]u8{0 ..< LEAD_MAX = 0xff}
 
-// The next token after the whitespace at `p` when it is none, or a newline and the indent `at` predicts: `ind^`
-// holds the last indent in its low half and the step in its high half. Nil for any other run, which `skip_indent`
-// then counts. Scalar only, so a state that holds it builds no vector on entry.
+// The next token after the whitespace at `p` when it is none, one space, or a newline and the indent `at`
+// predicts: `ind^` holds the last indent in its low half and the step in its high half. Nil for any other
+// run, which `skip_indent` then counts. Scalar only, so a state that holds it builds no vector on entry.
 @(private)
 indent_fast :: #force_inline proc "contextless" (p, end: [^]u8, ind: ^u64, $at: Indent_At) -> [^]u8 #no_bounds_check {
-	if p < end && p[0] > ' ' {
-		return p
-	}
-	if intrinsics.ptr_sub(end, p) > LEAD_MAX && p[0] == '\n' {
-		line := p[1:]
-		cur, step := ind^ & 0xffff_ffff, ind^ >> 32
-		k := cur
-		when at == .Open {
-			k += step
-		} else when at == .Close {
-			k -= step // wraps past LEAD_MAX when the indent is under a step, so the run is counted
+	if p < end {
+		c := p[0]
+		if c > ' ' {
+			return p
 		}
-		if k < LEAD_MAX && spaces_lead(line, k) && line[k] > ' ' {
-			ind^ = step << 32 | k
-			return line[k:]
+		if intrinsics.ptr_sub(end, p) > LEAD_MAX && c == '\n' {
+			line := p[1:]
+			cur, step := ind^ & 0xffff_ffff, ind^ >> 32
+			k := cur
+			when at == .Open {
+				k += step
+			} else when at == .Close {
+				k -= step // wraps past LEAD_MAX when the indent is under a step, so the run is counted
+			}
+			if k < LEAD_MAX && spaces_lead(line, k) && line[k] > ' ' {
+				ind^ = step << 32 | k
+				return line[k:]
+			}
+		}
+		// One space before the token, as a compact document writes after a comma or a pretty printer after a
+		// colon: it is whitespace, and only a newline moves the indent.
+		if c == ' ' && intrinsics.ptr_sub(end, p) > 1 && p[1] > ' ' {
+			return p[1:]
 		}
 	}
 	return nil
@@ -106,12 +115,13 @@ skip_indent :: #force_inline proc "contextless" (p, end: [^]u8, ind: ^u64, $at: 
 }
 
 // Whether the `k` bytes at `p` are spaces: `k < LEAD_MAX`, and LEAD_MAX bytes at `p` are in the text.
+// A max rather than an OR: the reduction is one cross-lane instruction on NEON, while an OR folds through
+// scalar shifts.
 @(private)
 spaces_lead :: #force_inline proc "contextless" (p: [^]u8, k: u64) -> bool #no_bounds_check {
+	V :: #simd[16]u8
 	m := ([^]u8)(&LEAD_MASK[LEAD_MAX - k])
-	acc: u64
-	#unroll for i in 0 ..< LEAD_MAX / 8 {
-		acc |= (intrinsics.unaligned_load((^u64)(p[8 * i:])) ~ 0x2020_2020_2020_2020) & intrinsics.unaligned_load((^u64)(m[8 * i:]))
-	}
-	return acc == 0
+	a := simd.bit_and(simd.bit_xor(intrinsics.unaligned_load((^V)(p)), V(' ')), intrinsics.unaligned_load((^V)(m)))
+	b := simd.bit_and(simd.bit_xor(intrinsics.unaligned_load((^V)(p[16:])), V(' ')), intrinsics.unaligned_load((^V)(m[16:])))
+	return simd.reduce_max(simd.bit_or(a, b)) == 0
 }

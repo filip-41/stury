@@ -163,10 +163,12 @@ Compact text has no whitespace between tokens, and each state first tests that t
 text puts a newline and an indent between most tokens. `indent_fast` predicts the indent: one step deeper after an open
 bracket, the same after a comma, one step out before a close. It checks the predicted run with one masked compare of up
 to 32 bytes, `spaces_lead`, and takes the token after it with no loop. `skip_indent` counts a run the prediction missed
-and learns from it: the indent after any newline, and the step after an open bracket.
+and learns from it: the indent after any newline, and the step after an open bracket. A single space before the next
+token, as some compact printers write after a comma, is taken there too, after the newline test, so neither compact nor
+indented text pays for it.
 
-`st_key` takes the colon after a key on a fast path when it is flush against its value or followed by one space, and
-`st_colon` takes every other spelling.
+`st_key` takes the colon after a key on a fast path when it is flush against its value or followed by one space, with
+or without one space before it, and `st_colon` takes every other spelling.
 
 ### Runs
 

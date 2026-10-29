@@ -116,6 +116,15 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 			return #must_tail st_value(q[2:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 	}
+	// A pretty printer that puts a space before the colon as well: `" : "` and `" :"`.
+	if intrinsics.ptr_sub(end, q) > 3 && q[0] == ' ' && q[1] == ':' {
+		if q[2] > ' ' {
+			return #must_tail st_value(q[2:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		if q[2] == ' ' && q[3] > ' ' {
+			return #must_tail st_value(q[3:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
