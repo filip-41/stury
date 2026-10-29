@@ -2,6 +2,7 @@ package json_tests
 
 import "base:sanitizer"
 import "core:math/rand"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -109,7 +110,7 @@ expect_fault :: proc(t: ^testing.T, c: Case, detail: json.Detail) {
 	if c.kind == nil {
 		testing.expectf(t, !bad, "%q: %v", c.text, f)
 	} else {
-		testing.expectf(t, bad && f.kind == c.kind && f.offset == c.offset && f.detail == u8(detail), "%q: %v, want %v at %d", c.text, f, c.kind, c.offset)
+		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset && f.detail == u8(detail), "%q: %v, want %v at %d", c.text, f, c.kind, c.offset)
 	}
 }
 
@@ -167,13 +168,13 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 					if !testing.expectf(t, !bad, "%q: %v", text[:], f) {
 						return
 					}
-				} else if !testing.expectf(t, bad && f.kind == piece.kind && f.offset == 1 + u64(k) + piece.offset, "%q: %v, want %v at %d", text[:], f, piece.kind, 1 + u64(k) + piece.offset) {
+				} else if !testing.expectf(t, bad && f.kind == piece.kind && f.at == 1 + u64(k) + piece.offset, "%q: %v, want %v at %d", text[:], f, piece.kind, 1 + u64(k) + piece.offset) {
 					return
 				}
 				// Cut before the closing quote.
 				resize(&text, 1 + k + len(piece.bytes))
 				f, bad = validate_fenced(text[:]).?
-				if piece.kind == nil && !testing.expectf(t, bad && f.kind == .Truncated && f.offset == u64(len(text)), "%q: %v", text[:], f) {
+				if piece.kind == nil && !testing.expectf(t, bad && f.kind == .Truncated && f.at == u64(len(text)), "%q: %v", text[:], f) {
 					return
 				}
 			}
@@ -210,7 +211,7 @@ escapes_by_byte :: proc(t: ^testing.T) {
 			return testing.expectf(t, !bad, "%q: %v", text[:], f)
 		}
 		at := u64(1 + shift + 2 * run + want.offset)
-		return testing.expectf(t, bad && f.kind == want.kind && f.offset == at, "%q: %v, want %v at %d", text[:], f, want.kind, at)
+		return testing.expectf(t, bad && f.kind == want.kind && f.at == at, "%q: %v, want %v at %d", text[:], f, want.kind, at)
 	}
 	is_hex :: proc(c: u8) -> bool {
 		return c - '0' < 10 || (c | 0x20) - 'a' < 6
@@ -296,7 +297,7 @@ indents_by_byte :: proc(t: ^testing.T) {
 		}
 		resize(&text, 2 + k + 3 + k)
 		f, bad := validate_fenced(text[:]).?
-		if !testing.expectf(t, bad && f.kind == .Truncated && f.offset == u64(len(text)), "%q: %v", text[:], f) {
+		if !testing.expectf(t, bad && f.kind == .Truncated && f.at == u64(len(text)), "%q: %v", text[:], f) {
 			return
 		}
 	}
@@ -320,7 +321,7 @@ colons_by_byte :: proc(t: ^testing.T) {
 	// The fault of a text that holds `by` bytes fewer before its colon than the reference.
 	shifted :: proc(f: Maybe(core.Fault), by: int) -> Maybe(core.Fault) {
 		if f, bad := f.?; bad {
-			return core.Fault{f.offset + u64(by), f.kind, f.detail}
+			return core.Fault{at = f.at + u64(by), rules = f.rules, kind = f.kind, detail = f.detail}
 		}
 		return nil
 	}
@@ -399,10 +400,87 @@ depth_limit :: proc(t: ^testing.T) {
 	testing.expect_value(t, json.validate(transmute([]u8)deep, .Strict), nil)
 	run := strings.repeat("[", json.MAX_DEPTH + 1, context.temp_allocator)
 	f, bad := json.validate(transmute([]u8)run, .Strict).?
-	testing.expectf(t, bad && f.kind == .Too_Deep && f.offset == json.MAX_DEPTH, "%v", f)
+	testing.expectf(t, bad && f.kind == .Too_Deep && f.at == json.MAX_DEPTH, "%v", f)
 	over :=strings.repeat("[{\"a\":", json.MAX_DEPTH, context.temp_allocator)
 	f, bad = json.validate(transmute([]u8)over, .Strict).?
-	testing.expectf(t, bad && f.kind == .Too_Deep && f.offset == 6 * (json.MAX_DEPTH / 2), "%v", f)
+	testing.expectf(t, bad && f.kind == .Too_Deep && f.at == 6 * (json.MAX_DEPTH / 2), "%v", f)
+}
+
+// Skips the token numbered `h^`, from 0, and reads every other.
+skip_hook :: proc "contextless" (h: ^int, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	h^ -= 1
+	return s, .Skip if h^ == -1 else .Next
+}
+
+// `max_depth` below the default, at it, and past it, where the depth stack comes from the heap: `max_depth` levels
+// pass and the bracket past them is `Too_Deep`, an array or an object, through `validate`, a walk with a hook, and a
+// walk that skips the root or its first key. The heap stack is the default heap's, whatever the caller's allocator.
+@(test)
+max_depth_option :: proc(t: ^testing.T) {
+	heap := context.allocator
+	log := new(Log)
+	defer free(log, heap)
+	context.allocator = mem.panic_allocator()
+	for depth in ([]u32{1, 3, json.MAX_DEPTH, json.MAX_DEPTH + 1, 5000}) {
+		n := int(depth)
+		fits := strings.concatenate({strings.repeat("[", n, context.temp_allocator), strings.repeat("]", n, context.temp_allocator)}, context.temp_allocator)
+		testing.expectf(t, json.validate(transmute([]u8)fits, .Strict, {max_depth = depth}) == nil, "%d levels", n)
+		over := strings.concatenate({strings.repeat("[{\"a\":", n / 2, context.temp_allocator), strings.repeat("[", n % 2 + 1, context.temp_allocator)}, context.temp_allocator)
+		f, bad := json.validate(transmute([]u8)over, .Strict, {max_depth = depth}).?
+		testing.expectf(t, bad && f.kind == .Too_Deep && f.at == u64(len(over) - 1), "%d levels: %v", n, f)
+		log^ = {}
+		_, fault := json.walk(transmute([]u8)over, 0, .Strict, {max_depth = depth}, log, &core.Hook_Regs{}, log_hook)
+		testing.expectf(t, fault == f && log.n == n + n / 2, "%d levels, walked: %v, %d tokens", n, fault, log.n)
+		maps := strings.concatenate({strings.repeat("{\"a\":", n, context.temp_allocator), "{"}, context.temp_allocator)
+		f, bad = json.validate(transmute([]u8)maps, .Strict, {max_depth = depth}).?
+		testing.expectf(t, bad && f.kind == .Too_Deep && f.at == u64(len(maps) - 1), "%d objects: %v", n, f)
+		for skip in ([]int{0, 1}) {
+			k := skip
+			_, fault = json.walk(transmute([]u8)maps, 0, .Strict, {max_depth = depth}, &k, &core.Hook_Regs{}, skip_hook)
+			testing.expectf(t, fault == f, "%d objects, token %d skipped: %v", n, skip, fault)
+		}
+	}
+}
+
+// Every value of `Detail` has a rule, and a fault renders as `line:col: message` with its rule's code beside it.
+// Faults met in offset order share one count of the lines, and one before the count's byte counts again.
+@(test)
+rendered_faults :: proc(t: ^testing.T) {
+	testing.expect_value(t, len(json.RULES.details), len(json.Detail))
+	src := transmute([]u8)string("{\n  \"a\": tru\n}")
+	f, bad := json.validate(src, .Strict).?
+	testing.expect(t, bad)
+	b := strings.builder_make(context.temp_allocator)
+	core.render(strings.to_writer(&b), src, f)
+	testing.expect_value(t, strings.to_string(b), "2:11: Invalid literal")
+	strings.builder_reset(&b)
+	core.write_code(strings.to_writer(&b), f)
+	testing.expect_value(t, strings.to_string(b), "json.literal")
+	lines: core.Lines
+	Want :: struct {
+		at:   u64,
+		kind: core.Fault_Kind,
+		text: string,
+	}
+	for want in ([]Want{{0, .Bad_Char, "1:1: Unexpected character"}, {6, .Bad_Number, "2:5: Invalid number"}, {14, .Truncated, "3:2: Unfinished input"}, {2, .Trailing, "2:1: Unexpected text after the value"}, {0, .No_Memory, "Out of memory"}}) {
+		strings.builder_reset(&b)
+		core.render(strings.to_writer(&b), src, core.Fault{want.at, &json.RULES, want.kind, 0}, &lines)
+		testing.expect_value(t, strings.to_string(b), want.text)
+	}
+	strings.builder_reset(&b)
+	core.write_code(strings.to_writer(&b), core.Fault{0, &json.RULES, .No_Memory, 0})
+	testing.expect_value(t, strings.to_string(b), "json.no_memory")
+	// A line ends at its LF, a CR is a byte of its line, and a column counts bytes.
+	Located :: struct {
+		src:  string,
+		at:   u64,
+		text: string,
+	}
+	for want in ([]Located{{"a\r\nb", 3, "2:1"}, {"a\r\nb", 2, "1:3"}, {"a\rb", 2, "1:3"}, {"éx", 3, "1:4"}}) {
+		strings.builder_reset(&b)
+		core.render(strings.to_writer(&b), transmute([]u8)want.src, core.Fault{want.at, &json.RULES, .Bad_Char, 0})
+		testing.expectf(t, strings.to_string(b) == strings.concatenate({want.text, ": Unexpected character"}, context.temp_allocator), "%q at %d: %s", want.src, want.at, strings.to_string(b))
+	}
 }
 
 // JSONTestSuite: every `y_` text passes and every `n_` text fails. The `i_` texts are the oracle's.

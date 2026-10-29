@@ -60,23 +60,3 @@ text_start :: proc "contextless" (src: []u8, lo: u64) -> u64 {
 	}
 	return lo
 }
-
-// What went wrong, the same for every format, and where. Each member names the formats that raise it. Zero is no
-// fault.
-Fault_Kind :: enum u8 {
-	Truncated = 1, // json, dsv: the input ended inside a construct, at `len(src)`
-	Bad_Char, // json, dsv: the first byte that cannot extend the construct, or that is not UTF-8
-	Bad_Escape, // json: at the escape's letter, or a lone surrogate half at its backslash, dsv (TSV): at the backslash
-	Bad_Number, // json: at the byte that breaks the number
-	Too_Deep, // json: at the bracket past the format's depth limit
-	Trailing, // json's one-document framing: at the first byte after the document
-	Bad_Structure, // dsv: well-formed text breaking a rule of the format's structure, at the construct's first byte
-	Too_Wide, // json, dsv: a token longer than `Token.n` holds, at its first byte
-}
-
-// `detail` tells a format's own rules apart within a kind, and the format turns it into a message. 0 is none.
-Fault :: struct {
-	offset: u64,
-	kind:   Fault_Kind,
-	detail: u8,
-}

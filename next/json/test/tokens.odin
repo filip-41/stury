@@ -157,7 +157,38 @@ bom_at_the_start :: proc(t: ^testing.T) {
 	testing.expect_value(t, hi, 7)
 	testing.expect_value(t, log.tokens[0], core.Token{4, 1, .Array, .Value, 0})
 	_, fault = json.walk(transmute([]u8)string(" \xef\xbb\xbf[1]"), 0, .Strict, {}, log, &core.Hook_Regs{}, log_hook)
-	testing.expect_value(t, fault, core.Fault{1, .Bad_Char, 0})
+	testing.expect_value(t, fault, core.Fault{1, &json.RULES, .Bad_Char, 0})
+}
+
+// A walk reads one document. A stream is a loop of walks, each from where the last one ended, passing over
+// whitespace and the record separator 0x1E before each document. Nothing but those left is no document and no fault,
+// and `validate` holds a text to one document with nothing before it.
+@(test)
+documents_one_walk_each :: proc(t: ^testing.T) {
+	log := new(Log)
+	defer free(log)
+	src := transmute([]u8)string("1 2[3]{}\n\x1e\"s\"\n\x1e true \x1e\n ")
+	ends := [?]u64{1, 3, 6, 8, 13, 20, u64(len(src))}
+	lo: u64
+	for want, i in ends {
+		log^ = {}
+		hi, fault := json.walk(src, lo, .Strict, {}, log, &core.Hook_Regs{}, log_hook)
+		testing.expectf(t, hi == want && fault == nil, "document %d from %d: %d %v, want %d", i, lo, hi, fault, want)
+		testing.expectf(t, (log.n == 0) == (i == len(ends) - 1), "document %d: %d tokens", i, log.n)
+		lo = hi
+	}
+	hi, fault := json.walk(src, 1000, .Strict, {}, log, &core.Hook_Regs{}, log_hook)
+	testing.expectf(t, hi == u64(len(src)) && fault == nil, "past the end: %d %v", hi, fault)
+	for empty in ([]string{"", "   ", "\x1e \x1e ", "\xef\xbb\xbf", "\xef\xbb\xbf \x1e"}) {
+		log^ = {}
+		hi, fault = json.walk(transmute([]u8)empty, 0, .Strict, {}, log, &core.Hook_Regs{}, log_hook)
+		testing.expectf(t, hi == u64(len(empty)) && fault == nil && log.n == 0, "%q: %d %v, %d tokens", empty, hi, fault, log.n)
+	}
+	_, fault = json.walk(transmute([]u8)string(" \x1e x"), 0, .Strict, {}, log, &core.Hook_Regs{}, log_hook)
+	testing.expect_value(t, fault, core.Fault{3, &json.RULES, .Bad_Char, 0})
+	testing.expect_value(t, json.validate(transmute([]u8)string("\x1e1"), .Strict), core.Fault{0, &json.RULES, .Bad_Char, 0})
+	testing.expect_value(t, json.validate(transmute([]u8)string("1 2"), .Strict), core.Fault{2, &json.RULES, .Trailing, 0})
+	testing.expect_value(t, json.validate(transmute([]u8)string(" \n"), .Strict), core.Fault{2, &json.RULES, .Truncated, 0})
 }
 
 // Whether a token's span holds what its kind says, and its spelling says whether a string holds an escape.

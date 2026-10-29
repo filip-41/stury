@@ -1,6 +1,7 @@
 package dsv_tests
 
 import "core:math/rand"
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import dsv ".."
@@ -158,24 +159,31 @@ Walked :: struct {
 	text:   string,
 	lo:     u64,
 	hi:     u64,
-	fault:  Maybe(core.Fault),
+	fault:  Want, // kind 0 for none
 	tokens: []core.Token,
+}
+
+// A fault as a rodata table writes it: a `core.Fault` holds a pointer, which rodata cannot.
+Want :: struct {
+	at:     u64,
+	kind:   core.Fault_Kind,
+	detail: dsv.Detail,
 }
 
 // Texts whose tokens are written out: walks from a byte past the first, texts with no record, and a record wider than
 // the header, whose cells past the header's make no tokens.
 @(rodata)
 WALKED := []Walked {
-	{"junk\na,b\n1,2\n", 5, 13, nil, {{5, 0, .Array, .Value, 0}, {9, 0, .Map, .Value, 0}, {5, 1, .Plain, .Key, 0}, {9, 1, .Plain, .Value, 0}, {7, 1, .Plain, .Key, 0}, {11, 1, .Plain, .Value, 0}, {12, 1, .End, .Value, 0}, {13, 0, .End, .Value, 0}}},
-	{"\xc3\xa9", 1, 1, core.Fault{1, .Bad_Char, 0}, {{1, 0, .Array, .Value, 0}}},
-	{"\xf0\x9f,\x98\x80", 2, 3, core.Fault{3, .Bad_Char, 0}, {{2, 0, .Array, .Value, 0}}},
-	{"\xe6\x97", 1, 1, core.Fault{1, .Bad_Char, 0}, {{1, 0, .Array, .Value, 0}}},
-	{"a,b", 100, 3, nil, {{3, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
-	{"", 0, 0, nil, {{0, 0, .Array, .Value, 0}, {0, 0, .End, .Value, 0}}},
-	{"\r\n\n", 0, 3, nil, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
-	{"\xef\xbb\xbf", 0, 3, nil, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
-	{"a,b\n1,2,3\n", 0, 4, core.Fault{4, .Bad_Structure, u8(dsv.Detail.Field_Count)}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
-	{"a,b\n1,2,3", 0, 4, core.Fault{4, .Bad_Structure, u8(dsv.Detail.Field_Count)}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
+	{"junk\na,b\n1,2\n", 5, 13, {}, {{5, 0, .Array, .Value, 0}, {9, 0, .Map, .Value, 0}, {5, 1, .Plain, .Key, 0}, {9, 1, .Plain, .Value, 0}, {7, 1, .Plain, .Key, 0}, {11, 1, .Plain, .Value, 0}, {12, 1, .End, .Value, 0}, {13, 0, .End, .Value, 0}}},
+	{"\xc3\xa9", 1, 1, {1, .Bad_Char, .None}, {{1, 0, .Array, .Value, 0}}},
+	{"\xf0\x9f,\x98\x80", 2, 3, {3, .Bad_Char, .None}, {{2, 0, .Array, .Value, 0}}},
+	{"\xe6\x97", 1, 1, {1, .Bad_Char, .None}, {{1, 0, .Array, .Value, 0}}},
+	{"a,b", 100, 3, {}, {{3, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
+	{"", 0, 0, {}, {{0, 0, .Array, .Value, 0}, {0, 0, .End, .Value, 0}}},
+	{"\r\n\n", 0, 3, {}, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
+	{"\xef\xbb\xbf", 0, 3, {}, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
+	{"a,b\n1,2,3\n", 0, 4, {4, .Bad_Structure, .Field_Count}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
+	{"a,b\n1,2,3", 0, 4, {4, .Bad_Structure, .Field_Count}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
 }
 
 @(test)
@@ -185,9 +193,26 @@ walked_tokens :: proc(t: ^testing.T) {
 	for c in WALKED {
 		log^ = {}
 		hi, fault := walk(transmute([]u8)c.text, false, false, log, &core.Hook_Regs{}, log_hook, c.lo)
-		testing.expectf(t, hi == c.hi && fault == c.fault, "%q from %d: %d %v, want %d %v", c.text, c.lo, hi, fault, c.hi, c.fault)
+		want: Maybe(core.Fault)
+		if c.fault.kind != nil {
+			want = core.Fault{c.fault.at, &dsv.RULES, c.fault.kind, u8(c.fault.detail)}
+		}
+		testing.expectf(t, hi == c.hi && fault == want, "%q from %d: %d %v, want %d %v", c.text, c.lo, hi, fault, c.hi, want)
 		testing.expectf(t, slice_eq(log.tokens[:log.n], c.tokens), "%q from %d: %v", c.text, c.lo, log.tokens[:log.n])
 	}
+}
+
+// Every value of `Detail` has a rule, named under the format's own name.
+@(test)
+detail_rules :: proc(t: ^testing.T) {
+	testing.expect_value(t, len(dsv.RULES.details), len(dsv.Detail))
+	b := strings.builder_make(context.temp_allocator)
+	f := core.Fault{4, &dsv.RULES, .Bad_Structure, u8(dsv.Detail.Field_Count)}
+	core.write_code(strings.to_writer(&b), f)
+	testing.expect_value(t, strings.to_string(b), "dsv.field_count")
+	strings.builder_reset(&b)
+	core.render(strings.to_writer(&b), transmute([]u8)string("a,b\n1,2,3\n"), f)
+	testing.expect_value(t, strings.to_string(b), "2:1: Record has the wrong number of fields")
 }
 
 // Whether a token's span holds what its kind says: a cell holds no line end outside quotes and is quoted where its

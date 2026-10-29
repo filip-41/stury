@@ -76,7 +76,7 @@ expect_fault :: proc(t: ^testing.T, c: Case, got: Maybe(core.Fault), shift := 0,
 		return testing.expectf(t, got == nil, "%q shifted %d: %v, want none", c.text, shift, got, loc = loc)
 	}
 	detail := u8(dsv.Detail.Field_Count) if c.kind == .Bad_Structure else 0
-	want := core.Fault{c.offset + u64(shift), c.kind, detail}
+	want := core.Fault{c.offset + u64(shift), &dsv.RULES, c.kind, detail}
 	return testing.expectf(t, got == want, "%q shifted %d: %v, want %v", c.text, shift, got, want, loc = loc)
 }
 

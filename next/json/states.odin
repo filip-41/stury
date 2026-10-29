@@ -52,7 +52,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		}
 		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Map:
-		if d >> 1 >= MAX_DEPTH {
+		if d >> 1 >= w.depth {
 			return fault(w, hs, p, .Too_Deep)
 		}
 		w.stack[d >> 1] = u8(d & 1)
@@ -65,7 +65,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		}
 		return #must_tail st_open(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, on)
 	case .Array:
-		if d >> 1 >= MAX_DEPTH {
+		if d >> 1 >= w.depth {
 			return fault(w, hs, p, .Too_Deep)
 		}
 		w.stack[d >> 1] = u8(d & 1)
@@ -296,7 +296,7 @@ st_open_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 	hs := core.Hook_Regs{s0, s1, s2}
 	p, d := p, d
 	for {
-		if d >> 1 >= MAX_DEPTH {
+		if d >> 1 >= w.depth {
 			return fault(w, hs, p, .Too_Deep)
 		}
 		w.stack[d >> 1] = u8(d & 1)
@@ -465,7 +465,7 @@ st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 		}
 		return #must_tail st_after(w.base[r >> 16:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
-	if d >> 1 >= MAX_DEPTH {
+	if d >> 1 >= w.depth {
 		return fault(w, hs, q, .Too_Deep)
 	}
 	w.stack[d >> 1] = u8(d & 1) | PASS_END

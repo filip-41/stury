@@ -44,7 +44,7 @@ check :: proc(t: ^testing.T, src: []u8, tsv: bool, log: ^[dynamic]core.Token) ->
 	opts := cur.Read_Opts{dialect = cur.TSV} if tsv else {}
 	want, refused := cur.validate(src, opts).?
 	got, bad := (dsv.validate(src, .Tsv) if tsv else dsv.validate(src, .Csv)).?
-	same := refused == bad && (!bad || fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.offset && want.detail == got.detail)
+	same := refused == bad && (!bad || fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.at && want.detail == got.detail)
 	if !testing.expectf(t, same, "%q: %v, current tree %v", src, got, want) {
 		return false
 	}

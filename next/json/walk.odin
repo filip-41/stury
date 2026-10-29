@@ -4,10 +4,12 @@
 package json
 
 import "base:intrinsics"
+import "base:runtime"
 import core "../core"
 import kernel "../core/kernel"
 
-// The deepest nesting a text may have. The open bracket past it is `Too_Deep` at that bracket.
+// The deepest nesting a text may have unless `Options.max_depth` says otherwise. The open bracket past the limit is
+// `Too_Deep` at that bracket.
 MAX_DEPTH :: 1024
 
 // The grammar a text follows, at compile time, so a build carries only the specs it names.
@@ -15,8 +17,12 @@ Spec :: enum u8 {
 	Strict, // RFC 8259
 }
 
-// What a walk takes at run time. Strict JSON needs nothing.
-Options :: struct {}
+// What a walk takes at run time. The zero value is the default.
+Options :: struct {
+	// The deepest nesting a text may have, 0 for `MAX_DEPTH`. Up to `MAX_DEPTH` the walk keeps its depth stack on its
+	// own stack, and past it takes one byte per level from the default heap.
+	max_depth: u32,
+}
 
 // JSON's rules within a `core.Fault_Kind`, in `core.Fault.detail`.
 Detail :: enum u8 {
@@ -24,28 +30,44 @@ Detail :: enum u8 {
 	Literal, // `Bad_Char`: a byte breaking `true`, `false` or `null`
 }
 
-// A text that holds one document: one leading BOM, the document, then only whitespace.
+// JSON's rules, per value of `Detail`, which every fault the walk returns points to.
+@(rodata)
+RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}}}
+
+// A text that holds one document (RFC 8259): one leading BOM, the document, then only whitespace.
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
 	p := raw_data(src)
+	end := p[len(src):]
 	h: No_Hooks
 	regs: core.Hook_Regs
-	r := walk_document(src, core.text_start(src, 0), S, &h, &regs, no_hook)
+	r := walk_document(src, skip_ws(p[core.text_start(src, 0):], end), S, opts, &h, &regs, no_hook)
 	if r & 0xff != 0 {
 		return fault_of(r)
 	}
-	end := p[len(src):]
 	q := skip_ws(p[r >> 16:], end)
 	if q != end {
-		return core.Fault{u64(intrinsics.ptr_sub(q, p)), .Trailing, 0}
+		return fault_of(fault_at(u64(intrinsics.ptr_sub(q, p)), .Trailing))
 	}
 	return nil
 }
 
-// One document read from `lo`, past one BOM at the text's first byte and the whitespace before the document: one past
-// its last byte, or the fault. When a hook stops the walk, `hi` is one past the token it stopped on. `regs` goes to
-// the first token and holds what the hook returned last.
+// One document read from `lo`: one past its last byte, or the fault. One BOM at the text's first byte, whitespace and
+// the record separator 0x1E are passed over before the document, so a stream of documents, whether NDJSON, RFC 7464
+// or jq's input, is a loop of walks each from where the last one ended. A text with nothing but those left, and a `lo`
+// past the text's end, holds no document: the walk makes no token and returns the text's end with no fault. When a
+// hook stops the walk, `hi` is one past the token it stopped on. `regs` goes to the first token and holds what the hook
+// returned last.
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
-	r := walk_document(src, core.text_start(src, lo), S, h, regs, on)
+	p := raw_data(src)
+	end := p[len(src):]
+	q := skip_ws(p[core.text_start(src, min(lo, u64(len(src)))):], end)
+	for q < end && q[0] == 0x1e {
+		q = skip_ws(q[1:], end)
+	}
+	if q == end {
+		return u64(len(src)), nil
+	}
+	r := walk_document(src, q, S, opts, h, regs, on)
 	return r >> 16, fault_of(r)
 }
 
@@ -73,18 +95,19 @@ fault_of :: #force_inline proc "contextless" (r: u64) -> Maybe(core.Fault) {
 	if r & 0xff == 0 {
 		return nil
 	}
-	return core.Fault{r >> 16, core.Fault_Kind(r & 0xff), u8(r >> 8)}
+	return core.Fault{at = r >> 16, rules = &RULES, kind = core.Fault_Kind(r & 0xff), detail = u8(r >> 8)}
 }
 
 // What the states share beyond their registers. `stack[i]` has bit 0 set when the container at depth `i` is an
-// object, and is written by the open that pushes past it (`MAX_DEPTH` slots), so the walk never reads a slot it did
-// not write. `tier` picks the string reader built for this CPU.
+// object, and is written by the open that pushes past it (`depth` slots), so the walk never reads a slot it did not
+// write. `tier` picks the string reader built for this CPU.
 @(private)
 Walk :: struct($S: Spec, $H: typeid) {
 	base:   [^]u8,
 	hooks:  ^H,
 	stack:  [^]u8,
 	regs:   ^core.Hook_Regs,
+	depth:  u64,
 	tier:   kernel.Tier,
 	// The block of the string being read where its first backslash is, for `string_escaped` to read on from.
 	resume: [^]u8,
@@ -95,13 +118,31 @@ Walk :: struct($S: Spec, $H: typeid) {
 @(private)
 PASS_END :: 4
 
+// The document from `p`, where its first byte must stand.
 @(private)
-walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	if opts.max_depth > MAX_DEPTH {
+		return walk_deep(src, p, S, u64(opts.max_depth), h, regs, on)
+	}
 	// `= ---` on an array leaves it unwritten (a struct would be zeroed), and every slot is written before it is read.
 	stack: [MAX_DEPTH]u8 = ---
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, kernel.tier(), nil}
-	end := w.base[len(src):]
-	return st_value(skip_ws(w.base[lo:], end), end, 0, 0, &w, regs.a, regs.b, regs.c, on)
+	depth := u64(opts.max_depth) if opts.max_depth != 0 else MAX_DEPTH
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), nil}
+	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
+}
+
+// The document from `p` with a depth stack past `MAX_DEPTH`, from the default heap and freed before it returns, which
+// keeps the walk callable from a hook.
+@(private, cold)
+walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, depth: u64, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	context = runtime.default_context()
+	stack, err := make([]u8, depth)
+	if err != nil {
+		return fault_at(0, .No_Memory)
+	}
+	defer delete(stack)
+	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), nil}
+	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
 // The features every state is built with: one build of the states for each target, on x86-64 for its floor tier.
@@ -122,7 +163,7 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d, ind: u64, $open: bool) -> u64 {
 	h: No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.tier, nil}
+	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, nil}
 	when open {
 		return st_open(p, end, d, ind, &v, 0, 0, 0, no_hook)
 	} else {

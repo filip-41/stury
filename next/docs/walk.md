@@ -12,7 +12,8 @@ change does not undo one by accident. `kernel.md` covers the vector code both wa
 
 | File | Holds |
 |---|---|
-| `core/walk.odin` | `Kind`, `Role`, `Token`, `Action`, `Hook_Regs`, `Fault_Kind`, `Fault`, `text_start` |
+| `core/walk.odin` | `Kind`, `Role`, `Token`, `Action`, `Hook_Regs`, `text_start` |
+| `core/error.odin` | `Fault_Kind`, `Fault`, `Rules`, `Rule`, the codes, line and column, the renderer |
 | `json/walk.odin` | JSON's interface, the result word, `Walk`, `walk_document`, the hook calls |
 | `json/states.odin` | the grammar states, one procedure each, and the value classes |
 | `json/strings.odin` | the string readers, from a two-load probe to a block reader per x86 tier |
@@ -25,12 +26,13 @@ change does not undo one by accident. `kernel.md` covers the vector code both wa
 
 ## The interface
 
-Each format package exposes five names of its walk and nothing else. The rest is `@(private)`.
+Each format package exposes six names of its walk and nothing else. The rest is `@(private)`.
 
 ```odin
 Spec     :: enum u8 { ... }    // the grammar, at compile time
 Options  :: struct { ... }     // what a walk takes at run time
 Detail   :: enum u8 { None, ... }   // the format's own rules, in `Fault.detail`
+RULES    : core.Rules             // each rule's code and message, in rodata
 walk     :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault)
 ```
@@ -43,11 +45,17 @@ for the walk's tokens reads it.
   whether a CSV text has a header, goes in `Options`.
 - `$S` has no default. A caller names the grammar it reads.
 - A walk from byte 0 passes over one BOM, through `core.text_start`, as `validate` does. From any other byte a BOM
-  is a bad byte, and a `lo` past the text's end reads an empty text.
-- `hi` is one past the last byte read, or the fault's offset. When a hook stops the walk, `hi` is one past the token
+  is a bad byte.
+- `hi` is one past the last byte read, or the fault's byte. When a hook stops the walk, `hi` is one past the token
   it stopped on and there is no fault.
+- A walk reads one document, and `validate` judges a text that holds one. No format takes a framing option: where a
+  document ends is the document's own business. A JSON walk passes over whitespace and the record separator 0x1E
+  before its document, so a stream of documents (NDJSON, RFC 7464, jq's input) is a loop of walks, each from where
+  the last one ended. A JSON walk with nothing but those left, or from past the text's end, makes no token and
+  returns the text's end with no fault. A dsv text is one table, so its walk reads to the text's end, and from past
+  the end it reads an empty table.
 - The walks are contextless, so a hook can call a walk. A walk that needs scratch takes it from the default heap
-  and frees it before it returns. `validate` allocates nothing.
+  and frees it before it returns. `validate` allocates nothing unless `max_depth` is past `MAX_DEPTH`.
 
 ### Tokens
 
@@ -86,6 +94,24 @@ through every state and pass, where a `(u64, Maybe(Fault))` would return through
 fault says a hook stopped the walk. It shares its value with a member of `Detail`, which is safe because a detail is
 read only beside a fault kind.
 
+### Faults
+
+```odin
+Fault :: struct { at: u64, rules: ^Rules, kind: Fault_Kind, detail: u8 }
+```
+
+`kind` is the same for every format. `detail` is the format's own rule within it, numbered by each format on its own,
+0 for none. `at` is the byte the kind names, and nothing else: a count or a limit is not written into it. A kind in
+`AT_NO_BYTE`, such as `No_Memory`, names no byte, and its `at` says nothing.
+
+`rules` points to the format's `RULES` in rodata, which holds per detail a stable code and a message. Core names a
+fault (`write_code`: `json.literal`, `dsv.field_count`, or the kind's code, `json.bad_char`) and words it (`render`:
+`line:col: message`) from that table, with no call into the format, so a format written outside stury adds its own
+table and renders the same way. A code stays the same from release to release, and a message may change.
+
+`locate` gives a byte's line and column, both from 1, counting bytes. It counts lines from where a `Lines` count left
+off, so the faults of one text met in offset order cost one pass over it.
+
 ## The JSON walk
 
 The JSON walk is a state machine. Each grammar state is a procedure, `st_value`, `st_key`, `st_after`, `st_close` and
@@ -114,8 +140,10 @@ A tail call passes them in the same registers it received them in, so moving fro
 - `d` carries the container's kind. Whether a close bracket is `]` or `}` and whether the next member starts with a
   key are bit tests on a register. `]` with bit 5 set is `}`, so `p[0] == ']' | (d & 1) << 5` tests the right one.
 - The depth stack holds only what a register cannot. An open bracket writes the kind of the container it leaves
-  into that depth's slot, and a close reads it back into `d`. The stack is `MAX_DEPTH` bytes in `Walk`, left
-  unwritten (`= ---` on an array, where a struct would be zeroed), and no slot is read before it is written.
+  into that depth's slot, and a close reads it back into `d`. The stack is `MAX_DEPTH` bytes on the walk's stack, left
+  unwritten (`= ---` on an array, where a struct would be zeroed), and no slot is read before it is written. An
+  `Options.max_depth` past `MAX_DEPTH` takes its stack from the default heap instead, in `walk_deep`, kept out of line
+  so the walk's entry stays as it was. The limit an open compares with is `w.depth`.
 - Every state is `#force_no_inline`. A state inlined into another makes one procedure that saves the union of their
   registers on entry. Kept apart, each state's entry is as cheap as its own work.
 

@@ -30,7 +30,7 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 			return true
 		}
 		compared^ += 1
-		same := refused == bad && (!bad || fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.offset && want.detail == got.detail)
+		same := refused == bad && (!bad || fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.at && want.detail == got.detail)
 		return testing.expectf(t, same, "%q: %v, current tree %v", src, got, want)
 	}
 	suite := #load_directory("../conformance/JSONTestSuite/test_parsing")

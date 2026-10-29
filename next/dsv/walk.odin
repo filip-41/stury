@@ -31,6 +31,10 @@ Detail :: enum u8 {
 	Field_Count, // `Bad_Structure`: a record with more or fewer cells than the first, at its first byte
 }
 
+// A delimited text's rules, per value of `Detail`, which every fault the walk returns points to.
+@(rodata)
+RULES := core.Rules{"dsv", {{}, {"field_count", "Record has the wrong number of fields"}}}
+
 // One text read from `lo`, past one BOM at the text's first byte, with a hook: one past its last byte, or the fault.
 // When a hook stops the walk, `hi` is one past the token it stopped on. A `lo` past the text's end reads an empty
 // text. The tokens are an `Array` for the text, then per record a `Map` (an `Array` with no header) holding, per
@@ -41,7 +45,8 @@ Detail :: enum u8 {
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
 	// One allocation per walk, of one 16-byte token per header cell, so that no cell of a record looks its column's
 	// header cell up again. It is scratch freed before the walk returns, so it comes from the default heap, which
-	// keeps the walk callable from a hook. `validate` allocates nothing.
+	// keeps the walk callable from a hook. When it cannot be had, the walk is `No_Memory` before it reads a byte.
+	// `validate` allocates nothing.
 	context = runtime.default_context()
 	from := min(lo, u64(len(src)))
 	keys: []core.Token
@@ -49,7 +54,7 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H,
 		err: runtime.Allocator_Error
 		keys, err = make([]core.Token, header_cells(src, int(core.text_start(src, from)), S))
 		if err != nil {
-			panic("dsv.walk: no memory for the header's keys")
+			return 0, fault_of(fault_at(0, .No_Memory))
 		}
 	}
 	defer delete(keys)
@@ -148,7 +153,7 @@ fault_of :: #force_inline proc "contextless" (r: u64) -> Maybe(core.Fault) {
 	if r & 0xff == 0 {
 		return nil
 	}
-	return core.Fault{offset = r >> 16, kind = core.Fault_Kind(r & 0xff), detail = u8(r >> 8)}
+	return core.Fault{at = r >> 16, rules = &RULES, kind = core.Fault_Kind(r & 0xff), detail = u8(r >> 8)}
 }
 
 // Hands one token to the hook and takes its registers back. The token is built here, from the words the call sites
