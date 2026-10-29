@@ -33,7 +33,7 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 			return true
 		}
 		tally.compared += 1
-		same := refused == bad && (!bad || fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.at && want.detail == got.detail)
+		same := refused == bad && (!bad || fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.at && detail_agrees(want, got))
 		when S == .Json5 {
 			if !same {
 				if part := json5_parts(src, got if bad else {}, want if refused else {}); part != .None {
@@ -86,6 +86,14 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 	}
 	fmt.printfln("seed %d: %d compared, %d skipped for digit caps, JSON5 parted by design %v", SEED, tally.compared, tally.capped, tally.parted)
+}
+
+// The walk's own `Bad_Char` details have no member in the current tree, which carries none.
+detail_agrees :: proc(want: cur.Error, got: core.Fault) -> bool {
+	if want.detail == got.detail {
+		return true
+	}
+	return want.detail == 0 && got.kind == .Bad_Char && (got.detail == u8(json.Detail.Identifier) || got.detail == u8(json.Detail.Colon))
 }
 
 Tally :: struct {

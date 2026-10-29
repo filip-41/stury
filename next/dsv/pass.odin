@@ -93,6 +93,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		seps, lfs: u64
 		fault := -1
 		kind := core.Fault_Kind.Bad_Char
+		detail := Detail.None
 		when S == .Csv {
 			m := kernel.pack_n([4]kernel.Block {
 				kernel.eq(b, '"'),
@@ -118,7 +119,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				w.cr = crm >> 63
 			} else {
 				w.quoted = true
-				instr, closing, cr, bad: u64
+				instr, closing, cr, bad, bare: u64
 				for {
 					// The bytes inside quoted fields, from the quotes: an opening quote flips the run on, a closing
 					// off. Once a text has held a quote, every block takes this way: a branch per block on its own
@@ -132,7 +133,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 					// A quote opens a field only at its first byte, and a closing quote may be followed only by a
 					// quote that doubles it, the delimiter, LF, CR, or the end of the text.
 					after := closing << 1 | w.close
-					bare := open & ~(seps << 1 | w.start | after)
+					bare = open & ~(seps << 1 | w.start | after)
 					bad = bare | after & ~(q | d | nl | crm | ~valid)
 					// A CR is judged with the byte after it: the one in bit 63 is the next block's.
 					bad |= cr & ~(nl >> 1) & ~(u64(1) << 63)
@@ -147,6 +148,9 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 					fault = pos - 1
 				} else if bad != 0 {
 					fault = pos + int(intrinsics.count_trailing_zeros(bad))
+					if bare & (bad & -bad) != 0 {
+						detail = .Bare_Quote
+					}
 				}
 				// All ones when the block ended inside a quoted field: the mask the next block's run starts from.
 				w.in_quote = u64(0) - (instr >> 63)
@@ -224,7 +228,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		}
 
 		if fault >= 0 {
-			return fault_at(fault, kind)
+			return fault_at(fault, kind, detail)
 		}
 		pos += 64
 	}

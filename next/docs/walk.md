@@ -227,7 +227,8 @@ token, as some compact printers write after a comma, is taken there too, after t
 indented text pays for it.
 
 `st_key` takes the colon after a key on a fast path when it is flush against its value or followed by one space, with
-or without one space before it, and `st_colon` takes every other spelling.
+or without one space before it, and `st_colon` takes every other spelling. A byte where the colon must stand is
+`Bad_Char` with `Colon`.
 
 ### Runs
 
@@ -357,8 +358,10 @@ value. Without a header a record is an `Array` of `Plain` values. A record's `En
   cell reads its keys with no bounds test (`put_key_n`).
 - The record's last cell and its `End` are the outer loop's work, once per record.
 - A record's state lives in locals for the block. `Pass` is one struct, and a field read per cell is a load per cell.
-- A cell past the header's last makes no token. Its record is wider than the header and faults at its line end, also
-  under `Ragged`, which takes a record narrower than the first, and with no header any width.
+- A record wider than the first makes its `Map` and its first `width` cells, then faults at the delimiter that opens
+  the next cell, also under `Ragged`, which takes a record narrower than the first, and with no header any width. A
+  narrower record makes its `Map` and all its cells, then faults at its line end's first byte: the CR of a CRLF, else
+  the LF, or the text's end.
 
 ### Tiers
 

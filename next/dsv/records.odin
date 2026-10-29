@@ -108,6 +108,54 @@ put_cell :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h
 	return put_value(h, on, hs, base, field_lo, hi, S)
 }
 
+// The tokens of a record wider than the width, for a text with a header: its first `width` cells, then the fault at
+// the delimiter that opens the cell past them. Cold, since a text of the right width never takes it.
+@(private, cold)
+read_wide_keys :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, cells, field_lo, width: int, $S: Spec) -> u64 {
+	cells, field_lo := cells, field_lo
+	dm, key := d, cells
+	for dm != 0 {
+		kk := intrinsics.count_trailing_zeros(dm)
+		at := pos + int(kk)
+		dm &= dm - 1
+		if k, klo, kn := put_key_n(h, on, hs, keys, key); k == .Stop {
+			return stopped(klo, kn)
+		} else if k == .Next {
+			if a, lo, n := put_value(h, on, hs, base, field_lo, at, S); a == .Stop {
+				return stopped(lo, n)
+			}
+		}
+		key += 1
+		field_lo = at + 1
+		cells += 1
+		if cells == width {
+			return fault_at(at, .Bad_Structure, .Field_Count)
+		}
+	}
+	unreachable()
+}
+
+// `read_wide_keys` for a text with no header: every cell is one `Plain` value.
+@(private, cold)
+read_wide_values :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, pos: int, d: u64, cells, field_lo, width: int, $S: Spec) -> u64 {
+	cells, field_lo := cells, field_lo
+	dm := d
+	for dm != 0 {
+		kk := intrinsics.count_trailing_zeros(dm)
+		at := pos + int(kk)
+		dm &= dm - 1
+		if a, lo, n := put_value(h, on, hs, base, field_lo, at, S); a == .Stop {
+			return stopped(lo, n)
+		}
+		field_lo = at + 1
+		cells += 1
+		if cells == width {
+			return fault_at(at, .Bad_Structure, .Field_Count)
+		}
+	}
+	unreachable()
+}
+
 // The tokens a block's separators end, for `walk`. The separators before the block's next LF are the open record's
 // delimiter cells, and they run through a loop of their own: it holds no LF test, no CR, no width and no `End`, and
 // no test of the record's state, which is chosen once for the run. The record's last cell and its `End` are the
@@ -161,12 +209,18 @@ read_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, 
 		} else if muted {
 			// A hook passed this record over: its cells are still counted, and its bytes judged, but make no tokens.
 			if d != 0 {
+				if width != 0 && !(.Ragged in w.tolerate && no_header) && cells + int(intrinsics.count_ones(d)) >= width {
+					return fault_at(scan_record(base[:w.n], rec_lo, width, S).fault_at, .Bad_Structure, .Field_Count), true
+				}
 				cells += int(intrinsics.count_ones(d))
 				field_lo = pos + 64 - int(intrinsics.count_leading_zeros(d))
 			}
 		} else if no_header {
 			// No header: every cell is one `Plain`, and no key is named.
 			dm := d
+			if width != 0 && .Ragged not_in w.tolerate && cells + int(intrinsics.count_ones(d)) >= width {
+				return read_wide_values(h, on, hs, base, pos, d, cells, field_lo, width, S), true
+			}
 			for dm != 0 {
 				kk := intrinsics.count_trailing_zeros(dm)
 				at := pos + int(kk)
@@ -177,13 +231,8 @@ read_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, 
 				cells += 1
 				field_lo = at + 1
 			}
-		} else if cells + int(intrinsics.count_ones(d)) > len(keys) {
-			// A record wider than the header, so wider than the keys: it faults at its own line end, so its cells
-			// are counted and its bytes judged, and they make no tokens.
-			if d != 0 {
-				cells += int(intrinsics.count_ones(d))
-				field_lo = pos + 64 - int(intrinsics.count_leading_zeros(d))
-			}
+		} else if cells + int(intrinsics.count_ones(d)) >= width {
+			return read_wide_keys(h, on, hs, base, keys, pos, d, cells, field_lo, width, S), true
 		} else {
 			// A data record's run of cells, each naming its column's header cell: one key per cell, proven once.
 			// The run is counted once, so a hook that reads no key keeps no index per cell.
@@ -249,7 +298,10 @@ read_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, 
 		if width == 0 {
 			width = cells
 		} else if cells != width && !ragged(w, cells, width) {
-			return fault_at(rec_lo, .Bad_Structure, .Field_Count), true
+			if cells > width {
+				return fault_at(scan_record(base[:w.n], rec_lo, width, S).fault_at, .Bad_Structure, .Field_Count), true
+			}
+			return fault_at(hi, .Bad_Structure, .Field_Count), true
 		}
 		if !muted && !header {
 			if emit(h, on, hs, u64(hi), u32(at + 1 - hi), .End, .Value, 0) == .Stop {
@@ -272,11 +324,10 @@ read_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, 
 // bytes at the text's end.
 @(private)
 read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, hs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (r: u64, done: bool) {
-	// A trailing CR is a fault already reported, so this record holds a cell.
-	if w.width == 0 {
-		w.width = w.cells + 1
-	} else if w.cells + 1 != w.width && !ragged(w, w.cells + 1, w.width) {
-		return fault_at(w.rec_lo, .Bad_Structure, .Field_Count), true
+	// A trailing CR is a fault already reported, so this record holds a cell. A wide last record already stopped at
+	// the delimiter past its last kept cell. A short one makes its tokens, then the walk faults at the text's end.
+	if !w.in_header && w.width != 0 && w.cells + 1 > w.width && !ragged(w, w.cells + 1, w.width) {
+		return fault_at(scan_record(base[:w.n], w.rec_lo, w.width, S).fault_at, .Bad_Structure, .Field_Count), true
 	}
 	hi := w.n
 	if w.in_header {
@@ -285,25 +336,30 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^
 		}
 		return 0, false
 	}
-	if w.muted {
-		return 0, false
-	}
-	if !w.open {
+	if !w.muted && !w.open {
 		w.open = true
 		switch emit(w.h, on, hs, u64(w.rec_lo), 0, w.no_header ? .Array : .Map, .Value, 0) {
 		case .Next:
 		case .Skip:
 			w.muted = true
-			return 0, false
 		case .Stop:
 			return stopped(u64(w.rec_lo), 0), true
 		}
 	}
-	if a, lo, n := put_cell(w.h, on, hs, base, w.keys, w.no_header, w.cells, w.field_lo, hi, S); a == .Stop {
-		return stopped(lo, n), true
+	if !w.muted {
+		if a, lo, n := put_cell(w.h, on, hs, base, w.keys, w.no_header, w.cells, w.field_lo, hi, S); a == .Stop {
+			return stopped(lo, n), true
+		}
 	}
-	if emit(w.h, on, hs, u64(hi), 0, .End, .Value, 0) == .Stop {
-		return stopped(u64(hi), 0), true
+	if w.width == 0 {
+		w.width = w.cells + 1
+	} else if w.cells + 1 != w.width && !ragged(w, w.cells + 1, w.width) {
+		return fault_at(hi, .Bad_Structure, .Field_Count), true
+	}
+	if !w.muted {
+		if emit(w.h, on, hs, u64(hi), 0, .End, .Value, 0) == .Stop {
+			return stopped(u64(hi), 0), true
+		}
 	}
 	return 0, false
 }

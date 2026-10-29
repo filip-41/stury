@@ -87,20 +87,22 @@ Lines :: struct {
 
 // The line and column of byte `byte_at` of `src`, both from 1. A line ends at LF, so CR LF is one line end and a lone CR
 // is a byte of its line. The column counts bytes. `byte_at` may be `len(src)`. A byte before the count's starts it again
-// from the text's first byte.
-locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines) -> (line, col: u64) {
+// from the text's first byte. A nil `lines` counts this fault alone, from the text's first byte.
+locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (line, col: u64) {
 	at := min(byte_at, u64(len(src)))
-	if at < lines.at {
-		lines^ = {}
+	fresh: Lines
+	l := lines if lines != nil else &fresh
+	if at < l.at {
+		l^ = {}
 	}
-	for i in lines.at ..< at {
+	for i in l.at ..< at {
 		if src[i] == '\n' {
-			lines.line += 1
-			lines.line_lo = i + 1
+			l.line += 1
+			l.line_lo = i + 1
 		}
 	}
-	lines.at = at
-	return lines.line + 1, at - lines.line_lo + 1
+	l.at = at
+	return l.line + 1, at - l.line_lo + 1
 }
 
 // Writes `line:col: message` for a fault in `src`, or the message alone for a kind at no byte. `lines` is the count

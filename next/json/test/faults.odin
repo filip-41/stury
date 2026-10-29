@@ -47,8 +47,6 @@ CASES := []Case {
 	{"[1 2]", .Bad_Char, 3},
 	{"[1}", .Bad_Char, 2},
 	{"[}", .Bad_Char, 1},
-	{"{1:2}", .Bad_Char, 1},
-	{"{\"a\" 1}", .Bad_Char, 5},
 	{"\"a\x01\"", .Bad_Char, 2},
 	{"\"\xff\"", .Bad_Char, 1},
 	{"\"\xc3\x28\"", .Bad_Char, 1},
@@ -77,7 +75,6 @@ CASES := []Case {
 	{"[\"\xff\"]", .Bad_Char, 2},
 	{"[\"\\ud800\"]", .Bad_Escape, 2},
 	{"[1,]", .Bad_Char, 3},
-	{"{\"a\":1,}", .Bad_Char, 7},
 	{"[01]", .Bad_Number, 2},
 	{"[1.]", .Bad_Number, 3},
 	{"\v[1]", .Bad_Char, 0},
@@ -88,9 +85,7 @@ CASES := []Case {
 	{"[1, 2, 01, 3]", .Bad_Number, 8},
 	{"[1, 2,  x]", .Bad_Char, 8},
 	{"[1, 2, ]", .Bad_Char, 7},
-	{"{\"a\": 1, \"b\" : 2, \"c\":3,}", .Bad_Char, 24},
 	{"{\"a\": 1, \"b\": x}", .Bad_Char, 14},
-	{"{\"a\": 1, b: 2}", .Bad_Char, 9},
 }
 
 // The faults with `Detail.Literal`.
@@ -127,9 +122,7 @@ JSONC_CASES := []Case {
 	{"[/*\t\r\n*/ //\t\r1]", nil, 0},
 	{"[,]", .Bad_Char, 1},
 	{"[1,,]", .Bad_Char, 3},
-	{"{,}", .Bad_Char, 1},
 	{"[1, /* a */ ,]", .Bad_Char, 12},
-	{"{\"a\": 1, /* b */ 2}", .Bad_Char, 17},
 	{"1 // a\n2", .Trailing, 7},
 	{"1 /* a */ 2", .Trailing, 10},
 }
@@ -181,7 +174,6 @@ JSON5_CASES := []Case {
 	{"{a\\u0020b: 1}", .Bad_Escape, 2},
 	{"{\\u0031: 1}", .Bad_Escape, 1},
 	{"{a\\u00: 1}", .Bad_Escape, 6},
-	{"{a b: 1}", .Bad_Char, 3},
 	{"{a\xff: 1}", .Bad_Char, 2},
 	{"[1 \xc2]", .Bad_Char, 3},
 	{"\xa0", .Bad_Char, 0},
@@ -202,11 +194,46 @@ JSON5_KEY_CASES := []Case {
 // The refusals JSON5_CASES has under `.Jsonc`.
 @(rodata)
 JSON5_IN_JSONC := []Case {
-	{"{a: 1}", .Bad_Char, 1},
 	{"[0x1]", .Bad_Char, 2},
 	{"'a'", .Bad_Char, 0},
 	{"[\v1]", .Bad_Char, 1},
 	{"NaN", .Bad_Char, 0},
+}
+
+// A byte where an object's key must start.
+@(rodata)
+KEY_CASES := []Case {
+	{"{1:2}", .Bad_Char, 1},
+	{"{\"a\": 1, b: 2}", .Bad_Char, 9},
+	{"{\"a\": 1, \"b\" : 2, \"c\":3,}", .Bad_Char, 24},
+	{"{\"a\":1,}", .Bad_Char, 7},
+}
+
+@(rodata)
+KEY_CASES_JSONC := []Case {
+	{"{,}", .Bad_Char, 1},
+	{"{\"a\": 1, /* b */ 2}", .Bad_Char, 17},
+	{"{a: 1}", .Bad_Char, 1},
+}
+
+// A byte where a member's colon must stand.
+@(rodata)
+COLON_CASES := []Case {
+	{"{\"a\" 1}", .Bad_Char, 5},
+	{"{\"a\" ,1}", .Bad_Char, 5},
+	{"{\"a\" [1]}", .Bad_Char, 5},
+}
+
+@(rodata)
+COLON_CASES_JSONC := []Case {
+	{"{\"a\" 1}", .Bad_Char, 5},
+	{"{\"a\" /* c */ 1}", .Bad_Char, 13},
+}
+
+@(rodata)
+COLON_CASES_JSON5 := []Case {
+	{"{a b: 1}", .Bad_Char, 3},
+	{"{a /* c */ 1}", .Bad_Char, 11},
 }
 
 @(test)
@@ -231,6 +258,51 @@ faults_at_their_byte :: proc(t: ^testing.T) {
 	}
 	for c in JSON5_IN_JSONC {
 		expect_fault(t, c, .Jsonc, .None)
+	}
+	for c in KEY_CASES {
+		expect_fault(t, c, .Json, .Identifier)
+	}
+	for c in KEY_CASES_JSONC {
+		expect_fault(t, c, .Jsonc, .Identifier)
+	}
+	for c in COLON_CASES {
+		expect_fault(t, c, .Json, .Colon)
+	}
+	for c in COLON_CASES_JSONC {
+		expect_fault(t, c, .Jsonc, .Colon)
+	}
+	for c in COLON_CASES_JSON5 {
+		expect_fault(t, c, .Json5, .Colon)
+	}
+}
+
+// A member skipped after its key still faults at the byte where its colon must stand, with `Colon` from the state
+// that passes the comments around the colon as well.
+@(test)
+colon_detail_after_skip :: proc(t: ^testing.T) {
+	Skipped :: struct {
+		spec: json.Spec,
+		text: string,
+		at:   u64,
+	}
+	for want in ([]Skipped {
+		{.Json, "{\"a\" 1}", 5},
+		{.Jsonc, "{\"a\" 1}", 5},
+		{.Jsonc, "{\"a\" /* c */ 1}", 13},
+		{.Json5, "{a b: 1}", 3},
+	}) {
+		skip := 1
+		fault: Maybe(core.Fault)
+		switch want.spec {
+		case .Json:
+			_, fault = json.walk(transmute([]u8)want.text, 0, .Json, {}, &skip, &core.Hook_Regs{}, skip_hook)
+		case .Jsonc:
+			_, fault = json.walk(transmute([]u8)want.text, 0, .Jsonc, {}, &skip, &core.Hook_Regs{}, skip_hook)
+		case .Json5:
+			_, fault = json.walk(transmute([]u8)want.text, 0, .Json5, {}, &skip, &core.Hook_Regs{}, skip_hook)
+		}
+		f := core.Fault{want.at, &json.RULES, .Bad_Char, u8(json.Detail.Colon)}
+		testing.expectf(t, fault == f, "%v %q: %v, want %v", want.spec, want.text, fault, f)
 	}
 }
 
@@ -711,6 +783,18 @@ rendered_faults :: proc(t: ^testing.T) {
 	strings.builder_reset(&b)
 	core.write_code(strings.to_writer(&b), core.Fault{0, &json.RULES, .No_Memory, 0})
 	testing.expect_value(t, strings.to_string(b), "json.no_memory")
+	strings.builder_reset(&b)
+	core.write_code(strings.to_writer(&b), core.Fault{5, &json.RULES, .Bad_Char, u8(json.Detail.Colon)})
+	testing.expect_value(t, strings.to_string(b), "json.colon")
+	strings.builder_reset(&b)
+	core.render(strings.to_writer(&b), transmute([]u8)string("{\"a\" 1}"), core.Fault{5, &json.RULES, .Bad_Char, u8(json.Detail.Colon)})
+	testing.expect_value(t, strings.to_string(b), "1:6: Missing colon after key")
+	line, col := core.locate(transmute([]u8)string("a\nb"), 2, nil)
+	testing.expect_value(t, line, u64(2))
+	testing.expect_value(t, col, u64(1))
+	line, col = core.locate(transmute([]u8)string("a\nb"), 1, nil)
+	testing.expect_value(t, line, u64(1))
+	testing.expect_value(t, col, u64(2))
 	// A line ends at its LF, a CR is a byte of its line, and a column counts bytes.
 	Located :: struct {
 		src:  string,

@@ -59,11 +59,12 @@ Detail :: enum u8 {
 	None,
 	Literal, // `Bad_Char`: a byte breaking `true`, `false` or `null`
 	Identifier, // `Bad_Char`: a byte that starts no key, quoted or not, where an object's key must start
+	Colon, // `Bad_Char`: a byte where a member's colon must stand
 }
 
 // JSON's rules, per value of `Detail`, which every fault the walk returns points to.
 @(rodata)
-RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}}}
+RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}}}
 
 // A text that holds one document: one leading BOM, the document, then only whitespace, and comments in a spec that
 // has them.

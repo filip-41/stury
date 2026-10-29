@@ -42,12 +42,13 @@ Tolerance :: enum u8 {
 // The rules of a delimited text within a `core.Fault_Kind`, in `core.Fault.detail`.
 Detail :: enum u8 {
 	None,
-	Field_Count, // `Bad_Structure`: a record with more or fewer cells than the first, at its first byte
+	Field_Count, // `Bad_Structure`: a record wider than the first, at the delimiter past its width, or narrower, at its line end
+	Bare_Quote, // `Bad_Char`: a quote inside an unquoted CSV cell
 }
 
 // A delimited text's rules, per value of `Detail`, which every fault the walk returns points to.
 @(rodata)
-RULES := core.Rules{"dsv", {{}, {"field_count", "Record has the wrong number of fields"}}}
+RULES := core.Rules{"dsv", {{}, {"field_count", "Record has the wrong number of fields"}, {"bare_quote", "Quote in an unquoted cell"}}}
 
 // One text read from `lo`, past one BOM at the text's first byte, with a hook: one past its last byte, or the fault.
 // When a hook stops the walk, `hi` is one past the token it stopped on. A `lo` past the text's end reads an empty
@@ -89,10 +90,65 @@ validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe
 judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options) -> u64 {
 	h: No_Hooks
 	regs: core.Hook_Regs
+	r: u64
 	if u64(len(src)) - lo > u64(max(u32)) {
-		return run(src, lo, S, opts, &h, &regs, no_hook, true, nil)
+		r = run(src, lo, S, opts, &h, &regs, no_hook, true, nil)
+	} else {
+		r = run(src, lo, S, opts, &h, &regs, no_hook, false, nil)
 	}
-	return run(src, lo, S, opts, &h, &regs, no_hook, false, nil)
+	return field_count_fault(src, lo, S, opts, r)
+}
+
+// A width fault's position, which the pass reports at the record's first byte: the delimiter that opens the cell past
+// the width for a wide record, or the line end's first byte for a narrow one. A width fault before a byte fault wins.
+// Only a fault reaches this scan, so nothing here is on the pass's per-block path.
+@(private, cold)
+field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, r: u64) -> u64 {
+	kind := core.Fault_Kind(r & 0xff)
+	if kind == .None {
+		return r
+	}
+	at, detail := r >> 16, u8(r >> 8)
+	end := len(src)
+	pos := int(core.text_start(src, min(lo, u64(end))))
+	skip_empty := proc "contextless" (src: []u8, pos: int) -> int {
+		pos := pos
+		for pos < len(src) {
+			if src[pos] == '\n' {
+				pos += 1
+				continue
+			}
+			if src[pos] == '\r' && pos + 1 < len(src) && src[pos + 1] == '\n' {
+				pos += 2
+				continue
+			}
+			break
+		}
+		return pos
+	}
+	pos = skip_empty(src, pos)
+	if pos >= end {
+		return r
+	}
+	width := header_cells(src, pos, S) if !opts.no_header else scan_record(src, pos, 0, S).cells
+	for pos < end {
+		if at < u64(pos) {
+			return r
+		}
+		s := scan_record(src, pos, width, S)
+		if at <= u64(s.line_end) {
+			if s.fault_at >= 0 {
+				if detail == u8(Detail.Field_Count) || u64(s.fault_at) < at {
+					return fault_at(s.fault_at, .Bad_Structure, .Field_Count)
+				}
+			} else if detail == u8(Detail.Field_Count) && s.cells < width {
+				return fault_at(s.line_end_lo, .Bad_Structure, .Field_Count)
+			}
+			return r
+		}
+		pos = skip_empty(src, s.line_end + 1)
+	}
+	return r
 }
 
 // A hook that asks for nothing: what `validate` passes for its tokens, which folds away to no code.

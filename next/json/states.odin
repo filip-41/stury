@@ -128,7 +128,7 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 					return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 				}
 			}
-			return fault(w, hs, p, .Bad_Char)
+			return fault(w, hs, p, .Bad_Char, .Identifier)
 		}
 	}
 	q, escaped := string_probe(p, end)
@@ -307,7 +307,7 @@ st_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 				return #must_tail st_comments_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
 		}
-		return fault(w, hs, q, kind)
+		return fault(w, hs, q, kind, .Colon if kind == .Bad_Char else .None)
 	}
 	return #must_tail st_value(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
@@ -533,13 +533,18 @@ st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, kind := colon(p, end)
+	detail := Detail.Colon if kind == .Bad_Char else Detail.None
 	// The comments around the colon are the skipped value's, passed over here so the value's first byte decides
 	// whether it is pushed.
 	when .Comments in FEATURES[S] {
 		if kind == .Bad_Char && gap(q, end, S) {
+			detail = .None
 			q, _, kind = comment_run(q, end, false, S)
 			if kind == .None {
 				q, kind = colon(q, end)
+				if kind == .Bad_Char {
+					detail = .Colon
+				}
 			}
 		}
 		if kind == .None && q < end && gap(q, end, S) {
@@ -547,7 +552,7 @@ st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 		}
 	}
 	if kind != .None {
-		return fault(w, hs, q, kind)
+		return fault(w, hs, q, kind, detail)
 	}
 	// A scalar is read as a document's root, where the walk ends after one value. A container is pushed here, as
 	// `st_value` pushes it, with this object's slot marked, so the walk ends at its close.

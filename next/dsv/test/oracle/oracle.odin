@@ -44,7 +44,17 @@ check :: proc(t: ^testing.T, src: []u8, tsv: bool, log: ^[dynamic]core.Token) ->
 	opts := cur.Read_Opts{dialect = cur.TSV} if tsv else {}
 	want, refused := cur.validate(src, opts).?
 	got, bad := (dsv.validate(src, .Tsv) if tsv else dsv.validate(src, .Csv)).?
-	same := refused == bad && (!bad || fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.at && want.detail == got.detail)
+	// The walk's own `Bad_Char` detail has no member in the current tree, which carries none.
+	detail_agrees := want.detail == got.detail || want.detail == 0 && got.kind == .Bad_Char && got.detail == u8(dsv.Detail.Bare_Quote)
+	same := refused == bad
+	if same && bad {
+		if got.kind == .Bad_Structure && got.detail == u8(dsv.Detail.Field_Count) {
+			// The current tree puts Field_Count at the record's first byte, and a later byte fault before it.
+			same = want.kind == .Bad_Structure && want.detail == u8(dsv.Detail.Field_Count) || want.offset >= got.at
+		} else {
+			same = fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.at && detail_agrees
+		}
+	}
 	if !testing.expectf(t, same, "%q: %v, current tree %v", src, got, want) {
 		return false
 	}

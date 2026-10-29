@@ -84,6 +84,93 @@ header_cells :: #force_no_inline proc "contextless" (src: []u8, start: int, $S: 
 	return n
 }
 
+// One record read from its first byte, for the width fault's position: its cells, the first delimiter that opens a
+// cell past `width` (-1 when there is none), and its line end and that line end's first byte. Quotes (CSV) and
+// escapes (TSV) are followed as the pass follows them, so no delimiter inside a quoted field is counted.
+@(private)
+Record_Scan :: struct {
+	cells:       int,
+	fault_at:    int,
+	line_end:    int,
+	line_end_lo: int,
+}
+
+@(private, cold, require_results)
+scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int, $S: Spec) -> Record_Scan {
+	s := Record_Scan{cells = 1, fault_at = -1}
+	i := start
+	end := len(src)
+	when S == .Csv {
+		quoted := false
+		first := true
+		for i < end {
+			c := src[i]
+			if quoted {
+				if c == '"' {
+					if i + 1 < end && src[i + 1] == '"' {
+						i += 2
+						continue
+					}
+					quoted = false
+				}
+				i += 1
+				continue
+			}
+			switch c {
+			case '\n':
+				s.line_end, s.line_end_lo = i, i
+				if i > start && src[i - 1] == '\r' {
+					s.line_end_lo = i - 1
+				}
+				return s
+			case '\r':
+				if i + 1 < end && src[i + 1] == '\n' {
+					s.line_end, s.line_end_lo = i + 1, i
+					return s
+				}
+			case ',':
+				if s.cells == width && s.fault_at < 0 {
+					s.fault_at = i
+				}
+				s.cells += 1
+			case '"':
+				quoted = first
+			}
+			first = c == ','
+			i += 1
+		}
+	} else {
+		for i < end {
+			c := src[i]
+			if c == '\\' {
+				i += 2
+				continue
+			}
+			switch c {
+			case '\n':
+				s.line_end, s.line_end_lo = i, i
+				if i > start && src[i - 1] == '\r' {
+					s.line_end_lo = i - 1
+				}
+				return s
+			case '\r':
+				if i + 1 < end && src[i + 1] == '\n' {
+					s.line_end, s.line_end_lo = i + 1, i
+					return s
+				}
+			case '\t':
+				if s.cells == width && s.fault_at < 0 {
+					s.fault_at = i
+				}
+				s.cells += 1
+			}
+			i += 1
+		}
+	}
+	s.line_end, s.line_end_lo = end, end
+	return s
+}
+
 // The first backslash in the block at `pos` that opens no escape, or -1. A backslash in bit 63 is left to the next
 // block, through `esc`. The bytes a backslash may escape are `\t`, `\n`, `\r`, `\0` and `\\`.
 // Out of line: inlined into the pass it drags its byte loop's branches into the block loop and spills the block's

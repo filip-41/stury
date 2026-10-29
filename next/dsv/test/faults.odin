@@ -25,9 +25,9 @@ CSV_CASES := []Case {
 	{"\"a\rb\nc,d\"\n", nil, 0},
 	{"a,\"\"\r\n", nil, 0},
 	{"a\\,b\n", nil, 0},
-	{"a,b\n1\n", .Bad_Structure, 4},
-	{"a,b\n1,2,3", .Bad_Structure, 4},
-	{"a\n\nb,c\n", .Bad_Structure, 3},
+	{"a,b\n1\n", .Bad_Structure, 5},
+	{"a,b\n1,2,3", .Bad_Structure, 7},
+	{"a\n\nb,c\n", .Bad_Structure, 4},
 	{"a\"b\n", .Bad_Char, 1},
 	{"\"a\"b\n", .Bad_Char, 3},
 	{"\"a\" ,b\n", .Bad_Char, 3},
@@ -53,7 +53,7 @@ TSV_CASES := []Case {
 	{"a\\xb\n", .Bad_Escape, 1},
 	{"a\\", .Bad_Escape, 1},
 	{"a\\\n", .Bad_Escape, 1},
-	{"a\tb\n1\n", .Bad_Structure, 4},
+	{"a\tb\n1\n", .Bad_Structure, 5},
 	{"a\rb", .Bad_Char, 1},
 	{"a\r", .Bad_Char, 1},
 	{"\\\xff", .Bad_Escape, 0},
@@ -64,20 +64,46 @@ TSV_CASES := []Case {
 @(test)
 faults_at_their_byte :: proc(t: ^testing.T) {
 	for c in CSV_CASES {
-		expect_fault(t, c, dsv.validate(transmute([]u8)c.text, .Csv))
+		expect_fault(t, c, dsv.validate(transmute([]u8)c.text, .Csv), tsv = false)
 	}
 	for c in TSV_CASES {
-		expect_fault(t, c, dsv.validate(transmute([]u8)c.text, .Tsv))
+		expect_fault(t, c, dsv.validate(transmute([]u8)c.text, .Tsv), tsv = true)
 	}
 }
 
-expect_fault :: proc(t: ^testing.T, c: Case, got: Maybe(core.Fault), shift := 0, loc := #caller_location) -> bool {
+expect_fault :: proc(t: ^testing.T, c: Case, got: Maybe(core.Fault), shift := 0, tsv := false, loc := #caller_location) -> bool {
 	if c.kind == nil {
 		return testing.expectf(t, got == nil, "%q shifted %d: %v, want none", c.text, shift, got, loc = loc)
 	}
 	detail := u8(dsv.Detail.Field_Count) if c.kind == .Bad_Structure else 0
+	// A quote byte is a fault only inside an unquoted CSV cell.
+	if c.kind == .Bad_Char && !tsv && c.offset < u64(len(c.text)) && c.text[c.offset] == '"' {
+		detail = u8(dsv.Detail.Bare_Quote)
+	}
 	want := core.Fault{c.offset + u64(shift), &dsv.RULES, c.kind, detail}
 	return testing.expectf(t, got == want, "%q shifted %d: %v, want %v", c.text, shift, got, want, loc = loc)
+}
+
+// A quote inside an unquoted CSV cell is a bare quote, and a quote after a closing quote is not.
+@(rodata)
+BARE_QUOTE_CASES := []Case {
+	{"a\"b\n", .Bad_Char, 1},
+	{"x\"y\"z\n", .Bad_Char, 1},
+	{"a\"\"b\n", .Bad_Char, 1},
+	{"ab\"", .Bad_Char, 2},
+	{"a\"b,\"c,\"\n", .Bad_Char, 1},
+}
+
+@(test)
+bare_quote_detail :: proc(t: ^testing.T) {
+	for c in BARE_QUOTE_CASES {
+		f, bad := dsv.validate(transmute([]u8)c.text, .Csv).?
+		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset && f.detail == u8(dsv.Detail.Bare_Quote), "%q: %v", c.text, f)
+		hi, fault := walk(transmute([]u8)c.text, false, false, &struct {}{}, &core.Hook_Regs{}, regs_hook)
+		testing.expectf(t, fault == f && hi == c.offset, "%q: walk %d %v, validate %v", c.text, hi, fault, f)
+	}
+	f, bad := dsv.validate(transmute([]u8)string("\"a\"b\n"), .Csv).?
+	testing.expectf(t, bad && f.kind == .Bad_Char && f.at == 3 && f.detail == u8(dsv.Detail.None), "%v", f)
 }
 
 // Each case after 0 to 129 empty lines, which are no records: every quote, CR, escape and UTF-8 sequence of a case
@@ -94,13 +120,13 @@ faults_at_every_offset :: proc(t: ^testing.T) {
 					append(&buf, '\n')
 				}
 				append(&buf, c.text)
-				if !expect_fault(t, c, validate(buf[:], tsv), k) {
+				if !expect_fault(t, c, validate(buf[:], tsv), k, tsv) {
 					return
 				}
 				// The walk's verdict is `validate`'s, and it ends at the fault or at the text's end.
 				hi, fault := walk(buf[:], tsv, false, &struct {}{}, &core.Hook_Regs{}, regs_hook)
 				end := c.offset + u64(k) if c.kind != nil else u64(len(buf))
-				if !expect_fault(t, c, fault, k) || !testing.expectf(t, hi == end, "%q shifted %d: hi %d, want %d", c.text, k, hi, end) {
+				if !expect_fault(t, c, fault, k, tsv) || !testing.expectf(t, hi == end, "%q shifted %d: hi %d, want %d", c.text, k, hi, end) {
 					return
 				}
 			}
@@ -159,9 +185,9 @@ TOLERATED := []Tolerated {
 	{{"a,b,c\n1,2\n3\n", nil, 0}, false, false, {.Ragged}},
 	{{"a,b\n1", nil, 0}, false, false, {.Ragged}},
 	{{"1,2\n3\n4,5,6\n7,8,9,10", nil, 0}, false, true, {.Ragged}},
-	{{"a,b\n1,2,3\n", .Bad_Structure, 4}, false, false, {.Ragged}},
-	{{"a,b\n1,2,3", .Bad_Structure, 4}, false, false, {.Ragged}},
-	{{"a,b\n1\n", .Bad_Structure, 4}, false, false, {.Invalid_Utf8, .Bare_Quote}},
+	{{"a,b\n1,2,3\n", .Bad_Structure, 7}, false, false, {.Ragged}},
+	{{"a,b\n1,2,3", .Bad_Structure, 7}, false, false, {.Ragged}},
+	{{"a,b\n1\n", .Bad_Structure, 5}, false, false, {.Invalid_Utf8, .Bare_Quote}},
 	{{"a\tb\tc\n1\n", nil, 0}, true, false, {.Ragged}},
 	{{"a,5\" pipe,b\n", nil, 0}, false, false, {.Bare_Quote}},
 	{{"x\"y\"z\n", nil, 0}, false, false, {.Bare_Quote}},
@@ -208,7 +234,7 @@ tolerances :: proc(t: ^testing.T) {
 				got = dsv.validate(buf[:], .Csv, opts)
 				hi, fault = dsv.walk(buf[:], 0, .Csv, opts, &struct {}{}, &core.Hook_Regs{}, regs_hook)
 			}
-			if !expect_fault(t, c, got, k) || !expect_fault(t, c, fault, k) || !testing.expectf(t, c.kind != nil || strict != nil, "%q: strict takes it", c.text) {
+			if !expect_fault(t, c, got, k, c.tsv) || !expect_fault(t, c, fault, k, c.tsv) || !testing.expectf(t, c.kind != nil || strict != nil, "%q: strict takes it", c.text) {
 				return
 			}
 			end := c.offset + u64(k) if c.kind != nil else u64(len(buf))
