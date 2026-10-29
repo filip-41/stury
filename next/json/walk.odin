@@ -71,22 +71,22 @@ RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", 
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
 	p := raw_data(src)
 	end := p[len(src):]
-	h: No_Hooks
+	h: core.No_Hooks
 	regs: core.Hook_Regs
-	r := walk_document(src, skip_ws(p[core.text_start(src, 0):], end), S, opts, &h, &regs, no_hook)
+	r := walk_document(src, skip_ws(p[core.text_start(src, 0):], end), S, opts, &h, &regs, core.no_hook)
 	if r & 0xff != 0 {
-		return fault_of(r)
+		return core.fault_of(r, &RULES)
 	}
 	q := skip_ws(p[r >> 16:], end)
 	when .Comments in FEATURES[S] {
 		kind: core.Fault_Kind
 		q, _, kind = comment_run(q, end, false, S)
 		if kind != .None {
-			return fault_of(fault_at(u64(intrinsics.ptr_sub(q, p)), kind))
+			return core.fault_of(core.fault_at(u64(intrinsics.ptr_sub(q, p)), kind), &RULES)
 		}
 	}
 	if q != end {
-		return fault_of(fault_at(u64(intrinsics.ptr_sub(q, p)), .Trailing))
+		return core.fault_of(core.fault_at(u64(intrinsics.ptr_sub(q, p)), .Trailing), &RULES)
 	}
 	return nil
 }
@@ -122,34 +122,7 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H,
 		return u64(len(src)), nil
 	}
 	r := walk_document(src, q, S, opts, h, regs, on)
-	return r >> 16, fault_of(r)
-}
-
-@(private)
-No_Hooks :: struct {}
-
-@(private)
-no_hook :: #force_inline proc "contextless" (h: ^No_Hooks, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	return s, .Next
-}
-
-// A walk's result in one word: a position in bits 16 and up, a detail in bits 8 to 15, and the fault's kind in
-// bits 0 to 7, 0 for none. With no fault the position is where the document ended and the detail is STOPPED when a
-// hook stopped the walk.
-@(private)
-fault_at :: #force_inline proc "contextless" (pos: u64, kind: core.Fault_Kind, detail: u8 = 0) -> u64 {
-	return pos << 16 | u64(detail) << 8 | u64(kind)
-}
-
-@(private)
-STOPPED :: 1
-
-@(private)
-fault_of :: #force_inline proc "contextless" (r: u64) -> Maybe(core.Fault) {
-	if r & 0xff == 0 {
-		return nil
-	}
-	return core.Fault{at = r >> 16, rules = &RULES, kind = core.Fault_Kind(r & 0xff), detail = u8(r >> 8)}
+	return r >> 16, core.fault_of(r, &RULES)
 }
 
 // What the states share beyond their registers. `stack[i]` has bit 0 set when the container at depth `i` is an
@@ -198,7 +171,7 @@ walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec,
 	context = runtime.default_context()
 	stack, err := make([]u8, depth)
 	if err != nil {
-		return fault_at(0, .No_Memory)
+		return core.fault_at(0, .No_Memory)
 	}
 	defer delete(stack)
 	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), false, tolerate, nil}
@@ -221,13 +194,13 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 // the end of a root value: a call, since `#must_tail` cannot jump between the walk's instances.
 @(private)
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d, ind: u64, $open: bool) -> u64 {
-	h: No_Hooks
+	h: core.No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, false, w.tolerate, nil}
+	v := Walk(S, core.No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, false, w.tolerate, nil}
 	when open {
-		return st_open(p, end, d, ind, &v, 0, 0, 0, no_hook)
+		return st_open(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
 	} else {
-		return st_value(p, end, d, ind, &v, 0, 0, 0, no_hook)
+		return st_value(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
 	}
 }
 
@@ -248,19 +221,19 @@ at :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8) -> u64 {
 @(private)
 fault :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8, kind: core.Fault_Kind, detail := Detail.None) -> u64 {
 	w.regs^ = hs
-	return fault_at(at(w, p), kind, u8(detail))
+	return core.fault_at(at(w, p), kind, u8(detail))
 }
 
 // The document ended at `p`.
 @(private)
 ended :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8) -> u64 {
 	w.regs^ = hs
-	return fault_at(at(w, p), .None)
+	return core.fault_at(at(w, p), .None)
 }
 
 // A hook stopped the walk on the token that ends at `p`.
 @(private)
 stopped :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8) -> u64 {
 	w.regs^ = hs
-	return fault_at(at(w, p), .None, STOPPED)
+	return core.fault_at(at(w, p), .None, core.STOPPED)
 }

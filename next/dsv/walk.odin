@@ -69,18 +69,18 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H,
 		err: runtime.Allocator_Error
 		keys, err = make([]core.Token, header_cells(src, int(core.text_start(src, from)), S))
 		if err != nil {
-			return 0, fault_of(fault_at(0, .No_Memory))
+			return 0, core.fault_of(core.fault_at(0, .No_Memory), &RULES)
 		}
 	}
 	defer delete(keys)
 	r := run(src, from, S, opts, h, regs, on, true, keys)
-	return r >> 16, fault_of(r)
+	return r >> 16, core.fault_of(r, &RULES)
 }
 
 // Whether `src`, after one leading BOM, is a text of spec `S`: the walk's verdict, with no hook. Whether the first
 // record is a header changes the verdict only under `.Ragged`.
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
-	return fault_of(judge(src, 0, S, opts))
+	return core.fault_of(judge(src, 0, S, opts), &RULES)
 }
 
 // The walk's verdict on the text from `lo`, with no hook. Only a text longer than `Token.n` holds can hold a cell
@@ -88,13 +88,13 @@ validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe
 // that asks for nothing and no keys.
 @(private)
 judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options) -> u64 {
-	h: No_Hooks
+	h: core.No_Hooks
 	regs: core.Hook_Regs
 	r: u64
 	if u64(len(src)) - lo > u64(max(u32)) {
-		r = run(src, lo, S, opts, &h, &regs, no_hook, true, nil)
+		r = run(src, lo, S, opts, &h, &regs, core.no_hook, true, nil)
 	} else {
-		r = run(src, lo, S, opts, &h, &regs, no_hook, false, nil)
+		r = run(src, lo, S, opts, &h, &regs, core.no_hook, false, nil)
 	}
 	return field_count_fault(src, lo, S, opts, r)
 }
@@ -139,25 +139,16 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 		if at <= u64(s.line_end) {
 			if s.fault_at >= 0 {
 				if detail == u8(Detail.Field_Count) || u64(s.fault_at) < at {
-					return fault_at(s.fault_at, .Bad_Structure, .Field_Count)
+					return core.fault_at(u64(s.fault_at), .Bad_Structure, u8(Detail.Field_Count))
 				}
 			} else if detail == u8(Detail.Field_Count) && s.cells < width {
-				return fault_at(s.line_end_lo, .Bad_Structure, .Field_Count)
+				return core.fault_at(u64(s.line_end_lo), .Bad_Structure, u8(Detail.Field_Count))
 			}
 			return r
 		}
 		pos = skip_empty(src, s.line_end + 1)
 	}
 	return r
-}
-
-// A hook that asks for nothing: what `validate` passes for its tokens, which folds away to no code.
-@(private)
-No_Hooks :: struct {}
-
-@(private)
-no_hook :: #force_inline proc "contextless" (h: ^No_Hooks, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	return s, .Next
 }
 
 // The pass built for this CPU's vector width, unless `-define:WALK_TIER=<n>` picks another for a test build.
@@ -201,27 +192,6 @@ when ODIN_ARCH == .amd64 {
 	}
 }
 
-// A pass's result in one word: a position in bits 16 and up, a detail in bits 8 to 15, and the fault's kind in
-// bits 0 to 7, 0 for none. With no fault the position is where the walk ended, and the detail is STOPPED when a
-// hook stopped it.
-@(private)
-fault_at :: #force_inline proc "contextless" (pos: int, kind: core.Fault_Kind, detail := Detail.None) -> u64 {
-	return u64(pos) << 16 | u64(detail) << 8 | u64(kind)
-}
-
-// Set in the result's detail field when a hook asked the walk to stop: no fault, and `hi` is one past the token it
-// stopped on.
-@(private)
-STOPPED :: Detail(1)
-
-@(private)
-fault_of :: #force_inline proc "contextless" (r: u64) -> Maybe(core.Fault) {
-	if r & 0xff == 0 {
-		return nil
-	}
-	return core.Fault{at = r >> 16, rules = &RULES, kind = core.Fault_Kind(r & 0xff), detail = u8(r >> 8)}
-}
-
 // Hands one token to the hook and takes its registers back. The token is built here, from the words the call sites
 // hold, so that no site has to give a whole `Token` an address or a second copy.
 @(private)
@@ -234,5 +204,5 @@ emit :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H
 // A hook stopped the walk on the token from `lo`, `n` bytes long.
 @(private)
 stopped :: #force_inline proc "contextless" (lo: u64, n: u32) -> u64 {
-	return fault_at(int(lo) + int(n), .None, STOPPED)
+	return core.fault_at(lo + u64(n), .None, core.STOPPED)
 }

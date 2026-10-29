@@ -10,6 +10,7 @@ import "core:math/rand"
 import "core:testing"
 import cur "stury:json"
 import core "../../../core"
+import walktest "../../../walktest"
 import json "../.."
 import gen "../gen"
 
@@ -47,16 +48,11 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 	check_all :: proc(t: ^testing.T, src: []u8, tally: ^Tally) -> bool {
 		return check(t, src, .Json, tally) && check(t, src, .Jsonc, tally) && check(t, src, .Json5, tally)
 	}
-	suites := [?][]runtime.Load_Directory_File {
-		#load_directory("../conformance/JSONTestSuite/test_parsing"),
-		#load_directory("../conformance/json5-tests/arrays"),
-		#load_directory("../conformance/json5-tests/comments"),
-		#load_directory("../conformance/json5-tests/misc"),
-		#load_directory("../conformance/json5-tests/new-lines"),
-		#load_directory("../conformance/json5-tests/numbers"),
-		#load_directory("../conformance/json5-tests/objects"),
-		#load_directory("../conformance/json5-tests/strings"),
-		#load_directory("../conformance/json5-tests/todo"),
+	suites: [dynamic][]runtime.Load_Directory_File
+	defer delete(suites)
+	append(&suites, #load_directory("../conformance/JSONTestSuite/test_parsing"))
+	for suite in walktest.JSON5_TESTS {
+		append(&suites, suite)
 	}
 	for suite in suites {
 		for file in suite {
@@ -64,7 +60,7 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 				return
 			}
 			for _ in 0 ..< 20 {
-				gen.mutate(&broken, file.data)
+				walktest.mutate(&broken, file.data, gen.SHARP)
 				if !check_all(t, broken[:], &tally) {
 					return
 				}
@@ -79,7 +75,7 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 		} else {
 			gen.text(&text, 1 + round % 6, spec)
 		}
-		gen.mutate(&broken, text[:])
+		walktest.mutate(&broken, text[:], gen.SHARP)
 		if !check_all(t, text[:], &tally) || !check_all(t, broken[:], &tally) {
 			return
 		}

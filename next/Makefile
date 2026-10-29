@@ -3,6 +3,8 @@ ODIN ?= $(or $(wildcard $(abspath ../../Odin-master/bin/odin)),odin)
 # The rebuilt layers, beside the tree they replace until each one moves to the root.
 LIB_PKGS  := core core/kernel json dsv
 TEST_PKGS := core/kernel/test json/test dsv/test
+# The packages the tests share, checked by `lint` and built through their imports.
+SUPPORT_PKGS := walktest
 # The test packages that read `-define:TIER`.
 TIER_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
@@ -48,7 +50,7 @@ test-asan:
 SEED ?= 1
 ROUNDS ?= 100000
 test-oracle:
-	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && mkdir -p $$d/n/next && cp -R core json dsv $$d/n/next/ && \
+	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && mkdir -p $$d/n/next && cp -R core json dsv walktest $$d/n/next/ && \
 	sed -i.orig 's/^package core$$/package next_core/' $$d/n/next/core/*.odin && \
 	sed -i.orig 's/^package json$$/package next_json/' $$d/n/next/json/*.odin && \
 	for p in json dsv; do echo "== $$p oracle"; \
@@ -57,9 +59,9 @@ test-oracle:
 
 # Host, then the other architectures' sources: x86-64 and a target with neither NEON nor x86 vectors.
 lint:
-	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS),-no-entry-point $(LINT_FLAGS),)
+	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS),)
 	$(ODIN) check bench $(LINT_FLAGS)
-	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
+	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for p in $(TIER_PKGS); do for o in none speed; do \
 		echo "== $$p (linux_amd64 v4 -o:$$o)"; \
 		$(ODIN) test $$p -build-mode:obj -target:linux_amd64 -define:TIER=2 -o:$$o $(LINT_FLAGS) -out:$$d/t.o || exit 1; \

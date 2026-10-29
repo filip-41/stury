@@ -1,5 +1,5 @@
 // Seeded delimited texts for the walk's tests: valid texts that touch every quote, escape, line end and UTF-8 width,
-// and mutations of them that break at a random byte.
+// and the bytes a mutation of them may write.
 package dsv_gen
 
 import "core:math/rand"
@@ -31,35 +31,8 @@ text :: proc(out: ^[dynamic]u8, tsv: bool) {
 	}
 }
 
-// `src` with one random edit: a byte replaced, deleted or inserted, or the text cut short.
-mutate :: proc(out: ^[dynamic]u8, src: []u8) {
-	clear(out)
-	append(out, ..src)
-	if len(src) == 0 {
-		append(out, pick(SHARP))
-		return
-	}
-	i := rand.int_max(len(src))
-	switch rand.int_max(4) {
-	case 0:
-		out[i] = pick(SHARP)
-	case 1:
-		ordered_remove(out, i)
-	case 2:
-		inject_at(out, i, pick(SHARP))
-	case:
-		resize(out, i)
-	}
-}
-
 // The bytes a mutation writes: every byte the grammars branch on, and the bytes that break UTF-8.
-@(private)
 SHARP :: "\",\t\n\r\\tnr0 a\x00\x01\x1f\x7f\x80\xbf\xc0\xc2\xe0\xed\xf0\xf4\xf5\xff"
-
-@(private)
-pick :: proc(s: string) -> u8 {
-	return s[rand.int_max(len(s))]
-}
 
 @(private)
 cell :: proc(out: ^[dynamic]u8, tsv: bool) {

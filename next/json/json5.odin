@@ -38,23 +38,6 @@ st_number5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
-// `p` stands on a single-quoted value string.
-@(private, enable_target_feature = STATE_FEATURES)
-st_string5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
-	hs := core.Hook_Regs{s0, s1, s2}
-	q, esc, kind := string_long(w, p, end)
-	if kind != .None {
-		return fault(w, hs, q, kind)
-	}
-	if too_wide(p, q) {
-		return fault(w, hs, p, .Too_Wide)
-	}
-	if emit(w, on, &hs, .String, .Value, p, q, u16(esc)) == .Stop {
-		return stopped(w, hs, q)
-	}
-	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
-}
-
 // `st_value` on a byte that starts no JSON value: a comment run, one of JSON5's own starts, a close bracket after a
 // trailing comma, or the fault. Its own state, so `st_value` holds none of it.
 @(private, cold, enable_target_feature = STATE_FEATURES)
@@ -65,7 +48,7 @@ st_value5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w:
 	}
 	switch p[0] {
 	case '\'':
-		return #must_tail st_string5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case '+', '.', 'I', 'N':
 		return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
@@ -219,16 +202,15 @@ hex_run :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_
 // The word at `p`, which starts with its first letter: one past it, or `Bad_Number` at the first byte that breaks it.
 @(private)
 word5 :: proc "contextless" (p, end: [^]u8, word: string) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
-	for i in 0 ..< len(word) {
-		q = p[i:]
-		if q >= end {
-			return end, .Truncated
-		}
-		if q[0] != word[i] {
-			return q, .Bad_Number
-		}
+	ok: bool
+	q, ok = word_end(p, end, word)
+	if ok {
+		return q, .None
 	}
-	return p[len(word):], .None
+	if q >= end {
+		return end, .Truncated
+	}
+	return q, .Bad_Number
 }
 
 // The JSON5 string whose opening quote, `"` or `'`, is at `p`, read byte by byte: one past its closing quote and
@@ -333,7 +315,7 @@ ident5_char :: #force_inline proc "contextless" (q, end: [^]u8, start: bool) -> 
 		}
 		return r, true, .None
 	}
-	r, kind = utf8_char(q, end)
+	r, kind = kernel.utf8_char(q, end)
 	if kind != .None {
 		return r, false, kind
 	}

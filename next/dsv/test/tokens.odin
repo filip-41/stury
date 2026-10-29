@@ -4,59 +4,16 @@ import "core:math/rand"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import walktest "../../walktest"
 import dsv ".."
 import gen "gen"
-
-// The most tokens a test text holds.
-MAX_TOKENS :: 1 << 14
-
-// A hook that keeps its state behind `h`, logs every token, and asks for Skip and Stop by `ask`.
-Log :: struct {
-	tokens: [MAX_TOKENS]core.Token,
-	n:      int,
-	hash:   u64,
-	rule:   u64,
-}
-
-log_hook :: proc "contextless" (h: ^Log, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	a := ask(h.rule, u64(h.n), t)
-	h.tokens[h.n] = t
-	h.n += 1
-	h.hash = mix(h.hash, t)
-	return s, a
-}
-
-// `log_hook` with its state in the walk's registers: `a` the hash, `b` the count, `c` the rule.
-regs_hook :: proc "contextless" (h: ^struct {}, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	return {mix(s.a, t), s.b + 1, s.c}, ask(s.c, s.b, t)
-}
-
-// What the hooks ask on the `i`th token they see: Stop on the token the rule's low half names, Skip on a container or
-// a key the rule's high half picks, else Next. Rule 0 asks for nothing.
-ask :: proc "contextless" (rule, i: u64, t: core.Token) -> core.Action {
-	if rule == 0 {
-		return .Next
-	}
-	if i == rule & 0xffff_ffff {
-		return .Stop
-	}
-	if (t.kind == .Array || t.kind == .Map || t.role == .Key) && ((i + rule >> 32) * 0x9e37_79b9_7f4a_7c15) >> 62 == 0 {
-		return .Skip
-	}
-	return .Next
-}
-
-mix :: proc "contextless" (hash: u64, t: core.Token) -> u64 {
-	x := hash ~ t.lo ~ u64(t.n) << 32 ~ u64(t.kind) << 48 ~ u64(t.role) << 56 ~ u64(t.spelling) << 60
-	return x * 0x100_0000_01b3 + 1
-}
 
 // The tokens a walk under `rule` gives, from the tokens of the walk that asked for nothing, and where a Stop ends it.
 expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop_hi: u64, stopped: bool) {
 	clear(out)
 	for j := 0; j < len(all); j += 1 {
 		t := all[j]
-		a := ask(rule, u64(len(out)), t)
+		a := walktest.ask(rule, u64(len(out)), t)
 		append(out, t)
 		switch a {
 		case .Stop:
@@ -100,9 +57,9 @@ walk :: proc(src: []u8, tsv, no_header: bool, h: ^$H, regs: ^core.Hook_Regs, $on
 hooks_agree :: proc(t: ^testing.T) {
 	state := rand.create(1)
 	context.random_generator = rand.default_random_generator(&state)
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
-	full := new(Log)
+	full := new(walktest.Log)
 	defer free(full)
 	text, broken: [dynamic]u8
 	defer delete(text)
@@ -115,11 +72,11 @@ hooks_agree :: proc(t: ^testing.T) {
 		gen.text(&text, tsv)
 		src := text[:]
 		if round % 2 == 1 {
-			gen.mutate(&broken, text[:])
+			walktest.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		}
 		full^ = {}
-		hi, fault := walk(src, tsv, no_header, full, &core.Hook_Regs{}, log_hook)
+		hi, fault := walk(src, tsv, no_header, full, &core.Hook_Regs{}, walktest.log_hook)
 		ok := testing.expectf(t, fault == validate(src, tsv), "%q: walk %v, validate %v", src, fault, validate(src, tsv))
 		ok &&= testing.expectf(t, fault != nil || hi == u64(len(src)), "%q: hi %d", src, hi)
 		ok &&= round % 2 == 1 || testing.expectf(t, fault == nil, "%q: %v", src, fault)
@@ -138,9 +95,9 @@ hooks_agree :: proc(t: ^testing.T) {
 			}
 			stop_hi, was_stopped := expect(full.tokens[:full.n], rule, &want)
 			log^ = {rule = rule}
-			hi1, fault1 := walk(src, tsv, no_header, log, &core.Hook_Regs{}, log_hook)
+			hi1, fault1 := walk(src, tsv, no_header, log, &core.Hook_Regs{}, walktest.log_hook)
 			regs := core.Hook_Regs{0, 0, rule}
-			hi2, fault2 := walk(src, tsv, no_header, &struct {}{}, &regs, regs_hook)
+			hi2, fault2 := walk(src, tsv, no_header, &struct {}{}, &regs, walktest.regs_hook)
 			ok = testing.expectf(t, slice_eq(log.tokens[:log.n], want[:]), "%q rule %x: tokens", src, rule)
 			if was_stopped {
 				ok &&= testing.expectf(t, hi1 == stop_hi && fault1 == nil, "%q rule %x: stop at %d %v", src, rule, hi1, fault1)
@@ -236,7 +193,7 @@ append_record_tokens :: proc(out: ^[dynamic]core.Token, rec_lo: int, spans: [SPA
 // record over every byte of a block and across the boundary between two.
 @(test)
 wrong_width_records :: proc(t: ^testing.T) {
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
 	text: [dynamic]u8
 	defer delete(text)
@@ -286,7 +243,7 @@ wrong_width_records :: proc(t: ^testing.T) {
 								append(&text, '\n')
 							}
 							log^ = {}
-							hi, fault := walk(text[:], tsv, !header, log, &core.Hook_Regs{}, log_hook)
+							hi, fault := walk(text[:], tsv, !header, log, &core.Hook_Regs{}, walktest.log_hook)
 							want_fault := core.Fault{u64(fault_at), &dsv.RULES, .Bad_Structure, u8(dsv.Detail.Field_Count)}
 							if !testing.expectf(t, hi == u64(fault_at) && fault == want_fault, "%q tsv %v header %v quoted %v lf %v: %d %v, want %d %v", text[:], tsv, header, quoted, final_lf, hi, fault, fault_at, want_fault) {
 								return
@@ -304,11 +261,11 @@ wrong_width_records :: proc(t: ^testing.T) {
 
 @(test)
 walked_tokens :: proc(t: ^testing.T) {
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
 	for c in WALKED {
 		log^ = {}
-		hi, fault := walk(transmute([]u8)c.text, false, false, log, &core.Hook_Regs{}, log_hook, c.lo)
+		hi, fault := walk(transmute([]u8)c.text, false, false, log, &core.Hook_Regs{}, walktest.log_hook, c.lo)
 		want: Maybe(core.Fault)
 		if c.fault.kind != nil {
 			want = core.Fault{c.fault.at, &dsv.RULES, c.fault.kind, u8(c.fault.detail)}

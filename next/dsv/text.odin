@@ -6,87 +6,33 @@ package dsv
 // where the block masks have already said a block needs it.
 
 import "base:intrinsics"
-import "core:unicode/utf8"
 import core "../core"
+import kernel "../core/kernel"
 
-// The cells of the text's first record, read from `start`: a delimiter count over one record, its quotes (CSV) or
-// escapes (TSV) followed as the pass follows them, so that no delimiter a quoted field holds is counted. The lines
-// before it that are empty or hold only a CR are passed over, since they are no record and so no header.
+// The cells of the text's first record, read from `start`, with `scan_record`'s reading of that record. The lines
+// before it that are empty or hold only a CR are passed over, since they are no record and so no header. Where the pass
+// does not fault, its reading of the same record agrees with this one, so the key buffer this sizes holds every cell
+// the header makes.
 @(private, cold, require_results)
 header_cells :: #force_no_inline proc "contextless" (src: []u8, start: int, $S: Spec) -> int {
-	n := 1
 	i := start
-	end := len(src)
-	for i < end {
+	for i < len(src) {
 		if src[i] == '\n' {
 			i += 1
 			continue
 		}
-		if src[i] == '\r' && i + 1 < end && src[i + 1] == '\n' {
+		if src[i] == '\r' && i + 1 < len(src) && src[i + 1] == '\n' {
 			i += 2
 			continue
 		}
 		break
 	}
-	when S == .Csv {
-		// A quote at a cell's first byte opens a quoted field, and a `""` inside one holds it open. A quote anywhere
-		// else is a bare quote, a fault the pass reports or a byte of the cell.
-		quoted := false
-		first := true
-		for i < end {
-			c := src[i]
-			if quoted {
-				if c == '"' {
-					if i + 1 < end && src[i + 1] == '"' {
-						i += 2
-						continue
-					}
-					quoted = false
-				}
-				i += 1
-				continue
-			}
-			switch c {
-			case '\n':
-				return n
-			case '\r':
-				if i + 1 < end && src[i + 1] == '\n' {
-					return n
-				}
-			case ',':
-				n += 1
-			case '"':
-				quoted = first
-			}
-			first = c == ','
-			i += 1
-		}
-	} else {
-		for i < end {
-			c := src[i]
-			if c == '\\' {
-				i += 2
-				continue
-			}
-			switch c {
-			case '\n':
-				return n
-			case '\r':
-				if i + 1 < end && src[i + 1] == '\n' {
-					return n
-				}
-			case '\t':
-				n += 1
-			}
-			i += 1
-		}
-	}
-	return n
+	return scan_record(src, i, 0, S).cells
 }
 
-// One record read from its first byte, for the width fault's position: its cells, the first delimiter that opens a
-// cell past `width` (-1 when there is none), and its line end and that line end's first byte. Quotes (CSV) and
-// escapes (TSV) are followed as the pass follows them, so no delimiter inside a quoted field is counted.
+// One record read from its first byte: its cells, the first delimiter that opens a cell past `width` (-1 when there is
+// none, and width 0 for a caller that reads cells only), and its line end and that line end's first byte. Quotes (CSV)
+// and escapes (TSV) are followed as the pass follows them, so no delimiter inside a quoted field is counted.
 @(private)
 Record_Scan :: struct {
 	cells:       int,
@@ -220,19 +166,21 @@ utf8_fault :: #force_no_inline proc "contextless" (src: []u8, floor, pos: int) -
 	if i > floor && src[i - 1] >= 0xc0 {
 		i -= 1
 	}
+	base := raw_data(src)
+	end := base[len(src):]
 	for i < min(pos + 64, len(src)) {
 		if src[i] < 0x80 {
 			i += 1
 			continue
 		}
-		r, size := utf8.decode_rune(src[i:])
-		if r == utf8.RUNE_ERROR && size == 1 {
-			if !utf8.full_rune(src[i:]) {
+		q, k := kernel.utf8_char(base[i:], end)
+		if k != .None {
+			if k == .Truncated {
 				return len(src), .Truncated
 			}
 			return i, .Bad_Char
 		}
-		i += size
+		i = int(intrinsics.ptr_sub(q, base))
 	}
 	return -1, .Bad_Char
 }

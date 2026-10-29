@@ -1,6 +1,5 @@
 package json_tests
 
-import "base:runtime"
 import "base:sanitizer"
 import "core:math/rand"
 import "core:mem"
@@ -10,6 +9,7 @@ import "core:testing"
 import core "../../core"
 import json ".."
 import gen "gen"
+import walktest "../../walktest"
 
 Case :: struct {
 	text:   string,
@@ -318,9 +318,9 @@ expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec, detail: json.Detail)
 		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset && f.detail == u8(detail), "%v %q: %v, want %v at %d", S, c.text, f, c.kind, c.offset)
 	}
 	if c.kind != .Trailing {
-		log := new(Log)
+		log := new(walktest.Log)
 		defer free(log)
-		_, fault := json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, log_hook)
+		_, fault := json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 		empty := fault == nil && log.n == 0
 		testing.expectf(t, empty || fault == verdict, "%v %q: hooked walk %v, validate %v", S, c.text, fault, verdict)
 	}
@@ -640,7 +640,7 @@ skip_hook :: proc "contextless" (h: ^int, s: core.Hook_Regs, t: core.Token) -> (
 @(test)
 max_depth_option :: proc(t: ^testing.T) {
 	heap := context.allocator
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log, heap)
 	context.allocator = mem.panic_allocator()
 	for depth in ([]u32{1, 3, json.MAX_DEPTH, json.MAX_DEPTH + 1, 5000}) {
@@ -651,7 +651,7 @@ max_depth_option :: proc(t: ^testing.T) {
 		f, bad := json.validate(transmute([]u8)over, .Json, {max_depth = depth}).?
 		testing.expectf(t, bad && f.kind == .Too_Deep && f.at == u64(len(over) - 1), "%d levels: %v", n, f)
 		log^ = {}
-		_, fault := json.walk(transmute([]u8)over, 0, .Json, {max_depth = depth}, log, &core.Hook_Regs{}, log_hook)
+		_, fault := json.walk(transmute([]u8)over, 0, .Json, {max_depth = depth}, log, &core.Hook_Regs{}, walktest.log_hook)
 		testing.expectf(t, fault == f && log.n == n + n / 2, "%d levels, walked: %v, %d tokens", n, fault, log.n)
 		maps := strings.concatenate({strings.repeat("{\"a\":", n, context.temp_allocator), "{"}, context.temp_allocator)
 		f, bad = json.validate(transmute([]u8)maps, .Json, {max_depth = depth}).?
@@ -746,9 +746,9 @@ expect_tolerated :: proc(t: ^testing.T, c: Tolerated, $S: json.Spec) {
 	} else {
 		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset, "%v %q: %v, want %v at %d", S, c.text, f, c.kind, c.offset)
 	}
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
-	_, fault := json.walk(src, 0, S, {tolerate = c.tol}, log, &core.Hook_Regs{}, log_hook)
+	_, fault := json.walk(src, 0, S, {tolerate = c.tol}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expectf(t, fault == (f if bad else nil), "%v %q: hooked walk %v, validate %v", S, c.text, fault, f)
 	for tok in log.tokens[:log.n] {
 		testing.expectf(t, spans(src, tok), "%v %q: %v", S, c.text, tok)
@@ -831,18 +831,8 @@ json_test_suite :: proc(t: ^testing.T) {
 // json5-tests: every `.json` and `.json5` text passes, and every `.js` and `.txt` text fails.
 @(test)
 json5_tests :: proc(t: ^testing.T) {
-	dirs := [?][]runtime.Load_Directory_File {
-		#load_directory("conformance/json5-tests/arrays"),
-		#load_directory("conformance/json5-tests/comments"),
-		#load_directory("conformance/json5-tests/misc"),
-		#load_directory("conformance/json5-tests/new-lines"),
-		#load_directory("conformance/json5-tests/numbers"),
-		#load_directory("conformance/json5-tests/objects"),
-		#load_directory("conformance/json5-tests/strings"),
-		#load_directory("conformance/json5-tests/todo"),
-	}
 	n: int
-	for dir in dirs {
+	for dir in walktest.JSON5_TESTS {
 		for file in dir {
 			f, bad := json.validate(file.data, .Json5).?
 			switch filepath.ext(file.name) {

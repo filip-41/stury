@@ -1,11 +1,11 @@
 // Seeded texts of each spec for the walk's tests: valid documents that touch every token, escape and UTF-8 width, and
-// mutations of them that break at a random byte. In a spec with comments a document also holds them wherever
-// whitespace may stand and now and then a comma before a close bracket, and in JSON5 its own numbers, strings, keys
-// and whitespace.
+// the bytes a mutation of them may write. In a spec with comments a document also holds them wherever whitespace may
+// stand and now and then a comma before a close bracket, and in JSON5 its own numbers, strings, keys and whitespace.
 package json_gen
 
 import "core:math/rand"
 import json "../.."
+import walktest "../../../walktest"
 
 // A valid document of at most `depth` levels, with whitespace of every kind between its tokens.
 text :: proc(out: ^[dynamic]u8, depth: int, spec: json.Spec) {
@@ -20,35 +20,8 @@ pretty :: proc(out: ^[dynamic]u8, depth: int, spec: json.Spec) {
 	pretty_value(out, depth, 0, 1 + rand.int_max(8), spec)
 }
 
-// `src` with one random edit: a byte replaced, deleted or inserted, or the text cut short.
-mutate :: proc(out: ^[dynamic]u8, src: []u8) {
-	clear(out)
-	append(out, ..src)
-	if len(src) == 0 {
-		append(out, pick(SHARP))
-		return
-	}
-	i := rand.int_max(len(src))
-	switch rand.int_max(4) {
-	case 0:
-		out[i] = pick(SHARP)
-	case 1:
-		ordered_remove(out, i)
-	case 2:
-		inject_at(out, i, pick(SHARP))
-	case:
-		resize(out, i)
-	}
-}
-
 // The bytes a mutation writes: every byte the grammar branches on, and bytes no state takes.
-@(private)
 SHARP :: "\"'\\/*{}[]:,0123456789-+.eEtrufalsnINx$_ \t\r\n\v\xa0\xa8u\x00\x1f\x7f\x80\xbf\xc0\xc2\xe0\xe2\xed\xf0\xf4\xf5\xff"
-
-@(private)
-pick :: proc(s: string) -> u8 {
-	return s[rand.int_max(len(s))]
-}
 
 @(private)
 ws :: proc(out: ^[dynamic]u8, spec: json.Spec) {
@@ -58,7 +31,7 @@ ws :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 		} else if spec == .Json5 && rand.int_max(3) == 0 {
 			append(out, rand.choice(WS5))
 		} else {
-			append(out, pick(" \t\r\n"))
+			append(out, walktest.pick(" \t\r\n"))
 		}
 	}
 }
@@ -87,7 +60,7 @@ comment :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 		piece := rand.choice(pieces[:7 if spec != .Json5 else len(pieces)])
 		append(out, piece if block || rand.int_max(3) != 0 else rand.choice([]string{"/", "//", "/*", "*/"}))
 		if block && rand.int_max(6) == 0 {
-			append(out, pick("\r\n"))
+			append(out, walktest.pick("\r\n"))
 		}
 	}
 	ends := []string{"\n", "\r", "\r\n", "\u2028", "\u2029"}
@@ -257,25 +230,25 @@ num :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 	if rand.int_max(4) == 0 {
 		append(out, '0')
 	} else {
-		append(out, pick("123456789"))
+		append(out, walktest.pick("123456789"))
 		digits(out)
 	}
 	if rand.int_max(3) == 0 {
 		append(out, '.')
-		append(out, pick("0123456789"))
+		append(out, walktest.pick("0123456789"))
 		digits(out)
 	}
 	if rand.int_max(3) == 0 {
-		append(out, pick("eE"))
+		append(out, walktest.pick("eE"))
 		if rand.int_max(2) == 0 {
-			append(out, pick("+-"))
+			append(out, walktest.pick("+-"))
 		}
 		// Leading zeros make a long run with a small value: the current tree caps an exponent's value.
 		for _ in 0 ..< rand.int_max(12) {
 			append(out, '0')
 		}
 		for _ in 0 ..< 1 + rand.int_max(3) {
-			append(out, pick("0123456789"))
+			append(out, walktest.pick("0123456789"))
 		}
 	}
 }
@@ -284,7 +257,7 @@ num :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 @(private)
 digits :: proc(out: ^[dynamic]u8) {
 	for _ in 0 ..< rand.int_max(20) {
-		append(out, pick("0123456789"))
+		append(out, walktest.pick("0123456789"))
 	}
 }
 
@@ -293,26 +266,26 @@ digits :: proc(out: ^[dynamic]u8) {
 @(private)
 num5 :: proc(out: ^[dynamic]u8) {
 	if rand.int_max(2) == 0 {
-		append(out, pick("+-"))
+		append(out, walktest.pick("+-"))
 	}
 	switch rand.int_max(5) {
 	case 0:
 		append(out, rand.choice([]string{"0x", "0X"}))
 		for _ in 0 ..< 1 + rand.int_max(17) {
-			append(out, pick("0123456789abcdefABCDEF"))
+			append(out, walktest.pick("0123456789abcdefABCDEF"))
 		}
 	case 1:
 		append(out, rand.choice([]string{"Infinity", "NaN"}))
 	case 2:
 		append(out, '.')
-		append(out, pick("0123456789"))
+		append(out, walktest.pick("0123456789"))
 		digits(out)
 	case:
-		append(out, pick("0123456789"))
+		append(out, walktest.pick("0123456789"))
 		append(out, '.')
 	}
 	if rand.int_max(4) == 0 && out[len(out) - 1] - '0' < 10 || out[len(out) - 1] == '.' {
-		append(out, pick("eE"))
-		append(out, pick("123456789"))
+		append(out, walktest.pick("eE"))
+		append(out, walktest.pick("123456789"))
 	}
 }

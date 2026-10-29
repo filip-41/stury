@@ -82,18 +82,23 @@ digit_run :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bound
 	return q
 }
 
+// The first four bytes of `true`, `null` and `false`, as a little-endian word.
+@(private)
+TRUE_WORD :: u32('t') | u32('r') << 8 | u32('u') << 16 | u32('e') << 24
+@(private)
+NULL_WORD :: u32('n') | u32('u') << 8 | u32('l') << 16 | u32('l') << 24
+@(private)
+FALS_WORD :: u32('f') | u32('a') << 8 | u32('l') << 16 | u32('s') << 24
+
 // The literal at `p`, which starts with `t`, `f` or `n`: one past it and its kind, or nil when it is not one. No
 // branch on which word it is, since `true` and `false` alternate at random in a column of flags.
 @(private)
 literal :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Kind) #no_bounds_check {
-	TRUE :: u32('t') | u32('r') << 8 | u32('u') << 16 | u32('e') << 24
-	NULL :: u32('n') | u32('u') << 8 | u32('l') << 16 | u32('l') << 24
-	FALS :: u32('f') | u32('a') << 8 | u32('l') << 16 | u32('s') << 24
 	if intrinsics.ptr_sub(end, p) < 5 {
 		return literal_short(p, end)
 	}
 	w := u32(intrinsics.unaligned_load((^u32le)(p)))
-	n := (u64(w == TRUE) | u64(w == NULL)) << 2 | (u64(w == FALS) & u64(p[4] == 'e')) * 5
+	n := (u64(w == TRUE_WORD) | u64(w == NULL_WORD)) << 2 | (u64(w == FALS_WORD) & u64(p[4] == 'e')) * 5
 	if n == 0 {
 		return nil, .Null
 	}
@@ -106,13 +111,29 @@ literal :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: 
 literal_short :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Kind) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) == 4 {
 		switch u32(intrinsics.unaligned_load((^u32le)(p))) {
-		case u32('t') | u32('r') << 8 | u32('u') << 16 | u32('e') << 24:
+		case TRUE_WORD:
 			return p[4:], .True
-		case u32('n') | u32('u') << 8 | u32('l') << 16 | u32('l') << 24:
+		case NULL_WORD:
 			return p[4:], .Null
 		}
 	}
 	return nil, .Null
+}
+
+// The end of `word` at `p`, which starts with the word's first letter: one past it, or the first byte that breaks it
+// with `ok` false, `end` when the text ends first.
+@(private)
+word_end :: #force_inline proc "contextless" (p, end: [^]u8, word: string) -> (q: [^]u8, ok: bool) #no_bounds_check {
+	for i in 0 ..< len(word) {
+		q = p[i:]
+		if q >= end {
+			return end, false
+		}
+		if q[0] != word[i] {
+			return q, false
+		}
+	}
+	return p[len(word):], true
 }
 
 // A literal `literal` refused: the first byte that breaks the word its first letter names, or `Truncated`.
@@ -124,14 +145,13 @@ literal_fault :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u
 	} else if p[0] == 'f' {
 		word = "false"
 	}
-	for i in 0 ..< len(word) {
-		q = p[i:]
-		if q >= end {
-			return end, .Truncated
-		}
-		if q[0] != word[i] {
-			return q, .Bad_Char
-		}
+	ok: bool
+	q, ok = word_end(p, end, word)
+	if ok {
+		unreachable()
 	}
-	unreachable()
+	if q >= end {
+		return end, .Truncated
+	}
+	return q, .Bad_Char
 }

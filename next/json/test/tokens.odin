@@ -4,59 +4,16 @@ import "core:math/rand"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import walktest "../../walktest"
 import json ".."
 import gen "gen"
-
-// The most tokens a test text holds.
-MAX_TOKENS :: 1 << 14
-
-// A hook that keeps its state behind `h`, logs every token, and asks for Skip and Stop by `ask`.
-Log :: struct {
-	tokens: [MAX_TOKENS]core.Token,
-	n:      int,
-	hash:   u64,
-	rule:   u64,
-}
-
-log_hook :: proc "contextless" (h: ^Log, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	a := ask(h.rule, u64(h.n), t)
-	h.tokens[h.n] = t
-	h.n += 1
-	h.hash = mix(h.hash, t)
-	return s, a
-}
-
-// `log_hook` with its state in the walk's registers: `a` the hash, `b` the count, `c` the rule.
-regs_hook :: proc "contextless" (h: ^struct {}, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	return {mix(s.a, t), s.b + 1, s.c}, ask(s.c, s.b, t)
-}
-
-// What the hooks ask on the `i`th token they see: Stop on the token the rule's low half names, Skip on a container or
-// a key the rule's high half picks, else Next. Rule 0 asks for nothing.
-ask :: proc "contextless" (rule, i: u64, t: core.Token) -> core.Action {
-	if rule == 0 {
-		return .Next
-	}
-	if i == rule & 0xffff_ffff {
-		return .Stop
-	}
-	if (t.kind == .Array || t.kind == .Map || t.role == .Key) && ((i + rule >> 32) * 0x9e37_79b9_7f4a_7c15) >> 62 == 0 {
-		return .Skip
-	}
-	return .Next
-}
-
-mix :: proc "contextless" (hash: u64, t: core.Token) -> u64 {
-	x := hash ~ t.lo ~ u64(t.n) << 32 ~ u64(t.kind) << 48 ~ u64(t.role) << 56 ~ u64(t.spelling) << 60
-	return x * 0x100_0000_01b3 + 1
-}
 
 // The tokens a walk under `rule` gives, from the tokens of the walk that asked for nothing, and where a Stop ends it.
 expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop_hi: u64, stopped: bool) {
 	clear(out)
 	for j := 0; j < len(all); j += 1 {
 		t := all[j]
-		a := ask(rule, u64(len(out)), t)
+		a := walktest.ask(rule, u64(len(out)), t)
 		append(out, t)
 		switch a {
 		case .Stop:
@@ -100,9 +57,9 @@ hooks_agree :: proc(t: ^testing.T) {
 hooks_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 	state := rand.create(1)
 	context.random_generator = rand.default_random_generator(&state)
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
-	full := new(Log)
+	full := new(walktest.Log)
 	defer free(full)
 	text, broken: [dynamic]u8
 	defer delete(text)
@@ -118,11 +75,11 @@ hooks_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 		}
 		src := text[:]
 		if round % 2 == 1 {
-			gen.mutate(&broken, text[:])
+			walktest.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		}
 		full^ = {}
-		hi, fault := json.walk(src, 0, S, {}, full, &core.Hook_Regs{}, log_hook)
+		hi, fault := json.walk(src, 0, S, {}, full, &core.Hook_Regs{}, walktest.log_hook)
 		if round % 2 == 0 && !testing.expectf(t, fault == nil, "%q: %v", src, fault) {
 			return false
 		}
@@ -138,9 +95,9 @@ hooks_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 			}
 			stop_hi, was_stopped := expect(full.tokens[:full.n], rule, &want)
 			log^ = {rule = rule}
-			hi1, fault1 := json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, log_hook)
+			hi1, fault1 := json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 			regs := core.Hook_Regs{0, 0, rule}
-			hi2, fault2 := json.walk(src, 0, S, {}, &struct {}{}, &regs, regs_hook)
+			hi2, fault2 := json.walk(src, 0, S, {}, &struct {}{}, &regs, walktest.regs_hook)
 			ok := testing.expectf(t, slice_eq(log.tokens[:log.n], want[:]), "%q rule %x: tokens", src, rule)
 			if was_stopped {
 				ok &&= testing.expectf(t, hi1 == stop_hi && fault1 == nil, "%q rule %x: stop at %d %v", src, rule, hi1, fault1)
@@ -160,13 +117,13 @@ hooks_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 // reads a BOM as the bad byte it is there.
 @(test)
 bom_at_the_start :: proc(t: ^testing.T) {
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
-	hi, fault := json.walk(transmute([]u8)string("\xef\xbb\xbf [1]"), 0, .Json, {}, log, &core.Hook_Regs{}, log_hook)
+	hi, fault := json.walk(transmute([]u8)string("\xef\xbb\xbf [1]"), 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expect_value(t, fault, nil)
 	testing.expect_value(t, hi, 7)
 	testing.expect_value(t, log.tokens[0], core.Token{4, 1, .Array, .Value, 0})
-	_, fault = json.walk(transmute([]u8)string(" \xef\xbb\xbf[1]"), 0, .Json, {}, log, &core.Hook_Regs{}, log_hook)
+	_, fault = json.walk(transmute([]u8)string(" \xef\xbb\xbf[1]"), 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expect_value(t, fault, core.Fault{1, &json.RULES, .Bad_Char, 0})
 }
 
@@ -175,26 +132,26 @@ bom_at_the_start :: proc(t: ^testing.T) {
 // and `validate` holds a text to one document with nothing before it.
 @(test)
 documents_one_walk_each :: proc(t: ^testing.T) {
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
 	src := transmute([]u8)string("1 2[3]{}\n\x1e\"s\"\n\x1e true \x1e\n ")
 	ends := [?]u64{1, 3, 6, 8, 13, 20, u64(len(src))}
 	lo: u64
 	for want, i in ends {
 		log^ = {}
-		hi, fault := json.walk(src, lo, .Json, {}, log, &core.Hook_Regs{}, log_hook)
+		hi, fault := json.walk(src, lo, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 		testing.expectf(t, hi == want && fault == nil, "document %d from %d: %d %v, want %d", i, lo, hi, fault, want)
 		testing.expectf(t, (log.n == 0) == (i == len(ends) - 1), "document %d: %d tokens", i, log.n)
 		lo = hi
 	}
-	hi, fault := json.walk(src, 1000, .Json, {}, log, &core.Hook_Regs{}, log_hook)
+	hi, fault := json.walk(src, 1000, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expectf(t, hi == u64(len(src)) && fault == nil, "past the end: %d %v", hi, fault)
 	for empty in ([]string{"", "   ", "\x1e \x1e ", "\xef\xbb\xbf", "\xef\xbb\xbf \x1e"}) {
 		log^ = {}
-		hi, fault = json.walk(transmute([]u8)empty, 0, .Json, {}, log, &core.Hook_Regs{}, log_hook)
+		hi, fault = json.walk(transmute([]u8)empty, 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 		testing.expectf(t, hi == u64(len(empty)) && fault == nil && log.n == 0, "%q: %d %v, %d tokens", empty, hi, fault, log.n)
 	}
-	_, fault = json.walk(transmute([]u8)string(" \x1e x"), 0, .Json, {}, log, &core.Hook_Regs{}, log_hook)
+	_, fault = json.walk(transmute([]u8)string(" \x1e x"), 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expect_value(t, fault, core.Fault{3, &json.RULES, .Bad_Char, 0})
 	testing.expect_value(t, json.validate(transmute([]u8)string("\x1e1"), .Json), core.Fault{0, &json.RULES, .Bad_Char, 0})
 	testing.expect_value(t, json.validate(transmute([]u8)string("1 2"), .Json), core.Fault{2, &json.RULES, .Trailing, 0})
@@ -267,9 +224,9 @@ comment_roles :: proc(t: ^testing.T) {
 		role: core.Role,
 	}
 	want := []Want{{"/* a */", .Comment}, {"/* b */", .Comment}, {"/* c */", .Comment}, {"// d", .Comment_Inline}, {"// e", .Comment}, {"/* f */", .Comment_Foot}, {"// g", .Comment_Inline}, {"// o", .Comment_Inline}, {"/* h */", .Comment_Inline}, {"/* i */", .Comment_Inline}, {"/* j\n  */", .Comment_Inline}, {"/* p */", .Comment_Foot}, {"// k", .Comment_Foot}, {"// l", .Comment_Inline}, {"// m", .Comment_Foot}}
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
-	hi, fault := json.walk(transmute([]u8)src, 0, .Jsonc, {}, log, &core.Hook_Regs{}, log_hook)
+	hi, fault := json.walk(transmute([]u8)src, 0, .Jsonc, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expect_value(t, fault, nil)
 	testing.expect_value(t, hi, u64(len(src) - 1))
 	i := 0
@@ -291,7 +248,7 @@ comment_roles :: proc(t: ^testing.T) {
 // the next document's, read by the next walk. Comments with no document after them belong to none.
 @(test)
 comments_between_documents :: proc(t: ^testing.T) {
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
 	src := transmute([]u8)string("1 // a\n/* b */ 2 /* c */\n// d\n\x1e3\n// e")
 	Want :: struct {
@@ -302,7 +259,7 @@ comments_between_documents :: proc(t: ^testing.T) {
 	lo: u64
 	for w, i in want {
 		log^ = {}
-		hi, fault := json.walk(src, lo, .Jsonc, {}, log, &core.Hook_Regs{}, log_hook)
+		hi, fault := json.walk(src, lo, .Jsonc, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 		testing.expectf(t, hi == w.hi && fault == nil && log.n == len(w.roles), "document %d: %d %v, %d tokens", i, hi, fault, log.n)
 		for r, j in w.roles[:min(len(w.roles), log.n)] {
 			testing.expectf(t, log.tokens[j].role == r, "document %d token %d: %v, want %v", i, j, log.tokens[j].role, r)
@@ -311,7 +268,7 @@ comments_between_documents :: proc(t: ^testing.T) {
 	}
 	log^ = {}
 	alone := " // a\n/* b */ \x1e // c"
-	hi, fault := json.walk(transmute([]u8)alone, 0, .Jsonc, {}, log, &core.Hook_Regs{}, log_hook)
+	hi, fault := json.walk(transmute([]u8)alone, 0, .Jsonc, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expectf(t, hi == u64(len(alone)) && fault == nil && log.n == 0, "comments alone: %d %v, %d tokens", hi, fault, log.n)
 }
 
@@ -319,12 +276,12 @@ comments_between_documents :: proc(t: ^testing.T) {
 // reads on.
 @(test)
 skip_past_comments :: proc(t: ^testing.T) {
-	skip_keys :: proc "contextless" (h: ^Log, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	skip_keys :: proc "contextless" (h: ^walktest.Log, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 		h.tokens[h.n] = t
 		h.n += 1
 		return s, .Skip if t.role == .Key else .Next
 	}
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
 	src := transmute([]u8)string("{\"a\" /* b */ : /* c */ [1, {}], \"d\": /* e */ 2 /* f */}")
 	_, fault := json.walk(src, 0, .Jsonc, {}, log, &core.Hook_Regs{}, skip_keys)

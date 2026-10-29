@@ -383,7 +383,7 @@ st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 	if d < 2 {
 		// The root's inline and foot comments are its walk's, read only where a hook takes them: `validate` passes
 		// over them as it checks what follows the document.
-		when .Comments in FEATURES[S] && H != No_Hooks {
+		when .Comments in FEATURES[S] && H != core.No_Hooks {
 			if x := skip_ws(p, end); x < end && gap(x, end, S) {
 				w.resume, w.crossed = x, false
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -586,7 +586,7 @@ st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 	hs := core.Hook_Regs{s0, s1, s2}
 	ind := ind
 	if d < 2 {
-		when .Comments in FEATURES[S] && H != No_Hooks {
+		when .Comments in FEATURES[S] && H != core.No_Hooks {
 			if x := skip_ws(p, end); x < end && gap(x, end, S) {
 				w.resume, w.crossed = x, false
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)

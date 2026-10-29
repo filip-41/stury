@@ -64,18 +64,15 @@ comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]
 	case '/':
 		for {
 			q = comment_scan(q, end, S, false)
-			if q >= end || q[0] == '\n' || q[0] == '\r' {
+			if q >= end || line_end(q, end, S) {
 				return q, .None
 			}
 			if !ES5 && q[0] < 0x20 && q[0] != '\t' {
 				return q, .Bad_Char
 			}
-			if ES5 && line_sep5(q, end) {
-				return q, .None
-			}
 			if q[0] < 0x80 {
 				q = q[1:]
-			} else if q, kind = utf8_char(q, end); kind != .None {
+			} else if q, kind = kernel.utf8_char(q, end); kind != .None {
 				return
 			}
 		}
@@ -93,7 +90,7 @@ comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]
 			}
 			if q[0] < 0x80 {
 				q = q[1:]
-			} else if q, kind = utf8_char(q, end); kind != .None {
+			} else if q, kind = kernel.utf8_char(q, end); kind != .None {
 				return
 			}
 		}
@@ -247,7 +244,7 @@ st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
-	when H != No_Hooks {
+	when H != core.No_Hooks {
 		foot := q < end && q[0] == ']' && d & 1 == 0 && d >= 2
 		r, stop, wide := emit_comments(w, on, &hs, p, q, false, .Comment_Foot if foot else .Comment)
 		if wide != .None {
@@ -269,7 +266,7 @@ st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
-	when H != No_Hooks {
+	when H != core.No_Hooks {
 		foot := q < end && q[0] == '}'
 		r, stop, wide := emit_comments(w, on, &hs, p, q, false, .Comment_Foot if foot else .Comment)
 		if wide != .None {
@@ -291,7 +288,7 @@ st_comments_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
-	when H != No_Hooks {
+	when H != core.No_Hooks {
 		r, stop, wide := emit_comments(w, on, &hs, p, q, false, .Comment)
 		if wide != .None {
 			return fault(w, hs, r, wide)
@@ -320,7 +317,7 @@ st_comments_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 	}
 	close := ']' | u8(d & 1) << 5
 	r := p
-	when H != No_Hooks {
+	when H != core.No_Hooks {
 		rest := core.Role.Comment_Foot
 		if d < 2 {
 			if q < end && q[0] != 0x1e {

@@ -6,6 +6,7 @@ import "core:testing"
 import core "../../core"
 import dsv ".."
 import gen "gen"
+import walktest "../../walktest"
 
 Case :: struct {
 	text:   string,
@@ -99,7 +100,7 @@ bare_quote_detail :: proc(t: ^testing.T) {
 	for c in BARE_QUOTE_CASES {
 		f, bad := dsv.validate(transmute([]u8)c.text, .Csv).?
 		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset && f.detail == u8(dsv.Detail.Bare_Quote), "%q: %v", c.text, f)
-		hi, fault := walk(transmute([]u8)c.text, false, false, &struct {}{}, &core.Hook_Regs{}, regs_hook)
+		hi, fault := walk(transmute([]u8)c.text, false, false, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
 		testing.expectf(t, fault == f && hi == c.offset, "%q: walk %d %v, validate %v", c.text, hi, fault, f)
 	}
 	f, bad := dsv.validate(transmute([]u8)string("\"a\"b\n"), .Csv).?
@@ -124,7 +125,7 @@ faults_at_every_offset :: proc(t: ^testing.T) {
 					return
 				}
 				// The walk's verdict is `validate`'s, and it ends at the fault or at the text's end.
-				hi, fault := walk(buf[:], tsv, false, &struct {}{}, &core.Hook_Regs{}, regs_hook)
+				hi, fault := walk(buf[:], tsv, false, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
 				end := c.offset + u64(k) if c.kind != nil else u64(len(buf))
 				if !expect_fault(t, c, fault, k, tsv) || !testing.expectf(t, hi == end, "%q shifted %d: hi %d, want %d", c.text, k, hi, end) {
 					return
@@ -148,7 +149,7 @@ validate_fenced :: proc(src: []u8, tsv: bool) -> Maybe(core.Fault) {
 	sanitizer.address_poison(buf[len(src):])
 	defer sanitizer.address_unpoison(buf[len(src):])
 	verdict := validate(buf[:len(src)], tsv)
-	if _, fault := walk(buf[:len(src)], tsv, false, &struct {}{}, &core.Hook_Regs{}, regs_hook); fault != verdict {
+	if _, fault := walk(buf[:len(src)], tsv, false, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook); fault != verdict {
 		return fault
 	}
 	return verdict
@@ -228,11 +229,11 @@ tolerances :: proc(t: ^testing.T) {
 			if c.tsv {
 				strict = dsv.validate(buf[:], .Tsv, {no_header = c.no_header})
 				got = dsv.validate(buf[:], .Tsv, opts)
-				hi, fault = dsv.walk(buf[:], 0, .Tsv, opts, &struct {}{}, &core.Hook_Regs{}, regs_hook)
+				hi, fault = dsv.walk(buf[:], 0, .Tsv, opts, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
 			} else {
 				strict = dsv.validate(buf[:], .Csv, {no_header = c.no_header})
 				got = dsv.validate(buf[:], .Csv, opts)
-				hi, fault = dsv.walk(buf[:], 0, .Csv, opts, &struct {}{}, &core.Hook_Regs{}, regs_hook)
+				hi, fault = dsv.walk(buf[:], 0, .Csv, opts, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
 			}
 			if !expect_fault(t, c, got, k, c.tsv) || !expect_fault(t, c, fault, k, c.tsv) || !testing.expectf(t, c.kind != nil || strict != nil, "%q: strict takes it", c.text) {
 				return
@@ -248,7 +249,7 @@ tolerances :: proc(t: ^testing.T) {
 // A ragged record's missing columns make no tokens, and a bare quote is a byte of its cell, which is no quoted cell.
 @(test)
 tolerated_tokens :: proc(t: ^testing.T) {
-	log := new(Log)
+	log := new(walktest.Log)
 	defer free(log)
 	Tokens :: struct {
 		text:   string,
@@ -260,7 +261,7 @@ tolerated_tokens :: proc(t: ^testing.T) {
 		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Map, .Value, 0}, {0, 3, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {4, 1, .Plain, .Key, 0}, {8, 3, .Plain, .Value, 1}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
 	}) {
 		log^ = {}
-		hi, fault := dsv.walk(transmute([]u8)c.text, 0, .Csv, {tolerate = c.tol}, log, &core.Hook_Regs{}, log_hook)
+		hi, fault := dsv.walk(transmute([]u8)c.text, 0, .Csv, {tolerate = c.tol}, log, &core.Hook_Regs{}, walktest.log_hook)
 		testing.expectf(t, fault == nil && hi == u64(len(c.text)), "%q: %d %v", c.text, hi, fault)
 		testing.expectf(t, slice_eq(log.tokens[:log.n], c.tokens), "%q: %v", c.text, log.tokens[:log.n])
 	}

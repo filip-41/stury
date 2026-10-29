@@ -11,6 +11,7 @@ import cur "stury:csv"
 import core "../../../core"
 import dsv "../.."
 import gen "../gen"
+import walktest "../../../walktest"
 
 SEED :: #config(SEED, 1)
 ROUNDS :: #config(ROUNDS, 100_000)
@@ -28,7 +29,7 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 	for round in 0 ..< ROUNDS {
 		tsv := round % 2 == 1
 		gen.text(&text, tsv)
-		gen.mutate(&broken, text[:])
+		walktest.mutate(&broken, text[:], gen.SHARP)
 		for src in ([][]u8{text[:], broken[:]}) {
 			compared += 1
 			if !check(t, src, tsv, &log) {

@@ -19,11 +19,9 @@ read_cells :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, p
 		at := pos + int(k)
 		// A line that is empty, or holds only a CR, is no record: it sets no width and breaks none.
 		if at != rec_lo && !(at == rec_lo + 1 && base[rec_lo] == '\r') {
-			if width == 0 {
-				width = cells + 1
-			} else if cells + 1 != width && !ragged(w, cells + 1, width) {
+			if fault, _ := record_width(w, cells + 1, &width); fault {
 				w.rec_lo, w.cells, w.width = rec_lo, cells, width
-				return fault_at(rec_lo, .Bad_Structure, .Field_Count), true
+				return core.fault_at(u64(rec_lo), .Bad_Structure, u8(Detail.Field_Count)), true
 			}
 		}
 		rec_lo, cells = at + 1, 0
@@ -37,6 +35,20 @@ read_cells :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, p
 @(private)
 ragged :: #force_inline proc "contextless" (w: ^Pass($S, $H), cells, width: int) -> bool {
 	return .Ragged in w.tolerate && (w.no_header || cells < width)
+}
+
+// The first record sets `width`, and a later record of `cells` cells must match it unless `.Ragged` takes it. `wide`
+// says whether the record is the wider one, whose fault is at the delimiter past the width.
+@(private)
+record_width :: #force_inline proc "contextless" (w: ^Pass($S, $H), cells: int, width: ^int) -> (fault: bool, wide: bool) {
+	if width^ == 0 {
+		width^ = cells
+		return
+	}
+	if cells != width^ && !ragged(w, cells, width^) {
+		return true, cells > width^
+	}
+	return
 }
 
 // A column's header cell as the `Key` token its cell names it by. `Skip` asks for the cell's own token to be passed
@@ -71,6 +83,14 @@ put_value :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (
 @(private)
 key_of :: #force_inline proc "contextless" (base: [^]u8, field_lo, hi: int, $S: Spec) -> core.Token {
 	return {u64(field_lo), u32(hi - field_lo), .Plain, .Key, spelling(base, field_lo, hi, S)}
+}
+
+// The header cell from `field_lo` to `hi` as its column's key, where a buffer sized from `header_cells` has room.
+@(private)
+put_header_key :: #force_inline proc "contextless" (keys: []core.Token, cells: int, base: [^]u8, field_lo, hi: int, $S: Spec) {
+	if cells < len(keys) {
+		keys[cells] = key_of(base, field_lo, hi, S)
+	}
 }
 
 // A cell's `Token.spelling`: 1 when it is quoted (CSV). A quoted cell's first byte is a quote, and an unquoted cell's
@@ -129,7 +149,7 @@ read_wide_keys :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "contex
 		field_lo = at + 1
 		cells += 1
 		if cells == width {
-			return fault_at(at, .Bad_Structure, .Field_Count)
+			return core.fault_at(u64(at), .Bad_Structure, u8(Detail.Field_Count))
 		}
 	}
 	unreachable()
@@ -150,7 +170,7 @@ read_wide_values :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "cont
 		field_lo = at + 1
 		cells += 1
 		if cells == width {
-			return fault_at(at, .Bad_Structure, .Field_Count)
+			return core.fault_at(u64(at), .Bad_Structure, u8(Detail.Field_Count))
 		}
 	}
 	unreachable()
@@ -200,9 +220,7 @@ read_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, 
 				kk := intrinsics.count_trailing_zeros(dm)
 				at := pos + int(kk)
 				dm &= dm - 1
-				if cells < len(keys) {
-					keys[cells] = key_of(base, field_lo, at, S)
-				}
+				put_header_key(keys, cells, base, field_lo, at, S)
 				cells += 1
 				field_lo = at + 1
 			}
@@ -210,7 +228,7 @@ read_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, 
 			// A hook passed this record over: its cells are still counted, and its bytes judged, but make no tokens.
 			if d != 0 {
 				if width != 0 && !(.Ragged in w.tolerate && no_header) && cells + int(intrinsics.count_ones(d)) >= width {
-					return fault_at(scan_record(base[:w.n], rec_lo, width, S).fault_at, .Bad_Structure, .Field_Count), true
+					return core.fault_at(u64(scan_record(base[:w.n], rec_lo, width, S).fault_at), .Bad_Structure, u8(Detail.Field_Count)), true
 				}
 				cells += int(intrinsics.count_ones(d))
 				field_lo = pos + 64 - int(intrinsics.count_leading_zeros(d))
@@ -284,9 +302,7 @@ read_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, 
 			}
 		}
 		if header {
-			if cells < len(keys) {
-				keys[cells] = key_of(base, field_lo, hi, S)
-			}
+			put_header_key(keys, cells, base, field_lo, hi, S)
 		} else if !muted {
 			a, lo, n := put_cell(h, on, hs, base, keys, no_header, cells, field_lo, hi, S)
 			if a == .Stop {
@@ -295,13 +311,11 @@ read_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, 
 		}
 		cells += 1
 		field_lo = at + 1
-		if width == 0 {
-			width = cells
-		} else if cells != width && !ragged(w, cells, width) {
-			if cells > width {
-				return fault_at(scan_record(base[:w.n], rec_lo, width, S).fault_at, .Bad_Structure, .Field_Count), true
+		if fault, wide := record_width(w, cells, &width); fault {
+			if wide {
+				return core.fault_at(u64(scan_record(base[:w.n], rec_lo, width, S).fault_at), .Bad_Structure, u8(Detail.Field_Count)), true
 			}
-			return fault_at(hi, .Bad_Structure, .Field_Count), true
+			return core.fault_at(u64(hi), .Bad_Structure, u8(Detail.Field_Count)), true
 		}
 		if !muted && !header {
 			if emit(h, on, hs, u64(hi), u32(at + 1 - hi), .End, .Value, 0) == .Stop {
@@ -327,13 +341,11 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^
 	// A trailing CR is a fault already reported, so this record holds a cell. A wide last record already stopped at
 	// the delimiter past its last kept cell. A short one makes its tokens, then the walk faults at the text's end.
 	if !w.in_header && w.width != 0 && w.cells + 1 > w.width && !ragged(w, w.cells + 1, w.width) {
-		return fault_at(scan_record(base[:w.n], w.rec_lo, w.width, S).fault_at, .Bad_Structure, .Field_Count), true
+		return core.fault_at(u64(scan_record(base[:w.n], w.rec_lo, w.width, S).fault_at), .Bad_Structure, u8(Detail.Field_Count)), true
 	}
 	hi := w.n
 	if w.in_header {
-		if w.cells < len(w.keys) {
-			w.keys[w.cells] = key_of(base, w.field_lo, hi, S)
-		}
+		put_header_key(w.keys, w.cells, base, w.field_lo, hi, S)
 		return 0, false
 	}
 	if !w.muted && !w.open {
@@ -351,10 +363,8 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^
 			return stopped(lo, n), true
 		}
 	}
-	if w.width == 0 {
-		w.width = w.cells + 1
-	} else if w.cells + 1 != w.width && !ragged(w, w.cells + 1, w.width) {
-		return fault_at(hi, .Bad_Structure, .Field_Count), true
+	if fault, _ := record_width(w, w.cells + 1, &w.width); fault {
+		return core.fault_at(u64(hi), .Bad_Structure, u8(Detail.Field_Count)), true
 	}
 	if !w.muted {
 		if emit(w.h, on, hs, u64(hi), 0, .End, .Value, 0) == .Stop {

@@ -1,6 +1,7 @@
 package kernel
 
 import "core:simd"
+import core ".."
 
 // UTF-8 validation of blocks by table lookups (Keiser and Lemire, "Validating UTF-8 in less than one instruction per
 // byte"). Three 16-entry tables, indexed by the high and low nibble of the byte before and the high nibble of the
@@ -93,6 +94,31 @@ before :: #force_inline proc "contextless" (prev, v: #simd[$N]u8, $K: int) -> #s
 		U :: #simd[N]u8
 		return simd.select(simd.lanes_lt(simd.indices(U), U(K)), simd.lanes_rotate_right(prev, K), simd.lanes_rotate_right(v, K))
 	}
+}
+
+// The UTF-8 character whose lead is at `p`, which is before `end` and at least 0x80, stepped over. A malformed one is
+// `Bad_Char` at its lead. One the text cuts short is `Truncated` while every byte present could still continue it,
+// else `Bad_Char`.
+utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+	c := p[0]
+	if c < 0xc2 || c > 0xf4 {
+		return p, .Bad_Char
+	}
+	need := 2 if c < 0xe0 else 3 if c < 0xf0 else 4
+	for i in 1 ..< need {
+		if p[i:] >= end {
+			return end, .Truncated
+		}
+		b := p[i]
+		bad := b & 0xc0 != 0x80
+		if i == 1 {
+			bad ||= c == 0xe0 && b < 0xa0 || c == 0xed && b > 0x9f || c == 0xf0 && b < 0x90 || c == 0xf4 && b > 0x8f
+		}
+		if bad {
+			return p, .Bad_Char
+		}
+	}
+	return p[need:], .None
 }
 
 // Non-zero lanes where the last bytes of `prev` start a sequence that needs more bytes than are left: a lead of four

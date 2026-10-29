@@ -478,49 +478,24 @@ escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) 
 	return q, .None
 }
 
-// `utf8_char`, which with `.Invalid_Utf8` in `tol` steps over a malformed sequence's maximal subpart: the longest
-// start of a well-formed sequence, at least one byte. A sequence the text cuts short is still `Truncated`, since the
-// string it stands in cannot close.
+// `kernel.utf8_char`, which with `.Invalid_Utf8` in `tol` steps over a malformed sequence's maximal subpart: the
+// longest start of a well-formed sequence, at least one byte. A sequence the text cuts short is still `Truncated`,
+// since the string it stands in cannot close.
 @(private)
 utf8_lax :: #force_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
-	q, kind = utf8_char(p, end)
+	q, kind = kernel.utf8_char(p, end)
 	if kind != .Bad_Char || .Invalid_Utf8 not_in tol {
 		return
 	}
-	// `utf8_char` cut at `p[n + 1:]` is `Truncated` while the first `n + 1` bytes start a well-formed sequence.
+	// `kernel.utf8_char` cut at `p[n + 1:]` is `Truncated` while the first `n + 1` bytes start a well-formed sequence.
 	n := 1
 	for n < 3 && p[n:] < end {
-		if _, k := utf8_char(p, p[n + 1:]); k != .Truncated {
+		if _, k := kernel.utf8_char(p, p[n + 1:]); k != .Truncated {
 			break
 		}
 		n += 1
 	}
 	return p[n:], .None
-}
-
-// The UTF-8 character whose lead is at `p` (at least 0x80), stepped over. A malformed one is `Bad_Char` at its
-// lead. One the text cuts short is `Truncated` while every byte present could still continue it, else `Bad_Char`.
-@(private)
-utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
-	c := p[0]
-	if c < 0xc2 || c > 0xf4 {
-		return p, .Bad_Char
-	}
-	need := 2 if c < 0xe0 else 3 if c < 0xf0 else 4
-	for i in 1 ..< need {
-		if p[i:] >= end {
-			return end, .Truncated
-		}
-		b := p[i]
-		bad := b & 0xc0 != 0x80
-		if i == 1 {
-			bad ||= c == 0xe0 && b < 0xa0 || c == 0xed && b > 0x9f || c == 0xf0 && b < 0x90 || c == 0xf4 && b > 0x8f
-		}
-		if bad {
-			return p, .Bad_Char
-		}
-	}
-	return p[need:], .None
 }
 
 // The byte a one-letter escape writes, or 0 for a letter that is not one.

@@ -41,6 +41,13 @@ Pass :: struct($S: Spec, $H: typeid) {
 	tolerate:  bit_set[Tolerance; u8],
 }
 
+// A CR is a fault when no LF follows it, and the CR in the block's last byte is the next block's to judge. `carried`
+// says a CR the block before left with no LF here, whose fault is at that byte.
+@(private)
+cr_fault :: #force_inline proc "contextless" (w: ^Pass($S, $H), cr, nl: u64) -> (bad: u64, carried: bool) {
+	return cr & ~(nl >> 1) & ~(u64(1) << 63), w.cr & ~nl != 0
+}
+
 // The one pass. `$EMIT` false compiles the hooked lane out: `validate` then touches no positions and no keys.
 @(private)
 pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool,
@@ -108,9 +115,8 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			if !w.quoted && q == 0 {
 				seps = d | nl
 				lfs = nl
-				// A CR is judged with the byte after it: the one in bit 63 is the next block's.
-				bad := crm & ~(nl >> 1) & ~(u64(1) << 63)
-				if w.cr & ~nl != 0 {
+				bad, carried := cr_fault(&w, crm, nl)
+				if carried {
 					fault = pos - 1
 				} else if bad != 0 {
 					fault = pos + int(intrinsics.count_trailing_zeros(bad))
@@ -120,6 +126,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			} else {
 				w.quoted = true
 				instr, closing, cr, bad, bare: u64
+				carried: bool
 				for {
 					// The bytes inside quoted fields, from the quotes: an opening quote flips the run on, a closing
 					// off. Once a text has held a quote, every block takes this way: a branch per block on its own
@@ -135,8 +142,9 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 					after := closing << 1 | w.close
 					bare = open & ~(seps << 1 | w.start | after)
 					bad = bare | after & ~(q | d | nl | crm | ~valid)
-					// A CR is judged with the byte after it: the one in bit 63 is the next block's.
-					bad |= cr & ~(nl >> 1) & ~(u64(1) << 63)
+					cr_bad, c := cr_fault(&w, cr, nl)
+					bad |= cr_bad
+					carried = c
 					// A tolerated bare quote is no quote: the block's quotes pair up again without it.
 					first := bad & -bad
 					if bare & first == 0 || .Bare_Quote not_in w.tolerate {
@@ -144,7 +152,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 					}
 					q &~= first
 				}
-				if w.cr & ~nl != 0 {
+				if carried {
 					fault = pos - 1
 				} else if bad != 0 {
 					fault = pos + int(intrinsics.count_trailing_zeros(bad))
@@ -168,8 +176,8 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			d, nl, crm, bs := m[0], m[1], m[2], m[3]
 			seps = d | nl
 			lfs = nl
-			bad := crm & ~(nl >> 1) & ~(u64(1) << 63)
-			if w.cr & ~nl != 0 {
+			bad, carried := cr_fault(&w, crm, nl)
+			if carried {
 				fault = pos - 1
 			} else if bad != 0 {
 				fault = pos + int(intrinsics.count_trailing_zeros(bad))
@@ -216,7 +224,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			// Every cell the block ends but the one open at its start is shorter than the block, and that one can be
 			// longer than `Token.n` holds only if it opened that far before the block's end.
 			if pos - w.field_lo > int(max(u32)) - 64 && cell_too_wide(base, w.field_lo, pos, seps) {
-				return fault_at(w.field_lo, .Too_Wide)
+				return core.fault_at(u64(w.field_lo), .Too_Wide)
 			}
 			if r, done := read_tokens(&w, base, pos, seps, lfs, &hs, on); done {
 				return r
@@ -228,7 +236,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		}
 
 		if fault >= 0 {
-			return fault_at(fault, kind, detail)
+			return core.fault_at(u64(fault), kind, u8(detail))
 		}
 		pos += 64
 	}
@@ -236,27 +244,27 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 	// What only the text's end shows, in text order: a CR or a backslash the last block left open, a UTF-8 sequence
 	// left open, a quoted field that never closed, then the last cell's width.
 	if w.cr != 0 {
-		return fault_at(n - 1, .Bad_Char)
+		return core.fault_at(u64(n - 1), .Bad_Char)
 	}
 	when S == .Tsv {
 		if w.esc != 0 {
-			return fault_at(n - 1, .Bad_Escape)
+			return core.fault_at(u64(n - 1), .Bad_Escape)
 		}
 	}
 	// A sequence the text cuts short in a cell is an ill-formed one: in a quoted field the quote is what is cut.
 	if w.prev_high && !kernel.utf8_ok(w.utf8) && .Invalid_Utf8 not_in w.tolerate {
 		if at, k := utf8_fault(src, int(lo), n); at >= 0 {
-			return fault_at(at, k)
+			return core.fault_at(u64(at), k)
 		}
 	}
 	when S == .Csv {
 		if w.in_quote != 0 {
-			return fault_at(n, .Truncated)
+			return core.fault_at(u64(n), .Truncated)
 		}
 	}
 	when EMIT {
 		if n - w.field_lo > int(max(u32)) {
-			return fault_at(w.field_lo, .Too_Wide)
+			return core.fault_at(u64(w.field_lo), .Too_Wide)
 		}
 	}
 
@@ -267,10 +275,8 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				return r
 			}
 		} else {
-			if w.width == 0 {
-				w.width = w.cells + 1
-			} else if w.cells + 1 != w.width && !ragged(&w, w.cells + 1, w.width) {
-				return fault_at(w.rec_lo, .Bad_Structure, .Field_Count)
+			if fault, _ := record_width(&w, w.cells + 1, &w.width); fault {
+				return core.fault_at(u64(w.rec_lo), .Bad_Structure, u8(Detail.Field_Count))
 			}
 		}
 	}
@@ -280,5 +286,5 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			return stopped(u64(n), 0)
 		}
 	}
-	return fault_at(n, .None)
+	return core.fault_at(u64(n), .None)
 }
