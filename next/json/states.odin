@@ -1,0 +1,253 @@
+package json
+
+import core "../core"
+
+// The registers every state takes: `p` the cursor, `end` one past the text, `d` the depth shifted left once with
+// the open container's kind in bit 0 (1 for an object), `w` the rest, and the hook's registers.
+
+// `p` stands where a value must start, past whitespace.
+@(private)
+st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	if p >= end {
+		return fault(w, hs, end, .Truncated)
+	}
+	// By class, so `true` and `false` take one branch.
+	switch VALUE_CLASS[p[0]] {
+	case .String:
+		q, esc, kind := string_exact(p, end)
+		if kind != NO_FAULT {
+			return fault(w, hs, q, kind)
+		}
+		if too_wide(p, q) {
+			return fault(w, hs, p, .Too_Wide)
+		}
+		if emit(w, on, &hs, .String, .Value, p, q, u16(esc)) == .Stop {
+			return stopped(w, hs, q)
+		}
+		return #must_tail st_after(q, end, d, w, hs.a, hs.b, hs.c, on)
+	case .Number:
+		q, kind := number(p, end)
+		if kind != NO_FAULT {
+			return fault(w, hs, q, kind)
+		}
+		if too_wide(p, q) {
+			return fault(w, hs, p, .Too_Wide)
+		}
+		if emit(w, on, &hs, .Number, .Value, p, q, 0) == .Stop {
+			return stopped(w, hs, q)
+		}
+		return #must_tail st_after(q, end, d, w, hs.a, hs.b, hs.c, on)
+	case .Literal:
+		q, e := literal(p, end)
+		if q == nil {
+			r, kind := literal_fault(p, end)
+			return fault(w, hs, r, kind, .Literal if kind == .Bad_Char else .None)
+		}
+		if emit(w, on, &hs, e, .Value, p, q, 0) == .Stop {
+			return stopped(w, hs, q)
+		}
+		return #must_tail st_after(q, end, d, w, hs.a, hs.b, hs.c, on)
+	case .Map:
+		if d >> 1 >= MAX_DEPTH {
+			return fault(w, hs, p, .Too_Deep)
+		}
+		w.stack[d >> 1] = u8(d & 1)
+		switch emit(w, on, &hs, .Map, .Value, p, p[1:], 0) {
+		case .Next:
+		case .Skip:
+			return #must_tail st_skip(p[1:], end, (d | 1) + 2, w, hs.a, hs.b, hs.c, on)
+		case .Stop:
+			return stopped(w, hs, p[1:])
+		}
+		return #must_tail st_open(p[1:], end, (d | 1) + 2, w, hs.a, hs.b, hs.c, on)
+	case .Array:
+		if d >> 1 >= MAX_DEPTH {
+			return fault(w, hs, p, .Too_Deep)
+		}
+		w.stack[d >> 1] = u8(d & 1)
+		switch emit(w, on, &hs, .Array, .Value, p, p[1:], 0) {
+		case .Next:
+		case .Skip:
+			return #must_tail st_skip(p[1:], end, (d | 1) + 1, w, hs.a, hs.b, hs.c, on)
+		case .Stop:
+			return stopped(w, hs, p[1:])
+		}
+		return #must_tail st_open(p[1:], end, (d | 1) + 1, w, hs.a, hs.b, hs.c, on)
+	case .Bad:
+	}
+	return fault(w, hs, p, .Bad_Char)
+}
+
+// `p` stands where an object's key must start, past whitespace: the key, its colon, and the value after it.
+@(private)
+st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	if p >= end {
+		return fault(w, hs, end, .Truncated)
+	}
+	if p[0] != '"' {
+		return fault(w, hs, p, .Bad_Char)
+	}
+	q, esc, kind := string_exact(p, end)
+	if kind != NO_FAULT {
+		return fault(w, hs, q, kind)
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	switch emit(w, on, &hs, .String, .Key, p, q, u16(esc)) {
+	case .Next:
+	case .Skip:
+		return #must_tail st_skip_member(q, end, d, w, hs.a, hs.b, hs.c, on)
+	case .Stop:
+		return stopped(w, hs, q)
+	}
+	r, colon_kind := colon(q, end)
+	if colon_kind != NO_FAULT {
+		return fault(w, hs, r, colon_kind)
+	}
+	return #must_tail st_value(r, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+// `p` stands right after an open bracket, `d` already the new container's.
+@(private)
+st_open :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q := skip_ws(p, end)
+	// `]` + 0x20 is `}`.
+	if q < end && q[0] == ']' | u8(d & 1) << 5 {
+		return #must_tail st_close(q, end, d, w, hs.a, hs.b, hs.c, on)
+	}
+	if d & 1 != 0 {
+		return #must_tail st_key(q, end, d, w, hs.a, hs.b, hs.c, on)
+	}
+	return #must_tail st_value(q, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+// `p` stands right after a value: a comma and the next member, the container's close, or the end of the document.
+@(private)
+st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	if d < 2 {
+		return ended(w, hs, p)
+	}
+	q := skip_ws(p, end)
+	if q >= end {
+		return fault(w, hs, end, .Truncated)
+	}
+	if q[0] == ',' {
+		r := skip_ws(q[1:], end)
+		if d & 1 != 0 {
+			return #must_tail st_key(r, end, d, w, hs.a, hs.b, hs.c, on)
+		}
+		return #must_tail st_value(r, end, d, w, hs.a, hs.b, hs.c, on)
+	}
+	if q[0] == ']' | u8(d & 1) << 5 {
+		return #must_tail st_close(q, end, d, w, hs.a, hs.b, hs.c, on)
+	}
+	return fault(w, hs, q, .Bad_Char)
+}
+
+// `p` stands on the close bracket of the container `d`: it and the run of closes after it, one state for the run.
+@(private)
+st_close :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	p := p
+	// The depth is carried apart from the kind bit, so the next close does not wait on the stack's load.
+	depth := d >> 1
+	stack := w.stack
+	for {
+		if emit(w, on, &hs, .End, .Value, p, p[1:], 0) == .Stop {
+			return stopped(w, hs, p[1:])
+		}
+		depth -= 1
+		p = p[1:]
+		if depth == 0 || p >= end || p[0] != ']' | stack[depth] << 5 {
+			break
+		}
+	}
+	k := stack[depth]
+	if k & PASS_END != 0 {
+		return #must_tail st_pass_end(p, end, d, w, hs.a, hs.b, hs.c, on)
+	}
+	return #must_tail st_after(p, end, depth << 1 | u64(k), w, hs.a, hs.b, hs.c, on)
+}
+
+// `p` stands right after the close that ends a walk passing over a skipped value. A state of its own, so the close
+// loop does not carry the result's position from byte to byte.
+@(private, cold)
+st_pass_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	return ended(w, {s0, s1, s2}, p)
+}
+
+// `p` stands right after the open bracket of a container whose hook asked to skip it, `d` the container's: the walk
+// without hooks reads up to its close, and this walk goes on after it.
+@(private, cold)
+st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	parent := d >> 1 - 1
+	w.stack[parent] |= PASS_END
+	r := pass_over(w, p, end, d, true)
+	if r & 0xff != 0 {
+		w.regs^ = hs
+		return r
+	}
+	w.stack[parent] &~= PASS_END
+	return #must_tail st_after(w.base[r >> 16:], end, parent << 1 | u64(w.stack[parent]), w, hs.a, hs.b, hs.c, on)
+}
+
+// `p` stands right after a key whose hook asked to skip its member's value: the colon, then the value read by the
+// walk without hooks, then this walk goes on after it.
+@(private, cold)
+st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q, kind := colon(p, end)
+	if kind != NO_FAULT {
+		return fault(w, hs, q, kind)
+	}
+	// A scalar is read as a document's root, where the walk ends after one value. A container is pushed here, as
+	// `st_value` pushes it, with this object's slot marked, so the walk ends at its close.
+	if q >= end || (q[0] != '{' && q[0] != '[') {
+		r := pass_over(w, q, end, 0, false)
+		if r & 0xff != 0 {
+			w.regs^ = hs
+			return r
+		}
+		return #must_tail st_after(w.base[r >> 16:], end, d, w, hs.a, hs.b, hs.c, on)
+	}
+	if d >> 1 >= MAX_DEPTH {
+		return fault(w, hs, q, .Too_Deep)
+	}
+	w.stack[d >> 1] = u8(d & 1) | PASS_END
+	r := pass_over(w, q[1:], end, (d | 1) + (2 if q[0] == '{' else 1), true)
+	if r & 0xff != 0 {
+		w.regs^ = hs
+		return r
+	}
+	w.stack[d >> 1] = u8(d & 1)
+	return #must_tail st_after(w.base[r >> 16:], end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+// What the first byte of a value starts.
+@(private)
+Value_Class :: enum u8 {
+	Bad,
+	String,
+	Number,
+	Literal,
+	Map,
+	Array,
+}
+
+@(private, rodata)
+VALUE_CLASS := [256]Value_Class {
+	'"' = .String,
+	'-' = .Number,
+	'0' ..= '9' = .Number,
+	't' = .Literal,
+	'f' = .Literal,
+	'n' = .Literal,
+	'{' = .Map,
+	'[' = .Array,
+}

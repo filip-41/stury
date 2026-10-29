@@ -1,15 +1,17 @@
 ODIN ?= $(or $(wildcard $(abspath ../../Odin-master/bin/odin)),odin)
 
 # The rebuilt layers, beside the tree they replace until each one moves to the root.
-LIB_PKGS  := core core/kernel
-TEST_PKGS := core/kernel/test
+LIB_PKGS  := core core/kernel json
+TEST_PKGS := core/kernel/test json/test
+# The test packages that read `-define:TIER`.
+TIER_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
 BUILD     := build
 
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: test test-x86 test-asan lint bench
+.PHONY: test test-x86 test-asan test-oracle lint bench
 
 # `$(call odin_each,VERB,PACKAGES,FLAGS,LABEL)` runs `odin VERB` over each package and stops at the first failure.
 define odin_each
@@ -35,15 +37,25 @@ test-x86:
 test-asan:
 	$(call odin_each,test,$(TEST_PKGS),-o:speed -sanitize:address -debug, (address))
 
+# The JSON walk against the current tree's `json.validate`, from a copy of next/ whose packages `core` and `json` are
+# renamed, since a program cannot hold two packages of one name. SEED and ROUNDS pass through.
+SEED ?= 1
+ROUNDS ?= 100000
+test-oracle:
+	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && mkdir -p $$d/n/next && cp -R core json $$d/n/next/ && \
+	sed -i.orig 's/^package core$$/package next_core/' $$d/n/next/core/*.odin && \
+	sed -i.orig 's/^package json$$/package next_json/' $$d/n/next/json/*.odin && \
+	$(ODIN) test $$d/n/next/json/test/oracle -o:speed -collection:stury=$(abspath ..) -define:SEED=$(SEED) -define:ROUNDS=$(ROUNDS) -out:$$d/oracle
+
 # Host, then the other architectures' sources: x86-64 and a target with neither NEON nor x86 vectors.
 lint:
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS),-no-entry-point $(LINT_FLAGS),)
 	$(ODIN) check bench $(LINT_FLAGS)
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
-	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for o in none speed; do \
-		echo "== $(TEST_PKGS) (linux_amd64 v4 -o:$$o)"; \
-		$(ODIN) test $(TEST_PKGS) -build-mode:obj -target:linux_amd64 -define:TIER=2 -o:$$o $(LINT_FLAGS) -out:$$d/t.o || exit 1; \
-	done
+	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for p in $(TIER_PKGS); do for o in none speed; do \
+		echo "== $$p (linux_amd64 v4 -o:$$o)"; \
+		$(ODIN) test $$p -build-mode:obj -target:linux_amd64 -define:TIER=2 -o:$$o $(LINT_FLAGS) -out:$$d/t.o || exit 1; \
+	done; done
 	$(call odin_each,check,$(LIB_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_riscv64, (linux_riscv64))
 
 # Kernel timings at release optimization, of the tier at place TIER of `Tier`. ROUNDS, CASES and COUNT pass through
