@@ -1,9 +1,9 @@
 # The kernel package
 
 `core/kernel` holds the vector code that every format's scanner is built on. It knows nothing about any formats, it
-loads input 64 bytes at a time, compares bytes, sorts them into sets, packs per-byte results into 64-bit masks, follows
-quoted strings and runs of bytes across blocks, lists the positions in a mask, and validates UTF-8. A format's walk
-calls these kernels in its hot loop and does the rest with scalar bit operations on the masks.
+loads input 64 bytes at a time, compares bytes, sorts them into sets, packs per-byte results into 64-bit masks, finds
+the bytes an escape escapes, and validates UTF-8. A format's walk calls these kernels where it reads a block at a time,
+and does the rest with scalar bit operations on the masks.
 
 This document explains how the package is split across files and CPUs, and why it has that shape. Most of the shape is
 forced by what Odin and LLVM do with vector code: the reasons are here so that a change does not undo one by accident.
@@ -12,7 +12,7 @@ forced by what Odin and LLVM do with vector code: the reasons are here so that a
 
 | File | Builds on | Holds |
 |---|---|---|
-| `kernel.odin` | every target | `Block`, tails, `align`, the nibble table and `classes`, `string_region`, `run_bytes`, `FLATTEN_STEP` |
+| `kernel.odin` | every target | `Block`, the copied tail, the nibble table and `classes`, `escaped` |
 | `arm64.odin` | arm64 | the block operations on NEON, one 16-byte register at a time |
 | `lanes64.odin` | everything but arm64 | the same operations on one 64-lane vector that LLVM splits to the target's width |
 | `amd64.odin` | x86-64 | `Tier` with v2, v3 and v4, `tier()`, and the kernels whose instructions differ by tier |
@@ -20,8 +20,8 @@ forced by what Odin and LLVM do with vector code: the reasons are here so that a
 | `utf8.odin` | every target | UTF-8 validation |
 
 There are two independent splits. The block operations (`load`, `eq`, `below`, `either`, `has`, `pack`, `pack_n`,
-`is_ascii`, `any_lane`, `any_below`, `first_lane`) split by how the target packs a mask. The kernels that take a tier
-(`lookup`, `prefix_xor`, `flatten`, `load_tail`, `load_padded`) split by whether the target has several instruction sets
+`is_ascii`, `any_lane`, `first_lane`) split by how the target packs a mask. The kernels that take a tier
+(`lookup`, `prefix_xor`, `load_padded`) split by whether the target has several instruction sets
 to choose between at run time. A target with neither NEON nor x86 vectors, such as riscv64, gets `lanes64.odin` and
 `single_tier.odin`, which is portable code that LLVM lowers as it can.
 
@@ -69,7 +69,7 @@ wrapper that `tier()` picks:
 
 ```odin
 count :: #force_inline proc "contextless" ($T: kernel.Tier, src: []u8, t: kernel.Nibble_Table, bits: u8) -> (n: int) {
-	// the loop over blocks, calling kernel.classes(T, ...), kernel.load_tail(T, ...) and the block operations
+	// the loop over blocks, calling kernel.classes(T, ...), kernel.load_padded(T, ...) and the block operations
 }
 
 when ODIN_ARCH == .amd64 {
@@ -105,7 +105,7 @@ bench loop is compiled with `FEATURES[T]`.
 Each rule below answers something Odin or LLVM does:
 
 - **A tier's instructions live in a small plain procedure with the tier's features** (`lookup_v2`, `lookup_v3`,
-  `lookup_v4`, `clmul_prefix_xor`, `masked_tail`, `paged_tail_v3`). The generic kernel (`lookup`) picks one with
+  `lookup_v4`, `clmul_prefix_xor`, `masked_tail`). The generic kernel (`lookup`) picks one with
   `when T == ...`. LLVM inlines the small procedure into the caller's wrapper, which has the same features.
 - **Those procedures are not `#force_inline`.** Odin refuses to force-inline a procedure with target features into one
   without them, and the generic kernels in between have none.
@@ -142,9 +142,8 @@ lane. Instead:
   instead of one cmtst.
 - **`pack_n`** packs two to four masks with the last round of adds shared between two masks. The walk packs its masks
   together for this reason.
-- **`any_lane` and `is_ascii`** reduce with `umaxv`, one instruction per block after the ORs. **`any_below`** reduces
-  with `uminv`. On x86 these go through `pack` instead: a packed mask costs one instruction per register, the same as a
-  vector test, and x86 has no byte minimum across a register.
+- **`any_lane` and `is_ascii`** reduce with `umaxv`, one instruction per block after the ORs. On x86 `any_lane` goes
+  through `pack` instead: a packed mask costs one instruction per register, the same as a vector test.
 - **`first_lane`** finds the first set lane of one 16-byte mask, for a reader that looks at a short span before it takes
   a whole block. x86 gathers one bit a lane (`pmovmskb`). NEON has no such instruction, so a narrowing shift (`shrn`)
   keeps four bits a lane and the trailing zero count is divided by four.
@@ -160,50 +159,13 @@ gives the bytes inside strings. On x86 it is one carry-less multiplication by al
 has. On arm64 a ladder of six shifts and XORs is faster than the carry-less multiply (`pmull`), which also needs the
 value moved into a vector register and back.
 
-**`flatten`** writes the positions of the set bits of a mask as `u16`s. On x86 it counts trailing zeros (`tzcnt`) and
-clears the lowest bit each time. arm64 has no trailing zero count, and LLVM builds one from a bit reversal and a leading
-zero count for every position, so the arm64 version reverses the mask once and counts leading zeros from then on. The
-x86 stores are volatile only to stop LLVM, in an AVX-512 caller, from turning the counts into a vector popcount
-sequence, which is slower. Both versions write positions in steps of `FLATTEN_STEP` slots, whatever the count. The
-branch to a second step and the loop after it are then taken alike at sparse and dense rates, instead of a loop exit
-that mispredicts once per mask. The cost is that the slots after the last position take junk, so the output buffer must
-hold `FLATTEN_STEP` slots past the last position. A mask with very few bits pays for a step it does not fill: for those
-a caller can loop on the mask directly.
-
-**`load_tail` and `load_padded`** are below.
+**`load_padded`** is below.
 
 ## The last partial block
 
-An input rarely ends on a 64-byte boundary. Copying the last bytes into a buffer is slow when inputs are short and many,
-so `load_tail` reads them in place where it can.
-
-- **v4** uses a masked load: it reads only the input's bytes, zeros the other lanes and never faults.
-- **The other tiers and arm64** use `paged_tail`. A 64-byte load from `lo` stays inside one 4 KiB page unless `lo` lies
-  in the page's last 63 bytes. In that case the input itself reaches the next page, so the load that ends at the input's
-  end, which starts in `lo`'s page, touches only pages the input touches. Either load may read bytes around the input,
-  never a page the input does not touch. 4 KiB is the smallest page of any target. The result's `shift` says which load
-  was taken and `live` which lanes are input.
-
-`align(mask, tail)` shifts a mask packed from the tail block into place and clears the bits outside the input. Masks
-from a tail go through `align` before anything that carries state from block to block reads them.
-
-The details of `paged_tail`:
-
-- **It is `#force_no_inline`.** Inlined where LLVM can see how large the input's allocation is, a load past its end is
-  undefined behaviour, and LLVM deletes the stores that filled the allocation.
-- **It is `no_sanitize_address`**, and the load is written in `read_paged_tail` rather than through `load`, so that ASan
-  skips it at every optimization level. The read past the end is deliberate.
-- **The load goes to a `#simd[64]u8` variable before the `transmute` to `Block`.** Odin folds a transmute of a load into
-  a load of `Block` at its own 16-byte alignment, which is an aligned `movaps` on x86 and faults on an unaligned input.
-  Rosetta does not fault on it, so the x86 tests under Rosetta cannot catch this.
-- **The load is a vector load, not an array load.** Odin lowers an array load to a `memcpy` at -o:none, and ASan checks
-  that.
-- **v3 has its own copy, `paged_tail_v3`, compiled with AVX2.** The default copy, compiled for v2, stores the block 16
-  bytes at a time, and the v3 caller reloads it 32 bytes at a time. A load that spans two stores cannot be forwarded
-  from them and waits for both to reach the cache.
-
-`load_padded` gives the tail followed by zeros, for a check that reads every lane, as UTF-8 validation does, where
-`align` cannot clear what the lanes outside the input did. v4 uses the masked load, the others copy.
+An input rarely ends on a 64-byte boundary. `load_padded` gives the bytes from `lo` to the input's end followed by
+zeros, for a check that reads every lane, as UTF-8 validation does. v4 uses a masked load, which reads only the input's
+bytes, zeros the other lanes and never faults. The other tiers and arm64 copy the bytes into a zeroed buffer.
 
 ## Byte sets
 
@@ -220,16 +182,10 @@ backslash, whitespace. There are two ways:
 `classes` works one vector register of the tier at a time (16, 32 or 64 bytes), because the lookup is one instruction
 per register on every tier.
 
-## Strings and runs
+## Escapes
 
-`string_region` takes a block's quote and escape masks and returns the quotes that no escape escapes and the bytes
-inside strings, and carries in `String_State` whether the block ended inside a string or in an odd run of escapes. The
-escape arithmetic is skipped for blocks without escapes, the common case. `escaped` finds the bytes after odd runs of
-escapes with one add per parity, so a run of any length costs the same.
-
-`run_bytes` gives the bytes of the runs in a mask that start at given bits, carrying a run across the block boundary.
-Adding a run's first bit carries through the whole run, so the bits the sum clears are the run. A walk takes a span of
-any length this way, without a loop per byte.
+`escaped` takes a block's escape mask and returns the bytes after odd runs of escapes, carrying to the next block
+whether the block ended in one. It uses one add per parity, so a run of any length costs the same.
 
 ## UTF-8
 

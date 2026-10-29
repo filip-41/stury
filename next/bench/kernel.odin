@@ -6,13 +6,11 @@ package bench
 //   skip <every>    blocks with no quote skipped by `any_lane`, one quote in `every` bytes, unit: a block.
 //   json <per256>   JSON's four sets by the nibble table, packed together, `per256` of their bytes in 256, unit: a block.
 //   csv <per256>    CSV's three sets by compares, packed together, `per256` of their bytes in 256, unit: a block.
-//   str <every>     unescaped quotes and string bytes by `string_region`, JSON's bytes 16 in 256 and one backslash in
-//                   `every` bytes, unit: a block.
+//   str <every>     the quotes no backslash escapes, by `escaped`, JSON's bytes 16 in 256 and one backslash in `every`
+//                   bytes, unit: a block.
 //   utf8 <every>    JSON's sets as in `json`, and UTF-8 checked per block, ASCII blocks skipped, JSON's bytes 16 in 256
 //                   and one three-byte character in `every` bytes, unit: a block.
 //   utf8all <every> `utf8`, every block checked in full.
-//   flatten <per256> the positions of the quotes listed by `flatten`, `per256` quotes in 256 bytes, unit: a block.
-//   tail <len>      quotes counted in inputs of `len` bytes, the last partial block by `load_tail`, unit: an input.
 // `-define:TIER=n` times the tier at place n of `k.Tier`, its loops compiled with the tier's features.
 
 import "base:intrinsics"
@@ -28,8 +26,6 @@ T :: k.Tier(#config(TIER, 0))
 
 L1_BYTES :: 32 * 1024
 SKIP_BYTES :: 1 << 20
-TAIL_BYTES :: 1 << 20
-TAIL_INPUTS :: 4096
 
 // `p`, read so that the compiler cannot prove it the same in every rep and hoist a rep's work out of the loop.
 opaque :: #force_inline proc "contextless" (p: ^[^]u8) -> [^]u8 {
@@ -108,12 +104,11 @@ run_str :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 	p := raw_data(buf)
 	for _ in 0 ..< reps {
 		q := opaque(&p)
-		s: k.String_State
+		odd: u64
 		for i := 0; i < len(buf); i += 64 {
 			b := k.load(q[i:])
 			m := k.pack_n([2]k.Block{k.eq(b, '"'), k.eq(b, '\\')})
-			quotes, inside := k.string_region(T, m[0], m[1], &s)
-			sink += quotes ~ inside
+			sink += m[0] &~ k.escaped(m[1], &odd)
 		}
 	}
 	return
@@ -140,44 +135,6 @@ run_utf8 :: #force_no_inline proc(buf: []u8, reps: int, t: k.Nibble_Table, s: [8
 	return
 }
 
-@(enable_target_feature = k.FEATURES[T])
-run_flatten :: #force_no_inline proc(buf: []u8, out: []u16, reps: int) -> (sink: u64) {
-	p := raw_data(buf)
-	for _ in 0 ..< reps {
-		q := opaque(&p)
-		n := 0
-		for i := 0; i < len(buf); i += 64 {
-			n = k.flatten(raw_data(out), n, k.pack(k.eq(k.load(q[i:]), '"')), u16(i))
-		}
-		sink += u64(n) + u64(out[n / 2])
-	}
-	return
-}
-
-count_quotes :: #force_inline proc "contextless" (src: []u8) -> (n: u64) {
-	lo := 0
-	for ; lo + 64 <= len(src); lo += 64 {
-		n += u64(bits.count_ones(k.pack(k.eq(k.load(raw_data(src[lo:])), '"'))))
-	}
-	if lo < len(src) {
-		t := k.load_tail(T, src, lo)
-		n += u64(bits.count_ones(k.align(k.pack(k.eq(t.block, '"')), t)))
-	}
-	return
-}
-
-@(enable_target_feature = k.FEATURES[T])
-run_tail :: #force_no_inline proc(buf: []u8, starts: []int, n, reps: int) -> (sink: u64) {
-	p := raw_data(buf)
-	for _ in 0 ..< reps {
-		q := opaque(&p)
-		for s in starts {
-			sink += count_quotes(q[s:][:n])
-		}
-	}
-	return
-}
-
 // `buf` filled with lowercase letters and, on average, `per256` bytes of `from` in every 256 bytes.
 fill :: proc(buf: []u8, per256: int, from: string) {
 	for &b in buf {
@@ -187,7 +144,7 @@ fill :: proc(buf: []u8, per256: int, from: string) {
 
 main :: proc() {
 	if len(os.args) != 4 {
-		fmt.eprintln("usage: bench pack|json|csv|str|utf8|utf8all|flatten|skip|tail <reps> <arg>")
+		fmt.eprintln("usage: bench pack|json|csv|str|utf8|utf8all|skip <reps> <arg>")
 		os.exit(2)
 	}
 	reps, reps_ok := strconv.parse_int(os.args[2])
@@ -236,14 +193,6 @@ main :: proc() {
 		t := time.tick_now()
 		sink = run_utf8(buf, reps, table, set_bits, os.args[1] == "utf8")
 		elapsed = time.tick_since(t)
-	case "flatten":
-		buf := make([]u8, L1_BYTES)
-		fill(buf, arg, "\"")
-		out := make([]u16, L1_BYTES + k.FLATTEN_STEP)
-		units = L1_BYTES / 64
-		t := time.tick_now()
-		sink = run_flatten(buf, out, reps)
-		elapsed = time.tick_since(t)
 	case "skip":
 		buf := make([]u8, SKIP_BYTES)
 		fill(buf, 0, "")
@@ -254,21 +203,6 @@ main :: proc() {
 		units = SKIP_BYTES / 64
 		t := time.tick_now()
 		sink = run_skip(buf, reps)
-		elapsed = time.tick_since(t)
-	case "tail":
-		if arg > TAIL_BYTES {
-			fmt.eprintln("tail inputs are at most", TAIL_BYTES, "bytes")
-			os.exit(2)
-		}
-		buf := make([]u8, TAIL_BYTES)
-		fill(buf, 16, "\"")
-		starts := make([]int, TAIL_INPUTS)
-		for &s in starts {
-			s = rand.int_max(TAIL_BYTES - arg + 1)
-		}
-		units = TAIL_INPUTS
-		t := time.tick_now()
-		sink = run_tail(buf, starts, arg, reps)
 		elapsed = time.tick_since(t)
 	case:
 		fmt.eprintln("unknown case", os.args[1])

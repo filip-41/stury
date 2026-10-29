@@ -58,12 +58,6 @@ any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
 	return pack(m) != 0
 }
 
-// Whether any byte of `b` is below `c`: the packed mask is the test, as in `any_lane`. x86 has no byte minimum across
-// a register.
-any_below :: #force_inline proc "contextless" (b: Block, c: u8) -> bool {
-	return pack(below(b, c)) != 0
-}
-
 // The first lane set in the 16 lane masks of `m`, or 16: one bit a lane by `pmovmskb`, and a bit past the lanes that
 // stands for the empty mask.
 first_lane :: #force_inline proc "contextless" (m: V) -> u64 {

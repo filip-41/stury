@@ -100,47 +100,8 @@ clmul_prefix_xor :: proc "contextless" (x: u64) -> u64 {
 	return u64(simd.extract(p, 0))
 }
 
-// The positions of the set bits of `m`, plus `base`, written from `out[n]` on, and the count after them. x86 counts
-// trailing zeros, so the walk goes up `m`. The stores are volatile only to keep each count a scalar `tzcnt`: in an
-// AVX-512 caller LLVM otherwise packs the counts into a vector popcount sequence, which is slower.
-flatten :: #force_inline proc "contextless" (out: [^]u16, n: int, m: u64, base: u16) -> int #no_bounds_check {
-	cnt := int(intrinsics.count_ones(m))
-	w := out[n:]
-	m := m
-	#unroll for k in 0 ..< 2 {
-		if k == 0 || cnt > FLATTEN_STEP * k {
-			#unroll for i in 0 ..< FLATTEN_STEP {
-				intrinsics.volatile_store(&w[FLATTEN_STEP * k + i], base + u16(intrinsics.count_trailing_zeros(m)))
-				m &= m - 1
-			}
-		}
-	}
-	for i := 2 * FLATTEN_STEP; i < cnt; i += 1 {
-		intrinsics.volatile_store(&w[i], base + u16(intrinsics.count_trailing_zeros(m)))
-		m &= m - 1
-	}
-	return n + cnt
-}
-
-// The bytes of `src` from `lo` to its end, fewer than 64, read in place: `lo < len(src) < lo + 64`. On v4 a masked
-// load reads only the input's bytes and zeros the other lanes.
-load_tail :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -> Tail {
-	when T == .V4 {
-		return {block = masked_tail(src, lo), live = u64(1) << u64(len(src) - lo) - 1}
-	} else when T == .V3 {
-		return paged_tail_v3(src, lo)
-	} else {
-		return paged_tail(src, lo)
-	}
-}
-
-@(private = "file", no_sanitize_address, enable_target_feature = FEATURES[.V3])
-paged_tail_v3 :: #force_no_inline proc "contextless" (src: []u8, lo: int) -> Tail {
-	return read_paged_tail(src, lo)
-}
-
 // The bytes of `src` from `lo` to its end, fewer than 64, followed by zeros: for a check that reads every lane, as
-// UTF-8 validation does, where `align` cannot clear what the lanes outside the input did.
+// UTF-8 validation does.
 load_padded :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -> Block {
 	when T == .V4 {
 		return masked_tail(src, lo)

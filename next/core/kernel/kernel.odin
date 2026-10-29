@@ -3,10 +3,9 @@ package kernel
 import "base:intrinsics"
 import "core:simd"
 
-// Format-neutral kernels on 64-byte blocks: loading a block, reading the last partial block of an input in place,
-// comparing bytes, sorting bytes into sets, packing per-byte masks into one bit per byte, following quoted strings and
-// runs of bytes across blocks, listing the positions in a mask, finding the first lane of a 16-byte mask, and
-// validating UTF-8 (utf8.odin). The operations are per architecture (arm64.odin, lanes64.odin). Kernels whose
+// Format-neutral kernels on 64-byte blocks: loading a block, and the last partial block of an input padded with zeros,
+// comparing bytes, sorting bytes into sets, packing per-byte masks into one bit per byte, finding the bytes an escape
+// escapes, finding the first lane of a 16-byte mask, and validating UTF-8 (utf8.odin). The operations are per architecture (arm64.odin, lanes64.odin). Kernels whose
 // instructions differ by CPU take a `Tier` as `$T` (amd64.odin, single_tier.odin).
 
 // 64 input bytes, or the 64 lane masks (0x00 or 0xFF) made from them, as four 16-byte vectors. Kernels that work
@@ -21,59 +20,12 @@ V :: #simd[16]u8
 @(private)
 W :: #simd[64]u8
 
-// The last partial block of an input. Lane j of `block` holds the input byte at `lo + j - shift`. Lanes outside the
-// input hold whatever memory is there, so a mask packed from `block` goes through `align` before anything that
-// carries state from block to block reads it.
-Tail :: struct {
-	block: Block,
-	shift: u64,
-	live:  u64,
-}
-
-// `load_tail` without a masked load: `lo < len(src) < lo + 64`. A 64-byte load
-// from `lo` stays in one 4 KiB page unless `lo` lies in the page's last 63 bytes. Then the input itself reaches the
-// next page, and the load that ends where the input ends, which starts in `lo`'s page, is taken instead. Either load
-// may read bytes around `src`, never a page that `src` does not touch. 4 KiB is the smallest page of any target.
-// Out of line: inlined where the compiler sees how large `src`'s allocation is, a load past its end is undefined, and
-// LLVM drops the writes that filled it. A tier with wider registers than the build's CPU reads its own copy
-// (`paged_tail_v3`), whose result the caller reloads as it was stored: a 32-byte load of a block stored 16 bytes at a
-// time waits for both stores to reach the cache.
-@(private, no_sanitize_address)
-paged_tail :: #force_no_inline proc "contextless" (src: []u8, lo: int) -> Tail {
-	return read_paged_tail(src, lo)
-}
-
-// The load is written here, not through `load`, so that ASan skips it at every optimization level.
-@(private, no_sanitize_address)
-read_paged_tail :: #force_inline proc "contextless" (src: []u8, lo: int) -> (t: Tail) {
-	rem := len(src) - lo
-	when ODIN_DEBUG {
-		assert_contextless(0 < rem && rem < 64)
-	}
-	p := raw_data(src)[lo:]
-	t.live = u64(1) << u64(rem) - 1
-	if uintptr(p) & 4095 > 4096 - 64 {
-		t.shift = u64(64 - rem)
-		p = intrinsics.ptr_offset(p, -int(t.shift))
-	}
-	// A vector load: Odin lowers an array load to a `memcpy` at -o:none, which ASan checks. Loaded into a variable
-	// first: Odin folds a `transmute` of the load into a load of `Block` at its own 16-byte alignment.
-	v := intrinsics.unaligned_load((^#simd[64]u8)(p))
-	t.block = transmute(Block)v
-	return
-}
-
 // `load_padded` without a masked load: a copy.
 @(private)
 copied_tail :: #force_inline proc "contextless" (src: []u8, lo: int) -> Block {
 	buf: [64]u8
 	intrinsics.mem_copy_non_overlapping(&buf, raw_data(src[lo:]), len(src) - lo)
 	return load(raw_data(buf[:]))
-}
-
-// A mask packed from `t.block`, one bit per input byte from `lo`, the bits past the input cleared.
-align :: #force_inline proc "contextless" (m: u64, t: Tail) -> u64 {
-	return m >> t.shift & t.live
 }
 
 // A table that sorts bytes into up to eight sets: byte `b` is in set k when `lo[b & 15] & hi[b >> 4]` shares a bit
@@ -116,26 +68,6 @@ classes :: #force_inline proc "contextless" ($T: Tier, b: Block, t: Nibble_Table
 	return transmute(Block)c
 }
 
-// Where the previous block left its strings: `inside` is all ones when it ended inside a string, `odd_escape` is 1
-// when it ended in an odd run of escape bytes, which escapes the first byte of the next block.
-String_State :: struct {
-	inside:     u64,
-	odd_escape: u64,
-}
-
-// The quotes of a block that no escape byte escapes, and its bytes inside a string, from its quote and escape bytes,
-// carrying `s` to the next block. An escape byte escapes the byte after it unless it is escaped itself. Blocks
-// without escape bytes are the common case and skip the escape arithmetic.
-string_region :: #force_inline proc "contextless" ($T: Tier, quote, escape: u64, s: ^String_State) -> (quotes, inside: u64) {
-	quotes = quote
-	if escape != 0 || s.odd_escape != 0 {
-		quotes &~= escaped(escape, &s.odd_escape)
-	}
-	inside = prefix_xor(T, quotes) ~ s.inside
-	s.inside = u64(i64(inside) >> 63)
-	return
-}
-
 // The bytes after an odd run of escape bytes. Adding a run's first bit to the escapes clears the run and sets the
 // bit after it, which lies an odd distance from the first bit when the run has odd length: an odd bit after a run
 // that starts on an even bit, an even bit after one that starts on an odd bit. A run that reaches the end of the
@@ -151,17 +83,3 @@ escaped :: #force_inline proc "contextless" (escape: u64, odd: ^u64) -> u64 {
 	odd^ = u64(overflow)
 	return (even_carries &~ escape & ~EVEN) | (odd_carries &~ escape & EVEN)
 }
-
-// The bytes of the runs in `runs` that start at a bit of `starts`, and of the run that `carry` (0 or 1) says goes on
-// from the block before, carrying to the next block whether such a run reaches the end of this one. `starts` holds
-// only first bits of runs. Adding a run's first bit carries through the run, so the bits the sum clears are the run.
-run_bytes :: #force_inline proc "contextless" (runs, starts: u64, carry: ^u64) -> u64 {
-	sum, out := intrinsics.overflow_add(runs, starts | carry^)
-	carry^ = u64(out)
-	return (sum ~ runs) & runs
-}
-
-// `flatten` writes positions in steps of this many slots, the first step whatever the count, so that its branch is
-// taken alike at sparse and dense rates: a mask with few bits pays for a step's slots, one with many saves the
-// mispredicted exit of a loop per bit. The slots after the last position take junk: `out` holds this many past it.
-FLATTEN_STEP :: 12

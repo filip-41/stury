@@ -77,11 +77,6 @@ is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
 	return simd.reduce_max(simd.bit_or(simd.bit_or(b[0], b[1]), simd.bit_or(b[2], b[3]))) < 0x80
 }
 
-// Whether any byte of `b` is below `c`: one `uminv` over the block, where the lane masks take a compare per register.
-any_below :: #force_inline proc "contextless" (b: Block, c: u8) -> bool {
-	return simd.reduce_min(simd.min(simd.min(b[0], b[1]), simd.min(b[2], b[3]))) < c
-}
-
 // Whether any lane mask is set. `umaxv` reduces a register in one instruction, an OR reduction goes through scalar
 // registers.
 any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
