@@ -1,20 +1,21 @@
 // Seeded JSON texts for the walk's tests: valid documents that touch every token, escape and UTF-8 width, and
-// mutations of them that break at a random byte.
+// mutations of them that break at a random byte. With `jsonc` a document also holds comments wherever whitespace may
+// stand and now and then a comma before a close bracket.
 package json_gen
 
 import "core:math/rand"
 
 // A valid document of at most `depth` levels, with whitespace of every kind between its tokens.
-text :: proc(out: ^[dynamic]u8, depth: int) {
-	ws(out)
-	value(out, depth)
-	ws(out)
+text :: proc(out: ^[dynamic]u8, depth: int, jsonc := false) {
+	ws(out, jsonc)
+	value(out, depth, jsonc)
+	ws(out, jsonc)
 }
 
 // A valid document of at most `depth` levels laid out as a pretty printer lays it out: each member on a line of its
 // own, indented a step of 1 to 8 spaces per level, so indents run past the 32 the walk predicts.
-pretty :: proc(out: ^[dynamic]u8, depth: int) {
-	pretty_value(out, depth, 0, 1 + rand.int_max(8))
+pretty :: proc(out: ^[dynamic]u8, depth: int, jsonc := false) {
+	pretty_value(out, depth, 0, 1 + rand.int_max(8), jsonc)
 }
 
 // `src` with one random edit: a byte replaced, deleted or inserted, or the text cut short.
@@ -40,7 +41,7 @@ mutate :: proc(out: ^[dynamic]u8, src: []u8) {
 
 // The bytes a mutation writes: every byte the grammar branches on, and bytes no state takes.
 @(private)
-SHARP :: "\"\\/{}[]:,0123456789-+.eEtrufalsn \t\r\nxu\x00\x1f\x7f\x80\xbf\xc0\xc2\xe0\xed\xf0\xf4\xf5\xff"
+SHARP :: "\"\\/*{}[]:,0123456789-+.eEtrufalsn \t\r\nxu\x00\x1f\x7f\x80\xbf\xc0\xc2\xe0\xed\xf0\xf4\xf5\xff"
 
 @(private)
 pick :: proc(s: string) -> u8 {
@@ -48,14 +49,49 @@ pick :: proc(s: string) -> u8 {
 }
 
 @(private)
-ws :: proc(out: ^[dynamic]u8) {
+ws :: proc(out: ^[dynamic]u8, jsonc: bool) {
 	for _ in 0 ..< rand.int_max(4) {
-		append(out, pick(" \t\r\n"))
+		if jsonc && rand.int_max(3) == 0 {
+			comment(out)
+		} else {
+			append(out, pick(" \t\r\n"))
+		}
+	}
+}
+
+// A `//` comment and the line end after it, or a `/* */` comment across lines, either one of a few bytes or past the
+// 64-byte blocks the readers load.
+@(private)
+comment :: proc(out: ^[dynamic]u8) {
+	PIECES :: []string{"c", " ", "*", "\"", "é", "😀", "\t"}
+	block := rand.int_max(2) == 0
+	append(out, "/*" if block else "//")
+	for _ in 0 ..< rand.int_max(8) {
+		if rand.int_max(8) == 0 {
+			for _ in 0 ..< rand.int_max(150) {
+				append(out, 'c')
+			}
+		}
+		// A `/` that follows `*` would end a block comment early.
+		append(out, rand.choice(PIECES) if block || rand.int_max(3) != 0 else rand.choice([]string{"/", "//", "/*", "*/"}))
+		if block && rand.int_max(6) == 0 {
+			append(out, pick("\r\n"))
+		}
+	}
+	append(out, "*/" if block else rand.choice([]string{"\n", "\r", "\r\n"}))
+}
+
+// A comma before the close bracket of a container that holds a value.
+@(private)
+trailing_comma :: proc(out: ^[dynamic]u8, n: int, jsonc: bool) {
+	if jsonc && n > 0 && rand.int_max(3) == 0 {
+		append(out, ',')
+		ws(out, jsonc)
 	}
 }
 
 @(private)
-value :: proc(out: ^[dynamic]u8, depth: int) {
+value :: proc(out: ^[dynamic]u8, depth: int, jsonc := false) {
 	switch rand.int_max(depth > 0 ? 7 : 5) {
 	case 0:
 		str(out)
@@ -72,35 +108,39 @@ value :: proc(out: ^[dynamic]u8, depth: int) {
 		}
 	case 5:
 		append(out, '[')
-		for i in 0 ..< rand.int_max(5) {
+		n := rand.int_max(5)
+		for i in 0 ..< n {
 			if i > 0 {
 				append(out, ',')
 			}
-			ws(out)
-			value(out, depth - 1)
-			ws(out)
+			ws(out, jsonc)
+			value(out, depth - 1, jsonc)
+			ws(out, jsonc)
 		}
+		trailing_comma(out, n, jsonc)
 		append(out, ']')
 	case:
 		append(out, '{')
-		for i in 0 ..< rand.int_max(5) {
+		n := rand.int_max(5)
+		for i in 0 ..< n {
 			if i > 0 {
 				append(out, ',')
 			}
-			ws(out)
+			ws(out, jsonc)
 			str(out)
-			ws(out)
+			ws(out, jsonc)
 			append(out, ':')
-			ws(out)
-			value(out, depth - 1)
-			ws(out)
+			ws(out, jsonc)
+			value(out, depth - 1, jsonc)
+			ws(out, jsonc)
 		}
+		trailing_comma(out, n, jsonc)
 		append(out, '}')
 	}
 }
 
 @(private)
-pretty_value :: proc(out: ^[dynamic]u8, depth, indent, step: int) {
+pretty_value :: proc(out: ^[dynamic]u8, depth, indent, step: int, jsonc: bool) {
 	if depth == 0 || rand.int_max(4) == 0 {
 		value(out, 0)
 		return
@@ -112,12 +152,24 @@ pretty_value :: proc(out: ^[dynamic]u8, depth, indent, step: int) {
 		if i > 0 {
 			append(out, ',')
 		}
+		// A comment at the end of the line before the member and one on a line of its own above it.
+		if jsonc && rand.int_max(3) == 0 {
+			append(out, ' ')
+			comment(out)
+		}
 		line(out, indent + step)
+		if jsonc && rand.int_max(3) == 0 {
+			comment(out)
+			line(out, indent + step)
+		}
 		if object {
 			str(out)
 			append(out, ": ")
 		}
-		pretty_value(out, depth - 1, indent + step, step)
+		pretty_value(out, depth - 1, indent + step, step, jsonc)
+	}
+	if jsonc && n > 0 && rand.int_max(3) == 0 {
+		append(out, ',')
 	}
 	if n > 0 {
 		line(out, indent)

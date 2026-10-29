@@ -19,6 +19,7 @@ change does not undo one by accident. `kernel.md` covers the vector code both wa
 | `json/strings.odin` | the string readers, from a two-load probe to a block reader per x86 tier |
 | `json/scalars.odin` | numbers and literals |
 | `json/whitespace.odin` | whitespace, the colon after a key, the indent predictor |
+| `json/comments.odin` | JSONC's comments: the reader, a run of them, and the states that give them roles |
 | `dsv/walk.odin` | dsv's interface, the dispatch to a pass per tier, the result word, the hook calls |
 | `dsv/pass.odin` | the one pass over 64-byte blocks and its state between blocks |
 | `dsv/records.odin` | what a block's separators end: cells and widths for `validate`, tokens for `walk` |
@@ -42,7 +43,8 @@ for the walk's tokens reads it.
 
 - `Spec` is a compile-time parameter. Each spec is its own instance of the walk, so a build carries the code of the
   specs it names and no other. Odin refuses a struct as a `$` parameter, so what a spec needs at run time, such as
-  whether a CSV text has a header, goes in `Options`.
+  whether a CSV text has a header, goes in `Options`. JSON's specs are `Json` (RFC 8259) and `Jsonc`. Each is strict
+  to itself: a spec reads its own grammar whole and refuses the rest, and there is no leniency option.
 - `$S` has no default. A caller names the grammar it reads.
 - A walk from byte 0 passes over one BOM, through `core.text_start`, as `validate` does. From any other byte a BOM
   is a bad byte.
@@ -50,8 +52,8 @@ for the walk's tokens reads it.
   it stopped on and there is no fault.
 - A walk reads one document, and `validate` judges a text that holds one. No format takes a framing option: where a
   document ends is the document's own business. A JSON walk passes over whitespace and the record separator 0x1E
-  before its document, so a stream of documents (NDJSON, RFC 7464, jq's input) is a loop of walks, each from where
-  the last one ended. A JSON walk with nothing but those left, or from past the text's end, makes no token and
+  before its document, and in JSONC comments with no document after them before the text's end or a 0x1E, so a
+  stream of documents (NDJSON, RFC 7464, jq's input) is a loop of walks, each from where the last one ended. A JSON walk with nothing but those left, or from past the text's end, makes no token and
   returns the text's end with no fault. A dsv text is one table, so its walk reads to the text's end, and from past
   the end it reads an empty table.
 - The walks are contextless, so a hook can call a walk. A walk that needs scratch takes it from the default heap
@@ -65,8 +67,10 @@ Token :: struct { lo: u64, n: u32, kind: Kind, role: Role, spelling: u16 }
 
 A token is 16 bytes, so it crosses a call in two registers. `lo` and `n` are its span in the text. `kind` says what it
 is: a scalar (`Null`, `False`, `True`, `Number`, `String`, `Plain`), a container's opening (`Array`, `Map`), or its
-`End`. `role` is `Key` for a JSON member's name and for the header cell that names a dsv cell's column. `spelling` is a
-detail only the format reads back: a JSON string that holds an escape, a CSV cell that is quoted. A token longer than
+`End`. `role` is `Key` for a JSON member's name and for the header cell that names a dsv cell's column, and past `Key`
+a fact: a comment, `Plain`, as `Comment`, `Comment_Inline` or `Comment_Foot`. A consumer that wants values only tests
+`role <= .Key`. `spelling` is a detail only the format reads back: a JSON string that holds an escape, a `/* */`
+comment, a CSV cell that is quoted. A token longer than
 `n` holds is the fault `Too_Wide`, so a span is never cut.
 
 ### Hooks
@@ -83,7 +87,8 @@ The `Action` a hook returns:
 
 - `Next` goes on.
 - `Skip` on an `Array` or `Map` passes the container with no more tokens, its `End` included, and on a `Key` passes
-  the member's value. The walk still judges the bytes it passes. On a scalar it is `Next`.
+  the comments before the member's value and the value. The walk still judges the bytes it passes. The comments after
+  a skipped value are still given. On a scalar it is `Next`.
 - `Stop` ends the walk at once, with no fault and the rest of the text unjudged.
 
 ### The result word
@@ -179,7 +184,7 @@ A string goes to the cheapest reader that can vouch for it, and falls through to
 
 ### Tiers
 
-The states are built once per target, for its floor (`STATE_TIER`: v2 on x86-64, the one tier elsewhere), with
+The states are built for one tier per target, its floor (`STATE_TIER`: v2 on x86-64, the one tier elsewhere), with
 `@(enable_target_feature = STATE_FEATURES)`. `#must_tail` cannot jump between procedures built with different
 features, and three copies of every state would triple the code that matters for the instruction cache. Only the block
 string reader differs by tier: `string_long` switches on `w.tier`, read once per walk from `kernel.tier()`, to a
@@ -217,6 +222,37 @@ A skipped value is read by `pass_over`: the same states instantiated with no hoo
 closes back to is marked with `PASS_END`. A close compares its byte with `]` and the slot's bits shifted in, and with
 that bit no byte of a valid text matches, so `st_close`'s loop stops as it reads the slot and the walk without hooks
 returns from `st_pass_end`. The walk with the hook clears the mark and goes on in `st_after`.
+
+`st_skip_member` passes the comments around the colon itself, so the skipped value's first byte decides whether it is
+pushed. A container read as a document's root would count its depth from 0.
+
+### Comments
+
+A spec adds to RFC 8259 through `FEATURES`, which the states test with `when`. A feature's code sits only where a state
+already refuses a byte or leaves its fast path: `st_value` on a byte of class `Bad`, `st_key` on a byte that is no
+quote, `st_colon` on a colon fault, and the separator states where a comment follows a value or its comma. In `Json`
+every `when` is false, and its instance holds none of JSONC's code.
+
+A `/` in one of those places hands over to a state in `comments.odin`, which reads the whole run of whitespace and
+comments up to the next token before it gives any of it to the hook, since what follows the run decides each comment's
+role. The rule is `core.Role`'s, the same for every format:
+
+- a comment on the line where the value before it ends is that value's `Comment_Inline`,
+- else, before a value, that value's `Comment`,
+- else, before a close bracket, the `Comment_Foot` of the value before it, or of the container when it is empty.
+
+A foot comes after its value's `End`, so an empty container's foot comes before its own `End`, which places it inside.
+
+The state that reads a comment after a value is handed the value's end, so a separator state routes a comma followed by
+a comment there rather than to the next member. After a document's root, comments past the root's line are its foot
+when the text ends after them or a 0x1E follows them, else they are the next document's, and the walk ends before them.
+A walk without hooks reads every run and gives nothing, and `validate` passes over the comments after its document as
+it checks that only whitespace follows.
+
+A comment's bytes are judged as a string's raw bytes are: UTF-8, and no control byte but a tab, and in a `/* */`
+comment CR and LF. A `//` comment ends at CR or LF. A `/` that opens no comment is `Bad_Char` at the `/`, and a `/*`
+the text ends inside is `Truncated`. Every spec with comments also takes a comma before a close bracket: a close after
+a run of comments is read with no look back at whether an open bracket or a comma came before the run.
 
 ## The dsv walk
 
@@ -304,9 +340,9 @@ From `next/`:
 | `make test` | the tests at -o:minimal and -o:speed |
 | `make test-x86` | the tests at v2 and v3 under Rosetta, `-define:WALK_TIER` picking the walks' tier |
 | `make test-asan` | the tests under AddressSanitizer |
-| `make test-oracle` | each walk against the current tree's `json` and `csv` on seeded texts and their mutations |
+| `make test-oracle` | each walk against the current tree's `json` and `csv` on seeded texts and their mutations, each JSON spec against the dialect of its name |
 | `make lint` | vet on the host, x86-64 and riscv64 |
 
 The tests check every fault at its byte and at every offset in a block, every prefix of generated texts with the bytes
 after it poisoned, Skip and Stop at random against the full walk's tokens, a hook that keeps its state behind `h`
-against one that keeps it in `Hook_Regs`, and JSON against JSONTestSuite.
+against one that keeps it in `Hook_Regs`, each comment's role, and JSON against JSONTestSuite.

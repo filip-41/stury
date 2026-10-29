@@ -5,10 +5,10 @@ import "core:io"
 // The errors of every layer live here, one type per layer, each with its own kinds. A layer's error holds the error
 // beneath it by value, one level. The walk's is `Fault`.
 
-// What went wrong in a walk, the same for every format, and where. Each member names the formats that raise it. Zero
-// is no fault.
+// What went wrong in a walk, the same for every format, and where. Each member names the formats that raise it.
 Fault_Kind :: enum u8 {
-	Truncated = 1, // json, dsv: the input ended inside a construct, at `len(src)`
+	None, // no fault
+	Truncated, // json, dsv: the input ended inside a construct, at `len(src)`
 	Bad_Char, // json, dsv: the first byte that cannot extend the construct, or that is not UTF-8
 	Bad_Escape, // json: at the escape's letter, or a lone surrogate half at its backslash, dsv (TSV): at the backslash
 	Bad_Number, // json: at the byte that breaks the number
@@ -20,7 +20,7 @@ Fault_Kind :: enum u8 {
 }
 
 // The kinds that name no byte of the text: `at` is 0 and says nothing.
-AT_NO_BYTE :: bit_set[Fault_Kind]{.No_Memory}
+AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory}
 
 // `at` is the byte the kind names. `detail` tells a format's own rules apart within a kind, 0 for none, and `rules`
 // is that format's table, which names and words them.
@@ -47,6 +47,7 @@ Rule :: struct {
 
 @(rodata)
 KIND_RULES := [Fault_Kind]Rule {
+	.None          = {"none", "No fault"},
 	.Truncated     = {"truncated", "Unfinished input"},
 	.Bad_Char      = {"bad_char", "Unexpected character"},
 	.Bad_Escape    = {"bad_escape", "Invalid escape"},

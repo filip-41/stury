@@ -263,5 +263,5 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			return stopped(u64(n), 0)
 		}
 	}
-	return fault_at(n, NO_FAULT)
+	return fault_at(n, .None)
 }

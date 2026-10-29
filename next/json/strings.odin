@@ -8,10 +8,6 @@ import kernel "../core/kernel"
 // The leaves the states step over tokens with: one past the token, or the fault's kind and the byte it is at
 // (`Truncated` at the end).
 
-// The leaf found no fault.
-@(private)
-NO_FAULT :: core.Fault_Kind(0)
-
 // Whether the token from `p` to `q` is longer than `Token.n` holds.
 @(private)
 too_wide :: #force_inline proc "contextless" (p, q: [^]u8) -> bool {
@@ -232,7 +228,7 @@ string_long :: #force_inline proc "contextless" (tier: kernel.Tier, p, end: [^]u
 	if q == nil {
 		return string_exact(p, end)
 	}
-	return q, esc, NO_FAULT
+	return q, esc, .None
 }
 
 // `string_span` per tier, each out of line with its tier's features, since the states are built once for the floor.
@@ -371,10 +367,10 @@ string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8
 		c := q[0]
 		switch {
 		case c == '"':
-			return q[1:], esc, NO_FAULT
+			return q[1:], esc, .None
 		case c == '\\':
 			esc = true
-			if q, kind = escape_exact(q, end); kind != NO_FAULT {
+			if q, kind = escape_exact(q, end); kind != .None {
 				return q, false, kind
 			}
 		case c < 0x20:
@@ -382,7 +378,7 @@ string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8
 		case c < 0x80:
 			q = q[1:]
 		case:
-			if q, kind = utf8_char(q, end); kind != NO_FAULT {
+			if q, kind = utf8_char(q, end); kind != .None {
 				return q, false, kind
 			}
 		}
@@ -398,7 +394,7 @@ escape_exact :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: core.Faul
 		return end, .Truncated
 	}
 	if ESC_BYTE[q[0]] != 0 {
-		return q[1:], NO_FAULT
+		return q[1:], .None
 	}
 	if q[0] != 'u' {
 		return q, .Bad_Escape
@@ -447,7 +443,7 @@ escape_exact :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: core.Faul
 		}
 		q = q[6:]
 	}
-	return q, NO_FAULT
+	return q, .None
 }
 
 // The UTF-8 character whose lead is at `p` (at least 0x80), stepped over. A malformed one is `Bad_Char` at its
@@ -472,7 +468,7 @@ utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind
 			return p, .Bad_Char
 		}
 	}
-	return p[need:], NO_FAULT
+	return p[need:], .None
 }
 
 // The byte a one-letter escape writes, or 0 for a letter that is not one.

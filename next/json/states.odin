@@ -32,7 +32,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Number:
 		q, kind := number(p, end)
-		if kind != NO_FAULT {
+		if kind != .None {
 			return fault(w, hs, q, kind)
 		}
 		if too_wide(p, q) {
@@ -78,6 +78,17 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		}
 		return #must_tail st_open(p[1:], end, (d | 1) + 1, ind, w, hs.a, hs.b, hs.c, on)
 	case .Bad:
+		when .Comments in FEATURES[S] {
+			if p[0] == '/' {
+				return #must_tail st_comments_value(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
+		// An array's close where a value must start follows a comma, or an open bracket and comments.
+		when .Trailing_Commas in FEATURES[S] {
+			if p[0] == ']' && d & 1 == 0 && d >= 2 {
+				return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
 	}
 	return fault(w, hs, p, .Bad_Char)
 }
@@ -90,6 +101,17 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 		return fault(w, hs, end, .Truncated)
 	}
 	if p[0] != '"' {
+		when .Comments in FEATURES[S] {
+			if p[0] == '/' {
+				return #must_tail st_comments_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
+		// An object's close where a key must start follows a comma, or an open bracket and comments.
+		when .Trailing_Commas in FEATURES[S] {
+			if p[0] == '}' {
+				return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
 		return fault(w, hs, p, .Bad_Char)
 	}
 	q, escaped := string_probe(p, end)
@@ -195,7 +217,7 @@ st_key_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, 
 st_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, esc, kind := string_long(w.tier, p, end)
-	if kind != NO_FAULT {
+	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
 	if too_wide(p, q) {
@@ -237,7 +259,7 @@ st_key_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 st_key_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, esc, kind := string_long(w.tier, p, end)
-	if kind != NO_FAULT {
+	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
 	if too_wide(p, q) {
@@ -262,7 +284,12 @@ st_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		return #must_tail st_value(p[2:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
 	q, kind := colon(p, end)
-	if kind != NO_FAULT {
+	if kind != .None {
+		when .Comments in FEATURES[S] {
+			if kind == .Bad_Char && q[0] == '/' {
+				return #must_tail st_comments_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
 		return fault(w, hs, q, kind)
 	}
 	return #must_tail st_value(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -337,6 +364,13 @@ st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 	hs := core.Hook_Regs{s0, s1, s2}
 	ind := ind
 	if d < 2 {
+		// The root's inline and foot comments are its walk's, read only where a hook takes them: `validate` passes
+		// over them as it checks what follows the document.
+		when .Comments in FEATURES[S] && H != No_Hooks {
+			if x := skip_ws(p, end); x < end && x[0] == '/' {
+				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
 		return ended(w, hs, p)
 	}
 	q := indent_fast(p, end, &ind, .Close)
@@ -345,6 +379,13 @@ st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 	}
 	if q[0] == ',' {
 		r := indent_fast(q[1:], end, &ind, .Member)
+		// A comment after the comma may be on the value's line, which only a state that knows where the value
+		// ended can tell.
+		when .Comments in FEATURES[S] {
+			if r == nil || r[0] == '/' {
+				return #must_tail st_after_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
 		if r == nil {
 			return #must_tail st_member_ws(q[1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
@@ -355,6 +396,11 @@ st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 	}
 	if q[0] == ']' | u8(d & 1) << 5 {
 		return #must_tail st_close(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+	when .Comments in FEATURES[S] {
+		if q[0] == '/' {
+			return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
 	}
 	return fault(w, hs, q, .Bad_Char)
 }
@@ -369,10 +415,20 @@ st_after_ws :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 		return fault(w, hs, end, .Truncated)
 	}
 	if q[0] == ',' {
+		when .Comments in FEATURES[S] {
+			if r := skip_ws(q[1:], end); r < end && r[0] == '/' {
+				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
 		return #must_tail st_member_ws(q[1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
 	if q[0] == ']' | u8(d & 1) << 5 {
 		return #must_tail st_close(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+	when .Comments in FEATURES[S] {
+		if q[0] == '/' {
+			return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
 	}
 	return fault(w, hs, q, .Bad_Char)
 }
@@ -452,7 +508,20 @@ st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, kind := colon(p, end)
-	if kind != NO_FAULT {
+	// The comments around the colon are the skipped value's, passed over here so the value's first byte decides
+	// whether it is pushed.
+	when .Comments in FEATURES[S] {
+		if kind == .Bad_Char && q[0] == '/' {
+			q, _, kind = comment_run(q, end, false)
+			if kind == .None {
+				q, kind = colon(q, end)
+			}
+		}
+		if kind == .None && q < end && q[0] == '/' {
+			q, _, kind = comment_run(q, end, false)
+		}
+	}
+	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
 	// A scalar is read as a document's root, where the walk ends after one value. A container is pushed here, as
@@ -487,6 +556,11 @@ st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 	hs := core.Hook_Regs{s0, s1, s2}
 	ind := ind
 	if d < 2 {
+		when .Comments in FEATURES[S] && H != No_Hooks {
+			if x := skip_ws(p, end); x < end && x[0] == '/' {
+				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
 		return ended(w, hs, p)
 	}
 	q := indent_fast(p, end, &ind, .Close)
@@ -495,6 +569,11 @@ st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 	}
 	if q[0] == ',' {
 		r := indent_fast(q[1:], end, &ind, .Member)
+		when .Comments in FEATURES[S] {
+			if r == nil || r[0] == '/' {
+				return #must_tail st_after_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
 		if r == nil {
 			return #must_tail st_member_ws(q[1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
@@ -508,6 +587,11 @@ st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 	}
 	if q[0] == ']' | u8(d & 1) << 5 {
 		return #must_tail st_close(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+	when .Comments in FEATURES[S] {
+		if q[0] == '/' {
+			return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
 	}
 	return fault(w, hs, q, .Bad_Char)
 }
@@ -523,7 +607,7 @@ st_number_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 	for {
 		kind: core.Fault_Kind
 		q, kind = number(p, end)
-		if kind != NO_FAULT {
+		if kind != .None {
 			return fault(w, hs, q, kind)
 		}
 		if too_wide(p, q) {
@@ -597,7 +681,7 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 			return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		n, kind := number(r, end)
-		if kind != NO_FAULT {
+		if kind != .None {
 			return fault(w, hs, n, kind)
 		}
 		if too_wide(r, n) {
@@ -611,6 +695,11 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 			return #must_tail st_after_number(n, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		next := indent_fast(n[1:], end, &ind, .Member)
+		when .Comments in FEATURES[S] {
+			if next == nil || next[0] == '/' {
+				return #must_tail st_after_number(n, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
 		if next == nil {
 			return #must_tail st_member_ws(n[1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}

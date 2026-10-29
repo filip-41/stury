@@ -139,10 +139,6 @@ fault_at :: #force_inline proc "contextless" (pos: int, kind: core.Fault_Kind, d
 	return u64(pos) << 16 | u64(detail) << 8 | u64(kind)
 }
 
-// The pass found no fault.
-@(private)
-NO_FAULT :: core.Fault_Kind(0)
-
 // Set in the result's detail field when a hook asked the walk to stop: no fault, and `hi` is one past the token it
 // stopped on.
 @(private)
@@ -168,5 +164,5 @@ emit :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H
 // A hook stopped the walk on the token from `lo`, `n` bytes long.
 @(private)
 stopped :: #force_inline proc "contextless" (lo: u64, n: u32) -> u64 {
-	return fault_at(int(lo) + int(n), NO_FAULT, STOPPED)
+	return fault_at(int(lo) + int(n), .None, STOPPED)
 }

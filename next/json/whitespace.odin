@@ -15,7 +15,7 @@ colon :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: co
 	if q[0] != ':' {
 		return q, .Bad_Char
 	}
-	return skip_ws(q[1:], end), NO_FAULT
+	return skip_ws(q[1:], end), .None
 }
 
 // JSON whitespace from `p` on: the first byte past it, or `end`. A short run is read byte by byte, a long one 64

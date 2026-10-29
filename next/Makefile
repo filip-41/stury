@@ -29,10 +29,16 @@ test:
 # is inlined into the tier's procedures, and at -o:speed. TIER picks the kernels' tier and WALK_TIER the walks'.
 # On Apple silicon they run under Rosetta. v4 runs only on a machine with AVX-512 (TIER=2), and `lint` compiles it.
 test-x86:
-	$(call odin_each,test,$(TEST_PKGS),-o:none -target:darwin_amd64 -define:TIER=0 -define:WALK_TIER=0, (v2 -o:none))
-	$(call odin_each,test,$(TEST_PKGS),-o:speed -target:darwin_amd64 -define:TIER=0 -define:WALK_TIER=0, (v2))
-	$(call odin_each,test,$(TEST_PKGS),-o:none -target:darwin_amd64 -define:TIER=1 -define:WALK_TIER=1, (v3 -o:none))
-	$(call odin_each,test,$(TEST_PKGS),-o:speed -target:darwin_amd64 -define:TIER=1 -define:WALK_TIER=1, (v3))
+	$(call x86_tier,none,0, (v2 -o:none))
+	$(call x86_tier,speed,0, (v2))
+	$(call x86_tier,none,1, (v3 -o:none))
+	$(call x86_tier,speed,1, (v3))
+
+# `$(call x86_tier,OPT,TIER,LABEL)` runs the tests at one tier, `TIER` defined only where it is read.
+define x86_tier
+$(call odin_each,test,$(TIER_PKGS),-o:$(1) -target:darwin_amd64 -define:TIER=$(2) -define:WALK_TIER=$(2),$(3))
+$(call odin_each,test,$(filter-out $(TIER_PKGS),$(TEST_PKGS)),-o:$(1) -target:darwin_amd64 -define:WALK_TIER=$(2),$(3))
+endef
 
 test-asan:
 	$(call odin_each,test,$(TEST_PKGS),-o:speed -sanitize:address -debug, (address))

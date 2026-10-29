@@ -12,9 +12,25 @@ import kernel "../core/kernel"
 // `Too_Deep` at that bracket.
 MAX_DEPTH :: 1024
 
-// The grammar a text follows, at compile time, so a build carries only the specs it names.
+// The grammar a text follows, at compile time, so a build carries only the specs it names. Each is strict to itself.
 Spec :: enum u8 {
-	Strict, // RFC 8259
+	Json, // RFC 8259
+	Jsonc, // RFC 8259 with `//` and `/* */` comments wherever whitespace may stand, and a comma before a close bracket
+}
+
+// What a spec adds to RFC 8259, which the states test with `when`, so a spec's walk carries only its own rules.
+@(private)
+Feature :: enum u8 {
+	Comments,
+	Trailing_Commas,
+}
+
+// Every spec with comments also takes trailing commas: a close bracket after a run of comments is read with no look
+// back at whether an open bracket or a comma came before the run.
+@(private)
+FEATURES :: [Spec]bit_set[Feature] {
+	.Json  = {},
+	.Jsonc = {.Comments, .Trailing_Commas},
 }
 
 // What a walk takes at run time. The zero value is the default.
@@ -34,7 +50,8 @@ Detail :: enum u8 {
 @(rodata)
 RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}}}
 
-// A text that holds one document (RFC 8259): one leading BOM, the document, then only whitespace.
+// A text that holds one document: one leading BOM, the document, then only whitespace, and comments in a spec that
+// has them.
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
 	p := raw_data(src)
 	end := p[len(src):]
@@ -45,24 +62,45 @@ validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe
 		return fault_of(r)
 	}
 	q := skip_ws(p[r >> 16:], end)
+	when .Comments in FEATURES[S] {
+		kind: core.Fault_Kind
+		q, _, kind = comment_run(q, end, false)
+		if kind != .None {
+			return fault_of(fault_at(u64(intrinsics.ptr_sub(q, p)), kind))
+		}
+	}
 	if q != end {
 		return fault_of(fault_at(u64(intrinsics.ptr_sub(q, p)), .Trailing))
 	}
 	return nil
 }
 
-// One document read from `lo`: one past its last byte, or the fault. One BOM at the text's first byte, whitespace and
-// the record separator 0x1E are passed over before the document, so a stream of documents, whether NDJSON, RFC 7464
-// or jq's input, is a loop of walks each from where the last one ended. A text with nothing but those left, and a `lo`
-// past the text's end, holds no document: the walk makes no token and returns the text's end with no fault. When a
+// One document read from `lo`: one past its last byte, or the fault. One BOM at the text's first byte, whitespace, the
+// record separator 0x1E, and comments with no document after them before the text's end or a 0x1E are passed over
+// before the document, so a stream of documents, whether NDJSON, RFC 7464 or jq's input, is a loop of walks each from
+// where the last one ended. A text with nothing but those left, and a `lo` past the text's end, holds no document: the
+// walk makes no token and returns the text's end with no fault. When a
 // hook stops the walk, `hi` is one past the token it stopped on. `regs` goes to the first token and holds what the hook
 // returned last.
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
 	p := raw_data(src)
 	end := p[len(src):]
 	q := skip_ws(p[core.text_start(src, min(lo, u64(len(src)))):], end)
-	for q < end && q[0] == 0x1e {
-		q = skip_ws(q[1:], end)
+	for q < end {
+		if q[0] == 0x1e {
+			q = skip_ws(q[1:], end)
+			continue
+		}
+		// Comments before the text's end or a 0x1E are the foot of the document before them, or of none.
+		when .Comments in FEATURES[S] {
+			if q[0] == '/' {
+				if r, _, kind := comment_run(q, end, false); kind == .None && (r == end || r[0] == 0x1e) {
+					q = r
+					continue
+				}
+			}
+		}
+		break
 	}
 	if q == end {
 		return u64(len(src)), nil
@@ -145,7 +183,7 @@ walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec,
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
-// The features every state is built with: one build of the states for each target, on x86-64 for its floor tier.
+// The features every state is built with: one tier for each target, on x86-64 its floor.
 when ODIN_ARCH == .amd64 {
 	@(private)
 	STATE_TIER :: kernel.Tier.V2
@@ -195,12 +233,12 @@ fault :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs,
 @(private)
 ended :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8) -> u64 {
 	w.regs^ = hs
-	return fault_at(at(w, p), NO_FAULT)
+	return fault_at(at(w, p), .None)
 }
 
 // A hook stopped the walk on the token that ends at `p`.
 @(private)
 stopped :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8) -> u64 {
 	w.regs^ = hs
-	return fault_at(at(w, p), NO_FAULT, STOPPED)
+	return fault_at(at(w, p), .None, STOPPED)
 }

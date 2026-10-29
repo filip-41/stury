@@ -95,22 +95,85 @@ CASES := []Case {
 @(rodata)
 LITERAL_CASES := []Case{{"trUe", .Bad_Char, 2}, {"nulx", .Bad_Char, 3}, {"falsy", .Bad_Char, 4}}
 
+// JSONC's comments and trailing commas, under JSONC, and as the bad bytes they are in JSON.
+@(rodata)
+JSONC_CASES := []Case {
+	{"// a\n[1, /* b */ 2 // c\r] /* d */", nil, 0},
+	{"/**/[/* a\n*/]//", nil, 0},
+	{"{ /* a */ \"k\" /* b */ : /* c */ 1 /* d */ , /* e */ }", nil, 0},
+	{"[1, 2, ]", nil, 0},
+	{"{\"a\": 1, \"b\" : 2, \"c\":3,}", nil, 0},
+	{"{\"a\": [1,], \"b\": {\"c\": {},},}", nil, 0},
+	{"// é 😀\n1", nil, 0},
+	{"/* \"*/ \"x\"", nil, 0},
+	{"[1, /*", .Truncated, 6},
+	{"[1 /", .Bad_Char, 3},
+	{"/", .Bad_Char, 0},
+	{"1 /", .Bad_Char, 2},
+	{"1 /* a", .Truncated, 6},
+	{"/* a */", .Truncated, 7},
+	{"// a", .Truncated, 4},
+	{"{\"a\" /* b */", .Truncated, 12},
+	{"[1 /x]", .Bad_Char, 3},
+	{"[/ 1]", .Bad_Char, 1},
+	{"1 /x", .Bad_Char, 2},
+	{"{\"a\" /x : 1}", .Bad_Char, 5},
+	{"[// \xff\n1]", .Bad_Char, 4},
+	{"[/* \xc3\x28 */1]", .Bad_Char, 4},
+	{"[// a\x00\n1]", .Bad_Char, 5},
+	{"[/* a\x1f */1]", .Bad_Char, 5},
+	{"[/*\t\r\n*/ //\t\r1]", nil, 0},
+	{"[,]", .Bad_Char, 1},
+	{"[1,,]", .Bad_Char, 3},
+	{"{,}", .Bad_Char, 1},
+	{"[1, /* a */ ,]", .Bad_Char, 12},
+	{"{\"a\": 1, /* b */ 2}", .Bad_Char, 17},
+	{"1 // a\n2", .Trailing, 7},
+	{"1 /* a */ 2", .Trailing, 10},
+}
+
+// The refusals JSONC_CASES has under `.Json`.
+@(rodata)
+JSONC_IN_JSON := []Case {
+	{"// a\n[1]", .Bad_Char, 0},
+	{"[1 /* a */]", .Bad_Char, 3},
+	{"[1, 2, ]", .Bad_Char, 7},
+	{"1 // a", .Trailing, 2},
+}
+
 @(test)
 faults_at_their_byte :: proc(t: ^testing.T) {
 	for c in CASES {
-		expect_fault(t, c, .None)
+		expect_fault(t, c, .Json, .None)
 	}
 	for c in LITERAL_CASES {
-		expect_fault(t, c, .Literal)
+		expect_fault(t, c, .Json, .Literal)
+	}
+	for c in JSONC_CASES {
+		expect_fault(t, c, .Jsonc, .None)
+	}
+	for c in JSONC_IN_JSON {
+		expect_fault(t, c, .Json, .None)
 	}
 }
 
-expect_fault :: proc(t: ^testing.T, c: Case, detail: json.Detail) {
-	f, bad := json.validate(transmute([]u8)c.text, .Strict).?
+// `validate`'s verdict, and the same fault from a walk with hooks, which takes the comment states that emit, where
+// the walk finds a document: `Trailing` is `validate`'s alone.
+expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec, detail: json.Detail) {
+	src := transmute([]u8)c.text
+	verdict := json.validate(src, S)
+	f, bad := verdict.?
 	if c.kind == nil {
-		testing.expectf(t, !bad, "%q: %v", c.text, f)
+		testing.expectf(t, !bad, "%v %q: %v", S, c.text, f)
 	} else {
-		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset && f.detail == u8(detail), "%q: %v, want %v at %d", c.text, f, c.kind, c.offset)
+		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset && f.detail == u8(detail), "%v %q: %v, want %v at %d", S, c.text, f, c.kind, c.offset)
+	}
+	if c.kind != .Trailing {
+		log := new(Log)
+		defer free(log)
+		_, fault := json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, log_hook)
+		empty := fault == nil && log.n == 0
+		testing.expectf(t, empty || fault == verdict, "%v %q: hooked walk %v, validate %v", S, c.text, fault, verdict)
 	}
 }
 
@@ -163,7 +226,7 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 				for _ in 0 ..< pad {
 					append(&text, ' ')
 				}
-				f, bad := validate_fenced(text[:]).?
+				f, bad := validate_fenced(text[:], .Json).?
 				if piece.kind == nil {
 					if !testing.expectf(t, !bad, "%q: %v", text[:], f) {
 						return
@@ -173,7 +236,7 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 				}
 				// Cut before the closing quote.
 				resize(&text, 1 + k + len(piece.bytes))
-				f, bad = validate_fenced(text[:]).?
+				f, bad = validate_fenced(text[:], .Json).?
 				if piece.kind == nil && !testing.expectf(t, bad && f.kind == .Truncated && f.at == u64(len(text)), "%q: %v", text[:], f) {
 					return
 				}
@@ -206,7 +269,7 @@ escapes_by_byte :: proc(t: ^testing.T) {
 		for _ in 0 ..< 80 {
 			append(text, ' ')
 		}
-		f, bad := validate_fenced(text[:]).?
+		f, bad := validate_fenced(text[:], .Json).?
 		if want.kind == nil {
 			return testing.expectf(t, !bad, "%q: %v", text[:], f)
 		}
@@ -288,15 +351,15 @@ indents_by_byte :: proc(t: ^testing.T) {
 				for b in text {
 					append(&plain, '\r' if b == '\n' else b)
 				}
-				want := json.validate(plain[:], .Strict)
-				got := validate_fenced(text[:])
+				want := json.validate(plain[:], .Json)
+				got := validate_fenced(text[:], .Json)
 				if !testing.expectf(t, got == want, "%q: %v, want %v", text[:], got, want) {
 					return
 				}
 			}
 		}
 		resize(&text, 2 + k + 3 + k)
-		f, bad := validate_fenced(text[:]).?
+		f, bad := validate_fenced(text[:], .Json).?
 		if !testing.expectf(t, bad && f.kind == .Truncated && f.at == u64(len(text)), "%q: %v", text[:], f) {
 			return
 		}
@@ -336,9 +399,9 @@ colons_by_byte :: proc(t: ^testing.T) {
 				member(&ref, key_len + PAST, true, u8(x), u8(y))
 				member(&short, key_len, false, u8(x), u8(y))
 				member(&long, key_len + PAST, false, u8(x), u8(y))
-				want := json.validate(ref[:], .Strict)
-				got_short := shifted(json.validate(short[:], .Strict), PAST + 1)
-				got_long := shifted(json.validate(long[:], .Strict), 1)
+				want := json.validate(ref[:], .Json)
+				got_short := shifted(json.validate(short[:], .Json), PAST + 1)
+				got_long := shifted(json.validate(long[:], .Json), 1)
 				if !testing.expectf(t, got_short == want && got_long == want, "%q: %v %v, want %v", short[:], got_short, got_long, want) {
 					return
 				}
@@ -347,9 +410,9 @@ colons_by_byte :: proc(t: ^testing.T) {
 					continue
 				}
 				for n in 4 + key_len ..= 6 + key_len {
-					want = json.validate(ref[:n + PAST + 1], .Strict)
-					got_short = shifted(validate_fenced(short[:n]), PAST + 1)
-					got_long = shifted(validate_fenced(long[:n + PAST]), 1)
+					want = json.validate(ref[:n + PAST + 1], .Json)
+					got_short = shifted(validate_fenced(short[:n], .Json), PAST + 1)
+					got_long = shifted(validate_fenced(long[:n + PAST], .Json), 1)
 					if !testing.expectf(t, got_short == want && got_long == want, "%q: %v %v, want %v", short[:n], got_short, got_long, want) {
 						return
 					}
@@ -361,14 +424,14 @@ colons_by_byte :: proc(t: ^testing.T) {
 
 // `src` validated from a copy whose next bytes are poisoned, so that under `-sanitize:address` a read past its end
 // fails the run.
-validate_fenced :: proc(src: []u8) -> Maybe(core.Fault) {
+validate_fenced :: proc(src: []u8, $S: json.Spec) -> Maybe(core.Fault) {
 	FENCE :: 64
 	buf := make([]u8, len(src) + FENCE)
 	defer delete(buf)
 	copy(buf, src)
 	sanitizer.address_poison(buf[len(src):])
 	defer sanitizer.address_unpoison(buf[len(src):])
-	return json.validate(buf[:len(src)], .Strict)
+	return json.validate(buf[:len(src)], S)
 }
 
 // Every prefix of seeded texts, compact and pretty, read with its next bytes poisoned: a state's look past the
@@ -379,15 +442,17 @@ prefixes_fenced :: proc(t: ^testing.T) {
 	context.random_generator = rand.default_random_generator(&state)
 	text: [dynamic]u8
 	defer delete(text)
-	for round in 0 ..< 300 {
+	for round in 0 ..< 600 {
 		clear(&text)
+		jsonc := round % 4 >= 2
 		if round % 2 == 1 {
-			gen.pretty(&text, 1 + round % 4)
+			gen.pretty(&text, 1 + round % 4, jsonc)
 		} else {
-			gen.text(&text, 1 + round % 4)
+			gen.text(&text, 1 + round % 4, jsonc)
 		}
 		for n in 0 ..= len(text) {
-			if !testing.expectf(t, validate_fenced(text[:n]) == json.validate(text[:n], .Strict), "%q", text[:n]) {
+			same := validate_fenced(text[:n], .Jsonc) == json.validate(text[:n], .Jsonc) if jsonc else validate_fenced(text[:n], .Json) == json.validate(text[:n], .Json)
+			if !testing.expectf(t, same, "%q", text[:n]) {
 				return
 			}
 		}
@@ -397,12 +462,12 @@ prefixes_fenced :: proc(t: ^testing.T) {
 @(test)
 depth_limit :: proc(t: ^testing.T) {
 	deep := strings.concatenate({strings.repeat("[", json.MAX_DEPTH, context.temp_allocator), strings.repeat("]", json.MAX_DEPTH, context.temp_allocator)}, context.temp_allocator)
-	testing.expect_value(t, json.validate(transmute([]u8)deep, .Strict), nil)
+	testing.expect_value(t, json.validate(transmute([]u8)deep, .Json), nil)
 	run := strings.repeat("[", json.MAX_DEPTH + 1, context.temp_allocator)
-	f, bad := json.validate(transmute([]u8)run, .Strict).?
+	f, bad := json.validate(transmute([]u8)run, .Json).?
 	testing.expectf(t, bad && f.kind == .Too_Deep && f.at == json.MAX_DEPTH, "%v", f)
 	over :=strings.repeat("[{\"a\":", json.MAX_DEPTH, context.temp_allocator)
-	f, bad = json.validate(transmute([]u8)over, .Strict).?
+	f, bad = json.validate(transmute([]u8)over, .Json).?
 	testing.expectf(t, bad && f.kind == .Too_Deep && f.at == 6 * (json.MAX_DEPTH / 2), "%v", f)
 }
 
@@ -424,19 +489,19 @@ max_depth_option :: proc(t: ^testing.T) {
 	for depth in ([]u32{1, 3, json.MAX_DEPTH, json.MAX_DEPTH + 1, 5000}) {
 		n := int(depth)
 		fits := strings.concatenate({strings.repeat("[", n, context.temp_allocator), strings.repeat("]", n, context.temp_allocator)}, context.temp_allocator)
-		testing.expectf(t, json.validate(transmute([]u8)fits, .Strict, {max_depth = depth}) == nil, "%d levels", n)
+		testing.expectf(t, json.validate(transmute([]u8)fits, .Json, {max_depth = depth}) == nil, "%d levels", n)
 		over := strings.concatenate({strings.repeat("[{\"a\":", n / 2, context.temp_allocator), strings.repeat("[", n % 2 + 1, context.temp_allocator)}, context.temp_allocator)
-		f, bad := json.validate(transmute([]u8)over, .Strict, {max_depth = depth}).?
+		f, bad := json.validate(transmute([]u8)over, .Json, {max_depth = depth}).?
 		testing.expectf(t, bad && f.kind == .Too_Deep && f.at == u64(len(over) - 1), "%d levels: %v", n, f)
 		log^ = {}
-		_, fault := json.walk(transmute([]u8)over, 0, .Strict, {max_depth = depth}, log, &core.Hook_Regs{}, log_hook)
+		_, fault := json.walk(transmute([]u8)over, 0, .Json, {max_depth = depth}, log, &core.Hook_Regs{}, log_hook)
 		testing.expectf(t, fault == f && log.n == n + n / 2, "%d levels, walked: %v, %d tokens", n, fault, log.n)
 		maps := strings.concatenate({strings.repeat("{\"a\":", n, context.temp_allocator), "{"}, context.temp_allocator)
-		f, bad = json.validate(transmute([]u8)maps, .Strict, {max_depth = depth}).?
+		f, bad = json.validate(transmute([]u8)maps, .Json, {max_depth = depth}).?
 		testing.expectf(t, bad && f.kind == .Too_Deep && f.at == u64(len(maps) - 1), "%d objects: %v", n, f)
 		for skip in ([]int{0, 1}) {
 			k := skip
-			_, fault = json.walk(transmute([]u8)maps, 0, .Strict, {max_depth = depth}, &k, &core.Hook_Regs{}, skip_hook)
+			_, fault = json.walk(transmute([]u8)maps, 0, .Json, {max_depth = depth}, &k, &core.Hook_Regs{}, skip_hook)
 			testing.expectf(t, fault == f, "%d objects, token %d skipped: %v", n, skip, fault)
 		}
 	}
@@ -448,7 +513,7 @@ max_depth_option :: proc(t: ^testing.T) {
 rendered_faults :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(json.RULES.details), len(json.Detail))
 	src := transmute([]u8)string("{\n  \"a\": tru\n}")
-	f, bad := json.validate(src, .Strict).?
+	f, bad := json.validate(src, .Json).?
 	testing.expect(t, bad)
 	b := strings.builder_make(context.temp_allocator)
 	core.render(strings.to_writer(&b), src, f)
@@ -462,7 +527,7 @@ rendered_faults :: proc(t: ^testing.T) {
 		kind: core.Fault_Kind,
 		text: string,
 	}
-	for want in ([]Want{{0, .Bad_Char, "1:1: Unexpected character"}, {6, .Bad_Number, "2:5: Invalid number"}, {14, .Truncated, "3:2: Unfinished input"}, {2, .Trailing, "2:1: Unexpected text after the value"}, {0, .No_Memory, "Out of memory"}}) {
+	for want in ([]Want{{0, .Bad_Char, "1:1: Unexpected character"}, {6, .Bad_Number, "2:5: Invalid number"}, {14, .Truncated, "3:2: Unfinished input"}, {2, .Trailing, "2:1: Unexpected text after the value"}, {0, .No_Memory, "Out of memory"}, {0, .None, "No fault"}}) {
 		strings.builder_reset(&b)
 		core.render(strings.to_writer(&b), src, core.Fault{want.at, &json.RULES, want.kind, 0}, &lines)
 		testing.expect_value(t, strings.to_string(b), want.text)
@@ -489,7 +554,7 @@ json_test_suite :: proc(t: ^testing.T) {
 	suite := #load_directory("conformance/JSONTestSuite/test_parsing")
 	n: int
 	for file in suite {
-		_, bad := json.validate(file.data, .Strict).?
+		_, bad := json.validate(file.data, .Json).?
 		switch file.name[0] {
 		case 'y':
 			testing.expectf(t, !bad, "%s", file.name)
