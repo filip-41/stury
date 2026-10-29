@@ -29,8 +29,10 @@ header_cells :: #force_no_inline proc "contextless" (src: []u8, start: int, $S: 
 		break
 	}
 	when S == .Csv {
-		// A quote outside a quoted field opens one, and a `""` inside one holds it open.
+		// A quote at a cell's first byte opens a quoted field, and a `""` inside one holds it open. A quote anywhere
+		// else is a bare quote, a fault the pass reports or a byte of the cell.
 		quoted := false
+		first := true
 		for i < end {
 			c := src[i]
 			if quoted {
@@ -54,8 +56,9 @@ header_cells :: #force_no_inline proc "contextless" (src: []u8, start: int, $S: 
 			case ',':
 				n += 1
 			case '"':
-				quoted = true
+				quoted = first
 			}
+			first = c == ','
 			i += 1
 		}
 	} else {

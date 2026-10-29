@@ -23,6 +23,20 @@ Spec :: enum u8 {
 // What a walk takes at run time. The zero value has a header.
 Options :: struct {
 	no_header: bool, // the first record is data, not column names
+	// The rules a text may break, each read one fixed way. None by default.
+	tolerate:  bit_set[Tolerance; u8],
+}
+
+// A rule a caller lets a text break. The walk stops faulting there and keeps the cells' bytes as they are: the value
+// a cell decodes to is where the reading shows.
+Tolerance :: enum u8 {
+	// Ill-formed UTF-8 in a cell: each maximal subpart of an ill-formed sequence reads as U+FFFD.
+	Invalid_Utf8,
+	// A record with fewer cells than the first: its missing columns are absent. With no header a record may have any
+	// number of cells, and with one a cell past the header's last is still a fault.
+	Ragged,
+	// A quote inside an unquoted cell (CSV) is a byte of the cell, and the quotes after it pair up without it.
+	Bare_Quote,
 }
 
 // The rules of a delimited text within a `core.Fault_Kind`, in `core.Fault.detail`.
@@ -63,22 +77,22 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H,
 }
 
 // Whether `src`, after one leading BOM, is a text of spec `S`: the walk's verdict, with no hook. Whether the first
-// record is a header changes no verdict.
+// record is a header changes the verdict only under `.Ragged`.
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
-	return fault_of(judge(src, 0, S))
+	return fault_of(judge(src, 0, S, opts))
 }
 
 // The walk's verdict on the text from `lo`, with no hook. Only a text longer than `Token.n` holds can hold a cell
 // that is, and only the hooked lane keeps the spans of cells, so such a text is read by the hooked lane with a hook
-// that asks for nothing.
+// that asks for nothing and no keys.
 @(private)
-judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec) -> u64 {
+judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options) -> u64 {
 	h: No_Hooks
 	regs: core.Hook_Regs
 	if u64(len(src)) - lo > u64(max(u32)) {
-		return run(src, lo, S, {no_header = true}, &h, &regs, no_hook, true, nil)
+		return run(src, lo, S, opts, &h, &regs, no_hook, true, nil)
 	}
-	return run(src, lo, S, {}, &h, &regs, no_hook, false, nil)
+	return run(src, lo, S, opts, &h, &regs, no_hook, false, nil)
 }
 
 // A hook that asks for nothing: what `validate` passes for its tokens, which folds away to no code.

@@ -501,14 +501,14 @@ colons_by_byte :: proc(t: ^testing.T) {
 
 // `src` validated from a copy whose next bytes are poisoned, so that under `-sanitize:address` a read past its end
 // fails the run.
-validate_fenced :: proc(src: []u8, $S: json.Spec) -> Maybe(core.Fault) {
+validate_fenced :: proc(src: []u8, $S: json.Spec, opts := json.Options{}) -> Maybe(core.Fault) {
 	FENCE :: 64
 	buf := make([]u8, len(src) + FENCE)
 	defer delete(buf)
 	copy(buf, src)
 	sanitizer.address_poison(buf[len(src):])
 	defer sanitizer.address_unpoison(buf[len(src):])
-	return json.validate(buf[:len(src)], S)
+	return json.validate(buf[:len(src)], S, opts)
 }
 
 // Every prefix of seeded texts, compact and pretty, read with its next bytes poisoned: a state's look past the
@@ -589,6 +589,97 @@ max_depth_option :: proc(t: ^testing.T) {
 			_, fault = json.walk(transmute([]u8)maps, 0, .Json, {max_depth = depth}, &k, &core.Hook_Regs{}, skip_hook)
 			testing.expectf(t, fault == f, "%d objects, token %d skipped: %v", n, skip, fault)
 		}
+	}
+}
+
+Tolerated :: struct {
+	spec:   json.Spec,
+	text:   string,
+	tol:    bit_set[json.Tolerance; u8],
+	kind:   core.Fault_Kind, // 0 where `tol` takes every fault
+	offset: u64,
+}
+
+// Texts a tolerance takes, and faults no tolerance in the set takes, which stand as they do without it.
+@(rodata)
+TOLERATED := []Tolerated {
+	{.Json, "\"a\xffb\"", {.Invalid_Utf8}, nil, 0},
+	{.Json, "[\"\xe2\x82\",1]", {.Invalid_Utf8}, nil, 0},
+	{.Json, "\"\xc0\xaf\"", {.Invalid_Utf8}, nil, 0},
+	{.Json, "\"\xed\xa0\x80\"", {.Invalid_Utf8}, nil, 0},
+	{.Json, "\"\xf0\x9f\x98x\"", {.Invalid_Utf8}, nil, 0},
+	{.Json, "\"\xf4\x90\x80\x80\"", {.Invalid_Utf8}, nil, 0},
+	{.Json, "{\"\xff\":1}", {.Invalid_Utf8}, nil, 0},
+	{.Json, "\"\xe2\x82", {.Invalid_Utf8}, .Truncated, 3},
+	{.Json, "\"\\ud800\"", {.Invalid_Utf8}, .Bad_Escape, 1},
+	{.Json, "[\xff]", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Char, 1},
+	{.Json, "\"\\ud800\"", {.Lone_Surrogate}, nil, 0},
+	{.Json, "\"\\udc00x\"", {.Lone_Surrogate}, nil, 0},
+	{.Json, "\"\\ud800\\u0041\"", {.Lone_Surrogate}, nil, 0},
+	{.Json, "\"\\ud800\\ud800\"", {.Lone_Surrogate}, nil, 0},
+	{.Json, "\"\\ud800\\ud83d\\ude00\"", {.Lone_Surrogate}, nil, 0},
+	{.Json, "\"\\ud800\\u00g1\"", {.Lone_Surrogate}, .Bad_Escape, 11},
+	{.Json, "\"\\ud800\\u", {.Lone_Surrogate}, .Truncated, 9},
+	{.Json, "\"\xff\"", {.Lone_Surrogate}, .Bad_Char, 1},
+	{.Jsonc, "\"\xff\" // \\ud800", {.Invalid_Utf8}, nil, 0},
+	{.Jsonc, "// \xff\n1", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Char, 3},
+	{.Jsonc, "/* \xff */1", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Char, 3},
+	{.Json5, "'\xff'", {.Invalid_Utf8}, nil, 0},
+	{.Json5, "'\\\xff'", {.Invalid_Utf8}, nil, 0},
+	{.Json5, "'\\ud800'", {.Lone_Surrogate}, nil, 0},
+	{.Json5, "{\xff:1}", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Char, 1},
+	{.Json5, "{a\\ud800:1}", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Escape, 2},
+}
+
+// Each tolerance, through `validate` and a walk with hooks: what it takes was a fault without it, and what it does not
+// take faults alike. A tolerated string's token keeps its bytes.
+@(test)
+tolerances :: proc(t: ^testing.T) {
+	for c in TOLERATED {
+		switch c.spec {
+		case .Json:
+			expect_tolerated(t, c, .Json)
+		case .Jsonc:
+			expect_tolerated(t, c, .Jsonc)
+		case .Json5:
+			expect_tolerated(t, c, .Json5)
+		}
+	}
+	// Every offset the string readers branch on, as `strings_at_every_offset` sweeps them.
+	text: [dynamic]u8
+	defer delete(text)
+	for piece in ([]string{"\xff", "\xe2\x82", "\xf0\x9f\x98x", "\\ud800", "\\udc00\\u0041"}) {
+		for k in 0 ..< 140 {
+			clear(&text)
+			append(&text, '"')
+			for _ in 0 ..< k {
+				append(&text, 'a')
+			}
+			append(&text, piece)
+			append(&text, '"')
+			f, bad := validate_fenced(text[:], .Json, {tolerate = {.Invalid_Utf8, .Lone_Surrogate}}).?
+			if !testing.expectf(t, !bad, "%q: %v", text[:], f) {
+				return
+			}
+		}
+	}
+}
+
+expect_tolerated :: proc(t: ^testing.T, c: Tolerated, $S: json.Spec) {
+	src := transmute([]u8)c.text
+	strict := json.validate(src, S)
+	f, bad := json.validate(src, S, {tolerate = c.tol}).?
+	if c.kind == nil {
+		testing.expectf(t, !bad && strict != nil, "%v %q: %v, strict %v", S, c.text, f, strict)
+	} else {
+		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset, "%v %q: %v, want %v at %d", S, c.text, f, c.kind, c.offset)
+	}
+	log := new(Log)
+	defer free(log)
+	_, fault := json.walk(src, 0, S, {tolerate = c.tol}, log, &core.Hook_Regs{}, log_hook)
+	testing.expectf(t, fault == (f if bad else nil), "%v %q: hooked walk %v, validate %v", S, c.text, fault, f)
+	for tok in log.tokens[:log.n] {
+		testing.expectf(t, spans(src, tok), "%v %q: %v", S, c.text, tok)
 	}
 }
 

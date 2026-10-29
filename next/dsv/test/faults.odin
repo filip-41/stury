@@ -145,3 +145,97 @@ prefixes_fenced :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+Tolerated :: struct {
+	using c:   Case,
+	tsv:       bool,
+	no_header: bool,
+	tol:       bit_set[dsv.Tolerance; u8],
+}
+
+// Texts a tolerance takes, and faults no tolerance in the set takes, which stand as they do without it.
+@(rodata)
+TOLERATED := []Tolerated {
+	{{"a,b,c\n1,2\n3\n", nil, 0}, false, false, {.Ragged}},
+	{{"a,b\n1", nil, 0}, false, false, {.Ragged}},
+	{{"1,2\n3\n4,5,6\n7,8,9,10", nil, 0}, false, true, {.Ragged}},
+	{{"a,b\n1,2,3\n", .Bad_Structure, 4}, false, false, {.Ragged}},
+	{{"a,b\n1,2,3", .Bad_Structure, 4}, false, false, {.Ragged}},
+	{{"a,b\n1\n", .Bad_Structure, 4}, false, false, {.Invalid_Utf8, .Bare_Quote}},
+	{{"a\tb\tc\n1\n", nil, 0}, true, false, {.Ragged}},
+	{{"a,5\" pipe,b\n", nil, 0}, false, false, {.Bare_Quote}},
+	{{"x\"y\"z\n", nil, 0}, false, false, {.Bare_Quote}},
+	{{"a\"\"b\n", nil, 0}, false, false, {.Bare_Quote}},
+	{{"a\"b,\"c,\"\n", nil, 0}, false, false, {.Bare_Quote}},
+	{{"ab\"", nil, 0}, false, false, {.Bare_Quote}},
+	{{"a\"b,\"c\n", .Truncated, 7}, false, false, {.Bare_Quote}},
+	{{"\"a\"b\n", .Bad_Char, 3}, false, false, {.Bare_Quote}},
+	{{"a\"\rb\n", .Bad_Char, 2}, false, false, {.Bare_Quote}},
+	{{"a\"b\n", .Bad_Char, 1}, false, false, {.Ragged, .Invalid_Utf8}},
+	{{"a\xff\n", nil, 0}, false, false, {.Invalid_Utf8}},
+	{{"a\xed\xa0\x80,\xc0\xaf\n", nil, 0}, false, false, {.Invalid_Utf8}},
+	{{"\"\xc3\",\"x\"\n", nil, 0}, false, false, {.Invalid_Utf8}},
+	{{"a\xc3", nil, 0}, false, false, {.Invalid_Utf8}},
+	{{"\"a\xc3", .Truncated, 3}, false, false, {.Invalid_Utf8}},
+	{{"a\xf5\n", nil, 0}, true, false, {.Invalid_Utf8}},
+	{{"a\xf0\x9f\x98", nil, 0}, true, false, {.Invalid_Utf8}},
+	{{"a\\xb\n", .Bad_Escape, 1}, true, false, {.Invalid_Utf8, .Ragged, .Bare_Quote}},
+	{{"a\xff\n", .Bad_Char, 1}, false, false, {.Ragged, .Bare_Quote}},
+}
+
+// Each tolerance, through `validate` and `walk`, after 0 to 129 empty lines so that what it takes falls on every byte
+// of a block: what it takes was a fault without it, and what it does not take faults alike.
+@(test)
+tolerances :: proc(t: ^testing.T) {
+	buf: [dynamic]u8
+	defer delete(buf)
+	for k in 0 ..< 130 {
+		for c in TOLERATED {
+			clear(&buf)
+			for _ in 0 ..< k {
+				append(&buf, '\n')
+			}
+			append(&buf, c.text)
+			opts := dsv.Options{no_header = c.no_header, tolerate = c.tol}
+			strict, got, fault: Maybe(core.Fault)
+			hi: u64
+			if c.tsv {
+				strict = dsv.validate(buf[:], .Tsv, {no_header = c.no_header})
+				got = dsv.validate(buf[:], .Tsv, opts)
+				hi, fault = dsv.walk(buf[:], 0, .Tsv, opts, &struct {}{}, &core.Hook_Regs{}, regs_hook)
+			} else {
+				strict = dsv.validate(buf[:], .Csv, {no_header = c.no_header})
+				got = dsv.validate(buf[:], .Csv, opts)
+				hi, fault = dsv.walk(buf[:], 0, .Csv, opts, &struct {}{}, &core.Hook_Regs{}, regs_hook)
+			}
+			if !expect_fault(t, c, got, k) || !expect_fault(t, c, fault, k) || !testing.expectf(t, c.kind != nil || strict != nil, "%q: strict takes it", c.text) {
+				return
+			}
+			end := c.offset + u64(k) if c.kind != nil else u64(len(buf))
+			if !testing.expectf(t, hi == end, "%q shifted %d: hi %d, want %d", c.text, k, hi, end) {
+				return
+			}
+		}
+	}
+}
+
+// A ragged record's missing columns make no tokens, and a bare quote is a byte of its cell, which is no quoted cell.
+@(test)
+tolerated_tokens :: proc(t: ^testing.T) {
+	log := new(Log)
+	defer free(log)
+	Tokens :: struct {
+		text:   string,
+		tol:    bit_set[dsv.Tolerance; u8],
+		tokens: []core.Token,
+	}
+	for c in ([]Tokens {
+		{"a,b,c\n1,2\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {6, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
+		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Map, .Value, 0}, {0, 3, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {4, 1, .Plain, .Key, 0}, {8, 3, .Plain, .Value, 1}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
+	}) {
+		log^ = {}
+		hi, fault := dsv.walk(transmute([]u8)c.text, 0, .Csv, {tolerate = c.tol}, log, &core.Hook_Regs{}, log_hook)
+		testing.expectf(t, fault == nil && hi == u64(len(c.text)), "%q: %d %v", c.text, hi, fault)
+		testing.expectf(t, slice_eq(log.tokens[:log.n], c.tokens), "%q: %v", c.text, log.tokens[:log.n])
+	}
+}

@@ -41,6 +41,17 @@ Options :: struct {
 	// The deepest nesting a text may have, 0 for `MAX_DEPTH`. Up to `MAX_DEPTH` the walk keeps its depth stack on its
 	// own stack, and past it takes one byte per level from the default heap.
 	max_depth: u32,
+	// The rules a text may break, each read one fixed way. None by default.
+	tolerate:  bit_set[Tolerance; u8],
+}
+
+// A rule a caller lets a text break. The walk stops faulting there and keeps the token's bytes as they are: the value
+// a string decodes to is where the reading shows.
+Tolerance :: enum u8 {
+	// Ill-formed UTF-8 in a string: each maximal subpart of an ill-formed sequence reads as U+FFFD.
+	Invalid_Utf8,
+	// A `\u` escape of a surrogate half that no other half pairs with reads as U+FFFD.
+	Lone_Surrogate,
 }
 
 // JSON's rules within a `core.Fault_Kind`, in `core.Fault.detail`.
@@ -145,18 +156,20 @@ fault_of :: #force_inline proc "contextless" (r: u64) -> Maybe(core.Fault) {
 // write. `tier` picks the string reader built for this CPU.
 @(private)
 Walk :: struct($S: Spec, $H: typeid) {
-	base:    [^]u8,
-	hooks:   ^H,
-	stack:   [^]u8,
-	regs:    ^core.Hook_Regs,
-	depth:   u64,
-	tier:    kernel.Tier,
+	base:     [^]u8,
+	hooks:    ^H,
+	stack:    [^]u8,
+	regs:     ^core.Hook_Regs,
+	depth:    u64,
+	tier:     kernel.Tier,
 	// Whether the state that handed a comment run over read the comma before it. In the padding after `tier`, so a
 	// spec without comments builds the same walk.
-	crossed: bool,
+	crossed:  bool,
+	// `Options.tolerate`, read only where a string faults.
+	tolerate: bit_set[Tolerance; u8],
 	// Where the state handed over picks up: for `string_escaped`, the block of the string being read where its first
 	// backslash is, and for `st_comments_after`, the run's first comment, which the state before it read up to.
-	resume:  [^]u8,
+	resume:   [^]u8,
 }
 
 // Set in the stack slot of the depth where a walk that passes over a skipped value ends: a close to that depth ends
@@ -168,26 +181,26 @@ PASS_END :: 4
 @(private)
 walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	if opts.max_depth > MAX_DEPTH {
-		return walk_deep(src, p, S, u64(opts.max_depth), h, regs, on)
+		return walk_deep(src, p, S, u64(opts.max_depth), opts.tolerate, h, regs, on)
 	}
 	// `= ---` on an array leaves it unwritten (a struct would be zeroed), and every slot is written before it is read.
 	stack: [MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else MAX_DEPTH
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, nil}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, opts.tolerate, nil}
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
 // The document from `p` with a depth stack past `MAX_DEPTH`, from the default heap and freed before it returns, which
 // keeps the walk callable from a hook.
 @(private, cold)
-walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, depth: u64, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, depth: u64, tolerate: bit_set[Tolerance; u8], h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	context = runtime.default_context()
 	stack, err := make([]u8, depth)
 	if err != nil {
 		return fault_at(0, .No_Memory)
 	}
 	defer delete(stack)
-	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), false, nil}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), false, tolerate, nil}
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
@@ -209,7 +222,7 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d, ind: u64, $open: bool) -> u64 {
 	h: No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, false, nil}
+	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, false, w.tolerate, nil}
 	when open {
 		return st_open(p, end, d, ind, &v, 0, 0, 0, no_hook)
 	} else {

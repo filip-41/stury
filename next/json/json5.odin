@@ -42,7 +42,7 @@ st_number5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w
 @(private, enable_target_feature = STATE_FEATURES)
 st_string5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, esc, kind := string_long(w.tier, p, end, S)
+	q, esc, kind := string_long(w, p, end)
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
@@ -92,7 +92,7 @@ st_key5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 	esc: bool
 	kind: core.Fault_Kind
 	if p[0] == '\'' {
-		q, esc, kind = string_long(w.tier, p, end, S)
+		q, esc, kind = string_long(w, p, end)
 		if kind != .None {
 			return fault(w, hs, q, kind)
 		}
@@ -232,10 +232,10 @@ word5 :: proc "contextless" (p, end: [^]u8, word: string) -> (q: [^]u8, kind: co
 }
 
 // The JSON5 string whose opening quote, `"` or `'`, is at `p`, read byte by byte: one past its closing quote and
-// whether it holds an escape, or the fault at the first byte that breaks it. Every character but its quote, a
-// backslash, CR and LF stands for itself.
+// whether it holds an escape, or the fault at the first byte that breaks it, unless `tol` takes it. Every character
+// but its quote, a backslash, CR and LF stands for itself.
 @(private, cold)
-string5 :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: core.Fault_Kind) #no_bounds_check {
+string5 :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, esc: bool, kind: core.Fault_Kind) #no_bounds_check {
 	quote := p[0]
 	q = p[1:]
 	for {
@@ -248,7 +248,7 @@ string5 :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc
 			return q[1:], esc, .None
 		case c == '\\':
 			esc = true
-			if q, kind = escape5(q, end); kind != .None {
+			if q, kind = escape5(q, end, tol); kind != .None {
 				return q, false, kind
 			}
 		case c == '\n' || c == '\r':
@@ -256,7 +256,7 @@ string5 :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc
 		case c < 0x80:
 			q = q[1:]
 		case:
-			if q, kind = utf8_char(q, end); kind != .None {
+			if q, kind = utf8_lax(q, end, tol); kind != .None {
 				return q, false, kind
 			}
 		}
@@ -266,9 +266,9 @@ string5 :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc
 // The JSON5 escape at the backslash `e`, stepped over: `\0` before no digit, `\x` and two hex digits, a backslash
 // before a line end (CR LF is one), JSON's `\u` escape with its surrogate halves paired, and a backslash before any
 // other character but a digit, which stands for that character. A digit after `\0`, and `\1` to `\9`, are
-// `Bad_Escape` at the digit.
+// `Bad_Escape` at the digit. `tol` is the walk's tolerances.
 @(private)
-escape5 :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+escape5 :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
 	q = e[1:]
 	if q >= end {
 		return end, .Truncated
@@ -276,7 +276,7 @@ escape5 :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kin
 	c := q[0]
 	switch {
 	case c == 'u':
-		return escape_exact(e, end)
+		return escape_exact(e, end, tol)
 	case c == 'x':
 		for i in 1 ..= 2 {
 			if q[i:] >= end {
@@ -302,7 +302,7 @@ escape5 :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kin
 	case c < 0x80:
 		return q[1:], .None
 	}
-	return utf8_char(q, end)
+	return utf8_lax(q, end, tol)
 }
 
 // One character of an identifier at `q` that is no ASCII identifier byte: a `\u` escape or a UTF-8 character, which

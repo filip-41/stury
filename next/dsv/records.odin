@@ -21,7 +21,7 @@ read_cells :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, p
 		if at != rec_lo && !(at == rec_lo + 1 && base[rec_lo] == '\r') {
 			if width == 0 {
 				width = cells + 1
-			} else if cells + 1 != width {
+			} else if cells + 1 != width && !ragged(w, cells + 1, width) {
 				w.rec_lo, w.cells, w.width = rec_lo, cells, width
 				return fault_at(rec_lo, .Bad_Structure, .Field_Count), true
 			}
@@ -30,6 +30,13 @@ read_cells :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, p
 	}
 	w.rec_lo, w.cells, w.width = rec_lo, cells + int(intrinsics.count_ones(seps)), width
 	return 0, false
+}
+
+// Whether `.Ragged` takes a record of `cells` cells in a text whose first has `width`: any width with no header,
+// and fewer cells with one.
+@(private)
+ragged :: #force_inline proc "contextless" (w: ^Pass($S, $H), cells, width: int) -> bool {
+	return .Ragged in w.tolerate && (w.no_header || cells < width)
 }
 
 // A column's header cell as the `Key` token its cell names it by. `Skip` asks for the cell's own token to be passed
@@ -66,8 +73,9 @@ key_of :: #force_inline proc "contextless" (base: [^]u8, field_lo, hi: int, $S: 
 	return {u64(field_lo), u32(hi - field_lo), .Plain, .Key, spelling(base, field_lo, hi, S)}
 }
 
-// A cell's `Token.spelling`: 1 when it is quoted (CSV). A quoted cell's first byte is a quote, since the pass refuses
-// a quote anywhere else in an unquoted cell.
+// A cell's `Token.spelling`: 1 when it is quoted (CSV). A quoted cell's first byte is a quote, and an unquoted cell's
+// never is: a quote at a cell's first byte opens a quoted field, and one anywhere else is refused or, under
+// `.Bare_Quote`, a byte of the cell.
 @(private)
 spelling :: #force_inline proc "contextless" (base: [^]u8, field_lo, hi: int, $S: Spec) -> u16 {
 	when S == .Csv {
@@ -240,7 +248,7 @@ read_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, 
 		field_lo = at + 1
 		if width == 0 {
 			width = cells
-		} else if cells != width {
+		} else if cells != width && !ragged(w, cells, width) {
 			return fault_at(rec_lo, .Bad_Structure, .Field_Count), true
 		}
 		if !muted && !header {
@@ -267,7 +275,7 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^
 	// A trailing CR is a fault already reported, so this record holds a cell.
 	if w.width == 0 {
 		w.width = w.cells + 1
-	} else if w.cells + 1 != w.width {
+	} else if w.cells + 1 != w.width && !ragged(w, w.cells + 1, w.width) {
 		return fault_at(w.rec_lo, .Bad_Structure, .Field_Count), true
 	}
 	hi := w.n

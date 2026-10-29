@@ -37,6 +37,8 @@ Pass :: struct($S: Spec, $H: typeid) {
 	// Whether a block of the text has held a quote byte. A text whose blocks have held none holds no quoted field,
 	// so its blocks need no quote judgement and its quoted-field state stays clear.
 	quoted:    bool,
+	// `Options.tolerate`, read only where a block faults or a record's width differs.
+	tolerate:  bit_set[Tolerance; u8],
 }
 
 // The one pass. `$EMIT` false compiles the hooked lane out: `validate` then touches no positions and no keys.
@@ -52,6 +54,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		h = h,
 		keys = keys,
 		no_header = opts.no_header,
+		tolerate = opts.tolerate,
 		start = 1,
 		in_header = !opts.no_header,
 	}
@@ -67,7 +70,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		switch emit(h, on, &hs, lo, 0, .Array, .Value, 0) {
 		case .Next:
 		case .Skip:
-			return judge(src, lo, S)
+			return judge(src, lo, S, opts)
 		case .Stop:
 			return stopped(lo, 0)
 		}
@@ -115,22 +118,31 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				w.cr = crm >> 63
 			} else {
 				w.quoted = true
-				// The bytes inside quoted fields, from the quotes: an opening quote flips the run on, a closing off.
-				// Once a text has held a quote, every block takes this way: a branch per block on its own quotes
-				// mispredicts on a text that quotes some cells and not others.
-				instr := kernel.prefix_xor(T, q) ~ w.in_quote
-				open := q & instr
-				closing := q & ~instr
-				seps = (d | nl) & ~instr
-				lfs = nl & ~instr
-				cr := crm & ~instr
-				// A quote opens a field only at its first byte, and a closing quote may be followed only by a quote
-				// that doubles it, the delimiter, LF, CR, or the end of the text.
-				after := closing << 1 | w.close
-				bad := open & ~(seps << 1 | w.start | after)
-				bad |= after & ~(q | d | nl | crm | ~valid)
-				// A CR is judged with the byte after it: the one in bit 63 is the next block's.
-				bad |= cr & ~(nl >> 1) & ~(u64(1) << 63)
+				instr, closing, cr, bad: u64
+				for {
+					// The bytes inside quoted fields, from the quotes: an opening quote flips the run on, a closing
+					// off. Once a text has held a quote, every block takes this way: a branch per block on its own
+					// quotes mispredicts on a text that quotes some cells and not others.
+					instr = kernel.prefix_xor(T, q) ~ w.in_quote
+					open := q & instr
+					closing = q & ~instr
+					seps = (d | nl) & ~instr
+					lfs = nl & ~instr
+					cr = crm & ~instr
+					// A quote opens a field only at its first byte, and a closing quote may be followed only by a
+					// quote that doubles it, the delimiter, LF, CR, or the end of the text.
+					after := closing << 1 | w.close
+					bare := open & ~(seps << 1 | w.start | after)
+					bad = bare | after & ~(q | d | nl | crm | ~valid)
+					// A CR is judged with the byte after it: the one in bit 63 is the next block's.
+					bad |= cr & ~(nl >> 1) & ~(u64(1) << 63)
+					// A tolerated bare quote is no quote: the block's quotes pair up again without it.
+					first := bad & -bad
+					if bare & first == 0 || .Bare_Quote not_in w.tolerate {
+						break
+					}
+					q &~= first
+				}
 				if w.cr & ~nl != 0 {
 					fault = pos - 1
 				} else if bad != 0 {
@@ -182,7 +194,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			w.prev_high = true
 			check = true
 		}
-		if check && !kernel.utf8_clean(T, w.utf8) {
+		if check && !kernel.utf8_clean(T, w.utf8) && .Invalid_Utf8 not_in w.tolerate {
 			if at, k := utf8_fault(src, int(lo), pos); at >= 0 && (fault < 0 || at < fault) {
 				fault, kind = at, k
 			}
@@ -227,7 +239,8 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			return fault_at(n - 1, .Bad_Escape)
 		}
 	}
-	if w.prev_high && !kernel.utf8_ok(w.utf8) {
+	// A sequence the text cuts short in a cell is an ill-formed one: in a quoted field the quote is what is cut.
+	if w.prev_high && !kernel.utf8_ok(w.utf8) && .Invalid_Utf8 not_in w.tolerate {
 		if at, k := utf8_fault(src, int(lo), n); at >= 0 {
 			return fault_at(at, k)
 		}
@@ -252,7 +265,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		} else {
 			if w.width == 0 {
 				w.width = w.cells + 1
-			} else if w.cells + 1 != w.width {
+			} else if w.cells + 1 != w.width && !ragged(&w, w.cells + 1, w.width) {
 				return fault_at(w.rec_lo, .Bad_Structure, .Field_Count)
 			}
 		}

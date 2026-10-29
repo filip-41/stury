@@ -66,9 +66,9 @@ tokens_agree :: proc(t: ^testing.T, src: []u8, tsv, no_header: bool, log: ^[dyna
 	hi: u64
 	fault: Maybe(core.Fault)
 	if tsv {
-		hi, fault = dsv.walk(src, 0, .Tsv, {no_header}, log, &regs, log_hook)
+		hi, fault = dsv.walk(src, 0, .Tsv, {no_header = no_header}, log, &regs, log_hook)
 	} else {
-		hi, fault = dsv.walk(src, 0, .Csv, {no_header}, log, &regs, log_hook)
+		hi, fault = dsv.walk(src, 0, .Csv, {no_header = no_header}, log, &regs, log_hook)
 	}
 	if !testing.expectf(t, fault == nil && hi == u64(len(src)), "%q: walk of a valid text: %d %v", src, hi, fault) {
 		return false

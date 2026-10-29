@@ -210,11 +210,12 @@ SURROGATE_CLASSES := kernel.Nibble_Table {
 }
 
 // The string at `p`: one past its closing quote and whether it holds an escape, or the fault. The block reader of
-// this CPU's tier first, then `string_exact` for a string it does not vouch for, or in JSON5 `string5`.
+// this CPU's tier first, then `string_exact` for a string it does not vouch for, or in JSON5 `string5`, which take
+// the walk's tolerances.
 @(private)
-string_long :: #force_inline proc "contextless" (tier: kernel.Tier, p, end: [^]u8, $S: Spec) -> (q: [^]u8, esc: bool, kind: core.Fault_Kind) {
+string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: core.Fault_Kind) {
 	when ODIN_ARCH == .amd64 {
-		switch tier {
+		switch w.tier {
 		case .V4:
 			q, esc = string_span_v4(p, end, S)
 		case .V3:
@@ -227,9 +228,9 @@ string_long :: #force_inline proc "contextless" (tier: kernel.Tier, p, end: [^]u
 	}
 	if q == nil {
 		when .Es5 in FEATURES[S] {
-			return string5(p, end)
+			return string5(p, end, w.tolerate)
 		} else {
-			return string_exact(p, end)
+			return string_exact(p, end, w.tolerate)
 		}
 	}
 	return q, esc, .None
@@ -318,7 +319,7 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 				}
 				n := u64(1)
 				if c == '\\' {
-					r, kind := escape5(bs[k:], end)
+					r, kind := escape5(bs[k:], end, {})
 					if kind != .None {
 						return nil, false
 					}
@@ -381,9 +382,9 @@ hex4 :: #force_inline proc "contextless" (h: [^]u8) -> (unit: u32, ok: bool) #no
 }
 
 // The string whose opening quote is at `p`, read byte by byte: one past its closing quote and whether it holds an
-// escape, or the fault at the first byte that breaks it.
+// escape, or the fault at the first byte that breaks it, unless `tol` takes it.
 @(private, cold)
-string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: core.Fault_Kind) #no_bounds_check {
+string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, esc: bool, kind: core.Fault_Kind) #no_bounds_check {
 	q = p[1:]
 	for {
 		if q >= end {
@@ -395,7 +396,7 @@ string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8
 			return q[1:], esc, .None
 		case c == '\\':
 			esc = true
-			if q, kind = escape_exact(q, end); kind != .None {
+			if q, kind = escape_exact(q, end, tol); kind != .None {
 				return q, false, kind
 			}
 		case c < 0x20:
@@ -403,7 +404,7 @@ string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8
 		case c < 0x80:
 			q = q[1:]
 		case:
-			if q, kind = utf8_char(q, end); kind != .None {
+			if q, kind = utf8_lax(q, end, tol); kind != .None {
 				return q, false, kind
 			}
 		}
@@ -411,9 +412,9 @@ string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8
 }
 
 // The escape at the backslash `e`, stepped over. A bad letter or hex digit is `Bad_Escape` at that byte, a lone
-// surrogate half `Bad_Escape` at its backslash, and input that ends first `Truncated`.
+// surrogate half `Bad_Escape` at its backslash unless `tol` takes it, and input that ends first `Truncated`.
 @(private)
-escape_exact :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
 	q = e[1:]
 	if q >= end {
 		return end, .Truncated
@@ -439,6 +440,9 @@ escape_exact :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: core.Faul
 	}
 	if unit - 0xd800 < 0x800 {
 		if unit >= 0xdc00 {
+			if .Lone_Surrogate in tol {
+				return q, .None
+			}
 			return e, .Bad_Escape
 		}
 		// `\`, `u`, then a low half's four digits, each refused where it stands, so a text cut inside them is told
@@ -463,12 +467,35 @@ escape_exact :: proc "contextless" (e, end: [^]u8) -> (q: [^]u8, kind: core.Faul
 				ok = h != 0xff
 			}
 			if !ok {
+				if .Lone_Surrogate in tol {
+					return q, .None
+				}
 				return e, .Bad_Escape
 			}
 		}
 		q = q[6:]
 	}
 	return q, .None
+}
+
+// `utf8_char`, which with `.Invalid_Utf8` in `tol` steps over a malformed sequence's maximal subpart: the longest
+// start of a well-formed sequence, at least one byte. A sequence the text cuts short is still `Truncated`, since the
+// string it stands in cannot close.
+@(private)
+utf8_lax :: #force_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+	q, kind = utf8_char(p, end)
+	if kind != .Bad_Char || .Invalid_Utf8 not_in tol {
+		return
+	}
+	// `utf8_char` cut at `p[n + 1:]` is `Truncated` while the first `n + 1` bytes start a well-formed sequence.
+	n := 1
+	for n < 3 && p[n:] < end {
+		if _, k := utf8_char(p, p[n + 1:]); k != .Truncated {
+			break
+		}
+		n += 1
+	}
+	return p[n:], .None
 }
 
 // The UTF-8 character whose lead is at `p` (at least 0x80), stepped over. A malformed one is `Bad_Char` at its

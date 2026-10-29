@@ -45,7 +45,8 @@ for the walk's tokens reads it.
 - `Spec` is a compile-time parameter. Each spec is its own instance of the walk, so a build carries the code of the
   specs it names and no other. Odin refuses a struct as a `$` parameter, so what a spec needs at run time, such as
   whether a CSV text has a header, goes in `Options`. JSON's specs are `Json` (RFC 8259), `Jsonc` and `Json5` (JSON5 1.0.0). Each is strict
-  to itself: a spec reads its own grammar whole and refuses the rest, and there is no leniency option.
+  to itself: a spec reads its own grammar whole and refuses the rest, unless `Options.tolerate` names a rule it may
+  break (see Tolerances).
 - `$S` has no default. A caller names the grammar it reads.
 - A walk from byte 0 passes over one BOM, through `core.text_start`, as `validate` does. From any other byte a BOM
   is a bad byte.
@@ -118,6 +119,26 @@ table and renders the same way. A code stays the same from release to release, a
 `locate` gives a byte's line and column, both from 1, counting bytes. It counts lines from where a `Lines` count left
 off, so the faults of one text met in offset order cost one pass over it.
 
+### Tolerances
+
+`Options.tolerate` is a `bit_set` of the format's `Tolerance`, the rules a caller lets a text break. A rule in the set
+is read one fixed way, and one outside it is a fault. None is taken by default, and a tolerated rule gives no warning.
+
+| Tolerance | Format | Reading |
+|---|---|---|
+| `Invalid_Utf8` | json (in a string), dsv (in a cell) | each maximal subpart of an ill-formed sequence is U+FFFD |
+| `Lone_Surrogate` | json (in a string) | a `\u` escape of a surrogate half no other half pairs with is U+FFFD |
+| `Ragged` | dsv | a record with fewer cells than the first has its missing columns absent, with no header any width |
+| `Bare_Quote` | dsv (CSV) | a quote inside an unquoted cell is a byte of the cell |
+
+- A tolerance changes no structure and no token. A token keeps its bytes, and the value it decodes to is where the
+  reading shows.
+- A tolerated fault is found where the strict walk finds it, on the cold branch it faults from, so a clean text pays
+  nothing for it.
+- Some faults no tolerance takes: a number's grammar, text after a closing quote, anything structural, ill-formed
+  UTF-8 outside a string or a cell (a JSON comment or identifier, between tokens), and a sequence cut short by the end
+  of a string or quoted field that the text also cuts short (`Truncated`).
+
 ## The JSON walk
 
 The JSON walk is a state machine. Each grammar state is a procedure, `st_value`, `st_key`, `st_after`, `st_close` and
@@ -184,7 +205,8 @@ A string goes to the cheapest reader that can vouch for it, and falls through to
 4. `string_escaped` reads on from the block of the first backslash, judging each block's escapes in masks with no
    branch per escape.
 5. `string_long` reads blocks with UTF-8 validation, through one `string_span` per x86 tier.
-6. `string_exact` reads byte by byte and gives the exact fault for what no block reader vouches for.
+6. `string_exact` reads byte by byte and gives the exact fault for what no block reader vouches for. It is where
+   `Invalid_Utf8` and `Lone_Surrogate` take a fault, so the readers above them refuse what they would tolerate.
 
 ### Tiers
 
@@ -307,13 +329,16 @@ byte, its open cell and its cell count.
 - The bytes inside quoted fields are `prefix_xor` of the quote mask, XORed with whether the last block ended inside
   one. An opening quote is legal only at a cell's first byte, and a closing quote only before a quote that doubles it, a
   delimiter, a line end or the text's end. Both are mask tests.
+- Under `Bare_Quote` a bare opening quote, the block's first fault, is dropped from the quote mask and the block's
+  masks are made again, until the first fault is another or there is none. A quote at a cell's first byte still opens a
+  quoted field, so a quoted cell is still one whose first byte is a quote.
 - A text whose blocks have held no quote byte skips the quote work. `Pass.quoted` is set by the first block with a
   quote, and the text takes the quoted path from then on. A per-block test of the block's own quotes would mispredict on
   text that quotes some cells and not others.
 - A CR is judged with the byte after it. The CR in a block's last byte is the next block's to judge, and one the text
   ends on is a fault.
 - UTF-8 is judged only in blocks that are not all ASCII, and in the first ASCII block after one, which settles a
-  sequence the block before left open.
+  sequence the block before left open. Under `Invalid_Utf8` the error is found the same way and not reported.
 - A fault cuts the masks at its byte, so no separator past it is read and no token past it is made.
 - The last, partial block is loaded zero-padded. A zero is no separator, no quote and ASCII, and `valid` clears the
   lanes past the text.
@@ -332,7 +357,8 @@ value. Without a header a record is an `Array` of `Plain` values. A record's `En
   cell reads its keys with no bounds test (`put_key_n`).
 - The record's last cell and its `End` are the outer loop's work, once per record.
 - A record's state lives in locals for the block. `Pass` is one struct, and a field read per cell is a load per cell.
-- A cell past the header's last makes no token. Its record is wider than the header and faults at its line end.
+- A cell past the header's last makes no token. Its record is wider than the header and faults at its line end, also
+  under `Ragged`, which takes a record narrower than the first, and with no header any width.
 
 ### Tiers
 

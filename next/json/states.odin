@@ -233,7 +233,7 @@ st_key_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, 
 @(private, enable_target_feature = STATE_FEATURES)
 st_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, esc, kind := string_long(w.tier, p, end, S)
+	q, esc, kind := string_long(w, p, end)
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
@@ -275,7 +275,7 @@ st_key_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 @(private, enable_target_feature = STATE_FEATURES)
 st_key_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, esc, kind := string_long(w.tier, p, end, S)
+	q, esc, kind := string_long(w, p, end)
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
