@@ -102,7 +102,7 @@ expect_fault :: proc(t: ^testing.T, c: Case, detail: json.Detail) {
 }
 
 // A string's every byte at every offset its readers branch on: the 16-byte halves, the 64-byte blocks, the text's
-// last 64 bytes, and past them. `pad` plain bytes follow the closing quote or the cut.
+// last 64 bytes, and past them, after plain bytes or escapes. `pad` plain bytes follow the closing quote or the cut.
 @(test)
 strings_at_every_offset :: proc(t: ^testing.T) {
 	Piece :: struct {
@@ -122,19 +122,28 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 		{"\x01", .Bad_Char, 0},
 		{"\x1f", .Bad_Char, 0},
 		{"\\q", .Bad_Escape, 1},
+		{"\\\\", nil, 0},
+		{"\\\"", nil, 0},
+		{"\\ud83d\\ude00", nil, 0},
+		{"\\ud800", .Bad_Escape, 0},
+		{"\\udc00", .Bad_Escape, 0},
+		{"\\ud800\\u0041", .Bad_Escape, 0},
+		{"\\u12g4", .Bad_Escape, 4},
+		{"\\u", .Bad_Escape, 2},
 		{"\xff", .Bad_Char, 0},
 		{"\xc3\x28", .Bad_Char, 0},
 		{"\xed\xa0\x80", .Bad_Char, 0},
 	}
 	text: [dynamic]u8
 	defer delete(text)
-	for piece in PIECES {
-		for k in 0 ..< 140 {
+	// The run before the piece, plain or escaped.
+	for fill in ([]string{"a", "\\n"}) do for piece in PIECES {
+		for k := 0; k < 140; k += len(fill) {
 			for pad in ([]int{0, 1, 70}) {
 				clear(&text)
 				append(&text, '"')
-				for _ in 0 ..< k {
-					append(&text, 'a')
+				for j in 0 ..< k {
+					append(&text, fill[j % len(fill)])
 				}
 				append(&text, piece.bytes)
 				append(&text, '"')
@@ -153,6 +162,83 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 				resize(&text, 1 + k + len(piece.bytes))
 				f, bad = json.validate(text[:], .Strict).?
 				if piece.kind == nil && !testing.expectf(t, bad && f.kind == .Truncated && f.offset == u64(len(text)), "%q: %v", text[:], f) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// Every byte as an escape's letter, as each digit of a `\u` escape, and as the second digit of a surrogate half, in
+// blocks with other escapes, the escape in the first block, the second block, and across their edge at every lane.
+@(test)
+escapes_by_byte :: proc(t: ^testing.T) {
+	Want :: struct {
+		kind:   core.Fault_Kind,
+		offset: int, // from the escape's backslash
+	}
+	text: [dynamic]u8
+	defer delete(text)
+	check :: proc(t: ^testing.T, text: ^[dynamic]u8, shift, run: int, escape: []u8, want: Want) -> bool {
+		clear(text)
+		append(text, '"')
+		for _ in 0 ..< shift {
+			append(text, 'a')
+		}
+		for _ in 0 ..< run {
+			append(text, "\\n")
+		}
+		append(text, ..escape)
+		append(text, '"')
+		for _ in 0 ..< 80 {
+			append(text, ' ')
+		}
+		f, bad := json.validate(text[:], .Strict).?
+		if want.kind == nil {
+			return testing.expectf(t, !bad, "%q: %v", text[:], f)
+		}
+		at := u64(1 + shift + 2 * run + want.offset)
+		return testing.expectf(t, bad && f.kind == want.kind && f.offset == at, "%q: %v, want %v at %d", text[:], f, want.kind, at)
+	}
+	is_hex :: proc(c: u8) -> bool {
+		return c - '0' < 10 || (c | 0x20) - 'a' < 6
+	}
+	for shift in 0 ..< 2 do for run in ([]int{8, 24, 26, 27, 28, 29, 30, 31}) {
+		for c in 0 ..< 256 {
+			c := u8(c)
+			want := Want{.Bad_Escape, 1}
+			switch c {
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+				want = {}
+			case 'u':
+				want = {.Bad_Escape, 2}
+			}
+			if !check(t, &text, shift, run, {'\\', c}, want) {
+				return
+			}
+			for i in 0 ..< 4 {
+				escape := []u8{'\\', 'u', '0', '0', '4', '1'}
+				escape[2 + i] = c
+				want = {} if is_hex(c) else {.Bad_Escape, 2 + i}
+				if !check(t, &text, shift, run, escape, want) {
+					return
+				}
+			}
+			// `\udX00`: a code point below the surrogates, a lone high half, or a lone low half.
+			want = {}
+			switch {
+			case !is_hex(c):
+				want = {.Bad_Escape, 3}
+			case c - '8' < 2 || (c | 0x20) - 'a' < 6:
+				want = {.Bad_Escape, 0}
+			}
+			if !check(t, &text, shift, run, {'\\', 'u', 'd', c, '0', '0'}, want) {
+				return
+			}
+			// A high half, then `\udX00`: valid only with a low half.
+			if is_hex(c) {
+				want = {} if (c | 0x20) - 'c' < 4 else {.Bad_Escape, 0}
+				if !check(t, &text, shift, run, {'\\', 'u', 'd', '8', '0', '0', '\\', 'u', 'd', c, '0', '0'}, want) {
 					return
 				}
 			}

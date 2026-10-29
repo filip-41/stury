@@ -19,7 +19,8 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk
 		if q == nil {
 			// A string with an escape goes past the reader of plain ASCII.
 			if escaped {
-				return #must_tail st_string_long(p, end, d, w, hs.a, hs.b, hs.c, on)
+				w.resume = p[1:]
+				return #must_tail st_string_escaped(p, end, d, w, hs.a, hs.b, hs.c, on)
 			}
 			return #must_tail st_string(p, end, d, w, hs.a, hs.b, hs.c, on)
 		}
@@ -93,7 +94,8 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 	q, escaped := string_probe(p, end)
 	if q == nil {
 		if escaped {
-			return #must_tail st_key_string_long(p, end, d, w, hs.a, hs.b, hs.c, on)
+			w.resume = p[1:]
+			return #must_tail st_key_string_escaped(p, end, d, w, hs.a, hs.b, hs.c, on)
 		}
 		return #must_tail st_key_string(p, end, d, w, hs.a, hs.b, hs.c, on)
 	}
@@ -111,13 +113,18 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 	return #must_tail st_value(r, end, d, w, hs.a, hs.b, hs.c, on)
 }
 
-// The value string at `p` that `string_short` did not vouch for: longer than 32 bytes, not ASCII, or faulty.
+// The value string at `p` that `string_short` did not vouch for: longer than 32 bytes, not ASCII, or faulty, with no
+// backslash in its first 32 bytes.
 // `string_lean` is inlined, so a plain ASCII string pays for no call.
 @(private, enable_target_feature = STATE_FEATURES)
 st_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q := string_lean(p, end)
+	q, escape := string_lean(p, end)
 	if q == nil {
+		if escape != nil {
+			w.resume = escape
+			return #must_tail st_string_escaped(p, end, d, w, hs.a, hs.b, hs.c, on)
+		}
 		return #must_tail st_string_long(p, end, d, w, hs.a, hs.b, hs.c, on)
 	}
 	if too_wide(p, q) {
@@ -127,6 +134,45 @@ st_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Wal
 		return stopped(w, hs, q)
 	}
 	return #must_tail st_after(q, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+// The value string at `p` read plain up to the block at `w.resume`, which holds its first backslash. A state of its
+// own, so the masks' registers are saved only for a string with an escape.
+@(private, enable_target_feature = STATE_FEATURES)
+st_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q := string_escaped(w.resume, end)
+	if q == nil {
+		return #must_tail st_string_long(p, end, d, w, hs.a, hs.b, hs.c, on)
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	if emit(w, on, &hs, .String, .Value, p, q, 1) == .Stop {
+		return stopped(w, hs, q)
+	}
+	return #must_tail st_after(q, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+// `st_string_escaped` for a key.
+@(private, enable_target_feature = STATE_FEATURES)
+st_key_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q := string_escaped(w.resume, end)
+	if q == nil {
+		return #must_tail st_key_string_long(p, end, d, w, hs.a, hs.b, hs.c, on)
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	switch emit(w, on, &hs, .String, .Key, p, q, 1) {
+	case .Next:
+	case .Skip:
+		return #must_tail st_skip_member(q, end, d, w, hs.a, hs.b, hs.c, on)
+	case .Stop:
+		return stopped(w, hs, q)
+	}
+	return #must_tail st_colon(q, end, d, w, hs.a, hs.b, hs.c, on)
 }
 
 // The value string at `p` that `string_lean` did not vouch for.
@@ -150,8 +196,12 @@ st_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w:
 @(private, enable_target_feature = STATE_FEATURES)
 st_key_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q := string_lean(p, end)
+	q, escape := string_lean(p, end)
 	if q == nil {
+		if escape != nil {
+			w.resume = escape
+			return #must_tail st_key_string_escaped(p, end, d, w, hs.a, hs.b, hs.c, on)
+		}
 		return #must_tail st_key_string_long(p, end, d, w, hs.a, hs.b, hs.c, on)
 	}
 	if too_wide(p, q) {

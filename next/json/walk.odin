@@ -82,11 +82,13 @@ fault_of :: #force_inline proc "contextless" (r: u64) -> Maybe(core.Fault) {
 // not write. `tier` picks the string reader built for this CPU.
 @(private)
 Walk :: struct($S: Spec, $H: typeid) {
-	base:  [^]u8,
-	hooks: ^H,
-	stack: [^]u8,
-	regs:  ^core.Hook_Regs,
-	tier:  kernel.Tier,
+	base:   [^]u8,
+	hooks:  ^H,
+	stack:  [^]u8,
+	regs:   ^core.Hook_Regs,
+	tier:   kernel.Tier,
+	// The block of the string being read where its first backslash is, for `string_escaped` to read on from.
+	resume: [^]u8,
 }
 
 // Set in the stack slot of the depth where a walk that passes over a skipped value ends: a close to that depth ends
@@ -98,7 +100,7 @@ PASS_END :: 4
 walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	// `= ---` on an array leaves it unwritten (a struct would be zeroed), and every slot is written before it is read.
 	stack: [MAX_DEPTH]u8 = ---
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, walk_tier()}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, walk_tier(), nil}
 	end := w.base[len(src):]
 	return st_value(skip_ws(w.base[lo:], end), end, 0, &w, regs.a, regs.b, regs.c, on)
 }
@@ -132,7 +134,7 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d: u64, $open: bool) -> u64 {
 	h: No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.tier}
+	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.tier, nil}
 	when open {
 		return st_open(p, end, d, &v, 0, 0, 0, no_hook)
 	} else {

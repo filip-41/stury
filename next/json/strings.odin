@@ -75,14 +75,15 @@ string_probe :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, e
 }
 
 // The string at `p` while it is plain ASCII, 64 bytes a step with no UTF-8 state, within 64 bytes of the text's end:
-// one past its closing quote, else nil.
+// one past its closing quote. Else nil, and `escape` the block whose first stop is a backslash, which
+// `string_escaped` reads on from, or nil when the string is not this reader's.
 @(private)
-string_lean :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
+string_lean :: #force_inline proc "contextless" (p, end: [^]u8) -> (q, escape: [^]u8) #no_bounds_check {
 	bs := p[1:]
 	for intrinsics.ptr_sub(end, bs) >= 64 {
 		b := kernel.load(bs)
 		if !kernel.is_ascii(b) {
-			return nil
+			return nil, nil
 		}
 		sv := kernel.either(kernel.either(kernel.eq(b, '"'), kernel.eq(b, '\\')), kernel.below(b, 0x20))
 		if !kernel.any_lane(sv) {
@@ -90,9 +91,120 @@ string_lean :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bou
 			continue
 		}
 		k := intrinsics.count_trailing_zeros(kernel.pack(sv))
-		return bs[k + 1:] if bs[k] == '"' else nil
+		if bs[k] == '"' {
+			return bs[k + 1:], nil
+		}
+		return nil, bs if bs[k] == '\\' else nil
+	}
+	return nil, nil
+}
+
+// The string read on from the block `bs`, which no escape runs into, while it is ASCII and its escapes are ones
+// `escape_len` takes, each within one block: one past its closing quote, else nil. A block is judged in masks, with
+// no branch per escape: the escaped lanes, their letters, a `\u` escape's four digits, and the first quote no escape
+// covers.
+@(private)
+string_escaped :: #force_inline proc "contextless" (bs, end: [^]u8) -> [^]u8 #no_bounds_check {
+	bs := bs
+	// 1 when an odd run of backslashes ends the block before, escaping the first byte of this one.
+	odd: u64
+	for intrinsics.ptr_sub(end, bs) >= 64 {
+		b := kernel.load(bs)
+		if !kernel.is_ascii(b) {
+			return nil
+		}
+		if odd == 0 && !kernel.any_lane(kernel.either(kernel.either(kernel.eq(b, '"'), kernel.eq(b, '\\')), kernel.below(b, 0x20))) {
+			bs = bs[64:]
+			continue
+		}
+		m := kernel.pack_n([3]kernel.Block{kernel.eq(b, '"'), kernel.eq(b, '\\'), kernel.below(b, 0x20)})
+		quote, slash, ctl := m[0], m[1], m[2]
+		// A block with at most one backslash and no escape running into it, the common case of sparse escapes,
+		// reads that escape in scalar and skips the class masks.
+		if odd == 0 && slash & (slash - 1) == 0 {
+			covered: u64
+			if slash != 0 {
+				k := intrinsics.count_trailing_zeros(slash)
+				n := escape_len(bs[k:], end)
+				if n == 0 || k + n > 64 {
+					return nil
+				}
+				covered = (u64(1) << n - 1) << k
+			}
+			real := quote &~ covered
+			if real == 0 {
+				if ctl != 0 {
+					return nil
+				}
+				bs = bs[64:]
+				continue
+			}
+			kq := intrinsics.count_trailing_zeros(real)
+			if ctl & (u64(1) << kq - 1) != 0 {
+				return nil
+			}
+			return bs[kq + 1:]
+		}
+		escaped := kernel.escaped(slash, &odd)
+		c := kernel.classes(STATE_TIER, b, ESCAPE_CLASSES)
+		n := kernel.pack_n([4]kernel.Block{kernel.has(c, ESC_LETTER | ESC_U), kernel.has(c, ESC_U), kernel.has(c, ESC_HEX), kernel.has(c, ESC_D)})
+		letter, u, hex, d := n[0], n[1], n[2], n[3]
+		u &= escaped
+		digits := u << 1 | u << 2 | u << 3 | u << 4
+		// A surrogate half's `\u` has `d` then a digit of 8 to B (high) or C to F (low): a high half's `\u` sits six
+		// lanes before a low half's.
+		half := u & (d >> 1)
+		high, low: u64
+		if half != 0 {
+			c2 := kernel.classes(STATE_TIER, b, SURROGATE_CLASSES)
+			h2 := kernel.pack_n([2]kernel.Block{kernel.has(c2, SUR_HIGH), kernel.has(c2, SUR_LOW)})
+			high, low = half & (h2[0] >> 2), half & (h2[1] >> 2)
+		}
+		// A `\u` escape whose digits leave the block is the block reader's.
+		bad := escaped &~ letter | digits &~ hex | high &~ (low >> 6) | low &~ (high << 6) | u >> 60 << 60 | ctl
+		real := quote &~ escaped &~ digits
+		if real == 0 {
+			if bad != 0 {
+				return nil
+			}
+			bs = bs[64:]
+			continue
+		}
+		k := intrinsics.count_trailing_zeros(real)
+		if bad & (u64(1) << k - 1) != 0 {
+			return nil
+		}
+		return bs[k + 1:]
 	}
 	return nil
+}
+
+// The classes `string_escaped` reads an escape by: the one-letter escapes, `u`, the hex digits, and `d` or `D`.
+@(private)
+ESC_LETTER :: 0x0f
+@(private)
+ESC_U :: 0x10
+@(private)
+ESC_HEX :: 0x60
+@(private)
+ESC_D :: 0x80
+
+@(private, rodata)
+ESCAPE_CLASSES := kernel.Nibble_Table {
+	lo = {0x20, 0x60, 0x6d, 0x60, 0xe8, 0x70, 0x64, 0x20, 0x20, 0x20, 0x00, 0x00, 0x02, 0x00, 0x04, 0x01},
+	hi = {0x00, 0x00, 0x01, 0x20, 0xc0, 0x02, 0xc4, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+}
+
+@(private)
+SUR_HIGH :: 0x03
+@(private)
+SUR_LOW :: 0x04
+
+// The second digit of a surrogate half's `\u`: 8 to B for a high half, C to F for a low one.
+@(private, rodata)
+SURROGATE_CLASSES := kernel.Nibble_Table {
+	lo = {0x00, 0x02, 0x02, 0x04, 0x04, 0x04, 0x04, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+	hi = {0x00, 0x00, 0x00, 0x01, 0x06, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
 }
 
 // The string at `p`: one past its closing quote and whether it holds an escape, or the fault. The block reader of

@@ -141,7 +141,6 @@ string_region :: #force_inline proc "contextless" ($T: Tier, quote, escape: u64,
 // that starts on an even bit, an even bit after one that starts on an odd bit. A run that reaches the end of the
 // block has odd length only when it starts on an odd bit, so the carry out of that add is the next block's `odd`.
 // With `odd` set, bit 0 continues the previous run: it counts as an odd start, and is escaped when not an escape.
-@(private = "file")
 escaped :: #force_inline proc "contextless" (escape: u64, odd: ^u64) -> u64 {
 	EVEN :: u64(0x5555_5555_5555_5555)
 	starts := escape &~ (escape << 1)
