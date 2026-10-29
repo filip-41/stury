@@ -307,8 +307,11 @@ validate_fenced :: proc(src: []u8) -> Maybe(core.Fault) {
 depth_limit :: proc(t: ^testing.T) {
 	deep := strings.concatenate({strings.repeat("[", json.MAX_DEPTH, context.temp_allocator), strings.repeat("]", json.MAX_DEPTH, context.temp_allocator)}, context.temp_allocator)
 	testing.expect_value(t, json.validate(transmute([]u8)deep, .Strict), nil)
-	over := strings.repeat("[{\"a\":", json.MAX_DEPTH, context.temp_allocator)
-	f, bad := json.validate(transmute([]u8)over, .Strict).?
+	run := strings.repeat("[", json.MAX_DEPTH + 1, context.temp_allocator)
+	f, bad := json.validate(transmute([]u8)run, .Strict).?
+	testing.expectf(t, bad && f.kind == .Too_Deep && f.offset == json.MAX_DEPTH, "%v", f)
+	over :=strings.repeat("[{\"a\":", json.MAX_DEPTH, context.temp_allocator)
+	f, bad = json.validate(transmute([]u8)over, .Strict).?
 	testing.expectf(t, bad && f.kind == .Too_Deep && f.offset == 6 * (json.MAX_DEPTH / 2), "%v", f)
 }
 

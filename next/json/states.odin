@@ -266,7 +266,36 @@ st_open :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 	if d & 1 != 0 {
 		return #must_tail st_key(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
+	if q[0] == '[' {
+		return #must_tail st_open_run(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
 	return #must_tail st_value(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+}
+
+// `p` stands on an open bracket right after another: the run of `[` is pushed in this one state.
+@(private, enable_target_feature = STATE_FEATURES)
+st_open_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	p, d := p, d
+	for {
+		if d >> 1 >= MAX_DEPTH {
+			return fault(w, hs, p, .Too_Deep)
+		}
+		w.stack[d >> 1] = u8(d & 1)
+		d = (d | 1) + 1
+		p = p[1:]
+		switch emit(w, on, &hs, .Array, .Value, p[-1:], p, 0) {
+		case .Next:
+		case .Skip:
+			return #must_tail st_skip(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		case .Stop:
+			return stopped(w, hs, p)
+		}
+		if p >= end || p[0] != '[' {
+			break
+		}
+	}
+	return #must_tail st_open(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
 // `st_open` where whitespace follows the bracket: kept out of the hot states, whose entry would build its vectors.
