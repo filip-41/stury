@@ -210,23 +210,27 @@ SURROGATE_CLASSES := kernel.Nibble_Table {
 }
 
 // The string at `p`: one past its closing quote and whether it holds an escape, or the fault. The block reader of
-// this CPU's tier first, then `string_exact` for a string it does not vouch for.
+// this CPU's tier first, then `string_exact` for a string it does not vouch for, or in JSON5 `string5`.
 @(private)
-string_long :: #force_inline proc "contextless" (tier: kernel.Tier, p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: core.Fault_Kind) {
+string_long :: #force_inline proc "contextless" (tier: kernel.Tier, p, end: [^]u8, $S: Spec) -> (q: [^]u8, esc: bool, kind: core.Fault_Kind) {
 	when ODIN_ARCH == .amd64 {
 		switch tier {
 		case .V4:
-			q, esc = string_span_v4(p, end)
+			q, esc = string_span_v4(p, end, S)
 		case .V3:
-			q, esc = string_span_v3(p, end)
+			q, esc = string_span_v3(p, end, S)
 		case .V2:
-			q, esc = string_span_v2(p, end)
+			q, esc = string_span_v2(p, end, S)
 		}
 	} else {
-		q, esc = string_span_base(p, end)
+		q, esc = string_span_base(p, end, S)
 	}
 	if q == nil {
-		return string_exact(p, end)
+		when .Es5 in FEATURES[S] {
+			return string5(p, end)
+		} else {
+			return string_exact(p, end)
+		}
 	}
 	return q, esc, .None
 }
@@ -234,21 +238,21 @@ string_long :: #force_inline proc "contextless" (tier: kernel.Tier, p, end: [^]u
 // `string_span` per tier, each out of line with its tier's features, since the states are built once for the floor.
 when ODIN_ARCH == .amd64 {
 	@(private, enable_target_feature = kernel.FEATURES[.V2])
-	string_span_v2 :: #force_no_inline proc "contextless" (p, end: [^]u8) -> ([^]u8, bool) {
-		return string_span(.V2, p, end)
+	string_span_v2 :: #force_no_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> ([^]u8, bool) {
+		return string_span(.V2, p, end, S)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V3])
-	string_span_v3 :: #force_no_inline proc "contextless" (p, end: [^]u8) -> ([^]u8, bool) {
-		return string_span(.V3, p, end)
+	string_span_v3 :: #force_no_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> ([^]u8, bool) {
+		return string_span(.V3, p, end, S)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V4])
-	string_span_v4 :: #force_no_inline proc "contextless" (p, end: [^]u8) -> ([^]u8, bool) {
-		return string_span(.V4, p, end)
+	string_span_v4 :: #force_no_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> ([^]u8, bool) {
+		return string_span(.V4, p, end, S)
 	}
 } else {
 	@(private)
-	string_span_base :: #force_no_inline proc "contextless" (p, end: [^]u8) -> ([^]u8, bool) {
-		return string_span(.Base, p, end)
+	string_span_base :: #force_no_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> ([^]u8, bool) {
+		return string_span(.Base, p, end, S)
 	}
 }
 
@@ -256,9 +260,15 @@ when ODIN_ARCH == .amd64 {
 // the block reading cannot vouch for it (a control byte, an escape it does not take, invalid UTF-8 anywhere in a
 // block it loaded, or the end of the text), which `string_exact` then settles. Blocks are loaded 64 bytes on from
 // `p + 1`, so they are contiguous and UTF-8 state carries from one to the next. An escape is stepped over inside the
-// block's stop mask, so escape-dense text loads each block once.
+// block's stop mask, so escape-dense text loads each block once. In JSON5 the string's quote is `"` or `'`, every
+// escape `escape5` takes is stepped over, and a control byte but CR and LF is a character of the string.
 @(private)
-string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8) -> (q: [^]u8, esc: bool) #no_bounds_check {
+string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8, $S: Spec) -> (q: [^]u8, esc: bool) #no_bounds_check {
+	when .Es5 in FEATURES[S] {
+		quote := p[0]
+	} else {
+		quote :: '"'
+	}
 	bs := p[1:]
 	skip: u64
 	u: kernel.Utf8_State
@@ -275,7 +285,7 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8)
 		} else {
 			return nil, false
 		}
-		sv := kernel.either(kernel.either(kernel.eq(b, '"'), kernel.eq(b, '\\')), kernel.below(b, 0x20))
+		sv := kernel.either(kernel.either(kernel.eq(b, quote), kernel.eq(b, '\\')), kernel.below(b, 0x20))
 		if !kernel.is_ascii(b) {
 			kernel.utf8_block(T, b, &u)
 			high, last_high = true, true
@@ -296,20 +306,35 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8)
 				return nil, false
 			}
 			c := bs[k]
-			if c == '"' {
+			if c == quote {
 				if high && !kernel.utf8_clean(T, u) {
 					return nil, false
 				}
 				return bs[k + 1:], esc
 			}
-			if c != '\\' {
-				return nil, false
+			when .Es5 in FEATURES[S] {
+				if c == '\n' || c == '\r' {
+					return nil, false
+				}
+				n := u64(1)
+				if c == '\\' {
+					r, kind := escape5(bs[k:], end)
+					if kind != .None {
+						return nil, false
+					}
+					n = u64(intrinsics.ptr_sub(r, bs[k:]))
+					esc = true
+				}
+			} else {
+				if c != '\\' {
+					return nil, false
+				}
+				n := escape_len(bs[k:], end)
+				if n == 0 {
+					return nil, false
+				}
+				esc = true
 			}
-			n := escape_len(bs[k:], end)
-			if n == 0 {
-				return nil, false
-			}
-			esc = true
 			k += n
 			if k >= 64 {
 				skip = k - 64

@@ -1,6 +1,7 @@
 package json_tests
 
 import "core:math/rand"
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import json ".."
@@ -93,7 +94,7 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 // see the same tokens, with Skip and Stop at random, and those are the tokens Skip and Stop leave of the full walk.
 @(test)
 hooks_agree :: proc(t: ^testing.T) {
-	_ = hooks_agree_in(t, .Json) && hooks_agree_in(t, .Jsonc)
+	_ = hooks_agree_in(t, .Json) && hooks_agree_in(t, .Jsonc) && hooks_agree_in(t, .Json5)
 }
 
 hooks_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
@@ -111,9 +112,9 @@ hooks_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 	for round in 0 ..< 4000 {
 		clear(&text)
 		if round % 3 == 2 {
-			gen.pretty(&text, 1 + round % 6, S == .Jsonc)
+			gen.pretty(&text, 1 + round % 6, S)
 		} else {
-			gen.text(&text, 1 + round % 6, S == .Jsonc)
+			gen.text(&text, 1 + round % 6, S)
 		}
 		src := text[:]
 		if round % 2 == 1 {
@@ -209,9 +210,26 @@ spans :: proc(src: []u8, t: core.Token) -> bool {
 		for c in b {
 			escaped ||= c == '\\'
 		}
-		return len(b) >= 2 && b[0] == '"' && b[len(b) - 1] == '"' && t.spelling == u16(escaped)
+		// A JSON5 key may go unquoted.
+		quoted := len(b) >= 2 && (b[0] == '"' || b[0] == '\'') && b[len(b) - 1] == b[0]
+		return (quoted || t.role == .Key && len(b) > 0) && t.spelling == u16(escaped)
 	case .Number:
-		return len(b) > 0 && (b[0] == '-' || b[0] - '0' < 10) && t.spelling == 0
+		spelling := json.Number_Spelling.Json
+		for c in b {
+			switch c {
+			case 'x', 'X':
+				spelling = .Hex
+			case 'I':
+				spelling = .Infinity
+			case 'N':
+				spelling = .Nan
+			}
+		}
+		// JSON's grammar starts with `-` or a digit, and has a digit on both sides of a `.`.
+		if spelling == .Json && (b[0] == '+' || b[0] == '.' || b[len(b) - 1] == '.' || strings.contains(string(b), ".e") || strings.contains(string(b), ".E") || strings.contains(string(b), "-.")) {
+			spelling = .Decimal
+		}
+		return len(b) > 0 && t.spelling == u16(spelling)
 	case .Null:
 		return string(b) == "null"
 	case .False:
@@ -222,7 +240,7 @@ spans :: proc(src: []u8, t: core.Token) -> bool {
 		return string(b) == "[" || string(b) == "{" || string(b) == "]" || string(b) == "}"
 	case .Plain:
 		block := len(b) >= 4 && string(b[:2]) == "/*" && string(b[len(b) - 2:]) == "*/"
-		line := len(b) >= 2 && string(b[:2]) == "//" && b[len(b) - 1] != '\n' && b[len(b) - 1] != '\r'
+		line := len(b) >= 2 && string(b[:2]) == "//" && b[len(b) - 1] != '\n' && b[len(b) - 1] != '\r' && !strings.has_suffix(string(b), "\u2028") && !strings.has_suffix(string(b), "\u2029")
 		return t.role > .Key && (block || line) && t.spelling == u16(block)
 	}
 	return false

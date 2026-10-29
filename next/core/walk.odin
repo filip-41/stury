@@ -24,16 +24,16 @@ Kind :: enum u8 {
 // the container's, `Comment_Foot`. A consumer that wants values only tests `t.role <= .Key`.
 Role :: enum u8 {
 	Value, // json, dsv
-	Key, // json: a member's name, always a `String`, dsv: the header cell of a cell's column
-	Comment, // json (JSONC): a comment above the value after it, `Plain`
-	Comment_Inline, // json (JSONC): a comment on the line where the value before it ends, `Plain`
-	Comment_Foot, // json (JSONC): a comment after the value before it, or in an empty container, with no value after it, `Plain`
+	Key, // json: a member's name, always a `String`, in JSON5 quoted or not, dsv: the header cell of a cell's column
+	Comment, // json (JSONC, JSON5): a comment above the value after it, `Plain`
+	Comment_Inline, // json (JSONC, JSON5): a comment on the line where the value before it ends, `Plain`
+	Comment_Foot, // json (JSONC, JSON5): a comment after the value before it, or in an empty container, with no value after it, `Plain`
 }
 
 // One token, in text order. `lo` is its first byte and `n` its length, 0 where the format writes nothing. A token
 // longer than `n` holds is `Too_Wide`. `spelling` is the format's own detail, read back only by that format. json: 1
-// when a string holds an escape, so a reader decodes only those, and 1 when a comment is `/* */` rather than `//`.
-// dsv: 1 when a cell is quoted.
+// when a string holds an escape, so a reader decodes only those, 1 when a comment is `/* */` rather than `//`, and a
+// number's `json.Number_Spelling`. dsv: 1 when a cell is quoted.
 Token :: struct {
 	lo:       u64,
 	n:        u32,

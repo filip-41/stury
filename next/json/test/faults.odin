@@ -1,8 +1,10 @@
 package json_tests
 
+import "base:runtime"
 import "base:sanitizer"
 import "core:math/rand"
 import "core:mem"
+import "core:path/filepath"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -141,6 +143,72 @@ JSONC_IN_JSON := []Case {
 	{"1 // a", .Trailing, 2},
 }
 
+@(rodata)
+JSON5_CASES := []Case {
+	{"{a: 1, $b_: 'x', _c: \"y\",}", nil, 0},
+	{"[0x1F, -0XaB, +1, .5, 5., +.5e3, Infinity, -Infinity, +NaN, NaN, 1e5,]", nil, 0},
+	{"'a\\'b\"c'", nil, 0},
+	{"\"\\x41\\0\\v\\q\\/\"", nil, 0},
+	{"'a\\\nb\\\r\nc\\\rd\\\xe2\x80\xa8e'", nil, 0},
+	{"\"a\xe2\x80\xa8b\xe2\x80\xa9c\t\x01\"", nil, 0},
+	{"\v\f\xc2\xa0\xef\xbb\xbf[1]\xe2\x80\xa9\xe3\x80\x80", nil, 0},
+	{"{\xc7\x85: 1, \xe2\x85\xab: 2, a\xcc\x81: 3, a\xd9\xa3: 4, a\xe2\x80\xbfb: 5, a\xe2\x80\x8cb: 6, \\u0061b: 7, a\\u0062: 8}", nil, 0},
+	{"[// a\x00\n1]", nil, 0},
+	{"// a\xe2\x80\xa81", nil, 0},
+	{"/* a */ {/* b */ k /* c */ : /* d */ 'v' /* e */, /* f */}", nil, 0},
+	{"0x", .Truncated, 2},
+	{"0xg", .Bad_Number, 2},
+	{"[0x]", .Bad_Number, 3},
+	{"01", .Bad_Number, 1},
+	{"+01", .Bad_Number, 2},
+	{".", .Truncated, 1},
+	{".e1", .Bad_Number, 1},
+	{"+", .Truncated, 1},
+	{"+-1", .Bad_Number, 1},
+	{"Infinit", .Truncated, 7},
+	{"Inf]", .Bad_Number, 3},
+	{"-NaN1", .Trailing, 4},
+	{"[1, Infinityx]", .Bad_Char, 12},
+	{"5.e", .Truncated, 3},
+	{"'abc", .Truncated, 4},
+	{"'a\nb'", .Bad_Char, 2},
+	{"\"a\\x1\"", .Bad_Escape, 5},
+	{"'\\1'", .Bad_Escape, 2},
+	{"'\\01'", .Bad_Escape, 3},
+	{"'\\x", .Truncated, 3},
+	{"\"\\ud800\"", .Bad_Escape, 1},
+	{"{a\\x: 1}", .Bad_Escape, 3},
+	{"{a\\u0020b: 1}", .Bad_Escape, 2},
+	{"{\\u0031: 1}", .Bad_Escape, 1},
+	{"{a\\u00: 1}", .Bad_Escape, 6},
+	{"{a b: 1}", .Bad_Char, 3},
+	{"{a\xff: 1}", .Bad_Char, 2},
+	{"[1 \xc2]", .Bad_Char, 3},
+	{"\xa0", .Bad_Char, 0},
+	{"[1,,]", .Bad_Char, 3},
+	{"/* a", .Truncated, 4},
+}
+
+// JSON5's refusals of a key, quoted or not.
+@(rodata)
+JSON5_KEY_CASES := []Case {
+	{"{1: 2}", .Bad_Char, 1},
+	{"{-a: 1}", .Bad_Char, 1},
+	{"{a: 1, @: 2}", .Bad_Char, 7},
+	{"{\xcc\x81a: 1}", .Bad_Char, 1},
+	{"{a: 1,,}", .Bad_Char, 6},
+}
+
+// The refusals JSON5_CASES has under `.Jsonc`.
+@(rodata)
+JSON5_IN_JSONC := []Case {
+	{"{a: 1}", .Bad_Char, 1},
+	{"[0x1]", .Bad_Char, 2},
+	{"'a'", .Bad_Char, 0},
+	{"[\v1]", .Bad_Char, 1},
+	{"NaN", .Bad_Char, 0},
+}
+
 @(test)
 faults_at_their_byte :: proc(t: ^testing.T) {
 	for c in CASES {
@@ -154,6 +222,15 @@ faults_at_their_byte :: proc(t: ^testing.T) {
 	}
 	for c in JSONC_IN_JSON {
 		expect_fault(t, c, .Json, .None)
+	}
+	for c in JSON5_CASES {
+		expect_fault(t, c, .Json5, .None)
+	}
+	for c in JSON5_KEY_CASES {
+		expect_fault(t, c, .Json5, .Identifier)
+	}
+	for c in JSON5_IN_JSONC {
+		expect_fault(t, c, .Jsonc, .None)
 	}
 }
 
@@ -442,17 +519,25 @@ prefixes_fenced :: proc(t: ^testing.T) {
 	context.random_generator = rand.default_random_generator(&state)
 	text: [dynamic]u8
 	defer delete(text)
-	for round in 0 ..< 600 {
+	for round in 0 ..< 900 {
 		clear(&text)
-		jsonc := round % 4 >= 2
+		spec := json.Spec(round / 2 % len(json.Spec))
 		if round % 2 == 1 {
-			gen.pretty(&text, 1 + round % 4, jsonc)
+			gen.pretty(&text, 1 + round % 4, spec)
 		} else {
-			gen.text(&text, 1 + round % 4, jsonc)
+			gen.text(&text, 1 + round % 4, spec)
 		}
 		for n in 0 ..= len(text) {
-			same := validate_fenced(text[:n], .Jsonc) == json.validate(text[:n], .Jsonc) if jsonc else validate_fenced(text[:n], .Json) == json.validate(text[:n], .Json)
-			if !testing.expectf(t, same, "%q", text[:n]) {
+			same: bool
+			switch spec {
+			case .Json:
+				same = validate_fenced(text[:n], .Json) == json.validate(text[:n], .Json)
+			case .Jsonc:
+				same = validate_fenced(text[:n], .Jsonc) == json.validate(text[:n], .Jsonc)
+			case .Json5:
+				same = validate_fenced(text[:n], .Json5) == json.validate(text[:n], .Json5)
+			}
+			if !testing.expectf(t, same, "%v %q", spec, text[:n]) {
 				return
 			}
 		}
@@ -566,4 +651,35 @@ json_test_suite :: proc(t: ^testing.T) {
 		n += 1
 	}
 	testing.expect(t, n > 250)
+}
+
+// json5-tests: every `.json` and `.json5` text passes, and every `.js` and `.txt` text fails.
+@(test)
+json5_tests :: proc(t: ^testing.T) {
+	dirs := [?][]runtime.Load_Directory_File {
+		#load_directory("conformance/json5-tests/arrays"),
+		#load_directory("conformance/json5-tests/comments"),
+		#load_directory("conformance/json5-tests/misc"),
+		#load_directory("conformance/json5-tests/new-lines"),
+		#load_directory("conformance/json5-tests/numbers"),
+		#load_directory("conformance/json5-tests/objects"),
+		#load_directory("conformance/json5-tests/strings"),
+		#load_directory("conformance/json5-tests/todo"),
+	}
+	n: int
+	for dir in dirs {
+		for file in dir {
+			f, bad := json.validate(file.data, .Json5).?
+			switch filepath.ext(file.name) {
+			case ".json", ".json5":
+				testing.expectf(t, !bad, "%s: %v", file.name, f)
+			case ".js", ".txt":
+				testing.expectf(t, bad, "%s", file.name)
+			case:
+				continue
+			}
+			n += 1
+		}
+	}
+	testing.expect_value(t, n, 114)
 }

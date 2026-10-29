@@ -1,7 +1,9 @@
 package json
 
 import "base:intrinsics"
+import "core:simd"
 import core "../core"
+import kernel "../core/kernel"
 
 // Comments, in the specs that have them: `//` up to the line's end, which is not part of it, and `/* */`, wherever
 // whitespace may stand. A comment is a fact token: `Plain`, its span the comment with its delimiters, `spelling` 1
@@ -10,21 +12,66 @@ import core "../core"
 // since what follows the run decides the role of each comment in it. A walk without hooks reads the run and emits
 // nothing.
 
+// The lanes of `v` that `comment` must read one at a time: a byte past 0x7F, which its UTF-8 reader judges, a
+// control byte, which its control test judges in a spec without `.Es5`, a line end, which ends a `//` comment in
+// JSON5, and a `*`, which may close a `/* */` comment. `v - 0x20 > 0x5f` holds for a control byte and a byte past
+// 0x7F.
+@(private)
+comment_stops :: #force_inline proc "contextless" (v: #simd[16]u8, $S: Spec, $star: bool) -> #simd[16]u8 {
+	V :: #simd[16]u8
+	when .Es5 in FEATURES[S] {
+		m := simd.lanes_gt(v, V(0x7f))
+		when !star {
+			m = simd.bit_or(m, simd.bit_or(simd.lanes_eq(v, V('\n')), simd.lanes_eq(v, V('\r'))))
+		}
+	} else {
+		m := simd.lanes_gt(v - 0x20, V(0x5f))
+	}
+	when star {
+		m = simd.bit_or(m, simd.lanes_eq(v, V('*')))
+	}
+	return m
+}
+
+// The first byte from `q` at or before `end` that `comment` must judge one at a time, 16 bytes at a step while a
+// whole vector lies in the text: `q` when the run holds no such byte before `end`.
+@(private)
+comment_scan :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec, $star: bool) -> [^]u8 #no_bounds_check {
+	q := q
+	for intrinsics.ptr_sub(end, q) >= 16 {
+		k := kernel.first_lane(comment_stops(intrinsics.unaligned_load((^#simd[16]u8)(q)), S, star))
+		if k != 16 {
+			return q[k:]
+		}
+		q = q[16:]
+	}
+	return q
+}
+
 // The comment at `p`, which stands on a `/`: one past its last byte, or the fault. A comment's bytes are judged as a
 // string's raw bytes are: UTF-8, and no control byte but a tab, and in a `/* */` comment CR and LF, else `Bad_Char` at
-// that byte. A `/` that opens no comment, the text's last byte among them, is `Bad_Char` at the `/`, and a `/*` the
-// text ends inside is `Truncated`.
+// that byte. JSON5 takes any control byte, as its grammar does, and ends a `//` comment at U+2028 and U+2029 too. A
+// `/` that opens no comment, the text's last byte among them, is `Bad_Char` at the `/`, and a `/*` the text ends
+// inside is `Truncated`.
 @(private)
-comment :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+	ES5 :: .Es5 in FEATURES[S]
 	if intrinsics.ptr_sub(end, p) < 2 {
 		return p, .Bad_Char
 	}
 	q = p[2:]
 	switch p[1] {
 	case '/':
-		for q < end && q[0] != '\n' && q[0] != '\r' {
-			if q[0] < 0x20 && q[0] != '\t' {
+		for {
+			q = comment_scan(q, end, S, false)
+			if q >= end || q[0] == '\n' || q[0] == '\r' {
+				return q, .None
+			}
+			if !ES5 && q[0] < 0x20 && q[0] != '\t' {
 				return q, .Bad_Char
+			}
+			if ES5 && line_sep5(q, end) {
+				return q, .None
 			}
 			if q[0] < 0x80 {
 				q = q[1:]
@@ -32,16 +79,16 @@ comment :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kin
 				return
 			}
 		}
-		return q, .None
 	case '*':
 		for {
+			q = comment_scan(q, end, S, true)
 			if q >= end {
 				return end, .Truncated
 			}
 			if q[0] == '*' && intrinsics.ptr_sub(end, q) > 1 && q[1] == '/' {
 				return q[2:], .None
 			}
-			if q[0] < 0x20 && q[0] != '\t' && q[0] != '\n' && q[0] != '\r' {
+			if !ES5 && q[0] < 0x20 && q[0] != '\t' && q[0] != '\n' && q[0] != '\r' {
 				return q, .Bad_Char
 			}
 			if q[0] < 0x80 {
@@ -54,18 +101,91 @@ comment :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kin
 	return p, .Bad_Char
 }
 
+// Whether `p`, before `end`, opens a run that `comment_run` reads and JSON's whitespace readers do not: a comment, or
+// in JSON5 its other whitespace. A state that comes back here on a byte the run did not take needs the exact answer.
+@(private)
+gap :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> bool {
+	when .Es5 in FEATURES[S] {
+		// JSON5's whitespace other than JSON's starts with 0x0B, 0x0C, or a lead byte of 0xC2 or more, so a byte
+		// between those opens a run only as a comment's `/`. `ws5_len` reads the rest.
+		c := p[0]
+		return c == '/' || (c - 0x0b <= 1 || c >= 0xc2) && ws5_len(p, end) > 0
+	} else {
+		return p[0] == '/'
+	}
+}
+
+// Whether `p` may open a run that `comment_run` reads: a comment, or in JSON5 its other whitespace. A byte of 0xC2 or
+// more may open neither, and a state handed one hands the byte back to the states that refuse it, so the states that
+// hand over test a byte's class, not `ws5_len`.
+@(private)
+gap_lead :: #force_inline proc "contextless" (p: [^]u8, $S: Spec) -> bool {
+	when .Es5 in FEATURES[S] {
+		c := p[0]
+		return c == '/' || c >= 0xc2 || c - 0x0b <= 1
+	} else {
+		return p[0] == '/'
+	}
+}
+
+// `gap_lead` where `indent_fast` has just read the token's first byte, which is past ' ': only a comment's `/` or a
+// lead byte of 0xC2 or more can open a run.
+@(private)
+gap_after_ws :: #force_inline proc "contextless" (p: [^]u8, $S: Spec) -> bool {
+	when .Es5 in FEATURES[S] {
+		return p[0] == '/' || p[0] >= 0xc2
+	} else {
+		return p[0] == '/'
+	}
+}
+
+// Whether `p` stands on a line's end: LF or CR, and in JSON5 U+2028 or U+2029.
+@(private)
+line_end :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> bool {
+	when .Es5 in FEATURES[S] {
+		return p[0] == '\n' || p[0] == '\r' || line_sep5(p, end)
+	} else {
+		return p[0] == '\n' || p[0] == '\r'
+	}
+}
+
+// `skip_ws` for the run between comments, which is short: eight bytes are stepped here, and a longer run is
+// `ws_long`'s, out of line, since every caller that inlines all of `skip_ws` builds its vectors on entry.
+@(private)
+ws_short :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
+	q := p
+	for _ in 0 ..< 8 {
+		if q >= end || !is_ws(q[0]) {
+			return q
+		}
+		q = q[1:]
+	}
+	return ws_long(q, end)
+}
+
+@(private, cold)
+ws_long :: #force_no_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
+	return skip_ws(p, end)
+}
+
 // The whitespace and comments from `p`, and one comma among them when `comma`: where the next token stands, whether
 // a comma was crossed, or the fault.
 @(private)
-comment_run :: proc "contextless" (p, end: [^]u8, comma: bool) -> (q: [^]u8, crossed: bool, kind: core.Fault_Kind) {
+comment_run :: #force_inline proc "contextless" (p, end: [^]u8, comma: bool, $S: Spec) -> (q: [^]u8, crossed: bool, kind: core.Fault_Kind) {
 	q = p
 	for {
-		q = skip_ws(q, end)
+		q = ws_short(q, end)
 		if q >= end {
 			return
 		}
+		when .Es5 in FEATURES[S] {
+			if n := ws5_len(q, end); n > 0 {
+				q = q[n:]
+				continue
+			}
+		}
 		if q[0] == '/' {
-			if q, kind = comment(q, end); kind != .None {
+			if q, kind = comment(q, end, S); kind != .None {
 				return
 			}
 		} else if comma && !crossed && q[0] == ',' {
@@ -88,11 +208,11 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 	next_line := !inline
 	for x < q {
 		if x[0] != '/' {
-			next_line ||= x[0] == '\n' || x[0] == '\r'
+			next_line ||= line_end(x, q, S)
 			x = x[1:]
 			continue
 		}
-		e, _ := comment(x, q)
+		e, _ := comment(x, q, S)
 		role := rest if next_line else .Comment_Inline
 		if role == .Value {
 			return
@@ -103,8 +223,8 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 		if emit(w, on, hs, .Plain, role, x, e, u16(x[1] == '*')) == .Stop {
 			return e, true, .None
 		}
-		for c in x[:intrinsics.ptr_sub(e, x)] {
-			next_line ||= c == '\n' || c == '\r'
+		for c := x; c < e; c = c[1:] {
+			next_line ||= line_end(c, e, S)
 		}
 		x, r = e, e
 	}
@@ -113,10 +233,10 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 
 // `p` stands on a comment where a value must start: the run up to the value, each comment the value's, or before an
 // array's close (an empty array, or a trailing comma) that array's foot, then the value.
-@(private, cold, enable_target_feature = STATE_FEATURES)
+@(private, enable_target_feature = STATE_FEATURES)
 st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, _, kind := comment_run(p, end, false)
+	q, _, kind := comment_run(p, end, false, S)
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
@@ -135,10 +255,10 @@ st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 
 // `p` stands on a comment where an object's key must start: the run up to the key, each comment the member's, or
 // before the object's close that object's foot, then the key.
-@(private, cold, enable_target_feature = STATE_FEATURES)
+@(private, enable_target_feature = STATE_FEATURES)
 st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, _, kind := comment_run(p, end, false)
+	q, _, kind := comment_run(p, end, false, S)
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
@@ -157,10 +277,10 @@ st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 
 // `p` stands on a comment between a key and its colon: the run up to the colon, each comment the member's value's,
 // then the colon.
-@(private, cold, enable_target_feature = STATE_FEATURES)
+@(private, enable_target_feature = STATE_FEATURES)
 st_comments_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, _, kind := comment_run(p, end, false)
+	q, _, kind := comment_run(p, end, false, S)
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
@@ -176,15 +296,18 @@ st_comments_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
-// `p` stands right after a value, and a comment follows it before the next token, or after its comma: the run up to
-// that token, then the token. A comment on the value's line is its inline comment. Past that line, a comment is the
-// next value's when a comma and a value follow, else the foot of the value before it. After a document's root the run
-// crosses no comma: the comments past the root's line are its foot when the text ends after them or a 0x1E follows
-// them, else the next document's, left unread.
-@(private, cold, enable_target_feature = STATE_FEATURES)
+// `p` stands right after a value, and a comment follows it before the next token, or after its comma: the run from
+// `w.resume`, which the caller read the run's leading whitespace up to, to that token, then the token, with
+// `w.crossed` whether the caller read a comma before it. A comment on the value's line is its inline comment. Past
+// that line, a comment is the next value's when a comma and a value follow, else the foot of the value before it.
+// After a document's root the run crosses no comma: the comments past the root's line are its foot when the text
+// ends after them or a 0x1E follows them, else the next document's, left unread.
+@(private, enable_target_feature = STATE_FEATURES)
 st_comments_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, crossed, kind := comment_run(p, end, d >= 2)
+	crossed := w.crossed
+	q, more, kind := comment_run(w.resume, end, d >= 2 && !crossed, S)
+	crossed ||= more
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}

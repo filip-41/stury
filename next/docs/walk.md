@@ -19,7 +19,8 @@ change does not undo one by accident. `kernel.md` covers the vector code both wa
 | `json/strings.odin` | the string readers, from a two-load probe to a block reader per x86 tier |
 | `json/scalars.odin` | numbers and literals |
 | `json/whitespace.odin` | whitespace, the colon after a key, the indent predictor |
-| `json/comments.odin` | JSONC's comments: the reader, a run of them, and the states that give them roles |
+| `json/comments.odin` | comments: the reader, a run of them with JSON5's whitespace, and the states that give them roles |
+| `json/json5.odin` | JSON5's numbers, strings, unquoted keys and whitespace, and the states that read them |
 | `dsv/walk.odin` | dsv's interface, the dispatch to a pass per tier, the result word, the hook calls |
 | `dsv/pass.odin` | the one pass over 64-byte blocks and its state between blocks |
 | `dsv/records.odin` | what a block's separators end: cells and widths for `validate`, tokens for `walk` |
@@ -43,7 +44,7 @@ for the walk's tokens reads it.
 
 - `Spec` is a compile-time parameter. Each spec is its own instance of the walk, so a build carries the code of the
   specs it names and no other. Odin refuses a struct as a `$` parameter, so what a spec needs at run time, such as
-  whether a CSV text has a header, goes in `Options`. JSON's specs are `Json` (RFC 8259) and `Jsonc`. Each is strict
+  whether a CSV text has a header, goes in `Options`. JSON's specs are `Json` (RFC 8259), `Jsonc` and `Json5` (JSON5 1.0.0). Each is strict
   to itself: a spec reads its own grammar whole and refuses the rest, and there is no leniency option.
 - `$S` has no default. A caller names the grammar it reads.
 - A walk from byte 0 passes over one BOM, through `core.text_start`, as `validate` does. From any other byte a BOM
@@ -52,7 +53,7 @@ for the walk's tokens reads it.
   it stopped on and there is no fault.
 - A walk reads one document, and `validate` judges a text that holds one. No format takes a framing option: where a
   document ends is the document's own business. A JSON walk passes over whitespace and the record separator 0x1E
-  before its document, and in JSONC comments with no document after them before the text's end or a 0x1E, so a
+  before its document, and in a spec with comments the comments, and in JSON5 its whitespace, with no document after them before the text's end or a 0x1E, so a
   stream of documents (NDJSON, RFC 7464, jq's input) is a loop of walks, each from where the last one ended. A JSON walk with nothing but those left, or from past the text's end, makes no token and
   returns the text's end with no fault. A dsv text is one table, so its walk reads to the text's end, and from past
   the end it reads an empty table.
@@ -163,6 +164,9 @@ moves to a state of its own:
   `indent_fast`, which is scalar and builds no vector.
 - A string that holds an escape goes to `st_string_escaped`, which keeps the escape masks' registers to itself.
 - A bad literal goes to `st_bad_literal`, so `st_value` saves nothing for its call.
+- In JSON5 a byte that starts no JSON value goes to `st_value5`, and one that opens no JSON key to `st_key5`, with the
+  comment run, the close after a trailing comma and the fault, so the states every document passes through keep their
+  size.
 - A skipped value goes to `st_skip` and `st_skip_member`.
 
 `st_value` branches on a 256-entry class table (`VALUE_CLASS`), so `true`, `false` and `null` share one branch.
@@ -231,7 +235,7 @@ pushed. A container read as a document's root would count its depth from 0.
 A spec adds to RFC 8259 through `FEATURES`, which the states test with `when`. A feature's code sits only where a state
 already refuses a byte or leaves its fast path: `st_value` on a byte of class `Bad`, `st_key` on a byte that is no
 quote, `st_colon` on a colon fault, and the separator states where a comment follows a value or its comma. In `Json`
-every `when` is false, and its instance holds none of JSONC's code.
+every `when` is false, and its instance holds none of the other specs' code.
 
 A `/` in one of those places hands over to a state in `comments.odin`, which reads the whole run of whitespace and
 comments up to the next token before it gives any of it to the hook, since what follows the run decides each comment's
@@ -250,9 +254,37 @@ A walk without hooks reads every run and gives nothing, and `validate` passes ov
 it checks that only whitespace follows.
 
 A comment's bytes are judged as a string's raw bytes are: UTF-8, and no control byte but a tab, and in a `/* */`
-comment CR and LF. A `//` comment ends at CR or LF. A `/` that opens no comment is `Bad_Char` at the `/`, and a `/*`
+comment CR and LF. JSON5 takes any control byte, as its grammar does. A `//` comment ends at CR or LF, and in JSON5 at
+U+2028 or U+2029 too. A `/` that opens no comment is `Bad_Char` at the `/`, and a `/*`
 the text ends inside is `Truncated`. Every spec with comments also takes a comma before a close bracket: a close after
 a run of comments is read with no look back at whether an open bracket or a comma came before the run.
+
+A comment's body is stepped 16 bytes at a time, to the first byte the reader must judge one at a time: a control byte, a
+byte past 0x7F, a `*` in a `/* */` comment, and a line end in a JSON5 `//` comment. Whitespace between comments stays
+scalar: a run there is short, and a vector's lane to a cursor costs more than the bytes it steps over. A state that has
+already read the whitespace before a run's first comment hands that comment's position over in `Walk.resume`, with
+`Walk.crossed` for a comma read before it, so the run is not scanned twice.
+
+### JSON5
+
+`Json5` adds `.Es5` to JSONC's features: JSON5 1.0.0's numbers, strings, unquoted keys and whitespace (`json5.odin`). A
+token JSON spells alike is read by JSON's own leaf. A state hands over to JSON5's readers only where that leaf refuses
+or none of JSON's starts:
+
+- `st_value` on `'`, `+`, `.`, `I` or `N`, and where JSON's number reader refuses or stops before an `x`, which the
+  number runs test too,
+- `st_key` on a byte that opens no JSON key: a single-quoted key, an ECMAScript 5.1 IdentifierName, or else `Bad_Char`
+  with `Identifier`,
+- `string_long`, where JSON's readers refuse a string: `string5` reads it again by JSON5's rules,
+- every place a comment may start: JSON5's other whitespace (VT, FF, U+00A0, U+FEFF, U+2028, U+2029 and Zs) opens a
+  run as a `/` does.
+
+A number's `spelling` is a `Number_Spelling`: `Json` for JSON's grammar, else `Decimal`, `Hex`, `Infinity` or `Nan`. A
+string's or key's is 1 when it holds an escape, as in JSON.
+
+Where the grammar leaves a choice: a `\u` escape keeps JSON's rule, so a lone surrogate half is `Bad_Escape` at its
+backslash. An identifier takes the letters of Nl, as ECMAScript 5.1 does, and a `\u` escape in it must write a
+character the identifier may have there. A bad escape is refused at the byte that breaks it.
 
 ## The dsv walk
 
@@ -340,9 +372,9 @@ From `next/`:
 | `make test` | the tests at -o:minimal and -o:speed |
 | `make test-x86` | the tests at v2 and v3 under Rosetta, `-define:WALK_TIER` picking the walks' tier |
 | `make test-asan` | the tests under AddressSanitizer |
-| `make test-oracle` | each walk against the current tree's `json` and `csv` on seeded texts and their mutations, each JSON spec against the dialect of its name |
+| `make test-oracle` | each walk against the current tree's `json` and `csv` on seeded texts and their mutations, each JSON spec against the dialect of its name, with the JSON5 differences the oracle names |
 | `make lint` | vet on the host, x86-64 and riscv64 |
 
 The tests check every fault at its byte and at every offset in a block, every prefix of generated texts with the bytes
 after it poisoned, Skip and Stop at random against the full walk's tokens, a hook that keeps its state behind `h`
-against one that keeps it in `Hook_Regs`, each comment's role, and JSON against JSONTestSuite.
+against one that keeps it in `Hook_Regs`, each comment's role, JSON against JSONTestSuite and JSON5 against json5-tests.

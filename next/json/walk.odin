@@ -16,6 +16,7 @@ MAX_DEPTH :: 1024
 Spec :: enum u8 {
 	Json, // RFC 8259
 	Jsonc, // RFC 8259 with `//` and `/* */` comments wherever whitespace may stand, and a comma before a close bracket
+	Json5, // JSON5 1.0.0
 }
 
 // What a spec adds to RFC 8259, which the states test with `when`, so a spec's walk carries only its own rules.
@@ -23,6 +24,7 @@ Spec :: enum u8 {
 Feature :: enum u8 {
 	Comments,
 	Trailing_Commas,
+	Es5, // JSON5's ECMAScript forms: its numbers, strings, unquoted keys and whitespace (json5.odin)
 }
 
 // Every spec with comments also takes trailing commas: a close bracket after a run of comments is read with no look
@@ -31,6 +33,7 @@ Feature :: enum u8 {
 FEATURES :: [Spec]bit_set[Feature] {
 	.Json  = {},
 	.Jsonc = {.Comments, .Trailing_Commas},
+	.Json5 = {.Comments, .Trailing_Commas, .Es5},
 }
 
 // What a walk takes at run time. The zero value is the default.
@@ -44,11 +47,12 @@ Options :: struct {
 Detail :: enum u8 {
 	None,
 	Literal, // `Bad_Char`: a byte breaking `true`, `false` or `null`
+	Identifier, // `Bad_Char`: a byte that starts no key, quoted or not, where an object's key must start
 }
 
 // JSON's rules, per value of `Detail`, which every fault the walk returns points to.
 @(rodata)
-RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}}}
+RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}}}
 
 // A text that holds one document: one leading BOM, the document, then only whitespace, and comments in a spec that
 // has them.
@@ -64,7 +68,7 @@ validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe
 	q := skip_ws(p[r >> 16:], end)
 	when .Comments in FEATURES[S] {
 		kind: core.Fault_Kind
-		q, _, kind = comment_run(q, end, false)
+		q, _, kind = comment_run(q, end, false, S)
 		if kind != .None {
 			return fault_of(fault_at(u64(intrinsics.ptr_sub(q, p)), kind))
 		}
@@ -93,8 +97,8 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H,
 		}
 		// Comments before the text's end or a 0x1E are the foot of the document before them, or of none.
 		when .Comments in FEATURES[S] {
-			if q[0] == '/' {
-				if r, _, kind := comment_run(q, end, false); kind == .None && (r == end || r[0] == 0x1e) {
+			if gap(q, end, S) {
+				if r, _, kind := comment_run(q, end, false, S); kind == .None && (r == end || r[0] == 0x1e) {
 					q = r
 					continue
 				}
@@ -141,14 +145,18 @@ fault_of :: #force_inline proc "contextless" (r: u64) -> Maybe(core.Fault) {
 // write. `tier` picks the string reader built for this CPU.
 @(private)
 Walk :: struct($S: Spec, $H: typeid) {
-	base:   [^]u8,
-	hooks:  ^H,
-	stack:  [^]u8,
-	regs:   ^core.Hook_Regs,
-	depth:  u64,
-	tier:   kernel.Tier,
-	// The block of the string being read where its first backslash is, for `string_escaped` to read on from.
-	resume: [^]u8,
+	base:    [^]u8,
+	hooks:   ^H,
+	stack:   [^]u8,
+	regs:    ^core.Hook_Regs,
+	depth:   u64,
+	tier:    kernel.Tier,
+	// Whether the state that handed a comment run over read the comma before it. In the padding after `tier`, so a
+	// spec without comments builds the same walk.
+	crossed: bool,
+	// Where the state handed over picks up: for `string_escaped`, the block of the string being read where its first
+	// backslash is, and for `st_comments_after`, the run's first comment, which the state before it read up to.
+	resume:  [^]u8,
 }
 
 // Set in the stack slot of the depth where a walk that passes over a skipped value ends: a close to that depth ends
@@ -165,7 +173,7 @@ walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec
 	// `= ---` on an array leaves it unwritten (a struct would be zeroed), and every slot is written before it is read.
 	stack: [MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else MAX_DEPTH
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), nil}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, nil}
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
@@ -179,7 +187,7 @@ walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec,
 		return fault_at(0, .No_Memory)
 	}
 	defer delete(stack)
-	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), nil}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), false, nil}
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
@@ -201,7 +209,7 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d, ind: u64, $open: bool) -> u64 {
 	h: No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, nil}
+	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, false, nil}
 	when open {
 		return st_open(p, end, d, ind, &v, 0, 0, 0, no_hook)
 	} else {
