@@ -102,7 +102,11 @@ hooks_agree :: proc(t: ^testing.T) {
 	defer delete(want)
 	for round in 0 ..< 4000 {
 		clear(&text)
-		gen.text(&text, 1 + round % 6)
+		if round % 3 == 2 {
+			gen.pretty(&text, 1 + round % 6)
+		} else {
+			gen.text(&text, 1 + round % 6)
+		}
 		src := text[:]
 		if round % 2 == 1 {
 			gen.mutate(&broken, text[:])

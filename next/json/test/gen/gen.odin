@@ -11,6 +11,12 @@ text :: proc(out: ^[dynamic]u8, depth: int) {
 	ws(out)
 }
 
+// A valid document of at most `depth` levels laid out as a pretty printer lays it out: each member on a line of its
+// own, indented a step of 1 to 8 spaces per level, so indents run past the 32 the walk predicts.
+pretty :: proc(out: ^[dynamic]u8, depth: int) {
+	pretty_value(out, depth, 0, 1 + rand.int_max(8))
+}
+
 // `src` with one random edit: a byte replaced, deleted or inserted, or the text cut short.
 mutate :: proc(out: ^[dynamic]u8, src: []u8) {
 	clear(out)
@@ -90,6 +96,40 @@ value :: proc(out: ^[dynamic]u8, depth: int) {
 			ws(out)
 		}
 		append(out, '}')
+	}
+}
+
+@(private)
+pretty_value :: proc(out: ^[dynamic]u8, depth, indent, step: int) {
+	if depth == 0 || rand.int_max(4) == 0 {
+		value(out, 0)
+		return
+	}
+	object := rand.int_max(2) == 0
+	append(out, '{' if object else '[')
+	n := rand.int_max(5)
+	for i in 0 ..< n {
+		if i > 0 {
+			append(out, ',')
+		}
+		line(out, indent + step)
+		if object {
+			str(out)
+			append(out, ": ")
+		}
+		pretty_value(out, depth - 1, indent + step, step)
+	}
+	if n > 0 {
+		line(out, indent)
+	}
+	append(out, '}' if object else ']')
+}
+
+@(private)
+line :: proc(out: ^[dynamic]u8, indent: int) {
+	append(out, '\n')
+	for _ in 0 ..< indent {
+		append(out, ' ')
 	}
 }
 

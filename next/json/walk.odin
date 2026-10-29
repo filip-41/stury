@@ -102,7 +102,7 @@ walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec,
 	stack: [MAX_DEPTH]u8 = ---
 	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, walk_tier(), nil}
 	end := w.base[len(src):]
-	return st_value(skip_ws(w.base[lo:], end), end, 0, &w, regs.a, regs.b, regs.c, on)
+	return st_value(skip_ws(w.base[lo:], end), end, 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
 // The string reader's tier: this CPU's, unless a test build forces a lower one with `-define:WALK_TIER=<n>`.
@@ -131,14 +131,14 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 // The walk without hooks from `p`, in state `st_open` or `st_value`, ending where the stack marks PASS_END or at
 // the end of a root value: a call, since `#must_tail` cannot jump between the walk's instances.
 @(private)
-pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d: u64, $open: bool) -> u64 {
+pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d, ind: u64, $open: bool) -> u64 {
 	h: No_Hooks
 	regs: core.Hook_Regs
 	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.tier, nil}
 	when open {
-		return st_open(p, end, d, &v, 0, 0, 0, no_hook)
+		return st_open(p, end, d, ind, &v, 0, 0, 0, no_hook)
 	} else {
-		return st_value(p, end, d, &v, 0, 0, 0, no_hook)
+		return st_value(p, end, d, ind, &v, 0, 0, 0, no_hook)
 	}
 }
 

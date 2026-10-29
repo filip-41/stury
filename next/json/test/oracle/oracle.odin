@@ -47,7 +47,11 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 	}
 	for round in 0 ..< ROUNDS {
 		clear(&text)
-		gen.text(&text, 1 + round % 6)
+		if round % 3 == 2 {
+			gen.pretty(&text, 1 + round % 6)
+		} else {
+			gen.text(&text, 1 + round % 6)
+		}
 		gen.mutate(&broken, text[:])
 		if !check(t, text[:], &compared, &skipped) || !check(t, broken[:], &compared, &skipped) {
 			return

@@ -1,5 +1,6 @@
 package json_tests
 
+import "base:sanitizer"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -150,7 +151,7 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 				for _ in 0 ..< pad {
 					append(&text, ' ')
 				}
-				f, bad := json.validate(text[:], .Strict).?
+				f, bad := validate_fenced(text[:]).?
 				if piece.kind == nil {
 					if !testing.expectf(t, !bad, "%q: %v", text[:], f) {
 						return
@@ -160,7 +161,7 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 				}
 				// Cut before the closing quote.
 				resize(&text, 1 + k + len(piece.bytes))
-				f, bad = json.validate(text[:], .Strict).?
+				f, bad = validate_fenced(text[:]).?
 				if piece.kind == nil && !testing.expectf(t, bad && f.kind == .Truncated && f.offset == u64(len(text)), "%q: %v", text[:], f) {
 					return
 				}
@@ -193,7 +194,7 @@ escapes_by_byte :: proc(t: ^testing.T) {
 		for _ in 0 ..< 80 {
 			append(text, ' ')
 		}
-		f, bad := json.validate(text[:], .Strict).?
+		f, bad := validate_fenced(text[:]).?
 		if want.kind == nil {
 			return testing.expectf(t, !bad, "%q: %v", text[:], f)
 		}
@@ -244,6 +245,62 @@ escapes_by_byte :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+// Every byte at every place of a predicted indent, and in the token after it, judged as the same text with each
+// newline a CR, which the indent prediction never takes. Then texts that end in a predicted indent.
+@(test)
+indents_by_byte :: proc(t: ^testing.T) {
+	text, plain: [dynamic]u8
+	defer delete(text)
+	defer delete(plain)
+	for k in 0 ..< 40 {
+		for i in 0 ..= k {
+			for c in 0 ..< 256 {
+				clear(&text)
+				append(&text, "[\n")
+				for _ in 0 ..< k {
+					append(&text, ' ')
+				}
+				append(&text, "1,\n")
+				for _ in 0 ..< k {
+					append(&text, ' ')
+				}
+				append(&text, '2')
+				text[len(text) - 1 - k + i] = u8(c)
+				append(&text, "\n]")
+				for _ in 0 ..< 40 {
+					append(&text, ' ')
+				}
+				clear(&plain)
+				for b in text {
+					append(&plain, '\r' if b == '\n' else b)
+				}
+				want := json.validate(plain[:], .Strict)
+				got := validate_fenced(text[:])
+				if !testing.expectf(t, got == want, "%q: %v, want %v", text[:], got, want) {
+					return
+				}
+			}
+		}
+		resize(&text, 2 + k + 3 + k)
+		f, bad := validate_fenced(text[:]).?
+		if !testing.expectf(t, bad && f.kind == .Truncated && f.offset == u64(len(text)), "%q: %v", text[:], f) {
+			return
+		}
+	}
+}
+
+// `src` validated from a copy whose next bytes are poisoned, so that under `-sanitize:address` a read past its end
+// fails the run.
+validate_fenced :: proc(src: []u8) -> Maybe(core.Fault) {
+	FENCE :: 64
+	buf := make([]u8, len(src) + FENCE)
+	defer delete(buf)
+	copy(buf, src)
+	sanitizer.address_poison(buf[len(src):])
+	defer sanitizer.address_unpoison(buf[len(src):])
+	return json.validate(buf[:len(src)], .Strict)
 }
 
 @(test)
