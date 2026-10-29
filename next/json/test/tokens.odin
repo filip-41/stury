@@ -113,8 +113,8 @@ hooks_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 	return true
 }
 
-// A walk from the text's first byte passes over one leading BOM, as `validate` does, and one from any other byte
-// reads a BOM as the bad byte it is there.
+// A walk from the text's first byte passes over one leading BOM, as `validate` does, and in JSON one from any other
+// byte outside a string reads a BOM as the bad byte it is there.
 @(test)
 bom_at_the_start :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -125,6 +125,85 @@ bom_at_the_start :: proc(t: ^testing.T) {
 	testing.expect_value(t, log.tokens[0], core.Token{4, 1, .Array, .Value, 0})
 	_, fault = json.walk(transmute([]u8)string(" \xef\xbb\xbf[1]"), 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expect_value(t, fault, core.Fault{1, &json.RULES, .Bad_Char, 0})
+}
+
+// A walk from a byte inside a comment or a string reads from that byte with no state, so the byte is the bad byte it
+// is there. A BOM past the text's first byte is a bad byte in JSON and whitespace in JSON5.
+@(test)
+walk_from_inside :: proc(t: ^testing.T) {
+	log := new(walktest.Log)
+	defer free(log)
+	for c in ([]struct {
+		text: string,
+		lo:   u64,
+		spec: json.Spec,
+		at:   u64, // 0 for a walk that faults nowhere
+	}{
+		{"/* abc */ 1", 3, .Json, 3},
+		{"/* abc */ 1", 4, .Json, 4},
+		{"\"abc\" 1", 2, .Json, 2},
+		{" \xef\xbb\xbf[1]", 1, .Json, 1},
+		{" \xef\xbb\xbf[1]", 1, .Json5, 0},
+	}) {
+		log^ = {}
+		hi: u64
+		fault: Maybe(core.Fault)
+		switch c.spec {
+		case .Json:
+			hi, fault = json.walk(transmute([]u8)c.text, c.lo, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+		case .Jsonc:
+			hi, fault = json.walk(transmute([]u8)c.text, c.lo, .Jsonc, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+		case .Json5:
+			hi, fault = json.walk(transmute([]u8)c.text, c.lo, .Json5, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+		}
+		if c.at == 0 {
+			testing.expectf(t, fault == nil && hi == u64(len(c.text)) && log.n == 3, "%v %q from %d: %d %v, %d tokens", c.spec, c.text, c.lo, hi, fault, log.n)
+		} else {
+			want := core.Fault{c.at, &json.RULES, .Bad_Char, 0}
+			testing.expectf(t, fault == want && hi == c.at, "%v %q from %d: %d %v, want %d %v", c.spec, c.text, c.lo, hi, fault, c.at, want)
+		}
+	}
+	// The text's first byte is past one BOM, and the walk from the byte after it reads the document.
+	log^ = {}
+	hi, fault := json.walk(transmute([]u8)string("\xef\xbb\xbf[1]"), 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+	testing.expectf(t, fault == nil && hi == 6 && log.tokens[0] == core.Token{3, 1, .Array, .Value, 0}, "%d %v %v", hi, fault, log.tokens[0])
+	log^ = {}
+	hi, fault = json.walk(transmute([]u8)string("\xef\xbb\xbf[1]"), 3, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+	testing.expectf(t, fault == nil && hi == 6 && log.tokens[0] == core.Token{3, 1, .Array, .Value, 0}, "%d %v %v", hi, fault, log.tokens[0])
+}
+
+// A hook that stops on a comment inside a run: the comments before it are given, the walk ends one past it, and no
+// later comment or value is read.
+@(test)
+stop_on_comment :: proc(t: ^testing.T) {
+	log := new(walktest.Log)
+	defer free(log)
+	Want :: struct {
+		text: string,
+		spec: json.Spec,
+		hi:   u64,
+	}
+	for c in ([]Want {
+		{"/* a */ /* b */ /* c */ 1", .Jsonc, 15},
+		{"// a\n// b\n// c\n1", .Jsonc, 9},
+		{"/* a */ /* b */ /* c */ 1", .Json5, 15},
+	}) {
+		log^ = {rule = 1}
+		hi: u64
+		fault: Maybe(core.Fault)
+		switch c.spec {
+		case .Json:
+			hi, fault = json.walk(transmute([]u8)c.text, 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+		case .Jsonc:
+			hi, fault = json.walk(transmute([]u8)c.text, 0, .Jsonc, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+		case .Json5:
+			hi, fault = json.walk(transmute([]u8)c.text, 0, .Json5, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+		}
+		testing.expectf(t, fault == nil && hi == c.hi && log.n == 2, "%v %q: %d %v, %d tokens", c.spec, c.text, hi, fault, log.n)
+		for tok in log.tokens[:log.n] {
+			testing.expectf(t, tok.kind == .Plain && tok.role == .Comment, "%v %q: %v", c.spec, c.text, tok)
+		}
+	}
 }
 
 // A walk reads one document. A stream is a loop of walks, each from where the last one ended, passing over

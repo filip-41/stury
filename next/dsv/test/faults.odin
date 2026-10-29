@@ -211,7 +211,8 @@ TOLERATED := []Tolerated {
 }
 
 // Each tolerance, through `validate` and `walk`, after 0 to 129 empty lines so that what it takes falls on every byte
-// of a block: what it takes was a fault without it, and what it does not take faults alike.
+// of a block: a text the set takes is clean with it and faulty without it, a text the set does not take keeps the kind
+// and offset it has without the set, and both return the same fault.
 @(test)
 tolerances :: proc(t: ^testing.T) {
 	buf: [dynamic]u8
@@ -240,6 +241,85 @@ tolerances :: proc(t: ^testing.T) {
 			}
 			end := c.offset + u64(k) if c.kind != nil else u64(len(buf))
 			if !testing.expectf(t, hi == end, "%q shifted %d: hi %d, want %d", c.text, k, hi, end) {
+				return
+			}
+		}
+	}
+}
+
+// A tolerance set changes `validate` and `walk` alike on generated texts: both return the same fault, and a walk with
+// no fault ends at the text's end and keeps every cell's bytes in its token's span.
+@(test)
+tolerances_agree :: proc(t: ^testing.T) {
+	tolerances_agree_in(t, .Csv)
+	tolerances_agree_in(t, .Tsv)
+}
+
+tolerances_agree_in :: proc(t: ^testing.T, $S: dsv.Spec) {
+	state := rand.create(1)
+	context.random_generator = rand.default_random_generator(&state)
+	log := new(walktest.Log)
+	defer free(log)
+	text, broken: [dynamic]u8
+	defer delete(text)
+	defer delete(broken)
+	tsv := S == .Tsv
+	for round in 0 ..< 1200 {
+		no_header := round % 8 >= 4
+		gen.text(&text, tsv)
+		src := text[:]
+		if round % 2 == 1 {
+			walktest.mutate(&broken, text[:], gen.SHARP)
+			src = broken[:]
+		} else {
+			// A byte no cell may hold, in the first cell, so that `Invalid_Utf8` is reached.
+			log^ = {}
+			dsv.walk(src, 0, S, {no_header = no_header}, log, &core.Hook_Regs{}, walktest.log_hook)
+			for tok in log.tokens[:log.n] {
+				if tok.kind != .Plain || tok.n == 0 {
+					continue
+				}
+				escaped := false
+				for i in tok.lo ..< tok.lo + u64(tok.n) {
+					if src[i] == '\\' {
+						escaped = true
+						break
+					}
+				}
+				if escaped {
+					continue
+				}
+				for i in tok.lo ..< tok.lo + u64(tok.n) {
+					if src[i] != '"' {
+						src[i] = 0xff
+						break
+					}
+				}
+				break
+			}
+		}
+		tol: bit_set[dsv.Tolerance; u8]
+		if rand.int_max(2) == 0 {
+			tol |= {.Invalid_Utf8}
+		}
+		if rand.int_max(2) == 0 {
+			tol |= {.Ragged}
+		}
+		if rand.int_max(2) == 0 {
+			tol |= {.Bare_Quote}
+		}
+		opts := dsv.Options{no_header = no_header, tolerate = tol}
+		want := dsv.validate(src, S, opts)
+		log^ = {}
+		hi, got := dsv.walk(src, 0, S, opts, log, &core.Hook_Regs{}, walktest.log_hook)
+		if !testing.expectf(t, got == want, "%q tsv %v no_header %v tol %v: walk %v, validate %v", src, tsv, no_header, tol, got, want) {
+			return
+		}
+		if got == nil && !testing.expectf(t, hi == u64(len(src)), "%q: hi %d", src, hi) {
+			return
+		}
+		for tok in log.tokens[:log.n] {
+			if !testing.expectf(t, spans(src, tok, tsv), "%q tol %v: %v", src, tol, tok) {
 				return
 			}
 		}

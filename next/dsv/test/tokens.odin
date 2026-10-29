@@ -259,6 +259,76 @@ wrong_width_records :: proc(t: ^testing.T) {
 	}
 }
 
+// Every `Key` token spans its column's header cell, in every record before a fault, at every block offset and in
+// both formats, quoted and unquoted. The bad record is short, wide, or faults inside its second cell.
+@(test)
+key_spans_follow_columns :: proc(t: ^testing.T) {
+	log := new(walktest.Log)
+	defer free(log)
+	text: [dynamic]u8
+	defer delete(text)
+	HEADER := []string{"h0", "h1", "h2"}
+	VALID := []string{"a0", "a1", "a2"}
+	Bad :: struct {
+		cells: []string,
+		keys:  int, // the keys the walk makes before the fault
+	}
+	BAD := []Bad {
+		{{"s0"}, 1},
+		{{"w0", "w1", "w2", "w3"}, 3},
+		{{"u0", "\xff", "u2"}, 1},
+	}
+	for tsv in ([]bool{false, true}) {
+		sep := u8('\t') if tsv else ','
+		for quoted in ([]bool{false, true}) {
+			for bad in BAD {
+				for k in 0 ..< 130 {
+					clear(&text)
+					for _ in 0 ..< k {
+						append(&text, '\n')
+					}
+					header_spans: [SPANS_MAX]Span
+					append_record(&text, HEADER, sep, quoted, &header_spans)
+					append(&text, '\n')
+					for _ in 0 ..< 2 {
+						spans: [SPANS_MAX]Span
+						append_record(&text, VALID, sep, quoted, &spans)
+						append(&text, '\n')
+					}
+					spans: [SPANS_MAX]Span
+					append_record(&text, bad.cells, sep, quoted, &spans)
+					log^ = {}
+					walk(text[:], tsv, false, log, &core.Hook_Regs{}, walktest.log_hook)
+					col, keys := 0, 0
+					for tok in log.tokens[:log.n] {
+						#partial switch tok.kind {
+						case .Map:
+							col = 0
+						case .Plain:
+							if tok.role == .Key {
+								ok := col < len(HEADER)
+								if ok {
+									ok = tok.lo == u64(header_spans[col].lo) && int(tok.n) == header_spans[col].n
+								}
+								if !testing.expectf(t, ok, "%q tsv %v quoted %v bad %v k %d: key %d %v, want column %d", text[:], tsv, quoted, bad.cells, k, keys, tok, col) {
+									return
+								}
+								keys += 1
+							} else {
+								col += 1
+							}
+						case:
+						}
+					}
+					if !testing.expectf(t, keys == 2 * len(VALID) + bad.keys, "%q tsv %v quoted %v bad %v k %d: %d keys, want %d", text[:], tsv, quoted, bad.cells, k, keys, 2 * len(VALID) + bad.keys) {
+						return
+					}
+				}
+			}
+		}
+	}
+}
+
 @(test)
 walked_tokens :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -273,6 +343,18 @@ walked_tokens :: proc(t: ^testing.T) {
 		testing.expectf(t, hi == c.hi && fault == want, "%q from %d: %d %v, want %d %v", c.text, c.lo, hi, fault, c.hi, want)
 		testing.expectf(t, slice_eq(log.tokens[:log.n], c.tokens), "%q from %d: %v", c.text, c.lo, log.tokens[:log.n])
 	}
+}
+
+// A BOM past the text's first byte is a cell byte, not a marker: a walk from the BOM reads the cell it starts.
+@(test)
+bom_mid_text :: proc(t: ^testing.T) {
+	log := new(walktest.Log)
+	defer free(log)
+	src := "a,b\n\xef\xbb\xbfx,y\n"
+	hi, fault := walk(transmute([]u8)src, false, true, log, &core.Hook_Regs{}, walktest.log_hook, 4)
+	testing.expectf(t, hi == 11 && fault == nil, "%d %v", hi, fault)
+	want := []core.Token{{4, 0, .Array, .Value, 0}, {4, 0, .Array, .Value, 0}, {4, 4, .Plain, .Value, 0}, {9, 1, .Plain, .Value, 0}, {10, 1, .End, .Value, 0}, {11, 0, .End, .Value, 0}}
+	testing.expectf(t, slice_eq(log.tokens[:log.n], want), "%v", log.tokens[:log.n])
 }
 
 // Every value of `Detail` has a rule, named under the format's own name.

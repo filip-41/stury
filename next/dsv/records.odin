@@ -53,7 +53,7 @@ record_width :: #force_inline proc "contextless" (w: ^Pass($S, $H), cells: int, 
 
 // A column's header cell as the `Key` token its cell names it by. `Skip` asks for the cell's own token to be passed
 // over and `Stop` ends the walk, and both come with the token's span. A cell past the header's last makes no token:
-// its record is wider than the header and faults at its line end.
+// its record is wider than the header and faults at the delimiter past the width.
 @(private)
 put_key :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, keys: []core.Token, cells: int) -> (a: core.Action, lo: u64, n: u32) {
 	if cells < len(keys) {

@@ -94,10 +94,11 @@ validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe
 // One document read from `lo`: one past its last byte, or the fault. One BOM at the text's first byte, whitespace, the
 // record separator 0x1E, and comments with no document after them before the text's end or a 0x1E are passed over
 // before the document, so a stream of documents, whether NDJSON, RFC 7464 or jq's input, is a loop of walks each from
-// where the last one ended. A text with nothing but those left, and a `lo` past the text's end, holds no document: the
-// walk makes no token and returns the text's end with no fault. When a
-// hook stops the walk, `hi` is one past the token it stopped on. `regs` goes to the first token and holds what the hook
-// returned last.
+// where the last one ended. Outside a string, a BOM at any later byte is `Bad_Char` in JSON and JSONC and whitespace
+// in JSON5. A text with nothing but those left, and a `lo` past the text's end, holds no document: the walk makes no
+// token and returns the text's end with no fault. When a hook stops the walk, `hi` is one past the token it stopped
+// on, and the walk has read no further, so `hi` is no document boundary. `regs` goes to the first token and holds
+// what the hook returned last.
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
 	p := raw_data(src)
 	end := p[len(src):]

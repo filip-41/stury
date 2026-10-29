@@ -11,7 +11,9 @@ package bench
 //   utf8 <every>    JSON's sets as in `json`, and UTF-8 checked per block, ASCII blocks skipped, JSON's bytes 16 in 256
 //                   and one three-byte character in `every` bytes, unit: a block.
 //   utf8all <every> `utf8`, every block checked in full.
-// `-define:TIER=n` times the tier at place n of `k.Tier`, its loops compiled with the tier's features.
+// The `json` and `utf8` lanes time a table `nibble_table` builds from JSON's sets. The walk builds no such table: it
+// uses compares and its own constant class tables. `-define:TIER=n` times the tier at place n of `k.Tier`, its loops
+// compiled with the tier's features.
 
 import "base:intrinsics"
 import "core:fmt"

@@ -11,7 +11,7 @@ fault_at :: #force_inline proc "contextless" (pos: u64, kind: Fault_Kind, detail
 }
 
 // Set in the result's detail field when a hook asked the walk to stop: no fault, and `hi` is one past the token it
-// stopped on.
+// stopped on. The walk read no further, so `hi` is no document boundary.
 STOPPED :: 1
 
 // The fault a result word holds, through the format's `rules`, or nil when its kind is 0.

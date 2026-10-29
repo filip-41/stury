@@ -1,8 +1,9 @@
 # The walks
 
-A walk reads one text from a byte offset and hands every token it finds to a hook, in text order, until the text
-ends, a fault stops it, or the hook does. Every format has one, and every format's walk gives the same tokens through
-the same hook, so a consumer written against `core` reads any format. `validate` is the same walk with no hook.
+A walk reads one text from a byte offset and hands every token it finds to a hook, in the order the walk reads them,
+until the text ends, a fault stops it, or the hook does. Every format has one, and every format's walk gives the same
+tokens through the same hook, so a consumer written against `core` reads any format. `validate` is the same walk with
+no hook.
 
 This document explains what the walks share, how the JSON walk and the delimited-text (dsv) walk are built, and why
 they have that shape. Much of the shape answers what Odin and LLVM do with a hot loop. The reasons are here so that a
@@ -48,10 +49,11 @@ for the walk's tokens reads it.
   to itself: a spec reads its own grammar whole and refuses the rest, unless `Options.tolerate` names a rule it may
   break (see Tolerances).
 - `$S` has no default. A caller names the grammar it reads.
-- A walk from byte 0 passes over one BOM, through `core.text_start`, as `validate` does. From any other byte a BOM
-  is a bad byte.
+- A walk from byte 0 passes over one BOM, through `core.text_start`, as `validate` does. Outside a string, a BOM at
+  any later byte is `Bad_Char` in JSON and JSONC, whitespace in JSON5, and a cell byte in dsv. Inside a JSON string it
+  is the character U+FEFF.
 - `hi` is one past the last byte read, or the fault's byte. When a hook stops the walk, `hi` is one past the token
-  it stopped on and there is no fault.
+  it stopped on and there is no fault. The walk has read no further, so `hi` is no document boundary.
 - A walk reads one document, and `validate` judges a text that holds one. No format takes a framing option: where a
   document ends is the document's own business. A JSON walk passes over whitespace and the record separator 0x1E
   before its document, and in a spec with comments the comments, and in JSON5 its whitespace, with no document after them before the text's end or a 0x1E, so a
@@ -67,13 +69,14 @@ for the walk's tokens reads it.
 Token :: struct { lo: u64, n: u32, kind: Kind, role: Role, spelling: u16 }
 ```
 
-A token is 16 bytes, so it crosses a call in two registers. `lo` and `n` are its span in the text. `kind` says what it
-is: a scalar (`Null`, `False`, `True`, `Number`, `String`, `Plain`), a container's opening (`Array`, `Map`), or its
-`End`. `role` is `Key` for a JSON member's name and for the header cell that names a dsv cell's column, and past `Key`
-a fact: a comment, `Plain`, as `Comment`, `Comment_Inline` or `Comment_Foot`. A consumer that wants values only tests
-`role <= .Key`. `spelling` is a detail only the format reads back: a JSON string that holds an escape, a `/* */`
-comment, a CSV cell that is quoted. A token longer than
-`n` holds is the fault `Too_Wide`, so a span is never cut.
+A token is 16 bytes, so it crosses a call in two registers. `lo` and `n` are its span in the text. Tokens come in the
+order the walk reads them. That is text order except for a dsv `Key`, whose span is its column's header cell, before
+the record the key names. `kind` says what it is: a scalar (`Null`, `False`, `True`, `Number`, `String`, `Plain`), a
+container's opening (`Array`, `Map`), or its `End`. `role` is `Key` for a JSON member's name and for the header cell
+that names a dsv cell's column, and past `Key` a fact: a comment, `Plain`, as `Comment`, `Comment_Inline` or
+`Comment_Foot`. A consumer that wants values only tests `role <= .Key`. `spelling` is a detail only the format reads
+back: a JSON string that holds an escape, a `/* */` comment, a CSV cell that is quoted. A token longer than `n` holds
+is the fault `Too_Wide`, so a span is never cut.
 
 ### Hooks
 
@@ -347,8 +350,9 @@ byte, its open cell and its cell count.
 ### Records and keys
 
 With a header, a record is a `Map` and each cell is a `Key` token, its column's header cell, then the cell as a `Plain`
-value. Without a header a record is an `Array` of `Plain` values. A record's `End` spans its LF or CRLF, and the text's
-`End` has no bytes. A line that is empty or holds only a CR is no record.
+value. Without a header a record is an `Array` of `Plain` values. A record's `End` spans its LF or CRLF. A last record
+that the text does not end with an LF has an `End` of no bytes, and the text's `End` has no bytes. A line that is empty
+or holds only a CR is no record.
 
 - The header's cells are kept as tokens, one 16-byte `Token` per column, so a cell's key is one indexed load, not a
   second scan of the header. `header_cells` counts them before the pass so that the buffer is allocated once, from the
@@ -358,10 +362,11 @@ value. Without a header a record is an `Array` of `Plain` values. A record's `En
   cell reads its keys with no bounds test (`put_key_n`).
 - The record's last cell and its `End` are the outer loop's work, once per record.
 - A record's state lives in locals for the block. `Pass` is one struct, and a field read per cell is a load per cell.
-- A record wider than the first makes its `Map` and its first `width` cells, then faults at the delimiter that opens
-  the next cell, also under `Ragged`, which takes a record narrower than the first, and with no header any width. A
-  narrower record makes its `Map` and all its cells, then faults at its line end's first byte: the CR of a CRLF, else
-  the LF, or the text's end.
+- A record wider than the first is found at the delimiter that opens the cell past the width. The walk gives its `Map`
+  and its first `width` cells, then faults at that delimiter, and gives no `End`. `validate` reports the same byte,
+  which it finds by rescanning the one record on the fault path. A wide record is still refused under `Ragged`, which
+  takes a record narrower than the first, and with no header any width. A narrower record makes its `Map` and all its
+  cells, then faults at its line end's first byte: the CR of a CRLF, else the LF, or the text's end.
 
 ### Tiers
 
@@ -404,6 +409,7 @@ From `next/`:
 | `make test-oracle` | each walk against the current tree's `json` and `csv` on seeded texts and their mutations, each JSON spec against the dialect of its name, with the JSON5 differences the oracle names |
 | `make lint` | vet on the host, x86-64 and riscv64 |
 
-The tests check every fault at its byte and at every offset in a block, every prefix of generated texts with the bytes
-after it poisoned, Skip and Stop at random against the full walk's tokens, a hook that keeps its state behind `h`
-against one that keeps it in `Hook_Regs`, each comment's role, JSON against JSONTestSuite and JSON5 against json5-tests.
+The tests check every fault that names a byte at that byte and at every offset in a block, every prefix of generated
+texts with the bytes after it poisoned, Skip and Stop at random against the full walk's tokens, a hook that keeps its
+state behind `h` against one that keeps it in `Hook_Regs`, each comment's role, JSON against JSONTestSuite and JSON5
+against json5-tests. `No_Memory` names no byte, so its test pins its rule and rendering instead.

@@ -61,6 +61,7 @@ CASES := []Case {
 	{"\"\\ud800\"", .Bad_Escape, 1},
 	{"\"\\ud800\\u0041\"", .Bad_Escape, 1},
 	{"\"\\ud800\\x\"", .Bad_Escape, 1},
+	{"\"\\ud83d\\ude0\"", .Bad_Escape, 1},
 	{"01", .Bad_Number, 1},
 	{"-01", .Bad_Number, 2},
 	{"-a", .Bad_Number, 1},
@@ -664,6 +665,58 @@ max_depth_option :: proc(t: ^testing.T) {
 	}
 }
 
+// `levels` brackets, each after a comment, with a trailing comma and a comment before each close.
+build_depth :: proc(out: ^[dynamic]u8, levels: int, $S: json.Spec, object: bool) {
+	clear(out)
+	for _ in 0 ..< levels {
+		append(out, '{' if object else '[')
+		if object {
+			append(out, "a: " if S == .Json5 else "\"a\": ")
+		}
+		append(out, "/* c */")
+	}
+	append(out, '1')
+	for _ in 0 ..< levels {
+		append(out, ", /* c */")
+		append(out, '}' if object else ']')
+	}
+}
+
+// `max_depth` in JSONC and JSON5, with a comment before every bracket and a trailing comma before every close:
+// `max_depth` levels pass and the next bracket is `Too_Deep`, through `validate` and a walk with a hook.
+@(test)
+max_depth_comments :: proc(t: ^testing.T) {
+	max_depth_comments_in(t, .Jsonc)
+	max_depth_comments_in(t, .Json5)
+}
+
+max_depth_comments_in :: proc(t: ^testing.T, $S: json.Spec) {
+	log := new(walktest.Log)
+	defer free(log)
+	text: [dynamic]u8
+	defer delete(text)
+	for object in ([]bool{false, true}) {
+		for depth in ([]u32{1, 3, json.MAX_DEPTH, json.MAX_DEPTH + 1}) {
+			n := int(depth)
+			build_depth(&text, n, S, object)
+			testing.expectf(t, json.validate(text[:], S, {max_depth = depth}) == nil, "%v object %v %d levels: %v", S, object, n, json.validate(text[:], S, {max_depth = depth}))
+			build_depth(&text, n + 1, S, object)
+			at := -1
+			for i := len(text) - 1; i >= 0; i -= 1 {
+				if text[i] == ('{' if object else '[') {
+					at = i
+					break
+				}
+			}
+			f, bad := json.validate(text[:], S, {max_depth = depth}).?
+			testing.expectf(t, bad && f.kind == .Too_Deep && f.at == u64(at), "%v object %v %d levels: %v, want Too_Deep at %d", S, object, n, f, at)
+			log^ = {}
+			_, fault := json.walk(text[:], 0, S, {max_depth = depth}, log, &core.Hook_Regs{}, walktest.log_hook)
+			testing.expectf(t, fault == (f if bad else nil), "%v object %v %d levels, walked: %v", S, object, n, fault)
+		}
+	}
+}
+
 Tolerated :: struct {
 	spec:   json.Spec,
 	text:   string,
@@ -690,6 +743,7 @@ TOLERATED := []Tolerated {
 	{.Json, "\"\\ud800\\u0041\"", {.Lone_Surrogate}, nil, 0},
 	{.Json, "\"\\ud800\\ud800\"", {.Lone_Surrogate}, nil, 0},
 	{.Json, "\"\\ud800\\ud83d\\ude00\"", {.Lone_Surrogate}, nil, 0},
+	{.Json, "\"\\ud83d\\ude0\"", {.Lone_Surrogate}, .Bad_Escape, 12},
 	{.Json, "\"\\ud800\\u00g1\"", {.Lone_Surrogate}, .Bad_Escape, 11},
 	{.Json, "\"\\ud800\\u", {.Lone_Surrogate}, .Truncated, 9},
 	{.Json, "\"\xff\"", {.Lone_Surrogate}, .Bad_Char, 1},
@@ -703,8 +757,9 @@ TOLERATED := []Tolerated {
 	{.Json5, "{a\\ud800:1}", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Escape, 2},
 }
 
-// Each tolerance, through `validate` and a walk with hooks: what it takes was a fault without it, and what it does not
-// take faults alike. A tolerated string's token keeps its bytes.
+// Each tolerance, through `validate` and a walk with hooks: a text the set takes is clean with it and faulty without
+// it, a text the set does not take keeps the kind and offset it has without the set, and the hooked walk returns
+// `validate`'s fault. A tolerated string's token keeps its bytes.
 @(test)
 tolerances :: proc(t: ^testing.T) {
 	for c in TOLERATED {
@@ -731,6 +786,121 @@ tolerances :: proc(t: ^testing.T) {
 			append(&text, '"')
 			f, bad := validate_fenced(text[:], .Json, {tolerate = {.Invalid_Utf8, .Lone_Surrogate}}).?
 			if !testing.expectf(t, !bad, "%q: %v", text[:], f) {
+				return
+			}
+		}
+	}
+}
+
+// The tolerated pieces of `tolerances`' sweep at every offset in JSONC and JSON5, in both of JSON5's quote kinds:
+// each is clean with the set and a fault without it.
+@(test)
+tolerance_offsets :: proc(t: ^testing.T) {
+	tolerance_offsets_in(t, .Jsonc)
+	tolerance_offsets_in(t, .Json5)
+}
+
+tolerance_offsets_in :: proc(t: ^testing.T, $S: json.Spec) {
+	text: [dynamic]u8
+	defer delete(text)
+	for quote in ([]u8{'"', '\''}) {
+		if S == .Jsonc && quote == '\'' {
+			continue
+		}
+		for piece in ([]string{"\xff", "\xe2\x82", "\xf0\x9f\x98x", "\\ud800", "\\udc00\\u0041"}) {
+			for k in 0 ..< 140 {
+				clear(&text)
+				append(&text, quote)
+				for _ in 0 ..< k {
+					append(&text, 'a')
+				}
+				append(&text, piece)
+				append(&text, quote)
+				f, bad := validate_fenced(text[:], S, {tolerate = {.Invalid_Utf8, .Lone_Surrogate}}).?
+				if !testing.expectf(t, !bad, "%v %q: %v", S, text[:], f) {
+					return
+				}
+				strict, strict_bad := json.validate(text[:], S).?
+				if !testing.expectf(t, strict_bad, "%v %q: strict %v", S, text[:], strict) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// A tolerance set changes `validate` and a hooked walk alike on generated texts of each spec: both return the same
+// fault, except that `Trailing` is `validate`'s alone, and every token keeps the bytes of its span.
+@(test)
+tolerances_agree :: proc(t: ^testing.T) {
+	tolerances_agree_in(t, .Json)
+	tolerances_agree_in(t, .Jsonc)
+	tolerances_agree_in(t, .Json5)
+}
+
+tolerances_agree_in :: proc(t: ^testing.T, $S: json.Spec) {
+	state := rand.create(1)
+	context.random_generator = rand.default_random_generator(&state)
+	log := new(walktest.Log)
+	defer free(log)
+	text, broken: [dynamic]u8
+	defer delete(text)
+	defer delete(broken)
+	for round in 0 ..< 1200 {
+		gen.text(&text, 1 + round % 6, S)
+		src := text[:]
+		if round % 2 == 1 {
+			walktest.mutate(&broken, text[:], gen.SHARP)
+			src = broken[:]
+		} else {
+			// A byte no string may hold, in the first quoted string, so that `Invalid_Utf8` is reached.
+			log^ = {}
+			json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, walktest.log_hook)
+			for tok in log.tokens[:log.n] {
+				if tok.kind != .String || tok.n < 3 || (src[tok.lo] != '"' && src[tok.lo] != '\'') {
+					continue
+				}
+				escaped := false
+				for i in tok.lo ..< tok.lo + u64(tok.n) {
+					if src[i] == '\\' {
+						escaped = true
+						break
+					}
+				}
+				if escaped {
+					continue
+				}
+				for i in tok.lo + 1 ..< tok.lo + u64(tok.n) - 1 {
+					if src[i] != '"' && src[i] != '\'' {
+						src[i] = 0xff
+						break
+					}
+				}
+				break
+			}
+		}
+		tol: bit_set[json.Tolerance; u8]
+		switch rand.int_max(4) {
+		case 1:
+			tol = {.Invalid_Utf8}
+		case 2:
+			tol = {.Lone_Surrogate}
+		case 3:
+			tol = {.Invalid_Utf8, .Lone_Surrogate}
+		}
+		opts := json.Options{tolerate = tol}
+		want := json.validate(src, S, opts)
+		log^ = {}
+		_, got := json.walk(src, 0, S, opts, log, &core.Hook_Regs{}, walktest.log_hook)
+		if f, bad := want.?; bad && f.kind == .Trailing {
+			if !testing.expectf(t, got == nil, "%v %q tol %v: walk %v, validate %v", S, src, tol, got, want) {
+				return
+			}
+		} else if !testing.expectf(t, got == want, "%v %q tol %v: walk %v, validate %v", S, src, tol, got, want) {
+			return
+		}
+		for tok in log.tokens[:log.n] {
+			if !testing.expectf(t, spans(src, tok), "%v %q tol %v: %v", S, src, tol, tok) {
 				return
 			}
 		}

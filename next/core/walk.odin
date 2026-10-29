@@ -30,10 +30,11 @@ Role :: enum u8 {
 	Comment_Foot, // json (JSONC, JSON5): a comment after the value before it, or in an empty container, with no value after it, `Plain`
 }
 
-// One token, in text order. `lo` is its first byte and `n` its length, 0 where the format writes nothing. A token
-// longer than `n` holds is `Too_Wide`. `spelling` is the format's own detail, read back only by that format. json: 1
-// when a string holds an escape, so a reader decodes only those, 1 when a comment is `/* */` rather than `//`, and a
-// number's `json.Number_Spelling`. dsv: 1 when a cell is quoted.
+// One token, in the order the walk reads it. That is text order except for a dsv `Key`, whose span is its column's
+// header cell, before the record the key names. `lo` is its first byte and `n` its length, 0 where the format writes
+// nothing. A token longer than `n` holds is `Too_Wide`. `spelling` is the format's own detail, read back only by that
+// format. json: 1 when a string holds an escape, so a reader decodes only those, 1 when a comment is `/* */` rather
+// than `//`, and a number's `json.Number_Spelling`. dsv: 1 when a cell is quoted.
 Token :: struct {
 	lo:       u64,
 	n:        u32,

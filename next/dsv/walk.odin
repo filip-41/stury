@@ -51,12 +51,13 @@ Detail :: enum u8 {
 RULES := core.Rules{"dsv", {{}, {"field_count", "Record has the wrong number of fields"}, {"bare_quote", "Quote in an unquoted cell"}}}
 
 // One text read from `lo`, past one BOM at the text's first byte, with a hook: one past its last byte, or the fault.
-// When a hook stops the walk, `hi` is one past the token it stopped on. A `lo` past the text's end reads an empty
-// text. The tokens are an `Array` for the text, then per record a `Map` (an `Array` with no header) holding, per
-// cell, its column's header cell as a `Plain` of role `Key` and the cell as a `Plain` value, and an `End` on its line
-// end (LF or CR LF, `n` 0 where the text ends without one). The text's `End` is at its end, `n` 0. A cell's span
-// keeps its quotes and leaves out the CR of a CRLF. The header makes no tokens of its own, and a line that is empty
-// or holds only a CR is no record.
+// A BOM at any later byte is a cell byte. When a hook stops the walk, `hi` is one past the token it stopped on, and
+// the walk has read no further, so `hi` is no document boundary. A `lo` past the text's end reads an empty text. The
+// tokens are an `Array` for the text, then per record a `Map` (an `Array` with no header) holding, per cell, its
+// column's header cell as a `Plain` of role `Key` and the cell as a `Plain` value, and an `End` on its line end (LF
+// or CR LF, `n` 0 where the text ends without one). The text's `End` is at its end, `n` 0. A cell's span keeps its
+// quotes and leaves out the CR of a CRLF. The header makes no tokens of its own, and a line that is empty or holds
+// only a CR is no record.
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
 	// One allocation per walk, of one 16-byte token per header cell, so that no cell of a record looks its column's
 	// header cell up again. It is scratch freed before the walk returns, so it comes from the default heap, which
@@ -99,9 +100,9 @@ judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options) -> u64
 	return field_count_fault(src, lo, S, opts, r)
 }
 
-// A width fault's position, which the pass reports at the record's first byte: the delimiter that opens the cell past
-// the width for a wide record, or the line end's first byte for a narrow one. A width fault before a byte fault wins.
-// Only a fault reaches this scan, so nothing here is on the pass's per-block path.
+// A width fault's position: the delimiter that opens the cell past the width for a wide record, or the line end's
+// first byte for a narrow one. A width fault before a byte fault wins. Only a fault reaches this scan, so nothing here
+// is on the pass's per-block path.
 @(private, cold)
 field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, r: u64) -> u64 {
 	kind := core.Fault_Kind(r & 0xff)
