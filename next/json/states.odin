@@ -683,14 +683,19 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 	ind := ind
 	p := p
 	for {
-		// A key this state does not read whole, or at all, is `st_key`'s: it checks the opening quote and reads the
-		// same bytes, and faults alike.
+		// A key this state does not read at all is `st_key`'s: it checks the opening quote, and its other starts and
+		// its fault, and faults alike.
 		if p >= end || p[0] != '"' {
 			return #must_tail st_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
-		q, _ := string_probe(p, end)
+		// A key this state does not read whole goes where `st_key`'s failed probe sends it, so no byte is read twice.
+		q, escaped := string_probe(p, end)
 		if q == nil {
-			return #must_tail st_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			if escaped {
+				w.resume = p[1:]
+				return #must_tail st_key_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+			return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		switch emit(w, on, &hs, .String, .Key, p, q, 0) {
 		case .Next:

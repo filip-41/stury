@@ -223,8 +223,15 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 		if emit(w, on, hs, .Plain, role, x, e, u16(x[1] == '*')) == .Stop {
 			return e, true, .None
 		}
-		for c := x; c < e; c = c[1:] {
-			next_line ||= line_end(c, e, S)
+		// A `//` comment ends at a line end that is no byte of it, so only a `/* */` body can move the line on, and
+		// the role needs only whether its body holds one.
+		if !next_line && x[1] == '*' {
+			for c := x[2:]; c < e; c = c[1:] {
+				if line_end(c, e, S) {
+					next_line = true
+					break
+				}
+			}
 		}
 		x, r = e, e
 	}
