@@ -1,7 +1,7 @@
 ODIN ?= $(or $(wildcard $(abspath ../../Odin-master/bin/odin)),odin)
 
 # The rebuilt layers, beside the tree they replace until each one moves to the root.
-LIB_PKGS  := core/kernel
+LIB_PKGS  := core core/kernel
 TEST_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
 BUILD     := build
