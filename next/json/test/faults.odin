@@ -79,6 +79,15 @@ CASES := []Case {
 	{"[1.]", .Bad_Number, 3},
 	{"\v[1]", .Bad_Char, 0},
 	{"[1]\x00garbage", .Trailing, 3},
+	// Number elements and number-valued members after a number, which runs of their own read.
+	{"[1, -2, 3.5e1, 0]", nil, 0},
+	{"{\"a\": 1, \"b\" : -2, \"c\":3, \"d\": [4, 5]}", nil, 0},
+	{"[1, 2, 01, 3]", .Bad_Number, 8},
+	{"[1, 2,  x]", .Bad_Char, 8},
+	{"[1, 2, ]", .Bad_Char, 7},
+	{"{\"a\": 1, \"b\" : 2, \"c\":3,}", .Bad_Char, 24},
+	{"{\"a\": 1, \"b\": x}", .Bad_Char, 14},
+	{"{\"a\": 1, b: 2}", .Bad_Char, 9},
 }
 
 // The faults with `Detail.Literal`.

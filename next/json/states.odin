@@ -41,7 +41,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		if emit(w, on, &hs, .Number, .Value, p, q, 0) == .Stop {
 			return stopped(w, hs, q)
 		}
-		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		return #must_tail st_after_number(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Literal:
 		q, e := literal(p, end)
 		if q == nil {
@@ -476,6 +476,146 @@ st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 	}
 	w.stack[d >> 1] = u8(d & 1)
 	return #must_tail st_after(w.base[r >> 16:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+}
+
+// `st_after` for a number: an array element that is also a number is read from the comma on by `st_number_run`, so
+// a run of numeric elements never hands over to a value state. A state of its own, kept out of `st_after` so the
+// states every document takes keep their size and placement. The separator rules are `st_after`'s, so a change
+// there belongs here too.
+@(private, enable_target_feature = STATE_FEATURES)
+st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	ind := ind
+	if d < 2 {
+		return ended(w, hs, p)
+	}
+	q := indent_fast(p, end, &ind, .Close)
+	if q == nil {
+		return #must_tail st_after_ws(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+	if q[0] == ',' {
+		r := indent_fast(q[1:], end, &ind, .Member)
+		if r == nil {
+			return #must_tail st_member_ws(q[1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		if d & 1 != 0 {
+			return #must_tail st_member_run(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		if r[0] == '-' || r[0] - '0' < 10 {
+			return #must_tail st_number_run(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+	if q[0] == ']' | u8(d & 1) << 5 {
+		return #must_tail st_close(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+	return fault(w, hs, q, .Bad_Char)
+}
+
+// `p` stands on the first byte of an array element, the comma and the one space or indent after it already read:
+// a run of number elements stays in this state, so the comma's successor is tested here and no state boundary stands
+// between one element and the next.
+@(private, enable_target_feature = STATE_FEATURES)
+st_number_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	p := p
+	q: [^]u8
+	for {
+		kind: core.Fault_Kind
+		q, kind = number(p, end)
+		if kind != NO_FAULT {
+			return fault(w, hs, q, kind)
+		}
+		if too_wide(p, q) {
+			return fault(w, hs, p, .Too_Wide)
+		}
+		if emit(w, on, &hs, .Number, .Value, p, q, 0) == .Stop {
+			return stopped(w, hs, q)
+		}
+		// `q[1]` and `q[2]` are read only where three bytes remain, so a run that ends at the text's last element
+		// hands the separator to `st_after`.
+		if intrinsics.ptr_sub(end, q) <= 2 || q[0] != ',' {
+			break
+		}
+		r := q[1:]
+		if r[0] == ' ' {
+			r = r[1:]
+		}
+		if r[0] != '-' && r[0] - '0' >= 10 {
+			break
+		}
+		p = r
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+}
+
+// `p` stands on an object's next key, the comma and the one space or indent after it already read: while the value
+// that follows is a number, the member's key, colon, value and separator stay in this state, so no key or value
+// state stands between two members. Anything else hands the rest of the walk back to the states that read it.
+@(private, enable_target_feature = STATE_FEATURES)
+st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	ind := ind
+	p := p
+	for {
+		// A key this state does not read whole, or at all, is `st_key`'s: it checks the opening quote and reads the
+		// same bytes, and faults alike.
+		if p >= end || p[0] != '"' {
+			return #must_tail st_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		q, _ := string_probe(p, end)
+		if q == nil {
+			return #must_tail st_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		switch emit(w, on, &hs, .String, .Key, p, q, 0) {
+		case .Next:
+		case .Skip:
+			return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		case .Stop:
+			return stopped(w, hs, q)
+		}
+		// The value after the colon, when the colon is flush against it, `": "`, `" : "` or `" :"`.
+		r: [^]u8
+		if intrinsics.ptr_sub(end, q) > 2 && q[0] == ':' {
+			if q[1] > ' ' {
+				r = q[1:]
+			} else if q[1] == ' ' && q[2] > ' ' {
+				r = q[2:]
+			}
+		}
+		if r == nil && intrinsics.ptr_sub(end, q) > 3 && q[0] == ' ' && q[1] == ':' {
+			if q[2] > ' ' {
+				r = q[2:]
+			} else if q[2] == ' ' && q[3] > ' ' {
+				r = q[3:]
+			}
+		}
+		if r == nil {
+			return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		if r[0] != '-' && r[0] - '0' >= 10 {
+			return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		n, kind := number(r, end)
+		if kind != NO_FAULT {
+			return fault(w, hs, n, kind)
+		}
+		if too_wide(r, n) {
+			return fault(w, hs, r, .Too_Wide)
+		}
+		if emit(w, on, &hs, .Number, .Value, r, n, 0) == .Stop {
+			return stopped(w, hs, n)
+		}
+		// `n[1]` and `n[2]` are read only where three bytes remain, as in `st_number_run`.
+		if intrinsics.ptr_sub(end, n) <= 2 || n[0] != ',' {
+			return #must_tail st_after_number(n, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		next := indent_fast(n[1:], end, &ind, .Member)
+		if next == nil {
+			return #must_tail st_member_ws(n[1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		p = next
+	}
 }
 
 // What the first byte of a value starts.

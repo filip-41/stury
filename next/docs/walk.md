@@ -38,15 +38,15 @@ validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe
 A limit of the format's own grammar may be public beside them, as JSON's `MAX_DEPTH` is, since a caller sizing a stack
 for the walk's tokens reads it.
 
-- **`Spec` is a compile-time parameter.** Each spec is its own instance of the walk, so a build carries the code of the
+- `Spec` is a compile-time parameter. Each spec is its own instance of the walk, so a build carries the code of the
   specs it names and no other. Odin refuses a struct as a `$` parameter, so what a spec needs at run time, such as
   whether a CSV text has a header, goes in `Options`.
-- **`$S` has no default.** A caller names the grammar it reads.
-- **A walk from byte 0 passes over one BOM**, through `core.text_start`, as `validate` does. From any other byte a BOM
+- `$S` has no default. A caller names the grammar it reads.
+- A walk from byte 0 passes over one BOM, through `core.text_start`, as `validate` does. From any other byte a BOM
   is a bad byte, and a `lo` past the text's end reads an empty text.
-- **`hi` is one past the last byte read, or the fault's offset.** When a hook stops the walk, `hi` is one past the token
+- `hi` is one past the last byte read, or the fault's offset. When a hook stops the walk, `hi` is one past the token
   it stopped on and there is no fault.
-- **The walks are contextless**, so a hook can call a walk. A walk that needs scratch takes it from the default heap
+- The walks are contextless, so a hook can call a walk. A walk that needs scratch takes it from the default heap
   and frees it before it returns. `validate` allocates nothing.
 
 ### Tokens
@@ -73,10 +73,10 @@ the arm64 and x86-64 calling conventions.
 
 The `Action` a hook returns:
 
-- **`Next`** goes on.
-- **`Skip`** on an `Array` or `Map` passes the container with no more tokens, its `End` included, and on a `Key` passes
+- `Next` goes on.
+- `Skip` on an `Array` or `Map` passes the container with no more tokens, its `End` included, and on a `Key` passes
   the member's value. The walk still judges the bytes it passes. On a scalar it is `Next`.
-- **`Stop`** ends the walk at once, with no fault and the rest of the text unjudged.
+- `Stop` ends the walk at once, with no fault and the rest of the text unjudged.
 
 ### The result word
 
@@ -108,15 +108,15 @@ Every state takes the same arguments:
 
 A tail call passes them in the same registers it received them in, so moving from state to state costs a jump.
 
-- **The state lives in registers, not in a struct.** A field of `w` that changes per token is a load and a store per
+- The state lives in registers, not in a struct. A field of `w` that changes per token is a load and a store per
   token. `w` holds what changes rarely: the text's base, the hook's state, the depth stack, the tier, and where a string's
   first escape is.
-- **`d` carries the container's kind.** Whether a close bracket is `]` or `}` and whether the next member starts with a
+- `d` carries the container's kind. Whether a close bracket is `]` or `}` and whether the next member starts with a
   key are bit tests on a register. `]` with bit 5 set is `}`, so `p[0] == ']' | (d & 1) << 5` tests the right one.
-- **The depth stack holds only what a register cannot.** An open bracket writes the kind of the container it leaves
+- The depth stack holds only what a register cannot. An open bracket writes the kind of the container it leaves
   into that depth's slot, and a close reads it back into `d`. The stack is `MAX_DEPTH` bytes in `Walk`, left
   unwritten (`= ---` on an array, where a struct would be zeroed), and no slot is read before it is written.
-- **Every state is `#force_no_inline`.** A state inlined into another makes one procedure that saves the union of their
+- Every state is `#force_no_inline`. A state inlined into another makes one procedure that saves the union of their
   registers on entry. Kept apart, each state's entry is as cheap as its own work.
 
 ### States and leaves
@@ -126,11 +126,11 @@ A state chooses and a leaf reads. The leaves (`number`, `literal`, the string re
 call, or a vector built on entry, makes every state that inlines it pay for that call's saved registers, so rare work
 moves to a state of its own:
 
-- **Whitespace after a token** goes to `st_open_ws`, `st_after_ws`, `st_member_ws`. The hot states hold only
+- Whitespace after a token goes to `st_open_ws`, `st_after_ws`, `st_member_ws`. The hot states hold only
   `indent_fast`, which is scalar and builds no vector.
-- **A string that holds an escape** goes to `st_string_escaped`, which keeps the escape masks' registers to itself.
-- **A bad literal** goes to `st_bad_literal`, so `st_value` saves nothing for its call.
-- **A skipped value** goes to `st_skip` and `st_skip_member`.
+- A string that holds an escape goes to `st_string_escaped`, which keeps the escape masks' registers to itself.
+- A bad literal goes to `st_bad_literal`, so `st_value` saves nothing for its call.
+- A skipped value goes to `st_skip` and `st_skip_member`.
 
 `st_value` branches on a 256-entry class table (`VALUE_CLASS`), so `true`, `false` and `null` share one branch.
 
@@ -138,16 +138,16 @@ moves to a state of its own:
 
 A string goes to the cheapest reader that can vouch for it, and falls through to the next when that reader cannot:
 
-1. **`string_short`** loads 16 bytes twice. A value string that closes within 32 bytes of printable ASCII is read
+1. `string_short` loads 16 bytes twice. A value string that closes within 32 bytes of printable ASCII is read
    with no loop.
-2. **`string_probe`**, for keys, reads up to 32 bytes one at a time, each a branch on a table. A key's length repeats
+2. `string_probe`, for keys, reads up to 32 bytes one at a time, each a branch on a table. A key's length repeats
    from member to member, so its closing quote lands on a predicted branch, and the next state's address does not wait
    on a vector compare.
-3. **`string_lean`** reads plain ASCII 64 bytes at a time with no UTF-8 state.
-4. **`string_escaped`** reads on from the block of the first backslash, judging each block's escapes in masks with no
+3. `string_lean` reads plain ASCII 64 bytes at a time with no UTF-8 state.
+4. `string_escaped` reads on from the block of the first backslash, judging each block's escapes in masks with no
    branch per escape.
-5. **`string_long`** reads blocks with UTF-8 validation, through one `string_span` per x86 tier.
-6. **`string_exact`** reads byte by byte and gives the exact fault for what no block reader vouches for.
+5. `string_long` reads blocks with UTF-8 validation, through one `string_span` per x86 tier.
+6. `string_exact` reads byte by byte and gives the exact fault for what no block reader vouches for.
 
 ### Tiers
 
@@ -175,6 +175,13 @@ or without one space before it, and `st_colon` takes every other spelling.
 A run of open brackets is pushed in one state, `st_open_run`, and a run of close brackets popped in one, `st_close`.
 `st_close` carries the depth apart from the kind bit, so the next close does not wait on the stack's load.
 
+A number hands over to `st_after_number`, which is `st_after` with two more ways out. In an array, when the element
+after the comma starts a number, the walk enters `st_number_run`, which reads number elements separated by a comma and
+at most one space in one loop. In an object, the next member enters `st_member_run`, which reads members with a short
+key, a colon in a fast-path spelling and a number value in one loop. Either run hands anything else to the states that
+read it, so the states every document passes through hold none of the runs' code. `st_after_number` is kept apart from
+`st_after` for the same reason, and holds the same separator rules.
+
 ### Skip
 
 A skipped value is read by `pass_over`: the same states instantiated with no hook, entered by a call, since
@@ -201,18 +208,18 @@ What carries from one block to the next lives in `Pass`: whether the last block 
 after a separator, right after a closing quote, in a CR or in a backslash, the UTF-8 state, and the open record's first
 byte, its open cell and its cell count.
 
-- **The bytes inside quoted fields are `prefix_xor` of the quote mask**, XORed with whether the last block ended inside
+- The bytes inside quoted fields are `prefix_xor` of the quote mask, XORed with whether the last block ended inside
   one. An opening quote is legal only at a cell's first byte, and a closing quote only before a quote that doubles it, a
   delimiter, a line end or the text's end. Both are mask tests.
-- **A text whose blocks have held no quote byte skips the quote work.** `Pass.quoted` is set by the first block with a
+- A text whose blocks have held no quote byte skips the quote work. `Pass.quoted` is set by the first block with a
   quote, and the text takes the quoted path from then on. A per-block test of the block's own quotes would mispredict on
   text that quotes some cells and not others.
-- **A CR is judged with the byte after it.** The CR in a block's last byte is the next block's to judge, and one the text
+- A CR is judged with the byte after it. The CR in a block's last byte is the next block's to judge, and one the text
   ends on is a fault.
-- **UTF-8 is judged only in blocks that are not all ASCII**, and in the first ASCII block after one, which settles a
+- UTF-8 is judged only in blocks that are not all ASCII, and in the first ASCII block after one, which settles a
   sequence the block before left open.
-- **A fault cuts the masks at its byte**, so no separator past it is read and no token past it is made.
-- **The last, partial block is loaded zero-padded.** A zero is no separator, no quote and ASCII, and `valid` clears the
+- A fault cuts the masks at its byte, so no separator past it is read and no token past it is made.
+- The last, partial block is loaded zero-padded. A zero is no separator, no quote and ASCII, and `valid` clears the
   lanes past the text.
 
 ### Records and keys
@@ -221,15 +228,15 @@ With a header, a record is a `Map` and each cell is a `Key` token, its column's 
 value. Without a header a record is an `Array` of `Plain` values. A record's `End` spans its LF or CRLF, and the text's
 `End` has no bytes. A line that is empty or holds only a CR is no record.
 
-- **The header's cells are kept as tokens**, one 16-byte `Token` per column, so a cell's key is one indexed load, not a
+- The header's cells are kept as tokens, one 16-byte `Token` per column, so a cell's key is one indexed load, not a
   second scan of the header. `header_cells` counts them before the pass so that the buffer is allocated once, from the
   default heap, and freed before `walk` returns.
-- **The delimiters before a block's next LF run in a loop of their own.** It holds no LF test, no CR, no width and no
+- The delimiters before a block's next LF run in a loop of their own. It holds no LF test, no CR, no width and no
   `End`, and which kind of record it is in is chosen once for the run, not per cell. A run proven to name one key per
   cell reads its keys with no bounds test (`put_key_n`).
-- **The record's last cell and its `End` are the outer loop's work**, once per record.
-- **A record's state lives in locals for the block.** `Pass` is one struct, and a field read per cell is a load per cell.
-- **A cell past the header's last makes no token.** Its record is wider than the header and faults at its line end.
+- The record's last cell and its `End` are the outer loop's work, once per record.
+- A record's state lives in locals for the block. `Pass` is one struct, and a field read per cell is a load per cell.
+- A cell past the header's last makes no token. Its record is wider than the header and faults at its line end.
 
 ### Tiers
 
