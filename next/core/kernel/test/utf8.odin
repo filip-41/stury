@@ -107,3 +107,53 @@ utf8_random_text :: proc(t: ^testing.T) {
 		check_utf8(t, buf[:n])
 	}
 }
+
+// Whether `src` holds no error, a sequence its end leaves open allowed: it is valid with one of the shortest
+// completions of each lead byte appended.
+reference_clean :: proc(src: []u8) -> bool {
+	if utf8.valid_string(string(src)) {
+		return true
+	}
+	buf: [64 * 4 + 3]u8
+	copy(buf[:], src)
+	for second in ([]u8{0x80, 0x90, 0xa0}) {
+		for rest in 0 ..< 3 {
+			buf[len(src)] = second
+			for i in 1 ..= rest {
+				buf[len(src) + i] = 0x80
+			}
+			if utf8.valid_string(string(buf[:len(src) + 1 + rest])) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Random text cut at a block end, often inside a sequence, now and then broken by a random byte: `utf8_clean` after
+// its whole blocks.
+@(test, enable_target_feature = FEATURES)
+utf8_clean_at_block_end :: proc(t: ^testing.T) {
+	state := rand.create(9)
+	context.random_generator = rand.default_random_generator(&state)
+	chars := []rune{'a', 0x80, 0x7ff, 0x800, 0xffff, 0x10000, 0x10ffff}
+	buf: [64 * 4 + 3]u8
+	for _ in 0 ..< 20000 {
+		n := 64 * (1 + rand.int_max(4))
+		for i := 0; i < len(buf); {
+			bytes, size := utf8.encode_rune(rand.choice(chars))
+			size = min(size, len(buf) - i)
+			copy(buf[i:], bytes[:size])
+			i += size
+		}
+		for _ in 0 ..< rand.int_max(3) {
+			buf[rand.int_max(n)] = u8(rand.int_max(256))
+		}
+		s: k.Utf8_State
+		for lo := 0; lo < n; lo += 64 {
+			k.utf8_block(T, k.load(raw_data(buf[lo:])), &s)
+		}
+		want := reference_clean(buf[:n])
+		testing.expectf(t, k.utf8_clean(T, s) == want, "% x: %v, want %v", buf[n - 8:n], !want, want)
+	}
+}

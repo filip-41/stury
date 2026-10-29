@@ -63,3 +63,9 @@ any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
 any_below :: #force_inline proc "contextless" (b: Block, c: u8) -> bool {
 	return pack(below(b, c)) != 0
 }
+
+// The first lane set in the 16 lane masks of `m`, or 16: one bit a lane by `pmovmskb`, and a bit past the lanes that
+// stands for the empty mask.
+first_lane :: #force_inline proc "contextless" (m: V) -> u64 {
+	return u64(intrinsics.count_trailing_zeros(u32(transmute(u16)simd.extract_msbs(m)) | 0x1_0000))
+}

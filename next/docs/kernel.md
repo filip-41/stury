@@ -20,9 +20,9 @@ forced by what Odin and LLVM do with vector code: the reasons are here so that a
 | `utf8.odin` | every target | UTF-8 validation |
 
 There are two independent splits. The block operations (`load`, `eq`, `below`, `either`, `has`, `pack`, `pack_n`,
-`is_ascii`, `any_lane`, `any_below`) split by how the target packs a mask. The kernels that take a tier (`lookup`,
-`prefix_xor`, `flatten`, `load_tail`, `load_padded`) split by whether the target has several instruction sets to choose
-between at run time. A target with neither NEON nor x86 vectors, such as riscv64, gets `lanes64.odin` and
+`is_ascii`, `any_lane`, `any_below`, `first_lane`) split by how the target packs a mask. The kernels that take a tier
+(`lookup`, `prefix_xor`, `flatten`, `load_tail`, `load_padded`) split by whether the target has several instruction sets
+to choose between at run time. A target with neither NEON nor x86 vectors, such as riscv64, gets `lanes64.odin` and
 `single_tier.odin`, which is portable code that LLVM lowers as it can.
 
 Shared code goes in `kernel.odin` and is written once. A file per architecture holds only what has to differ.
@@ -145,6 +145,9 @@ lane. Instead:
 - **`any_lane` and `is_ascii`** reduce with `umaxv`, one instruction per block after the ORs. **`any_below`** reduces
   with `uminv`. On x86 these go through `pack` instead: a packed mask costs one instruction per register, the same as a
   vector test, and x86 has no byte minimum across a register.
+- **`first_lane`** finds the first set lane of one 16-byte mask, for a reader that looks at a short span before it takes
+  a whole block. x86 gathers one bit a lane (`pmovmskb`). NEON has no such instruction, so a narrowing shift (`shrn`)
+  keeps four bits a lane and the trailing zero count is divided by four.
 
 ## Tier-dependent kernels
 
@@ -233,7 +236,9 @@ any length this way, without a loop per byte.
 `utf8.odin` follows Keiser and Lemire: three 16-entry tables, indexed by the high and low nibble of the byte before and
 the high nibble of the byte itself, flag every error a pair of bytes can show. The bytes two and three before a byte say
 whether it must be a continuation. A caller checks each block with `utf8_block`, or with `utf8_ascii_block` when
-`is_ascii` says the block is all ASCII, and calls `utf8_ok` once at the end.
+`is_ascii` says the block is all ASCII, and calls `utf8_ok` once at the end. A reader that stops inside a block, at a
+string's closing quote, asks `utf8_clean` instead: it allows a sequence the last block leaves open, since the bytes past
+the stop are not the reader's to judge.
 
 - **One tier register at a time.** Written on all 64 lanes, the 16-byte tiers keep every step's four registers live at
   once and spill to the stack.

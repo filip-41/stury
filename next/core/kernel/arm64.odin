@@ -88,6 +88,13 @@ any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
 	return simd.reduce_max(simd.bit_or(simd.bit_or(m[0], m[1]), simd.bit_or(m[2], m[3]))) != 0
 }
 
+// The first lane set in the 16 lane masks of `m`, or 16. A narrowing shift (`shrn`) keeps four bits a lane in a scalar
+// register, since NEON has no instruction that gathers one bit a lane.
+first_lane :: #force_inline proc "contextless" (m: V) -> u64 {
+	bits := transmute(u64)cast(#simd[8]u8)simd.shr(transmute(#simd[8]u16)m, 4)
+	return u64(intrinsics.count_trailing_zeros(bits)) >> 2
+}
+
 @(private = "file", default_calling_convention = "none")
 foreign _ {
 	@(link_name = "llvm.aarch64.neon.addp.v16i8")

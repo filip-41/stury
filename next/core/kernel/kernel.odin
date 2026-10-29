@@ -4,10 +4,10 @@ import "base:intrinsics"
 import "core:simd"
 
 // Format-neutral kernels on 64-byte blocks: loading a block, reading the last partial block of an input in place,
-// comparing bytes, sorting bytes into sets, packing per-byte masks into one bit per byte, following quoted strings
-// and runs of bytes across blocks, listing the positions in a mask, and validating UTF-8 (utf8.odin). The operations
-// are per architecture (arm64.odin, lanes64.odin). Kernels whose instructions differ by CPU take a `Tier` as `$T`
-// (amd64.odin, single_tier.odin).
+// comparing bytes, sorting bytes into sets, packing per-byte masks into one bit per byte, following quoted strings and
+// runs of bytes across blocks, listing the positions in a mask, finding the first lane of a 16-byte mask, and
+// validating UTF-8 (utf8.odin). The operations are per architecture (arm64.odin, lanes64.odin). Kernels whose
+// instructions differ by CPU take a `Tier` as `$T` (amd64.odin, single_tier.odin).
 
 // 64 input bytes, or the 64 lane masks (0x00 or 0xFF) made from them, as four 16-byte vectors. Kernels that work
 // on all 64 lanes at once reinterpret it as one 64-lane vector (lanes64.odin). An array, so that a block crosses a

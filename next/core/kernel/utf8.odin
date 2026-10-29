@@ -45,6 +45,13 @@ utf8_ascii_block :: #force_inline proc "contextless" ($T: Tier, s: ^Utf8_State) 
 	s.prev = {}
 }
 
+// Whether the blocks given so far hold no error, a sequence the last one leaves open allowed: for a reader that stops
+// inside the last block. Errors anywhere in the blocks count, the bytes past its stop included.
+utf8_clean :: #force_inline proc "contextless" ($T: Tier, s: Utf8_State) -> bool {
+	N :: VECTOR_BYTES[T]
+	return simd.reduce_max((transmute([64 / N]#simd[N]u8)s.err)[0]) == 0
+}
+
 // Whether the blocks given were valid UTF-8, the last one leaving no sequence open: called once, at the end of input.
 utf8_ok :: proc "contextless" (s: Utf8_State) -> bool {
 	return simd.reduce_or(simd.bit_or(s.err, open_sequence(s.prev))) == 0

@@ -325,6 +325,27 @@ below_every_byte_and_lane :: proc(t: ^testing.T) {
 	}
 }
 
+// Every lane alone, then every lane under random lanes above it, and the empty mask.
+@(test, enable_target_feature = FEATURES)
+first_lane_every_lane :: proc(t: ^testing.T) {
+	state := rand.create(8)
+	context.random_generator = rand.default_random_generator(&state)
+	testing.expect_value(t, k.first_lane(#simd[16]u8{}), 16)
+	for lane in 0 ..< 16 {
+		for round in 0 ..< 64 {
+			m: [16]u8
+			m[lane] = 0xff
+			for above in lane + 1 ..< 16 {
+				if round > 0 && rand.int_max(2) == 0 {
+					m[above] = 0xff
+				}
+			}
+			got := k.first_lane(transmute(#simd[16]u8)m)
+			testing.expectf(t, got == u64(lane), "% x: %d, want %d", m, got, lane)
+		}
+	}
+}
+
 // The positions of `m`, plus `base`, from `out[n]` on, and no slot written before `n` or past `FLATTEN_STEP` slots
 // after the last position.
 check_flatten :: proc(t: ^testing.T, m: u64, n: int, base: u16, loc := #caller_location) {
