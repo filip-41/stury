@@ -5,6 +5,7 @@ package json
 
 import "base:intrinsics"
 import core "../core"
+import kernel "../core/kernel"
 
 // The deepest nesting a text may have. The open bracket past it is `Too_Deep` at that bracket.
 MAX_DEPTH :: 1024
@@ -78,13 +79,14 @@ fault_of :: #force_inline proc "contextless" (r: u64) -> Maybe(core.Fault) {
 
 // What the states share beyond their registers. `stack[i]` has bit 0 set when the container at depth `i` is an
 // object, and is written by the open that pushes past it (`MAX_DEPTH` slots), so the walk never reads a slot it did
-// not write.
+// not write. `tier` picks the string reader built for this CPU.
 @(private)
 Walk :: struct($S: Spec, $H: typeid) {
 	base:  [^]u8,
 	hooks: ^H,
 	stack: [^]u8,
 	regs:  ^core.Hook_Regs,
+	tier:  kernel.Tier,
 }
 
 // Set in the stack slot of the depth where a walk that passes over a skipped value ends: a close to that depth ends
@@ -96,10 +98,33 @@ PASS_END :: 4
 walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	// `= ---` on an array leaves it unwritten (a struct would be zeroed), and every slot is written before it is read.
 	stack: [MAX_DEPTH]u8 = ---
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, walk_tier()}
 	end := w.base[len(src):]
 	return st_value(skip_ws(w.base[lo:], end), end, 0, &w, regs.a, regs.b, regs.c, on)
 }
+
+// The string reader's tier: this CPU's, unless a test build forces a lower one with `-define:WALK_TIER=<n>`.
+@(private)
+walk_tier :: #force_inline proc "contextless" () -> kernel.Tier {
+	FORCED :: #config(WALK_TIER, -1)
+	when FORCED >= 0 {
+		return kernel.Tier(FORCED)
+	} else {
+		return kernel.tier()
+	}
+}
+
+// The features every state is built with: one build of the states for each target, on x86-64 for its floor tier.
+when ODIN_ARCH == .amd64 {
+	@(private)
+	STATE_TIER :: kernel.Tier.V2
+} else {
+	@(private)
+	STATE_TIER :: kernel.Tier.Base
+}
+
+@(private)
+STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 
 // The walk without hooks from `p`, in state `st_open` or `st_value`, ending where the stack marks PASS_END or at
 // the end of a root value: a call, since `#must_tail` cannot jump between the walk's instances.
@@ -107,7 +132,7 @@ walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec,
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d: u64, $open: bool) -> u64 {
 	h: No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs}
+	v := Walk(S, No_Hooks){w.base, &h, w.stack, &regs, w.tier}
 	when open {
 		return st_open(p, end, d, &v, 0, 0, 0, no_hook)
 	} else {

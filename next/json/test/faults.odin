@@ -101,6 +101,65 @@ expect_fault :: proc(t: ^testing.T, c: Case, detail: json.Detail) {
 	}
 }
 
+// A string's every byte at every offset its readers branch on: the 16-byte halves, the 64-byte blocks, the text's
+// last 64 bytes, and past them. `pad` plain bytes follow the closing quote or the cut.
+@(test)
+strings_at_every_offset :: proc(t: ^testing.T) {
+	Piece :: struct {
+		bytes:  string,
+		kind:   core.Fault_Kind,
+		offset: u64, // past the opening quote and the run before the piece
+	}
+	@(static, rodata)
+	PIECES := []Piece {
+		{"", nil, 0},
+		{"\\n", nil, 0},
+		{"\\u00e9", nil, 0},
+		{"é", nil, 0},
+		{"😀", nil, 0},
+		{"\x7f", nil, 0},
+		{"\x80", .Bad_Char, 0},
+		{"\x01", .Bad_Char, 0},
+		{"\x1f", .Bad_Char, 0},
+		{"\\q", .Bad_Escape, 1},
+		{"\xff", .Bad_Char, 0},
+		{"\xc3\x28", .Bad_Char, 0},
+		{"\xed\xa0\x80", .Bad_Char, 0},
+	}
+	text: [dynamic]u8
+	defer delete(text)
+	for piece in PIECES {
+		for k in 0 ..< 140 {
+			for pad in ([]int{0, 1, 70}) {
+				clear(&text)
+				append(&text, '"')
+				for _ in 0 ..< k {
+					append(&text, 'a')
+				}
+				append(&text, piece.bytes)
+				append(&text, '"')
+				for _ in 0 ..< pad {
+					append(&text, ' ')
+				}
+				f, bad := json.validate(text[:], .Strict).?
+				if piece.kind == nil {
+					if !testing.expectf(t, !bad, "%q: %v", text[:], f) {
+						return
+					}
+				} else if !testing.expectf(t, bad && f.kind == piece.kind && f.offset == 1 + u64(k) + piece.offset, "%q: %v, want %v at %d", text[:], f, piece.kind, 1 + u64(k) + piece.offset) {
+					return
+				}
+				// Cut before the closing quote.
+				resize(&text, 1 + k + len(piece.bytes))
+				f, bad = json.validate(text[:], .Strict).?
+				if piece.kind == nil && !testing.expectf(t, bad && f.kind == .Truncated && f.offset == u64(len(text)), "%q: %v", text[:], f) {
+					return
+				}
+			}
+		}
+	}
+}
+
 @(test)
 depth_limit :: proc(t: ^testing.T) {
 	deep := strings.concatenate({strings.repeat("[", json.MAX_DEPTH, context.temp_allocator), strings.repeat("]", json.MAX_DEPTH, context.temp_allocator)}, context.temp_allocator)

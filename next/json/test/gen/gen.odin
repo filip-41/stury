@@ -97,7 +97,13 @@ value :: proc(out: ^[dynamic]u8, depth: int) {
 str :: proc(out: ^[dynamic]u8) {
 	PIECES :: []string{"a", "Z", "~", " ", "\\\"", "\\\\", "\\/", "\\b", "\\f", "\\n", "\\r", "\\t", "\\u00e9", "\\uFFFF", "\\ud83d\\ude00", "é", "中", "😀", "߿", "￿"}
 	append(out, '"')
+	// Now and then a run of plain bytes, so strings cross the 16- and 64-byte blocks the readers load.
 	for _ in 0 ..< rand.int_max(12) {
+		if rand.int_max(8) == 0 {
+			for _ in 0 ..< rand.int_max(150) {
+				append(out, 'a')
+			}
+		}
 		append(out, rand.choice(PIECES))
 	}
 	append(out, '"')

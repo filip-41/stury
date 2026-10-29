@@ -6,7 +6,7 @@ import core "../core"
 // the open container's kind in bit 0 (1 for an object), `w` the rest, and the hook's registers.
 
 // `p` stands where a value must start, past whitespace.
-@(private)
+@(private, enable_target_feature = STATE_FEATURES)
 st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	if p >= end {
@@ -15,14 +15,15 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk
 	// By class, so `true` and `false` take one branch.
 	switch VALUE_CLASS[p[0]] {
 	case .String:
-		q, esc, kind := string_exact(p, end)
-		if kind != NO_FAULT {
-			return fault(w, hs, q, kind)
+		q, escaped := string_short(p, end)
+		if q == nil {
+			// A string with an escape goes past the reader of plain ASCII.
+			if escaped {
+				return #must_tail st_string_long(p, end, d, w, hs.a, hs.b, hs.c, on)
+			}
+			return #must_tail st_string(p, end, d, w, hs.a, hs.b, hs.c, on)
 		}
-		if too_wide(p, q) {
-			return fault(w, hs, p, .Too_Wide)
-		}
-		if emit(w, on, &hs, .String, .Value, p, q, u16(esc)) == .Stop {
+		if emit(w, on, &hs, .String, .Value, p, q, 0) == .Stop {
 			return stopped(w, hs, q)
 		}
 		return #must_tail st_after(q, end, d, w, hs.a, hs.b, hs.c, on)
@@ -80,7 +81,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk
 }
 
 // `p` stands where an object's key must start, past whitespace: the key, its colon, and the value after it.
-@(private)
+@(private, enable_target_feature = STATE_FEATURES)
 st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	if p >= end {
@@ -89,14 +90,14 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 	if p[0] != '"' {
 		return fault(w, hs, p, .Bad_Char)
 	}
-	q, esc, kind := string_exact(p, end)
-	if kind != NO_FAULT {
-		return fault(w, hs, q, kind)
+	q, escaped := string_probe(p, end)
+	if q == nil {
+		if escaped {
+			return #must_tail st_key_string_long(p, end, d, w, hs.a, hs.b, hs.c, on)
+		}
+		return #must_tail st_key_string(p, end, d, w, hs.a, hs.b, hs.c, on)
 	}
-	if too_wide(p, q) {
-		return fault(w, hs, p, .Too_Wide)
-	}
-	switch emit(w, on, &hs, .String, .Key, p, q, u16(esc)) {
+	switch emit(w, on, &hs, .String, .Key, p, q, 0) {
 	case .Next:
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, w, hs.a, hs.b, hs.c, on)
@@ -110,8 +111,96 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($
 	return #must_tail st_value(r, end, d, w, hs.a, hs.b, hs.c, on)
 }
 
+// The value string at `p` that `string_short` did not vouch for: longer than 32 bytes, not ASCII, or faulty.
+// `string_lean` is inlined, so a plain ASCII string pays for no call.
+@(private, enable_target_feature = STATE_FEATURES)
+st_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q := string_lean(p, end)
+	if q == nil {
+		return #must_tail st_string_long(p, end, d, w, hs.a, hs.b, hs.c, on)
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	if emit(w, on, &hs, .String, .Value, p, q, 0) == .Stop {
+		return stopped(w, hs, q)
+	}
+	return #must_tail st_after(q, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+// The value string at `p` that `string_lean` did not vouch for.
+@(private, enable_target_feature = STATE_FEATURES)
+st_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q, esc, kind := string_long(w.tier, p, end)
+	if kind != NO_FAULT {
+		return fault(w, hs, q, kind)
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	if emit(w, on, &hs, .String, .Value, p, q, u16(esc)) == .Stop {
+		return stopped(w, hs, q)
+	}
+	return #must_tail st_after(q, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+// `st_string` for a key.
+@(private, enable_target_feature = STATE_FEATURES)
+st_key_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q := string_lean(p, end)
+	if q == nil {
+		return #must_tail st_key_string_long(p, end, d, w, hs.a, hs.b, hs.c, on)
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	switch emit(w, on, &hs, .String, .Key, p, q, 0) {
+	case .Next:
+	case .Skip:
+		return #must_tail st_skip_member(q, end, d, w, hs.a, hs.b, hs.c, on)
+	case .Stop:
+		return stopped(w, hs, q)
+	}
+	return #must_tail st_colon(q, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+// `st_string_long` for a key.
+@(private, enable_target_feature = STATE_FEATURES)
+st_key_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q, esc, kind := string_long(w.tier, p, end)
+	if kind != NO_FAULT {
+		return fault(w, hs, q, kind)
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	switch emit(w, on, &hs, .String, .Key, p, q, u16(esc)) {
+	case .Next:
+	case .Skip:
+		return #must_tail st_skip_member(q, end, d, w, hs.a, hs.b, hs.c, on)
+	case .Stop:
+		return stopped(w, hs, q)
+	}
+	return #must_tail st_colon(q, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
+// `p` stands right after a key read out of `st_key`: whitespace, the colon, whitespace, then the member's value.
+@(private, enable_target_feature = STATE_FEATURES)
+st_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q, kind := colon(p, end)
+	if kind != NO_FAULT {
+		return fault(w, hs, q, kind)
+	}
+	return #must_tail st_value(q, end, d, w, hs.a, hs.b, hs.c, on)
+}
+
 // `p` stands right after an open bracket, `d` already the new container's.
-@(private)
+@(private, enable_target_feature = STATE_FEATURES)
 st_open :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q := skip_ws(p, end)
@@ -126,7 +215,7 @@ st_open :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 }
 
 // `p` stands right after a value: a comma and the next member, the container's close, or the end of the document.
-@(private)
+@(private, enable_target_feature = STATE_FEATURES)
 st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	if d < 2 {
@@ -150,7 +239,7 @@ st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk
 }
 
 // `p` stands on the close bracket of the container `d`: it and the run of closes after it, one state for the run.
-@(private)
+@(private, enable_target_feature = STATE_FEATURES)
 st_close :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	p := p
@@ -176,14 +265,14 @@ st_close :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk
 
 // `p` stands right after the close that ends a walk passing over a skipped value. A state of its own, so the close
 // loop does not carry the result's position from byte to byte.
-@(private, cold)
+@(private, cold, enable_target_feature = STATE_FEATURES)
 st_pass_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	return ended(w, {s0, s1, s2}, p)
 }
 
 // `p` stands right after the open bracket of a container whose hook asked to skip it, `d` the container's: the walk
 // without hooks reads up to its close, and this walk goes on after it.
-@(private, cold)
+@(private, cold, enable_target_feature = STATE_FEATURES)
 st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	parent := d >> 1 - 1
@@ -199,7 +288,7 @@ st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk(
 
 // `p` stands right after a key whose hook asked to skip its member's value: the colon, then the value read by the
 // walk without hooks, then this walk goes on after it.
-@(private, cold)
+@(private, cold, enable_target_feature = STATE_FEATURES)
 st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	q, kind := colon(p, end)

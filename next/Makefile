@@ -26,13 +26,13 @@ test:
 	$(call odin_each,test,$(TEST_PKGS),-o:speed, (-o:speed))
 
 # The x86-64 tiers v2 and v3 in a build for Odin's default CPU, as a caller's build is, at -o:none, where no kernel
-# is inlined into the tier's procedures, and at -o:speed. On Apple silicon they run under Rosetta. v4 runs only on a
-# machine with AVX-512 (TIER=2), and `lint` compiles it.
+# is inlined into the tier's procedures, and at -o:speed. TIER picks the kernels' tier and WALK_TIER the JSON walk's.
+# On Apple silicon they run under Rosetta. v4 runs only on a machine with AVX-512 (TIER=2), and `lint` compiles it.
 test-x86:
-	$(call odin_each,test,$(TEST_PKGS),-o:none -target:darwin_amd64 -define:TIER=0, (v2 -o:none))
-	$(call odin_each,test,$(TEST_PKGS),-o:speed -target:darwin_amd64 -define:TIER=0, (v2))
-	$(call odin_each,test,$(TEST_PKGS),-o:none -target:darwin_amd64 -define:TIER=1, (v3 -o:none))
-	$(call odin_each,test,$(TEST_PKGS),-o:speed -target:darwin_amd64 -define:TIER=1, (v3))
+	$(call odin_each,test,$(TEST_PKGS),-o:none -target:darwin_amd64 -define:TIER=0 -define:WALK_TIER=0, (v2 -o:none))
+	$(call odin_each,test,$(TEST_PKGS),-o:speed -target:darwin_amd64 -define:TIER=0 -define:WALK_TIER=0, (v2))
+	$(call odin_each,test,$(TEST_PKGS),-o:none -target:darwin_amd64 -define:TIER=1 -define:WALK_TIER=1, (v3 -o:none))
+	$(call odin_each,test,$(TEST_PKGS),-o:speed -target:darwin_amd64 -define:TIER=1 -define:WALK_TIER=1, (v3))
 
 test-asan:
 	$(call odin_each,test,$(TEST_PKGS),-o:speed -sanitize:address -debug, (address))
