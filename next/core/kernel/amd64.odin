@@ -35,17 +35,23 @@ VECTOR_BYTES :: [Tier]int {
 	.V4 = 64,
 }
 
-// The best tier this CPU runs. `core:sys/info` reports AVX and AVX-512 only where the OS saves their registers.
+// The best tier this CPU runs, unless a test build forces a lower one with `-define:WALK_TIER=<n>`, its place in
+// `Tier`. `core:sys/info` reports AVX and AVX-512 only where the OS saves their registers.
 tier :: proc "contextless" () -> Tier {
-	f := info.cpu_features()
-	V3 :: info.CPU_Features{.avx, .avx2, .bmi1, .bmi2, .popcnt, .pclmulqdq}
-	switch {
-	case V3 + {.avx512f, .avx512bw, .avx512vl} <= f:
-		return .V4
-	case V3 <= f:
-		return .V3
+	FORCED :: #config(WALK_TIER, -1)
+	when FORCED >= 0 {
+		return Tier(FORCED)
+	} else {
+		f := info.cpu_features()
+		V3 :: info.CPU_Features{.avx, .avx2, .bmi1, .bmi2, .popcnt, .pclmulqdq}
+		switch {
+		case V3 + {.avx512f, .avx512bw, .avx512vl} <= f:
+			return .V4
+		case V3 <= f:
+			return .V3
+		}
+		return .V2
 	}
-	return .V2
 }
 
 @(private = "file")

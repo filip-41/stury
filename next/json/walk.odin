@@ -27,10 +27,9 @@ Detail :: enum u8 {
 // A text that holds one document: one leading BOM, the document, then only whitespace.
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
 	p := raw_data(src)
-	lo: u64 = 3 if len(src) >= 3 && p[0] == 0xef && p[1] == 0xbb && p[2] == 0xbf else 0
 	h: No_Hooks
 	regs: core.Hook_Regs
-	r := walk_document(src, lo, S, &h, &regs, no_hook)
+	r := walk_document(src, core.text_start(src, 0), S, &h, &regs, no_hook)
 	if r & 0xff != 0 {
 		return fault_of(r)
 	}
@@ -42,11 +41,11 @@ validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe
 	return nil
 }
 
-// One document read from `lo`, past the whitespace before it: one past its last byte, or the fault. When a hook
-// stops the walk, `hi` is one past the token it stopped on. `regs` goes to the first token and holds what the hook
-// returned last.
+// One document read from `lo`, past one BOM at the text's first byte and the whitespace before the document: one past
+// its last byte, or the fault. When a hook stops the walk, `hi` is one past the token it stopped on. `regs` goes to
+// the first token and holds what the hook returned last.
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
-	r := walk_document(src, lo, S, h, regs, on)
+	r := walk_document(src, core.text_start(src, lo), S, h, regs, on)
 	return r >> 16, fault_of(r)
 }
 
@@ -100,20 +99,9 @@ PASS_END :: 4
 walk_document :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	// `= ---` on an array leaves it unwritten (a struct would be zeroed), and every slot is written before it is read.
 	stack: [MAX_DEPTH]u8 = ---
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, walk_tier(), nil}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, kernel.tier(), nil}
 	end := w.base[len(src):]
 	return st_value(skip_ws(w.base[lo:], end), end, 0, 0, &w, regs.a, regs.b, regs.c, on)
-}
-
-// The string reader's tier: this CPU's, unless a test build forces a lower one with `-define:WALK_TIER=<n>`.
-@(private)
-walk_tier :: #force_inline proc "contextless" () -> kernel.Tier {
-	FORCED :: #config(WALK_TIER, -1)
-	when FORCED >= 0 {
-		return kernel.Tier(FORCED)
-	} else {
-		return kernel.tier()
-	}
 }
 
 // The features every state is built with: one build of the states for each target, on x86-64 for its floor tier.

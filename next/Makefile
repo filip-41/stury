@@ -1,8 +1,8 @@
 ODIN ?= $(or $(wildcard $(abspath ../../Odin-master/bin/odin)),odin)
 
 # The rebuilt layers, beside the tree they replace until each one moves to the root.
-LIB_PKGS  := core core/kernel json
-TEST_PKGS := core/kernel/test json/test
+LIB_PKGS  := core core/kernel json dsv
+TEST_PKGS := core/kernel/test json/test dsv/test
 # The test packages that read `-define:TIER`.
 TIER_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
@@ -26,7 +26,7 @@ test:
 	$(call odin_each,test,$(TEST_PKGS),-o:speed, (-o:speed))
 
 # The x86-64 tiers v2 and v3 in a build for Odin's default CPU, as a caller's build is, at -o:none, where no kernel
-# is inlined into the tier's procedures, and at -o:speed. TIER picks the kernels' tier and WALK_TIER the JSON walk's.
+# is inlined into the tier's procedures, and at -o:speed. TIER picks the kernels' tier and WALK_TIER the walks'.
 # On Apple silicon they run under Rosetta. v4 runs only on a machine with AVX-512 (TIER=2), and `lint` compiles it.
 test-x86:
 	$(call odin_each,test,$(TEST_PKGS),-o:none -target:darwin_amd64 -define:TIER=0 -define:WALK_TIER=0, (v2 -o:none))
@@ -37,15 +37,17 @@ test-x86:
 test-asan:
 	$(call odin_each,test,$(TEST_PKGS),-o:speed -sanitize:address -debug, (address))
 
-# The JSON walk against the current tree's `json.validate`, from a copy of next/ whose packages `core` and `json` are
+# The walks against the current tree's `json` and `csv`, from a copy of next/ whose packages `core` and `json` are
 # renamed, since a program cannot hold two packages of one name. SEED and ROUNDS pass through.
 SEED ?= 1
 ROUNDS ?= 100000
 test-oracle:
-	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && mkdir -p $$d/n/next && cp -R core json $$d/n/next/ && \
+	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && mkdir -p $$d/n/next && cp -R core json dsv $$d/n/next/ && \
 	sed -i.orig 's/^package core$$/package next_core/' $$d/n/next/core/*.odin && \
 	sed -i.orig 's/^package json$$/package next_json/' $$d/n/next/json/*.odin && \
-	$(ODIN) test $$d/n/next/json/test/oracle -o:speed -collection:stury=$(abspath ..) -define:SEED=$(SEED) -define:ROUNDS=$(ROUNDS) -out:$$d/oracle
+	for p in json dsv; do echo "== $$p oracle"; \
+		$(ODIN) test $$d/n/next/$$p/test/oracle -o:speed -collection:stury=$(abspath ..) -define:SEED=$(SEED) -define:ROUNDS=$(ROUNDS) -out:$$d/oracle || exit 1; \
+	done
 
 # Host, then the other architectures' sources: x86-64 and a target with neither NEON nor x86 vectors.
 lint:

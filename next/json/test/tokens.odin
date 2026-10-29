@@ -146,6 +146,20 @@ hooks_agree :: proc(t: ^testing.T) {
 	}
 }
 
+// A walk from the text's first byte passes over one leading BOM, as `validate` does, and one from any other byte
+// reads a BOM as the bad byte it is there.
+@(test)
+bom_at_the_start :: proc(t: ^testing.T) {
+	log := new(Log)
+	defer free(log)
+	hi, fault := json.walk(transmute([]u8)string("\xef\xbb\xbf [1]"), 0, .Strict, {}, log, &core.Hook_Regs{}, log_hook)
+	testing.expect_value(t, fault, nil)
+	testing.expect_value(t, hi, 7)
+	testing.expect_value(t, log.tokens[0], core.Token{4, 1, .Array, .Value, 0})
+	_, fault = json.walk(transmute([]u8)string(" \xef\xbb\xbf[1]"), 0, .Strict, {}, log, &core.Hook_Regs{}, log_hook)
+	testing.expect_value(t, fault, core.Fault{1, .Bad_Char, 0})
+}
+
 // Whether a token's span holds what its kind says, and its spelling says whether a string holds an escape.
 spans :: proc(src: []u8, t: core.Token) -> bool {
 	b := src[t.lo:][:t.n]

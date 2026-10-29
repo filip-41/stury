@@ -1,7 +1,7 @@
 package core
 
 // What every format's walk gives its caller: one token per event, through one hook, and the first fault. The walks
-// differ underneath and is shared between the formats
+// differ underneath, and what they give is shared between the formats.
 
 // What a token is. `Array` and `Map` open a container, `End` closes the innermost one, and every other kind is a
 // scalar. `Plain` is text whose type the format resolves for the consumer. Each member names the formats that give it.
@@ -14,7 +14,7 @@ Kind :: enum u8 {
 	Plain, // dsv: every cell
 	Array, // json: `[`, dsv: the document, and a record with no header
 	Map, // json: `{`, dsv: a record with a header
-	End, // json: `]` and `}`, dsv: the end of a record and of the text, `n` 0
+	End, // json: `]` and `}`, dsv: a record's line end (`n` 1 or 2, 0 at the text's end) and the text's end (`n` 0)
 }
 
 // What a token is to its container. A key may be any value in the formats that allow it.
@@ -53,12 +53,20 @@ Hook_Regs :: struct {
 	a, b, c: u64,
 }
 
+// Where a text read from `lo` starts: past one UTF-8 byte order mark when `lo` is the text's first byte.
+text_start :: proc "contextless" (src: []u8, lo: u64) -> u64 {
+	if lo == 0 && len(src) >= 3 && src[0] == 0xef && src[1] == 0xbb && src[2] == 0xbf {
+		return 3
+	}
+	return lo
+}
+
 // What went wrong, the same for every format, and where. Each member names the formats that raise it. Zero is no
 // fault.
 Fault_Kind :: enum u8 {
 	Truncated = 1, // json, dsv: the input ended inside a construct, at `len(src)`
 	Bad_Char, // json, dsv: the first byte that cannot extend the construct, or that is not UTF-8
-	Bad_Escape, // json: at the escape's letter, or a lone surrogate half at its backslash
+	Bad_Escape, // json: at the escape's letter, or a lone surrogate half at its backslash, dsv (TSV): at the backslash
 	Bad_Number, // json: at the byte that breaks the number
 	Too_Deep, // json: at the bracket past the format's depth limit
 	Trailing, // json's one-document framing: at the first byte after the document
