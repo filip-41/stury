@@ -114,6 +114,9 @@ hooks_agree :: proc(t: ^testing.T) {
 		}
 		full^ = {}
 		hi, fault := json.walk(src, 0, .Strict, {}, full, &core.Hook_Regs{}, log_hook)
+		if round % 2 == 0 && !testing.expectf(t, fault == nil, "%q: %v", src, fault) {
+			return
+		}
 		for tok in full.tokens[:full.n] {
 			if !testing.expectf(t, spans(src, tok), "%q: %v", src, tok) {
 				return

@@ -1,5 +1,6 @@
 package json
 
+import "base:intrinsics"
 import core "../core"
 
 // The registers every state takes: `p` the cursor, `end` one past the text, `d` the depth shifted left once with
@@ -44,8 +45,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 	case .Literal:
 		q, e := literal(p, end)
 		if q == nil {
-			r, kind := literal_fault(p, end)
-			return fault(w, hs, r, kind, .Literal if kind == .Bad_Char else .None)
+			return #must_tail st_bad_literal(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		if emit(w, on, &hs, e, .Value, p, q, 0) == .Stop {
 			return stopped(w, hs, q)
@@ -107,11 +107,16 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 	case .Stop:
 		return stopped(w, hs, q)
 	}
-	r, colon_kind := colon(q, end)
-	if colon_kind != NO_FAULT {
-		return fault(w, hs, r, colon_kind)
+	// A colon flush against its value, or a pretty printer's `": "`.
+	if intrinsics.ptr_sub(end, q) > 2 && q[0] == ':' {
+		if q[1] > ' ' {
+			return #must_tail st_value(q[1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		if q[1] == ' ' && q[2] > ' ' {
+			return #must_tail st_value(q[2:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
 	}
-	return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
 // The value string at `p` that `string_short` did not vouch for: longer than 32 bytes, not ASCII, or faulty, with no
@@ -243,6 +248,10 @@ st_key_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind
 @(private, enable_target_feature = STATE_FEATURES)
 st_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
+	// A pretty printer's `": "`.
+	if intrinsics.ptr_sub(end, p) > 2 && p[0] == ':' && p[1] == ' ' && p[2] > ' ' {
+		return #must_tail st_value(p[2:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
 	q, kind := colon(p, end)
 	if kind != NO_FAULT {
 		return fault(w, hs, q, kind)
@@ -401,6 +410,15 @@ st_close :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_pass_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	return ended(w, {s0, s1, s2}, p)
+}
+
+// `p` stands on a literal that `literal` refused: where it breaks. Kept out of `st_value`, whose entry would save
+// registers for the call.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_bad_literal :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q, kind := literal_fault(p, end)
+	return fault(w, hs, q, kind, .Literal if kind == .Bad_Char else .None)
 }
 
 // `p` stands right after the open bracket of a container whose hook asked to skip it, `d` the container's: the walk

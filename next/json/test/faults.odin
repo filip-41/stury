@@ -1,10 +1,12 @@
 package json_tests
 
 import "base:sanitizer"
+import "core:math/rand"
 import "core:strings"
 import "core:testing"
 import core "../../core"
 import json ".."
+import gen "gen"
 
 Case :: struct {
 	text:   string,
@@ -291,6 +293,62 @@ indents_by_byte :: proc(t: ^testing.T) {
 	}
 }
 
+// Every pair of bytes after a key's colon, after keys the probe reads and keys too long for it, judged as the same
+// member with a space before its colon, which no state takes on a fast path. Then the members cut after the colon
+// and after each of the two bytes, at the lengths where the probe still reads the key.
+@(test)
+colons_by_byte :: proc(t: ^testing.T) {
+	member :: proc(out: ^[dynamic]u8, key_len: int, spaced: bool, x, y: u8) {
+		clear(out)
+		append(out, "{\"")
+		for _ in 0 ..< key_len {
+			append(out, 'k')
+		}
+		append(out, "\" :" if spaced else "\":")
+		append(out, x, y)
+		append(out, "1,\"pad\":\"........................................\"}")
+	}
+	// The fault of a text that holds `by` bytes fewer before its colon than the reference.
+	shifted :: proc(f: Maybe(core.Fault), by: int) -> Maybe(core.Fault) {
+		if f, bad := f.?; bad {
+			return core.Fault{f.offset + u64(by), f.kind, f.detail}
+		}
+		return nil
+	}
+	ref, short, long: [dynamic]u8
+	defer delete(ref)
+	defer delete(short)
+	defer delete(long)
+	PAST :: 40
+	for key_len in ([]int{1, 29, 30, 31}) {
+		for x in 0 ..< 256 {
+			for y in 0 ..< 256 {
+				member(&ref, key_len + PAST, true, u8(x), u8(y))
+				member(&short, key_len, false, u8(x), u8(y))
+				member(&long, key_len + PAST, false, u8(x), u8(y))
+				want := json.validate(ref[:], .Strict)
+				got_short := shifted(json.validate(short[:], .Strict), PAST + 1)
+				got_long := shifted(json.validate(long[:], .Strict), 1)
+				if !testing.expectf(t, got_short == want && got_long == want, "%q: %v %v, want %v", short[:], got_short, got_long, want) {
+					return
+				}
+				// Cut after the colon, after x, and after y when x is the space of a pretty printer's `": "`.
+				if y > 0 && x != ' ' {
+					continue
+				}
+				for n in 4 + key_len ..= 6 + key_len {
+					want = json.validate(ref[:n + PAST + 1], .Strict)
+					got_short = shifted(validate_fenced(short[:n]), PAST + 1)
+					got_long = shifted(validate_fenced(long[:n + PAST]), 1)
+					if !testing.expectf(t, got_short == want && got_long == want, "%q: %v %v, want %v", short[:n], got_short, got_long, want) {
+						return
+					}
+				}
+			}
+		}
+	}
+}
+
 // `src` validated from a copy whose next bytes are poisoned, so that under `-sanitize:address` a read past its end
 // fails the run.
 validate_fenced :: proc(src: []u8) -> Maybe(core.Fault) {
@@ -301,6 +359,29 @@ validate_fenced :: proc(src: []u8) -> Maybe(core.Fault) {
 	sanitizer.address_poison(buf[len(src):])
 	defer sanitizer.address_unpoison(buf[len(src):])
 	return json.validate(buf[:len(src)], .Strict)
+}
+
+// Every prefix of seeded texts, compact and pretty, read with its next bytes poisoned: a state's look past the
+// token it stands on must stop at the end wherever the text is cut.
+@(test)
+prefixes_fenced :: proc(t: ^testing.T) {
+	state := rand.create(1)
+	context.random_generator = rand.default_random_generator(&state)
+	text: [dynamic]u8
+	defer delete(text)
+	for round in 0 ..< 300 {
+		clear(&text)
+		if round % 2 == 1 {
+			gen.pretty(&text, 1 + round % 4)
+		} else {
+			gen.text(&text, 1 + round % 4)
+		}
+		for n in 0 ..= len(text) {
+			if !testing.expectf(t, validate_fenced(text[:n]) == json.validate(text[:n], .Strict), "%q", text[:n]) {
+				return
+			}
+		}
+	}
 }
 
 @(test)
