@@ -2,10 +2,11 @@ package core
 
 import "core:io"
 
-// The errors of every layer live here, one type per layer, each with its own kinds. A layer's error holds the error
-// beneath it by value, one level. The walk's is `Fault`.
+// The error types of the layers that walk and build a text. `Fault` is the walk's error and `Document_Error` the
+// value layer's, which holds a `Fault` by value in `inner`.
 
-// What went wrong in a walk, the same for every format, and where. Each member names the formats that raise it.
+// The kinds of fault a walk raises, shared by every format. Each member's comment names the formats that raise it
+// and the byte `at` names.
 Fault_Kind :: enum u8 {
 	None, // no fault
 	Truncated, // json, dsv: the input ended inside a construct, at `len(src)`
@@ -15,15 +16,16 @@ Fault_Kind :: enum u8 {
 	Too_Deep, // json: at the bracket past the depth limit
 	Trailing, // json's `validate`: at the first byte after the document
 	Bad_Structure, // dsv: well-formed text breaking a rule of the format's structure, at the construct's first byte
-	Too_Wide, // json, dsv: a token longer than `Token.n` holds, at its first byte
-	No_Memory, // json (a depth stack past `MAX_DEPTH`), dsv (the header's keys): the walk's scratch could not be allocated, at no byte
+	Too_Wide, // json, dsv: the first byte of a token longer than `Token.n` holds
+	No_Memory, // json (depth stack past `MAX_DEPTH`), dsv (header's keys): the walk's scratch allocation failed, no byte
+	Bad_Option, // dsv: an option the spec does not take, found before any byte is read
 }
 
-// The kinds that name no byte of the text: `at` is 0 and says nothing.
-AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory}
+// The kinds that name no byte of the text. Their `at` is 0.
+AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
 
-// `at` is the byte the kind names. `detail` tells a format's own rules apart within a kind, 0 for none, and `rules`
-// is that format's table, which names and words them.
+// A walk's fault. `at` is the byte the kind names, `detail` is the format's rule within the kind (0 for none), and
+// `rules` points at the format's table of those rules.
 Fault :: struct {
 	at:     u64,
 	rules:  ^Rules,
@@ -31,15 +33,15 @@ Fault :: struct {
 	detail: u8,
 }
 
-// A format's rules, in its rodata: its name, which starts each of its codes, and per value of its `Detail` the rule's
-// code and message (`details[0]` stands for none). Core names and words any format's fault from it, with no call into
-// the format.
+// A format's rules, stored in rodata. `format` is the prefix of each of its codes, and `details[d]` holds the code
+// and message for `Detail` `d` (`details[0]` is for no detail). Core renders a fault from this table without calling
+// into the format.
 Rules :: struct {
 	format:  string,
 	details: []Rule,
 }
 
-// A code stays the same from release to release, so a caller may match on it. A message may change.
+// `code` is stable across releases and a caller may match on it. `message` may change.
 Rule :: struct {
 	code:    string,
 	message: string,
@@ -57,9 +59,11 @@ KIND_RULES := [Fault_Kind]Rule {
 	.Bad_Structure = {"bad_structure", "Text breaks a rule of its format"},
 	.Too_Wide      = {"too_wide", "Token is longer than 4 GiB"},
 	.No_Memory     = {"no_memory", "Out of memory"},
+	.Bad_Option    = {"bad_option", "An option the format does not take"},
 }
 
-// The rule a fault breaks: its format's rule for its detail, or its kind's.
+// Returns the `Rule` for `f`: `f.rules.details[f.detail]` when `detail` is nonzero, `rules` is set and the index is
+// in range, else `KIND_RULES[f.kind]`.
 rule_of :: proc "contextless" (f: Fault) -> Rule {
 	if f.detail != 0 && f.rules != nil && int(f.detail) < len(f.rules.details) {
 		return f.rules.details[f.detail]
@@ -67,8 +71,9 @@ rule_of :: proc "contextless" (f: Fault) -> Rule {
 	return KIND_RULES[f.kind]
 }
 
-// Writes a fault's code: its format, a dot, and its rule's code, as `json.literal` or `dsv.bad_char`.
-write_code :: proc(w: io.Writer, f: Fault) -> io.Error {
+// Writes the fault's code to `w`: `f.rules.format`, a dot when `rules` is set, then `rule_of(f).code`, as in
+// `json.literal` or `dsv.bad_char`. Returns the writer's error.
+write_fault_code :: proc(w: io.Writer, f: Fault) -> io.Error {
 	if f.rules != nil {
 		io.write_string(w, f.rules.format) or_return
 		io.write_byte(w, '.') or_return
@@ -77,17 +82,18 @@ write_code :: proc(w: io.Writer, f: Fault) -> io.Error {
 	return err
 }
 
-// A count of a text's lines up to a byte, which goes on from there for the next fault, so that the positions of many
-// faults met in offset order take one pass over the text. Its zero value stands at the text's first byte.
+// A count of a text's lines up to byte `at`, kept between faults met in offset order so that `locate` scans each byte
+// once. The zero value starts at the text's first byte.
 Lines :: struct {
 	at:      u64, // the byte counted up to
 	line:    u64, // its line, from 0
 	line_lo: u64, // that line's first byte
 }
 
-// The line and column of byte `byte_at` of `src`, both from 1. A line ends at LF, so CR LF is one line end and a lone CR
-// is a byte of its line. The column counts bytes. `byte_at` may be `len(src)`. A byte before the count's starts it again
-// from the text's first byte. A nil `lines` counts this fault alone, from the text's first byte.
+// Returns the line and column of byte `byte_at` in `src`, both counted from 1. A line ends at LF, so CR LF ends one
+// line and a lone CR is a byte of the line. The column counts bytes. `byte_at` may be `len(src)`, and a larger value
+// is clamped to it. When `byte_at` is before `lines.at`, the count restarts at byte 0. A nil `lines` counts from byte
+// 0 for this call only.
 locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (line, col: u64) {
 	at := min(byte_at, u64(len(src)))
 	fresh: Lines
@@ -105,17 +111,99 @@ locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (
 	return l.line + 1, at - l.line_lo + 1
 }
 
-// Writes `line:col: message` for a fault in `src`, or the message alone for a kind at no byte. `lines` is the count
-// the last fault rendered in offset order left, or nil for a fault on its own.
-render :: proc(w: io.Writer, src: []u8, f: Fault, lines: ^Lines = nil) -> io.Error {
+@(private)
+write_position :: proc(w: io.Writer, src: []u8, at: u64, lines: ^Lines) -> io.Error {
+	fresh: Lines
+	line, col := locate(src, at, lines if lines != nil else &fresh)
+	io.write_u64(w, line) or_return
+	io.write_byte(w, ':') or_return
+	io.write_u64(w, col) or_return
+	io.write_string(w, ": ") or_return
+	return nil
+}
+
+// Writes `line:col: message` for `f` in `src`, or the message alone when `f.kind` is in `AT_NO_BYTE`. `lines` is the
+// count a previous fault in offset order left, or nil to count from byte 0.
+render_fault :: proc(w: io.Writer, src: []u8, f: Fault, lines: ^Lines = nil) -> io.Error {
 	if f.kind not_in AT_NO_BYTE {
-		fresh: Lines
-		line, col := locate(src, f.at, lines if lines != nil else &fresh)
-		io.write_u64(w, line) or_return
-		io.write_byte(w, ':') or_return
-		io.write_u64(w, col) or_return
-		io.write_string(w, ": ") or_return
+		write_position(w, src, f.at, lines) or_return
 	}
 	_, err := io.write_string(w, rule_of(f).message)
 	return err
 }
+
+// The value layer's error kinds. `Document_Error.inner` holds the walk's `Fault` by value for `.Walk`, so a syntax
+// fault met while building a document renders as the document error and its cause.
+Document_Error_Kind :: enum u8 {
+	None,
+	Walk, // the walk's fault, in `inner`
+	Duplicate_Key, // `.Refuse` met a key that repeats one of its object's, at the second key's first byte
+	No_Memory, // an allocation the document or the edit list owns was refused, at no byte
+	Bad_Index, // an edit names no node it may change: no such node, a key of a member, the root, a table's record
+	Bad_Position, // an insert position is past the container's length
+	Wrong_Container, // the container requires the other insert form: a key for a member, none for an element
+	Bad_Value, // a recorded text is not exactly one value of the document's format and spec
+	Bad_Key, // a recorded key text is not exactly one key of the document's format and spec
+	Bad_Fact, // a recorded fact body does not have its role's shape
+	Bad_Width, // an edit would leave a delimited text a record the table cannot read
+	Conflicting_Edits, // two edits of one node, or an edit inside what another replaces or removes
+	Bad_Result, // a committed text does not read, the walk's fault in `inner`
+}
+
+// The document error kinds that name no byte of the text. Their `at` is not read.
+DOCUMENT_AT_NO_BYTE :: bit_set[Document_Error_Kind]{.None, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Key, .Bad_Fact, .Bad_Width, .Bad_Result}
+
+// A value layer error. `at` is the byte `kind` names: the walk's fault byte for `.Walk`, the first byte of the
+// repeated key for `.Duplicate_Key`. `inner` is the walk's fault, set for `.Walk`.
+Document_Error :: struct {
+	kind:  Document_Error_Kind,
+	at:    u64,
+	inner: Fault,
+}
+
+@(rodata)
+DOCUMENT_KIND_RULES := [Document_Error_Kind]Rule {
+	.None              = {"none", "No error"},
+	.Walk              = {"walk", "Input does not parse"},
+	.Duplicate_Key     = {"duplicate_key", "Duplicate key"},
+	.No_Memory         = {"no_memory", "Out of memory"},
+	.Bad_Index         = {"bad_index", "The node takes no such edit"},
+	.Bad_Position      = {"bad_position", "Insert position is past the container"},
+	.Wrong_Container   = {"wrong_container", "The container takes the other insert form"},
+	.Bad_Value         = {"bad_value", "Not one value of the format"},
+	.Bad_Key           = {"bad_key", "Not one key of the format"},
+	.Bad_Fact          = {"bad_fact", "Not a fact of the role's shape"},
+	.Bad_Width         = {"bad_width", "The edit would break the table's width"},
+	.Conflicting_Edits = {"conflicting_edits", "Edits conflict"},
+	.Bad_Result        = {"bad_result", "The edited text does not read"},
+}
+
+// Writes `e`'s code: `document.` then the kind's code, as in `document.walk` or `document.duplicate_key`. The
+// `write_code` overload below exposes it beside the fault's code.
+write_document_code :: proc(w: io.Writer, e: Document_Error) -> io.Error {
+	io.write_string(w, "document.") or_return
+	_, err := io.write_string(w, DOCUMENT_KIND_RULES[e.kind].code)
+	return err
+}
+
+// Writes `line:col: message` for `e` in `src`, and for `.Walk` also `  caused by line:col: message` for `e.inner`.
+// `lines` is as in `render_fault`. Errors from the edit list other than a conflict name no byte, since they describe
+// a node, a recorded text or a position rather than a place in `src`.
+render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Lines = nil) -> io.Error {
+	// No position is written when `e.kind` is in `DOCUMENT_AT_NO_BYTE`, or when `e.kind` is `.Walk` and
+	// `e.inner.kind` names no byte, as a bad option is found before any byte is read.
+	no_byte := e.kind in DOCUMENT_AT_NO_BYTE || (e.kind == .Walk && e.inner.kind in AT_NO_BYTE)
+	if !no_byte {
+		write_position(w, src, e.at, lines) or_return
+	}
+	io.write_string(w, DOCUMENT_KIND_RULES[e.kind].message) or_return
+	if e.kind == .Walk && e.inner.kind != .None {
+		io.write_string(w, "\n  caused by ") or_return
+		render_fault(w, src, e.inner, lines) or_return
+	}
+	return nil
+}
+
+// `write_code` writes a fault's or a document error's code, `render` writes its rendered line.
+write_code :: proc {write_fault_code, write_document_code}
+render :: proc {render_fault, render_document}

@@ -1,11 +1,11 @@
-// Seeded delimited texts for the walk's tests: valid texts that touch every quote, escape, line end and UTF-8 width,
-// and the bytes a mutation of them may write.
+// Seeded delimited texts for the walk's tests: valid texts that use every quote, escape, line end and UTF-8 width,
+// and the bytes a mutation may write.
 package dsv_gen
 
 import "core:math/rand"
 
-// A valid text: a header and records of one width, LF or CRLF line ends, empty lines now and then, a final line end
-// or not, and now and then a BOM. Its cells now and then run past the 64-byte blocks the walk reads.
+// Appends a valid text to `out`: a header and records of one width, LF or CRLF line ends, empty lines now and then,
+// a final line end or not, and now and then a BOM. A cell now and then extends past the 64-byte block the walk reads.
 text :: proc(out: ^[dynamic]u8, tsv: bool) {
 	clear(out)
 	if rand.int_max(10) == 0 {
@@ -42,8 +42,8 @@ cell :: proc(out: ^[dynamic]u8, tsv: bool) {
 		append(out, rand.choice(TSV if tsv else CSV))
 		return
 	}
-	// A long cell: plain, or (CSV) quoted with quotes, delimiters and line ends inside, so the bytes inside quotes
-	// cross a block.
+	// A long cell, plain or (CSV) quoted with quotes, delimiters and line ends inside, so bytes inside quotes cross a
+	// block.
 	quoted := !tsv && rand.int_max(2) == 0
 	if quoted {
 		append(out, '"')

@@ -1,6 +1,6 @@
-// JSON's walk: one pass over a document, each grammar state a procedure that hands over to the next with
-// `#must_tail` (states.odin). A state reads the first byte of the token it stands on and branches on it. Strings
-// (strings.odin), numbers and literals (scalars.odin) and whitespace (whitespace.odin) are read by leaves.
+// JSON's walk: each grammar state is a procedure that tail-calls the next with `#must_tail` (states.odin). A state
+// reads the first byte of its token and branches on it. Strings (strings.odin), numbers and literals (scalars.odin)
+// and whitespace (whitespace.odin) are read by leaf procedures.
 package json
 
 import "base:intrinsics"
@@ -8,18 +8,19 @@ import "base:runtime"
 import core "../core"
 import kernel "../core/kernel"
 
-// The deepest nesting a text may have unless `Options.max_depth` says otherwise. The open bracket past the limit is
+// The deepest nesting a text may have when `Options.max_depth` is 0. An open bracket past the limit faults
 // `Too_Deep` at that bracket.
 MAX_DEPTH :: 1024
 
-// The grammar a text follows, at compile time, so a build carries only the specs it names. Each is strict to itself.
+// `Spec` is the grammar a text follows, a compile-time parameter, so a build compiles only the specs it names.
 Spec :: enum u8 {
 	Json, // RFC 8259
 	Jsonc, // RFC 8259 with `//` and `/* */` comments wherever whitespace may stand, and a comma before a close bracket
 	Json5, // JSON5 1.0.0
 }
 
-// What a spec adds to RFC 8259, which the states test with `when`, so a spec's walk carries only its own rules.
+// A `Feature` names a rule set a spec adds to RFC 8259. States test features with `when`, so a spec's walk compiles
+// only its own rules.
 @(private)
 Feature :: enum u8 {
 	Comments,
@@ -27,8 +28,8 @@ Feature :: enum u8 {
 	Es5, // JSON5's ECMAScript forms: its numbers, strings, unquoted keys and whitespace (json5.odin)
 }
 
-// Every spec with comments also takes trailing commas: a close bracket after a run of comments is read with no look
-// back at whether an open bracket or a comma came before the run.
+// `FEATURES` holds the features of each spec. Both specs with comments also have trailing commas: a close bracket
+// after a comment run is read without checking whether an open bracket or a comma came before the run.
 @(private)
 FEATURES :: [Spec]bit_set[Feature] {
 	.Json  = {},
@@ -36,17 +37,17 @@ FEATURES :: [Spec]bit_set[Feature] {
 	.Json5 = {.Comments, .Trailing_Commas, .Es5},
 }
 
-// What a walk takes at run time. The zero value is the default.
+// `Options` holds a walk's run-time options. The zero value is the default.
 Options :: struct {
-	// The deepest nesting a text may have, 0 for `MAX_DEPTH`. Up to `MAX_DEPTH` the walk keeps its depth stack on its
-	// own stack, and past it takes one byte per level from the default heap.
+	// The deepest nesting a text may have, 0 for `MAX_DEPTH`. A depth up to `MAX_DEPTH` keeps the stack in
+	// `walk_document`'s frame, and a larger one allocates one byte per level on the default heap.
 	max_depth: u32,
-	// The rules a text may break, each read one fixed way. None by default.
+	// The rules a text may break, each with a fixed reading. Empty by default.
 	tolerate:  bit_set[Tolerance; u8],
 }
 
-// A rule a caller lets a text break. The walk stops faulting there and keeps the token's bytes as they are: the value
-// a string decodes to is where the reading shows.
+// `Tolerance` names a rule a caller lets a text break. The walk does not fault there, and the decoded string shows the
+// tolerant reading.
 Tolerance :: enum u8 {
 	// Ill-formed UTF-8 in a string: each maximal subpart of an ill-formed sequence reads as U+FFFD.
 	Invalid_Utf8,
@@ -54,20 +55,20 @@ Tolerance :: enum u8 {
 	Lone_Surrogate,
 }
 
-// JSON's rules within a `core.Fault_Kind`, in `core.Fault.detail`.
+// `Detail` holds JSON's detail for a `core.Fault_Kind`, in `core.Fault.detail`.
 Detail :: enum u8 {
 	None,
 	Literal, // `Bad_Char`: a byte breaking `true`, `false` or `null`
 	Identifier, // `Bad_Char`: a byte that starts no key, quoted or not, where an object's key must start
-	Colon, // `Bad_Char`: a byte where a member's colon must stand
+	Colon, // `Bad_Char`: a byte where a member's colon must be
 }
 
-// JSON's rules, per value of `Detail`, which every fault the walk returns points to.
+// `RULES` is JSON's `core.Rules`, one per `Detail` value, which every fault the walk returns points to.
 @(rodata)
 RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}}}
 
-// A text that holds one document: one leading BOM, the document, then only whitespace, and comments in a spec that
-// has them.
+// Checks that `src` holds exactly one document: an optional leading BOM, the document, then whitespace and, in a
+// spec with comments, comments up to the text's end. Returns the fault, or nil.
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
 	p := raw_data(src)
 	end := p[len(src):]
@@ -77,7 +78,16 @@ validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe
 	if r & 0xff != 0 {
 		return core.fault_of(r, &RULES)
 	}
-	q := skip_ws(p[r >> 16:], end)
+	return tail_fault(src, r >> 16, S)
+}
+
+// Returns the fault for the bytes after a document that ends at `hi`, or nil when only whitespace and, in a spec
+// with comments, comments up to the text's end follow it. Any other byte faults `Trailing`.
+@(private)
+tail_fault :: proc "contextless" (src: []u8, hi: u64, $S: Spec) -> Maybe(core.Fault) {
+	p := raw_data(src)
+	end := p[len(src):]
+	q := skip_ws(p[hi:], end)
 	when .Comments in FEATURES[S] {
 		kind: core.Fault_Kind
 		q, _, kind = comment_run(q, end, false, S)
@@ -91,24 +101,37 @@ validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe
 	return nil
 }
 
-// One document read from `lo`: one past its last byte, or the fault. One BOM at the text's first byte, whitespace, the
-// record separator 0x1E, and comments with no document after them before the text's end or a 0x1E are passed over
-// before the document, so a stream of documents, whether NDJSON, RFC 7464 or jq's input, is a loop of walks each from
-// where the last one ended. Outside a string, a BOM at any later byte is `Bad_Char` in JSON and JSONC and whitespace
-// in JSON5. A text with nothing but those left, and a `lo` past the text's end, holds no document: the walk makes no
-// token and returns the text's end with no fault. When a hook stops the walk, `hi` is one past the token it stopped
-// on, and the walk has read no further, so `hi` is no document boundary. `regs` goes to the first token and holds
-// what the hook returned last.
+// Reads one document starting at `lo`. Returns one past its last byte and the fault, or nil. Before the document it
+// passes over one BOM at the text's first byte, whitespace, record separators 0x1E, and comments that no document
+// follows before the text's end or a 0x1E, so a stream of documents (NDJSON, RFC 7464, jq's input) is a loop of
+// walks from where the last one ended. Outside a string a later BOM faults `Bad_Char` in JSON and JSONC and is
+// whitespace in JSON5. When only those bytes remain, or `lo` is past the text's end, no token is made and the text's
+// end is returned with no fault. When a hook stops the walk, `hi` is one past the token it stopped on and no later
+// byte was read, so `hi` is no document boundary. `regs` is passed to the first token and holds what the hook
+// returned last.
 walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
+	q, _ := document_start(src, lo, S)
+	h2, f2, _ := walk_from(src, q, S, opts, h, regs, on)
+	return h2, f2
+}
+
+// Reads the run before a document, for `walk` and `build`: one BOM at the text's first byte, whitespace, record
+// separators 0x1E, and comments that no document follows before the text's end or a 0x1E. Returns the document's
+// first byte or the text's end, and the first 0x1E crossed, which a stream passes over and `build` refuses.
+@(private)
+document_start :: proc "contextless" (src: []u8, lo: u64, $S: Spec) -> (q: [^]u8, sep: [^]u8) {
 	p := raw_data(src)
 	end := p[len(src):]
-	q := skip_ws(p[core.text_start(src, min(lo, u64(len(src)))):], end)
+	q = skip_ws(p[core.text_start(src, min(lo, u64(len(src)))):], end)
 	for q < end {
 		if q[0] == 0x1e {
+			if sep == nil {
+				sep = q
+			}
 			q = skip_ws(q[1:], end)
 			continue
 		}
-		// Comments before the text's end or a 0x1E are the foot of the document before them, or of none.
+		// A comment before the text's end or a 0x1E is the foot of the document before it, or of no document.
 		when .Comments in FEATURES[S] {
 			if gap(q, end, S) {
 				if r, _, kind := comment_run(q, end, false, S); kind == .None && (r == end || r[0] == 0x1e) {
@@ -119,16 +142,23 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H,
 		}
 		break
 	}
-	if q == end {
-		return u64(len(src)), nil
-	}
-	r := walk_document(src, q, S, opts, h, regs, on)
-	return r >> 16, core.fault_of(r, &RULES)
+	return
 }
 
-// What the states share beyond their registers. `stack[i]` has bit 0 set when the container at depth `i` is an
-// object, and is written by the open that pushes past it (`depth` slots), so the walk never reads a slot it did not
-// write. `tier` picks the string reader built for this CPU.
+// Reads the document at `q`, where `document_start` left it. Returns one past its last byte, the fault or nil, and
+// whether a hook stopped the walk.
+@(private)
+walk_from :: #force_inline proc "contextless" (src: []u8, q: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault), stopped: bool) {
+	if q == raw_data(src)[len(src):] {
+		return u64(len(src)), nil, false
+	}
+	r := walk_document(src, q, S, opts, h, regs, on)
+	return r >> 16, core.fault_of(r, &RULES), r & 0xff == 0 && u8(r >> 8) == core.STOPPED
+}
+
+// `Walk` holds the state a walk carries besides its registers. `stack[i]` bit 0 is set when the container at depth
+// `i` is an object. The open that pushes past depth `i` writes `stack[i]`, and `depth` slots are allocated, so no slot
+// is read before it is written. `tier` selects the string reader built for this CPU.
 @(private)
 Walk :: struct($S: Spec, $H: typeid) {
 	base:     [^]u8,
@@ -137,36 +167,38 @@ Walk :: struct($S: Spec, $H: typeid) {
 	regs:     ^core.Hook_Regs,
 	depth:    u64,
 	tier:     kernel.Tier,
-	// Whether the state that handed a comment run over read the comma before it. In the padding after `tier`, so a
-	// spec without comments builds the same walk.
+	// Whether the state that passed a comment run to `st_comments_after` read the comma before it. It fills the
+	// padding after `tier`, so a spec without comments builds the same `Walk` size.
 	crossed:  bool,
 	// `Options.tolerate`, read only where a string faults.
 	tolerate: bit_set[Tolerance; u8],
-	// Where the state handed over picks up: for `string_escaped`, the block of the string being read where its first
-	// backslash is, and for `st_comments_after`, the run's first comment, which the state before it read up to.
+	// Where the next state continues: for `string_escaped`, the block holding the string's first backslash, for
+	// `st_comments_after`, the run's first comment, which the previous state has read up to.
 	resume:   [^]u8,
 }
 
-// Set in the stack slot of the depth where a walk that passes over a skipped value ends: a close to that depth ends
-// it. `]` with this bit shifted into it is no close bracket, so the close loop stops there as it reads the slot.
+// `PASS_END` is set in the stack slot of the depth where a walk that passes over a skipped value ends, so a close to
+// that depth ends the pass. `]` with this bit shifted into bit 5 is no `]` or `}`, so the close loop stops when it
+// reads the slot.
 @(private)
 PASS_END :: 4
 
-// The document from `p`, where its first byte must stand.
+// Reads the document whose first byte is `p`. Keeps the depth stack in this frame up to `MAX_DEPTH`, and allocates
+// it on the default heap above that.
 @(private)
 walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	if opts.max_depth > MAX_DEPTH {
 		return walk_deep(src, p, S, u64(opts.max_depth), opts.tolerate, h, regs, on)
 	}
-	// `= ---` on an array leaves it unwritten (a struct would be zeroed), and every slot is written before it is read.
+	// `= ---` leaves the array unwritten, where a struct would be zeroed. Every slot is written before it is read.
 	stack: [MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else MAX_DEPTH
 	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, opts.tolerate, nil}
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
-// The document from `p` with a depth stack past `MAX_DEPTH`, from the default heap and freed before it returns, which
-// keeps the walk callable from a hook.
+// `walk_document` for a depth past `MAX_DEPTH`. Allocates `depth` bytes on the default heap and frees them before
+// returning, so a hook can call the walk.
 @(private, cold)
 walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, depth: u64, tolerate: bit_set[Tolerance; u8], h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	context = runtime.default_context()
@@ -179,7 +211,7 @@ walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec,
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
-// The features every state is built with: one tier for each target, on x86-64 its floor.
+// `STATE_TIER` is the CPU tier every state is built for: `V2` on x86-64, `Base` elsewhere.
 when ODIN_ARCH == .amd64 {
 	@(private)
 	STATE_TIER :: kernel.Tier.V2
@@ -191,8 +223,8 @@ when ODIN_ARCH == .amd64 {
 @(private)
 STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 
-// The walk without hooks from `p`, in state `st_open` or `st_value`, ending where the stack marks PASS_END or at
-// the end of a root value: a call, since `#must_tail` cannot jump between the walk's instances.
+// Runs the walk without hooks from `p`, starting in `st_open` or `st_value`, until the stack marks `PASS_END` or a
+// root value ends. It is a call because `#must_tail` cannot jump between two instances of the walk.
 @(private)
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d, ind: u64, $open: bool) -> u64 {
 	h: core.No_Hooks
@@ -205,12 +237,21 @@ pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, 
 	}
 }
 
-// Hands the token from `p` to `q` to the hook, and answers what it asks. The readers refuse a token wider than
-// `Token.n` holds before it gets here.
+// Passes the token over `p..q` to the hook and returns its `Action`. The readers refuse a token wider than `Token.n`
+// holds before they call `emit`.
 @(private)
 emit :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, kind: core.Kind, role: core.Role, p, q: [^]u8, spelling: u16) -> core.Action {
 	a: core.Action
 	hs^, a = on(w.hooks, hs^, core.Token{at(w, p), u32(intrinsics.ptr_sub(q, p)), kind, role, spelling})
+	return a
+}
+
+// `emit_string` is `emit` for a quoted string, whose token spans the bytes between the quotes. `SPELLING_QUOTED` marks
+// the pair as outside the span, so a read does not probe `src` for it and `span` adds it back.
+@(private)
+emit_string :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, kind: core.Kind, role: core.Role, p, q: [^]u8, spelling: u16) -> core.Action {
+	a: core.Action
+	hs^, a = on(w.hooks, hs^, core.Token{at(w, p) + 1, u32(intrinsics.ptr_sub(q, p) - 2), kind, role, spelling | core.SPELLING_QUOTED})
 	return a
 }
 
@@ -225,14 +266,15 @@ fault :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs,
 	return core.fault_at(at(w, p), kind, u8(detail))
 }
 
-// The document ended at `p`.
+// Returns the fault value for a document that ended at `p`, with kind `.None`.
 @(private)
 ended :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8) -> u64 {
 	w.regs^ = hs
 	return core.fault_at(at(w, p), .None)
 }
 
-// A hook stopped the walk on the token that ends at `p`.
+// Returns the fault value for a hook that stopped the walk at the token ending at `p`, with `core.STOPPED` in the
+// detail.
 @(private)
 stopped :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8) -> u64 {
 	w.regs^ = hs

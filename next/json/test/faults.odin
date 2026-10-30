@@ -13,11 +13,11 @@ import walktest "../../walktest"
 
 Case :: struct {
 	text:   string,
-	kind:   core.Fault_Kind, // 0 for a valid text
+	kind:   core.Fault_Kind, // nil for a valid text
 	offset: u64,
 }
 
-// Every fault the walk and its one-document framing raise, at the byte the fault's rule names.
+// Holds each fault of a JSON text at the byte its rule names. A `nil` kind is a valid text.
 @(rodata)
 CASES := []Case {
 	{"0", nil, 0},
@@ -69,7 +69,7 @@ CASES := []Case {
 	{"[1e+]", .Bad_Number, 4},
 	{"1 2", .Trailing, 2},
 	{"{}x", .Trailing, 2},
-	// The texts `core:encoding/json` takes in `.JSON` mode (odin-lang/Odin#8061).
+	// Texts `core:encoding/json` accepts in `.JSON` mode that the walk refuses (odin-lang/Odin#8061).
 	{"[\"a\x01b\"]", .Bad_Char, 3},
 	{"[\"\\q\"]", .Bad_Escape, 3},
 	{"[1e]", .Bad_Number, 3},
@@ -80,7 +80,7 @@ CASES := []Case {
 	{"[1.]", .Bad_Number, 3},
 	{"\v[1]", .Bad_Char, 0},
 	{"[1]\x00garbage", .Trailing, 3},
-	// Number elements and number-valued members after a number, which runs of their own read.
+	// Number elements and number-valued members after a number, each read as its own number run.
 	{"[1, -2, 3.5e1, 0]", nil, 0},
 	{"{\"a\": 1, \"b\" : -2, \"c\":3, \"d\": [4, 5]}", nil, 0},
 	{"[1, 2, 01, 3]", .Bad_Number, 8},
@@ -89,11 +89,11 @@ CASES := []Case {
 	{"{\"a\": 1, \"b\": x}", .Bad_Char, 14},
 }
 
-// The faults with `Detail.Literal`.
+// Holds texts faulted at a literal's first wrong letter, with `Detail.Literal`.
 @(rodata)
 LITERAL_CASES := []Case{{"trUe", .Bad_Char, 2}, {"nulx", .Bad_Char, 3}, {"falsy", .Bad_Char, 4}}
 
-// JSONC's comments and trailing commas, under JSONC, and as the bad bytes they are in JSON.
+// Holds JSONC texts with comments and trailing commas, and the faults they raise under `.Jsonc`.
 @(rodata)
 JSONC_CASES := []Case {
 	{"// a\n[1, /* b */ 2 // c\r] /* d */", nil, 0},
@@ -128,7 +128,7 @@ JSONC_CASES := []Case {
 	{"1 /* a */ 2", .Trailing, 10},
 }
 
-// The refusals JSONC_CASES has under `.Json`.
+// Holds JSONC texts that raise a fault under `.Json`.
 @(rodata)
 JSONC_IN_JSON := []Case {
 	{"// a\n[1]", .Bad_Char, 0},
@@ -182,7 +182,7 @@ JSON5_CASES := []Case {
 	{"/* a", .Truncated, 4},
 }
 
-// JSON5's refusals of a key, quoted or not.
+// Holds JSON5 keys that start with no identifier character, faulted with `Detail.Identifier`.
 @(rodata)
 JSON5_KEY_CASES := []Case {
 	{"{1: 2}", .Bad_Char, 1},
@@ -192,7 +192,7 @@ JSON5_KEY_CASES := []Case {
 	{"{a: 1,,}", .Bad_Char, 6},
 }
 
-// The refusals JSON5_CASES has under `.Jsonc`.
+// Holds JSON5 texts that raise a fault under `.Jsonc`.
 @(rodata)
 JSON5_IN_JSONC := []Case {
 	{"[0x1]", .Bad_Char, 2},
@@ -201,7 +201,7 @@ JSON5_IN_JSONC := []Case {
 	{"NaN", .Bad_Char, 0},
 }
 
-// A byte where an object's key must start.
+// Holds bytes where an object's key must start, with `Detail.Identifier`.
 @(rodata)
 KEY_CASES := []Case {
 	{"{1:2}", .Bad_Char, 1},
@@ -217,7 +217,7 @@ KEY_CASES_JSONC := []Case {
 	{"{a: 1}", .Bad_Char, 1},
 }
 
-// A byte where a member's colon must stand.
+// Holds bytes where a member's colon must stand, with `Detail.Colon`.
 @(rodata)
 COLON_CASES := []Case {
 	{"{\"a\" 1}", .Bad_Char, 5},
@@ -277,8 +277,8 @@ faults_at_their_byte :: proc(t: ^testing.T) {
 	}
 }
 
-// A member skipped after its key still faults at the byte where its colon must stand, with `Colon` from the state
-// that passes the comments around the colon as well.
+// A walk whose hook skips a key still faults at the byte where its colon must stand, with `Detail.Colon`, the
+// comments around the colon passed over.
 @(test)
 colon_detail_after_skip :: proc(t: ^testing.T) {
 	Skipped :: struct {
@@ -307,8 +307,8 @@ colon_detail_after_skip :: proc(t: ^testing.T) {
 	}
 }
 
-// `validate`'s verdict, and the same fault from a walk with hooks, which takes the comment states that emit, where
-// the walk finds a document: `Trailing` is `validate`'s alone.
+// Checks `validate`'s fault against `c`, then checks that a hooked walk returns the same fault, except `Trailing`,
+// which only `validate` reports, and a text with no value, where the walk returns no fault.
 expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec, detail: json.Detail) {
 	src := transmute([]u8)c.text
 	verdict := json.validate(src, S)
@@ -327,14 +327,14 @@ expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec, detail: json.Detail)
 	}
 }
 
-// A string's every byte at every offset its readers branch on: the 16-byte halves, the 64-byte blocks, the text's
-// last 64 bytes, and past them, after plain bytes or escapes. `pad` plain bytes follow the closing quote or the cut.
+// Tests a string's bytes at every offset its readers branch on: the 16-byte halves, the 64-byte blocks, the text's
+// last 64 bytes and past them, after plain bytes or escapes. `pad` spaces follow the closing quote.
 @(test)
 strings_at_every_offset :: proc(t: ^testing.T) {
 	Piece :: struct {
 		bytes:  string,
 		kind:   core.Fault_Kind,
-		offset: u64, // past the opening quote and the run before the piece
+		offset: u64, // from the piece's first byte, after the opening quote and the run
 	}
 	@(static, rodata)
 	PIECES := []Piece {
@@ -362,7 +362,7 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 	}
 	text: [dynamic]u8
 	defer delete(text)
-	// The run before the piece, plain or escaped.
+	// The run before the piece: `a` bytes, or `\n` escapes.
 	for fill in ([]string{"a", "\\n"}) do for piece in PIECES {
 		for k := 0; k < 140; k += len(fill) {
 			for pad in ([]int{0, 1, 70}) {
@@ -384,7 +384,7 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 				} else if !testing.expectf(t, bad && f.kind == piece.kind && f.at == 1 + u64(k) + piece.offset, "%q: %v, want %v at %d", text[:], f, piece.kind, 1 + u64(k) + piece.offset) {
 					return
 				}
-				// Cut before the closing quote.
+				// The same text cut before its closing quote, which is `Truncated` at its end.
 				resize(&text, 1 + k + len(piece.bytes))
 				f, bad = validate_fenced(text[:], .Json).?
 				if piece.kind == nil && !testing.expectf(t, bad && f.kind == .Truncated && f.at == u64(len(text)), "%q: %v", text[:], f) {
@@ -395,8 +395,9 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 	}
 }
 
-// Every byte as an escape's letter, as each digit of a `\u` escape, and as the second digit of a surrogate half, in
-// blocks with other escapes, the escape in the first block, the second block, and across their edge at every lane.
+// Tests every byte as an escape's letter, as each of the four `\u` digits, and as the second digit of a surrogate
+// half, at shifts 0 and 1 and after runs of 8 or 24 to 31 `\n` escapes, which put the escape in the first block, the
+// second, or across their edge.
 @(test)
 escapes_by_byte :: proc(t: ^testing.T) {
 	Want :: struct {
@@ -450,7 +451,7 @@ escapes_by_byte :: proc(t: ^testing.T) {
 					return
 				}
 			}
-			// `\udX00`: a code point below the surrogates, a lone high half, or a lone low half.
+			// `\udX00` below the surrogates is valid, and a lone high or low half is `.Bad_Escape` at the backslash.
 			want = {}
 			switch {
 			case !is_hex(c):
@@ -461,7 +462,7 @@ escapes_by_byte :: proc(t: ^testing.T) {
 			if !check(t, &text, shift, run, {'\\', 'u', 'd', c, '0', '0'}, want) {
 				return
 			}
-			// A high half, then `\udX00`: valid only with a low half.
+			// A high half then `\udX00` is valid only when the second half is low.
 			if is_hex(c) {
 				want = {} if (c | 0x20) - 'c' < 4 else {.Bad_Escape, 0}
 				if !check(t, &text, shift, run, {'\\', 'u', 'd', '8', '0', '0', '\\', 'u', 'd', c, '0', '0'}, want) {
@@ -472,8 +473,8 @@ escapes_by_byte :: proc(t: ^testing.T) {
 	}
 }
 
-// Every byte at every place of a predicted indent, and in the token after it, judged as the same text with each
-// newline a CR, which the indent prediction never takes. Then texts that end in a predicted indent.
+// Tests every byte at every place of a predicted indent and in the token after it, judged as the same text with each
+// `\n` replaced by `\r`. Then texts that end in a predicted indent, which is `Truncated` at their end.
 @(test)
 indents_by_byte :: proc(t: ^testing.T) {
 	text, plain: [dynamic]u8
@@ -516,9 +517,8 @@ indents_by_byte :: proc(t: ^testing.T) {
 	}
 }
 
-// Every pair of bytes after a key's colon, after keys the probe reads and keys too long for it, judged as the same
-// member with a space before its colon, which no state takes on a fast path. Then the members cut after the colon
-// and after each of the two bytes, at the lengths where the probe still reads the key.
+// Tests every pair of bytes after a key's colon, for keys of 1, 29, 30 and 31 bytes, judged as the same member with a
+// space before its colon. Then the same members cut after the colon and after each of the two bytes.
 @(test)
 colons_by_byte :: proc(t: ^testing.T) {
 	member :: proc(out: ^[dynamic]u8, key_len: int, spaced: bool, x, y: u8) {
@@ -531,7 +531,7 @@ colons_by_byte :: proc(t: ^testing.T) {
 		append(out, x, y)
 		append(out, "1,\"pad\":\"........................................\"}")
 	}
-	// The fault of a text that holds `by` bytes fewer before its colon than the reference.
+	// Moves a fault `by` bytes on, for a text `by` bytes shorter before its colon than the reference.
 	shifted :: proc(f: Maybe(core.Fault), by: int) -> Maybe(core.Fault) {
 		if f, bad := f.?; bad {
 			return core.Fault{at = f.at + u64(by), rules = f.rules, kind = f.kind, detail = f.detail}
@@ -555,7 +555,7 @@ colons_by_byte :: proc(t: ^testing.T) {
 				if !testing.expectf(t, got_short == want && got_long == want, "%q: %v %v, want %v", short[:], got_short, got_long, want) {
 					return
 				}
-				// Cut after the colon, after x, and after y when x is the space of a pretty printer's `": "`.
+				// Cuts after the colon, after `x`, and after `y` when `x` is the space of a pretty printer's `": "`.
 				if y > 0 && x != ' ' {
 					continue
 				}
@@ -572,8 +572,8 @@ colons_by_byte :: proc(t: ^testing.T) {
 	}
 }
 
-// `src` validated from a copy whose next bytes are poisoned, so that under `-sanitize:address` a read past its end
-// fails the run.
+// Validates `src` from a copy with 64 poisoned bytes after it, so a read past the end fails under
+// `-sanitize:address`.
 validate_fenced :: proc(src: []u8, $S: json.Spec, opts := json.Options{}) -> Maybe(core.Fault) {
 	FENCE :: 64
 	buf := make([]u8, len(src) + FENCE)
@@ -584,8 +584,8 @@ validate_fenced :: proc(src: []u8, $S: json.Spec, opts := json.Options{}) -> May
 	return json.validate(buf[:len(src)], S, opts)
 }
 
-// Every prefix of seeded texts, compact and pretty, read with its next bytes poisoned: a state's look past the
-// token it stands on must stop at the end wherever the text is cut.
+// Validates every prefix of 900 seeded texts, compact and pretty, with poisoned bytes after it: each prefix gives the
+// same fault as the same text validated without the poison.
 @(test)
 prefixes_fenced :: proc(t: ^testing.T) {
 	state := rand.create(1)
@@ -629,15 +629,15 @@ depth_limit :: proc(t: ^testing.T) {
 	testing.expectf(t, bad && f.kind == .Too_Deep && f.at == 6 * (json.MAX_DEPTH / 2), "%v", f)
 }
 
-// Skips the token numbered `h^`, from 0, and reads every other.
+// Returns `.Skip` on the token numbered `h^`, counted from 0, and `.Next` on every other token.
 skip_hook :: proc "contextless" (h: ^int, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	h^ -= 1
 	return s, .Skip if h^ == -1 else .Next
 }
 
-// `max_depth` below the default, at it, and past it, where the depth stack comes from the heap: `max_depth` levels
-// pass and the bracket past them is `Too_Deep`, an array or an object, through `validate`, a walk with a hook, and a
-// walk that skips the root or its first key. The heap stack is the default heap's, whatever the caller's allocator.
+// Tests `max_depth` 1, 3, the default and 5000. That many levels pass and the next bracket is `Too_Deep`, for an
+// array and an object, through `validate`, a hooked walk, and a walk that skips the root or its first key. The depth
+// stack comes from the default heap even when `context.allocator` is the panic allocator.
 @(test)
 max_depth_option :: proc(t: ^testing.T) {
 	heap := context.allocator
@@ -665,7 +665,8 @@ max_depth_option :: proc(t: ^testing.T) {
 	}
 }
 
-// `levels` brackets, each after a comment, with a trailing comma and a comment before each close.
+// Writes `levels` brackets with a comment before each, `1` as the value, and a trailing comma and a comment before
+// each close.
 build_depth :: proc(out: ^[dynamic]u8, levels: int, $S: json.Spec, object: bool) {
 	clear(out)
 	for _ in 0 ..< levels {
@@ -682,8 +683,8 @@ build_depth :: proc(out: ^[dynamic]u8, levels: int, $S: json.Spec, object: bool)
 	}
 }
 
-// `max_depth` in JSONC and JSON5, with a comment before every bracket and a trailing comma before every close:
-// `max_depth` levels pass and the next bracket is `Too_Deep`, through `validate` and a walk with a hook.
+// Tests `max_depth` in JSONC and JSON5 with a comment before every bracket and a trailing comma before every close.
+// That many levels pass and the next bracket is `Too_Deep`, through `validate` and a hooked walk.
 @(test)
 max_depth_comments :: proc(t: ^testing.T) {
 	max_depth_comments_in(t, .Jsonc)
@@ -721,11 +722,11 @@ Tolerated :: struct {
 	spec:   json.Spec,
 	text:   string,
 	tol:    bit_set[json.Tolerance; u8],
-	kind:   core.Fault_Kind, // 0 where `tol` takes every fault
+	kind:   core.Fault_Kind, // nil where `tol` tolerates every fault
 	offset: u64,
 }
 
-// Texts a tolerance takes, and faults no tolerance in the set takes, which stand as they do without it.
+// Holds texts a tolerance set accepts, and faults the set does not accept, which are the same as without it.
 @(rodata)
 TOLERATED := []Tolerated {
 	{.Json, "\"a\xffb\"", {.Invalid_Utf8}, nil, 0},
@@ -757,9 +758,9 @@ TOLERATED := []Tolerated {
 	{.Json5, "{a\\ud800:1}", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Escape, 2},
 }
 
-// Each tolerance, through `validate` and a walk with hooks: a text the set takes is clean with it and faulty without
-// it, a text the set does not take keeps the kind and offset it has without the set, and the hooked walk returns
-// `validate`'s fault. A tolerated string's token keeps its bytes.
+// Tests each tolerance through `validate` and a hooked walk: a text the set accepts is clean with it and faulty
+// without it, a text the set does not accept keeps its kind and offset, the hooked walk returns `validate`'s fault, and
+// every token keeps its span's bytes.
 @(test)
 tolerances :: proc(t: ^testing.T) {
 	for c in TOLERATED {
@@ -772,7 +773,7 @@ tolerances :: proc(t: ^testing.T) {
 			expect_tolerated(t, c, .Json5)
 		}
 	}
-	// Every offset the string readers branch on, as `strings_at_every_offset` sweeps them.
+	// The tolerated pieces at every offset from 0 to 139, as `strings_at_every_offset` sweeps them.
 	text: [dynamic]u8
 	defer delete(text)
 	for piece in ([]string{"\xff", "\xe2\x82", "\xf0\x9f\x98x", "\\ud800", "\\udc00\\u0041"}) {
@@ -792,8 +793,8 @@ tolerances :: proc(t: ^testing.T) {
 	}
 }
 
-// The tolerated pieces of `tolerances`' sweep at every offset in JSONC and JSON5, in both of JSON5's quote kinds:
-// each is clean with the set and a fault without it.
+// Tests the same pieces at every offset from 0 to 139 in JSONC and JSON5, in both of JSON5's quote kinds: each is
+// clean with the tolerance set and a fault without it.
 @(test)
 tolerance_offsets :: proc(t: ^testing.T) {
 	tolerance_offsets_in(t, .Jsonc)
@@ -829,8 +830,8 @@ tolerance_offsets_in :: proc(t: ^testing.T, $S: json.Spec) {
 	}
 }
 
-// A tolerance set changes `validate` and a hooked walk alike on generated texts of each spec: both return the same
-// fault, except that `Trailing` is `validate`'s alone, and every token keeps the bytes of its span.
+// On 1200 generated and mutated texts of each spec, `validate` and a hooked walk return the same fault under a
+// tolerance set, except that only `validate` reports `Trailing`, and every token keeps its span's bytes.
 @(test)
 tolerances_agree :: proc(t: ^testing.T) {
 	tolerances_agree_in(t, .Json)
@@ -853,7 +854,7 @@ tolerances_agree_in :: proc(t: ^testing.T, $S: json.Spec) {
 			walktest.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		} else {
-			// A byte no string may hold, in the first quoted string, so that `Invalid_Utf8` is reached.
+			// Writes 0xff into the first quoted string with no escape, so `Invalid_Utf8` is reached.
 			log^ = {}
 			json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 			for tok in log.tokens[:log.n] {
@@ -925,8 +926,9 @@ expect_tolerated :: proc(t: ^testing.T, c: Tolerated, $S: json.Spec) {
 	}
 }
 
-// Every value of `Detail` has a rule, and a fault renders as `line:col: message` with its rule's code beside it.
-// Faults met in offset order share one count of the lines, and one before the count's byte counts again.
+// `RULES.details` has one entry per `Detail`. A fault renders as `line:col: message`, and `write_code` gives its rule's
+// code. A `Lines` keeps the line count between faults in offset order, and a fault before its byte counts from 0
+// again.
 @(test)
 rendered_faults :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(json.RULES.details), len(json.Detail))
@@ -965,7 +967,7 @@ rendered_faults :: proc(t: ^testing.T) {
 	line, col = core.locate(transmute([]u8)string("a\nb"), 1, nil)
 	testing.expect_value(t, line, u64(1))
 	testing.expect_value(t, col, u64(2))
-	// A line ends at its LF, a CR is a byte of its line, and a column counts bytes.
+	// A line ends at its `\n`, a `\r` belongs to its line, and a column counts bytes.
 	Located :: struct {
 		src:  string,
 		at:   u64,
@@ -978,7 +980,7 @@ rendered_faults :: proc(t: ^testing.T) {
 	}
 }
 
-// JSONTestSuite: every `y_` text passes and every `n_` text fails. The `i_` texts are the oracle's.
+// JSONTestSuite: every `y_` text passes, every `n_` text fails, and the `i_` texts are left to the oracle.
 @(test)
 json_test_suite :: proc(t: ^testing.T) {
 	suite := #load_directory("conformance/JSONTestSuite/test_parsing")
@@ -998,7 +1000,7 @@ json_test_suite :: proc(t: ^testing.T) {
 	testing.expect(t, n > 250)
 }
 
-// json5-tests: every `.json` and `.json5` text passes, and every `.js` and `.txt` text fails.
+// json5-tests: every `.json` and `.json5` text passes and every `.js` and `.txt` text fails, 114 files in all.
 @(test)
 json5_tests :: proc(t: ^testing.T) {
 	n: int

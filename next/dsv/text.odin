@@ -1,20 +1,18 @@
 package dsv
 
-// The cold scalars of the walk: what its masks cannot answer by bit. The number of a header's cells, which sizes the
-// key buffer before the pass starts, the first bad UTF-8 sequence of a block, the first backslash that opens no
-// escape, and the exact span of a cell too long to measure by block. Each reads bytes one at a time and runs only
-// where the block masks have already said a block needs it.
+// The byte-at-a-time scans of the walk. The cell count of the header sizes the key buffer, the first malformed UTF-8
+// sequence in a block, the first backslash that opens no escape, and whether a cell is too long for `Token.n`. The walk
+// calls each only on a block whose masks say it is needed.
 
 import "base:intrinsics"
 import core "../core"
 import kernel "../core/kernel"
 
-// The cells of the text's first record, read from `start`, with `scan_record`'s reading of that record. The lines
-// before it that are empty or hold only a CR are passed over, since they are no record and so no header. Where the pass
-// does not fault, its reading of the same record agrees with this one, so the key buffer this sizes holds every cell
-// the header makes.
-@(private, cold, require_results)
-header_cells :: #force_no_inline proc "contextless" (src: []u8, start: int, $S: Spec) -> int {
+// The first byte of the first record at or after `start`. Skips empty lines, lines holding only a CR LF, and lines
+// whose first byte is `comment` when `comment` is not 0. A lone CR is not skipped. Returns `len(src)` when no record
+// starts at or after `start`.
+@(private)
+record_start :: #force_inline proc "contextless" (src: []u8, start: int, comment: byte) -> int {
 	i := start
 	for i < len(src) {
 		if src[i] == '\n' {
@@ -25,14 +23,32 @@ header_cells :: #force_no_inline proc "contextless" (src: []u8, start: int, $S: 
 			i += 2
 			continue
 		}
+		if comment != 0 && src[i] == comment {
+			for i < len(src) && src[i] != '\n' {
+				i += 1
+			}
+			if i < len(src) {
+				i += 1
+			}
+			continue
+		}
 		break
 	}
-	return scan_record(src, i, 0, S).cells
+	return i
 }
 
-// One record read from its first byte: its cells, the first delimiter that opens a cell past `width` (-1 when there is
-// none, and width 0 for a caller that reads cells only), and its line end and that line end's first byte. Quotes (CSV)
-// and escapes (TSV) are followed as the pass follows them, so no delimiter inside a quoted field is counted.
+// The cell count of the text's first record at or after `start`, read by `scan_record` with width 0. The key buffer
+// sized from it holds every cell the header makes, since the pass reads the same record the same way when it does not
+// fault.
+@(private, cold, require_results)
+header_cells :: #force_no_inline proc "contextless" (src: []u8, start: int, $S: Spec, opts: Options) -> int {
+	return scan_record(src, record_start(src, start, opts.comment), 0, S, delimiter_of(S, opts)).cells
+}
+
+// A record read from its first byte by `scan_record`. `cells` is its cell count, at least 1. `fault_at` is the index
+// of the first delimiter that opens a cell past `width`, -1 when there is none, and width 0 counts cells only.
+// `line_end` is the index of its LF, or `len(src)` when the text ends first. `line_end_lo` is the index of the CR in a
+// CR LF, else the same as `line_end`.
 @(private)
 Record_Scan :: struct {
 	cells:       int,
@@ -41,8 +57,12 @@ Record_Scan :: struct {
 	line_end_lo: int,
 }
 
+// Reads one record from `start`, with `delim` between cells. Quotes (CSV) and escapes (TSV) are read as the pass reads
+// them, so a delimiter inside a quoted field does not count. A non-nil `ends` receives each cell's end byte in order,
+// before the CR of a CR LF, for as many cells as it has room for.
+
 @(private, cold, require_results)
-scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int, $S: Spec) -> Record_Scan {
+scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int, $S: Spec, delim: byte, ends: []int = nil) -> Record_Scan {
 	s := Record_Scan{cells = 1, fault_at = -1}
 	i := start
 	end := len(src)
@@ -64,17 +84,27 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 			}
 			switch c {
 			case '\n':
-				s.line_end, s.line_end_lo = i, i
+				hi := i
 				if i > start && src[i - 1] == '\r' {
-					s.line_end_lo = i - 1
+					hi = i - 1
 				}
+				if ends != nil && s.cells - 1 < len(ends) {
+					ends[s.cells - 1] = hi
+				}
+				s.line_end, s.line_end_lo = i, hi
 				return s
 			case '\r':
 				if i + 1 < end && src[i + 1] == '\n' {
+					if ends != nil && s.cells - 1 < len(ends) {
+						ends[s.cells - 1] = i
+					}
 					s.line_end, s.line_end_lo = i + 1, i
 					return s
 				}
-			case ',':
+			case delim:
+				if ends != nil && s.cells - 1 < len(ends) {
+					ends[s.cells - 1] = i
+				}
 				if s.cells == width && s.fault_at < 0 {
 					s.fault_at = i
 				}
@@ -82,29 +112,41 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 			case '"':
 				quoted = first
 			}
-			first = c == ','
+			first = c == delim
 			i += 1
 		}
 	} else {
 		for i < end {
 			c := src[i]
-			if c == '\\' {
-				i += 2
-				continue
+			when S == .Tsv {
+				if c == '\\' {
+					i += 2
+					continue
+				}
 			}
 			switch c {
 			case '\n':
-				s.line_end, s.line_end_lo = i, i
+				hi := i
 				if i > start && src[i - 1] == '\r' {
-					s.line_end_lo = i - 1
+					hi = i - 1
 				}
+				if ends != nil && s.cells - 1 < len(ends) {
+					ends[s.cells - 1] = hi
+				}
+				s.line_end, s.line_end_lo = i, hi
 				return s
 			case '\r':
 				if i + 1 < end && src[i + 1] == '\n' {
+					if ends != nil && s.cells - 1 < len(ends) {
+						ends[s.cells - 1] = i
+					}
 					s.line_end, s.line_end_lo = i + 1, i
 					return s
 				}
-			case '\t':
+			case delim:
+				if ends != nil && s.cells - 1 < len(ends) {
+					ends[s.cells - 1] = i
+				}
 				if s.cells == width && s.fault_at < 0 {
 					s.fault_at = i
 				}
@@ -113,16 +155,19 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 			i += 1
 		}
 	}
+	if ends != nil && s.cells - 1 < len(ends) {
+		ends[s.cells - 1] = end
+	}
 	s.line_end, s.line_end_lo = end, end
 	return s
 }
 
-// The first backslash in the block at `pos` that opens no escape, or -1. A backslash in bit 63 is left to the next
-// block, through `esc`. The bytes a backslash may escape are `\t`, `\n`, `\r`, `\0` and `\\`.
-// Out of line: inlined into the pass it drags its byte loop's branches into the block loop and spills the block's
-// vectors, which costs the hot path of every block, not only the blocks that hold a backslash.
+// The index of the first backslash in the block at `pos` that opens no escape, or -1. A backslash at the block's last
+// byte is left to the next block through `esc`, and a carry in `esc` judges `src[pos]` and faults at `pos - 1` when it
+// is not one of the five escapes. The bytes a backslash may escape are `t`, `n`, `r`, `0` and `\\`. Bytes in `comment`
+// are skipped.
 @(private, cold)
-escape_fault :: #force_no_inline proc "contextless" (src: []u8, pos: int, esc: ^u64) -> int {
+escape_fault :: #force_inline proc "contextless" (src: []u8, pos: int, comment: u64, esc: ^u64) -> int {
 	end := min(pos + 64, len(src))
 	i := pos
 	if esc^ != 0 {
@@ -133,6 +178,10 @@ escape_fault :: #force_no_inline proc "contextless" (src: []u8, pos: int, esc: ^
 	}
 	esc^ = 0
 	for ; i < end; i += 1 {
+		// A backslash inside a comment line is text and opens no escape.
+		if comment & (u64(1) << u64(i - pos)) != 0 {
+			continue
+		}
 		if src[i] != '\\' {
 			continue
 		}
@@ -153,10 +202,11 @@ escaped :: #force_inline proc "contextless" (c: u8) -> bool {
 	return c == 't' || c == 'n' || c == 'r' || c == '0' || c == '\\'
 }
 
-// The first malformed UTF-8 sequence of the block at `pos`, searching from the start of the sequence that holds `pos`
-// but from no byte before `floor`, the walk's first: `Bad_Char` at its lead byte, or `Truncated` at `len(src)` when the text ends inside
-// a sequence that is valid so far. -1 for none. A block whose mask of errors is set comes here, and so does the text's
-// end when a sequence is left open there: a lead byte that no byte follows is judged only by its sequence's length.
+// The first malformed UTF-8 sequence in the block at `pos`, starting from the lead byte of the sequence that holds
+// `pos` but never before `floor`. Returns `Bad_Char` at the sequence's lead byte, `Truncated` at `len(src)` when the
+// text ends inside a sequence that is valid so far, or -1 when there is none. A block whose error mask is set comes
+// here, and so does the text's end when a sequence is left open there, where the lead byte alone decides `Truncated`
+// from its sequence's length.
 @(private, cold)
 utf8_fault :: #force_no_inline proc "contextless" (src: []u8, floor, pos: int) -> (fault: int, kind: core.Fault_Kind) {
 	i := pos
@@ -185,8 +235,8 @@ utf8_fault :: #force_no_inline proc "contextless" (src: []u8, floor, pos: int) -
 	return -1, .Bad_Char
 }
 
-// Whether the cell from `lo` ends at a separator of the block at `pos`, whose separators are `seps`, and is longer
-// than `Token.n` holds. The CR of a CRLF is the line end's, not the cell's.
+// Whether the first separator in `seps` at or after `pos` ends the cell that starts at `lo` more than `max(u32)` bytes
+// later. A CR LF's CR belongs to the line end, so `hi` leaves it out. Returns false when `seps` is 0.
 @(private, cold)
 cell_too_wide :: #force_no_inline proc "contextless" (base: [^]u8, lo, pos: int, seps: u64) -> bool {
 	if seps == 0 {

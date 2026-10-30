@@ -8,7 +8,8 @@ import walktest "../../walktest"
 import json ".."
 import gen "gen"
 
-// The tokens a walk under `rule` gives, from the tokens of the walk that asked for nothing, and where a Stop ends it.
+// Returns the tokens a hooked walk gives under `rule`, from `all`, the tokens of a walk that returned `.Next` every
+// time, and the byte where a `.Stop` ends the walk.
 expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop_hi: u64, stopped: bool) {
 	clear(out)
 	for j := 0; j < len(all); j += 1 {
@@ -17,16 +18,21 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 		append(out, t)
 		switch a {
 		case .Stop:
-			return t.lo + u64(t.n), true
+			// A quoted string's token span leaves its quotes out, and the walk stops one byte past the closing quote.
+			hi := t.lo + u64(t.n)
+			if t.kind == .String && t.spelling & core.SPELLING_QUOTED != 0 {
+				hi += 1
+			}
+			return hi, true
 		case .Skip:
-			// A key's Skip passes the comments up to its member's value, and the value.
+			// A key's `.Skip` passes the comments up to the member's value and the value itself.
 			if t.role == .Key {
 				j += 1
 				for j < len(all) && all[j].role > .Key {
 					j += 1
 				}
 			}
-			// Past the container, or the scalar after a key, that the walk skips.
+			// A container value is skipped whole, through its `End`.
 			if j < len(all) && (all[j].kind == .Array || all[j].kind == .Map) {
 				depth := 0
 				for ; j < len(all); j += 1 {
@@ -47,8 +53,9 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 	return
 }
 
-// On valid and broken texts of each spec, a hook that keeps its state behind `h` and one that keeps it in `Hook_Regs`
-// see the same tokens, with Skip and Stop at random, and those are the tokens Skip and Stop leave of the full walk.
+// On 4000 valid and mutated texts of each spec, a hook keeping its state behind `h` and one keeping it in `Hook_Regs`
+// see the same tokens, with `.Skip` and `.Stop` chosen at random, and those are the tokens the full walk leaves after
+// them.
 @(test)
 hooks_agree :: proc(t: ^testing.T) {
 	_ = hooks_agree_in(t, .Json) && hooks_agree_in(t, .Jsonc) && hooks_agree_in(t, .Json5)
@@ -113,8 +120,8 @@ hooks_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 	return true
 }
 
-// A walk from the text's first byte passes over one leading BOM, as `validate` does, and in JSON one from any other
-// byte outside a string reads a BOM as the bad byte it is there.
+// A walk from byte 0 passes over one leading BOM, as `validate` does, and in JSON a BOM at any other byte outside a
+// string is `.Bad_Char`.
 @(test)
 bom_at_the_start :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -127,8 +134,8 @@ bom_at_the_start :: proc(t: ^testing.T) {
 	testing.expect_value(t, fault, core.Fault{1, &json.RULES, .Bad_Char, 0})
 }
 
-// A walk from a byte inside a comment or a string reads from that byte with no state, so the byte is the bad byte it
-// is there. A BOM past the text's first byte is a bad byte in JSON and whitespace in JSON5.
+// A walk from a byte inside a comment or a string starts there with no state, so that byte is `.Bad_Char`. A BOM past
+// byte 0 is `.Bad_Char` in JSON and whitespace in JSON5.
 @(test)
 walk_from_inside :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -163,7 +170,7 @@ walk_from_inside :: proc(t: ^testing.T) {
 			testing.expectf(t, fault == want && hi == c.at, "%v %q from %d: %d %v, want %d %v", c.spec, c.text, c.lo, hi, fault, c.at, want)
 		}
 	}
-	// The text's first byte is past one BOM, and the walk from the byte after it reads the document.
+	// A walk from byte 3, past one BOM, reads the same document as one from byte 0.
 	log^ = {}
 	hi, fault := json.walk(transmute([]u8)string("\xef\xbb\xbf[1]"), 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expectf(t, fault == nil && hi == 6 && log.tokens[0] == core.Token{3, 1, .Array, .Value, 0}, "%d %v %v", hi, fault, log.tokens[0])
@@ -172,8 +179,8 @@ walk_from_inside :: proc(t: ^testing.T) {
 	testing.expectf(t, fault == nil && hi == 6 && log.tokens[0] == core.Token{3, 1, .Array, .Value, 0}, "%d %v %v", hi, fault, log.tokens[0])
 }
 
-// A hook that stops on a comment inside a run: the comments before it are given, the walk ends one past it, and no
-// later comment or value is read.
+// A hook stops on the third comment of a run. The two before it are given, the walk ends one byte past the third, and
+// no later comment or value is read.
 @(test)
 stop_on_comment :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -206,9 +213,9 @@ stop_on_comment :: proc(t: ^testing.T) {
 	}
 }
 
-// A walk reads one document. A stream is a loop of walks, each from where the last one ended, passing over
-// whitespace and the record separator 0x1E before each document. Nothing but those left is no document and no fault,
-// and `validate` holds a text to one document with nothing before it.
+// A walk reads one document. A stream loops walks, each from where the last ended, and each passes over whitespace and
+// the record separator 0x1E before its document. A text with only those left is no document and no fault, and
+// `validate` holds a text to one document with nothing before it.
 @(test)
 documents_one_walk_each :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -237,7 +244,8 @@ documents_one_walk_each :: proc(t: ^testing.T) {
 	testing.expect_value(t, json.validate(transmute([]u8)string(" \n"), .Json), core.Fault{2, &json.RULES, .Truncated, 0})
 }
 
-// Whether a token's span holds what its kind says, and its spelling says whether a string holds an escape.
+// Returns true if a token's span holds what its kind says and its spelling matches. For a string, the spelling says
+// whether it holds an escape.
 spans :: proc(src: []u8, t: core.Token) -> bool {
 	b := src[t.lo:][:t.n]
 	switch t.kind {
@@ -246,9 +254,16 @@ spans :: proc(src: []u8, t: core.Token) -> bool {
 		for c in b {
 			escaped ||= c == '\\'
 		}
-		// A JSON5 key may go unquoted.
-		quoted := len(b) >= 2 && (b[0] == '"' || b[0] == '\'') && b[len(b) - 1] == b[0]
-		return (quoted || t.role == .Key && len(b) > 0) && t.spelling == u16(escaped)
+		decode := t.spelling & core.SPELLING_DECODE != 0
+		lax := t.spelling & core.SPELLING_LAX != 0
+		if escaped != decode && !lax {
+			return false
+		}
+		// A quoted token's span is its text without the quotes, and a JSON5 key may be unquoted.
+		if t.spelling & core.SPELLING_QUOTED != 0 {
+			return true
+		}
+		return t.role == .Key && len(b) > 0
 	case .Number:
 		spelling := json.Number_Spelling.Json
 		for c in b {
@@ -261,11 +276,11 @@ spans :: proc(src: []u8, t: core.Token) -> bool {
 				spelling = .Nan
 			}
 		}
-		// JSON's grammar starts with `-` or a digit, and has a digit on both sides of a `.`.
+		// JSON's grammar starts a number with `-` or a digit, and has a digit on both sides of a `.`.
 		if spelling == .Json && (b[0] == '+' || b[0] == '.' || b[len(b) - 1] == '.' || strings.contains(string(b), ".e") || strings.contains(string(b), ".E") || strings.contains(string(b), "-.")) {
 			spelling = .Decimal
 		}
-		return len(b) > 0 && t.spelling == u16(spelling)
+		return len(b) > 0 && json.number_spelling_of(t.spelling) == spelling
 	case .Null:
 		return string(b) == "null"
 	case .False:
@@ -277,7 +292,7 @@ spans :: proc(src: []u8, t: core.Token) -> bool {
 	case .Plain:
 		block := len(b) >= 4 && string(b[:2]) == "/*" && string(b[len(b) - 2:]) == "*/"
 		line := len(b) >= 2 && string(b[:2]) == "//" && b[len(b) - 1] != '\n' && b[len(b) - 1] != '\r' && !strings.has_suffix(string(b), "\u2028") && !strings.has_suffix(string(b), "\u2029")
-		return t.role > .Key && (block || line) && t.spelling == u16(block)
+		return t.role > .Key && (block || line) && t.spelling == (u16(2) | (u16(2) if block else 0) << 8)
 	}
 	return false
 }
@@ -294,7 +309,8 @@ slice_eq :: proc(a, b: []core.Token) -> bool {
 	return true
 }
 
-// Each comment of a JSONC text gets its role by `core.Role`'s rule, and a `/* */` comment its spelling.
+// Each comment of a JSONC text gets its role from its place. A `/* */` comment gets a spelling with a two-byte lead and
+// tail.
 @(test)
 comment_roles :: proc(t: ^testing.T) {
 	src := "/* a */ {\n  \"k\" /* b */ : /* c */ 1, // d\n  // e\n  \"l\": [ /* f */ ], // g\n  \"n\": {\"x\": 1, \"y\": 2, // o\n    \"z\": 3},\n  \"m\": [1, /* h */ 2 /* i */ , ] /* j\n  */ /* p */\n  // k\n} // l\n// m\n"
@@ -317,14 +333,14 @@ comment_roles :: proc(t: ^testing.T) {
 			return
 		}
 		text := src[tok.lo:][:tok.n]
-		testing.expectf(t, text == want[i].text && tok.role == want[i].role && tok.kind == .Plain && tok.spelling == u16(text[1] == '*'), "comment %d: %q %v, want %q %v", i, text, tok.role, want[i].text, want[i].role)
+		testing.expectf(t, text == want[i].text && tok.role == want[i].role && tok.kind == .Plain && tok.spelling == (u16(2) | (u16(2) if text[1] == '*' else 0) << 8), "comment %d: %q %v, want %q %v", i, text, tok.role, want[i].text, want[i].role)
 		i += 1
 	}
 	testing.expect_value(t, i, len(want))
 }
 
-// After a document's root, comments past its line are its foot only where the text ends or a 0x1E follows them, else
-// the next document's, read by the next walk. Comments with no document after them belong to none.
+// After a document's root, a comment past its line is the root's foot only where the text ends or 0x1E follows it,
+// else it is the next document's and the next walk reads it. A comment with no document after it belongs to none.
 @(test)
 comments_between_documents :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -351,8 +367,8 @@ comments_between_documents :: proc(t: ^testing.T) {
 	testing.expectf(t, hi == u64(len(alone)) && fault == nil && log.n == 0, "comments alone: %d %v, %d tokens", hi, fault, log.n)
 }
 
-// A key's Skip passes the comments around its colon and the value after them, at the value's depth, and its object
-// reads on.
+// A key's `.Skip` passes the comments around its colon and the value after them, at the value's depth, and the
+// object reads on.
 @(test)
 skip_past_comments :: proc(t: ^testing.T) {
 	skip_keys :: proc "contextless" (h: ^walktest.Log, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
@@ -370,7 +386,7 @@ skip_past_comments :: proc(t: ^testing.T) {
 	for k, i in want[:min(len(want), log.n)] {
 		testing.expectf(t, log.tokens[i].kind == k, "token %d: %v, want %v", i, log.tokens[i].kind, k)
 	}
-	// The skipped value keeps its depth.
+	// The skipped value keeps its depth, so the third bracket is `Too_Deep`.
 	deep := transmute([]u8)string("{\"a\": /* c */ [[1]]}")
 	_, fault = json.walk(deep, 0, .Jsonc, {max_depth = 2}, log, &core.Hook_Regs{}, skip_keys)
 	testing.expect_value(t, fault, json.validate(deep, .Jsonc, {max_depth = 2}))

@@ -1,26 +1,26 @@
-// Seeded texts of each spec for the walk's tests: valid documents that touch every token, escape and UTF-8 width, and
-// the bytes a mutation of them may write. In a spec with comments a document also holds them wherever whitespace may
-// stand and now and then a comma before a close bracket, and in JSON5 its own numbers, strings, keys and whitespace.
+// Seeded texts of each spec for the walk's tests: valid documents holding every token kind, escape and UTF-8 width,
+// and `SHARP`, the bytes a mutation writes. In JSONC and JSON5 a document holds comments wherever whitespace may stand
+// and sometimes a comma before a close bracket. In JSON5 it holds JSON5's numbers, strings, keys and whitespace.
 package json_gen
 
 import "core:math/rand"
 import json "../.."
 import walktest "../../../walktest"
 
-// A valid document of at most `depth` levels, with whitespace of every kind between its tokens.
+// Writes a valid document of at most `depth` levels, with up to 3 whitespace runs between its tokens.
 text :: proc(out: ^[dynamic]u8, depth: int, spec: json.Spec) {
 	ws(out, spec)
 	value(out, depth, spec)
 	ws(out, spec)
 }
 
-// A valid document of at most `depth` levels laid out as a pretty printer lays it out: each member on a line of its
-// own, indented a step of 1 to 8 spaces per level, so indents run past the 32 the walk predicts.
+// Writes a valid document of at most `depth` levels as a pretty printer lays it out: each member on its own line,
+// indented by a step of 1 to 8 spaces per level, so indents run past the 32 the walk predicts.
 pretty :: proc(out: ^[dynamic]u8, depth: int, spec: json.Spec) {
 	pretty_value(out, depth, 0, 1 + rand.int_max(8), spec)
 }
 
-// The bytes a mutation writes: every byte the grammar branches on, and bytes no state takes.
+// Holds the bytes `walktest.mutate` writes: every byte the grammar branches on, and bytes no state accepts.
 SHARP :: "\"'\\/*{}[]:,0123456789-+.eEtrufalsnINx$_ \t\r\n\v\xa0\xa8u\x00\x1f\x7f\x80\xbf\xc0\xc2\xe0\xe2\xed\xf0\xf4\xf5\xff"
 
 @(private)
@@ -36,13 +36,13 @@ ws :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 	}
 }
 
-// JSON5's whitespace past JSON's: VT, FF, U+00A0, U+1680, U+2000, U+200A, U+2028, U+2029, U+202F, U+205F, U+3000 and
-// U+FEFF.
+// Holds JSON5's whitespace beyond JSON's: VT, FF, U+00A0, U+1680, U+2000, U+200A, U+2028, U+2029, U+202F, U+205F,
+// U+3000 and U+FEFF.
 @(private)
 WS5 :: []string{"\v", "\f", "\u00a0", "\u1680", "\u2000", "\u200a", "\u2028", "\u2029", "\u202f", "\u205f", "\u3000", "\ufeff"}
 
-// A `//` comment and the line end after it, or a `/* */` comment across lines, either one of a few bytes or past the
-// 64-byte blocks the readers load.
+// Writes a `//` comment and the line end after it, or a `/* */` comment that may span lines. A run of up to 149 `c`
+// bytes puts it past the 64-byte blocks the readers load.
 @(private)
 comment :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 	PIECES :: []string{"c", " ", "*", "\"", "é", "😀", "\t", "\x01", "\x7f"}
@@ -54,8 +54,8 @@ comment :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 				append(out, 'c')
 			}
 		}
-		// A `/` that follows `*` would end a block comment early.
-		// JSON5 takes any control byte in a comment.
+		// A `/` after `*` would close a block comment early, so a block comment writes no `/` piece.
+		// JSON5 accepts any control byte in a comment, so only JSON and JSONC skip the control pieces.
 		pieces := PIECES
 		piece := rand.choice(pieces[:7 if spec != .Json5 else len(pieces)])
 		append(out, piece if block || rand.int_max(3) != 0 else rand.choice([]string{"/", "//", "/*", "*/"}))
@@ -67,7 +67,7 @@ comment :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 	append(out, "*/" if block else rand.choice(ends[:3 if spec != .Json5 else 5]))
 }
 
-// A comma before the close bracket of a container that holds a value.
+// Writes a comma before a close bracket in JSONC and JSON5 when the container holds a value, a third of the time.
 @(private)
 trailing_comma :: proc(out: ^[dynamic]u8, n: int, spec: json.Spec) {
 	if spec != .Json && n > 0 && rand.int_max(3) == 0 {
@@ -86,7 +86,7 @@ value :: proc(out: ^[dynamic]u8, depth: int, spec: json.Spec) {
 	case 2:
 		append(out, rand.choice([]string{"true", "false", "null"}))
 	case 3, 4:
-		// Scalars weigh more at the leaves, so documents stay small.
+		// A leaf chooses a scalar in 2 of 5 cases, an inner node in 2 of 7, which keeps documents small.
 		if rand.int_max(2) == 0 {
 			str(out, spec)
 		} else {
@@ -138,7 +138,7 @@ pretty_value :: proc(out: ^[dynamic]u8, depth, indent, step: int, spec: json.Spe
 		if i > 0 {
 			append(out, ',')
 		}
-		// A comment at the end of the line before the member and one on a line of its own above it.
+		// Sometimes a comment at the end of the previous line, and sometimes one on its own line above the member.
 		if spec != .Json && rand.int_max(3) == 0 {
 			append(out, ' ')
 			comment(out, spec)
@@ -171,15 +171,15 @@ line :: proc(out: ^[dynamic]u8, indent: int) {
 	}
 }
 
-// An object's key: a string, and in JSON5 now and then an identifier.
+// Writes an object's key: a string, and in JSON5 an identifier half the time.
 @(private)
 key :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 	if spec != .Json5 || rand.int_max(2) == 0 {
 		str(out, spec)
 		return
 	}
-	// Letters of each class an identifier starts with (Lu, Ll, Lt, Lm, Lo, Nl), then the marks, digits and connectors
-	// it may go on with.
+	// `START` holds one letter of each class an identifier may start with (Lu, Ll, Lt, Lm, Lo, Nl), `PART` a mark, digit
+	// or connector it may continue with.
 	START :: []string{"a", "Z", "$", "_", "\\u0061", "é", "ǅ", "ʰ", "中", "Ⅻ"}
 	PART :: []string{"0", "9", "\u0301", "\u0903", "٣", "‿", "\u200c", "\u200d", "\\u0030"}
 	append(out, rand.choice(START))
@@ -191,14 +191,14 @@ key :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 @(private)
 str :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 	PIECES :: []string{"a", "Z", "~", " ", "\\\"", "\\\\", "\\/", "\\b", "\\f", "\\n", "\\r", "\\t", "\\u00e9", "\\uFFFF", "\\ud83d\\ude00", "é", "中", "😀", "߿", "￿"}
-	// JSON5's escapes and the characters it takes raw in a string.
+	// Holds JSON5's escapes, and the characters it accepts raw in a string.
 	PIECES5 :: []string{"\\x4A", "\\0", "\\v", "\\q", "\\'", "\\\n", "\\\r\n", "\\\u2028", "\\é", "\t", "\x01", "\u2028", "\u2029"}
 	quote: u8 = '"'
 	if spec == .Json5 && rand.int_max(3) == 0 {
 		quote = '\''
 	}
 	append(out, quote)
-	// Now and then a run of plain bytes, so strings cross the 16- and 64-byte blocks the readers load.
+	// Sometimes a run of up to 149 `a` bytes, so a string crosses the 16- and 64-byte blocks the readers load.
 	for _ in 0 ..< rand.int_max(12) {
 		if rand.int_max(8) == 0 {
 			for _ in 0 ..< rand.int_max(150) {
@@ -209,7 +209,7 @@ str :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 		if spec == .Json5 && rand.int_max(3) == 0 {
 			piece = rand.choice(PIECES5)
 		}
-		// A quote of the other kind stands for itself.
+		// In a single-quoted string `\"` is written as a bare `"`.
 		if piece == "\\\"" && quote == '\'' {
 			piece = "\""
 		}
@@ -243,7 +243,7 @@ num :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 		if rand.int_max(2) == 0 {
 			append(out, walktest.pick("+-"))
 		}
-		// Leading zeros make a long run with a small value: the current tree caps an exponent's value.
+		// Up to 11 leading zeros make a long exponent with a small value, which the current tree caps.
 		for _ in 0 ..< rand.int_max(12) {
 			append(out, '0')
 		}
@@ -253,7 +253,7 @@ num :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 	}
 }
 
-// Up to 19 more digits, so a run crosses the eight-byte words the number reader steps by.
+// Writes up to 19 more digits, which carries a run across the eight-byte words the number reader steps by.
 @(private)
 digits :: proc(out: ^[dynamic]u8) {
 	for _ in 0 ..< rand.int_max(20) {
@@ -261,8 +261,8 @@ digits :: proc(out: ^[dynamic]u8) {
 	}
 }
 
-// A number JSON does not write: a sign of either kind, then a hexadecimal integer, `Infinity`, `NaN`, or a decimal
-// with an empty integer or fraction part.
+// Writes a number JSON does not: an optional sign, then a hexadecimal integer, `Infinity`, `NaN`, or a decimal with an
+// empty integer or fraction part.
 @(private)
 num5 :: proc(out: ^[dynamic]u8) {
 	if rand.int_max(2) == 0 {

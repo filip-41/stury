@@ -4,12 +4,12 @@ import "core:math/rand"
 import "core:testing"
 import k ".."
 
-// The tier under test, by its place in `k.Tier`: `-define:TIER=2` is v4 on x86-64. The kernels run in procedures
+// The tier under test, by its index in `k.Tier`: `-define:TIER=2` is v4 on x86-64. The kernels run in procedures
 // compiled with the tier's features, as a caller's hot loops are.
 T :: k.Tier(#config(TIER, 0))
 FEATURES :: k.FEATURES[T]
 
-// Bit i set where `src[i] == c`.
+// Returns a mask with bit `i` set where `src[i] == c`.
 reference :: proc(src: []u8, c: u8) -> (m: u64) {
 	for b, i in src {
 		if b == c {
@@ -38,7 +38,8 @@ pack_every_byte_and_lane :: proc(t: ^testing.T) {
 			testing.expect(t, k.any_lane(m))
 			buf[lane] = c + 1
 		}
-		// The near misses of `c`: its neighbours and its top bit flipped, which a compare of the top bit alone takes.
+		// The near misses of `c`: its neighbours and a byte with its top bit flipped, which catch a compare that tests
+		// the top bit alone.
 		alphabet := [4]u8{c, c + 1, c - 1, c ~ 0x80}
 		for _ in 0 ..< 64 {
 			for &b in buf {
@@ -52,7 +53,7 @@ pack_every_byte_and_lane :: proc(t: ^testing.T) {
 	}
 }
 
-// Bit i set where `src[i]` is a byte of `set`.
+// Returns a mask with bit `i` set where `src[i]` is a byte of `set`.
 reference_set :: proc(src: []u8, set: string) -> (m: u64) {
 	for b, i in src {
 		for c in transmute([]u8)set {
@@ -64,7 +65,8 @@ reference_set :: proc(src: []u8, set: string) -> (m: u64) {
 	return
 }
 
-// Every byte value against the sets, then random blocks of their bytes and their neighbours.
+// Checks `classes` against every byte value in 4 blocks, then against random blocks of each set's bytes and their
+// neighbours, and checks `pack_n` against `pack` for the four masks.
 @(enable_target_feature = FEATURES)
 check_sets :: proc(t: ^testing.T, sets: []string) {
 	table, bits := k.nibble_table(sets)
@@ -103,7 +105,7 @@ classes_of_every_byte :: proc(t: ^testing.T) {
 	context.random_generator = rand.default_random_generator(&state)
 	check_sets(t, {"\"", "\\", ",:[]{}", " \t\n\r"})
 	check_sets(t, {",", "\"", "\n\r"})
-	// Random families with up to eight pairs of a set and a high nibble, bytes above 0x7f, and bytes in two sets.
+	// 500 random families with up to eight pairs of a set and a high nibble, bytes above 0x7f, and bytes in two sets.
 	for _ in 0 ..< 500 {
 		bytes: [8][16]u8
 		lens: [8]int
@@ -144,8 +146,8 @@ either_and_pack_n :: proc(t: ^testing.T) {
 	}
 }
 
-// Per block of `src`, the quotes no backslash escapes, byte by byte: a backslash escapes the next byte unless it is
-// escaped itself.
+// Sets bit `i % 64` of `quotes[i / 64]` for each quote in `src` that no backslash escapes. A backslash escapes the
+// next byte unless it is escaped itself.
 reference_quotes :: proc(src: []u8, quotes: []u64) {
 	escaped := false
 	for b, i in src {
@@ -180,7 +182,7 @@ strings_across_blocks :: proc(t: ^testing.T) {
 	state := rand.create(5)
 	context.random_generator = rand.default_random_generator(&state)
 	buf: [64 * 8]u8
-	// Backslash runs of every length up to two blocks, ending at every byte of a block, then a quote.
+	// A run of 1 to 128 backslashes ending at each byte of the third block, then a quote.
 	for run in 1 ..= 128 {
 		for end in 0 ..< 64 {
 			for &b in buf {
@@ -194,7 +196,8 @@ strings_across_blocks :: proc(t: ^testing.T) {
 			check_strings(t, buf[:256])
 		}
 	}
-	// Random blocks, dense in quotes and backslashes or with a few of them.
+	// Random blocks from four alphabets: a quote and a backslash in every 3 bytes, then 1 quote and 3 backslashes in 8,
+	// 1 quote in 28, and 1 quote and 1 backslash in 50.
 	for alphabet in ([]string{"\"\\a", "\"\\\\\\aaaa", "\"aaaaaaaaaaaaaaaaaaaaaaaaaaa", "\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}) {
 		for _ in 0 ..< 2000 {
 			for &b in buf {
@@ -217,7 +220,7 @@ below_every_byte_and_lane :: proc(t: ^testing.T) {
 		if c == 0 {
 			continue
 		}
-		// Every lane, holding the largest byte below `c` and a byte with its top bit flipped.
+		// Each lane in turn holds `c - 1`, the largest byte below `c`, or that byte with its top bit flipped.
 		for low in ([2]u8{c - 1, (c - 1) ~ 0x80}) {
 			for lane in 0 ..< 64 {
 				buf[lane] = low
@@ -230,7 +233,7 @@ below_every_byte_and_lane :: proc(t: ^testing.T) {
 	}
 }
 
-// Every lane alone, then every lane under random lanes above it, and the empty mask.
+// Checks `first_lane` on the empty mask (16), on each lane alone, and on each lane under random lanes above it.
 @(test, enable_target_feature = FEATURES)
 first_lane_every_lane :: proc(t: ^testing.T) {
 	state := rand.create(8)

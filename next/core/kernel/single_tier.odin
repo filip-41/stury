@@ -4,7 +4,8 @@ package kernel
 import "base:intrinsics"
 import "core:simd"
 
-// One tier: arm64 always has NEON, and other targets take LLVM's lowering of the portable code.
+// The only tier on targets without x86-64 tiers. arm64 has NEON, and other targets use LLVM's lowering of the
+// portable code.
 Tier :: enum u8 {
 	Base,
 }
@@ -19,19 +20,20 @@ VECTOR_BYTES :: [Tier]int {
 	.Base = 16,
 }
 
-// The best tier this CPU runs.
+// Returns `.Base`, the only tier.
 tier :: proc "contextless" () -> Tier {
 	return .Base
 }
 
-// Lane j is `t[i[j]]`, for indices below 16.
+// Returns lane j as `t[i[j]]` for each index below 16, through `simd.runtime_swizzle`.
 @(private)
 lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
 	return simd.runtime_swizzle(t, i)
 }
 
-// Bit i set where an odd number of the bits of `x` at or below i are set. With the quotes of a block in `x`, these
-// are the bytes from each opening quote up to its closing quote, the closing quote excluded.
+// Returns a mask with bit i set when an odd number of bits of `x` at or below i are set. With a block's quote bits
+// as `x`, the set bits mark the bytes from each opening quote to its closing quote, excluding the close. Computed
+// with six shifts and XORs.
 prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64 {
 	x := x
 	x ~= x << 1
@@ -43,8 +45,8 @@ prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64 {
 	return x
 }
 
-// The bytes of `src` from `lo` to its end, fewer than 64, followed by zeros: for a check that reads every lane, as
-// UTF-8 validation does.
+// Returns the bytes of `src` from `lo` to `len(src)`, followed by zeros to fill a `Block`. For a check that reads
+// every lane, such as UTF-8 validation. The caller must pass `0 < len(src) - lo < 64`.
 load_padded :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -> Block {
 	return copied_tail(src, lo)
 }

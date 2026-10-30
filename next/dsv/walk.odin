@@ -1,92 +1,171 @@
-// The walk of a delimited text: one pass 64 bytes at a time (pass.odin). Each block is sorted into the masks of its
-// delimiter, LF, CR and quote bytes, `prefix_xor` of the quote mask gives the bytes inside quoted fields, and every
-// later test is a bit test on a mask: quote placement, a CR that no LF follows, the delimiters and LFs that are the
-// text's rather than a cell's, and the delimiters between two LFs that count a record's cells for the width check.
-// UTF-8 is judged a block at a time as well, and only for a block whose bytes are not all ASCII.
+// The walk of a delimited text, in passes of 64-byte blocks (pass.odin). A block is reduced to masks of its delimiter,
+// LF, CR and quote bytes, `prefix_xor` of the quote mask marks the bytes inside quoted fields, and every later test is
+// a bit test on a mask, for quote placement, a CR that no LF follows, the delimiters and LFs that are the text's rather
+// than a cell's, and the delimiters between two LFs that count a record's cells for the width check. UTF-8 is judged a
+// block at a time, and only for a block that is not all ASCII.
 //
-// A text read with a hook reads the same masks a second way, as positions (records.odin): the separators of a block
-// in order, each ending a cell or a record, give every token's span. `validate` reads with `$EMIT` false, and its
-// instance of the pass holds no position code and no key buffer at all. The bytes the masks cannot judge are read
-// one at a time in text.odin, only where a block's masks say it needs them.
+// A hooked read turns the same masks into positions (records.odin). The block's separators in order, each ending a cell
+// or a record, give every token's span. `validate` compiles the pass with `$EMIT` false, which leaves out the position
+// code and the key buffer. The bytes the masks cannot judge are read one at a time in text.odin, on the blocks whose
+// masks say they are needed.
 package dsv
 
 import "base:runtime"
 import core "../core"
 import kernel "../core/kernel"
 
-// The grammar a text follows. Each is its own instance of the pass, so one spec carries no code of the other.
+// The grammar a text follows, chosen at compile time. Each spec instantiates its own pass, so a CSV build holds no TSV
+// code.
 Spec :: enum u8 {
-	Csv, // RFC 4180: comma, and a quoted field whose `""` is a quote
-	Tsv, // tab, a quote is text, and a backslash escapes `\t`, `\n`, `\r`, `\0` or `\\`
+	Csv, // RFC 4180, a field whose first byte is a quote is quoted, and `""` inside it reads as `"`
+	Tsv, // a quote is text, and a backslash escapes `t`, `n`, `r`, `0` or `\\`
+	Plain, // no quotes and no escapes, a quote is text, and a cell cannot hold the delimiter, CR or LF
 }
 
-// What a walk takes at run time. The zero value has a header.
+// Run-time options for a walk. The zero value reads a header, uses the spec's delimiter and sets no comment byte.
 Options :: struct {
 	no_header: bool, // the first record is data, not column names
-	// The rules a text may break, each read one fixed way. None by default.
+	// The byte between cells, 0 for the spec's own, which is `,` for CSV and Plain and a tab for TSV. A walk whose
+	// spec cannot read the byte returns `.Bad_Option` before reading the text.
+	delimiter: byte,
+	// A line whose first byte is this is no record, 0 for none. At any other byte, or inside a quoted field, it is
+	// cell text. A byte the spec cannot read is refused as `.Bad_Option`, like the delimiter.
+	comment:   byte,
+	// The rules a text may break. Empty by default.
 	tolerate:  bit_set[Tolerance; u8],
 }
 
-// A rule a caller lets a text break. The walk stops faulting there and keeps the cells' bytes as they are: the value
-// a cell decodes to is where the reading shows.
+// A rule a caller lets a text break. The walk stops faulting on it. The tolerance shows in the value a cell decodes to
+// or in the record width check.
 Tolerance :: enum u8 {
-	// Ill-formed UTF-8 in a cell: each maximal subpart of an ill-formed sequence reads as U+FFFD.
+	// Ill-formed UTF-8 in a cell is not a fault. Each maximal subpart of an ill-formed sequence decodes as U+FFFD.
 	Invalid_Utf8,
-	// A record with fewer cells than the first: its missing columns are absent. With no header a record may have any
-	// number of cells, and with one a cell past the header's last is still a fault.
+	// A record with fewer cells than the first is not a fault, and its missing columns are absent. With no header a
+	// record may hold any number of cells. With a header a cell past the header's last still faults.
 	Ragged,
-	// A quote inside an unquoted cell (CSV) is a byte of the cell, and the quotes after it pair up without it.
+	// A quote inside an unquoted cell (CSV) is a cell byte, and the block's quotes pair up without it.
 	Bare_Quote,
 }
 
-// The rules of a delimited text within a `core.Fault_Kind`, in `core.Fault.detail`.
+// The `core.Fault.detail` values a delimited text's faults use.
 Detail :: enum u8 {
 	None,
-	Field_Count, // `Bad_Structure`: a record wider than the first, at the delimiter past its width, or narrower, at its line end
-	Bare_Quote, // `Bad_Char`: a quote inside an unquoted CSV cell
+	Field_Count, // `Bad_Structure`, at the delimiter past the width of a wide record or the line end of a narrow one
+	Bare_Quote, // `Bad_Char`, a quote inside an unquoted CSV cell
 }
 
-// A delimited text's rules, per value of `Detail`, which every fault the walk returns points to.
+// A delimited text's rules, indexed by `Detail`. Every fault the walk returns points to this table.
 @(rodata)
 RULES := core.Rules{"dsv", {{}, {"field_count", "Record has the wrong number of fields"}, {"bare_quote", "Quote in an unquoted cell"}}}
 
-// One text read from `lo`, past one BOM at the text's first byte, with a hook: one past its last byte, or the fault.
-// A BOM at any later byte is a cell byte. When a hook stops the walk, `hi` is one past the token it stopped on, and
-// the walk has read no further, so `hi` is no document boundary. A `lo` past the text's end reads an empty text. The
-// tokens are an `Array` for the text, then per record a `Map` (an `Array` with no header) holding, per cell, its
-// column's header cell as a `Plain` of role `Key` and the cell as a `Plain` value, and an `End` on its line end (LF
-// or CR LF, `n` 0 where the text ends without one). The text's `End` is at its end, `n` 0. A cell's span keeps its
-// quotes and leaves out the CR of a CRLF. The header makes no tokens of its own, and a line that is empty or holds
-// only a CR is no record.
-walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
-	// One allocation per walk, of one 16-byte token per header cell, so that no cell of a record looks its column's
-	// header cell up again. It is scratch freed before the walk returns, so it comes from the default heap, which
-	// keeps the walk callable from a hook. When it cannot be had, the walk is `No_Memory` before it reads a byte.
-	// `validate` allocates nothing.
+// The delimiter a walk of `S` reads. `opts.delimiter` 0 selects the spec's own, `,` for CSV and Plain and a tab for
+// TSV. The pass reads it once into a register and compares each block against it.
+@(private)
+delimiter_of :: #force_inline proc "contextless" ($S: Spec, opts: Options) -> byte {
+	if opts.delimiter != 0 {
+		return opts.delimiter
+	}
+	when S == .Tsv {
+		return '\t'
+	} else {
+		return ','
+	}
+}
+
+// Whether `S` can read the delimiter and comment byte in `opts`. A delimiter is refused when it is CR, LF, non-ASCII
+// or, under CSV, a quote, and under TSV also a backslash or one of `t`, `n`, `r`, `0`. A comment byte is refused when
+// it is CR, LF, the delimiter, non-ASCII or, under CSV, a quote, and under TSV also a backslash.
+@(private)
+options_ok :: #force_inline proc "contextless" ($S: Spec, opts: Options) -> bool {
+	delim := delimiter_of(S, opts)
+	if delim == '\r' || delim == '\n' || delim >= 0x80 {
+		return false
+	}
+	when S == .Csv {
+		if delim == '"' {
+			return false
+		}
+	}
+	when S == .Tsv {
+		if delim == '\\' || delim == 't' || delim == 'n' || delim == 'r' || delim == '0' {
+			return false
+		}
+	}
+	if c := opts.comment; c != 0 {
+		if c == '\r' || c == '\n' || c == delim || c >= 0x80 {
+			return false
+		}
+		when S == .Csv {
+			if c == '"' {
+				return false
+			}
+		}
+		when S == .Tsv {
+			if c == '\\' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// The `.Bad_Option` fault at byte 0 for options `S` cannot read, or nil.
+@(private)
+option_fault :: #force_inline proc "contextless" ($S: Spec, opts: Options) -> Maybe(core.Fault) {
+	if options_ok(S, opts) {
+		return nil
+	}
+	return core.Fault{at = 0, rules = &RULES, kind = .Bad_Option}
+}
+
+// Reads a text of spec `S` from `lo`, past one BOM at its first byte, with hook `on`. Returns `hi`, one past the last
+// byte read, or the fault. A BOM at a later byte is a cell byte. A `lo` past `len(src)` reads an empty text. When the
+// hook stops the walk, `hi` is one past the token it stopped on and the text past it is unread, so `hi` is no document
+// boundary.
+// The tokens are an `Array` for the text, then for each record a `Map` (an `Array` when `opts.no_header`), each cell as
+// its column's header cell (`Plain`, role `Key`) and the cell itself (`Plain`, role `Value`), and an `End` over the
+// record's line end, 1 byte for LF and 2 for CR LF. The text's `End` is at its end, with `n` 0. A cell's span keeps its
+// quotes and leaves out the CR of a CR LF. The header makes no tokens, and an empty line or a line holding only a CR is
+// no record.
+// A caller that holds a buffer of one token per header cell passes it as `keys`, and the walk writes the header's cells
+// there and allocates none. With nil, the walk allocates the buffer.
+walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), keys: []core.Token = nil) -> (hi: u64, fault: Maybe(core.Fault)) {
+	if f, bad := option_fault(S, opts).?; bad {
+		return 0, f
+	}
+	// With no `keys` buffer and a header, allocates one 16-byte token per header cell for the walk to write the
+	// header's cells into. Data cells read their column's key from it by index. The buffer is scratch freed before
+	// the walk returns, so it comes from the default heap, which keeps the walk callable from a hook. If the
+	// allocation fails the walk returns `No_Memory` before reading a byte. `validate` allocates nothing.
 	context = runtime.default_context()
 	from := min(lo, u64(len(src)))
-	keys: []core.Token
-	if !opts.no_header {
+	key_buf := keys
+	owned: []core.Token
+	if key_buf == nil && !opts.no_header {
 		err: runtime.Allocator_Error
-		keys, err = make([]core.Token, header_cells(src, int(core.text_start(src, from)), S))
+		key_buf, err = make([]core.Token, header_cells(src, int(core.text_start(src, from)), S, opts))
 		if err != nil {
 			return 0, core.fault_of(core.fault_at(0, .No_Memory), &RULES)
 		}
+		owned = key_buf
 	}
-	defer delete(keys)
-	r := run(src, from, S, opts, h, regs, on, true, keys)
+	defer delete(owned)
+	r := run(src, from, S, opts, h, regs, on, true, key_buf)
 	return r >> 16, core.fault_of(r, &RULES)
 }
 
-// Whether `src`, after one leading BOM, is a text of spec `S`: the walk's verdict, with no hook. Whether the first
-// record is a header changes the verdict only under `.Ragged`.
+// The walk's verdict on `src` for spec `S`, with no hook and after one leading BOM. Whether the first record is a
+// header changes the verdict only under `.Ragged`.
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
+	if f, bad := option_fault(S, opts).?; bad {
+		return f
+	}
 	return core.fault_of(judge(src, 0, S, opts), &RULES)
 }
 
-// The walk's verdict on the text from `lo`, with no hook. Only a text longer than `Token.n` holds can hold a cell
-// that is, and only the hooked lane keeps the spans of cells, so such a text is read by the hooked lane with a hook
-// that asks for nothing and no keys.
+// The walk's verdict on the text from `lo`, with no hook. A cell can exceed `Token.n` only in a text longer than
+// `max(u32)` bytes, and only the hooked lane checks cell width, so such a text runs with `$EMIT` true and
+// `core.no_hook`. A shorter text runs with `$EMIT` false. `field_count_fault` then places a width fault.
 @(private)
 judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options) -> u64 {
 	h: core.No_Hooks
@@ -100,9 +179,9 @@ judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options) -> u64
 	return field_count_fault(src, lo, S, opts, r)
 }
 
-// A width fault's position: the delimiter that opens the cell past the width for a wide record, or the line end's
-// first byte for a narrow one. A width fault before a byte fault wins. Only a fault reaches this scan, so nothing here
-// is on the pass's per-block path.
+// The position of a width fault is the delimiter that opens the cell past the width in a wide record, or the line end's
+// first byte in a narrow one. A width fault at or before a byte fault wins. A walk with no fault returns `r` unchanged,
+// and a faulting one rescans the records with `scan_record`.
 @(private, cold)
 field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, r: u64) -> u64 {
 	kind := core.Fault_Kind(r & 0xff)
@@ -111,32 +190,17 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 	}
 	at, detail := r >> 16, u8(r >> 8)
 	end := len(src)
-	pos := int(core.text_start(src, min(lo, u64(end))))
-	skip_empty := proc "contextless" (src: []u8, pos: int) -> int {
-		pos := pos
-		for pos < len(src) {
-			if src[pos] == '\n' {
-				pos += 1
-				continue
-			}
-			if src[pos] == '\r' && pos + 1 < len(src) && src[pos + 1] == '\n' {
-				pos += 2
-				continue
-			}
-			break
-		}
-		return pos
-	}
-	pos = skip_empty(src, pos)
+	pos := record_start(src, int(core.text_start(src, min(lo, u64(end)))), opts.comment)
 	if pos >= end {
 		return r
 	}
-	width := header_cells(src, pos, S) if !opts.no_header else scan_record(src, pos, 0, S).cells
+	delim := delimiter_of(S, opts)
+	width := header_cells(src, pos, S, opts) if !opts.no_header else scan_record(src, pos, 0, S, delim).cells
 	for pos < end {
 		if at < u64(pos) {
 			return r
 		}
-		s := scan_record(src, pos, width, S)
+		s := scan_record(src, pos, width, S, delim)
 		if at <= u64(s.line_end) {
 			if s.fault_at >= 0 {
 				if detail == u8(Detail.Field_Count) || u64(s.fault_at) < at {
@@ -147,54 +211,70 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 			}
 			return r
 		}
-		pos = skip_empty(src, s.line_end + 1)
+		pos = record_start(src, s.line_end + 1, opts.comment)
 	}
 	return r
 }
 
-// The pass built for this CPU's vector width, unless `-define:WALK_TIER=<n>` picks another for a test build.
+// Runs the pass for the CPU's vector tier (`kernel.tier()`), or for the tier `-define:WALK_TIER=<n>` forces in a test
+// build.
 @(private)
 run :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, keys: []core.Token) -> u64 {
 	when ODIN_ARCH == .amd64 {
+		// A text with no comment byte runs the pass instance with `$COMMENTS` false, which holds no comment code.
+		if opts.comment != 0 {
+			switch kernel.tier() {
+			case .V4:
+				return pass_v4(src, lo, S, opts, h, regs, on, EMIT, true, keys)
+			case .V3:
+				return pass_v3(src, lo, S, opts, h, regs, on, EMIT, true, keys)
+			case .V2:
+				return pass_v2(src, lo, S, opts, h, regs, on, EMIT, true, keys)
+			}
+			unreachable()
+		}
 		switch kernel.tier() {
 		case .V4:
-			return pass_v4(src, lo, S, opts, h, regs, on, EMIT, keys)
+			return pass_v4(src, lo, S, opts, h, regs, on, EMIT, false, keys)
 		case .V3:
-			return pass_v3(src, lo, S, opts, h, regs, on, EMIT, keys)
+			return pass_v3(src, lo, S, opts, h, regs, on, EMIT, false, keys)
 		case .V2:
-			return pass_v2(src, lo, S, opts, h, regs, on, EMIT, keys)
+			return pass_v2(src, lo, S, opts, h, regs, on, EMIT, false, keys)
 		}
 		unreachable()
 	} else {
-		return pass_base(src, lo, S, opts, h, regs, on, EMIT, keys)
+		if opts.comment != 0 {
+			return pass_base(src, lo, S, opts, h, regs, on, EMIT, true, keys)
+		}
+		return pass_base(src, lo, S, opts, h, regs, on, EMIT, false, keys)
 	}
 }
 
-// The pass once per tier, each with its tier's features and its own copy of the loop, as kernel.md asks: a hot loop
-// that calls a kernel generic over `$T` is built once per tier, so that a v4 build holds v4 compares and a v2 build
-// holds SSE ones. `#force_no_inline` keeps each one a procedure of its own.
+// A pass procedure per vector tier, each with its tier's target features and its own copy of the loop, as kernel.md
+// asks. A loop that calls a kernel generic over `$T` is instantiated per tier, so a v4 build holds v4 compares and a v2
+// build holds SSE ones. `#force_no_inline` keeps each a separate procedure.
 when ODIN_ARCH == .amd64 {
 	@(private, enable_target_feature = kernel.FEATURES[.V2])
-	pass_v2 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, keys: []core.Token) -> u64 {
-		return pass(.V2, S, EMIT, src, lo, opts, h, regs, on, keys)
+	pass_v2 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, keys: []core.Token) -> u64 {
+		return pass(.V2, S, EMIT, COMMENTS, src, lo, opts, h, regs, on, keys)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V3])
-	pass_v3 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, keys: []core.Token) -> u64 {
-		return pass(.V3, S, EMIT, src, lo, opts, h, regs, on, keys)
+	pass_v3 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, keys: []core.Token) -> u64 {
+		return pass(.V3, S, EMIT, COMMENTS, src, lo, opts, h, regs, on, keys)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V4])
-	pass_v4 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, keys: []core.Token) -> u64 {
-		return pass(.V4, S, EMIT, src, lo, opts, h, regs, on, keys)
+	pass_v4 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, keys: []core.Token) -> u64 {
+		return pass(.V4, S, EMIT, COMMENTS, src, lo, opts, h, regs, on, keys)
 	}
 } else {
 	@(private)
-	pass_base :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, keys: []core.Token) -> u64 {
-		return pass(.Base, S, EMIT, src, lo, opts, h, regs, on, keys)
+	pass_base :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, keys: []core.Token) -> u64 {
+		return pass(.Base, S, EMIT, COMMENTS, src, lo, opts, h, regs, on, keys)
 	}
 }
 
-// Hands one token to the hook and takes its registers back. The token is built here, from the words the call sites
-// hold, so that no site has to give a whole `Token` an address or a second copy.
+// Passes a token to the hook and stores the returned registers in `hs`. The token is built here from the call's words,
+// so a call site gives no `Token` an address or a second copy.
 @(private)
 emit :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, lo: u64, n: u32, kind: core.Kind, role: core.Role, spelling: u16) -> core.Action {
 	a: core.Action
@@ -202,7 +282,8 @@ emit :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H
 	return a
 }
 
-// A hook stopped the walk on the token from `lo`, `n` bytes long.
+// The walk's result when the hook stopped on the token at `lo` of `n` bytes. Its position is `lo + n`, its kind 0, and
+// its detail `STOPPED`.
 @(private)
 stopped :: #force_inline proc "contextless" (lo: u64, n: u32) -> u64 {
 	return core.fault_at(lo + u64(n), .None, core.STOPPED)

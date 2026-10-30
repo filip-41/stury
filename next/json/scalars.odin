@@ -3,56 +3,92 @@ package json
 import "base:intrinsics"
 import core "../core"
 
-// The number at `p`, which starts with `-` or a digit: one past it, or the fault's kind and the byte it is at.
+// Reads the number at `p`, which starts with `-` or a digit. Returns one past it and its `spelling`, or the fault's
+// kind and the byte it is at. With `$shape` false the spelling is 0 and the digit counts are not counted, for a walk
+// with no hook.
 @(private)
-number :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape: bool) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind) #no_bounds_check {
 	q = p
 	if q[0] == '-' {
 		q = q[1:]
 		if q >= end {
-			return end, .Truncated
+			return end, 0, .Truncated
 		}
+	}
+	when shape {
+		int_at := q
 	}
 	if q[0] == '0' {
 		q = q[1:]
 		if q < end && q[0] - '0' < 10 {
-			return q, .Bad_Number
+			return q, 0, .Bad_Number
 		}
 	} else {
-		r := digit_run(q, end)
+		r := core.digit_end(q, end, nil, false)
 		if r == q {
-			return q, .Bad_Number
+			return q, 0, .Bad_Number
 		}
 		q = r
 	}
+	when shape {
+		int_digits := u64(intrinsics.ptr_sub(q, int_at))
+		frac_digits: u64
+	}
 	if q >= end {
-		return
+		when shape {
+			return q, number_spelling(.Json, int_digits, frac_digits), .None
+		}
+		return q, 0, .None
 	}
 	c := q[0]
 	if c == '.' {
-		r := digit_run(q[1:], end)
+		r := core.digit_end(q[1:], end, nil, false)
 		if r == q[1:] {
-			return bad_or_truncated(r, end)
+			q2, k2 := bad_or_truncated(r, end)
+			return q2, 0, k2
+		}
+		when shape {
+			frac_digits = u64(intrinsics.ptr_sub(r, q[1:]))
 		}
 		q = r
 		if q >= end {
-			return
+			when shape {
+				return q, number_spelling(.Json, int_digits, frac_digits), .None
+			}
+			return q, 0, .None
 		}
 		c = q[0]
 	}
-	// `c | 0x20 == 'e'` holds for `e` and `E` and no other byte.
+	// `c | 0x20 == 'e'` is true for `e` and `E` and no other byte.
 	if c | 0x20 == 'e' {
 		q = q[1:]
 		if q < end && (q[0] == '+' || q[0] == '-') {
 			q = q[1:]
 		}
-		r := digit_run(q, end)
+		r := core.digit_end(q, end, nil, false)
 		if r == q {
-			return bad_or_truncated(r, end)
+			q2, k2 := bad_or_truncated(r, end)
+			return q2, 0, k2
+		}
+		when shape {
+			return r, number_spelling_exp(.Json, int_digits, frac_digits), .None
 		}
 		q = r
 	}
-	return
+	when shape {
+		return q, number_spelling(.Json, int_digits, frac_digits), .None
+	}
+	return q, 0, .None
+}
+
+// Calls `number_run` with `$shape` true for a hook and false for `core.No_Hooks`.
+@(private)
+number_h :: #force_inline proc "contextless" (p, end: [^]u8, $H: typeid) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind) {
+	when H == core.No_Hooks {
+		return number_run(p, end, false)
+	} else {
+		return number_run(p, end, true)
+	}
 }
 
 @(private)
@@ -63,26 +99,7 @@ bad_or_truncated :: #force_inline proc "contextless" (q, end: [^]u8) -> ([^]u8, 
 	return q, .Bad_Number
 }
 
-// The end of the run of digits at `p`, eight bytes a word while eight remain.
-@(private)
-digit_run :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
-	q := p
-	for intrinsics.ptr_sub(end, q) >= 8 {
-		w := intrinsics.unaligned_load((^u64le)(q))
-		// Bit 7 of each byte that is not a digit: below '0' borrows, above '9' carries past 0x7F.
-		gap := u64((w - 0x3030_3030_3030_3030) | (w + 0x4646_4646_4646_4646)) & 0x8080_8080_8080_8080
-		if gap != 0 {
-			return q[intrinsics.count_trailing_zeros(gap) >> 3:]
-		}
-		q = q[8:]
-	}
-	for q < end && q[0] - '0' < 10 {
-		q = q[1:]
-	}
-	return q
-}
-
-// The first four bytes of `true`, `null` and `false`, as a little-endian word.
+// The first four bytes of `true`, `null` and `false` as a little-endian `u32`.
 @(private)
 TRUE_WORD :: u32('t') | u32('r') << 8 | u32('u') << 16 | u32('e') << 24
 @(private)
@@ -90,8 +107,9 @@ NULL_WORD :: u32('n') | u32('u') << 8 | u32('l') << 16 | u32('l') << 24
 @(private)
 FALS_WORD :: u32('f') | u32('a') << 8 | u32('l') << 16 | u32('s') << 24
 
-// The literal at `p`, which starts with `t`, `f` or `n`: one past it and its kind, or nil when it is not one. No
-// branch on which word it is, since `true` and `false` alternate at random in a column of flags.
+// Reads the literal at `p`, which starts with `t`, `f` or `n`. Returns one past it and its kind, or nil and `.Null`
+// when the bytes are no literal. Tests the three words with no branch on which one it is, since `true` and `false`
+// alternate in a column of flags.
 @(private)
 literal :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Kind) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) < 5 {
@@ -106,7 +124,7 @@ literal :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: 
 	return p[n:], .True if c == 't' else (.False if c == 'f' else .Null)
 }
 
-// `literal` within the last four bytes of the text.
+// `literal_short` is `literal` when exactly 4 bytes remain in the text.
 @(private)
 literal_short :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Kind) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) == 4 {
@@ -120,8 +138,8 @@ literal_short :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, 
 	return nil, .Null
 }
 
-// The end of `word` at `p`, which starts with the word's first letter: one past it, or the first byte that breaks it
-// with `ok` false, `end` when the text ends first.
+// Reads `word` at `p`, which starts with the word's first letter. Returns one past it with `ok` true, or the first
+// byte that differs with `ok` false, `end` when the text ends first.
 @(private)
 word_end :: #force_inline proc "contextless" (p, end: [^]u8, word: string) -> (q: [^]u8, ok: bool) #no_bounds_check {
 	for i in 0 ..< len(word) {
@@ -136,7 +154,8 @@ word_end :: #force_inline proc "contextless" (p, end: [^]u8, word: string) -> (q
 	return p[len(word):], true
 }
 
-// A literal `literal` refused: the first byte that breaks the word its first letter names, or `Truncated`.
+// The fault for a literal `literal` refused. It is the first byte that breaks the word its first letter names, or
+// `end` and `Truncated`.
 @(private, cold)
 literal_fault :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kind) {
 	word := "null"

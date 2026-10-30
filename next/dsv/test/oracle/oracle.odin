@@ -1,6 +1,6 @@
-// The walk against the current tree's csv: `validate`'s verdict on seeded texts and mutations of them, and on a valid
-// text the walk's tokens against the fields of `records`. `make test-oracle` builds it from a copy of next/ with its
-// packages renamed, since both trees name a package `core`.
+// The walk against the current tree's `csv`: `validate`'s verdict on seeded texts and mutations of them, and on a
+// valid text the walk's tokens against the fields of `records`. `make test-oracle` builds it from a copy of next/
+// with its packages renamed, since both trees name a package `core`.
 package dsv_oracle
 
 import "base:runtime"
@@ -50,7 +50,7 @@ check :: proc(t: ^testing.T, src: []u8, tsv: bool, log: ^[dynamic]core.Token) ->
 	same := refused == bad
 	if same && bad {
 		if got.kind == .Bad_Structure && got.detail == u8(dsv.Detail.Field_Count) {
-			// The current tree puts Field_Count at the record's first byte, and a later byte fault before it.
+			// The current tree puts `Field_Count` at the record's first byte, and a fault at a later byte comes before it.
 			same = want.kind == .Bad_Structure && want.detail == u8(dsv.Detail.Field_Count) || want.offset >= got.at
 		} else {
 			same = fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.at && detail_agrees
@@ -68,9 +68,9 @@ log_hook :: proc "contextless" (h: ^[dynamic]core.Token, s: core.Hook_Regs, t: c
 	return s, .Next
 }
 
-// The walk's tokens of a valid text against the fields of the current tree's `records`: per record after the
-// header a `Map` (an `Array` with no header), per field the header field of its column as a `Key` and the field as a
-// `Plain` value, and an `End` on the record's line end.
+// Checks the walk's tokens of a valid text against the fields of the current tree's `records`. Each record after the
+// header is a `Map`, or an `Array` with no header. For each field the walk emits its column's header field as a `Key`
+// and the field as a `Plain` value, and for the record's line end an `End`.
 tokens_agree :: proc(t: ^testing.T, src: []u8, tsv, no_header: bool, log: ^[dynamic]core.Token) -> bool {
 	clear(log)
 	regs: core.Hook_Regs
@@ -126,5 +126,16 @@ tokens_agree :: proc(t: ^testing.T, src: []u8, tsv, no_header: bool, log: ^[dyna
 
 cell :: proc(src: []u8, f: cur.Field, role: core.Role, tsv: bool) -> core.Token {
 	quoted := !tsv && f.hi > f.lo && src[f.lo] == '"'
-	return {f.lo, u32(f.hi - f.lo), .Plain, role, u16(quoted)}
+	spelling := core.SPELLING_DECODE | core.SPELLING_QUOTED if quoted else 0
+	if tsv {
+		// A TSV cell decodes only when its span holds a backslash.
+		spelling = 0
+		for c in src[f.lo:f.hi] {
+			if c == '\\' {
+				spelling = core.SPELLING_DECODE
+				break
+			}
+		}
+	}
+	return {f.lo, u32(f.hi - f.lo), .Plain, role, spelling}
 }

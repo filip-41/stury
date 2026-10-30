@@ -14,7 +14,7 @@ Case :: struct {
 	offset: u64,
 }
 
-// Every fault the CSV pass raises, at the byte the fault's rule names.
+// CSV texts and the fault each raises, at the byte the fault's rule names. `nil` for a valid text.
 @(rodata)
 CSV_CASES := []Case {
 	{"", nil, 0},
@@ -44,7 +44,7 @@ CSV_CASES := []Case {
 	{"a,b\n1\r2,3\n", .Bad_Char, 5},
 }
 
-// Every fault the TSV pass raises, at the byte the fault's rule names.
+// TSV texts and the fault each raises, at the byte the fault's rule names. `nil` for a valid text.
 @(rodata)
 TSV_CASES := []Case {
 	{"a\tb\n1\t2\n", nil, 0},
@@ -107,7 +107,7 @@ bare_quote_detail :: proc(t: ^testing.T) {
 	testing.expectf(t, bad && f.kind == .Bad_Char && f.at == 3 && f.detail == u8(dsv.Detail.None), "%v", f)
 }
 
-// Each case after 0 to 129 empty lines, which are no records: every quote, CR, escape and UTF-8 sequence of a case
+// Each case after 0 to 129 empty lines, which are no records. Every quote, CR, escape and UTF-8 sequence of a case
 // falls on every byte of a 64-byte block and across the boundary between two, and its fault moves by the same count.
 @(test)
 faults_at_every_offset :: proc(t: ^testing.T) {
@@ -139,8 +139,8 @@ validate :: proc(src: []u8, tsv: bool) -> Maybe(core.Fault) {
 	return dsv.validate(src, .Tsv) if tsv else dsv.validate(src, .Csv)
 }
 
-// `validate` and `walk` of `src` with the bytes after it poisoned: the pass's loads of the last, partial block stay in
-// the text. The two verdicts agree, or the walk's is the one returned.
+// Runs `validate` and `walk` on `src` with the bytes after it poisoned, so a load of the last partial block must stay
+// inside the text. Returns the walk's fault when the two differ, else `validate`'s.
 validate_fenced :: proc(src: []u8, tsv: bool) -> Maybe(core.Fault) {
 	FENCE :: 64
 	buf := make([]u8, len(src) + FENCE)
@@ -180,7 +180,7 @@ Tolerated :: struct {
 	tol:       bit_set[dsv.Tolerance; u8],
 }
 
-// Texts a tolerance takes, and faults no tolerance in the set takes, which stand as they do without it.
+// Texts each tolerance set accepts, and faults no tolerance in the set accepts, which stay the same without it.
 @(rodata)
 TOLERATED := []Tolerated {
 	{{"a,b,c\n1,2\n3\n", nil, 0}, false, false, {.Ragged}},
@@ -210,9 +210,9 @@ TOLERATED := []Tolerated {
 	{{"a\xff\n", .Bad_Char, 1}, false, false, {.Ragged, .Bare_Quote}},
 }
 
-// Each tolerance, through `validate` and `walk`, after 0 to 129 empty lines so that what it takes falls on every byte
-// of a block: a text the set takes is clean with it and faulty without it, a text the set does not take keeps the kind
-// and offset it has without the set, and both return the same fault.
+// Each tolerance, through `validate` and `walk`, after 0 to 129 empty lines so what it accepts falls on every byte of
+// a block. A text the set accepts is clean with it and faulty without it, a text it does not accept keeps the kind and
+// offset it has without the set, and both return the same fault.
 @(test)
 tolerances :: proc(t: ^testing.T) {
 	buf: [dynamic]u8
@@ -247,7 +247,7 @@ tolerances :: proc(t: ^testing.T) {
 	}
 }
 
-// A tolerance set changes `validate` and `walk` alike on generated texts: both return the same fault, and a walk with
+// A tolerance set changes `validate` and `walk` alike on generated texts. Both return the same fault, and a walk with
 // no fault ends at the text's end and keeps every cell's bytes in its token's span.
 @(test)
 tolerances_agree :: proc(t: ^testing.T) {
@@ -272,7 +272,8 @@ tolerances_agree_in :: proc(t: ^testing.T, $S: dsv.Spec) {
 			walktest.mutate(&broken, text[:], gen.SHARP)
 			src = broken[:]
 		} else {
-			// A byte no cell may hold, in the first cell, so that `Invalid_Utf8` is reached.
+			// Writes a byte no cell may hold into the first plain cell that holds no backslash, so `Invalid_Utf8` is
+			// reached.
 			log^ = {}
 			dsv.walk(src, 0, S, {no_header = no_header}, log, &core.Hook_Regs{}, walktest.log_hook)
 			for tok in log.tokens[:log.n] {
@@ -319,14 +320,14 @@ tolerances_agree_in :: proc(t: ^testing.T, $S: dsv.Spec) {
 			return
 		}
 		for tok in log.tokens[:log.n] {
-			if !testing.expectf(t, spans(src, tok, tsv), "%q tol %v: %v", src, tol, tok) {
+			if !testing.expectf(t, spans(src, tok, tsv, tol), "%q tol %v: %v", src, tol, tok) {
 				return
 			}
 		}
 	}
 }
 
-// A ragged record's missing columns make no tokens, and a bare quote is a byte of its cell, which is no quoted cell.
+// A ragged record's missing columns make no tokens, and a bare quote is a byte of its cell, so the cell is not quoted.
 @(test)
 tolerated_tokens :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -338,7 +339,7 @@ tolerated_tokens :: proc(t: ^testing.T) {
 	}
 	for c in ([]Tokens {
 		{"a,b,c\n1,2\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {6, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
-		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Map, .Value, 0}, {0, 3, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {4, 1, .Plain, .Key, 0}, {8, 3, .Plain, .Value, 1}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
+		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Map, .Value, 0}, {0, 3, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {4, 1, .Plain, .Key, 0}, {8, 3, .Plain, .Value, core.SPELLING_DECODE | core.SPELLING_QUOTED}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
 	}) {
 		log^ = {}
 		hi, fault := dsv.walk(transmute([]u8)c.text, 0, .Csv, {tolerate = c.tol}, log, &core.Hook_Regs{}, walktest.log_hook)

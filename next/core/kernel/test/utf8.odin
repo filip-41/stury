@@ -5,7 +5,8 @@ import "core:testing"
 import "core:unicode/utf8"
 import k ".."
 
-// Whether `src` is UTF-8 by the kernel, block by block, ASCII blocks taken by `utf8_ascii_block` when `skip_ascii`.
+// Returns whether the kernel finds `src` valid UTF-8, a 64-byte block at a time, calling `utf8_ascii_block` for an
+// ASCII block when `skip_ascii` is set.
 @(enable_target_feature = FEATURES)
 kernel_utf8 :: proc(src: []u8, skip_ascii: bool) -> bool {
 	s: k.Utf8_State
@@ -28,8 +29,8 @@ check_utf8 :: proc(t: ^testing.T, src: []u8, loc := #caller_location) {
 	}
 }
 
-// Every pair of bytes, followed by two bytes that continue, end or break a sequence, where each 16 bytes end,
-// and where a block ends.
+// Each pair of bytes followed by two bytes that continue, end or break a sequence, placed where a 16-byte vector
+// ends and where the 128-byte text ends.
 @(test)
 utf8_every_pair :: proc(t: ^testing.T) {
 	buf: [128]u8
@@ -55,8 +56,8 @@ utf8_every_pair :: proc(t: ^testing.T) {
 	}
 }
 
-// Inputs of every length up to three blocks that end in a lead byte and fewer continuation bytes than it needs, or
-// exactly as many: an open sequence at the end of a full block or of a padded tail.
+// Inputs of 1 to 192 bytes ending in a lead byte with fewer continuation bytes than its size needs, so an open
+// sequence ends a full block or a padded tail.
 @(test)
 utf8_sequence_at_end :: proc(t: ^testing.T) {
 	buf: [192]u8
@@ -82,7 +83,7 @@ utf8_sequence_at_end :: proc(t: ^testing.T) {
 	}
 }
 
-// Random text of valid characters of every size, now and then broken by a random byte, over runs of ASCII blocks.
+// Random text of valid characters of every UTF-8 size, with a random run of ASCII bytes, then 0 to 2 random bytes.
 @(test)
 utf8_random_text :: proc(t: ^testing.T) {
 	state := rand.create(6)
@@ -108,8 +109,8 @@ utf8_random_text :: proc(t: ^testing.T) {
 	}
 }
 
-// Whether `src` holds no error, a sequence its end leaves open allowed: it is valid with one of the shortest
-// completions of each lead byte appended.
+// Returns whether `src` holds no error, with a sequence open at its end allowed. It is clean when `src` plus one of
+// the shortest completions of a lead byte is valid UTF-8.
 reference_clean :: proc(src: []u8) -> bool {
 	if utf8.valid_string(string(src)) {
 		return true
@@ -130,8 +131,8 @@ reference_clean :: proc(src: []u8) -> bool {
 	return false
 }
 
-// Random text cut at a block end, often inside a sequence, now and then broken by a random byte: `utf8_clean` after
-// its whole blocks.
+// Random text of 64 to 256 bytes, often cut inside a sequence, then 0 to 2 random bytes. Checks `utf8_clean` after
+// the whole blocks against `reference_clean`.
 @(test, enable_target_feature = FEATURES)
 utf8_clean_at_block_end :: proc(t: ^testing.T) {
 	state := rand.create(9)

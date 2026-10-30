@@ -1,18 +1,19 @@
 package bench
 
-// Timings of `core/kernel`, one case per run: `bench <case> <reps> <arg>` prints a sink, the nanoseconds per unit
-// and the units per rep, which run.py reads. Cases:
-//   pack <per256>   eq and pack per block of an L1-resident buffer, `per256` quotes in 256 bytes, unit: a block.
-//   skip <every>    blocks with no quote skipped by `any_lane`, one quote in `every` bytes, unit: a block.
-//   json <per256>   JSON's four sets by the nibble table, packed together, `per256` of their bytes in 256, unit: a block.
-//   csv <per256>    CSV's three sets by compares, packed together, `per256` of their bytes in 256, unit: a block.
-//   str <every>     the quotes no backslash escapes, by `escaped`, JSON's bytes 16 in 256 and one backslash in `every`
-//                   bytes, unit: a block.
-//   utf8 <every>    JSON's sets as in `json`, and UTF-8 checked per block, ASCII blocks skipped, JSON's bytes 16 in 256
-//                   and one three-byte character in `every` bytes, unit: a block.
-//   utf8all <every> `utf8`, every block checked in full.
-// The `json` and `utf8` lanes time a table `nibble_table` builds from JSON's sets. The walk builds no such table: it
-// uses compares and its own constant class tables. `-define:TIER=n` times the tier at place n of `k.Tier`, its loops
+// Timings of `core/kernel`. `bench <case> <reps> <arg>` prints a sink, the nanoseconds per unit and the units per rep,
+// which run.py reads. Cases:
+//   pack <per256>   eq and pack per block of an L1-resident buffer, with `per256` quotes in 256 bytes, unit: a block.
+//   skip <every>    blocks with no quote skipped by `any_lane`, with a quote in `every` bytes, unit: a block.
+//   json <per256>   JSON's four sets by the nibble table, packed together, with `per256` of their bytes in 256, unit: a
+//                   block.
+//   csv <per256>    CSV's three sets by compares, packed together, with `per256` of their bytes in 256, unit: a block.
+//   str <every>     the quotes no backslash escapes, by `escaped`, with JSON's 16 bytes in 256 and a backslash in
+//                   `every` bytes, unit: a block.
+//   utf8 <every>    JSON's sets as in `json`, and UTF-8 checked per block with ASCII blocks skipped, with JSON's 16
+//                   bytes in 256 and a three-byte character in `every` bytes, unit: a block.
+//   utf8all <every> `utf8` with every block checked in full.
+// The `json` and `utf8` cases time a `nibble_table` built from JSON's sets. The walk builds no such table, it uses
+// compares and its own constant class tables. `-define:TIER=n` times the tier at place n of `k.Tier`, with its loops
 // compiled with the tier's features.
 
 import "base:intrinsics"
@@ -29,7 +30,7 @@ T :: k.Tier(#config(TIER, 0))
 L1_BYTES :: 32 * 1024
 SKIP_BYTES :: 1 << 20
 
-// `p`, read so that the compiler cannot prove it the same in every rep and hoist a rep's work out of the loop.
+// Reads `p` through a volatile load, so the compiler cannot prove it constant and hoist a rep's work out of the loop.
 opaque :: #force_inline proc "contextless" (p: ^[^]u8) -> [^]u8 {
 	return intrinsics.volatile_load(p)
 }
@@ -67,7 +68,7 @@ run_skip :: #force_no_inline proc(buf: []u8, reps: int) -> (sink: u64) {
 JSON_SETS :: [4]string{"\"", "\\", ",:[]{}", " \t\n\r"}
 CSV_BYTES :: ",\"\n\r"
 
-// The masks folded into one word, so that every mask reaches the sink.
+// Folds the masks into one word, so every mask reaches the sink.
 mix :: #force_inline proc "contextless" (m: [$N]u64) -> (x: u64) {
 	#unroll for i in 0 ..< N {
 		x ~= bits.rotate_left64(m[i], 16 * i)
@@ -137,7 +138,7 @@ run_utf8 :: #force_no_inline proc(buf: []u8, reps: int, t: k.Nibble_Table, s: [8
 	return
 }
 
-// `buf` filled with lowercase letters and, on average, `per256` bytes of `from` in every 256 bytes.
+// Fills `buf` with lowercase letters, and with a byte of `from` at `per256` of 256 positions on average.
 fill :: proc(buf: []u8, per256: int, from: string) {
 	for &b in buf {
 		b = rand.int_max(256) < per256 ? from[rand.int_max(len(from))] : u8('a' + rand.int_max(26))
@@ -198,7 +199,7 @@ main :: proc() {
 	case "skip":
 		buf := make([]u8, SKIP_BYTES)
 		fill(buf, 0, "")
-		// Placed at random: at a fixed stride the branch predictor learns which blocks to skip.
+		// Places the quotes at random, since at a fixed stride the branch predictor learns which blocks to skip.
 		for _ in 0 ..< SKIP_BYTES / arg {
 			buf[rand.int_max(SKIP_BYTES)] = '"'
 		}

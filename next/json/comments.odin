@@ -5,16 +5,17 @@ import "core:simd"
 import core "../core"
 import kernel "../core/kernel"
 
-// Comments, in the specs that have them: `//` up to the line's end, which is not part of it, and `/* */`, wherever
-// whitespace may stand. A comment is a fact token: `Plain`, its span the comment with its delimiters, `spelling` 1
-// for `/* */`, and its role `core.Role`'s rule gives it. A state that meets a `/` where it wants a token hands over to
-// a state here, which reads the whole run of whitespace and comments up to the next token before it emits any of it,
-// since what follows the run decides the role of each comment in it. A walk without hooks reads the run and emits
-// nothing.
+// This file reads the comments of the specs that have them. A `//` comment runs to the line's end, which is not part
+// of the comment, and a `/* */` comment may be anywhere whitespace may be. A comment is a `Plain` fact token whose
+// span includes its delimiters and whose `spelling` holds its marker lengths, 2 and 0 for `//`, 2 and 2 for `/* */`.
+// Its role follows `core.Role`'s rule. A state that meets a `/` where it wants a token tail-calls a state here, which
+// reads the whole run of whitespace and comments
+// up to the next token before it emits any of them, since the token after the run decides each comment's role. A walk
+// without hooks reads the run and emits nothing.
 
-// The lanes of `v` that `comment` must read one at a time: a byte past 0x7F, which its UTF-8 reader judges, a
+// Marks the lanes of `v` that `comment` must judge one at a time: a byte past 0x7F, which its UTF-8 reader judges, a
 // control byte, which its control test judges in a spec without `.Es5`, a line end, which ends a `//` comment in
-// JSON5, and a `*`, which may close a `/* */` comment. `v - 0x20 > 0x5f` holds for a control byte and a byte past
+// JSON5, and a `*`, which may close a `/* */` comment. `v - 0x20 > 0x5f` is true for a control byte and a byte past
 // 0x7F.
 @(private)
 comment_stops :: #force_inline proc "contextless" (v: #simd[16]u8, $S: Spec, $star: bool) -> #simd[16]u8 {
@@ -33,8 +34,8 @@ comment_stops :: #force_inline proc "contextless" (v: #simd[16]u8, $S: Spec, $st
 	return m
 }
 
-// The first byte from `q` at or before `end` that `comment` must judge one at a time, 16 bytes at a step while a
-// whole vector lies in the text: `q` when the run holds no such byte before `end`.
+// Returns the first byte from `q` that `comment` must judge one at a time, scanning 16 bytes at a step while 16 lie
+// before `end`. When none is found, returns `q` advanced by the 16-byte steps.
 @(private)
 comment_scan :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec, $star: bool) -> [^]u8 #no_bounds_check {
 	q := q
@@ -48,11 +49,11 @@ comment_scan :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec, $star
 	return q
 }
 
-// The comment at `p`, which stands on a `/`: one past its last byte, or the fault. A comment's bytes are judged as a
-// string's raw bytes are: UTF-8, and no control byte but a tab, and in a `/* */` comment CR and LF, else `Bad_Char` at
-// that byte. JSON5 takes any control byte, as its grammar does, and ends a `//` comment at U+2028 and U+2029 too. A
-// `/` that opens no comment, the text's last byte among them, is `Bad_Char` at the `/`, and a `/*` the text ends
-// inside is `Truncated`.
+// Reads the comment at `p`, which is at a `/`. Returns one past its last byte, or the fault. A comment's bytes are
+// judged as a string's raw bytes are: UTF-8, and no control byte but a tab, and in a `/* */` comment also CR and LF,
+// else `Bad_Char` at that byte. JSON5 accepts any control byte, as its grammar does, and ends a `//` comment at
+// U+2028 and U+2029 too. A `/` that opens no comment, the text's last byte among them, faults `Bad_Char` at the `/`,
+// and a `/*` the text ends inside faults `Truncated`.
 @(private)
 comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
 	ES5 :: .Es5 in FEATURES[S]
@@ -99,12 +100,13 @@ comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]
 }
 
 // Whether `p`, before `end`, opens a run that `comment_run` reads and JSON's whitespace readers do not: a comment, or
-// in JSON5 its other whitespace. A state that comes back here on a byte the run did not take needs the exact answer.
+// in JSON5 its other whitespace. A state that tests a byte after reading whitespace needs an exact answer, unlike
+// `gap_lead` below.
 @(private)
 gap :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> bool {
 	when .Es5 in FEATURES[S] {
-		// JSON5's whitespace other than JSON's starts with 0x0B, 0x0C, or a lead byte of 0xC2 or more, so a byte
-		// between those opens a run only as a comment's `/`. `ws5_len` reads the rest.
+		// JSON5's whitespace other than JSON's starts with 0x0B, 0x0C, or a lead byte of 0xC2 or more, so any other
+		// byte opens a run only as a comment's `/`. `ws5_len` reads the rest.
 		c := p[0]
 		return c == '/' || (c - 0x0b <= 1 || c >= 0xc2) && ws5_len(p, end) > 0
 	} else {
@@ -112,9 +114,9 @@ gap :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> bool {
 	}
 }
 
-// Whether `p` may open a run that `comment_run` reads: a comment, or in JSON5 its other whitespace. A byte of 0xC2 or
-// more may open neither, and a state handed one hands the byte back to the states that refuse it, so the states that
-// hand over test a byte's class, not `ws5_len`.
+// Whether `p` may open a run that `comment_run` reads: a comment, or in JSON5 its other whitespace. In JSON5 a byte of
+// 0xC2 or more may be the lead byte of that whitespace, so this tests the byte's class and not `ws5_len`. A byte that
+// opens no run is passed on to the states that refuse it.
 @(private)
 gap_lead :: #force_inline proc "contextless" (p: [^]u8, $S: Spec) -> bool {
 	when .Es5 in FEATURES[S] {
@@ -125,8 +127,8 @@ gap_lead :: #force_inline proc "contextless" (p: [^]u8, $S: Spec) -> bool {
 	}
 }
 
-// `gap_lead` where `indent_fast` has just read the token's first byte, which is past ' ': only a comment's `/` or a
-// lead byte of 0xC2 or more can open a run.
+// `gap_lead` for a byte that `indent_fast` has just read, which is past `' '`. Only a comment's `/` or a byte of 0xC2
+// or more can open a run, so the 0x0B and 0x0C test is left out.
 @(private)
 gap_after_ws :: #force_inline proc "contextless" (p: [^]u8, $S: Spec) -> bool {
 	when .Es5 in FEATURES[S] {
@@ -136,7 +138,7 @@ gap_after_ws :: #force_inline proc "contextless" (p: [^]u8, $S: Spec) -> bool {
 	}
 }
 
-// Whether `p` stands on a line's end: LF or CR, and in JSON5 U+2028 or U+2029.
+// Whether `p` is at a line's end: LF or CR, and in JSON5 U+2028 or U+2029.
 @(private)
 line_end :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> bool {
 	when .Es5 in FEATURES[S] {
@@ -146,8 +148,8 @@ line_end :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> bool {
 	}
 }
 
-// `skip_ws` for the run between comments, which is short: eight bytes are stepped here, and a longer run is
-// `ws_long`'s, out of line, since every caller that inlines all of `skip_ws` builds its vectors on entry.
+// The run between comments is short, so this `skip_ws` steps up to eight bytes here and passes a longer run to
+// `ws_long`, out of line. A caller that inlines all of `skip_ws` builds its vectors on entry.
 @(private)
 ws_short :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_check {
 	q := p
@@ -165,8 +167,8 @@ ws_long :: #force_no_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_boun
 	return skip_ws(p, end)
 }
 
-// The whitespace and comments from `p`, and one comma among them when `comma`: where the next token stands, whether
-// a comma was crossed, or the fault.
+// Reads whitespace and comments from `p` and, when `comma`, one comma among them. Returns the next token's byte,
+// whether a comma was crossed, or the fault.
 @(private)
 comment_run :: #force_inline proc "contextless" (p, end: [^]u8, comma: bool, $S: Spec) -> (q: [^]u8, crossed: bool, kind: core.Fault_Kind) {
 	q = p
@@ -194,10 +196,10 @@ comment_run :: #force_inline proc "contextless" (p, end: [^]u8, comma: bool, $S:
 	}
 }
 
-// Emits the comments of the run from `p` to `q`, which `comment_run` read whole: with `inline`, those that start on
-// the run's first line as `Comment_Inline`, and the rest as `rest`. With `rest` `Value` the rest stay unread, the next
-// document's. Returns one past the last comment emitted, or `p`, and whether a hook stopped the walk there, or the
-// comment that is `Too_Wide`.
+// Emits the comments in the run from `p` to `q`, which `comment_run` has read whole. With `inline`, a comment on the
+// run's first line is `Comment_Inline`, and the rest get role `rest`. With `rest` `.Value` the rest stay unread, for
+// the next document. Returns one past the last comment emitted, or `p`, whether a hook stopped the walk there, and
+// the `Too_Wide` comment or `.None`.
 @(private)
 emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, p, q: [^]u8, inline: bool, rest: core.Role) -> (r: [^]u8, stop: bool, kind: core.Fault_Kind) #no_bounds_check {
 	r = p
@@ -217,11 +219,11 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 		if too_wide(x, e) {
 			return x, false, .Too_Wide
 		}
-		if emit(w, on, hs, .Plain, role, x, e, u16(x[1] == '*')) == .Stop {
+		if emit(w, on, hs, .Plain, role, x, e, u16(2) | (u16(2) if x[1] == '*' else 0) << 8) == .Stop {
 			return e, true, .None
 		}
-		// A `//` comment ends at a line end that is no byte of it, so only a `/* */` body can move the line on, and
-		// the role needs only whether its body holds one.
+		// A `//` comment ends at a line end that is no byte of it, so only a `/* */` body can move to the next line.
+		// The role needs only whether the body holds a line end.
 		if !next_line && x[1] == '*' {
 			for c := x[2:]; c < e; c = c[1:] {
 				if line_end(c, e, S) {
@@ -235,8 +237,8 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 	return
 }
 
-// `p` stands on a comment where a value must start: the run up to the value, each comment the value's, or before an
-// array's close (an empty array, or a trailing comma) that array's foot, then the value.
+// `p` is at a comment where a value must start. Reads the run up to the value, and gives each comment the value's
+// role, or the array's `Comment_Foot` before its close (an empty array or a trailing comma). Then reads the value.
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
@@ -257,8 +259,8 @@ st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 	return #must_tail st_value(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
-// `p` stands on a comment where an object's key must start: the run up to the key, each comment the member's, or
-// before the object's close that object's foot, then the key.
+// `p` is at a comment where an object's key must start. Reads the run up to the key, and gives each comment the
+// member's role, or the object's `Comment_Foot` before its close. Then reads the key.
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
@@ -279,8 +281,8 @@ st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 	return #must_tail st_key(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
-// `p` stands on a comment between a key and its colon: the run up to the colon, each comment the member's value's,
-// then the colon.
+// `p` is at a comment between a key and its colon. Reads the run up to the colon, gives each comment the member's
+// value's role, then reads the colon.
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
@@ -300,12 +302,12 @@ st_comments_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
-// `p` stands right after a value, and a comment follows it before the next token, or after its comma: the run from
-// `w.resume`, which the caller read the run's leading whitespace up to, to that token, then the token, with
-// `w.crossed` whether the caller read a comma before it. A comment on the value's line is its inline comment. Past
-// that line, a comment is the next value's when a comma and a value follow, else the foot of the value before it.
-// After a document's root the run crosses no comma: the comments past the root's line are its foot when the text
-// ends after them or a 0x1E follows them, else the next document's, left unread.
+// `p` is right after a value, and a comment follows before the next token or after its comma. Reads the run from
+// `w.resume`, where the caller read the run's leading whitespace up to, to that token, then the token. `w.crossed` says
+// whether the caller read a comma before the run. A comment on the value's line is its inline comment. Past that line,
+// a comment is the next value's when a comma and a value follow, else the foot of the value before it. After a
+// document's root no comma is crossed: a comment past the root's line is its foot when the text ends after it or a
+// 0x1E follows it, else it belongs to the next document and stays unread.
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}

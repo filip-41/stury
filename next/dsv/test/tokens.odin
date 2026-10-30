@@ -8,7 +8,7 @@ import walktest "../../walktest"
 import dsv ".."
 import gen "gen"
 
-// The tokens a walk under `rule` gives, from the tokens of the walk that asked for nothing, and where a Stop ends it.
+// Returns the tokens a walk under `rule` emits, from the tokens of a walk with rule 0, and where a `Stop` ends it.
 expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop_hi: u64, stopped: bool) {
 	clear(out)
 	for j := 0; j < len(all); j += 1 {
@@ -20,10 +20,10 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 			return t.lo + u64(t.n), true
 		case .Skip:
 			if t.role == .Key {
-				// Past the cell the key names.
+				// Skips the cell the key names.
 				j += 1
 			} else if t.kind == .Array || t.kind == .Map {
-				// Past the record, or the text, and its `End`.
+				// Skips the record or the text and its `End`.
 				depth := 0
 				for ; j < len(all); j += 1 {
 					#partial switch all[j].kind {
@@ -50,9 +50,9 @@ walk :: proc(src: []u8, tsv, no_header: bool, h: ^$H, regs: ^core.Hook_Regs, $on
 	return dsv.walk(src, lo, .Csv, {no_header = no_header}, h, regs, on)
 }
 
-// On valid and broken texts, with and without a header, a hook that keeps its state behind `h` and one that keeps it
-// in `Hook_Regs` see the same tokens, with Skip and Stop at random, and those are the tokens Skip and Stop leave of
-// the full walk. The full walk's verdict is `validate`'s.
+// On valid and broken texts, with and without a header, a hook that keeps its state behind `h` and a hook that keeps
+// it in `Hook_Regs` see the same tokens, with `Skip` and `Stop` at random, and those are the tokens `Skip` and `Stop`
+// leave of the full walk. The full walk's verdict is `validate`'s.
 @(test)
 hooks_agree :: proc(t: ^testing.T) {
 	state := rand.create(1)
@@ -120,7 +120,7 @@ Walked :: struct {
 	tokens: []core.Token,
 }
 
-// A fault as a rodata table writes it: a `core.Fault` holds a pointer, which rodata cannot.
+// A fault as a rodata table writes it. A `core.Fault` holds a pointer, which rodata cannot.
 Want :: struct {
 	at:     u64,
 	kind:   core.Fault_Kind,
@@ -171,26 +171,44 @@ append_record :: proc(out: ^[dynamic]u8, cells: []string, sep: u8, quoted: bool,
 	return
 }
 
-// The tokens a record makes: its opening, its cells (each naming its column's header cell when `with_header`), and the
-// `End` at `end` when `with_end`. A short record that faults makes all but its `End`.
-append_record_tokens :: proc(out: ^[dynamic]core.Token, rec_lo: int, spans: [SPANS_MAX]Span, cells: int, header_spans: [SPANS_MAX]Span, with_header, tsv, quoted: bool, end: int, with_end: bool) {
+// A CSV cell's spelling is quoted or not, and a TSV cell's is `SPELLING_DECODE` only when its span holds a backslash.
+@(private)
+cell_spelling :: proc(src: []u8, lo, n: int, tsv, quoted: bool, lax := false) -> u16 {
+	if tsv {
+		if lax {
+			return core.SPELLING_DECODE
+		}
+		for c in src[lo:lo + n] {
+			if c == '\\' {
+				return core.SPELLING_DECODE
+			}
+		}
+		return 0
+	}
+	return core.SPELLING_DECODE | core.SPELLING_QUOTED if quoted else 0
+}
+
+// Appends the tokens of a record: its opening, its cells (each naming its column's header cell when `with_header`), and
+// the `End` at `end` when `with_end`. A short record that faults has all but its `End`.
+append_record_tokens :: proc(out: ^[dynamic]core.Token, src: []u8, rec_lo: int, spans: [SPANS_MAX]Span, cells: int, header_spans: [SPANS_MAX]Span, with_header, tsv, quoted: bool, end: int, with_end: bool) {
 	append(out, core.Token{u64(rec_lo), 0, .Map if with_header else .Array, .Value, 0})
 	for i in 0 ..< cells {
 		if with_header {
 			h := header_spans[i]
-			append(out, core.Token{u64(h.lo), u32(h.n), .Plain, .Key, u16(!tsv && quoted)})
+			append(out, core.Token{u64(h.lo), u32(h.n), .Plain, .Key, cell_spelling(src, h.lo, h.n, tsv, quoted)})
 		}
 		s := spans[i]
-		append(out, core.Token{u64(s.lo), u32(s.n), .Plain, .Value, u16(!tsv && quoted)})
+		append(out, core.Token{u64(s.lo), u32(s.n), .Plain, .Value, cell_spelling(src, s.lo, s.n, tsv, quoted)})
 	}
 	if with_end {
 		append(out, core.Token{u64(end), 1, .End, .Value, 0})
 	}
 }
 
-// A wide record makes its `Map` and first `width` cells, then faults at the delimiter that opens the next cell. A short
-// one makes its `Map` and all its cells, then faults at its line end. Neither makes its `End`. The paddings move the
-// record over every byte of a block and across the boundary between two.
+// For a wide record the walk emits its container (`Map` with a header, `Array` without) and first 3 cells, then
+// faults at the delimiter that opens the next cell. For a short record it emits its container and all its cells,
+// then faults at its line end. Neither has an `End`. The empty lines move the record over every byte of a block and
+// across the boundary between two.
 @(test)
 wrong_width_records :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -225,15 +243,15 @@ wrong_width_records :: proc(t: ^testing.T) {
 								append(&text, '\n')
 							} else {
 								lo := append_record(&text, FIRST, sep, quoted, &spans)
-								append_record_tokens(&want, lo, spans, len(FIRST), header_spans, false, tsv, quoted, len(text), true)
+								append_record_tokens(&want, text[:], lo, spans, len(FIRST), header_spans, false, tsv, quoted, len(text), true)
 								append(&text, '\n')
 							}
 							lo := append_record(&text, VALID, sep, quoted, &spans)
-							append_record_tokens(&want, lo, spans, len(VALID), header_spans, header, tsv, quoted, len(text), true)
+							append_record_tokens(&want, text[:], lo, spans, len(VALID), header_spans, header, tsv, quoted, len(text), true)
 							append(&text, '\n')
 							bad_lo := append_record(&text, bad, sep, quoted, &spans)
 							bad_cells := min(len(bad), len(HEADER))
-							append_record_tokens(&want, bad_lo, spans, bad_cells, header_spans, header, tsv, quoted, len(text), false)
+							append_record_tokens(&want, text[:], bad_lo, spans, bad_cells, header_spans, header, tsv, quoted, len(text), false)
 							fault_at := len(text)
 							if len(bad) > len(HEADER) {
 								// The delimiter after the last kept cell opens the cell past the width.
@@ -259,8 +277,8 @@ wrong_width_records :: proc(t: ^testing.T) {
 	}
 }
 
-// Every `Key` token spans its column's header cell, in every record before a fault, at every block offset and in
-// both formats, quoted and unquoted. The bad record is short, wide, or faults inside its second cell.
+// Checks that every `Key` token spans its column's header cell, in every record before a fault, at every block
+// offset, in both formats, quoted and unquoted. The bad record is short, wide, or faults inside its second cell.
 @(test)
 key_spans_follow_columns :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -271,7 +289,7 @@ key_spans_follow_columns :: proc(t: ^testing.T) {
 	VALID := []string{"a0", "a1", "a2"}
 	Bad :: struct {
 		cells: []string,
-		keys:  int, // the keys the walk makes before the fault
+		keys:  int, // the keys the walk emits before the fault
 	}
 	BAD := []Bad {
 		{{"s0"}, 1},
@@ -345,7 +363,7 @@ walked_tokens :: proc(t: ^testing.T) {
 	}
 }
 
-// A BOM past the text's first byte is a cell byte, not a marker: a walk from the BOM reads the cell it starts.
+// A BOM past the text's first byte is a cell byte, not a marker, so a walk from the BOM reads the cell it starts.
 @(test)
 bom_mid_text :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
@@ -357,7 +375,7 @@ bom_mid_text :: proc(t: ^testing.T) {
 	testing.expectf(t, slice_eq(log.tokens[:log.n], want), "%v", log.tokens[:log.n])
 }
 
-// Every value of `Detail` has a rule, named under the format's own name.
+// Every value of `Detail` has a rule, named under the format's name.
 @(test)
 detail_rules :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(dsv.RULES.details), len(dsv.Detail))
@@ -377,14 +395,22 @@ detail_rules :: proc(t: ^testing.T) {
 	testing.expect_value(t, strings.to_string(b), "1:2: Quote in an unquoted cell")
 }
 
-// Whether a token's span holds what its kind says: a cell holds no line end outside quotes and is quoted where its
+// Whether a token's span holds what its kind says. A cell holds no line end outside quotes and is quoted where its
 // spelling says, a record's `End` is its line end, and an opening token and the text's `End` are empty.
-spans :: proc(src: []u8, t: core.Token, tsv: bool) -> bool {
+spans :: proc(src: []u8, t: core.Token, tsv: bool, tol := bit_set[dsv.Tolerance; u8]{}) -> bool {
 	b := src[t.lo:][:t.n]
 	switch t.kind {
 	case .Plain:
 		quoted := !tsv && len(b) > 0 && b[0] == '"'
-		if t.spelling != u16(quoted) {
+		want: u16
+		if tsv {
+			want = cell_spelling(src, int(t.lo), int(t.n), true, false, .Invalid_Utf8 in tol)
+		} else if quoted {
+			want = core.SPELLING_DECODE | core.SPELLING_QUOTED
+		} else if .Invalid_Utf8 in tol {
+			want = core.SPELLING_DECODE
+		}
+		if t.spelling != want {
 			return false
 		}
 		if !quoted {

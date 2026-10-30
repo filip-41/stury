@@ -4,37 +4,38 @@ package kernel
 import "base:intrinsics"
 import "core:simd"
 
-// Operations on all 64 lanes of a block at once, as one vector that LLVM splits to the target's width: four registers
-// on SSE, two on AVX2, one on AVX-512, where a compare writes a mask register and `pack` is one move out of it.
-// Written at 16 lanes, the AVX-512 code instead merges 16-lane mask registers one OR at a time.
+// Block operations written on all 64 lanes at once, as one vector that LLVM splits to the target's width: four
+// registers on SSE, two on AVX2, one on AVX-512, where a compare writes a mask register and `pack` moves it out with
+// one instruction. Written at 16 lanes, the AVX-512 code would instead merge 16-lane mask registers with ORs.
 
-// Loaded into a variable first: Odin folds a `transmute` of the load into a load of `Block` at its own alignment.
+// Loads 64 bytes from `p` as a `Block`, with no alignment requirement. The load is stored in `v` first, because Odin
+// folds a `transmute` of the load into a load of `Block` at `Block`'s alignment.
 load :: #force_inline proc "contextless" (p: [^]u8) -> Block {
 	v := intrinsics.unaligned_load((^W)(p))
 	return transmute(Block)v
 }
 
-// The lanes of `b` equal to `c`.
+// Returns a mask with 0xFF in each lane where `b`'s byte equals `c`.
 eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
 	return transmute(Block)simd.lanes_eq(transmute(W)b, W(c))
 }
 
-// The lanes of `b` below `c`.
+// Returns a mask with 0xFF in each lane where `b`'s byte is below `c`.
 below :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
 	return transmute(Block)simd.lanes_lt(transmute(W)b, W(c))
 }
 
-// The lanes of `a` or of `b`.
+// Returns `a` OR `b` lane by lane, 0xFF where either mask is set.
 either :: #force_inline proc "contextless" (a, b: Block) -> Block {
 	return transmute(Block)simd.bit_or(transmute(W)a, transmute(W)b)
 }
 
-// The lanes of `c`, as `classes` returns it, in a set of `bits`.
+// Returns 0xFF in each lane whose class bits in `c`, as `classes` returned them, share a bit with `bits`.
 has :: #force_inline proc "contextless" (c: Block, bits: u8) -> Block {
 	return transmute(Block)simd.lanes_ne(simd.bit_and(transmute(W)c, W(bits)), W(0))
 }
 
-// `pack` of each mask.
+// Returns `pack(m[i])` for each of the 2 to 4 masks.
 pack_n :: #force_inline proc "contextless" (m: [$N]Block) -> (r: [N]u64) where 2 <= N && N <= 4 {
 	#unroll for i in 0 ..< N {
 		r[i] = pack(m[i])
@@ -42,7 +43,7 @@ pack_n :: #force_inline proc "contextless" (m: [$N]Block) -> (r: [N]u64) where 2
 	return
 }
 
-// One bit per lane mask: `pmovmskb` per register, or `kmovq` from a mask register.
+// Returns one bit per lane of `m`, 64 bits in all, as `pmovmskb` per register or `kmovq` from a mask register.
 pack :: #force_inline proc "contextless" (m: Block) -> u64 {
 	return transmute(u64)simd.extract_msbs(transmute(W)m)
 }
@@ -52,14 +53,14 @@ is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
 	return simd.extract_msbs(transmute(W)b) == {}
 }
 
-// Whether any lane mask is set. The packed mask is the test: packing costs one instruction per register, as a
-// vector test does.
+// Reports whether any lane mask in `m` is set, by testing the packed mask. Packing uses one instruction per
+// register, the same as a vector test.
 any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
 	return pack(m) != 0
 }
 
-// The first lane set in the 16 lane masks of `m`, or 16: one bit a lane by `pmovmskb`, and a bit past the lanes that
-// stands for the empty mask.
+// Returns the index of the first set lane in the 16 lane masks of `m`, or 16 when none is set. `pmovmskb` gives one
+// bit per lane, and `0x1_0000` adds a bit past lane 15 that the trailing-zero count finds when no lane is set.
 first_lane :: #force_inline proc "contextless" (m: V) -> u64 {
 	return u64(intrinsics.count_trailing_zeros(u32(transmute(u16)simd.extract_msbs(m)) | 0x1_0000))
 }

@@ -1,7 +1,7 @@
-// The walk's verdict against the current tree's `json.validate`, in each spec against the dialect of its name, on
-// seeded texts and mutations of them, of JSONTestSuite and of json5-tests. Where the two part on JSON5 by design,
-// `json5_parts` says why. `make test-oracle` builds it from a copy of next/ with its packages renamed, since both trees name
-// packages `core` and `json`.
+// Compares `json.validate` with the current tree's `json.validate`, each spec against the dialect of its name, on
+// seeded texts, mutations, JSONTestSuite and json5-tests. `json5_parts` names the cases where the two part on JSON5 by
+// design. `make test-oracle` builds this package from a copy of next/ with its packages renamed, because both trees
+// have packages named `core` and `json`.
 package json_oracle
 
 import "base:runtime"
@@ -28,7 +28,7 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 	check :: proc(t: ^testing.T, src: []u8, $S: json.Spec, tally: ^Tally) -> bool {
 		want, refused := cur.validate(src, {dialect = cur.Dialect(S)}).?
 		got, bad := json.validate(src, S).?
-		// Digit and exponent caps are the layers' above the walk.
+		// The current tree's digit and exponent caps are not the walk's, so a case it caps is skipped.
 		if refused && (want.kind == .Limit_Digits || want.kind == .Limit_Scale) {
 			tally.capped += 1
 			return true
@@ -84,7 +84,7 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 	fmt.printfln("seed %d: %d compared, %d skipped for digit caps, JSON5 parted by design %v", SEED, tally.compared, tally.capped, tally.parted)
 }
 
-// The walk's own `Bad_Char` details have no member in the current tree, which carries none.
+// The current tree has no `Bad_Char` detail: its `detail` is 0 where the walk says `Identifier` or `Colon`.
 detail_agrees :: proc(want: cur.Error, got: core.Fault) -> bool {
 	if want.detail == got.detail {
 		return true
@@ -97,21 +97,22 @@ Tally :: struct {
 	parted:           [Part]int,
 }
 
-// Why the walk and the current tree part on a JSON5 text, the walk following JSON5 1.0.0 and its own rules for JSON.
+// `Part` names why the walk and the current tree part on a JSON5 text. The walk follows JSON5 1.0.0 and its own
+// JSON rules.
 Part :: enum {
 	None,
-	Comment, // a comment holds a control byte, or a `//` comment ends at U+2028 or U+2029: the current tree refuses the one and reads on past the other
-	Escape, // a bad escape is refused at the byte that breaks it, the current tree refuses it at its backslash
-	Key, // an unquoted key the text cuts short is `Truncated`, and a byte that starts no key has the `Identifier` detail
-	Word, // `Infinity` or `NaN` broken is `Bad_Number` at the byte that breaks it, the current tree a bad literal
+	Comment, // a comment holds a control byte, or a `//` comment ends at U+2028 or U+2029: the current tree differs
+	Escape, // a bad escape is refused at the byte that breaks it, the current tree at its backslash
+	Key, // an unquoted key the text cuts short is `Truncated`, and a byte that starts no key has `Detail.Identifier`
+	Word, // `Infinity` or `NaN` broken is `Bad_Number` at the byte that breaks it, the current tree at a bad literal
 }
 
-// The part, if any, that explains the walk's fault `got` against the current tree's `want`, each zero for none.
+// Returns the `Part` that explains the walk's fault `got` against the current tree's `want`, or `.None`.
 json5_parts :: proc(src: []u8, got: core.Fault, want: cur.Error) -> Part {
 	if comment_parts(src) {
 		return .Comment
 	}
-	// The byte that breaks an escape is at most the twelfth of a surrogate pair.
+	// In a surrogate pair the byte that breaks the escape is at most 11 past its backslash.
 	if want.kind == .Bad_Escape && src[want.offset] == '\\' && got.at > want.offset && got.at - want.offset <= 11 && got.kind != .None {
 		return .Escape
 	}
@@ -127,8 +128,8 @@ json5_parts :: proc(src: []u8, got: core.Fault, want: cur.Error) -> Part {
 	return .None
 }
 
-// Whether a comment holds a control byte, or a `//` comment ends at U+2028 or U+2029: the text read lexically, its
-// strings passed over, as far as it goes.
+// Returns true if a comment holds a control byte other than tab, LF or CR, or a `//` comment ends at U+2028 or
+// U+2029. Strings are passed over.
 comment_parts :: proc(src: []u8) -> bool {
 	quote: u8
 	for i := 0; i < len(src); i += 1 {
