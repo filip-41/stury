@@ -8,10 +8,10 @@ import "core:fmt"
 import "core:math/rand"
 import "core:testing"
 import cur "stury:csv"
-import core "../../../core"
-import dsv "../.."
-import gen "../gen"
-import walktest "../../../walktest"
+import core "../../next/core"
+import dsv "../../next/dsv"
+import gen "../../next/dsv/test/gen"
+import walktest "../../next/walktest"
 
 SEED :: #config(SEED, 1)
 ROUNDS :: #config(ROUNDS, 100_000)

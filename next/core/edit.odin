@@ -12,9 +12,10 @@ import "core:slice"
 // touched stays, and the format's `Edit_Spelling` supplies the separators.
 //
 // A fact edit names a node and a role, and a set also a body. The commit writes the body where the role reads it, or
-// drops it and counts it when the output cannot hold it. A fact no edit names keeps its bytes, in order, unless it is
-// removed with a removed node or lies inside the span a set replaces, which is the only removed or replaced case. Its
-// node and role afterwards follow the comments around it and are not preserved.
+// drops it and counts it when the output cannot hold it, and refuses a second fact edit of one node and role. A fact
+// no edit names keeps its bytes, in order, unless it is removed with a removed node or lies inside the span a set
+// replaces, which is the only removed or replaced case. Its node and role afterwards follow the comments around it and
+// are not preserved.
 
 // An `Edit_Op` names the change an edit makes to its node.
 Edit_Op :: enum u8 {
@@ -25,16 +26,13 @@ Edit_Op :: enum u8 {
 	Remove_Fact, // every fact of the node with `role` is removed
 }
 
-// Holds the `as` value that selects the document's own spec.
-SPEC_DEFAULT :: u8(max(u8))
-
 // A recorded edit. `node` names a node of the document the list was made with: a value or a key for `Set`, a
 // container for `Insert`, a value that is a member of a container for `Remove`, and any node but a key for the fact
 // edits, whose `role` says which facts they change. `at` is an insert's position, 0 through the container's length at
 // the time the edit was recorded. `key` is a member insert's name and `text` is the value, a record, a cell or a
 // fact's body, each copied into the list's allocator.
 Edit :: struct {
-	node: u32,
+	node: Node_Index,
 	op:   Edit_Op,
 	role: Role,
 	at:   u32,
@@ -53,7 +51,8 @@ Edit_List :: struct {
 
 // Returns an edit list over `doc`. It allocates nothing until the first edit is recorded.
 edit_list_init :: proc(doc: ^Document, allocator := context.allocator) -> Edit_List {
-	return {doc = doc, allocator = allocator}
+	edits, _ := make([dynamic]Edit, allocator)
+	return {doc = doc, edits = edits, allocator = allocator}
 }
 
 // Frees every edit's copies and the log, and sets the list to the zero value. The document is the caller's.
@@ -76,17 +75,17 @@ table_doc :: #force_inline proc(doc: ^Document) -> bool {
 // Checks a recorded text as a key, a value or a table's cell. For a table's cell, an empty text is the empty cell and
 // passes without a read.
 @(private)
-judge :: proc(doc: ^Document, text: []u8, allocator: runtime.Allocator, key: bool) -> Document_Error {
+judge :: proc(doc: ^Document, text: string, allocator: runtime.Allocator, key: bool) -> Document_Error {
 	if key {
-		return doc.spelling.edit.key(doc, text, allocator)
+		return doc.spelling.edit.key(doc, transmute([]u8)text, allocator)
 	}
 	if !table_doc(doc) {
-		return doc.spelling.edit.value(doc, text, allocator)
+		return doc.spelling.edit.value(doc, transmute([]u8)text, allocator)
 	}
 	if len(text) == 0 {
 		return {}
 	}
-	cells, e := doc.spelling.edit.record(doc, text, allocator)
+	cells, e := doc.spelling.edit.record(doc, transmute([]u8)text, allocator)
 	if e.kind != .None {
 		return e
 	}
@@ -96,7 +95,7 @@ judge :: proc(doc: ^Document, text: []u8, allocator: runtime.Allocator, key: boo
 // Returns node `node` of `list`'s document, or `.Bad_Index` when the list has no document or the index is past the
 // last node.
 @(private)
-node_of :: proc(list: ^Edit_List, node: u32) -> (doc: ^Document, n: Node, err: Document_Error) {
+node_of :: proc(list: ^Edit_List, node: Node_Index) -> (doc: ^Document, n: Node, err: Document_Error) {
 	doc = list.doc
 	if doc == nil || int(node) >= len(doc.nodes) {
 		return doc, {}, {kind = .Bad_Index}
@@ -105,37 +104,37 @@ node_of :: proc(list: ^Edit_List, node: u32) -> (doc: ^Document, n: Node, err: D
 }
 
 // Makes `text` the source bytes of node `node`, a value or a key. A key's text must read as one key of the format,
-// and in a delimited text a cell is no key, so its text is checked as a value. An `End` node, a fact node, or a
-// container in a table returns `.Bad_Index`. Runs in O(len(text)), checking the text once and copying it once.
-set :: proc(list: ^Edit_List, node: u32, text: []u8) -> Document_Error {
+// and in a delimited text a cell is no key, so its text is checked as a value. A fact node or a container in a table
+// returns `.Bad_Index`. Runs in O(len(text)), checking the text once and copying it once.
+set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error {
 	doc, n, err := node_of(list, node)
 	if err.kind != .None {
 		return err
 	}
 	table := table_doc(doc)
 	// A record or a table is no single value to write: its cells are edited.
-	if n.kind == .End || n.role > .Key || table && (n.kind == .Array || n.kind == .Map) {
+	if n.role > .Key || table && (n.kind == .Array || n.kind == .Map) {
 		return {kind = .Bad_Index}
 	}
 	// A record or a table's cell is no key: only a tree's key node reads as one.
 	if e := judge(doc, text, list.allocator, n.role == .Key && !table); e.kind != .None {
 		return e
 	}
-	return edit_add(list, node, .Set, .Value, 0, nil, text)
+	return edit_add(list, node, .Set, .Value, 0, "", text)
 }
 
 // Inserts `text` into the array `container` before its element `at`, or after its last when `at` is its length. A
 // delimited text's root accepts a record and a record accepts a cell.
 @(private)
-insert_value :: proc(list: ^Edit_List, container: u32, at: int, text: []u8) -> Document_Error {
-	return insert_at(list, container, at, nil, text)
+insert_value :: proc(list: ^Edit_List, container: Node_Index, at: int, text: string) -> Document_Error {
+	return insert_at(list, container, at, "", false, text)
 }
 
 // Inserts `key` and `text` as a member of the object `container` before its member `at`, or after its last when
 // `at` is its length.
 @(private)
-insert_member :: proc(list: ^Edit_List, container: u32, at: int, key, text: []u8) -> Document_Error {
-	return insert_at(list, container, at, key, text)
+insert_member :: proc(list: ^Edit_List, container: Node_Index, at: int, key, text: string) -> Document_Error {
+	return insert_at(list, container, at, key, true, text)
 }
 
 // `insert` is `insert_value` for an array and `insert_member` for an object.
@@ -145,8 +144,7 @@ insert :: proc {
 }
 
 @(private)
-insert_at :: proc(list: ^Edit_List, container: u32, at: int, key, text: []u8) -> Document_Error {
-	member := key != nil
+insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, member: bool, text: string) -> Document_Error {
 	doc := list.doc
 	if doc == nil || int(container) >= len(doc.nodes) {
 		return {kind = .Bad_Index}
@@ -168,7 +166,7 @@ insert_at :: proc(list: ^Edit_List, container: u32, at: int, key, text: []u8) ->
 		}
 	} else if table && container == ROOT {
 		// The root accepts a record of cells, whose count must equal the table's width.
-		cells, e := doc.spelling.edit.record(doc, text, list.allocator)
+		cells, e := doc.spelling.edit.record(doc, transmute([]u8)text, list.allocator)
 		if e.kind != .None {
 			return e
 		}
@@ -191,54 +189,49 @@ insert_at :: proc(list: ^Edit_List, container: u32, at: int, key, text: []u8) ->
 
 // Appends the removal edit. The commit removes the member with its key and one adjacent separator. A delimited
 // text's record is removed with its line end, and a record's cell when the remaining table still reads.
-remove :: proc(list: ^Edit_List, node: u32) -> Document_Error {
+remove :: proc(list: ^Edit_List, node: Node_Index) -> Document_Error {
 	_, n, err := node_of(list, node)
 	// A key and a delimited text's header row are no member of their own: a key is removed with its value.
-	if err.kind != .None || node == ROOT || n.kind == .End || n.role != .Value {
+	if err.kind != .None || node == ROOT || n.role != .Value {
 		return {kind = .Bad_Index}
 	}
-	return edit_add(list, node, .Remove, .Value, 0, nil, nil)
+	return edit_add(list, node, .Remove, .Value, 0, "", "")
 }
 
 // Makes `text` the body of every fact of node `node` and `role`. A `Comment_Inline` body holds no LF or CR. A
 // `Comment` or `Comment_Foot` body may. Runs in O(len(text)), checking the shape once and copying the text once.
-set_fact :: proc(list: ^Edit_List, node: u32, role: Role, text: []u8) -> Document_Error {
+set_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) -> Document_Error {
 	if e := fact_node(list, node, role, text); e.kind != .None {
 		return e
 	}
-	return edit_add(list, node, .Set_Fact, role, 0, nil, text)
+	return edit_add(list, node, .Set_Fact, role, 0, "", text)
 }
 
 // Removes every fact of node `node` and `role`, with its source bytes.
-remove_fact :: proc(list: ^Edit_List, node: u32, role: Role) -> Document_Error {
-	if e := fact_node(list, node, role, nil); e.kind != .None {
+remove_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role) -> Document_Error {
+	if e := fact_node(list, node, role, ""); e.kind != .None {
 		return e
 	}
-	return edit_add(list, node, .Remove_Fact, role, 0, nil, nil)
+	return edit_add(list, node, .Remove_Fact, role, 0, "", "")
 }
 
-// The checks every fact edit makes: the node accepts a fact, the role has a body shape, and no other edit of the same
-// node and role is recorded. A role at or below `.Key` is refused with `.Bad_Index`, and an unhandled role past `.Key`
-// with `.Bad_Fact`.
+// The checks every fact edit makes: the node accepts a fact and the role has a body shape. A role at or below `.Key`
+// is refused with `.Bad_Index`, and an unhandled role past `.Key` with `.Bad_Fact`. A commit refuses a second edit of
+// one node and role.
 @(private)
-fact_node :: proc(list: ^Edit_List, node: u32, role: Role, text: []u8) -> Document_Error {
+fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) -> Document_Error {
 	_, n, err := node_of(list, node)
-	if err.kind != .None || n.role == .Key || role <= .Key || n.kind == .End {
+	if err.kind != .None || n.role == .Key || role <= .Key {
 		return {kind = .Bad_Index}
 	}
 	#partial switch role {
 	case .Comment_Inline:
-		if body_lf_cr(text) {
+		if body_lf_cr(transmute([]u8)text) {
 			return {kind = .Bad_Fact}
 		}
 	case .Comment, .Comment_Foot:
 	case:
 		return {kind = .Bad_Fact}
-	}
-	for e in list.edits {
-		if e.op >= .Set_Fact && e.node == node && e.role == role {
-			return {kind = .Conflicting_Edits}
-		}
 	}
 	return {}
 }
@@ -258,7 +251,7 @@ comment_style :: #force_inline proc(doc: ^Document, spec: u8) -> (style: Comment
 // its first record, and a foot on the root. An output with no marker holds no fact. The role's shape and the body's
 // spelling are checked where the fact is written.
 @(private)
-fact_slot :: #force_inline proc(doc: ^Document, node: u32, role: Role, style: Comment_Spelling, all_records_removed: bool) -> bool {
+fact_slot :: #force_inline proc(doc: ^Document, node: Node_Index, role: Role, style: Comment_Spelling, all_records_removed: bool) -> bool {
 	if style == .None {
 		return false
 	}
@@ -299,19 +292,27 @@ records_removed :: #force_inline proc(doc: ^Document, list: ^Edit_List) -> bool 
 }
 
 // Returns the source bytes the edits make: every byte no edit touched, the edits' texts in their places, and the
-// separators the format supplies. The caller frees the result with `allocator`. An edit that another covers and a
-// second edit of one node are `.Conflicting_Edits` at the byte where the two meet. An insert whose index lies in a
-// removal run moves to the run's cut end, so it is no conflict. The result is checked by the format under `as`, and a
-// result that reads less strictly than the source is `.Bad_Result`. A spec other than the document's must read
-// strictly, since the source almost never reads under it.
-// A fact the output cannot hold is dropped with its source bytes. `dropped` counts the source facts and fact edits the
-// output cannot hold. A fact that is removed with a removed member or a set's span is not counted.
-commit :: proc(list: ^Edit_List, as := SPEC_DEFAULT, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
+// separators the format supplies, in the document's own spec. The caller frees the result with `allocator`. An edit
+// that another covers, a second edit of one node, and a second fact edit of one node and role are
+// `.Conflicting_Edits` at the byte where the two meet. An insert whose index lies in a removal run moves to the run's
+// cut end, so it is no conflict. The result is checked by the format, and a result that reads less strictly than the
+// source is `.Bad_Result`. A fact the output cannot hold is dropped with its source bytes. `dropped` counts the source
+// facts and fact edits the output cannot hold. A fact that is removed with a removed member or a set's span is not
+// counted.
+commit :: proc(list: ^Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
+	if list.doc == nil {
+		return nil, 0, {kind = .Bad_Index}
+	}
+	return commit_as(list, list.doc.read.spec, allocator)
+}
+
+// Writes `list`'s edits as spec byte `spec`, for a format's `commit` that offers another spec of its own. `commit`
+// passes the document's own spec.
+commit_as :: proc(list: ^Edit_List, spec: u8, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
 	doc := list.doc
 	if doc == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
-	spec := doc.spec if as == SPEC_DEFAULT else as
 	chunks, _ := make([dynamic]Chunk, allocator)
 	defer delete(chunks)
 	text, _ := make([dynamic]u8, allocator)
@@ -343,12 +344,35 @@ order_chunks :: proc(doc: ^Document, chunks: ^[dynamic]Chunk) -> Document_Error 
 			return a.lo < b.lo
 		}
 		// A comment that leads a byte is written before the tree's bytes there, so a head comment stays a head comment.
-		// An inline comment at a byte sorts first and stays on the value's line.
+		// An inline comment at a byte sorts first and stays on the value's line. A foot at the text's end sorts after
+		// the other chunks there, since a set may fill the last cell at that byte.
 		if a.inline != b.inline {
 			return a.inline
 		}
+		if a.tail != b.tail {
+			return !a.tail
+		}
 		// An insert at a byte is written before the bytes there, so it is spliced before what it precedes.
-		return a.insert && !b.insert
+		if a.insert != b.insert {
+			return a.insert && !b.insert
+		}
+		if !a.insert {
+			return false
+		}
+		if a.fact != b.fact {
+			return !a.fact
+		}
+		// Two inserts into different containers at one byte write the inner container's bytes first when both join
+		// the member at the byte, and the outer container's first when both come before the bytes there. A cell
+		// appended to a record comes before a record appended after it, and a record prepended before a record comes
+		// before a cell prepended in it. Two inserts into one container keep the order they were recorded in.
+		if a.container != b.container {
+			if a.append != b.append {
+				return a.append
+			}
+			return a.append ? a.container > b.container : a.container < b.container
+		}
+		return false
 	})
 	at := u64(0)
 	prev_lo, prev_hi := u64(0), u64(0)
@@ -419,7 +443,7 @@ reads_as_source :: proc(doc: ^Document, out: []u8, spec: u8) -> Document_Error {
 	if g, still := edit.reads(doc, out, true, spec); still {
 		return {kind = .Bad_Result, inner = g}
 	}
-	if spec != doc.spec {
+	if spec != doc.read.spec {
 		return {kind = .Bad_Result, inner = f}
 	}
 	if _, src_bad := edit.reads(doc, doc.src, false, spec); !src_bad {
@@ -456,23 +480,119 @@ splice :: proc(doc: ^Document, chunks: []Chunk, text: []u8, allocator: runtime.A
 
 // Replaces `src[lo:hi]` with `text[from:to]`. With `insert` set the range is empty and the text goes in at `lo`.
 // `fact` marks a fact's chunk, which shares no separator with a neighbour's removal, and `inline` marks one written
-// after the value it belongs to rather than before the byte it leads.
+// after the value it belongs to rather than before the byte it leads. `tail` marks a foot at the text's end, which is
+// written after the other chunks at its byte. `container` is the container an insert writes into, and `append` says it
+// joins the member at its byte rather than coming before it.
 @(private)
 Chunk :: struct {
 	lo, hi: u64,
 	from:   int,
 	to:     int,
+	container: Node_Index,
 	insert:    bool,
 	remove:    bool,
 	fact:      bool,
 	inline:    bool,
 	sep_first: bool,
+	tail:      bool,
+	append:    bool,
+}
+
+// A removal chunk's byte range, with `hi` raised to the greatest `hi` of the ranges before it.
+@(private)
+Removed_Span :: struct {
+	lo, hi: u64,
+}
+
+// Bit 0 of an `inserts` value marks a tree chunk's insert at the byte, bit 1 a fact chunk's.
+@(private)
+INSERT_TREE :: u8(1)
+@(private)
+INSERT_FACT :: u8(2)
+
+// Holds the bytes a chunk inserts at and the tree's removal ranges sorted by `lo`, which a fact edit asks about. A
+// fact edit adds its own insert bytes as it builds.
+@(private)
+Chunk_Index :: struct {
+	inserts:  map[u64]u8,
+	removals: []Removed_Span,
+}
+
+// Returns whether a chunk inserts at `pos`, a tree's or a fact's.
+@(private)
+insert_at_byte :: #force_inline proc(inserts: ^map[u64]u8, pos: u64) -> bool {
+	_, ok := inserts[pos]
+	return ok
+}
+
+// Returns whether a tree chunk inserts at `pos`.
+@(private)
+tree_insert_at :: #force_inline proc(inserts: ^map[u64]u8, pos: u64) -> bool {
+	bits, ok := inserts[pos]
+	return ok && bits & INSERT_TREE != 0
+}
+
+// Builds the index of the chunks built so far. `extra` is the number of fact edits, each of which may add an insert
+// at one byte.
+@(private)
+chunk_index :: proc(chunks: []Chunk, extra: int, allocator: runtime.Allocator) -> (idx: Chunk_Index, ok: bool) {
+	inserts, removes := 0, 0
+	for c in chunks {
+		if c.insert {
+			inserts += 1
+		} else if c.remove && !c.fact {
+			removes += 1
+		}
+	}
+	idx.inserts = make(map[u64]u8, inserts + extra, allocator)
+	if idx.inserts == nil {
+		return {}, false
+	}
+	for c in chunks {
+		if c.insert {
+			idx.inserts[c.lo] |= INSERT_TREE
+		}
+	}
+	spans, err := make([]Removed_Span, removes, allocator)
+	if err != nil {
+		delete(idx.inserts)
+		return {}, false
+	}
+	k := 0
+	for c in chunks {
+		if c.remove && !c.fact {
+			spans[k] = {lo = c.lo, hi = c.hi}
+			k += 1
+		}
+	}
+	slice.sort_by(spans, proc(a, b: Removed_Span) -> bool { return a.lo < b.lo })
+	for i in 1 ..< len(spans) {
+		spans[i].hi = max(spans[i].hi, spans[i-1].hi)
+	}
+	idx.removals = spans
+	return idx, true
+}
+
+// Returns whether a tree removal covers byte `pos`.
+@(private)
+removal_covers :: #force_inline proc(idx: ^Chunk_Index, pos: u64) -> bool {
+	spans := idx.removals
+	lo, hi := 0, len(spans)
+	for lo < hi {
+		mid := lo + (hi - lo) / 2
+		if spans[mid].lo <= pos {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo > 0 && spans[lo-1].hi > pos
 }
 
 // Whether `c` is the delimited text's record that sets the table's width: the only record of a table with no
 // header, or the header of a table with no data record. Such a record may change its width.
 @(private)
-sole_record :: proc(doc: ^Document, c: u32) -> bool {
+sole_record :: proc(doc: ^Document, c: Node_Index) -> bool {
 	if doc.header == c { return length(doc, ROOT) == 0 }
 	return doc.header == 0 && length(doc, ROOT) == 1
 }
@@ -495,11 +615,11 @@ table_width :: proc(doc: ^Document) -> int {
 // whose spelling ends with no marker runs to the line's end, and a delimited text's line may also start with its
 // comment byte and hold no line end.
 @(private)
-ends_in_comment :: proc(doc: ^Document, v: u32, pos: u64) -> bool {
-	if doc.comment != 0 && pos > 0 && pos <= u64(len(doc.src)) {
+ends_in_comment :: proc(doc: ^Document, v: Node_Index, pos: u64) -> bool {
+	if doc.read.comment != 0 && pos > 0 && pos <= u64(len(doc.src)) {
 		if last := doc.src[pos-1]; last != '\n' && last != '\r' {
 			lo, _ := line_of(doc.src, pos, !table_doc(doc))
-			if doc.src[lo] == doc.comment {
+			if doc.src[lo] == doc.read.comment {
 				return true
 			}
 		}
@@ -517,7 +637,7 @@ ends_in_comment :: proc(doc: ^Document, v: u32, pos: u64) -> bool {
 // Only a `Map`'s member has a key node before it. A dsv root's first record follows the header row, whose last cell
 // also has role `Key`, and that cell names a column, not the record.
 @(private)
-value_lo :: proc(doc: ^Document, parent, v: u32) -> u64 {
+value_lo :: proc(doc: ^Document, parent, v: Node_Index) -> u64 {
 	if doc.nodes[parent].kind == .Map && doc.nodes[v-1].role == .Key {
 		return key_start(doc.nodes[v-1])
 	}
@@ -526,7 +646,7 @@ value_lo :: proc(doc: ^Document, parent, v: u32) -> u64 {
 
 // Returns the first byte of member `v` of `parent`: a comment above it, or its own first byte.
 @(private)
-entry_lo :: proc(doc: ^Document, parent, v: u32) -> u64 {
+entry_lo :: proc(doc: ^Document, parent, v: Node_Index) -> u64 {
 	lo := value_lo(doc, parent, v)
 	for f in all_facts(doc, v) {
 		if f.lo < lo {
@@ -540,7 +660,7 @@ entry_lo :: proc(doc: ^Document, parent, v: u32) -> u64 {
 // comma that follows the member, the extent stops at that comma, so the cut removes the separator. With no fact after
 // the comma, the next member's cut takes the separator.
 @(private)
-entry_hi :: proc(doc: ^Document, v: u32) -> u64 {
+entry_hi :: proc(doc: ^Document, v: Node_Index) -> u64 {
 	hi := key_start(doc.nodes[v]) + u64(len(span(doc, v)))
 	at := hi
 	for f in all_facts(doc, v) {
@@ -559,7 +679,7 @@ entry_hi :: proc(doc: ^Document, v: u32) -> u64 {
 // Returns the first `b` in `src[lo:hi]` that lies in a gap between the facts of `node`, or false when there is none.
 // A separator lies between comments, and no comment body holds one.
 @(private)
-trivia_byte :: proc(doc: ^Document, node: u32, lo, hi: u64, b: u8) -> (u64, bool) {
+trivia_byte :: proc(doc: ^Document, node: Node_Index, lo, hi: u64, b: u8) -> (u64, bool) {
 	from := lo
 	for f in all_facts(doc, node) {
 		if f.lo >= hi {
@@ -583,7 +703,7 @@ trivia_byte :: proc(doc: ^Document, node: u32, lo, hi: u64, b: u8) -> (u64, bool
 // Returns the bytes between container `c`'s brackets, where its members go. A delimited text's empty table is empty
 // to its end, and a tree's empty container keeps only its brackets.
 @(private)
-interior :: proc(doc: ^Document, c: u32) -> (lo, hi: u64) {
+interior :: proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64) {
 	hi = doc.spelling.close_end(doc, c)
 	if table_doc(doc) {
 		return doc.nodes[c].lo, hi
@@ -595,14 +715,14 @@ interior :: proc(doc: ^Document, c: u32) -> (lo, hi: u64) {
 // removal writes from, and one past the last.
 @(private)
 Entry :: struct {
-	node: u32,
+	node: Node_Index,
 	lo:   u64,
 	hi:   u64,
 }
 
 // Collects the members of `c` into `out`, in source order.
 @(private)
-collect_entries :: proc(doc: ^Document, c: u32, out: ^[dynamic]Entry) -> bool {
+collect_entries :: proc(doc: ^Document, c: Node_Index, out: ^[dynamic]Entry) -> bool {
 	clear(out)
 	it := children(doc, c)
 	for {
@@ -616,9 +736,10 @@ collect_entries :: proc(doc: ^Document, c: u32, out: ^[dynamic]Entry) -> bool {
 
 // Writes one insert's bytes and its chunk at `pos`: the member's separator, a table's cell or record separator, on
 // the side `side` picks (-1 before, 0 none, 1 after). A leading newline keeps the insert off the line of the comments
-// that lead its neighbour. Returns false when the format has no record separator.
+// that lead its neighbour. `append` says the insert joins the member at `pos` rather than coming before it. Returns
+// false when the format has no record separator.
 @(private)
-write_insert :: proc(doc: ^Document, e: Edit, pos: u64, side: int, leading, table: bool, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk) -> bool {
+write_insert :: proc(doc: ^Document, e: Edit, pos: u64, side: int, leading, table, append: bool, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk) -> bool {
 	cell_sep: [1]u8
 	sep := doc.spelling.edit.member_sep
 	if table && e.node == ROOT {
@@ -627,7 +748,7 @@ write_insert :: proc(doc: ^Document, e: Edit, pos: u64, side: int, leading, tabl
 		}
 		sep = doc.spelling.edit.record_sep(doc)
 	} else if table {
-		cell_sep[0] = doc.delimiter
+		cell_sep[0] = doc.read.delimiter
 		sep = string(cell_sep[:])
 	}
 	sep_bytes := transmute([]u8)sep
@@ -646,7 +767,7 @@ write_insert :: proc(doc: ^Document, e: Edit, pos: u64, side: int, leading, tabl
 	if leading {
 		push(text, '\n') or_return
 	}
-	push(chunks, Chunk{lo = pos, hi = pos, from = from, to = len(text^), insert = true, sep_first = side < 0}) or_return
+	push(chunks, Chunk{lo = pos, hi = pos, from = from, to = len(text^), container = e.node, insert = true, sep_first = side < 0, append = append}) or_return
 	return true
 }
 
@@ -701,7 +822,7 @@ insert_chunk :: proc(doc: ^Document, e: Edit, entries: []Entry, table, first_emp
 		}
 		if !table && ends_in_comment(doc, entries[n-1].node, pos) {
 			// A line comment ends its line: the new member starts the next one, after the line end the text has.
-			pos = line_end_len(doc.src, pos, true)
+			pos = line_end_len(doc.src, pos)
 		}
 	case:
 		// An empty container writes the member alone, or after a separator another edit put there.
@@ -714,7 +835,7 @@ insert_chunk :: proc(doc: ^Document, e: Edit, entries: []Entry, table, first_emp
 			side = -1
 		}
 	}
-	return write_insert(doc, e, pos, side, leading && !table, table, text, chunks)
+	return write_insert(doc, e, pos, side, leading && !table, table, int(e.at) == n, text, chunks)
 }
 
 // One run of removed members. `first` and `last` are the removed member indices, and `hi` is where the run's cut
@@ -817,7 +938,7 @@ fact_write :: proc(doc: ^Document, style: Comment_Spelling, role: Role, body: []
 			push_all(text, transmute([]u8)string("*/")) or_return
 		}
 	case .Byte:
-		push(text, doc.comment) or_return
+		push(text, doc.read.comment) or_return
 		push_all(text, body) or_return
 	case .None:
 		return false
@@ -832,9 +953,10 @@ fact_write :: proc(doc: ^Document, style: Comment_Spelling, role: Role, body: []
 // Builds the chunks of every source fact the output cannot hold and of every fact edit. A source fact the output cannot
 // hold is removed with its bytes and counted, unless a set writes over its bytes, where it is removed with the set and is
 // not counted. A source fact the output can hold stays where its bytes are: a removal takes it, a set takes the bytes inside
-// its span, and an insert beside it leaves it.
+// its span, and an insert beside it leaves it. Two fact edits of one node and role are `.Conflicting_Edits`.
 @(private)
-fact_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk, dropped: ^int, all_records_removed: bool, allocator: runtime.Allocator) -> bool {
+fact_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk, dropped: ^int, all_records_removed: bool, idx: ^Chunk_Index, allocator: runtime.Allocator) -> (err: Document_Error, ok: bool) {
+	err = {kind = .No_Memory}
 	Span :: struct {
 		lo, hi: u64,
 	}
@@ -855,6 +977,11 @@ fact_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, t
 		}
 	}
 	slice.sort(keys[:])
+	for i in 1 ..< len(keys) {
+		if keys[i] == keys[i-1] {
+			return {kind = .Conflicting_Edits, at = key_start(doc.nodes[Node_Index(keys[i] >> 8)])}, false
+		}
+	}
 	slice.sort_by(spans[:], proc(a, b: Span) -> bool { return a.lo < b.lo })
 	for i in 1 ..< len(spans[:]) {
 		spans[i].hi = max(spans[i].hi, spans[i-1].hi)
@@ -885,10 +1012,10 @@ fact_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, t
 	}
 	for e in list.edits {
 		if e.op >= .Set_Fact {
-			fact_edit_chunks(doc, list, style, e, text, chunks, dropped, all_records_removed) or_return
+			fact_edit_chunks(doc, list, style, e, text, chunks, dropped, all_records_removed, idx) or_return
 		}
 	}
-	return true
+	return {}, true
 }
 
 // Returns the indent of the line holding `pos` and whether bytes stand before `pos` on that line.
@@ -930,7 +1057,7 @@ comma_after :: proc(src: []u8, pos: u64) -> (u64, bool) {
 // Returns the byte a fact body is written at: the first old fact's end when the edit replaces one, else after the
 // value and comma on its line, else before the byte the role leads.
 @(private)
-fact_place :: proc(doc: ^Document, e: Edit, taken: int, first_hi: u64, chunks: ^[dynamic]Chunk) -> u64 {
+fact_place :: proc(doc: ^Document, e: Edit, taken: int, first_hi: u64, idx: ^Chunk_Index) -> u64 {
 	if taken > 0 {
 		return first_hi
 	}
@@ -938,10 +1065,8 @@ fact_place :: proc(doc: ^Document, e: Edit, taken: int, first_hi: u64, chunks: ^
 		pos := key_start(doc.nodes[e.node]) + u64(len(span(doc, e.node)))
 		after, comma := comma_after(doc.src, pos)
 		if comma {
-			for c in chunks^ {
-				if c.remove && !c.fact && after > c.lo && after <= c.hi {
-					return pos
-				}
+			if removal_covers(idx, after - 1) {
+				return pos
 			}
 			pos = after
 		}
@@ -967,7 +1092,7 @@ fact_place :: proc(doc: ^Document, e: Edit, taken: int, first_hi: u64, chunks: ^
 // line, and a replacement or inline fact is written in the block spelling.
 @(private)
 fact_line :: proc(doc: ^Document, e: Edit, pos: u64, taken: int, inserted: bool) -> bool {
-	line := taken == 0 && e.role != .Comment_Inline || pos >= u64(len(doc.src)) || line_end_len(doc.src, pos, true) > pos
+	line := taken == 0 && e.role != .Comment_Inline || pos >= u64(len(doc.src)) || line_end_len(doc.src, pos) > pos
 	line = line && !body_line_end(e.text)
 	if e.role == .Comment_Inline || taken > 0 {
 		line = line && !inserted
@@ -977,23 +1102,18 @@ fact_line :: proc(doc: ^Document, e: Edit, pos: u64, taken: int, inserted: bool)
 
 // Whether a line end before `pos` is left by the removal chunks. At the text's start there is no line end to keep.
 @(private)
-line_end_survives :: proc(doc: ^Document, chunks: ^[dynamic]Chunk, pos: u64) -> bool {
+line_end_survives :: proc(doc: ^Document, idx: ^Chunk_Index, pos: u64) -> bool {
 	_, eol, has_eol := line_start(doc.src, pos, !table_doc(doc))
 	if !has_eol {
 		return true
 	}
-	for c in chunks^ {
-		if c.remove && !c.fact && eol >= c.lo && eol < c.hi {
-			return false
-		}
-	}
-	return true
+	return !removal_covers(idx, eol)
 }
 
 // Builds the chunks of one fact edit. The facts the edit names are removed, and a set writes its body where the role
 // reads it, or drops it and counts it. A body the output cannot spell is dropped too. The facts are read once.
 @(private)
-fact_edit_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, e: Edit, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk, dropped: ^int, all_records_removed: bool) -> bool {
+fact_edit_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, e: Edit, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk, dropped: ^int, all_records_removed: bool, idx: ^Chunk_Index) -> bool {
 	slot := fact_slot(doc, e.node, e.role, style, all_records_removed)
 	first_lo, first_hi, taken, ok := fact_take_old(doc, e, slot, chunks)
 	if !ok {
@@ -1006,19 +1126,10 @@ fact_edit_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelli
 		}
 		return true
 	}
-	pos := fact_place(doc, e, taken, first_hi, chunks)
-	inserted, tree_insert, insert_here := false, false, false
-	for c in chunks^ {
-		if c.insert {
-			if c.lo == pos {
-				inserted = true
-				tree_insert ||= !c.fact
-			}
-			if c.lo == first_lo {
-				insert_here ||= !c.fact
-			}
-		}
-	}
+	pos := fact_place(doc, e, taken, first_hi, idx)
+	inserted := insert_at_byte(&idx.inserts, pos)
+	tree_insert := tree_insert_at(&idx.inserts, pos)
+	insert_here := tree_insert_at(&idx.inserts, first_lo)
 	line := fact_line(doc, e, pos, taken, inserted)
 	if !fact_body_held(style, e.text, line) {
 		if taken > 0 {
@@ -1027,36 +1138,42 @@ fact_edit_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelli
 		dropped^ += 1
 		return true
 	}
-	from := len(text^)
+	lo, hi := pos, pos
+	indent: []u8
+	lead := false
 	if taken > 0 {
-		// A head or foot that the source held mid-line gets a line of its own, so its role survives the bytes another
-		// edit may remove before it.
-		indent, lead := line_shape(doc, first_lo)
+		lo, hi = first_lo, first_hi
+		indent, lead = line_shape(doc, lo)
 		lead = lead && e.role != .Comment_Inline
-		if style == .Byte {
-			indent, lead = nil, false
-		} else if e.role != .Comment_Inline {
-			lead = lead || insert_here || !line_end_survives(doc, chunks, first_lo)
-		}
-		fact_write(doc, style, e.role, e.text, line, indent, lead, false, text) or_return
-		push(chunks, Chunk{lo = first_lo, hi = first_hi, from = from, to = len(text^), fact = true}) or_return
-		return true
+	} else if e.role != .Comment_Inline {
+		indent, lead = line_shape(doc, pos)
 	}
-	inline := e.role == .Comment_Inline
-	if inline {
-		fact_write(doc, style, e.role, e.text, line, nil, false, false, text) or_return
-	} else {
-		indent, lead := line_shape(doc, pos)
-		if style == .Byte {
-			lo, _ := line_of(doc.src, pos, false)
-			indent, lead = nil, pos != text_start(doc.src, 0) && lo < pos
+	if style == .Byte {
+		indent, lead = nil, false
+		if taken == 0 && e.role != .Comment_Inline {
+			at, _ := line_of(doc.src, pos, false)
+			lead = pos != text_start(doc.src, 0) && at < pos
 		}
-		// An insert at the same byte writes before the fact, and a cut may take the line end before it, so a head or
-		// foot needs a line end to stay on its own line and keep the role the edit names.
-		lead = lead || tree_insert || !line_end_survives(doc, chunks, pos)
-		fact_write(doc, style, e.role, e.text, line, indent, lead, true, text) or_return
 	}
-	push(chunks, Chunk{lo = pos, hi = pos, from = from, to = len(text^), insert = true, fact = true, inline = inline}) or_return
+	if e.role != .Comment_Inline {
+		if taken > 0 {
+			// A head or foot that the source held mid-line gets a line of its own, so its role survives the bytes
+			// another edit may remove before it.
+			if style != .Byte {
+				lead = lead || insert_here || !line_end_survives(doc, idx, lo)
+			}
+		} else {
+			// An insert at the same byte writes before the fact, and a cut may take the line end before it, so a
+			// head or foot needs a line end to stay on its own line and keep the role the edit names.
+			lead = lead || tree_insert || !line_end_survives(doc, idx, pos)
+		}
+	}
+	from := len(text^)
+	fact_write(doc, style, e.role, e.text, line, indent, lead, taken == 0 && e.role != .Comment_Inline, text) or_return
+	push(chunks, Chunk{lo = lo, hi = hi, from = from, to = len(text^), insert = taken == 0, fact = true, inline = taken == 0 && e.role == .Comment_Inline, tail = e.role == .Comment_Foot && pos >= u64(len(doc.src))}) or_return
+	if taken == 0 {
+		idx.inserts[pos] |= INSERT_FACT
+	}
 	return true
 }
 
@@ -1064,15 +1181,15 @@ fact_edit_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelli
 // edit below it.
 @(private)
 Remove_Range :: struct {
-	lo: u32,
-	hi: u32,
+	lo: Node_Index,
+	hi: Node_Index,
 	op: Edit_Op,
 }
 
 // A `Remove_Query` names the node an edit writes at, its index in the list, and whether it is a fact edit.
 @(private)
 Remove_Query :: struct {
-	node: u32,
+	node: Node_Index,
 	edit: int,
 	fact: bool,
 }
@@ -1096,7 +1213,7 @@ edits_removed :: proc(doc: ^Document, list: ^Edit_List, allocator: runtime.Alloc
 		case .Remove, .Set:
 			n := doc.nodes[e.node]
 			span := n.n if n.kind == .Array || n.kind == .Map else 1
-			push(&ranges, Remove_Range{lo = e.node, hi = e.node + span, op = e.op}) or_return
+			push(&ranges, Remove_Range{lo = e.node, hi = e.node + Node_Index(span), op = e.op}) or_return
 			if e.op == .Set {
 				push(&queries, Remove_Query{node = e.node, edit = i}) or_return
 			}
@@ -1108,9 +1225,9 @@ edits_removed :: proc(doc: ^Document, list: ^Edit_List, allocator: runtime.Alloc
 	}
 	slice.sort_by(ranges[:], proc(a, b: Remove_Range) -> bool { return a.lo < b.lo })
 	slice.sort_by(queries[:], proc(a, b: Remove_Query) -> bool { return a.node < b.node })
-	removed_hi, set_hi, same_set_hi := u32(0), u32(0), u32(0)
-	node := u32(0)
-	ri, best, best_node := 0, -1, u32(0)
+	removed_hi, set_hi, same_set_hi := Node_Index(0), Node_Index(0), Node_Index(0)
+	node := Node_Index(0)
+	ri, best, best_node := 0, -1, Node_Index(0)
 	for q in queries {
 		if q.node != node {
 			node = q.node
@@ -1152,8 +1269,31 @@ chunk_edits :: proc(doc: ^Document, list: ^Edit_List, spec: u8, text: ^[dynamic]
 	if e, good := tree_chunks(doc, list, text, chunks, allocator); !good {
 		return e, false
 	}
+	fact_edits := 0
+	for e in list.edits {
+		if e.op >= .Set_Fact {
+			fact_edits += 1
+		}
+	}
+	idx: Chunk_Index
+	defer {
+		if idx.inserts != nil {
+			delete(idx.inserts)
+		}
+		if idx.removals != nil {
+			delete(idx.removals, allocator)
+		}
+	}
+	if fact_edits > 0 {
+		idx, ok = chunk_index(chunks[:], fact_edits, allocator)
+		if !ok {
+			return {kind = .No_Memory}, false
+		}
+	}
 	all_records_removed := table_doc(doc) && records_removed(doc, list)
-	fact_chunks(doc, list, style, text, chunks, dropped, all_records_removed, allocator) or_return
+	if e, good := fact_chunks(doc, list, style, text, chunks, dropped, all_records_removed, &idx, allocator); !good {
+		return e, false
+	}
 	return {}, true
 }
 
@@ -1229,7 +1369,7 @@ container_cuts :: proc(doc: ^Document, list: ^Edit_List, groups: []Target, first
 
 // Builds the removal chunks of one container, merging adjacent removals into runs and recording each run's cut end.
 @(private)
-container_cut_chunks :: proc(doc: ^Document, c: u32, entries: []Entry, cuts: []int, table: bool, runs: ^[dynamic]Run, chunks: ^[dynamic]Chunk) -> (err: Document_Error, ok: bool) {
+container_cut_chunks :: proc(doc: ^Document, c: Node_Index, entries: []Entry, cuts: []int, table: bool, runs: ^[dynamic]Run, chunks: ^[dynamic]Chunk) -> (err: Document_Error, ok: bool) {
 	err = {kind = .No_Memory}
 	clear(runs)
 	for k := 0; k < len(cuts); {
@@ -1253,7 +1393,7 @@ container_cut_chunks :: proc(doc: ^Document, c: u32, entries: []Entry, cuts: []i
 // Writes one container's inserts. An insert inside a removal run moves to the run's cut end, and its separator follows
 // the survivors.
 @(private)
-place_inserts :: proc(doc: ^Document, list: ^Edit_List, groups: []Target, inserts: []int, entries: []Entry, runs: []Run, comment_nodes: []u32, table: bool, c: u32, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk) -> bool {
+place_inserts :: proc(doc: ^Document, list: ^Edit_List, groups: []Target, inserts: []int, entries: []Entry, runs: []Run, comment_nodes: []Node_Index, table: bool, c: Node_Index, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk) -> bool {
 	placed := 0
 	for k in inserts {
 		e := list.edits[groups[k].edit]
@@ -1284,12 +1424,12 @@ place_inserts :: proc(doc: ^Document, list: ^Edit_List, groups: []Target, insert
 			// A comment line at the cut's end needs a line of its own, and each record written before it ends with a
 			// line end. A record separator is a line end. A delimited comment line starts with the comment byte after a
 			// line end, so the byte at the cut's end is a comment exactly then.
-			if table && c == ROOT && doc.comment != 0 && r.hi < u64(len(doc.src)) && doc.src[r.hi] == doc.comment &&
+			if table && c == ROOT && doc.read.comment != 0 && r.hi < u64(len(doc.src)) && doc.src[r.hi] == doc.read.comment &&
 			   r.hi > 0 && doc.src[r.hi-1] == '\n' {
 				side = 1
 			}
 		}
-		if !write_insert(doc, e, r.hi, side, false, table, text, chunks) {
+		if !write_insert(doc, e, r.hi, side, false, table, r.last + 1 >= len(entries), text, chunks) {
 			return false
 		}
 		r.inserts += 1
@@ -1317,7 +1457,7 @@ tree_chunks :: proc(doc: ^Document, list: ^Edit_List, text: ^[dynamic]u8, chunks
 	defer delete(inserts)
 	runs, _ := make([dynamic]Run, allocator)
 	defer delete(runs)
-	comment_nodes, _ := make([dynamic]u32, 0, 8, allocator)
+	comment_nodes, _ := make([dynamic]Node_Index, 0, 8, allocator)
 	defer delete(comment_nodes)
 	for e in list.edits {
 		if e.op == .Set_Fact && e.role == .Comment {
@@ -1351,7 +1491,7 @@ tree_chunks :: proc(doc: ^Document, list: ^Edit_List, text: ^[dynamic]u8, chunks
 // Returns the cut of a run that has a member after it. The separator that joins the member before may be after the
 // run's own comments, and the next member's own comments come before its separator.
 @(private)
-cut_with_next :: proc(doc: ^Document, c: u32, entries: []Entry, a, b: int, chunks: ^[dynamic]Chunk) -> (lo, hi: u64, ok: bool) {
+cut_with_next :: proc(doc: ^Document, c: Node_Index, entries: []Entry, a, b: int, chunks: ^[dynamic]Chunk) -> (lo, hi: u64, ok: bool) {
 	next := entries[b+1]
 	lo, hi = entries[a].lo, next.lo
 	if comma, found := trivia_byte(doc, entries[a].node, lo, value_lo(doc, c, entries[a].node), ','); found {
@@ -1398,7 +1538,7 @@ cut_with_next :: proc(doc: ^Document, c: u32, entries: []Entry, a, b: int, chunk
 // stays, so the cut starts after that fact's line. The removed members' own facts after their trailing separator are
 // removed as separate chunks.
 @(private)
-cut_before :: proc(doc: ^Document, c: u32, entries: []Entry, a, b: int, chunks: ^[dynamic]Chunk) -> (lo, hi: u64, ok: bool) {
+cut_before :: proc(doc: ^Document, c: Node_Index, entries: []Entry, a, b: int, chunks: ^[dynamic]Chunk) -> (lo, hi: u64, ok: bool) {
 	prev := entries[a-1]
 	lo, hi = prev.hi, entries[b].hi
 	for f in all_facts(doc, prev.node) {
@@ -1424,7 +1564,7 @@ cut_before :: proc(doc: ^Document, c: u32, entries: []Entry, a, b: int, chunks: 
 		}
 	}
 	// A line comment just before the run would extend over what follows, so the cut keeps its line end.
-	if e := line_end_len(doc.src, lo, true); e > lo && e <= hi {
+	if e := line_end_len(doc.src, lo); e > lo && e <= hi {
 		lo = e
 	}
 	return lo, hi, true
@@ -1433,7 +1573,7 @@ cut_before :: proc(doc: ^Document, c: u32, entries: []Entry, a, b: int, chunks: 
 // Returns the cut of a run that empties its container. The foot stays before the close, and a separator after the foot
 // joined it to a member that is gone.
 @(private)
-cut_all :: proc(doc: ^Document, c: u32, entries: []Entry, chunks: ^[dynamic]Chunk) -> (lo, hi: u64, ok: bool) {
+cut_all :: proc(doc: ^Document, c: Node_Index, entries: []Entry, chunks: ^[dynamic]Chunk) -> (lo, hi: u64, ok: bool) {
 	lo, hi = interior(doc, c)
 	close := hi
 	for f in all_facts(doc, c) {
@@ -1455,7 +1595,7 @@ cut_all :: proc(doc: ^Document, c: u32, entries: []Entry, chunks: ^[dynamic]Chun
 // separator to the cut. Otherwise the separator before the run is removed with it, and an emptied container keeps its
 // brackets and its foot.
 @(private)
-run_cut :: proc(doc: ^Document, c: u32, entries: []Entry, a, b: int, table: bool, chunks: ^[dynamic]Chunk) -> (lo, hi: u64, ok: bool) {
+run_cut :: proc(doc: ^Document, c: Node_Index, entries: []Entry, a, b: int, table: bool, chunks: ^[dynamic]Chunk) -> (lo, hi: u64, ok: bool) {
 	switch {
 	case table && c == ROOT:
 		// A record's extent starts at its own comments, so they are removed with the record.
@@ -1473,7 +1613,7 @@ run_cut :: proc(doc: ^Document, c: u32, entries: []Entry, a, b: int, table: bool
 // Checks the removals a delimited text's record needs: it keeps a cell that reads, and its width keeps a value the
 // table can follow.
 @(private)
-table_cut_check :: proc(doc: ^Document, c: u32, entries: []Entry, cuts: []int) -> (Document_Error, bool) {
+table_cut_check :: proc(doc: ^Document, c: Node_Index, entries: []Entry, cuts: []int) -> (Document_Error, bool) {
 	l := len(entries)
 	if len(cuts) >= l || l >= table_width(doc) && !sole_record(doc, c) {
 		return {kind = .Bad_Width}, false
@@ -1493,8 +1633,8 @@ table_cut_check :: proc(doc: ^Document, c: u32, entries: []Entry, cuts: []int) -
 
 // Returns the position of member node `node` among `entries`, or -1 when it is absent.
 @(private)
-entry_at :: proc(entries: []Entry, node: u32) -> int {
-	i, found := slice.binary_search_by(entries, node, proc(e: Entry, n: u32) -> slice.Ordering {
+entry_at :: proc(entries: []Entry, node: Node_Index) -> int {
+	i, found := slice.binary_search_by(entries, node, proc(e: Entry, n: Node_Index) -> slice.Ordering {
 		return slice.cmp(e.node, n)
 	})
 	return i if found else -1
@@ -1504,7 +1644,7 @@ entry_at :: proc(entries: []Entry, node: u32) -> int {
 // named it. An insert's `at` orders it against the other inserts of its container.
 @(private)
 Target :: struct {
-	node: u32,
+	node: Node_Index,
 	edit: int,
 	at:   u32,
 }
@@ -1518,7 +1658,7 @@ parents_of :: proc(doc: ^Document, targets: []Target, groups: ^[dynamic]Target, 
 		return true
 	}
 	slice.sort_by(targets, proc(a, b: Target) -> bool { return a.node < b.node })
-	stack, _ := make([dynamic]u32, allocator)
+	stack, _ := make([dynamic]Node_Index, allocator)
 	defer delete(stack)
 	k := 0
 	for i in 0 ..< len(doc.nodes) {
@@ -1529,7 +1669,7 @@ parents_of :: proc(doc: ^Document, targets: []Target, groups: ^[dynamic]Target, 
 			}
 			pop(&stack)
 		}
-		for k < len(targets) && targets[k].node == u32(i) {
+		for k < len(targets) && targets[k].node == Node_Index(i) {
 			parent := NO_NODE
 			if len(stack[:]) > 0 {
 				parent = stack[:][len(stack[:]) - 1]
@@ -1539,7 +1679,7 @@ parents_of :: proc(doc: ^Document, targets: []Target, groups: ^[dynamic]Target, 
 		}
 		n := doc.nodes[i]
 		if n.kind == .Array || n.kind == .Map {
-			push(&stack, u32(i)) or_return
+			push(&stack, Node_Index(i)) or_return
 		}
 	}
 	return true
@@ -1548,7 +1688,7 @@ parents_of :: proc(doc: ^Document, targets: []Target, groups: ^[dynamic]Target, 
 // Copies an edit's key and text into one allocation, then appends the edit to the log. A refused append frees the
 // copy.
 @(private)
-edit_add :: proc(list: ^Edit_List, node: u32, op: Edit_Op, role: Role, at: u32, key, text: []u8) -> Document_Error {
+edit_add :: proc(list: ^Edit_List, node: Node_Index, op: Edit_Op, role: Role, at: u32, key, text: string) -> Document_Error {
 	k, t: []u8
 	owned: []u8
 	if n := len(key) + len(text); n > 0 {
@@ -1556,8 +1696,8 @@ edit_add :: proc(list: ^Edit_List, node: u32, op: Edit_Op, role: Role, at: u32, 
 		if err != nil {
 			return {kind = .No_Memory}
 		}
-		copy(fresh, key)
-		copy(fresh[len(key):], text)
+		copy(fresh, transmute([]u8)key)
+		copy(fresh[len(key):], transmute([]u8)text)
 		owned = fresh
 		if len(key) > 0 {
 			k = fresh[:len(key)]
@@ -1590,10 +1730,8 @@ push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool) {
 
 @(private)
 push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool) {
-	for v in vs {
-		if _, good := push(d, v); !good {
-			return 0, false
-		}
+	if _, err := append(d, ..vs); err != nil {
+		return 0, false
 	}
 	return len(vs), true
 }

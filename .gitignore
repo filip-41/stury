@@ -18,6 +18,9 @@
 
 # Benchmark inputs: bench/gen.py writes the synthetic fixtures, bench/fetch.py the pinned corpus under corpus/.
 /bench/fixtures/
+/next/bench/fixtures/
+# A peer built in place with cargo, without CARGO_TARGET_DIR.
+/next/bench/peers/rust/target/
 __pycache__/
 
 # Library output from `odin build ./json -build-mode:lib`
@@ -62,3 +65,4 @@ tmp/
 /tools/api_surface.py
 /ols.json
 /next/build/
+/compare/build/

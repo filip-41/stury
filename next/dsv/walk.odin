@@ -1,3 +1,5 @@
+// `kernel` is used only in a generic procedure, which the unused-import check does not read.
+#+vet !unused-imports
 // The walk of a delimited text, in passes of 64-byte blocks (pass.odin). A block is reduced to masks of its delimiter,
 // LF, CR and quote bytes, `prefix_xor` of the quote mask marks the bytes inside quoted fields, and every later test is
 // a bit test on a mask, for quote placement, a CR that no LF follows, the delimiters and LFs that are the text's rather
@@ -128,20 +130,27 @@ option_fault :: #force_inline proc "contextless" ($S: Spec, opts: Options) -> Ma
 // quotes and leaves out the CR of a CR LF. The header makes no tokens, and an empty line or a line holding only a CR is
 // no record.
 // A caller that holds a buffer of one token per header cell passes it as `keys`, and the walk writes the header's cells
-// there and allocates none. With nil, the walk allocates the buffer.
-walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), keys: []core.Token = nil) -> (hi: u64, fault: Maybe(core.Fault)) {
+// there and allocates none. With nil, the walk allocates the buffer. `regs` nil starts from zero registers and keeps
+// none. `opts` is `Options{}` by default.
+walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), keys: []core.Token = nil) -> (hi: u64, fault: Maybe(core.Fault)) {
 	if f, bad := option_fault(S, opts).?; bad {
 		return 0, f
+	}
+	// The nil test runs once per walk, not per token.
+	zero: core.Hook_Regs
+	reg := regs
+	if reg == nil {
+		reg = &zero
 	}
 	// With no `keys` buffer and a header, allocates one 16-byte token per header cell for the walk to write the
 	// header's cells into. Data cells read their column's key from it by index. The buffer is scratch freed before
 	// the walk returns, so it comes from the default heap, which keeps the walk callable from a hook. If the
 	// allocation fails the walk returns `No_Memory` before reading a byte. `validate` allocates nothing.
-	context = runtime.default_context()
 	from := min(lo, u64(len(src)))
 	key_buf := keys
 	owned: []core.Token
 	if key_buf == nil && !opts.no_header {
+		context = runtime.default_context()
 		err: runtime.Allocator_Error
 		key_buf, err = make([]core.Token, header_cells(src, int(core.text_start(src, from)), S, opts))
 		if err != nil {
@@ -149,8 +158,11 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H,
 		}
 		owned = key_buf
 	}
-	defer delete(owned)
-	r := run(src, from, S, opts, h, regs, on, true, key_buf)
+	r := run(src, from, S, opts, h, reg, on, true, key_buf)
+	if owned != nil {
+		context = runtime.default_context()
+		delete(owned)
+	}
 	return r >> 16, core.fault_of(r, &RULES)
 }
 

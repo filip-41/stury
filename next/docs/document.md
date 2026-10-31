@@ -1,0 +1,496 @@
+# The document
+
+A build turns one walk's tokens into a document: the tokens as 16-byte nodes in preorder, the comments beside them as
+facts, and a table of services the format supplies to read a node's text, number and kind. The readers walk the node
+array and call a service where a node's `spelling` says its value is not its own bytes.
+
+This document describes the node, the document and its builder, the readers, the spelling services, the duplicate-key
+rule, a delimited text, facts, the edit list and its commit, the value layer's errors and its bounds. `walk.md`
+describes the walks that make the tokens and `kernel.md` the vector code behind them.
+
+## Files
+
+| File | Holds |
+|---|---|
+| `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `destroy`, the spelling tables |
+| `core/build/build.odin` | `Builder`, the hooks, `builder_start`, `builder_end`, the header row, the duplicate-key check |
+| `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact`, `commit` |
+| `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, every decoder |
+| `core/spell/text.odin` | `decode_text` and `bytes_equal`, the decoders' and readers' byte helpers |
+| `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
+| `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, `render`, `write_code` |
+| `json/document.odin` | JSON's `build`, `Spelling` and `Edit_Spelling` tables, `close_end`, the edit checks |
+| `json/escape.odin` | the escape-byte table and the hex and surrogate helpers its walk and decoder share |
+| `json/unescape.odin` | JSON's `text` and `number` readers and the decoder behind them |
+| `dsv/document.odin` | dsv's `build`, its `Spelling` table, its edit table, `close_end`, the record check |
+
+## The node
+
+A node is a 16-byte `Token` from `core/walk.odin`: `lo`, `n`, `kind`, `role` and `spelling`.
+
+- A scalar's node is its token, and its `n` is its byte length. An `Array` or `Map` is written at its open, and at its
+  close the builder writes its subtree's node count into `n`, its own node included. The walk's `End` token patches
+  the container and is not stored.
+- The next node in preorder is `i + n` for a container and `i + 1` for a scalar, so a member's key and value take one
+  node more than the value's subtree holds.
+- A container's `spelling` is its child count, where a member counts once, not its key and its value. The count
+  saturates at `CHILDREN_MAX`, and `Document.counts` holds the true count of every container that does.
+- A JSON key is a node of its own, kind `String` and role `Key`, directly before its value. A dsv record stores no key
+  node: its columns' keys are the cells of the header row.
+- `Node_Index` is a node's index in `nodes`, distinct from `u32` so an index cannot be passed where a count or a byte
+  offset goes. Readers, iterators, `Fact.node`, `Child_Count.node` and `Edit.node` take it. `ROOT` is node 0, the root
+  value's node. `NO_NODE` is `Node_Index(max(u32))` and answers a miss, and every reader treats an index at or past
+  `len(doc.nodes)` as a miss.
+- A container's closing byte is no node. `close_end` returns one past it: it starts after the container's last
+  descendant, or after its open when the container is empty, skips the closes on its rightmost spine and the trivia
+  between them, then skips to the container's own close. `span` of a container is `src[lo:close_end]`. JSON reads the
+  trivia by the document's spec, and dsv's root ends at the text's end while a record ends at its own line end.
+- `span` of a JSON string restores the quote pair when `SPELLING_QUOTED` is set, since a string token's span is the
+  bytes between its quotes. A dsv cell is `Plain`, so its span holds a quoted cell's quotes as written.
+
+Core reads three bits of a node's `spelling`:
+
+| Bit | Name | Set on | Means |
+|---|---|---|---|
+| 0 | `SPELLING_DECODE` | a string, key or dsv cell | the text is read through the format's `text` |
+| 1 | `SPELLING_QUOTED` | a JSON string, a quoted CSV cell | the token is quoted |
+| 2 | `SPELLING_LAX` | a JSON string | a tolerated ill-formed sequence may grow its decode |
+
+A node whose decode bit is clear is its own text: a JSON string's span leaves its quote pair out, an unquoted JSON5 key
+is bare, and an unquoted dsv cell is its bytes. The other bits are the format's own: a number's packed shape, and a
+comment fact's marker lengths.
+
+## The document
+
+A `Document` holds `src`, a borrowed `[]u8` that must outlive it and that no build copies. Every span and fact body
+is a slice of `src`. A decoded text is `buf` or an allocation from the reader's allocator.
+
+- `nodes` is a `[]Node` in preorder. `nodes_alloc` is the allocation and `nodes` its length prefix, so `destroy` frees
+  it after the build cut the length to the node count. A JSON build keeps its whole reservation, one node per source
+  byte, for the document's life. `facts` and `facts_alloc`, both `[]Fact`, are alike, and a
+  document with no facts holds nil. `counts` and `counts_alloc`, both `[]Child_Count`, hold the true child count of
+  every container whose count saturated `CHILDREN_MAX`, sorted by node, and are nil when no container is that wide.
+- `spelling` is a `^Spelling` that points at a format's table in rodata, and `allocator` is the one the build
+  received. `destroy` frees the three allocations and sets the document to zero. A reader that allocates takes its own
+  allocator.
+- `header` is the dsv header row's node, 0 for a text read without a header and for every JSON document.
+- `read: Read_As` records how the text was read, in 8 bytes. Its `spec` is the spec the text was read as, in one
+  byte, so an edit service can dispatch on it when a procedure pointer carries no compile-time spec. Its `delimiter`
+  and `comment` are dsv's run-time dialect, the byte between two cells and the byte
+  that starts a comment line, 0 for none and for a JSON document. Its `no_header` is dsv's build choice that the first
+  record is data, and a commit reads its output under the same choice. Its `max_depth` is `Options.max_depth`, 0 for
+  the default: JSON's build stores it and its edit services read a recorded value at that depth, and a delimited text
+  has no depth option and leaves it 0.
+- The document does not change after its build, and no reader accepts an edit.
+
+## Building
+
+```odin
+json.build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false,
+	allocator := context.allocator) -> (core.Document, core.Document_Error)
+dsv.build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false,
+	allocator := context.allocator) -> (core.Document, core.Document_Error)
+```
+
+The builder is package `core/build`, which imports `core`. Both run the walk with a builder hook, end it with
+`build.builder_end`, and store the spec in `doc.read.spec`. `build.builder_start` reserves at least 16 nodes,
+`len(src) / seed_div` when that is larger, and a stack of `depth` slots, or 1 when `depth` is 0. The hook pushes a
+frame with no capacity test, so `depth` must be at least the walk's depth limit. The node buffer is not zeroed. A
+refused allocation leaves the builder with `.No_Memory` and no nodes, and the build returns that error with no hook
+run over a nil array.
+
+A build chooses its hook, and the hook is compiled for that choice:
+
+| Hook | Facts | Grows | Refuses | Used by |
+|---|---|---|---|---|
+| `build.builder_hook` | yes | no | yes | JSON, a spec with comments |
+| `build.builder_hook_checked` | yes | yes | yes | every JSON spec, after a refused reservation |
+| `build.builder_hook_plain` | no | no | no | JSON, a spec with no comments |
+| `build.builder_hook_plain_refuse` | no | no | yes | the same, under `refuse_duplicates` |
+| `build.builder_hook_keyless` | no | yes | no | dsv, with no comment byte |
+| `build.builder_hook_keyless_facts` | yes | yes | no | dsv, with a comment byte |
+
+- JSON reserves the token bound, one node per source byte, and a stack of `max(MAX_DEPTH, opts.max_depth)` slots, so
+  its hook tests no capacity and grows no buffer. A text whose 16 bytes per source byte the allocator refuses is
+  retried with one node per 8 bytes and the checked hook, and a second refusal is `.No_Memory`.
+- Every hook keeps the open containers as packed frames in the hook's registers: the high 32 bits of `b` are the
+  innermost open container's node and its low 32 bits that container's child count, and `c` is the depth. A close
+  reads its frame, writes the container's size and child count, and pops the frame below from the stack.
+- A spec with no comments makes no fact token, so its build compiles the fact branch out. A build with facts keeps the
+  last completed value in `Builder.last`, for an inline comment's node.
+- dsv reserves an estimate, one node per 2 bytes with 8 stack slots, so its hooks check capacity and grow. The
+  `$KEYLESS` rule of `builder_step` drops every key, stores a `Map` as an `Array`, and steps over the header row the
+  build wrote before the walk.
+  The row is node 1, an `Array` of role `Key` whose `n` is its cell count plus one and whose `spelling` is its cell
+  count, saturated at `CHILDREN_MAX` with the true count in `Document.counts`. Its cells come from `header_cells` and a
+  walk buffer of one `Token` per cell. A text with no header, or no record to read, leaves node 1 zeroed, and the
+  first record's token overwrites it.
+- A close whose child count reaches `CHILDREN_MAX` stores `CHILDREN_MAX` in the container's `spelling` and keeps the
+  true count in `Builder.wide_node` and `Builder.wide_count`. `build.builder_end` copies that one count to
+  `Document.counts`. A build with a second such container counts the members of every container whose `spelling` is
+  `CHILDREN_MAX`, walking the nodes once at its end.
+- `build.builder_close_node` writes a container's subtree size and child count. dsv calls it for the header row it
+  writes before its walk.
+- `build.builder_end` cuts the node and fact slices to their counts, gives a comment run with no value after it to the
+  root as `Comment_Foot`, and sorts the facts by node, keeping source order within a node. The child counts follow
+  node order.
+
+| Error | When |
+|---|---|
+| `.Walk` | the walk's fault, in `inner` |
+| `.Duplicate_Key` | a build under `refuse_duplicates` met a repeated key, at the later key's first byte |
+| `.No_Memory` | an owned allocation was refused |
+
+A JSON `0x1E` before the document is `.Bad_Char` at that byte, a JSON text with no value is `.Truncated` at `len(src)`,
+and dsv's `.Bad_Option` names no byte. On an error the document is zero and its data is freed.
+
+## Reading
+
+A reader given an index no node holds answers as it does for a node of the wrong kind:
+
+| Reader | Returns | Miss | Wrong kind |
+|---|---|---|---|
+| `kind` | the node's `Kind` | `.Null` | its own kind |
+| `span` | the node's source bytes | nil | its own bytes |
+| `length` | the member count | 0 | 0 |
+| `children`, `member_all`, `facts_of`, `fact_next` | a walk, or a body | an empty walk | an empty walk |
+| `child_next`, `child_at`, `member`, `member_next` | a node or false | false | false |
+| `key_equals` | whether a key decodes to a name | false | false |
+| `text` | the node's text, its allocation as `owned`, and whether it read | `false` | `false` |
+| `number` | a `Number` | `.Wide` | `.Wide` |
+| `resolve` | the value's kind | `.Null` | the format's answer |
+| `int_value`, `uint_value` | an integer and whether it is one | false | false |
+
+### Children and members
+
+`kind` and `span` allocate nothing, and a container's `span` is the only read that scans forward, in `close_end`.
+`key_start` returns a node's first source byte, `lo`, or `lo - 1` for a quoted string, whose token leaves the quote
+pair out. `length` returns a container's child count and 0 for a scalar. The count is a member count, and a header row
+is no member, so `length` of a headed text's root is its record count. A count that saturated `CHILDREN_MAX` is read
+from `Document.counts` by binary search.
+
+`children` starts a `Child_Iter` over a container's member values and `child_next` returns them one at a time. A `Map`
+steps a key node and a value's subtree per member, and a value's key is the node before it. An `Array` steps one
+subtree per member, and a leading child of role `Key` is the root's header row, which a root of role `Value` skips. The
+header row's own role is `Key`, so it skips no cell.
+
+`child_at(doc, i, k)` returns the member `child_next` would reach at step `k`. It indexes when every member is one
+node, at `i + 2 + 2k` in a `Map` whose `n` is twice its count plus one and at `i + 1 + k` in an `Array` whose `n` is
+its count plus one, and walks any other container or a `k` at or past a saturated count. A negative `k`, a scalar, a
+miss and a `k` past the last member return no node.
+
+`member(doc, obj, name, dups := .Last)` returns the value of the member whose key decodes to `name`: `.First` the
+first match, `.Last` the last, and `.All` read as `.First`, while `member_all` yields every match in source order. A
+headed dsv record's members are its cells.
+
+`key_equals` compares an unmarked key with its span through `bytes_equal` and a marked one through the format's
+`key_equals`, which allocates nothing. A node whose role is not `Key` answers false, and a dsv header cell has role
+`Key`.
+
+### Text, numbers and plain cells
+
+Only a scalar carries text. A node whose decode bit is clear returns its span as its text with no call. A marked node
+goes to the format's `text`, which writes into the caller's buffer when the buffer has room and otherwise allocates
+from the caller's allocator.
+
+```odin
+text :: proc(doc: ^Document, i: Node_Index, buf: []u8,
+	allocator := context.allocator) -> (s: string, owned: []u8, ok: bool)
+```
+
+`owned` is non-nil only when the call allocated, and it is the allocation the caller frees with the same allocator. It
+is nil for a text that is `buf` or a slice of the source. A decode writes into `buf` when it has room for the token's
+bytes, else into an allocation from `allocator`. `json.text` sizes a string by its encoded length, which is at least
+the decoded length. A `SPELLING_LAX` string and a dsv cell are sized by their decoded length.
+
+`number(doc, i)` returns a 16-byte `Number`, `bits` and `kind`, decoded from the node's span when it is read. The
+node holds the token's bytes and the format's packed shape, never a value. `Number_Kind` is `Int`, `Uint`, `Float` or
+`Wide`. The decoders are in package `core/spell`, and `core.Number`, `core.Number_Kind`, `core.MAX_NUMBER_DIGITS` and
+`core.MAX_NUMBER_SCALE` alias `spell`'s names, so a caller of a reader writes `core.Number`.
+
+- `Int` is an integer that fits `i64`, in two's complement in `bits`. `-0` is `Int` 0.
+- `Uint` is a positive integer that fits `u64` and not `i64`.
+- `Float` is a binary64, correctly rounded to nearest even, for a fraction, an exponent, an integer past `u64`, or a
+  negative integer past `i64`'s floor, when a binary64 represents the value. `-0.0` is `Float` -0.0.
+- `Wide` is a number no `i64`, `u64` or `f64` holds, and the caller reads its span.
+
+A container and a miss return `{0, .Wide}`. JSON's reader folds a pure integer of at most 19 digits
+from the recorded digit counts with no search for a point or an exponent, and reads every other token by its packed
+shape: a JSON decimal, a decimal JSON does not write, a hex integer, `Infinity` or `NaN`; a fraction whose integer part
+is empty or whose digits pass 19 reads by the full decimal decoder. dsv's reader returns a value cell that is exactly a
+JSON number, and `.Wide` for a quoted cell, a TSV escape, a key cell or any other cell.
+
+`int_value` returns an `Int`'s value. `uint_value` returns a `Uint`, or a
+nonnegative `Int`. Both return false for a `Float`, a `Wide` and a node that is no number.
+
+`resolve(doc, i, opts := Resolve_Options{})` returns what a node is: `.Null` for a miss, and otherwise the format's
+answer. JSON's is the node's own kind. dsv's returns `.String` for a key cell, for a quoted or escaped cell, and for
+every cell without `opts.infer`. With `infer`, an empty cell is `.Null`, a `true` or `false` cell is `.True` or
+`.False`, and a cell that is exactly a JSON number is `.Number`. A quoted cell, a TSV escape and a cell holding an
+ill-formed sequence answer `.String`, since their span holds a quote, a backslash or a byte no JSON number holds.
+
+## The spelling services
+
+A `Spelling` holds five services, `text`, `key_equals`, `number`, `resolve` and `close_end`, and a pointer to the
+format's `Edit_Spelling`, nil for a format that accepts no edits. A document points at its format's table in rodata,
+one table for every spec of the format: a JSON token holds no form that only JSON5 reads, so `text` reads any JSON
+string, and dsv's `text` and `key_equals` read `Document.read.spec`, since a CSV backslash is a byte, a TSV
+backslash is an escape, and a `Plain` cell has neither.
+
+| Service | JSON | dsv |
+|---|---|---|
+| `text` | unescape, JSON5 quotes and identifiers | a quoted cell's inner span, `""` to `"`, a TSV escape, U+FFFD |
+| `key_equals` | compare an escaped key without decoding | the same over a quoted or escaped cell |
+| `number` | the recorded shape, else the token's grammar | a plain value cell that is exactly a JSON number |
+| `resolve` | the node's kind | what a `Plain` cell is |
+| `close_end` | forward over trivia and inner closes | a record's line end, the text's end for the root |
+
+```odin
+Edit_Spelling :: struct {
+	value, key: proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
+	record:     proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: Document_Error),
+	reads:      proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
+	comment:    proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
+	member_sep, key_sep: string,
+	record_sep: proc(doc: ^Document) -> string,
+}
+```
+
+`Comment_Spelling` is `None`, `Line` or `Byte`: no marker, a JSON line or block comment, or a delimited text's comment
+line. Under `Line` a body holding a line end is written as `/* */`, so a line comment cannot end its line early. JSON's
+table supplies `value`, `key`, `reads` and `comment`, with `member_sep` `","` and `key_sep` `":"`, and its `comment`
+is `.Line` for `Jsonc` and `Json5` and `.None` for `Json`. It has no `record` and no `record_sep`, so a document
+whose edit table lacks `record` holds a tree's values. dsv's table supplies `record`, `reads`, `comment` and
+`record_sep`, and no `value` or `key`, so a dsv document holds a table. Its `record_sep` is the first line end the text
+has for a record, else its header's, else LF. A table's cell separator is `read.delimiter` and its comment marker is
+`read.comment`.
+
+A reader reaches the table only where it must: `text` and `key_equals` for a marked node, `number` for every scalar,
+`resolve` for every node, `close_end` for a container whose span is read, and the edit services for every recorded or
+committed text. A caller that knows the format at compile time calls `json.text` or `json.number` directly.
+
+## Duplicate keys
+
+`Duplicates` says how an object's repeated keys are read: `.First` gives the first match and `.Last`, the default, the
+last, and `.All` is read as `.First` while `member_all` yields every match. Refusing a repeated key is a build check,
+not a reader choice: `json.build` and `dsv.build` take `refuse_duplicates`, false by default.
+
+A build with `refuse_duplicates` tests each object as it closes, comparing the decoded text of its keys through a hash
+table that is 64 entries on the stack and spills to the allocator past 32 keys. A repeat is reported at the later key's
+first byte, counting its opening quote, and an inner object closes before an outer one, so the earliest repeat in
+document order wins, while a refused allocation in a later check replaces no earlier error.
+
+A build that stops on a fault checks the objects it left open, innermost first, since their close never ran. dsv's
+header row has no close, so a headed build tests it after the walk. Both go through `build.builder_refuse_result`, which
+keeps the earliest repeat in the build's error and which a format's `build` may call for a container it checks itself.
+
+## dsv as a document
+
+A delimited text is an `Array` of records whose first child may be the header row.
+
+- The root is an `Array` of role `Value`, and its readers step over the header row as over a member's key, so `length`
+  counts records and `children` returns the records. `Document.header` is the header row's node, 0 for a text read
+  without one.
+- A record with a header is a `Map` token that the keyless hook stores as an `Array`. Its cells are its children, each
+  a `Plain` token of role `Value`. No record stores a key node, so it holds one node per cell.
+- The header row is an `Array` of role `Key` whose cells are `Plain` tokens of role `Key`, one per column. Its `n` is
+  its cell count plus one and its `spelling` its cell count.
+- The Map readers of a headed record resolve a cell by its column: `member` and `member_all` walk the header's cells,
+  and column `i`'s key is header cell `i`. A cell's node is its record's node plus one plus its column, so `child_at`
+  returns a cell in one step. A column past a record's last cell, as a ragged record has, names no cell.
+- A header cell reads as a key node, so `key_equals`, `text`, `number` and `resolve` answer for it as for a JSON key.
+- `read.no_header` makes the first record data and every record an `Array` of `Plain` value cells, with no key node at
+  all.
+
+## Facts
+
+A `Fact` holds `lo`, `node`, `n`, `role` and `spelling`: a comment token, the node it belongs to and its role. The
+list is sorted by node, keeps source order within a node, and is empty for a strict JSON document and a dsv text with
+no comment byte. `lo` and `n` span the comment's bytes, markers included.
+
+A comment's node follows the walk's `Role` rule: a comment on the line where the value before it ends is that value's
+`Comment_Inline`, else one before a value the grammar allows it above is that value's `Comment`, else it is the
+`Comment_Foot` of the innermost open container, or of the root at depth 0.
+
+The builder keeps a head comment pending until the value it marks arrives, gives an inline comment to the last value
+it completed (`Builder.last`), or holds it pending when none has, and gives a foot to the innermost open container's
+frame, or to the root. A
+comment run with no value after it becomes the root's foot when the build ends. A dsv comment line is a walk token
+like any other fact: a line above a record is that record's `Comment`, and a line above the header row becomes the
+root's, a `Comment` when a record follows it and a `Comment_Foot` when none does.
+
+`facts_of(doc, i, role)` starts a `Facts` walk over node `i`'s facts of that role, and `fact_next` returns their
+bodies in source order, one at a time, as a `string` and whether it read. `NO_NODE` and a node with no such fact give
+an empty walk, and a read allocates nothing. A body is the source between the markers: the fact's `spelling` holds the
+lead marker's length in its low byte and the tail's in the next. A `//` comment leads with two bytes and trails with
+none, a `/* */` comment leads and trails with two, and a delimited text's comment line leads with one.
+
+## Edits
+
+An edit list is kept apart from the document, which never changes. A reader sees an edit only after the caller commits
+the list and builds the output again.
+
+```odin
+Edit_List :: struct { doc: ^Document, edits: [dynamic]Edit, allocator: runtime.Allocator }
+Edit :: struct { node: Node_Index, op: Edit_Op, role: Role, at: u32, key: []u8, text: []u8 }
+Edit_Op :: enum u8 { Set, Insert, Remove, Set_Fact, Remove_Fact }
+```
+
+`edit_list_init` makes an empty list over a borrowed document and allocates nothing until the first edit. Any number
+of lists may share one document. The list's allocator owns the log and a copy of each edit's key and text, which share
+one allocation with the key first, and `edit_list_destroy` frees them.
+
+### Recording an edit
+
+An edit is checked when it is recorded, by reading its own text, so the check costs O(the text). The format's own walk
+judges the text as one value, one key or one record of the document's spec, and for a delimited text of its recorded
+`delimiter` and `comment` byte. Every text argument is a `string`, and the list copies it.
+
+| Call | Records | Refuses |
+|---|---|---|
+| `set(list, node, text: string)` | the node's bytes become `text` | `.Bad_Index`, `.Bad_Value`, `.Bad_Key` |
+| `insert(list, container, at, text: string)` | an element of an `Array` | `.Bad_Index`, `.Wrong_Container`, `.Bad_Position`, `.Bad_Value`, `.Bad_Width` |
+| `insert(list, container, at, key, text: string)` | a member of a `Map` | the same, with `.Bad_Key` when the key is judged |
+| `remove(list, node)` | the member the node is, and its key | `.Bad_Index` |
+| `set_fact(list, node, role, text: string)`, `remove_fact(list, node, role)` | the facts of the node and role | `.Bad_Index`, `.Bad_Fact` |
+
+- `set` takes a value or a key. It refuses a node whose role is a fact's and a table's container. A key's text is
+  judged as a key only in a tree, so a dsv header cell's new text is a record of exactly one cell.
+- In a delimited text a cell's text is one record of exactly one cell, and an empty text is the empty cell. A root's
+  insert is a record, and its cell count must equal the table's width when the table has one. An insert's `at` is 0
+  through the container's length at the time the edit was recorded.
+- A cell joins a record only while the count stays within the table's width. The record that sets the width may take a
+  cell past it: the header row when no data record follows it, or the only record of a headerless table.
+- `remove` takes any value that is a member of a container. It refuses the root and any node whose role is not
+  `Value`, so a key goes with its value and a header cell cannot be removed alone.
+- A fact edit takes any node that is not a key and a role past `Key`. `Comment_Inline` refuses a body holding LF or CR
+  with `.Bad_Fact`, and a role at or below `Key` is `.Bad_Index`. A second edit of one node and role is recorded and
+  `commit` refuses it with `.Conflicting_Edits`.
+
+JSON's value check walks the text as exactly one value of `doc.read.spec` at `doc.read.max_depth`, refusing one that
+begins with a byte-order mark or holds a comment after its value, since a splice would put the next bytes inside it.
+JSON's key check reads the text as the only member of `{text:0}` and requires the key's token to cover the whole text.
+
+### A commit
+
+```odin
+commit :: proc(list: ^Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error)
+json.commit :: proc(list: ^core.Edit_List, as: Spec,
+	allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error)
+```
+
+`core.commit` writes the output in the document's own spec. `json.commit` writes another JSON spec, and a text of
+another spec must read strictly, since the source's own reading is no evidence. dsv has no wrapper, because a spec
+change would respell every cell and is refused. `core.commit_as(list, spec, allocator)` is the entry that takes a spec
+byte, which `json.commit` calls. The commit builds the output in one allocation with the format's separators, the
+caller frees `out`, and reading after edits is `commit` then `build`.
+
+The commit refuses:
+
+- two edits of one node, two fact edits of one node and role, two ranges that overlap, an insert inside what another
+  edit replaces, an insert at the byte of a set that writes no bytes when the insert's separator comes first, and an
+  inline fact after inserted bytes with nothing but whitespace between them. All are `.Conflicting_Edits` at the byte
+  where the two meet.
+- an edit inside the subtree another edit removes, and a fact edit on a node below a set's node, both
+  `.Conflicting_Edits` at the named node's first byte. The ranges and queries are swept once, so the check is
+  O(n log n).
+- an edit that would leave a delimited text a record the table cannot read, with `.Bad_Width`. A table's width is its
+  header's cell count or its first record's. A removal may not take every cell, nor leave a record of the table's full
+  width with fewer cells, except the record that sets the width, and a cell set to nothing is refused when the
+  removals leave its record at most one cell, which would read as no record.
+- a result that does not read, with `.Bad_Result`. The output is read strictly, then with the format's tolerances, and
+  a text that needs a tolerance is accepted only when the source needed one too. A JSON commit under another spec must
+  read strictly. A dsv spec change is refused, since it would respell every cell.
+- `.No_Memory` for any allocation it needs.
+
+`dropped` counts the source facts and fact edits the output cannot hold. A fact removed with a removed member, or one
+inside the span a set replaces, is not counted, since the edit that takes it accounts for it.
+
+### Where a removal and an insert land
+
+The commit sorts the edits' source ranges by position. An insert at a byte is written before the bytes there, a head
+comment before the bytes it leads, and an inline comment first at its byte. Two inserts into different containers at
+one byte write the inner container's member first when both join the member at the byte, and the outer container's
+member first when both come before the bytes there. A cell appended to the last record comes before a record appended
+after it, and a record put before a record comes before a cell put before that record's first byte. Two inserts into
+one container keep the order they were recorded in.
+
+- A set replaces the node's own source bytes, a quoted key's quotes included, and leaves the trivia around it.
+- A removal takes the member with its key and its comments and one separator, the one after it when a member follows
+  and the one before it otherwise. Adjacent removals are one cut. A cut keeps the member before it on its line and the
+  next member's head comment on its own, and a member's facts after its trailing separator are removed as separate
+  ranges, so the separator and the line end stay and the output still reads.
+- A container whose every member is removed keeps its brackets, and a foot stays before the close. A dsv record is cut
+  from its own first comment through its own line end, so a comment line beside it and its line end stay.
+- An insert at the root is placed on the side that leaves a comment line a line of its own, and one inside a removal
+  run moves to the run's cut end, with its separator on the side where what survives is. A head comment the same list
+  adds to the member at the insert's place gets a line of its own, and a new member is joined to its neighbour by one
+  separator. A table writes `read.delimiter` between cells and its `record_sep` between records.
+
+### Facts in a commit
+
+The output decides which facts it keeps.
+
+- A fact no edit names keeps its bytes in place, unless a removal takes it, a set replaces its bytes, or the output
+  cannot hold it. A fact the output cannot hold is removed with its bytes and counted in `dropped`.
+- A tree holds a head or inline fact on any node and a foot only on a container or the root. A delimited text holds a
+  head fact on a record, or on the root above its first record, and a foot on the root. An output whose spec writes no
+  comment, as `Json` does, holds no fact at all.
+- `set_fact` replaces the first fact of that node and role in place and removes the rest, or writes a new comment
+  where the role reads it: a head before the node's first byte, an inline after the value, a foot before the close. A
+  fact edit on a node the list removes, or on one below a set's node, is `.Conflicting_Edits`.
+- A body is written as `//body` when a line end follows its place or the text ends there, the body holds no line end,
+  and no insert writes at that byte. It is written as `/*body*/` otherwise. A dsv body is the document's comment byte
+  and the body, on a line of its own. A head or foot the source held mid-line gets a line of its own with that line's
+  indent, and an inline fact gets one space before it. A body the output cannot spell is dropped and counted.
+- A dsv foot at the text's end is written after a set or an insert at that byte.
+
+## Errors
+
+```odin
+Document_Error :: struct { kind: Document_Error_Kind, at: u64, inner: Fault }
+```
+
+| Kind | Means | `at` |
+|---|---|---|
+| `Walk` | the walk's fault | the fault's byte, as in `inner` |
+| `Duplicate_Key` | a build with `refuse_duplicates` met a repeated key | the later key's first byte |
+| `No_Memory` | an owned allocation was refused | none |
+| `Bad_Index` | an edit names no node it may change | none |
+| `Bad_Position` | an insert is past the container's length | none |
+| `Wrong_Container` | the container takes the other insert form | none |
+| `Bad_Value` | a text is not exactly one value of the format and spec | none |
+| `Bad_Key` | a key text is not exactly one key of the format and spec | none |
+| `Bad_Fact` | a fact body does not have its role's shape | none |
+| `Bad_Width` | an edit would break the table's width | none |
+| `Conflicting_Edits` | two edits meet, or one lies inside another's range | where they meet |
+| `Bad_Result` | a committed text does not read | none, the fault in `inner` |
+
+`inner` holds a `Fault` by value for `.Walk`, `.Bad_Value`, `.Bad_Key` and `.Bad_Result`, and for the last three its
+`at` names a byte of the recorded text or of the commit's output, so it renders without a position.
+`DOCUMENT_AT_NO_BYTE` lists the kinds that name no byte, and their `at` is not read.
+
+`write_code` writes a code. For a document error it is `document.` and the kind's code, as in `document.walk` or
+`document.duplicate_key`. For a fault it is the format's name, a dot, and the rule's code, as in `json.literal`,
+`dsv.field_count` or the kind's own code `json.bad_char`. A code is stable across releases, and a message may change.
+
+`render` writes a line from a rule table in rodata, without calling into the format. For a document error it writes
+`line:col: message`, then for `.Walk` a newline and `caused by` with the rendered fault, and for `.Bad_Value`,
+`.Bad_Key` and `.Bad_Result` the fault's message alone. For a fault it writes `line:col: message`, or the message
+alone for a kind in `AT_NO_BYTE`. Line and column count from 1, the column in bytes, and a `Lines` carries the count
+from one fault to the next, so each byte is scanned once.
+
+## Limits
+
+| Bound | Value | Effect |
+|---|---|---|
+| `spell.MAX_NUMBER_DIGITS` | 256 | more authored mantissa digits read as `.Wide` |
+| `spell.MAX_NUMBER_SCALE` | 4096 | an exponent or scale beyond ±this reads as `.Wide` |
+| `CHILDREN_MAX` | 65535 | the largest child count `spelling` holds, with the true count in `Document.counts` |
+| `json.MAX_DEPTH` | 1024 | the deepest nesting when `Options.max_depth` is 0 |
+| `Token.n` | `u32` | a token one byte longer is `.Too_Wide` |
+
+A number's `spelling` holds its integer and fraction digit counts in five bits each, so a count saturates at 31, and a
+reader that sees one reads the span again rather than trust the fields. The duplicate-key table is 64 entries on the
+stack and holds 32 keys before it spills. A fact's two marker lengths are the bytes of its `spelling`, so neither may
+exceed 255 bytes. dsv's build stack is 8 slots and does not grow, since a record nests at most two containers.

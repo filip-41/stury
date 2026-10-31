@@ -68,7 +68,7 @@ LEAD_MASK := [2 * LEAD_MAX]u8{0 ..< LEAD_MAX = 0xff}
 
 // Returns the byte after the whitespace at `p` when that is no whitespace, one space, or a newline and the indent
 // `at` predicts. `ind^` holds the last indent in its low 32 bits and the step in its high 32. Returns nil for any
-// other run, which `skip_indent` then counts. Uses no vector registers.
+// other run, which `skip_indent` then counts.
 @(private)
 indent_fast :: #force_inline proc "contextless" (p, end: [^]u8, ind: ^u64, $at: Indent_At) -> [^]u8 #no_bounds_check {
 	if p < end {

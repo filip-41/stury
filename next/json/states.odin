@@ -146,25 +146,33 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 	case .Stop:
 		return stopped(w, hs, q)
 	}
-	// Reads a colon flush against its value, or a pretty printer's `": "`, without entering `st_colon`.
-	if intrinsics.ptr_sub(end, q) > 2 && q[0] == ':' {
-		if q[1] > ' ' {
-			return #must_tail st_value(q[1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
-		}
-		if q[1] == ' ' && q[2] > ' ' {
-			return #must_tail st_value(q[2:], end, d, ind, w, hs.a, hs.b, hs.c, on)
-		}
-	}
-	// Reads a pretty printer's space before the colon as well: `" : "` and `" :"`.
-	if intrinsics.ptr_sub(end, q) > 3 && q[0] == ' ' && q[1] == ':' {
-		if q[2] > ' ' {
-			return #must_tail st_value(q[2:], end, d, ind, w, hs.a, hs.b, hs.c, on)
-		}
-		if q[2] == ' ' && q[3] > ' ' {
-			return #must_tail st_value(q[3:], end, d, ind, w, hs.a, hs.b, hs.c, on)
-		}
+	if r := colon_fast(q, end); r != nil {
+		return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+}
+
+// Returns where a member's value starts when the colon after a key is flush against it, or a pretty printer's `": "`,
+// `" : "` or `" :"`, and nil when `st_colon` must read the colon.
+@(private)
+colon_fast :: #force_inline proc "contextless" (q, end: [^]u8) -> [^]u8 {
+	if intrinsics.ptr_sub(end, q) > 2 && q[0] == ':' {
+		if q[1] > ' ' {
+			return q[1:]
+		}
+		if q[1] == ' ' && q[2] > ' ' {
+			return q[2:]
+		}
+	}
+	if intrinsics.ptr_sub(end, q) > 3 && q[0] == ' ' && q[1] == ':' {
+		if q[2] > ' ' {
+			return q[2:]
+		}
+		if q[2] == ' ' && q[3] > ' ' {
+			return q[3:]
+		}
+	}
+	return nil
 }
 
 // Reads the value string at `p` that `string_short` did not vouch for, which is longer than 32 bytes, not ASCII, or
@@ -613,6 +621,10 @@ st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 			return #must_tail st_member_ws(q[1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		if d & 1 != 0 {
+			// The run pays when a member follows its comma flush. An indented member reads faster through `st_key`.
+			if r != q[1:] {
+				return #must_tail st_key(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
 			return #must_tail st_member_run(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		if r[0] == '-' || r[0] - '0' < 10 {
@@ -707,21 +719,7 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 			return stopped(w, hs, q)
 		}
 		// Finds the value after the colon when the colon is flush against it, or is `": "`, `" : "` or `" :"`.
-		r: [^]u8
-		if intrinsics.ptr_sub(end, q) > 2 && q[0] == ':' {
-			if q[1] > ' ' {
-				r = q[1:]
-			} else if q[1] == ' ' && q[2] > ' ' {
-				r = q[2:]
-			}
-		}
-		if r == nil && intrinsics.ptr_sub(end, q) > 3 && q[0] == ' ' && q[1] == ':' {
-			if q[2] > ' ' {
-				r = q[2:]
-			} else if q[2] == ' ' && q[3] > ' ' {
-				r = q[3:]
-			}
-		}
+		r := colon_fast(q, end)
 		if r == nil {
 			return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}

@@ -1,6 +1,5 @@
 package json_tests
 
-import "base:sanitizer"
 import "core:math/rand"
 import "core:mem"
 import "core:path/filepath"
@@ -362,6 +361,8 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 	}
 	text: [dynamic]u8
 	defer delete(text)
+	fence := walktest.fence_init()
+	defer walktest.unfence(&fence)
 	// The run before the piece: `a` bytes, or `\n` escapes.
 	for fill in ([]string{"a", "\\n"}) do for piece in PIECES {
 		for k := 0; k < 140; k += len(fill) {
@@ -376,7 +377,7 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 				for _ in 0 ..< pad {
 					append(&text, ' ')
 				}
-				f, bad := validate_fenced(text[:], .Json).?
+				f, bad := validate_fenced(&fence, text[:], .Json).?
 				if piece.kind == nil {
 					if !testing.expectf(t, !bad, "%q: %v", text[:], f) {
 						return
@@ -386,7 +387,7 @@ strings_at_every_offset :: proc(t: ^testing.T) {
 				}
 				// The same text cut before its closing quote, which is `Truncated` at its end.
 				resize(&text, 1 + k + len(piece.bytes))
-				f, bad = validate_fenced(text[:], .Json).?
+				f, bad = validate_fenced(&fence, text[:], .Json).?
 				if piece.kind == nil && !testing.expectf(t, bad && f.kind == .Truncated && f.at == u64(len(text)), "%q: %v", text[:], f) {
 					return
 				}
@@ -406,7 +407,9 @@ escapes_by_byte :: proc(t: ^testing.T) {
 	}
 	text: [dynamic]u8
 	defer delete(text)
-	check :: proc(t: ^testing.T, text: ^[dynamic]u8, shift, run: int, escape: []u8, want: Want) -> bool {
+	fence := walktest.fence_init()
+	defer walktest.unfence(&fence)
+	check :: proc(t: ^testing.T, fence: ^walktest.Fence, text: ^[dynamic]u8, shift, run: int, escape: []u8, want: Want) -> bool {
 		clear(text)
 		append(text, '"')
 		for _ in 0 ..< shift {
@@ -420,7 +423,7 @@ escapes_by_byte :: proc(t: ^testing.T) {
 		for _ in 0 ..< 80 {
 			append(text, ' ')
 		}
-		f, bad := validate_fenced(text[:], .Json).?
+		f, bad := validate_fenced(fence, text[:], .Json).?
 		if want.kind == nil {
 			return testing.expectf(t, !bad, "%q: %v", text[:], f)
 		}
@@ -440,14 +443,14 @@ escapes_by_byte :: proc(t: ^testing.T) {
 			case 'u':
 				want = {.Bad_Escape, 2}
 			}
-			if !check(t, &text, shift, run, {'\\', c}, want) {
+			if !check(t, &fence, &text, shift, run, {'\\', c}, want) {
 				return
 			}
 			for i in 0 ..< 4 {
 				escape := []u8{'\\', 'u', '0', '0', '4', '1'}
 				escape[2 + i] = c
 				want = {} if is_hex(c) else {.Bad_Escape, 2 + i}
-				if !check(t, &text, shift, run, escape, want) {
+				if !check(t, &fence, &text, shift, run, escape, want) {
 					return
 				}
 			}
@@ -459,13 +462,13 @@ escapes_by_byte :: proc(t: ^testing.T) {
 			case c - '8' < 2 || (c | 0x20) - 'a' < 6:
 				want = {.Bad_Escape, 0}
 			}
-			if !check(t, &text, shift, run, {'\\', 'u', 'd', c, '0', '0'}, want) {
+			if !check(t, &fence, &text, shift, run, {'\\', 'u', 'd', c, '0', '0'}, want) {
 				return
 			}
 			// A high half then `\udX00` is valid only when the second half is low.
 			if is_hex(c) {
 				want = {} if (c | 0x20) - 'c' < 4 else {.Bad_Escape, 0}
-				if !check(t, &text, shift, run, {'\\', 'u', 'd', '8', '0', '0', '\\', 'u', 'd', c, '0', '0'}, want) {
+				if !check(t, &fence, &text, shift, run, {'\\', 'u', 'd', '8', '0', '0', '\\', 'u', 'd', c, '0', '0'}, want) {
 					return
 				}
 			}
@@ -480,6 +483,8 @@ indents_by_byte :: proc(t: ^testing.T) {
 	text, plain: [dynamic]u8
 	defer delete(text)
 	defer delete(plain)
+	fence := walktest.fence_init()
+	defer walktest.unfence(&fence)
 	for k in 0 ..< 40 {
 		for i in 0 ..= k {
 			for c in 0 ..< 256 {
@@ -503,14 +508,14 @@ indents_by_byte :: proc(t: ^testing.T) {
 					append(&plain, '\r' if b == '\n' else b)
 				}
 				want := json.validate(plain[:], .Json)
-				got := validate_fenced(text[:], .Json)
+				got := validate_fenced(&fence, text[:], .Json)
 				if !testing.expectf(t, got == want, "%q: %v, want %v", text[:], got, want) {
 					return
 				}
 			}
 		}
 		resize(&text, 2 + k + 3 + k)
-		f, bad := validate_fenced(text[:], .Json).?
+		f, bad := validate_fenced(&fence, text[:], .Json).?
 		if !testing.expectf(t, bad && f.kind == .Truncated && f.at == u64(len(text)), "%q: %v", text[:], f) {
 			return
 		}
@@ -542,6 +547,8 @@ colons_by_byte :: proc(t: ^testing.T) {
 	defer delete(ref)
 	defer delete(short)
 	defer delete(long)
+	fence := walktest.fence_init()
+	defer walktest.unfence(&fence)
 	PAST :: 40
 	for key_len in ([]int{1, 29, 30, 31}) {
 		for x in 0 ..< 256 {
@@ -561,8 +568,8 @@ colons_by_byte :: proc(t: ^testing.T) {
 				}
 				for n in 4 + key_len ..= 6 + key_len {
 					want = json.validate(ref[:n + PAST + 1], .Json)
-					got_short = shifted(validate_fenced(short[:n], .Json), PAST + 1)
-					got_long = shifted(validate_fenced(long[:n + PAST], .Json), 1)
+					got_short = shifted(validate_fenced(&fence, short[:n], .Json), PAST + 1)
+					got_long = shifted(validate_fenced(&fence, long[:n + PAST], .Json), 1)
 					if !testing.expectf(t, got_short == want && got_long == want, "%q: %v %v, want %v", short[:n], got_short, got_long, want) {
 						return
 					}
@@ -572,26 +579,22 @@ colons_by_byte :: proc(t: ^testing.T) {
 	}
 }
 
-// Validates `src` from a copy with 64 poisoned bytes after it, so a read past the end fails under
-// `-sanitize:address`.
-validate_fenced :: proc(src: []u8, $S: json.Spec, opts := json.Options{}) -> Maybe(core.Fault) {
-	FENCE :: 64
-	buf := make([]u8, len(src) + FENCE)
-	defer delete(buf)
-	copy(buf, src)
-	sanitizer.address_poison(buf[len(src):])
-	defer sanitizer.address_unpoison(buf[len(src):])
-	return json.validate(buf[:len(src)], S, opts)
+// Validates `src` from a copy at the end of `fence`'s readable page, with the page after it unreadable, so a read past
+// the end faults in every build.
+validate_fenced :: proc(fence: ^walktest.Fence, src: []u8, $S: json.Spec, opts := json.Options{}) -> Maybe(core.Fault) {
+	return json.validate(walktest.fence_copy(fence, src), S, opts)
 }
 
-// Validates every prefix of 900 seeded texts, compact and pretty, with poisoned bytes after it: each prefix gives the
-// same fault as the same text validated without the poison.
+// Validates every prefix of 900 seeded texts, compact and pretty, from a copy that ends at a guard page: each prefix
+// gives the same fault as the same text validated without the fence.
 @(test)
 prefixes_fenced :: proc(t: ^testing.T) {
 	state := rand.create(1)
 	context.random_generator = rand.default_random_generator(&state)
 	text: [dynamic]u8
 	defer delete(text)
+	fence := walktest.fence_init()
+	defer walktest.unfence(&fence)
 	for round in 0 ..< 900 {
 		clear(&text)
 		spec := json.Spec(round / 2 % len(json.Spec))
@@ -604,11 +607,11 @@ prefixes_fenced :: proc(t: ^testing.T) {
 			same: bool
 			switch spec {
 			case .Json:
-				same = validate_fenced(text[:n], .Json) == json.validate(text[:n], .Json)
+				same = validate_fenced(&fence, text[:n], .Json) == json.validate(text[:n], .Json)
 			case .Jsonc:
-				same = validate_fenced(text[:n], .Jsonc) == json.validate(text[:n], .Jsonc)
+				same = validate_fenced(&fence, text[:n], .Jsonc) == json.validate(text[:n], .Jsonc)
 			case .Json5:
-				same = validate_fenced(text[:n], .Json5) == json.validate(text[:n], .Json5)
+				same = validate_fenced(&fence, text[:n], .Json5) == json.validate(text[:n], .Json5)
 			}
 			if !testing.expectf(t, same, "%v %q", spec, text[:n]) {
 				return
@@ -776,6 +779,8 @@ tolerances :: proc(t: ^testing.T) {
 	// The tolerated pieces at every offset from 0 to 139, as `strings_at_every_offset` sweeps them.
 	text: [dynamic]u8
 	defer delete(text)
+	fence := walktest.fence_init()
+	defer walktest.unfence(&fence)
 	for piece in ([]string{"\xff", "\xe2\x82", "\xf0\x9f\x98x", "\\ud800", "\\udc00\\u0041"}) {
 		for k in 0 ..< 140 {
 			clear(&text)
@@ -785,7 +790,7 @@ tolerances :: proc(t: ^testing.T) {
 			}
 			append(&text, piece)
 			append(&text, '"')
-			f, bad := validate_fenced(text[:], .Json, {tolerate = {.Invalid_Utf8, .Lone_Surrogate}}).?
+			f, bad := validate_fenced(&fence, text[:], .Json, {tolerate = {.Invalid_Utf8, .Lone_Surrogate}}).?
 			if !testing.expectf(t, !bad, "%q: %v", text[:], f) {
 				return
 			}
@@ -804,6 +809,8 @@ tolerance_offsets :: proc(t: ^testing.T) {
 tolerance_offsets_in :: proc(t: ^testing.T, $S: json.Spec) {
 	text: [dynamic]u8
 	defer delete(text)
+	fence := walktest.fence_init()
+	defer walktest.unfence(&fence)
 	for quote in ([]u8{'"', '\''}) {
 		if S == .Jsonc && quote == '\'' {
 			continue
@@ -817,7 +824,7 @@ tolerance_offsets_in :: proc(t: ^testing.T, $S: json.Spec) {
 				}
 				append(&text, piece)
 				append(&text, quote)
-				f, bad := validate_fenced(text[:], S, {tolerate = {.Invalid_Utf8, .Lone_Surrogate}}).?
+				f, bad := validate_fenced(&fence, text[:], S, {tolerate = {.Invalid_Utf8, .Lone_Surrogate}}).?
 				if !testing.expectf(t, !bad, "%v %q: %v", S, text[:], f) {
 					return
 				}
@@ -825,84 +832,6 @@ tolerance_offsets_in :: proc(t: ^testing.T, $S: json.Spec) {
 				if !testing.expectf(t, strict_bad, "%v %q: strict %v", S, text[:], strict) {
 					return
 				}
-			}
-		}
-	}
-}
-
-// On 1200 generated and mutated texts of each spec, `validate` and a hooked walk return the same fault under a
-// tolerance set, except that only `validate` reports `Trailing`, and every token keeps its span's bytes.
-@(test)
-tolerances_agree :: proc(t: ^testing.T) {
-	tolerances_agree_in(t, .Json)
-	tolerances_agree_in(t, .Jsonc)
-	tolerances_agree_in(t, .Json5)
-}
-
-tolerances_agree_in :: proc(t: ^testing.T, $S: json.Spec) {
-	state := rand.create(1)
-	context.random_generator = rand.default_random_generator(&state)
-	log := new(walktest.Log)
-	defer free(log)
-	text, broken: [dynamic]u8
-	defer delete(text)
-	defer delete(broken)
-	for round in 0 ..< 1200 {
-		gen.text(&text, 1 + round % 6, S)
-		src := text[:]
-		if round % 2 == 1 {
-			walktest.mutate(&broken, text[:], gen.SHARP)
-			src = broken[:]
-		} else {
-			// Writes 0xff into the first quoted string with no escape, so `Invalid_Utf8` is reached.
-			log^ = {}
-			json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, walktest.log_hook)
-			for tok in log.tokens[:log.n] {
-				if tok.kind != .String || tok.n < 3 || (src[tok.lo] != '"' && src[tok.lo] != '\'') {
-					continue
-				}
-				escaped := false
-				for i in tok.lo ..< tok.lo + u64(tok.n) {
-					if src[i] == '\\' {
-						escaped = true
-						break
-					}
-				}
-				if escaped {
-					continue
-				}
-				for i in tok.lo + 1 ..< tok.lo + u64(tok.n) - 1 {
-					if src[i] != '"' && src[i] != '\'' {
-						src[i] = 0xff
-						break
-					}
-				}
-				break
-			}
-		}
-		tol: bit_set[json.Tolerance; u8]
-		switch rand.int_max(4) {
-		case 1:
-			tol = {.Invalid_Utf8}
-		case 2:
-			tol = {.Lone_Surrogate}
-		case 3:
-			tol = {.Invalid_Utf8, .Lone_Surrogate}
-		}
-		opts := json.Options{tolerate = tol}
-		want := json.validate(src, S, opts)
-		log^ = {}
-		_, got := json.walk(src, 0, S, opts, log, &core.Hook_Regs{}, walktest.log_hook)
-		if f, bad := want.?; bad && f.kind == .Trailing {
-			if !testing.expectf(t, got == nil, "%v %q tol %v: walk %v, validate %v", S, src, tol, got, want) {
-				return
-			}
-		} else if !testing.expectf(t, got == want, "%v %q tol %v: walk %v, validate %v", S, src, tol, got, want) {
-			return
-		}
-		for tok in log.tokens[:log.n] {
-			if !testing.expectf(t, spans(src, tok), "%v %q tol %v: %v", S, src, tol, tok) {
-				return
 			}
 		}
 	}

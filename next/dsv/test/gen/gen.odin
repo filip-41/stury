@@ -1,8 +1,9 @@
 // Seeded delimited texts for the walk's tests: valid texts that use every quote, escape, line end and UTF-8 width,
-// and the bytes a mutation may write.
+// texts in a random run-time dialect, and the bytes a mutation may write.
 package dsv_gen
 
 import "core:math/rand"
+import dsv "../.."
 
 // Appends a valid text to `out`: a header and records of one width, LF or CRLF line ends, empty lines now and then,
 // a final line end or not, and now and then a BOM. A cell now and then extends past the 64-byte block the walk reads.
@@ -60,5 +61,92 @@ cell :: proc(out: ^[dynamic]u8, tsv: bool) {
 	}
 	if quoted {
 		append(out, '"')
+	}
+}
+
+// The delimiters a case may pick: no CR, LF, non-ASCII byte or quote. A quote is left to the tests that check it
+// under each spec.
+DELIMITERS :: []byte{',', '\t', ';', '|', ':', '^', '~', '#'}
+
+// The comment bytes a case may pick: no CR, LF, non-ASCII byte, backslash or quote. A case keeps its comment byte
+// away from its delimiter.
+COMMENTS :: []byte{'#', ';', '%', '!', '@', '&'}
+
+// A cell's body for each spec, spelled as that spec writes it: CSV quotes or not, TSV escapes, Plain text.
+CSV_PLAIN :: []string{"", "a", "12.5", "sp ace", "é", "日本", "😀"}
+CSV_QUOTED :: []string{"", "a", "a,b", "x\"\"y", "multi\nline", "cr\r\nlf", "é", "😀"}
+TSV_CELLS :: []string{"", "a", "\\t", "\\n", "\\r", "\\0", "\\\\", "x\\ty", "\"q\"", "12.5", "é", "😀"}
+PLAIN_CELLS :: []string{"", "a", "\"q\"", "x\\y", "12.5", "é", "😀", " sp "}
+
+// A generated text's spec, delimiter and comment byte.
+Dialect_Case :: struct {
+	spec:    dsv.Spec,
+	delim:   byte,
+	comment: byte,
+}
+
+// Returns a case whose spec, delimiter and comment byte are drawn from their sets, with the comment byte away from
+// the delimiter.
+pick_case :: proc() -> Dialect_Case {
+	spec := rand.choice([]dsv.Spec{.Csv, .Tsv, .Plain})
+	delim := rand.choice(DELIMITERS)
+	comment: byte
+	if rand.int_max(2) == 0 {
+		for {
+			comment = rand.choice(COMMENTS)
+			if comment != delim {
+				break
+			}
+		}
+	}
+	return {spec, delim, comment}
+}
+
+// Appends a valid text of a case to `out`: a header and records of one width, a comment line before the header and
+// now and then between records, a line end at the end or not, and now and then a BOM. A comment line holds arbitrary
+// text bytes, including a delimiter, a quote and a CR.
+dialect_text :: proc(out: ^[dynamic]u8, c: Dialect_Case) {
+	clear(out)
+	if rand.int_max(10) == 0 {
+		append(out, "\xef\xbb\xbf")
+	}
+	width := 1 + rand.int_max(5)
+	rows := rand.int_max(6)
+	crlf := rand.int_max(3) == 0
+	line_end := []string{"\r\n", "\n"}
+	le := line_end[0 if crlf else 1]
+	for r in 0 ..= rows {
+		if c.comment != 0 && (r == 0 || rand.int_max(2) == 0) {
+			append(out, c.comment)
+			for _ in 0 ..< rand.int_max(10) {
+				append(out, rand.choice([]byte{'a', '#', ';', ',', '"', '\\', ' ', '\r', '|'}))
+			}
+			append(out, le)
+		}
+		for col in 0 ..< width {
+			if col > 0 {
+				append(out, c.delim)
+			}
+			switch c.spec {
+			case .Csv:
+				if rand.int_max(2) == 0 {
+					append(out, '"')
+					append(out, rand.choice(CSV_QUOTED))
+					append(out, '"')
+				} else {
+					append(out, rand.choice(CSV_PLAIN))
+				}
+			case .Tsv:
+				append(out, rand.choice(TSV_CELLS))
+			case .Plain:
+				append(out, rand.choice(PLAIN_CELLS))
+			}
+		}
+		if r < rows || rand.int_max(2) == 0 {
+			append(out, le)
+		}
+		if r < rows && rand.int_max(8) == 0 {
+			append(out, le)
+		}
 	}
 }

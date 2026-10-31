@@ -108,10 +108,16 @@ tail_fault :: proc "contextless" (src: []u8, hi: u64, $S: Spec) -> Maybe(core.Fa
 // whitespace in JSON5. When only those bytes remain, or `lo` is past the text's end, no token is made and the text's
 // end is returned with no fault. When a hook stops the walk, `hi` is one past the token it stopped on and no later
 // byte was read, so `hi` is no document boundary. `regs` is passed to the first token and holds what the hook
-// returned last.
-walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
+// returned last, and a nil `regs` starts from zero registers and keeps none. `opts` is `Options{}` by default.
+walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
+	// The nil test runs once per walk, not per token.
+	zero: core.Hook_Regs
+	r := regs
+	if r == nil {
+		r = &zero
+	}
 	q, _ := document_start(src, lo, S)
-	h2, f2, _ := walk_from(src, q, S, opts, h, regs, on)
+	h2, f2, _ := walk_from(src, q, S, opts, h, r, on)
 	return h2, f2
 }
 

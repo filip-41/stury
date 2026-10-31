@@ -10,10 +10,10 @@ import "core:strings"
 import "core:math/rand"
 import "core:testing"
 import cur "stury:json"
-import core "../../../core"
-import walktest "../../../walktest"
-import json "../.."
-import gen "../gen"
+import core "../../next/core"
+import walktest "../../next/walktest"
+import json "../../next/json"
+import gen "../../next/json/test/gen"
 
 @(test)
 documents_agree :: proc(t: ^testing.T) {
@@ -25,14 +25,14 @@ documents_agree :: proc(t: ^testing.T) {
 	compared := 0
 	suites: [dynamic][]runtime.Load_Directory_File
 	defer delete(suites)
-	append(&suites, #load_directory("../conformance/JSONTestSuite/test_parsing"))
+	append(&suites, #load_directory("../../next/json/test/conformance/JSONTestSuite/test_parsing"))
 	for suite in walktest.JSON5_TESTS {
 		append(&suites, suite)
 	}
 	for suite in suites {
 		for file in suite {
 			compared += 1
-			if !check_all(t, file.data, .Last) || !check_all(t, file.data, .Refuse) {
+			if !check_all(t, file.data, false) || !check_all(t, file.data, true) {
 				return
 			}
 		}
@@ -48,7 +48,7 @@ documents_agree :: proc(t: ^testing.T) {
 		walktest.mutate(&broken, text[:], gen.SHARP)
 		for src in ([][]u8{text[:], broken[:]}) {
 			compared += 2
-			if !check_all(t, src, .Last) || !check_all(t, src, .Refuse) {
+			if !check_all(t, src, false) || !check_all(t, src, true) {
 				return
 			}
 		}
@@ -57,33 +57,23 @@ documents_agree :: proc(t: ^testing.T) {
 	fmt.printfln("seed %d: %d documents compared", SEED, compared)
 }
 
-// JSON5's `.Refuse` is left out: the current tree does not read an unquoted key as a duplicate and this tree decodes
+// JSON5's refusal is left out: the current tree does not read an unquoted key as a duplicate and this tree decodes
 // every key. The two `Duplicates` enums name the same readings in a different order.
-old_dups :: proc(d: core.Duplicates) -> cur.Duplicates {
-	switch d {
-	case .First:
-		return .First
-	case .Last:
-		return .Last
-	case .All:
-		return .All
-	case .Refuse:
-		return .Refuse
-	}
-	return .Last
+old_dups :: proc(refuse: bool) -> cur.Duplicates {
+	return .Refuse if refuse else .Last
 }
 
-check_all :: proc(t: ^testing.T, src: []u8, dups: core.Duplicates) -> bool {
-	if !check_document(t, src, .Json, dups) || !check_document(t, src, .Jsonc, dups) {
+check_all :: proc(t: ^testing.T, src: []u8, refuse: bool) -> bool {
+	if !check_document(t, src, .Json, refuse) || !check_document(t, src, .Jsonc, refuse) {
 		return false
 	}
-	return dups == .Refuse || check_document(t, src, .Json5, dups)
+	return refuse || check_document(t, src, .Json5, refuse)
 }
 
-check_document :: proc(t: ^testing.T, src: []u8, $S: json.Spec, dups: core.Duplicates) -> bool {
-	old, old_err := cur.build(src, cur.Read_Opts{dialect = cur.Dialect(S), duplicates = old_dups(dups)})
+check_document :: proc(t: ^testing.T, src: []u8, $S: json.Spec, refuse: bool) -> bool {
+	old, old_err := cur.build(src, cur.Read_Opts{dialect = cur.Dialect(S), duplicates = old_dups(refuse)})
 	defer cur.destroy(&old)
-	doc, err := json.build(src, S, {}, dups)
+	doc, err := json.build(src, S, {}, refuse)
 	defer core.destroy(&doc)
 	if old_err != nil || err.kind != .None {
 		return refuses_agree(t, src, S, old_err, err)
@@ -124,7 +114,7 @@ refuses_agree :: proc(t: ^testing.T, src: []u8, $S: json.Spec, old: Maybe(cur.Er
 	return testing.expectf(t, false, "%v %q: document %v, current tree %v", S, src, new, old)
 }
 
-compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32, theirs: ^cur.Document, ti: cur.Node) -> bool {
+compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_Index, theirs: ^cur.Document, ti: cur.Node) -> bool {
 	tk, tok := cur.kind(theirs, ti)
 	ok := testing.expectf(t, tok && kind_agrees(core.kind(ours, oi), tk), "%q node %d: kind %v, current tree %v", src, oi, core.kind(ours, oi), tk)
 	if !ok {
@@ -134,7 +124,7 @@ compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32, theirs:
 	case .Null, .False, .True:
 	case .String:
 		buf: [4096]u8
-		s, sok := core.text(ours, oi, buf[:])
+		s, _, sok := core.text(ours, oi, buf[:])
 		w, wok := cur.get_string(theirs, ti)
 		ok = testing.expectf(t, sok && wok && s == w, "%q node %d: string %q, current tree %q", src, oi, s, w)
 	case .Number:
@@ -177,7 +167,7 @@ compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32, theirs:
 					ok = testing.expectf(t, ov_ok == tv_ok, "%q node %d: member counts", src, oi)
 					break
 				}
-				key, kok := core.text(ours, ov - 1, buf[:])
+				key, _, kok := core.text(ours, ov - 1, buf[:])
 				if !testing.expectf(t, kok && key == name, "%q node %d: key %q, current tree %q", src, oi, key, name) {
 					return false
 				}
@@ -213,7 +203,7 @@ kind_agrees :: proc(a: core.Kind, b: cur.Kind) -> bool {
 	return false
 }
 
-number_agrees :: proc(src: []u8, ours: ^core.Document, i: u32, n: core.Number, w: cur.Number) -> bool {
+number_agrees :: proc(src: []u8, ours: ^core.Document, i: core.Node_Index, n: core.Number, w: cur.Number) -> bool {
 	if math.is_nan(w.value) {
 		return n.kind == .Float && math.is_nan(transmute(f64)n.bits)
 	}

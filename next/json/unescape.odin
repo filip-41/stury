@@ -3,6 +3,7 @@ package json
 import "base:intrinsics"
 import "base:runtime"
 import "core:unicode/utf8"
+import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
 
@@ -71,7 +72,7 @@ decoded_next :: proc(d: ^Decoded) -> (b: u8, ok: bool) {
 		return first_byte(d, spelled, size)
 	}
 	// An ill-formed sequence reads as U+FFFD over its maximal subpart, the step `utf8_lax` makes.
-	q2, _ := utf8_lax(base[d.p:], base[d.end:], {.Invalid_Utf8})
+	q2, _, _ := utf8_lax(base[d.p:], base[d.end:], {.Invalid_Utf8})
 	d.p += u64(intrinsics.ptr_sub(q2, base[d.p:]))
 	return first_byte(d, replacement(), 3)
 }
@@ -94,7 +95,7 @@ decoded_escape :: #force_inline proc(src: []u8, p, end: u64) -> (spelled: [4]u8,
 			return replacement(), 3, end
 		}
 		e := src[p + 1]
-		if ent := core.ESC_WORD[e]; ent != 0 {
+		if ent := ESC_WORD[e]; ent != 0 {
 			spelled[0] = u8(ent)
 			return spelled, 1, p + 2
 		}
@@ -103,7 +104,7 @@ decoded_escape :: #force_inline proc(src: []u8, p, end: u64) -> (spelled: [4]u8,
 				spelled[0] = 'u'
 				return spelled, 1, p + 2
 			}
-			unit, ok := core.hex4(raw_data(src)[p + 2:])
+			unit, ok := hex4(raw_data(src)[p + 2:])
 			if !ok {
 				spelled[0] = 'u'
 				return spelled, 1, p + 2
@@ -115,7 +116,7 @@ decoded_escape :: #force_inline proc(src: []u8, p, end: u64) -> (spelled: [4]u8,
 				if unit >= 0xDC00 || next + 6 > end || src[next] != '\\' || src[next + 1] != 'u' {
 					return replacement(), 3, next
 				}
-				low, low_ok := core.hex4(raw_data(src)[next + 2:])
+				low, low_ok := hex4(raw_data(src)[next + 2:])
 				if !low_ok || low - 0xDC00 >= 0x400 {
 					return replacement(), 3, next
 				}
@@ -158,7 +159,7 @@ decoded_escape_other :: proc(src: []u8, p, end: u64, e: u8) -> (spelled: [4]u8, 
 			if p + 4 > end {
 				break
 			}
-			hi, lo := core.HEX_NIBBLE[src[p + 2]], core.HEX_NIBBLE[src[p + 3]]
+			hi, lo := spell.HEX_NIBBLE[src[p + 2]], spell.HEX_NIBBLE[src[p + 3]]
 			if hi > 15 || lo > 15 {
 				break
 			}
@@ -191,7 +192,7 @@ decoded_escape_other :: proc(src: []u8, p, end: u64, e: u8) -> (spelled: [4]u8, 
 		base := raw_data(src)
 		q, kind := kernel.utf8_char(base[p + 1:], base[end:])
 		if kind != .None {
-			q, _ = utf8_lax(base[p + 1:], base[end:], {.Invalid_Utf8})
+			q, _, _ = utf8_lax(base[p + 1:], base[end:], {.Invalid_Utf8})
 			return replacement(), 3, p + 1 + u64(intrinsics.ptr_sub(q, base[p + 1:]))
 		}
 		n := int(intrinsics.ptr_sub(q, base[p + 1:]))
@@ -208,32 +209,41 @@ replacement :: #force_inline proc() -> [4]u8 {
 	return {0xEF, 0xBF, 0xBD, 0}
 }
 
-// JSON's `Spelling.text`, exported so a caller that knows the format calls it without the table. A node with
+// JSON's `Spelling.text`, exported so a caller that knows the format calls it without the table. A scalar with
 // `SPELLING_DECODE` clear returns its span. A node that needs decoding is written into `buf` when it has room, else
-// into a new allocation from `allocator`.
-text :: #force_inline proc(doc: ^core.Document, i: u32, buf: []u8, allocator := context.allocator) -> (string, bool) {
+// into a new allocation from `allocator`, returned as `owned`. A container and an index past the last node return
+// false, as `core.text` does.
+text :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, allocator := context.allocator) -> (s: string, owned: []u8, ok: bool) {
+	if int(i) >= len(doc.nodes) {
+		return "", nil, false
+	}
 	n := doc.nodes[i]
+	// A container's `n` is a node count and its `spelling` a child count, not a span and a decode bit.
+	if n.kind > .Plain {
+		return "", nil, false
+	}
 	if n.spelling & core.SPELLING_DECODE == 0 {
-		return string(doc.src[n.lo:n.lo + u64(n.n)]), true
+		return string(doc.src[n.lo:n.lo + u64(n.n)]), nil, true
 	}
 	if n.spelling & core.SPELLING_LAX != 0 {
-		return core.decode_text(buf, allocator, decoded_init(doc.src, n), decoded_next)
+		return spell.decode_text(buf, allocator, decoded_init(doc.src, n), decoded_next)
 	}
 	return decode_plain(doc, i, buf, allocator)
 }
 
 // Returns the destination a decode writes. It is `buf` when `buf` is at least `n` bytes, else a new allocation of
-// `n + 4` bytes from `allocator`, for an escape's whole 32-bit word. Returns false when the allocation fails.
+// `n + 4` bytes from `allocator`, for an escape's whole 32-bit word, and `owned` is that allocation. Returns false
+// when the allocation fails.
 @(private)
-decode_dst :: proc(n: u32, buf: []u8, allocator: runtime.Allocator) -> (dst: []u8, ok: bool) {
+decode_dst :: proc(n: u32, buf: []u8, allocator: runtime.Allocator) -> (dst: []u8, owned: []u8, ok: bool) {
 	if int(n) <= len(buf) {
-		return buf, true
+		return buf, nil, true
 	}
 	raw, err := runtime.mem_alloc_non_zeroed(int(n) + 4, 1, allocator)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
-	return raw, true
+	return raw, raw, true
 }
 
 // Writes an escape's `size` bytes at `w` in `dst`: one 32-bit store when four bytes fit, else one byte at a time. A
@@ -254,11 +264,11 @@ put_word :: #force_inline proc(dst: []u8, w: int, spelled: [4]u8, size: int) {
 // Decodes a short token byte by byte with one 32-bit store per escape. `decode_plain` picks it for a token under
 // 256 bytes, where finding escapes in 64-byte blocks does more work than the byte walk.
 @(private)
-decode_scalar :: proc(doc: ^core.Document, i: u32, buf: []u8, allocator: runtime.Allocator) -> (string, bool) {
+decode_scalar :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, allocator: runtime.Allocator) -> (string, []u8, bool) {
 	n := doc.nodes[i]
-	dst, ok := decode_dst(n.n, buf, allocator)
+	dst, owned, ok := decode_dst(n.n, buf, allocator)
 	if !ok {
-		return "", false
+		return "", nil, false
 	}
 	src := doc.src
 	out := raw_data(dst)
@@ -279,18 +289,18 @@ decode_scalar :: proc(doc: ^core.Document, i: u32, buf: []u8, allocator: runtime
 		w += size
 		p = next
 	}
-	return string(dst[:w]), true
+	return string(dst[:w]), owned, true
 }
 
 // Decodes a long token. Loads each 64-byte block once, stores a block with no escape whole, and walks a block with
 // escapes by its backslash mask, copying the run before each escape and decoding the escape in place. A block is not
 // reloaded after an escape.
 @(private)
-decode_block :: proc(doc: ^core.Document, i: u32, buf: []u8, allocator: runtime.Allocator) -> (string, bool) {
+decode_block :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, allocator: runtime.Allocator) -> (string, []u8, bool) {
 	n := doc.nodes[i]
-	dst, ok := decode_dst(n.n, buf, allocator)
+	dst, owned, ok := decode_dst(n.n, buf, allocator)
 	if !ok {
-		return "", false
+		return "", nil, false
 	}
 	src := raw_data(doc.src)
 	out := raw_data(dst)
@@ -369,12 +379,12 @@ decode_block :: proc(doc: ^core.Document, i: u32, buf: []u8, allocator: runtime.
 		w += size
 		p = next
 	}
-	return string(dst[:w]), true
+	return string(dst[:w]), owned, true
 }
 
 // Decodes a token under 256 bytes with `decode_scalar` and a longer one with `decode_block`.
 @(private)
-decode_plain :: #force_inline proc(doc: ^core.Document, i: u32, buf: []u8, allocator: runtime.Allocator) -> (string, bool) {
+decode_plain :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, allocator: runtime.Allocator) -> (string, []u8, bool) {
 	if doc.nodes[i].n < 256 {
 		return decode_scalar(doc, i, buf, allocator)
 	}
@@ -428,7 +438,7 @@ copy_up_to :: #force_inline proc(dst: []u8, w: int, src: [^]u8, p, n: int) {
 // between escapes, with no allocation. A key holding a tolerated ill-formed sequence compares through `decoded_next`,
 // so it matches what `text` returns.
 @(private)
-key_equals_decode :: #force_inline proc(doc: ^core.Document, i: u32, name: string) -> bool {
+key_equals_decode :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, name: string) -> bool {
 	n := doc.nodes[i]
 	if n.spelling & core.SPELLING_LAX != 0 {
 		d := decoded_init(doc.src, n)
@@ -466,7 +476,7 @@ key_equals_decode :: #force_inline proc(doc: ^core.Document, i: u32, name: strin
 		if at + run > len(name) {
 			return false
 		}
-		if run > 0 && !core.bytes_equal(src[p:e], transmute([]u8)name[at:at + run]) {
+		if run > 0 && !spell.bytes_equal(src[p:e], transmute([]u8)name[at:at + run]) {
 			return false
 		}
 		at += run
@@ -488,22 +498,15 @@ key_equals_decode :: #force_inline proc(doc: ^core.Document, i: u32, name: strin
 	return at == len(name)
 }
 
-// JSON's `key_equals`, exported beside `text`. It calls core's key rule, which compares an unmarked key as its own
-// text and sends a marked key to `key_equals_decode`. A caller that knows this format calls it directly and inlines
-// both.
-key_equals :: #force_inline proc(doc: ^core.Document, i: u32, name: string) -> bool {
-	return core.key_equals(doc, i, name)
-}
-
 // JSON's `Spelling.resolve` returns the node's kind, which is its value's kind.
 @(private)
-spelling_resolve :: proc(doc: ^core.Document, i: u32, opts: core.Resolve_Options) -> core.Kind {
+spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index, opts: core.Resolve_Options) -> core.Kind {
 	return doc.nodes[i].kind
 }
 
 // JSON's `Spelling.number`, exported beside `text`. A pure integer of at most 19 digits folds here from the recorded
 // shape with no grammar search. Every other token, and a negative below `i64`, is passed to `number_slow`.
-number :: #force_inline proc(doc: ^core.Document, i: u32) -> core.Number {
+number :: #force_inline proc(doc: ^core.Document, i: core.Node_Index) -> core.Number {
 	n := doc.nodes[i]
 	// Any kind but `.Number` is no number and returns `.Wide`.
 	if n.kind == .Number {
@@ -514,14 +517,14 @@ number :: #force_inline proc(doc: ^core.Document, i: u32) -> core.Number {
 			int_digits := int((sp >> NUMBER_INT_SHIFT) & 0x1f)
 			if sp & (NUMBER_FRAC_MASK | NUMBER_EXP) == 0 {
 				if int_digits <= 19 {
-					if num, ok := core.number_int(doc.src, lo, hi, int_digits); ok {
+					if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
 						return num
 					}
 				}
 			} else {
 				frac_digits := int((sp >> NUMBER_FRAC_SHIFT) & 0x1f)
 				if sp & NUMBER_EXP != 0 {
-					return core.number_exponent(doc.src, lo, hi, int_digits, frac_digits)
+					return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits)
 				}
 				// A set `NUMBER_FRAC_MASK` without `NUMBER_EXP` is a fraction of at least one digit.
 				// `number_fraction`'s first arm checks the point byte at `hi - frac_digits - 1` and folds both
@@ -529,7 +532,7 @@ number :: #force_inline proc(doc: ^core.Document, i: u32) -> core.Number {
 				// recorded them from this span. A saturated count records 31, so `int_digits + frac_digits`
 				// exceeds 19 and `number_slow` reads the token.
 				if int_digits + frac_digits <= 19 {
-					return core.number_fraction(doc.src, lo, hi, int_digits, frac_digits)
+					return spell.number_fraction(doc.src, lo, hi, int_digits, frac_digits)
 				}
 			}
 		}
@@ -538,19 +541,36 @@ number :: #force_inline proc(doc: ^core.Document, i: u32) -> core.Number {
 	return {0, .Wide}
 }
 
+// The bits of binary64 infinity, which `strconv.fast_float_compute_float` returns on overflow.
+@(private)
+F64_INF_BITS :: u64(0x7FF) << 52
+
+// Returns JSON5's `Infinity` as a binary64, with a negative sign when `src[lo]` is `-` and `lo < hi`.
+@(private)
+number_infinity :: proc(src: []u8, lo, hi: u64) -> core.Number {
+	neg := lo < hi && src[lo] == '-'
+	return {F64_INF_BITS | u64(neg) << 63, .Float}
+}
+
+// Returns JSON5's `NaN` as a quiet binary64 NaN with a zero sign, since the sign of NaN is not a value.
+@(private)
+number_nan :: proc(src: []u8, lo, hi: u64) -> core.Number {
+	return {0x7ff8_0000_0000_0000, .Float}
+}
+
 // Decodes the number shapes that are not a plain integer: decimal, hex, infinity and NaN.
 @(private, cold)
-number_slow :: #force_no_inline proc(doc: ^core.Document, i: u32, n: core.Node) -> core.Number {
+number_slow :: #force_no_inline proc(doc: ^core.Document, i: core.Node_Index, n: core.Node) -> core.Number {
 	lo, hi := n.lo, n.lo + u64(n.n)
 	switch number_spelling_of(n.spelling) {
 	case .Json, .Decimal:
-		return core.number_decimal(doc.src, lo, hi)
+		return spell.number_decimal(doc.src, lo, hi)
 	case .Hex:
-		return core.number_hex(doc.src, lo, hi)
+		return spell.number_hex(doc.src, lo, hi)
 	case .Infinity:
-		return core.number_infinity(doc.src, lo, hi)
+		return number_infinity(doc.src, lo, hi)
 	case .Nan:
-		return core.number_nan(doc.src, lo, hi)
+		return number_nan(doc.src, lo, hi)
 	}
 	return {0, .Wide}
 }

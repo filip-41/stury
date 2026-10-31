@@ -7,10 +7,10 @@ import "core:fmt"
 import "core:math/rand"
 import "core:testing"
 import cur "stury:csv"
-import core "../../../core"
-import dsv "../.."
-import gen "../gen"
-import walktest "../../../walktest"
+import core "../../next/core"
+import dsv "../../next/dsv"
+import gen "../../next/dsv/test/gen"
+import walktest "../../next/walktest"
 
 @(test)
 documents_agree :: proc(t: ^testing.T) {
@@ -27,7 +27,7 @@ documents_agree :: proc(t: ^testing.T) {
 		for src in ([][]u8{text[:], broken[:]}) {
 			for no_header in ([]bool{false, true}) {
 				compared += 2
-				if !check_document(t, src, tsv, no_header, .Last) || !check_document(t, src, tsv, no_header, .Refuse) {
+				if !check_document(t, src, tsv, no_header, false) || !check_document(t, src, tsv, no_header, true) {
 					return
 				}
 			}
@@ -39,22 +39,12 @@ documents_agree :: proc(t: ^testing.T) {
 
 // The two `Duplicates` enums name the same readings in a different order, and the old tree's `Document` and `Node`
 // differ, so each oracle adapts its own tree's type.
-old_dups :: proc(d: core.Duplicates) -> cur.Duplicates {
-	switch d {
-	case .First:
-		return .First
-	case .Last:
-		return .Last
-	case .All:
-		return .All
-	case .Refuse:
-		return .Refuse
-	}
-	return .Last
+old_dups :: proc(refuse: bool) -> cur.Duplicates {
+	return .Refuse if refuse else .Last
 }
 
-check_document :: proc(t: ^testing.T, src: []u8, tsv, no_header: bool, dups: core.Duplicates) -> bool {
-	old_opts := cur.Read_Opts{no_header = no_header, duplicates = old_dups(dups)}
+check_document :: proc(t: ^testing.T, src: []u8, tsv, no_header, refuse: bool) -> bool {
+	old_opts := cur.Read_Opts{no_header = no_header, duplicates = old_dups(refuse)}
 	if tsv {
 		old_opts.dialect = cur.TSV
 	}
@@ -63,9 +53,9 @@ check_document :: proc(t: ^testing.T, src: []u8, tsv, no_header: bool, dups: cor
 	doc: core.Document
 	err: core.Document_Error
 	if tsv {
-		doc, err = dsv.build(src, .Tsv, {no_header = no_header}, dups)
+		doc, err = dsv.build(src, .Tsv, {no_header = no_header}, refuse)
 	} else {
-		doc, err = dsv.build(src, .Csv, {no_header = no_header}, dups)
+		doc, err = dsv.build(src, .Csv, {no_header = no_header}, refuse)
 	}
 	defer core.destroy(&doc)
 	if old_err != nil || err.kind != .None {
@@ -114,7 +104,7 @@ refuses_agree :: proc(t: ^testing.T, src: []u8, tsv: bool, old: Maybe(cur.Error)
 	return testing.expectf(t, false, "%q: document %v, current tree %v", src, new, old)
 }
 
-compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32, theirs: ^cur.Document, ti: cur.Node, headed: bool) -> bool {
+compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_Index, theirs: ^cur.Document, ti: cur.Node, headed: bool) -> bool {
 	tk, tok := cur.kind(theirs, ti)
 	record := headed && oi != core.ROOT && core.kind(ours, oi) == .Array
 	ok: bool
@@ -163,7 +153,7 @@ compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32, theirs:
 // Checks a record's members in order: its cells against the current tree's fields, their names against its member
 // names, and each name against the key the document stores for it, a headed record's header cell or a JSON object's
 // key node.
-compare_members :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32, theirs: ^cur.Document, ti: cur.Node, headed: bool) -> bool {
+compare_members :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_Index, theirs: ^cur.Document, ti: cur.Node, headed: bool) -> bool {
 	if !walktest.count_agrees(t, src, oi, core.length(ours, oi), cur.child_count(theirs, ti)) {
 		return false
 	}
@@ -182,9 +172,9 @@ compare_members :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32,
 		}
 		key_node := ov - 1
 		if headed {
-			key_node = ours.header + 1 + u32(col)
+			key_node = ours.header + 1 + core.Node_Index(col)
 		}
-		key, kok := core.text(ours, key_node, buf[:])
+		key, _, kok := core.text(ours, key_node, buf[:])
 		if !testing.expectf(t, kok && key == name, "%q node %d: key %q, current tree %q", src, oi, key, name) {
 			return false
 		}
@@ -213,9 +203,9 @@ compare_members :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32,
 
 // Checks a cell's text. The current tree resolves an empty unquoted cell to null and every other cell to a string,
 // so the text is what the two models agree on.
-cell_agrees :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32, theirs: ^cur.Document, ti: cur.Node) -> bool {
+cell_agrees :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_Index, theirs: ^cur.Document, ti: cur.Node) -> bool {
 	buf: [4096]u8
-	s, sok := core.text(ours, oi, buf[:])
+	s, _, sok := core.text(ours, oi, buf[:])
 	w, _ := cur.get_string(theirs, ti)
 	return testing.expectf(t, sok && s == w, "%q node %d: cell %q, current tree %q", src, oi, s, w)
 }

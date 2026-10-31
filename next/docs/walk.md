@@ -13,15 +13,19 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 | File | Holds |
 |---|---|
 | `core/walk.odin` | `Kind`, `Role`, `Token`, `Action`, `Hook_Regs`, `text_start` |
-| `core/document.odin` | `Node`, `Document`, the builder hook, the readers, `Duplicates`, `Spelling` |
-| `core/edit.odin` | `Edit_List`, `Edit`, `Edit_Spelling`, `set`/`insert`/`remove`, `commit` |
-| `core/number.odin` | `Number`, `Number_Kind`, the decimal, hex, infinities and the JSON number writer's reading |
-| `core/escape.odin` | the escape-byte and hex-digit tables both formats' decoders share |
+| `core/document.odin` | `Node`, `Document`, the readers, `Duplicates`, `Spelling`, `Edit_Spelling`, `destroy` |
+| `core/result.odin` | the result word: `fault_at`, `STOPPED`, `fault_of`, and the empty hook `No_Hooks`/`no_hook` |
+| `core/build/build.odin` | `Builder`, the hooks a format's `build` passes its walk, the header row, the duplicate-key check |
+| `core/spell/number.odin` | `Number`, `Number_Kind`, the decimal and hex decoders, the digit reader |
+| `core/spell/text.odin` | `decode_text` and `bytes_equal` |
+| `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
+| `core/edit.odin` | `Edit_List`, `Edit`, `set`/`insert`/`remove`, `commit` |
 | `core/error.odin` | `Fault_Kind`, `Fault`, `Rules`, `Rule`, the codes, line and column, the renderer |
+| `json/escape.odin` | the escape-byte table and the hex and surrogate helpers JSON's walk and decoder share |
 | `json/walk.odin` | JSON's interface, the result word, `Walk`, `walk_document`, the hook calls |
 | `json/document.odin` | JSON's `build` and its spelling table |
 | `json/unescape.odin` | JSON's string decoder, its key compare and its number reader |
-| `dsv/document.odin` | dsv's `build`, its spelling tables and its header rule |
+| `dsv/document.odin` | dsv's `build`, its spelling table and its header rule |
 | `json/states.odin` | the grammar states, one procedure each, and the value classes |
 | `json/strings.odin` | the string readers, from a two-load probe to a block reader per x86 tier |
 | `json/scalars.odin` | numbers and literals |
@@ -37,27 +41,52 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 
 Each format package exposes the names a caller uses: `Spec`, `Options`, `Detail`, `RULES`, `walk`, `validate` and
 `build`, plus the token spelling detail its walk documents (`json.Number_Spelling` and `json.number_spelling_of`).
-Everything else, including the `core.Spelling` tables, is `@(private)`.
+`json` also exposes `Tolerance`, `MAX_DEPTH`, `commit`, `text` and `number`, and `dsv` exposes `Tolerance`. `make
+surface` lists every public name.
+
+`core`'s walk interface is what a format author uses: `Kind` and `Role` are a token's fields, `Token`, `Action` and
+`Hook_Regs` are a hook's signature, `Fault`, `Fault_Kind` and `Rules` are a walk's result, `fault_at` and `fault_of`
+make a fault, `STOPPED` is the result word's stopped detail, `No_Hooks` and `no_hook` make a walk without hooks, and
+`text_start` skips a byte-order mark at byte 0. A caller of `build` and the readers does not name them: the document
+and its readers are the caller's interface.
 
 ```odin
 Spec     :: enum u8 { ... }    // the grammar, at compile time
 Options  :: struct { ... }     // what a walk receives at run time
 Detail   :: enum u8 { None, ... }   // the format's own rules, in `Fault.detail`
 RULES    : core.Rules             // each rule's code and message, in rodata
-walk     :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), keys: []core.Token = nil) -> (hi: u64, fault: Maybe(core.Fault))
+walk     :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), keys: []core.Token = nil) -> (hi: u64, fault: Maybe(core.Fault))
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault)
-build    :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Document_Error)
+build    :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error)
 ```
 
-`keys` is optional scratch the caller may pass: one `core.Token` per header cell. The walk fills it with the header
-record's cells and allocates nothing for them. With `nil`, `walk` allocates one token per header cell from the default
-heap and frees it before returning. `dsv.build` passes a buffer so the header's cells are read once and written into
-the row it built.
+`keys` is dsv's alone and JSON's `walk` takes none: optional scratch the caller may pass, one `core.Token` per header
+cell. The dsv walk fills it with the header record's cells and allocates nothing for them. With `nil`, the walk
+allocates one token per header cell from the default heap and frees it before returning. `dsv.build` passes a buffer
+so the header's cells are read once and written into the row it built.
 
-`build` runs the value layer: it passes `walk` core's `builder_hook` and returns the document of nodes and facts, or
-a `Document_Error`. `Document_Error.at` is the byte the error names, 0 for a kind that names none, and `inner` is the
-walk's fault for `.Walk`. The format's `document.odin` holds a `core.Spelling` table in rodata per reading (JSON, and
-CSV or TSV), and a reader uses it to decode a string or number without running a second walk.
+`opts` defaults to `Options{}` and `regs` may be nil, in which case the walk starts from zero registers and keeps
+none. A call that skips `opts` passes the later parameters by name:
+
+```odin
+h: core.No_Hooks
+at: u64
+for at < u64(len(src)) {
+	next, fault := json.walk(src, at, .Json, h = &h, regs = nil, on = core.no_hook)
+	if fault != nil || next == at {
+		break
+	}
+	at = next
+}
+```
+
+That loop reads an NDJSON stream: each walk returns one past the document it read, so the next starts there. A
+`regs` the caller keeps returns the hook's registers from one walk to the next.
+
+`build` runs the value layer: it passes `walk` one of `core/build`'s builder hooks, `build.builder_hook` for a spec
+with comments, and returns the document of nodes and facts, or a `Document_Error`. `Document_Error.at` is the byte the
+error names, 0 for a kind that names none, and `inner` is the walk's fault for `.Walk`. The format's `document.odin` holds one `core.Spelling` table in rodata for all its readings,
+and a reader uses it to decode a string or number without running a second walk.
 
 A limit of the format's grammar may be public beside them, as JSON's `MAX_DEPTH` is, because a caller sizes a stack
 for the walk's tokens from it.
@@ -79,80 +108,21 @@ for the walk's tokens from it.
   the text's end or a 0x1E, it emits no token and returns the text's end with no fault. A stream of documents
   (NDJSON, RFC 7464, jq's input) is therefore a loop of walks, each starting where the last ended. A dsv text is one
   table, so its walk reads to the text's end, and a walk started past the end reads an empty table.
-- The walks are contextless, so a hook can call a walk. A walk that needs scratch allocates it from the default heap
-  and frees it before it returns. `validate` allocates nothing unless `max_depth` is past `MAX_DEPTH`.
+- The walks are contextless, so a hook can call a walk. A walk that needs scratch sets the default context there,
+  allocates from the default heap, and frees it before it returns; a walk that allocates nothing sets no context.
+  `validate` allocates nothing unless `max_depth` is past `MAX_DEPTH`.
 
 ### The document
 
-`build` returns one `core.Document`: the walk's tokens as `core.Node`s in preorder, the facts beside them, and a
-`core.Spelling` table. `ROOT` names the root's node and `NO_NODE` a miss. The readers are `kind`, `span`, `text`,
-`number`, `resolve`, `key_equals`, `length`, `children`/`child_next`, `child_at`, `first_child`/`next_child`,
-`member`/`member_all` and `facts_of`. A reader given an index no node holds refuses as it does for a node of the
-wrong kind: `kind` and `resolve` return `.Null`, `length` 0, `span` nil, `number` `.Wide`, `text` false,
-`key_equals` false and `child_at` no node.
+`build` runs the walk and returns one `core.Document`, or a `core.Document_Error`: the walk's tokens as 16-byte
+`core.Node`s in preorder, the facts beside them, and a `core.Spelling` table. `document.md` describes the node, the
+document, the readers, the spelling services, the duplicate-key rule, a delimited text as a document, facts, the edit
+list and its commit, and the value layer's errors.
 
-A document holds no `End` node. A container's `n` is its subtree's node count, its own node included, so its next
-sibling is `i + n`. Its `spelling` is its child count, where a member counts once, not its key and value. `length`
-reads that count and counts the members by stepping when the count is saturated (`CHILDREN_MAX`). `span` of a
-container runs from its open to its close. The close is no node, so the format's `close_end` service starts after the
-container's last descendant (or at its open when the container is empty), skips the closes on its rightmost spine and
-the whitespace and comments between them, and ends one byte past its close. A string's token span is the text between
-its quotes, and `span` restores the quotes from the quote bit for splicing. `text` of a node that needs decoding
-writes into the caller's buffer when the buffer holds the token's span, which decoded text never exceeds, so a read
-allocates only for a buffer shorter than the token.
-
-A dsv text read with a header is an `Array` of records whose first child is the header row: an `Array` of role `Key`
-whose cells, each a `Plain` token of role `Key`, name the columns. The root's readers step over it as they step over a
-member's key, and `length` of the root counts the records. `Document.header` is that `Array`'s node, 0 for a text read
-without a header and for every JSON document. A record is an `Array` of `Plain` cells. The Map readers of a headed
-record resolve cell `c` with the header's cell `c`: `member` and `member_all` walk the header, and a cell's node is
-its record's node plus one plus its column. `child_at` returns a record's cell `c` in one step, since every child of a
-headed record is one node. A column past a record's last cell, as a ragged record has, names no cell, and a header
-cell reads as a key node, so `key_equals`, `text`, `resolve` and `number` return for it as they do for a JSON key.
-The build writes the header row before the walk and passes the walk a key buffer of one token per cell, so the walk
-reads the header once and `build` fills the row's cells from it. No record stores a key node. `Document.delimiter`
-and `Document.comment` hold the run-time dialect the text was read with, the byte between cells and the byte that
-starts a comment line, 0 for none and for a JSON document. They fill the padding `header` leaves, so the document size
-and node positions do not change.
-
-### The edit list
-
-A document does not change after its build, and no reader accepts edits. `core.edit_list_init` makes an empty
-`core.Edit_List` over a document, and any number of lists may share it. `set`, `insert` and `remove` append an edit
-`(node, operation, text)`, and `commit` splices the log into the source: every byte no edit touched stays as it was,
-including comments, spacing and number spellings. The format supplies the separators.
-
-An edit is checked when it is recorded, by reading its own text. `set` writes one value over a node's own bytes, or
-one key over a key's, and `insert` adds an element to an array or a member, with a key, to an object. A delimited
-text's root takes a record of cells and a record takes a cell. The format's own walk judges the text as one value, one
-key or one record of the document's spec and, for a delimited text, of its `delimiter` and `comment` byte, so the
-same walk parses the recorded text and it reads as its document does. A cell that holds the delimiter unquoted is two
-cells unless the spec quotes it (Csv and Tsv can, Plain cannot), and a cell or record that starts a line with the
-comment byte is no record. Both are refused. `remove` takes a value that is a member of a container, with its key.
-
-`core.Edit_Spelling`, which `Spelling.edit` points at, supplies `value`, `key` and `record` to judge
-a recorded text, `reads` to read a text with or without the format's tolerance set, the member and key separators,
-and the line end a record insert writes, taken from the text. A table's cell separator is the document's `delimiter`,
-so a read of `;` writes `;`. A document whose edit table has a `record` service holds a table's records and cells, and
-every other document holds values. `Document.spec` names the spec an edit's text is judged by. dsv's three specs share
-one edit table, and each service reads the document's spec and dialect.
-
-A commit sorts the edits by source position, resolving an insert's position against the document the list was made
-from, so a commit takes O(text) time. It cuts a removed member with the comments attached to it and one separator, the
-one after it when a member follows and the one before it otherwise. A container whose every member is removed keeps
-only its brackets. A dsv record is cut from its own first byte through its own line end, so a comment line beside it
-and its line end stay, and an insert beside one is placed on the side that leaves the comment line a line of its own.
-A set replaces the node's bytes and leaves the surrounding trivia. Two edits of one node conflict,
-as do an edit inside what another replaces or an insert whose byte a removal's range touches, and both are refused as
-`.Conflicting_Edits`. A delimited text's width is its header's or its first record's, so an edit that would leave a
-record the table cannot follow is refused. A committed text is checked once, in core: it must read strictly, then
-within the format's tolerance set, and only a text that needs a tolerance the source also needed is accepted. A text
-that fails even the tolerant read is not committed. Reading after edits is `commit` then `build`.
-
-A fact edit names a node and a role, and a set also a body. `set_fact` and `remove_fact` change every fact of that node
-and role. A commit writes a set body where the role reads it, and counts a fact that a set drops because the output
-cannot hold or spell it. A fact no edit names keeps its bytes in place, unless a set or a removal writes over them, and
-its node and role after the commit follow the comments around it and are not preserved.
+Two things here are the walk's. The walk gives an `End` token for every container and a `Plain` token of a comment
+role for every comment, and the builder consumes the `End` and stores the comment as a fact. An edit's text is judged
+by the same walk: a recorded value, key or record is read by the format's `walk` with the document's spec and, for a
+delimited text, its `delimiter` and `comment` byte, so it reads as its document does.
 
 ### Tokens
 
@@ -165,7 +135,7 @@ order the walk reads them, which is text order except for a dsv `Key`, whose spa
 the record that names it. `kind` says what the token is: a scalar (`Null`, `False`, `True`, `Number`, `String`,
 `Plain`), a container's opening (`Array`, `Map`), or its `End`. `role` is `Key` for a JSON member's name and for the
 header cell that names a dsv cell's column, and past `Key` a fact: a comment, `Plain`, as `Comment`, `Comment_Inline`
-or `Comment_Foot`. A consumer that wants values only tests `role <= .Key`. `spelling` is a detail the format writes
+or `Comment_Foot`. A consumer that wants values only tests `role == .Value`. `spelling` is a detail the format writes
 and core reads through three bits: bit 0 says `text` must be decoded, bit 1 says the token is quoted (a JSON string,
 whose token span leaves its quotes out, or a quoted dsv cell, whose span holds them), and bit 2 says a JSON string
 holds a tolerated ill-formed UTF-8 sequence. For a comment token, the low byte of `spelling` holds the lead marker's
@@ -279,13 +249,19 @@ builds a vector on entry, makes every state that inlines it save the call's regi
 of its own:
 
 - Whitespace after a token goes to `st_open_ws`, `st_after_ws`, `st_member_ws`. The hot states hold only
-  `indent_fast`, which is scalar and builds no vector.
+  `indent_fast`, whose one masked vector compare replaces `skip_indent`'s loop.
 - A string that holds an escape goes to `st_string_escaped`, which keeps the escape masks' registers to itself.
 - A bad literal goes to `st_bad_literal`, so `st_value` saves nothing for its call.
 - In JSON5 a byte that starts no JSON value goes to `st_value5`, and one that opens no JSON key to `st_key5`, with the
   comment run, the close after a trailing comma and the fault, so the states every document passes through keep their
   size.
 - A skipped value goes to `st_skip` and `st_skip_member`.
+
+Two states that differ only by a constant, such as `st_string` and `st_key_string` or `st_after` and
+`st_after_number`, are written out as two procedures. `#must_tail` requires the caller and the callee to have the same
+procedure type, and a compile-time parameter of the state's own makes a different type. The jumps between such states
+would then be plain returns, which `-o:speed` still compiles as jumps but `-sanitize:address` compiles as calls, so a
+deep text overflows the stack.
 
 `st_value` branches on a 256-entry class table (`VALUE_CLASS`), so `true`, `false` and `null` share one branch.
 
@@ -325,8 +301,8 @@ single space before the next token, as some compact printers write after a comma
 newline test, so neither compact nor indented text runs extra code for it.
 
 `st_key` reads the colon after a key on a fast path when the colon is flush against its value or followed by one
-space, with or without one space before it. `st_colon` handles every other spelling. A byte where the colon must be
-is `Bad_Char` with `Colon`.
+space, with or without one space before it. `colon_fast`, a leaf, finds that spelling, and `st_member_run` uses it
+too. `st_colon` handles every other spelling. A byte where the colon must be is `Bad_Char` with `Colon`.
 
 ### Runs
 
@@ -401,7 +377,7 @@ that leaf refuses or no JSON construct starts:
 - every place a comment may start: JSON5's other whitespace (VT, FF, U+00A0, U+FEFF, U+2028, U+2029 and Zs) opens a
   run as a `/` does.
 
-A number's `spelling` is the packed `Number_Shape` (`json/json5.odin`): the `Number_Spelling` in bits 0 to 3, whose
+A number's `spelling` is the packed `Number_Spelling` (`json/json5.odin`) in bits 0 to 3, whose
 values are 0, 2, 4, 6 and 8, the integer digit count in bits 4 to 8, the fraction count in bits 9 to 13 (zero for no
 fraction), and `NUMBER_EXP` in bit 14. Every kind value is even, so a number does not set core's decode bit 0, and a
 pure integer is a decimal with a zero fraction count and no exponent. A string's or key's bit 0 is set when it needs
@@ -482,9 +458,15 @@ tier's features, and `run` switches on `kernel.tier()` once per walk. A block lo
 ### Cold readers
 
 `text.odin` holds the readers the masks cannot replace, each reading one byte at a time and called only where a
-block's masks show it is needed: the header's cell count, the first bad UTF-8 sequence of a block (searched from no
-byte before the walk's first), the first backslash that opens no TSV escape, and the exact span of a cell too long to
-measure by block. They are `@(cold)` and `#force_no_inline`, so the pass saves no registers for them.
+block's masks show it is needed: `record_start`, `header_cells`, `scan_record`, the first bad UTF-8 sequence of a
+block (`utf8_fault`, searched from no byte before the walk's first), and the exact span of a cell too long to measure
+by block (`cell_too_wide`). `record_start` is `#force_inline`, `escape_fault` is `@(cold)` and `#force_inline`, and
+`header_cells`, `scan_record`, `utf8_fault` and `cell_too_wide` are `@(cold)` and `#force_no_inline`, so the pass
+saves no registers for them.
+
+A TSV block's escapes are judged in masks. `kernel.escaped` marks the bytes an odd run of backslashes escapes, and one
+class mask of `t`, `n`, `r`, `0` and `\` drops the valid ones, so a block with no bad escape runs no byte loop. A
+backslash at the block's last byte carries into the next block, and a fault is at the backslash.
 
 ## The two walks compared
 
@@ -508,13 +490,33 @@ From `next/`:
 
 | Command | What it runs |
 |---|---|
-| `make test` | the tests at -o:minimal and -o:speed |
+| `make test` | the tests at -o:minimal and -o:speed, one target per compile so `make -j` runs them in parallel, and the golden answers `json/test` checks |
 | `make test-x86` | the tests at v2 and v3 under Rosetta, `-define:WALK_TIER` picking the walks' tier |
 | `make test-asan` | the tests under AddressSanitizer |
-| `make test-oracle` | each walk against the current tree's `json` and `csv` on seeded texts and their mutations, each JSON spec against the dialect of its name, with the JSON5 differences the oracle names, the edit lists against a value tree, and an edit per round against the current tree's `set`, `insert` and `remove` |
-| `make lint` | vet on the host, x86-64 and riscv64 |
+| `make lint` | the import order, then vet on the host, x86-64 and riscv64 |
+| `make size` | the lean lines of each library package against the 13,000 budget |
+| `make surface` | each library package's public declarations, sorted |
+
+The checks against the old tree's `json` and `csv` live in `compare/`, outside this tree, and run by its own
+`make test-oracle`.
+
+The value-tree models and the edit rounds against their own models are private, in the separate stury test repository
+beside this one, and its `next-model` target runs them with `SEED` and `ROUNDS`. A value-tree model is a plain
+recursive-descent reader of a valid text that shares no code with the walk or the readers. For each generated valid
+text, and each valid JSONTestSuite and json5-tests file, it builds the document and checks every reader against the
+model: `kind`, `length`, `children` and `child_at`, `member` under each `Duplicates` value and `member_all`,
+`key_equals`, `text`, `number`, `resolve` with and without `infer`, `facts_of` per role, and `span` against the
+value's source bytes.
+
+The golden file `json/test/golden/json.txt` holds the old tree's answer for every JSONTestSuite and json5-tests file per
+spec, as `compare/golden` wrote it. A line names the file and the spec, and records a pass or a fault kind and byte.
+Where the oracle accepts a difference between the trees by design, the line holds this tree's answer and a marker
+naming the reason. The test in `json/test` reads each file and checks `validate` against the line. Regenerate the file
+from `compare/` with `make golden`.
 
 The tests check every fault that names a byte at that byte and at every offset in a block, every prefix of generated
-texts with the bytes after it poisoned, `Skip` and `Stop` at random against the full walk's tokens, a hook that keeps
-its state behind `h` against one that keeps it in `Hook_Regs`, each comment's role, JSON against JSONTestSuite and
-JSON5 against json5-tests. `No_Memory` names no byte, so its test pins its rule and its rendering.
+texts copied so the text ends at a guard page, so a read past it faults in every build, `Skip` and `Stop` at random
+against the full walk's tokens on 100 generated texts, a hook that keeps its state behind `h` against one that keeps it
+in `Hook_Regs`, each comment's role, JSON against JSONTestSuite and JSON5 against json5-tests. The private `next-laws`
+target runs the same laws at their stress counts. `No_Memory` names no byte, so its test pins its rule and its
+rendering.

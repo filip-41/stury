@@ -1,0 +1,12 @@
+[package]
+name = "rust_bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sonic-rs = "0.5.10"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

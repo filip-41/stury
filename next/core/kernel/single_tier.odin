@@ -1,4 +1,6 @@
 #+build !amd64
+// `simd` is used only in a generic procedure, which the unused-import check does not read.
+#+vet !unused-imports
 package kernel
 
 import "base:intrinsics"

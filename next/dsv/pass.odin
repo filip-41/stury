@@ -291,7 +291,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				// A backslash must open one of the five escapes. Any other byte after it is a `.Bad_Escape` fault at
 				// the backslash.
 				if bs != 0 || w.esc != 0 {
-					if at := escape_fault(src, pos, cb, &w.esc); at >= 0 && (fault < 0 || at < fault) {
+					if at := escape_fault(T, b, bs, pos, &w.esc); at >= 0 && (fault < 0 || at < fault) {
 						fault, kind = at, .Bad_Escape
 					}
 				}

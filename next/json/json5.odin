@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:simd"
 import "core:unicode"
+import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
 
@@ -203,14 +204,14 @@ number5 :: proc "contextless" (p, end: [^]u8, $shape: bool) -> (q: [^]u8, spelli
 			return q, u16(kind5), .Bad_Number
 		}
 	} else {
-		q = core.digit_end(q, end, nil, false)
+		q = spell.digit_end(q, end, nil, false)
 	}
 	when shape {
 		int_digits := u64(intrinsics.ptr_sub(q, whole))
 		frac_digits: u64
 	}
 	if q < end && q[0] == '.' {
-		r := core.digit_end(q[1:], end, nil, false)
+		r := spell.digit_end(q[1:], end, nil, false)
 		if r == q[1:] || q == whole {
 			if r == q[1:] && q == whole {
 				q, kind = bad_or_truncated(r, end)
@@ -231,7 +232,7 @@ number5 :: proc "contextless" (p, end: [^]u8, $shape: bool) -> (q: [^]u8, spelli
 		if q < end && (q[0] == '+' || q[0] == '-') {
 			q = q[1:]
 		}
-		r := core.digit_end(q, end, nil, false)
+		r := spell.digit_end(q, end, nil, false)
 		if r == q {
 			q, kind = bad_or_truncated(r, end)
 			return q, u16(kind5), kind
@@ -270,7 +271,7 @@ hex_run :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 #no_bounds_
 		}
 		q = q[16:]
 	}
-	for q < end && core.HEX_NIBBLE[q[0]] != 0xff {
+	for q < end && spell.HEX_NIBBLE[q[0]] != 0xff {
 		q = q[1:]
 	}
 	return q
@@ -308,23 +309,23 @@ string5 :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tole
 			return q[1:], esc, lax, .None
 		case c == '\\':
 			esc = true
-			if q[1:] < end && utf8_taken(q[1:], end, tol) {
-				lax = true
+			q2, kind2, took := escape5(q, end, tol)
+			lax ||= took
+			if kind2 != .None {
+				return q2, false, false, kind2
 			}
-			if q, kind = escape5(q, end, tol); kind != .None {
-				return q, false, false, kind
-			}
+			q = q2
 		case c == '\n' || c == '\r':
 			return q, false, false, .Bad_Char
 		case c < 0x80:
 			q = q[1:]
 		case:
-			if utf8_taken(q, end, tol) {
-				lax = true
+			q2, kind2, took := utf8_lax(q, end, tol)
+			lax ||= took
+			if kind2 != .None {
+				return q2, false, false, kind2
 			}
-			if q, kind = utf8_lax(q, end, tol); kind != .None {
-				return q, false, false, kind
-			}
+			q = q2
 		}
 	}
 }
@@ -332,43 +333,44 @@ string5 :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tole
 // Steps over the JSON5 escape at the backslash `e`: `\0` before no digit, `\x` and two hex digits, a backslash before
 // a line end (CR LF counts as one), JSON's `\u` escape with its surrogate halves paired, and a backslash before any
 // character but a digit, which spells that character. A digit after `\0`, and `\1` to `\9`, fault `Bad_Escape` at the
-// digit. `tol` is the walk's tolerances.
+// digit. `tol` is the walk's tolerances, and `lax` says an escaped ill-formed sequence was accepted as U+FFFD.
 @(private)
-escape5 :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+escape5 :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind, lax: bool) #no_bounds_check {
 	q = e[1:]
 	if q >= end {
-		return end, .Truncated
+		return end, .Truncated, false
 	}
 	c := q[0]
 	switch {
 	case c == 'u':
-		return escape_exact(e, end, tol)
+		return escape_exact(e, end, tol), false
 	case c == 'x':
 		for i in 1 ..= 2 {
 			if q[i:] >= end {
-				return end, .Truncated
+				return end, .Truncated, false
 			}
-			if core.HEX_NIBBLE[q[i]] == 0xff {
-				return q[i:], .Bad_Escape
+			if spell.HEX_NIBBLE[q[i]] == 0xff {
+				return q[i:], .Bad_Escape, false
 			}
 		}
-		return q[3:], .None
+		return q[3:], .None, false
 	case c == '0':
 		if intrinsics.ptr_sub(end, q) > 1 && q[1] - '0' < 10 {
-			return q[1:], .Bad_Escape
+			return q[1:], .Bad_Escape, false
 		}
-		return q[1:], .None
+		return q[1:], .None, false
 	case c - '1' < 9:
-		return q, .Bad_Escape
+		return q, .Bad_Escape, false
 	case c == '\r':
 		if intrinsics.ptr_sub(end, q) > 1 && q[1] == '\n' {
-			return q[2:], .None
+			return q[2:], .None, false
 		}
-		return q[1:], .None
+		return q[1:], .None, false
 	case c < 0x80:
-		return q[1:], .None
+		return q[1:], .None, false
 	}
-	return utf8_lax(q, end, tol)
+	r, k, took := utf8_lax(q, end, tol)
+	return r, k, took
 }
 
 // Reads one character of an identifier at `q` that is no ASCII identifier byte: a `\u` escape or a UTF-8 character,
@@ -388,11 +390,11 @@ ident5_char :: #force_inline proc "contextless" (q, end: [^]u8, start: bool) -> 
 			if q[i:] >= end {
 				return end, false, .Truncated
 			}
-			if core.HEX_NIBBLE[q[i]] == 0xff {
+			if spell.HEX_NIBBLE[q[i]] == 0xff {
 				return q[i:], false, .Bad_Escape
 			}
 		}
-		unit, _ := core.hex4(q[2:])
+		unit, _ := hex4(q[2:])
 		r = q[6:]
 		if !ident_char(rune(unit), start) {
 			return q, false, .Bad_Escape

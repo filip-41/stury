@@ -131,12 +131,13 @@ render_fault :: proc(w: io.Writer, src: []u8, f: Fault, lines: ^Lines = nil) -> 
 	return err
 }
 
-// The value layer's error kinds. `Document_Error.inner` holds the walk's `Fault` by value for `.Walk`, so a syntax
-// fault met while building a document renders as the document error and its cause.
+// The value layer's error kinds. `Document_Error.inner` holds a `Fault` by value for `.Walk`, `.Bad_Value`, `.Bad_Key`
+// and `.Bad_Result`, so the error renders with its cause. The last three name a byte of a text that is not the rendered
+// source.
 Document_Error_Kind :: enum u8 {
 	None,
 	Walk, // the walk's fault, in `inner`
-	Duplicate_Key, // `.Refuse` met a key that repeats one of its object's, at the second key's first byte
+	Duplicate_Key, // a build with `refuse_duplicates` met a key that repeats one of its object's, at the second key's first byte
 	No_Memory, // an allocation the document or the edit list owns was refused, at no byte
 	Bad_Index, // an edit names no node it may change: no such node, a key of a member, the root, a table's record
 	Bad_Position, // an insert position is past the container's length
@@ -153,7 +154,8 @@ Document_Error_Kind :: enum u8 {
 DOCUMENT_AT_NO_BYTE :: bit_set[Document_Error_Kind]{.None, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Key, .Bad_Fact, .Bad_Width, .Bad_Result}
 
 // A value layer error. `at` is the byte `kind` names: the walk's fault byte for `.Walk`, the first byte of the
-// repeated key for `.Duplicate_Key`. `inner` is the walk's fault, set for `.Walk`.
+// repeated key for `.Duplicate_Key`. `inner` is the fault, set for `.Walk` and for `.Bad_Value`, `.Bad_Key` and
+// `.Bad_Result`, whose `inner.at` is a byte of the recorded text or of the commit's output, not of the source.
 Document_Error :: struct {
 	kind:  Document_Error_Kind,
 	at:    u64,
@@ -185,9 +187,10 @@ write_document_code :: proc(w: io.Writer, e: Document_Error) -> io.Error {
 	return err
 }
 
-// Writes `line:col: message` for `e` in `src`, and for `.Walk` also `  caused by line:col: message` for `e.inner`.
-// `lines` is as in `render_fault`. Errors from the edit list other than a conflict name no byte, since they describe
-// a node, a recorded text or a position rather than a place in `src`.
+// Writes `line:col: message` for `e` in `src`. For `.Walk` it also writes `  caused by line:col: message` for
+// `e.inner`, and for `.Bad_Value`, `.Bad_Key` and `.Bad_Result` `  caused by message`, since `inner.at` is a byte of a
+// text that is not `src`. `lines` is as in `render_fault`. Errors from the edit list other than a conflict name no
+// byte, since they describe a node, a recorded text or a position rather than a place in `src`.
 render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Lines = nil) -> io.Error {
 	// No position is written when `e.kind` is in `DOCUMENT_AT_NO_BYTE`, or when `e.kind` is `.Walk` and
 	// `e.inner.kind` names no byte, as a bad option is found before any byte is read.
@@ -196,9 +199,19 @@ render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Line
 		write_position(w, src, e.at, lines) or_return
 	}
 	io.write_string(w, DOCUMENT_KIND_RULES[e.kind].message) or_return
-	if e.kind == .Walk && e.inner.kind != .None {
-		io.write_string(w, "\n  caused by ") or_return
-		render_fault(w, src, e.inner, lines) or_return
+	#partial switch e.kind {
+	case .Walk:
+		if e.inner.kind != .None {
+			io.write_string(w, "\n  caused by ") or_return
+			render_fault(w, src, e.inner, lines) or_return
+		}
+	case .Bad_Value, .Bad_Key, .Bad_Result:
+		if e.inner.kind != .None {
+			io.write_string(w, "\n  caused by ") or_return
+			_, err := io.write_string(w, rule_of(e.inner).message)
+			return err
+		}
+	case:
 	}
 	return nil
 }

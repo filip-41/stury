@@ -1,6 +1,7 @@
 package json
 
 import "base:intrinsics"
+import spell "../core/spell"
 import core "../core"
 
 // Reads the number at `p`, which starts with `-` or a digit. Returns one past it and its `spelling`, or the fault's
@@ -24,7 +25,7 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape: bool) -> 
 			return q, 0, .Bad_Number
 		}
 	} else {
-		r := core.digit_end(q, end, nil, false)
+		r := spell.digit_end(q, end, nil, false)
 		if r == q {
 			return q, 0, .Bad_Number
 		}
@@ -42,7 +43,7 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape: bool) -> 
 	}
 	c := q[0]
 	if c == '.' {
-		r := core.digit_end(q[1:], end, nil, false)
+		r := spell.digit_end(q[1:], end, nil, false)
 		if r == q[1:] {
 			q2, k2 := bad_or_truncated(r, end)
 			return q2, 0, k2
@@ -65,7 +66,7 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape: bool) -> 
 		if q < end && (q[0] == '+' || q[0] == '-') {
 			q = q[1:]
 		}
-		r := core.digit_end(q, end, nil, false)
+		r := spell.digit_end(q, end, nil, false)
 		if r == q {
 			q2, k2 := bad_or_truncated(r, end)
 			return q2, 0, k2

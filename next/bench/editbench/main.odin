@@ -47,18 +47,18 @@ main :: proc() {
 		fmt.eprintln("build:", derr)
 		os.exit(1)
 	}
-	nodes := make([dynamic]u32, 0, 1024)
+	nodes := make([dynamic]core.Node_Index, 0, 1024)
 	defer delete(nodes)
 	for n, i in doc.nodes {
 		if n.role != .Value || (n.kind != .String && n.kind != .Number && n.kind != .Plain) {
 			continue
 		}
-		append(&nodes, u32(i))
+		append(&nodes, core.Node_Index(i))
 	}
 	n := min(want, len(nodes))
-	text := transmute([]u8)string("0")
+	text := "0"
 	if dsv_text {
-		text = transmute([]u8)string("x")
+		text = "x"
 	}
 
 	list := core.edit_list_init(&doc)

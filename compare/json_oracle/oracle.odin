@@ -11,10 +11,10 @@ import "core:testing"
 import "core:unicode"
 import "core:unicode/utf8"
 import cur "stury:json"
-import core "../../../core"
-import walktest "../../../walktest"
-import json "../.."
-import gen "../gen"
+import core "../../next/core"
+import walktest "../../next/walktest"
+import json "../../next/json"
+import gen "../../next/json/test/gen"
 
 SEED :: #config(SEED, 1)
 ROUNDS :: #config(ROUNDS, 100_000)
@@ -52,7 +52,7 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 	}
 	suites: [dynamic][]runtime.Load_Directory_File
 	defer delete(suites)
-	append(&suites, #load_directory("../conformance/JSONTestSuite/test_parsing"))
+	append(&suites, #load_directory("../../next/json/test/conformance/JSONTestSuite/test_parsing"))
 	for suite in walktest.JSON5_TESTS {
 		append(&suites, suite)
 	}

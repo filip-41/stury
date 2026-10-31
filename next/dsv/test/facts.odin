@@ -3,23 +3,11 @@ package dsv_tests
 import "core:testing"
 import core "../../core"
 import dsv ".."
+import walktest "../../walktest"
 
 // Tests fact edits over a delimited text with a comment byte. A comment line belongs to the record that follows it, or
 // to the root as its foot after the last record. The output writes the document's comment byte at the line's first
 // byte.
-
-@(private = "file")
-body :: proc(t: ^testing.T, doc: ^core.Document, node: u32, role: core.Role, want: string) -> bool {
-	it := core.facts_of(doc, node, role)
-	got, ok := core.fact_next(&it)
-	if !testing.expectf(t, ok && string(got) == want, "node %d role %v: %q, want %q", node, role, got, want) {
-		return false
-	}
-	if _, more := core.fact_next(&it); !testing.expectf(t, !more, "node %d role %v holds more than one fact", node, role) {
-		return false
-	}
-	return true
-}
 
 // A headed table's comment lines are the fact of the record after them, and a line after the last record is the
 // root's foot.
@@ -30,8 +18,8 @@ fact_read_lines :: proc(t: ^testing.T) {
 	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
 		return
 	}
-	testing.expect(t, body(t, &doc, 4, .Comment, "head"))
-	body(t, &doc, core.ROOT, .Comment_Foot, "foot")
+	testing.expect(t, walktest.body(t, &doc, 4, .Comment, "head"))
+	walktest.body(t, &doc, core.ROOT, .Comment_Foot, "foot")
 }
 
 // Each role is written where the walk reads it: a record's `Comment`, no `Comment_Inline` in a delimited text, and a
@@ -40,7 +28,7 @@ fact_read_lines :: proc(t: ^testing.T) {
 fact_set_roles :: proc(t: ^testing.T) {
 	for c in ([]struct {
 			role:    core.Role,
-			node:    u32,
+			node:    core.Node_Index,
 			want:    string,
 			dropped: int,
 		}{
@@ -55,7 +43,7 @@ fact_set_roles :: proc(t: ^testing.T) {
 		}
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		if e := core.set_fact(&list, c.node, c.role, transmute([]u8)string("c")); !testing.expect_value(t, e.kind, core.Document_Error_Kind.None) {
+		if e := core.set_fact(&list, c.node, c.role, string("c")); !testing.expect_value(t, e.kind, core.Document_Error_Kind.None) {
 			return
 		}
 		out, dropped, cerr := core.commit(&list)
@@ -78,7 +66,7 @@ fact_replace_and_remove :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.set_fact(&list, 4, .Comment, transmute([]u8)string("new")).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.set_fact(&list, 4, .Comment, string("new")).kind, core.Document_Error_Kind.None)
 		out, dropped, err := core.commit(&list)
 		defer if len(out) > 0 {
 			delete(out)
@@ -102,7 +90,7 @@ fact_replace_and_remove :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment_Foot, transmute([]u8)string("new")).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment_Foot, string("new")).kind, core.Document_Error_Kind.None)
 		out, dropped, err := core.commit(&list)
 		defer if len(out) > 0 {
 			delete(out)
@@ -126,7 +114,7 @@ fact_replace_and_remove :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.set(&list, 6, transmute([]u8)string("9")).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.set(&list, 6, string("9")).kind, core.Document_Error_Kind.None)
 		out, _, err := core.commit(&list)
 		defer if len(out) > 0 {
 			delete(out)
@@ -143,8 +131,8 @@ fact_shapes_and_output :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set_fact(&list, 4, .Comment, transmute([]u8)string("one\ntwo")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.set_fact(&list, 4, .Comment_Inline, transmute([]u8)string("a\nb")).kind, core.Document_Error_Kind.Bad_Fact)
+	testing.expect_value(t, core.set_fact(&list, 4, .Comment, string("one\ntwo")).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.set_fact(&list, 4, .Comment_Inline, string("a\nb")).kind, core.Document_Error_Kind.Bad_Fact)
 	out, dropped, err := core.commit(&list)
 	defer if len(out) > 0 {
 		delete(out)
@@ -155,7 +143,7 @@ fact_shapes_and_output :: proc(t: ^testing.T) {
 	defer core.destroy(&plain)
 	one := core.edit_list_init(&plain)
 	defer core.edit_list_destroy(&one)
-	testing.expect_value(t, core.set_fact(&one, 4, .Comment, transmute([]u8)string("c")).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.set_fact(&one, 4, .Comment, string("c")).kind, core.Document_Error_Kind.None)
 	dropped_out, plain_dropped, derr := core.commit(&one)
 	defer if len(dropped_out) > 0 {
 		delete(dropped_out)
@@ -170,12 +158,12 @@ fact_header_and_last_line :: proc(t: ^testing.T) {
 	{
 		doc, _ := dsv.build(transmute([]u8)string("#top\na,b\n1,2\n"), .Csv, {comment = '#'})
 		defer core.destroy(&doc)
-		testing.expect(t, body(t, &doc, core.ROOT, .Comment, "top"))
+		testing.expect(t, walktest.body(t, &doc, core.ROOT, .Comment, "top"))
 	}
 	{
 		doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n#end"), .Csv, {comment = '#'})
 		defer core.destroy(&doc)
-		body(t, &doc, core.ROOT, .Comment_Foot, "end")
+		walktest.body(t, &doc, core.ROOT, .Comment_Foot, "end")
 	}
 }
 
@@ -186,12 +174,12 @@ fact_comment_byte_and_bom :: proc(t: ^testing.T) {
 	{
 		doc, _ := dsv.build(transmute([]u8)string("//hello\na,b\n1,2\n"), .Csv, {comment = '/'})
 		defer core.destroy(&doc)
-		testing.expect(t, body(t, &doc, core.ROOT, .Comment, "/hello"))
+		testing.expect(t, walktest.body(t, &doc, core.ROOT, .Comment, "/hello"))
 	}
 	{
 		doc, _ := dsv.build(transmute([]u8)string("\xEF\xBB\xBF#c\na,b\n1,2\n"), .Csv, {comment = '#'})
 		defer core.destroy(&doc)
-		body(t, &doc, core.ROOT, .Comment, "c")
+		walktest.body(t, &doc, core.ROOT, .Comment, "c")
 	}
 }
 
@@ -199,7 +187,7 @@ fact_comment_byte_and_bom :: proc(t: ^testing.T) {
 @(test)
 fact_slots :: proc(t: ^testing.T) {
 	cases := []struct {
-		node: u32,
+		node: core.Node_Index,
 		role: core.Role,
 	}{
 		{4, .Comment_Foot},
@@ -209,7 +197,7 @@ fact_slots :: proc(t: ^testing.T) {
 	for c in cases {
 		doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n"), .Csv, {comment = '#'})
 		list := core.edit_list_init(&doc)
-		e := core.set_fact(&list, c.node, c.role, transmute([]u8)string("c"))
+		e := core.set_fact(&list, c.node, c.role, string("c"))
 		out, dropped, cerr := core.commit(&list)
 		testing.expectf(t, e.kind == .None && cerr.kind == .None && dropped == 1 && string(out) == "a,b\n1,2\n", "node %d role %v: %v %v, %d dropped, %q", c.node, c.role, e, cerr, dropped, out)
 		if len(out) > 0 {
@@ -229,7 +217,7 @@ fact_root_comment :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment, transmute([]u8)string("c")).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment, string("c")).kind, core.Document_Error_Kind.None)
 		out, dropped, err := core.commit(&list)
 		defer if len(out) > 0 {
 			delete(out)
@@ -241,7 +229,7 @@ fact_root_comment :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment, transmute([]u8)string("c")).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment, string("c")).kind, core.Document_Error_Kind.None)
 		out, dropped, err := core.commit(&list)
 		defer if len(out) > 0 {
 			delete(out)
@@ -258,7 +246,7 @@ fact_root_comment_all_records_removed :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment, transmute([]u8)string("c")).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment, string("c")).kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, core.remove(&list, 4).kind, core.Document_Error_Kind.None)
 	out, dropped, err := core.commit(&list)
 	defer if len(out) > 0 {
@@ -274,7 +262,7 @@ fact_body_u2028 :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	if e := core.set_fact(&list, 4, .Comment, transmute([]u8)string("a\u2028b")); !testing.expect_value(t, e.kind, core.Document_Error_Kind.None) {
+	if e := core.set_fact(&list, 4, .Comment, string("a\u2028b")); !testing.expect_value(t, e.kind, core.Document_Error_Kind.None) {
 		return
 	}
 	out, dropped, err := core.commit(&list)
@@ -317,16 +305,16 @@ fact_insert_in_removal_run :: proc(t: ^testing.T) {
 
 	commit_want(t, "a,b\n1,2\n3,4\n", "a,b\n7,7\n8,8\n3,4\n", proc(list: ^core.Edit_List) {
 		core.remove(list, 4)
-		core.insert(list, core.ROOT, 1, transmute([]u8)string("7,7"))
-		core.insert(list, core.ROOT, 1, transmute([]u8)string("8,8"))
+		core.insert(list, core.ROOT, 1, string("7,7"))
+		core.insert(list, core.ROOT, 1, string("8,8"))
 	})
 	commit_want(t, "a,b\n1,2\n3,4", "a,b\n1,2\n9,9", proc(list: ^core.Edit_List) {
 		core.remove(list, 7)
-		core.insert(list, core.ROOT, 1, transmute([]u8)string("9,9"))
+		core.insert(list, core.ROOT, 1, string("9,9"))
 	})
 	commit_want(t, "a,b\n1,2\n3,4", "a,b\n1,2\n9,9", proc(list: ^core.Edit_List) {
 		core.remove(list, 7)
-		core.insert(list, core.ROOT, 2, transmute([]u8)string("9,9"))
+		core.insert(list, core.ROOT, 2, string("9,9"))
 	})
 }
 
@@ -359,8 +347,8 @@ fact_zero_width_set_beside_insert :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.insert(&list, core.ROOT, 0, transmute([]u8)string("3,4")).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.set(&list, 5, transmute([]u8)string("9")).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.insert(&list, core.ROOT, 0, string("3,4")).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.set(&list, 5, string("9")).kind, core.Document_Error_Kind.None)
 		out, dropped, err := core.commit(&list)
 		defer if len(out) > 0 {
 			delete(out)
@@ -375,8 +363,8 @@ fact_zero_width_set_beside_insert :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.insert(&list, core.ROOT, 2, transmute([]u8)string("7,8")).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.set(&list, 6, transmute([]u8)string("9")).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.insert(&list, core.ROOT, 2, string("7,8")).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.set(&list, 6, string("9")).kind, core.Document_Error_Kind.None)
 		out, _, err := core.commit(&list)
 		defer if len(out) > 0 {
 			delete(out)
@@ -392,7 +380,7 @@ fact_spec_change_refused :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	out, _, err := core.commit(&list, u8(dsv.Spec.Tsv))
+	out, _, err := core.commit_as(&list, u8(dsv.Spec.Tsv))
 	defer if len(out) > 0 {
 		delete(out)
 	}
@@ -407,12 +395,42 @@ fact_foot_after_blank_cell :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment_Foot, transmute([]u8)string("x")).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment_Foot, string("x")).kind, core.Document_Error_Kind.None)
 	out, dropped, err := core.commit(&list)
 	defer if len(out) > 0 {
 		delete(out)
 	}
 	testing.expectf(t, err.kind == .None && dropped == 0 && string(out) == "a\tb\n1\t2\n\t\n!x\n", "foot: %v, %d dropped, %q", err, dropped, out)
+}
+
+// A set at the text's end and a foot at the same byte write the cell before the foot on a line of its own.
+@(test)
+fact_set_at_text_end_with_foot :: proc(t: ^testing.T) {
+	doc, err := dsv.build(transmute([]u8)string("!#\n sp ^\"q\"\nx\\y^"), .Plain, {no_header = true, delimiter = '^', comment = '!'})
+	defer core.destroy(&doc)
+	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+		return
+	}
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	testing.expect_value(t, core.set(&list, 6, string("x\\y")).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment_Foot, "").kind, core.Document_Error_Kind.None)
+	out, dropped, cerr := core.commit(&list)
+	defer if len(out) > 0 {
+		delete(out)
+	}
+	if !testing.expectf(t, cerr.kind == .None && dropped == 0, "commit: %v, %d dropped", cerr, dropped) {
+		return
+	}
+	read, rerr := dsv.build(out, .Plain, {no_header = true, delimiter = '^', comment = '!'})
+	defer core.destroy(&read)
+	if !testing.expectf(t, rerr.kind == .None, "committed text does not read: %v in %q", rerr, out) {
+		return
+	}
+	buf: [64]u8
+	cell, _, read_ok := core.text(&read, 6, buf[:], context.temp_allocator)
+	testing.expectf(t, read_ok && cell == "x\\y", "committed %q: last cell is %q, want %q", out, cell, "x\\y")
+	testing.expectf(t, walktest.body(t, &read, core.ROOT, .Comment_Foot, ""), "committed %q: no root foot", out)
 }
 
 // An unnamed root comment above the header stays when every record is removed. It reads as the root's foot, and no

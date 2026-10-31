@@ -135,44 +135,27 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 	return s
 }
 
-// The index of the first backslash in the block at `pos` that opens no escape, or -1. A backslash at the block's last
-// byte is left to the next block through `esc`, and a carry in `esc` judges `src[pos]` and faults at `pos - 1` when it
-// is not one of the five escapes. The bytes a backslash may escape are `t`, `n`, `r`, `0` and `\\`. Bytes in `comment`
-// are skipped.
+// The index of the first backslash in the block at `pos` that opens no escape, or -1. `bs` has a bit at each backslash
+// of the block, a comment line's bytes already cleared. `esc` is 1 when the block before ended in an odd run of
+// backslashes, and it returns that state for the next block. The bytes a backslash may escape are `t`, `n`, `r`, `0`
+// and `\\`, read as one class mask, so the byte loop runs only when a block holds a bad escape.
 @(private, cold)
-escape_fault :: #force_inline proc "contextless" (src: []u8, pos: int, comment: u64, esc: ^u64) -> int {
-	end := min(pos + 64, len(src))
-	i := pos
-	if esc^ != 0 {
-		if !escaped(src[pos]) {
-			return pos - 1
-		}
-		i += 1
+escape_fault :: #force_inline proc "contextless" ($T: kernel.Tier, b: kernel.Block, bs: u64, pos: int, esc: ^u64) -> int {
+	odd := esc^
+	after := kernel.escaped(bs, &odd)
+	esc^ = odd
+	bad := after & ~kernel.pack(kernel.has(kernel.classes(T, b, ESCAPE_LETTERS), 0x0f))
+	if bad == 0 {
+		return -1
 	}
-	esc^ = 0
-	for ; i < end; i += 1 {
-		// A backslash inside a comment line is text and opens no escape.
-		if comment & (u64(1) << u64(i - pos)) != 0 {
-			continue
-		}
-		if src[i] != '\\' {
-			continue
-		}
-		if i + 1 == pos + 64 {
-			esc^ = 1
-			break
-		}
-		if i + 1 == len(src) || !escaped(src[i + 1]) {
-			return i
-		}
-		i += 1
-	}
-	return -1
+	return pos + int(intrinsics.count_trailing_zeros(bad)) - 1
 }
 
-@(private)
-escaped :: #force_inline proc "contextless" (c: u8) -> bool {
-	return c == 't' || c == 'n' || c == 'r' || c == '0' || c == '\\'
+// The class bit of the bytes a TSV backslash may escape: `t`, `n`, `r`, `0` and `\\`.
+@(private, rodata)
+ESCAPE_LETTERS := kernel.Nibble_Table {
+	lo = {4, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 8, 0, 2, 0},
+	hi = {0, 0, 0, 4, 0, 8, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0},
 }
 
 // The first malformed UTF-8 sequence in the block at `pos`, starting from the lead byte of the sequence that holds

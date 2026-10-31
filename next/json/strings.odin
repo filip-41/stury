@@ -2,6 +2,7 @@ package json
 
 import "base:intrinsics"
 import "core:simd"
+import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
 
@@ -337,7 +338,7 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 				}
 				n := u64(1)
 				if c == '\\' {
-					r, kind := escape5(bs[k:], end, {})
+					r, kind, _ := escape5(bs[k:], end, {})
 					if kind != .None {
 						return nil, false
 					}
@@ -373,27 +374,27 @@ escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 #no_bounds
 	if room < 2 {
 		return 0
 	}
-	if core.ESC_WORD[e[1]] != 0 {
+	if ESC_WORD[e[1]] != 0 {
 		return 2
 	}
 	if e[1] != 'u' || room < 6 {
 		return 0
 	}
-	unit, ok := core.hex4(e[2:])
+	unit, ok := hex4(e[2:])
 	if !ok {
 		return 0
 	}
-	if core.low_surrogate(unit) {
+	if low_surrogate(unit) {
 		return 0
 	}
-	if !core.high_surrogate(unit) {
+	if !high_surrogate(unit) {
 		return 6
 	}
 	if room < 12 || e[6] != '\\' || e[7] != 'u' {
 		return 0
 	}
-	low, low_ok := core.hex4(e[8:])
-	return 12 if low_ok && core.low_surrogate(low) else 0
+	low, low_ok := hex4(e[8:])
+	return 12 if low_ok && low_surrogate(low) else 0
 }
 
 // Reads the string whose opening quote is at `p` one byte at a time. Returns one past its closing quote, whether it
@@ -419,12 +420,12 @@ string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: bit_set
 		case c < 0x80:
 			q = q[1:]
 		case:
-			if utf8_taken(q, end, tol) {
-				lax = true
+			q2, kind2, took := utf8_lax(q, end, tol)
+			lax ||= took
+			if kind2 != .None {
+				return q2, false, false, kind2
 			}
-			if q, kind = utf8_lax(q, end, tol); kind != .None {
-				return q, false, false, kind
-			}
+			q = q2
 		}
 	}
 }
@@ -438,7 +439,7 @@ escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) 
 	if q >= end {
 		return end, .Truncated
 	}
-	if core.ESC_WORD[q[0]] != 0 {
+	if ESC_WORD[q[0]] != 0 {
 		return q[1:], .None
 	}
 	if q[0] != 'u' {
@@ -450,20 +451,20 @@ escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) 
 		if q >= end {
 			return end, .Truncated
 		}
-		h := core.HEX_NIBBLE[q[0]]
+		h := spell.HEX_NIBBLE[q[0]]
 		if h == 0xff {
 			return q, .Bad_Escape
 		}
 		unit = unit << 4 | u32(h)
 		q = q[1:]
 	}
-	if core.low_surrogate(unit) {
+	if low_surrogate(unit) {
 		if .Lone_Surrogate in tol {
 			return q, .None
 		}
 		return e, .Bad_Escape
 	}
-	if core.high_surrogate(unit) {
+	if high_surrogate(unit) {
 		// Checks `\`, `u` and a low half's four digits in turn, each refused at its own byte, so a text cut inside them
 		// gives `Truncated` where a wrong byte gives `Bad_Escape`.
 		for i in 0 ..< 6 {
@@ -471,7 +472,7 @@ escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) 
 				return end, .Truncated
 			}
 			c := q[i]
-			h := core.HEX_NIBBLE[c]
+			h := spell.HEX_NIBBLE[c]
 			ok: bool
 			switch i {
 			case 0:
@@ -497,23 +498,16 @@ escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) 
 	return q, .None
 }
 
-// Whether `.Invalid_Utf8` is in `tol` and `kernel.utf8_char` answers `Bad_Char` at `p`, so `utf8_lax` will step over
-// the maximal subpart. A sequence the text cuts short is still `Truncated`, since the string it is in cannot close.
+// Whether `.Invalid_Utf8` is in `tol` and the character at `p` is an ill-formed sequence, which `utf8_lax` then steps
+// over by its maximal subpart. A sequence the text cuts short is still `Truncated`, since the string it is in cannot
+// close. `took` says the sequence was ill-formed and the tolerance accepted it.
 @(private)
-utf8_taken :: #force_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tolerance; u8]) -> bool {
-	if .Invalid_Utf8 not_in tol {
-		return false
-	}
-	_, kind := kernel.utf8_char(p, end)
-	return kind == .Bad_Char
-}
-
-utf8_lax :: #force_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+utf8_lax :: #force_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind, took: bool) #no_bounds_check {
 	q, kind = kernel.utf8_char(p, end)
 	if kind != .Bad_Char || .Invalid_Utf8 not_in tol {
 		return
 	}
-	return kernel.utf8_subpart(p, end), .None
+	return kernel.utf8_subpart(p, end), .None, true
 }
 
 // 1 for the bytes that stop a run of plain string bytes: `"`, `\`, control bytes and bytes past 0x7F.

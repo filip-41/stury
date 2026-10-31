@@ -1,6 +1,7 @@
 package json_tests
 
 import "core:math/rand"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -53,9 +54,9 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 	return
 }
 
-// On 4000 valid and mutated texts of each spec, a hook keeping its state behind `h` and one keeping it in `Hook_Regs`
+// On 100 valid and mutated texts of each spec, a hook keeping its state behind `h` and one keeping it in `Hook_Regs`
 // see the same tokens, with `.Skip` and `.Stop` chosen at random, and those are the tokens the full walk leaves after
-// them.
+// them. The private suite runs the same law on 4000 texts of each spec.
 @(test)
 hooks_agree :: proc(t: ^testing.T) {
 	_ = hooks_agree_in(t, .Json) && hooks_agree_in(t, .Jsonc) && hooks_agree_in(t, .Json5)
@@ -73,7 +74,7 @@ hooks_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 	defer delete(broken)
 	want: [dynamic]core.Token
 	defer delete(want)
-	for round in 0 ..< 4000 {
+	for round in 0 ..< 100 {
 		clear(&text)
 		if round % 3 == 2 {
 			gen.pretty(&text, 1 + round % 6, S)
@@ -105,7 +106,7 @@ hooks_agree_in :: proc(t: ^testing.T, $S: json.Spec) -> bool {
 			hi1, fault1 := json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 			regs := core.Hook_Regs{0, 0, rule}
 			hi2, fault2 := json.walk(src, 0, S, {}, &struct {}{}, &regs, walktest.regs_hook)
-			ok := testing.expectf(t, slice_eq(log.tokens[:log.n], want[:]), "%q rule %x: tokens", src, rule)
+			ok := testing.expectf(t, slice.equal(log.tokens[:log.n], want[:]), "%q rule %x: tokens", src, rule)
 			if was_stopped {
 				ok &&= testing.expectf(t, hi1 == stop_hi && fault1 == nil, "%q rule %x: stop at %d %v", src, rule, hi1, fault1)
 			} else {
@@ -297,17 +298,6 @@ spans :: proc(src: []u8, t: core.Token) -> bool {
 	return false
 }
 
-slice_eq :: proc(a, b: []core.Token) -> bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for x, i in a {
-		if x != b[i] {
-			return false
-		}
-	}
-	return true
-}
 
 // Each comment of a JSONC text gets its role from its place. A `/* */` comment gets a spelling with a two-byte lead and
 // tail.
@@ -391,4 +381,22 @@ skip_past_comments :: proc(t: ^testing.T) {
 	_, fault = json.walk(deep, 0, .Jsonc, {max_depth = 2}, log, &core.Hook_Regs{}, skip_keys)
 	testing.expect_value(t, fault, json.validate(deep, .Jsonc, {max_depth = 2}))
 	testing.expect_value(t, fault, core.Fault{15, &json.RULES, .Too_Deep, 0})
+}
+
+// A walk with nil registers and the default options gives the tokens of a walk with zero registers and `Options{}`.
+@(test)
+walk_defaults :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":[1],"b":{"c":2}}`)
+	with := new(walktest.Log)
+	defer free(with)
+	bare := new(walktest.Log)
+	defer free(bare)
+	_, fault := json.walk(src, 0, .Json, {}, with, &core.Hook_Regs{}, walktest.log_hook)
+	testing.expect(t, fault == nil)
+	_, fault = json.walk(src, 0, .Json, h = bare, regs = nil, on = walktest.log_hook)
+	testing.expect(t, fault == nil)
+	testing.expect_value(t, bare.n, with.n)
+	for tok, i in with.tokens[:with.n] {
+		testing.expect_value(t, bare.tokens[i], tok)
+	}
 }

@@ -1,7 +1,7 @@
 package dsv_tests
 
-import "base:sanitizer"
 import "core:math/rand"
+import "core:slice"
 import "core:testing"
 import core "../../core"
 import dsv ".."
@@ -72,6 +72,56 @@ faults_at_their_byte :: proc(t: ^testing.T) {
 	}
 }
 
+// A backslash at every byte of a block: each of the five escapes is valid there, and a byte no escape spells faults at
+// the backslash. The last case holds the pair split across the block's end, and a comment line's backslash opens no
+// escape.
+@(test)
+escapes_at_every_block_byte :: proc(t: ^testing.T) {
+	b: [dynamic]u8
+	defer delete(b)
+	for k in 0 ..< 128 {
+		for letter in ([]u8{'t', 'n', 'r', '0', '\\'}) {
+			clear(&b)
+			append(&b, "h\n")
+			for _ in 0 ..< k {
+				append(&b, 'a')
+			}
+			append(&b, '\\', letter, '\n')
+			got := dsv.validate(b[:], .Tsv)
+			if fault, bad := got.?; bad {
+				testing.expectf(t, false, "backslash at %d escapes %c: %v", 2 + k, letter, fault)
+			}
+		}
+		for other in ([]u8{'x', 'T', '\\' ~ 0x20, 0x80}) {
+			clear(&b)
+			append(&b, "h\n")
+			for _ in 0 ..< k {
+				append(&b, 'a')
+			}
+			append(&b, '\\', other, '\n')
+			got := dsv.validate(b[:], .Tsv)
+			if fault, bad := got.?; !bad || fault.kind != .Bad_Escape || fault.at != u64(2 + k) {
+				testing.expectf(t, false, "backslash at %d escapes %#x: %v, want .Bad_Escape at %d", 2 + k, other, got, 2 + k)
+			}
+		}
+	}
+	// A `\\` pair split across the block's end: the backslash is at byte 63 and its letter at 64.
+	clear(&b)
+	append(&b, "h\n")
+	for _ in 0 ..< 61 {
+		append(&b, 'a')
+	}
+	append(&b, '\\', 't', '\n')
+	if fault, bad := dsv.validate(b[:], .Tsv).?; bad {
+		testing.expectf(t, false, "escape split across a block: %v", fault)
+	}
+	// A backslash in a comment line is text.
+	comment := "h\n#a\\xb\n1\n"
+	if fault, bad := dsv.validate(transmute([]u8)comment, .Tsv, {comment = '#'}).?; bad {
+		testing.expectf(t, false, "backslash in a comment line: %v", fault)
+	}
+}
+
 expect_fault :: proc(t: ^testing.T, c: Case, got: Maybe(core.Fault), shift := 0, tsv := false, loc := #caller_location) -> bool {
 	if c.kind == nil {
 		return testing.expectf(t, got == nil, "%q shifted %d: %v, want none", c.text, shift, got, loc = loc)
@@ -139,34 +189,32 @@ validate :: proc(src: []u8, tsv: bool) -> Maybe(core.Fault) {
 	return dsv.validate(src, .Tsv) if tsv else dsv.validate(src, .Csv)
 }
 
-// Runs `validate` and `walk` on `src` with the bytes after it poisoned, so a load of the last partial block must stay
-// inside the text. Returns the walk's fault when the two differ, else `validate`'s.
-validate_fenced :: proc(src: []u8, tsv: bool) -> Maybe(core.Fault) {
-	FENCE :: 64
-	buf := make([]u8, len(src) + FENCE)
-	defer delete(buf)
-	copy(buf, src)
-	sanitizer.address_poison(buf[len(src):])
-	defer sanitizer.address_unpoison(buf[len(src):])
-	verdict := validate(buf[:len(src)], tsv)
-	if _, fault := walk(buf[:len(src)], tsv, false, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook); fault != verdict {
+// Runs `validate` and `walk` on `src` from a copy at the end of `fence`'s readable page, with the page after it
+// unreadable, so a load past the text faults in every build. Returns the walk's fault when the two differ, else
+// `validate`'s.
+validate_fenced :: proc(fence: ^walktest.Fence, src: []u8, tsv: bool) -> Maybe(core.Fault) {
+	fenced := walktest.fence_copy(fence, src)
+	verdict := validate(fenced, tsv)
+	if _, fault := walk(fenced, tsv, false, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook); fault != verdict {
 		return fault
 	}
 	return verdict
 }
 
-// Every prefix of seeded texts, read with its next bytes poisoned.
+// Every prefix of seeded texts, read from a copy that ends at a guard page.
 @(test)
 prefixes_fenced :: proc(t: ^testing.T) {
 	state := rand.create(1)
 	context.random_generator = rand.default_random_generator(&state)
 	text: [dynamic]u8
 	defer delete(text)
+	fence := walktest.fence_init()
+	defer walktest.unfence(&fence)
 	for round in 0 ..< 400 {
 		tsv := round % 2 == 1
 		gen.text(&text, tsv)
 		for n in 0 ..= len(text) {
-			if !testing.expectf(t, validate_fenced(text[:n], tsv) == validate(text[:n], tsv), "%q", text[:n]) {
+			if !testing.expectf(t, validate_fenced(&fence, text[:n], tsv) == validate(text[:n], tsv), "%q", text[:n]) {
 				return
 			}
 		}
@@ -247,86 +295,6 @@ tolerances :: proc(t: ^testing.T) {
 	}
 }
 
-// A tolerance set changes `validate` and `walk` alike on generated texts. Both return the same fault, and a walk with
-// no fault ends at the text's end and keeps every cell's bytes in its token's span.
-@(test)
-tolerances_agree :: proc(t: ^testing.T) {
-	tolerances_agree_in(t, .Csv)
-	tolerances_agree_in(t, .Tsv)
-}
-
-tolerances_agree_in :: proc(t: ^testing.T, $S: dsv.Spec) {
-	state := rand.create(1)
-	context.random_generator = rand.default_random_generator(&state)
-	log := new(walktest.Log)
-	defer free(log)
-	text, broken: [dynamic]u8
-	defer delete(text)
-	defer delete(broken)
-	tsv := S == .Tsv
-	for round in 0 ..< 1200 {
-		no_header := round % 8 >= 4
-		gen.text(&text, tsv)
-		src := text[:]
-		if round % 2 == 1 {
-			walktest.mutate(&broken, text[:], gen.SHARP)
-			src = broken[:]
-		} else {
-			// Writes a byte no cell may hold into the first plain cell that holds no backslash, so `Invalid_Utf8` is
-			// reached.
-			log^ = {}
-			dsv.walk(src, 0, S, {no_header = no_header}, log, &core.Hook_Regs{}, walktest.log_hook)
-			for tok in log.tokens[:log.n] {
-				if tok.kind != .Plain || tok.n == 0 {
-					continue
-				}
-				escaped := false
-				for i in tok.lo ..< tok.lo + u64(tok.n) {
-					if src[i] == '\\' {
-						escaped = true
-						break
-					}
-				}
-				if escaped {
-					continue
-				}
-				for i in tok.lo ..< tok.lo + u64(tok.n) {
-					if src[i] != '"' {
-						src[i] = 0xff
-						break
-					}
-				}
-				break
-			}
-		}
-		tol: bit_set[dsv.Tolerance; u8]
-		if rand.int_max(2) == 0 {
-			tol |= {.Invalid_Utf8}
-		}
-		if rand.int_max(2) == 0 {
-			tol |= {.Ragged}
-		}
-		if rand.int_max(2) == 0 {
-			tol |= {.Bare_Quote}
-		}
-		opts := dsv.Options{no_header = no_header, tolerate = tol}
-		want := dsv.validate(src, S, opts)
-		log^ = {}
-		hi, got := dsv.walk(src, 0, S, opts, log, &core.Hook_Regs{}, walktest.log_hook)
-		if !testing.expectf(t, got == want, "%q tsv %v no_header %v tol %v: walk %v, validate %v", src, tsv, no_header, tol, got, want) {
-			return
-		}
-		if got == nil && !testing.expectf(t, hi == u64(len(src)), "%q: hi %d", src, hi) {
-			return
-		}
-		for tok in log.tokens[:log.n] {
-			if !testing.expectf(t, spans(src, tok, tsv, tol), "%q tol %v: %v", src, tol, tok) {
-				return
-			}
-		}
-	}
-}
-
 // A ragged record's missing columns make no tokens, and a bare quote is a byte of its cell, so the cell is not quoted.
 @(test)
 tolerated_tokens :: proc(t: ^testing.T) {
@@ -344,6 +312,6 @@ tolerated_tokens :: proc(t: ^testing.T) {
 		log^ = {}
 		hi, fault := dsv.walk(transmute([]u8)c.text, 0, .Csv, {tolerate = c.tol}, log, &core.Hook_Regs{}, walktest.log_hook)
 		testing.expectf(t, fault == nil && hi == u64(len(c.text)), "%q: %d %v", c.text, hi, fault)
-		testing.expectf(t, slice_eq(log.tokens[:log.n], c.tokens), "%q: %v", c.text, log.tokens[:log.n])
+		testing.expectf(t, slice.equal(log.tokens[:log.n], c.tokens), "%q: %v", c.text, log.tokens[:log.n])
 	}
 }

@@ -1,6 +1,7 @@
 package dsv_tests
 
 import "core:math/rand"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -50,9 +51,10 @@ walk :: proc(src: []u8, tsv, no_header: bool, h: ^$H, regs: ^core.Hook_Regs, $on
 	return dsv.walk(src, lo, .Csv, {no_header = no_header}, h, regs, on)
 }
 
-// On valid and broken texts, with and without a header, a hook that keeps its state behind `h` and a hook that keeps
-// it in `Hook_Regs` see the same tokens, with `Skip` and `Stop` at random, and those are the tokens `Skip` and `Stop`
-// leave of the full walk. The full walk's verdict is `validate`'s.
+// On 100 valid and broken texts, with and without a header, a hook that keeps its state behind `h` and a hook that
+// keeps it in `Hook_Regs` see the same tokens, with `Skip` and `Stop` at random, and those are the tokens `Skip` and
+// `Stop` leave of the full walk. The full walk's verdict is `validate`'s. The private suite runs the same law on 4000
+// texts.
 @(test)
 hooks_agree :: proc(t: ^testing.T) {
 	state := rand.create(1)
@@ -66,7 +68,7 @@ hooks_agree :: proc(t: ^testing.T) {
 	defer delete(broken)
 	want: [dynamic]core.Token
 	defer delete(want)
-	for round in 0 ..< 4000 {
+	for round in 0 ..< 100 {
 		tsv := round % 4 >= 2
 		no_header := round % 8 >= 4
 		gen.text(&text, tsv)
@@ -98,7 +100,7 @@ hooks_agree :: proc(t: ^testing.T) {
 			hi1, fault1 := walk(src, tsv, no_header, log, &core.Hook_Regs{}, walktest.log_hook)
 			regs := core.Hook_Regs{0, 0, rule}
 			hi2, fault2 := walk(src, tsv, no_header, &struct {}{}, &regs, walktest.regs_hook)
-			ok = testing.expectf(t, slice_eq(log.tokens[:log.n], want[:]), "%q rule %x: tokens", src, rule)
+			ok = testing.expectf(t, slice.equal(log.tokens[:log.n], want[:]), "%q rule %x: tokens", src, rule)
 			if was_stopped {
 				ok &&= testing.expectf(t, hi1 == stop_hi && fault1 == nil, "%q rule %x: stop at %d %v", src, rule, hi1, fault1)
 			} else {
@@ -171,7 +173,8 @@ append_record :: proc(out: ^[dynamic]u8, cells: []string, sep: u8, quoted: bool,
 	return
 }
 
-// A CSV cell's spelling is quoted or not, and a TSV cell's is `SPELLING_DECODE` only when its span holds a backslash.
+// A cell's spelling: `SPELLING_DECODE` for a TSV cell whose span holds a backslash and for a `lax` cell, and
+// `SPELLING_QUOTED` for a quoted CSV cell.
 @(private)
 cell_spelling :: proc(src: []u8, lo, n: int, tsv, quoted: bool, lax := false) -> u16 {
 	if tsv {
@@ -185,7 +188,10 @@ cell_spelling :: proc(src: []u8, lo, n: int, tsv, quoted: bool, lax := false) ->
 		}
 		return 0
 	}
-	return core.SPELLING_DECODE | core.SPELLING_QUOTED if quoted else 0
+	if quoted {
+		return core.SPELLING_DECODE | core.SPELLING_QUOTED
+	}
+	return core.SPELLING_DECODE if lax else 0
 }
 
 // Appends the tokens of a record: its opening, its cells (each naming its column's header cell when `with_header`), and
@@ -266,7 +272,7 @@ wrong_width_records :: proc(t: ^testing.T) {
 							if !testing.expectf(t, hi == u64(fault_at) && fault == want_fault, "%q tsv %v header %v quoted %v lf %v: %d %v, want %d %v", text[:], tsv, header, quoted, final_lf, hi, fault, fault_at, want_fault) {
 								return
 							}
-							if !testing.expectf(t, slice_eq(log.tokens[:log.n], want[:]), "%q tsv %v header %v quoted %v lf %v: %v", text[:], tsv, header, quoted, final_lf, log.tokens[:log.n]) {
+							if !testing.expectf(t, slice.equal(log.tokens[:log.n], want[:]), "%q tsv %v header %v quoted %v lf %v: %v", text[:], tsv, header, quoted, final_lf, log.tokens[:log.n]) {
 								return
 							}
 						}
@@ -359,7 +365,7 @@ walked_tokens :: proc(t: ^testing.T) {
 			want = core.Fault{c.fault.at, &dsv.RULES, c.fault.kind, u8(c.fault.detail)}
 		}
 		testing.expectf(t, hi == c.hi && fault == want, "%q from %d: %d %v, want %d %v", c.text, c.lo, hi, fault, c.hi, want)
-		testing.expectf(t, slice_eq(log.tokens[:log.n], c.tokens), "%q from %d: %v", c.text, c.lo, log.tokens[:log.n])
+		testing.expectf(t, slice.equal(log.tokens[:log.n], c.tokens), "%q from %d: %v", c.text, c.lo, log.tokens[:log.n])
 	}
 }
 
@@ -372,7 +378,7 @@ bom_mid_text :: proc(t: ^testing.T) {
 	hi, fault := walk(transmute([]u8)src, false, true, log, &core.Hook_Regs{}, walktest.log_hook, 4)
 	testing.expectf(t, hi == 11 && fault == nil, "%d %v", hi, fault)
 	want := []core.Token{{4, 0, .Array, .Value, 0}, {4, 0, .Array, .Value, 0}, {4, 4, .Plain, .Value, 0}, {9, 1, .Plain, .Value, 0}, {10, 1, .End, .Value, 0}, {11, 0, .End, .Value, 0}}
-	testing.expectf(t, slice_eq(log.tokens[:log.n], want), "%v", log.tokens[:log.n])
+	testing.expectf(t, slice.equal(log.tokens[:log.n], want), "%v", log.tokens[:log.n])
 }
 
 // Every value of `Detail` has a rule, named under the format's name.
@@ -402,14 +408,7 @@ spans :: proc(src: []u8, t: core.Token, tsv: bool, tol := bit_set[dsv.Tolerance;
 	switch t.kind {
 	case .Plain:
 		quoted := !tsv && len(b) > 0 && b[0] == '"'
-		want: u16
-		if tsv {
-			want = cell_spelling(src, int(t.lo), int(t.n), true, false, .Invalid_Utf8 in tol)
-		} else if quoted {
-			want = core.SPELLING_DECODE | core.SPELLING_QUOTED
-		} else if .Invalid_Utf8 in tol {
-			want = core.SPELLING_DECODE
-		}
+		want := cell_spelling(src, int(t.lo), int(t.n), tsv, quoted, .Invalid_Utf8 in tol)
 		if t.spelling != want {
 			return false
 		}
@@ -430,14 +429,21 @@ spans :: proc(src: []u8, t: core.Token, tsv: bool, tol := bit_set[dsv.Tolerance;
 	return false
 }
 
-slice_eq :: proc(a, b: []core.Token) -> bool {
-	if len(a) != len(b) {
-		return false
+
+// A walk with nil registers and the default options gives the tokens of a walk with zero registers and `Options{}`.
+@(test)
+walk_defaults :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("a,b\n1,2\n")
+	with := new(walktest.Log)
+	defer free(with)
+	bare := new(walktest.Log)
+	defer free(bare)
+	_, fault := dsv.walk(src, 0, .Csv, {}, with, &core.Hook_Regs{}, walktest.log_hook)
+	testing.expect(t, fault == nil)
+	_, fault = dsv.walk(src, 0, .Csv, h = bare, regs = nil, on = walktest.log_hook)
+	testing.expect(t, fault == nil)
+	testing.expect_value(t, bare.n, with.n)
+	for tok, i in with.tokens[:with.n] {
+		testing.expect_value(t, bare.tokens[i], tok)
 	}
-	for x, i in a {
-		if x != b[i] {
-			return false
-		}
-	}
-	return true
 }

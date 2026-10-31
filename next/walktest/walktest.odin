@@ -6,11 +6,76 @@ import "base:runtime"
 import "core:fmt"
 import "core:math/rand"
 import "core:strings"
+import "core:sys/posix"
 import "core:testing"
 import core "../core"
 
 // The capacity of `Log.tokens` is the most tokens a test text may hold.
 MAX_TOKENS :: 1 << 14
+
+// A `Fence` is one mapping whose last page has no access, sized for the longest text copied into it. `fence_copy`
+// copies a text to end at the mapping's last readable byte, so a read past the text faults in every build, with or
+// without the address sanitizer. `unfence` releases the mapping.
+Fence :: struct {
+	base: rawptr,
+	span: uint,
+	size: uint,
+}
+
+// Returns a fence with no mapping. `fence_copy` maps it for the first text.
+fence_init :: proc() -> Fence {
+	return {}
+}
+
+@(private)
+page_size :: #force_inline proc() -> uint {
+	page := uint(posix.sysconf(._PAGESIZE))
+	if page == 0 {
+		page = 1 << 12
+	}
+	return page
+}
+
+// Maps the fence with room for `n` bytes when it holds less, and marks the page after that room as no access.
+@(private)
+fence_reserve :: proc(f: ^Fence, n: uint) {
+	page := page_size()
+	span := (n + page - 1) & ~(page - 1)
+	if span == 0 {
+		span = page
+	}
+	if f.base != nil && f.span >= span {
+		return
+	}
+	unfence(f)
+	size := span + page
+	base := posix.mmap(nil, size, {.READ, .WRITE}, {.ANONYMOUS, .PRIVATE})
+	if base == nil || base == posix.MAP_FAILED {
+		panic("walktest.fence: mmap failed")
+	}
+	if posix.mprotect(rawptr(uintptr(base) + uintptr(span)), page, posix.PROT_NONE) != .OK {
+		posix.munmap(base, size)
+		panic("walktest.fence: mprotect failed")
+	}
+	f^ = {base = base, span = span, size = size}
+}
+
+// Copies `src` to the end of the fence's readable pages and returns the copy. A read past the copy faults.
+fence_copy :: proc(f: ^Fence, src: []u8) -> []u8 {
+	fence_reserve(f, uint(len(src)))
+	lo := f.span - uint(len(src))
+	dst := ([^]u8)(f.base)[lo:f.span]
+	copy(dst, src)
+	return dst
+}
+
+// Releases the mapping a fence made.
+unfence :: proc(f: ^Fence) {
+	if f.base != nil {
+		posix.munmap(f.base, f.size)
+	}
+	f^ = {}
+}
 
 // `log_hook` logs every token into `tokens`, updates `hash`, and returns the action `ask` picks from `rule`.
 Log :: struct {
@@ -113,12 +178,12 @@ expect_nodes :: proc(t: ^testing.T, doc: ^core.Document, want: []Node_Want) -> b
 check_containers :: proc(t: ^testing.T, doc: ^core.Document, tokens: []core.Token) -> bool {
 	Frame :: struct {
 		lo:    u64,
-		node:  u32,
+		node:  core.Node_Index,
 		count: u32,
 	}
 	stack: [1100]Frame
 	depth := 0
-	node := u32(0)
+	node := core.Node_Index(0)
 	headed := doc.header != 0
 	for tok in tokens {
 		if tok.role > .Key {
@@ -158,19 +223,19 @@ check_containers :: proc(t: ^testing.T, doc: ^core.Document, tokens: []core.Toke
 		node += 1
 		// The root is the first token, and a headed document's next nodes are the header row and its cells.
 		if headed && node == 1 {
-			node += u32(doc.nodes[doc.header].n)
+			node += core.Node_Index(doc.nodes[doc.header].n)
 		}
 	}
-	return testing.expectf(t, depth == 0 && node == u32(len(doc.nodes)), "depth %d, %d nodes, doc %d", depth, node, len(doc.nodes))
+	return testing.expectf(t, depth == 0 && node == core.Node_Index(len(doc.nodes)), "depth %d, %d nodes, doc %d", depth, node, len(doc.nodes))
 }
 
 // Checks that the two trees give container `oi` the same child count.
-count_agrees :: proc(t: ^testing.T, src: []u8, oi: u32, ours, theirs: int) -> bool {
+count_agrees :: proc(t: ^testing.T, src: []u8, oi: core.Node_Index, ours, theirs: int) -> bool {
 	return testing.expectf(t, ours == theirs, "%q node %d: %d children, current tree %d", src, oi, ours, theirs)
 }
 
 // Checks that `child_at` returns every member `child_next` walks, in order, and fails past the last.
-child_at_agrees :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32) -> bool {
+child_at_agrees :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_Index) -> bool {
 	it := core.children(ours, oi)
 	k := 0
 	for {
@@ -188,7 +253,10 @@ child_at_agrees :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: u32)
 	return testing.expectf(t, !ok, "%q node %d: child %d exists", src, oi, k)
 }
 
-// `JSON5_TESTS` holds the json5-tests suites, used by the walk's conformance test and by its oracle.
+// `JSON_TEST_SUITE` holds the JSONTestSuite parsing files and `JSON5_TESTS` the json5-tests suites, used by the walk's
+// conformance tests and by tests outside this tree.
+JSON_TEST_SUITE := #load_directory("../json/test/conformance/JSONTestSuite/test_parsing")
+
 JSON5_TESTS := [?][]runtime.Load_Directory_File {
 	#load_directory("../json/test/conformance/json5-tests/arrays"),
 	#load_directory("../json/test/conformance/json5-tests/comments"),
@@ -202,7 +270,7 @@ JSON5_TESTS := [?][]runtime.Load_Directory_File {
 
 // A `Fact_Model` holds a fact's node, byte, span, role and body for a round's model.
 Fact_Model :: struct {
-	node: u32,
+	node: core.Node_Index,
 	lo:   u64,
 	n:    u64,
 	role: core.Role,
@@ -218,7 +286,7 @@ FACT_BODIES := [?]string{"c", "two words", "", "one\ntwo", "a\rb", "x\n*/", "a*/
 
 // Whether a set, insert or removal touches `node`. With `allow_remove` set a removal is skipped, so a round can name a
 // fact on a node the same list removes and check the commit's refusal.
-tree_touched :: proc(doc: ^core.Document, list: ^core.Edit_List, node: u32, allow_remove: bool) -> bool {
+tree_touched :: proc(doc: ^core.Document, list: ^core.Edit_List, node: core.Node_Index, allow_remove: bool) -> bool {
 	for e in list.edits {
 		if e.op >= .Set_Fact {
 			continue
@@ -237,7 +305,7 @@ tree_touched :: proc(doc: ^core.Document, list: ^core.Edit_List, node: u32, allo
 		}
 		n := doc.nodes[e.node]
 		span := n.n if n.kind == .Array || n.kind == .Map else 1
-		if e.node <= node && node < e.node + span {
+		if e.node <= node && node < e.node + core.Node_Index(span) {
 			return true
 		}
 	}
@@ -256,7 +324,7 @@ tree_written :: proc(doc: ^core.Document, list: ^core.Edit_List, f: Fact_Model) 
 		case .Remove:
 			n := doc.nodes[e.node]
 			span := n.n if n.kind == .Array || n.kind == .Map else 1
-			if e.node <= f.node && f.node < e.node + span {
+			if e.node <= f.node && f.node < e.node + core.Node_Index(span) {
 				return true
 			}
 		case .Set:
@@ -272,15 +340,15 @@ tree_written :: proc(doc: ^core.Document, list: ^core.Edit_List, f: Fact_Model) 
 }
 
 // Whether `node` and every touched node are outside each other's subtrees, so neither is the other's ancestor.
-nodes_disjoint :: proc(doc: ^core.Document, touched: []u32, node: u32) -> bool {
+nodes_disjoint :: proc(doc: ^core.Document, touched: []core.Node_Index, node: core.Node_Index) -> bool {
 	for t in touched {
 		nt, nn := doc.nodes[t], doc.nodes[node]
 		ts := nt.n if nt.kind == .Array || nt.kind == .Map else 1
 		ns := nn.n if nn.kind == .Array || nn.kind == .Map else 1
-		if t <= node && node < t + ts {
+		if t <= node && node < t + core.Node_Index(ts) {
 			return false
 		}
-		if node <= t && t < node + ns {
+		if node <= t && t < node + core.Node_Index(ns) {
 			return false
 		}
 	}
@@ -307,7 +375,7 @@ body_line_end :: proc(body: string) -> bool {
 // output that removed every record reads the comment as a foot. A JSON line comment ends at U+2028 or U+2029 too, so
 // such a body needs the block spelling, which holds no `*/`. An inline body with `*/` and no line end is either
 // spelled or dropped, so `fact_agrees` judges it by what reads back.
-fact_holdable :: proc(doc: ^core.Document, node: u32, role: core.Role, body: string, spec: u8, read: ^core.Document) -> bool {
+fact_holdable :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Role, body: string, spec: u8, read: ^core.Document) -> bool {
 	edit := doc.spelling.edit
 	if edit == nil || edit.comment == nil {
 		return false
@@ -371,7 +439,7 @@ fact_either :: proc(doc: ^core.Document, e: core.Edit, spec: u8) -> bool {
 }
 
 // Whether a fact edit names one node and role: that fact is the edit's, not the invariant's.
-fact_named :: proc(list: ^core.Edit_List, node: u32, role: core.Role) -> bool {
+fact_named :: proc(list: ^core.Edit_List, node: core.Node_Index, role: core.Role) -> bool {
 	for e in list.edits {
 		if e.op >= .Set_Fact && e.node == node && e.role == role {
 			return true
@@ -392,7 +460,7 @@ fact_model :: proc(doc: ^core.Document, out: ^[dynamic]Fact_Model) {
 }
 
 // Whether `got` holds one fact of node, role and body, taking it from `used`.
-fact_find :: proc(got: []Fact_Model, used: []bool, node: u32, role: core.Role, body: string) -> bool {
+fact_find :: proc(got: []Fact_Model, used: []bool, node: core.Node_Index, role: core.Role, body: string) -> bool {
 	for g, i in got {
 		if !used[i] && g.node == node && g.role == role && g.body == body {
 			used[i] = true
@@ -437,7 +505,7 @@ body_find :: proc(got: []Fact_Model, used: []bool, read: ^core.Document, role: c
 // every such fact is one of the commit's drops. Every source fact not named and not written over reads back by its
 // body, unless the output cannot hold it, which is the other kind of drop. `kept` is how many facts the round
 // compared.
-fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.Document, list: ^core.Edit_List, node_at: []u32, read: ^core.Document, dropped: int, spec: u8) -> (ok: bool, kept: int) {
+fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.Document, list: ^core.Edit_List, node_at: []core.Node_Index, read: ^core.Document, dropped: int, spec: u8) -> (ok: bool, kept: int) {
 	got: [dynamic]Fact_Model
 	defer delete(got)
 	fact_model(read, &got)
@@ -484,11 +552,11 @@ fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.
 		foot := f.role == .Comment && f.node == core.ROOT && doc.header != 0 && core.length(read, core.ROOT) == 0
 		// A source fact in the document's own spec already reads under it, so only a missing slot drops it. Under
 		// another spec the output must hold the whole fact, body included.
-		if spec != doc.spec && !foot && !fact_holdable(doc, f.node, f.role, f.body, spec, read) {
+		if spec != doc.read.spec && !foot && !fact_holdable(doc, f.node, f.role, f.body, spec, read) {
 			expected += 1
 			continue
 		}
-		if spec == doc.spec && !foot && !fact_holdable(doc, f.node, f.role, "", spec, read) {
+		if spec == doc.read.spec && !foot && !fact_holdable(doc, f.node, f.role, "", spec, read) {
 			expected += 1
 			continue
 		}
@@ -566,4 +634,82 @@ fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.
 		return testing.expectf(t, false, "round %d: %d facts went of %d, %d extra, dropped %d, expected %d + %d either", round, missing, kept, extra, dropped, expected, either_missing), kept
 	}
 	return true, kept
+}
+
+// Checks that `doc` holds one fact of `role` on `node` with body `want`.
+body :: proc(t: ^testing.T, doc: ^core.Document, node: core.Node_Index, role: core.Role, want: string) -> bool {
+	it := core.facts_of(doc, node, role)
+	got, ok := core.fact_next(&it)
+	if !testing.expectf(t, ok && string(got) == want, "node %d role %v: %q, want %q", node, role, got, want) {
+		return false
+	}
+	if _, more := core.fact_next(&it); !testing.expectf(t, !more, "node %d role %v holds more than one fact", node, role) {
+		return false
+	}
+	return true
+}
+
+// `Failing_Alloc` counts allocations and forwards each call to `inner`. It returns `.Out_Of_Memory` on the
+// allocation numbered `fail_at`, counting from 0, and on every allocation while `fail_all` is set. A `fail_at` of -1
+// fails none.
+Failing_Alloc :: struct {
+	inner:    runtime.Allocator,
+	n:        int,
+	fail_at:  int,
+	fail_all: bool,
+}
+
+@(private)
+failing_alloc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
+	f := (^Failing_Alloc)(data)
+	switch mode {
+	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
+		if f.fail_all || f.n == f.fail_at {
+			f.n += 1
+			return nil, .Out_Of_Memory
+		}
+		f.n += 1
+	case .Free, .Free_All, .Query_Features, .Query_Info:
+	}
+	return f.inner.procedure(f.inner.data, mode, size, alignment, old_memory, old_size, loc)
+}
+
+// Returns the allocator `f` describes.
+failing_allocator :: proc(f: ^Failing_Alloc) -> runtime.Allocator {
+	return {procedure = failing_alloc, data = f}
+}
+
+// Reads `src` as a built document under the spec a caller passes as `spec`.
+Build :: proc(src: []u8, spec: any) -> (core.Document, core.Document_Error)
+
+// Commits `list`, checks the output against `want`, then builds the output with `build` and `spec`.
+expect_commit :: proc(t: ^testing.T, list: ^core.Edit_List, want: string, build: Build, spec: any) -> bool {
+	out, _, err := core.commit(list)
+	defer if len(out) > 0 {
+		delete(out)
+	}
+	if !testing.expectf(t, err.kind == .None, "commit: %v", err) {
+		return false
+	}
+	if !testing.expectf(t, string(out) == want, "committed %q, want %q", string(out), want) {
+		return false
+	}
+	doc, derr := build(out, spec)
+	defer core.destroy(&doc)
+	return testing.expectf(t, derr.kind == .None, "committed text does not read: %v", derr)
+}
+
+// Builds `src` with `build` and `spec`, records `edit` on a list over it, and checks the committed text against `want`.
+check :: proc(t: ^testing.T, src, want: string, build: Build, spec: any, edit: proc(list: ^core.Edit_List) -> core.Document_Error) -> bool {
+	doc, err := build(transmute([]u8)src, spec)
+	defer core.destroy(&doc)
+	if !testing.expectf(t, err.kind == .None, "%q: %v", src, err) {
+		return false
+	}
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	if e := edit(&list); !testing.expectf(t, e.kind == .None, "%q: record %v", src, e) {
+		return false
+	}
+	return expect_commit(t, &list, want, build, spec)
 }
