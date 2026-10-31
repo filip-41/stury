@@ -100,7 +100,7 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.La
 	if fault == nil && regs.a == 0 {
 		fault = core.fault_of(core.fault_at(u64(len(src)), .Truncated), &RULES)
 	}
-	return core.builder_end(&b, regs, fault)
+	return core.builder_end(&b, regs, fault, .Comments in FEATURES[S])
 }
 
 // Returns the byte just past container `i`'s closing bracket. The document keeps no close node, so it starts after
@@ -108,6 +108,7 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.La
 // close on the rightmost spine, then the container's own. Cold: only a span read or the writer's splice calls it.
 @(private, cold)
 close_end :: proc(doc: ^core.Document, i: u32) -> u64 {
+	spec := Spec(doc.spec)
 	n := doc.nodes[i]
 	end := int(i) + int(n.n)
 	p := n.lo + 1
@@ -125,17 +126,22 @@ close_end :: proc(doc: ^core.Document, i: u32) -> u64 {
 	}
 	// Every container whose subtree ends here is on the rightmost spine, and its close is the next one to skip.
 	closes := 0
-	for j := int(i) + 1; j < end; j += 1 {
+	for j := int(i) + 1; j < end; {
 		m := doc.nodes[j]
-		if (m.kind == .Array || m.kind == .Map) && j + int(m.n) == end {
+		if m.kind != .Array && m.kind != .Map {
+			j += 1
+		} else if j + int(m.n) == end {
 			closes += 1
+			j += 1
+		} else {
+			j += int(m.n)
 		}
 	}
 	for _ in 0 ..< closes {
-		p = skip_to_close(doc.src, p)
+		p = skip_to_close(doc.src, p, spec)
 		p += 1
 	}
-	p = skip_to_close(doc.src, p)
+	p = skip_to_close(doc.src, p, spec)
 	if p < u64(len(doc.src)) {
 		p += 1
 	}
@@ -143,10 +149,17 @@ close_end :: proc(doc: ^core.Document, i: u32) -> u64 {
 }
 
 // Returns the first byte at or past `p` that is no whitespace, comment or trailing comma, where a container's span
-// ends. The walk already judged these bytes, so the fault from `comment_run` is ignored.
+// ends. `comment_run` reads the bytes as spec `spec`, the spec the document was built as, since a JSON5 `//` comment
+// ends at U+2028 and U+2029 and a JSONC one does not. The walk already judged these bytes, so the fault is ignored.
 @(private)
-skip_to_close :: proc(src: []u8, p: u64) -> u64 {
-	q, _, _ := comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, .Json5)
+skip_to_close :: proc(src: []u8, p: u64, spec: Spec) -> u64 {
+	q: [^]u8
+	switch spec {
+	case .Json:  q, _, _ = comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, .Json)
+	case .Jsonc: q, _, _ = comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, .Jsonc)
+	case .Json5: q, _, _ = comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, .Json5)
+	case:        return p
+	}
 	return u64(intrinsics.ptr_sub(q, raw_data(src)))
 }
 
@@ -256,8 +269,7 @@ key_check_hook :: proc "contextless" (h: ^Key_Check, s: core.Hook_Regs, t: core.
 // output strictly, then tolerantly, then the source.
 @(private)
 edit_reads :: proc(doc: ^core.Document, src: []u8, tolerate: bool, $S: Spec) -> (core.Fault, bool) {
-	t: bit_set[Tolerance; u8]
-	if tolerate { t = {.Invalid_Utf8, .Lone_Surrogate} }
+	t := core.tolerances(tolerate, bit_set[Tolerance; u8]{.Invalid_Utf8, .Lone_Surrogate})
 	return validate(src, S, {tolerate = t}).?
 }
 

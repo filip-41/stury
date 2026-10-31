@@ -13,7 +13,7 @@ build :: proc(src: string, $S: json.Spec, opts := json.Options{}, dups := core.D
 	return json.build(transmute([]u8)src, S, opts, dups)
 }
 
-// The 7 nodes of `{"a":[1,2],"b":{}}`: a container's `n` counts its subtree in nodes, a key node comes right
+// `{"a":[1,2],"b":{}}` makes 7 nodes. A container's `n` counts its subtree in nodes, a key node is written right
 // before its value's, `length` counts a container's members, and `span` returns its bytes through the close.
 @(test)
 node_layout :: proc(t: ^testing.T) {
@@ -48,8 +48,39 @@ node_layout :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.length(&doc, 3), 0)
 }
 
-// Each valid JSONTestSuite text under `.Json`, `.Jsonc` and `.Json5`, and each json5-tests text under `.Json5`: every
-// container's span ends where the walk's `End` ends, and its child count is its member count.
+// A JSONC `//` comment ends only at LF or CR, so U+2028 and U+2029 inside one belong to it and the root's span runs
+// to the close. A JSON5 comment ends at either byte, which is still whitespace there.
+@(test)
+line_separators_in_comments :: proc(t: ^testing.T) {
+	cases := []struct {
+		src:  string,
+		spec: json.Spec,
+	}{
+		{"{\"a\":1 // x\u2028y\n}", .Jsonc},
+		{"[1 // x\u2029y\n]", .Jsonc},
+		{"{\"a\"://x\u20281}", .Json5},
+		{"[1,//x\u20292]", .Json5},
+	}
+	for c in cases {
+		doc: core.Document
+		err: core.Document_Error
+		switch c.spec {
+		case .Json:  doc, err = build(c.src, .Json)
+		case .Jsonc: doc, err = build(c.src, .Jsonc)
+		case .Json5: doc, err = build(c.src, .Json5)
+		}
+		if !testing.expectf(t, err.kind == .None, "%v %q: %v", c.spec, c.src, err) {
+			core.destroy(&doc)
+			continue
+		}
+		got := string(core.span(&doc, 0))
+		testing.expectf(t, got == c.src, "%v %q: span %q", c.spec, c.src, got)
+		core.destroy(&doc)
+	}
+}
+
+// For each valid JSONTestSuite text under `.Json`, `.Jsonc` and `.Json5`, and each json5-tests text under `.Json5`,
+// every container's span ends where the walk's `End` ends, and its child count is its member count.
 @(test)
 container_spans :: proc(t: ^testing.T) {
 	suite := #load_directory("conformance/JSONTestSuite/test_parsing")
@@ -120,7 +151,7 @@ readers_refuse_containers :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.number(&doc, 1).kind, core.Number_Kind.Wide)
 }
 
-// `child_at` returns the node `child_next` reaches at step `k`: it indexes when each member is one node and walks the
+// `child_at` returns the node `child_next` reaches at step `k`. It indexes when each member is one node and walks the
 // subtree sizes otherwise, and returns false past the last member, for `k` -1, for `NO_NODE` and for a scalar.
 @(test)
 child_at_reader :: proc(t: ^testing.T) {
@@ -222,7 +253,7 @@ child_at_saturated :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 	core.destroy(&doc)
 
-	// A `Map` of `CHILDREN_MAX` members: the last value is the last node, and its key is at `last - 1`.
+	// A `Map` of `CHILDREN_MAX` members puts the last value at the last node, with its key at `last - 1`.
 	clear(&text)
 	append(&text, '{')
 	key: [24]u8
@@ -248,7 +279,7 @@ child_at_saturated :: proc(t: ^testing.T) {
 		core.destroy(&doc)
 	}
 
-	// An `Array` of `CHILDREN_MAX + 1` members: the count stays at 65535 and the last member is still the last node.
+	// An `Array` of `CHILDREN_MAX + 1` members keeps its count at 65535, and the last member is still the last node.
 	clear(&text)
 	append(&text, '[')
 	for i in 0 ..< int(core.CHILDREN_MAX) + 1 {
@@ -319,8 +350,8 @@ readers_refuse_no_node :: proc(t: ^testing.T) {
 }
 
 
-// `length`, `first_child` and `next_child` on an empty array and a nested one, and `kind`, `span` and `int_value` on
-// a number.
+// Checks `length`, `first_child` and `next_child` on an empty array and a nested one, and `kind`, `span` and
+// `int_value` on a number.
 @(test)
 readers :: proc(t: ^testing.T) {
 	doc, err := build(`[]`, .Json)
@@ -354,7 +385,7 @@ readers :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 }
 
-// `member` with `.First` and `.Last`, `member_all` over both values, and `.Refuse` failing at the repeat's byte.
+// Checks `member` with `.First` and `.Last`, `member_all` over both values, and `.Refuse` failing at the repeat's byte.
 @(test)
 duplicates :: proc(t: ^testing.T) {
 	src := `{"a":1,"a":2,"b":3}`
@@ -396,6 +427,23 @@ duplicates :: proc(t: ^testing.T) {
 	testing.expect_value(t, v, 2)
 }
 
+// A repeat read before a later walk fault is reported at its byte. The walk stops before the root object closes, so
+// the close-time check never runs for it.
+@(test)
+refuse_repeat_before_fault :: proc(t: ^testing.T) {
+	// The root's second `""` is at byte 6, and the comma after the colon is the fault at byte 8.
+	doc, err := build(`{"":0,"":,}`, .Json, {}, .Refuse)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, err.at, 6)
+	testing.expect_value(t, len(doc.nodes), 0)
+
+	// A closed inner object finds its own repeat first, at byte 15. The root's repeat at byte 6 is earlier.
+	doc, err = build(`{"":0,"":{"":1,"":2},x}`, .Json, {}, .Refuse)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, err.at, 6)
+	testing.expect_value(t, len(doc.nodes), 0)
+}
+
 // `member` does not find a key inside a member's value: the step over a key or a value is its whole subtree, which
 // keeps the next key and its value aligned.
 @(test)
@@ -431,7 +479,7 @@ member_nested_keys :: proc(t: ^testing.T) {
 	}
 }
 
-// `bytes_equal` on lengths 0 to 40, with the last byte differing and with the second slice a byte shorter.
+// Checks `bytes_equal` on lengths 0 to 40, with the last byte differing and with the second slice a byte shorter.
 @(test)
 bytes_equal_table :: proc(t: ^testing.T) {
 	a, b: [64]u8
@@ -450,7 +498,7 @@ bytes_equal_table :: proc(t: ^testing.T) {
 	}
 }
 
-// Numbers of 3 to 19 digits with a point after `total / 2` of them: `number` returns `.Float` with the bits
+// For numbers of 3 to 19 digits with a point after `total / 2` of them, `number` returns `.Float` with the bits
 // `strconv.parse_f64` returns.
 @(test)
 number_digit_count :: proc(t: ^testing.T) {
@@ -486,8 +534,8 @@ number_digit_count :: proc(t: ^testing.T) {
 	}
 }
 
-// Facts follow the ownership rule: a head comment belongs to the value after it, an inline or foot comment to the
-// value completed before it, and a foot comment in an empty container to that container.
+// Facts follow the ownership rule. A head comment belongs to the next value, an inline comment to the last value
+// completed, and a foot to the innermost open container, or to the root at depth 0.
 @(test)
 facts :: proc(t: ^testing.T) {
 	Case :: struct {
@@ -501,7 +549,7 @@ facts :: proc(t: ^testing.T) {
 		{"{ /* h */ \"k\": /* h2 */ 1 /* i */ }\n/* foot */", 2, {.Comment, .Comment, .Comment_Inline}},
 		{`[ /* f */ ]`, 0, {.Comment_Foot}},
 		{`[1 /* i */, 2]`, 1, {.Comment_Inline}},
-		{"[1,\n/* f */ ]", 1, {.Comment_Foot}},
+		{"[1,\n/* f */ ]", 0, {.Comment_Foot}},
 		{`{"a": {} /* i */}`, 2, {.Comment_Inline}},
 	}
 	for c in cases {
@@ -530,7 +578,7 @@ facts :: proc(t: ^testing.T) {
 	}
 }
 
-// JSON5's identifier and `\u`-escaped keys, single-quoted strings, `\x` and `\0` escapes, and number forms.
+// Checks JSON5's identifier and `\u`-escaped keys, single-quoted strings, `\x` and `\0` escapes, and number forms.
 @(test)
 json5 :: proc(t: ^testing.T) {
 	src := `{'a': 'x', b: 'y', \u0063: 0x10}`
@@ -621,8 +669,8 @@ tolerated :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 }
 
-// A number's kind and bits at the i64 and u64 edges, at the binary64 edges, and against `strconv.parse_f64` on random
-// digits.
+// Checks a number's kind and bits at the i64 and u64 edges, at the binary64 edges, and against `strconv.parse_f64` on
+// random digits.
 @(test)
 numbers :: proc(t: ^testing.T) {
 	Case :: struct {
@@ -758,8 +806,8 @@ json5_duplicates :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(doc.nodes), 0)
 }
 
-// JSON5 comments get roles as JSONC's do: `/* h */` above the key and `// i` after the value are both facts of the
-// value node, 2.
+// JSON5 comments get the same roles as JSONC's. `/* h */` above the key and `// i` after the value are both facts of
+// the value node, 2.
 @(test)
 json5_facts :: proc(t: ^testing.T) {
 	doc, err := build("{/* h */ a: 1 // i\n}", .Json5)
@@ -887,8 +935,8 @@ number_spelling_bits :: proc(t: ^testing.T) {
 	testing.expect_value(t, i, len(want))
 }
 
-// Strings that cross the decoder's 64-byte block edge: an escape at the edge, a surrogate pair across it, `\u0000`,
-// a string of escapes only, and plain strings of 63, 64 and 65 bytes.
+// Checks strings that cross the decoder's 64-byte block edge: an escape at the edge, a surrogate pair across it,
+// `\u0000`, a string of escapes only, and plain strings of 63, 64 and 65 bytes.
 @(test)
 decode_edges :: proc(t: ^testing.T) {
 	buf: [256]u8
@@ -997,8 +1045,8 @@ tolerated_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, v, 2)
 }
 
-// `text` into a buffer as long as the token's span allocates nothing, for the scalar decoder and the block decoder:
-// the decoded text is no longer than the span.
+// Reads `text` into a buffer as long as the token's span and checks that it allocates nothing, for the scalar decoder
+// and the block decoder. The decoded text is no longer than the span.
 @(test)
 decode_into_token_sized_buffer :: proc(t: ^testing.T) {
 	arena: mem.Arena
@@ -1083,7 +1131,7 @@ reservation_retry :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 }
 
-// An allocator that refuses the allocation numbered `fail_at`, counting from 0, and forwards every other call to
+// A `Failing_Alloc` refuses the allocation numbered `fail_at`, counting from 0, and forwards every other call to
 // `inner`.
 Failing_Alloc :: struct {
 	inner:   runtime.Allocator,
@@ -1145,6 +1193,113 @@ splice_spans :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(core.span(&doc, 1)), `"a"`)
 	testing.expect_value(t, string(core.span(&doc, 2)), `"x\ny"`)
 	testing.expect_value(t, string(core.span(&doc, 4)), `'q'`)
+}
+
+// An insert whose position lies in a removal run moves to the run's cut end, with its separator chosen by what
+// survives: after the run, before it, or neither.
+@(test)
+edit_insert_in_removal_run :: proc(t: ^testing.T) {
+	commit_want :: proc(t: ^testing.T, src, want: string, $S: json.Spec, body: proc(list: ^core.Edit_List)) {
+		doc, err := json.build(transmute([]u8)src, S)
+		defer core.destroy(&doc)
+		if !testing.expectf(t, err.kind == .None, "%q: %v", src, err) {
+			return
+		}
+		list := core.edit_list_init(&doc)
+		defer core.edit_list_destroy(&list)
+		body(&list)
+		out, _, cerr := core.commit(&list)
+		defer if len(out) > 0 {
+			delete(out)
+		}
+		if !testing.expectf(t, cerr.kind == .None, "%q: commit %v", src, cerr) {
+			return
+		}
+		testing.expectf(t, string(out) == want, "%q: committed %q, want %q", src, out, want)
+		read, rerr := json.build(out, S)
+		defer core.destroy(&read)
+		if !testing.expectf(t, rerr.kind == .None, "%q: committed text does not read: %v in %q", src, rerr, out) {
+			return
+		}
+	}
+
+	commit_want(t, `[1,2]`, `[1,3]`, .Json, proc(list: ^core.Edit_List) {
+		core.remove(list, 2)
+		core.insert(list, 0, 1, transmute([]u8)string("3"))
+	})
+	commit_want(t, `[1,2]`, `[1,3]`, .Json, proc(list: ^core.Edit_List) {
+		core.remove(list, 2)
+		core.insert(list, 0, 2, transmute([]u8)string("3"))
+	})
+	commit_want(t, `{"a":1,"b":2,"c":3}`, `{"a":1,"x":9,"c":3}`, .Json, proc(list: ^core.Edit_List) {
+		core.remove(list, 4)
+		core.insert(list, 0, 1, transmute([]u8)string(`"x"`), transmute([]u8)string("9"))
+	})
+	commit_want(t, `{"a":1,"b":2,"c":3}`, `{"a":1,"x":9,"c":3}`, .Json, proc(list: ^core.Edit_List) {
+		core.remove(list, 4)
+		core.insert(list, 0, 2, transmute([]u8)string(`"x"`), transmute([]u8)string("9"))
+	})
+	commit_want(t, `[1]`, `[9]`, .Json, proc(list: ^core.Edit_List) {
+		core.remove(list, 1)
+		core.insert(list, 0, 0, transmute([]u8)string("9"))
+	})
+	commit_want(t, `[1]`, `[9]`, .Json, proc(list: ^core.Edit_List) {
+		core.remove(list, 1)
+		core.insert(list, 0, 1, transmute([]u8)string("9"))
+	})
+	commit_want(t, `[1,2,3]`, `[9,3]`, .Json, proc(list: ^core.Edit_List) {
+		core.remove(list, 1)
+		core.remove(list, 2)
+		core.insert(list, 0, 1, transmute([]u8)string("9"))
+	})
+	commit_want(t, `[1,2]`, `[8,9]`, .Json, proc(list: ^core.Edit_List) {
+		core.remove(list, 1)
+		core.remove(list, 2)
+		core.insert(list, 0, 0, transmute([]u8)string("8"))
+		core.insert(list, 0, 2, transmute([]u8)string("9"))
+	})
+
+	// The removal takes the comma the insert counted on. The new member stays off the head comment's line, so the
+	// comment still leads `"c"`.
+	src := "{\n  \"a\": 1,\n  \"b\": 2,\n  //hc\n  \"c\": 3\n}"
+	doc, err := json.build(transmute([]u8)src, .Jsonc)
+	defer core.destroy(&doc)
+	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+		return
+	}
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	testing.expect_value(t, core.remove(&list, 4).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.insert(&list, 0, 2, transmute([]u8)string(`"x"`), transmute([]u8)string("9")).kind, core.Document_Error_Kind.None)
+	out, _, cerr := core.commit(&list)
+	defer if len(out) > 0 {
+		delete(out)
+	}
+	if !testing.expectf(t, cerr.kind == .None, "multiline: commit %v", cerr) {
+		return
+	}
+	read, rerr := json.build(out, .Jsonc)
+	defer core.destroy(&read)
+	if !testing.expectf(t, rerr.kind == .None, "multiline: committed text does not read: %v in %q", rerr, out) {
+		return
+	}
+	v, ok := core.member(&read, 0, "c")
+	if !testing.expect(t, ok) {
+		return
+	}
+	it := core.facts_of(&read, v, .Comment)
+	got, more := core.fact_next(&it)
+	testing.expectf(t, more && string(got) == "hc", "head comment on c: %q %v", got, more)
+}
+
+// A leading zero in a multi-digit integer run is a digit, not the zero of a `0.<fraction>` significand.
+@(test)
+number_decimal_leading_zero :: proc(t: ^testing.T) {
+	for src in ([]string{"012345678901234567890123456789", "0012345678901234567890123456789"}) {
+		got := core.number_decimal(transmute([]u8)src, 0, u64(len(src)))
+		want, ok := strconv.parse_f64(src)
+		testing.expectf(t, ok && got.kind == .Float && got.bits == transmute(u64)want, "%q: %v, want %x", src, got, transmute(u64)want)
+	}
 }
 
 // An `Array` of 65535 members records `CHILDREN_MAX` in its spelling, and `length` counts all 65535.

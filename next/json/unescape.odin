@@ -507,22 +507,29 @@ number :: #force_inline proc(doc: ^core.Document, i: u32) -> core.Number {
 	n := doc.nodes[i]
 	// Any kind but `.Number` is no number and returns `.Wide`.
 	if n.kind == .Number {
-		shape := number_shape(n.spelling)
-		if shape.kind <= .Decimal {
+		sp := n.spelling
+		// The walk's `spelling` holds the kind and the two digit counts. Each arm reads the fields it uses.
+		if sp & NUMBER_KIND_MASK <= u16(Number_Spelling.Decimal) {
 			lo, hi := n.lo, n.lo + u64(n.n)
-			if shape.pure {
-				if shape.int_digits <= 19 {
-					if num, ok := core.number_int(doc.src, lo, hi, shape.int_digits); ok {
+			int_digits := int((sp >> NUMBER_INT_SHIFT) & 0x1f)
+			if sp & (NUMBER_FRAC_MASK | NUMBER_EXP) == 0 {
+				if int_digits <= 19 {
+					if num, ok := core.number_int(doc.src, lo, hi, int_digits); ok {
 						return num
 					}
 				}
-			} else if shape.has_exp {
-				return core.number_exponent(doc.src, lo, hi, shape.int_digits, shape.frac_digits)
-			} else if shape.frac_digits > 0 {
-				// A saturated count records less than the fraction's length, and `number_fraction` checks the point and
-				// the run's length against the counts and falls back when they disagree.
-				if shape.int_digits + shape.frac_digits <= 19 {
-					return core.number_fraction(doc.src, lo, hi, shape.int_digits, shape.frac_digits)
+			} else {
+				frac_digits := int((sp >> NUMBER_FRAC_SHIFT) & 0x1f)
+				if sp & NUMBER_EXP != 0 {
+					return core.number_exponent(doc.src, lo, hi, int_digits, frac_digits)
+				}
+				// A set `NUMBER_FRAC_MASK` without `NUMBER_EXP` is a fraction of at least one digit.
+				// `number_fraction`'s first arm checks the point byte at `hi - frac_digits - 1` and folds both
+				// runs to their recorded lengths, without testing that the bytes are digits, since the walk
+				// recorded them from this span. A saturated count records 31, so `int_digits + frac_digits`
+				// exceeds 19 and `number_slow` reads the token.
+				if int_digits + frac_digits <= 19 {
+					return core.number_fraction(doc.src, lo, hi, int_digits, frac_digits)
 				}
 			}
 		}

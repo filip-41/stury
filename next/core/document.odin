@@ -14,7 +14,7 @@ import "core:slice"
 //	- a container's `n` is its subtree's node count, its own node included, and the document holds no close node,
 //	  so its next sibling is `i + n`,
 //	- a container's `spelling` is its child count, where a member counts once, not its key and value.
-//	  `CHILDREN_MAX` is saturated, and `length` counts the members by stepping.
+//	  The count saturates at `CHILDREN_MAX`, and `length` counts the members by stepping.
 //	- a document holds no `End` node: the walk still emits one, and the builder consumes it.
 Node :: Token
 
@@ -23,25 +23,25 @@ CHILDREN_MAX :: u16(0xFFFF)
 
 // "No such node": answer on a miss. A node index never takes it.
 NO_NODE :: u32(max(u32))
-// The root value's node, node 0.
+// The root value's node is node 0.
 ROOT :: u32(0)
 
-// Bit 0 of a string or key's `spelling`, set when its text must be decoded. A reader tests it before calling
-// the format's `text`. An unmarked node's span is its text: a JSON string's token leaves its quote pair out, an
-// unquoted JSON5 key is bare, and a dsv cell's span is its source bytes.
+// Bit 0 of a string, key or dsv cell's `spelling` is set when its text must be decoded. A reader tests it before
+// calling the format's `text`. An unmarked node's span is its text: a JSON string's token leaves its quote pair out,
+// an unquoted JSON5 key is bare, and a dsv cell's span is its source bytes.
 SPELLING_DECODE :: u16(1)
-// Bit 1 of a JSON string or a dsv cell, set when the token is quoted. A JSON string's token span is the bytes
+// Bit 1 of a JSON string or a dsv cell is set when the token is quoted. A JSON string's token span is the bytes
 // between its quotes, so `span` adds the pair back. A quoted dsv cell's span already holds them.
 SPELLING_QUOTED :: u16(2)
-// Bit 2 of a JSON string, set when it holds an ill-formed UTF-8 sequence that `Invalid_Utf8` takes as U+FFFD, so
-// its decode may grow past its span.
+// Bit 2 of a JSON string is set when it holds an ill-formed UTF-8 sequence that `Invalid_Utf8` reads as U+FFFD, so its
+// decode may grow past its span.
 SPELLING_LAX :: u16(4)
 
-// A fact is a token beside the nodes: a comment, a tag, an anchor. Facts are sorted by the node they belong to,
-// and two facts of one node keep their source order. `n` is the span's length and `lo` its first byte.
-// `spelling`'s low byte is the marker's lead length and its next byte the tail's, so core slices a body without
-// knowing a format's markers. A line comment leads with two and trails none, a block comment leads and trails
-// with two, and a delimited text's comment line leads with one.
+// A `Fact` holds a comment token, the node it belongs to and its role. Facts are sorted by the node they belong to,
+// and two facts of one node keep their source order. `lo` is the first byte and `n` the span's length, markers
+// included. `spelling`'s low byte is the marker's lead length and the next byte its tail length, so core slices a body
+// without knowing a format's markers. A `//` comment leads with two bytes and trails none, a `/* */` comment leads and
+// trails with two, and a delimited text's comment line leads with one.
 Fact :: struct {
 	lo:       u64,
 	node:     u32,
@@ -50,9 +50,9 @@ Fact :: struct {
 	spelling: u16,
 }
 
-// A parsed text: the walk's tokens over the caller's bytes, the facts beside them, and the format's spelling
-// services. `src` is borrowed and must outlive the document. `nodes_alloc` is the allocation behind `nodes`,
-// whose length is its capacity, so `destroy` frees it after `nodes` shrank to the node count.
+// A `Document` holds the walk's tokens over the caller's bytes, the facts beside them, and the format's `Spelling`
+// table. `src` is borrowed and must outlive the document. `nodes_alloc` is the allocation behind `nodes`, whose length
+// is its capacity, so `destroy` frees it after `nodes` shrank to the node count.
 //
 // A headed dsv text keeps its header row as the root's first child, an `Array` of role `Key` whose `Plain` cells
 // name its columns, so the root's readers step over it as they step over a member's key. `header` is that
@@ -72,11 +72,13 @@ Document :: struct {
 	// table and dispatch its edit services on this byte.
 	spec:        u8,
 	// dsv's run-time dialect, which every edit service reads: the byte between two cells and the byte that starts
-	// a comment line, 0 for none. `spelling` names the spec, so the spec and these two bytes record the dialect
-	// the text was read with. `spec`, `delimiter` and `comment` fill the padding after `header`: the document is
-	// 112 bytes, and no node or read lane moves.
+	// a comment line, 0 for none. `spelling` names the spec, so the spec and these bytes record how the text was
+	// read. They fill the padding after `header`: the document stays 112 bytes, and no node or read lane moves.
 	delimiter:   u8,
 	comment:     u8,
+	// dsv's build choice: the first record is data. It is stored beside the dialect so a commit validates an output
+	// as the text was read.
+	no_header:   bool,
 }
 
 // How a reader treats an object's repeated keys. `Refuse` is a build option: the build checks each object as it
@@ -88,20 +90,19 @@ Duplicates :: enum u8 {
 	Refuse,
 }
 
-// The options `resolve` reads besides the node.
+// Holds the options `resolve` reads besides the node.
 Resolve_Options :: struct {
 	// dsv: an unquoted cell that is empty, `true`, `false` or exactly a JSON number reads as Null, True, False or
-	// Number. False, the default, makes every cell a String.
+	// Number. False, the default, makes every value cell a String.
 	infer: bool,
 }
 
-// A format's spelling services, in its rodata. `text` decodes a node's text into `buf` when it has room, else
-// into `allocator`, which the caller frees. A node whose `SPELLING_DECODE` bit is clear is its span without the
-// quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token.
+// A `Spelling` holds a format's read services, in its rodata. `text` decodes a node's text into `buf` when it has
+// room, else into `allocator`, which the caller frees. A node whose `SPELLING_DECODE` bit is clear is its span without
+// the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token.
 // `resolve` returns what a `Plain` node is. `close_end` returns the byte just past a container's closing bytes,
 // found from its last descendant or its open, over the whitespace and comments the format allows there. `edit`
-// points at the format's edit services, nil for a format that accepts no edits, so the read table holds no edit
-// service.
+// points at the format's edit services, nil for a format that accepts no edits.
 Spelling :: struct {
 	text:       proc(doc: ^Document, i: u32, buf: []u8, allocator: runtime.Allocator) -> (string, bool),
 	key_equals: proc(doc: ^Document, i: u32, name: string) -> bool,
@@ -111,13 +112,13 @@ Spelling :: struct {
 	edit:       ^Edit_Spelling,
 }
 
-// A format's edit services. A document's `Spelling` points at one, and a format that reads two dialects
-// differently has one per dialect. `value` checks a text as exactly one value of the format and spec, `key` as
-// exactly one key, and `record` as exactly one record, returning its cell count. `reads` is the format's own read
-// of a text with or without its tolerance set, for the check a commit makes, under the output spec `spec`. Each
-// service receives the document, so it reads the run-time dialect the document holds. A text that is no value or
-// record answers `.Bad_Value`, one that is no key answers `.Bad_Key`, with the walk's fault in `inner` where there
-// is one, and `.No_Memory` when the service could not allocate.
+// An `Edit_Spelling` holds a format's edit services. A document's `Spelling` points at one table, and the services
+// dispatch on the document's `spec` and run-time dialect. `value` checks a text as exactly one value of the format and
+// spec, `key` as exactly one key, and `record` as exactly one record, returning its cell count. `reads` is the
+// format's own read of a text with or without its tolerance set, for the check a commit makes, under the output spec
+// `spec`. Each service receives the document, so it reads the run-time dialect the document holds. A text that is no
+// value or record answers `.Bad_Value`, one that is no key answers `.Bad_Key`, with the walk's fault in `inner` where
+// there is one, and `.No_Memory` when the service could not allocate.
 //
 // `member_sep` is written between two members of an object or two elements of an array, `key_sep` between a
 // member's key and its value, and `record_sep` is the line end a record insert writes, read from the document so
@@ -134,19 +135,19 @@ Edit_Spelling :: struct {
 	record_sep: proc(doc: ^Document) -> string,
 }
 
-// How a format spells a comment in an output: `//` for a JSON spec that has comments, the document's comment byte
-// for a delimited text, or none. Under `Line`, a body holding a line end is written in the block form `/* */`, so a
-// line comment's body cannot end its line early.
+// A `Comment_Spelling` names how a format spells a comment in an output: `//` for a JSON spec that has comments, the
+// document's comment byte for a delimited text, or none. Under `Line`, a body holding a line end is written in the
+// block form `/* */`, so a line comment's body cannot end its line early.
 Comment_Spelling :: enum u8 {
 	None,
 	Line,
 	Byte,
 }
 
-// The open-container stack and the growing node and fact buffers of one build. `Hook_Regs` holds the state the
-// hook passes between tokens: `a` is the node cursor, `b` the open container's index, `c` the last completed
-// value. The plain hook keeps different state there: `b` holds the innermost open container's index in its high
-// 32 bits and its child count in the low 32, and `c` is the depth.
+// A `Builder` holds the open-container stack and the growing node and fact buffers of one build. `Hook_Regs` holds
+// the state the hook passes between tokens: `a` is the node cursor, `b` the open container's index, `c` the last
+// completed value. The plain hook keeps different state there: `b` holds the innermost open container's index in its
+// high 32 bits and its child count in the low 32, and `c` is the depth.
 Builder :: struct {
 	doc:     Document,
 	stack:   []u64,
@@ -157,14 +158,14 @@ Builder :: struct {
 	err:     Document_Error,
 }
 
-// The register values a builder's hook starts with: `a` is 0, and `b` and `c` are `NO_NODE`.
+// Holds the register values a builder's hook starts with: `a` is 0, and `b` and `c` are `NO_NODE`.
 BUILDER_REGS :: Hook_Regs{a = 0, b = u64(NO_NODE), c = u64(NO_NODE)}
 
-// Returns a builder over `src`, with at least 16 nodes reserved, `len(src) / seed_div` when that is larger, and
-// an open stack of `depth` slots. A JSON build passes `seed_div` 1, since a text makes no more tokens than bytes,
-// and the walk's maximum depth, so its hook tests no capacity and grows neither buffer. A format's `build` passes
-// the builder to its walk with a builder hook and ends it with `builder_end`. A refused allocation returns a
-// builder whose `err` is `.No_Memory`.
+// Returns a builder over `src`, with at least 16 nodes reserved, `len(src) / seed_div` when that is larger, and an
+// open stack of `depth` slots, or 1 when `depth` is 0. A JSON build passes `seed_div` 1, since a text makes no more
+// tokens than bytes, and the walk's maximum depth, so its hook tests no capacity and grows neither buffer. A format's
+// `build` passes the builder to its walk with a builder hook and ends it with `builder_end`. A refused allocation
+// returns a builder whose `err` is `.No_Memory`.
 builder_start :: proc(src: []u8, spelling: ^Spelling, dups: Duplicates, allocator: runtime.Allocator, seed_div := 8, depth := 16) -> Builder {
 	b := Builder{dups = dups, pending = -1}
 	b.doc.src = src
@@ -194,7 +195,13 @@ builder_start :: proc(src: []u8, spelling: ^Spelling, dups: Duplicates, allocato
 // Returns the document the walk built, or the error that stopped it. A walk fault returns `.Walk` with the fault
 // in `inner`, a repeated key under `.Refuse` returns `.Duplicate_Key` at the later key's byte, and a refused
 // allocation returns `.No_Memory`. On an error the document is the zero value and every allocation is freed.
-builder_end :: proc(b: ^Builder, regs: Hook_Regs, fault: Maybe(Fault)) -> (Document, Document_Error) {
+// `facts` says the walk kept open containers in `Builder.depth` and the stack's slots, not as packed frames.
+builder_end :: proc(b: ^Builder, regs: Hook_Regs, fault: Maybe(Fault), facts := false) -> (Document, Document_Error) {
+	if _, bad := fault.?; bad {
+		// The walk stopped before an open object closed, so its close-time duplicate check never ran. A key read
+		// before the fault is still a repeat.
+		builder_refuse_open(b, regs, facts)
+	}
 	if b.err.kind != .None {
 		e := b.err
 		builder_free(b)
@@ -216,7 +223,7 @@ builder_end :: proc(b: ^Builder, regs: Hook_Regs, fault: Maybe(Fault)) -> (Docum
 		}
 	}
 	if len(b.doc.facts) > 1 {
-		facts_sort(b.doc.facts)
+		slice.stable_sort_by(b.doc.facts, proc(a, b: Fact) -> bool { return a.node < b.node })
 	}
 	doc := b.doc
 	if b.stack != nil {
@@ -251,47 +258,70 @@ builder_free :: proc(b: ^Builder) {
 	b^ = {}
 }
 
-// The hooks a format's `build` gives its walk. The full hook stores facts, which include comments, and the plain
-// hook is for a spec with no comments, where no fact token arrives. A scalar is written and the cursor moves. An
-// open container is pushed and its children are counted as they arrive, so its close touches no child again. A
-// close writes the container's subtree size and child count.
+// A format's `build` gives these hooks to its walk, and they write its document. The full hook stores facts, which are
+// comments, and the plain hook is for a spec with no comments, where no fact token arrives. A scalar is written and
+// the cursor moves. An open container is pushed and its children are counted as they arrive, so its close touches no
+// child again. A close writes the container's subtree size and child count.
 builder_hook :: #force_inline proc "contextless" (h: ^Builder, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
 	return builder_step(true, false, true, h, s, t)
 }
 
-// The plain hook of a build whose reservation is the token bound, so the node buffer cannot fill and no capacity
-// test is needed.
+// Stores tokens without a capacity test, for a build whose reservation is the token bound, so the node buffer cannot
+// fill.
 builder_hook_plain :: #force_inline proc "contextless" (h: ^Builder, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
 	return builder_step(false, false, false, h, s, t)
 }
 
-// The full hook of a build whose reservation is an estimate: it doubles the node buffer when it is full. A build
-// whose token-bound reservation the allocator refused retries with this hook.
+// Stores tokens and facts and doubles the node buffer when it is full, for a build whose reservation is an estimate.
+// A build whose token-bound reservation the allocator refused retries with this hook.
 builder_hook_checked :: #force_inline proc "contextless" (h: ^Builder, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
 	return builder_step(true, true, true, h, s, t)
 }
 
-// The plain hook of a build under `.Refuse`, with the duplicate-key check compiled in. `builder_hook_plain`
-// compiles it out.
+// Stores tokens with no facts, with the duplicate-key test compiled in, for a build under `.Refuse`.
+// `builder_hook_plain` compiles the test out.
 builder_hook_plain_refuse :: #force_inline proc "contextless" (h: ^Builder, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
 	return builder_step(false, false, true, h, s, t)
 }
 
-// The plain hook of a build whose reservation is an estimate: it doubles the node buffer when it is full.
+// Stores tokens with no facts and doubles the node buffer when it is full, for a build whose reservation is an
+// estimate.
 builder_hook_plain_checked :: #force_inline proc "contextless" (h: ^Builder, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
 	return builder_step(false, true, true, h, s, t)
 }
 
-// The hook of a keyless document. It drops every key, stores a `Map` as an `Array`, and steps over a header row
-// written before the walk. These are document-model rules, not a grammar's. The key drop covers facts too (`role`
-// past `.Key`): a fact is not a value. A row written before the walk is the root's next node, role `Key` where a
-// record is a value, and the root's token moves the cursor past it. `.Refuse` reads that row after the build
-// instead of at a close, so no close tests it.
+// Builds a keyless document. It drops every key, stores a `Map` as an `Array`, and steps over a header row written
+// before the walk. These are document-model rules, not a grammar's. The key drop covers facts too (`role` past
+// `.Key`): a fact is not a value. A row written before the walk is the root's next node, role `Key` where a record
+// is a value, and the root's token moves the cursor past it. `.Refuse` reads that row after the build instead of at
+// a close, so no close tests it.
 //
-// This repeats `builder_step`'s body because the shared form, `builder_step` with the three rules around it,
-// builds dsv text more slowly.
+// This repeats `builder_step`'s body to keep its three rules out of the dsv per-token path.
 builder_hook_keyless :: #force_inline proc "contextless" (h: ^Builder, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
+	return builder_keyless_step(false, h, s, t)
+}
+
+// Stores the facts of a delimited text with a comment byte and drops its keys. A fact token is passed to
+// `builder_fact` with the pending cursor, and a record's open resolves the comments above it. A text with no comment
+// byte uses `builder_hook_keyless`, whose `$FACTS` false compiles the fact branch out.
+builder_hook_keyless_facts :: #force_inline proc "contextless" (h: ^Builder, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
+	return builder_keyless_step(true, h, s, t)
+}
+
+@(private)
+builder_keyless_step :: #force_inline proc "contextless" ($FACTS: bool, h: ^Builder, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
 	s := s
+	when FACTS {
+		if t.role > .Key {
+			// A fact is passed to `builder_fact` with the pending cursor, as in the full hook. A delimited text's
+			// comment line has role `.Comment` and does not read `s.c`, which is the depth here.
+			builder_fact(h, s, t)
+			if h.err.kind != .None {
+				return s, .Stop
+			}
+			return s, .Next
+		}
+	}
 	if t.role >= .Key {
 		return s, .Next
 	}
@@ -306,6 +336,9 @@ builder_hook_keyless :: #force_inline proc "contextless" (h: ^Builder, s: Hook_R
 		#no_bounds_check h.doc.nodes[a] = t
 		s.a = u64(a + 1)
 		s.b += 1
+		when FACTS {
+			builder_resolve_pending(h, u32(a), builder_header_lo(h))
+		}
 		return s, .Next
 	}
 	flat := t
@@ -319,6 +352,11 @@ builder_hook_keyless :: #force_inline proc "contextless" (h: ^Builder, s: Hook_R
 		s.c += 1
 		s.a = u64(a + 1)
 		s.b = u64(a) << 32
+		when FACTS {
+			// A record's comments above it are its own: the line above a header is the first record's, since the
+			// header itself makes no token.
+			builder_resolve_pending(h, u32(a), builder_header_lo(h))
+		}
 		if a == 0 {
 			if j := int(s.a); j < len(h.doc.nodes) && h.doc.nodes[j].role == .Key {
 				s.a = u64(j + int(h.doc.nodes[j].n))
@@ -333,69 +371,10 @@ builder_hook_keyless :: #force_inline proc "contextless" (h: ^Builder, s: Hook_R
 	return s, .Next
 }
 
-// The keyless hook of a delimited text with a comment byte. A fact token goes to `builder_fact` with the pending
-// cursor, and a record's open resolves the comments above it. A text with no comment byte uses
-// `builder_hook_keyless`, which has no fact branch.
-builder_hook_keyless_facts :: #force_inline proc "contextless" (h: ^Builder, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
-	s := s
-	if t.role != .Value {
-		// A key is dropped, and a fact goes to `builder_fact` with the pending cursor, as in the full hook. A
-		// delimited text's comment line has role `.Comment` and does not read `s.c`, which is the depth here.
-		if t.role == .Key {
-			return s, .Next
-		}
-		builder_fact(h, s, t)
-		if h.err.kind != .None {
-			return s, .Stop
-		}
-		return s, .Next
-	}
-	a := int(s.a)
-	if a == len(h.doc.nodes) {
-		builder_grow(h)
-		if h.err.kind != .None {
-			return s, .Stop
-		}
-	}
-	if t.kind == .Plain {
-		#no_bounds_check h.doc.nodes[a] = t
-		s.a = u64(a + 1)
-		s.b += 1
-		builder_resolve_pending(h, u32(a))
-		return s, .Next
-	}
-	flat := t
-	if flat.kind == .Map {
-		flat.kind = .Array
-	}
-	if flat.kind != .End {
-		#no_bounds_check h.doc.nodes[a] = flat
-		s.b += 1
-		#no_bounds_check h.stack[s.c] = s.b
-		s.c += 1
-		s.a = u64(a + 1)
-		s.b = u64(a) << 32
-		// A record gets the comments above it as its own. A line above the header belongs to the first record,
-		// since the header itself makes no token.
-		builder_resolve_pending(h, u32(a))
-		if a == 0 {
-			if j := int(s.a); j < len(h.doc.nodes) && h.doc.nodes[j].role == .Key {
-				s.a = u64(j + int(h.doc.nodes[j].n))
-			}
-		}
-		return s, .Next
-	}
-	open := u32(s.b >> 32)
-	builder_close_node(h, a, open, u32(s.b))
-	s.c -= 1
-	#no_bounds_check s.b = h.stack[s.c]
-	return s, .Next
-}
-
-// The body of every hook. With `$FACTS` false the fact branch, the pending-comment cursor `s.c` and every read of
-// it are compiled out, which a spec with no comments does not use. `$CHECK` false compiles out the capacity test,
-// needed only when the reservation is short of the token bound. `$REFUSE` false compiles out the duplicate-key
-// test, which a build that did not ask for it does not run.
+// Every hook runs this body. With `$FACTS` false the fact branch and every use of `s.c` as the pending-comment cursor
+// are compiled out, which a spec with no comments does not use. `$CHECK` false compiles out the capacity test, needed
+// only when the reservation is short of the token bound. `$REFUSE` false compiles out the duplicate-key test, which a
+// build that did not ask for it does not run.
 @(private)
 builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE: bool, h: ^Builder, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
 	s := s
@@ -497,7 +476,7 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE: bool,
 		// frame is the top of the register-held stack and needs no structure test.
 		open = u32(s.b >> 32)
 		builder_close_node(h, a, open, u32(s.b))
-		// No close node is stored, so the cursor is already where the next token goes.
+		// No close node is stored, so the cursor is already where the next token is written.
 		s.c -= 1
 		#no_bounds_check s.b = h.stack[s.c]
 		when REFUSE {
@@ -514,13 +493,47 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE: bool,
 // and a refused allocation names none, so a `No_Memory` replaces no earlier error.
 @(private)
 builder_refuse_result :: #force_inline proc "contextless" (h: ^Builder, open, end: u32) {
-	if e := builder_refuse(h, open, end); e.kind != .None {
+	if e := duplicate_key(&h.doc, open, end, h.doc.allocator); e.kind != .None {
 		if e.kind == .Duplicate_Key {
 			if h.err.kind != .Duplicate_Key || e.at < h.err.at {
 				h.err = e
 			}
 		} else if h.err.kind == .None {
 			h.err = e
+		}
+	}
+}
+
+// Checks every object the walk left open and whose close-time check never ran, innermost first. With `facts` the
+// builder kept the open containers in `h.stack` from `h.depth`, else as the packed frames `h.stack[0 ..< regs.c]`
+// under the current frame `regs.b`. An open object's keys are the nodes before the next open container, or before the
+// node cursor `regs.a` for the innermost, so no node field is marked. A repeat found here is before the fault's byte,
+// and `builder_refuse_result` keeps the earliest.
+@(private)
+builder_refuse_open :: proc "contextless" (h: ^Builder, regs: Hook_Regs, facts: bool) {
+	if h.dups != .Refuse {
+		return
+	}
+	depth := h.depth if facts else int(regs.c)
+	if depth == 0 || !facts && u32(regs.b >> 32) == NO_NODE {
+		return
+	}
+	open := u32(h.stack[depth - 1]) if facts else u32(regs.b >> 32)
+	stop := u32(regs.a)
+	for open != NO_NODE {
+		if h.doc.nodes[open].kind == .Map {
+			builder_refuse_result(h, open, stop)
+		}
+		stop = open
+		if facts {
+			// `h.stack[k]` is the container open at depth `k + 1`.
+			depth -= 1
+			open = u32(h.stack[depth - 1]) if depth > 0 else NO_NODE
+		} else {
+			// `h.stack[k]` is the frame of the container below depth `k + 1`, so a frame's high half is its
+			// parent's index.
+			open = u32(h.stack[depth - 1] >> 32) if depth > 1 else NO_NODE
+			depth -= 1
 		}
 	}
 }
@@ -626,11 +639,10 @@ builder_top :: #force_inline proc "contextless" (h: ^Builder) -> u32 {
 	return top
 }
 
-// Stores a fact token. A head comment is held until the value it marks arrives. An inline or foot comment belongs
-// to the last value completed, or to an empty container for a foot before its own `End`.
+// Handles a fact token out of line. A head comment is held until the value it marks arrives, an inline comment
+// belongs to the last value completed, and a foot belongs to the innermost open container, or to the root at depth 0.
 @(private, cold)
 builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: Hook_Regs, t: Token) {
-	context = runtime.default_context()
 	node := u32(0)
 	pending := false
 	#partial switch t.role {
@@ -643,12 +655,8 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: Hook_Regs, 
 			node = u32(s.c)
 		}
 	case .Comment_Foot:
-		if h.depth > 0 && s.a == u64(u32(h.stack[h.depth - 1]) + 1) {
+		if h.depth > 0 {
 			node = u32(h.stack[h.depth - 1])
-		} else if s.c == u64(NO_NODE) {
-			pending = true
-		} else {
-			node = u32(s.c)
 		}
 	case:
 		pending = true
@@ -666,19 +674,30 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: Hook_Regs, 
 	}
 }
 
-// Assigns the head comments held since the last value to the value node `node`.
+// Gives the head comments held since the last value to the value node `node`. A pending fact before the header row's
+// first byte belongs to the root, since no record precedes it to take it.
 @(private)
-builder_resolve_pending :: #force_inline proc "contextless" (h: ^Builder, node: u32) {
+builder_resolve_pending :: #force_inline proc "contextless" (h: ^Builder, node: u32, root_before := u64(0)) {
 	if h.pending < 0 {
 		return
 	}
 	for i in h.pending ..< h.n_facts {
-		h.doc.facts_alloc[i].node = node
+		f := &h.doc.facts_alloc[i]
+		f.node = ROOT if root_before != 0 && f.lo < root_before else node
 	}
 	h.pending = -1
 }
 
-// Whether `text` allocated `s`: `s` is neither `buf` nor a slice of the document's source.
+// Returns the first byte of the header row a keyless document wrote before its walk, or 0 when it has none.
+@(private)
+builder_header_lo :: #force_inline proc "contextless" (h: ^Builder) -> u64 {
+	if len(h.doc.nodes) > 1 && h.doc.nodes[1].role == .Key {
+		return h.doc.nodes[1].lo
+	}
+	return 0
+}
+
+// Returns whether `text` allocated `s`: it is neither `buf` nor a slice of the document's source.
 @(private)
 allocated :: proc(doc: ^Document, s: string, buf: []u8) -> bool {
 	p := uintptr(raw_data(s))
@@ -687,12 +706,6 @@ allocated :: proc(doc: ^Document, s: string, buf: []u8) -> bool {
 	}
 	lo := uintptr(raw_data(doc.src))
 	return p < lo || p + uintptr(len(s)) > lo + uintptr(len(doc.src))
-}
-
-// Sorts `facts` by node, stably, so facts of one node keep their source order.
-@(private)
-facts_sort :: proc(facts: []Fact) {
-	slice.stable_sort_by(facts, proc(a, b: Fact) -> bool { return a.node < b.node })
 }
 
 // Returns the kind of node `i`, or `.Null` when `i` is past the last node.
@@ -725,9 +738,17 @@ span :: #force_inline proc(doc: ^Document, i: u32) -> []u8 {
 	}
 }
 
+// Returns `all` when `tolerate` is set, else the empty set.
+tolerances :: #force_inline proc(tolerate: bool, all: $T) -> T {
+	if tolerate {
+		return all
+	}
+	return {}
+}
+
 // Returns one past the line end at `pos`: LF, CR, or under `json5` U+2028 or U+2029. Returns `pos` when no line end
-// starts there. `json5` accepts U+2028 and U+2029, which end a line in that spec and in no other. The edit list and
-// the comment scanners use this rule.
+// starts there. `json5` accepts U+2028 and U+2029, which end a line in that spec and in no other. The edit list uses
+// this rule.
 line_end_len :: proc(src: []u8, pos: u64, json5: bool) -> u64 {
 	if pos >= u64(len(src)) {
 		return pos
@@ -812,17 +833,18 @@ key_equals :: #force_inline proc(doc: ^Document, i: u32, name: string) -> bool {
 		return false
 	}
 	n := doc.nodes[i]
-	// A key is a scalar, so a container is no key.
-	if n.kind > .Plain {
-		return false
-	}
 	if n.role != .Key {
-		if doc.header == 0 || i <= doc.header || i >= doc.header + doc.nodes[doc.header].n {
+		// A key is a scalar, so a container is no key. A header cell is a key node without the role.
+		if n.kind > .Plain || doc.header == 0 || i <= doc.header || i >= doc.header + doc.nodes[doc.header].n {
 			return false
 		}
 	}
 	if n.spelling & SPELLING_DECODE == 0 {
-		return bytes_equal(node_text(doc.src, n), transmute([]u8)name)
+		// A key node is a scalar, so its span lies inside the source. A header row's `n` is a node count, but
+		// `key_equals` rejects that container above.
+		#no_bounds_check {
+			return bytes_equal(doc.src[n.lo:n.lo + u64(n.n)], transmute([]u8)name)
+		}
 	}
 	return doc.spelling.key_equals(doc, i, name)
 }
@@ -875,16 +897,20 @@ bytes_equal :: #force_inline proc(a, b: []u8) -> bool {
 	}
 }
 
-// Returns the member value after `from` in `parent`, or false past the last. `from` is a child of `parent`. A
-// member's key is the node before its value, and `skip` steps over a key as it steps over a value.
-@(private)
-child_after :: #force_inline proc(doc: ^Document, parent, from: u32) -> (u32, bool) {
-	end := int(parent) + int(doc.nodes[parent].n)
-	j := int(from) + skip(doc, from)
+// Returns the member value after `child` in `parent`, or false past the last or when `parent` is no container.
+next_child :: #force_inline proc(doc: ^Document, parent, child: u32) -> (u32, bool) {
+	if int(parent) >= len(doc.nodes) {
+		return NO_NODE, false
+	}
+	n := doc.nodes[parent]
+	if n.kind != .Array && n.kind != .Map {
+		return NO_NODE, false
+	}
+	end := int(parent) + int(n.n)
+	j := int(child) + skip(doc, child)
 	// A `Map`'s member key is skipped, and so is the dsv header row a root holds first. The key-role `Array` is the
 	// header row itself, and it holds key cells, not key/value members, so it skips none.
-	p := doc.nodes[parent]
-	if (p.kind == .Map || p.role != .Key) && j < end && doc.nodes[j].role == .Key {
+	if (n.kind == .Map || n.role != .Key) && j < end && doc.nodes[j].role == .Key {
 		j += skip(doc, u32(j))
 	}
 	if j >= end {
@@ -897,18 +923,6 @@ child_after :: #force_inline proc(doc: ^Document, parent, from: u32) -> (u32, bo
 first_child :: #force_inline proc(doc: ^Document, i: u32) -> (u32, bool) {
 	it := children(doc, i)
 	return child_next(&it)
-}
-
-// Returns the member value after `child` in `parent`, or false past the last or when `parent` is no container.
-next_child :: #force_inline proc(doc: ^Document, parent, child: u32) -> (u32, bool) {
-	if int(parent) >= len(doc.nodes) {
-		return NO_NODE, false
-	}
-	n := doc.nodes[parent]
-	if n.kind != .Array && n.kind != .Map {
-		return NO_NODE, false
-	}
-	return child_after(doc, parent, child)
 }
 
 // Returns container `i`'s `k`th member value, counted from 0: for a `Map`, the value after its `k`th key, which is
@@ -946,8 +960,8 @@ child_at :: #force_inline proc(doc: ^Document, i: u32, k: int) -> (u32, bool) {
 	return child_at_walk(doc, i, k)
 }
 
-// `child_at` for a container whose members are not all one node, and for the `k` a saturated count leaves open.
-// Only those two cases call it.
+// Walks a container whose members are not all one node, and the `k` a saturated count leaves open. `child_at` calls it
+// only in those two cases.
 @(private, cold)
 child_at_walk :: #force_no_inline proc(doc: ^Document, i: u32, k: int) -> (u32, bool) {
 	it := children(doc, i)
@@ -960,8 +974,8 @@ child_at_walk :: #force_no_inline proc(doc: ^Document, i: u32, k: int) -> (u32, 
 	return v, ok
 }
 
-// A walk over one container's member values. `children` starts it and `child_next` returns the next value. For a
-// `Map`, a value's key is the node before it.
+// A `Child_Iter` walks one container's member values. `children` starts it and `child_next` returns the next value.
+// For a `Map`, a value's key is the node before it.
 Child_Iter :: struct {
 	doc:    ^Document,
 	parent: u32,
@@ -984,7 +998,7 @@ children :: proc(doc: ^Document, i: u32) -> Child_Iter {
 	it := Child_Iter{doc = doc, parent = i, end = int(i) + int(n.n), pairs = n.kind == .Map}
 	j := int(i) + 1
 	if n.kind == .Map {
-		// The first member's key, one node.
+		// The first member's key is one node.
 		j += 1
 	} else if n.role != .Key && j < it.end && doc.nodes[j].role == .Key {
 		// The dsv header row a root holds first. The key-role `Array` is that row, and it holds key cells, not
@@ -999,7 +1013,16 @@ children :: proc(doc: ^Document, i: u32) -> Child_Iter {
 	return it
 }
 
-// Inlined at every call: the step is a few loads, and a call would spill the iterator and re-read it per member.
+// Returns the step from `v` over a container's subtree, to the node after it. The call makes the kind test a
+// `b.eq` with the load of `n` in the taken block: inlined, LLVM computes the stride with `csinc` from a load of
+// `n` that the next member's address waits for.
+@(private)
+subtree_step :: #force_no_inline proc(v: int, n: u32) -> int {
+	return v + int(n)
+}
+
+// Returns the next value of a container and is inlined at every call, so a call does not spill the iterator and
+// re-read it per member.
 child_next :: #force_inline proc(it: ^Child_Iter) -> (u32, bool) {
 	if it.done {
 		return NO_NODE, false
@@ -1009,7 +1032,7 @@ child_next :: #force_inline proc(it: ^Child_Iter) -> (u32, bool) {
 	n := doc.nodes[v]
 	j := int(v) + 1
 	if n.kind == .Array || n.kind == .Map {
-		j = int(v) + int(n.n)
+		j = subtree_step(int(v), n.n)
 	}
 	if it.pairs {
 		j += 1
@@ -1026,8 +1049,7 @@ child_next :: #force_inline proc(it: ^Child_Iter) -> (u32, bool) {
 // reads as `.Last`, since the build refused repeats, and `.All` reads as `.First`, while `member_all` yields every
 // match. A headed dsv record's members are its cells, named by the header's cells.
 member :: #force_inline proc(doc: ^Document, obj: u32, name: string, dups := Duplicates.Last) -> (u32, bool) {
-	// A single loop handles both shapes: `member_next` is inlined, so an object's step stays in this frame's
-	// registers.
+	// A single loop handles both shapes: `member_next` is inlined, so an object's step uses this frame's registers.
 	it := member_all(doc, obj, name)
 	found := NO_NODE
 	for {
@@ -1042,7 +1064,7 @@ member :: #force_inline proc(doc: ^Document, obj: u32, name: string, dups := Dup
 	}
 }
 
-// A walk over every member of `obj` whose key decodes to `name`, in source order. A headed dsv record is an
+// A `Member_Iter` walks every member of `obj` whose key decodes to `name`, in source order. A headed dsv record is an
 // `Array`, and its members are its cells: column `i`'s key is header cell `i`, and a cell past the header's last
 // matches no key. A cell's node is its record's node plus one plus its column.
 Member_Iter :: struct {
@@ -1069,8 +1091,8 @@ member_all :: proc(doc: ^Document, obj: u32, name: string) -> Member_Iter {
 	return {doc = doc, at = int(obj) + 1, end = int(obj) + int(n.n), name = name, rec = NO_NODE}
 }
 
-// Inlined at `member`: the object step then needs no iterator load or store between members. A headed record
-// goes to `member_next_cell`.
+// Returns the next member and is inlined at `member`, so the object step needs no iterator load or store between
+// members. A headed record is passed to `member_next_cell`.
 member_next :: #force_inline proc(it: ^Member_Iter) -> (u32, bool) {
 	if it.rec != NO_NODE {
 		return member_next_cell(it)
@@ -1122,8 +1144,8 @@ text :: #force_inline proc(doc: ^Document, i: u32, buf: []u8, allocator := conte
 	return s, ok
 }
 
-// `text`, plus the allocation behind the text when it came from `allocator` rather than `src` or `buf`. A caller
-// frees `owned` with the same allocator. `owned` is nil for a borrowed text.
+// Returns `text`, plus the allocation behind the text when it came from `allocator` rather than `src` or `buf`. A
+// caller frees `owned` with the same allocator. `owned` is nil for a borrowed text.
 text_view :: #force_inline proc(doc: ^Document, i: u32, buf: []u8, allocator := context.allocator) -> (s: string, owned: []u8, ok: bool) {
 	if int(i) >= len(doc.nodes) {
 		return "", nil, false
@@ -1250,7 +1272,7 @@ all_facts :: #force_inline proc(doc: ^Document, i: u32) -> []Fact {
 	return doc.facts[lo:hi]
 }
 
-// A walk over the bodies of one node's facts of one role, in source order. `fact_next` returns one at a time.
+// A `Facts` walk reads the bodies of one node's facts of one role, in source order. `fact_next` returns one at a time.
 Facts :: struct {
 	doc:  ^Document,
 	at:   int,
@@ -1326,9 +1348,6 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^Document, open, end:
 	defer if heap != nil {
 		delete(heap, allocator)
 	}
-	for i in 0 ..< size {
-		table[i].used = false
-	}
 	mask := u64(size - 1)
 	for i := int(open) + 1; i < int(end); {
 		n := doc.nodes[i]
@@ -1376,8 +1395,8 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^Document, open, end:
 	return {}
 }
 
-// Whether key node `i`'s text equals `s`, both decoded as `text_view` reads them. The duplicate rule compares
-// decoded texts, not the bytes `key_equals` compares: a TSV cell's quotes are bytes of its text.
+// Returns whether key node `i`'s text equals `s`, both read through `text_view`: a CSV quoted cell's quotes are
+// markers, and a TSV cell's quote is a byte of its text.
 @(private)
 text_equals :: proc(doc: ^Document, i: u32, s: string, allocator: runtime.Allocator) -> (bool, bool) {
 	buf: [256]u8
@@ -1389,11 +1408,6 @@ text_equals :: proc(doc: ^Document, i: u32, s: string, allocator: runtime.Alloca
 		defer delete(owned, allocator)
 	}
 	return t == s, true
-}
-
-@(private)
-builder_refuse :: #force_inline proc "contextless" (h: ^Builder, open, end: u32) -> Document_Error {
-	return duplicate_key(&h.doc, open, end, h.doc.allocator)
 }
 
 @(private)

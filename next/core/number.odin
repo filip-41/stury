@@ -145,9 +145,9 @@ number_fraction :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_d
 	mant: u64
 	// Folds the significand as two runs from their ends: the integer run ends at the point and the fraction run at
 	// `hi`, each word masked to its run, so neither fold branches on the run's length.
-	if int_digits > 0 && frac_digits > 0 && int_digits + frac_digits <= 19 {
+	if int_digits > 0 && int_digits + frac_digits <= 19 {
 		point := hi - u64(frac_digits) - 1
-		if point > p && base[point] == '.' {
+		if base[point] == '.' {
 			whole := fold_digits_end(src, point, u64(int_digits))
 			frac := fold_digits_end(src, hi, u64(frac_digits))
 			sig := whole * POW10_U64[frac_digits] + frac
@@ -557,20 +557,7 @@ f64_of_lex :: #force_inline proc(src: []u8, lo, hi: u64, n: Number_Lex) -> (f64,
 	e := n.exp - i64(n.frac_digits)
 	neg := n.neg
 	if digits <= 19 {
-		if e == 0 {
-			v := f64(n.mant)
-			return (-v if neg else v), true
-		}
-		if digits <= 15 && e >= -22 && e <= 22 {
-			f := f64(n.mant)
-			v := f * POW10_F64[e] if e > 0 else f / POW10_F64[-e]
-			return (-v if neg else v), true
-		}
-		b := #force_inline strconv.fast_float_compute_float(f64, int(e), n.mant)
-		if b == F64_INF_BITS {
-			return 0, false
-		}
-		return transmute(f64)(b | u64(neg) << 63), true
+		return f64_of_significand(n.mant, e, neg, digits <= 15)
 	}
 	// A significand past the 19 digits a word holds, so the wide accumulator collects it, Eisel-Lemire brackets
 	// it, and `strconv.parse_f64` handles only the tokens the bracket leaves `.Undecided`.
@@ -628,12 +615,13 @@ el_settle :: proc(m: u64, q: i64, nz, neg: bool) -> (f64, El_Decode) {
 }
 
 // Computes `el_settle`'s facts for a token whose significand does not fit the 19 digits in `mant`. The fraction's
-// leading zeros are skipped only when the integer part starts with `0`.
+// leading zeros are skipped only when the integer part is the single digit `0`, so a multi-digit run keeps every
+// digit, leading zero included.
 @(private)
 dom_acc_wide :: proc(src: []u8, n: Number_Lex, out: ^EL_Facts) {
 	#no_bounds_check {
 		sig_int := n.int_digits
-		if sig_int > 0 && src[n.int_at] == '0' {
+		if sig_int == 1 && src[n.int_at] == '0' {
 			sig_int = 0
 		}
 		fold_int := min(sig_int, u64(EL_MAX_DIGITS))

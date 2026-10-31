@@ -67,27 +67,6 @@ number_spelling_exp :: #force_no_inline proc "contextless" (kind: Number_Spellin
 	return number_spelling(kind, int_digits, frac_digits) | NUMBER_EXP
 }
 
-// `number_spelling` packs these fields into a number token's `spelling`, and the reader and its test read them back.
-@(private)
-Number_Shape :: struct {
-	kind:        Number_Spelling,
-	int_digits:  int,
-	frac_digits: int,
-	pure:        bool,
-	has_exp:     bool,
-}
-
-@(private)
-number_shape :: #force_inline proc "contextless" (spelling: u16) -> Number_Shape {
-	return {
-		kind = number_spelling_of(spelling),
-		int_digits = int((spelling >> NUMBER_INT_SHIFT) & 0x1f),
-		frac_digits = int((spelling >> NUMBER_FRAC_SHIFT) & 0x1f),
-		pure = spelling & (NUMBER_FRAC_MASK | NUMBER_EXP) == 0,
-		has_exp = spelling & NUMBER_EXP != 0,
-	}
-}
-
 // Calls `number5` with `$shape` true for a hook and false for `core.No_Hooks`.
 @(private)
 number5_h :: #force_inline proc "contextless" (p, end: [^]u8, $H: typeid) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind) {

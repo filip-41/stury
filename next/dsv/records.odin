@@ -59,8 +59,8 @@ record_width :: #force_inline proc "contextless" (w: ^Pass($S, $H), cells: int, 
 }
 
 // Emits a column's header cell as the `Key` token its cell names it by, and returns the hook's action with the token's
-// span. A `Stop` ends the walk. A cell past the header's last makes no token, since its record is wider than the header
-// and faults at the delimiter past the width. A cell with no key traps rather than dropping the cell and its value.
+// span. A `Stop` ends the walk. The width check refuses a record wider than the header before this runs, so `cells` is
+// below `len(keys)` and a cell with no key is `unreachable`, not a dropped cell.
 @(private)
 put_key :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, keys: []core.Token, cells: int) -> (a: core.Action, lo: u64, n: u32) {
 	if cells < 0 || cells >= len(keys) {
@@ -170,10 +170,11 @@ put_cell :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h
 	return put_value(h, on, hs, base, field_lo, hi, esc, lax, S)
 }
 
-// Emits the first `width` cells of a record wider than `width`, for a text with a header, then returns the fault at the
-// delimiter that opens cell `width`. A record of the right width never reaches it.
+// Emits the first `width` cells of a record wider than `width`, then returns the fault at the delimiter that opens cell
+// `width`. Such a record does not reach the returning caller. With `$KEYS` set the record is headed, so each cell has a
+// `Key` before it, else each cell is a `Plain` value. A caller with no header passes `keys` nil.
 @(private, cold)
-read_wide_keys :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, cells, field_lo, width: int, bs: u64, carry, lax: bool, $S: Spec) -> u64 {
+read_wide :: #force_no_inline proc "contextless" ($KEYS: bool, h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, cells, field_lo, width: int, bs: u64, carry, lax: bool, $S: Spec) -> u64 {
 	cells, field_lo := cells, field_lo
 	dm := d
 	for dm != 0 {
@@ -184,37 +185,17 @@ read_wide_keys :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "contex
 		when S == .Tsv {
 			esc = span_esc(bs, pos, field_lo, at, carry)
 		}
-		// `cells` is the cell's own count and its column's index.
-		if k, klo, kn := put_key_n(h, on, hs, keys, cells); k == .Stop {
-			return stopped(klo, kn)
-		} else if k == .Next {
-			if a, lo, n := put_value(h, on, hs, base, field_lo, at, esc, lax, S); a == .Stop {
-				return stopped(lo, n)
+		if KEYS {
+			// `cells` is the cell's own count and its column's index.
+			k, klo, kn := put_key_n(h, on, hs, keys, cells)
+			if k == .Stop {
+				return stopped(klo, kn)
+			} else if k == .Next {
+				if a, lo, n := put_value(h, on, hs, base, field_lo, at, esc, lax, S); a == .Stop {
+					return stopped(lo, n)
+				}
 			}
-		}
-		field_lo = at + 1
-		cells += 1
-		if cells == width {
-			return core.fault_at(u64(at), .Bad_Structure, u8(Detail.Field_Count))
-		}
-	}
-	unreachable()
-}
-
-// `read_wide_keys` for a text with no header, where every cell is a `Plain` value.
-@(private, cold)
-read_wide_values :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, pos: int, d: u64, cells, field_lo, width: int, bs: u64, carry, lax: bool, $S: Spec) -> u64 {
-	cells, field_lo := cells, field_lo
-	dm := d
-	for dm != 0 {
-		kk := intrinsics.count_trailing_zeros(dm)
-		at := pos + int(kk)
-		dm &= dm - 1
-		esc := false
-		when S == .Tsv {
-			esc = span_esc(bs, pos, field_lo, at, carry)
-		}
-		if a, lo, n := put_value(h, on, hs, base, field_lo, at, esc, lax, S); a == .Stop {
+		} else if a, lo, n := put_value(h, on, hs, base, field_lo, at, esc, lax, S); a == .Stop {
 			return stopped(lo, n)
 		}
 		field_lo = at + 1
@@ -350,7 +331,7 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 		} else if no_header {
 			// No header, so every cell is a `Plain` value and no key is emitted.
 			if width != 0 && .Ragged not_in w.tolerate && cells + int(intrinsics.count_ones(d)) >= width {
-				return read_wide_values(h, on, hs, base, pos, d, cells, field_lo, width, bs, carry, lax, S), true
+				return read_wide(false, h, on, hs, base, nil, pos, d, cells, field_lo, width, bs, carry, lax, S), true
 			}
 			rr: u64
 			dd: bool
@@ -363,7 +344,7 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 				return rr, true
 			}
 		} else if cells + int(intrinsics.count_ones(d)) >= width {
-			return read_wide_keys(h, on, hs, base, keys, pos, d, cells, field_lo, width, bs, carry, lax, S), true
+			return read_wide(true, h, on, hs, base, keys, pos, d, cells, field_lo, width, bs, carry, lax, S), true
 		} else {
 			// A data record's run of cells, each after its column's key. The cell's own count is the key's index, and
 			// the run advances that count only.

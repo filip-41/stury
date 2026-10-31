@@ -113,8 +113,7 @@ locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (
 
 @(private)
 write_position :: proc(w: io.Writer, src: []u8, at: u64, lines: ^Lines) -> io.Error {
-	fresh: Lines
-	line, col := locate(src, at, lines if lines != nil else &fresh)
+	line, col := locate(src, at, lines)
 	io.write_u64(w, line) or_return
 	io.write_byte(w, ':') or_return
 	io.write_u64(w, col) or_return

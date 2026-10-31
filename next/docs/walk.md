@@ -130,13 +130,12 @@ same walk parses the recorded text and it reads as its document does. A cell tha
 cells unless the spec quotes it (Csv and Tsv can, Plain cannot), and a cell or record that starts a line with the
 comment byte is no record. Both are refused. `remove` takes a value that is a member of a container, with its key.
 
-`core.Edit_Spelling`, which `Spelling.edit` points at as its cold field, supplies `value`, `key` and `record` to judge
+`core.Edit_Spelling`, which `Spelling.edit` points at, supplies `value`, `key` and `record` to judge
 a recorded text, `reads` to read a text with or without the format's tolerance set, the member and key separators,
 and the line end a record insert writes, taken from the text. A table's cell separator is the document's `delimiter`,
 so a read of `;` writes `;`. A document whose edit table has a `record` service holds a table's records and cells, and
-every other document holds values. `Document.spec` names the spec an edit's text is judged by, so a table serves
-several specs of a format when only the edit services differ. A format whose readings differ in what they accept as
-an edit has a table per spec, and dsv's Plain uses the services of Csv and Tsv.
+every other document holds values. `Document.spec` names the spec an edit's text is judged by. dsv's three specs share
+one edit table, and each service reads the document's spec and dialect.
 
 A commit sorts the edits by source position, resolving an insert's position against the document the list was made
 from, so a commit takes O(text) time. It cuts a removed member with the comments attached to it and one separator, the
@@ -149,6 +148,11 @@ as do an edit inside what another replaces or an insert whose byte a removal's r
 record the table cannot follow is refused. A committed text is checked once, in core: it must read strictly, then
 within the format's tolerance set, and only a text that needs a tolerance the source also needed is accepted. A text
 that fails even the tolerant read is not committed. Reading after edits is `commit` then `build`.
+
+A fact edit names a node and a role, and a set also a body. `set_fact` and `remove_fact` change every fact of that node
+and role. A commit writes a set body where the role reads it, and counts a fact that a set drops because the output
+cannot hold or spell it. A fact no edit names keeps its bytes in place, unless a set or a removal writes over them, and
+its node and role after the commit follow the comments around it and are not preserved.
 
 ### Tokens
 
@@ -164,8 +168,9 @@ header cell that names a dsv cell's column, and past `Key` a fact: a comment, `P
 or `Comment_Foot`. A consumer that wants values only tests `role <= .Key`. `spelling` is a detail the format writes
 and core reads through three bits: bit 0 says `text` must be decoded, bit 1 says the token is quoted (a JSON string,
 whose token span leaves its quotes out, or a quoted dsv cell, whose span holds them), and bit 2 says a JSON string
-holds a tolerated ill-formed UTF-8 sequence. The other bits are the format's own. A token longer than `n` can hold is
-the fault `Too_Wide`, so a span is not cut.
+holds a tolerated ill-formed UTF-8 sequence. For a comment token, the low byte of `spelling` holds the lead marker's
+length and the next byte the tail's. The other bits are the format's own. A token longer than `n` can hold is
+the fault `Too_Wide`.
 
 ### Hooks
 
@@ -328,7 +333,7 @@ is `Bad_Char` with `Colon`.
 A run of open brackets is pushed in `st_open_run`, and a run of close brackets is popped in `st_close`. `st_close`
 keeps the depth apart from the kind bit, so the next close does not wait on the stack load.
 
-A number hands over to `st_after_number`, which is `st_after` with two more ways out. In an array, when the element
+A number continues in `st_after_number`, which is `st_after` with two more ways out. In an array, when the element
 after the comma starts a number, the walk enters `st_number_run`, which reads number elements separated by a comma and
 at most one space in a loop. In an object, the next member enters `st_member_run`, which reads members with a short
 key, a colon in a fast-path spelling and a number value in a loop. Either run passes anything else to the states that
@@ -353,15 +358,16 @@ state already refuses a byte or leaves its fast path: `st_value` on a byte of cl
 not a quote, `st_colon` on a colon fault, and the separator states where a comment follows a value or its comma. In
 `Json` every `when` is false, and its instance holds no code of the other specs.
 
-A `/` in one of those places hands over to a state in `comments.odin`, which reads the whole run of whitespace and
+A `/` in one of those places passes to a state in `comments.odin`, which reads the whole run of whitespace and
 comments up to the next token before passing any of it to the hook, because what follows the run decides each
 comment's role. The rule is `core.Role`'s and is the same in every format:
 
 - a comment on the line where the value before it ends is that value's `Comment_Inline`,
 - else, before a value, that value's `Comment`,
-- else, before a close bracket, the `Comment_Foot` of the value before it, or of the container when it is empty.
+- else the `Comment_Foot` of the innermost open container, or of the root at depth 0.
 
-A foot comes after its value's `End`, so an empty container's foot comes before its own `End`, which places it inside.
+A foot is written after the container's last value and before the container's `End`, so a foot in an empty container is
+written before that container's `End`.
 
 The state that reads a comment after a value receives the value's end, so a separator state sends a comma followed by
 a comment there rather than to the next member. After a document's root, comments past the root's line are its foot
@@ -384,7 +390,7 @@ with `Walk.crossed` for a comma read before it, so the run is not scanned twice.
 ### JSON5
 
 `Json5` adds `.Es5` to JSONC's features: JSON5 1.0.0's numbers, strings, unquoted keys and whitespace (`json5.odin`).
-A token that JSON spells the same way is read by JSON's own leaf. A state hands over to JSON5's readers only where
+A token that JSON spells the same way is read by JSON's own leaf. A state passes to JSON5's readers only where
 that leaf refuses or no JSON construct starts:
 
 - `st_value` on `'`, `+`, `.`, `I` or `N`, and where JSON's number reader refuses or stops before an `x`, which the

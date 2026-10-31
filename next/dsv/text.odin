@@ -66,11 +66,14 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 	s := Record_Scan{cells = 1, fault_at = -1}
 	i := start
 	end := len(src)
-	when S == .Csv {
-		quoted := false
-		first := true
-		for i < end {
-			c := src[i]
+	quoted, first := false, true
+	when S != .Csv {
+		// The quoted-field state is CSV's, and this build has no use for it.
+		_, _ = quoted, first
+	}
+	for i < end {
+		c := src[i]
+		when S == .Csv {
 			if quoted {
 				if c == '"' {
 					if i + 1 < end && src[i + 1] == '"' {
@@ -82,78 +85,48 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 				i += 1
 				continue
 			}
-			switch c {
-			case '\n':
-				hi := i
-				if i > start && src[i - 1] == '\r' {
-					hi = i - 1
-				}
-				if ends != nil && s.cells - 1 < len(ends) {
-					ends[s.cells - 1] = hi
-				}
-				s.line_end, s.line_end_lo = i, hi
-				return s
-			case '\r':
-				if i + 1 < end && src[i + 1] == '\n' {
-					if ends != nil && s.cells - 1 < len(ends) {
-						ends[s.cells - 1] = i
-					}
-					s.line_end, s.line_end_lo = i + 1, i
-					return s
-				}
-			case delim:
+		}
+		when S == .Tsv {
+			if c == '\\' {
+				i += 2
+				continue
+			}
+		}
+		switch c {
+		case '\n':
+			hi := i
+			if i > start && src[i - 1] == '\r' {
+				hi = i - 1
+			}
+			if ends != nil && s.cells - 1 < len(ends) {
+				ends[s.cells - 1] = hi
+			}
+			s.line_end, s.line_end_lo = i, hi
+			return s
+		case '\r':
+			if i + 1 < end && src[i + 1] == '\n' {
 				if ends != nil && s.cells - 1 < len(ends) {
 					ends[s.cells - 1] = i
 				}
-				if s.cells == width && s.fault_at < 0 {
-					s.fault_at = i
-				}
-				s.cells += 1
-			case '"':
+				s.line_end, s.line_end_lo = i + 1, i
+				return s
+			}
+		case delim:
+			if ends != nil && s.cells - 1 < len(ends) {
+				ends[s.cells - 1] = i
+			}
+			if s.cells == width && s.fault_at < 0 {
+				s.fault_at = i
+			}
+			s.cells += 1
+		}
+		when S == .Csv {
+			if c == '"' {
 				quoted = first
 			}
 			first = c == delim
-			i += 1
 		}
-	} else {
-		for i < end {
-			c := src[i]
-			when S == .Tsv {
-				if c == '\\' {
-					i += 2
-					continue
-				}
-			}
-			switch c {
-			case '\n':
-				hi := i
-				if i > start && src[i - 1] == '\r' {
-					hi = i - 1
-				}
-				if ends != nil && s.cells - 1 < len(ends) {
-					ends[s.cells - 1] = hi
-				}
-				s.line_end, s.line_end_lo = i, hi
-				return s
-			case '\r':
-				if i + 1 < end && src[i + 1] == '\n' {
-					if ends != nil && s.cells - 1 < len(ends) {
-						ends[s.cells - 1] = i
-					}
-					s.line_end, s.line_end_lo = i + 1, i
-					return s
-				}
-			case delim:
-				if ends != nil && s.cells - 1 < len(ends) {
-					ends[s.cells - 1] = i
-				}
-				if s.cells == width && s.fault_at < 0 {
-					s.fault_at = i
-				}
-				s.cells += 1
-			}
-			i += 1
-		}
+		i += 1
 	}
 	if ends != nil && s.cells - 1 < len(ends) {
 		ends[s.cells - 1] = end

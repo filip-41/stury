@@ -421,21 +421,21 @@ edit_dialect :: proc(t: ^testing.T) {
 edit_beside_comment :: proc(t: ^testing.T) {
 	opts := dsv.Options{comment = '#', no_header = true}
 	// A comment line above the removed record stays.
-	check(t, "#c\na,b\n1,2\n", "#c\n1,2\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
+	check(t, "#c\na,b\n1,2\n", "1,2\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 1)
 	})
 	// A comment line between records stays when either record is removed.
 	check(t, "a,b\n#c\n1,2\n", "#c\n1,2\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 1)
 	})
-	check(t, "a,b\n#c\n1,2\n", "a,b\n#c\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
+	check(t, "a,b\n#c\n1,2\n", "a,b\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 4)
 	})
 	// A comment line below the removed record stays, with its line end.
 	check(t, "a,b\n#c\n", "#c\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 1)
 	})
-	check(t, "#c\r\na\tb\r\n", "#c\r\n", .Tsv, dsv.Options{comment = '#', no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
+	check(t, "#c\r\na\tb\r\n", "", .Tsv, dsv.Options{comment = '#', no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 1)
 	})
 	// A record inserted before a record that a comment line introduces is written before the comment, so the comment
@@ -499,4 +499,79 @@ edit_record_sep_crlf :: proc(t: ^testing.T) {
 	check(t, "a,b\r\n", "a,b\r\nv,v\r\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, core.ROOT, 0, transmute([]u8)string("v,v"))
 	})
+}
+
+// A set or insert inside a record the same list removes is refused, including a cell of no bytes at the record's first
+// byte. The removal takes the written bytes, so the edit cannot read back.
+@(test)
+edit_edit_inside_removed_record :: proc(t: ^testing.T) {
+	{
+		// The first cell is empty, so its set writes no bytes at the record's first byte.
+		doc, err := dsv.build(transmute([]u8)string("|1\n"), .Plain, dsv.Options{no_header = true, delimiter = '|'})
+		defer core.destroy(&doc)
+		if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+			return
+		}
+		list := core.edit_list_init(&doc)
+		defer core.edit_list_destroy(&list)
+		testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.set(&list, 2, transmute([]u8)string("x")).kind, core.Document_Error_Kind.None)
+		out, _, cerr := core.commit(&list)
+		if len(out) > 0 {
+			delete(out)
+		}
+		testing.expectf(t, cerr.kind == .Conflicting_Edits, "set: commit %v", cerr)
+	}
+	{
+		// The record is the table's only one, so it may take a cell.
+		doc, err := dsv.build(transmute([]u8)string("1\n"), .Plain, dsv.Options{no_header = true})
+		defer core.destroy(&doc)
+		if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+			return
+		}
+		list := core.edit_list_init(&doc)
+		defer core.edit_list_destroy(&list)
+		testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.insert(&list, 1, 0, transmute([]u8)string("x")).kind, core.Document_Error_Kind.None)
+		out, _, cerr := core.commit(&list)
+		if len(out) > 0 {
+			delete(out)
+		}
+		testing.expectf(t, cerr.kind == .Conflicting_Edits, "insert: commit %v", cerr)
+	}
+}
+
+// Two records inserted at the ends of one run of removed records keep their `at` order in the output.
+@(test)
+edit_inserts_at_removed_run_end :: proc(t: ^testing.T) {
+	check(t, "h\n1\n2\n", "h\nA\nB\n2\n", .Plain, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.insert(list, core.ROOT, 1, transmute([]u8)string("B")); e.kind != .None {
+			return e
+		}
+		if e := core.insert(list, core.ROOT, 0, transmute([]u8)string("A")); e.kind != .None {
+			return e
+		}
+		return core.remove(list, 3)
+	})
+}
+
+// A record appended after the last record is removed ends with a line end. The root's foot comment then keeps a line
+// of its own and reads back on the root.
+@(test)
+edit_append_after_removed_last :: proc(t: ^testing.T) {
+	opts := dsv.Options{comment = '#'}
+	check(t, "h\n1\n#f\n", "h\nA\n#f\n", .Plain, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.insert(list, core.ROOT, 1, transmute([]u8)string("A")); e.kind != .None {
+			return e
+		}
+		return core.remove(list, 3)
+	})
+	doc, err := dsv.build(transmute([]u8)string("h\nA\n#f\n"), .Plain, opts)
+	defer core.destroy(&doc)
+	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+		return
+	}
+	it := core.facts_of(&doc, core.ROOT, .Comment_Foot)
+	b, ok := core.fact_next(&it)
+	testing.expectf(t, ok && string(b) == "f", "foot: %q %v", b, ok)
 }

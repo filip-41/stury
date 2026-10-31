@@ -1,5 +1,6 @@
 package dsv_tests
 
+import "base:runtime"
 import "core:math/rand"
 import "core:mem"
 import "core:strings"
@@ -266,6 +267,50 @@ duplicates :: proc(t: ^testing.T) {
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 4)
 	testing.expect_value(t, len(doc.nodes), 0)
+}
+
+// A repeat in a complete header row is reported when a later record faults. The header cells are still the walk's
+// tokens, since no document is built.
+@(test)
+refuse_header_before_fault :: proc(t: ^testing.T) {
+	doc, err := build("a,a\n1,2\n3,\"x\n", .Csv, {}, .Refuse)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, err.at, 2)
+	testing.expect_value(t, len(doc.nodes), 0)
+
+	// Both header cells are empty, so the repeat is at the second cell's byte.
+	doc, err = build(",\n1,2\n3,\"x\n", .Csv, {}, .Refuse)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, err.at, 1)
+	testing.expect_value(t, len(doc.nodes), 0)
+}
+
+// A header repeat found before a later fault carries `.No_Memory` when `duplicate_key` cannot allocate its key table.
+@(test)
+refuse_fault_header_oom :: proc(t: ^testing.T) {
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	for i in 0 ..< 33 {
+		if i > 0 {
+			strings.write_byte(&b, ',')
+		}
+		c := 'a' + u8(i) if i < 26 else 'A' + u8(i - 26)
+		if i == 32 {
+			c = 'a'
+		}
+		strings.write_byte(&b, c)
+	}
+	// The first cell `a` repeats as the 33rd cell, and the unterminated quote in the only record faults.
+	strings.write_string(&b, "\n\"x")
+	// Allocations 0 and 1 are the node array and the open stack, 2 the header's token buffer, and 3 the key table
+	// that 33 cells need.
+	f: Failing_Alloc
+	f.inner = context.allocator
+	f.fail_at = 3
+	alloc := runtime.Allocator{procedure = failing_alloc_proc, data = &f}
+	doc, err := dsv.build(transmute([]u8)strings.to_string(b), .Csv, {}, .Refuse, alloc)
+	testing.expectf(t, err.kind == core.Document_Error_Kind.No_Memory, "fail_at 3: %v at %d", err.kind, err.at)
+	core.destroy(&doc)
 }
 
 // A record of the wrong width fails the build with `.Walk` and a `Bad_Structure` fault in `inner`.

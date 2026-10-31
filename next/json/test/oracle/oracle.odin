@@ -8,6 +8,8 @@ import "base:runtime"
 import "core:fmt"
 import "core:math/rand"
 import "core:testing"
+import "core:unicode"
+import "core:unicode/utf8"
 import cur "stury:json"
 import core "../../../core"
 import walktest "../../../walktest"
@@ -105,6 +107,7 @@ Part :: enum {
 	Escape, // a bad escape is refused at the byte that breaks it, the current tree at its backslash
 	Key, // an unquoted key the text cuts short is `Truncated`, and a byte that starts no key has `Detail.Identifier`
 	Word, // `Infinity` or `NaN` broken is `Bad_Number` at the byte that breaks it, the current tree at a bad literal
+	Letter_Number, // the current tree stops an unquoted key at an Nl that `unicode.is_letter` lacks
 }
 
 // Returns the `Part` that explains the walk's fault `got` against the current tree's `want`, or `.None`.
@@ -125,7 +128,93 @@ json5_parts :: proc(src: []u8, got: core.Fault, want: cur.Error) -> Part {
 	if got.kind == .Bad_Number && want.kind == .Bad_Char && want.detail == u8(json.Detail.Literal) && (src[want.offset] == 'I' || src[want.offset] == 'N') {
 		return .Word
 	}
+	// ES5's IdentifierStart holds the letter numbers (Nl) and `unicode.is_letter` lacks most of them. The current
+	// tree stops the key at the run's first Nl and faults there. The walk reads through the run and faults at the
+	// byte that ends it.
+	if got.kind == .Bad_Char && want.kind == .Bad_Char && want.offset < got.at && letter_number_run(src, want.offset, got.at) && !identifier_at(src, got.at) {
+		return .Letter_Number
+	}
 	return .None
+}
+
+// Whether `src[lo:hi]` is a run of unquoted-key characters whose first character is a letter number (Nl).
+letter_number_run :: proc(src: []u8, lo, hi: u64) -> bool {
+	if lo >= hi || hi > u64(len(src)) {
+		return false
+	}
+	first := true
+	for i := lo; i < hi; {
+		r, size := utf8.decode_rune(src[i:hi])
+		if size <= 0 || r == utf8.RUNE_ERROR {
+			return false
+		}
+		if first {
+			if !unicode.in_range(r, unicode.nl_ranges) {
+				return false
+			}
+			first = false
+		} else if !identifier_continues(r) {
+			return false
+		}
+		i += u64(size)
+	}
+	return !first
+}
+
+// Whether `src` continues with a character that may follow an unquoted key's first character.
+identifier_at :: proc(src: []u8, i: u64) -> bool {
+	if i >= u64(len(src)) {
+		return false
+	}
+	r, size := utf8.decode_rune(src[i:])
+	return size > 0 && r != utf8.RUNE_ERROR && identifier_continues(r)
+}
+
+// Whether `r` may follow an unquoted key's first character, as the walk's `ident_char` allows.
+identifier_continues :: proc(r: rune) -> bool {
+	if r == '$' || r == '_' || unicode.is_letter(r) || unicode.in_range(r, unicode.nl_ranges) {
+		return true
+	}
+	if r == 0x200c || r == 0x200d {
+		return true
+	}
+	return unicode.in_range(r, unicode.mn_ranges) || unicode.in_range(r, unicode.mc_ranges) || unicode.in_range(r, unicode.nd_ranges) || unicode.in_range(r, unicode.pc_ranges)
+}
+
+// The Nl part covers a position difference only inside an unquoted key's run of Nl-led characters. Any other
+// difference of offset keeps the fault.
+@(test)
+letter_number_part_is_narrow :: proc(t: ^testing.T) {
+	// Bytes 27 to 29 are U+3028 and byte 30 is the stray 0x80.
+	src := transmute([]u8)string("{\t//*//\r\n/* é\n\U0001F600*/\u02B0\u4E2D0\u3028\x80://\"\"\t//\r\n-40759966\u3000\r}")
+	got, got_bad := json.validate(src, .Json5).?
+	want, want_bad := cur.validate(src, {dialect = .Json5}).?
+	if !testing.expect(t, got_bad && want_bad && got.kind == .Bad_Char && want.kind == .Bad_Char) {
+		return
+	}
+	testing.expect_value(t, want.offset, u64(27))
+	testing.expect_value(t, got.at, u64(30))
+	testing.expect_value(t, json5_parts(src, got, want), Part.Letter_Number)
+	// A fault inside the Nl's bytes is not a run.
+	testing.expect_value(t, json5_parts(src, got, cur.Error{offset = 28, kind = .Bad_Char}), Part.None)
+	// A difference at a byte that is no letter number keeps the fault.
+	stray := transmute([]u8)string("{aX\x80:1}")
+	sgot, sbad := json.validate(stray, .Json5).?
+	if testing.expect(t, sbad && sgot.at == 3) {
+		testing.expect_value(t, json5_parts(stray, sgot, cur.Error{offset = 2, kind = .Bad_Char}), Part.None)
+	}
+	// A run of an Nl and a digit continues after it before the stray byte.
+	run := transmute([]u8)string("{a\u30280\x80:1}")
+	rgot, rbad := json.validate(run, .Json5).?
+	if testing.expect(t, rbad && rgot.at == 6) {
+		testing.expect_value(t, json5_parts(run, rgot, cur.Error{offset = 2, kind = .Bad_Char}), Part.Letter_Number)
+	}
+	// A key that ends at the Nl still parts at the byte the walk cannot accept.
+	quote := transmute([]u8)string("{a\u3028\"b\":")
+	qgot, qbad := json.validate(quote, .Json5).?
+	if testing.expect(t, qbad && qgot.at == 5) {
+		testing.expect_value(t, json5_parts(quote, qgot, cur.Error{offset = 2, kind = .Bad_Char}), Part.Letter_Number)
+	}
 }
 
 // Returns true if a comment holds a control byte other than tab, LF or CR, or a `//` comment ends at U+2028 or

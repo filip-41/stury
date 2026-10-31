@@ -84,6 +84,7 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.La
 	b.doc.spec = u8(S)
 	b.doc.delimiter = delimiter_of(S, opts)
 	b.doc.comment = opts.comment
+	b.doc.no_header = opts.no_header
 	if len(b.doc.nodes) == 0 {
 		// The reservation was refused and the node array is nil, so no hook may run.
 		doc, err := core.builder_end(&b, core.BUILDER_REGS, nil)
@@ -132,23 +133,43 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, dups := core.Duplicates.La
 	} else {
 		_, fault = walk(src, 0, S, opts, &b, &regs, core.builder_hook_keyless, keys)
 	}
+	if count > 0 {
+		// The header's cells go into the slots the root's token steps over, before the builder shrinks the node array.
+		copy(b.doc.nodes[2:2 + count], keys)
+	}
+	if dups == .Refuse && count > 0 {
+		// A fault inside the header row leaves some slots zero, whose kind is not `Plain`. Check a complete row, and
+		// merge the result as the builder's close path does: the earliest repeat wins and a refused allocation
+		// replaces no earlier error.
+		filled := true
+		if _, bad := fault.?; bad {
+			for i in 0 ..< count {
+				if keys[i].kind != .Plain {
+					filled = false
+					break
+				}
+			}
+		}
+		if filled {
+			if e := core.duplicate_key(&b.doc, 1, u32(count + 2), allocator, true); e.kind != .None {
+				switch {
+				case e.kind == .Duplicate_Key:
+					if b.err.kind != .Duplicate_Key || e.at < b.err.at {
+						b.err = e
+					}
+				case b.err.kind == .None:
+					b.err = e
+				}
+			}
+		}
+	}
 	doc, err := core.builder_end(&b, regs, fault)
 	if err.kind != .None {
 		return doc, err
 	}
-	if count > 0 {
-		copy(doc.nodes[2:2 + count], keys)
-	}
 	// The header row is the root's first child, an `Array` of role `Key`. A text without one has no such node.
 	if i := int(core.ROOT) + 1; i < len(doc.nodes) && doc.nodes[i].kind == .Array && doc.nodes[i].role == .Key {
 		doc.header = u32(i)
-	}
-	if dups == .Refuse && doc.header != 0 {
-		h := doc.nodes[doc.header]
-		if e := core.duplicate_key(&doc, doc.header, doc.header + h.n, allocator, true); e.kind != .None {
-			core.destroy(&doc)
-			return {}, e
-		}
 	}
 	return doc, err
 }
@@ -310,16 +331,7 @@ spelling_key_equals :: proc(doc: ^core.Document, i: u32, name: string, $S: Spec)
 	n := doc.nodes[i]
 	when S != .Tsv {
 		if dsv_plain(doc.src, n, S) {
-			b := doc.src[n.lo:n.lo + u64(n.n)]
-			if len(b) != len(name) {
-				return false
-			}
-			#no_bounds_check for k in 0 ..< len(b) {
-				if b[k] != name[k] {
-					return false
-				}
-			}
-			return true
+			return core.bytes_equal(doc.src[n.lo:n.lo + u64(n.n)], transmute([]u8)name)
 		}
 	}
 	d := dsv_decoded_init(doc.src, n, S)
@@ -439,22 +451,16 @@ shape_hook :: proc "contextless" (h: ^Text_Shape, s: core.Hook_Regs, t: core.Tok
 	return s, .Next
 }
 
-// The options an edit's text is judged with, `no_header` and the document's delimiter and comment byte. A recorded text
-// that holds the delimiter outside quotes reads as two cells and is refused, and so is one that starts a line with the
-// comment byte, which the walk reads as no record. A CSV or TSV cell holding the delimiter must be quoted or escaped by
-// the caller. Plain has no quote, so its cells cannot hold the delimiter at all.
-@(private)
-edit_options :: #force_inline proc(doc: ^core.Document) -> Options {
-	return {no_header = true, delimiter = doc.delimiter, comment = doc.comment}
-}
-
 // Checks that an edit's text is a record of at least one cell, with its record at the text's start and its last cell
-// ending at the text's end, so the text writes no line end of its own. Returns its cell count.
+// ending at the text's end, so the text writes no line end of its own. A recorded text that holds the delimiter outside
+// quotes reads as two cells and is refused, and so is one that starts a line with the comment byte, which the walk reads
+// as no record. A CSV or TSV cell holding the delimiter must be quoted or escaped by the caller. Plain has no quote, so
+// its cells cannot hold the delimiter at all. Returns the cell count.
 @(private)
 edit_record :: proc(doc: ^core.Document, src: []u8, _: runtime.Allocator, $S: Spec) -> (cells: int, err: core.Document_Error) {
 	h: Text_Shape
 	regs: core.Hook_Regs
-	_, fault := walk(src, 0, S, edit_options(doc), &h, &regs, shape_hook)
+	_, fault := walk(src, 0, S, {no_header = true, delimiter = doc.delimiter, comment = doc.comment}, &h, &regs, shape_hook)
 	if f, bad := fault.?; bad {
 		return 0, {kind = .Bad_Value, inner = f}
 	}
@@ -468,9 +474,18 @@ edit_record :: proc(doc: ^core.Document, src: []u8, _: runtime.Allocator, $S: Sp
 // tolerantly. A delimited text can write only its own dialect, so `spec` must be the document's.
 @(private)
 edit_reads :: proc(doc: ^core.Document, src: []u8, tolerate: bool, _: u8, $S: Spec) -> (core.Fault, bool) {
-	t: bit_set[Tolerance; u8]
-	if tolerate { t = {.Invalid_Utf8, .Ragged, .Bare_Quote} }
-	return validate(src, S, {delimiter = doc.delimiter, comment = doc.comment, tolerate = t}).?
+	t := core.tolerances(tolerate, bit_set[Tolerance; u8]{.Invalid_Utf8, .Ragged, .Bare_Quote})
+	return validate(src, S, {no_header = doc.no_header, delimiter = doc.delimiter, comment = doc.comment, tolerate = t}).?
+}
+
+// Returns the line end record `i` ends with, or an empty string when it has none.
+@(private)
+record_line_end :: proc(doc: ^core.Document, i: u32) -> string {
+	p := record_end(doc, i)
+	if p == 0 || doc.src[p-1] != '\n' {
+		return ""
+	}
+	return "\r\n" if p >= 2 && doc.src[p-2] == '\r' else "\n"
 }
 
 // The line end a record insert writes. It is the first line end a record has, else its header's, else LF.
@@ -482,13 +497,13 @@ edit_record_sep :: proc(doc: ^core.Document) -> string {
 		if !ok {
 			break
 		}
-		if s := core.span(doc, rec); len(s) >= 2 && s[len(s) - 1] == '\n' {
-			return "\r\n" if s[len(s) - 2] == '\r' else "\n"
+		if e := record_line_end(doc, rec); e != "" {
+			return e
 		}
 	}
 	if doc.header != 0 {
-		if s := core.span(doc, doc.header); len(s) >= 2 && s[len(s) - 1] == '\n' {
-			return "\r\n" if s[len(s) - 2] == '\r' else "\n"
+		if e := record_line_end(doc, doc.header); e != "" {
+			return e
 		}
 	}
 	return "\n"
@@ -524,13 +539,10 @@ edit_comment :: proc(doc: ^core.Document, _: u8) -> (core.Comment_Spelling, u8) 
 	return (.Byte if doc.comment != 0 else .None), doc.comment
 }
 
-// The byte just past container `i`'s close. The root ends at `len(doc.src)`. A record ends at its line end, CR LF
-// included, or at the text's end when it is the last. Only a container span read calls it.
+// The byte just past record `i`'s line end, CR LF included. A record at the text's end stops past its last cell. The
+// root ends at `len(doc.src)`. Only a container span read calls it.
 @(private, cold)
-close_end :: proc(doc: ^core.Document, i: u32) -> u64 {
-	if i == core.ROOT {
-		return u64(len(doc.src))
-	}
+record_end :: proc(doc: ^core.Document, i: u32) -> u64 {
 	n := doc.nodes[i]
 	p := n.lo
 	if n.n > 1 {
@@ -544,4 +556,13 @@ close_end :: proc(doc: ^core.Document, i: u32) -> u64 {
 		p += 1
 	}
 	return p
+}
+
+// The byte just past container `i`'s close. The root ends at `len(doc.src)`, and a record at its line end.
+@(private, cold)
+close_end :: proc(doc: ^core.Document, i: u32) -> u64 {
+	if i == core.ROOT {
+		return u64(len(doc.src))
+	}
+	return record_end(doc, i)
 }

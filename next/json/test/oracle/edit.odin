@@ -385,7 +385,6 @@ model_agrees :: proc(t: ^testing.T, m: Edit_Model, doc: ^core.Document, i: u32, 
 	return true
 }
 
-
 @(private)
 span_lo :: proc(doc: ^core.Document, i: u32) -> u64 {
 	return u64(intrinsics.ptr_sub(raw_data(core.span(doc, i)), raw_data(doc.src)))
@@ -452,28 +451,27 @@ insert_pos :: proc(doc: ^core.Document, e: core.Edit) -> (u64, bool) {
 		i += 1
 	}
 	if have {
-		// A trailing comma serves as the new member's separator, so the insert is written before the close.
-		if close := doc.spelling.close_end(doc, e.node); true {
-			if k := find_byte(doc.src, int(last), ','); k >= 0 && u64(k) < close {
-				return close - 1, true
-			}
-		}
-		// A `//` comment at the last member's end puts the new member after its line end.
+		// The last member's own comments after its separator remain its own, and a line comment at their end moves the
+		// new member past its line end.
+		pos := last
 		for f in doc.facts {
-			if f.node != last_node {
-				continue
-			}
-			if f.lo + u64(f.n) == last && f.n >= 2 && doc.src[f.lo] == '/' && doc.src[f.lo+1] == '/' {
-				return core.line_end_len(doc.src, last, true), true
+			if f.node == last_node && f.lo >= last {
+				pos = max(pos, f.lo + u64(f.n))
 			}
 		}
-		return last, true
+		for f in doc.facts {
+			if f.node == last_node && f.lo + u64(f.n) == pos && f.spelling >> 8 == 0 {
+				return core.line_end_len(doc.src, pos, true), true
+			}
+		}
+		return pos, true
 	}
 	n := doc.nodes[e.node].lo
 	return n + 1, true
 }
 
-// Checks that a conflict's byte belongs to an edit: a member's first or last byte, a node's span, or an insert's byte.
+// A conflict names a byte inside a node another edit writes, or the byte an insert is written at. A removal and a set
+// write their node's own span, and an insert inside either names its own byte.
 @(private)
 conflict_agrees :: proc(t: ^testing.T, round: int, doc: ^core.Document, edits: []core.Edit, at: u64) -> bool {
 	if at > u64(len(doc.src)) {
@@ -486,10 +484,30 @@ conflict_agrees :: proc(t: ^testing.T, round: int, doc: ^core.Document, edits: [
 			}
 			continue
 		}
+		lo := span_lo(doc, e.node)
+		hi := lo + u64(len(core.span(doc, e.node)))
+		if at >= lo && at <= hi {
+			return true
+		}
+	}
+	// A fact edit's byte may be one past its node's extent, where the separator its line leads is removed. The fact
+	// then conflicts with that removal.
+	for e in edits {
+		if e.op < .Set_Fact || int(e.node) >= len(doc.nodes) {
+			continue
+		}
 		lo, hi := member_extent(doc, e.node)
-		ks := span_lo(doc, e.node)
-		ke := ks + u64(len(core.span(doc, e.node)))
-		if at == lo || at == hi || at == ks || at == ke || at > lo && at < hi {
+		if at >= lo && at <= hi + 1 {
+			return true
+		}
+		p := span_lo(doc, e.node) + u64(len(core.span(doc, e.node)))
+		for p < u64(len(doc.src)) && (doc.src[p] == ' ' || doc.src[p] == '\t') {
+			p += 1
+		}
+		if p < u64(len(doc.src)) && doc.src[p] == ',' {
+			p += 1
+		}
+		if at == p {
 			return true
 		}
 	}
@@ -499,11 +517,10 @@ conflict_agrees :: proc(t: ^testing.T, round: int, doc: ^core.Document, edits: [
 			p, _ := insert_pos(doc, e)
 			fmt.printfln("  insert node %d at %d -> %d text %q", e.node, e.at, p, e.text)
 		} else {
-			lo, hi := member_extent(doc, e.node)
-			fmt.printfln("  %v node %d extent %d..%d span %d..%d", e.op, e.node, lo, hi, span_lo(doc, e.node), span_lo(doc, e.node)+u64(len(core.span(doc, e.node))))
+			fmt.printfln("  %v node %d span %d..%d", e.op, e.node, span_lo(doc, e.node), span_lo(doc, e.node)+u64(len(core.span(doc, e.node))))
 		}
 	}
-	return testing.expectf(t, false, "round %d: conflict at %d names no edited member", round, at)
+	return testing.expectf(t, false, "round %d: conflict at %d names no edited node", round, at)
 }
 
 @(private)
@@ -512,11 +529,20 @@ Piece :: struct {
 	b:  []u8,
 }
 
-// Checks that every node and fact no edit replaces appears in `out` in source order. A set replaces the node's own
-// bytes and no comment, and a removal removes the member's subtree and its facts.
+@(private)
+Set_Span :: struct {
+	lo, hi: u64,
+}
+
+// Every node and fact no edit removes, in source order, appears in `out`. A set replaces the node's own span and no
+// comment outside it, so a head comment on the set node survives, and a comment inside the span goes with the node.
+// A removal removes the member's subtree and the facts on those nodes. A fact edit removes the facts of its node and
+// role, and leaves every other fact's bytes where they are.
 @(private)
 kept_bytes :: proc(t: ^testing.T, round: int, doc: ^core.Document, out: []u8, edits: []core.Edit) -> bool {
 	gone := make([]bool, len(doc.nodes), context.temp_allocator)
+	removed := make([]bool, len(doc.nodes), context.temp_allocator)
+	spans := make([dynamic]Set_Span, context.temp_allocator)
 	for e in edits {
 		if e.op == .Insert {
 			continue
@@ -528,9 +554,14 @@ kept_bytes :: proc(t: ^testing.T, round: int, doc: ^core.Document, out: []u8, ed
 		}
 		for i := int(e.node); i < min(end, len(doc.nodes)); i += 1 {
 			gone[i] = true
+			removed[i] ||= e.op == .Remove
 		}
 		if e.op == .Remove && e.node > 0 && doc.nodes[e.node-1].role == .Key {
 			gone[e.node-1] = true
+		}
+		if e.op == .Set {
+			lo := doc.nodes[e.node].lo
+			append(&spans, Set_Span{lo = lo, hi = lo + u64(len(core.span(doc, e.node)))})
 		}
 	}
 	pieces := make([dynamic]Piece, context.temp_allocator)
@@ -542,15 +573,13 @@ kept_bytes :: proc(t: ^testing.T, round: int, doc: ^core.Document, out: []u8, ed
 		append(&pieces, Piece{lo = span_lo(doc, u32(i)), b = s})
 	}
 	for f in doc.facts {
-		if f.node < u32(len(gone)) && gone[f.node] {
+		if f.node < u32(len(removed)) && removed[f.node] {
 			continue
 		}
-		// A foot on a member an insert no longer makes last, and a head comment a removal would join to a value, are
-		// dropped and counted, so their bytes may be missing from `out`.
-		if f.node != core.ROOT && (f.role == .Comment_Foot || f.role == .Comment) {
-			continue
+		in_set := false
+		for s in spans {
+			in_set ||= f.lo >= s.lo && f.lo + u64(f.n) <= s.hi
 		}
-		// A fact edit replaces or removes every fact of its node and role, so their bytes may be missing.
 		taken := false
 		for e in edits {
 			if e.op >= .Set_Fact && e.node == f.node && e.role == f.role {
@@ -558,7 +587,7 @@ kept_bytes :: proc(t: ^testing.T, round: int, doc: ^core.Document, out: []u8, ed
 				break
 			}
 		}
-		if taken {
+		if in_set || taken {
 			continue
 		}
 		append(&pieces, Piece{lo = f.lo, b = doc.src[f.lo:f.lo + u64(f.n)]})
@@ -617,6 +646,18 @@ Second :: struct {
 	path:     string,
 }
 
+// `Edit_Kind` names each edit a round's list can hold, for counting rounds.
+@(private)
+Edit_Kind :: enum u8 {
+	set_value,
+	set_key,
+	insert_element,
+	insert_member,
+	remove,
+	set_fact,
+	remove_fact,
+}
+
 @(test)
 edits_agree_with_tree :: proc(t: ^testing.T) {
 	state := rand.create(SEED + 11)
@@ -624,6 +665,7 @@ edits_agree_with_tree :: proc(t: ^testing.T) {
 	text: [dynamic]u8
 	defer delete(text)
 	rounds, refused, conflicted, checked, parted, frounds, fnonempty: int
+	round_counts: [Edit_Kind]int
 	for round in 0 ..< ROUNDS {
 		clear(&text)
 		spec := json.Spec(round % len(json.Spec))
@@ -646,13 +688,14 @@ edits_agree_with_tree :: proc(t: ^testing.T) {
 		want := root
 		second.ok = unique_keys(&want)
 
+		disjoint := rand.int_max(4) == 0
 		edits := 1 + rand.int_max(4)
 		bad := false
 		for _ in 0 ..< edits {
 			g: Gather
 			gather_init(&g)
 			gather(&want, -1, &g, &touched)
-			if !one_edit(t, &want, &g, &list, values, keys, spec, &second, &touched) {
+			if !one_edit(t, &want, &g, &list, values, keys, spec, &second, &touched, &doc, disjoint) {
 				bad = true
 				break
 			}
@@ -664,7 +707,7 @@ edits_agree_with_tree :: proc(t: ^testing.T) {
 			free_all(context.temp_allocator)
 			return
 		}
-		fbefore, fok := fact_edits(t, round, &doc, &list)
+		fbefore, fok := fact_edits(t, round, &doc, &list, &touched, disjoint)
 		if !fok {
 			core.edit_list_destroy(&list)
 			core.destroy(&doc)
@@ -672,6 +715,17 @@ edits_agree_with_tree :: proc(t: ^testing.T) {
 			return
 		}
 		out, dropped, cerr := core.commit(&list)
+		if disjoint && cerr.kind != .None {
+			testing.expectf(t, false, "round %d: a disjoint list was refused: %v", round, cerr)
+			fmt.printfln("  text %q", text[:])
+			for e in list.edits {
+				fmt.printfln("  edit %v node %d role %v at %d key %q text %q", e.op, e.node, e.role, e.at, e.key, e.text)
+			}
+			core.edit_list_destroy(&list)
+			core.destroy(&doc)
+			free_all(context.temp_allocator)
+			return
+		}
 		if cerr.kind == .Conflicting_Edits {
 			conflicted += 1
 			if !conflict_agrees(t, round, &doc, list.edits[:], cerr.at) {
@@ -693,6 +747,32 @@ edits_agree_with_tree :: proc(t: ^testing.T) {
 			return
 		}
 		rounds += 1
+		kinds: bit_set[Edit_Kind]
+		for e in list.edits {
+			switch e.op {
+			case .Set:
+				if doc.nodes[e.node].role == .Key {
+					kinds += {.set_key}
+				} else {
+					kinds += {.set_value}
+				}
+			case .Insert:
+				if doc.nodes[e.node].kind == .Array {
+					kinds += {.insert_element}
+				} else {
+					kinds += {.insert_member}
+				}
+			case .Remove:
+				kinds += {.remove}
+			case .Set_Fact:
+				kinds += {.set_fact}
+			case .Remove_Fact:
+				kinds += {.remove_fact}
+			}
+		}
+		for k in kinds {
+			round_counts[k] += 1
+		}
 		read, rerr := build_spec(out, spec)
 		if !testing.expectf(t, rerr.kind == .None, "round %d: committed text does not read: %v in %q", round, rerr, out) {
 			return
@@ -714,14 +794,16 @@ edits_agree_with_tree :: proc(t: ^testing.T) {
 		if second.ok && second_check(t, &doc, &second, spec, &refused, &checked, &parted) {
 			// `second_check` records its failures itself, so its result is unused here.
 		}
-		frounds += 1
-		fokc, fkept := fact_check(t, round, fbefore[:], &list, &doc, &want, &read, dropped)
+		fokc, fkept := fact_check(t, round, fbefore[:], &list, &doc, &want, &read, dropped, u8(spec))
 		if !fokc {
 			fmt.printfln("  text %q", text[:])
 			for e in list.edits {
 				fmt.printfln("  edit %v node %d role %v at %d key %q text %q", e.op, e.node, e.role, e.at, e.key, e.text)
 			}
 			return
+		}
+		if fkept > 0 {
+			frounds += 1
 		}
 		if fkept > 0 && dropped == 0 {
 			fnonempty += 1
@@ -733,16 +815,96 @@ edits_agree_with_tree :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 	}
 	fmt.printfln("seed %d: %d rounds, %d refused, %d conflicted, %d second checks (%d parted, %d refused), %d fact rounds (%d with a non-empty model)", SEED, rounds, refused, conflicted, checked, parted, refused, frounds, fnonempty)
+	fmt.printfln("seed %d: rounds set value %d, set key %d, insert element %d, insert member %d, remove %d, set fact %d, remove fact %d", SEED, round_counts[.set_value], round_counts[.set_key], round_counts[.insert_element], round_counts[.insert_member], round_counts[.remove], round_counts[.set_fact], round_counts[.remove_fact])
+	for k in Edit_Kind {
+		testing.expectf(t, round_counts[k] > 0, "no round applied kind %v", k)
+	}
 	testing.expectf(t, fnonempty > 0, "no round compared a non-empty fact model")
+}
+
+// A JSONC or JSON5 document committed as strict JSON with no tree edits drops every source fact and no value: the
+// output holds no comment, and the values read as the source's. The drop count is exact, not merely at least the
+// number of facts that went.
+@(test)
+cross_spec_drops :: proc(t: ^testing.T) {
+	cases := []struct {
+		text: string,
+		spec: json.Spec,
+	}{
+		{"//head\n{\"a\":[1,2,{\"b\":true}],\"c\":\"x\"}", .Jsonc},
+		{"{\"a\":1 /*i*/,\"b\":[2,3]}\n//foot", .Jsonc},
+		{"/*x*/[1,2,3] //y", .Json5},
+		{"{\"a\":1}\n//tail", .Json5},
+	}
+	rounds := 0
+	for round in 0 ..< ROUNDS {
+		free_all(context.temp_allocator)
+		c := cases[round % len(cases)]
+		doc, err := build_spec(transmute([]u8)c.text, c.spec)
+		if err.kind != .None {
+			testing.expectf(t, false, "round %d: build %v", round, err)
+			core.destroy(&doc)
+			continue
+		}
+		if len(doc.facts) == 0 {
+			testing.expectf(t, false, "round %d: no facts to drop", round)
+			core.destroy(&doc)
+			continue
+		}
+		list := core.edit_list_init(&doc)
+		out, dropped, cerr := core.commit(&list, u8(json.Spec.Json))
+		if !testing.expectf(t, cerr.kind == .None, "round %d: commit %v", round, cerr) {
+			if len(out) > 0 {
+				delete(out)
+			}
+			core.edit_list_destroy(&list)
+			core.destroy(&doc)
+			continue
+		}
+		if !testing.expectf(t, dropped == len(doc.facts), "round %d: dropped %d of %d facts", round, dropped, len(doc.facts)) {
+			delete(out)
+			core.edit_list_destroy(&list)
+			core.destroy(&doc)
+			continue
+		}
+		read, rerr := json.build(out, .Json)
+		if !testing.expectf(t, rerr.kind == .None, "round %d: strict output does not read: %v in %q", round, rerr, out) {
+			delete(out)
+			core.edit_list_destroy(&list)
+			core.destroy(&doc)
+			continue
+		}
+		if !testing.expectf(t, len(read.facts) == 0, "round %d: output holds %d comments", round, len(read.facts)) {
+			delete(out)
+			core.destroy(&read)
+			core.edit_list_destroy(&list)
+			core.destroy(&doc)
+			continue
+		}
+		want := model_of(&doc, core.ROOT, ".")
+		if !model_agrees(t, want, &read, core.ROOT, "cross spec") {
+			delete(out)
+			core.destroy(&read)
+			core.edit_list_destroy(&list)
+			core.destroy(&doc)
+			continue
+		}
+		rounds += 1
+		delete(out)
+		core.destroy(&read)
+		core.edit_list_destroy(&list)
+		core.destroy(&doc)
+	}
+	testing.expectf(t, rounds == ROUNDS, "%d of %d rounds checked", rounds, ROUNDS)
 }
 
 // Records a random edit on the list and applies it to the tree, or neither. A refusal at record leaves both unchanged.
 @(private)
-one_edit :: proc(t: ^testing.T, want: ^Edit_Model, g: ^Gather, list: ^core.Edit_List, values, keys: []string, spec: json.Spec, second: ^Second, x: ^Touched) -> bool {
+one_edit :: proc(t: ^testing.T, want: ^Edit_Model, g: ^Gather, list: ^core.Edit_List, values, keys: []string, spec: json.Spec, second: ^Second, x: ^Touched, doc: ^core.Document, disjoint: bool) -> bool {
 	switch rand.int_max(4) {
 	case 0, 1:
-		// A set of a value, or sometimes of a key.
-		if len(g.keys) > 0 && rand.int_max(4) == 0 {
+		// Sets a value, or sometimes a key.
+		if !disjoint && len(g.keys) > 0 && rand.int_max(4) == 0 {
 			ref := g.keys[rand.int_max(len(g.keys))]
 			text := keys[rand.int_max(len(keys))]
 			if e := core.set(list, ref.node, transmute([]u8)text); e.kind == .None {
@@ -759,8 +921,15 @@ one_edit :: proc(t: ^testing.T, want: ^Edit_Model, g: ^Gather, list: ^core.Edit_
 			return true
 		}
 		ref := g.values[rand.int_max(len(g.values))]
+		if disjoint && !walktest.nodes_disjoint(doc, x.nodes[:x.n_nodes], ref.node) {
+			return true
+		}
 		text := values[rand.int_max(len(values))]
 		if e := core.set(list, ref.node, transmute([]u8)text); e.kind != .None {
+			if disjoint {
+				testing.expectf(t, e.kind == .None, "set node %d refused: %v", ref.node, e)
+				return false
+			}
 			return true
 		}
 		m := model_at(want, ref.node)
@@ -783,6 +952,9 @@ one_edit :: proc(t: ^testing.T, want: ^Edit_Model, g: ^Gather, list: ^core.Edit_
 			return true
 		}
 		ref := g.containers[rand.int_max(len(g.containers))]
+		if disjoint && !walktest.nodes_disjoint(doc, x.nodes[:x.n_nodes], ref.node) {
+			return true
+		}
 		m := model_at(want, ref.node)
 		if m == nil {
 			return false
@@ -795,14 +967,25 @@ one_edit :: proc(t: ^testing.T, want: ^Edit_Model, g: ^Gather, list: ^core.Edit_
 		at := rand.int_max(len(m.kids) + 1)
 		if ref.kind == .Array {
 			if e := core.insert(list, ref.node, at, transmute([]u8)text); e.kind != .None {
+				if disjoint {
+					testing.expectf(t, e.kind == .None, "insert node %d refused: %v", ref.node, e)
+					return false
+				}
 				return true
 			}
 			model_insert(m, at, v, "", false)
 			touch_container(x, ref.node)
+			if disjoint {
+				touch_node(x, ref.node)
+			}
 			take_second(second, 1, ref.node, at, "", "", text, ref.path)
 		} else {
 			key := keys[rand.int_max(len(keys))]
 			if e := core.insert(list, ref.node, at, transmute([]u8)key, transmute([]u8)text); e.kind != .None {
+				if disjoint {
+					testing.expectf(t, e.kind == .None, "insert node %d refused: %v", ref.node, e)
+					return false
+				}
 				return true
 			}
 			name, ok2 := key_value(transmute([]u8)key, spec)
@@ -811,6 +994,9 @@ one_edit :: proc(t: ^testing.T, want: ^Edit_Model, g: ^Gather, list: ^core.Edit_
 			}
 			model_insert(m, at, v, name, true)
 			touch_container(x, ref.node)
+			if disjoint {
+				touch_node(x, ref.node)
+			}
 			// The current tree appends a member, so only the last place can be checked against it.
 			if at == len(m.kids) - 1 {
 				take_second(second, 2, ref.node, at, name, key, text, ref.path)
@@ -821,7 +1007,14 @@ one_edit :: proc(t: ^testing.T, want: ^Edit_Model, g: ^Gather, list: ^core.Edit_
 			return true
 		}
 		ref := g.members[rand.int_max(len(g.members))]
+		if disjoint && !walktest.nodes_disjoint(doc, x.nodes[:x.n_nodes], ref.node) {
+			return true
+		}
 		if e := core.remove(list, ref.node); e.kind != .None {
+			if disjoint {
+				testing.expectf(t, e.kind == .None, "remove node %d refused: %v", ref.node, e)
+				return false
+			}
 			return true
 		}
 		parent, index := model_parent(want, ref.node)
@@ -830,6 +1023,7 @@ one_edit :: proc(t: ^testing.T, want: ^Edit_Model, g: ^Gather, list: ^core.Edit_
 		}
 		path := parent.kids[index].path
 		model_remove(parent, index)
+		touch_node(x, ref.node)
 		take_second(second, 3, ref.node, 0, "", "", "", path)
 	}
 	return true
@@ -933,28 +1127,18 @@ map_nodes :: proc(m: ^Edit_Model, doc: ^core.Document, r: u32, node_at: []u32) {
 	}
 }
 
-// Returns true if an unused entry of `got` is the fact of `node`, `role` and `body`, and marks it used.
+// Records a round's fact edits on the round's list. A set or a removal targets any node but a key and an `End`.
 @(private)
-fact_find :: proc(got: []walktest.Fact_Model, used: []bool, node: u32, role: core.Role, body: string) -> bool {
-	for g, i in got {
-		if !used[i] && g.node == node && g.role == role && g.body == body {
-			used[i] = true
-			return true
-		}
-	}
-	return false
-}
-
-// Records up to 3 fact edits on the round's list, a set or a removal on a node that is no key and no `End`, and
-// returns the facts the document had before.
-@(private)
-fact_edits :: proc(t: ^testing.T, round: int, doc: ^core.Document, list: ^core.Edit_List) -> (before: [dynamic]walktest.Fact_Model, ok: bool) {
+fact_edits :: proc(t: ^testing.T, round: int, doc: ^core.Document, list: ^core.Edit_List, x: ^Touched, disjoint: bool) -> (before: [dynamic]walktest.Fact_Model, ok: bool) {
 	before = make([dynamic]walktest.Fact_Model, 0, 8, context.temp_allocator)
 	walktest.fact_model(doc, &before)
 	for _ in 0 ..< 1 + rand.int_max(3) {
 		node := u32(rand.int_max(len(doc.nodes)))
 		n := doc.nodes[node]
-		if n.role == .Key || n.kind == .End || walktest.tree_touched(doc, list, node) {
+		if n.role == .Key || n.kind == .End || walktest.tree_touched(doc, list, node, !disjoint) {
+			continue
+		}
+		if disjoint && !walktest.nodes_disjoint(doc, x.nodes[:x.n_nodes], node) {
 			continue
 		}
 		role := walktest.FACT_ROLES[rand.int_max(len(walktest.FACT_ROLES))]
@@ -980,42 +1164,16 @@ fact_edits :: proc(t: ^testing.T, round: int, doc: ^core.Document, list: ^core.E
 	return before, true
 }
 
-// Checks that every fact of a node no edit names reads back on the same value, in the same role, with the same body, or
-// is covered by the commit's dropped count. `kept` is the number of such facts.
+// Checks the round's fact model mapped onto the committed text: each fact's node is carried across the round's tree
+// edits.
 @(private)
-fact_check :: proc(t: ^testing.T, round: int, before: []walktest.Fact_Model, list: ^core.Edit_List, doc: ^core.Document, want: ^Edit_Model, read: ^core.Document, dropped: int) -> (ok: bool, kept: int) {
+fact_check :: proc(t: ^testing.T, round: int, before: []walktest.Fact_Model, list: ^core.Edit_List, doc: ^core.Document, want: ^Edit_Model, read: ^core.Document, dropped: int, spec: u8) -> (ok: bool, kept: int) {
 	node_at := make([]u32, len(doc.nodes), context.temp_allocator)
 	for i in 0 ..< len(node_at) {
 		node_at[i] = core.NO_NODE
 	}
 	map_nodes(want, read, core.ROOT, node_at)
-	got: [dynamic]walktest.Fact_Model
-	walktest.fact_model(read, &got)
-	defer delete(got)
-	used := make([]bool, len(got), context.temp_allocator)
-	missing: int
-	for f in before {
-		if walktest.fact_touched(doc, list, f.node, f.lo) {
-			continue
-		}
-		kept += 1
-		if rn := node_at[f.node]; rn == core.NO_NODE || !fact_find(got[:], used, rn, f.role, f.body) {
-			missing += 1
-			if dropped == 0 {
-				testing.expectf(t, false, "round %d: kept fact node %d -> %d role %v body %q is missing", round, f.node, node_at[f.node], f.role, f.body)
-				for b in before {
-					fmt.printfln("    before node %d role %v body %q", b.node, b.role, b.body)
-				}
-				for g in got {
-					fmt.printfln("    got node %d role %v body %q", g.node, g.role, g.body)
-				}
-			}
-		}
-	}
-	if dropped == 0 {
-		return testing.expectf(t, missing == 0, "round %d: %d kept facts missing of %d, no drop", round, missing, kept), kept
-	}
-	return testing.expectf(t, missing <= dropped, "round %d: %d kept facts missing of %d, dropped %d", round, missing, kept, dropped), kept
+	return walktest.fact_agrees(t, round, before, doc, list, node_at, read, dropped, spec)
 }
 
 // Returns true if every object in the tree has unique keys, so a path names one value.

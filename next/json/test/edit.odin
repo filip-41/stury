@@ -117,10 +117,25 @@ edit_insert_array :: proc(t: ^testing.T) {
 	check(t, `[1, /* two */ 2]`, `[0,1, /* two */ 2]`, .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, 0, 0, transmute([]u8)string("0"))
 	})
-	check(t, `[1,2,]`, `[1,2,0]`, .Json5, proc(list: ^core.Edit_List) -> core.Document_Error {
+	check(t, `[1,2,]`, `[1,2,0,]`, .Json5, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, 0, 2, transmute([]u8)string("0"))
 	})
 	check(t, `[1,2,]`, `[0,1,2,]`, .Json5, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 0, 0, transmute([]u8)string("0"))
+	})
+}
+
+// A JSONC comment that holds U+2028 or U+2029 ends at the line feed, not at that byte, so an insert at the start and
+// an append land inside the container.
+@(test)
+edit_line_separator_comment :: proc(t: ^testing.T) {
+	check(t, "{\"a\":1 // x\u2028y\n}", "{\"b\":2,\"a\":1 // x\u2028y\n}", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 0, 0, transmute([]u8)string("\"b\""), transmute([]u8)string("2"))
+	})
+	check(t, "{\"a\":1 // x\u2028y\n}", "{\"a\":1 // x\u2028y\n,\"b\":2}", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 0, 1, transmute([]u8)string("\"b\""), transmute([]u8)string("2"))
+	})
+	check(t, "[1 // x\u2029y\n]", "[0,1 // x\u2029y\n]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, 0, 0, transmute([]u8)string("0"))
 	})
 }
@@ -232,17 +247,14 @@ edit_mixed :: proc(t: ^testing.T) {
 		testing.expect(t, expect_commit(t, &list, `[1,4]`, .Json))
 	}
 	{
-		// An insert at position 1 conflicts with a removal of member 2: the insert's byte is the first byte of the
-		// removal's range.
+		// An insert at position 1 lies in the removal's run, so it moves to the cut end: `[1,9,3]`.
 		doc, _ := json.build(transmute([]u8)string(`[1,2,3]`), .Json)
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
 		testing.expect_value(t, core.remove(&list, 2).kind, core.Document_Error_Kind.None)
 		testing.expect_value(t, core.insert(&list, 0, 1, transmute([]u8)string("9")).kind, core.Document_Error_Kind.None)
-		out, _, e := core.commit(&list)
-		testing.expect_value(t, e.kind, core.Document_Error_Kind.Conflicting_Edits)
-		testing.expect_value(t, len(out), 0)
+		testing.expect(t, expect_commit(t, &list, `[1,9,3]`, .Json))
 	}
 	{
 		// Two inserts at position 0 keep their recorded order: `[7,8,1]`.
@@ -531,8 +543,11 @@ edit_tolerated_source :: proc(t: ^testing.T) {
 // inside a comment.
 @(test)
 edit_comma_in_comment :: proc(t: ^testing.T) {
-	check(t, "[1,\n /* , */ 2]", "[ 2]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
+	check(t, "[1,\n /* , */ 2]", "[/* , */ 2]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 1)
+	})
+	check(t, "[0, 1,\n//h\n2]", "[0, \n//h\n2]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 2)
 	})
 	check(t, "[1,\n /* , */ 2,\n 3]", "[1,\n 3]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 2)
@@ -606,4 +621,66 @@ edit_commit_allocator :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, string(out), "[9,8,2,3]")
+}
+
+// 100k sets and 100k removes disjoint by member: no edit conflicts. The old pair loops compared every edit with every
+// other edit, 2e10 pairs, and did not finish in the time box; the sorted range sweep does.
+@(test)
+edit_large_list_no_conflict :: proc(t: ^testing.T) {
+	n := 200_000
+	half := n / 2
+	src := make([dynamic]u8, 0, n * 2 + 2, context.temp_allocator)
+	append(&src, '[')
+	for i in 0 ..< n {
+		if i > 0 {
+			append(&src, ',')
+		}
+		append(&src, '0')
+	}
+	append(&src, ']')
+	doc, err := json.build(src[:], .Json)
+	defer core.destroy(&doc)
+	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+		return
+	}
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	for i in 0 ..< half {
+		if e := core.set(&list, u32(i + 1), transmute([]u8)string("1")); !testing.expectf(t, e.kind == .None, "set %d: %v", i, e) {
+			return
+		}
+	}
+	for i in 0 ..< half {
+		if e := core.remove(&list, u32(half + i + 1)); !testing.expectf(t, e.kind == .None, "remove %d: %v", i, e) {
+			return
+		}
+	}
+	out, _, cerr := core.commit(&list)
+	defer delete(out)
+	if !testing.expectf(t, cerr.kind == .None, "commit: %v", cerr) {
+		return
+	}
+	read, rerr := json.build(out, .Json)
+	defer core.destroy(&read)
+	if !testing.expectf(t, rerr.kind == .None, "committed text does not read: %v", rerr) {
+		return
+	}
+	testing.expect_value(t, core.length(&read, core.ROOT), half)
+	it := core.children(&read, core.ROOT)
+	v, ok := core.child_next(&it)
+	buf: [8]u8
+	s, _ := core.text(&read, v, buf[:], context.temp_allocator)
+	testing.expectf(t, ok && s == "1", "first member %q", s)
+}
+
+// A removal of one member and a set of the next, which are siblings, do not conflict.
+@(test)
+edit_sibling_remove_and_set :: proc(t: ^testing.T) {
+	doc, _ := json.build(transmute([]u8)string("[10,20]"), .Json)
+	defer core.destroy(&doc)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.set(&list, 2, transmute([]u8)string("3")).kind, core.Document_Error_Kind.None)
+	testing.expect(t, expect_commit(t, &list, `[3]`, .Json))
 }
