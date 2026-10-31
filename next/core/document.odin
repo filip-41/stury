@@ -108,7 +108,6 @@ Document :: struct {
 Duplicates :: enum u8 {
 	First,
 	Last,
-	All,
 }
 
 // Holds the options `resolve` reads besides the node.
@@ -118,14 +117,14 @@ Resolve_Options :: struct {
 	infer: bool,
 }
 
-// A `Spelling` holds a format's read services, in its rodata. `text` decodes a node's text into `buf` when it has
-// room, else into `allocator`, and returns that allocation as `owned` for the caller to free. A node whose
-// `SPELLING_DECODE` bit is clear is its span without the quotes that surround it. `key_equals` compares a key without
-// allocating. `number` reads a number token. `resolve` returns what a `Plain` node is. `close_end` returns the byte
-// just past a container's closing bytes, found from its last descendant or its open, over the whitespace and comments
-// the format allows there. `edit` points at the format's edit services, nil for a format that accepts no edits.
+// A `Spelling` holds a format's read services, in its rodata. `text` decodes a node's text into `buf` and returns false
+// when `buf` is too short, so a read never allocates. A node whose `SPELLING_DECODE` bit is clear is its span without
+// the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token.
+// `resolve` returns what a `Plain` node is. `close_end` returns the byte just past a container's closing bytes, found
+// from its last descendant or its open, over the whitespace and comments the format allows there. `edit` points at the
+// format's edit services, nil for a format that accepts no edits.
 Spelling :: struct {
-	text:       proc(doc: ^Document, i: Node_Index, buf: []u8, allocator: runtime.Allocator) -> (s: string, owned: []u8, ok: bool),
+	text:       proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc(doc: ^Document, i: Node_Index, name: string) -> bool,
 	number:     proc(doc: ^Document, i: Node_Index) -> Number,
 	resolve:    proc(doc: ^Document, i: Node_Index, opts: Resolve_Options) -> Kind,
@@ -135,11 +134,12 @@ Spelling :: struct {
 
 // An `Edit_Spelling` holds a format's edit services. A document's `Spelling` points at one table, and the services
 // dispatch on the document's `spec` and run-time dialect. `value` checks a text as exactly one value of the format and
-// spec, `key` as exactly one key, and `record` as exactly one record, returning its cell count. `reads` is the
-// format's own read of a text with or without its tolerance set, for the check a commit makes, under the output spec
-// `spec`. Each service receives the document, so it reads the run-time dialect the document holds. A text that is no
-// value or record answers `.Bad_Value`, one that is no key answers `.Bad_Key`, with the walk's fault in `inner` where
-// there is one, and `.No_Memory` when the service could not allocate.
+// spec, `record` as exactly one record, returning its cell count, and `key_text` writes a decoded member name in the
+// format's own spelling, quotes and escapes included. A member insert's key and a key set take a decoded name, so no
+// service judges a key. `reads` is the format's own read of a text with or without its tolerance set, for the check a
+// commit makes, under the output spec `spec`. Each service receives the document, so it reads the run-time dialect the
+// document holds. A text that is no value or record answers `.Bad_Value`, with the walk's fault in `inner` where there
+// is one, and `.No_Memory` when the service could not allocate.
 //
 // `member_sep` is written between two members of an object or two elements of an array, `key_sep` between a
 // member's key and its value, and `record_sep` is the line end a record insert writes, read from the document so
@@ -147,7 +147,7 @@ Spelling :: struct {
 // the output spells a comment under `spec` and is nil for a format that accepts no comment.
 Edit_Spelling :: struct {
 	value:      proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
-	key:        proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
+	key_text:   proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
 	record:     proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: Document_Error),
 	reads:      proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
 	comment:    proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
@@ -426,9 +426,8 @@ child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool) {
 	return v, true
 }
 
-// Returns the value of the member of `obj` whose key decodes to `name`, under `.First` or `.Last`. `.All` reads as
-// `.First`, while `member_all` yields every match. A headed dsv record's members are its cells, named by the header's
-// cells.
+// Returns the value of the member of `obj` whose key decodes to `name`, under `.First` or `.Last`. `member_all` yields
+// every match. A headed dsv record's members are its cells, named by the header's cells.
 member :: #force_inline proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplicates.Last) -> (Node_Index, bool) {
 	// A single loop handles both shapes: `member_next` is inlined, so an object's step uses this frame's registers.
 	it := member_all(doc, obj, name)
@@ -438,7 +437,7 @@ member :: #force_inline proc(doc: ^Document, obj: Node_Index, name: string, dups
 		if !ok {
 			return found, found != NO_NODE
 		}
-		if dups == .First || dups == .All {
+		if dups == .First {
 			return v, true
 		}
 		found = v
@@ -517,26 +516,65 @@ member_next_cell :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool) {
 }
 
 // Returns the decoded text of string or plain node `i`. A node whose `SPELLING_DECODE` bit is clear is its span
-// without its quotes. A node that needs decoding is written into `buf` when it has room, else into an allocation from
-// `allocator`, which is returned as `owned`: it is non-nil only then, and the caller frees it with the same allocator.
-// Returns false for a container or a node past the last.
-text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8, allocator := context.allocator) -> (s: string, owned: []u8, ok: bool) {
+// without its quotes. A node that needs decoding is written into `buf`, and the call returns false when `buf` is too
+// short. It allocates nothing, so a caller that has no buffer long enough uses `text_clone`. Returns false for a
+// container or a node past the last.
+text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool) {
 	if int(i) >= len(doc.nodes) {
-		return "", nil, false
+		return "", false
 	}
 	n := doc.nodes[i]
 	// Only a scalar carries text: a container's `n` is a node count, not a byte length.
 	if n.kind > .Plain {
-		return "", nil, false
+		return "", false
 	}
 	if n.spelling & SPELLING_DECODE == 0 {
-		return string(node_text(doc.src, n)), nil, true
+		return string(node_text(doc.src, n)), true
 	}
-	s, owned, ok = doc.spelling.text(doc, i, buf, allocator)
+	return doc.spelling.text(doc, i, buf)
+}
+
+// Returns a copy of node `i`'s decoded text, allocated from `allocator`. The result is the allocation the caller frees
+// with `delete(s, allocator)`, for a text that needed no decode too, and its length is the allocation's length. A
+// decode may write fewer bytes than the buffer it was given, so an over-long allocation is trimmed. Returns false for
+// a container, a node past the last, or a refused allocation.
+text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator) -> (s: string, ok: bool) {
+	if int(i) >= len(doc.nodes) {
+		return "", false
+	}
+	n := doc.nodes[i]
+	if n.kind > .Plain {
+		return "", false
+	}
+	if n.spelling & SPELLING_DECODE == 0 {
+		raw, err := runtime.mem_alloc_non_zeroed(int(n.n), 1, allocator)
+		if err != nil {
+			return "", false
+		}
+		copy(raw, node_text(doc.src, n))
+		return string(raw[:int(n.n)]), true
+	}
+	// A tolerated ill-formed sequence reads as U+FFFD, three bytes for one source byte, so three bytes per token byte
+	// is an upper bound on the decoded length of every format's decode.
+	size := 3 * int(n.n) + 4
+	raw, err := runtime.mem_alloc_non_zeroed(size, 1, allocator)
+	if err != nil {
+		return "", false
+	}
+	s, ok = doc.spelling.text(doc, i, raw)
 	if !ok {
-		return "", nil, false
+		delete(raw, allocator)
+		return "", false
 	}
-	return
+	if len(s) != size {
+		trimmed, rerr := runtime.non_zero_mem_resize(raw_data(raw), size, len(s), 1, allocator)
+		if rerr != nil {
+			delete(raw, allocator)
+			return "", false
+		}
+		raw = trimmed
+	}
+	return string(raw[:len(s)]), true
 }
 
 // Returns the number node `i` writes, decoded from its span. A container and an index past the last node return
@@ -579,6 +617,22 @@ uint_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (u64, bool) {
 	case .Uint:
 		return n.bits, true
 	case .Float, .Wide:
+	}
+	return 0, false
+}
+
+// Returns the binary64 an `Int`, `Uint` or `Float` node writes. A `Wide` number has no decoded value in this tree, so
+// the call returns false for it and the caller reads its span. Returns false for a node that is no number.
+float_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (f64, bool) {
+	n := number(doc, i)
+	switch n.kind {
+	case .Int:
+		return f64(i64(n.bits)), true
+	case .Uint:
+		return f64(n.bits), true
+	case .Float:
+		return transmute(f64)n.bits, true
+	case .Wide:
 	}
 	return 0, false
 }

@@ -28,6 +28,7 @@ FEATURES :: [Tier]string {
 }
 
 // The width of each tier's vector registers.
+@(private)
 VECTOR_BYTES :: [Tier]int {
 	.V2 = 16,
 	.V3 = 32,

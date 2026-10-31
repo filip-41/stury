@@ -373,7 +373,7 @@ fact_zero_width_set_beside_insert :: proc(t: ^testing.T) {
 	}
 }
 
-// A spec change would respell every cell, so it is refused with `Bad_Result` and nothing is written.
+// A spec change would respell every cell, so it is refused with `Bad_Spec` before anything is written.
 @(test)
 fact_spec_change_refused :: proc(t: ^testing.T) {
 	doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n"), .Csv)
@@ -384,7 +384,8 @@ fact_spec_change_refused :: proc(t: ^testing.T) {
 	defer if len(out) > 0 {
 		delete(out)
 	}
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Bad_Result)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.Bad_Spec)
+	testing.expect(t, out == nil)
 }
 
 // A foot written after a last record that ends in a blank cell starts its own line, since a comment byte reads as a
@@ -428,7 +429,7 @@ fact_set_at_text_end_with_foot :: proc(t: ^testing.T) {
 		return
 	}
 	buf: [64]u8
-	cell, _, read_ok := core.text(&read, 6, buf[:], context.temp_allocator)
+	cell, read_ok := core.text(&read, 6, buf[:])
 	testing.expectf(t, read_ok && cell == "x\\y", "committed %q: last cell is %q, want %q", out, cell, "x\\y")
 	testing.expectf(t, walktest.body(t, &read, core.ROOT, .Comment_Foot, ""), "committed %q: no root foot", out)
 }

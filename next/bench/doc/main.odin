@@ -180,15 +180,28 @@ read_all :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec, $HA
 		check = CHECK_OFFSET
 	}
 	if !dsv_text && spec == .Json {
-		read_nodes(a, &doc, buf[:], true, HASH)
+		if read_nodes(a, &doc, buf[:], true, HASH, false) {
+			when HASH {
+				check = CHECK_OFFSET
+			}
+			read_nodes(a, &doc, buf[:], true, HASH, true)
+		}
 	} else {
-		read_nodes(a, &doc, buf[:], false, HASH)
+		if read_nodes(a, &doc, buf[:], false, HASH, false) {
+			when HASH {
+				check = CHECK_OFFSET
+			}
+			read_nodes(a, &doc, buf[:], false, HASH, true)
+		}
 	}
 }
 
 // `DIRECT` picks the format's own readers, which inline for a caller that knows the format, or the format-agnostic
 // `core` readers, as dsv cells need.
-read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HASH: bool) {
+// Reads every value. `FALLBACK` false is the fast lane, which stops and returns true at the first text too long for
+// `buf`; `FALLBACK` true is the slow lane, which clones such a text and frees it. A document whose texts all fit pays
+// for one lane only, and a text that does not fit is read by the slow lane from the start.
+read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HASH: bool, $FALLBACK: bool) -> (long: bool) {
 	for n, i in doc.nodes {
 		if n.role != .Value {
 			continue
@@ -197,21 +210,32 @@ read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HA
 			check = fnv(check, value_tag(n.kind))
 		}
 		if n.kind == .String || n.kind == .Plain {
-			s: string
-			ok: bool
+			text_ok: bool
+			size := 0
 			when DIRECT {
-				s, _, ok = json.text(doc, core.Node_Index(i), buf, a.alloc)
+				s, ok := json.text(doc, core.Node_Index(i), buf)
+				text_ok = ok
+				size = len(s)
 			} else {
-				s, _, ok = core.text(doc, core.Node_Index(i), buf, a.alloc)
+				s, ok := core.text(doc, core.Node_Index(i), buf)
+				text_ok = ok
+				size = len(s)
 			}
-			if !ok {
-				fmt.eprintf("read: text of node %d failed\n", i)
-				os.exit(1)
+			if !text_ok {
+				when FALLBACK {
+					size, text_ok = long_text_length(doc, core.Node_Index(i), a.alloc)
+					if !text_ok {
+						fmt.eprintf("read: text of node %d failed\n", i)
+						os.exit(1)
+					}
+				} else {
+					return true
+				}
 			}
 			when HASH {
-				check = fnv_u64(check, u64(len(s)))
+				check = fnv_u64(check, u64(size))
 			} else {
-				sink = sink ~ u64(len(s))
+				sink = sink ~ u64(size)
 			}
 			continue
 		}
@@ -229,6 +253,36 @@ read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HA
 			}
 		}
 	}
+	return false
+}
+
+// Returns a name read through the format's direct reader or core's, and whether the read cloned it. A name too long for
+// `buf` is cloned, and the caller frees it with `alloc`.
+@(private)
+read_name :: #force_no_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, alloc: mem.Allocator, direct: bool) -> (name: string, cloned: bool, ok: bool) {
+	if direct {
+		name, ok = json.text(doc, i, buf)
+	} else {
+		name, ok = core.text(doc, i, buf)
+	}
+	if ok {
+		return name, false, true
+	}
+	name, ok = core.text_clone(doc, i, alloc)
+	return name, true, ok
+}
+
+// Returns a text too long for the read lane's buffer, and frees it before returning. A read with a stack buffer covers
+// every text that fits, so only a long one pays for the clone.
+@(private, cold)
+long_text_length :: #force_no_inline proc(doc: ^core.Document, i: core.Node_Index, alloc: mem.Allocator) -> (n: int, ok: bool) {
+	s, read := core.text_clone(doc, i, alloc)
+	if !read {
+		return 0, false
+	}
+	n = len(s)
+	delete(s, alloc)
+	return n, true
 }
 
 // A member lookup that knows the format: each member's key goes through `core.key_equals` directly, with `.Last`
@@ -257,14 +311,18 @@ key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 	key_answers = 0
 	key_objects = 0
 	key_name = ""
+	name_cloned := false
+	defer if name_cloned {
+		delete(name, a.alloc)
+	}
 	check = CHECK_OFFSET
 	if dsv_text {
 		// A headed dsv text's header row is the root's first child, an `Array` of role `Key` whose first cell names
 		// its first column.
 		for n, i in doc.nodes {
 			if n.kind == .Array && n.role == .Key && int(i) + 1 < len(doc.nodes) {
-				text_ok := false
-				name, _, text_ok = core.text(&doc, core.Node_Index(i) + 1, buf[:], a.alloc)
+				text_ok: bool
+				name, name_cloned, text_ok = read_name(&doc, core.Node_Index(i) + 1, buf[:], a.alloc, false)
 				if !text_ok {
 					fmt.eprintf("key: header cell %d failed\n", i + 1)
 					os.exit(1)
@@ -280,12 +338,8 @@ key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 			}
 			j := i + 1
 			if j < len(doc.nodes) && doc.nodes[j].role == .Key {
-				text_ok := false
-				if inline {
-					name, _, text_ok = json.text(&doc, core.Node_Index(j), buf[:], a.alloc)
-				} else {
-					name, _, text_ok = core.text(&doc, core.Node_Index(j), buf[:], a.alloc)
-				}
+				text_ok: bool
+				name, name_cloned, text_ok = read_name(&doc, core.Node_Index(j), buf[:], a.alloc, inline)
 				if !text_ok {
 					fmt.eprintf("key: node %d's key failed\n", i)
 					os.exit(1)

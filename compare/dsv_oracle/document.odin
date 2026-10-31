@@ -174,7 +174,7 @@ compare_members :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core
 		if headed {
 			key_node = ours.header + 1 + core.Node_Index(col)
 		}
-		key, _, kok := core.text(ours, key_node, buf[:])
+		key, kok := core.text(ours, key_node, buf[:])
 		if !testing.expectf(t, kok && key == name, "%q node %d: key %q, current tree %q", src, oi, key, name) {
 			return false
 		}
@@ -205,7 +205,7 @@ compare_members :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core
 // so the text is what the two models agree on.
 cell_agrees :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_Index, theirs: ^cur.Document, ti: cur.Node) -> bool {
 	buf: [4096]u8
-	s, _, sok := core.text(ours, oi, buf[:])
+	s, sok := core.text(ours, oi, buf[:])
 	w, _ := cur.get_string(theirs, ti)
 	return testing.expectf(t, sok && s == w, "%q node %d: cell %q, current tree %q", src, oi, s, w)
 }

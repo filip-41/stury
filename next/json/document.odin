@@ -15,7 +15,7 @@ import build "../core/build"
 @(private, rodata)
 EDIT := core.Edit_Spelling {
 	value      = edit_value_at,
-	key        = edit_key_at,
+	key_text   = edit_key_text,
 	reads      = edit_reads_at,
 	comment    = edit_comment,
 	member_sep = ",",
@@ -220,52 +220,57 @@ value_check_hook :: proc "contextless" (h: ^Value_Check, s: core.Hook_Regs, t: c
 	return s, .Next
 }
 
-// Checks that `src` is one key of spec `S` for an edit. The text is read as the only member of an object around it,
-// and its token must cover the whole text, so a text with its own trivia is no key.
+// Appends one byte to `text`, false when the allocation fails.
 @(private)
-edit_key :: proc(src: []u8, allocator: runtime.Allocator, $S: Spec) -> core.Document_Error {
-	buf, err := make([]u8, len(src) + 4, allocator)
-	if err != nil {
-		return {kind = .No_Memory}
-	}
-	defer delete(buf, allocator)
-	buf[0] = '{'
-	copy(buf[1:], src)
-	buf[len(src) + 1] = ':'
-	buf[len(src) + 2] = '0'
-	buf[len(src) + 3] = '}'
-	k: Key_Check
-	regs: core.Hook_Regs
-	_, fault := walk(buf, 0, S, {}, &k, &regs, key_check_hook)
-	if f, bad := fault.?; bad {
-		return {kind = .Bad_Key, inner = f}
-	}
-	if k.n != 4 || k.tokens[0].kind != .Map || k.tokens[1].role != .Key || k.tokens[3].kind != .End {
-		return {kind = .Bad_Key}
-	}
-	t := k.tokens[1]
-	lo := core.key_start(t)
-	hi := lo + u64(t.n)
-	if t.spelling & core.SPELLING_QUOTED != 0 {
-		hi += 2
-	}
-	if lo != 1 || hi != u64(len(src)) + 1 {
-		return {kind = .Bad_Key}
-	}
-	return {}
+push_byte :: #force_inline proc(text: ^[dynamic]u8, b: u8) -> bool {
+	_, err := append(text, b)
+	return err == nil
 }
 
+// Writes `name` as a JSON string in `text`, with the quotes and escapes every JSON spec reads. A control byte is
+// written as `\u00xx`, so the key reads the same in JSON, JSONC and JSON5.
 @(private)
-Key_Check :: struct {
-	tokens: [4]core.Token,
-	n:      int,
-}
-
-@(private)
-key_check_hook :: proc "contextless" (h: ^Key_Check, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	if h.n < len(h.tokens) { h.tokens[h.n] = t }
-	h.n += 1
-	return s, .Next
+edit_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool {
+	hex := "0123456789abcdef"
+	push_byte(text, '"') or_return
+	for b in name {
+		switch b {
+		case '"':
+			push_byte(text, '\\') or_return
+			push_byte(text, '"') or_return
+		case '\\':
+			push_byte(text, '\\') or_return
+			push_byte(text, '\\') or_return
+		case '\b':
+			push_byte(text, '\\') or_return
+			push_byte(text, 'b') or_return
+		case '\f':
+			push_byte(text, '\\') or_return
+			push_byte(text, 'f') or_return
+		case '\n':
+			push_byte(text, '\\') or_return
+			push_byte(text, 'n') or_return
+		case '\r':
+			push_byte(text, '\\') or_return
+			push_byte(text, 'r') or_return
+		case '\t':
+			push_byte(text, '\\') or_return
+			push_byte(text, 't') or_return
+		case:
+			if b < 0x20 {
+				push_byte(text, '\\') or_return
+				push_byte(text, 'u') or_return
+				push_byte(text, '0') or_return
+				push_byte(text, '0') or_return
+				push_byte(text, hex[b >> 4]) or_return
+				push_byte(text, hex[b & 0xF]) or_return
+			} else {
+				push_byte(text, b) or_return
+			}
+		}
+	}
+	push_byte(text, '"') or_return
+	return true
 }
 
 // Reads `src` as spec `S` with or without the tolerance set a build may hold, nested no deeper than the document's
@@ -285,16 +290,6 @@ edit_value_at :: proc(doc: ^core.Document, src: []u8, allocator: runtime.Allocat
 	case .Json5: return edit_value(src, allocator, doc.read.max_depth, .Json5)
 	}
 	return {kind = .Bad_Value}
-}
-
-@(private)
-edit_key_at :: proc(doc: ^core.Document, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
-	switch Spec(doc.read.spec) {
-	case .Json:  return edit_key(src, allocator, .Json)
-	case .Jsonc: return edit_key(src, allocator, .Jsonc)
-	case .Json5: return edit_key(src, allocator, .Json5)
-	}
-	return {kind = .Bad_Key}
 }
 
 @(private)
@@ -322,7 +317,11 @@ edit_comment :: proc(doc: ^core.Document, spec: u8) -> (core.Comment_Spelling, u
 }
 
 // Writes `list`'s edits as spec `as`, returning the text the caller frees with `allocator`. A text of another spec
-// must read strictly, since the source's reading under its own spec is no evidence.
+// must read strictly, since the source's reading under its own spec is no evidence. A delimited document is another
+// format family and is refused before the splice.
 commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+	if list.doc != nil && list.doc.spelling.edit != nil && list.doc.spelling.edit.record != nil {
+		return nil, 0, {kind = .Bad_Spec}
+	}
 	return core.commit_as(list, u8(as), allocator)
 }

@@ -1,5 +1,6 @@
 package json_tests
 
+import "base:runtime"
 import "core:mem"
 import "core:strconv"
 import "core:strings"
@@ -83,7 +84,7 @@ json5 :: proc(t: ^testing.T) {
 			continue
 		}
 		if w.text != "" {
-			s, _, _ := core.text(&doc, v, nil)
+			s, _ := core.text_clone(&doc, v, context.temp_allocator)
 			testing.expect_value(t, s, w.text)
 		}
 	}
@@ -96,10 +97,10 @@ json5 :: proc(t: ^testing.T) {
 	doc, err = build(`['\x41\0\n\'\\', "\uD83D\uDE00"]`, .Json5)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	buf: [256]u8
-	s, _, ok := core.text(&doc, 1, buf[:])
+	s, ok := core.text(&doc, 1, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "A\x00\n'\\")
-	s, _, ok = core.text(&doc, 2, buf[:])
+	s, ok = core.text(&doc, 2, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "\U0001F600")
 	core.destroy(&doc)
@@ -137,14 +138,14 @@ tolerated :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	buf: [64]u8
-	s, _, ok := core.text(&doc, 0, buf[:])
+	s, ok := core.text(&doc, 0, buf[:])
 	testing.expect(t, ok)
 	testing.expectf(t, s == "a\uFFFDb", "got %x want %x", transmute([]u8)s, transmute([]u8)string("a\uFFFDb"))
 	core.destroy(&doc)
 
 	doc, err = build("\"\\uD800\"", .Json, {tolerate = {.Lone_Surrogate}})
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	s, _, ok = core.text(&doc, 0, buf[:])
+	s, ok = core.text(&doc, 0, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "\uFFFD")
 	core.destroy(&doc)
@@ -152,7 +153,7 @@ tolerated :: proc(t: ^testing.T) {
 	// `E1 80 41` is U+FFFD for the maximal subpart `E1 80`, then `A`.
 	doc, err = build("'\xe1\x80A'", .Json5, {tolerate = {.Invalid_Utf8}})
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	s, _, ok = core.text(&doc, 0, buf[:])
+	s, ok = core.text(&doc, 0, buf[:])
 	testing.expect(t, ok)
 	testing.expectf(t, s == "\uFFFDA", "got %x want %x", transmute([]u8)s, transmute([]u8)string("\uFFFDA"))
 	core.destroy(&doc)
@@ -291,34 +292,70 @@ number_spelling_bits :: proc(t: ^testing.T) {
 	testing.expect_value(t, i, len(want))
 }
 
-// `text` returns the allocation a decode makes as `owned`, and nil for a text that is the caller's buffer or a slice
-// of the source. `json.text` has the same shape.
+// `text` writes a decode into the caller's buffer and never allocates, and returns false when the buffer is too short.
+// `text_clone` always allocates, and the allocation is exactly the string the caller frees with `delete`, for a decoded
+// text and for one that is its source.
 @(test)
 text_owned :: proc(t: ^testing.T) {
-	alloc := context.temp_allocator
 	doc, err := build(`"\u0041"`, .Json)
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
 		return
 	}
 	buf: [8]u8
-	s, owned, ok := core.text(&doc, 0, buf[:], alloc)
-	testing.expect(t, ok && s == "A" && owned == nil)
-	s, owned, ok = core.text(&doc, 0, nil, alloc)
-	testing.expectf(t, ok && s == "A" && owned != nil, "decode: %q %v", s, ok)
-	testing.expect(t, ok && raw_data(owned) == raw_data(s) && len(owned) >= len(s))
-	delete(owned, alloc)
-	s, owned, ok = json.text(&doc, 0, nil, alloc)
-	testing.expectf(t, ok && s == "A" && owned != nil, "json.text: %q %v", s, ok)
-	delete(owned, alloc)
+	s, ok := core.text(&doc, 0, buf[:])
+	testing.expect(t, ok && s == "A")
+	_, ok = core.text(&doc, 0, nil)
+	testing.expect(t, !ok)
+	_, ok = core.text(&doc, 0, buf[:0])
+	testing.expect(t, !ok)
+
+	p: Track_Alloc = {inner = context.temp_allocator}
+	alloc := track_allocator(&p)
+	s, ok = core.text_clone(&doc, 0, alloc)
+	testing.expectf(t, ok && s == "A", "clone: %q %v", s, ok)
+	testing.expect_value(t, p.alloc_size, len(s))
+	delete(s, alloc)
+	testing.expect_value(t, p.free_size, len(s))
 
 	plain, perr := build(`"abc"`, .Json)
 	defer core.destroy(&plain)
 	if !testing.expectf(t, perr.kind == .None, "build: %v", perr) {
 		return
 	}
-	s, owned, ok = core.text(&plain, 0, nil, alloc)
-	testing.expect(t, ok && s == "abc" && owned == nil)
+	s, ok = core.text(&plain, 0, nil)
+	testing.expect(t, ok && s == "abc")
+	p.alloc_size, p.free_size = 0, 0
+	s, ok = core.text_clone(&plain, 0, alloc)
+	testing.expect(t, ok && s == "abc")
+	testing.expect_value(t, p.alloc_size, len(s))
+	delete(s, alloc)
+	testing.expect_value(t, p.free_size, len(s))
+}
+
+// A `Track_Alloc` records the size of the last allocation and of the last free.
+Track_Alloc :: struct {
+	inner:      runtime.Allocator,
+	alloc_size: int,
+	free_size:  int,
+}
+
+track_allocator_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, loc := #caller_location) -> ([]byte, runtime.Allocator_Error) {
+	p := (^Track_Alloc)(data)
+	switch mode {
+	case .Alloc, .Alloc_Non_Zeroed:
+		p.alloc_size = size
+	case .Free:
+		p.free_size = old_size
+	case .Resize, .Resize_Non_Zeroed:
+		p.alloc_size = size
+	case .Free_All, .Query_Features, .Query_Info:
+	}
+	return p.inner.procedure(p.inner.data, mode, size, alignment, old_memory, old_size, loc)
+}
+
+track_allocator :: proc(p: ^Track_Alloc) -> runtime.Allocator {
+	return {procedure = track_allocator_proc, data = p}
 }
 
 // Checks strings that cross the decoder's 64-byte block edge: an escape at the edge, a surrogate pair across it,
@@ -332,7 +369,7 @@ decode_edges :: proc(t: ^testing.T) {
 		if !testing.expectf(t, err.kind == .None, "%q: %v", src, err) {
 			return
 		}
-		s, _, ok := core.text(&doc, 0, buf)
+		s, ok := core.text(&doc, 0, buf)
 		testing.expectf(t, ok && string(want) == s, "%q: %q, want %q", src, s, want)
 	}
 
@@ -422,7 +459,7 @@ tolerated_key :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	buf: [16]u8
-	k, _, ok := core.text(&doc, 1, buf[:])
+	k, ok := core.text(&doc, 1, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, k, "a\uFFFDb")
 	testing.expect(t, core.key_equals(&doc, 1, k))
@@ -448,7 +485,7 @@ decode_into_token_sized_buffer :: proc(t: ^testing.T) {
 		}
 		before := arena.offset
 		buf: [16]u8
-		s, _, ok := core.text(&doc, 0, buf[:len(src) - 2], alloc)
+		s, ok := core.text(&doc, 0, buf[:len(src) - 2])
 		testing.expectf(t, ok, "%q: no text", src)
 		testing.expectf(t, arena.offset == before, "%q: allocated %d bytes", src, arena.offset - before)
 		if src == texts[0] {
@@ -473,7 +510,7 @@ decode_into_token_sized_buffer :: proc(t: ^testing.T) {
 	}
 	before := arena.offset
 	buf: [400]u8
-	s, _, ok := core.text(&doc, 0, buf[:len(src) - 2], alloc)
+	s, ok := core.text(&doc, 0, buf[:len(src) - 2])
 	testing.expect(t, ok)
 	testing.expectf(t, arena.offset == before, "long: allocated %d bytes", arena.offset - before)
 	testing.expect_value(t, len(s), 301)

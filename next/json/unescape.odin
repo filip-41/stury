@@ -1,7 +1,6 @@
 package json
 
 import "base:intrinsics"
-import "base:runtime"
 import "core:unicode/utf8"
 import spell "../core/spell"
 import core "../core"
@@ -210,66 +209,36 @@ replacement :: #force_inline proc() -> [4]u8 {
 }
 
 // JSON's `Spelling.text`, exported so a caller that knows the format calls it without the table. A scalar with
-// `SPELLING_DECODE` clear returns its span. A node that needs decoding is written into `buf` when it has room, else
-// into a new allocation from `allocator`, returned as `owned`. A container and an index past the last node return
-// false, as `core.text` does.
-text :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, allocator := context.allocator) -> (s: string, owned: []u8, ok: bool) {
+// `SPELLING_DECODE` clear returns its span. A node that needs decoding is written into `buf`, and the call returns false
+// when `buf` is too short. A container and an index past the last node return false, as `core.text` does.
+text :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool) {
 	if int(i) >= len(doc.nodes) {
-		return "", nil, false
+		return "", false
 	}
 	n := doc.nodes[i]
 	// A container's `n` is a node count and its `spelling` a child count, not a span and a decode bit.
 	if n.kind > .Plain {
-		return "", nil, false
+		return "", false
 	}
 	if n.spelling & core.SPELLING_DECODE == 0 {
-		return string(doc.src[n.lo:n.lo + u64(n.n)]), nil, true
+		return string(doc.src[n.lo:n.lo + u64(n.n)]), true
 	}
 	if n.spelling & core.SPELLING_LAX != 0 {
-		return spell.decode_text(buf, allocator, decoded_init(doc.src, n), decoded_next)
+		return spell.decode_text(buf, decoded_init(doc.src, n), decoded_next)
 	}
-	return decode_plain(doc, i, buf, allocator)
-}
-
-// Returns the destination a decode writes. It is `buf` when `buf` is at least `n` bytes, else a new allocation of
-// `n + 4` bytes from `allocator`, for an escape's whole 32-bit word, and `owned` is that allocation. Returns false
-// when the allocation fails.
-@(private)
-decode_dst :: proc(n: u32, buf: []u8, allocator: runtime.Allocator) -> (dst: []u8, owned: []u8, ok: bool) {
-	if int(n) <= len(buf) {
-		return buf, nil, true
-	}
-	raw, err := runtime.mem_alloc_non_zeroed(int(n) + 4, 1, allocator)
-	if err != nil {
-		return nil, nil, false
-	}
-	return raw, raw, true
-}
-
-// Writes an escape's `size` bytes at `w` in `dst`: one 32-bit store when four bytes fit, else one byte at a time. A
-// buffer as long as the token needs no allocation.
-@(private)
-put_word :: #force_inline proc(dst: []u8, w: int, spelled: [4]u8, size: int) {
-	#no_bounds_check {
-		if w + 4 <= len(dst) {
-			intrinsics.unaligned_store((^u32)(&dst[w]), transmute(u32)spelled)
-		} else {
-			for k in 0 ..< size {
-				dst[w + k] = spelled[k]
-			}
-		}
-	}
+	return decode_plain(doc, i, buf)
 }
 
 // Decodes a short token byte by byte with one 32-bit store per escape. `decode_plain` picks it for a token under
 // 256 bytes, where finding escapes in 64-byte blocks does more work than the byte walk.
 @(private)
-decode_scalar :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, allocator: runtime.Allocator) -> (string, []u8, bool) {
+decode_scalar :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (string, bool) {
 	n := doc.nodes[i]
-	dst, owned, ok := decode_dst(n.n, buf, allocator)
-	if !ok {
-		return "", nil, false
+	// A JSON escape decodes to no more bytes than it spells, so a buffer as long as the token holds every result.
+	if int(n.n) > len(buf) {
+		return "", false
 	}
+	dst := buf
 	src := doc.src
 	out := raw_data(dst)
 	lo := n.lo
@@ -289,19 +258,19 @@ decode_scalar :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, alloca
 		w += size
 		p = next
 	}
-	return string(dst[:w]), owned, true
+	return string(dst[:w]), true
 }
 
 // Decodes a long token. Loads each 64-byte block once, stores a block with no escape whole, and walks a block with
 // escapes by its backslash mask, copying the run before each escape and decoding the escape in place. A block is not
 // reloaded after an escape.
 @(private)
-decode_block :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, allocator: runtime.Allocator) -> (string, []u8, bool) {
+decode_block :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (string, bool) {
 	n := doc.nodes[i]
-	dst, owned, ok := decode_dst(n.n, buf, allocator)
-	if !ok {
-		return "", nil, false
+	if int(n.n) > len(buf) {
+		return "", false
 	}
+	dst := buf
 	src := raw_data(doc.src)
 	out := raw_data(dst)
 	limit := u64(len(doc.src))
@@ -379,16 +348,30 @@ decode_block :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, allocat
 		w += size
 		p = next
 	}
-	return string(dst[:w]), owned, true
+	return string(dst[:w]), true
+}
+
+// Writes an escape's `size` bytes at `w` in `dst`: one 32-bit store when four bytes fit, else one byte at a time.
+@(private)
+put_word :: #force_inline proc(dst: []u8, w: int, spelled: [4]u8, size: int) {
+	#no_bounds_check {
+		if w + 4 <= len(dst) {
+			intrinsics.unaligned_store((^u32)(&dst[w]), transmute(u32)spelled)
+		} else {
+			for k in 0 ..< size {
+				dst[w + k] = spelled[k]
+			}
+		}
+	}
 }
 
 // Decodes a token under 256 bytes with `decode_scalar` and a longer one with `decode_block`.
 @(private)
-decode_plain :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, allocator: runtime.Allocator) -> (string, []u8, bool) {
+decode_plain :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (string, bool) {
 	if doc.nodes[i].n < 256 {
-		return decode_scalar(doc, i, buf, allocator)
+		return decode_scalar(doc, i, buf)
 	}
-	return decode_block(doc, i, buf, allocator)
+	return decode_block(doc, i, buf)
 }
 
 // Stores a 64-byte block as four 16-byte stores.

@@ -41,8 +41,8 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 
 Each format package exposes the names a caller uses: `Spec`, `Options`, `Detail`, `RULES`, `walk`, `validate` and
 `build`, plus the token spelling detail its walk documents (`json.Number_Spelling` and `json.number_spelling_of`).
-`json` also exposes `Tolerance`, `MAX_DEPTH`, `commit`, `text` and `number`, and `dsv` exposes `Tolerance`. `make
-surface` lists every public name.
+`json` also exposes `Tolerance`, `MAX_DEPTH`, `commit`, `text` and `number`, and `dsv` exposes `Tolerance`, `commit`,
+`text` and `number`. `make surface` lists every public name.
 
 `core`'s walk interface is what a format author uses: `Kind` and `Role` are a token's fields, `Token`, `Action` and
 `Hook_Regs` are a hook's signature, `Fault`, `Fault_Kind` and `Rules` are a walk's result, `fault_at` and `fault_of`
@@ -55,15 +55,14 @@ Spec     :: enum u8 { ... }    // the grammar, at compile time
 Options  :: struct { ... }     // what a walk receives at run time
 Detail   :: enum u8 { None, ... }   // the format's own rules, in `Fault.detail`
 RULES    : core.Rules             // each rule's code and message, in rodata
-walk     :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), keys: []core.Token = nil) -> (hi: u64, fault: Maybe(core.Fault))
+walk     :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault)
 build    :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error)
 ```
 
-`keys` is dsv's alone and JSON's `walk` takes none: optional scratch the caller may pass, one `core.Token` per header
-cell. The dsv walk fills it with the header record's cells and allocates nothing for them. With `nil`, the walk
-allocates one token per header cell from the default heap and frees it before returning. `dsv.build` passes a buffer
-so the header's cells are read once and written into the row it built.
+The walks share one signature, and dsv's `build` writes the header's cells into a private key buffer: `walk` allocates
+one token per header cell for them and frees it before returning, while the build's buffer is read once and written
+into the row it built.
 
 `opts` defaults to `Options{}` and `regs` may be nil, in which case the walk starts from zero registers and keeps
 none. A call that skips `opts` passes the later parameters by name:

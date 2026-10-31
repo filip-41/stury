@@ -47,7 +47,7 @@ Rule :: struct {
 	message: string,
 }
 
-@(rodata)
+@(private, rodata)
 KIND_RULES := [Fault_Kind]Rule {
 	.None          = {"none", "No fault"},
 	.Truncated     = {"truncated", "Unfinished input"},
@@ -73,6 +73,7 @@ rule_of :: proc "contextless" (f: Fault) -> Rule {
 
 // Writes the fault's code to `w`: `f.rules.format`, a dot when `rules` is set, then `rule_of(f).code`, as in
 // `json.literal` or `dsv.bad_char`. Returns the writer's error.
+@(private)
 write_fault_code :: proc(w: io.Writer, f: Fault) -> io.Error {
 	if f.rules != nil {
 		io.write_string(w, f.rules.format) or_return
@@ -123,6 +124,7 @@ write_position :: proc(w: io.Writer, src: []u8, at: u64, lines: ^Lines) -> io.Er
 
 // Writes `line:col: message` for `f` in `src`, or the message alone when `f.kind` is in `AT_NO_BYTE`. `lines` is the
 // count a previous fault in offset order left, or nil to count from byte 0.
+@(private)
 render_fault :: proc(w: io.Writer, src: []u8, f: Fault, lines: ^Lines = nil) -> io.Error {
 	if f.kind not_in AT_NO_BYTE {
 		write_position(w, src, f.at, lines) or_return
@@ -131,8 +133,8 @@ render_fault :: proc(w: io.Writer, src: []u8, f: Fault, lines: ^Lines = nil) -> 
 	return err
 }
 
-// The value layer's error kinds. `Document_Error.inner` holds a `Fault` by value for `.Walk`, `.Bad_Value`, `.Bad_Key`
-// and `.Bad_Result`, so the error renders with its cause. The last three name a byte of a text that is not the rendered
+// The value layer's error kinds. `Document_Error.inner` holds a `Fault` by value for `.Walk`, `.Bad_Value` and
+// `.Bad_Result`, so the error renders with its cause. The last two name a byte of a text that is not the rendered
 // source.
 Document_Error_Kind :: enum u8 {
 	None,
@@ -143,26 +145,27 @@ Document_Error_Kind :: enum u8 {
 	Bad_Position, // an insert position is past the container's length
 	Wrong_Container, // the container requires the other insert form: a key for a member, none for an element
 	Bad_Value, // a recorded text is not exactly one value of the document's format and spec
-	Bad_Key, // a recorded key text is not exactly one key of the document's format and spec
 	Bad_Fact, // a recorded fact body does not have its role's shape
 	Bad_Width, // an edit would leave a delimited text a record the table cannot read
+	Bad_Spec, // a commit asks for a spec of another format family, or one a delimited text cannot write
 	Conflicting_Edits, // two edits of one node, or an edit inside what another replaces or removes
 	Bad_Result, // a committed text does not read, the walk's fault in `inner`
 }
 
 // The document error kinds that name no byte of the text. Their `at` is not read.
-DOCUMENT_AT_NO_BYTE :: bit_set[Document_Error_Kind]{.None, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Key, .Bad_Fact, .Bad_Width, .Bad_Result}
+@(private)
+DOCUMENT_AT_NO_BYTE :: bit_set[Document_Error_Kind]{.None, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Fact, .Bad_Width, .Bad_Spec, .Bad_Result}
 
 // A value layer error. `at` is the byte `kind` names: the walk's fault byte for `.Walk`, the first byte of the
-// repeated key for `.Duplicate_Key`. `inner` is the fault, set for `.Walk` and for `.Bad_Value`, `.Bad_Key` and
-// `.Bad_Result`, whose `inner.at` is a byte of the recorded text or of the commit's output, not of the source.
+// repeated key for `.Duplicate_Key`. `inner` is the fault, set for `.Walk`, `.Bad_Value` and `.Bad_Result`, whose
+// `inner.at` is a byte of the recorded text or of the commit's output, not of the source.
 Document_Error :: struct {
 	kind:  Document_Error_Kind,
 	at:    u64,
 	inner: Fault,
 }
 
-@(rodata)
+@(private, rodata)
 DOCUMENT_KIND_RULES := [Document_Error_Kind]Rule {
 	.None              = {"none", "No error"},
 	.Walk              = {"walk", "Input does not parse"},
@@ -172,15 +175,16 @@ DOCUMENT_KIND_RULES := [Document_Error_Kind]Rule {
 	.Bad_Position      = {"bad_position", "Insert position is past the container"},
 	.Wrong_Container   = {"wrong_container", "The container takes the other insert form"},
 	.Bad_Value         = {"bad_value", "Not one value of the format"},
-	.Bad_Key           = {"bad_key", "Not one key of the format"},
 	.Bad_Fact          = {"bad_fact", "Not a fact of the role's shape"},
 	.Bad_Width         = {"bad_width", "The edit would break the table's width"},
+	.Bad_Spec          = {"bad_spec", "The commit cannot write that spec"},
 	.Conflicting_Edits = {"conflicting_edits", "Edits conflict"},
 	.Bad_Result        = {"bad_result", "The edited text does not read"},
 }
 
 // Writes `e`'s code: `document.` then the kind's code, as in `document.walk` or `document.duplicate_key`. The
 // `write_code` overload below exposes it beside the fault's code.
+@(private)
 write_document_code :: proc(w: io.Writer, e: Document_Error) -> io.Error {
 	io.write_string(w, "document.") or_return
 	_, err := io.write_string(w, DOCUMENT_KIND_RULES[e.kind].code)
@@ -188,9 +192,10 @@ write_document_code :: proc(w: io.Writer, e: Document_Error) -> io.Error {
 }
 
 // Writes `line:col: message` for `e` in `src`. For `.Walk` it also writes `  caused by line:col: message` for
-// `e.inner`, and for `.Bad_Value`, `.Bad_Key` and `.Bad_Result` `  caused by message`, since `inner.at` is a byte of a
+// `e.inner`, and for `.Bad_Value` and `.Bad_Result` `  caused by message`, since `inner.at` is a byte of a
 // text that is not `src`. `lines` is as in `render_fault`. Errors from the edit list other than a conflict name no
 // byte, since they describe a node, a recorded text or a position rather than a place in `src`.
+@(private)
 render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Lines = nil) -> io.Error {
 	// No position is written when `e.kind` is in `DOCUMENT_AT_NO_BYTE`, or when `e.kind` is `.Walk` and
 	// `e.inner.kind` names no byte, as a bad option is found before any byte is read.
@@ -205,7 +210,7 @@ render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Line
 			io.write_string(w, "\n  caused by ") or_return
 			render_fault(w, src, e.inner, lines) or_return
 		}
-	case .Bad_Value, .Bad_Key, .Bad_Result:
+	case .Bad_Value, .Bad_Result:
 		if e.inner.kind != .None {
 			io.write_string(w, "\n  caused by ") or_return
 			_, err := io.write_string(w, rule_of(e.inner).message)

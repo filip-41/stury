@@ -508,6 +508,7 @@ builder_header_lo :: #force_inline proc "contextless" (h: ^Builder) -> u64 {
 // Checks that the object from `open` through its last node at `end` has no two keys whose decoded text is equal.
 // A repeated key returns `.Duplicate_Key` at the later key's first byte. The table is a 64-entry
 // array on the stack and spills to `allocator` past 32 keys. A refused allocation returns `.No_Memory`.
+@(private)
 duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open, end: core.Node_Index, allocator: runtime.Allocator) -> core.Document_Error {
 	context = runtime.default_context()
 	keys := 0
@@ -545,9 +546,14 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open,
 		}
 		key := core.Node_Index(i)
 		buf: [256]u8
-		s, owned, ok := core.text(doc, key, buf[:], allocator)
+		s, ok := core.text(doc, key, buf[:])
+		cloned := false
 		if !ok {
-			return {kind = .No_Memory}
+			s, ok = core.text_clone(doc, key, allocator)
+			if !ok {
+				return {kind = .No_Memory}
+			}
+			cloned = true
 		}
 		hash := hash_bytes(transmute([]u8)s)
 		at := hash & mask
@@ -561,22 +567,22 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open,
 				same: bool
 				same, ok = text_equals(doc, e.node, s, allocator)
 				if !ok {
-					if owned != nil {
-						delete(owned, allocator)
+					if cloned {
+						delete(s, allocator)
 					}
 					return {kind = .No_Memory}
 				}
 				if same {
-					if owned != nil {
-						delete(owned, allocator)
+					if cloned {
+						delete(s, allocator)
 					}
 					return {kind = .Duplicate_Key, at = core.key_start(n)}
 				}
 			}
 			at = (at + 1) & mask
 		}
-		if owned != nil {
-			delete(owned, allocator)
+		if cloned {
+			delete(s, allocator)
 		}
 		i += int(n.n) if n.kind == .Array || n.kind == .Map else 1
 	}
@@ -588,15 +594,17 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open,
 @(private)
 text_equals :: proc(doc: ^core.Document, i: core.Node_Index, s: string, allocator: runtime.Allocator) -> (bool, bool) {
 	buf: [256]u8
-	t, owned, ok := core.text(doc, i, buf[:], allocator)
+	t, ok := core.text(doc, i, buf[:])
 	if !ok {
-		return false, false
+		t, ok = core.text_clone(doc, i, allocator)
+		if !ok {
+			return false, false
+		}
+		same := t == s
+		delete(t, allocator)
+		return same, true
 	}
-	same := t == s
-	if owned != nil {
-		delete(owned, allocator)
-	}
-	return same, true
+	return t == s, true
 }
 
 @(private)

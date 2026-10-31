@@ -99,9 +99,9 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 	}
 	fault: Maybe(core.Fault)
 	if opts.comment != 0 {
-		_, fault = walk(src, 0, S, opts, &b, &regs, build.builder_hook_keyless_facts, keys)
+		_, fault = walk_keys(src, 0, S, opts, &b, &regs, build.builder_hook_keyless_facts, keys)
 	} else {
-		_, fault = walk(src, 0, S, opts, &b, &regs, build.builder_hook_keyless, keys)
+		_, fault = walk_keys(src, 0, S, opts, &b, &regs, build.builder_hook_keyless, keys)
 	}
 	if count > 0 {
 		// The header's cells go into the slots the root's token steps over, before the builder shrinks the node array.
@@ -133,6 +133,18 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 		doc.header = core.Node_Index(i)
 	}
 	return doc, err
+}
+
+// Writes `list`'s edits as spec `as`, returning the text the caller frees with `allocator`. A delimited text writes
+// only its own spec: another spec would respell every cell, so the commit refuses it before it splices anything.
+commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+	if list.doc == nil {
+		return nil, 0, {kind = .Bad_Index}
+	}
+	if list.doc.spelling.edit == nil || list.doc.spelling.edit.record == nil || as != Spec(list.doc.read.spec) {
+		return nil, 0, {kind = .Bad_Spec}
+	}
+	return core.commit_as(list, u8(as), allocator)
 }
 
 // Returns node `n`'s span without a surrounding quote pair, if it has one. A quoted CSV cell has that shape.
@@ -275,22 +287,35 @@ plain_quoted :: proc(src: []u8, n: core.Node) -> bool {
 
 // dsv's `Spelling.text`. It returns a cell that needs no decode as a slice of the source: a quoted CSV cell without
 // `""` and with well-formed UTF-8 as its inner span, and another cell as its span. It decodes a quoted cell holding
-// `""`, a TSV escape and a `lax` cell into `buf` or `allocator`, and returns that allocation as `owned`.
+// `""`, a TSV escape and a `lax` cell into `buf`, and returns false when `buf` is too short.
 @(private)
-spelling_text :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, allocator := context.allocator) -> (s: string, owned: []u8, ok: bool) {
+spelling_text :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool) {
 	n := doc.nodes[i]
 	spec := Spec(doc.read.spec)
 	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(doc.src, n) {
 		lo, hi := inner_span(doc.src, n)
-		return string(doc.src[lo:hi]), nil, true
+		return string(doc.src[lo:hi]), true
 	}
 	if n.spelling & core.SPELLING_DECODE == 0 {
-		return string(doc.src[n.lo:n.lo + u64(n.n)]), nil, true
+		return string(doc.src[n.lo:n.lo + u64(n.n)]), true
 	}
 	// A cell carries `SPELLING_DECODE` when its span must be decoded. That is a quoted CSV cell holding `""`, a TSV
 	// cell with a backslash, which the pass's block mask answers, and any cell under `lax`, where a tolerated ill-formed
 	// sequence reads as U+FFFD.
-	return spell.decode_text(buf, allocator, dsv_decoded_init(doc.src, n, spec), dsv_decoded_next)
+	return spell.decode_text(buf, dsv_decoded_init(doc.src, n, spec), dsv_decoded_next)
+}
+
+// dsv's text reader, exported so a caller that knows the format calls it without the table. It decodes into `buf` and
+// returns false for a container, an index past the last node, or a `buf` too short for the decoded cell.
+text :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool) {
+	if int(i) >= len(doc.nodes) {
+		return "", false
+	}
+	n := doc.nodes[i]
+	if n.kind > .Plain {
+		return "", false
+	}
+	return spelling_text(doc, i, buf)
 }
 
 
@@ -339,6 +364,15 @@ spelling_number :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Number 
 	s := doc.src[n.lo:n.lo + u64(n.n)]
 	if num, is_number := spell.number_json(s, 0, u64(len(s))); is_number {
 		return num
+	}
+	return {0, .Wide}
+}
+
+// dsv's number reader, exported so a caller that knows the format calls it without the table. A value cell that is
+// exactly a JSON number reads as that number, and every other cell and a container read `.Wide`.
+number :: #force_inline proc(doc: ^core.Document, i: core.Node_Index) -> core.Number {
+	if int(i) < len(doc.nodes) && doc.nodes[i].kind <= .Plain {
+		return spelling_number(doc, i)
 	}
 	return {0, .Wide}
 }

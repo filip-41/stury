@@ -5,6 +5,7 @@ import "core:mem"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import dsv "../../dsv"
 import json ".."
 import walktest "../../walktest"
 
@@ -50,7 +51,7 @@ edit_set :: proc(t: ^testing.T) {
 		return set_text(list, 4, "3")
 	})
 	check(t, `{"a":1}`, `{"b":1}`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_text(list, 1, `"b"`)
+		return set_text(list, 1, `b`)
 	})
 	check(t, `{"a":1}`, `{"a":[1]}`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return set_text(list, 2, "[1]")
@@ -64,7 +65,7 @@ edit_set :: proc(t: ^testing.T) {
 	check(t, `"x"`, `"y\n"`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return set_text(list, 0, `"y\n"`)
 	})
-	// A JSONC set keeps the `/*c*/` beside the key, and a JSON5 key may be written as a string or an identifier.
+	// A JSONC set keeps the `/*c*/` beside the key, and a JSON5 key is written as a string from its decoded name.
 	check(t, `{"a" /*c*/: 1}`, `{"a" /*c*/: 2}`, .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return set_text(list, 2, "2")
 	})
@@ -72,9 +73,6 @@ edit_set :: proc(t: ^testing.T) {
 		return set_text(list, 2, "2")
 	})
 	check(t, `{a: 1}`, `{"b": 1}`, .Json5, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_text(list, 1, `"b"`)
-	})
-	check(t, `{a: 1}`, `{b: 1}`, .Json5, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return set_text(list, 1, `b`)
 	})
 }
@@ -122,10 +120,10 @@ edit_insert_array :: proc(t: ^testing.T) {
 @(test)
 edit_line_separator_comment :: proc(t: ^testing.T) {
 	check(t, "{\"a\":1 // x\u2028y\n}", "{\"b\":2,\"a\":1 // x\u2028y\n}", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 0, 0, string("\"b\""), string("2"))
+		return core.insert(list, 0, 0, string("b"), string("2"))
 	})
 	check(t, "{\"a\":1 // x\u2028y\n}", "{\"a\":1 // x\u2028y\n,\"b\":2}", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 0, 1, string("\"b\""), string("2"))
+		return core.insert(list, 0, 1, string("b"), string("2"))
 	})
 	check(t, "[1 // x\u2029y\n]", "[0,1 // x\u2029y\n]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, 0, 0, string("0"))
@@ -137,26 +135,38 @@ edit_line_separator_comment :: proc(t: ^testing.T) {
 @(test)
 edit_insert_member :: proc(t: ^testing.T) {
 	check(t, `{"a":1}`, `{"b":2,"a":1}`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 0, 0, string(`"b"`), string("2"))
+		return core.insert(list, 0, 0, string("b"), string("2"))
 	})
 	check(t, `{"a":1,"c":3}`, `{"a":1,"b":2,"c":3}`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 0, 1, string(`"b"`), string("2"))
+		return core.insert(list, 0, 1, string("b"), string("2"))
 	})
 	check(t, `{"a":1}`, `{"a":1,"b":2}`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 0, 1, string(`"b"`), string("2"))
+		return core.insert(list, 0, 1, string("b"), string("2"))
 	})
 	check(t, `{}`, `{"b":2}`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 0, 0, string(`"b"`), string("2"))
+		return core.insert(list, 0, 0, string("b"), string("2"))
 	})
 	check(t, `{"a":{"x":1}}`, `{"a":{"x":1,"y":[2]}}`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 2, 1, string(`"y"`), string("[2]"))
+		return core.insert(list, 2, 1, string("y"), string("[2]"))
 	})
-	check(t, `{a:1}`, `{a:1,b:2}`, .Json5, proc(list: ^core.Edit_List) -> core.Document_Error {
+	check(t, `{a:1}`, `{a:1,"b":2}`, .Json5, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, 0, 1, string("b"), string("2"))
 	})
 	// A repeated key is an ordinary member: `insert` appends it and the document keeps both in source order.
 	check(t, `{"a":1}`, `{"a":1,"a":2}`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 0, 1, string(`"a"`), string("2"))
+		return core.insert(list, 0, 1, string("a"), string("2"))
+	})
+}
+
+// A key is a decoded name, so a quote, a backslash, a line feed and a control byte are written escaped, by `set` on a
+// key node and by a member `insert` alike.
+@(test)
+edit_key_spelling :: proc(t: ^testing.T) {
+	check(t, `{"x":1}`, `{"a\"b\\c\nd\u0001":1}`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.set(list, 1, "a\"b\\c\nd\x01")
+	})
+	check(t, `{"x":1}`, `{"x":1,"a\"b\\c\nd\u0001":2}`, .Json, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 0, 1, "a\"b\\c\nd\x01", string("2"))
 	})
 }
 
@@ -333,7 +343,6 @@ edit_errors :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	testing.expect_value(t, core.set(&list, 99, string("1")).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, core.set(&list, 1, string("a")).kind, core.Document_Error_Kind.Bad_Key)
 	testing.expect_value(t, core.set(&list, 2, string("1 // c")).kind, core.Document_Error_Kind.Bad_Value)
 	testing.expect_value(t, core.set(&list, 2, string("[1] /* c */")).kind, core.Document_Error_Kind.Bad_Value)
 	testing.expect_value(t, core.set(&list, 2, string("")).kind, core.Document_Error_Kind.Bad_Value)
@@ -341,20 +350,18 @@ edit_errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.insert(&list, 0, 0, string("1")).kind, core.Document_Error_Kind.Wrong_Container)
 	testing.expect_value(t, core.insert(&list, 2, 3, string("1")).kind, core.Document_Error_Kind.Bad_Position)
 	testing.expect_value(t, core.insert(&list, 2, -1, string("1")).kind, core.Document_Error_Kind.Bad_Position)
-	testing.expect_value(t, core.insert(&list, 2, 2, string(`"k"`), string("1")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.insert(&list, 0, 1, string(`k`), string("1")).kind, core.Document_Error_Kind.Bad_Key)
+	testing.expect_value(t, core.insert(&list, 2, 2, string("k"), string("1")).kind, core.Document_Error_Kind.Wrong_Container)
 	testing.expect_value(t, core.remove(&list, 0).kind, core.Document_Error_Kind.Bad_Index)
 	testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.Bad_Index)
 	testing.expect_value(t, core.remove(&list, 99).kind, core.Document_Error_Kind.Bad_Index)
 	testing.expect_value(t, len(list.edits), 0)
 
-	// JSON5 refuses a comment before a key and after a value.
+	// JSON5 refuses a comment after a value.
 	j5, _ := json.build(transmute([]u8)string(`{a:1}`), .Json5)
 	defer core.destroy(&j5)
 	l5 := core.edit_list_init(&j5)
 	defer core.edit_list_destroy(&l5)
 	testing.expect_value(t, core.insert(&l5, 0, 1, string("b"), string("2")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.set(&l5, 1, string("/*c*/a")).kind, core.Document_Error_Kind.Bad_Key)
 	testing.expect_value(t, core.set(&l5, 2, string("1 /*c*/")).kind, core.Document_Error_Kind.Bad_Value)
 	testing.expect_value(t, core.set(&l5, 2, string("0x10")).kind, core.Document_Error_Kind.None)
 
@@ -412,7 +419,7 @@ edit_no_leak :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc, allocator = alloc)
 	testing.expect_value(t, core.set(&list, 4, string("9")).kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, core.insert(&list, 2, 2, string("3")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.insert(&list, 0, 2, string(`"d"`), string("4")).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.insert(&list, 0, 2, string("d"), string("4")).kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, core.remove(&list, 8).kind, core.Document_Error_Kind.None)
 	out, _, cerr := core.commit(&list, allocator = alloc)
 	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
@@ -435,7 +442,7 @@ edit_error_codes :: proc(t: ^testing.T) {
 		{.Bad_Position, "document.bad_position", "Insert position is past the container"},
 		{.Wrong_Container, "document.wrong_container", "The container takes the other insert form"},
 		{.Bad_Value, "document.bad_value", "Not one value of the format"},
-		{.Bad_Key, "document.bad_key", "Not one key of the format"},
+		{.Bad_Spec, "document.bad_spec", "The commit cannot write that spec"},
 		{.Bad_Width, "document.bad_width", "The edit would break the table's width"},
 		{.Bad_Result, "document.bad_result", "The edited text does not read"},
 	}
@@ -719,6 +726,20 @@ render_inner_cause :: proc(t: ^testing.T) {
 	testing.expect_value(t, strings.to_string(b), "The edited text does not read\n  caused by Invalid unquoted key")
 }
 
+// `json.commit` refuses a delimited document before it splices, since a table is another format family.
+@(test)
+json_commit_refuses_table :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("a\n1\n")
+	doc, err := dsv.build(src, .Csv)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	out, _, cerr := json.commit(&list, .Json)
+	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.Bad_Spec)
+	testing.expect(t, out == nil)
+}
+
 // `span` on a string or a key returns its source bytes with the quotes, which the splice writer copies.
 @(test)
 splice_spans :: proc(t: ^testing.T) {
@@ -769,11 +790,11 @@ edit_insert_in_removal_run :: proc(t: ^testing.T) {
 	})
 	commit_want(t, `{"a":1,"b":2,"c":3}`, `{"a":1,"x":9,"c":3}`, .Json, proc(list: ^core.Edit_List) {
 		core.remove(list, 4)
-		core.insert(list, 0, 1, string(`"x"`), string("9"))
+		core.insert(list, 0, 1, string("x"), string("9"))
 	})
 	commit_want(t, `{"a":1,"b":2,"c":3}`, `{"a":1,"x":9,"c":3}`, .Json, proc(list: ^core.Edit_List) {
 		core.remove(list, 4)
-		core.insert(list, 0, 2, string(`"x"`), string("9"))
+		core.insert(list, 0, 2, string("x"), string("9"))
 	})
 	commit_want(t, `[1]`, `[9]`, .Json, proc(list: ^core.Edit_List) {
 		core.remove(list, 1)
@@ -806,7 +827,7 @@ edit_insert_in_removal_run :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	testing.expect_value(t, core.remove(&list, 4).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.insert(&list, 0, 2, string(`"x"`), string("9")).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.insert(&list, 0, 2, string("x"), string("9")).kind, core.Document_Error_Kind.None)
 	out, _, cerr := core.commit(&list)
 	defer if len(out) > 0 {
 		delete(out)

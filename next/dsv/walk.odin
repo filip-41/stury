@@ -128,11 +128,15 @@ option_fault :: #force_inline proc "contextless" ($S: Spec, opts: Options) -> Ma
 // its column's header cell (`Plain`, role `Key`) and the cell itself (`Plain`, role `Value`), and an `End` over the
 // record's line end, 1 byte for LF and 2 for CR LF. The text's `End` is at its end, with `n` 0. A cell's span keeps its
 // quotes and leaves out the CR of a CR LF. The header makes no tokens, and an empty line or a line holding only a CR is
-// no record.
-// A caller that holds a buffer of one token per header cell passes it as `keys`, and the walk writes the header's cells
-// there and allocates none. With nil, the walk allocates the buffer. `regs` nil starts from zero registers and keeps
-// none. `opts` is `Options{}` by default.
-walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), keys: []core.Token = nil) -> (hi: u64, fault: Maybe(core.Fault)) {
+// no record. `regs` nil starts from zero registers and keeps none. `opts` is `Options{}` by default.
+walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
+	return walk_keys(src, lo, S, opts, h, regs, on, nil)
+}
+
+// The walk behind `build`: a caller that holds a buffer of one token per header cell passes it as `keys`, and the walk
+// writes the header's cells there and allocates none. With nil, the walk allocates the buffer.
+@(private)
+walk_keys :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), keys: []core.Token) -> (hi: u64, fault: Maybe(core.Fault)) {
 	if f, bad := option_fault(S, opts).?; bad {
 		return 0, f
 	}

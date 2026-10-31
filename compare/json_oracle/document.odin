@@ -124,7 +124,7 @@ compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_In
 	case .Null, .False, .True:
 	case .String:
 		buf: [4096]u8
-		s, _, sok := core.text(ours, oi, buf[:])
+		s, sok := core.text(ours, oi, buf[:])
 		w, wok := cur.get_string(theirs, ti)
 		ok = testing.expectf(t, sok && wok && s == w, "%q node %d: string %q, current tree %q", src, oi, s, w)
 	case .Number:
@@ -167,7 +167,7 @@ compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_In
 					ok = testing.expectf(t, ov_ok == tv_ok, "%q node %d: member counts", src, oi)
 					break
 				}
-				key, _, kok := core.text(ours, ov - 1, buf[:])
+				key, kok := core.text(ours, ov - 1, buf[:])
 				if !testing.expectf(t, kok && key == name, "%q node %d: key %q, current tree %q", src, oi, key, name) {
 					return false
 				}

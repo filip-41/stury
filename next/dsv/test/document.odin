@@ -73,7 +73,7 @@ no_header :: proc(t: ^testing.T) {
 	testing.expect_value(t, doc.nodes[rec].kind, core.Kind.Array)
 	testing.expect_value(t, core.length(&doc, rec), 2)
 	v, _ := first_member(&doc, rec)
-	s, _, _ := core.text(&doc, v, nil)
+	s, _ := core.text(&doc, v, nil)
 	testing.expect_value(t, s, "1")
 }
 
@@ -89,7 +89,7 @@ child_at_reader :: proc(t: ^testing.T) {
 		v, ok := core.child_at(&doc, rec, i)
 		testing.expect(t, ok)
 		testing.expect_value(t, v, rec + 1 + core.Node_Index(i))
-		s, _, _ := core.text(&doc, v, nil)
+		s, _ := core.text(&doc, v, nil)
 		testing.expect_value(t, s, string([]u8{u8('1' + i)}))
 	}
 	_, ok := core.child_at(&doc, rec, 3)
@@ -193,11 +193,11 @@ quoted_and_escaped :: proc(t: ^testing.T) {
 	v, ok := core.member(&doc, rec, "a")
 	testing.expect(t, ok)
 	buf: [64]u8
-	s, _, _ := core.text(&doc, v, buf[:])
+	s, _ := core.text(&doc, v, buf[:])
 	testing.expect_value(t, s, "x,y")
 	v, ok = core.member(&doc, rec, "b")
 	testing.expect(t, ok)
-	s, _, _ = core.text(&doc, v, buf[:])
+	s, _ = core.text(&doc, v, buf[:])
 	testing.expect_value(t, s, "say \"hi\"")
 	core.destroy(&doc)
 
@@ -209,11 +209,11 @@ quoted_and_escaped :: proc(t: ^testing.T) {
 	rec, _ = first_member(&doc, 0)
 	v, ok = core.member(&doc, rec, "a")
 	testing.expect(t, ok)
-	s, _, _ = core.text(&doc, v, buf[:])
+	s, _ = core.text(&doc, v, buf[:])
 	testing.expect_value(t, s, "x\ty")
 	v, ok = core.member(&doc, rec, "b")
 	testing.expect(t, ok)
-	s, _, _ = core.text(&doc, v, buf[:])
+	s, _ = core.text(&doc, v, buf[:])
 	testing.expect_value(t, s, "z\\w")
 }
 
@@ -260,11 +260,11 @@ duplicates :: proc(t: ^testing.T) {
 	rec, _ := first_member(&doc, 0)
 	v, ok := core.member(&doc, rec, "a", .First)
 	testing.expect(t, ok)
-	s, _, _ := core.text(&doc, v, nil)
+	s, _ := core.text(&doc, v, nil)
 	testing.expect_value(t, s, "1")
 	v, ok = core.member(&doc, rec, "a", .Last)
 	testing.expect(t, ok)
-	s, _, _ = core.text(&doc, v, nil)
+	s, _ = core.text(&doc, v, nil)
 	testing.expect_value(t, s, "2")
 	core.destroy(&doc)
 
@@ -330,7 +330,7 @@ errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Bad_Structure)
 
 	b := strings.builder_make(context.temp_allocator)
-	core.render_document(strings.to_writer(&b), transmute([]u8)string("a,b\n1,2,3\n"), err)
+	core.render(strings.to_writer(&b), transmute([]u8)string("a,b\n1,2,3\n"), err)
 	testing.expectf(t, strings.contains(strings.to_string(b), "caused by"), "%q", strings.to_string(b))
 }
 
@@ -345,7 +345,7 @@ quoted_keys :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(core.span(&doc, key)), "\"a\"")
 	testing.expect_value(t, doc.nodes[doc.header].role, core.Role.Key)
 	buf: [8]u8
-	s, _, _ := core.text(&doc, key, buf[:])
+	s, _ := core.text(&doc, key, buf[:])
 	testing.expect_value(t, s, "a")
 }
 
@@ -359,7 +359,7 @@ invalid_utf8 :: proc(t: ^testing.T) {
 	rec, _ := first_member(&doc, 0)
 	cell, _ := core.member(&doc, rec, "a")
 	buf: [16]u8
-	s, _, ok := core.text(&doc, cell, buf[:])
+	s, ok := core.text(&doc, cell, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\uFFFdy")
 	key := doc.header + 1
@@ -372,7 +372,7 @@ invalid_utf8 :: proc(t: ^testing.T) {
 	testing.expect_value(t, terr.kind, core.Document_Error_Kind.None)
 	trec, _ := first_member(&tsv, 0)
 	tcell, _ := core.member(&tsv, trec, "a")
-	s, _, ok = core.text(&tsv, tcell, buf[:])
+	s, ok = core.text(&tsv, tcell, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\uFFFdy")
 	testing.expect(t, core.key_equals(&tsv, tsv.header + 1, "a"))
@@ -382,7 +382,7 @@ invalid_utf8 :: proc(t: ^testing.T) {
 	tkey, tkerr := build(tkey_src, .Tsv, {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&tkey)
 	testing.expect_value(t, tkerr.kind, core.Document_Error_Kind.None)
-	kt, _, kok := core.text(&tkey, tkey.header + 1, buf[:])
+	kt, kok := core.text(&tkey, tkey.header + 1, buf[:])
 	testing.expect(t, kok)
 	testing.expect_value(t, kt, "\uFFFdh")
 	testing.expect(t, core.key_equals(&tkey, tkey.header + 1, kt))
@@ -467,13 +467,13 @@ quoted_cell_text :: proc(t: ^testing.T) {
 	rec, _ := first_member(&doc, 0)
 	buf: [8]u8
 	plain, _ := core.member(&doc, rec, "a")
-	s, _, ok := core.text(&doc, plain, buf[:])
+	s, ok := core.text(&doc, plain, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "1")
 	testing.expect_value(t, core.number(&doc, plain).kind, core.Number_Kind.Wide)
 	testing.expect_value(t, core.resolve(&doc, plain, {infer = true}), core.Kind.String)
 	escaped, _ := core.member(&doc, rec, "b")
-	s, _, ok = core.text(&doc, escaped, buf[:])
+	s, ok = core.text(&doc, escaped, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\"y")
 	testing.expect_value(t, core.number(&doc, escaped).kind, core.Number_Kind.Wide)
@@ -484,7 +484,7 @@ quoted_cell_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, err2.kind, core.Document_Error_Kind.None)
 	erec, _ := first_member(&empty, 0)
 	ecell, _ := core.member(&empty, erec, "a")
-	s, _, ok = core.text(&empty, ecell, buf[:])
+	s, ok = core.text(&empty, ecell, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "")
 	testing.expect_value(t, core.resolve(&empty, ecell, {infer = true}), core.Kind.String)
@@ -499,7 +499,7 @@ escaped_cell_text :: proc(t: ^testing.T) {
 	rec, _ := first_member(&doc, 0)
 	buf: [8]u8
 	cell, _ := core.member(&doc, rec, "a")
-	s, _, ok := core.text(&doc, cell, buf[:])
+	s, ok := core.text(&doc, cell, buf[:])
 	testing.expect(t, ok)
 	want := []u8{'1', 0, '2'}
 	testing.expect_value(t, s, string(want))
@@ -510,7 +510,7 @@ escaped_cell_text :: proc(t: ^testing.T) {
 	core.child_next(&it)
 	rec2, _ = core.child_next(&it)
 	cell2, _ := core.member(&doc, rec2, "a")
-	s, _, ok = core.text(&doc, cell2, buf[:])
+	s, ok = core.text(&doc, cell2, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\ty")
 	testing.expect_value(t, core.resolve(&doc, cell2, {infer = true}), core.Kind.String)
@@ -529,7 +529,7 @@ tolerated_cell_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.number(&doc, num).kind, core.Number_Kind.Int)
 	testing.expect_value(t, core.resolve(&doc, num, {infer = true}), core.Kind.Number)
 	bad, _ := core.member(&doc, rec, "b")
-	s, _, ok := core.text(&doc, bad, buf[:])
+	s, ok := core.text(&doc, bad, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\uFFFdy")
 	testing.expect_value(t, core.number(&doc, bad).kind, core.Number_Kind.Wide)
@@ -546,7 +546,7 @@ tolerated_cell_text :: proc(t: ^testing.T) {
 	core.child_next(&it)
 	second, _ = core.child_next(&it)
 	bcell, _ := core.member(&tsv_doc, second, "a")
-	s, _, ok = core.text(&tsv_doc, bcell, buf[:])
+	s, ok = core.text(&tsv_doc, bcell, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\uFFFdy")
 }
@@ -563,7 +563,7 @@ empty_tail_cell :: proc(t: ^testing.T) {
 	cell, _ := core.child_next(&it)
 	testing.expect_value(t, core.resolve(&doc, cell, {infer = true}), core.Kind.Null)
 	testing.expect_value(t, core.number(&doc, cell).kind, core.Number_Kind.Wide)
-	s, _, ok := core.text(&doc, cell, nil)
+	s, ok := core.text(&doc, cell, nil)
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "")
 }
@@ -653,7 +653,7 @@ header_only :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.length(&doc, doc.header), 2)
 	for text, i in ([]string{"a", "b"}) {
 		cell := doc.header + 1 + core.Node_Index(i)
-		s, _, _ := core.text(&doc, cell, nil)
+		s, _ := core.text(&doc, cell, nil)
 		testing.expect_value(t, s, text)
 		testing.expect(t, core.key_equals(&doc, cell, text))
 	}
@@ -701,8 +701,7 @@ empty_and_ragged_header_cells :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 }
 
-// Duplicate header names: `.First` returns the first column, `.Last` the last, and `.All` starts at the first, with
-// `member_all` returning both.
+// Duplicate header names: `.First` returns the first column, `.Last` the last, with `member_all` returning both.
 @(test)
 duplicate_header_modes :: proc(t: ^testing.T) {
 	doc, err := build("a,a\n1,2\n", .Csv)
@@ -715,9 +714,6 @@ duplicate_header_modes :: proc(t: ^testing.T) {
 	v, ok = core.member(&doc, rec, "a", .Last)
 	testing.expect(t, ok)
 	testing.expect_value(t, v, rec + 2)
-	v, ok = core.member(&doc, rec, "a", .All)
-	testing.expect(t, ok)
-	testing.expect_value(t, v, rec + 1)
 	it := core.member_all(&doc, rec, "a")
 	got: [4]core.Node_Index
 	n := 0
@@ -775,7 +771,7 @@ plain_quoted_check :: proc(t: ^testing.T, src, cell: string, $S: dsv.Spec) {
 		return
 	}
 	buf: [64]u8
-	kt, _, ok := core.text(&doc, doc.header + 1, buf[:])
+	kt, ok := core.text(&doc, doc.header + 1, buf[:])
 	testing.expectf(t, ok && kt == cell, "%q: key text %q want %q", src, kt, cell)
 	testing.expectf(t, core.key_equals(&doc, doc.header + 1, kt), "%q: key_equals(%q) false", src, kt)
 	rec, _ := first_member(&doc, 0)
@@ -797,11 +793,11 @@ plain_quoted_keys :: proc(t: ^testing.T) {
 	rec, _ := first_member(&doc, 0)
 	v1, ok1 := core.member(&doc, rec, "\"q\"", .First)
 	testing.expect(t, ok1)
-	s, _, _ := core.text(&doc, v1, nil)
+	s, _ := core.text(&doc, v1, nil)
 	testing.expect_value(t, s, "1")
 	v2, ok2 := core.member(&doc, rec, "q", .First)
 	testing.expect(t, ok2)
-	s, _, _ = core.text(&doc, v2, nil)
+	s, _ = core.text(&doc, v2, nil)
 	testing.expect_value(t, s, "2")
 	it := core.member_all(&doc, rec, "q")
 	n := 0
@@ -849,7 +845,7 @@ generated_keys_agree :: proc(t: ^testing.T) {
 					break
 				}
 				buf: [256]u8
-				kt, _, kok := core.text(&doc, key, buf[:])
+				kt, kok := core.text(&doc, key, buf[:])
 				if !testing.expectf(t, kok, "round %d: key text failed", round) {
 					break root
 				}
@@ -890,7 +886,7 @@ dialect_options :: proc(t: ^testing.T) {
 	rec, _ := first_member(&doc, 0)
 	v, ok := core.member(&doc, rec, "b")
 	testing.expect(t, ok)
-	s, _, _ := core.text(&doc, v, nil)
+	s, _ := core.text(&doc, v, nil)
 	testing.expect_value(t, s, "2,3")
 
 	// Plain has no quotes and no escapes, so a quote and a backslash are cell bytes, and its default delimiter is a
@@ -901,11 +897,11 @@ dialect_options :: proc(t: ^testing.T) {
 	prec, _ := first_member(&plain, 0)
 	pv, pok := core.member(&plain, prec, "a")
 	testing.expect(t, pok)
-	s, _, _ = core.text(&plain, pv, nil)
+	s, _ = core.text(&plain, pv, nil)
 	testing.expect_value(t, s, "\"q\"")
 	pv, pok = core.member(&plain, prec, "b")
 	testing.expect(t, pok)
-	s, _, _ = core.text(&plain, pv, nil)
+	s, _ = core.text(&plain, pv, nil)
 	testing.expect_value(t, s, "x\\ty")
 	// Plain reads a quote delimiter as text, since it has no quoted field.
 	if pd, pderr := build("a\"b\n1\"2\n", .Plain, {delimiter = '"'}); testing.expectf(t, pderr.kind == .None, "quote delimiter: %v", pderr) {
@@ -920,7 +916,7 @@ dialect_options :: proc(t: ^testing.T) {
 	tv, tok := core.member(&tsv, trec, "a")
 	testing.expect(t, tok)
 	buf: [8]u8
-	s, _, _ = core.text(&tsv, tv, buf[:])
+	s, _ = core.text(&tsv, tv, buf[:])
 	testing.expect_value(t, s, "x\ty")
 }
 
@@ -935,7 +931,7 @@ comment_lines :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.length(&doc, 0), 1)
 	rec, _ := first_member(&doc, 0)
 	v, _ := core.member(&doc, rec, "b")
-	s, _, _ := core.text(&doc, v, nil)
+	s, _ := core.text(&doc, v, nil)
 	testing.expect_value(t, s, "2")
 
 	// The comment byte inside a quoted field, or elsewhere in a line, is a cell byte.
@@ -945,10 +941,10 @@ comment_lines :: proc(t: ^testing.T) {
 	rec2, _ := first_member(&doc2, 0)
 	v2, _ := core.member(&doc2, rec2, "a")
 	buf: [16]u8
-	s, _, _ = core.text(&doc2, v2, buf[:])
+	s, _ = core.text(&doc2, v2, buf[:])
 	testing.expect_value(t, s, "x\n#y")
 	v2, _ = core.member(&doc2, rec2, "b")
-	s, _, _ = core.text(&doc2, v2, nil)
+	s, _ = core.text(&doc2, v2, nil)
 	testing.expect_value(t, s, "z#w")
 
 	// A comment line before the header is skipped, and a text ending inside a comment line has no record.
@@ -970,13 +966,50 @@ header_cell_is_a_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.number(&doc, h + 1).kind, core.Number_Kind.Wide)
 	testing.expect_value(t, core.resolve(&doc, h + 1, {infer = true}), core.Kind.String)
 	buf: [8]u8
-	s, _, ok := core.text(&doc, h + 1, buf[:])
+	s, ok := core.text(&doc, h + 1, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "12.5")
 	testing.expect(t, core.key_equals(&doc, h + 1, "12.5"))
 	// A value cell of the record is still a number.
 	rec, _ := first_member(&doc, 0)
 	testing.expect_value(t, core.number(&doc, rec + 1).kind, core.Number_Kind.Int)
+}
+
+// `dsv.text` and `dsv.number` are the direct readers, and `dsv.commit` writes the document's own spec and refuses
+// another one before it splices.
+@(test)
+direct_readers_and_commit :: proc(t: ^testing.T) {
+	doc, err := build("a\nx\\ty\n", .Tsv)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	rec, _ := first_member(&doc, 0)
+	cell, _ := core.member(&doc, rec, "a")
+	buf: [8]u8
+	s, ok := dsv.text(&doc, cell, buf[:])
+	testing.expect(t, ok && s == "x\ty")
+	_, ok = dsv.text(&doc, cell, buf[:1])
+	testing.expect(t, !ok)
+
+	nums, nerr := build("a,b\n42,\"7\"\n", .Csv)
+	defer core.destroy(&nums)
+	testing.expect_value(t, nerr.kind, core.Document_Error_Kind.None)
+	nrec, _ := first_member(&nums, 0)
+	num, _ := core.member(&nums, nrec, "a")
+	n := dsv.number(&nums, num)
+	testing.expect(t, n.kind == .Int && n.bits == 42)
+	quoted, _ := core.member(&nums, nrec, "b")
+	testing.expect_value(t, dsv.number(&nums, quoted).kind, core.Number_Kind.Wide)
+
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	testing.expect_value(t, core.set(&list, cell, "z").kind, core.Document_Error_Kind.None)
+	out, _, cerr := dsv.commit(&list, .Tsv)
+	testing.expectf(t, cerr.kind == .None && string(out) == "a\nz\n", "commit: %v %q", cerr, out)
+	delete(out)
+	_, _, bad := dsv.commit(&list, .Csv)
+	testing.expect_value(t, bad.kind, core.Document_Error_Kind.Bad_Spec)
+	_, _, bad = core.commit_as(&list, u8(dsv.Spec.Csv))
+	testing.expect_value(t, bad.kind, core.Document_Error_Kind.Bad_Spec)
 }
 
 @(test)
@@ -1029,23 +1062,21 @@ check_bad_option :: proc(t: ^testing.T, opts: dsv.Options, $S: dsv.Spec) {
 	testing.expect_value(t, len(doc.nodes), 0)
 }
 
-// A caller's key buffer receives the header's cells and the walk allocates none. With nil the walk allocates its own.
+// `build` writes the header's cells through the walk's key buffer, and the walk emits no token for the header row
+// itself. Its cells' `Key` tokens start at bytes 0 and 2.
 @(test)
 caller_key_buffer :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a,b\n1,2\n")
-	keys := make([]core.Token, 2)
-	defer delete(keys)
+	doc, err := dsv.build(src, .Csv)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, doc.header, core.Node_Index(1))
+	testing.expect_value(t, doc.nodes[2], core.Node{0, 1, .Plain, .Key, 0})
+	testing.expect_value(t, doc.nodes[3], core.Node{2, 1, .Plain, .Key, 0})
 	log := new(walktest.Log)
 	defer free(log)
 	regs: core.Hook_Regs
-	_, fault := dsv.walk(src, 0, .Csv, {}, log, &regs, walktest.log_hook, keys)
-	testing.expect(t, fault == nil)
-	testing.expect_value(t, keys[0], core.Token{0, 1, .Plain, .Key, 0})
-	testing.expect_value(t, keys[1], core.Token{2, 1, .Plain, .Key, 0})
-	// The walk emits no token for the header row itself, with or without the caller's buffer. Its cells' `Key` tokens
-	// start at bytes 0 and 2.
-	log^ = {}
-	_, fault = dsv.walk(src, 0, .Csv, {}, log, &regs, walktest.log_hook)
+	_, fault := dsv.walk(src, 0, .Csv, {}, log, &regs, walktest.log_hook)
 	testing.expect(t, fault == nil)
 	for tok in log.tokens[:log.n] {
 		if tok.role == .Key {
@@ -1073,7 +1104,7 @@ header_row_cells :: proc(t: ^testing.T) {
 			return
 		}
 		buf: [8]u8
-		got, _, _ := core.text(&doc, cell, buf[:])
+		got, _ := core.text(&doc, cell, buf[:])
 		testing.expect_value(t, got, s)
 		testing.expect_value(t, doc.nodes[cell].role, core.Role.Key)
 	}
@@ -1112,8 +1143,8 @@ dialect_remembered :: proc(t: ^testing.T) {
 	testing.expect_value(t, tsv.read.delimiter, u8('\t'))
 }
 
-// `text` returns the allocation a decode makes as `owned` for an escaped TSV cell, and nil for a cell that is its
-// source.
+// `text` writes a decode into the caller's buffer, and `text_clone` returns the allocation the caller frees with
+// `delete`, for an escaped TSV cell and for a cell that is its source.
 @(test)
 text_owned :: proc(t: ^testing.T) {
 	doc, err := build("a\nx\\ty\n", .Tsv)
@@ -1123,12 +1154,12 @@ text_owned :: proc(t: ^testing.T) {
 	}
 	rec, _ := first_member(&doc, 0)
 	cell, _ := core.member(&doc, rec, "a")
-	s, owned, ok := core.text(&doc, cell, nil, context.temp_allocator)
-	testing.expectf(t, ok && s == "x\ty" && owned != nil, "%q %v", s, ok)
-	delete(owned, context.temp_allocator)
-	s, owned, ok = core.text(&doc, cell, nil, context.temp_allocator)
-	testing.expect(t, ok && owned != nil)
-	delete(owned, context.temp_allocator)
+	_, ok := core.text(&doc, cell, nil)
+	testing.expect(t, !ok)
+	s: string
+	s, ok = core.text_clone(&doc, cell, context.temp_allocator)
+	testing.expectf(t, ok && s == "x\ty", "%q %v", s, ok)
+	delete(s, context.temp_allocator)
 
 	plain, perr := build("a\nxy\n", .Tsv)
 	defer core.destroy(&plain)
@@ -1137,6 +1168,9 @@ text_owned :: proc(t: ^testing.T) {
 	}
 	prec, _ := first_member(&plain, 0)
 	pcell, _ := core.member(&plain, prec, "a")
-	s, owned, ok = core.text(&plain, pcell, nil, context.temp_allocator)
-	testing.expect(t, ok && s == "xy" && owned == nil)
+	s, ok = core.text(&plain, pcell, nil)
+	testing.expect(t, ok && s == "xy")
+	s, ok = core.text_clone(&plain, pcell, context.temp_allocator)
+	testing.expect(t, ok && s == "xy")
+	delete(s, context.temp_allocator)
 }

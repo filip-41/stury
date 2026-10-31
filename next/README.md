@@ -31,6 +31,30 @@ Imports point down: `core/spell` imports no package of this tree, `core` imports
 The places where the code keeps two instances or two copies of one piece of work for speed, with the lane and the
 measured win, are listed in [docs/hotpaths.md](docs/hotpaths.md).
 
+## API
+
+The readers and writers a caller names:
+
+```odin
+core.text       :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool)
+core.text_clone :: proc(doc: ^core.Document, i: core.Node_Index, allocator := context.allocator) -> (s: string, ok: bool)
+core.float_value :: proc(doc: ^core.Document, i: core.Node_Index) -> (f64, bool)
+core.commit     :: proc(list: ^core.Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error)
+json.text       :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool)
+json.number     :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Number
+json.commit     :: proc(list: ^core.Edit_List, as: json.Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error)
+dsv.text        :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool)
+dsv.number      :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Number
+dsv.commit      :: proc(list: ^core.Edit_List, as: dsv.Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error)
+core.write_code :: proc {write_fault_code, write_document_code}
+core.render     :: proc {render_fault, render_document}
+```
+
+`text` never allocates and returns false when `buf` is too short. `text_clone` always allocates, and the caller frees
+its result with `delete(s, allocator)`. `float_value` reads `Int`, `Uint` and `Float`, and returns false for `Wide`.
+`dsv.commit` writes only the document's own spec and refuses another with `.Bad_Spec` before the splice. The exact
+signatures and every error kind are in [docs/document.md](docs/document.md).
+
 ## Make targets
 
 Run from `next/`. `ODIN` names the compiler, as in `make ODIN=/path/to/odin test`.

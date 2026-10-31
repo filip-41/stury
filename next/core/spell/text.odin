@@ -1,15 +1,13 @@
 package spell
 
 import "base:intrinsics"
-import "base:runtime"
 
 // The byte helpers the readers and decoders share: a two-pass decode into a caller's buffer, and a byte-for-byte
 // compare.
 
-// Decodes a node's bytes into `buf` or `allocator`: `d` is the decoder's initial state and `next` returns one
-// byte at a time. The decoder makes two passes, one to count the bytes and one to write them. `owned` is the
-// allocation when `buf` was too small, nil otherwise, and the caller frees it with `allocator`.
-decode_text :: proc(buf: []u8, allocator: runtime.Allocator, d: $D, $next: proc(^D) -> (u8, bool)) -> (s: string, owned: []u8, ok: bool) {
+// Decodes a node's bytes into `buf`: `d` is the decoder's initial state and `next` returns one byte at a time. The
+// decoder makes two passes, one to count the bytes and one to write them, and returns false when `buf` is too short.
+decode_text :: proc(buf: []u8, d: $D, $next: proc(^D) -> (u8, bool)) -> (s: string, ok: bool) {
 	count := 0
 	c := d
 	for {
@@ -19,14 +17,8 @@ decode_text :: proc(buf: []u8, allocator: runtime.Allocator, d: $D, $next: proc(
 		}
 		count += 1
 	}
-	dst := buf
-	if len(dst) < count {
-		fresh, err := make([]u8, count, allocator)
-		if err != nil {
-			return "", nil, false
-		}
-		dst = fresh
-		owned = fresh
+	if count > len(buf) {
+		return "", false
 	}
 	c = d
 	w := 0
@@ -35,10 +27,10 @@ decode_text :: proc(buf: []u8, allocator: runtime.Allocator, d: $D, $next: proc(
 		if !more {
 			break
 		}
-		dst[w] = b
+		buf[w] = b
 		w += 1
 	}
-	return string(dst[:w]), owned, true
+	return string(buf[:w]), true
 }
 
 // Whether byte strings `a` and `b` are equal. A length test comes first, then below 8 bytes a byte at a time, at

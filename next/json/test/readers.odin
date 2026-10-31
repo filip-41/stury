@@ -132,10 +132,10 @@ readers_refuse_containers :: proc(t: ^testing.T) {
 	doc, err := build(`{"a":[1]}`, .Json)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	_, _, ok := core.text(&doc, 0, buf[:])
+	_, ok := core.text(&doc, 0, buf[:])
 	testing.expect(t, !ok)
 	testing.expect(t, !core.key_equals(&doc, 0, "a"))
-	_, _, ok = core.text(&doc, 2, buf[:])
+	_, ok = core.text(&doc, 2, buf[:])
 	testing.expect(t, !ok)
 	testing.expect_value(t, core.kind(&doc, 0), core.Kind.Map)
 	testing.expect_value(t, core.kind(&doc, 2), core.Kind.Array)
@@ -163,7 +163,7 @@ child_at_reader :: proc(t: ^testing.T) {
 		v, ok := core.child_at(&doc, 0, i)
 		testing.expect(t, ok)
 		testing.expect_value(t, v, core.Node_Index(1 + i))
-		s, _, _ := core.text(&doc, v, nil)
+		s, _ := core.text(&doc, v, nil)
 		testing.expect_value(t, s, string([]u8{u8('a' + i)}))
 	}
 	_, ok := core.child_at(&doc, 0, 3)
@@ -343,7 +343,7 @@ readers_refuse_no_node :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(core.span(&doc, i)), 0)
 	testing.expect_value(t, core.number(&doc, i).kind, core.Number_Kind.Wide)
 	testing.expect_value(t, core.resolve(&doc, i), core.Kind.Null)
-	_, _, ok := core.text(&doc, i, buf[:])
+	_, ok := core.text(&doc, i, buf[:])
 	testing.expect(t, !ok)
 	testing.expect(t, !core.key_equals(&doc, i, "a"))
 	it := core.children(&doc, i)
@@ -530,7 +530,7 @@ facts :: proc(t: ^testing.T) {
 }
 
 
-// A walk's fault becomes `.Walk` with the fault in `inner`, and `render_document` prints both lines.
+// A walk's fault becomes `.Walk` with the fault in `inner`, and `render` prints both lines.
 @(test)
 errors :: proc(t: ^testing.T) {
 	src := `{`
@@ -540,14 +540,14 @@ errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Truncated)
 	testing.expect_value(t, len(doc.nodes), 0)
 	b := strings.builder_make(context.temp_allocator)
-	core.render_document(strings.to_writer(&b), transmute([]u8)src, err)
+	core.render(strings.to_writer(&b), transmute([]u8)src, err)
 	testing.expect_value(t, strings.to_string(b), "1:2: Input does not parse\n  caused by 1:2: Unfinished input")
 
 	doc, err = build(`{"a":1,"a":2}`, .Json, {}, true)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 7)
 	strings.builder_reset(&b)
-	core.render_document(strings.to_writer(&b), transmute([]u8)string(`{"a":1,"a":2}`), err)
+	core.render(strings.to_writer(&b), transmute([]u8)string(`{"a":1,"a":2}`), err)
 	testing.expect_value(t, strings.to_string(b), "1:8: Duplicate key")
 }
 
@@ -639,8 +639,8 @@ check_0x1e_one :: proc(t: ^testing.T, src: []u8, $S: json.Spec, text: string) ->
 }
 
 
-// A JSON document's spelling table has all five read services, and its edit table has `value`, `key` and `reads`, with
-// `,` and `:` as the separators.
+// A JSON document's spelling table has all five read services, and its edit table has `value`, `key_text` and `reads`,
+// with `,` and `:` as the separators.
 @(test)
 spelling_complete :: proc(t: ^testing.T) {
 	src := []u8{'1'}
@@ -651,7 +651,7 @@ spelling_complete :: proc(t: ^testing.T) {
 	}
 	s := doc.spelling
 	testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.resolve != nil && s.close_end != nil)
-	testing.expect(t, s.edit != nil && s.edit.value != nil && s.edit.key != nil && s.edit.reads != nil)
+	testing.expect(t, s.edit != nil && s.edit.value != nil && s.edit.key_text != nil && s.edit.reads != nil)
 	testing.expect_value(t, s.edit.member_sep, ",")
 	testing.expect_value(t, s.edit.key_sep, ":")
 }
@@ -700,13 +700,13 @@ text_refuses_containers :: proc(t: ^testing.T) {
 	// Node 0 is an array of 5 children, node 1 of 1, node 3 of 3, node 7 an object of 1 member, and
 	// `len(doc.nodes)` is past the last node.
 	for i in ([]core.Node_Index{0, 1, 3, 7, core.Node_Index(len(doc.nodes))}) {
-		s, _, ok := json.text(&doc, i, buf[:])
+		s, ok := json.text(&doc, i, buf[:])
 		testing.expectf(t, !ok && s == "", "node %d: %q, %v", i, s, ok)
 	}
-	n, _, nok := json.text(&doc, 10, buf[:])
+	n, nok := json.text(&doc, 10, buf[:])
 	testing.expect(t, nok)
 	testing.expect_value(t, n, "7")
-	s, _, ok := json.text(&doc, 11, buf[:])
+	s, ok := json.text(&doc, 11, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "s")
 }

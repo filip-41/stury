@@ -29,8 +29,9 @@ Edit_Op :: enum u8 {
 // A recorded edit. `node` names a node of the document the list was made with: a value or a key for `Set`, a
 // container for `Insert`, a value that is a member of a container for `Remove`, and any node but a key for the fact
 // edits, whose `role` says which facts they change. `at` is an insert's position, 0 through the container's length at
-// the time the edit was recorded. `key` is a member insert's name and `text` is the value, a record, a cell or a
-// fact's body, each copied into the list's allocator.
+// the time the edit was recorded. `role` is a fact edit's role, or `.Key` when an insert is a member or a set's text
+// is a decoded key name. `key` is a member insert's decoded name, and `text` is a value's source text, a record, a
+// cell, a key's decoded name for a key set, or a fact's body, each copied into the list's allocator.
 Edit :: struct {
 	node: Node_Index,
 	op:   Edit_Op,
@@ -72,13 +73,10 @@ table_doc :: #force_inline proc(doc: ^Document) -> bool {
 	return doc.spelling.edit != nil && doc.spelling.edit.record != nil
 }
 
-// Checks a recorded text as a key, a value or a table's cell. For a table's cell, an empty text is the empty cell and
-// passes without a read.
+// Checks a recorded text as a value or a table's cell. For a table's cell, an empty text is the empty cell and passes
+// without a read. A member's key is a decoded name, so no text is judged as a key.
 @(private)
-judge :: proc(doc: ^Document, text: string, allocator: runtime.Allocator, key: bool) -> Document_Error {
-	if key {
-		return doc.spelling.edit.key(doc, transmute([]u8)text, allocator)
-	}
+judge :: proc(doc: ^Document, text: string, allocator: runtime.Allocator) -> Document_Error {
 	if !table_doc(doc) {
 		return doc.spelling.edit.value(doc, transmute([]u8)text, allocator)
 	}
@@ -103,9 +101,10 @@ node_of :: proc(list: ^Edit_List, node: Node_Index) -> (doc: ^Document, n: Node,
 	return doc, doc.nodes[node], {}
 }
 
-// Makes `text` the source bytes of node `node`, a value or a key. A key's text must read as one key of the format,
-// and in a delimited text a cell is no key, so its text is checked as a value. A fact node or a container in a table
-// returns `.Bad_Index`. Runs in O(len(text)), checking the text once and copying it once.
+// Makes `text` the source bytes of node `node`, a value or a key. A key's text is its decoded name, which the commit
+// writes in the format's own spelling; a value's text is source text and must read as one value, and in a delimited
+// text a cell is no key, so its text is checked as a value. A fact node or a container in a table returns `.Bad_Index`.
+// Runs in O(len(text)), checking the text once and copying it once.
 set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error {
 	doc, n, err := node_of(list, node)
 	if err.kind != .None {
@@ -117,7 +116,10 @@ set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error 
 		return {kind = .Bad_Index}
 	}
 	// A record or a table's cell is no key: only a tree's key node reads as one.
-	if e := judge(doc, text, list.allocator, n.role == .Key && !table); e.kind != .None {
+	if n.role == .Key && !table {
+		return edit_add(list, node, .Set, .Key, 0, "", text)
+	}
+	if e := judge(doc, text, list.allocator); e.kind != .None {
 		return e
 	}
 	return edit_add(list, node, .Set, .Value, 0, "", text)
@@ -158,10 +160,10 @@ insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string,
 	}
 	table := table_doc(doc)
 	if member {
-		if e := judge(doc, key, list.allocator, true); e.kind != .None {
-			return e
+		if doc.spelling.edit.key_text == nil {
+			return {kind = .Wrong_Container}
 		}
-		if e := judge(doc, text, list.allocator, false); e.kind != .None {
+		if e := judge(doc, text, list.allocator); e.kind != .None {
 			return e
 		}
 	} else if table && container == ROOT {
@@ -174,7 +176,7 @@ insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string,
 			return {kind = .Bad_Width}
 		}
 	} else {
-		if e := judge(doc, text, list.allocator, false); e.kind != .None {
+		if e := judge(doc, text, list.allocator); e.kind != .None {
 			return e
 		}
 		// A record's width is its table's, so a cell may join it only while the count stays within the table's width.
@@ -184,7 +186,7 @@ insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string,
 			return {kind = .Bad_Width}
 		}
 	}
-	return edit_add(list, container, .Insert, .Value, u32(at), key, text)
+	return edit_add(list, container, .Insert, .Key if member else .Value, u32(at), key, text)
 }
 
 // Appends the removal edit. The commit removes the member with its key and one adjacent separator. A delimited
@@ -312,6 +314,11 @@ commit_as :: proc(list: ^Edit_List, spec: u8, allocator := context.allocator) ->
 	doc := list.doc
 	if doc == nil {
 		return nil, 0, {kind = .Bad_Index}
+	}
+	// A delimited text writes only its own dialect, since another spec would respell every cell. Refuse before any
+	// chunk is built or spliced, rather than after the output fails to read.
+	if table_doc(doc) && spec != doc.read.spec {
+		return nil, 0, {kind = .Bad_Spec}
 	}
 	chunks, _ := make([dynamic]Chunk, allocator)
 	defer delete(chunks)
@@ -756,8 +763,10 @@ write_insert :: proc(doc: ^Document, e: Edit, pos: u64, side: int, leading, tabl
 	if side < 0 {
 		push_all(text, sep_bytes) or_return
 	}
-	if e.key != nil {
-		push_all(text, e.key) or_return
+	if e.role == .Key {
+		if doc.spelling.edit.key_text == nil || !doc.spelling.edit.key_text(doc, e.key, text) {
+			return false
+		}
 		push_all(text, transmute([]u8)doc.spelling.edit.key_sep) or_return
 	}
 	push_all(text, e.text) or_return
@@ -1309,9 +1318,16 @@ tree_targets :: proc(doc: ^Document, list: ^Edit_List, text: ^[dynamic]u8, chunk
 		case .Remove:
 			push(targets, Target{node = e.node, edit = i}) or_return
 		case .Set:
-			// A set replaces the node's own bytes, apart from the comments around it.
+			// A set replaces the node's own bytes, apart from the comments around it. A key's text is its decoded name,
+			// which the format spells here.
 			from := len(text^)
-			push_all(text, e.text) or_return
+			if e.role == .Key {
+				if doc.spelling.edit.key_text == nil || !doc.spelling.edit.key_text(doc, e.text, text) {
+					return {kind = .No_Memory}, false
+				}
+			} else {
+				push_all(text, e.text) or_return
+			}
 			lo := key_start(doc.nodes[e.node])
 			push(chunks, Chunk{lo = lo, hi = lo + u64(len(span(doc, e.node))), from = from, to = len(text^)}) or_return
 			// A cell set to nothing that the removals leave as the record's only cell would read as no record.

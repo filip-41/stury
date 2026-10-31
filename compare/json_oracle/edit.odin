@@ -113,12 +113,12 @@ second_round :: proc(t: ^testing.T, src: []u8, spec: json.Spec, refused, checked
 			}
 		} else {
 			key = KEY_TEXT[spec][rand.int_max(len(KEY_TEXT[spec]))]
-			if e := core.insert(&list, c.node, at, key, text); e.kind != .None {
-				return true
-			}
 			name_ok: bool
 			name, name_ok = key_value(transmute([]u8)key, spec)
 			if !name_ok {
+				return true
+			}
+			if e := core.insert(&list, c.node, at, name, text); e.kind != .None {
 				return true
 			}
 		}
@@ -196,7 +196,7 @@ collect :: proc(doc: ^core.Document, i: core.Node_Index, path: string, c: ^Candi
 		child := path
 		if kind == .Map {
 			buf: [4096]u8
-			key, _, kok := core.text(doc, v - 1, buf[:], context.temp_allocator)
+			key, kok := core.text(doc, v - 1, buf[:])
 			if !kok {
 				return
 			}
@@ -238,7 +238,7 @@ unique_keys :: proc(doc: ^core.Document, i: core.Node_Index) -> bool {
 				break
 			}
 			buf: [4096]u8
-			key, _, kok := core.text(doc, v - 1, buf[:], context.temp_allocator)
+			key, kok := core.text(doc, v - 1, buf[:])
 			if !kok {
 				return false
 			}
@@ -288,7 +288,7 @@ key_value :: proc(text: []u8, spec: json.Spec) -> (string, bool) {
 		return "", false
 	}
 	out: [4096]u8
-	s, _, ok := core.text(&doc, 1, out[:], context.temp_allocator)
+	s, ok := core.text(&doc, 1, out[:])
 	if !ok {
 		return "", false
 	}
