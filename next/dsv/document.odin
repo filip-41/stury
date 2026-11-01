@@ -9,19 +9,29 @@ import core "../core"
 import kernel "../core/kernel"
 import build "../core/build"
 
-// dsv's document, built from the walk's tokens over the caller's bytes. A headed text is an `Array` of `Array` records
+// dsv's document, built from the walk's tokens over the caller's bytes. A headed text is an `Array` of `Map` records
 // whose first child is the header row, an `Array` of role `Key` whose cells name every record's columns. A text without
-// a header is an `Array` of `Array`s. A cell is text until a reader calls `resolve`, and the Map readers of a record
-// read its cells by their column's header cell, through `Document.header`.
+// a header is an `Array` of `Array`s. A cell is text until a reader calls `resolve`, and a headed record's shared keys
+// sit in `Document.header`.
+
+// Returns the delimiter, comment byte and `no_header` flag packed in `doc.read.opts`.
+@(private)
+read_opts :: #force_inline proc(doc: ^core.Document) -> (delimiter: u8, comment: u8, no_header: bool) {
+	return doc.read.opts[0], doc.read.opts[1], doc.read.opts[2] != 0
+}
 
 // dsv's edit services, in rodata. The three specs share this table, and each service dispatches on `doc.read.spec`,
 // since the specs differ only in how a recorded text is read.
 @(private, rodata)
 EDIT := core.Edit_Spelling {
-	record     = edit_record_at,
-	reads      = edit_reads_at,
-	comment    = edit_comment,
-	record_sep = edit_record_sep,
+	value        = edit_value_at,
+	record       = edit_record_at,
+	reads        = edit_reads_at,
+	comment      = edit_comment,
+	record_sep   = edit_record_sep,
+	cell_sep     = edit_cell_sep,
+	insert_check = edit_insert_check,
+	cut_check    = edit_cut_check,
 }
 
 // dsv's spelling services, in rodata, the same table for every spec. A service dispatches on `doc.read.spec`, since the
@@ -94,12 +104,10 @@ build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bo
 		// The reservation was refused and the node array is nil, so no hook may run.
 		return build.builder_end(&b, build.BUILDER_REGS, nil)
 	}
-	// The document stores the dialect it was read with, so every edit service judges a recorded text and writes its
+	// The document stores the options it was read with, so every edit service judges a recorded text and writes its
 	// separators the way this text reads. `spec` is what the spelling and edit services dispatch on.
 	b.doc.read.spec = u8(S)
-	b.doc.read.delimiter = delimiter_of(S, opts)
-	b.doc.read.comment = opts.comment
-	b.doc.read.no_header = opts.no_header
+	b.doc.read.opts = {delimiter_of(S, opts), opts.comment, 1 if opts.no_header else 0}
 	regs := build.BUILDER_REGS
 	// The header row is written before the walk, so the root's token steps over it and the walk's `Key` tokens name its
 	// cells. A text with no row leaves the root's next node zeroed for the hook's test.
@@ -456,7 +464,8 @@ shape_hook :: proc "contextless" (h: ^Text_Shape, s: core.Hook_Regs, t: core.Tok
 edit_record :: proc(doc: ^core.Document, src: []u8, _: runtime.Allocator, $S: Spec) -> (cells: int, err: core.Document_Error) {
 	h: Text_Shape
 	regs: core.Hook_Regs
-	_, fault := walk(src, 0, S, {no_header = true, delimiter = doc.read.delimiter, comment = doc.read.comment}, &h, &regs, shape_hook)
+	delimiter, comment, _ := read_opts(doc)
+	_, fault := walk(src, 0, S, {no_header = true, delimiter = delimiter, comment = comment}, &h, &regs, shape_hook)
 	if f, bad := fault.?; bad {
 		return 0, {kind = .Bad_Value, inner = f}
 	}
@@ -467,11 +476,112 @@ edit_record :: proc(doc: ^core.Document, src: []u8, _: runtime.Allocator, $S: Sp
 }
 
 // Validates an edit's text, strictly or with all three tolerances set. The commit reads its output strictly, then
-// tolerantly. A delimited text can write only its own dialect, so `spec` must be the document's.
+// tolerantly. A delimited text can write only its own spec and options, so `spec` must be the document's.
 @(private)
 edit_reads :: proc(doc: ^core.Document, src: []u8, tolerate: bool, _: u8, $S: Spec) -> (core.Fault, bool) {
+	delimiter, comment, no_header := read_opts(doc)
 	t := bit_set[Tolerance; u8]{.Invalid_Utf8, .Ragged, .Bare_Quote} if tolerate else {}
-	return validate(src, S, {no_header = doc.read.no_header, delimiter = doc.read.delimiter, comment = doc.read.comment, tolerate = t}).?
+	return validate(src, S, {no_header = no_header, delimiter = delimiter, comment = comment, tolerate = t}).?
+}
+
+// Returns the cell count every record of a delimited text has: its header's, its first record's, or 0 for an empty text.
+@(private)
+dsv_width :: proc(doc: ^core.Document) -> int {
+	if doc.header != 0 {
+		return core.length(doc, doc.header)
+	}
+	it := core.children(doc, core.ROOT)
+	if rec, ok := core.child_next(&it); ok {
+		return core.length(doc, rec)
+	}
+	return 0
+}
+
+// Whether `c` is the record that sets the table's width: the only record of a table with no header, or the header of a table with no data record.
+@(private)
+dsv_sole_record :: proc(doc: ^core.Document, c: core.Node_Index) -> bool {
+	if doc.header == c {
+		return core.length(doc, core.ROOT) == 0
+	}
+	return doc.header == 0 && core.length(doc, core.ROOT) == 1
+}
+
+// Returns the single-byte string of the delimiter.
+@(private)
+edit_cell_sep :: proc(doc: ^core.Document) -> string {
+	return string(doc.read.opts[:1])
+}
+
+// Checks that a cell's text is empty or exactly one cell under the document's grammar.
+@(private)
+edit_value_at :: proc(doc: ^core.Document, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
+	if len(src) == 0 {
+		return {}
+	}
+	cells, err := edit_record_at(doc, src, allocator)
+	if err.kind != .None {
+		return err
+	}
+	return {} if cells == 1 else {kind = .Bad_Value}
+}
+
+// Checks an insert into `container`: a record insert into the root must match the table's width, and a cell insert into a record must stay within the width or change a sole record.
+@(private)
+edit_insert_check :: proc(doc: ^core.Document, container: core.Node_Index, text: string, allocator: runtime.Allocator) -> core.Document_Error {
+	if container == core.ROOT {
+		cells, e := edit_record_at(doc, transmute([]u8)text, allocator)
+		if e.kind != .None {
+			return e
+		}
+		if w := dsv_width(doc); w > 0 && cells != w {
+			return {kind = .Bad_Width}
+		}
+		return {}
+	}
+	if len(text) > 0 {
+		if e := edit_value_at(doc, transmute([]u8)text, allocator); e.kind != .None {
+			return e
+		}
+	}
+	n_members := core.length(doc, container)
+	if !(n_members + 1 <= dsv_width(doc) || dsv_sole_record(doc, container)) {
+		return {kind = .Bad_Width}
+	}
+	return {}
+}
+
+// Checks removals and sets within a record: a remaining cell must read, and the record must keep the table width unless it is a sole record.
+@(private)
+edit_cut_check :: proc(doc: ^core.Document, container: core.Node_Index, cuts: []int, has_set: bool) -> core.Document_Error {
+	l := core.length(doc, container)
+	if has_set && l - len(cuts) <= 1 {
+		return {kind = .Bad_Width}
+	}
+	if len(cuts) == 0 {
+		return {}
+	}
+	if len(cuts) >= l || l >= dsv_width(doc) && !dsv_sole_record(doc, container) {
+		return {kind = .Bad_Width}
+	}
+	// A record of one cell that reads as none is refused, since an empty line is no record.
+	if len(cuts) == l - 1 {
+		left := 0
+		for left < len(cuts) && cuts[left] == left {
+			left += 1
+		}
+		cell, ok := core.child_at(doc, container, left)
+		if !ok {
+			return {kind = .Bad_Width}
+		}
+		n := doc.nodes[cell]
+		if n.n == 0 {
+			return {kind = .Bad_Width}
+		}
+		if _, comment, _ := read_opts(doc); comment != 0 && doc.src[n.lo] == comment {
+			return {kind = .Bad_Width}
+		}
+	}
+	return {}
 }
 
 // Returns the line end record `i` ends with, or an empty string when it has none.
@@ -532,7 +642,8 @@ edit_reads_at :: proc(doc: ^core.Document, src: []u8, tolerate: bool, spec: u8) 
 // A delimited text's comment spelling. It is `.Byte` with the document's comment byte, or `.None` when the byte is 0.
 @(private)
 edit_comment :: proc(doc: ^core.Document, _: u8) -> (core.Comment_Spelling, u8) {
-	return (.Byte if doc.read.comment != 0 else .None), doc.read.comment
+	_, comment, _ := read_opts(doc)
+	return (.Byte if comment != 0 else .None), comment
 }
 
 // The byte just past record `i`'s line end, CR LF included. A record at the text's end stops past its last cell. The

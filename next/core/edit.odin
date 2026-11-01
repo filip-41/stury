@@ -73,21 +73,13 @@ table_doc :: #force_inline proc(doc: ^Document) -> bool {
 	return doc.spelling.edit != nil && doc.spelling.edit.record != nil
 }
 
-// Checks a recorded text as a value or a table's cell. For a table's cell, an empty text is the empty cell and passes
-// without a read. A member's key is a decoded name, so no text is judged as a key.
+// Checks a recorded text as a value. A member's key is a decoded name, so no text is judged as a key.
 @(private)
 judge :: proc(doc: ^Document, text: string, allocator: runtime.Allocator) -> Document_Error {
-	if !table_doc(doc) {
+	if doc.spelling.edit != nil && doc.spelling.edit.value != nil {
 		return doc.spelling.edit.value(doc, transmute([]u8)text, allocator)
 	}
-	if len(text) == 0 {
-		return {}
-	}
-	cells, e := doc.spelling.edit.record(doc, transmute([]u8)text, allocator)
-	if e.kind != .None {
-		return e
-	}
-	return e if cells == 1 else {kind = .Bad_Value}
+	return {}
 }
 
 // Returns node `node` of `list`'s document, or `.Bad_Index` when the list has no document or the index is past the
@@ -102,7 +94,7 @@ node_of :: proc(list: ^Edit_List, node: Node_Index) -> (doc: ^Document, n: Node,
 }
 
 // Makes `text` the source bytes of node `node`, a value or a key. A key's text is its decoded name, which the commit
-// writes in the format's own spelling; a value's text is source text and must read as one value, and in a delimited
+// writes in the format's own spelling, a value's text is source text and must read as one value, and in a delimited
 // text a cell is no key, so its text is checked as a value. A fact node or a container in a table returns `.Bad_Index`.
 // Runs in O(len(text)), checking the text once and copying it once.
 set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error {
@@ -158,7 +150,6 @@ insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string,
 	if at < 0 || at > n_members {
 		return {kind = .Bad_Position}
 	}
-	table := table_doc(doc)
 	if member {
 		if doc.spelling.edit.key_text == nil {
 			return {kind = .Wrong_Container}
@@ -166,24 +157,13 @@ insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string,
 		if e := judge(doc, text, list.allocator); e.kind != .None {
 			return e
 		}
-	} else if table && container == ROOT {
-		// The root accepts a record of cells, whose count must equal the table's width.
-		cells, e := doc.spelling.edit.record(doc, transmute([]u8)text, list.allocator)
-		if e.kind != .None {
+	} else if doc.spelling.edit != nil && doc.spelling.edit.insert_check != nil {
+		if e := doc.spelling.edit.insert_check(doc, container, text, list.allocator); e.kind != .None {
 			return e
-		}
-		if w := table_width(doc); w > 0 && cells != w {
-			return {kind = .Bad_Width}
 		}
 	} else {
 		if e := judge(doc, text, list.allocator); e.kind != .None {
 			return e
-		}
-		// A record's width is its table's, so a cell may join it only while the count stays within the table's width.
-		// The record that sets the width may take a cell past it: the header with no data record, or the only record
-		// of a headerless table.
-		if table && !(n_members + 1 <= table_width(doc) || sole_record(doc, container)) {
-			return {kind = .Bad_Width}
 		}
 	}
 	return edit_add(list, container, .Insert, .Key if member else .Value, u32(at), key, text)
@@ -315,8 +295,8 @@ commit_as :: proc(list: ^Edit_List, spec: u8, allocator := context.allocator) ->
 	if doc == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
-	// A delimited text writes only its own dialect, since another spec would respell every cell. Refuse before any
-	// chunk is built or spliced, rather than after the output fails to read.
+	// A table format writes only the spec it was read as, since another spec would respell every cell. Refuse before
+	// any chunk is built or spliced, rather than after the output fails to read.
 	if table_doc(doc) && spec != doc.read.spec {
 		return nil, 0, {kind = .Bad_Spec}
 	}
@@ -596,37 +576,15 @@ removal_covers :: #force_inline proc(idx: ^Chunk_Index, pos: u64) -> bool {
 	return lo > 0 && spans[lo-1].hi > pos
 }
 
-// Whether `c` is the delimited text's record that sets the table's width: the only record of a table with no
-// header, or the header of a table with no data record. Such a record may change its width.
-@(private)
-sole_record :: proc(doc: ^Document, c: Node_Index) -> bool {
-	if doc.header == c { return length(doc, ROOT) == 0 }
-	return doc.header == 0 && length(doc, ROOT) == 1
-}
-
-// Returns the cell count every record of a delimited text has: its header's, its first record's, or 0 for an empty
-// text.
-@(private)
-table_width :: proc(doc: ^Document) -> int {
-	if doc.header != 0 {
-		return length(doc, doc.header)
-	}
-	it := children(doc, ROOT)
-	if rec, ok := child_next(&it); ok {
-		return length(doc, rec)
-	}
-	return 0
-}
-
 // Whether the bytes before `pos` end inside a comment, which would swallow what a splice writes there: a comment
 // whose spelling ends with no marker runs to the line's end, and a delimited text's line may also start with its
 // comment byte and hold no line end.
 @(private)
 ends_in_comment :: proc(doc: ^Document, v: Node_Index, pos: u64) -> bool {
-	if doc.read.comment != 0 && pos > 0 && pos <= u64(len(doc.src)) {
+	if style, b := comment_style(doc, doc.read.spec); style == .Byte && pos > 0 && pos <= u64(len(doc.src)) {
 		if last := doc.src[pos-1]; last != '\n' && last != '\r' {
 			lo, _ := line_of(doc.src, pos, !table_doc(doc))
-			if doc.src[lo] == doc.read.comment {
+			if doc.src[lo] == b {
 				return true
 			}
 		}
@@ -641,11 +599,11 @@ ends_in_comment :: proc(doc: ^Document, v: Node_Index, pos: u64) -> bool {
 }
 
 // Returns the first byte of member `v` of `parent`, without the comments it holds: its key's first byte or its own.
-// Only a `Map`'s member has a key node before it. A dsv root's first record follows the header row, whose last cell
+// Only an inline-key `Map`'s member has a key node before it. A dsv root's first record follows the header row, whose last cell
 // also has role `Key`, and that cell names a column, not the record.
 @(private)
 value_lo :: proc(doc: ^Document, parent, v: Node_Index) -> u64 {
-	if doc.nodes[parent].kind == .Map && doc.nodes[v-1].role == .Key {
+	if doc.header == 0 && doc.nodes[parent].kind == .Map && doc.nodes[v-1].role == .Key {
 		return key_start(doc.nodes[v-1])
 	}
 	return key_start(doc.nodes[v])
@@ -747,7 +705,6 @@ collect_entries :: proc(doc: ^Document, c: Node_Index, out: ^[dynamic]Entry) -> 
 // false when the format has no record separator.
 @(private)
 write_insert :: proc(doc: ^Document, e: Edit, pos: u64, side: int, leading, table, append: bool, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk) -> bool {
-	cell_sep: [1]u8
 	sep := doc.spelling.edit.member_sep
 	if table && e.node == ROOT {
 		if doc.spelling.edit.record_sep == nil {
@@ -755,8 +712,10 @@ write_insert :: proc(doc: ^Document, e: Edit, pos: u64, side: int, leading, tabl
 		}
 		sep = doc.spelling.edit.record_sep(doc)
 	} else if table {
-		cell_sep[0] = doc.read.delimiter
-		sep = string(cell_sep[:])
+		if doc.spelling.edit.cell_sep == nil {
+			return false
+		}
+		sep = doc.spelling.edit.cell_sep(doc)
 	}
 	sep_bytes := transmute([]u8)sep
 	from := len(text^)
@@ -931,7 +890,7 @@ fact_body_held :: proc(style: Comment_Spelling, body: []u8, line: bool) -> bool 
 // `/*body*/`. A fact that leads its line (`lead`) starts on a line of its own with the line's indent. A new head or
 // foot fact (`new`) also ends its line, and a replaced or inline one adds no trailing line end.
 @(private)
-fact_write :: proc(doc: ^Document, style: Comment_Spelling, role: Role, body: []u8, line: bool, indent: []u8, lead, new: bool, text: ^[dynamic]u8) -> bool {
+fact_write :: proc(doc: ^Document, style: Comment_Spelling, comment_byte: u8, role: Role, body: []u8, line: bool, indent: []u8, lead, new: bool, text: ^[dynamic]u8) -> bool {
 	if lead {
 		push(text, '\n') or_return
 		push_all(text, indent) or_return
@@ -947,7 +906,7 @@ fact_write :: proc(doc: ^Document, style: Comment_Spelling, role: Role, body: []
 			push_all(text, transmute([]u8)string("*/")) or_return
 		}
 	case .Byte:
-		push(text, doc.read.comment) or_return
+		push(text, comment_byte) or_return
 		push_all(text, body) or_return
 	case .None:
 		return false
@@ -964,7 +923,7 @@ fact_write :: proc(doc: ^Document, style: Comment_Spelling, role: Role, body: []
 // not counted. A source fact the output can hold stays where its bytes are: a removal takes it, a set takes the bytes inside
 // its span, and an insert beside it leaves it. Two fact edits of one node and role are `.Conflicting_Edits`.
 @(private)
-fact_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk, dropped: ^int, all_records_removed: bool, idx: ^Chunk_Index, allocator: runtime.Allocator) -> (err: Document_Error, ok: bool) {
+fact_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, comment_byte: u8, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk, dropped: ^int, all_records_removed: bool, idx: ^Chunk_Index, allocator: runtime.Allocator) -> (err: Document_Error, ok: bool) {
 	err = {kind = .No_Memory}
 	Span :: struct {
 		lo, hi: u64,
@@ -1021,7 +980,7 @@ fact_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, t
 	}
 	for e in list.edits {
 		if e.op >= .Set_Fact {
-			fact_edit_chunks(doc, list, style, e, text, chunks, dropped, all_records_removed, idx) or_return
+			fact_edit_chunks(doc, list, style, comment_byte, e, text, chunks, dropped, all_records_removed, idx) or_return
 		}
 	}
 	return {}, true
@@ -1091,7 +1050,7 @@ fact_place :: proc(doc: ^Document, e: Edit, taken: int, first_hi: u64, idx: ^Chu
 	pos := key_start(doc.nodes[e.node])
 	if table_doc(doc) && e.node == ROOT {
 		pos = text_start(doc.src, 0)
-	} else if !table_doc(doc) && e.node > 0 && doc.nodes[e.node-1].role == .Key && doc.nodes[e.node-1].kind <= .Plain {
+	} else if !table_doc(doc) && doc.header == 0 && e.node > 0 && doc.nodes[e.node-1].role == .Key && doc.nodes[e.node-1].kind <= .Plain {
 		pos = key_start(doc.nodes[e.node-1])
 	}
 	return pos
@@ -1122,7 +1081,7 @@ line_end_survives :: proc(doc: ^Document, idx: ^Chunk_Index, pos: u64) -> bool {
 // Builds the chunks of one fact edit. The facts the edit names are removed, and a set writes its body where the role
 // reads it, or drops it and counts it. A body the output cannot spell is dropped too. The facts are read once.
 @(private)
-fact_edit_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, e: Edit, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk, dropped: ^int, all_records_removed: bool, idx: ^Chunk_Index) -> bool {
+fact_edit_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, comment_byte: u8, e: Edit, text: ^[dynamic]u8, chunks: ^[dynamic]Chunk, dropped: ^int, all_records_removed: bool, idx: ^Chunk_Index) -> bool {
 	slot := fact_slot(doc, e.node, e.role, style, all_records_removed)
 	first_lo, first_hi, taken, ok := fact_take_old(doc, e, slot, chunks)
 	if !ok {
@@ -1178,7 +1137,7 @@ fact_edit_chunks :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelli
 		}
 	}
 	from := len(text^)
-	fact_write(doc, style, e.role, e.text, line, indent, lead, taken == 0 && e.role != .Comment_Inline, text) or_return
+	fact_write(doc, style, comment_byte, e.role, e.text, line, indent, lead, taken == 0 && e.role != .Comment_Inline, text) or_return
 	push(chunks, Chunk{lo = lo, hi = hi, from = from, to = len(text^), insert = taken == 0, fact = true, inline = taken == 0 && e.role == .Comment_Inline, tail = e.role == .Comment_Foot && pos >= u64(len(doc.src))}) or_return
 	if taken == 0 {
 		idx.inserts[pos] |= INSERT_FACT
@@ -1274,7 +1233,7 @@ chunk_edits :: proc(doc: ^Document, list: ^Edit_List, spec: u8, text: ^[dynamic]
 	if e, bad := edits_removed(doc, list, allocator); bad {
 		return e, false
 	}
-	style, _ := comment_style(doc, spec)
+	style, comment_byte := comment_style(doc, spec)
 	if e, good := tree_chunks(doc, list, text, chunks, allocator); !good {
 		return e, false
 	}
@@ -1300,7 +1259,7 @@ chunk_edits :: proc(doc: ^Document, list: ^Edit_List, spec: u8, text: ^[dynamic]
 		}
 	}
 	all_records_removed := table_doc(doc) && records_removed(doc, list)
-	if e, good := fact_chunks(doc, list, style, text, chunks, dropped, all_records_removed, &idx, allocator); !good {
+	if e, good := fact_chunks(doc, list, style, comment_byte, text, chunks, dropped, all_records_removed, &idx, allocator); !good {
 		return e, false
 	}
 	return {}, true
@@ -1347,12 +1306,12 @@ tree_targets :: proc(doc: ^Document, list: ^Edit_List, text: ^[dynamic]u8, chunk
 	return {}, true
 }
 
-// Collects one container's inserts and removals, checks its table width, and sorts the removal indices.
+// Collects one container's inserts and removals, runs the format's cut check, and sorts the removal indices.
 @(private)
 container_cuts :: proc(doc: ^Document, list: ^Edit_List, groups: []Target, first, last: int, table: bool, entries: ^[dynamic]Entry, cuts, inserts: ^[dynamic]int) -> (err: Document_Error, ok: bool) {
 	err = {kind = .No_Memory}
 	collect_entries(doc, groups[first].node, entries) or_return
-	empty_cell := false
+	has_set := false
 	clear(cuts)
 	clear(inserts)
 	for k in first ..< last {
@@ -1367,16 +1326,13 @@ container_cuts :: proc(doc: ^Document, list: ^Edit_List, groups: []Target, first
 			}
 			push(cuts, p) or_return
 		case .Set:
-			empty_cell = true
+			has_set = true
 		case .Set_Fact, .Remove_Fact:
 		}
 	}
-	if empty_cell && len(entries[:]) - len(cuts[:]) <= 1 {
-		return {kind = .Bad_Width}, false
-	}
 	slice.sort_by(cuts[:], proc(a, b: int) -> bool { return a < b })
-	if table && groups[first].node != ROOT && len(cuts[:]) > 0 {
-		if e, good := table_cut_check(doc, groups[first].node, entries[:], cuts[:]); !good {
+	if doc.spelling.edit != nil && doc.spelling.edit.cut_check != nil && groups[first].node != ROOT {
+		if e := doc.spelling.edit.cut_check(doc, groups[first].node, cuts[:], has_set); e.kind != .None {
 			return e, false
 		}
 	}
@@ -1440,9 +1396,10 @@ place_inserts :: proc(doc: ^Document, list: ^Edit_List, groups: []Target, insert
 			// A comment line at the cut's end needs a line of its own, and each record written before it ends with a
 			// line end. A record separator is a line end. A delimited comment line starts with the comment byte after a
 			// line end, so the byte at the cut's end is a comment exactly then.
-			if table && c == ROOT && doc.read.comment != 0 && r.hi < u64(len(doc.src)) && doc.src[r.hi] == doc.read.comment &&
-			   r.hi > 0 && doc.src[r.hi-1] == '\n' {
-				side = 1
+			if table && c == ROOT && r.hi < u64(len(doc.src)) && r.hi > 0 && doc.src[r.hi-1] == '\n' {
+				if style, b := comment_style(doc, doc.read.spec); style == .Byte && doc.src[r.hi] == b {
+					side = 1
+				}
 			}
 		}
 		if !write_insert(doc, e, r.hi, side, false, table, r.last + 1 >= len(entries), text, chunks) {
@@ -1626,26 +1583,7 @@ run_cut :: proc(doc: ^Document, c: Node_Index, entries: []Entry, a, b: int, tabl
 	return lo, hi, true
 }
 
-// Checks the removals a delimited text's record needs: it keeps a cell that reads, and its width keeps a value the
-// table can follow.
-@(private)
-table_cut_check :: proc(doc: ^Document, c: Node_Index, entries: []Entry, cuts: []int) -> (Document_Error, bool) {
-	l := len(entries)
-	if len(cuts) >= l || l >= table_width(doc) && !sole_record(doc, c) {
-		return {kind = .Bad_Width}, false
-	}
-	// A record of one cell that reads as none is refused, since an empty line is no record.
-	if len(cuts) == l - 1 {
-		left := 0
-		for left < len(cuts) && cuts[left] == left {
-			left += 1
-		}
-		if entries[left].hi == entries[left].lo {
-			return {kind = .Bad_Width}, false
-		}
-	}
-	return {}, true
-}
+
 
 // Returns the position of member node `node` among `entries`, or -1 when it is absent.
 @(private)

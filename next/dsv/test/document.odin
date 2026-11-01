@@ -19,7 +19,7 @@ first_member :: proc(doc: ^core.Document, i: core.Node_Index) -> (core.Node_Inde
 	return core.child_next(&it)
 }
 
-// A headed text is an `Array` of `Array` records whose first child is the header row, an `Array` of `Key` cells. The
+// A headed text is an `Array` of `Map` records whose first child is the header row, an `Array` of `Key` cells. The
 // header's cells are the document's keys, and a cell's node is its record's node plus one plus its column.
 @(test)
 node_layout :: proc(t: ^testing.T) {
@@ -36,7 +36,7 @@ node_layout :: proc(t: ^testing.T) {
 		{0, 3, .Array, .Key},
 		{0, 1, .Plain, .Key},
 		{2, 1, .Plain, .Key},
-		{4, 3, .Array, .Value},
+		{4, 3, .Map, .Value},
 		{4, 1, .Plain, .Value},
 		{6, 1, .Plain, .Value},
 	}
@@ -879,8 +879,8 @@ generated_keys_agree :: proc(t: ^testing.T) {
 
 // A caller sets the delimiter and comment byte at run time, and each spec has its own default.
 @(test)
-dialect_options :: proc(t: ^testing.T) {
-	// A CSV text with `;` as its delimiter reads a comma as a cell byte.
+runtime_options :: proc(t: ^testing.T) {
+	// A CSV text with semicolon as its delimiter reads a comma as a cell byte.
 	doc, err := build("a;b\n1;2,3\n", .Csv, {delimiter = ';'})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
@@ -1125,23 +1125,75 @@ header_row_cells :: proc(t: ^testing.T) {
 // A document stores the delimiter and comment byte it was built with, and an edit writes and judges by them. With a
 // zero option the document uses the spec's own delimiter and no comment.
 @(test)
-dialect_remembered :: proc(t: ^testing.T) {
+options_remembered :: proc(t: ^testing.T) {
 	plain, perr := build("a|b\n1|2\n", .Plain, {delimiter = '|', comment = '#'})
 	defer core.destroy(&plain)
 	testing.expect_value(t, perr.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, plain.read.delimiter, u8('|'))
-	testing.expect_value(t, plain.read.comment, u8('#'))
+	testing.expect_value(t, plain.read.opts[0], u8('|'))
+	testing.expect_value(t, plain.read.opts[1], u8('#'))
+	testing.expect_value(t, plain.read.opts[2], u8(0))
 
 	csv, cerr := build("a,b\n1,2\n", .Csv)
 	defer core.destroy(&csv)
 	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, csv.read.delimiter, u8(','))
-	testing.expect_value(t, csv.read.comment, u8(0))
+	testing.expect_value(t, csv.read.opts[0], u8(','))
+	testing.expect_value(t, csv.read.opts[1], u8(0))
 
 	tsv, terr := build("a\tb\n1\t2\n", .Tsv)
 	defer core.destroy(&tsv)
 	testing.expect_value(t, terr.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, tsv.read.delimiter, u8('\t'))
+	testing.expect_value(t, tsv.read.opts[0], u8('\t'))
+}
+
+// A headed record yields member key and value pairs through `pairs` and `pair_next`, with keys from the shared header row.
+// A ragged record stops at its last cell, a header-only document has no records, and a headerless record yields an empty iterator.
+@(test)
+pairs_iteration :: proc(t: ^testing.T) {
+	// Headed record: keys from header, values from record.
+	doc, err := build("a,b\n1,2\n3,4\n", .Csv)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	rec := core.Node_Index(4)
+	testing.expect_value(t, core.kind(&doc, rec), core.Kind.Map)
+	it := core.pairs(&doc, rec)
+	k1, v1, ok1 := core.pair_next(&it)
+	testing.expect(t, ok1 && k1 == 2 && v1 == 5)
+	k2, v2, ok2 := core.pair_next(&it)
+	testing.expect(t, ok2 && k2 == 3 && v2 == 6)
+	_, _, ok3 := core.pair_next(&it)
+	testing.expect(t, !ok3)
+
+	// Ragged headed record: fewer cells than columns.
+	ragged, rerr := build("a,b,c\n1\n", .Csv, {tolerate = {.Ragged}})
+	defer core.destroy(&ragged)
+	testing.expect_value(t, rerr.kind, core.Document_Error_Kind.None)
+	ragged_rec := core.Node_Index(5)
+	rit := core.pairs(&ragged, ragged_rec)
+	rk1, rv1, rok1 := core.pair_next(&rit)
+	testing.expect(t, rok1 && rk1 == 2 && rv1 == 6)
+	_, _, rok2 := core.pair_next(&rit)
+	testing.expect(t, !rok2)
+
+	// Header-only text: header is Array, ROOT is Array, pairs on either returns empty.
+	hdr_only, herr := build("a,b,c\n", .Csv)
+	defer core.destroy(&hdr_only)
+	testing.expect_value(t, herr.kind, core.Document_Error_Kind.None)
+	hit := core.pairs(&hdr_only, hdr_only.header)
+	_, _, hok := core.pair_next(&hit)
+	testing.expect(t, !hok)
+	roit := core.pairs(&hdr_only, core.ROOT)
+	_, _, rook := core.pair_next(&roit)
+	testing.expect(t, !rook)
+
+	// Headerless record: Kind is Array, pairs returns empty.
+	nh, nherr := build("1,2\n3,4\n", .Csv, {no_header = true})
+	defer core.destroy(&nh)
+	testing.expect_value(t, nherr.kind, core.Document_Error_Kind.None)
+	nh_rec := core.Node_Index(1)
+	testing.expect_value(t, core.kind(&nh, nh_rec), core.Kind.Array)
+	nhit := core.pairs(&nh, nh_rec)
+	_, _, nhok := core.pair_next(&nhit)
+	testing.expect(t, !nhok)
 }
 
 // `text` writes a decode into the caller's buffer, and `text_clone` returns the allocation the caller frees with

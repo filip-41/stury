@@ -58,12 +58,12 @@ fnv_u64 :: proc(h0: u64, v: u64) -> u64 {
 	return h
 }
 
-// The byte next's visitor adds for a value of `k`. A dsv record is an `Object` in this tree and an `Array` in next's
-// document, so both tag `a` there. An empty cell is `Null` here and an empty `Plain` cell there, so both tag `s`.
+// The byte next's visitor adds for a value of `k`. A dsv record is an `Object` in this tree and a `Map` in next's
+// document, so both tag `o`. An empty cell is `Null` here and an empty `Plain` cell there, so both tag `s`.
 value_tag :: #force_inline proc(k: core.Kind, dsv_text: bool) -> u8 {
 	switch k {
 	case .Object:
-		return 'a' if dsv_text else 'o'
+		return 'o'
 	case .Array:
 		return 'a'
 	case .String:
@@ -214,7 +214,7 @@ document_check :: proc(doc: ^core.Document, dsv_text: bool) -> u64 {
 			if !more {
 				break
 			}
-			h = fnv(h, 'a')
+			h = fnv(h, 'o')
 			h = fnv(h, 0)
 			cells := csv.children(doc, rec)
 			for {

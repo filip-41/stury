@@ -148,8 +148,8 @@ hook and the call inlines: a hook that tests a token's kind and returns folds in
 nothing compiles to no code. `validate` is the walk with such a hook.
 
 `Hook_Regs` is three words passed in the walk's argument registers from token to token. A cursor or count kept there
-needs no load or store per token. Anything larger stays behind `h`. Three words are what fit beside a walk's own
-arguments in the arm64 and x86-64 calling conventions.
+needs no load or store per token. Anything larger stays behind `h`. On arm64 all three fit beside the walk's five
+arguments in registers, while on x86-64 SysV two words spill to the stack under contextless calling.
 
 The `Action` a hook returns:
 

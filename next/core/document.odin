@@ -59,25 +59,110 @@ Child_Count :: struct {
 	count: u32,
 }
 
-// How the text was read: its spec, a delimited text's run-time dialect, and the build's depth. Every edit service
+// How the text was read: its spec, three opaque format option bytes, and the build's depth. Every edit service
 // reads it to judge a text and to spell its output.
 Read_As :: struct {
 	// The spec the text was read as, which the edit dispatcher reads. A format may point every spec at one spelling
 	// table and dispatch its edit services on this byte.
 	spec: u8,
-	// dsv's dialect: the byte between two cells and the byte that starts a comment line, 0 for none. `spelling`
-	// names the spec, so the spec and these bytes record how the text was read.
-	delimiter: u8,
-	comment:   u8,
-	// dsv's build choice: the first record is data. A commit validates an output as the text was read.
-	no_header: bool,
+	// Opaque format bytes, passed along unread by core. A format packs its run-time options into these bytes.
+	opts: [3]u8,
 	// The build's `Options.max_depth`, 0 for the default. The edit services read a value text at this depth, and a
 	// text built deeper than the default can be edited.
 	max_depth: u32,
 }
 
-// 8 bytes: the spec and dialect bytes, the header flag and the depth word.
+// 8 bytes: the spec, the three option bytes and the depth word.
 #assert(size_of(Read_As) == 8)
+
+// A `Pair_Iter` walks every (key, value) member pair of a `Map` container. `pairs` starts it and `pair_next` returns
+// each pair in source order.
+Pair_Iter :: struct {
+	doc:     ^Document,
+	key_at:  Node_Index,
+	val_at:  Node_Index,
+	key_end: Node_Index,
+	val_end: Node_Index,
+	shared:  bool,
+	done:    bool,
+}
+
+// Starts a `Pair_Iter` over the key/value pairs of `obj`. On a non-`Map` container, a scalar, or an index past the last
+// node, returns an empty iterator.
+pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter {
+	if int(obj) >= len(doc.nodes) {
+		return {doc = doc, done = true}
+	}
+	n := doc.nodes[obj]
+	if n.kind != .Map {
+		return {doc = doc, done = true}
+	}
+	if doc.header != 0 {
+		h := doc.nodes[doc.header]
+		it := Pair_Iter{
+			doc     = doc,
+			key_at  = doc.header + 1,
+			val_at  = obj + 1,
+			key_end = doc.header + Node_Index(h.n),
+			val_end = obj + Node_Index(n.n),
+			shared  = true,
+		}
+		if it.key_at >= it.key_end || it.val_at >= it.val_end {
+			it.done = true
+		}
+		return it
+	}
+	it := Pair_Iter{
+		doc     = doc,
+		key_at  = obj + 1,
+		val_at  = obj + 2,
+		key_end = obj + Node_Index(n.n),
+		val_end = obj + Node_Index(n.n),
+		shared  = false,
+	}
+	if it.key_at >= it.key_end {
+		it.done = true
+	}
+	return it
+}
+
+// Returns the next key and value node of the `Map`. For an inline-key `Map`, key and value alternate in preorder.
+// For a shared-key `Map`, keys come from `doc.header` while values advance within `obj`.
+pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool) {
+	if it.done {
+		return NO_NODE, NO_NODE, false
+	}
+	doc := it.doc
+	if it.shared {
+		if it.key_at >= it.key_end || it.val_at >= it.val_end {
+			it.done = true
+			return NO_NODE, NO_NODE, false
+		}
+		k := it.key_at
+		v := it.val_at
+		it.key_at += 1
+		n := doc.nodes[v]
+		next_v := int(v) + 1
+		if n.kind == .Array || n.kind == .Map {
+			next_v = subtree_step(int(v), n.n)
+		}
+		it.val_at = Node_Index(next_v)
+		return k, v, true
+	}
+	if it.key_at >= it.key_end {
+		it.done = true
+		return NO_NODE, NO_NODE, false
+	}
+	k := it.key_at
+	v := k + 1
+	n := doc.nodes[v]
+	next_k := int(v) + 1
+	if n.kind == .Array || n.kind == .Map {
+		next_k = subtree_step(int(v), n.n)
+	}
+	it.key_at = Node_Index(next_k)
+	return k, v, true
+}
 
 // A `Document` holds the walk's tokens over the caller's bytes, the facts beside them, and the format's `Spelling`
 // table. `src` is borrowed and must outlive the document. `nodes_alloc` is the allocation behind `nodes`, whose length
@@ -138,27 +223,30 @@ Spelling :: struct {
 }
 
 // An `Edit_Spelling` holds a format's edit services. A document's `Spelling` points at one table, and the services
-// dispatch on the document's `spec` and run-time dialect. `value` checks a text as exactly one value of the format and
+// dispatch on the document's `spec` and `opts`. `value` checks a text as exactly one value of the format and
 // spec, `record` as exactly one record, returning its cell count, and `key_text` writes a decoded member name in the
 // format's own spelling, quotes and escapes included. A member insert's key and a key set take a decoded name, so no
 // service judges a key. `reads` is the format's own read of a text with or without its tolerance set, for the check a
-// commit makes, under the output spec `spec`. Each service receives the document, so it reads the run-time dialect the
+// commit makes, under the output spec `spec`. Each service receives the document, so it reads the run-time options the
 // document holds. A text that is no value or record answers `.Bad_Value`, with the walk's fault in `inner` where there
 // is one, and `.No_Memory` when the service could not allocate.
 //
 // `member_sep` is written between two members of an object or two elements of an array, `key_sep` between a
 // member's key and its value, and `record_sep` is the line end a record insert writes, read from the document so
-// a text keeps the line end it uses. A table's cell separator is the document's `delimiter`. `comment` says how
+// a text keeps the line end it uses. A table's cell separator comes from `cell_sep`. `comment` says how
 // the output spells a comment under `spec` and is nil for a format that accepts no comment.
 Edit_Spelling :: struct {
-	value:      proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
-	key_text:   proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
-	record:     proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: Document_Error),
-	reads:      proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
-	comment:    proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
-	member_sep: string,
-	key_sep:    string,
-	record_sep: proc(doc: ^Document) -> string,
+	value:        proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
+	key_text:     proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
+	record:       proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: Document_Error),
+	reads:        proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
+	comment:      proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
+	member_sep:   string,
+	key_sep:      string,
+	record_sep:   proc(doc: ^Document) -> string,
+	cell_sep:     proc(doc: ^Document) -> string,
+	insert_check: proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
+	cut_check:    proc(doc: ^Document, container: Node_Index, cuts: []int, has_set: bool) -> Document_Error,
 }
 
 // A `Comment_Spelling` names how a format spells a comment in an output: `//` for a JSON spec that has comments, the
@@ -314,10 +402,10 @@ key_start :: #force_inline proc(n: Node) -> u64 {
 	return n.lo
 }
 
-// Returns container `i`'s `k`th member value, counted from 0: for a `Map`, the value after its `k`th key, which is
-// the node after the key. A `k` past the last member, a negative `k`, and a node that holds no members return no
+// Returns container `i`'s `k`th member value, counted from 0: for an inline-key `Map`, the value after its `k`th key,
+// which is the node after the key. A `k` past the last member, a negative `k`, and a node that holds no members return no
 // node. A container whose members are one node each is indexed, since its subtree size gives the stride: an
-// `Array`'s is its member count plus one and a `Map`'s twice its count plus one. Any other container is walked,
+// `Array`'s is its member count plus one, a shared-key `Map`'s its count plus one, and an inline-key `Map`'s twice its count plus one. Any other container is walked,
 // stepping one subtree size per member. A count that saturated `CHILDREN_MAX` is read from `Document.counts`, so
 // the stride test uses the true member count.
 child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
@@ -336,8 +424,14 @@ child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_I
 	}
 	#partial switch n.kind {
 	case .Map:
-		if int(n.n) == 2 * count + 1 {
-			return i + Node_Index(2 + 2 * k), true
+		if doc.header == 0 {
+			if int(n.n) == 2 * count + 1 {
+				return i + Node_Index(2 + 2 * k), true
+			}
+		} else {
+			if int(n.n) == count + 1 {
+				return i + Node_Index(1 + k), true
+			}
 		}
 	case .Array:
 		// The dsv header row is a child of the root that names no member, so a root with one is walked.
@@ -371,7 +465,7 @@ Child_Iter :: struct {
 	parent: Node_Index,
 	at:     Node_Index,
 	end:    Node_Index,
-	// The container is a `Map`, whose children are key/value pairs with a key of one node. A step skips the
+	// The container is an inline-key `Map`, whose children are key/value pairs with a key of one node. A step skips the
 	// value's span and then one node for the next key, with no role test: only a pair's first node is a key.
 	pairs:  bool,
 	done:   bool,
@@ -385,9 +479,9 @@ children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
 	if n.kind != .Array && n.kind != .Map {
 		return {doc = doc, parent = i, done = true}
 	}
-	it := Child_Iter{doc = doc, parent = i, end = i + Node_Index(n.n), pairs = n.kind == .Map}
+	it := Child_Iter{doc = doc, parent = i, end = i + Node_Index(n.n), pairs = n.kind == .Map && doc.header == 0}
 	j := int(i) + 1
-	if n.kind == .Map {
+	if it.pairs {
 		// The first member's key is one node.
 		j += 1
 	} else if n.role != .Key && j < int(it.end) && doc.nodes[j].role == .Key {
@@ -453,8 +547,8 @@ member :: #force_inline proc(doc: ^Document, obj: Node_Index, name: string, dups
 	}
 }
 
-// A `Member_Iter` walks every member of `obj` whose key decodes to `name`, in source order. A headed dsv record is an
-// `Array`, and its members are its cells: column `i`'s key is header cell `i`, and a cell past the header's last
+// A `Member_Iter` walks every member of `obj` whose key decodes to `name`, in source order. A headed dsv record is a
+// `Map`, and its members are its cells. Column `i`'s key is header cell `i`, and a cell past the header's last
 // matches no key. A cell's node is its record's node plus one plus its column.
 Member_Iter :: struct {
 	doc:  ^Document,
@@ -470,12 +564,12 @@ member_all :: proc(doc: ^Document, obj: Node_Index, name: string) -> Member_Iter
 		return {doc = doc, rec = NO_NODE, done = true}
 	}
 	n := doc.nodes[obj]
-	if doc.header != 0 && n.kind == .Array && n.role == .Value && obj != ROOT && obj != doc.header {
-		h := doc.nodes[doc.header]
-		return {doc = doc, at = doc.header + 1, end = doc.header + Node_Index(h.n), name = name, rec = obj}
-	}
 	if n.kind != .Map {
 		return {doc = doc, rec = NO_NODE, done = true}
+	}
+	if doc.header != 0 {
+		h := doc.nodes[doc.header]
+		return {doc = doc, at = doc.header + 1, end = doc.header + Node_Index(h.n), name = name, rec = obj}
 	}
 	return {doc = doc, at = obj + 1, end = obj + Node_Index(n.n), name = name, rec = NO_NODE}
 }

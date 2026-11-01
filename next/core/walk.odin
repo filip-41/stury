@@ -61,8 +61,9 @@ Action :: enum u8 {
 }
 
 // Three `u64` words of hook state passed in the walk's argument registers. A hook receives them and returns them
-// with its `Action`, so a cursor or count kept here needs no load or store. Three is what fits beside a walk's own
-// arguments. Anything a pointer reaches stays in the hook's state.
+// with its `Action`, so a cursor or count kept here needs no load or store. On arm64 all three fit beside the walk's
+// five arguments in registers, while on x86-64 SysV two words spill to the stack under contextless calling.
+// Anything a pointer reaches stays in the hook's state.
 Hook_Regs :: struct {
 	a, b, c: u64,
 }

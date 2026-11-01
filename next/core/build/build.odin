@@ -183,7 +183,7 @@ builder_hook_plain_refuse :: #force_inline proc "contextless" (h: ^Builder, s: c
 	return builder_step(false, false, true, false, h, s, t)
 }
 
-// Builds a keyless document. It drops every key, stores a `Map` as an `Array`, and steps over a header row written
+// Builds a keyless document. It drops every inline key, keeps a headed record as a `Map`, and steps over a header row written
 // before the walk. These are document-model rules, not a grammar's, and `builder_step`'s `$KEYLESS` holds them. The
 // key drop covers facts too (`role` past `.Key`): a fact is not a value. A row written before the walk is the root's
 // next node, role `Key` where a record is a value, and the root's token moves the cursor past it. A build that refuses
@@ -274,12 +274,6 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYL
 			}
 		}
 	}
-	flat := t
-	when KEYLESS {
-		if flat.kind == .Map {
-			flat.kind = .Array
-		}
-	}
 	if t.kind <= .Plain {
 		#no_bounds_check h.doc.nodes[a] = t
 		s.a = u64(a + 1)
@@ -302,7 +296,7 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYL
 		return s, .Next
 	}
 	if t.kind != .End {
-		#no_bounds_check h.doc.nodes[a] = flat
+		#no_bounds_check h.doc.nodes[a] = t
 		// The parent's frame, its open index above its count, is pushed, and the new container's count starts at
 		// zero.
 		when KEYLESS {

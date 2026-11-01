@@ -21,7 +21,7 @@ dialects_agree :: proc(t: ^testing.T) {
 	compared := 0
 	for _ in 0 ..< ROUNDS {
 		c := gen.pick_case()
-		gen.dialect_text(&text, c)
+		gen.options_text(&text, c)
 		for src in ([][]u8{text[:]}) {
 			compared += 1
 			if !check_dialect(t, src, c) {
@@ -40,7 +40,7 @@ dialects_agree :: proc(t: ^testing.T) {
 	fmt.printfln("seed %d: %d dialect texts compared", SEED, compared)
 }
 
-old_dialect :: proc(c: gen.Dialect_Case) -> cur.Dialect {
+old_dialect :: proc(c: gen.Options_Case) -> cur.Dialect {
 	d := cur.Dialect{delimiter = c.delim, comment = c.comment}
 	switch c.spec {
 	case .Csv:
@@ -53,7 +53,7 @@ old_dialect :: proc(c: gen.Dialect_Case) -> cur.Dialect {
 	return d
 }
 
-validate_case :: proc(src: []u8, c: gen.Dialect_Case, opts: dsv.Options) -> Maybe(core.Fault) {
+validate_case :: proc(src: []u8, c: gen.Options_Case, opts: dsv.Options) -> Maybe(core.Fault) {
 	switch c.spec {
 	case .Csv:
 		return dsv.validate(src, .Csv, opts)
@@ -65,7 +65,7 @@ validate_case :: proc(src: []u8, c: gen.Dialect_Case, opts: dsv.Options) -> Mayb
 	return nil
 }
 
-build_case :: proc(src: []u8, c: gen.Dialect_Case, opts: dsv.Options) -> (core.Document, core.Document_Error) {
+build_case :: proc(src: []u8, c: gen.Options_Case, opts: dsv.Options) -> (core.Document, core.Document_Error) {
 	switch c.spec {
 	case .Csv:
 		return dsv.build(src, .Csv, opts)
@@ -77,7 +77,7 @@ build_case :: proc(src: []u8, c: gen.Dialect_Case, opts: dsv.Options) -> (core.D
 	return {}, {}
 }
 
-check_dialect :: proc(t: ^testing.T, src: []u8, c: gen.Dialect_Case) -> bool {
+check_dialect :: proc(t: ^testing.T, src: []u8, c: gen.Options_Case) -> bool {
 	no_header := rand.int_max(3) == 0
 	old_opts := cur.Read_Opts{dialect = old_dialect(c), no_header = no_header}
 	opts := dsv.Options{no_header = no_header, delimiter = c.delim, comment = c.comment}
@@ -101,7 +101,7 @@ check_dialect :: proc(t: ^testing.T, src: []u8, c: gen.Dialect_Case) -> bool {
 	return compare(t, src, &doc, 0, &old, 0, !no_header && doc.header != 0)
 }
 
-validate_agrees :: proc(t: ^testing.T, src: []u8, c: gen.Dialect_Case, refused: bool, want: cur.Error, bad: bool, got: core.Fault) -> bool {
+validate_agrees :: proc(t: ^testing.T, src: []u8, c: gen.Options_Case, refused: bool, want: cur.Error, bad: bool, got: core.Fault) -> bool {
 	if !testing.expectf(t, refused == bad, "%q %v %v: walk %v, current tree %v", src, c.spec, c, got, want) {
 		return false
 	}

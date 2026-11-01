@@ -79,12 +79,10 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
   scalar, quotes included. It is 0 when the build did not record it. `span(ROOT)` and a whole-document writer use it
   instead of the format's `close_end`.
 - `read: Read_As` records how the text was read, in 8 bytes. Its `spec` is the spec the text was read as, in one
-  byte, so an edit service can dispatch on it when a procedure pointer carries no compile-time spec. Its `delimiter`
-  and `comment` are dsv's run-time dialect, the byte between two cells and the byte
-  that starts a comment line, 0 for none and for a JSON document. Its `no_header` is dsv's build choice that the first
-  record is data, and a commit reads its output under the same choice. Its `max_depth` is `Options.max_depth`, 0 for
-  the default: JSON's build stores it and its edit services read a recorded value at that depth, and a delimited text
-  has no depth option and leaves it 0.
+  byte, so an edit service can dispatch on it when a procedure pointer carries no compile-time spec. `opts` holds
+  three opaque format bytes, passed along unread by core, which dsv uses for its delimiter, comment byte and `no_header`
+  flag. Its `max_depth` is `Options.max_depth`, 0 for the default: JSON's build stores it and its edit services read a
+  recorded value at that depth, and a delimited text has no depth option and leaves it 0.
 - The document does not change after its build, and no reader accepts an edit. A path query's `Answer` record and its
   container-close decision are planned in `paths.md`.
 
@@ -167,8 +165,9 @@ A reader given an index no node holds answers as it does for a node of the wrong
 | `kind` | the node's `Kind` | `.Null` | its own kind |
 | `span` | the node's source bytes | nil | its own bytes |
 | `length` | the member count | 0 | 0 |
-| `children`, `member_all`, `facts_of`, `fact_next` | a walk, or a body | an empty walk | an empty walk |
+| `children`, `member_all`, `pairs`, `facts_of`, `fact_next` | a walk, or a body | an empty walk | an empty walk |
 | `child_next`, `child_at`, `member`, `member_next` | a node or false | false | false |
+| `pair_next` | a key and value node or false | false | false |
 | `key_equals` | whether a key decodes to a name | false | false |
 | `text` | the node's text, and whether it read | `false` | `false` |
 | `number` | a `Number` | `.Wide` | `.Wide` |
@@ -184,16 +183,22 @@ pair out. `length` returns a container's child count and 0 for a scalar. The cou
 is no member, so `length` of a headed text's root is its record count. A count that saturated `CHILDREN_MAX` is read
 from `Document.counts` by binary search.
 
-`children` starts a `Child_Iter` over a container's member values and `child_next` returns them one at a time. A `Map`
-steps a key node and a value's subtree per member, and a value's key is the node before it. An `Array` steps one
-subtree per member, and a leading child of role `Key` is the root's header row, which a root of role `Value` skips. The
-header row's own role is `Key`, so it skips no cell.
+`children` starts a `Child_Iter` over a container's member values and `child_next` returns them one at a time. An
+inline-key `Map` steps a key node and a value's subtree per member, and a value's key is the node before it. A
+shared-key `Map` steps through value nodes directly. An `Array` steps one subtree per member, and a leading child of role
+`Key` is the root's header row, which a root of role `Value` skips. The header row's own role is `Key`, so it skips no
+cell.
 
 `child_at(doc, i, k)` returns the member `child_next` would reach at step `k`. It indexes when every member is one
-node, at `i + 2 + 2k` in a `Map` whose `n` is twice its count plus one and at `i + 1 + k` in an `Array` whose `n` is
-its count plus one. A count that saturated `CHILDREN_MAX` is read from `Document.counts`, so the stride test uses the
-true count; any other container is walked. A negative `k`, a scalar, a miss and a `k` past the last member return no
-node.
+node: at `i + 2 + 2k` in an inline-key `Map` whose `n` is twice its count plus one, at `i + 1 + k` in a shared-key
+`Map` whose `n` is its count plus one, and at `i + 1 + k` in an `Array` whose `n` is its count plus one. A count that
+saturated `CHILDREN_MAX` is read from `Document.counts`, so the stride test uses the true count; any other container is
+walked. A negative `k`, a scalar, a miss and a `k` past the last member return no node.
+
+`pairs` starts a `Pair_Iter` over a `Map` container's key/value member pairs and `pair_next` yields `(key, val, ok)` in
+source order. For an inline-key `Map`, key and value alternate in preorder. For a shared-key `Map`, keys come from
+`doc.header` while values step through the record's cells. A non-`Map` container, scalar, or out of range index yields
+an empty iterator.
 
 `member(doc, obj, name, dups := .Last)` returns the value of the member whose key decodes to `name`: `.First` the
 first match, `.Last` the last, while `member_all` yields every match in source order. A headed dsv record's members
@@ -268,13 +273,17 @@ backslash is an escape, and a `Plain` cell has neither.
 
 ```odin
 Edit_Spelling :: struct {
-	value:      proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
-	key_text:   proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
-	record:     proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: Document_Error),
-	reads:      proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
-	comment:    proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
-	member_sep, key_sep: string,
-	record_sep: proc(doc: ^Document) -> string,
+	value:        proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
+	key_text:     proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
+	record:       proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: Document_Error),
+	reads:        proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
+	comment:      proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
+	member_sep:   string,
+	key_sep:      string,
+	record_sep:   proc(doc: ^Document) -> string,
+	cell_sep:     proc(doc: ^Document) -> string,
+	insert_check: proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
+	cut_check:    proc(doc: ^Document, container: Node_Index, cuts: []int, has_set: bool) -> Document_Error,
 }
 ```
 
@@ -282,10 +291,10 @@ Edit_Spelling :: struct {
 line. Under `Line` a body holding a line end is written as `/* */`, so a line comment cannot end its line early. JSON's
 table supplies `value`, `key_text`, `reads` and `comment`, with `member_sep` `","` and `key_sep` `":"`, and its
 `comment` is `.Line` for `Jsonc` and `Json5` and `.None` for `Json`. It has no `record` and no `record_sep`, so a
-document whose edit table lacks `record` holds a tree's values. dsv's table supplies `record`, `reads`, `comment` and
-`record_sep`, and no `value` or `key_text`, so a dsv document holds a table. Its `record_sep` is the first line end the
-text has for a record, else its header's, else LF. A table's cell separator is `read.delimiter` and its comment marker
-is `read.comment`.
+document whose edit table lacks `record` holds a tree's values. dsv's table supplies `value`, `record`, `reads`,
+`comment`, `cell_sep`, `insert_check`, `cut_check` and `record_sep`, and no `key_text`, so a dsv document holds a
+table. Its `record_sep` is the first line end the text has for a record, else its header's, else LF. Its cell separator
+is given by `cell_sep` and its comment marker by `comment`.
 
 A reader reaches the table only where it must: `text` and `key_equals` for a marked node, `number` for every scalar,
 `resolve` for every node, `close_end` for a container whose span is read, and the edit services for every recorded or
@@ -315,16 +324,17 @@ A delimited text is an `Array` of records whose first child may be the header ro
 - The root is an `Array` of role `Value`, and its readers step over the header row as over a member's key, so `length`
   counts records and `children` returns the records. `Document.header` is the header row's node, 0 for a text read
   without one.
-- A record with a header is a `Map` token that the keyless hook stores as an `Array`. Its cells are its children, each
+- A record with a header is stored as a `Kind.Map` with no inline key nodes. Its cells are its children, each
   a `Plain` token of role `Value`. No record stores a key node, so it holds one node per cell.
 - The header row is an `Array` of role `Key` whose cells are `Plain` tokens of role `Key`, one per column. Its `n` is
   its cell count plus one and its `spelling` its cell count.
 - The Map readers of a headed record resolve a cell by its column: `member` and `member_all` walk the header's cells,
-  and column `i`'s key is header cell `i`. A cell's node is its record's node plus one plus its column, so `child_at`
-  returns a cell in one step. A column past a record's last cell, as a ragged record has, names no cell.
+  and column `i`'s key is header cell `i`. `pairs` yields `(key, val)` by pairing each header cell with the record's
+  corresponding value cell. A cell's node is its record's node plus one plus its column, so `child_at` returns a cell
+  in one step. A column past a record's last cell, as a ragged record has, names no cell.
 - A header cell reads as a key node, so `key_equals`, `text`, `number` and `resolve` answer for it as for a JSON key.
-- `read.no_header` makes the first record data and every record an `Array` of `Plain` value cells, with no key node at
-  all.
+- A headerless text (`no_header` true) has no header row (`doc.header == 0`), making the first record data and every
+  record an `Array` of `Plain` value cells, with no key node at all.
 
 ## Facts
 

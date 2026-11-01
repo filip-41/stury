@@ -736,3 +736,63 @@ text_refuses_containers :: proc(t: ^testing.T) {
 	testing.expect_value(t, s, "s")
 }
 
+// `core.pairs` walks every member pair of a `Map` container in source order. An empty object yields an empty
+// iterator, nested containers step over their full subtree, duplicate keys yield both pairs, and a non-`Map`
+// container or scalar yields an empty iterator.
+@(test)
+pairs_iteration :: proc(t: ^testing.T) {
+	// Nested container values: array and object values step over their subtree.
+	doc, err := build(`{"a":[1,2],"b":{"c":3},"d":4}`, .Json)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	it := core.pairs(&doc, 0)
+	buf: [32]u8
+	k1, v1, ok1 := core.pair_next(&it)
+	s1, _ := core.text(&doc, k1, buf[:])
+	testing.expect(t, ok1 && s1 == "a" && doc.nodes[v1].kind == .Array)
+	k2, v2, ok2 := core.pair_next(&it)
+	s2, _ := core.text(&doc, k2, buf[:])
+	testing.expect(t, ok2 && s2 == "b" && doc.nodes[v2].kind == .Map)
+	k3, v3, ok3 := core.pair_next(&it)
+	s3, _ := core.text(&doc, k3, buf[:])
+	testing.expect(t, ok3 && s3 == "d" && doc.nodes[v3].kind == .Number)
+	_, _, ok4 := core.pair_next(&it)
+	testing.expect(t, !ok4)
+
+	// Empty object: returns empty iterator.
+	empty_doc, eerr := build(`{}`, .Json)
+	defer core.destroy(&empty_doc)
+	testing.expect_value(t, eerr.kind, core.Document_Error_Kind.None)
+	eit := core.pairs(&empty_doc, 0)
+	_, _, eok := core.pair_next(&eit)
+	testing.expect(t, !eok)
+
+	// Duplicate keys: both pairs are yielded in source order.
+	dup_doc, derr := build(`{"k":1,"k":2}`, .Json)
+	defer core.destroy(&dup_doc)
+	testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
+	dit := core.pairs(&dup_doc, 0)
+	dk1, dv1, dok1 := core.pair_next(&dit)
+	ds1, _ := core.text(&dup_doc, dk1, buf[:])
+	testing.expect(t, dok1 && ds1 == "k" && dv1 == 2)
+	dk2, dv2, dok2 := core.pair_next(&dit)
+	ds2, _ := core.text(&dup_doc, dk2, buf[:])
+	testing.expect(t, dok2 && ds2 == "k" && dv2 == 4)
+	_, _, dok3 := core.pair_next(&dit)
+	testing.expect(t, !dok3)
+
+	// Non-Map containers and scalars: Array, scalar, or out of range index yields empty iterator.
+	arr_doc, aerr := build(`[1,2,{"x":3}]`, .Json)
+	defer core.destroy(&arr_doc)
+	testing.expect_value(t, aerr.kind, core.Document_Error_Kind.None)
+	ait := core.pairs(&arr_doc, 0)
+	_, _, aok := core.pair_next(&ait)
+	testing.expect(t, !aok)
+	sit := core.pairs(&arr_doc, 1)
+	_, _, sok := core.pair_next(&sit)
+	testing.expect(t, !sok)
+	oit := core.pairs(&arr_doc, 999)
+	_, _, ook := core.pair_next(&oit)
+	testing.expect(t, !ook)
+}
+

@@ -199,7 +199,7 @@ read_all :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec, $HA
 // `DIRECT` picks the format's own readers, which inline for a caller that knows the format, or the format-agnostic
 // `core` readers, as dsv cells need.
 // Reads every value. `FALLBACK` false is the fast lane, which stops and returns true at the first text too long for
-// `buf`; `FALLBACK` true is the slow lane, which clones such a text and frees it. A document whose texts all fit pays
+// `buf`. `FALLBACK` true is the slow lane, which clones such a text and frees it. A document whose texts all fit pays
 // for one lane only, and a text that does not fit is read by the slow lane from the start.
 read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HASH: bool, $FALLBACK: bool) -> (long: bool) {
 	for n, i in doc.nodes {
@@ -363,7 +363,7 @@ key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 		// the column every record's cell sits at, so each record costs one indexed read.
 		first := core.NO_NODE
 		for n, i in doc.nodes {
-			if n.kind == .Array && n.role == .Value && i != 0 {
+			if (n.kind == .Map || n.kind == .Array) && n.role == .Value && i != 0 {
 				first = core.Node_Index(i)
 				break
 			}
@@ -375,7 +375,7 @@ key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 			}
 		}
 		for n, i in doc.nodes {
-			if n.kind == .Array && n.role == .Value && i != 0 {
+			if (n.kind == .Map || n.kind == .Array) && n.role == .Value && i != 0 {
 				key_objects += 1
 				hit := false
 				if col >= 0 {

@@ -1,5 +1,5 @@
 // Seeded delimited texts for the walk's tests: valid texts that use every quote, escape, line end and UTF-8 width,
-// texts in a random run-time dialect, and the bytes a mutation may write.
+// texts with random run-time options, and the bytes a mutation may write.
 package dsv_gen
 
 import "core:math/rand"
@@ -79,7 +79,7 @@ TSV_CELLS :: []string{"", "a", "\\t", "\\n", "\\r", "\\0", "\\\\", "x\\ty", "\"q
 PLAIN_CELLS :: []string{"", "a", "\"q\"", "x\\y", "12.5", "é", "😀", " sp "}
 
 // A generated text's spec, delimiter and comment byte.
-Dialect_Case :: struct {
+Options_Case :: struct {
 	spec:    dsv.Spec,
 	delim:   byte,
 	comment: byte,
@@ -87,7 +87,7 @@ Dialect_Case :: struct {
 
 // Returns a case whose spec, delimiter and comment byte are drawn from their sets, with the comment byte away from
 // the delimiter.
-pick_case :: proc() -> Dialect_Case {
+pick_case :: proc() -> Options_Case {
 	spec := rand.choice([]dsv.Spec{.Csv, .Tsv, .Plain})
 	delim := rand.choice(DELIMITERS)
 	comment: byte
@@ -105,7 +105,7 @@ pick_case :: proc() -> Dialect_Case {
 // Appends a valid text of a case to `out`: a header and records of one width, a comment line before the header and
 // now and then between records, a line end at the end or not, and now and then a BOM. A comment line holds arbitrary
 // text bytes, including a delimiter, a quote and a CR.
-dialect_text :: proc(out: ^[dynamic]u8, c: Dialect_Case) {
+options_text :: proc(out: ^[dynamic]u8, c: Options_Case) {
 	clear(out)
 	if rand.int_max(10) == 0 {
 		append(out, "\xef\xbb\xbf")

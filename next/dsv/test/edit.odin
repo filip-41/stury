@@ -132,19 +132,29 @@ edit_insert_cell :: proc(t: ^testing.T) {
 	check(t, "a,b\n", "a,b,c\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, 1, 2, string("c"))
 	})
-	// A record narrower than the header is ragged, and an edit may add a cell to it while it stays under the width.
-	check(t, "a,b\n1\n", "a,b\n1,2\n", .Csv, {tolerate = {.Ragged}}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 4, 1, string("2"))
+	// A headerless record narrower than the first record is ragged, and an edit may add a cell to it while it stays under the width.
+	check(t, "1,2\n3\n", "1,2\n3,4\n", .Csv, {no_header = true, tolerate = {.Ragged}}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 4, 1, string("4"))
 	})
-	// A record already at the table's width refuses a cell, and so does a header that two records follow.
+	// A headed record is a Map, so an array-element insert is refused as Wrong_Container. A header that records follow refuses a column.
 	doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n3,4\n"), .Csv)
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.insert(&list, 4, 2, string("9")).kind, core.Document_Error_Kind.Bad_Width)
+	testing.expect_value(t, core.insert(&list, 4, 2, string("9")).kind, core.Document_Error_Kind.Wrong_Container)
 	testing.expect_value(t, core.insert(&list, 1, 2, string("c")).kind, core.Document_Error_Kind.Bad_Width)
-	testing.expect_value(t, core.insert(&list, 4, 0, string("x,y")).kind, core.Document_Error_Kind.Bad_Value)
+	testing.expect_value(t, core.insert(&list, 4, 0, string("x,y")).kind, core.Document_Error_Kind.Wrong_Container)
 	testing.expect_value(t, len(list.edits), 0)
+
+	// A headerless record is an Array and checks cell count against the table width.
+	nh_doc, _ := dsv.build(transmute([]u8)string("1,2\n3,4\n"), .Csv, {no_header = true})
+	defer core.destroy(&nh_doc)
+	nh_list := core.edit_list_init(&nh_doc)
+	defer core.edit_list_destroy(&nh_list)
+	testing.expect_value(t, core.insert(&nh_list, 1, 2, string("9")).kind, core.Document_Error_Kind.Bad_Width)
+	testing.expect_value(t, core.insert(&nh_list, 1, 0, string("x,y")).kind, core.Document_Error_Kind.Bad_Value)
+	testing.expect_value(t, core.insert(&nh_list, 1, 9, string("7")).kind, core.Document_Error_Kind.Bad_Position)
+	testing.expect_value(t, len(nh_list.edits), 0)
 }
 
 // Two cells of one record inserted at one byte keep the order they were recorded in: the cell before the empty last
@@ -255,15 +265,22 @@ edit_errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.set(&list, 99, string("x")).kind, core.Document_Error_Kind.Bad_Index)
 	testing.expect_value(t, core.set(&list, 5, string("x,y")).kind, core.Document_Error_Kind.Bad_Value)
 	testing.expect_value(t, core.set(&list, 5, string("x\ny")).kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, core.insert(&list, 4, 0, string("x,y")).kind, core.Document_Error_Kind.Bad_Value)
+	testing.expect_value(t, core.insert(&list, 4, 0, string("x,y")).kind, core.Document_Error_Kind.Wrong_Container)
 	testing.expect_value(t, core.insert(&list, core.ROOT, 0, string("7")).kind, core.Document_Error_Kind.Bad_Width)
 	testing.expect_value(t, core.insert(&list, core.ROOT, 3, string("7,8")).kind, core.Document_Error_Kind.Bad_Position)
-	testing.expect_value(t, core.insert(&list, 4, 9, string("7")).kind, core.Document_Error_Kind.Bad_Position)
+	testing.expect_value(t, core.insert(&list, 4, 9, string("7")).kind, core.Document_Error_Kind.Wrong_Container)
 	testing.expect_value(t, core.insert(&list, 4, 0, string(`k`), string("v")).kind, core.Document_Error_Kind.Wrong_Container)
 	testing.expect_value(t, core.remove(&list, 0).kind, core.Document_Error_Kind.Bad_Index)
 	testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.Bad_Index)
 	testing.expect_value(t, core.remove(&list, 99).kind, core.Document_Error_Kind.Bad_Index)
 	testing.expect_value(t, len(list.edits), 0)
+
+	nh_doc, _ := dsv.build(transmute([]u8)string("1,2\n3,4\n"), .Csv, {no_header = true})
+	defer core.destroy(&nh_doc)
+	nh_list := core.edit_list_init(&nh_doc)
+	defer core.edit_list_destroy(&nh_list)
+	testing.expect_value(t, core.insert(&nh_list, 1, 0, string("x,y")).kind, core.Document_Error_Kind.Bad_Value)
+	testing.expect_value(t, core.insert(&nh_list, 1, 9, string("7")).kind, core.Document_Error_Kind.Bad_Position)
 
 	// An empty record text reads as no record, so inserting it is refused.
 	empty := core.edit_list_init(&doc)
@@ -354,10 +371,10 @@ edit_out_of_memory :: proc(t: ^testing.T) {
 	f.fail_at = -1
 }
 
-// The edit services use the document's dialect, so the cell separator is its delimiter, and a recorded cell or record
+// The edit services use the document's options, so the cell separator is its delimiter, and a recorded cell or record
 // is judged with its delimiter and comment byte.
 @(test)
-edit_dialect :: proc(t: ^testing.T) {
+edit_options :: proc(t: ^testing.T) {
 	// A semicolon CSV text writes semicolons, and a comma is a cell byte.
 	opts := dsv.Options{delimiter = ';'}
 	check(t, "a;b\n1;2\n", "a;b\n9;2\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
@@ -381,7 +398,7 @@ edit_dialect :: proc(t: ^testing.T) {
 		defer core.edit_list_destroy(&list)
 		testing.expect_value(t, core.set(&list, 5, string("p;q")).kind, core.Document_Error_Kind.Bad_Value)
 		testing.expect_value(t, core.set(&list, 5, string("\"p;q\"")).kind, core.Document_Error_Kind.None)
-		// An unquoted `p;q;r` is three cells, so it is no record of this two-cell table.
+		// An unquoted text with three cells is no record of this two-cell table.
 		testing.expect_value(t, core.insert(&list, core.ROOT, 0, string("p;q;r")).kind, core.Document_Error_Kind.Bad_Width)
 	}
 	// Plain has no quoting, so it cannot hold the delimiter at all.

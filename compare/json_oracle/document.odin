@@ -158,14 +158,19 @@ compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_In
 				return false
 			}
 			oit := core.children(ours, oi)
+			pit := core.pairs(ours, oi)
 			tit := cur.members(theirs, ti)
 			buf: [4096]u8
 			for {
 				ov, ov_ok := core.child_next(&oit)
+				pk, pv, pok := core.pair_next(&pit)
 				name, tv, tv_ok := cur.members(&tit)
 				if !ov_ok || !tv_ok {
-					ok = testing.expectf(t, ov_ok == tv_ok, "%q node %d: member counts", src, oi)
+					ok = testing.expectf(t, ov_ok == tv_ok && ov_ok == pok, "%q node %d: member counts", src, oi)
 					break
+				}
+				if !testing.expectf(t, pok && pk == ov - 1 && pv == ov, "%q node %d: pair (%d, %d) disagrees with child (%d, %d)", src, oi, pk, pv, ov - 1, ov) {
+					return false
 				}
 				key, kok := core.text(ours, ov - 1, buf[:])
 				if !testing.expectf(t, kok && key == name, "%q node %d: key %q, current tree %q", src, oi, key, name) {
@@ -174,6 +179,10 @@ compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_In
 				if !compare(t, src, ours, ov, theirs, tv) {
 					return false
 				}
+			}
+			if ok {
+				_, _, trailing := core.pair_next(&pit)
+				ok = testing.expectf(t, !trailing, "%q node %d: trailing pair", src, oi)
 			}
 		}
 	case .End, .Plain:

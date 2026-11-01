@@ -106,19 +106,8 @@ refuses_agree :: proc(t: ^testing.T, src: []u8, tsv: bool, old: Maybe(cur.Error)
 
 compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_Index, theirs: ^cur.Document, ti: cur.Node, headed: bool) -> bool {
 	tk, tok := cur.kind(theirs, ti)
-	record := headed && oi != core.ROOT && core.kind(ours, oi) == .Array
-	ok: bool
-	if record {
-		// A headed record is our `Array` of cells where the current tree has an object.
-		ok = testing.expectf(t, tok && tk == .Object, "%q node %d: kind %v, current tree %v", src, oi, core.kind(ours, oi), tk)
-	} else {
-		ok = testing.expectf(t, tok && kind_agrees(core.kind(ours, oi), tk), "%q node %d: kind %v, current tree %v", src, oi, core.kind(ours, oi), tk)
-	}
-	if !ok {
+	if !testing.expectf(t, tok && kind_agrees(core.kind(ours, oi), tk), "%q node %d: kind %v, current tree %v", src, oi, core.kind(ours, oi), tk) {
 		return false
-	}
-	if record {
-		return compare_members(t, src, ours, oi, theirs, ti, true)
 	}
 	switch core.kind(ours, oi) {
 	case .Array:
@@ -141,13 +130,13 @@ compare :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core.Node_In
 			}
 		}
 	case .Map:
-		return compare_members(t, src, ours, oi, theirs, ti, false)
+		return compare_members(t, src, ours, oi, theirs, ti, headed)
 	case .Plain:
-		ok = cell_agrees(t, src, ours, oi, theirs, ti)
+		return cell_agrees(t, src, ours, oi, theirs, ti)
 	case .Null, .False, .True, .Number, .String, .End:
-		ok = false
+		return false
 	}
-	return ok
+	return true
 }
 
 // Checks a record's members in order: its cells against the current tree's fields, their names against its member
@@ -161,18 +150,29 @@ compare_members :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core
 		return false
 	}
 	oit := core.children(ours, oi)
+	pit := core.pairs(ours, oi)
 	tit := cur.members(theirs, ti)
 	buf: [4096]u8
 	col := 0
 	for {
 		ov, ov_ok := core.child_next(&oit)
+		pk, pv, pok := core.pair_next(&pit)
 		name, tv, tv_ok := cur.members(&tit)
 		if !ov_ok || !tv_ok {
-			return testing.expectf(t, ov_ok == tv_ok, "%q node %d: member counts", src, oi)
+			if !testing.expectf(t, ov_ok == tv_ok && ov_ok == pok, "%q node %d: member counts", src, oi) {
+				return false
+			}
+			break
+		}
+		if !testing.expectf(t, pok && pv == ov, "%q node %d: pair_next value %d disagrees with child_next %d", src, oi, pv, ov) {
+			return false
 		}
 		key_node := ov - 1
 		if headed {
 			key_node = ours.header + 1 + core.Node_Index(col)
+		}
+		if !testing.expectf(t, pk == key_node, "%q node %d: pair_next key %d disagrees with header %d", src, oi, pk, key_node) {
+			return false
 		}
 		key, kok := core.text(ours, key_node, buf[:])
 		if !testing.expectf(t, kok && key == name, "%q node %d: key %q, current tree %q", src, oi, key, name) {
@@ -199,6 +199,8 @@ compare_members :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core
 		}
 		col += 1
 	}
+	_, _, trailing_pair := core.pair_next(&pit)
+	return testing.expectf(t, !trailing_pair, "%q node %d: trailing pair", src, oi)
 }
 
 // Checks a cell's text. The current tree resolves an empty unquoted cell to null and every other cell to a string,
