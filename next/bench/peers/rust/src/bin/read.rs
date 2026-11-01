@@ -193,7 +193,7 @@ fn dom_read(data: &[u8]) -> Result<(), String> {
         let mut c = VisitCounts::default();
         visit_sonic::<false>(&v, &mut c);
         black_box(&c);
-        Ok(())
+        Ok(v)
     })?;
     // The check is work outside the clock, on a fresh parse.
     let v = parse(data)?;
@@ -253,7 +253,7 @@ fn key_walk(v: &sonic_rs::Value, key: &str, answers: &mut usize, objects: &mut u
 // Times a sonic-rs Value parse plus the key lane: the first object's first key, then one `.get` of it per
 // object. The key is taken from the Value the lane itself parsed.
 fn key_job(data: &[u8]) -> Result<(), String> {
-    let (ns, (answers, objects, key)) = time_runs(|| {
+    let (ns, (_, answers, objects, key)) = time_runs(|| {
         let v = parse(data)?;
         let mut answers = 0;
         let mut objects = 0;
@@ -265,7 +265,7 @@ fn key_job(data: &[u8]) -> Result<(), String> {
             key_walk(&v, &key, &mut answers, &mut objects);
         }
         black_box(&answers);
-        Ok((answers, objects, key))
+        Ok((v, answers, objects, key))
     })?;
     let chk = fnv_u64(fnv_u64(fnv_bytes(CHECK_OFFSET, key.as_bytes()), answers as u64), objects as u64);
     report(

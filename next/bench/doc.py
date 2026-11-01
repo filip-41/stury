@@ -1,12 +1,13 @@
-"""doc.py: the document lanes of next/ against the other parsers, GB/s as the best round of each arm's median.
+"""doc.py: the document lanes of next/ against the other parsers, GB/s as the best round of each arm's median
+and peak RSS as the median of the rounds' kernel-tracked child maxima.
 
 Usage: python3 next/bench/doc.py [--rounds N] [FILE...]
 Arms: `next` (next/bench/doc), and yy, simd and sonic when their binary is present under next/build/bench.
 A fixture that is not plain `.json` runs only `next`, since the other parsers read plain JSON.
-Every arm's `check=` must agree before a fixture is timed. Rounds interleave the arms; the printed number is the
-best of the rounds. The runner holds next/build/bench/timing.lock and kills a child over 1 GB of RSS.
+Every arm's `check=` must agree before a fixture is timed. Rounds interleave the arms. The runner holds
+next/build/bench/timing.lock, kills a child over 1 GB of live RSS, and reports each child's peak RSS from wait4.
 """
-import fcntl, os, re, subprocess, sys, time
+import fcntl, os, re, statistics, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "fixtures")
@@ -56,15 +57,29 @@ def cmd(arm, lane, fixture):
     return [BIN[arm], *args, fixture]
 
 
+def peak_mib(ru_maxrss):
+    """Converts wait4's maximum RSS to MiB: bytes on macOS, KiB elsewhere."""
+    peak_bytes = ru_maxrss if sys.platform == "darwin" else ru_maxrss * 1024
+    return peak_bytes / (1024 * 1024)
+
+
 def run(cmdline):
-    """Runs one arm once under the RSS cap and returns (gb_per_s, check) or exits."""
+    """Runs one arm once under the RSS cap and returns (gb_per_s, check, peak MiB) or exits."""
     p = subprocess.Popen(cmdline, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=HERE)
-    while p.poll() is None:
+    while True:
+        pid, status, usage = os.wait4(p.pid, os.WNOHANG)
+        if pid == p.pid:
+            break
         rss = subprocess.run(["ps", "-o", "rss=", "-p", str(p.pid)], capture_output=True, text=True).stdout.strip()
         if rss and int(rss) > CAP_KB:
             p.kill()
+            _, killed, _ = os.wait4(p.pid, 0)
+            p.returncode = os.waitstatus_to_exitcode(killed)
+            p.communicate()
             sys.exit(f"over the memory cap: {cmdline}")
         time.sleep(0.005)
+    # wait4 reaped the child, so Popen must not wait again; its pipes still hold the output.
+    p.returncode = os.waitstatus_to_exitcode(status)
     out, err = p.communicate()
     if p.returncode != 0:
         sys.exit(f"failed {cmdline}: {err.strip()}")
@@ -72,7 +87,7 @@ def run(cmdline):
     c = re.search(r"check=(\d+)", out)
     if not g or not c:
         sys.exit(f"no gb_per_s or check from {cmdline}: {out.strip()}")
-    return float(g.group(1)), int(c.group(1))
+    return float(g.group(1)), int(c.group(1)), peak_mib(usage.ru_maxrss)
 
 
 def arms_for(name):
@@ -116,20 +131,38 @@ def main(argv):
                 print(f"check {name:22} {lane:5} " + " ".join(f"{a}={c}" for a, c in checks.items()), flush=True)
 
         for lane in LANES:
-            print(f"\n{lane} GB/s")
-            print(f"{'file':22}" + "".join(f"{a:>10}" for a in ARMS))
+            best = {name: dict.fromkeys(ARMS, 0.0) for name in files}
+            peaks = {name: {a: [] for a in ARMS} for name in files}
             for name in files:
                 f = path(name)
-                best = dict.fromkeys(ARMS, 0.0)
                 for _ in range(rounds):
                     for arm in arms_for(name):
                         if arm not in have:
                             continue
-                        best[arm] = max(best[arm], run(cmd(arm, lane, f))[0])
+                        gb, _, mib = run(cmd(arm, lane, f))
+                        best[name][arm] = max(best[name][arm], gb)
+                        peaks[name][arm].append(mib)
+
+            print(f"\n{lane} GB/s")
+            print(f"{'file':22}" + "".join(f"{a:>10}" for a in ARMS))
+            for name in files:
+                applicable = [a for a in arms_for(name) if a in have]
                 print(
                     f"{name:22}"
                     + "".join(
-                        f"{best[a]:10.3f}" if a in have and arms_for(name).count(a) else f"{'-':>10}"
+                        f"{best[name][a]:10.3f}" if a in applicable else f"{'-':>10}" for a in ARMS
+                    ),
+                    flush=True,
+                )
+
+            print(f"\n{lane} RSS MiB")
+            print(f"{'file':22}" + "".join(f"{a:>10}" for a in ARMS))
+            for name in files:
+                applicable = [a for a in arms_for(name) if a in have]
+                print(
+                    f"{name:22}"
+                    + "".join(
+                        f"{statistics.median(peaks[name][a]):10.2f}" if a in applicable else f"{'-':>10}"
                         for a in ARMS
                     ),
                     flush=True,

@@ -428,9 +428,14 @@ main :: proc() {
 	}
 	defer delete(src)
 
-	// A JSON build reserves one node per source byte (16 bytes), so nested.json's 16 MiB needs 256 MiB and
-	// the rest of the probe's allocations ride above it.
-	backing := make([]byte, 512 << 20)
+	// A JSON build reserves half the source bytes in nodes (8 bytes per source byte), so nested.json's 16 MiB
+	// needs 128 MiB and the rest of the probe's allocations ride above it. The backing is non-zeroed, so only
+	// the pages a lane touches count toward the probe's RSS.
+	backing, aerr := mem.alloc_bytes_non_zeroed(512 << 20)
+	if aerr != nil {
+		fmt.eprintln("arena backing:", aerr)
+		os.exit(1)
+	}
 	defer delete(backing)
 	a: Arena
 	mem.arena_init(&a.arena, backing)

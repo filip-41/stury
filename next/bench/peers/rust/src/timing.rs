@@ -5,12 +5,13 @@ use std::time::Instant;
 pub const WARMUP: usize = 2;
 pub const TIMED: usize = 10;
 
-// Returns the median ns of TIMED timed calls of `f` after WARMUP untimed ones, and the last call's value. Each
-// earlier value is dropped after its clock stops.
+// Returns the median ns of TIMED timed calls of `f` after WARMUP untimed ones, and the last call's value. An
+// earlier value is dropped before the next call starts, so only one call's value is live at a time.
 pub fn time_runs<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<(u128, T), String> {
     let mut times = Vec::with_capacity(TIMED);
     let mut kept = None;
     for i in 0..WARMUP + TIMED {
+        drop(kept.take());
         let t0 = Instant::now();
         let v = f()?;
         let ns = t0.elapsed().as_nanos();

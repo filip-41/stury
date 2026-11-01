@@ -378,7 +378,13 @@ main :: proc() {
 	}
 	defer delete(src)
 
-	backing := make([]byte, 512 << 20)
+	// Non-zeroed: only the pages a lane touches become resident, so peak RSS tracks the document, not the
+	// reservation.
+	backing, aerr := mem.alloc_bytes_non_zeroed(512 << 20)
+	if aerr != nil {
+		fmt.eprintln("arena backing:", aerr)
+		os.exit(1)
+	}
 	defer delete(backing)
 	a: Arena
 	mem.arena_init(&a.arena, backing)

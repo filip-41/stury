@@ -35,4 +35,6 @@ program cannot hold two packages of one name. `golden` writes the file the test 
 writes the same bytes each run. `lint` checks the oracle packages through the same copy, and
 `found_probe` against the old tree alone. `bench-doc` builds the old tree's probe and `next/bench/doc`, compares each
 lane's `check` and counts between the arms, then prints each lane's best and median GB/s for both arms with next's
-delta in percent. It holds `next/build/bench/timing.lock` and kills a child that passes 1 GB of RSS.
+delta in percent, followed by a peak RSS MiB table with min and median columns and the same deltas. RSS is each
+child's kernel-tracked maximum from `wait4`. It holds `next/build/bench/timing.lock` and kills a child that passes
+1 GB of live RSS.
