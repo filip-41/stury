@@ -66,8 +66,8 @@ A `Document` holds `src`, a borrowed `[]u8` that must outlive it and that no bui
 is a slice of `src`. A decoded text is `buf` or an allocation from the reader's allocator.
 
 - `nodes` is a `[]Node` in preorder. `nodes_alloc` is the allocation and `nodes` its length prefix, so `destroy` frees
-  it after the build cut the length to the node count. A heap build trims the unused tail where the allocator can
-  resize; an arena or another fixed allocator keeps the reservation. `facts` and `facts_alloc`, both `[]Fact`, are
+  it after the build cut the length to the node count. A build trims the unused tail where the allocator can
+  resize, and an arena does that for its last block, which is the nodes in a text with no facts. `facts` and `facts_alloc`, both `[]Fact`, are
   alike, and a document with no facts holds nil. `counts` and `counts_alloc`, both `[]Child_Count`, hold the true child
   count of every container whose count saturated `CHILDREN_MAX`, sorted by node, and are nil when no container is that
   wide.
@@ -98,26 +98,33 @@ dsv.build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := f
 ```
 
 The builder is package `core/build`, which imports `core`. Both run the walk with a builder hook, end it with
-`build.builder_end`, and store the spec in `doc.read.spec`. `build.builder_start` reserves at least 16 nodes,
-`len(src) / seed_div` when that is larger, and a stack of `depth` slots, or 1 when `depth` is 0. The hook pushes a
-frame with no capacity test, so `depth` must be at least the walk's depth limit. The node buffer is not zeroed. A
-refused allocation leaves the builder with `.No_Memory` and no nodes, and the build returns that error with no hook
-run over a nil array.
+`build.builder_end`, and store the spec in `doc.read.spec`. `build.builder_start` reserves a stack of `depth` slots, or
+1 when `depth` is 0, the `facts` it is given, and at least 16 nodes, `nodes` when that is larger. The hook pushes a
+frame with no capacity test, so `depth` must be at least the walk's depth limit. The node buffer is not zeroed, and it
+is allocated last, so an arena gets its unused tail back at `builder_end`. A refused allocation leaves the builder with
+`.No_Memory` and no nodes, and no hook runs over a nil array.
+
+A build that ends in `.No_Memory` reads the text again with `build.builder_hook_count` or
+`build.builder_hook_count_keyless`, which store nothing, and builds once more with every buffer at the size that walk
+found. So a text fails only when its document does not fit the allocator. `builder_free` shrinks each buffer before it
+frees it, since an arena ignores a free and takes a last block's tail back at a resize. A block that is not last stays
+in the arena, so a text with comments that fills an arena during its first try can fail where a counted first try
+would fit.
 
 A build chooses its hook, and the hook is compiled for that choice:
 
 | Hook | Facts | Grows | Refuses | Used by |
 |---|---|---|---|---|
 | `build.builder_hook` | yes | no | yes | JSON, a spec with comments |
-| `build.builder_hook_checked` | yes | yes | yes | every JSON spec, after a refused reservation |
 | `build.builder_hook_plain` | no | no | no | JSON, a spec with no comments |
 | `build.builder_hook_plain_refuse` | no | no | yes | the same, under `refuse_duplicates` |
 | `build.builder_hook_keyless` | no | yes | no | dsv, with no comment byte |
 | `build.builder_hook_keyless_facts` | yes | yes | no | dsv, with a comment byte |
 
-- JSON reserves the token bound, one node per source byte, and a stack of `max(MAX_DEPTH, opts.max_depth)` slots, so
-  its hook tests no capacity and grows no buffer. A text whose 16 bytes per source byte the allocator refuses is
-  retried from 16 nodes with the checked hook, and a text that then outgrows the allocator is `.No_Memory`.
+- JSON reserves `(len(src) + depth) / 2 + 16` nodes and a stack of `depth` slots, where `depth` is
+  `max(MAX_DEPTH, opts.max_depth)`, so its hook tests no capacity and grows no node buffer. Every node takes two bytes
+  of the text but an open container that stays open: a closed container its brackets, a key its colon, and a scalar
+  its comma or its parent's close. A fault ends the walk one token past that, which the 16 covers.
 - Every hook keeps the open containers as packed frames in the hook's registers: the high 32 bits of `b` are the
   innermost open container's node and its low 32 bits that container's child count, and `c` is the depth. A close
   reads its frame, writes the container's size and child count, and pops the frame below from the stack.

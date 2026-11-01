@@ -650,13 +650,14 @@ body :: proc(t: ^testing.T, doc: ^core.Document, node: core.Node_Index, role: co
 }
 
 // `Failing_Alloc` counts allocations and forwards each call to `inner`. It returns `.Out_Of_Memory` on the
-// allocation numbered `fail_at`, counting from 0, and on every allocation while `fail_all` is set. A `fail_at` of -1
-// fails none.
+// allocation numbered `fail_at`, counting from 0, on every later one while `fail_on` is set, and on every allocation
+// while `fail_all` is set. A `fail_at` of -1 fails none.
 Failing_Alloc :: struct {
 	inner:    runtime.Allocator,
 	n:        int,
 	fail_at:  int,
 	fail_all: bool,
+	fail_on:  bool,
 }
 
 @(private)
@@ -664,7 +665,7 @@ failing_alloc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignmen
 	f := (^Failing_Alloc)(data)
 	switch mode {
 	case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
-		if f.fail_all || f.n == f.fail_at {
+		if f.fail_all || f.n == f.fail_at || (f.fail_on && f.fail_at >= 0 && f.n > f.fail_at) {
 			f.n += 1
 			return nil, .Out_Of_Memory
 		}

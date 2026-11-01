@@ -47,55 +47,68 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 	if f, bad := option_fault(S, opts).?; bad {
 		return {}, {kind = .Walk, inner = f}
 	}
-	// A record is a container inside the document's array, so a dsv text nests at most two containers and 8 stack
-	// slots cover it. The node reservation is `len(src) / 2` nodes, an estimate because a cell is not always one byte,
-	// and the hook checks capacity as it grows.
-	b := build.builder_start(src, &SPELLING, refuse_duplicates, allocator, 2, 8)
+	// `header_cells` sizes the row by scanning the header record. A text with no header, or no record to read, has no
+	// row. The key buffer holds the header's cells for the walk, which then allocates none, and for a second walk if the
+	// reservation is refused. It is separate from the node array because that array moves as the walk grows it.
+	start, count := 0, 0
+	if !opts.no_header {
+		start = record_start(src, int(core.text_start(src, 0)), opts.comment)
+		if start < len(src) {
+			count = header_cells(src, start, S, opts)
+		}
+	}
+	keys: []core.Token
+	if count > 0 {
+		fresh, kerr := make([]core.Token, count, allocator)
+		if kerr != nil {
+			return {}, {kind = .No_Memory}
+		}
+		keys = fresh
+	}
+	defer if keys != nil {
+		delete(keys, allocator)
+	}
+	// The node reservation is `len(src) / 2` nodes, an estimate because a cell is not always one byte, and the hook
+	// checks capacity as it grows. A header row of `count` cells and its node follow the root.
+	doc, err := build_reserved(src, S, opts, refuse_duplicates, allocator, max(len(src) / 2, count + 2), 0, start, keys)
+	if err.kind != .No_Memory {
+		return doc, err
+	}
+	// The allocator refused the estimate or a growth. Reading the text again sizes every buffer exactly, so only a
+	// document that does not fit the allocator fails. The hook tests capacity before a close, which writes no node, so
+	// the buffer holds one node more than the text has, and `builder_end` returns it.
+	need: build.Count
+	regs: core.Hook_Regs
+	walk_keys(src, 0, S, opts, &need, &regs, build.builder_hook_count_keyless, keys)
+	return build_reserved(src, S, opts, refuse_duplicates, allocator, need.nodes + count + 2, need.facts, start, keys)
+}
+
+// Reads `src` into a builder with room for `nodes` nodes and `facts` facts, which the hooks grow past. `keys` holds a
+// token per header cell, and `start` is the header's first byte.
+@(private)
+build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, facts, start: int, keys: []core.Token) -> (core.Document, core.Document_Error) {
+	// A record is a container inside the document's array, so a dsv text nests at most two containers and 8 stack slots
+	// cover it.
+	b := build.builder_start(src, &SPELLING, refuse_duplicates, allocator, nodes, 8, facts)
+	if len(b.doc.nodes) == 0 {
+		// The reservation was refused and the node array is nil, so no hook may run.
+		return build.builder_end(&b, build.BUILDER_REGS, nil)
+	}
 	// The document stores the dialect it was read with, so every edit service judges a recorded text and writes its
 	// separators the way this text reads. `spec` is what the spelling and edit services dispatch on.
 	b.doc.read.spec = u8(S)
 	b.doc.read.delimiter = delimiter_of(S, opts)
 	b.doc.read.comment = opts.comment
 	b.doc.read.no_header = opts.no_header
-	if len(b.doc.nodes) == 0 {
-		// The reservation was refused and the node array is nil, so no hook may run.
-		doc, err := build.builder_end(&b, build.BUILDER_REGS, nil)
-		return doc, err
-	}
 	regs := build.BUILDER_REGS
-	// The header row is written before the walk, so the root's token steps over it and the walk's `Key` tokens name
-	// its cells. `header_cells` sizes the row by scanning the header record. A text with no header, or no record to
-	// read, leaves the root's next node zeroed for the hook's test.
-	count := 0
-	if !opts.no_header {
-		start := record_start(src, int(core.text_start(src, 0)), opts.comment)
-		if start < len(src) {
-			count = header_cells(src, start, S, opts)
-			if rerr := build.builder_reserve(&b, count + 2); rerr.kind != .None {
-				doc, err := build.builder_end(&b, regs, nil)
-				return doc, err
-			}
-			b.doc.nodes[1] = core.Node{lo = u64(start), kind = .Array, role = .Key}
-			build.builder_close_node(&b, count + 2, 1, u32(count))
-		}
-	}
-	if count == 0 {
-		b.doc.nodes[1] = {}
-	}
-	// The key buffer holds the header's cells for the walk, which then allocates none. It is separate from the node
-	// array because that array moves as the walk grows it, and the row's slots are filled from it after the walk.
-	keys: []core.Token
+	// The header row is written before the walk, so the root's token steps over it and the walk's `Key` tokens name its
+	// cells. A text with no row leaves the root's next node zeroed for the hook's test.
+	count := len(keys)
 	if count > 0 {
-		fresh, kerr := make([]core.Token, count, allocator)
-		if kerr != nil {
-			b.err = {kind = .No_Memory}
-			doc, err := build.builder_end(&b, regs, nil)
-			return doc, err
-		}
-		keys = fresh
-	}
-	defer if keys != nil {
-		delete(keys, allocator)
+		b.doc.nodes[1] = core.Node{lo = u64(start), kind = .Array, role = .Key}
+		build.builder_close_node(&b, count + 2, 1, u32(count))
+	} else {
+		b.doc.nodes[1] = {}
 	}
 	fault: Maybe(core.Fault)
 	if opts.comment != 0 {

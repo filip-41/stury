@@ -35,35 +35,39 @@ Builder :: struct {
 // child count 0, and the depth 0.
 BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
 
-// Returns a builder over `src`, with at least 16 nodes reserved, `len(src) / seed_div` when that is larger, and an
-// open stack of `depth` slots, or 1 when `depth` is 0. The hook pushes an open container's frame there with no
-// capacity test, so `depth` must be at least the walk's depth limit. A JSON build passes `seed_div` 1, since a text
-// makes no more tokens than bytes, and the walk's maximum depth, so its hook tests no capacity and grows neither
-// buffer. A format's `build` passes the builder to its walk with a builder hook and ends it with `builder_end`. A
-// refused allocation returns a builder whose `err` is `.No_Memory`.
-builder_start :: proc(src: []u8, spelling: ^core.Spelling, refuse_duplicates: bool, allocator: runtime.Allocator, seed_div := 8, depth := 16) -> Builder {
+// Returns a builder over `src` with an open stack of `depth` slots, or 1 when `depth` is 0, room for `facts` facts, and
+// at least 16 nodes, `nodes` when that is larger. The hook pushes an open container's frame with no capacity test, so
+// `depth` must be at least the walk's depth limit. The nodes are allocated last, so an arena gets their unused tail back
+// at `builder_end`. A format's `build` passes the builder to its walk with a builder hook and ends it with `builder_end`.
+// A refused allocation returns a builder whose `err` is `.No_Memory` and whose node array is nil.
+builder_start :: proc(src: []u8, spelling: ^core.Spelling, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0) -> Builder {
 	b := Builder{refuse = refuse_duplicates, pending = -1, last = core.NO_NODE}
 	b.doc.src = src
 	b.doc.spelling = spelling
 	b.doc.allocator = allocator
-	n := max(16, len(src) / seed_div)
+	stack, serr := make([]u64, max(1, depth), allocator)
+	if serr != nil {
+		b.err = {kind = .No_Memory}
+		return b
+	}
+	b.stack = stack
+	if facts > 0 {
+		reserved, ferr := make([]core.Fact, facts, allocator)
+		if ferr != nil {
+			b.err = {kind = .No_Memory}
+			return b
+		}
+		b.doc.facts_alloc = reserved
+	}
+	n := max(16, nodes)
 	raw, err := runtime.mem_alloc_non_zeroed(n * size_of(core.Node), align_of(core.Node), allocator)
 	if err != nil {
 		b.err = {kind = .No_Memory}
 		return b
 	}
-	nodes := ([^]core.Node)(raw_data(raw))[:n]
-	b.doc.nodes = nodes
-	b.doc.nodes_alloc = nodes
-	stack, serr := make([]u64, max(1, depth), allocator)
-	if serr != nil {
-		delete(nodes, allocator)
-		b.doc.nodes = nil
-		b.doc.nodes_alloc = nil
-		b.err = {kind = .No_Memory}
-		return b
-	}
-	b.stack = stack
+	fresh := ([^]core.Node)(raw_data(raw))[:n]
+	b.doc.nodes = fresh
+	b.doc.nodes_alloc = fresh
 	return b
 }
 
@@ -116,8 +120,8 @@ builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault))
 	if len(b.doc.facts) > 1 {
 		slice.stable_sort_by(b.doc.facts, proc(a, b: core.Fact) -> bool { return a.node < b.node })
 	}
-	// The build wrote fewer nodes and facts than it reserved. Return the tail where the allocator can resize, a caller
-	// with an arena or another fixed allocator keeps the reservation, and the document still owns the whole block.
+	// The build wrote fewer nodes and facts than it reserved. Return the tail where the allocator can resize. An arena
+	// resizes only its last block, which is the nodes in a text with no facts, and the document owns what it keeps.
 	if fresh := trim(b.doc.allocator, b.doc.nodes_alloc, n); len(fresh) == n {
 		b.doc.nodes_alloc = fresh
 		b.doc.nodes = fresh
@@ -143,20 +147,19 @@ builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault))
 	return doc, {}
 }
 
+// Frees the builder's buffers, last allocated first. An arena ignores a free and takes a last block's tail back at a
+// resize, so each buffer shrinks first and a retry after `.No_Memory` finds that room.
 @(private)
 builder_free :: proc(b: ^Builder) {
-	if b.doc.nodes_alloc != nil {
-		delete(b.doc.nodes_alloc, b.doc.allocator)
+	release :: proc(allocator: runtime.Allocator, old: []$T) {
+		if old != nil {
+			delete(trim(allocator, old, 1), allocator)
+		}
 	}
-	if b.doc.facts_alloc != nil {
-		delete(b.doc.facts_alloc, b.doc.allocator)
-	}
-	if b.doc.counts_alloc != nil {
-		delete(b.doc.counts_alloc, b.doc.allocator)
-	}
-	if b.stack != nil {
-		delete(b.stack, b.doc.allocator)
-	}
+	release(b.doc.allocator, b.doc.counts_alloc)
+	release(b.doc.allocator, b.doc.facts_alloc)
+	release(b.doc.allocator, b.doc.nodes_alloc)
+	release(b.doc.allocator, b.stack)
 	b^ = {}
 }
 
@@ -168,7 +171,7 @@ builder_hook :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs
 	return builder_step(true, false, true, false, h, s, t)
 }
 
-// Stores tokens without a capacity test, for a build whose reservation is the token bound, so the node buffer cannot
+// Stores tokens without a capacity test, for a build whose reservation covers every node, so the node buffer cannot
 // fill.
 builder_hook_plain :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return builder_step(false, false, false, false, h, s, t)
@@ -178,12 +181,6 @@ builder_hook_plain :: #force_inline proc "contextless" (h: ^Builder, s: core.Hoo
 // `builder_hook_plain` compiles the test out.
 builder_hook_plain_refuse :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return builder_step(false, false, true, false, h, s, t)
-}
-
-// Stores tokens and facts and doubles the node buffer when it is full, for a build whose reservation is an estimate.
-// A build whose token-bound reservation the allocator refused retries with this hook.
-builder_hook_checked :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	return builder_step(true, true, true, false, h, s, t)
 }
 
 // Builds a keyless document. It drops every key, stores a `Map` as an `Array`, and steps over a header row written
@@ -202,9 +199,52 @@ builder_hook_keyless_facts :: #force_inline proc "contextless" (h: ^Builder, s: 
 	return builder_step(true, true, false, true, h, s, t)
 }
 
+// What a text needs, read by a walk with `builder_hook_count` or `builder_hook_count_keyless`: its nodes, its facts and
+// its deepest nesting. `depth` is the nesting at the walk's cursor.
+Count :: struct {
+	nodes:   int,
+	facts:   int,
+	depth:   int,
+	deepest: int,
+}
+
+// Counts a text's tokens and stores nothing, for a build whose reservation was refused.
+builder_hook_count :: #force_inline proc "contextless" (h: ^Count, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	count_step(false, h, t)
+	return s, .Next
+}
+
+// Counts the tokens of a text `builder_hook_keyless` or `builder_hook_keyless_facts` would store: no key makes a node.
+builder_hook_count_keyless :: #force_inline proc "contextless" (h: ^Count, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	count_step(true, h, t)
+	return s, .Next
+}
+
+@(private)
+count_step :: #force_inline proc "contextless" ($KEYLESS: bool, h: ^Count, t: core.Token) {
+	if t.role > .Key {
+		h.facts += 1
+		return
+	}
+	when KEYLESS {
+		if t.role == .Key {
+			return
+		}
+	}
+	if t.kind == .End {
+		h.depth -= 1
+		return
+	}
+	h.nodes += 1
+	if t.kind > .Plain {
+		h.depth += 1
+		h.deepest = max(h.deepest, h.depth)
+	}
+}
+
 // Every hook runs this body. `$FACTS` false compiles out the fact branch, the pending comments and the write of the
 // last completed value, which a spec with no comments does not use. `$CHECK` false compiles out the capacity test,
-// needed only when the reservation is short of the token bound. `$REFUSE` false compiles out the duplicate-key test,
+// needed only when the reservation is an estimate. `$REFUSE` false compiles out the duplicate-key test,
 // which a build that did not ask for it does not run. `$KEYLESS` compiles in the keyless document rules above.
 @(private)
 builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYLESS: bool, h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
@@ -296,8 +336,8 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYL
 		}
 		return s, .Next
 	}
-	// A JSON text holds no more tokens than bytes and dsv's stack is sized for its records, so a close's open frame
-	// is the top of the register-held stack, and the walk emits a close only for a container it opened.
+	// The walk emits a close only for a container it opened, so a close's open frame is the top of the register-held
+	// stack.
 	open := core.Node_Index(s.b >> 32)
 	builder_close_node(h, a, open, u32(s.b))
 	when FACTS && !KEYLESS {
@@ -417,28 +457,24 @@ builder_counts :: #force_no_inline proc(h: ^Builder, n: int) -> bool {
 	return true
 }
 
-// Returns a slice of `$T` in `allocator`, twice `old`'s length, at least 8 and at least `min` long, with `old`
-// copied into it and freed. The new memory is not zeroed: the caller writes every slot before a reader reads it,
-// and a doubling copies the old ones. A caller reaches this only when its buffer is full.
+// Returns a slice of `$T` in `allocator`, twice `old`'s length, at least 8 and at least `min` long, holding `old`'s
+// values, which `old` no longer does. The new memory is not zeroed: the caller writes every slot before a reader reads
+// it. A resize lets an arena extend its last block and leave none behind. A caller reaches this only when its buffer
+// is full.
 @(private, cold)
 grow :: #force_no_inline proc "contextless" (allocator: runtime.Allocator, old: []$T, min: int) -> ([]T, bool) {
 	context = runtime.default_context()
 	n := max(min, max(8, len(old) * 2))
-	raw, err := runtime.mem_alloc_non_zeroed(n * size_of(T), align_of(T), allocator)
+	raw, err := runtime.non_zero_mem_resize(raw_data(old), len(old) * size_of(T), n * size_of(T), align_of(T), allocator)
 	if err != nil {
 		return nil, false
 	}
-	fresh := ([^]T)(raw_data(raw))[:n]
-	copy(fresh, old)
-	if old != nil {
-		delete(old, allocator)
-	}
-	return fresh, true
+	return ([^]T)(raw_data(raw))[:n], true
 }
 
 // Returns `old` shortened to `n` where the allocator can resize it, and `old` unchanged where it cannot. The caller
-// sets both the array and the allocation behind it to the result. A fixed allocator such as an arena keeps the
-// reservation, so this is an optimization for the heap and not a promise about every allocator.
+// sets both the array and the allocation behind it to the result. An arena returns the tail of its last block and keeps
+// any other block's, so this is not a promise about every allocator.
 @(private, cold)
 trim :: #force_no_inline proc (allocator: runtime.Allocator, old: []$T, n: int) -> []T {
 	if n <= 0 || n >= len(old) {
@@ -465,18 +501,6 @@ builder_grow :: #force_no_inline proc "contextless" (h: ^Builder) {
 	}
 	h.doc.nodes = fresh
 	h.doc.nodes_alloc = fresh
-}
-
-// Makes room for `n` nodes, for a format that writes its header row before its walk. Returns `.No_Memory` when a
-// growth is refused.
-builder_reserve :: #force_no_inline proc "contextless" (b: ^Builder, n: int) -> core.Document_Error {
-	for len(b.doc.nodes) < n {
-		builder_grow(b)
-		if b.err.kind != .None {
-			return b.err
-		}
-	}
-	return {}
 }
 
 // Doubles the fact buffer. A text with no facts does not call this. Returns false when a growth is refused.

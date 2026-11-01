@@ -309,9 +309,9 @@ refuse_fault_header_oom :: proc(t: ^testing.T) {
 	}
 	// The first cell `a` repeats as the 33rd cell, and the unterminated quote in the only record faults.
 	strings.write_string(&b, "\n\"x")
-	// Allocations 0 and 1 are the node array and the open stack, 2 the header's token buffer, and 3 the key table
-	// that 33 cells need.
-	f := walktest.Failing_Alloc{inner = context.allocator, fail_at = 3}
+	// Allocations 0 to 2 are the header's token buffer, the open stack and the node array, and 3 the key table that 33
+	// cells need. Every later one fails too, so the build's second try fails as well.
+	f := walktest.Failing_Alloc{inner = context.allocator, fail_at = 3, fail_on = true}
 	doc, err := dsv.build(transmute([]u8)strings.to_string(b), .Csv, {}, true, walktest.failing_allocator(&f))
 	testing.expectf(t, err.kind == core.Document_Error_Kind.No_Memory, "fail_at 3: %v at %d", err.kind, err.at)
 	core.destroy(&doc)
@@ -1174,4 +1174,27 @@ text_owned :: proc(t: ^testing.T) {
 	s, ok = core.text_clone(&plain, pcell, context.temp_allocator)
 	testing.expect(t, ok && s == "xy")
 	delete(s, context.temp_allocator)
+}
+
+// A text fits an arena of its nodes and a small stack, reading past its first reservation and past a refused growth.
+@(test)
+smallest_arena :: proc(t: ^testing.T) {
+	texts := [?]string{
+		strings.concatenate({"a,b\n", strings.repeat("1,2\n", 5000, context.temp_allocator)}, context.temp_allocator),
+		strings.concatenate({"a,b,c,d\n", strings.repeat(",,,\n", 5000, context.temp_allocator)}, context.temp_allocator),
+	}
+	for src in texts {
+		first, err := dsv.build(transmute([]u8)src, .Csv)
+		defer core.destroy(&first)
+		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+		need := len(first.nodes) * size_of(core.Node) + 512
+		backing := make([]u8, need, context.allocator)
+		defer delete(backing)
+		arena: mem.Arena
+		mem.arena_init(&arena, backing)
+		doc, derr := dsv.build(transmute([]u8)src, .Csv, {}, false, mem.arena_allocator(&arena))
+		defer core.destroy(&doc)
+		testing.expectf(t, derr.kind == .None, "%d bytes: %v", need, derr)
+		testing.expect_value(t, len(doc.nodes), len(first.nodes))
+	}
 }

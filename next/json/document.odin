@@ -54,20 +54,31 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 		at := u64(intrinsics.ptr_sub(sep, p))
 		return {}, {kind = .Walk, at = at, inner = {at = at, rules = &RULES, kind = .Bad_Char}}
 	}
-	// A JSON text makes at most one token per byte, so `len(src)` is the reservation bound, and the depth stack is
-	// `max(MAX_DEPTH, opts.max_depth)`. Neither buffer grows during the build, and `builder_end` returns the unused tail.
-	b := build.builder_start(src, &SPELLING, refuse_duplicates, allocator, 1, max(MAX_DEPTH, int(opts.max_depth)))
-	// A reservation of one node per text byte is 16 bytes per byte, and an allocator with less room refuses a text
-	// whose few nodes would fit many times over. Only that refusal reaches here, and the retry starts at 16 nodes and
-	// grows, so only a text that needs more than the allocator holds fails.
-	retry := len(b.doc.nodes) == 0 && b.err.kind == .No_Memory
-	if retry {
-		b = build.builder_start(src, &SPELLING, refuse_duplicates, allocator, max(1, len(src)), max(MAX_DEPTH, int(opts.max_depth)))
+	// Every node takes two bytes of the text but an open container that stays open, which takes one: a closed container
+	// its brackets, a key its colon, and a scalar its comma or its parent's close. A walk faults at the first byte past
+	// a token, so the last token may be missing its second byte. So a text makes at most `(len(src) + 1 + depth) / 2`
+	// nodes, the hooks test no capacity, and `builder_end` returns the unused tail.
+	depth := max(MAX_DEPTH, int(opts.max_depth))
+	doc, err := build_reserved(src, q, S, opts, refuse_duplicates, allocator, (len(src) + depth) / 2 + 16, depth, 0)
+	if err.kind != .No_Memory {
+		return doc, err
 	}
+	// The allocator refused the bound, or a fact growth. Reading the text again sizes every buffer exactly, so only a
+	// document that does not fit the allocator fails.
+	count: build.Count
+	regs: core.Hook_Regs
+	walk_from(src, q, S, opts, &count, &regs, build.builder_hook_count)
+	return build_reserved(src, q, S, opts, refuse_duplicates, allocator, count.nodes, count.deepest, count.facts)
+}
+
+// Reads the document that starts at `q` into a builder with room for `nodes` nodes, `depth` open containers and `facts`
+// facts, which must cover every node and open container the walk reaches.
+@(private)
+build_reserved :: proc(src: []u8, q: [^]u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth, facts: int) -> (core.Document, core.Document_Error) {
+	b := build.builder_start(src, &SPELLING, refuse_duplicates, allocator, nodes, depth, facts)
 	if len(b.doc.nodes) == 0 {
 		// The reservation was refused, so no hook may run over a nil node array.
-		doc, err := build.builder_end(&b, build.BUILDER_REGS, nil)
-		return doc, err
+		return build.builder_end(&b, build.BUILDER_REGS, nil)
 	}
 	// The edit dispatcher reads `doc.read.spec`, and the reads use the build's depth.
 	b.doc.read.spec = u8(S)
@@ -78,20 +89,13 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 	fault: Maybe(core.Fault)
 	stopped: bool
 	when .Comments in FEATURES[S] {
-		if retry {
-			hi, fault, stopped = walk_from(src, q, S, opts, &b, &regs, build.builder_hook_checked)
-		} else {
-			hi, fault, stopped = walk_from(src, q, S, opts, &b, &regs, build.builder_hook)
-		}
+		hi, fault, stopped = walk_from(src, q, S, opts, &b, &regs, build.builder_hook)
 	} else {
 		// A build that refuses repeats selects a separate hook, so the hook a usual build runs has no duplicate-key
 		// test.
-		switch {
-		case retry:
-			hi, fault, stopped = walk_from(src, q, S, opts, &b, &regs, build.builder_hook_checked)
-		case refuse_duplicates:
+		if refuse_duplicates {
 			hi, fault, stopped = walk_from(src, q, S, opts, &b, &regs, build.builder_hook_plain_refuse)
-		case:
+		} else {
 			hi, fault, stopped = walk_from(src, q, S, opts, &b, &regs, build.builder_hook_plain)
 		}
 	}
