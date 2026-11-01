@@ -14,20 +14,12 @@ import kernel "../core/kernel"
 // without hooks reads the run and emits nothing.
 
 // Marks the lanes of `v` that `comment` must judge one at a time: a byte past 0x7F, which its UTF-8 reader judges, a
-// control byte, which its control test judges in a spec without `.Es5`, a line end, which ends a `//` comment in
-// JSON5, and a `*`, which may close a `/* */` comment. `v - 0x20 > 0x5f` is true for a control byte and a byte past
-// 0x7F.
+// control byte, a line end among them, which its control test judges, and a `*`, which may close a `/* */` comment.
+// `v - 0x20 > 0x5f` is true for a control byte and a byte past 0x7F.
 @(private)
-comment_stops :: #force_inline proc "contextless" (v: #simd[16]u8, $S: Spec, $star: bool) -> #simd[16]u8 {
+comment_stops :: #force_inline proc "contextless" (v: #simd[16]u8, $star: bool) -> #simd[16]u8 {
 	V :: #simd[16]u8
-	when .Es5 in FEATURES[S] {
-		m := simd.lanes_gt(v, V(0x7f))
-		when !star {
-			m = simd.bit_or(m, simd.bit_or(simd.lanes_eq(v, V('\n')), simd.lanes_eq(v, V('\r'))))
-		}
-	} else {
-		m := simd.lanes_gt(v - 0x20, V(0x5f))
-	}
+	m := simd.lanes_gt(v - 0x20, V(0x5f))
 	when star {
 		m = simd.bit_or(m, simd.lanes_eq(v, V('*')))
 	}
@@ -37,10 +29,10 @@ comment_stops :: #force_inline proc "contextless" (v: #simd[16]u8, $S: Spec, $st
 // Returns the first byte from `q` that `comment` must judge one at a time, scanning 16 bytes at a step while 16 lie
 // before `end`. When none is found, returns `q` advanced by the 16-byte steps.
 @(private)
-comment_scan :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec, $star: bool) -> [^]u8 #no_bounds_check {
+comment_scan :: #force_inline proc "contextless" (q, end: [^]u8, $star: bool) -> [^]u8 #no_bounds_check {
 	q := q
 	for intrinsics.ptr_sub(end, q) >= 16 {
-		k := kernel.first_lane(comment_stops(intrinsics.unaligned_load((^#simd[16]u8)(q)), S, star))
+		k := kernel.first_lane(comment_stops(intrinsics.unaligned_load((^#simd[16]u8)(q)), star))
 		if k != 16 {
 			return q[k:]
 		}
@@ -51,12 +43,11 @@ comment_scan :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec, $star
 
 // Reads the comment at `p`, which is at a `/`. Returns one past its last byte, or the fault. A comment's bytes are
 // judged as a string's raw bytes are: UTF-8, and no control byte but a tab, and in a `/* */` comment also CR and LF,
-// else `Bad_Char` at that byte. JSON5 accepts any control byte, as its grammar does, and ends a `//` comment at
-// U+2028 and U+2029 too. A `/` that opens no comment, the text's last byte among them, faults `Bad_Char` at the `/`,
+// else `Bad_Char` at that byte, in JSON5 too, which refuses control bytes its grammar allows. JSON5 ends a `//` comment
+// at U+2028 and U+2029 too. A `/` that opens no comment, the text's last byte among them, faults `Bad_Char` at the `/`,
 // and a `/*` the text ends inside faults `Truncated`.
 @(private)
 comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
-	ES5 :: .Es5 in FEATURES[S]
 	if intrinsics.ptr_sub(end, p) < 2 {
 		return p, .Bad_Char
 	}
@@ -64,11 +55,11 @@ comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]
 	switch p[1] {
 	case '/':
 		for {
-			q = comment_scan(q, end, S, false)
+			q = comment_scan(q, end, false)
 			if q >= end || line_end(q, end, S) {
 				return q, .None
 			}
-			if !ES5 && q[0] < 0x20 && q[0] != '\t' {
+			if q[0] < 0x20 && q[0] != '\t' {
 				return q, .Bad_Char
 			}
 			if q[0] < 0x80 {
@@ -79,14 +70,14 @@ comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]
 		}
 	case '*':
 		for {
-			q = comment_scan(q, end, S, true)
+			q = comment_scan(q, end, true)
 			if q >= end {
 				return end, .Truncated
 			}
 			if q[0] == '*' && intrinsics.ptr_sub(end, q) > 1 && q[1] == '/' {
 				return q[2:], .None
 			}
-			if !ES5 && q[0] < 0x20 && q[0] != '\t' && q[0] != '\n' && q[0] != '\r' {
+			if q[0] < 0x20 && q[0] != '\t' && q[0] != '\n' && q[0] != '\r' {
 				return q, .Bad_Char
 			}
 			if q[0] < 0x80 {

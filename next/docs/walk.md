@@ -351,8 +351,8 @@ before them. A walk without hooks reads every run and emits nothing, and `valida
 document while it checks that only whitespace follows.
 
 A comment's bytes are judged as a string's raw bytes are: UTF-8, no control byte except a tab, and in a `/* */`
-comment also CR and LF. JSON5 accepts any control byte, as its grammar does. A `//` comment ends at CR or LF, and in
-JSON5 also at U+2028 or U+2029. A `/` that opens no comment is `Bad_Char` at the `/`, and a `/*` that the text ends
+comment also CR and LF. JSON5 keeps this rule, tighter than its grammar, which allows any control byte. A `//` comment
+ends at CR or LF, and in JSON5 also at U+2028 or U+2029. A `/` that opens no comment is `Bad_Char` at the `/`, and a `/*` that the text ends
 inside is `Truncated`. Every spec with comments also accepts a comma before a close bracket: a close after a run of
 comments is read without looking back at whether an open bracket or a comma came before the run.
 

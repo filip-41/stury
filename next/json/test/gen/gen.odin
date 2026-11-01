@@ -45,7 +45,7 @@ WS5 :: []string{"\v", "\f", "\u00a0", "\u1680", "\u2000", "\u200a", "\u2028", "\
 // bytes puts it past the 64-byte blocks the readers load.
 @(private)
 comment :: proc(out: ^[dynamic]u8, spec: json.Spec) {
-	PIECES :: []string{"c", " ", "*", "\"", "é", "😀", "\t", "\x01", "\x7f"}
+	PIECES :: []string{"c", " ", "*", "\"", "é", "😀", "\t", "\x7f"}
 	block := rand.int_max(2) == 0
 	append(out, "/*" if block else "//")
 	for _ in 0 ..< rand.int_max(8) {
@@ -55,10 +55,8 @@ comment :: proc(out: ^[dynamic]u8, spec: json.Spec) {
 			}
 		}
 		// A `/` after `*` would close a block comment early, so a block comment writes no `/` piece.
-		// JSON5 accepts any control byte in a comment, so only JSON and JSONC skip the control pieces.
 		pieces := PIECES
-		piece := rand.choice(pieces[:7 if spec != .Json5 else len(pieces)])
-		append(out, piece if block || rand.int_max(3) != 0 else rand.choice([]string{"/", "//", "/*", "*/"}))
+		append(out, rand.choice(pieces) if block || rand.int_max(3) != 0 else rand.choice([]string{"/", "//", "/*", "*/"}))
 		if block && rand.int_max(6) == 0 {
 			append(out, walktest.pick("\r\n"))
 		}
