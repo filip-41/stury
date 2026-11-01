@@ -32,7 +32,7 @@ reservation_retry :: proc(t: ^testing.T) {
 	testing.expectf(t, err.kind == .None, "longtext in 24 MB: %v", err)
 	core.destroy(&doc)
 
-	// One node per level: 2,000,001 nodes of 16 bytes, more than the 24 MB arena.
+	// One node per level: 2,000,001 nodes of 16 bytes, more than the 24 MB arena, so growth past the arena fails.
 	arena.offset = 0
 	depth := 2_000_000
 	nested := make([]u8, 2 * depth + 1, context.allocator)
@@ -45,6 +45,38 @@ reservation_retry :: proc(t: ^testing.T) {
 	doc, err = json.build(nested, .Json, {max_depth = u32(depth + 1)}, false, alloc)
 	testing.expectf(t, err.kind == .No_Memory, "deep in 24 MB: %v", err)
 	core.destroy(&doc)
+}
+
+// A text whose one node is far smaller than its reservation builds in a 1 MB arena: the first reservation is refused,
+// and the retry starts at 16 nodes and grows only if the text needs more.
+@(test)
+sparse_text_fits_small_arena :: proc(t: ^testing.T) {
+	backing := make([]u8, 1 << 20, context.allocator)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+
+	src := make([]u8, 8 << 20, context.allocator)
+	defer delete(src)
+	src[0] = '"'
+	for i in 1 ..< len(src) - 1 {
+		src[i] = 'a'
+	}
+	src[len(src) - 1] = '"'
+	doc, err := json.build(src, .Json, {}, false, mem.arena_allocator(&arena))
+	defer core.destroy(&doc)
+	testing.expectf(t, err.kind == .None, "8 MB string in 1 MB arena: %v", err)
+	testing.expect_value(t, len(doc.nodes), 1)
+}
+
+// A heap build returns the node and fact allocations' unused tails, so a document does not hold its reservation.
+@(test)
+build_trims_allocations :: proc(t: ^testing.T) {
+	doc, err := json.build(transmute([]u8)string(`[1,2,3]`), .Json)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, len(doc.nodes_alloc), len(doc.nodes))
+	testing.expect_value(t, len(doc.facts_alloc), len(doc.facts))
 }
 
 // A `.Duplicate_Key` found before an allocation that then fails stays the error: `.No_Memory` names no byte and does
@@ -121,8 +153,8 @@ refuse_grow_keeps_earliest_repeat :: proc(t: ^testing.T) {
 	}
 	strings.write_byte(&b, '}')
 	src := transmute([]u8)strings.to_string(b)
-	// Allocation 0 is the token-bound node array. Its refusal retries with the checked hook and one node per 8 bytes,
-	// and the text makes 89 nodes against a 33-node reservation, so the buffer grows after the inner repeat.
+	// Allocation 0 is the token-bound node array. Its refusal retries with the checked hook and 16 nodes, and the text
+	// makes 89 nodes, so the buffer grows after the inner repeat.
 	f := walktest.Failing_Alloc{inner = context.allocator, fail_at = 0}
 	doc, err := json.build(src, .Json, {}, true, walktest.failing_allocator(&f))
 	defer core.destroy(&doc)

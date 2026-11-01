@@ -66,14 +66,18 @@ A `Document` holds `src`, a borrowed `[]u8` that must outlive it and that no bui
 is a slice of `src`. A decoded text is `buf` or an allocation from the reader's allocator.
 
 - `nodes` is a `[]Node` in preorder. `nodes_alloc` is the allocation and `nodes` its length prefix, so `destroy` frees
-  it after the build cut the length to the node count. A JSON build keeps its whole reservation, one node per source
-  byte, for the document's life. `facts` and `facts_alloc`, both `[]Fact`, are alike, and a
-  document with no facts holds nil. `counts` and `counts_alloc`, both `[]Child_Count`, hold the true child count of
-  every container whose count saturated `CHILDREN_MAX`, sorted by node, and are nil when no container is that wide.
+  it after the build cut the length to the node count. A heap build trims the unused tail where the allocator can
+  resize; an arena or another fixed allocator keeps the reservation. `facts` and `facts_alloc`, both `[]Fact`, are
+  alike, and a document with no facts holds nil. `counts` and `counts_alloc`, both `[]Child_Count`, hold the true child
+  count of every container whose count saturated `CHILDREN_MAX`, sorted by node, and are nil when no container is that
+  wide.
 - `spelling` is a `^Spelling` that points at a format's table in rodata, and `allocator` is the one the build
   received. `destroy` frees the three allocations and sets the document to zero. A reader that allocates takes its own
   allocator.
 - `header` is the dsv header row's node, 0 for a text read without a header and for every JSON document.
+- `root_close` is one past the root value's authored bytes: the close of a root container, or the last byte of a root
+  scalar, quotes included. It is 0 when the build did not record it. `span(ROOT)` and a whole-document writer use it
+  instead of the format's `close_end`.
 - `read: Read_As` records how the text was read, in 8 bytes. Its `spec` is the spec the text was read as, in one
   byte, so an edit service can dispatch on it when a procedure pointer carries no compile-time spec. Its `delimiter`
   and `comment` are dsv's run-time dialect, the byte between two cells and the byte
@@ -81,7 +85,8 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
   record is data, and a commit reads its output under the same choice. Its `max_depth` is `Options.max_depth`, 0 for
   the default: JSON's build stores it and its edit services read a recorded value at that depth, and a delimited text
   has no depth option and leaves it 0.
-- The document does not change after its build, and no reader accepts an edit.
+- The document does not change after its build, and no reader accepts an edit. A path query's `Answer` record and its
+  container-close decision are planned in `paths.md`.
 
 ## Building
 
@@ -112,7 +117,7 @@ A build chooses its hook, and the hook is compiled for that choice:
 
 - JSON reserves the token bound, one node per source byte, and a stack of `max(MAX_DEPTH, opts.max_depth)` slots, so
   its hook tests no capacity and grows no buffer. A text whose 16 bytes per source byte the allocator refuses is
-  retried with one node per 8 bytes and the checked hook, and a second refusal is `.No_Memory`.
+  retried from 16 nodes with the checked hook, and a text that then outgrows the allocator is `.No_Memory`.
 - Every hook keeps the open containers as packed frames in the hook's registers: the high 32 bits of `b` are the
   innermost open container's node and its low 32 bits that container's child count, and `c` is the depth. A close
   reads its frame, writes the container's size and child count, and pops the frame below from the stack.
@@ -131,9 +136,11 @@ A build chooses its hook, and the hook is compiled for that choice:
   `CHILDREN_MAX`, walking the nodes once at its end.
 - `build.builder_close_node` writes a container's subtree size and child count. dsv calls it for the header row it
   writes before its walk.
-- `build.builder_end` cuts the node and fact slices to their counts, gives a comment run with no value after it to the
-  root as `Comment_Foot`, and sorts the facts by node, keeping source order within a node. The child counts follow
-  node order.
+- A build records `Document.root_close` from the end the walk returns, and `builder_end` copies it to the document. A
+  JSON spec with comments records none, since its walk ends past a comment after the root.
+- `build.builder_end` cuts the node and fact slices to their counts, trims their unused tails where the allocator can
+  resize, gives a comment run with no value after it to the root as `Comment_Foot`, and sorts the facts by node,
+  keeping source order within a node. The child counts follow node order.
 
 | Error | When |
 |---|---|
@@ -163,7 +170,8 @@ A reader given an index no node holds answers as it does for a node of the wrong
 
 ### Children and members
 
-`kind` and `span` allocate nothing, and a container's `span` is the only read that scans forward, in `close_end`.
+`kind` and `span` allocate nothing, and a nested container's `span` is the only read that scans forward, in
+`close_end`; the root's `span` uses `root_close` and is O(1).
 `key_start` returns a node's first source byte, `lo`, or `lo - 1` for a quoted string, whose token leaves the quote
 pair out. `length` returns a container's child count and 0 for a scalar. The count is a member count, and a header row
 is no member, so `length` of a headed text's root is its record count. A count that saturated `CHILDREN_MAX` is read
@@ -176,8 +184,9 @@ header row's own role is `Key`, so it skips no cell.
 
 `child_at(doc, i, k)` returns the member `child_next` would reach at step `k`. It indexes when every member is one
 node, at `i + 2 + 2k` in a `Map` whose `n` is twice its count plus one and at `i + 1 + k` in an `Array` whose `n` is
-its count plus one, and walks any other container or a `k` at or past a saturated count. A negative `k`, a scalar, a
-miss and a `k` past the last member return no node.
+its count plus one. A count that saturated `CHILDREN_MAX` is read from `Document.counts`, so the stride test uses the
+true count; any other container is walked. A negative `k`, a scalar, a miss and a `k` past the last member return no
+node.
 
 `member(doc, obj, name, dups := .Last)` returns the value of the member whose key decodes to `name`: `.First` the
 first match, `.Last` the last, while `member_all` yields every match in source order. A headed dsv record's members

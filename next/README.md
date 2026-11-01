@@ -25,6 +25,7 @@ Imports point down: `core/spell` imports no package of this tree, `core` imports
 | `docs/kernel.md` | `core/kernel`: the split by architecture and x86-64 tier, and the Odin and LLVM behaviour behind it |
 | `docs/walk.md` | the walk interface every format shares, the JSON and dsv walks, faults and tolerances |
 | `docs/document.md` | the document: nodes, building, readers, spelling services, duplicate keys, facts, edits, errors, limits |
+| `docs/paths.md` | the next layer's plan: path steps, the `Answer` record, and the container-close decision |
 | `docs/hotpaths.md` | the places the code keeps two instances or two copies of one piece of work for speed, with the lane and the measured win |
 | `bench/README.md` | the document lanes, their fixtures and the other libraries they run beside; the kernel bench is `bench/run.py` |
 

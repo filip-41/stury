@@ -55,14 +55,14 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 		return {}, {kind = .Walk, at = at, inner = {at = at, rules = &RULES, kind = .Bad_Char}}
 	}
 	// A JSON text makes at most one token per byte, so `len(src)` is the reservation bound, and the depth stack is
-	// `max(MAX_DEPTH, opts.max_depth)`. Neither buffer grows during the build.
+	// `max(MAX_DEPTH, opts.max_depth)`. Neither buffer grows during the build, and `builder_end` returns the unused tail.
 	b := build.builder_start(src, &SPELLING, refuse_duplicates, allocator, 1, max(MAX_DEPTH, int(opts.max_depth)))
 	// A reservation of one node per text byte is 16 bytes per byte, and an allocator with less room refuses a text
-	// whose few nodes would fit many times over. Only that refusal reaches here, and the retry reserves one node per
-	// 8 bytes.
+	// whose few nodes would fit many times over. Only that refusal reaches here, and the retry starts at 16 nodes and
+	// grows, so only a text that needs more than the allocator holds fails.
 	retry := len(b.doc.nodes) == 0 && b.err.kind == .No_Memory
 	if retry {
-		b = build.builder_start(src, &SPELLING, refuse_duplicates, allocator, 8, max(MAX_DEPTH, int(opts.max_depth)))
+		b = build.builder_start(src, &SPELLING, refuse_duplicates, allocator, max(1, len(src)), max(MAX_DEPTH, int(opts.max_depth)))
 	}
 	if len(b.doc.nodes) == 0 {
 		// The reservation was refused, so no hook may run over a nil node array.
@@ -95,6 +95,10 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 			hi, fault, stopped = walk_from(src, q, S, opts, &b, &regs, build.builder_hook_plain)
 		}
 	}
+	// A spec with comments walks past a comment after the root, so its `hi` is no close and `close_end` scans for it.
+	when .Comments not_in FEATURES[S] {
+		b.root_close = hi
+	}
 	if fault == nil && !stopped {
 		fault = tail_fault(src, hi, S)
 	}
@@ -105,11 +109,15 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 	return build.builder_end(&b, regs, fault)
 }
 
-// Returns the byte just past container `i`'s closing bracket. The document keeps no close node, so it starts after
-// the last descendant's own bytes (after the open when the container is empty), skips each descendant container's
-// close on the rightmost spine, then the container's own. Cold: only a span read or the writer's splice calls it.
+// Returns the byte just past container `i`'s closing bracket. The root uses `root_close`, otherwise the document keeps
+// no close node, so it starts after the last descendant's own bytes (after the open when the container is empty), skips
+// each descendant container's close on the rightmost spine, then the container's own. Cold: only a nested span read
+// calls it.
 @(private, cold)
 close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
+	if i == core.ROOT && doc.root_close != 0 {
+		return doc.root_close
+	}
 	spec := Spec(doc.read.spec)
 	n := doc.nodes[i]
 	end := int(i) + int(n.n)

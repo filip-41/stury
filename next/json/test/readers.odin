@@ -37,6 +37,7 @@ node_layout :: proc(t: ^testing.T) {
 	if !walktest.expect_nodes(t, &doc, want) {
 		return
 	}
+	testing.expect_value(t, doc.root_close, u64(len(src)))
 	testing.expect_value(t, string(core.span(&doc, 0)), src)
 	testing.expect_value(t, string(core.span(&doc, 2)), "[1,2]")
 	testing.expect_value(t, string(core.span(&doc, 6)), "{}")
@@ -46,6 +47,29 @@ node_layout :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.length(&doc, 2), 2)
 	testing.expect_value(t, core.length(&doc, 6), 0)
 	testing.expect_value(t, core.length(&doc, 3), 0)
+}
+
+// A document's `root_close` is one past the root value's authored bytes: a container's closing bracket, or a scalar's
+// last byte, quotes included. A scalar root's span is the same bytes, and trailing text after a container stays out.
+@(test)
+root_close_reader :: proc(t: ^testing.T) {
+	cases := []string{`"x"`, `42`, `true`, `null`}
+	for src in cases {
+		doc, err := build(src, .Json)
+		if !testing.expectf(t, err.kind == .None, "scalar %q: %v", src, err) {
+			core.destroy(&doc)
+			continue
+		}
+		testing.expect_value(t, doc.root_close, u64(len(src)))
+		testing.expect_value(t, string(core.span(&doc, core.ROOT)), src)
+		core.destroy(&doc)
+	}
+
+	doc, err := build("[1]  ", .Json)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, doc.root_close, 3)
+	testing.expect_value(t, string(core.span(&doc, core.ROOT)), "[1]")
 }
 
 // A JSONC `//` comment ends only at LF or CR, so U+2028 and U+2029 inside one belong to it and the root's span runs
@@ -225,8 +249,9 @@ child_at_reader :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 }
 
-// A container of `core.CHILDREN_MAX` members records 65535 as its child count, the saturation value, so `child_at`
-// walks the members and returns false at `k == CHILDREN_MAX` and past it.
+// A container of `core.CHILDREN_MAX` members records 65535 as its child count, the saturation value. `child_at`
+// reads the true count from `Document.counts`, so a uniform array still indexes and a `k` past the last member is
+// false without a walk.
 @(test)
 child_at_saturated :: proc(t: ^testing.T) {
 	text: [dynamic]u8

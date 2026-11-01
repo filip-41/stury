@@ -99,9 +99,9 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 	}
 	fault: Maybe(core.Fault)
 	if opts.comment != 0 {
-		_, fault = walk_keys(src, 0, S, opts, &b, &regs, build.builder_hook_keyless_facts, keys)
+		b.root_close, fault = walk_keys(src, 0, S, opts, &b, &regs, build.builder_hook_keyless_facts, keys)
 	} else {
-		_, fault = walk_keys(src, 0, S, opts, &b, &regs, build.builder_hook_keyless, keys)
+		b.root_close, fault = walk_keys(src, 0, S, opts, &b, &regs, build.builder_hook_keyless, keys)
 	}
 	if count > 0 {
 		// The header's cells go into the slots the root's token steps over, before the builder shrinks the node array.
@@ -541,10 +541,14 @@ record_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 	return p
 }
 
-// The byte just past container `i`'s close. The root ends at `len(doc.src)`, and a record at its line end.
+// The byte just past container `i`'s close. The root uses `root_close`, or `len(doc.src)` when the build did not
+// record it, a record ends at its line end.
 @(private, cold)
 close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 	if i == core.ROOT {
+		if doc.root_close != 0 {
+			return doc.root_close
+		}
 		return u64(len(doc.src))
 	}
 	return record_end(doc, i)

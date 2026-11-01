@@ -44,6 +44,7 @@ node_layout :: proc(t: ^testing.T) {
 		return
 	}
 	testing.expect_value(t, doc.header, 1)
+	testing.expect_value(t, doc.root_close, u64(len(src)))
 	testing.expect_value(t, core.length(&doc, 0), 1)
 	testing.expect_value(t, core.length(&doc, 1), 2)
 	testing.expect_value(t, core.length(&doc, 4), 2)

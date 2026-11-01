@@ -97,6 +97,10 @@ Document :: struct {
 	spelling:    ^Spelling,
 	allocator:   runtime.Allocator,
 	header:      Node_Index,
+	// The byte just past the root value's authored bytes: the close of a root container, or the end of a root scalar,
+	// quotes included. 0 when the build did not record it. `span(ROOT)` and a whole-document writer read it instead
+	// of calling the format's `close_end`.
+	root_close:  u64,
 	read:        Read_As,
 	// The true child count of every container whose count saturated `CHILDREN_MAX`, sorted by node, and the
 	// allocation behind it. It is empty when no container is that wide.
@@ -121,7 +125,8 @@ Resolve_Options :: struct {
 // when `buf` is too short, so a read never allocates. A node whose `SPELLING_DECODE` bit is clear is its span without
 // the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token.
 // `resolve` returns what a `Plain` node is. `close_end` returns the byte just past a container's closing bytes, found
-// from its last descendant or its open, over the whitespace and comments the format allows there. `edit` points at the
+// from its last descendant or its open, over the whitespace and comments the format allows there, the root's close is
+// `Document.root_close`, so a service may return it without a scan. `edit` points at the
 // format's edit services, nil for a format that accepts no edits.
 Spelling :: struct {
 	text:       proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool),
@@ -188,8 +193,8 @@ kind :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind {
 }
 
 // Returns the byte span of node `i`: a scalar's token, or a container's opening through its closing bytes. The
-// close is not a node, so it comes from the format's `close_end`, which skips the whitespace and comments after
-// the container's last descendant. A node past the last returns nil.
+// close is not a node, so it comes from `root_close` for the root and the format's `close_end` otherwise, which
+// skips the whitespace and comments after the container's last descendant. A node past the last returns nil.
 span :: #force_inline proc(doc: ^Document, i: Node_Index) -> []u8 {
 	if int(i) >= len(doc.nodes) {
 		return nil
@@ -197,6 +202,9 @@ span :: #force_inline proc(doc: ^Document, i: Node_Index) -> []u8 {
 	n := doc.nodes[i]
 	#partial switch n.kind {
 	case .Array, .Map:
+		if i == ROOT && doc.root_close != 0 {
+			return doc.src[n.lo:doc.root_close]
+		}
 		return doc.src[n.lo:doc.spelling.close_end(doc, i)]
 	case .String:
 		// A quoted string's token leaves its quote pair out, and splicing needs the bytes as authored.
@@ -310,20 +318,21 @@ key_start :: #force_inline proc(n: Node) -> u64 {
 // the node after the key. A `k` past the last member, a negative `k`, and a node that holds no members return no
 // node. A container whose members are one node each is indexed, since its subtree size gives the stride: an
 // `Array`'s is its member count plus one and a `Map`'s twice its count plus one. Any other container is walked,
-// stepping one subtree size per member.
+// stepping one subtree size per member. A count that saturated `CHILDREN_MAX` is read from `Document.counts`, so
+// the stride test uses the true member count.
 child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
 	if int(i) >= len(doc.nodes) || k < 0 {
 		return NO_NODE, false
 	}
 	n := doc.nodes[i]
 	count := int(n.spelling)
-	// A saturated count says the container holds at least `CHILDREN_MAX` members, so a `k` at or past it may
-	// still be within: the walk decides that, and the indexed paths handle only `k` below the count.
+	// A saturated count holds only `CHILDREN_MAX`, the true count is in `Document.counts`. Reading it here keeps the
+	// index path for a uniform container of any width and makes a `k` past the last member answer without a walk.
+	if n.spelling == CHILDREN_MAX {
+		count = wide_length(doc, i)
+	}
 	if k >= count {
-		if n.spelling != CHILDREN_MAX {
-			return NO_NODE, false
-		}
-		return child_at_walk(doc, i, k)
+		return NO_NODE, false
 	}
 	#partial switch n.kind {
 	case .Map:
@@ -341,8 +350,8 @@ child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_I
 	return child_at_walk(doc, i, k)
 }
 
-// Walks a container whose members are not all one node, and the `k` a saturated count leaves open. `child_at` calls it
-// only in those two cases.
+// Walks a container whose members are not all one node. `child_at` calls it for a container whose subtree size does
+// not give one node per member.
 @(private, cold)
 child_at_walk :: #force_no_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
 	it := children(doc, i)

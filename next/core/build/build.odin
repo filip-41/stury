@@ -17,7 +17,10 @@ Builder :: struct {
 	pending: int, // the first fact of a run of head comments, or -1
 	// The node of the last completed value, `core.NO_NODE` before the first, for an inline comment's node. A JSON
 	// build with facts writes it, and a dsv text has no inline comment.
-	last:       core.Node_Index,
+	last: core.Node_Index,
+	// The byte just past the root value's authored bytes, which a format's `build` sets from the walk's end before
+	// `builder_end` copies it to `Document.root_close`. A format whose walk may end past the root leaves it 0.
+	root_close: u64,
 	// The first container whose close saturated `core.CHILDREN_MAX`, with its true child count, and whether a second
 	// container did. `wide_count` is 0 while none has.
 	wide_node:  core.Node_Index,
@@ -113,6 +116,25 @@ builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault))
 	if len(b.doc.facts) > 1 {
 		slice.stable_sort_by(b.doc.facts, proc(a, b: core.Fact) -> bool { return a.node < b.node })
 	}
+	// The build wrote fewer nodes and facts than it reserved. Return the tail where the allocator can resize, a caller
+	// with an arena or another fixed allocator keeps the reservation, and the document still owns the whole block.
+	if fresh := trim(b.doc.allocator, b.doc.nodes_alloc, n); len(fresh) == n {
+		b.doc.nodes_alloc = fresh
+		b.doc.nodes = fresh
+	}
+	if b.n_facts > 0 {
+		if fresh := trim(b.doc.allocator, b.doc.facts_alloc, b.n_facts); len(fresh) == b.n_facts {
+			b.doc.facts_alloc = fresh
+			b.doc.facts = fresh
+		}
+	}
+	if len(b.doc.counts) > 0 {
+		if fresh := trim(b.doc.allocator, b.doc.counts_alloc, len(b.doc.counts)); len(fresh) == len(b.doc.counts) {
+			b.doc.counts_alloc = fresh
+			b.doc.counts = fresh
+		}
+	}
+	b.doc.root_close = b.root_close
 	doc := b.doc
 	if b.stack != nil {
 		delete(b.stack, b.doc.allocator)
@@ -205,7 +227,9 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYL
 	when CHECK {
 		if a == len(h.doc.nodes) {
 			builder_grow(h)
-			if h.err.kind == .No_Memory {
+			// A failed growth leaves the buffer at its old length. Stop on that, whatever error is held: a duplicate
+			// found earlier is the error the build keeps, and the hook must not write past the buffer.
+			if a == len(h.doc.nodes) {
 				return s, .Stop
 			}
 		}
@@ -378,7 +402,9 @@ builder_counts :: #force_no_inline proc(h: ^Builder, n: int) -> bool {
 		if k == len(fresh) {
 			grown, ok := grow(h.doc.allocator, fresh, 8)
 			if !ok {
-				h.err = {kind = .No_Memory}
+				if h.err.kind == .None {
+					h.err = {kind = .No_Memory}
+				}
 				return false
 			}
 			fresh = grown
@@ -410,13 +436,31 @@ grow :: #force_no_inline proc "contextless" (allocator: runtime.Allocator, old: 
 	return fresh, true
 }
 
+// Returns `old` shortened to `n` where the allocator can resize it, and `old` unchanged where it cannot. The caller
+// sets both the array and the allocation behind it to the result. A fixed allocator such as an arena keeps the
+// reservation, so this is an optimization for the heap and not a promise about every allocator.
+@(private, cold)
+trim :: #force_no_inline proc (allocator: runtime.Allocator, old: []$T, n: int) -> []T {
+	if n <= 0 || n >= len(old) {
+		return old
+	}
+	raw, err := runtime.non_zero_mem_resize(raw_data(old), len(old) * size_of(T), n * size_of(T), align_of(T), allocator)
+	if err != nil {
+		return old
+	}
+	return ([^]T)(raw_data(raw))[:n]
+}
+
 // Doubles the node buffer. A text that fits its reservation does not call this. A refused allocation sets `err`
 // to `.No_Memory`.
 @(private, cold)
 builder_grow :: #force_no_inline proc "contextless" (h: ^Builder) {
 	fresh, ok := grow(h.doc.allocator, h.doc.nodes_alloc, 16)
 	if !ok {
-		h.err = {kind = .No_Memory}
+		// A repeat found before the growth remains the error, a failure with no earlier error is `No_Memory`.
+		if h.err.kind == .None {
+			h.err = {kind = .No_Memory}
+		}
 		return
 	}
 	h.doc.nodes = fresh
@@ -471,7 +515,9 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: core.Hook_R
 	}
 	if h.n_facts == len(h.doc.facts_alloc) {
 		if !builder_facts_grow(h) {
-			h.err = {kind = .No_Memory}
+			if h.err.kind == .None {
+				h.err = {kind = .No_Memory}
+			}
 			return
 		}
 	}
