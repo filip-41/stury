@@ -450,9 +450,8 @@ edit_beside_comment :: proc(t: ^testing.T) {
 	check(t, "a,b\n#c\n", "a,b\nx,y\n#c\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, core.ROOT, 1, string("x,y"))
 	})
-	// A text that ends inside a comment line has a line end written before the record, so the comment keeps its own
-	// bytes.
-	check(t, "#c", "#c\nx,y", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
+	// A comment with no record after it is the root's foot, and a new record goes before a foot.
+	check(t, "#c", "x,y\n#c", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, core.ROOT, 0, string("x,y"))
 	})
 	// A cell whose text starts a line with the comment byte reads as no record, so it is refused. A quoted CSV cell

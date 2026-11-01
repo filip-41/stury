@@ -15,6 +15,7 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `destroy`, the spelling tables |
 | `core/build/build.odin` | `Builder`, the hooks, `builder_start`, `builder_end`, the header row, the duplicate-key check |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact`, `commit` |
+| `core/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, every decoder |
 | `core/spell/text.odin` | `decode_text` and `bytes_equal`, the decoders' and readers' byte helpers |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
@@ -426,10 +427,8 @@ builds the output in one allocation with the format's separators, the caller fre
 
 The commit refuses:
 
-- two edits of one node, two fact edits of one node and role, two ranges that overlap, an insert inside what another
-  edit replaces, an insert at the byte of a set that writes no bytes when the insert's separator comes first, and an
-  inline fact after inserted bytes with nothing but whitespace between them. All are `.Conflicting_Edits` at the byte
-  where the two meet.
+- two edits of one node, two fact edits of one node and role, two ranges that overlap, and an insert inside what another
+  edit replaces. All are `.Conflicting_Edits` at the byte where the two meet.
 - an edit inside the subtree another edit removes, and a fact edit on a node below a set's node, both
   `.Conflicting_Edits` at the named node's first byte. The ranges and queries are swept once, so the check is
   O(n log n).
@@ -449,24 +448,24 @@ inside the span a set replaces, is not counted, since the edit that takes it acc
 
 ### Where a removal and an insert land
 
-The commit sorts the edits' source ranges by position. An insert at a byte is written before the bytes there, a head
-comment before the bytes it leads, and an inline comment first at its byte. Two inserts into different containers at
-one byte write the inner container's member first when both join the member at the byte, and the outer container's
-member first when both come before the bytes there. A cell appended to the last record comes before a record appended
-after it, and a record put before a record comes before a cell put before that record's first byte. Two inserts into
-one container keep the order they were recorded in.
+The commit composes each edited container once. A container is its members and the gaps between them, and the root is
+the one member of the text. A junction is the bytes between two surviving neighbours: the gaps, the removed members
+and the new members between them. An edited junction is written as one replacement, and a junction no edit reaches
+stays bytes, so two replacements overlap only when a set covers a nested edit. At one byte, which only a cell of no
+bytes makes possible, a record's line comes before a cell, then the set, then what follows the cell, then the next
+line.
 
 - A set replaces the node's own source bytes, a quoted key's quotes included, and leaves the trivia around it.
 - A removal takes the member with its key and its comments and one separator, the one after it when a member follows
-  and the one before it otherwise. Adjacent removals are one cut. A cut keeps the member before it on its line and the
-  next member's head comment on its own, and a member's facts after its trailing separator are removed as separate
-  ranges, so the separator and the line end stay and the output still reads.
+  and the one before it otherwise. A removal keeps the member before it on its line, that member's inline comment on
+  that line, and the next member's head comment on its own line. A fact the output removes leaves its line end.
 - A container whose every member is removed keeps its brackets, and a foot stays before the close. A dsv record is cut
   from its own first comment through its own line end, so a comment line beside it and its line end stay.
-- An insert at the root is placed on the side that leaves a comment line a line of its own, and one inside a removal
-  run moves to the run's cut end, with its separator on the side where what survives is. A head comment the same list
-  adds to the member at the insert's place gets a line of its own, and a new member is joined to its neighbour by one
-  separator. A table writes `read.delimiter` between cells and its `record_sep` between records.
+- New members at one index keep the order they were recorded in, and one at an index inside a removal run takes the
+  run's place. A new member comes after the inline comment of the member before it and before the head comment of the
+  member after it, and a foot stays last, so a record added to a text of only comments comes before them. A new member
+  is joined to its neighbours by one separator. A table writes `read.delimiter` between cells and its `record_sep`
+  between records, and a new last record ends as the old last record did.
 
 ### Facts in a commit
 
@@ -480,8 +479,8 @@ The output decides which facts it keeps.
 - `set_fact` replaces the first fact of that node and role in place and removes the rest, or writes a new comment
   where the role reads it: a head before the node's first byte, an inline after the value, a foot before the close. A
   fact edit on a node the list removes, or on one below a set's node, is `.Conflicting_Edits`.
-- A body is written as `//body` when a line end follows its place or the text ends there, the body holds no line end,
-  and no insert writes at that byte. It is written as `/*body*/` otherwise. A dsv body is the document's comment byte
+- A body is written as `//body` when a line end follows its place or the text ends there and the body holds no line
+  end. It is written as `/*body*/` otherwise, and anything written after a `//` comment starts on the next line. A dsv body is the document's comment byte
   and the body, on a line of its own. A head or foot the source held mid-line gets a line of its own with that line's
   indent, and an inline fact gets one space before it. A body the output cannot spell is dropped and counted.
 - A dsv foot at the text's end is written after a set or an insert at that byte.

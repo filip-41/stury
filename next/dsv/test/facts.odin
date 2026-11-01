@@ -338,8 +338,8 @@ fact_headerless_commit_reads_headerless :: proc(t: ^testing.T) {
 	}
 }
 
-// An insert whose separator comes after its text accepts a zero-width set at the same byte, in that order. An insert
-// whose separator comes first refuses it, since the set text would otherwise join the inserted record.
+// A zero-width set keeps its cell's place beside an insert at the same byte, whichever side the insert's separator is
+// on.
 @(test)
 fact_zero_width_set_beside_insert :: proc(t: ^testing.T) {
 	{
@@ -369,8 +369,59 @@ fact_zero_width_set_beside_insert :: proc(t: ^testing.T) {
 		defer if len(out) > 0 {
 			delete(out)
 		}
-		testing.expectf(t, err.kind == .Conflicting_Edits, "refuse: commit %v", err)
+		testing.expectf(t, err.kind == .None && string(out) == "1,2\n3,9\n7,8", "accept: committed %q, %v", out, err)
 	}
+}
+
+// A cell insert stays in its record's line below the record's new comment.
+@(test)
+fact_new_comment_beside_first_cell :: proc(t: ^testing.T) {
+	doc, _ := dsv.build(transmute([]u8)string("1,2\n"), .Csv, {comment = '#', no_header = true})
+	defer core.destroy(&doc)
+	record, _ := core.child_at(&doc, core.ROOT, 0)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	testing.expect_value(t, core.set_fact(&list, record, .Comment, "c").kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.insert(&list, record, 0, string("9")).kind, core.Document_Error_Kind.None)
+	out, _, err := core.commit(&list)
+	defer if len(out) > 0 {
+		delete(out)
+	}
+	testing.expectf(t, err.kind == .None && string(out) == "#c\n9,1,2\n", "committed %q, %v", out, err)
+}
+
+// A set of an empty last cell keeps to its cell when cells are inserted on both sides of it.
+@(test)
+edit_zero_width_set_between_inserts :: proc(t: ^testing.T) {
+	doc, _ := dsv.build(transmute([]u8)string("a,\n"), .Csv, {no_header = true})
+	defer core.destroy(&doc)
+	record, _ := core.child_at(&doc, core.ROOT, 0)
+	cell, _ := core.child_at(&doc, record, 1)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	testing.expect_value(t, core.insert(&list, record, 1, string("x")).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.insert(&list, record, 2, string("y")).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.set(&list, cell, string("9")).kind, core.Document_Error_Kind.None)
+	out, _, err := core.commit(&list)
+	defer if len(out) > 0 {
+		delete(out)
+	}
+	testing.expectf(t, err.kind == .None && string(out) == "a,x,9,y\n", "committed %q, %v", out, err)
+}
+
+// A comment above a header with no record is the root's foot, and an edit of it writes in place.
+@(test)
+fact_foot_above_header :: proc(t: ^testing.T) {
+	doc, _ := dsv.build(transmute([]u8)string("#h\nk\n"), .Csv, {comment = '#'})
+	defer core.destroy(&doc)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment_Foot, "x").kind, core.Document_Error_Kind.None)
+	out, _, err := core.commit(&list)
+	defer if len(out) > 0 {
+		delete(out)
+	}
+	testing.expectf(t, err.kind == .None && string(out) == "#x\nk\n", "committed %q, %v", out, err)
 }
 
 // A spec change would respell every cell, so it is refused with `Bad_Spec` before anything is written.

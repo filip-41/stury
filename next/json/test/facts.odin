@@ -487,7 +487,7 @@ fact_removed_member_takes_its_inline :: proc(t: ^testing.T) {
 	if !testing.expectf(t, cerr.kind == .None && dropped == 0, "commit: %v, %d dropped", cerr, dropped) {
 		return
 	}
-	if !testing.expectf(t, string(out) == "[0//x\n,\n\n]", "committed %q", out) {
+	if !testing.expectf(t, string(out) == "[0//x\n\n]", "committed %q", out) {
 		return
 	}
 	read, rerr := json.build(out, .Jsonc)

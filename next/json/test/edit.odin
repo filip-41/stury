@@ -122,7 +122,7 @@ edit_line_separator_comment :: proc(t: ^testing.T) {
 	check(t, "{\"a\":1 // x\u2028y\n}", "{\"b\":2,\"a\":1 // x\u2028y\n}", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, 0, 0, string("b"), string("2"))
 	})
-	check(t, "{\"a\":1 // x\u2028y\n}", "{\"a\":1 // x\u2028y\n,\"b\":2}", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
+	check(t, "{\"a\":1 // x\u2028y\n}", "{\"a\":1, // x\u2028y\n\"b\":2\n}", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, 0, 1, string("b"), string("2"))
 	})
 	check(t, "[1 // x\u2029y\n]", "[0,1 // x\u2029y\n]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
@@ -580,13 +580,13 @@ edit_comma_in_comment :: proc(t: ^testing.T) {
 // Removing the last member keeps the previous member's inline comment.
 @(test)
 edit_inline_comment_survives :: proc(t: ^testing.T) {
-	check(t, "[1, /* keep */ 2]", "[1/* keep */]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
+	check(t, "[1, /* keep */ 2]", "[1 /* keep */]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 2)
 	})
-	check(t, "[1, // keep\n 2]", "[1// keep\n]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
+	check(t, "[1, // keep\n 2]", "[1 // keep\n]", .Jsonc, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 2)
 	})
-	check(t, "[1, /*x*/ 2,]", "[1/*x*/,]", .Json5, proc(list: ^core.Edit_List) -> core.Document_Error {
+	check(t, "[1, /*x*/ 2,]", "[1 /*x*/,]", .Json5, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 2)
 	})
 	// The removed member's head comment is removed with it.
