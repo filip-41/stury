@@ -22,7 +22,8 @@ Kind :: enum u8 {
 // change its meaning. A comment's role and node follow its position, by the same rule in every format. On the line
 // where the previous value ends it is that value's `Comment_Inline`. Before a value the grammar allows it above, it is
 // that value's `Comment`. Any other comment is a `Comment_Foot` of the innermost open container, or of the root at
-// depth 0. A consumer that wants values only tests `t.role <= .Key`.
+// depth 0. A consumer that wants values only tests `t.role <= .Key`. `Partial` is no token's role: a read by paths writes
+// it on a container it kept only some children of.
 Role :: enum u8 {
 	Value, // json, dsv
 	Key, // json: a member's name, always a `String`, in JSON5 quoted or not, dsv: the header cell of a cell's column
@@ -30,6 +31,7 @@ Role :: enum u8 {
 	Comment_Inline, // json (JSONC, JSON5): a comment on the line where the value before it ends, `Plain`
 	Comment_Foot, // json, dsv: after the last value or in an empty container, on the innermost open container
 	// or the root at depth 0, `Plain`
+	Partial, // a document's container whose children were not all kept, in place of `Value`
 }
 
 // A token the walk passes to a hook. Tokens come in the order the walk reads them, text order except for a dsv `Key`,

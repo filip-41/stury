@@ -103,7 +103,7 @@ decoded_escape :: #force_inline proc(src: []u8, p, end: u64) -> (spelled: [4]u8,
 				spelled[0] = 'u'
 				return spelled, 1, p + 2
 			}
-			unit, ok := hex4(raw_data(src)[p + 2:])
+			unit, ok := spell.hex4(raw_data(src)[p + 2:])
 			if !ok {
 				spelled[0] = 'u'
 				return spelled, 1, p + 2
@@ -115,7 +115,7 @@ decoded_escape :: #force_inline proc(src: []u8, p, end: u64) -> (spelled: [4]u8,
 				if unit >= 0xDC00 || next + 6 > end || src[next] != '\\' || src[next + 1] != 'u' {
 					return replacement(), 3, next
 				}
-				low, low_ok := hex4(raw_data(src)[next + 2:])
+				low, low_ok := spell.hex4(raw_data(src)[next + 2:])
 				if !low_ok || low - 0xDC00 >= 0x400 {
 					return replacement(), 3, next
 				}

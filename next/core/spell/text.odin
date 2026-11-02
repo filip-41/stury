@@ -33,10 +33,32 @@ decode_text :: proc(buf: []u8, d: $D, $next: proc(^D) -> (u8, bool)) -> (s: stri
 	return string(buf[:w]), true
 }
 
+// Returns the four hex digits at `h` as a 16-bit value, and whether all four are hex digits. The caller must ensure
+// four bytes are readable at `h`.
+hex4 :: #force_inline proc "contextless" (h: [^]u8) -> (unit: u32, ok: bool) {
+	#no_bounds_check {
+		a := HEX_NIBBLE[h[0]]
+		b := HEX_NIBBLE[h[1]]
+		c := HEX_NIBBLE[h[2]]
+		d := HEX_NIBBLE[h[3]]
+		return u32(a) << 12 | u32(b) << 8 | u32(c) << 4 | u32(d), (a | b | c | d) & 0xf0 == 0
+	}
+}
+
+// Reports whether `unit` is a UTF-16 high surrogate, 0xD800 to 0xDBFF.
+high_surrogate :: #force_inline proc "contextless" (unit: u32) -> bool {
+	return unit - 0xD800 < 0x400
+}
+
+// Reports whether `unit` is a UTF-16 low surrogate, 0xDC00 to 0xDFFF.
+low_surrogate :: #force_inline proc "contextless" (unit: u32) -> bool {
+	return unit - 0xDC00 < 0x400
+}
+
 // Whether byte strings `a` and `b` are equal. A length test comes first, then below 8 bytes a byte at a time, at
 // most 16 bytes two overlapping 8-byte loads that stay inside both strings, and past that 8-byte words then the
 // tail.
-bytes_equal :: #force_inline proc(a, b: []u8) -> bool {
+bytes_equal :: #force_inline proc "contextless" (a, b: []u8) -> bool {
 	if len(a) != len(b) {
 		return false
 	}

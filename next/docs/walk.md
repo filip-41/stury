@@ -323,8 +323,11 @@ closes back to is marked with `PASS_END`. A close compares its byte with `]` com
 and that bit matches no byte of a valid text, so `st_close`'s loop stops as it reads the slot and the walk without
 hooks returns from `st_pass_end`. The walk with the hook clears the mark and continues in `st_after`.
 
-`st_skip_member` passes the comments around the colon itself, so the skipped value's first byte decides whether it is
-pushed. A container read as a document's root counts its depth from 0.
+`Skip` on a `Key` stays in the walk with the hook for a value it can read inline: `st_member_run` reads a number and
+goes on, and `st_skip_member` reads a string or a number after a colon `colon_fast` takes, with no token, so a skip
+of every member of an object makes no call per member. `st_skip_member` passes the comments around any other colon
+itself, so the skipped value's first byte decides whether it is pushed. A container read as a document's root counts
+its depth from 0.
 
 ### Comments
 

@@ -221,6 +221,70 @@ render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Line
 	return nil
 }
 
-// `write_code` writes a fault's or a document error's code, `render` writes its rendered line.
-write_code :: proc {write_fault_code, write_document_code}
-render :: proc {render_fault, render_document}
+// The path layer's error kinds. A value a path does not reach is an `Answer`'s outcome, not an error.
+Path_Error_Kind :: enum u8 {
+	None,
+	Bad_Path, // the path's text does not parse, at the byte of that text
+	Over_Capacity, // a path past `MAX_STEPS` steps, at no byte
+	No_Memory, // an allocation the read owns was refused, at no byte
+	Walk, // the walk's fault, in `inner`
+	Duplicate_Key, // a read with `refuse_duplicates` met a key that repeats one of its object's, at the second key's first byte
+	Unsupported, // a step the engine does not read yet, or a read of a partial document, at no byte
+}
+
+// A path layer error. `at` is the byte `kind` names: a byte of the path's text for `.Bad_Path`, and the walk's fault
+// byte for `.Walk`.
+Path_Error :: struct {
+	kind:  Path_Error_Kind,
+	at:    u64,
+	inner: Fault,
+}
+
+@(private, rodata)
+PATH_KIND_RULES := [Path_Error_Kind]Rule {
+	.None          = {"none", "No error"},
+	.Bad_Path      = {"bad_path", "Invalid path"},
+	.Over_Capacity = {"over_capacity", "Path exceeds a fixed limit"},
+	.No_Memory     = {"no_memory", "Out of memory"},
+	.Walk          = {"walk", "Input does not parse"},
+	.Duplicate_Key = {"duplicate_key", "Duplicate key"},
+	.Unsupported   = {"unsupported", "Path is not supported"},
+}
+
+// Returns the read error a build's error is.
+path_error :: proc(e: Document_Error) -> Path_Error {
+	#partial switch e.kind {
+	case .None:
+		return {}
+	case .Walk:
+		return {kind = .Walk, at = e.at, inner = e.inner}
+	case .Duplicate_Key:
+		return {kind = .Duplicate_Key, at = e.at}
+	}
+	return {kind = .No_Memory}
+}
+
+@(private)
+write_path_code :: proc(w: io.Writer, e: Path_Error) -> io.Error {
+	io.write_string(w, "path.") or_return
+	_, err := io.write_string(w, PATH_KIND_RULES[e.kind].code)
+	return err
+}
+
+// Writes `line:col: message` for `e`. `text` is the path's text for `.Bad_Path` and the source for the others, and
+// `.Walk` writes its fault. `lines` is as in `render_fault`.
+@(private)
+render_path :: proc(w: io.Writer, text: []u8, e: Path_Error, lines: ^Lines = nil) -> io.Error {
+	if e.kind == .Walk {
+		return render_fault(w, text, e.inner, lines)
+	}
+	if e.kind == .Bad_Path || e.kind == .Duplicate_Key {
+		write_position(w, text, e.at, lines) or_return
+	}
+	_, err := io.write_string(w, PATH_KIND_RULES[e.kind].message)
+	return err
+}
+
+// `write_code` writes an error's code, `render` writes its rendered line.
+write_code :: proc {write_fault_code, write_document_code, write_path_code}
+render :: proc {render_fault, render_document, render_path}

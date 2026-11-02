@@ -190,6 +190,15 @@ Document :: struct {
 	// allocation behind it. It is empty when no container is that wide.
 	counts:       []Child_Count,
 	counts_alloc: []Child_Count,
+	// What a read by paths gives beside its nodes, in one block. `partial` says the document holds only what the paths
+	// reached, and `stopped` that the read stopped early, so the containers it left open have a `Partial` role, the count
+	// of what was read, and text past the stop that no walk judged. See `core/path.odin`.
+	answers:      []Answer,
+	kept:         []Kept_Child,
+	missing:      []Missing_Name,
+	reads_block:  []u8,
+	partial:      bool,
+	stopped:      bool,
 }
 
 // How a reader treats an object's repeated keys. `.Last` is the default.
@@ -273,6 +282,9 @@ destroy :: proc(doc: ^Document) {
 	}
 	if doc.counts_alloc != nil {
 		delete(doc.counts_alloc, doc.allocator)
+	}
+	if doc.reads_block != nil {
+		delete(doc.reads_block, doc.allocator)
 	}
 	doc^ = {}
 }
@@ -422,6 +434,9 @@ child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_I
 	// A saturated count holds only `CHILDREN_MAX`, the true count is in `Document.counts`. Reading it here keeps the
 	// index path for a uniform container of any width and makes a `k` past the last member answer without a walk.
 	if n.spelling == CHILDREN_MAX {
+		if n.role == .Partial {
+			return kept_child(doc, i, k)
+		}
 		count = wide_length(doc, i)
 	}
 	if k >= count {

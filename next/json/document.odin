@@ -129,6 +129,9 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 	}
 	spec := Spec(doc.read.spec)
 	n := doc.nodes[i]
+	if doc.partial {
+		return close_by_walk(doc, n.lo, spec)
+	}
 	end := int(i) + int(n.n)
 	p := n.lo + 1
 	if end > int(i) + 1 {
@@ -165,6 +168,27 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 		p += 1
 	}
 	return p
+}
+
+// Returns the byte past the container at `lo`, by walking it. The nodes of a partial document do not reach a container's
+// last descendant. The walk tolerates every fault, since a tolerance changes no container's end and the read may have
+// tolerated any. A stopped read may leave text no walk judged, where this returns the fault's byte.
+@(private, cold)
+close_by_walk :: proc(doc: ^core.Document, lo: u64, spec: Spec) -> u64 {
+	regs: core.Hook_Regs
+	none: core.No_Hooks
+	hi: u64
+	fault: Maybe(core.Fault)
+	opts := Options{max_depth = doc.read.max_depth, tolerate = {.Invalid_Utf8, .Lone_Surrogate}}
+	switch spec {
+	case .Json:  hi, fault = walk(doc.src, lo, .Json, opts, &none, &regs, core.no_hook)
+	case .Jsonc: hi, fault = walk(doc.src, lo, .Jsonc, opts, &none, &regs, core.no_hook)
+	case .Json5: hi, fault = walk(doc.src, lo, .Json5, opts, &none, &regs, core.no_hook)
+	}
+	if f, bad := fault.?; bad {
+		return f.at
+	}
+	return hi
 }
 
 // Returns the first byte at or past `p` that is no whitespace, comment or trailing comma, where a container's span

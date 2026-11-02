@@ -266,6 +266,10 @@ commit_as :: proc(list: ^Edit_List, spec: u8, allocator := context.allocator) ->
 	if doc == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
+	// A partial document does not hold the members a commit composes.
+	if doc.partial {
+		return nil, 0, {kind = .Bad_Index}
+	}
 	// Refused before any chunk is built or spliced, rather than after the output fails to read.
 	if flat_doc(doc) && spec != doc.read.spec {
 		return nil, 0, {kind = .Bad_Spec}

@@ -394,7 +394,7 @@ ident5_char :: #force_inline proc "contextless" (q, end: [^]u8, start: bool) -> 
 				return q[i:], false, .Bad_Escape
 			}
 		}
-		unit, _ := hex4(q[2:])
+		unit, _ := spell.hex4(q[2:])
 		r = q[6:]
 		if !ident_char(rune(unit), start) {
 			return q, false, .Bad_Escape

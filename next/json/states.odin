@@ -535,11 +535,45 @@ st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 	return #must_tail st_after(w.base[r >> 16:], end, parent << 1 | u64(w.stack[parent]), ind, w, hs.a, hs.b, hs.c, on)
 }
 
-// `p` is right after a key whose hook returned `Skip` for its member's value. Reads the colon, then the value with the
-// walk without hooks, and continues after it.
-@(private, cold, enable_target_feature = STATE_FEATURES)
+// Reads the value string at `p` of a member whose key was skipped, which `string_short` did not vouch for.
+@(private, enable_target_feature = STATE_FEATURES)
+st_skip_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	q, _ := string_lean(p, end)
+	if q == nil {
+		kind: core.Fault_Kind
+		q, _, _, kind = string_long(w, p, end)
+		if kind != .None {
+			return fault(w, hs, q, kind)
+		}
+	}
+	if too_wide(p, q) {
+		return fault(w, hs, p, .Too_Wide)
+	}
+	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+}
+
+// `p` is right after a key whose hook returned `Skip` for its member's value. A string or number after a colon the fast
+// path reads goes straight to what follows it, since a skip of every member of a large object lands here. Anything else
+// reads the colon, then the value with the walk without hooks, and continues after it.
+@(private, enable_target_feature = STATE_FEATURES)
 st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
+	if r := colon_fast(p, end); r != nil {
+		if r[0] == '"' {
+			q, _, _ := string_short(r, end)
+			if q == nil {
+				return #must_tail st_skip_string(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+			return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		if r[0] == '-' || r[0] - '0' < 10 {
+			n, _, number := number_h(r, end, H)
+			if number == .None && !too_wide(r, n) && !(.Es5 in FEATURES[S] && n < end && n[0] | 0x20 == 'x') {
+				return #must_tail st_after_number(n, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		}
+	}
 	q, kind := colon(p, end)
 	detail := Detail.Colon if kind == .Bad_Char else Detail.None
 	// The comments around the colon belong to the skipped value and are passed over here, so the value's first byte
@@ -711,19 +745,23 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 			}
 			return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
+		skip := false
 		switch emit_string(w, on, &hs, .String, .Key, p, q, 0) {
 		case .Next:
 		case .Skip:
-			return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			skip = true
 		case .Stop:
 			return stopped(w, hs, q)
 		}
 		// Finds the value after the colon when the colon is flush against it, or is `": "`, `" : "` or `" :"`.
 		r := colon_fast(q, end)
-		if r == nil {
-			return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
-		}
-		if r[0] != '-' && r[0] - '0' >= 10 {
+		if r == nil || (r[0] != '-' && r[0] - '0' >= 10) {
+			if skip {
+				return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+			if r == nil {
+				return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
 			return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		n, spelling, kind := number_h(r, end, H)
@@ -738,7 +776,7 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 		if too_wide(r, n) {
 			return fault(w, hs, r, .Too_Wide)
 		}
-		if emit(w, on, &hs, .Number, .Value, r, n, spelling) == .Stop {
+		if !skip && emit(w, on, &hs, .Number, .Value, r, n, spelling) == .Stop {
 			return stopped(w, hs, n)
 		}
 		// `n[1]` and `n[2]` are read only where three bytes remain, as in `st_number_run`.

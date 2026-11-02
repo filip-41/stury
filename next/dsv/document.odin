@@ -727,5 +727,44 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 		}
 		return u64(len(doc.src))
 	}
+	if doc.partial {
+		return record_end_by_walk(doc, i)
+	}
 	return record_end(doc, i)
+}
+
+// What a walk from a record's first byte finds: the end of the first record's line.
+@(private)
+Record_End :: struct {
+	end: u64,
+}
+
+@(private)
+record_end_hook :: proc "contextless" (h: ^Record_End, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if t.kind != .End {
+		return s, .Next
+	}
+	h.end = t.lo + u64(t.n)
+	return s, .Stop
+}
+
+// Returns the byte past record `i`'s line end by walking the record, since a partial document may not hold its last cell.
+// The walk tolerates every fault, since the read may have tolerated any and a judged text's record bounds stay. A
+// stopped read may leave text no walk judged, where this returns the fault's byte.
+@(private, cold)
+record_end_by_walk :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
+	h: Record_End
+	regs: core.Hook_Regs
+	lo := doc.nodes[i].lo
+	fault: Maybe(core.Fault)
+	opts := Options{no_header = true, delimiter = doc.read.opts[0], comment = doc.read.opts[1], tolerate = {.Invalid_Utf8, .Ragged, .Bare_Quote}}
+	switch Spec(doc.read.spec) {
+	case .Csv:   _, fault = walk(doc.src, lo, .Csv, opts, &h, &regs, record_end_hook)
+	case .Tsv:   _, fault = walk(doc.src, lo, .Tsv, opts, &h, &regs, record_end_hook)
+	case .Plain: _, fault = walk(doc.src, lo, .Plain, opts, &h, &regs, record_end_hook)
+	}
+	if f, bad := fault.?; bad {
+		return f.at
+	}
+	return h.end
 }

@@ -26,6 +26,8 @@ Builder :: struct {
 	wide_node:  core.Node_Index,
 	wide_count: u32,
 	wide_more:  bool,
+	// The child counts a read by paths wrote to `counts_alloc`, in node order.
+	n_counts:   int,
 	// Whether the build refuses a repeated key, which selects the `$REFUSE` hook and its close-time check.
 	refuse:     bool,
 	err:        core.Document_Error,
@@ -92,6 +94,7 @@ builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault))
 	n := int(regs.a)
 	b.doc.nodes = b.doc.nodes_alloc[:n]
 	b.doc.facts = b.doc.facts_alloc[:b.n_facts]
+	b.doc.counts = b.doc.counts_alloc[:b.n_counts]
 	// One wide container was recorded at its close. A build with more counts them from the nodes here.
 	if b.wide_more {
 		if !builder_counts(b, n) {
@@ -419,10 +422,10 @@ builder_close_node :: #force_inline proc "contextless" (h: ^Builder, a: int, ope
 @(private, cold)
 builder_counts :: #force_no_inline proc(h: ^Builder, n: int) -> bool {
 	fresh := h.doc.counts_alloc
-	k := 0
+	k := h.n_counts
 	for i in 0 ..< n {
 		node := h.doc.nodes[i]
-		if node.spelling != core.CHILDREN_MAX || (node.kind != .Array && node.kind != .Map) {
+		if node.spelling != core.CHILDREN_MAX || node.role == .Partial || (node.kind != .Array && node.kind != .Map) {
 			continue
 		}
 		count := 0
@@ -448,6 +451,9 @@ builder_counts :: #force_no_inline proc(h: ^Builder, n: int) -> bool {
 		k += 1
 	}
 	h.doc.counts = fresh[:k]
+	if h.n_counts > 0 {
+		slice.sort_by(h.doc.counts, proc(a, b: core.Child_Count) -> bool { return a.node < b.node })
+	}
 	return true
 }
 

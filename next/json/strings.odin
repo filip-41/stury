@@ -380,21 +380,21 @@ escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 #no_bounds
 	if e[1] != 'u' || room < 6 {
 		return 0
 	}
-	unit, ok := hex4(e[2:])
+	unit, ok := spell.hex4(e[2:])
 	if !ok {
 		return 0
 	}
-	if low_surrogate(unit) {
+	if spell.low_surrogate(unit) {
 		return 0
 	}
-	if !high_surrogate(unit) {
+	if !spell.high_surrogate(unit) {
 		return 6
 	}
 	if room < 12 || e[6] != '\\' || e[7] != 'u' {
 		return 0
 	}
-	low, low_ok := hex4(e[8:])
-	return 12 if low_ok && low_surrogate(low) else 0
+	low, low_ok := spell.hex4(e[8:])
+	return 12 if low_ok && spell.low_surrogate(low) else 0
 }
 
 // Reads the string whose opening quote is at `p` one byte at a time. Returns one past its closing quote, whether it
@@ -458,13 +458,13 @@ escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) 
 		unit = unit << 4 | u32(h)
 		q = q[1:]
 	}
-	if low_surrogate(unit) {
+	if spell.low_surrogate(unit) {
 		if .Lone_Surrogate in tol {
 			return q, .None
 		}
 		return e, .Bad_Escape
 	}
-	if high_surrogate(unit) {
+	if spell.high_surrogate(unit) {
 		// Checks `\`, `u` and a low half's four digits in turn, each refused at its own byte, so a text cut inside them
 		// gives `Truncated` where a wrong byte gives `Bad_Escape`.
 		for i in 0 ..< 6 {

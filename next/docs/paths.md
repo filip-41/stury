@@ -1,8 +1,10 @@
 # Path queries
 
-The next layer. A path is a chain of steps from a value, and reading one gives an answer per value it reaches. This
-file is the layer's contract: what a path is, what a read gives, how the one engine works, and how an answer gets a
-container's end. Nothing here is implemented yet.
+A path is a chain of steps from a value, and reading one gives an answer per value it reaches. This file is the layer's
+contract: what a path is, what a read gives, how the one engine works, and how an answer gets a container's end. One
+path through `Name`, `Index` from 0 and `All` reads today, with `find`, `query` and `query_document`. A step or a read
+this file names past those parses where it has a spelling and gives `Unsupported`: several paths, `each_answer`,
+negative indexes, `Slice`, `Descend` and `?`.
 
 ## Vocabulary
 
@@ -23,13 +25,14 @@ container's end. Nothing here is implemented yet.
 | `All` | `.[]` | every member or element |
 | `Slice` | `.[2:5]` | a run of elements |
 | `Descend` | `..` | the value and everything under it |
+| `Either` | JSON Pointer's `/0` | a member of a map named by the token, an element of an array by its number |
 
 - `?` may follow any step. It drops a `Type_Mismatch` answer, as jq's empty does, and leaves `Missing` as it is.
 - Three spellings parse to one `Path`: jq text, RFC 6901 JSON Pointer, and Odin step literals, such as
   `{Name("a"), Index(-1), All{}}`. Every parse error has a byte offset in the text.
 - `first(P)` and `limit(N; P)` wrap a path in its text. They count answers and give no more after the Nth.
-- A parsed path owns its steps and decoded names in one block from an allocator. A name with no escape borrows the
-  text.
+- A parsed path owns its steps and decoded names in one block from an allocator, and a name with no escape borrows the
+  text. A document's `Missing` names borrow the path, so the path and its text outlive the document it read.
 - Predicates are not paths: a caller who wants `select(.level == "error")` asks for `.level` and compares.
 
 ## The Answer record
@@ -50,11 +53,15 @@ Answer :: struct {
 | Outcome | `owner` |
 |---|---|
 | `.Found` | the container holding the value, `NO_NODE` for the root |
-| `.Missing` | the deepest container the path reached, the one lacking the member or element |
+| `.Missing` | the deepest container the path reached, the one lacking the member or element, or the `null` at the root |
 | `.Type_Mismatch` | the value a step could not enter |
 
 So `.config.host` answers `Missing` naming `config` when `config` has no `host`, and `Missing` naming the root when
 there is no `config`. With `?`, it answers nothing when `config` is not an object.
+
+A step on a `null` is `Missing`, as jq's `null.a` is `null`, and names the container holding the `null`. A `[]` has
+nothing to enter in a `null` or in a value that is absent, as jq's `null[]` fails, so with a `[]` still to come a `null`
+is `Type_Mismatch` naming itself and an absent member or element is `Type_Mismatch` naming its container.
 
 An answer's outcome is always known, since the scan read the container it names. Everything else about a value is
 read from its node: `core.span(doc, a.node)` for its bytes, and the node's `kind`. The node stays the one place these
@@ -72,6 +79,7 @@ the answers, and a full build is the same read with every node kept.
 |---|---|
 | `query` | a document and its answers, in text order |
 | `find(src, path)` | `query` of one path with a limit of one |
+| `query_document(doc, path)` | the answers over a built document, naming its nodes |
 | `each_answer(src, paths, ctx, on)` | no document: `on` gets each answer's path number, outcome and token |
 
 `on` keeps nothing and returns whether to go on. `each_answer` calls it as each answer becomes known, which under
@@ -100,13 +108,13 @@ wants only found values drops the rest.
 ### Stopping early
 
 A scan judges all the text by default. `stop_early` (default false) returns `Stop` once every answer is known, so
-nothing past that point is read or judged. The answers are the same either way, and with it `refuse_duplicates` checks
-only the objects read before the stop.
+nothing past that point is read or judged. The answers are the same either way. `refuse_duplicates` needs every key of
+the text in hand, so such a read builds the whole text, ignores `stop_early`, and answers over the built document.
 
 The read's argument is `dups: Maybe(Duplicates)`. Nil is `.Last`, or `.First` under `stop_early`, so a root key's scan
 stops at its first match, which differs from `.Last` only on a text with a repeated key. Under a named policy the scan
-stops where the answer is known: `.First` at the match, `.Last` at the close of the object holding the key, and a path
-asking for every match or `refuse_duplicates` at the end of the text.
+stops where the answer is known: `.First` at the match, and `.Last` at the close of the object holding the key.
+Containers a stop leaves open are `Partial` with the count read so far, and `Document.stopped` is set.
 
 ### Negative indexes
 
@@ -127,15 +135,16 @@ the header key the hook kept.
 
 A dsv path addresses the tree its document has: `.[i]` is record `i`, `.[i].name` a cell by its header name, `.[i][j]`
 cell `j`, `.[]` every record, negative indexes included. A headed walk gives each cell its `Key` token, so the step
-logic needs no dsv code. A headerless text has no names.
+logic needs no dsv code. A headerless text has no names. A partial document keeps a kept cell's key beside it, so it has
+no `shared_keys`.
 
 ## The partial document
 
 A partial document holds the answers and the containers on the way to them, and nothing else. `.logs[].id` keeps the
 root, `logs`, each element, and each `id` whole, so an `id` that is an object is kept with all its nodes.
 
-A container whose children were not all kept has the role `Partial` in place of `Value`. `Partial` sorts before `Key`
-in `Role`, so a `role > .Key` fact test stays true to its meaning, and a test that means "a value" takes both.
+A container whose children were not all kept has the role `Partial` in place of `Value`. It is a node's role, never a
+token's, and sorts last in `Role`, so the numbers the walk's tokens carry stay as they are.
 
 A container's true child count comes from the walk and goes in a table keyed by node, which `Document.counts` already
 is for a count past `CHILDREN_MAX`. On a `Partial` container:
@@ -145,6 +154,11 @@ is for a count past `CHILDREN_MAX`. On a `Partial` container:
 | an index | exact, since the count is true: past the end is `Missing` |
 | a key a path asked for and did not find | `Missing`, from a list of `(container, name)` sorted by container |
 | any other key | `Not_Loaded` |
+| a key under `.Last` of a member kept by position | `Not_Loaded`, since a repeat of the key may lie past what was kept |
+
+`member_of` and `element_of` give these three answers as a `Presence`. An element a path reached by position is found
+through `Document.kept`, which holds each kept child's true index, since its place among the kept nodes is not its
+index.
 
 A key lookup scans the kept nodes as on any container, and only a miss on a `Partial` container reads the list. The
 list is why `.config.host` with no `host` makes a later `member(config, "host")` say `Missing` as its answer did. No
@@ -153,7 +167,7 @@ outcome. To read more of `config`, ask for `.config` or for each member.
 
 An edit names a node, so a `Not_Loaded` member cannot be edited. A `set` on a listed name is an insert into its
 container, by name. A commit takes an edited container's members from the format's walk on every document, full or
-partial, so a scan keeps nothing extra for edits.
+partial, so a scan keeps nothing extra for edits. `commit` refuses a partial document with `Bad_Index` until then.
 
 ## The engine
 
@@ -163,10 +177,11 @@ hook sees `Map`, `Array`, `Key` and value tokens and returns `Next`, `Skip` or `
 - Its state per depth is which step of which path is armed there. For one path that is a step number and a depth, two
   registers. Several paths keep one `u64` bit set of armed paths per depth. Each form is its own instantiation, so one
   path pays nothing for many.
-- A `Name` step compares the `Key` token's span with the name: length, then the first 8 bytes, then the rest, on the raw
-  bytes when neither side has an escape, decoded otherwise.
-- A member or element no path needs is skipped. When every answer is known and `stop_early` is set, the hook returns
-  `Stop`.
+- A `Name` step compares the `Key` token's span with the name: length, then the bytes, on the raw bytes when the key has
+  no escape, decoded otherwise. No compare runs inside the walk: a name matches few keys, so one would be spent on nearly
+  every key and save a scan only on a match.
+- A member no path needs is skipped at its `Key`, so the walk reads a string or number value inline, and an element at
+  its value's token. When every answer is known and `stop_early` is set, the hook returns `Stop`.
 - Each answer goes to a sink chosen at compile time: `query` uses the document sink, and `each_answer` the stream sink.
 
 The step logic runs on two token sources: the walk's during a scan, and a document's during a query. `doc.nodes` is not
@@ -191,9 +206,11 @@ resolved only when a caller asks for its bytes, through `core.span` and the form
   answers with a scalar, or tests only a container's `kind`, pays nothing.
 - A `Partial` container cannot use that scan, which starts from the last kept descendant and takes it for the
   container's last, and a dsv record's line end has the same trap. Each format's `close_end` walks the value again from
-  its `lo` instead. The text was judged, so the walk cannot
-  fail, and no storage is spent on a span few callers ask for: an answer is kept whole, so only an ancestor on the way
-  to an answer is `Partial`. A commit does not ask, since it reads an edited container's members from the walk.
+  its `lo` instead, tolerating every fault, since the read may have tolerated any. No storage is spent on a span few
+  callers ask for: an answer is kept whole, so only an ancestor on the way to an answer is `Partial`. A commit does not
+  ask, since it reads an edited container's members from the walk.
+- A container a stopped read left open may run into text no walk judged, and a fault there ends its span at the fault's
+  byte.
 
 Why this and not a wider record:
 
@@ -207,13 +224,6 @@ filled at the walk's `End`, and do not widen `Node`. A third option changes the 
 bytes as `hi` gives every container an O(1) close at the price of a 4 GiB source cap.
 
 ## Open
-
-These are settled by measurement, and a lane an arm loses goes to Filip:
-
-- **The key compare and the skip.** The arms are the hook comparing the span and skipping at the value's container
-  token with no walk change, the same plus a compare inside the walk before the key scan, and the same plus `Skip` on a
-  `Key` reading a scalar value inline. `validate` and `build` compile none of it, so their instruction counts stay.
-- **The replay against stored `End` nodes**, which every build and read lane would pay for.
 
 One shape question is left: a `Token`'s `n` is `u32`, so `each_answer` cannot pass a found container past 4 GiB as a
 token, and its `on` may need the span as `lo` and `hi`.

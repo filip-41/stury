@@ -16,13 +16,16 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/build/build.odin` | `Builder`, the hooks, `builder_start`, `builder_end`, the header row, the duplicate-key check |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact`, `commit` |
 | `core/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
+| `core/path.odin` | `Path`, its steps and spellings, `Answer`, `member_of` and `element_of` |
+| `core/build/scan.odin` | the one engine: the hook a format's `query` walks with, the partial document, `query_document` |
+| `json/query.odin`, `dsv/query.odin` | each format's `query` and `find` |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, every decoder |
 | `core/spell/text.odin` | `decode_text` and `bytes_equal`, the decoders' and readers' byte helpers |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
 | `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, `render`, `write_code` |
 | `json/document.odin` | JSON's `build`, `Spelling` and `Edit_Spelling` tables, `close_end`, the edit checks |
 | `dsv/compose.odin` | a delimited text's root junctions and the comments above its header |
-| `json/escape.odin` | the escape-byte table and the hex and surrogate helpers its walk and decoder share |
+| `json/escape.odin` | the escape-byte table its walk and decoder share |
 | `json/unescape.odin` | JSON's `text` and `number` readers and the decoder behind them |
 | `dsv/document.odin` | dsv's `build` and `commit`, its `text` and `number` readers, its `Spelling` table, its edit table, `close_end`, the record check |
 
@@ -76,7 +79,8 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
 - `spelling` is a `^Spelling` that points at a format's table in rodata, and `allocator` is the one the build
   received. `destroy` frees the three allocations and sets the document to zero. A reader that allocates takes its own
   allocator.
-- `header` is the dsv header row's node, 0 for a text read without a header and for every JSON document.
+- `shared_keys` is the dsv header row's node, 0 for a text read without a header, for a partial document and for every
+  JSON document.
 - `root_close` is one past the root value's authored bytes: the close of a root container, or the last byte of a root
   scalar, quotes included. It is 0 when the build did not record it. `span(ROOT)` and a whole-document writer use it
   instead of the format's `close_end`.
@@ -85,8 +89,9 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
   three opaque format bytes, passed along unread by core, which dsv uses for its delimiter, comment byte and `no_header`
   flag. Its `max_depth` is `Options.max_depth`, 0 for the default: JSON's build stores it and its edit services read a
   recorded value at that depth, and a delimited text has no depth option and leaves it 0.
-- The document does not change after its build, and no reader accepts an edit. A path query's `Answer` record and its
-  container-close decision are planned in `paths.md`.
+- A path read fills `answers`, and for a partial document `kept`, `missing`, `partial` and `stopped`, all in `paths.md`.
+  `answers`, `kept` and `missing` share `reads_block`, which `destroy` frees.
+- The document does not change after its build, and no reader accepts an edit.
 
 ## Building
 
