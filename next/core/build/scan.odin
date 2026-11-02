@@ -74,7 +74,7 @@ Scan :: struct {
 	stopped:    bool,
 	borrowed:   bool, // the builder's stack is the caller's `frames`
 	positional: bool, // a `Map`'s members answer an `Index`, as a dsv record's cells do
-	at:         core.Node_Index, // the node `query_document` is giving the logic
+	at:         core.Node_Index, // the node `query` is giving the logic
 	answers:    []core.Answer,
 	n_answers:  int,
 	kept:       []core.Kept_Child,
@@ -91,7 +91,7 @@ Scan :: struct {
 }
 
 // Gives one value of a text to the `$MANY` form's hook again from the value's first byte, `at` being its node in a
-// built document. A format's `query` sets it, since only a format can walk from a value.
+// built document. A format's `scan` sets it, since only a format can walk from a value.
 Rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index)
 
 // Reads `paths` and `read` into `h`. `many` asks for `$MANY`, and `depth` bounds the frames a `Descend` path opens.
@@ -183,7 +183,7 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 }
 
 // Starts a scan of `paths` over `src`. `depth` is as in `builder_start`, `frames` is the caller's room for that stack,
-// which `depth` may outgrow, and a format's `query` runs its walk with `scan_hook`, or `many_hook` when `Scan.many` is
+// which `depth` may outgrow, and a format's `scan` runs its walk with `scan_hook`, or `many_hook` when `Scan.many` is
 // set, and ends it with `scan_end`. `many` asks for `$MANY`.
 scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error {
 	e := scan_plan(h, paths, read, depth, many, allocator)
@@ -296,13 +296,13 @@ attach_reads :: proc(doc: ^core.Document, answers: []core.Answer, kept: []core.K
 // Answers `path` over a document built whole, in the order a scan of its text answers, and allocates nothing but the
 // list, which the caller frees with `delete(answers, allocator)`. A partial document cannot say what it does not hold,
 // so it is `.Unsupported`. An `Answer`'s nodes are `doc`'s.
-query_document_one :: proc(doc: ^core.Document, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
+query_one :: proc(doc: ^core.Document, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
 	paths := [1]core.Path{path}
-	return query_document_many(doc, paths[:], read, allocator)
+	return query_many(doc, paths[:], read, allocator)
 }
 
-// Answers `paths` over a document built whole, as `query_document_one`, each answer tagged with its path's number.
-query_document_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
+// Answers `paths` over a document built whole, as `query_one`, each answer tagged with its path's number.
+query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
 	if doc.partial {
 		return nil, {kind = .Unsupported}
 	}
@@ -340,7 +340,7 @@ query_document_many :: proc(doc: ^core.Document, paths: []core.Path, read := cor
 	return h.answers[:h.n_answers], {}
 }
 
-query_document :: proc {query_document_one, query_document_many}
+query :: proc {query_one, query_many}
 
 @(private = "file")
 has_descend :: proc(path: core.Path) -> bool {
@@ -368,7 +368,7 @@ set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, allocato
 			read.steps = path.steps[:n - 1]
 		}
 	}
-	answers, qerr := query_document_one(doc, read, allocator = allocator)
+	answers, qerr := query_one(doc, read, allocator = allocator)
 	defer delete(answers, allocator)
 	if qerr.kind != .None {
 		return nil, qerr
@@ -400,7 +400,7 @@ replay_rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: 
 // Answers `paths` over the whole document `doc`, which a read with `refuse_duplicates` built, and gives it its answers. On
 // an error `doc` is destroyed.
 query_built :: proc(doc: ^core.Document, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Path_Error) {
-	answers, e := query_document_many(doc, paths, read, doc.allocator)
+	answers, e := query_many(doc, paths, read, doc.allocator)
 	if e.kind == .None {
 		defer delete(answers, doc.allocator)
 		if attach_reads(doc, answers, nil, nil) {
@@ -470,7 +470,7 @@ replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.H
 	}
 }
 
-// The hook a format's `query` gives its walk.
+// The hook a format's `scan` gives its walk.
 scan_hook :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return scan_step(false, .Document, h, s, t)
 }

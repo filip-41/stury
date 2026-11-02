@@ -17,8 +17,8 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact`, `commit` |
 | `core/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
 | `core/path.odin` | `Path`, its steps and spellings, `Answer`, `member_of` and `element_of` |
-| `core/build/scan.odin` | the one engine: the hook a format's `query` walks with, the partial document, `query_document` |
-| `json/query.odin`, `dsv/query.odin` | each format's `query` and `find` |
+| `core/build/scan.odin` | the one engine: the hook a format's `scan` walks with, the partial document, `query` |
+| `json/query.odin`, `dsv/query.odin` | each format's `scan` and `find` |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, every decoder |
 | `core/spell/text.odin` | `decode_text` and `bytes_equal`, the decoders' and readers' byte helpers |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |

@@ -1,4 +1,5 @@
-"""paths.py: the path lanes of next/, GB/s as the best round of each arm's median.
+"""paths.py: the path lanes of next/, the best round of each arm's median as ns and as GB/s of the whole text. A lane that
+stops early leaves bytes unread, so its ns is what counts.
 
 Usage: python3 next/bench/paths.py [--rounds N]
 A `get` lane reads one root key early, in the middle, late and absent: next's scan, stopped scan and query, and sonic-rs `get` and
@@ -35,7 +36,7 @@ LOG_LANES = [(".logs[].id", ".logs[].id"), (".logs[][]", ".logs[][]"), (".logs[-
              ("five keys per record", ";".join(f".logs[].{k}" for k in FIELDS))]
 
 
-def race(label, arms, rounds):
+def race(label, size, arms, rounds):
     best = dict.fromkeys(arms, 0.0)
     checks = {}
     for _ in range(rounds):
@@ -44,7 +45,7 @@ def race(label, arms, rounds):
             best[arm] = max(best[arm], gb)
     if len(set(checks.values())) > 1:
         sys.exit(f"checksums disagree on {label}: {checks}")
-    print(f"{label:22} " + "  ".join(f"{a} {b:8.2f}" for a, b in best.items()), flush=True)
+    print(f"{label:22} " + "  ".join(f"{a} {size / b:12.0f} ns {b:8.2f}" for a, b in best.items()), flush=True)
 
 
 def main(argv):
@@ -61,10 +62,10 @@ def main(argv):
                 arms["sonic"] = [SONIC, "sonic", "sonic_get", path, key]
             if os.path.exists(SIMD):
                 arms["simd"] = [SIMD, path, "simd_get", key]
-            race(label, arms, rounds)
+            race(label, os.path.getsize(path), arms, rounds)
         logs = fixture("logs.json")
         for label, paths in LOG_LANES:
-            race(label, {a: [PROBE, a, paths, logs] for a in ("scan", "query")}, rounds)
+            race(label, os.path.getsize(logs), {a: [PROBE, a, paths, logs] for a in ("scan", "query")}, rounds)
 
 
 if __name__ == "__main__":

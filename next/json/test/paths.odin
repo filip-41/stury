@@ -245,7 +245,7 @@ path_reads :: proc(t: ^testing.T) {
 		defer core.path_destroy(&path)
 		testing.expect_value(t, perr.kind, core.Path_Error_Kind.None)
 
-		doc, err := json.query(transmute([]u8)c.src, .Json, path, read = c.opts)
+		doc, err := json.scan(transmute([]u8)c.src, .Json, path, read = c.opts)
 		defer core.destroy(&doc)
 		testing.expectf(t, err.kind == .None, "%q: %v", c.path, err)
 		check_answers(t, c, &doc, doc.answers, "scan")
@@ -253,7 +253,7 @@ path_reads :: proc(t: ^testing.T) {
 		full, berr := json.build(transmute([]u8)c.src, .Json)
 		defer core.destroy(&full)
 		testing.expect_value(t, berr.kind, core.Document_Error_Kind.None)
-		answers, qerr := json.query_document(&full, path, c.opts)
+		answers, qerr := json.query(&full, path, c.opts)
 		defer delete(answers)
 		testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
 		check_answers(t, c, &full, answers, "query")
@@ -266,7 +266,7 @@ partial_reads :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"keep":1,"a":{"x":[10,20,30],"y":2},"z":3}`)
 	path, _ := core.parse_path(".a.x[1]")
 	defer core.path_destroy(&path)
-	doc, err := json.query(src, .Json, path)
+	doc, err := json.scan(src, .Json, path)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, doc.nodes[core.ROOT].role, core.Role.Partial)
@@ -289,7 +289,7 @@ partial_reads :: proc(t: ^testing.T) {
 
 	miss, _ := core.parse_path(".a.host")
 	defer core.path_destroy(&miss)
-	partial, merr := json.query(src, .Json, miss)
+	partial, merr := json.scan(src, .Json, miss)
 	defer core.destroy(&partial)
 	testing.expect_value(t, merr.kind, core.Path_Error_Kind.None)
 	owner := partial.answers[0].owner
@@ -344,7 +344,7 @@ stream_stops_and_refuses :: proc(t: ^testing.T) {
 	b, _ := core.parse_path(".b")
 	defer core.path_destroy(&b)
 	paths := [2]core.Path{a, b}
-	doc, err := json.query(src, .Json, paths[:], read = {refuse_duplicates = true})
+	doc, err := json.scan(src, .Json, paths[:], read = {refuse_duplicates = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.Duplicate_Key)
 	seen := 0
@@ -365,7 +365,7 @@ partial_repeated_keys :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"0":true,"0":null}`)
 	cut, _ := core.parse_path("limit(1; .[])")
 	defer core.path_destroy(&cut)
-	doc, err := json.query(src, .Json, cut)
+	doc, err := json.scan(src, .Json, cut)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	_, last := core.member_of(&doc, core.ROOT, "0")
@@ -376,7 +376,7 @@ partial_repeated_keys :: proc(t: ^testing.T) {
 
 	pointer, _ := core.parse_pointer("/0")
 	defer core.path_destroy(&pointer)
-	named, nerr := json.query(transmute([]u8)string(`{"0":1,"0":2,"b":3}`), .Json, pointer)
+	named, nerr := json.scan(transmute([]u8)string(`{"0":1,"0":2,"b":3}`), .Json, pointer)
 	defer core.destroy(&named)
 	testing.expect_value(t, nerr.kind, core.Path_Error_Kind.None)
 	v, found := core.member_of(&named, core.ROOT, "0")
@@ -390,7 +390,7 @@ partial_tolerated_span :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("{\"a\":{\"x\":1,\"y\":\"\xff\"}}")
 	path, _ := core.parse_path(".a.x")
 	defer core.path_destroy(&path)
-	doc, err := json.query(src, .Json, path, {tolerate = {.Invalid_Utf8}})
+	doc, err := json.scan(src, .Json, path, {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, string(core.span(&doc, doc.answers[0].owner)), "{\"x\":1,\"y\":\"\xff\"}")
@@ -404,10 +404,10 @@ path_capacity :: proc(t: ^testing.T) {
 		s = core.Name("a")
 	}
 	src := transmute([]u8)string(`1`)
-	doc, err := json.query(src, .Json, core.Path{steps = steps[:core.MAX_STEPS]})
+	doc, err := json.scan(src, .Json, core.Path{steps = steps[:core.MAX_STEPS]})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
-	_, over := json.query(src, .Json, core.Path{steps = steps[:]})
+	_, over := json.scan(src, .Json, core.Path{steps = steps[:]})
 	testing.expect_value(t, over.kind, core.Path_Error_Kind.Over_Capacity)
 }
 
@@ -417,7 +417,7 @@ stop_early_reads :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"a":1,"b":[1,2],"c":!`)
 	path, _ := core.parse_path(".a")
 	defer core.path_destroy(&path)
-	doc, err := json.query(src, .Json, path, read = {stop_early = true})
+	doc, err := json.scan(src, .Json, path, read = {stop_early = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, len(doc.answers), 1)
@@ -425,18 +425,18 @@ stop_early_reads :: proc(t: ^testing.T) {
 	_, rest := core.member_of(&doc, core.ROOT, "b")
 	testing.expect_value(t, rest, core.Presence.Not_Loaded)
 
-	_, bad := json.query(src, .Json, path)
+	_, bad := json.scan(src, .Json, path)
 	testing.expect_value(t, bad.kind, core.Path_Error_Kind.Walk)
 
 	each, _ := core.parse_path(".a[]")
 	defer core.path_destroy(&each)
 	late := transmute([]u8)string(`{"a":[1,2],"a":[3]}!`)
-	named, nerr := json.query(late, .Json, each, read = {stop_early = true, dups = core.Duplicates.Last})
+	named, nerr := json.scan(late, .Json, each, read = {stop_early = true, dups = core.Duplicates.Last})
 	defer core.destroy(&named)
 	testing.expect_value(t, nerr.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, len(named.answers), 1)
 
-	_, dup := json.query(transmute([]u8)string(`{"a":1,"a":2}`), .Json, path, read = {refuse_duplicates = true})
+	_, dup := json.scan(transmute([]u8)string(`{"a":1,"a":2}`), .Json, path, read = {refuse_duplicates = true})
 	testing.expect_value(t, dup.kind, core.Path_Error_Kind.Duplicate_Key)
 }
 
@@ -444,19 +444,19 @@ stop_early_reads :: proc(t: ^testing.T) {
 path_refusals :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`[1]`)
 	far := core.Path{steps = []core.Step{core.Index(-65)}}
-	_, deep := json.query(src, .Json, far)
+	_, deep := json.scan(src, .Json, far)
 	testing.expect_value(t, deep.kind, core.Path_Error_Kind.Over_Capacity)
 	twice := core.Path{steps = []core.Step{core.Descend{}, core.Name("a"), core.Descend{}}}
-	_, again := json.query(src, .Json, twice)
+	_, again := json.scan(src, .Json, twice)
 	testing.expect_value(t, again.kind, core.Path_Error_Kind.Bad_Path)
 	many: [65]core.Path
-	_, over := json.query(src, .Json, many[:])
+	_, over := json.scan(src, .Json, many[:])
 	testing.expect_value(t, over.kind, core.Path_Error_Kind.Over_Capacity)
 	path, _ := core.parse_path(".[0]")
 	defer core.path_destroy(&path)
-	doc, _ := json.query(src, .Json, path)
+	doc, _ := json.scan(src, .Json, path)
 	defer core.destroy(&doc)
-	_, e := json.query_document(&doc, path)
+	_, e := json.query(&doc, path)
 	testing.expect_value(t, e.kind, core.Path_Error_Kind.Unsupported)
 }
 
@@ -490,7 +490,7 @@ query_kept_value_in_small_arena :: proc(t: ^testing.T) {
 	buf: [8192]u8
 	arena: mem.Arena
 	mem.arena_init(&arena, buf[:])
-	doc, err := json.query(transmute([]u8)src, .Json, path, allocator = mem.arena_allocator(&arena))
+	doc, err := json.scan(transmute([]u8)src, .Json, path, allocator = mem.arena_allocator(&arena))
 	testing.expect(t, err.kind == .None)
 	testing.expect(t, len(doc.answers) == 1 && doc.answers[0].outcome == .Found)
 	testing.expect(t, string(core.span(&doc, doc.answers[0].node)) == `[1,{"b":2}]`)
@@ -507,12 +507,12 @@ either_by_name_has_no_position :: proc(t: ^testing.T) {
 	b, be := core.parse_path(".b")
 	defer core.path_destroy(&b)
 	testing.expect_value(t, be.kind, core.Path_Error_Kind.None)
-	one, oerr := json.query(src, .Json, either)
+	one, oerr := json.scan(src, .Json, either)
 	defer core.destroy(&one)
 	testing.expect_value(t, oerr.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, len(one.kept), 0)
 	paths := [?]core.Path{either, b}
-	many, merr := json.query(src, .Json, paths[:])
+	many, merr := json.scan(src, .Json, paths[:])
 	defer core.destroy(&many)
 	testing.expect_value(t, merr.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, len(many.kept), 0)

@@ -1,7 +1,7 @@
 // `paths <scan|stop|query> <paths> <file>`: one read of `paths`, separated by `;`, gb_per_s from the median of ten timed
-// calls after two warm-ups, and a checksum of the answers' spans. `scan` runs `json.query` over the text and judges all of
-// it. `stop` reads under `.First` with `stop_early`, as a reader that leaves the rest unread does. `query` builds the
-// document once outside the clock and times `json.query_document`.
+// calls after two warm-ups, and a checksum of the answers' spans. `scan` runs `json.scan` over the text and judges all of
+// it. `stop` reads under `.First` with `stop_early`, as a reader that leaves the rest unread does. `scan` builds the
+// document once outside the clock and times `json.query`.
 package paths
 
 import "core:fmt"
@@ -57,7 +57,7 @@ main :: proc() {
 		read := core.Path_Options{dups = .First, stop_early = true} if os.args[1] == "stop" else {}
 		for i in 0 ..< WARMUP + TIMED {
 			start := time.tick_now()
-			doc, err := json.query(src, .Json, paths, read = read)
+			doc, err := json.scan(src, .Json, paths, read = read)
 			d := i64(time.tick_since(start))
 			if err.kind != .None {
 				fmt.eprintln("scan:", err)
@@ -77,7 +77,7 @@ main :: proc() {
 		}
 		for i in 0 ..< WARMUP + TIMED {
 			start := time.tick_now()
-			answers, qerr := json.query_document(&doc, paths)
+			answers, qerr := json.query(&doc, paths)
 			d := i64(time.tick_since(start))
 			if qerr.kind != .None {
 				fmt.eprintln("query:", qerr)

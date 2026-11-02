@@ -438,17 +438,17 @@ check_paths :: proc(t: ^testing.T, src: []u8, $S: json.Spec, full: ^core.Documen
 				continue
 			}
 			want := model_reads(full, paths, dups, every)
-			scanned, err := json.query(src, S, paths, read = {dups = dups, every_key = every})
+			scanned, err := json.scan(src, S, paths, read = {dups = dups, every_key = every})
 			defer core.destroy(&scanned)
 			testing.expectf(t, err.kind == .None, "%v: %v", paths, err) or_return
 			same_reads(t, &scanned, scanned.answers, want, "scan", paths) or_return
 
-			stopped, serr := json.query(src, S, paths, read = {dups = dups, stop_early = true, every_key = every})
+			stopped, serr := json.scan(src, S, paths, read = {dups = dups, stop_early = true, every_key = every})
 			defer core.destroy(&stopped)
 			testing.expectf(t, serr.kind == .None, "%v: %v", paths, serr) or_return
 			same_stopped(t, &stopped, stopped.answers, want, paths) or_return
 
-			answers, qerr := json.query_document(full, paths, {dups = dups, every_key = every})
+			answers, qerr := json.query(full, paths, {dups = dups, every_key = every})
 			defer delete(answers)
 			testing.expectf(t, qerr.kind == .None, "%v: %v", paths, qerr) or_return
 			same_reads(t, full, answers, want, "query", paths) or_return
@@ -495,13 +495,13 @@ check_round :: proc(t: ^testing.T, src: []u8, $S: json.Spec) -> bool {
 
 // `set` writes what a built document's answers commit to, and a partial document's commit is refused.
 check_commit :: proc(t: ^testing.T, src: []u8, $S: json.Spec, full: ^core.Document, path: core.Path) -> bool {
-	scanned, err := json.query(src, S, path)
+	scanned, err := json.scan(src, S, path)
 	defer core.destroy(&scanned)
 	testing.expectf(t, err.kind == .None, "%v: %v", path, err) or_return
 	list := core.edit_list_init(&scanned, context.temp_allocator)
 	_, _, refused := core.commit(&list, context.temp_allocator)
 	testing.expectf(t, refused.kind == .Bad_Index, "%q %v: %v", string(src), path, refused) or_return
-	answers, qerr := json.query_document(full, path)
+	answers, qerr := json.query(full, path)
 	defer delete(answers)
 	testing.expectf(t, qerr.kind == .None, "%v: %v", path, qerr) or_return
 	edits := core.edit_list_init(full, context.temp_allocator)

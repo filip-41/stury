@@ -78,12 +78,12 @@ the answers, and a full build is the same read with every node kept.
 
 | Name | Gives |
 |---|---|
-| `query` | a document and its answers, in text order |
-| `find(src, path)` | `query` of one path with a limit of one |
+| `scan` | a document and its answers, in text order |
+| `find(src, path)` | `scan` of one path with a limit of one |
 | `query_document(doc, paths)` | the answers over a built document, naming its nodes |
 | `each_answer(src, paths, state, on)` | no document: `on` gets each answer's path number, outcome, token and end |
 
-`query` and `query_document` take one path or a slice of them. With several, each path answers what it answers alone,
+`scan` and `query` take one path or a slice of them. With several, each path answers what it answers alone,
 and the answers are in one text order, the earlier path first at one byte.
 
 `on` keeps nothing and returns whether to go on. `each_answer` calls it as each answer becomes known, in the order they
@@ -210,7 +210,7 @@ hook sees `Map`, `Array`, `Key` and value tokens and returns `Next`, `Skip` or `
   every key and save a scan only on a match.
 - A member no path needs is skipped at its `Key`, so the walk reads a string or number value inline, and an element at
   its value's token. When every answer is known and `stop_early` is set, the hook returns `Stop`.
-- Each answer goes to a sink chosen at compile time: `query` uses the document sink, `each_answer` the stream sink, and
+- Each answer goes to a sink chosen at compile time: `scan` uses the document sink, `each_answer` the stream sink, and
   a read of a built document the replay sink, which writes nothing.
 - A repeated key under `.Last` takes answers back. One path rewinds the lists and the nodes. Several cannot, since
   another path may have read past that point, so their answers are marked dead and their nodes stay with no answer
