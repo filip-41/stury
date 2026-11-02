@@ -342,3 +342,20 @@ path_model :: proc(t: ^testing.T) {
 		core.destroy(&full)
 	}
 }
+
+@(test)
+path_set :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("a,b\n1,2\n# kept\n3,4\n")
+	opts := dsv.Options{comment = '#'}
+	cases := [?][3]string {
+		{".[1].b", "9", "a,b\n1,2\n# kept\n3,9\n"},
+		{".[-1][0]", "9", "a,b\n1,2\n# kept\n9,4\n"},
+		{".[1].c", "9", "a,b,c\n1,2,\n# kept\n3,4,9\n"},
+	}
+	for c in cases {
+		out, err := dsv.set(src, .Csv, c[0], c[1], opts)
+		defer delete(out)
+		testing.expectf(t, err == nil, "%s: %v", c[0], err)
+		testing.expect_value(t, string(out), c[2])
+	}
+}

@@ -117,6 +117,25 @@ set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error 
 	return edit_add(list, node, .Set, .Value, 0, "", text)
 }
 
+// Makes `text` the value of the member of `obj` named `name`: a set of the member the document holds, or an insert after
+// `obj`'s last member when it has none. On a partial document a name no path looked for is `.Bad_Index`, since whether
+// the text holds it is not known.
+set_member :: proc(list: ^Edit_List, obj: Node_Index, name, text: string) -> Document_Error {
+	doc := list.doc
+	if doc == nil {
+		return {kind = .Bad_Index}
+	}
+	v, presence := member_of(doc, obj, name)
+	switch presence {
+	case .Found:
+		return set(list, v, text)
+	case .Missing:
+		return insert_member(list, obj, length(doc, obj), name, text)
+	case .Not_Loaded:
+	}
+	return {kind = .Bad_Index}
+}
+
 // Inserts `text` into the array `container` before its element `at`, or after its last when `at` is its length.
 @(private)
 insert_value :: proc(list: ^Edit_List, container: Node_Index, at: int, text: string) -> Document_Error {
@@ -266,9 +285,8 @@ commit_as :: proc(list: ^Edit_List, spec: u8, allocator := context.allocator) ->
 	if doc == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
-	// A partial document does not hold the members a commit composes.
 	if doc.partial {
-		return nil, 0, {kind = .Bad_Index}
+		return commit_partial(list, spec, allocator)
 	}
 	// Refused before any chunk is built or spliced, rather than after the output fails to read.
 	if flat_doc(doc) && spec != doc.read.spec {
@@ -289,6 +307,61 @@ commit_as :: proc(list: ^Edit_List, spec: u8, allocator := context.allocator) ->
 		return nil, 0, e
 	}
 	return commit_edits(&planned if changed else list, spec, allocator)
+}
+
+// Commits a partial document's edits on the whole text. A partial document holds neither the members a commit composes
+// nor their comments, and a format's plan reads every record, so the format builds the text and each edit moves to the
+// node at its byte. The read that made the document has judged only what it read, so a fault in the rest is the commit's.
+@(private)
+commit_partial :: proc(list: ^Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: Document_Error) {
+	doc := list.doc
+	if doc.spelling.edit == nil || doc.spelling.edit.whole == nil {
+		return nil, 0, {kind = .Bad_Index}
+	}
+	full, e := doc.spelling.edit.whole(doc, allocator)
+	if e.kind != .None {
+		return nil, 0, e
+	}
+	defer destroy(&full)
+	moved := Edit_List{doc = &full, allocator = allocator}
+	moved.edits, _ = make([dynamic]Edit, len(list.edits), allocator)
+	defer delete(moved.edits)
+	for edit, i in list.edits {
+		node, found := same_node(doc, &full, edit.node)
+		if !found {
+			return nil, 0, {kind = .Bad_Index}
+		}
+		moved.edits[i] = edit
+		moved.edits[i].node = node
+	}
+	return commit_as(&moved, spec, allocator)
+}
+
+// Returns the node of `full` that is `partial`'s node `node`. Nodes are in text order, so the one at its byte and of its
+// kind is found by search. Only a container and its first member share a byte and a kind, in a text with no brackets: the
+// root and its first record, so any node but the root is the last of those.
+@(private)
+same_node :: proc(partial, full: ^Document, node: Node_Index) -> (Node_Index, bool) {
+	if node == ROOT {
+		return ROOT, true
+	}
+	want := partial.nodes[node]
+	lo, hi := 0, len(full.nodes)
+	for lo < hi {
+		mid := lo + (hi - lo) / 2
+		if full.nodes[mid].lo < want.lo {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	found, ok := NO_NODE, false
+	for ; lo < len(full.nodes) && full.nodes[lo].lo == want.lo; lo += 1 {
+		if full.nodes[lo].kind == want.kind {
+			found, ok = Node_Index(lo), true
+		}
+	}
+	return found, ok
 }
 
 // Composes `list`'s edits, splices them into the source and checks that the output reads.

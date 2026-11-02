@@ -36,6 +36,7 @@ EDIT := core.Edit_Spelling {
 	fact_slot     = edit_fact_slot,
 	emptied       = edit_emptied,
 	plan          = edit_plan,
+	whole         = edit_whole,
 }
 
 // dsv's spelling services, in rodata, the same table for every spec. A service dispatches on `doc.read.spec`, since the

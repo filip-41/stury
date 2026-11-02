@@ -489,7 +489,35 @@ check_round :: proc(t: ^testing.T, src: []u8, $S: json.Spec) -> bool {
 	for &p in paths {
 		p = random_path(random_steps())
 	}
-	return check_paths(t, src, S, &full, paths)
+	return check_paths(t, src, S, &full, paths) && check_commit(t, src, S, &full, paths[0], rand.int_max(2) == 0)
+}
+
+// The answers' nodes as edits, on a partial document and on the built one, commit to the same text or the same refusal.
+check_commit :: proc(t: ^testing.T, src: []u8, $S: json.Spec, full: ^core.Document, path: core.Path, removing: bool) -> bool {
+	record :: proc(doc: ^core.Document, answers: []core.Answer, removing: bool) -> (out: []u8, err: core.Document_Error) {
+		list := core.edit_list_init(doc, context.temp_allocator)
+		for a in answers {
+			if a.outcome != .Found {
+				continue
+			}
+			e := core.remove(&list, a.node) if removing else core.set(&list, a.node, "0")
+			if e.kind != .None {
+				return nil, e
+			}
+		}
+		out, _, err = core.commit(&list, context.temp_allocator)
+		return
+	}
+	scanned, err := json.query(src, S, path)
+	defer core.destroy(&scanned)
+	testing.expectf(t, err.kind == .None, "%v: %v", path, err) or_return
+	answers, qerr := json.query_document(full, path)
+	defer delete(answers)
+	testing.expectf(t, qerr.kind == .None, "%v: %v", path, qerr) or_return
+	got, gerr := record(&scanned, scanned.answers, removing)
+	want, werr := record(full, answers, removing)
+	testing.expectf(t, gerr.kind == werr.kind, "%q %v: %v want %v", string(src), path, gerr, werr) or_return
+	return testing.expectf(t, string(got) == string(want), "%q %v: %q want %q", string(src), path, string(got), string(want))
 }
 
 @(test)

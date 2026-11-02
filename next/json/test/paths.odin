@@ -298,10 +298,84 @@ partial_reads :: proc(t: ^testing.T) {
 	_, unlisted := core.member_of(&partial, owner, "y")
 	testing.expect_value(t, unlisted, core.Presence.Not_Loaded)
 
+}
+
+// A commit of a partial document writes what a built one writes, and what no read reached stays byte for byte.
+@(test)
+partial_commit :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("{ // head\n  \"a\": 1, /* mid */ \"b\": [1, 2,3], \"c\": {\"x\": 1}\n}\n")
+	parsed, _ := core.parse_path(".b[-1]")
+	defer core.path_destroy(&parsed)
+	doc, err := json.query(src, .Jsonc, parsed)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	_, _, cerr := core.commit(&list)
-	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.Bad_Index)
+	testing.expect_value(t, core.remove(&list, doc.answers[0].node).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.insert(&list, doc.answers[0].owner, 3, "9").kind, core.Document_Error_Kind.None)
+	out, _, cerr := core.commit(&list)
+	defer delete(out)
+	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, string(out), "{ // head\n  \"a\": 1, /* mid */ \"b\": [1, 2,9], \"c\": {\"x\": 1}\n}\n")
+}
+
+@(private = "file")
+expect_set :: proc(t: ^testing.T, src, path, text, want: string, loc := #caller_location) {
+	out, err := json.set(transmute([]u8)src, .Json, path, text)
+	defer delete(out)
+	testing.expect_value(t, err, nil, loc)
+	testing.expect_value(t, string(out), want, loc)
+}
+
+@(test)
+path_set :: proc(t: ^testing.T) {
+	expect_set(t, `{"host":"h","port":80}`, ".port", "8080", `{"host":"h","port":8080}`)
+	expect_set(t, `{"host":"h"}`, ".port", "8080", `{"host":"h","port":8080}`)
+	expect_set(t, `{}`, ".port", "1", `{"port":1}`)
+	expect_set(t, `{"a":{"b":{}}}`, ".a.b.c", "1", `{"a":{"b":{"c":1}}}`)
+	expect_set(t, `[{"a":1},{"b":2}]`, ".[].a", "0", `[{"a":0},{"b":2,"a":0}]`)
+	expect_set(t, `{"a":[1,2,3]}`, ".a[-1]", "0", `{"a":[1,2,0]}`)
+	expect_set(t, `{"a":1,"a":2}`, ".a", "3", `{"a":1,"a":3}`)
+	refused := [?]string{".a.b", ".x.y", ".a[5]", ".a[]"}
+	for path in refused {
+		src := `{"a":1}`
+		out, err := json.set(transmute([]u8)src, .Json, path, "1")
+		defer delete(out)
+		e, is_edit := err.(core.Document_Error)
+		testing.expectf(t, is_edit && e.kind == .Bad_Index, "%s: %v", path, err)
+	}
+	bad_text := `{"a":1}`
+	_, verr := json.set(transmute([]u8)bad_text, .Json, ".a", "01")
+	v, is_edit := verr.(core.Document_Error)
+	testing.expect(t, is_edit && v.kind == .Bad_Value)
+	_, perr := json.set(transmute([]u8)bad_text, .Json, ".[", "1")
+	p, is_path := perr.(core.Path_Error)
+	testing.expect(t, is_path && p.kind == .Bad_Path)
+}
+
+// `refuse_duplicates` holds in every object of the text with several paths, in a query and in `each_answer`, and `on`
+// ends a read by returning false.
+@(test)
+stream_stops_and_refuses :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":1,"b":2,"c":{"x":1,"x":2}}`)
+	a, _ := core.parse_path(".a")
+	defer core.path_destroy(&a)
+	b, _ := core.parse_path(".b")
+	defer core.path_destroy(&b)
+	paths := [2]core.Path{a, b}
+	doc, err := json.query(src, .Json, paths[:], read = {refuse_duplicates = true})
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.Duplicate_Key)
+	seen := 0
+	first_only :: proc(state: rawptr, _: core.Token_Answer) -> bool {
+		(^int)(state)^ += 1
+		return false
+	}
+	serr := json.each_answer(src, .Json, paths[:], &seen, first_only, read = {refuse_duplicates = true})
+	testing.expect_value(t, serr.kind, core.Path_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, seen, 0)
+	testing.expect_value(t, json.each_answer(src, .Json, paths[:], &seen, first_only).kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, seen, 1)
 }
 
 // A member kept by position says nothing of a repeat of its key that a limit cut, and one kept by name does.

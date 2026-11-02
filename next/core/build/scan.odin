@@ -276,6 +276,35 @@ query_document_many :: proc(doc: ^core.Document, paths: []core.Path, read := cor
 
 query_document :: proc {query_document_one, query_document_many}
 
+// Writes `text` as the value at every answer of `doc`, a read of `path`, and returns the new text. A `Name` the path ends
+// in that its container lacks is inserted there. Any other answer that is no value, a mismatch or a missing position or
+// parent, is `.Bad_Index`.
+set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+	list := core.edit_list_init(doc, allocator)
+	defer core.edit_list_destroy(&list)
+	name: core.Name
+	named := false
+	if len(path.steps) > 0 {
+		name, named = path.steps[len(path.steps) - 1].(core.Name)
+	}
+	for a in doc.answers {
+		e := core.Document_Error{kind = .Bad_Index}
+		if a.outcome == .Found {
+			e = core.set(&list, a.node, text)
+		} else if a.outcome == .Missing && named {
+			e = core.set_member(&list, a.owner, string(name), text)
+		}
+		if e.kind != .None {
+			return nil, e
+		}
+	}
+	committed, _, e := core.commit(&list, allocator)
+	if e.kind != .None {
+		return nil, e
+	}
+	return committed, nil
+}
+
 // A `$MANY` read's re-walk of the value at node `at` of a built document.
 @(private)
 replay_rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index) {

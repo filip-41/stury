@@ -183,9 +183,18 @@ list is why `.config.host` with no `host` makes a later `member(config, "host")`
 `Kind` is added and every node stays text-backed. `Not_Loaded` is a document read's result and never an answer's
 outcome. To read more of `config`, ask for `.config` or for each member.
 
-An edit names a node, so a `Not_Loaded` member cannot be edited. A `set` on a listed name is an insert into its
-container, by name. A commit takes an edited container's members from the format's walk on every document, full or
-partial, so a scan keeps nothing extra for edits. `commit` refuses a partial document with `Bad_Index` until then.
+An edit names a node, so a `Not_Loaded` member cannot be edited. `core.set_member` on a listed `Missing` name is an insert
+after the container's last member, by name, and on a name no path looked for is `Bad_Index`.
+
+`json.set(src, S, ".port", "8080")` and `dsv.set` are a read, one edit per answer and a commit in one call. A path that
+ends in a `Name` inserts it where it is missing. Any other answer that is no value, a mismatch or a missing position or
+parent, is `Bad_Index`, and the error is a `Path_Edit_Error`, the read's or the edit's.
+
+A scan keeps nothing for edits. A commit of a partial document asks the format's `whole` service to build the text, moves
+each edit to the node at its byte, and commits there. A partial document holds no comments, and a commit needs them to
+move a comment with its member, and dsv's plan reads every record, so one member walk per container would not do. The
+commit already reads its whole output again, and the build runs only on the commit, so a read that makes no edit pays
+nothing. The text past a stop is read then, so a fault there is the commit's.
 
 ## The engine
 
@@ -228,7 +237,7 @@ resolved only when a caller asks for its bytes, through `core.span` and the form
   container's last, and a dsv record's line end has the same trap. Each format's `close_end` walks the value again from
   its `lo` instead, tolerating every fault, since the read may have tolerated any. No storage is spent on a span few
   callers ask for: an answer is kept whole, so only an ancestor on the way to an answer is `Partial`. A commit does not
-  ask, since it reads an edited container's members from the walk.
+  ask, since it builds the text.
 - A container a stopped read left open may run into text no walk judged, and a fault there ends its span at the fault's
   byte.
 

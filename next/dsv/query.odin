@@ -47,6 +47,13 @@ query :: proc {query_one, query_many}
 
 // Calls `on` with each answer of `paths` as it becomes known, with no document, as `json.each_answer`.
 each_answer :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+	if read.refuse_duplicates {
+		built, e := build(src, S, opts, true, allocator)
+		core.destroy(&built)
+		if e.kind != .None {
+			return core.path_error(e)
+		}
+	}
 	h: scan.Scan
 	frames: [8]u64 = ---
 	if e := scan.scan_start(&h, src, &SPELLING, paths, read, true, allocator, 8, frames[:], true, state, on); e.kind != .None {
@@ -139,3 +146,32 @@ find :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := co
 
 // Answers one path or several over a built document with the engine `query` runs. `core.Answer`s name `doc`'s nodes.
 query_document :: scan.query_document
+
+// Writes `text` as the value at every answer of `path` over `src`, in one call: a read of the path, one edit per answer and
+// a commit. A `Name` the path ends in that its container lacks is inserted after the container's last member. The result
+// is the new text, which the caller frees with `allocator`.
+set :: proc(src: []u8, $S: Spec, path: string, text: string, opts := Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+	parsed, perr := core.parse_path(path, allocator)
+	if perr.kind != .None {
+		return nil, perr
+	}
+	defer core.path_destroy(&parsed)
+	doc, qerr := query_one(src, S, parsed, opts, allocator = allocator)
+	defer core.destroy(&doc)
+	if qerr.kind != .None {
+		return nil, qerr
+	}
+	return scan.set_answers(&doc, parsed, text, allocator)
+}
+
+@(private)
+edit_whole :: proc(doc: ^core.Document, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+	delimiter, comment, no_header := read_opts(doc)
+	opts := Options{no_header = no_header, delimiter = delimiter, comment = comment, tolerate = {.Invalid_Utf8, .Ragged, .Bare_Quote}}
+	switch Spec(doc.read.spec) {
+	case .Csv:   return build(doc.src, .Csv, opts, false, allocator)
+	case .Tsv:   return build(doc.src, .Tsv, opts, false, allocator)
+	case .Plain: return build(doc.src, .Plain, opts, false, allocator)
+	}
+	return {}, {kind = .Bad_Index}
+}

@@ -87,6 +87,12 @@ Token_Answer :: struct {
 	outcome: Answer_Outcome,
 }
 
+// What a path edit can fail with: the read of the path, or the edit and its commit. nil on success.
+Path_Edit_Error :: union {
+	Path_Error,
+	Document_Error,
+}
+
 // The true position of a child a `Partial` container kept, for a container read by position. `Document.kept` holds these,
 // sorted by node.
 Kept_Child :: struct {
