@@ -830,13 +830,14 @@ scan_key_decoded :: #force_no_inline proc "contextless" (h: ^Scan, a: int, t: co
 	return core.key_equals(&h.b.doc, core.Node_Index(a), name)
 }
 
-// Gives an answer to the read's list. With several paths it waits among the placed ones for its place in the text.
+// Gives an answer to the read's list. With several paths it waits among the placed ones for its place in the text. One
+// path's steps stop picking at the limit, so only its close has to ask.
 @(private)
 scan_answer :: #force_inline proc "contextless" ($MANY: bool, h: ^Scan, path: ^Scan_Path, p: uint, a: core.Answer, pos: u64, t: core.Token, hi: u64, chain: int) {
-	if !scan_fits(MANY, h, path) {
-		return
-	}
 	when MANY {
+		if !scan_fits(MANY, h, path) {
+			return
+		}
 		path.count += 1
 		a := a
 		a.path = u32(p)
@@ -917,7 +918,7 @@ scan_reach :: proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Ho
 		child := many_arrivals(SINK, h, t, d, at, owner, pos)
 		enter := child != 0
 		ended := m.ended
-		has_key, indexed := m.has_key, m.indexed
+		has_key, keeps_place := m.has_key, m.indexed
 		m.indexed = false
 		m.has_key = false
 		whole := f.whole || m.keep && WRITE
@@ -933,11 +934,14 @@ scan_reach :: proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Ho
 		}
 	} else {
 		h.next = 0
-		indexed := d > 0 && (h.path.indexed &~ h.matched) >> uint(d - 1) & 1 != 0
+		keeps_place := false
+		if WRITE && d > 0 && (h.path.indexed &~ h.matched) >> uint(d - 1) & 1 != 0 {
+			scan_push(h, &h.kept, &h.n_kept, core.Kept_Child{at, u32(s.b)})
+		}
 		enter := scan_arrive(false, SINK, h, &h.path, 0, d, d, t, at, owner, 0)
 		ended := u64(0)
 	}
-	if WRITE && indexed {
+	if WRITE && keeps_place {
 		scan_push(h, &h.kept, &h.n_kept, core.Kept_Child{at, u32(s.b)})
 	}
 	if !enter {
@@ -1065,7 +1069,7 @@ scan_missed :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^S
 		return false
 	}
 	outcome, dropped := scan_miss(path, k + 1, path.alls >> uint(k + 1), true)
-	if !dropped {
+	if !dropped && scan_fits(MANY, h, path) {
 		scan_answer(MANY, h, path, p, core.Answer{node = core.NO_NODE, owner = open, outcome = outcome}, pos, t, t.lo + u64(t.n), d - k - 1)
 	}
 	when SINK == .Document {
