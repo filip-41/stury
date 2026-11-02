@@ -32,7 +32,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		}
 		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Number:
-		q, spelling, kind := number_h(p, end, H)
+		q, spelling, kind := number_h(p, end, w)
 		when .Es5 in FEATURES[S] {
 			if kind != .None || q < end && q[0] | 0x20 == 'x' {
 				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -136,6 +136,14 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 			return fault(w, hs, p, .Bad_Char, .Identifier)
 		}
 	}
+	when intrinsics.type_has_field(H, "expect") {
+		if r := expected_key(p, end, &hs, H); r != nil {
+			if r[0] > ' ' {
+				return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+			return #must_tail st_colon(r[-1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+	}
 	q, escaped, stop := string_probe(p, end)
 	if q == nil {
 		if escaped {
@@ -155,6 +163,43 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 		return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+}
+
+// Returns where a member's value may start when the key at `p`, whose first byte is a quote, is the one `hs.b` points
+// to, and moves `hs.b` to the next record, and nil otherwise. A byte the record holds is a byte judged, so the key
+// needs no scan, and one past the colon is the first byte no compare covered. A text's last 16 bytes are not compared,
+// and the states read such a key.
+@(private)
+expected_key :: #force_inline proc "contextless" (p, end: [^]u8, hs: ^core.Hook_Regs, $H: typeid) -> [^]u8 {
+	if intrinsics.ptr_sub(end, p) <= 16 {
+		return nil
+	}
+	e := (^core.Expected_Key)(uintptr(hs.b))
+	w0 := u64(intrinsics.unaligned_load((^u64le)(p)))
+	w1 := u64(intrinsics.unaligned_load((^u64le)(p[8:])))
+	if (w0 ~ e.word[0]) & e.mask[0] | (w1 ~ e.word[1]) & e.mask[1] != 0 {
+		return nil
+	}
+	if e.n > 16 && !expected_rest(p, end, e) {
+		return nil
+	}
+	hs.b += u64(size_of(intrinsics.type_elem_type(intrinsics.type_field_type(H, "expect"))))
+	return p[e.n:]
+}
+
+// Compares a key's bytes past the 16th, leaving a byte to read after them.
+@(private)
+expected_rest :: #force_inline proc "contextless" (p, end: [^]u8, e: ^core.Expected_Key) -> bool {
+	if intrinsics.ptr_sub(end, p) <= int(e.n) {
+		return false
+	}
+	q := p[16:]
+	for i in 0 ..< int(e.n) - 16 {
+		if q[i] != e.rest[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Returns where a member's value starts when the colon after a key is flush against it, or a pretty printer's `": "`,
@@ -612,7 +657,7 @@ st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 			return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		if r[0] == '-' || r[0] - '0' < 10 {
-			n, _, number := number_h(r, end, H)
+			n, _, number, _ := number_run(r, end, false, false)
 			if number == .None && !too_wide(r, n) && !(.Es5 in FEATURES[S] && n < end && n[0] | 0x20 == 'x') {
 				return #must_tail st_after_number(n, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
@@ -733,7 +778,7 @@ st_number_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 	spelling: u16
 	kind: core.Fault_Kind
 	for {
-		q, spelling, kind = number_h(p, end, H)
+		q, spelling, kind = number_h(p, end, w)
 		when .Es5 in FEATURES[S] {
 			if kind != .None || q < end && q[0] | 0x20 == 'x' {
 				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -779,38 +824,54 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 		if p >= end || p[0] != '"' {
 			return #must_tail st_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
-		// A key this state does not read whole is passed where a failed `string_probe` sends `st_key`, so no byte is
-		// read twice.
-		q, escaped, stop := string_probe(p, end)
-		if q == nil {
-			if escaped {
-				w.resume = stop
-				return #must_tail st_key_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		r: [^]u8
+		when intrinsics.type_has_field(H, "expect") {
+			r = expected_key(p, end, &hs, H)
+			if r != nil && r[0] <= ' ' {
+				return #must_tail st_colon(r[-1:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
-			return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		skip := false
-		switch emit_string(w, on, &hs, .String, .Key, p, q, 0) {
-		case .Next, .Keep:
-		case .Skip:
-			skip = true
-		case .Stop:
-			return stopped(w, hs, q)
-		}
-		// Finds the value after the colon when the colon is flush against it, or is `": "`, `" : "` or `" :"`.
-		r := colon_fast(q, end)
-		if r == nil || (r[0] != '-' && r[0] - '0' >= 10) {
-			if skip {
-				return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		key_end := p
+		if r == nil {
+			// A key this state does not read whole is passed where a failed `string_probe` sends `st_key`, so no byte is
+			// read twice.
+			q, escaped, stop := string_probe(p, end)
+			if q == nil {
+				if escaped {
+					w.resume = stop
+					return #must_tail st_key_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+				}
+				return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
-			if r == nil {
-				return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			switch emit_string(w, on, &hs, .String, .Key, p, q, 0) {
+			case .Next, .Keep:
+			case .Skip:
+				skip = true
+			case .Stop:
+				return stopped(w, hs, q)
 			}
+			// Finds the value after the colon when the colon is flush against it, or is `": "`, `" : "` or `" :"`.
+			key_end = q
+			r = colon_fast(q, end)
+			if r == nil || (r[0] != '-' && r[0] - '0' >= 10) {
+				if skip {
+					return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+				}
+				if r == nil {
+					return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+				}
+				return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+		} else if r[0] != '-' && r[0] - '0' >= 10 {
 			return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
-		n, spelling, kind := number_h(r, end, H)
+		n, spelling, kind := number_h(r, end, w)
 		when .Es5 in FEATURES[S] {
 			if kind != .None || n < end && n[0] | 0x20 == 'x' {
+				if skip {
+					return #must_tail st_skip_member(key_end, end, d, ind, w, hs.a, hs.b, hs.c, on)
+				}
 				return #must_tail st_number5(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
 		}

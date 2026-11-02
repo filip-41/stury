@@ -312,7 +312,7 @@ eval :: proc(m: ^Model, i, parent: core.Node_Index, k: int) {
 			}
 		}
 		return
-	case core.Either:
+	case core.Index_Or_Name:
 	}
 	at, later := first_all(m.steps[k:])
 	failed := k + at if kind == .Null else k
@@ -459,7 +459,7 @@ check_paths :: proc(t: ^testing.T, src: []u8, $S: json.Spec, full: ^core.Documen
 			testing.expectf(t, serr.kind == .None, "%v: %v", paths, serr) or_return
 			same_stopped(t, &stopped, stopped.answers, want, paths) or_return
 
-			answers, qerr := json.query(full, paths, {dups = dups, every_key = every})
+			answers, qerr := core.query(full, paths, {dups = dups, every_key = every})
 			defer delete(answers)
 			testing.expectf(t, qerr.kind == .None, "%v: %v", paths, qerr) or_return
 			same_reads(t, full, answers, want, "query", paths) or_return
@@ -512,7 +512,7 @@ check_commit :: proc(t: ^testing.T, src: []u8, $S: json.Spec, full: ^core.Docume
 	list := core.edit_list_init(&scanned, context.temp_allocator)
 	_, _, refused := core.commit(&list, context.temp_allocator)
 	testing.expectf(t, refused.kind == .Bad_Index, "%q %v: %v", string(src), path, refused) or_return
-	answers, qerr := json.query(full, path)
+	answers, qerr := core.query(full, path)
 	defer delete(answers)
 	testing.expectf(t, qerr.kind == .None, "%v: %v", path, qerr) or_return
 	edits := core.edit_list_init(full, context.temp_allocator)

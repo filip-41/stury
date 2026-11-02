@@ -200,7 +200,7 @@ check_containers :: proc(t: ^testing.T, doc: ^core.Document, tokens: []core.Toke
 			if !testing.expectf(t, f.lo + u64(len(s)) == hi, "container %d at %d: span ends at %d, walk at %d, missing %q after %q", f.node, f.lo, f.lo + u64(len(s)), hi, doc.src[min(f.lo + u64(len(s)), u64(len(doc.src))):min(hi, u64(len(doc.src)))], s[len(s) - min(len(s), 12):]) {
 				return false
 			}
-			if doc.nodes[f.node].spelling != core.CHILDREN_MAX {
+			if doc.nodes[f.node].spelling != core.MAX_CHILDREN {
 				if !testing.expectf(t, u32(core.length(doc, f.node)) == f.count, "container %d: %d members, walk %d", f.node, core.length(doc, f.node), f.count) {
 					return false
 				}
@@ -384,7 +384,7 @@ fact_holdable :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Rol
 	if style == .None {
 		return false
 	}
-	table := core.flat_doc(doc)
+	table := core.is_flat(doc)
 	if !table {
 		if role == .Comment_Foot {
 			n := doc.nodes[node]

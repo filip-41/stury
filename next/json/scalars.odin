@@ -6,14 +6,15 @@ import core "../core"
 
 // Reads the number at `p`, which starts with `-` or a digit. Returns one past it and its `spelling`, or the fault's
 // kind and the byte it is at. With `$shape` false the spelling is 0 and the digit counts are not counted, for a walk
-// with no hook.
+// with no hook. With `$fold` true `mant` is the integer the digits of the integer and fraction runs spell, which wraps
+// past 19 digits.
 @(private)
-number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape: bool) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind) #no_bounds_check {
+number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape, $fold: bool) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind, mant: u64) #no_bounds_check {
 	q = p
 	if q[0] == '-' {
 		q = q[1:]
 		if q >= end {
-			return end, 0, .Truncated
+			return end, 0, .Truncated, 0
 		}
 	}
 	when shape {
@@ -22,12 +23,12 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape: bool) -> 
 	if q[0] == '0' {
 		q = q[1:]
 		if q < end && q[0] - '0' < 10 {
-			return q, 0, .Bad_Number
+			return q, 0, .Bad_Number, 0
 		}
 	} else {
-		r := spell.digit_end(q, end, nil, false)
+		r := spell.digit_end(q, end, &mant, fold)
 		if r == q {
-			return q, 0, .Bad_Number
+			return q, 0, .Bad_Number, 0
 		}
 		q = r
 	}
@@ -37,16 +38,16 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape: bool) -> 
 	}
 	if q >= end {
 		when shape {
-			return q, number_spelling(.Json, int_digits, frac_digits), .None
+			return q, number_spelling(.Json, int_digits, frac_digits), .None, mant
 		}
-		return q, 0, .None
+		return q, 0, .None, 0
 	}
 	c := q[0]
 	if c == '.' {
-		r := spell.digit_end(q[1:], end, nil, false)
+		r := spell.digit_end(q[1:], end, &mant, fold)
 		if r == q[1:] {
 			q2, k2 := bad_or_truncated(r, end)
-			return q2, 0, k2
+			return q2, 0, k2, 0
 		}
 		when shape {
 			frac_digits = u64(intrinsics.ptr_sub(r, q[1:]))
@@ -54,9 +55,9 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape: bool) -> 
 		q = r
 		if q >= end {
 			when shape {
-				return q, number_spelling(.Json, int_digits, frac_digits), .None
+				return q, number_spelling(.Json, int_digits, frac_digits), .None, mant
 			}
-			return q, 0, .None
+			return q, 0, .None, 0
 		}
 		c = q[0]
 	}
@@ -69,27 +70,31 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape: bool) -> 
 		r := spell.digit_end(q, end, nil, false)
 		if r == q {
 			q2, k2 := bad_or_truncated(r, end)
-			return q2, 0, k2
+			return q2, 0, k2, 0
 		}
 		when shape {
-			return r, number_spelling_exp(.Json, int_digits, frac_digits), .None
+			return r, number_spelling_exp(.Json, int_digits, frac_digits), .None, mant
 		}
 		q = r
 	}
 	when shape {
-		return q, number_spelling(.Json, int_digits, frac_digits), .None
+		return q, number_spelling(.Json, int_digits, frac_digits), .None, mant
 	}
-	return q, 0, .None
+	return q, 0, .None, 0
 }
 
-// Calls `number_run` with `$shape` true for a hook and false for `core.No_Hooks`.
+// Calls `number_run` with `$shape` true for a hook and false for `core.No_Hooks`, and hands `mant` to a hook with a
+// field `mant`.
 @(private)
-number_h :: #force_inline proc "contextless" (p, end: [^]u8, $H: typeid) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind) {
+number_h :: #force_inline proc "contextless" (p, end: [^]u8, w: ^Walk($S, $H)) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind) {
 	when H == core.No_Hooks {
-		return number_run(p, end, false)
+		q, spelling, kind, _ = number_run(p, end, false, false)
+	} else when intrinsics.type_has_field(H, "mant") {
+		q, spelling, kind, w.hooks.mant = number_run(p, end, true, true)
 	} else {
-		return number_run(p, end, true)
+		q, spelling, kind, _ = number_run(p, end, true, false)
 	}
+	return
 }
 
 @(private)

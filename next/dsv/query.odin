@@ -36,7 +36,7 @@ scan_many :: proc(src: []u8, $S: Spec, paths: []core.Path, read := core.Path_Opt
 		hi, fault = walk(src, 0, S, opts, &h, &regs, engine.scan_hook)
 	} else {
 		records: Record_Read
-		hi, fault = walk_many(src, S, opts, &h, &records, &regs, engine.many_hook)
+		hi, fault = walk_many(src, S, opts, &h, &records, &regs, engine.scan_hook_many)
 	}
 	return engine.scan_end(&h, regs, hi, fault)
 }
@@ -60,7 +60,7 @@ each_answer_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr,
 	}
 	regs := engine.BUILDER_REGS
 	records: Record_Read
-	hi, fault := walk_many(src, S, opts, &h, &records, &regs, engine.stream_hook)
+	hi, fault := walk_many(src, S, opts, &h, &records, &regs, engine.scan_hook_stream)
 	doc, err := engine.scan_end(&h, regs, hi, fault)
 	core.destroy(&doc)
 	return err
@@ -149,9 +149,6 @@ find :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, 
 	}
 	return
 }
-
-// Answers one path or several over a built document with the engine `scan` runs. `core.Answer`s name `doc`'s nodes.
-query :: engine.query
 
 // Writes `text` as the value at every answer of `path` over `src`, in one call: a build of the text, one edit per answer
 // and a commit. A `Name` the path ends in that its container lacks is inserted after the container's last member. The result

@@ -1,8 +1,8 @@
 ODIN ?= $(or $(wildcard $(abspath ../../Odin-master/bin/odin)),odin)
 
 # The library packages, and the test packages that read them.
-LIB_PKGS  := core/spell core core/kernel core/build json dsv
-TEST_PKGS := core/kernel/test json/test dsv/test
+LIB_PKGS  := core/spell core core/kernel core/compose core/build core/typed json dsv
+TEST_PKGS := core/kernel/test core/test json/test dsv/test
 # The packages the tests share, checked by `lint` and built through their imports.
 SUPPORT_PKGS := walktest
 # The test packages that read `-define:TIER`.
@@ -15,12 +15,13 @@ TEST_MINIMAL  := $(foreach p,$(TEST_PKGS),$(BUILD)/test/minimal/$(p))
 TEST_SPEED    := $(foreach p,$(TEST_PKGS),$(BUILD)/test/speed/$(p))
 TEST_TARGETS  := $(TEST_MINIMAL) $(TEST_SPEED)
 ASAN_TARGETS  := $(foreach p,$(TEST_PKGS),$(BUILD)/test/asan/$(p))
+X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS),$(BUILD)/test/x86/$(o)/$(t)/$(p))))
 
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: test test-x86 test-asan lint bench bench-doc bench-paths fixtures size surface \
-	$(TEST_TARGETS) $(ASAN_TARGETS)
+.PHONY: check gate test test-x86 test-asan lint bench bench-doc bench-paths bench-typed fixtures size surface \
+	$(TEST_TARGETS) $(ASAN_TARGETS) $(X86_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
 BENCH      := $(BUILD)/bench
@@ -35,6 +36,13 @@ define odin_each
 	echo "== $$p$(4)"; $(ODIN) $(1) $$p $(3) $(if $(filter test,$(1)),-out:$$d/test) || exit 1; \
 done
 endef
+
+# The checks a change can reach, in `tools/gate.py`: `check` while editing, `gate` before a branch lands.
+check:
+	@ODIN=$(ODIN) python3 tools/gate.py quick
+
+gate:
+	@ODIN=$(ODIN) python3 tools/gate.py merge
 
 # The tests at -o:minimal and at -o:speed, where the optimizer reasons about loads that the walk makes past an input's
 # end. Each compile is its own target, so `make -j test` runs them at once.
@@ -53,17 +61,15 @@ $(TEST_SPEED): $(BUILD)/test/speed/%:
 # The x86-64 tiers v2 and v3 in a build for Odin's default CPU, as a caller's build is, at -o:none, where no kernel
 # is inlined into the tier's procedures, and at -o:speed. TIER picks the kernels' tier and WALK_TIER the walks'.
 # On Apple silicon they run under Rosetta. v4 runs only on a machine with AVX-512 (TIER=2), and `lint` compiles it.
-test-x86:
-	$(call x86_tier,none,0, (v2 -o:none))
-	$(call x86_tier,speed,0, (v2))
-	$(call x86_tier,none,1, (v3 -o:none))
-	$(call x86_tier,speed,1, (v3))
+test-x86: $(X86_TARGETS)
 
-# `$(call x86_tier,OPT,TIER,LABEL)` runs the tests at one tier, `TIER` defined only where it is read.
-define x86_tier
-$(call odin_each,test,$(TIER_PKGS),-o:$(1) -target:darwin_amd64 -define:TIER=$(2) -define:WALK_TIER=$(2),$(3))
-$(call odin_each,test,$(filter-out $(TIER_PKGS),$(TEST_PKGS)),-o:$(1) -target:darwin_amd64 -define:WALK_TIER=$(2),$(3))
-endef
+# `build/test/x86/OPT/TIER/PACKAGE` runs one package at one tier, `TIER` defined only where it is read.
+$(X86_TARGETS): $(BUILD)/test/x86/%:
+	@mkdir -p $(@D)
+	@o=$(word 1,$(subst /, ,$*)); t=$(word 2,$(subst /, ,$*)); p=$(patsubst $(word 1,$(subst /, ,$*))/$(word 2,$(subst /, ,$*))/%,%,$*); \
+	echo "== $$p (x86 tier $$t -o:$$o)"; \
+	$(ODIN) test $$p -o:$$o -target:darwin_amd64 -define:WALK_TIER=$$t \
+		$(if $(filter %/kernel/test,$*),-define:TIER=$$t) -out:$@ || { echo "== $$p (x86 tier $$t -o:$$o) failed"; exit 1; }
 
 test-asan: $(ASAN_TARGETS)
 
@@ -111,13 +117,23 @@ fixtures:
 	python3 bench/gen.py --check
 
 # The path lanes' probe at -o:speed, then paths.py over the peers `bench-doc` built. ROUNDS passes through.
+bench-paths: ROUNDS ?= 5
 bench-paths:
 	@mkdir -p $(BENCH)
 	$(ODIN) build bench/paths -o:speed -out:$(BENCH)/paths
 	ROUNDS=$(ROUNDS) python3 bench/paths.py
 
+# The typed read's probe at -o:speed, then typed.py, which adds the old tree's arm where the checkout holds it. ROUNDS
+# passes through.
+bench-typed: ROUNDS ?= 5
+bench-typed:
+	@mkdir -p $(BENCH)
+	$(ODIN) build bench/typed -o:speed -out:$(BENCH)/typed
+	ODIN=$(ODIN) ROUNDS=$(ROUNDS) python3 bench/typed.py
+
 # The document lanes' probe at -o:speed, the peers whose toolchain and sources are present, then doc.py. ROUNDS and
 # BENCH_FILES pass through.
+bench-doc: ROUNDS ?= 5
 bench-doc:
 	@mkdir -p $(BENCH)
 	$(ODIN) build bench/doc -o:speed -out:$(BENCH)/doc

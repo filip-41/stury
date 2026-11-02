@@ -5,7 +5,7 @@ BUILD := build
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -strict-style
 LINT_FLAGS := $(VET) -terse-errors -max-error-count:500
 
-.PHONY: test-oracle lint bench-doc golden
+.PHONY: test-oracle test-typed-oracle lint bench-doc golden
 
 # The document lanes' files, run by `bench-doc`.
 BENCH_FILES ?= logs.json citm_catalog.json table.csv
@@ -23,13 +23,19 @@ d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && mkdir -p $$d/next $$d/compare && \
 endef
 
 # The walks against the current tree's `json` and `csv`, from a copy whose next packages are renamed. SEED and ROUNDS
-# pass through.
+# pass through, and ORACLES names the packages to run.
 SEED ?= 1
+ORACLES ?= json_oracle dsv_oracle
 test-oracle: ROUNDS ?= 100000
 test-oracle:
-	@$(tree); for p in json_oracle dsv_oracle; do echo "== $$p oracle"; \
+	@$(tree); for p in $(ORACLES); do echo "== $$p oracle"; \
 		$(ODIN) test $$d/compare/$$p -o:speed -collection:stury=$(abspath ..) -define:SEED=$(SEED) -define:ROUNDS=$(ROUNDS) -out:$$d/oracle || exit 1; \
 	done
+
+# The typed read against the old unmarshal, every shape and read mode: two programs over one case file, so no copy.
+test-typed-oracle: ROUNDS ?= 20000
+test-typed-oracle:
+	ODIN=$(ODIN) bash typed_oracle/run.sh $(ROUNDS) $(SEED)
 
 # Writes next/json/test/golden: the old tree's answer for every suite file per spec. Through the same renamed copy,
 # since both trees name a package `json` and a package `core`.
@@ -44,6 +50,7 @@ lint:
 		$(ODIN) check $$d/compare/$$p -no-entry-point $(LINT_FLAGS) -collection:stury=$(abspath ..) || exit 1; \
 	done
 	$(ODIN) check found_probe $(LINT_FLAGS) -collection:stury=$(abspath ..)
+	ODIN=$(ODIN) OPT=none bash typed_oracle/build.sh $$(mktemp -d)
 
 # The old tree's document probe, then next/bench's probe on the same files and lanes. ROUNDS and BENCH_FILES pass
 # through.

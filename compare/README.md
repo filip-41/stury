@@ -8,6 +8,8 @@ self-contained drop-in for the repo root. This directory is deleted when the old
 |---|---|
 | `json_oracle/` | `json.validate` and the document against the old tree's `json`, and one edit per round through its `set`, `insert` and `remove` by path |
 | `dsv_oracle/` | the dsv walk and document against the old tree's `csv`, on the specs and on run-time dialects |
+| `typed_oracle/` | `json.unmarshal` against the old tree's over generated, mutated and directed cases on JSON, JSONC and JSON5, every shape, prefilled targets, `.First`, refused duplicates, refused unknowns and copied strings. One accepted difference class per reason, listed in `oracle.py` |
+| `typed_oracle/cells.py` | `dsv.unmarshal` against the old `csv.unmarshal` on the same arms: each spec, every row form, prefilled targets, no header, `.First`, refused duplicates and unknowns, ragged records, comments, enums by value and copied strings. A refusal compares by kind, byte and path. `accepted` names the differences kept |
 | `golden/` | writes `next/json/test/golden`: the old tree's answer for every suite file per spec |
 | `found_probe/` | the old tree's document lanes on the work `next/bench/doc` does: one build, a read of every value with next's tags, decoded lengths and number bits, and a key lookup with one column resolve per sample, with `run.py` timing them beside `next/bench/doc` |
 
@@ -26,6 +28,7 @@ From `compare/`, with the same `ODIN` argument `next/Makefile` takes:
 ```
 make ODIN=/path/to/odin lint
 make ODIN=/path/to/odin test-oracle ROUNDS=50000 SEED=7
+make ODIN=/path/to/odin test-typed-oracle ROUNDS=20000
 make ODIN=/path/to/odin golden
 make ODIN=/path/to/odin bench-doc ROUNDS=5
 ```

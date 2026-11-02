@@ -6,6 +6,7 @@ import "base:intrinsics"
 import "base:runtime"
 import spell "../core/spell"
 import core "../core"
+import compose "../core/compose"
 import kernel "../core/kernel"
 import build "../core/build"
 
@@ -31,11 +32,22 @@ EDIT := core.Edit_Spelling {
 	member_sep    = edit_cell_sep,
 	insert_check  = edit_insert_check,
 	interior      = edit_interior,
-	root_head     = compose_root_head,
-	root_junction = compose_root_junction,
 	fact_slot     = edit_fact_slot,
 	emptied       = edit_emptied,
 	plan          = edit_plan,
+	commit        = edit_commit,
+	flat          = true,
+}
+
+@(private, rodata)
+ROOT_EDIT := compose.Root_Spelling {
+	root_head     = compose_root_head,
+	root_junction = compose_root_junction,
+}
+
+@(private)
+edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+	return compose.commit(list, spec, &ROOT_EDIT, allocator)
 }
 
 // dsv's spelling services, in rodata, the same table for every spec. A service dispatches on `doc.read.spec`, since the
@@ -48,11 +60,17 @@ SPELLING := core.Spelling {
 	number     = spelling_number,
 	resolve    = spelling_resolve,
 	close_end  = close_end,
+	query      = build.query,
 	edit       = &EDIT,
+	tag_key    = "csv",
 }
 
 // The spelling bits dsv sets. Bit 0 (`SPELLING_DECODE`) means `text` must decode a cell, bit 1 (`SPELLING_QUOTED`) a
-// quoted CSV cell. No other bit is set.
+// quoted CSV cell, and bit 2 (`SPELLING_LAX`) that a tolerated ill-formed sequence may grow its decode.
+
+// `Token.spelling`'s bit for a quoted CSV cell holding a `""`, set only on a walk for `Cells`.
+@(private)
+SPELLING_DOUBLED :: u16(8)
 
 // Reads a delimited text as spec `S` into a document, allocating its nodes with `allocator`. `opts.no_header` makes the
 // first record data. `refuse_duplicates` returns an error at a header name that repeats another in the header row. The
@@ -158,18 +176,6 @@ build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bo
 		doc.shared_keys = core.Node_Index(i)
 	}
 	return doc, err
-}
-
-// Writes `list`'s edits as spec `as`, returning the text the caller frees with `allocator`. A delimited text writes
-// only its own spec: another spec would respell every cell, so the commit refuses it before it splices anything.
-commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
-	if list.doc == nil {
-		return nil, 0, {kind = .Bad_Index}
-	}
-	if !core.flat_doc(list.doc) || as != Spec(list.doc.read.spec) {
-		return nil, 0, {kind = .Bad_Spec}
-	}
-	return core.commit_as(list, u8(as), allocator)
 }
 
 // Returns node `n`'s span without a surrounding quote pair, if it has one. A quoted CSV cell has that shape.
@@ -467,7 +473,7 @@ edit_interior :: proc(doc: ^core.Document, c: core.Node_Index) -> (lo, hi: u64) 
 	}
 	lo = doc.nodes[c].lo
 	if last, ok := core.child_at(doc, c, core.length(doc, c) - 1); ok {
-		return lo, core.key_start(doc.nodes[last]) + u64(len(core.span(doc, last)))
+		return lo, core.node_start(doc.nodes[last]) + u64(len(core.span(doc, last)))
 	}
 	return lo, close_end(doc, c)
 }
@@ -556,16 +562,16 @@ edit_key_text :: proc(doc: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bo
 			quoted = quoted || b == delimiter || b == '"' || b == '\r' || b == '\n'
 		}
 		if quoted {
-			core.push(text, '"') or_return
+			compose.push(text, '"') or_return
 		}
 		for b in name {
 			if b == '"' {
-				core.push(text, '"') or_return
+				compose.push(text, '"') or_return
 			}
-			core.push(text, b) or_return
+			compose.push(text, b) or_return
 		}
 		if quoted {
-			core.push(text, '"') or_return
+			compose.push(text, '"') or_return
 		}
 	case .Tsv:
 		for b in name {
@@ -578,14 +584,14 @@ edit_key_text :: proc(doc: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bo
 			case '\\': escape = '\\'
 			}
 			if escape != 0 {
-				core.push(text, '\\') or_return
-				core.push(text, escape) or_return
+				compose.push(text, '\\') or_return
+				compose.push(text, escape) or_return
 			} else {
-				core.push(text, b) or_return
+				compose.push(text, b) or_return
 			}
 		}
 	case:
-		core.push_all(text, name) or_return
+		compose.push_all(text, name) or_return
 	}
 	return true
 }

@@ -5,6 +5,7 @@ package json
 import "base:intrinsics"
 import "base:runtime"
 import core "../core"
+import compose "../core/compose"
 import build "../core/build"
 
 // JSON's document holds the walk's tokens over the caller's bytes, read through core's readers and JSON's `SPELLING`.
@@ -20,6 +21,12 @@ EDIT := core.Edit_Spelling {
 	comment    = edit_comment,
 	member_sep = edit_member_sep,
 	key_sep    = ":",
+	commit     = edit_commit,
+}
+
+@(private)
+edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+	return compose.commit(list, spec, nil, allocator)
 }
 
 @(private)
@@ -35,16 +42,17 @@ edit_member_sep :: proc(_: ^core.Document) -> string {
 @(private)
 SPELLING := core.Spelling {
 	text = text, key_equals = key_equals_decode, number = number,
-	resolve = spelling_resolve, close_end = close_end, edit = &EDIT,
+	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT,
+	tag_key = "json", key_open = "\"", key_close = "\":",
 }
 
 // No field of a number's spelling reaches bit 0 or bit 15. Every kind value is even, so bit 0 (`SPELLING_DECODE`) is
-// clear, and the counts and `NUMBER_EXP` stay below bit 15.
+// clear, and the counts and `core.NUMBER_EXP` stay below bit 15.
 #assert(u16(Number_Spelling.Nan) & core.SPELLING_DECODE == 0)
-#assert(u16(Number_Spelling.Nan) <= NUMBER_KIND_MASK)
-#assert(NUMBER_INT_SHIFT + 5 <= 15)
-#assert(NUMBER_FRAC_SHIFT + 5 <= 15)
-#assert(NUMBER_EXP < 1 << 15)
+#assert(u16(Number_Spelling.Nan) <= core.NUMBER_KIND_MASK)
+#assert(core.NUMBER_INT_SHIFT + 5 <= 15)
+#assert(core.NUMBER_FRAC_SHIFT + 5 <= 15)
+#assert(core.NUMBER_EXP < 1 << 15)
 #assert(u16(Number_Spelling.Nan) < 1 << 15)
 
 // Reads `src` as spec `S` into a document, allocating nodes and facts with `allocator`. `refuse_duplicates` fails at a
@@ -63,7 +71,7 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 	// its brackets, a key its colon, and a scalar its comma or its parent's close. A walk faults at the first byte past
 	// a token, so the last token may be missing its second byte. So a text makes at most `(len(src) + 1 + depth) / 2`
 	// nodes, the hooks test no capacity, and `builder_end` returns the unused tail.
-	depth := max(MAX_DEPTH, int(opts.max_depth))
+	depth := max(core.MAX_DEPTH, int(opts.max_depth))
 	doc, err := build_reserved(src, q, S, opts, refuse_duplicates, allocator, (len(src) + depth) / 2 + 16, depth, 0)
 	if err.kind != .No_Memory {
 		return doc, err
@@ -361,8 +369,8 @@ edit_comment :: proc(doc: ^core.Document, spec: u8) -> (core.Comment_Spelling, u
 // must read strictly, since the source's reading under its own spec is no evidence. A delimited document is another
 // format family and is refused before the splice.
 commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
-	if list.doc != nil && core.flat_doc(list.doc) {
+	if list.doc != nil && core.is_flat(list.doc) {
 		return nil, 0, {kind = .Bad_Spec}
 	}
-	return core.commit_as(list, u8(as), allocator)
+	return compose.commit(list, u8(as), nil, allocator)
 }

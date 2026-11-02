@@ -625,14 +625,14 @@ prefixes_fenced :: proc(t: ^testing.T) {
 
 @(test)
 depth_limit :: proc(t: ^testing.T) {
-	deep := strings.concatenate({strings.repeat("[", json.MAX_DEPTH, context.temp_allocator), strings.repeat("]", json.MAX_DEPTH, context.temp_allocator)}, context.temp_allocator)
+	deep := strings.concatenate({strings.repeat("[", core.MAX_DEPTH, context.temp_allocator), strings.repeat("]", core.MAX_DEPTH, context.temp_allocator)}, context.temp_allocator)
 	testing.expect_value(t, json.validate(transmute([]u8)deep, .Json), nil)
-	run := strings.repeat("[", json.MAX_DEPTH + 1, context.temp_allocator)
+	run := strings.repeat("[", core.MAX_DEPTH + 1, context.temp_allocator)
 	f, bad := json.validate(transmute([]u8)run, .Json).?
-	testing.expectf(t, bad && f.kind == .Too_Deep && f.at == json.MAX_DEPTH, "%v", f)
-	over :=strings.repeat("[{\"a\":", json.MAX_DEPTH, context.temp_allocator)
+	testing.expectf(t, bad && f.kind == .Too_Deep && f.at == core.MAX_DEPTH, "%v", f)
+	over :=strings.repeat("[{\"a\":", core.MAX_DEPTH, context.temp_allocator)
 	f, bad = json.validate(transmute([]u8)over, .Json).?
-	testing.expectf(t, bad && f.kind == .Too_Deep && f.at == 6 * (json.MAX_DEPTH / 2), "%v", f)
+	testing.expectf(t, bad && f.kind == .Too_Deep && f.at == 6 * (core.MAX_DEPTH / 2), "%v", f)
 }
 
 // Returns `.Skip` on the token numbered `h^`, counted from 0, and `.Next` on every other token.
@@ -650,7 +650,7 @@ max_depth_option :: proc(t: ^testing.T) {
 	log := new(walktest.Log)
 	defer free(log, heap)
 	context.allocator = mem.panic_allocator()
-	for depth in ([]u32{1, 3, json.MAX_DEPTH, json.MAX_DEPTH + 1, 5000}) {
+	for depth in ([]u32{1, 3, core.MAX_DEPTH, core.MAX_DEPTH + 1, 5000}) {
 		n := int(depth)
 		fits := strings.concatenate({strings.repeat("[", n, context.temp_allocator), strings.repeat("]", n, context.temp_allocator)}, context.temp_allocator)
 		testing.expectf(t, json.validate(transmute([]u8)fits, .Json, {max_depth = depth}) == nil, "%d levels", n)
@@ -703,7 +703,7 @@ max_depth_comments_in :: proc(t: ^testing.T, $S: json.Spec) {
 	text: [dynamic]u8
 	defer delete(text)
 	for object in ([]bool{false, true}) {
-		for depth in ([]u32{1, 3, json.MAX_DEPTH, json.MAX_DEPTH + 1}) {
+		for depth in ([]u32{1, 3, core.MAX_DEPTH, core.MAX_DEPTH + 1}) {
 			n := int(depth)
 			build_depth(&text, n, S, object)
 			testing.expectf(t, json.validate(text[:], S, {max_depth = depth}) == nil, "%v object %v %d levels: %v", S, object, n, json.validate(text[:], S, {max_depth = depth}))

@@ -20,6 +20,7 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 | `core/spell/text.odin` | `decode_text` and `bytes_equal` |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`/`insert`/`remove`, `commit` |
+| `core/compose/` | the commit the format tables point at, and the composition a format's root junctions share |
 | `core/error.odin` | `Fault_Kind`, `Fault`, `Rules`, `Rule`, the codes, line and column, the renderer |
 | `json/escape.odin` | the escape-byte table and the hex and surrogate helpers JSON's walk and decoder share |
 | `json/walk.odin` | JSON's interface, the result word, `Walk`, `walk_document`, the hook calls |
@@ -41,8 +42,7 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 
 Each format package exposes the names a caller uses: `Spec`, `Options`, `Detail`, `RULES`, `walk`, `validate` and
 `build`, plus the token spelling detail its walk documents (`json.Number_Spelling` and `json.number_spelling_of`).
-`json` also exposes `Tolerance`, `MAX_DEPTH`, `commit`, `text` and `number`, and `dsv` exposes `Tolerance`, `commit`,
-`text` and `number`. `make surface` lists every public name.
+`json` also exposes `Tolerance`, `commit`, `text` and `number`, and `dsv` exposes `Tolerance`, `text` and `number`. `make surface` lists every public name.
 
 `core`'s walk interface is what a format author uses: `Kind` and `Role` are a token's fields, `Token`, `Action` and
 `Hook_Regs` are a hook's signature, `Fault`, `Fault_Kind` and `Rules` are a walk's result, `fault_at` and `fault_of`
@@ -87,8 +87,7 @@ with comments, and returns the document of nodes and facts, or a `Document_Error
 error names, 0 for a kind that names none, and `inner` is the walk's fault for `.Walk`. The format's `document.odin` holds one `core.Spelling` table in rodata for all its readings,
 and a reader uses it to decode a string or number without running a second walk.
 
-A limit of the format's grammar may be public beside them, as JSON's `MAX_DEPTH` is, because a caller sizes a stack
-for the walk's tokens from it.
+`core.MAX_DEPTH` is public beside them, because a caller sizes a stack for the walk's tokens from it.
 
 - `Spec` is a compile-time parameter. Each spec is a separate instance of the walk, so a build carries the code of the
   specs it names and no other. Odin refuses a struct as a `$` parameter, so run-time settings, such as whether a CSV
@@ -161,6 +160,18 @@ The `Action` a hook returns:
   a walk may do by the builder's plain hook.
 - `Stop` ends the walk at once, with no fault and the rest of the text unjudged.
 
+Two fields of a hook's state change what the walk does, and the walk finds them by name, so a hook without them holds
+none of this code:
+
+- `expect`: `Hook_Regs.b` points at a `core.Expected_Key`. Before scanning a key the walk compares the key's first 16
+  bytes as written, open quote through colon, with the record's `word` under its `mask`, then `rest`. A match moves `b`
+  by one record, gives no `Key` token, and goes to the value. A miss, and a key in the text's last 16 bytes, gives the token as usual.
+  A record no key matches has a mask over an all-zero word. Each record pays one compare, so `expect` suits a reader
+  whose keys arrive in a known order. A one-path scan does not use it: its `b` is the builder's, and nearly every key
+  it meets is a miss, on which the compare is work the key scan does anyway.
+- `mant`: the walk folds the digits of a number's integer and fraction runs into it as it reads them, so a hook reads
+  a short number with no second pass over the digits. It wraps past 19 digits, which the token's `spelling` says.
+
 ### The result word
 
 Inside a walk the result is a `u64`: a position in bits 16 and up, a `Detail` in bits 8 to 15, and a `Fault_Kind` in
@@ -207,6 +218,30 @@ produces no warning.
 - Some faults no tolerance covers: a number's grammar, text after a closing quote, anything structural, ill-formed
   UTF-8 outside a string or a cell (a JSON comment or identifier, between tokens), and a sequence cut short by the end
   of a string or quoted field that the text also cuts short (`Truncated`).
+
+## For format authors
+
+A format is a package under `next/` that supplies a grammar and its spelling. Everything a caller calls after `build`
+lives in `core`, so a format adds no reader, no `query` and no `commit` of its own, only what follows.
+
+1. **The walk.** `Spec`, `Options`, `Detail`, `RULES`, `walk` and `validate`, with the signatures in The interface. The
+   walk emits `core.Token`s to a hook and returns a `core.Fault` through `core.fault_at` or `core.fault_of`.
+2. **The build.** `build` runs a count walk over `build.builder_hook_count`, reserves with `build.builder_start`, walks
+   again with `build.builder_hook` and finishes the document. It is a thin entry that instantiates the walk for a spec.
+3. **The spelling.** One `core.Spelling` table in rodata, stored in the document, carries the services that need the
+   grammar: `text`, `key_equals`, `number`, `resolve` and `close_end`, plus `tag_key`, `key_open` and `key_close`. `query`
+   takes `build.query` unless the format routes paths itself. Set `edit` to one `core.Edit_Spelling` table.
+4. **The paths.** `set` and the path walk instantiate `build.Scan` over the format's `walk`, and `Scan.rewalk` walks one
+   value again for a ring's element. See `paths.md`.
+5. **The edits.** `Edit_Spelling.commit` calls `compose.commit`. A format whose root has no brackets passes a
+   `compose.Root_Spelling`, sets `flat` and supplies `interior`, `fact_slot`, `emptied` and `plan`.
+6. **The typed read.** `unmarshal` runs the format's `walk` over `typed.Reader`'s hook. A format that reads its values
+   as JSON does needs no more. A format with its own value reader, as dsv has for a cell, stores through `token_text`,
+   `store_whole`, `store_cstring`, `store_enum`, `store_number`, `store_enum_value` and `map_slot`, and reads the
+   target's field by `field_at` and `Plan.node_read`. `read_start` opens the read in either case.
+
+`core/spell` holds the number decoders a format with its own number grammar calls: `POW10_F64`, `POW10_U64` and
+`number_loose` are public for that.
 
 ## The JSON walk
 
@@ -498,7 +533,7 @@ From `next/`:
 | `make test-x86` | the tests at v2 and v3 under Rosetta, `-define:WALK_TIER` picking the walks' tier |
 | `make test-asan` | the tests under AddressSanitizer |
 | `make lint` | the import order, then vet on the host, x86-64 and riscv64 |
-| `make size` | the lean lines of each library package against the 15,300 budget |
+| `make size` | the lean lines of each library package against the 18,500 budget |
 | `make surface` | each library package's public declarations, sorted |
 
 The checks against the old tree's `json` and `csv` live in `compare/`, outside this tree, and run by its own
@@ -508,7 +543,7 @@ The value-tree models and the edit rounds against their own models are private, 
 beside this one, and its `next-model` target runs them with `SEED` and `ROUNDS`. A value-tree model is a plain
 recursive-descent reader of a valid text that shares no code with the walk or the readers. For each generated valid
 text, and each valid JSONTestSuite and json5-tests file, it builds the document and checks every reader against the
-model: `kind`, `length`, `children` and `child_at`, `member` under each `Duplicates` value and `member_all`,
+model: `kind`, `length`, `children` and `child_at`, `member` under each `Duplicates` value and `members_named`,
 `key_equals`, `text`, `number`, `resolve` with and without `infer`, `facts_of` per role, and `span` against the
 value's source bytes.
 

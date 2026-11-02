@@ -26,7 +26,7 @@ Slice :: struct {
 // The value and everything under it.
 Descend :: struct {}
 // A JSON Pointer token of digits, which names a member of an object and an element of an array.
-Either :: struct {
+Index_Or_Name :: struct {
 	name:  string,
 	index: int,
 }
@@ -39,7 +39,7 @@ Step :: union #no_nil {
 	All,
 	Slice,
 	Descend,
-	Either,
+	Index_Or_Name,
 }
 
 // `optional` holds a bit per step a `?` follows, and `limit` is the most answers the path gives, nil for no limit. `block`
@@ -289,7 +289,7 @@ parse_text :: proc(p: ^Parser) -> bool {
 }
 
 // Reads an RFC 6901 JSON Pointer: the empty text is the root, and each `/` starts a reference token, in which `~0` is `~`
-// and `~1` is `/`. A token that is an array index by the RFC's rule, with no leading zero, is an `Either`.
+// and `~1` is `/`. A token that is an array index by the RFC's rule, with no leading zero, is an `Index_Or_Name`.
 parse_pointer :: proc(text: string, allocator := context.allocator) -> (path: Path, err: Path_Error) {
 	return parse(text, allocator, true)
 }
@@ -316,7 +316,7 @@ parse_tokens :: proc(p: ^Parser) -> bool {
 		p.at = hi
 		token := t[lo:hi]
 		if index, ok := pointer_index(token); ok {
-			push_step(p, Either{token, index}) or_return
+			push_step(p, Index_Or_Name{token, index}) or_return
 			continue
 		}
 		push_step(p, Name(token)) or_return
@@ -617,3 +617,19 @@ pointer_index :: proc(token: string) -> (index: int, ok: bool) {
 	n, end, good := digits_int(token, 0)
 	return n, good && end == len(token)
 }
+
+// Answers `path` over a document built whole, in the order a scan of its text answers, and allocates nothing but the
+// list, which the caller frees with `delete(answers, allocator)`. A partial document cannot say what it does not hold,
+// so it is `.Unsupported`. An `Answer`'s nodes are `doc`'s.
+@(private)
+query_one :: proc(doc: ^Document, path: Path, read := Query_Options{}, allocator := context.allocator) -> (answers: []Answer, err: Path_Error) {
+	return doc.spelling.query(doc, []Path{path}, read, allocator)
+}
+
+// Answers `paths` over a document built whole, as for one path, each answer tagged with its path's number.
+@(private)
+query_many :: proc(doc: ^Document, paths: []Path, read := Query_Options{}, allocator := context.allocator) -> (answers: []Answer, err: Path_Error) {
+	return doc.spelling.query(doc, paths, read, allocator)
+}
+
+query :: proc {query_one, query_many}

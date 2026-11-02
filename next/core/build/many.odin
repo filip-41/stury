@@ -250,12 +250,12 @@ many_answers :: proc(h: ^Scan) {
 }
 
 // The hook of a `$MANY` read into a document.
-many_hook :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+scan_hook_many :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return scan_step(true, .Document, h, s, t)
 }
 
 // The hook of `each_answer`.
-stream_hook :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+scan_hook_stream :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return many_step(.Stream, h, s, t)
 }
 

@@ -13,12 +13,12 @@ import spell "./spell"
 //	- a container's `n` is its subtree's node count, its own node included, and the document holds no close node,
 //	  so its next sibling is `i + n`,
 //	- a container's `spelling` is its child count, where a member counts once, not its key and value.
-//	  The count saturates at `CHILDREN_MAX`, and `Document.counts` holds the true count when it does.
+//	  The count saturates at `MAX_CHILDREN`, and `Document.counts` holds the true count when it does.
 //	- a document holds no `End` node: the walk still emits one, and the builder consumes it.
 Node :: Token
 
 // The largest child count a container's `spelling` holds. A container with more children stores this value.
-CHILDREN_MAX :: u16(0xFFFF)
+MAX_CHILDREN :: u16(0xFFFF)
 
 // A node's index in a document's `nodes` array.
 Node_Index :: distinct u32
@@ -52,7 +52,7 @@ Fact :: struct {
 	spelling: u16,
 }
 
-// A container's true child count, kept when `spelling` saturates at `CHILDREN_MAX`. `Document.counts` holds these,
+// A container's true child count, kept when `spelling` saturates at `MAX_CHILDREN`. `Document.counts` holds these,
 // sorted by node.
 Child_Count :: struct {
 	node:  Node_Index,
@@ -186,7 +186,7 @@ Document :: struct {
 	// of calling the format's `close_end`.
 	root_close:  u64,
 	read:        Read_As,
-	// The true child count of every container whose count saturated `CHILDREN_MAX`, sorted by node, and the
+	// The true child count of every container whose count saturated `MAX_CHILDREN`, sorted by node, and the
 	// allocation behind it. It is empty when no container is that wide.
 	counts:       []Child_Count,
 	counts_alloc: []Child_Count,
@@ -201,6 +201,37 @@ Document :: struct {
 	stopped:      bool,
 	// The records of a partial document are positional, as a dsv record's cells are. A built document says it by `shared_keys`.
 	positional:   bool,
+}
+
+// A number token's `spelling` holds these fields. A format's spelling kinds are even, so bit 0 (`SPELLING_DECODE`) is
+// always clear.
+//
+//	bits 0 to 3   the format's number kind, 0 for its plain decimal
+//	bits 4 to 8   the integer digit count (saturated at 31)
+//	bits 9 to 13  the fraction digit count (saturated at 31, 0 for no fraction)
+//	bit 14        `NUMBER_EXP`
+//
+// A pure integer is a decimal with no fraction and no exponent, so a reader folds its significand without lexing the
+// span.
+NUMBER_KIND_MASK :: u16(0xF)
+NUMBER_INT_SHIFT :: 4
+NUMBER_FRAC_SHIFT :: 9
+NUMBER_FRAC_MAX :: 31
+NUMBER_FRAC_MASK :: u16(NUMBER_FRAC_MAX) << NUMBER_FRAC_SHIFT
+NUMBER_EXP :: u16(1 << 14)
+NUMBER_DIGITS_MAX :: 31
+
+// Returns a number token's integer digit count, and the count plus 32 or more when it has a fraction or an exponent.
+number_shape :: #force_inline proc "contextless" (spelling: u16) -> u16 {
+	return spelling >> NUMBER_INT_SHIFT
+}
+
+// Returns a number token's fraction digit count and its integer and fraction digit counts' sum, or at least 256 for the
+// sum when it has an exponent.
+number_digits :: #force_inline proc "contextless" (spelling: u16) -> (frac, sum: u16) {
+	frac = spelling >> NUMBER_FRAC_SHIFT & u16(NUMBER_FRAC_MAX)
+	sum = (spelling >> NUMBER_INT_SHIFT & u16(NUMBER_DIGITS_MAX)) + frac
+	return frac, sum | (spelling & NUMBER_EXP) >> 6
 }
 
 // How a reader treats an object's repeated keys. `.Last` is the default.
@@ -222,14 +253,20 @@ Resolve_Options :: struct {
 // `resolve` returns what a `Plain` node is. `close_end` returns the byte just past a container's closing bytes, found
 // from its last descendant or its open, over the whitespace and comments the format allows there, the root's close is
 // `Document.root_close`, so a service may return it without a scan. `edit` points at the
-// format's edit services, nil for a format that accepts no edits.
+// format's edit services, nil for a format that accepts no edits. `tag_key` is the format's own struct tag key, and
+// `key_open` and `key_close` are what a key is written between, empty for a format whose keys a typed read does not
+// compare as text.
 Spelling :: struct {
 	text:       proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool,
 	number:     proc(doc: ^Document, i: Node_Index) -> Number,
 	resolve:    proc(doc: ^Document, i: Node_Index, opts: Resolve_Options) -> Kind,
 	close_end:  proc(doc: ^Document, i: Node_Index) -> u64,
+	query:      proc(doc: ^Document, paths: []Path, read: Query_Options, allocator: runtime.Allocator) -> (answers: []Answer, err: Path_Error),
 	edit:       ^Edit_Spelling,
+	tag_key:    string,
+	key_open:   string,
+	key_close:  string,
 }
 
 // An `Edit_Spelling` holds a format's edit services. A document's `Spelling` points at one table, and the services
@@ -244,9 +281,10 @@ Spelling :: struct {
 // value. `comment` says how the output spells a comment under `spec` and is nil for a format that accepts no comment.
 // `insert_check` holds a format's rules on what a container takes.
 //
-// A flat format also supplies the rest. `interior` returns the bytes a container's members lie in, `root_head` writes
-// the edits of what lies before the root's first member, and `root_junction` composes a junction of the root, whose
-// members are lines. `fact_slot` says whether the output holds a fact of a role on a node, and `emptied` whether a list
+// `commit` writes a list's edits as spec byte `spec`, which `core.commit` passes as the document's own: a format points it
+// at `core/compose`'s commit. `flat` says a text has no brackets, so a container has no bytes of its own.
+//
+// A flat format also supplies the rest. `interior` returns the bytes a container's members lie in, `fact_slot` says whether the output holds a fact of a role on a node, and `emptied` whether a list
 // removes every member of the root. `plan` runs first on a commit and may turn the whole list into plain edits, which
 // `out` receives with their texts borrowed or allocated with `allocator`, and it returns false to keep the list as it is.
 Edit_Spelling :: struct {
@@ -258,11 +296,11 @@ Edit_Spelling :: struct {
 	key_sep:       string,
 	insert_check:  proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
 	interior:      proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64),
-	root_head:     proc(cx: ^Compose, open: u64) -> (err: Document_Error, ok: bool),
-	root_junction: proc(cx: ^Compose, open, close: u64, l, r: int, inserts: []Edit) -> bool,
 	fact_slot:     proc(doc: ^Document, node: Node_Index, role: Role, emptied: bool) -> bool,
 	emptied:       proc(doc: ^Document, list: ^Edit_List) -> bool,
 	plan:          proc(doc: ^Document, list: ^Edit_List, out: ^[dynamic]Edit, allocator: runtime.Allocator) -> (changed: bool, err: Document_Error),
+	commit:        proc(list: ^Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: Document_Error),
+	flat:          bool,
 }
 
 // A `Comment_Spelling` names how a format spells a comment in an output: `//` for a JSON spec that has comments, the
@@ -332,7 +370,6 @@ scalar_ends :: #force_inline proc "contextless" (t: Token) -> (lo, hi: u64) {
 
 // Returns one past the line end at `pos`: LF, CR, or U+2028 or U+2029. Returns `pos` when no line end starts there.
 // The edit list uses this rule.
-@(private)
 line_end_len :: proc(src: []u8, pos: u64) -> u64 {
 	if pos >= u64(len(src)) {
 		return pos
@@ -350,7 +387,7 @@ line_end_len :: proc(src: []u8, pos: u64) -> u64 {
 }
 
 // Returns the number of members in container `i`, from its `spelling`, or 0 for a scalar or a node past the last.
-// A count that saturated `CHILDREN_MAX` is read from `Document.counts`.
+// A count that saturated `MAX_CHILDREN` is read from `Document.counts`.
 length :: #force_inline proc(doc: ^Document, i: Node_Index) -> int {
 	if int(i) >= len(doc.nodes) {
 		return 0
@@ -359,7 +396,7 @@ length :: #force_inline proc(doc: ^Document, i: Node_Index) -> int {
 	if n.kind != .Array && n.kind != .Map {
 		return 0
 	}
-	if n.spelling != CHILDREN_MAX {
+	if n.spelling != MAX_CHILDREN {
 		return int(n.spelling)
 	}
 	return wide_length(doc, i)
@@ -409,7 +446,7 @@ key_equals :: #force_inline proc "contextless" (doc: ^Document, i: Node_Index, n
 }
 
 // Returns the first source byte of node `n`. A quoted string's token starts one byte past its opening quote.
-key_start :: #force_inline proc(n: Node) -> u64 {
+node_start :: #force_inline proc(n: Node) -> u64 {
 	if n.kind == .String && n.spelling & SPELLING_QUOTED != 0 {
 		return n.lo - 1
 	}
@@ -420,7 +457,7 @@ key_start :: #force_inline proc(n: Node) -> u64 {
 // which is the node after the key. A `k` past the last member, a negative `k`, and a node that holds no members return no
 // node. A container whose members are one node each is indexed, since its subtree size gives the stride: an
 // `Array`'s is its member count plus one, a shared-key `Map`'s its count plus one, and an inline-key `Map`'s twice its count plus one. Any other container is walked,
-// stepping one subtree size per member. A count that saturated `CHILDREN_MAX` is read from `Document.counts`, so
+// stepping one subtree size per member. A count that saturated `MAX_CHILDREN` is read from `Document.counts`, so
 // the stride test uses the true member count.
 child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
 	if int(i) >= len(doc.nodes) || k < 0 {
@@ -428,9 +465,9 @@ child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_I
 	}
 	n := doc.nodes[i]
 	count := int(n.spelling)
-	// A saturated count holds only `CHILDREN_MAX`, the true count is in `Document.counts`. Reading it here keeps the
+	// A saturated count holds only `MAX_CHILDREN`, the true count is in `Document.counts`. Reading it here keeps the
 	// index path for a uniform container of any width and makes a `k` past the last member answer without a walk.
-	if n.spelling == CHILDREN_MAX {
+	if n.spelling == MAX_CHILDREN {
 		if n.role == .Partial {
 			return kept_child(doc, i, k)
 		}
@@ -546,11 +583,11 @@ child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool) {
 	return v, true
 }
 
-// Returns the value of the member of `obj` whose key decodes to `name`, under `.First` or `.Last`. `member_all` yields
+// Returns the value of the member of `obj` whose key decodes to `name`, under `.First` or `.Last`. `members_named` yields
 // every match. A headed dsv record's members are its cells, named by the header's cells.
 member :: #force_inline proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplicates.Last) -> (Node_Index, bool) {
 	// A single loop handles both shapes: `member_next` is inlined, so an object's step uses this frame's registers.
-	it := member_all(doc, obj, name)
+	it := members_named(doc, obj, name)
 	found := NO_NODE
 	for {
 		v, ok := member_next(&it)
@@ -576,7 +613,7 @@ Member_Iter :: struct {
 	done: bool,
 }
 
-member_all :: proc(doc: ^Document, obj: Node_Index, name: string) -> Member_Iter {
+members_named :: proc(doc: ^Document, obj: Node_Index, name: string) -> Member_Iter {
 	if int(obj) >= len(doc.nodes) {
 		return {doc = doc, rec = NO_NODE, done = true}
 	}
@@ -759,7 +796,7 @@ float_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (f64, bool) 
 // Returns a walk over the bodies of node `i`'s facts of `role`, in source order, with `fact_next` giving one at a
 // time. `NO_NODE` returns an empty walk. This is the public fact reader. A fact body is a slice of the source, so
 // a read allocates nothing.
-facts_of :: proc(doc: ^Document, i: Node_Index, role: Role) -> Facts {
+facts_of :: proc(doc: ^Document, i: Node_Index, role: Role) -> Fact_Iter {
 	if i == NO_NODE {
 		return {doc = doc, role = role}
 	}
@@ -777,8 +814,8 @@ all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact {
 	return doc.facts[lo:hi]
 }
 
-// A `Facts` walk reads the bodies of one node's facts of one role, in source order. `fact_next` returns one at a time.
-Facts :: struct {
+// A `Fact_Iter` walk reads the bodies of one node's facts of one role, in source order. `fact_next` returns one at a time.
+Fact_Iter :: struct {
 	doc:  ^Document,
 	at:   int,
 	end:  int,
@@ -787,7 +824,7 @@ Facts :: struct {
 
 // Returns the next body without the markers its format writes: the fact's `spelling` gives the lead and tail
 // lengths, and core reads the bytes between them without knowing any format's marker.
-fact_next :: proc(it: ^Facts) -> (body: string, ok: bool) {
+fact_next :: proc(it: ^Fact_Iter) -> (body: string, ok: bool) {
 	for it.at < it.end {
 		f := it.doc.facts[it.at]
 		it.at += 1

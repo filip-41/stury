@@ -2,8 +2,6 @@ package core
 
 import "base:runtime"
 import "core:bytes"
-import "core:mem"
-import "core:slice"
 
 // A log of edits kept apart from a document, which does not change after its build. A reader sees an edit only after
 // the caller commits and builds the output again. Any number of lists may share one document, each with its own edits.
@@ -68,10 +66,10 @@ edit_list_destroy :: proc(list: ^Edit_List) {
 }
 
 // Whether a document is flat: its text has no brackets, so a container has no bytes of its own, and its root's members
-// are lines the format composes through `root_junction`. A flat format writes the spec it was read as, since another
+// are lines the format composes itself. A flat format writes the spec it was read as, since another
 // spec would respell every member.
-flat_doc :: #force_inline proc(doc: ^Document) -> bool {
-	return doc.spelling.edit != nil && doc.spelling.edit.root_junction != nil
+is_flat :: #force_inline proc(doc: ^Document) -> bool {
+	return doc.spelling.edit != nil && doc.spelling.edit.flat
 }
 
 // Checks a recorded text as a value. A member's key is a decoded name, so no text is judged as a key.
@@ -104,7 +102,7 @@ set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error 
 	if err.kind != .None {
 		return err
 	}
-	flat := flat_doc(doc)
+	flat := is_flat(doc)
 	if n.role > .Key || flat && (n.kind == .Array || n.kind == .Map) {
 		return {kind = .Bad_Index}
 	}
@@ -187,7 +185,7 @@ insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string,
 remove :: proc(list: ^Edit_List, node: Node_Index) -> Document_Error {
 	doc, n, err := node_of(list, node)
 	// A key is removed with its value and a header row is no member of its own, but a flat text's key is a cell.
-	flat_key := n.role == .Key && flat_doc(doc) && n.kind != .Array
+	flat_key := n.role == .Key && is_flat(doc) && n.kind != .Array
 	if err.kind != .None || node == ROOT || n.role != .Value && !flat_key {
 		return {kind = .Bad_Index}
 	}
@@ -222,7 +220,7 @@ fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) 
 	}
 	#partial switch role {
 	case .Comment_Inline:
-		if body_lf_cr(transmute([]u8)text) {
+		if has_line_end(transmute([]u8)text) {
 			return {kind = .Bad_Fact}
 		}
 	case .Comment, .Comment_Foot:
@@ -232,449 +230,21 @@ fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) 
 	return {}
 }
 
-// Returns how `spec`'s output spells a comment and its marker byte, from the format's `edit.comment`. Returns
-// `.None` and 0 for a format with no comment service.
-@(private)
-comment_style :: #force_inline proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8) {
-	if edit := doc.spelling.edit; edit != nil && edit.comment != nil {
-		return edit.comment(doc, spec)
-	}
-	return .None, 0
-}
-
-// Whether the output can hold a fact of `role` on `node`. A tree writes a foot on a container or the root, whose close
-// or text's end it precedes, and on no other node. A format with a `fact_slot` says its own. An output with no marker
-// holds no fact. The role's shape and the body's spelling are checked where the fact is written. `emptied` says the
-// list removes every member of the root.
-@(private)
-fact_slot :: #force_inline proc(doc: ^Document, node: Node_Index, role: Role, style: Comment_Spelling, emptied: bool) -> bool {
-	if style == .None {
-		return false
-	}
-	if edit := doc.spelling.edit; edit != nil && edit.fact_slot != nil {
-		return edit.fact_slot(doc, node, role, emptied)
-	}
-	n := doc.nodes[node]
-	return role != .Comment_Foot || node == ROOT || n.kind == .Array || n.kind == .Map
-}
-
-// Returns the source bytes the edits make: every byte no edit touched, the edits' texts in their places, and the
-// separators the format supplies, in the document's own spec. The caller frees the result with `allocator`. An edit
-// that another covers, a second edit of one node, and a second fact edit of one node and role are
-// `.Conflicting_Edits` at the byte where the two meet. An insert whose index lies in a removal run moves to the run's
-// cut end, so it is no conflict. The result is checked by the format, and a result that reads less strictly than the
-// source is `.Bad_Result`. A fact the output cannot hold is dropped with its source bytes. `dropped` counts the source
-// facts and fact edits the output cannot hold. A fact that is removed with a removed member or a set's span is not
-// counted.
+// Returns the source bytes `list`'s edits make, in the document's own spec, through the format's commit. The caller frees
+// the result with `allocator`. An edit that another covers, a second edit of one node, and a second fact edit of one node
+// and role are `.Conflicting_Edits` at the byte where the two meet. A result that reads less strictly than the source is
+// `.Bad_Result`. `dropped` counts the source facts and fact edits the output cannot hold.
 commit :: proc(list: ^Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
 	if list.doc == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
-	return commit_as(list, list.doc.read.spec, allocator)
-}
-
-// Writes `list`'s edits as spec byte `spec`, for a format's `commit` that offers another spec of its own. `commit`
-// passes the document's own spec.
-commit_as :: proc(list: ^Edit_List, spec: u8, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
-	doc := list.doc
-	if doc == nil {
-		return nil, 0, {kind = .Bad_Index}
-	}
-	// A partial document does not hold the members a commit composes.
-	if doc.partial {
-		return nil, 0, {kind = .Bad_Index}
-	}
-	// Refused before any chunk is built or spliced, rather than after the output fails to read.
-	if flat_doc(doc) && spec != doc.read.spec {
-		return nil, 0, {kind = .Bad_Spec}
-	}
-	if doc.spelling.edit == nil || doc.spelling.edit.plan == nil {
-		return commit_edits(list, spec, allocator)
-	}
-	// What a plan writes lives only as long as this commit, so its one arena frees all of it.
-	arena: mem.Dynamic_Arena
-	mem.dynamic_arena_init(&arena, allocator, allocator)
-	defer mem.dynamic_arena_destroy(&arena)
-	scratch := mem.dynamic_arena_allocator(&arena)
-	planned := Edit_List{doc = doc, allocator = scratch}
-	planned.edits, _ = make([dynamic]Edit, scratch)
-	changed, e := doc.spelling.edit.plan(doc, list, &planned.edits, scratch)
-	if e.kind != .None {
-		return nil, 0, e
-	}
-	return commit_edits(&planned if changed else list, spec, allocator)
-}
-
-// Composes `list`'s edits, splices them into the source and checks that the output reads.
-@(private)
-commit_edits :: proc(list: ^Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: Document_Error) {
-	doc := list.doc
-	chunks, _ := make([dynamic]Chunk, allocator)
-	defer delete(chunks)
-	text, _ := make([dynamic]u8, allocator)
-	defer delete(text)
-	if e, conflict := edits_removed(doc, list, allocator); conflict {
-		return nil, 0, e
-	}
-	style, comment_byte := comment_style(doc, spec)
-	if e, ok := compose_tree(doc, list, style, comment_byte, &text, &chunks, &dropped, allocator); !ok {
-		return nil, 0, e
-	}
-	if e := order_chunks(&chunks); e.kind != .None {
-		return nil, 0, e
-	}
-	out, err = splice(doc, chunks[:], text[:], allocator)
-	if err.kind != .None {
-		return nil, 0, err
-	}
-	if e := reads_as_source(doc, out, spec); e.kind != .None {
-		delete(out, allocator)
-		return nil, 0, e
-	}
-	return out, dropped, {}
-}
-
-// The output must read as strictly as the source. A text that needs a tolerance only the source needed is the edit's
-// own defect. A tolerance is accepted only when the output keeps the document's spec, since under another spec the
-// source's own reading is no evidence and the output must read strictly. A text that fails even the format's tolerant
-// read returns `.Bad_Result`.
-@(private)
-reads_as_source :: proc(doc: ^Document, out: []u8, spec: u8) -> Document_Error {
-	edit := doc.spelling.edit
-	if edit == nil || edit.reads == nil {
-		return {}
-	}
-	f, faulted := edit.reads(doc, out, false, spec)
-	if !faulted {
-		return {}
-	}
-	if g, still := edit.reads(doc, out, true, spec); still {
-		return {kind = .Bad_Result, inner = g}
-	}
-	if spec != doc.read.spec {
-		return {kind = .Bad_Result, inner = f}
-	}
-	if _, src_bad := edit.reads(doc, doc.src, false, spec); !src_bad {
-		return {kind = .Bad_Result, inner = f}
-	}
-	return {}
-}
-
-// Builds the output in one allocation: the source bytes between chunks, and each chunk's text in its place.
-// Returns `.No_Memory` when the allocation is refused.
-@(private)
-splice :: proc(doc: ^Document, chunks: []Chunk, text: []u8, allocator: runtime.Allocator) -> (out: []u8, err: Document_Error) {
-	total := i64(len(doc.src))
-	for c in chunks {
-		total += i64(c.to-c.from) - i64(c.hi-c.lo)
-	}
-	raw, aerr := runtime.mem_alloc_non_zeroed(int(total), 1, allocator)
-	if aerr != nil {
-		return nil, {kind = .No_Memory}
-	}
-	out = raw[:int(total)]
-	w := 0
-	at := u64(0)
-	for c in chunks {
-		if c.lo > at {
-			w += copy(out[w:], doc.src[at:c.lo])
-		}
-		w += copy(out[w:], text[c.from:c.to])
-		at = max(at, c.hi)
-	}
-	copy(out[w:], doc.src[at:])
-	return out, {}
-}
-
-// Replaces `src[lo:hi]` with `text[from:to]`. `fact` marks a fact's chunk and `remove` one that writes nothing, and
-// `rank` orders chunks at one byte.
-@(private)
-Chunk :: struct {
-	lo, hi: u64,
-	from:   int,
-	to:     int,
-	rank:   u8,
-	fact:   bool,
-	remove: bool,
-}
-
-// Returns the first byte of member `v` of `parent`, without the comments it holds: its key's first byte or its own.
-// Only an inline-key `Map`'s member has a key node before it. A shared-key root's first member follows the shared keys,
-// whose last also has role `Key` and names no member of the root.
-@(private)
-value_lo :: proc(doc: ^Document, parent, v: Node_Index) -> u64 {
-	if doc.shared_keys == 0 && doc.nodes[parent].kind == .Map && doc.nodes[v-1].role == .Key {
-		return key_start(doc.nodes[v-1])
-	}
-	return key_start(doc.nodes[v])
-}
-
-// Returns the bytes where container `c`'s members go: those between its brackets, or a format's `interior`.
-@(private)
-interior :: proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64) {
-	if edit := doc.spelling.edit; edit != nil && edit.interior != nil {
-		return edit.interior(doc, c)
-	}
-	hi = doc.spelling.close_end(doc, c)
-	return doc.nodes[c].lo + 1, hi - 1
-}
-
-// Returns `lo` moved past each space or tab before `hi`.
-@(private)
-blanks_end :: #force_inline proc(src: []u8, lo, hi: u64) -> u64 {
-	p := lo
-	for p < hi && (src[p] == ' ' || src[p] == '\t') {
-		p += 1
-	}
-	return p
-}
-
-// Returns the first byte of the line holding `pos`, and the line end that ends the line before it. With `unicode`, a
-// U+2028 or U+2029 separator is a line end, which only JSON5 reads as one.
-@(private)
-line_start :: #force_inline proc(src: []u8, pos: u64, unicode: bool) -> (lo, eol: u64, has_eol: bool) {
-	lo = pos
-	for lo > 0 {
-		c := src[lo-1]
-		if c == '\n' {
-			return lo, lo - 2 if lo >= 2 && src[lo-2] == '\r' else lo - 1, true
-		}
-		if c == '\r' {
-			return lo, lo - 1, true
-		}
-		if unicode && lo >= 3 && src[lo-3] == 0xE2 && src[lo-2] == 0x80 && c | 1 == 0xA9 {
-			return lo, lo - 3, true
-		}
-		lo -= 1
-	}
-	return lo, 0, false
-}
-
-// Returns the first byte of the line holding `pos`, and the first byte past the whitespace that starts that line.
-@(private)
-line_of :: #force_inline proc(src: []u8, pos: u64, unicode: bool) -> (lo, indent_hi: u64) {
-	lo, _, _ = line_start(src, pos, unicode)
-	indent_hi = blanks_end(src, lo, pos)
-	return
-}
-
-// Whether `body` holds a line end a JSON line comment ends at: LF, CR, or a Unicode line separator. `line_end_len`
-// reads the same set.
-@(private)
-body_line_end :: #force_inline proc(body: []u8) -> bool {
-	return body_lf_cr(body) || bytes.index(body, transmute([]u8)string("\xE2\x80\xA8")) >= 0 || bytes.index(body, transmute([]u8)string("\xE2\x80\xA9")) >= 0
+	return list.doc.spelling.edit.commit(list, list.doc.read.spec, allocator)
 }
 
 // Whether `body` holds LF or CR, the only line ends a delimited text's comment line ends at. U+2028 is a byte in its
 // body.
-@(private)
-body_lf_cr :: #force_inline proc(body: []u8) -> bool {
+has_line_end :: #force_inline proc(body: []u8) -> bool {
 	return bytes.index_byte(body, '\n') >= 0 || bytes.index_byte(body, '\r') >= 0
-}
-
-// Whether the output holds `body` in the spelling `line` picks: a line comment holds no line end, a block comment holds
-// no `*/`, and a comment byte's line holds no LF or CR.
-@(private)
-fact_body_held :: proc(style: Comment_Spelling, body: []u8, line: bool) -> bool {
-	switch style {
-	case .None:
-		return false
-	case .Byte:
-		return !body_lf_cr(body)
-	case .Line:
-		if line {
-			return !body_line_end(body)
-		}
-		return bytes.index(body, transmute([]u8)string("*/")) < 0
-	}
-	return false
-}
-
-// Writes a fact body with the markers `style` gives: `//body` when `line` says a line comment ends here, else
-// `/*body*/`. A fact that leads its line (`lead`) starts on a line of its own with the line's indent. A new head or
-// foot fact (`new`) also ends its line, and a replaced or inline one adds no trailing line end.
-@(private)
-fact_write :: proc(doc: ^Document, style: Comment_Spelling, comment_byte: u8, role: Role, body: []u8, line: bool, indent: []u8, lead, new: bool, text: ^[dynamic]u8) -> bool {
-	if lead {
-		push(text, '\n') or_return
-		push_all(text, indent) or_return
-	}
-	if role == .Comment_Inline {
-		push(text, ' ') or_return
-	}
-	switch style {
-	case .Line:
-		push_all(text, transmute([]u8)string("/*" if !line else "//")) or_return
-		push_all(text, body) or_return
-		if !line {
-			push_all(text, transmute([]u8)string("*/")) or_return
-		}
-	case .Byte:
-		push(text, comment_byte) or_return
-		push_all(text, body) or_return
-	case .None:
-		return false
-	}
-	if new {
-		push(text, '\n') or_return
-		push_all(text, indent) or_return
-	}
-	return true
-}
-
-// Returns the indent of the line holding `pos` and whether bytes stand before `pos` on that line.
-@(private)
-line_shape :: proc(doc: ^Document, pos: u64) -> (indent: []u8, lead: bool) {
-	lo, hi := line_of(doc.src, pos, !flat_doc(doc))
-	return doc.src[lo:hi], hi < pos
-}
-
-// Returns the byte after a comma that follows `pos` over blanks, or `pos` and false.
-@(private)
-comma_after :: proc(src: []u8, pos: u64) -> (u64, bool) {
-	p := blanks_end(src, pos, u64(len(src)))
-	if p < u64(len(src)) && src[p] == ',' {
-		return p + 1, true
-	}
-	return pos, false
-}
-
-// Whether a fact body at `pos` can use a line comment. A chunk that inserts at the byte writes after the comment on its
-// line, and a replacement or inline fact is written in the block spelling.
-@(private)
-fact_line :: proc(doc: ^Document, e: Edit, pos: u64, taken: int, inserted: bool) -> bool {
-	line := taken == 0 && e.role != .Comment_Inline || pos >= u64(len(doc.src)) || line_end_len(doc.src, pos) > pos
-	line = line && !body_line_end(e.text)
-	if e.role == .Comment_Inline || taken > 0 {
-		line = line && !inserted
-	}
-	return line
-}
-
-// A `Remove_Range` is the node range an edit takes out: a removal's subtree, or a set's replaced value for a fact
-// edit below it.
-@(private)
-Remove_Range :: struct {
-	lo: Node_Index,
-	hi: Node_Index,
-	op: Edit_Op,
-}
-
-// A `Remove_Query` names the node an edit writes at, its index in the list, and whether it is a fact edit.
-@(private)
-Remove_Query :: struct {
-	node: Node_Index,
-	edit: int,
-	fact: bool,
-}
-
-// Returns the conflict when an edit writes inside a subtree another edit removes, or a fact edit names a node below a
-// set's node. The ranges and queries are sorted once and swept, so the check is O(n log n). A range covers a node when
-// `lo <= node < hi`, so the greatest `hi` seen with `lo <= node` decides it. A removal includes its own node. A set on
-// the fact's own node is not below it, so a set at the query's node is held back one node.
-@(private)
-edits_removed :: proc(doc: ^Document, list: ^Edit_List, allocator: runtime.Allocator) -> (err: Document_Error, conflict: bool) {
-	err = {kind = .No_Memory}
-	ranges, _ := make([dynamic]Remove_Range, 0, len(list.edits), allocator)
-	defer delete(ranges)
-	queries, _ := make([dynamic]Remove_Query, 0, len(list.edits), allocator)
-	defer delete(queries)
-	for e, i in list.edits {
-		if int(e.node) >= len(doc.nodes) {
-			continue
-		}
-		switch e.op {
-		case .Remove, .Set:
-			n := doc.nodes[e.node]
-			span := n.n if n.kind == .Array || n.kind == .Map else 1
-			push(&ranges, Remove_Range{lo = e.node, hi = e.node + Node_Index(span), op = e.op}) or_return
-			if e.op == .Set {
-				push(&queries, Remove_Query{node = e.node, edit = i}) or_return
-			}
-		case .Insert:
-			push(&queries, Remove_Query{node = e.node, edit = i}) or_return
-		case .Set_Fact, .Remove_Fact:
-			push(&queries, Remove_Query{node = e.node, edit = i, fact = true}) or_return
-		}
-	}
-	slice.sort_by(ranges[:], proc(a, b: Remove_Range) -> bool { return a.lo < b.lo })
-	slice.sort_by(queries[:], proc(a, b: Remove_Query) -> bool { return a.node < b.node })
-	removed_hi, set_hi, same_set_hi := Node_Index(0), Node_Index(0), Node_Index(0)
-	node := Node_Index(0)
-	ri, best, best_node := 0, -1, Node_Index(0)
-	for q in queries {
-		if q.node != node {
-			node = q.node
-			set_hi = max(set_hi, same_set_hi)
-			same_set_hi = 0
-		}
-		for ri < len(ranges) && ranges[ri].lo <= q.node {
-			r := ranges[ri]
-			ri += 1
-			switch {
-			case r.op == .Remove:
-				removed_hi = max(removed_hi, r.hi)
-			case r.lo == q.node:
-				same_set_hi = max(same_set_hi, r.hi)
-			case:
-				set_hi = max(set_hi, r.hi)
-			}
-		}
-		bad := removed_hi > q.node || q.fact && set_hi > q.node
-		if bad && (best < 0 || q.edit < best) {
-			best = q.edit
-			best_node = q.node
-		}
-	}
-	if best >= 0 {
-		return {kind = .Conflicting_Edits, at = key_start(doc.nodes[best_node])}, true
-	}
-	return {}, false
-}
-
-// A `Target` names a node a group of edits works on, a container for an insert or a removed member, with the edit that
-// named it. An insert's `at` orders it against the other inserts of its container.
-@(private)
-Target :: struct {
-	node: Node_Index,
-	edit: int,
-	at:   u32,
-}
-
-// Fills `groups` with the parent of each target within the document's node range, in one preorder pass: the targets
-// are sorted and the open containers are kept on a stack, so no node array is built. The root as a target has parent
-// `NO_NODE`, and a target past the last node is not added.
-@(private)
-parents_of :: proc(doc: ^Document, targets: []Target, groups: ^[dynamic]Target, allocator: runtime.Allocator) -> bool {
-	if len(targets) == 0 {
-		return true
-	}
-	slice.sort_by(targets, proc(a, b: Target) -> bool { return a.node < b.node })
-	stack, _ := make([dynamic]Node_Index, allocator)
-	defer delete(stack)
-	k := 0
-	for i in 0 ..< len(doc.nodes) {
-		for len(stack[:]) > 0 {
-			top := stack[:][len(stack[:]) - 1]
-			if u64(top) + u64(doc.nodes[top].n) > u64(i) {
-				break
-			}
-			pop(&stack)
-		}
-		for k < len(targets) && targets[k].node == Node_Index(i) {
-			parent := NO_NODE
-			if len(stack[:]) > 0 {
-				parent = stack[:][len(stack[:]) - 1]
-			}
-			push(groups, Target{node = parent, edit = targets[k].edit, at = targets[k].at}) or_return
-			k += 1
-		}
-		n := doc.nodes[i]
-		if n.kind == .Array || n.kind == .Map {
-			push(&stack, Node_Index(i)) or_return
-		}
-	}
-	return true
 }
 
 // Copies an edit's key and text into one allocation, then appends the edit to the log. A refused append frees the
@@ -707,14 +277,3 @@ edit_add :: proc(list: ^Edit_List, node: Node_Index, op: Edit_Op, role: Role, at
 	return {}
 }
 
-push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool) {
-	count, err := append(d, v)
-	return count, err == nil
-}
-
-push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool) {
-	if _, err := append(d, ..vs); err != nil {
-		return 0, false
-	}
-	return len(vs), true
-}

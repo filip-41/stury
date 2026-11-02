@@ -320,6 +320,105 @@ render_edit :: proc(w: io.Writer, src: []u8, path: string, e: Path_Edit_Error, l
 	return nil
 }
 
+// How a typed read refuses. `.None` is no error.
+Unmarshal_Error_Kind :: enum u8 {
+	None,
+	Walk, // the walk's fault, in `inner`
+	Wrong_Kind, // a value the target's type does not read
+	Out_Of_Range, // a value past what the target holds
+	Not_A_Member, // a name or number no enum or union member has
+	Wrong_Length, // an array's element count differs from a fixed array's, or passes a fixed capacity
+	Missing_Field, // a `required` member is absent, the last step names it
+	Unknown_Field, // a key the type does not name, the last step names it
+	Missing_Tag, // an object for a union that reads by tag has no tag member
+	Repeated_Tag, // an object for a union that reads by tag has two
+	Duplicate_Key, // a read with `refuse_duplicates` met a key that repeats one of its object's
+	Out_Of_Memory,
+	Bad_Option, // a nil target, at no byte
+	Plan_Mismatch, // a plan built for another type or format, at no byte
+	Unsupported, // a type a plan cannot read, the last step names the field
+	Ambiguous_Union, // a union whose arms a value's class cannot tell apart
+	Bad_Tag, // a field's tag holds a flag no reader knows
+}
+
+// The steps an `Unmarshal_Error` holds.
+MAX_ERROR_STEPS :: 8
+
+// A typed read's refusal. `at` is the value's byte, and `steps[:n_steps]` the path to it from the target, the innermost
+// `MAX_ERROR_STEPS` when `truncated` says more were cut from the front. A step's name lives as long as `src` or the plan,
+// or for a decoded key as long as `context.temp_allocator`'s block. `.Walk` holds its fault in `inner`.
+Unmarshal_Error :: struct {
+	kind:      Unmarshal_Error_Kind,
+	truncated: bool,
+	n_steps:   u8,
+	at:        u64,
+	inner:     Fault,
+	steps:     [MAX_ERROR_STEPS]Step,
+}
+
+@(private, rodata)
+UNMARSHAL_KIND_RULES := [Unmarshal_Error_Kind]Rule {
+	.None          = {"none", "No error"},
+	.Walk          = {"walk", "Input does not parse"},
+	.Wrong_Kind    = {"wrong_kind", "Value does not fit the field's type"},
+	.Out_Of_Range  = {"out_of_range", "Value is out of range for the field's type"},
+	.Not_A_Member  = {"not_a_member", "Value is no member of the type"},
+	.Wrong_Length  = {"wrong_length", "Wrong number of elements"},
+	.Missing_Field = {"missing_field", "Required field is missing"},
+	.Unknown_Field = {"unknown_field", "Unknown field"},
+	.Missing_Tag   = {"missing_tag", "Object has no tag member"},
+	.Repeated_Tag  = {"repeated_tag", "Object repeats its tag member"},
+	.Duplicate_Key = {"duplicate_key", "Duplicate key"},
+	.Out_Of_Memory = {"out_of_memory", "Out of memory"},
+	.Bad_Option    = {"bad_option", "Invalid option"},
+	.Plan_Mismatch = {"plan_mismatch", "Plan does not read this target"},
+	.Unsupported   = {"unsupported", "Type is not supported"},
+	.Ambiguous_Union = {"ambiguous_union", "Union arms cannot be told apart"},
+	.Bad_Tag       = {"bad_tag", "Invalid field tag"},
+}
+
+@(private)
+write_unmarshal_code :: proc(w: io.Writer, e: Unmarshal_Error) -> io.Error {
+	io.write_string(w, "unmarshal.") or_return
+	_, err := io.write_string(w, UNMARSHAL_KIND_RULES[e.kind].code)
+	return err
+}
+
+// Writes `line:col: message at path` for `e`, the position left out where the kind has no byte. `.Walk` writes its
+// fault. `lines` is as in `render_fault`.
+@(private)
+render_unmarshal :: proc(w: io.Writer, src: []u8, e: Unmarshal_Error, lines: ^Lines = nil) -> io.Error {
+	if e.kind == .Walk {
+		return render_fault(w, src, e.inner, lines)
+	}
+	#partial switch e.kind {
+	case .None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag:
+	case:
+		write_position(w, src, e.at, lines) or_return
+	}
+	io.write_string(w, UNMARSHAL_KIND_RULES[e.kind].message) or_return
+	if e.n_steps == 0 {
+		return nil
+	}
+	io.write_string(w, " at ") or_return
+	if e.truncated {
+		io.write_string(w, "...") or_return
+	}
+	e := e
+	for s in e.steps[:e.n_steps] {
+		#partial switch v in s {
+		case Name:
+			io.write_byte(w, '.') or_return
+			io.write_string(w, string(v)) or_return
+		case Index:
+			io.write_byte(w, '[') or_return
+			io.write_int(w, int(v)) or_return
+			io.write_byte(w, ']') or_return
+		}
+	}
+	return nil
+}
+
 // `write_code` writes an error's code, `render` writes its rendered line.
-write_code :: proc {write_fault_code, write_document_code, write_path_code, write_edit_code}
-render :: proc {render_fault, render_document, render_path, render_edit}
+write_code :: proc {write_fault_code, write_document_code, write_path_code, write_edit_code, write_unmarshal_code}
+render :: proc {render_fault, render_document, render_path, render_edit, render_unmarshal}

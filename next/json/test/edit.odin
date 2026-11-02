@@ -5,7 +5,7 @@ import "core:mem"
 import "core:strings"
 import "core:testing"
 import core "../../core"
-import dsv "../../dsv"
+import compose "../../core/compose"
 import json ".."
 import walktest "../../walktest"
 
@@ -517,7 +517,7 @@ edit_check_policy :: proc(t: ^testing.T) {
 	if !testing.expect_value(t, core.set(&list, 4, string("2")).kind, core.Document_Error_Kind.None) {
 		return
 	}
-	out, _, cerr := core.commit(&list)
+	out, _, cerr := compose.commit(&list, doc.read.spec, nil)
 	defer if len(out) > 0 {
 		delete(out)
 	}
@@ -724,20 +724,6 @@ render_inner_cause :: proc(t: ^testing.T) {
 	strings.builder_reset(&b)
 	core.render(strings.to_writer(&b), j5.src, ce)
 	testing.expect_value(t, strings.to_string(b), "The edited text does not read\n  caused by Invalid unquoted key")
-}
-
-// `json.commit` refuses a delimited document before it splices, since a table is another format family.
-@(test)
-json_commit_refuses_table :: proc(t: ^testing.T) {
-	src := transmute([]u8)string("a\n1\n")
-	doc, err := dsv.build(src, .Csv)
-	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	list := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&list)
-	out, _, cerr := json.commit(&list, .Json)
-	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.Bad_Spec)
-	testing.expect(t, out == nil)
 }
 
 // `span` on a string or a key returns its source bytes with the quotes, which the splice writer copies.

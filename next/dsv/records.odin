@@ -106,17 +106,20 @@ put_header_key :: #force_inline proc "contextless" (keys: []core.Token, cells: i
 // `.Bare_Quote`, a cell byte. Every quoted CSV cell sets both bits, and `spelling_text` and `spelling_key_equals` cut
 // it to its inner span without decoding when `plain_quoted` holds, which is when the span holds no `""` and is
 // well-formed UTF-8. An unquoted CSV cell sets bit 0 under `lax`. A TSV cell sets it when its span holds a backslash,
-// which the pass's block mask answers, or under `lax`.
+// which the pass's block mask answers, or under `lax`. On a walk for `Cells` the mask holds a quoted cell's `""`, and
+// `esc` sets `SPELLING_DOUBLED`. A cell read under `lax` sets `SPELLING_LAX`, since its decode may grow past its span.
 @(private)
 spelling :: #force_inline proc "contextless" (base: [^]u8, field_lo, hi: int, esc, lax: bool, $S: Spec) -> u16 {
 	when S == .Csv {
-		quoted := hi > field_lo && base[field_lo] == '"'
-		if quoted {
-			return core.SPELLING_DECODE | core.SPELLING_QUOTED
+		plain := core.SPELLING_DECODE | core.SPELLING_LAX if lax else 0
+		if hi == field_lo {
+			return plain
 		}
-		return core.SPELLING_DECODE if lax else 0
+		// With no branch on the first byte, since a text's quoted cells fall in no pattern.
+		quoted := -u16(base[field_lo] == '"')
+		return plain | quoted & (core.SPELLING_DECODE | core.SPELLING_QUOTED | (SPELLING_DOUBLED if esc else 0))
 	} else {
-		return core.SPELLING_DECODE if esc || lax else 0
+		return (core.SPELLING_DECODE if esc || lax else 0) | (core.SPELLING_LAX if lax else 0)
 	}
 }
 
@@ -232,7 +235,7 @@ values_run :: #force_inline proc "contextless" ($ESC, $KEYS: bool, h: ^$H, $on: 
 		dm &= dm - 1
 		esc := false
 		when ESC {
-			when S == .Tsv {
+			when S == .Tsv || H == Cells {
 				esc = span_esc(bs, pos, field_lo2, at, carry)
 			}
 		}
@@ -300,7 +303,7 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 				at := pos + int(kk)
 				dm &= dm - 1
 				esc := false
-				when S == .Tsv {
+				when S == .Tsv || H == Cells {
 					if !plain_block {
 						esc = span_esc(bs, pos, field_lo, at, carry)
 					}
@@ -394,7 +397,7 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 			}
 		}
 		esc := false
-		when S == .Tsv {
+		when S == .Tsv || H == Cells {
 			if !plain_block {
 				esc = span_esc(bs, pos, field_lo, at, carry)
 			}
@@ -429,7 +432,7 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 	w.in_header, w.muted, w.open = header, muted, open
 	// The cell still open at the block's end carries its backslash state into the next block, as `field_esc`.
 	w.field_esc = false
-	when S == .Tsv {
+	when S == .Tsv || H == Cells {
 		if !plain_block {
 			w.field_esc = span_esc(bs, pos, field_lo, pos + 64, carry)
 		}

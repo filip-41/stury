@@ -8,10 +8,6 @@ import "base:runtime"
 import core "../core"
 import kernel "../core/kernel"
 
-// The deepest nesting a text may have when `Options.max_depth` is 0. An open bracket past the limit faults
-// `Too_Deep` at that bracket.
-MAX_DEPTH :: core.MAX_DEPTH
-
 // `Spec` is the grammar a text follows, a compile-time parameter, so a build compiles only the specs it names.
 Spec :: enum u8 {
 	Json, // RFC 8259
@@ -70,13 +66,23 @@ RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", 
 // Checks that `src` holds exactly one document: an optional leading BOM, the document, then whitespace and, in a
 // spec with comments, comments up to the text's end. Returns the fault, or nil.
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
-	p := raw_data(src)
-	end := p[len(src):]
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	r := walk_document(src, skip_ws(p[core.text_start(src, 0):], end), S, opts, &h, &regs, core.no_hook)
+	return walk_text(src, S, opts, &h, &regs, core.no_hook)
+}
+
+// Reads `src` as exactly one document through the hook, as `validate` checks it. A hook that stops the walk ends the
+// read with no fault. Returns the fault, or nil.
+@(private)
+walk_text :: #force_inline proc "contextless" (src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> Maybe(core.Fault) {
+	p := raw_data(src)
+	end := p[len(src):]
+	r := walk_document(src, skip_ws(p[core.text_start(src, 0):], end), S, opts, h, regs, on)
 	if r & 0xff != 0 {
 		return core.fault_of(r, &RULES)
+	}
+	if u8(r >> 8) == core.STOPPED {
+		return nil
 	}
 	return tail_fault(src, r >> 16, S)
 }
@@ -195,12 +201,12 @@ PASS_END :: 4
 // it on the default heap above that.
 @(private)
 walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
-	if opts.max_depth > MAX_DEPTH {
+	if opts.max_depth > core.MAX_DEPTH {
 		return walk_deep(src, p, S, u64(opts.max_depth), opts.tolerate, h, regs, on)
 	}
 	// `= ---` leaves the array unwritten, where a struct would be zeroed. Every slot is written before it is read.
-	stack: [MAX_DEPTH]u8 = ---
-	depth := u64(opts.max_depth) if opts.max_depth != 0 else MAX_DEPTH
+	stack: [core.MAX_DEPTH]u8 = ---
+	depth := u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH
 	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, opts.tolerate, nil, 0}
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }

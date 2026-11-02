@@ -3,6 +3,7 @@ package dsv
 import "base:runtime"
 import "core:slice"
 import core "../core"
+import compose "../core/compose"
 
 // A commit's column changes. An edit names one cell, and a column is what the whole list does to every line, so this
 // pass turns the list into plain cell edits before core composes it. A list with no cell inserted or removed costs one
@@ -47,11 +48,13 @@ Slot :: struct {
 	cell: []u8,
 }
 
+// A procedure that returns false leaves its refusal in `err`, `.No_Memory` until one sets it.
 @(private = "file")
 Plan :: struct {
 	doc:       ^core.Document,
 	list:      ^core.Edit_List,
 	out:       ^[dynamic]core.Edit,
+	err:       core.Document_Error,
 	lines:     [dynamic]Line,
 	added:     [dynamic]Column,
 	fills:     [dynamic]Fill,
@@ -59,6 +62,12 @@ Plan :: struct {
 	dropped:   []bool,
 	width:     int, // the longest line's cell count
 	allocator: runtime.Allocator,
+}
+
+@(private = "file")
+refuse :: proc(p: ^Plan, err: core.Document_Error) -> bool {
+	p.err = err
+	return false
 }
 
 // dsv's `Edit_Spelling.plan`.
@@ -82,9 +91,9 @@ edit_plan :: proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]cor
 		}
 		return false, record_widths(doc, list, dsv_width(doc), allocator) if records else {}
 	}
-	p := Plan{doc = doc, list = list, out = out, allocator = allocator}
-	if e, ok := plan_columns(&p); !ok {
-		return false, e
+	p := Plan{doc = doc, list = list, out = out, allocator = allocator, err = {kind = .No_Memory}}
+	if !plan_columns(&p) {
+		return false, p.err
 	}
 	return true, record_widths(doc, list, planned_width(&p), allocator)
 }
@@ -131,8 +140,7 @@ planned_width :: proc(p: ^Plan) -> int {
 }
 
 @(private = "file")
-plan_columns :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
-	err = {kind = .No_Memory}
+plan_columns :: proc(p: ^Plan) -> bool {
 	p.lines, _ = make([dynamic]Line, 0, core.length(p.doc, core.ROOT) + 1, p.allocator)
 	p.added, _ = make([dynamic]Column, p.allocator)
 	p.fills, _ = make([dynamic]Fill, p.allocator)
@@ -140,27 +148,21 @@ plan_columns :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
 	for e in p.list.edits {
 		switch e.op {
 		case .Set, .Set_Fact, .Remove_Fact:
-			core.push(p.out, e) or_return
+			compose.push(p.out, e) or_return
 		case .Insert:
 			if e.node == core.ROOT {
-				core.push(p.out, e) or_return
+				compose.push(p.out, e) or_return
 			}
 		case .Remove:
 			if is_line(p.doc, e.node) {
-				core.push(p.out, e) or_return
+				compose.push(p.out, e) or_return
 			}
 		}
 	}
-	if e, good := plan_cuts(p); !good {
-		return e, false
-	}
-	if e, good := plan_fills(p); !good {
-		return e, false
-	}
-	if e, good := plan_write(p); !good {
-		return e, false
-	}
-	return {}, true
+	plan_cuts(p) or_return
+	plan_fills(p) or_return
+	plan_write(p) or_return
+	return true
 }
 
 @(private = "file")
@@ -168,7 +170,7 @@ plan_lines :: proc(p: ^Plan) -> bool {
 	doc := p.doc
 	if doc.shared_keys != 0 {
 		p.width = core.length(doc, doc.shared_keys)
-		core.push(&p.lines, Line{node = doc.shared_keys, n = p.width, header = true}) or_return
+		compose.push(&p.lines, Line{node = doc.shared_keys, n = p.width, header = true}) or_return
 	}
 	it := core.children(doc, core.ROOT)
 	for {
@@ -178,7 +180,7 @@ plan_lines :: proc(p: ^Plan) -> bool {
 		}
 		n := core.length(doc, rec)
 		p.width = max(p.width, n)
-		core.push(&p.lines, Line{node = rec, n = n}) or_return
+		compose.push(&p.lines, Line{node = rec, n = n}) or_return
 	}
 	for e in p.list.edits {
 		if e.op == .Remove && is_line(doc, e.node) {
@@ -209,23 +211,30 @@ line_at :: proc(lines: []Line, node: core.Node_Index) -> int {
 
 // Decides which columns the removed cells drop, and empties the cells of the columns that stay.
 @(private = "file")
-plan_cuts :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
-	err = {kind = .No_Memory}
+plan_cuts :: proc(p: ^Plan) -> bool {
 	doc, lines := p.doc, p.lines[:]
 	cuts, _ := make([dynamic]core.Node_Index, p.allocator)
 	for e in p.list.edits {
 		if e.op == .Remove && !is_line(doc, e.node) {
-			core.push(&cuts, e.node) or_return
+			compose.push(&cuts, e.node) or_return
 		}
 	}
 	if !slice.is_sorted(cuts[:]) {
 		slice.sort(cuts[:])
 	}
+	// A cell the list both sets and removes is a conflict, whatever else the list does to its line's width.
+	writes, _ := make([dynamic]core.Node_Index, p.allocator)
+	for e in p.list.edits {
+		if e.op == .Set {
+			compose.push(&writes, e.node) or_return
+		}
+	}
+	slice.sort(writes[:])
 	dropped, e1 := make([]bool, p.width, p.allocator)
 	held, e2 := make([]int, p.width, p.allocator)
 	cut, e3 := make([]int, p.width, p.allocator)
 	if e1 != nil || e2 != nil || e3 != nil {
-		return err, false
+		return false
 	}
 	p.dropped = dropped
 	for l in lines {
@@ -239,8 +248,9 @@ plan_cuts :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
 	}
 	at := 0
 	for node, i in cuts {
-		if i > 0 && cuts[i - 1] == node {
-			return {kind = .Conflicting_Edits, at = core.key_start(doc.nodes[node])}, false
+		_, written := slice.binary_search(writes[:], node)
+		if written || i > 0 && cuts[i - 1] == node {
+			return refuse(p, {kind = .Conflicting_Edits, at = core.node_start(doc.nodes[node])})
 		}
 		at = line_from(lines, at, node)
 		l := lines[at]
@@ -249,7 +259,7 @@ plan_cuts :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
 		case l.header:
 			dropped[col] = true
 		case l.gone:
-			core.push(p.out, core.Edit{node = node, op = .Remove, role = .Value}) or_return
+			compose.push(p.out, core.Edit{node = node, op = .Remove, role = .Value}) or_return
 		case:
 			cut[col] += 1
 		}
@@ -262,36 +272,33 @@ plan_cuts :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
 		at = line_from(lines, at, node)
 		l := lines[at]
 		if !l.header && !l.gone && !dropped[int(node - l.node) - 1] {
-			core.push(p.out, core.Edit{node = node, op = .Set, role = .Value}) or_return
+			compose.push(p.out, core.Edit{node = node, op = .Set, role = .Value}) or_return
 		}
 	}
-	return {}, true
+	return true
 }
 
 // Sorts the list's cell inserts into new columns and the cells each record writes.
 @(private = "file")
-plan_fills :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
-	err = {kind = .No_Memory}
+plan_fills :: proc(p: ^Plan) -> bool {
 	doc := p.doc
 	if doc.shared_keys != 0 {
 		for e in p.list.edits {
 			if e.op == .Insert && e.node == doc.shared_keys {
-				core.push(&p.added, Column{id = len(p.added), p = int(e.at), order = len(p.added), cell = e.text}) or_return
+				compose.push(&p.added, Column{id = len(p.added), p = int(e.at), order = len(p.added), cell = e.text}) or_return
 			}
 		}
 		for e in p.list.edits {
 			if e.op == .Insert && e.role == .Key {
-				if e2, good := plan_named(p, e); !good {
-					return e2, false
-				}
+				plan_named(p, e) or_return
 			}
 		}
-		return {}, true
+		return true
 	}
 	inserts, _ := make([dynamic]core.Edit, p.allocator)
 	for e in p.list.edits {
 		if e.op == .Insert && e.node != core.ROOT {
-			core.push(&inserts, e) or_return
+			compose.push(&inserts, e) or_return
 		}
 	}
 	slice.stable_sort_by(inserts[:], proc(a, b: core.Edit) -> bool {
@@ -305,9 +312,7 @@ plan_fills :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
 		// A cell written at a short record's end takes the next column it lacks.
 		if at == p.lines[line].n {
 			if at + nth < p.width {
-				if e2, good := plan_fill(p, line, at + nth, e.text); !good {
-					return e2, false
-				}
+				plan_fill(p, line, at + nth, e.text) or_return
 				continue
 			}
 			at, order = p.width, at + nth - p.width
@@ -320,20 +325,17 @@ plan_fills :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
 		}
 		if col < 0 {
 			col = len(p.added)
-			core.push(&p.added, Column{id = col, p = at, order = order}) or_return
+			compose.push(&p.added, Column{id = col, p = at, order = order}) or_return
 		}
-		if e2, good := plan_fill(p, line, -1 - col, e.text); !good {
-			return e2, false
-		}
+		plan_fill(p, line, -1 - col, e.text) or_return
 	}
-	return {}, true
+	return true
 }
 
 // Places a named insert: in the column that holds its name when its record lacks that cell, else in a new column, which
 // every insert of that name must place alike.
 @(private = "file")
-plan_named :: proc(p: ^Plan, e: core.Edit) -> (err: core.Document_Error, ok: bool) {
-	err = {kind = .No_Memory}
+plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
 	doc := p.doc
 	line := line_at(p.lines[:], e.node)
 	l := p.lines[line]
@@ -343,7 +345,7 @@ plan_named :: proc(p: ^Plan, e: core.Edit) -> (err: core.Document_Error, ok: boo
 			continue
 		}
 		if c < l.n || p.dropped[c] {
-			return {kind = .Duplicate_Key, at = core.key_start(doc.nodes[cell])}, false
+			return refuse(p, {kind = .Duplicate_Key, at = core.node_start(doc.nodes[cell])})
 		}
 		return plan_fill(p, line, c, e.text)
 	}
@@ -359,33 +361,32 @@ plan_named :: proc(p: ^Plan, e: core.Edit) -> (err: core.Document_Error, ok: boo
 	}
 	if col < 0 {
 		if bad := edit_value_at(doc, spelled[:], p.allocator); bad.kind != .None {
-			return bad, false
+			return refuse(p, bad)
 		}
 		col = len(p.added)
-		core.push(&p.added, Column{id = col, p = at, order = col, cell = spelled[:]}) or_return
+		compose.push(&p.added, Column{id = col, p = at, order = col, cell = spelled[:]}) or_return
 	} else if p.added[col].p != at {
-		return {kind = .Bad_Position}, false
+		return refuse(p, {kind = .Bad_Position})
 	}
 	return plan_fill(p, line, -1 - col, e.text)
 }
 
 @(private = "file")
-plan_fill :: proc(p: ^Plan, line, slot: int, text: []u8) -> (err: core.Document_Error, ok: bool) {
+plan_fill :: proc(p: ^Plan, line, slot: int, text: []u8) -> bool {
 	if slot >= 0 && p.dropped[slot] {
-		return {kind = .Conflicting_Edits, at = core.key_start(p.doc.nodes[p.lines[line].node])}, false
+		return refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[p.lines[line].node])})
 	}
-	_, ok = core.push(&p.fills, Fill{line = line, slot = slot, text = text})
-	return {kind = .No_Memory}, ok
+	_, ok := compose.push(&p.fills, Fill{line = line, slot = slot, text = text})
+	return ok
 }
 
 // Writes each line's edits, walking the row of all columns.
 @(private = "file")
-plan_write :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
-	err = {kind = .No_Memory}
+plan_write :: proc(p: ^Plan) -> bool {
 	p.sets, _ = make([dynamic]core.Edit, p.allocator)
 	for e in p.out {
 		if e.op == .Set {
-			core.push(&p.sets, e) or_return
+			compose.push(&p.sets, e) or_return
 		}
 	}
 	slice.sort_by(p.sets[:], proc(a, b: core.Edit) -> bool { return a.node < b.node })
@@ -397,14 +398,14 @@ plan_write :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
 	// With no column added or dropped, only a line the list wrote can change.
 	columns := len(p.added) > 0 || slice.contains(p.dropped, true)
 	if columns && reserve(p.out, len(p.out) + len(p.lines)) != nil {
-		return err, false
+		return false
 	}
 	order, e1 := slice.clone(p.added[:], p.allocator)
 	old_slot, e2 := make([]int, p.width, p.allocator)
 	new_slot, e3 := make([]int, len(p.added), p.allocator)
 	slots, _ := make([dynamic]Slot, p.allocator)
 	if e1 != nil || e2 != nil || e3 != nil {
-		return err, false
+		return false
 	}
 	slice.sort_by(order, proc(a, b: Column) -> bool {
 		return a.p != b.p ? a.p < b.p : a.order < b.order
@@ -413,12 +414,12 @@ plan_write :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
 	for at in 0 ..= p.width {
 		for next < len(order) && order[next].p == at {
 			new_slot[order[next].id] = len(slots)
-			core.push(&slots, Slot{old = -1, cell = order[next].cell}) or_return
+			compose.push(&slots, Slot{old = -1, cell = order[next].cell}) or_return
 			next += 1
 		}
 		if at < p.width {
 			old_slot[at] = len(slots)
-			core.push(&slots, Slot{old = at}) or_return
+			compose.push(&slots, Slot{old = at}) or_return
 		}
 	}
 	for &f in p.fills {
@@ -429,7 +430,7 @@ plan_write :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
 	})
 	for f, i in p.fills {
 		if i > 0 && p.fills[i - 1].line == f.line && p.fills[i - 1].slot == f.slot {
-			return {kind = .Conflicting_Edits, at = core.key_start(p.doc.nodes[p.lines[f.line].node])}, false
+			return refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[p.lines[f.line].node])})
 		}
 	}
 	lo := 0
@@ -439,21 +440,18 @@ plan_write :: proc(p: ^Plan) -> (err: core.Document_Error, ok: bool) {
 			hi += 1
 		}
 		if columns || hi > lo || l.emptied {
-			if e, good := plan_line(p, l, slots[:], p.fills[lo:hi]); !good {
-				return e, false
-			}
+			plan_line(p, l, slots[:], p.fills[lo:hi]) or_return
 		}
 		lo = hi
 	}
-	return {}, true
+	return true
 }
 
 // Writes one line's edits. A cell before one of the line's own always goes in, and one past its end goes in when a
 // later cell needs it or the line holds every old column. A removed line keeps only the cells the list wrote, which the
 // commit refuses as a conflict.
 @(private = "file")
-plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> (err: core.Document_Error, ok: bool) {
-	err = {kind = .No_Memory}
+plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> bool {
 	last := fills[len(fills) - 1].slot if len(fills) > 0 else -1
 	if l.n >= p.width {
 		last = len(slots)
@@ -465,7 +463,7 @@ plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> (err: core
 		if slot.old >= 0 && slot.old < l.n {
 			if p.dropped[slot.old] {
 				if !l.gone {
-					core.push(p.out, core.Edit{node = l.node + 1 + core.Node_Index(slot.old), op = .Remove, role = .Value}) or_return
+					compose.push(p.out, core.Edit{node = l.node + 1 + core.Node_Index(slot.old), op = .Remove, role = .Value}) or_return
 				}
 			} else {
 				if kept == 0 {
@@ -486,7 +484,7 @@ plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> (err: core
 			f += 1
 		}
 		if filled || !l.gone && (at < l.n || s <= last) {
-			core.push(p.out, core.Edit{node = l.node, op = .Insert, role = .Value, at = u32(at), text = text}) or_return
+			compose.push(p.out, core.Edit{node = l.node, op = .Insert, role = .Value, at = u32(at), text = text}) or_return
 			if kept == 0 {
 				first = text
 			}
@@ -494,9 +492,9 @@ plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> (err: core
 		}
 	}
 	if !l.gone && !line_reads(p.doc, l, kept, first, moved) {
-		return {kind = .Bad_Width}, false
+		return refuse(p, {kind = .Bad_Width})
 	}
-	return {}, true
+	return true
 }
 
 // Returns the bytes cell `node` will hold.

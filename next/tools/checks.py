@@ -11,15 +11,15 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The library packages, and the order imports of them take. json and dsv share the last rank.
-PACKAGES = ["core/spell", "core", "core/kernel", "core/build", "json", "dsv"]
-RANK = {"core/spell": 0, "core": 1, "core/kernel": 2, "core/build": 3, "json": 4, "dsv": 4}
+PACKAGES = ["core/spell", "core", "core/kernel", "core/compose", "core/build", "core/typed", "json", "dsv"]
+RANK = {"core/spell": 0, "core": 1, "core/kernel": 2, "core/compose": 2, "core/build": 3, "core/typed": 4, "json": 5, "dsv": 5}
 FORMATS = {"json", "dsv"}
 
-LEAN_BUDGET = 15_300
+LEAN_BUDGET = 18_500
 
 # core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte
 # shuffle's.
-NEUTRAL = ["core/spell", "core", "core/build"]
+NEUTRAL = ["core/spell", "core", "core/compose", "core/build", "core/typed"]
 FORMAT_WORD = re.compile(r"(?<![a-z])(header|table|record|cell|delimiter)s?(?![a-z])")
 
 DECL = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(::|:=|:)")

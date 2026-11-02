@@ -27,8 +27,8 @@ scan_many :: proc(src: []u8, $S: Spec, paths: []core.Path, read := core.Path_Opt
 	}
 	opts := opts
 	h: engine.Scan
-	frames: [MAX_DEPTH]u64 = ---
-	if e := engine.scan_start(&h, src, &SPELLING, paths, read, false, allocator, max(MAX_DEPTH, int(opts.max_depth)), frames[:]); e.kind != .None {
+	frames: [core.MAX_DEPTH]u64 = ---
+	if e := engine.scan_start(&h, src, &SPELLING, paths, read, false, allocator, max(core.MAX_DEPTH, int(opts.max_depth)), frames[:]); e.kind != .None {
 		return {}, e
 	}
 	h.b.doc.read.spec = u8(S)
@@ -43,9 +43,9 @@ scan_many :: proc(src: []u8, $S: Spec, paths: []core.Path, read := core.Path_Opt
 		h.opts = &opts
 		h.rewalk = proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, _: core.Node_Index) {
 			src := h.b.doc.src
-			walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.many_hook)
+			walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.scan_hook_many)
 		}
-		hi, fault, stopped = walk_from(src, q, S, opts, &h, &regs, engine.many_hook)
+		hi, fault, stopped = walk_from(src, q, S, opts, &h, &regs, engine.scan_hook_many)
 	}
 	return scan_close(src, S, &h, regs, hi, fault, stopped)
 }
@@ -92,17 +92,17 @@ each_answer_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr,
 	}
 	opts := opts
 	h: engine.Scan
-	frames: [MAX_DEPTH]u64 = ---
-	if e := engine.scan_start(&h, src, &SPELLING, paths, read, false, allocator, max(MAX_DEPTH, int(opts.max_depth)), frames[:], true, state, on); e.kind != .None {
+	frames: [core.MAX_DEPTH]u64 = ---
+	if e := engine.scan_start(&h, src, &SPELLING, paths, read, false, allocator, max(core.MAX_DEPTH, int(opts.max_depth)), frames[:], true, state, on); e.kind != .None {
 		return e
 	}
 	h.opts = &opts
 	h.rewalk = proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, _: core.Node_Index) {
 		src := h.b.doc.src
-		walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.stream_hook)
+		walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.scan_hook_stream)
 	}
 	regs := engine.BUILDER_REGS
-	hi, fault, stopped := walk_from(src, q, S, opts, &h, &regs, engine.stream_hook)
+	hi, fault, stopped := walk_from(src, q, S, opts, &h, &regs, engine.scan_hook_stream)
 	doc, err := scan_close(src, S, &h, regs, hi, fault, stopped)
 	core.destroy(&doc)
 	return err
@@ -126,9 +126,6 @@ find :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, 
 	}
 	return
 }
-
-// Answers one path or several over a built document with the engine `scan` runs. `core.Answer`s name `doc`'s nodes.
-query :: engine.query
 
 // Writes `text` as the value at every answer of `path` over `src`, in one call: a build of the text, one edit per answer
 // and a commit. A `Name` the path ends in that its container lacks is inserted after the container's last member. The result

@@ -170,7 +170,7 @@ bound_holds :: proc(t: ^testing.T, src: string, $S: json.Spec, max_depth: u32 = 
 	count: build.Count
 	regs: core.Hook_Regs
 	json.walk(transmute([]u8)src, 0, S, {max_depth = max_depth}, &count, &regs, build.builder_hook_count)
-	bound := (len(src) + max(json.MAX_DEPTH, int(max_depth))) / 2 + 16
+	bound := (len(src) + max(core.MAX_DEPTH, int(max_depth))) / 2 + 16
 	testing.expectf(t, count.nodes <= bound, "%v %q: %d nodes, reservation %d", S, src[:min(len(src), 16)], count.nodes, bound)
 	doc, _ := json.build(transmute([]u8)src, S, {max_depth = max_depth})
 	core.destroy(&doc)
@@ -255,6 +255,6 @@ arena_tail_returns :: proc(t: ^testing.T) {
 	doc, err := json.build(transmute([]u8)src, .Json, {}, false, mem.arena_allocator(&arena))
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	stack := json.MAX_DEPTH * size_of(u64)
+	stack := core.MAX_DEPTH * size_of(u64)
 	testing.expectf(t, arena.offset <= stack + 64 + len(doc.nodes) * size_of(core.Node), "%d bytes held", arena.offset)
 }

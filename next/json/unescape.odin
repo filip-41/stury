@@ -448,29 +448,32 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index, opts: core.Res
 	return doc.nodes[i].kind
 }
 
-// JSON's `Spelling.number`, exported beside `text`. A pure integer of at most 19 digits folds here from the recorded
+// JSON's `Spelling.number`, exported beside `text`. An index past the last node is `.Wide`, as `core.number` answers. A pure integer of at most 19 digits folds here from the recorded
 // shape with no grammar search. Every other token, and a negative below `i64`, is passed to `number_slow`.
 number :: #force_inline proc(doc: ^core.Document, i: core.Node_Index) -> core.Number {
+	if int(i) >= len(doc.nodes) {
+		return {0, .Wide}
+	}
 	n := doc.nodes[i]
 	// Any kind but `.Number` is no number and returns `.Wide`.
 	if n.kind == .Number {
 		sp := n.spelling
 		// The walk's `spelling` holds the kind and the two digit counts. Each arm reads the fields it uses.
-		if sp & NUMBER_KIND_MASK <= u16(Number_Spelling.Decimal) {
+		if sp & core.NUMBER_KIND_MASK <= u16(Number_Spelling.Decimal) {
 			lo, hi := n.lo, n.lo + u64(n.n)
-			int_digits := int((sp >> NUMBER_INT_SHIFT) & 0x1f)
-			if sp & (NUMBER_FRAC_MASK | NUMBER_EXP) == 0 {
+			int_digits := int((sp >> core.NUMBER_INT_SHIFT) & 0x1f)
+			if sp & (core.NUMBER_FRAC_MASK | core.NUMBER_EXP) == 0 {
 				if int_digits <= 19 {
 					if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
 						return num
 					}
 				}
 			} else {
-				frac_digits := int((sp >> NUMBER_FRAC_SHIFT) & 0x1f)
-				if sp & NUMBER_EXP != 0 {
+				frac_digits := int((sp >> core.NUMBER_FRAC_SHIFT) & 0x1f)
+				if sp & core.NUMBER_EXP != 0 {
 					return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits)
 				}
-				// A set `NUMBER_FRAC_MASK` without `NUMBER_EXP` is a fraction of at least one digit.
+				// A set `core.NUMBER_FRAC_MASK` without `core.NUMBER_EXP` is a fraction of at least one digit.
 				// `number_fraction`'s first arm checks the point byte at `hi - frac_digits - 1` and folds both
 				// runs to their recorded lengths, without testing that the bytes are digits, since the walk
 				// recorded them from this span. A saturated count records 31, so `int_digits + frac_digits`

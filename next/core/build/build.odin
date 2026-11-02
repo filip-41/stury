@@ -21,7 +21,7 @@ Builder :: struct {
 	// The byte just past the root value's authored bytes, which a format's `build` sets from the walk's end before
 	// `builder_end` copies it to `Document.root_close`. A format whose walk may end past the root leaves it 0.
 	root_close: u64,
-	// The first container whose close saturated `core.CHILDREN_MAX`, with its true child count, and whether a second
+	// The first container whose close saturated `core.MAX_CHILDREN`, with its true child count, and whether a second
 	// container did. `wide_count` is 0 while none has.
 	wide_node:  core.Node_Index,
 	wide_count: u32,
@@ -394,16 +394,16 @@ builder_refuse_open :: proc "contextless" (h: ^Builder, regs: core.Hook_Regs) {
 }
 
 // Writes the subtree size of the container at `open` into its `n` and its child count into `spelling` at its close.
-// No close node is stored. A count at or past `CHILDREN_MAX` saturates `spelling` and keeps the true count in
+// No close node is stored. A count at or past `MAX_CHILDREN` saturates `spelling` and keeps the true count in
 // `Builder.wide_node` and `Builder.wide_count`, or marks a second such container in `Builder.wide_more`.
 builder_close_node :: #force_inline proc "contextless" (h: ^Builder, a: int, open: core.Node_Index, count: u32) {
 	#no_bounds_check {
 		n := &h.doc.nodes[int(open)]
 		n.n = u32(a - int(open))
-		if count < u32(core.CHILDREN_MAX) {
+		if count < u32(core.MAX_CHILDREN) {
 			n.spelling = u16(count)
 		} else {
-			n.spelling = core.CHILDREN_MAX
+			n.spelling = core.MAX_CHILDREN
 			if h.wide_count == 0 {
 				h.wide_node = open
 				h.wide_count = count
@@ -414,7 +414,7 @@ builder_close_node :: #force_inline proc "contextless" (h: ^Builder, a: int, ope
 	}
 }
 
-// Records the true child count of every container whose `spelling` saturated `CHILDREN_MAX`, by walking its members
+// Records the true child count of every container whose `spelling` saturated `MAX_CHILDREN`, by walking its members
 // in node order. Returns false when an allocation is refused.
 @(private, cold)
 builder_counts :: #force_no_inline proc(h: ^Builder, n: int) -> bool {
@@ -422,7 +422,7 @@ builder_counts :: #force_no_inline proc(h: ^Builder, n: int) -> bool {
 	k := h.n_counts
 	for i in 0 ..< n {
 		node := h.doc.nodes[i]
-		if node.spelling != core.CHILDREN_MAX || node.role == .Partial || (node.kind != .Array && node.kind != .Map) {
+		if node.spelling != core.MAX_CHILDREN || node.role == .Partial || (node.kind != .Array && node.kind != .Map) {
 			continue
 		}
 		count := 0
@@ -639,7 +639,7 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open,
 					if owned != nil {
 						delete(owned, allocator)
 					}
-					return {kind = .Duplicate_Key, at = core.key_start(n)}
+					return {kind = .Duplicate_Key, at = core.node_start(n)}
 				}
 			}
 			at = (at + 1) & mask

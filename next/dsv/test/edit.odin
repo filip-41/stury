@@ -825,3 +825,30 @@ edit_append_after_removed_last :: proc(t: ^testing.T) {
 	b, ok := core.fact_next(&it)
 	testing.expectf(t, ok && string(b) == "f", "foot: %q %v", b, ok)
 }
+
+// A cell a list both sets and removes is a conflict at the cell, in either order of the list, though the removal alone
+// would leave a one-cell line empty.
+@(test)
+set_and_remove_of_a_cell :: proc(t: ^testing.T) {
+	for text in ([]string{"z", ""}) {
+		for set_first in ([]bool{true, false}) {
+			src := "a\n1\n2\n"
+			doc, err := dsv.build(transmute([]u8)src, .Csv)
+			defer core.destroy(&doc)
+			testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+			list := core.edit_list_init(&doc)
+			defer core.edit_list_destroy(&list)
+			cell := core.Node_Index(4)
+			if set_first {
+				testing.expect_value(t, core.set(&list, cell, text).kind, core.Document_Error_Kind.None)
+			}
+			testing.expect_value(t, core.remove(&list, cell).kind, core.Document_Error_Kind.None)
+			if !set_first {
+				testing.expect_value(t, core.set(&list, cell, text).kind, core.Document_Error_Kind.None)
+			}
+			out, _, e := core.commit(&list)
+			delete(out)
+			testing.expectf(t, e.kind == .Conflicting_Edits && e.at == 2, "%q set first %v: %v", text, set_first, e)
+		}
+	}
+}

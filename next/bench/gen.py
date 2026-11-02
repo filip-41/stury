@@ -222,6 +222,47 @@ def gen_table_csv(target: int, delimiter: str = ",") -> bytes:
     return _check_csv(data, delimiter, csv.QUOTE_NONE if delimiter == "\t" else csv.QUOTE_MINIMAL, 9)
 
 
+_CSV_FIRST = ["Ada", "Boris", "Chen", "Dalia", "Emre", "Farah", "Goran", "Hana", "Ivo", "Jun", "Zoë",
+              "Łukasz", "Søren", "Amélie", "Renée"]
+_CSV_LAST = ["Nowak", "Okafor", "Lindqvist", "Tanaka", "Müller", "Haddad", "Silva", "Kowalski", "Dubois",
+             "O'Neil", "Petrov", "Ngu"]
+_CSV_CITIES = ["Oslo", "Lagos", "Kraków", "Osaka", "Lima", "Washington, DC", "St. John's", "Zürich", "Hanoi",
+               "Perth", "Quito", "Reykjavík"]
+_CSV_WORDS = ["the", "quick", "ledger", "closes", "on", "friday", "after", "audit", "review", "of", "returns",
+              "and", "refunds", "pending", "carrier", "dispute", "escalated", "to", "billing", "team"]
+
+
+def _csv_cell(s: str, delimiter: str = ",") -> str:
+    """Quotes S, per RFC 4180's minimal quoting, only when it contains the delimiter, a quote, CR or LF."""
+    if delimiter in s or any(c in s for c in '"\r\n'):
+        return '"' + s.replace('"', '""') + '"'
+    return s
+
+
+def gen_text_csv(target: int) -> bytes:
+    """Returns a text table with quoting: UTF-8 names, cities containing a comma, and a free-text column quoted when
+    it contains a comma (1 row in 3), a doubled quote (1 in 4) or an LF (1 in 12)."""
+    rng = _Lcg(0xC5F0002)
+    out = ["id,name,city,quote,note\n"]
+    size, i = len(out[0]), 0
+    while size < target:
+        words = [rng.pick(_CSV_WORDS) for _ in range(4 + rng.below(10))]
+        if rng.below(3) == 0:
+            words[1] += ","
+        if rng.below(4) == 0:
+            words[2] = '"%s"' % words[2]
+        if rng.below(12) == 0:
+            words[3] += "\n"
+        row = ",".join([
+            str(i), _csv_cell(rng.pick(_CSV_FIRST) + " " + rng.pick(_CSV_LAST)), _csv_cell(rng.pick(_CSV_CITIES)),
+            _csv_cell(" ".join(words)), _csv_cell("n%d%s" % (rng.below(100000), ", ok" if rng.below(6) == 0 else ""))
+        ]) + "\n"
+        out.append(row)
+        size += len(row.encode())
+        i += 1
+    return _check_csv("".join(out).encode("utf-8"), ",", csv.QUOTE_MINIMAL, 5)
+
+
 def gen_wide_csv(target: int) -> bytes:
     """Returns a 200-column table (~1.2 KB a row) of integers, with every fifth column a 2-decimal number."""
     rng = _Lcg(0xC5F0003)
@@ -459,6 +500,7 @@ FIXTURES = {
     "logs.json5": (gen_logs_dialect, [8 * MIB, True]),
     "pretty.json": (gen_pretty_json, [8 * MIB]),
     "table.csv": (gen_table_csv, [16 * MIB]),
+    "text.csv": (gen_text_csv, [16 * MIB]),
     "wide.csv": (gen_wide_csv, [8 * MIB]),
     "table.tsv": (gen_table_csv, [8 * MIB, "\t"]),
     "deep.json": (gen_deep_json, [8 * MIB]),

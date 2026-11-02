@@ -19,6 +19,7 @@ make fixtures
 ```sh
 make bench-doc
 make bench-paths   # the path lanes, with the peers bench-doc built
+make bench-typed   # the typed read's lanes
 ```
 
 That builds the probe at `-o:speed` into `build/bench/doc`, builds the peers whose compiler and sources are
@@ -51,3 +52,9 @@ The GB/s table gives the best round of each arm's median; the RSS MiB table give
 child's kernel-tracked peak RSS, from `wait4`.
 
 The peers run only on plain `.json`. Any other fixture is timed for `next` alone.
+
+## Typed lanes
+
+`bench/typed` reads `logs.json`, `twitter.json`, `citm_catalog.json`, `table.csv` and `text.csv` into their own struct
+types, in an arena, with strings borrowed and with strings copied. `bench/typed.py` prints each lane's median GB/s, the best of `ROUNDS` rounds,
+beside the old tree's probe, which `compare/typed_oracle/build.sh` builds, each string mode a program of its own.

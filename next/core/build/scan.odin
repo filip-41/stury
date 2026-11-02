@@ -141,7 +141,7 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 	for step, i in path.steps {
 		bit := u64(1) << uint(i)
 		switch s in step {
-		case core.Name, core.Either:
+		case core.Name, core.Index_Or_Name:
 			if h.every_key {
 				x.multi = min(x.multi, i)
 			} else if h.last {
@@ -150,7 +150,7 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 				// A key past a `Descend` can repeat in any container, so nothing is known before the root closes.
 				h.flush = min(h.flush, i) if x.descend < 0 else -1
 			}
-			if _, either := s.(core.Either); either {
+			if _, either := s.(core.Index_Or_Name); either {
 				x.indexed |= bit
 			} else if name := s.(core.Name); raw_data(string(name)) == nil {
 				return {kind = .Bad_Path}
@@ -199,7 +199,7 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 }
 
 // Starts a scan of `paths` over `src`. `depth` is as in `builder_start`, `frames` is the caller's room for that stack,
-// which `depth` may outgrow, and a format's `scan` runs its walk with `scan_hook`, or `many_hook` when `Scan.many` is
+// which `depth` may outgrow, and a format's `scan` runs its walk with `scan_hook`, or `scan_hook_many` when `Scan.many` is
 // set, and ends it with `scan_end`. `many` asks for `$MANY`.
 scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error {
 	e := scan_plan(h, paths, read, depth, many, allocator)
@@ -289,6 +289,7 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 
 // Copies a read's lists, and the names in `missing`, into one block `doc` owns, so only `src` outlives the read. Returns
 // false when the allocation is refused.
+@(private)
 attach_reads :: proc(doc: ^core.Document, answers: []core.Answer, kept: []core.Kept_Child, missing: []core.Missing_Name) -> bool {
 	a := len(answers) * size_of(core.Answer)
 	k := a + len(kept) * size_of(core.Kept_Child)
@@ -320,15 +321,8 @@ attach_reads :: proc(doc: ^core.Document, answers: []core.Answer, kept: []core.K
 	return true
 }
 
-// Answers `path` over a document built whole, in the order a scan of its text answers, and allocates nothing but the
-// list, which the caller frees with `delete(answers, allocator)`. A partial document cannot say what it does not hold,
-// so it is `.Unsupported`. An `Answer`'s nodes are `doc`'s.
-query_one :: proc(doc: ^core.Document, path: core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
-	return query_many(doc, []core.Path{path}, read, allocator)
-}
-
-// Answers `paths` over a document built whole, as `query_one`, each answer tagged with its path's number.
-query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
+// The query `Spelling.query` points at, behind `core.query`.
+query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
 	if doc.partial {
 		return nil, {kind = .Unsupported}
 	}
@@ -366,8 +360,6 @@ query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_O
 	return h.answers[:h.n_answers], {}
 }
 
-query :: proc {query_one, query_many}
-
 // Writes `text` as the value at every answer of `path` over the built `doc`, and returns the new text. A `Name` the path ends
 // in that its container lacks is inserted there. Any other answer that is no value, a mismatch or a missing position or
 // parent, is `.Bad_Index`.
@@ -386,7 +378,7 @@ set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := 
 			read_path.steps = path.steps[:n - 1]
 		}
 	}
-	answers, qerr := query_one(doc, read_path, read, allocator)
+	answers, qerr := query(doc, []core.Path{read_path}, read, allocator)
 	defer delete(answers, allocator)
 	if qerr.kind != .None {
 		return nil, {kind = .Path, path = qerr}
@@ -416,7 +408,7 @@ set_named :: proc(list: ^core.Edit_List, obj: core.Node_Index, name, text: strin
 		return core.set_member(list, obj, name, text, read.dups.? or_else .Last)
 	}
 	found := false
-	it := core.member_all(list.doc, obj, name)
+	it := core.members_named(list.doc, obj, name)
 	for v in core.member_next(&it) {
 		found = true
 		if e := core.set(list, v, text); e.kind != .None {
@@ -438,7 +430,7 @@ query_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []co
 	if built.kind != .None {
 		return {}, core.path_error(built)
 	}
-	answers, e := query_many(doc, paths, {read.dups, read.every_key}, doc.allocator)
+	answers, e := query(doc, paths, {read.dups, read.every_key}, doc.allocator)
 	if e.kind == .None {
 		defer delete(answers, doc.allocator)
 		if attach_reads(doc, answers, nil, nil) {
@@ -450,62 +442,34 @@ query_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []co
 	return {}, e
 }
 
-// Feeds the step logic the tokens of nodes `from ..< to` as the walk gave them: each close comes back from a stack of
-// container ends, and each key of a headed record from `doc.shared_keys`, and a `Skip` steps over the value's subtree.
-// Only the containers on the path open, so `ends` holds a frame per step, or one per depth with a `Descend`.
+// Feeds the step logic the tokens of nodes `from ..< to` by `feed_nodes`. Only the containers on the path open, so `ends`
+// holds a frame per step, or one per depth with a `Descend`.
 @(private)
 replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.Hook_Regs, ends: []u32) {
-	doc := &h.b.doc
-	regs := out^
-	defer out^ = regs
-	depth := 0
-	i := from
-	action: core.Action
-	for {
-		for depth > 0 && i >= ends[depth - 1] {
-			depth -= 1
-			regs, action = scan_step(MANY, .Replay, h, regs, core.Token{kind = .End, lo = u64(ends[depth]) - 1})
-			if action == .Stop {
-				return
-			}
-		}
-		if i >= to {
-			return
-		}
-		t := doc.nodes[i]
-		// The header row is the root's first child, and the walk gives its cells as each record's keys.
-		if t.role == .Key && t.kind == .Array {
-			i += t.n
-			continue
-		}
-		if doc.shared_keys != 0 && depth > 0 && doc.nodes[regs.b >> 32].kind == .Map {
-			h.at = doc.shared_keys + 1 + core.Node_Index(u32(regs.b))
-			regs, action = scan_step(MANY, .Replay, h, regs, doc.nodes[h.at])
-			if action == .Skip {
-				i += t.n if t.kind > .Plain else 1
-				continue
-			}
-		}
-		h.at = core.Node_Index(i)
-		regs, action = scan_step(MANY, .Replay, h, regs, t)
-		switch action {
-		case .Stop:
-			return
-		case .Skip:
-			// A key passed over takes its value with it.
-			if t.role == .Key {
-				i += 1
-				t = doc.nodes[i]
-			}
-			i += t.n if t.kind > .Plain else 1
-		case .Next, .Keep:
-			if t.kind > .Plain {
-				ends[depth] = i + t.n
-				depth += 1
-			}
-			i += 1
-		}
+	when MANY {
+		feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_many, replay_keyed, false)
+	} else {
+		feed_nodes(&h.b.doc, from, to, h, out, ends, replay_step_one, replay_keyed, false)
 	}
+}
+
+@(private)
+replay_step_one :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
+	h.at = at
+	return scan_step(false, .Replay, h, s, t)
+}
+
+@(private)
+replay_step_many :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
+	h.at = at
+	return scan_step(true, .Replay, h, s, t)
+}
+
+// The key of the value the registers stand at, when the open container is a headed record: its children so far name it.
+@(private)
+replay_keyed :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, _, _: core.Node_Index) -> (core.Node_Index, bool) {
+	doc := &h.b.doc
+	return doc.shared_keys + 1 + core.Node_Index(u32(s.b)), doc.nodes[s.b >> 32].kind == .Map
 }
 
 // The hook a format's `scan` gives its walk.
@@ -741,7 +705,7 @@ scan_pick :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Sca
 		if keyed {
 			return scan_name(MANY, SINK, h, s, t, f, path, p, k, d, string(x))
 		}
-	case core.Either:
+	case core.Index_Or_Name:
 		if keyed {
 			return scan_name(MANY, SINK, h, s, t, f, path, p, k, d, x.name)
 		}
@@ -1072,7 +1036,7 @@ scan_enters :: #force_inline proc "contextless" (h: ^Scan, path: ^Scan_Path, k: 
 		return kind == .Map
 	case core.Index, core.Slice:
 		return kind == .Array || kind == .Map && h.positional
-	case core.All, core.Either, core.Descend:
+	case core.All, core.Index_Or_Name, core.Descend:
 		return kind == .Array || kind == .Map
 	}
 	return false
@@ -1089,7 +1053,7 @@ scan_missed :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^S
 		miss, named, name = !seen, true, string(x)
 	case core.Index:
 		miss = int(x) >= count || count + int(x) < 0
-	case core.Either:
+	case core.Index_Or_Name:
 		when MANY {
 			named = f.is_map
 		} else {
@@ -1162,7 +1126,7 @@ scan_partial :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, s
 	#no_bounds_check {
 		n := &h.b.doc.nodes[open]
 		n.n = u32(int(s.a) - int(open))
-		n.spelling = core.CHILDREN_MAX
+		n.spelling = core.MAX_CHILDREN
 		n.role = .Partial
 		h.b.doc.counts_alloc[slot].count = u32(s.b)
 	}

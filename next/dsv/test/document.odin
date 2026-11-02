@@ -589,13 +589,13 @@ read_does_not_allocate :: proc(t: ^testing.T) {
 	testing.expect_value(t, arena.offset, before)
 }
 
-// Every spec's spelling table has the five read services and an edit table with `root_junction`, `reads` and `interior`.
+// Every spec's spelling table has the five read services and an edit table that is flat, with `commit`, `reads` and `interior`.
 @(test)
 spelling_complete :: proc(t: ^testing.T) {
 	check :: proc(t: ^testing.T, doc: ^core.Document) {
 		s := doc.spelling
 		testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.resolve != nil && s.close_end != nil)
-		testing.expect(t, s.edit != nil && s.edit.root_junction != nil && s.edit.reads != nil && s.edit.interior != nil)
+		testing.expect(t, s.edit != nil && s.edit.flat && s.edit.commit != nil && s.edit.reads != nil && s.edit.interior != nil)
 	}
 	a, ea := build("a\n", .Csv)
 	defer core.destroy(&a)
@@ -689,7 +689,7 @@ empty_and_ragged_header_cells :: proc(t: ^testing.T) {
 	testing.expect_value(t, v, rec + 2)
 	_, ok = core.member(&doc, rec, "c")
 	testing.expect(t, !ok)
-	it := core.member_all(&doc, rec, "c")
+	it := core.members_named(&doc, rec, "c")
 	_, ok = core.member_next(&it)
 	testing.expect(t, !ok)
 	testing.expect_value(t, string(core.span(&doc, rec)), "1,2\n")
@@ -702,7 +702,7 @@ empty_and_ragged_header_cells :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 }
 
-// Duplicate header names: `.First` returns the first column, `.Last` the last, with `member_all` returning both.
+// Duplicate header names: `.First` returns the first column, `.Last` the last, with `members_named` returning both.
 @(test)
 duplicate_header_modes :: proc(t: ^testing.T) {
 	doc, err := build("a,a\n1,2\n", .Csv)
@@ -715,7 +715,7 @@ duplicate_header_modes :: proc(t: ^testing.T) {
 	v, ok = core.member(&doc, rec, "a", .Last)
 	testing.expect(t, ok)
 	testing.expect_value(t, v, rec + 2)
-	it := core.member_all(&doc, rec, "a")
+	it := core.members_named(&doc, rec, "a")
 	got: [4]core.Node_Index
 	n := 0
 	for {
@@ -800,7 +800,7 @@ plain_quoted_keys :: proc(t: ^testing.T) {
 	testing.expect(t, ok2)
 	s, _ = core.text(&doc, v2, nil)
 	testing.expect_value(t, s, "2")
-	it := core.member_all(&doc, rec, "q")
+	it := core.members_named(&doc, rec, "q")
 	n := 0
 	for {
 		_, more := core.member_next(&it)
@@ -1004,12 +1004,10 @@ readers_and_commit :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	testing.expect_value(t, core.set(&list, cell, "z").kind, core.Document_Error_Kind.None)
-	out, _, cerr := dsv.commit(&list, .Tsv)
+	out, _, cerr := core.commit(&list)
 	testing.expectf(t, cerr.kind == .None && string(out) == "a\nz\n", "commit: %v %q", cerr, out)
 	delete(out)
-	_, _, bad := dsv.commit(&list, .Csv)
-	testing.expect_value(t, bad.kind, core.Document_Error_Kind.Bad_Spec)
-	_, _, bad = core.commit_as(&list, u8(dsv.Spec.Csv))
+	_, _, bad := doc.spelling.edit.commit(&list, u8(dsv.Spec.Csv), context.allocator)
 	testing.expect_value(t, bad.kind, core.Document_Error_Kind.Bad_Spec)
 }
 

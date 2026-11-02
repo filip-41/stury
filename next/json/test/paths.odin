@@ -130,8 +130,8 @@ parse_pointer_steps :: proc(t: ^testing.T) {
 		{"/", {core.Name("")}},
 		{"/a/b", {core.Name("a"), core.Name("b")}},
 		{"/a~1b/m~0n", {core.Name("a/b"), core.Name("m~n")}},
-		{"/0", {core.Either{"0", 0}}},
-		{"/12/a", {core.Either{"12", 12}, core.Name("a")}},
+		{"/0", {core.Index_Or_Name{"0", 0}}},
+		{"/12/a", {core.Index_Or_Name{"12", 12}, core.Name("a")}},
 		{"/01", {core.Name("01")}},
 		{"/-", {core.Name("-")}},
 		{"/99999999999999999999", {core.Name("99999999999999999999")}},
@@ -253,7 +253,7 @@ path_reads :: proc(t: ^testing.T) {
 		full, berr := json.build(transmute([]u8)c.src, .Json)
 		defer core.destroy(&full)
 		testing.expect_value(t, berr.kind, core.Document_Error_Kind.None)
-		answers, qerr := json.query(&full, path, {dups = c.opts.dups, every_key = c.opts.every_key})
+		answers, qerr := core.query(&full, path, {dups = c.opts.dups, every_key = c.opts.every_key})
 		defer delete(answers)
 		testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
 		check_answers(t, c, &full, answers, "query")
@@ -521,7 +521,7 @@ path_refusals :: proc(t: ^testing.T) {
 	defer core.path_destroy(&path)
 	doc, _ := json.scan(src, .Json, path)
 	defer core.destroy(&doc)
-	_, e := json.query(&doc, path)
+	_, e := core.query(&doc, path)
 	testing.expect_value(t, e.kind, core.Path_Error_Kind.Unsupported)
 }
 

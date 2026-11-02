@@ -431,7 +431,7 @@ fact_spec_change_refused :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	out, _, err := core.commit_as(&list, u8(dsv.Spec.Tsv))
+	out, _, err := doc.spelling.edit.commit(&list, u8(dsv.Spec.Tsv), context.allocator)
 	defer if len(out) > 0 {
 		delete(out)
 	}

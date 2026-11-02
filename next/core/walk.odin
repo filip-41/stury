@@ -2,7 +2,8 @@ package core
 
 // The types shared by every format's walk: tokens, the hook interface and the fault result.
 
-// The deepest nesting a walk reads unless its options say more.
+// The deepest nesting a walk reads unless its options say more. An open bracket past the limit faults `Too_Deep` at that
+// bracket.
 MAX_DEPTH :: 1024
 
 // `Kind` names what a token is: `Array` and `Map` open a container, `End` closes the innermost one, and the other
@@ -74,6 +75,16 @@ Action :: enum u8 {
 // Anything a pointer reaches stays in the hook's state.
 Hook_Regs :: struct {
 	a, b, c: u64,
+}
+
+// The key a hook expects next, the first member of the records `Hook_Regs.b` walks through when the hook has a field
+// `expect` of a pointer to such a record. `word` holds the first 16 of the key's bytes as written, open quote through
+// colon, `mask` the bytes of `word` that count, `rest` those past the 16th, and `n` their number. A record no key
+// matches has a mask that covers an all-zero word, since a key's first byte is a quote.
+Expected_Key :: struct {
+	word, mask: [2]u64,
+	rest:       [^]u8,
+	n:          u32,
 }
 
 // Returns `lo`, or 3 when `lo` is 0 and `src` starts with a UTF-8 byte order mark.

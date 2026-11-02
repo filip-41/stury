@@ -22,50 +22,25 @@ Number_Spelling :: enum u16 {
 	Nan      = 8,
 }
 
-// A number token's `spelling` holds these fields. Every kind value is even, so bit 0 (`SPELLING_DECODE`) is always
-// clear.
-//
-//	bits 0 to 3   the `Number_Spelling`, whose values are 0, 2, 4, 6 and 8
-//	bits 4 to 8   the integer digit count (saturated at 31)
-//	bits 9 to 13  the fraction digit count (saturated at 31, 0 for no fraction)
-//	bit 14        `NUMBER_EXP`
-//
-// A pure integer is a decimal with no fraction and no exponent. The reader folds the significand without lexing the
-// span.
-@(private)
-NUMBER_KIND_MASK :: u16(0xF)
-@(private)
-NUMBER_INT_SHIFT :: 4
-@(private)
-NUMBER_FRAC_SHIFT :: 9
-@(private)
-NUMBER_FRAC_MAX :: 31
-@(private)
-NUMBER_FRAC_MASK :: u16(NUMBER_FRAC_MAX) << NUMBER_FRAC_SHIFT
-@(private)
-NUMBER_EXP :: u16(1 << 14)
-@(private)
-NUMBER_DIGITS_MAX :: 31
-
 // Returns the `Number_Spelling` in a token's `spelling`, for a test or a consumer that reads the detail.
 number_spelling_of :: #force_inline proc "contextless" (spelling: u16) -> Number_Spelling {
-	return Number_Spelling(spelling & NUMBER_KIND_MASK)
+	return Number_Spelling(spelling & core.NUMBER_KIND_MASK)
 }
 
 // Builds the `spelling` of a decimal token from its kind and its integer and fraction digit counts. A pure integer
 // has a zero fraction count and no `NUMBER_EXP`.
 @(private)
 number_spelling :: #force_inline proc "contextless" (kind: Number_Spelling, int_digits, frac_digits: u64) -> u16 {
-	n := u16(min(int_digits, u64(NUMBER_DIGITS_MAX)))
-	f := u16(min(frac_digits, u64(NUMBER_FRAC_MAX))) << NUMBER_FRAC_SHIFT
-	return u16(kind) | n << NUMBER_INT_SHIFT | f
+	n := u16(min(int_digits, u64(core.NUMBER_DIGITS_MAX)))
+	f := u16(min(frac_digits, u64(core.NUMBER_FRAC_MAX))) << core.NUMBER_FRAC_SHIFT
+	return u16(kind) | n << core.NUMBER_INT_SHIFT | f
 }
 
 // Returns `number_spelling` plus `NUMBER_EXP`, from the walk's counts, without scanning the span again. Cold, since
 // only a token with an `e` reaches it.
 @(private, cold)
 number_spelling_exp :: #force_no_inline proc "contextless" (kind: Number_Spelling, int_digits, frac_digits: u64) -> u16 {
-	return number_spelling(kind, int_digits, frac_digits) | NUMBER_EXP
+	return number_spelling(kind, int_digits, frac_digits) | core.NUMBER_EXP
 }
 
 // Calls `number5` with `$shape` true for a hook and false for `core.No_Hooks`.

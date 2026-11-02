@@ -22,7 +22,7 @@ contract: what a path is, what a read gives, how the one engine works, and how a
 | `All` | `.[]` | every member or element |
 | `Slice` | `.[2:5]` | a run of elements, one answer each, its ends clamped and each negative from the end |
 | `Descend` | `..` | the value and everything under it, one to a path |
-| `Either` | JSON Pointer's `/0` | a member of a map named by the token, an element of an array by its number |
+| `Index_Or_Name` | JSON Pointer's `/0` | a member of a map named by the token, an element of an array by its number |
 
 - `?` may follow any step. It drops a `Type_Mismatch` answer, as jq's empty does, and leaves `Missing` as it is. The
   mismatch of a `null` or an absent value with a `[]` still to come is that `[]`'s, so that `[]`'s `?` drops it.
@@ -80,14 +80,14 @@ An `Answer` is a read result and holds no edit state. An edit names a node, and 
 A scan and a query are one operation. Reading paths gives a `Document` that holds only the nodes the paths reach, plus
 the answers, and a full build is the same read with every node kept.
 
-The entries of `json`, and of `dsv` with `dsv.Spec` and `dsv.Options`. `scan`, `each_answer` and `query` are overload
+The entries of `json`, and of `dsv` with `dsv.Spec` and `dsv.Options`, and `core.query` for both. `scan`, `each_answer` and `query` are overload
 groups of a one-path form and a `[]core.Path` form, and the read options come straight after the paths.
 
 ```odin
 scan        :: proc(src: []u8, $S: Spec, paths: core.Path | []core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, err: core.Path_Error)
 find        :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error)
 each_answer :: proc(src: []u8, $S: Spec, paths: core.Path | []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> core.Path_Error
-query       :: proc(doc: ^core.Document, paths: core.Path | []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error)
+core.query  :: proc(doc: ^core.Document, paths: core.Path | []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error)
 set         :: proc(src: []u8, $S: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error)
 ```
 
@@ -189,7 +189,7 @@ A container whose children were not all kept has the role `Partial` in place of 
 token's, and sorts last in `Role`, so the numbers the walk's tokens carry stay as they are.
 
 A container's true child count comes from the walk and goes in a table keyed by node, which `Document.counts` already
-is for a count past `CHILDREN_MAX`. On a `Partial` container:
+is for a count past `MAX_CHILDREN`. On a `Partial` container:
 
 | Read | Gives |
 |---|---|
@@ -228,7 +228,7 @@ hook sees `Map`, `Array`, `Key` and value tokens and returns `Next`, `Skip` or `
 
 - Its state per depth is which step of which path is armed there. `core/build/scan.odin` writes the step logic once, as
   `scan_step($MANY, $SINK, ...)`. `$MANY` false compiles it down to one plain path, of `Name`, `Index` from 0, `All` and
-  `Either`, at step `d - 1`: a step number and a depth, two registers. Several paths, and any path with a step or an option
+  `Index_Or_Name`, at step `d - 1`: a step number and a depth, two registers. Several paths, and any path with a step or an option
   that form has no state for, run it with `$MANY` true, and `core/build/many.odin` holds what only they need: one `u64`
   bit set of armed paths per depth, a `u64` of steps per depth for a `Descend` path, which can be at several steps of a
   container at once, the rings of negative indexes, the answers placed in text order and the stream. A plain path pays
@@ -246,26 +246,27 @@ hook sees `Map`, `Array`, `Key` and value tokens and returns `Next`, `Skip` or `
 
 The step logic runs on two token sources: the walk's during a scan, and a document's during a query. `doc.nodes` is not
 the walk's token stream: it holds no `End` node, a headed dsv record's `Key` tokens live in `doc.shared_keys`, and a
-container's `n` and `spelling` are rewritten at its close. A replay in core feeds the step logic from a document,
-restoring each `End` with a stack and each dsv key from `doc.shared_keys`.
+container's `n` and `spelling` are rewritten at its close. `build.feed_nodes` feeds a hook from a document, restoring each
+`End` with a stack and each dsv key from `doc.shared_keys`. The step logic is one hook of it, and the typed read of an
+answer another (see `docs/typed.md`): a caller reads an answer's value with `typed.unmarshal(&doc, answer, ...)`.
 
 A query over a full document, a scan of the text and a value-tree model give the same answers in the same order.
 
 ## What a format calls
 
-A format's `scan`, `each_answer` and `query` are thin entries over `core/build`. It gives the engine its walk and its
-`Spelling`, and writes no step logic.
+A format's `scan` and `each_answer` are thin entries over `core/build`, and `core.query` reaches the engine through the
+format's table. A format gives the engine its walk and its `Spelling`, and writes no step logic.
 
 | Name | Does |
 |---|---|
 | `scan_start` | plans the read's paths into a `Scan`, on `frames` the entry holds on its stack, and takes `positional` for a format whose `Map` members answer an `Index` |
-| `scan_hook`, `many_hook`, `stream_hook` | the hooks the entry passes its walk: one plain path, `Scan.many` into a document, and `each_answer` |
+| `scan_hook`, `scan_hook_many`, `scan_hook_stream` | the hooks the entry passes its walk: one plain path, `Scan.many` into a document, and `each_answer` |
 | `Rewalk`, `Scan.rewalk` | walks one value again from its first byte, for a ring's element, since only a format can walk from a value |
 | `scan_end` | turns the walk's end into the document and its answers, and frees everything on an error |
 | `query`, `query_built` | answers paths over a built document, the second for a read with `refuse_duplicates` |
 | `set_answers` | one edit per answer and a commit, behind `set` |
 
-`scan_reserve`, `scan_kept` and `attach_reads` are the engine's own, public since the hooks inline into a format's
+`scan_reserve` and `scan_kept` are the engine's own, public since the hooks inline into a format's
 walk.
 
 ## Errors
