@@ -1,10 +1,7 @@
 # Path queries
 
 A path is a chain of steps from a value, and reading one gives an answer per value it reaches. This file is the layer's
-contract: what a path is, what a read gives, how the one engine works, and how an answer gets a container's end. One
-path through `Name`, `Index` from 0 and `All` reads today, with `find`, `query` and `query_document`. A step or a read
-this file names past those parses where it has a spelling and gives `Unsupported`: several paths, `each_answer`,
-negative indexes, `Slice`, `Descend` and `?`.
+contract: what a path is, what a read gives, how the one engine works, and how an answer gets a container's end.
 
 ## Vocabulary
 
@@ -23,13 +20,17 @@ negative indexes, `Slice`, `Descend` and `?`.
 | `Name` | `.a`, `."a-b"`, `.["a-b"]` | a member by its decoded key, so an escaped key matches its literal text |
 | `Index` | `.[0]`, `.[-1]` | an element, negative from the end |
 | `All` | `.[]` | every member or element |
-| `Slice` | `.[2:5]` | a run of elements |
-| `Descend` | `..` | the value and everything under it |
+| `Slice` | `.[2:5]` | a run of elements, one answer each, its ends clamped and each negative from the end |
+| `Descend` | `..` | the value and everything under it, one to a path |
 | `Either` | JSON Pointer's `/0` | a member of a map named by the token, an element of an array by its number |
 
-- `?` may follow any step. It drops a `Type_Mismatch` answer, as jq's empty does, and leaves `Missing` as it is.
+- `?` may follow any step. It drops a `Type_Mismatch` answer, as jq's empty does, and leaves `Missing` as it is. The
+  mismatch of a `null` or an absent value with a `[]` still to come is that `[]`'s, so that `[]`'s `?` drops it.
 - Three spellings parse to one `Path`: jq text, RFC 6901 JSON Pointer, and Odin step literals, such as
   `{Name("a"), Index(-1), All{}}`. Every parse error has a byte offset in the text.
+- `Slice` reads an array or a dsv record as `Index` does: on a `null` it is `Missing`, and on anything else a
+  `Type_Mismatch`. Strings are not slices.
+- A path holds one `Descend`, and a second is `Bad_Path`. jq's text spells it first only.
 - `first(P)` and `limit(N; P)` wrap a path in its text. They count answers and give no more after the Nth.
 - A parsed path owns its steps and decoded names in one block from an allocator, and a name with no escape borrows the
   text. A document's `Missing` names borrow the path, so the path and its text outlive the document it read.
@@ -79,12 +80,19 @@ the answers, and a full build is the same read with every node kept.
 |---|---|
 | `query` | a document and its answers, in text order |
 | `find(src, path)` | `query` of one path with a limit of one |
-| `query_document(doc, path)` | the answers over a built document, naming its nodes |
-| `each_answer(src, paths, ctx, on)` | no document: `on` gets each answer's path number, outcome and token |
+| `query_document(doc, paths)` | the answers over a built document, naming its nodes |
+| `each_answer(src, paths, state, on)` | no document: `on` gets each answer's path number, outcome, token and end |
 
-`on` keeps nothing and returns whether to go on. `each_answer` calls it as each answer becomes known, which under
-`.Last` can differ from text order with several paths: on `{"a":1,"y":{"b":2}}`, `.y.b` is known when `y` closes, and
-`.a` when the root closes. A found container's value is its authored span.
+`query` and `query_document` take one path or a slice of them. With several, each path answers what it answers alone,
+and the answers are in one text order, the earlier path first at one byte.
+
+`on` keeps nothing and returns whether to go on. `each_answer` calls it as each answer becomes known, in the order they
+become known. A `Token`'s `n` is `u32`, so `on` gets a `Token_Answer` whose `hi` is the byte past the value, and a found
+container past 4 GiB has its span. Under `.First` an answer goes out at its match, or its close if it is a container.
+Under `.Last` the key of any `Name` on the way can repeat and take the answer back, so an answer goes out when the
+shallowest `Name` of any path is past repeating: on `{"a":1,"y":{"b":2}}`, `.y.b` and `.a` both wait for the root's
+close, since `y` could come again. A `Name` past a `Descend` can repeat in any container, and a late path's limit needs
+the text order, so those reads give everything at the end.
 
 A read takes up to 64 paths. More is `Over_Capacity`, and the caller splits the read or builds a document.
 
@@ -100,10 +108,12 @@ wants only found values drops the rest.
 
 - `.Last`: each matching key replaces the candidate. The answer is known when the object closes.
 - `.First`: the first matching key answers.
-- Every matching key answering, in order, is a path option and not a `Duplicates` member, since `member` could not take
-  it.
+- `every_key`, a read option and not a `Duplicates` member, since `member` could not take it: every matching key answers,
+  in order.
 - `refuse_duplicates`, a flag of the read as of `build`: a repeated key is a fault at the repeat, in every object the
   scan reads.
+
+`All` and `Descend` reach every member, repeats included, under every rule.
 
 ### Stopping early
 
@@ -118,18 +128,24 @@ Containers a stop leaves open are `Partial` with the count read so far, and `Doc
 
 ### Negative indexes
 
-An array's length is known only at its close. The hook keeps the starts of the last `k` elements in a ring, where `k` is
-the largest negative index any path asks of that array. `k` above 64 is `Over_Capacity`, and a path with no negative
-index keeps no ring. At the close:
+An array's length is known only at its close. The hook keeps the last `k` elements in a ring, where `k` is the largest
+negative index or `Slice` end any armed path asks of that array. `k` above 64 is `Over_Capacity`, and a path with no
+negative step keeps no ring. At the close the ring's elements a path picks are given to the logic again, oldest first,
+with their true indexes, and each path picks up there as if it had reached the element in order. A scalar is the ring's
+tokens and no second read. A container is walked again from its first byte, also for a path that ends at it, since an
+answer is kept whole and a found container's end is not in its token. Only those elements are read twice, and they were
+already judged. A path into a ring's element that another path also reached keeps its own copy of the element's nodes,
+so a `Partial` array can hold a child twice, and `child_at` gives the first. Answers name the right nodes either way.
 
-- A path that ends at the index answers the ring's token, with no second read.
-- A path with steps after it walks that element again from its start with the rest of the path. Only that element is
-  read twice, and it was already judged.
+A `Slice` from the start with a negative end, `.[1:-1]`, knows an element is in it once `|end|` more have arrived, so the
+element is given again at that moment.
 
-`walk(src, lo)` reads one value from any JSON value's first byte. A JSON string token's `lo` is the byte after its
-opening quote, so the ring stores `lo - 1` for a token with `SPELLING_QUOTED`. A dsv walk from a record's `lo` would
-read that record as the header, so its re-walk passes `no_header`, stops at the record's `End`, and maps each cell to
-the header key the hook kept.
+`walk(src, lo)` reads one value from any JSON value's first byte. A dsv walk from a record's `lo` would read that record
+as the header, so its re-walk passes `no_header`, stops at the record's `End`, and gives each cell the key the first walk
+kept. A query reads the element's nodes again by the same replay.
+
+A negative step or a `Descend` makes a path late: its answers can arrive out of text order, so a read sorts them, and
+its limit cuts the sorted list.
 
 ### dsv
 
@@ -140,7 +156,9 @@ no `shared_keys`.
 
 ## The partial document
 
-A partial document holds the answers and the containers on the way to them, and nothing else. `.logs[].id` keeps the
+A partial document holds the answers and the containers on the way to them, and nothing else, but for the dead nodes
+under a key that repeated in a read past one plain path: no answer names them, and a member lookup under `.Last` passes
+them. `.logs[].id` keeps the
 root, `logs`, each element, and each `id` whole, so an `id` that is an object is kept with all its nodes.
 
 A container whose children were not all kept has the role `Partial` in place of `Value`. It is a node's role, never a
@@ -174,9 +192,11 @@ partial, so a scan keeps nothing extra for edits. `commit` refuses a partial doc
 One hook on the walk answers every path, in core, written once for every format. The walk knows nothing of paths: the
 hook sees `Map`, `Array`, `Key` and value tokens and returns `Next`, `Skip` or `Stop`.
 
-- Its state per depth is which step of which path is armed there. For one path that is a step number and a depth, two
-  registers. Several paths keep one `u64` bit set of armed paths per depth. Each form is its own instantiation, so one
-  path pays nothing for many.
+- Its state per depth is which step of which path is armed there. For one plain path, of `Name`, `Index` from 0, `All`
+  and `Either`, that is a step number and a depth, two registers. Several paths, and any path with a step or an option
+  that form has no state for, take the `$MANY` form in `core/build/many.odin`: one `u64` bit set of armed paths per depth,
+  and for a `Descend` path, which can be at several steps of a container at once, a `u64` of steps per depth. Each form
+  is its own instantiation behind a `nil` pointer, so a plain path pays nothing for the other.
 - A `Name` step compares the `Key` token's span with the name: length, then the bytes, on the raw bytes when the key has
   no escape, decoded otherwise. No compare runs inside the walk: a name matches few keys, so one would be spent on nearly
   every key and save a scan only on a match.
@@ -222,8 +242,3 @@ Why this and not a wider record:
 If a benchmark shows nested spans dominate, add a sparse table of `(node, end)` sorted by node, one entry per container,
 filled at the walk's `End`, and do not widen `Node`. A third option changes the record: `lo` as `u32` with the freed
 bytes as `hi` gives every container an O(1) close at the price of a 4 GiB source cap.
-
-## Open
-
-One shape question is left: a `Token`'s `n` is `u32`, so `each_answer` cannot pass a found container past 4 GiB as a
-token, and its `on` may need the span as `lo` and `hi`.

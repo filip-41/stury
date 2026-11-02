@@ -2,6 +2,9 @@ package core
 
 // The types shared by every format's walk: tokens, the hook interface and the fault result.
 
+// The deepest nesting a walk reads unless its options say more.
+MAX_DEPTH :: 1024
+
 // `Kind` names what a token is: `Array` and `Map` open a container, `End` closes the innermost one, and the other
 // kinds are scalars. `Plain` is text whose type the format resolves for the consumer. Each member names the formats
 // that give it.

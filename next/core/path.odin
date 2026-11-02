@@ -51,11 +51,12 @@ Path :: struct {
 
 // A read's options. `dups` is nil for `.Last`, or for `.First` under `stop_early`. `refuse_duplicates` faults at a repeated
 // key, so the read builds the whole text. `stop_early` ends the walk once every answer is known, and what lies past that
-// point is not judged.
+// point is not judged. `every_key` has a `Name` answer every key that matches instead of the one `dups` picks.
 Path_Options :: struct {
 	dups:              Maybe(Duplicates),
 	refuse_duplicates: bool,
 	stop_early:        bool,
+	every_key:         bool,
 }
 
 Answer_Outcome :: enum u8 {
@@ -72,6 +73,16 @@ Answer_Outcome :: enum u8 {
 Answer :: struct {
 	node:    Node_Index,
 	owner:   Node_Index,
+	path:    u32,
+	outcome: Answer_Outcome,
+}
+
+// What `each_answer` gives for one value a path reaches, with no document. `token` is the value's for a `.Found` and a
+// `.Type_Mismatch`, and the closing token of the container that lacks it, or the null, for a `.Missing`. `hi` is the byte
+// past `token`'s value, since a container past 4 GiB has no end a `Token` can hold.
+Token_Answer :: struct {
+	token:   Token,
+	hi:      u64,
 	path:    u32,
 	outcome: Answer_Outcome,
 }

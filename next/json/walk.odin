@@ -10,7 +10,7 @@ import kernel "../core/kernel"
 
 // The deepest nesting a text may have when `Options.max_depth` is 0. An open bracket past the limit faults
 // `Too_Deep` at that bracket.
-MAX_DEPTH :: 1024
+MAX_DEPTH :: core.MAX_DEPTH
 
 // `Spec` is the grammar a text follows, a compile-time parameter, so a build compiles only the specs it names.
 Spec :: enum u8 {

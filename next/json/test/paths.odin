@@ -388,12 +388,15 @@ stop_early_reads :: proc(t: ^testing.T) {
 @(test)
 path_refusals :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`[1]`)
-	for text in ([]string{".[-1]", ".[0:1]", "..", ".a?"}) {
-		path, _ := core.parse_path(text)
-		defer core.path_destroy(&path)
-		_, e := json.query(src, .Json, path)
-		testing.expectf(t, e.kind == .Unsupported, "%q: %v", text, e)
-	}
+	far := core.Path{steps = []core.Step{core.Index(-65)}}
+	_, deep := json.query(src, .Json, far)
+	testing.expect_value(t, deep.kind, core.Path_Error_Kind.Over_Capacity)
+	twice := core.Path{steps = []core.Step{core.Descend{}, core.Name("a"), core.Descend{}}}
+	_, again := json.query(src, .Json, twice)
+	testing.expect_value(t, again.kind, core.Path_Error_Kind.Bad_Path)
+	many: [65]core.Path
+	_, over := json.query(src, .Json, many[:])
+	testing.expect_value(t, over.kind, core.Path_Error_Kind.Over_Capacity)
 	path, _ := core.parse_path(".[0]")
 	defer core.path_destroy(&path)
 	doc, _ := json.query(src, .Json, path)

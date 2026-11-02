@@ -3,6 +3,7 @@ package dsv_tests
 import "core:fmt"
 import "core:math/rand"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -179,7 +180,81 @@ path_fixtures :: proc(t: ^testing.T) {
 	}
 }
 
-// Scan and query against the table a round wrote, over the paths a table has.
+// The positions a lead or cell step picks of `n`, and whether it answers one missing value.
+@(private = "file")
+picked :: proc(step: core.Step, n: int) -> (at: []int, missing: bool) {
+	list := make([dynamic]int, context.temp_allocator)
+	#partial switch x in step {
+	case core.All:
+		for i in 0 ..< n {
+			append(&list, i)
+		}
+	case core.Index:
+		i := int(x) if x >= 0 else n + int(x)
+		if i < 0 || i >= n {
+			return nil, true
+		}
+		append(&list, i)
+	case core.Slice:
+		lo := x.lo if x.lo >= 0 else max(n + x.lo, 0)
+		hi := x.hi.? or_else n
+		hi = hi if hi >= 0 else n + hi
+		for i in lo ..< min(hi, n) {
+			append(&list, i)
+		}
+	}
+	return list[:], false
+}
+
+@(private = "file")
+random_position :: proc(n: int) -> core.Step {
+	switch rand.int_max(5) {
+	case 0:
+		return core.All{}
+	case 1:
+		return core.Index(rand.int_max(n + 2))
+	case 2:
+		return core.Index(-1 - rand.int_max(n + 2))
+	case 3:
+		return core.Slice{lo = rand.int_max(2 * n + 3) - n - 1}
+	}
+	return core.Slice{rand.int_max(2 * n + 3) - n - 1, rand.int_max(2 * n + 3) - n - 1}
+}
+
+@(private = "file")
+answers_of :: proc(doc: ^core.Document, answers: []core.Answer, p: int) -> []string {
+	mine := make([dynamic]core.Answer, context.temp_allocator)
+	for a in answers {
+		if int(a.path) == p {
+			append(&mine, a)
+		}
+	}
+	return answer_texts(doc, mine[:])
+}
+
+@(private = "file")
+Stream :: struct {
+	src:  []u8,
+	want: [dynamic]string,
+}
+
+@(private = "file")
+on_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+	s := (^Stream)(state)
+	text := "T"
+	switch a.outcome {
+	case .Found:
+		text = strings.trim_right(string(s.src[a.token.lo:a.hi]), "\r\n")
+	case .Missing:
+		text = "M"
+	case .Type_Mismatch:
+	}
+	append(&s.want, fmt.tprintf("%d:%s", a.path, text))
+	return true
+}
+
+// Scan, stopped scan, query and `each_answer` against the table a round wrote, over the paths a table has, one or several
+// in a read.
 @(test)
 path_model :: proc(t: ^testing.T) {
 	NAMES := [?]string{"x", "yy", `"q r"`, `"e""f"`}
@@ -203,33 +278,67 @@ path_model :: proc(t: ^testing.T) {
 			strings.write_byte(&b, '\n')
 		}
 		src := transmute([]u8)strings.to_string(b)
-		record := rand.int_max(rows + 1)
-		column := rand.int_max(width + 1)
-		named := rand.int_max(2) == 0 && column < width
-		every := rand.int_max(2) == 0
-		cell_step := core.Step(core.Name(DECODED[column])) if named else core.Step(core.Index(column))
-		lead := core.Step(core.All{}) if every else core.Step(core.Index(record))
-		steps := []core.Step{lead, cell_step}
-		want := make([dynamic]string, context.temp_allocator)
-		for row, i in cells {
-			if every || i == record {
-				append(&want, row[column] if column < width else "M")
+		paths := make([]core.Path, rand.int_max(3) + 1, context.temp_allocator)
+		wants := make([][dynamic]string, len(paths), context.temp_allocator)
+		total := 0
+		for &path, p in paths {
+			column := rand.int_max(width + 1)
+			lead := random_position(rows)
+			step := random_position(width)
+			if rand.int_max(2) == 0 && column < width {
+				step = core.Name(DECODED[column])
 			}
+			steps := make([]core.Step, 2, context.temp_allocator)
+			steps[0], steps[1] = lead, step
+			path.steps = steps
+			wants[p] = make([dynamic]string, context.temp_allocator)
+			records, gone := picked(lead, rows)
+			if gone {
+				_, every := step.(core.All)
+				append(&wants[p], "T" if every else "M")
+			}
+			for i in records {
+				if _, named := step.(core.Name); named {
+					append(&wants[p], cells[i][column])
+					continue
+				}
+				at, none := picked(step, width)
+				if none {
+					append(&wants[p], "M")
+				}
+				for c in at {
+					append(&wants[p], cells[i][c])
+				}
+			}
+			total += len(wants[p])
 		}
-		if !every && record == rows {
-			append(&want, "M")
-		}
-		path := core.Path{steps = steps}
-		doc, err := dsv.query(src, .Csv, path)
+		doc, err := dsv.query(src, .Csv, paths)
 		testing.expectf(t, err.kind == .None, "%q: %v", string(src), err)
-		testing.expectf(t, slice_equal(answer_texts(&doc, doc.answers), want[:]), "scan %q %v: %v want %v", string(src), steps, answer_texts(&doc, doc.answers), want)
-		core.destroy(&doc)
+		stopped, serr := dsv.query(src, .Csv, paths, read = {stop_early = true})
+		testing.expectf(t, serr.kind == .None, "%q: %v", string(src), serr)
 		full, berr := dsv.build(src, .Csv)
 		testing.expect_value(t, berr.kind, core.Document_Error_Kind.None)
-		answers, qerr := dsv.query_document(&full, path)
+		answers, qerr := dsv.query_document(&full, paths)
 		testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
-		testing.expectf(t, slice_equal(answer_texts(&full, answers), want[:]), "query %q %v: %v want %v", string(src), steps, answer_texts(&full, answers), want)
+		stream := Stream{src, make([dynamic]string, context.temp_allocator)}
+		eerr := dsv.each_answer(src, .Csv, paths, &stream, on_answer)
+		testing.expect_value(t, eerr.kind, core.Path_Error_Kind.None)
+		testing.expectf(t, len(stream.want) == total, "stream %q %v: %v", string(src), paths, stream.want)
+		for want, p in wants {
+			tagged := make([dynamic]string, context.temp_allocator)
+			for w in want {
+				append(&tagged, fmt.tprintf("%d:%s", p, w))
+			}
+			for w in tagged {
+				testing.expectf(t, slice.contains(stream.want[:], w), "stream %q %v: %v want %v", string(src), paths, stream.want, tagged)
+			}
+			testing.expectf(t, slice_equal(answers_of(&doc, doc.answers, p), want[:]), "scan %q %v: %v want %v", string(src), paths, answers_of(&doc, doc.answers, p), want)
+			testing.expectf(t, slice_equal(answers_of(&stopped, stopped.answers, p), want[:]), "stopped %q %v: %v want %v", string(src), paths, answers_of(&stopped, stopped.answers, p), want)
+			testing.expectf(t, slice_equal(answers_of(&full, answers, p), want[:]), "query %q %v: %v want %v", string(src), paths, answers_of(&full, answers, p), want)
+		}
 		delete(answers)
+		core.destroy(&doc)
+		core.destroy(&stopped)
 		core.destroy(&full)
 	}
 }

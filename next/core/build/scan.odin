@@ -4,7 +4,8 @@ import "base:runtime"
 import spell "../spell"
 import core ".."
 
-// The path engine: one step logic that answers a path from any token source, with no format in it. `scan_hook` runs it
+// The path engine: one step logic that answers a path from any token source, with no format in it, and its `$MANY` form
+// in `many.odin` for what this form has no state for. `scan_hook` runs it
 // on a walk and writes the partial document, and `query_document` runs it on a built document's tokens. With no `Descend`
 // step the depth is the step number: a container open at depth `d` reads `steps[d - 1]`, and a value at depth
 // `len(steps)` is an answer, kept whole. Whatever no step needs is skipped, so the logic sees the members of the
@@ -53,12 +54,20 @@ Scan :: struct {
 	n_kept:     int,
 	missing:    []core.Missing_Name,
 	n_missing:  int,
+	many:       ^Scan_Many, // the `$MANY` form's state, nil in this form
+	rewalk:     Rewalk,
+	opts:       rawptr, // the format's walk options, which `rewalk` reads
+	ends:       []u32, // the container ends a `$MANY` replay holds, a frame per depth
 	marks:      [core.MAX_STEPS]Scan_Mark,
 	slots:      [core.MAX_STEPS]u32, // the `Child_Count` reserved for the container open at each depth
 	first:      [8]core.Answer, // `answers` until they outgrow it, so a read of few allocates no list
 }
 
-// Reads `path` and `read` into `h`. A step this engine does not read yet is `.Unsupported`.
+// Gives one value of a text to the `$MANY` form's hook again from the value's first byte, `at` being its node in a
+// built document. A format's `query` sets it, since only a format can walk from a value.
+Rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index)
+
+// Reads `path` and `read` into `h`, for a path `many_needed` says this form can read.
 @(private)
 scan_plan :: proc(h: ^Scan, path: core.Path, read: core.Path_Options) -> core.Path_Error {
 	if len(path.steps) > core.MAX_STEPS {
@@ -74,9 +83,6 @@ scan_plan :: proc(h: ^Scan, path: core.Path, read: core.Path_Options) -> core.Pa
 	h.last = dups == .Last
 	h.stop_early = read.stop_early
 	h.want = h.limit > 0
-	if path.optional != {} {
-		return {kind = .Unsupported}
-	}
 	for step, i in path.steps {
 		bit := u64(1) << uint(i)
 		switch x in step {
@@ -89,9 +95,6 @@ scan_plan :: proc(h: ^Scan, path: core.Path, read: core.Path_Options) -> core.Pa
 				h.indexed |= bit
 			}
 		case core.Index:
-			if x < 0 {
-				return {kind = .Unsupported}
-			}
 			h.indexed |= bit
 		case core.All:
 			h.alls |= bit
@@ -100,18 +103,27 @@ scan_plan :: proc(h: ^Scan, path: core.Path, read: core.Path_Options) -> core.Pa
 				h.indexed |= bit
 			}
 		case core.Slice, core.Descend:
-			return {kind = .Unsupported}
 		}
 	}
 	return {}
 }
 
-// Starts a scan of `path` over `src`. `depth` is as in `builder_start`, `frames` is the caller's room for that stack,
-// which `depth` may outgrow, and a format's `query` runs its walk with
-// `scan_hook` and ends it with `scan_end`.
-scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, path: core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64) -> core.Path_Error {
-	if e := scan_plan(h, path, read); e.kind != .None {
+// Starts a scan of `paths` over `src`. `depth` is as in `builder_start`, `frames` is the caller's room for that stack,
+// which `depth` may outgrow, and a format's `query` runs its walk with `scan_hook`, or `many_hook` when `Scan.many` is
+// set, and ends it with `scan_end`. `many` asks for the `$MANY` form.
+scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error {
+	e: core.Path_Error
+	if many || many_needed(paths, read) {
+		e = many_plan(h, paths, read, depth, allocator)
+	} else {
+		e = scan_plan(h, paths[0], read)
+	}
+	if e.kind != .None {
+		many_free(h, allocator)
 		return e
+	}
+	if h.many != nil {
+		h.many.on, h.many.state, h.many.ctx = on, state, context
 	}
 	h.positional = positional
 	h.answers = h.first[:]
@@ -124,8 +136,9 @@ scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, path: core.Pat
 		if h.borrowed {
 			h.b.stack = nil
 		}
-		_, e := builder_end(&h.b, BUILDER_REGS, nil)
-		return core.path_error(e)
+		many_free(h, allocator)
+		_, be := builder_end(&h.b, BUILDER_REGS, nil)
+		return core.path_error(be)
 	}
 	return {}
 }
@@ -141,11 +154,12 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 		}
 		delete(h.kept, allocator)
 		delete(h.missing, allocator)
+		many_free(h, allocator)
 	}
 	if _, bad := fault.?; !bad && h.stopped && h.b.err.kind == .None {
 		// The containers the stop left open are on the path. Their counts hold what was read of them.
 		for regs.c > 0 {
-			scan_partial(h, regs, h.slots[regs.c - 1])
+			scan_partial(h, regs, h.many.frames[regs.c].slot if h.many != nil else h.slots[regs.c - 1])
 			regs.c -= 1
 			regs.b = h.b.stack[regs.c]
 		}
@@ -159,6 +173,13 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 		}
 	}
 	h.b.n_counts = w
+	if _, bad := fault.?; !bad && h.many != nil {
+		if h.many.on != nil {
+			many_stream_end(h)
+		} else {
+			many_answers(h)
+		}
+	}
 	h.b.wide_more = h.b.wide_count != 0
 	h.b.root_close = 0 if h.stopped else root_close
 	if h.borrowed {
@@ -206,20 +227,46 @@ attach_reads :: proc(doc: ^core.Document, answers: []core.Answer, kept: []core.K
 // Answers `path` over a document built whole, in the order a scan of its text answers, and allocates nothing but the
 // list, which the caller frees with `delete(answers, allocator)`. A partial document cannot say what it does not hold,
 // so it is `.Unsupported`. An `Answer`'s nodes are `doc`'s.
-query_document :: proc(doc: ^core.Document, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
+query_document_one :: proc(doc: ^core.Document, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
+	paths := [1]core.Path{path}
+	return query_document_many(doc, paths[:], read, allocator)
+}
+
+// Answers `paths` over a document built whole, as `query_document_one`, each answer tagged with its path's number.
+query_document_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
 	if doc.partial {
 		return nil, {kind = .Unsupported}
 	}
 	h: Scan
-	if e := scan_plan(&h, path, read); e.kind != .None {
-		return nil, e
-	}
 	h.b.doc = doc^
 	h.b.doc.allocator = allocator
 	h.positional = doc.shared_keys != 0
-	stack: [core.MAX_STEPS + 2]u64
-	h.b.stack = stack[:]
-	replay(&h, doc)
+	regs := BUILDER_REGS
+	if !many_needed(paths, read) {
+		if e := scan_plan(&h, paths[0], read); e.kind != .None {
+			return nil, e
+		}
+		stack: [core.MAX_STEPS + 2]u64
+		ends: [core.MAX_STEPS + 2]u32
+		h.b.stack = stack[:]
+		replay(false, &h, 0, u32(len(doc.nodes)), &regs, ends[:])
+	} else {
+		depth := max(core.MAX_DEPTH, int(doc.read.max_depth))
+		if e := many_plan(&h, paths, read, depth, allocator); e.kind != .None {
+			many_free(&h, allocator)
+			return nil, e
+		}
+		h.rewalk = replay_rewalk
+		h.b.stack = make([]u64, depth + 2, allocator)
+		h.ends = make([]u32, depth + 2, allocator)
+		replay(true, &h, 0, u32(len(doc.nodes)), &regs, h.ends)
+		if h.b.err.kind == .None {
+			many_answers(&h)
+		}
+		many_free(&h, allocator)
+		delete(h.b.stack, allocator)
+		delete(h.ends, allocator)
+	}
 	if h.b.err.kind != .None {
 		delete(h.answers, allocator)
 		return nil, {kind = .No_Memory}
@@ -227,10 +274,18 @@ query_document :: proc(doc: ^core.Document, path: core.Path, read := core.Path_O
 	return h.answers[:h.n_answers], {}
 }
 
-// Answers `path` over the whole document `doc`, which a read with `refuse_duplicates` built, and gives it its answers. On
+query_document :: proc {query_document_one, query_document_many}
+
+// A `$MANY` read's re-walk of the value at node `at` of a built document.
+@(private)
+replay_rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index) {
+	replay(true, h, u32(at), u32(at) + h.b.doc.nodes[at].n, s, h.ends[s.c:])
+}
+
+// Answers `paths` over the whole document `doc`, which a read with `refuse_duplicates` built, and gives it its answers. On
 // an error `doc` is destroyed.
-query_built :: proc(doc: ^core.Document, path: core.Path, read: core.Path_Options) -> (core.Document, core.Path_Error) {
-	answers, e := query_document(doc, path, read, doc.allocator)
+query_built :: proc(doc: ^core.Document, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Path_Error) {
+	answers, e := query_document_many(doc, paths, read, doc.allocator)
 	if e.kind == .None {
 		defer delete(answers, doc.allocator)
 		if attach_reads(doc, answers, nil, nil) {
@@ -242,26 +297,30 @@ query_built :: proc(doc: ^core.Document, path: core.Path, read: core.Path_Option
 	return {}, e
 }
 
-// Feeds the step logic a document's tokens as the walk gave them: each close comes back from a stack of container ends,
-// and each key of a headed record from `doc.shared_keys`, and a `Skip` steps over the value's subtree. Only the containers
-// on the path open, so the stack holds a frame per step.
+// Feeds the step logic the tokens of nodes `from ..< to` as the walk gave them: each close comes back from a stack of
+// container ends, and each key of a headed record from `doc.shared_keys`, and a `Skip` steps over the value's subtree.
+// Only the containers on the path open, so `ends` holds a frame per step, or one per depth with a `Descend`.
 @(private)
-replay :: proc(h: ^Scan, doc: ^core.Document) {
-	regs := BUILDER_REGS
-	ends: [core.MAX_STEPS + 2]u32
+replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.Hook_Regs, ends: []u32) {
+	doc := &h.b.doc
+	regs := out^
+	defer out^ = regs
 	depth := 0
-	i := u32(0)
-	count := u32(len(doc.nodes))
+	i := from
 	action: core.Action
 	for {
 		for depth > 0 && i >= ends[depth - 1] {
 			depth -= 1
-			regs, action = scan_step(false, h, regs, core.Token{kind = .End})
+			when MANY {
+				regs, action = many_step(.Replay, h, regs, core.Token{kind = .End, lo = u64(ends[depth]) - 1})
+			} else {
+				regs, action = scan_step(false, h, regs, core.Token{kind = .End})
+			}
 			if action == .Stop {
 				return
 			}
 		}
-		if i >= count {
+		if i >= to {
 			return
 		}
 		t := doc.nodes[i]
@@ -272,14 +331,22 @@ replay :: proc(h: ^Scan, doc: ^core.Document) {
 		}
 		if doc.shared_keys != 0 && depth > 0 && doc.nodes[regs.b >> 32].kind == .Map {
 			h.at = doc.shared_keys + 1 + core.Node_Index(u32(regs.b))
-			regs, action = scan_step(false, h, regs, doc.nodes[h.at])
+			when MANY {
+				regs, action = many_step(.Replay, h, regs, doc.nodes[h.at])
+			} else {
+				regs, action = scan_step(false, h, regs, doc.nodes[h.at])
+			}
 			if action == .Skip {
 				i += t.n if t.kind > .Plain else 1
 				continue
 			}
 		}
 		h.at = core.Node_Index(i)
-		regs, action = scan_step(false, h, regs, t)
+		when MANY {
+			regs, action = many_step(.Replay, h, regs, t)
+		} else {
+			regs, action = scan_step(false, h, regs, t)
+		}
 		switch action {
 		case .Stop:
 			return
