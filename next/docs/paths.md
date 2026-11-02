@@ -198,17 +198,23 @@ comments.
 One hook on the walk answers every path, in core, written once for every format. The walk knows nothing of paths: the
 hook sees `Map`, `Array`, `Key` and value tokens and returns `Next`, `Skip` or `Stop`.
 
-- Its state per depth is which step of which path is armed there. For one plain path, of `Name`, `Index` from 0, `All`
-  and `Either`, that is a step number and a depth, two registers. Several paths, and any path with a step or an option
-  that form has no state for, take the `$MANY` form in `core/build/many.odin`: one `u64` bit set of armed paths per depth,
-  and for a `Descend` path, which can be at several steps of a container at once, a `u64` of steps per depth. Each form
-  is its own instantiation behind a `nil` pointer, so a plain path pays nothing for the other.
+- Its state per depth is which step of which path is armed there. `core/build/scan.odin` writes the step logic once, as
+  `scan_step($MANY, $SINK, ...)`. `$MANY` false compiles it down to one plain path, of `Name`, `Index` from 0, `All` and
+  `Either`, at step `d - 1`: a step number and a depth, two registers. Several paths, and any path with a step or an option
+  that form has no state for, run it with `$MANY` true, and `core/build/many.odin` holds what only they need: one `u64`
+  bit set of armed paths per depth, a `u64` of steps per depth for a `Descend` path, which can be at several steps of a
+  container at once, the rings of negative indexes, the answers placed in text order and the stream. A plain path pays
+  nothing for them.
 - A `Name` step compares the `Key` token's span with the name: length, then the bytes, on the raw bytes when the key has
   no escape, decoded otherwise. No compare runs inside the walk: a name matches few keys, so one would be spent on nearly
   every key and save a scan only on a match.
 - A member no path needs is skipped at its `Key`, so the walk reads a string or number value inline, and an element at
   its value's token. When every answer is known and `stop_early` is set, the hook returns `Stop`.
-- Each answer goes to a sink chosen at compile time: `query` uses the document sink, and `each_answer` the stream sink.
+- Each answer goes to a sink chosen at compile time: `query` uses the document sink, `each_answer` the stream sink, and
+  a read of a built document the replay sink, which writes nothing.
+- A repeated key under `.Last` takes answers back. One path rewinds the lists and the nodes. Several cannot, since
+  another path may have read past that point, so their answers are marked dead and their nodes stay with no answer
+  naming them.
 
 The step logic runs on two token sources: the walk's during a scan, and a document's during a query. `doc.nodes` is not
 the walk's token stream: it holds no `End` node, a headed dsv record's `Key` tokens live in `doc.shared_keys`, and a

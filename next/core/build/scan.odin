@@ -1,15 +1,45 @@
 package build
 
+import "base:intrinsics"
 import "base:runtime"
 import spell "../spell"
 import core ".."
 
-// The path engine: one step logic that answers a path from any token source, with no format in it, and its `$MANY` form
-// in `many.odin` for what this form has no state for. `scan_hook` runs it
-// on a walk and writes the partial document, and `query_document` runs it on a built document's tokens. With no `Descend`
-// step the depth is the step number: a container open at depth `d` reads `steps[d - 1]`, and a value at depth
-// `len(steps)` is an answer, kept whole. Whatever no step needs is skipped, so the logic sees the members of the
-// containers on the path and nothing else.
+// The path engine: one step logic that answers paths from any token source, with no format in it. `$MANY` true reads up
+// to 64 paths with the state of `many.odin`, and false compiles the same logic down to one path at step `d - 1`, where
+// the depth is the step number: a container open at depth `d` reads `steps[d - 1]`, and a value at depth `len(steps)` is
+// an answer, kept whole. `$SINK` says where answers go. Whatever no step needs is skipped, so the logic sees the members
+// of the containers on the path and nothing else.
+
+// Where the engine sends answers. `.Document` writes the partial document, `.Replay` reads a built one and writes
+// nothing, `.Stream` writes nothing and calls `each_answer`'s `on`.
+Sink :: enum u8 {
+	Document,
+	Replay,
+	Stream,
+}
+
+// One path of a read. The `u64` sets hold a bit per step. `multi` is the first step that can answer again, `rollback` the
+// first step a repeated key can take answers back through, `alls` the `All` steps, and `indexed` the steps that keep a
+// `Kept_Child` for each child they keep by position. `late` says the path's answers can be known out of text order, so
+// its limit is applied to the sorted list and its `rollback` is -1.
+@(private)
+Scan_Path :: struct {
+	steps:    []core.Step,
+	n:        int,
+	limit:    int,
+	count:    int, // the answers given, for `$MANY`, which `n_answers` holds with one path
+	multi:    int,
+	rollback: int,
+	optional: u64,
+	alls:     u64,
+	indexed:  u64,
+	negative: u64,
+	descend:  int, // the `Descend` step, -1 for none
+	deep:     int, // the path's column in `Scan_Many.deep`, -1 with no `Descend`
+	marks:    int, // the path's first entry in `Scan_Many.marks`
+	late:     bool,
+}
 
 // What a matched `Name` left behind when it matched: the lists' lengths and the node cursor, which a repeated key under
 // `.Last` restores.
@@ -25,24 +55,21 @@ Scan_Mark :: struct {
 // A `Scan` holds one read's state beside the walk's registers, which are the builder's: `a` the node cursor, the high
 // half of `b` the open container, its low half that container's children so far, kept or not, and `c` the depth.
 //
-// The `u64` sets hold a bit per step. `matched` says a `Name` has met its key in the container open at that step, `maps`
-// that the container is a `Map`, `cut` that the limit dropped a member, `alls` that the step is `All`, and `indexed` that
-// the step keeps a `Kept_Child` for each child it keeps by position.
+// The `u64` sets hold a bit per step of `path`, the path of a read that is not `$MANY`. `matched` says a `Name` has met its
+// key in the container open at that step, `maps` that the container is a `Map`, and `cut` that the limit dropped a member.
+// `next` holds a bit per path that picked the coming value.
 Scan :: struct {
 	b:          Builder,
-	steps:      []core.Step,
-	n:          int, // the step count
-	keep:       int, // the depth at and past which every token is kept: `n`, or the depth of a value no step can enter
-	limit:      int, // the most answers
-	multi:      int, // the first step that can answer again, `n` for none
-	rollback:   int, // the first step a repeated key can take answers back through, `n` for none
+	path:       Scan_Path,
+	keep:       int, // the depth past which every token is kept
+	free:       int, // what `keep` is with no value being kept
+	next:       u64,
 	matched:    u64,
 	maps:       u64,
 	cut:        u64,
-	alls:       u64,
-	indexed:    u64,
-	want:       bool, // the next value is wanted, as its key was
+	flush:      int, // the depth at and above which `.Stream` may give what it holds
 	last:       bool, // a repeated key replaces the candidate
+	every_key:  bool,
 	stop_early: bool,
 	stopped:    bool,
 	borrowed:   bool, // the builder's stack is the caller's `frames`
@@ -54,7 +81,7 @@ Scan :: struct {
 	n_kept:     int,
 	missing:    []core.Missing_Name,
 	n_missing:  int,
-	many:       ^Scan_Many, // the `$MANY` form's state, nil in this form
+	many:       ^Scan_Many, // the `$MANY` state, nil with one path
 	rewalk:     Rewalk,
 	opts:       rawptr, // the format's walk options, which `rewalk` reads
 	ends:       []u32, // the container ends a `$MANY` replay holds, a frame per depth
@@ -67,42 +94,89 @@ Scan :: struct {
 // built document. A format's `query` sets it, since only a format can walk from a value.
 Rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index)
 
-// Reads `path` and `read` into `h`, for a path `many_needed` says this form can read.
+// Reads `paths` and `read` into `h`. `many` asks for `$MANY`, and `depth` bounds the frames a `Descend` path opens.
 @(private)
-scan_plan :: proc(h: ^Scan, path: core.Path, read: core.Path_Options) -> core.Path_Error {
+scan_plan :: proc(h: ^Scan, paths: []core.Path, read: core.Path_Options, depth: int, many: bool, allocator: runtime.Allocator) -> core.Path_Error {
+	dups := read.dups.? or_else (core.Duplicates.First if read.stop_early else core.Duplicates.Last)
+	h.last = dups == .Last && !read.every_key
+	h.every_key = read.every_key
+	h.stop_early = read.stop_early
+	h.flush = max(int)
+	if many || many_needed(paths, read) {
+		return many_plan(h, paths, depth, allocator)
+	}
+	e := scan_plan_path(h, &h.path, paths[0])
+	h.free = h.path.n
+	h.keep = h.free
+	h.next = 1 if h.path.limit > 0 else 0
+	// With one path an `All` drops a member only for the limit, and `cut` tells that.
+	if h.path.limit == max(int) {
+		h.path.indexed &~= h.path.alls
+	}
+	return e
+}
+
+@(private)
+scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Error {
 	if len(path.steps) > core.MAX_STEPS {
 		return {kind = .Over_Capacity}
 	}
-	dups := read.dups.? or_else (core.Duplicates.First if read.stop_early else core.Duplicates.Last)
-	h.steps = path.steps
-	h.n = len(path.steps)
-	h.keep = h.n
-	h.limit = path.limit.? or_else max(int)
-	h.multi = h.n
-	h.rollback = h.n
-	h.last = dups == .Last
-	h.stop_early = read.stop_early
-	h.want = h.limit > 0
+	x.steps = path.steps
+	x.n = len(path.steps)
+	x.limit = path.limit.? or_else max(int)
+	x.multi, x.rollback = x.n, x.n
+	x.optional = transmute(u64)path.optional
+	x.descend = -1
 	for step, i in path.steps {
 		bit := u64(1) << uint(i)
-		switch x in step {
+		switch s in step {
 		case core.Name, core.Either:
-			if h.last {
-				h.multi = min(h.multi, i)
-				h.rollback = min(h.rollback, i)
+			if h.every_key {
+				x.multi = min(x.multi, i)
+			} else if h.last {
+				x.multi = min(x.multi, i)
+				x.rollback = min(x.rollback, i)
+				// A key past a `Descend` can repeat in any container, so nothing is known before the root closes.
+				h.flush = min(h.flush, i) if x.descend < 0 else -1
 			}
-			if _, either := x.(core.Either); either {
-				h.indexed |= bit
+			if _, either := s.(core.Either); either {
+				x.indexed |= bit
 			}
 		case core.Index:
-			h.indexed |= bit
+			x.indexed |= bit
 		case core.All:
-			h.alls |= bit
-			h.multi = min(h.multi, i)
-			if h.limit != max(int) {
-				h.indexed |= bit
+			x.alls |= bit
+			x.multi = min(x.multi, i)
+			x.indexed |= bit
+		case core.Slice:
+			x.indexed |= bit
+			x.multi = min(x.multi, i)
+		case core.Descend:
+			// One `Descend` tells every answer's route by its depth less its step, and a step is a bit of a `u64`.
+			if x.descend >= 0 {
+				return {kind = .Bad_Path}
 			}
-		case core.Slice, core.Descend:
+			if x.n >= core.MAX_STEPS {
+				return {kind = .Over_Capacity}
+			}
+			x.descend = i
+			x.late = true
+			x.multi = min(x.multi, i)
+		}
+		need, _ := step_ring(step)
+		if need > MAX_RING {
+			return {kind = .Over_Capacity}
+		}
+		if need > 0 {
+			x.negative |= bit
+			x.late = true
+			x.multi = min(x.multi, i)
+		}
+	}
+	if x.late {
+		x.rollback = -1
+		if x.limit != max(int) {
+			h.flush = -1
 		}
 	}
 	return {}
@@ -110,14 +184,9 @@ scan_plan :: proc(h: ^Scan, path: core.Path, read: core.Path_Options) -> core.Pa
 
 // Starts a scan of `paths` over `src`. `depth` is as in `builder_start`, `frames` is the caller's room for that stack,
 // which `depth` may outgrow, and a format's `query` runs its walk with `scan_hook`, or `many_hook` when `Scan.many` is
-// set, and ends it with `scan_end`. `many` asks for the `$MANY` form.
+// set, and ends it with `scan_end`. `many` asks for `$MANY`.
 scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error {
-	e: core.Path_Error
-	if many || many_needed(paths, read) {
-		e = many_plan(h, paths, read, depth, allocator)
-	} else {
-		e = scan_plan(h, paths[0], read)
-	}
+	e := scan_plan(h, paths, read, depth, many, allocator)
 	if e.kind != .None {
 		many_free(h, allocator)
 		return e
@@ -241,21 +310,18 @@ query_document_many :: proc(doc: ^core.Document, paths: []core.Path, read := cor
 	h.b.doc = doc^
 	h.b.doc.allocator = allocator
 	h.positional = doc.shared_keys != 0
+	depth := max(core.MAX_DEPTH, int(doc.read.max_depth))
+	if e := scan_plan(&h, paths, read, depth, false, allocator); e.kind != .None {
+		many_free(&h, allocator)
+		return nil, e
+	}
 	regs := BUILDER_REGS
-	if !many_needed(paths, read) {
-		if e := scan_plan(&h, paths[0], read); e.kind != .None {
-			return nil, e
-		}
+	if h.many == nil {
 		stack: [core.MAX_STEPS + 2]u64
 		ends: [core.MAX_STEPS + 2]u32
 		h.b.stack = stack[:]
 		replay(false, &h, 0, u32(len(doc.nodes)), &regs, ends[:])
 	} else {
-		depth := max(core.MAX_DEPTH, int(doc.read.max_depth))
-		if e := many_plan(&h, paths, read, depth, allocator); e.kind != .None {
-			many_free(&h, allocator)
-			return nil, e
-		}
 		h.rewalk = replay_rewalk
 		h.b.stack = make([]u64, depth + 2, allocator)
 		h.ends = make([]u32, depth + 2, allocator)
@@ -360,11 +426,7 @@ replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.H
 	for {
 		for depth > 0 && i >= ends[depth - 1] {
 			depth -= 1
-			when MANY {
-				regs, action = many_step(.Replay, h, regs, core.Token{kind = .End, lo = u64(ends[depth]) - 1})
-			} else {
-				regs, action = scan_step(false, h, regs, core.Token{kind = .End})
-			}
+			regs, action = scan_step(MANY, .Replay, h, regs, core.Token{kind = .End, lo = u64(ends[depth]) - 1})
 			if action == .Stop {
 				return
 			}
@@ -380,22 +442,14 @@ replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.H
 		}
 		if doc.shared_keys != 0 && depth > 0 && doc.nodes[regs.b >> 32].kind == .Map {
 			h.at = doc.shared_keys + 1 + core.Node_Index(u32(regs.b))
-			when MANY {
-				regs, action = many_step(.Replay, h, regs, doc.nodes[h.at])
-			} else {
-				regs, action = scan_step(false, h, regs, doc.nodes[h.at])
-			}
+			regs, action = scan_step(MANY, .Replay, h, regs, doc.nodes[h.at])
 			if action == .Skip {
 				i += t.n if t.kind > .Plain else 1
 				continue
 			}
 		}
 		h.at = core.Node_Index(i)
-		when MANY {
-			regs, action = many_step(.Replay, h, regs, t)
-		} else {
-			regs, action = scan_step(false, h, regs, t)
-		}
+		regs, action = scan_step(MANY, .Replay, h, regs, t)
 		switch action {
 		case .Stop:
 			return
@@ -418,77 +472,141 @@ replay :: proc "contextless" ($MANY: bool, h: ^Scan, from, to: u32, out: ^core.H
 
 // The hook a format's `query` gives its walk.
 scan_hook :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	return scan_step(true, h, s, t)
+	return scan_step(false, .Document, h, s, t)
 }
 
-// The step logic. `$WRITE` writes the kept tokens to the builder, and false writes nothing, for `query_document`, whose
-// answers name the nodes it reads.
+// The step logic.
 @(private)
-scan_step :: #force_inline proc "contextless" ($WRITE: bool, h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+scan_step :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	s := s
 	if t.role > .Key {
 		return s, .Next
 	}
 	d := int(s.c)
-	when WRITE {
+	when SINK != .Replay {
 		if d > h.keep {
-			action: core.Action
-			s, action = builder_step(false, true, false, false, &h.b, s, t)
-			// Only a close can bring the depth back.
-			if t.kind == .End && int(s.c) == h.keep {
-				h.keep = h.n
-				if scan_known(h, int(s.c)) {
-					return scan_stop(h, s)
-				}
-			}
-			return s, action
+			return scan_inside(MANY, SINK, h, s, t)
 		}
 	}
 	if t.kind == .End {
-		return scan_close(WRITE, h, s)
+		return scan_close(MANY, SINK, h, s, t)
+	}
+	when MANY {
+		m := h.many
+		#no_bounds_check f := &m.frames[d]
+	} else {
+		f: ^Many_Frame
 	}
 	if t.role == .Key {
-		wanted := false
-		#no_bounds_check #partial switch x in h.steps[d - 1] {
-		case core.Name:
-			s, wanted = scan_name(WRITE, h, s, t, d, string(x))
-		case core.Either:
-			s, wanted = scan_name(WRITE, h, s, t, d, x.name)
-		case core.Index:
-			wanted = int(u32(s.b)) == int(x)
-		case core.All:
-			wanted = scan_room(h, d)
+		when MANY {
+			if f.delay {
+				s = many_delayed(SINK, h, s, f, d)
+				if h.stopped {
+					return s, .Stop
+				}
+			}
+			m.key = t
+			m.key_at = h.at
+			m.has_key = true
 		}
-		if !wanted {
-			s.b += 1
-			return s, .Skip
+		wanted: bool
+		s, wanted = scan_picks(MANY, SINK, h, s, t, f, d, true)
+		if scan_skips(MANY, h, f, wanted) {
+			return scan_pass(MANY, h, s)
 		}
-		h.want = true
-		return scan_write(WRITE, h, s, t)
-	}
-	want := h.want
-	h.want = false
-	if d > 0 && h.maps >> uint(d - 1) & 1 == 0 {
-		#no_bounds_check #partial switch x in h.steps[d - 1] {
-		case core.Index:
-			want = int(u32(s.b)) == int(x)
-		case core.Either:
-			want = int(u32(s.b)) == x.index
-		case core.All:
-			want = scan_room(h, d)
+		// With several paths a key waits for its value, which they may yet all refuse.
+		when MANY {
+			return s, .Next
+		} else {
+			h.next = 1
+			return scan_write(SINK == .Document, h, s, t)
 		}
 	}
-	if !want {
-		s.b += 1
-		return s, .Skip
+	when MANY {
+		if m.feeding {
+			m.feeding = false
+			return scan_reach(true, SINK, h, s, t, f, d)
+		}
+		if !m.has_key && f.delay {
+			s = many_delayed(SINK, h, s, f, d)
+			if h.stopped {
+				return s, .Stop
+			}
+		}
+		if f.ring_k != 0 {
+			i := u32(s.b) % f.ring_k
+			#no_bounds_check m.rings[f.ring + i] = {m.key if m.has_key else {}, t, m.key_at, h.at}
+		}
+		element := d > 0 && !m.has_key
+	} else {
+		element := d > 0 && h.maps >> uint(d - 1) & 1 == 0
 	}
-	return scan_reach(WRITE, h, s, t, d)
+	wanted: bool
+	if element {
+		s, wanted = scan_picks(MANY, SINK, h, s, t, f, d, false)
+	} else {
+		wanted = h.next != 0
+	}
+	if scan_skips(MANY, h, f, wanted) {
+		return scan_pass(MANY, h, s)
+	}
+	return scan_reach(MANY, SINK, h, s, t, f, d)
 }
 
-// Whether every answer is known with the logic at depth `d`, so a read that stops early may stop.
+// Whether the coming value goes unread: one path did not want it, or nothing of several picked or holds it.
 @(private)
-scan_known :: #force_inline proc "contextless" (h: ^Scan, d: int) -> bool {
-	return h.stop_early && (d <= h.multi || h.n_answers >= h.limit && d <= h.rollback)
+scan_skips :: #force_inline proc "contextless" ($MANY: bool, h: ^Scan, f: ^Many_Frame, wanted: bool) -> bool {
+	when MANY {
+		return h.next == 0 && !f.whole && f.ring_k == 0
+	} else {
+		return !wanted
+	}
+}
+
+@(private)
+scan_pass :: #force_inline proc "contextless" ($MANY: bool, h: ^Scan, s: core.Hook_Regs) -> (core.Hook_Regs, core.Action) {
+	s := s
+	s.b += 1
+	when MANY {
+		h.many.has_key = false
+	}
+	return s, .Skip
+}
+
+// A token inside a value kept whole, in which no path is armed.
+@(private)
+scan_inside :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	s := s
+	action := core.Action.Next
+	when SINK == .Document {
+		s, action = builder_step(false, true, false, false, &h.b, s, t)
+	} else {
+		if t.kind == .End {
+			s.c -= 1
+			#no_bounds_check s.b = h.b.stack[s.c]
+		} else {
+			s, action = scan_write(false, h, s, t)
+		}
+	}
+	// Only a close can bring the depth back.
+	if t.kind == .End && int(s.c) == h.keep {
+		d := h.keep
+		h.keep = h.free
+		when MANY {
+			m := h.many
+			many_found(SINK, h, m.keep_found, m.keep_open, t.lo + u64(t.n), d)
+			return scan_left(true, SINK, h, s, m.keep_set, d)
+		} else {
+			return scan_left(false, SINK, h, s, 0, d)
+		}
+	}
+	return s, action
+}
+
+// Whether path `path` is past answering with the logic at depth `d`, so a read that stops early need not wait for it.
+@(private)
+scan_known :: #force_inline proc "contextless" ($MANY: bool, h: ^Scan, path: ^Scan_Path, d: int) -> bool {
+	return h.stop_early && (d <= path.multi || !scan_fits(MANY, h, path) && d <= path.rollback)
 }
 
 @(private)
@@ -497,14 +615,45 @@ scan_stop :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs) -> (
 	return s, .Stop
 }
 
-// Whether an `All` step may keep another member. The limit counts answers, which only a repeated key can take back.
+// A value or container is past for the paths in `set`, with the logic at depth `d`: a path that can answer no more is
+// done, and a read that stops early stops when all are.
 @(private)
-scan_room :: #force_inline proc "contextless" (h: ^Scan, d: int) -> bool {
-	if h.n_answers < h.limit {
-		return true
+scan_left :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, set: u64, d: int) -> (core.Hook_Regs, core.Action) {
+	when MANY {
+		m := h.many
+		when SINK == .Stream {
+			if d <= h.flush {
+				many_flush(h)
+			}
+		}
+		if h.stop_early && !h.stopped {
+			for rest := set &~ m.done; rest != 0; rest &= rest - 1 {
+				p := intrinsics.count_trailing_zeros(rest)
+				#no_bounds_check if scan_known(true, h, &m.paths[p], d) {
+					m.done |= 1 << p
+				}
+			}
+			if m.done == m.all {
+				h.stopped = true
+			}
+		}
+		return s, .Stop if h.stopped else .Next
+	} else {
+		if scan_known(false, h, &h.path, d) {
+			return scan_stop(h, s)
+		}
+		return s, .Next
 	}
-	h.cut |= 1 << uint(d - 1)
-	return false
+}
+
+// Whether a path has room for another answer. The limit counts answers, which only a repeated key can take back.
+@(private)
+scan_fits :: #force_inline proc "contextless" ($MANY: bool, h: ^Scan, path: ^Scan_Path) -> bool {
+	when MANY {
+		return path.late || path.count < path.limit
+	} else {
+		return h.n_answers < path.limit
+	}
 }
 
 // Writes a key, a scalar or an open token. With `$WRITE` false only the open's frame is kept.
@@ -526,28 +675,132 @@ scan_write :: #force_inline proc "contextless" ($WRITE: bool, h: ^Scan, s: core.
 	}
 }
 
-// Tests a `Name` step against a key. Under `.Last` a later match takes back what the earlier one kept and answered.
+// Runs the step of every armed path over a key or an element. `wanted` is one path's answer, which `Scan.next` holds for
+// several.
 @(private)
-scan_name :: #force_inline proc "contextless" ($WRITE: bool, h: ^Scan, s: core.Hook_Regs, t: core.Token, d: int, name: string) -> (core.Hook_Regs, bool) {
+scan_picks :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token, f: ^Many_Frame, d: int, keyed: bool) -> (regs: core.Hook_Regs, wanted: bool) {
 	s := s
-	bit := u64(1) << uint(d - 1)
-	seen := h.matched & bit != 0
-	if seen && !h.last || !scan_key_is(WRITE, h, s, t, name) {
+	when MANY {
+		m := h.many
+		for set := f.armed; set != 0; set &= set - 1 {
+			p := uint(intrinsics.count_trailing_zeros(set))
+			#no_bounds_check path := &m.paths[p]
+			if path.deep < 0 {
+				s, _ = scan_pick(true, SINK, h, s, t, f, path, p, d - 1, d, keyed)
+			} else {
+				#no_bounds_check row := &m.deep[d * m.deeps + path.deep]
+				for bits := row.live; bits != 0; bits &= bits - 1 {
+					s, _ = scan_pick(true, SINK, h, s, t, f, path, p, int(intrinsics.count_trailing_zeros(bits)), d, keyed)
+				}
+			}
+		}
 		return s, false
+	} else {
+		return scan_pick(false, SINK, h, s, t, f, &h.path, 0, d - 1, d, keyed)
 	}
-	#no_bounds_check m := &h.marks[d - 1]
-	if seen {
-		h.n_answers = m.answers
-		when WRITE {
-			s.a = m.a
-			h.b.n_counts = m.counts
-			h.n_kept = m.kept
-			h.n_missing = m.missing
+}
+
+// Runs step `k` of path `p`, live in the container at depth `d`, over a key or an element.
+@(private)
+scan_pick :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token, f: ^Many_Frame, path: ^Scan_Path, p: uint, k, d: int, keyed: bool) -> (core.Hook_Regs, bool) {
+	#no_bounds_check switch x in path.steps[k] {
+	case core.Name:
+		if keyed {
+			return scan_name(MANY, SINK, h, s, t, f, path, p, k, d, string(x))
+		}
+	case core.Either:
+		if keyed {
+			return scan_name(MANY, SINK, h, s, t, f, path, p, k, d, x.name)
+		}
+		if int(u32(s.b)) == x.index {
+			scan_picked(MANY, h, path, p, k, true)
+			return s, true
+		}
+	case core.Index:
+		if int(u32(s.b)) == int(x) {
+			scan_picked(MANY, h, path, p, k, true)
+			return s, true
+		}
+	case core.All:
+		if scan_fits(MANY, h, path) {
+			scan_picked(MANY, h, path, p, k, true)
+			return s, true
+		}
+		h.cut |= 1 << uint(k)
+	case core.Slice:
+		when MANY {
+			count := int(u32(s.b))
+			if path.negative >> uint(k) & 1 == 0 && count >= x.lo && count < (x.hi.? or_else max(int)) {
+				scan_picked(MANY, h, path, p, k, true)
+			}
+		}
+	case core.Descend:
+		when MANY {
+			h.next |= 1 << p
+			#no_bounds_check h.many.next_deep[path.deep] |= 1 << uint(k)
+		}
+	}
+	return s, false
+}
+
+// Marks that path `p` picked the coming value at step `k`. `by_place` says it was by position, and such a child keeps a
+// `Kept_Child`, where one matched by name has none.
+@(private)
+scan_picked :: #force_inline proc "contextless" ($MANY: bool, h: ^Scan, path: ^Scan_Path, p: uint, k: int, by_place: bool) {
+	when MANY {
+		h.next |= 1 << p
+		m := h.many
+		if path.deep >= 0 {
+			#no_bounds_check m.next_deep[path.deep] |= 2 << uint(k)
+		}
+		if by_place && path.indexed >> uint(k) & 1 != 0 {
+			m.indexed = true
+		}
+	}
+}
+
+// Tests a `Name` step against a key. Under `.Last` a later match takes back what the earlier one answered: one path
+// rewinds the lists and the nodes, and with several the nodes stay in the document with no answer naming them.
+@(private)
+scan_name :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token, f: ^Many_Frame, path: ^Scan_Path, p: uint, k, d: int, name: string) -> (core.Hook_Regs, bool) {
+	s := s
+	when MANY {
+		m := h.many
+		matched := &f.matched
+		bit := u64(1) << p
+		if path.deep >= 0 {
+			#no_bounds_check matched = &m.deep[d * m.deeps + path.deep].matched
+			bit = 1 << uint(k)
 		}
 	} else {
-		h.matched |= bit
-		m^ = {s.a, h.n_answers, h.b.n_counts, h.n_kept, h.n_missing}
+		matched := &h.matched
+		bit := u64(1) << uint(k)
 	}
+	seen := matched^ & bit != 0
+	if seen && !h.last && !h.every_key || !scan_key_is(SINK != .Replay, h, s, t, name) {
+		return s, false
+	}
+	when MANY {
+		if seen && h.last {
+			many_take_back(m, f, path, p, k, d)
+		}
+		#no_bounds_check m.marks[path.marks + k] = m.n_placed
+	} else {
+		#no_bounds_check mark := &h.marks[k]
+		if seen {
+			h.n_answers = mark.answers
+			when SINK == .Document {
+				s.a = mark.a
+				h.b.n_counts = mark.counts
+				h.n_kept = mark.kept
+				h.n_missing = mark.missing
+			}
+		} else {
+			mark^ = {s.a, h.n_answers, h.b.n_counts, h.n_kept, h.n_missing}
+		}
+	}
+	matched^ |= bit
+	scan_picked(MANY, h, path, p, k, false)
 	return s, true
 }
 
@@ -577,71 +830,176 @@ scan_key_decoded :: #force_no_inline proc "contextless" (h: ^Scan, a: int, t: co
 	return core.key_equals(&h.b.doc, core.Node_Index(a), name)
 }
 
-// A wanted value: the path's end, a container the next step enters, or a value it cannot.
+// Gives an answer to the read's list. With several paths it waits among the placed ones for its place in the text.
 @(private)
-scan_reach :: proc "contextless" ($WRITE: bool, h: ^Scan, s: core.Hook_Regs, t: core.Token, d: int) -> (core.Hook_Regs, core.Action) {
+scan_answer :: #force_inline proc "contextless" ($MANY: bool, h: ^Scan, path: ^Scan_Path, p: uint, a: core.Answer, pos: u64, t: core.Token, hi: u64, chain: int) {
+	if !scan_fits(MANY, h, path) {
+		return
+	}
+	when MANY {
+		path.count += 1
+		a := a
+		a.path = u32(p)
+		m := h.many
+		scan_push(h, &m.placed, &m.n_placed, Placed{pos, a, t, hi, u32(chain)})
+	} else {
+		scan_push(h, &h.answers, &h.n_answers, a)
+	}
+}
+
+// A step the value cannot take, or a member the close found missing, with `later` the steps past it. `?` drops a
+// mismatch, and on a null or a missing member the mismatch belongs to the first `All` to come, as jq's `null[]`.
+@(private)
+scan_miss :: #force_inline proc "contextless" (path: ^Scan_Path, k: int, later: u64, is_null: bool) -> (outcome: core.Answer_Outcome, dropped: bool) {
+	if is_null && later == 0 {
+		return .Missing, false
+	}
+	at := k + int(intrinsics.count_trailing_zeros(later)) if is_null else k
+	return .Type_Mismatch, path.optional >> uint(at) & 1 != 0
+}
+
+// Path `p` reached a value at step `k`: the path's end, a container the next step enters, or a value it cannot. Returns
+// whether the path goes on inside it.
+@(private)
+scan_arrive :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, path: ^Scan_Path, p: uint, k, d: int, t: core.Token, at, owner: core.Node_Index, pos: u64) -> bool {
+	if k == path.n {
+		when MANY {
+			m := h.many
+			m.keep = true
+			m.ended |= 1 << p
+			when SINK == .Stream {
+				if t.kind > .Plain {
+					m.found |= 1 << p
+					return false
+				}
+			}
+		}
+		scan_answer(MANY, h, path, p, core.Answer{node = at, owner = owner}, pos, t, t.lo + u64(t.n), d - k)
+		return false
+	}
+	if scan_enters(h, path, k, t.kind) {
+		return true
+	}
+	outcome, dropped := scan_miss(path, k, path.alls >> uint(k), t.kind == .Null)
+	when MANY {
+		h.many.ended |= 1 << p
+	}
+	if dropped {
+		return false
+	}
+	// jq reads every step but `[]` of a null as null.
+	holder := at if outcome == .Type_Mismatch || owner == core.NO_NODE else owner
+	scan_answer(MANY, h, path, p, core.Answer{node = core.NO_NODE, owner = holder, outcome = outcome}, pos, t, t.lo + u64(t.n), d - k)
+	when MANY {
+		h.many.keep = true
+	}
+	return false
+}
+
+// A value the paths have reached: each answers, fails or goes on inside it.
+@(private)
+scan_reach :: proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token, f: ^Many_Frame, d: int) -> (core.Hook_Regs, core.Action) {
+	WRITE :: SINK == .Document
 	s := s
 	at := h.at
-	owner := core.Node_Index(s.b >> 32)
 	when WRITE {
 		at = core.Node_Index(s.a)
-		if d > 0 && (h.indexed &~ h.matched) >> uint(d - 1) & 1 != 0 {
-			scan_push(h, &h.kept, &h.n_kept, core.Kept_Child{at, u32(s.b)})
+	}
+	owner := core.Node_Index(s.b >> 32)
+	when MANY {
+		m := h.many
+		when WRITE {
+			if m.has_key {
+				at += 1
+			}
 		}
+		pos := u64(at) << 32 when SINK == .Replay else 2 * t.lo
+		child := many_arrivals(SINK, h, t, d, at, owner, pos)
+		enter := child != 0
+		ended := m.ended
+		has_key, indexed := m.has_key, m.indexed
+		m.indexed = false
+		m.has_key = false
+		whole := f.whole || m.keep && WRITE
+		if !enter && !m.keep && !whole {
+			s.b += 1
+			return s, .Skip
+		}
+		if WRITE && has_key {
+			s, _ = scan_write(WRITE, h, s, m.key)
+		}
+		if WRITE {
+			f.kept += 1
+		}
+	} else {
+		h.next = 0
+		indexed := d > 0 && (h.path.indexed &~ h.matched) >> uint(d - 1) & 1 != 0
+		enter := scan_arrive(false, SINK, h, &h.path, 0, d, d, t, at, owner, 0)
+		ended := u64(0)
 	}
-	if d == h.n {
-		scan_push(h, &h.answers, &h.n_answers, core.Answer{node = at, owner = owner})
-		return scan_keep(WRITE, h, s, t, d)
+	if WRITE && indexed {
+		scan_push(h, &h.kept, &h.n_kept, core.Kept_Child{at, u32(s.b)})
 	}
-	if scan_enters(h, d, t.kind) {
-		s, _ = scan_write(WRITE, h, s, t)
+	if !enter {
+		return scan_past(MANY, SINK, h, s, t, ended, d)
+	}
+	s, _ = scan_write(WRITE, h, s, t)
+	when MANY {
+		g := &m.frames[d + 1]
+		g^ = {armed = child, ends = ended, found = m.found, open = t, open_pos = pos, whole = whole, is_map = t.kind == .Map, ring = m.ring_top}
+		m.found = 0
+		many_ring_open(h, g, d + 1)
+	} else {
 		bit := u64(1) << uint(d)
 		h.matched &~= bit
 		h.cut &~= bit
 		h.maps = h.maps | bit if t.kind == .Map else h.maps &~ bit
-		when WRITE {
+	}
+	when WRITE {
+		when MANY {
+			g.slot = u32(h.b.n_counts)
+		} else {
 			#no_bounds_check h.slots[d] = u32(h.b.n_counts)
-			scan_push(h, &h.b.doc.counts_alloc, &h.b.n_counts, core.Child_Count{node = at})
 		}
-		return s, .Next
+		scan_push(h, &h.b.doc.counts_alloc, &h.b.n_counts, core.Child_Count{node = at})
 	}
-	if t.kind == .Null && h.alls >> uint(d) == 0 {
-		// jq reads every step but `[]` of a null as null.
-		scan_push(h, &h.answers, &h.n_answers, core.Answer{node = core.NO_NODE, owner = at if owner == core.NO_NODE else owner, outcome = .Missing})
-	} else {
-		scan_push(h, &h.answers, &h.n_answers, core.Answer{node = core.NO_NODE, owner = at, outcome = .Type_Mismatch})
-		when WRITE {
-			if t.kind > .Plain {
-				h.keep = d
-			}
-		}
-	}
-	return scan_keep(WRITE, h, s, t, d)
+	return s, .Next
 }
 
-// Keeps a value whole and goes on past it. With `$WRITE` false it is stepped over, since its nodes are already held.
+// Goes on past a value kept whole, the paths in `set` done with it. With `.Replay` it is stepped over, since its nodes are
+// already held.
 @(private)
-scan_keep :: #force_inline proc "contextless" ($WRITE: bool, h: ^Scan, s: core.Hook_Regs, t: core.Token, d: int) -> (core.Hook_Regs, core.Action) {
+scan_past :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token, set: u64, d: int) -> (core.Hook_Regs, core.Action) {
 	s := s
-	when WRITE {
+	when SINK == .Replay {
+		s.b += 1
+		left, action := scan_left(MANY, SINK, h, s, set, d)
+		return left, .Stop if action == .Stop else .Skip
+	} else {
+		when SINK == .Stream {
+			if t.kind > .Plain && !h.many.keep {
+				s.b += 1
+				return s, .Skip
+			}
+		}
 		action: core.Action
-		s, action = builder_step(false, true, false, false, &h.b, s, t)
+		s, action = scan_write(SINK == .Document, h, s, t)
 		if action != .Next {
 			return s, action
 		}
-		if t.kind > .Plain {
+		if t.kind <= .Plain {
+			return scan_left(MANY, SINK, h, s, set, d)
+		}
+		h.keep = d
+		when MANY {
+			m := h.many
+			m.keep_set = set
+			m.keep_found, m.keep_open = m.found, t
+			m.found = 0
+			return s, .Next
+		} else {
 			return s, .Keep
 		}
-		if scan_known(h, d) {
-			return scan_stop(h, s)
-		}
-		return s, .Next
-	} else {
-		s.b += 1
-		if scan_known(h, d) {
-			return scan_stop(h, s)
-		}
-		return s, .Skip
 	}
 }
 
@@ -664,80 +1022,100 @@ scan_reserve :: proc "contextless" (h: ^Scan, nodes: int) -> bool {
 
 // A kept value's close has passed at depth `d`. Returns whether the walk stops there.
 scan_kept :: proc "contextless" (h: ^Scan, d: int) -> bool {
-	h.keep = h.n
-	h.stopped = scan_known(h, d)
+	h.keep = h.free
+	h.stopped = scan_known(false, h, &h.path, d)
 	return h.stopped
 }
 
-// Whether `steps[d]` can enter a value of `kind`.
+// Whether step `k` of a path can enter a value of `kind`.
 @(private)
-scan_enters :: #force_inline proc "contextless" (h: ^Scan, d: int, kind: core.Kind) -> bool {
-	#no_bounds_check switch _ in h.steps[d] {
+scan_enters :: #force_inline proc "contextless" (h: ^Scan, path: ^Scan_Path, k: int, kind: core.Kind) -> bool {
+	#no_bounds_check switch _ in path.steps[k] {
 	case core.Name:
 		return kind == .Map
-	case core.Index:
+	case core.Index, core.Slice:
 		return kind == .Array || kind == .Map && h.positional
-	case core.All, core.Either:
+	case core.All, core.Either, core.Descend:
 		return kind == .Array || kind == .Map
-	case core.Slice, core.Descend:
 	}
 	return false
 }
 
-// A path container closes. A `Name` that met no key and an `Index` past the last element answer here, since only the
-// close knows, and the container's true count is known.
+// A `Name` that met no key and an `Index` past either end answer at the close, since only the close knows. Returns whether
+// the step missed.
 @(private)
-scan_close :: proc "contextless" ($WRITE: bool, h: ^Scan, s: core.Hook_Regs) -> (core.Hook_Regs, core.Action) {
-	s := s
-	d := int(s.c)
-	bit := u64(1) << uint(d - 1)
-	open := core.Node_Index(s.b >> 32)
-	count := u32(s.b)
-	miss, named, all := false, false, false
+scan_missed :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, f: ^Many_Frame, path: ^Scan_Path, p: uint, k: int, seen: bool, count: int, open: core.Node_Index, pos: u64, t: core.Token, d: int) -> bool {
+	miss, named := false, false
 	name: string
-	#no_bounds_check switch x in h.steps[d - 1] {
+	#no_bounds_check #partial switch x in path.steps[k] {
 	case core.Name:
-		miss = h.matched & bit == 0
-		named = true
-		name = string(x)
+		miss, named, name = !seen, true, string(x)
 	case core.Index:
-		miss = int(count) <= int(x)
+		miss = int(x) >= count || count + int(x) < 0
 	case core.Either:
-		named = h.maps & bit != 0
+		when MANY {
+			named = f.is_map
+		} else {
+			named = h.maps >> uint(k) & 1 != 0
+		}
 		name = x.name
-		miss = h.matched & bit == 0 if named else int(count) <= x.index
-	case core.All:
-		all = true
-	case core.Slice, core.Descend:
+		miss = !seen if named else x.index >= count
 	}
-	if miss && h.n_answers < h.limit {
-		// A `[]` still to come has nothing to enter, as jq's `null[]`.
-		outcome := core.Answer_Outcome.Missing if h.alls >> uint(d) == 0 else core.Answer_Outcome.Type_Mismatch
-		scan_push(h, &h.answers, &h.n_answers, core.Answer{node = core.NO_NODE, owner = open, outcome = outcome})
-		when WRITE {
-			if named {
-				scan_push(h, &h.missing, &h.n_missing, core.Missing_Name{open, name})
-			}
+	if !miss {
+		return false
+	}
+	outcome, dropped := scan_miss(path, k + 1, path.alls >> uint(k + 1), true)
+	if !dropped {
+		scan_answer(MANY, h, path, p, core.Answer{node = core.NO_NODE, owner = open, outcome = outcome}, pos, t, t.lo + u64(t.n), d - k - 1)
+	}
+	when SINK == .Document {
+		if named {
+			scan_push(h, &h.missing, &h.n_missing, core.Missing_Name{open, name})
 		}
 	}
-	when WRITE {
-		if h.b.err.kind == .None {
-			#no_bounds_check slot := h.slots[d - 1]
-			kept := count if all else (0 if miss else 1)
-			if h.cut & bit == 0 && kept == count {
-				builder_close_node(&h.b, int(s.a), open, count)
-				h.b.doc.counts_alloc[slot].node = core.NO_NODE
-			} else {
-				scan_partial(h, s, slot)
-			}
+	return true
+}
+
+// A path container closes, and its true count is known.
+@(private)
+scan_close :: proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	s := s
+	d := int(s.c)
+	count := int(u32(s.b))
+	when MANY {
+		m := h.many
+		#no_bounds_check f := &m.frames[d]
+		s = many_close_ring(SINK, h, s, f, d, count)
+		if h.stopped {
+			return s, .Stop
+		}
+		many_misses(SINK, h, s, t, f, d, count)
+		whole := int(f.kept) == count
+		slot := f.slot
+	} else {
+		bit := u64(1) << uint(d - 1)
+		miss := scan_missed(false, SINK, h, nil, &h.path, 0, d - 1, h.matched & bit != 0, count, core.Node_Index(s.b >> 32), 0, t, d)
+		kept := count if h.path.alls & bit != 0 else (0 if miss else 1)
+		whole := h.cut & bit == 0 && kept == count
+		#no_bounds_check slot := h.slots[d - 1]
+	}
+	if SINK == .Document && h.b.err.kind == .None {
+		if whole {
+			builder_close_node(&h.b, int(s.a), core.Node_Index(s.b >> 32), u32(count))
+			h.b.doc.counts_alloc[slot].node = core.NO_NODE
+		} else {
+			scan_partial(h, s, slot)
 		}
 	}
 	s.c -= 1
 	#no_bounds_check s.b = h.b.stack[s.c]
-	if scan_known(h, d - 1) {
-		return scan_stop(h, s)
+	when MANY {
+		m.ring_top = f.ring
+		many_found(SINK, h, f.found, f.open, t.lo + u64(t.n), d - 1)
+		return scan_left(true, SINK, h, s, f.armed | f.ends, d - 1)
+	} else {
+		return scan_left(false, SINK, h, s, 0, d - 1)
 	}
-	return s, .Next
 }
 
 // Closes the open container of `s` as `Partial`, its true count in its slot.

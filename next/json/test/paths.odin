@@ -495,3 +495,25 @@ query_kept_value_in_small_arena :: proc(t: ^testing.T) {
 	testing.expect(t, len(doc.answers) == 1 && doc.answers[0].outcome == .Found)
 	testing.expect(t, string(core.span(&doc, doc.answers[0].node)) == `[1,{"b":2}]`)
 }
+
+// A member matched by name has no `Kept_Child`, with one path and with several, so `member_of` does not take it for one
+// kept by position.
+@(test)
+either_by_name_has_no_position :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"0":1,"b":2}`)
+	either, e := core.parse_pointer("/0")
+	defer core.path_destroy(&either)
+	testing.expect_value(t, e.kind, core.Path_Error_Kind.None)
+	b, be := core.parse_path(".b")
+	defer core.path_destroy(&b)
+	testing.expect_value(t, be.kind, core.Path_Error_Kind.None)
+	one, oerr := json.query(src, .Json, either)
+	defer core.destroy(&one)
+	testing.expect_value(t, oerr.kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, len(one.kept), 0)
+	paths := [?]core.Path{either, b}
+	many, merr := json.query(src, .Json, paths[:])
+	defer core.destroy(&many)
+	testing.expect_value(t, merr.kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, len(many.kept), 0)
+}
