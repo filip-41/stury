@@ -152,7 +152,7 @@ A build chooses its hook, and the hook is compiled for that choice:
 | Error | When |
 |---|---|
 | `.Walk` | the walk's fault, in `inner` |
-| `.Duplicate_Key` | a build under `refuse_duplicates` met a repeated key, at the later key's first byte |
+| `.Duplicate_Key` | a build under `refuse_duplicates` met a repeated key, at the later key's first byte, or a commit's named cell is one its record holds |
 | `.No_Memory` | an owned allocation was refused |
 
 A JSON `0x1E` before the document is `.Bad_Char` at that byte, a JSON text with no value is `.Truncated` at `len(src)`,
@@ -282,20 +282,20 @@ Edit_Spelling :: struct {
 	member_sep:    proc(doc: ^Document) -> string,
 	key_sep:       string,
 	insert_check:  proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
-	cut_check:     proc(doc: ^Document, container: Node_Index, cuts: []int, has_set: bool) -> Document_Error,
 	interior:      proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64),
 	root_head:     proc(cx: ^Compose, open: u64) -> (err: Document_Error, ok: bool),
 	root_junction: proc(cx: ^Compose, open, close: u64, l, r: int, inserts: []Edit) -> bool,
 	fact_slot:     proc(doc: ^Document, node: Node_Index, role: Role, emptied: bool) -> bool,
 	emptied:       proc(doc: ^Document, list: ^Edit_List) -> bool,
+	plan:          proc(doc: ^Document, list: ^Edit_List, out: ^[dynamic]Edit, allocator: runtime.Allocator) -> (changed: bool, err: Document_Error),
 }
 ```
 
 `Comment_Spelling` is `None`, `Line` or `Byte`: no marker, a JSON line or block comment, or a delimited text's comment
 line. Under `Line` a body holding a line end is written as `/* */`, so a line comment cannot end its line early. JSON's
 table supplies `value`, `key_text`, `reads`, `comment` and `member_sep`, with `key_sep` `":"`, and its `comment` is
-`.Line` for `Jsonc` and `Json5` and `.None` for `Json`. dsv's table supplies `value`, `reads`, `comment`, `member_sep`,
-`insert_check` and `cut_check`, and no `key_text`. A format with `root_junction` is flat: its text has no brackets, so
+`.Line` for `Jsonc` and `Json5` and `.None` for `Json`. dsv's table supplies `value`, `key_text`, `reads`, `comment`,
+`member_sep`, `insert_check` and `plan`, which turns a list's column changes into plain edits. A format with `root_junction` is flat: its text has no brackets, so
 `interior` says where a container's members lie, `root_head` and `root_junction` compose the root, whose members are
 lines (`dsv/compose.odin`), and `fact_slot` and `emptied` say which facts the output holds. dsv's `member_sep` is the
 delimiter, and its line end is the first one the text has for a record, else its header's, else LF. A record's cells
@@ -388,7 +388,7 @@ judges the text as one value, one key or one record of the document's spec, and 
 | Call | Records | Refuses |
 |---|---|---|
 | `set(list, node, text: string)` | the node's bytes become `text`; a key's text is its decoded name | `.Bad_Index`, `.Bad_Value` |
-| `insert(list, container, at, text: string)` | an element of an `Array` | `.Bad_Index`, `.Wrong_Container`, `.Bad_Position`, `.Bad_Value`, `.Bad_Width` |
+| `insert(list, container, at, text: string)` | an element of an `Array` | `.Bad_Index`, `.Wrong_Container`, `.Bad_Position`, `.Bad_Value` |
 | `insert(list, container, at, key, text: string)` | a member of a `Map`, its key a decoded name | the same |
 | `remove(list, node)` | the member the node is, and its key | `.Bad_Index` |
 | `set_fact(list, node, role, text: string)`, `remove_fact(list, node, role)` | the facts of the node and role | `.Bad_Index`, `.Bad_Fact` |
@@ -397,12 +397,11 @@ judges the text as one value, one key or one record of the document's spec, and 
   decoded name, which the commit writes with the format's quotes and escapes; a dsv header cell's new text is a record
   of exactly one cell.
 - In a delimited text a cell's text is one record of exactly one cell, and an empty text is the empty cell. A root's
-  insert is a record, and its cell count must equal the table's width when the table has one. An insert's `at` is 0
-  through the container's length at the time the edit was recorded.
-- A cell joins a record only while the count stays within the table's width. The record that sets the width may take a
-  cell past it: the header row when no data record follows it, or the only record of a headerless table.
-- `remove` takes any value that is a member of a container. It refuses the root and any node whose role is not
-  `Value`, so a key goes with its value and a header cell cannot be removed alone.
+  insert is a record. An insert's `at` is 0 through the container's length at the time the edit was recorded.
+- A delimited text's columns are the commit's to decide, from the whole list. A cell joins a headed record, a `Map`, by
+  name and a headerless record, an `Array`, by position.
+- `remove` takes any value that is a member of a container, and a delimited text's header cell. It refuses the root and
+  any other node whose role is not `Value`, so a key goes with its value.
 - A fact edit takes any node that is not a key and a role past `Key`. `Comment_Inline` refuses a body holding LF or CR
   with `.Bad_Fact`, and a role at or below `Key` is `.Bad_Index`. A second edit of one node and role is recorded and
   `commit` refuses it with `.Conflicting_Edits`.
@@ -429,6 +428,13 @@ and `commit_as` take the spec byte, and `commit_as` refuses a delimited document
 builds the output in one allocation with the format's separators, the caller frees `out`, and reading after edits is
 `commit` then `build`.
 
+A delimited text's commit first turns the list's cell edits into column changes (`dsv/plan.odin`). A list with no cell
+inserted or removed pays one pass over its edits, and any other pays one over the records. A cell removed from every record that holds it drops its column with the
+header cell, and a removed header cell does the same. A cell removed from only some records is emptied. A cell inserted
+beyond the old columns adds a column: one per name in a headed text, at the position the insert gives or else at the
+end, and one per position in a headerless one. A record no insert fills gets an empty cell. A short record stays short
+unless a cell is written past its end, which pads the cells before it.
+
 The commit refuses:
 
 - two edits of one node, two fact edits of one node and role, two ranges that overlap, and an insert inside what another
@@ -436,10 +442,13 @@ The commit refuses:
 - an edit inside the subtree another edit removes, and a fact edit on a node below a set's node, both
   `.Conflicting_Edits` at the named node's first byte. The ranges and queries are swept once, so the check is
   O(n log n).
-- an edit that would leave a delimited text a record the table cannot read, with `.Bad_Width`. A table's width is its
-  header's cell count or its first record's. A removal may not take every cell, nor leave a record of the table's full
-  width with fewer cells, except the record that sets the width, and a cell set to nothing is refused when the
-  removals leave its record at most one cell, which would read as no record.
+- an edit that would leave a delimited text a line that does not read as its record, with `.Bad_Width`: a line with no
+  cell or with one empty cell, which reads as no record, or one whose new first cell starts with the comment byte or, on
+  the text's first line, a byte order mark. A record inserted into the root must hold as many cells as the table will
+  have, and records inserted into an empty table must agree.
+- a named cell that its record already holds, with `.Duplicate_Key` at the header cell, a new column that two inserts
+  place apart, with `.Bad_Position`, a name the spec cannot spell, with `.Bad_Value`, and a second cell for one column
+  of a record, with `.Conflicting_Edits`.
 - a result that does not read, with `.Bad_Result`. The output is read strictly, then with the format's tolerances, and
   a text that needs a tolerance is accepted only when the source needed one too. A JSON commit under another spec must
   read strictly.

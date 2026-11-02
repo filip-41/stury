@@ -6,8 +6,8 @@ import core "../../core"
 import dsv ".."
 import walktest "../../walktest"
 
-// Edits over a delimited text: a cell's text, a record's line, and the table's width, which the header or the first
-// record fixes.
+// Edits over a delimited text: a cell's text, a record's line, and the table's columns, which a commit decides from the
+// whole list.
 
 @(private = "file")
 Dsv_Read :: struct {
@@ -115,7 +115,7 @@ edit_insert_record :: proc(t: ^testing.T) {
 	})
 }
 
-// A cell inserted into a record the table lets it join, and the refusal when the record is already the table's width.
+// A cell inserted into a record: it fills a cell a short record lacks, and otherwise adds a column.
 @(test)
 edit_insert_cell :: proc(t: ^testing.T) {
 	// A table of one record follows the record's width.
@@ -136,22 +136,20 @@ edit_insert_cell :: proc(t: ^testing.T) {
 	check(t, "1,2\n3\n", "1,2\n3,4\n", .Csv, {no_header = true, tolerate = {.Ragged}}, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.insert(list, 4, 1, string("4"))
 	})
-	// A headed record is a Map, so an array-element insert is refused as Wrong_Container. A header that records follow refuses a column.
+	// A headed record is a Map, so an array-element insert is refused as Wrong_Container.
 	doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n3,4\n"), .Csv)
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	testing.expect_value(t, core.insert(&list, 4, 2, string("9")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.insert(&list, 1, 2, string("c")).kind, core.Document_Error_Kind.Bad_Width)
 	testing.expect_value(t, core.insert(&list, 4, 0, string("x,y")).kind, core.Document_Error_Kind.Wrong_Container)
 	testing.expect_value(t, len(list.edits), 0)
 
-	// A headerless record is an Array and checks cell count against the table width.
+	// A headerless record is an Array, and a recorded cell is one cell at a position of the record.
 	nh_doc, _ := dsv.build(transmute([]u8)string("1,2\n3,4\n"), .Csv, {no_header = true})
 	defer core.destroy(&nh_doc)
 	nh_list := core.edit_list_init(&nh_doc)
 	defer core.edit_list_destroy(&nh_list)
-	testing.expect_value(t, core.insert(&nh_list, 1, 2, string("9")).kind, core.Document_Error_Kind.Bad_Width)
 	testing.expect_value(t, core.insert(&nh_list, 1, 0, string("x,y")).kind, core.Document_Error_Kind.Bad_Value)
 	testing.expect_value(t, core.insert(&nh_list, 1, 9, string("7")).kind, core.Document_Error_Kind.Bad_Position)
 	testing.expect_value(t, len(nh_list.edits), 0)
@@ -223,34 +221,271 @@ edit_remove_cell :: proc(t: ^testing.T) {
 	check(t, "1,2,3\n", "1,3\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.remove(list, 3)
 	})
-	// A header cell has role `Key` and is no member to remove. A column leaves only through the header row's own
-	// edits, which are refused too.
-	{
-		doc, _ := dsv.build(transmute([]u8)string("a,b\n"), .Csv)
-		defer core.destroy(&doc)
-		list := core.edit_list_init(&doc)
-		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.remove(&list, 3).kind, core.Document_Error_Kind.Bad_Index)
-		testing.expect_value(t, len(list.edits), 0)
-	}
-	// A record at the table's width keeps it, and a record cannot become empty or keep one empty cell.
-	doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n3,4\n"), .Csv)
-	defer core.destroy(&doc)
-	list := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.remove(&list, 5).kind, core.Document_Error_Kind.None)
-	_, _, e := core.commit(&list)
-	testing.expect_value(t, e.kind, core.Document_Error_Kind.Bad_Width)
-	core.edit_list_destroy(&list)
-
+	// A header cell is a column's name, and removing it drops the column.
+	check(t, "a,b\n", "a\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 3)
+	})
+	// A cell removed from only some records is emptied, and its column stays.
+	check(t, "a,b\n1,2\n3,4\n", "a,b\n,2\n3,4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 5)
+	})
+	// A record cannot become empty.
 	single, _ := dsv.build(transmute([]u8)string("1,2\n"), .Csv, {no_header = true})
 	defer core.destroy(&single)
-	list = core.edit_list_init(&single)
+	list := core.edit_list_init(&single)
 	defer core.edit_list_destroy(&list)
 	testing.expect_value(t, core.remove(&list, 3).kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, core.remove(&list, 2).kind, core.Document_Error_Kind.None)
-	_, _, e = core.commit(&list)
+	_, _, e := core.commit(&list)
 	testing.expect_value(t, e.kind, core.Document_Error_Kind.Bad_Width)
+}
+
+@(private = "file")
+Column_Edit :: proc(list: ^core.Edit_List) -> core.Document_Error
+
+// Expects `edit` to record and the commit to refuse the list with `want`.
+@(private = "file")
+refused :: proc(t: ^testing.T, src: string, opts: dsv.Options, want: core.Document_Error_Kind, edit: Column_Edit) {
+	doc, err := dsv.build(transmute([]u8)src, .Csv, opts)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	testing.expect_value(t, edit(&list).kind, core.Document_Error_Kind.None)
+	out, _, e := core.commit(&list)
+	delete(out)
+	testing.expectf(t, e.kind == want, "%q: commit %v, want %v", src, e.kind, want)
+}
+
+// Removes each node in turn.
+@(private = "file")
+remove_all :: proc(list: ^core.Edit_List, nodes: ..core.Node_Index) -> core.Document_Error {
+	for n in nodes {
+		if e := core.remove(list, n); e.kind != .None {
+			return e
+		}
+	}
+	return {}
+}
+
+// A cell removed from every record that holds it drops its column with the header cell. A short record is skipped.
+@(test)
+edit_drop_column :: proc(t: ^testing.T) {
+	check(t, "a,b,c\n1,2,3\n4,5,6\n", "b,c\n2,3\n5,6\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return remove_all(list, 6, 10)
+	})
+	check(t, "a,b,c\n1,2,3\n4,5,6\n", "a,c\n1,3\n4,6\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return remove_all(list, 7, 11)
+	})
+	check(t, "a,b,c\n1,2,3\n4,5,6\n", "a,b\n1,2\n4,5\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return remove_all(list, 8, 12)
+	})
+	// The header cell alone names the same column.
+	check(t, "a,b,c\n1,2,3\n4,5,6\n", "a,c\n1,3\n4,6\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 3)
+	})
+	check(t, "a,b\r\n1,2\r\n3,4\r\n", "a\r\n1\r\n3\r\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return remove_all(list, 6, 9)
+	})
+	check(t, "a,\"b,c\",d\n1,\"2\n3\",4\n", "\"b,c\",d\n\"2\n3\",4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 6)
+	})
+	// A headerless text has no names, and a column is every record's cell at one position.
+	check(t, "1,2\n3,4\n", "1\n3\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return remove_all(list, 3, 6)
+	})
+	ragged := dsv.Options{tolerate = {.Ragged}}
+	check(t, "a,b,c\n1\n2,3\n4,5,6\n", "a,c\n1\n2\n4,6\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return remove_all(list, 9, 12)
+	})
+	check(t, "a,b,c\n1\n2,3\n4,5,6\n", "a,b\n1\n2,3\n4,5\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 13)
+	})
+	// A removed record does not hold the column.
+	check(t, "a,b\n1,2\n3,4\n", "a\n1\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return remove_all(list, 7, 6)
+	})
+	// The refusals: no column left, and a line that would stop reading as the record it was.
+	refused(t, "a\n1\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 4)
+	})
+	refused(t, "a,b\n1,2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return remove_all(list, 2, 3)
+	})
+	refused(t, "a\n1\n2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 4)
+	})
+	refused(t, "a,b\n1,#2\n", {comment = '#'}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 2)
+	})
+	refused(t, "a,b,c\n1,#2,3\n", {comment = '#'}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 2)
+	})
+	refused(t, "a,\xEF\xBB\xBFb\n1,2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 2)
+	})
+	// A quoted cell starts with its quote, so it may become the first.
+	check(t, "a,b\n1,\"#2\"\n", "b\n\"#2\"\n", .Csv, {comment = '#'}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 2)
+	})
+	// One cell removed twice is a conflict, and so is a set of a cell the list drops.
+	refused(t, "a,b\n1,2\n", {}, .Conflicting_Edits, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return remove_all(list, 5, 5)
+	})
+	refused(t, "a,b\n1,2\n", {}, .Conflicting_Edits, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.remove(list, 2); e.kind != .None {
+			return e
+		}
+		return core.set(list, 5, string("9"))
+	})
+}
+
+// An insert of a name the header lacks adds one column, however many records name it, and the others get an empty cell.
+@(test)
+edit_add_column :: proc(t: ^testing.T) {
+	check(t, "a,b\n1,2\n3,4\n", "a,b,c\n1,2,9\n3,4,\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 4, 2, string("c"), string("9"))
+	})
+	check(t, "a,b\n1,2\n3,4\n", "a,b,c\n1,2,8\n3,4,9\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.insert(list, 4, 2, string("c"), string("8")); e.kind != .None {
+			return e
+		}
+		return core.insert(list, 7, 2, string("c"), string("9"))
+	})
+	check(t, "a,b\n1,2\n", "a,b,c,d\n1,2,8,9\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.insert(list, 4, 2, string("c"), string("8")); e.kind != .None {
+			return e
+		}
+		return core.insert(list, 4, 2, string("d"), string("9"))
+	})
+	// A position inside the record places the column, and every record naming it must agree.
+	check(t, "a,b\n1,2\n3,4\n", "a,c,b\n1,9,2\n3,,4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 4, 1, string("c"), string("9"))
+	})
+	refused(t, "a,b\n1,2\n3,4\n", {}, .Bad_Position, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.insert(list, 4, 1, string("c"), string("8")); e.kind != .None {
+			return e
+		}
+		return core.insert(list, 7, 0, string("c"), string("9"))
+	})
+	// A name is spelled as a cell of the text, and a header cell inserted by name is the same column.
+	check(t, "a\n1\n", "a,\"x,\"\"y\"\n1,9\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 3, 1, string("x,\"y"), string("9"))
+	})
+	check(t, "a\tb\n1\t2\n", "a\tb\tx\\ty\n1\t2\t9\n", .Tsv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 4, 2, string("x\ty"), string("9"))
+	})
+	check(t, "a,b\n1,2\n3,4\n", "a,b,c\n1,2,9\n3,4,\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.insert(list, 1, 2, string("c")); e.kind != .None {
+			return e
+		}
+		return core.insert(list, 4, 2, string("c"), string("9"))
+	})
+	// A header cell inserted alone adds an empty column.
+	check(t, "a,b\n1,2\n3,4\n", "c,a,b\n,1,2\n,3,4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 1, 0, string("c"))
+	})
+	// Plain cannot spell a name holding its delimiter.
+	{
+		doc, _ := dsv.build(transmute([]u8)string("a|b\n1|2\n"), .Plain, dsv.Options{delimiter = '|'})
+		defer core.destroy(&doc)
+		list := core.edit_list_init(&doc)
+		defer core.edit_list_destroy(&list)
+		testing.expect_value(t, core.insert(&list, 4, 2, string("x|y"), string("9")).kind, core.Document_Error_Kind.None)
+		_, _, e := core.commit(&list)
+		testing.expect_value(t, e.kind, core.Document_Error_Kind.Bad_Value)
+	}
+	// A record that holds the name already refuses it.
+	refused(t, "a,b\n1,2\n", {}, .Duplicate_Key, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 4, 2, string("b"), string("9"))
+	})
+	// A headerless record's position is the column, and the records at one position share it.
+	check(t, "1,2\n3,4\n", "1,2,9\n3,4,\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 1, 2, string("9"))
+	})
+	check(t, "1,2\n3,4\n", "1,2,8\n3,4,9\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.insert(list, 1, 2, string("8")); e.kind != .None {
+			return e
+		}
+		return core.insert(list, 4, 2, string("9"))
+	})
+	check(t, "1,2\n3,4\n", "8,1,2\n,3,4\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 1, 0, string("8"))
+	})
+	// A column goes while another comes, and an inserted record is judged against what the table becomes.
+	check(t, "a,b\n1,2\n", "a,c\n1,9\n3,4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.remove(list, 3); e.kind != .None {
+			return e
+		}
+		if e := core.insert(list, 4, 2, string("c"), string("9")); e.kind != .None {
+			return e
+		}
+		return core.insert(list, core.ROOT, 1, string("3,4"))
+	})
+	refused(t, "a,b\n1,2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, core.ROOT, 0, string("7"))
+	})
+	refused(t, "a,b\n1,2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.remove(list, 3); e.kind != .None {
+			return e
+		}
+		return core.insert(list, core.ROOT, 0, string("7,8"))
+	})
+	refused(t, "", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.insert(list, core.ROOT, 0, string("1,2")); e.kind != .None {
+			return e
+		}
+		return core.insert(list, core.ROOT, 0, string("3"))
+	})
+}
+
+// A short record fills a column it lacks, padding the ones before it, and stays short when nothing is written past it.
+@(test)
+edit_fill_short_record :: proc(t: ^testing.T) {
+	ragged := dsv.Options{tolerate = {.Ragged}}
+	check(t, "a,b,c\n1\n", "a,b,c\n1,,9\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 5, 1, string("c"), string("9"))
+	})
+	check(t, "a,b\n1\n2,3\n", "a,b,c\n1\n2,3,\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 1, 2, string("c"))
+	})
+	check(t, "a,b\n1\n2,3\n", "a,b,c\n1,,9\n2,3,\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 4, 1, string("c"), string("9"))
+	})
+	check(t, "1,2\n3\n", "1,2\n3,4\n", .Csv, {no_header = true, tolerate = {.Ragged}}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, 4, 1, string("4"))
+	})
+	refused(t, "a,b\n1\n", ragged, .Conflicting_Edits, proc(list: ^core.Edit_List) -> core.Document_Error {
+		if e := core.insert(list, 4, 1, string("b"), string("8")); e.kind != .None {
+			return e
+		}
+		return core.insert(list, 4, 1, string("b"), string("9"))
+	})
+}
+
+// A set to the empty text changes no column, so only a line left as one empty cell is refused.
+@(test)
+edit_set_empty :: proc(t: ^testing.T) {
+	check(t, "a,b\n1,2\n", "a,b\n,2\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.set(list, 5, string(""))
+	})
+	refused(t, "a\n1\n2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.set(list, 4, string(""))
+	})
+	refused(t, "a\n1\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.set(list, 2, string(""))
+	})
+	refused(t, "1,2\n3\n", {no_header = true, tolerate = {.Ragged}}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.set(list, 5, string(""))
+	})
+}
+
+// A column edit judges the lines it changes, and a line it leaves alone may hold what no edit could write.
+@(test)
+edit_column_keeps_other_lines :: proc(t: ^testing.T) {
+	check(t, "a,b\n\"\"\n1,2\n3,4\n", "a\n\"\"\n1\n3\n", .Csv, {tolerate = {.Ragged}}, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return remove_all(list, 8, 11)
+	})
 }
 
 // The refused edits, each with the kind that names what is wrong.
@@ -266,10 +501,9 @@ edit_errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.set(&list, 5, string("x,y")).kind, core.Document_Error_Kind.Bad_Value)
 	testing.expect_value(t, core.set(&list, 5, string("x\ny")).kind, core.Document_Error_Kind.Bad_Value)
 	testing.expect_value(t, core.insert(&list, 4, 0, string("x,y")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.insert(&list, core.ROOT, 0, string("7")).kind, core.Document_Error_Kind.Bad_Width)
 	testing.expect_value(t, core.insert(&list, core.ROOT, 3, string("7,8")).kind, core.Document_Error_Kind.Bad_Position)
 	testing.expect_value(t, core.insert(&list, 4, 9, string("7")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.insert(&list, 4, 0, string(`k`), string("v")).kind, core.Document_Error_Kind.Wrong_Container)
+	testing.expect_value(t, core.insert(&list, 5, 0, string(`k`), string("v")).kind, core.Document_Error_Kind.Wrong_Container)
 	testing.expect_value(t, core.remove(&list, 0).kind, core.Document_Error_Kind.Bad_Index)
 	testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.Bad_Index)
 	testing.expect_value(t, core.remove(&list, 99).kind, core.Document_Error_Kind.Bad_Index)
@@ -398,8 +632,6 @@ edit_options :: proc(t: ^testing.T) {
 		defer core.edit_list_destroy(&list)
 		testing.expect_value(t, core.set(&list, 5, string("p;q")).kind, core.Document_Error_Kind.Bad_Value)
 		testing.expect_value(t, core.set(&list, 5, string("\"p;q\"")).kind, core.Document_Error_Kind.None)
-		// An unquoted text with three cells is no record of this two-cell table.
-		testing.expect_value(t, core.insert(&list, core.ROOT, 0, string("p;q;r")).kind, core.Document_Error_Kind.Bad_Width)
 	}
 	// Plain has no quoting, so it cannot hold the delimiter at all.
 	{

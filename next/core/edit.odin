@@ -2,6 +2,7 @@ package core
 
 import "base:runtime"
 import "core:bytes"
+import "core:mem"
 import "core:slice"
 
 // A log of edits kept apart from a document, which does not change after its build. A reader sees an edit only after
@@ -168,11 +169,12 @@ insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string,
 }
 
 // Appends the removal edit. The commit removes the member with its key and one adjacent separator. A delimited
-// text's record is removed with its line end, and a record's cell when the remaining table still reads.
+// text's record is removed with its line end, and a header cell or a record's cell by the format's column rules.
 remove :: proc(list: ^Edit_List, node: Node_Index) -> Document_Error {
-	_, n, err := node_of(list, node)
-	// A key and a delimited text's header row are no member of their own: a key is removed with its value.
-	if err.kind != .None || node == ROOT || n.role != .Value {
+	doc, n, err := node_of(list, node)
+	// A key is removed with its value and a header row is no member of its own, but a flat text's key is a cell.
+	flat_key := n.role == .Key && flat_doc(doc) && n.kind != .Array
+	if err.kind != .None || node == ROOT || n.role != .Value && !flat_key {
 		return {kind = .Bad_Index}
 	}
 	return edit_add(list, node, .Remove, .Value, 0, "", "")
@@ -268,6 +270,27 @@ commit_as :: proc(list: ^Edit_List, spec: u8, allocator := context.allocator) ->
 	if flat_doc(doc) && spec != doc.read.spec {
 		return nil, 0, {kind = .Bad_Spec}
 	}
+	if doc.spelling.edit == nil || doc.spelling.edit.plan == nil {
+		return commit_edits(list, spec, allocator)
+	}
+	// What a plan writes lives only as long as this commit, so its one arena frees all of it.
+	arena: mem.Dynamic_Arena
+	mem.dynamic_arena_init(&arena, allocator, allocator)
+	defer mem.dynamic_arena_destroy(&arena)
+	scratch := mem.dynamic_arena_allocator(&arena)
+	planned := Edit_List{doc = doc, allocator = scratch}
+	planned.edits, _ = make([dynamic]Edit, scratch)
+	changed, e := doc.spelling.edit.plan(doc, list, &planned.edits, scratch)
+	if e.kind != .None {
+		return nil, 0, e
+	}
+	return commit_edits(&planned if changed else list, spec, allocator)
+}
+
+// Composes `list`'s edits, splices them into the source and checks that the output reads.
+@(private)
+commit_edits :: proc(list: ^Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: Document_Error) {
+	doc := list.doc
 	chunks, _ := make([dynamic]Chunk, allocator)
 	defer delete(chunks)
 	text, _ := make([dynamic]u8, allocator)
@@ -666,13 +689,11 @@ edit_add :: proc(list: ^Edit_List, node: Node_Index, op: Edit_Op, role: Role, at
 	return {}
 }
 
-@(private)
 push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool) {
 	count, err := append(d, v)
 	return count, err == nil
 }
 
-@(private)
 push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool) {
 	if _, err := append(d, ..vs); err != nil {
 		return 0, false

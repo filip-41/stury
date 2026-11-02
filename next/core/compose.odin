@@ -482,7 +482,6 @@ compose_container :: proc(cx: ^Compose, c: Node_Index, group: []Target, allocato
 	}
 	inserts, _ := make([dynamic]Edit, allocator)
 	defer delete(inserts)
-	has_set := false
 	for t in group {
 		e := cx.list.edits[t.edit]
 		switch e.op {
@@ -499,7 +498,6 @@ compose_container :: proc(cx: ^Compose, c: Node_Index, group: []Target, allocato
 			}
 			cx.removed[p] = true
 		case .Set:
-			has_set = true
 		case .Set_Fact, .Remove_Fact:
 			if e.role == .Comment_Foot {
 				cx.dirty[n] = true
@@ -529,18 +527,6 @@ compose_container :: proc(cx: ^Compose, c: Node_Index, group: []Target, allocato
 					member_fact(cx, f) or_return
 				}
 			}
-		}
-	}
-	if check := doc.spelling.edit.cut_check; check != nil && c != ROOT && c != NO_NODE {
-		cuts, _ := make([dynamic]int, allocator)
-		defer delete(cuts)
-		for removed, i in cx.removed {
-			if removed {
-				push(&cuts, i) or_return
-			}
-		}
-		if e := check(doc, c, cuts[:], has_set); e.kind != .None {
-			return e, false
 		}
 	}
 	l, k := -1, 0
@@ -602,10 +588,6 @@ compose_tree :: proc(doc: ^Document, list: ^Edit_List, style: Comment_Spelling, 
 			end := at + u64(len(span(doc, e.node)))
 			push(chunks, Chunk{lo = at, hi = end, from = from, to = len(text^), rank = RANK_SET}) or_return
 			push(&spans, Written_Span{lo = at, hi = end}) or_return
-			// A member set to nothing goes through the format's cut check, as the removals beside it do.
-			if len(e.text) == 0 && doc.spelling.edit.cut_check != nil {
-				push(&targets, Target{node = e.node, edit = i}) or_return
-			}
 		case .Set_Fact, .Remove_Fact:
 			push(&keys, Fact_Key{key = u64(e.node) << 8 | u64(e.role), edit = i}) or_return
 			if e.op == .Set_Fact && !fact_slot(doc, e.node, e.role, style, emptied) {

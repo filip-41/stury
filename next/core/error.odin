@@ -139,7 +139,7 @@ render_fault :: proc(w: io.Writer, src: []u8, f: Fault, lines: ^Lines = nil) -> 
 Document_Error_Kind :: enum u8 {
 	None,
 	Walk, // the walk's fault, in `inner`
-	Duplicate_Key, // a build with `refuse_duplicates` met a key that repeats one of its object's, at the second key's first byte
+	Duplicate_Key, // a build with `refuse_duplicates` met a key that repeats one of its object's, at the second key's first byte, or a commit's named cell is one its record holds, at the header cell
 	No_Memory, // an allocation the document or the edit list owns was refused, at no byte
 	Bad_Index, // an edit names no node it may change: no such node, a key of a member, the root, a table's record
 	Bad_Position, // an insert position is past the container's length

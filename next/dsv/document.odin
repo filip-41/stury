@@ -25,16 +25,17 @@ read_opts :: #force_inline proc(doc: ^core.Document) -> (delimiter: u8, comment:
 @(private, rodata)
 EDIT := core.Edit_Spelling {
 	value         = edit_value_at,
+	key_text      = edit_key_text,
 	reads         = edit_reads_at,
 	comment       = edit_comment,
 	member_sep    = edit_cell_sep,
 	insert_check  = edit_insert_check,
-	cut_check     = edit_cut_check,
 	interior      = edit_interior,
 	root_head     = compose_root_head,
 	root_junction = compose_root_junction,
 	fact_slot     = edit_fact_slot,
 	emptied       = edit_emptied,
+	plan          = edit_plan,
 }
 
 // dsv's spelling services, in rodata, the same table for every spec. A service dispatches on `doc.read.spec`, since the
@@ -500,15 +501,6 @@ dsv_width :: proc(doc: ^core.Document) -> int {
 	return 0
 }
 
-// Whether `c` is the record that sets the table's width: the only record of a table with no header, or the header of a table with no data record.
-@(private)
-dsv_sole_record :: proc(doc: ^core.Document, c: core.Node_Index) -> bool {
-	if doc.shared_keys == c {
-		return core.length(doc, core.ROOT) == 0
-	}
-	return doc.shared_keys == 0 && core.length(doc, core.ROOT) == 1
-}
-
 // The bytes a container's members lie in. The root's records start after its header row and run to the text's end, and
 // a record's cells stop at its last cell, since its line end is the root's.
 @(private)
@@ -587,63 +579,61 @@ edit_value_at :: proc(doc: ^core.Document, src: []u8, allocator: runtime.Allocat
 	return {} if cells == 1 else {kind = .Bad_Value}
 }
 
-// Checks an insert into `container`: a record insert into the root must match the table's width, and a cell insert into a record must stay within the width or change a sole record.
+// Checks an insert's text: a record into the root, or a cell into a record. Its width is the commit's to judge.
 @(private)
 edit_insert_check :: proc(doc: ^core.Document, container: core.Node_Index, text: string, allocator: runtime.Allocator) -> core.Document_Error {
 	if container == core.ROOT {
-		cells, e := edit_record_at(doc, transmute([]u8)text, allocator)
-		if e.kind != .None {
-			return e
-		}
-		if w := dsv_width(doc); w > 0 && cells != w {
-			return {kind = .Bad_Width}
-		}
-		return {}
+		_, e := edit_record_at(doc, transmute([]u8)text, allocator)
+		return e
 	}
-	if len(text) > 0 {
-		if e := edit_value_at(doc, transmute([]u8)text, allocator); e.kind != .None {
-			return e
-		}
-	}
-	n_members := core.length(doc, container)
-	if !(n_members + 1 <= dsv_width(doc) || dsv_sole_record(doc, container)) {
-		return {kind = .Bad_Width}
-	}
-	return {}
+	return edit_value_at(doc, transmute([]u8)text, allocator)
 }
 
-// Checks removals and sets within a record: a remaining cell must read, and the record must keep the table width unless it is a sole record.
+// Writes a decoded name as one cell of the document's spec. A CSV name that would not read back bare is quoted, and a
+// TSV name's escapes are written. Plain has neither, and neither has a spelling for every name, so what is written may
+// still be no cell, which the caller checks. Returns false when `text` cannot grow.
 @(private)
-edit_cut_check :: proc(doc: ^core.Document, container: core.Node_Index, cuts: []int, has_set: bool) -> core.Document_Error {
-	l := core.length(doc, container)
-	if has_set && l - len(cuts) <= 1 {
-		return {kind = .Bad_Width}
-	}
-	if len(cuts) == 0 {
-		return {}
-	}
-	if len(cuts) >= l || l >= dsv_width(doc) && !dsv_sole_record(doc, container) {
-		return {kind = .Bad_Width}
-	}
-	// A record of one cell that reads as none is refused, since an empty line is no record.
-	if len(cuts) == l - 1 {
-		left := 0
-		for left < len(cuts) && cuts[left] == left {
-			left += 1
+edit_key_text :: proc(doc: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool {
+	delimiter, comment, _ := read_opts(doc)
+	#partial switch Spec(doc.read.spec) {
+	case .Csv:
+		quoted := len(name) > 0 && name[0] == comment
+		for b in name {
+			quoted = quoted || b == delimiter || b == '"' || b == '\r' || b == '\n'
 		}
-		cell, ok := core.child_at(doc, container, left)
-		if !ok {
-			return {kind = .Bad_Width}
+		if quoted {
+			core.push(text, '"') or_return
 		}
-		n := doc.nodes[cell]
-		if n.n == 0 {
-			return {kind = .Bad_Width}
+		for b in name {
+			if b == '"' {
+				core.push(text, '"') or_return
+			}
+			core.push(text, b) or_return
 		}
-		if _, comment, _ := read_opts(doc); comment != 0 && doc.src[n.lo] == comment {
-			return {kind = .Bad_Width}
+		if quoted {
+			core.push(text, '"') or_return
 		}
+	case .Tsv:
+		for b in name {
+			escape: u8
+			switch b {
+			case '\t': escape = 't'
+			case '\n': escape = 'n'
+			case '\r': escape = 'r'
+			case 0:    escape = '0'
+			case '\\': escape = '\\'
+			}
+			if escape != 0 {
+				core.push(text, '\\') or_return
+				core.push(text, escape) or_return
+			} else {
+				core.push(text, b) or_return
+			}
+		}
+	case:
+		core.push_all(text, name) or_return
 	}
-	return {}
+	return true
 }
 
 // Returns the line end record `i` ends with, or an empty string when it has none.
