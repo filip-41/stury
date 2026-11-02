@@ -3,6 +3,7 @@
 //   read sonic dom FILE             sonic_rs::Value
 //   read sonic sonic_dom_read FILE  sonic_rs::Value, then a visit of every value
 //   read sonic sonic_key FILE       one .get of the first key in every object
+//   read sonic sonic_get FILE KEY   sonic_rs::get of one root key
 use std::hint::black_box;
 
 #[path = "../timing.rs"]
@@ -276,6 +277,19 @@ fn key_job(data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+// One `sonic_rs::get` of `key`, which scans to the key and leaves the rest of the text unread.
+fn get_job(data: &[u8], key: &str) -> Result<(), String> {
+    let path = [key];
+    let (ns, raw) = time_runs(|| {
+        let found = sonic_rs::get_from_slice(data, path).ok().map(|v| v.as_raw_str().to_owned());
+        black_box(&found);
+        Ok(found)
+    })?;
+    let chk = fnv_bytes(CHECK_OFFSET, raw.unwrap_or_default().as_bytes());
+    report(data.len(), ns, &format!("check={}", chk));
+    Ok(())
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     if args.get(1).map(String::as_str) != Some("sonic") {
         return Err("TOOL is sonic".into());
@@ -287,6 +301,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "dom" => dom(&data),
         "sonic_dom_read" => dom_read(&data),
         "sonic_key" => key_job(&data),
+        "sonic_get" => get_job(&data, args.get(4).ok_or("missing KEY")?),
         _ => Err(format!("unknown job {job}")),
     }
 }

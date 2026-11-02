@@ -190,7 +190,7 @@ after the container's last member, by name, and on a name no path looked for is 
 ends in a `Name` inserts it where it is missing. Any other answer that is no value, a mismatch or a missing position or
 parent, is `Bad_Index`, and the error is a `Path_Edit_Error`, the read's or the edit's.
 
-A scan keeps nothing for edits. A commit of a partial document asks the format's `whole` service to build the text, moves
+A scan keeps nothing for edits. A commit of a partial document calls `Document.whole`, which a format's `query` sets, to build the text, moves
 each edit to the node at its byte, and commits there. A partial document holds no comments, and a commit needs them to
 move a comment with its member, and dsv's plan reads every record, so one member walk per container would not do. The
 commit already reads its whole output again, and the build runs only on the commit, so a read that makes no edit pays

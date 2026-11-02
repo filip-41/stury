@@ -18,6 +18,7 @@ make fixtures
 
 ```sh
 make bench-doc
+make bench-paths   # the path lanes, with the peers bench-doc built
 ```
 
 That builds the probe at `-o:speed` into `build/bench/doc`, builds the peers whose compiler and sources are

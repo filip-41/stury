@@ -20,7 +20,6 @@ EDIT := core.Edit_Spelling {
 	comment    = edit_comment,
 	member_sep = edit_member_sep,
 	key_sep    = ":",
-	whole      = edit_whole,
 }
 
 @(private)

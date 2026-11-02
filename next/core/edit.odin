@@ -315,10 +315,10 @@ commit_as :: proc(list: ^Edit_List, spec: u8, allocator := context.allocator) ->
 @(private)
 commit_partial :: proc(list: ^Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: Document_Error) {
 	doc := list.doc
-	if doc.spelling.edit == nil || doc.spelling.edit.whole == nil {
+	if doc.whole == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
-	full, e := doc.spelling.edit.whole(doc, allocator)
+	full, e := doc.whole(doc, allocator)
 	if e.kind != .None {
 		return nil, 0, e
 	}

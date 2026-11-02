@@ -15,6 +15,7 @@
 //   simd_dom               simdjson DOM
 //   simd_dom_read          simdjson DOM, then a visit of every value (string lengths, numbers, bools, nulls)
 //   simd_key               the first object's first key, then one at_key of it per object
+//   simd_get KEY           On-Demand find_field of one root key, and the value's raw text
 using clk = std::chrono::steady_clock;
 using simdjson::error_code;
 using simdjson::SUCCESS;
@@ -425,7 +426,35 @@ static int run_job(const std::string& buffer, const std::string& job) {
     return 2;
 }
 
+// Times one On-Demand `find_field` of `key` in the root object. A value's raw text ends at its last byte, so the check
+// folds the bytes every arm's span holds.
+static int simd_get_job(const simdjson::padded_string& in, const std::string& key) {
+    simdjson::ondemand::parser parser;
+    std::string_view found;
+    int64_t ns = median_ns([&] {
+        auto t0 = clk::now();
+        std::string_view raw;
+        simdjson::ondemand::document doc;
+        if (!parser.iterate(in).get(doc)) {
+            simdjson::ondemand::value v;
+            if (!doc.find_field(key).get(v) && v.raw_json().get(raw)) raw = {};
+        }
+        keep(raw);
+        int64_t d = since(t0);
+        found = raw;
+        return d;
+    });
+    while (!found.empty() && (found.back() == ' ' || found.back() == '\n' || found.back() == '\t' || found.back() == '\r'))
+        found.remove_suffix(1);
+    return report(in.size(), ns, "check=" + std::to_string(fnv_bytes(CHECK_OFFSET, found.data(), found.size())));
+}
+
 int main(int argc, char* argv[]) {
+    if (argc == 4 && std::string(argv[2]) == "simd_get") {
+        simdjson::padded_string in;
+        if (simdjson::padded_string::load(argv[1]).get(in)) return 1;
+        return simd_get_job(in, argv[3]);
+    }
     if (argc != 3) {
         std::cerr << "Usage: cpp_bench <fixture_path> <mode>" << std::endl;
         return 1;

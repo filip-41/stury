@@ -194,6 +194,10 @@ Document :: struct {
 	// reached, and `stopped` that the read stopped early, so the containers it left open have a `Partial` role, the count
 	// of what was read, and text past the stop that no walk judged. See `core/path.odin`.
 	answers:      []Answer,
+	// Builds a partial document's text as the read that made it read that text, with every tolerance on, since the text's
+	// own rules were the read's to judge and a commit's output is judged again. A format's `query` sets it, and no service
+	// table holds it, so a program that only builds keeps a walk its one caller's constant options can specialize.
+	whole:        proc(doc: ^Document, allocator: runtime.Allocator) -> (Document, Document_Error),
 	kept:         []Kept_Child,
 	missing:      []Missing_Name,
 	reads_block:  []u8,
@@ -247,8 +251,6 @@ Spelling :: struct {
 // members are lines. `fact_slot` says whether the output holds a fact of a role on a node, and `emptied` whether a list
 // removes every member of the root. `plan` runs first on a commit and may turn the whole list into plain edits, which
 // `out` receives with their texts borrowed or allocated with `allocator`, and it returns false to keep the list as it is.
-// `whole` builds a partial document's text as the read that made it read that text, with every tolerance on, since the
-// text's own rules were the read's to judge and a commit's output is judged again.
 Edit_Spelling :: struct {
 	value:         proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:      proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
@@ -263,7 +265,6 @@ Edit_Spelling :: struct {
 	fact_slot:     proc(doc: ^Document, node: Node_Index, role: Role, emptied: bool) -> bool,
 	emptied:       proc(doc: ^Document, list: ^Edit_List) -> bool,
 	plan:          proc(doc: ^Document, list: ^Edit_List, out: ^[dynamic]Edit, allocator: runtime.Allocator) -> (changed: bool, err: Document_Error),
-	whole:         proc(doc: ^Document, allocator: runtime.Allocator) -> (Document, Document_Error),
 }
 
 // A `Comment_Spelling` names how a format spells a comment in an output: `//` for a JSON spec that has comments, the

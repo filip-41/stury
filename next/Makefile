@@ -19,7 +19,7 @@ ASAN_TARGETS  := $(foreach p,$(TEST_PKGS),$(BUILD)/test/asan/$(p))
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: test test-x86 test-asan lint bench bench-doc fixtures size surface \
+.PHONY: test test-x86 test-asan lint bench bench-doc bench-paths fixtures size surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
@@ -80,6 +80,7 @@ lint:
 	$(ODIN) check bench $(LINT_FLAGS)
 	$(ODIN) check bench/doc $(LINT_FLAGS)
 	$(ODIN) check bench/editbench $(LINT_FLAGS)
+	$(ODIN) check bench/paths $(LINT_FLAGS)
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for p in $(TIER_PKGS); do for o in none speed; do \
 		echo "== $$p (linux_amd64 v4 -o:$$o)"; \
@@ -108,6 +109,12 @@ bench:
 fixtures:
 	python3 bench/fetch.py
 	python3 bench/gen.py --check
+
+# The path lanes' probe at -o:speed, then paths.py over the peers `bench-doc` built. ROUNDS passes through.
+bench-paths:
+	@mkdir -p $(BENCH)
+	$(ODIN) build bench/paths -o:speed -out:$(BENCH)/paths
+	ROUNDS=$(ROUNDS) python3 bench/paths.py
 
 # The document lanes' probe at -o:speed, the peers whose toolchain and sources are present, then doc.py. ROUNDS and
 # BENCH_FILES pass through.

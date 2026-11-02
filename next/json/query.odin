@@ -35,6 +35,7 @@ query_many :: proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, r
 	}
 	h.b.doc.read.spec = u8(S)
 	h.b.doc.read.max_depth = opts.max_depth
+	h.b.doc.whole = whole_text
 	regs := scan.BUILDER_REGS
 	hi: u64
 	fault: Maybe(core.Fault)
@@ -140,8 +141,8 @@ set :: proc(src: []u8, $S: Spec, path: string, text: string, opts := Options{}, 
 	return scan.set_answers(&doc, parsed, text, allocator)
 }
 
-@(private)
-edit_whole :: proc(doc: ^core.Document, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+@(private = "file")
+whole_text :: proc(doc: ^core.Document, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 	opts := Options{max_depth = doc.read.max_depth, tolerate = {.Invalid_Utf8, .Lone_Surrogate}}
 	switch Spec(doc.read.spec) {
 	case .Json:  return build(doc.src, .Json, opts, false, allocator)

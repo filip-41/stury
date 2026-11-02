@@ -91,6 +91,8 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
   recorded value at that depth, and a delimited text has no depth option and leaves it 0.
 - A path read fills `answers`, and for a partial document `kept`, `missing`, `partial` and `stopped`, all in `paths.md`.
   `answers`, `kept` and `missing` share `reads_block`, which `destroy` frees.
+- `whole` builds a partial document's text for a commit. A format's `query` sets it, and no service table holds it, so a
+  program that only builds keeps `build`'s walk specialized to its one caller's options.
 - The document does not change after its build, and no reader accepts an edit.
 
 ## Building
