@@ -1,5 +1,6 @@
 package json_tests
 
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -420,4 +421,19 @@ pointer_reads :: proc(t: ^testing.T) {
 		testing.expect(t, some && a.outcome == .Found)
 		testing.expect_value(t, string(core.span(&doc, a.node)), c.want)
 	}
+}
+
+// An arena that refuses the node bound a kept value's walk reserves by still gets its answer, through the scan's hook.
+@(test)
+query_kept_value_in_small_arena :: proc(t: ^testing.T) {
+	src := strings.concatenate({`{"a":[1,{"b":2}],"pad":"`, strings.repeat("x", 1 << 16, context.temp_allocator), `"}`}, context.temp_allocator)
+	path, perr := core.parse_path(".a", context.temp_allocator)
+	testing.expect(t, perr.kind == .None)
+	buf: [8192]u8
+	arena: mem.Arena
+	mem.arena_init(&arena, buf[:])
+	doc, err := json.query(transmute([]u8)src, .Json, path, allocator = mem.arena_allocator(&arena))
+	testing.expect(t, err.kind == .None)
+	testing.expect(t, len(doc.answers) == 1 && doc.answers[0].outcome == .Found)
+	testing.expect(t, string(core.span(&doc, doc.answers[0].node)) == `[1,{"b":2}]`)
 }

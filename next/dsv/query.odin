@@ -18,7 +18,8 @@ query :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := c
 	}
 	h: scan.Scan
 	// A record is a container inside the document's array, so a dsv text nests at most two containers.
-	if e := scan.scan_start(&h, src, &SPELLING, path, read, true, allocator, 8); e.kind != .None {
+	frames: [8]u64 = ---
+	if e := scan.scan_start(&h, src, &SPELLING, path, read, true, allocator, 8, frames[:]); e.kind != .None {
 		return {}, e
 	}
 	h.b.doc.read.spec = u8(S)

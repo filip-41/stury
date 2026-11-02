@@ -44,6 +44,7 @@ Scan :: struct {
 	last:       bool, // a repeated key replaces the candidate
 	stop_early: bool,
 	stopped:    bool,
+	borrowed:   bool, // the builder's stack is the caller's `frames`
 	positional: bool, // a `Map`'s members answer an `Index`, as a dsv record's cells do
 	at:         core.Node_Index, // the node `query_document` is giving the logic
 	answers:    []core.Answer,
@@ -54,6 +55,7 @@ Scan :: struct {
 	n_missing:  int,
 	marks:      [core.MAX_STEPS]Scan_Mark,
 	slots:      [core.MAX_STEPS]u32, // the `Child_Count` reserved for the container open at each depth
+	first:      [8]core.Answer, // `answers` until they outgrow it, so a read of few allocates no list
 }
 
 // Reads `path` and `read` into `h`. A step this engine does not read yet is `.Unsupported`.
@@ -104,15 +106,24 @@ scan_plan :: proc(h: ^Scan, path: core.Path, read: core.Path_Options) -> core.Pa
 	return {}
 }
 
-// Starts a scan of `path` over `src`. `depth` is as in `builder_start`, and a format's `query` runs its walk with
+// Starts a scan of `path` over `src`. `depth` is as in `builder_start`, `frames` is the caller's room for that stack,
+// which `depth` may outgrow, and a format's `query` runs its walk with
 // `scan_hook` and ends it with `scan_end`.
-scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, path: core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int) -> core.Path_Error {
+scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, path: core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64) -> core.Path_Error {
 	if e := scan_plan(h, path, read); e.kind != .None {
 		return e
 	}
 	h.positional = positional
-	h.b = builder_start(src, spelling, false, allocator, 64, depth)
+	h.answers = h.first[:]
+	h.borrowed = depth <= len(frames)
+	h.b = builder_start(src, spelling, false, allocator, 64, 0 if h.borrowed else depth)
+	if h.borrowed {
+		h.b.stack = frames[:depth]
+	}
 	if h.b.err.kind != .None {
+		if h.borrowed {
+			h.b.stack = nil
+		}
 		_, e := builder_end(&h.b, BUILDER_REGS, nil)
 		return core.path_error(e)
 	}
@@ -125,7 +136,9 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	regs := regs
 	allocator := h.b.doc.allocator
 	free_lists :: proc(h: ^Scan, allocator: runtime.Allocator) {
-		delete(h.answers, allocator)
+		if raw_data(h.answers) != &h.first[0] {
+			delete(h.answers, allocator)
+		}
 		delete(h.kept, allocator)
 		delete(h.missing, allocator)
 	}
@@ -148,6 +161,9 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	h.b.n_counts = w
 	h.b.wide_more = h.b.wide_count != 0
 	h.b.root_close = 0 if h.stopped else root_close
+	if h.borrowed {
+		h.b.stack = nil
+	}
 	doc, e := builder_end(&h.b, regs, fault)
 	if e.kind != .None {
 		free_lists(h, allocator)
@@ -274,7 +290,7 @@ replay :: proc(h: ^Scan, doc: ^core.Document) {
 				t = doc.nodes[i]
 			}
 			i += t.n if t.kind > .Plain else 1
-		case .Next:
+		case .Next, .Keep:
 			if t.kind > .Plain {
 				ends[depth] = i + t.n
 				depth += 1
@@ -302,7 +318,8 @@ scan_step :: #force_inline proc "contextless" ($WRITE: bool, h: ^Scan, s: core.H
 		if d > h.keep {
 			action: core.Action
 			s, action = builder_step(false, true, false, false, &h.b, s, t)
-			if int(s.c) == h.keep {
+			// Only a close can bring the depth back.
+			if t.kind == .End && int(s.c) == h.keep {
 				h.keep = h.n
 				if scan_known(h, int(s.c)) {
 					return scan_stop(h, s)
@@ -427,7 +444,6 @@ scan_key_is :: #force_inline proc "contextless" ($WRITE: bool, h: ^Scan, s: core
 	when WRITE {
 		return scan_key_decoded(h, int(s.a), t, name)
 	} else {
-		context = runtime.default_context()
 		return core.key_equals(&h.b.doc, h.at, name)
 	}
 }
@@ -435,7 +451,6 @@ scan_key_is :: #force_inline proc "contextless" ($WRITE: bool, h: ^Scan, s: core
 // Reads a key through the format's `key_equals`, which reads a node, so the token goes in the next node's slot.
 @(private, cold)
 scan_key_decoded :: #force_no_inline proc "contextless" (h: ^Scan, a: int, t: core.Token, name: string) -> bool {
-	context = runtime.default_context()
 	if a == len(h.b.doc.nodes) {
 		builder_grow(&h.b)
 		if a == len(h.b.doc.nodes) {
@@ -495,10 +510,16 @@ scan_keep :: #force_inline proc "contextless" ($WRITE: bool, h: ^Scan, s: core.H
 	when WRITE {
 		action: core.Action
 		s, action = builder_step(false, true, false, false, &h.b, s, t)
-		if action == .Next && t.kind <= .Plain && scan_known(h, d) {
+		if action != .Next {
+			return s, action
+		}
+		if t.kind > .Plain {
+			return s, .Keep
+		}
+		if scan_known(h, d) {
 			return scan_stop(h, s)
 		}
-		return s, action
+		return s, .Next
 	} else {
 		s.b += 1
 		if scan_known(h, d) {
@@ -506,6 +527,30 @@ scan_keep :: #force_inline proc "contextless" ($WRITE: bool, h: ^Scan, s: core.H
 		}
 		return s, .Skip
 	}
+}
+
+// Makes room for `nodes` nodes, for a kept value's walk that tests no capacity. Returns false when the allocator refuses,
+// and the value's tokens then come through `scan_hook`.
+scan_reserve :: proc "contextless" (h: ^Scan, nodes: int) -> bool {
+	if nodes <= len(h.b.doc.nodes) {
+		return true
+	}
+	context = runtime.default_context()
+	raw, err := runtime.non_zero_mem_resize(raw_data(h.b.doc.nodes_alloc), len(h.b.doc.nodes_alloc) * size_of(core.Node), nodes * size_of(core.Node), align_of(core.Node), h.b.doc.allocator)
+	if err != nil {
+		return false
+	}
+	fresh := ([^]core.Node)(raw_data(raw))[:nodes]
+	h.b.doc.nodes = fresh
+	h.b.doc.nodes_alloc = fresh
+	return true
+}
+
+// A kept value's close has passed at depth `d`. Returns whether the walk stops there.
+scan_kept :: proc "contextless" (h: ^Scan, d: int) -> bool {
+	h.keep = h.n
+	h.stopped = scan_known(h, d)
+	return h.stopped
 }
 
 // Whether `steps[d]` can enter a value of `kind`.
@@ -592,11 +637,26 @@ scan_partial :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, s
 	}
 }
 
+// Doubles a list of a read. Answers leave `first` for the allocator, and `first` stays with the `Scan`.
+@(private, cold)
+scan_grow :: #force_no_inline proc "contextless" (h: ^Scan, list: []$T) -> ([]T, bool) {
+	when T == core.Answer {
+		if raw_data(list) == &h.first[0] {
+			fresh, ok := grow(h.b.doc.allocator, ([]T)(nil), 2 * len(list))
+			if ok {
+				copy(fresh, list)
+			}
+			return fresh, ok
+		}
+	}
+	return grow(h.b.doc.allocator, list, 8)
+}
+
 // Appends `v` to a list of a read. A refused growth is held in the builder's error, which ends the read, and drops `v`.
 @(private)
 scan_push :: #force_inline proc "contextless" (h: ^Scan, list: ^[]$T, n: ^int, v: T) {
 	if n^ == len(list^) {
-		fresh, ok := grow(h.b.doc.allocator, list^, 8)
+		fresh, ok := scan_grow(h, list^)
 		if !ok {
 			if h.b.err.kind == .None {
 				h.b.err = {kind = .No_Memory}

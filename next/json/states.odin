@@ -2,6 +2,7 @@ package json
 
 import "base:intrinsics"
 import core "../core"
+import build "../core/build"
 
 // Every state takes these arguments. `p` is the cursor, `end` one past the text, `d` the depth shifted left once with
 // the open container's kind in bit 0 (1 for an object), `ind` the predicted indent (whitespace.odin), `w` the rest of
@@ -65,6 +66,8 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		case .Next:
 		case .Skip:
 			return #must_tail st_skip(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, on)
+		case .Keep:
+			return #must_tail st_keep(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, on)
 		case .Stop:
 			return stopped(w, hs, p[1:])
 		}
@@ -78,6 +81,8 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		case .Next:
 		case .Skip:
 			return #must_tail st_skip(p[1:], end, (d | 1) + 1, ind, w, hs.a, hs.b, hs.c, on)
+		case .Keep:
+			return #must_tail st_keep(p[1:], end, (d | 1) + 1, ind, w, hs.a, hs.b, hs.c, on)
 		case .Stop:
 			return stopped(w, hs, p[1:])
 		}
@@ -140,7 +145,7 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 		return #must_tail st_key_string(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
 	switch emit_string(w, on, &hs, .String, .Key, p, q, 0) {
-	case .Next:
+	case .Next, .Keep:
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Stop:
@@ -219,7 +224,10 @@ st_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 @(private, enable_target_feature = STATE_FEATURES)
 st_key_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q := string_escaped(w.resume, end)
+	q, at := key_escaped_head(w.resume, end)
+	if q == nil {
+		q = string_escaped(at, end)
+	}
 	if q == nil {
 		return #must_tail st_key_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
@@ -227,7 +235,7 @@ st_key_string_escaped :: #force_no_inline proc "contextless" (p, end: [^]u8, d, 
 		return fault(w, hs, p, .Too_Wide)
 	}
 	switch emit_string(w, on, &hs, .String, .Key, p, q, 1) {
-	case .Next:
+	case .Next, .Keep:
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Stop:
@@ -269,7 +277,7 @@ st_key_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 		return fault(w, hs, p, .Too_Wide)
 	}
 	switch emit_string(w, on, &hs, .String, .Key, p, q, 0) {
-	case .Next:
+	case .Next, .Keep:
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Stop:
@@ -290,7 +298,7 @@ st_key_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind
 		return fault(w, hs, p, .Too_Wide)
 	}
 	switch emit_string(w, on, &hs, .String, .Key, p, q, string_spelling(esc, lax)) {
-	case .Next:
+	case .Next, .Keep:
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Stop:
@@ -357,6 +365,8 @@ st_open_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 		case .Next:
 		case .Skip:
 			return #must_tail st_skip(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		case .Keep:
+			return #must_tail st_keep(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		case .Stop:
 			return stopped(w, hs, p)
 		}
@@ -535,6 +545,34 @@ st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 	return #must_tail st_after(w.base[r >> 16:], end, parent << 1 | u64(w.stack[parent]), ind, w, hs.a, hs.b, hs.c, on)
 }
 
+// `p` is right after the open bracket of a container a scan keeps whole, and `d` is the container's. A spec with no
+// comments gives its tokens to the builder's plain hook, under the bound `build` reserves by, with no scan step between,
+// and this walk continues after its close. Any other walk reads on through its hook.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_keep :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	when H == build.Scan && .Comments not_in FEATURES[S] {
+		if build.scan_reserve(w.hooks, int(hs.a) + (intrinsics.ptr_sub(end, p) + int(w.depth)) / 2 + 16) {
+			parent := d >> 1 - 1
+			w.stack[parent] |= PASS_END
+			regs := hs
+			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack, &regs, w.depth, w.tier, false, w.tolerate, nil, 0}
+			r := st_open(p, end, d, ind, &v, hs.a, hs.b, hs.c, build.builder_hook_plain)
+			if r & 0xff != 0 {
+				w.regs^ = regs
+				return r
+			}
+			w.stack[parent] &~= PASS_END
+			q := w.base[r >> 16:]
+			if build.scan_kept(w.hooks, int(regs.c)) {
+				return stopped(w, regs, q)
+			}
+			return #must_tail st_after(q, end, parent << 1 | u64(w.stack[parent]), ind, w, regs.a, regs.b, regs.c, on)
+		}
+	}
+	return #must_tail st_open(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+}
+
 // Reads the value string at `p` of a member whose key was skipped, which `string_short` did not vouch for.
 @(private, enable_target_feature = STATE_FEATURES)
 st_skip_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
@@ -565,6 +603,12 @@ st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 			if q == nil {
 				return #must_tail st_skip_string(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
+			// While values repeat a length this branch is predicted, so the next token's address does not wait on the load.
+			guess := r[w.skip_len:]
+			if q == guess {
+				return #must_tail st_after(guess, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+			w.skip_len = intrinsics.ptr_sub(q, r)
 			return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		if r[0] == '-' || r[0] - '0' < 10 {
@@ -747,7 +791,7 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 		}
 		skip := false
 		switch emit_string(w, on, &hs, .String, .Key, p, q, 0) {
-		case .Next:
+		case .Next, .Keep:
 		case .Skip:
 			skip = true
 		case .Stop:

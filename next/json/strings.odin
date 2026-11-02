@@ -79,6 +79,36 @@ string_probe :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, e
 	return nil, false, nil
 }
 
+// Reads a key on from the backslash at `bs` byte by byte, up to `PROBE_MAX` bytes, since a key is short and `string_escaped`
+// pays for a whole block. Returns one past its closing quote, else nil and the byte `string_escaped` reads on from.
+@(private)
+key_escaped_head :: #force_inline proc "contextless" (bs, end: [^]u8) -> (q, at: [^]u8) #no_bounds_check {
+	if intrinsics.ptr_sub(end, bs) <= PROBE_MAX {
+		return nil, bs
+	}
+	e := bs
+	stop := bs[PROBE_MAX - 12:]
+	for intrinsics.ptr_sub(stop, e) > 0 {
+		c := e[0]
+		if STOP[c] == 0 {
+			e = e[1:]
+			continue
+		}
+		if c == '"' {
+			return e[1:], nil
+		}
+		if c != '\\' {
+			break
+		}
+		n := escape_len(e, end)
+		if n == 0 {
+			break
+		}
+		e = e[n:]
+	}
+	return nil, e
+}
+
 // Applies `string_stops` to each 16-byte lane of a 64-byte block. Bytes past 0x7F and below 0x20 are both stops, so a
 // block needs no separate test for them, and the reader that cannot take them returns nil for `string_long` to settle.
 @(private)

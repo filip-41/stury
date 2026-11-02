@@ -119,7 +119,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		// The text's opening `Array` token, at `lo` with `n` 0. A hook that passes it over leaves the walk to
 		// `judge`, which makes no tokens.
 		switch emit(h, on, &hs, lo, 0, .Array, .Value, 0) {
-		case .Next:
+		case .Next, .Keep:
 		case .Skip:
 			return judge(src, lo, S, opts)
 		case .Stop:
@@ -390,7 +390,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		last = last && w.comment == 0
 		if w.comment != 0 && w.rec_lo < n {
 			switch emit(h, on, &hs, u64(w.rec_lo), u32(n - w.rec_lo), .Plain, .Comment, 1) {
-			case .Next, .Skip:
+			case .Next, .Keep, .Skip:
 			case .Stop:
 				return stopped(u64(w.rec_lo), u32(n - w.rec_lo))
 			}

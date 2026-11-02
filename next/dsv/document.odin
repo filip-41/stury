@@ -174,7 +174,7 @@ commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) 
 
 // Returns node `n`'s span without a surrounding quote pair, if it has one. A quoted CSV cell has that shape.
 @(private)
-inner_span :: #force_inline proc(src: []u8, n: core.Node) -> (lo, hi: u64) {
+inner_span :: #force_inline proc "contextless" (src: []u8, n: core.Node) -> (lo, hi: u64) {
 	lo, hi = n.lo, n.lo + u64(n.n)
 	if hi >= lo + 2 {
 		a, b := src[lo], src[hi - 1]
@@ -202,7 +202,7 @@ Dsv_Decoded :: struct {
 }
 
 @(private)
-dsv_decoded_init :: proc(src: []u8, n: core.Node, spec: Spec) -> Dsv_Decoded {
+dsv_decoded_init :: proc "contextless" (src: []u8, n: core.Node, spec: Spec) -> Dsv_Decoded {
 	if spec == .Csv {
 		if n.spelling & core.SPELLING_QUOTED != 0 {
 			lo, hi := inner_span(src, n)
@@ -214,7 +214,7 @@ dsv_decoded_init :: proc(src: []u8, n: core.Node, spec: Spec) -> Dsv_Decoded {
 }
 
 @(private)
-dsv_decoded_next :: proc(d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
+dsv_decoded_next :: proc "contextless" (d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
 	if d.n > 0 {
 		b = d.buf[d.at]
 		d.at += 1
@@ -277,7 +277,7 @@ dsv_decoded_next :: proc(d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
 // `""` decodes to fewer bytes, and one under `lax` held an ill-formed sequence that decodes as U+FFFD. The byte scan
 // moves eight bytes at a time while they are ASCII and hold no quote byte.
 @(private)
-plain_quoted :: proc(src: []u8, n: core.Node) -> bool {
+plain_quoted :: proc "contextless" (src: []u8, n: core.Node) -> bool {
 	lo, hi := inner_span(src, n)
 	b := src[lo:hi]
 	i := 0
@@ -350,7 +350,7 @@ text :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -
 // decode is compared by its span, or by its inner span for a quoted cell without `""`, and one that needs it byte by
 // byte as it decodes.
 @(private)
-spelling_key_equals :: proc(doc: ^core.Document, i: core.Node_Index, name: string) -> bool {
+spelling_key_equals :: proc "contextless" (doc: ^core.Document, i: core.Node_Index, name: string) -> bool {
 	n := doc.nodes[i]
 	spec := Spec(doc.read.spec)
 	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(doc.src, n) {

@@ -161,7 +161,7 @@ put_cell :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h
 	if !no_header {
 		k, klo, kn := put_key(h, on, hs, keys, cells)
 		switch k {
-		case .Next:
+		case .Next, .Keep:
 		case .Skip:
 			// The hook passed this key over, so its cell's value is passed over too.
 			return .Skip, klo, kn
@@ -177,7 +177,7 @@ put_cell :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h
 @(private)
 open_record :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, rec_lo: u64, no_header: bool, muted: ^bool) -> bool {
 	switch emit(h, on, hs, rec_lo, 0, no_header ? .Array : .Map, .Value, 0) {
-	case .Next:
+	case .Next, .Keep:
 	case .Skip:
 		muted^ = true
 	case .Stop:
@@ -390,7 +390,7 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 				end = at - 1
 			}
 			switch emit(h, on, hs, u64(rec_lo), u32(end - rec_lo), .Plain, .Comment, 1) {
-			case .Next, .Skip:
+			case .Next, .Keep, .Skip:
 			case .Stop:
 				return stopped(u64(rec_lo), u32(end - rec_lo)), true
 			}

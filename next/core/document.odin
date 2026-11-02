@@ -223,7 +223,7 @@ Resolve_Options :: struct {
 // format's edit services, nil for a format that accepts no edits.
 Spelling :: struct {
 	text:       proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool),
-	key_equals: proc(doc: ^Document, i: Node_Index, name: string) -> bool,
+	key_equals: proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool,
 	number:     proc(doc: ^Document, i: Node_Index) -> Number,
 	resolve:    proc(doc: ^Document, i: Node_Index, opts: Resolve_Options) -> Kind,
 	close_end:  proc(doc: ^Document, i: Node_Index) -> u64,
@@ -394,7 +394,7 @@ node_text :: #force_inline proc(src: []u8, n: Node) -> []u8 {
 
 // Whether key node `i` decodes to `name`. A node whose `SPELLING_DECODE` bit is clear is compared with
 // `spell.bytes_equal`, else through the format's `key_equals`. A dsv header cell has role `Key` and names a column.
-key_equals :: #force_inline proc(doc: ^Document, i: Node_Index, name: string) -> bool {
+key_equals :: #force_inline proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool {
 	if int(i) >= len(doc.nodes) {
 		return false
 	}

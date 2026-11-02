@@ -37,7 +37,7 @@ Builder :: struct {
 // child count 0, and the depth 0.
 BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
 
-// Returns a builder over `src` with an open stack of `depth` slots, or 1 when `depth` is 0, room for `facts` facts, and
+// Returns a builder over `src` with an open stack of `depth` slots, none when `depth` is 0, room for `facts` facts, and
 // at least 16 nodes, `nodes` when that is larger. The hook pushes an open container's frame with no capacity test, so
 // `depth` must be at least the walk's depth limit. The nodes are allocated last, so an arena gets their unused tail back
 // at `builder_end`. A format's `build` passes the builder to its walk with a builder hook and ends it with `builder_end`.
@@ -47,12 +47,14 @@ builder_start :: proc(src: []u8, spelling: ^core.Spelling, refuse_duplicates: bo
 	b.doc.src = src
 	b.doc.spelling = spelling
 	b.doc.allocator = allocator
-	stack, serr := make([]u64, max(1, depth), allocator)
-	if serr != nil {
-		b.err = {kind = .No_Memory}
-		return b
+	if depth > 0 {
+		stack, serr := make([]u64, depth, allocator)
+		if serr != nil {
+			b.err = {kind = .No_Memory}
+			return b
+		}
+		b.stack = stack
 	}
-	b.stack = stack
 	if facts > 0 {
 		reserved, ferr := make([]core.Fact, facts, allocator)
 		if ferr != nil {
@@ -477,7 +479,8 @@ grow :: #force_no_inline proc "contextless" (allocator: runtime.Allocator, old: 
 // any other block's, so this is not a promise about every allocator.
 @(private, cold)
 trim :: #force_no_inline proc (allocator: runtime.Allocator, old: []$T, n: int) -> []T {
-	if n <= 0 || n >= len(old) {
+	// A short buffer's tail is not worth the allocator's call.
+	if n <= 0 || n >= len(old) || len(old) * size_of(T) <= 4096 {
 		return old
 	}
 	raw, err := runtime.non_zero_mem_resize(raw_data(old), len(old) * size_of(T), n * size_of(T), align_of(T), allocator)

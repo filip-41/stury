@@ -181,6 +181,8 @@ Walk :: struct($S: Spec, $H: typeid) {
 	// Where the next state continues: for `string_escaped`, the block holding the string's first backslash, for
 	// `st_comments_after`, the run's first comment, which the previous state has read up to.
 	resume:   [^]u8,
+	// The length of the last string `st_skip_member` read whole, its guess at the next one's.
+	skip_len: int,
 }
 
 // `PASS_END` is set in the stack slot of the depth where a walk that passes over a skipped value ends, so a close to
@@ -199,7 +201,7 @@ walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec
 	// `= ---` leaves the array unwritten, where a struct would be zeroed. Every slot is written before it is read.
 	stack: [MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else MAX_DEPTH
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, opts.tolerate, nil}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, opts.tolerate, nil, 0}
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
@@ -213,7 +215,7 @@ walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec,
 		return core.fault_at(0, .No_Memory)
 	}
 	defer delete(stack)
-	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), false, tolerate, nil}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), false, tolerate, nil, 0}
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
@@ -235,7 +237,7 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d, ind: u64, $open: bool) -> u64 {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, core.No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, false, w.tolerate, nil}
+	v := Walk(S, core.No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, false, w.tolerate, nil, 0}
 	when open {
 		return st_open(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
 	} else {

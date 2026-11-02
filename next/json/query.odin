@@ -21,7 +21,8 @@ query :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := c
 		return {}, {kind = .Walk, at = at, inner = {at = at, rules = &RULES, kind = .Bad_Char}}
 	}
 	h: scan.Scan
-	if e := scan.scan_start(&h, src, &SPELLING, path, read, false, allocator, max(MAX_DEPTH, int(opts.max_depth))); e.kind != .None {
+	frames: [MAX_DEPTH]u64 = ---
+	if e := scan.scan_start(&h, src, &SPELLING, path, read, false, allocator, max(MAX_DEPTH, int(opts.max_depth)), frames[:]); e.kind != .None {
 		return {}, e
 	}
 	h.b.doc.read.spec = u8(S)

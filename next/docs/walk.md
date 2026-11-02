@@ -157,6 +157,8 @@ The `Action` a hook returns:
 - `Skip` on an `Array` or `Map` passes the container with no more tokens, its `End` included, and on a `Key` passes
   the comments before the member's value and the value. The walk still judges the bytes it passes. The comments after
   a skipped value are still given. On a scalar it acts as `Next`.
+- `Keep` on an `Array` or `Map` is `Next`, and says every token up to its `End` is to be written as it comes, which
+  a walk may do by the builder's plain hook.
 - `Stop` ends the walk at once, with no fault and the rest of the text unjudged.
 
 ### The result word

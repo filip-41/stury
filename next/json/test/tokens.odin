@@ -48,7 +48,7 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 					}
 				}
 			}
-		case .Next:
+		case .Next, .Keep:
 		}
 	}
 	return

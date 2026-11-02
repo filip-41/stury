@@ -7,7 +7,7 @@ import "base:intrinsics"
 
 // Decodes a node's bytes into `buf`: `d` is the decoder's initial state and `next` returns one byte at a time. The
 // decoder makes two passes, one to count the bytes and one to write them, and returns false when `buf` is too short.
-decode_text :: proc(buf: []u8, d: $D, $next: proc(^D) -> (u8, bool)) -> (s: string, ok: bool) {
+decode_text :: proc(buf: []u8, d: $D, $next: proc "contextless" (^D) -> (u8, bool)) -> (s: string, ok: bool) {
 	count := 0
 	c := d
 	for {

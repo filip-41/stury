@@ -55,10 +55,13 @@ Token :: struct {
 // The action a hook returns to the walk. `Skip` on an `Array` or `Map`, or on a `Key` for its member's value, passes
 // that value with no more tokens, its `End` included, and on a `Key` also the comments before the value, while the
 // walk still judges their bytes. The comments after the value are still given. On a scalar value `Skip` acts as
-// `Next`. `Stop` ends the walk at once with no fault, with the rest of the text unjudged.
+// `Next`. `Keep` on an `Array` or `Map` is `Next` and says the hook wants every token up to its `End` written as they are,
+// which a walk may do by the builder's plain hook, past this hook. `Stop` ends the walk at once with no fault, with the
+// rest of the text unjudged.
 Action :: enum u8 {
 	Next,
 	Skip,
+	Keep,
 	Stop,
 }
 

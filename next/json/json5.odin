@@ -156,7 +156,7 @@ st_key5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 		a = emit(w, on, &hs, .String, .Key, p, q, string_spelling(esc, lax))
 	}
 	switch a {
-	case .Next:
+	case .Next, .Keep:
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Stop:

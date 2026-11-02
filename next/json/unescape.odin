@@ -25,13 +25,13 @@ Decoded :: struct {
 // Returns a decoder over node `n`'s token span, `n.lo..n.lo+n.n`. A quoted string's span begins past its opening quote
 // and ends at its closing quote, an unquoted key's is bare.
 @(private)
-decoded_init :: proc(src: []u8, n: core.Node) -> Decoded {
+decoded_init :: proc "contextless" (src: []u8, n: core.Node) -> Decoded {
 	return {src = src, p = n.lo, end = n.lo + u64(n.n)}
 }
 
 // Returns the next decoded byte, or false past the token's end.
 @(private)
-decoded_next :: proc(d: ^Decoded) -> (b: u8, ok: bool) {
+decoded_next :: proc "contextless" (d: ^Decoded) -> (b: u8, ok: bool) {
 	if d.n > 0 {
 		b = d.buf[d.at]
 		d.at += 1
@@ -78,7 +78,7 @@ decoded_next :: proc(d: ^Decoded) -> (b: u8, ok: bool) {
 
 // Returns the first of a character's `size` bytes and leaves the rest in `d`'s buffer.
 @(private)
-first_byte :: #force_inline proc(d: ^Decoded, spelled: [4]u8, size: int) -> (u8, bool) {
+first_byte :: #force_inline proc "contextless" (d: ^Decoded, spelled: [4]u8, size: int) -> (u8, bool) {
 	d.buf = spelled
 	d.n = u8(size - 1)
 	d.at = 1
@@ -88,7 +88,7 @@ first_byte :: #force_inline proc(d: ^Decoded, spelled: [4]u8, size: int) -> (u8,
 // Decodes the escape at `src[p] == '\\'`. Returns up to four bytes, their count, and the byte after the escape. The
 // walk has already accepted the escape. A lone surrogate half reads as U+FFFD.
 @(private)
-decoded_escape :: #force_inline proc(src: []u8, p, end: u64) -> (spelled: [4]u8, size: int, next: u64) {
+decoded_escape :: #force_inline proc "contextless" (src: []u8, p, end: u64) -> (spelled: [4]u8, size: int, next: u64) {
 	#no_bounds_check {
 		if p + 1 >= end {
 			return replacement(), 3, end
@@ -151,7 +151,7 @@ decoded_escape :: #force_inline proc(src: []u8, p, end: u64) -> (spelled: [4]u8,
 // `\x`, `\0`, `\v`, `\'` and line continuations, and the byte a backslash spells as itself. Out of line, so
 // `decoded_escape` compiles none of it.
 @(private)
-decoded_escape_other :: proc(src: []u8, p, end: u64, e: u8) -> (spelled: [4]u8, size: int, next: u64) {
+decoded_escape_other :: proc "contextless" (src: []u8, p, end: u64, e: u8) -> (spelled: [4]u8, size: int, next: u64) {
 	#no_bounds_check {
 		switch e {
 		case 'x':
@@ -204,7 +204,7 @@ decoded_escape_other :: proc(src: []u8, p, end: u64, e: u8) -> (spelled: [4]u8, 
 }
 
 @(private)
-replacement :: #force_inline proc() -> [4]u8 {
+replacement :: #force_inline proc "contextless" () -> [4]u8 {
 	return {0xEF, 0xBF, 0xBD, 0}
 }
 
@@ -421,7 +421,7 @@ copy_up_to :: #force_inline proc(dst: []u8, w: int, src: [^]u8, p, n: int) {
 // between escapes, with no allocation. A key holding a tolerated ill-formed sequence compares through `decoded_next`,
 // so it matches what `text` returns.
 @(private)
-key_equals_decode :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, name: string) -> bool {
+key_equals_decode :: #force_inline proc "contextless" (doc: ^core.Document, i: core.Node_Index, name: string) -> bool {
 	n := doc.nodes[i]
 	if n.spelling & core.SPELLING_LAX != 0 {
 		d := decoded_init(doc.src, n)
@@ -438,35 +438,21 @@ key_equals_decode :: #force_inline proc(doc: ^core.Document, i: core.Node_Index,
 		}
 	}
 	src := doc.src
-	lo := n.lo
-	end := lo + u64(n.n)
-	p := lo
+	end := n.lo + u64(n.n)
+	p := n.lo
 	at := 0
-	for p < end {
-		e := p
-		// Steps eight bytes at a time while none of them is a backslash, then one byte at a time to the next backslash.
-		for e + 8 <= end {
-			v := u64(intrinsics.unaligned_load((^u64)(&src[e]))) ~ u64(0x5c5c_5c5c_5c5c_5c5c)
-			if (v - 0x0101_0101_0101_0101) & ~v & 0x8080_8080_8080_8080 != 0 {
-				break
+	// Most keys differ from `name` early, so the read ends at the first byte that differs.
+	#no_bounds_check for p < end {
+		c := src[p]
+		if c != '\\' {
+			if at >= len(name) || name[at] != c {
+				return false
 			}
-			e += 8
+			p += 1
+			at += 1
+			continue
 		}
-		for e < end && src[e] != '\\' {
-			e += 1
-		}
-		run := int(e - p)
-		if at + run > len(name) {
-			return false
-		}
-		if run > 0 && !spell.bytes_equal(src[p:e], transmute([]u8)name[at:at + run]) {
-			return false
-		}
-		at += run
-		if e >= end {
-			return at == len(name)
-		}
-		spelled, size, next := decoded_escape(src, e, end)
+		spelled, size, next := decoded_escape(src, p, end)
 		if at + size > len(name) {
 			return false
 		}
