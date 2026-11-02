@@ -87,12 +87,12 @@ the answers, and a full build is the same read with every node kept.
 and the answers are in one text order, the earlier path first at one byte.
 
 `on` keeps nothing and returns whether to go on. `each_answer` calls it as each answer becomes known, in the order they
-become known. A `Token`'s `n` is `u32`, so `on` gets a `Token_Answer` whose `hi` is the byte past the value, and a found
-container past 4 GiB has its span. Under `.First` an answer goes out at its match, or its close if it is a container.
-Under `.Last` the key of any `Name` on the way can repeat and take the answer back, so an answer goes out when the
-shallowest `Name` of any path is past repeating: on `{"a":1,"y":{"b":2}}`, `.y.b` and `.a` both wait for the root's
-close, since `y` could come again. A `Name` past a `Descend` can repeat in any container, and a late path's limit needs
-the text order, so those reads give everything at the end.
+become known. A `Token`'s `n` is `u32`, so `on` gets a `Token_Answer` whose `hi` is the byte past the value. A found
+container is known at its close, and `on` gets it there, so one inside another comes first. Under `.Last` the key of any
+`Name` on the way can repeat and take the answer back, so an answer goes out when the shallowest `Name` of any path is
+past repeating: on `{"a":1,"y":{"b":2}}`, `.y.b` and `.a` both wait for the root's close, since `y` could come again. A
+`Name` past a `Descend` can repeat in any container, and a late path's limit needs the text order, so those reads give
+everything at the end.
 
 A read takes up to 64 paths. More is `Over_Capacity`, and the caller splits the read or builds a document.
 
@@ -186,15 +186,12 @@ outcome. To read more of `config`, ask for `.config` or for each member.
 An edit names a node, so a `Not_Loaded` member cannot be edited. `core.set_member` on a listed `Missing` name is an insert
 after the container's last member, by name, and on a name no path looked for is `Bad_Index`.
 
-`json.set(src, S, ".port", "8080")` and `dsv.set` are a read, one edit per answer and a commit in one call. A path that
-ends in a `Name` inserts it where it is missing. Any other answer that is no value, a mismatch or a missing position or
-parent, is `Bad_Index`, and the error is a `Path_Edit_Error`, the read's or the edit's.
+`json.set(src, S, ".port", "8080")` and `dsv.set` are a build of the text, one edit per answer and a commit in one call.
+A path that ends in a `Name` inserts it where it is missing. Any other answer that is no value, a mismatch or a missing
+position or parent, is `Bad_Index`, and the error is a `Path_Edit_Error`, the read's or the edit's.
 
-A scan keeps nothing for edits. A commit of a partial document calls `Document.whole`, which a format's `query` sets, to build the text, moves
-each edit to the node at its byte, and commits there. A partial document holds no comments, and a commit needs them to
-move a comment with its member, and dsv's plan reads every record, so one member walk per container would not do. The
-commit already reads its whole output again, and the build runs only on the commit, so a read that makes no edit pays
-nothing. The text past a stop is read then, so a fault there is the commit's.
+`commit` refuses a partial document with `Bad_Index`, since it holds neither the members a commit composes nor their
+comments.
 
 ## The engine
 

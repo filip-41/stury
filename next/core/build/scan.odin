@@ -276,23 +276,43 @@ query_document_many :: proc(doc: ^core.Document, paths: []core.Path, read := cor
 
 query_document :: proc {query_document_one, query_document_many}
 
-// Writes `text` as the value at every answer of `doc`, a read of `path`, and returns the new text. A `Name` the path ends
+@(private = "file")
+has_descend :: proc(path: core.Path) -> bool {
+	for step in path.steps {
+		if _, is_descend := step.(core.Descend); is_descend {
+			return true
+		}
+	}
+	return false
+}
+
+// Writes `text` as the value at every answer of `path` over the built `doc`, and returns the new text. A `Name` the path ends
 // in that its container lacks is inserted there. Any other answer that is no value, a mismatch or a missing position or
 // parent, is `.Bad_Index`.
 set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 	list := core.edit_list_init(doc, allocator)
 	defer core.edit_list_destroy(&list)
+	// A `Name` at the end is set through its container, so that a missing name is told from a missing parent.
+	read := path
 	name: core.Name
 	named := false
-	if len(path.steps) > 0 {
-		name, named = path.steps[len(path.steps) - 1].(core.Name)
+	if n := len(path.steps); n > 0 && n - 1 not_in path.optional && !has_descend(path) {
+		name, named = path.steps[n - 1].(core.Name)
+		if named {
+			read.steps = path.steps[:n - 1]
+		}
 	}
-	for a in doc.answers {
+	answers, qerr := query_document_one(doc, read, allocator = allocator)
+	defer delete(answers, allocator)
+	if qerr.kind != .None {
+		return nil, qerr
+	}
+	for a in answers {
 		e := core.Document_Error{kind = .Bad_Index}
-		if a.outcome == .Found {
+		if a.outcome == .Found && !named {
 			e = core.set(&list, a.node, text)
-		} else if a.outcome == .Missing && named {
-			e = core.set_member(&list, a.owner, string(name), text)
+		} else if a.outcome == .Found && doc.nodes[a.node].kind == .Map {
+			e = core.set_member(&list, a.node, string(name), text)
 		}
 		if e.kind != .None {
 			return nil, e

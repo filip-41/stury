@@ -194,10 +194,6 @@ Document :: struct {
 	// reached, and `stopped` that the read stopped early, so the containers it left open have a `Partial` role, the count
 	// of what was read, and text past the stop that no walk judged. See `core/path.odin`.
 	answers:      []Answer,
-	// Builds a partial document's text as the read that made it read that text, with every tolerance on, since the text's
-	// own rules were the read's to judge and a commit's output is judged again. A format's `query` sets it, and no service
-	// table holds it, so a program that only builds keeps a walk its one caller's constant options can specialize.
-	whole:        proc(doc: ^Document, allocator: runtime.Allocator) -> (Document, Document_Error),
 	kept:         []Kept_Child,
 	missing:      []Missing_Name,
 	reads_block:  []u8,

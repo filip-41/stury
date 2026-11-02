@@ -22,10 +22,6 @@ Sink :: enum u8 {
 @(private = "file")
 DEAD :: max(u32)
 
-// The end of a found container not closed yet.
-@(private = "file")
-OPEN :: max(u64)
-
 // What the most ring entries of a container, and the most steps of a `Descend` path, are bounded by.
 @(private = "file")
 MAX_RING :: 64
@@ -62,16 +58,16 @@ Deep_Row :: struct {
 // A container the read is inside. `armed` holds a bit per path with a step here, `matched` the paths whose `Name` met its
 // key, and `ends` the paths that answered this container itself. `whole` says every member is kept, as a path answered
 // it. `ring` is the frame's first entry in `Scan_Many.rings` and `ring_k` its entries, 0 for none. `delay` says a
-// `Slice` with a negative end feeds its elements late. `found_lo` to `found_hi` are the list's entries that wait for
-// this container's end under `.Stream`.
+// `Slice` with a negative end feeds its elements late. `found` holds the paths that found the container under `.Stream`,
+// which answer at its close, and `open` is its token.
 @(private)
 Many_Frame :: struct {
 	armed:    u64,
 	matched:  u64,
 	ends:     u64,
+	found:    u64,
 	open_pos: u64,
-	found_lo: int,
-	found_hi: int,
+	open:     core.Token,
 	ring:     u32,
 	ring_k:   u32,
 	kept:     u32,
@@ -133,9 +129,10 @@ Scan_Many :: struct {
 	feeding:    bool,
 	last:       bool,
 	every_key:  bool,
+	found:      u64,
 	keep_set:   u64,
-	keep_lo:    int,
-	keep_hi:    int,
+	keep_found: u64,
+	keep_open:  core.Token,
 	on:         proc(state: rawptr, a: core.Token_Answer) -> bool,
 	state:      rawptr,
 	ctx:        runtime.Context,
@@ -451,20 +448,20 @@ many_kept :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Ho
 		d := h.keep
 		m := h.many
 		h.keep = max(int)
-		many_found_end(SINK, m, m.keep_lo, m.keep_hi, t.lo + u64(t.n))
+		many_found(SINK, h, m.keep_found, m.keep_open, t.lo + u64(t.n), d)
 		return many_left(SINK, h, s, m.keep_set, d)
 	}
 	return s, action
 }
 
-// Gives the answers in `lo ..< hi` the end of the container they found.
+// The paths in `set` answer the container at depth `d` that closed at `end`, which `open` opened.
 @(private = "file")
-many_found_end :: #force_inline proc "contextless" ($SINK: Sink, m: ^Scan_Many, lo, hi: int, end: u64) {
+many_found :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, set: u64, open: core.Token, end: u64, d: int) {
 	when SINK == .Stream {
-		for i in lo ..< hi {
-			if a := &m.placed[i]; a.hi == OPEN {
-				a.hi = end
-			}
+		for rest := set; rest != 0; rest &= rest - 1 {
+			p := uint(intrinsics.count_trailing_zeros(rest))
+			#no_bounds_check path := &h.many.paths[p]
+			many_emit(h, path, p, core.Answer{}, 2 * open.lo, open, end, d - path.n)
 		}
 	}
 }
@@ -494,7 +491,7 @@ many_left :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, set: 
 	return s, .Stop if h.stopped else .Next
 }
 
-// Gives `on` what is known, up to the first found container still open.
+// Gives `on` what is known.
 @(private = "file")
 many_flush :: proc "contextless" (h: ^Scan) {
 	m := h.many
@@ -502,9 +499,6 @@ many_flush :: proc "contextless" (h: ^Scan) {
 	for m.flushed < m.n_placed {
 		a := &m.placed[m.flushed]
 		if a.answer.path != DEAD {
-			if a.hi == OPEN {
-				return
-			}
 			if !many_give(h, a^) {
 				return
 			}
@@ -670,7 +664,7 @@ many_enters :: #force_inline proc "contextless" (h: ^Scan, path: ^Many_Path, k: 
 }
 
 @(private = "file")
-many_emit :: #force_inline proc "contextless" (h: ^Scan, path: ^Many_Path, p: uint, a: core.Answer, pos: u64, t: core.Token, chain: int) {
+many_emit :: #force_inline proc "contextless" (h: ^Scan, path: ^Many_Path, p: uint, a: core.Answer, pos: u64, t: core.Token, hi: u64, chain: int) {
 	if !many_room(path) {
 		return
 	}
@@ -678,7 +672,6 @@ many_emit :: #force_inline proc "contextless" (h: ^Scan, path: ^Many_Path, p: ui
 	a := a
 	a.path = u32(p)
 	m := h.many
-	hi := t.lo + u64(t.n) if t.kind <= .Plain || t.kind == .End else OPEN
 	scan_push(h, &m.placed, &m.n_placed, Placed{pos, a, t, hi, u32(chain)})
 }
 
@@ -695,12 +688,18 @@ many_miss :: #force_inline proc "contextless" (path: ^Many_Path, k: int, later: 
 
 // Path `p` reached a value at step `k`. Returns whether the path goes on inside it.
 @(private = "file")
-many_arrive :: #force_inline proc "contextless" (h: ^Scan, path: ^Many_Path, p: uint, k, d: int, t: core.Token, at, owner: core.Node_Index, pos: u64) -> bool {
+many_arrive :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, path: ^Many_Path, p: uint, k, d: int, t: core.Token, at, owner: core.Node_Index, pos: u64) -> bool {
 	m := h.many
 	if k == path.n {
-		many_emit(h, path, p, core.Answer{node = at, owner = owner}, pos, t, d - k)
 		m.keep = true
 		m.ended |= 1 << p
+		when SINK == .Stream {
+			if t.kind > .Plain {
+				m.found |= 1 << p
+				return false
+			}
+		}
+		many_emit(h, path, p, core.Answer{node = at, owner = owner}, pos, t, t.lo + u64(t.n), d - k)
 		return false
 	}
 	if many_enters(h, path, k, t.kind) {
@@ -713,9 +712,9 @@ many_arrive :: #force_inline proc "contextless" (h: ^Scan, path: ^Many_Path, p: 
 		return false
 	}
 	if outcome == .Missing {
-		many_emit(h, path, p, core.Answer{node = core.NO_NODE, owner = at if owner == core.NO_NODE else owner, outcome = .Missing}, pos, t, d - k)
+		many_emit(h, path, p, core.Answer{node = core.NO_NODE, owner = at if owner == core.NO_NODE else owner, outcome = .Missing}, pos, t, t.lo + u64(t.n), d - k)
 	} else {
-		many_emit(h, path, p, core.Answer{node = core.NO_NODE, owner = at, outcome = .Type_Mismatch}, pos, t, d - k)
+		many_emit(h, path, p, core.Answer{node = core.NO_NODE, owner = at, outcome = .Type_Mismatch}, pos, t, t.lo + u64(t.n), d - k)
 	}
 	m.keep = true
 	return false
@@ -733,7 +732,6 @@ many_reach :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: c
 	}
 	owner := core.Node_Index(s.b >> 32)
 	pos := u64(at) << 32 when SINK == .Replay else 2 * t.lo
-	found_lo := m.n_placed
 	child: u64
 	m.keep = false
 	m.ended = 0
@@ -741,7 +739,7 @@ many_reach :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: c
 		p := uint(intrinsics.count_trailing_zeros(set))
 		#no_bounds_check path := &m.paths[p]
 		if path.deep < 0 {
-			if many_arrive(h, path, p, d, d, t, at, owner, pos) {
+			if many_arrive(SINK, h, path, p, d, d, t, at, owner, pos) {
 				child |= 1 << p
 			}
 			continue
@@ -758,7 +756,7 @@ many_reach :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: c
 		}
 		for rest := bits; rest != 0; rest &= rest - 1 {
 			k := int(intrinsics.count_trailing_zeros(rest))
-			if many_arrive(h, path, p, k, d, t, at, owner, pos) {
+			if many_arrive(SINK, h, path, p, k, d, t, at, owner, pos) {
 				live |= 1 << uint(k)
 			}
 		}
@@ -790,7 +788,8 @@ many_reach :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: c
 	if child != 0 {
 		s, _ = scan_write(WRITE, h, s, t)
 		g := &m.frames[d + 1]
-		g^ = {armed = child, ends = m.ended, open_pos = pos, whole = whole, is_map = t.kind == .Map, found_lo = found_lo, found_hi = m.n_placed, ring = m.ring_top}
+		g^ = {armed = child, ends = m.ended, found = m.found, open = t, open_pos = pos, whole = whole, is_map = t.kind == .Map, ring = m.ring_top}
+		m.found = 0
 		many_ring_open(h, g, d + 1)
 		when WRITE {
 			g.slot = u32(h.b.n_counts)
@@ -816,7 +815,8 @@ many_reach :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: c
 		s, _ = scan_write(WRITE, h, s, t)
 		h.keep = d
 		m.keep_set = m.ended
-		m.keep_lo, m.keep_hi = found_lo, m.n_placed
+		m.keep_found, m.keep_open = m.found, t
+		m.found = 0
 		return s, .Next
 	}
 }
@@ -987,7 +987,7 @@ many_close :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: c
 	m.ring_top = f.ring
 	s.c -= 1
 	#no_bounds_check s.b = h.b.stack[s.c]
-	many_found_end(SINK, m, f.found_lo, f.found_hi, t.lo + u64(t.n))
+	many_found(SINK, h, f.found, f.open, t.lo + u64(t.n), d - 1)
 	return many_left(SINK, h, s, f.armed | f.ends, d - 1)
 }
 
@@ -1011,7 +1011,7 @@ many_missed :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, f: ^Many
 	later := path.alls >> uint(k + 1)
 	outcome, dropped := many_miss(path, k + 1, later, true)
 	if !dropped {
-		many_emit(h, path, p, core.Answer{node = core.NO_NODE, owner = open, outcome = outcome}, pos, t, d - k - 1)
+		many_emit(h, path, p, core.Answer{node = core.NO_NODE, owner = open, outcome = outcome}, pos, t, t.lo + u64(t.n), d - k - 1)
 	}
 	when SINK == .Document {
 		if named {

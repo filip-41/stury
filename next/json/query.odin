@@ -35,7 +35,6 @@ query_many :: proc(src: []u8, $S: Spec, paths: []core.Path, opts := Options{}, r
 	}
 	h.b.doc.read.spec = u8(S)
 	h.b.doc.read.max_depth = opts.max_depth
-	h.b.doc.whole = whole_text
 	regs := scan.BUILDER_REGS
 	hi: u64
 	fault: Maybe(core.Fault)
@@ -74,10 +73,10 @@ query_end :: proc(src: []u8, $S: Spec, h: ^scan.Scan, regs: core.Hook_Regs, hi: 
 }
 
 // Calls `on` with each answer of `paths` as it becomes known, with no document. `on` returns false to stop the read. A
-// repeated key can take an answer back under `.Last`, so an answer through a `Name` waits for that `Name`'s container
-// to close there, and `.First` gives each as soon as it is read. Answers come in the order they are known, and a path
-// with a `Descend` or a negative index that has a limit gives them all at the end. `read.refuse_duplicates` reads the
-// whole text first, so a fault there comes before any answer.
+// found container answers at its close. A repeated key can take an answer back under `.Last`, so an answer through a
+// `Name` waits for that `Name`'s container to close there, and `.First` gives each as soon as it is read. Answers come in
+// the order they are known, and a path with a `Descend` or a negative index that has a limit gives them all at the end.
+// `read.refuse_duplicates` reads the whole text first, so a fault there comes before any answer.
 each_answer :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
 	if read.refuse_duplicates {
 		built, e := build(src, S, opts, true, allocator)
@@ -124,8 +123,8 @@ find :: proc(src: []u8, $S: Spec, path: core.Path, opts := Options{}, read := co
 // Answers one path or several over a built document with the engine `query` runs. `core.Answer`s name `doc`'s nodes.
 query_document :: scan.query_document
 
-// Writes `text` as the value at every answer of `path` over `src`, in one call: a read of the path, one edit per answer and
-// a commit. A `Name` the path ends in that its container lacks is inserted after the container's last member. The result
+// Writes `text` as the value at every answer of `path` over `src`, in one call: a build of the text, one edit per answer
+// and a commit. A `Name` the path ends in that its container lacks is inserted after the container's last member. The result
 // is the new text, which the caller frees with `allocator`.
 set :: proc(src: []u8, $S: Spec, path: string, text: string, opts := Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 	parsed, perr := core.parse_path(path, allocator)
@@ -133,21 +132,10 @@ set :: proc(src: []u8, $S: Spec, path: string, text: string, opts := Options{}, 
 		return nil, perr
 	}
 	defer core.path_destroy(&parsed)
-	doc, qerr := query_one(src, S, parsed, opts, allocator = allocator)
+	doc, berr := build(src, S, opts, false, allocator)
 	defer core.destroy(&doc)
-	if qerr.kind != .None {
-		return nil, qerr
+	if berr.kind != .None {
+		return nil, berr
 	}
 	return scan.set_answers(&doc, parsed, text, allocator)
-}
-
-@(private = "file")
-whole_text :: proc(doc: ^core.Document, allocator := context.allocator) -> (core.Document, core.Document_Error) {
-	opts := Options{max_depth = doc.read.max_depth, tolerate = {.Invalid_Utf8, .Lone_Surrogate}}
-	switch Spec(doc.read.spec) {
-	case .Json:  return build(doc.src, .Json, opts, false, allocator)
-	case .Jsonc: return build(doc.src, .Jsonc, opts, false, allocator)
-	case .Json5: return build(doc.src, .Json5, opts, false, allocator)
-	}
-	return {}, {kind = .Bad_Index}
 }

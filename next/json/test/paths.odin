@@ -300,25 +300,6 @@ partial_reads :: proc(t: ^testing.T) {
 
 }
 
-// A commit of a partial document writes what a built one writes, and what no read reached stays byte for byte.
-@(test)
-partial_commit :: proc(t: ^testing.T) {
-	src := transmute([]u8)string("{ // head\n  \"a\": 1, /* mid */ \"b\": [1, 2,3], \"c\": {\"x\": 1}\n}\n")
-	parsed, _ := core.parse_path(".b[-1]")
-	defer core.path_destroy(&parsed)
-	doc, err := json.query(src, .Jsonc, parsed)
-	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
-	list := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.remove(&list, doc.answers[0].node).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.insert(&list, doc.answers[0].owner, 3, "9").kind, core.Document_Error_Kind.None)
-	out, _, cerr := core.commit(&list)
-	defer delete(out)
-	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, string(out), "{ // head\n  \"a\": 1, /* mid */ \"b\": [1, 2,9], \"c\": {\"x\": 1}\n}\n")
-}
-
 @(private = "file")
 expect_set :: proc(t: ^testing.T, src, path, text, want: string, loc := #caller_location) {
 	out, err := json.set(transmute([]u8)src, .Json, path, text)
