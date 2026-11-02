@@ -98,7 +98,7 @@ check_dialect :: proc(t: ^testing.T, src: []u8, c: gen.Options_Case) -> bool {
 	if old_err != nil || err.kind != .None {
 		return testing.expectf(t, (old_err != nil) == (err.kind != .None), "%q %v %v: build %v, current tree %v", src, c.spec, opts, err, old_err)
 	}
-	return compare(t, src, &doc, 0, &old, 0, !no_header && doc.header != 0)
+	return compare(t, src, &doc, 0, &old, 0, !no_header && doc.shared_keys != 0)
 }
 
 validate_agrees :: proc(t: ^testing.T, src: []u8, c: gen.Options_Case, refused: bool, want: cur.Error, bad: bool, got: core.Fault) -> bool {

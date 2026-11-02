@@ -184,7 +184,7 @@ check_containers :: proc(t: ^testing.T, doc: ^core.Document, tokens: []core.Toke
 	stack: [1100]Frame
 	depth := 0
 	node := core.Node_Index(0)
-	headed := doc.header != 0
+	headed := doc.shared_keys != 0
 	for tok in tokens {
 		if tok.role > .Key {
 			continue
@@ -223,7 +223,7 @@ check_containers :: proc(t: ^testing.T, doc: ^core.Document, tokens: []core.Toke
 		node += 1
 		// The root is the first token, and a headed document's next nodes are the header row and its cells.
 		if headed && node == 1 {
-			node += core.Node_Index(doc.nodes[doc.header].n)
+			node += core.Node_Index(doc.nodes[doc.shared_keys].n)
 		}
 	}
 	return testing.expectf(t, depth == 0 && node == core.Node_Index(len(doc.nodes)), "depth %d, %d nodes, doc %d", depth, node, len(doc.nodes))
@@ -384,7 +384,7 @@ fact_holdable :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Rol
 	if style == .None {
 		return false
 	}
-	table := edit.record != nil
+	table := core.flat_doc(doc)
 	if !table {
 		if role == .Comment_Foot {
 			n := doc.nodes[node]
@@ -399,7 +399,7 @@ fact_holdable :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Rol
 			}
 		} else if role == .Comment {
 			if node == core.ROOT {
-				if read.header == 0 || core.length(read, core.ROOT) == 0 {
+				if read.shared_keys == 0 || core.length(read, core.ROOT) == 0 {
 					return false
 				}
 			} else {
@@ -549,7 +549,7 @@ fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.
 		}
 		// A source root comment above a header reads as the root's foot when the commit leaves no record, which the
 		// output holds.
-		foot := f.role == .Comment && f.node == core.ROOT && doc.header != 0 && core.length(read, core.ROOT) == 0
+		foot := f.role == .Comment && f.node == core.ROOT && doc.shared_keys != 0 && core.length(read, core.ROOT) == 0
 		// A source fact in the document's own spec already reads under it, so only a missing slot drops it. Under
 		// another spec the output must hold the whole fact, body included.
 		if spec != doc.read.spec && !foot && !fact_holdable(doc, f.node, f.role, f.body, spec, read) {

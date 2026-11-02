@@ -97,13 +97,13 @@ pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter {
 	if n.kind != .Map {
 		return {doc = doc, done = true}
 	}
-	if doc.header != 0 {
-		h := doc.nodes[doc.header]
+	if doc.shared_keys != 0 {
+		h := doc.nodes[doc.shared_keys]
 		it := Pair_Iter{
 			doc     = doc,
-			key_at  = doc.header + 1,
+			key_at  = doc.shared_keys + 1,
 			val_at  = obj + 1,
-			key_end = doc.header + Node_Index(h.n),
+			key_end = doc.shared_keys + Node_Index(h.n),
 			val_end = obj + Node_Index(n.n),
 			shared  = true,
 		}
@@ -127,7 +127,7 @@ pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter {
 }
 
 // Returns the next key and value node of the `Map`. For an inline-key `Map`, key and value alternate in preorder.
-// For a shared-key `Map`, keys come from `doc.header` while values advance within `obj`.
+// For a shared-key `Map`, keys come from `doc.shared_keys` while values advance within `obj`.
 pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool) {
 	if it.done {
 		return NO_NODE, NO_NODE, false
@@ -168,11 +168,10 @@ pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bo
 // table. `src` is borrowed and must outlive the document. `nodes_alloc` is the allocation behind `nodes`, whose length
 // is its capacity, so `destroy` frees it after `nodes` shrank to the node count.
 //
-// A headed dsv text keeps its header row as the root's first child, an `Array` of role `Key` whose `Plain` cells
-// name its columns, so the root's readers step over it as they step over a member's key. `header` is that
-// `Array`'s node, and its cells, at `header + 1` on, are the keys of every record: column `i`'s key is the
-// header's cell `i`. It is 0 for a document with no header, for every JSON text, and for a dsv text read
-// without one.
+// A format whose root members share their keys keeps those keys as the root's first child, an `Array` of role `Key`, so
+// the root's readers step over it as they step over a member's key. `shared_keys` is that `Array`'s node, and its
+// children, at `shared_keys + 1` on, are the keys of every member `Map`: a `Map`'s `i`th value has key `i`. It is 0 for
+// a document with no shared keys, for every JSON text, and for a dsv text read without a header.
 Document :: struct {
 	src:         []u8,
 	nodes:       []Node,
@@ -181,7 +180,7 @@ Document :: struct {
 	facts_alloc: []Fact,
 	spelling:    ^Spelling,
 	allocator:   runtime.Allocator,
-	header:      Node_Index,
+	shared_keys: Node_Index,
 	// The byte just past the root value's authored bytes: the close of a root container, or the end of a root scalar,
 	// quotes included. 0 when the build did not record it. `span(ROOT)` and a whole-document writer read it instead
 	// of calling the format's `close_end`.
@@ -224,29 +223,34 @@ Spelling :: struct {
 
 // An `Edit_Spelling` holds a format's edit services. A document's `Spelling` points at one table, and the services
 // dispatch on the document's `spec` and `opts`. `value` checks a text as exactly one value of the format and
-// spec, `record` as exactly one record, returning its cell count, and `key_text` writes a decoded member name in the
-// format's own spelling, quotes and escapes included. A member insert's key and a key set take a decoded name, so no
-// service judges a key. `reads` is the format's own read of a text with or without its tolerance set, for the check a
-// commit makes, under the output spec `spec`. Each service receives the document, so it reads the run-time options the
-// document holds. A text that is no value or record answers `.Bad_Value`, with the walk's fault in `inner` where there
-// is one, and `.No_Memory` when the service could not allocate.
+// spec, and `key_text` writes a decoded member name in the format's own spelling, quotes and escapes included. A member
+// insert's key and a key set take a decoded name, so no service judges a key. `reads` is the format's own read of a text
+// with or without its tolerance set, for the check a commit makes, under the output spec `spec`. Each service receives
+// the document, so it reads the run-time options the document holds. A text that is no value answers `.Bad_Value`, with
+// the walk's fault in `inner` where there is one, and `.No_Memory` when the service could not allocate.
 //
-// `member_sep` is written between two members of an object or two elements of an array, `key_sep` between a
-// member's key and its value, and `record_sep` is the line end a record insert writes, read from the document so
-// a text keeps the line end it uses. A table's cell separator comes from `cell_sep`. `comment` says how
-// the output spells a comment under `spec` and is nil for a format that accepts no comment.
+// `member_sep` is what is written between two members of a container, and `key_sep` between a member's key and its
+// value. `comment` says how the output spells a comment under `spec` and is nil for a format that accepts no comment.
+// `insert_check` and `cut_check` hold a format's rules on a container's inserts and removals.
+//
+// A flat format also supplies the rest. `interior` returns the bytes a container's members lie in, `root_head` writes
+// the edits of what lies before the root's first member, and `root_junction` composes a junction of the root, whose
+// members are lines. `fact_slot` says whether the output holds a fact of a role on a node, and `emptied` whether a list
+// removes every member of the root.
 Edit_Spelling :: struct {
-	value:        proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
-	key_text:     proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
-	record:       proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: Document_Error),
-	reads:        proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
-	comment:      proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
-	member_sep:   string,
-	key_sep:      string,
-	record_sep:   proc(doc: ^Document) -> string,
-	cell_sep:     proc(doc: ^Document) -> string,
-	insert_check: proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
-	cut_check:    proc(doc: ^Document, container: Node_Index, cuts: []int, has_set: bool) -> Document_Error,
+	value:         proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
+	key_text:      proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
+	reads:         proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
+	comment:       proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
+	member_sep:    proc(doc: ^Document) -> string,
+	key_sep:       string,
+	insert_check:  proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
+	cut_check:     proc(doc: ^Document, container: Node_Index, cuts: []int, has_set: bool) -> Document_Error,
+	interior:      proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64),
+	root_head:     proc(cx: ^Compose, open: u64) -> (err: Document_Error, ok: bool),
+	root_junction: proc(cx: ^Compose, open, close: u64, l, r: int, inserts: []Edit) -> bool,
+	fact_slot:     proc(doc: ^Document, node: Node_Index, role: Role, emptied: bool) -> bool,
+	emptied:       proc(doc: ^Document, list: ^Edit_List) -> bool,
 }
 
 // A `Comment_Spelling` names how a format spells a comment in an output: `//` for a JSON spec that has comments, the
@@ -424,7 +428,7 @@ child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_I
 	}
 	#partial switch n.kind {
 	case .Map:
-		if doc.header == 0 {
+		if doc.shared_keys == 0 {
 			if int(n.n) == 2 * count + 1 {
 				return i + Node_Index(2 + 2 * k), true
 			}
@@ -479,7 +483,7 @@ children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
 	if n.kind != .Array && n.kind != .Map {
 		return {doc = doc, parent = i, done = true}
 	}
-	it := Child_Iter{doc = doc, parent = i, end = i + Node_Index(n.n), pairs = n.kind == .Map && doc.header == 0}
+	it := Child_Iter{doc = doc, parent = i, end = i + Node_Index(n.n), pairs = n.kind == .Map && doc.shared_keys == 0}
 	j := int(i) + 1
 	if it.pairs {
 		// The first member's key is one node.
@@ -567,18 +571,18 @@ member_all :: proc(doc: ^Document, obj: Node_Index, name: string) -> Member_Iter
 	if n.kind != .Map {
 		return {doc = doc, rec = NO_NODE, done = true}
 	}
-	if doc.header != 0 {
-		h := doc.nodes[doc.header]
-		return {doc = doc, at = doc.header + 1, end = doc.header + Node_Index(h.n), name = name, rec = obj}
+	if doc.shared_keys != 0 {
+		h := doc.nodes[doc.shared_keys]
+		return {doc = doc, at = doc.shared_keys + 1, end = doc.shared_keys + Node_Index(h.n), name = name, rec = obj}
 	}
 	return {doc = doc, at = obj + 1, end = obj + Node_Index(n.n), name = name, rec = NO_NODE}
 }
 
 // Returns the next member and is inlined at `member`, so the object step needs no iterator load or store between
-// members. A headed record is passed to `member_next_cell`.
+// members. A headed record is passed to `member_next_shared`.
 member_next :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool) {
 	if it.rec != NO_NODE {
-		return member_next_cell(it)
+		return member_next_shared(it)
 	}
 	for !it.done {
 		j := int(it.at)
@@ -597,12 +601,11 @@ member_next :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool) {
 	return NO_NODE, false
 }
 
-// Returns the next of a headed record's cells whose header cell decodes to `it.name`. The walk runs over the
-// header's cells. A column past the record's last cell matches nothing, so a ragged record's missing columns are
-// absent.
+// Returns the next of a shared-key `Map`'s values whose key decodes to `it.name`. The walk runs over the shared keys. A
+// key past the `Map`'s last value matches nothing, so a short `Map`'s missing members are absent.
 @(private)
-member_next_cell :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool) {
-	cells := int(it.doc.nodes[it.rec].n) - 1
+member_next_shared :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool) {
+	width := int(it.doc.nodes[it.rec].n) - 1
 	for !it.done {
 		j := int(it.at)
 		if j >= int(it.end) {
@@ -610,8 +613,8 @@ member_next_cell :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool) {
 			break
 		}
 		it.at = Node_Index(j + 1)
-		col := j - int(it.doc.header) - 1
-		if col < cells && key_equals(it.doc, Node_Index(j), it.name) {
+		col := j - int(it.doc.shared_keys) - 1
+		if col < width && key_equals(it.doc, Node_Index(j), it.name) {
 			return it.rec + Node_Index(1 + col), true
 		}
 	}
@@ -752,7 +755,6 @@ facts_of :: proc(doc: ^Document, i: Node_Index, role: Role) -> Facts {
 
 // Returns node `i`'s facts of every role, sorted by node and then source order. Core's edit and span code walk
 // them, and a caller reads one role at a time through `facts_of`.
-@(private)
 all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact {
 	if i == NO_NODE {
 		return nil

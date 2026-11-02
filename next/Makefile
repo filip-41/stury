@@ -75,6 +75,7 @@ $(ASAN_TARGETS): $(BUILD)/test/asan/%:
 # Host, then the other architectures' sources: x86-64 and a target with neither NEON nor x86 vectors.
 lint:
 	python3 tools/checks.py imports
+	python3 tools/checks.py words
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS),)
 	$(ODIN) check bench $(LINT_FLAGS)
 	$(ODIN) check bench/doc $(LINT_FLAGS)

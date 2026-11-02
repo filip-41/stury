@@ -12,7 +12,7 @@ import build "../core/build"
 // dsv's document, built from the walk's tokens over the caller's bytes. A headed text is an `Array` of `Map` records
 // whose first child is the header row, an `Array` of role `Key` whose cells name every record's columns. A text without
 // a header is an `Array` of `Array`s. A cell is text until a reader calls `resolve`, and a headed record's shared keys
-// sit in `Document.header`.
+// sit in `Document.shared_keys`.
 
 // Returns the delimiter, comment byte and `no_header` flag packed in `doc.read.opts`.
 @(private)
@@ -24,14 +24,17 @@ read_opts :: #force_inline proc(doc: ^core.Document) -> (delimiter: u8, comment:
 // since the specs differ only in how a recorded text is read.
 @(private, rodata)
 EDIT := core.Edit_Spelling {
-	value        = edit_value_at,
-	record       = edit_record_at,
-	reads        = edit_reads_at,
-	comment      = edit_comment,
-	record_sep   = edit_record_sep,
-	cell_sep     = edit_cell_sep,
-	insert_check = edit_insert_check,
-	cut_check    = edit_cut_check,
+	value         = edit_value_at,
+	reads         = edit_reads_at,
+	comment       = edit_comment,
+	member_sep    = edit_cell_sep,
+	insert_check  = edit_insert_check,
+	cut_check     = edit_cut_check,
+	interior      = edit_interior,
+	root_head     = compose_root_head,
+	root_junction = compose_root_junction,
+	fact_slot     = edit_fact_slot,
+	emptied       = edit_emptied,
 }
 
 // dsv's spelling services, in rodata, the same table for every spec. A service dispatches on `doc.read.spec`, since the
@@ -151,7 +154,7 @@ build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bo
 	}
 	// The header row is the root's first child, an `Array` of role `Key`. A text without one has no such node.
 	if i := int(core.ROOT) + 1; i < len(doc.nodes) && doc.nodes[i].kind == .Array && doc.nodes[i].role == .Key {
-		doc.header = core.Node_Index(i)
+		doc.shared_keys = core.Node_Index(i)
 	}
 	return doc, err
 }
@@ -162,7 +165,7 @@ commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) 
 	if list.doc == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
-	if list.doc.spelling.edit == nil || list.doc.spelling.edit.record == nil || as != Spec(list.doc.read.spec) {
+	if !core.flat_doc(list.doc) || as != Spec(list.doc.read.spec) {
 		return nil, 0, {kind = .Bad_Spec}
 	}
 	return core.commit_as(list, u8(as), allocator)
@@ -487,8 +490,8 @@ edit_reads :: proc(doc: ^core.Document, src: []u8, tolerate: bool, _: u8, $S: Sp
 // Returns the cell count every record of a delimited text has: its header's, its first record's, or 0 for an empty text.
 @(private)
 dsv_width :: proc(doc: ^core.Document) -> int {
-	if doc.header != 0 {
-		return core.length(doc, doc.header)
+	if doc.shared_keys != 0 {
+		return core.length(doc, doc.shared_keys)
 	}
 	it := core.children(doc, core.ROOT)
 	if rec, ok := core.child_next(&it); ok {
@@ -500,10 +503,69 @@ dsv_width :: proc(doc: ^core.Document) -> int {
 // Whether `c` is the record that sets the table's width: the only record of a table with no header, or the header of a table with no data record.
 @(private)
 dsv_sole_record :: proc(doc: ^core.Document, c: core.Node_Index) -> bool {
-	if doc.header == c {
+	if doc.shared_keys == c {
 		return core.length(doc, core.ROOT) == 0
 	}
-	return doc.header == 0 && core.length(doc, core.ROOT) == 1
+	return doc.shared_keys == 0 && core.length(doc, core.ROOT) == 1
+}
+
+// The bytes a container's members lie in. The root's records start after its header row and run to the text's end, and
+// a record's cells stop at its last cell, since its line end is the root's.
+@(private)
+edit_interior :: proc(doc: ^core.Document, c: core.Node_Index) -> (lo, hi: u64) {
+	if c == core.ROOT {
+		if doc.shared_keys != 0 {
+			lo = close_end(doc, doc.shared_keys)
+		}
+		return lo, u64(len(doc.src))
+	}
+	lo = doc.nodes[c].lo
+	if last, ok := core.child_at(doc, c, core.length(doc, c) - 1); ok {
+		return lo, core.key_start(doc.nodes[last]) + u64(len(core.span(doc, last)))
+	}
+	return lo, close_end(doc, c)
+}
+
+// Whether the output holds a fact: a comment on a record, or on the root above its first record, and a foot on the root.
+// A comment above a header reads on the root only when a record follows it, which resolves it there.
+@(private)
+edit_fact_slot :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Role, emptied: bool) -> bool {
+	if role == .Comment_Foot {
+		return node == core.ROOT
+	}
+	if role != .Comment {
+		return false
+	}
+	if node == core.ROOT {
+		return doc.shared_keys != 0 && core.length(doc, core.ROOT) > 0 && !emptied
+	}
+	n := doc.nodes[node]
+	return n.role == .Value && (n.kind == .Array || n.kind == .Map)
+}
+
+// Whether the list removes every record. A record is the only value container of a table, so one pass over the edits
+// counts the removals. A root insert keeps a record, and a text with no record is no removal.
+@(private)
+edit_emptied :: proc(doc: ^core.Document, list: ^core.Edit_List) -> bool {
+	removed := 0
+	for e in list.edits {
+		switch e.op {
+		case .Insert:
+			if e.node == core.ROOT {
+				return false
+			}
+		case .Remove:
+			if e.node == core.ROOT || int(e.node) >= len(doc.nodes) {
+				continue
+			}
+			n := doc.nodes[e.node]
+			if n.role == .Value && (n.kind == .Array || n.kind == .Map) {
+				removed += 1
+			}
+		case .Set, .Set_Fact, .Remove_Fact:
+		}
+	}
+	return removed > 0 && removed == core.length(doc, core.ROOT)
 }
 
 // Returns the single-byte string of the delimiter.
@@ -607,8 +669,8 @@ edit_record_sep :: proc(doc: ^core.Document) -> string {
 			return e
 		}
 	}
-	if doc.header != 0 {
-		if e := record_line_end(doc, doc.header); e != "" {
+	if doc.shared_keys != 0 {
+		if e := record_line_end(doc, doc.shared_keys); e != "" {
 			return e
 		}
 	}

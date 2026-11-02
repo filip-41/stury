@@ -170,9 +170,9 @@ hook sees `Map`, `Array`, `Key` and value tokens and returns `Next`, `Skip` or `
 - Each answer goes to a sink chosen at compile time: `query` uses the document sink, and `each_answer` the stream sink.
 
 The step logic runs on two token sources: the walk's during a scan, and a document's during a query. `doc.nodes` is not
-the walk's token stream: it holds no `End` node, a headed dsv record's `Key` tokens live in `doc.header`, and a
+the walk's token stream: it holds no `End` node, a headed dsv record's `Key` tokens live in `doc.shared_keys`, and a
 container's `n` and `spelling` are rewritten at its close. A replay in core feeds the step logic from a document,
-restoring each `End` with a stack and each dsv key from `doc.header`.
+restoring each `End` with a stack and each dsv key from `doc.shared_keys`.
 
 A query over a full document, a scan of the text and a value-tree model give the same answers in the same order.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Checks over the tree: its lean size, its import order, and its public surface.
+"""Checks over the tree: its lean size, its import order, its public surface, and the words in core.
 
-Run from next/: `python3 tools/checks.py size`, `imports` or `surface`.
+Run from next/: `python3 tools/checks.py size`, `imports`, `surface` or `words`.
 """
 
 import os
@@ -16,6 +16,11 @@ RANK = {"core/spell": 0, "core": 1, "core/kernel": 2, "core/build": 3, "json": 4
 FORMATS = {"json", "dsv"}
 
 LEAN_BUDGET = 13_000
+
+# core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte
+# shuffle's.
+NEUTRAL = ["core/spell", "core", "core/build"]
+FORMAT_WORD = re.compile(r"(?<![a-z])(header|table|record|cell|delimiter)s?(?![a-z])")
 
 DECL = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(::|:=|:)")
 
@@ -208,6 +213,21 @@ def declarations(path):
         raise ValueError(f"{path}: unbalanced braces")
 
 
+def words():
+    found = 0
+    for package in NEUTRAL:
+        for path in package_files(package):
+            block = False
+            with open(path, encoding="utf-8") as lines:
+                for number, line in enumerate(lines, 1):
+                    code, block = strip_code(line, block)
+                    hit = FORMAT_WORD.search(code.lower())
+                    if hit:
+                        print(f"{path}:{number}: {hit.group(1)}")
+                        found += 1
+    return 1 if found else 0
+
+
 def surface():
     for package in PACKAGES:
         names = set()
@@ -221,9 +241,9 @@ def surface():
 
 
 def main(argv):
-    commands = {"size": size, "imports": imports, "surface": surface}
+    commands = {"size": size, "imports": imports, "surface": surface, "words": words}
     if len(argv) != 2 or argv[1] not in commands:
-        print("usage: checks.py size|imports|surface", file=sys.stderr)
+        print("usage: checks.py size|imports|surface|words", file=sys.stderr)
         return 2
     return commands[argv[1]]()
 

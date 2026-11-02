@@ -18,8 +18,13 @@ EDIT := core.Edit_Spelling {
 	key_text   = edit_key_text,
 	reads      = edit_reads_at,
 	comment    = edit_comment,
-	member_sep = ",",
+	member_sep = edit_member_sep,
 	key_sep    = ":",
+}
+
+@(private)
+edit_member_sep :: proc(_: ^core.Document) -> string {
+	return ","
 }
 
 // `SPELLING` holds JSON's spelling services, in rodata, the same table for every spec, for a caller that knows no
@@ -332,7 +337,7 @@ edit_comment :: proc(doc: ^core.Document, spec: u8) -> (core.Comment_Spelling, u
 // must read strictly, since the source's reading under its own spec is no evidence. A delimited document is another
 // format family and is refused before the splice.
 commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
-	if list.doc != nil && list.doc.spelling.edit != nil && list.doc.spelling.edit.record != nil {
+	if list.doc != nil && core.flat_doc(list.doc) {
 		return nil, 0, {kind = .Bad_Spec}
 	}
 	return core.commit_as(list, u8(as), allocator)

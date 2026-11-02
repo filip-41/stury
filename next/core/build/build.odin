@@ -280,7 +280,7 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYL
 		when KEYLESS {
 			s.b += 1
 			when FACTS {
-				builder_resolve_pending(h, core.Node_Index(a), builder_header_lo(h))
+				builder_resolve_pending(h, core.Node_Index(a), builder_keys_lo(h))
 			}
 		} else {
 			if t.role == .Value {
@@ -314,7 +314,7 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYL
 			when KEYLESS {
 				// A record's head comments are its own, except one above the header row's first byte, which belongs
 				// to the root since no record precedes it to take it.
-				builder_resolve_pending(h, core.Node_Index(a), builder_header_lo(h))
+				builder_resolve_pending(h, core.Node_Index(a), builder_keys_lo(h))
 			} else {
 				if t.role == .Value {
 					builder_resolve_pending(h, core.Node_Index(a))
@@ -560,9 +560,9 @@ builder_resolve_pending :: #force_inline proc "contextless" (h: ^Builder, node: 
 	h.pending = -1
 }
 
-// Returns the first byte of the header row a keyless document wrote before its walk, or 0 when it has none.
+// Returns the first byte of the shared keys a keyless document wrote before its walk, or 0 when it has none.
 @(private)
-builder_header_lo :: #force_inline proc "contextless" (h: ^Builder) -> u64 {
+builder_keys_lo :: #force_inline proc "contextless" (h: ^Builder) -> u64 {
 	if len(h.doc.nodes) > 1 && h.doc.nodes[1].role == .Key {
 		return h.doc.nodes[1].lo
 	}
@@ -588,7 +588,7 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open,
 		size <<= 1
 	}
 	small: [64]Key_Entry
-	table := small[:]
+	slots := small[:]
 	heap: []Key_Entry
 	if size > len(small) {
 		fresh, err := make([]Key_Entry, size, allocator)
@@ -596,7 +596,7 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open,
 			return {kind = .No_Memory}
 		}
 		heap = fresh
-		table = fresh
+		slots = fresh
 	}
 	defer if heap != nil {
 		delete(heap, allocator)
@@ -622,7 +622,7 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open,
 		hash := hash_bytes(transmute([]u8)s)
 		at := hash & mask
 		for {
-			e := &table[at]
+			e := &slots[at]
 			if !e.used {
 				e^ = {hash = hash, node = key, used = true}
 				break

@@ -61,7 +61,7 @@ check_document :: proc(t: ^testing.T, src: []u8, tsv, no_header, refuse: bool) -
 	if old_err != nil || err.kind != .None {
 		return refuses_agree(t, src, tsv, old_err, err)
 	}
-	return compare(t, src, &doc, 0, &old, 0, !no_header && doc.header != 0)
+	return compare(t, src, &doc, 0, &old, 0, !no_header && doc.shared_keys != 0)
 }
 
 // Whether a TSV header cell begins and ends with the same quote byte, the cell whose text the old tree spells
@@ -169,7 +169,7 @@ compare_members :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core
 		}
 		key_node := ov - 1
 		if headed {
-			key_node = ours.header + 1 + core.Node_Index(col)
+			key_node = ours.shared_keys + 1 + core.Node_Index(col)
 		}
 		if !testing.expectf(t, pk == key_node, "%q node %d: pair_next key %d disagrees with header %d", src, oi, pk, key_node) {
 			return false
@@ -187,7 +187,7 @@ compare_members :: proc(t: ^testing.T, src: []u8, ours: ^core.Document, oi: core
 		if ok {
 			found_key := found - 1
 			if headed {
-				found_key = ours.header + 1 + (found - oi - 1)
+				found_key = ours.shared_keys + 1 + (found - oi - 1)
 			}
 			ok = core.key_equals(ours, found_key, key)
 		}

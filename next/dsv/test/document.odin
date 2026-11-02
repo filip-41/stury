@@ -43,7 +43,7 @@ node_layout :: proc(t: ^testing.T) {
 	if !walktest.expect_nodes(t, &doc, want) {
 		return
 	}
-	testing.expect_value(t, doc.header, 1)
+	testing.expect_value(t, doc.shared_keys, 1)
 	testing.expect_value(t, doc.root_close, u64(len(src)))
 	testing.expect_value(t, core.length(&doc, 0), 1)
 	testing.expect_value(t, core.length(&doc, 1), 2)
@@ -104,9 +104,9 @@ child_at_reader :: proc(t: ^testing.T) {
 	_, has = core.child_at(&doc, 0, 1)
 	testing.expect(t, !has)
 	// The header row is an `Array`, so its cells are its children and it skips no leading key.
-	key, kok := core.child_at(&doc, doc.header, 2)
+	key, kok := core.child_at(&doc, doc.shared_keys, 2)
 	testing.expect(t, kok)
-	testing.expect_value(t, key, doc.header + 3)
+	testing.expect_value(t, key, doc.shared_keys + 3)
 	core.destroy(&doc)
 
 	// A ragged record has no cell past its last column.
@@ -342,9 +342,9 @@ quoted_keys :: proc(t: ^testing.T) {
 	doc, err := build(src, .Csv)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	key := doc.header + 1
+	key := doc.shared_keys + 1
 	testing.expect_value(t, string(core.span(&doc, key)), "\"a\"")
-	testing.expect_value(t, doc.nodes[doc.header].role, core.Role.Key)
+	testing.expect_value(t, doc.nodes[doc.shared_keys].role, core.Role.Key)
 	buf: [8]u8
 	s, _ := core.text(&doc, key, buf[:])
 	testing.expect_value(t, s, "a")
@@ -363,7 +363,7 @@ invalid_utf8 :: proc(t: ^testing.T) {
 	s, ok := core.text(&doc, cell, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\uFFFdy")
-	key := doc.header + 1
+	key := doc.shared_keys + 1
 	testing.expect(t, core.key_equals(&doc, key, "a"))
 	testing.expect(t, !core.key_equals(&doc, key, "x\uFFFdy"))
 
@@ -376,17 +376,17 @@ invalid_utf8 :: proc(t: ^testing.T) {
 	s, ok = core.text(&tsv, tcell, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\uFFFdy")
-	testing.expect(t, core.key_equals(&tsv, tsv.header + 1, "a"))
+	testing.expect(t, core.key_equals(&tsv, tsv.shared_keys + 1, "a"))
 
 	// A header cell with ill-formed UTF-8 reads its key text with U+FFFD, and `member` finds the cell by that text.
 	tkey_src := "\xffh\tb\n1\t2\n"
 	tkey, tkerr := build(tkey_src, .Tsv, {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&tkey)
 	testing.expect_value(t, tkerr.kind, core.Document_Error_Kind.None)
-	kt, kok := core.text(&tkey, tkey.header + 1, buf[:])
+	kt, kok := core.text(&tkey, tkey.shared_keys + 1, buf[:])
 	testing.expect(t, kok)
 	testing.expect_value(t, kt, "\uFFFdh")
-	testing.expect(t, core.key_equals(&tkey, tkey.header + 1, kt))
+	testing.expect(t, core.key_equals(&tkey, tkey.shared_keys + 1, kt))
 	krec, _ := first_member(&tkey, 0)
 	found, fok := core.member(&tkey, krec, kt)
 	testing.expect(t, fok && found == krec + 1)
@@ -440,7 +440,7 @@ readers_refuse_containers :: proc(t: ^testing.T) {
 
 	doc, err = build("a\n1\n", .Csv)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.number(&doc, doc.header + 1).kind, core.Number_Kind.Wide)
+	testing.expect_value(t, core.number(&doc, doc.shared_keys + 1).kind, core.Number_Kind.Wide)
 	rec, _ = first_member(&doc, 0)
 	testing.expect_value(t, core.number(&doc, rec).kind, core.Number_Kind.Wide)
 }
@@ -589,13 +589,13 @@ read_does_not_allocate :: proc(t: ^testing.T) {
 	testing.expect_value(t, arena.offset, before)
 }
 
-// Every spec's spelling table has the five read services and an edit table with `record`, `reads` and `record_sep`.
+// Every spec's spelling table has the five read services and an edit table with `root_junction`, `reads` and `interior`.
 @(test)
 spelling_complete :: proc(t: ^testing.T) {
 	check :: proc(t: ^testing.T, doc: ^core.Document) {
 		s := doc.spelling
 		testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.resolve != nil && s.close_end != nil)
-		testing.expect(t, s.edit != nil && s.edit.record != nil && s.edit.reads != nil && s.edit.record_sep != nil)
+		testing.expect(t, s.edit != nil && s.edit.root_junction != nil && s.edit.reads != nil && s.edit.interior != nil)
 	}
 	a, ea := build("a\n", .Csv)
 	defer core.destroy(&a)
@@ -645,15 +645,15 @@ header_only :: proc(t: ^testing.T) {
 	doc, err := build(src, .Csv)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, doc.header, 1)
+	testing.expect_value(t, doc.shared_keys, 1)
 	testing.expect_value(t, core.length(&doc, 0), 0)
 	_, ok := first_member(&doc, 0)
 	testing.expect(t, !ok)
 	testing.expect_value(t, string(core.span(&doc, 0)), src)
 	testing.expect_value(t, string(core.span(&doc, 1)), src)
-	testing.expect_value(t, core.length(&doc, doc.header), 2)
+	testing.expect_value(t, core.length(&doc, doc.shared_keys), 2)
 	for text, i in ([]string{"a", "b"}) {
-		cell := doc.header + 1 + core.Node_Index(i)
+		cell := doc.shared_keys + 1 + core.Node_Index(i)
 		s, _ := core.text(&doc, cell, nil)
 		testing.expect_value(t, s, text)
 		testing.expect(t, core.key_equals(&doc, cell, text))
@@ -661,7 +661,7 @@ header_only :: proc(t: ^testing.T) {
 	// A text with no record has no header and one root node.
 	for text in ([]string{"", "\n\n", "\r\n"}) {
 		d, derr := build(text, .Csv)
-		testing.expectf(t, derr.kind == .None && d.header == 0 && len(d.nodes) == 1, "%q: %v header %d nodes %d", text, derr, d.header, len(d.nodes))
+		testing.expectf(t, derr.kind == .None && d.shared_keys == 0 && len(d.nodes) == 1, "%q: %v header %d nodes %d", text, derr, d.shared_keys, len(d.nodes))
 		testing.expect_value(t, string(core.span(&d, 0)), text)
 		core.destroy(&d)
 	}
@@ -677,7 +677,7 @@ empty_and_ragged_header_cells :: proc(t: ^testing.T) {
 	v, ok := core.member(&doc, rec, "")
 	testing.expect(t, ok)
 	testing.expect_value(t, v, rec + 2)
-	testing.expect(t, core.key_equals(&doc, doc.header + 2, ""))
+	testing.expect(t, core.key_equals(&doc, doc.shared_keys + 2, ""))
 	core.destroy(&doc)
 
 	doc, err = build("a,b,c\n1,2\n", .Csv, {tolerate = {.Ragged}})
@@ -740,7 +740,7 @@ bom_crlf_spans :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, string(core.span(&doc, 0)), src)
-	testing.expect_value(t, string(core.span(&doc, doc.header)), "a,b\r\n")
+	testing.expect_value(t, string(core.span(&doc, doc.shared_keys)), "a,b\r\n")
 	records := core.children(&doc, 0)
 	first, _ := core.child_next(&records)
 	testing.expect_value(t, string(core.span(&doc, first)), "1,2\r\n")
@@ -772,9 +772,9 @@ plain_quoted_check :: proc(t: ^testing.T, src, cell: string, $S: dsv.Spec) {
 		return
 	}
 	buf: [64]u8
-	kt, ok := core.text(&doc, doc.header + 1, buf[:])
+	kt, ok := core.text(&doc, doc.shared_keys + 1, buf[:])
 	testing.expectf(t, ok && kt == cell, "%q: key text %q want %q", src, kt, cell)
-	testing.expectf(t, core.key_equals(&doc, doc.header + 1, kt), "%q: key_equals(%q) false", src, kt)
+	testing.expectf(t, core.key_equals(&doc, doc.shared_keys + 1, kt), "%q: key_equals(%q) false", src, kt)
 	rec, _ := first_member(&doc, 0)
 	mv, mok := core.member(&doc, rec, kt, .First)
 	testing.expectf(t, mok && mv == rec + 1, "%q: member(%q) -> %v %v", src, kt, mv, mok)
@@ -837,9 +837,9 @@ generated_keys_agree :: proc(t: ^testing.T) {
 		}
 		// Each header cell's text is found by `key_equals`, and `member` returns a cell of the record whose header cell
 		// decodes to that text, at or before this column.
-		root: if !no_header && doc.header != 0 {
+		root: if !no_header && doc.shared_keys != 0 {
 			col := 0
-			it := core.children(&doc, doc.header)
+			it := core.children(&doc, doc.shared_keys)
 			for {
 				key, more := core.child_next(&it)
 				if !more {
@@ -864,7 +864,7 @@ generated_keys_agree :: proc(t: ^testing.T) {
 					}
 					mv, mok := core.member(&doc, rec, kt, .First)
 					// A repeated name returns the first column, whose header cell decodes to the same text.
-					ok := mok && mv > rec && mv <= rec + 1 + core.Node_Index(col) && core.key_equals(&doc, doc.header + 1 + (mv - rec - 1), kt)
+					ok := mok && mv > rec && mv <= rec + 1 + core.Node_Index(col) && core.key_equals(&doc, doc.shared_keys + 1 + (mv - rec - 1), kt)
 					if !testing.expectf(t, ok, "round %d: member %q -> %v %v, column %d of record %d", round, kt, mv, mok, col, rec) {
 						break root
 					}
@@ -928,7 +928,7 @@ comment_lines :: proc(t: ^testing.T) {
 	doc, err := build(src, .Csv, {comment = '#'})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, doc.header, 1)
+	testing.expect_value(t, doc.shared_keys, 1)
 	testing.expect_value(t, core.length(&doc, 0), 1)
 	rec, _ := first_member(&doc, 0)
 	v, _ := core.member(&doc, rec, "b")
@@ -952,7 +952,7 @@ comment_lines :: proc(t: ^testing.T) {
 	doc3, err3 := build("# head\na,b\n1,2\n# no line end", .Csv, {comment = '#'})
 	defer core.destroy(&doc3)
 	testing.expect_value(t, err3.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, doc3.header, 1)
+	testing.expect_value(t, doc3.shared_keys, 1)
 	testing.expect_value(t, core.length(&doc3, 0), 1)
 }
 
@@ -962,7 +962,7 @@ header_cell_is_a_key :: proc(t: ^testing.T) {
 	doc, err := build("12.5,7\n1,2\n", .Csv)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	h := doc.header
+	h := doc.shared_keys
 	testing.expect_value(t, doc.nodes[h + 1].role, core.Role.Key)
 	testing.expect_value(t, core.number(&doc, h + 1).kind, core.Number_Kind.Wide)
 	testing.expect_value(t, core.resolve(&doc, h + 1, {infer = true}), core.Kind.String)
@@ -1071,7 +1071,7 @@ caller_key_buffer :: proc(t: ^testing.T) {
 	doc, err := dsv.build(src, .Csv)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, doc.header, core.Node_Index(1))
+	testing.expect_value(t, doc.shared_keys, core.Node_Index(1))
 	testing.expect_value(t, doc.nodes[2], core.Node{0, 1, .Plain, .Key, 0})
 	testing.expect_value(t, doc.nodes[3], core.Node{2, 1, .Plain, .Key, 0})
 	log := new(walktest.Log)
@@ -1094,11 +1094,11 @@ header_row_cells :: proc(t: ^testing.T) {
 	doc, err := build(src, .Csv)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	if doc.header == 0 {
+	if doc.shared_keys == 0 {
 		return
 	}
 	want := []string{"a", "b", "c"}
-	it := core.children(&doc, doc.header)
+	it := core.children(&doc, doc.shared_keys)
 	for s, i in want {
 		cell, ok := core.child_next(&it)
 		if !testing.expectf(t, ok, "cell %d missing", i) {
@@ -1112,7 +1112,7 @@ header_row_cells :: proc(t: ^testing.T) {
 	_, more := core.child_next(&it)
 	testing.expect(t, !more)
 	// The same cells through a second `children`/`child_next` walk of the header row.
-	it2 := core.children(&doc, doc.header)
+	it2 := core.children(&doc, doc.shared_keys)
 	for i in 0 ..< len(want) {
 		if _, nok := core.child_next(&it2); !testing.expectf(t, nok, "cell %d missing", i) {
 			return
@@ -1178,7 +1178,7 @@ pairs_iteration :: proc(t: ^testing.T) {
 	hdr_only, herr := build("a,b,c\n", .Csv)
 	defer core.destroy(&hdr_only)
 	testing.expect_value(t, herr.kind, core.Document_Error_Kind.None)
-	hit := core.pairs(&hdr_only, hdr_only.header)
+	hit := core.pairs(&hdr_only, hdr_only.shared_keys)
 	_, _, hok := core.pair_next(&hit)
 	testing.expect(t, !hok)
 	roit := core.pairs(&hdr_only, core.ROOT)

@@ -21,6 +21,7 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
 | `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, `render`, `write_code` |
 | `json/document.odin` | JSON's `build`, `Spelling` and `Edit_Spelling` tables, `close_end`, the edit checks |
+| `dsv/compose.odin` | a delimited text's root junctions and the comments above its header |
 | `json/escape.odin` | the escape-byte table and the hex and surrogate helpers its walk and decoder share |
 | `json/unescape.odin` | JSON's `text` and `number` readers and the decoder behind them |
 | `dsv/document.odin` | dsv's `build` and `commit`, its `text` and `number` readers, its `Spelling` table, its edit table, `close_end`, the record check |
@@ -198,7 +199,7 @@ walked. A negative `k`, a scalar, a miss and a `k` past the last member return n
 
 `pairs` starts a `Pair_Iter` over a `Map` container's key/value member pairs and `pair_next` yields `(key, val, ok)` in
 source order. For an inline-key `Map`, key and value alternate in preorder. For a shared-key `Map`, keys come from
-`doc.header` while values step through the record's cells. A non-`Map` container, scalar, or out of range index yields
+`doc.shared_keys` while values step through the record's cells. A non-`Map` container, scalar, or out of range index yields
 an empty iterator.
 
 `member(doc, obj, name, dups := .Last)` returns the value of the member whose key decodes to `name`: `.First` the
@@ -276,26 +277,29 @@ backslash is an escape, and a `Plain` cell has neither.
 Edit_Spelling :: struct {
 	value:        proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:     proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
-	record:       proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: Document_Error),
-	reads:        proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
-	comment:      proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
-	member_sep:   string,
-	key_sep:      string,
-	record_sep:   proc(doc: ^Document) -> string,
-	cell_sep:     proc(doc: ^Document) -> string,
-	insert_check: proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
-	cut_check:    proc(doc: ^Document, container: Node_Index, cuts: []int, has_set: bool) -> Document_Error,
+	reads:         proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
+	comment:       proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
+	member_sep:    proc(doc: ^Document) -> string,
+	key_sep:       string,
+	insert_check:  proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
+	cut_check:     proc(doc: ^Document, container: Node_Index, cuts: []int, has_set: bool) -> Document_Error,
+	interior:      proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64),
+	root_head:     proc(cx: ^Compose, open: u64) -> (err: Document_Error, ok: bool),
+	root_junction: proc(cx: ^Compose, open, close: u64, l, r: int, inserts: []Edit) -> bool,
+	fact_slot:     proc(doc: ^Document, node: Node_Index, role: Role, emptied: bool) -> bool,
+	emptied:       proc(doc: ^Document, list: ^Edit_List) -> bool,
 }
 ```
 
 `Comment_Spelling` is `None`, `Line` or `Byte`: no marker, a JSON line or block comment, or a delimited text's comment
 line. Under `Line` a body holding a line end is written as `/* */`, so a line comment cannot end its line early. JSON's
-table supplies `value`, `key_text`, `reads` and `comment`, with `member_sep` `","` and `key_sep` `":"`, and its
-`comment` is `.Line` for `Jsonc` and `Json5` and `.None` for `Json`. It has no `record` and no `record_sep`, so a
-document whose edit table lacks `record` holds a tree's values. dsv's table supplies `value`, `record`, `reads`,
-`comment`, `cell_sep`, `insert_check`, `cut_check` and `record_sep`, and no `key_text`, so a dsv document holds a
-table. Its `record_sep` is the first line end the text has for a record, else its header's, else LF. Its cell separator
-is given by `cell_sep` and its comment marker by `comment`.
+table supplies `value`, `key_text`, `reads`, `comment` and `member_sep`, with `key_sep` `":"`, and its `comment` is
+`.Line` for `Jsonc` and `Json5` and `.None` for `Json`. dsv's table supplies `value`, `reads`, `comment`, `member_sep`,
+`insert_check` and `cut_check`, and no `key_text`. A format with `root_junction` is flat: its text has no brackets, so
+`interior` says where a container's members lie, `root_head` and `root_junction` compose the root, whose members are
+lines (`dsv/compose.odin`), and `fact_slot` and `emptied` say which facts the output holds. dsv's `member_sep` is the
+delimiter, and its line end is the first one the text has for a record, else its header's, else LF. A record's cells
+take the junction a tree's members do, in `core/compose.odin`.
 
 A reader reaches the table only where it must: `text` and `key_equals` for a marked node, `number` for every scalar,
 `resolve` for every node, `close_end` for a container whose span is read, and the edit services for every recorded or
@@ -323,7 +327,7 @@ keeps the earliest repeat in the build's error and which a format's `build` may 
 A delimited text is an `Array` of records whose first child may be the header row.
 
 - The root is an `Array` of role `Value`, and its readers step over the header row as over a member's key, so `length`
-  counts records and `children` returns the records. `Document.header` is the header row's node, 0 for a text read
+  counts records and `children` returns the records. `Document.shared_keys` is the header row's node, 0 for a text read
   without one.
 - A record with a header is stored as a `Kind.Map` with no inline key nodes. Its cells are its children, each
   a `Plain` token of role `Value`. No record stores a key node, so it holds one node per cell.
@@ -334,7 +338,7 @@ A delimited text is an `Array` of records whose first child may be the header ro
   corresponding value cell. A cell's node is its record's node plus one plus its column, so `child_at` returns a cell
   in one step. A column past a record's last cell, as a ragged record has, names no cell.
 - A header cell reads as a key node, so `key_equals`, `text`, `number` and `resolve` answer for it as for a JSON key.
-- A headerless text (`no_header` true) has no header row (`doc.header == 0`), making the first record data and every
+- A headerless text (`no_header` true) has no header row (`doc.shared_keys == 0`), making the first record data and every
   record an `Array` of `Plain` value cells, with no key node at all.
 
 ## Facts
@@ -471,8 +475,10 @@ line.
 
 The output decides which facts it keeps.
 
-- A fact no edit names keeps its bytes in place, unless a removal takes it, a set replaces its bytes, or the output
-  cannot hold it. A fact the output cannot hold is removed with its bytes and counted in `dropped`.
+- A fact keeps its node and role while its node survives. A fact no edit names keeps its bytes in place, unless a
+  removal takes it, a set replaces its bytes, or the output cannot hold it. A fact the output cannot hold is removed
+  with its bytes and counted in `dropped`. One role changes: a root comment above a delimited text's header, when every
+  record is removed, reads as the root's foot, and it is kept and not counted.
 - A tree holds a head or inline fact on any node and a foot only on a container or the root. A delimited text holds a
   head fact on a record, or on the root above its first record, and a foot on the root. An output whose spec writes no
   comment, as `Json` does, holds no fact at all.

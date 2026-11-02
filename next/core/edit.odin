@@ -66,11 +66,11 @@ edit_list_destroy :: proc(list: ^Edit_List) {
 	list^ = {}
 }
 
-// Whether a document's containers hold a table's records and cells rather than a tree's values. A document whose
-// edit table has a `record` service holds a table.
-@(private)
-table_doc :: #force_inline proc(doc: ^Document) -> bool {
-	return doc.spelling.edit != nil && doc.spelling.edit.record != nil
+// Whether a document is flat: its text has no brackets, so a container has no bytes of its own, and its root's members
+// are lines the format composes through `root_junction`. A flat format writes the spec it was read as, since another
+// spec would respell every member.
+flat_doc :: #force_inline proc(doc: ^Document) -> bool {
+	return doc.spelling.edit != nil && doc.spelling.edit.root_junction != nil
 }
 
 // Checks a recorded text as a value. A member's key is a decoded name, so no text is judged as a key.
@@ -94,21 +94,20 @@ node_of :: proc(list: ^Edit_List, node: Node_Index) -> (doc: ^Document, n: Node,
 }
 
 // Makes `text` the source bytes of node `node`, a value or a key. A key's text is its decoded name, which the commit
-// writes in the format's own spelling, a value's text is source text and must read as one value, and in a delimited
-// text a cell is no key, so its text is checked as a value. A fact node or a container in a table returns `.Bad_Index`.
+// writes in the format's own spelling, a value's text is source text and must read as one value, and in a flat text a
+// key is a member like any other, so its text is checked as a value. A fact node or a flat text's container returns
+// `.Bad_Index`.
 // Runs in O(len(text)), checking the text once and copying it once.
 set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error {
 	doc, n, err := node_of(list, node)
 	if err.kind != .None {
 		return err
 	}
-	table := table_doc(doc)
-	// A record or a table is no single value to write: its cells are edited.
-	if n.role > .Key || table && (n.kind == .Array || n.kind == .Map) {
+	flat := flat_doc(doc)
+	if n.role > .Key || flat && (n.kind == .Array || n.kind == .Map) {
 		return {kind = .Bad_Index}
 	}
-	// A record or a table's cell is no key: only a tree's key node reads as one.
-	if n.role == .Key && !table {
+	if n.role == .Key && !flat {
 		return edit_add(list, node, .Set, .Key, 0, "", text)
 	}
 	if e := judge(doc, text, list.allocator); e.kind != .None {
@@ -117,8 +116,7 @@ set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error 
 	return edit_add(list, node, .Set, .Value, 0, "", text)
 }
 
-// Inserts `text` into the array `container` before its element `at`, or after its last when `at` is its length. A
-// delimited text's root accepts a record and a record accepts a cell.
+// Inserts `text` into the array `container` before its element `at`, or after its last when `at` is its length.
 @(private)
 insert_value :: proc(list: ^Edit_List, container: Node_Index, at: int, text: string) -> Document_Error {
 	return insert_at(list, container, at, "", false, text)
@@ -229,48 +227,19 @@ comment_style :: #force_inline proc(doc: ^Document, spec: u8) -> (style: Comment
 }
 
 // Whether the output can hold a fact of `role` on `node`. A tree writes a foot on a container or the root, whose close
-// or text's end it precedes, and on no other node. A delimited text writes a comment on a record, or on the root above
-// its first record, and a foot on the root. An output with no marker holds no fact. The role's shape and the body's
-// spelling are checked where the fact is written.
+// or text's end it precedes, and on no other node. A format with a `fact_slot` says its own. An output with no marker
+// holds no fact. The role's shape and the body's spelling are checked where the fact is written. `emptied` says the
+// list removes every member of the root.
 @(private)
-fact_slot :: #force_inline proc(doc: ^Document, node: Node_Index, role: Role, style: Comment_Spelling, all_records_removed: bool) -> bool {
+fact_slot :: #force_inline proc(doc: ^Document, node: Node_Index, role: Role, style: Comment_Spelling, emptied: bool) -> bool {
 	if style == .None {
 		return false
 	}
+	if edit := doc.spelling.edit; edit != nil && edit.fact_slot != nil {
+		return edit.fact_slot(doc, node, role, emptied)
+	}
 	n := doc.nodes[node]
-	if !table_doc(doc) {
-		return role != .Comment_Foot || node == ROOT || n.kind == .Array || n.kind == .Map
-	}
-	if role == .Comment_Foot {
-		return node == ROOT
-	}
-	// A comment above a header reads on the root only when a record follows it, which resolves it there.
-	return role == .Comment && (node == ROOT ? doc.header != 0 && length(doc, ROOT) > 0 && !all_records_removed : n.role == .Value && (n.kind == .Array || n.kind == .Map))
-}
-
-// Whether the list removes every record of a delimited text. A record is the only value container of a table, so one
-// pass over the edits counts the removals. A root insert keeps a record, and a text with no record is no removal.
-@(private)
-records_removed :: #force_inline proc(doc: ^Document, list: ^Edit_List) -> bool {
-	removed := 0
-	for e in list.edits {
-		switch e.op {
-		case .Insert:
-			if e.node == ROOT {
-				return false
-			}
-		case .Remove:
-			if e.node == ROOT || int(e.node) >= len(doc.nodes) {
-				continue
-			}
-			n := doc.nodes[e.node]
-			if n.role == .Value && (n.kind == .Array || n.kind == .Map) {
-				removed += 1
-			}
-		case .Set, .Set_Fact, .Remove_Fact:
-		}
-	}
-	return removed > 0 && removed == length(doc, ROOT)
+	return role != .Comment_Foot || node == ROOT || n.kind == .Array || n.kind == .Map
 }
 
 // Returns the source bytes the edits make: every byte no edit touched, the edits' texts in their places, and the
@@ -295,9 +264,8 @@ commit_as :: proc(list: ^Edit_List, spec: u8, allocator := context.allocator) ->
 	if doc == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
-	// A table format writes only the spec it was read as, since another spec would respell every cell. Refuse before
-	// any chunk is built or spliced, rather than after the output fails to read.
-	if table_doc(doc) && spec != doc.read.spec {
+	// Refused before any chunk is built or spliced, rather than after the output fails to read.
+	if flat_doc(doc) && spec != doc.read.spec {
 		return nil, 0, {kind = .Bad_Spec}
 	}
 	chunks, _ := make([dynamic]Chunk, allocator)
@@ -390,24 +358,23 @@ Chunk :: struct {
 }
 
 // Returns the first byte of member `v` of `parent`, without the comments it holds: its key's first byte or its own.
-// Only an inline-key `Map`'s member has a key node before it. A dsv root's first record follows the header row, whose last cell
-// also has role `Key`, and that cell names a column, not the record.
+// Only an inline-key `Map`'s member has a key node before it. A shared-key root's first member follows the shared keys,
+// whose last also has role `Key` and names no member of the root.
 @(private)
 value_lo :: proc(doc: ^Document, parent, v: Node_Index) -> u64 {
-	if doc.header == 0 && doc.nodes[parent].kind == .Map && doc.nodes[v-1].role == .Key {
+	if doc.shared_keys == 0 && doc.nodes[parent].kind == .Map && doc.nodes[v-1].role == .Key {
 		return key_start(doc.nodes[v-1])
 	}
 	return key_start(doc.nodes[v])
 }
 
-// Returns the bytes between container `c`'s brackets, where its members go. A delimited text's empty table is empty
-// to its end, and a tree's empty container keeps only its brackets.
+// Returns the bytes where container `c`'s members go: those between its brackets, or a format's `interior`.
 @(private)
 interior :: proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64) {
-	hi = doc.spelling.close_end(doc, c)
-	if table_doc(doc) {
-		return doc.nodes[c].lo, hi
+	if edit := doc.spelling.edit; edit != nil && edit.interior != nil {
+		return edit.interior(doc, c)
 	}
+	hi = doc.spelling.close_end(doc, c)
 	return doc.nodes[c].lo + 1, hi - 1
 }
 
@@ -517,7 +484,7 @@ fact_write :: proc(doc: ^Document, style: Comment_Spelling, comment_byte: u8, ro
 // Returns the indent of the line holding `pos` and whether bytes stand before `pos` on that line.
 @(private)
 line_shape :: proc(doc: ^Document, pos: u64) -> (indent: []u8, lead: bool) {
-	lo, hi := line_of(doc.src, pos, !table_doc(doc))
+	lo, hi := line_of(doc.src, pos, !flat_doc(doc))
 	return doc.src[lo:hi], hi < pos
 }
 
