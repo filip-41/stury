@@ -162,6 +162,24 @@ fact_shapes :: proc(t: ^testing.T) {
 	testing.expect(t, expect_fact_commit(t, &list, json.Spec.Jsonc, "/*one\ntwo*/\n{\"a\":1}", 0, .Jsonc))
 }
 
+// U+2028 and U+2029 in a body count as a line end under both specs, since a JSON5 line comment ends at them. The body
+// is written as a block comment, and neither fact is dropped.
+@(test)
+fact_shapes_line_separator :: proc(t: ^testing.T) {
+	fact_line_separator_under(t, .Jsonc)
+	fact_line_separator_under(t, .Json5)
+}
+
+fact_line_separator_under :: proc(t: ^testing.T, $S: json.Spec) {
+	doc, _ := json.build(transmute([]u8)string(`{"a":1}`), S)
+	defer core.destroy(&doc)
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	testing.expect_value(t, core.set_fact(&list, core.ROOT, .Comment, string("one\u2028two")).kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, core.set_fact(&list, 2, .Comment_Inline, string("a\u2029b")).kind, core.Document_Error_Kind.None)
+	testing.expect(t, expect_fact_commit(t, &list, S, "/*one\u2028two*/\n{\"a\":1 /*a\u2029b*/}", 0, S))
+}
+
 // Every role is set, replaced and removed on the node it belongs to: a source fact of the role becomes the new body,
 // and a removal leaves no fact of the role.
 @(test)

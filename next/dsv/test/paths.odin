@@ -56,7 +56,7 @@ path_reads :: proc(t: ^testing.T) {
 		defer core.path_destroy(&path)
 		testing.expect_value(t, perr.kind, core.Path_Error_Kind.None)
 		src := transmute([]u8)c.src
-		doc, err := dsv.scan(src, .Csv, path, {tolerate = {.Ragged}})
+		doc, err := dsv.scan(src, .Csv, path, opts = {tolerate = {.Ragged}})
 		defer core.destroy(&doc)
 		testing.expectf(t, err.kind == .None, "%q: %v", c.path, err)
 		testing.expectf(t, slice_equal(answer_texts(&doc, doc.answers), c.want), "scan %q: %v", c.path, doc.answers)
@@ -91,7 +91,7 @@ path_shapes :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("1,2\n3,4\n")
 	path, _ := core.parse_path(".[1][1]")
 	defer core.path_destroy(&path)
-	doc, err := dsv.scan(src, .Csv, path, {no_header = true})
+	doc, err := dsv.scan(src, .Csv, path, opts = {no_header = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, string(core.span(&doc, doc.answers[0].node)), "4")
@@ -104,7 +104,7 @@ path_shapes :: proc(t: ^testing.T) {
 
 	named, _ := core.parse_path(".[0].a")
 	defer core.path_destroy(&named)
-	bare, bad := dsv.scan(src, .Csv, named, {no_header = true})
+	bare, bad := dsv.scan(src, .Csv, named, opts = {no_header = true})
 	defer core.destroy(&bare)
 	testing.expect_value(t, bad.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, bare.answers[0].outcome, core.Answer_Outcome.Type_Mismatch)
@@ -129,7 +129,7 @@ path_record_ends :: proc(t: ^testing.T) {
 	defer core.path_destroy(&path)
 
 	bare := transmute([]u8)string("a,b\n1,x\"y\n2,3\n")
-	doc, err := dsv.scan(bare, .Csv, path, {tolerate = {.Bare_Quote}})
+	doc, err := dsv.scan(bare, .Csv, path, opts = {tolerate = {.Bare_Quote}})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, string(core.span(&doc, doc.answers[0].owner)), "1,x\"y\n")
@@ -244,7 +244,7 @@ on_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
 	text := "T"
 	switch a.outcome {
 	case .Found:
-		text = strings.trim_right(string(s.src[a.token.lo:a.hi]), "\r\n")
+		text = strings.trim_right(string(s.src[a.lo:a.hi]), "\r\n")
 	case .Missing:
 		text = "M"
 	case .Type_Mismatch:
@@ -343,6 +343,63 @@ path_model :: proc(t: ^testing.T) {
 	}
 }
 
+// `each_answer` gives the bytes `span` gives for the same value, a quoted cell's quotes and a record's line end included.
+@(test)
+stream_spans_are_authored :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("a,b\n\"x,y\",2\n3,\"\"\"q\"\"\"\n")
+	texts := [?]string{".[0].a", ".[0]", ".[0].b", ".[1][1]", ".[1]"}
+	paths: [len(texts)]core.Path
+	for text, i in texts {
+		paths[i], _ = core.parse_path(text)
+	}
+	defer for &p in paths {
+		core.path_destroy(&p)
+	}
+	doc, err := dsv.scan(src, .Csv, paths[:])
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+	Seen :: struct {
+		src:   []u8,
+		spans: [8]string,
+	}
+	seen := Seen{src = src}
+	each_answer_span :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+		s := (^Seen)(state)
+		s.spans[a.path] = string(s.src[a.lo:a.hi])
+		return true
+	}
+	testing.expect_value(t, dsv.each_answer(src, .Csv, paths[:], &seen, each_answer_span).kind, core.Path_Error_Kind.None)
+	for a in doc.answers {
+		testing.expect_value(t, seen.spans[a.path], string(core.span(&doc, a.node)))
+	}
+	testing.expect_value(t, seen.spans[0], "\"x,y\"")
+	testing.expect_value(t, seen.spans[3], "\"\"\"q\"\"\"")
+}
+
+// A dsv record reads by position and by name, and a cell reads as neither.
+@(test)
+presence_of_records :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("a,b\n1,2\n")
+	full, _ := dsv.build(src, .Csv)
+	defer core.destroy(&full)
+	record, _ := core.element_of(&full, core.ROOT, 0)
+	cell, at := core.element_of(&full, record, 1)
+	testing.expect_value(t, at, core.Presence.Found)
+	testing.expect_value(t, string(core.span(&full, cell)), "2")
+	_, by_name := core.member_of(&full, cell, "a")
+	testing.expect_value(t, by_name, core.Presence.Wrong_Kind)
+	_, by_position := core.element_of(&full, cell, 0)
+	testing.expect_value(t, by_position, core.Presence.Wrong_Kind)
+
+	path, _ := core.parse_path(".[0].b")
+	defer core.path_destroy(&path)
+	doc, _ := dsv.scan(src, .Csv, path)
+	defer core.destroy(&doc)
+	partial, _ := core.element_of(&doc, core.ROOT, 0)
+	_, kept := core.element_of(&doc, partial, 1)
+	testing.expect(t, kept != .Wrong_Kind)
+}
+
 @(test)
 path_set :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a,b\n1,2\n# kept\n3,4\n")
@@ -353,9 +410,11 @@ path_set :: proc(t: ^testing.T) {
 		{".[1].c", "9", "a,b,c\n1,2,\n# kept\n3,4,9\n"},
 	}
 	for c in cases {
-		out, err := dsv.set(src, .Csv, c[0], c[1], opts)
+		path, _ := core.parse_path(c[0])
+		defer core.path_destroy(&path)
+		out, err := dsv.set(src, .Csv, path, c[1], opts = opts)
 		defer delete(out)
-		testing.expectf(t, err == nil, "%s: %v", c[0], err)
+		testing.expectf(t, err.kind == .None, "%s: %v", c[0], err)
 		testing.expect_value(t, string(out), c[2])
 	}
 }

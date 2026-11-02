@@ -28,20 +28,8 @@ compose_root_junction :: proc(cx: ^core.Compose, open, close: u64, l, r: int, in
 	doc := cx.doc
 	members := cx.members[:]
 	n := len(members)
-	has_left, has_right := l >= 0, r < n
-	lo, hi := open, close
-	if has_left {
-		lo = members[l].hi
-	}
-	if has_right {
-		hi = members[r].lo
-	}
-	clear(&cx.items)
-	if has_right {
-		core.add_items(cx, members[r].node, lo, hi) or_return
-	}
-	core.add_items(cx, core.ROOT, lo, hi) or_return
-	core.sort_items(cx)
+	has_right := r < n
+	lo, hi := core.junction_items(cx, core.ROOT, open, close, l, r, false) or_return
 	first := hi
 	if len(cx.items) > 0 {
 		first = cx.items[0].lo

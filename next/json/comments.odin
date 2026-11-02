@@ -228,24 +228,37 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 	return
 }
 
+// Reads the run of comments at `p` up to the next token and emits each as `Comment`, or as `Comment_Foot` when the token
+// is the byte `close`, where 0 is no close. Returns the token's byte, or with `done` the fault or stop value the state
+// returns.
+@(private)
+comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, p, end: [^]u8, close: u8) -> (q: [^]u8, done: bool, result: u64) {
+	kind: core.Fault_Kind
+	q, _, kind = comment_run(p, end, false, S)
+	if kind != .None {
+		return q, true, fault(w, hs^, q, kind)
+	}
+	when H != core.No_Hooks {
+		foot := close != 0 && q < end && q[0] == close
+		r, stop, wide := emit_comments(w, on, hs, p, q, false, .Comment_Foot if foot else .Comment)
+		if wide != .None {
+			return q, true, fault(w, hs^, r, wide)
+		}
+		if stop {
+			return q, true, stopped(w, hs^, r)
+		}
+	}
+	return q, false, 0
+}
+
 // `p` is at a comment where a value must start. Reads the run up to the value, and gives each comment the value's
 // role, or the array's `Comment_Foot` before its close (an empty array or a trailing comma). Then reads the value.
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, _, kind := comment_run(p, end, false, S)
-	if kind != .None {
-		return fault(w, hs, q, kind)
-	}
-	when H != core.No_Hooks {
-		foot := q < end && q[0] == ']' && d & 1 == 0 && d >= 2
-		r, stop, wide := emit_comments(w, on, &hs, p, q, false, .Comment_Foot if foot else .Comment)
-		if wide != .None {
-			return fault(w, hs, r, wide)
-		}
-		if stop {
-			return stopped(w, hs, r)
-		}
+	q, done, result := comments_before(w, on, &hs, p, end, ']' if d & 1 == 0 && d >= 2 else 0)
+	if done {
+		return result
 	}
 	return #must_tail st_value(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
@@ -255,19 +268,9 @@ st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, _, kind := comment_run(p, end, false, S)
-	if kind != .None {
-		return fault(w, hs, q, kind)
-	}
-	when H != core.No_Hooks {
-		foot := q < end && q[0] == '}'
-		r, stop, wide := emit_comments(w, on, &hs, p, q, false, .Comment_Foot if foot else .Comment)
-		if wide != .None {
-			return fault(w, hs, r, wide)
-		}
-		if stop {
-			return stopped(w, hs, r)
-		}
+	q, done, result := comments_before(w, on, &hs, p, end, '}')
+	if done {
+		return result
 	}
 	return #must_tail st_key(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
@@ -277,18 +280,9 @@ st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, _, kind := comment_run(p, end, false, S)
-	if kind != .None {
-		return fault(w, hs, q, kind)
-	}
-	when H != core.No_Hooks {
-		r, stop, wide := emit_comments(w, on, &hs, p, q, false, .Comment)
-		if wide != .None {
-			return fault(w, hs, r, wide)
-		}
-		if stop {
-			return stopped(w, hs, r)
-		}
+	q, done, result := comments_before(w, on, &hs, p, end, 0)
+	if done {
+		return result
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }

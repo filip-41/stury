@@ -249,8 +249,8 @@ SURROGATE_CLASSES := kernel.Nibble_Table {
 }
 
 // Reads the string whose opening quote is at `p`. Returns one past its closing quote, whether it holds an escape and
-// whether `Invalid_Utf8` accepted a sequence, or the fault. Uses this CPU's block reader first, then `string_exact`, or
-// `string5` in JSON5, which read the walk's tolerances.
+// whether `Invalid_Utf8` accepted a sequence, or the fault. Uses this CPU's block reader first, then `string_exact`, which
+// reads the walk's tolerances.
 @(private)
 string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8) -> (q: [^]u8, esc, lax: bool, kind: core.Fault_Kind) {
 	when ODIN_ARCH == .amd64 {
@@ -266,11 +266,7 @@ string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8
 		q, esc = string_span_base(p, end, S)
 	}
 	if q == nil {
-		when .Es5 in FEATURES[S] {
-			return string5(p, end, w.tolerate)
-		} else {
-			return string_exact(p, end, w.tolerate)
-		}
+		return string_exact(p, end, S, w.tolerate)
 	}
 	return q, esc, false, .None
 }
@@ -428,9 +424,12 @@ escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 #no_bounds
 }
 
 // Reads the string whose opening quote is at `p` one byte at a time. Returns one past its closing quote, whether it
-// holds an escape and whether `tol` accepted an ill-formed sequence, or the fault at the first byte that breaks it.
+// holds an escape and whether `tol` accepted an ill-formed sequence, or the fault at the first byte that breaks it. A
+// JSON string closes at `"` and holds no byte below 0x20. A JSON5 string closes at its own quote, `"` or `'`, takes the
+// escapes of `escape5`, and holds every byte but CR and LF.
 @(private, cold)
-string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, esc, lax: bool, kind: core.Fault_Kind) #no_bounds_check {
+string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8, $S: Spec, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, esc, lax: bool, kind: core.Fault_Kind) #no_bounds_check {
+	quote := p[0]
 	q = p[1:]
 	for {
 		if q >= end {
@@ -438,14 +437,22 @@ string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: bit_set
 		}
 		c := q[0]
 		switch {
-		case c == '"':
+		case c == quote:
 			return q[1:], esc, lax, .None
 		case c == '\\':
 			esc = true
-			if q, kind = escape_exact(q, end, tol); kind != .None {
-				return q, false, false, kind
+			q2, kind2, took := q, core.Fault_Kind.None, false
+			when .Es5 in FEATURES[S] {
+				q2, kind2, took = escape5(q, end, tol)
+			} else {
+				q2, kind2 = escape_exact(q, end, tol)
 			}
-		case c < 0x20:
+			lax ||= took
+			if kind2 != .None {
+				return q2, false, false, kind2
+			}
+			q = q2
+		case (c == '\n' || c == '\r') if .Es5 in FEATURES[S] else c < 0x20:
 			return q, false, false, .Bad_Char
 		case c < 0x80:
 			q = q[1:]

@@ -9,6 +9,8 @@ import spell "./spell"
 
 // The most steps a path holds, since `Path.optional` holds one bit per step.
 MAX_STEPS :: 64
+// The most paths one read holds, since the engine keeps a bit per path.
+MAX_PATHS :: 64
 
 // A member by its decoded key.
 Name :: distinct string
@@ -29,6 +31,8 @@ Either :: struct {
 	index: int,
 }
 
+// A zero `Step` is a `Name` with no data pointer, which a read refuses as `Bad_Path`, so a path built with an unset step
+// fails instead of reading an empty key. A name that is empty needs a data pointer, as every parsed one has.
 Step :: union #no_nil {
 	Name,
 	Index,
@@ -59,6 +63,12 @@ Path_Options :: struct {
 	every_key:         bool,
 }
 
+// What a query over a built document can honour of `Path_Options`: the other fields are the walk's.
+Query_Options :: struct {
+	dups:      Maybe(Duplicates),
+	every_key: bool,
+}
+
 Answer_Outcome :: enum u8 {
 	Found,
 	Missing,
@@ -78,19 +88,27 @@ Answer :: struct {
 }
 
 // What `each_answer` gives for one value a path reaches, with no document. `token` is the value's for a `.Found` and a
-// `.Type_Mismatch`, and the closing token of the container that lacks it, or the null, for a `.Missing`. `hi` is the byte
-// past `token`'s value, since a container past 4 GiB has no end a `Token` can hold.
+// `.Type_Mismatch`, and the closing token of the container that lacks it, or the null, for a `.Missing`. For a `.Found`,
+// `lo` and `hi` are the value's authored span, `src[lo:hi]`, the bytes `span` gives for its node in every format, so a
+// string's quotes and a quoted cell's quotes are inside it. For the other outcomes both are 0.
 Token_Answer :: struct {
 	token:   Token,
-	hi:      u64,
+	lo, hi:  u64,
 	path:    u32,
 	outcome: Answer_Outcome,
 }
 
-// What a path edit can fail with: the read of the path, or the edit and its commit. nil on success.
-Path_Edit_Error :: union {
-	Path_Error,
-	Document_Error,
+Path_Edit_Error_Kind :: enum u8 {
+	None,
+	Path, // the read of the path failed, in `path`
+	Edit, // the build, the edit or the commit failed, in `edit`
+}
+
+// What a path edit can fail with: the read of the path, or the build, the edit and its commit.
+Path_Edit_Error :: struct {
+	kind: Path_Edit_Error_Kind,
+	path: Path_Error,
+	edit: Document_Error,
 }
 
 // The true position of a child a `Partial` container kept, for a container read by position. `Document.kept` holds these,
@@ -100,18 +118,21 @@ Kept_Child :: struct {
 	index: u32,
 }
 
-// A name a path asked `node` for and did not find. `Document.missing` holds these, sorted by node, and they borrow the
-// path's names, so the path must outlive a `member_of` on the document.
+// A name a path asked `node` for and did not find. `Document.missing` holds these, sorted by node, and the names are
+// copies in the document's reads block.
 Missing_Name :: struct {
 	node: Node_Index,
 	name: string,
 }
 
-// What a read of a member or an element gives. `Not_Loaded` is the answer of a `Partial` container for what a read did
-// not ask for: it may or may not be in the text.
+// What a read of a member or an element gives. `Wrong_Kind` is a value that cannot take the read, as the path's
+// `.Type_Mismatch`: a name of a value that is no map, a position of a value that is no array or positional record. A
+// `null` takes both reads and holds nothing. `Not_Loaded` is the answer of a `Partial` container for what a read did not
+// ask for: it may or may not be in the text.
 Presence :: enum u8 {
 	Found,
 	Missing,
+	Wrong_Kind,
 	Not_Loaded,
 }
 
@@ -119,6 +140,9 @@ Presence :: enum u8 {
 // A member kept by position was not looked for by name: under `.Last` a repeat of its key may lie among what the read
 // did not keep, so it is `Not_Loaded`.
 member_of :: proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplicates.Last) -> (Node_Index, Presence) {
+	if int(obj) < len(doc.nodes) && doc.nodes[obj].kind != .Map && doc.nodes[obj].kind != .Null {
+		return NO_NODE, .Wrong_Kind
+	}
 	v, ok := member(doc, obj, name, dups)
 	partial := int(obj) < len(doc.nodes) && doc.nodes[obj].role == .Partial
 	if ok {
@@ -130,15 +154,7 @@ member_of :: proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplica
 	if !partial {
 		return NO_NODE, .Missing
 	}
-	lo, hi := 0, len(doc.missing)
-	for lo < hi {
-		mid := lo + (hi - lo) / 2
-		if doc.missing[mid].node < obj {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
+	lo := lower_node(doc.missing, obj)
 	for ; lo < len(doc.missing) && doc.missing[lo].node == obj; lo += 1 {
 		if doc.missing[lo].name == name {
 			return NO_NODE, .Missing
@@ -148,8 +164,15 @@ member_of :: proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplica
 }
 
 // Reads a member by position as `child_at` does, and on a `Partial` container tells a position past the end from a child
-// that was not kept. A container a stopped read left open does not know its end.
+// that was not kept. A container a stopped read left open does not know its end. A `Map` answers by position only when
+// the format's records are positional, as a dsv record is.
 element_of :: proc(doc: ^Document, c: Node_Index, k: int) -> (Node_Index, Presence) {
+	if int(c) < len(doc.nodes) {
+		kind := doc.nodes[c].kind
+		if kind != .Array && kind != .Null && !(kind == .Map && (doc.positional || doc.shared_keys != 0)) {
+			return NO_NODE, .Wrong_Kind
+		}
+	}
 	if v, ok := child_at(doc, c, k); ok {
 		return v, .Found
 	}
@@ -157,6 +180,12 @@ element_of :: proc(doc: ^Document, c: Node_Index, k: int) -> (Node_Index, Presen
 		return NO_NODE, .Not_Loaded
 	}
 	return NO_NODE, .Missing
+}
+
+// Returns `length`, and whether it is the container's true count. A `Partial` container of a stopped read holds the
+// count read so far.
+length_exact :: proc(doc: ^Document, i: Node_Index) -> (n: int, exact: bool) {
+	return length(doc, i), !(doc.stopped && int(i) < len(doc.nodes) && doc.nodes[i].role == .Partial)
 }
 
 // Returns the child of `Partial` container `i` at true position `k`, when it was kept.
@@ -177,16 +206,8 @@ kept_child :: #force_no_inline proc(doc: ^Document, i: Node_Index, k: int) -> (N
 // Returns the true position `Document.kept` gives child `v`, -1 for a child kept by name.
 @(private)
 kept_index :: proc(doc: ^Document, v: Node_Index) -> int {
-	lo, hi := 0, len(doc.kept)
-	for lo < hi {
-		mid := lo + (hi - lo) / 2
-		if doc.kept[mid].node < v {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	return int(doc.kept[lo].index) if lo < len(doc.kept) && doc.kept[lo].node == v else -1
+	at := lower_node(doc.kept, v)
+	return int(doc.kept[at].index) if at < len(doc.kept) && doc.kept[at].node == v else -1
 }
 
 // Frees a parsed path's block and sets `p` to the zero value.
@@ -204,9 +225,8 @@ Parser :: struct {
 	n:        int,
 	steps:    [MAX_STEPS]Step,
 	optional: bit_set[0 ..< MAX_STEPS; u64],
-	// The `Name` steps that still hold their source spelling, which `decode` reads.
+	// The `Name` steps that still hold their source spelling, which `path_of` decodes.
 	escaped:  bit_set[0 ..< MAX_STEPS; u64],
-	decode:   proc(raw: string, out: []u8) -> int,
 	limit:    Maybe(int),
 	fault:    Path_Error,
 }
@@ -223,11 +243,16 @@ bad_path :: proc(p: ^Parser, at: int) -> bool {
 // wrapper, not inside a path. Text past this subset is refused, so a path means here what it means in jq. A bare name is
 // a jq identifier. `.Bad_Path`'s `at` is a byte of `text`.
 parse_path :: proc(text: string, allocator := context.allocator) -> (path: Path, err: Path_Error) {
-	p := Parser{text = text, decode = decode_quoted}
-	if !parse_text(&p) {
+	return parse(text, allocator, false)
+}
+
+@(private = "file")
+parse :: proc(text: string, allocator: runtime.Allocator, $POINTER: bool) -> (Path, Path_Error) {
+	p := Parser{text = text}
+	if !(parse_tokens(&p) if POINTER else parse_text(&p)) {
 		return {}, p.fault
 	}
-	return path_of(&p, allocator)
+	return path_of(&p, allocator, POINTER)
 }
 
 @(private = "file")
@@ -266,11 +291,7 @@ parse_text :: proc(p: ^Parser) -> bool {
 // Reads an RFC 6901 JSON Pointer: the empty text is the root, and each `/` starts a reference token, in which `~0` is `~`
 // and `~1` is `/`. A token that is an array index by the RFC's rule, with no leading zero, is an `Either`.
 parse_pointer :: proc(text: string, allocator := context.allocator) -> (path: Path, err: Path_Error) {
-	p := Parser{text = text, decode = decode_pointer}
-	if !parse_tokens(&p) {
-		return {}, p.fault
-	}
-	return path_of(&p, allocator)
+	return parse(text, allocator, true)
 }
 
 @(private = "file")
@@ -306,15 +327,18 @@ parse_tokens :: proc(p: ^Parser) -> bool {
 	return true
 }
 
-// Copies the parser's steps into one block with the names it decodes.
+// Copies the parser's steps into one block with the names it decodes, as a pointer when `$POINTER`.
 @(private = "file")
-path_of :: proc(p: ^Parser, allocator: runtime.Allocator) -> (Path, Path_Error) {
+path_of :: proc(p: ^Parser, allocator: runtime.Allocator, $POINTER: bool) -> (Path, Path_Error) {
+	if p.n == 0 {
+		return {limit = p.limit}, {}
+	}
 	head := p.n * size_of(Step)
 	size := head
 	for i in p.escaped {
 		size += len(p.steps[i].(Name))
 	}
-	block, failed := runtime.mem_alloc_bytes(max(size, 1), align_of(Step), allocator)
+	block, failed := runtime.mem_alloc_bytes(size, align_of(Step), allocator)
 	if failed != nil {
 		return {}, {kind = .No_Memory}
 	}
@@ -322,7 +346,7 @@ path_of :: proc(p: ^Parser, allocator: runtime.Allocator) -> (Path, Path_Error) 
 	copy(steps, p.steps[:p.n])
 	w := head
 	for i in p.escaped {
-		k := p.decode(string(p.steps[i].(Name)), block[w:])
+		k := decode_pointer(string(p.steps[i].(Name)), block[w:]) if POINTER else decode_quoted(string(p.steps[i].(Name)), block[w:])
 		steps[i] = Name(string(block[w:w + k]))
 		w += k
 	}
@@ -365,7 +389,7 @@ parse_chain :: proc(p: ^Parser) -> bool {
 	}
 	if eat(p, "..") {
 		push_step(p, Descend{}) or_return
-	} else if p.at + 1 == len(t) || !starts_step(t[p.at + 1]) {
+	} else if p.at + 1 == len(t) || !(t[p.at + 1] == '"' || t[p.at + 1] == '[' || is_name_start(t[p.at + 1])) {
 		p.at += 1
 	}
 	for p.at < len(t) {
@@ -384,12 +408,6 @@ parse_chain :: proc(p: ^Parser) -> bool {
 		}
 	}
 	return true
-}
-
-// Whether `.` before `b` starts a step, as `.a`, `."a"` and `.[0]` do.
-@(private = "file")
-starts_step :: proc(b: u8) -> bool {
-	return b == '"' || b == '[' || is_name_start(b)
 }
 
 @(private = "file")
@@ -432,20 +450,20 @@ parse_quoted :: proc(p: ^Parser) -> bool {
 	escape := false
 	for i < len(t) && t[i] != '"' {
 		if t[i] == '\\' {
+			_, n := quoted_escape(t, i)
+			if n == 0 {
+				return bad_path(p, i)
+			}
 			escape = true
+			i += n
+		} else {
 			i += 1
 		}
-		i += 1
 	}
 	if i >= len(t) {
 		return bad_path(p, p.at)
 	}
 	raw := t[lo:i]
-	if escape {
-		if bad := quoted_fault(raw); bad >= 0 {
-			return bad_path(p, lo + bad)
-		}
-	}
 	push_step(p, Name(raw)) or_return
 	if escape {
 		p.escaped += {p.n - 1}
@@ -479,53 +497,37 @@ parse_bracket :: proc(p: ^Parser) -> bool {
 	if !has_lo && !has_hi {
 		return bad_path(p, open)
 	}
-	s := Slice{lo = lo if has_lo else 0}
-	if has_hi {
-		s.hi = hi
-	}
+	s := Slice{lo = lo if has_lo else 0, hi = hi if has_hi else nil}
 	push_step(p, s) or_return
 	return eat(p, "]") || bad_path(p, p.at)
+}
+
+// Reads the digits at `t[i:]` as an `int`, returning the byte past them, and false when there is none or it overflows.
+@(private = "file")
+digits_int :: proc(t: string, i: int) -> (value: int, end: int, ok: bool) {
+	end = i
+	for end < len(t) && t[end] >= '0' && t[end] <= '9' {
+		d := int(t[end] - '0')
+		if value > (max(int) - d) / 10 {
+			return 0, i, false
+		}
+		value = value * 10 + d
+		end += 1
+	}
+	return value, end, end > i
 }
 
 // Reads an optional `-` and its digits, and leaves `p.at` where it was when they make no `int`.
 @(private = "file")
 parse_int :: proc(p: ^Parser) -> (value: int, ok: bool) {
-	t := p.text
 	i := p.at
-	minus := i < len(t) && t[i] == '-'
-	if minus {
-		i += 1
-	}
-	digits := i
-	for i < len(t) && t[i] >= '0' && t[i] <= '9' {
-		d := int(t[i] - '0')
-		if value > (max(int) - d) / 10 {
-			return 0, false
-		}
-		value = value * 10 + d
-		i += 1
-	}
-	if i == digits {
+	minus := i < len(p.text) && p.text[i] == '-'
+	n, end, good := digits_int(p.text, i + 1 if minus else i)
+	if !good {
 		return 0, false
 	}
-	p.at = i
-	return -value if minus else value, true
-}
-
-// Returns the byte of `raw`, a quoted name's inside, where its first bad escape starts, or -1 when all are good.
-@(private = "file")
-quoted_fault :: proc(raw: string) -> int {
-	for i := 0; i < len(raw); i += 1 {
-		if raw[i] != '\\' {
-			continue
-		}
-		_, n := quoted_escape(raw, i)
-		if n == 0 {
-			return i
-		}
-		i += n - 1
-	}
-	return -1
+	p.at = end
+	return -n if minus else n, true
 }
 
 // Decodes the escape at `raw[i]` and returns its rune and length, 0 for a bad one.
@@ -612,11 +614,6 @@ pointer_index :: proc(token: string) -> (index: int, ok: bool) {
 	if len(token) == 0 || len(token) > 1 && token[0] == '0' {
 		return 0, false
 	}
-	for b in transmute([]u8)token {
-		if b < '0' || b > '9' || index > (max(int) - int(b - '0')) / 10 {
-			return 0, false
-		}
-		index = index * 10 + int(b - '0')
-	}
-	return index, true
+	n, end, good := digits_int(token, 0)
+	return n, good && end == len(token)
 }

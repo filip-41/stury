@@ -90,6 +90,8 @@ Scan_Many :: struct {
 	placed:     []Placed,
 	n_placed:   int,
 	flushed:    int,
+	dead:       int,
+	late:       bool,
 	key:        core.Token,
 	key_at:     core.Node_Index,
 	has_key:    bool,
@@ -103,26 +105,6 @@ Scan_Many :: struct {
 	on:         proc(state: rawptr, a: core.Token_Answer) -> bool,
 	state:      rawptr,
 	ctx:        runtime.Context,
-}
-
-// Whether a read of `paths` needs the `$MANY` form.
-@(private)
-many_needed :: proc(paths: []core.Path, read: core.Path_Options) -> bool {
-	if len(paths) != 1 || read.every_key || paths[0].optional != {} {
-		return true
-	}
-	for step in paths[0].steps {
-		switch x in step {
-		case core.Index:
-			if x < 0 {
-				return true
-			}
-		case core.Slice, core.Descend:
-			return true
-		case core.Name, core.All, core.Either:
-		}
-	}
-	return false
 }
 
 // The ring entries a step needs, 0 for none. `delayed` says the step feeds elements as later ones arrive.
@@ -144,7 +126,7 @@ step_ring :: proc "contextless" (step: core.Step) -> (need: int, delayed: bool) 
 // Reads `paths` into a `Scan_Many` for `h`. `depth` bounds the frames a `Descend` path opens.
 @(private)
 many_plan :: proc(h: ^Scan, paths: []core.Path, depth: int, allocator: runtime.Allocator) -> core.Path_Error {
-	if len(paths) > 64 {
+	if len(paths) > core.MAX_PATHS {
 		return {kind = .Over_Capacity}
 	}
 	m := new(Scan_Many, allocator)
@@ -156,6 +138,8 @@ many_plan :: proc(h: ^Scan, paths: []core.Path, depth: int, allocator: runtime.A
 	for path, p in paths {
 		x := &m.paths[p]
 		if e := scan_plan_path(h, x, path); e.kind != .None {
+			e := e
+			e.path = u32(p)
 			return e
 		}
 		x.marks = total
@@ -175,6 +159,7 @@ many_plan :: proc(h: ^Scan, paths: []core.Path, depth: int, allocator: runtime.A
 		if x.negative != 0 {
 			m.ringed |= 1 << uint(p)
 		}
+		m.late = m.late || x.late
 		m.all |= 1 << uint(p)
 	}
 	if m.deeps > 0 {
@@ -221,6 +206,10 @@ placed_less :: proc(a, b: Placed) -> bool {
 @(private)
 many_settle :: proc(h: ^Scan) {
 	m := h.many
+	// With no late path and nothing taken back, the answers were placed in order and each path stopped at its limit.
+	if !m.late && m.dead == 0 {
+		return
+	}
 	w := m.flushed
 	for i in m.flushed ..< m.n_placed {
 		if m.placed[i].answer.path != DEAD {
@@ -262,7 +251,7 @@ many_answers :: proc(h: ^Scan) {
 
 // The hook of a `$MANY` read into a document.
 many_hook :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	return many_step(.Document, h, s, t)
+	return scan_step(true, .Document, h, s, t)
 }
 
 // The hook of `each_answer`.
@@ -310,7 +299,14 @@ many_flush :: proc "contextless" (h: ^Scan) {
 @(private = "file")
 many_give :: proc(h: ^Scan, a: Placed) -> bool {
 	m := h.many
-	if m.on(m.state, core.Token_Answer{a.token, a.hi, a.answer.path, a.answer.outcome}) {
+	lo, hi: u64
+	if a.answer.outcome == .Found {
+		lo, hi = core.scalar_ends(a.token)
+		if a.token.kind == .Array || a.token.kind == .Map {
+			hi = a.hi
+		}
+	}
+	if m.on(m.state, core.Token_Answer{a.token, lo, hi, a.answer.path, a.answer.outcome}) {
 		return true
 	}
 	h.stopped = true
@@ -321,13 +317,8 @@ many_give :: proc(h: ^Scan, a: Placed) -> bool {
 // Gives `on` what a read held to its end. Under a limit on a late path that is everything.
 @(private)
 many_stream_end :: proc(h: ^Scan) {
-	m := h.many
 	many_settle(h)
-	for ; m.flushed < m.n_placed; m.flushed += 1 {
-		if !many_give(h, m.placed[m.flushed]) {
-			return
-		}
-	}
+	many_flush(h)
 }
 
 // Takes back path `p`'s answers through the earlier match of step `k`. A step past a `Descend` is live in many
@@ -340,6 +331,7 @@ many_take_back :: proc "contextless" (m: ^Scan_Many, f: ^Many_Frame, path: ^Scan
 			if a := &m.placed[i]; a.answer.path == u32(p) {
 				a.answer.path = DEAD
 				path.count -= 1
+				m.dead += 1
 			}
 		}
 		return
@@ -349,6 +341,7 @@ many_take_back :: proc "contextless" (m: ^Scan_Many, f: ^Many_Frame, path: ^Scan
 		if a := &m.placed[i]; a.answer.path == u32(p) && a.chain == chain {
 			a.answer.path = DEAD
 			path.count -= 1
+			m.dead += 1
 		}
 	}
 }
@@ -394,6 +387,19 @@ many_arrivals :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, t: cor
 	return child
 }
 
+// The negative steps of `path` live in the container at depth `d`.
+@(private = "file")
+ring_steps :: #force_inline proc "contextless" (h: ^Scan, path: ^Scan_Path, d: int) -> u64 {
+	m := h.many
+	bits := path.negative
+	if path.deep >= 0 {
+		#no_bounds_check bits &= m.deep[d * m.deeps + path.deep].live
+	} else {
+		bits &= u64(1) << uint(d - 1)
+	}
+	return bits
+}
+
 // Gives frame `g` the ring its armed paths' negative steps need, sized by the largest.
 @(private)
 many_ring_open :: #force_inline proc "contextless" (h: ^Scan, g: ^Many_Frame, d: int) {
@@ -405,12 +411,7 @@ many_ring_open :: #force_inline proc "contextless" (h: ^Scan, g: ^Many_Frame, d:
 	k := 0
 	for ; rest != 0; rest &= rest - 1 {
 		#no_bounds_check path := &m.paths[intrinsics.count_trailing_zeros(rest)]
-		bits := path.negative
-		if path.deep >= 0 {
-			#no_bounds_check bits &= m.deep[d * m.deeps + path.deep].live
-		} else {
-			bits &= u64(1) << uint(d - 1)
-		}
+		bits := ring_steps(h, path, d)
 		for ; bits != 0; bits &= bits - 1 {
 			need, delayed := step_ring(path.steps[intrinsics.count_trailing_zeros(bits)])
 			k = max(k, need)
@@ -440,15 +441,10 @@ many_ring_picks :: proc "contextless" (h: ^Scan, f: ^Many_Frame, d, index, count
 	for rest := f.armed & m.ringed; rest != 0; rest &= rest - 1 {
 		p := uint(intrinsics.count_trailing_zeros(rest))
 		#no_bounds_check path := &m.paths[p]
-		bits := path.negative
-		if path.deep >= 0 {
-			#no_bounds_check bits &= m.deep[d * m.deeps + path.deep].live
-		} else {
-			bits &= u64(1) << uint(d - 1)
-		}
+		bits := ring_steps(h, path, d)
 		for ; bits != 0; bits &= bits - 1 {
 			k := int(intrinsics.count_trailing_zeros(bits))
-			switch x in path.steps[k] {
+			#partial switch x in path.steps[k] {
 			case core.Index:
 				if offset == 0 && index == count + int(x) {
 					scan_picked(true, h, path, p, k, true)
@@ -462,7 +458,6 @@ many_ring_picks :: proc "contextless" (h: ^Scan, f: ^Many_Frame, d, index, count
 				} else if offset == 0 && index >= count + x.lo && index < (hi if hi >= 0 else count + hi) {
 					scan_picked(true, h, path, p, k, true)
 				}
-			case core.Name, core.All, core.Descend, core.Either:
 			}
 		}
 	}

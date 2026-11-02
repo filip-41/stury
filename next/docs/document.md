@@ -16,18 +16,20 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/build/build.odin` | `Builder`, the hooks, `builder_start`, `builder_end`, the header row, the duplicate-key check |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact`, `commit` |
 | `core/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
-| `core/path.odin` | `Path`, its steps and spellings, `Answer`, `member_of` and `element_of` |
-| `core/build/scan.odin` | the one engine: the hook a format's `scan` walks with, the partial document, `query` |
-| `json/query.odin`, `dsv/query.odin` | each format's `scan` and `find` |
+| `core/path.odin` | `Path`, its steps and spellings, `Answer`, `Token_Answer`, `Presence`, `member_of`, `element_of` and `length_exact` |
+| `core/build/scan.odin` | the one engine: the hook a format's `scan` walks with, the partial document, `query`, `set_answers` |
+| `core/build/many.odin` | what only `$MANY` reads hold: armed path sets, rings of negative indexes, answers placed in text order, the stream |
+| `json/query.odin`, `dsv/query.odin` | each format's `scan`, `find`, `each_answer`, `query` and `set` |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, every decoder |
-| `core/spell/text.odin` | `decode_text` and `bytes_equal`, the decoders' and readers' byte helpers |
+| `core/spell/text.odin` | `decode_text`, `decoded_equals`, `bytes_equal` and `Pending`, the decoders' and readers' byte helpers |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
 | `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, `render`, `write_code` |
 | `json/document.odin` | JSON's `build`, `Spelling` and `Edit_Spelling` tables, `close_end`, the edit checks |
 | `dsv/compose.odin` | a delimited text's root junctions and the comments above its header |
 | `json/escape.odin` | the escape-byte table its walk and decoder share |
 | `json/unescape.odin` | JSON's `text` and `number` readers and the decoder behind them |
-| `dsv/document.odin` | dsv's `build` and `commit`, its `text` and `number` readers, its `Spelling` table, its edit table, `close_end`, the record check |
+| `dsv/document.odin` | dsv's `build` and `commit`, its `Spelling` table, its edit table, `close_end`, the record check |
+| `dsv/plan.odin` | a commit's column changes, turned into plain cell edits before core composes the list |
 
 ## The node
 
@@ -176,6 +178,8 @@ A reader given an index no node holds answers as it does for a node of the wrong
 | `child_next`, `child_at`, `member`, `member_next` | a node or false | false | false |
 | `pair_next` | a key and value node or false | false | false |
 | `key_equals` | whether a key decodes to a name | false | false |
+| `member_of`, `element_of` | a node and a `Presence`, for a partial document (see `docs/paths.md`) | `.Missing` | `.Wrong_Kind` |
+| `length_exact` | `length`, and whether it is the true count | 0, true | 0, true |
 | `text` | the node's text, and whether it read | `false` | `false` |
 | `number` | a `Number` | `.Wide` | `.Wide` |
 | `resolve` | the value's kind | `.Null` | the format's answer |
@@ -227,8 +231,8 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 ```
 
 `text` returns a source slice or a decode in `buf`. It returns false for a container, an index past the last node, or a
-`buf` too short for the decoded text. `json.text` and `dsv.text` are the same read without the table, for a caller that
-knows the format.
+`buf` too short for the decoded text. `json.text` is the same read without the table, for a caller that knows the
+format.
 
 `text_clone` always allocates, and the result is exactly what the caller passes to `delete(s, allocator)`: a text that
 is its source is copied, and a decode's over-long buffer is trimmed, so `len(s)` is the allocation's length. A caller
@@ -237,7 +241,7 @@ that has a buffer reads through `text` first and falls back to `text_clone` only
 `number(doc, i)` returns a 16-byte `Number`, `bits` and `kind`, decoded from the node's span when it is read. The
 node holds the token's bytes and the format's packed shape, never a value. `Number_Kind` is `Int`, `Uint`, `Float` or
 `Wide`. The decoders are in package `core/spell`, and `core.Number` and `core.Number_Kind` alias `spell`'s names, so a
-caller of a reader writes `core.Number`. `dsv.number` is the direct reader for a delimited text.
+caller of a reader writes `core.Number`.
 
 - `Int` is an integer that fits `i64`, in two's complement in `bits`. `-0` is `Int` 0.
 - `Uint` is a positive integer that fits `u64` and not `i64`.
@@ -308,8 +312,7 @@ take the junction a tree's members do, in `core/compose.odin`.
 
 A reader reaches the table only where it must: `text` and `key_equals` for a marked node, `number` for every scalar,
 `resolve` for every node, `close_end` for a container whose span is read, and the edit services for every recorded or
-committed text. A caller that knows the format at compile time calls `json.text`, `json.number`, `dsv.text` or
-`dsv.number` directly.
+committed text. A caller that knows the format at compile time calls `json.text` or `json.number` directly.
 
 ## Duplicate keys
 

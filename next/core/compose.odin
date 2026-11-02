@@ -131,6 +131,7 @@ new_fact :: proc(cx: ^Compose, node: Node_Index, role: Role) -> int {
 }
 
 // Adds `node`'s facts in `lo` through `hi` to the junction's items.
+@(private)
 add_items :: proc(cx: ^Compose, node: Node_Index, lo, hi: u64) -> bool {
 	for f in all_facts(cx.doc, node) {
 		if f.lo < lo || f.lo >= hi {
@@ -143,6 +144,7 @@ add_items :: proc(cx: ^Compose, node: Node_Index, lo, hi: u64) -> bool {
 }
 
 // Sorts the junction's items by byte.
+@(private)
 sort_items :: proc(cx: ^Compose) {
 	slice.sort_by(cx.items[:], proc(a, b: Item) -> bool { return a.lo < b.lo })
 }
@@ -292,33 +294,41 @@ write_member :: proc(cx: ^Compose, e: Edit) -> bool {
 	return true
 }
 
-// Composes the junction between survivors `l` and `r`, `-1` for the open and the member count for the close, with the
-// edits `inserts` writes between them.
-@(private)
-compose_junction :: proc(cx: ^Compose, c: Node_Index, open, close: u64, l, r: int, inserts: []Edit) -> bool {
-	doc := cx.doc
-	lo, hi := open, close
+// Fills `cx.items` with the comment items between survivors `l` and `r` of container `c`, sorted, and returns the span
+// they lie in: from the left survivor's end, else `open`, to the right survivor's start, else `close`. `left` says
+// whether the left survivor's own items are read, which a format that keeps no comment on a record's line leaves out.
+junction_items :: proc(cx: ^Compose, c: Node_Index, open, close: u64, l, r: int, left: bool) -> (lo, hi: u64, ok: bool) {
 	members := cx.members[:]
-	n := len(members)
-	has_left, has_right := l >= 0, r < n
-	run := r - l > 1
-	if has_left {
+	lo, hi = open, close
+	if l >= 0 {
 		lo = members[l].hi
 	}
-	if has_right {
+	if r < len(members) {
 		hi = members[r].lo
 	}
 	clear(&cx.items)
-	if has_left {
+	if left && l >= 0 {
 		add_items(cx, members[l].node, lo, hi) or_return
 	}
-	if has_right {
+	if r < len(members) {
 		add_items(cx, members[r].node, lo, hi) or_return
 	}
 	if c != NO_NODE {
 		add_items(cx, c, lo, hi) or_return
 	}
 	sort_items(cx)
+	return lo, hi, true
+}
+
+// Composes the junction between survivors `l` and `r`, `-1` for the open and the member count for the close, with the
+// edits `inserts` writes between them.
+@(private)
+compose_junction :: proc(cx: ^Compose, c: Node_Index, open, close: u64, l, r: int, inserts: []Edit) -> bool {
+	doc := cx.doc
+	members := cx.members[:]
+	has_left, has_right := l >= 0, r < len(members)
+	run := r - l > 1
+	lo, hi := junction_items(cx, c, open, close, l, r, true) or_return
 
 	following := len(inserts) > 0 || has_right
 	l_end := lo

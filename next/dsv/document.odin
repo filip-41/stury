@@ -188,17 +188,14 @@ inner_span :: #force_inline proc "contextless" (src: []u8, n: core.Node) -> (lo,
 
 // Decodes one cell. A CSV cell's inner bytes have each `""` read as `"`, or a TSV cell's bytes have each accepted
 // escape read as the byte it spells. A byte past 0x7F reads as one UTF-8 character, or U+FFFD over its maximal subpart
-// when it is ill-formed. `buf` holds the bytes of a character read in parts, `at` the next one and `n` how many are
-// left.
+// when it is ill-formed. `pending` holds the rest of a character read in parts.
 @(private)
 Dsv_Decoded :: struct {
-	src:    []u8,
-	p, end: u64,
-	tsv:    bool,
-	quoted: bool,
-	buf:    [4]u8,
-	n:      u8,
-	at:     u8,
+	src:     []u8,
+	p, end:  u64,
+	tsv:     bool,
+	quoted:  bool,
+	pending: spell.Pending,
 }
 
 @(private)
@@ -215,11 +212,8 @@ dsv_decoded_init :: proc "contextless" (src: []u8, n: core.Node, spec: Spec) -> 
 
 @(private)
 dsv_decoded_next :: proc "contextless" (d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
-	if d.n > 0 {
-		b = d.buf[d.at]
-		d.at += 1
-		d.n -= 1
-		return b, true
+	if b, ok = spell.pending_next(&d.pending); ok {
+		return
 	}
 	if d.p >= d.end {
 		return 0, false
@@ -259,18 +253,14 @@ dsv_decoded_next :: proc "contextless" (d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
 	q, kind := kernel.utf8_char(base[d.p:], base[d.end:])
 	if kind == .None {
 		n := int(intrinsics.ptr_sub(q, base[d.p:]))
-		copy(d.buf[:], d.src[d.p:d.p + u64(n)])
+		spelled: [4]u8
+		copy(spelled[:], d.src[d.p:d.p + u64(n)])
 		d.p += u64(n)
-		d.n = u8(n - 1)
-		d.at = 1
-		return d.buf[0], true
+		return spell.pending_give(&d.pending, spelled, n), true
 	}
 	q = kernel.utf8_subpart(base[d.p:], base[d.end:])
 	d.p += u64(intrinsics.ptr_sub(q, base[d.p:]))
-	d.buf = {0xEF, 0xBF, 0xBD, 0}
-	d.n = 2
-	d.at = 1
-	return d.buf[0], true
+	return spell.pending_give(&d.pending, {0xEF, 0xBF, 0xBD, 0}, 3), true
 }
 
 // Whether a quoted cell's inner span is its text: it holds no `""` and its bytes are well-formed UTF-8. A cell holding
@@ -330,22 +320,6 @@ spelling_text :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s:
 	return spell.decode_text(buf, dsv_decoded_init(doc.src, n, spec), dsv_decoded_next)
 }
 
-// dsv's text reader, exported so a caller that knows the format calls it without the table. It decodes into `buf` and
-// returns false for a container, an index past the last node, or a `buf` too short for the decoded cell.
-text :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool) {
-	if int(i) >= len(doc.nodes) {
-		return "", false
-	}
-	n := doc.nodes[i]
-	if n.kind > .Plain {
-		return "", false
-	}
-	return spelling_text(doc, i, buf)
-}
-
-
-
-
 // dsv's `Spelling.key_equals`. It returns whether cell `i` decodes to `name`, with no allocation. A cell that needs no
 // decode is compared by its span, or by its inner span for a quoted cell without `""`, and one that needs it byte by
 // byte as it decodes.
@@ -360,18 +334,7 @@ spelling_key_equals :: proc "contextless" (doc: ^core.Document, i: core.Node_Ind
 	if n.spelling & core.SPELLING_DECODE == 0 {
 		return spell.bytes_equal(doc.src[n.lo:n.lo + u64(n.n)], transmute([]u8)name)
 	}
-	d := dsv_decoded_init(doc.src, n, spec)
-	at := 0
-	for {
-		b, ok := dsv_decoded_next(&d)
-		if !ok {
-			return at == len(name)
-		}
-		if at >= len(name) || name[at] != b {
-			return false
-		}
-		at += 1
-	}
+	return spell.decoded_equals(dsv_decoded_init(doc.src, n, spec), dsv_decoded_next, name)
 }
 
 
@@ -389,15 +352,6 @@ spelling_number :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Number 
 	s := doc.src[n.lo:n.lo + u64(n.n)]
 	if num, is_number := spell.number_json(s, 0, u64(len(s))); is_number {
 		return num
-	}
-	return {0, .Wide}
-}
-
-// dsv's number reader, exported so a caller that knows the format calls it without the table. A value cell that is
-// exactly a JSON number reads as that number, and every other cell and a container read `.Wide`.
-number :: #force_inline proc(doc: ^core.Document, i: core.Node_Index) -> core.Number {
-	if int(i) < len(doc.nodes) && doc.nodes[i].kind <= .Plain {
-		return spelling_number(doc, i)
 	}
 	return {0, .Wide}
 }

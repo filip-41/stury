@@ -27,7 +27,7 @@ BENCH      := $(BUILD)/bench
 BENCH_CC    ?= cc
 BENCH_CXX   ?= c++
 BENCH_CARGO ?= cargo
-BENCH_FILES ?= logs.json citm_catalog.json table.csv
+BENCH_FILES ?= logs.json citm_catalog.json table.csv logs.jsonc logs.json5
 
 # `$(call odin_each,VERB,PACKAGES,FLAGS,LABEL)` runs `odin VERB` over each package and stops at the first failure.
 define odin_each

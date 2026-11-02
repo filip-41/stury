@@ -277,6 +277,42 @@ def gen_logs_json(target: int) -> bytes:
     return data
 
 
+def gen_logs_dialect(target: int, json5: bool) -> bytes:
+    """Returns `gen_logs_json`'s records one per line in a dialect, each followed by a trailing comma. JSONC puts a
+    line comment before every fourth record and a block comment after every sixteenth. JSON5 leaves keys unquoted,
+    quotes strings with `'`, writes `status` in hex and `bytes` with a leading `+`."""
+    rng = _Lcg(0x5EED10C5)
+    q = "'" if json5 else '"'
+    out = bytearray(b"{\n  logs: [\n" if json5 else b'{"logs":[\n')
+    i = 0
+    while len(out) < target:
+        i += 1
+        words = " ".join(rng.pick(_LOG_WORDS) for _ in range(6 + rng.below(6)))
+        msg = "%s %s %s" % (rng.pick(_LOG_SERVICES), words, i)
+        fields = [
+            ("ts", "%s2026-10-03T%02d:%02d:%02d.%03dZ%s" % (q, rng.below(24), rng.below(60), rng.below(60), rng.below(1000), q)),
+            ("level", q + rng.pick(_LOG_LEVELS) + q),
+            ("service", q + rng.pick(_LOG_SERVICES) + q),
+            ("msg", q + msg + q),
+        ]
+        status, size = 200 + rng.below(300), rng.below(200000)
+        fields.append(("status", "0x%x" % status if json5 else "%d" % status))
+        fields.append(("bytes", "+%d" % size if json5 else "%d" % size))
+        fields.append(("duration_ms", "%d.%03d" % (rng.below(500), rng.below(1000))))
+        fields.append(("id", "%sreq-%08x%s" % (q, rng.next() & 0xFFFFFFFF, q)))
+        if json5:
+            line = "    { %s },\n" % ", ".join("%s: %s" % kv for kv in fields)
+        else:
+            line = "{%s},\n" % ",".join('"%s":%s' % kv for kv in fields)
+            if i % 4 == 1:
+                out += b"// batch %d\n" % (i // 4)
+        out += line.encode("ascii")
+        if not json5 and i % 16 == 0:
+            out += b"/* checkpoint %d */\n" % (i // 16)
+    out += b"  ],\n}\n" if json5 else b"]}\n"
+    return bytes(out)
+
+
 def gen_documents_json(target: int) -> bytes:
     """Returns documents with structure and no period. Each document draws its own
     field->class binding, so values cluster as in a real payload while the class
@@ -419,6 +455,8 @@ FIXTURES = {
     "longtext.json": (gen_longtext_json, [8 * MIB]),
     "utf8.json": (gen_utf8_json, [8 * MIB]),
     "logs.json": (gen_logs_json, [8 * MIB]),
+    "logs.jsonc": (gen_logs_dialect, [8 * MIB, False]),
+    "logs.json5": (gen_logs_dialect, [8 * MIB, True]),
     "pretty.json": (gen_pretty_json, [8 * MIB]),
     "table.csv": (gen_table_csv, [16 * MIB]),
     "wide.csv": (gen_wide_csv, [8 * MIB]),

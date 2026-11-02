@@ -39,6 +39,7 @@ Scan_Path :: struct {
 	deep:     int, // the path's column in `Scan_Many.deep`, -1 with no `Descend`
 	marks:    int, // the path's first entry in `Scan_Many.marks`
 	late:     bool,
+	broad:    bool, // a step or an option the single-path form has no state for
 }
 
 // What a matched `Name` left behind when it matched: the lists' lengths and the node cursor, which a repeated key under
@@ -102,10 +103,16 @@ scan_plan :: proc(h: ^Scan, paths: []core.Path, read: core.Path_Options, depth: 
 	h.every_key = read.every_key
 	h.stop_early = read.stop_early
 	h.flush = max(int)
-	if many || many_needed(paths, read) {
+	if many || len(paths) != 1 {
 		return many_plan(h, paths, depth, allocator)
 	}
-	e := scan_plan_path(h, &h.path, paths[0])
+	if e := scan_plan_path(h, &h.path, paths[0]); e.kind != .None {
+		return e
+	}
+	if h.path.broad {
+		h.path = {}
+		return many_plan(h, paths, depth, allocator)
+	}
 	h.free = h.path.n
 	h.keep = h.free
 	h.next = 1 if h.path.limit > 0 else 0
@@ -113,7 +120,7 @@ scan_plan :: proc(h: ^Scan, paths: []core.Path, read: core.Path_Options, depth: 
 	if h.path.limit == max(int) {
 		h.path.indexed &~= h.path.alls
 	}
-	return e
+	return {}
 }
 
 @(private)
@@ -121,12 +128,16 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 	if len(path.steps) > core.MAX_STEPS {
 		return {kind = .Over_Capacity}
 	}
+	if limit, limited := path.limit.?; limited && limit < 0 {
+		return {kind = .Bad_Path}
+	}
 	x.steps = path.steps
 	x.n = len(path.steps)
 	x.limit = path.limit.? or_else max(int)
 	x.multi, x.rollback = x.n, x.n
 	x.optional = transmute(u64)path.optional
 	x.descend = -1
+	x.broad = h.every_key || path.optional != {}
 	for step, i in path.steps {
 		bit := u64(1) << uint(i)
 		switch s in step {
@@ -141,6 +152,8 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 			}
 			if _, either := s.(core.Either); either {
 				x.indexed |= bit
+			} else if name := s.(core.Name); raw_data(string(name)) == nil {
+				return {kind = .Bad_Path}
 			}
 		case core.Index:
 			x.indexed |= bit
@@ -149,6 +162,7 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 			x.multi = min(x.multi, i)
 			x.indexed |= bit
 		case core.Slice:
+			x.broad = true
 			x.indexed |= bit
 			x.multi = min(x.multi, i)
 		case core.Descend:
@@ -159,6 +173,7 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 			if x.n >= core.MAX_STEPS {
 				return {kind = .Over_Capacity}
 			}
+			x.broad = true
 			x.descend = i
 			x.late = true
 			x.multi = min(x.multi, i)
@@ -168,6 +183,7 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 			return {kind = .Over_Capacity}
 		}
 		if need > 0 {
+			x.broad = true
 			x.negative |= bit
 			x.late = true
 			x.multi = min(x.multi, i)
@@ -261,6 +277,7 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	}
 	doc.partial = true
 	doc.stopped = h.stopped
+	doc.positional = h.positional
 	ok := attach_reads(&doc, h.answers[:h.n_answers], h.kept[:h.n_kept], h.missing[:h.n_missing])
 	free_lists(h, allocator)
 	if !ok {
@@ -270,12 +287,17 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	return doc, {}
 }
 
-// Copies a read's lists into one block `doc` owns. Returns false when the allocation is refused.
+// Copies a read's lists, and the names in `missing`, into one block `doc` owns, so only `src` outlives the read. Returns
+// false when the allocation is refused.
 attach_reads :: proc(doc: ^core.Document, answers: []core.Answer, kept: []core.Kept_Child, missing: []core.Missing_Name) -> bool {
 	a := len(answers) * size_of(core.Answer)
 	k := a + len(kept) * size_of(core.Kept_Child)
 	m := (k + 7) &~ 7
-	size := m + len(missing) * size_of(core.Missing_Name)
+	names := m + len(missing) * size_of(core.Missing_Name)
+	size := names
+	for x in missing {
+		size += len(x.name)
+	}
 	if size == 0 {
 		return true
 	}
@@ -289,20 +311,24 @@ attach_reads :: proc(doc: ^core.Document, answers: []core.Answer, kept: []core.K
 	doc.missing = ([^]core.Missing_Name)(raw_data(block[m:]))[:len(missing)]
 	copy(doc.answers, answers)
 	copy(doc.kept, kept)
-	copy(doc.missing, missing)
+	w := names
+	for x, i in missing {
+		copy(block[w:], x.name)
+		doc.missing[i] = {x.node, string(block[w:w + len(x.name)])}
+		w += len(x.name)
+	}
 	return true
 }
 
 // Answers `path` over a document built whole, in the order a scan of its text answers, and allocates nothing but the
 // list, which the caller frees with `delete(answers, allocator)`. A partial document cannot say what it does not hold,
 // so it is `.Unsupported`. An `Answer`'s nodes are `doc`'s.
-query_one :: proc(doc: ^core.Document, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
-	paths := [1]core.Path{path}
-	return query_many(doc, paths[:], read, allocator)
+query_one :: proc(doc: ^core.Document, path: core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
+	return query_many(doc, []core.Path{path}, read, allocator)
 }
 
 // Answers `paths` over a document built whole, as `query_one`, each answer tagged with its path's number.
-query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
+query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
 	if doc.partial {
 		return nil, {kind = .Unsupported}
 	}
@@ -311,7 +337,7 @@ query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Path_Op
 	h.b.doc.allocator = allocator
 	h.positional = doc.shared_keys != 0
 	depth := max(core.MAX_DEPTH, int(doc.read.max_depth))
-	if e := scan_plan(&h, paths, read, depth, false, allocator); e.kind != .None {
+	if e := scan_plan(&h, paths, {dups = read.dups, every_key = read.every_key}, depth, false, allocator); e.kind != .None {
 		many_free(&h, allocator)
 		return nil, e
 	}
@@ -342,53 +368,62 @@ query_many :: proc(doc: ^core.Document, paths: []core.Path, read := core.Path_Op
 
 query :: proc {query_one, query_many}
 
-@(private = "file")
-has_descend :: proc(path: core.Path) -> bool {
-	for step in path.steps {
-		if _, is_descend := step.(core.Descend); is_descend {
-			return true
-		}
-	}
-	return false
-}
-
 // Writes `text` as the value at every answer of `path` over the built `doc`, and returns the new text. A `Name` the path ends
 // in that its container lacks is inserted there. Any other answer that is no value, a mismatch or a missing position or
 // parent, is `.Bad_Index`.
-set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 	list := core.edit_list_init(doc, allocator)
 	defer core.edit_list_destroy(&list)
 	// A `Name` at the end is set through its container, so that a missing name is told from a missing parent.
-	read := path
+	read_path := path
 	name: core.Name
 	named := false
-	if n := len(path.steps); n > 0 && n - 1 not_in path.optional && !has_descend(path) {
+	if n := len(path.steps); n > 0 && n - 1 not_in path.optional {
 		name, named = path.steps[n - 1].(core.Name)
+		// A zero `Step` is left for the read to refuse.
+		named &&= raw_data(string(name)) != nil
 		if named {
-			read.steps = path.steps[:n - 1]
+			read_path.steps = path.steps[:n - 1]
 		}
 	}
-	answers, qerr := query_one(doc, read, allocator = allocator)
+	answers, qerr := query_one(doc, read_path, read, allocator)
 	defer delete(answers, allocator)
 	if qerr.kind != .None {
-		return nil, qerr
+		return nil, {kind = .Path, path = qerr}
 	}
 	for a in answers {
 		e := core.Document_Error{kind = .Bad_Index}
 		if a.outcome == .Found && !named {
 			e = core.set(&list, a.node, text)
 		} else if a.outcome == .Found && doc.nodes[a.node].kind == .Map {
-			e = core.set_member(&list, a.node, string(name), text)
+			e = set_named(&list, a.node, string(name), text, read)
 		}
 		if e.kind != .None {
-			return nil, e
+			return nil, {kind = .Edit, edit = e}
 		}
 	}
 	committed, _, e := core.commit(&list, allocator)
 	if e.kind != .None {
-		return nil, e
+		return nil, {kind = .Edit, edit = e}
 	}
-	return committed, nil
+	return committed, {}
+}
+
+// Sets the member `name` of `obj`: the one `read.dups` picks, or each of its repeats under `read.every_key`.
+@(private = "file")
+set_named :: proc(list: ^core.Edit_List, obj: core.Node_Index, name, text: string, read: core.Query_Options) -> core.Document_Error {
+	if !read.every_key {
+		return core.set_member(list, obj, name, text, read.dups.? or_else .Last)
+	}
+	found := false
+	it := core.member_all(list.doc, obj, name)
+	for v in core.member_next(&it) {
+		found = true
+		if e := core.set(list, v, text); e.kind != .None {
+			return e
+		}
+	}
+	return {} if found else core.set_member(list, obj, name, text)
 }
 
 // A `$MANY` read's re-walk of the value at node `at` of a built document.
@@ -397,10 +432,13 @@ replay_rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: 
 	replay(true, h, u32(at), u32(at) + h.b.doc.nodes[at].n, s, h.ends[s.c:])
 }
 
-// Answers `paths` over the whole document `doc`, which a read with `refuse_duplicates` built, and gives it its answers. On
-// an error `doc` is destroyed.
-query_built :: proc(doc: ^core.Document, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Path_Error) {
-	answers, e := query_many(doc, paths, read, doc.allocator)
+// Answers `paths` over the whole document `doc`, which a read with `refuse_duplicates` built with the error `built`, and
+// gives it its answers. On an error `doc` is destroyed, or empty when the build failed.
+query_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Path_Error) {
+	if built.kind != .None {
+		return {}, core.path_error(built)
+	}
+	answers, e := query_many(doc, paths, {read.dups, read.every_key}, doc.allocator)
 	if e.kind == .None {
 		defer delete(answers, doc.allocator)
 		if attach_reads(doc, answers, nil, nil) {
@@ -609,12 +647,6 @@ scan_known :: #force_inline proc "contextless" ($MANY: bool, h: ^Scan, path: ^Sc
 	return h.stop_early && (d <= path.multi || !scan_fits(MANY, h, path) && d <= path.rollback)
 }
 
-@(private)
-scan_stop :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs) -> (core.Hook_Regs, core.Action) {
-	h.stopped = true
-	return s, .Stop
-}
-
 // A value or container is past for the paths in `set`, with the logic at depth `d`: a path that can answer no more is
 // done, and a read that stops early stops when all are.
 @(private)
@@ -640,7 +672,8 @@ scan_left :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Sca
 		return s, .Stop if h.stopped else .Next
 	} else {
 		if scan_known(false, h, &h.path, d) {
-			return scan_stop(h, s)
+			h.stopped = true
+			return s, .Stop
 		}
 		return s, .Next
 	}

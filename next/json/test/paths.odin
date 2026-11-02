@@ -253,7 +253,7 @@ path_reads :: proc(t: ^testing.T) {
 		full, berr := json.build(transmute([]u8)c.src, .Json)
 		defer core.destroy(&full)
 		testing.expect_value(t, berr.kind, core.Document_Error_Kind.None)
-		answers, qerr := json.query(&full, path, c.opts)
+		answers, qerr := json.query(&full, path, {dups = c.opts.dups, every_key = c.opts.every_key})
 		defer delete(answers)
 		testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
 		check_answers(t, c, &full, answers, "query")
@@ -301,10 +301,13 @@ partial_reads :: proc(t: ^testing.T) {
 }
 
 @(private = "file")
-expect_set :: proc(t: ^testing.T, src, path, text, want: string, loc := #caller_location) {
-	out, err := json.set(transmute([]u8)src, .Json, path, text)
+expect_set :: proc(t: ^testing.T, src, path_text, text, want: string, read := core.Query_Options{}, loc := #caller_location) {
+	path, perr := core.parse_path(path_text)
+	defer core.path_destroy(&path)
+	testing.expect_value(t, perr.kind, core.Path_Error_Kind.None, loc)
+	out, err := json.set(transmute([]u8)src, .Json, path, text, read)
 	defer delete(out)
-	testing.expect_value(t, err, nil, loc)
+	testing.expect_value(t, err.kind, core.Path_Edit_Error_Kind.None, loc)
 	testing.expect_value(t, string(out), want, loc)
 }
 
@@ -317,21 +320,83 @@ path_set :: proc(t: ^testing.T) {
 	expect_set(t, `[{"a":1},{"b":2}]`, ".[].a", "0", `[{"a":0},{"b":2,"a":0}]`)
 	expect_set(t, `{"a":[1,2,3]}`, ".a[-1]", "0", `{"a":[1,2,0]}`)
 	expect_set(t, `{"a":1,"a":2}`, ".a", "3", `{"a":1,"a":3}`)
-	refused := [?]string{".a.b", ".x.y", ".a[5]", ".a[]"}
-	for path in refused {
+	expect_set(t, `{"b":{}}`, "...a", "0", `{"b":{"a":0},"a":0}`)
+	expect_set(t, `{"a":1,"a":2}`, ".a", "3", `{"a":3,"a":2}`, {dups = .First})
+	expect_set(t, `{"a":1,"a":2}`, ".a", "3", `{"a":3,"a":3}`, {every_key = true})
+	refused := [?]string{".a.b", ".x.y", ".a[5]", ".a[]", "...a"}
+	for text in refused {
 		src := `{"a":1}`
+		path, _ := core.parse_path(text)
+		defer core.path_destroy(&path)
 		out, err := json.set(transmute([]u8)src, .Json, path, "1")
 		defer delete(out)
-		e, is_edit := err.(core.Document_Error)
-		testing.expectf(t, is_edit && e.kind == .Bad_Index, "%s: %v", path, err)
+		testing.expectf(t, err.kind == .Edit && err.edit.kind == .Bad_Index, "%s: %v", text, err)
 	}
-	bad_text := `{"a":1}`
-	_, verr := json.set(transmute([]u8)bad_text, .Json, ".a", "01")
-	v, is_edit := verr.(core.Document_Error)
-	testing.expect(t, is_edit && v.kind == .Bad_Value)
-	_, perr := json.set(transmute([]u8)bad_text, .Json, ".[", "1")
-	p, is_path := perr.(core.Path_Error)
-	testing.expect(t, is_path && p.kind == .Bad_Path)
+	bad_text := transmute([]u8)string(`{"a":1}`)
+	a, _ := core.parse_path(".a")
+	defer core.path_destroy(&a)
+	_, verr := json.set(bad_text, .Json, a, "01")
+	testing.expect(t, verr.kind == .Edit && verr.edit.kind == .Bad_Value)
+	_, perr := core.parse_path(".[")
+	testing.expect_value(t, perr.kind, core.Path_Error_Kind.Bad_Path)
+}
+
+// A set can refuse a repeated key, and its path errors and edit errors render from the same call.
+@(test)
+path_set_refusals :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":1,"a":2}`)
+	a, _ := core.parse_path(".a")
+	defer core.path_destroy(&a)
+	_, dup := json.set(src, .Json, a, "3", refuse_duplicates = true)
+	testing.expect(t, dup.kind == .Edit && dup.edit.kind == .Duplicate_Key)
+	b := strings.builder_make(context.temp_allocator)
+	core.render(strings.to_writer(&b), src, "", dup)
+	testing.expect_value(t, strings.to_string(b), "1:8: Duplicate key")
+	strings.builder_reset(&b)
+	core.write_code(strings.to_writer(&b), dup)
+	testing.expect_value(t, strings.to_string(b), "document.duplicate_key")
+
+	unset := make([]core.Step, 1, context.temp_allocator)
+	_, bad := json.set(src, .Json, core.Path{steps = unset}, "3")
+	testing.expect_value(t, bad.kind, core.Path_Edit_Error_Kind.Path)
+	strings.builder_reset(&b)
+	core.render(strings.to_writer(&b), src, "", bad)
+	testing.expect_value(t, strings.to_string(b), "1:1: Invalid path")
+	strings.builder_reset(&b)
+	core.write_code(strings.to_writer(&b), bad)
+	testing.expect_value(t, strings.to_string(b), "path.bad_path")
+
+	// A path error points into the path's text and a walk error into the source, and the caller passes both.
+	_, perr := core.parse_path(".a[")
+	strings.builder_reset(&b)
+	core.render(strings.to_writer(&b), src, ".a[", perr)
+	testing.expect_value(t, strings.to_string(b), "1:3: Invalid path")
+	_, werr := json.scan(transmute([]u8)string(`{"a":!}`), .Json, a)
+	strings.builder_reset(&b)
+	core.render(strings.to_writer(&b), transmute([]u8)string(`{"a":!}`), ".a", werr)
+	testing.expect_value(t, strings.to_string(b), "1:6: Unexpected character")
+}
+
+// A failed path names its number in the read, and a read past the limits says which one.
+@(test)
+path_errors_name_the_path :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":1}`)
+	good, _ := core.parse_path(".a")
+	defer core.path_destroy(&good)
+	bad := core.Path{steps = []core.Step{core.Descend{}, core.Descend{}}}
+	_, e := json.scan(src, .Json, []core.Path{good, good, bad})
+	testing.expect_value(t, e.kind, core.Path_Error_Kind.Bad_Path)
+	testing.expect_value(t, e.path, 2)
+	_, e = json.scan(src, .Json, []core.Path{bad})
+	testing.expect_value(t, e.path, 0)
+	_, e = json.scan(src, .Json, []core.Path{good, {limit = -1}})
+	testing.expect_value(t, e.path, 1)
+	many: [core.MAX_PATHS + 1]core.Path
+	_, e = json.scan(src, .Json, many[:])
+	testing.expect_value(t, e.kind, core.Path_Error_Kind.Over_Capacity)
+	b := strings.builder_make(context.temp_allocator)
+	core.render(strings.to_writer(&b), src, "", e)
+	testing.expect(t, strings.contains(strings.to_string(b), "MAX_PATHS"))
 }
 
 // `refuse_duplicates` holds in every object of the text with several paths, in a query and in `each_answer`, and `on`
@@ -390,7 +455,7 @@ partial_tolerated_span :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("{\"a\":{\"x\":1,\"y\":\"\xff\"}}")
 	path, _ := core.parse_path(".a.x")
 	defer core.path_destroy(&path)
-	doc, err := json.scan(src, .Json, path, {tolerate = {.Invalid_Utf8}})
+	doc, err := json.scan(src, .Json, path, opts = {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, string(core.span(&doc, doc.answers[0].owner)), "{\"x\":1,\"y\":\"\xff\"}")
@@ -460,6 +525,119 @@ path_refusals :: proc(t: ^testing.T) {
 	testing.expect_value(t, e.kind, core.Path_Error_Kind.Unsupported)
 }
 
+// A step literal that was never set, and a negative limit, are refused where a parsed path would be.
+@(test)
+path_literals_are_judged :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":1}`)
+	unset := make([]core.Step, 2, context.temp_allocator)
+	unset[0] = core.Name("a")
+	_, e := json.scan(src, .Json, core.Path{steps = unset})
+	testing.expect_value(t, e.kind, core.Path_Error_Kind.Bad_Path)
+	_, negative := json.scan(src, .Json, core.Path{limit = -1})
+	testing.expect_value(t, negative.kind, core.Path_Error_Kind.Bad_Path)
+	_, many := json.scan(src, .Json, []core.Path{{}, {limit = -1}})
+	testing.expect_value(t, many.kind, core.Path_Error_Kind.Bad_Path)
+}
+
+@(test)
+root_path_owns_nothing :: proc(t: ^testing.T) {
+	for text in ([]string{".", " . "}) {
+		p, err := core.parse_path(text)
+		testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+		testing.expect(t, p.block == nil && p.steps == nil)
+	}
+	p, _ := core.parse_path("first(.)")
+	testing.expect_value(t, p.limit, Maybe(int)(1))
+}
+
+// A document owns the names it was told were missing, so the path and its text can go once the read is done.
+@(test)
+document_outlives_path :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":{"x":1}}`)
+	text := strings.clone(".a.host", context.temp_allocator)
+	path, _ := core.parse_path(text)
+	doc, err := json.scan(src, .Json, path)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+	core.path_destroy(&path)
+	for &b in transmute([]u8)text {
+		b = 'z'
+	}
+	_, listed := core.member_of(&doc, doc.answers[0].owner, "host")
+	testing.expect_value(t, listed, core.Presence.Missing)
+	_, other := core.member_of(&doc, doc.answers[0].owner, "zzzz")
+	testing.expect_value(t, other, core.Presence.Not_Loaded)
+}
+
+// `each_answer` gives the bytes `span` gives for the same value, a string's quotes and a container's brackets included.
+@(test)
+stream_spans_are_authored :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":"x","b":[1, 2],"c":{"d":null},"e":"A"}`)
+	texts := [?]string{".a", ".b", ".c", ".c.d", ".e", ".b[1]"}
+	paths: [len(texts)]core.Path
+	for text, i in texts {
+		paths[i], _ = core.parse_path(text)
+	}
+	defer for &p in paths {
+		core.path_destroy(&p)
+	}
+	doc, err := json.scan(src, .Json, paths[:])
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+	Seen :: struct {
+		src:   []u8,
+		spans: [8]string,
+	}
+	seen := Seen{src = src}
+	each_answer_span :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+		s := (^Seen)(state)
+		s.spans[a.path] = string(s.src[a.lo:a.hi])
+		return true
+	}
+	testing.expect_value(t, json.each_answer(src, .Json, paths[:], &seen, each_answer_span).kind, core.Path_Error_Kind.None)
+	for a in doc.answers {
+		testing.expect_value(t, seen.spans[a.path], string(core.span(&doc, a.node)))
+	}
+	testing.expect_value(t, seen.spans[0], `"x"`)
+	testing.expect_value(t, seen.spans[4], `"A"`)
+}
+
+// A read says a value of the wrong kind, as the path does, and a stopped read says its counts are partial.
+@(test)
+presence_of_wrong_kinds :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"s":5,"a":[1,2,3],"n":null}`)
+	full, _ := json.build(src, .Json)
+	defer core.destroy(&full)
+	s, _ := core.member_of(&full, core.ROOT, "s")
+	a, _ := core.member_of(&full, core.ROOT, "a")
+	n, _ := core.member_of(&full, core.ROOT, "n")
+	_, scalar := core.member_of(&full, s, "x")
+	testing.expect_value(t, scalar, core.Presence.Wrong_Kind)
+	_, array := core.member_of(&full, a, "x")
+	testing.expect_value(t, array, core.Presence.Wrong_Kind)
+	_, null := core.member_of(&full, n, "x")
+	testing.expect_value(t, null, core.Presence.Missing)
+	_, map_at := core.element_of(&full, core.ROOT, 0)
+	testing.expect_value(t, map_at, core.Presence.Wrong_Kind)
+	_, scalar_at := core.element_of(&full, s, 0)
+	testing.expect_value(t, scalar_at, core.Presence.Wrong_Kind)
+	_, null_at := core.element_of(&full, n, 0)
+	testing.expect_value(t, null_at, core.Presence.Missing)
+	_, past := core.element_of(&full, a, 3)
+	testing.expect_value(t, past, core.Presence.Missing)
+
+	path, _ := core.parse_path(".a[0]")
+	defer core.path_destroy(&path)
+	doc, _ := json.scan(src, .Json, path, read = {stop_early = true})
+	defer core.destroy(&doc)
+	open, _ := core.member_of(&doc, core.ROOT, "a")
+	n_read, exact := core.length_exact(&doc, open)
+	testing.expect_value(t, n_read, 1)
+	testing.expect(t, !exact)
+	_, whole := core.length_exact(&full, a)
+	testing.expect(t, whole)
+}
+
 @(test)
 pointer_reads :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"0":"key","a":[10,20],"b/c":1}`)
@@ -516,4 +694,27 @@ either_by_name_has_no_position :: proc(t: ^testing.T) {
 	defer core.destroy(&many)
 	testing.expect_value(t, merr.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, len(many.kept), 0)
+}
+
+// The read options come straight after the paths in every entry, and `each_answer` takes one path as `scan` does.
+@(test)
+read_options_follow_paths :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":1,"a":2}`)
+	path, _ := core.parse_path(".a")
+	defer core.path_destroy(&path)
+	doc, err := json.scan(src, .Json, path, {dups = .First})
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, string(core.span(&doc, doc.answers[0].node)), "1")
+	found, answer, ferr := json.find(src, .Json, path, {dups = .First})
+	defer core.destroy(&found)
+	testing.expect_value(t, ferr.kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, string(core.span(&found, answer.?.node)), "1")
+	seen: string
+	on :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+		(^string)(state)^ = "got"
+		return true
+	}
+	testing.expect_value(t, json.each_answer(src, .Json, path, &seen, on, {dups = .First}).kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, seen, "got")
 }

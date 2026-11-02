@@ -976,19 +976,19 @@ header_cell_is_a_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.number(&doc, rec + 1).kind, core.Number_Kind.Int)
 }
 
-// `dsv.text` and `dsv.number` are the direct readers, and `dsv.commit` writes the document's own spec and refuses
-// another one before it splices.
+// `core.text` and `core.number` read a TSV escape, a short buffer and a quoted number, and `dsv.commit` writes the
+// document's own spec and refuses another one before it splices.
 @(test)
-direct_readers_and_commit :: proc(t: ^testing.T) {
+readers_and_commit :: proc(t: ^testing.T) {
 	doc, err := build("a\nx\\ty\n", .Tsv)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	rec, _ := first_member(&doc, 0)
 	cell, _ := core.member(&doc, rec, "a")
 	buf: [8]u8
-	s, ok := dsv.text(&doc, cell, buf[:])
+	s, ok := core.text(&doc, cell, buf[:])
 	testing.expect(t, ok && s == "x\ty")
-	_, ok = dsv.text(&doc, cell, buf[:1])
+	_, ok = core.text(&doc, cell, buf[:1])
 	testing.expect(t, !ok)
 
 	nums, nerr := build("a,b\n42,\"7\"\n", .Csv)
@@ -996,10 +996,10 @@ direct_readers_and_commit :: proc(t: ^testing.T) {
 	testing.expect_value(t, nerr.kind, core.Document_Error_Kind.None)
 	nrec, _ := first_member(&nums, 0)
 	num, _ := core.member(&nums, nrec, "a")
-	n := dsv.number(&nums, num)
+	n := core.number(&nums, num)
 	testing.expect(t, n.kind == .Int && n.bits == 42)
 	quoted, _ := core.member(&nums, nrec, "b")
-	testing.expect_value(t, dsv.number(&nums, quoted).kind, core.Number_Kind.Wide)
+	testing.expect_value(t, core.number(&nums, quoted).kind, core.Number_Kind.Wide)
 
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)

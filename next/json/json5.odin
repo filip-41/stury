@@ -292,44 +292,6 @@ word5 :: proc "contextless" (p, end: [^]u8, word: string) -> (q: [^]u8, kind: co
 	return q, .Bad_Number
 }
 
-// Reads the JSON5 string whose opening quote, `"` or `'`, is at `p`, one byte at a time. Returns one past its closing
-// quote, whether it holds an escape and whether `tol` accepted an ill-formed sequence, or the fault at the first byte
-// that breaks it. Every byte but the quote, a backslash, CR and LF is a character of the string.
-@(private, cold)
-string5 :: #force_no_inline proc "contextless" (p, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, esc, lax: bool, kind: core.Fault_Kind) #no_bounds_check {
-	quote := p[0]
-	q = p[1:]
-	for {
-		if q >= end {
-			return end, false, false, .Truncated
-		}
-		c := q[0]
-		switch {
-		case c == quote:
-			return q[1:], esc, lax, .None
-		case c == '\\':
-			esc = true
-			q2, kind2, took := escape5(q, end, tol)
-			lax ||= took
-			if kind2 != .None {
-				return q2, false, false, kind2
-			}
-			q = q2
-		case c == '\n' || c == '\r':
-			return q, false, false, .Bad_Char
-		case c < 0x80:
-			q = q[1:]
-		case:
-			q2, kind2, took := utf8_lax(q, end, tol)
-			lax ||= took
-			if kind2 != .None {
-				return q2, false, false, kind2
-			}
-			q = q2
-		}
-	}
-}
-
 // Steps over the JSON5 escape at the backslash `e`: `\0` before no digit, `\x` and two hex digits, a backslash before
 // a line end (CR LF counts as one), JSON's `\u` escape with its surrogate halves paired, and a backslash before any
 // character but a digit, which spells that character. A digit after `\0`, and `\1` to `\9`, fault `Bad_Escape` at the

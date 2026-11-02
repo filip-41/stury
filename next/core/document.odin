@@ -199,6 +199,8 @@ Document :: struct {
 	reads_block:  []u8,
 	partial:      bool,
 	stopped:      bool,
+	// The records of a partial document are positional, as a dsv record's cells are. A built document says it by `shared_keys`.
+	positional:   bool,
 }
 
 // How a reader treats an object's repeated keys. `.Last` is the default.
@@ -311,15 +313,21 @@ span :: #force_inline proc(doc: ^Document, i: Node_Index) -> []u8 {
 			return doc.src[n.lo:doc.root_close]
 		}
 		return doc.src[n.lo:doc.spelling.close_end(doc, i)]
-	case .String:
-		// A quoted string's token leaves its quote pair out, and splicing needs the bytes as authored.
-		if n.spelling & SPELLING_QUOTED != 0 {
-			return doc.src[n.lo - 1:n.lo + u64(n.n) + 1]
-		}
-		return doc.src[n.lo:n.lo + u64(n.n)]
 	case:
-		return doc.src[n.lo:n.lo + u64(n.n)]
+		lo, hi := scalar_ends(n)
+		return doc.src[lo:hi]
 	}
+}
+
+// Returns the first byte and the byte past scalar token `t` as authored. A quoted JSON string's token leaves its quote
+// pair out, and splicing needs the bytes as written.
+scalar_ends :: #force_inline proc "contextless" (t: Token) -> (lo, hi: u64) {
+	lo, hi = t.lo, t.lo + u64(t.n)
+	if t.kind == .String && t.spelling & SPELLING_QUOTED != 0 {
+		lo -= 1
+		hi += 1
+	}
+	return
 }
 
 // Returns one past the line end at `pos`: LF, CR, or U+2028 or U+2029. Returns `pos` when no line end starts there.
@@ -360,19 +368,8 @@ length :: #force_inline proc(doc: ^Document, i: Node_Index) -> int {
 // Returns the true child count of container `i` from `Document.counts`, which holds it because `spelling` saturated.
 @(private, cold)
 wide_length :: #force_no_inline proc(doc: ^Document, i: Node_Index) -> int {
-	lo, hi := 0, len(doc.counts)
-	for lo < hi {
-		mid := lo + (hi - lo) / 2
-		if doc.counts[mid].node < i {
-			lo = mid + 1
-		} else {
-			hi = mid
-		}
-	}
-	if lo < len(doc.counts) && doc.counts[lo].node == i {
-		return int(doc.counts[lo].count)
-	}
-	return 0
+	at := lower_node(doc.counts, i)
+	return int(doc.counts[at].count) if at < len(doc.counts) && doc.counts[at].node == i else 0
 }
 
 // Returns the distance from node `i` to the next node in preorder: its subtree size for a container, 1 for a
@@ -766,7 +763,7 @@ facts_of :: proc(doc: ^Document, i: Node_Index, role: Role) -> Facts {
 	if i == NO_NODE {
 		return {doc = doc, role = role}
 	}
-	return {doc = doc, at = lower_fact(doc.facts, i), end = lower_fact(doc.facts, i + 1), role = role}
+	return {doc = doc, at = lower_node(doc.facts, i), end = lower_node(doc.facts, i + 1), role = role}
 }
 
 // Returns node `i`'s facts of every role, sorted by node and then source order. Core's edit and span code walk
@@ -775,8 +772,8 @@ all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact {
 	if i == NO_NODE {
 		return nil
 	}
-	lo := lower_fact(doc.facts, i)
-	hi := lower_fact(doc.facts, i + 1)
+	lo := lower_node(doc.facts, i)
+	hi := lower_node(doc.facts, i + 1)
 	return doc.facts[lo:hi]
 }
 
@@ -808,12 +805,13 @@ fact_body :: #force_inline proc(doc: ^Document, f: Fact) -> []u8 {
 	return doc.src[f.lo + lead : f.lo + u64(f.n) - tail]
 }
 
+// Returns the index of the first entry of `entries`, which are sorted by `node`, whose node is not below `node`.
 @(private)
-lower_fact :: proc(facts: []Fact, node: Node_Index) -> int {
-	lo, hi := 0, len(facts)
+lower_node :: proc(entries: []$E, node: Node_Index) -> int {
+	lo, hi := 0, len(entries)
 	for lo < hi {
 		mid := lo + (hi - lo) / 2
-		if facts[mid].node < node {
+		if entries[mid].node < node {
 			lo = mid + 1
 		} else {
 			hi = mid

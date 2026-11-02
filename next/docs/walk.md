@@ -377,7 +377,7 @@ that leaf refuses or no JSON construct starts:
   number runs test too,
 - `st_key` on a byte that opens no JSON key: a single-quoted key, an ECMAScript 5.1 IdentifierName, or else `Bad_Char`
   with `Identifier`,
-- `string_long`, where JSON's readers refuse a string: `string5` reads it again by JSON5's rules,
+- `string_long`, where JSON's readers refuse a string: `string_exact` reads it again by JSON5's rules,
 - every place a comment may start: JSON5's other whitespace (VT, FF, U+00A0, U+FEFF, U+2028, U+2029 and Zs) opens a
   run as a `/` does.
 
@@ -498,7 +498,7 @@ From `next/`:
 | `make test-x86` | the tests at v2 and v3 under Rosetta, `-define:WALK_TIER` picking the walks' tier |
 | `make test-asan` | the tests under AddressSanitizer |
 | `make lint` | the import order, then vet on the host, x86-64 and riscv64 |
-| `make size` | the lean lines of each library package against the 13,000 budget |
+| `make size` | the lean lines of each library package against the 15,300 budget |
 | `make surface` | each library package's public declarations, sorted |
 
 The checks against the old tree's `json` and `csv` live in `compare/`, outside this tree, and run by its own

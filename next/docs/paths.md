@@ -33,7 +33,11 @@ contract: what a path is, what a read gives, how the one engine works, and how a
 - A path holds one `Descend`, and a second is `Bad_Path`. jq's text spells it first only.
 - `first(P)` and `limit(N; P)` wrap a path in its text. They count answers and give no more after the Nth.
 - A parsed path owns its steps and decoded names in one block from an allocator, and a name with no escape borrows the
-  text. A document's `Missing` names borrow the path, so the path and its text outlive the document it read.
+  text, so the text outlives the path. A document copies the names its path asked for and did not find, so only `src`
+  outlives a document, and the path can be destroyed once the read returns.
+- `.` is the empty path, `Path{}`, and owns nothing. A zero `Step`, which is a `Name` with no data pointer, and a
+  negative `limit` are `Bad_Path`, as in a parsed path. A literal for the empty key needs a data pointer, which every
+  parsed one has.
 - Predicates are not paths: a caller who wants `select(.level == "error")` asks for `.level` and compares.
 
 ## The Answer record
@@ -69,32 +73,50 @@ read from its node: `core.span(doc, a.node)` for its bytes, and the node's `kind
 live, and a caller who tests only the outcome pays for neither.
 
 An `Answer` is a read result and holds no edit state. An edit names a node, and a path edit such as
-`set(src, ".port", "8080")` is a scan, one edit and a commit in one call.
+`set(src, S, port, "8080")` with a parsed `.port` is a build, one edit and a commit in one call.
 
 ## Reading
 
 A scan and a query are one operation. Reading paths gives a `Document` that holds only the nodes the paths reach, plus
 the answers, and a full build is the same read with every node kept.
 
-| Name | Gives |
-|---|---|
-| `scan` | a document and its answers, in text order |
-| `find(src, path)` | `scan` of one path with a limit of one |
-| `query_document(doc, paths)` | the answers over a built document, naming its nodes |
-| `each_answer(src, paths, state, on)` | no document: `on` gets each answer's path number, outcome, token and end |
+The entries of `json`, and of `dsv` with `dsv.Spec` and `dsv.Options`. `scan`, `each_answer` and `query` are overload
+groups of a one-path form and a `[]core.Path` form, and the read options come straight after the paths.
 
-`scan` and `query` take one path or a slice of them. With several, each path answers what it answers alone,
-and the answers are in one text order, the earlier path first at one byte.
+```odin
+scan        :: proc(src: []u8, $S: Spec, paths: core.Path | []core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, err: core.Path_Error)
+find        :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error)
+each_answer :: proc(src: []u8, $S: Spec, paths: core.Path | []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> core.Path_Error
+query       :: proc(doc: ^core.Document, paths: core.Path | []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error)
+set         :: proc(src: []u8, $S: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error)
+```
+
+| Name | Gives | Freed by |
+|---|---|---|
+| `scan` | a document and its answers, in text order | `core.destroy(&doc)`, which frees `doc.answers`, so no `delete(doc.answers)` |
+| `find` | `scan` of one path with a limit of one: the document and its first answer, nil when the path gives none | `core.destroy(&doc)` |
+| `each_answer` | no document: `on` gets each answer's path number, outcome, token and authored span | nothing |
+| `query` | the answers over a built document, naming its nodes | the caller: `delete(answers, allocator)`. The document does not hold them |
+| `set` | the new text of a build, one edit per answer and a commit | the caller: `delete(out, allocator)` |
+
+`read` is `Path_Options` for the reads that walk a text, and `Query_Options` for the ones that run over a built document:
+`dups` and `every_key`, the two options a built document can honour. `stop_early` and `refuse_duplicates` are the walk's,
+so they do not compile in `query` or in `set`, which takes `refuse_duplicates` as `build`'s own parameter. `set`'s `read`
+picks among a repeated key as `query` does, and sets each repeat under `every_key`.
+
+With several paths, each path answers what it answers alone, and the answers are in one text order, the earlier path
+first at one byte.
 
 `on` keeps nothing and returns whether to go on. `each_answer` calls it as each answer becomes known, in the order they
-become known. A `Token`'s `n` is `u32`, so `on` gets a `Token_Answer` whose `hi` is the byte past the value. A found
-container is known at its close, and `on` gets it there, so one inside another comes first. Under `.Last` the key of any
-`Name` on the way can repeat and take the answer back, so an answer goes out when the shallowest `Name` of any path is
-past repeating: on `{"a":1,"y":{"b":2}}`, `.y.b` and `.a` both wait for the root's close, since `y` could come again. A
-`Name` past a `Descend` can repeat in any container, and a late path's limit needs the text order, so those reads give
-everything at the end.
+become known. A `Token_Answer` holds the answer's `token`, its `path` and `outcome`, and for a `.Found` its authored span
+`src[lo:hi]`, the bytes `core.span` gives for the same value in every format: a string's quotes and a quoted cell's
+quotes are inside it. For the other outcomes `lo` and `hi` are 0. A found container is known at its close, and `on` gets
+it there, so one inside another comes first. Under `.Last` the key of any `Name` on the way can repeat and take the answer
+back, so an answer goes out when the shallowest `Name` of any path is past repeating: on `{"a":1,"y":{"b":2}}`, `.y.b` and
+`.a` both wait for the root's close, since `y` could come again. A `Name` past a `Descend` can repeat in any container, and
+a late path's limit needs the text order, so those reads give everything at the end.
 
-A read takes up to 64 paths. More is `Over_Capacity`, and the caller splits the read or builds a document.
+A read takes up to `MAX_PATHS` (64) paths. More is `Over_Capacity`, and the caller splits the read or builds a document.
 
 ### Every element answers
 
@@ -118,12 +140,14 @@ wants only found values drops the rest.
 ### Stopping early
 
 A scan judges all the text by default. `stop_early` (default false) returns `Stop` once every answer is known, so
-nothing past that point is read or judged. The answers are the same either way. `refuse_duplicates` needs every key of
-the text in hand, so such a read builds the whole text, ignores `stop_early`, and answers over the built document.
+nothing past that point is read or judged. `refuse_duplicates` needs every key of the text in hand, so such a read builds
+the whole text, ignores `stop_early`, and answers over the built document.
 
-The read's argument is `dups: Maybe(Duplicates)`. Nil is `.Last`, or `.First` under `stop_early`, so a root key's scan
-stops at its first match, which differs from `.Last` only on a text with a repeated key. Under a named policy the scan
-stops where the answer is known: `.First` at the match, and `.Last` at the close of the object holding the key.
+The answers are the same either way on a text with no repeated key. The read's argument is `dups: Maybe(Duplicates)`, and
+nil is `.Last`, or `.First` under `stop_early`, so a root key's scan stops at its first match and `{"a":1,"a":2}` gives
+`.a` the value 1 with `stop_early` and 2 without it. A caller who wants the same answers sets `dups`. Under a named
+policy the scan stops where the answer is known: `.First` at the match, and `.Last` at the close of the object holding
+the key.
 Containers a stop leaves open are `Partial` with the count read so far, and `Document.stopped` is set.
 
 ### Negative indexes
@@ -169,16 +193,19 @@ is for a count past `CHILDREN_MAX`. On a `Partial` container:
 
 | Read | Gives |
 |---|---|
-| an index | exact, since the count is true: past the end is `Missing` |
+| an index | exact, since the count is true: past the end is `Missing`. In a stopped read the count is what was read so far, so a position past it is `Not_Loaded` and `core.length_exact` returns `exact` false |
 | a key a path asked for and did not find | `Missing`, from a list of `(container, name)` sorted by container |
 | any other key | `Not_Loaded` |
 | a key under `.Last` of a member kept by position | `Not_Loaded`, since a repeat of the key may lie past what was kept |
 
-`member_of` and `element_of` give these three answers as a `Presence`. An element a path reached by position is found
+`member_of` and `element_of` give these three answers as a `Presence`, and `Wrong_Kind` for a value that cannot take the
+read, as the path's `.Type_Mismatch`: a name of a value that is no map, a position of one that is no array or positional
+record, so a JSON map takes a name and a dsv record takes both. A `null` holds nothing, so it is `Missing`. An element a path reached by position is found
 through `Document.kept`, which holds each kept child's true index, since its place among the kept nodes is not its
 index.
 
-A key lookup scans the kept nodes as on any container, and only a miss on a `Partial` container reads the list. The
+A key lookup scans the kept nodes as on any container, and only a miss on a `Partial` container reads the list, of
+`Missing_Name`s, whose names are copies the document owns. The
 list is why `.config.host` with no `host` makes a later `member(config, "host")` say `Missing` as its answer did. No
 `Kind` is added and every node stays text-backed. `Not_Loaded` is a document read's result and never an answer's
 outcome. To read more of `config`, ask for `.config` or for each member.
@@ -186,9 +213,10 @@ outcome. To read more of `config`, ask for `.config` or for each member.
 An edit names a node, so a `Not_Loaded` member cannot be edited. `core.set_member` on a listed `Missing` name is an insert
 after the container's last member, by name, and on a name no path looked for is `Bad_Index`.
 
-`json.set(src, S, ".port", "8080")` and `dsv.set` are a build of the text, one edit per answer and a commit in one call.
-A path that ends in a `Name` inserts it where it is missing. Any other answer that is no value, a mismatch or a missing
-position or parent, is `Bad_Index`, and the error is a `Path_Edit_Error`, the read's or the edit's.
+`json.set(src, S, port, "8080")` and `dsv.set`, with `port` the parsed `.port`, are a build of the text, one edit per
+answer and a commit in one call. A path that ends in a `Name` inserts it where it is missing. Any other answer that is no value, a mismatch or a missing
+position or parent, is `Bad_Index`. The error is a `Path_Edit_Error` with one `kind`: `.Path` for the read of the path,
+with `path` set, and `.Edit` for the build, the edit and the commit, with `edit` set.
 
 `commit` refuses a partial document with `Bad_Index`, since it holds neither the members a commit composes nor their
 comments.
@@ -223,10 +251,33 @@ restoring each `End` with a stack and each dsv key from `doc.shared_keys`.
 
 A query over a full document, a scan of the text and a value-tree model give the same answers in the same order.
 
+## What a format calls
+
+A format's `scan`, `each_answer` and `query` are thin entries over `core/build`. It gives the engine its walk and its
+`Spelling`, and writes no step logic.
+
+| Name | Does |
+|---|---|
+| `scan_start` | plans the read's paths into a `Scan`, on `frames` the entry holds on its stack, and takes `positional` for a format whose `Map` members answer an `Index` |
+| `scan_hook`, `many_hook`, `stream_hook` | the hooks the entry passes its walk: one plain path, `Scan.many` into a document, and `each_answer` |
+| `Rewalk`, `Scan.rewalk` | walks one value again from its first byte, for a ring's element, since only a format can walk from a value |
+| `scan_end` | turns the walk's end into the document and its answers, and frees everything on an error |
+| `query`, `query_built` | answers paths over a built document, the second for a read with `refuse_duplicates` |
+| `set_answers` | one edit per answer and a commit, behind `set` |
+
+`scan_reserve`, `scan_kept` and `attach_reads` are the engine's own, public since the hooks inline into a format's
+walk.
+
 ## Errors
 
 `Path_Error` has its own kinds and holds the walk's `Fault` as its inner error: `Bad_Path` with the byte offset in the
-path text, `Over_Capacity`, `No_Memory`. A missing value or a wrong kind is an answer's outcome, not an error.
+path text, `Over_Capacity` for more than `MAX_PATHS` paths, `MAX_STEPS` steps or a negative index past its ring,
+`No_Memory`. A missing value or a wrong kind is an answer's outcome, not an error. `path` is the number in the read of the
+path a `Bad_Path` or a step's `Over_Capacity` names.
+
+`at` is a byte of the path's text for `Bad_Path` and of the source for `Walk` and `Duplicate_Key`. `Path_Edit_Error` has one `kind`: `.Path` holds the read's error in `path`, and `.Edit` the build's, the edit's or the
+commit's in `edit`. `core.render` and `core.write_code` take a `Path_Error` or a `Path_Edit_Error`, and `render` takes the source and the path's text, so
+the caller never tests the kind to choose the text. A `Path` built from step literals has no text, and `""` stands for it.
 
 ## A container's end
 

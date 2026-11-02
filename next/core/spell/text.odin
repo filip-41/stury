@@ -33,6 +33,48 @@ decode_text :: proc(buf: []u8, d: $D, $next: proc "contextless" (^D) -> (u8, boo
 	return string(buf[:w]), true
 }
 
+// Returns whether the bytes `next` returns from `d` are `name`, with no allocation.
+decoded_equals :: proc "contextless" (d: $D, $next: proc "contextless" (^D) -> (u8, bool), name: string) -> bool {
+	d := d
+	at := 0
+	for {
+		b, more := next(&d)
+		if !more {
+			return at == len(name)
+		}
+		if at >= len(name) || name[at] != b {
+			return false
+		}
+		at += 1
+	}
+}
+
+// The bytes of a decoded character that a decoder has returned the first of. `n` of them remain from `at`.
+Pending :: struct {
+	buf: [4]u8,
+	n:   u8,
+	at:  u8,
+}
+
+// Returns the next byte of the character `pending_give` left, or false when none remain.
+pending_next :: #force_inline proc "contextless" (p: ^Pending) -> (b: u8, ok: bool) {
+	if p.n == 0 {
+		return 0, false
+	}
+	b = p.buf[p.at]
+	p.at += 1
+	p.n -= 1
+	return b, true
+}
+
+// Leaves the `size` bytes of `spelled` in `p` and returns the first, which the decoder returns now.
+pending_give :: #force_inline proc "contextless" (p: ^Pending, spelled: [4]u8, size: int) -> u8 {
+	p.buf = spelled
+	p.n = u8(size - 1)
+	p.at = 1
+	return spelled[0]
+}
+
 // Returns the four hex digits at `h` as a 16-bit value, and whether all four are hex digits. The caller must ensure
 // four bytes are readable at `h`.
 hex4 :: #force_inline proc "contextless" (h: [^]u8) -> (unit: u32, ok: bool) {

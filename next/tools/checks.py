@@ -15,7 +15,7 @@ PACKAGES = ["core/spell", "core", "core/kernel", "core/build", "json", "dsv"]
 RANK = {"core/spell": 0, "core": 1, "core/kernel": 2, "core/build": 3, "json": 4, "dsv": 4}
 FORMATS = {"json", "dsv"}
 
-LEAN_BUDGET = 13_000
+LEAN_BUDGET = 15_300
 
 # core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte
 # shuffle's.

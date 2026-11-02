@@ -225,7 +225,7 @@ render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Line
 Path_Error_Kind :: enum u8 {
 	None,
 	Bad_Path, // the path's text does not parse, at the byte of that text
-	Over_Capacity, // a path past `MAX_STEPS` steps, at no byte
+	Over_Capacity, // a read past `MAX_PATHS` paths, a path past `MAX_STEPS` steps, or a negative index past the ring, at no byte
 	No_Memory, // an allocation the read owns was refused, at no byte
 	Walk, // the walk's fault, in `inner`
 	Duplicate_Key, // a read with `refuse_duplicates` met a key that repeats one of its object's, at the second key's first byte
@@ -233,10 +233,12 @@ Path_Error_Kind :: enum u8 {
 }
 
 // A path layer error. `at` is the byte `kind` names: a byte of the path's text for `.Bad_Path`, and the walk's fault
-// byte for `.Walk`.
+// byte for `.Walk`. `path` is the number in the read of the path a `.Bad_Path` or an `.Over_Capacity` of steps names, 0
+// for the other kinds.
 Path_Error :: struct {
 	kind:  Path_Error_Kind,
 	at:    u64,
+	path:  u32,
 	inner: Fault,
 }
 
@@ -244,7 +246,7 @@ Path_Error :: struct {
 PATH_KIND_RULES := [Path_Error_Kind]Rule {
 	.None          = {"none", "No error"},
 	.Bad_Path      = {"bad_path", "Invalid path"},
-	.Over_Capacity = {"over_capacity", "Path exceeds a fixed limit"},
+	.Over_Capacity = {"over_capacity", "Read exceeds a fixed limit: MAX_PATHS paths, MAX_STEPS steps in a path, or the ring of a negative index"},
 	.No_Memory     = {"no_memory", "Out of memory"},
 	.Walk          = {"walk", "Input does not parse"},
 	.Duplicate_Key = {"duplicate_key", "Duplicate key"},
@@ -271,20 +273,53 @@ write_path_code :: proc(w: io.Writer, e: Path_Error) -> io.Error {
 	return err
 }
 
-// Writes `line:col: message` for `e`. `text` is the path's text for `.Bad_Path` and the source for the others, and
-// `.Walk` writes its fault. `lines` is as in `render_fault`.
+// Writes `line:col: message` for `e`. A `.Bad_Path`'s `at` is a byte of `path`, the path's text, and a `.Duplicate_Key`'s
+// a byte of `src`, so the caller passes both and never tests the kind. `.Walk` writes its fault. `lines` is as in
+// `render_fault`.
 @(private)
-render_path :: proc(w: io.Writer, text: []u8, e: Path_Error, lines: ^Lines = nil) -> io.Error {
+render_path :: proc(w: io.Writer, src: []u8, path: string, e: Path_Error, lines: ^Lines = nil) -> io.Error {
 	if e.kind == .Walk {
-		return render_fault(w, text, e.inner, lines)
+		return render_fault(w, src, e.inner, lines)
 	}
-	if e.kind == .Bad_Path || e.kind == .Duplicate_Key {
-		write_position(w, text, e.at, lines) or_return
+	if e.kind == .Bad_Path {
+		write_position(w, transmute([]u8)path, e.at, lines) or_return
+	} else if e.kind == .Duplicate_Key {
+		write_position(w, src, e.at, lines) or_return
 	}
 	_, err := io.write_string(w, PATH_KIND_RULES[e.kind].message)
 	return err
 }
 
+// Writes `e`'s code: the path error's or the document error's, by `e.kind`.
+@(private)
+write_edit_code :: proc(w: io.Writer, e: Path_Edit_Error) -> io.Error {
+	switch e.kind {
+	case .None:
+		_, err := io.write_string(w, "none")
+		return err
+	case .Path:
+		return write_path_code(w, e.path)
+	case .Edit:
+		return write_document_code(w, e.edit)
+	}
+	return nil
+}
+
+// Writes the rendered line of `e`, as `render_path` for a path error and `render_document` for an edit's.
+@(private)
+render_edit :: proc(w: io.Writer, src: []u8, path: string, e: Path_Edit_Error, lines: ^Lines = nil) -> io.Error {
+	switch e.kind {
+	case .None:
+		_, err := io.write_string(w, "No error")
+		return err
+	case .Path:
+		return render_path(w, src, path, e.path, lines)
+	case .Edit:
+		return render_document(w, src, e.edit, lines)
+	}
+	return nil
+}
+
 // `write_code` writes an error's code, `render` writes its rendered line.
-write_code :: proc {write_fault_code, write_document_code, write_path_code}
-render :: proc {render_fault, render_document, render_path}
+write_code :: proc {write_fault_code, write_document_code, write_path_code, write_edit_code}
+render :: proc {render_fault, render_document, render_path, render_edit}

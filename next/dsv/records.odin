@@ -201,41 +201,22 @@ wide_fault :: #force_no_inline proc "contextless" (base: []u8, lo, width: int, $
 	return core.fault_at(u64(scan_record(base, lo, width, S, delim).fault_at), .Bad_Structure, u8(Detail.Field_Count))
 }
 
-// Emits the first `width` cells of a record wider than `width`, then returns the fault at the delimiter that opens cell
-// `width`. Such a record does not reach the returning caller. With `$KEYS` set the record is headed, so each cell has a
-// `Key` before it, else each cell is a `Plain` value. A caller with no header passes `keys` nil.
+// Emits the cells of a record wider than `width` up to the one that ends at `width`'s delimiter, then returns the fault
+// at that delimiter. Such a record does not reach the returning caller. With `$KEYS` set the record is headed, so each
+// cell has a `Key` before it, else each cell is a `Plain` value. A caller with no header passes `keys` nil.
 @(private, cold)
 read_wide :: #force_no_inline proc "contextless" ($KEYS: bool, h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, cells, field_lo, width: int, bs: u64, carry, lax: bool, $S: Spec) -> u64 {
-	cells, field_lo := cells, field_lo
-	dm := d
-	for dm != 0 {
-		kk := intrinsics.count_trailing_zeros(dm)
-		at := pos + int(kk)
-		dm &= dm - 1
-		esc := false
-		when S == .Tsv {
-			esc = span_esc(bs, pos, field_lo, at, carry)
-		}
-		if KEYS {
-			// `cells` is the cell's own count and its column's index.
-			k, klo, kn := put_key_n(h, on, hs, keys, cells)
-			if k == .Stop {
-				return stopped(klo, kn)
-			} else if k == .Next {
-				if a, lo, n := put_value(h, on, hs, base, field_lo, at, esc, lax, S); a == .Stop {
-					return stopped(lo, n)
-				}
-			}
-		} else if a, lo, n := put_value(h, on, hs, base, field_lo, at, esc, lax, S); a == .Stop {
-			return stopped(lo, n)
-		}
-		field_lo = at + 1
-		cells += 1
-		if cells == width {
-			return core.fault_at(u64(at), .Bad_Structure, u8(Detail.Field_Count))
-		}
+	// `last` is the delimiter that ends the cell numbered `width - 1`, the first cell past the width's delimiters.
+	last := d
+	for _ in 1 ..< width - cells {
+		last &= last - 1
 	}
-	unreachable()
+	last &= -last
+	_, _, r, done := values_run(true, KEYS, h, on, hs, base, keys, pos, d & (last | (last - 1)), field_lo, cells, bs, carry, lax, S)
+	if done {
+		return r
+	}
+	return core.fault_at(u64(pos + int(intrinsics.count_trailing_zeros(last))), .Bad_Structure, u8(Detail.Field_Count))
 }
 
 // Emits a run of a record's cells as `Plain` values. `$ESC` compiles the TSV backslash test in or out, chosen per block

@@ -118,19 +118,19 @@ set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error 
 }
 
 // Makes `text` the value of the member of `obj` named `name`: a set of the member the document holds, or an insert after
-// `obj`'s last member when it has none.
-set_member :: proc(list: ^Edit_List, obj: Node_Index, name, text: string) -> Document_Error {
+// `obj`'s last member when it has none. `dups` picks the member of a repeated key.
+set_member :: proc(list: ^Edit_List, obj: Node_Index, name, text: string, dups := Duplicates.Last) -> Document_Error {
 	doc := list.doc
 	if doc == nil {
 		return {kind = .Bad_Index}
 	}
-	v, presence := member_of(doc, obj, name)
+	v, presence := member_of(doc, obj, name, dups)
 	switch presence {
 	case .Found:
 		return set(list, v, text)
 	case .Missing:
 		return insert_member(list, obj, length(doc, obj), name, text)
-	case .Not_Loaded:
+	case .Wrong_Kind, .Not_Loaded:
 	}
 	return {kind = .Bad_Index}
 }
@@ -167,21 +167,17 @@ insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string,
 	if at < 0 || at > n_members {
 		return {kind = .Bad_Position}
 	}
-	if member {
-		if doc.spelling.edit.key_text == nil {
-			return {kind = .Wrong_Container}
-		}
-		if e := judge(doc, text, list.allocator); e.kind != .None {
-			return e
-		}
-	} else if doc.spelling.edit != nil && doc.spelling.edit.insert_check != nil {
-		if e := doc.spelling.edit.insert_check(doc, container, text, list.allocator); e.kind != .None {
-			return e
-		}
+	if member && doc.spelling.edit.key_text == nil {
+		return {kind = .Wrong_Container}
+	}
+	e: Document_Error
+	if !member && doc.spelling.edit != nil && doc.spelling.edit.insert_check != nil {
+		e = doc.spelling.edit.insert_check(doc, container, text, list.allocator)
 	} else {
-		if e := judge(doc, text, list.allocator); e.kind != .None {
-			return e
-		}
+		e = judge(doc, text, list.allocator)
+	}
+	if e.kind != .None {
+		return e
 	}
 	return edit_add(list, container, .Insert, .Key if member else .Value, u32(at), key, text)
 }
@@ -466,7 +462,7 @@ line_of :: #force_inline proc(src: []u8, pos: u64, unicode: bool) -> (lo, indent
 // reads the same set.
 @(private)
 body_line_end :: #force_inline proc(body: []u8) -> bool {
-	return bytes.index_byte(body, '\n') >= 0 || bytes.index_byte(body, '\r') >= 0 || bytes.index(body, transmute([]u8)string("\xE2\x80\xA8")) >= 0 || bytes.index(body, transmute([]u8)string("\xE2\x80\xA9")) >= 0
+	return body_lf_cr(body) || bytes.index(body, transmute([]u8)string("\xE2\x80\xA8")) >= 0 || bytes.index(body, transmute([]u8)string("\xE2\x80\xA9")) >= 0
 }
 
 // Whether `body` holds LF or CR, the only line ends a delimited text's comment line ends at. U+2028 is a byte in its

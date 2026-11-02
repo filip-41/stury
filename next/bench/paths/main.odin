@@ -1,6 +1,6 @@
 // `paths <scan|stop|query> <paths> <file>`: one read of `paths`, separated by `;`, gb_per_s from the median of ten timed
 // calls after two warm-ups, and a checksum of the answers' spans. `scan` runs `json.scan` over the text and judges all of
-// it. `stop` reads under `.First` with `stop_early`, as a reader that leaves the rest unread does. `scan` builds the
+// it. `stop` reads under `.First` with `stop_early`, as a reader that leaves the rest unread does. `query` builds the
 // document once outside the clock and times `json.query`.
 package paths
 

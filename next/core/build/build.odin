@@ -127,22 +127,17 @@ builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault))
 	}
 	// The build wrote fewer nodes and facts than it reserved. Return the tail where the allocator can resize. An arena
 	// resizes only its last block, which is the nodes in a text with no facts, and the document owns what it keeps.
-	if fresh := trim(b.doc.allocator, b.doc.nodes_alloc, n); len(fresh) == n {
-		b.doc.nodes_alloc = fresh
-		b.doc.nodes = fresh
-	}
-	if b.n_facts > 0 {
-		if fresh := trim(b.doc.allocator, b.doc.facts_alloc, b.n_facts); len(fresh) == b.n_facts {
-			b.doc.facts_alloc = fresh
-			b.doc.facts = fresh
+	shrink :: proc(allocator: runtime.Allocator, arr: ^[]$T, n: int) {
+		if fresh := trim(allocator, arr^, n); len(fresh) == n {
+			arr^ = fresh
 		}
 	}
-	if len(b.doc.counts) > 0 {
-		if fresh := trim(b.doc.allocator, b.doc.counts_alloc, len(b.doc.counts)); len(fresh) == len(b.doc.counts) {
-			b.doc.counts_alloc = fresh
-			b.doc.counts = fresh
-		}
-	}
+	shrink(b.doc.allocator, &b.doc.nodes_alloc, n)
+	shrink(b.doc.allocator, &b.doc.facts_alloc, b.n_facts)
+	shrink(b.doc.allocator, &b.doc.counts_alloc, len(b.doc.counts))
+	b.doc.nodes = b.doc.nodes_alloc[:n]
+	b.doc.facts = b.doc.facts_alloc[:b.n_facts]
+	b.doc.counts = b.doc.counts_alloc[:len(b.doc.counts)]
 	b.doc.root_close = b.root_close
 	doc := b.doc
 	if b.stack != nil {
@@ -619,14 +614,9 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open,
 		}
 		key := core.Node_Index(i)
 		buf: [256]u8
-		s, ok := core.text(doc, key, buf[:])
-		cloned := false
+		s, owned, ok := key_text(doc, key, allocator, buf[:])
 		if !ok {
-			s, ok = core.text_clone(doc, key, allocator)
-			if !ok {
-				return {kind = .No_Memory}
-			}
-			cloned = true
+			return {kind = .No_Memory}
 		}
 		hash := hash_bytes(transmute([]u8)s)
 		at := hash & mask
@@ -640,44 +630,56 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open,
 				same: bool
 				same, ok = text_equals(doc, e.node, s, allocator)
 				if !ok {
-					if cloned {
-						delete(s, allocator)
+					if owned != nil {
+						delete(owned, allocator)
 					}
 					return {kind = .No_Memory}
 				}
 				if same {
-					if cloned {
-						delete(s, allocator)
+					if owned != nil {
+						delete(owned, allocator)
 					}
 					return {kind = .Duplicate_Key, at = core.key_start(n)}
 				}
 			}
 			at = (at + 1) & mask
 		}
-		if cloned {
-			delete(s, allocator)
+		if owned != nil {
+			delete(owned, allocator)
 		}
 		i += int(n.n) if n.kind == .Array || n.kind == .Map else 1
 	}
 	return {}
 }
 
-// Returns whether key node `i`'s text equals `s`, both read through `text`: a CSV quoted cell's quotes are
-// markers, and a TSV cell's quote is a byte of its text.
+// Returns key node `i`'s text, through `buf` when it fits and a copy `owned` by the caller otherwise. A CSV quoted
+// cell's quotes are markers, and a TSV cell's quote is a byte of its text.
+@(private)
+key_text :: proc(doc: ^core.Document, i: core.Node_Index, allocator: runtime.Allocator, buf: []u8) -> (s: string, owned: []u8, ok: bool) {
+	s, ok = core.text(doc, i, buf)
+	if ok {
+		return
+	}
+	s, ok = core.text_clone(doc, i, allocator)
+	if ok {
+		owned = transmute([]u8)s
+	}
+	return
+}
+
+// Returns whether key node `i`'s text equals `s`, both read through `text`.
 @(private)
 text_equals :: proc(doc: ^core.Document, i: core.Node_Index, s: string, allocator: runtime.Allocator) -> (bool, bool) {
 	buf: [256]u8
-	t, ok := core.text(doc, i, buf[:])
+	t, owned, ok := key_text(doc, i, allocator, buf[:])
 	if !ok {
-		t, ok = core.text_clone(doc, i, allocator)
-		if !ok {
-			return false, false
-		}
-		same := t == s
-		delete(t, allocator)
-		return same, true
+		return false, false
 	}
-	return t == s, true
+	same := t == s
+	if owned != nil {
+		delete(owned, allocator)
+	}
+	return same, true
 }
 
 @(private)

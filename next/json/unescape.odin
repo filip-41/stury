@@ -10,16 +10,14 @@ import kernel "../core/kernel"
 // and the tolerated readings of ill-formed UTF-8 and lone surrogate halves. `decoded_escape` serves the copy, the key
 // compare and the tolerant reader.
 
-// A decoder over one string token, for the tolerant reader. `buf` holds the bytes of the last decoded character, and
-// `n` bytes from `at` remain to return. The readers below that do not tolerate do not use it.
+// A decoder over one string token, for the tolerant reader. `pending` holds the rest of the last decoded character. The
+// readers below that do not tolerate do not use it.
 @(private)
 Decoded :: struct {
-	src: []u8,
-	p:   u64,
-	end: u64,
-	buf: [4]u8,
-	n:   u8,
-	at:  u8,
+	src:     []u8,
+	p:       u64,
+	end:     u64,
+	pending: spell.Pending,
 }
 
 // Returns a decoder over node `n`'s token span, `n.lo..n.lo+n.n`. A quoted string's span begins past its opening quote
@@ -32,11 +30,8 @@ decoded_init :: proc "contextless" (src: []u8, n: core.Node) -> Decoded {
 // Returns the next decoded byte, or false past the token's end.
 @(private)
 decoded_next :: proc "contextless" (d: ^Decoded) -> (b: u8, ok: bool) {
-	if d.n > 0 {
-		b = d.buf[d.at]
-		d.at += 1
-		d.n -= 1
-		return b, true
+	if b, ok = spell.pending_next(&d.pending); ok {
+		return
 	}
 	if d.p >= d.end {
 		return 0, false
@@ -55,7 +50,7 @@ decoded_next :: proc "contextless" (d: ^Decoded) -> (b: u8, ok: bool) {
 			c = d.src[d.p]
 			continue
 		}
-		return first_byte(d, spelled, size)
+		return spell.pending_give(&d.pending, spelled, size), true
 	}
 	if c < 0x80 {
 		d.p += 1
@@ -68,21 +63,12 @@ decoded_next :: proc "contextless" (d: ^Decoded) -> (b: u8, ok: bool) {
 		spelled: [4]u8
 		copy(spelled[:], d.src[d.p:d.p + u64(size)])
 		d.p += u64(size)
-		return first_byte(d, spelled, size)
+		return spell.pending_give(&d.pending, spelled, size), true
 	}
 	// An ill-formed sequence reads as U+FFFD over its maximal subpart, the step `utf8_lax` makes.
 	q2, _, _ := utf8_lax(base[d.p:], base[d.end:], {.Invalid_Utf8})
 	d.p += u64(intrinsics.ptr_sub(q2, base[d.p:]))
-	return first_byte(d, replacement(), 3)
-}
-
-// Returns the first of a character's `size` bytes and leaves the rest in `d`'s buffer.
-@(private)
-first_byte :: #force_inline proc "contextless" (d: ^Decoded, spelled: [4]u8, size: int) -> (u8, bool) {
-	d.buf = spelled
-	d.n = u8(size - 1)
-	d.at = 1
-	return spelled[0], true
+	return spell.pending_give(&d.pending, replacement(), 3), true
 }
 
 // Decodes the escape at `src[p] == '\\'`. Returns up to four bytes, their count, and the byte after the escape. The
@@ -424,18 +410,7 @@ copy_up_to :: #force_inline proc(dst: []u8, w: int, src: [^]u8, p, n: int) {
 key_equals_decode :: #force_inline proc "contextless" (doc: ^core.Document, i: core.Node_Index, name: string) -> bool {
 	n := doc.nodes[i]
 	if n.spelling & core.SPELLING_LAX != 0 {
-		d := decoded_init(doc.src, n)
-		at := 0
-		for {
-			b, ok := decoded_next(&d)
-			if !ok {
-				return at == len(name)
-			}
-			if at >= len(name) || name[at] != b {
-				return false
-			}
-			at += 1
-		}
+		return spell.decoded_equals(decoded_init(doc.src, n), decoded_next, name)
 	}
 	src := doc.src
 	end := n.lo + u64(n.n)

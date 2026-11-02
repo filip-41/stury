@@ -50,6 +50,10 @@ KEYS := [][2]string {
 	{"aaaaaaaaaaaaaaaaaaaaaaaac", `"aaaaaaaaaaaaaaaaaaaaaaaac"`},
 }
 
+// The bytes an empty `Name` points into.
+@(private = "file", rodata)
+EMPTY_KEY := [1]u8{}
+
 @(private = "file")
 gap :: proc(b: ^strings.Builder, comments: bool) {
 	switch rand.int_max(6) {
@@ -171,6 +175,10 @@ sampled_steps :: proc(doc: ^core.Document) -> []core.Step {
 				key, value, _ = core.pair_next(&it)
 			}
 			name, _ := core.text_clone(doc, key, context.temp_allocator)
+			// An empty name needs a data pointer, which a zero `Step` lacks.
+			if len(name) == 0 {
+				name = string(EMPTY_KEY[:0])
+			}
 			append(&steps, core.Step(core.Name(name)))
 			at = value
 		}
@@ -381,7 +389,7 @@ same_stopped :: proc(t: ^testing.T, doc: ^core.Document, answers: []core.Answer,
 Given :: struct {
 	path:    u32,
 	outcome: core.Answer_Outcome,
-	hi:      u64,
+	lo, hi:  u64,
 }
 
 @(private = "file")
@@ -392,6 +400,9 @@ given_less :: proc(a, b: Given) -> bool {
 	if a.outcome != b.outcome {
 		return a.outcome < b.outcome
 	}
+	if a.lo != b.lo {
+		return a.lo < b.lo
+	}
 	return a.hi < b.hi
 }
 
@@ -400,11 +411,10 @@ Stream :: struct {
 	given: [dynamic]Given,
 }
 
-// A string's token is its inside, so only other kinds' ends are compared.
 @(private = "file")
 on_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
 	s := (^Stream)(state)
-	append(&s.given, Given{a.path, a.outcome, a.hi if a.outcome == .Found && a.token.kind != .String else 0})
+	append(&s.given, Given{a.path, a.outcome, a.lo, a.hi})
 	return true
 }
 
@@ -415,11 +425,12 @@ same_stream :: proc(t: ^testing.T, src: []u8, $S: json.Spec, paths: []core.Path,
 	testing.expectf(t, err.kind == .None, "stream %v: %v", paths, err) or_return
 	wanted := make([]Given, len(want), context.temp_allocator)
 	for r, i in want {
-		hi: u64
-		if r.outcome == .Found && r.kind != .String {
-			hi = u64(uintptr(raw_data(r.bytes)) - uintptr(raw_data(src))) + u64(len(r.bytes))
+		lo, hi: u64
+		if r.outcome == .Found {
+			lo = u64(uintptr(raw_data(r.bytes)) - uintptr(raw_data(src)))
+			hi = lo + u64(len(r.bytes))
 		}
-		wanted[i] = {r.path, r.outcome, hi}
+		wanted[i] = {r.path, r.outcome, lo, hi}
 	}
 	slice.sort_by(stream.given[:], given_less)
 	slice.sort_by(wanted, given_less)
@@ -516,9 +527,8 @@ check_commit :: proc(t: ^testing.T, src: []u8, $S: json.Spec, full: ^core.Docume
 		}
 	}
 	want, _, werr = core.commit(&edits, context.temp_allocator)
-	got, gerr := scan.set_answers(full, path, "0", context.temp_allocator)
-	e, _ := gerr.(core.Document_Error)
-	testing.expectf(t, e.kind == werr.kind, "%q %v: %v want %v", string(src), path, gerr, werr) or_return
+	got, gerr := scan.set_answers(full, path, "0", allocator = context.temp_allocator)
+	testing.expectf(t, gerr.edit.kind == werr.kind, "%q %v: %v want %v", string(src), path, gerr, werr) or_return
 	return testing.expectf(t, string(got) == string(want), "%q %v: %q want %q", string(src), path, string(got), string(want))
 }
 
