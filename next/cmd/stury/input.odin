@@ -483,8 +483,9 @@ take_data :: proc(ins: ^Inputs, carry: []byte) {
 // Counts jq's place, and the open file's lines, past data[:to].
 @(private = "file")
 advance_past :: proc(ins: ^Inputs, to: int) {
+	line := ins.parsed.line
 	jq.advance(&ins.parsed.line, &ins.parsed.column, ins.data[:to])
-	ins.file_lines += bytes.count(ins.data[:to], {'\n'})
+	ins.file_lines += ins.parsed.line - line
 }
 
 // The open file read past.

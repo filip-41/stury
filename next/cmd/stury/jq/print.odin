@@ -39,6 +39,10 @@ Spill :: struct {
 @(private = "file")
 KEY_COLOR :: 7
 
+// The size from which the library's writer streams a value into the output, its stream buffer's.
+@(private = "file")
+STREAM_FROM :: 64 << 10
+
 // The colour index of a container's punctuation and of a NaN's `null`.
 @(private = "file")
 OBJECT_COLOR :: int(Kind.Object)
@@ -163,6 +167,17 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 	}
 	opts := p.opts
 	opts.respell_strings = true
+	as := json.as(.Jsonc if p.comments && p.depth == 0 else .Json)
+	heap := runtime.heap_allocator()
+	// A value shorter than the library's stream buffer is written whole and copied, which takes one allocation of its
+	// size where a stream takes one of the buffer's.
+	if len(core_pkg.span(r.doc, r.node)) < STREAM_FROM {
+		text, _, err := core_pkg.write(r.doc, opts, as, r.node, heap)
+		defer delete(text, heap)
+		write.put_text(p.out, string(text))
+		spill(p)
+		return err.kind == .None
+	}
 	p.streamed = false
 	to_out := io.Stream {
 		data = p,
@@ -177,7 +192,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 			return i64(len(b)), .None
 		},
 	}
-	_, err := core_pkg.write_stream(to_out, r.doc, opts, json.as(.Jsonc if p.comments && p.depth == 0 else .Json), r.node, runtime.heap_allocator())
+	_, err := core_pkg.write_stream(to_out, r.doc, opts, as, r.node, heap)
 	// Only an allocation fails, and the printer walks the value when the writer handed it nothing.
 	return err.kind == .None || p.streamed
 }

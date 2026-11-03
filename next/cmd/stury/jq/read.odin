@@ -128,13 +128,17 @@ fault_sentence :: proc(f: core_pkg.Fault, rest: string) -> string {
 
 // Move a line and column past `b`, as jq's parser counts them.
 advance :: proc(line, column: ^int, b: []byte) {
-	rest := b
-	for i := bytes.index_byte(rest, '\n'); i >= 0; i = bytes.index_byte(rest, '\n') {
-		line^ += 1
-		column^ = 0
-		rest = rest[i + 1:]
+	if nl := bytes.last_index_byte(b, '\n'); nl >= 0 {
+		// A count with no branch, which the compiler vectorizes.
+		n := 0
+		for c in b[:nl + 1] {
+			n += int(c == '\n')
+		}
+		line^ += n
+		column^ = len(b) - nl - 1
+	} else {
+		column^ += len(b)
 	}
-	column^ += len(rest)
 }
 
 // What jq says for a top-level number in a --seq record with no whitespace or separator after it.

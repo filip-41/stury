@@ -130,18 +130,21 @@ selected_path :: proc(run: ^Run, text: string) -> bit_set[Route_Why] {
 // nothing printed, when the text is the interpreter's: it does not parse, a step of the path meets a value it does not
 // apply to, or a `[]` meets an object, whose repeated keys jq gives once and the scan gives each time.
 answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
-	// A whole build is the heap's, whose fresh pages need no zeroing, where an arena zeroes every node it reserves. A
-	// scan's document grows by reallocation, which the arena does in place.
+	// What a text builds lives in the temp arena and is emptied after it, so a run over many texts holds one text's at a
+	// time.
 	defer free_all(context.temp_allocator)
 	route := &run.route
 	doc: core.Document
 	answers: []core.Answer
+	root := [1]core.Answer{{node = core.ROOT, outcome = .Found}}
 	err: core.Path_Error
 	if !slice.any_of_proc(route.path.steps, proc(s: core.Step) -> bool {_, every := s.(core.All);return !every}) {
 		// Every value the text holds may answer, and a whole build costs less than a scan that keeps them all.
 		fault: Maybe(core.Fault)
-		if doc, fault = jq.build_text(data, r); fault != nil {
+		if doc, fault = jq.build_text(data, r, context.temp_allocator); fault != nil {
 			err.kind = .Walk
+		} else if len(route.path.steps) == 0 && route.path.limit == nil {
+			answers = root[:] // `.`
 		} else {
 			answers, err = core.query(&doc, route.path, allocator = context.temp_allocator)
 		}
@@ -180,7 +183,7 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 			c = jq.compare(jq.scalar(value), sel.literal, eq = eq)
 		}
 		if jq.compared(sel.op, c) {
-			whole, _ := jq.build_text(data, r)
+			whole, _ := jq.build_text(data, r, context.temp_allocator)
 			defer core.destroy(&whole)
 			emit(&run.output, jq.Ref{&whole, core.ROOT}) or_return
 		}
