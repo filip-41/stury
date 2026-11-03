@@ -1,4 +1,4 @@
-// `records <frame|check|stream|read|cells|rows|threads|validate|each> <file> <iters> [width]`: reads the records of the
+// `records <frame|check|stream|read|cells|rows|text|threads|validate|each> <file> <iters> [width]`: reads the records of the
 // file and prints best and median GB/s. `check`, `threads` and `validate` read a `.csv` file as CSV. On NDJSON, `frame` frames each record and reads no value, `check` judges each
 // one, `threads` is `check` on a pool of `width` threads (6 by default), `stream` judges each one through a stream's
 // window, `read` reads each one of `logs.ndjson` into a `Log_Record`, strings borrowed. `validate` judges a whole
@@ -133,14 +133,28 @@ Table_Row :: struct {
 }
 
 row_plan: typed.Plan
+text_plan: typed.Plan
+
+Text_Row :: struct {
+	id:                      i64,
+	name, city, quote, note: string,
+}
 
 rows :: proc(src: []u8) -> int {
+	return read_rows(src, Table_Row, &row_plan)
+}
+
+text :: proc(src: []u8) -> int {
+	return read_rows(src, Text_Row, &text_plan)
+}
+
+read_rows :: proc(src: []u8, $T: typeid, plan: ^typed.Plan) -> int {
 	it := records.open(src, dsv.as(.Csv))
 	defer records.close(&it)
 	n := 0
 	for {
-		v: Table_Row
-		more, err := records.read(&it, &v, &row_plan, {borrow_strings = true})
+		v: T
+		more, err := records.read(&it, &v, plan, {borrow_strings = true})
 		if !more {
 			return n
 		}
@@ -150,7 +164,7 @@ rows :: proc(src: []u8) -> int {
 
 main :: proc() {
 	if len(os.args) != 4 && len(os.args) != 5 {
-		fmt.eprintln("usage: records <frame|check|stream|read|cells|rows|threads|validate|each> <file> <iters> [width]")
+		fmt.eprintln("usage: records <frame|check|stream|read|cells|rows|text|threads|validate|each> <file> <iters> [width]")
 		os.exit(2)
 	}
 	src, err := os.read_entire_file(os.args[2], runtime.default_allocator())
@@ -183,6 +197,9 @@ main :: proc() {
 	case "rows":
 		lane = rows
 		row_plan, _ = dsv.plan_make(Table_Row, .Csv)
+	case "text":
+		lane = text
+		text_plan, _ = dsv.plan_make(Text_Row, .Csv)
 	case:
 		fmt.eprintln("no lane", os.args[1])
 		os.exit(2)

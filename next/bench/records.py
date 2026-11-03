@@ -8,7 +8,7 @@ from doc import BUILD, LOCK, path as fixture
 
 FIXTURES = ["logs.ndjson", "docs.ndjson", "twitter.ndjson", "logs.json", "table.csv", "text.csv", "wide.csv"]
 # `threads`, `validate` and `each` run on a pool of 6 threads.
-LANES = ["frame", "check", "stream", "read", "threads", "validate", "each", "cells", "rows"]
+LANES = ["frame", "check", "stream", "read", "threads", "validate", "each", "cells", "rows", "text"]
 ITERS = 41
 
 
@@ -22,7 +22,7 @@ def main():
             path = fixture(name)
             # `read` and `rows` read into the struct of the logs records and the table rows alone.
             if name.endswith(".csv"):
-                lanes = ["check", "threads", "validate", "each"] + (LANES[7:] if name == "table.csv" else LANES[7:8])
+                lanes = ["check", "threads", "validate", "each"] + (LANES[7:9] if name == "table.csv" else LANES[7:8] + (LANES[9:] if name == "text.csv" else []))
             elif name == "logs.json":
                 lanes = ["validate", "each"]
             else:
