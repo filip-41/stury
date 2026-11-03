@@ -7,6 +7,7 @@ import "base:runtime"
 import "core:io"
 import core ".."
 import "../kernel"
+import engine "../build"
 import typed "../typed"
 
 // One record of the input. `text` is its bytes in the input and `at` the offset of its first byte from the input's
@@ -30,7 +31,7 @@ Record :: struct {
 // window but the input's first starts a record at its offset 0. `src` is a window of `buf` that ends on a whole
 // record, and `base` the input offset of `src[0]`. `last` says the window holds the input's end, `eof` that `input`
 // ended, and `cause` is the error it failed with. `held` holds the bytes past the last whole record when the input
-// ended inside a record or failed, and `held_at` their offset.
+// ended inside a record or failed, and `held_at` their offset. `scan` is what `scan` keeps, allocated at its first call.
 Reader :: struct {
 	src:       []u8,
 	pos:       u64,
@@ -54,6 +55,16 @@ Reader :: struct {
 	cause:     io.Error,
 	held:      []u8,
 	held_at:   u64,
+	scan:      ^Scanned,
+}
+
+// What `scan` keeps between records: the planned read, the document it returned last, and that document's answers
+// when a query gave them.
+@(private)
+Scanned :: struct {
+	h:       engine.Scan,
+	last:    core.Document,
+	answers: []core.Answer,
 }
 
 // `max_bytes` is the most bytes past the last whole record a stream's window holds, 0 for no limit. When they hold no
@@ -80,6 +91,10 @@ RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limi
 // false when there is none. nil reads a text on the calling thread alone. `whole` returns the format, framing and
 // offset whose records make up the whole of `src`, for `validate`, nil for a format that does not take it.
 //
+// `scan` is `next` and a read of `path` in the record by one walk, into a document whose text is the input up to the
+// record's end. It starts `h` at the first call, and then with `engine.scan_again` while `h.again` is set, from `last`,
+// the document it returned before. nil reads a record as `next` gives it.
+//
 // `exact` returns the scan whose cuts, a byte past a separator it finds from the end of an open reader's first record,
 // are each the end of a record and the start of the next, and false when the format has none under the reader's
 // framing or options. `piece` makes a copy of a reader past its first record, or a new reader for `lo` 0, read the
@@ -90,6 +105,7 @@ Services :: struct {
 	guess:  proc(it: ^Reader, to: u64) -> bool,
 	exact:  proc(it: ^Reader) -> (kernel.Quotes, bool),
 	piece:  proc(it: ^Reader, lo, hi: u64) -> bool,
+	scan:   proc(it: ^Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (Record, core.Document, core.Path_Error, bool),
 	whole:  proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64),
 	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
@@ -198,6 +214,45 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 	return
 }
 
+// Reads the next record and the answers of `path` in it, as `scan` of `core/build` reads the record's text, into a
+// document that lives until the next call on `it`, with every offset in an error from the input's first byte. The path
+// is planned at the first call, and every call passes the same `path` and `read`. Returns false at the input's end, on
+// a fault in `it.fault`, or when the reader's memory is refused. A record whose text does not read returns true and its
+// error, and the next read goes on after it. A stream, and a format with no `scan` service, build the record and
+// query it, where `read.stop_early` and `read.refuse_duplicates` do not apply.
+scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec: Record, doc: core.Document, err: core.Path_Error, more: bool) {
+	if it.fault != nil {
+		return
+	}
+	if it.scan == nil {
+		failed: runtime.Allocator_Error
+		if it.scan, failed = new(Scanned, it.allocator); failed != nil {
+			return {}, {}, {kind = .No_Memory}, false
+		}
+	}
+	s := it.scan
+	if it.services.scan != nil && it.input.procedure == nil {
+		rec, doc, err, more = it.services.scan(it, &s.h, &s.last, path, read)
+		// A record that fails before its walk leaves `last` and its buffers for the next.
+		if doc.nodes_alloc != nil {
+			s.last = doc
+		}
+		return
+	}
+	core.destroy(&s.last)
+	delete(s.answers, it.allocator)
+	s.answers = nil
+	if rec, more = next(it); more {
+		built: core.Document_Error
+		if s.last, built = build(it, rec, it.allocator); built.kind == .None {
+			s.answers, err = core.query(&s.last, path, {dups = read.dups, every_key = read.every_key}, it.allocator)
+			s.last.answers = s.answers
+		}
+		err = core.path_error(built) if built.kind != .None else err
+	}
+	return rec, s.last, err, more
+}
+
 // Builds the document of `rec`, a record `next` gave, as the format's `build` of its text does, with every offset in
 // an error from the input's first byte. The nodes' offsets index the document's `src`, which is JSON's record text and
 // dsv's input. A streamed record's document lives until the next call on `it`.
@@ -230,6 +285,14 @@ cell :: proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool)
 close :: proc(it: ^Reader) {
 	if it.services != nil && it.services.close != nil {
 		it.services.close(it)
+	}
+	if it.scan != nil {
+		core.destroy(&it.scan.last)
+		delete(it.scan.answers, it.allocator)
+		if it.scan.h.again {
+			engine.scan_free(&it.scan.h, it.allocator)
+		}
+		free(it.scan, it.allocator)
 	}
 	delete(it.frames, it.allocator)
 	delete(it.buf, it.allocator)

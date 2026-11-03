@@ -391,6 +391,106 @@ records_follow_the_model :: proc(t: ^testing.T) {
 	}
 }
 
+// `scan` gives the records `next` gives, each with what `scan` of its text alone answers, its offsets from the input.
+@(private = "file")
+expect_scan :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, path: core.Path) -> bool {
+	want := records.open(transmute([]u8)src, json.as(spec), framing)
+	defer records.close(&want)
+	got := records.open(transmute([]u8)src, json.as(spec), framing)
+	defer records.close(&got)
+	for {
+		rec, more := records.next(&want)
+		g, doc, err, g_more := records.scan(&got, path)
+		if !testing.expectf(t, more == g_more && rec.at == g.at && string(rec.text) == string(g.text), "%v %v %q: record %v %v %q, scan %v %v %q", framing, spec, src, more, rec.at, rec.text, g_more, g.at, g.text) {
+			return false
+		}
+		if !more {
+			return testing.expectf(t, want.fault == got.fault, "%v %v %q: fault %v, scan %v", framing, spec, src, want.fault, got.fault)
+		}
+		alone, e := json.scan(rec.text, spec, path, allocator = context.temp_allocator)
+		// A BOM is the input's, as `build` reads a record.
+		if rec.at > 0 && spec != .Json5 && has_bom(string(rec.text)) {
+			alone, e = {}, {kind = .Walk, inner = {rules = &json.RULES, kind = .Bad_Char}}
+		}
+		if e.kind == .Walk {
+			e.at += rec.at
+			e.inner.at += rec.at
+		}
+		if !testing.expectf(t, e == err && len(alone.answers) == len(doc.answers), "%v %v %q at %v: %v %v, scan %v %v", framing, spec, src, rec.at, e, len(alone.answers), err, len(doc.answers)) {
+			return false
+		}
+		for a, i in alone.answers {
+			b := doc.answers[i]
+			if !testing.expectf(t, a.outcome == b.outcome && string(core.span(&alone, a.node)) == string(core.span(&doc, b.node)), "%v %v %q at %v: answer %v %v, scan %v", framing, spec, src, rec.at, i, a, b) {
+				return false
+			}
+		}
+	}
+}
+
+@(test)
+records_scan_as_next_and_scan :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	paths: [dynamic]core.Path
+	for text in ([]string{".a", ".b[2]", ".[]", "first(.[])", ".k.x?[0]"}) {
+		p, _ := core.parse_path(text, context.temp_allocator)
+		append(&paths, p)
+	}
+	defer delete(paths)
+	buf := make([dynamic]u8, context.temp_allocator)
+	breakers := []string{"}", "\n", "\x1e", "\""}
+	for seed in u64(1) ..= SEEDS {
+		state := rand.create(seed)
+		gen := rand.default_random_generator(&state)
+		for round in 0 ..< 200 / SEEDS {
+			framing := core.Framing(round % 4)
+			src := seeded_text(gen, framing)
+			// Each byte in turn becomes one that breaks or ends a value, in every fifth text, under the first two paths.
+			for i in -1 ..< (len(src) if round % 5 == 0 else 0) {
+				for c in breakers[:1 if i < 0 else 4] {
+					clear(&buf)
+					if i < 0 {
+						append(&buf, src)
+					} else {
+						append(&buf, src[:i])
+						append(&buf, c)
+						append(&buf, src[i + 1:])
+					}
+					for spec in json.Spec {
+						for path in paths[:len(paths) if i < 0 else 2] {
+							if !expect_scan(t, string(buf[:]), framing, spec, path) {
+								return
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+@(test)
+records_scan_a_stream :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "{\"a\":1}\n{\"b\":2}\n{\"a\":[3]} {\"a\":4\n"
+	path, _ := core.parse_path(".a", context.temp_allocator)
+	c := Chunked{src = transmute([]u8)src, sizes = {3}, fail_at = -1}
+	it := records.open_stream(chunked(&c), json.as(.Json), .Concatenated)
+	defer records.close(&it)
+	got: [dynamic]string
+	defer delete(got)
+	for {
+		_, doc, err, more := records.scan(&it, path)
+		if !more {
+			break
+		}
+		testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+		append(&got, fmt.tprint(doc.answers[0].outcome, string(core.span(&doc, doc.answers[0].node))))
+	}
+	testing.expect_value(t, fmt.tprint(got[:]), `["Found 1", "Missing ", "Found [3]"]`)
+	testing.expect_value(t, string(it.held), " {\"a\":4\n")
+}
+
 // The seeds each property test draws its texts from.
 @(private = "file")
 SEEDS :: 4

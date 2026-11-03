@@ -75,6 +75,7 @@ Scan :: struct {
 	stopped:    bool,
 	borrowed:   bool, // the builder's stack is the caller's `frames`
 	positional: bool, // a `Map`'s members answer an `Index`, as a dsv record's cells do
+	again:      bool, // `scan_end` keeps the lists for `scan_again`, and the document's answers borrow them
 	at:         core.Node_Index, // the node `query` is giving the logic
 	answers:    []core.Answer,
 	n_answers:  int,
@@ -227,19 +228,41 @@ scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: c
 	return {}
 }
 
+// Starts the next walk over `src` of a one-path read with a borrowed stack that `scan_end` ended with `again`, with its
+// plan and lists, the stack `frames`, and the buffers of `last`, the document that walk returned, which goes.
+scan_again :: proc(h: ^Scan, src: []u8, as: core.As, last: ^core.Document, allocator: runtime.Allocator, frames: []u64) -> core.Path_Error {
+	if last.nodes_alloc == nil {
+		// The last walk failed, and freed its buffers.
+		if h.b = builder_start(src, as, false, allocator, 64, 0); h.b.err.kind != .None {
+			return {kind = .No_Memory}
+		}
+	} else {
+		h.b = {pending = -1, last = core.NO_NODE, doc = {src = src, as = as, allocator = allocator, nodes = last.nodes_alloc, nodes_alloc = last.nodes_alloc, facts_alloc = last.facts_alloc, counts_alloc = last.counts_alloc}}
+	}
+	last^ = {}
+	h.b.stack = frames
+	h.keep, h.next = h.free, 1 if h.path.limit > 0 else 0
+	h.matched, h.maps, h.cut, h.stopped, h.path.count = 0, 0, 0, false, 0
+	h.n_answers, h.n_kept, h.n_missing = 0, 0, 0
+	return {}
+}
+
+// Frees what a read ended with `again` holds past its documents.
+scan_free :: proc(h: ^Scan, allocator: runtime.Allocator) {
+	if raw_data(h.answers) != &h.first[0] {
+		delete(h.answers, allocator)
+	}
+	delete(h.kept, allocator)
+	delete(h.missing, allocator)
+	many_free(h, allocator)
+}
+
 // Returns the partial document the walk built, its answers in text order, or the error that stopped it. `root_close` is
-// the root's end when the walk gives one, else 0. On an error every allocation is freed.
+// the root's end when the walk gives one, else 0. On an error every allocation is freed, but for the lists of a read
+// with `again`.
 scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(core.Fault)) -> (core.Document, core.Path_Error) {
 	regs := regs
 	allocator := h.b.doc.allocator
-	free_lists :: proc(h: ^Scan, allocator: runtime.Allocator) {
-		if raw_data(h.answers) != &h.first[0] {
-			delete(h.answers, allocator)
-		}
-		delete(h.kept, allocator)
-		delete(h.missing, allocator)
-		many_free(h, allocator)
-	}
 	streamed := h.many != nil && h.many.on != nil
 	if _, bad := fault.?; !bad && h.stopped && !streamed && h.b.err.kind == .None {
 		// The containers the stop left open are on the path. Their counts hold what was read of them. A stream keeps no counts.
@@ -272,14 +295,20 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	}
 	doc, e := builder_end(&h.b, regs, fault)
 	if e.kind != .None {
-		free_lists(h, allocator)
+		if !h.again {
+			scan_free(h, allocator)
+		}
 		return {}, core.path_error(e)
 	}
 	doc.partial = true
 	doc.stopped = h.stopped
 	doc.positional = h.positional
+	if h.again {
+		doc.answers, doc.kept, doc.missing = h.answers[:h.n_answers], h.kept[:h.n_kept], h.missing[:h.n_missing]
+		return doc, {}
+	}
 	ok := attach_reads(&doc, h.answers[:h.n_answers], h.kept[:h.n_kept], h.missing[:h.n_missing])
-	free_lists(h, allocator)
+	scan_free(h, allocator)
 	if !ok {
 		core.destroy(&doc)
 		return {}, {kind = .No_Memory}

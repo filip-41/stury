@@ -18,6 +18,7 @@ RECORDS := records.Services {
 	guess = guess_start,
 	exact = exact_cut,
 	piece = piece_of,
+	scan  = scan_record,
 	whole = whole_text,
 	read  = read_record,
 	build = build_record,

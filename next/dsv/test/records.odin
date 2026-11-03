@@ -319,6 +319,26 @@ rows_name_wide_cells_by_position :: proc(t: ^testing.T) {
 }
 
 @(test)
+rows_scan_by_their_header :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "a,b\n1,2\n3,5\n\"x,\"\"y\",4\n"
+	path, _ := core.parse_path(".a", context.temp_allocator)
+	it := records.open(transmute([]u8)src, dsv.as(.Csv))
+	defer records.close(&it)
+	got := make([dynamic]string, context.temp_allocator)
+	buf: [8]u8
+	for {
+		_, doc, err, more := records.scan(&it, path)
+		if !more {
+			break
+		}
+		text, _ := core.text(&doc, doc.answers[0].node, buf[:])
+		append(&got, fmt.tprint(err.kind, text))
+	}
+	testing.expect_value(t, fmt.tprint(got[:]), `["None 1", "None 3", "None x,\"y"]`)
+}
+
+@(test)
 rows_columns_cells_and_documents :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "\xef\xbb\xbfid,\"pri\"\"ce\",note\r\n1,\"2,5\",\"a\"\"b\"\n\n2,7,\"x\ny\"\n"

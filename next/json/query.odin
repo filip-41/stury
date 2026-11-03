@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import core "../core"
 import engine "../core/build"
+import records "../core/records"
 
 // The path reads of `core/build` over JSON's handle. `scan`, `each_answer`, `find` and `set` take `spec` and `opts` and
 // forward to the same names in `core/build` with `as(spec, opts)`.
@@ -57,23 +58,37 @@ scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_
 scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
 	q, sep := document_start(src, 0, S)
 	if sep != nil {
-		at := u64(intrinsics.ptr_sub(sep, raw_data(src)))
-		return {}, {kind = .Walk, at = at, inner = {at = at, rules = &RULES, kind = .Bad_Char}}
+		return {}, sep_error(src, sep)
 	}
 	opts := options_of(handle)
 	// The scan's room as words, which an uninitialized declaration leaves unwritten where a struct's padding would not.
 	room: [size_of(engine.Scan) / 8]u64 = ---
-	h := (^engine.Scan)(&room)
+	h := (^engine.Scan)(rawptr(&room))
 	frames: [core.MAX_DEPTH]u64 = ---
 	if e := engine.scan_start(h, src, handle, paths, read, false, allocator, core.reserve_depth(opts.max_depth, len(src)), frames[:], on != nil, state, on); e.kind != .None {
 		return {}, e
 	}
+	return scan_walk(h, src, q, S, opts, on != nil)
+}
+
+@(private)
+sep_error :: proc(src: []u8, sep: [^]u8) -> core.Path_Error {
+	at := u64(intrinsics.ptr_sub(sep, raw_data(src)))
+	return {kind = .Walk, at = at, inner = {at = at, rules = &RULES, kind = .Bad_Char}}
+}
+
+// Walks the text at `q` of `src` with the hook of the read `h` started on `src`, the stream's when `stream` is set,
+// judges what the walk leaves and ends the read.
+@(private)
+scan_walk :: proc(h: ^engine.Scan, src: []u8, q: [^]u8, $S: Spec, opts: Options, stream: bool) -> (core.Document, core.Path_Error) {
 	regs := engine.BUILDER_REGS
 	hi: u64
 	fault: Maybe(core.Fault)
 	stopped: bool
+	opts := opts
 	h.opts = &opts
-	if on != nil {
+	defer h.opts = nil
+	if stream {
 		h.rewalk = proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, _: core.Node_Index) {
 			src := h.b.doc.src
 			walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.scan_hook_stream)
@@ -82,10 +97,7 @@ scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read
 	} else if h.many == nil {
 		hi, fault, stopped = walk_from(src, q, S, opts, h, &regs, engine.scan_hook)
 	} else {
-		h.rewalk = proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, _: core.Node_Index) {
-			src := h.b.doc.src
-			walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.scan_hook_many)
-		}
+		h.rewalk = rewalk_many(S)
 		hi, fault, stopped = walk_from(src, q, S, opts, h, &regs, engine.scan_hook_many)
 	}
 	if fault == nil && !stopped {
@@ -100,4 +112,90 @@ scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read
 		hi = 0
 	}
 	return engine.scan_end(h, regs, hi, fault)
+}
+
+@(private)
+rewalk_many :: proc "contextless" ($S: Spec) -> proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index) {
+	return proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, _: core.Node_Index) {
+		src := h.b.doc.src
+		walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.scan_hook_many)
+	}
+}
+
+// The record service `scan`. A text of concatenated strict JSON is framed by the walk that reads it, and any other
+// record is framed first and then read in place.
+@(private)
+scan_record :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (records.Record, core.Document, core.Path_Error, bool) {
+	switch Spec(it.as.spec) {
+	case .Json:  return scan_record_spec(it, h, last, path, read, .Json)
+	case .Jsonc: return scan_record_spec(it, h, last, path, read, .Jsonc)
+	case .Json5: return scan_record_spec(it, h, last, path, read, .Json5)
+	}
+	return {}, {}, {}, false
+}
+
+@(private)
+scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options, $S: Spec) -> (rec: records.Record, doc: core.Document, err: core.Path_Error, ok: bool) {
+	opts := options_of(it.as)
+	walked := it.framing == .Concatenated && S == .Json
+	src := it.src
+	q: [^]u8
+	pos, state := it.pos, it.state
+	if !walked {
+		if rec, ok = it.services.next[it.framing](it); !ok {
+			return
+		}
+		src = src[:rec.at + u64(len(rec.text))]
+		sep: [^]u8
+		if q, sep = document_start(src, rec.at, S); sep != nil {
+			return rec, {}, sep_error(src, sep), true
+		}
+	}
+	frames: [core.MAX_DEPTH]u64 = ---
+	// The builder keeps `room` past the read, unread until `scan_again` replaces it.
+	room := ([^]u64)(rawptr(&frames))[:core.MAX_DEPTH]
+	depth := core.reserve_depth(opts.max_depth, len(src))
+	started: core.Path_Error
+	if h.again {
+		started = engine.scan_again(h, src, it.as, last, it.allocator, room[:depth])
+	} else {
+		core.destroy(last)
+		started = engine.scan_start(h, src, it.as, []core.Path{path}, read, false, it.allocator, depth, room)
+		h.again = started.kind == .None && h.many == nil && int(opts.max_depth) <= core.MAX_DEPTH
+	}
+	if started.kind != .None {
+		if walked {
+			rec, ok = next_framed(it, S)
+		}
+		return rec, {}, started, ok || !walked
+	}
+	if !walked {
+		doc, err = scan_walk(h, src, q, S, opts, false)
+		return rec, doc, err, true
+	}
+	regs := engine.BUILDER_REGS
+	stopped: bool
+	h.opts = &opts
+	defer h.opts = nil
+	if h.many == nil {
+		rec, ok, stopped = frame_value(it, .Json, opts, h, &regs, engine.scan_hook)
+	} else {
+		h.rewalk = rewalk_many(.Json)
+		rec, ok, stopped = frame_value(it, .Json, opts, h, &regs, engine.scan_hook_many)
+	}
+	// A stop leaves the record's end to a walk with no hook.
+	if stopped {
+		it.pos, it.state = pos, state
+		rec, ok = next_framed(it, .Json)
+	}
+	// The input's end, which ends the records with no fault, ends the read with one and is no error.
+	fault := it.fault
+	if !ok && fault == nil {
+		fault = core.fault_of(core.fault_at(u64(len(src)), .Truncated), &RULES)
+	}
+	d, e := engine.scan_end(h, regs, rec.at + u64(len(rec.text)) if ok && !stopped else 0, fault)
+	if !ok && it.fault == nil {
+		return rec, {}, {}, false
+	}
+	return rec, d, e, ok
 }

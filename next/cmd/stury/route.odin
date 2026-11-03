@@ -139,16 +139,12 @@ selected_path :: proc(run: ^Run, text: string) -> bit_set[Route_Why] {
 // nothing printed, when the text is the interpreter's: it does not parse, a step of the path meets a value it does not
 // apply to, or a `[]` meets an object, whose repeated keys jq gives once and the scan gives each time.
 answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
-	// What a text builds lives in the temp arena and is emptied after it, so a run over many texts holds one text's at a
-	// time.
-	defer free_all(context.temp_allocator)
 	route := &run.route
 	doc: core.Document
 	answers: []core.Answer
 	root := [1]core.Answer{{node = core.ROOT, outcome = .Found}}
 	err: core.Path_Error
-	if !slice.any_of_proc(route.path.steps, proc(s: core.Step) -> bool {_, every := s.(core.All);return !every}) {
-		// Every value the text holds may answer, and a whole build costs less than a scan that keeps them all.
+	if !scans(route.path) {
 		fault: Maybe(core.Fault)
 		if doc, fault = jq.build_text(data, r, context.temp_allocator); fault != nil {
 			err.kind = .Walk
@@ -160,10 +156,22 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 	} else {
 		doc, err = engine.scan(data, r, route.path, allocator = context.temp_allocator)
 	}
-	defer core.destroy(&doc)
-	if answers == nil {
-		answers = doc.answers
-	}
+	return answer(run, &doc, answers if answers != nil else doc.answers, err, data, r)
+}
+
+// Whether a scan answers `path`. When its steps are all `[]`, every value the text holds may answer, and a whole build
+// costs less than a scan that keeps them all.
+scans :: proc(path: core.Path) -> bool {
+	return slice.any_of_proc(path.steps, proc(s: core.Step) -> bool {_, every := s.(core.All);return !every})
+}
+
+// Prints the outputs of the scanned filter from `answers` of `doc`, which the path read of the text `data` gave with
+// `err`. Returns false, with nothing printed, when the text is the interpreter's.
+answer :: proc(run: ^Run, doc: ^core.Document, answers: []core.Answer, err: core.Path_Error, data: []byte, r: core.As) -> bool {
+	// What a text builds lives in the temp arena and is emptied after it, so a run over many texts holds one text's at a
+	// time.
+	defer free_all(context.temp_allocator)
+	route := &run.route
 	switch {
 	case err.kind != .None:
 		explain_fallback(route, .Bad_Text)
@@ -171,7 +179,7 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 	case slice.any_of_proc(answers, proc(a: core.Answer) -> bool {return a.outcome == .Type_Mismatch}):
 		explain_fallback(route, .Step_Kind)
 		return false
-	case iterates_object(&doc, core.ROOT, route.path.steps):
+	case iterates_object(doc, core.ROOT, route.path.steps):
 		explain_fallback(route, .Object_Members)
 		return false
 	}
@@ -180,7 +188,7 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 	for a in answers {
 		value: jq.Value
 		if a.outcome == .Found {
-			value = jq.Ref{&doc, a.node}
+			value = jq.Ref{doc, a.node}
 		}
 		if sel.op == .None {
 			emit(&run.output, value) or_return

@@ -167,7 +167,18 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 			continue
 		}
 		from := ins.texts.pos
-		rec, ok := records.next(&ins.texts)
+		route := &ins.run.route
+		// The path's read frames the record it answers.
+		scanned := route.scanning && scans(route.path) && !reads_cells(&ins.run.opts)
+		rec: records.Record
+		ok: bool
+		part: core.Document
+		read: core.Path_Error
+		if scanned {
+			rec, part, read, ok = records.scan(&ins.texts, route.path)
+		} else {
+			rec, ok = records.next(&ins.texts)
+		}
 		// A text the window cuts short, or one --seq's separator may yet end, waits for the next window.
 		if !ins.last && (ok && ins.framing == .Seq && bytes.index_byte(ins.data[rec.at:], 0x1e) < 0 || !ok && cut_short(ins)) {
 			// The reader has passed the record's separator, which the next window must start with.
@@ -199,7 +210,7 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 			}
 			continue
 		}
-		if ins.run.route.scanning && answer_path(ins.run, rec.text, ins.as) {
+		if route.scanning && (answer(ins.run, &part, part.answers, read, rec.text, ins.as) if scanned else answer_path(ins.run, rec.text, ins.as)) {
 			// As jq's main loop, which reads one input past a file that did not open.
 			if ins.failures > 0 {
 				return nil, "", .More

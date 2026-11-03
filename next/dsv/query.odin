@@ -73,7 +73,7 @@ scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read
 	} else {
 		hi, fault = walk_many(src, S, opts, &h, &records, &regs, engine.scan_hook_many)
 	}
-	return engine.scan_end(&h, regs, hi, fault)
+	return engine.scan_end((^engine.Scan)(rawptr(&h)), regs, hi, fault)
 }
 
 // What a re-walk of one record needs: the header's cells, which the record's own walk does not read, and the hook.

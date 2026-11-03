@@ -9,6 +9,7 @@ records.open_stream :: proc(input: io.Reader, as: core.As, framing := core.Frami
 records.next  :: proc(it: ^records.Reader) -> (records.Record, bool)
 records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error)
 records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Document_Error)
+records.scan  :: proc(it: ^records.Reader, path: core.Path, read := core.Path_Options{}) -> (rec: records.Record, doc: core.Document, err: core.Path_Error, more: bool)
 records.column :: proc(it: ^records.Reader, name: string) -> int
 records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
 records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok: bool)
@@ -162,6 +163,14 @@ is depends on the format: JSON's is the record's text, so a node's offsets are t
 (for a streamed dsv reader, the header joined with the row). A document built from a streamed record lives until the
 next call on the reader. `build` on a reader whose format builds no records is `.Bad_Index`.
 
+`scan` frames the next record and answers `path` in it, as `scan` of `core/build` answers it in the record's text, with
+every offset in an error from the input's first byte. The path is planned at the first call and reused, and the
+document's buffers too, so the document lives until the next call on the reader, and every call passes the same `path`
+and `read`. JSON reads the record in place: the document's `src` is the input up to the record's end, and under
+`.Concatenated` strict JSON one walk both frames the record and answers the path. A stream, and a format with no
+scan of its own (dsv), build the record and query it, where `read.stop_early` and `read.refuse_duplicates` do not apply.
+A record whose text does not read returns true and its error, and the next `scan` goes on past it.
+
 ## Rows
 
 A dsv text is read under `.Lines`, the zero value, so `records.open(src, dsv.as(.Csv))` takes no framing. A record is a
@@ -248,7 +257,7 @@ whitespace, and its records are read with offsets from `base`.
 
 A format gives its record reader as a `records.Services` table in its rodata, which its `core.Spelling.records` points
 at. `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
-and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault, `read` and `build` read
+and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault, `read`, `build` and `scan` read
 one. `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
 without the cost of finding the whole text's fault. `exact` gives the scan whose cuts `each` starts pieces at, and `piece` turns a copy of a reader past its
 first record into a piece's reader. `whole` names the framing and offset `validate` reads a whole
