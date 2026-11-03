@@ -364,6 +364,12 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	context = h.r.ctx
 	next := regs
 	next.b += u64(col.step)
+	if col.kind == .String && t.spelling == core.SPELLING_DECODE | core.SPELLING_QUOTED | SPELLING_DOUBLED && regs.c < regs.a {
+		if store_undoubled(h, t, uintptr(regs.c) + uintptr(col.offset)) {
+			next.c += u64(col.stride)
+			return next, .Next
+		}
+	}
 	at := core.Hook_Regs{regs.a, u64(uintptr(col.rec)), regs.c}
 	#partial switch col.kind {
 	case .Inside:
@@ -440,6 +446,17 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	return next, action
 }
 
+// Stores the text of a quoted cell holding a `""` into the string at `dest`, in memory of the read's allocator.
+@(private)
+store_undoubled :: proc (h: ^Cells, t: core.Token, dest: uintptr) -> bool {
+	buf, err := runtime.mem_alloc_non_zeroed(int(t.n), 1)
+	if err != nil {
+		return false
+	}
+	(^string)(dest)^ = undoubled(buf, inner_text(h, t))
+	return true
+}
+
 // The bytes of a cell without the quote pair of a quoted cell.
 @(private)
 inner_text :: #force_inline proc "contextless" (h: ^Cells, t: core.Token) -> string {
@@ -458,12 +475,7 @@ read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) ->
 	case .String:
 		// The walk marked it, so a `""` takes no scan and no general decode.
 		if t.spelling & (SPELLING_DOUBLED | core.SPELLING_LAX) == SPELLING_DOUBLED {
-			buf, err := runtime.mem_alloc_non_zeroed(int(t.n), 1)
-			if err != nil {
-				return .Out_Of_Memory
-			}
-			(^string)(dest)^ = undoubled(buf, inner_text(h, t))
-			return .None
+			return .None if store_undoubled(h, t, dest) else .Out_Of_Memory
 		}
 		if t.spelling & (core.SPELLING_QUOTED | SPELLING_DOUBLED) == core.SPELLING_QUOTED && plain_quoted(h.r.src, t) {
 			lo, hi := inner_span(h.r.src, t)
