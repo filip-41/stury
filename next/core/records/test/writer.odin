@@ -230,3 +230,69 @@ failed_stream_is_final :: proc(t: ^testing.T) {
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Write_Failed)
 	testing.expect_value(t, err.cause, io.Error.Permission_Denied)
 }
+
+@(test)
+calls_after_the_end_are_out_of_order :: proc(t: ^testing.T) {
+	plan, _ := json.plan_make(Entry)
+	defer typed.plan_destroy(&plan)
+	wr: records.Writer
+	records.writer_init(&wr, {}, json.as(.Json), allocator = context.temp_allocator)
+	records.write(&wr, ENTRIES[0], &plan)
+	_, end := records.writer_end(&wr)
+	testing.expect_value(t, end.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, records.write(&wr, ENTRIES[1], &plan), core.Typed_Error_Kind.Out_Of_Order)
+	testing.expect_value(t, records.write_text(&wr, {'1'}), core.Typed_Error_Kind.Out_Of_Order)
+	testing.expect_value(t, records.write_cells(&wr, {"a"}), core.Typed_Error_Kind.Out_Of_Order)
+	_, end = records.writer_end(&wr)
+	testing.expect_value(t, end.kind, core.Typed_Error_Kind.Out_Of_Order)
+	records.writer_destroy(&wr)
+}
+
+@(test)
+typed_row_after_written_cells_binds_without_a_header :: proc(t: ^testing.T) {
+	plan, _ := dsv.plan_make(Entry, .Csv)
+	defer typed.plan_destroy(&plan)
+	wr: records.Writer
+	records.writer_init(&wr, {}, dsv.as(.Csv), allocator = context.temp_allocator)
+	records.write_cells(&wr, {"x", "y", "z", "w"})
+	testing.expect_value(t, records.write(&wr, ENTRIES[0], &plan), core.Typed_Error_Kind.None)
+	records.write_text(&wr, transmute([]u8)string("p,q"))
+	testing.expect_value(t, records.write(&wr, ENTRIES[3], &plan), core.Typed_Error_Kind.None)
+	text, _ := records.writer_end(&wr)
+	testing.expect_value(t, string(text), "x,y,z,w\n1,plain,true,0.5\np,q\n4,\"\",false,0\n")
+}
+
+@(test)
+plan_of_another_layout_is_a_mismatch :: proc(t: ^testing.T) {
+	headless, _ := dsv.plan_make(Entry, .Csv, {no_header = true})
+	defer typed.plan_destroy(&headless)
+	tsv, _ := dsv.plan_make(Entry, .Tsv)
+	defer typed.plan_destroy(&tsv)
+	plain, _ := dsv.plan_make(Entry, .Csv)
+	defer typed.plan_destroy(&plain)
+	_, err := records.marshal(ENTRIES[:], &headless, dsv.as(.Csv), allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Plan_Mismatch)
+	_, err = records.marshal(ENTRIES[:], &tsv, dsv.as(.Csv), allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Plan_Mismatch)
+	_, err = records.marshal(ENTRIES[:], &plain, dsv.as(.Csv, {no_header = true}), allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Plan_Mismatch)
+	text, ok := records.marshal(ENTRIES[:1], &headless, dsv.as(.Csv, {no_header = true}), allocator = context.temp_allocator)
+	testing.expect_value(t, ok.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(text), "1,plain,true,0.5\n")
+	text, ok = records.marshal(ENTRIES[:1], &plain, dsv.as(.Csv, {delimiter = ','}), allocator = context.temp_allocator)
+	testing.expect_value(t, string(text), "id,name,ok,score\n1,plain,true,0.5\n")
+}
+
+@(test)
+refused_first_row_lets_another_plan_in :: proc(t: ^testing.T) {
+	first, _ := dsv.plan_make(Entry, .Csv)
+	defer typed.plan_destroy(&first)
+	second, _ := dsv.plan_make(Entry, .Csv)
+	defer typed.plan_destroy(&second)
+	wr: records.Writer
+	records.writer_init(&wr, {}, dsv.as(.Csv), allocator = context.temp_allocator)
+	testing.expect_value(t, records.write(&wr, Entry{score = math.inf_f64(1)}, &first), core.Typed_Error_Kind.Non_Finite)
+	testing.expect_value(t, records.write(&wr, ENTRIES[0], &second), core.Typed_Error_Kind.None)
+	text, _ := records.writer_end(&wr)
+	testing.expect_value(t, string(text), "id,name,ok,score\n1,plain,true,0.5\n")
+}

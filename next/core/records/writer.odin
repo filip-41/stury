@@ -37,7 +37,8 @@ writer_init :: proc(wr: ^Writer, w: io.Stream, as: core.As, framing := core.Fram
 	return kind
 }
 
-// Ends the writer and returns its error, and for a buffer writer the text, which the caller owns.
+// Ends the writer and returns its error, and for a buffer writer the text, which the caller owns. Every later call is
+// `.Out_Of_Order`.
 writer_end :: proc(wr: ^Writer) -> ([]u8, core.Typed_Error) {
 	if wr.tokens.spell == nil {
 		return nil, wr.err
@@ -50,6 +51,8 @@ writer_end :: proc(wr: ^Writer) -> ([]u8, core.Typed_Error) {
 	if wr.final {
 		return nil, wr.err
 	}
+	// The tokens are freed: every later call is out of order.
+	wr.final, wr.err = true, {kind = .Out_Of_Order}
 	return text, err
 }
 
@@ -137,7 +140,7 @@ marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: core.As,
 
 @(private)
 marshal_to :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing: core.Framing, opts: core.Write_Options, stream: io.Stream, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
-	wr: Writer
+	wr: Writer = ---
 	if writer_init(&wr, stream, as, framing, opts, allocator) == .None && mismatched(&wr, E, plan) {
 		wr.err, wr.final = {kind = .Plan_Mismatch}, true
 	}

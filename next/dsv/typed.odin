@@ -34,7 +34,7 @@ plan_make :: proc(T: typeid, spec: Spec, layout := Options{}, opts := typed.Plan
 		typed.plan_destroy(&plan)
 		return {}, {kind = .Bad_Option}
 	}
-	plan.layout = {u8(spec), layout.delimiter, layout.comment, u8(layout.no_header), u8(layout.crlf)}
+	plan.layout = {u8(spec), spec_delimiter(spec, layout.delimiter), layout.comment, u8(layout.no_header), u8(layout.crlf)}
 	plan.marshal = marshal_text
 	if _, listed := row_of(&plan); listed {
 		plan.node_read = document_read

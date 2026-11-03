@@ -237,12 +237,14 @@ Held_Walker :: struct {
 tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind {
 	h := (^Held_Walker)(t.state)
 	if h == nil {
-		made, failed := new(Held_Walker)
+		// The stacks are written before they are read, so only the walker is zeroed.
+		made, failed := runtime.mem_alloc_non_zeroed(size_of(Held_Walker), align_of(Held_Walker))
 		if failed != nil {
 			err^ = {kind = .Out_Of_Memory}
 			return .Out_Of_Memory
 		}
-		h = made
+		h = (^Held_Walker)(raw_data(made))
+		h.w = {}
 		h.w.out = t.out^
 		t.out, t.state = &h.w.out, h
 		walker_init(&h.w, t.opts, raw_data(h.frames[:]), raw_data(h.ptrs[:]))

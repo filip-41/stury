@@ -97,15 +97,16 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 	return rows_end((^Rows)(rawptr(&w)), write_rows(&w, uintptr(value)))
 }
 
+// The delimiter byte of `spec` when `layout` leaves it 0.
+@(private)
+spec_delimiter :: proc(spec: Spec, delimiter: u8) -> u8 {return delimiter if delimiter != 0 else '\t' if spec == .Tsv else ','}
+
 @(private)
 rows_start :: proc(w: ^Rows, spill: ^[write.ROOM_MAX]u8, layout: Options, spec: Spec, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, hint: int) {
 	write.init(&w.out, spill, allocator, stream, hint)
 	w.opts = layout
 	w.spec = spec
-	w.opts.delimiter = layout.delimiter
-	if w.opts.delimiter == 0 {
-		w.opts.delimiter = '\t' if spec == .Tsv else ','
-	}
+	w.opts.delimiter = spec_delimiter(spec, layout.delimiter)
 	w.sort = opts.sort_keys
 	w.arena.backing_allocator, w.arena.minimum_block_size = context.allocator, ARENA_BLOCK
 	w.side.allocator = context.allocator
@@ -126,11 +127,17 @@ rows_start :: proc(w: ^Rows, spill: ^[write.ROOM_MAX]u8, layout: Options, spec: 
 	w.words = strings.index_byte("truefals", delim) < 0 && strings.index_byte("truefals", comment) < 0
 }
 
+// Frees what a write allocated besides its output.
+@(private)
+rows_free :: proc(w: ^Rows) {
+	runtime.arena_destroy(&w.arena)
+	write.release_sides(&w.side)
+}
+
 // Ends a write: the text, or the refusal `kind` with the path `w.err` holds.
 @(private)
 rows_end :: proc(w: ^Rows, kind: core.Typed_Error_Kind) -> ([]u8, core.Typed_Error) {
-	runtime.arena_destroy(&w.arena)
-	write.release_sides(&w.side)
+	rows_free(w)
 	if kind != .None {
 		write.destroy(&w.out)
 		w.err.kind = kind
@@ -230,7 +237,7 @@ write_rows :: proc(w: ^Rows, value: uintptr) -> core.Typed_Error_Kind {
 // Binds the columns of `row` and writes the header: a struct row's field names in order, or a map row's sorted union of
 // the keys of `list`'s rows. A list row has no header.
 @(private)
-write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice) -> core.Typed_Error_Kind {
+write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, named := true) -> core.Typed_Error_Kind {
 	w.headed = true
 	pl := w.plan
 	scratch := runtime.arena_allocator(&w.arena)
@@ -249,7 +256,7 @@ write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice) -> co
 			slice.sort_by(cols, proc(a, b: Named) -> bool {return a.name < b.name})
 		}
 		w.cols = cols
-		if !w.opts.no_header {
+		if named && !w.opts.no_header {
 			for c, k in cols {
 				names[k] = c.name
 			}
@@ -279,7 +286,7 @@ write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice) -> co
 		}
 		slice.sort(keys[:])
 		w.keys = keys[:]
-		if !w.opts.no_header && len(keys) > 0 {
+		if named && !w.opts.no_header && len(keys) > 0 {
 			return put_header(w, w.keys)
 		}
 	}
@@ -358,20 +365,21 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 	return .None
 }
 
-// One row of a record write, by a plan of the row's type. The first row binds the columns and writes the header, and
-// every row after it takes the same plan. What hooks allocate lasts the row.
+// One row of a record write, by a plan of the row's type, which must be of the writer's layout. The first row binds the
+// columns and writes the header, unless the caller already wrote the head of the text, and every row after it takes the
+// same plan. What hooks allocate lasts the row.
 @(private)
 token_record :: proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind {
 	w := (^Rows)(t.state)
 	row, listed := row_of(plan)
-	if listed || w.plan != nil && w.plan != plan {
+	if listed || w.plan != nil && w.plan != plan || plan.layout != {u8(w.spec), w.opts.delimiter, w.opts.comment, u8(w.opts.no_header), u8(w.opts.crlf)} {
 		err^ = {kind = .Plan_Mismatch}
 		return .Plan_Mismatch
 	}
 	w.plan = plan
 	temp := runtime.arena_temp_begin(&w.arena)
 	first := !w.headed
-	kind := write_header(w, row, {value, 1}) if first else .None
+	kind := write_header(w, row, {value, 1}, t.mark == 0) if first else .None
 	if kind == .None {
 		kind = write_list(w, row, {value, 1}, false)
 	}
@@ -381,8 +389,10 @@ token_record :: proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^c
 	}
 	runtime.arena_temp_end(temp)
 	if kind != .None {
-		// The header goes with a refused first row, which the record writer takes back when it can.
-		w.headed = !first
+		// The header goes with a refused first row, which the record writer takes back when it can, and the plan with it.
+		if first {
+			w.headed, w.plan = false, nil
+		}
 		err^ = w.err
 		err.kind, err.cause = kind, w.out.cause
 	}
@@ -750,8 +760,7 @@ TOKENS := write.Token_Spelling {
 	},
 	stop   = proc(t: ^write.Tokens) {
 		if w := (^Rows)(t.state); w != nil {
-			runtime.arena_destroy(&w.arena)
-			write.release_sides(&w.side)
+			rows_free(w)
 			free(w, t.base.allocator)
 		}
 	},

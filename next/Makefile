@@ -17,13 +17,16 @@ TEST_MINIMAL  := $(foreach p,$(TEST_PKGS),$(BUILD)/test/minimal/$(p))
 TEST_SPEED    := $(foreach p,$(TEST_PKGS),$(BUILD)/test/speed/$(p))
 TEST_TARGETS  := $(TEST_MINIMAL) $(TEST_SPEED)
 ASAN_TARGETS  := $(foreach p,$(TEST_PKGS),$(BUILD)/test/asan/$(p))
+# The test packages that run threads, which only `host` does.
+TSAN_PKGS     := host/test
+TSAN_TARGETS  := $(foreach p,$(TSAN_PKGS),$(BUILD)/test/tsan/$(p))
 X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS),$(BUILD)/test/x86/$(o)/$(t)/$(p))))
 
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: check gate build-cli test test-x86 test-asan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write fixtures size surface \
-	$(TEST_TARGETS) $(ASAN_TARGETS) $(X86_TARGETS)
+.PHONY: check gate build-cli test test-x86 test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write fixtures size surface \
+	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
 BENCH      := $(BUILD)/bench
@@ -98,6 +101,14 @@ $(ASAN_TARGETS): $(BUILD)/test/asan/%:
 	@mkdir -p $(@D)
 	@echo "== $* (address)"
 	@$(ODIN) test $* -o:speed -sanitize:address -debug -out:$@ || { echo "== $* (address) failed"; exit 1; }
+
+# The pool's start budget is raised, since a loaded host would otherwise stop it short of every helper under the sanitizer.
+test-tsan: $(TSAN_TARGETS)
+
+$(TSAN_TARGETS): $(BUILD)/test/tsan/%:
+	@mkdir -p $(@D)
+	@echo "== $* (thread)"
+	@TSAN_OPTIONS=atexit_sleep_ms=0 $(ODIN) test $* -o:speed -sanitize:thread -debug -define:HOST_START_BUDGET_US=100000 -out:$@ || { echo "== $* (thread) failed"; exit 1; }
 
 # Host, then the other architectures' sources: x86-64 and a target with neither NEON nor x86 vectors.
 lint:

@@ -29,6 +29,7 @@ TIERS = {"quick": 0, "merge": 1, "full": 2}
 HOST = "arm64"
 
 TEST_PKGS = ["core/spell/test", "host/test", "core/kernel/test", "core/test", "core/write/test", "core/records/test", "json/test", "dsv/test"]
+TSAN_PKGS = ["host/test"]
 LIB_PKGS = ["core/spell", "core", "host", "core/kernel", "core/compose", "core/build", "core/typed", "core/write", "core/records", "json", "dsv", "walktest"]
 CLI = "cmd/stury"
 BENCH_PKGS = ["bench", "bench/doc", "bench/editbench", "bench/paths", "bench/typed", "bench/write", "bench/records"]
@@ -185,6 +186,8 @@ def checks(odin, seed):
         out.append(Check(f"{name} minimal", 1, 0, root, make(odin, f"build/test/minimal/{package}")))
         out.append(Check(f"{name} speed", 2, 1, root, make(odin, f"build/test/speed/{package}")))
         out.append(Check(f"{name} asan", 3, 1, root, make(odin, f"build/test/asan/{package}")))
+        if package in TSAN_PKGS:
+            out.append(Check(f"{name} tsan", 3, 1, root, make(odin, f"build/test/tsan/{package}")))
         for opt in ("none", "speed"):
             for tier in (0, 1):
                 target = f"build/test/x86/{opt}/{tier}/{package}"

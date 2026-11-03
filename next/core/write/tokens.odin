@@ -47,8 +47,8 @@ Tokens :: struct {
 // Starts a write in the format `as` names, as `opts` says, into a buffer from `allocator` or to `stream`. A format with no
 // token writer is `.Unsupported`, and an `as` the format cannot write is its own refusal. The kind is also kept in `t`.
 tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, allocator := context.allocator, stream := io.Stream{}) -> core.Typed_Error_Kind {
-	t^ = {}
-	t.opts, t.first = opts, true
+	// The spill and the levels are not zeroed: a level is read only below `top`.
+	t.opts, t.spell, t.state, t.top, t.mark, t.first, t.keyed, t.done, t.err = opts, nil, nil, 0, 0, true, false, false, .None
 	init(&t.base, &t.spill, allocator, stream)
 	t.out = &t.base
 	if as.spelling == nil || as.spelling.tokens == nil {

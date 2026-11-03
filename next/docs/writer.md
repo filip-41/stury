@@ -266,16 +266,17 @@ records.marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: 
   takes compact text only, so `pretty` there is `.Bad_Option`. `.Entries` is one document, which `write.marshal` writes,
   so it is `.Unsupported`.
 - A record of a delimited text is a row, written by a plan of the row type: `dsv.plan_make(Entry, .Csv)`, not
-  `[]Entry`. The first row writes the header, a map row's from its own keys, so a later row with another key is
-  `.Unwritable`. Every row takes the plan of the first. A delimited text takes `.Lines` only.
+  `[]Entry`, made with the writer's spec and layout, else `.Plan_Mismatch`. The first row writes the header, a map row's
+  from its own keys, so a later row with another key is `.Unwritable`, unless `write_cells` or `write_text` wrote the head
+  of the text first: then the row binds its columns and writes no header. Every row takes the plan of the first. A delimited text takes `.Lines` only.
 - `write` takes a plan of the value's type built by the writer's format, else `.Plan_Mismatch`. `write_text` writes the
   caller's text of one record as it is, unjudged. `write_cells` writes a row of a delimited text, each cell as the typed
   write writes a string: a nil cell is empty, a row of one nil cell is `""` since an empty line is no record, and a BOM
   at the start of the text is quoted. Another format is `.Unsupported`.
 - A refused record leaves no byte when nothing was flushed since it began, and the writer goes on. Otherwise, and on a
   stream or memory failure, the refusal is final: every later call returns it and `writer_end` returns it with no text.
-  Each call returns the refusal's kind, and `wr.err` holds it with its path. `writer_destroy` frees a writer
-  `writer_end` did not end.
+  Each call returns the refusal's kind, and `wr.err` holds it with its path. Every call after `writer_end` is `.Out_Of_Order`.
+  `writer_destroy` frees a writer `writer_end` did not end.
 - `records.marshal` stops at the first refused element and returns no text. `marshal_stream` may leave a prefix.
 
 A writer sets up once: the walker, its stacks and a delimited text's columns live as long as it does, so a record costs

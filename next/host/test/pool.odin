@@ -1,7 +1,9 @@
 package host_test
 
+import "base:intrinsics"
 import "core:sync"
 import "core:testing"
+import "core:time"
 import core "../../core"
 import host ".."
 
@@ -80,4 +82,23 @@ writing_calls_balance :: proc(t: ^testing.T) {
 	count: int
 	run(&pool.runner, pool.runner.threads, bump, &count)
 	testing.expect(t, count >= 1)
+}
+
+// Every call waits for a second one to start, so a pool that hands the task to no helper leaves it waiting.
+meet :: proc(arg: rawptr) {
+	sync.atomic_add((^int)(arg), 1)
+	began := time.tick_now()
+	for sync.atomic_load((^int)(arg)) < 2 && time.tick_since(began) < 5 * time.Second {
+		intrinsics.cpu_relax()
+	}
+}
+
+@(test)
+helpers_run_the_task_beside_the_caller :: proc(t: ^testing.T) {
+	pool: host.Pool
+	host.pool_init(&pool, 3)
+	defer host.pool_destroy(&pool)
+	started: int
+	run(&pool.runner, pool.runner.threads, meet, &started)
+	testing.expect(t, started >= 2)
 }
