@@ -3,6 +3,7 @@ package main
 // The formats `--from` reads and `--to` writes, one row of FORMATS each, and the options a format refuses.
 
 import "core:strings"
+import json "../../json"
 import "message"
 
 Format :: enum u8 {
@@ -24,13 +25,15 @@ Format_Spec :: struct {
 	comments:   bool,
 	// The format a read-only format is written as, by default and by `--to`. Such a format is not itself written.
 	written_as: Maybe(Format),
+	// The spec its JSON texts are read in: `--argjson`, `fromjson` and a JSON-like format's input.
+	spec:       json.Spec,
 }
 
 @(rodata)
 FORMATS := [Format]Format_Spec {
 	.Json   = {name = "json"},
-	.Jsonc  = {name = "jsonc", comments = true},
-	.Json5  = {name = "json5", comments = true, written_as = .Jsonc},
+	.Jsonc  = {name = "jsonc", comments = true, spec = .Jsonc},
+	.Json5  = {name = "json5", comments = true, written_as = .Jsonc, spec = .Json5},
 	.Ndjson = {name = "ndjson", lines = true},
 	.Csv    = {name = "csv", cells = true},
 	.Tsv    = {name = "tsv", cells = true},

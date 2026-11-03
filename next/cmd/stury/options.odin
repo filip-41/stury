@@ -7,6 +7,7 @@ package main
 import "core:os"
 import "core:slice"
 import "core:strings"
+import "jq"
 import "message"
 
 Opts :: struct {
@@ -44,8 +45,9 @@ Cli :: struct {
 	files:      [dynamic]string,
 	// --arg, --argjson, --slurpfile and --rawfile, the first of a name standing.
 	var_names:  [dynamic]string,
-	var_values: [dynamic]string,
-	positional: [dynamic]string, // --args and --jsonargs
+	var_values: [dynamic]jq.Value,
+	positional: [dynamic]jq.Value, // --args and --jsonargs
+	reading:    jq.Reading, // how --argjson, --jsonargs and --slurpfile read their texts, as --from and --max-depth say
 	binding_flag: string,
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
@@ -82,6 +84,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
+	cli.reading = {FORMATS[o.from].spec, o.max_depth}
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
 		a := args[i]
@@ -93,9 +96,9 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			case !cli.validating && !cli.formatting && cli.filter == nil:
 				cli.filter = a
 			case rest_as == .Args:
-				append(&cli.positional, a)
+				append(&cli.positional, jq.valid_utf8(a))
 			case rest_as == .Json_Args:
-				append(&cli.positional, json_arg(a, "--jsonargs"))
+				append(&cli.positional, json_arg(cli.reading, a, "--jsonargs"))
 			case:
 				append(&cli.files, a)
 			}
@@ -272,15 +275,15 @@ bind_variable_option :: proc(cli: ^Cli, args: []string, i: int) {
 	if slice.contains(cli.var_names[:], args[i + 1]) {
 		return
 	}
-	v: string
+	v: jq.Value
 	switch name {
 	case "arg":
-		v = args[i + 2]
+		v = jq.valid_utf8(args[i + 2])
 	case "argjson":
-		v = json_arg(args[i + 2], a)
+		v = json_arg(cli.reading, args[i + 2], a)
 	case:
 		msg: string
-		v, msg = load_file(args[i + 2], name == "rawfile")
+		v, msg = load_file(args[i + 2], name == "rawfile", cli.reading)
 		if msg != "" {
 			message.write_stderr("stury: Bad JSON in %s %s %s: %s\n", a, args[i + 1], args[i + 2], msg)
 			os.exit(EXIT_USAGE)
@@ -427,7 +430,7 @@ add_lib_dir :: proc(cli: ^Cli, dir: string) {
 		cli.lib_dirs = make([dynamic]string)
 	}
 	dirs := &cli.lib_dirs.?
-	append(dirs, dir)
+	append(dirs, jq.real_path(dir))
 }
 
 // --indent's number as jq's strtol reads it: a sign, then decimal digits to the end, from -1 to 7.
