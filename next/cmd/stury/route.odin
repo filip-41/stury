@@ -5,7 +5,7 @@ package main
 
 import "core:slice"
 import core "../../core"
-import json "../../json"
+import engine "../../core/build"
 import "jq"
 
 // Why a filter is the interpreter's. `--explain` lists them in this order.
@@ -134,7 +134,6 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 	// scan's document grows by reallocation, which the arena does in place.
 	defer free_all(context.temp_allocator)
 	route := &run.route
-	opts := json.Options{max_depth = r.max_depth}
 	doc: core.Document
 	answers: []core.Answer
 	err: core.Path_Error
@@ -146,10 +145,8 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 		} else {
 			answers, err = core.query(&doc, route.path, allocator = context.temp_allocator)
 		}
-	} else if json.Spec(r.spec) == .Jsonc {
-		doc, err = json.scan(data, .Jsonc, route.path, opts = opts, allocator = context.temp_allocator)
 	} else {
-		doc, err = json.scan(data, .Json, route.path, opts = opts, allocator = context.temp_allocator)
+		doc, err = engine.scan(data, r, route.path, allocator = context.temp_allocator)
 	}
 	defer core.destroy(&doc)
 	if answers == nil {

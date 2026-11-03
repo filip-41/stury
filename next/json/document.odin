@@ -41,7 +41,7 @@ edit_member_sep :: proc(_: ^core.Document) -> string {
 // accepts it.
 @(private)
 SPELLING := core.Spelling {
-	text = text, key_equals = key_equals_decode, number = number, build = build_as, validate = validate_as,
+	text = text, key_equals = key_equals_decode, number = number, build = build_as, validate = validate_as, scan = scan_as,
 	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT, write = write_text, tokens = &TOKENS, records = &RECORDS,
 	tag_key = "json", key_open = "\"", key_close = "\":",
 }
@@ -56,7 +56,7 @@ SPELLING := core.Spelling {
 #assert(u16(Number_Spelling.Nan) < 1 << 15)
 
 // Reads `src` as spec `spec` into a document, as `core.build` does with `as(spec, opts)`.
-build :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 	return core.build(src, as(spec, opts), refuse_duplicates, allocator)
 }
 

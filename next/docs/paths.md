@@ -80,15 +80,19 @@ An `Answer` is a read result and holds no edit state. An edit names a node, and 
 A scan and a query are one operation. Reading paths gives a `Document` that holds only the nodes the paths reach, plus
 the answers, and a full build is the same read with every node kept.
 
-The entries of `json`, and of `dsv` with `dsv.Spec` and `dsv.Options`, and `core.query` for both. `scan`, `each_answer` and `query` are overload
-groups of a one-path form and a `[]core.Path` form, and the read options come straight after the paths.
+The entries live once in `core/build`, over a handle, and `core.query` serves both formats. `json` and `dsv` keep
+`scan`, `find`, `each_answer` and `set` as forwarders that take the format's own `Spec` and `Options` and call the same
+name in `core/build` with `as(spec, opts)`, so a caller who reads one format imports that format alone. `scan`,
+`each_answer` and `query` are overload groups of a one-path form and a `[]core.Path` form, and the read options come
+straight after the paths.
 
 ```odin
-scan        :: proc(src: []u8, $S: Spec, paths: core.Path | []core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, err: core.Path_Error)
-find        :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error)
-each_answer :: proc(src: []u8, $S: Spec, paths: core.Path | []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> core.Path_Error
+build.scan  :: proc(src: []u8, as: core.As, paths: core.Path | []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error)
+scan        :: proc(src: []u8, spec: Spec, paths: core.Path | []core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error)
+find        :: proc(src: []u8, spec: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error)
+each_answer :: proc(src: []u8, spec: Spec, paths: core.Path | []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> core.Path_Error
 core.query  :: proc(doc: ^core.Document, paths: core.Path | []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error)
-set         :: proc(src: []u8, $S: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error)
+set         :: proc(src: []u8, spec: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error)
 ```
 
 | Name | Gives | Freed by |
@@ -256,8 +260,10 @@ A query over a full document, a scan of the text and a value-tree model give the
 
 ## What a format calls
 
-A format's `scan` and `each_answer` are thin entries over `core/build`, and `core.query` reaches the engine through the
-format's table. A format gives the engine its walk and its `Spelling`, and writes no step logic.
+A format gives the engine its walk through `Spelling.scan`, which switches once on the handle's spec and runs the walk
+compiled for it with the hook the read needs, the stream's when `on` is set. `core/build`'s `scan`, `find`,
+`each_answer` and `set` call it, and `core.query` reaches the engine through the format's table. A format writes no
+step logic.
 
 | Name | Does |
 |---|---|

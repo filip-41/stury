@@ -54,6 +54,7 @@ SPELLING := core.Spelling {
 	number     = spelling_number,
 	build      = build_as,
 	validate   = validate_as,
+	scan       = scan_as,
 	resolve    = spelling_resolve,
 	close_end  = close_end,
 	query      = build.query,
@@ -75,7 +76,7 @@ SPELLING_DOUBLED :: u16(8)
 // first record data. `refuse_duplicates` returns an error at a header name that repeats another in the header row. The
 // document borrows `src`, which must outlive it, and `core.destroy` frees the document. It is `core.build` with
 // `as(spec, opts)`.
-build :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 	return core.build(src, as(spec, opts), refuse_duplicates, allocator)
 }
 

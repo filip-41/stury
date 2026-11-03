@@ -67,7 +67,7 @@ RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", 
 // Checks that `src` holds exactly one document: an optional leading BOM, the document, then whitespace and, in a
 // spec with comments, comments up to the text's end. Returns the fault, or nil. It is `core.validate` with
 // `as(spec, opts)`.
-validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
+validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
 	return core.validate(src, as(spec, opts))
 }
 

@@ -1,67 +1,79 @@
 package dsv
 
+import "base:runtime"
 import core "../core"
 import engine "../core/build"
 
-// Reads `path` over `src` as spec `S`, into a partial document holding what the path reached and `Document.answers` in
-// text order. `.[i]` is a record, `.[i].name` a cell by its header name, and `.[i][j]` a cell by position. The partial
-// document keeps a kept cell's key beside it, so it holds no shared keys. Everything the walk passes is still judged,
-// unless `read.stop_early` ends it. `core.destroy` frees the document, which borrows `src`. With
-// `read.refuse_duplicates` the document holds the whole text.
+// The path reads of `core/build` over dsv's handle. `scan`, `each_answer`, `find` and `set` take `spec` and `opts` and
+// forward to the same names in `core/build` with `as(spec, opts)`. `.[i]` is a record, `.[i].name` a cell by its header
+// name, and `.[i][j]` a cell by position. A partial document keeps a kept cell's key beside it, so it holds no shared
+// keys.
+
 @(private)
-scan_one :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, err: core.Path_Error) {
-	return scan_many(src, S, []core.Path{path}, read, opts, allocator)
+scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+	return engine.scan_one(src, as(spec, opts), path, read, allocator)
 }
 
-// Reads up to 64 `paths` in one read, as `scan_one`. An answer's `path` is its path's number, and the answers of all the
-// paths are in one text order.
 @(private)
-scan_many :: proc(src: []u8, $S: Spec, paths: []core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, err: core.Path_Error) {
-	if read.refuse_duplicates {
-		built, e := build_spec(src, S, opts, true, allocator)
-		return engine.query_built(&built, e, paths, read)
+scan_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+	return engine.scan_many(src, as(spec, opts), paths, read, allocator)
+}
+
+scan :: proc {scan_one, scan_many}
+
+@(private)
+each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> core.Path_Error {
+	return engine.each_answer_one(src, as(spec, opts), path, state, on, read, allocator)
+}
+
+@(private)
+each_answer_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> core.Path_Error {
+	return engine.each_answer_many(src, as(spec, opts), paths, state, on, read, allocator)
+}
+
+each_answer :: proc {each_answer_one, each_answer_many}
+
+find :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
+	return engine.find(src, as(spec, opts), path, read, allocator)
+}
+
+set :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+	return engine.set(src, as(spec, opts), path, text, read, refuse_duplicates, allocator)
+}
+
+// The spelling's `scan`: the walk compiled for the handle's spec.
+@(private)
+scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
+	switch Spec(handle.spec) {
+	case .Csv:   return scan_spec(src, .Csv, handle, paths, read, state, on, allocator)
+	case .Tsv:   return scan_spec(src, .Tsv, handle, paths, read, state, on, allocator)
+	case .Plain: return scan_spec(src, .Plain, handle, paths, read, state, on, allocator)
 	}
+	return {}, {kind = .Unsupported}
+}
+
+// Walks `src` as spec `S` with the scan's hook, the stream's when `on` is set, and ends the read.
+@(private)
+scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
+	opts := options_of(handle)
 	h: engine.Scan
 	// A record is a container inside the document's array, so a dsv text nests at most two containers.
 	frames: [8]u64 = ---
-	if e := engine.scan_start(&h, src, as(S, opts), paths, read, true, allocator, 8, frames[:]); e.kind != .None {
+	if e := engine.scan_start(&h, src, handle, paths, read, true, allocator, 8, frames[:], on != nil, state, on); e.kind != .None {
 		return {}, e
 	}
 	regs := engine.BUILDER_REGS
 	hi: u64
 	fault: Maybe(core.Fault)
-	if h.many == nil {
+	records: Record_Read
+	if on != nil {
+		hi, fault = walk_many(src, S, opts, &h, &records, &regs, engine.scan_hook_stream)
+	} else if h.many == nil {
 		hi, fault = walk(src, 0, S, opts, &h, &regs, engine.scan_hook)
 	} else {
-		records: Record_Read
 		hi, fault = walk_many(src, S, opts, &h, &records, &regs, engine.scan_hook_many)
 	}
 	return engine.scan_end(&h, regs, hi, fault)
-}
-
-scan :: proc {scan_one, scan_many}
-
-// Calls `on` with each answer of `path` or `paths` as it becomes known, with no document, as `json.each_answer`.
-@(private)
-each_answer_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> core.Path_Error {
-	if read.refuse_duplicates {
-		built, e := build_spec(src, S, opts, true, allocator)
-		core.destroy(&built)
-		if e.kind != .None {
-			return core.path_error(e)
-		}
-	}
-	h: engine.Scan
-	frames: [8]u64 = ---
-	if e := engine.scan_start(&h, src, as(S, opts), paths, read, true, allocator, 8, frames[:], true, state, on); e.kind != .None {
-		return e
-	}
-	regs := engine.BUILDER_REGS
-	records: Record_Read
-	hi, fault := walk_many(src, S, opts, &h, &records, &regs, engine.scan_hook_stream)
-	doc, err := engine.scan_end(&h, regs, hi, fault)
-	core.destroy(&doc)
-	return err
 }
 
 // What a re-walk of one record needs: the header's cells, which the record's own walk does not read, and the hook.
@@ -128,35 +140,4 @@ record_hook :: proc "contextless" (r: ^Record_Read, s: core.Hook_Regs, t: core.T
 		}
 	}
 	return r.on(r.h, s, t)
-}
-
-@(private)
-each_answer_one :: proc(src: []u8, $S: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> core.Path_Error {
-	return each_answer_many(src, S, []core.Path{path}, state, on, read, opts, allocator)
-}
-
-each_answer :: proc {each_answer_one, each_answer_many}
-
-// Reads the first answer of `path`, as `scan` with a limit of one. `answer` is nil when the path gives none.
-find :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
-	one := path
-	one.limit = min(path.limit.? or_else 1, 1)
-	doc, err = scan_one(src, S, one, read, opts, allocator)
-	if len(doc.answers) > 0 {
-		answer = doc.answers[0]
-	}
-	return
-}
-
-// Writes `text` as the value at every answer of `path` over `src`, in one call: a build of the text, one edit per answer
-// and a commit. A `Name` the path ends in that its container lacks is inserted after the container's last member. The result
-// is the new text, which the caller frees with `allocator`. `refuse_duplicates` is
-// `build`'s, and `read` picks among a repeated key as `query` does.
-set :: proc(src: []u8, $S: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
-	doc, berr := build_spec(src, S, opts, refuse_duplicates, allocator)
-	defer core.destroy(&doc)
-	if berr.kind != .None {
-		return nil, {kind = .Edit, edit = berr}
-	}
-	return engine.set_answers(&doc, path, text, read, allocator)
 }

@@ -245,16 +245,24 @@ builder_hook_plain :: #force_inline proc (h: ^Builder, s: core.Hook_Regs, t: cor
 builder_hook_plain_refuse :: #force_inline proc (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 builder_refuse_result :: #force_inline proc (h: ^Builder, open, end: core.Node_Index) {
 builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0) -> Builder {
+each_answer :: proc {each_answer_one, each_answer_many}
+each_answer_many :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+each_answer_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
 feed_nodes :: proc (
+find :: proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
 query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
 query_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Path_Error) {
+scan :: proc {scan_one, scan_many}
 scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(core.Fault)) -> (core.Document, core.Path_Error) {
 scan_hook :: #force_inline proc (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 scan_hook_many :: #force_inline proc (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 scan_hook_stream :: #force_inline proc (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 scan_kept :: proc (h: ^Scan, d: int) -> bool {
+scan_many :: proc(src: []u8, as: core.As, paths: []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+scan_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
 scan_reserve :: proc (h: ^Scan, nodes: int) -> bool {
 scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error {
+set :: proc(src: []u8, as: core.As, path: core.Path, text: string, read := core.Query_Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 # core/typed
 Arm :: struct {
@@ -390,10 +398,10 @@ SPINE_LEVELS :: 4
 Spec :: enum u8 {
 Tolerance :: enum u8 {
 as :: proc (spec: Spec, opts := Options{}) -> core.As {
-build :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 each_answer :: proc {each_answer_one, each_answer_many}
-find :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
+find :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
 format :: proc(src: []u8, $S: Spec, opts := core.Write_Options{}, read := Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
 marshal :: proc(value: any, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
 number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
@@ -401,11 +409,11 @@ number_spelling_of :: #force_inline proc (spelling: u16) -> Number_Spelling {
 plan_make :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
 put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind {
 scan :: proc {scan_one, scan_many}
-set :: proc(src: []u8, $S: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+set :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 spine :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool) {
 text :: #force_inline proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
-validate :: proc (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
+validate :: #force_inline proc (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
 walk :: proc (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
 # dsv
 Detail :: enum u8 {
@@ -414,13 +422,13 @@ RULES := core.Rules{, {{}, {, }, {, }}}
 Spec :: enum u8 {
 Tolerance :: enum u8 {
 as :: proc (spec: Spec, layout := Options{}) -> core.As {
-build :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 each_answer :: proc {each_answer_one, each_answer_many}
-find :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
+find :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
 marshal :: proc(value: any, spec := Spec.Csv, layout := Options{}, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
 plan_make :: proc(T: typeid, spec: Spec, layout := Options{}, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
 scan :: proc {scan_one, scan_many}
-set :: proc(src: []u8, $S: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+set :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
-validate :: proc (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
+validate :: #force_inline proc (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
 walk :: proc (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {

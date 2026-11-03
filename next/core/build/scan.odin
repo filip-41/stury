@@ -448,6 +448,81 @@ query_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []co
 	return {}, e
 }
 
+// Reads `path` over `src` as `as` says, into a partial document holding what the path reached and `Document.answers` in
+// text order, through the format's `Spelling.scan`. Everything the walk passes is still judged, unless `read.stop_early`
+// ends it. `core.destroy` frees the document, which borrows `src`. With `read.refuse_duplicates` the document holds the
+// whole text. A handle with no format's scan is `.Unsupported`.
+scan_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+	return scan_many(src, as, []core.Path{path}, read, allocator)
+}
+
+// Reads up to 64 `paths` in one read, as `scan_one`. An answer's `path` is its path's number, and the answers of all the
+// paths are in one text order.
+scan_many :: proc(src: []u8, as: core.As, paths: []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+	if read.refuse_duplicates {
+		built, e := core.build(src, as, true, allocator)
+		return query_built(&built, e, paths, read)
+	}
+	if as.spelling == nil || as.spelling.scan == nil {
+		return {}, {kind = .Unsupported}
+	}
+	return as.spelling.scan(src, as, paths, read, nil, nil, allocator)
+}
+
+scan :: proc {scan_one, scan_many}
+
+// Calls `on` with each answer of `path` or `paths` as it becomes known, with no document. `on` returns false to stop the
+// read. A found container answers at its close. A repeated key can take an answer back under `.Last`, so an answer
+// through a `Name` waits for that `Name`'s container to close there, and `.First` gives each as soon as it is read.
+// Answers come in the order they are known, and a path with a `Descend` or a negative index that has a limit gives them
+// all at the end. `read.refuse_duplicates` reads the whole text first, so a fault there comes before any answer.
+each_answer_many :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+	if read.refuse_duplicates {
+		built, e := core.build(src, as, true, allocator)
+		core.destroy(&built)
+		if e.kind != .None {
+			return core.path_error(e)
+		}
+	}
+	if as.spelling == nil || as.spelling.scan == nil {
+		return {kind = .Unsupported}
+	}
+	doc, err := as.spelling.scan(src, as, paths, read, state, on, allocator)
+	core.destroy(&doc)
+	return err
+}
+
+each_answer_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+	return each_answer_many(src, as, []core.Path{path}, state, on, read, allocator)
+}
+
+each_answer :: proc {each_answer_one, each_answer_many}
+
+// Reads the first answer of `path`, as `scan` with a limit of one. `answer` is nil when the path gives none, as `.[]` of
+// an empty array.
+find :: proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
+	one := path
+	one.limit = min(path.limit.? or_else 1, 1)
+	doc, err = scan_one(src, as, one, read, allocator)
+	if len(doc.answers) > 0 {
+		answer = doc.answers[0]
+	}
+	return
+}
+
+// Writes `text` as the value at every answer of `path` over `src`, in one call: a build of the text, one edit per answer
+// and a commit. A `Name` the path ends in that its container lacks is inserted after the container's last member. The
+// result is the new text, which the caller frees with `allocator`. `refuse_duplicates` is `core.build`'s, and `read`
+// picks among a repeated key as `query` does.
+set :: proc(src: []u8, as: core.As, path: core.Path, text: string, read := core.Query_Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+	doc, berr := core.build(src, as, refuse_duplicates, allocator)
+	defer core.destroy(&doc)
+	if berr.kind != .None {
+		return nil, {kind = .Edit, edit = berr}
+	}
+	return set_answers(&doc, path, text, read, allocator)
+}
+
 // Feeds the step logic the tokens of nodes `from ..< to` by `feed_nodes`. Only the containers on the path open, so `ends`
 // holds a frame per step, or one per depth with a `Descend`.
 @(private)

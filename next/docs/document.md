@@ -18,9 +18,9 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/compose/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
 | `core/compose/commit.odin` | the commit a format's table points at: plan, compose, splice, the read of the result |
 | `core/path.odin` | `Path`, its steps and spellings, `Answer`, `Token_Answer`, `Presence`, `member_of`, `element_of` and `length_exact` |
-| `core/build/scan.odin` | the one engine: the hook a format's `scan` walks with, the partial document, the query behind `core.query`, `set_answers` |
+| `core/build/scan.odin` | the one engine: the hook a format's `scan` walks with, the partial document, the query behind `core.query`, `scan`, `find`, `each_answer` and `set` over a handle |
 | `core/build/many.odin` | what only `$MANY` reads hold: armed path sets, rings of negative indexes, answers placed in text order, the stream |
-| `json/query.odin`, `dsv/query.odin` | each format's `scan`, `find`, `each_answer` and `set` |
+| `json/query.odin`, `dsv/query.odin` | each format's `Spelling.scan` walk, and `scan`, `find`, `each_answer` and `set` as forwarders |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, every decoder |
 | `core/spell/text.odin` | `decode_text`, `decoded_equals`, `bytes_equal` and `Pending`, the decoders' and readers' byte helpers |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |

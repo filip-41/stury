@@ -177,7 +177,7 @@ walk_keys :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}
 
 // The walk's verdict on `src` for spec `S`, with no hook and after one leading BOM. Whether the first record is a
 // header changes the verdict only under `.Ragged`. It is `core.validate` with `as(spec, opts)`.
-validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
+validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
 	return core.validate(src, as(spec, opts))
 }
 

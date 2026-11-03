@@ -234,7 +234,9 @@ Duplicates :: enum u8 {
 // when `buf` is too short, so a read never allocates. A node whose `SPELLING_DECODE` bit is clear is its span without
 // the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token.
 // `build` reads a text into a document and `validate` judges one without building, each as the handle says, see
-// `core.build` and `core.validate`. `resolve` returns what a `Plain` node is. `close_end` returns the byte just past a container's closing bytes, found
+// `core.build` and `core.validate`. `scan` reads paths over a text as the handle says into a partial document, or gives
+// each answer to `on` when it is set, see `core/build`'s `scan` and `each_answer`. `resolve` returns what a `Plain` node
+// is. `close_end` returns the byte just past a container's closing bytes, found
 // from its last descendant or its open, over the whitespace and comments the format allows there, the root's close is
 // `Document.root_close`, so a service may return it without a scan. `edit` points at the
 // format's edit services, nil for a format that accepts no edits. `tag_key` is the format's own struct tag key, and
@@ -250,6 +252,7 @@ Spelling :: struct {
 	number:     proc(v: ^Token_View, t: Token) -> Number,
 	build:      proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error),
 	validate:   proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
+	scan:       proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error),
 	resolve:    proc(doc: ^Document, i: Node_Index) -> Kind,
 	close_end:  proc(doc: ^Document, i: Node_Index) -> u64,
 	query:      proc(doc: ^Document, paths: []Path, read: Query_Options, allocator: runtime.Allocator) -> (answers: []Answer, err: Path_Error),
