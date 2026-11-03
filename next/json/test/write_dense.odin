@@ -102,23 +102,27 @@ write_dense_string_edges :: proc(t: ^testing.T) {
 	}
 }
 
-// A backslash run ends at each offset around the end of the writer's first 2 KB, whose escape state the next 2 KB take.
+// A backslash run ends at each offset around the end of the writer's first 2 KB, whose escape state the next 2 KB take, and
+// of later segments, which are written blind while no space shows. A newline after the value is dropped.
 @(test)
 write_dense_segment_edges :: proc(t: ^testing.T) {
-	for n in 2030 ..< 2060 {
-		for piece in ([]string{`\" ", " "`, `\\", " "`, `\\\" ", " "`}) {
-			b: strings.Builder
-			defer strings.builder_destroy(&b)
-			strings.write_byte(&b, '"')
-			for _ in 0 ..< n {
-				strings.write_byte(&b, 'a')
-			}
-			strings.write_string(&b, piece)
-			src: [dynamic]u8
-			defer delete(src)
-			dense_text(&src, transmute([]u8)strings.to_string(b))
-			if !check_dense(t, src[:]) {
-				return
+	for start in ([]int{2030, 2078, 4126, 8222}) {
+		for n in start ..< start + 30 {
+			for piece in ([]string{`\" ", " "`, `\\", " "`, `\\\" ", " "`}) {
+				b: strings.Builder
+				defer strings.builder_destroy(&b)
+				strings.write_byte(&b, '"')
+				for _ in 0 ..< n {
+					strings.write_byte(&b, 'a')
+				}
+				strings.write_string(&b, piece)
+				src: [dynamic]u8
+				defer delete(src)
+				dense_text(&src, transmute([]u8)strings.to_string(b))
+				append(&src, '\n')
+				if !check_dense(t, src[:]) {
+					return
+				}
 			}
 		}
 	}
