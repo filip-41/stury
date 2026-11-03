@@ -16,6 +16,7 @@ Model_Record :: struct {
 	at:    u64,
 	text:  string,
 	fault: Maybe(core.Fault),
+	key:   string,
 }
 
 @(private = "file")
@@ -48,10 +49,149 @@ model_fault :: proc(text: string, at: u64, spec: json.Spec) -> Maybe(core.Fault)
 	return nil
 }
 
+// Returns the first offset at or past `i` that is no whitespace, in a spec with comments no comment, in JSON5 no BOM,
+// and with `rs` no 0x1E.
+@(private = "file")
+model_gap :: proc(src: string, i: int, spec: json.Spec, rs: bool) -> int {
+	i := i
+	for i < len(src) {
+		if is_blank(src[i]) || rs && src[i] == 0x1e {
+			i += 1
+		} else if spec == .Json5 && has_bom(src[i:]) {
+			i += 3
+		} else if spec != .Json && (strings.has_prefix(src[i:], "//") || strings.has_prefix(src[i:], "/*")) {
+			// A `//` comment ends at a CR or an LF.
+			e := strings.index_any(src[i:], "\r\n") if src[i + 1] == '/' else strings.index(src[i + 2:], "*/") + 4
+			e = len(src) - i if e < 0 && src[i + 1] == '/' else e
+			// A comment that does not end, or holds a control byte but a tab or a line end, is no gap.
+			if e < 4 && src[i + 1] == '*' || strings.index_proc(src[i:][:e], proc(r: rune) -> bool {return r < 0x20 && r != '\t' && r != '\r' && r != '\n'}) >= 0 {
+				return i
+			}
+			i += e
+		} else {
+			break
+		}
+	}
+	return i
+}
+
+// Returns one past the value that starts at `i`: a string to its closing quote, a container to the bracket that
+// closes it, anything else to the next byte that may follow a value.
+@(private = "file")
+model_value_end :: proc(src: string, i: int, spec: json.Spec) -> int {
+	depth := 0
+	j := i
+	for j < len(src) {
+		c := src[j]
+		switch {
+		case c == '"' || c == '\'' && spec == .Json5:
+			j += 1
+			for j < len(src) && src[j] != c {
+				j += 2 if src[j] == '\\' else 1
+			}
+			j = min(j + 1, len(src))
+		case c == '[' || c == '{':
+			depth += 1
+			j += 1
+			continue
+		case c == ']' || c == '}':
+			depth -= 1
+			j += 1
+		case depth > 0:
+			j = max(model_gap(src, j, spec, false), j + 1)
+			continue
+		case:
+			k := j
+			for k < len(src) && !strings.contains_rune(",:[]{}\"'/ \t\r\n\x1e", rune(src[k])) {
+				k += 1
+			}
+			return max(k, j + 1)
+		}
+		if depth <= 0 {
+			return j
+		}
+	}
+	return j
+}
+
+@(private = "file")
+is_ident :: proc(c: u8, first: bool) -> bool {
+	return c == '_' || c == '$' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || !first && c >= '0' && c <= '9'
+}
+
 // Frames `src` byte by byte. Returns the records and the framing's own fault.
 @(private = "file")
 model_frame :: proc(src: string, framing: core.Framing, spec: json.Spec) -> (out: [dynamic]Model_Record, fault: Maybe(core.Fault)) {
 	out = make([dynamic]Model_Record, context.temp_allocator)
+	start := 3 if has_bom(src) else 0
+	if framing == .Concatenated {
+		for i := model_gap(src, start, spec, true); i < len(src); i = model_gap(src, i, spec, true) {
+			j := model_value_end(src, i, spec)
+			// A broken value's fault may lie past where this framer ends it, as in an unclosed comment before it.
+			if model_fault(src[i:j], u64(i), spec) != nil {
+				return out, model_fault(src[i:], u64(i), spec)
+			}
+			append(&out, Model_Record{at = u64(i), text = src[i:j]})
+			i = j
+		}
+		return
+	}
+	if framing == .Entries {
+		// The entries' fault is the whole text's, whichever entry or byte of the root breaks it.
+		fault = model_fault(src, 0, spec)
+		i := model_gap(src, start, spec, false)
+		if i == len(src) || src[i] != '[' && src[i] != '{' {
+			return
+		}
+		close := src[i] + 2
+		i = model_gap(src, i + 1, spec, false)
+		for n := 0;; n += 1 {
+			if i < len(src) && src[i] == close && n == 0 {
+				return
+			}
+			if n > 0 {
+				if i == len(src) || src[i] != ',' {
+					return
+				}
+				i = model_gap(src, i + 1, spec, false)
+				if i < len(src) && src[i] == close && spec != .Json {
+					return
+				}
+			}
+			key := ""
+			if close == '}' {
+				k := i
+				if i < len(src) && (src[i] == '"' || spec == .Json5 && src[i] == '\'') {
+					i = model_value_end(src, i, spec)
+					if model_fault(src[k:i], u64(k), spec) != nil {
+						return
+					}
+				} else if spec == .Json5 {
+					for i < len(src) && is_ident(src[i], i == k) {
+						i += 1
+					}
+				}
+				if i == k {
+					return
+				}
+				key = src[k:i]
+				i = model_gap(src, i, spec, false)
+				if i == len(src) || src[i] != ':' {
+					return
+				}
+				i = model_gap(src, i + 1, spec, false)
+			}
+			if i == len(src) {
+				return
+			}
+			j := model_value_end(src, i, spec)
+			if model_fault(src[i:j], u64(i), spec) != nil {
+				return
+			}
+			append(&out, Model_Record{at = u64(i), text = src[i:j], key = key})
+			i = model_gap(src, j, spec, false)
+		}
+	}
 	stop: u8 = '\n' if framing == .Lines else 0x1e
 	i := 3 if has_bom(src) else 0
 	first := true
@@ -73,7 +213,7 @@ model_frame :: proc(src: string, framing: core.Framing, spec: json.Spec) -> (out
 				return out, core.Fault{at = u64(k), rules = &json.RULES, kind = .Bad_Char}
 			}
 		} else if k < hi {
-			append(&out, Model_Record{u64(k), src[k:hi], model_fault(src[k:hi], u64(k), spec)})
+			append(&out, Model_Record{at = u64(k), text = src[k:hi], fault = model_fault(src[k:hi], u64(k), spec)})
 		}
 		first = false
 		i = j + 1
@@ -89,8 +229,8 @@ expect_model :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: js
 	defer records.close(&it)
 	n := 0
 	for rec in records.next(&it) {
-		if n >= len(want) || rec.at != want[n].at || string(rec.text) != want[n].text {
-			testing.expectf(t, false, "%v %v %q: record %d at %d %q", framing, spec, src, n, rec.at, rec.text)
+		if n >= len(want) || rec.at != want[n].at || string(rec.text) != want[n].text || string(rec.key) != want[n].key {
+			testing.expectf(t, false, "%v %v %q: record %d at %d %q key %q, want %v", framing, spec, src, n, rec.at, rec.text, rec.key, want[n] if n < len(want) else Model_Record{})
 			return false
 		}
 		n += 1
@@ -145,6 +285,10 @@ PIECES := []string {
 @(private = "file", rodata)
 SEPARATORS := []string{"\n", "\r\n", "\n\n", "\n  \t\n", " \n", "\r\n\r\n"}
 
+// Object members' keys under `.Entries`, JSON5's among them.
+@(private = "file", rodata)
+KEYS := []string{`"a":`, `"b\"c" : `, "\"k\"\n:", `a:`, `'q' :`, `/* c */ "x"/* c */:`}
+
 @(private = "file")
 seeded_text :: proc(gen: rand.Generator, framing: core.Framing) -> string {
 	b := strings.builder_make(context.temp_allocator)
@@ -152,7 +296,23 @@ seeded_text :: proc(gen: rand.Generator, framing: core.Framing) -> string {
 		strings.write_string(&b, "\xef\xbb\xbf")
 	}
 	n := 1 + rand.int_max(6, gen)
-	for _ in 0 ..< n {
+	if framing == .Entries {
+		// A root array or object of the pieces, with a trailing comma at times.
+		object := rand.int_max(2, gen) == 0
+		strings.write_byte(&b, '{' if object else '[')
+		for i in 0 ..< n {
+			if object {
+				strings.write_string(&b, rand.choice(KEYS, gen))
+			}
+			strings.write_string(&b, rand.choice(PIECES, gen))
+			strings.write_string(&b, rand.choice(SEPARATORS, gen))
+			if i < n - 1 || rand.int_max(4, gen) == 0 {
+				strings.write_byte(&b, ',')
+			}
+		}
+		strings.write_string(&b, "}\n" if object else "]\n")
+	}
+	for _ in 0 ..< n * int(framing != .Entries) {
 		if framing == .Seq {
 			strings.write_byte(&b, 0x1e)
 		}
@@ -174,7 +334,7 @@ records_follow_the_model :: proc(t: ^testing.T) {
 	// Each byte of a text in turn becomes a byte that breaks or ends a value.
 	breakers := "x\"}],:\n\r \x1e\x00\\"
 	for round in 0 ..< 200 {
-		framing := core.Framing.Lines if round % 2 == 0 else core.Framing.Seq
+		framing := core.Framing(round % 4)
 		src := seeded_text(gen, framing)
 		for spec in json.Spec {
 			if !expect_model(t, src, framing, spec) {
@@ -214,6 +374,27 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(faults), 2)
 	testing.expect_value(t, faults[0], core.Fault{at = 5, rules = &json.RULES, kind = .Truncated})
 	testing.expect_value(t, faults[1], core.Fault{at = 7, rules = &json.RULES, kind = .Trailing})
+
+	// The members of a root object, keys as written, and a root at the deepest level, whose entries may be no container.
+	obj := transmute([]u8)string(`{"a": 1, "b\"c" :[2] , "a":{}}`)
+	it3 := records.open(obj, json.as(.Json), .Entries)
+	keys := []string{`"a"`, `"b\"c"`, `"a"`}
+	values := []string{"1", "[2]", "{}"}
+	n := 0
+	for r in records.next(&it3) {
+		testing.expect(t, string(r.key) == keys[n] && string(r.text) == values[n] && string(obj[r.at:][:len(r.text)]) == values[n])
+		n += 1
+	}
+	testing.expect(t, n == 3 && it3.fault == nil)
+	flat := json.as(.Json)
+	flat.read.max_depth = 1
+	faults, _ = records.check(transmute([]u8)string("[1, 2]"), flat, .Entries, context.temp_allocator)
+	testing.expect_value(t, len(faults), 0)
+	faults, _ = records.check(transmute([]u8)string("[1, [2]]"), flat, .Entries, context.temp_allocator)
+	testing.expect(t, len(faults) == 1 && faults[0].kind == .Too_Deep && faults[0].at == 4)
+	// Concatenated documents: a number runs on into a letter as one bad token.
+	faults, _ = records.check(transmute([]u8)string("1 [2]{}\"s\"3x"), json.as(.Json), .Concatenated, context.temp_allocator)
+	testing.expect(t, len(faults) == 1 && faults[0].kind == .Trailing && faults[0].at == 11)
 
 	// RFC 7464: text before the first 0x1E ends the records.
 	it2 := records.open(transmute([]u8)string(" 1\x1e2\n"), json.as(.Json), .Seq)
@@ -319,7 +500,7 @@ records_read_as_unmarshal :: proc(t: ^testing.T) {
 	sink: typed.Collected
 	reads := []typed.Read_Options{{}, {collect = &sink}, {refuse_duplicates = true}, {unknown = .Refuse}}
 	for round in 0 ..< 16 {
-		framing := core.Framing.Lines if round % 2 == 0 else core.Framing.Seq
+		framing := core.Framing(round % 4)
 		src := seeded_text(gen, framing)
 		buf := make([]u8, len(src), context.temp_allocator)
 		for i in -1 ..< len(src) {

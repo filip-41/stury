@@ -1,5 +1,6 @@
 // JSON's record services (`core/records`). `.Lines` (NDJSON) and `.Seq` (RFC 7464) frame a record by a scan for the
-// byte that ends it, and a record is read in place in the whole text, not as a slice cut from it.
+// byte that ends it, and a record is read in place in the whole text, not as a slice cut from it. `.Concatenated` and
+// `.Entries` frame a record by a walk of its value, which judges it.
 package json
 
 import "base:intrinsics"
@@ -11,20 +12,164 @@ import records "../core/records"
 
 @(private, rodata)
 RECORDS := records.Services {
-	next  = next_record,
+	next  = {.Lines = frame_line, .Seq = frame_line, .Concatenated = next_walked, .Entries = next_walked},
 	judge = judge_record,
 	read  = read_record,
 	build = build_record,
 }
 
 @(private)
-next_record :: proc(it: ^records.Reader) -> (records.Record, bool) {
-	#partial switch it.framing {
-	case .Lines, .Seq:
-		return frame_line(it)
+next_walked :: proc(it: ^records.Reader) -> (records.Record, bool) {
+	switch Spec(it.as.read.spec) {
+	case .Json:  return next_framed(it, .Json)
+	case .Jsonc: return next_framed(it, .Jsonc)
+	case .Json5: return next_framed(it, .Json5)
 	}
-	it.fault = core.Fault{kind = .Bad_Option}
 	return {}, false
+}
+
+@(private)
+next_framed :: proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
+	h: core.No_Hooks
+	regs: core.Hook_Regs
+	rec, ok, _ := frame_value(it, S, options_of(it.as.read), &h, &regs, core.no_hook)
+	return rec, ok
+}
+
+// Frames the next record under `.Concatenated` or `.Entries` by a walk of its value through the hook. `stopped` says
+// the hook stopped the walk, so the record's end is not known and `it.pos` is no boundary.
+//
+// `.Concatenated`: each document of the text, as a loop of `walk` reads them, from its value's first byte. A fault ends
+// the records.
+//
+// `.Entries`: each element of the root array, or the value of each member of the root object, whose key is in
+// `rec.key`. Each value is walked one level below the root. A scalar root has no entries and is judged whole. Any
+// fault ends the records with the fault of a walk of the whole text, which `validate` gives, as a fault in the root's
+// own bytes depends on what came before. `state[0]` is the root's open bracket once it is read and 1 after its close,
+// and `state[1]` is 1 after an entry.
+@(private)
+frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (rec: records.Record, ok: bool, stopped: bool) {
+	src := it.src
+	p := raw_data(src)
+	end := p[len(src):]
+	if it.framing == .Concatenated {
+		q, _ := document_start(src, it.pos, S)
+		q = gap_end(q, end, S)
+		hi, fault, stop := walk_from(src, q, S, opts, h, regs, on)
+		it.pos = hi
+		if fault == nil && !stop && runs_on(src, q, hi) {
+			fault = core.fault_of(core.fault_at(hi, .Trailing), &RULES)
+		}
+		if fault != nil || q == end {
+			it.fault = fault
+			return
+		}
+		at := u64(intrinsics.ptr_sub(q, p))
+		return {text = src[at:hi], at = at}, true, stop
+	}
+	if it.state[0] == 1 {
+		return
+	}
+	q := gap_end(p[it.pos:], end, S)
+	value := opts
+	value.max_depth = (opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH) - 1
+	key: []u8
+	none: core.No_Hooks
+	zero: core.Hook_Regs
+	whole: {
+		if it.state[0] == 0 {
+			if q == end || q[0] != '[' && q[0] != '{' {
+				break whole
+			}
+			it.state[0] = q[0]
+			q = gap_end(q[1:], end, S)
+		}
+		// `]` and `}` are 2 past their open brackets.
+		close := it.state[0] + 2
+		closes := q < end && q[0] == close
+		if it.state[1] == 1 && !closes {
+			if q == end || q[0] != ',' {
+				break whole
+			}
+			q = gap_end(q[1:], end, S)
+			closes = .Trailing_Commas in FEATURES[S] && q < end && q[0] == close
+		}
+		if closes {
+			it.state[0] = 1
+			it.fault = tail_fault(src, u64(intrinsics.ptr_sub(q, p)) + 1, S)
+			return
+		}
+		if close == '}' {
+			k := q
+			if q < end && (q[0] == '"' || S == .Json5 && q[0] == '\'') {
+				hi, fault, _ := walk_from(src, q, S, opts, &none, &zero, core.no_hook)
+				if fault != nil {
+					break whole
+				}
+				q = p[hi:]
+			} else {
+				when .Es5 in FEATURES[S] {
+					if r, _, kind := ident5(q, end); kind == .None {
+						q = r
+					}
+				}
+				if q == k {
+					break whole
+				}
+			}
+			key = src[intrinsics.ptr_sub(k, p):intrinsics.ptr_sub(q, p)]
+			q = gap_end(q, end, S)
+			if q == end || q[0] != ':' {
+				break whole
+			}
+			q = gap_end(q[1:], end, S)
+		}
+		// Under a root at the deepest level a value may be no container.
+		if q == end || value.max_depth == 0 && (q[0] == '[' || q[0] == '{') {
+			break whole
+		}
+		hi, fault, stop := walk_from(src, q, S, value, h, regs, on)
+		if fault != nil || !stop && runs_on(src, q, hi) {
+			break whole
+		}
+		at := u64(intrinsics.ptr_sub(q, p))
+		it.pos = hi
+		it.state[1] = 1
+		return {text = src[at:hi], at = at, key = key}, true, stop
+	}
+	it.state[0] = 1
+	it.fault = walk_text(src, 0, S, opts, &none, &zero, core.no_hook)
+	return
+}
+
+// Whether the number or literal at `q`, which a walk ended at `hi`, runs on into a byte that may not follow a value, so
+// that, as jq reads `1x`, it is one bad token and no record.
+@(private)
+runs_on :: #force_inline proc "contextless" (src: []u8, q: [^]u8, hi: u64) -> bool {
+	if hi >= u64(len(src)) {
+		return false
+	}
+	switch q[0] {
+	case '[', '{', '"', '\'':
+		return false
+	}
+	switch src[hi] {
+	case ' ', '\t', '\r', '\n', 0x1e, ',', ':', '[', ']', '{', '}', '"', '\'', '/':
+		return false
+	}
+	return true
+}
+
+// Returns the first byte at or past `q` that is no whitespace and, in a spec with comments, starts no comment, or the
+// first byte of a comment that does not end.
+@(private)
+gap_end :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec) -> [^]u8 {
+	when .Comments in FEATURES[S] {
+		r, _, kind := comment_run(q, end, false, S)
+		return r if kind == .None else q
+	} else {
+		return skip_ws(q, end)
+	}
 }
 
 // Frames the next record under `.Lines` or `.Seq`: from its first byte that is no whitespace up to the next LF or
@@ -79,6 +224,9 @@ find_byte :: #force_inline proc "contextless" (src: []u8, lo: u64, c: u8) -> u64
 
 @(private)
 judge_record :: proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) {
+	if it.framing >= .Concatenated {
+		return nil
+	}
 	switch Spec(it.as.read.spec) {
 	case .Json:  return judge_spec(it, rec, .Json)
 	case .Jsonc: return judge_spec(it, rec, .Jsonc)
@@ -101,6 +249,13 @@ judge_spec :: proc(it: ^records.Reader, rec: records.Record, $S: Spec) -> Maybe(
 
 @(private)
 read_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
+	if it.framing >= .Concatenated {
+		switch Spec(it.as.read.spec) {
+		case .Json:  return read_framed(it, target, T, plan, read, allocator, err, .Json)
+		case .Jsonc: return read_framed(it, target, T, plan, read, allocator, err, .Jsonc)
+		case .Json5: return read_framed(it, target, T, plan, read, allocator, err, .Json5)
+		}
+	}
 	switch Spec(it.as.read.spec) {
 	case .Json:  return read_spec(it, target, T, plan, read, allocator, err, .Json)
 	case .Jsonc: return read_spec(it, target, T, plan, read, allocator, err, .Jsonc)
@@ -114,7 +269,7 @@ read_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 // `read.collect` holds are the ones of the record alone.
 @(private)
 read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
-	rec, ok := next_record(it)
+	rec, ok := frame_line(it)
 	if !ok {
 		return false
 	}
@@ -129,10 +284,7 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 	if !read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, err, true) {
 		return true
 	}
-	if c != nil {
-		resize(&c.errors, len(kept.errors))
-		c.truncated = kept.truncated
-	}
+	uncollect(c, kept)
 	scratch, failed := runtime.mem_alloc(type_info_of(T).size, type_info_of(T).align, context.temp_allocator)
 	if failed != nil {
 		err^ = {kind = .Out_Of_Memory}
@@ -141,6 +293,57 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 	err^ = {}
 	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, context.temp_allocator, err, false)
 	return true
+}
+
+// Reads the next record under `.Concatenated` or `.Entries` into `target` by the framing's own walk. A refusal stops
+// that walk before the record's end, which a walk with no hook then finds. A record with a fault after a refusal is no
+// record, as `next` gives none, and what the read collected is taken back.
+@(private)
+read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
+	opts := options_of(it.as.read)
+	if read.refuse_duplicates {
+		// The duplicate check builds the record's text, so the framing's walk finds its end first.
+		rec, ok := next_framed(it, S)
+		if ok {
+			read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, err, false)
+		}
+		return ok
+	}
+	h: typed.Reader
+	json_reader(&h, &opts, S)
+	regs, started := typed.read_start(&h, it.src, plan, &SPELLING, T, target, read, it.frames, allocator)
+	if started.kind != .None {
+		err^ = started
+		return false
+	}
+	on :: typed.on_token_spelled when S == .Json5 else typed.on_token
+	pos, state := it.pos, it.state
+	kept: typed.Collected
+	if read.collect != nil {
+		kept = read.collect^
+	}
+	_, ok, stopped := frame_value(it, S, opts, &h, &regs, on)
+	// A walk with a hook reads the comments after a value, so a fault there is past the record, which a walk with no
+	// hook ends where `next` does.
+	if stopped || it.fault != nil {
+		it.pos, it.state, it.fault = pos, state, nil
+		_, ok = next_framed(it, S)
+	}
+	if !ok {
+		uncollect(read.collect, kept)
+	} else if h.first.kind != .None {
+		err^ = typed.read_end(&h, regs, nil)
+	}
+	return ok
+}
+
+// Takes back what the read of a record whose answer is another read's collected in `c`.
+@(private)
+uncollect :: proc(c: ^typed.Collected, kept: typed.Collected) {
+	if c != nil {
+		resize(&c.errors, len(kept.errors))
+		c.truncated = kept.truncated
+	}
 }
 
 // Builds the document of `rec`'s text. Its offsets in a fault count from the input's first byte.

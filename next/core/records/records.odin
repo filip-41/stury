@@ -31,26 +31,26 @@ Reader :: struct {
 }
 
 // A format's record services, in its rodata, which `core.Spelling.records` points at. `next` frames the next record
-// and returns false at the input's end or on a fault, which it stores in `it.fault`. `judge` returns the fault of a
-// record `next` gave, or nil, as the format's validate of the record's text at its place in the input says. `read`
-// is `next` and a typed read of the record into `target`, a `T`. `build` builds a record's document.
+// under each framing the format takes, nil for one it does not, and returns false at the input's end or on a fault,
+// which it stores in `it.fault`. `judge` returns the fault of a record `next` gave, or nil, as the format's validate of
+// the record's text at its place in the input says. `read` is `next` and a typed read of the record into `target`, a
+// `T`. `build` builds a record's document.
 Services :: struct {
-	next:  proc(it: ^Reader) -> (Record, bool),
+	next:  [core.Framing]proc(it: ^Reader) -> (Record, bool),
 	judge: proc(it: ^Reader, rec: Record) -> Maybe(core.Fault),
 	read:  proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
 	build: proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
 }
 
 // Opens the records of `src` in format `as` under `framing`. The reader's own memory comes from `allocator`. A UTF-8
-// byte order mark at the input's first byte is passed over. A format with no record reader, or one that does not take `framing`, ends the records with the fault
-// `.Bad_Option` before any is read.
+// byte order mark at the input's first byte is passed over. A format with no record reader, or one that does not take
+// `framing`, ends the records with the fault `.Bad_Option` before any is read.
 open :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> Reader {
 	it := Reader{src = src, pos = core.text_start(src, 0), as = as, framing = framing, allocator = allocator}
-	if as.spelling == nil || as.spelling.records == nil {
+	it.services = (^Services)(as.spelling.records) if as.spelling != nil else nil
+	if it.services == nil || it.services.next[framing] == nil {
 		it.fault = core.Fault{kind = .Bad_Option}
-		return it
 	}
-	it.services = (^Services)(as.spelling.records)
 	return it
 }
 
@@ -60,7 +60,7 @@ next :: #force_inline proc(it: ^Reader) -> (Record, bool) {
 	if it.fault != nil {
 		return {}, false
 	}
-	return it.services.next(it)
+	return it.services.next[it.framing](it)
 }
 
 // Reads the next record into `target` by `plan`, as the format's `unmarshal` of the record's text reads it, with every

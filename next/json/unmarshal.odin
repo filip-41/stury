@@ -69,12 +69,7 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 	}
 	h: typed.Reader
 	walk_opts := opts
-	h.format = &walk_opts
-	h.find_tag = proc(h: ^typed.Reader, at: u64) -> typed.Tag_Scan {
-		s := typed.Tag_Scan{spelling = &SPELLING, src = h.src, name = h.plan.union_tag}
-		_, s.fault = walk(h.src, at, S, (^Options)(h.format)^, &s, nil, typed.on_tag_token)
-		return s
-	}
+	json_reader(&h, &walk_opts, S)
 	text := src if LINE else src[:cut]
 	regs, started := typed.read_start(&h, text, plan, &SPELLING, T, target, read, frames, allocator)
 	if started.kind != .None {
@@ -93,4 +88,15 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 		err^ = typed.read_end(&h, regs, fault)
 	}
 	return
+}
+
+// Points the typed reader `h` at JSON's walk under `opts`, which a union's tag scan walks with.
+@(private)
+json_reader :: #force_inline proc(h: ^typed.Reader, opts: ^Options, $S: Spec) {
+	h.format = opts
+	h.find_tag = proc(h: ^typed.Reader, at: u64) -> typed.Tag_Scan {
+		s := typed.Tag_Scan{spelling = &SPELLING, src = h.src, name = h.plan.union_tag}
+		_, s.fault = walk(h.src, at, S, (^Options)(h.format)^, &s, nil, typed.on_tag_token)
+		return s
+	}
 }
