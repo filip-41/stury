@@ -14,8 +14,9 @@ Case :: struct {
 	offset: u64,
 }
 
-// The kind a case names for `Bad_Char` with `Detail.Field_Count`, a record of the wrong width.
-FIELD_COUNT :: core.Fault_Kind(0xff)
+// The kinds a case names for `Bad_Char` with `Detail.Too_Many` and `Detail.Too_Few`, a record wider or narrower than the first.
+TOO_MANY :: core.Fault_Kind(0xff)
+TOO_FEW :: core.Fault_Kind(0xfe)
 
 // CSV texts and the fault each raises, at the byte the fault's rule names. `nil` for a valid text.
 @(rodata)
@@ -29,9 +30,9 @@ CSV_CASES := []Case {
 	{"\"a\rb\nc,d\"\n", nil, 0},
 	{"a,\"\"\r\n", nil, 0},
 	{"a\\,b\n", nil, 0},
-	{"a,b\n1\n", FIELD_COUNT, 5},
-	{"a,b\n1,2,3", FIELD_COUNT, 7},
-	{"a\n\nb,c\n", FIELD_COUNT, 4},
+	{"a,b\n1\n", TOO_FEW, 5},
+	{"a,b\n1,2,3", TOO_MANY, 7},
+	{"a\n\nb,c\n", TOO_MANY, 4},
 	{"a\"b\n", .Bad_Char, 1},
 	{"\"a\"b\n", .Bad_Char, 3},
 	{"\"a\" ,b\n", .Bad_Char, 3},
@@ -58,7 +59,7 @@ TSV_CASES := []Case {
 	{"a\\xb\n", .Bad_Escape, 1},
 	{"a\\", .Bad_Escape, 1},
 	{"a\\\n", .Bad_Escape, 1},
-	{"a\tb\n1\n", FIELD_COUNT, 5},
+	{"a\tb\n1\n", TOO_FEW, 5},
 	{"a\rb", .Bad_Char, 1},
 	{"a\r", .Bad_Char, 1},
 	{"\\\xff", .Bad_Escape, 0},
@@ -131,12 +132,12 @@ expect_fault :: proc(t: ^testing.T, c: Case, got: Maybe(core.Fault), shift := 0,
 		return testing.expectf(t, got == nil, "%q shifted %d: %v, want none", c.text, shift, got, loc = loc)
 	}
 	kind, detail := c.kind, u8(0)
-	if kind == FIELD_COUNT {
-		kind, detail = .Bad_Char, u8(dsv.Detail.Field_Count)
+	if kind == TOO_MANY || kind == TOO_FEW {
+		kind, detail = .Bad_Char, u8(dsv.Detail.Too_Many if c.kind == TOO_MANY else dsv.Detail.Too_Few)
 	}
 	// The rule within the kind follows the byte the fault names. A quote byte is a fault only inside an unquoted CSV cell,
 	// and a text cut short ends in a quote's cell or a UTF-8 sequence.
-	if c.kind != FIELD_COUNT && c.kind != .Bad_Escape && c.kind != nil {
+	if c.kind != TOO_MANY && c.kind != TOO_FEW && c.kind != .Bad_Escape && c.kind != nil {
 		at := c.text[c.offset] if c.offset < u64(len(c.text)) else 0
 		switch {
 		case c.kind == .Truncated:
@@ -256,8 +257,8 @@ TOLERATED := []Tolerated {
 	{{"1,2\n3\n4,5,6\n7,8,9,10", nil, 0}, false, true, {.Ragged}},
 	{{"a,b\n1,2,3\n", nil, 0}, false, false, {.Ragged}},
 	{{"a,b\n1,2,3,4", nil, 0}, false, false, {.Ragged}},
-	{{"a,b\n1,2,3\n", FIELD_COUNT, 7}, false, false, {.Invalid_Utf8, .Bare_Quote}},
-	{{"a,b\n1\n", FIELD_COUNT, 5}, false, false, {.Invalid_Utf8, .Bare_Quote}},
+	{{"a,b\n1,2,3\n", TOO_MANY, 7}, false, false, {.Invalid_Utf8, .Bare_Quote}},
+	{{"a,b\n1\n", TOO_FEW, 5}, false, false, {.Invalid_Utf8, .Bare_Quote}},
 	{{"a\tb\tc\n1\n", nil, 0}, true, false, {.Ragged}},
 	{{"a,5\" pipe,b\n", nil, 0}, false, false, {.Bare_Quote}},
 	{{"x\"y\"z\n", nil, 0}, false, false, {.Bare_Quote}},

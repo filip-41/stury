@@ -191,13 +191,14 @@ independently, 0 for none. `at` is the byte the kind names. A count or limit is 
 `AT_NO_BYTE`, such as `No_Memory`, names no byte and its `at` is not read.
 
 `rules` points to the format's `RULES` in rodata, which holds a code and a message per detail. Core names a fault
-(`write_code`: `json.literal`, `dsv.field_count`, or the kind's code, `json.bad_char`) and renders it (`render`:
+(`write_code`: `json.literal`, `dsv.too_many_fields`, or the kind's code, `json.bad_char`) and renders it (`render`:
 `line:col: message`) from that table without calling into the format, so a format outside stury can add its own table
 and render the same way. A code is stable across releases and a message may change.
 
-dsv names what is wrong within `Bad_Char` and `Truncated`: `field_count` (a record of another width, at the delimiter past
-the width or at the line end), `bare_quote`, `after_quote` (a byte after a closing quote that is no quote, delimiter or line
-end), `lone_cr`, `bad_utf8` (at the lead byte), and for `Truncated` `open_quote` (at the opening quote) and `cut_utf8`.
+dsv names what is wrong within `Bad_Char` and `Truncated`: `too_many_fields` (a record wider than the first, at the
+delimiter that starts its extra cell), `too_few_fields` (a narrower one, at its line end), `bare_quote`, `after_quote` (a
+byte after a closing quote that is no quote, delimiter or line end), `lone_cr`, `bad_utf8` (at the lead byte), and for
+`Truncated` `open_quote` (at the opening quote) and `cut_utf8`.
 
 `locate` returns a byte's line and column, both counted from 1, with the column in bytes. It continues from the
 position a `Lines` count reached, so faults met in offset order scan each byte once.

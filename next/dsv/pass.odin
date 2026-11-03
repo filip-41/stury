@@ -415,8 +415,8 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			when H == Batch {
 				header := w.width == 0 && !w.no_header
 			}
-			if fault, _ := record_width(&w, w.cells + 1, &w.width); fault {
-				return core.fault_at(u64(w.rec_lo), .Bad_Char, u8(Detail.Field_Count))
+			if fault, wide := record_width(&w, w.cells + 1, &w.width); fault {
+				return core.fault_at(u64(w.rec_lo), .Bad_Char, u8(Detail.Too_Many if wide else Detail.Too_Few))
 			}
 			when H == Batch {
 				frame_row(h, w.rec_lo, n, header, w.width)

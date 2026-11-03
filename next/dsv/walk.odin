@@ -57,7 +57,8 @@ Tolerance :: enum u8 {
 // The `core.Fault.detail` values a delimited text's faults use.
 Detail :: enum u8 {
 	None,
-	Field_Count, // `Bad_Char`, at the delimiter past the width of a wide record or the line end of a narrow one
+	Too_Many, // `Bad_Char`, a record wider than the first, at the delimiter that starts its extra cell
+	Too_Few, // `Bad_Char`, a record narrower than the first, at its line end
 	Bare_Quote, // `Bad_Char`, a quote inside an unquoted CSV cell
 	Bad_Utf8, // `Bad_Char`, at the lead byte of an ill-formed sequence
 	Lone_Cr, // `Bad_Char`, a CR with no LF after it
@@ -68,7 +69,7 @@ Detail :: enum u8 {
 
 // A delimited text's rules, indexed by `Detail`. Every fault the walk returns points to this table.
 @(rodata)
-RULES := core.Rules{"dsv", {{}, {"field_count", "Record has the wrong number of fields"}, {"bare_quote", "Quote inside an unquoted field"}, {"bad_utf8", "Invalid UTF-8"}, {"lone_cr", "Carriage return not before a line feed"}, {"after_quote", "Character after a closing quote"}, {"open_quote", "Unfinished quoted field"}, {"cut_utf8", "Unfinished UTF-8 sequence"}}}
+RULES := core.Rules{"dsv", {{}, {"too_many_fields", "Record has more fields than the first record"}, {"too_few_fields", "Record has fewer fields than the first record"}, {"bare_quote", "Quote inside an unquoted field"}, {"bad_utf8", "Invalid UTF-8"}, {"lone_cr", "Carriage return not before a line feed"}, {"after_quote", "Character after a closing quote"}, {"open_quote", "Unfinished quoted field"}, {"cut_utf8", "Unfinished UTF-8 sequence"}}}
 
 // The delimiter a walk of `S` reads. `opts.delimiter` 0 selects the spec's own, `,` for CSV and Plain and a tab for
 // TSV. The pass reads it once into a register and compares each block against it.
@@ -238,6 +239,7 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 		return r
 	}
 	at, detail := r >> 16, u8(r >> 8)
+	width_fault := detail == u8(Detail.Too_Many) || detail == u8(Detail.Too_Few)
 	end := len(src)
 	pos := record_start(src, int(core.text_start(src, min(lo, u64(end)))), opts.comment)
 	if pos >= end {
@@ -255,11 +257,11 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 		s := scan_record(src, pos, width, S, delim)
 		if at <= u64(s.line_end) {
 			if s.fault_at >= 0 {
-				if detail == u8(Detail.Field_Count) || u64(s.fault_at) < at {
-					return core.fault_at(u64(s.fault_at), .Bad_Char, u8(Detail.Field_Count))
+				if width_fault || u64(s.fault_at) < at {
+					return core.fault_at(u64(s.fault_at), .Bad_Char, u8(Detail.Too_Many))
 				}
-			} else if detail == u8(Detail.Field_Count) && s.cells < width {
-				return core.fault_at(u64(s.line_end_lo), .Bad_Char, u8(Detail.Field_Count))
+			} else if width_fault && s.cells < width {
+				return core.fault_at(u64(s.line_end_lo), .Bad_Char, u8(Detail.Too_Few))
 			}
 			return r
 		}

@@ -141,8 +141,8 @@ WALKED := []Walked {
 	{"", 0, 0, {}, {{0, 0, .Array, .Value, 0}, {0, 0, .End, .Value, 0}}},
 	{"\r\n\n", 0, 3, {}, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
 	{"\xef\xbb\xbf", 0, 3, {}, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
-	{"a,b\n1,2,3\n", 0, 7, {7, .Bad_Char, .Field_Count}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
-	{"a,b\n1,2,3", 0, 7, {7, .Bad_Char, .Field_Count}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
+	{"a,b\n1,2,3\n", 0, 7, {7, .Bad_Char, .Too_Many}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
+	{"a,b\n1,2,3", 0, 7, {7, .Bad_Char, .Too_Many}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
 }
 
 // A cell's span in a generated text.
@@ -268,7 +268,7 @@ wrong_width_records :: proc(t: ^testing.T) {
 							}
 							log^ = {}
 							hi, fault := walk(text[:], tsv, !header, log, &core.Hook_Regs{}, walktest.log_hook)
-							want_fault := core.Fault{u64(fault_at), &dsv.RULES, .Bad_Char, u8(dsv.Detail.Field_Count)}
+							want_fault := core.Fault{u64(fault_at), &dsv.RULES, .Bad_Char, u8(dsv.Detail.Too_Many if len(bad) > len(HEADER) else dsv.Detail.Too_Few)}
 							if !testing.expectf(t, hi == u64(fault_at) && fault == want_fault, "%q tsv %v header %v quoted %v lf %v: %d %v, want %d %v", text[:], tsv, header, quoted, final_lf, hi, fault, fault_at, want_fault) {
 								return
 							}
@@ -386,12 +386,12 @@ bom_mid_text :: proc(t: ^testing.T) {
 detail_rules :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(dsv.RULES.details), len(dsv.Detail))
 	b := strings.builder_make(context.temp_allocator)
-	f := core.Fault{4, &dsv.RULES, .Bad_Char, u8(dsv.Detail.Field_Count)}
+	f := core.Fault{4, &dsv.RULES, .Bad_Char, u8(dsv.Detail.Too_Many)}
 	core.write_code(strings.to_writer(&b), f)
-	testing.expect_value(t, strings.to_string(b), "dsv.field_count")
+	testing.expect_value(t, strings.to_string(b), "dsv.too_many_fields")
 	strings.builder_reset(&b)
 	core.render(strings.to_writer(&b), transmute([]u8)string("a,b\n1,2,3\n"), f)
-	testing.expect_value(t, strings.to_string(b), "2:1: Record has the wrong number of fields")
+	testing.expect_value(t, strings.to_string(b), "2:1: Record has more fields than the first record")
 	f = {1, &dsv.RULES, .Bad_Char, u8(dsv.Detail.Bare_Quote)}
 	strings.builder_reset(&b)
 	core.write_code(strings.to_writer(&b), f)
@@ -408,8 +408,8 @@ fault_sentences :: proc(t: ^testing.T) {
 		text, line: string,
 	}
 	cases := [?]Case {
-		{"a,b\n3\n", "2:2: Record has the wrong number of fields"},
-		{"a,b\n1,2,3\n", "2:4: Record has the wrong number of fields"},
+		{"a,b\n3\n", "2:2: Record has fewer fields than the first record"},
+		{"a,b\n1,2,3\n", "2:4: Record has more fields than the first record"},
 		{"a,b\n1,\xe9\n", "2:3: Invalid UTF-8"},
 		{"a,b\n1,2\xc3", "2:5: Unfinished UTF-8 sequence"},
 		{"a,b\n1,2\r3,4\n", "2:4: Carriage return not before a line feed"},

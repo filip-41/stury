@@ -561,7 +561,7 @@ render     :: proc {render_fault, render_document}
 
 `write_code` writes a code. For a document error it is `document.` and the kind's code, as in `document.walk` or
 `document.duplicate_key`. For a fault it is the format's name, a dot, and the rule's code, as in `json.literal`,
-`dsv.field_count` or the kind's own code `json.bad_char`. A code is stable across releases, and a message may change.
+`dsv.too_many_fields` or the kind's own code `json.bad_char`. A code is stable across releases, and a message may change.
 
 `render` writes a line from a rule table in rodata, without calling into the format. For a document error it writes
 `line:col: message`, then for `.Walk` a newline and `caused by` with the rendered fault, and for `.Bad_Value` and
