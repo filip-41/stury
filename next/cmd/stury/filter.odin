@@ -47,6 +47,7 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 		v, msg, status := next_input(ins)
 		switch status {
 		case .Value:
+			run.route.interpreted += 1
 			run_once(run, v)
 		case .Error:
 			flush_some(run, force = true)
@@ -116,6 +117,11 @@ run_once :: proc(run: ^Run, v: jq.Value) {
 			run.ret, run.halted = code, true
 		}
 	}
+	settle(run)
+}
+
+// Records the input's result for `-e`, once its outputs are printed.
+settle :: proc(run: ^Run) {
 	if run.ret <= 0 && run.ret != JQ_OK_NO_OUTPUT {
 		run.last_result = int(run.ret != JQ_OK_NULL_KIND)
 	}

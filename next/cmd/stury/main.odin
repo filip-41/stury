@@ -19,6 +19,8 @@ package main
 //	colors.odin                      jq's output colours and when a run uses them
 //	formats.odin                     the formats --from reads and --to writes
 //	input.odin                       reading files and stdin
+//	route.odin                       the path scan or the interpreter, which answers the filter
+//	explain.odin                     --explain's report of the route and the run
 //	filter.odin                      the jq interpreter over each input
 //	print.odin                       output as jq prints it, buffered in `Run.out`
 //	message/                         the text of every message, built from a format and its values (package `message`)
@@ -50,6 +52,7 @@ Run :: struct {
 		named:              int, // the first `named` of names are $ARGS.named
 	},
 	home_module: bool, // `~/.jq`, or what stands for it, is a module every filter includes
+	route:       Route,
 	ip:          jq.Interp,
 	out:         write.Out, // a buffer, written to stdout by `flush_some`
 	spare:       [write.ROOM_MAX]u8,
@@ -67,6 +70,7 @@ main :: proc() {
 	run.ret, run.last_result = JQ_OK_NO_OUTPUT, -1
 	cli := parse_args(&run.opts, command_args()[1:])
 	set_colors(&run, cli)
+	run.route.on = run.opts.explain
 	o := &run.opts
 	refuse_format_clashes(o, &cli)
 	validating := cli.validating
@@ -80,7 +84,7 @@ main :: proc() {
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
-	if validating || cli.formatting || o.raw_input || o.seq || o.stream || o.explain || FORMATS[o.from].lines || FORMATS[o.from].cells || FORMATS[o.to].cells {
+	if validating || cli.formatting || o.raw_input || o.seq || o.stream || FORMATS[o.from].lines || FORMATS[o.from].cells || FORMATS[o.to].cells {
 		message.write_stderr("stury: this build does not run that yet\n")
 		os.exit(EXIT_USAGE)
 	}
@@ -108,12 +112,16 @@ main :: proc() {
 		append(&cli.var_values, BUILD_CONFIGURATION)
 	}
 	run.program = {text, cli.var_names[:], cli.var_values[:], cli.positional[:], named}
+	explain_filter(&run)
 	run.home_module = jq.home_module(&run.ip)
 	ready_interpreter(&run)
+	choose_route(&run, text)
+	explain_route(&run)
 	ins := Inputs {
 		reading = cli.reading,
 		files   = cli.files[:] if len(cli.files) > 0 else STDIN_ONLY,
 		slurp   = o.slurp,
+		run     = &run,
 	}
 	bind_inputs(&run.ip, &ins)
 	write.init(&run.out, &run.spare, runtime.heap_allocator(), hint = FLUSH_AT * 2)
@@ -209,5 +217,6 @@ bind_cli_vars :: proc(run: ^Run) {
 
 finish :: proc(run: ^Run, code: int) -> ! {
 	flush_some(run, force = true)
+	explain_end(run)
 	os.exit(code)
 }

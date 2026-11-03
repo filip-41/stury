@@ -241,8 +241,9 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 		delete(h.missing, allocator)
 		many_free(h, allocator)
 	}
-	if _, bad := fault.?; !bad && h.stopped && h.b.err.kind == .None {
-		// The containers the stop left open are on the path. Their counts hold what was read of them.
+	streamed := h.many != nil && h.many.on != nil
+	if _, bad := fault.?; !bad && h.stopped && !streamed && h.b.err.kind == .None {
+		// The containers the stop left open are on the path. Their counts hold what was read of them. A stream keeps no counts.
 		for regs.c > 0 {
 			scan_partial(h, regs, h.many.frames[regs.c].slot if h.many != nil else h.slots[regs.c - 1])
 			regs.c -= 1
@@ -259,7 +260,7 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	}
 	h.b.n_counts = w
 	if _, bad := fault.?; !bad && h.many != nil {
-		if h.many.on != nil {
+		if streamed {
 			many_stream_end(h)
 		} else {
 			many_answers(h)

@@ -160,6 +160,8 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 	}
 	opts := p.opts
 	opts.respell_strings = true
+	// A value of a partial document is an answer of the path scan, which keeps it whole.
+	opts.partial = r.doc.partial
 	p.streamed = false
 	to_out := io.Stream {
 		data = p,

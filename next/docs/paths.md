@@ -107,7 +107,8 @@ picks among a repeated key as `query` does, and sets each repeat under `every_ke
 With several paths, each path answers what it answers alone, and the answers are in one text order, the earlier path
 first at one byte.
 
-`on` keeps nothing and returns whether to go on. `each_answer` calls it as each answer becomes known, in the order they
+`on` keeps nothing and returns whether to go on, from any depth: a stop inside open containers ends the read there,
+with no error. `each_answer` calls it as each answer becomes known, in the order they
 become known. A `Token_Answer` holds the answer's `token`, its `path` and `outcome`, and for a `.Found` its authored span
 `src[lo:hi]`, the bytes `core.span` gives for the same value in every format: a string's quotes and a quoted cell's
 quotes are inside it. For the other outcomes `lo` and `hi` are 0. A found container is known at its close, and `on` gets

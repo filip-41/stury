@@ -422,6 +422,13 @@ stream_stops_and_refuses :: proc(t: ^testing.T) {
 	testing.expect_value(t, seen, 0)
 	testing.expect_value(t, json.each_answer(src, .Json, paths[:], &seen, first_only).kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, seen, 1)
+	// A stop inside containers the path is in leaves them open.
+	all_a, _ := core.parse_path(".[].a")
+	defer core.path_destroy(&all_a)
+	seen = 0
+	nested := transmute([]u8)string(`[[1,2],[3]]`)
+	testing.expect_value(t, json.each_answer(nested, .Json, all_a, &seen, first_only).kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, seen, 1)
 }
 
 // A member kept by position says nothing of a repeat of its key that a limit cut, and one kept by name does.

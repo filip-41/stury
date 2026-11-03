@@ -68,6 +68,7 @@ flush_some :: proc(run: ^Run, force := false) {
 	n := run.out.cursor
 	if n >= FLUSH_AT || (force || run.opts.unbuffered) && n > 0 {
 		write_out(run.out.buf[:n])
+		run.route.output += n
 		run.out.cursor = 0
 	}
 }

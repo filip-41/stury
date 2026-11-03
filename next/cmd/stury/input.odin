@@ -23,6 +23,7 @@ Inputs :: struct {
 	line:      int, // the lines of it jq's parser has read
 	failures:  int, // files that did not open or read
 	slurp:     bool,
+	run:       ^Run, // under the path scan, a text it answers is printed and passed over
 }
 
 // jq's next_input: the next value, or under -s every value as one array once the files are read, or a parse error as
@@ -51,7 +52,7 @@ next_input :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 next_value :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 	for ins.next_file < len(ins.files) {
 		data, ok := read_next_file(ins)
-		if !ok || blank(data) {
+		if !ok || blank(data) || ins.run.route.scanning && answer_path(ins.run, data, ins.reading) {
 			continue
 		}
 		doc, fault := jq.build_text(data, ins.reading)
@@ -90,6 +91,7 @@ read_next_file :: proc(ins: ^Inputs) -> (data: []byte, ok: bool) {
 		ins.failures += 1
 		return
 	}
+	ins.run.route.input += len(data)
 	return data, true
 }
 
