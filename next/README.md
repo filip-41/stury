@@ -151,7 +151,9 @@ git common directory, so worktrees share stamps and a merge reruns nothing its b
 an edit under `dsv/` reruns no JSON suite, and an edit to `arm64.odin` reruns no x86 check. `python3 tools/gate.py full`
 adds the long randomized runs, `--seed N` a fresh seed, `--list` prints what would run, and `--force` ignores the stamps.
 
-The checks that compare this tree with the old one live in `../compare/` and go with the old tree.
+The checks that compare this tree with the old one live in `../compare/` and go with the old tree. A gate run without
+`../compare/` or the private test repository still passes what it ran, and prints a `SKIPPED` line for each group it
+left out, at the start and again at the end.
 
 The value and edit models, the randomized laws at their stress counts, and the timing and scale tests are private, in
 the separate stury test repository beside this one. Its `next-model`, `next-laws` and `next-perf` targets run them

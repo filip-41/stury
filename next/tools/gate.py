@@ -185,8 +185,10 @@ def rosetta():
 
 
 def checks(odin, seed):
-    """Every check, cheapest stage first. Each package is its own check, so a diff reruns only what imports it."""
+    """Every check, cheapest stage first, and the groups left out because their checkout is absent. Each package is its
+    own check, so a diff reruns only what imports it."""
     out = []
+    absent = []
     every = [at(p) for p in LIB_PKGS + TEST_PKGS + BENCH_PKGS + [CLI]]
     out.append(Check("lint", 0, 0, every, make(odin, "lint"), trees=[at("tools/checks.py"), at("API.txt")], also="amd64"))
     out.append(Check("size", 0, 0, [at(p) for p in LIB_PKGS + [CLI]], ["python3", "tools/checks.py", "size"], trees=[at("tools/checks.py")]))
@@ -218,7 +220,12 @@ def checks(odin, seed):
                 flags += [f"-define:SEED={seed}", "-define:ROUNDS=10000"]
             path = os.path.join(PRIVATE, suite)
             out.append(Check(f"private {suite}", 2, 1, [path], [odin, "test", path] + flags, cwd=REPO))
+    else:
+        absent.append(f"private suites ({PRIVATE} is not there)")
     compare = os.path.join(REPO, "compare")
+    if not (os.path.isdir(compare) and os.path.isdir(os.path.join(REPO, "csv"))):
+        absent.append(f"compare oracles and golden ({compare} or the old tree they read is not there)")
+        return out, absent
     in_compare = lambda *names: [os.path.join(compare, name) for name in names]
     typed = in_compare("typed_oracle")
     out.append(Check(
@@ -252,7 +259,7 @@ def checks(odin, seed):
         "golden", 3, 1, in_compare("golden"),
         ["sh", "-c", f"make -s ODIN={odin} golden && git diff --exit-code -- ../next/json/test/golden"], cwd=compare,
     ))
-    return out
+    return out, absent
 
 
 def run_check(check):
@@ -274,7 +281,11 @@ def main():
     stamps = stamp_directory()
     os.makedirs(os.path.join(ROOT, "build", "test"), exist_ok=True)
     odin_id = compiler_id(args.odin)
-    wanted = [c for c in checks(args.odin, args.seed) if c.tier <= TIERS[args.tier]]
+    every, absent = checks(args.odin, args.seed)
+    wanted = [c for c in every if c.tier <= TIERS[args.tier]]
+    notice = [f"SKIPPED, not run and not passed: {what}" for what in absent]
+    for line in notice:
+        print(line, flush=True)
     start = time.monotonic()
     todo = {}
     skipped = 0
@@ -308,8 +319,10 @@ def main():
                 print(output[-6000:])
         if failed:
             print(f"failed after {ran} checks, {skipped} unchanged, {time.monotonic() - start:.1f}s")
+            print(*notice, sep="\n")
             return 1
     print(f"passed: {ran} ran, {skipped} unchanged, {time.monotonic() - start:.1f}s")
+    print(*notice, sep="\n")
     return 0
 
 
