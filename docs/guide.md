@@ -6,7 +6,7 @@ doc comment is its contract. [json/json.odin](../json/json.odin), [csv/csv.odin]
 
 ## Requirements
 
-- Odin `dev-2026-10`. stury follows Odin's monthly releases closely.
+- Odin `dev-2026-11`. stury follows Odin's monthly releases closely.
 - 64-bit little-endian targets: darwin and linux, on amd64 and arm64. The command line also builds on Windows.
 - On amd64 the floor is x86-64-v2 (SSSE3, SSE4.1, POPCNT). On processors with AVX-512BW, long strings are
   scanned 64 bytes at a time, chosen at run time.

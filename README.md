@@ -28,7 +28,7 @@ surrogate), CSV against RFC 4180.
 
 ## Install
 
-**Library.** stury needs [Odin](https://odin-lang.org/docs/install/) `dev-2026-10` and a 64-bit little-endian
+**Library.** stury needs [Odin](https://odin-lang.org/docs/install/) `dev-2026-11` and a 64-bit little-endian
 target (darwin or linux, amd64 or arm64; the command line also builds on Windows). Clone it into your project
 and add it as a collection:
 
