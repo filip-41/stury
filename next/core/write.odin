@@ -10,6 +10,7 @@ Write_Options :: struct {
 	tab:             bool, // pretty: one tab per level, in place of `indent`
 	ascii:           bool, // a rune past U+007F is written as `\uXXXX`
 	escape_html:     bool, // `<`, `>`, `&`, U+2028 and U+2029 are written as `\uXXXX`
+	escape_del:      bool, // DEL is written as `\u007f`, which `ascii` does as well. A string keeps it otherwise
 	sort_keys:       bool, // a struct's fields and a document's keys in byte order. A map's keys are always sorted
 	respell_strings: bool, // a string read from a source is written in the writer's own escapes, as a computed one is
 }

@@ -123,17 +123,44 @@ dirty :: #force_inline proc "contextless" (v: V) -> bool {
 }
 
 // Writes `s` as a JSON string at the output's cursor and returns `.Bad_Utf8` when it is not UTF-8. With `ascii` DEL and
-// every rune past U+007F are written as `\uXXXX`, and with `escape_html` `<`, `>`, `&`, U+2028 and U+2029 are.
+// every rune past U+007F are written as `\uXXXX`, with `escape_del` DEL is, and with `escape_html` `<`, `>`, `&`, U+2028
+// and U+2029 are.
 put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind {
 	switch {
 	case opts.ascii && opts.escape_html:
-		return put_escaped(out, s, true, true)
+		return put_escaped(out, s, true, true, false)
 	case opts.ascii:
-		return put_escaped(out, s, true, false)
+		return put_escaped(out, s, true, false, false)
+	case opts.escape_html && opts.escape_del:
+		return put_escaped(out, s, false, true, true)
 	case opts.escape_html:
-		return put_escaped(out, s, false, true)
+		return put_escaped(out, s, false, true, false)
+	case opts.escape_del && has_del(s):
+		return put_escaped(out, s, false, false, true)
 	}
 	return put_short(out, write.room(out, 18), s)
+}
+
+// Whether `s` holds a DEL. A string of 16 bytes or more is read in blocks, the last overlapping the one before it.
+@(private)
+has_del :: proc "contextless" (s: string) -> bool #no_bounds_check {
+	n := len(s)
+	src := raw_data(s)
+	if n < 16 {
+		v, live, ok := kernel.head16(src, n)
+		if ok {
+			v = simd.select(simd.lanes_ne(live, V(0)), v, PAD)
+		} else {
+			v = short_block(src, n)
+		}
+		return kernel.any_lane16(simd.lanes_eq(v, V(0x7f)))
+	}
+	for i := 0; i + 16 < n; i += 16 {
+		if kernel.any_lane16(simd.lanes_eq(intrinsics.unaligned_load((^V)(src[i:])), V(0x7f))) {
+			return true
+		}
+	}
+	return kernel.any_lane16(simd.lanes_eq(intrinsics.unaligned_load((^V)(src[n - 16:])), V(0x7f)))
 }
 
 // Writes `s` as a JSON string. `p` is `write.room(out, 18)`, the 18 free bytes at the cursor, with every byte before
@@ -367,10 +394,11 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int) -> core.
 	return .None
 }
 
-// Writes `s` one byte at a time with the stops `ascii` and `escape_html` add: DEL and a rune past U+007F as `\uXXXX`, a surrogate
-// pair past U+FFFF, and `<`, `>`, `&`, U+2028 and U+2029 as `\u00xx` and `\u202x`. Any other rune is copied as it is.
+// Writes `s` one byte at a time with the stops `ascii`, `escape_del` and `escape_html` add: DEL, and with `ASCII` a rune past
+// U+007F, as `\uXXXX`, a surrogate pair past U+FFFF, and `<`, `>`, `&`, U+2028 and U+2029 as `\u00xx` and `\u202x`. Any
+// other rune is copied as it is.
 @(private)
-put_escaped :: proc(out: ^write.Out, s: string, $ASCII, $HTML: bool) -> core.Typed_Error_Kind #no_bounds_check {
+put_escaped :: proc(out: ^write.Out, s: string, $ASCII, $HTML, $DEL: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	n := len(s)
 	src := raw_data(s)
 	write.put_byte(out, '"')
@@ -387,7 +415,7 @@ put_escaped :: proc(out: ^write.Out, s: string, $ASCII, $HTML: bool) -> core.Typ
 					v := intrinsics.unaligned_load((^V)(src[i:]))
 					stop := dirty(v)
 					stop ||= HTML && kernel.any_lane16(simd.lanes_eq(v, V('<')) | simd.lanes_eq(v, V('>')) | simd.lanes_eq(v, V('&')))
-					stop ||= ASCII && kernel.any_lane16(simd.lanes_eq(v, V(0x7f)))
+					stop ||= (ASCII || DEL) && kernel.any_lane16(simd.lanes_eq(v, V(0x7f)))
 					if !stop {
 						intrinsics.unaligned_store((^V)(base[o:]), v)
 						o += 16
@@ -400,7 +428,7 @@ put_escaped :: proc(out: ^write.Out, s: string, $ASCII, $HTML: bool) -> core.Typ
 			}
 			b := src[i]
 			if b < 0x80 {
-				if HTML && (b == '<' || b == '>' || b == '&') || ASCII && b == 0x7f {
+				if HTML && (b == '<' || b == '>' || b == '&') || (ASCII || DEL) && b == 0x7f {
 					o += u_escape(base[o:], u16(b))
 				} else {
 					seq := ESC_SEQ[b]

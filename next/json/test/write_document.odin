@@ -202,16 +202,16 @@ write_document_keeps_spelling :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(text), src)
 }
 
-// A string that was escaped keeps its escapes, and `ascii` and `escape_html` ask for another spelling of the same text.
+// A string that was escaped keeps its escapes, and `ascii`, `escape_del` and `escape_html` ask for another spelling of the same text.
 @(test)
 write_document_string_options :: proc(t: ^testing.T) {
-	src := `["a<b>&c","é😀","é\n"]`
+	src := "[\"a<b>&c\",\"é😀\",\"é\\n\",\"x\x7fy\"]"
 	doc, _ := json.build(transmute([]u8)src, .Json)
 	defer core.destroy(&doc)
 	plain, _, _ := core.write(&doc)
 	defer delete(plain)
 	testing.expect_value(t, string(plain), src)
-	for opts in ([?]core.Write_Options{{ascii = true}, {escape_html = true}, {ascii = true, escape_html = true}, {pretty = true, indent = 2, ascii = true}}) {
+	for opts in ([?]core.Write_Options{{ascii = true}, {escape_html = true}, {escape_del = true}, {ascii = true, escape_html = true}, {pretty = true, indent = 2, ascii = true}}) {
 		text, _, err := core.write(&doc, opts)
 		defer delete(text)
 		if !testing.expect_value(t, err.kind, core.Typed_Error_Kind.None) {
@@ -232,6 +232,7 @@ write_document_string_options :: proc(t: ^testing.T) {
 		}
 		for b in text {
 			testing.expect(t, !opts.ascii || b < 0x80)
+			testing.expect(t, !opts.escape_del || b != 0x7f)
 			testing.expect(t, !opts.escape_html || (b != '<' && b != '>' && b != '&'))
 		}
 	}
@@ -996,11 +997,11 @@ document_write_to_a_failing_stream :: proc(t: ^testing.T) {
 	}
 }
 
-// A string with `ascii` or `escape_html` is copied from the source when it holds no byte they respell and written by
+// A string with `ascii`, `escape_del` or `escape_html` is copied from the source when it holds no byte they respell and written by
 // `put_string` otherwise. The tree writer, which `sort_keys` takes, is the model.
 @(test)
 spelling_options_in_the_row_walk :: proc(t: ^testing.T) {
-	PIECES := [?]string{"a", "plain text", "0123456789abcdef", "é", "日", "😀", "<", ">", "&", " ", `\n`, `é`, `\"`, `\/`, " "}
+	PIECES := [?]string{"a", "plain text", "0123456789abcdef", "é", "日", "😀", "<", ">", "&", " ", `\n`, `é`, `\"`, `\/`, " ", "\x7f"}
 	rand.reset(5)
 	for _ in 0 ..< 300 {
 		b: strings.Builder
@@ -1034,6 +1035,8 @@ spelling_options_in_the_row_walk :: proc(t: ^testing.T) {
 		for opts in ([?]core.Write_Options {
 				{ascii = true},
 				{escape_html = true},
+				{escape_del = true},
+				{escape_del = true, escape_html = true},
 				{ascii = true, escape_html = true, pretty = true, indent = 2},
 				{escape_html = true, pretty = true, indent = 1},
 			}) {

@@ -7,12 +7,9 @@ package jq
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:bytes"
 import "core:io"
 import "core:math"
 import "core:mem"
-import "core:simd"
-import "core:strings"
 import "../../../core/spell"
 import core_pkg "../../../core"
 import "../../../core/write"
@@ -175,7 +172,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 		return false
 	}
 	opts := p.opts
-	opts.respell_strings = true
+	opts.respell_strings, opts.escape_del = true, true
 	as := json.as(.Jsonc if p.comments && p.depth == 0 else .Json)
 	heap := runtime.heap_allocator()
 	// A value shorter than the library's stream buffer is written whole and copied, which takes one allocation of its
@@ -195,7 +192,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 		defer if on_heap {
 			delete(text, heap)
 		}
-		put_written(p, string(text))
+		write.put_text(p.out, string(text))
 		spill(p)
 		return err.kind == .None
 	}
@@ -208,7 +205,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 			}
 			p := (^Printer)(data)
 			p.streamed = true
-			put_written(p, string(b))
+			write.put_text(p.out, string(b))
 			spill(p)
 			return i64(len(b)), .None
 		},
@@ -216,16 +213,6 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 	_, err := core_pkg.write_stream(to_out, r.doc, opts, as, r.node, heap)
 	// Only an allocation fails, and the printer walks the value when the writer handed it nothing.
 	return err.kind == .None || p.streamed
-}
-
-// `text`, which the library's writer wrote, with jq's DEL. A comment keeps its own.
-@(private = "file")
-put_written :: proc(p: ^Printer, text: string) {
-	mark := p.out.cursor
-	write.put_text(p.out, text)
-	if !p.comments {
-		spell_del(p.out, mark)
-	}
 }
 
 // `text` in the colour `color`.
@@ -300,56 +287,9 @@ put_number :: proc(p: ^Printer, n: Number) {
 // so the cursor goes back over what a refused string wrote.
 put_string :: proc(out: ^write.Out, s: string, opts: core_pkg.Write_Options) {
 	mark := out.cursor
-	if json.put_string(out, s, {ascii = opts.ascii}) == .Bad_Utf8 {
+	if json.put_string(out, s, {ascii = opts.ascii, escape_del = true}) == .Bad_Utf8 {
 		out.cursor = mark
-		json.put_string(out, valid_utf8(s), {ascii = opts.ascii})
-	}
-	spell_del(out, mark)
-}
-
-// The index of the first DEL in `b`, or -1. A block of 32 bytes at a time, the last one overlapping the one before it, where a
-// scalar loop would read the tail a byte at a time.
-@(private = "file")
-index_del :: proc(b: []u8) -> int #no_bounds_check {
-	V :: #simd[16]u8
-	if len(b) < 32 {
-		return bytes.index_byte(b, 0x7f)
-	}
-	del := V(0x7f)
-	for from := 0;; from += 32 {
-		i := min(from, len(b) - 32)
-		hit := simd.lanes_eq(intrinsics.unaligned_load((^V)(&b[i])), del) | simd.lanes_eq(intrinsics.unaligned_load((^V)(&b[i + 16])), del)
-		if simd.reduce_max(hit) != 0 {
-			return i + bytes.index_byte(b[i:i + 32], 0x7f)
-		}
-		if i == len(b) - 32 {
-			return -1
-		}
-	}
-}
-
-// Each DEL written into the buffer output `out` past `mark` written again as `\u007f`, as jq writes it, where the
-// library's writer, as JSON lets it, leaves the byte as it is.
-@(private = "file")
-spell_del :: proc(out: ^write.Out, mark: int) {
-	at := index_del(out.buf[mark:out.cursor])
-	if at < 0 {
-		return
-	}
-	heap := runtime.heap_allocator()
-	tail := string(bytes.clone(out.buf[mark + at:out.cursor], heap))
-	defer delete(tail, heap)
-	out.cursor = mark + at
-	rest := tail
-	for len(rest) > 0 {
-		i := strings.index_byte(rest, 0x7f)
-		if i < 0 {
-			write.put_text(out, rest)
-			return
-		}
-		write.put_text(out, rest[:i])
-		write.put_text(out, `\u007f`)
-		rest = rest[i + 1:]
+		json.put_string(out, valid_utf8(s), {ascii = opts.ascii, escape_del = true})
 	}
 }
 

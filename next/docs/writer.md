@@ -34,7 +34,7 @@ each call and tests `out.err` where it can stop. `finish` returns the error.
 ## Options
 
 ```odin
-core.Write_Options :: struct {pretty: bool, indent: u8, tab: bool, ascii: bool, escape_html: bool, sort_keys: bool, respell_strings: bool}
+core.Write_Options :: struct {pretty: bool, indent: u8, tab: bool, ascii: bool, escape_html: bool, escape_del: bool, sort_keys: bool, respell_strings: bool}
 core.PRETTY :: core.Write_Options{pretty = true, indent = 2}
 ```
 
@@ -144,7 +144,7 @@ A string and a number read from a source keep their source spelling and are copi
 with the quotes around its span, so a string with an escape keeps the escape. The punctuation and the whitespace are
 made again, which is the whole of the difference between a source and its compact text. A number of a document of
 another format is spelled by `core/spell` as a computed number is, and `-0.0` from a source stays as written. A string is
-spelled again, through `put_string` or the row loop's own block test, when `ascii`, `escape_html` or `respell_strings` is
+spelled again, through `put_string` or the row loop's own block test, when `ascii`, `escape_del`, `escape_html` or `respell_strings` is
 set and when it carries a tolerated ill-formed sequence. `respell_strings` alone writes every string in the writer's own
 escapes, the shortest JSON has, so `"\u00e9\/"` is written `"é/"` as a computed string is. A number keeps its spelling,
 and a comment is written as it was read.
@@ -421,8 +421,9 @@ Escapes are `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t` and `\u00xx` in lowercase h
 and every other valid byte are written as they are.
 
 `opts.ascii` writes each rune past U+007F as `\uXXXX`, a surrogate pair past U+FFFF. `opts.escape_html` writes `<`, `>`,
-`&`, U+2028 and U+2029 the same way. Either option takes `put_escaped`, built for the options in force, which tests a
-block of the string at a time, copies a block with no stop whole, and goes byte by byte through a block with one. The
+`&`, U+2028 and U+2029 the same way, and `opts.escape_del` writes DEL as `\u007f`, which `ascii` does as well. A string takes
+`put_escaped`, built for the options in force, under `ascii` or `escape_html` and under `escape_del` when it holds a DEL.
+It tests a block of the string at a time, copies a block with no stop whole, and goes byte by byte through a block with one. The
 document write keeps these options in its row loop, which tests a string's blocks the same way.
 
 A string without those options takes one of three paths by what it holds:

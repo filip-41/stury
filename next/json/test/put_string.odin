@@ -84,7 +84,7 @@ model_string :: proc(s: []u8, opts: core.Write_Options) -> (text: [dynamic]u8, o
 			model_unit(&text, cp)
 		case opts.escape_html && (cp == '<' || cp == '>' || cp == '&' || cp == 0x2028 || cp == 0x2029):
 			model_unit(&text, cp)
-		case opts.ascii && cp >= 0x7f:
+		case opts.ascii && cp >= 0x7f || opts.escape_del && cp == 0x7f:
 			if cp >= 0x10000 {
 				model_unit(&text, 0xD800 + (cp - 0x10000) >> 10)
 				model_unit(&text, 0xDC00 + (cp - 0x10000) & 0x3FF)
@@ -101,7 +101,7 @@ model_string :: proc(s: []u8, opts: core.Write_Options) -> (text: [dynamic]u8, o
 }
 
 @(private = "file")
-OPTION_SETS := [?]core.Write_Options{{}, {ascii = true}, {escape_html = true}, {ascii = true, escape_html = true}}
+OPTION_SETS := [?]core.Write_Options{{}, {ascii = true}, {escape_html = true}, {ascii = true, escape_html = true}, {escape_del = true}, {escape_del = true, escape_html = true}}
 
 // Writes `s` after `lead` bytes of an earlier text and returns the whole output, which the caller frees.
 @(private = "file")
@@ -334,7 +334,7 @@ strings_at_the_end_of_a_page :: proc(t: ^testing.T) {
 	}
 	for n in 0 ..< len(body) {
 		s := string(walktest.fence_copy(&fence, body[:n]))
-		for opts in ([?]core.Write_Options{{}, {ascii = true}, {escape_html = true}}) {
+		for opts in ([?]core.Write_Options{{}, {ascii = true}, {escape_html = true}, {escape_del = true}}) {
 			text, err := json.marshal(s, opts, context.temp_allocator)
 			testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 			doc, derr := json.build(text, .Json)

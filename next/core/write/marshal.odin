@@ -212,11 +212,11 @@ walker_init :: proc(w: ^Walker, opts: core.Write_Options, frames: [^]Frame, ptrs
 walker_value :: proc(w: ^Walker, plan: ^typed.Plan, value: uintptr, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind {
 	w.plan, w.meta = plan, raw_data(plan.meta)
 	switch {
-	case w.opts.pretty && (w.opts.ascii || w.opts.escape_html):
+	case w.opts.pretty && (w.opts.ascii || w.opts.escape_del || w.opts.escape_html):
 		return walk(w, value, true, T, put_opted)
 	case w.opts.pretty:
 		return walk(w, value, true, T, put)
-	case w.opts.ascii || w.opts.escape_html:
+	case w.opts.ascii || w.opts.escape_del || w.opts.escape_html:
 		return walk(w, value, false, T, put_opted)
 	}
 	return walk(w, value, false, T, put)

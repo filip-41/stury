@@ -75,9 +75,9 @@ Emit :: struct {
 	opts:    core.Write_Options,
 	cap:     int, // the deepest level the stack holds
 	line_at: int, // the deepest level whose line fits `NODE_ROOM`
-	copy:    bool, // a string is copied as it was read. False when `ascii`, `escape_html` or `respell_strings` ask for another spelling
+	copy:    bool, // a string is copied as it was read. False when `ascii`, `escape_del`, `escape_html` or `respell_strings` ask for another spelling
 	hi:      V, // with `copy` false, the bytes from which a string is written by the rare path: DEL under `ascii`, else 0xFF
-	html:    [4]V, // with `copy` false, more such bytes: `<`, `>`, `&` and 0xE2 under `escape_html`, else a backslash
+	html:    [4]V, // with `copy` false, more such bytes: `<`, `>`, `&` and 0xE2 under `escape_html`, DEL under `escape_del`, else a backslash
 }
 
 @(private)
@@ -92,10 +92,13 @@ put_start :: proc(e: ^Emit, out: ^write.Out, src: []u8, doc: ^core.Document, opt
 		stack = raw_data(wide)
 	}
 	e.copy = copies_strings(opts)
-	e.hi = V(0x7f) if opts.ascii else V(0xFF)
+	e.hi = V(0x7f) if opts.ascii || opts.escape_del && opts.escape_html else V(0xFF)
 	e.html = {V('\\'), V('\\'), V('\\'), V('\\')}
-	if opts.escape_html {
+	switch {
+	case opts.escape_html:
 		e.html = {V('<'), V('>'), V('&'), V(0xE2)}
+	case opts.escape_del:
+		e.html[1] = V(0x7f)
 	}
 	fill := V(0x20)
 	e.c.unit = int(opts.indent)
@@ -337,7 +340,7 @@ put_token_string :: proc(out: ^write.Out, src: []u8, doc: ^core.Document, i: cor
 // Whether a string read from a source is written as it was authored under `opts`.
 @(private)
 copies_strings :: #force_inline proc "contextless" (opts: core.Write_Options) -> bool {
-	return !opts.ascii && !opts.escape_html && !opts.respell_strings
+	return !opts.ascii && !opts.escape_del && !opts.escape_html && !opts.respell_strings
 }
 
 // The handle of JSON of spec `spec` read with `opts`. As the target of `core.write`, `.Json` drops a document's comments,

@@ -253,6 +253,12 @@ tags_rename_skip_and_omit :: proc(t: ^testing.T) {
 }
 
 @(test)
+escape_del_spells_del :: proc(t: ^testing.T) {
+	written(t, "a\x7fb", "\"a\x7fb\"")
+	written(t, "a\x7fb", "\"a\\u007fb\"", {escape_del = true})
+}
+
+@(test)
 a_long_name_writes_whole :: proc(t: ^testing.T) {
 	Long :: struct {
 		a: i64 `json:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`,
