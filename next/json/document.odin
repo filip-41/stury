@@ -103,8 +103,10 @@ build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, 
 // facts, which must cover every node and open container the walk reaches.
 @(private)
 build_reserved :: proc(src: []u8, q: [^]u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth, facts: int) -> (core.Document, core.Document_Error) {
-	// The edit services dispatch on the handle's spec and read at its depth.
-	b := build.builder_start(src, as(S, opts), refuse_duplicates, allocator, nodes, depth, facts)
+	// The edit services dispatch on the handle's spec and read at its depth. The open containers' stack is this frame's
+	// when it holds `depth`, so a build allocates none and an arena that keeps the document keeps none.
+	frames: [core.MAX_DEPTH]u64 = ---
+	b := build.builder_start(src, as(S, opts), refuse_duplicates, allocator, nodes, depth, facts, frames[:])
 	if len(b.doc.nodes) == 0 {
 		// The reservation was refused, so no hook may run over a nil node array.
 		return build.builder_end(&b, build.BUILDER_REGS, nil)

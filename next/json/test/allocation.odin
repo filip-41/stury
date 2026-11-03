@@ -88,9 +88,9 @@ refuse_oom_keeps_duplicate :: proc(t: ^testing.T) {
 	}
 	strings.write_string(&b, "}]")
 	src := transmute([]u8)strings.to_string(b)
-	// Allocations 0 and 1 are the open stack and the node array, before any repeat is found. Failing 2 to 4 leaves the
-	// `.Duplicate_Key` at byte 8 as the error.
-	for fail_at in 2 ..= 4 {
+	// Allocation 0 is the node array, before any repeat is found. Failing 1 to 3 leaves the `.Duplicate_Key` at byte 8 as
+	// the error.
+	for fail_at in 1 ..= 3 {
 		f := walktest.Failing_Alloc{inner = context.allocator, fail_at = fail_at}
 		doc, err := json.build(src, .Json, {}, true, walktest.failing_allocator(&f))
 		testing.expectf(t, err.kind == core.Document_Error_Kind.Duplicate_Key && err.at == 8, "fail_at %d: %v at %d", fail_at, err.kind, err.at)
@@ -145,8 +145,8 @@ refuse_grow_keeps_earliest_repeat :: proc(t: ^testing.T) {
 	}
 	strings.write_byte(&b, '}')
 	src := transmute([]u8)strings.to_string(b)
-	// Allocation 1 is the node array.
-	f := walktest.Failing_Alloc{inner = context.allocator, fail_at = 1}
+	// Allocation 0 is the node array.
+	f := walktest.Failing_Alloc{inner = context.allocator, fail_at = 0}
 	doc, err := json.build(src, .Json, {}, true, walktest.failing_allocator(&f))
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)

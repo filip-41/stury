@@ -73,7 +73,6 @@ Scan :: struct {
 	every_key:  bool,
 	stop_early: bool,
 	stopped:    bool,
-	borrowed:   bool, // the builder's stack is the caller's `frames`
 	positional: bool, // a `Map`'s members answer an `Index`, as a dsv record's cells do
 	again:      bool, // `scan_end` keeps the lists for `scan_again`, and the document's answers borrow them
 	at:         core.Node_Index, // the node `query` is giving the logic
@@ -212,15 +211,8 @@ scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: c
 	}
 	h.positional = positional
 	h.answers = h.first[:]
-	h.borrowed = depth <= len(frames)
-	h.b = builder_start(src, as, false, allocator, 64, 0 if h.borrowed else depth)
-	if h.borrowed {
-		h.b.stack = frames[:depth]
-	}
+	h.b = builder_start(src, as, false, allocator, 64, depth, 0, frames)
 	if h.b.err.kind != .None {
-		if h.borrowed {
-			h.b.stack = nil
-		}
 		many_free(h, allocator)
 		_, be := builder_end(&h.b, BUILDER_REGS, nil)
 		return core.path_error(be)
@@ -240,7 +232,7 @@ scan_again :: proc(h: ^Scan, src: []u8, as: core.As, last: ^core.Document, alloc
 		h.b = {pending = -1, last = core.NO_NODE, doc = {src = src, as = as, allocator = allocator, nodes = last.nodes_alloc, nodes_alloc = last.nodes_alloc, facts_alloc = last.facts_alloc, counts_alloc = last.counts_alloc}}
 	}
 	last^ = {}
-	h.b.stack = frames
+	h.b.stack, h.b.borrowed = frames, true
 	h.keep, h.next = h.free, 1 if h.path.limit > 0 else 0
 	h.matched, h.maps, h.cut, h.stopped, h.path.count = 0, 0, 0, false, 0
 	h.n_answers, h.n_kept, h.n_missing = 0, 0, 0
@@ -290,9 +282,6 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	}
 	h.b.wide_more = h.b.wide_count != 0
 	h.b.root_close = 0 if h.stopped else root_close
-	if h.borrowed {
-		h.b.stack = nil
-	}
 	doc, e := builder_end(&h.b, regs, fault)
 	if e.kind != .None {
 		if !h.again {

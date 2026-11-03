@@ -30,6 +30,7 @@ Builder :: struct {
 	n_counts:   int,
 	// Whether the build refuses a repeated key, which selects the `$REFUSE` hook and its close-time check.
 	refuse:     bool,
+	borrowed:   bool, // `stack` is the caller's `frames`, which the builder does not free
 	err:        core.Document_Error,
 }
 
@@ -38,17 +39,20 @@ Builder :: struct {
 BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
 
 // Returns a builder over `src`, read as `as`, with an open stack of `depth` slots, none when `depth` is 0, room for `facts` facts, and
-// at least 16 nodes, `nodes` when that is larger. The hook pushes an open container's frame with no capacity test, so
+// at least 16 nodes, `nodes` when that is larger. The stack is the caller's `frames` when they hold `depth` slots, else
+// it is allocated. The hook pushes an open container's frame with no capacity test, so
 // `depth` must be at least the walk's depth limit. The nodes are allocated last, and a document keeps the reservation
 // they were given, whose unused tail an arena shrinking it would write zeros over. A format's `build` passes the builder
 // to its walk with a builder hook and ends it with `builder_end`.
 // A refused allocation returns a builder whose `err` is `.No_Memory` and whose node array is nil.
-builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0) -> Builder {
+builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0, frames: []u64 = nil) -> Builder {
 	b := Builder{refuse = refuse_duplicates, pending = -1, last = core.NO_NODE}
 	b.doc.src = src
 	b.doc.as = as
 	b.doc.allocator = allocator
-	if depth > 0 {
+	if 0 < depth && depth <= len(frames) {
+		b.stack, b.borrowed = frames[:depth], true
+	} else if depth > 0 {
 		stack, serr := make([]u64, depth, allocator)
 		if serr != nil {
 			b.err = {kind = .No_Memory}
@@ -131,7 +135,7 @@ builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault))
 	b.doc.counts = b.doc.counts_alloc[:len(b.doc.counts)]
 	b.doc.root_close = b.root_close
 	doc := b.doc
-	if b.stack != nil {
+	if b.stack != nil && !b.borrowed {
 		delete(b.stack, b.doc.allocator)
 	}
 	b^ = {}
@@ -150,7 +154,9 @@ builder_free :: proc(b: ^Builder) {
 	release(b.doc.allocator, b.doc.counts_alloc)
 	release(b.doc.allocator, b.doc.facts_alloc)
 	release(b.doc.allocator, b.doc.nodes_alloc)
-	release(b.doc.allocator, b.stack)
+	if !b.borrowed {
+		release(b.doc.allocator, b.stack)
+	}
 	b^ = {}
 }
 

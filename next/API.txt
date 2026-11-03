@@ -248,7 +248,7 @@ builder_hook_keyless_facts :: #force_inline proc (h: ^Builder, s: core.Hook_Regs
 builder_hook_plain :: #force_inline proc (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 builder_hook_plain_refuse :: #force_inline proc (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 builder_refuse_result :: #force_inline proc (h: ^Builder, open, end: core.Node_Index) {
-builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0) -> Builder {
+builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0, frames: []u64 = nil) -> Builder {
 each_answer :: proc {each_answer_one, each_answer_many}
 each_answer_many :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
 each_answer_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
