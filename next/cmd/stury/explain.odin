@@ -48,8 +48,17 @@ explain_route :: proc(run: ^Run) {
 	}
 	o := &run.opts
 	records := "none" if o.null_input else "ndjson" if reads_lines(o) else "seq" if o.seq else "raw_lines" if o.raw_input else "whole"
-	explain_line("input: format=%s dialect=%s records=%s duplicates=last", FORMATS[o.from].name, token(FORMATS[o.from].spec), records)
-	if r.scanning {
+	if reads_cells(o) {
+		explain_line("input: format=%s", FORMATS[o.from].name)
+	} else {
+		explain_line("input: format=%s dialect=%s records=%s duplicates=last", FORMATS[o.from].name, token(FORMATS[o.from].spec), records)
+	}
+	if cols := r.columns; cols != nil {
+		explain_line("route: columns")
+		read := "*" if cols.every else strings.join(cols.names[:], ",", context.temp_allocator)
+		shape := "all" if cols.every || cols.shape == .Select else token(cols.shape)
+		explain_line("columns: read=%s shape=%s selecting=%s", read, shape, "yes" if cols.shape == .Select else "no")
+	} else if r.scanning {
 		explain_line("route: path_scan")
 		sel := "none"
 		if r.select.op != .None {
@@ -118,7 +127,11 @@ explain_end :: proc(run: ^Run) {
 	if !r.on || r.ran == {} {
 		return
 	}
-	explain_line("run: texts=%d scanned=%d interpreted=%d pieces=none", r.scanned + r.interpreted, r.scanned, r.interpreted)
+	if r.columns != nil {
+		explain_line("run: files=%d pieces=none", r.columns.files)
+	} else {
+		explain_line("run: texts=%d scanned=%d interpreted=%d pieces=none", r.scanned + r.interpreted, r.scanned, r.interpreted)
+	}
 	if r.fallback.text > 0 {
 		explain_line("fallback: text=%d why=%s", r.fallback.text, token(r.fallback.why))
 	}

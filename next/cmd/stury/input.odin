@@ -61,6 +61,7 @@ Inputs :: struct {
 	texts:     records.Reader,
 	several:   bool,
 	pinned:    bool,
+	header_judged: bool, // --from csv or tsv: the open file's first record is read
 	spent:     [dynamic][]byte,
 	raw_at:    int, // -R: where the next line starts in data
 	raw_done:  bool, // -R -s: the one string is read
@@ -188,6 +189,16 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 			continue
 		}
 		ins.has_text = true
+		if reads_cells(&ins.run.opts) {
+			v, msg, status, answered := cells_value(ins, rec)
+			if !answered {
+				return v, msg, status
+			}
+			if ins.failures > 0 || ins.run.halted {
+				return nil, "", .More
+			}
+			continue
+		}
 		if ins.run.route.scanning && answer_path(ins.run, rec.text, ins.as) {
 			// As jq's main loop, which reads one input past a file that did not open.
 			if ins.failures > 0 {
@@ -285,6 +296,9 @@ text_value :: proc(ins: ^Inputs, built: core.Document, at: int, own: bool) -> (j
 @(private = "file")
 text_fault :: proc(ins: ^Inputs, f: core.Fault, at: int, end := -1) -> (jq.Value, string, jq.Parse_Status) {
 	data := ins.data
+	if reads_cells(&ins.run.opts) {
+		return cells_fault(ins, f)
+	}
 	if json.Spec(ins.as.spec) != .Json {
 		fail_dialect(ins, data, f)
 	}
@@ -405,8 +419,9 @@ open_next :: proc(ins: ^Inputs) -> bool {
 				continue
 			}
 		}
-		// A JSONC or JSON5 file is one text, its comments around it, so it is read whole.
-		if !is_regular_file(f) && json.Spec(ins.as.spec) == .Json {
+		// A JSONC or JSON5 file is one text, its comments around it, so it is read whole, and so is a delimited one, whose
+		// header heads all of it.
+		if !is_regular_file(f) && json.Spec(ins.as.spec) == .Json && !reads_cells(&ins.run.opts) {
 			ins.pipe = pipe_start(f)
 			ins.open = true
 			take_data(ins, nil)
@@ -434,7 +449,7 @@ open_next :: proc(ins: ^Inputs) -> bool {
 @(private = "file")
 set_data :: proc(ins: ^Inputs, data: []byte) {
 	retire(ins)
-	ins.data, ins.raw_at, ins.pieces = data, 0, {}
+	ins.data, ins.raw_at, ins.pieces, ins.header_judged = data, 0, {}, false
 	ins.several = ins.framing != .Concatenated || !ins.last
 	ins.texts = records.open(data, ins.as, ins.framing, allocator = runtime.heap_allocator())
 }
@@ -477,7 +492,6 @@ advance_past :: proc(ins: ^Inputs, to: int) {
 }
 
 // The open file read past.
-@(private = "file")
 close_file :: proc(ins: ^Inputs) {
 	if !ins.open {
 		return

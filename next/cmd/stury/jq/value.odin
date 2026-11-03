@@ -99,7 +99,8 @@ node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index)
 	case .Map:
 		return .Object
 	case .Plain:
-		return .String
+		// A delimited cell: an empty unquoted one is null, a quoted one keeps its quotes in its span.
+		return .Null if doc.nodes[i].n == 0 && doc.nodes[i].role == .Value else .String
 	case:
 		return Kind(k)
 	}

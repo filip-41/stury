@@ -26,6 +26,10 @@ Route_Why :: enum u8 {
 	Select_Redefined,
 	Select_Compare,
 	Select_Path,
+	Not_Columns,
+	Object_Key,
+	Object_Member,
+	Select_Columns,
 	Own_Spelling,
 }
 
@@ -45,6 +49,7 @@ Route :: struct {
 		literal: jq.Value,
 	},
 	whys:     bit_set[Route_Why],
+	columns:  ^Columns, // a delimited input's filter that reads only columns
 	using explain: Explain,
 }
 
@@ -53,6 +58,10 @@ Route :: struct {
 choose_route :: proc(run: ^Run, text: string) {
 	o := &run.opts
 	r := &run.route
+	if reads_cells(o) {
+		choose_columns(run)
+		return
+	}
 	stops: bit_set[Route_Why]
 	if o.null_input {stops += {.Null_Input}}
 	if o.slurp {stops += {.Slurp}}

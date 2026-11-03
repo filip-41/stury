@@ -13,8 +13,8 @@ import "core:os"
 import "core:slice"
 import "core:strings"
 import core "../../core"
-import records "../../core/records"
 import "../../core/write"
+import records "../../core/records"
 import dsv "../../dsv"
 import "jq"
 import "message"
@@ -65,7 +65,7 @@ emit_row :: proc(o: ^Output, v: jq.Value) {
 		table_fail(o, "output %d is %s: a table is all objects (under a header) or none", t.count, "an object, after arrays or scalars" if object else "not an object, after objects")
 	}
 	if !object && jq.kind(v) != .Array {
-		append(&cells, cell_of(o, v, ""))
+		append(&cells, cell_of(o, v, nil, 0))
 	} else {
 		it := jq.iterate(v)
 		for k, e in jq.next_member(&it) {
@@ -73,7 +73,7 @@ emit_row :: proc(o: ^Output, v: jq.Value) {
 				table_fail(o, "output %d has the key %q, which the header lacks (the header is output 1's keys; --grow-header adds keys as they come)", t.count, k)
 			}
 			append(&keys, k)
-			append(&cells, cell_of(o, e, message.build_temp("at key %q", k) if object else message.build_temp("at cell %d", len(cells) + 1)))
+			append(&cells, cell_of(o, e, k if object else nil, len(cells) + 1))
 		}
 	}
 	t.shape = .Objects if object else .Rows
@@ -98,6 +98,22 @@ emit_row :: proc(o: ^Output, v: jq.Value) {
 		}
 		return
 	}
+	object_row(o, keys[:], cells[:])
+}
+
+// Writes the output object of `cells` under `keys` as a table row, when every output is such an object of the same
+// keys, or ends the run on a row the table refuses.
+table_object :: proc(o: ^Output, keys: []string, cells: []Maybe(string)) {
+	o.table.count += 1
+	o.table.shape = .Objects
+	o.result = JQ_OK
+	object_row(o, keys, cells)
+}
+
+// Writes an object's `cells`, under `keys`, as a row under the header, which the first object's keys make.
+@(private = "file")
+object_row :: proc(o: ^Output, keys: []string, cells: []Maybe(string)) {
+	t := o.table
 	fresh := len(t.header) == 0
 	if fresh {
 		for k in keys {
@@ -107,7 +123,7 @@ emit_row :: proc(o: ^Output, v: jq.Value) {
 			slice.sort(t.header[:])
 		}
 	}
-	row := aligned(t.header[:], keys[:], cells[:])
+	row := aligned(t.header[:], keys, cells)
 	if fresh {
 		// A first row the table refuses leaves no header behind it.
 		refuse_blank(o, row)
@@ -128,9 +144,9 @@ aligned :: proc(header, keys: []string, cells: []Maybe(string)) -> []Maybe(strin
 	return row
 }
 
-// The cell `v` writes as, or the end of the run for an array or object, `where_` in the row.
+// The cell `v` writes as, or the end of the run for an array or object at `key`, or with no key at cell `n` of the row.
 @(private = "file")
-cell_of :: proc(o: ^Output, v: jq.Value, where_: string) -> Maybe(string) {
+cell_of :: proc(o: ^Output, v: jq.Value, key: Maybe(string), n: int) -> Maybe(string) {
 	switch jq.kind(v) {
 	case .Null:
 		return nil
@@ -149,7 +165,9 @@ cell_of :: proc(o: ^Output, v: jq.Value, where_: string) -> Maybe(string) {
 		return jq.to_json(v)
 	case .Array, .Object:
 		what := "an object" if jq.kind(v) == .Object else "an array"
-		table_fail(o, "output %d has %s %s: a cell is a text, a number, true, false or null; tojson makes text of %s", o.table.count, what, where_, what)
+		k, keyed := key.?
+		at := message.build_temp("at key %q", k) if keyed else message.build_temp("at cell %d", n)
+		table_fail(o, "output %d has %s %s: a cell is a text, a number, true, false or null; tojson makes text of %s", o.table.count, what, at, what)
 	}
 	return nil
 }

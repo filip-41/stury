@@ -4,6 +4,7 @@ package main
 
 import "core:strings"
 import core "../../core"
+import dsv "../../dsv"
 import json "../../json"
 import "message"
 
@@ -66,6 +67,9 @@ format_names :: proc(writing: bool) -> string {
 
 // How the inputs are read, as --from and --seq say. A JSON-like format's texts are read as `json_reading` reads them.
 input_source :: proc(o: ^Opts, json_reading: core.As) -> Source {
+	if reads_cells(o) {
+		return {as = dsv.as(.Csv if o.from == .Csv else .Tsv), framing = .Lines}
+	}
 	return {as = json_reading, framing = .Seq if o.seq else .Lines if reads_lines(o) else .Concatenated}
 }
 

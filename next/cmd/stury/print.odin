@@ -8,6 +8,7 @@ import "core:os"
 import "core:strings"
 import core "../../core"
 import "../../core/write"
+import records "../../core/records"
 import "jq"
 import "message"
 
@@ -29,6 +30,11 @@ Output :: struct {
 	result, ret: int,
 	last_result: int, // jq's: -1 before any output, else whether the last input with outputs ended truthy
 	table:       ^Table, // under --to csv or tsv
+	// The column route's `select(F)`: the record each output of F stands for.
+	whole:       struct {
+		ins: ^Inputs,
+		rec: records.Record,
+	},
 }
 
 init_output :: proc(o: ^Output, run: ^Run) {
@@ -61,6 +67,11 @@ init_output :: proc(o: ^Output, run: ^Run) {
 // JSON in ASCII). After it a newline, but under -j, and a NUL under --raw-output0, which refuses a string that holds
 // one: false then, with nothing printed.
 emit :: proc(o: ^Output, v: jq.Value) -> bool {
+	v := v
+	if o.whole.ins != nil {
+		built, _ := records.build(&o.whole.ins.texts, o.whole.rec, context.allocator)
+		v = jq.document_value(built)
+	}
 	if o.table != nil {
 		emit_row(o, v)
 		return true
@@ -89,14 +100,20 @@ emit :: proc(o: ^Output, v: jq.Value) -> bool {
 		// A line comment the value ends with ended its line.
 		ended = o.layout.comments && out.cursor > 0 && out.buf[out.cursor - 1] == '\n'
 	}
-	if !opts.join && !ended {
-		jq.put_byte(out, '\n')
+	end_output(o, ended)
+	return true
+}
+
+// Ends an output written into `o.buf`: a newline but under -j or when a line comment `ended` its line, and a NUL
+// under --raw-output0.
+end_output :: proc(o: ^Output, ended := false) {
+	if !o.opts.join && !ended {
+		jq.put_byte(&o.buf, '\n')
 	}
-	if opts.raw0 {
-		jq.put_byte(out, 0)
+	if o.opts.raw0 {
+		jq.put_byte(&o.buf, 0)
 	}
 	flush_some(o)
-	return true
 }
 
 // Ends an input's outputs: what it came to, its last output's result, or the exit status the filter `ended` it with
