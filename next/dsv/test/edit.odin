@@ -268,6 +268,32 @@ remove_all :: proc(list: ^core.Edit_List, nodes: ..core.Node_Index) -> core.Docu
 	return {}
 }
 
+// A wide record's cells past the header's last are cells like any other, and its positional column drops with them. A
+// header named by position has no cell to set, and a column added or dropped before the positional ones would rename
+// them, so both are refused.
+@(test)
+edit_wide_record :: proc(t: ^testing.T) {
+	ragged := dsv.Options{tolerate = {.Ragged}}
+	check(t, "a,b\n1,2,3\n4,5\n", "a,b\n1,2,9\n4,5\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.set(list, 8, "9")
+	})
+	check(t, "a,b\n1,2,3\n4,5\n", "a,b\n1,2\n4,5\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 8)
+	})
+	check(t, "a,b\n1,2,3\n4,5\n", "a,b\n1,2,3\n4,5,z\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.set_member(list, 9, "3", "z")
+	})
+	refused(t, "a,b\n1,2,3\n4,5\n", ragged, .Bad_Index, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.set(list, 4, "c")
+	})
+	refused(t, "a,b\n1,2,3\n4,5\n", ragged, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.remove(list, 2)
+	})
+	refused(t, "a,b\n1,2,3\n4,5\n", ragged, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.set_member(list, 9, "c", "z")
+	})
+}
+
 // A cell removed from every record that holds it drops its column with the header cell. A short record is skipped.
 @(test)
 edit_drop_column :: proc(t: ^testing.T) {

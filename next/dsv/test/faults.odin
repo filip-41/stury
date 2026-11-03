@@ -241,8 +241,9 @@ TOLERATED := []Tolerated {
 	{{"a,b,c\n1,2\n3\n", nil, 0}, false, false, {.Ragged}},
 	{{"a,b\n1", nil, 0}, false, false, {.Ragged}},
 	{{"1,2\n3\n4,5,6\n7,8,9,10", nil, 0}, false, true, {.Ragged}},
-	{{"a,b\n1,2,3\n", FIELD_COUNT, 7}, false, false, {.Ragged}},
-	{{"a,b\n1,2,3", FIELD_COUNT, 7}, false, false, {.Ragged}},
+	{{"a,b\n1,2,3\n", nil, 0}, false, false, {.Ragged}},
+	{{"a,b\n1,2,3,4", nil, 0}, false, false, {.Ragged}},
+	{{"a,b\n1,2,3\n", FIELD_COUNT, 7}, false, false, {.Invalid_Utf8, .Bare_Quote}},
 	{{"a,b\n1\n", FIELD_COUNT, 5}, false, false, {.Invalid_Utf8, .Bare_Quote}},
 	{{"a\tb\tc\n1\n", nil, 0}, true, false, {.Ragged}},
 	{{"a,5\" pipe,b\n", nil, 0}, false, false, {.Bare_Quote}},
@@ -314,6 +315,7 @@ tolerated_tokens :: proc(t: ^testing.T) {
 	}
 	for c in ([]Tokens {
 		{"a,b,c\n1,2\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {6, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
+		{"a,b\n1,2,3\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {0, 3, .Plain, .Key, core.SPELLING_DECODE | 16}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
 		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Map, .Value, 0}, {0, 3, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {4, 1, .Plain, .Key, 0}, {8, 3, .Plain, .Value, core.SPELLING_DECODE | core.SPELLING_QUOTED}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
 	}) {
 		log^ = {}

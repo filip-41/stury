@@ -82,6 +82,9 @@ edit_plan :: proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]cor
 		case .Remove:
 			cells = cells || !is_line(doc, e.node)
 		case .Set:
+			if positional(doc, e.node) {
+				return false, {kind = .Bad_Index}
+			}
 			lone_empty = lone_empty || len(e.text) == 0 && is_line(doc, e.node - 1) && core.length(doc, e.node - 1) == 1
 		}
 	}
@@ -96,6 +99,12 @@ edit_plan :: proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]cor
 		return false, p.err
 	}
 	return true, record_widths(doc, list, planned_width(&p), allocator)
+}
+
+// Whether `node` is a header cell `.Ragged` named by its position, which the header's line does not hold.
+@(private = "file")
+positional :: #force_inline proc(doc: ^core.Document, node: core.Node_Index) -> bool {
+	return doc.nodes[node].spelling & SPELLING_COLUMN != 0
 }
 
 @(private = "file")
@@ -170,7 +179,11 @@ plan_lines :: proc(p: ^Plan) -> bool {
 	doc := p.doc
 	if doc.shared_keys != 0 {
 		p.width = core.length(doc, doc.shared_keys)
-		compose.push(&p.lines, Line{node = doc.shared_keys, n = p.width, header = true}) or_return
+		n := p.width
+		for n > 0 && positional(doc, doc.shared_keys + core.Node_Index(n)) {
+			n -= 1
+		}
+		compose.push(&p.lines, Line{node = doc.shared_keys, n = n, header = true}) or_return
 	}
 	it := core.children(doc, core.ROOT)
 	for {
@@ -337,7 +350,7 @@ plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
 	doc := p.doc
 	line := line_at(p.lines[:], e.node)
 	l := p.lines[line]
-	for c in 0 ..< p.lines[0].n {
+	for c in 0 ..< core.length(doc, doc.shared_keys) {
 		cell := doc.shared_keys + 1 + core.Node_Index(c)
 		if !core.key_equals(doc, cell, string(e.key)) {
 			continue
@@ -450,6 +463,15 @@ plan_write :: proc(p: ^Plan) -> bool {
 // commit refuses as a conflict.
 @(private = "file")
 plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> bool {
+	if l.header && l.n < p.width {
+		// The header's line names the table's last columns by position, which a column added or dropped before them
+		// would change.
+		for slot in slots {
+			if slot.old < 0 || slot.old < l.n && p.dropped[slot.old] {
+				return refuse(p, {kind = .Bad_Width})
+			}
+		}
+	}
 	last := fills[len(fills) - 1].slot if len(fills) > 0 else -1
 	if l.n >= p.width {
 		last = len(slots)

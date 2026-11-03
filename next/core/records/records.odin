@@ -156,11 +156,13 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 		more = it.services.read(it, target, T, plan, opts, allocator, &err)
 		return
 	}
-	// A record the window cannot tell yet is read again after a refill, so what its first read collected goes.
+	// A record the window cannot tell yet is read again after a refill, so what its first read collected and wrote goes.
+	// The restore is shallow, so what a first read allocated for `target` stays allocated.
 	kept: typed.Collected
 	if opts.collect != nil {
 		kept = opts.collect^
 	}
+	before := target^
 	for {
 		if it.src == nil && (it.eof || !window_move(it)) {
 			return false, {}
@@ -175,6 +177,7 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 			resize(&opts.collect.errors, len(kept.errors))
 			opts.collect.truncated = kept.truncated
 		}
+		target^ = before
 		if !window_move(it) {
 			return false, {}
 		}

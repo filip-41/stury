@@ -47,8 +47,8 @@ Options :: struct {
 Tolerance :: enum u8 {
 	// Ill-formed UTF-8 in a cell is not a fault. Each maximal subpart of an ill-formed sequence decodes as U+FFFD.
 	Invalid_Utf8,
-	// A record with fewer cells than the first is not a fault, and its missing columns are absent. With no header a
-	// record may hold any number of cells. With a header a cell past the header's last still faults.
+	// A record of any width is not a fault. A narrower record's missing columns are absent. With a header, a wider
+	// record's cells past the header's last are columns named by their 1-based position, `"3"` for the third.
 	Ragged,
 	// A quote inside an unquoted cell (CSV) is a cell byte, and the block's quotes pair up without it.
 	Bare_Quote,
@@ -225,11 +225,11 @@ judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, width 
 // The position of a width fault is the delimiter that opens the cell past the width in a wide record, or the line end's
 // first byte in a narrow one. A width fault at or before a byte fault wins. A walk with no fault returns `r` unchanged,
 // and a faulting one rescans the records with `scan_record`. A `width` above 0 is the width a walk from a row start
-// checked rows against, and 0 reads it from the first record.
+// checked rows against, and 0 reads it from the first record. `.Ragged` has no width fault to place.
 @(private, cold)
 field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, r: u64, width := 0) -> u64 {
 	kind := core.Fault_Kind(r & 0xff)
-	if kind == .None {
+	if kind == .None || .Ragged in opts.tolerate {
 		return r
 	}
 	at, detail := r >> 16, u8(r >> 8)

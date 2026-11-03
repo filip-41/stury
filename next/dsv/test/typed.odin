@@ -107,6 +107,31 @@ a_repeated_column_reads_as_its_last :: proc(t: ^testing.T) {
 	expect_refusal(t, read_rows("a,a\n1,2\n", &rows, {refuse_duplicates = true}), .Duplicate_Key, 2)
 }
 
+// Under `.Ragged` a wide record's cell past the header's last reads the field its 1-based position names. A header cell
+// of that name repeats it, so the duplicate policy decides the wide record's cell, and a narrower record reads the
+// header's column.
+@(test)
+a_wide_record_names_its_cells_by_position :: proc(t: ^testing.T) {
+	Row :: struct { a: i64, three: i64 `csv:"3"` }
+	read :: proc(src: string, rows: ^[]Row, read := typed.Read_Options{}) -> core.Typed_Error {
+		return dsv.unmarshal(transmute([]u8)src, .Csv, rows, read, {tolerate = {.Ragged}}, context.temp_allocator)
+	}
+	rows: []Row
+	testing.expect_value(t, read("a,b\n1,2,3\n4\n5,6,7,8\n", &rows).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, len(rows), 3)
+	testing.expect(t, rows[0] == {1, 3} && rows[1] == {4, 0} && rows[2] == {5, 7})
+	expect_refusal(t, read("a\n1,2\n", &rows, {unknown = .Refuse}), .Unknown_Field, 0)
+	src := "3,a\n1,2\n4,5,6\n"
+	testing.expect_value(t, read(src, &rows).kind, core.Typed_Error_Kind.None)
+	testing.expect(t, rows[0].three == 1 && rows[1].three == 6)
+	testing.expect_value(t, read(src, &rows, {dups = .First}).kind, core.Typed_Error_Kind.None)
+	testing.expect(t, rows[0].three == 1 && rows[1].three == 4)
+	expect_refusal(t, read(src, &rows, {refuse_duplicates = true}), .Duplicate_Key, 0)
+	expect_refusal(t, read("3,a\n1,2\n4,5,x\n", &rows, {dups = .First}), .Wrong_Kind, 12)
+	e := dsv.unmarshal(transmute([]u8)string("a,b\n1,2,3\n"), .Csv, &rows, {}, {}, context.temp_allocator)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Walk)
+}
+
 // The column a repeat leaves out is judged against the field's type, as JSON judges a repeated member it skips.
 @(test)
 a_skipped_repeated_column_is_judged :: proc(t: ^testing.T) {

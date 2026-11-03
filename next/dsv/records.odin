@@ -53,15 +53,8 @@ read_cells :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H
 	return 0, false
 }
 
-// Whether `.Ragged` accepts a record of `cells` cells in a text whose first record has `width` cells. With no header
-// any count is accepted, with a header only a count below `width`.
-@(private)
-ragged :: #force_inline proc "contextless" (w: ^Pass($S, $H), cells, width: int) -> bool {
-	return .Ragged in w.tolerate && (w.no_header || cells < width)
-}
-
 // Sets `width` from the first record. A later record of `cells` cells that differs from `width` faults unless `.Ragged`
-// accepts it, and `fault` is then true. `wide` is true when `cells` is above `width`, whose fault is at the delimiter
+// is tolerated, and `fault` is then true. `wide` is true when `cells` is above `width`, whose fault is at the delimiter
 // past the width.
 @(private)
 record_width :: #force_inline proc "contextless" (w: ^Pass($S, $H), cells: int, width: ^int) -> (fault: bool, wide: bool) {
@@ -69,21 +62,17 @@ record_width :: #force_inline proc "contextless" (w: ^Pass($S, $H), cells: int, 
 		width^ = cells
 		return
 	}
-	if cells != width^ && !ragged(w, cells, width^) {
+	if cells != width^ && .Ragged not_in w.tolerate {
 		return true, cells > width^
 	}
 	return
 }
 
 // Emits a column's header cell as the `Key` token its cell names it by, and returns the hook's action with the token's
-// span. A `Stop` ends the walk. The width check refuses a record wider than the header before this runs, so `cells` is
-// below `len(keys)` and a cell with no key is `unreachable`, not a dropped cell.
+// span. A `Stop` ends the walk. A cell past the header's last, which only `.Ragged` reads, is named by `column_key`.
 @(private)
 put_key :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, keys: []core.Token, cells: int) -> (a: core.Action, lo: u64, n: u32) {
-	if cells < 0 || cells >= len(keys) {
-		unreachable()
-	}
-	k := key_at(keys, cells)
+	k := column_key(keys, cells)
 	// A `Key` is always a `Plain` of role `Key`. Both are passed as constants, so a hook that tells tokens apart by
 	// kind or role folds its whole call away for a header cell.
 	return emit(h, on, hs, k.lo, k.n, .Plain, .Key, k.spelling), k.lo, k.n
@@ -239,6 +228,37 @@ read_wide :: #force_no_inline proc "contextless" ($KEYS: bool, h: ^$H, $on: proc
 	return core.fault_at(u64(pos + int(intrinsics.count_trailing_zeros(last))), .Bad_Char, u8(Detail.Field_Count))
 }
 
+// Emits a run of a headed record's cells under `.Ragged` once it reaches the header's width, each after its column's key.
+@(private, cold)
+read_ragged :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, field_lo, cells: int, bs: u64, carry, lax: bool, $S: Spec) -> (field_lo2, cells2: int, r: u64, done: bool) {
+	field_lo2, cells2 = field_lo, cells
+	for dm := d; dm != 0; dm &= dm - 1 {
+		at := pos + int(intrinsics.count_trailing_zeros(dm))
+		esc := false
+		when S == .Tsv || H == Cells {
+			esc = span_esc(bs, pos, field_lo2, at, carry)
+		}
+		if a, lo, n := put_cell(h, on, hs, base, keys, false, cells2, field_lo2, at, esc, lax, S); a == .Stop {
+			return field_lo2, cells2, stopped(lo, n), true
+		}
+		cells2 += 1
+		field_lo2 = at + 1
+	}
+	return
+}
+
+// The `Key` token of column `c`: its header cell, or past the header's last, which only `.Ragged` reads, a key named by
+// its 1-based position. That key holds no bytes: `n` is the position, which `spelling_text` writes out, and `lo` the
+// header's first byte, so the span stays inside the text, which holds the header's line and the `c` delimiters before
+// the cell.
+@(private)
+column_key :: #force_inline proc "contextless" (keys: []core.Token, c: int) -> core.Token {
+	if c < len(keys) {
+		return key_at(keys, c)
+	}
+	return {keys[0].lo if len(keys) > 0 else 0, u32(c + 1), .Plain, .Key, core.SPELLING_DECODE | SPELLING_COLUMN}
+}
+
 // Emits a run of a record's cells as `Plain` values. `$ESC` compiles the TSV backslash test in or out, chosen per block
 // by `plain_block`. With `$KEYS` the record is headed, so each cell's column key precedes its value and the cell's own
 // count is that key's index, which the run keeps no other counter for.
@@ -332,7 +352,7 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 		} else if muted {
 			// The hook passed this record over, so its cells are counted and its bytes judged, but make no tokens.
 			if d != 0 {
-				if width != 0 && !(.Ragged in w.tolerate && no_header) && cells + int(intrinsics.count_ones(d)) >= width {
+				if width != 0 && .Ragged not_in w.tolerate && cells + int(intrinsics.count_ones(d)) >= width {
 					return wide_fault(base[:w.n], rec_lo, width, S, w.delim), true
 				}
 				cells += int(intrinsics.count_ones(d))
@@ -354,7 +374,14 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 				return rr, true
 			}
 		} else if cells + int(intrinsics.count_ones(d)) >= width {
-			return read_wide(true, h, on, hs, base, keys, pos, d, cells, field_lo, width, bs, carry, lax, S), true
+			if .Ragged not_in w.tolerate {
+				return read_wide(true, h, on, hs, base, keys, pos, d, cells, field_lo, width, bs, carry, lax, S), true
+			}
+			rr: u64
+			dd: bool
+			if field_lo, cells, rr, dd = read_ragged(h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, lax, S); dd {
+				return rr, true
+			}
 		} else {
 			// A data record's run of cells, each after its column's key. The cell's own count is the key's index, and
 			// the run advances that count only.
@@ -463,7 +490,7 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^]u8, hs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (r: u64, done: bool) {
 	// A trailing CR is a fault already reported, so this record holds a cell. A last record wider than `width` returns
 	// the fault from `scan_record` before any token. A short one emits its tokens, then faults at the text's end.
-	if !w.in_header && w.width != 0 && w.cells + 1 > w.width && !ragged(w, w.cells + 1, w.width) {
+	if !w.in_header && w.width != 0 && w.cells + 1 > w.width && .Ragged not_in w.tolerate {
 		return wide_fault(base[:w.n], w.rec_lo, w.width, S, w.delim), true
 	}
 	hi := w.n

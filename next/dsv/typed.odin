@@ -383,6 +383,11 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 			_, action := typed.refuse(&h.r, at, {kind = reason, at = t.lo})
 			return next, action
 		}
+		if !h.no_header {
+			// A headed row's cursor stands here past the header's last column only under `.Ragged`, at a column the row
+			// binds now, named by its position.
+			return widen_columns(h, regs, t)
+		}
 		if !h.r.refuse_unknown {
 			return next, .Next
 		}
@@ -548,18 +553,32 @@ one_arm :: #force_inline proc "contextless" (plan: ^typed.Plan, m: ^typed.Meta) 
 }
 
 // Binds the columns to the row's fields, the first time the read needs them: the header's when the text has one, else
-// the fields in order. Returns how the walk goes on. A refused header leaves the target as it was.
+// the fields in order. Returns how the walk goes on. A refused header leaves the target as it was. `from` above 0 binds
+// one more column, past the `from` bound before, and refuses for that column alone.
 @(private, cold)
-bind_columns :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, at: u64) -> core.Action {
+bind_columns :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, at: u64, from := 0) -> core.Action {
 	context = h.r.ctx
 	sp := h.r.sp
 	// A header's refusal has its field alone as a path.
 	h.r.sp = 1
-	action := columns_of(h, regs, at)
+	action := columns_of(h, regs, at, from)
 	if action != .Stop {
 		h.r.sp = sp
 	}
 	return action
+}
+
+// Binds the column at the cursor, past the last bound, and reads cell `t` there.
+@(private, cold)
+widen_columns :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	from := len(h.cols) - 1
+	// A refused allocation leaves the columns as they were, and the cell passes.
+	if action := bind_columns(h, regs, t.lo, from); action == .Stop || len(h.cols) == from + 1 {
+		return regs, action
+	}
+	regs := regs
+	regs.b = u64(uintptr(&h.cols[from]))
+	return cell_cold(h, regs, &h.cols[from], t)
 }
 
 @(private)
@@ -569,12 +588,12 @@ refuse_header :: proc(h: ^Cells, regs: core.Hook_Regs, kind: core.Typed_Error_Ki
 }
 
 @(private)
-columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64) -> core.Action {
+columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.Action {
 	plan := h.r.plan
 	row := h.row
 	record := is_record(row)
 	members := ([^]typed.Field)(row.first)[:plan.meta[row.meta].members if record else 0]
-	width := len(h.keys) if !h.no_header else len(members) if record else 1
+	width := max(len(h.keys), from + 1) if !h.no_header else len(members) if record else 1
 	cols, failed := make([]Column, width + 1, context.temp_allocator)
 	if failed != nil {
 		return refuse_header(h, regs, .Out_Of_Memory, at, "")
@@ -596,12 +615,14 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64) -> core.Action {
 			col.kind, col.offset, col.rec = members[c].kind, members[c].offset, &fields[c + 1]
 			continue
 		}
-		key := h.keys[c]
+		// A column past the header's last is named by its position, and a refusal names it once, when it is bound.
+		key := column_key(h.keys, c)
+		positional, refusing := key.spelling & SPELLING_COLUMN != 0, c >= from
 		name, ok := typed.token_text(&h.r, key, context.temp_allocator)
 		if !ok {
 			return refuse_header(h, regs, .Out_Of_Memory, key.lo, "")
 		}
-		spelled := inner_text(h, key)
+		spelled := name if positional else inner_text(h, key)
 		k := -1
 		for &m, i in members {
 			if plan.meta[m.meta].name == name {
@@ -610,11 +631,11 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64) -> core.Action {
 				break
 			}
 		}
-		if record && k < 0 && h.r.refuse_unknown && refuse_header(h, regs, .Unknown_Field, key.lo, spelled) == .Stop {
+		if record && k < 0 && h.r.refuse_unknown && refusing && refuse_header(h, regs, .Unknown_Field, key.lo, spelled) == .Stop {
 			return .Stop
 		}
 		if prev, repeated := bound[name]; repeated {
-			if h.refuse_repeats && refuse_header(h, regs, .Duplicate_Key, key.lo, spelled) == .Stop {
+			if h.refuse_repeats && refusing && refuse_header(h, regs, .Duplicate_Key, key.lo, spelled) == .Stop {
 				return .Stop
 			}
 			if h.r.first_key {
@@ -623,7 +644,11 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64) -> core.Action {
 				}
 				continue
 			}
-			cols[prev].kind, cols[prev].repeat = .Never if k >= 0 else .Inside, k >= 0
+			// Only a wide record holds a positional column, so the column it repeats still reads a narrower record's
+			// cell, and a wide record's cell here replaces it.
+			if !positional {
+				cols[prev].kind, cols[prev].repeat = .Never if k >= 0 else .Inside, k >= 0
+			}
 		}
 		bound[name] = c
 		if k >= 0 {
@@ -648,7 +673,7 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64) -> core.Action {
 		}
 		if found {
 			cols[c].required = true
-		} else if refuse_header(h, regs, .Missing_Field, h.keys[0].lo if len(h.keys) > 0 else at, name) == .Stop {
+		} else if from == 0 && refuse_header(h, regs, .Missing_Field, h.keys[0].lo if len(h.keys) > 0 else at, name) == .Stop {
 			return .Stop
 		}
 	}

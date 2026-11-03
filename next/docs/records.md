@@ -160,7 +160,9 @@ for rec in records.next(&it) {
   three quarters full, and a row too wide for the buffer grows it. The next walk restarts at the next row's first byte
   with the header and the row width carried in.
 - `column` returns the index of the first header cell that decodes to `name`, and -1 with no header. It reads the
-  first batch, whose rows `next` then gives.
+  first batch, whose rows `next` then gives. Under `.Ragged` a decimal `name` past the header's width is the column
+  of that 1-based position, which a wide row holds.
+- A stream's `read` of a row the window cut is read again once the window holds it, from the target as it was.
 - `cell` returns cell `column` of the row `next` gave last, as a slice of the input when it needs no decode, else
   decoded into `buf`. It returns false for another row, a column past the row, or a `buf` too short.
 - `read` reads a row into a row type, from a plan of the row type, not of a list of rows. It reads as `dsv.unmarshal`

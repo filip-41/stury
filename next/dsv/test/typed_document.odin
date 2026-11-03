@@ -70,6 +70,18 @@ a_document_reads_as_its_text :: proc(t: ^testing.T) {
 	agree(t, "a\n128\n", []struct { a: i8 }, .Csv)
 }
 
+// Under `.Ragged` a wide record's cells past the header's are columns named by position, in a document as in its text.
+@(test)
+a_document_reads_wide_records_as_its_text :: proc(t: ^testing.T) {
+	Row :: struct { a: i64, three: i64 `csv:"3"` }
+	ragged := dsv.Options{tolerate = {.Ragged}}
+	agree(t, "a,b\n1,2,3\n4\n5,6,7,8\n", []Row, .Csv, ragged)
+	agree(t, "a\n1\n2,3\n", []Row, .Csv, ragged, {unknown = .Refuse})
+	agree(t, "3,a\n1,2\n4,5,6\n", []Row, .Csv, ragged)
+	agree(t, "3,a\n1,2\n4,5,6\n", []Row, .Csv, ragged, {dups = .First})
+	agree(t, "3,a\n1,2\n4,5,x\n", []Row, .Csv, ragged, {dups = .First})
+}
+
 @(test)
 a_document_reads_a_single_row_plan_as_its_text_does :: proc(t: ^testing.T) {
 	agree(t, "a,b\n1,x\n", struct { a: i64, b: string }, .Csv)

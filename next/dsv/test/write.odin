@@ -234,6 +234,19 @@ dsv_document_writes_in_its_spec :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(tsv), "id\tname\n1\ta;b\n2\t\n")
 }
 
+// A wide record's columns past the header's last are named by position when the document is written.
+@(test)
+wide_dsv_document_writes_its_positional_names :: proc(t: ^testing.T) {
+	doc, err := dsv.build(transmute([]u8)string("a,b\n1,2,3\n4\n"), .Csv, {tolerate = {.Ragged}}, false, context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	got, _, werr := core.write(&doc, {}, allocator = context.temp_allocator)
+	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(got), "a,b,3\n1,2,3\n4,,\n")
+	js, _, jerr := core.write(&doc, {}, json.as(.Json), allocator = context.temp_allocator)
+	testing.expect_value(t, jerr.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(js), `[{"a":"1","b":"2","3":"3"},{"a":"4"}]`)
+}
+
 @(test)
 json_records_write_as_a_table :: proc(t: ^testing.T) {
 	src := `[{"a":1,"b":"x,y"},{"b":null,"c":true,"a":2.50}]`

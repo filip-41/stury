@@ -121,6 +121,40 @@ path_shapes :: proc(t: ^testing.T) {
 	testing.expect_value(t, other, core.Presence.Not_Loaded)
 }
 
+// Under `.Ragged` a path names a wide record's cell past the header's last by its 1-based position, and a header cell
+// of that name repeats it. A path takes the last of a repeated name.
+@(test)
+path_wide_record :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("3,b\n1,2\n4,5,6,7\n")
+	ragged := dsv.Options{tolerate = {.Ragged}}
+	paths: [3]core.Path
+	for p, i in ([]string{`.[1]["4"]`, `.[0]["3"]`, `.[1]["3"]`}) {
+		paths[i], _ = core.parse_path(p)
+	}
+	defer for &p in paths {
+		core.path_destroy(&p)
+	}
+	buf: [8]u8
+	want := []string{"7", "1", "6"}
+	for i in 0 ..< 3 {
+		doc, err := dsv.scan(src, .Csv, paths[i], opts = ragged)
+		text, _ := core.text(&doc, doc.answers[0].node, buf[:])
+		testing.expectf(t, err.kind == .None && text == want[i], "path %d: %v %q", i, err, text)
+		core.destroy(&doc)
+	}
+	many, err := dsv.scan(src, .Csv, paths[:], opts = ragged)
+	defer core.destroy(&many)
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+	// The answers of several paths come in the text's order.
+	for w, i in ([]string{"1", "6", "7"}) {
+		text, _ := core.text(&many, many.answers[i].node, buf[:])
+		testing.expectf(t, text == w, "path %d of many: %q", i, text)
+	}
+	refused, strict := dsv.scan(src, .Csv, paths[0])
+	defer core.destroy(&refused)
+	testing.expect_value(t, strict.kind, core.Path_Error_Kind.Walk)
+}
+
 // A `Partial` record's end comes from a walk that takes the text as the read did, and a stop may leave the record's end
 // in text no walk judged.
 @(test)

@@ -698,11 +698,48 @@ empty_and_ragged_header_cells :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(core.span(&doc, rec)), "1,2\n")
 	core.destroy(&doc)
 
-	// A record wider than the header is still a fault under `.Ragged`.
-	doc, err = build("a,b\n1,2,3\n", .Csv, {tolerate = {.Ragged}})
+	// Under `.Ragged` a record wider than the header names its extra cells by their 1-based position.
+	doc, err = build("a,b\n1,2,3,4\n5\n", .Csv, {tolerate = {.Ragged}})
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	rec, _ = first_member(&doc, 0)
+	testing.expect_value(t, core.length(&doc, rec), 4)
+	for name, i in ([]string{"a", "b", "3", "4"}) {
+		v, ok = core.member(&doc, rec, name)
+		testing.expectf(t, ok && v == rec + 1 + core.Node_Index(i), "%s: %v %d", name, ok, v)
+	}
+	buf: [8]u8
+	text, _ := core.text(&doc, doc.shared_keys + 3, buf[:])
+	testing.expect_value(t, text, "3")
+	core.destroy(&doc)
+
+	doc, err = build("a,b\n1,2,3\n", .Csv)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Walk)
 	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Bad_Char)
 	core.destroy(&doc)
+}
+
+// Under `.Ragged` a header cell named `"3"` and a wide record's third column share a name, which meets the duplicate
+// policy as a repeated header name does.
+@(test)
+ragged_position_duplicates :: proc(t: ^testing.T) {
+	src := "3,b\n1,2,x\n"
+	doc, err := build(src, .Csv, {tolerate = {.Ragged}})
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	rec, _ := first_member(&doc, 0)
+	v, ok := core.member(&doc, rec, "3", .First)
+	testing.expect(t, ok && v == rec + 1)
+	v, ok = core.member(&doc, rec, "3", .Last)
+	testing.expect(t, ok && v == rec + 3)
+	it := core.members_named(&doc, rec, "3")
+	n := 0
+	for _, more := core.member_next(&it); more; _, more = core.member_next(&it) {
+		n += 1
+	}
+	testing.expect_value(t, n, 2)
+	refused, rerr := build(src, .Csv, {tolerate = {.Ragged}}, refuse_duplicates = true)
+	defer core.destroy(&refused)
+	testing.expect_value(t, rerr.kind, core.Document_Error_Kind.Duplicate_Key)
 }
 
 // Duplicate header names: `.First` returns the first column, `.Last` the last, with `members_named` returning both.

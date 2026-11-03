@@ -134,7 +134,7 @@ record_hook :: proc "contextless" (r: ^Record_Read, s: core.Hook_Regs, t: core.T
 	}
 	r.cell += 1
 	if len(r.keys) > 0 {
-		s, action = r.on(r.h, s, r.keys[r.cell - 1])
+		s, action = r.on(r.h, s, column_key(r.keys, r.cell - 1))
 		if action != .Next {
 			return s, action if action == .Stop else .Next
 		}

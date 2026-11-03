@@ -275,6 +275,48 @@ records_check_on_threads :: proc(t: ^testing.T) {
 	}
 }
 
+// Under `.Ragged` a wide row's cells past the header's last are columns named by position, in memory, on a stream and in
+// a check on threads. A header cell of that name is the column `column` finds, and a built row takes the last of the two.
+@(test)
+rows_name_wide_cells_by_position :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "3,b\n1,2\n4,5,6,7\n"
+	as := dsv.as(.Csv, {tolerate = {.Ragged}})
+	pool: host.Pool
+	host.pool_init(&pool, 2)
+	defer host.pool_destroy(&pool)
+	faults, _ := records.check(transmute([]u8)src, as, .Lines, context.temp_allocator, &pool.runner)
+	testing.expect_value(t, len(faults), 0)
+	testing.expect_value(t, records.validate(transmute([]u8)src, as, &pool.runner), nil)
+	path, _ := core.parse_path(`.["4"]`, context.temp_allocator)
+	same, _ := core.parse_path(`.["3"]`, context.temp_allocator)
+	for stream in ([]bool{false, true}) {
+		c := Chunked{src = transmute([]u8)src, sizes = {1}}
+		it := records.open_stream(chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
+		testing.expect_value(t, records.column(&it, "3"), 0)
+		testing.expect_value(t, records.column(&it, "4"), 3)
+		testing.expect_value(t, records.column(&it, "2"), -1)
+		buf: [8]u8
+		_, _ = records.next(&it)
+		rec, ok := records.next(&it)
+		testing.expect(t, ok && string(rec.text) == "4,5,6,7")
+		s, got := records.cell(&it, rec, 3, buf[:])
+		testing.expect(t, got && s == "7")
+		doc, err := records.build(&it, rec, context.temp_allocator)
+		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+		want := []string{"7", "6"}
+		for p, i in ([]core.Path{path, same}) {
+			answers, _ := core.query(&doc, p, allocator = context.temp_allocator)
+			text: string
+			if len(answers) == 1 {
+				text, _ = core.text(&doc, answers[0].node, buf[:])
+			}
+			testing.expectf(t, text == want[i], "stream %v, path %d: %q", stream, i, text)
+		}
+		records.close(&it)
+	}
+}
+
 @(test)
 rows_columns_cells_and_documents :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
@@ -340,6 +382,7 @@ Record_Row :: struct {
 	a: int,
 	b: string,
 	c: Maybe(f64),
+	d: Maybe(string) `csv:"4"`,
 }
 
 @(private = "file")
@@ -445,7 +488,7 @@ rows_read_as_unmarshal :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	state := rand.create(7)
 	gen := rand.default_random_generator(&state)
-	headers := []string{"a,b,c", "b,a,x", "a,a,c", "c,b,\"a\"", "x,y,z"}
+	headers := []string{"a,b,c", "b,a,x", "a,a,c", "c,b,\"a\"", "x,y,z", "4,a,b"}
 	breakers := "\",\n1x"
 	sink: typed.Collected
 	reads := []typed.Read_Options{{borrow_strings = true}, {collect = &sink}, {refuse_duplicates = true}, {unknown = .Refuse}}
@@ -463,7 +506,7 @@ rows_read_as_unmarshal :: proc(t: ^testing.T) {
 				if i >= 0 {
 					buf[i] = c
 				}
-				for opts in LAYOUTS[:2] {
+				for opts in ([]dsv.Options{LAYOUTS[0], LAYOUTS[1], LAYOUTS[4]}) {
 					for read in reads {
 						ok := expect_read(t, string(buf), spec, opts, read, Record_Row) && expect_read(t, string(buf), spec, opts, read, Required_Record_Row) && expect_read(t, string(buf), spec, opts, read, []string) && expect_read(t, string(buf), spec, opts, read, map[string]string)
 						if !ok {
@@ -642,16 +685,17 @@ rows_stream_read_as_in_memory :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	state := rand.create(10)
 	gen := rand.default_random_generator(&state)
-	headers := []string{"a,b,c", "b,x,a", "a,a,c", "x,y,z"}
+	headers := []string{"a,b,c", "b,x,a", "a,a,c", "x,y,z", "4,a,b"}
 	for round in 0 ..< 60 {
 		spec := dsv.Spec(round % 2)
-		header, _ := strings.replace_all(headers[round % 4], ",", "\t" if spec == .Tsv else ",", context.temp_allocator)
+		opts := LAYOUTS[4] if round % 3 == 0 else {}
+		header, _ := strings.replace_all(headers[round % 5], ",", "\t" if spec == .Tsv else ",", context.temp_allocator)
 		src := seeded_rows(gen, spec, 1 + rand.int_max(40, gen), header)
 		plan, _ := dsv.plan_make(Required_Record_Row, spec, allocator = context.temp_allocator)
 		mplan, _ := dsv.plan_make(map[string]string, spec, allocator = context.temp_allocator)
-		mem := records.open(transmute([]u8)src, dsv.as(spec))
+		mem := records.open(transmute([]u8)src, dsv.as(spec, opts))
 		c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 7}}
-		st := records.open_stream(chunked(&c), dsv.as(spec))
+		st := records.open_stream(chunked(&c), dsv.as(spec, opts))
 		ms, ss: typed.Collected
 		ms.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
 		ss.errors = make([dynamic]core.Typed_Error, context.temp_allocator)

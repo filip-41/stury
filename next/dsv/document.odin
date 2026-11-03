@@ -73,6 +73,11 @@ SPELLING := core.Spelling {
 @(private)
 SPELLING_DOUBLED :: u16(8)
 
+// `Token.spelling`'s bit for the key of a column past the header's last cell, which `column_key` makes. Its text is
+// `n`, the column's 1-based position, in decimal.
+@(private)
+SPELLING_COLUMN :: u16(16)
+
 // Reads a delimited text as spec `S` into a document, allocating its nodes with `allocator`. `opts.no_header` makes the
 // first record data. `refuse_duplicates` returns an error at a header name that repeats another in the header row. The
 // document borrows `src`, which must outlive it, and `core.destroy` frees the document. It is `core.build` with
@@ -121,16 +126,40 @@ build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, 
 	// The node reservation is `len(src) / 2` nodes, an estimate because a cell is not always one byte, and the hook
 	// checks capacity as it grows. A header row of `count` cells and its node follow the root.
 	doc, err := build_reserved(src, S, opts, refuse_duplicates, allocator, max(len(src) / 2, count + 2), 0, start, keys)
-	if err.kind != .No_Memory {
+	if err.kind == .No_Memory {
+		// The allocator refused the estimate or a growth. Reading the text again sizes every buffer exactly, so only a
+		// document that does not fit the allocator fails. The hook tests capacity before a close, which writes no node,
+		// so the buffer holds one node more than the text has, and `builder_end` returns it.
+		need: build.Count
+		regs: core.Hook_Regs
+		walk_keys(src, 0, S, opts, &need, &regs, build.builder_hook_count_keyless, keys)
+		doc, err = build_reserved(src, S, opts, refuse_duplicates, allocator, need.nodes + count + 2, need.facts, start, keys)
+	}
+	wide := count
+	if .Ragged in opts.tolerate && count > 0 && err.kind == .None {
+		it := core.children(&doc, core.ROOT)
+		for rec, more := core.child_next(&it); more; rec, more = core.child_next(&it) {
+			wide = max(wide, core.length(&doc, rec))
+		}
+	}
+	if wide == count {
 		return doc, err
 	}
-	// The allocator refused the estimate or a growth. Reading the text again sizes every buffer exactly, so only a
-	// document that does not fit the allocator fails. The hook tests capacity before a close, which writes no node, so
-	// the buffer holds one node more than the text has, and `builder_end` returns it.
-	need: build.Count
-	regs: core.Hook_Regs
-	walk_keys(src, 0, S, opts, &need, &regs, build.builder_hook_count_keyless, keys)
-	return build_reserved(src, S, opts, refuse_duplicates, allocator, need.nodes + count + 2, need.facts, start, keys)
+	// A record wider than the header names its extra columns by position, so the header row is read again with their
+	// keys after its own, and the first read sized every buffer.
+	wider, kerr := make([]core.Token, wide, allocator)
+	if kerr != nil {
+		core.destroy(&doc)
+		return {}, {kind = .No_Memory}
+	}
+	defer delete(wider, allocator)
+	copy(wider, keys)
+	for c in count ..< wide {
+		wider[c] = column_key(keys, c)
+	}
+	nodes, facts := len(doc.nodes) + wide - count + 1, len(doc.facts)
+	core.destroy(&doc)
+	return build_reserved(src, S, opts, refuse_duplicates, allocator, nodes, facts, start, wider)
 }
 
 // Reads `src` into a builder with room for `nodes` nodes and `facts` facts, which the hooks grow past. `keys` holds a
@@ -335,6 +364,11 @@ cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string,
 	if n.spelling & core.SPELLING_DECODE == 0 {
 		return string(src[n.lo:n.lo + u64(n.n)]), true
 	}
+	if n.spelling & SPELLING_COLUMN != 0 {
+		text: [spell.INT_ROOM]u8
+		name := text[:spell.u64_text(&text[0], u64(n.n))]
+		return string(buf[:copy(buf, name)]), len(buf) >= len(name)
+	}
 	// A cell carries `SPELLING_DECODE` when its span must be decoded. That is a quoted CSV cell holding `""`, a TSV
 	// cell with a backslash, which the pass's block mask answers, and any cell under `lax`, where a tolerated ill-formed
 	// sequence reads as U+FFFD.
@@ -354,9 +388,12 @@ spelling_key_equals :: proc "contextless" (doc: ^core.Token_View, n: core.Node, 
 	if n.spelling & core.SPELLING_DECODE == 0 {
 		return spell.bytes_equal(doc.src[n.lo:n.lo + u64(n.n)], transmute([]u8)name)
 	}
+	if n.spelling & SPELLING_COLUMN != 0 {
+		text: [spell.INT_ROOM]u8
+		return spell.bytes_equal(text[:spell.u64_text(&text[0], u64(n.n))], transmute([]u8)name)
+	}
 	return spell.decoded_equals(dsv_decoded_init(doc.src, n, spec), dsv_decoded_next, name)
 }
-
 
 
 

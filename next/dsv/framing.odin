@@ -5,6 +5,7 @@ package dsv
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:strconv"
 import core "../core"
 import kernel "../core/kernel"
 import build "../core/build"
@@ -410,20 +411,29 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 	if it.format == nil {
 		// The first row is read to frame the header, then given back.
 		_, _ = records.next(it)
+		// In memory `pos` is where the next frame starts, and only a stream's moves back to the batch's first row.
 		if b := (^Batch)(it.format); b != nil && b.at > 0 {
-			b.at, it.pos = 0, b.from
-			b.seen = {it.pos, it.base, u64(len(it.src))}
+			b.at = 0
+			if it.input.procedure != nil {
+				it.pos = b.from
+				b.seen = {it.pos, it.base, u64(len(it.src))}
+			}
 		}
 	}
 	b := (^Batch)(it.format)
 	if b == nil {
 		return -1
 	}
+	view := core.Token_View{src = b.key_src, as = it.as}
 	for &key, c in b.keys {
-		view := core.Token_View{src = b.key_src, as = it.as}
 		if spelling_key_equals(&view, key, name) {
 			return c
 		}
+	}
+	// Under `.Ragged` a column past the header's last is named by its position.
+	c, number := strconv.parse_int(name, 10)
+	if number && c > len(b.keys) && .Ragged in options_of(it.as).tolerate && spelling_key_equals(&view, column_key(b.keys, c - 1), name) {
+		return c - 1
 	}
 	return -1
 }
@@ -475,7 +485,7 @@ build_row :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.A
 	regs, _ = build.builder_hook_plain(&b, regs, {kind = .Map if len(keys) > 0 else .Array, role = .Value, lo = at.at})
 	for t, c in cells {
 		if len(keys) > 0 {
-			regs, _ = build.builder_hook_plain(&b, regs, keys[c])
+			regs, _ = build.builder_hook_plain(&b, regs, column_key(keys, c))
 		}
 		cell := t
 		cell.spelling &~= SPELLING_DOUBLED
@@ -563,7 +573,8 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 			}
 		}
 	}
-	if fresh {
+	// A wide row under `.Ragged` binds its columns again, so the row's columns may be new past its open.
+	if raw_data(h.cols) != raw_data(b.cols) {
 		delete(h.cols, context.temp_allocator)
 	}
 	return true

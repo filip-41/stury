@@ -362,6 +362,11 @@ A delimited text is an `Array` of records whose first child may be the header ro
   and column `i`'s key is header cell `i`. `pairs` yields `(key, val)` by pairing each header cell with the record's
   corresponding value cell. A cell's node is its record's node plus one plus its column, so `child_at` returns a cell
   in one step. A column past a record's last cell, as a ragged record has, names no cell.
+- Under `.Ragged` a record wider than the header widens the header row: the build reads the text again with a
+  positional key per column past the header's last, so the row holds as many cells as the widest record. Those keys
+  read as their position (`"3"`), and `refuse_duplicates` refuses a header cell of that name. An edit may set or
+  remove a wide record's cells and drop a positional column. It may not set a positional header cell (`.Bad_Index`),
+  and a column added or dropped before the positional ones, which would rename them, is `.Bad_Width`.
 - A header cell reads as a key node, so `key_equals`, `text`, `number` and `resolve` answer for it as for a JSON key.
 - A headerless text (`no_header` true) has no header row (`doc.shared_keys == 0`), making the first record data and every
   record an `Array` of `Plain` value cells, with no key node at all.

@@ -208,7 +208,7 @@ produces no warning.
 |---|---|---|
 | `Invalid_Utf8` | json (in a string), dsv (in a cell) | each maximal subpart of an ill-formed sequence is U+FFFD |
 | `Lone_Surrogate` | json (in a string) | a `\u` escape of a surrogate half no other half pairs with is U+FFFD |
-| `Ragged` | dsv | a record with fewer cells than the first has its missing columns absent, with no header any width |
+| `Ragged` | dsv | a record of any width: a narrower one has its missing columns absent, and with a header a wider one's cells past the header's last are columns named by their 1-based position (`"3"`) |
 | `Bare_Quote` | dsv (CSV) | a quote inside an unquoted cell is a byte of the cell |
 
 - A tolerance changes no structure. A token keeps its bytes, and the difference appears in the value it decodes to. A
@@ -483,9 +483,12 @@ or holds only a CR is no record.
   cell.
 - A record wider than the first is found at the delimiter that opens the cell past the width. The walk gives its `Map`
   and its first `width` cells, then faults at that delimiter, and gives no `End`. `validate` reports the same byte,
-  which it finds by rescanning that record on the fault path. A wide record is still refused under `Ragged`, which
-  accepts a record narrower than the first, and with no header any width. A narrower record makes its `Map` and all its
-  cells, then faults at its line end's first byte: the CR of a CRLF, else the LF, or the text's end.
+  which it finds by rescanning that record on the fault path. A narrower record makes its `Map` and all its cells, then
+  faults at its line end's first byte: the CR of a CRLF, else the LF, or the text's end.
+- Under `Ragged` no width faults. A headed record's cells past the header's last are read on a cold path
+  (`read_ragged`), each after a `Key` that `column_key` makes: no bytes of its own, `lo` the header's first byte, `n` the
+  column's 1-based position, and the spelling bit `SPELLING_COLUMN`, which `text` and `key_equals` spell as that
+  position in decimal. A header cell of the same name repeats it and meets the duplicate policy.
 
 ### Tiers
 

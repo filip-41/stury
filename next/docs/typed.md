@@ -302,6 +302,10 @@ columns are bound once, when the walk reaches the first record, or the text's en
 - A repeated column reads as its last occurrence, as its first under `.First`, and `refuse_duplicates` makes it
   `.Duplicate_Key` at the repeat. The other occurrence's cells are read into a scratch value, so they are judged against
   the field's type as a skipped repeat is in JSON.
+- Under `.Ragged` a wide record's cell past the header's last is the column named by its 1-based position, which the
+  read binds when the first record that wide reaches it. A refusal for that column (`.Unknown_Field`,
+  `.Duplicate_Key`) is at the header's first byte. A header cell of the same name still reads a narrower record's
+  cell, and in a wide record the duplicate policy picks between the two.
 - `no_header` reads a struct's fields in order. A list row takes every record, with or without `no_header`. A map row
   needs a header, and `no_header` on one is `.Unsupported`, in a write as in a read. A plan of a row reads a built
   document as it reads a text: the first record, and a later one is `.Wrong_Length`.
