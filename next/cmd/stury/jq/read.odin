@@ -22,15 +22,19 @@ is_space :: #force_inline proc "contextless" (c: u8) -> bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
-// `src` as one text's document, or the fault that it is not one. A JSON5 `Infinity` or `NaN` is refused as a bad
-// literal, since jq has no spelling for it.
+// `src` as one text's document, or the fault that it is not one.
 build_text :: proc(src: []byte, r: core_pkg.As, allocator := context.allocator) -> (doc: core_pkg.Document, fault: Maybe(core_pkg.Fault)) {
-	err: core_pkg.Document_Error
-	doc, err = core_pkg.build(src, r, allocator = allocator)
-	if json.Spec(r.spec) == .Json5 {
-		if at, found := non_finite_at(&doc); found {
+	return judge_build(core_pkg.build(src, r, allocator = allocator))
+}
+
+// A build's document `doc`, or the fault its error `err` tells. A JSON5 `Infinity` or `NaN` is refused as a bad
+// literal, since jq has no spelling for it, at its offset in `doc.src` plus `at`.
+judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Document_Error, at: u64 = 0) -> (core_pkg.Document, Maybe(core_pkg.Fault)) {
+	doc := doc
+	if json.Spec(doc.as.spec) == .Json5 && err.kind == .None {
+		if bad, found := non_finite_at(&doc); found {
 			core_pkg.destroy(&doc)
-			return {}, core_pkg.Fault{at = at, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Literal)}
+			return {}, core_pkg.Fault{at = at + bad, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Literal)}
 		}
 	}
 	switch err.kind {

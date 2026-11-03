@@ -59,6 +59,7 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 		}
 		virtual.arena_free_all(&arena)
 		free_all(context.temp_allocator)
+		release_spent(ins)
 	}
 }
 

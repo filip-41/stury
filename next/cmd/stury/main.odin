@@ -85,7 +85,7 @@ main :: proc() {
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
-	if validating || cli.formatting || o.raw_input || o.seq || FORMATS[o.from].lines || FORMATS[o.from].cells || FORMATS[o.to].cells {
+	if validating || cli.formatting || FORMATS[o.from].cells || FORMATS[o.to].cells {
 		message.write_stderr("stury: this build does not run that yet\n")
 		os.exit(EXIT_USAGE)
 	}
@@ -120,6 +120,8 @@ main :: proc() {
 	explain_route(&run)
 	ins := Inputs {
 		reading = cli.reading,
+		framing = input_framing(o),
+		parsed  = {line = 1},
 		files   = cli.files[:] if len(cli.files) > 0 else STDIN_ONLY,
 		slurp   = o.slurp,
 		run     = &run,
@@ -130,6 +132,7 @@ main :: proc() {
 	reserve(&run.ip.messages, 1 << 12)
 	// The interpreter recurses, and so does printing an answer.
 	run_deep(&run, &ins, run_filter)
+	abandon_inputs(&ins)
 	// jq's exit status: the last input's result, 5 after a text that does not parse, 2 after a file that did not
 	// open. Under -e, from the last output when the last input had none.
 	if ins.failures > 0 {

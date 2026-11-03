@@ -6,6 +6,7 @@ package main
 import "core:os"
 import "core:strings"
 import core "../../core"
+import records "../../core/records"
 import "jq"
 import "message"
 
@@ -36,15 +37,29 @@ load_file :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: str
 	if raw {
 		return jq.valid_utf8(string(data)), ""
 	}
+	// Every text of the file, as jq reads its input.
 	all := jq.new_array()
-	if blank(data) {
-		return all, ""
+	texts := records.open(data, r, .Concatenated)
+	defer records.close(&texts)
+	for {
+		rec, more := records.next(&texts)
+		if !more {
+			break
+		}
+		fault := runs_on(data, rec, r)
+		doc: core.Document
+		if fault == nil {
+			built, err := records.build(&texts, rec)
+			doc, fault = jq.judge_build(built, err, rec.at)
+		}
+		if f, bad := fault.?; bad {
+			return nil, jq.parse_message(data, f)
+		}
+		append(&all.items, jq.document_value(doc))
 	}
-	x, fault := jq.read_text(data, r)
-	if e, bad := fault.?; bad {
-		return nil, jq.parse_message(data, e)
+	if f, bad := texts.fault.?; bad {
+		return nil, jq.parse_message(data, f)
 	}
-	append(&all.items, x)
 	return all, ""
 }
 
