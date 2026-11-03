@@ -22,7 +22,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: check gate test test-x86 test-asan test-f32 lint bench bench-doc bench-paths bench-typed bench-write fixtures size surface \
+.PHONY: check gate build-cli test test-x86 test-asan test-f32 lint bench bench-doc bench-paths bench-typed bench-write fixtures size surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(X86_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
@@ -38,6 +38,18 @@ define odin_each
 	echo "== $$p$(4)"; $(ODIN) $(1) $$p $(3) $(if $(filter test,$(1)),-out:$$d/test) || exit 1; \
 done
 endef
+
+# The command line at -o:speed. STURY_VERSION names the version `-V` prints, the commit's short hash by default.
+ifeq ($(shell uname -s),Darwin)
+CLI_LINK := "-extra-linker-flags:-L$(shell xcrun --show-sdk-path)/usr/lib/system -lsystem_m -lsystem_c -lsystem_kernel -lsystem_pthread -lsystem_malloc"
+else ifeq ($(shell uname -s),Linux)
+CLI_LINK := -reloc-mode:static
+endif
+CLI_VERSION := $(or $(STURY_VERSION),$(shell git log -1 --format=%h 2>/dev/null),dev)
+CLI_DEFINES := -define:STURY_VERSION='"$(CLI_VERSION)"'
+build-cli:
+	@mkdir -p $(BUILD)
+	$(ODIN) build cmd/stury -o:speed $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury
 
 # The checks a change can reach, in `tools/gate.py`: `check` while editing, `gate` before a branch lands.
 check:
@@ -104,7 +116,8 @@ lint:
 	done; done
 	$(call odin_each,check,$(LIB_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_riscv64, (linux_riscv64))
 
-# The lean lines of each library package, with the sum and the budget. Past the budget the command fails.
+# The lean lines of each library package and each command line package, with each sum and its budget. Past a budget
+# the command fails.
 size:
 	python3 tools/checks.py size
 

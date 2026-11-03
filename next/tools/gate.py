@@ -30,6 +30,7 @@ HOST = "arm64"
 
 TEST_PKGS = ["core/spell/test", "host/test", "core/kernel/test", "core/test", "core/write/test", "core/records/test", "json/test", "dsv/test"]
 LIB_PKGS = ["core/spell", "core", "host", "core/kernel", "core/compose", "core/build", "core/typed", "core/write", "core/records", "json", "dsv", "walktest"]
+CLI = "cmd/stury"
 BENCH_PKGS = ["bench", "bench/doc", "bench/editbench", "bench/paths", "bench/typed", "bench/write"]
 
 IMPORT = re.compile(r'^\s*import\s+(?:[A-Za-z_]\w*\s+)?"([^"]+)"', re.MULTILINE)
@@ -173,9 +174,11 @@ def make(odin, target, **variables):
 def checks(odin, seed):
     """Every check, cheapest stage first. Each package is its own check, so a diff reruns only what imports it."""
     out = []
-    every = [at(p) for p in LIB_PKGS + TEST_PKGS + BENCH_PKGS]
+    every = [at(p) for p in LIB_PKGS + TEST_PKGS + BENCH_PKGS + [CLI]]
     out.append(Check("lint", 0, 0, every, make(odin, "lint"), trees=[at("tools/checks.py")]))
-    out.append(Check("size", 0, 0, [at(p) for p in LIB_PKGS], ["python3", "tools/checks.py", "size"]))
+    out.append(Check("size", 0, 0, [at(p) for p in LIB_PKGS + [CLI]], ["python3", "tools/checks.py", "size"]))
+    if os.path.isdir(at(CLI)):
+        out.append(Check("cli build", 1, 0, [at(CLI)], make(odin, "build-cli")))
     for package in TEST_PKGS:
         name = package.replace("/", "-")
         root = [at(package)]

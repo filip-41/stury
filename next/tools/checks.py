@@ -17,6 +17,11 @@ FORMATS = {"json", "dsv"}
 
 LEAN_BUDGET = 20_500
 
+# The command line and its subpackages, counted apart from the library under their own budget. Its test files are
+# Python and jq corpora, never counted.
+CLI = "cmd/stury"
+CLI_BUDGET = 18_500
+
 # core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte
 # shuffle's.
 NEUTRAL = ["core/spell", "core", "core/compose", "core/build", "core/typed", "core/write", "core/records"]
@@ -68,7 +73,15 @@ def size():
         total += count
         print(f"{package:<12} {count:>6}")
     print(f"{'sum':<12} {total:>6} of {LEAN_BUDGET}")
-    return 0 if total <= LEAN_BUDGET else 1
+    cli = 0
+    root = os.path.join(ROOT, CLI)
+    parts = sorted({os.path.dirname(path) for path in odin_files(root) if "/test" not in path[len(root):]})
+    for directory in parts:
+        count = sum(lean_lines(path) for path in package_files(os.path.relpath(directory, ROOT)))
+        cli += count
+        print(f"{os.path.relpath(directory, ROOT):<12} {count:>6}")
+    print(f"{'cli sum':<12} {cli:>6} of {CLI_BUDGET}")
+    return 0 if total <= LEAN_BUDGET and cli <= CLI_BUDGET else 1
 
 
 def strip_code(line, block):
