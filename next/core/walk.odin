@@ -94,3 +94,13 @@ text_start :: proc "contextless" (src: []u8, lo: u64) -> u64 {
 	}
 	return lo
 }
+
+// `Framing` says how a text holds a list of records. `Lines` is one record per line end, a row in dsv and a value per
+// line in JSON (NDJSON). `Seq` puts 0x1E before each record (RFC 7464). `Concatenated` is documents one after another,
+// as jq reads them. `Entries` is each element of the root array or member of the root object.
+Framing :: enum u8 {
+	Lines,
+	Seq,
+	Concatenated,
+	Entries,
+}
