@@ -4,7 +4,7 @@ mutated and directed texts. ORACLE_SPEC (csv, tsv, plain), ORACLE_NO_HEADER, ORA
 ORACLE_COMMENT and ORACLE_ENUMS choose the read's options, and the arms read them too. ORACLE_PREFILL reads each case over
 the value the first reads as. A read compares by its value, or by its refusal's kind, byte and path. The old tree is the
 reference, and `accepted` names each difference the plan lists."""
-import os, random, struct, subprocess, sys
+import os, random, re, struct, subprocess, sys
 
 armdir = sys.argv[1]
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 20000
@@ -127,6 +127,9 @@ def repeats_a_column(text):
     names = [n.strip('"') for n in head.split(DELIM)]
     return len(set(names)) < len(names)
 
+POSITION_COLUMN = re.compile(r'"[1-9][0-9]*":("(?:[^"\\\\]|\\\\.)*"|[^,>]*),')
+POSITION_STEP = re.compile(r'^R \w+ \d+ \[\d+\]\.[1-9][0-9]*$')
+
 def accepted(old, new, text):
     """The reason a difference is a listed one, or None."""
     # Every cell of a repeated column is judged, where the old tree judged only the one it kept, so the walk refuses
@@ -136,9 +139,13 @@ def accepted(old, new, text):
     # The walk puts a quoted field never closed at its opening quote, and the old tree at the text's end.
     if old.startswith('R Walk') and new.startswith('R Walk') and at_of(new) < at_of(old) and text[at_of(new):at_of(new) + 1] == b'"':
         return 'unclosed quote at its opening quote'
-    # The walk refuses a record wider than the first under `.Ragged` with a header, where the old tree read past it.
-    if RAGGED and new.startswith('R Width'):
-        return 'wide record under ragged'
+    # Under `.Ragged` with a header a wide record's cells past the header's last are columns named by their 1-based
+    # position, which are read and judged, where the old tree dropped them.
+    if RAGGED and not NO_HEADER:
+        if not new.startswith('R ') and POSITION_COLUMN.sub('', new) == POSITION_COLUMN.sub('', old):
+            return 'wide record under ragged'
+        if POSITION_STEP.search(new) and (not old.startswith('R ') or at_of(new) < at_of(old)):
+            return 'wide record under ragged'
     if not (old.startswith('R ') and new.startswith('R ')):
         return None
     # A headless text's columns are the fields in order, so a required field past the first record's width is missing

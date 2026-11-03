@@ -871,7 +871,7 @@ key_decoded :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_
 map_key :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, f: ^Frame, owner: ^Field) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
 	regs := regs
-	f.extra, f.run = cast([^]u64)uintptr(t.lo), (^Field)(uintptr(t.n))
+	f.extra, f.run = cast([^]u64)raw_data(h.src)[t.lo:], (^Field)(uintptr(t.n))
 	key, ok := token_text(h, t, context.temp_allocator)
 	if !ok {
 		return refuse(h, regs, {kind = .Out_Of_Memory, at = t.lo})

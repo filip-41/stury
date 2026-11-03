@@ -414,8 +414,12 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	reason: core.Typed_Error_Kind
 	if map_row {
 		f := &h.r.frames[h.r.sp - 1]
-		quotes := u64(col.key.spelling >> 1 & 1)
-		f.extra, f.run = cast([^]u64)uintptr(col.key.lo + quotes), (^typed.Field)(uintptr(u64(col.key.n) - 2 * quotes))
+		if col.key.spelling & SPELLING_COLUMN != 0 {
+			f.extra, f.run = cast([^]u64)raw_data(col.name), (^typed.Field)(uintptr(len(col.name)))
+		} else {
+			quotes := u64(col.key.spelling >> 1 & 1)
+			f.extra, f.run = cast([^]u64)raw_data(h.r.src)[col.key.lo + quotes:], (^typed.Field)(uintptr(u64(col.key.n) - 2 * quotes))
+		}
 		slot: rawptr
 		slot, reason = typed.map_slot(&h.r, &h.r.plan.meta[h.row.meta], (^runtime.Raw_Map)(f.data), col.name, col.key)
 		at.c = u64(uintptr(slot))

@@ -14,7 +14,7 @@ NO_LIMIT :: max(u64)
 // base once a key arrived out of order. `seen` holds which members of a struct have been read, kept only once a key
 // arrives out of order, since until then the cursor says, with `SEEN_ON` set then, and a map's keys under `.First`.
 // `run` is the member after the one last found by key, and a map's last key's length. `extra` holds the repeats of a
-// member past the 63rd, and a map's last key's first byte.
+// member past the 63rd, and points at a map's last key's text, which a key named by its position holds outside the source.
 Frame :: struct {
 	a, b, c: u64,
 	data:    rawptr,

@@ -121,7 +121,7 @@ step_at :: proc(h: ^Reader, f: ^Frame, at: core.Hook_Regs) -> (s: core.Step, ok:
 		name := h.plan.meta[field_at(at.b).meta].name
 		return core.Name(name), len(name) > 0
 	case .Map:
-		return core.Name(h.src[uintptr(f.extra):][:uintptr(f.run)]), true
+		return core.Name(string(([^]u8)(f.extra)[:uintptr(f.run)])), true
 	case .Slice, .Dynamic, .Array, .Fixed_List:
 		if f.data == nil {
 			return core.Index(0), true

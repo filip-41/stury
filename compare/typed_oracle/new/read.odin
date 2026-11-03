@@ -106,7 +106,7 @@ rd_cells :: proc(src: []u8, d: ^$T, a: runtime.Allocator) -> bool {
 	}
 	if e.kind != .None {
 		b := strings.builder_make(context.temp_allocator)
-		width := e.kind == .Walk && e.inner.kind == .Bad_Char && e.inner.detail == u8(dsv.Detail.Field_Count)
+		width := e.kind == .Walk && e.inner.kind == .Bad_Char && (e.inner.detail == u8(dsv.Detail.Too_Many) || e.inner.detail == u8(dsv.Detail.Too_Few))
 		fmt.sbprintf(&b, "R %v %d ", "Width" if width else fmt.tprint(e.kind), e.at)
 		for step in e.steps[:e.n_steps] {
 			#partial switch v in step {

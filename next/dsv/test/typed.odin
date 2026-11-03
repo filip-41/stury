@@ -130,6 +130,10 @@ a_wide_record_names_its_cells_by_position :: proc(t: ^testing.T) {
 	expect_refusal(t, read("3,a\n1,2\n4,5,x\n", &rows, {dups = .First}), .Wrong_Kind, 12)
 	e := dsv.unmarshal(transmute([]u8)string("a,b\n1,2,3\n"), .Csv, &rows, {}, {}, context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Walk)
+	maps: []map[string]i64
+	e = dsv.unmarshal(transmute([]u8)string("rap\r\n1,x\r\n"), .Csv, &maps, {}, {tolerate = {.Ragged}}, context.temp_allocator)
+	expect_refusal(t, e, .Wrong_Kind, 7)
+	testing.expect(t, e.n_steps == 2 && e.steps[1] == core.Step(core.Name("2")))
 }
 
 // The column a repeat leaves out is judged against the field's type, as JSON judges a repeated member it skips.

@@ -108,12 +108,12 @@ validate_agrees :: proc(t: ^testing.T, src: []u8, c: gen.Options_Case, refused: 
 	if !refused {
 		return true
 	}
-	// The walk's own `Bad_Char` detail has no member in the current tree, which carries none.
-	detail_agrees := want.detail == got.detail || want.detail == 0 && got.kind == .Bad_Char && got.detail == u8(dsv.Detail.Bare_Quote)
+	// The walk says what is wrong with a `Bad_Char`, where the current tree carries no detail.
+	detail_agrees := want.detail == got.detail || want.detail == 0 && got.kind == .Bad_Char
 	same := false
-	if got.kind == .Bad_Char && got.detail == u8(dsv.Detail.Field_Count) {
-		// The current tree puts `Field_Count` at the record's first byte, and a fault at a later byte comes before it.
-		same = want.kind == .Bad_Structure && want.detail == u8(dsv.Detail.Field_Count) || want.offset >= got.at
+	if got.kind == .Bad_Char && (got.detail == u8(dsv.Detail.Too_Many) || got.detail == u8(dsv.Detail.Too_Few)) {
+		// The current tree puts `Field_Count` at the record's first byte, the walk at the byte where the width goes wrong.
+		same = want.kind == .Bad_Structure && want.detail == u8(cur.Fault.Field_Count) || want.offset >= got.at
 	} else if got.kind == .Truncated {
 		// The walk puts an unclosed quoted field's fault at its opening quote, the current tree at the text's end.
 		same = want.kind == .Truncated && got.at <= want.offset
