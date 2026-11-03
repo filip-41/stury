@@ -38,7 +38,7 @@ Dense_State :: struct {
 dense_route :: #force_inline proc "contextless" (doc: ^core.Document, opts: core.Write_Options, src: []u8, nodes: int) -> bool {
 	return !opts.pretty && copies_strings(opts) &&
 		len(src) < DENSE_BYTES_PER_NODE * nodes &&
-		Spec(doc.read.spec) == .Json && doc.read.opts[0] == 0 && doc.spelling == &SPELLING &&
+		Spec(doc.as.spec) == .Json && doc.as.tolerate == 0 && doc.spelling == &SPELLING &&
 		(len(src) < DENSE_BYTES_PER_NODE_BLANK * nodes || dense_sample(src))
 }
 

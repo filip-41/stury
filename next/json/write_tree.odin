@@ -48,7 +48,7 @@ Pair :: struct {
 // it was authored.
 @(private)
 document_cold :: proc(doc: ^core.Document, opts: core.Write_Options, own: bool, node: core.Node_Index) -> bool {
-	return !own || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || doc.shared_keys != 0 || Spec(doc.read.spec) == .Json5
+	return !own || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || doc.shared_keys != 0 || Spec(doc.as.spec) == .Json5
 }
 
 // Writes node `node` of `doc` as spec `as`, into an output of `hint` bytes. The count is the facts `as` cannot hold.
@@ -59,7 +59,7 @@ write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, stream: io.Str
 	write.init(&out, &spill, allocator, stream, hint)
 	w := Tree{doc = doc, root = node, out = &out, opts = opts, json = doc.spelling == &SPELLING}
 	w.keep = w.json && as != .Json
-	w.respell = w.json && Spec(doc.read.spec) == .Json5 && as != .Json5
+	w.respell = w.json && Spec(doc.as.spec) == .Json5 && as != .Json5
 	w.copy = w.json && !w.respell && copies_strings(opts)
 	if w.keep {
 		root := doc.nodes[node]
@@ -244,15 +244,15 @@ tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int) -> bool {
 	return true
 }
 
-// Writes scalar `i`. A delimited text's cell is a string, or with `infer` what `core.resolve` reads it as.
+// Writes scalar `i`. A delimited text's cell is what `core.resolve` reads it as.
 @(private)
 tree_scalar :: proc(w: ^Tree, i: core.Node_Index, t: core.Token) -> bool {
 	if w.respell && t.kind == .Number {
 		return tree_number(w, t)
 	}
 	cell := t
-	if cell.kind == .Plain && w.opts.infer {
-		cell.kind = core.resolve(w.doc, i, {infer = true})
+	if cell.kind == .Plain {
+		cell.kind = core.resolve(w.doc, i)
 	}
 	w.kind = put_token(w.out, w.doc.src, w.doc, i, cell, w.opts, w.json, w.copy)
 	return w.kind == .None

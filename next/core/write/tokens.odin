@@ -17,7 +17,7 @@ Scalar :: union {
 // writes one scalar, or one cell of a flat format, and a key is a string. A format with a `line` is flat.
 Token_Spelling :: struct {
 	tree:   Tree,
-	start:  proc(t: ^Tokens, read: core.Read_As) -> core.Typed_Error_Kind, // sets `state` and `out`
+	start:  proc(t: ^Tokens, as: core.As) -> core.Typed_Error_Kind, // sets `state` and `out`
 	value:  proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind,
 	line:   proc(t: ^Tokens) -> core.Typed_Error_Kind, // ends a record
 	stop:   proc(t: ^Tokens), // frees `state`
@@ -56,7 +56,7 @@ tokens_init :: proc(t: ^Tokens, as: core.As, opts := core.Write_Options{}, alloc
 	}
 	t.spell = (^Token_Spelling)(as.spelling.tokens)
 	if t.spell.start != nil {
-		return refuse(t, t.spell.start(t, as.read))
+		return refuse(t, t.spell.start(t, as))
 	}
 	return .None
 }

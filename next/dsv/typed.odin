@@ -34,7 +34,7 @@ plan_make :: proc(T: typeid, spec: Spec, layout := Options{}, opts := typed.Plan
 		typed.plan_destroy(&plan)
 		return {}, {kind = .Bad_Option}
 	}
-	plan.layout = {u8(spec), spec_delimiter(spec, layout.delimiter), layout.comment, u8(layout.no_header), u8(layout.crlf)}
+	plan.as = layout_as(spec, layout)
 	plan.marshal, plan.node_read = marshal_text, document_read
 	return plan, {}
 }
@@ -64,7 +64,7 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 	if err.kind != .None {
 		return err
 	}
-	h.r.read.spec = u8(S)
+	h.r.as.spec = u8(S)
 	rows_of(&h, plan, len(src))
 	if h.row.kind == .Map && opts.no_header {
 		return {kind = .Unsupported}

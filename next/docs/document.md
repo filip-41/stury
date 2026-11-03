@@ -90,11 +90,11 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
 - `root_close` is one past the root value's authored bytes: the close of a root container, or the last byte of a root
   scalar, quotes included. It is 0 when the build did not record it. `span(ROOT)` and a whole-document writer use it
   instead of the format's `close_end`.
-- `read: Read_As` records how the text was read, in 8 bytes. Its `spec` is the spec the text was read as, in one
-  byte, so an edit service can dispatch on it when a procedure pointer carries no compile-time spec. `opts` holds
-  three opaque format bytes, passed along unread by core, which dsv uses for its delimiter, comment byte and `no_header`
-  flag. Its `max_depth` is `Options.max_depth`, 0 for the default: JSON's build stores it and its edit services read a
-  recorded value at that depth, and a delimited text has no depth option and leaves it 0.
+- `as: core.As` is the handle the text was read with, in 24 bytes: the `spelling`, the `spec` in one byte, so an edit
+  service can dispatch on it when a procedure pointer carries no compile-time spec, the `tolerate` set, `max_depth`, and
+  ten format bytes core passes along unread, which dsv uses for its delimiter, comment byte, `no_header`, `crlf` and
+  `infer`. `max_depth` is `Options.max_depth`, 0 for the default: JSON's edit services read a recorded value at that
+  depth, and a delimited text has no depth option and leaves it 0. `json.as` and `dsv.as` make a handle.
 - A path read fills `answers`, and for a partial document `kept`, `missing`, `partial` and `stopped`, all in `paths.md`.
   `answers`, `kept` and `missing` share `reads_block`, which `destroy` frees.
 - The document does not change after its build, and no reader accepts an edit.
@@ -109,7 +109,7 @@ dsv.build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := f
 ```
 
 The builder is package `core/build`, which imports `core`. Both run the walk with a builder hook, end it with
-`build.builder_end`, and store the spec in `doc.read.spec`. `build.builder_start` reserves a stack of `depth` slots, or
+`build.builder_end`, and `build.builder_start` stores the handle in `doc.as` and reserves a stack of `depth` slots, or
 1 when `depth` is 0, the `facts` it is given, and at least 16 nodes, `nodes` when that is larger. The hook pushes a
 frame with no capacity test, so `depth` must be at least the walk's depth limit. The node buffer is not zeroed, and it
 is allocated last, so `builder_free` frees it first. A document keeps its buffer whole, since an arena that shrank it would
@@ -265,9 +265,9 @@ nonnegative `Int`. `float_value` returns an `Int`, `Uint` or `Float` as a binary
 they do not read; `float_value` returns false for `Wide`, which the caller reads from its span. A node that is no
 number returns false from each.
 
-`resolve(doc, i, opts := Resolve_Options{})` returns what a node is: `.Null` for a miss, and otherwise the format's
-answer. JSON's is the node's own kind. dsv's returns `.String` for a key cell, for a quoted or escaped cell, and for
-every cell without `opts.infer`. With `infer`, an empty cell is `.Null`, a `true` or `false` cell is `.True` or
+`resolve(doc, i)` returns what a node is: `.Null` for a miss, and otherwise the format's answer. JSON's is the node's
+own kind. dsv's returns `.String` for a key cell, for a quoted or escaped cell, and for every cell of a document read
+without `Options.infer`. With `infer`, an empty cell is `.Null`, a `true` or `false` cell is `.True` or
 `.False`, and a cell that is exactly a JSON number is `.Number`. A quoted cell, a TSV escape and a cell holding an
 ill-formed sequence answer `.String`, since their span holds a quote, a backslash or a byte no JSON number holds.
 
@@ -276,9 +276,9 @@ ill-formed sequence answer `.String`, since their span holds a quote, a backslas
 A `Spelling` holds five services, `text`, `key_equals`, `number`, `resolve` and `close_end`, the `query` engine `core.query`
 dispatches through, which each format points at `core/build`'s, and a pointer to the format's `Edit_Spelling`. A document points at its format's table in rodata,
 one table for every spec of the format: a JSON token holds no form that only JSON5 reads, so `text` reads any JSON
-string, and dsv's `text` and `key_equals` read `Document.read.spec`, since a CSV backslash is a byte, a TSV
+string, and dsv's `text` and `key_equals` read `Document.as.spec`, since a CSV backslash is a byte, a TSV
 backslash is an escape, and a `Plain` cell has neither. `text`, `key_equals` and `number` take a `Token_View`, the
-source, the table and the read, and the token by value, so a typed read hands them a walk's token with no document.
+source and the handle, and the token by value, so a typed read hands them a walk's token with no document.
 `Document` starts with `using view: Token_View`, and `Edit_Spelling.value` takes one too.
 
 | Service | JSON | dsv |
@@ -422,7 +422,7 @@ judges the text as one value, one key or one record of the document's spec, and 
   with `.Bad_Fact`, and a role at or below `Key` is `.Bad_Index`. A second edit of one node and role is recorded and
   `commit` refuses it with `.Conflicting_Edits`.
 
-JSON's value check walks the text as exactly one value of `doc.read.spec` at `doc.read.max_depth`, refusing one that
+JSON's value check walks the text as exactly one value of `doc.as.spec` at `doc.as.max_depth`, refusing one that
 begins with a byte-order mark or holds a comment after its value, since a splice would put the next bytes inside it.
 JSON's key check reads the text as the only member of `{text:0}` and requires the key's token to cover the whole text.
 

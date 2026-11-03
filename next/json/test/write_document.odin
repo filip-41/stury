@@ -285,17 +285,11 @@ write_document_nodes :: proc(t: ^testing.T) {
 write_document_refusals :: proc(t: ^testing.T) {
 	doc, _ := json.build(transmute([]u8)string(`{"a":1}`), .Json)
 	defer core.destroy(&doc)
-	doc.partial = true
-	_, _, err := core.write(&doc)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
-	_, _, err = core.write(&doc)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
-	doc.partial = false
 	whole, _, werr := core.write(&doc)
 	delete(whole)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
 
-	_, err = json.format(transmute([]u8)string(`[1,`), .Json)
+	_, err := json.format(transmute([]u8)string(`[1,`), .Json)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Walk)
 	_, err = json.format(transmute([]u8)string("[1, /* c */ "), .Jsonc)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Walk)
@@ -724,7 +718,7 @@ write_document_shared_keys :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(sorted), `[{"x":"1","y":"a"},{"x":"2.5","y":"b c"}]`)
 }
 
-// A partial document is written with only the members and elements its read kept, and only with `partial` set.
+// A partial document is written with only the members and elements its read kept.
 @(test)
 write_document_kept :: proc(t: ^testing.T) {
 	src := `{"a":[1,2,3,{"k":[4,5]}],"b":{"c":1,"d":2},"e":null}`
@@ -745,9 +739,7 @@ write_document_kept :: proc(t: ^testing.T) {
 		return
 	}
 	defer core.destroy(&doc)
-	_, _, werr := core.write(&doc)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.Unsupported)
-	text, _, kerr := core.write(&doc, {partial = true})
+	text, _, kerr := core.write(&doc)
 	defer delete(text)
 	testing.expect_value(t, kerr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(text), `{"a":[2,{"k":[4]}],"b":{"d":2}}`)
@@ -797,17 +789,17 @@ write_document_from_delimited_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(records), `[{"x":"1","y":"2"}]`)
 }
 
-// With `infer` a cell is written as the null, boolean or number it reads as, and every other cell stays a string, so the
+// A document read with `infer` writes a cell as the null, boolean or number it reads as, and every other cell stays a string, so the
 // text is JSON whatever the cells hold.
 @(test)
 write_document_infers_cells :: proc(t: ^testing.T) {
 	src := "a,b,c,d,e,f,g,h\n1,-2.50e3,true,false,,x,\"7\",0\n01,+1,.5,1.,0x1,NaN,-, 1\n"
-	doc, err := dsv.build(transmute([]u8)src, .Csv)
+	doc, err := dsv.build(transmute([]u8)src, .Csv, {infer = true})
 	defer core.destroy(&doc)
 	if !testing.expect_value(t, err.kind, core.Document_Error_Kind.None) {
 		return
 	}
-	text, _, werr := core.write(&doc, {infer = true}, json.as(.Json))
+	text, _, werr := core.write(&doc, {}, json.as(.Json))
 	defer delete(text)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(text), `[{"a":1,"b":-2.50e3,"c":true,"d":false,"e":null,"f":"x","g":"7","h":0},` +

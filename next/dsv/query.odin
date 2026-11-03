@@ -24,11 +24,9 @@ scan_many :: proc(src: []u8, $S: Spec, paths: []core.Path, read := core.Path_Opt
 	h: engine.Scan
 	// A record is a container inside the document's array, so a dsv text nests at most two containers.
 	frames: [8]u64 = ---
-	if e := engine.scan_start(&h, src, &SPELLING, paths, read, true, allocator, 8, frames[:]); e.kind != .None {
+	if e := engine.scan_start(&h, src, as(S, opts), paths, read, true, allocator, 8, frames[:]); e.kind != .None {
 		return {}, e
 	}
-	h.b.doc.read.spec = u8(S)
-	h.b.doc.read.opts = {delimiter_of(S, opts), opts.comment, 1 if opts.no_header else 0}
 	regs := engine.BUILDER_REGS
 	hi: u64
 	fault: Maybe(core.Fault)
@@ -55,7 +53,7 @@ each_answer_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr,
 	}
 	h: engine.Scan
 	frames: [8]u64 = ---
-	if e := engine.scan_start(&h, src, &SPELLING, paths, read, true, allocator, 8, frames[:], true, state, on); e.kind != .None {
+	if e := engine.scan_start(&h, src, as(S, opts), paths, read, true, allocator, 8, frames[:], true, state, on); e.kind != .None {
 		return e
 	}
 	regs := engine.BUILDER_REGS

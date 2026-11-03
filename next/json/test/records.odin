@@ -427,7 +427,7 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	kerr := json.unmarshal(transmute([]u8)keys[1], .Json, &name, &kp, {}, {}, context.temp_allocator)
 	testing.expect(t, kerr.kind == .None && name == `b"c`)
 	flat := json.as(.Json)
-	flat.read.max_depth = 1
+	flat.max_depth = 1
 	faults, _ = records.check(transmute([]u8)string("[1, 2]"), flat, .Entries, context.temp_allocator)
 	testing.expect_value(t, len(faults), 0)
 	faults, _ = records.check(transmute([]u8)string("[1, [2]]"), flat, .Entries, context.temp_allocator)

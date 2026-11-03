@@ -552,11 +552,11 @@ fact_agrees :: proc(t: ^testing.T, round: int, before: []Fact_Model, doc: ^core.
 		foot := f.role == .Comment && f.node == core.ROOT && doc.shared_keys != 0 && core.length(read, core.ROOT) == 0
 		// A source fact in the document's own spec already reads under it, so only a missing slot drops it. Under
 		// another spec the output must hold the whole fact, body included.
-		if spec != doc.read.spec && !foot && !fact_holdable(doc, f.node, f.role, f.body, spec, read) {
+		if spec != doc.as.spec && !foot && !fact_holdable(doc, f.node, f.role, f.body, spec, read) {
 			expected += 1
 			continue
 		}
-		if spec == doc.read.spec && !foot && !fact_holdable(doc, f.node, f.role, "", spec, read) {
+		if spec == doc.as.spec && !foot && !fact_holdable(doc, f.node, f.role, "", spec, read) {
 			expected += 1
 			continue
 		}

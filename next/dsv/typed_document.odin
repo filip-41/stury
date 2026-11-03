@@ -33,7 +33,7 @@ document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	if !root && doc.nodes[node].kind <= .Plain {
 		return {kind = .Unsupported}
 	}
-	_, _, headless := read_opts(doc)
+	headless := options_of(doc.as).no_header
 	d := Document_Cells{doc = doc}
 	h := &d.cells
 	frames: [ROW_FRAMES]typed.Frame = ---
@@ -41,7 +41,7 @@ document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	if err.kind != .None {
 		return err
 	}
-	h.r.read.spec = doc.read.spec
+	h.r.as.spec = doc.as.spec
 	// A node says less of a quoted cell than the walk's token, so every cell takes the cold read.
 	rows_of(h, plan, 0)
 	if h.row.kind == .Map && headless {

@@ -234,7 +234,7 @@ put_raw :: proc(w: ^Walker, s: string, top: int, $T: Tree) -> core.Typed_Error_K
 	case ' ', '\t', '\n', '\r':
 		return .Bad_Raw
 	}
-	view := core.Token_View{spelling = w.plan.spelling, read = {max_depth = u32(core.MAX_DEPTH - top)}}
+	view := core.Token_View{as = {spelling = w.plan.spelling, max_depth = u32(core.MAX_DEPTH - top)}}
 	if e := w.plan.spelling.edit.value(&view, transmute([]u8)s, context.allocator); e.kind != .None {
 		return .Too_Deep if e.inner.kind == .Too_Deep else .Bad_Raw
 	}

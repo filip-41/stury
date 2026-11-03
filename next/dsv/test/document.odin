@@ -223,7 +223,7 @@ quoted_and_escaped :: proc(t: ^testing.T) {
 @(test)
 resolve_infer :: proc(t: ^testing.T) {
 	src := "a,b,c,d,e,f\n,true,false,1.5,007,\"1\"\n"
-	doc, err := build(src, .Csv)
+	doc, err := build(src, .Csv, {infer = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	rec, _ := first_member(&doc, 0)
@@ -234,7 +234,7 @@ resolve_infer :: proc(t: ^testing.T) {
 		v, ok := core.member(&doc, rec, key)
 		testing.expectf(t, ok, "key %q", key)
 		testing.expectf(t, core.kind(&doc, v) == .Plain, "key %q kind %v", key, core.kind(&doc, v))
-		got := core.resolve(&doc, v, {infer = true})
+		got := core.resolve(&doc, v)
 		testing.expectf(t, got == w, "key %q: %v, want %v", key, got, w)
 	}
 	v, _ := core.member(&doc, rec, "d")
@@ -242,8 +242,11 @@ resolve_infer :: proc(t: ^testing.T) {
 	testing.expect_value(t, n.kind, core.Number_Kind.Float)
 	testing.expect_value(t, n.bits, 0x3ff8000000000000)
 	// Without `infer` every cell is a string.
-	v, _ = core.member(&doc, rec, "b")
-	testing.expect_value(t, core.resolve(&doc, v, {}), core.Kind.String)
+	text, _ := build(src, .Csv)
+	defer core.destroy(&text)
+	trec, _ := first_member(&text, 0)
+	v, _ = core.member(&text, trec, "b")
+	testing.expect_value(t, core.resolve(&text, v), core.Kind.String)
 }
 
 // A repeated header name is a duplicate under a refusing build, at the later cell, and `member` reads the last column
@@ -448,12 +451,12 @@ readers_refuse_containers :: proc(t: ^testing.T) {
 // A quoted cell is not a number, so `resolve` reads it as `.String` and `number` as `.Wide`.
 @(test)
 quoted_number :: proc(t: ^testing.T) {
-	doc, err := build("n\n\"1\"\n", .Csv)
+	doc, err := build("n\n\"1\"\n", .Csv, {infer = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	rec, _ := first_member(&doc, 0)
 	cell, _ := core.member(&doc, rec, "n")
-	testing.expect_value(t, core.resolve(&doc, cell, {infer = true}), core.Kind.String)
+	testing.expect_value(t, core.resolve(&doc, cell), core.Kind.String)
 	testing.expect_value(t, core.number(&doc, cell).kind, core.Number_Kind.Wide)
 }
 
@@ -462,7 +465,7 @@ quoted_number :: proc(t: ^testing.T) {
 @(test)
 quoted_cell_text :: proc(t: ^testing.T) {
 	src := "a,b\n\"1\",\"x\"\"y\"\n"
-	doc, err := build(src, .Csv)
+	doc, err := build(src, .Csv, {infer = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	rec, _ := first_member(&doc, 0)
@@ -472,15 +475,15 @@ quoted_cell_text :: proc(t: ^testing.T) {
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "1")
 	testing.expect_value(t, core.number(&doc, plain).kind, core.Number_Kind.Wide)
-	testing.expect_value(t, core.resolve(&doc, plain, {infer = true}), core.Kind.String)
+	testing.expect_value(t, core.resolve(&doc, plain), core.Kind.String)
 	escaped, _ := core.member(&doc, rec, "b")
 	s, ok = core.text(&doc, escaped, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\"y")
 	testing.expect_value(t, core.number(&doc, escaped).kind, core.Number_Kind.Wide)
-	testing.expect_value(t, core.resolve(&doc, escaped, {infer = true}), core.Kind.String)
+	testing.expect_value(t, core.resolve(&doc, escaped), core.Kind.String)
 	// A quoted empty cell is no empty cell: it is text, not `.Null`.
-	empty, err2 := build("a\n\"\"\n", .Csv)
+	empty, err2 := build("a\n\"\"\n", .Csv, {infer = true})
 	defer core.destroy(&empty)
 	testing.expect_value(t, err2.kind, core.Document_Error_Kind.None)
 	erec, _ := first_member(&empty, 0)
@@ -488,13 +491,13 @@ quoted_cell_text :: proc(t: ^testing.T) {
 	s, ok = core.text(&empty, ecell, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "")
-	testing.expect_value(t, core.resolve(&empty, ecell, {infer = true}), core.Kind.String)
+	testing.expect_value(t, core.resolve(&empty, ecell), core.Kind.String)
 }
 
 // A TSV escape reads as the byte it spells, so its cell is text and no number.
 @(test)
 escaped_cell_text :: proc(t: ^testing.T) {
-	doc, err := build("a\n1\\02\nx\\ty\n", .Tsv)
+	doc, err := build("a\n1\\02\nx\\ty\n", .Tsv, {infer = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	rec, _ := first_member(&doc, 0)
@@ -505,7 +508,7 @@ escaped_cell_text :: proc(t: ^testing.T) {
 	want := []u8{'1', 0, '2'}
 	testing.expect_value(t, s, string(want))
 	testing.expect_value(t, core.number(&doc, cell).kind, core.Number_Kind.Wide)
-	testing.expect_value(t, core.resolve(&doc, cell, {infer = true}), core.Kind.String)
+	testing.expect_value(t, core.resolve(&doc, cell), core.Kind.String)
 	rec2 := core.Node_Index(0)
 	it := core.children(&doc, 0)
 	core.child_next(&it)
@@ -514,27 +517,27 @@ escaped_cell_text :: proc(t: ^testing.T) {
 	s, ok = core.text(&doc, cell2, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\ty")
-	testing.expect_value(t, core.resolve(&doc, cell2, {infer = true}), core.Kind.String)
+	testing.expect_value(t, core.resolve(&doc, cell2), core.Kind.String)
 }
 
 // A tolerated ill-formed sequence reads as U+FFFD in a quoted and an unquoted cell, while a well-formed number in the
 // same text still reads as `.Number`.
 @(test)
 tolerated_cell_text :: proc(t: ^testing.T) {
-	doc, err := build("a,b\n1,\"x\xffy\"\n", .Csv, {tolerate = {.Invalid_Utf8}})
+	doc, err := build("a,b\n1,\"x\xffy\"\n", .Csv, {tolerate = {.Invalid_Utf8}, infer = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	rec, _ := first_member(&doc, 0)
 	buf: [8]u8
 	num, _ := core.member(&doc, rec, "a")
 	testing.expect_value(t, core.number(&doc, num).kind, core.Number_Kind.Int)
-	testing.expect_value(t, core.resolve(&doc, num, {infer = true}), core.Kind.Number)
+	testing.expect_value(t, core.resolve(&doc, num), core.Kind.Number)
 	bad, _ := core.member(&doc, rec, "b")
 	s, ok := core.text(&doc, bad, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\uFFFdy")
 	testing.expect_value(t, core.number(&doc, bad).kind, core.Number_Kind.Wide)
-	testing.expect_value(t, core.resolve(&doc, bad, {infer = true}), core.Kind.String)
+	testing.expect_value(t, core.resolve(&doc, bad), core.Kind.String)
 
 	tsv_doc, terr := build("a\n2\nx\xffy\n", .Tsv, {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&tsv_doc)
@@ -554,7 +557,7 @@ tolerated_cell_text :: proc(t: ^testing.T) {
 
 @(test)
 empty_tail_cell :: proc(t: ^testing.T) {
-	doc, err := build("1,2,", .Csv, {no_header = true})
+	doc, err := build("1,2,", .Csv, {no_header = true, infer = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	rec, _ := first_member(&doc, 0)
@@ -562,7 +565,7 @@ empty_tail_cell :: proc(t: ^testing.T) {
 	_, _ = core.child_next(&it)
 	_, _ = core.child_next(&it)
 	cell, _ := core.child_next(&it)
-	testing.expect_value(t, core.resolve(&doc, cell, {infer = true}), core.Kind.Null)
+	testing.expect_value(t, core.resolve(&doc, cell), core.Kind.Null)
 	testing.expect_value(t, core.number(&doc, cell).kind, core.Number_Kind.Wide)
 	s, ok := core.text(&doc, cell, nil)
 	testing.expect(t, ok)
@@ -578,14 +581,14 @@ read_does_not_allocate :: proc(t: ^testing.T) {
 	mem.arena_init(&arena, backing)
 	alloc := mem.arena_allocator(&arena)
 	src := transmute([]u8)string("n\n\"" + "1234567890" + "1234567890" + "1234567890" + "1234567890" + "1234567890" + "1234567890" + "1234567890" + "1234567890" + "1234567890" + "1234567890" + "\"\n")
-	doc, err := dsv.build(src, .Csv, {}, false, alloc)
+	doc, err := dsv.build(src, .Csv, {infer = true}, false, alloc)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	rec, _ := first_member(&doc, 0)
 	cell, _ := core.member(&doc, rec, "n")
 	before := arena.offset
 	_ = core.number(&doc, cell)
-	_ = core.resolve(&doc, cell, {infer = true})
+	_ = core.resolve(&doc, cell)
 	testing.expect_value(t, arena.offset, before)
 }
 
@@ -959,13 +962,13 @@ comment_lines :: proc(t: ^testing.T) {
 // A header cell is a key, so `number` reads it as `.Wide` and `resolve` as `.String`, as for a JSON key node.
 @(test)
 header_cell_is_a_key :: proc(t: ^testing.T) {
-	doc, err := build("12.5,7\n1,2\n", .Csv)
+	doc, err := build("12.5,7\n1,2\n", .Csv, {infer = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	h := doc.shared_keys
 	testing.expect_value(t, doc.nodes[h + 1].role, core.Role.Key)
 	testing.expect_value(t, core.number(&doc, h + 1).kind, core.Number_Kind.Wide)
-	testing.expect_value(t, core.resolve(&doc, h + 1, {infer = true}), core.Kind.String)
+	testing.expect_value(t, core.resolve(&doc, h + 1), core.Kind.String)
 	buf: [8]u8
 	s, ok := core.text(&doc, h + 1, buf[:])
 	testing.expect(t, ok)
@@ -1127,20 +1130,20 @@ options_remembered :: proc(t: ^testing.T) {
 	plain, perr := build("a|b\n1|2\n", .Plain, {delimiter = '|', comment = '#'})
 	defer core.destroy(&plain)
 	testing.expect_value(t, perr.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, plain.read.opts[0], u8('|'))
-	testing.expect_value(t, plain.read.opts[1], u8('#'))
-	testing.expect_value(t, plain.read.opts[2], u8(0))
+	testing.expect_value(t, plain.as.opts[0], u8('|'))
+	testing.expect_value(t, plain.as.opts[1], u8('#'))
+	testing.expect_value(t, plain.as.opts[2], u8(0))
 
 	csv, cerr := build("a,b\n1,2\n", .Csv)
 	defer core.destroy(&csv)
 	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, csv.read.opts[0], u8(','))
-	testing.expect_value(t, csv.read.opts[1], u8(0))
+	testing.expect_value(t, csv.as.opts[0], u8(','))
+	testing.expect_value(t, csv.as.opts[1], u8(0))
 
 	tsv, terr := build("a\tb\n1\t2\n", .Tsv)
 	defer core.destroy(&tsv)
 	testing.expect_value(t, terr.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, tsv.read.opts[0], u8('\t'))
+	testing.expect_value(t, tsv.as.opts[0], u8('\t'))
 }
 
 // A headed record yields member key and value pairs through `pairs` and `pair_next`, with keys from the shared header row.

@@ -34,7 +34,7 @@ each call and tests `out.err` where it can stop. `finish` returns the error.
 ## Options
 
 ```odin
-core.Write_Options :: struct {pretty: bool, indent: u8, tab: bool, ascii: bool, escape_html: bool, sort_keys: bool, partial: bool, infer: bool, respell_strings: bool}
+core.Write_Options :: struct {pretty: bool, indent: u8, tab: bool, ascii: bool, escape_html: bool, sort_keys: bool, respell_strings: bool}
 core.PRETTY :: core.Write_Options{pretty = true, indent = 2}
 ```
 
@@ -121,7 +121,7 @@ A refusal names its path. Nothing tracks one while writing: `refused` reads it f
 core.write           :: proc(doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Typed_Error)
 core.write_stream    :: proc(w: io.Stream, doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (dropped: int, err: core.Typed_Error)
 core.subtree_facts   :: proc(doc: ^core.Document, i: core.Node_Index) -> []core.Fact
-json.as              :: proc(spec: json.Spec) -> core.As
+json.as              :: proc(spec: json.Spec, opts := json.Options{}) -> core.As
 dsv.as               :: proc(spec: dsv.Spec, layout := dsv.Options{}) -> core.As
 json.format          :: proc(src: []u8, $S: json.Spec, opts := core.Write_Options{}, read := json.Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
 ```
@@ -129,7 +129,7 @@ json.format          :: proc(src: []u8, $S: json.Spec, opts := core.Write_Option
 `core.write` writes a document through the `write` slot of the `Spelling` in `as`. A nil `as` is the format and layout the
 document was read in. `json.as(.Jsonc)` and `dsv.as(.Tsv, layout)` name another target, in the same format or in another,
 so a JSON document is written as a table and a table as JSON by the target's writer. A target with no spelling or no writer
-is `.Unsupported`. `core.As` holds the spelling and the spec and layout bytes a `Document` holds in `read`.
+is `.Unsupported`. `core.As` is the handle a `Document` holds in `as`.
 
 `node` writes one value of the document as a text of its own, the root by default: a subtree with the comments inside
 its span, which `core.subtree_facts` returns, in the spelling and layout the root would have. A key, a node the document
@@ -194,11 +194,10 @@ as decimal of any length, a leading `+`, a bare `.5` and a trailing `.` as JSON 
 `.Non_Finite`. A `shared_keys` document is written as an array of objects, and a positional record as an object through its
 pairs.
 
-`core.write` is `.Unsupported` for a partial document unless `Write_Options.partial` is set. Then it writes one from the nodes
-it kept, as JSON: an array position collapses to the next kept element, and an element reached by two paths in a ring is
+`core.write` writes a partial document from the nodes it kept, as JSON: an array position collapses to the next kept element, and an element reached by two paths in a ring is
 written once for each. A partial
 document keeps no comments. A delimited text with a header is an array of objects, and a headerless one an array of arrays.
-Each cell is a string, or with `Write_Options.infer` what `resolve` reads it as: an empty cell is `null`, `true` and `false` are booleans, and
+Each cell is a string, or for a text read with `dsv.Options.infer` what `resolve` reads it as: an empty cell is `null`, `true` and `false` are booleans, and
 a cell that is exactly a JSON number is a number in its source spelling. Any other cell, a quoted one included, stays a string, so the
 text is JSON and no value changes.
 The size hint of a document write is its source length, and for pretty text eight levels of

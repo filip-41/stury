@@ -99,7 +99,7 @@ refill :: proc(it: ^records.Reader) -> bool {
 	}
 	b.n, b.at, b.split_row, b.from = 0, 0, 0, it.pos
 	if !b.done {
-		spec, opts := read_layout(it.as.read)
+		spec, opts := Spec(it.as.spec), options_of(it.as)
 		switch spec {
 		case .Csv:   frame_batch(it, b, .Csv, opts)
 		case .Tsv:   frame_batch(it, b, .Tsv, opts)
@@ -336,7 +336,7 @@ cells_of :: proc(it: ^records.Reader, rec: records.Record) -> ([]core.Token, boo
 	}
 	b := (^Batch)(it.format)
 	if b.split_row != b.at {
-		spec, opts := read_layout(it.as.read)
+		spec, opts := Spec(it.as.spec), options_of(it.as)
 		ok: bool
 		if b.split, ok = split_all(it, b, it.src, row, spec, opts, .Value); !ok {
 			return nil, false
@@ -361,7 +361,7 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 		return -1
 	}
 	for &key, c in b.keys {
-		view := core.Token_View{src = b.key_src, read = it.as.read}
+		view := core.Token_View{src = b.key_src, as = it.as}
 		if spelling_key_equals(&view, key, name) {
 			return c
 		}
@@ -373,10 +373,10 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 @(private)
 cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) {
 	b := (^Batch)(it.format)
-	spec := Spec(it.as.read.spec)
+	spec := Spec(it.as.spec)
 	row, held := held_row(it, rec)
 	if held && b.split_row != b.at && 0 <= column && column < len(b.cells) {
-		_, opts := read_layout(it.as.read)
+		opts := options_of(it.as)
 		sp := Split{out = b.cells[:column + 1]}
 		split_any(it.src, row, spec, opts, .Value, &sp, {}, on_split)
 		if sp.n <= column {
@@ -407,11 +407,10 @@ build_row :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.A
 	if !joinable {
 		return {}, {kind = .No_Memory}
 	}
-	b := build.builder_start(src, &SPELLING, false, allocator, 1 + len(cells) + len(keys), 2)
+	b := build.builder_start(src, it.as, false, allocator, 1 + len(cells) + len(keys), 2)
 	if len(b.doc.nodes) == 0 {
 		return build.builder_end(&b, build.BUILDER_REGS, nil)
 	}
-	b.doc.read = it.as.read
 	b.root_close = at.hi
 	regs := build.BUILDER_REGS
 	regs, _ = build.builder_hook_plain(&b, regs, {kind = .Map if len(keys) > 0 else .Array, role = .Value, lo = at.at})
@@ -432,7 +431,7 @@ build_row :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.A
 // of the header and that row. A list row reads the row alone, as it reads a header as data.
 @(private)
 read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
-	spec, opts := read_layout(it.as.read)
+	spec, opts := Spec(it.as.spec), options_of(it.as)
 	h := Cells{refuse_repeats = read.refuse_duplicates}
 	regs, started := typed.read_start(&h.r, it.src, plan, &SPELLING, T, target, read, it.frames, allocator)
 	if started.kind == .None && plan.marshal == nil {
@@ -466,7 +465,7 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 	if stream {
 		h.r.src, h.r.base, h.hot_end = src, raw_data(src), u64(max(len(src) - HOT_REACH, 0))
 	}
-	h.r.read.spec = u8(spec)
+	h.r.as.spec = u8(spec)
 	h.no_header = opts.no_header || h.opens == .Array
 	if !h.no_header {
 		h.keys = b.keys

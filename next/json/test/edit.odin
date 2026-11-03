@@ -517,7 +517,7 @@ edit_check_policy :: proc(t: ^testing.T) {
 	if !testing.expect_value(t, core.set(&list, 4, string("2")).kind, core.Document_Error_Kind.None) {
 		return
 	}
-	out, _, cerr := compose.commit(&list, doc.read.spec, nil)
+	out, _, cerr := compose.commit(&list, doc.as.spec, nil)
 	defer if len(out) > 0 {
 		delete(out)
 	}

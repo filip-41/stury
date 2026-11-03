@@ -89,10 +89,9 @@ layout_ok :: proc(spec: Spec, layout: Options) -> bool {
 // The plan's `marshal`: the value is the list of rows.
 @(private)
 marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error) {
-	l := plan.layout
 	spill: [write.ROOM_MAX]u8 = ---
 	w: Rows
-	rows_start(&w, &spill, {delimiter = l[1], comment = l[2], no_header = l[3] != 0, crlf = l[4] != 0}, Spec(l[0]), opts, stream, allocator, 0)
+	rows_start(&w, &spill, options_of(plan.as), Spec(plan.spec), opts, stream, allocator, 0)
 	w.plan = plan
 	return rows_end((^Rows)(rawptr(&w)), write_rows(&w, uintptr(value)))
 }
@@ -100,6 +99,12 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 // The delimiter byte of `spec` when `layout` leaves it 0.
 @(private)
 spec_delimiter :: proc(spec: Spec, delimiter: u8) -> u8 {return delimiter if delimiter != 0 else '\t' if spec == .Tsv else ','}
+
+// The handle of the rows a plan writes: `spec`, and `layout`'s delimiter, comment byte, `no_header` and `crlf`.
+@(private)
+layout_as :: proc(spec: Spec, layout: Options) -> core.As {
+	return as(spec, {delimiter = layout.delimiter, comment = layout.comment, no_header = layout.no_header, crlf = layout.crlf})
+}
 
 @(private)
 rows_start :: proc(w: ^Rows, spill: ^[write.ROOM_MAX]u8, layout: Options, spec: Spec, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, hint: int) {
@@ -373,7 +378,7 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 token_record :: proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind {
 	w := (^Rows)(t.state)
 	row, listed := row_of(plan)
-	if listed || w.plan != nil && w.plan != plan || plan.layout != {u8(w.spec), w.opts.delimiter, w.opts.comment, u8(w.opts.no_header), u8(w.opts.crlf)} {
+	if listed || w.plan != nil && w.plan != plan || plan.as != layout_as(w.spec, w.opts) {
 		err^ = {kind = .Plan_Mismatch}
 		return .Plan_Mismatch
 	}
@@ -791,8 +796,8 @@ token_cell :: proc(t: ^write.Tokens, v: write.Scalar) -> core.Typed_Error_Kind {
 
 // Sets up the rows of a token write, which `Tokens.state` holds and `Tokens.out` points into.
 @(private)
-tokens_start :: proc(t: ^write.Tokens, read: core.Read_As) -> core.Typed_Error_Kind {
-	spec, layout := read_layout(read)
+tokens_start :: proc(t: ^write.Tokens, as: core.As) -> core.Typed_Error_Kind {
+	spec, layout := Spec(as.spec), options_of(as)
 	if !layout_ok(spec, layout) {
 		return .Bad_Option
 	}

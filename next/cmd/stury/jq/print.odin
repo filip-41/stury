@@ -158,13 +158,11 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 	TREE_DEPTH :: 4096
 	r, is_ref := v.(Ref)
 	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || r.doc.spelling != json.as(.Json).spelling ||
-	   p.depth + max(int(r.doc.read.max_depth), core_pkg.MAX_DEPTH) > TREE_DEPTH || repeats_key(r) {
+	   p.depth + max(int(r.doc.as.max_depth), core_pkg.MAX_DEPTH) > TREE_DEPTH || repeats_key(r) {
 		return false
 	}
 	opts := p.opts
 	opts.respell_strings = true
-	// A value of a partial document is an answer of the path scan, which keeps it whole.
-	opts.partial = r.doc.partial
 	p.streamed = false
 	to_out := io.Stream {
 		data = p,

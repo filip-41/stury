@@ -143,7 +143,7 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 	if it.frames == nil {
 		// A stream's window moves, so a record may be as long as the stream's bound.
 		bound := len(it.src) if it.input.procedure == nil else it.max_bytes
-		frames, failed := make([]typed.Frame, core.reserve_depth(it.as.read.max_depth, bound) + 2, it.allocator)
+		frames, failed := make([]typed.Frame, core.reserve_depth(it.as.max_depth, bound) + 2, it.allocator)
 		if failed != nil {
 			return false, {kind = .Out_Of_Memory}
 		}

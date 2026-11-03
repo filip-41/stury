@@ -509,7 +509,7 @@ line_reads :: proc(doc: ^core.Document, l: Line, kept: int, first: []u8, moved: 
 	if !moved || len(first) == 0 {
 		return true
 	}
-	if _, comment, _ := read_opts(doc); comment != 0 && first[0] == comment {
+	if comment := doc.as.opts[1]; comment != 0 && first[0] == comment {
 		return false
 	}
 	return doc.nodes[l.node].lo != 0 || len(first) < 3 || string(first[:3]) != "\xEF\xBB\xBF"

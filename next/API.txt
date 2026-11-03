@@ -94,8 +94,6 @@ Path_Options :: struct {
 Presence :: enum u8 {
 Query_Options :: struct {
 ROOT :: Node_Index(0)
-Read_As :: struct {
-Resolve_Options :: struct {
 Role :: enum u8 {
 Rules :: struct {
 Runner :: struct {
@@ -157,7 +155,7 @@ remove :: proc(list: ^Edit_List, node: Node_Index) -> Document_Error {
 remove_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role) -> Document_Error {
 render :: proc {render_fault, render_document, render_path, render_edit, render_typed}
 reserve_depth :: #force_inline proc (max_depth: u32, n: int) -> int {
-resolve :: #force_inline proc(doc: ^Document, i: Node_Index, opts := Resolve_Options{}) -> Kind {
+resolve :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind {
 rule_of :: proc (f: Fault) -> Rule {
 scalar_ends :: #force_inline proc (t: Token) -> (lo, hi: u64) {
 set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error {
@@ -244,7 +242,7 @@ builder_hook_keyless_facts :: #force_inline proc (h: ^Builder, s: core.Hook_Regs
 builder_hook_plain :: #force_inline proc (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 builder_hook_plain_refuse :: #force_inline proc (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 builder_refuse_result :: #force_inline proc (h: ^Builder, open, end: core.Node_Index) {
-builder_start :: proc(src: []u8, spelling: ^core.Spelling, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0) -> Builder {
+builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0) -> Builder {
 feed_nodes :: proc (
 query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
 query_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Path_Error) {
@@ -254,7 +252,7 @@ scan_hook_many :: #force_inline proc (h: ^Scan, s: core.Hook_Regs, t: core.Token
 scan_hook_stream :: #force_inline proc (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 scan_kept :: proc (h: ^Scan, d: int) -> bool {
 scan_reserve :: proc (h: ^Scan, nodes: int) -> bool {
-scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error {
+scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error {
 set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 # core/typed
 Arm :: struct {
@@ -389,7 +387,7 @@ RULES := core.Rules{, {{}, {, }, {, }, {, }, {, }}}
 SPINE_LEVELS :: 4
 Spec :: enum u8 {
 Tolerance :: enum u8 {
-as :: proc(spec: Spec) -> core.As {
+as :: proc(spec: Spec, opts := Options{}) -> core.As {
 build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 each_answer :: proc {each_answer_one, each_answer_many}

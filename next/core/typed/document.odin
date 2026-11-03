@@ -55,7 +55,7 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 		return plan.node_read(doc, node, T, target, plan, read, allocator)
 	}
 	// Only the containers the value opens need a frame, but the value's depth is not known without a walk.
-	depth := core.reserve_depth(doc.read.max_depth, len(doc.nodes)) + 2
+	depth := core.reserve_depth(doc.as.max_depth, len(doc.nodes)) + 2
 	frames_fixed: [core.MAX_DEPTH + 2]Frame = ---
 	ends_fixed: [3 * (core.MAX_DEPTH + 2)]u32 = ---
 	frames, ends := frames_fixed[:], ends_fixed[:]

@@ -182,7 +182,8 @@ Plan :: struct {
 	root:      ^Field,
 	// A zeroed value as wide as the widest map value, the value a new entry is inserted with.
 	zero:      []u8,
-	spelling:  ^core.Spelling,
+	// The format, and for a format whose writer reads them, the spec and option bytes a write by the plan takes.
+	using as:  core.As,
 	type:      typeid,
 	union_tag: string,
 	enums:     Enum_Spelling,
@@ -195,8 +196,6 @@ Plan :: struct {
 	node_read: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error,
 	// The format's value writer, which holds its spelling compiled in, where its plan maker sets it.
 	marshal:   Marshal_Text,
-	// A format's own bytes for its writer, as `Read_As.opts` is for a document.
-	layout:    [5]u8,
 	// The options the plan was built with, for the plans a write builds for a type met in an `any`.
 	options:   Plan_Options,
 }

@@ -32,7 +32,7 @@ commit :: proc(list: ^core.Edit_List, spec: u8, root: ^Root_Spelling, allocator 
 		return nil, 0, {kind = .Bad_Index}
 	}
 	// Refused before any chunk is built or spliced, rather than after the output fails to read.
-	if core.is_flat(doc) && spec != doc.read.spec {
+	if core.is_flat(doc) && spec != doc.as.spec {
 		return nil, 0, {kind = .Bad_Spec}
 	}
 	// All a commit writes but its output lives only as long as the commit, so one arena frees it.
@@ -86,7 +86,7 @@ reads_as_source :: proc(doc: ^core.Document, out: []u8, spec: u8) -> core.Docume
 	if g, still := edit.reads(doc, out, true, spec); still {
 		return {kind = .Bad_Result, inner = g}
 	}
-	if spec != doc.read.spec {
+	if spec != doc.as.spec {
 		return {kind = .Bad_Result, inner = f}
 	}
 	if _, src_bad := edit.reads(doc, doc.src, false, spec); !src_bad {

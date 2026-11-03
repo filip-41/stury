@@ -60,22 +60,6 @@ Child_Count :: struct {
 	count: u32,
 }
 
-// How the text was read: its spec, three opaque format option bytes, and the build's depth. Every edit service
-// reads it to judge a text and to spell its output.
-Read_As :: struct {
-	// The spec the text was read as, which the edit dispatcher reads. A format may point every spec at one spelling
-	// table and dispatch its edit services on this byte.
-	spec: u8,
-	// Opaque format bytes, passed along unread by core. A format packs its run-time options into these bytes.
-	opts: [3]u8,
-	// The build's `Options.max_depth`, 0 for the default. The edit services read a value text at this depth, and a
-	// text built deeper than the default can be edited.
-	max_depth: u32,
-}
-
-// 8 bytes: the spec, the three option bytes and the depth word.
-#assert(size_of(Read_As) == 8)
-
 // A `Pair_Iter` walks every (key, value) member pair of a `Map` container. `pairs` starts it and `pair_next` returns
 // each pair in source order.
 Pair_Iter :: struct {
@@ -165,12 +149,11 @@ pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bo
 	return k, v, true
 }
 
-// What a format's token readers need besides the token: the source it spans, the format's table and how the text was
-// read. A document starts with one, and a typed read holds one for the walk's tokens.
+// What a format's token readers need besides the token: the source it spans and the handle it was read with. A document
+// starts with one, and a typed read holds one for the walk's tokens.
 Token_View :: struct {
 	src:      []u8,
-	spelling: ^Spelling,
-	read:     Read_As,
+	using as: As,
 }
 
 // A `Document` holds the walk's tokens over the caller's bytes, the facts beside them, and the format's `Spelling`
@@ -247,13 +230,6 @@ Duplicates :: enum u8 {
 	Last,
 }
 
-// Holds the options `resolve` reads besides the node.
-Resolve_Options :: struct {
-	// dsv: an unquoted cell that is empty, `true`, `false` or exactly a JSON number reads as Null, True, False or
-	// Number. False, the default, makes every value cell a String.
-	infer: bool,
-}
-
 // A `Spelling` holds a format's read services, in its rodata. `text` decodes a node's text into `buf` and returns false
 // when `buf` is too short, so a read never allocates. A node whose `SPELLING_DECODE` bit is clear is its span without
 // the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token.
@@ -262,7 +238,7 @@ Resolve_Options :: struct {
 // `Document.root_close`, so a service may return it without a scan. `edit` points at the
 // format's edit services, nil for a format that accepts no edits. `tag_key` is the format's own struct tag key, and
 // `key_open` and `key_close` are what a key is written between, empty for a format whose keys a typed read does not
-// compare as text. `write` writes a node of the document as text of the spec and layout `read` names, into a buffer from `allocator` or to
+// compare as text. `write` writes a node of the document as text of the format `as` names, into a buffer from `allocator` or to
 // `stream`, nil for a format with no document writer, see `core.write`. `tokens` is the format's `^write.Token_Spelling`,
 // nil for a format with no token writer. `records` is the format's `^records.Services`, nil for a format with no record
 // reader. Both are a `rawptr` since `core/write` and `core/records` import `core`, and each is cast back to that type
@@ -271,11 +247,11 @@ Spelling :: struct {
 	text:       proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
 	number:     proc(v: ^Token_View, t: Token) -> Number,
-	resolve:    proc(doc: ^Document, i: Node_Index, opts: Resolve_Options) -> Kind,
+	resolve:    proc(doc: ^Document, i: Node_Index) -> Kind,
 	close_end:  proc(doc: ^Document, i: Node_Index) -> u64,
 	query:      proc(doc: ^Document, paths: []Path, read: Query_Options, allocator: runtime.Allocator) -> (answers: []Answer, err: Path_Error),
 	edit:       ^Edit_Spelling,
-	write:      proc(doc: ^Document, opts: Write_Options, read: Read_As, node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error),
+	write:      proc(doc: ^Document, opts: Write_Options, as: As, node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error),
 	tokens:     rawptr,
 	records:    rawptr,
 	tag_key:    string,
@@ -766,13 +742,13 @@ number :: #force_inline proc(doc: ^Document, i: Node_Index) -> Number {
 	return {0, .Wide}
 }
 
-// Returns what `Plain` node `i` is, through the format's `resolve`. A node of another kind returns its own kind,
-// and an index past the last returns `.Null`.
-resolve :: #force_inline proc(doc: ^Document, i: Node_Index, opts := Resolve_Options{}) -> Kind {
+// Returns what `Plain` node `i` is, through the format's `resolve`, as the handle the document was read with says. A node
+// of another kind returns its own kind, and an index past the last returns `.Null`.
+resolve :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind {
 	if int(i) >= len(doc.nodes) {
 		return .Null
 	}
-	return doc.spelling.resolve(doc, i, opts)
+	return doc.spelling.resolve(doc, i)
 }
 
 // Returns the `i64` an `Int` node writes. Returns false for any other number.

@@ -238,7 +238,7 @@ commit :: proc(list: ^Edit_List, allocator := context.allocator) -> (out: []u8, 
 	if list.doc == nil || list.doc.spelling == nil || list.doc.spelling.edit == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
-	return list.doc.spelling.edit.commit(list, list.doc.read.spec, allocator)
+	return list.doc.spelling.edit.commit(list, list.doc.as.spec, allocator)
 }
 
 // Whether `body` holds LF or CR, the only line ends a delimited text's comment line ends at. U+2028 is a byte in its

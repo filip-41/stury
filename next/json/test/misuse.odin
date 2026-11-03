@@ -82,7 +82,7 @@ a_huge_depth_limit_reserves_by_the_input :: proc(t: ^testing.T) {
 	n: [1]i32
 	testing.expect_value(t, json.unmarshal(src, json.Spec.Json, &n, {}, opts, alloc).kind, core.Typed_Error_Kind.None)
 	as := json.as(.Json)
-	as.read.max_depth = 1 << 30
+	as.max_depth = 1 << 30
 	it := records.open(src, as, allocator = alloc)
 	defer records.close(&it)
 	plan, _ := json.plan_make([1]i32, allocator = context.temp_allocator)

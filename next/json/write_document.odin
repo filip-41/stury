@@ -334,18 +334,18 @@ copies_strings :: #force_inline proc "contextless" (opts: core.Write_Options) ->
 	return !opts.ascii && !opts.escape_html && !opts.respell_strings
 }
 
-// Names JSON of spec `spec` as the target of `core.write`. `.Json` drops a document's comments, `.Jsonc` and `.Json5`
-// keep them, and a JSON5 document is spelled again unless the target is `.Json5`. `dropped` counts the facts of `doc` that
-// the target cannot hold, as `commit` does, and is not an error: a document of another format drops all its facts. A
-// document read as JSON or JSONC keeps the spelling of its numbers and strings, and the bytes between them are made again:
-// no whitespace in compact text, and `opts` in pretty text. A document of another format is written through its `text`,
-// each cell a string, or with `opts.infer` the null, boolean or number it reads as. A partial document is `.Unsupported`. With `opts.partial` it is written as JSON from the nodes its
-// read kept: the text holds only what the read reached, an array's elements stand next to each other whatever their
-// positions were, and an element that two paths reached through a ring of negative indexes is written once for each. A
-// partial document keeps no comments. A document nested past `MAX_DEPTH` was built under a raised `max_depth` and is
+// The handle of JSON of spec `spec` read with `opts`. As the target of `core.write`, `.Json` drops a document's comments,
+// `.Jsonc` and `.Json5` keep them, and a JSON5 document is spelled again unless the target is `.Json5`. `dropped` counts
+// the facts of `doc` that the target cannot hold, as `commit` does, and is not an error: a document of another format
+// drops all its facts. A document read as JSON or JSONC keeps the spelling of its numbers and strings, and the bytes
+// between them are made again: no whitespace in compact text, and the write options' in pretty text. A document of
+// another format is written through its `text`, each cell what `core.resolve` reads it as. A partial document is written
+// from the nodes its read kept: the text holds only what the read reached, an array's elements stand next to each other
+// whatever their positions were, and an element that two paths reached through a ring of negative indexes is written
+// once for each. A partial document keeps no comments. A document nested past `MAX_DEPTH` was built under a raised `max_depth` and is
 // written, except one with comments, shared keys or `sort_keys` past 4096 levels, which is `.Too_Deep`.
-as :: proc(spec: Spec) -> core.As {
-	return {&SPELLING, {spec = u8(spec)}}
+as :: proc(spec: Spec, opts := Options{}) -> core.As {
+	return {spelling = &SPELLING, max_depth = opts.max_depth, spec = u8(spec), tolerate = transmute(u8)opts.tolerate}
 }
 
 // The size to ask the output for: the source, and for pretty text what eight levels of indent make on each node.
@@ -361,10 +361,7 @@ document_hint :: proc(src, nodes: int, opts: core.Write_Options) -> int {
 // The spelling's `write`: node `node` of `doc`, which `core.write` checked is a value the document holds, as the spec
 // `as` names.
 @(private)
-write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.Read_As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
-	if doc.partial && !opts.partial {
-		return nil, 0, {kind = .Unsupported}
-	}
+write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
 	// The source bytes and the nodes the write covers. A partial document's node holds no span of its own text, so its
 	// output grows from the least room.
 	src, count := doc.src, len(doc.nodes)
@@ -388,7 +385,7 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.Read_
 	// The stack holds the open containers and the sentinel under them.
 	local: [core.MAX_DEPTH + 1]Open = ---
 	e: Emit
-	if !put_start(&e, &out, doc.src, doc, opts, local[:], core.reserve_depth(doc.read.max_depth, len(doc.nodes))) {
+	if !put_start(&e, &out, doc.src, doc, opts, local[:], core.reserve_depth(doc.as.max_depth, len(doc.nodes))) {
 		write.destroy(&out)
 		return nil, 0, {kind = .Out_Of_Memory}
 	}

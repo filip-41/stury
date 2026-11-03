@@ -422,7 +422,7 @@ key_equals_decode :: #force_inline proc "contextless" (doc: ^core.Token_View, n:
 
 // JSON's `Spelling.resolve` returns the node's kind, which is its value's kind.
 @(private)
-spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index, opts: core.Resolve_Options) -> core.Kind {
+spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	return doc.nodes[i].kind
 }
 

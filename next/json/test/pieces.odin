@@ -150,7 +150,7 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 		texts[i], _ = strings.replace(text, "@", array, 1, context.temp_allocator)
 	}
 	entries, at, ok := json.spine(transmute([]u8)texts[0], json.as(.Json))
-	testing.expect(t, ok && entries.read.opts[1] == 1 && at == 23)
+	testing.expect(t, ok && entries.opts[0] == 1 && at == 23)
 	it := records.open(transmute([]u8)texts[0], entries, .Entries, at)
 	defer records.close(&it)
 	n := 0
@@ -160,11 +160,11 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, n == 301 && it.fault == nil)
 	entries, _, ok = json.spine(transmute([]u8)texts[1], json.as(.Json))
-	testing.expect(t, ok && entries.read.opts[1] == 2)
+	testing.expect(t, ok && entries.opts[0] == 2)
 	_, _, ok = json.spine(transmute([]u8)texts[4], json.as(.Json))
 	testing.expect(t, !ok)
 	entries, at, ok = json.spine(transmute([]u8)texts[5], json.as(.Json))
-	testing.expect(t, ok && entries.read.opts[1] == 0 && at == 0)
+	testing.expect(t, ok && entries.opts[0] == 0 && at == 0)
 	_, _, ok = json.spine(transmute([]u8)string(`{"a":[1]}`), json.as(.Json))
 	testing.expect(t, !ok)
 
@@ -198,7 +198,7 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 	}
 	// A spine nested past the depth a text may open.
 	deep := json.as(.Json)
-	deep.read.max_depth = 2
+	deep.max_depth = 2
 	src := transmute([]u8)texts[1]
 	testing.expect_value(t, records.validate(src, deep), json.validate(src, .Json, {max_depth = 2}))
 }

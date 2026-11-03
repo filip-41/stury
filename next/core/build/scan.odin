@@ -195,10 +195,10 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 	return {}
 }
 
-// Starts a scan of `paths` over `src`. `depth` is as in `builder_start`, `frames` is the caller's room for that stack,
+// Starts a scan of `paths` over `src`, read as `as`. `depth` is as in `builder_start`, `frames` is the caller's room for that stack,
 // which `depth` may outgrow, and a format's `scan` runs its walk with `scan_hook`, or `scan_hook_many` when `Scan.many` is
 // set, and ends it with `scan_end`. `many` asks for `$MANY`.
-scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error {
+scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error {
 	e := scan_plan(h, paths, read, depth, many, allocator)
 	if e.kind != .None {
 		many_free(h, allocator)
@@ -210,7 +210,7 @@ scan_start :: proc(h: ^Scan, src: []u8, spelling: ^core.Spelling, paths: []core.
 	h.positional = positional
 	h.answers = h.first[:]
 	h.borrowed = depth <= len(frames)
-	h.b = builder_start(src, spelling, false, allocator, 64, 0 if h.borrowed else depth)
+	h.b = builder_start(src, as, false, allocator, 64, 0 if h.borrowed else depth)
 	if h.borrowed {
 		h.b.stack = frames[:depth]
 	}
@@ -328,7 +328,7 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 	h.b.doc = doc^
 	h.b.doc.allocator = allocator
 	h.positional = doc.shared_keys != 0
-	depth := core.reserve_depth(doc.read.max_depth, len(doc.nodes))
+	depth := core.reserve_depth(doc.as.max_depth, len(doc.nodes))
 	if e := scan_plan(&h, paths, {dups = read.dups, every_key = read.every_key}, depth, false, allocator); e.kind != .None {
 		many_free(&h, allocator)
 		return nil, e

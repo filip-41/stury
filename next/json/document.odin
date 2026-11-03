@@ -13,7 +13,7 @@ import write "../core/write"
 // `build` is the only entry, and it runs the walk and the builder together.
 
 // `EDIT` holds JSON's edit services, cold. The same table serves every spec, since a spec differs only in the text it
-// accepts as an edit. Each service dispatches on `doc.read.spec`.
+// accepts as an edit. Each service dispatches on `doc.as.spec`.
 @(private, rodata)
 EDIT := core.Edit_Spelling {
 	value      = edit_value_at,
@@ -89,15 +89,12 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 // facts, which must cover every node and open container the walk reaches.
 @(private)
 build_reserved :: proc(src: []u8, q: [^]u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth, facts: int) -> (core.Document, core.Document_Error) {
-	b := build.builder_start(src, &SPELLING, refuse_duplicates, allocator, nodes, depth, facts)
+	// The edit services dispatch on the handle's spec and read at its depth.
+	b := build.builder_start(src, as(S, opts), refuse_duplicates, allocator, nodes, depth, facts)
 	if len(b.doc.nodes) == 0 {
 		// The reservation was refused, so no hook may run over a nil node array.
 		return build.builder_end(&b, build.BUILDER_REGS, nil)
 	}
-	// The edit dispatcher reads `doc.read.spec`, and the reads use the build's depth.
-	b.doc.read.spec = u8(S)
-	b.doc.read.max_depth = opts.max_depth
-	b.doc.read.opts[0] = transmute(u8)opts.tolerate
 	regs := build.BUILDER_REGS
 	// A spec with no comments makes no fact token, so its build uses the hook without fact and pending work.
 	hi: u64
@@ -137,7 +134,7 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 	if i == core.ROOT && doc.root_close != 0 {
 		return doc.root_close
 	}
-	spec := Spec(doc.read.spec)
+	spec := Spec(doc.as.spec)
 	n := doc.nodes[i]
 	if doc.partial {
 		return close_by_walk(doc, n.lo, spec)
@@ -189,7 +186,7 @@ close_by_walk :: proc(doc: ^core.Document, lo: u64, spec: Spec) -> u64 {
 	none: core.No_Hooks
 	hi: u64
 	fault: Maybe(core.Fault)
-	opts := Options{max_depth = doc.read.max_depth, tolerate = {.Invalid_Utf8, .Lone_Surrogate}}
+	opts := Options{max_depth = doc.as.max_depth, tolerate = {.Invalid_Utf8, .Lone_Surrogate}}
 	switch spec {
 	case .Json:  hi, fault = walk(doc.src, lo, .Json, opts, &none, &regs, core.no_hook)
 	case .Jsonc: hi, fault = walk(doc.src, lo, .Jsonc, opts, &none, &regs, core.no_hook)
@@ -294,16 +291,16 @@ edit_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool
 @(private)
 edit_reads :: proc(doc: ^core.Document, src: []u8, tolerate: bool, $S: Spec) -> (core.Fault, bool) {
 	t := bit_set[Tolerance; u8]{.Invalid_Utf8, .Lone_Surrogate} if tolerate else {}
-	return validate(src, S, {tolerate = t, max_depth = doc.read.max_depth}).?
+	return validate(src, S, {tolerate = t, max_depth = doc.as.max_depth}).?
 }
 
-// The three services dispatch on `doc.read.spec`, since a proc pointer carries no compile-time spec.
+// The three services dispatch on `doc.as.spec`, since a proc pointer carries no compile-time spec.
 @(private)
 edit_value_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
-	switch Spec(doc.read.spec) {
-	case .Json:  return edit_value(src, allocator, doc.read.max_depth, .Json)
-	case .Jsonc: return edit_value(src, allocator, doc.read.max_depth, .Jsonc)
-	case .Json5: return edit_value(src, allocator, doc.read.max_depth, .Json5)
+	switch Spec(doc.spec) {
+	case .Json:  return edit_value(src, allocator, doc.max_depth, .Json)
+	case .Jsonc: return edit_value(src, allocator, doc.max_depth, .Jsonc)
+	case .Json5: return edit_value(src, allocator, doc.max_depth, .Json5)
 	}
 	return {kind = .Bad_Value}
 }

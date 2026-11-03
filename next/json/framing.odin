@@ -21,7 +21,7 @@ RECORDS := records.Services {
 	build = build_record,
 }
 
-// `Read_As.opts[2]` is `PIECE` in a piece's reader.
+// `As.opts[1]` is `PIECE` in a piece's reader.
 @(private)
 PIECE :: 1
 
@@ -35,7 +35,7 @@ guess_start :: proc(it: ^records.Reader, to: u64) -> bool {
 		it.pos = find_byte(it.src[:to], it.pos, b) + u64(it.framing != .Entries)
 	}
 	it.state[1] = 1
-	it.as.read.opts[2] = PIECE
+	it.as.opts[1] = PIECE
 	return it.pos < to
 }
 
@@ -43,7 +43,7 @@ guess_start :: proc(it: ^records.Reader, to: u64) -> bool {
 @(private)
 whole_text :: proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) {
 	entries, at, ok := spine(src, as)
-	return entries if ok else as, .Entries, at if ok && entries.read.opts[1] > 0 else 0
+	return entries if ok else as, .Entries, at if ok && entries.opts[0] > 0 else 0
 }
 
 // The most objects deep `spine` looks for an array, and the most members and bytes of each it passes before one in an
@@ -59,14 +59,14 @@ SIDE_MEMBERS, SIDE_BYTES :: 16, 4096
 // so that every fault is the one `validate` gives for the whole text. False when there is none. Allocates nothing.
 spine :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool) {
 	levels: u8
-	switch Spec(as.read.spec) {
-	case .Json:  at, levels, ok = spine_of(src, options_of(as.read), .Json)
-	case .Jsonc: at, levels, ok = spine_of(src, options_of(as.read), .Jsonc)
-	case .Json5: at, levels, ok = spine_of(src, options_of(as.read), .Json5)
+	switch Spec(as.spec) {
+	case .Json:  at, levels, ok = spine_of(src, options_of(as), .Json)
+	case .Jsonc: at, levels, ok = spine_of(src, options_of(as), .Jsonc)
+	case .Json5: at, levels, ok = spine_of(src, options_of(as), .Json5)
 	}
 	entries = as
 	// The number of objects around the array.
-	entries.read.opts[1] = levels
+	entries.opts[0] = levels
 	return
 }
 
@@ -113,7 +113,7 @@ spine_of :: proc(src: []u8, opts: Options, $S: Spec) -> (at: u64, levels: u8, ok
 
 @(private)
 next_walked :: proc(it: ^records.Reader) -> (records.Record, bool) {
-	switch Spec(it.as.read.spec) {
+	switch Spec(it.as.spec) {
 	case .Json:  return next_framed(it, .Json)
 	case .Jsonc: return next_framed(it, .Jsonc)
 	case .Json5: return next_framed(it, .Json5)
@@ -125,7 +125,7 @@ next_walked :: proc(it: ^records.Reader) -> (records.Record, bool) {
 next_framed :: proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	rec, ok, _ := frame_value(it, S, options_of(it.as.read), &h, &regs, core.no_hook)
+	rec, ok, _ := frame_value(it, S, options_of(it.as), &h, &regs, core.no_hook)
 	return rec, ok
 }
 
@@ -166,9 +166,9 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 	}
 	q := gap_end(p[it.pos:], end, S)
 	value := opts
-	levels := u32(it.as.read.opts[1])
+	levels := u32(it.as.opts[0])
 	value.max_depth = (opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH) - 1 - levels
-	piece := it.as.read.opts[2] == PIECE
+	piece := it.as.opts[1] == PIECE
 	key: []u8
 	none: core.No_Hooks
 	zero: core.Hook_Regs
@@ -308,7 +308,7 @@ frame_line :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) #no_b
 	stop: u8 = '\n' if it.framing == .Lines else 0x1e
 	for {
 		w := skip_ws(p[it.pos:], end)
-		if Spec(it.as.read.spec) == .Json5 {
+		if Spec(it.as.spec) == .Json5 {
 			for n := ws5_len(w, end); n > 0; n = ws5_len(w, end) {
 				w = skip_ws(w[n:], end)
 			}
@@ -352,7 +352,7 @@ judge_record :: proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fau
 	if it.framing >= .Concatenated {
 		return nil
 	}
-	switch Spec(it.as.read.spec) {
+	switch Spec(it.as.spec) {
 	case .Json:  return judge_spec(it, rec, .Json)
 	case .Jsonc: return judge_spec(it, rec, .Jsonc)
 	case .Json5: return judge_spec(it, rec, .Json5)
@@ -364,7 +364,7 @@ judge_record :: proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fau
 judge_spec :: proc(it: ^records.Reader, rec: records.Record, $S: Spec) -> Maybe(core.Fault) {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	opts := options_of(it.as.read)
+	opts := options_of(it.as)
 	fault, cold := walk_line(it.src, rec.at, rec.at + u64(len(rec.text)), S, opts, &h, &regs, core.no_hook)
 	if cold {
 		return walk_text(it.src[:rec.at + u64(len(rec.text))], rec.at, S, opts, &h, &regs, core.no_hook)
@@ -375,13 +375,13 @@ judge_spec :: proc(it: ^records.Reader, rec: records.Record, $S: Spec) -> Maybe(
 @(private)
 read_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
 	if it.framing >= .Concatenated {
-		switch Spec(it.as.read.spec) {
+		switch Spec(it.as.spec) {
 		case .Json:  return read_framed(it, target, T, plan, read, allocator, err, .Json)
 		case .Jsonc: return read_framed(it, target, T, plan, read, allocator, err, .Jsonc)
 		case .Json5: return read_framed(it, target, T, plan, read, allocator, err, .Json5)
 		}
 	}
-	switch Spec(it.as.read.spec) {
+	switch Spec(it.as.spec) {
 	case .Json:  return read_spec(it, target, T, plan, read, allocator, err, .Json)
 	case .Jsonc: return read_spec(it, target, T, plan, read, allocator, err, .Jsonc)
 	case .Json5: return read_spec(it, target, T, plan, read, allocator, err, .Json5)
@@ -400,7 +400,7 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 	}
 	lo := rec.at
 	cut := lo + u64(len(rec.text))
-	opts := options_of(it.as.read)
+	opts := options_of(it.as)
 	c := read.collect
 	kept: typed.Collected
 	if c != nil {
@@ -429,7 +429,7 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 // record, as `next` gives none, and what the read collected is taken back.
 @(private)
 read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
-	opts := options_of(it.as.read)
+	opts := options_of(it.as)
 	if read.refuse_duplicates {
 		// The duplicate check builds the record's text, so the framing's walk finds its end first.
 		rec, ok := next_framed(it, S)
@@ -478,12 +478,12 @@ uncollect :: proc(c: ^typed.Collected, kept: typed.Collected) {
 // Builds the document of `rec`'s text. Its offsets in a fault count from the input's first byte.
 @(private)
 build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Document_Error) {
-	spec := Spec(it.as.read.spec)
+	spec := Spec(it.as.spec)
 	// A BOM is the input's, and passed over only at its first byte.
 	if rec.at > 0 && spec != .Json5 && len(rec.text) >= 3 && rec.text[0] == 0xef && rec.text[1] == 0xbb && rec.text[2] == 0xbf {
 		return {}, {kind = .Walk, at = rec.at, inner = {at = rec.at, rules = &RULES, kind = .Bad_Char}}
 	}
-	opts := options_of(it.as.read)
+	opts := options_of(it.as)
 	switch spec {
 	case .Json:  doc, err = build(rec.text, .Json, opts, false, allocator)
 	case .Jsonc: doc, err = build(rec.text, .Jsonc, opts, false, allocator)
@@ -499,10 +499,10 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 @(private)
 FAULT_REACH :: 16
 
-// The walk options a `core.Read_As` holds.
+// The walk options a handle holds.
 @(private)
-options_of :: #force_inline proc "contextless" (read: core.Read_As) -> Options {
-	return {max_depth = read.max_depth, tolerate = transmute(bit_set[Tolerance; u8])read.opts[0]}
+options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
+	return {max_depth = as.max_depth, tolerate = transmute(bit_set[Tolerance; u8])as.tolerate}
 }
 
 // Walks the record `src[lo:cut]` of a `.Lines` or `.Seq` text in place in `src`. Returns the fault that a walk of the record's

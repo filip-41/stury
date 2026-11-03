@@ -167,7 +167,7 @@ node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 		// past binary64's digits or range, `1e400` among them, which strconv reads as infinity
 		f, _ = strconv.parse_f64(lit)
 	}
-	return Number{f = f, lit = json5_literal(lit) if doc.read.spec == u8(json.Spec.Json5) else lit}
+	return Number{f = f, lit = json5_literal(lit) if doc.as.spec == u8(json.Spec.Json5) else lit}
 }
 
 // A JSON5 decimal as the library's writer spells it in JSON (`+1.50` as `1.50`, `.5` as `0.5`, `5.` as `5`), so that

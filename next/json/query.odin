@@ -28,11 +28,9 @@ scan_many :: proc(src: []u8, $S: Spec, paths: []core.Path, read := core.Path_Opt
 	opts := opts
 	h: engine.Scan
 	frames: [core.MAX_DEPTH]u64 = ---
-	if e := engine.scan_start(&h, src, &SPELLING, paths, read, false, allocator, core.reserve_depth(opts.max_depth, len(src)), frames[:]); e.kind != .None {
+	if e := engine.scan_start(&h, src, as(S, opts), paths, read, false, allocator, core.reserve_depth(opts.max_depth, len(src)), frames[:]); e.kind != .None {
 		return {}, e
 	}
-	h.b.doc.read.spec = u8(S)
-	h.b.doc.read.max_depth = opts.max_depth
 	regs := engine.BUILDER_REGS
 	hi: u64
 	fault: Maybe(core.Fault)
@@ -93,7 +91,7 @@ each_answer_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr,
 	opts := opts
 	h: engine.Scan
 	frames: [core.MAX_DEPTH]u64 = ---
-	if e := engine.scan_start(&h, src, &SPELLING, paths, read, false, allocator, core.reserve_depth(opts.max_depth, len(src)), frames[:], true, state, on); e.kind != .None {
+	if e := engine.scan_start(&h, src, as(S, opts), paths, read, false, allocator, core.reserve_depth(opts.max_depth, len(src)), frames[:], true, state, on); e.kind != .None {
 		return e
 	}
 	h.opts = &opts

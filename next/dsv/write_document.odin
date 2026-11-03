@@ -27,22 +27,23 @@ marshal :: proc(value: any, spec := Spec.Csv, layout := Options{}, opts := core.
 	return write.marshal(value, &plan, opts, allocator)
 }
 
-// Names a delimited text of `spec` as the target of `core.write`, with the delimiter, comment byte, `no_header` and `crlf`
-// of `layout`. See the file's header for what a document may hold.
+// The handle of a delimited text of `spec` read or written with `layout`, which holds the delimiter `spec` reads when
+// `layout` leaves it 0. See the file's header for what a document may hold.
 as :: proc(spec: Spec, layout := Options{}) -> core.As {
-	return {&SPELLING, {spec = u8(spec), opts = {layout.delimiter, layout.comment, flags_of(layout.no_header, layout.crlf) | transmute(u8)layout.tolerate << 2}}}
+	opts := [10]u8{0 = spec_delimiter(spec, layout.delimiter), 1 = layout.comment, 2 = u8(layout.no_header), 3 = u8(layout.crlf), 4 = u8(layout.infer)}
+	return {spelling = &SPELLING, spec = u8(spec), tolerate = transmute(u8)layout.tolerate, opts = opts}
 }
 
-// The spec and layout a `core.Read_As` holds.
+// The options a handle `as` made holds.
 @(private)
-read_layout :: proc(read: core.Read_As) -> (Spec, Options) {
-	return Spec(read.spec), Options{delimiter = read.opts[0], comment = read.opts[1], no_header = read.opts[2] & READ_NO_HEADER != 0, crlf = read.opts[2] & READ_CRLF != 0, tolerate = transmute(bit_set[Tolerance; u8])(read.opts[2] >> 2)}
+options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
+	return {delimiter = as.opts[0], comment = as.opts[1], no_header = as.opts[2] != 0, crlf = as.opts[3] != 0, infer = as.opts[4] != 0, tolerate = transmute(bit_set[Tolerance; u8])as.tolerate}
 }
 
-// The spelling's `write`: `doc` as the spec and layout `read` holds.
+// The spelling's `write`: `doc` as the handle `as` says.
 @(private)
-document_write :: proc(doc: ^core.Document, opts: core.Write_Options, read: core.Read_As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
-	spec, layout := read_layout(read)
+document_write :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
+	spec, layout := Spec(as.spec), options_of(as)
 	if !layout_ok(spec, layout) {
 		return nil, 0, {kind = .Bad_Option}
 	}

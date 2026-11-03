@@ -37,6 +37,9 @@ Options :: struct {
 	// The rules a text may break. Empty by default.
 	tolerate:  bit_set[Tolerance; u8],
 	crlf:      bool, // a write ends each record with CR LF, where a read takes either
+	// A document's unquoted cell that is empty, `true`, `false` or exactly a JSON number resolves as Null, True, False or
+	// Number, as `core.resolve` and a JSON write read it. Off, every value cell is a String.
+	infer:     bool,
 }
 
 // A rule a caller lets a text break. The walk stops faulting on it. The tolerance shows in the value a cell decodes to
