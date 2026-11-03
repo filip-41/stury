@@ -2,7 +2,6 @@ package compose
 
 import "base:runtime"
 import "core:bytes"
-import "core:mem"
 import core ".."
 
 // A commit: what a format's `Edit_Spelling.commit` calls. It runs the format's plan, composes the junctions, splices the
@@ -37,10 +36,9 @@ commit :: proc(list: ^core.Edit_List, spec: u8, root: ^Root_Spelling, allocator 
 		return nil, 0, {kind = .Bad_Spec}
 	}
 	// All a commit writes but its output lives only as long as the commit, so one arena frees it.
-	arena: mem.Dynamic_Arena
-	mem.dynamic_arena_init(&arena, allocator, allocator)
-	defer mem.dynamic_arena_destroy(&arena)
-	scratch := mem.dynamic_arena_allocator(&arena)
+	arena := runtime.Arena{backing_allocator = allocator, minimum_block_size = 64 * 1024}
+	defer runtime.arena_destroy(&arena)
+	scratch := runtime.arena_allocator(&arena)
 	planned := core.Edit_List{doc = doc, allocator = scratch, edits = list.edits}
 	if doc.spelling.edit != nil && doc.spelling.edit.plan != nil {
 		written, _ := make([dynamic]core.Edit, scratch)

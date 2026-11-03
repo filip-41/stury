@@ -18,6 +18,7 @@ part of the shape works around.
 | `amd64.odin` | x86-64 | `Tier` with v2, v3 and v4, `tier()`, and the kernels whose instructions differ by tier |
 | `single_tier.odin` | everything but x86-64 | `Tier` with one member, and the same tier-dependent kernels in portable or arm64 form |
 | `utf8.odin` | every target | UTF-8 validation |
+| `compress.odin` | every target | `compress`, which gathers the lanes a mask keeps |
 
 The package splits in two independent ways. The block operations (`load`, `eq`, `below`, `either`, `has`, `pack`,
 `pack_n`, `is_ascii`, `any_lane`, `first_lane`) split by how the target packs a mask. The kernels that take a tier
@@ -148,6 +149,10 @@ lane. Instead:
 - **`first_lane`** finds the first set lane of one 16-byte mask, for a reader that looks at a short span before it
   takes a whole block. x86 gathers one bit per lane with `pmovmskb`. NEON has no such instruction, so a narrowing
   shift (`shrn`) keeps four bits per lane and the trailing zero count is divided by four.
+- **`compress`** stores the lanes of a block that a 64-bit mask keeps, in order, and returns how many: per 8 lanes one
+  table shuffle half (`KEEP_LANES`, the positions of an 8-bit mask's set bits) and one 8-byte store, and one vector
+  popcount for the eight counts. It stores up to 64 bytes from its start. The shuffle is `lookup` at its 16-byte width on
+  every tier, since `vpcompressb` needs VBMI2, which `.V4` does not promise.
 
 ## Tier-dependent kernels
 

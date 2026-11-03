@@ -36,6 +36,7 @@ Options :: struct {
 	comment:   byte,
 	// The rules a text may break. Empty by default.
 	tolerate:  bit_set[Tolerance; u8],
+	crlf:      bool, // a write ends each record with CR LF, where a read takes either
 }
 
 // A rule a caller lets a text break. The walk stops faulting on it. The tolerance shows in the value a cell decodes to

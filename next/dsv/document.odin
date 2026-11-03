@@ -4,6 +4,7 @@ package dsv
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:bytes"
 import spell "../core/spell"
 import core "../core"
 import compose "../core/compose"
@@ -15,10 +16,22 @@ import build "../core/build"
 // a header is an `Array` of `Array`s. A cell is text until a reader calls `resolve`, and a headed record's shared keys
 // sit in `Document.shared_keys`.
 
+// The flags of `doc.read.opts[2]`. `READ_CRLF` says the text's first line ends in CR LF, as a write of the document does.
+@(private)
+READ_NO_HEADER :: u8(1)
+@(private)
+READ_CRLF :: u8(2)
+
+// Packs `no_header` and `crlf` into the flag byte of `doc.read.opts`.
+@(private)
+flags_of :: #force_inline proc(no_header, crlf: bool) -> u8 {
+	return (READ_NO_HEADER if no_header else 0) | (READ_CRLF if crlf else 0)
+}
+
 // Returns the delimiter, comment byte and `no_header` flag packed in `doc.read.opts`.
 @(private)
 read_opts :: #force_inline proc(doc: ^core.Document) -> (delimiter: u8, comment: u8, no_header: bool) {
-	return doc.read.opts[0], doc.read.opts[1], doc.read.opts[2] != 0
+	return doc.read.opts[0], doc.read.opts[1], doc.read.opts[2] & READ_NO_HEADER != 0
 }
 
 // dsv's edit services, in rodata. The three specs share this table, and each service dispatches on `doc.read.spec`,
@@ -63,6 +76,8 @@ SPELLING := core.Spelling {
 	query      = build.query,
 	edit       = &EDIT,
 	tag_key    = "csv",
+	write      = document_write,
+	tokens     = &TOKENS,
 }
 
 // The spelling bits dsv sets. Bit 0 (`SPELLING_DECODE`) means `text` must decode a cell, bit 1 (`SPELLING_QUOTED`) a
@@ -129,7 +144,8 @@ build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bo
 	// The document stores the options it was read with, so every edit service judges a recorded text and writes its
 	// separators the way this text reads. `spec` is what the spelling and edit services dispatch on.
 	b.doc.read.spec = u8(S)
-	b.doc.read.opts = {delimiter_of(S, opts), opts.comment, 1 if opts.no_header else 0}
+	line := bytes.index_byte(src, '\n')
+	b.doc.read.opts = {delimiter_of(S, opts), opts.comment, flags_of(opts.no_header, line > 0 && src[line - 1] == '\r')}
 	regs := build.BUILDER_REGS
 	// The header row is written before the walk, so the root's token steps over it and the walk's `Key` tokens name its
 	// cells. A text with no row leaves the root's next node zeroed for the hook's test.

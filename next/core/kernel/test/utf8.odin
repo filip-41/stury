@@ -1,6 +1,8 @@
 package kernel_tests
 
+import "base:intrinsics"
 import "core:math/rand"
+import "core:simd"
 import "core:testing"
 import "core:unicode/utf8"
 import k ".."
@@ -156,5 +158,48 @@ utf8_clean_at_block_end :: proc(t: ^testing.T) {
 		}
 		want := reference_clean(buf[:n])
 		testing.expectf(t, k.utf8_clean(T, s) == want, "% x: %v, want %v", buf[n - 8:n], !want, want)
+	}
+}
+
+// Whether `utf8_window` finds no fault in `src` read as 16-byte windows after a window of zeros, with ASCII after it so
+// a sequence left open shows.
+@(enable_target_feature = FEATURES)
+window_utf8 :: proc(src: []u8) -> bool {
+	buf: [64]u8
+	for &b in buf {
+		b = 'a'
+	}
+	copy(buf[:], src)
+	prev, err: #simd[16]u8
+	for lo := 0; lo < len(buf); lo += 16 {
+		v := intrinsics.unaligned_load((^#simd[16]u8)(raw_data(buf[lo:])))
+		err = simd.bit_or(err, k.utf8_window(prev, v))
+		prev = v
+	}
+	return simd.reduce_or(err) == 0
+}
+
+// Every pair of bytes followed by two others, placed across a 16-byte window edge, against `core:unicode/utf8`.
+@(test)
+utf8_window_every_pair :: proc(t: ^testing.T) {
+	buf: [48]u8
+	for &b in buf {
+		b = 'a'
+	}
+	for at in ([]int{14, 15, 30, 44}) {
+		n := min(4, len(buf) - at)
+		for a in 0 ..< 256 {
+			for b in 0 ..< 256 {
+				for c in ([]u8{'a', 0x80, 0xbf}) {
+					seq := [4]u8{u8(a), u8(b), c, 0x80}
+					copy(buf[at:], seq[:n])
+					want := utf8.valid_string(string(buf[:]))
+					testing.expectf(t, window_utf8(buf[:]) == want, "% x", buf)
+					for &x in buf[at:][:n] {
+						x = 'a'
+					}
+				}
+			}
+		}
 	}
 }

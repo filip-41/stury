@@ -8,7 +8,7 @@ import core ".."
 // where the refused one was, so a member keeps what it held and a list's element is zero. `errors` allocates with its
 // own allocator, the read's when it has none, and the caller frees it.
 Collected :: struct {
-	errors:     [dynamic]core.Unmarshal_Error,
+	errors:     [dynamic]core.Typed_Error,
 	max_errors: int,
 	truncated:  bool,
 }
@@ -16,7 +16,7 @@ Collected :: struct {
 // The one refusal: records `e` and says how the walk goes on, which is `.Stop` unless a `Collected` reads on. The hot
 // path has no branch on the sink.
 @(cold)
-refuse :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, e: core.Unmarshal_Error) -> (core.Hook_Regs, core.Action) {
+refuse :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
 	note(h, regs, e)
 	return regs, .Stop if h.collect == nil else .Skip
@@ -24,7 +24,7 @@ refuse :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs,
 
 // Refuses the value `t`, which a collecting read then counts as read.
 @(cold)
-refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.Hook_Regs, t: core.Token, kind: core.Unmarshal_Error_Kind) -> (core.Hook_Regs, core.Action) {
+refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action) {
 	lo, _ := core.scalar_ends(t)
 	regs, action := refuse(h, regs_in, {kind = kind, at = lo})
 	fld := field_at(regs.b)
@@ -37,14 +37,14 @@ refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.H
 
 // Refuses an element no room was made for, which a collecting read does not count.
 @(cold)
-refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, kind: core.Unmarshal_Error_Kind) -> (core.Hook_Regs, core.Action) {
+refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action) {
 	lo, _ := core.scalar_ends(t)
 	return refuse(h, regs, {kind = kind, at = lo})
 }
 
 // Adds `e`, with the path to where the read stands, to the sink.
 @(private)
-note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Unmarshal_Error) {
+note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error) {
 	e := e
 	path_of(h, regs, &e)
 	if h.first.kind == .None {
@@ -62,7 +62,7 @@ note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Unmarshal_Error) {
 // Builds `e`'s path, the innermost `MAX_ERROR_STEPS` steps, from the open frames. A step `e` holds already is the last,
 // in place of the step the registers stand at.
 @(private)
-path_of :: proc(h: ^Reader, regs: core.Hook_Regs, e: ^core.Unmarshal_Error) {
+path_of :: proc(h: ^Reader, regs: core.Hook_Regs, e: ^core.Typed_Error) {
 	buf: [core.MAX_ERROR_STEPS]core.Step
 	n := 0
 	if e.n_steps > 0 {

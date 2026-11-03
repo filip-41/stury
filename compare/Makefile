@@ -5,7 +5,7 @@ BUILD := build
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -strict-style
 LINT_FLAGS := $(VET) -terse-errors -max-error-count:500
 
-.PHONY: test-oracle test-typed-oracle lint bench-doc golden
+.PHONY: test-oracle test-typed-oracle test-marshal-oracle test-dsv-marshal-oracle test-document-oracle lint bench-doc golden
 
 # The document lanes' files, run by `bench-doc`.
 BENCH_FILES ?= logs.json citm_catalog.json table.csv
@@ -37,6 +37,18 @@ test-typed-oracle: ROUNDS ?= 20000
 test-typed-oracle:
 	ODIN=$(ODIN) bash typed_oracle/run.sh $(ROUNDS) $(SEED)
 
+# The typed write against the old marshal, compact and pretty, on the fixtures and a value of every kind.
+test-marshal-oracle:
+	ODIN=$(ODIN) bash marshal_oracle/run.sh
+
+# The delimited-text write against the old tree's, in every spec and layout, on the fixtures and a text of every kind.
+test-dsv-marshal-oracle:
+	ODIN=$(ODIN) bash dsv_marshal_oracle/run.sh
+
+# The document writer and `format` against the old tree's, in every layout, on the fixtures and directed texts.
+test-document-oracle:
+	ODIN=$(ODIN) bash document_oracle/run.sh
+
 # Writes next/json/test/golden: the old tree's answer for every suite file per spec. Through the same renamed copy,
 # since both trees name a package `json` and a package `core`.
 golden:
@@ -50,7 +62,11 @@ lint:
 		$(ODIN) check $$d/compare/$$p -no-entry-point $(LINT_FLAGS) -collection:stury=$(abspath ..) || exit 1; \
 	done
 	$(ODIN) check found_probe $(LINT_FLAGS) -collection:stury=$(abspath ..)
+	$(ODIN) check write_probe $(LINT_FLAGS) -collection:stury=$(abspath ..)
 	ODIN=$(ODIN) OPT=none bash typed_oracle/build.sh $$(mktemp -d)
+	ODIN=$(ODIN) OPT=none BUILD_ONLY=1 bash marshal_oracle/run.sh
+	ODIN=$(ODIN) OPT=none BUILD_ONLY=1 bash dsv_marshal_oracle/run.sh
+	ODIN=$(ODIN) OPT=none BUILD_ONLY=1 bash document_oracle/run.sh
 
 # The old tree's document probe, then next/bench's probe on the same files and lanes. ROUNDS and BENCH_FILES pass
 # through.

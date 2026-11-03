@@ -83,6 +83,11 @@ any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
 	return simd.reduce_max(simd.bit_or(simd.bit_or(m[0], m[1]), simd.bit_or(m[2], m[3]))) != 0
 }
 
+// Reports whether any lane of the 16-lane mask `m` is set, by `umaxv`.
+any_lane16 :: #force_inline proc "contextless" (m: V) -> bool {
+	return simd.reduce_max(m) != 0
+}
+
 // Returns the index of the first set lane in the 16 lane masks of `m`, or 16 when none is set. NEON has no
 // instruction that gathers one bit a lane, so a narrowing shift (`shrn`) keeps four bits a lane in a scalar register.
 first_lane :: #force_inline proc "contextless" (m: V) -> u64 {

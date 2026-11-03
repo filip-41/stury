@@ -11,15 +11,15 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The library packages, and the order imports of them take. json and dsv share the last rank.
-PACKAGES = ["core/spell", "core", "core/kernel", "core/compose", "core/build", "core/typed", "json", "dsv"]
-RANK = {"core/spell": 0, "core": 1, "core/kernel": 2, "core/compose": 2, "core/build": 3, "core/typed": 4, "json": 5, "dsv": 5}
+PACKAGES = ["core/spell", "core", "core/kernel", "core/compose", "core/build", "core/typed", "core/write", "json", "dsv"]
+RANK = {"core/spell": 0, "core": 1, "core/kernel": 2, "core/compose": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "json": 6, "dsv": 6}
 FORMATS = {"json", "dsv"}
 
 LEAN_BUDGET = 18_500
 
 # core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte
 # shuffle's.
-NEUTRAL = ["core/spell", "core", "core/compose", "core/build", "core/typed"]
+NEUTRAL = ["core/spell", "core", "core/compose", "core/build", "core/typed", "core/write"]
 FORMAT_WORD = re.compile(r"(?<![a-z])(header|table|record|cell|delimiter)s?(?![a-z])")
 
 DECL = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(::|:=|:)")
@@ -221,7 +221,8 @@ def words():
             with open(path, encoding="utf-8") as lines:
                 for number, line in enumerate(lines, 1):
                     code, block = strip_code(line, block)
-                    hit = FORMAT_WORD.search(code.lower())
+                    # A name of Odin's runtime is not this tree's vocabulary.
+                    hit = FORMAT_WORD.search(re.sub(r"runtime\.\w+", "", code.lower()))
                     if hit:
                         print(f"{path}:{number}: {hit.group(1)}")
                         found += 1

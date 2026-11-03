@@ -280,7 +280,7 @@ escape5 :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q
 	c := q[0]
 	switch {
 	case c == 'u':
-		return escape_exact(e, end, tol), false
+		return escape_exact(e, end, tol)
 	case c == 'x':
 		for i in 1 ..= 2 {
 			if q[i:] >= end {

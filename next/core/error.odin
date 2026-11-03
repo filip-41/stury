@@ -1,6 +1,7 @@
 package core
 
 import "core:io"
+import "core:reflect"
 
 // The error types of the layers that walk and build a text. `Fault` is the walk's error and `Document_Error` the
 // value layer's, which holds a `Fault` by value in `inner`.
@@ -320,8 +321,9 @@ render_edit :: proc(w: io.Writer, src: []u8, path: string, e: Path_Edit_Error, l
 	return nil
 }
 
-// How a typed read refuses. `.None` is no error.
-Unmarshal_Error_Kind :: enum u8 {
+// How a typed read or write refuses. `.None` is no error. The kinds from `Bad_Utf8` on are a write's, and none of them
+// names a byte of a source.
+Typed_Error_Kind :: enum u8 {
 	None,
 	Walk, // the walk's fault, in `inner`
 	Wrong_Kind, // a value the target's type does not read
@@ -336,28 +338,39 @@ Unmarshal_Error_Kind :: enum u8 {
 	Out_Of_Memory,
 	Bad_Option, // a nil target, at no byte
 	Plan_Mismatch, // a plan built for another type or format, at no byte
-	Unsupported, // a type a plan cannot read, the last step names the field
+	Unsupported, // a type a plan cannot read or write, the last step names the field
 	Ambiguous_Union, // a union whose arms a value's class cannot tell apart
 	Bad_Tag, // a field's tag holds a flag no reader knows
+	Bad_Utf8, // a string to write is not UTF-8
+	Non_Finite, // a number to write is infinite or not a number
+	Too_Deep, // a value to write nests past `MAX_DEPTH`
+	Cycle, // a pointer to write leads back to itself
+	Bad_Raw, // a `Raw` or `Number_Text` to write is not one value of the format
+	Unwritable, // a value the format cannot spell, the last step names it
+	Out_Of_Order, // a token call the text's grammar does not allow next, or a text finished before it is whole
+	Write_Failed, // the output stream refused bytes, which may have left a prefix in it
 }
 
-// The steps an `Unmarshal_Error` holds.
+// The steps a `Typed_Error` holds.
 MAX_ERROR_STEPS :: 8
 
-// A typed read's refusal. `at` is the value's byte, and `steps[:n_steps]` the path to it from the target, the innermost
-// `MAX_ERROR_STEPS` when `truncated` says more were cut from the front. A step's name lives as long as `src` or the plan,
-// or for a decoded key as long as `context.temp_allocator`'s block. `.Walk` holds its fault in `inner`.
-Unmarshal_Error :: struct {
-	kind:      Unmarshal_Error_Kind,
+// A typed read's or write's refusal. `at` is the value's byte in the source, 0 for a write and for a kind with no
+// byte. `steps[:n_steps]` is the path to the value from the target, the innermost `MAX_ERROR_STEPS` when `truncated`
+// says more were cut from the front. A step's name lives as long as `src` or the plan,
+// or for a decoded key as long as `context.temp_allocator`'s block. `.Walk` holds its fault in `inner`, and
+// `.Write_Failed` what the stream answered in `cause`, which is `.Unknown` for most failures of a `core:os` file stream.
+Typed_Error :: struct {
+	kind:      Typed_Error_Kind,
 	truncated: bool,
 	n_steps:   u8,
+	cause:     io.Error,
 	at:        u64,
 	inner:     Fault,
 	steps:     [MAX_ERROR_STEPS]Step,
 }
 
 @(private, rodata)
-UNMARSHAL_KIND_RULES := [Unmarshal_Error_Kind]Rule {
+TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.None          = {"none", "No error"},
 	.Walk          = {"walk", "Input does not parse"},
 	.Wrong_Kind    = {"wrong_kind", "Value does not fit the field's type"},
@@ -375,28 +388,43 @@ UNMARSHAL_KIND_RULES := [Unmarshal_Error_Kind]Rule {
 	.Unsupported   = {"unsupported", "Type is not supported"},
 	.Ambiguous_Union = {"ambiguous_union", "Union arms cannot be told apart"},
 	.Bad_Tag       = {"bad_tag", "Invalid field tag"},
+	.Bad_Utf8      = {"bad_utf8", "String is not valid UTF-8"},
+	.Non_Finite    = {"non_finite", "Number is not finite"},
+	.Too_Deep      = {"too_deep", "Value nests past the depth limit"},
+	.Cycle         = {"cycle", "Value refers to itself"},
+	.Bad_Raw       = {"bad_raw", "Text is not one value of the format"},
+	.Unwritable    = {"unwritable", "Value cannot be written in the format"},
+	.Out_Of_Order  = {"out_of_order", "Token written out of order"},
+	.Write_Failed  = {"write_failed", "Output refused the bytes"},
 }
 
+// The kinds that name no byte of a source.
 @(private)
-write_unmarshal_code :: proc(w: io.Writer, e: Unmarshal_Error) -> io.Error {
-	io.write_string(w, "unmarshal.") or_return
-	_, err := io.write_string(w, UNMARSHAL_KIND_RULES[e.kind].code)
+TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Bad_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
+
+@(private)
+write_typed_code :: proc(w: io.Writer, e: Typed_Error) -> io.Error {
+	io.write_string(w, "typed.") or_return
+	_, err := io.write_string(w, TYPED_KIND_RULES[e.kind].code)
 	return err
 }
 
 // Writes `line:col: message at path` for `e`, the position left out where the kind has no byte. `.Walk` writes its
 // fault. `lines` is as in `render_fault`.
 @(private)
-render_unmarshal :: proc(w: io.Writer, src: []u8, e: Unmarshal_Error, lines: ^Lines = nil) -> io.Error {
+render_typed :: proc(w: io.Writer, src: []u8, e: Typed_Error, lines: ^Lines = nil) -> io.Error {
 	if e.kind == .Walk {
 		return render_fault(w, src, e.inner, lines)
 	}
-	#partial switch e.kind {
-	case .None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag:
-	case:
+	if e.kind not_in TYPED_AT_NO_BYTE {
 		write_position(w, src, e.at, lines) or_return
 	}
-	io.write_string(w, UNMARSHAL_KIND_RULES[e.kind].message) or_return
+	io.write_string(w, TYPED_KIND_RULES[e.kind].message) or_return
+	if e.cause != .None {
+		io.write_string(w, " (") or_return
+		io.write_string(w, reflect.enum_string(e.cause)) or_return
+		io.write_byte(w, ')') or_return
+	}
 	if e.n_steps == 0 {
 		return nil
 	}
@@ -420,5 +448,5 @@ render_unmarshal :: proc(w: io.Writer, src: []u8, e: Unmarshal_Error, lines: ^Li
 }
 
 // `write_code` writes an error's code, `render` writes its rendered line.
-write_code :: proc {write_fault_code, write_document_code, write_path_code, write_edit_code, write_unmarshal_code}
-render :: proc {render_fault, render_document, render_path, render_edit, render_unmarshal}
+write_code :: proc {write_fault_code, write_document_code, write_path_code, write_edit_code, write_typed_code}
+render :: proc {render_fault, render_document, render_path, render_edit, render_typed}

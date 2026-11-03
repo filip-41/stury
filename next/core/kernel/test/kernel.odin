@@ -253,3 +253,52 @@ first_lane_every_lane :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// Checks `any_lane16` on the empty mask and on each lane alone.
+@(test, enable_target_feature = FEATURES)
+any_lane16_every_lane :: proc(t: ^testing.T) {
+	testing.expect(t, !k.any_lane16(#simd[16]u8{}))
+	for lane in 0 ..< 16 {
+		m: [16]u8
+		m[lane] = 0xff
+		testing.expectf(t, k.any_lane16(transmute(#simd[16]u8)m), "lane %d", lane)
+	}
+}
+
+// Checks `compress` against a loop on random and structured keep masks: it stores the kept lanes in order, returns their
+// count, and stores nothing past 64 bytes from its start.
+@(test, enable_target_feature = FEATURES)
+compress_keeps_lanes_in_order :: proc(t: ^testing.T) {
+	state := rand.create(9)
+	context.random_generator = rand.default_random_generator(&state)
+	src: [64]u8
+	for lane in 0 ..< 64 {
+		src[lane] = u8(lane + 1)
+	}
+	masks: [dynamic]u64
+	defer delete(masks)
+	append(&masks, 0, ~u64(0), 0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555, 1, 1 << 63, 0xFF, 0xFF00_0000_0000_0000)
+	for _ in 0 ..< 4096 {
+		append(&masks, rand.uint64())
+	}
+	for keep in masks {
+		out: [64 + 8]u8
+		for &b in out {
+			b = 0xEE
+		}
+		got := k.compress(k.load(raw_data(src[:])), keep, raw_data(out[:]))
+		n := 0
+		for lane in 0 ..< 64 {
+			if keep >> u64(lane) & 1 != 0 {
+				if !testing.expectf(t, out[n] == src[lane], "keep %x: byte %d is %d, want %d", keep, n, out[n], src[lane]) {
+					return
+				}
+				n += 1
+			}
+		}
+		testing.expectf(t, got == n, "keep %x: count %d, want %d", keep, got, n)
+		for b in out[64:] {
+			testing.expectf(t, b == 0xEE, "keep %x: stored past 64 bytes", keep)
+		}
+	}
+}

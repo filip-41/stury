@@ -96,6 +96,13 @@ before :: #force_inline proc "contextless" (prev, v: #simd[$N]u8, $K: int) -> #s
 	}
 }
 
+// Returns a non-zero lane where the 16 bytes `v`, read after the 16 bytes `prev`, are not UTF-8. For a reader that steps
+// through a text a vector at a time, with `prev` zero before the first. It uses the lowest tier's lookups, so any tier's
+// procedure may call it. A sequence the last vector leaves open shows when a vector of ASCII follows it.
+utf8_window :: #force_inline proc "contextless" (prev, v: V) -> V {
+	return errors(Tier(0), prev, v)
+}
+
 // Steps over the UTF-8 character whose lead is at `p`, where `p < end` and `*p >= 0x80`. Returns one past the
 // character with `.None`, or `p` with `.Bad_Char` for a malformed sequence. A sequence the text cuts short returns
 // `end` with `.Truncated` when every byte present could still continue it, else `p` with `.Bad_Char`.

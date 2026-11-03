@@ -13,6 +13,7 @@ Field_Tag :: struct {
 	keep:     bool,
 	required: bool,
 	unknown:  bool,
+	omit:     bool,
 }
 
 // Reads a field's tag: `name,flag,flag`, or `-` to leave the field out. An empty name keeps the field's own, renamed by
@@ -32,7 +33,11 @@ field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, ok: bool) {
 	if value == "-" {
 		return {}, true
 	}
-	out := make([dynamic]u8, 0, len(value))
+	out, failed := make([dynamic]u8, 0, len(value))
+	if failed != nil {
+		refuse_plan(b, .Out_Of_Memory)
+		return {}, true
+	}
 	i := 0
 	for ; i < len(value) && value[i] != ','; i += 1 {
 		if value[i] == '\\' && i + 1 < len(value) {
@@ -49,7 +54,9 @@ field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, ok: bool) {
 		flags := value[i + 1:]
 		for flag in strings.split_iterator(&flags, ",") {
 			switch flag {
-			case "", "omitempty":
+			case "":
+			case "omitempty":
+				t.omit = true
 			case "required":
 				t.required = true
 			case "unknown":
@@ -68,7 +75,11 @@ renamed :: proc(b: ^Builder, name: string) -> string {
 	if b.rename == .None {
 		return name
 	}
-	out := make([]u8, len(name))
+	out, failed := make([]u8, len(name))
+	if failed != nil {
+		refuse_plan(b, .Out_Of_Memory)
+		return name
+	}
 	n := 0
 	upper := b.rename == .Pascal
 	for i in 0 ..< len(name) {

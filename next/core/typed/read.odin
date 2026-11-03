@@ -80,7 +80,7 @@ Reader :: struct {
 	src:       []u8,
 	plan:      ^Plan,
 	ctx:       runtime.Context,
-	first:     core.Unmarshal_Error,
+	first:     core.Typed_Error,
 	collect:   ^Collected,
 	// The one-node document a token is handed to `Spelling`'s procedures in.
 	token:     core.Node,
@@ -93,7 +93,7 @@ Reader :: struct {
 
 // Starts a read of `src` into `target`, a value of `plan`'s type. `frames` holds one more than the walk's depth. The
 // walk then runs with `r` and the returned registers, and `read_end` ends it.
-read_start :: proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Unmarshal_Error) {
+read_start :: proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
 	if plan == nil || plan.spelling != spelling || plan.type != T {
 		err.kind = .Plan_Mismatch
 		return
@@ -116,9 +116,9 @@ read_start :: proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling,
 
 // Ends a read: gives the open lists to their destinations, so what the read allocated is reachable from the target, and
 // returns the first refusal or `fault`.
-read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Unmarshal_Error {
+read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Error {
 	if f, faulted := fault.?; faulted {
-		e := core.Unmarshal_Error{kind = .Walk, at = f.at, inner = f}
+		e := core.Typed_Error{kind = .Walk, at = f.at, inner = f}
 		note(r, regs, e)
 	}
 	if r.first.kind != .None {
@@ -158,7 +158,7 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 		return {f.a, f.b, f.c + u64(owner.stride)}, .Next
 	}
 	if regs.c >= regs.a {
-		kind: core.Unmarshal_Error_Kind
+		kind: core.Typed_Error_Kind
 		regs, kind = grow_list(h, regs)
 		if kind != .None {
 			return refuse_element(h, regs, t, kind)
@@ -166,7 +166,7 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 	}
 	fld := field_at(regs.b)
 	dest := uintptr(regs.c) + uintptr(fld.offset)
-	reason: core.Unmarshal_Error_Kind
+	reason: core.Typed_Error_Kind
 	#partial switch t.kind {
 	case .String:
 		if fld.kind != .String {
@@ -274,7 +274,7 @@ token_text :: proc(h: ^Reader, t: core.Token, allocator: runtime.Allocator) -> (
 
 // Stores a string token's text: a decoded buffer, or the span as the read keeps one.
 @(cold)
-store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, dest: ^string) -> core.Unmarshal_Error_Kind {
+store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, dest: ^string) -> core.Typed_Error_Kind {
 	context = h.ctx
 	if t.spelling & core.SPELLING_DECODE != 0 {
 		s, ok := token_text(h, t, context.allocator)
@@ -289,7 +289,7 @@ store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, 
 
 // Gives the open list room for one more element. A fixed array has no more room.
 @(cold)
-grow_list :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs) -> (core.Hook_Regs, core.Unmarshal_Error_Kind) {
+grow_list :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs) -> (core.Hook_Regs, core.Typed_Error_Kind) {
 	context = h.ctx
 	f := &h.frames[h.sp - 1]
 	owner := frame_owner(f)
@@ -342,13 +342,13 @@ close_container :: #force_no_inline proc "contextless" (h: ^Reader, f: ^Frame, o
 		if at := missing_member(h, f, owner, regs); at >= 0 {
 			// The struct's frame is reopened for the path, whose last step this name replaces.
 			h.sp += 1
-			r, action := refuse(h, back, core.Unmarshal_Error{kind = .Missing_Field, at = t.lo, steps = {0 = core.Name(h.plan.meta[int(h.plan.meta[owner.meta].block) + int(at)].name)}, n_steps = 1})
+			r, action := refuse(h, back, core.Typed_Error{kind = .Missing_Field, at = t.lo, steps = {0 = core.Name(h.plan.meta[int(h.plan.meta[owner.meta].block) + int(at)].name)}, n_steps = 1})
 			h.sp -= 1
 			return r, action
 		}
 	case .Array:
 		if regs.c != regs.a {
-			return refuse(h, back, core.Unmarshal_Error{kind = .Wrong_Length, at = t.lo})
+			return refuse(h, back, core.Typed_Error{kind = .Wrong_Length, at = t.lo})
 		}
 	case .Slice, .Dynamic, .Fixed_List:
 		publish_list(h, f, owner, regs.a, regs.c, false)

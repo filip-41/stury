@@ -59,6 +59,11 @@ any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
 	return pack(m) != 0
 }
 
+// Reports whether any lane of the 16-lane mask `m` is set, by `pmovmskb`. An OR reduction is a shuffle tree on x86.
+any_lane16 :: #force_inline proc "contextless" (m: V) -> bool {
+	return transmute(u16)simd.extract_msbs(m) != 0
+}
+
 // Returns the index of the first set lane in the 16 lane masks of `m`, or 16 when none is set. `pmovmskb` gives one
 // bit per lane, and `0x1_0000` adds a bit past lane 15 that the trailing-zero count finds when no lane is set.
 first_lane :: #force_inline proc "contextless" (m: V) -> u64 {

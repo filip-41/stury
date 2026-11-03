@@ -28,9 +28,9 @@ DEFAULT_ODIN = os.path.join(os.path.dirname(REPO), "Odin-master", "bin", "odin")
 TIERS = {"quick": 0, "merge": 1, "full": 2}
 HOST = "arm64"
 
-TEST_PKGS = ["core/kernel/test", "core/test", "json/test", "dsv/test"]
-LIB_PKGS = ["core/spell", "core", "core/kernel", "core/compose", "core/build", "core/typed", "json", "dsv", "walktest"]
-BENCH_PKGS = ["bench", "bench/doc", "bench/editbench", "bench/paths", "bench/typed"]
+TEST_PKGS = ["core/spell/test", "core/kernel/test", "core/test", "core/write/test", "json/test", "dsv/test"]
+LIB_PKGS = ["core/spell", "core", "core/kernel", "core/compose", "core/build", "core/typed", "core/write", "json", "dsv", "walktest"]
+BENCH_PKGS = ["bench", "bench/doc", "bench/editbench", "bench/paths", "bench/typed", "bench/write"]
 
 IMPORT = re.compile(r'^\s*import\s+(?:[A-Za-z_]\w*\s+)?"([^"]+)"', re.MULTILINE)
 LOAD = re.compile(r'#load(?:_directory|_hash)?\(\s*"([^"]+)"')
@@ -186,6 +186,8 @@ def checks(odin, seed):
             for tier in (0, 1):
                 target = f"build/test/x86/{opt}/{tier}/{package}"
                 out.append(Check(f"{name} x86 v{tier + 2} {opt}", 3, 1, root, make(odin, target), arch="amd64"))
+    # Alone in the last stage, since it fills every core.
+    out.append(Check("f32 exhaustive", 4, 2, [at("core/spell"), at("core/spell/test")], make(odin, "test-f32")))
     if os.path.isdir(PRIVATE):
         private = [
             ("model/json", True), ("model/dsv", True), ("laws/json", False), ("laws/dsv", False), ("perf", False),
@@ -201,7 +203,7 @@ def checks(odin, seed):
     in_compare = lambda *names: [os.path.join(compare, name) for name in names]
     typed = in_compare("typed_oracle")
     out.append(Check(
-        "compare lint", 0, 1, in_compare("json_oracle", "dsv_oracle", "golden", "found_probe") + [at("json"), at("dsv")],
+        "compare lint", 0, 1, in_compare("json_oracle", "dsv_oracle", "golden", "found_probe", "marshal_oracle", "dsv_marshal_oracle", "document_oracle", "write_probe") + [at("json"), at("dsv")],
         make(odin, "lint"), cwd=compare, trees=typed,
     ))
     for tier, rounds, typed_rounds in ((1, 20000, 2000), (2, 100000, 20000)):
@@ -215,6 +217,18 @@ def checks(odin, seed):
             f"typed oracle{label}", 3, tier, [at("json"), at("dsv"), os.path.join(REPO, "json"), os.path.join(REPO, "csv")],
             make(odin, "test-typed-oracle", ROUNDS=typed_rounds, SEED=seed), cwd=compare, trees=typed,
         ))
+    out.append(Check(
+        "marshal oracle", 3, 1, [at("json"), at("core/write"), at("core/typed"), os.path.join(REPO, "json")],
+        make(odin, "test-marshal-oracle"), cwd=compare, trees=in_compare("marshal_oracle"),
+    ))
+    out.append(Check(
+        "dsv marshal oracle", 3, 1, [at("dsv"), at("core/write"), at("core/typed"), os.path.join(REPO, "csv")],
+        make(odin, "test-dsv-marshal-oracle"), cwd=compare, trees=in_compare("dsv_marshal_oracle"),
+    ))
+    out.append(Check(
+        "document oracle", 3, 1, [at("json"), at("core/write"), os.path.join(REPO, "json")],
+        make(odin, "test-document-oracle"), cwd=compare, trees=in_compare("document_oracle"),
+    ))
     out.append(Check(
         "golden", 3, 1, in_compare("golden"),
         ["sh", "-c", f"make -s ODIN={odin} golden && git diff --exit-code -- ../next/json/test/golden"], cwd=compare,

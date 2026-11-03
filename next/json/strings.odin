@@ -249,7 +249,7 @@ SURROGATE_CLASSES := kernel.Nibble_Table {
 }
 
 // Reads the string whose opening quote is at `p`. Returns one past its closing quote, whether it holds an escape and
-// whether `Invalid_Utf8` accepted a sequence, or the fault. Uses this CPU's block reader first, then `string_exact`, which
+// whether a tolerance accepted a sequence, or the fault. Uses this CPU's block reader first, then `string_exact`, which
 // reads the walk's tolerances.
 @(private)
 string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8) -> (q: [^]u8, esc, lax: bool, kind: core.Fault_Kind) {
@@ -271,8 +271,8 @@ string_long :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8
 	return q, esc, false, .None
 }
 
-// The spelling bits of a string the walk read: bit 0 when it holds an escape or an ill-formed sequence
-// `Invalid_Utf8` accepted, and bit 2 when it holds the latter.
+// The spelling bits of a string the walk read: bit 0 when it holds an escape or a sequence a tolerance accepted, and bit
+// 2 when it holds the latter.
 @(private)
 string_spelling :: #force_inline proc "contextless" (esc, lax: bool) -> u16 {
 	return (core.SPELLING_DECODE if esc || lax else 0) | (core.SPELLING_LAX if lax else 0)
@@ -445,7 +445,7 @@ string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8, $S: Spec, to
 			when .Es5 in FEATURES[S] {
 				q2, kind2, took = escape5(q, end, tol)
 			} else {
-				q2, kind2 = escape_exact(q, end, tol)
+				q2, kind2, took = escape_exact(q, end, tol)
 			}
 			lax ||= took
 			if kind2 != .None {
@@ -469,44 +469,44 @@ string_exact :: #force_no_inline proc "contextless" (p, end: [^]u8, $S: Spec, to
 
 // Steps over the escape at the backslash `e`. Returns one past it, or `Bad_Escape` at a bad letter or hex digit,
 // `Bad_Escape` at the backslash for a lone surrogate half unless `tol` accepts it, or `Truncated` when the text ends
-// first.
+// first. `took` says the tolerance accepted a lone half.
 @(private)
-escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind, took: bool) #no_bounds_check {
 	q = e[1:]
 	if q >= end {
-		return end, .Truncated
+		return end, .Truncated, false
 	}
 	if ESC_WORD[q[0]] != 0 {
-		return q[1:], .None
+		return q[1:], .None, false
 	}
 	if q[0] != 'u' {
-		return q, .Bad_Escape
+		return q, .Bad_Escape, false
 	}
 	q = q[1:]
 	unit: u32
 	for _ in 0 ..< 4 {
 		if q >= end {
-			return end, .Truncated
+			return end, .Truncated, false
 		}
 		h := spell.HEX_NIBBLE[q[0]]
 		if h == 0xff {
-			return q, .Bad_Escape
+			return q, .Bad_Escape, false
 		}
 		unit = unit << 4 | u32(h)
 		q = q[1:]
 	}
 	if spell.low_surrogate(unit) {
 		if .Lone_Surrogate in tol {
-			return q, .None
+			return q, .None, true
 		}
-		return e, .Bad_Escape
+		return e, .Bad_Escape, false
 	}
 	if spell.high_surrogate(unit) {
 		// Checks `\`, `u` and a low half's four digits in turn, each refused at its own byte, so a text cut inside them
 		// gives `Truncated` where a wrong byte gives `Bad_Escape`.
 		for i in 0 ..< 6 {
 			if q[i:] >= end {
-				return end, .Truncated
+				return end, .Truncated, false
 			}
 			c := q[i]
 			h := spell.HEX_NIBBLE[c]
@@ -525,14 +525,14 @@ escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) 
 			}
 			if !ok {
 				if .Lone_Surrogate in tol {
-					return q, .None
+					return q, .None, true
 				}
-				return e, .Bad_Escape
+				return e, .Bad_Escape, false
 			}
 		}
 		q = q[6:]
 	}
-	return q, .None
+	return q, .None, false
 }
 
 // Whether `.Invalid_Utf8` is in `tol` and the character at `p` is an ill-formed sequence, which `utf8_lax` then steps

@@ -5,6 +5,7 @@ package typed
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:io"
 import "core:reflect"
 import "core:strings"
 import core ".."
@@ -54,11 +55,16 @@ Read_Kind :: enum u8 {
 Field :: struct {
 	using key: core.Expected_Key,
 	kind:      Read_Kind,
+	omit:      bool, // a member a write leaves out when it is empty, the tag's `omitempty`
+	key_size:  u8, // what a write stores of `key`, 0 for a member it must look at first: `omit`, the end, or a name to escape
 	offset:    u32,
 	stride:    u32,
 	meta:      u32,
 	first:     ^Field,
 }
+
+// The longest key text a write stores in line. A longer one is written through the format's string writer.
+KEY_SIZE_MAX :: 240
 
 // What only the cold paths read, indexed like `Plan.fields`.
 Meta :: struct {
@@ -67,6 +73,7 @@ Meta :: struct {
 	enum_info:  ^runtime.Type_Info_Enum,
 	arms:       []Arm, // a `Union`'s
 	read:       Unmarshal_Hook, // a `Hook`'s
+	write:      Marshal_Hook, // a `Hook`'s
 	required:   []i32, // on a struct's `Never` record, the members that must be present
 	names:      u64, // a struct's members' `name_bit`s, so most keys it does not hold are known by one test
 	lower:      i64, // a `Bit_Set`'s lowest element
@@ -76,7 +83,7 @@ Meta :: struct {
 	align:      u32,
 	tag:        u32, // a `Maybe`'s or `Union`'s tag offset, a `Fixed_List`'s length offset
 	tag_size:   u8, // a `Union`'s, 0 for a pure maybe
-	key_kind:   Read_Kind, // a `Map`'s key
+	key_kind:   Read_Kind, // a `Map`'s key, a `Hook`'s own kind, which says when `omitempty` finds it empty
 	block:      i32,
 	members:    i32, // a struct's member count
 	capture:    i32, // on a struct's `Never` record, the record of the map that captures unknown members, or -1
@@ -129,12 +136,19 @@ Hook_Value :: struct {
 
 // Reads `v` into `dest`, a value of the hook's type that holds what the target held, allocating with `allocator`. Nil
 // reads it, and a kind refuses it at the value.
-Unmarshal_Hook :: #type proc(v: Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Unmarshal_Error_Kind)
+Unmarshal_Hook :: #type proc(v: Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind)
 
-// A type read by the caller's proc instead of by the plan.
+// Answers what to write in place of `v`, a value of the hook's type: any value, which is written as a value of its own
+// type, through hooks too, and nil writes a null. A value the call must allocate comes from `allocator`, which lasts as
+// long as the write. A kind refuses the value.
+Marshal_Hook :: #type proc(v: rawptr, allocator: runtime.Allocator) -> (stand_in: any, refuse: core.Typed_Error_Kind)
+
+// A type read or written by the caller's procs instead of by the plan. A nil `read` or `write` refuses the type on that
+// side as `.Unsupported`, at the value.
 Type_Hook :: struct {
-	type: typeid,
-	read: Unmarshal_Hook,
+	type:  typeid,
+	read:  Unmarshal_Hook,
+	write: Marshal_Hook,
 }
 
 // How a field with no name of its own in its tag is spelled from its Odin name.
@@ -177,8 +191,18 @@ Plan :: struct {
 	strings:   [dynamic]string,
 	allocator: runtime.Allocator,
 	// A format whose tokens do not type their values reads a document's node through this, where its plan maker sets it.
-	node_read: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Unmarshal_Error,
+	node_read: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error,
+	// The format's value writer, which holds its spelling compiled in, where its plan maker sets it.
+	marshal:   Marshal_Text,
+	// A format's own bytes for its writer, as `Read_As.opts` is for a document.
+	layout:    [5]u8,
+	// The options the plan was built with, for the plans a write builds for a type met in an `any`.
+	options:   Plan_Options,
 }
+
+// Writes the value of `plan`'s type at `value` as `opts` says, to `stream` when it has a procedure, else to new bytes
+// from `allocator`.
+Marshal_Text :: #type proc(plan: ^Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
 
 @(private)
 Builder :: struct {
@@ -189,32 +213,44 @@ Builder :: struct {
 	blocks:     map[typeid]i32,
 	ends:       map[i32]i32, // a struct block's `Never` record
 	widest:     int,
-	err:        core.Unmarshal_Error,
+	err:        core.Typed_Error,
 }
 
 // Builds the plan of `T` for the format `spelling` gives, allocating with `allocator`. A type the read cannot take is
 // an error, with the path to it, and the plan is then the zero value. `opts`'s strings and slices are read here only.
-plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Unmarshal_Error) {
+plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error) {
 	context.allocator = allocator
 	p = {spelling = spelling, type = T, union_tag = opts.union_tag, enums = opts.enums, key_frame = u32(len(spelling.key_open) + len(spelling.key_close)), allocator = allocator}
 	b := Builder{opts = opts, p = &p}
-	p.union_tag = owned(&b, transmute([]u8)strings.clone(opts.union_tag))
+	p.union_tag = owned_copy(&b, opts.union_tag)
+	hooks, no_hooks := make([]Type_Hook, len(opts.hooks))
+	tag_names, no_names := make([]Tag_Name, len(opts.tag_names))
+	p.options = {enums = opts.enums, union_tag = p.union_tag, rename = opts.rename, hooks = hooks, tag_names = tag_names}
+	copy(hooks, opts.hooks)
+	for &t, i in tag_names {
+		t = {opts.tag_names[i].type, owned_copy(&b, opts.tag_names[i].name)}
+	}
 	defer delete(b.blocks)
 	defer delete(b.ends)
 	// The root's block, then the block a value read whole passes through.
-	reserve_block(&b, 4)
-	fill(&b, 0, type_info_of(T), "", 0, 0)
-	never(&b, 1)
-	never(&b, 2)
-	b.fields[2].kind = .Inside
-	never(&b, 3)
+	if reserve_block(&b, 4, nil) >= 0 {
+		fill(&b, 0, type_info_of(T), "", 0, 0)
+		never(&b, 1)
+		never(&b, 2)
+		b.fields[2].kind = .Inside
+		never(&b, 3)
+	}
+	solo, no_solo := make([]Field, 2 * len(b.fields))
+	zero, no_zero := make([]u8, max(b.widest, 1))
+	p.solo, p.zero, p.fields, p.meta = solo, zero, b.fields[:], b.meta[:]
+	if no_hooks != nil || no_names != nil || no_solo != nil || no_zero != nil {
+		refuse_plan(&b, .Out_Of_Memory)
+	}
 	if b.err.kind != .None {
 		err = b.err
-		p.fields, p.meta = b.fields[:], b.meta[:]
 		plan_destroy(&p)
 		return {}, err
 	}
-	p.solo = make([]Field, 2 * len(b.fields))
 	for i in 0 ..< len(b.fields) {
 		m := &b.meta[i]
 		if m.block >= 0 {
@@ -231,7 +267,7 @@ plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := Plan_Options{}, a
 		p.solo[2 * i] = f
 		p.solo[2 * i + 1] = b.fields[1]
 	}
-	p.fields, p.meta, p.root, p.zero = b.fields[:], b.meta[:], &b.fields[1], make([]u8, max(b.widest, 1))
+	p.root = &b.fields[1]
 	return
 }
 
@@ -250,14 +286,22 @@ plan_destroy :: proc(p: ^Plan) {
 	delete(p.solo)
 	delete(p.meta)
 	delete(p.zero)
+	delete(p.options.hooks)
+	delete(p.options.tag_names)
 	p^ = {}
 }
 
+// Adds a block of `n` records and returns its first, or -1 with the plan refused. A block of type `id` is recorded for the
+// next use of the type and for a type that holds itself.
 @(private)
-reserve_block :: proc(b: ^Builder, n: int) -> i32 {
+reserve_block :: proc(b: ^Builder, n: int, id: typeid) -> i32 {
 	at := len(b.fields)
-	resize(&b.fields, at + n)
-	resize(&b.meta, at + n)
+	_, slot, _, no_slot := map_entry(&b.blocks, id)
+	if no_slot != nil || resize(&b.fields, at + n) != nil || resize(&b.meta, at + n) != nil {
+		refuse_plan(b, .Out_Of_Memory)
+		return -1
+	}
+	slot^ = i32(at)
 	return i32(at)
 }
 
@@ -269,11 +313,25 @@ never :: proc(b: ^Builder, at: int) {
 	b.meta[at] = {block = -1, capture = -1}
 }
 
-// Keeps `s` for as long as the plan.
+// Keeps `s` for as long as the plan, or frees it with the plan refused.
 @(private)
 owned :: proc(b: ^Builder, s: []u8) -> string {
-	append(&b.p.strings, string(s))
+	if _, failed := append(&b.p.strings, string(s)); failed != nil {
+		refuse_plan(b, .Out_Of_Memory)
+		delete(s)
+		return ""
+	}
 	return string(s)
+}
+
+@(private)
+owned_copy :: proc(b: ^Builder, s: string) -> string {
+	text, failed := strings.clone(s)
+	if failed != nil {
+		refuse_plan(b, .Out_Of_Memory)
+		return ""
+	}
+	return owned(b, transmute([]u8)text)
 }
 
 // Holds `name` as the format writes a key when the record can compare it. A format with no such writing, an element's
@@ -292,10 +350,13 @@ expect_name :: proc(b: ^Builder, f: ^Field, name: string) {
 		}
 	}
 	n := len(open) + len(name) + len(close)
-	buf := make([]u8, max(n, 16))
+	buf, failed := make([]u8, max(n, 16))
+	if failed != nil {
+		refuse_plan(b, .Out_Of_Memory)
+		return
+	}
 	copy(buf[copy(buf, open):], name)
 	copy(buf[len(open) + len(name):], close)
-	owned(b, buf)
 	f.word, f.mask = {}, {}
 	for i in 0 ..< min(n, 16) {
 		f.word[i / 8] |= u64(buf[i]) << uint(8 * (i % 8))
@@ -303,6 +364,7 @@ expect_name :: proc(b: ^Builder, f: ^Field, name: string) {
 	}
 	f.rest = raw_data(buf[16:])
 	f.n = u32(n)
+	owned(b, buf)
 }
 
 // One of 64 bits for a key's text, which is not empty.
@@ -312,7 +374,7 @@ name_bit :: #force_inline proc "contextless" (name: string) -> u64 #no_bounds_ch
 }
 
 @(private)
-refuse_plan :: proc(b: ^Builder, kind: core.Unmarshal_Error_Kind, at := "") {
+refuse_plan :: proc(b: ^Builder, kind: core.Typed_Error_Kind, at := "") {
 	if b.err.kind == .None {
 		b.err.kind = kind
 		if len(at) > 0 {
@@ -327,9 +389,10 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 	f := Field{offset = offset, stride = stride, meta = u32(at)}
 	m := Meta{name = name, size = u32(base.size), block = -1}
 	expect_name(b, &f, name)
-	if read, hooked := hook_of(b, ti.id); hooked {
-		f.kind, m.read = .Hook, read
-		if read == nil {
+	if hook, hooked := hook_of(b, ti.id); hooked {
+		f.kind, m.read, m.write = .Hook, hook.read, hook.write
+		m.key_kind = hooked_kind(base)
+		if hook.read == nil && hook.write == nil {
 			refuse_plan(b, .Unsupported, name)
 		}
 		b.fields[at], b.meta[at] = f, m
@@ -351,6 +414,24 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 		fill_base(b, &f, &m, ti, base, name)
 	}
 	b.fields[at], b.meta[at] = f, m
+}
+
+// The kind whose test for empty a hooked value of base type `base` takes, `.Never` for a type with none.
+@(private)
+hooked_kind :: proc(base: ^runtime.Type_Info) -> Read_Kind {
+	#partial switch v in base.variant {
+	case runtime.Type_Info_String:
+		return .Cstring if v.is_cstring else .String
+	case runtime.Type_Info_Slice:
+		return .Slice
+	case runtime.Type_Info_Dynamic_Array:
+		return .Dynamic
+	case runtime.Type_Info_Map:
+		return .Map
+	case runtime.Type_Info_Pointer:
+		return .Ptr
+	}
+	return .Never
 }
 
 // Whether `ti` is an integer the plan's stores write.
@@ -495,8 +576,10 @@ fill_bit_set :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v
 		m.block = at
 		return
 	}
-	m.block = reserve_block(b, 2)
-	b.blocks[ti.id] = m.block
+	m.block = reserve_block(b, 2, ti.id)
+	if m.block < 0 {
+		return
+	}
 	never(b, int(m.block))
 	never(b, int(m.block) + 1)
 	e := &b.fields[m.block]
@@ -515,8 +598,10 @@ any_block :: proc(b: ^Builder) -> i32 {
 	if at, ok := b.blocks[typeid_of(any)]; ok {
 		return at
 	}
-	at := reserve_block(b, 4)
-	b.blocks[typeid_of(any)] = at
+	at := reserve_block(b, 4, typeid_of(any))
+	if at < 0 {
+		return -1
+	}
 	never(b, int(at) + 1)
 	never(b, int(at) + 3)
 	fill(b, int(at), type_info_of(map[string]any), "", 0, 0)
@@ -539,8 +624,10 @@ list :: proc(b: ^Builder, m: ^Meta, ti, elem: ^runtime.Type_Info, stride: u32) {
 		m.block = at
 		return
 	}
-	m.block = reserve_block(b, 2)
-	b.blocks[ti.id] = m.block
+	m.block = reserve_block(b, 2, ti.id)
+	if m.block < 0 {
+		return
+	}
 	never(b, int(m.block) + 1)
 	fill(b, int(m.block), elem, "", 0, stride)
 }
@@ -570,14 +657,21 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 	if at, ok := b.blocks[ti.id]; ok {
 		m.block = at
 	} else {
-		m.block = reserve_block(b, len(v.variants) + 1)
-		b.blocks[ti.id] = m.block
+		m.block = reserve_block(b, len(v.variants) + 1, ti.id)
+		if m.block < 0 {
+			return
+		}
 		never(b, int(m.block) + len(v.variants))
 		for arm, k in v.variants {
 			fill(b, int(m.block) + k, arm, "", 0, 0)
 		}
 	}
-	m.arms = make([]Arm, len(v.variants))
+	arms, failed := make([]Arm, len(v.variants))
+	if failed != nil {
+		refuse_plan(b, .Out_Of_Memory)
+		return
+	}
+	m.arms = arms
 	named: int
 	for arm, k in v.variants {
 		n, is_named := arm.variant.(runtime.Type_Info_Named)
@@ -588,7 +682,7 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 			m.arms[k].name = n.name
 			for t in b.tag_names {
 				if t.type == arm.id {
-					m.arms[k].name = owned(b, transmute([]u8)strings.clone(t.name))
+					m.arms[k].name = owned_copy(b, t.name)
 				}
 			}
 		}
@@ -675,6 +769,7 @@ Member :: struct {
 	type:     ^runtime.Type_Info,
 	offset:   uintptr,
 	required: bool,
+	omit:     bool,
 }
 
 // A struct's block holds its members, a `Never` record that holds in its `Meta` what is true of every use of the struct,
@@ -702,15 +797,25 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 		}
 	}
 	n := len(members)
-	at := reserve_block(b, n + 1 + (2 if capture != nil else 0))
-	b.blocks[ti.id], b.ends[at] = at, at + i32(n)
+	at := reserve_block(b, n + 1 + (2 if capture != nil else 0), ti.id)
+	if at < 0 {
+		return
+	}
+	_, end_slot, _, no_end := map_entry(&b.ends, at)
+	if no_end != nil {
+		refuse_plan(b, .Out_Of_Memory)
+		return
+	}
+	end_slot^ = at + i32(n)
 	m.block, m.members = at, i32(n)
 	end := at + i32(n)
 	never(b, int(end))
 	required: [dynamic]i32
 	for x, i in members {
 		if x.required {
-			append(&required, i32(i))
+			if _, failed := append(&required, i32(i)); failed != nil {
+				refuse_plan(b, .Out_Of_Memory)
+			}
 		}
 	}
 	b.meta[end].required = required[:]
@@ -724,7 +829,25 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	}
 	for x, i in members {
 		fill(b, int(at) + i, x.type, x.name, u32(x.offset), 0)
+		r := &b.fields[int(at) + i]
+		r.omit = x.omit
+		if !x.omit && r.n <= KEY_SIZE_MAX && plain_name(x.name) {
+			r.key_size = u8(r.n)
+		}
 	}
+}
+
+// Whether a name's written text is its bytes whatever the options of a write: letters, digits, `_` and `-`.
+@(private)
+plain_name :: proc(name: string) -> bool {
+	for c in transmute([]u8)name {
+		switch c {
+		case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9', '_', '-':
+		case:
+			return false
+		}
+	}
+	return true
 }
 
 // Collects a struct's members, with a `using` member its tag gives no name flattened into the struct that holds it.
@@ -744,7 +867,7 @@ lay_out :: proc(b: ^Builder, v: runtime.Type_Info_Struct, base: uintptr, out: ^[
 			lay_out(b, inner, base + v.offsets[i], out, capture)
 			continue
 		}
-		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required}
+		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit}
 		if tag.unknown {
 			if v.types[i].id != typeid_of(map[string]Raw) || capture^ != nil {
 				refuse_plan(b, .Unsupported, tag.name)
@@ -752,15 +875,18 @@ lay_out :: proc(b: ^Builder, v: runtime.Type_Info_Struct, base: uintptr, out: ^[
 			capture^ = x
 			continue
 		}
-		append(out, x)
+		if _, failed := append(out, x); failed != nil {
+			refuse_plan(b, .Out_Of_Memory)
+			return
+		}
 	}
 }
 
 @(private)
-hook_of :: proc(b: ^Builder, T: typeid) -> (read: Unmarshal_Hook, ok: bool) {
+hook_of :: proc(b: ^Builder, T: typeid) -> (hook: Type_Hook, ok: bool) {
 	for h in b.hooks {
 		if h.type == T {
-			return h.read, true
+			return h, true
 		}
 	}
 	return

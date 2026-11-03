@@ -114,7 +114,7 @@ value_text :: proc(v: any) -> string {
 }
 
 @(private = "file")
-errors_agree :: proc(t: ^testing.T, want_in, got_in: core.Unmarshal_Error, text: string, loc: runtime.Source_Code_Location, shift := u64(0)) {
+errors_agree :: proc(t: ^testing.T, want_in, got_in: core.Typed_Error, text: string, loc: runtime.Source_Code_Location, shift := u64(0)) {
 	want, got := want_in, got_in
 	testing.expectf(t, want.kind == got.kind, "%s: kind %v, a document gives %v", text, want.kind, got.kind, loc = loc)
 	testing.expectf(t, want.at + (shift if want.kind != .None else 0) == got.at, "%s: at %v, a document gives %v", text, want.at, got.at, loc = loc)
@@ -128,13 +128,13 @@ errors_agree :: proc(t: ^testing.T, want_in, got_in: core.Unmarshal_Error, text:
 agree_as :: proc(t: ^testing.T, text: string, $S: json.Spec, init: $T, read := typed.Read_Options{}, plan_opts := typed.Plan_Options{}, loc := #caller_location) {
 	src := transmute([]u8)text
 	plan, perr := json.plan_make(T, plan_opts, context.temp_allocator)
-	testing.expect_value(t, perr.kind, core.Unmarshal_Error_Kind.None, loc = loc)
+	testing.expect_value(t, perr.kind, core.Typed_Error_Kind.None, loc = loc)
 	doc, built := json.build(src, S, {}, false, context.temp_allocator)
 	testing.expectf(t, built.kind == .None, "%s: build %v", text, built.kind, loc = loc)
 	a, b := init, init
 	by_text, by_doc := read, read
-	sink_a := typed.Collected{errors = make([dynamic]core.Unmarshal_Error, context.temp_allocator)}
-	sink_b := typed.Collected{errors = make([dynamic]core.Unmarshal_Error, context.temp_allocator)}
+	sink_a := typed.Collected{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
+	sink_b := typed.Collected{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
 	if read.collect != nil {
 		by_text.collect, by_doc.collect = &sink_a, &sink_b
 	}
@@ -276,7 +276,7 @@ unions_hooks_and_fields_read_alike :: proc(t: ^testing.T) {
 		v, w: Hex,
 		l:    []Hex,
 	}
-	hook := proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Unmarshal_Error_Kind) {
+	hook := proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind) {
 		if v.decoded == "bad" {
 			return .Out_Of_Range
 		}
@@ -284,7 +284,7 @@ unions_hooks_and_fields_read_alike :: proc(t: ^testing.T) {
 		return nil
 	}
 	hooks := typed.Plan_Options {
-		hooks = {{Hex, hook}},
+		hooks = {{type = Hex, read = hook}},
 	}
 	agree(t, `{"v":"a\n","w":{"k":[1]},"l":[12,[3],{}]}`, Hooked{}, plan_opts = hooks)
 	agree(t, `{"v":"bad"}`, Hooked{}, plan_opts = hooks)
@@ -326,14 +326,14 @@ a_collecting_read_reads_past_each_refusal :: proc(t: ^testing.T) {
 	testing.expect_value(t, built.kind, core.Document_Error_Kind.None)
 	plan, _ := json.plan_make(S, allocator = context.temp_allocator)
 	sink := typed.Collected {
-		errors = make([dynamic]core.Unmarshal_Error, context.temp_allocator),
+		errors = make([dynamic]core.Typed_Error, context.temp_allocator),
 	}
 	s: S
 	e := typed.unmarshal(&doc, core.ROOT, &s, &plan, {collect = &sink}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Unmarshal_Error_Kind.Wrong_Kind)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.errors), 3)
 	testing.expect_value(t, sink.errors[0].at, 5)
-	testing.expect_value(t, sink.errors[2].kind, core.Unmarshal_Error_Kind.Missing_Field)
+	testing.expect_value(t, sink.errors[2].kind, core.Typed_Error_Kind.Missing_Field)
 	testing.expect_value(t, len(s.l), 2)
 	testing.expect_value(t, s.l[0], 1)
 }
@@ -349,7 +349,7 @@ a_node_inside_a_document_reads_as_its_span :: proc(t: ^testing.T) {
 	for node in 0 ..< core.Node_Index(len(doc.nodes)) {
 		a, b: Pt
 		if doc.nodes[node].role == .Key {
-			testing.expect_value(t, typed.unmarshal(&doc, node, &b, &plan, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Bad_Option)
+			testing.expect_value(t, typed.unmarshal(&doc, node, &b, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
 			continue
 		}
 		span := core.span(&doc, node)
@@ -391,7 +391,7 @@ an_answer_reads_as_its_value :: proc(t: ^testing.T) {
 	testing.expect_value(t, kerr.kind, core.Path_Error_Kind.None)
 	root_plan, _ := json.plan_make(Root, allocator = context.temp_allocator)
 	whole: Root
-	testing.expect_value(t, typed.unmarshal(&kept, core.ROOT, &whole, &root_plan, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.None)
+	testing.expect_value(t, typed.unmarshal(&kept, core.ROOT, &whole, &root_plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, len(whole.items), 3)
 	testing.expect_value(t, whole.items[0].id, 1)
 	testing.expect_value(t, whole.items[2].id, 3)
@@ -401,7 +401,7 @@ an_answer_reads_as_its_value :: proc(t: ^testing.T) {
 	testing.expect_value(t, merr.kind, core.Path_Error_Kind.None)
 	v: Checked
 	testing.expect_value(t, len(miss.answers), 1)
-	testing.expect_value(t, typed.unmarshal(&miss, miss.answers[0], &v, &plan, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Bad_Option)
+	testing.expect_value(t, typed.unmarshal(&miss, miss.answers[0], &v, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
 }
 
 @(test)
@@ -412,22 +412,22 @@ a_document_read_refuses_what_a_text_read_refuses :: proc(t: ^testing.T) {
 	plan, _ := json.plan_make(Pt, allocator = context.temp_allocator)
 	other, _ := json.plan_make(Rich, allocator = context.temp_allocator)
 	p: Pt
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &other, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Plan_Mismatch)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &other, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Plan_Mismatch)
 	r: Rich
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &r, &plan, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Plan_Mismatch)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &r, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Plan_Mismatch)
 	other_format := core.Spelling{}
 	elsewhere, _ := typed.plan_make(Pt, &other_format, allocator = context.temp_allocator)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &elsewhere, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Plan_Mismatch)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, (^Pt)(nil), &plan, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Bad_Option)
-	testing.expect_value(t, typed.unmarshal(&doc, core.Node_Index(len(doc.nodes)), &p, &plan, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Bad_Option)
-	testing.expect_value(t, typed.unmarshal(&doc, core.NO_NODE, &p, &plan, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Bad_Option)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &plan, {refuse_duplicates = true}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Bad_Option)
-	testing.expect_value(t, typed.unmarshal(nil, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Bad_Option)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &elsewhere, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Plan_Mismatch)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, (^Pt)(nil), &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	testing.expect_value(t, typed.unmarshal(&doc, core.Node_Index(len(doc.nodes)), &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	testing.expect_value(t, typed.unmarshal(&doc, core.NO_NODE, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &plan, {refuse_duplicates = true}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	testing.expect_value(t, typed.unmarshal(nil, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
 	empty: core.Document
-	testing.expect_value(t, typed.unmarshal(&empty, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.Bad_Option)
+	testing.expect_value(t, typed.unmarshal(&empty, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
 	// Nothing was stored by a refusal at the start.
 	testing.expect_value(t, p, Pt{})
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Unmarshal_Error_Kind.None)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, p, Pt{1, 2})
 }
 
@@ -451,7 +451,7 @@ a_deep_document_uses_the_wide_stacks :: proc(t: ^testing.T) {
 	plan, _ := json.plan_make(Deep, allocator = context.temp_allocator)
 	d: Deep
 	e := typed.unmarshal(&doc, core.ROOT, &d, &plan, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Unmarshal_Error_Kind.None)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	n := 0
 	for p := &d; p != nil; p = p.d {
 		n += 1
@@ -485,12 +485,12 @@ a_read_borrows_the_source_and_not_the_document :: proc(t: ^testing.T) {
 	// Without `borrow_strings` nothing the target holds is the source's or the document's.
 	doc, _ := json.build(src, json.Spec.Json, allocator = context.temp_allocator)
 	copied: Holder
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &copied, &plan, {}, scratch).kind, core.Unmarshal_Error_Kind.None)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &copied, &plan, {}, scratch).kind, core.Typed_Error_Kind.None)
 	testing.expect(t, !inside(raw_data(copied.keys[0]), src) && !inside(raw_data(copied.s), src) && !inside(raw_data(string(copied.r)), src) && !inside(raw_data(string(copied.n)), src))
 
 	// With it, a string with nothing to decode is a slice of the source, and a decoded one is the read's.
 	borrowed: Holder
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &borrowed, &plan, {borrow_strings = true}, scratch).kind, core.Unmarshal_Error_Kind.None)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &borrowed, &plan, {borrow_strings = true}, scratch).kind, core.Typed_Error_Kind.None)
 	testing.expect(t, inside(raw_data(borrowed.keys[0]), src) && inside(raw_data(borrowed.s), src) && inside(raw_data(string(borrowed.r)), src) && inside(raw_data(string(borrowed.n)), src))
 	testing.expect(t, !inside(raw_data(borrowed.keys[1]), src))
 	for k, v in borrowed.m {

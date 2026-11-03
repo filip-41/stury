@@ -16,18 +16,18 @@ format gives. `core/typed` holds everything format-neutral and names no format.
 
 ```odin
 json.unmarshal :: proc {unmarshal_once, unmarshal_plan}
-unmarshal_once :: proc(src: []u8, $S: json.Spec, target: ^$T, read := typed.Read_Options{}, opts := json.Options{}, allocator := context.allocator) -> core.Unmarshal_Error
-unmarshal_plan :: proc(src: []u8, $S: json.Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := json.Options{}, allocator := context.allocator) -> core.Unmarshal_Error
+unmarshal_once :: proc(src: []u8, $S: json.Spec, target: ^$T, read := typed.Read_Options{}, opts := json.Options{}, allocator := context.allocator) -> core.Typed_Error
+unmarshal_plan :: proc(src: []u8, $S: json.Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := json.Options{}, allocator := context.allocator) -> core.Typed_Error
 
-json.plan_make  :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Unmarshal_Error)
-typed.plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := typed.Plan_Options{}, allocator := context.allocator) -> (p: typed.Plan, err: core.Unmarshal_Error)
+json.plan_make  :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error)
+typed.plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := typed.Plan_Options{}, allocator := context.allocator) -> (p: typed.Plan, err: core.Typed_Error)
 typed.plan_destroy :: proc(p: ^typed.Plan)
 
 dsv.unmarshal :: proc {unmarshal_once, unmarshal_plan}
-unmarshal_once :: proc(src: []u8, $S: dsv.Spec, target: ^$T, read := typed.Read_Options{}, opts := dsv.Options{}, allocator := context.allocator) -> core.Unmarshal_Error
-unmarshal_plan :: proc(src: []u8, $S: dsv.Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := dsv.Options{}, allocator := context.allocator) -> core.Unmarshal_Error
+unmarshal_once :: proc(src: []u8, $S: dsv.Spec, target: ^$T, read := typed.Read_Options{}, opts := dsv.Options{}, allocator := context.allocator) -> core.Typed_Error
+unmarshal_plan :: proc(src: []u8, $S: dsv.Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := dsv.Options{}, allocator := context.allocator) -> core.Typed_Error
 
-dsv.plan_make :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Unmarshal_Error)
+dsv.plan_make :: proc(T: typeid, spec: dsv.Spec, layout := dsv.Options{}, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error)
 ```
 
 `S` is `.Json`, `.Jsonc` or `.Json5`, or for dsv `.Csv`, `.Tsv` or `.Plain`, and `opts` the walk's own options, as for
@@ -37,8 +37,8 @@ A built document is read by one call for every format, in `core/typed`:
 
 ```odin
 typed.unmarshal :: proc {unmarshal_node, unmarshal_answer}
-unmarshal_node   :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Unmarshal_Error
-unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Unmarshal_Error
+unmarshal_node   :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error
+unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error
 ```
 
 See From a document below.
@@ -77,7 +77,7 @@ Item :: struct {
 
 - The value is `name,flag,flag`. `-` leaves the field out. An empty name keeps the field's own, renamed by
   `Plan_Options.rename`. In the name a backslash makes the next byte literal, so a comma is `\,` and a backslash `\\`.
-- `omitempty` is a writer's flag and is accepted. `required` makes an absent member `.Missing_Field`. `unknown` on a
+- `omitempty` is a writer's flag, see `docs/writer.md`, and a read accepts it and does nothing with it. `required` makes an absent member `.Missing_Field`. `unknown` on a
   `map[string]Raw` field captures every member the type does not name. Any other flag is `.Bad_Tag`.
 - An absent member keeps what the target holds. That is how defaults work: fill the target, then read.
 - `Read_Options.unknown` is `.Ignore` or `.Refuse`, which makes a member the type does not name `.Unknown_Field`.
@@ -136,8 +136,8 @@ allocator for any text not trusted to be free of repeats.
 ## Refusal
 
 ```odin
-Unmarshal_Error :: struct {
-	kind:      Unmarshal_Error_Kind,
+Typed_Error :: struct {
+	kind:      Typed_Error_Kind,
 	truncated: bool,
 	n_steps:   u8,
 	at:        u64,
@@ -149,7 +149,8 @@ Unmarshal_Error :: struct {
 `at` is the value's byte, a string's opening quote for a string. `steps[:n_steps]` is the path from the target, the
 innermost `MAX_ERROR_STEPS` (8) when `truncated` says more were cut. `.Walk` holds the walk's fault in `inner`. A step's
 name lives as long as `src` or the plan, or, for a decoded key, as long as `context.temp_allocator`'s block.
-`core.render` and `core.write_code` take the error, as they do every other error of the library.
+`core.render` and `core.write_code` take the error, as they do every other error of the library. A write returns the same
+type, see `writer.md`.
 
 | Kind | Means |
 |---|---|
@@ -172,7 +173,7 @@ otherwise not a contract.
 
 ```odin
 Collected :: struct {
-	errors:     [dynamic]core.Unmarshal_Error,
+	errors:     [dynamic]core.Typed_Error,
 	max_errors: int,  // 100 for 0
 	truncated:  bool, // set past max_errors
 }
@@ -185,8 +186,8 @@ error is the first refusal. The caller frees `errors`, which uses its own alloca
 ## From a document
 
 `typed.unmarshal` reads the value at a node, or the node a `.Found` answer names, with the plan and rules of a read of
-a text: the same fields, tags, refusals, `Unmarshal_Error` and sinks, and the same value for the same text. An
-`Unmarshal_Error`'s `at` is a byte of `doc.src`, whichever node was read. It is one call across formats. A format gives
+a text: the same fields, tags, refusals, `Typed_Error` and sinks, and the same value for the same text. An
+`Typed_Error`'s `at` is a byte of `doc.src`, whichever node was read. It is one call across formats. A format gives
 it nothing but the `Spelling` its document holds.
 
 - The plan must be built for the type of `target` and the document's `Spelling`, else `.Plan_Mismatch`.
@@ -226,8 +227,9 @@ Hook_Value :: struct {
 	text:    string, // the value as the format spells it
 	decoded: string, // a string's text decoded, `text` for any other kind
 }
-Unmarshal_Hook :: #type proc(v: Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Unmarshal_Error_Kind)
-Type_Hook :: struct { type: typeid, read: Unmarshal_Hook }
+Unmarshal_Hook :: #type proc(v: Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind)
+Marshal_Hook :: #type proc(v: rawptr, allocator: runtime.Allocator) -> (stand_in: any, refuse: core.Typed_Error_Kind)
+Type_Hook :: struct { type: typeid, read: Unmarshal_Hook, write: Marshal_Hook }
 ```
 
 A hook reads one whole value of its type, containers included. `dest` holds what the target held. `text` and `decoded`

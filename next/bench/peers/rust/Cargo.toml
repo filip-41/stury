@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 sonic-rs = "0.5.10"
+serde = { version = "1", features = ["derive"] }
+# preserve_order keeps a document's keys in source order, as every other arm writes them. float_roundtrip makes the
+# fixture's decimals read to the nearest double, so every arm writes the same values.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
 [profile.release]
 lto = "fat"

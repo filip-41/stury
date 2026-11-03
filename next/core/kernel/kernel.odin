@@ -7,8 +7,9 @@ import "core:simd"
 
 // Format-neutral kernels that work on 64-byte blocks: load a block, load the last partial block padded with zeros,
 // compare bytes, sort bytes into sets, pack per-byte masks to one bit per byte, find the bytes an escape escapes,
-// find the first set lane of a 16-byte mask, and validate UTF-8 (utf8.odin). arm64.odin and lanes64.odin hold the
-// per-architecture operations. Kernels whose instructions differ by CPU take a `Tier` as `$T` (amd64.odin,
+// find the first set lane of a 16-byte mask, gather the lanes a mask keeps (compress.odin), and validate UTF-8
+// (utf8.odin). arm64.odin and lanes64.odin hold the per-architecture operations. Kernels whose instructions differ by
+// CPU take a `Tier` as `$T` (amd64.odin,
 // single_tier.odin).
 
 // 64 input bytes, or the 64 lane masks (0x00 or 0xFF) made from them, as four 16-byte vectors. lanes64.odin
@@ -22,6 +23,24 @@ Block :: [4]#simd[16]u8
 V :: #simd[16]u8
 @(private)
 W :: #simd[64]u8
+
+// The mask a load at `16 - n` gives: `n` lanes of 0xFF, then zeros.
+@(private, rodata)
+LIVE_LANES := [32]u8{0 ..< 16 = 0xFF, 16 ..< 32 = 0}
+
+// Loads the 16 bytes at `src` in one instruction, with the mask of the first `n` lanes, `n` below 16. It is not `ok` when
+// the load could cross a 4096-byte page boundary from `src`'s first byte, for a nil `src`, and under the address
+// sanitizer. The lanes past `n` hold whatever follows `src` in its page.
+head16 :: #force_inline proc "contextless" (src: [^]u8, n: int) -> (v, live: V, ok: bool) #no_bounds_check {
+	when .Address in ODIN_SANITIZER_FLAGS {
+		return
+	} else {
+		if (uintptr(src) - 1) & 4095 >= 4080 {
+			return
+		}
+		return intrinsics.unaligned_load((^V)(src)), intrinsics.unaligned_load((^V)(&LIVE_LANES[16 - n])), true
+	}
+}
 
 // Returns the bytes of `src` from `lo` to `len(src)` copied into a zeroed 64-byte buffer and loaded as a `Block`.
 // `load_padded` uses it where no masked load exists.

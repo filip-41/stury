@@ -58,3 +58,62 @@ The peers run only on plain `.json`. Any other fixture is timed for `next` alone
 `bench/typed` reads `logs.json`, `twitter.json`, `citm_catalog.json`, `table.csv` and `text.csv` into their own struct
 types, in an arena, with strings borrowed and with strings copied. `bench/typed.py` prints each lane's median GB/s, the best of `ROUNDS` rounds,
 beside the old tree's probe, which `compare/typed_oracle/build.sh` builds, each string mode a program of its own.
+
+## Write lanes
+
+`bench/write.py` times the other libraries' writers, and next's writer once `bench/write/` exists. Run from `next/`:
+
+```sh
+make bench-write                       # every lane
+make bench-write LANES="doc" ROUNDS=3  # the lanes named, three rounds
+```
+
+It builds the peers as `bench-doc` does, builds next's probe from `bench/write/` when that directory is there, and
+runs the lanes. The rounds interleave the arms, and each cell is the best round of an arm's median of ten calls after
+two warm-ups. The runner holds `build/bench/timing.lock` and caps each child at 1 GB of live RSS.
+
+| lane | job | fixtures | GB/s counts |
+|---|---|---|---|
+| `typed` | a struct value to compact text | `logs`, `twitter`, `citm_catalog`, `canada`, `nested`, `wide` | the output's bytes |
+| `typed_pretty` | the same, two-space pretty | the same | the output's bytes |
+| `doc` | a parsed document to compact text | `logs`, `twitter`, `citm_catalog`, `canada`, `pretty`, `utf8`, `escape`, `longtext` | the source's bytes |
+| `doc_pretty` | the same, two-space pretty | the same | the source's bytes |
+
+Reading the fixture into the value, or into the document, is outside the clock. Each call's text and document are
+freed outside it too.
+
+### Arms
+
+Each arm does the job the way its library does it fastest, and writes to a buffer that the arm sized once or that the
+library allocates once.
+
+| arm | typed | document |
+|---|---|---|
+| `yy` (yyjson 0.13) | builds a mutable document from C structs with borrowed strings, then `yyjson_mut_write_opts`. The build is inside the clock, since yyjson writes no struct without a document. | `yyjson_write_opts` of the read document, `YYJSON_WRITE_PRETTY_TWO_SPACES` for pretty |
+| `simd` (simdjson) | none: its typed writer needs C++26 reflection | `simdjson::to_string` of a DOM element, compact only. The parser keeps numbers as text, as `bench-doc`'s does, so `escape.json` parses. |
+| `simd_min` | none | `simdjson::minify` of the source text. It reads no values and is not checked against the others. |
+| `sonic` (sonic-rs) | `sonic_rs::to_writer` and `to_writer_pretty` of a serde struct | the same, of a `sonic_rs::Value`, which keeps string and number text as read |
+| `serde` (serde_json) | `serde_json::to_writer` and `to_writer_pretty` of the same struct | the same, of a `serde_json::Value` with `preserve_order` |
+| `next` | `bench/write/` | `bench/write/` |
+
+The Rust structs in `peers/rust/src/bin/write.rs` and the C structs in `peers/yy_bench.c` carry the same fields, in
+the same order, so the typed arms write the same text. `twitter` and `citm_catalog` keep a subset of the source's
+fields, so their output is smaller than the source. A JSON object of any keys is a list of pairs in source order
+(`citm_catalog`'s maps, `wide`). `serde_json` reads its numbers with `float_roundtrip`, so every arm writes the same
+doubles.
+
+An arm that has no writer for a lane is left out of that lane and shows `-`.
+
+### Agreement
+
+Arms that write the same job must write the same text. Each prints `check=`, an FNV-1a hash of its output, and the
+runner stops when they differ. `nested.json` and `escape.json` are the exceptions, since each library spells an
+exponent, an escape or a very large integer its own way, and the runner times them without the check.
+
+### Where next's arm goes
+
+next's probe is `bench/write/`, an Odin package built to `build/bench/write`. Its command line is `write MODE FILE
+[pretty]`, with MODE `typed` or `doc`. It prints one line of `gb_per_s=`, `ns=`, `out=` and `check=`, with the
+timing protocol of the other arms and `check` the FNV-1a hash of the output text. `typed` reads the fixture into the
+types of the file named, as the Rust and C arms do. Until the package exists, `make bench-write` names `next` as left
+out and `write.py` runs the peers alone.

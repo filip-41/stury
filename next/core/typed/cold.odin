@@ -16,7 +16,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Reg
 	fld := field_at(regs.b)
 	dest := uintptr(regs.c) + uintptr(fld.offset)
 	m := &h.plan.meta[fld.meta]
-	reason: core.Unmarshal_Error_Kind
+	reason: core.Typed_Error_Kind
 	#partial switch fld.kind {
 	case .Inside:
 		if t.kind == .Map || t.kind == .Array {
@@ -206,7 +206,7 @@ on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.
 
 // The arm a value picks: an object's by its tag member, any value's by its class.
 @(private)
-pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core.Unmarshal_Error_Kind, fault: core.Fault) {
+pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core.Typed_Error_Kind, fault: core.Fault) {
 	if t.kind == .Map && m.tagged {
 		s := h.find_tag(h, t.lo)
 		// A text that breaks past the tag is the walk's to report, not a missing tag's.
@@ -254,7 +254,7 @@ pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core
 }
 
 // Stores a value read whole, `lo..hi` of the text.
-store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64, t: core.Token) -> core.Unmarshal_Error_Kind {
+store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core.Kind, lo, hi: u64, t: core.Token) -> core.Typed_Error_Kind {
 	if fld.kind == .Raw {
 		return store_span(h, lo, hi - lo, (^string)(dest))
 	}
@@ -265,6 +265,9 @@ store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core
 		if v.decoded, ok = token_text(h, t, context.temp_allocator); !ok {
 			return .Out_Of_Memory
 		}
+	}
+	if m.read == nil {
+		return .Unsupported
 	}
 	return m.read(v, rawptr(dest), context.allocator).? or_else .None
 }
@@ -283,7 +286,7 @@ close_whole :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, back: c
 
 // A slice of `src`, or its copy when the read copies.
 @(private)
-store_span :: #force_inline proc(h: ^Reader, lo, n: u64, dest: ^string) -> core.Unmarshal_Error_Kind {
+store_span :: #force_inline proc(h: ^Reader, lo, n: u64, dest: ^string) -> core.Typed_Error_Kind {
 	s := string(h.base[lo:][:n])
 	if h.borrow {
 		dest^ = s
@@ -294,7 +297,7 @@ store_span :: #force_inline proc(h: ^Reader, lo, n: u64, dest: ^string) -> core.
 
 // A copy of `s`, with an empty one needing no allocation.
 @(private)
-store_copy :: #force_inline proc(s: string, dest: ^string) -> core.Unmarshal_Error_Kind {
+store_copy :: #force_inline proc(s: string, dest: ^string) -> core.Typed_Error_Kind {
 	if len(s) == 0 {
 		dest^ = ""
 		return .None
@@ -308,7 +311,7 @@ store_copy :: #force_inline proc(s: string, dest: ^string) -> core.Unmarshal_Err
 	return .None
 }
 
-store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Unmarshal_Error_Kind {
+store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind {
 	if t.kind == .Null {
 		(^cstring)(dest)^ = nil
 		return .None
@@ -324,7 +327,7 @@ store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Unmarsha
 }
 
 @(private)
-copy_cstring :: proc(s: string, dest: uintptr) -> core.Unmarshal_Error_Kind {
+copy_cstring :: proc(s: string, dest: uintptr) -> core.Typed_Error_Kind {
 	if strings.index_byte(s, 0) >= 0 {
 		return .Out_Of_Range
 	}
@@ -344,7 +347,7 @@ read_number :: proc(h: ^Reader, t: core.Token) -> core.Number {
 }
 
 @(private)
-store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Unmarshal_Error_Kind {
+store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Error_Kind {
 	#partial switch t.kind {
 	case .Null:
 		dest^ = Null{}
@@ -389,7 +392,7 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Unmarsha
 
 // A scalar into an `any`: a null as nil, any other as its `Scalar` arm, boxed.
 @(private)
-store_any :: proc(h: ^Reader, t: core.Token, dest: ^any) -> core.Unmarshal_Error_Kind {
+store_any :: proc(h: ^Reader, t: core.Token, dest: ^any) -> core.Typed_Error_Kind {
 	dest^ = nil
 	if t.kind == .Null {
 		return .None
@@ -410,7 +413,7 @@ store_any :: proc(h: ^Reader, t: core.Token, dest: ^any) -> core.Unmarshal_Error
 }
 
 // A name or, under `.Int`, a backing integer into an enum of `size` bytes.
-store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, dest: uintptr, size: u32) -> core.Unmarshal_Error_Kind {
+store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, dest: uintptr, size: u32) -> core.Typed_Error_Kind {
 	if h.plan.enums == .Int {
 		if t.kind != .Number {
 			return .Wrong_Kind
@@ -432,7 +435,7 @@ store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, des
 }
 
 @(private)
-enum_name_store :: proc(info: ^runtime.Type_Info_Enum, name: string, dest: uintptr, size: u32) -> core.Unmarshal_Error_Kind {
+enum_name_store :: proc(info: ^runtime.Type_Info_Enum, name: string, dest: uintptr, size: u32) -> core.Typed_Error_Kind {
 	for member, i in info.names {
 		if member == name {
 			write_uint(dest, u64(info.values[i]), size)
@@ -442,7 +445,7 @@ enum_name_store :: proc(info: ^runtime.Type_Info_Enum, name: string, dest: uintp
 	return .Not_A_Member
 }
 
-store_enum_value :: proc(info: ^runtime.Type_Info_Enum, v: i64, dest: uintptr, size: u32) -> core.Unmarshal_Error_Kind {
+store_enum_value :: proc(info: ^runtime.Type_Info_Enum, v: i64, dest: uintptr, size: u32) -> core.Typed_Error_Kind {
 	for value in info.values {
 		if i64(value) == v {
 			write_uint(dest, u64(v), size)
@@ -476,7 +479,7 @@ integer_number :: proc(h: ^Reader, t: core.Token) -> core.Number {
 
 // An integer token as an i64.
 @(private)
-number_i64 :: proc(h: ^Reader, t: core.Token) -> (v: i64, reason: core.Unmarshal_Error_Kind) {
+number_i64 :: proc(h: ^Reader, t: core.Token) -> (v: i64, reason: core.Typed_Error_Kind) {
 	n := integer_number(h, t)
 	#partial switch n.kind {
 	case .Int:
@@ -489,9 +492,9 @@ number_i64 :: proc(h: ^Reader, t: core.Token) -> (v: i64, reason: core.Unmarshal
 
 // One element of a bit_set: a member's name, or an integer of its range or a member's.
 @(private)
-store_bit :: proc(h: ^Reader, t: core.Token, m: ^Meta, dest: uintptr) -> core.Unmarshal_Error_Kind {
+store_bit :: proc(h: ^Reader, t: core.Token, m: ^Meta, dest: uintptr) -> core.Typed_Error_Kind {
 	v: i64
-	reason: core.Unmarshal_Error_Kind
+	reason: core.Typed_Error_Kind
 	if m.enum_info != nil {
 		reason = store_enum(h, t, m.enum_info, uintptr(&v), 8)
 	} else if t.kind != .Number {
@@ -511,7 +514,7 @@ store_bit :: proc(h: ^Reader, t: core.Token, m: ^Meta, dest: uintptr) -> core.Un
 }
 
 @(private)
-store_int :: #force_no_inline proc "contextless" (mag: u64, neg: bool, kind: Read_Kind, dest: uintptr) -> core.Unmarshal_Error_Kind {
+store_int :: #force_no_inline proc "contextless" (mag: u64, neg: bool, kind: Read_Kind, dest: uintptr) -> core.Typed_Error_Kind {
 	signed := kind >= .I8 && kind <= .I64
 	bits := u32(8) << (u32(kind) - u32(Read_Kind.I8 if signed else Read_Kind.U8))
 	if signed {
@@ -533,7 +536,7 @@ store_int :: #force_no_inline proc "contextless" (mag: u64, neg: bool, kind: Rea
 // Every number the hot cases do not take, read from its span.
 @(cold)
 @(private)
-number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Unmarshal_Error_Kind {
+number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind {
 	context = h.ctx
 	if fld.kind >= .I8 && fld.kind <= .U64 {
 		if core.number_shape(t.spelling) >= 32 {
@@ -548,7 +551,7 @@ number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, f
 }
 
 // Stores a number read from its span.
-store_number :: proc(n: core.Number, h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Unmarshal_Error_Kind {
+store_number :: proc(n: core.Number, h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind {
 	if fld.kind >= .I8 && fld.kind <= .U64 {
 		switch n.kind {
 		case .Int, .Uint:
@@ -600,7 +603,7 @@ spelled_number :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 	context = h.ctx
 	regs := regs
 	if regs.c >= regs.a {
-		reason: core.Unmarshal_Error_Kind
+		reason: core.Typed_Error_Kind
 		regs, reason = grow_list(h, regs)
 		if reason != .None {
 			return refuse_element(h, regs, t, reason)
@@ -897,7 +900,7 @@ first_keys :: proc(h: ^Reader, f: ^Frame) -> ^map[string]struct {} {
 }
 
 // The zeroed value slot of map key `key`, spelled as the map's key type reads it.
-map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: core.Token) -> (slot: rawptr, reason: core.Unmarshal_Error_Kind) {
+map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: core.Token) -> (slot: rawptr, reason: core.Typed_Error_Kind) {
 	if raw.allocator.procedure == nil {
 		raw.allocator = context.allocator
 	}
@@ -948,7 +951,7 @@ key_number :: proc(key: string) -> (core.Number, bool) {
 
 // Stores a number that reads as `.Int` or `.Uint`.
 @(private)
-store_integer :: proc(n: core.Number, kind: Read_Kind, dest: uintptr) -> core.Unmarshal_Error_Kind {
+store_integer :: proc(n: core.Number, kind: Read_Kind, dest: uintptr) -> core.Typed_Error_Kind {
 	if n.kind == .Uint {
 		return store_int(n.bits, false, kind, dest)
 	}

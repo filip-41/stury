@@ -16,7 +16,7 @@ Raw_T :: typed.Raw
 Digits_T :: typed.Number_Text
 Decoded_T :: typed.Scalar
 
-hex_read :: proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Unmarshal_Error_Kind) {
+hex_read :: proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind) {
 	if len(v.decoded) == 0 {
 		return .Out_Of_Range
 	}
@@ -53,9 +53,9 @@ rd :: proc(src: []u8, d: ^$T, a: runtime.Allocator) -> bool {
 			opts = {union_tag = "type", tag_names = {{Tag_B, "b"}}}
 		}
 		when T == Hooked {
-			opts = {hooks = {{Hex, hex_read}}}
+			opts = {hooks = {{type = Hex, read = hex_read}}}
 		}
-		err: core.Unmarshal_Error
+		err: core.Typed_Error
 		plan, err = json.plan_make(T, opts)
 		if err.kind != .None {
 			fmt.println("PLAN", err.kind)
@@ -80,12 +80,12 @@ rd_cells :: proc(src: []u8, d: ^$T, a: runtime.Allocator) -> bool {
 	@(static) read: typed.Read_Options
 	@(static) opts: dsv.Options
 	if !made {
-		po := typed.Plan_Options{hooks = {{Hex, hex_read}}}
+		po := typed.Plan_Options{hooks = {{type = Hex, read = hex_read}}}
 		if env("ORACLE_ENUMS") != "" {
 			po.enums = .Int
 		}
-		err: core.Unmarshal_Error
-		plan, err = dsv.plan_make(T, po)
+		err: core.Typed_Error
+		plan, err = dsv.plan_make(T, .Csv, opts = po)
 		if err.kind != .None {
 			fmt.println("PLAN", err.kind)
 			os.exit(2)
@@ -98,7 +98,7 @@ rd_cells :: proc(src: []u8, d: ^$T, a: runtime.Allocator) -> bool {
 		opts.no_header = env("ORACLE_NO_HEADER") != ""
 		made = true
 	}
-	e: core.Unmarshal_Error
+	e: core.Typed_Error
 	switch env("ORACLE_SPEC") {
 	case "tsv": e = dsv.unmarshal(src, .Tsv, d, &plan, read, opts, a)
 	case "plain": e = dsv.unmarshal(src, .Plain, d, &plan, read, opts, a)

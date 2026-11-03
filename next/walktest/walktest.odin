@@ -680,6 +680,36 @@ failing_allocator :: proc(f: ^Failing_Alloc) -> runtime.Allocator {
 	return {procedure = failing_alloc, data = f}
 }
 
+// A write `sweep_write` runs: the text under `allocator`, or why it has none.
+Write_Try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind)
+
+// Fails each allocation of a write in turn, then that one and every later one, on the output's allocator and on
+// `context.allocator`. A write gives `want` or `.Out_Of_Memory`, whatever fails, and the test's tracker sees a leak.
+sweep_write :: proc(t: ^testing.T, try: Write_Try, data: rawptr, want: string, loc := #caller_location) {
+	for on_context in ([?]bool{false, true}) {
+		for hold in ([?]bool{false, true}) {
+			for at := 0;; at += 1 {
+				f := Failing_Alloc{inner = context.allocator, fail_at = at, fail_on = hold}
+				text: []u8
+				kind: core.Typed_Error_Kind
+				if on_context {
+					inner := context.allocator
+					context.allocator = failing_allocator(&f)
+					text, kind = try(data, inner)
+				} else {
+					text, kind = try(data, failing_allocator(&f))
+				}
+				fine := kind == .Out_Of_Memory && len(text) == 0 || kind == .None && string(text) == want
+				testing.expectf(t, fine, "allocation %d, later ones too %v, on the context %v: %v %q", at, hold, on_context, kind, text, loc = loc)
+				delete(text)
+				if f.n <= at {
+					break
+				}
+			}
+		}
+	}
+}
+
 // Reads `src` as a built document under the spec a caller passes as `spec`.
 Build :: proc(src: []u8, spec: any) -> (core.Document, core.Document_Error)
 

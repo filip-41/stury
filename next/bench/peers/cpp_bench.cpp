@@ -16,6 +16,9 @@
 //   simd_dom_read          simdjson DOM, then a visit of every value (string lengths, numbers, bools, nulls)
 //   simd_key               the first object's first key, then one at_key of it per object
 //   simd_get KEY           On-Demand find_field of one root key, and the value's raw text
+//   simd_minify            simdjson::minify of the text, which does not read the text's values
+//   simd_doc_write         simdjson::to_string of a parsed DOM element, compact
+// The write lanes count the source's bytes. simdjson has no pretty writer, and its typed writer needs C++26 reflection.
 using clk = std::chrono::steady_clock;
 using simdjson::error_code;
 using simdjson::SUCCESS;
@@ -359,8 +362,47 @@ static int simd_key_job(const simdjson::padded_string& in) {
                                       " objects=" + std::to_string(objects) + " key=" + key_copy);
 }
 
+static uint64_t fnv_all(const char* p, size_t n) { return fnv_bytes(CHECK_OFFSET, p, n); }
+
 static int run_job(const std::string& buffer, const std::string& job) {
     simdjson::padded_string in(buffer);
+    if (job == "simd_minify") {
+        std::vector<char> out(in.size());
+        size_t out_len = 0;
+        int64_t ns = median_ns([&]() -> int64_t {
+            auto t0 = clk::now();
+            error_code e = simdjson::minify(in.data(), in.size(), out.data(), out_len);
+            keep(out);
+            int64_t d = since(t0);
+            if (e) {
+                std::cerr << "simdjson minify failed: " << e << std::endl;
+                return -1;
+            }
+            return d;
+        });
+        return report(in.size(), ns, "out=" + std::to_string(out_len) + " check=" + std::to_string(fnv_all(out.data(), out_len)));
+    }
+    if (job == "simd_doc_write") {
+        simdjson::dom::parser parser;
+        // As simd_dom reads, so a number too big for 64 bits stays as text instead of failing the parse.
+        parser.number_as_string(true);
+        simdjson::dom::element root;
+        if (error_code e = parser.parse(in).get(root)) {
+            std::cerr << "simdjson dom parse failed: " << e << std::endl;
+            return 1;
+        }
+        std::string out;
+        int64_t ns = median_ns([&]() -> int64_t {
+            auto t0 = clk::now();
+            std::string text = simdjson::to_string(root);
+            keep(text);
+            int64_t d = since(t0);
+            // The previous call's text is freed outside the clock, as the other arms free theirs.
+            out = std::move(text);
+            return d;
+        });
+        return report(in.size(), ns, "out=" + std::to_string(out.size()) + " check=" + std::to_string(fnv_all(out.data(), out.size())));
+    }
     if (job == "simd_dom") {
         simdjson::dom::parser parser;
         parser.number_as_string(true);

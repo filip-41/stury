@@ -28,7 +28,7 @@ Document_Cells :: struct {
 }
 
 @(private)
-document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Unmarshal_Error {
+document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
 	root := node == core.ROOT
 	if !root && doc.nodes[node].kind <= .Plain {
 		return {kind = .Unsupported}

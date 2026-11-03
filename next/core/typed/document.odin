@@ -21,12 +21,12 @@ import build "../build"
 // `refuse_duplicates`.
 unmarshal :: proc {unmarshal_node, unmarshal_answer}
 
-unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Unmarshal_Error {
+unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
 	return read_document(doc, node, typeid_of(T), target, plan, read, allocator)
 }
 
 // Reads the value a path found. An answer that is not `.Found` holds no value, and is `.Bad_Option`.
-unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Unmarshal_Error {
+unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
 	if answer.outcome != .Found {
 		return {kind = .Bad_Option}
 	}
@@ -43,7 +43,7 @@ Document_Read :: struct {
 }
 
 @(private)
-read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Unmarshal_Error {
+read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
 	if doc == nil || doc.spelling == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key || read.refuse_duplicates {
 		return {kind = .Bad_Option}
 	}

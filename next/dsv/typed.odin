@@ -17,8 +17,10 @@ import typed "../core/typed"
 // refusal leaves everything the read allocated reachable from `target`.
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
-// Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows.
-plan_make :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Unmarshal_Error) {
+// Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows. A write
+// by the plan is of spec `spec` with the delimiter, comment byte, `no_header` and `crlf` of `layout`, and `.Bad_Option`
+// when the spec cannot spell them. A read takes its spec and options at the call.
+plan_make :: proc(T: typeid, spec: Spec, layout := Options{}, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
 	plan, err := typed.plan_make(T, &SPELLING, opts, allocator)
 	if err.kind != .None {
 		return plan, err
@@ -27,13 +29,19 @@ plan_make :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.
 		typed.plan_destroy(&plan)
 		return {}, err
 	}
+	if !layout_ok(spec, layout) {
+		typed.plan_destroy(&plan)
+		return {}, {kind = .Bad_Option}
+	}
+	plan.layout = {u8(spec), layout.delimiter, layout.comment, u8(layout.no_header), u8(layout.crlf)}
+	plan.marshal = marshal_text
 	plan.node_read = document_read
 	return plan, {}
 }
 
 @(private)
-unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Unmarshal_Error {
-	plan, err := plan_make(T, allocator = context.temp_allocator)
+unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
+	plan, err := plan_make(T, S, allocator = context.temp_allocator)
 	if err.kind != .None {
 		return err
 	}
@@ -42,7 +50,7 @@ unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Opti
 }
 
 @(private)
-unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Unmarshal_Error {
+unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
 	// Only `plan_make` checks that a type is a list of rows of cells.
 	if plan != nil && plan.node_read == nil {
 		return {kind = .Plan_Mismatch}
@@ -348,7 +356,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 			return next, .Next
 		}
 	}
-	reason: core.Unmarshal_Error_Kind
+	reason: core.Typed_Error_Kind
 	if map_row {
 		f := &h.r.frames[h.r.sp - 1]
 		quotes := u64(col.key.spelling >> 1 & 1)
@@ -393,7 +401,7 @@ inner_text :: #force_inline proc "contextless" (h: ^Cells, t: core.Token) -> str
 // Reads a present cell into the field `fld` at `dest`. A number and a bool read the cell's bytes, since what decodes to
 // other bytes spells neither. The rest read as a string token, whose text `Spelling.text` gives.
 @(private)
-read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) -> core.Unmarshal_Error_Kind {
+read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind {
 	m := &h.r.plan.meta[fld.meta]
 	cell := t
 	cell.kind = .String
@@ -511,7 +519,7 @@ bind_columns :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_
 }
 
 @(private)
-refuse_header :: proc(h: ^Cells, regs: core.Hook_Regs, kind: core.Unmarshal_Error_Kind, at: u64, name: string) -> core.Action {
+refuse_header :: proc(h: ^Cells, regs: core.Hook_Regs, kind: core.Typed_Error_Kind, at: u64, name: string) -> core.Action {
 	_, action := typed.refuse(&h.r, regs, {kind = kind, at = at, steps = {0 = core.Name(name)}, n_steps = 1})
 	return .Stop if action == .Stop else .Next
 }
@@ -631,7 +639,7 @@ fault_position :: proc(h: ^Cells, regs: ^core.Hook_Regs) {
 // Refuses a type no text can read: a root that is no list of rows, or a row or cell of a kind this format has no
 // spelling for.
 @(private)
-rows_supported :: proc(plan: ^typed.Plan) -> core.Unmarshal_Error {
+rows_supported :: proc(plan: ^typed.Plan) -> core.Typed_Error {
 	root := typed.field_at(u64(uintptr(plan.root)))
 	if root.kind != .Slice && root.kind != .Dynamic {
 		return {kind = .Unsupported}

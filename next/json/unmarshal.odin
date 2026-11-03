@@ -9,12 +9,14 @@ import typed "../core/typed"
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
 // Builds the plan of `T` for JSON's spelling, as `typed.plan_make` does.
-plan_make :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Unmarshal_Error) {
-	return typed.plan_make(T, &SPELLING, opts, allocator)
+plan_make :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
+	plan, err := typed.plan_make(T, &SPELLING, opts, allocator)
+	plan.marshal = marshal_text
+	return plan, err
 }
 
 @(private)
-unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Unmarshal_Error {
+unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
 	plan, err := plan_make(T, allocator = context.temp_allocator)
 	if err.kind != .None {
 		return err
@@ -24,7 +26,7 @@ unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Opti
 }
 
 @(private)
-unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Unmarshal_Error {
+unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
 	if read.refuse_duplicates {
 		doc, built := build(src, S, opts, true, context.temp_allocator)
 		if built.kind == .Walk {

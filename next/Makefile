@@ -1,13 +1,15 @@
 ODIN ?= $(or $(wildcard $(abspath ../../Odin-master/bin/odin)),odin)
 
 # The library packages, and the test packages that read them.
-LIB_PKGS  := core/spell core core/kernel core/compose core/build core/typed json dsv
-TEST_PKGS := core/kernel/test core/test json/test dsv/test
+LIB_PKGS  := core/spell core core/kernel core/compose core/build core/typed core/write json dsv
+TEST_PKGS := core/spell/test core/kernel/test core/test core/write/test json/test dsv/test
 # The packages the tests share, checked by `lint` and built through their imports.
 SUPPORT_PKGS := walktest
 # The test packages that read `-define:TIER`.
 TIER_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
+# A leak or a bad free fails the test that made it.
+TEST_MEMORY := -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 BUILD     := build
 
 # One target per compile, so `make -j` builds the tests in parallel and each compile writes its own binary.
@@ -20,7 +22,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: check gate test test-x86 test-asan lint bench bench-doc bench-paths bench-typed fixtures size surface \
+.PHONY: check gate test test-x86 test-asan test-f32 lint bench bench-doc bench-paths bench-typed bench-write fixtures size surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(X86_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
@@ -51,12 +53,12 @@ test: $(TEST_TARGETS)
 $(TEST_MINIMAL): $(BUILD)/test/minimal/%:
 	@mkdir -p $(@D)
 	@echo "== $* (-o:minimal)"
-	@$(ODIN) test $* $(TEST_OPT) -out:$@ || { echo "== $* (-o:minimal) failed"; exit 1; }
+	@$(ODIN) test $* $(TEST_OPT) $(TEST_MEMORY) -out:$@ || { echo "== $* (-o:minimal) failed"; exit 1; }
 
 $(TEST_SPEED): $(BUILD)/test/speed/%:
 	@mkdir -p $(@D)
 	@echo "== $* (-o:speed)"
-	@$(ODIN) test $* -o:speed -out:$@ || { echo "== $* (-o:speed) failed"; exit 1; }
+	@$(ODIN) test $* -o:speed $(TEST_MEMORY) -out:$@ || { echo "== $* (-o:speed) failed"; exit 1; }
 
 # The x86-64 tiers v2 and v3 in a build for Odin's default CPU, as a caller's build is, at -o:none, where no kernel
 # is inlined into the tier's procedures, and at -o:speed. TIER picks the kernels' tier and WALK_TIER the walks'.
@@ -70,6 +72,13 @@ $(X86_TARGETS): $(BUILD)/test/x86/%:
 	echo "== $$p (x86 tier $$t -o:$$o)"; \
 	$(ODIN) test $$p -o:$$o -target:darwin_amd64 -define:WALK_TIER=$$t \
 		$(if $(filter %/kernel/test,$*),-define:TIER=$$t) -out:$@ || { echo "== $$p (x86 tier $$t -o:$$o) failed"; exit 1; }
+
+# Every binary32 pattern read back and checked shortest, on F32_THREADS threads at -o:speed, which the gate's full tier runs.
+F32_THREADS ?= 6
+test-f32:
+	@mkdir -p $(BUILD)/test/f32
+	$(ODIN) test core/spell/test -o:speed -define:F32_STRIDE=1 -define:F32_THREADS=$(F32_THREADS) \
+		-define:ODIN_TEST_NAMES=spell_tests.f32_exhaustive -out:$(BUILD)/test/f32/spell
 
 test-asan: $(ASAN_TARGETS)
 
@@ -87,6 +96,7 @@ lint:
 	$(ODIN) check bench/doc $(LINT_FLAGS)
 	$(ODIN) check bench/editbench $(LINT_FLAGS)
 	$(ODIN) check bench/paths $(LINT_FLAGS)
+	$(ODIN) check bench/write $(LINT_FLAGS)
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for p in $(TIER_PKGS); do for o in none speed; do \
 		echo "== $$p (linux_amd64 v4 -o:$$o)"; \
@@ -130,6 +140,27 @@ bench-typed:
 	@mkdir -p $(BENCH)
 	$(ODIN) build bench/typed -o:speed -out:$(BENCH)/typed
 	ODIN=$(ODIN) ROUNDS=$(ROUNDS) python3 bench/typed.py
+
+# The write lanes: next's probe at -o:speed when bench/write exists, the peers `bench-doc` builds plus the Rust write
+# binary, then write.py. ROUNDS passes through.
+bench-write: ROUNDS ?= 5
+bench-write:
+	@mkdir -p $(BENCH)
+	@if [ -d bench/write ]; then $(ODIN) build bench/write -o:speed -out:$(BENCH)/write; \
+	else echo "next: left out (bench/write is not there yet)"; fi
+	@if command -v $(BENCH_CC) >/dev/null && [ -f $(BENCH)/deps/yyjson/yyjson.c ]; then \
+		$(BENCH_CC) -O3 -DNDEBUG -o $(BENCH)/yy_bench bench/peers/yy_bench.c \
+			$(BENCH)/deps/yyjson/yyjson.c -I$(BENCH)/deps/yyjson && echo "yy: built"; \
+	else echo "yy: left out (C compiler or yyjson source missing; run make fixtures)"; fi
+	@if command -v $(BENCH_CXX) >/dev/null && [ -f $(BENCH)/deps/simdjson/simdjson.cpp ]; then \
+		$(BENCH_CXX) -O3 -DNDEBUG -std=c++17 -o $(BENCH)/cpp_bench bench/peers/cpp_bench.cpp \
+			$(BENCH)/deps/simdjson/simdjson.cpp -I$(BENCH)/deps/simdjson && echo "simd: built"; \
+	else echo "simd: left out (C++ compiler or simdjson source missing; run make fixtures)"; fi
+	@if command -v $(BENCH_CARGO) >/dev/null; then \
+		CARGO_TARGET_DIR=$(abspath $(BENCH)/rust) $(BENCH_CARGO) build --release --locked \
+			--manifest-path bench/peers/rust/Cargo.toml && echo "sonic, serde: built"; \
+	else echo "sonic, serde: left out (cargo missing)"; fi
+	ROUNDS=$(ROUNDS) python3 bench/write.py $(LANES)
 
 # The document lanes' probe at -o:speed, the peers whose toolchain and sources are present, then doc.py. ROUNDS and
 # BENCH_FILES pass through.

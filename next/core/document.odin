@@ -1,6 +1,7 @@
 package core
 
 import "base:runtime"
+import "core:io"
 import spell "./spell"
 
 // A document holds a walk's tokens in walk order, 16 bytes per node, plus the facts beside them. `core/build`'s
@@ -255,7 +256,9 @@ Resolve_Options :: struct {
 // `Document.root_close`, so a service may return it without a scan. `edit` points at the
 // format's edit services, nil for a format that accepts no edits. `tag_key` is the format's own struct tag key, and
 // `key_open` and `key_close` are what a key is written between, empty for a format whose keys a typed read does not
-// compare as text.
+// compare as text. `write` writes the document as text of the spec and layout `read` names, into a buffer from `allocator` or to
+// `stream`, nil for a format with no document writer, see `core.write`. `tokens` is the format's `^write.Token_Spelling`,
+// nil for a format with no token writer. It is a `rawptr` since `core/write` imports `core`.
 Spelling :: struct {
 	text:       proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool,
@@ -264,6 +267,8 @@ Spelling :: struct {
 	close_end:  proc(doc: ^Document, i: Node_Index) -> u64,
 	query:      proc(doc: ^Document, paths: []Path, read: Query_Options, allocator: runtime.Allocator) -> (answers: []Answer, err: Path_Error),
 	edit:       ^Edit_Spelling,
+	write:      proc(doc: ^Document, opts: Write_Options, read: Read_As, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error),
+	tokens:     rawptr,
 	tag_key:    string,
 	key_open:   string,
 	key_close:  string,
@@ -721,6 +726,10 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 	if !ok {
 		delete(raw, allocator)
 		return "", false
+	}
+	if len(s) > 0 && raw_data(s) != raw_data(raw) {
+		// A format may answer with a span of its source instead of a decode into `buf`.
+		copy(raw, s)
 	}
 	if len(s) != size {
 		trimmed, rerr := runtime.non_zero_mem_resize(raw_data(raw), size, len(s), 1, allocator)

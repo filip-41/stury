@@ -92,7 +92,7 @@ lane :: proc($T: typeid, src: []u8, borrow: bool, iters: int, $DSV: bool) {
 	mem.arena_init(&ar, backing)
 	alloc := mem.arena_allocator(&ar)
 	when DSV {
-		plan, err := dsv.plan_make(T)
+		plan, err := dsv.plan_make(T, .Csv)
 	} else {
 		plan, err := json.plan_make(T)
 	}

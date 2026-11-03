@@ -7,6 +7,7 @@ import "base:runtime"
 import core "../core"
 import compose "../core/compose"
 import build "../core/build"
+import write "../core/write"
 
 // JSON's document holds the walk's tokens over the caller's bytes, read through core's readers and JSON's `SPELLING`.
 // `build` is the only entry, and it runs the walk and the builder together.
@@ -42,7 +43,7 @@ edit_member_sep :: proc(_: ^core.Document) -> string {
 @(private)
 SPELLING := core.Spelling {
 	text = text, key_equals = key_equals_decode, number = number,
-	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT,
+	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT, write = write_spec, tokens = &TOKENS,
 	tag_key = "json", key_open = "\"", key_close = "\":",
 }
 
@@ -96,6 +97,7 @@ build_reserved :: proc(src: []u8, q: [^]u8, $S: Spec, opts: Options, refuse_dupl
 	// The edit dispatcher reads `doc.read.spec`, and the reads use the build's depth.
 	b.doc.read.spec = u8(S)
 	b.doc.read.max_depth = opts.max_depth
+	b.doc.read.opts[0] = transmute(u8)opts.tolerate
 	regs := build.BUILDER_REGS
 	// A spec with no comments makes no fact token, so its build uses the hook without fact and pending work.
 	hi: u64
@@ -269,57 +271,22 @@ value_check_hook :: proc "contextless" (h: ^Value_Check, s: core.Hook_Regs, t: c
 	return s, .Next
 }
 
-// Appends one byte to `text`, false when the allocation fails.
-@(private)
-push_byte :: #force_inline proc(text: ^[dynamic]u8, b: u8) -> bool {
-	_, err := append(text, b)
-	return err == nil
-}
-
 // Writes `name` as a JSON string in `text`, with the quotes and escapes every JSON spec reads. A control byte is
-// written as `\u00xx`, so the key reads the same in JSON, JSONC and JSON5.
+// written as `\u00xx`, so the key reads the same in JSON, JSONC and JSON5. False when the allocation fails or `name`
+// is not UTF-8.
 @(private)
 edit_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool {
-	hex := "0123456789abcdef"
-	push_byte(text, '"') or_return
-	for b in name {
-		switch b {
-		case '"':
-			push_byte(text, '\\') or_return
-			push_byte(text, '"') or_return
-		case '\\':
-			push_byte(text, '\\') or_return
-			push_byte(text, '\\') or_return
-		case '\b':
-			push_byte(text, '\\') or_return
-			push_byte(text, 'b') or_return
-		case '\f':
-			push_byte(text, '\\') or_return
-			push_byte(text, 'f') or_return
-		case '\n':
-			push_byte(text, '\\') or_return
-			push_byte(text, 'n') or_return
-		case '\r':
-			push_byte(text, '\\') or_return
-			push_byte(text, 'r') or_return
-		case '\t':
-			push_byte(text, '\\') or_return
-			push_byte(text, 't') or_return
-		case:
-			if b < 0x20 {
-				push_byte(text, '\\') or_return
-				push_byte(text, 'u') or_return
-				push_byte(text, '0') or_return
-				push_byte(text, '0') or_return
-				push_byte(text, hex[b >> 4]) or_return
-				push_byte(text, hex[b & 0xF]) or_return
-			} else {
-				push_byte(text, b) or_return
-			}
-		}
+	spill: [write.ROOM_MAX]u8 = ---
+	out: write.Out
+	write.init(&out, &spill, text.allocator)
+	kind := put_string(&out, string(name))
+	spelled, err := write.finish(&out)
+	defer delete(spelled, text.allocator)
+	if kind != .None || err.kind != .None {
+		return false
 	}
-	push_byte(text, '"') or_return
-	return true
+	_, appended := append(text, ..spelled)
+	return appended == nil
 }
 
 // Reads `src` as spec `S` with or without the tolerance set a build may hold, nested no deeper than the document's
