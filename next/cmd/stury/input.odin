@@ -25,6 +25,7 @@ Inputs :: struct {
 	line:      int, // the lines of it jq's parser has read
 	line_end:  int, // --stream: the byte after the newline `line` counts last
 	failures:  int, // files that did not open or read
+	has_text:  bool, // a file before this one held a text, so a byte order mark opening this one is no mark
 	slurp:     bool,
 	run:       ^Run, // under the path scan, a text it answers is printed and passed over
 	// --stream: the open file's text, and its events while some are left: a document's, or those jq's parser makes of
@@ -90,7 +91,12 @@ next_value :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 	stream := ins.run.opts.stream
 	for ins.next_file < len(ins.files) {
 		data, ok := read_next_file(ins)
-		if !ok || blank(data, ins.reading.spec) || ins.run.route.scanning && answer_path(ins.run, data, ins.reading) {
+		if !ok || blank(data, ins.reading.spec) {
+			continue
+		}
+		stray_bom := ins.has_text && bytes.has_prefix(data, {0xef, 0xbb, 0xbf})
+		ins.has_text = true
+		if ins.run.route.scanning && !stray_bom && answer_path(ins.run, data, ins.reading) {
 			continue
 		}
 		if k := cut_bom_len(data); ins.run.opts.stream_errors && ins.next_file == 1 && k > 0 {
@@ -101,7 +107,13 @@ next_value :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 			return nil, "Malformed BOM", .Error
 		}
 		// --stream's document lives until its last event, past the memory of the input that reads it.
-		doc, fault := jq.build_text(data, ins.reading, runtime.heap_allocator() if stream else context.allocator)
+		doc: core.Document
+		fault: Maybe(core.Fault)
+		if stray_bom {
+			fault = core.Fault{kind = .Bad_Char}
+		} else {
+			doc, fault = jq.build_text(data, ins.reading, runtime.heap_allocator() if stream else context.allocator)
+		}
 		ins.data = data
 		if f, bad := fault.?; bad {
 			if ins.reading.spec != .Json {
@@ -109,6 +121,7 @@ next_value :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 			}
 			ins.note = fault_note(data, f, ins)
 			if !stream {
+				ins.line = lines_read(data, int(f.at) + 1)
 				return nil, jq.parse_message(data, f), .Error
 			}
 			// jq's parser gives the events of the bytes before the fault, and with --stream-errors the fault as one.
@@ -129,8 +142,8 @@ next_value :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 	return nil, "", .More
 }
 
-// The next file whole, from the heap, since the values read from it may outlive any input's memory. A file that does
-// not open or read is told as jq tells it and counted.
+// The next file whole, in the memory of the input that reads it, which is emptied with it, but for --stream, whose
+// events outlive it. A file that does not open or read is told as jq tells it and counted.
 @(private = "file")
 read_next_file :: proc(ins: ^Inputs) -> (data: []byte, ok: bool) {
 	path := ins.files[ins.next_file]
@@ -149,8 +162,7 @@ read_next_file :: proc(ins: ^Inputs) -> (data: []byte, ok: bool) {
 		os.close(f)
 	}
 	err: os.Error
-	// Every file read stays on the heap until the run ends, since a value may point into any of them.
-	if data, err = read_whole(f, runtime.heap_allocator()); err != nil {
+	if data, err = read_whole(f, runtime.heap_allocator() if ins.run.opts.stream else context.allocator); err != nil {
 		message.write_stderr("stury: error: %s\n", strerror(err))
 		ins.failures += 1
 		return
@@ -229,11 +241,18 @@ fail_dialect :: proc(ins: ^Inputs, data: []byte, f: core.Fault) -> ! {
 	run := ins.run
 	flush_some(run, force = true)
 	if f.kind in core.AT_NO_BYTE {
-		message.write_stderr("stury: error: %s: %s\n", ins.name, jq.fault_sentence(f))
+		message.write_stderr("stury: error: %s: %s\n", ins.name, jq.fault_sentence(f, ""))
 		finish(run, EXIT_INPUT)
 	}
 	line, col := core.locate(data, f.at)
-	message.write_stderr("stury: error: %s:%d:%d: %s\n", ins.name, line, col, jq.fault_sentence(f))
+	rest := string(data[f.at:])
+	sentence := jq.fault_sentence(f, rest)
+	// JSON5 spells them, JSON has no value for them, and the library refuses them as a literal.
+	unsigned := strings.trim_left(rest, "+-")
+	if ins.reading.spec == .Json5 && f.kind == .Bad_Char && (strings.has_prefix(unsigned, "Infinity") || strings.has_prefix(unsigned, "NaN")) {
+		sentence = "Infinity and NaN have no JSON value"
+	}
+	message.write_stderr("stury: error: %s:%d:%d: %s\n", ins.name, line, col, sentence)
 	message.write_stderr("%s", fault_note(data, f, ins))
 	finish(run, EXIT_INPUT)
 }
@@ -296,9 +315,6 @@ bind_inputs :: proc(ip: ^jq.Interp, ins: ^Inputs) {
 		},
 	}
 }
-
-// The name of the input whose file is mapped, which the fault handler reports when the file shrinks under its mapping.
-mapped_input_name: string
 
 // All of file `f`, to its end. os.read_entire_file reads as many bytes as fstat gives, which for a pipe is
 // only what is in it so far, so it reads only a regular file.

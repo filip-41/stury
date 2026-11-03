@@ -76,7 +76,7 @@ main :: proc() {
 	refuse_format_clashes(o, &cli)
 	validating := cli.validating
 	switch {
-	case o.in_place || o.check:
+	case (o.in_place || o.check) && !cli.formatting:
 		usage_error("%s is fmt's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
 	case o.stream && validating:
 		usage_error("--stream makes jq's events of each input; check only judges it")

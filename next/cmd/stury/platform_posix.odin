@@ -64,23 +64,16 @@ out_of_memory :: proc() -> ! {
 }
 
 // A fault in the guard below the interpreter's stack: jq's message for memory run out, then abort as jq does.
-// A SIGBUS with an input mapped is that file shrinking under its mapping: say so and exit 2, as for a failed
-// read. Only write(2) and _exit(2) run here. Any other fault is left to the default action, which the access
-// meets again once this returns.
+// Only write(2) runs here. Any other fault is left to the default action, which the access meets again once this
+// returns.
 @(private = "file")
-fault :: proc "c" (sig: posix.Signal, info: ^posix.siginfo_t, _: rawptr) {
+fault :: proc "c" (_: posix.Signal, info: ^posix.siginfo_t, _: rawptr) {
 	say :: proc "contextless" (s: string) {
 		posix.write(posix.STDERR_FILENO, raw_data(s), len(s))
 	}
 	if at := uintptr(info.si_addr); stack_guard[0] <= at && at < stack_guard[1] {
 		say("stury: error: cannot allocate memory\n")
 		posix.abort()
-	}
-	if sig == .SIGBUS && mapped_input_name != "" {
-		say("stury: error: ")
-		say(mapped_input_name)
-		say(": input file shrank while reading\n")
-		posix._exit(2)
 	}
 }
 

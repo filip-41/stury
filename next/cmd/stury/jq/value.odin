@@ -9,6 +9,7 @@ import "core:hash"
 import "core:slice"
 import "core:strconv"
 import "../../../core/spell"
+import "../message"
 import core_pkg "../../../core"
 import json "../../../json"
 
@@ -23,8 +24,8 @@ Value :: union {
 	Path,
 }
 
-// `lit` is the number as written, for a number read from input or the program and not yet computed on:
-// jq prints such a number in its canonical form of that literal, and a computed one from `f`.
+// `lit` is the number as written, for a number read from input or the program and not yet computed on. It prints as
+// written and a computed number prints from `f`.
 Number :: struct {
 	f:   f64,
 	lit: string,
@@ -156,7 +157,8 @@ node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 	f: f64
 	switch n.kind {
 	case .Int:
-		f = f64(i64(n.bits))
+		// `-0` is an integer node whose bits carry no sign
+		f = -0.0 if n.bits == 0 && lit[0] == '-' else f64(i64(n.bits))
 	case .Uint:
 		f = f64(n.bits)
 	case .Float:
@@ -169,15 +171,23 @@ node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 }
 
 // A JSON5 decimal as the library's writer spells it in JSON (`+1.50` as `1.50`, `.5` as `0.5`, `5.` as `5`), so that
-// `tostring` gives what `-c .` prints. A hexadecimal integer, `Infinity` and `NaN` are no literal, and print as computed.
+// `tostring` gives what `-c .` prints. `Infinity` and `NaN` are no literal, and print as computed.
 @(private = "file")
 json5_literal :: proc(text: string) -> string {
 	if _, plain := spell.number_json(transmute([]u8)text, 0, u64(len(text))); plain {
 		return text
 	}
 	p := 1 if text[0] == '+' || text[0] == '-' else 0
-	if text[p] != '.' && text[p] - '0' >= 10 || p + 1 < len(text) && (text[p + 1] == 'x' || text[p + 1] == 'X') {
+	if text[p] != '.' && text[p] - '0' >= 10 {
 		return ""
+	}
+	if p + 1 < len(text) && (text[p + 1] == 'x' || text[p + 1] == 'X') {
+		// the exact integer, which binary64 would round past 2^53
+		n, ok := strconv.parse_u64_of_base(text[p + 2:], 16)
+		if !ok {
+			return ""
+		}
+		return message.build("%s%d", "-" if text[0] == '-' else "", n)
 	}
 	b := make([dynamic]u8, 0, len(text) + 1)
 	if text[0] == '-' {
@@ -380,7 +390,7 @@ Members :: struct {
 	items: core_pkg.Child_Iter, // a document array's
 	pairs: core_pkg.Pair_Iter, // a document object's
 	array: bool, // a document's array: its nodes have no keys
-	seen:  ^map[string]bool, // made at the first repeated key
+	last:  ^map[string]core_pkg.Node_Index, // when a key repeats: a key's last node, 0 once yielded
 	dupes: bool,
 }
 
@@ -397,6 +407,13 @@ iterate :: proc(v: Value) -> Members {
 		} else {
 			it.pairs = core_pkg.pairs(r.doc, r.node)
 			it.dupes = has_repeated_key(r)
+			if it.dupes {
+				it.last = new(map[string]core_pkg.Node_Index)
+				all := it.pairs
+				for kn, vn in core_pkg.pair_next(&all) {
+					it.last[node_string(r.doc, kn)] = vn
+				}
+			}
 		}
 	}
 	return it
@@ -497,15 +514,12 @@ next_member :: #force_inline proc(it: ^Members) -> (key: string, v: Value, ok: b
 			if !it.dupes {
 				return k, Ref{x.doc, vn}, true
 			}
-			if it.seen == nil {
-				it.seen = new(map[string]bool)
-			}
-			if it.seen[k] {
+			if it.last[k] == 0 {
 				continue
 			}
-			it.seen[k] = true
-			last, _ := core_pkg.member(x.doc, x.node, k)
-			return k, Ref{x.doc, last}, true
+			vn = it.last[k]
+			it.last[k] = 0
+			return k, Ref{x.doc, vn}, true
 		case nil, bool, Number, string:
 		}
 	}
