@@ -369,12 +369,15 @@ set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := 
 	// A `Name` at the end is set through its container, so that a missing name is told from a missing parent.
 	read_path := path
 	name: core.Name
-	named := false
+	named, whole := false, false
 	if n := len(path.steps); n > 0 && n - 1 not_in path.optional {
 		name, named = path.steps[n - 1].(core.Name)
 		// A zero `Step` is left for the read to refuse.
 		named &&= raw_data(string(name)) != nil
-		if named {
+		// A `Descend` answers in the order its containers close, which is not the order it reaches them, so under a limit
+		// the answers of the whole path pick the containers.
+		whole = named && path.limit != nil && n > 1 && path.steps[n - 2] == core.Descend{}
+		if named && !whole {
 			read_path.steps = path.steps[:n - 1]
 		}
 	}
@@ -385,9 +388,9 @@ set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := 
 	}
 	for a in answers {
 		e := core.Document_Error{kind = .Bad_Index}
-		if a.outcome == .Found && !named {
+		if a.outcome == .Found && (!named || whole) {
 			e = core.set(&list, a.node, text)
-		} else if a.outcome == .Found && doc.nodes[a.node].kind == .Map {
+		} else if (a.outcome == .Found || whole && a.outcome == .Missing) && doc.nodes[a.node].kind == .Map {
 			e = set_named(&list, a.node, string(name), text, read)
 		}
 		if e.kind != .None {

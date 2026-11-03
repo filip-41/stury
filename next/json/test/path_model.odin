@@ -532,6 +532,19 @@ check_commit :: proc(t: ^testing.T, src: []u8, $S: json.Spec, full: ^core.Docume
 	return testing.expectf(t, string(got) == string(want), "%q %v: %q want %q", string(src), path, string(got), string(want))
 }
 
+// A limit counts the members a path ends in, not the containers a `..` reads before them.
+@(test)
+path_set_limit_counts_members :: proc(t: ^testing.T) {
+	src := `{"aaaaaaaaaaaaaaaaaaaaaaaac":{ "a":12} }`
+	path := core.Path{steps = {core.Descend{}, core.Name("a")}, limit = 1}
+	full, _ := json.build(transmute([]u8)src, .Json)
+	defer core.destroy(&full)
+	got, err := scan.set_answers(&full, path, "0")
+	defer delete(got)
+	testing.expect_value(t, err.edit.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, string(got), `{"aaaaaaaaaaaaaaaaaaaaaaaac":{ "a":0} }`)
+}
+
 @(test)
 path_model :: proc(t: ^testing.T) {
 	for i in 0 ..< PATH_ROUNDS {
