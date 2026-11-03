@@ -15,8 +15,100 @@ RECORDS := records.Services {
 	ends  = {.Lines = '\n', .Seq = 0x1e, .Concatenated = 0, .Entries = 0},
 	next  = {.Lines = frame_line, .Seq = frame_line, .Concatenated = next_walked, .Entries = next_walked},
 	judge = judge_record,
+	guess = guess_start,
+	whole = whole_text,
 	read  = read_record,
 	build = build_record,
+}
+
+// `Read_As.opts[2]` is `PIECE` in a piece's reader.
+@(private)
+PIECE :: 1
+
+// Moves a piece's reader to the first place at or past `it.pos` and before `to` where a record may start: under
+// `.Lines` and `.Seq` past the next end byte unless one is before `it.pos`, under `.Concatenated` past the next LF,
+// and under `.Entries` at the next comma, read as following an entry. A piece starts past the first record.
+@(private)
+guess_start :: proc(it: ^records.Reader, to: u64) -> bool {
+	b: u8 = ',' if it.framing == .Entries else 0x1e if it.framing == .Seq else '\n'
+	if it.framing >= .Concatenated || it.src[it.pos - 1] != b {
+		it.pos = find_byte(it.src[:to], it.pos, b) + u64(it.framing != .Entries)
+	}
+	it.state[1] = 1
+	it.as.read.opts[2] = PIECE
+	return it.pos < to
+}
+
+// The whole text is the entries of its spine, or of its root.
+@(private)
+whole_text :: proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) {
+	entries, at, ok := spine(src, as)
+	return entries if ok else as, .Entries, at if ok && entries.read.opts[1] > 0 else 0
+}
+
+// The most objects deep `spine` looks for an array, and the most members and bytes of each it passes before one in an
+// object.
+SPINE_LEVELS :: 4
+@(private)
+SIDE_MEMBERS, SIDE_BYTES :: 16, 4096
+
+// Finds the array that holds the bulk of `src`, read as `as`: its root array, or the array a root object holds up to
+// `SPINE_LEVELS` objects deep, past at most `SIDE_MEMBERS` members in each object whose values end within `SIDE_BYTES`.
+// A key on the way must be quoted with `"`. `at` is the array's `[`, and `records.open(src, entries, .Entries, at)`
+// gives its elements, each judged at its depth in the text, then judges the text around the array once, at its close,
+// so that every fault is the one `validate` gives for the whole text. False when there is none. Allocates nothing.
+spine :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool) {
+	levels: u8
+	switch Spec(as.read.spec) {
+	case .Json:  at, levels, ok = spine_of(src, options_of(as.read), .Json)
+	case .Jsonc: at, levels, ok = spine_of(src, options_of(as.read), .Jsonc)
+	case .Json5: at, levels, ok = spine_of(src, options_of(as.read), .Json5)
+	}
+	entries = as
+	// The number of objects around the array.
+	entries.read.opts[1] = levels
+	return
+}
+
+@(private)
+spine_of :: proc(src: []u8, opts: Options, $S: Spec) -> (at: u64, levels: u8, ok: bool) {
+	p := raw_data(src)
+	end := p[len(src):]
+	none: core.No_Hooks
+	zero: core.Hook_Regs
+	q := gap_end(p[core.text_start(src, 0):], end, S)
+	// The array's elements lie one level below it.
+	for q < end && u32(levels) < (opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH) {
+		if q[0] == '[' {
+			return u64(intrinsics.ptr_sub(q, p)), levels, true
+		}
+		if q[0] != '{' || levels == SPINE_LEVELS {
+			return
+		}
+		levels += 1
+		for n := 0;; n += 1 {
+			q = gap_end(q[1:], end, S)
+			if n == SIDE_MEMBERS || q == end || q[0] != '"' {
+				return
+			}
+			hi, fault, _ := walk_from(src, q, S, opts, &none, &zero, core.no_hook)
+			q = gap_end(p[hi:], end, S)
+			if fault != nil || q == end || q[0] != ':' {
+				return
+			}
+			q = gap_end(q[1:], end, S)
+			// A value that does not end within `SIDE_BYTES` is the one the spine runs through.
+			at := intrinsics.ptr_sub(q, p)
+			if hi, fault, _ = walk_from(src[:min(len(src), at + SIDE_BYTES)], q, S, opts, &none, &zero, core.no_hook); fault != nil {
+				break
+			}
+			q = gap_end(p[hi:], end, S)
+			if q == end || q[0] != ',' {
+				return
+			}
+		}
+	}
+	return
 }
 
 @(private)
@@ -47,7 +139,8 @@ next_framed :: proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
 // `rec.key`. Each value is walked one level below the root. A scalar root has no entries and is judged whole. Any
 // fault ends the records with the fault of a walk of the text from `it.from`, which `validate` gives, as a fault in the root's
 // own bytes depends on what came before. `state[0]` is the root's open bracket once it is read and 1 after its close,
-// and `state[1]` is 1 after an entry.
+// and `state[1]` is 1 after an entry. The entries of a `Spine` sit `levels` objects deeper, and at its close the text
+// with them cut out is walked whole. A piece's reader ends on a fault whose place is not looked for.
 @(private)
 frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (rec: records.Record, ok: bool, stopped: bool) {
 	src := it.src
@@ -73,7 +166,9 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 	}
 	q := gap_end(p[it.pos:], end, S)
 	value := opts
-	value.max_depth = (opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH) - 1
+	levels := u32(it.as.read.opts[1])
+	value.max_depth = (opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH) - 1 - levels
+	piece := it.as.read.opts[2] == PIECE
 	key: []u8
 	none: core.No_Hooks
 	zero: core.Hook_Regs
@@ -97,7 +192,11 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		}
 		if closes {
 			it.state[0] = 1
-			it.fault = tail_fault(src, u64(intrinsics.ptr_sub(q, p)) + 1, S)
+			if levels == 0 {
+				it.fault = tail_fault(src, u64(intrinsics.ptr_sub(q, p)) + 1, S)
+			} else if piece || !shell_valid(it, u64(intrinsics.ptr_sub(q, p)), S, opts) {
+				break whole
+			}
 			return
 		}
 		if close == '}' {
@@ -139,8 +238,30 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		return {text = src[at:hi], at = at, key = key}, true, stop
 	}
 	it.state[0] = 1
-	it.fault = walk_text(src, it.from, S, opts, &none, &zero, core.no_hook)
+	if piece {
+		it.fault = core.fault_of(core.fault_at(u64(intrinsics.ptr_sub(q, p)), .Bad_Char), &RULES)
+	} else {
+		it.fault = walk_text(src, 0 if levels > 0 else it.from, S, opts, &none, &zero, core.no_hook)
+	}
 	return
+}
+
+// Whether the text around a spine's array, closed at `close`, is valid with the array's elements cut out, so that with
+// valid elements the whole text is. The copy is allocated with the reader's allocator, and a failed allocation is a no.
+@(private)
+shell_valid :: proc(it: ^records.Reader, close: u64, $S: Spec, opts: Options) -> bool {
+	src := it.src
+	open := u64(intrinsics.ptr_sub(gap_end(raw_data(src)[it.from:], raw_data(src)[len(src):], S), raw_data(src))) + 1
+	shell, err := make([]u8, u64(len(src)) - (close - open), it.allocator)
+	if err != nil {
+		return false
+	}
+	defer delete(shell, it.allocator)
+	copy(shell, src[:open])
+	copy(shell[open:], src[close:])
+	none: core.No_Hooks
+	zero: core.Hook_Regs
+	return walk_text(shell, 0, S, opts, &none, &zero, core.no_hook) == nil
 }
 
 // Whether the number or literal at `q`, which a walk ended at `hi`, runs on into a byte that may not follow a value, so
@@ -291,7 +412,7 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 	if c != nil {
 		kept = c^
 	}
-	if !read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, err, true) {
+	if !read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, it.allocator, err, true) {
 		return true
 	}
 	uncollect(c, kept)
@@ -305,7 +426,7 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 		return true
 	}
 	err^ = {}
-	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, scratch_allocator, err, false)
+	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, scratch_allocator, it.allocator, err, false)
 	return true
 }
 
@@ -319,7 +440,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 		// The duplicate check builds the record's text, so the framing's walk finds its end first.
 		rec, ok := next_framed(it, S)
 		if ok {
-			read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, err, false)
+			read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, it.allocator, err, false)
 		}
 		return ok
 	}

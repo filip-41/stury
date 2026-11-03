@@ -1,7 +1,9 @@
-// `records <frame|check|stream|read|cells|rows> <file> <iters>`: reads the records of the file and prints best and
-// median GB/s. On NDJSON, `frame` frames each record and reads no value, `check` judges each one, `stream` judges each
-// one through a stream's window, `read` reads each one of `logs.ndjson` into a `Log_Record`, strings borrowed. On CSV,
-// `cells` reads each row's first cell, and `rows` reads each row of `table.csv` into a `Table_Row`, strings borrowed.
+// `records <frame|check|stream|read|cells|rows|threads|validate> <file> <iters> [width]`: reads the records of the
+// file and prints best and median GB/s. On NDJSON, `frame` frames each record and reads no value, `check` judges each
+// one, `threads` is `check` on a pool of `width` threads (6 by default), `stream` judges each one through a stream's
+// window, `read` reads each one of `logs.ndjson` into a `Log_Record`, strings borrowed. `validate` judges a whole JSON
+// text on the pool. On CSV, `cells` reads each row's first cell, and `rows` reads each row of `table.csv` into a
+// `Table_Row`, strings borrowed.
 package main
 
 import "base:runtime"
@@ -11,6 +13,7 @@ import "core:os"
 import "core:slice"
 import "core:strconv"
 import "core:time"
+import host "../../host"
 import typed "../../core/typed"
 import records "../../core/records"
 import json "../../json"
@@ -30,6 +33,18 @@ check :: proc(src: []u8) -> int {
 	faults, _ := records.check(src, json.as(.Json), .Lines, context.temp_allocator)
 	defer free_all(context.temp_allocator)
 	return len(faults)
+}
+
+pool: host.Pool
+
+threads :: proc(src: []u8) -> int {
+	faults, _ := records.check(src, json.as(.Json), .Lines, context.temp_allocator, &pool.runner)
+	defer free_all(context.temp_allocator)
+	return len(faults)
+}
+
+validate :: proc(src: []u8) -> int {
+	return int(records.validate(src, json.as(.Json), &pool.runner) != nil)
 }
 
 // `check`'s work on a stream of the text in memory, read through the 64 KiB window.
@@ -108,8 +123,8 @@ rows :: proc(src: []u8) -> int {
 }
 
 main :: proc() {
-	if len(os.args) != 4 {
-		fmt.eprintln("usage: records <frame|check|stream|read|cells|rows> <file> <iters>")
+	if len(os.args) != 4 && len(os.args) != 5 {
+		fmt.eprintln("usage: records <frame|check|stream|read|cells|rows|threads|validate> <file> <iters> [width]")
 		os.exit(2)
 	}
 	src, err := os.read_entire_file(os.args[2], runtime.default_allocator())
@@ -122,6 +137,13 @@ main :: proc() {
 	switch os.args[1] {
 	case "frame": lane = frame
 	case "check": lane = check
+	case "threads", "validate":
+		lane = threads if os.args[1] == "threads" else validate
+		width := 6
+		if len(os.args) == 5 {
+			width, _ = strconv.parse_int(os.args[4])
+		}
+		host.pool_init(&pool, width)
 	case "stream": lane = stream
 	case "read":
 		lane = read

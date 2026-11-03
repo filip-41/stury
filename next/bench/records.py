@@ -6,8 +6,9 @@ import fcntl, os, subprocess, sys
 
 from doc import BUILD, LOCK, path as fixture
 
-FIXTURES = ["logs.ndjson", "docs.ndjson", "twitter.ndjson", "table.csv", "text.csv", "wide.csv"]
-LANES = ["frame", "check", "stream", "read", "cells", "rows"]
+FIXTURES = ["logs.ndjson", "docs.ndjson", "twitter.ndjson", "logs.json", "table.csv", "text.csv", "wide.csv"]
+# `threads` and `validate` run on a pool of 6 threads.
+LANES = ["frame", "check", "stream", "read", "threads", "validate", "cells", "rows"]
 ITERS = 41
 
 
@@ -21,9 +22,11 @@ def main():
             path = fixture(name)
             # `read` and `rows` read into the struct of the logs records and the table rows alone.
             if name.endswith(".csv"):
-                lanes = LANES[4:] if name == "table.csv" else LANES[4:5]
+                lanes = LANES[6:] if name == "table.csv" else LANES[6:7]
+            elif name == "logs.json":
+                lanes = ["validate"]
             else:
-                lanes = LANES[:4] if name == "logs.ndjson" else LANES[:3]
+                lanes = LANES[:5] if name == "logs.ndjson" else LANES[:3] + ["threads"]
             best = {lane: 0.0 for lane in LANES}
             for _ in range(rounds):
                 for lane in lanes:

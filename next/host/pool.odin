@@ -99,18 +99,16 @@ TAKEN :: 2
 @(private)
 REVOKED :: 3
 
-// Start `workers - 1` parked threads (`workers <= 0` means one per core, the caller counted).
+// Start `workers - 1` parked threads (`workers <= 0` means one per core, the caller counted). A failed allocation
+// returns its error and leaves a pool that runs calls on the caller alone.
 //
 //	- Fewer start initially when the system refuses one, or when starting one took over `START_BUDGET`. The rest
 //	  start lazily across calm calls.
 //	- A pool with none still runs calls, on the caller alone.
-pool_init :: proc(pool: ^Pool, workers := 0) {
-	pool^ = {}
+pool_init :: proc(pool: ^Pool, workers := 0) -> runtime.Allocator_Error {
+	pool^ = {runner = {data = pool, start = start, finish = finish}}
 	w := workers > 0 ? workers : os.get_processor_core_count()
-	helpers, herr := make([]Helper, max(w - 1, 0), runtime.heap_allocator())
-	if herr != nil {
-		return
-	}
+	helpers := make([]Helper, max(w - 1, 0), runtime.heap_allocator()) or_return
 	pool.helpers = helpers[:0]
 	pool.max_helpers = len(helpers)
 	for _ in helpers {
@@ -119,7 +117,7 @@ pool_init :: proc(pool: ^Pool, workers := 0) {
 			break
 		}
 	}
-	pool.runner = {data = pool, threads = len(pool.helpers), start = start, finish = finish}
+	return nil
 }
 
 @(private)
@@ -149,6 +147,8 @@ spawn_one :: proc(pool: ^Pool) -> bool {
 // The pool is not usable afterwards.
 pool_destroy :: proc(pool: ^Pool) {
 	pool.task = nil
+	// Each helper counts itself out as it stops.
+	sync.atomic_store(&pool.pending, len(pool.helpers))
 	for &h in pool.helpers {
 		sync.atomic_store(&h.ready, HANDED)
 		sync.futex_signal(&h.ready)
@@ -156,13 +156,14 @@ pool_destroy :: proc(pool: ^Pool) {
 	for &h in pool.helpers {
 		thread.destroy(h.thread)
 	}
+	assert(pool.pending == 0)
 	if pool.max_helpers > 0 {
 		delete(raw_data(pool.helpers)[:pool.max_helpers], runtime.heap_allocator())
 	}
 	pool^ = {}
 }
 
-// Hand the task to the first `n` helpers, then wake two. Each helper wakes two more once it starts, so the caller
+// Hand the task to the first `n` helpers, none for a negative `n`, then wake two. Each helper wakes two more once it starts, so the caller
 // pays for two wakes, not one per helper.
 @(private)
 start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
@@ -170,7 +171,7 @@ start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
 	pool.began = time.tick_now()
 	pool.task, pool.arg = task, arg
 	pool.current = width_of(pool, task)
-	pool.handed = min(n, pool.current.width)
+	pool.handed = clamp(n, 0, pool.current.width)
 	sync.atomic_store(&pool.pending, pool.handed)
 	for &h in pool.helpers[:pool.handed] {
 		sync.atomic_store(&h.ready, HANDED)
@@ -266,6 +267,7 @@ helper_main :: proc(t: ^thread.Thread) {
 			continue
 		}
 		if pool.task == nil {
+			sync.atomic_sub(&pool.pending, 1)
 			return
 		}
 		for j in 2 * h.index + 2 ..< min(2 * h.index + 4, pool.handed) {

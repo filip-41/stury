@@ -317,7 +317,6 @@ SEPARATORS := []string{"\n", "\r\n", "\n\n", "\n  \t\n", " \n", "\r\n\r\n", "\x0
 @(private = "file", rodata)
 KEYS := []string{`"a":`, `"b\"c" : `, "\"k\"\n:", `a:`, `'q' :`, `/* c */ "x"/* c */:`}
 
-@(private = "file")
 seeded_text :: proc(gen: rand.Generator, framing: core.Framing) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	if rand.int_max(4, gen) == 0 {

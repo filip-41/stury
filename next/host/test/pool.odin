@@ -102,3 +102,54 @@ helpers_run_the_task_beside_the_caller :: proc(t: ^testing.T) {
 	run(&pool.runner, pool.runner.threads, meet, &started)
 	testing.expect(t, started >= 2)
 }
+
+// A call ended before its helpers woke: none runs the task after `finish`, and a negative count hands out none.
+@(test)
+no_call_runs_after_finish :: proc(t: ^testing.T) {
+	pool: host.Pool
+	host.pool_init(&pool, 4)
+	defer host.pool_destroy(&pool)
+	for i in 0 ..< 200 {
+		count: int
+		pool.runner.start(pool.runner.data, pool.runner.threads if i % 2 == 0 else -1, bump, &count)
+		pool.runner.finish(pool.runner.data)
+		seen := sync.atomic_load(&count)
+		time.sleep(50 * time.Microsecond)
+		testing.expect_value(t, sync.atomic_load(&count), seen)
+	}
+}
+
+@(private = "file")
+Stalled :: struct {
+	pool:    ^host.Pool,
+	caller:  int,
+	started: int,
+	done:    int,
+}
+
+// A helper's long write, which the caller does not share, so `finish` waits for it past `STALL` and sleeps.
+@(private = "file")
+write_slowly :: proc(arg: rawptr) {
+	s := (^Stalled)(arg)
+	if sync.current_thread_id() == s.caller {
+		for i := 0; sync.atomic_load(&s.started) == 0 && i < 100_000; i += 1 {
+			time.sleep(time.Microsecond)
+		}
+		return
+	}
+	sync.atomic_add(&s.started, 1)
+	host.writing(s.pool, true)
+	time.sleep(3 * time.Millisecond)
+	host.writing(s.pool, false)
+	sync.atomic_add(&s.done, 1)
+}
+
+@(test)
+finish_sleeps_on_a_stalled_write :: proc(t: ^testing.T) {
+	pool: host.Pool
+	host.pool_init(&pool, 3)
+	defer host.pool_destroy(&pool)
+	s := Stalled{pool = &pool, caller = sync.current_thread_id()}
+	run(&pool.runner, pool.runner.threads, write_slowly, &s)
+	testing.expect(t, s.started >= 1 && s.done == s.started)
+}

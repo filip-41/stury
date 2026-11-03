@@ -38,20 +38,23 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 		frames = wide
 	}
 	err: core.Typed_Error
-	read_value(src, 0, u64(len(src)), S, target, T, plan, read, opts, frames, allocator, &err, false)
+	read_value(src, 0, u64(len(src)), S, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false)
 	return err
 }
 
 // Reads the document of `src[lo:cut]` into `target` with `frames`, one more than `opts` lets a text open, and stores
 // its error in `err`, with every offset from `src`'s first byte. A record's read (`LINE`) walks it in place in `src`
 // as `walk_line` does, and `cold` says only a read of `src[:cut]` tells its answer. The error goes out by pointer, as
-// copies of it through the record reader's calls cost a record's read more than its tokens.
+// copies of it through the record reader's calls cost a record's read more than its tokens. The duplicate check's
+// document lives in an arena on `scratch`, freed before the read.
 @(private)
-read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator: runtime.Allocator, err: ^core.Typed_Error, $LINE: bool) -> (cold: bool) {
+read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Error, $LINE: bool) -> (cold: bool) {
 	// A BOM past the input's first byte is the read's `Bad_Char`, in a spec where it is no whitespace, and `build` of
 	// the text from `lo` would pass over it.
 	if read.refuse_duplicates && (lo == 0 || S == .Json5 || core.text_start(src[lo:cut], 0) == 0) {
-		doc, built := build(src[lo:cut], S, opts, true, context.temp_allocator)
+		arena := runtime.Arena{backing_allocator = scratch, minimum_block_size = 4096}
+		defer runtime.arena_destroy(&arena)
+		_, built := build(src[lo:cut], S, opts, true, runtime.arena_allocator(&arena))
 		if built.kind == .Walk {
 			built.inner.at += lo
 			err^ = {kind = .Walk, at = built.at + lo, inner = built.inner}
@@ -65,7 +68,6 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 			err^ = {kind = .Out_Of_Memory}
 			return
 		}
-		core.destroy(&doc)
 	}
 	h: typed.Reader
 	walk_opts := opts

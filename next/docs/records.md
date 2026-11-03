@@ -13,7 +13,9 @@ records.column :: proc(it: ^records.Reader, name: string) -> int
 records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
 records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok: bool)
 records.close :: proc(it: ^records.Reader)
-records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> (faults: []core.Fault, err: runtime.Allocator_Error)
+records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
+records.validate :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
+json.spine :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool)
 ```
 
 ```odin
@@ -78,8 +80,29 @@ records: the next one is read past it.
 `next` under `.Concatenated` and `.Entries` frames a record by a walk of its value, which judges it, so a fault ends
 the records. Under `.Entries` that fault is the one `validate` gives for the whole text.
 
-`check` judges every record and returns the faults of the refused ones in source order, then the fault that ended the
-records, if any. `check` runs on the calling thread.
+`check` judges every record from `at` and returns the faults of the refused ones in source order, then the fault that
+ended the records, if any. `validate` returns the fault the format's `validate` gives for the whole text, read as the
+entries of its spine or its root.
+
+## Threads
+
+With a `runner`, such as a `host.Pool`'s, `check` and `validate` read a long text in pieces on its threads and the
+caller's, with the answer one thread gives: the same faults at the same bytes. Each piece guesses where a record may
+start in it, past an LF or 0x1E, or at a comma under `.Entries`, and reads records from there until one starts past
+the piece. A guess that leads to a fault is dropped for the next one. Then the records are read in source order on
+the caller, and a piece whose first record is the next one read gives its faults and jumps the reading past it. A
+guess inside a string, a comment or a nested value is never a record the in-order reading meets, so it costs time and
+never the answer. A runner with no threads, a format with no guess (dsv) and a short text read on the caller alone.
+
+## Spines
+
+Under `.Entries` a text is read in pieces across its root's entries. A text whose bulk is an array inside objects,
+as `{"meta":{...},"logs":[...]}`, has one root entry, so `json.spine` finds that array: the root array, or the value
+of the member of a root object, up to `json.SPINE_LEVELS` objects deep, that does not end within the first bytes of
+it, past at most a few members whose values do. `records.open(src, entries, .Entries, at)` then gives the array's
+elements, each judged at its depth in the text, and at the array's close the text with the elements cut out is
+walked whole, so the frame around them is judged once. Any fault is the one `validate` gives for the whole text.
+`records.validate` reads a JSON text this way when it has a spine.
 
 ## Typed reads and documents
 
@@ -192,7 +215,9 @@ whitespace, and its records are read with offsets from `base`.
 A format gives its record reader as a `records.Services` table in its rodata, which its `core.Spelling.records` points
 at. `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
 and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault, `read` and `build` read
-one. `column` and `cell` are a format's with named columns, and `close` frees the memory the format keeps in
+one. `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
+without the cost of finding the whole text's fault. `whole` names the framing and offset `validate` reads a whole
+text by. `column` and `cell` are a format's with named columns, and `close` frees the memory the format keeps in
 `Reader.format`. `ends` names, per framing, the byte a backward scan finds a whole record's end by (JSON's LF and 0x1E),
 0 where only a walk of the records finds it, and 0xff where the format reads no stream under that framing. `core` stores the table as a
 `rawptr`, since `core/records` imports `core`.

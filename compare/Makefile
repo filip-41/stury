@@ -14,7 +14,7 @@ BENCH_FILES ?= logs.json citm_catalog.json table.csv
 # program cannot hold two packages of one name. Sets the shell variable `d` to the tree.
 define tree
 d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && mkdir -p $$d/next $$d/compare && \
-	cp -R ../next/core ../next/json ../next/dsv ../next/walktest $$d/next/ && \
+	cp -R ../next/core ../next/host ../next/json ../next/dsv ../next/walktest $$d/next/ && \
 	cp -R json_oracle dsv_oracle $$d/compare/ && \
 	sed -i.orig 's/^package core$$/package next_core/' $$d/next/core/*.odin && \
 	sed -i.orig 's/^package json$$/package next_json/' $$d/next/json/*.odin && \
@@ -23,13 +23,13 @@ d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && mkdir -p $$d/next $$d/compare && \
 endef
 
 # The walks against the current tree's `json` and `csv`, from a copy whose next packages are renamed. SEED and ROUNDS
-# pass through, and ORACLES names the packages to run.
+# pass through, and ORACLES names the packages to run. Pieces of 16 bytes read the small texts on threads too.
 SEED ?= 1
 ORACLES ?= json_oracle dsv_oracle
 test-oracle: ROUNDS ?= 100000
 test-oracle:
 	@$(tree); for p in $(ORACLES); do echo "== $$p oracle"; \
-		$(ODIN) test $$d/compare/$$p -o:speed -collection:stury=$(abspath ..) -define:SEED=$(SEED) -define:ROUNDS=$(ROUNDS) -out:$$d/oracle || exit 1; \
+		$(ODIN) test $$d/compare/$$p -o:speed -collection:stury=$(abspath ..) -define:SEED=$(SEED) -define:ROUNDS=$(ROUNDS) -define:RECORDS_SLICE=16 -out:$$d/oracle || exit 1; \
 	done
 
 # The typed read against the old unmarshal, every shape and read mode: two programs over one case file, so no copy.

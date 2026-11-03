@@ -10,6 +10,9 @@ TIER_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
 # A leak or a bad free fails the test that made it.
 TEST_MEMORY := -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+# A text read on threads is cut at every byte in pieces of one byte, and at -o:speed chains run over several records.
+TEST_PIECES := -define:RECORDS_SLICE=1
+TEST_CHAINS := -define:RECORDS_SLICE=16
 BUILD     := build
 
 # One target per compile, so `make -j` builds the tests in parallel and each compile writes its own binary.
@@ -68,12 +71,12 @@ test: $(TEST_TARGETS)
 $(TEST_MINIMAL): $(BUILD)/test/minimal/%:
 	@mkdir -p $(@D)
 	@echo "== $* (-o:minimal)"
-	@$(ODIN) test $* $(TEST_OPT) $(TEST_MEMORY) -out:$@ || { echo "== $* (-o:minimal) failed"; exit 1; }
+	@$(ODIN) test $* $(TEST_OPT) $(TEST_MEMORY) $(TEST_PIECES) -out:$@ || { echo "== $* (-o:minimal) failed"; exit 1; }
 
 $(TEST_SPEED): $(BUILD)/test/speed/%:
 	@mkdir -p $(@D)
 	@echo "== $* (-o:speed)"
-	@$(ODIN) test $* -o:speed $(TEST_MEMORY) -out:$@ || { echo "== $* (-o:speed) failed"; exit 1; }
+	@$(ODIN) test $* -o:speed $(TEST_MEMORY) $(TEST_CHAINS) -out:$@ || { echo "== $* (-o:speed) failed"; exit 1; }
 
 # The x86-64 tiers v2 and v3 in a build for Odin's default CPU, as a caller's build is, at -o:none, where no kernel
 # is inlined into the tier's procedures, and at -o:speed. TIER picks the kernels' tier and WALK_TIER the walks'.
@@ -100,7 +103,7 @@ test-asan: $(ASAN_TARGETS)
 $(ASAN_TARGETS): $(BUILD)/test/asan/%:
 	@mkdir -p $(@D)
 	@echo "== $* (address)"
-	@$(ODIN) test $* -o:speed -sanitize:address -debug -out:$@ || { echo "== $* (address) failed"; exit 1; }
+	@$(ODIN) test $* -o:speed -sanitize:address -debug $(TEST_PIECES) -out:$@ || { echo "== $* (address) failed"; exit 1; }
 
 # The pool's start budget is raised, since a loaded host would otherwise stop it short of every helper under the sanitizer.
 test-tsan: $(TSAN_TARGETS)

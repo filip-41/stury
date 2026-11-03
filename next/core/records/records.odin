@@ -66,9 +66,16 @@ Stream_Options :: struct {
 // `close` frees `it.format`, nil for a format that keeps none. `ends` is the byte that ends a record under each framing
 // where a backward scan for it finds the end of a whole record, 0 where only a walk of the records does, and 0xff where
 // the format reads no stream.
+//
+// `guess` moves a copy of a reader to the first place at or past its `pos` and before `to` where a record may start,
+// and marks it as a piece's, whose `next` may end on any fault with no cost to find the one `validate` gives. It returns
+// false when there is none. nil reads a text on the calling thread alone. `whole` returns the format, framing and
+// offset whose records make up the whole of `src`, for `validate`, nil for a format that does not take it.
 Services :: struct {
 	next:   [core.Framing]proc(it: ^Reader) -> (Record, bool),
 	judge:  proc(it: ^Reader, rec: Record) -> Maybe(core.Fault),
+	guess:  proc(it: ^Reader, to: u64) -> bool,
+	whole:  proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64),
 	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
 	column: proc(it: ^Reader, name: string) -> int,
@@ -393,27 +400,6 @@ shift_error :: proc(e: ^core.Typed_Error, base: u64) {
 		e.at += base
 		if e.kind == .Walk {
 			e.inner.at += base
-		}
-	}
-}
-
-// Returns the fault of each refused record of `src`, in source order, and last the fault that ended the records, if
-// any. The slice is allocated with `allocator`. An allocation that fails returns its error and no faults.
-check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> (faults: []core.Fault, err: runtime.Allocator_Error) {
-	it := open(src, as, framing)
-	defer close(&it)
-	out := make([dynamic]core.Fault, allocator)
-	for {
-		rec, more := next(&it)
-		fault := it.services.judge(&it, rec) if more else it.fault
-		if f, bad := fault.?; bad {
-			if _, e := append(&out, f); e != nil {
-				delete(out)
-				return nil, e
-			}
-		}
-		if !more {
-			return out[:], nil
 		}
 	}
 }

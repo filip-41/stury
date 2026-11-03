@@ -12,6 +12,8 @@ import "core:unicode"
 import "core:unicode/utf8"
 import cur "stury:json"
 import core "../../next/core"
+import host "../../next/host"
+import records "../../next/core/records"
 import walktest "../../next/walktest"
 import json "../../next/json"
 import gen "../../next/json/test/gen"
@@ -26,10 +28,17 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 	text, broken: [dynamic]u8
 	defer delete(text)
 	defer delete(broken)
-	tally: Tally
+	// Each text is read in pieces on threads too, which gives the walk's answer.
+	pool: host.Pool
+	host.pool_init(&pool, 4)
+	defer host.pool_destroy(&pool)
+	tally := Tally{runner = &pool.runner}
 	check :: proc(t: ^testing.T, src: []u8, $S: json.Spec, tally: ^Tally) -> bool {
 		want, refused := cur.validate(src, {dialect = cur.Dialect(S)}).?
 		got, bad := json.validate(src, S).?
+		if on := records.validate(src, json.as(S), tally.runner); !testing.expectf(t, on == json.validate(src, S), "%v %q: on threads %v, walk %v", S, src, on, got) {
+			return false
+		}
 		// The current tree's digit and exponent caps are not the walk's, so a case it caps is skipped.
 		if refused && (want.kind == .Limit_Digits || want.kind == .Limit_Scale) {
 			tally.capped += 1
@@ -97,6 +106,7 @@ detail_agrees :: proc(want: cur.Error, got: core.Fault) -> bool {
 Tally :: struct {
 	compared, capped: int,
 	parted:           [Part]int,
+	runner:           ^core.Runner,
 }
 
 // `Part` names why the walk and the current tree part on a JSON5 text. The walk follows JSON5 1.0.0 and its own
