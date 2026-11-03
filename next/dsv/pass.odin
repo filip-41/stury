@@ -235,7 +235,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				}
 				// A quote that opens right after a closing one is a `""`'s second. The typed read keeps a cell free of
 				// them from a second scan, through the mask TSV's backslashes use.
-				when H == Cells || H == Batch {
+				when H == Cells {
 					bs = (closing << 1 | w.close) & q
 				}
 				if carried {
@@ -339,13 +339,15 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			clfs &= cut
 		}
 
-		when EMIT {
+		when EMIT || H == Batch {
 			// Every cell that the block ends, except the one open at its start, is shorter than 64 bytes. That cell can
 			// exceed `max(u32)` only if it opened more than `max(u32) - 64` bytes before `pos`, so the test runs only
 			// then.
 			if pos - w.field_lo > int(max(u32)) - 64 && cell_too_wide(base, w.field_lo, pos, seps) {
 				return core.fault_at(u64(w.field_lo), .Too_Wide)
 			}
+		}
+		when EMIT {
 			if r, done := read_tokens(COMMENTS, &w, base, pos, seps, lfs, clfs, bs, &hs, on); done {
 				return r
 			}
@@ -383,7 +385,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			return core.fault_at(u64(at), k)
 		}
 	}
-	when EMIT {
+	when EMIT || H == Batch {
 		if n - w.field_lo > int(max(u32)) {
 			return core.fault_at(u64(w.field_lo), .Too_Wide)
 		}
@@ -408,8 +410,14 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				return r
 			}
 		} else {
+			when H == Batch {
+				header := w.width == 0 && !w.no_header
+			}
 			if fault, _ := record_width(&w, w.cells + 1, &w.width); fault {
 				return core.fault_at(u64(w.rec_lo), .Bad_Structure, u8(Detail.Field_Count))
+			}
+			when H == Batch {
+				frame_row(h, w.rec_lo, n, header)
 			}
 		}
 	}

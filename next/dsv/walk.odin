@@ -199,9 +199,10 @@ judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options) -> u64
 
 // The position of a width fault is the delimiter that opens the cell past the width in a wide record, or the line end's
 // first byte in a narrow one. A width fault at or before a byte fault wins. A walk with no fault returns `r` unchanged,
-// and a faulting one rescans the records with `scan_record`.
+// and a faulting one rescans the records with `scan_record`. A `width` above 0 is the width a walk from a row start
+// checked rows against, and 0 reads it from the first record.
 @(private, cold)
-field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, r: u64) -> u64 {
+field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, r: u64, width := 0) -> u64 {
 	kind := core.Fault_Kind(r & 0xff)
 	if kind == .None {
 		return r
@@ -213,7 +214,10 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 		return r
 	}
 	delim := delimiter_of(S, opts)
-	width := header_cells(src, pos, S, opts) if !opts.no_header else scan_record(src, pos, 0, S, delim).cells
+	width := width
+	if width == 0 {
+		width = header_cells(src, pos, S, opts) if !opts.no_header else scan_record(src, pos, 0, S, delim).cells
+	}
 	for pos < end {
 		if at < u64(pos) {
 			return r

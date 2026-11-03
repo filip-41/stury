@@ -1,9 +1,12 @@
-// dsv's record services (`core/records`). A record is a row, framed by a judged walk that stops after a batch of rows
-// and restarts at the next row's first byte with the header and the width carried in.
+// dsv's record services (`core/records`). A record is a row, framed by `validate`'s pass, which stops after a batch of
+// rows and restarts at the next row's first byte with the width carried in. A row's cells are read from its text when
+// asked for.
 package dsv
 
+import "base:intrinsics"
 import "base:runtime"
 import core "../core"
+import kernel "../core/kernel"
 import build "../core/build"
 import typed "../core/typed"
 import records "../core/records"
@@ -25,31 +28,27 @@ RECORDS := records.Services {
 @(private)
 BATCH :: 256
 
-// The tokens `Batch.cells` holds at least. A batch also ends at a row end past which the widest row might not fit.
-@(private)
-BATCH_CELLS :: 1 << 15
-
-// A row of a batch: its first byte, the byte its line end starts at, and the end of its cells in `Batch.cells`.
+// A row of a batch: its first byte and the byte its line end starts at.
 @(private)
 Batch_Row :: struct {
 	at, hi: u64,
-	end:    int,
 }
 
-// The rows of a reader's last walk, kept in `Reader.format`. `cells` holds each row's value tokens and `keys` the
-// header's cells, empty with no header. `width` is the row width a walk checks rows against, 0 for the first walk of a
-// text with a header, which the header sets. No row makes more cells than the first record has, so a walk that stops
-// once more than `last` cells are held never overruns `cells`. `done` says the text ended or faulted, with the fault in
-// `fault`, given once the batch's rows are. `cols` are the columns a typed read bound, for the plan and read flags
-// beside them.
+// The rows of a reader's last frame, kept in `Reader.format`. The frame is `validate`'s pass, which records each row, and
+// the header's line in `head`, and stops once `BATCH` rows are held. `width` is the row width a frame checks rows
+// against, 0 for the first frame, which the first record sets, and a stop keeps it for the next. A row's cells are
+// split from its text when one is asked for. `cells` holds the `split` cells of row `split_row - 1`, and `keys` the
+// header's cells, empty with no header. `done` says the text ended or faulted, with the fault in `fault`, given once
+// the batch's rows are. `cols` are the columns a typed read bound, for the plan and read flags beside them.
 @(private)
 Batch :: struct {
-	cells:     []core.Token,
 	rows:      [BATCH]Batch_Row,
+	head:      Batch_Row,
+	cells:     []core.Token,
 	keys:      []core.Token,
 	n, at:     int,
-	open:      u64,
-	last:      u64,
+	split:     int,
+	split_row: int,
 	width:     int,
 	done:      bool,
 	fault:     Maybe(core.Fault),
@@ -58,35 +57,19 @@ Batch :: struct {
 	cols_read: [3]bool,
 }
 
-// The hook of a batch's walk. `Hook_Regs.a` counts the cells held, `b` the rows and `c` the open containers.
+// Records the record from `lo` to `hi`, the header's line when `header`. Returns true once the batch is full.
 @(private)
-on_row :: proc "contextless" (b: ^Batch, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
-	s := s
-	#partial switch t.kind {
-	case .Plain:
-		if t.role == .Value {
-			b.cells[s.a] = t
-			s.a += 1
-		}
-	case .End:
-		if s.c == 1 {
-			b.done = true
-			return s, .Next
-		}
-		s.c = 1
-		b.rows[s.b] = {at = b.open, hi = t.lo, end = int(s.a)}
-		s.b += 1
-		if s.b == BATCH || s.a > b.last {
-			return s, .Stop
-		}
-	case:
-		s.c += 1
-		b.open = t.lo
+frame_row :: #force_inline proc "contextless" (b: ^Batch, lo, hi: int, header: bool) -> bool #no_bounds_check {
+	if header {
+		b.head = {u64(lo), u64(hi)}
+		return false
 	}
-	return s, .Next
+	b.rows[b.n] = {u64(lo), u64(hi)}
+	b.n += 1
+	return b.n == BATCH
 }
 
-// Walks the next batch from `it.pos`. Returns false when no row is left, with the fault, if any, in `it.fault`.
+// Frames the next batch from `it.pos`. Returns false when no row is left, with the fault, if any, in `it.fault`.
 @(private)
 refill :: proc(it: ^records.Reader) -> bool {
 	b := (^Batch)(it.format)
@@ -99,13 +82,13 @@ refill :: proc(it: ^records.Reader) -> bool {
 		b = fresh
 		it.format = b
 	}
-	b.n, b.at = 0, 0
+	b.n, b.at, b.split_row = 0, 0, 0
 	if !b.done {
 		spec, opts := read_layout(it.as.read)
 		switch spec {
-		case .Csv:   walk_batch(it, b, .Csv, opts)
-		case .Tsv:   walk_batch(it, b, .Tsv, opts)
-		case .Plain: walk_batch(it, b, .Plain, opts)
+		case .Csv:   frame_batch(it, b, .Csv, opts)
+		case .Tsv:   frame_batch(it, b, .Tsv, opts)
+		case .Plain: frame_batch(it, b, .Plain, opts)
 		}
 	}
 	if b.n == 0 {
@@ -115,37 +98,134 @@ refill :: proc(it: ^records.Reader) -> bool {
 }
 
 @(private)
-walk_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
+frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 	if f, bad := option_fault(S, opts).?; bad {
 		b.done, b.fault = true, f
 		return
 	}
-	if b.cells == nil {
-		// The first record's cells bound every row's: the header's are the width, and with no header the walk is given
-		// the width, so a wider row faults before it makes a cell past it.
-		widest := 0
-		if record_start(it.src, int(it.pos), opts.comment) < len(it.src) {
-			widest = header_cells(it.src, int(it.pos), S, opts)
-		}
-		keys, kerr := make([]core.Token, 0 if opts.no_header else widest, it.allocator)
-		cells, cerr := make([]core.Token, max(BATCH_CELLS, widest), it.allocator)
-		if kerr != nil || cerr != nil {
-			delete(keys, it.allocator)
+	first := b.width == 0
+	// The frame makes no tokens, a comment line's included.
+	on :: proc "contextless" (b: ^Batch, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+		return s, .Next
+	}
+	regs: core.Hook_Regs
+	r := run(it.src, it.pos, S, opts, b, &regs, on, false, nil, b.width)
+	r = field_count_fault(src = it.src, lo = it.pos, S = S, opts = opts, r = r, width = 0 if first else b.width)
+	if f := core.fault_of(r, &RULES); f != nil {
+		b.done, b.fault = true, f
+	} else if u8(r >> 8) != core.STOPPED {
+		b.done = true
+	}
+	// A stopped frame returns the byte past the row end it stopped on. A restart reads no header.
+	it.pos = r >> 16
+	if first && b.head.hi > b.head.at {
+		n, ok := split_all(it, b, b.head, S, opts, .Key)
+		keys, err := make([]core.Token, n, it.allocator)
+		if !ok || err != nil {
 			b.done, b.fault = true, core.Fault{rules = &RULES, kind = .No_Memory}
 			return
 		}
-		b.keys, b.cells, b.last = keys, cells, u64(len(cells) - widest)
-		b.width = widest if opts.no_header else 0
+		copy(keys, b.cells[:n])
+		b.keys = keys
 	}
-	regs: core.Hook_Regs
-	r := run(it.src, it.pos, S, opts, b, &regs, on_row, true, b.keys, b.width)
-	b.n = int(regs.b)
-	if f := core.fault_of(r, &RULES); f != nil {
-		b.done, b.fault = true, f
+}
+
+// Splits `row` into `b.cells`, which grows to hold them all. Returns the cell count, or false when they do not fit in
+// memory.
+@(private)
+split_all :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, $S: Spec, opts: Options, role: core.Role) -> (int, bool) {
+	for {
+		sp := Split{out = b.cells}
+		if _, a := split_cells(it.src, row, S, opts, role, &sp, {}, on_split); a != .Stop {
+			return sp.n, true
+		}
+		grown, err := make([]core.Token, max(2 * len(b.cells), 64), it.allocator)
+		if err != nil {
+			return 0, false
+		}
+		delete(b.cells, it.allocator)
+		b.cells = grown
 	}
-	// A stopped walk returns the byte past the row end it stopped on. A restart reads no header.
-	it.pos = r >> 16
-	b.width = max(b.width, len(b.keys))
+}
+
+// A split's buffer: the first `n` tokens of `out` are the row's cells.
+@(private)
+Split :: struct {
+	out: []core.Token,
+	n:   int,
+}
+
+// The hook of a split into a buffer, which stops the split at a cell past the buffer's end.
+@(private)
+on_split :: proc "contextless" (s: ^Split, r: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
+	if s.n == len(s.out) {
+		return r, .Stop
+	}
+	s.out[s.n] = t
+	s.n += 1
+	return r, .Next
+}
+
+// Passes the cells of the judged row `row` to the hook `on` as `Plain` tokens of `role`, spelled as the hooked pass
+// spells them, and returns the hook's last action. The row starts outside a quoted field, so its quotes pair up from
+// its first byte.
+@(private)
+split_cells :: proc "contextless" (src: []u8, row: Batch_Row, $S: Spec, opts: Options, role: core.Role, h: ^$H, regs: core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (core.Hook_Regs, core.Action) #no_bounds_check {
+	T :: kernel.Tier(0)
+	base := raw_data(src)
+	lo, hi := int(row.at), int(row.hi)
+	delim := delimiter_of(S, opts)
+	lax := .Invalid_Utf8 in opts.tolerate
+	field_lo := lo
+	carry := false
+	regs := regs
+	a: core.Action
+	when S == .Csv {
+		in_quote, close, start: u64 = 0, 0, 1
+	}
+	for pos := lo; ; pos += 64 {
+		blk := kernel.load(base[pos:]) if len(src) - pos >= 64 else kernel.load_padded(T, src, pos)
+		live := bits_between(0, min(hi - pos, 64))
+		d := kernel.pack(kernel.eq(blk, delim)) & live
+		bs: u64
+		when S == .Csv {
+			// With no branch on the row's quotes, since a text's quoted cells fall in no pattern.
+			q := kernel.pack(kernel.eq(blk, '"')) & live
+			instr := kernel.prefix_xor(T, q) ~ in_quote
+			if .Bare_Quote in opts.tolerate {
+				// A quote the pass read as a tolerated bare quote is text, so the quotes pair up without it.
+				for {
+					bare := q & instr & ~((d & ~instr) << 1 | start | (q & ~instr) << 1 | close)
+					if bare == 0 {
+						break
+					}
+					q &~= bare & -bare
+					instr = kernel.prefix_xor(T, q) ~ in_quote
+				}
+			}
+			closing := q & ~instr
+			d &= ~instr
+			bs = (closing << 1 | close) & q
+			in_quote, close, start = u64(0) - (instr >> 63), closing >> 63, d >> 63
+		} else when S == .Tsv {
+			bs = kernel.pack(kernel.eq(blk, '\\')) & live
+		}
+		plain := bs == 0 && !carry
+		for d != 0 {
+			at := pos + int(intrinsics.count_trailing_zeros(d))
+			d &= d - 1
+			esc := !plain && span_esc(bs, pos, field_lo, at, carry)
+			if regs, a = on(h, regs, {u64(field_lo), u32(at - field_lo), .Plain, role, spelling(base, field_lo, at, esc, lax, S)}); a == .Stop {
+				return regs, a
+			}
+			field_lo = at + 1
+		}
+		if hi - pos <= 64 {
+			esc := !plain && span_esc(bs, pos, field_lo, hi, carry)
+			return on(h, regs, {u64(field_lo), u32(hi - field_lo), .Plain, role, spelling(base, field_lo, hi, esc, lax, S)})
+		}
+		carry = !plain && span_esc(bs, pos, field_lo, pos + 64, carry)
+	}
 }
 
 @(private)
@@ -162,15 +242,27 @@ next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
 	return {text = it.src[row.at:row.hi], at = row.at}, true
 }
 
-// The value tokens of `rec`, the row `next` gave last, or false for another.
+// The value tokens of `rec`, the row `next` gave last, or false for another or when they do not fit in memory.
 @(private)
 cells_of :: proc(it: ^records.Reader, rec: records.Record) -> ([]core.Token, bool) {
 	b := (^Batch)(it.format)
 	if b == nil || b.at == 0 || b.rows[b.at - 1].at != rec.at {
 		return nil, false
 	}
-	lo := b.rows[b.at - 2].end if b.at > 1 else 0
-	return b.cells[lo:b.rows[b.at - 1].end], true
+	if b.split_row != b.at {
+		spec, opts := read_layout(it.as.read)
+		ok: bool
+		switch spec {
+		case .Csv:   b.split, ok = split_all(it, b, b.rows[b.at - 1], .Csv, opts, .Value)
+		case .Tsv:   b.split, ok = split_all(it, b, b.rows[b.at - 1], .Tsv, opts, .Value)
+		case .Plain: b.split, ok = split_all(it, b, b.rows[b.at - 1], .Plain, opts, .Value)
+		}
+		if !ok {
+			return nil, false
+		}
+		b.split_row = b.at
+	}
+	return b.cells[:b.split], true
 }
 
 @(private)
@@ -191,13 +283,29 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 	return -1
 }
 
+// A cell below the split buffer's length splits the row only up to it.
 @(private)
 cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) {
+	b := (^Batch)(it.format)
+	spec := Spec(it.as.read.spec)
+	if b != nil && b.split_row != b.at && b.at > 0 && b.rows[b.at - 1].at == rec.at && 0 <= column && column < len(b.cells) {
+		_, opts := read_layout(it.as.read)
+		sp := Split{out = b.cells[:column + 1]}
+		switch spec {
+		case .Csv:   split_cells(it.src, b.rows[b.at - 1], .Csv, opts, .Value, &sp, {}, on_split)
+		case .Tsv:   split_cells(it.src, b.rows[b.at - 1], .Tsv, opts, .Value, &sp, {}, on_split)
+		case .Plain: split_cells(it.src, b.rows[b.at - 1], .Plain, opts, .Value, &sp, {}, on_split)
+		}
+		if sp.n <= column {
+			return "", false
+		}
+		return cell_text(it.src, sp.out[column], spec, buf)
+	}
 	cells, ok := cells_of(it, rec)
 	if !ok || column < 0 || column >= len(cells) {
 		return "", false
 	}
-	return cell_text(it.src, cells[column], Spec(it.as.read.spec), buf)
+	return cell_text(it.src, cells[column], spec, buf)
 }
 
 // Builds `rec`, the row `next` gave last, as a document over the whole input: a `Map` keyed by the header's cells, or an
@@ -257,7 +365,6 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 		return false
 	}
 	b := (^Batch)(it.format)
-	cells, _ := cells_of(it, rec)
 	h.r.token_doc.read.spec = u8(spec)
 	h.no_header = opts.no_header || h.opens == .Array
 	if !h.no_header {
@@ -282,10 +389,11 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 		}
 	}
 	if action == .Next {
-		for t in cells {
-			if regs, action = on_cell(&h, regs, t); action == .Stop {
-				break
-			}
+		row := b.rows[b.at - 1]
+		switch spec {
+		case .Csv:   regs, action = split_cells(it.src, row, .Csv, opts, .Value, &h, regs, on_cell)
+		case .Tsv:   regs, action = split_cells(it.src, row, .Tsv, opts, .Value, &h, regs, on_cell)
+		case .Plain: regs, action = split_cells(it.src, row, .Plain, opts, .Value, &h, regs, on_cell)
 		}
 		if action != .Stop {
 			regs, _ = row_token(&h, regs, {kind = .End, role = .Value, lo = rec.at + u64(len(rec.text))})
