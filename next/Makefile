@@ -1,5 +1,8 @@
 ODIN ?= $(or $(wildcard $(abspath ../../Odin-master/bin/odin)),odin)
 
+# A plain `make` runs the gate.
+.DEFAULT_GOAL := gate
+
 # The library packages, and the test packages that read them.
 LIB_PKGS  := core/spell core host core/kernel core/compose core/build core/typed core/write core/records json dsv
 TEST_PKGS := core/spell/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test
@@ -117,12 +120,15 @@ $(TSAN_TARGETS): $(BUILD)/test/tsan/%:
 lint:
 	python3 tools/checks.py imports
 	python3 tools/checks.py words
+	python3 tools/checks.py globals
+	python3 tools/checks.py api
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS),)
 	$(ODIN) check bench $(LINT_FLAGS)
 	$(ODIN) check bench/doc $(LINT_FLAGS)
 	$(ODIN) check bench/editbench $(LINT_FLAGS)
 	$(ODIN) check bench/paths $(LINT_FLAGS)
 	$(ODIN) check bench/records $(LINT_FLAGS)
+	$(ODIN) check bench/typed $(LINT_FLAGS)
 	$(ODIN) check bench/write $(LINT_FLAGS)
 	$(ODIN) check cmd/stury $(LINT_FLAGS)
 	$(ODIN) check cmd/stury $(LINT_FLAGS) -target:linux_amd64
@@ -140,7 +146,8 @@ lint:
 size:
 	python3 tools/checks.py size
 
-# The public declarations of each library package, sorted, so a review can diff the surface.
+# The public declarations of each library package, sorted. `api` compares their signatures with API.txt, and
+# `python3 tools/checks.py api --write` regenerates it.
 surface:
 	python3 tools/checks.py surface
 

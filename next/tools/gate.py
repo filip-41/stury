@@ -16,9 +16,12 @@ import dataclasses
 import hashlib
 import os
 import re
+import platform
 import subprocess
 import sys
 import time
+
+from checks import makefile_list
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(ROOT)
@@ -28,9 +31,10 @@ DEFAULT_ODIN = os.path.join(os.path.dirname(REPO), "Odin-master", "bin", "odin")
 TIERS = {"quick": 0, "merge": 1, "full": 2}
 HOST = "arm64"
 
-TEST_PKGS = ["core/spell/test", "host/test", "core/kernel/test", "core/test", "core/write/test", "core/records/test", "json/test", "dsv/test"]
-TSAN_PKGS = ["host/test"]
-LIB_PKGS = ["core/spell", "core", "host", "core/kernel", "core/compose", "core/build", "core/typed", "core/write", "core/records", "json", "dsv", "walktest"]
+# The Makefile keeps the package lists.
+TEST_PKGS = makefile_list("TEST_PKGS")
+TSAN_PKGS = makefile_list("TSAN_PKGS")
+LIB_PKGS = makefile_list("LIB_PKGS") + makefile_list("SUPPORT_PKGS")
 CLI = "cmd/stury"
 BENCH_PKGS = ["bench", "bench/doc", "bench/editbench", "bench/paths", "bench/typed", "bench/write", "bench/records"]
 
@@ -55,6 +59,7 @@ class Check:
     cwd: str = ROOT
     arch: str = HOST
     trees: list = dataclasses.field(default_factory=list)  # Whole directories, hashed as they are.
+    also: str = ""  # A second architecture whose sources the check compiles.
 
 
 def strip_comments(text):
@@ -149,6 +154,8 @@ def key_of(check, odin_id):
     digest.update(repr(check.cmd).encode())
     hash_tree(digest, os.path.join(check.cwd, "Makefile"))
     hash_closure(digest, check.roots, check.arch)
+    if check.also:
+        hash_closure(digest, check.roots, check.also)
     for tree in check.trees:
         hash_tree(digest, tree)
     return digest.hexdigest()
@@ -172,26 +179,32 @@ def make(odin, target, **variables):
     return ["make", "-s", f"ODIN={odin}", target] + [f"{k}={v}" for k, v in variables.items()]
 
 
+def rosetta():
+    """Whether this machine runs x86-64 programs."""
+    return platform.machine() == "x86_64" or os.path.exists("/Library/Apple/usr/libexec/oah/libRosettaRuntime")
+
+
 def checks(odin, seed):
     """Every check, cheapest stage first. Each package is its own check, so a diff reruns only what imports it."""
     out = []
     every = [at(p) for p in LIB_PKGS + TEST_PKGS + BENCH_PKGS + [CLI]]
-    out.append(Check("lint", 0, 0, every, make(odin, "lint"), trees=[at("tools/checks.py")]))
-    out.append(Check("size", 0, 0, [at(p) for p in LIB_PKGS + [CLI]], ["python3", "tools/checks.py", "size"]))
+    out.append(Check("lint", 0, 0, every, make(odin, "lint"), trees=[at("tools/checks.py"), at("API.txt")], also="amd64"))
+    out.append(Check("size", 0, 0, [at(p) for p in LIB_PKGS + [CLI]], ["python3", "tools/checks.py", "size"], trees=[at("tools/checks.py")]))
     if os.path.isdir(at(CLI)):
         out.append(Check("cli build", 1, 0, [at(CLI)], make(odin, "build-cli")))
     for package in TEST_PKGS:
         name = package.replace("/", "-")
         root = [at(package)]
-        out.append(Check(f"{name} minimal", 1, 0, root, make(odin, f"build/test/minimal/{package}")))
-        out.append(Check(f"{name} speed", 2, 1, root, make(odin, f"build/test/speed/{package}")))
-        out.append(Check(f"{name} asan", 3, 1, root, make(odin, f"build/test/asan/{package}")))
+        golden = [at("json/test/golden")] if package == "json/test" else []
+        out.append(Check(f"{name} minimal", 1, 0, root, make(odin, f"build/test/minimal/{package}"), trees=golden))
+        out.append(Check(f"{name} speed", 2, 1, root, make(odin, f"build/test/speed/{package}"), trees=golden))
+        out.append(Check(f"{name} asan", 3, 1, root, make(odin, f"build/test/asan/{package}"), trees=golden))
         if package in TSAN_PKGS:
             out.append(Check(f"{name} tsan", 3, 1, root, make(odin, f"build/test/tsan/{package}")))
-        for opt in ("none", "speed"):
+        for opt in ("none", "speed") if rosetta() else ():
             for tier in (0, 1):
                 target = f"build/test/x86/{opt}/{tier}/{package}"
-                out.append(Check(f"{name} x86 v{tier + 2} {opt}", 3, 1, root, make(odin, target), arch="amd64"))
+                out.append(Check(f"{name} x86 v{tier + 2} {opt}", 3, 1, root, make(odin, target), arch="amd64", trees=golden))
     # Alone in the last stage, since it fills every core.
     out.append(Check("f32 exhaustive", 4, 2, [at("core/spell"), at("core/spell/test")], make(odin, "test-f32")))
     if os.path.isdir(PRIVATE):

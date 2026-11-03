@@ -135,9 +135,9 @@ Run from `next/`. `ODIN` names the compiler, as in `make ODIN=/path/to/odin test
 | `test-asan` | the test packages under the address sanitizer |
 | `test-f32` | every binary32 pattern written, read back and checked shortest, on `F32_THREADS` threads; `gate full` runs it |
 | `test-x86` | the tests for x86-64 tiers v2 and v3, at `-o:none` and `-o:speed`, under Rosetta on Apple silicon |
-| `lint` | the import order and vet with the unused-import flag on the host, x86-64 and riscv64, and the v4 kernel tests as objects |
-| `size` | the lean lines of each library package, their sum and the 18,500 budget, and a failure past it |
-| `surface` | each library package's public declarations, sorted, for a review to diff |
+| `lint` | the import order, no mutable package-level state, the signatures against `API.txt`, and vet with the unused-import flag on the host, x86-64 and riscv64, and the v4 kernel tests as objects |
+| `size` | the lean lines of each library package, their sum and the 20,500 budget, and a failure past it |
+| `surface` | each library package's public declarations, sorted, for a review to diff; `python3 tools/checks.py api --write` regenerates `API.txt` |
 | `bench` | the kernel and number-text timings, with `TIER` and `ROUNDS` |
 | `fixtures` | fetches the pinned corpus and the other libraries' sources, and generates the synthetic fixtures |
 | `bench-doc` | the document lanes (build, read, key) beside yyjson, simdjson and sonic-rs, with `ROUNDS` and `BENCH_FILES` |
