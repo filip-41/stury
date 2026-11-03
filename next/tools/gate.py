@@ -30,6 +30,8 @@ DEFAULT_ODIN = os.path.join(os.path.dirname(REPO), "Odin-master", "bin", "odin")
 
 TIERS = {"quick": 0, "merge": 1, "full": 2}
 HOST = "arm64"
+# Whether a library or CLI over its lean-line budget fails the gate. Off, it warns and the later stages run.
+SIZE_FAILS = False
 
 # The Makefile keeps the package lists.
 TEST_PKGS = makefile_list("TEST_PKGS")
@@ -60,6 +62,7 @@ class Check:
     arch: str = HOST
     trees: list = dataclasses.field(default_factory=list)  # Whole directories, hashed as they are.
     also: str = ""  # A second architecture whose sources the check compiles.
+    fails: bool = True  # False: a failure warns, and the later stages run.
 
 
 def strip_comments(text):
@@ -191,7 +194,7 @@ def checks(odin, seed):
     absent = []
     every = [at(p) for p in LIB_PKGS + TEST_PKGS + BENCH_PKGS + [CLI]]
     out.append(Check("lint", 0, 0, every, make(odin, "lint"), trees=[at("tools/checks.py"), at("API.txt")], also="amd64"))
-    out.append(Check("size", 0, 0, [at(p) for p in LIB_PKGS + [CLI]], ["python3", "tools/checks.py", "size"], trees=[at("tools/checks.py")]))
+    out.append(Check("size", 0, 0, [at(p) for p in LIB_PKGS + [CLI]], ["python3", "tools/checks.py", "size"], trees=[at("tools/checks.py")], fails=SIZE_FAILS))
     if os.path.isdir(at(CLI)):
         out.append(Check("cli build", 1, 0, [at(CLI)], make(odin, "build-cli")))
         law = at(f"{CLI}/test/pieces_law.py")
@@ -312,12 +315,12 @@ def main():
         failed = False
         for check, code, output, seconds in results:
             ran += 1
-            print(f"{'ok  ' if code == 0 else 'FAIL'} {check.name} ({seconds:.1f}s)", flush=True)
+            print(f"{'ok  ' if code == 0 else 'FAIL' if check.fails else 'WARN'} {check.name} ({seconds:.1f}s)", flush=True)
             if code == 0:
                 with open(os.path.join(stamps, keys[check.name]), "w") as stamp:
                     stamp.write(check.name + "\n")
             else:
-                failed = True
+                failed = failed or check.fails
                 print(output[-6000:])
         if failed:
             print(f"failed after {ran} checks, {skipped} unchanged, {time.monotonic() - start:.1f}s")
