@@ -33,6 +33,12 @@ NODE_ROOM :: write.LINE_ROOM + 64
 ROW_ROOM_SHIFT :: 12
 #assert(TOKEN_LONG + write.LINE_ROOM + NODE_ROOM <= 1 << ROW_ROOM_SHIFT && 1 << ROW_ROOM_SHIFT <= write.ROOM_MAX)
 
+// The largest source `write_text` copies, and the room it leaves past its end, which a row's block copy and string test read.
+@(private)
+SRC_COPY :: 1 << 10
+@(private)
+COPY_ROOM :: COPY_MIN + 16
+
 // An open container: the node its subtree ends before, and its close bracket.
 @(private)
 Open :: struct {
@@ -384,8 +390,16 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 	}
 	// The stack holds the open containers and the sentinel under them.
 	local: [core.MAX_DEPTH + 1]Open = ---
+	// A small source is copied to room past its end, so no row is near enough to the end to take the rare path.
+	copied: [SRC_COPY + COPY_ROOM]u8 = ---
+	read := doc.src
+	if len(read) <= SRC_COPY {
+		copy(copied[:], read)
+		intrinsics.mem_zero(raw_data(copied[len(read):]), COPY_ROOM)
+		read = copied[:len(read) + COPY_ROOM]
+	}
 	e: Emit
-	if !put_start(&e, &out, doc.src, doc, opts, local[:], core.reserve_depth(doc.as.max_depth, len(doc.nodes))) {
+	if !put_start(&e, &out, read, doc, opts, local[:], core.reserve_depth(doc.as.max_depth, len(doc.nodes))) {
 		write.destroy(&out)
 		return nil, 0, {kind = .Out_Of_Memory}
 	}
@@ -402,11 +416,11 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 // The first row `rows_run` leaves to the rare path because a block copy of it or a later row would load past the source.
 // Scalar rows are in source order, so one that fits has only fitting rows before it.
 @(private)
-rows_stop :: proc(doc: ^core.Document) -> u32 {
+rows_stop :: proc(doc: ^core.Document, room: int) -> u32 {
 	stop := len(doc.nodes)
 	for ; stop > 0; stop -= 1 {
 		t := &doc.nodes[stop - 1]
-		if t.kind < .Array && t.role != .Key && t.lo + max(u64(t.n), COPY_MIN) + 16 <= u64(len(doc.src)) {
+		if t.kind < .Array && t.role != .Key && t.lo + max(u64(t.n), COPY_MIN) + 16 <= u64(room) {
 			break
 		}
 	}
@@ -422,7 +436,7 @@ rows_stop :: proc(doc: ^core.Document) -> u32 {
 rows :: proc(e: ^Emit, doc: ^core.Document, node: u32) -> core.Typed_Error_Kind {
 	count := u32(len(doc.nodes))
 	// No chunk runs past the subtree, since `rows_run` writes on past the close of the container it entered first.
-	stop := min(rows_stop(doc), node + (1 if doc.nodes[node].kind < .Array else doc.nodes[node].n))
+	stop := min(rows_stop(doc, len(e.src)), node + (1 if doc.nodes[node].kind < .Array else doc.nodes[node].n))
 	c := &e.c
 	if kind := rare_row(e, doc.nodes[node], node); kind != .None {
 		return kind

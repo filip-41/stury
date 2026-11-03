@@ -898,6 +898,10 @@ writes_stop_at_the_end_of_a_page :: proc(t: ^testing.T) {
 	for text in WRITE_TEXTS {
 		append(&texts, text)
 	}
+	// The sizes around the one a small text is copied up to.
+	for n in 1000 ..< 1030 {
+		append(&texts, strings.concatenate({`["`, strings.repeat("a", n, context.temp_allocator), `"]`}, context.temp_allocator))
+	}
 	for n in 0 ..< 200 {
 		append(&texts, strings.concatenate({`["`, strings.repeat("a", n, context.temp_allocator), `"]`}, context.temp_allocator))
 		append(&texts, strings.concatenate({"[", strings.repeat("1,", n, context.temp_allocator), "1]"}, context.temp_allocator))
