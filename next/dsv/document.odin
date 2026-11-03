@@ -56,6 +56,7 @@ SPELLING := core.Spelling {
 	validate   = validate_as,
 	scan       = scan_as,
 	resolve    = spelling_resolve,
+	resolves   = proc "contextless" (as: core.As) -> bool {return options_of(as).infer},
 	close_end  = close_end,
 	query      = build.query,
 	edit       = &EDIT,
@@ -384,10 +385,7 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 		return n.kind
 	}
 	// A key cell is text, as a JSON key node is, since a header cell names a column whatever it spells.
-	if n.role != .Value {
-		return .String
-	}
-	if !options_of(doc.as).infer {
+	if n.role != .Value || !options_of(doc.as).infer {
 		return .String
 	}
 	s := doc.src[n.lo:n.lo + u64(n.n)]

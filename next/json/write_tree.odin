@@ -35,6 +35,7 @@ Tree :: struct {
 	keep:    bool, // facts are written as comments
 	respell: bool, // JSON5's spelling of a string and a number is spelled again for JSON
 	copy:    bool, // a string is written as it was authored
+	resolve: bool, // a `Plain` cell is written as `core.resolve` reads it, else as text
 }
 
 // A member of a `Map` as the tree writer orders them. `name` is the decoded key under `sort_keys`.
@@ -61,6 +62,7 @@ write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, stream: io.Str
 	w.keep = w.json && as != .Json
 	w.respell = w.json && Spec(doc.as.spec) == .Json5 && as != .Json5
 	w.copy = w.json && !w.respell && copies_strings(opts)
+	w.resolve = doc.spelling.resolves != nil && doc.spelling.resolves(doc.as)
 	if w.keep {
 		root := doc.nodes[node]
 		_, w.close = core.scalar_ends(root)
@@ -251,9 +253,7 @@ tree_scalar :: proc(w: ^Tree, i: core.Node_Index, t: core.Token) -> bool {
 		return tree_number(w, t)
 	}
 	cell := t
-	if cell.kind == .Plain {
-		cell.kind = core.resolve(w.doc, i)
-	}
+	cell.kind = core.resolve(w.doc, i) if t.kind == .Plain && w.resolve else t.kind
 	w.kind = put_token(w.out, w.doc.src, w.doc, i, cell, w.opts, w.json, w.copy)
 	return w.kind == .None
 }

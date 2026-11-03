@@ -236,7 +236,8 @@ Duplicates :: enum u8 {
 // `build` reads a text into a document and `validate` judges one without building, each as the handle says, see
 // `core.build` and `core.validate`. `scan` reads paths over a text as the handle says into a partial document, or gives
 // each answer to `on` when it is set, see `core/build`'s `scan` and `each_answer`. `resolve` returns what a `Plain` node
-// is. `close_end` returns the byte just past a container's closing bytes, found
+// is, and `resolves` whether it can return anything but `.String` under handle `as`, nil for a format with no `Plain`
+// nodes, so a writer asks once per text. `close_end` returns the byte just past a container's closing bytes, found
 // from its last descendant or its open, over the whitespace and comments the format allows there, the root's close is
 // `Document.root_close`, so a service may return it without a scan. `edit` points at the
 // format's edit services, nil for a format that accepts no edits. `tag_key` is the format's own struct tag key, and
@@ -254,6 +255,7 @@ Spelling :: struct {
 	validate:   proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
 	scan:       proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error),
 	resolve:    proc(doc: ^Document, i: Node_Index) -> Kind,
+	resolves:   proc "contextless" (as: As) -> bool,
 	close_end:  proc(doc: ^Document, i: Node_Index) -> u64,
 	query:      proc(doc: ^Document, paths: []Path, read: Query_Options, allocator: runtime.Allocator) -> (answers: []Answer, err: Path_Error),
 	edit:       ^Edit_Spelling,

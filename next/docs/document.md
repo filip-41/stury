@@ -281,7 +281,7 @@ ill-formed sequence answer `.String`, since their span holds a quote, a backslas
 
 ## The spelling services
 
-A `Spelling` holds seven services, `text`, `key_equals`, `number`, `build`, `validate`, `resolve` and `close_end`, the `query` engine `core.query`
+A `Spelling` holds eight services, `text`, `key_equals`, `number`, `build`, `validate`, `resolve`, `resolves` and `close_end`, the `query` engine `core.query`
 dispatches through, which each format points at `core/build`'s, and a pointer to the format's `Edit_Spelling`. A document points at its format's table in rodata,
 one table for every spec of the format: a JSON token holds no form that only JSON5 reads, so `text` reads any JSON
 string, and dsv's `text` and `key_equals` read `Document.as.spec`, since a CSV backslash is a byte, a TSV
@@ -295,6 +295,7 @@ source and the handle, and the token by value, so a typed read hands them a walk
 | `key_equals` | compare an escaped key without decoding | the same over a quoted or escaped cell |
 | `number` | the recorded shape, else the token's grammar | a plain value cell that is exactly a JSON number |
 | `resolve` | the node's kind | what a `Plain` cell is |
+| `resolves` | nil, no `Plain` nodes | the handle's `infer`, so a writer reads every cell as text without asking `resolve` |
 | `close_end` | forward over trivia and inner closes | a record's line end, the text's end for the root |
 
 ```odin
