@@ -193,8 +193,9 @@ per register on every tier.
 ## Escapes
 
 `escaped` reads a block's escape mask and returns a mask of the bytes after odd runs of escapes, and carries through
-`odd` whether this block ended in such a run. It uses one add per parity, so a run of any length uses the same number
-of instructions.
+`odd` whether this block ended in such a run. One subtract borrows through every run at once, as in simdjson's escape
+scanner, so a run of any length uses the same number of instructions, and the carry into the next block passes through
+no add.
 
 ## UTF-8
 

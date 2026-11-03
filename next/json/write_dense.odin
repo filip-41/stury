@@ -26,10 +26,10 @@ DENSE_SEGMENT :: 2048
 #assert(DENSE_SEGMENT % 64 == 0 && DENSE_SEGMENT + 64 <= write.ROOM_MAX)
 
 // What a block carries to the next: whether the block ended inside a string, as all ones or zero, and whether it ended
-// in an odd run of backslashes.
+// in an odd run of backslashes. `escapes` is nonzero when the last run met a backslash, so the next takes the mask.
 @(private)
 Dense_State :: struct {
-	in_string, odd: u64,
+	in_string, odd, escapes: u64,
 }
 
 // Whether `src`, the text of `nodes` nodes of `doc`, is written by `write_dense` under `opts`. The source must be strict
@@ -53,78 +53,76 @@ dense_sample :: proc "contextless" (src: []u8) -> bool {
 	scratch: [DENSE_SEGMENT + 64]u8 = ---
 	state: Dense_State
 	hi := min(len(src), DENSE_SEGMENT)
-	kept := dense_run_tier(kernel.tier(), raw_data(scratch[:]), src, 0, hi, &state)
+	kept, _ := dense_run_tier(kernel.tier(), raw_data(scratch[:]), src, 0, hi, &state, true)
 	return (hi - kept) * 16 < hi
 }
 
 // Stores the blocks of `src` from `lo` to `hi` without their blanks outside strings, at `out`, which has room for
-// `hi - lo + 64` bytes. Returns the count of bytes stored. `hi` is a whole number of blocks past `lo`, or `len(src)`,
-// where the last block is the source's tail. A block's string mask comes from its quotes that no backslash escapes.
-// Inside a string a byte below 0x21 can only be a space, which the mask keeps.
+// `hi - lo + 64` bytes. Returns the count of bytes stored and where the run stopped. `hi` is a whole number of blocks
+// past `lo`, or `len(src)`, where the last block is the source's tail, padded with zeros that fall after the value and
+// so are dropped. A block's string mask comes from its quotes that no backslash escapes. Inside a string a byte below
+// 0x21 can only be a space, which the mask keeps. Without `ESCAPES` the run skips that mask and stops before the first
+// block that holds a backslash, and must start with `s.odd` clear.
 @(private)
-dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State) -> int #no_bounds_check {
-	in_string, odd := s.in_string, s.odd
-	w := 0
-	for i := lo; i < hi; i += 64 {
-		live := ~u64(0)
-		b: kernel.Block
-		if hi - i >= 64 {
-			b = kernel.load(raw_data(src)[i:])
-		} else {
-			b = kernel.load_padded(T, src, i)
-			live = 1 << u64(hi - i) - 1
-		}
+dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $ESCAPES: bool) -> (w, i: int) #no_bounds_check {
+	in_string, odd, escapes := s.in_string, s.odd, u64(0)
+	for i = lo; i < hi; i += 64 {
+		b := kernel.load(raw_data(src)[i:]) if hi - i >= 64 else kernel.load_padded(T, src, i)
 		m := kernel.pack_n([3]kernel.Block{kernel.eq(b, '"'), kernel.eq(b, '\\'), kernel.below(b, ' ' + 1)})
-		quotes := m[0] &~ kernel.escaped(m[1], &odd)
+		escapes |= m[1]
+		if !ESCAPES && escapes != 0 {
+			break
+		}
+		quotes := m[0] &~ (kernel.escaped(m[1], &odd) if ESCAPES else 0)
 		inside := kernel.prefix_xor(T, quotes) ~ in_string
 		in_string = u64(i64(inside) >> 63)
 		drop := m[2] &~ inside
-		if drop == 0 && live == ~u64(0) {
+		if drop == 0 {
 			intrinsics.unaligned_store((^kernel.Block)(out[w:]), b)
 			w += 64
 		} else {
-			w += kernel.compress(b, ~drop & live, out[w:])
+			w += kernel.compress(b, ~drop, out[w:])
 		}
 	}
-	s^ = {in_string, odd}
-	return w
+	s^ = {in_string, odd, escapes}
+	return
 }
 
 // `dense_run` has a copy per x86 tier, each out of line with the tier's target features, so its 64-lane operations use
 // the tier's registers.
 when ODIN_ARCH == .amd64 {
 	@(private, enable_target_feature = kernel.FEATURES[.V2])
-	dense_run_v2 :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State) -> int {
-		return dense_run(.V2, out, src, lo, hi, s)
+	dense_run_v2 :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: bool) -> (int, int) {
+		return dense_run(.V2, out, src, lo, hi, s, E)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V3])
-	dense_run_v3 :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State) -> int {
-		return dense_run(.V3, out, src, lo, hi, s)
+	dense_run_v3 :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: bool) -> (int, int) {
+		return dense_run(.V3, out, src, lo, hi, s, E)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V4])
-	dense_run_v4 :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State) -> int {
-		return dense_run(.V4, out, src, lo, hi, s)
+	dense_run_v4 :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: bool) -> (int, int) {
+		return dense_run(.V4, out, src, lo, hi, s, E)
 	}
 } else {
 	@(private)
-	dense_run_base :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State) -> int {
-		return dense_run(.Base, out, src, lo, hi, s)
+	dense_run_base :: #force_no_inline proc "contextless" (out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: bool) -> (int, int) {
+		return dense_run(.Base, out, src, lo, hi, s, E)
 	}
 }
 
 @(private)
-dense_run_tier :: #force_inline proc "contextless" (tier: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State) -> int {
+dense_run_tier :: #force_inline proc "contextless" (tier: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $E: bool) -> (int, int) {
 	when ODIN_ARCH == .amd64 {
 		switch tier {
 		case .V4:
-			return dense_run_v4(out, src, lo, hi, s)
+			return dense_run_v4(out, src, lo, hi, s, E)
 		case .V3:
-			return dense_run_v3(out, src, lo, hi, s)
+			return dense_run_v3(out, src, lo, hi, s, E)
 		case .V2:
 		}
-		return dense_run_v2(out, src, lo, hi, s)
+		return dense_run_v2(out, src, lo, hi, s, E)
 	} else {
-		return dense_run_base(out, src, lo, hi, s)
+		return dense_run_base(out, src, lo, hi, s, E)
 	}
 }
 
@@ -136,7 +134,12 @@ write_dense :: proc(out: ^write.Out, src: []u8) {
 	i := 3 if len(src) >= 3 && src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF else 0
 	for i < len(src) {
 		hi := min(i + DENSE_SEGMENT, len(src))
-		out.cursor += dense_run_tier(tier, write.room(out, hi - i + 64), src, i, hi, &state)
+		at, w := write.room(out, hi - i + 64), 0
+		if state.escapes == 0 {
+			w, i = dense_run_tier(tier, at, src, i, hi, &state, false)
+		}
+		n, _ := dense_run_tier(tier, at[w:], src, i, hi, &state, true)
+		out.cursor += w + n
 		i = hi
 	}
 }

@@ -102,6 +102,28 @@ write_dense_string_edges :: proc(t: ^testing.T) {
 	}
 }
 
+// A backslash run ends at each offset around the end of the writer's first 2 KB, whose escape state the next 2 KB take.
+@(test)
+write_dense_segment_edges :: proc(t: ^testing.T) {
+	for n in 2030 ..< 2060 {
+		for piece in ([]string{`\" ", " "`, `\\", " "`, `\\\" ", " "`}) {
+			b: strings.Builder
+			defer strings.builder_destroy(&b)
+			strings.write_byte(&b, '"')
+			for _ in 0 ..< n {
+				strings.write_byte(&b, 'a')
+			}
+			strings.write_string(&b, piece)
+			src: [dynamic]u8
+			defer delete(src)
+			dense_text(&src, transmute([]u8)strings.to_string(b))
+			if !check_dense(t, src[:]) {
+				return
+			}
+		}
+	}
+}
+
 // A document read tolerating ill-formed UTF-8 is written as it decodes, so it does not take the dense path.
 @(test)
 write_dense_tolerant_read :: proc(t: ^testing.T) {

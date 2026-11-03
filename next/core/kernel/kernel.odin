@@ -92,21 +92,18 @@ classes :: #force_inline proc "contextless" ($T: Tier, b: Block, t: Nibble_Table
 	return transmute(Block)c
 }
 
-// Returns a mask of the bytes after an odd run of escape bytes. Adding a run's first bit to the escapes clears the
-// run and sets the bit after it, an odd distance from the first bit when the run is odd: an odd bit after a run
-// starting on an even bit, an even bit after a run starting on an odd bit. A run reaching the end of the block is odd
-// only when it starts on an odd bit, so the carry out of that add becomes the next block's `odd`. When `*odd` is
-// set, bit 0 continues the previous run, counts as an odd start and is treated as escaped if it is not an escape. On
-// return `*odd` says whether this block ends in a run of odd length.
+// Returns a mask of the bytes after an odd run of escape bytes. Each escape that `*odd` does not escape (bit 0 only)
+// is a candidate, and subtracting the candidates from their own bits moved up one, with every odd bit set, borrows
+// through each run: past a run the result's bit differs from the odd pattern exactly at the escape bytes that open an
+// escape and at the byte each escapes. When `*odd` is set, bit 0 continues the previous run and is escaped if it is
+// not an escape. On return `*odd` says whether this block ends in a run of odd length.
 escaped :: #force_inline proc "contextless" (escape: u64, odd: ^u64) -> u64 {
-	EVEN :: u64(0x5555_5555_5555_5555)
-	starts := escape &~ (escape << 1)
-	even_starts_mask := EVEN ~ odd^
-	even_carries := escape + (starts & even_starts_mask)
-	odd_carries, overflow := intrinsics.overflow_add(escape, starts &~ even_starts_mask)
-	odd_carries |= odd^
-	odd^ = u64(overflow)
-	return (even_carries &~ escape & ~EVEN) | (odd_carries &~ escape & EVEN)
+	ODD :: u64(0xAAAA_AAAA_AAAA_AAAA)
+	candidates := escape &~ odd^
+	opens := ((candidates << 1 | ODD) - candidates) ~ ODD
+	after := opens ~ (escape | odd^)
+	odd^ = (opens & escape) >> 63
+	return after &~ escape
 }
 
 // Returns the index of the first byte `c` in `src`, or -1. Reads 64 bytes at a time with the CPU's tier.
