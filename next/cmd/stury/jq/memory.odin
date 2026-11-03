@@ -287,13 +287,9 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 		if m, ok := c.made[{x.doc, -1}]; ok {
 			return Ref{m.(Ref).doc, x.node}
 		}
-		// The nodes, the facts and the text. A document built whole has no path answers to copy.
 		d := new(core_pkg.Document)
-		d^ = {src = transmute([]byte)copy_string(c, string(x.doc.src)), as = x.doc.as, shared_keys = x.doc.shared_keys, root_close = x.doc.root_close, allocator = context.allocator}
-		d.nodes = slice.clone(x.doc.nodes)
-		d.facts = slice.clone(x.doc.facts)
-		d.counts = slice.clone(x.doc.counts)
-		d.nodes_alloc, d.facts_alloc, d.counts_alloc = d.nodes, d.facts, d.counts
+		d^, _ = core_pkg.clone(x.doc)
+		d.src = transmute([]byte)copy_string(c, string(x.doc.src))
 		c.made[{x.doc, -1}] = Ref{d, core_pkg.ROOT}
 		return Ref{d, x.node}
 	case Number:

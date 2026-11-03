@@ -602,6 +602,32 @@ document_outlives_path :: proc(t: ^testing.T) {
 	testing.expect_value(t, other, core.Presence.Not_Loaded)
 }
 
+// A clone keeps a read's answers and missing names once the original's memory is reused.
+@(test)
+clone_outlives_document :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":{"x":1},"b":[2]}`)
+	path, _ := core.parse_path(".a.host")
+	defer core.path_destroy(&path)
+	backing := make([]u8, 1 << 14)
+	defer delete(backing)
+	arena: mem.Arena
+	mem.arena_init(&arena, backing)
+	doc, err := json.scan(src, .Json, path, allocator = mem.arena_allocator(&arena))
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+	c, cerr := core.clone(&doc)
+	defer core.destroy(&c)
+	testing.expect_value(t, cerr, nil)
+	want := len(doc.nodes)
+	for &b in backing {
+		b = 0xAA
+	}
+	testing.expect_value(t, len(c.nodes), want)
+	testing.expect_value(t, len(c.answers), 1)
+	_, listed := core.member_of(&c, c.answers[0].owner, "host")
+	testing.expect_value(t, listed, core.Presence.Missing)
+	testing.expect_value(t, core.kind(&c, c.answers[0].owner), core.Kind.Map)
+}
+
 // `each_answer` gives the bytes `span` gives for the same value, a string's quotes and a container's brackets included.
 @(test)
 stream_spans_are_authored :: proc(t: ^testing.T) {

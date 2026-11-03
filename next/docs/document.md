@@ -12,7 +12,7 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 
 | File | Holds |
 |---|---|
-| `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `destroy`, the spelling tables |
+| `core/document.odin` | `Node`, `Document`, the readers, `Fact`, `destroy`, `clone`, the spelling tables |
 | `core/build/build.odin` | `Builder`, the hooks, `builder_start`, `builder_end`, the header row, the duplicate-key check |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`, `insert`, `remove`, `set_fact`, `remove_fact`, `commit` |
 | `core/compose/compose.odin` | a commit's container composition: members, junctions and the placement of facts |
@@ -83,8 +83,9 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
   count of every container whose count saturated `MAX_CHILDREN`, sorted by node, and are nil when no container is that
   wide.
 - `spelling` is a `^Spelling` that points at a format's table in rodata, and `allocator` is the one the build
-  received. `destroy` frees the three allocations and sets the document to zero. A reader that allocates takes its own
-  allocator.
+  received. `destroy` frees the three allocations and sets the document to zero. `clone` copies them, and a read's
+  answers block, into another allocator, so the original may go while the copy lives, and the copy borrows the same
+  `src`. A reader that allocates takes its own allocator.
 - `shared_keys` is the dsv header row's node, 0 for a text read without a header, for a partial document and for every
   JSON document.
 - `root_close` is one past the root value's authored bytes: the close of a root container, or the last byte of a root

@@ -2,6 +2,7 @@ package core
 
 import "base:runtime"
 import "core:io"
+import "core:slice"
 import spell "./spell"
 
 // A document holds a walk's tokens in walk order, 16 bytes per node, plus the facts beside them. `core/build`'s
@@ -309,19 +310,38 @@ Comment_Spelling :: enum u8 {
 
 // Frees `doc`'s node, fact and child-count allocations and sets `doc` to the zero value.
 destroy :: proc(doc: ^Document) {
-	if doc.nodes_alloc != nil {
-		delete(doc.nodes_alloc, doc.allocator)
-	}
-	if doc.facts_alloc != nil {
-		delete(doc.facts_alloc, doc.allocator)
-	}
-	if doc.counts_alloc != nil {
-		delete(doc.counts_alloc, doc.allocator)
-	}
-	if doc.reads_block != nil {
-		delete(doc.reads_block, doc.allocator)
-	}
+	// A nil slice frees nothing.
+	delete(doc.nodes_alloc, doc.allocator)
+	delete(doc.facts_alloc, doc.allocator)
+	delete(doc.counts_alloc, doc.allocator)
+	delete(doc.reads_block, doc.allocator)
 	doc^ = {}
+}
+
+// Returns a copy of `doc` whose nodes, facts, child counts and path answers are new allocations from `allocator`, so
+// `doc` may be destroyed while the copy lives. The text is not copied: the copy borrows `doc.src` as `doc` does.
+clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, err: runtime.Allocator_Error) {
+	c = doc^
+	c.allocator = allocator
+	c.nodes_alloc, c.facts_alloc, c.counts_alloc, c.reads_block = nil, nil, nil, nil
+	defer if err != nil {
+		destroy(&c)
+	}
+	c.nodes_alloc = slice.clone(doc.nodes, allocator) or_return
+	c.facts_alloc = slice.clone(doc.facts, allocator) or_return
+	c.counts_alloc = slice.clone(doc.counts, allocator) or_return
+	c.reads_block = runtime.make_aligned([]u8, len(doc.reads_block), 8, allocator) or_return
+	copy(c.reads_block, doc.reads_block)
+	c.nodes, c.facts, c.counts = c.nodes_alloc, c.facts_alloc, c.counts_alloc
+	// The answers, the kept children and the missing names' lists and bytes lie in `reads_block`, at the same offsets.
+	shift := uintptr(raw_data(c.reads_block)) - uintptr(raw_data(doc.reads_block))
+	c.answers = ([^]Answer)(uintptr(raw_data(doc.answers)) + shift)[:len(doc.answers)]
+	c.kept = ([^]Kept_Child)(uintptr(raw_data(doc.kept)) + shift)[:len(doc.kept)]
+	c.missing = ([^]Missing_Name)(uintptr(raw_data(doc.missing)) + shift)[:len(doc.missing)]
+	for &m in c.missing {
+		m.name = string(([^]u8)(uintptr(raw_data(m.name)) + shift)[:len(m.name)])
+	}
+	return
 }
 
 // Returns the kind of node `i`, or `.Null` when `i` is past the last node.

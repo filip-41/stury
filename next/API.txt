@@ -116,6 +116,7 @@ build :: proc(src: []u8, as: As, refuse_duplicates := false, allocator := contex
 child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
 child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool) {
 children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
+clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, err: runtime.Allocator_Error) {
 commit :: proc(list: ^Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
 destroy :: proc(doc: ^Document) {
 edit_list_destroy :: proc(list: ^Edit_List) {
