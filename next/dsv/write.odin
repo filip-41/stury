@@ -750,7 +750,7 @@ scan_text :: #force_inline proc(w: ^Rows, s: string) -> (special, high: bool) #n
 }
 
 // The token write of a delimited text: a scalar call is a cell, written by the rules of the typed write.
-@(private)
+@(private, rodata)
 TOKENS := write.Token_Spelling {
 	start  = tokens_start,
 	value  = token_cell,

@@ -22,7 +22,7 @@ TREE :: write.Tree {
 }
 
 // The token write of every JSON spec: a key and a string go through `put_string`.
-@(private)
+@(private, rodata)
 TOKENS := write.Token_Spelling {
 	tree  = TREE,
 	value = proc(t: ^write.Tokens, v: write.Scalar) -> core.Typed_Error_Kind {

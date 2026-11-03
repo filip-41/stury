@@ -98,15 +98,15 @@ ESC_SEQ: [256]u64 = {
 }
 
 @(private)
-SPACE: V = 0x20
+SPACE :: V(0x20)
 @(private)
-QUOTE: V = '"'
+QUOTE :: V('"')
 @(private)
-BACKSLASH: V = '\\'
+BACKSLASH :: V('\\')
 @(private)
-HIGH: V = 0x80
+HIGH :: V(0x80)
 @(private)
-PAD: V = 0x61
+PAD :: V(0x61)
 @(private)
 PAD_WORD :: u64(0x6161616161616161)
 
