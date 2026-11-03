@@ -595,7 +595,10 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 			regs, _ = row_token(&h, regs, {kind = .End, role = .Value, lo = at.hi})
 		}
 	}
-	err^ = typed.read_end(&h.r, regs, nil)
+	// A read with no refusal leaves `err` as the caller zeroed it.
+	if h.r.first.kind != .None {
+		err^ = typed.read_end(&h.r, regs, nil)
+	}
 	if stream {
 		// The errors name bytes of the joined text, which the window's own bytes replace.
 		place_error(it, b, row, err)
