@@ -354,12 +354,6 @@ as :: proc(spec: Spec) -> core.As {
 	return {&SPELLING, {spec = u8(spec)}}
 }
 
-// The spelling's `write`: node `node` of `doc` as the spec `read` names.
-@(private)
-write_spec :: proc(doc: ^core.Document, opts: core.Write_Options, read: core.Read_As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, core.Typed_Error) {
-	return write_text(doc, opts, Spec(read.spec), node, stream, allocator)
-}
-
 // The size to ask the output for: the source, and for pretty text what eight levels of indent make on each node.
 @(private)
 document_hint :: proc(src, nodes: int, opts: core.Write_Options) -> int {
@@ -370,9 +364,10 @@ document_hint :: proc(src, nodes: int, opts: core.Write_Options) -> int {
 	return hint
 }
 
-// Writes node `node` of `doc`, which `core.write` checked is a value the document holds.
+// The spelling's `write`: node `node` of `doc`, which `core.write` checked is a value the document holds, as the spec
+// `as` names.
 @(private)
-write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: Spec, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
+write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.Read_As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
 	if doc.partial && !opts.partial {
 		return nil, 0, {kind = .Unsupported}
 	}
@@ -386,7 +381,7 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: Spec, node
 	hint := document_hint(len(src), count, opts)
 	own := doc.spelling == &SPELLING
 	if doc.partial || document_cold(doc, opts, own, node) {
-		return write_tree(doc, opts, stream, allocator, .Json if doc.partial else as, node, hint)
+		return write_tree(doc, opts, stream, allocator, .Json if doc.partial else Spec(as.spec), node, hint)
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	out: write.Out
@@ -638,6 +633,6 @@ format :: proc(src: []u8, $S: Spec, opts := core.Write_Options{}, read := Option
 		return nil, {kind = .Walk if err.kind == .Walk else .Out_Of_Memory, at = err.at, inner = err.inner}
 	}
 	defer core.destroy(&doc)
-	text, _, werr := write_text(&doc, opts, S, core.ROOT, {}, allocator)
+	text, _, werr := write_text(&doc, opts, {spec = u8(S)}, core.ROOT, {}, allocator)
 	return text, werr
 }
