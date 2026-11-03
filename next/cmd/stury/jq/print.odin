@@ -3,11 +3,13 @@ package jq
 // Values printed as jq 1.8 prints them into a `write.Out`: its layout and its colours, strings in JSON's shortest
 // escapes, a number read or written in the program as its text, and a computed one in the library's layout. A container
 // of an input document is written by the library's document writer where that writes what jq prints, and everything
-// else token by token.
+// else token by token. DEL is written `\u007f`, as jq writes it.
 
 import "base:runtime"
+import "core:bytes"
 import "core:io"
 import "core:math"
+import "core:strings"
 import "../../../core/spell"
 import core_pkg "../../../core"
 import "../../../core/write"
@@ -174,7 +176,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 	if len(core_pkg.span(r.doc, r.node)) < STREAM_FROM {
 		text, _, err := core_pkg.write(r.doc, opts, as, r.node, heap)
 		defer delete(text, heap)
-		write.put_text(p.out, string(text))
+		put_written(p, string(text))
 		spill(p)
 		return err.kind == .None
 	}
@@ -187,7 +189,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 			}
 			p := (^Printer)(data)
 			p.streamed = true
-			write.put_text(p.out, string(b))
+			put_written(p, string(b))
 			spill(p)
 			return i64(len(b)), .None
 		},
@@ -195,6 +197,16 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 	_, err := core_pkg.write_stream(to_out, r.doc, opts, as, r.node, heap)
 	// Only an allocation fails, and the printer walks the value when the writer handed it nothing.
 	return err.kind == .None || p.streamed
+}
+
+// `text`, which the library's writer wrote, with jq's DEL. A comment keeps its own.
+@(private = "file")
+put_written :: proc(p: ^Printer, text: string) {
+	mark := p.out.cursor
+	write.put_text(p.out, text)
+	if !p.comments {
+		spell_del(p.out, mark)
+	}
 }
 
 // `text` in the colour `color`.
@@ -272,6 +284,32 @@ put_string :: proc(out: ^write.Out, s: string, opts: core_pkg.Write_Options) {
 	if json.put_string(out, s, {ascii = opts.ascii}) == .Bad_Utf8 {
 		out.cursor = mark
 		json.put_string(out, valid_utf8(s), {ascii = opts.ascii})
+	}
+	spell_del(out, mark)
+}
+
+// Each DEL written into the buffer output `out` past `mark` written again as `\u007f`, as jq writes it, where the
+// library's writer, as JSON lets it, leaves the byte as it is.
+@(private = "file")
+spell_del :: proc(out: ^write.Out, mark: int) {
+	at := bytes.index_byte(out.buf[mark:out.cursor], 0x7f)
+	if at < 0 {
+		return
+	}
+	heap := runtime.heap_allocator()
+	tail := string(bytes.clone(out.buf[mark + at:out.cursor], heap))
+	defer delete(tail, heap)
+	out.cursor = mark + at
+	rest := tail
+	for len(rest) > 0 {
+		i := strings.index_byte(rest, 0x7f)
+		if i < 0 {
+			write.put_text(out, rest)
+			return
+		}
+		write.put_text(out, rest[:i])
+		write.put_text(out, `\u007f`)
+		rest = rest[i + 1:]
 	}
 }
 
