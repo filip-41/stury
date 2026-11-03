@@ -53,3 +53,9 @@ prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64 {
 load_padded :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -> Block {
 	return copied_tail(src, lo)
 }
+
+// Runs `scan_loop`, the only tier's.
+@(private)
+scan :: #force_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) -> int {
+	return scan_loop(src, c, BACK)
+}

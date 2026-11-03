@@ -4,9 +4,9 @@
 package records
 
 import "base:runtime"
-import "core:bytes"
 import "core:io"
 import core ".."
+import "../kernel"
 import typed "../typed"
 
 // One record of the input. `text` is its bytes in the input and `at` the offset of its first byte from the input's
@@ -342,7 +342,7 @@ window_move :: proc(it: ^Reader) -> bool {
 		}
 		cut := it.filled
 		if stop != 0 {
-			if i := bytes.last_index_byte(it.buf[1:it.filled], stop); i >= 0 {
+			if i := kernel.last_index_byte(it.buf[1:it.filled], stop); i >= 0 {
 				cut = i + 2
 			} else if !it.eof {
 				continue

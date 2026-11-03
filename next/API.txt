@@ -193,7 +193,9 @@ escaped :: #force_inline proc (escape: u64, odd: ^u64) -> u64 {
 first_lane :: #force_inline proc (m: V) -> u64 {
 has :: #force_inline proc (c: Block, bits: u8) -> Block {
 head16 :: #force_inline proc (src: [^]u8, n: int) -> (v, live: V, ok: bool) #no_bounds_check {
+index_byte :: #force_inline proc (src: []u8, c: u8) -> int {
 is_ascii :: #force_inline proc (b: Block) -> bool {
+last_index_byte :: #force_inline proc (src: []u8, c: u8) -> int {
 load :: #force_inline proc (p: [^]u8) -> Block {
 load_padded :: #force_inline proc ($T: Tier, src: []u8, lo: int) -> Block {
 nibble_table :: proc(sets: []string) -> (t: Nibble_Table, bits: [8]u8) {

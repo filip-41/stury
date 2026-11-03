@@ -108,3 +108,47 @@ escaped :: #force_inline proc "contextless" (escape: u64, odd: ^u64) -> u64 {
 	odd^ = u64(overflow)
 	return (even_carries &~ escape & ~EVEN) | (odd_carries &~ escape & EVEN)
 }
+
+// Returns the index of the first byte `c` in `src`, or -1. Reads 64 bytes at a time with the CPU's tier.
+index_byte :: #force_inline proc "contextless" (src: []u8, c: u8) -> int {
+	return scan(src, c, false)
+}
+
+// Returns the index of the last byte `c` in `src`, or -1. Reads 64 bytes at a time back from the end.
+last_index_byte :: #force_inline proc "contextless" (src: []u8, c: u8) -> int {
+	return scan(src, c, true)
+}
+
+// The loop of `index_byte` and `last_index_byte`, which `scan` builds once per tier.
+@(private)
+scan_loop :: #force_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) -> int #no_bounds_check {
+	p := raw_data(src)
+	i := len(src)
+	when BACK {
+		for i >= 64 {
+			i -= 64
+			if m := pack(eq(load(p[i:]), c)); m != 0 {
+				return i + 63 - int(intrinsics.count_leading_zeros(m))
+			}
+		}
+		for i > 0 {
+			i -= 1
+			if p[i] == c {
+				return i
+			}
+		}
+	} else {
+		n := i
+		for i = 0; i + 64 <= n; i += 64 {
+			if m := pack(eq(load(p[i:]), c)); m != 0 {
+				return i + int(intrinsics.count_trailing_zeros(m))
+			}
+		}
+		for ; i < n; i += 1 {
+			if p[i] == c {
+				return i
+			}
+		}
+	}
+	return -1
+}

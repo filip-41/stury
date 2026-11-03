@@ -338,19 +338,13 @@ frame_line :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) #no_b
 // Returns the first offset at or past `lo` of byte `c` in `src`, or `len(src)`.
 @(private)
 find_byte :: #force_inline proc "contextless" (src: []u8, lo: u64, c: u8) -> u64 #no_bounds_check {
-	p := raw_data(src)
-	n := u64(len(src))
-	i := lo
-	for i + 64 <= n {
-		if m := kernel.pack(kernel.eq(kernel.load(p[i:]), c)); m != 0 {
-			return i + u64(intrinsics.count_trailing_zeros(m))
-		}
-		i += 64
+	if lo >= u64(len(src)) {
+		return lo
 	}
-	for i < n && p[i] != c {
-		i += 1
+	if i := kernel.index_byte(src[lo:], c); i >= 0 {
+		return lo + u64(i)
 	}
-	return i
+	return u64(len(src))
 }
 
 @(private)

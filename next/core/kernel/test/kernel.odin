@@ -302,3 +302,35 @@ compress_keeps_lanes_in_order :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// Checks `index_byte` and `last_index_byte` against a scalar scan on every prefix of random texts that hold the searched
+// byte, its neighbours and a byte with its top bit flipped, for the bytes a record ends on and the quote.
+@(test)
+index_byte_every_cut :: proc(t: ^testing.T) {
+	state := rand.create(7)
+	context.random_generator = rand.default_random_generator(&state)
+	buf: [200]u8
+	for c in ([3]u8{'\n', 0x1E, '"'}) {
+		near := [3]u8{c + 1, c - 1, c ~ 0x80}
+		for round in 0 ..< 40 {
+			// Early rounds are dense and later ones sparse, so the first hit falls in every block or in none.
+			for &b in buf {
+				b = c if rand.int_max(2 + round * 4) == 0 else near[rand.int_max(3)]
+			}
+			for cut in 0 ..= len(buf) {
+				for start in ([2]int{0, min(cut, 1)}) {
+					text := buf[start:cut]
+					first, last := -1, -1
+					for b, i in text {
+						if b == c {
+							first = first if first >= 0 else i
+							last = i
+						}
+					}
+					testing.expect_value(t, k.index_byte(text, c), first)
+					testing.expect_value(t, k.last_index_byte(text, c), last)
+				}
+			}
+		}
+	}
+}
