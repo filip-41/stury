@@ -43,21 +43,11 @@ number_spelling_exp :: #force_no_inline proc "contextless" (kind: Number_Spellin
 	return number_spelling(kind, int_digits, frac_digits) | core.NUMBER_EXP
 }
 
-// Calls `number5` with `$shape` true for a hook and false for `core.No_Hooks`.
-@(private)
-number5_h :: #force_inline proc "contextless" (p, end: [^]u8, $H: typeid) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind) {
-	when H == core.No_Hooks {
-		return number5(p, end, false)
-	} else {
-		return number5(p, end, true)
-	}
-}
-
 // `p` is at a number JSON's leaf refused or read only up to an `x`. Reads the JSON5 number, then what follows it.
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_number5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, spelling, kind := number5_h(p, end, H)
+	q, spelling, kind := number5(p, end, H != core.No_Hooks)
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
@@ -108,17 +98,14 @@ st_key5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 	kind: core.Fault_Kind
 	if p[0] == '\'' {
 		q, esc, lax, kind = string_long(w, p, end)
-		if kind != .None {
-			return fault(w, hs, q, kind)
-		}
 	} else {
 		q, esc, kind = ident5(p, end)
-		if kind != .None {
-			return fault(w, hs, q, kind)
-		}
-		if q == p {
-			return fault(w, hs, p, .Bad_Char, .Identifier)
-		}
+	}
+	if kind != .None {
+		return fault(w, hs, q, kind)
+	}
+	if q == p {
+		return fault(w, hs, p, .Bad_Char, .Identifier)
 	}
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
@@ -261,10 +248,7 @@ word5 :: proc "contextless" (p, end: [^]u8, word: string) -> (q: [^]u8, kind: co
 	if ok {
 		return q, .None
 	}
-	if q >= end {
-		return end, .Truncated
-	}
-	return q, .Bad_Number
+	return bad_or_truncated(q, end)
 }
 
 // Steps over the JSON5 escape at the backslash `e`: `\0` before no digit, `\x` and two hex digits, a backslash before
@@ -306,8 +290,7 @@ escape5 :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q
 	case c < 0x80:
 		return q[1:], .None, false
 	}
-	r, k, took := utf8_lax(q, end, tol)
-	return r, k, took
+	return utf8_lax(q, end, tol)
 }
 
 // Reads one character of an identifier at `q` that is no ASCII identifier byte: a `\u` escape or a UTF-8 character,

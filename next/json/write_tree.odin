@@ -270,13 +270,14 @@ tree_string :: proc(w: ^Tree, i: core.Node_Index) -> bool {
 tree_number :: proc(w: ^Tree, t: core.Token) -> bool {
 	lit := string(w.doc.src[t.lo:t.lo + u64(t.n)])
 	p := 1 if lit[0] == '+' || lit[0] == '-' else 0
-	switch number_spelling_of(t.spelling) {
+	spelling := number_spelling_of(t.spelling)
+	if spelling != .Json && lit[0] == '-' {
+		write.put_byte(w.out, '-')
+	}
+	switch spelling {
 	case .Json:
 		write.put_text(w.out, lit)
 	case .Decimal:
-		if lit[0] == '-' {
-			write.put_byte(w.out, '-')
-		}
 		if lit[p] == '.' {
 			write.put_byte(w.out, '0')
 		}
@@ -286,9 +287,6 @@ tree_number :: proc(w: ^Tree, t: core.Token) -> bool {
 			}
 		}
 	case .Hex:
-		if lit[0] == '-' {
-			write.put_byte(w.out, '-')
-		}
 		if !put_hex_decimal(w.out, lit[p + 2:]) {
 			w.kind = .Out_Of_Memory
 			return false

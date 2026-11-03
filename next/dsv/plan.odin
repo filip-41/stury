@@ -219,9 +219,7 @@ plan_cuts :: proc(p: ^Plan) -> bool {
 			compose.push(&cuts, e.node) or_return
 		}
 	}
-	if !slice.is_sorted(cuts[:]) {
-		slice.sort(cuts[:])
-	}
+	slice.sort(cuts[:])
 	// A cell the list both sets and removes is a conflict, whatever else the list does to its line's width.
 	writes, _ := make([dynamic]core.Node_Index, p.allocator)
 	for e in p.list.edits {
@@ -467,7 +465,11 @@ plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> bool {
 				}
 			} else {
 				if kept == 0 {
-					first, moved = cell_bytes(p, l.node + 1 + core.Node_Index(slot.old)), slot.old > 0
+					node := l.node + 1 + core.Node_Index(slot.old)
+					i, found := slice.binary_search_by(p.sets[:], node, proc(e: core.Edit, n: core.Node_Index) -> slice.Ordering {
+						return slice.cmp(e.node, n)
+					})
+					first, moved = p.sets[i].text if found else core.span(p.doc, node), slot.old > 0
 				}
 				kept += 1
 			}
@@ -495,15 +497,6 @@ plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> bool {
 		return refuse(p, {kind = .Bad_Width})
 	}
 	return true
-}
-
-// Returns the bytes cell `node` will hold.
-@(private = "file")
-cell_bytes :: proc(p: ^Plan, node: core.Node_Index) -> []u8 {
-	i, found := slice.binary_search_by(p.sets[:], node, proc(e: core.Edit, n: core.Node_Index) -> slice.Ordering {
-		return slice.cmp(e.node, n)
-	})
-	return p.sets[i].text if found else core.span(p.doc, node)
 }
 
 // Whether a line still reads as its record. An empty line is no record, so it keeps a cell and its one cell is not empty,

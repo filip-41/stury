@@ -108,23 +108,7 @@ decoded_escape :: #force_inline proc "contextless" (src: []u8, p, end: u64) -> (
 				unit = 0x10000 + (unit - 0xD800) * 0x400 + (low - 0xDC00)
 				next += 6
 			}
-			// A code unit outside the surrogate range writes as one to three UTF-8 bytes here, since the unit already is
-			// the rune's value.
-			if unit < 0x80 {
-				spelled[0] = u8(unit)
-				return spelled, 1, next
-			}
-			if unit < 0x800 {
-				spelled[0] = 0xC0 | u8(unit >> 6)
-				spelled[1] = 0x80 | u8(unit & 0x3F)
-				return spelled, 2, next
-			}
-			if unit < 0x10000 {
-				spelled[0] = 0xE0 | u8(unit >> 12)
-				spelled[1] = 0x80 | u8(unit >> 6 & 0x3F)
-				spelled[2] = 0x80 | u8(unit & 0x3F)
-				return spelled, 3, next
-			}
+			// A code unit outside the surrogate range already is the rune's value.
 			s, n := utf8.encode_rune(rune(unit))
 			return s, n, next
 		}

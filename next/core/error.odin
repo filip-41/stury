@@ -296,31 +296,25 @@ render_path :: proc(w: io.Writer, src: []u8, path: string, e: Path_Error, lines:
 // Writes `e`'s code: the path error's or the document error's, by `e.kind`.
 @(private)
 write_edit_code :: proc(w: io.Writer, e: Path_Edit_Error) -> io.Error {
-	switch e.kind {
-	case .None:
-		_, err := io.write_string(w, "none")
-		return err
+	#partial switch e.kind {
 	case .Path:
 		return write_path_code(w, e.path)
 	case .Edit:
 		return write_document_code(w, e.edit)
 	}
-	return nil
+	return write_coded(w, "", "none")
 }
 
 // Writes the rendered line of `e`, as `render_path` for a path error and `render_document` for an edit's.
 @(private)
 render_edit :: proc(w: io.Writer, src: []u8, path: string, e: Path_Edit_Error, lines: ^Lines = nil) -> io.Error {
-	switch e.kind {
-	case .None:
-		_, err := io.write_string(w, "No error")
-		return err
+	#partial switch e.kind {
 	case .Path:
 		return render_path(w, src, path, e.path, lines)
 	case .Edit:
 		return render_document(w, src, e.edit, lines)
 	}
-	return nil
+	return write_coded(w, "", "No error")
 }
 
 // How a typed read or write refuses. `.None` is no error. The kinds from `Bad_Utf8` on are a write's, and none of them
