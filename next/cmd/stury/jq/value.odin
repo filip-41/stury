@@ -427,14 +427,24 @@ has_repeated_key :: proc(r: Ref) -> bool {
 	}
 	it := Key_Iter{core_pkg.pairs(r.doc, r.node)}
 	if n <= 16 {
-		keys: [16]string
+		keys: [16]string = ---
+		// A key's length and end bytes set a bit, so only a key whose bit is set is compared with the ones before it.
+		seen: [4]u64
 		i := 0
 		for k in next_key(&it) {
-			for prev in keys[:i] {
-				if prev == k {
-					return true
+			h := u32(len(k))
+			if len(k) > 0 {
+				h = h * 7 + u32(k[0]) * 31 + u32(k[len(k) - 1]) * 131
+			}
+			bit := u64(1) << (h & 63)
+			if seen[(h >> 6) & 3] & bit != 0 {
+				for prev in keys[:i] {
+					if prev == k {
+						return true
+					}
 				}
 			}
+			seen[(h >> 6) & 3] |= bit
 			keys[i] = k
 			i += 1
 		}
