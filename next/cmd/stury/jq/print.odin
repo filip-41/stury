@@ -10,6 +10,7 @@ import "core:bytes"
 import "core:io"
 import "core:math"
 import "core:strings"
+import "core:mem"
 import "../../../core/spell"
 import core_pkg "../../../core"
 import "../../../core/write"
@@ -44,6 +45,10 @@ KEY_COLOR :: 7
 // The size from which the library's writer streams a value into the output, its stream buffer's.
 @(private = "file")
 STREAM_FROM :: 64 << 10
+
+// The size of the stack buffer a small value's text is written into.
+@(private = "file")
+FRAME_TEXT :: 8 << 10
 
 // The colour index of a container's punctuation and of a NaN's `null`.
 @(private = "file")
@@ -173,9 +178,21 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 	heap := runtime.heap_allocator()
 	// A value shorter than the library's stream buffer is written whole and copied, which takes one allocation of its
 	// size where a stream takes one of the buffer's.
-	if len(core_pkg.span(r.doc, r.node)) < STREAM_FROM {
-		text, _, err := core_pkg.write(r.doc, opts, as, r.node, heap)
-		defer delete(text, heap)
+	if size := len(core_pkg.span(r.doc, r.node)); size < STREAM_FROM {
+		// The writer's buffer is the value's size and a room. A value that fits the frame buffer with that is written
+		// in it, and a pretty layout that outgrows it is written again on the heap.
+		frame: [FRAME_TEXT]u8 = ---
+		arena: mem.Arena
+		mem.arena_init(&arena, frame[:])
+		on_heap := size + write.ROOM_MAX > FRAME_TEXT
+		text, _, err := core_pkg.write(r.doc, opts, as, r.node, heap if on_heap else mem.arena_allocator(&arena))
+		if !on_heap && err.kind != .None {
+			on_heap = true
+			text, _, err = core_pkg.write(r.doc, opts, as, r.node, heap)
+		}
+		defer if on_heap {
+			delete(text, heap)
+		}
 		put_written(p, string(text))
 		spill(p)
 		return err.kind == .None
