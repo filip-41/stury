@@ -276,7 +276,8 @@ window_settled :: proc(it: ^Reader, ok: bool, pos: u64, state: [2]u8) -> bool {
 			it.fault, it.src, it.eof = nil, nil, true
 			return true
 		}
-		if it.last || !walked || f.at + REACH <= n {
+		// A `Truncated` may name a byte far back, such as an opening quote, and the next bytes may close it.
+		if it.last || !walked || f.kind != .Truncated && f.at + REACH <= n {
 			if f.kind not_in core.AT_NO_BYTE {
 				f.at += it.base
 				it.fault = f

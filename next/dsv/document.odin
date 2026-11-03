@@ -17,6 +17,7 @@ import build "../core/build"
 // sit in `Document.shared_keys`.
 
 // The flags of `doc.read.opts[2]`. `READ_CRLF` says the text's first line ends in CR LF, as a write of the document does.
+// The bits from 2 up are the `Tolerance` set a record reader walks under.
 @(private)
 READ_NO_HEADER :: u8(1)
 @(private)

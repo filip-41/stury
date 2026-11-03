@@ -59,11 +59,9 @@ Record_Scan :: struct {
 }
 
 // Reads one record from `start`, with `delim` between cells. Quotes (CSV) and escapes (TSV) are read as the pass reads
-// them, so a delimiter inside a quoted field does not count. A non-nil `ends` receives each cell's end byte in order,
-// before the CR of a CR LF, for as many cells as it has room for.
-
+// them, so a delimiter inside a quoted field does not count.
 @(private, cold, require_results)
-scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int, $S: Spec, delim: byte, ends: []int = nil) -> Record_Scan {
+scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int, $S: Spec, delim: byte) -> Record_Scan {
 	s := Record_Scan{cells = 1, fault_at = -1}
 	i := start
 	end := len(src)
@@ -99,23 +97,14 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 			if i > start && src[i - 1] == '\r' {
 				hi = i - 1
 			}
-			if ends != nil && s.cells - 1 < len(ends) {
-				ends[s.cells - 1] = hi
-			}
 			s.line_end, s.line_end_lo = i, hi
 			return s
 		case '\r':
 			if i + 1 < end && src[i + 1] == '\n' {
-				if ends != nil && s.cells - 1 < len(ends) {
-					ends[s.cells - 1] = i
-				}
 				s.line_end, s.line_end_lo = i + 1, i
 				return s
 			}
 		case delim:
-			if ends != nil && s.cells - 1 < len(ends) {
-				ends[s.cells - 1] = i
-			}
 			if s.cells == width && s.fault_at < 0 {
 				s.fault_at = i
 			}
@@ -128,9 +117,6 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 			first = c == delim
 		}
 		i += 1
-	}
-	if ends != nil && s.cells - 1 < len(ends) {
-		ends[s.cells - 1] = end
 	}
 	s.line_end, s.line_end_lo = end, end
 	return s

@@ -2,6 +2,7 @@ package dsv_tests
 
 import "core:bytes"
 import "core:fmt"
+import "core:io"
 import "core:math/rand"
 import "core:strings"
 import "core:testing"
@@ -142,7 +143,7 @@ seeded_rows :: proc(gen: rand.Generator, spec: dsv.Spec, rows: int, header := ""
 }
 
 @(private = "file")
-LAYOUTS := []dsv.Options{{}, {no_header = true}, {comment = '#'}, {no_header = true, comment = '#'}}
+LAYOUTS := []dsv.Options{{}, {no_header = true}, {comment = '#'}, {no_header = true, comment = '#'}, {tolerate = {.Invalid_Utf8, .Ragged, .Bare_Quote}}}
 
 @(test)
 rows_follow_the_model :: proc(t: ^testing.T) {
@@ -269,9 +270,9 @@ rows_columns_cells_and_documents :: proc(t: ^testing.T) {
 	_, ok = records.next(&it3)
 	testing.expect(t, !ok && it3.fault.?.kind == .Bad_Option)
 
-	// No dsv framing reads a stream.
+	// A framing dsv does not take is refused on a stream too.
 	r: bytes.Reader
-	it4 := records.open_stream(bytes.reader_init(&r, transmute([]u8)string("a\n1\n")), dsv.as(.Csv))
+	it4 := records.open_stream(bytes.reader_init(&r, transmute([]u8)string("a\n1\n")), dsv.as(.Csv), .Seq)
 	defer records.close(&it4)
 	_, ok = records.next(&it4)
 	testing.expect(t, !ok && it4.fault.?.kind == .Bad_Option)
@@ -436,4 +437,187 @@ row_target_reads_one_record :: proc(t: ^testing.T) {
 	back: Record_Row
 	e = dsv.unmarshal(text, .Csv, &back, {}, {}, context.temp_allocator)
 	testing.expect(t, e.kind == .None && back.a == 3 && back.b == "q,r" && back.c.? == 1.5)
+}
+
+// A reader that gives `sizes[n]` bytes at a time, cycling, or random sizes when `sizes` is empty.
+@(private = "file")
+Chunked :: struct {
+	src:   []u8,
+	sizes: []int,
+	gen:   rand.Generator,
+	reads: int,
+	at:    int,
+}
+
+@(private = "file")
+chunked :: proc(c: ^Chunked) -> io.Reader {
+	return {data = c, procedure = proc(data: rawptr, mode: io.Stream_Mode, p: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
+		c := (^Chunked)(data)
+		if mode != .Read {
+			return 0, .Unsupported
+		}
+		if c.at == len(c.src) {
+			return 0, .EOF
+		}
+		k := c.sizes[c.reads % len(c.sizes)] if len(c.sizes) > 0 else 1 + rand.int_max(16, c.gen)
+		c.reads += 1
+		n := copy(p[:min(len(p), k)], c.src[c.at:])
+		c.at += n
+		return i64(n), nil
+	}}
+}
+
+@(private = "file")
+Got :: struct {
+	rows:  [dynamic]string,
+	fault: Maybe(core.Fault),
+	held:  string,
+	at:    u64,
+}
+
+// Every row of `it` as its offset, text, cells, named column and built document's `b` answer, copied since a stream's
+// bytes are gone at the next call.
+@(private = "file")
+drain :: proc(it: ^records.Reader) -> (g: Got) {
+	g.rows = make([dynamic]string, context.temp_allocator)
+	path, _ := core.parse_path(".b", context.temp_allocator)
+	buf: [64]u8
+	col := records.column(it, "b")
+	for rec in records.next(it) {
+		cells := make([dynamic]string, context.temp_allocator)
+		for c in 0 ..< 5 {
+			s, ok := records.cell(it, rec, c, buf[:])
+			append(&cells, fmt.tprint(ok, s))
+		}
+		named: string
+		doc, err := records.build(it, rec, context.temp_allocator)
+		if answers, _ := core.query(&doc, path, allocator = context.temp_allocator); len(answers) == 1 {
+			named, _ = core.text(&doc, answers[0].node, buf[:])
+		}
+		append(&g.rows, fmt.tprint(rec.at, string(rec.text), col, cells[:], err.kind, named))
+	}
+	g.fault, g.held, g.at = it.fault, strings.clone(string(it.held), context.temp_allocator), it.held_at
+	return
+}
+
+// A stream of `src` read in chunks gives the rows and fault `src` in memory gives, but for a last row the input ends
+// inside, which it holds.
+@(private = "file")
+expect_stream :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Options, sizes: []int, gen: rand.Generator) -> bool {
+	mem := records.open(transmute([]u8)src, dsv.as(spec, opts))
+	defer records.close(&mem)
+	want := drain(&mem)
+	c := Chunked{src = transmute([]u8)src, sizes = sizes, gen = gen}
+	st := records.open_stream(chunked(&c), dsv.as(spec, opts))
+	defer records.close(&st)
+	got := drain(&st)
+	n := len(got.rows)
+	same := n <= len(want.rows)
+	for i in 0 ..< min(n, len(want.rows)) {
+		same &&= got.rows[i] == want.rows[i]
+	}
+	if len(got.held) == 0 {
+		same &&= n == len(want.rows) && got.fault == want.fault
+	} else {
+		same &&= got.fault == nil && got.at + u64(len(got.held)) == u64(len(src)) && src[got.at:] == got.held
+		f, bad := want.fault.?
+		same &&= bad && f.kind == .Truncated && f.at == u64(len(src)) && n == len(want.rows)
+	}
+	return testing.expectf(t, same && st.cause == nil, "%v %v %v %q: stream %v %v held %q at %d, memory %v %v", spec, opts, sizes, src, got.rows[:], got.fault, got.held, got.at, want.rows[:], want.fault)
+}
+
+@(test)
+rows_stream_as_in_memory :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	state := rand.create(8)
+	gen := rand.default_random_generator(&state)
+	sizes := [][]int{{1}, {2}, {3}, {7}, {64}, {}}
+	breakers := "\",\n\r\xff\xc3x"
+	for round in 0 ..< 150 {
+		spec := dsv.Spec(round % 3)
+		// The longer texts cross a batch and several windows.
+		rows := 700 if round % 5 == 0 else 1 + rand.int_max(8, gen)
+		src := seeded_rows(gen, spec, rows, "a\tb\tc" if spec == .Tsv else "a,b,c")
+		buf := transmute([]u8)strings.clone(src, context.temp_allocator)
+		if round % 2 == 1 {
+			buf[rand.int_max(len(buf), gen)] = breakers[rand.int_max(len(breakers), gen)]
+		}
+		for opts in LAYOUTS {
+			for s in sizes {
+				if !expect_stream(t, string(buf), spec, opts, s, gen) {
+					return
+				}
+			}
+		}
+		free_all(context.temp_allocator)
+	}
+}
+
+// An input that ends at any byte of its last row holds that row or gives the fault memory gives, never a wrong row.
+@(test)
+rows_stream_holds_a_cut_row :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	state := rand.create(9)
+	gen := rand.default_random_generator(&state)
+	head := "a,b,c\n1,2,3\n"
+	src := strings.concatenate({head, "\"q,\nx\",é,\"é\"\"\"\n"}, context.temp_allocator)
+	for k in len(head) + 1 ..< len(src) {
+		for s in ([][]int{{1}, {3}, {}}) {
+			if !expect_stream(t, src[:k], .Csv, {}, s, gen) {
+				return
+			}
+		}
+	}
+	// A cut inside an encoded character is held.
+	c := Chunked{src = transmute([]u8)string("a,b\n1,\xc3"), sizes = {2}}
+	it := records.open_stream(chunked(&c), dsv.as(.Csv))
+	defer records.close(&it)
+	n := 0
+	for _ in records.next(&it) {
+		n += 1
+	}
+	testing.expectf(t, n == 0 && it.fault == nil && string(it.held) == "a,b\n1,\xc3", "%d rows, %v, held %q", n, it.fault, it.held)
+}
+
+// `records.read` on a stream gives what it gives in memory, with the same offsets in its errors.
+@(test)
+rows_stream_read_as_in_memory :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	state := rand.create(10)
+	gen := rand.default_random_generator(&state)
+	headers := []string{"a,b,c", "b,x,a", "a,a,c", "x,y,z"}
+	for round in 0 ..< 60 {
+		spec := dsv.Spec(round % 2)
+		header, _ := strings.replace_all(headers[round % 4], ",", "\t" if spec == .Tsv else ",", context.temp_allocator)
+		src := seeded_rows(gen, spec, 1 + rand.int_max(40, gen), header)
+		plan, _ := dsv.plan_make(Required_Record_Row, spec, allocator = context.temp_allocator)
+		mplan, _ := dsv.plan_make(map[string]string, spec, allocator = context.temp_allocator)
+		mem := records.open(transmute([]u8)src, dsv.as(spec))
+		c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 7}}
+		st := records.open_stream(chunked(&c), dsv.as(spec))
+		ms, ss: typed.Collected
+		ms.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
+		ss.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
+		for {
+			v, w: Required_Record_Row
+			more, err := records.read(&st, &v, &plan, {collect = &ss, unknown = .Refuse}, context.temp_allocator)
+			wmore, werr := records.read(&mem, &w, &plan, {collect = &ms, unknown = .Refuse}, context.temp_allocator)
+			if !more {
+				break
+			}
+			if !testing.expectf(t, wmore && moved_error(err, 0, 0) == moved_error(werr, 0, 0) && fmt.tprint(v) == fmt.tprint(w), "%q: read %v %v, memory %v %v", src, v, err, w, werr) {
+				return
+			}
+			m, wm: map[string]string
+			_, merr := records.read(&st, &m, &mplan, {}, context.temp_allocator)
+			_, wmerr := records.read(&mem, &wm, &mplan, {}, context.temp_allocator)
+			if !testing.expectf(t, moved_error(merr, 0, 0) == moved_error(wmerr, 0, 0) && len(m) == len(wm), "%q: map %v %v, memory %v %v", src, m, merr, wm, wmerr) {
+				return
+			}
+		}
+		testing.expectf(t, fmt.tprint(ss.errors[:]) == fmt.tprint(ms.errors[:]), "%q: collected %v, memory %v", src, ss.errors[:], ms.errors[:])
+		records.close(&mem)
+		records.close(&st)
+		free_all(context.temp_allocator)
+	}
 }

@@ -194,8 +194,12 @@ at. `next` holds one procedure per framing, nil for a framing the format does no
 and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault, `read` and `build` read
 one. `column` and `cell` are a format's with named columns, and `close` frees the memory the format keeps in
 `Reader.format`. `ends` names, per framing, the byte a backward scan finds a whole record's end by (JSON's LF and 0x1E),
-0 where only a walk of the records finds it, and 0xff where the format reads no stream. `core` stores the table as a
+0 where only a walk of the records finds it, and 0xff where the format reads no stream under that framing. `core` stores the table as a
 `rawptr`, since `core/records` imports `core`.
 
-dsv reads no stream yet: a quoted cell may hold an LF, so only a walk finds a row's end, and its batch holds rows past
-the one `next` gave, as offsets in the text, which a moving window would leave stale.
+dsv reads a stream under `.Lines`. A quoted cell may hold an LF, so the window is found by walking, as under
+`.Concatenated`: a row, or a fault, within 12 bytes of the window's end, and any `Truncated` fault while more input may
+come, is read again once more is read. Its batch of rows is dropped when the window moves, and the walk resumes at the
+byte past the last row given. The header's cells are kept as a copy of its line, so on a stream `build` gives a
+document over that line and the row's, which lasts until the next call and whose offsets count from it, and `read`
+reports its errors at the input's own offsets.

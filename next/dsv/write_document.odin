@@ -30,13 +30,13 @@ marshal :: proc(value: any, spec := Spec.Csv, layout := Options{}, opts := core.
 // Names a delimited text of `spec` as the target of `core.write`, with the delimiter, comment byte, `no_header` and `crlf`
 // of `layout`. See the file's header for what a document may hold.
 as :: proc(spec: Spec, layout := Options{}) -> core.As {
-	return {&SPELLING, {spec = u8(spec), opts = {layout.delimiter, layout.comment, flags_of(layout.no_header, layout.crlf)}}}
+	return {&SPELLING, {spec = u8(spec), opts = {layout.delimiter, layout.comment, flags_of(layout.no_header, layout.crlf) | transmute(u8)layout.tolerate << 2}}}
 }
 
 // The spec and layout a `core.Read_As` holds.
 @(private)
 read_layout :: proc(read: core.Read_As) -> (Spec, Options) {
-	return Spec(read.spec), Options{delimiter = read.opts[0], comment = read.opts[1], no_header = read.opts[2] & READ_NO_HEADER != 0, crlf = read.opts[2] & READ_CRLF != 0}
+	return Spec(read.spec), Options{delimiter = read.opts[0], comment = read.opts[1], no_header = read.opts[2] & READ_NO_HEADER != 0, crlf = read.opts[2] & READ_CRLF != 0, tolerate = transmute(bit_set[Tolerance; u8])(read.opts[2] >> 2)}
 }
 
 // The spelling's `write`: `doc` as the spec and layout `read` holds.

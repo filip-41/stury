@@ -20,8 +20,6 @@ RECORDS := records.Services {
 	column = column_of,
 	cell   = cell_of,
 	close  = close_rows,
-	// A batch holds rows past the one `next` gave and offsets in the text, so a window cannot move under it.
-	ends   = #partial {.Lines = 0xff},
 }
 
 // The rows a batch holds at most.
@@ -36,16 +34,28 @@ Batch_Row :: struct {
 
 // The rows of a reader's last frame, kept in `Reader.format`. The frame is `validate`'s pass, which records each row, and
 // the header's line in `head`, and stops once `BATCH` rows are held. `width` is the row width a frame checks rows
-// against, 0 for the first frame, which the first record sets, and a stop keeps it for the next. A row's cells are
+// against, 0 until the first record sets it, and each row framed keeps it for the next frame. A row's cells are
 // split from its text when one is asked for. `cells` holds the `split` cells of row `split_row - 1`, and `keys` the
-// header's cells, empty with no header. `done` says the text ended or faulted, with the fault in `fault`, given once
-// the batch's rows are. `cols` are the columns a typed read bound, for the plan and read flags beside them.
+// header's cells, empty with no header, as tokens of `key_src`. That is the text itself, and on a stream a copy of the
+// header's line, since the window moves. `comb` joins the header's line and a row for a read or a build on a stream.
+// `done` says the text ended or faulted, with the fault in `fault`, given once the batch's rows are. `cols` are the
+// columns a typed read bound, for the plan and read flags beside them.
+//
+// On a stream, `seen` is the `pos`, `base` and length of the window as the last call left them, so a different one
+// says the window moved and the batch is stale. `from` is `pos` where the batch was framed, `past` says a row stood
+// in its window, and `head_at` the input offset of the header's line.
 @(private)
 Batch :: struct {
 	rows:      [BATCH]Batch_Row,
 	head:      Batch_Row,
 	cells:     []core.Token,
 	keys:      []core.Token,
+	key_src:   []u8,
+	comb:      []u8,
+	seen:      [3]u64,
+	from:      u64,
+	past:      bool,
+	head_at:   u64,
 	n, at:     int,
 	split:     int,
 	split_row: int,
@@ -57,15 +67,20 @@ Batch :: struct {
 	cols_read: [3]bool,
 }
 
-// Records the record from `lo` to `hi`, the header's line when `header`. Returns true once the batch is full.
+// Records the record from `lo` to `hi`, the header's line when `header`, and the `width` its check left. The first record
+// sets the width and no later one changes it. Returns true
+// once the batch is full.
 @(private)
-frame_row :: #force_inline proc "contextless" (b: ^Batch, lo, hi: int, header: bool) -> bool #no_bounds_check {
+frame_row :: #force_inline proc "contextless" (b: ^Batch, lo, hi: int, header: bool, width: int) -> bool #no_bounds_check {
 	if header {
-		b.head = {u64(lo), u64(hi)}
+		b.head, b.width = {u64(lo), u64(hi)}, width
 		return false
 	}
 	b.rows[b.n] = {u64(lo), u64(hi)}
 	b.n += 1
+	if b.n == 1 {
+		b.width = width
+	}
 	return b.n == BATCH
 }
 
@@ -82,7 +97,7 @@ refill :: proc(it: ^records.Reader) -> bool {
 		b = fresh
 		it.format = b
 	}
-	b.n, b.at, b.split_row = 0, 0, 0
+	b.n, b.at, b.split_row, b.from = 0, 0, 0, it.pos
 	if !b.done {
 		spec, opts := read_layout(it.as.read)
 		switch spec {
@@ -119,7 +134,18 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 	// A stopped frame returns the byte past the row end it stopped on. A restart reads no header.
 	it.pos = r >> 16
 	if first && b.head.hi > b.head.at {
-		n, ok := split_all(it, b, b.head, S, opts, .Key)
+		src, head := it.src, b.head
+		b.key_src, b.head_at = src, it.base + head.at
+		if it.input.procedure != nil {
+			text, err := make([]u8, head.hi - head.at, it.allocator)
+			if err != nil {
+				b.done, b.fault = true, core.Fault{rules = &RULES, kind = .No_Memory}
+				return
+			}
+			copy(text, src[head.at:head.hi])
+			src, head, b.key_src = text, {0, u64(len(text))}, text
+		}
+		n, ok := split_all(it, b, src, head, S, opts, .Key)
 		keys, err := make([]core.Token, n, it.allocator)
 		if !ok || err != nil {
 			b.done, b.fault = true, core.Fault{rules = &RULES, kind = .No_Memory}
@@ -133,10 +159,10 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 // Splits `row` into `b.cells`, which grows to hold them all. Returns the cell count, or false when they do not fit in
 // memory.
 @(private)
-split_all :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, $S: Spec, opts: Options, role: core.Role) -> (int, bool) {
+split_all :: proc(it: ^records.Reader, b: ^Batch, src: []u8, row: Batch_Row, spec: Spec, opts: Options, role: core.Role) -> (int, bool) {
 	for {
 		sp := Split{out = b.cells}
-		if _, a := split_cells(it.src, row, S, opts, role, &sp, {}, on_split); a != .Stop {
+		if _, a := split_any(src, row, spec, opts, role, &sp, {}, on_split); a != .Stop {
 			return sp.n, true
 		}
 		grown, err := make([]core.Token, max(2 * len(b.cells), 64), it.allocator)
@@ -146,6 +172,17 @@ split_all :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, $S: Spec, opts
 		delete(b.cells, it.allocator)
 		b.cells = grown
 	}
+}
+
+// `split_cells` for a spelling known at run time, for the cold readers.
+@(private)
+split_any :: proc "contextless" (src: []u8, row: Batch_Row, spec: Spec, opts: Options, role: core.Role, h: ^$H, regs: core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (core.Hook_Regs, core.Action) {
+	switch spec {
+	case .Csv:   return split_cells(src, row, .Csv, opts, role, h, regs, on)
+	case .Tsv:   return split_cells(src, row, .Tsv, opts, role, h, regs, on)
+	case .Plain: return split_cells(src, row, .Plain, opts, role, h, regs, on)
+	}
+	return regs, .Stop
 }
 
 // A split's buffer: the first `n` tokens of `out` are the row's cells.
@@ -228,9 +265,27 @@ split_cells :: proc "contextless" (src: []u8, row: Batch_Row, $S: Spec, opts: Op
 	}
 }
 
+// Gives the next row and leaves `it.pos` at the byte past it, so a window that moves resumes from there. A batch framed
+// in a window that has since moved is dropped. Before any row stands, the header is dropped too and read again, since
+// the window may have cut it.
 @(private)
 next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
 	b := (^Batch)(it.format)
+	stream := it.input.procedure != nil
+	if stream && b != nil {
+		if b.seen == {it.pos, it.base, u64(len(it.src))} {
+			// The window held after the last row, so that row stands.
+			b.past ||= b.at > 0
+		} else {
+			b.n, b.at, b.split_row, b.done, b.fault = 0, 0, 0, false, nil
+			if !b.past {
+				b.width, b.head = 0, {}
+				delete(b.keys, it.allocator)
+				delete(b.key_src, it.allocator)
+				b.keys, b.key_src = nil, nil
+			}
+		}
+	}
 	if b == nil || b.at == b.n {
 		if !refill(it) {
 			return {}, false
@@ -239,25 +294,57 @@ next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
 	}
 	row := b.rows[b.at]
 	b.at += 1
+	if stream {
+		it.pos = u64(min(int(row.hi) + 1 + int(int(row.hi) < len(it.src) && it.src[row.hi] == '\r'), len(it.src)))
+		b.seen = {it.pos, it.base, u64(len(it.src))}
+	}
 	return {text = it.src[row.at:row.hi], at = row.at}, true
+}
+
+// The batch row `rec` is, when `rec` is the row `next` gave last.
+@(private)
+held_row :: #force_inline proc(it: ^records.Reader, rec: records.Record) -> (Batch_Row, bool) {
+	b := (^Batch)(it.format)
+	if b == nil || b.at == 0 {
+		return {}, false
+	}
+	row := b.rows[b.at - 1]
+	return row, row.at + it.base == rec.at
+}
+
+// The text and row a read or a build of `row` uses: in memory the input and `row`, on a stream the header's line then the
+// row's, since the window no longer holds the header. Returns false when the join does not fit in memory.
+@(private)
+joined :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row) -> (src: []u8, at: Batch_Row, ok: bool) {
+	if it.input.procedure == nil {
+		return it.src, row, true
+	}
+	n, size := len(b.key_src), len(b.key_src) + int(row.hi - row.at)
+	if len(b.comb) < size {
+		grown, err := make([]u8, max(size, 2 * len(b.comb)), it.allocator)
+		if err != nil {
+			return nil, {}, false
+		}
+		delete(b.comb, it.allocator)
+		b.comb = grown
+	}
+	copy(b.comb, b.key_src)
+	copy(b.comb[n:], it.src[row.at:row.hi])
+	return b.comb[:size], {u64(n), u64(size)}, true
 }
 
 // The value tokens of `rec`, the row `next` gave last, or false for another or when they do not fit in memory.
 @(private)
 cells_of :: proc(it: ^records.Reader, rec: records.Record) -> ([]core.Token, bool) {
-	b := (^Batch)(it.format)
-	if b == nil || b.at == 0 || b.rows[b.at - 1].at != rec.at {
+	row, held := held_row(it, rec)
+	if !held {
 		return nil, false
 	}
+	b := (^Batch)(it.format)
 	if b.split_row != b.at {
 		spec, opts := read_layout(it.as.read)
 		ok: bool
-		switch spec {
-		case .Csv:   b.split, ok = split_all(it, b, b.rows[b.at - 1], .Csv, opts, .Value)
-		case .Tsv:   b.split, ok = split_all(it, b, b.rows[b.at - 1], .Tsv, opts, .Value)
-		case .Plain: b.split, ok = split_all(it, b, b.rows[b.at - 1], .Plain, opts, .Value)
-		}
-		if !ok {
+		if b.split, ok = split_all(it, b, it.src, row, spec, opts, .Value); !ok {
 			return nil, false
 		}
 		b.split_row = b.at
@@ -268,14 +355,19 @@ cells_of :: proc(it: ^records.Reader, rec: records.Record) -> ([]core.Token, boo
 @(private)
 column_of :: proc(it: ^records.Reader, name: string) -> int {
 	if it.format == nil {
-		refill(it)
+		// The first row is read to frame the header, then given back.
+		_, _ = records.next(it)
+		if b := (^Batch)(it.format); b != nil && b.at > 0 {
+			b.at, it.pos = 0, b.from
+			b.seen = {it.pos, it.base, u64(len(it.src))}
+		}
 	}
 	b := (^Batch)(it.format)
 	if b == nil {
 		return -1
 	}
 	for &key, c in b.keys {
-		doc := core.Document{src = it.src, nodes = ([^]core.Node)(&key)[:1], read = it.as.read}
+		doc := core.Document{src = b.key_src, nodes = ([^]core.Node)(&key)[:1], read = it.as.read}
 		if spelling_key_equals(&doc, 0, name) {
 			return c
 		}
@@ -288,14 +380,11 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) {
 	b := (^Batch)(it.format)
 	spec := Spec(it.as.read.spec)
-	if b != nil && b.split_row != b.at && b.at > 0 && b.rows[b.at - 1].at == rec.at && 0 <= column && column < len(b.cells) {
+	row, held := held_row(it, rec)
+	if held && b.split_row != b.at && 0 <= column && column < len(b.cells) {
 		_, opts := read_layout(it.as.read)
 		sp := Split{out = b.cells[:column + 1]}
-		switch spec {
-		case .Csv:   split_cells(it.src, b.rows[b.at - 1], .Csv, opts, .Value, &sp, {}, on_split)
-		case .Tsv:   split_cells(it.src, b.rows[b.at - 1], .Tsv, opts, .Value, &sp, {}, on_split)
-		case .Plain: split_cells(it.src, b.rows[b.at - 1], .Plain, opts, .Value, &sp, {}, on_split)
-		}
+		split_any(it.src, row, spec, opts, .Value, &sp, {}, on_split)
 		if sp.n <= column {
 			return "", false
 		}
@@ -309,32 +398,39 @@ cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8
 }
 
 // Builds `rec`, the row `next` gave last, as a document over the whole input: a `Map` keyed by the header's cells, or an
-// `Array` with no header.
+// `Array` with no header. On a stream the document is over the header's line and the row's, which lasts until the next
+// call on the reader, and its offsets count from that text.
 @(private)
 build_row :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	cells, ok := cells_of(it, rec)
 	if !ok {
 		return {}, {kind = .Bad_Index, at = rec.at}
 	}
-	keys := (^Batch)(it.format).keys
-	b := build.builder_start(it.src, &SPELLING, false, allocator, 1 + len(cells) + len(keys), 2)
+	batch := (^Batch)(it.format)
+	keys := batch.keys
+	row, _ := held_row(it, rec)
+	src, at, joinable := joined(it, batch, row)
+	if !joinable {
+		return {}, {kind = .No_Memory}
+	}
+	b := build.builder_start(src, &SPELLING, false, allocator, 1 + len(cells) + len(keys), 2)
 	if len(b.doc.nodes) == 0 {
 		return build.builder_end(&b, build.BUILDER_REGS, nil)
 	}
 	b.doc.read = it.as.read
-	hi := rec.at + u64(len(rec.text))
-	b.root_close = hi
+	b.root_close = at.hi
 	regs := build.BUILDER_REGS
-	regs, _ = build.builder_hook_plain(&b, regs, {kind = .Map if len(keys) > 0 else .Array, role = .Value, lo = rec.at})
+	regs, _ = build.builder_hook_plain(&b, regs, {kind = .Map if len(keys) > 0 else .Array, role = .Value, lo = at.at})
 	for t, c in cells {
 		if len(keys) > 0 {
 			regs, _ = build.builder_hook_plain(&b, regs, keys[c])
 		}
 		cell := t
 		cell.spelling &~= SPELLING_DOUBLED
+		cell.lo += at.at - row.at
 		regs, _ = build.builder_hook_plain(&b, regs, cell)
 	}
-	regs, _ = build.builder_hook_plain(&b, regs, {kind = .End, lo = hi})
+	regs, _ = build.builder_hook_plain(&b, regs, {kind = .End, lo = at.hi})
 	return build.builder_end(&b, regs, nil)
 }
 
@@ -360,11 +456,22 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 		err^ = started
 		return false
 	}
-	rec, ok := next_row(it)
+	_, ok := next_row(it)
 	if !ok {
 		return false
 	}
 	b := (^Batch)(it.format)
+	row := b.rows[b.at - 1]
+	src, at, joinable := joined(it, b, row)
+	if !joinable {
+		err^ = {kind = .Out_Of_Memory}
+		return false
+	}
+	stream := it.input.procedure != nil
+	kept := len(read.collect.errors) if read.collect != nil else 0
+	if stream {
+		h.r.src, h.r.base, h.r.token_doc.src, h.hot_end = src, raw_data(src), src, u64(max(len(src) - HOT_REACH, 0))
+	}
 	h.r.token_doc.read.spec = u8(spec)
 	h.no_header = opts.no_header || h.opens == .Array
 	if !h.no_header {
@@ -377,7 +484,7 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 	// The text's open is read.
 	h.met = 1
 	action: core.Action
-	regs, action = row_token(&h, regs, {kind = .Array, role = .Value, lo = rec.at})
+	regs, action = row_token(&h, regs, {kind = .Array, role = .Value, lo = at.at})
 	fresh := h.cols != nil && raw_data(h.cols) != raw_data(b.cols)
 	if fresh {
 		// Columns bound with no refusal and no map row's names are the same for every row.
@@ -389,21 +496,41 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 		}
 	}
 	if action == .Next {
-		row := b.rows[b.at - 1]
-		switch spec {
-		case .Csv:   regs, action = split_cells(it.src, row, .Csv, opts, .Value, &h, regs, on_cell)
-		case .Tsv:   regs, action = split_cells(it.src, row, .Tsv, opts, .Value, &h, regs, on_cell)
-		case .Plain: regs, action = split_cells(it.src, row, .Plain, opts, .Value, &h, regs, on_cell)
-		}
+		regs, action = split_any(src, at, spec, opts, .Value, &h, regs, on_cell)
 		if action != .Stop {
-			regs, _ = row_token(&h, regs, {kind = .End, role = .Value, lo = rec.at + u64(len(rec.text))})
+			regs, _ = row_token(&h, regs, {kind = .End, role = .Value, lo = at.hi})
 		}
 	}
 	err^ = typed.read_end(&h.r, regs, nil)
+	if stream {
+		// The errors name bytes of the joined text, which the window's own bytes replace.
+		place_error(it, b, row, err)
+		if read.collect != nil {
+			for &e in read.collect.errors[kept:] {
+				place_error(it, b, row, &e)
+			}
+		}
+	}
 	if fresh {
 		delete(h.cols, context.temp_allocator)
 	}
 	return true
+}
+
+// Moves the offsets of `e`, which name bytes of `joined`'s text, to the window's: the header's line is at `head_at` of
+// the input, and the row's bytes are `row`'s.
+@(private)
+place_error :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, e: ^core.Typed_Error) {
+	place :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, at: u64) -> u64 {
+		n := u64(len(b.key_src))
+		return b.head_at + at - it.base if at < n else at - n + row.at
+	}
+	if e.kind not_in core.TYPED_AT_NO_BYTE {
+		e.at = place(it, b, row, e.at)
+		if e.kind == .Walk {
+			e.inner.at = place(it, b, row, e.inner.at)
+		}
+	}
 }
 
 @(private)
@@ -411,6 +538,10 @@ close_rows :: proc(it: ^records.Reader) {
 	if b := (^Batch)(it.format); b != nil {
 		delete(b.cells, it.allocator)
 		delete(b.keys, it.allocator)
+		if it.input.procedure != nil {
+			delete(b.key_src, it.allocator)
+		}
+		delete(b.comb, it.allocator)
 		delete(b.cols, it.allocator)
 		free(b, it.allocator)
 	}

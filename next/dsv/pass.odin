@@ -417,7 +417,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				return core.fault_at(u64(w.rec_lo), .Bad_Structure, u8(Detail.Field_Count))
 			}
 			when H == Batch {
-				frame_row(h, w.rec_lo, n, header)
+				frame_row(h, w.rec_lo, n, header, w.width)
 			}
 		}
 	}

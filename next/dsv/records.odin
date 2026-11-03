@@ -34,8 +34,7 @@ read_cells :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H
 			}
 			when H == Batch {
 				// A record batch stops past the row that fills it, with the width the next frame checks rows against.
-				if frame_row(w.h, rec_lo, at - int(base[at - 1] == '\r'), header) {
-					w.h.width = width
+				if frame_row(w.h, rec_lo, at - int(base[at - 1] == '\r'), header, width) {
 					return stopped(u64(at), 1), true
 				}
 			}
