@@ -3,6 +3,7 @@ package main
 // The formats `--from` reads and `--to` writes, one row of FORMATS each, and the options a format refuses.
 
 import "core:strings"
+import core "../../core"
 import json "../../json"
 import "message"
 
@@ -61,6 +62,11 @@ format_names :: proc(writing: bool) -> string {
 		append(&b, spec.name)
 	}
 	return string(b[:])
+}
+
+// How the inputs are read, as --from and --seq say. A JSON-like format's texts are read as `json_reading` reads them.
+input_source :: proc(o: ^Opts, json_reading: core.As) -> Source {
+	return {as = json_reading, framing = .Seq if o.seq else .Lines if reads_lines(o) else .Concatenated}
 }
 
 // Reports whether the input format is a delimited one.

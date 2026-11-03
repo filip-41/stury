@@ -163,7 +163,6 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 		explain_fallback(route, .Object_Members)
 		return false
 	}
-	run.ret = JQ_OK_NO_OUTPUT
 	sel := route.select
 	eq := sel.op == .Eq || sel.op == .Ne
 	for a in answers {
@@ -172,7 +171,7 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 			value = jq.Ref{&doc, a.node}
 		}
 		if sel.op == .None {
-			print_jq(run, value) or_return
+			emit(&run.output, value) or_return
 			continue
 		}
 		// A container is above every literal the filter may hold.
@@ -183,10 +182,10 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 		if jq.compared(sel.op, c) {
 			whole, _ := jq.build_text(data, r)
 			defer core.destroy(&whole)
-			print_jq(run, jq.Ref{&whole, core.ROOT}) or_return
+			emit(&run.output, jq.Ref{&whole, core.ROOT}) or_return
 		}
 	}
-	settle(run)
+	finish_input(&run.output)
 	route.scanned += 1
 	return true
 }

@@ -50,9 +50,9 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 			run.route.interpreted += 1
 			run_once(run, v)
 		case .Error:
-			flush_some(run, force = true)
+			flush_some(&run.output, force = true)
 			message.write_stderr("stury: parse error: %s\n%s", msg, ins.note)
-			run.ret = EXIT_INPUT
+			finish_input(&run.output, EXIT_INPUT)
 			return
 		case .More:
 			return
@@ -63,29 +63,12 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 	}
 }
 
-Print_Sink :: struct {
-	using sink: jq.Sink,
-	run:        ^Run,
-}
-
 // Runs the filter on one input and prints its outputs. Returns the signal the run ended with.
 eval_input :: proc(run: ^Run, v: jq.Value) -> jq.Signal {
-	s := Print_Sink{sink = {emit = proc(s: ^jq.Sink, it: jq.Item) -> jq.Signal {
-				run := ((^Print_Sink)(s)).run
-				// jq's message goes to stderr at once and its output waits in a buffer: an output's messages
-				// come before it, never after all of the run's output.
-				jq.flush_messages(&run.ip)
-				if !print_jq(run, it.v) {
-					run.ip.err = "Cannot dump a string containing NUL with --raw-output0 option"
-					return .Fail
-				}
-				return .Go
-			}}, run = run}
 	ip := &run.ip
 	ip.free_envs = nil // the last input's, emptied with its memory
-	run.ret = JQ_OK_NO_OUTPUT
-	ip.printer = &s
-	sig := jq.eval(ip, run.prog, {v = v}, ip.globals, false, &s)
+	ip.printer = &run.output
+	sig := jq.eval(ip, run.prog, {v = v}, ip.globals, false, &run.output)
 	ip.printer = nil
 	return sig
 }
@@ -96,11 +79,12 @@ run_once :: proc(run: ^Run, v: jq.Value) {
 	sig := eval_input(run, v)
 	if len(ip.messages) > 0 {
 		jq.flush_messages(ip)
-		flush_some(run, force = true)
+		flush_some(&run.output, force = true)
 	}
+	ended: Maybe(int)
 	#partial switch sig {
 	case .Fail:
-		flush_some(run, force = true)
+		flush_some(&run.output, force = true)
 		name, line := ip.inputs.position(ip.inputs.data)
 		at := message.build_temp("%s:%d", name, line) if name != "" else "<unknown>"
 		if msg, is_str := jq.string_of(ip.err); is_str {
@@ -112,19 +96,11 @@ run_once :: proc(run: ^Run, v: jq.Value) {
 		} else {
 			message.write_stderr("stury: error (at %s) (not a string): %s\n", at, jq.to_json(ip.err))
 		}
-		run.ret = EXIT_INPUT
+		ended = EXIT_INPUT
 	case .Break:
 		if code, halted := ip.halted.?; halted {
-			run.ret, run.halted = code, true
+			ended, run.halted = code, true
 		}
 	}
-	settle(run)
-}
-
-// Records the input's result for `-e`, once its outputs are printed.
-settle :: proc(run: ^Run) {
-	if run.ret <= 0 && run.ret != JQ_OK_NO_OUTPUT {
-		run.last_result = int(run.ret != JQ_OK_NULL_KIND)
-	}
-	flush_some(run)
+	finish_input(&run.output, ended)
 }

@@ -23,17 +23,15 @@ package main
 //	route.odin                       the path scan or the interpreter, which answers the filter
 //	explain.odin                     --explain's report of the route and the run
 //	filter.odin                      the jq interpreter over each input
-//	print.odin                       output as jq prints it, buffered in `Run.out`
+//	print.odin                       output as jq prints it, and what it comes to (`Output`)
 //	message/                         the text of every message, built from a format and its values (package `message`)
 //	platform_posix.odin,
 //	platform_windows.odin            the calls into the system, one file per platform
 //	jq/                              the jq interpreter (package `jq`)
 //	regex/                           the Oniguruma-compatible matcher behind `test`, `match` and `sub`
 
-import "base:runtime"
 import "core:os"
 import "core:slice"
-import "../../core/write"
 import "jq"
 import "message"
 
@@ -55,11 +53,7 @@ Run :: struct {
 	home_module: bool, // `~/.jq`, or what stands for it, is a module every filter includes
 	route:       Route,
 	ip:          jq.Interp,
-	out:         write.Out, // a buffer, written to stdout by `flush_some`
-	spare:       [write.ROOM_MAX]u8,
-	spill:       jq.Spill, // `spill_out`, so a deep value is not held whole
-	ret:         int, // jq's: what the last input came to, a JQ_OK result or an exit status
-	last_result: int, // jq's: -1 before any output, else whether the last input with outputs ended truthy
+	output:      Output,
 	halted:      bool,
 }
 
@@ -68,7 +62,6 @@ main :: proc() {
 	jq.set_origin()
 	run: Run
 	run.opts.indent = 2
-	run.ret, run.last_result = JQ_OK_NO_OUTPUT, -1
 	cli := parse_args(&run.opts, command_args()[1:])
 	set_colors(&run, cli)
 	run.route.on = run.opts.explain
@@ -92,7 +85,7 @@ main :: proc() {
 	if dirs, given := cli.lib_dirs.?; given {
 		run.ip.search_list = dirs[:]
 	}
-	run.ip.reading = cli.reading
+	run.ip.reading = cli.json_reading
 	run.ip.load_file = load_file
 	run.ip.debug_layout = output_layout(&run)
 	run.ip.debug_layout.opts.pretty = false
@@ -119,29 +112,25 @@ main :: proc() {
 	choose_route(&run, text)
 	explain_route(&run)
 	ins := Inputs {
-		reading = cli.reading,
-		framing = input_framing(o),
+		source  = input_source(o, cli.json_reading),
 		parsed  = {line = 1},
 		files   = cli.files[:] if len(cli.files) > 0 else STDIN_ONLY,
 		slurp   = o.slurp,
 		run     = &run,
 	}
 	bind_inputs(&run.ip, &ins)
-	write.init(&run.out, &run.spare, runtime.heap_allocator(), hint = FLUSH_AT * 2)
-	run.spill = {at = FLUSH_AT, flush = spill_out, data = &run}
+	init_output(&run.output, &run)
 	reserve(&run.ip.messages, 1 << 12)
 	// The interpreter recurses, and so does printing an answer.
 	run_deep(&run, &ins, run_filter)
 	abandon_inputs(&ins)
 	// jq's exit status: the last input's result, 5 after a text that does not parse, 2 after a file that did not
 	// open. Under -e, from the last output when the last input had none.
-	if ins.failures > 0 {
-		run.ret = EXIT_USAGE
-	}
-	code := run.ret
+	code := EXIT_USAGE if ins.failures > 0 else run.output.ret
 	if o.exit_status {
 		if code == JQ_OK_NO_OUTPUT {
-			code = JQ_OK_NO_OUTPUT if run.last_result < 0 else JQ_OK_NULL_KIND if run.last_result == 0 else JQ_OK
+			last := run.output.last_result
+			code = JQ_OK_NO_OUTPUT if last < 0 else JQ_OK_NULL_KIND if last == 0 else JQ_OK
 		}
 		finish(&run, abs(code))
 	}
@@ -220,7 +209,7 @@ bind_cli_vars :: proc(run: ^Run) {
 }
 
 finish :: proc(run: ^Run, code: int) -> ! {
-	flush_some(run, force = true)
+	flush_some(&run.output, force = true)
 	explain_end(run)
 	os.exit(code)
 }

@@ -20,7 +20,6 @@ Explain :: struct {
 		why:  Fallback,
 	},
 	input:       int, // bytes read
-	output:      int, // bytes written
 }
 
 @(private = "file")
@@ -124,5 +123,5 @@ explain_end :: proc(run: ^Run) {
 		explain_line("fallback: text=%d why=%s", r.fallback.text, token(r.fallback.why))
 	}
 	explain_line("run_time: %dus", i64(time.duration_microseconds(time.tick_since(r.ran))))
-	explain_line("cost: peak_rss=%d input=%d output=%d", peak_rss(), r.input, r.output)
+	explain_line("cost: peak_rss=%d input=%d output=%d", peak_rss(), r.input, run.output.written)
 }

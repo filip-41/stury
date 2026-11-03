@@ -34,9 +34,15 @@ READ_AHEAD :: 8 << 20
 // How much a pipe's thread reads at once.
 READ_BLOCK :: 1 << 16
 
+// How the inputs are read: `as`, the format's handle, which `core.build` and `core.validate` read a text through
+// whatever the format is, and how a file's texts follow each other.
+Source :: struct {
+	as:      core.As,
+	framing: core.Framing,
+}
+
 Inputs :: struct {
-	reading:   core.As,
-	framing:   core.Framing,
+	using source: Source,
 	files:     []string, // "-" is stdin
 	next_file: int,
 	name:      string, // the file opened last, "" before the first
@@ -78,11 +84,6 @@ Inputs :: struct {
 	walk_spare:  ^Fault_Walk, // a walk that has ended, whose memory the next one takes
 	fault_error: string,
 	note:        string, // what the parse error that ends the run adds on the lines after it
-}
-
-// The framing jq reads the inputs with, as the options say.
-input_framing :: proc(o: ^Opts) -> core.Framing {
-	return .Seq if o.seq else .Lines if reads_lines(o) else .Concatenated
 }
 
 // jq's next_input: the next value, or under -s every value as one array once the files are read, or a parse error as
@@ -186,10 +187,10 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 			continue
 		}
 		ins.has_text = true
-		if f, bad := runs_on(ins.data, rec, ins.reading).?; bad && ins.framing == .Concatenated {
+		if f, bad := runs_on(ins.data, rec, ins.as).?; bad && ins.framing == .Concatenated {
 			return text_fault(ins, f, int(rec.at))
 		}
-		if ins.run.route.scanning && answer_path(ins.run, rec.text, ins.reading) {
+		if ins.run.route.scanning && answer_path(ins.run, rec.text, ins.as) {
 			// As jq's main loop, which reads one input past a file that did not open.
 			if ins.failures > 0 {
 				return nil, "", .More
@@ -229,14 +230,14 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	if ins.framing != .Concatenated || !ins.last {
 		return
 	}
-	if blank(data, json.Spec(ins.reading.spec)) {
+	if blank(data, json.Spec(ins.as.spec)) {
 		close_file(ins)
 		return
 	}
 	stray_bom := ins.has_text && bytes.has_prefix(data, {0xef, 0xbb, 0xbf})
 	ins.has_text = true
 	run := ins.run
-	if run.route.scanning && !stray_bom && answer_path(run, data, ins.reading) {
+	if run.route.scanning && !stray_bom && answer_path(run, data, ins.as) {
 		close_file(ins)
 		return nil, "", .More, ins.failures > 0
 	}
@@ -245,10 +246,10 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	if stray_bom {
 		fault = core.Fault{kind = .Bad_Char}
 	} else {
-		doc, fault = jq.build_text(data, ins.reading, runtime.heap_allocator() if run.opts.stream else context.allocator)
+		doc, fault = jq.build_text(data, ins.as, runtime.heap_allocator() if run.opts.stream else context.allocator)
 	}
 	if f, bad := fault.?; bad {
-		if !stray_bom && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) && json.Spec(ins.reading.spec) == .Json {
+		if !stray_bom && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) && json.Spec(ins.as.spec) == .Json {
 			return
 		}
 		v, msg, status = text_fault(ins, f, 0)
@@ -302,7 +303,7 @@ text_value :: proc(ins: ^Inputs, built: core.Document, at: int, own: bool) -> (j
 @(private = "file")
 text_fault :: proc(ins: ^Inputs, f: core.Fault, at: int, end := -1) -> (jq.Value, string, jq.Parse_Status) {
 	data := ins.data
-	if json.Spec(ins.reading.spec) != .Json {
+	if json.Spec(ins.as.spec) != .Json {
 		fail_dialect(ins, data, f)
 	}
 	ins.note = fault_note(data, f, ins)
@@ -318,7 +319,7 @@ text_fault :: proc(ins: ^Inputs, f: core.Fault, at: int, end := -1) -> (jq.Value
 		stop := min(int(f.at), len(data))
 		nl := bytes.index_byte(data[stop:], '\n')
 		records.close(&ins.texts)
-		ins.texts = records.open(data, ins.reading, ins.framing, u64(len(data) if nl < 0 else stop + nl + 1), runtime.heap_allocator())
+		ins.texts = records.open(data, ins.as, ins.framing, u64(len(data) if nl < 0 else stop + nl + 1), runtime.heap_allocator())
 		ins.several = true
 		return nil, msg, .Error
 	}
@@ -338,7 +339,7 @@ text_fault :: proc(ins: ^Inputs, f: core.Fault, at: int, end := -1) -> (jq.Value
 	ins.walk, ins.walk_at = fault_walk(text, l, c, false, false, false, ins.walk_spare), at
 	if ins.run.opts.stream_errors {
 		records.close(&ins.texts)
-		ins.texts = records.open(data, ins.reading, ins.framing, u64(resume), runtime.heap_allocator())
+		ins.texts = records.open(data, ins.as, ins.framing, u64(resume), runtime.heap_allocator())
 		ins.several = true
 	} else {
 		close_file(ins)
@@ -423,7 +424,7 @@ open_next :: proc(ins: ^Inputs) -> bool {
 			}
 		}
 		// A JSONC or JSON5 file is one text, its comments around it, so it is read whole.
-		if !is_regular_file(f) && json.Spec(ins.reading.spec) == .Json {
+		if !is_regular_file(f) && json.Spec(ins.as.spec) == .Json {
 			ins.pipe = pipe_start(f)
 			ins.open = true
 			take_data(ins, nil)
@@ -453,7 +454,7 @@ set_data :: proc(ins: ^Inputs, data: []byte) {
 	retire(ins)
 	ins.data, ins.raw_at, ins.pieces = data, 0, {}
 	ins.several = ins.framing != .Concatenated || !ins.last
-	ins.texts = records.open(data, ins.reading, ins.framing, allocator = runtime.heap_allocator())
+	ins.texts = records.open(data, ins.as, ins.framing, allocator = runtime.heap_allocator())
 }
 
 // The open file's next window: data[from:], a text the last window cut short, then the pipe's next whole lines.
@@ -576,7 +577,7 @@ pipe_take :: proc(p: ^Pipe, carry: []byte, run: ^Run) -> (window: []byte, ended:
 	for waited := false; !p.newline && !p.ended; waited = true {
 		if !waited {
 			sync.mutex_unlock(&p.mutex)
-			flush_some(run, force = true)
+			flush_some(&run.output, force = true)
 			sync.mutex_lock(&p.mutex)
 			continue
 		}
@@ -698,7 +699,7 @@ cut_bom_len :: proc(data: []byte) -> int {
 @(private = "file")
 fail_dialect :: proc(ins: ^Inputs, data: []byte, f: core.Fault) -> ! {
 	run := ins.run
-	flush_some(run, force = true)
+	flush_some(&run.output, force = true)
 	if f.kind in core.AT_NO_BYTE {
 		message.write_stderr("stury: error: %s: %s\n", ins.name, jq.fault_sentence(f, ""))
 		finish(run, EXIT_INPUT)
@@ -709,7 +710,7 @@ fail_dialect :: proc(ins: ^Inputs, data: []byte, f: core.Fault) -> ! {
 	sentence := jq.fault_sentence(f, rest)
 	// JSON5 spells them, JSON has no value for them, and the library refuses them as a literal.
 	unsigned := strings.trim_left(rest, "+-")
-	if json.Spec(ins.reading.spec) == .Json5 && f.kind == .Bad_Char && (strings.has_prefix(unsigned, "Infinity") || strings.has_prefix(unsigned, "NaN")) {
+	if json.Spec(ins.as.spec) == .Json5 && f.kind == .Bad_Char && (strings.has_prefix(unsigned, "Infinity") || strings.has_prefix(unsigned, "NaN")) {
 		sentence = "Infinity and NaN have no JSON value"
 	}
 	message.write_stderr("stury: error: %s:%d:%d: %s\n", ins.name, line, col, sentence)
@@ -726,7 +727,7 @@ fault_note :: proc(data: []byte, f: core.Fault, ins: ^Inputs) -> string {
 	switch {
 	case f.kind == .Too_Deep:
 		hint = "a larger --max-depth reads it" if ins.run.opts.max_depth != 0 else "--max-depth N raises the nesting limit"
-	case f.kind != .Bad_Char || at >= len(data) || json.Spec(ins.reading.spec) != .Json:
+	case f.kind != .Bad_Char || at >= len(data) || json.Spec(ins.as.spec) != .Json:
 		return ""
 	case data[at] == '/' && at + 1 < len(data) && (data[at + 1] == '/' || data[at + 1] == '*'):
 		hint = "--from jsonc reads comments"

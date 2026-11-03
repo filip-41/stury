@@ -49,7 +49,9 @@ Cli :: struct {
 	var_names:  [dynamic]string,
 	var_values: [dynamic]jq.Value,
 	positional: [dynamic]jq.Value, // --args and --jsonargs
-	reading:    core.As, // how --argjson, --jsonargs and --slurpfile read their texts, as --from and --max-depth say
+	// How --argjson, --jsonargs, --slurpfile and `fromjson` read their texts, as --from and --max-depth say: as JSON, or
+	// the JSON dialect --from names.
+	json_reading: core.As,
 	binding_flag: string,
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
@@ -86,7 +88,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
-	cli.reading = json.as(FORMATS[o.from].spec, {max_depth = o.max_depth})
+	cli.json_reading = json.as(FORMATS[o.from].spec, {max_depth = o.max_depth})
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
 		a := args[i]
@@ -100,7 +102,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			case rest_as == .Args:
 				append(&cli.positional, jq.valid_utf8(a))
 			case rest_as == .Json_Args:
-				append(&cli.positional, json_arg(cli.reading, a, "--jsonargs"))
+				append(&cli.positional, json_arg(cli.json_reading, a, "--jsonargs"))
 			case:
 				append(&cli.files, a)
 			}
@@ -282,10 +284,10 @@ bind_variable_option :: proc(cli: ^Cli, args: []string, i: int) {
 	case "arg":
 		v = jq.valid_utf8(args[i + 2])
 	case "argjson":
-		v = json_arg(cli.reading, args[i + 2], a)
+		v = json_arg(cli.json_reading, args[i + 2], a)
 	case:
 		msg: string
-		v, msg = load_file(args[i + 2], name == "rawfile", cli.reading)
+		v, msg = load_file(args[i + 2], name == "rawfile", cli.json_reading)
 		if msg != "" {
 			message.write_stderr("stury: Bad JSON in %s %s %s: %s\n", a, args[i + 1], args[i + 2], msg)
 			os.exit(EXIT_USAGE)
