@@ -188,9 +188,6 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 			continue
 		}
 		ins.has_text = true
-		if f, bad := runs_on(ins.data, rec, ins.as).?; bad && ins.framing == .Concatenated {
-			return text_fault(ins, f, int(rec.at))
-		}
 		if ins.run.route.scanning && answer_path(ins.run, rec.text, ins.as) {
 			// As jq's main loop, which reads one input past a file that did not open.
 			if ins.failures > 0 {
@@ -260,22 +257,6 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	// The file's one text: it is read past whole.
 	close_file(ins)
 	return v, msg, status, true
-}
-
-// The fault jq gives the number or literal `rec` of `.Concatenated` texts in `data` when a ',', ':', ']', '}' or JSON's
-// '/' follows it, which jq reads on through, else nil.
-runs_on :: proc(data: []byte, rec: records.Record, r: core.As) -> Maybe(core.Fault) {
-	end := int(rec.at) + len(rec.text)
-	if end == len(data) || strings.contains_rune("[{\"", rune(rec.text[0])) {
-		return nil
-	}
-	switch data[end] {
-	case ',', ':', ']', '}', '/':
-		if data[end] != '/' || json.Spec(r.spec) == .Json {
-			return core.Fault{at = u64(end), rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Trailing)}
-		}
-	}
-	return nil
 }
 
 // Whether the records of a window that is not the file's last ended on a text cut short at the window's end.

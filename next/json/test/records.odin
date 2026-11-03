@@ -151,6 +151,10 @@ model_frame :: proc(src: string, framing: core.Framing, spec: json.Spec) -> (out
 			if model_fault(src[i:j], u64(i), spec) != nil {
 				return out, model_fault(src[i:], u64(i), spec)
 			}
+			// As jq reads them, a scalar runs on into a ',', ':', ']', '}', or a '/' where no comment may start.
+			if j < len(src) && !strings.contains_rune("[{\"'", rune(src[i])) && (strings.contains_rune(",:]}", rune(src[j])) || src[j] == '/' && spec == .Json) {
+				return out, core.fault_of(core.fault_at(u64(j), .Bad_Char, u8(json.Detail.Trailing)), &json.RULES)
+			}
 			append(&out, Model_Record{at = u64(i), text = src[i:j]})
 			i = j
 		}
@@ -435,6 +439,13 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	// Concatenated documents: a number runs on into a letter as one bad token.
 	faults, _ = records.check(transmute([]u8)string("1 [2]{}\"s\"3x"), json.as(.Json), .Concatenated, context.temp_allocator)
 	testing.expect(t, len(faults) == 1 && faults[0].detail == u8(json.Detail.Trailing) && faults[0].at == 11)
+	// So does a scalar into a ',', ':', ']', '}', or a '/' where no comment may start, as jq reads them.
+	for text in ([]string{"1,2", "1 true:", "1]", "1}", "1/"}) {
+		faults, _ = records.check(transmute([]u8)text, json.as(.Json), .Concatenated, context.temp_allocator)
+		testing.expectf(t, len(faults) == 1 && faults[0].detail == u8(json.Detail.Trailing) && faults[0].at == u64(strings.index_any(text[1:], ",:]}/")) + 1, "%q", text)
+	}
+	faults, _ = records.check(transmute([]u8)string("1/**/2"), json.as(.Jsonc), .Concatenated, context.temp_allocator)
+	testing.expect_value(t, len(faults), 0)
 
 	// A line of JSON5 whitespace is no record, in JSON it is a refused one.
 	ws := transmute([]u8)string("1\n\x0b\n\xc2\xa0\n2")

@@ -46,12 +46,8 @@ load_file :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: str
 		if !more {
 			break
 		}
-		fault := runs_on(data, rec, r)
-		doc: core.Document
-		if fault == nil {
-			built, err := records.build(&texts, rec)
-			doc, fault = jq.judge_build(built, err, rec.at)
-		}
+		built, err := records.build(&texts, rec)
+		doc, fault := jq.judge_build(built, err, rec.at)
 		if f, bad := fault.?; bad {
 			return nil, jq.parse_message(data, f)
 		}

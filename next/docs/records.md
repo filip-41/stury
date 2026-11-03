@@ -65,7 +65,8 @@ identifier. A quoted key is a string, so `json.unmarshal(rec.key, spec, &name, &
   `.Seq` record's `text` keeps the whitespace before the next 0x1E.
 - Under `.Seq`, a byte that is no whitespace before the first 0x1E ends the records with `Bad_Char` at that byte.
 - Under `.Concatenated`, whitespace, 0x1E and comments lie between documents. A number or literal that runs on into a
-  byte that may not follow a value, as in `1x`, is one bad token, as jq reads it, and no record.
+  byte that may not follow a value, as in `1x`, `1,` or `1]`, or into a `/` where no comment may start, is one bad
+  token, as jq reads it, and no record.
 - Under `.Entries`, a scalar root has no entries and is judged whole. A value is judged one level below the root, so
   under a root at the deepest level an entry may be no container.
 - A format with no record reader, or one that does not take the framing, ends the records with `.Bad_Option` before

@@ -151,7 +151,7 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		q = gap_end(q, end, S)
 		hi, fault, stop := walk_from(src, q, S, opts, h, regs, on)
 		it.pos = hi
-		if fault == nil && !stop && runs_on(src, q, hi, S) {
+		if fault == nil && !stop && runs_on(src, q, hi, S, true) {
 			fault = core.fault_of(core.fault_at(hi, .Bad_Char, u8(Detail.Trailing)), &RULES)
 		}
 		if fault != nil || q == end {
@@ -229,7 +229,7 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 			break whole
 		}
 		hi, fault, stop := walk_from(src, q, S, value, h, regs, on)
-		if fault != nil || !stop && runs_on(src, q, hi, S) {
+		if fault != nil || !stop && runs_on(src, q, hi, S, false) {
 			break whole
 		}
 		at := u64(intrinsics.ptr_sub(q, p))
@@ -265,9 +265,10 @@ shell_valid :: proc(it: ^records.Reader, close: u64, $S: Spec, opts: Options) ->
 }
 
 // Whether the number or literal at `q`, which a walk ended at `hi`, runs on into a byte that may not follow a value, so
-// that, as jq reads `1x`, it is one bad token and no record.
+// that, as jq reads `1x`, it is one bad token and no record. Between `concatenated` texts, as jq reads them, a ',', ':',
+// ']' or '}' runs on too, and so does a '/' where no comment may start.
 @(private)
-runs_on :: #force_inline proc "contextless" (src: []u8, q: [^]u8, hi: u64, $S: Spec) -> bool {
+runs_on :: #force_inline proc "contextless" (src: []u8, q: [^]u8, hi: u64, $S: Spec, $concatenated: bool) -> bool {
 	if hi >= u64(len(src)) {
 		return false
 	}
@@ -276,7 +277,11 @@ runs_on :: #force_inline proc "contextless" (src: []u8, q: [^]u8, hi: u64, $S: S
 		return false
 	}
 	switch src[hi] {
-	case ' ', '\t', '\r', '\n', 0x1e, ',', ':', '[', ']', '{', '}', '"', '\'', '/':
+	case ',', ':', ']', '}':
+		return concatenated
+	case '/':
+		return concatenated && .Comments not_in FEATURES[S]
+	case ' ', '\t', '\r', '\n', 0x1e, '[', '{', '"', '\'':
 		return false
 	}
 	when .Es5 in FEATURES[S] {
