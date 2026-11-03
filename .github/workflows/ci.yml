@@ -31,6 +31,57 @@ jobs:
           sudo apt-get install -y mandoc
           mandoc -T lint -W warning docs/stury.1
 
+  # The rebuild in next/, beside the jobs above until it replaces them. Its Makefile runs the same stages.
+  next-lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: next
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-odin
+      - run: make lint
+      - run: make size
+
+  next-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
+        target: [test]
+        include:
+          - os: macos-15
+            target: test-x86
+          - os: macos-15
+            target: test-asan
+          - os: macos-15
+            target: test-tsan
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: next
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-odin
+      - run: make -j4 ${{ matrix.target }}
+
+  # The packages whose suites do not read the POSIX-only walktest helper (json and dsv do), and the command line.
+  next-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: next
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-odin
+      - run: |
+          set -e
+          for p in core/spell/test host/test core/kernel/test core/test core/write/test core/records/test; do
+            odin test $p -o:minimal -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:RECORDS_SLICE=1 -out:test.exe
+          done
+          odin build cmd/stury -o:speed -define:STURY_VERSION='"ci"' -out:stury.exe
+
   test:
     strategy:
       fail-fast: false
