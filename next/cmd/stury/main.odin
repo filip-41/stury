@@ -84,6 +84,9 @@ main :: proc() {
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
+	if o.follow {
+		refuse_follow(o, &cli)
+	}
 	if validating {
 		check_main(&run, &cli)
 	}
@@ -125,6 +128,9 @@ main :: proc() {
 		files   = cli.files[:] if len(cli.files) > 0 else STDIN_ONLY,
 		slurp   = o.slurp,
 		run     = &run,
+	}
+	if o.follow {
+		catch_stop()
 	}
 	bind_inputs(&run.ip, &ins)
 	init_output(&run.output, &run)

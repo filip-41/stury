@@ -91,6 +91,8 @@ stury's own options:
                             not already formatted;
       --grow-header         with --to csv or tsv, write a header of every key;
       --max-depth n         refuse nesting past n levels (default 1024);
+      --follow              with one file, answer each record as it is
+                            appended, like tail -f FILE | stury;
       --explain             write the filter's route, its plan and what the
                             run did to stderr, and run the filter.
 

@@ -14,6 +14,7 @@ import "core:io"
 import "core:os"
 import "core:strings"
 import "core:sync"
+import "core:time"
 import "core:sys/posix"
 import "core:thread"
 import core "../../core"
@@ -33,6 +34,13 @@ READ_AHEAD :: 8 << 20
 
 // How much a pipe's thread reads at once.
 READ_BLOCK :: 1 << 16
+
+// How long --follow waits at a file's end before it reads again: short enough that an appended record is answered
+// before anyone looks, long enough that an idle run is a few dozen stat calls a second.
+FOLLOW_POLL :: 50 * time.Millisecond
+
+// Set by SIGINT and SIGTERM (`catch_stop`) for a --follow run, which then ends as if its file ended.
+stopped: bool
 
 // How the inputs are read: `as`, the format's handle, which `core.build` and `core.validate` read a text through
 // whatever the format is, and how a file's texts follow each other.
@@ -64,6 +72,11 @@ Inputs :: struct {
 	skip_below: u64, // a delimited text's records before it are answered by pieces
 	pinned:    bool,
 	header_judged: bool, // --from csv or tsv: the open file's first record is read
+	// --follow with a delimited format: the header's bytes through its line end, which every window after the first
+	// opens with so that it reads as the header of a file of its own, and whether the open window does.
+	head:      []byte,
+	headed:    bool,
+	fresh:     bool, // --follow: the file was truncated, so what follows the last window taken is a new file
 	spent:     [dynamic][]byte,
 	raw_at:    int, // -R: where the next line starts in data
 	raw_done:  bool, // -R -s: the one string is read
@@ -171,7 +184,8 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 		if !own && records_pieces(ins) {
 			continue
 		}
-		from := ins.texts.pos
+		// A window that opens with the header is carried on from past it: its reader is at the header until a row is read.
+		from := max(ins.texts.pos, u64(len(ins.head)) if ins.headed else 0)
 		route := &ins.run.route
 		// The path's read frames the record it answers.
 		scanned := route.scanning && scans(route.path) && !reads_cells(&ins.run.opts)
@@ -289,11 +303,12 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	return v, msg, status, true
 }
 
-// Whether the records of a window that is not the file's last ended on a text cut short at the window's end.
+// Whether the records of a window that is not the file's last ended on a text cut short at the window's end. A
+// delimited record's open quote is a fault at the quote, where the record starts.
 @(private = "file")
 cut_short :: proc(ins: ^Inputs) -> bool {
 	f, bad := ins.texts.fault.?
-	return !bad || f.kind == .Truncated && int(f.at) >= len(ins.data)
+	return !bad || f.kind == .Truncated && (int(f.at) >= len(ins.data) || reads_cells(&ins.run.opts))
 }
 
 // The value of the document `doc` of a text at data[at:], or its first --stream event.
@@ -436,8 +451,9 @@ open_next :: proc(ins: ^Inputs) -> bool {
 		}
 		// A JSONC or JSON5 file is one text, its comments around it, so it is read whole, and so is a delimited one, whose
 		// header heads all of it.
-		if !is_regular_file(f) && json.Spec(ins.as.spec) == .Json && !reads_cells(&ins.run.opts) {
-			ins.pipe = pipe_start(f)
+		follow := ins.run.opts.follow
+		if follow || !is_regular_file(f) && json.Spec(ins.as.spec) == .Json && !reads_cells(&ins.run.opts) {
+			ins.pipe = pipe_start(f, follow, ins.name)
 			ins.open = true
 			take_data(ins, nil)
 			return true
@@ -513,8 +529,19 @@ next_window :: proc(ins: ^Inputs, from: int) {
 // The pipe's next window after `carry`, as the open file's bytes.
 @(private = "file")
 take_data :: proc(ins: ^Inputs, carry: []byte) {
-	window, ended := pipe_take(ins.pipe, carry, ins.run)
-	ins.run.route.input += len(window) - len(carry)
+	carry := carry
+	if ins.fresh {
+		carry, ins.file_lines, ins.parsed = nil, 0, {line = 1}
+		delete(ins.head, runtime.heap_allocator())
+		ins.head, ins.headed = nil, false
+	}
+	if ins.head != nil && !ins.headed {
+		// The window's lines are counted from past the header, as the lines before it were.
+		ins.file_lines -= bytes.count(ins.head, {'\n'})
+	}
+	window, ended, restarted := pipe_take(ins.pipe, ins.head, carry, ins.run)
+	ins.fresh, ins.headed = restarted, ins.head != nil
+	ins.run.route.input += len(window) - len(carry) - len(ins.head)
 	ins.last = ended
 	if ended {
 		if err := pipe_end(ins.pipe); err != nil {
@@ -531,7 +558,7 @@ take_data :: proc(ins: ^Inputs, carry: []byte) {
 advance_past :: proc(ins: ^Inputs, to: int) {
 	settle_line(ins)
 	line := ins.parsed.line
-	jq.advance(&ins.parsed.line, &ins.parsed.column, ins.data[:to])
+	jq.advance(&ins.parsed.line, &ins.parsed.column, ins.data[min(len(ins.head), to) if ins.headed else 0:to])
 	ins.file_lines += ins.parsed.line - line
 }
 
@@ -593,19 +620,32 @@ Pipe :: struct {
 	ended:   bool,
 	err:     os.Error, // the read that ended it, if it failed
 	thread:  ^thread.Thread,
+	// --follow: the file is read on past its end, `name` is told when it shrinks, and `restart` says it did and the
+	// bytes pending are the last of the old file, which the reader waits to have taken.
+	follow:  bool,
+	name:    string,
+	restart: bool,
 }
 
 @(private = "file")
-pipe_start :: proc(f: ^os.File) -> ^Pipe {
+pipe_start :: proc(f: ^os.File, follow: bool, name: string) -> ^Pipe {
 	context.allocator = runtime.heap_allocator()
 	p := new(Pipe)
-	p.file = f
+	p.file, p.follow, p.name = f, follow, name
 	p.pending = make([dynamic]byte, 0, READ_BLOCK)
 	p.thread = thread.create_and_start_with_poly_data(p, proc(p: ^Pipe) {
 		block := make([]byte, READ_BLOCK, runtime.heap_allocator())
 		defer delete(block, runtime.heap_allocator())
+		read: i64
 		for {
 			n, err := read_some(p.file, block)
+			read += i64(n)
+			if p.follow && n == 0 && (err == nil || err == io.Error.EOF) {
+				if follow_idle(p, &read) {
+					return
+				}
+				continue
+			}
 			sync.mutex_lock(&p.mutex)
 			append(&p.pending, ..block[:n])
 			p.newline ||= bytes.index_byte(block[:n], '\n') >= 0
@@ -626,14 +666,37 @@ pipe_start :: proc(f: ^os.File) -> ^Pipe {
 	return p
 }
 
-// `carry` and then the pipe's whole lines read so far, waiting for a line end or the pipe's end, and whether the
-// pipe has ended, when the window is all of it. Before it first waits, the output so far is written, as what is waited
-// for may be a while coming.
+// Waits one poll at the end of a followed file, then looks at what ended the wait: a stop, which ends the pipe, or a
+// file shorter than the bytes read, which is read again from its start once the bytes before it are taken. Returns
+// true when the pipe has ended.
 @(private = "file")
-pipe_take :: proc(p: ^Pipe, carry: []byte, run: ^Run) -> (window: []byte, ended: bool) {
+follow_idle :: proc(p: ^Pipe, read: ^i64) -> bool {
+	time.sleep(FOLLOW_POLL)
 	sync.mutex_lock(&p.mutex)
 	defer sync.mutex_unlock(&p.mutex)
-	for waited := false; !p.newline && !p.ended; waited = true {
+	if sync.atomic_load(&stopped) {
+		p.ended = true
+	} else if size, err := os.file_size(p.file); err == nil && size < read^ {
+		message.write_stderr("stury: %s: file truncated\n", p.name)
+		os.seek(p.file, 0, .Start)
+		read^, p.restart = 0, true
+	}
+	sync.cond_broadcast(&p.cond)
+	for p.restart && !p.ended {
+		sync.cond_wait(&p.cond, &p.mutex)
+	}
+	return p.ended
+}
+
+// `head`, `carry` and then the pipe's whole lines read so far, waiting for a line end or the pipe's end, and whether
+// the pipe has ended, when the window is all of it. `restarted` says the file shrank after these lines, so the next
+// window starts a new file. Before it first waits, the output so far is written, as what is waited for may be a while
+// coming.
+@(private = "file")
+pipe_take :: proc(p: ^Pipe, head, carry: []byte, run: ^Run) -> (window: []byte, ended, restarted: bool) {
+	sync.mutex_lock(&p.mutex)
+	defer sync.mutex_unlock(&p.mutex)
+	for waited := false; !p.newline && !p.ended && !p.restart; waited = true {
 		if !waited {
 			sync.mutex_unlock(&p.mutex)
 			flush_some(&run.output, force = true)
@@ -643,13 +706,15 @@ pipe_take :: proc(p: ^Pipe, carry: []byte, run: ^Run) -> (window: []byte, ended:
 		sync.cond_wait(&p.cond, &p.mutex)
 	}
 	end := len(p.pending) if p.ended else bytes.last_index_byte(p.pending[:], '\n') + 1
-	window = make([]byte, len(carry) + end, runtime.heap_allocator())
-	copy(window, carry)
-	copy(window[len(carry):], p.pending[:end])
-	remove_range(&p.pending, 0, end)
-	p.newline = false
+	window = make([]byte, len(head) + len(carry) + end, runtime.heap_allocator())
+	copy(window, head)
+	copy(window[len(head):], carry)
+	copy(window[len(head) + len(carry):], p.pending[:end])
+	// A line the old file ended without its newline is not the new file's.
+	remove_range(&p.pending, 0, len(p.pending) if p.restart else end)
+	restarted, p.restart, p.newline = p.restart, false, false
 	sync.cond_broadcast(&p.cond)
-	return window, p.ended
+	return window, p.ended, restarted
 }
 
 // The pipe's thread joined and its memory freed. Returns the error its last read failed with.

@@ -6,6 +6,7 @@ package main
 import "core:io"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:sys/posix"
 import "message"
 
@@ -165,6 +166,13 @@ open_input :: proc(path: string) -> (f: ^os.File, err: os.Error) {
 	}
 	posix.close(fd)
 	return
+}
+
+// SIGINT and SIGTERM set `stopped`, which a --follow run takes as its file's end.
+catch_stop :: proc() {
+	act := posix.sigaction_t{sa_handler = proc "c" (_: posix.Signal) {sync.atomic_store(&stopped, true)}, sa_flags = {.RESTART}}
+	posix.sigaction(.SIGINT, &act, nil)
+	posix.sigaction(.SIGTERM, &act, nil)
 }
 
 is_regular_file :: proc(f: ^os.File) -> bool {

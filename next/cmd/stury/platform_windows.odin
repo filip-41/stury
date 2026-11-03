@@ -103,6 +103,9 @@ open_input :: proc(path: string) -> (^os.File, os.Error) {
 	return os.open(path)
 }
 
+// Ctrl-C ends a --follow run as it ends any other, the output having been flushed at each record.
+catch_stop :: proc() {}
+
 is_regular_file :: proc(f: ^os.File) -> bool {
 	return win.GetFileType(win.HANDLE(os.fd(f))) == win.FILE_TYPE_DISK
 }

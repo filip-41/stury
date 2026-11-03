@@ -3,6 +3,8 @@ package main
 // --from csv and --from tsv: each file's first record is its header, and each later record is one object keyed by it,
 // an empty unquoted cell null. A file is read whole, as its records' documents point into all of it.
 
+import "base:runtime"
+import "core:bytes"
 import core "../../core"
 import records "../../core/records"
 import "jq"
@@ -24,6 +26,10 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 		}
 		if !ins.header_judged {
 			ins.header_judged = true
+			if ins.run.opts.follow && ins.head == nil {
+				// The first record built is the first row, so the header is what lies before it.
+				ins.head = bytes.clone(ins.data[:rec.at], runtime.heap_allocator())
+			}
 			if text, twice := repeated_header(ins.name, ins.data, &doc); twice {
 				return nil, text, .Error, false
 			}

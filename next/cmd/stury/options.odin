@@ -37,6 +37,7 @@ Opts :: struct {
 	max_depth:        u32, // --max-depth, 0 when it was not given
 	in_place:         bool,
 	check:            bool,
+	follow:           bool, // --follow: the one file is read on as it grows
 }
 
 // What the command line gives besides the options.
@@ -165,6 +166,8 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			o.grow_header = true
 		case "explain":
 			o.explain = true
+		case "follow":
+			o.follow = true
 		case "in-place":
 			o.in_place = true
 		case "check":
@@ -478,3 +481,18 @@ parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
 	return n, ok && 1 <= n && n <= DEPTH_CEILING
 }
 
+
+// Refuses what --follow cannot do: it answers the records of one file as they are appended, so it needs the file
+// named, a filter run, and an input that is records rather than whole texts.
+refuse_follow :: proc(o: ^Opts, cli: ^Cli) {
+	other := "check" if cli.validating else "fmt" if cli.formatting else "--slurp" if o.slurp else "--null-input" if o.null_input else "--stream" if o.stream else ""
+	if other != "" {
+		usage_error("--follow answers each record of a file as it is appended: it cannot be combined with %s", other)
+	}
+	if len(cli.files) != 1 || cli.files[0] == "-" {
+		usage_error("--follow follows one named file, not stdin or %d files", len(cli.files))
+	}
+	if FORMATS[o.from].spec != .Json {
+		usage_error("--follow reads records: --from %s makes one text of a file", FORMATS[o.from].name)
+	}
+}
