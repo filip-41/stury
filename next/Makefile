@@ -109,6 +109,10 @@ lint:
 	$(ODIN) check bench/editbench $(LINT_FLAGS)
 	$(ODIN) check bench/paths $(LINT_FLAGS)
 	$(ODIN) check bench/write $(LINT_FLAGS)
+	$(ODIN) check cmd/stury $(LINT_FLAGS)
+	$(ODIN) check cmd/stury $(LINT_FLAGS) -target:linux_amd64
+	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && echo "== cmd/stury (windows_amd64 objects)" && \
+		$(ODIN) build cmd/stury -build-mode:obj -target:windows_amd64 -windows-sdk-root:$$d $(LINT_FLAGS) -out:$$d/stury.obj
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for p in $(TIER_PKGS); do for o in none speed; do \
 		echo "== $$p (linux_amd64 v4 -o:$$o)"; \
