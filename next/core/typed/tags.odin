@@ -4,6 +4,7 @@ import "core:reflect"
 import "core:strings"
 
 // The tag key every format reads where a field has no tag under the format's own key.
+@(private)
 SHARED_TAG_KEY :: "stury"
 
 @(private)

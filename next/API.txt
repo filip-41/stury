@@ -96,7 +96,6 @@ ROOT :: Node_Index(0)
 Read_As :: struct {
 Resolve_Options :: struct {
 Role :: enum u8 {
-Rule :: struct {
 Rules :: struct {
 Runner :: struct {
 SPELLING_DECODE :: u16(1)
@@ -211,7 +210,6 @@ utf8_window :: #force_inline proc (prev, v: V) -> V {
 # core/compose
 Compose :: struct {
 Member :: struct {
-Rank :: enum u8 {
 Root_Spelling :: struct {
 commit :: proc(list: ^core.Edit_List, spec: u8, root: ^Root_Spelling, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 emit_chunk :: proc(cx: ^Compose, lo, hi: u64, from: int, rank: Rank) -> bool {
@@ -230,7 +228,6 @@ write_member :: proc(cx: ^Compose, e: core.Edit) -> bool {
 BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
 Builder :: struct {
 Count :: struct {
-Rewalk :: proc (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index)
 Scan :: struct {
 Sink :: enum u8 {
 builder_close_node :: #force_inline proc (h: ^Builder, a: int, open: core.Node_Index, count: u32) {
@@ -266,7 +263,6 @@ KEY_SIZE_MAX :: 240
 Marshal_Hook :: #type proc(v: rawptr, allocator: runtime.Allocator) -> (stand_in: any, refuse: core.Typed_Error_Kind)
 Marshal_Text :: #type proc(plan: ^Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
 Meta :: struct {
-NO_LIMIT :: max(u64)
 Null :: struct {}
 Number_Text :: distinct string
 Plan :: struct {
@@ -276,7 +272,6 @@ Read_Kind :: enum u8 {
 Read_Options :: struct {
 Reader :: struct {
 Rename :: enum u8 {
-SHARED_TAG_KEY ::
 Scalar :: union {
 Tag_Name :: struct {
 Tag_Scan :: struct {
@@ -338,7 +333,6 @@ marshal_stream :: proc(w: io.Stream, value: any, plan: ^typed.Plan, opts := core
 number_text :: proc(p: [^]u8, n: core.Number) -> (size: int, kind: core.Typed_Error_Kind) {
 open_array :: proc(t: ^Tokens) -> core.Typed_Error_Kind {return open(t, false)}
 open_object :: proc(t: ^Tokens) -> core.Typed_Error_Kind {return open(t, true)}
-put_fill :: proc(out: ^Out, n: int, fill: u8) {
 put_line :: proc(out: ^Out, opts: core.Write_Options, depth: int) {
 put_number :: proc(out: ^Out, n: core.Number) -> core.Typed_Error_Kind {
 put_text :: proc(out: ^Out, s: string) {

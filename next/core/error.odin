@@ -44,6 +44,7 @@ Rules :: struct {
 }
 
 // `code` is stable across releases and a caller may match on it. `message` may change.
+@(private)
 Rule :: struct {
 	code:    string,
 	message: string,

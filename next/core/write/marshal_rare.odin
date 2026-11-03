@@ -183,6 +183,7 @@ put_bit_set :: proc(w: ^Walker, m: ^typed.Meta, v: uintptr, top, nest: int, $P: 
 }
 
 // A line break and `n` bytes of `fill`, at any length.
+@(private)
 put_fill :: proc(out: ^Out, n: int, fill: u8) {
 	put_byte(out, '\n')
 	for _ in 0 ..< n {

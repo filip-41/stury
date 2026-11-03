@@ -259,7 +259,8 @@ Resolve_Options :: struct {
 // compare as text. `write` writes a node of the document as text of the spec and layout `read` names, into a buffer from `allocator` or to
 // `stream`, nil for a format with no document writer, see `core.write`. `tokens` is the format's `^write.Token_Spelling`,
 // nil for a format with no token writer. `records` is the format's `^records.Services`, nil for a format with no record
-// reader. Both are a `rawptr` since `core/write` and `core/records` import `core`.
+// reader. Both are a `rawptr` since `core/write` and `core/records` import `core`, and each is cast back to that type
+// unchecked, so a format sets them to a table of exactly that type or leaves them nil.
 Spelling :: struct {
 	text:       proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool,

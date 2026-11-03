@@ -16,6 +16,7 @@ NO_BYTE :: max(u64)
 
 // The order of chunks at one byte, which only a member of no bytes makes possible: what comes before a line, what comes
 // before a member, a set, what comes after a member, what comes after a line.
+@(private)
 Rank :: enum u8 {
 	Line_Head,
 	Head,

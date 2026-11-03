@@ -7,6 +7,7 @@ import core ".."
 // `Hook_Regs` while reading: `b` walks the plan's records, `c` is the struct the members are read into or the list's
 // next element, and `a` is one past the list's capacity, or `NO_LIMIT` outside a list, so one compare guards every
 // value and a value in a struct pays no branch on what holds it.
+@(private)
 NO_LIMIT :: max(u64)
 
 // An open container, with the registers its close gives back. `data` is a list's first element, a map, or a struct's

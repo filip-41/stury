@@ -93,6 +93,7 @@ Scan :: struct {
 
 // Gives one value of a text to the `$MANY` form's hook again from the value's first byte, `at` being its node in a
 // built document. A format's `scan` sets it, since only a format can walk from a value.
+@(private)
 Rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index)
 
 // Reads `paths` and `read` into `h`. `many` asks for `$MANY`, and `depth` bounds the frames a `Descend` path opens.
