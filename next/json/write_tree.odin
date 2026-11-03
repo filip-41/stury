@@ -36,6 +36,7 @@ Tree :: struct {
 	respell: bool, // JSON5's spelling of a string and a number is spelled again for JSON
 	copy:    bool, // a string is written as it was authored
 	resolve: bool, // a `Plain` cell is written as `core.resolve` reads it, else as text
+	at:      int, // the first fact not before the node `node_facts` last answered for
 }
 
 // A member of a `Map` as the tree writer orders them. `name` is the decoded key under `sort_keys`.
@@ -108,12 +109,26 @@ tree_comment :: proc(w: ^Tree, f: core.Fact) -> (line: bool) {
 	return
 }
 
+// The facts of node `i`. A walk in row order reads them from `at` on without a search, and a node before the cursor, as
+// a sorted key's is, is searched for.
+@(private)
+node_facts :: proc(w: ^Tree, i: core.Node_Index) -> []core.Fact {
+	all := w.doc.facts
+	if w.at > 0 && all[w.at - 1].node >= i {
+		return core.all_facts(w.doc, i)
+	}
+	lo := w.at
+	for lo < len(all) && all[lo].node < i {lo += 1}
+	for w.at = lo; w.at < len(all) && all[w.at].node == i; w.at += 1 {}
+	return all[lo:w.at]
+}
+
 // Writes member `i` of the container at `depth`: the comments before it, its key `key` when it has one, its value, its
 // comma, and the comments that follow. The root is entered with no key.
 @(private)
 tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -> bool {
 	doc := w.doc
-	facts := core.all_facts(doc, i) if w.keep else nil
+	facts := node_facts(w, i) if w.keep else nil
 	key_lo := max(u64)
 	if key != core.NO_NODE {
 		key_lo = core.node_start(doc.nodes[key])
@@ -137,7 +152,7 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 			}
 		}
 	}
-	tree_value(w, i, depth) or_return
+	tree_value(w, i, depth, facts) or_return
 	if comma {
 		write.put_byte(w.out, ',')
 	}
@@ -180,9 +195,9 @@ tree_pairs :: proc(w: ^Tree, i: core.Node_Index) -> (list: [dynamic]Pair, ok: bo
 	return list, true
 }
 
-// Writes the value at `i`: a scalar, or a container with its members and its feet.
+// Writes the value at `i`: a scalar, or a container with its members and its feet, which are among its `facts`.
 @(private)
-tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int) -> bool {
+tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int, facts: []core.Fact) -> bool {
 	doc := w.doc
 	t := doc.nodes[i]
 	if t.kind < .Array {
@@ -231,7 +246,7 @@ tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int) -> bool {
 	}
 	feet := false
 	if w.keep {
-		for f in core.all_facts(doc, i) {
+		for f in facts {
 			if f.role == .Comment_Foot && (i != w.root || f.lo < w.close) {
 				write.put_line(w.out, w.opts, depth + 1)
 				tree_comment(w, f)
