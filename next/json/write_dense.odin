@@ -110,6 +110,8 @@ dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src:
 	}
 	when MODE != .Blind {
 		s^ = {in_string, odd, escapes}
+	} else {
+		_, _, _ = in_string, odd, escapes
 	}
 	return
 }
