@@ -776,6 +776,15 @@ fault_told :: proc(name: string, data: []byte, f: core.Fault, as: core.As, lines
 	return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, sentence)
 }
 
+// The fault `f` of the records of `data` framed by `framing`, but under `.Lines` a word cut short by its line's end,
+// where jq ends a literal, is an invalid literal.
+literal_cut :: proc(data: []byte, f: core.Fault, framing: core.Framing) -> core.Fault {
+	if framing == .Lines && f.kind == .Truncated && f.rules == &json.RULES && f.at > 0 && int(f.at) < len(data) && is_letter(data[f.at - 1]) {
+		return {at = f.at, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Literal)}
+	}
+	return f
+}
+
 // For the faults whose cure is a flag of stury's own, the line of `data` the fault `f` is at, a caret under its byte,
 // and the flag, else "". A trailing comma and a comment are JSONC's, and a nesting past the cap is raised by
 // --max-depth, which the hint asks for only when it was not given. The text ends in a newline.

@@ -23,6 +23,7 @@ package main
 //	route.odin                       the path scan or the interpreter, which answers the filter
 //	explain.odin                     --explain's report of the route and the run
 //	check.odin                       `stury check`, which judges the inputs
+//	fmt.odin                         `stury fmt`, which writes the inputs back in the printer's layout
 //	filter.odin                      the jq interpreter over each input
 //	print.odin                       output as jq prints it, and what it comes to (`Output`)
 //	message/                         the text of every message, built from a format and its values (package `message`)
@@ -83,8 +84,7 @@ main :: proc() {
 		check_main(&run, &cli)
 	}
 	if cli.formatting {
-		message.write_stderr("stury: this build does not run that yet\n")
-		os.exit(EXIT_USAGE)
+		fmt_main(&run, &cli)
 	}
 	if dirs, given := cli.lib_dirs.?; given {
 		run.ip.search_list = dirs[:]

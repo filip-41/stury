@@ -25,6 +25,7 @@ Output :: struct {
 	spare:       [write.ROOM_MAX]u8,
 	spill:       jq.Spill, // `spill_out`, so a deep value is not held whole
 	written:     int, // bytes written to stdout
+	held:        bool, // fmt --check and --in-place: the output is kept whole and not written
 	// jq's: what the input being run has come to so far, JQ_OK_NO_OUTPUT or its last output's result, and what the
 	// last input came to, a JQ_OK result or an exit status.
 	result, ret: int,
@@ -143,6 +144,9 @@ output_layout :: proc(run: ^Run) -> jq.Layout {
 // The output held so far written, when it passes FLUSH_AT bytes, when `force`d, and under --unbuffered.
 flush_some :: proc(o: ^Output, force := false) {
 	n := o.buf.cursor
+	if o.held {
+		return
+	}
 	if n >= FLUSH_AT || (force || o.opts.unbuffered) && n > 0 {
 		write_out(o.buf.buf[:n])
 		o.written += n
