@@ -26,7 +26,6 @@ Number :: struct {
 #assert(size_of(Number) == 16)
 
 // The bits of binary64 infinity, which `strconv.fast_float_compute_float` returns on overflow.
-@(private)
 F64_INF_BITS :: u64(0x7FF) << 52
 
 // The powers of ten from 1e0 to 1e22, each exact as a binary64, used by the Clinger window.

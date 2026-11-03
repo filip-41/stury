@@ -48,10 +48,10 @@ Batch_Row :: struct {
 Batch :: struct {
 	rows:      [BATCH]Batch_Row,
 	head:      Batch_Row,
-	cells:     []core.Token,
+	cells:     [dynamic]core.Token,
 	keys:      []core.Token,
 	key_src:   []u8,
-	comb:      []u8,
+	comb:      [dynamic]u8,
 	seen:      [3]u64,
 	from:      u64,
 	past:      bool,
@@ -161,16 +161,14 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 @(private)
 split_all :: proc(it: ^records.Reader, b: ^Batch, src: []u8, row: Batch_Row, spec: Spec, opts: Options, role: core.Role) -> (int, bool) {
 	for {
-		sp := Split{out = b.cells}
+		sp := Split{out = b.cells[:]}
 		if _, a := split_any(src, row, spec, opts, role, &sp, {}, on_split); a != .Stop {
 			return sp.n, true
 		}
-		grown, err := make([]core.Token, max(2 * len(b.cells), 64), it.allocator)
-		if err != nil {
+		b.cells.allocator = it.allocator
+		if resize(&b.cells, max(2 * len(b.cells), 64)) != nil {
 			return 0, false
 		}
-		delete(b.cells, it.allocator)
-		b.cells = grown
 	}
 }
 
@@ -320,17 +318,13 @@ joined :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row) -> (src: []u8, at
 		return it.src, row, true
 	}
 	n, size := len(b.key_src), len(b.key_src) + int(row.hi - row.at)
-	if len(b.comb) < size {
-		grown, err := make([]u8, max(size, 2 * len(b.comb)), it.allocator)
-		if err != nil {
-			return nil, {}, false
-		}
-		delete(b.comb, it.allocator)
-		b.comb = grown
+	b.comb.allocator = it.allocator
+	if resize(&b.comb, size) != nil {
+		return nil, {}, false
 	}
-	copy(b.comb, b.key_src)
+	copy(b.comb[:], b.key_src)
 	copy(b.comb[n:], it.src[row.at:row.hi])
-	return b.comb[:size], {u64(n), u64(size)}, true
+	return b.comb[:], {u64(n), u64(size)}, true
 }
 
 // The value tokens of `rec`, the row `next` gave last, or false for another or when they do not fit in memory.
@@ -536,12 +530,12 @@ place_error :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, e: ^core.Typ
 @(private)
 close_rows :: proc(it: ^records.Reader) {
 	if b := (^Batch)(it.format); b != nil {
-		delete(b.cells, it.allocator)
+		delete(b.cells)
 		delete(b.keys, it.allocator)
 		if it.input.procedure != nil {
 			delete(b.key_src, it.allocator)
 		}
-		delete(b.comb, it.allocator)
+		delete(b.comb)
 		delete(b.cols, it.allocator)
 		free(b, it.allocator)
 	}

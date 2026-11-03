@@ -188,9 +188,13 @@ DOCUMENT_KIND_RULES := [Document_Error_Kind]Rule {
 // Writes `e`'s code: `document.` then the kind's code, as in `document.walk` or `document.duplicate_key`. The
 // `write_code` overload below exposes it beside the fault's code.
 @(private)
-write_document_code :: proc(w: io.Writer, e: Document_Error) -> io.Error {
-	io.write_string(w, "document.") or_return
-	_, err := io.write_string(w, DOCUMENT_KIND_RULES[e.kind].code)
+write_document_code :: proc(w: io.Writer, e: Document_Error) -> io.Error {return write_coded(w, "document.", DOCUMENT_KIND_RULES[e.kind].code)}
+
+// Writes `prefix` then `code`.
+@(private)
+write_coded :: proc(w: io.Writer, prefix, code: string) -> io.Error {
+	io.write_string(w, prefix) or_return
+	_, err := io.write_string(w, code)
 	return err
 }
 
@@ -270,11 +274,7 @@ path_error :: proc(e: Document_Error) -> Path_Error {
 }
 
 @(private)
-write_path_code :: proc(w: io.Writer, e: Path_Error) -> io.Error {
-	io.write_string(w, "path.") or_return
-	_, err := io.write_string(w, PATH_KIND_RULES[e.kind].code)
-	return err
-}
+write_path_code :: proc(w: io.Writer, e: Path_Error) -> io.Error {return write_coded(w, "path.", PATH_KIND_RULES[e.kind].code)}
 
 // Writes `line:col: message` for `e`. A `.Bad_Path`'s `at` is a byte of `path`, the path's text, and a `.Duplicate_Key`'s
 // a byte of `src`, so the caller passes both and never tests the kind. `.Walk` writes its fault. `lines` is as in
@@ -404,11 +404,7 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Bad_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 
 @(private)
-write_typed_code :: proc(w: io.Writer, e: Typed_Error) -> io.Error {
-	io.write_string(w, "typed.") or_return
-	_, err := io.write_string(w, TYPED_KIND_RULES[e.kind].code)
-	return err
-}
+write_typed_code :: proc(w: io.Writer, e: Typed_Error) -> io.Error {return write_coded(w, "typed.", TYPED_KIND_RULES[e.kind].code)}
 
 // Writes `line:col: message at path` for `e`, the position left out where the kind has no byte. `.Walk` writes its
 // fault. `lines` is as in `render_fault`.

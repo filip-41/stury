@@ -373,8 +373,7 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int) -> core.
 put_escaped :: proc(out: ^write.Out, s: string, $ASCII, $HTML: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	n := len(s)
 	src := raw_data(s)
-	write.room(out, 1)[0] = '"'
-	out.cursor += 1
+	write.put_byte(out, '"')
 	for i := 0; i < n; {
 		end := min(i + SEGMENT, n)
 		base := write.room(out, 6 * (end - i) + 32)
@@ -429,8 +428,7 @@ put_escaped :: proc(out: ^write.Out, s: string, $ASCII, $HTML: bool) -> core.Typ
 		}
 		out.cursor += o
 	}
-	write.room(out, 1)[0] = '"'
-	out.cursor += 1
+	write.put_byte(out, '"')
 	return .None
 }
 

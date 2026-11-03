@@ -153,10 +153,7 @@ total :: #force_inline proc "contextless" (w: ^Rows) -> int {
 }
 
 @(private)
-put_byte :: #force_inline proc(w: ^Rows, c: u8) {
-	write.room(&w.out, 1)[0] = c
-	w.out.cursor += 1
-}
+put_byte :: #force_inline proc(w: ^Rows, c: u8) {write.put_byte(&w.out, c)}
 
 // Writes the header: `names`, then the line end. A header that wrote nothing would be a blank line, and the first record
 // would read as the header.
@@ -706,20 +703,19 @@ put_doubled :: proc(p: [^]u8, n: int, src: [^]u8, i, end: int) -> int #no_bounds
 // The letter that follows a backslash to spell `c`, 0 for a byte no escape spells.
 @(private)
 escape_letter :: proc "contextless" (c: u8) -> u8 {
-	switch c {
-	case '\t':
-		return 't'
-	case '\n':
-		return 'n'
-	case '\r':
-		return 'r'
-	case '\\':
-		return '\\'
-	case 0:
-		return '0'
+	for k in 0 ..< len(TSV_ESCAPED) {
+		if TSV_ESCAPED[k] == c {
+			return TSV_LETTERS[k]
+		}
 	}
 	return 0
 }
+
+// The bytes a TSV cell writes as a backslash and a letter, and their letters in the same order.
+@(private, rodata)
+TSV_ESCAPED := [?]u8{'\t', '\n', '\r', '\\', 0}
+@(private, rodata)
+TSV_LETTERS := [?]u8{'t', 'n', 'r', '\\', '0'}
 
 // Whether `s` holds a byte `put_guarded` changes, and whether it holds one past 0x7F. A text under 16 bytes goes through
 // the byte classes, and a longer one by 16-byte blocks, the last overlapping the one before.

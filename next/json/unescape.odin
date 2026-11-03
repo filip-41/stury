@@ -488,23 +488,6 @@ number :: #force_inline proc(doc: ^core.Document, i: core.Node_Index) -> core.Nu
 	return {0, .Wide}
 }
 
-// The bits of binary64 infinity, which `strconv.fast_float_compute_float` returns on overflow.
-@(private)
-F64_INF_BITS :: u64(0x7FF) << 52
-
-// Returns JSON5's `Infinity` as a binary64, with a negative sign when `src[lo]` is `-` and `lo < hi`.
-@(private)
-number_infinity :: proc(src: []u8, lo, hi: u64) -> core.Number {
-	neg := lo < hi && src[lo] == '-'
-	return {F64_INF_BITS | u64(neg) << 63, .Float}
-}
-
-// Returns JSON5's `NaN` as a quiet binary64 NaN with a zero sign, since the sign of NaN is not a value.
-@(private)
-number_nan :: proc(src: []u8, lo, hi: u64) -> core.Number {
-	return {0x7ff8_0000_0000_0000, .Float}
-}
-
 // Decodes the number shapes that are not a plain integer: decimal, hex, infinity and NaN.
 @(private, cold)
 number_slow :: #force_no_inline proc(doc: ^core.Document, i: core.Node_Index, n: core.Node) -> core.Number {
@@ -515,9 +498,10 @@ number_slow :: #force_no_inline proc(doc: ^core.Document, i: core.Node_Index, n:
 	case .Hex:
 		return spell.number_hex(doc.src, lo, hi)
 	case .Infinity:
-		return number_infinity(doc.src, lo, hi)
+		// JSON5's `Infinity`, signed by a `-` before it, and its `NaN`, a quiet one with a zero sign.
+		return {spell.F64_INF_BITS | u64(lo < hi && doc.src[lo] == '-') << 63, .Float}
 	case .Nan:
-		return number_nan(doc.src, lo, hi)
+		return {0x7ff8_0000_0000_0000, .Float}
 	}
 	return {0, .Wide}
 }

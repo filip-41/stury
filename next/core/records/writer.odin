@@ -159,8 +159,7 @@ begin :: #force_inline proc(wr: ^Writer) {
 	t := &wr.tokens
 	t.mark = t.out.flushed + t.out.cursor
 	if wr.framing == .Seq {
-		cw.room(t.out, 1)[0] = 0x1E
-		t.out.cursor += 1
+		cw.put_byte(t.out, 0x1E)
 	}
 }
 
@@ -170,8 +169,7 @@ begin :: #force_inline proc(wr: ^Writer) {
 end :: #force_inline proc(wr: ^Writer, kind: core.Typed_Error_Kind, pathed: bool) -> core.Typed_Error_Kind {
 	t := &wr.tokens
 	if t.spell.line == nil {
-		cw.room(t.out, 1)[0] = '\n'
-		t.out.cursor += 1
+		cw.put_byte(t.out, '\n')
 	}
 	if kind != .None || t.out.err != .None {
 		return refused(wr, kind, pathed)

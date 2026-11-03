@@ -250,20 +250,12 @@ dsv_decoded_next :: proc "contextless" (d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
 		}
 		e := d.src[d.p + 1]
 		d.p += 2
-		switch e {
-		case 't':
-			return '\t', true
-		case 'n':
-			return '\n', true
-		case 'r':
-			return '\r', true
-		case '0':
-			return 0, true
-		case '\\':
-			return '\\', true
-		case:
-			unreachable()
+		for k in 0 ..< len(TSV_LETTERS) {
+			if TSV_LETTERS[k] == e {
+				return TSV_ESCAPED[k], true
+			}
 		}
+		unreachable()
 	}
 	if d.quoted && c == '"' && d.p + 1 < d.end && d.src[d.p + 1] == '"' {
 		d.p += 2
@@ -597,15 +589,7 @@ edit_key_text :: proc(doc: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bo
 		}
 	case .Tsv:
 		for b in name {
-			escape: u8
-			switch b {
-			case '\t': escape = 't'
-			case '\n': escape = 'n'
-			case '\r': escape = 'r'
-			case 0:    escape = '0'
-			case '\\': escape = '\\'
-			}
-			if escape != 0 {
+			if escape := escape_letter(b); escape != 0 {
 				compose.push(text, '\\') or_return
 				compose.push(text, escape) or_return
 			} else {

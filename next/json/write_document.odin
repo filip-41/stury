@@ -250,7 +250,7 @@ rare_close :: proc(e: ^Emit) {
 	if c.after == 2 {
 		write.put_line(e.out, e.opts, c.top - 1)
 	}
-	put_byte(e.out, u8(c.stack[c.top].close))
+	write.put_byte(e.out, u8(c.stack[c.top].close))
 	pop(c)
 	resume(e)
 }
@@ -268,13 +268,13 @@ rare_row :: proc(e: ^Emit, t: core.Token, i: u32) -> core.Typed_Error_Kind {
 	settle(e)
 	out := e.out
 	if c.after == 2 {
-		put_byte(out, ',')
+		write.put_byte(out, ',')
 	}
 	if c.after != 0 {
 		write.put_line(out, e.opts, c.top)
 	}
 	if k >= .Array {
-		put_byte(out, open_bracket(k))
+		write.put_byte(out, open_bracket(k))
 		push(c, &t, i, open_bracket(k))
 	} else {
 		if kind := put_token(out, e.src, e.doc, core.Node_Index(i), t, e.opts, true, e.copy); kind != .None {
@@ -307,12 +307,6 @@ put_token :: proc(out: ^write.Out, src: []u8, doc: ^core.Document, i: core.Node_
 		return put_token_string(out, src, doc, i, t, opts, own, copy)
 	}
 	return .None
-}
-
-@(private)
-put_byte :: proc(out: ^write.Out, b: u8) {
-	write.room(out, 1)[0] = b
-	out.cursor += 1
 }
 
 // A string or a key: copied as authored when `copy` allows, else decoded and written by `put_string`.

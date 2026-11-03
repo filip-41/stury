@@ -101,7 +101,7 @@ tree_comment :: proc(w: ^Tree, f: core.Fact) -> (line: bool) {
 		write.put_text(w.out, string(text))
 	}
 	if line && !w.opts.pretty {
-		put_byte(w.out, '\n')
+		write.put_byte(w.out, '\n')
 	}
 	return
 }
@@ -130,14 +130,14 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 				if tree_comment(w, f) {
 					write.put_line(w.out, w.opts, depth)
 				} else if w.opts.pretty {
-					put_byte(w.out, ' ')
+					write.put_byte(w.out, ' ')
 				}
 			}
 		}
 	}
 	tree_value(w, i, depth) or_return
 	if comma {
-		put_byte(w.out, ',')
+		write.put_byte(w.out, ',')
 	}
 	after_line := false
 	for f in facts {
@@ -148,12 +148,12 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 		if root_foot || after_line {
 			write.put_line(w.out, w.opts, depth)
 		} else if w.opts.pretty {
-			put_byte(w.out, ' ')
+			write.put_byte(w.out, ' ')
 		}
 		after_line = tree_comment(w, f)
 	}
 	if i == w.root && after_line && w.opts.pretty {
-		put_byte(w.out, '\n')
+		write.put_byte(w.out, '\n')
 	}
 	return true
 }
@@ -191,7 +191,7 @@ tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int) -> bool {
 		return false
 	}
 	map_ := t.kind == .Map
-	put_byte(w.out, '{' if map_ else '[')
+	write.put_byte(w.out, '{' if map_ else '[')
 	members := 0
 	if map_ {
 		list, ok := tree_pairs(w, i)
@@ -240,7 +240,7 @@ tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int) -> bool {
 	if members > 0 || feet {
 		write.put_line(w.out, w.opts, depth)
 	}
-	put_byte(w.out, '}' if map_ else ']')
+	write.put_byte(w.out, '}' if map_ else ']')
 	return true
 }
 
@@ -275,19 +275,19 @@ tree_number :: proc(w: ^Tree, t: core.Token) -> bool {
 		write.put_text(w.out, lit)
 	case .Decimal:
 		if lit[0] == '-' {
-			put_byte(w.out, '-')
+			write.put_byte(w.out, '-')
 		}
 		if lit[p] == '.' {
-			put_byte(w.out, '0')
+			write.put_byte(w.out, '0')
 		}
 		for k in p ..< len(lit) {
 			if lit[k] != '.' || k + 1 < len(lit) && lit[k + 1] - '0' < 10 {
-				put_byte(w.out, lit[k])
+				write.put_byte(w.out, lit[k])
 			}
 		}
 	case .Hex:
 		if lit[0] == '-' {
-			put_byte(w.out, '-')
+			write.put_byte(w.out, '-')
 		}
 		if !put_hex_decimal(w.out, lit[p + 2:]) {
 			w.kind = .Out_Of_Memory
@@ -323,7 +323,7 @@ put_hex_decimal :: proc(out: ^write.Out, hex: string) -> bool {
 		}
 	}
 	if len(words) == 0 {
-		put_byte(out, '0')
+		write.put_byte(out, '0')
 		return true
 	}
 	buf: [16]u8
@@ -331,7 +331,7 @@ put_hex_decimal :: proc(out: ^write.Out, hex: string) -> bool {
 	#reverse for w in words[:len(words) - 1] {
 		s := strconv.write_uint(buf[:], u64(w), 10)
 		for _ in len(s) ..< 9 {
-			put_byte(out, '0')
+			write.put_byte(out, '0')
 		}
 		write.put_text(out, s)
 	}

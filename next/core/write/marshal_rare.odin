@@ -151,8 +151,7 @@ put_bit_set :: proc(w: ^Walker, m: ^typed.Meta, v: uintptr, top, nest: int, $P: 
 	e := &w.meta[m.block]
 	bits: u128
 	runtime.mem_copy_non_overlapping(&bits, rawptr(v), int(m.size))
-	room(out, 1)[0] = T[.Open_Array][0]
-	out.cursor += 1
+	put_byte(out, T[.Open_Array][0])
 	written := 0
 	for b := bits; b != 0; b &= b - 1 {
 		value := e.lower + i64(intrinsics.count_trailing_zeros(b))
@@ -185,12 +184,16 @@ put_bit_set :: proc(w: ^Walker, m: ^typed.Meta, v: uintptr, top, nest: int, $P: 
 
 // A line break and `n` bytes of `fill`, at any length.
 put_fill :: proc(out: ^Out, n: int, fill: u8) {
-	room(out, 1)[0] = '\n'
-	out.cursor += 1
+	put_byte(out, '\n')
 	for _ in 0 ..< n {
-		room(out, 1)[0] = fill
-		out.cursor += 1
+		put_byte(out, fill)
 	}
+}
+
+// Writes the byte `b`.
+put_byte :: #force_inline proc(out: ^Out, b: u8) {
+	room(out, 1)[0] = b
+	out.cursor += 1
 }
 
 // A line break and the indent of `depth` levels of `opts`, in pretty text. Compact text gets nothing.
@@ -279,8 +282,7 @@ put_number :: proc(out: ^Out, n: core.Number) -> core.Typed_Error_Kind {
 member_key :: proc(w: ^Walker, r: ^typed.Field, $T: Tree, $put: Put) -> core.Typed_Error_Kind {
 	out := &w.out
 	put(out, room(out, 18), w.meta[r.meta].name, &w.opts) or_return
-	room(out, 1)[0] = T[.Colon][0]
-	out.cursor += 1
+	put_byte(out, T[.Colon][0])
 	return .None
 }
 
@@ -574,8 +576,7 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 // The frame of the object just listed, with its opening byte written.
 @(private)
 open_entries :: proc(w: ^Walker, $T: Tree) -> Frame {
-	room(&w.out, 1)[0] = T[.Open_Object][0]
-	w.out.cursor += 1
+	put_byte(&w.out, T[.Open_Object][0])
 	return {at = uintptr(len(w.entries) - w.listed), left = w.listed, total = w.listed, step = w.mark, mode = .Entries}
 }
 
@@ -585,8 +586,7 @@ entry_key :: proc(w: ^Walker, at: int, first: bool, nest: int, $T: Tree) -> (^ty
 	out := &w.out
 	e := w.entries[at]
 	if !first {
-		room(out, 1)[0] = T[.Comma][0]
-		out.cursor += 1
+		put_byte(out, T[.Comma][0])
 	}
 	if w.opts.pretty {
 		line(w, room(out, 1 + LINE_ROOM + 16), nest)
