@@ -3,6 +3,7 @@ package write_bench
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
+import "core:mem/virtual"
 import "core:os"
 import "core:slice"
 import "core:time"
@@ -144,10 +145,16 @@ lane :: proc($T: typeid, src: []u8, pretty: bool) {
 	ITERS :: 41
 	times: [ITERS]i64
 	text: []u8
+	// The walk's own scratch, a map's sorted keys among it, comes from an arena emptied after each pass, so the lane's
+	// resident memory is one pass's and not the allocator's lag in returning forty-three.
+	scratch: virtual.Arena
+	_ = virtual.arena_init_growing(&scratch)
 	for i in 0 ..< ITERS + 2 {
+		context.allocator = virtual.arena_allocator(&scratch)
 		start := time.tick_now()
 		out, err := write.marshal(value, &plan, opts, fixed)
 		d := i64(time.tick_since(start))
+		virtual.arena_free_all(&scratch)
 		if err.kind != .None {
 			fmt.eprintln("write:", err)
 			os.exit(1)

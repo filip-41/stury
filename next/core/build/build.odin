@@ -471,11 +471,13 @@ grow :: #force_no_inline proc "contextless" (allocator: runtime.Allocator, old: 
 
 // Returns `old` shortened to `n` where the allocator can resize it, and `old` unchanged where it cannot. The caller
 // sets both the array and the allocation behind it to the result. An arena returns the tail of its last block and keeps
-// any other block's, so this is not a promise about every allocator.
+// any other block's, so this is not a promise about every allocator. The default allocator keeps the reservation: the
+// pages past the nodes were never touched, and a shrunk large block is returned to the system when freed, so a document
+// built and destroyed in a loop would fault its pages in again each time.
 @(private, cold)
 trim :: #force_no_inline proc (allocator: runtime.Allocator, old: []$T, n: int) -> []T {
 	// A short buffer's tail is not worth the allocator's call.
-	if n <= 0 || n >= len(old) || len(old) * size_of(T) <= 4096 {
+	if n <= 0 || n >= len(old) || len(old) * size_of(T) <= 4096 || allocator.procedure == runtime.default_allocator_proc {
 		return old
 	}
 	raw, err := runtime.non_zero_mem_resize(raw_data(old), len(old) * size_of(T), n * size_of(T), align_of(T), allocator)
