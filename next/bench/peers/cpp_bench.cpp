@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <type_traits>
 
 #include <simdjson.h>
 
@@ -18,6 +19,12 @@
 //   simd_get KEY           On-Demand find_field of one root key, and the value's raw text
 //   simd_minify            simdjson::minify of the text, which does not read the text's values
 //   simd_doc_write         simdjson::to_string of a parsed DOM element, compact
+//   simd_stream[_nothread] parse_many over an NDJSON text: every document judged and its tape built. The text is
+//                          read in 1 MB batches (simdjson's default), and stage 1 of the next batch runs in a
+//                          thread of its own unless `_nothread`
+//   simd_stream_skip[_nothread]  iterate_many (On-Demand) over the same text, each document skipped: the structure
+//                          is judged, string escapes and number syntax are not
+// The stream jobs print the document count as `check` and whether stage 1 ran threaded as `threads`.
 // The write lanes count the source's bytes. simdjson has no pretty writer, and its typed writer needs C++26 reflection.
 using clk = std::chrono::steady_clock;
 using simdjson::error_code;
@@ -362,6 +369,48 @@ static int simd_key_job(const simdjson::padded_string& in) {
                                       " objects=" + std::to_string(objects) + " key=" + key_copy);
 }
 
+// Times a document_stream over `in` and counts its documents, which the runner compares across arms. `Parser` is
+// simdjson::dom::parser (parse_many, a tape per document) or simdjson::ondemand::parser (iterate_many, each document
+// skipped). A document that fails to parse or skip ends the job.
+template <class Parser>
+static int stream_job(const simdjson::padded_string& in, bool threaded) {
+    constexpr bool DOM = std::is_same_v<Parser, simdjson::dom::parser>;
+    Parser parser;
+    parser.threaded = threaded && parser.threaded;
+    uint64_t docs = 0;
+    bool failed = false;
+    int64_t ns = median_ns([&]() -> int64_t {
+        auto t0 = clk::now();
+        uint64_t n = 0;
+        std::conditional_t<DOM, simdjson::dom::document_stream, simdjson::ondemand::document_stream> stream;
+        error_code opened = SUCCESS;
+        if constexpr (DOM) opened = parser.parse_many(in).get(stream);
+        else opened = parser.iterate_many(in).get(stream);
+        if (opened) failed = true;
+        else
+            for (auto doc : stream) {
+                if constexpr (DOM) {
+                    if (doc.error()) { failed = true; break; }
+                } else {
+                    simdjson::ondemand::document_reference d;
+                    std::string_view raw;
+                    if (doc.get(d) || d.raw_json().get(raw)) { failed = true; break; }
+                    keep(raw);
+                }
+                n++;
+            }
+        keep(n);
+        int64_t d = since(t0);
+        docs = n;
+        return failed ? -1 : d;
+    });
+    if (failed) {
+        std::cerr << "simdjson stream failed" << std::endl;
+        return 1;
+    }
+    return report(in.size(), ns, "check=" + std::to_string(docs) + " threads=" + std::to_string(int(parser.threaded)));
+}
+
 static uint64_t fnv_all(const char* p, size_t n) { return fnv_bytes(CHECK_OFFSET, p, n); }
 
 static int run_job(const std::string& buffer, const std::string& job) {
@@ -465,6 +514,10 @@ static int run_job(const std::string& buffer, const std::string& job) {
         return report(in.size(), ns, "check=" + std::to_string(counts.check));
     }
     if (job == "simd_key") return simd_key_job(in);
+    if (job == "simd_stream") return stream_job<simdjson::dom::parser>(in, true);
+    if (job == "simd_stream_nothread") return stream_job<simdjson::dom::parser>(in, false);
+    if (job == "simd_stream_skip") return stream_job<simdjson::ondemand::parser>(in, true);
+    if (job == "simd_stream_skip_nothread") return stream_job<simdjson::ondemand::parser>(in, false);
     return 2;
 }
 

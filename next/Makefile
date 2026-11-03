@@ -31,7 +31,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: check gate build-cli test test-x86 test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write fixtures size surface \
+.PHONY: check gate build-cli test test-x86 test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers fixtures size surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
@@ -180,50 +180,38 @@ bench-typed:
 	$(ODIN) build bench/typed -o:speed -out:$(BENCH)/typed
 	ODIN=$(ODIN) ROUNDS=$(ROUNDS) python3 bench/typed.py
 
-# The record lanes on the NDJSON fixtures. ROUNDS passes through.
+# The record lanes on the NDJSON and CSV fixtures, beside the peers' record readers. ROUNDS passes through.
 bench-records: ROUNDS ?= 5
-bench-records:
-	@mkdir -p $(BENCH)
+bench-records: bench-peers
 	$(ODIN) build bench/records -o:speed -out:$(BENCH)/records
 	ROUNDS=$(ROUNDS) python3 bench/records.py
 
-# The write lanes: next's probe at -o:speed when bench/write exists, the peers `bench-doc` builds plus the Rust write
-# binary, then write.py. ROUNDS passes through.
-bench-write: ROUNDS ?= 5
-bench-write:
+# The peers whose toolchain and sources are present: yyjson, simdjson (threaded, as its document_stream runs stage 1 in a
+# thread of its own), and the Rust binaries (sonic-rs, serde_json, simd-csv).
+bench-peers:
 	@mkdir -p $(BENCH)
+	@if command -v $(BENCH_CC) >/dev/null && [ -f $(BENCH)/deps/yyjson/yyjson.c ]; then \
+		$(BENCH_CC) -O3 -DNDEBUG -o $(BENCH)/yy_bench bench/peers/yy_bench.c \
+			$(BENCH)/deps/yyjson/yyjson.c -I$(BENCH)/deps/yyjson && echo "yy: built"; \
+	else echo "yy: left out (C compiler or yyjson source missing; run make fixtures)"; fi
+	@if command -v $(BENCH_CXX) >/dev/null && [ -f $(BENCH)/deps/simdjson/simdjson.cpp ]; then \
+		$(BENCH_CXX) -O3 -DNDEBUG -std=c++17 -pthread -o $(BENCH)/cpp_bench bench/peers/cpp_bench.cpp \
+			$(BENCH)/deps/simdjson/simdjson.cpp -I$(BENCH)/deps/simdjson && echo "simd: built"; \
+	else echo "simd: left out (C++ compiler or simdjson source missing; run make fixtures)"; fi
+	@if command -v $(BENCH_CARGO) >/dev/null; then \
+		CARGO_TARGET_DIR=$(abspath $(BENCH)/rust) $(BENCH_CARGO) build --release --locked \
+			--manifest-path bench/peers/rust/Cargo.toml && echo "sonic, serde, simd-csv: built"; \
+	else echo "sonic, serde, simd-csv: left out (cargo missing)"; fi
+
+# The write lanes: next's probe at -o:speed when bench/write exists, the peers, then write.py. ROUNDS passes through.
+bench-write: ROUNDS ?= 5
+bench-write: bench-peers
 	@if [ -d bench/write ]; then $(ODIN) build bench/write -o:speed -out:$(BENCH)/write; \
 	else echo "next: left out (bench/write is not there yet)"; fi
-	@if command -v $(BENCH_CC) >/dev/null && [ -f $(BENCH)/deps/yyjson/yyjson.c ]; then \
-		$(BENCH_CC) -O3 -DNDEBUG -o $(BENCH)/yy_bench bench/peers/yy_bench.c \
-			$(BENCH)/deps/yyjson/yyjson.c -I$(BENCH)/deps/yyjson && echo "yy: built"; \
-	else echo "yy: left out (C compiler or yyjson source missing; run make fixtures)"; fi
-	@if command -v $(BENCH_CXX) >/dev/null && [ -f $(BENCH)/deps/simdjson/simdjson.cpp ]; then \
-		$(BENCH_CXX) -O3 -DNDEBUG -std=c++17 -o $(BENCH)/cpp_bench bench/peers/cpp_bench.cpp \
-			$(BENCH)/deps/simdjson/simdjson.cpp -I$(BENCH)/deps/simdjson && echo "simd: built"; \
-	else echo "simd: left out (C++ compiler or simdjson source missing; run make fixtures)"; fi
-	@if command -v $(BENCH_CARGO) >/dev/null; then \
-		CARGO_TARGET_DIR=$(abspath $(BENCH)/rust) $(BENCH_CARGO) build --release --locked \
-			--manifest-path bench/peers/rust/Cargo.toml && echo "sonic, serde: built"; \
-	else echo "sonic, serde: left out (cargo missing)"; fi
 	ROUNDS=$(ROUNDS) python3 bench/write.py $(LANES)
 
-# The document lanes' probe at -o:speed, the peers whose toolchain and sources are present, then doc.py. ROUNDS and
-# BENCH_FILES pass through.
+# The document lanes' probe at -o:speed, the peers, then doc.py. ROUNDS and BENCH_FILES pass through.
 bench-doc: ROUNDS ?= 5
-bench-doc:
-	@mkdir -p $(BENCH)
+bench-doc: bench-peers
 	$(ODIN) build bench/doc -o:speed -out:$(BENCH)/doc
-	@if command -v $(BENCH_CC) >/dev/null && [ -f $(BENCH)/deps/yyjson/yyjson.c ]; then \
-		$(BENCH_CC) -O3 -DNDEBUG -o $(BENCH)/yy_bench bench/peers/yy_bench.c \
-			$(BENCH)/deps/yyjson/yyjson.c -I$(BENCH)/deps/yyjson && echo "yy: built"; \
-	else echo "yy: left out (C compiler or yyjson source missing; run make fixtures)"; fi
-	@if command -v $(BENCH_CXX) >/dev/null && [ -f $(BENCH)/deps/simdjson/simdjson.cpp ]; then \
-		$(BENCH_CXX) -O3 -DNDEBUG -std=c++17 -o $(BENCH)/cpp_bench bench/peers/cpp_bench.cpp \
-			$(BENCH)/deps/simdjson/simdjson.cpp -I$(BENCH)/deps/simdjson && echo "simd: built"; \
-	else echo "simd: left out (C++ compiler or simdjson source missing; run make fixtures)"; fi
-	@if command -v $(BENCH_CARGO) >/dev/null; then \
-		CARGO_TARGET_DIR=$(abspath $(BENCH)/rust) $(BENCH_CARGO) build --release --locked \
-			--manifest-path bench/peers/rust/Cargo.toml && echo "sonic: built"; \
-	else echo "sonic: left out (cargo missing)"; fi
 	ROUNDS=$(ROUNDS) python3 bench/doc.py $(BENCH_FILES)
