@@ -23,7 +23,7 @@ make bench-typed   # the typed read's lanes
 ```
 
 That builds the probe at `-o:speed` into `build/bench/doc`, builds the peers whose compiler and sources are
-present, names any it left out, and runs `bench/doc.py`. The probe builds each document in a 512 MiB arena whose
+present (`make bench-peers` alone), names any it left out, and runs `bench/doc.py`. The probe builds each document in a 512 MiB arena whose
 backing is not zeroed, so only the pages a lane touches count toward its RSS. `ROUNDS` sets the interleaved rounds
 (default 5) and `BENCH_FILES` the fixtures (default `logs.json citm_catalog.json table.csv logs.jsonc logs.json5`):
 
@@ -58,6 +58,30 @@ The peers run only on plain `.json`. Any other fixture is timed for `next` alone
 `bench/typed` reads `logs.json`, `twitter.json`, `citm_catalog.json`, `table.csv` and `text.csv` into their own struct
 types, in an arena, with strings borrowed and with strings copied. `bench/typed.py` prints each lane's median GB/s, the best of `ROUNDS` rounds,
 beside the old tree's probe, which `compare/typed_oracle/build.sh` builds, each string mode a program of its own.
+
+## Record lanes
+
+```sh
+make bench-records ROUNDS=3
+```
+
+`bench/records` reads the records of `logs.ndjson`, `docs.ndjson`, `twitter.ndjson`, `table.csv`, `text.csv` and
+`wide.csv` by lane: `frame` (record boundaries), `check`, `build` (a document per record), `stream` (through a 64 KiB
+window), `read` and `rows`/`text` (into a struct), `write` (a list of structs written as records, counting the bytes
+written), `threads`, `validate` and `each` (on a pool of 6 threads) and `cells`. `bench/records.py` times them beside the
+peers' record readers, each doing the same job the fastest way that library gives:
+
+| Arm | Job |
+|---|---|
+| `simd` | simdjson `parse_many` over the NDJSON text: every document judged and a tape built |
+| `simd_od` | simdjson On-Demand `iterate_many`, each document skipped: the structure is judged, not the escapes or number syntax |
+| `serde_validate`, `serde_value` | serde_json `StreamDeserializer` to `IgnoredAny`, to a `Value` |
+| `sonic_validate`, `sonic_value` | sonic-rs `StreamDeserializer` to `IgnoredAny`, to a `Value` |
+| `csv_frame` | simd-csv `Splitter`, each record's bytes after the header and no cells |
+
+simdjson runs stage 1 of the next batch in a thread of its own unless its parser's `threaded` is cleared, so `simd` and
+`simd_od` have an `_nt` arm with threading off. sonic-rs's stream ends with an end-of-input error, which the driver
+counts as the end. Every arm prints the number of records it passed, and `records.py` times nothing until they agree.
 
 ## Write lanes
 
