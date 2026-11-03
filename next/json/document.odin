@@ -43,7 +43,7 @@ edit_member_sep :: proc(_: ^core.Document) -> string {
 @(private)
 SPELLING := core.Spelling {
 	text = text, key_equals = key_equals_decode, number = number,
-	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT, write = write_spec, tokens = &TOKENS,
+	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT, write = write_spec, tokens = &TOKENS, records = &RECORDS,
 	tag_key = "json", key_open = "\"", key_close = "\":",
 }
 

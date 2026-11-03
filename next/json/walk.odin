@@ -68,16 +68,16 @@ RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", 
 validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	return walk_text(src, S, opts, &h, &regs, core.no_hook)
+	return walk_text(src, 0, S, opts, &h, &regs, core.no_hook)
 }
 
-// Reads `src` as exactly one document through the hook, as `validate` checks it. A hook that stops the walk ends the
-// read with no fault. Returns the fault, or nil.
+// Reads `src` from `lo` as exactly one document through the hook, as `validate` checks it. A BOM is passed over only
+// at the text's first byte. A hook that stops the walk ends the read with no fault. Returns the fault, or nil.
 @(private)
-walk_text :: #force_inline proc "contextless" (src: []u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> Maybe(core.Fault) {
+walk_text :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> Maybe(core.Fault) {
 	p := raw_data(src)
 	end := p[len(src):]
-	r := walk_document(src, skip_ws(p[core.text_start(src, 0):], end), S, opts, h, regs, on)
+	r := walk_document(src, skip_ws(p[core.text_start(src, lo):], end), S, opts, h, regs, on)
 	if r & 0xff != 0 {
 		return core.fault_of(r, &RULES)
 	}

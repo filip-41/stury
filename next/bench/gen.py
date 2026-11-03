@@ -488,6 +488,24 @@ _DOC_KEY_POOL = ["id", "ts", "level", "msg", "src", "dur_ms", "user", "ip",
                  "request_id", "user_agent", "referrer", "session"]
 
 
+def gen_ndjson(target: int, values) -> bytes:
+    """Returns NDJSON of the records `values()` gives, one compact record per line, repeated in order up to `target`
+    bytes."""
+    lines = [json.dumps(v, separators=(",", ":"), ensure_ascii=False).encode("utf-8") + b"\n" for v in values()]
+    out = bytearray()
+    while len(out) < target:
+        for line in lines:
+            out += line
+            if len(out) >= target:
+                break
+    return bytes(out)
+
+
+def _twitter_statuses():
+    """The statuses of the corpus's twitter.json, which fetch.py writes."""
+    with open(os.path.join(OUT, "corpus", "twitter.json"), "rb") as f:
+        return json.load(f)["statuses"]
+
 
 FIXTURES = {
     "nested.json": (gen_nested_json, [16 * MIB]),
@@ -505,6 +523,9 @@ FIXTURES = {
     "table.tsv": (gen_table_csv, [8 * MIB, "\t"]),
     "deep.json": (gen_deep_json, [8 * MIB]),
     "documents.json": (gen_documents_json, [8 * MIB]),
+    "logs.ndjson": (gen_ndjson, [8 * MIB, lambda: json.loads(gen_logs_json(8 * MIB))["logs"]]),
+    "docs.ndjson": (gen_ndjson, [8 * MIB, lambda: json.loads(gen_documents_json(8 * MIB))]),
+    "twitter.ndjson": (gen_ndjson, [16 * MIB, _twitter_statuses]),
 }
 
 

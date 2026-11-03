@@ -258,7 +258,8 @@ Resolve_Options :: struct {
 // `key_open` and `key_close` are what a key is written between, empty for a format whose keys a typed read does not
 // compare as text. `write` writes the document as text of the spec and layout `read` names, into a buffer from `allocator` or to
 // `stream`, nil for a format with no document writer, see `core.write`. `tokens` is the format's `^write.Token_Spelling`,
-// nil for a format with no token writer. It is a `rawptr` since `core/write` imports `core`.
+// nil for a format with no token writer. `records` is the format's `^records.Services`, nil for a format with no record
+// reader. Both are a `rawptr` since `core/write` and `core/records` import `core`.
 Spelling :: struct {
 	text:       proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool,
@@ -269,6 +270,7 @@ Spelling :: struct {
 	edit:       ^Edit_Spelling,
 	write:      proc(doc: ^Document, opts: Write_Options, read: Read_As, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error),
 	tokens:     rawptr,
+	records:    rawptr,
 	tag_key:    string,
 	key_open:   string,
 	key_close:  string,

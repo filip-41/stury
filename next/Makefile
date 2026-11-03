@@ -22,7 +22,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: check gate build-cli test test-x86 test-asan test-f32 lint bench bench-doc bench-paths bench-typed bench-write fixtures size surface \
+.PHONY: check gate build-cli test test-x86 test-asan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write fixtures size surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(X86_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
@@ -108,6 +108,7 @@ lint:
 	$(ODIN) check bench/doc $(LINT_FLAGS)
 	$(ODIN) check bench/editbench $(LINT_FLAGS)
 	$(ODIN) check bench/paths $(LINT_FLAGS)
+	$(ODIN) check bench/records $(LINT_FLAGS)
 	$(ODIN) check bench/write $(LINT_FLAGS)
 	$(ODIN) check cmd/stury $(LINT_FLAGS)
 	$(ODIN) check cmd/stury $(LINT_FLAGS) -target:linux_amd64
@@ -157,6 +158,13 @@ bench-typed:
 	@mkdir -p $(BENCH)
 	$(ODIN) build bench/typed -o:speed -out:$(BENCH)/typed
 	ODIN=$(ODIN) ROUNDS=$(ROUNDS) python3 bench/typed.py
+
+# The record lanes on the NDJSON fixtures. ROUNDS passes through.
+bench-records: ROUNDS ?= 5
+bench-records:
+	@mkdir -p $(BENCH)
+	$(ODIN) build bench/records -o:speed -out:$(BENCH)/records
+	ROUNDS=$(ROUNDS) python3 bench/records.py
 
 # The write lanes: next's probe at -o:speed when bench/write exists, the peers `bench-doc` builds plus the Rust write
 # binary, then write.py. ROUNDS passes through.

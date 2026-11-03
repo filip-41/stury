@@ -62,9 +62,9 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 		return err
 	}
 	when S == .Json5 {
-		fault := walk_text(src, S, opts, &h, &regs, typed.on_token_spelled)
+		fault := walk_text(src, 0, S, opts, &h, &regs, typed.on_token_spelled)
 	} else {
-		fault := walk_text(src, S, opts, &h, &regs, typed.on_token)
+		fault := walk_text(src, 0, S, opts, &h, &regs, typed.on_token)
 	}
 	return typed.read_end(&h, regs, fault)
 }

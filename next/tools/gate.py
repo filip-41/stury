@@ -31,7 +31,7 @@ HOST = "arm64"
 TEST_PKGS = ["core/spell/test", "host/test", "core/kernel/test", "core/test", "core/write/test", "core/records/test", "json/test", "dsv/test"]
 LIB_PKGS = ["core/spell", "core", "host", "core/kernel", "core/compose", "core/build", "core/typed", "core/write", "core/records", "json", "dsv", "walktest"]
 CLI = "cmd/stury"
-BENCH_PKGS = ["bench", "bench/doc", "bench/editbench", "bench/paths", "bench/typed", "bench/write"]
+BENCH_PKGS = ["bench", "bench/doc", "bench/editbench", "bench/paths", "bench/typed", "bench/write", "bench/records"]
 
 IMPORT = re.compile(r'^\s*import\s+(?:[A-Za-z_]\w*\s+)?"([^"]+)"', re.MULTILINE)
 LOAD = re.compile(r'#load(?:_directory|_hash)?\(\s*"([^"]+)"')
