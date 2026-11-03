@@ -261,26 +261,33 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 // build. A text with no comment byte runs the pass instance with `$COMMENTS` false, which holds no comment code.
 @(private)
 run :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, keys: []core.Token, width := 0) -> u64 {
-	if opts.comment != 0 {
-		return run_tier(src, lo, S, opts, h, regs, on, EMIT, true, keys, width)
+	// A document build or a record batch with the default options runs its own pass instance with literal options,
+	// which fold the option tests and leave the instance for other options out of its registers.
+	when H == build.Builder || H == Batch {
+		if opts == {} {
+			return run_tier(src, lo, S, opts, h, regs, on, EMIT, false, true, keys, width)
+		}
 	}
-	return run_tier(src, lo, S, opts, h, regs, on, EMIT, false, keys, width)
+	if opts.comment != 0 {
+		return run_tier(src, lo, S, opts, h, regs, on, EMIT, true, false, keys, width)
+	}
+	return run_tier(src, lo, S, opts, h, regs, on, EMIT, false, false, keys, width)
 }
 
 @(private)
-run_tier :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, keys: []core.Token, width: int) -> u64 {
+run_tier :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, $DEFAULT: bool, keys: []core.Token, width: int) -> u64 {
 	when ODIN_ARCH == .amd64 {
 		switch kernel.tier() {
 		case .V4:
-			return pass_v4(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, keys, width)
+			return pass_v4(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, DEFAULT, keys, width)
 		case .V3:
-			return pass_v3(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, keys, width)
+			return pass_v3(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, DEFAULT, keys, width)
 		case .V2:
-			return pass_v2(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, keys, width)
+			return pass_v2(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, DEFAULT, keys, width)
 		}
 		unreachable()
 	} else {
-		return pass_base(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, keys, width)
+		return pass_base(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, DEFAULT, keys, width)
 	}
 }
 
@@ -289,43 +296,21 @@ run_tier :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts
 // build holds SSE ones. `#force_no_inline` keeps each a separate procedure.
 when ODIN_ARCH == .amd64 {
 	@(private, enable_target_feature = kernel.FEATURES[.V2])
-	pass_v2 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, keys: []core.Token, width: int) -> u64 {
-		// A document build or a record batch with the default options runs the pass with literal ones, which fold the
-		// option tests even when another call site reads the text with options of its own.
-		when H == build.Builder || H == Batch {
-			if opts == {} {
-				return pass(.V2, S, EMIT, COMMENTS, src, lo, Options{}, h, regs, on, keys, width)
-			}
-		}
-		return pass(.V2, S, EMIT, COMMENTS, src, lo, opts, h, regs, on, keys, width)
+	pass_v2 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, $DEFAULT: bool, keys: []core.Token, width: int) -> u64 {
+		return pass(.V2, S, EMIT, COMMENTS, src, lo, Options{} when DEFAULT else opts, h, regs, on, keys, width)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V3])
-	pass_v3 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, keys: []core.Token, width: int) -> u64 {
-		when H == build.Builder || H == Batch {
-			if opts == {} {
-				return pass(.V3, S, EMIT, COMMENTS, src, lo, Options{}, h, regs, on, keys, width)
-			}
-		}
-		return pass(.V3, S, EMIT, COMMENTS, src, lo, opts, h, regs, on, keys, width)
+	pass_v3 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, $DEFAULT: bool, keys: []core.Token, width: int) -> u64 {
+		return pass(.V3, S, EMIT, COMMENTS, src, lo, Options{} when DEFAULT else opts, h, regs, on, keys, width)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V4])
-	pass_v4 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, keys: []core.Token, width: int) -> u64 {
-		when H == build.Builder || H == Batch {
-			if opts == {} {
-				return pass(.V4, S, EMIT, COMMENTS, src, lo, Options{}, h, regs, on, keys, width)
-			}
-		}
-		return pass(.V4, S, EMIT, COMMENTS, src, lo, opts, h, regs, on, keys, width)
+	pass_v4 :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, $DEFAULT: bool, keys: []core.Token, width: int) -> u64 {
+		return pass(.V4, S, EMIT, COMMENTS, src, lo, Options{} when DEFAULT else opts, h, regs, on, keys, width)
 	}
 } else {
 	@(private)
-	pass_base :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, keys: []core.Token, width: int) -> u64 {
-		when H == build.Builder || H == Batch {
-			if opts == {} {
-				return pass(.Base, S, EMIT, COMMENTS, src, lo, Options{}, h, regs, on, keys, width)
-			}
-		}
-		return pass(.Base, S, EMIT, COMMENTS, src, lo, opts, h, regs, on, keys, width)
+	pass_base :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, $COMMENTS: bool, $DEFAULT: bool, keys: []core.Token, width: int) -> u64 {
+		return pass(.Base, S, EMIT, COMMENTS, src, lo, Options{} when DEFAULT else opts, h, regs, on, keys, width)
 	}
 }
 
