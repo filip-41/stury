@@ -242,8 +242,12 @@ table_end :: proc(o: ^Output) {
 	}
 }
 
-// Writes what the table holds, reports `format` and ends the run.
-table_fail :: proc(o: ^Output, format: string, args: ..any) -> ! {
+// Writes what the table holds, reports `format` and ends the run. A piece's output is marked refused instead.
+table_fail :: proc(o: ^Output, format: string, args: ..any) {
+	if o.piece {
+		o.refused = true
+		return
+	}
 	msg := message.build_temp(format, ..args)
 	table_end(o)
 	flush_some(o, force = true)

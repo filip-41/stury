@@ -194,6 +194,8 @@ def checks(odin, seed):
     out.append(Check("size", 0, 0, [at(p) for p in LIB_PKGS + [CLI]], ["python3", "tools/checks.py", "size"], trees=[at("tools/checks.py")]))
     if os.path.isdir(at(CLI)):
         out.append(Check("cli build", 1, 0, [at(CLI)], make(odin, "build-cli")))
+        law = at(f"{CLI}/test/pieces_law.py")
+        out.append(Check("cli pieces law", 2, 0, [at(CLI)], ["python3", law, f"--odin={odin}"], trees=[law]))
     for package in TEST_PKGS:
         name = package.replace("/", "-")
         root = [at(package)]

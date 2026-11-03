@@ -8,14 +8,10 @@ import "base:runtime"
 import "core:os"
 import "core:strings"
 import core "../../core"
-import host "../../host"
 import records "../../core/records"
 import json "../../json"
 import "jq"
 import "message"
-
-// The least input judged on the pool's threads: on a shorter one, starting them costs more than they save.
-POOLED_BYTES :: 1 << 20
 
 // Each file in turn, until one holds a fault. Exits 0, 2 after a file that did not open or read, or 5 at a fault.
 check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
@@ -25,8 +21,6 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		usage(EXIT_USAGE, true)
 	}
 	src := input_source(o, cli.json_reading)
-	pool: host.Pool
-	pooled := false
 	failures := 0
 	for path in (cli.files[:] if len(cli.files) > 0 else STDIN_ONLY) {
 		f, read := open_file(path)
@@ -40,8 +34,7 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		}
 		runner: ^core.Runner
 		if len(data) >= POOLED_BYTES {
-			pooled = pooled || host.pool_init(&pool) == nil
-			runner = &pool.runner if pooled else nil
+			runner = run_pool(run)
 		}
 		if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
 			message.write_stderr("stury: error: %s", msg)

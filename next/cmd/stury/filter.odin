@@ -112,6 +112,10 @@ eval_input :: proc(run: ^Run, v: jq.Value) -> jq.Signal {
 run_once :: proc(run: ^Run, v: jq.Value) {
 	ip := &run.ip
 	sig := eval_input(run, v)
+	if run.output.piece && (sig == .Fail || ip.halted != nil) {
+		run.output.refused = true
+		return
+	}
 	if len(ip.messages) > 0 {
 		jq.flush_messages(ip)
 		flush_some(&run.output, force = true)

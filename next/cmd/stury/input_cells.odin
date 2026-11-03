@@ -35,7 +35,7 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 			return jq.document_value(doc), "", .Value, false
 		}
 	}
-	answer_columns(ins.run, ins, rec)
+	answer_columns(ins.run, &ins.texts, rec)
 	return nil, "", .Value, true
 }
 

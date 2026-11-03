@@ -26,6 +26,9 @@ Output :: struct {
 	spill:       jq.Spill, // `spill_out`, so a deep value is not held whole
 	written:     int, // bytes written to stdout
 	held:        bool, // fmt --check and --in-place: the output is kept whole and not written
+	// A piece's output, which a failure or a refused row does not end the run on but marks `refused`.
+	piece:       bool,
+	refused:     bool,
 	// jq's: what the input being run has come to so far, JQ_OK_NO_OUTPUT or its last output's result, and what the
 	// last input came to, a JQ_OK result or an exit status.
 	result, ret: int,
@@ -33,7 +36,7 @@ Output :: struct {
 	table:       ^Table, // under --to csv or tsv
 	// The column route's `select(F)`: the record each output of F stands for.
 	whole:       struct {
-		ins: ^Inputs,
+		it:  ^records.Reader,
 		rec: records.Record,
 	},
 }
@@ -69,8 +72,8 @@ init_output :: proc(o: ^Output, run: ^Run) {
 // one: false then, with nothing printed.
 emit :: proc(o: ^Output, v: jq.Value) -> bool {
 	v := v
-	if o.whole.ins != nil {
-		built, _ := records.build(&o.whole.ins.texts, o.whole.rec, context.allocator)
+	if o.whole.it != nil {
+		built, _ := records.build(o.whole.it, o.whole.rec, context.allocator)
 		v = jq.document_value(built)
 	}
 	if o.table != nil {

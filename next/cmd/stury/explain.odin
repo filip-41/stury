@@ -20,6 +20,7 @@ Explain :: struct {
 		why:  Fallback,
 	},
 	input:       int, // bytes read
+	pieces:      int, // pieces answered on the pool's threads
 }
 
 @(private = "file")
@@ -127,10 +128,11 @@ explain_end :: proc(run: ^Run) {
 	if !r.on || r.ran == {} {
 		return
 	}
+	pieces := message.build_temp("%d", r.pieces) if r.pieces > 0 else "none"
 	if r.columns != nil {
-		explain_line("run: files=%d pieces=none", r.columns.files)
+		explain_line("run: files=%d pieces=%s", r.columns.files, pieces)
 	} else {
-		explain_line("run: texts=%d scanned=%d interpreted=%d pieces=none", r.scanned + r.interpreted, r.scanned, r.interpreted)
+		explain_line("run: texts=%d scanned=%d interpreted=%d pieces=%s", r.scanned + r.interpreted, r.scanned, r.interpreted, pieces)
 	}
 	if r.fallback.text > 0 {
 		explain_line("fallback: text=%d why=%s", r.fallback.text, token(r.fallback.why))

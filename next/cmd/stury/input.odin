@@ -60,6 +60,8 @@ Inputs :: struct {
 	pipe:      ^Pipe,
 	texts:     records.Reader,
 	several:   bool,
+	parallel_from: u64, // where pieces may start again, past a record they stopped at
+	skip_below: u64, // a delimited text's records before it are answered by pieces
 	pinned:    bool,
 	header_judged: bool, // --from csv or tsv: the open file's first record is read
 	spent:     [dynamic][]byte,
@@ -166,6 +168,9 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 			}
 			continue
 		}
+		if !own && records_pieces(ins) {
+			continue
+		}
 		from := ins.texts.pos
 		route := &ins.run.route
 		// The path's read frames the record it answers.
@@ -197,6 +202,9 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 				continue
 			}
 			close_file(ins)
+			continue
+		}
+		if rec.at < ins.skip_below {
 			continue
 		}
 		ins.has_text = true
@@ -257,7 +265,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	stray_bom := ins.has_text && bytes.has_prefix(data, {0xef, 0xbb, 0xbf})
 	ins.has_text = true
 	run := ins.run
-	if run.route.scanning && !stray_bom && answer_path(run, data, ins.as) {
+	if !stray_bom && (entries_pieces(ins) || run.route.scanning && answer_path(run, data, ins.as)) {
 		close_file(ins)
 		return nil, "", .More, ins.failures > 0
 	}
@@ -485,7 +493,7 @@ read_file :: proc(f: ^os.File) -> (data: []byte, ok: bool) {
 @(private = "file")
 set_data :: proc(ins: ^Inputs, data: []byte) {
 	retire(ins)
-	ins.data, ins.raw_at, ins.pieces, ins.header_judged = data, 0, {}, false
+	ins.data, ins.raw_at, ins.pieces, ins.header_judged, ins.parallel_from, ins.skip_below = data, 0, {}, false, 0, 0
 	ins.several = ins.framing != .Concatenated || !ins.last
 	ins.texts = records.open(data, ins.as, ins.framing, allocator = runtime.heap_allocator())
 }

@@ -34,6 +34,7 @@ package main
 
 import "core:os"
 import "core:slice"
+import host "../../host"
 import "jq"
 import "message"
 
@@ -57,6 +58,9 @@ Run :: struct {
 	ip:          jq.Interp,
 	output:      Output,
 	halted:      bool,
+	pool:        host.Pool, // `run_pool`'s, started once `pooled`
+	pooled:      bool,
+	parallel:    Maybe(bool), // whether the filter runs on pieces, once `parallel` has decided it
 }
 
 main :: proc() {

@@ -191,8 +191,8 @@ place_columns :: proc(run: ^Run, cols: ^Columns, texts: ^records.Reader, header:
 	}
 }
 
-// Answers the filter on record `rec` of the open file and prints its outputs, as `run_once` would.
-answer_columns :: proc(run: ^Run, ins: ^Inputs, rec: records.Record) {
+// Answers the filter on the record `rec` that `it` read and prints its outputs, as `run_once` would.
+answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 	cols := run.route.columns
 	o := &run.output
 	defer {
@@ -202,17 +202,17 @@ answer_columns :: proc(run: ^Run, ins: ^Inputs, rec: records.Record) {
 	buf := make([]u8, len(rec.text))
 	if len(cols.at) > 1 {
 		// The reader splits a record at each cell asked for, from its start, unless a cell it has none of split it all.
-		records.cell(&ins.texts, rec, -1, nil)
+		records.cell(it, rec, -1, nil)
 	}
 	switch cols.shape {
 	case .Column:
 		for at in cols.at {
-			emit(o, column_cell(ins, rec, at, &buf))
+			emit(o, column_cell(it, rec, at, &buf))
 		}
 	case .Array:
 		a := jq.new_array(len(cols.at))
 		for at in cols.at {
-			append(&a.items, column_cell(ins, rec, at, &buf))
+			append(&a.items, column_cell(it, rec, at, &buf))
 		}
 		emit(o, a)
 	case .Object:
@@ -222,7 +222,7 @@ answer_columns :: proc(run: ^Run, ins: ^Inputs, rec: records.Record) {
 			// Compact JSON, written as the printer writes the object.
 			for m in cols.members {
 				write.put_text(&o.buf, m.lead)
-				if s, text := column_cell(ins, rec, m.at, &buf).(string); text {
+				if s, text := column_cell(it, rec, m.at, &buf).(string); text {
 					jq.put_string(&o.buf, s, {})
 				} else {
 					write.put_text(&o.buf, "null")
@@ -236,27 +236,27 @@ answer_columns :: proc(run: ^Run, ins: ^Inputs, rec: records.Record) {
 			cells := make([]Maybe(string), len(cols.members))
 			for m, i in cols.members {
 				keys[i] = m.key
-				if s, text := column_cell(ins, rec, m.at, &buf).(string); text {
+				if s, text := column_cell(it, rec, m.at, &buf).(string); text {
 					cells[i] = s
 				}
 			}
 			table_object(o, keys, cells)
 		case cols.every:
-			built, _ := records.build(&ins.texts, rec, context.allocator)
+			built, _ := records.build(it, rec, context.allocator)
 			emit(o, jq.document_value(built))
 		case:
 			obj := jq.new_object()
 			for at, i in cols.at {
-				jq.object_put(obj, cols.keys[i], column_cell(ins, rec, at, &buf))
+				jq.object_put(obj, cols.keys[i], column_cell(it, rec, at, &buf))
 			}
 			emit(o, obj)
 		}
 	case .Select:
 		watched := jq.new_object()
 		for name, i in cols.names {
-			jq.object_put(watched, name, column_cell(ins, rec, cols.at[i], &buf))
+			jq.object_put(watched, name, column_cell(it, rec, cols.at[i], &buf))
 		}
-		o.whole = {ins, rec}
+		o.whole = {it, rec}
 		run_once(run, watched)
 		o.whole = {}
 		return
@@ -267,15 +267,15 @@ answer_columns :: proc(run: ^Run, ins: ^Inputs, rec: records.Record) {
 // The cell at column `at` of `rec` as the record's object holds it: its text, or null for an empty unquoted cell and
 // for a column the header lacks. A decoded cell takes the front of `buf`, which holds as many bytes as the record.
 @(private = "file")
-column_cell :: proc(ins: ^Inputs, rec: records.Record, at: int, buf: ^[]u8) -> jq.Value {
-	s, ok := records.cell(&ins.texts, rec, at, buf^)
+column_cell :: proc(it: ^records.Reader, rec: records.Record, at: int, buf: ^[]u8) -> jq.Value {
+	s, ok := records.cell(it, rec, at, buf^)
 	if !ok {
 		return nil
 	}
 	if len(s) == 0 {
 		// A quoted empty cell's text is the empty span after its opening quote.
-		p := int(uintptr(raw_data(s)) - uintptr(raw_data(ins.data)))
-		return "" if 0 < p && p < len(ins.data) && ins.data[p] == '"' else nil
+		p := int(uintptr(raw_data(s)) - uintptr(raw_data(it.src)))
+		return "" if 0 < p && p < len(it.src) && it.src[p] == '"' else nil
 	}
 	if raw_data(s) == raw_data(buf^) {
 		buf^ = buf[len(s):]
