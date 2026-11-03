@@ -178,11 +178,7 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 			x.late = true
 			x.multi = min(x.multi, i)
 		}
-		need, _ := step_ring(step)
-		if need > MAX_RING {
-			return {kind = .Over_Capacity}
-		}
-		if need > 0 {
+		if need, _ := step_ring(step); need > 0 {
 			x.broad = true
 			x.negative |= bit
 			x.late = true

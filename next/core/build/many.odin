@@ -14,10 +14,6 @@ import core ".."
 @(private)
 DEAD :: max(u32)
 
-// What the most ring entries of a container, and the most steps of a `Descend` path, are bounded by.
-@(private)
-MAX_RING :: 64
-
 // One `Descend` path's steps in one frame, a bit per step: those live in the container, and the `Name`s among them that
 // met their key.
 @(private)
@@ -436,8 +432,10 @@ many_ring_open :: #force_inline proc "contextless" (h: ^Scan, g: ^Many_Frame, d:
 	if k == 0 {
 		return
 	}
+	// An array of n elements takes 2n - 1 bytes at least, so a ring past that holds nothing more.
+	k = min(k, len(h.b.doc.src) / 2 + 1)
 	for int(m.ring_top) + k > len(m.rings) {
-		fresh, ok := grow(h.b.doc.allocator, m.rings, MAX_RING)
+		fresh, ok := grow(h.b.doc.allocator, m.rings, int(m.ring_top) + k)
 		if !ok {
 			h.b.err = {kind = .No_Memory}
 			return

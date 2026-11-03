@@ -154,8 +154,9 @@ Containers a stop leaves open are `Partial` with the count read so far, and `Doc
 ### Negative indexes
 
 An array's length is known only at its close. The hook keeps the last `k` elements in a ring, where `k` is the largest
-negative index or `Slice` end any armed path asks of that array. `k` above 64 is `Over_Capacity`, and a path with no
-negative step keeps no ring. At the close the ring's elements a path picks are given to the logic again, oldest first,
+negative index or `Slice` end any armed path asks of that array. The ring holds at most the elements the input has room for,
+and a refused allocation for it is `No_Memory`. A path with no negative step keeps no ring, and an index before the
+array's start is `Missing`. At the close the ring's elements a path picks are given to the logic again, oldest first,
 with their true indexes, and each path picks up there as if it had reached the element in order. A scalar is the ring's
 tokens and no second read. A container is walked again from its first byte, also for a path that ends at it, since an
 answer is kept whole and a found container's end is not in its token. Only those elements are read twice, and they were

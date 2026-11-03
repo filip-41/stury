@@ -125,24 +125,41 @@ stream_refusing_the_final_flush_is_reported :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(l.took), 10)
 }
 
-// A stream that takes fewer bytes than it was given and names no error.
-silent_stream :: proc() -> io.Stream {
+// A stream that takes `taken` bytes of what it was given and names no error.
+silent_stream :: proc(taken: ^i64) -> io.Stream {
 	return {
+		data = taken,
 		procedure = proc(data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (i64, io.Error) {
-			return 1 if mode == .Write else 0, nil if mode == .Write else .Empty
+			if mode != .Write {
+				return 0, .Empty
+			}
+			return min(i64(len(p)), (^i64)(data)^), nil
 		},
 	}
 }
 
 @(test)
-stream_taking_fewer_bytes_with_no_error_is_a_short_write :: proc(t: ^testing.T) {
+stream_taking_none_with_no_error_is_a_short_write :: proc(t: ^testing.T) {
 	spill: [write.ROOM_MAX]u8 = ---
 	out: write.Out
-	write.init(&out, &spill, stream = silent_stream())
+	taken: i64
+	write.init(&out, &spill, stream = silent_stream(&taken))
 	put_pieces(&out, 1, 50)
 	_, err := write.finish(&out)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Write_Failed)
 	testing.expect_value(t, err.cause, io.Error.Short_Write)
+}
+
+@(test)
+stream_taking_a_few_bytes_at_a_time_is_written_whole :: proc(t: ^testing.T) {
+	spill: [write.ROOM_MAX]u8 = ---
+	out: write.Out
+	taken: i64 = 7
+	write.init(&out, &spill, stream = silent_stream(&taken))
+	put_pieces(&out, 1, 50)
+	_, err := write.finish(&out)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, out.flushed, 50)
 }
 
 @(test)

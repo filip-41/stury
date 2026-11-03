@@ -232,7 +232,7 @@ render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Line
 Path_Error_Kind :: enum u8 {
 	None,
 	Bad_Path, // the path's text does not parse, at the byte of that text
-	Over_Capacity, // a read past `MAX_PATHS` paths, a path past `MAX_STEPS` steps, or a negative index past the ring, at no byte
+	Over_Capacity, // a read past `MAX_PATHS` paths, or a path past `MAX_STEPS` steps, at no byte
 	No_Memory, // an allocation the read owns was refused, at no byte
 	Walk, // the walk's fault, in `inner`
 	Duplicate_Key, // a read with `refuse_duplicates` met a key that repeats one of its object's, at the second key's first byte
@@ -253,7 +253,7 @@ Path_Error :: struct {
 PATH_KIND_RULES := [Path_Error_Kind]Rule {
 	.None          = {"none", "No error"},
 	.Bad_Path      = {"bad_path", "Invalid path"},
-	.Over_Capacity = {"over_capacity", "Read exceeds a fixed limit: MAX_PATHS paths, MAX_STEPS steps in a path, or the ring of a negative index"},
+	.Over_Capacity = {"over_capacity", "Read exceeds a fixed limit: MAX_PATHS paths or MAX_STEPS steps in a path"},
 	.No_Memory     = {"no_memory", "Out of memory"},
 	.Walk          = {"walk", "Input does not parse"},
 	.Duplicate_Key = {"duplicate_key", "Duplicate key"},

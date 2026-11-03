@@ -420,19 +420,30 @@ sort_words :: proc(items: []Sort_Item, entries: []Entry, d: int) #no_bounds_chec
 				i += 1
 			}
 		}
-		sort_words(items[:lt], entries, d)
-		sort_words(items[gt:], entries, d)
-		items = items[lt:gt]
-		// A zero last byte says the keys end inside the word, or hold a NUL there. The insertion sort below compares
-		// their text.
+		// The smaller outer side and the equal run recurse and the larger outer side loops, so the stack is logarithmic in
+		// the items and linear in the key words.
+		low, high := items[:lt], items[gt:]
+		if len(low) > len(high) {
+			low, high = high, low
+		}
+		sort_words(low, entries, d)
+		mid := items[lt:gt]
+		// A zero last byte says the keys end inside the word, or hold a NUL there. Their text is compared instead.
 		if pivot & 0xFF == 0 {
-			break
+			insertion_sort(mid, entries)
+		} else {
+			for &it in mid {
+				it.word = key_word(entries[it.entry].text, d + 8)
+			}
+			sort_words(mid, entries, d + 8)
 		}
-		d += 8
-		for &it in items {
-			it.word = key_word(entries[it.entry].text, d)
-		}
+		items = high
 	}
+	insertion_sort(items, entries)
+}
+
+@(private)
+insertion_sort :: proc(items: []Sort_Item, entries: []Entry) #no_bounds_check {
 	for i in 1 ..< max(len(items), 1) {
 		it := items[i]
 		j := i

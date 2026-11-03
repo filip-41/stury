@@ -101,15 +101,24 @@ refill :: #force_no_inline proc(out: ^Out, n: int) -> [^]u8 {
 	return out.buf[out.cursor:]
 }
 
-// Writes the buffer to the stream and empties it. Returns what the stream answered, `.Short_Write` when it took fewer
-// bytes and named no error.
+// Writes the buffer to the stream and empties it, again from where the stream stopped while it takes bytes without an
+// error. Returns what the stream answered, `.Short_Write` when it took none of what was left and named no error.
 @(private)
 flush :: proc(out: ^Out) -> io.Error {
-	wrote, err := io.write(out.stream, out.buf[:out.cursor])
-	out.flushed += wrote
-	short := wrote != out.cursor
+	left := out.buf[:out.cursor]
 	out.cursor = 0
-	return .Short_Write if err == .None && short else err
+	for len(left) > 0 {
+		wrote, err := io.write(out.stream, left)
+		out.flushed += wrote
+		if err != .None {
+			return err
+		}
+		if wrote <= 0 {
+			return .Short_Write
+		}
+		left = left[wrote:]
+	}
+	return .None
 }
 
 // Records `kind` and `cause`, frees the buffer, and points the output at its scratch.

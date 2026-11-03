@@ -514,11 +514,36 @@ stop_early_reads :: proc(t: ^testing.T) {
 }
 
 @(test)
+a_negative_index_past_sixty_four_reads_its_element :: proc(t: ^testing.T) {
+	text: [dynamic]u8
+	defer delete(text)
+	append(&text, '[')
+	for i in 0 ..< 200 {
+		if i > 0 {
+			append(&text, ',')
+		}
+		append(&text, '1')
+	}
+	append(&text, ']')
+	path := core.Path{steps = []core.Step{core.Index(-150)}}
+	doc, err := json.scan(text[:], .Json, path)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, len(doc.answers), 1)
+	testing.expect_value(t, doc.answers[0].outcome, core.Answer_Outcome.Found)
+}
+
+@(test)
 path_refusals :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`[1]`)
-	far := core.Path{steps = []core.Step{core.Index(-65)}}
-	_, deep := json.scan(src, .Json, far)
-	testing.expect_value(t, deep.kind, core.Path_Error_Kind.Over_Capacity)
+	for far in ([?]int{-65, -1_000_000_000}) {
+		path := core.Path{steps = []core.Step{core.Index(far)}}
+		doc, deep := json.scan(src, .Json, path)
+		defer core.destroy(&doc)
+		testing.expect_value(t, deep.kind, core.Path_Error_Kind.None)
+		testing.expect_value(t, len(doc.answers), 1)
+		testing.expect_value(t, doc.answers[0].outcome, core.Answer_Outcome.Missing)
+	}
 	twice := core.Path{steps = []core.Step{core.Descend{}, core.Name("a"), core.Descend{}}}
 	_, again := json.scan(src, .Json, twice)
 	testing.expect_value(t, again.kind, core.Path_Error_Kind.Bad_Path)
