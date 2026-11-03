@@ -28,8 +28,8 @@ DEFAULT_ODIN = os.path.join(os.path.dirname(REPO), "Odin-master", "bin", "odin")
 TIERS = {"quick": 0, "merge": 1, "full": 2}
 HOST = "arm64"
 
-TEST_PKGS = ["core/spell/test", "host/test", "core/kernel/test", "core/test", "core/write/test", "json/test", "dsv/test"]
-LIB_PKGS = ["core/spell", "core", "host", "core/kernel", "core/compose", "core/build", "core/typed", "core/write", "json", "dsv", "walktest"]
+TEST_PKGS = ["core/spell/test", "host/test", "core/kernel/test", "core/test", "core/write/test", "core/records/test", "json/test", "dsv/test"]
+LIB_PKGS = ["core/spell", "core", "host", "core/kernel", "core/compose", "core/build", "core/typed", "core/write", "core/records", "json", "dsv", "walktest"]
 BENCH_PKGS = ["bench", "bench/doc", "bench/editbench", "bench/paths", "bench/typed", "bench/write"]
 
 IMPORT = re.compile(r'^\s*import\s+(?:[A-Za-z_]\w*\s+)?"([^"]+)"', re.MULTILINE)

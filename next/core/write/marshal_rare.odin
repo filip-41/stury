@@ -694,13 +694,16 @@ leave_side :: proc(w: ^Walker) {
 	w.meta = raw_data(w.plan.meta)
 }
 
-// Frees the plans `side_plan` built.
+// Frees the plans `side_plan` built and leaves `side` empty, with its allocator.
 release_sides :: proc(side: ^map[typeid]^typed.Plan) {
+	allocator := side.allocator
 	for _, p in side {
 		typed.plan_destroy(p)
-		free(p, side.allocator)
+		free(p, allocator)
 	}
 	delete(side^)
+	side^ = nil
+	side.allocator = allocator
 }
 
 // Frees what a walk holds but the output.

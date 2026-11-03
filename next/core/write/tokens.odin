@@ -4,6 +4,7 @@ package write
 
 import "core:io"
 import core ".."
+import "../typed"
 
 // One value of a token write: a string, a number, or `.Null`, `.False` or `.True` of the tree.
 Scalar :: union {
@@ -15,11 +16,14 @@ Scalar :: union {
 // A format's token spelling, which `core.Spelling.tokens` points at. `tree` is the nested format's punctuation. `value`
 // writes one scalar, or one cell of a flat format, and a key is a string. A format with a `line` is flat.
 Token_Spelling :: struct {
-	tree:  Tree,
-	start: proc(t: ^Tokens, read: core.Read_As) -> core.Typed_Error_Kind, // sets `state` and `out`
-	value: proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind,
-	line:  proc(t: ^Tokens) -> core.Typed_Error_Kind, // ends a record
-	stop:  proc(t: ^Tokens), // frees `state`
+	tree:   Tree,
+	start:  proc(t: ^Tokens, read: core.Read_As) -> core.Typed_Error_Kind, // sets `state` and `out`
+	value:  proc(t: ^Tokens, v: Scalar) -> core.Typed_Error_Kind,
+	line:   proc(t: ^Tokens) -> core.Typed_Error_Kind, // ends a record
+	stop:   proc(t: ^Tokens), // frees `state`
+	// Writes a value by a plan the format built as one record, with no frame: a value, or a row with its line end and,
+	// for the first, the header. A refusal's kind and path go to `err`, and the kind is returned.
+	record: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind,
 }
 
 // A token write's state. It holds `core.MAX_DEPTH` levels with no allocation and is not copied after `tokens_init`. A

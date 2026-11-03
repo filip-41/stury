@@ -10,6 +10,9 @@
 // `write dsv <file>` and `write dsvdoc <file>`: `write.marshal` of a delimited file's rows, and `core.write` of its
 // document, see dsv.odin.
 //
+// `write records logs.json`: `records.marshal` of the logs as NDJSON against `write.marshal` of the same list, see
+// typed.odin.
+//
 // `write typed <file> [pretty]`: `json.marshal` of the file's struct type, chosen by its name, the fields the other
 // libraries' lanes use. One buffer is reused, so a pass counts neither growth nor page faults. GB/s counts output bytes.
 package write_bench
@@ -29,8 +32,8 @@ CHECK_OFFSET :: u64(14695981039346656037)
 CHECK_PRIME :: u64(1099511628211)
 
 main :: proc() {
-	if len(os.args) < 3 || (os.args[1] != "string" && os.args[1] != "typed" && os.args[1] != "doc" && os.args[1] != "format" && os.args[1] != "dsv" && os.args[1] != "dsvdoc") {
-		fmt.eprintln("usage: write string <file> [iters] | write typed|doc|format <file> [pretty] | write dsv|dsvdoc <file>")
+	if len(os.args) < 3 || (os.args[1] != "string" && os.args[1] != "typed" && os.args[1] != "doc" && os.args[1] != "format" && os.args[1] != "dsv" && os.args[1] != "dsvdoc" && os.args[1] != "records") {
+		fmt.eprintln("usage: write string <file> [iters] | write typed|doc|format <file> [pretty] | write dsv|dsvdoc <file> | write records logs.json")
 		os.exit(2)
 	}
 	src, err := os.read_entire_file(os.args[2], context.allocator)
@@ -40,6 +43,10 @@ main :: proc() {
 	}
 	if os.args[1] == "dsv" || os.args[1] == "dsvdoc" {
 		dsv_lane(src, filepath.stem(os.args[2]), os.args[1] == "dsvdoc")
+		return
+	}
+	if os.args[1] == "records" {
+		records_lane(src)
 		return
 	}
 	if os.args[1] == "typed" {

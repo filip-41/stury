@@ -60,6 +60,9 @@ Rows :: struct {
 	words:   bool, // `true` and `false` hold neither the delimiter nor the comment byte
 	depth:   int,
 	dropped: int, // the cells a repeated key overwrote
+	cols:    []Named, // a struct row's columns, in the order written
+	keys:    []string, // a map row's columns, sorted
+	headed:  bool, // the columns are bound
 	err:     core.Typed_Error,
 }
 
@@ -189,11 +192,14 @@ end_line :: proc(w: ^Rows) -> core.Typed_Error_Kind {
 	return w.out.err
 }
 
-// The path of a refusal in record `i`.
+// The path of a refusal in record `i`, none for -1.
 @(cold, private)
 refuse :: proc(w: ^Rows, kind: core.Typed_Error_Kind, i: int) -> core.Typed_Error_Kind {
-	w.err.n_steps = 1
-	w.err.steps[0] = core.Index(i)
+	w.err.n_steps = 0
+	if i >= 0 {
+		w.err.n_steps = 1
+		w.err.steps[0] = core.Index(i)
+	}
 	return kind
 }
 
@@ -204,137 +210,183 @@ refuse_in :: proc(w: ^Rows, kind: core.Typed_Error_Kind, i: int, step: core.Step
 	if name, named := step.(core.Name); named {
 		step = core.Name(strings.clone(string(name), context.temp_allocator))
 	}
-	w.err.n_steps = 2
-	w.err.steps[0], w.err.steps[1] = core.Index(i), step
+	refuse(w, kind, i)
+	w.err.steps[w.err.n_steps] = step
+	w.err.n_steps += 1
 	return kind
 }
 
 @(private)
 write_rows :: proc(w: ^Rows, value: uintptr) -> core.Typed_Error_Kind {
-	list := (^runtime.Raw_Slice)(value)^
-	row := typed.field_at(u64(uintptr(w.plan.fields[0].first)))
+	row, listed := row_of(w.plan)
+	list := runtime.Raw_Slice{rawptr(value), 1}
+	if listed {
+		list = (^runtime.Raw_Slice)(value)^
+	}
+	write_header(w, row, list) or_return
+	return write_list(w, row, list, true)
+}
+
+// Binds the columns of `row` and writes the header: a struct row's field names in order, or a map row's sorted union of
+// the keys of `list`'s rows. A list row has no header.
+@(private)
+write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice) -> core.Typed_Error_Kind {
+	w.headed = true
+	pl := w.plan
+	scratch := runtime.arena_allocator(&w.arena)
 	#partial switch row.kind {
 	case .Struct, .Required:
-		return write_struct_rows(w, list, row)
-	case .Slice, .Dynamic:
-		return write_list_rows(w, list, row)
+		members := ([^]typed.Field)(row.first)[:pl.meta[row.meta].members]
+		cols, failed := make([]Named, len(members), scratch)
+		names, no_names := make([]string, len(members), scratch)
+		if failed != nil || no_names != nil {
+			return .Out_Of_Memory
+		}
+		for &f, k in members {
+			cols[k] = {&f, pl.meta[f.meta].name}
+		}
+		if w.sort {
+			slice.sort_by(cols, proc(a, b: Named) -> bool {return a.name < b.name})
+		}
+		w.cols = cols
+		if !w.opts.no_header {
+			for c, k in cols {
+				names[k] = c.name
+			}
+			return put_header(w, names)
+		}
 	case .Map:
-		return write_map_rows(w, list, row)
+		info := pl.meta[row.meta].map_info
+		keys := make([dynamic]string, scratch)
+		seen := make(map[string]struct{}, scratch)
+		for i in 0 ..< list.len {
+			m := (^runtime.Raw_Map)(uintptr(list.data) + uintptr(i) * uintptr(row.stride))^
+			ks, _, hs, _, _ := runtime.map_kvh_data_dynamic(m, info)
+			for k in 0 ..< uintptr(runtime.map_cap(m)) {
+				if !runtime.map_hash_is_valid(hs[k]) {
+					continue
+				}
+				key := (^string)(runtime.map_cell_index_dynamic(ks, info.ks, k))^
+				if key in seen {
+					continue
+				}
+				_, _, _, no_seen := map_entry(&seen, key)
+				_, no_key := append(&keys, key)
+				if no_seen != nil || no_key != nil {
+					return .Out_Of_Memory
+				}
+			}
+		}
+		slice.sort(keys[:])
+		w.keys = keys[:]
+		if !w.opts.no_header && len(keys) > 0 {
+			return put_header(w, w.keys)
+		}
 	}
-	return .Unsupported
+	return .None
 }
 
+// Writes the rows of `list` by the columns `write_header` bound, as records `0 ..< list.len`, or as no record a path
+// names when `indexed` is false, as a record write's row is. A map row writes a cell per header key, an empty one where
+// the row lacks it, and refuses a key the header lacks. A cell that is present and empty would read back as no entry, so
+// it is refused too.
 @(private)
-write_struct_rows :: proc(w: ^Rows, list: runtime.Raw_Slice, row: ^typed.Field) -> core.Typed_Error_Kind {
+write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed: bool) -> core.Typed_Error_Kind {
 	pl := w.plan
-	members := ([^]typed.Field)(row.first)[:pl.meta[row.meta].members]
-	scratch := runtime.arena_allocator(&w.arena)
-	cols, failed := make([]Named, len(members), scratch)
-	names, no_names := make([]string, len(members), scratch)
-	if failed != nil || no_names != nil {
-		return .Out_Of_Memory
-	}
-	for &f, k in members {
-		cols[k] = {&f, pl.meta[f.meta].name}
-	}
-	if w.sort {
-		slice.sort_by(cols, proc(a, b: Named) -> bool {return a.name < b.name})
-	}
-	if !w.opts.no_header {
-		for c, k in cols {
-			names[k] = c.name
-		}
-		put_header(w, names) or_return
-	}
-	for i in 0 ..< list.len {
-		start := total(w)
-		e := uintptr(list.data) + uintptr(i) * uintptr(row.stride)
-		for c, k in cols {
-			if k > 0 {
-				put_byte(w, w.opts.delimiter)
+	#partial switch row.kind {
+	case .Struct, .Required:
+		cols := w.cols
+		for i in 0 ..< list.len {
+			start := total(w)
+			e := uintptr(list.data) + uintptr(i) * uintptr(row.stride)
+			for c, k in cols {
+				if k > 0 {
+					put_byte(w, w.opts.delimiter)
+				}
+				if kind := write_cell(w, pl, c.f, e + uintptr(c.f.offset), k == 0, false); kind != .None {
+					return refuse_in(w, kind, i if indexed else -1, core.Name(c.name))
+				}
 			}
-			if kind := write_cell(w, pl, c.f, e + uintptr(c.f.offset), k == 0, false); kind != .None {
-				return refuse_in(w, kind, i, core.Name(c.name))
-			}
+			end_record(w, start, i if indexed else -1) or_return
 		}
-		end_record(w, start, i) or_return
+	case .Slice, .Dynamic:
+		cell := typed.field_at(u64(uintptr(row.first)))
+		for i in 0 ..< list.len {
+			start := total(w)
+			inner := (^runtime.Raw_Slice)(uintptr(list.data) + uintptr(i) * uintptr(row.stride))^
+			for k in 0 ..< inner.len {
+				if k > 0 {
+					put_byte(w, w.opts.delimiter)
+				}
+				if kind := write_cell(w, pl, cell, uintptr(inner.data) + uintptr(k) * uintptr(cell.stride), k == 0, false); kind != .None {
+					return refuse_in(w, kind, i if indexed else -1, core.Index(k))
+				}
+			}
+			end_record(w, start, i if indexed else -1) or_return
+		}
+	case .Map:
+		info := pl.meta[row.meta].map_info
+		cell := typed.field_at(u64(uintptr(row.first)))
+		for i in 0 ..< list.len {
+			start := total(w)
+			m := (^runtime.Raw_Map)(uintptr(list.data) + uintptr(i) * uintptr(row.stride))
+			found := 0
+			for &key, k in w.keys {
+				if k > 0 {
+					put_byte(w, w.opts.delimiter)
+				}
+				value := runtime.__dynamic_map_get(m, info, info.key_hasher(&key, runtime.map_seed(m^)), &key)
+				if value == nil {
+					continue
+				}
+				found += 1
+				at := total(w)
+				kind := write_cell(w, pl, cell, uintptr(value), k == 0, false)
+				if kind == .None && total(w) == at {
+					kind = .Unwritable
+				}
+				if kind != .None {
+					return refuse_in(w, kind, i if indexed else -1, core.Name(key))
+				}
+			}
+			if found < int(m.len) {
+				return refuse(w, .Unwritable, i if indexed else -1)
+			}
+			end_record(w, start, i if indexed else -1) or_return
+		}
 	}
 	return .None
 }
 
+// One row of a record write, by a plan of the row's type. The first row binds the columns and writes the header, and
+// every row after it takes the same plan. What hooks allocate lasts the row.
 @(private)
-write_list_rows :: proc(w: ^Rows, list: runtime.Raw_Slice, row: ^typed.Field) -> core.Typed_Error_Kind {
-	cell := typed.field_at(u64(uintptr(row.first)))
-	for i in 0 ..< list.len {
-		start := total(w)
-		inner := (^runtime.Raw_Slice)(uintptr(list.data) + uintptr(i) * uintptr(row.stride))^
-		for k in 0 ..< inner.len {
-			if k > 0 {
-				put_byte(w, w.opts.delimiter)
-			}
-			if kind := write_cell(w, w.plan, cell, uintptr(inner.data) + uintptr(k) * uintptr(cell.stride), k == 0, false); kind != .None {
-				return refuse_in(w, kind, i, core.Index(k))
-			}
-		}
-		end_record(w, start, i) or_return
+token_record :: proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind {
+	w := (^Rows)(t.state)
+	row, listed := row_of(plan)
+	if listed || w.plan != nil && w.plan != plan {
+		err^ = {kind = .Plan_Mismatch}
+		return .Plan_Mismatch
 	}
-	return .None
-}
-
-// A map row writes the sorted union of its keys as the header, then a cell per key, an empty one where the record lacks
-// it. A cell that is present and empty would read back as no entry, so it is refused.
-@(private)
-write_map_rows :: proc(w: ^Rows, list: runtime.Raw_Slice, row: ^typed.Field) -> core.Typed_Error_Kind {
-	info := w.plan.meta[row.meta].map_info
-	cell := typed.field_at(u64(uintptr(row.first)))
-	scratch := runtime.arena_allocator(&w.arena)
-	keys := make([dynamic]string, scratch)
-	seen := make(map[string]struct{}, scratch)
-	for i in 0 ..< list.len {
-		m := (^runtime.Raw_Map)(uintptr(list.data) + uintptr(i) * uintptr(row.stride))^
-		ks, _, hs, _, _ := runtime.map_kvh_data_dynamic(m, info)
-		for k in 0 ..< uintptr(runtime.map_cap(m)) {
-			if !runtime.map_hash_is_valid(hs[k]) {
-				continue
-			}
-			key := (^string)(runtime.map_cell_index_dynamic(ks, info.ks, k))^
-			if key in seen {
-				continue
-			}
-			_, _, _, no_seen := map_entry(&seen, key)
-			_, no_key := append(&keys, key)
-			if no_seen != nil || no_key != nil {
-				return .Out_Of_Memory
-			}
-		}
+	w.plan = plan
+	temp := runtime.arena_temp_begin(&w.arena)
+	first := !w.headed
+	kind := write_header(w, row, {value, 1}) if first else .None
+	if kind == .None {
+		kind = write_list(w, row, {value, 1}, false)
 	}
-	slice.sort(keys[:])
-	if !w.opts.no_header && len(keys) > 0 {
-		put_header(w, keys[:]) or_return
+	if first && kind == .None {
+		runtime.arena_temp_ignore(temp)
+		return .None
 	}
-	for i in 0 ..< list.len {
-		start := total(w)
-		m := (^runtime.Raw_Map)(uintptr(list.data) + uintptr(i) * uintptr(row.stride))
-		for &key, k in keys {
-			if k > 0 {
-				put_byte(w, w.opts.delimiter)
-			}
-			value := runtime.__dynamic_map_get(m, info, info.key_hasher(&key, runtime.map_seed(m^)), &key)
-			if value == nil {
-				continue
-			}
-			at := total(w)
-			kind := write_cell(w, w.plan, cell, uintptr(value), k == 0, false)
-			if kind == .None && total(w) == at {
-				kind = .Unwritable
-			}
-			if kind != .None {
-				return refuse_in(w, kind, i, core.Name(key))
-			}
-		}
-		end_record(w, start, i) or_return
+	runtime.arena_temp_end(temp)
+	if kind != .None {
+		// The header goes with a refused first row, which the record writer takes back when it can.
+		w.headed = !first
+		err^ = w.err
+		err.kind, err.cause = kind, w.out.cause
 	}
-	return .None
+	return kind
 }
 
 // One cell. The kinds a row is made of are written in line, and `write_other` takes the rest: its frame is large, and a
@@ -690,13 +742,20 @@ scan_text :: #force_inline proc(w: ^Rows, s: string) -> (special, high: bool) #n
 // The token write of a delimited text: a scalar call is a cell, written by the rules of the typed write.
 @(private)
 TOKENS := write.Token_Spelling {
-	start = tokens_start,
-	value = token_cell,
-	line  = proc(t: ^write.Tokens) -> core.Typed_Error_Kind {
+	start  = tokens_start,
+	value  = token_cell,
+	line   = proc(t: ^write.Tokens) -> core.Typed_Error_Kind {
 		w := (^Rows)(t.state)
 		return end_line(w) if total(w) != t.mark else .Unwritable
 	},
-	stop  = proc(t: ^write.Tokens) {free(t.state, t.base.allocator)},
+	stop   = proc(t: ^write.Tokens) {
+		if w := (^Rows)(t.state); w != nil {
+			runtime.arena_destroy(&w.arena)
+			write.release_sides(&w.side)
+			free(w, t.base.allocator)
+		}
+	},
+	record = token_record,
 }
 
 // Writes the delimiter if a cell came before in the record, then the cell `v`.

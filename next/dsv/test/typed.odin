@@ -209,7 +209,7 @@ a_text_with_no_record_keeps_or_empties_the_target :: proc(t: ^testing.T) {
 @(test)
 a_plan_refuses_a_type_no_text_reads :: proc(t: ^testing.T) {
 	Nested :: struct { a: []int }
-	for id in ([]typeid{int, []int, []Nested, []map[int]string, [][][]int}) {
+	for id in ([]typeid{int, []^int, []Nested, []map[int]string, [][][]int}) {
 		_, e := dsv.plan_make(id, .Csv, allocator = context.temp_allocator)
 		testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unsupported)
 	}

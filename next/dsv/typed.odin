@@ -17,9 +17,10 @@ import typed "../core/typed"
 // refusal leaves everything the read allocated reachable from `target`.
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
-// Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows. A write
-// by the plan is of spec `spec` with the delimiter, comment byte, `no_header` and `crlf` of `layout`, and `.Bad_Option`
-// when the spec cannot spell them. A read takes its spec and options at the call.
+// Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows and no
+// row. A write by the plan is of spec `spec` with the delimiter, comment byte, `no_header` and `crlf` of `layout`, and
+// `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call, and a row's plan, which
+// a record writer takes, reads nothing.
 plan_make :: proc(T: typeid, spec: Spec, layout := Options{}, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
 	plan, err := typed.plan_make(T, &SPELLING, opts, allocator)
 	if err.kind != .None {
@@ -35,7 +36,9 @@ plan_make :: proc(T: typeid, spec: Spec, layout := Options{}, opts := typed.Plan
 	}
 	plan.layout = {u8(spec), layout.delimiter, layout.comment, u8(layout.no_header), u8(layout.crlf)}
 	plan.marshal = marshal_text
-	plan.node_read = document_read
+	if _, listed := row_of(&plan); listed {
+		plan.node_read = document_read
+	}
 	return plan, {}
 }
 
@@ -636,15 +639,23 @@ fault_position :: proc(h: ^Cells, regs: ^core.Hook_Regs) {
 	}
 }
 
-// Refuses a type no text can read: a root that is no list of rows, or a row or cell of a kind this format has no
-// spelling for.
+// The row of a plan, and whether the plan is of a list of them. A list whose elements are cells is one row.
+@(private)
+row_of :: proc(plan: ^typed.Plan) -> (row: ^typed.Field, listed: bool) {
+	root := typed.field_at(u64(uintptr(plan.root)))
+	if root.kind == .Slice || root.kind == .Dynamic {
+		first := typed.field_at(u64(uintptr(root.first)))
+		if !cell_supported(plan, first) {
+			return first, true
+		}
+	}
+	return root, false
+}
+
+// Refuses a type no text can be made of: a row or cell of a kind this format has no spelling for.
 @(private)
 rows_supported :: proc(plan: ^typed.Plan) -> core.Typed_Error {
-	root := typed.field_at(u64(uintptr(plan.root)))
-	if root.kind != .Slice && root.kind != .Dynamic {
-		return {kind = .Unsupported}
-	}
-	row := typed.field_at(u64(uintptr(root.first)))
+	row, _ := row_of(plan)
 	#partial switch row.kind {
 	case .Struct, .Required:
 		m := &plan.meta[row.meta]

@@ -69,11 +69,13 @@ caller with hooks, a union tag or many writes keeps. A plan is one type's, and a
 text comes from `allocator`. What lasts only the call, the key text, stand-ins and side plans, comes from
 `context.allocator`.
 
-The walk is `write.walk` in `core/write/marshal.odin`, one loop over the plan's records with one stack of frames, held
-by `marshal_as`. It takes a format's text at compile time: `Tree`, the bytes of a tree, and `Put`, its string writer, so
-strings and punctuation are in line. `Plan.marshal` holds a format's instance, set by its `plan_make`, so a caller of
-`write.marshal` names no format. A plan with no `marshal` is `.Unsupported`. `marshal_as` picks one of
-four instances: compact or pretty, each with the plain string writer or the one for `ascii` and `escape_html`.
+The walk is `write.walk` in `core/write/marshal.odin`, one loop over the plan's records with one stack of frames. It
+takes a format's text at compile time: `Tree`, the bytes of a tree, and `Put`, its string writer, so strings and
+punctuation are in line. `Plan.marshal` holds a format's instance, set by its `plan_make`, so a caller of `write.marshal`
+names no format. A plan with no `marshal` is `.Unsupported`. A walker is set up once (`walker_init`), writes values
+(`walker_value`, which picks one of four instances: compact or pretty, each with the plain string writer or the one for
+`ascii` and `escape_html`) and is released once. `marshal_as` holds its stacks for one value, and a record writer keeps
+one walker, with its stacks on the heap, for all its values.
 
 A list of structs keeps one frame open: the next element takes over the frame of the one that closed, so a list does not
 push and pop per element. A struct's members are written from the records' key text with no call. A member with `key_size` 0 is the rest: it has
@@ -231,7 +233,53 @@ bytes, as `finish` does for an output that failed. A stream that failed leaves a
   `open_object`, `open_array`, `close` and `key` are `.Unsupported`. `tokens_finish` with cells waiting for `end_record` is
   `.Out_Of_Order`. A header is a record of strings the caller writes.
 - A format supplies a `write.Token_Spelling` through `core.Spelling.tokens`: its tree, one `value` procedure that writes a
-  string, a number or a word, and for a flat format `start`, `line` and `stop`.
+  string, a number or a word, `record`, which writes a typed value with no frame, `stop`, and for a flat format `start` and
+  `line`.
+
+## Records
+
+`core/records` writes a list one record at a time: an NDJSON or RFC 7464 text, or the rows of a delimited text.
+
+```odin
+wr: records.Writer
+records.writer_init(&wr, stream, json.as(.Json), .Lines)
+for v in values {
+	if records.write(&wr, v, &plan) != .None {
+		log(wr.err)
+	}
+}
+_, err := records.writer_end(&wr)
+```
+
+```odin
+records.writer_init  :: proc(wr: ^records.Writer, w: io.Stream, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind
+records.writer_end   :: proc(wr: ^records.Writer) -> ([]u8, core.Typed_Error)
+records.writer_destroy :: proc(wr: ^records.Writer)
+records.write        :: proc(wr: ^records.Writer, value: any, plan: ^typed.Plan) -> core.Typed_Error_Kind
+records.write_text   :: proc(wr: ^records.Writer, text: []u8) -> core.Typed_Error_Kind
+records.write_cells  :: proc(wr: ^records.Writer, cells: []Maybe(string)) -> core.Typed_Error_Kind
+records.marshal        :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
+records.marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}) -> core.Typed_Error
+```
+
+- A record of JSON is the value's text, as `write.marshal` writes it, and LF. `.Seq` also puts 0x1E before it. `.Lines`
+  takes compact text only, so `pretty` there is `.Bad_Option`. `.Entries` is one document, which `write.marshal` writes,
+  so it is `.Unsupported`.
+- A record of a delimited text is a row, written by a plan of the row type: `dsv.plan_make(Entry, .Csv)`, not
+  `[]Entry`. The first row writes the header, a map row's from its own keys, so a later row with another key is
+  `.Unwritable`. Every row takes the plan of the first. A delimited text takes `.Lines` only.
+- `write` takes a plan of the value's type built by the writer's format, else `.Plan_Mismatch`. `write_text` writes the
+  caller's text of one record as it is, unjudged. `write_cells` writes a row of a delimited text, each cell as the typed
+  write writes a string: a nil cell is empty, a row of one nil cell is `""` since an empty line is no record, and a BOM
+  at the start of the text is quoted. Another format is `.Unsupported`.
+- A refused record leaves no byte when nothing was flushed since it began, and the writer goes on. Otherwise, and on a
+  stream or memory failure, the refusal is final: every later call returns it and `writer_end` returns it with no text.
+  Each call returns the refusal's kind, and `wr.err` holds it with its path. `writer_destroy` frees a writer
+  `writer_end` did not end.
+- `records.marshal` stops at the first refused element and returns no text. `marshal_stream` may leave a prefix.
+
+A writer sets up once: the walker, its stacks and a delimited text's columns live as long as it does, so a record costs
+the value's text and one walk entry.
 
 ## Delimited text
 
@@ -240,7 +288,7 @@ from `dsv.plan_make(T, spec, layout, plan_opts, allocator)`. `layout` is the `ds
 `comment`, `no_header` and the write's own `crlf`. The spec and the layout ride in `Plan.layout`, so a plan writes one spec and `.Bad_Option` refuses a layout that spec cannot read. `sort_keys` orders a struct row's
 columns.
 
-A struct row writes a header of its field names, then a record per element. A list row writes its cells and no header. A
+A plan of one row writes a text of that one row. A struct row writes a header of its field names, then a record per element. A list row writes its cells and no header. A
 map row writes the sorted union of its keys as the header and a cell per key, an empty one where a record lacks it, and a
 cell that is present and empty is `.Unwritable`. The loop is dsv's own in `dsv/write.odin`, and the cells are the leaves of
 `core/write` (`int_text`, `enum_value`, `union_arm`, `put_text`), so a number or an enum has one spelling in every format.

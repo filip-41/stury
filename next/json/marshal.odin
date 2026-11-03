@@ -36,6 +36,10 @@ TOKENS := write.Token_Spelling {
 		}
 		return .None
 	},
+	record = proc(t: ^write.Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error) -> core.Typed_Error_Kind {
+		return write.tokens_marshal(t, plan, value, err, TREE, put_plain, put_opted)
+	},
+	stop = write.tokens_release,
 }
 
 @(private)

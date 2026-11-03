@@ -8,6 +8,7 @@ import "core:slice"
 import "core:time"
 import core "../../core"
 import write "../../core/write"
+import records "../../core/records"
 import json "../../json"
 
 Log_Record :: struct {
@@ -163,4 +164,56 @@ lane :: proc($T: typeid, src: []u8, pretty: bool) {
 	slice.sort(times[:])
 	median := times[ITERS / 2]
 	fmt.printfln("gb_per_s=%.3f best=%.3f ns=%d out=%d check=%d", f64(len(text)) / f64(median), f64(len(text)) / f64(times[0]), median, len(text), h)
+}
+
+// `write records logs.json`: `records.marshal` of the file's records as NDJSON, and in the same pass `write.marshal` of
+// the same list, which writes it as one array, under `list_`. GB/s counts output bytes.
+records_lane :: proc(src: []u8) {
+	value: Logs
+	if err := json.unmarshal(src, .Json, &value); err.kind != .None {
+		fmt.eprintln("read:", err)
+		os.exit(1)
+	}
+	plan, _ := json.plan_make(Log_Record)
+	list_plan, _ := json.plan_make([]Log_Record)
+	output := Fixed_Output{make([]u8, 2 * len(src) + 64 * mem.Kilobyte)}
+	fixed := runtime.Allocator{fixed_output_proc, &output}
+	ITERS :: 41
+	times, list_times: [ITERS]i64
+	size, list_size: int
+	h := CHECK_OFFSET
+	for i in 0 ..< ITERS + 2 {
+		start := time.tick_now()
+		text, err := records.marshal(value.logs, &plan, json.as(.Json), allocator = fixed)
+		d := i64(time.tick_since(start))
+		if i == 0 {
+			for b in text {
+				h = (h ~ u64(b)) * CHECK_PRIME
+			}
+		}
+		size = len(text)
+		start = time.tick_now()
+		list, lerr := write.marshal(value.logs, &list_plan, {}, fixed)
+		ld := i64(time.tick_since(start))
+		if err.kind != .None || lerr.kind != .None {
+			fmt.eprintln("write:", err, lerr)
+			os.exit(1)
+		}
+		list_size = len(list)
+		if i >= 2 {
+			times[i - 2], list_times[i - 2] = d, ld
+		}
+	}
+	slice.sort(times[:])
+	slice.sort(list_times[:])
+	fmt.printfln(
+		"gb_per_s=%.3f best=%.3f ns=%d out=%d check=%d list_gb_per_s=%.3f list_best=%.3f",
+		f64(size) / f64(times[ITERS / 2]),
+		f64(size) / f64(times[0]),
+		times[ITERS / 2],
+		size,
+		h,
+		f64(list_size) / f64(list_times[ITERS / 2]),
+		f64(list_size) / f64(list_times[0]),
+	)
 }

@@ -96,7 +96,9 @@ Entry :: struct {
 	rec:   ^typed.Field,
 }
 
-// A typed write's state. `frames` has `MAX_DEPTH + 1` slots and `ptrs` `MAX_DEPTH`, on `marshal_as`'s stack.
+// A typed write's state. `frames` has `MAX_DEPTH + 1` slots and `ptrs` `MAX_DEPTH`, on `marshal_as`'s stack or in a
+// `Held_Walker`. Between two values it holds no frame, so one walker writes a run of values. `out` is held in place, so
+// a store to it does not alias the walker's other fields.
 @(private)
 Walker :: struct {
 	out:       Out,
@@ -177,27 +179,8 @@ marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, s
 	spill: [ROOM_MAX]u8 = ---
 	w: Walker
 	init(&w.out, &spill, allocator, stream)
-	init(&w.keys, &spill)
-	w.plan, w.meta, w.opts, w.frames, w.ptrs = plan, raw_data(plan.meta), opts, raw_data(frames[:]), raw_data(ptrs[:])
-	w.fill, w.unit = 0x20, int(opts.indent)
-	if opts.tab {
-		w.fill, w.unit = 0x09, 1
-	}
-	w.tag_field.kind = .String
-	w.entries.allocator, w.plans.allocator = context.allocator, context.allocator
-	w.side.allocator = context.allocator
-	w.arena.backing_allocator = context.allocator
-	kind: core.Typed_Error_Kind
-	switch {
-	case opts.pretty && (opts.ascii || opts.escape_html):
-		kind = walk(&w, uintptr(value), true, T, put_opted)
-	case opts.pretty:
-		kind = walk(&w, uintptr(value), true, T, put)
-	case opts.ascii || opts.escape_html:
-		kind = walk(&w, uintptr(value), false, T, put_opted)
-	case:
-		kind = walk(&w, uintptr(value), false, T, put)
-	}
+	walker_init(&w, opts, raw_data(frames[:]), raw_data(ptrs[:]))
+	kind := walker_value(&w, plan, uintptr(value), T, put, put_opted)
 	release_walker(&w)
 	if kind != .None {
 		destroy(&w.out)
@@ -206,6 +189,89 @@ marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, s
 		return nil, w.err
 	}
 	return finish((^Out)(rawptr(&w.out)))
+}
+
+// Starts a walker that writes to its started `out` as `opts` says, over `frames` of `MAX_DEPTH + 1` slots and `ptrs` of
+// `MAX_DEPTH`. What it allocates for itself comes from `context.allocator`, and `release_walker` frees it.
+@(private)
+walker_init :: proc(w: ^Walker, opts: core.Write_Options, frames: [^]Frame, ptrs: [^]Target) {
+	init(&w.keys, w.out.spill)
+	w.opts, w.frames, w.ptrs = opts, frames, ptrs
+	w.fill, w.unit = 0x20, int(opts.indent)
+	if opts.tab {
+		w.fill, w.unit = 0x09, 1
+	}
+	w.tag_field.kind = .String
+	w.entries.allocator, w.plans.allocator = context.allocator, context.allocator
+	w.side.allocator = context.allocator
+	w.arena.backing_allocator = context.allocator
+}
+
+// Writes one value by `plan`, in the instance of the walk `opts` picks. A refusal's path is in `w.err`.
+@(private)
+walker_value :: proc(w: ^Walker, plan: ^typed.Plan, value: uintptr, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind {
+	w.plan, w.meta = plan, raw_data(plan.meta)
+	switch {
+	case w.opts.pretty && (w.opts.ascii || w.opts.escape_html):
+		return walk(w, value, true, T, put_opted)
+	case w.opts.pretty:
+		return walk(w, value, true, T, put)
+	case w.opts.ascii || w.opts.escape_html:
+		return walk(w, value, false, T, put_opted)
+	}
+	return walk(w, value, false, T, put)
+}
+
+// A walker that outlives one value, with its stacks, which a token write keeps in `Tokens.state`.
+@(private)
+Held_Walker :: struct {
+	w:      Walker,
+	frames: [core.MAX_DEPTH + 1]Frame,
+	ptrs:   [core.MAX_DEPTH]Target,
+}
+
+// Writes `value` by `plan` at the output of the token write `t`, by the walk of tree `T`, with nothing around it. The
+// walker is made at the first value and kept until `tokens_release`, so a run of values sets it up once, and the token
+// write's output moves into it, so `t.out` points into the walker from then on. A refusal's
+// kind and path go to `err`, and the kind is returned.
+tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.Typed_Error, $T: Tree, $put, $put_opted: Put) -> core.Typed_Error_Kind {
+	h := (^Held_Walker)(t.state)
+	if h == nil {
+		made, failed := new(Held_Walker)
+		if failed != nil {
+			err^ = {kind = .Out_Of_Memory}
+			return .Out_Of_Memory
+		}
+		h = made
+		h.w.out = t.out^
+		t.out, t.state = &h.w.out, h
+		walker_init(&h.w, t.opts, raw_data(h.frames[:]), raw_data(h.ptrs[:]))
+	}
+	w := &h.w
+	// A side plan is built with its parent plan's options, so another plan builds its own.
+	if w.plan != plan {
+		release_sides(&w.side)
+	}
+	if w.arena.total_used > 0 {
+		runtime.arena_free_all(&w.arena)
+	}
+	kind := walker_value(w, plan, uintptr(value), T, put, put_opted)
+	if kind != .None {
+		// A refusal leaves open what its value had open.
+		w.n_ptrs, w.keys.cursor = 0, 0
+		clear(&w.entries)
+		err^ = w.err
+		err.kind, err.cause = kind, t.out.cause
+	}
+	return kind
+}
+
+// Frees the walker `tokens_marshal` kept: a token write's `stop`.
+tokens_release :: proc(t: ^Tokens) {
+	if h := (^Held_Walker)(t.state); h != nil {
+		release_walker(&h.w)
+		free(h, h.w.entries.allocator)
+	}
 }
 
 // The walk. `cur` is the open frame, kept out of `frames` so its fields stay in registers, so `refused` gets a copy, since

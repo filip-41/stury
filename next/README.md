@@ -14,13 +14,15 @@ tests and benchmarks on its own and imports nothing outside this directory.
 | `core/build` | the builder: the hooks that write a document, its reservation, the duplicate-key check, and the path engine |
 | `core/typed` | the typed read: the type plan, the read's hook, refusal and collection, for any format |
 | `core/write` | the output a written text goes into, a buffer that grows or one flushed to a stream, and the typed write over a type plan and the token write |
+| `core/records` | the record writer: a list written one framed value, text or row at a time |
 | `json` | the JSON walk for the `Json`, `Jsonc` and `Json5` specs, its `build`, its path reads, `unmarshal` and its spelling and edit services |
 | `dsv` | the delimited-text walk for the `Csv`, `Tsv` and `Plain` specs, its `build`, its path reads and its spelling and edit services |
 | `walktest` | helpers the test packages share |
 
 Imports point down: `host` imports `core` only, `core/spell` imports no package of this tree, `core` imports `core/spell`, `core/kernel`,
-`core/build` and `core/typed` import `core`, `core/write` imports `core`, `core/spell` and `core/typed`, `json` and `dsv` import all of
-them, and no format imports another.
+`core/build` and `core/typed` import `core`, `core/write` imports `core`, `core/spell` and `core/typed`, `core/records` imports
+`core`, `core/typed` and `core/write`, `json` and `dsv` import all of them but `host` and `core/records`, and no format imports
+another.
 
 ## Docs
 
@@ -31,7 +33,7 @@ them, and no format imports another.
 | `docs/document.md` | the document: nodes, building, readers, spelling services, duplicate keys, facts, edits, errors, limits |
 | `docs/paths.md` | the path layer: path steps, reading paths, the `Answer` record, the engine and the container-close decision |
 | `docs/typed.md` | the typed read: the plan, the entries, field and type rules, who owns a string, refusal and collecting, what a format gives, limits |
-| `docs/writer.md` | the writer, layer by layer: number text, the output and its stream flush, `Write_Options`, the typed write, the document write, the token write, and the errors a write returns |
+| `docs/writer.md` | the writer, layer by layer: number text, the output and its stream flush, `Write_Options`, the typed write, the document write, the token write, the record writer, and the errors a write returns |
 | `docs/hotpaths.md` | the places the code keeps two instances or two copies of one piece of work for speed, with the lane and the measured win |
 | `bench/README.md` | the document lanes, their fixtures and the other libraries they run beside; the kernel bench is `bench/run.py` |
 
@@ -58,6 +60,10 @@ write.tokens_finish :: proc(t: ^write.Tokens) -> (bytes: []u8, err: core.Typed_E
 write.open_object, write.open_array, write.close :: proc(t: ^write.Tokens) -> core.Typed_Error_Kind
 write.key, write.value_string :: proc(t: ^write.Tokens, s: string) -> core.Typed_Error_Kind
 write.value_int, write.value_uint, write.value_float, write.value_bool, write.value_null, write.end_record // a value each, and a delimited record's end
+records.writer_init :: proc(wr: ^records.Writer, w: io.Stream, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind
+records.write, records.write_text, records.write_cells // one record each: a typed value by its plan, a caller's text, a delimited row of cells
+records.writer_end :: proc(wr: ^records.Writer) -> ([]u8, core.Typed_Error)
+records.marshal    :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
 core.write        :: proc(doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Typed_Error)
 core.write_stream :: proc(w: io.Stream, doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, allocator := context.allocator) -> (dropped: int, err: core.Typed_Error)
 json.as           :: proc(spec: json.Spec) -> core.As

@@ -114,7 +114,9 @@ bad_layouts_and_values_are_refused :: proc(t: ^testing.T) {
 	expect_refused(t, []One{{"\xff"}}, .Csv, {}, .Bad_Utf8)
 	Float :: struct {f: f64}
 	expect_refused(t, []Float{{max(f64) * 2}}, .Csv, {}, .Non_Finite)
-	expect_refused(t, []int{1}, .Csv, {}, .Unsupported)
+	expect_refused(t, [][][]int{}, .Csv, {}, .Unsupported)
+	// A list of cells is one row.
+	expect_text(t, []int{1, 2}, .Csv, {}, "1,2\n")
 	Nested :: struct {a: []int}
 	expect_refused(t, []Nested{}, .Csv, {}, .Unsupported)
 	err := expect_refused(t, []Float{{1}, {max(f64) * 2}}, .Csv, {}, .Non_Finite)
