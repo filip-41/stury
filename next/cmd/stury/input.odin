@@ -74,6 +74,7 @@ Inputs :: struct {
 		at, lines: int,
 	}, // `lines_read`'s place: the first piece of data fgets has not read, and the line ends before it
 	line:       int, // the lines of the open file jq's parser has read
+	text_end:   int, // the end in data of the text read last, while `line` does not count its lines yet, else 0
 	line_end:   int, // --stream: the byte after the newline `line` counts last
 	// --stream: the open text's events while some are left: a document's, whose text starts at `events_at`, or those
 	// jq's parser makes of the bytes before a fault, which plain --stream ends with the fault's message
@@ -210,7 +211,7 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 			return text_fault(ins, f, int(rec.at), int(rec.at) + len(rec.text) if ins.framing == .Lines else -1)
 		}
 		if own_scalar {
-			ins.line = lines_read(ins, int(rec.at) + int(doc.nodes[0].lo) + len(core.span(&doc, core.ROOT)))
+			ins.text_end = int(rec.at) + int(doc.nodes[0].lo) + len(core.span(&doc, core.ROOT))
 			heap := runtime.heap_allocator()
 			d := new_clone(doc, heap)
 			v := jq.scalar(jq.Ref{d, core.ROOT})
@@ -294,7 +295,7 @@ text_value :: proc(ins: ^Inputs, built: core.Document, at: int, own: bool) -> (j
 		return next_value(ins, own)
 	}
 	ins.pinned ||= !own
-	ins.line = lines_read(ins, at + int(doc.nodes[0].lo) + len(core.span(&doc, core.ROOT)))
+	ins.text_end = at + int(doc.nodes[0].lo) + len(core.span(&doc, core.ROOT))
 	return jq.document_value(doc), "", .Value
 }
 
@@ -308,7 +309,7 @@ text_fault :: proc(ins: ^Inputs, f: core.Fault, at: int, end := -1) -> (jq.Value
 	}
 	ins.note = fault_note(data, f, ins)
 	if !ins.run.opts.stream {
-		ins.line = lines_read(ins, int(f.at) + 1)
+		ins.line, ins.text_end = lines_read(ins, int(f.at) + 1), 0
 		// A record of NDJSON ends at its line's end, where jq ends a literal.
 		what := ""
 		if end >= 0 && end < len(data) && f.kind == .Truncated && f.at > 0 && is_letter(data[f.at - 1]) {
@@ -413,7 +414,7 @@ open_next :: proc(ins: ^Inputs) -> bool {
 	for ins.next_file < len(ins.files) {
 		path := ins.files[ins.next_file]
 		ins.next_file += 1
-		ins.name, ins.line, ins.line_end, ins.file_lines = "<stdin>" if path == "-" else path, 0, 0, 0
+		ins.name, ins.line, ins.line_end, ins.file_lines, ins.text_end = "<stdin>" if path == "-" else path, 0, 0, 0, 0
 		f := os.stdin
 		if path != "-" {
 			err: os.Error
@@ -483,6 +484,7 @@ take_data :: proc(ins: ^Inputs, carry: []byte) {
 // Counts jq's place, and the open file's lines, past data[:to].
 @(private = "file")
 advance_past :: proc(ins: ^Inputs, to: int) {
+	settle_line(ins)
 	line := ins.parsed.line
 	jq.advance(&ins.parsed.line, &ins.parsed.column, ins.data[:to])
 	ins.file_lines += ins.parsed.line - line
@@ -494,8 +496,20 @@ close_file :: proc(ins: ^Inputs) {
 	if !ins.open {
 		return
 	}
-	advance_past(ins, len(ins.data))
+	// Only a fault in a later file reads the lines of this one.
+	settle_line(ins)
+	if ins.next_file < len(ins.files) {
+		advance_past(ins, len(ins.data))
+	}
 	ins.open = false
+}
+
+// `ins.line` once it counts the lines of the text read last, which wait until something reads them.
+@(private = "file")
+settle_line :: proc(ins: ^Inputs) {
+	if ins.text_end > 0 {
+		ins.line, ins.text_end = lines_read(ins, ins.text_end), 0
+	}
 }
 
 // The bytes of `data` freed, or kept in `spent` while a value lies in them.
@@ -773,6 +787,7 @@ bind_inputs :: proc(ip: ^jq.Interp, ins: ^Inputs) {
 		},
 		position = proc(data: rawptr) -> (string, int) {
 			ins := (^Inputs)(data)
+			settle_line(ins)
 			return ins.name, ins.line
 		},
 	}

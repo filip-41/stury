@@ -2,6 +2,7 @@ package main
 
 // The jq interpreter over each input, as jq's main loop runs it, each output printed as jq prints it.
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:mem/virtual"
 import "core:strings"
@@ -31,12 +32,13 @@ Deep_Job :: struct {
 run_filter :: proc(run: ^Run, ins: ^Inputs) {
 	// Each input's values live in an arena emptied once its outputs are printed, and so does the temporary
 	// allocator, which nothing holds past a call.
-	arena: virtual.Arena
-	if virtual.arena_init_growing(&arena) != nil {
+	inputs, temp: virtual.Arena
+	if virtual.arena_init_growing(&inputs) != nil || virtual.arena_init_growing(&temp) != nil {
 		message.write_stderr("stury: error: out of memory\n")
 		finish(run, EXIT_INPUT)
 	}
-	context.allocator = virtual.arena_allocator(&arena)
+	context.allocator = {scratch_allocator_proc, &inputs}
+	context.temp_allocator = {scratch_allocator_proc, &temp}
 	if run.opts.null_input {
 		run_once(run, nil)
 		return
@@ -57,10 +59,43 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 		case .More:
 			return
 		}
-		virtual.arena_free_all(&arena)
+		free_all(context.allocator)
 		free_all(context.temp_allocator)
 		release_spent(ins)
 	}
+}
+
+// A growing arena whose emptying keeps its first block and writes no zeros over it: only `.Alloc` and `.Resize`
+// promise zeros, and they write them over what they give.
+scratch_allocator_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old: rawptr, old_size: int, loc := #caller_location) -> (out: []byte, err: runtime.Allocator_Error) {
+	arena := (^virtual.Arena)(data)
+	switch mode {
+	case .Free_All:
+		for arena.curr_block != nil && arena.curr_block.prev != nil {
+			virtual.arena_growing_free_last_memory_block(arena, loc)
+		}
+		if arena.curr_block != nil {
+			arena.curr_block.used = 0
+		}
+		arena.total_used = 0
+		return
+	case .Resize, .Resize_Non_Zeroed:
+		if old != nil && 0 < size && size <= old_size && uintptr(old) & uintptr(alignment - 1) == 0 {
+			// The tail of the block's last allocation goes back to the block, so that it can grow again in place.
+			if b := arena.curr_block; b != nil && uintptr(old) + uintptr(old_size) == uintptr(b.base) + uintptr(b.used) {
+				b.used -= uint(old_size - size)
+				arena.total_used -= uint(old_size - size)
+			}
+			return ([^]byte)(old)[:size], nil
+		}
+	case .Alloc, .Alloc_Non_Zeroed, .Free, .Query_Features, .Query_Info:
+	}
+	out, err = virtual.arena_allocator_proc(data, mode, size, alignment, old, old_size, loc)
+	if err == nil && (mode == .Alloc || mode == .Resize) {
+		kept := 0 if old == nil else min(old_size, len(out))
+		intrinsics.mem_zero(raw_data(out[kept:]), len(out) - kept)
+	}
+	return
 }
 
 // Runs the filter on one input and prints its outputs. Returns the signal the run ended with.

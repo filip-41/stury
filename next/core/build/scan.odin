@@ -197,8 +197,10 @@ scan_plan_path :: proc(h: ^Scan, x: ^Scan_Path, path: core.Path) -> core.Path_Er
 
 // Starts a scan of `paths` over `src`, read as `as`. `depth` is as in `builder_start`, `frames` is the caller's room for that stack,
 // which `depth` may outgrow, and a format's `scan` runs its walk with `scan_hook`, or `scan_hook_many` when `Scan.many` is
-// set, and ends it with `scan_end`. `many` asks for `$MANY`.
+// set, and ends it with `scan_end`. `many` asks for `$MANY`. `h` may hold anything: the lists from `marks` on are written
+// before they are read.
 scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error {
+	intrinsics.mem_zero(h, offset_of(Scan, marks))
 	e := scan_plan(h, paths, read, depth, many, allocator)
 	if e.kind != .None {
 		many_free(h, allocator)

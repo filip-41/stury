@@ -61,9 +61,11 @@ scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read
 		return {}, {kind = .Walk, at = at, inner = {at = at, rules = &RULES, kind = .Bad_Char}}
 	}
 	opts := options_of(handle)
-	h: engine.Scan
+	// The scan's room as words, which an uninitialized declaration leaves unwritten where a struct's padding would not.
+	room: [size_of(engine.Scan) / 8]u64 = ---
+	h := (^engine.Scan)(&room)
 	frames: [core.MAX_DEPTH]u64 = ---
-	if e := engine.scan_start(&h, src, handle, paths, read, false, allocator, core.reserve_depth(opts.max_depth, len(src)), frames[:], on != nil, state, on); e.kind != .None {
+	if e := engine.scan_start(h, src, handle, paths, read, false, allocator, core.reserve_depth(opts.max_depth, len(src)), frames[:], on != nil, state, on); e.kind != .None {
 		return {}, e
 	}
 	regs := engine.BUILDER_REGS
@@ -76,15 +78,15 @@ scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read
 			src := h.b.doc.src
 			walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.scan_hook_stream)
 		}
-		hi, fault, stopped = walk_from(src, q, S, opts, &h, &regs, engine.scan_hook_stream)
+		hi, fault, stopped = walk_from(src, q, S, opts, h, &regs, engine.scan_hook_stream)
 	} else if h.many == nil {
-		hi, fault, stopped = walk_from(src, q, S, opts, &h, &regs, engine.scan_hook)
+		hi, fault, stopped = walk_from(src, q, S, opts, h, &regs, engine.scan_hook)
 	} else {
 		h.rewalk = proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, _: core.Node_Index) {
 			src := h.b.doc.src
 			walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.scan_hook_many)
 		}
-		hi, fault, stopped = walk_from(src, q, S, opts, &h, &regs, engine.scan_hook_many)
+		hi, fault, stopped = walk_from(src, q, S, opts, h, &regs, engine.scan_hook_many)
 	}
 	if fault == nil && !stopped {
 		fault = tail_fault(src, hi, S)
@@ -97,5 +99,5 @@ scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read
 	when .Comments in FEATURES[S] {
 		hi = 0
 	}
-	return engine.scan_end(&h, regs, hi, fault)
+	return engine.scan_end(h, regs, hi, fault)
 }
