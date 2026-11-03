@@ -28,6 +28,7 @@ Output :: struct {
 	// last input came to, a JQ_OK result or an exit status.
 	result, ret: int,
 	last_result: int, // jq's: -1 before any output, else whether the last input with outputs ended truthy
+	table:       ^Table, // under --to csv or tsv
 }
 
 init_output :: proc(o: ^Output, run: ^Run) {
@@ -38,6 +39,7 @@ init_output :: proc(o: ^Output, run: ^Run) {
 		result = JQ_OK_NO_OUTPUT,
 		ret = JQ_OK_NO_OUTPUT,
 		last_result = -1,
+		table = table_start(run) if writes_cells(&run.opts) else nil,
 	}
 	o.emit = proc(s: ^jq.Sink, it: jq.Item) -> jq.Signal {
 		o := (^Output)(s)
@@ -59,6 +61,10 @@ init_output :: proc(o: ^Output, run: ^Run) {
 // JSON in ASCII). After it a newline, but under -j, and a NUL under --raw-output0, which refuses a string that holds
 // one: false then, with nothing printed.
 emit :: proc(o: ^Output, v: jq.Value) -> bool {
+	if o.table != nil {
+		emit_row(o, v)
+		return true
+	}
 	opts := o.opts
 	out := &o.buf
 	o.result = JQ_OK if jq.truthy(v) else JQ_OK_NULL_KIND

@@ -78,7 +78,7 @@ main :: proc() {
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
-	if validating || cli.formatting || FORMATS[o.from].cells || FORMATS[o.to].cells {
+	if validating || cli.formatting {
 		message.write_stderr("stury: this build does not run that yet\n")
 		os.exit(EXIT_USAGE)
 	}
@@ -209,6 +209,7 @@ bind_cli_vars :: proc(run: ^Run) {
 }
 
 finish :: proc(run: ^Run, code: int) -> ! {
+	table_end(&run.output)
 	flush_some(&run.output, force = true)
 	explain_end(run)
 	os.exit(code)
