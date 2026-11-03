@@ -5,11 +5,13 @@ package jq
 // of an input document is written by the library's document writer where that writes what jq prints, and everything
 // else token by token. DEL is written `\u007f`, as jq writes it.
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:bytes"
 import "core:io"
 import "core:math"
 import "core:mem"
+import "core:simd"
 import "core:strings"
 import "../../../core/spell"
 import core_pkg "../../../core"
@@ -305,11 +307,32 @@ put_string :: proc(out: ^write.Out, s: string, opts: core_pkg.Write_Options) {
 	spell_del(out, mark)
 }
 
+// The index of the first DEL in `b`, or -1. A block of 32 bytes at a time, the last one overlapping the one before it, where a
+// scalar loop would read the tail a byte at a time.
+@(private = "file")
+index_del :: proc(b: []u8) -> int #no_bounds_check {
+	V :: #simd[16]u8
+	if len(b) < 32 {
+		return bytes.index_byte(b, 0x7f)
+	}
+	del := V(0x7f)
+	for from := 0;; from += 32 {
+		i := min(from, len(b) - 32)
+		hit := simd.lanes_eq(intrinsics.unaligned_load((^V)(&b[i])), del) | simd.lanes_eq(intrinsics.unaligned_load((^V)(&b[i + 16])), del)
+		if simd.reduce_max(hit) != 0 {
+			return i + bytes.index_byte(b[i:i + 32], 0x7f)
+		}
+		if i == len(b) - 32 {
+			return -1
+		}
+	}
+}
+
 // Each DEL written into the buffer output `out` past `mark` written again as `\u007f`, as jq writes it, where the
 // library's writer, as JSON lets it, leaves the byte as it is.
 @(private = "file")
 spell_del :: proc(out: ^write.Out, mark: int) {
-	at := bytes.index_byte(out.buf[mark:out.cursor], 0x7f)
+	at := index_del(out.buf[mark:out.cursor])
 	if at < 0 {
 		return
 	}
