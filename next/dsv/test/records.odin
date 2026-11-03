@@ -4,9 +4,11 @@ import "core:bytes"
 import "core:fmt"
 import "core:io"
 import "core:math/rand"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import host "../../host"
 import typed "../../core/typed"
 import records "../../core/records"
 import dsv ".."
@@ -216,6 +218,61 @@ rows_across_batches :: proc(t: ^testing.T) {
 		}
 	}
 	expect_rows(t, strings.to_string(wide), .Csv, {no_header = true})
+}
+
+// A text read in pieces on threads against the same text read on one, and `records.validate` against `validate`: the
+// same faults at the same bytes, at every width. The tests build pieces of one byte, so every byte is a cut, inside
+// quoted cells and CRLF pairs among them.
+@(private = "file")
+expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: dsv.Spec, opts: dsv.Options) -> bool {
+	text, as := transmute([]u8)src, dsv.as(spec, opts)
+	serial, _ := records.check(text, as, .Lines, context.temp_allocator)
+	whole := dsv.validate(text, spec, opts)
+	if v := records.validate(text, as); !testing.expectf(t, v == whole, "%v %v %q: validate %v, want %v", spec, opts, src, v, whole) {
+		return false
+	}
+	for &pool in pools {
+		got, _ := records.check(text, as, .Lines, context.temp_allocator, &pool.runner)
+		if !testing.expectf(t, slice.equal(got, serial), "%v %v %q at width %d: %v, want %v", spec, opts, src, pool.runner.threads + 1, got, serial) {
+			return false
+		}
+		if v := records.validate(text, as, &pool.runner); !testing.expectf(t, v == whole, "%v %v %q at width %d: validate %v, want %v", spec, opts, src, pool.runner.threads + 1, v, whole) {
+			return false
+		}
+	}
+	return true
+}
+
+@(test)
+records_check_on_threads :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	pools: [4]host.Pool
+	for w, i in ([4]int{1, 2, 6, 18}) {
+		host.pool_init(&pools[i], w)
+	}
+	defer for &p in pools {
+		host.pool_destroy(&p)
+	}
+	state := rand.create(7)
+	gen := rand.default_random_generator(&state)
+	breakers := "\",\n\r\xff"
+	for round in 0 ..< 24 {
+		spec := dsv.Spec(round % 3)
+		src := seeded_rows(gen, spec, 12)
+		buf := make([]u8, len(src), context.temp_allocator)
+		for i in -1 ..< len(src) {
+			copy(buf, src)
+			if i >= 0 {
+				buf[i] = breakers[rand.int_max(len(breakers), gen)]
+			}
+			for opts in LAYOUTS {
+				if !expect_chain_law(t, pools[:], string(buf), spec, opts) {
+					return
+				}
+			}
+		}
+		free_all(context.temp_allocator)
+	}
 }
 
 @(test)

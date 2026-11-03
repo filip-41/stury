@@ -15,6 +15,8 @@ import records "../core/records"
 RECORDS := records.Services {
 	next   = #partial {.Lines = next_row},
 	judge  = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) { return nil },
+	guess  = guess_row,
+	whole  = proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) { return as, .Lines, 0 },
 	read   = read_row,
 	build  = build_row,
 	column = column_of,
@@ -48,6 +50,7 @@ Batch_Row :: struct {
 Batch :: struct {
 	rows:      [BATCH]Batch_Row,
 	head:      Batch_Row,
+	to:        u64,
 	cells:     [dynamic]core.Token,
 	keys:      []core.Token,
 	key_src:   []u8,
@@ -68,8 +71,7 @@ Batch :: struct {
 }
 
 // Records the record from `lo` to `hi`, the header's line when `header`, and the `width` its check left. The first record
-// sets the width and no later one changes it. Returns true
-// once the batch is full.
+// sets the width and no later one changes it. Returns true once the batch is full or holds a record at or past `b.to`.
 @(private)
 frame_row :: #force_inline proc "contextless" (b: ^Batch, lo, hi: int, header: bool, width: int) -> bool #no_bounds_check {
 	if header {
@@ -81,7 +83,7 @@ frame_row :: #force_inline proc "contextless" (b: ^Batch, lo, hi: int, header: b
 	if b.n == 1 {
 		b.width = width
 	}
-	return b.n == BATCH
+	return b.n == BATCH || u64(lo) >= b.to
 }
 
 // Frames the next batch from `it.pos`. Returns false when no row is left, with the fault, if any, in `it.fault`.
@@ -97,19 +99,24 @@ refill :: proc(it: ^records.Reader) -> bool {
 		b = fresh
 		it.format = b
 	}
-	b.n, b.at, b.split_row, b.from = 0, 0, 0, it.pos
+	b.n, b.at, b.split_row, b.from, b.to = 0, 0, 0, it.pos, max(u64)
 	if !b.done {
-		spec, opts := Spec(it.as.spec), options_of(it.as)
-		switch spec {
-		case .Csv:   frame_batch(it, b, .Csv, opts)
-		case .Tsv:   frame_batch(it, b, .Tsv, opts)
-		case .Plain: frame_batch(it, b, .Plain, opts)
-		}
+		frame(it, b)
 	}
 	if b.n == 0 {
 		it.fault = b.fault
 	}
 	return b.n > 0
+}
+
+// Frames rows from `it.pos` into `b` and leaves `it.pos` past them.
+@(private)
+frame :: proc(it: ^records.Reader, b: ^Batch) {
+	switch opts := options_of(it.as); Spec(it.as.spec) {
+	case .Csv:   frame_batch(it, b, .Csv, opts)
+	case .Tsv:   frame_batch(it, b, .Tsv, opts)
+	case .Plain: frame_batch(it, b, .Plain, opts)
+	}
 }
 
 @(private)
@@ -133,7 +140,8 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 	}
 	// A stopped frame returns the byte past the row end it stopped on. A restart reads no header.
 	it.pos = r >> 16
-	if first && b.head.hi > b.head.at {
+	// A span reads no header's cells.
+	if first && b.head.hi > b.head.at && b.to == max(u64) {
 		src, head := it.src, b.head
 		b.key_src, b.head_at = src, it.base + head.at
 		if it.input.procedure != nil {
@@ -268,6 +276,9 @@ split_cells :: proc "contextless" (src: []u8, row: Batch_Row, $S: Spec, opts: Op
 // the window may have cut it.
 @(private)
 next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
+	if it.to != 0 {
+		return next_span(it)
+	}
 	b := (^Batch)(it.format)
 	stream := it.input.procedure != nil
 	if stream && b != nil {
@@ -297,6 +308,54 @@ next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
 		b.seen = {it.pos, it.base, u64(len(it.src))}
 	}
 	return {text = it.src[row.at:row.hi], at = row.at}, true
+}
+
+// Gives the rows from `it.pos` up to the first that starts at or past `it.to` as one record, the first row alone when it
+// starts there. The frame judged them, and a fault ends the records on the next call. The width the first record sets
+// is kept in `it.as.opts[6:10]`, so a piece's reader, a copy of this one past its first record, checks rows against it.
+@(private)
+next_span :: proc(it: ^records.Reader) -> (records.Record, bool) {
+	if it.fault != nil {
+		return {}, false
+	}
+	b := Batch{width = int(intrinsics.unaligned_load((^u32)(&it.as.opts[6]))), to = it.to}
+	if it.to == max(u64) {
+		// The rest of the text is one record, judged by the walk with no hook.
+		lo := it.pos
+		it.pos, it.fault = u64(len(it.src)), validate_from(it.src, it.as, lo, b.width)
+		return {text = it.src[lo:], at = lo}, lo < it.pos
+	}
+	lo := max(u64)
+	for {
+		b.n = 0
+		frame(it, &b)
+		if b.n > 0 {
+			lo = min(lo, b.rows[0].at)
+			if last := b.rows[b.n - 1].at; last >= it.to {
+				// The row the frame stopped on starts the next span, unless it is this span's first.
+				it.pos = it.pos if last == lo else last
+				break
+			}
+		}
+		if b.done {
+			it.fault = b.fault
+			break
+		}
+	}
+	intrinsics.unaligned_store((^u32)(&it.as.opts[6]), u32(b.width))
+	if lo == max(u64) {
+		return {}, false
+	}
+	return {text = it.src[lo:it.pos], at = lo}, true
+}
+
+// Moves a piece's reader past the first LF from the byte before `it.pos` on, which is past the piece's first byte.
+// A guess inside a quoted cell's line is never a row the in-order reading meets.
+@(private)
+guess_row :: proc(it: ^records.Reader, to: u64) -> bool {
+	i := kernel.index_byte(it.src[it.pos - 1:to], '\n')
+	it.pos = it.pos + u64(i) if i >= 0 else to
+	return it.pos < to
 }
 
 // The batch row `rec` is, when `rec` is the row `next` gave last.

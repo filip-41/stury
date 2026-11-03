@@ -92,7 +92,12 @@ start in it, past an LF or 0x1E, or at a comma under `.Entries`, and reads recor
 the piece. A guess that leads to a fault is dropped for the next one. Then the records are read in source order on
 the caller, and a piece whose first record is the next one read gives its faults and jumps the reading past it. A
 guess inside a string, a comment or a nested value is never a record the in-order reading meets, so it costs time and
-never the answer. A runner with no threads, a format with no guess (dsv) and a short text read on the caller alone.
+never the answer. A runner with no threads and a short text read on the caller alone.
+
+A dsv text is read in pieces of rows. A piece's guess is the byte past an LF, and its rows are checked against the
+width the text's first record set. A guess inside a quoted cell either faults, and the piece guesses again, or gives
+rows the in-order reading never meets. In `check` and `validate` the walk that frames the rows judges them, so the
+in-order reading takes the rows between two pieces' starts as one walk.
 
 ## Spines
 

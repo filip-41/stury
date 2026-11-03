@@ -65,6 +65,8 @@ Chain :: struct {
 judge_all :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, runner: ^core.Runner, out: ^[dynamic]core.Fault) -> runtime.Allocator_Error {
 	it := open(src, as, framing, at)
 	defer close(&it)
+	// The first record comes alone, so the pieces can start past it.
+	it.to = 1
 	c: Chain
 	// Run in reverse: the faults go before the pieces that hold them.
 	defer delete(c.pieces, runtime.heap_allocator())
@@ -90,6 +92,12 @@ judge_all :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, runner
 				runner.start(runner.data, runner.threads, chain_pieces, &c)
 				chain_pieces(&c)
 				runner.finish(runner.data)
+			}
+			// A record comes alone at a piece's start, where it may be the piece's first, and the text before the next
+			// piece's start comes as one, or with no pieces the rest of the text.
+			it.to = max(u64)
+			if c.pieces != nil {
+				it.to = c.start.pos + (k + 1) * SLICE if rec.at >= c.start.pos else c.start.pos
 			}
 		}
 		if f, bad := fault.?; bad {
@@ -117,7 +125,7 @@ chain_pieces :: proc(arg: rawptr) {
 		hi := min(lo + SLICE, u64(len(c.start.src)))
 		for from := lo; from < hi; {
 			it := c.start
-			it.pos = from
+			it.pos, it.to = from, hi
 			if !it.services.guess(&it, hi) {
 				break
 			}

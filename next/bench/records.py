@@ -22,7 +22,7 @@ def main():
             path = fixture(name)
             # `read` and `rows` read into the struct of the logs records and the table rows alone.
             if name.endswith(".csv"):
-                lanes = LANES[6:] if name == "table.csv" else LANES[6:7]
+                lanes = ["check", "threads", "validate"] + (LANES[6:] if name == "table.csv" else LANES[6:7])
             elif name == "logs.json":
                 lanes = ["validate"]
             else:

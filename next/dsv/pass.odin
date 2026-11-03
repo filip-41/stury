@@ -326,7 +326,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		}
 		if check && !kernel.utf8_clean(T, w.utf8) && .Invalid_Utf8 not_in w.tolerate {
 			if at, k := utf8_fault(src, int(lo), pos); at >= 0 && (fault < 0 || at < fault) {
-				fault, kind = at, k
+				fault, kind, detail = at, k, .None
 			}
 		}
 

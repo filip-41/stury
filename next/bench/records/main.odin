@@ -1,7 +1,7 @@
 // `records <frame|check|stream|read|cells|rows|threads|validate> <file> <iters> [width]`: reads the records of the
-// file and prints best and median GB/s. On NDJSON, `frame` frames each record and reads no value, `check` judges each
+// file and prints best and median GB/s. `check`, `threads` and `validate` read a `.csv` file as CSV. On NDJSON, `frame` frames each record and reads no value, `check` judges each
 // one, `threads` is `check` on a pool of `width` threads (6 by default), `stream` judges each one through a stream's
-// window, `read` reads each one of `logs.ndjson` into a `Log_Record`, strings borrowed. `validate` judges a whole JSON
+// window, `read` reads each one of `logs.ndjson` into a `Log_Record`, strings borrowed. `validate` judges a whole
 // text on the pool. On CSV, `cells` reads each row's first cell, and `rows` reads each row of `table.csv` into a
 // `Table_Row`, strings borrowed.
 package main
@@ -12,7 +12,9 @@ import "core:fmt"
 import "core:os"
 import "core:slice"
 import "core:strconv"
+import "core:strings"
 import "core:time"
+import core "../../core"
 import host "../../host"
 import typed "../../core/typed"
 import records "../../core/records"
@@ -29,8 +31,11 @@ frame :: proc(src: []u8) -> int {
 	return n
 }
 
+// The handle `check`, `threads` and `validate` read the file by.
+handle: core.As
+
 check :: proc(src: []u8) -> int {
-	faults, _ := records.check(src, json.as(.Json), .Lines, context.temp_allocator)
+	faults, _ := records.check(src, handle, .Lines, context.temp_allocator)
 	defer free_all(context.temp_allocator)
 	return len(faults)
 }
@@ -38,13 +43,13 @@ check :: proc(src: []u8) -> int {
 pool: host.Pool
 
 threads :: proc(src: []u8) -> int {
-	faults, _ := records.check(src, json.as(.Json), .Lines, context.temp_allocator, &pool.runner)
+	faults, _ := records.check(src, handle, .Lines, context.temp_allocator, &pool.runner)
 	defer free_all(context.temp_allocator)
 	return len(faults)
 }
 
 validate :: proc(src: []u8) -> int {
-	return int(records.validate(src, json.as(.Json), &pool.runner) != nil)
+	return int(records.validate(src, handle, &pool.runner) != nil)
 }
 
 // `check`'s work on a stream of the text in memory, read through the 64 KiB window.
@@ -134,6 +139,7 @@ main :: proc() {
 	}
 	iters, _ := strconv.parse_int(os.args[3])
 	lane: proc(src: []u8) -> int
+	handle = dsv.as(.Csv) if strings.has_suffix(os.args[2], ".csv") else json.as(.Json)
 	switch os.args[1] {
 	case "frame": lane = frame
 	case "check": lane = check

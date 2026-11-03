@@ -184,36 +184,42 @@ validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Opt
 // The handle's validate: the walk compiled for the handle's spec.
 @(private)
 validate_as :: proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {
+	return validate_from(src, as, 0, 0)
+}
+
+// The handle's verdict on the text from `lo`, a record's start, checking records against `width` when it is above 0.
+@(private)
+validate_from :: proc "contextless" (src: []u8, as: core.As, lo: u64, width: int) -> Maybe(core.Fault) {
 	switch Spec(as.spec) {
-	case .Csv:   return validate_spec(src, .Csv, options_of(as))
-	case .Tsv:   return validate_spec(src, .Tsv, options_of(as))
-	case .Plain: return validate_spec(src, .Plain, options_of(as))
+	case .Csv:   return validate_spec(src, .Csv, options_of(as), lo, width)
+	case .Tsv:   return validate_spec(src, .Tsv, options_of(as), lo, width)
+	case .Plain: return validate_spec(src, .Plain, options_of(as), lo, width)
 	}
 	return core.Fault{rules = &RULES, kind = .Bad_Option}
 }
 
 @(private)
-validate_spec :: proc "contextless" (src: []u8, $S: Spec, opts: Options) -> Maybe(core.Fault) {
+validate_spec :: proc "contextless" (src: []u8, $S: Spec, opts: Options, lo: u64 = 0, width := 0) -> Maybe(core.Fault) {
 	if f, bad := option_fault(S, opts).?; bad {
 		return f
 	}
-	return core.fault_of(judge(src, 0, S, opts), &RULES)
+	return core.fault_of(judge(src, lo, S, opts, width), &RULES)
 }
 
-// The walk's verdict on the text from `lo`, with no hook. A cell can exceed `Token.n` only in a text longer than
+// The walk's verdict on the text from `lo`, with no hook, checking records against `width` when it is above 0. A cell can exceed `Token.n` only in a text longer than
 // `max(u32)` bytes, and only the hooked lane checks cell width, so such a text runs with `$EMIT` true and
 // `core.no_hook`. A shorter text runs with `$EMIT` false. `field_count_fault` then places a width fault.
 @(private)
-judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options) -> u64 {
+judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, width := 0) -> u64 {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
 	r: u64
 	if u64(len(src)) - lo > u64(max(u32)) {
-		r = run(src, lo, S, opts, &h, &regs, core.no_hook, true, nil)
+		r = run(src, lo, S, opts, &h, &regs, core.no_hook, true, nil, width)
 	} else {
-		r = run(src, lo, S, opts, &h, &regs, core.no_hook, false, nil)
+		r = run(src, lo, S, opts, &h, &regs, core.no_hook, false, nil, width)
 	}
-	return field_count_fault(src, lo, S, opts, r)
+	return field_count_fault(src, lo, S, opts, r, width)
 }
 
 // The position of a width fault is the delimiter that opens the cell past the width in a wide record, or the line end's

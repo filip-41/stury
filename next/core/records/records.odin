@@ -22,7 +22,9 @@ Record :: struct {
 // `pos` is the byte of `src` the next record is looked for from, and `from` the byte the records start at. `state` is
 // the format's own framing state, and `format` the memory a format keeps for it. `frames` are the typed reads' open
 // containers, allocated with `allocator` by the first. A reader is not copied, since a copy and the original would free
-// the same memory, and the plans it reads by outlive it.
+// the same memory, and the plans it reads by outlive it. `to` is 0 but in `check` and `validate`, where a format whose
+// frame judges its records may give those from `pos` up to the first at or past `to` as one record, the first alone
+// when it starts there.
 //
 // A stream's: `input` is read into `buf`, whose first of `filled` bytes is the byte before the unread ones, so no
 // window but the input's first starts a record at its offset 0. `src` is a window of `buf` that ends on a whole
@@ -33,6 +35,7 @@ Reader :: struct {
 	src:       []u8,
 	pos:       u64,
 	from:      u64,
+	to:        u64,
 	as:        core.As,
 	services:  ^Services,
 	frames:    []typed.Frame,
