@@ -212,6 +212,7 @@ utf8_ascii_block :: #force_inline proc ($T: Tier, s: ^Utf8_State) #no_bounds_che
 utf8_block :: #force_inline proc ($T: Tier, b: Block, s: ^Utf8_State) #no_bounds_check {
 utf8_char :: #force_inline proc (p, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
 utf8_clean :: #force_inline proc ($T: Tier, s: Utf8_State) -> bool {
+utf8_head :: #force_inline proc ($T: Tier, b: Block, s: ^Utf8_State, last: u64) #no_bounds_check {
 utf8_ok :: proc (s: Utf8_State) -> bool {
 utf8_subpart :: #force_inline proc (p, end: [^]u8) -> [^]u8 {
 utf8_window :: #force_inline proc (prev, v: V) -> V {

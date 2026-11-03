@@ -34,6 +34,24 @@ utf8_block :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_Sta
 	s.prev = transmute(W)b
 }
 
+// `utf8_block` for the vectors of `b` up to the one holding byte `last`, for a reader that stops there.
+utf8_head :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_State, last: u64) #no_bounds_check {
+	N :: VECTOR_BYTES[T]
+	U :: #simd[N]u8
+	w := transmute([64 / N]U)b
+	prev := (transmute([64 / N]U)s.prev)[64 / N - 1]
+	err := (transmute([64 / N]U)s.err)[0]
+	#unroll for i in 0 ..< 64 / N {
+		if u64(i * N) <= last {
+			err = simd.bit_or(err, errors(T, prev, w[i]))
+			prev = w[i]
+		}
+	}
+	e: [64 / N]U
+	e[0] = err
+	s.err = transmute(W)e
+}
+
 // Reads a block whose bytes are all below 0x80, as `is_ascii` reports. Its only possible error is a sequence the
 // block before left open, so this adds that error to `s.err` and sets `s.prev` to zeros.
 utf8_ascii_block :: #force_inline proc "contextless" ($T: Tier, s: ^Utf8_State) #no_bounds_check {

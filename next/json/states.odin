@@ -25,6 +25,10 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 				w.resume = stop
 				return #must_tail st_string_escaped(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
+			// A byte past ASCII or a control byte, which `st_string` would only find again.
+			if stop != nil {
+				return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
 			return #must_tail st_string(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		if emit_string(w, on, &hs, .String, .Value, p, q, 0) == .Stop {

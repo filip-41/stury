@@ -30,7 +30,7 @@ load16 :: #force_inline proc "contextless" (p: [^]u8) -> #simd[16]u8 {
 
 // Reads the string whose opening quote is at `p` when its closing quote is one of the next 32 bytes and the bytes
 // before it are printable ASCII. Returns one past the closing quote. Else returns nil, whether a backslash came
-// first, and the backslash's address.
+// first, and the address of the first byte that is no printable ASCII and no quote, or nil when none is within 32 bytes.
 @(private)
 string_short :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, escaped: bool, stop: [^]u8) #no_bounds_check {
 	if intrinsics.ptr_sub(end, p) <= 32 {
@@ -47,7 +47,7 @@ string_short :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, e
 		if p[1 + k] == '\\' {
 			return nil, true, p[1 + k:]
 		}
-		return nil, false, nil
+		return nil, false, p[1 + k:]
 	}
 	return p[2 + k:], false, nil
 }
@@ -332,15 +332,16 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 			return nil, false
 		}
 		sv := kernel.either(kernel.either(kernel.eq(b, quote), kernel.eq(b, '\\')), kernel.below(b, 0x20))
-		if !kernel.is_ascii(b) {
-			kernel.utf8_block(T, b, &u)
-			high, last_high = true, true
-		} else if last_high {
-			kernel.utf8_ascii_block(T, &u)
-			last_high = false
-		}
+		ascii := kernel.is_ascii(b)
 		// A block with no stop is skipped without packing its mask, unless an escape ran into it.
 		if skip == 0 && !kernel.any_lane(sv) {
+			if !ascii {
+				kernel.utf8_block(T, b, &u)
+				high, last_high = true, true
+			} else if last_high {
+				kernel.utf8_ascii_block(T, &u)
+				last_high = false
+			}
 			bs = bs[64:]
 			continue
 		}
@@ -353,6 +354,13 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 			}
 			c := bs[k]
 			if c == quote {
+				// The string ends in this block, so only the vectors up to its quote are read.
+				if !ascii {
+					kernel.utf8_head(T, b, &u, k)
+					high = true
+				} else if last_high {
+					kernel.utf8_ascii_block(T, &u)
+				}
 				if high && !kernel.utf8_clean(T, u) {
 					return nil, false
 				}
@@ -387,6 +395,13 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 				break
 			}
 			stop &= max(u64) << k
+		}
+		if !ascii {
+			kernel.utf8_block(T, b, &u)
+			high, last_high = true, true
+		} else if last_high {
+			kernel.utf8_ascii_block(T, &u)
+			last_high = false
 		}
 		bs = bs[64:]
 	}
