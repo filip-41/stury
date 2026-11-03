@@ -102,11 +102,19 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
 ## Building
 
 ```odin
-json.build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false,
+core.build :: proc(src: []u8, as: As, refuse_duplicates := false,
+	allocator := context.allocator) -> (Document, Document_Error)
+core.validate :: proc "contextless" (src: []u8, as: As) -> Maybe(Fault)
+json.build :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false,
 	allocator := context.allocator) -> (core.Document, core.Document_Error)
-dsv.build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false,
+dsv.build :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false,
 	allocator := context.allocator) -> (core.Document, core.Document_Error)
 ```
+
+`core.build` and `core.validate` are the one implementation: each calls the handle's `Spelling.build` or
+`Spelling.validate`, which switches once on the handle's spec into the walk compiled for it. A handle with no format
+gives `.Bad_Spec` from a build and a `.Bad_Option` fault from a validate. `json.build`, `json.validate`, `dsv.build` and
+`dsv.validate` take the format's own spec and options and forward to them with `as(spec, opts)`.
 
 The builder is package `core/build`, which imports `core`. Both run the walk with a builder hook, end it with
 `build.builder_end`, and `build.builder_start` stores the handle in `doc.as` and reserves a stack of `depth` slots, or
@@ -273,7 +281,7 @@ ill-formed sequence answer `.String`, since their span holds a quote, a backslas
 
 ## The spelling services
 
-A `Spelling` holds five services, `text`, `key_equals`, `number`, `resolve` and `close_end`, the `query` engine `core.query`
+A `Spelling` holds seven services, `text`, `key_equals`, `number`, `build`, `validate`, `resolve` and `close_end`, the `query` engine `core.query`
 dispatches through, which each format points at `core/build`'s, and a pointer to the format's `Edit_Spelling`. A document points at its format's table in rodata,
 one table for every spec of the format: a JSON token holds no form that only JSON5 reads, so `text` reads any JSON
 string, and dsv's `text` and `key_equals` read `Document.as.spec`, since a CSV backslash is a byte, a TSV
@@ -293,7 +301,6 @@ source and the handle, and the token by value, so a typed read hands them a walk
 Edit_Spelling :: struct {
 	value:        proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:     proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
-	reads:         proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
 	comment:       proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
 	member_sep:    proc(doc: ^Document) -> string,
 	key_sep:       string,
@@ -309,8 +316,8 @@ Edit_Spelling :: struct {
 
 `Comment_Spelling` is `None`, `Line` or `Byte`: no marker, a JSON line or block comment, or a delimited text's comment
 line. Under `Line` a body holding a line end is written as `/* */`, so a line comment cannot end its line early. JSON's
-table supplies `value`, `key_text`, `reads`, `comment` and `member_sep`, with `key_sep` `":"`, and its `comment` is
-`.Line` for `Jsonc` and `Json5` and `.None` for `Json`. dsv's table supplies `value`, `key_text`, `reads`, `comment`,
+table supplies `value`, `key_text`, `comment` and `member_sep`, with `key_sep` `":"`, and its `comment` is
+`.Line` for `Jsonc` and `Json5` and `.None` for `Json`. dsv's table supplies `value`, `key_text`, `comment`,
 `member_sep`, `insert_check` and `plan`, which turns a list's column changes into plain edits. Each table's `commit` calls
 `compose.commit`, which `core/compose` holds, so core reads no composing state. A format with `flat` set has no brackets
 in its text, so `interior` says where a container's members lie, the `compose.Root_Spelling` it passes composes the root,

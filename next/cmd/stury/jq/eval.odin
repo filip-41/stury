@@ -9,6 +9,7 @@ package jq
 // at, which `path`, `paths`, `del` and the assignments build on.
 
 import "core:strings"
+import core_pkg "../../../core"
 import "../message"
 
 Signal :: enum u8 {
@@ -75,7 +76,7 @@ Interp :: struct {
 	labels:       int, // label ids handed out so far (`fresh_label`)
 	globals:      ^Env, // the prelude's functions and the command line's variables
 	inputs:       Input_Source,
-	reading:      Reading, // how `fromjson` reads a text, as `--from` and `--max-depth` read input
+	reading:      core_pkg.As, // how `fromjson` reads a text, as `--from` and `--max-depth` read input
 	env_obj:     Value, // $ENV, nil until `env_value` makes it
 	halted:       Maybe(int), // `halt`'s exit code
 	messages:     [dynamic]byte, // `debug` and `stderr` output, written by the caller
@@ -84,7 +85,7 @@ Interp :: struct {
 	prog_origin:  string, // under -f, the real path of the filter file's directory
 	// jq's jv_load_file, which modules are read with: the file as one string (`raw`) or as the array of its
 	// JSON texts, or jq's message for why not.
-	load_file:    proc(path: string, raw: bool, r: Reading) -> (Value, string),
+	load_file:    proc(path: string, raw: bool, r: core_pkg.As) -> (Value, string),
 	// Scopes no evaluation reads any more, linked by `parent`, for `new_env` to hand out again. They live
 	// in the input's memory, so the caller empties the list with it.
 	free_envs:    ^Env,

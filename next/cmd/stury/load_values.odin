@@ -5,11 +5,12 @@ package main
 
 import "core:os"
 import "core:strings"
+import core "../../core"
 import "jq"
 import "message"
 
 // A JSON text given to `option` on the command line, read as `r` says: exactly one value.
-json_arg :: proc(r: jq.Reading, text, option: string) -> jq.Value {
+json_arg :: proc(r: core.As, text, option: string) -> jq.Value {
 	v, fault := jq.read_text(transmute([]byte)text, r)
 	if f, bad := fault.?; bad {
 		usage_error("invalid JSON text passed to %s: %s", option, jq.parse_message(transmute([]byte)text, f))
@@ -19,7 +20,7 @@ json_arg :: proc(r: jq.Reading, text, option: string) -> jq.Value {
 
 // jq's jv_load_file: file `path` as one string (`raw`) or as the array of its JSON text, read as `r` says, or jq's
 // message for why not.
-load_file :: proc(path: string, raw: bool, r: jq.Reading) -> (v: jq.Value, msg: string) {
+load_file :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: string) {
 	f, err := open_input(path)
 	if err != nil {
 		return nil, message.build_temp("Could not open %s: %s", path, strerror(err))

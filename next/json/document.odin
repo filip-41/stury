@@ -18,7 +18,6 @@ import write "../core/write"
 EDIT := core.Edit_Spelling {
 	value      = edit_value_at,
 	key_text   = edit_key_text,
-	reads      = edit_reads_at,
 	comment    = edit_comment,
 	member_sep = edit_member_sep,
 	key_sep    = ":",
@@ -42,7 +41,7 @@ edit_member_sep :: proc(_: ^core.Document) -> string {
 // accepts it.
 @(private)
 SPELLING := core.Spelling {
-	text = text, key_equals = key_equals_decode, number = number,
+	text = text, key_equals = key_equals_decode, number = number, build = build_as, validate = validate_as,
 	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT, write = write_text, tokens = &TOKENS, records = &RECORDS,
 	tag_key = "json", key_open = "\"", key_close = "\":",
 }
@@ -56,10 +55,25 @@ SPELLING := core.Spelling {
 #assert(core.NUMBER_EXP < 1 << 15)
 #assert(u16(Number_Spelling.Nan) < 1 << 15)
 
-// Reads `src` as spec `S` into a document, allocating nodes and facts with `allocator`. `refuse_duplicates` fails at a
-// key that repeats one of its object's, and false builds every member. The document borrows `src`, which must outlive
-// it, and `core.destroy` frees it. On an error the document is the zero value.
-build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+// Reads `src` as spec `spec` into a document, as `core.build` does with `as(spec, opts)`.
+build :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+	return core.build(src, as(spec, opts), refuse_duplicates, allocator)
+}
+
+// The handle's build: the walk compiled for the handle's spec.
+@(private)
+build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	switch Spec(as.spec) {
+	case .Json:  return build_spec(src, .Json, options_of(as), refuse_duplicates, allocator)
+	case .Jsonc: return build_spec(src, .Jsonc, options_of(as), refuse_duplicates, allocator)
+	case .Json5: return build_spec(src, .Json5, options_of(as), refuse_duplicates, allocator)
+	}
+	return {}, {kind = .Bad_Spec}
+}
+
+// Reads `src` as spec `S` into a document, allocating nodes and facts with `allocator`.
+@(private)
+build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	// `walk` passes over record separators before a document for streams. A built document is one text, so a 0x1E
 	// crossed by the shared pre-document run is the bad byte `validate` refuses.
 	p := raw_data(src)
@@ -286,15 +300,7 @@ edit_key_text :: proc(_: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool
 	return appended == nil
 }
 
-// Reads `src` as spec `S` with or without the tolerance set a build may hold, nested no deeper than the document's
-// `max_depth`. The commit's check policy reads the output strictly, then tolerantly, then the source.
-@(private)
-edit_reads :: proc(doc: ^core.Document, src: []u8, tolerate: bool, $S: Spec) -> (core.Fault, bool) {
-	t := bit_set[Tolerance; u8]{.Invalid_Utf8, .Lone_Surrogate} if tolerate else {}
-	return validate(src, S, {tolerate = t, max_depth = doc.as.max_depth}).?
-}
-
-// The three services dispatch on `doc.as.spec`, since a proc pointer carries no compile-time spec.
+// The value check dispatches on `doc.as.spec`, since a proc pointer carries no compile-time spec.
 @(private)
 edit_value_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
 	switch Spec(doc.spec) {
@@ -303,16 +309,6 @@ edit_value_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Alloc
 	case .Json5: return edit_value(src, allocator, doc.max_depth, .Json5)
 	}
 	return {kind = .Bad_Value}
-}
-
-@(private)
-edit_reads_at :: proc(doc: ^core.Document, src: []u8, tolerate: bool, spec: u8) -> (core.Fault, bool) {
-	switch Spec(spec) {
-	case .Json:  return edit_reads(doc, src, tolerate, .Json)
-	case .Jsonc: return edit_reads(doc, src, tolerate, .Jsonc)
-	case .Json5: return edit_reads(doc, src, tolerate, .Json5)
-	}
-	return {}, true
 }
 
 // Returns JSON's comment spelling for `spec`. It is `//` for the specs whose grammar has comments, and none for

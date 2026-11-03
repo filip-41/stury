@@ -77,7 +77,7 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 		start := int(core.text_start(src, 0))
 		// With no header there is no list of rows to give the target, so it keeps what it held.
 		if record_start(src, start, opts.comment) >= len(src) {
-			if f, faulted := validate(src, S, opts).?; faulted {
+			if f, faulted := validate_spec(src, S, opts).?; faulted {
 				return {kind = .Walk, at = f.at, inner = f}
 			}
 			return {}

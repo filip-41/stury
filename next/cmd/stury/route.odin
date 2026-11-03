@@ -129,7 +129,7 @@ selected_path :: proc(run: ^Run, text: string) -> bit_set[Route_Why] {
 // Answers the scanned filter over the text `data` and prints its outputs, as `run_once` would. Returns false, with
 // nothing printed, when the text is the interpreter's: it does not parse, a step of the path meets a value it does not
 // apply to, or a `[]` meets an object, whose repeated keys jq gives once and the scan gives each time.
-answer_path :: proc(run: ^Run, data: []byte, r: jq.Reading) -> bool {
+answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 	// A whole build is the heap's, whose fresh pages need no zeroing, where an arena zeroes every node it reserves. A
 	// scan's document grows by reallocation, which the arena does in place.
 	defer free_all(context.temp_allocator)
@@ -146,7 +146,7 @@ answer_path :: proc(run: ^Run, data: []byte, r: jq.Reading) -> bool {
 		} else {
 			answers, err = core.query(&doc, route.path, allocator = context.temp_allocator)
 		}
-	} else if r.spec == .Jsonc {
+	} else if json.Spec(r.spec) == .Jsonc {
 		doc, err = json.scan(data, .Jsonc, route.path, opts = opts, allocator = context.temp_allocator)
 	} else {
 		doc, err = json.scan(data, .Json, route.path, opts = opts, allocator = context.temp_allocator)

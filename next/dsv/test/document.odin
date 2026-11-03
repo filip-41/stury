@@ -597,8 +597,8 @@ read_does_not_allocate :: proc(t: ^testing.T) {
 spelling_complete :: proc(t: ^testing.T) {
 	check :: proc(t: ^testing.T, doc: ^core.Document) {
 		s := doc.spelling
-		testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.resolve != nil && s.close_end != nil)
-		testing.expect(t, s.edit != nil && s.edit.flat && s.edit.commit != nil && s.edit.reads != nil && s.edit.interior != nil)
+		testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.build != nil && s.validate != nil && s.resolve != nil && s.close_end != nil)
+		testing.expect(t, s.edit != nil && s.edit.flat && s.edit.commit != nil && s.edit.interior != nil)
 	}
 	a, ea := build("a\n", .Csv)
 	defer core.destroy(&a)

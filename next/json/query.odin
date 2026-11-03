@@ -17,7 +17,7 @@ scan_one :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options
 @(private)
 scan_many :: proc(src: []u8, $S: Spec, paths: []core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, err: core.Path_Error) {
 	if read.refuse_duplicates {
-		built, e := build(src, S, opts, true, allocator)
+		built, e := build_spec(src, S, opts, true, allocator)
 		return engine.query_built(&built, e, paths, read)
 	}
 	q, sep := document_start(src, 0, S)
@@ -77,7 +77,7 @@ scan_close :: proc(src: []u8, $S: Spec, h: ^engine.Scan, regs: core.Hook_Regs, h
 @(private)
 each_answer_many :: proc(src: []u8, $S: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> core.Path_Error {
 	if read.refuse_duplicates {
-		built, e := build(src, S, opts, true, allocator)
+		built, e := build_spec(src, S, opts, true, allocator)
 		core.destroy(&built)
 		if e.kind != .None {
 			return core.path_error(e)
@@ -130,7 +130,7 @@ find :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, 
 // is the new text, which the caller frees with `allocator`. `refuse_duplicates` is
 // `build`'s, and `read` picks among a repeated key as `query` does.
 set :: proc(src: []u8, $S: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
-	doc, berr := build(src, S, opts, refuse_duplicates, allocator)
+	doc, berr := build_spec(src, S, opts, refuse_duplicates, allocator)
 	defer core.destroy(&doc)
 	if berr.kind != .None {
 		return nil, {kind = .Edit, edit = berr}

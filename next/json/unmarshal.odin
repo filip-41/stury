@@ -57,7 +57,7 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 	if read.refuse_duplicates && (lo == 0 || S == .Json5 || core.text_start(src[lo:cut], 0) == 0) {
 		arena := runtime.Arena{backing_allocator = scratch, minimum_block_size = 4096}
 		defer runtime.arena_destroy(&arena)
-		_, built := build(src[lo:cut], S, opts, true, runtime.arena_allocator(&arena))
+		_, built := build_spec(src[lo:cut], S, opts, true, runtime.arena_allocator(&arena))
 		if built.kind == .Walk {
 			built.inner.at += lo
 			err^ = {kind = .Walk, at = built.at + lo, inner = built.inner}

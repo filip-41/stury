@@ -75,21 +75,21 @@ commit :: proc(list: ^core.Edit_List, spec: u8, root: ^Root_Spelling, allocator 
 // read returns `.Bad_Result`.
 @(private)
 reads_as_source :: proc(doc: ^core.Document, out: []u8, spec: u8) -> core.Document_Error {
-	edit := doc.spelling.edit
-	if edit == nil || edit.reads == nil {
-		return {}
-	}
-	f, faulted := edit.reads(doc, out, false, spec)
+	strict := doc.as
+	strict.spec, strict.tolerate = spec, 0
+	f, faulted := core.validate(out, strict).?
 	if !faulted {
 		return {}
 	}
-	if g, still := edit.reads(doc, out, true, spec); still {
+	tolerant := strict
+	tolerant.tolerate = 0xff
+	if g, still := core.validate(out, tolerant).?; still {
 		return {kind = .Bad_Result, inner = g}
 	}
 	if spec != doc.as.spec {
 		return {kind = .Bad_Result, inner = f}
 	}
-	if _, src_bad := edit.reads(doc, doc.src, false, spec); !src_bad {
+	if _, src_bad := core.validate(doc.src, strict).?; !src_bad {
 		return {kind = .Bad_Result, inner = f}
 	}
 	return {}

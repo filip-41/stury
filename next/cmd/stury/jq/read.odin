@@ -17,12 +17,6 @@ Parse_Status :: enum u8 {
 	Error,
 }
 
-// How the CLI reads a JSON text: the spec `--from` names, and `--max-depth`, 0 for the library's `MAX_DEPTH`.
-Reading :: struct {
-	spec:      json.Spec,
-	max_depth: u32,
-}
-
 // JSON's whitespace.
 is_space :: #force_inline proc "contextless" (c: u8) -> bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
@@ -30,16 +24,10 @@ is_space :: #force_inline proc "contextless" (c: u8) -> bool {
 
 // `src` as one text's document, or the fault that it is not one. A JSON5 `Infinity` or `NaN` is refused as a bad
 // literal, since jq has no spelling for it.
-build_text :: proc(src: []byte, r: Reading, allocator := context.allocator) -> (doc: core_pkg.Document, fault: Maybe(core_pkg.Fault)) {
-	opts := json.Options{max_depth = r.max_depth}
+build_text :: proc(src: []byte, r: core_pkg.As, allocator := context.allocator) -> (doc: core_pkg.Document, fault: Maybe(core_pkg.Fault)) {
 	err: core_pkg.Document_Error
-	switch r.spec {
-	case .Json:
-		doc, err = json.build(src, .Json, opts, allocator = allocator)
-	case .Jsonc:
-		doc, err = json.build(src, .Jsonc, opts, allocator = allocator)
-	case .Json5:
-		doc, err = json.build(src, .Json5, opts, allocator = allocator)
+	doc, err = core_pkg.build(src, r, allocator = allocator)
+	if json.Spec(r.spec) == .Json5 {
 		if at, found := non_finite_at(&doc); found {
 			core_pkg.destroy(&doc)
 			return {}, core_pkg.Fault{at = at, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Literal)}
@@ -53,20 +41,6 @@ build_text :: proc(src: []byte, r: Reading, allocator := context.allocator) -> (
 	case .Duplicate_Key, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Fact, .Bad_Width, .Bad_Spec, .Conflicting_Edits, .Bad_Result:
 	}
 	return {}, core_pkg.Fault{kind = .No_Memory}
-}
-
-// Whether `src` is one text as `r` reads it, or the fault that it is not.
-validate_text :: proc(src: []byte, r: Reading) -> Maybe(core_pkg.Fault) {
-	opts := json.Options{max_depth = r.max_depth}
-	switch r.spec {
-	case .Json:
-		return json.validate(src, .Json, opts)
-	case .Jsonc:
-		return json.validate(src, .Jsonc, opts)
-	case .Json5:
-		return json.validate(src, .Json5, opts)
-	}
-	return nil
 }
 
 // The offset of the first number of `doc` that is not finite and no JSON literal (JSON5's `Infinity` and `NaN`).
@@ -84,7 +58,7 @@ non_finite_at :: proc(doc: ^core_pkg.Document) -> (at: u64, found: bool) {
 }
 
 // `src` as one JSON text, or the fault that it is not one.
-read_text :: proc(src: []byte, r: Reading) -> (Value, Maybe(core_pkg.Fault)) {
+read_text :: proc(src: []byte, r: core_pkg.As) -> (Value, Maybe(core_pkg.Fault)) {
 	d, fault := build_text(src, r)
 	if fault != nil {
 		return nil, fault
@@ -93,7 +67,7 @@ read_text :: proc(src: []byte, r: Reading) -> (Value, Maybe(core_pkg.Fault)) {
 }
 
 // `src` as one JSON text (`fromjson`), or jq's message for why it is not one.
-read_json :: proc(src: string, r: Reading) -> (Value, string) {
+read_json :: proc(src: string, r: core_pkg.As) -> (Value, string) {
 	text := transmute([]byte)src
 	v, fault := read_text(text, r)
 	f, bad := fault.?
@@ -109,7 +83,7 @@ read_json :: proc(src: string, r: Reading) -> (Value, string) {
 	switch {
 	case len(strings.trim(src, " \t\n\r")) == 0:
 		msg = "Expected JSON value"
-	case f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) && validate_text(text[f.at:], r) == nil:
+	case f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) && core_pkg.validate(text[f.at:], r) == nil:
 		msg = "Unexpected extra JSON values"
 	case:
 		msg = parse_message(text, f)

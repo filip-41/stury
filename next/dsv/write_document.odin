@@ -29,7 +29,7 @@ marshal :: proc(value: any, spec := Spec.Csv, layout := Options{}, opts := core.
 
 // The handle of a delimited text of `spec` read or written with `layout`, which holds the delimiter `spec` reads when
 // `layout` leaves it 0. See the file's header for what a document may hold.
-as :: proc(spec: Spec, layout := Options{}) -> core.As {
+as :: proc "contextless" (spec: Spec, layout := Options{}) -> core.As {
 	opts := [10]u8{0 = spec_delimiter(spec, layout.delimiter), 1 = layout.comment, 2 = u8(layout.no_header), 3 = u8(layout.crlf), 4 = u8(layout.infer)}
 	return {spelling = &SPELLING, spec = u8(spec), tolerate = transmute(u8)layout.tolerate, opts = opts}
 }

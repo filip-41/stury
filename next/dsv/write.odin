@@ -72,18 +72,11 @@ Named :: struct {
 	name: string,
 }
 
-// Whether `spec` reads `layout`'s delimiter and comment byte, so a text written with them reads back.
+// Whether `spec` reads `layout`'s delimiter and comment byte, so a text written with them reads back. An empty text
+// faults only on its options.
 @(private)
 layout_ok :: proc(spec: Spec, layout: Options) -> bool {
-	switch spec {
-	case .Csv:
-		return options_ok(.Csv, layout)
-	case .Tsv:
-		return options_ok(.Tsv, layout)
-	case .Plain:
-		return options_ok(.Plain, layout)
-	}
-	return false
+	return validate(nil, spec, layout) == nil
 }
 
 // The plan's `marshal`: the value is the list of rows.
@@ -98,7 +91,7 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 
 // The delimiter byte of `spec` when `layout` leaves it 0.
 @(private)
-spec_delimiter :: proc(spec: Spec, delimiter: u8) -> u8 {return delimiter if delimiter != 0 else '\t' if spec == .Tsv else ','}
+spec_delimiter :: proc "contextless" (spec: Spec, delimiter: u8) -> u8 {return delimiter if delimiter != 0 else '\t' if spec == .Tsv else ','}
 
 // The handle of the rows a plan writes: `spec`, and `layout`'s delimiter, comment byte, `no_header` and `crlf`.
 @(private)

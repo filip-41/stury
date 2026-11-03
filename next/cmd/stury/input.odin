@@ -18,7 +18,7 @@ STDIN_ONLY := []string{"-"}
 
 // The inputs a run reads: each file one JSON text, read whole.
 Inputs :: struct {
-	reading:   jq.Reading,
+	reading:   core.As,
 	files:     []string, // "-" is stdin
 	next_file: int,
 	name:      string, // the file opened last, "" before the first
@@ -91,7 +91,7 @@ next_value :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 	stream := ins.run.opts.stream
 	for ins.next_file < len(ins.files) {
 		data, ok := read_next_file(ins)
-		if !ok || blank(data, ins.reading.spec) {
+		if !ok || blank(data, json.Spec(ins.reading.spec)) {
 			continue
 		}
 		stray_bom := ins.has_text && bytes.has_prefix(data, {0xef, 0xbb, 0xbf})
@@ -116,7 +116,7 @@ next_value :: proc(ins: ^Inputs) -> (jq.Value, string, jq.Parse_Status) {
 		}
 		ins.data = data
 		if f, bad := fault.?; bad {
-			if ins.reading.spec != .Json {
+			if json.Spec(ins.reading.spec) != .Json {
 				fail_dialect(ins, data, f)
 			}
 			ins.note = fault_note(data, f, ins)
@@ -249,7 +249,7 @@ fail_dialect :: proc(ins: ^Inputs, data: []byte, f: core.Fault) -> ! {
 	sentence := jq.fault_sentence(f, rest)
 	// JSON5 spells them, JSON has no value for them, and the library refuses them as a literal.
 	unsigned := strings.trim_left(rest, "+-")
-	if ins.reading.spec == .Json5 && f.kind == .Bad_Char && (strings.has_prefix(unsigned, "Infinity") || strings.has_prefix(unsigned, "NaN")) {
+	if json.Spec(ins.reading.spec) == .Json5 && f.kind == .Bad_Char && (strings.has_prefix(unsigned, "Infinity") || strings.has_prefix(unsigned, "NaN")) {
 		sentence = "Infinity and NaN have no JSON value"
 	}
 	message.write_stderr("stury: error: %s:%d:%d: %s\n", ins.name, line, col, sentence)
@@ -266,7 +266,7 @@ fault_note :: proc(data: []byte, f: core.Fault, ins: ^Inputs) -> string {
 	switch {
 	case f.kind == .Too_Deep:
 		hint = "a larger --max-depth reads it" if ins.run.opts.max_depth != 0 else "--max-depth N raises the nesting limit"
-	case f.kind != .Bad_Char || at >= len(data) || ins.reading.spec != .Json:
+	case f.kind != .Bad_Char || at >= len(data) || json.Spec(ins.reading.spec) != .Json:
 		return ""
 	case data[at] == '/' && at + 1 < len(data) && (data[at + 1] == '/' || data[at + 1] == '*'):
 		hint = "--from jsonc reads comments"

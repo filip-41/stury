@@ -344,7 +344,7 @@ copies_strings :: #force_inline proc "contextless" (opts: core.Write_Options) ->
 // whatever their positions were, and an element that two paths reached through a ring of negative indexes is written
 // once for each. A partial document keeps no comments. A document nested past `MAX_DEPTH` was built under a raised `max_depth` and is
 // written, except one with comments, shared keys or `sort_keys` past 4096 levels, which is `.Too_Deep`.
-as :: proc(spec: Spec, opts := Options{}) -> core.As {
+as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 	return {spelling = &SPELLING, max_depth = opts.max_depth, spec = u8(spec), tolerate = transmute(u8)opts.tolerate}
 }
 
@@ -619,7 +619,7 @@ rows_run :: #force_no_inline proc "contextless" (e: ^Emit, i: u32, $P, $O: bool)
 // built into a document and written as `core.write` writes it. A text that is not a document of `S` is refused as `.Walk`,
 // with the fault in `inner`.
 format :: proc(src: []u8, $S: Spec, opts := core.Write_Options{}, read := Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
-	doc, err := build(src, S, read, false, allocator)
+	doc, err := build_spec(src, S, read, false, allocator)
 	if err.kind != .None {
 		return nil, {kind = .Walk if err.kind == .Walk else .Out_Of_Memory, at = err.at, inner = err.inner}
 	}

@@ -56,8 +56,8 @@ Options  :: struct { ... }     // what a walk receives at run time
 Detail   :: enum u8 { None, ... }   // the format's own rules, in `Fault.detail`
 RULES    : core.Rules             // each rule's code and message, in rodata
 walk     :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault)
-build    :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error)
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault)
+build    :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error)
 ```
 
 The walks share one signature, and dsv's `build` writes the header's cells into a private key buffer: `walk` allocates

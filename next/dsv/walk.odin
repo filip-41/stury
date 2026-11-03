@@ -176,8 +176,24 @@ walk_keys :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}
 }
 
 // The walk's verdict on `src` for spec `S`, with no hook and after one leading BOM. Whether the first record is a
-// header changes the verdict only under `.Ragged`.
-validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
+// header changes the verdict only under `.Ragged`. It is `core.validate` with `as(spec, opts)`.
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
+	return core.validate(src, as(spec, opts))
+}
+
+// The handle's validate: the walk compiled for the handle's spec.
+@(private)
+validate_as :: proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {
+	switch Spec(as.spec) {
+	case .Csv:   return validate_spec(src, .Csv, options_of(as))
+	case .Tsv:   return validate_spec(src, .Tsv, options_of(as))
+	case .Plain: return validate_spec(src, .Plain, options_of(as))
+	}
+	return core.Fault{rules = &RULES, kind = .Bad_Option}
+}
+
+@(private)
+validate_spec :: proc "contextless" (src: []u8, $S: Spec, opts: Options) -> Maybe(core.Fault) {
 	if f, bad := option_fault(S, opts).?; bad {
 		return f
 	}

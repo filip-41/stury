@@ -233,7 +233,8 @@ Duplicates :: enum u8 {
 // A `Spelling` holds a format's read services, in its rodata. `text` decodes a node's text into `buf` and returns false
 // when `buf` is too short, so a read never allocates. A node whose `SPELLING_DECODE` bit is clear is its span without
 // the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token.
-// `resolve` returns what a `Plain` node is. `close_end` returns the byte just past a container's closing bytes, found
+// `build` reads a text into a document and `validate` judges one without building, each as the handle says, see
+// `core.build` and `core.validate`. `resolve` returns what a `Plain` node is. `close_end` returns the byte just past a container's closing bytes, found
 // from its last descendant or its open, over the whitespace and comments the format allows there, the root's close is
 // `Document.root_close`, so a service may return it without a scan. `edit` points at the
 // format's edit services, nil for a format that accepts no edits. `tag_key` is the format's own struct tag key, and
@@ -247,6 +248,8 @@ Spelling :: struct {
 	text:       proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
 	number:     proc(v: ^Token_View, t: Token) -> Number,
+	build:      proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error),
+	validate:   proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
 	resolve:    proc(doc: ^Document, i: Node_Index) -> Kind,
 	close_end:  proc(doc: ^Document, i: Node_Index) -> u64,
 	query:      proc(doc: ^Document, paths: []Path, read: Query_Options, allocator: runtime.Allocator) -> (answers: []Answer, err: Path_Error),
@@ -262,9 +265,7 @@ Spelling :: struct {
 // An `Edit_Spelling` holds a format's edit services. A document's `Spelling` points at one table, and the services
 // dispatch on the document's `spec` and `opts`. `value` checks a text as exactly one value of the format and
 // spec, and `key_text` writes a decoded member name in the format's own spelling, quotes and escapes included. A member
-// insert's key and a key set take a decoded name, so no service judges a key. `reads` is the format's own read of a text
-// with or without its tolerance set, for the check a commit makes, under the output spec `spec`. Each service receives
-// the document, so it reads the run-time options the document holds. A text that is no value answers `.Bad_Value`, with
+// insert's key and a key set take a decoded name, so no service judges a key. Each service receives the document, so it reads the run-time options the document holds. A text that is no value answers `.Bad_Value`, with
 // the walk's fault in `inner` where there is one, and `.No_Memory` when the service could not allocate.
 //
 // `member_sep` is what is written between two members of a container, and `key_sep` between a member's key and its
@@ -280,7 +281,6 @@ Spelling :: struct {
 Edit_Spelling :: struct {
 	value:         proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:      proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
-	reads:         proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
 	comment:       proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
 	member_sep:    proc(doc: ^Document) -> string,
 	key_sep:       string,
@@ -740,6 +740,26 @@ number :: #force_inline proc(doc: ^Document, i: Node_Index) -> Number {
 		return doc.spelling.number(&doc.view, doc.nodes[i])
 	}
 	return {0, .Wide}
+}
+
+// Reads `src` into a document as `as` says: its format, spec, depth, tolerance and the format's own options.
+// `refuse_duplicates` fails at a key that repeats one of its object's, and false builds every member. The document
+// borrows `src`, which must outlive it, and `destroy` frees it. A handle with no format's build returns `.Bad_Spec`, and
+// on any error the document is the zero value.
+build :: proc(src: []u8, as: As, refuse_duplicates := false, allocator := context.allocator) -> (Document, Document_Error) {
+	if as.spelling == nil || as.spelling.build == nil {
+		return {}, {kind = .Bad_Spec}
+	}
+	return as.spelling.build(src, as, refuse_duplicates, allocator)
+}
+
+// Judges `src` as `as` says without building or allocating. Returns the first fault, or nil for a text that reads. A
+// handle with no format's validate faults `.Bad_Option` at byte 0.
+validate :: proc "contextless" (src: []u8, as: As) -> Maybe(Fault) {
+	if as.spelling == nil || as.spelling.validate == nil {
+		return Fault{kind = .Bad_Option}
+	}
+	return as.spelling.validate(src, as)
 }
 
 // Returns what `Plain` node `i` is, through the format's `resolve`, as the handle the document was read with says. A node

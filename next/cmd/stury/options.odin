@@ -7,6 +7,8 @@ package main
 import "core:os"
 import "core:slice"
 import "core:strings"
+import core "../../core"
+import json "../../json"
 import "jq"
 import "message"
 
@@ -47,7 +49,7 @@ Cli :: struct {
 	var_names:  [dynamic]string,
 	var_values: [dynamic]jq.Value,
 	positional: [dynamic]jq.Value, // --args and --jsonargs
-	reading:    jq.Reading, // how --argjson, --jsonargs and --slurpfile read their texts, as --from and --max-depth say
+	reading:    core.As, // how --argjson, --jsonargs and --slurpfile read their texts, as --from and --max-depth say
 	binding_flag: string,
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
@@ -84,7 +86,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
-	cli.reading = {FORMATS[o.from].spec, o.max_depth}
+	cli.reading = json.as(FORMATS[o.from].spec, {max_depth = o.max_depth})
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
 		a := args[i]

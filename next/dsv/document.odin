@@ -22,7 +22,6 @@ import build "../core/build"
 EDIT := core.Edit_Spelling {
 	value         = edit_value_at,
 	key_text      = edit_key_text,
-	reads         = edit_reads_at,
 	comment       = edit_comment,
 	member_sep    = edit_cell_sep,
 	insert_check  = edit_insert_check,
@@ -53,6 +52,8 @@ SPELLING := core.Spelling {
 	text       = spelling_text,
 	key_equals = spelling_key_equals,
 	number     = spelling_number,
+	build      = build_as,
+	validate   = validate_as,
 	resolve    = spelling_resolve,
 	close_end  = close_end,
 	query      = build.query,
@@ -72,8 +73,25 @@ SPELLING_DOUBLED :: u16(8)
 
 // Reads a delimited text as spec `S` into a document, allocating its nodes with `allocator`. `opts.no_header` makes the
 // first record data. `refuse_duplicates` returns an error at a header name that repeats another in the header row. The
-// document borrows `src`, which must outlive it, and `core.destroy` frees the document.
-build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+// document borrows `src`, which must outlive it, and `core.destroy` frees the document. It is `core.build` with
+// `as(spec, opts)`.
+build :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+	return core.build(src, as(spec, opts), refuse_duplicates, allocator)
+}
+
+// The handle's build: the walk compiled for the handle's spec.
+@(private)
+build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
+	switch Spec(as.spec) {
+	case .Csv:   return build_spec(src, .Csv, options_of(as), refuse_duplicates, allocator)
+	case .Tsv:   return build_spec(src, .Tsv, options_of(as), refuse_duplicates, allocator)
+	case .Plain: return build_spec(src, .Plain, options_of(as), refuse_duplicates, allocator)
+	}
+	return {}, {kind = .Bad_Spec}
+}
+
+@(private)
+build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	if f, bad := option_fault(S, opts).?; bad {
 		return {}, {kind = .Walk, inner = f}
 	}
@@ -432,15 +450,6 @@ edit_record :: proc(doc: ^core.Token_View, src: []u8, _: runtime.Allocator, $S: 
 	return h.cells, {}
 }
 
-// Validates an edit's text, strictly or with all three tolerances set. The commit reads its output strictly, then
-// tolerantly. A delimited text can write only its own spec and options, so `spec` must be the document's.
-@(private)
-edit_reads :: proc(doc: ^core.Document, src: []u8, tolerate: bool, _: u8, $S: Spec) -> (core.Fault, bool) {
-	layout := options_of(doc.as)
-	t := bit_set[Tolerance; u8]{.Invalid_Utf8, .Ragged, .Bare_Quote} if tolerate else {}
-	return validate(src, S, {no_header = layout.no_header, delimiter = layout.delimiter, comment = layout.comment, tolerate = t}).?
-}
-
 // Returns the cell count every record of a delimited text has: its header's, its first record's, or 0 for an empty text.
 @(private)
 dsv_width :: proc(doc: ^core.Document) -> int {
@@ -620,16 +629,6 @@ edit_record_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allo
 	case .Plain: return edit_record(doc, src, allocator, .Plain)
 	}
 	return 0, {kind = .Bad_Value}
-}
-
-@(private)
-edit_reads_at :: proc(doc: ^core.Document, src: []u8, tolerate: bool, spec: u8) -> (core.Fault, bool) {
-	switch Spec(spec) {
-	case .Csv:   return edit_reads(doc, src, tolerate, spec, .Csv)
-	case .Tsv:   return edit_reads(doc, src, tolerate, spec, .Tsv)
-	case .Plain: return edit_reads(doc, src, tolerate, spec, .Plain)
-	}
-	return {}, true
 }
 
 // A delimited text's comment spelling. It is `.Byte` with the document's comment byte, or `.None` when the byte is 0.

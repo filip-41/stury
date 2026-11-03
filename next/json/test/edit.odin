@@ -497,8 +497,8 @@ edit_accepts :: proc(_: ^core.Document, _: []u8, _: runtime.Allocator) -> core.D
 }
 
 @(private = "file")
-reads_faults :: proc(_: ^core.Document, _: []u8, _: bool, _: u8) -> (core.Fault, bool) {
-	return {}, true
+reads_faults :: proc "contextless" (_: []u8, _: core.As) -> Maybe(core.Fault) {
+	return core.Fault{}
 }
 
 // `commit` refuses an output that fails even the format's tolerant read, even when the source needed that tolerance.
@@ -510,8 +510,8 @@ edit_check_policy :: proc(t: ^testing.T) {
 	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
 		return
 	}
-	edit := core.Edit_Spelling{value = edit_accepts, reads = reads_faults}
-	doc.spelling = &core.Spelling{edit = &edit}
+	edit := core.Edit_Spelling{value = edit_accepts}
+	doc.spelling = &core.Spelling{edit = &edit, validate = reads_faults}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	if !testing.expect_value(t, core.set(&list, 4, string("2")).kind, core.Document_Error_Kind.None) {

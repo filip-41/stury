@@ -675,8 +675,8 @@ spelling_complete :: proc(t: ^testing.T) {
 		return
 	}
 	s := doc.spelling
-	testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.resolve != nil && s.close_end != nil)
-	testing.expect(t, s.edit != nil && s.edit.value != nil && s.edit.key_text != nil && s.edit.reads != nil)
+	testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.build != nil && s.validate != nil && s.resolve != nil && s.close_end != nil)
+	testing.expect(t, s.edit != nil && s.edit.value != nil && s.edit.key_text != nil)
 	testing.expect_value(t, s.edit.member_sep(nil), ",")
 	testing.expect_value(t, s.edit.key_sep, ":")
 }

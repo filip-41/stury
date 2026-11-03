@@ -483,12 +483,7 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 	if rec.at > 0 && spec != .Json5 && len(rec.text) >= 3 && rec.text[0] == 0xef && rec.text[1] == 0xbb && rec.text[2] == 0xbf {
 		return {}, {kind = .Walk, at = rec.at, inner = {at = rec.at, rules = &RULES, kind = .Bad_Char}}
 	}
-	opts := options_of(it.as)
-	switch spec {
-	case .Json:  doc, err = build(rec.text, .Json, opts, false, allocator)
-	case .Jsonc: doc, err = build(rec.text, .Jsonc, opts, false, allocator)
-	case .Json5: doc, err = build(rec.text, .Json5, opts, false, allocator)
-	}
+	doc, err = build_as(rec.text, it.as, false, allocator)
 	if err.kind != .None {
 		err.at += rec.at
 		err.inner.at += rec.at

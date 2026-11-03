@@ -112,6 +112,7 @@ Typed_Error :: struct {
 Typed_Error_Kind :: enum u8 {
 Write_Options :: struct {
 all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact {
+build :: proc(src: []u8, as: As, refuse_duplicates := false, allocator := context.allocator) -> (Document, Document_Error) {
 child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
 child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool) {
 children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
@@ -167,6 +168,7 @@ text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: stri
 text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator) -> (s: string, ok: bool) {
 text_start :: proc (src: []u8, lo: u64) -> u64 {
 uint_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (u64, bool) {
+validate :: proc (src: []u8, as: As) -> Maybe(Fault) {
 write :: proc(doc: ^Document, opts := Write_Options{}, as: Maybe(As) = nil, node := ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: Typed_Error) {
 write_code :: proc {write_fault_code, write_document_code, write_path_code, write_edit_code, write_typed_code}
 write_stream :: proc(w: io.Stream, doc: ^Document, opts := Write_Options{}, as: Maybe(As) = nil, node := ROOT, allocator := context.allocator) -> (dropped: int, err: Typed_Error) {
@@ -387,8 +389,8 @@ RULES := core.Rules{, {{}, {, }, {, }, {, }, {, }}}
 SPINE_LEVELS :: 4
 Spec :: enum u8 {
 Tolerance :: enum u8 {
-as :: proc(spec: Spec, opts := Options{}) -> core.As {
-build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+as :: proc (spec: Spec, opts := Options{}) -> core.As {
+build :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 each_answer :: proc {each_answer_one, each_answer_many}
 find :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
@@ -403,7 +405,7 @@ set :: proc(src: []u8, $S: Spec, path: core.Path, text: string, read := core.Que
 spine :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool) {
 text :: #force_inline proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
-validate :: proc (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
+validate :: proc (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
 walk :: proc (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {
 # dsv
 Detail :: enum u8 {
@@ -411,8 +413,8 @@ Options :: struct {
 RULES := core.Rules{, {{}, {, }, {, }}}
 Spec :: enum u8 {
 Tolerance :: enum u8 {
-as :: proc(spec: Spec, layout := Options{}) -> core.As {
-build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+as :: proc (spec: Spec, layout := Options{}) -> core.As {
+build :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 each_answer :: proc {each_answer_one, each_answer_many}
 find :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
 marshal :: proc(value: any, spec := Spec.Csv, layout := Options{}, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
@@ -420,5 +422,5 @@ plan_make :: proc(T: typeid, spec: Spec, layout := Options{}, opts := typed.Plan
 scan :: proc {scan_one, scan_many}
 set :: proc(src: []u8, $S: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
-validate :: proc (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
+validate :: proc (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
 walk :: proc (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {

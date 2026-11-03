@@ -65,11 +65,23 @@ Detail :: enum u8 {
 RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}, {"trailing", "Unexpected text after the value"}}}
 
 // Checks that `src` holds exactly one document: an optional leading BOM, the document, then whitespace and, in a
-// spec with comments, comments up to the text's end. Returns the fault, or nil.
-validate :: proc "contextless" (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
+// spec with comments, comments up to the text's end. Returns the fault, or nil. It is `core.validate` with
+// `as(spec, opts)`.
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
+	return core.validate(src, as(spec, opts))
+}
+
+// The handle's validate: the walk compiled for the handle's spec.
+@(private)
+validate_as :: proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	return walk_text(src, 0, S, opts, &h, &regs, core.no_hook)
+	switch Spec(as.spec) {
+	case .Json:  return walk_text(src, 0, .Json, options_of(as), &h, &regs, core.no_hook)
+	case .Jsonc: return walk_text(src, 0, .Jsonc, options_of(as), &h, &regs, core.no_hook)
+	case .Json5: return walk_text(src, 0, .Json5, options_of(as), &h, &regs, core.no_hook)
+	}
+	return core.Fault{rules = &RULES, kind = .Bad_Option}
 }
 
 // Reads `src` from `lo` as exactly one document through the hook, as `validate` checks it. A BOM is passed over only
