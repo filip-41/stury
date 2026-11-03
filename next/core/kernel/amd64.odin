@@ -130,31 +130,31 @@ foreign _ {
 	pshufb512 :: proc(table, index: W) -> W ---
 }
 
-// Runs `scan_loop` built for the CPU's tier, each copy out of line with the tier's target features so its 64-lane
+// Runs `scan_op` built for the CPU's tier, each copy out of line with the tier's target features so its 64-lane
 // compares use the tier's registers.
 @(private)
-scan :: #force_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) -> int {
+scan :: #force_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
 	switch tier() {
 	case .V4:
-		return scan_v4(src, c, BACK)
+		return scan_v4(src, c, s, OP)
 	case .V3:
-		return scan_v3(src, c, BACK)
+		return scan_v3(src, c, s, OP)
 	case .V2:
 	}
-	return scan_v2(src, c, BACK)
+	return scan_v2(src, c, s, OP)
 }
 
 @(private, enable_target_feature = FEATURES[.V2])
-scan_v2 :: #force_no_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) -> int {
-	return scan_loop(src, c, BACK)
+scan_v2 :: #force_no_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
+	return scan_op(.V2, src, c, s, OP)
 }
 
 @(private, enable_target_feature = FEATURES[.V3])
-scan_v3 :: #force_no_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) -> int {
-	return scan_loop(src, c, BACK)
+scan_v3 :: #force_no_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
+	return scan_op(.V3, src, c, s, OP)
 }
 
 @(private, enable_target_feature = FEATURES[.V4])
-scan_v4 :: #force_no_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) -> int {
-	return scan_loop(src, c, BACK)
+scan_v4 :: #force_no_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
+	return scan_op(.V4, src, c, s, OP)
 }

@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:slice"
 import "core:sync"
 import core ".."
+import "../kernel"
 
 // Returns the fault of each refused record of `src` read from byte `at`, in source order, and last the fault that ended
 // the records, if any. The slice is allocated with `allocator`. An allocation that fails returns its error and no
@@ -89,9 +90,7 @@ judge_all :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, runner
 			if c.pieces == nil && runner != nil && runner.threads > 0 && it.services.guess != nil && u64(len(src)) >= it.pos + 2 * SLICE {
 				c.start = it
 				c.pieces = make([]Piece, (u64(len(src)) - it.pos + SLICE - 1) / SLICE, runtime.heap_allocator()) or_return
-				runner.start(runner.data, runner.threads, chain_pieces, &c)
-				chain_pieces(&c)
-				runner.finish(runner.data)
+				fan(runner, chain_pieces, &c)
 			}
 			// A record comes alone at a piece's start, where it may be the piece's first, and the text before the next
 			// piece's start comes as one, or with no pieces the rest of the text.
@@ -153,5 +152,151 @@ chain_pieces :: proc(arg: rawptr) {
 			}
 			from = max(from, it.pos)
 		}
+	}
+}
+
+// Runs `task(arg)` on the calling thread and on `runner`'s, and returns once every call has.
+@(private)
+fan :: proc(runner: ^core.Runner, task: proc(arg: rawptr), arg: rawptr) {
+	runner.start(runner.data, runner.threads, task, arg)
+	task(arg)
+	runner.finish(runner.data)
+}
+
+// Runs `task` on pieces of the records of `src` in format `as` under `framing` from byte `at`, each a reader over whole
+// records, and returns the first fault in source order that ended a piece's records, or nil. Each piece is handed out
+// once and closed after its task returns, and `k` numbers them in source order with gaps. With a `runner` they run on
+// its threads, cut where the format finds a record's end by a scan from the first record's, and with none, or no such
+// cut in the format, the whole text is piece 0. Once a task returns false or a piece's records end on a fault, no
+// further piece is handed out. A piece's own memory comes from the heap.
+each :: #force_inline proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> Maybe(core.Fault) {
+	return each_piece(src, as, framing, cast(proc(data: rawptr, piece: ^Reader, k: int) -> bool)task, data, runner, at)
+}
+
+// `each`'s pieces: piece 0 runs from the text's start and piece k past it from the first cut in slice k - 1 of the text
+// past the first record, each up to the next cut. `cuts` holds where a quoted cut stands at each slice's start.
+@(private)
+Each :: struct {
+	start:   Reader,
+	rule:    kernel.Quotes,
+	cuts:    []kernel.Quotes,
+	base:    u64,
+	slices:  int,
+	task:    proc(data: rawptr, piece: ^Reader, k: int) -> bool,
+	data:    rawptr,
+	claimed: int,
+	stop:    bool,
+	lock:    sync.Mutex,
+	first:   int,
+	fault:   Maybe(core.Fault),
+}
+
+@(private)
+each_piece :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: rawptr, piece: ^Reader, k: int) -> bool, data: rawptr, runner: ^core.Runner, at: u64) -> Maybe(core.Fault) {
+	e := Each{start = open(src, as, framing, at, runtime.heap_allocator()), task = task, data = data, first = max(int)}
+	defer close(&e.start)
+	if e.start.fault != nil {
+		return e.start.fault
+	}
+	if runner != nil && runner.threads > 0 && e.start.services.exact != nil {
+		exact: bool
+		e.rule, exact = e.start.services.exact(&e.start)
+		// The slices start past the first record, where the reader knows the framing's state.
+		if rec, ok := next(&e.start); exact && ok && u64(len(src)) >= rec.at + u64(len(rec.text)) + 2 * SLICE {
+			e.base = rec.at + u64(len(rec.text))
+			e.slices = int((u64(len(src)) - e.base + SLICE - 1) / SLICE)
+		}
+	}
+	defer delete(e.cuts, runtime.heap_allocator())
+	if e.slices > 0 && e.rule.quote != 0 {
+		cuts, err := make([]kernel.Quotes, e.slices, runtime.heap_allocator())
+		if err != nil {
+			return core.Fault{kind = .No_Memory}
+		}
+		e.cuts = cuts
+		fan(runner, run_slices, &e)
+		e.claimed = 0
+		// Each slice's state is the one the slices before it leave, read again when an escape run crosses into it.
+		st := e.rule
+		st.depth[0] = st.want
+		for &r, k in e.cuts {
+			if st.odd != 0 {
+				r = e.rule
+				r.odd = st.odd
+				kernel.quote_run(slice_of(&e, k), &r)
+			}
+			run, g := r, int(st.quoted)
+			r = st
+			// A level that fell below the first record's ends the cuts.
+			st.depth[0] = st.depth[0] + run.depth[g] if st.depth[0] + run.low[g] >= st.want else min(int) / 2
+			st.quoted = run.quoted != st.quoted
+			st.odd = run.odd
+		}
+	}
+	if e.slices > 0 {
+		fan(runner, run_pieces, &e)
+	} else {
+		run_pieces(&e)
+	}
+	return e.fault
+}
+
+@(private)
+slice_of :: proc(e: ^Each, k: int) -> []u8 {
+	lo := e.base + u64(k) * SLICE
+	return e.start.src[lo:min(lo + SLICE, u64(len(e.start.src)))]
+}
+
+// Claims slices until none is left, and reads each from an even escape run under both starts.
+@(private)
+run_slices :: proc(arg: rawptr) {
+	e := (^Each)(arg)
+	for k := sync.atomic_add(&e.claimed, 1); k < e.slices; k = sync.atomic_add(&e.claimed, 1) {
+		e.cuts[k] = e.rule
+		kernel.quote_run(slice_of(e, k), &e.cuts[k])
+	}
+}
+
+// Returns the byte past the first cut from slice `k`'s start, within the slice unless `on`, or false when there is none.
+@(private)
+cut_from :: proc(e: ^Each, k: int, on: bool) -> (u64, bool) {
+	lo := e.base + u64(k) * SLICE
+	i := kernel.quote_cut(e.start.src[lo:] if on else slice_of(e, k), e.cuts[k] if e.cuts != nil else e.rule)
+	return lo + u64(i) + 1, i >= 0
+}
+
+// Claims pieces until none is left or one stops the run, and runs the task on each that starts at a cut.
+@(private)
+run_pieces :: proc(arg: rawptr) {
+	e := (^Each)(arg)
+	// A piece claimed before the one that stops the run still runs, so every piece before a fault runs.
+	for !sync.atomic_load(&e.stop) {
+		k := sync.atomic_add(&e.claimed, 1)
+		if k > e.slices {
+			return
+		}
+		lo, hi: u64 = 0, u64(len(e.start.src))
+		if k > 0 {
+			ok: bool
+			if lo, ok = cut_from(e, k - 1, false); !ok {
+				continue
+			}
+		}
+		if k < e.slices {
+			hi = cut_from(e, k, true) or_else hi
+		}
+		piece := e.start if k > 0 else open(e.start.src, e.start.as, e.start.framing, e.start.from, runtime.heap_allocator())
+		if e.slices > 0 && !piece.services.piece(&piece, lo, hi) {
+			piece.fault = core.Fault{kind = .No_Memory}
+		}
+		more := piece.fault == nil && e.task(e.data, &piece, k)
+		if f, bad := piece.fault.?; bad || !more {
+			sync.atomic_store(&e.stop, true)
+			sync.guard(&e.lock)
+			if bad && k < e.first {
+				e.first, e.fault = k, f
+			}
+		}
+		close(&piece)
 	}
 }

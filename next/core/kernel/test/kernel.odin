@@ -334,3 +334,52 @@ index_byte_every_cut :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// Checks `quote_run` and `quote_cut` against a scan a byte at a time, on every stretch of random texts of quotes,
+// escapes, brackets and separators, from both starts and both escape carries.
+@(test)
+quote_scan_every_stretch :: proc(t: ^testing.T) {
+	state := rand.create(9)
+	context.random_generator = rand.default_random_generator(&state)
+	alphabet := "\"\\[]{},\nab"
+	buf: [160]u8
+	for round in 0 ..< 24 {
+		for &b in buf {
+			b = alphabet[rand.int_max(len(alphabet) if round % 2 == 0 else 4)]
+		}
+		for lo := 0; lo < len(buf); lo += 1 + rand.int_max(9) {
+			for hi := lo; hi <= len(buf); hi += 1 + rand.int_max(9) {
+				text := buf[lo:hi]
+				for odd in u64(0) ..= 1 {
+					s := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, odd = odd}
+					k.quote_run(text, &s)
+					for g in 0 ..< 2 {
+						quoted, want := g == 1, rand.int_max(3)
+						esc, depth, low, cut := odd == 1, 0, 0, -1
+						// An escape hides only a quote.
+						for c, i in text {
+							was := esc
+							esc = !esc && c == '\\'
+							switch {
+							case c == '"' && !was: quoted = !quoted
+							case quoted:
+							case c == '[' || c == '{': depth += 1
+							case c == ']' || c == '}':
+								depth -= 1
+								low = min(low, depth)
+								cut = -2 if cut == -1 && depth < 0 else cut
+							case c == ',' && cut == -1 && depth == 0: cut = i
+							}
+						}
+						testing.expectf(t, s.depth[g] == depth && s.low[g] == low && s.quoted == (quoted != (g == 1)) && s.odd == u64(esc), "%q from %d: %v", text, g, s)
+						from := k.Quotes{quote = '"', escape = '\\', sep = ',', nest = true, odd = odd, quoted = g == 1, want = want}
+						from.depth[0] = want
+						testing.expectf(t, k.quote_cut(text, from) == max(cut, -1), "%q from %d: cut %d, want %d", text, g, k.quote_cut(text, from), cut)
+						from.depth[0] = min(int) / 2
+						testing.expectf(t, k.quote_cut(text, from) == -1, "%q from %d below `want`: cut %d", text, g, k.quote_cut(text, from))
+					}
+				}
+			}
+		}
+	}
+}

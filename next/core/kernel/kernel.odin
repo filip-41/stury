@@ -111,15 +111,125 @@ escaped :: #force_inline proc "contextless" (escape: u64, odd: ^u64) -> u64 {
 
 // Returns the index of the first byte `c` in `src`, or -1. Reads 64 bytes at a time with the CPU's tier.
 index_byte :: #force_inline proc "contextless" (src: []u8, c: u8) -> int {
-	return scan(src, c, false)
+	return scan(src, c, nil, .Forward)
 }
 
 // Returns the index of the last byte `c` in `src`, or -1. Reads 64 bytes at a time back from the end.
 last_index_byte :: #force_inline proc "contextless" (src: []u8, c: u8) -> int {
-	return scan(src, c, true)
+	return scan(src, c, nil, .Back)
 }
 
-// The loop of `index_byte` and `last_index_byte`, which `scan` builds once per tier.
+// A scan of quoted runs and brackets, and where it stands at a byte. A quoted run goes from a `quote` byte to the next
+// one no `escape` byte escapes, 0 for no escape. With `nest`, `[` and `{` outside quoted runs open a level and `]` and
+// `}` close one. At a byte, `odd` says an odd run of escapes ends just before it, `quoted` that it is in a quoted run,
+// and `depth[0]` is its level, far below `want` once the level fell below `want` before it.
+//
+// After `quote_run` over a stretch from `odd`, index 0 is for a start outside a quoted run and 1 for a start inside
+// one: `depth` holds the change in level and `low` the lowest level from 0. `quoted` says the stretch ends in a quoted
+// run from a start outside one, and so ends outside from a start inside one.
+Quotes :: struct {
+	quote, escape, sep: u8,
+	nest, quoted:       bool,
+	odd:                u64,
+	want:               int,
+	depth, low:         [2]int,
+}
+
+// Reads `src` as a stretch of text into `s`, which holds only `quote`, `escape`, `nest` and `odd`.
+quote_run :: proc "contextless" (src: []u8, s: ^Quotes) {
+	scan(src, 0, s, .Run)
+}
+
+// Returns the index of the first `sep` of `src` outside quoted runs at level `want`, from where `s` stands at
+// `src[0]`, or -1 when there is none or the level falls below `want` first.
+quote_cut :: proc "contextless" (src: []u8, s: Quotes) -> int {
+	s := s
+	if s.quote == 0 {
+		return scan(src, s.sep, nil, .Forward)
+	}
+	return scan(src, s.sep, &s, .Cut)
+}
+
+@(private)
+Scan_Op :: enum u8 {
+	Forward,
+	Back,
+	Run,
+	Cut,
+}
+
+// The loops `scan` builds once per tier: `index_byte` and `last_index_byte` for `c`, then `quote_run` and `quote_cut`.
+// The zeros of a padded last block are no quote, escape, separator or bracket.
+@(private)
+scan_op :: #force_inline proc "contextless" ($T: Tier, src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int #no_bounds_check {
+	when OP <= .Back {
+		return scan_loop(src, c, OP == .Back)
+	} else {
+		inq := ~u64(0) if s.quoted else 0
+		for lo := 0; lo < len(src); lo += 64 {
+			b := load(raw_data(src)[lo:]) if len(src) - lo >= 64 else load_padded(T, src, lo)
+			q := pack(eq(b, s.quote))
+			if s.escape != 0 {
+				e := escaped(pack(eq(b, s.escape)), &s.odd)
+				// A run that ends before a padded block's end escapes the first pad byte.
+				if n := len(src) - lo; n < 64 {
+					s.odd = e >> uint(n) & 1
+				}
+				q &~= e
+			}
+			inside := prefix_xor(T, q) ~ inq
+			inq = u64(i64(inside) >> 63)
+			m := pack_n([3]Block{eq(b, s.sep), either(eq(b, '['), eq(b, '{')), either(eq(b, ']'), eq(b, '}'))})
+			when OP == .Run {
+				if s.nest {
+					#unroll for g in 0 ..< 2 {
+						out := inside if g == 1 else ~inside
+						s.low[g] = depth_low(s.low[g], s.depth[g], m[1] & out, m[2] & out)
+						s.depth[g] += int(intrinsics.count_ones(m[1] & out)) - int(intrinsics.count_ones(m[2] & out))
+					}
+				}
+			} else {
+				sep, open, close := m[0] &~ inside, m[1] &~ inside, m[2] &~ inside
+				if !s.nest {
+					if sep != 0 {
+						return lo + int(intrinsics.count_trailing_zeros(sep))
+					}
+					continue
+				}
+				for r := sep | close; r != 0; r &= r - 1 {
+					before := (r & -r) - 1
+					d := s.depth[0] + int(intrinsics.count_ones(open & before)) - int(intrinsics.count_ones(close & before))
+					if close & r & -r != 0 && d <= s.want {
+						return -1
+					}
+					if sep & r & -r != 0 && d == s.want {
+						return lo + int(intrinsics.count_trailing_zeros(r))
+					}
+				}
+				s.depth[0] += int(intrinsics.count_ones(open)) - int(intrinsics.count_ones(close))
+			}
+		}
+		s.quoted = inq != 0
+		return -1
+	}
+}
+
+// Returns the lower of `low` and the lowest level the closes of a block bring `depth` to, counting the opens before
+// each close.
+@(private)
+depth_low :: #force_inline proc "contextless" (low, depth: int, open, close: u64) -> int {
+	low := low
+	if depth - int(intrinsics.count_ones(close)) >= low {
+		return low
+	}
+	for m := close; m != 0; m &= m - 1 {
+		through := (m & -m) << 1 - 1
+		low = min(low, depth + int(intrinsics.count_ones(open & through)) - int(intrinsics.count_ones(close & through)))
+	}
+	return low
+}
+
+// The loop of `index_byte` and `last_index_byte`.
 @(private)
 scan_loop :: #force_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) -> int #no_bounds_check {
 	p := raw_data(src)

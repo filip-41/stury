@@ -5,6 +5,7 @@ package dsv
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:slice"
 import "core:strconv"
 import core "../core"
 import kernel "../core/kernel"
@@ -17,6 +18,8 @@ RECORDS := records.Services {
 	next   = #partial {.Lines = next_row},
 	judge  = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) { return nil },
 	guess  = guess_row,
+	exact  = exact_row,
+	piece  = piece_rows,
 	whole  = proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) { return as, .Lines, 0 },
 	read   = read_row,
 	build  = build_row,
@@ -357,6 +360,35 @@ guess_row :: proc(it: ^records.Reader, to: u64) -> bool {
 	i := kernel.index_byte(it.src[it.pos - 1:to], '\n')
 	it.pos = it.pos + u64(i) if i >= 0 else to
 	return it.pos < to
+}
+
+// The LF outside quoted cells. A comment line or a tolerated bare quote may hold a quote that pairs with none.
+@(private)
+exact_row :: proc(it: ^records.Reader) -> (kernel.Quotes, bool) {
+	opts := options_of(it.as)
+	if Spec(it.as.spec) != .Csv {
+		return {sep = '\n'}, true
+	}
+	return {quote = '"', sep = '\n'}, opts.comment == 0 && .Bare_Quote not_in opts.tolerate
+}
+
+// A piece past the first keeps the header and width the first record's batch read.
+@(private)
+piece_rows :: proc(it: ^records.Reader, lo, hi: u64) -> bool {
+	it.src = it.src[:hi]
+	if lo == 0 {
+		return true
+	}
+	first := (^Batch)(it.format)
+	it.pos, it.format = lo, nil
+	b, err := new(Batch, it.allocator)
+	if err != nil {
+		return false
+	}
+	it.format = b
+	b.head, b.width, b.head_at, b.key_src = first.head, first.width, first.head_at, first.key_src
+	b.keys, err = slice.clone(first.keys, it.allocator)
+	return err == nil
 }
 
 // The batch row `rec` is, when `rec` is the row `next` gave last.

@@ -16,14 +16,46 @@ RECORDS := records.Services {
 	next  = {.Lines = frame_line, .Seq = frame_line, .Concatenated = next_walked, .Entries = next_walked},
 	judge = judge_record,
 	guess = guess_start,
+	exact = exact_cut,
+	piece = piece_of,
 	whole = whole_text,
 	read  = read_record,
 	build = build_record,
 }
 
-// `As.opts[1]` is `PIECE` in a piece's reader.
+// `As.opts[1]` is `PIECE` in a piece's reader, and `EXACT` in an `each` piece's under `.Entries`, which ends at the
+// comma at `to`.
 @(private)
-PIECE :: 1
+PIECE, EXACT :: 1, 2
+
+// Under `.Lines` and `.Seq` the end byte, and in strict JSON the LF between texts and the comma between entries, outside
+// strings at the level of the first record. Comments and single quotes would hide brackets from the count.
+@(private)
+exact_cut :: proc(it: ^records.Reader) -> (kernel.Quotes, bool) {
+	switch it.framing {
+	case .Lines:        return {sep = '\n'}, true
+	case .Seq:          return {sep = 0x1e}, true
+	case .Concatenated: return {quote = '"', escape = '\\', sep = '\n', nest = true}, Spec(it.as.spec) == .Json
+	case .Entries:      return {quote = '"', escape = '\\', sep = ',', nest = true, want = 1}, Spec(it.as.spec) == .Json
+	}
+	return {}, false
+}
+
+// A `.Seq` record starts at its 0x1E, and an entry past the first at the comma before it, one byte before the cut.
+@(private)
+piece_of :: proc(it: ^records.Reader, lo, hi: u64) -> bool {
+	back := u64(it.framing == .Seq || it.framing == .Entries)
+	end := hi - back if hi < u64(len(it.src)) else max(u64)
+	if lo > 0 {
+		it.pos = lo - back
+	}
+	if it.framing == .Entries {
+		it.to, it.as.opts[1] = end, EXACT
+	} else {
+		it.src = it.src[:min(end, u64(len(it.src)))]
+	}
+	return true
+}
 
 // Moves a piece's reader to the first place at or past `it.pos` and before `to` where a record may start: under
 // `.Lines` and `.Seq` past the next end byte unless one is before `it.pos`, under `.Concatenated` past the next LF,
@@ -184,6 +216,9 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		close := it.state[0] + 2
 		closes := q < end && q[0] == close
 		if it.state[1] == 1 && !closes {
+			if it.as.opts[1] == EXACT && u64(intrinsics.ptr_sub(q, p)) >= it.to {
+				return
+			}
 			if q == end || q[0] != ',' {
 				break whole
 			}

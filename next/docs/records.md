@@ -15,6 +15,7 @@ records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok
 records.close :: proc(it: ^records.Reader)
 records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
 records.validate :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
+records.each :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> Maybe(core.Fault)
 json.spine :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool)
 ```
 
@@ -99,6 +100,28 @@ A dsv text is read in pieces of rows. A piece's guess is the byte past an LF, an
 width the text's first record set. A guess inside a quoted cell either faults, and the piece guesses again, or gives
 rows the in-order reading never meets. In `check` and `validate` the walk that frames the rows judges them, so the
 in-order reading takes the rows between two pieces' starts as one walk.
+
+`each` hands a task readers over pieces of the text, whose records together are those `next` gives, each once. The
+pieces are cut exactly, since a task may act on what it reads: past the first record, a scan from where it ends finds
+the byte past each separator at the first record's level and outside strings or quoted cells, and the first such cut
+in each slice of the text starts a piece. Under `.Lines` and `.Seq` the separator is the LF or 0x1E, and a dsv text's
+is the LF, outside quoted cells in CSV. A strict JSON text under `.Concatenated` is cut at an LF and under `.Entries`
+at a comma, both outside strings and nested values. Strings and levels are counted in each slice on the threads from
+both guesses of whether the slice starts in a string, then settled in order. A text with comments or single quotes
+under those two framings, and a CSV text with comment lines or tolerated bare quotes, is one piece. Pieces are
+numbered in source order, with gaps where a slice holds no cut. A task returns false to stop the run, and a piece's
+records that end on a fault stop it too: every piece before it is still handed out, and the first fault in source
+order is returned. A dsv piece past the first keeps the header the first record's read found.
+
+```odin
+sum_piece :: proc(job: ^Job, piece: ^records.Reader, k: int) -> bool {
+	for rec in records.next(piece) {
+		// rec.text, rec.at, offsets from the input's first byte
+	}
+	return true
+}
+fault := records.each(src, json.as(.Json), .Lines, sum_piece, &job, &pool.runner)
+```
 
 ## Spines
 
@@ -227,7 +250,8 @@ A format gives its record reader as a `records.Services` table in its rodata, wh
 at. `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
 and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault, `read` and `build` read
 one. `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
-without the cost of finding the whole text's fault. `whole` names the framing and offset `validate` reads a whole
+without the cost of finding the whole text's fault. `exact` gives the scan whose cuts `each` starts pieces at, and `piece` turns a copy of a reader past its
+first record into a piece's reader. `whole` names the framing and offset `validate` reads a whole
 text by. `column` and `cell` are a format's with named columns, and `close` frees the memory the format keeps in
 `Reader.format`. `ends` names, per framing, the byte a backward scan finds a whole record's end by (JSON's LF and 0x1E),
 0 where only a walk of the records finds it, and 0xff where the format reads no stream under that framing. `core` stores the table as a

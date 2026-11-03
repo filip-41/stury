@@ -1,14 +1,18 @@
 // The walk tests share this harness. It holds a hook that logs every token and hashes it, the rule that picks `Skip`
-// and `Stop`, a mutation of a seeded text, and the json5-tests suites.
+// and `Stop`, a mutation of a seeded text, the json5-tests suites, and the law of `records.each`.
 package walktest
 
 import "base:runtime"
 import "core:fmt"
 import "core:math/rand"
+import "core:slice"
 import "core:strings"
+import "core:sync"
 import "core:sys/posix"
 import "core:testing"
 import core "../core"
+import host "../host"
+import records "../core/records"
 
 // The capacity of `Log.tokens` is the most tokens a test text may hold.
 MAX_TOKENS :: 1 << 14
@@ -743,4 +747,55 @@ check :: proc(t: ^testing.T, src, want: string, build: Build, spec: any, edit: p
 		return false
 	}
 	return expect_commit(t, &list, want, build, spec)
+}
+
+// `each` on each pool gives the records `next` gives, each once and in piece order, up to and with the piece the first
+// fault ends, and that fault.
+expect_each_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.As, framing: core.Framing, at: u64 = 0) -> bool {
+	it := records.open(src, as, framing, at, context.temp_allocator)
+	want := make([dynamic][2]u64, context.temp_allocator)
+	for rec in records.next(&it) {
+		append(&want, [2]u64{rec.at, u64(len(rec.text))})
+	}
+	fault := it.fault
+	records.close(&it)
+	Piece :: struct {
+		k:      int,
+		ended:  bool,
+		recs:   [dynamic][2]u64,
+	}
+	Got :: struct {
+		lock:   sync.Mutex,
+		pieces: [dynamic]Piece,
+	}
+	collect :: proc(g: ^Got, piece: ^records.Reader, k: int) -> bool {
+		p := Piece{k = k, recs = make([dynamic][2]u64, runtime.heap_allocator())}
+		for rec in records.next(piece) {
+			append(&p.recs, [2]u64{rec.at, u64(len(rec.text))})
+		}
+		p.ended = piece.fault != nil
+		sync.guard(&g.lock)
+		append(&g.pieces, p)
+		return true
+	}
+	for &pool in pools {
+		g := Got{pieces = make([dynamic]Piece, runtime.heap_allocator())}
+		f := records.each(src, as, framing, collect, &g, &pool.runner, at)
+		slice.sort_by(g.pieces[:], proc(a, b: Piece) -> bool { return a.k < b.k })
+		got := make([dynamic][2]u64, context.temp_allocator)
+		ended, unique := false, true
+		for p, i in g.pieces {
+			unique &&= i == 0 || p.k != g.pieces[i - 1].k
+			if !ended {
+				append(&got, ..p.recs[:])
+				ended = p.ended
+			}
+			delete(p.recs)
+		}
+		delete(g.pieces)
+		if !testing.expectf(t, unique && f == fault && slice.equal(got[:], want[:]), "%v %q at width %d: each %v %v, want %v %v", framing, src, pool.runner.threads + 1, got, f, want, fault) {
+			return false
+		}
+	}
+	return true
 }

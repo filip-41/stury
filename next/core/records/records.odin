@@ -79,10 +79,17 @@ RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limi
 // and marks it as a piece's, whose `next` may end on any fault with no cost to find the one `validate` gives. It returns
 // false when there is none. nil reads a text on the calling thread alone. `whole` returns the format, framing and
 // offset whose records make up the whole of `src`, for `validate`, nil for a format that does not take it.
+//
+// `exact` returns the scan whose cuts, a byte past a separator it finds from the end of an open reader's first record,
+// are each the end of a record and the start of the next, and false when the format has none under the reader's
+// framing or options. `piece` makes a copy of a reader past its first record, or a new reader for `lo` 0, read the
+// records from the cut `lo` up to the cut or text end `hi`, and returns false when its memory is refused.
 Services :: struct {
 	next:   [core.Framing]proc(it: ^Reader) -> (Record, bool),
 	judge:  proc(it: ^Reader, rec: Record) -> Maybe(core.Fault),
 	guess:  proc(it: ^Reader, to: u64) -> bool,
+	exact:  proc(it: ^Reader) -> (kernel.Quotes, bool),
+	piece:  proc(it: ^Reader, lo, hi: u64) -> bool,
 	whole:  proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64),
 	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),

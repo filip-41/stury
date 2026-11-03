@@ -54,8 +54,8 @@ load_padded :: #force_inline proc "contextless" ($T: Tier, src: []u8, lo: int) -
 	return copied_tail(src, lo)
 }
 
-// Runs `scan_loop`, the only tier's.
+// Runs `scan_op`, the only tier's.
 @(private)
-scan :: #force_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) -> int {
-	return scan_loop(src, c, BACK)
+scan :: #force_inline proc "contextless" (src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
+	return scan_op(.Base, src, c, s, OP)
 }

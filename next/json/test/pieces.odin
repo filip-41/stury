@@ -11,6 +11,7 @@ import host "../../host"
 import typed "../../core/typed"
 import records "../../core/records"
 import json ".."
+import walktest "../../walktest"
 
 // A text read in pieces on threads against the same text read on one: the same faults at the same bytes, at every
 // width. The tests build pieces of one byte, so every byte is a cut.
@@ -45,7 +46,11 @@ expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, framing
 			return false
 		}
 	}
-	return true
+	if !walktest.expect_each_law(t, pools, text, json.as(spec), framing) {
+		return false
+	}
+	entries, at, ok := json.spine(text, json.as(spec))
+	return framing != .Entries || !ok || walktest.expect_each_law(t, pools, text, entries, .Entries, at)
 }
 
 // Strings of commas and brackets, arrays inside entries and faults near either end.

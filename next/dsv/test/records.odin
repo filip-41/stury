@@ -12,6 +12,7 @@ import host "../../host"
 import typed "../../core/typed"
 import records "../../core/records"
 import dsv ".."
+import walktest "../../walktest"
 
 // The row reader against a model: a plain framer that honours quotes, then `validate` of the whole text, whose fault
 // ends the rows before the first whose line end is not before it.
@@ -240,7 +241,7 @@ expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: d
 			return false
 		}
 	}
-	return true
+	return walktest.expect_each_law(t, pools, text, as, .Lines)
 }
 
 @(test)

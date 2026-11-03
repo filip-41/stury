@@ -1,8 +1,9 @@
-// `records <frame|check|stream|read|cells|rows|threads|validate> <file> <iters> [width]`: reads the records of the
+// `records <frame|check|stream|read|cells|rows|threads|validate|each> <file> <iters> [width]`: reads the records of the
 // file and prints best and median GB/s. `check`, `threads` and `validate` read a `.csv` file as CSV. On NDJSON, `frame` frames each record and reads no value, `check` judges each
 // one, `threads` is `check` on a pool of `width` threads (6 by default), `stream` judges each one through a stream's
 // window, `read` reads each one of `logs.ndjson` into a `Log_Record`, strings borrowed. `validate` judges a whole
-// text on the pool. On CSV, `cells` reads each row's first cell, and `rows` reads each row of `table.csv` into a
+// text on the pool, and `each` is `check` through `each` on the pool, a `.json` file read as the entries of its spine. On
+// CSV, `cells` reads each row's first cell, and `rows` reads each row of `table.csv` into a
 // `Table_Row`, strings borrowed.
 package main
 
@@ -13,6 +14,7 @@ import "core:os"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
 import "core:time"
 import core "../../core"
 import host "../../host"
@@ -50,6 +52,25 @@ threads :: proc(src: []u8) -> int {
 
 validate :: proc(src: []u8) -> int {
 	return int(records.validate(src, handle, &pool.runner) != nil)
+}
+
+// The framing `each` reads the file by, and the byte the records start at: a `.json` file's spine.
+each_framing: core.Framing
+each_at: u64
+
+// `check`'s work through `each`, each piece's refused records counted by the piece.
+each :: proc(src: []u8) -> int {
+	judge_piece :: proc(n: ^int, piece: ^records.Reader, k: int) -> bool {
+		bad := 0
+		for rec in records.next(piece) {
+			bad += int(piece.services.judge(piece, rec) != nil)
+		}
+		sync.atomic_add(n, bad)
+		return true
+	}
+	n := 0
+	n += int(records.each(src, handle, each_framing, judge_piece, &n, &pool.runner, each_at) != nil)
+	return n
 }
 
 // `check`'s work on a stream of the text in memory, read through the 64 KiB window.
@@ -129,7 +150,7 @@ rows :: proc(src: []u8) -> int {
 
 main :: proc() {
 	if len(os.args) != 4 && len(os.args) != 5 {
-		fmt.eprintln("usage: records <frame|check|stream|read|cells|rows|threads|validate> <file> <iters> [width]")
+		fmt.eprintln("usage: records <frame|check|stream|read|cells|rows|threads|validate|each> <file> <iters> [width]")
 		os.exit(2)
 	}
 	src, err := os.read_entire_file(os.args[2], runtime.default_allocator())
@@ -143,8 +164,12 @@ main :: proc() {
 	switch os.args[1] {
 	case "frame": lane = frame
 	case "check": lane = check
-	case "threads", "validate":
-		lane = threads if os.args[1] == "threads" else validate
+	case "threads", "validate", "each":
+		lane = threads if os.args[1] == "threads" else validate if os.args[1] == "validate" else each
+		if lane == each && strings.has_suffix(os.args[2], ".json") {
+			handle, each_at, _ = json.spine(src, handle)
+			each_framing = .Entries
+		}
 		width := 6
 		if len(os.args) == 5 {
 			width, _ = strconv.parse_int(os.args[4])

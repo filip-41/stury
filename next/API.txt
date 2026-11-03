@@ -182,6 +182,7 @@ writing :: proc(pool: ^Pool, on: bool) {
 Block :: [4]#simd[16]u8
 FEATURES :: [Tier]string {
 Nibble_Table :: struct {
+Quotes :: struct {
 Tier :: enum u8 {
 Utf8_State :: struct {
 any_lane :: #force_inline proc (m: Block) -> bool {
@@ -204,6 +205,8 @@ nibble_table :: proc(sets: []string) -> (t: Nibble_Table, bits: [8]u8) {
 pack :: #force_inline proc (m: Block) -> u64 {
 pack_n :: #force_inline proc (m: [$N]Block) -> (r: [N]u64) where 2 <= N && N <= 4 {
 prefix_xor :: #force_inline proc ($T: Tier, x: u64) -> u64 {
+quote_cut :: proc (src: []u8, s: Quotes) -> int {
+quote_run :: proc (src: []u8, s: ^Quotes) {
 tier :: proc () -> Tier {
 utf8_ascii_block :: #force_inline proc ($T: Tier, s: ^Utf8_State) #no_bounds_check {
 utf8_block :: #force_inline proc ($T: Tier, b: Block, s: ^Utf8_State) #no_bounds_check {
@@ -376,6 +379,7 @@ cell :: proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool)
 check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error) {
 close :: proc(it: ^Reader) {
 column :: proc(it: ^Reader, name: string) -> int {
+each :: #force_inline proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> Maybe(core.Fault) {
 marshal :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
 marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}) -> core.Typed_Error {
 next :: #force_inline proc(it: ^Reader) -> (Record, bool) {
