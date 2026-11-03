@@ -58,7 +58,7 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		q = gap_end(q, end, S)
 		hi, fault, stop := walk_from(src, q, S, opts, h, regs, on)
 		it.pos = hi
-		if fault == nil && !stop && runs_on(src, q, hi) {
+		if fault == nil && !stop && runs_on(src, q, hi, S) {
 			fault = core.fault_of(core.fault_at(hi, .Trailing), &RULES)
 		}
 		if fault != nil || q == end {
@@ -130,7 +130,7 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 			break whole
 		}
 		hi, fault, stop := walk_from(src, q, S, value, h, regs, on)
-		if fault != nil || !stop && runs_on(src, q, hi) {
+		if fault != nil || !stop && runs_on(src, q, hi, S) {
 			break whole
 		}
 		at := u64(intrinsics.ptr_sub(q, p))
@@ -146,7 +146,7 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 // Whether the number or literal at `q`, which a walk ended at `hi`, runs on into a byte that may not follow a value, so
 // that, as jq reads `1x`, it is one bad token and no record.
 @(private)
-runs_on :: #force_inline proc "contextless" (src: []u8, q: [^]u8, hi: u64) -> bool {
+runs_on :: #force_inline proc "contextless" (src: []u8, q: [^]u8, hi: u64, $S: Spec) -> bool {
 	if hi >= u64(len(src)) {
 		return false
 	}
@@ -157,6 +157,9 @@ runs_on :: #force_inline proc "contextless" (src: []u8, q: [^]u8, hi: u64) -> bo
 	switch src[hi] {
 	case ' ', '\t', '\r', '\n', 0x1e, ',', ':', '[', ']', '{', '}', '"', '\'', '/':
 		return false
+	}
+	when .Es5 in FEATURES[S] {
+		return !gap(raw_data(src)[hi:], raw_data(src)[len(src):], S)
 	}
 	return true
 }
@@ -183,7 +186,13 @@ frame_line :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) #no_b
 	end := p[len(src):]
 	stop: u8 = '\n' if it.framing == .Lines else 0x1e
 	for {
-		q := u64(intrinsics.ptr_sub(skip_ws(p[it.pos:], end), p))
+		w := skip_ws(p[it.pos:], end)
+		if Spec(it.as.read.spec) == .Json5 {
+			for n := ws5_len(w, end); n > 0; n = ws5_len(w, end) {
+				w = skip_ws(w[n:], end)
+			}
+		}
+		q := u64(intrinsics.ptr_sub(w, p))
 		if q == u64(len(src)) {
 			it.pos = q
 			return
@@ -286,13 +295,17 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 		return true
 	}
 	uncollect(c, kept)
-	scratch, failed := runtime.mem_alloc(type_info_of(T).size, type_info_of(T).align, context.temp_allocator)
+	// The scratch value and what its read allocates are dropped with the arena.
+	arena := runtime.Arena{backing_allocator = it.allocator, minimum_block_size = 4096}
+	defer runtime.arena_destroy(&arena)
+	scratch_allocator := runtime.arena_allocator(&arena)
+	scratch, failed := runtime.mem_alloc(type_info_of(T).size, type_info_of(T).align, scratch_allocator)
 	if failed != nil {
 		err^ = {kind = .Out_Of_Memory}
 		return true
 	}
 	err^ = {}
-	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, context.temp_allocator, err, false)
+	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, scratch_allocator, err, false)
 	return true
 }
 

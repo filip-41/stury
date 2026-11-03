@@ -42,6 +42,10 @@ resumes at that record's `at` with the same offsets. `open_stream`'s `at` names 
 is, for a stream opened part way into a file. Both read from `at` as from the first byte of a record, and pass over a
 byte order mark only when `at` is 0.
 
+`key` is the key's token as written in the input: its quotes and escapes are in it, and a JSON5 key may be a bare
+identifier. A quoted key is a string, so `json.unmarshal(rec.key, spec, &name, &plan)` into a `string` with a plan of
+`string` decodes it, and a bare one is its own text.
+
 ## Framings
 
 | Framing | A record is |
@@ -51,7 +55,8 @@ byte order mark only when `at` is 0.
 | `.Concatenated` | one document of a text of documents one after another, as jq reads its input, from its value's first byte to its last |
 | `.Entries` | one element of the root array, or the value of one member of the root object, with its key in `key` |
 
-- A line of whitespace alone is no record, under `.Lines` and between two 0x1E under `.Seq`.
+- A line of whitespace alone is no record, under `.Lines` and between two 0x1E under `.Seq`. Whitespace is the format's:
+  JSON5 has VT, FF, NBSP, the byte order mark and the other Unicode spaces besides JSON's four bytes.
 - A UTF-8 byte order mark is passed over at the input's first byte only. One that starts a later record is the record's,
   and JSON refuses it, except in JSON5, where it is whitespace.
 - Under `.Lines`, a 0x1E in a line is the record's, and JSON refuses it. Under `.Seq`, an LF is the record's, and a
@@ -80,8 +85,8 @@ records, if any. `check` runs on the calling thread.
 
 `read` frames the next record and reads it into `target` by `plan`, as the format's `unmarshal` of the record's text
 reads it, refusals included, with every offset from the input's first byte. It returns false at the input's end, on
-the fault in `it.fault`, or with `.Out_Of_Memory` when the reader's own memory is refused. A refused record returns
-true and its error, and the next `read` goes on past it. It reads the record in place, so it costs less than `next`
+the fault in `it.fault`, with `.Plan_Mismatch` when `plan` is no plan of `T` by the format, or with `.Out_Of_Memory`
+when the reader's own memory is refused. A refused record returns true and its error, and the next `read` goes on past it. It reads the record in place, so it costs less than `next`
 and an `unmarshal` of `rec.text`.
 
 ```odin

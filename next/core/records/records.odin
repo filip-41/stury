@@ -117,12 +117,16 @@ next :: #force_inline proc(it: ^Reader) -> (Record, bool) {
 }
 
 // Reads the next record into `target` by `plan`, as the format's `unmarshal` of the record's text reads it, with every
-// offset from the input's first byte. Returns false at the input's end, on a fault in `it.fault`, or with
-// `.Out_Of_Memory` when the reader's memory is refused. A refused record returns true and its error, and the next read
-// goes on after it. When a refused record's value runs past its end, `target` may hold values read past it.
+// offset from the input's first byte. Returns false at the input's end, on a fault in `it.fault`, with `.Plan_Mismatch`
+// when `plan` is no plan of `T` by the format, or with `.Out_Of_Memory` when the reader's memory is refused. A refused
+// record returns true and its error, and the next read goes on after it. When a refused record's value runs past its
+// end, `target` may hold values read past it.
 read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error) {
 	if it.fault != nil {
 		return false, {}
+	}
+	if plan == nil || plan.spelling != it.as.spelling || plan.type != T {
+		return false, {kind = .Plan_Mismatch}
 	}
 	if it.frames == nil {
 		frames, failed := make([]typed.Frame, max(core.MAX_DEPTH, int(it.as.read.max_depth)) + 2, it.allocator)

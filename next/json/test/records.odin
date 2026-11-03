@@ -5,6 +5,7 @@ import "core:io"
 import "core:math/rand"
 import "core:strings"
 import "core:testing"
+import "core:unicode/utf8"
 import core "../../core"
 import typed "../../core/typed"
 import records "../../core/records"
@@ -23,6 +24,24 @@ Model_Record :: struct {
 @(private = "file")
 is_blank :: proc(c: u8) -> bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+// Returns the length of the whitespace character at the start of `s`: JSON's four bytes and, in JSON5, VT, FF, NBSP,
+// BOM and U+2028 and U+2029 besides.
+@(private = "file")
+ws_len :: proc(s: string, spec: json.Spec) -> int {
+	if len(s) > 0 && is_blank(s[0]) {
+		return 1
+	}
+	if spec != .Json5 {
+		return 0
+	}
+	for w in ([]string{"\x0b", "\x0c", "\xc2\xa0", "\xef\xbb\xbf", "\u2028", "\u2029"}) {
+		if strings.has_prefix(s, w) {
+			return len(w)
+		}
+	}
+	return 0
 }
 
 @(private = "file")
@@ -50,22 +69,22 @@ model_fault :: proc(text: string, at: u64, spec: json.Spec) -> Maybe(core.Fault)
 	return nil
 }
 
-// Returns the first offset at or past `i` that is no whitespace, in a spec with comments no comment, in JSON5 no BOM,
-// and with `rs` no 0x1E.
+// Returns the first offset at or past `i` that is no whitespace, in a spec with comments no comment, and with `rs` no
+// 0x1E.
 @(private = "file")
 model_gap :: proc(src: string, i: int, spec: json.Spec, rs: bool) -> int {
 	i := i
 	for i < len(src) {
-		if is_blank(src[i]) || rs && src[i] == 0x1e {
+		if n := ws_len(src[i:], spec); n > 0 {
+			i += n
+		} else if rs && src[i] == 0x1e {
 			i += 1
-		} else if spec == .Json5 && has_bom(src[i:]) {
-			i += 3
 		} else if spec != .Json && (strings.has_prefix(src[i:], "//") || strings.has_prefix(src[i:], "/*")) {
-			// A `//` comment ends at a CR or an LF.
-			e := strings.index_any(src[i:], "\r\n") if src[i + 1] == '/' else strings.index(src[i + 2:], "*/") + 4
+			// A `//` comment ends at a CR or an LF, in JSON5 at U+2028 and U+2029 too.
+			e := strings.index_any(src[i:], "\r\n\u2028\u2029" if spec == .Json5 else "\r\n") if src[i + 1] == '/' else strings.index(src[i + 2:], "*/") + 4
 			e = len(src) - i if e < 0 && src[i + 1] == '/' else e
-			// A comment that does not end, or holds a control byte but a tab or a line end, is no gap.
-			if e < 4 && src[i + 1] == '*' || strings.index_proc(src[i:][:e], proc(r: rune) -> bool {return r < 0x20 && r != '\t' && r != '\r' && r != '\n'}) >= 0 {
+			// A comment that does not end, is not UTF-8, or holds a control byte but a tab or a line end, is no gap.
+			if e < 4 && src[i + 1] == '*' || !utf8.valid_string(src[i:][:e]) || strings.index_proc(src[i:][:e], proc(r: rune) -> bool {return r < 0x20 && r != '\t' && r != '\r' && r != '\n'}) >= 0 {
 				return i
 			}
 			i += e
@@ -103,7 +122,7 @@ model_value_end :: proc(src: string, i: int, spec: json.Spec) -> int {
 			continue
 		case:
 			k := j
-			for k < len(src) && !strings.contains_rune(",:[]{}\"'/ \t\r\n\x1e", rune(src[k])) {
+			for k < len(src) && !strings.contains_rune(",:[]{}\"'/ \t\r\n\x1e", rune(src[k])) && ws_len(src[k:], spec) == 0 {
 				k += 1
 			}
 			return max(k, j + 1)
@@ -206,8 +225,8 @@ model_frame :: proc(src: string, framing: core.Framing, spec: json.Spec) -> (out
 			hi -= 1
 		}
 		k := i
-		for k < hi && is_blank(src[k]) {
-			k += 1
+		for k < hi && ws_len(src[k:hi], spec) > 0 {
+			k += ws_len(src[k:hi], spec)
 		}
 		if framing == .Seq && first {
 			if k < hi {
@@ -281,10 +300,18 @@ PIECES := []string {
 	`12 13`,
 	`{a:'x',}`,
 	"\"\\ud83d\\ude00\xf0\x9f\x98\x80\"",
+	`{"aaaaaaaaaaaaaaaaaaaaaaaa":"𐀀xxxxxxxxxxxxxxxxxxxxxxxxxx","b":[1,2,3,4,5,6,7,8,9,10,11,12,13,14]}`,
+	"[\"\\ud800\\udc00\xf0\x9f\x98\x80yyyyyyyyyyyyyyyyyyyyyyyyy\", 123456789012345678901234567890, -0.5e-300, \"\xc3\xa9zzzzzzzzzzzzzzzzzzzzz\"]",
+	"/* a long comment that runs and runs and runs */ {\"k\":{\"x\":[\"pppppppppppppppppppppppp\"]}}   ",
+	"{a:'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\\nyyyyy', bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: 0x1234567890abcdef, c: Infinity}",
+	"[1, /* comment spread\n over lines */ 2, 33333333333333333333333333333333333333]",
+	"{\"a\":\"qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\\\"qqqqqqqqqqqqqqqqqqqqqq\",\"b\":[[[[[[[[[[1]]]]]]]]]]}  // tail comment here",
+	"[1\x0b,2\xc2\xa0]",
+	"12\xef\xbb\xbf13",
 }
 
 @(private = "file", rodata)
-SEPARATORS := []string{"\n", "\r\n", "\n\n", "\n  \t\n", " \n", "\r\n\r\n"}
+SEPARATORS := []string{"\n", "\r\n", "\n\n", "\n  \t\n", " \n", "\r\n\r\n", "\x0b\n", "\n\xc2\xa0\n", "\xef\xbb\xbf\n", "\x0c", "\xc2\xa0", "\xe2\x80\xa8\n"}
 
 // Object members' keys under `.Entries`, JSON5's among them.
 @(private = "file", rodata)
@@ -330,32 +357,40 @@ seeded_text :: proc(gen: rand.Generator, framing: core.Framing) -> string {
 @(test)
 records_follow_the_model :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	state := rand.create(1)
-	gen := rand.default_random_generator(&state)
-	// Each byte of a text in turn becomes a byte that breaks or ends a value.
-	breakers := "x\"}],:\n\r \x1e\x00\\"
-	for round in 0 ..< 200 {
-		framing := core.Framing(round % 4)
-		src := seeded_text(gen, framing)
-		for spec in json.Spec {
-			if !expect_model(t, src, framing, spec) {
-				return
+	// Each byte of a text in turn becomes a byte or character that breaks or ends a value.
+	breakers := []string{"x", "\"", "}", "]", ",", ":", "\n", "\r", " ", "\x1e", "\x00", "\\", "\x0b", "\x0c", "\xc2\xa0", "\xef\xbb\xbf"}
+	buf := make([dynamic]u8, context.temp_allocator)
+	for seed in u64(1) ..= SEEDS {
+		state := rand.create(seed)
+		gen := rand.default_random_generator(&state)
+		for round in 0 ..< 200 / SEEDS {
+			framing := core.Framing(round % 4)
+			src := seeded_text(gen, framing)
+			for spec in json.Spec {
+				if !expect_model(t, src, framing, spec) {
+					return
+				}
 			}
-		}
-		buf := make([]u8, len(src), context.temp_allocator)
-		for i in 0 ..< len(src) {
-			copy(buf, src)
-			for c in transmute([]u8)breakers {
-				buf[i] = c
-				for spec in json.Spec {
-					if !expect_model(t, string(buf), framing, spec) {
-						return
+			for i in 0 ..< len(src) {
+				for c in breakers {
+					clear(&buf)
+					append(&buf, src[:i])
+					append(&buf, c)
+					append(&buf, src[i + 1:])
+					for spec in json.Spec {
+						if !expect_model(t, string(buf[:]), framing, spec) {
+							return
+						}
 					}
 				}
 			}
 		}
 	}
 }
+
+// The seeds each property test draws its texts from.
+@(private = "file")
+SEEDS :: 4
 
 @(test)
 records_frame_and_place :: proc(t: ^testing.T) {
@@ -387,6 +422,11 @@ records_frame_and_place :: proc(t: ^testing.T) {
 		n += 1
 	}
 	testing.expect(t, n == 3 && it3.fault == nil)
+	kp, _ := json.plan_make(string)
+	defer typed.plan_destroy(&kp)
+	name: string
+	kerr := json.unmarshal(transmute([]u8)keys[1], .Json, &name, &kp, {}, {}, context.temp_allocator)
+	testing.expect(t, kerr.kind == .None && name == `b"c`)
 	flat := json.as(.Json)
 	flat.read.max_depth = 1
 	faults, _ = records.check(transmute([]u8)string("[1, 2]"), flat, .Entries, context.temp_allocator)
@@ -396,6 +436,18 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	// Concatenated documents: a number runs on into a letter as one bad token.
 	faults, _ = records.check(transmute([]u8)string("1 [2]{}\"s\"3x"), json.as(.Json), .Concatenated, context.temp_allocator)
 	testing.expect(t, len(faults) == 1 && faults[0].kind == .Trailing && faults[0].at == 11)
+
+	// A line of JSON5 whitespace is no record, in JSON it is a refused one.
+	ws := transmute([]u8)string("1\n\x0b\n\xc2\xa0\n2")
+	for spec in ([]json.Spec{.Json5, .Json}) {
+		it4 := records.open(ws, json.as(spec))
+		defer records.close(&it4)
+		n = 0
+		for _ in records.next(&it4) {
+			n += 1
+		}
+		testing.expect_value(t, n, 2 if spec == .Json5 else 4)
+	}
 
 	// RFC 7464: text before the first 0x1E ends the records.
 	it2 := records.open(transmute([]u8)string(" 1\x1e2\n"), json.as(.Json), .Seq)
@@ -427,7 +479,7 @@ error_text :: proc(e: core.Typed_Error, at: u64) -> string {
 
 // `records.read` against `json.unmarshal` of each record's text the model frames, with the model's BOM rule.
 @(private = "file")
-expect_read :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, read: typed.Read_Options, plan: ^typed.Plan) -> bool {
+expect_read :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, read: typed.Read_Options, plan: ^typed.Plan, $T: typeid) -> bool {
 	want, framed := model_frame(src, framing, spec)
 	it := records.open(transmute([]u8)src, json.as(spec), framing)
 	defer records.close(&it)
@@ -441,7 +493,7 @@ expect_read :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: jso
 	}
 	n := 0
 	for {
-		v: Typed_Piece
+		v: T
 		more, err := records.read(&it, &v, plan, got_read, context.temp_allocator)
 		if !more {
 			break
@@ -450,7 +502,7 @@ expect_read :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: jso
 			return testing.expectf(t, false, "%v %v %q: record %d past the model's", framing, spec, src, n)
 		}
 		r := want[n]
-		w: Typed_Piece
+		w: T
 		want_err: string
 		if r.at > 0 && has_bom(r.text) && spec != .Json5 {
 			bom := core.Typed_Error{kind = .Walk, at = r.at, inner = {at = r.at, rules = &json.RULES, kind = .Bad_Char}}
@@ -478,7 +530,7 @@ expect_read :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: jso
 		if !testing.expectf(t, got_err == want_err, "%v %v %v %q: record %d at %d: %s, want %s", framing, spec, read, src, n, r.at, got_err, want_err) {
 			return false
 		}
-		if err.kind == .None && !testing.expectf(t, fmt.tprint(v) == fmt.tprint(w), "%v %v %q: record %d read %v, want %v", framing, spec, src, n, v, w) {
+		if (err.kind == .None || r.fault == nil) && !testing.expectf(t, fmt.tprint(v) == fmt.tprint(w), "%v %v %q: record %d read %v, want %v", framing, spec, src, n, v, w) {
 			return false
 		}
 		n += 1
@@ -495,24 +547,29 @@ records_read_as_unmarshal :: proc(t: ^testing.T) {
 	plan, err := json.plan_make(Typed_Piece)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	defer typed.plan_destroy(&plan)
-	state := rand.create(2)
-	gen := rand.default_random_generator(&state)
-	breakers := "x\"}],:\n\r \x1e\\1"
+	breakers := []string{"x", "\"", "]", ",", "\n", "\x1e", "1", "\x0b", "\xc2\xa0", "\xef\xbb\xbf"}
 	sink: typed.Collected
 	reads := []typed.Read_Options{{}, {collect = &sink}, {refuse_duplicates = true}, {unknown = .Refuse}}
-	for round in 0 ..< 16 {
-		framing := core.Framing(round % 4)
+	buf: [dynamic]u8
+	defer delete(buf)
+	for seed in u64(1) ..= SEEDS {
+		state := rand.create(seed + 1)
+		gen := rand.default_random_generator(&state)
+		framing := core.Framing(seed % 4)
 		src := seeded_text(gen, framing)
-		buf := make([]u8, len(src), context.temp_allocator)
 		for i in -1 ..< len(src) {
-			for c in transmute([]u8)breakers {
-				copy(buf, src)
-				if i >= 0 {
-					buf[i] = c
+			for c in breakers {
+				clear(&buf)
+				if i < 0 {
+					append(&buf, src)
+				} else {
+					append(&buf, src[:i])
+					append(&buf, c)
+					append(&buf, src[i + 1:])
 				}
 				for spec in json.Spec {
 					for read in reads {
-						if !expect_read(t, string(buf), framing, spec, read, &plan) {
+						if !expect_read(t, string(buf[:]), framing, spec, read, &plan, Typed_Piece) {
 							return
 						}
 					}
@@ -523,6 +580,44 @@ records_read_as_unmarshal :: proc(t: ^testing.T) {
 			}
 		}
 		free_all(context.temp_allocator)
+	}
+}
+
+// A union target reads the arm its record's class picks, and refuses the other classes, as `unmarshal` does.
+@(test)
+records_read_a_union :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Arms :: union {
+		int,
+		string,
+		[]int,
+	}
+	plan, err := json.plan_make(Arms)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	defer typed.plan_destroy(&plan)
+	texts := []string{"1\n\"s\"\n[1,2]\ntrue\n{}\n[\"x\"]\n", "[1, \"s\", [3], null, false, {\"a\":1}]", "1 \"s\" [2] 3x"}
+	for text in texts {
+		for framing in core.Framing {
+			for spec in json.Spec {
+				if !expect_read(t, text, framing, spec, {}, &plan, Arms) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// A plan of another type is refused the same way under every framing, before any record is read.
+@(test)
+records_read_checks_the_plan_once :: proc(t: ^testing.T) {
+	plan, _ := json.plan_make(Typed_Piece)
+	defer typed.plan_destroy(&plan)
+	for framing in core.Framing {
+		it := records.open(transmute([]u8)string("{\"a\":1}\n{\"a\":2}\n"), json.as(.Json), framing)
+		defer records.close(&it)
+		v: struct{ a: int }
+		more, err := records.read(&it, &v, &plan)
+		testing.expectf(t, !more && err.kind == .Plan_Mismatch && it.pos == core.text_start(it.src, 0), "%v: %v %v", framing, more, err.kind)
 	}
 }
 
