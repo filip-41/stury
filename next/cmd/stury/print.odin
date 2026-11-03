@@ -20,7 +20,7 @@ print_jq :: proc(run: ^Run, v: jq.Value) -> bool {
 	out := &run.out
 	run.ret = JQ_OK if jq.truthy(v) else JQ_OK_NULL_KIND
 	s: string
-	is_str: bool
+	is_str, ended: bool
 	if o.raw {
 		s, is_str = jq.string_of(v)
 	}
@@ -39,8 +39,10 @@ print_jq :: proc(run: ^Run, v: jq.Value) -> bool {
 		l := output_layout(run)
 		l.spill = &run.spill
 		jq.write_value(out, v, l)
+		// A line comment the value ends with ended its line.
+		ended = l.comments && out.cursor > 0 && out.buf[out.cursor - 1] == '\n'
 	}
-	if !o.join {
+	if !o.join && !ended {
 		jq.put_byte(out, '\n')
 	}
 	if o.raw0 {
@@ -60,7 +62,7 @@ output_layout :: proc(run: ^Run) -> jq.Layout {
 		ascii     = o.ascii,
 		sort_keys = o.sort_keys,
 	}
-	return {opts = opts, colors = &run.colors if o.color else nil}
+	return {opts = opts, colors = &run.colors if o.color else nil, comments = writes_comments(o)}
 }
 
 // The output held so far written, when it passes FLUSH_AT bytes, when `force`d, and under --unbuffered.

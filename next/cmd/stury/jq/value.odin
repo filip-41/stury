@@ -165,7 +165,33 @@ node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 		// past binary64's digits or range, `1e400` among them, which strconv reads as infinity
 		f, _ = strconv.parse_f64(lit)
 	}
-	return Number{f = f, lit = json_literal(lit) if doc.read.spec == u8(json.Spec.Json5) else lit}
+	return Number{f = f, lit = json5_literal(lit) if doc.read.spec == u8(json.Spec.Json5) else lit}
+}
+
+// A JSON5 decimal as the library's writer spells it in JSON (`+1.50` as `1.50`, `.5` as `0.5`, `5.` as `5`), so that
+// `tostring` gives what `-c .` prints. A hexadecimal integer, `Infinity` and `NaN` are no literal, and print as computed.
+@(private = "file")
+json5_literal :: proc(text: string) -> string {
+	if _, plain := spell.number_json(transmute([]u8)text, 0, u64(len(text))); plain {
+		return text
+	}
+	p := 1 if text[0] == '+' || text[0] == '-' else 0
+	if text[p] != '.' && text[p] - '0' >= 10 || p + 1 < len(text) && (text[p + 1] == 'x' || text[p + 1] == 'X') {
+		return ""
+	}
+	b := make([dynamic]u8, 0, len(text) + 1)
+	if text[0] == '-' {
+		append(&b, '-')
+	}
+	if text[p] == '.' {
+		append(&b, '0')
+	}
+	for k in p ..< len(text) {
+		if text[k] != '.' || k + 1 < len(text) && text[k + 1] - '0' < 10 {
+			append(&b, text[k])
+		}
+	}
+	return string(b[:])
 }
 
 // `text` as a number's kept literal: itself when JSON spells a number so (a JSON5 `+1`, `.5` or `0x10` is no

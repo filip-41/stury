@@ -51,7 +51,7 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 			run_once(run, v)
 		case .Error:
 			flush_some(run, force = true)
-			message.write_stderr("stury: parse error: %s\n", msg)
+			message.write_stderr("stury: parse error: %s\n%s", msg, ins.note)
 			run.ret = EXIT_INPUT
 			return
 		case .More:

@@ -19,6 +19,7 @@ package main
 //	colors.odin                      jq's output colours and when a run uses them
 //	formats.odin                     the formats --from reads and --to writes
 //	input.odin                       reading files and stdin
+//	stream_fault.odin                --stream for a text that does not parse
 //	route.odin                       the path scan or the interpreter, which answers the filter
 //	explain.odin                     --explain's report of the route and the run
 //	filter.odin                      the jq interpreter over each input
@@ -84,7 +85,7 @@ main :: proc() {
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
-	if validating || cli.formatting || o.raw_input || o.seq || o.stream || FORMATS[o.from].lines || FORMATS[o.from].cells || FORMATS[o.to].cells {
+	if validating || cli.formatting || o.raw_input || o.seq || FORMATS[o.from].lines || FORMATS[o.from].cells || FORMATS[o.to].cells {
 		message.write_stderr("stury: this build does not run that yet\n")
 		os.exit(EXIT_USAGE)
 	}

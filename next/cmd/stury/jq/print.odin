@@ -18,11 +18,14 @@ import json "../../../json"
 Colors :: [8]string
 
 // How values are printed: the layout and escapes `opts` asks (`pretty`, `indent`, `tab`, `ascii`, `sort_keys`), the
-// colours, nil for none, and where a large output is emptied, nil for nowhere.
+// colours, nil for none, where a large output is emptied, nil for nowhere, and whether a value read from a text prints
+// with its comments, as JSONC. Only an output read whole from a text has its comments: a value a filter builds keeps
+// none of its members'.
 Layout :: struct {
-	opts:   core_pkg.Write_Options,
-	colors: ^Colors,
-	spill:  ^Spill,
+	opts:     core_pkg.Write_Options,
+	colors:   ^Colors,
+	spill:    ^Spill,
+	comments: bool,
 }
 
 // A layout's way to empty the output it writes into, once it holds `at` bytes, so a deep value is not held whole.
@@ -89,7 +92,7 @@ emit :: proc(p: ^Printer, v: Value) {
 	switch {
 	case p.depth > MAX_DEPTH:
 		token(p, int(k), "<skipped: too deep>") // what jq prints past its depth limit
-	case k >= .Array && write_node(p, v):
+	case (k >= .Array || p.comments && p.depth == 0) && write_node(p, v):
 	case k == .Null:
 		token(p, int(k), "null")
 	case k == .False:
@@ -176,7 +179,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 			return i64(len(b)), .None
 		},
 	}
-	_, err := core_pkg.write_stream(to_out, r.doc, opts, json.as(.Json), r.node, runtime.heap_allocator())
+	_, err := core_pkg.write_stream(to_out, r.doc, opts, json.as(.Jsonc if p.comments && p.depth == 0 else .Json), r.node, runtime.heap_allocator())
 	// Only an allocation fails, and the printer walks the value when the writer handed it nothing.
 	return err.kind == .None || p.streamed
 }
