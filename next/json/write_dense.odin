@@ -32,14 +32,14 @@ Dense_State :: struct {
 	in_string, odd: u64,
 }
 
-// Whether `doc` is written by `write_dense` under `opts`. The source must be strict JSON that the document read in
-// full under no tolerance, and the options must not spell anything again.
+// Whether `src`, the text of `nodes` nodes of `doc`, is written by `write_dense` under `opts`. The source must be strict
+// JSON that the document read in full under no tolerance, and the options must not spell anything again.
 @(private)
-dense_route :: #force_inline proc "contextless" (doc: ^core.Document, opts: core.Write_Options) -> bool {
-	return !opts.pretty && !opts.ascii && !opts.escape_html &&
-		len(doc.src) < DENSE_BYTES_PER_NODE * len(doc.nodes) &&
+dense_route :: #force_inline proc "contextless" (doc: ^core.Document, opts: core.Write_Options, src: []u8, nodes: int) -> bool {
+	return !opts.pretty && copies_strings(opts) &&
+		len(src) < DENSE_BYTES_PER_NODE * nodes &&
 		Spec(doc.read.spec) == .Json && doc.read.opts[0] == 0 && doc.spelling == &SPELLING &&
-		(len(doc.src) < DENSE_BYTES_PER_NODE_BLANK * len(doc.nodes) || dense_sample(doc.src))
+		(len(src) < DENSE_BYTES_PER_NODE_BLANK * nodes || dense_sample(src))
 }
 
 // Whether the blanks outside strings in the first `DENSE_SEGMENT` bytes of `src` are under a sixteenth of them, counted

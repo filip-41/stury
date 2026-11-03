@@ -25,9 +25,10 @@ TREE_DEPTH :: 4096
 @(private)
 Tree :: struct {
 	doc:     ^core.Document,
+	root:    core.Node_Index, // the node written as the text's root
 	out:     ^write.Out,
 	opts:    core.Write_Options,
-	close:   u64, // the byte past the root, where the root's feet that follow it begin
+	close:   u64, // the byte past `root`, where the document root's feet that follow it begin
 	dropped: int, // the facts the target cannot hold
 	kind:    core.Typed_Error_Kind, // what stopped the write
 	json:    bool, // the document is JSON's, in any spec
@@ -43,32 +44,33 @@ Pair :: struct {
 	name:     string,
 }
 
-// Whether the row walk cannot write `doc`. A JSON5 document is the row walk's only when it is written as it was authored.
+// Whether the row walk cannot write the subtree at `node`. A JSON5 document is the row walk's only when it is written as
+// it was authored.
 @(private)
-document_cold :: proc(doc: ^core.Document, opts: core.Write_Options, own: bool) -> bool {
-	return !own || len(doc.facts) != 0 || opts.sort_keys || doc.shared_keys != 0 || Spec(doc.read.spec) == .Json5
+document_cold :: proc(doc: ^core.Document, opts: core.Write_Options, own: bool, node: core.Node_Index) -> bool {
+	return !own || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || doc.shared_keys != 0 || Spec(doc.read.spec) == .Json5
 }
 
-// Writes `doc` as spec `as`. The count is the facts `as` cannot hold.
+// Writes node `node` of `doc` as spec `as`, into an output of `hint` bytes. The count is the facts `as` cannot hold.
 @(private)
-write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, as: Spec) -> (text: []u8, dropped: int, err: core.Typed_Error) {
+write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, as: Spec, node: core.Node_Index, hint: int) -> (text: []u8, dropped: int, err: core.Typed_Error) {
 	spill: [write.ROOM_MAX]u8 = ---
 	out: write.Out
-	write.init(&out, &spill, allocator, stream, document_hint(doc, opts))
-	w := Tree{doc = doc, out = &out, opts = opts, json = doc.spelling == &SPELLING}
+	write.init(&out, &spill, allocator, stream, hint)
+	w := Tree{doc = doc, root = node, out = &out, opts = opts, json = doc.spelling == &SPELLING}
 	w.keep = w.json && as != .Json
 	w.respell = w.json && Spec(doc.read.spec) == .Json5 && as != .Json5
-	w.copy = w.json && !w.respell && !opts.ascii && !opts.escape_html
+	w.copy = w.json && !w.respell && copies_strings(opts)
 	if w.keep {
-		root := doc.nodes[core.ROOT]
+		root := doc.nodes[node]
 		_, w.close = core.scalar_ends(root)
 		if root.kind >= .Array {
-			w.close = doc.spelling.close_end(doc, core.ROOT)
+			w.close = doc.spelling.close_end(doc, node)
 		}
 	} else {
-		w.dropped = len(doc.facts)
+		w.dropped = len(core.subtree_facts(doc, node))
 	}
-	if !tree_entry(&w, core.ROOT, core.NO_NODE, 0, false) {
+	if !tree_entry(&w, node, core.NO_NODE, 0, false) {
 		write.destroy(&out)
 		return nil, 0, {kind = w.kind}
 	}
@@ -139,7 +141,7 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 	}
 	after_line := false
 	for f in facts {
-		root_foot := i == core.ROOT && f.role == .Comment_Foot && f.lo >= w.close
+		root_foot := i == w.root && f.role == .Comment_Foot && f.lo >= w.close
 		if f.role != .Comment_Inline && !root_foot {
 			continue
 		}
@@ -150,7 +152,7 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 		}
 		after_line = tree_comment(w, f)
 	}
-	if i == core.ROOT && after_line && w.opts.pretty {
+	if i == w.root && after_line && w.opts.pretty {
 		put_byte(w.out, '\n')
 	}
 	return true
@@ -228,7 +230,7 @@ tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int) -> bool {
 	feet := false
 	if w.keep {
 		for f in core.all_facts(doc, i) {
-			if f.role == .Comment_Foot && (i != core.ROOT || f.lo < w.close) {
+			if f.role == .Comment_Foot && (i != w.root || f.lo < w.close) {
 				write.put_line(w.out, w.opts, depth + 1)
 				tree_comment(w, f)
 				feet = true

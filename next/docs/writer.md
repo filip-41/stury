@@ -34,7 +34,7 @@ each call and tests `out.err` where it can stop. `finish` returns the error.
 ## Options
 
 ```odin
-core.Write_Options :: struct {pretty: bool, indent: u8, tab: bool, ascii: bool, escape_html: bool, sort_keys: bool, partial: bool, infer: bool}
+core.Write_Options :: struct {pretty: bool, indent: u8, tab: bool, ascii: bool, escape_html: bool, sort_keys: bool, partial: bool, infer: bool, respell_strings: bool}
 core.PRETTY :: core.Write_Options{pretty = true, indent = 2}
 ```
 
@@ -118,8 +118,9 @@ A refusal names its path. Nothing tracks one while writing: `refused` reads it f
 ## Documents
 
 ```odin
-core.write           :: proc(doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Typed_Error)
-core.write_stream    :: proc(w: io.Stream, doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, allocator := context.allocator) -> (dropped: int, err: core.Typed_Error)
+core.write           :: proc(doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Typed_Error)
+core.write_stream    :: proc(w: io.Stream, doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (dropped: int, err: core.Typed_Error)
+core.subtree_facts   :: proc(doc: ^core.Document, i: core.Node_Index) -> []core.Fact
 json.as              :: proc(spec: json.Spec) -> core.As
 dsv.as               :: proc(spec: dsv.Spec, layout := dsv.Options{}) -> core.As
 json.format          :: proc(src: []u8, $S: json.Spec, opts := core.Write_Options{}, read := json.Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
@@ -130,6 +131,11 @@ document was read in. `json.as(.Jsonc)` and `dsv.as(.Tsv, layout)` name another 
 so a JSON document is written as a table and a table as JSON by the target's writer. A target with no spelling or no writer
 is `.Unsupported`. `core.As` holds the spelling and the spec and layout bytes a `Document` holds in `read`.
 
+`node` writes one value of the document as a text of its own, the root by default: a subtree with the comments inside
+its span, which `core.subtree_facts` returns, in the spelling and layout the root would have. A key, a node the document
+does not hold and, for a delimited target, a node that is not an array are `.Unsupported`. The row walk stops at the
+subtree's end, and the dense path runs over the subtree's span.
+
 A document has no close nodes: a container's `n` is its subtree size, so the walk keeps a stack of `{end, close}` and
 writes a container's close bracket when the next row is past its subtree. The stack holds `MAX_DEPTH` levels on the
 stack of the call, and a document read under a raised `max_depth` takes one allocation of its depth.
@@ -138,8 +144,10 @@ A string and a number read from a source keep their source spelling and are copi
 with the quotes around its span, so a string with an escape keeps the escape. The punctuation and the whitespace are
 made again, which is the whole of the difference between a source and its compact text. A number of a document of
 another format is spelled by `core/spell` as a computed number is, and `-0.0` from a source stays as written. A string is
-spelled again, through `put_string` or the row loop's own block test, when `ascii` or `escape_html` is set and when it carries a tolerated ill-formed
-sequence.
+spelled again, through `put_string` or the row loop's own block test, when `ascii`, `escape_html` or `respell_strings` is
+set and when it carries a tolerated ill-formed sequence. `respell_strings` alone writes every string in the writer's own
+escapes, the shortest JSON has, so `"\u00e9\/"` is written `"é/"` as a computed string is. A number keeps its spelling,
+and a comment is written as it was read.
 
 The common case calls nothing. `rows` hands `rows_run` chunks of rows that the output's room holds: a chunk counts every
 row at `1 << ROW_ROOM_SHIFT` bytes and the closes of the containers open at its start, so no row tests room. `rows_run`
@@ -159,8 +167,8 @@ runs over the source's bytes in 64-byte blocks: `kernel` masks of the quotes, th
 give the bytes inside strings, the blanks outside them are dropped, and `kernel.compress` stores the rest. The block's
 string mask comes from the quotes no backslash escapes, and a byte below 0x21 inside a string can only be a space, which
 stays. The route is one test at entry, with the document read as `.Json` and without the
-`Invalid_Utf8` tolerance (the build records the tolerances in `read.opts[0]`), and `ascii`, `escape_html` and `pretty`
-off. The test takes a source under 8 bytes per node, and one under 26 bytes per node when the blanks outside strings in
+`Invalid_Utf8` tolerance (the build records the tolerances in `read.opts[0]`), and `ascii`, `escape_html`,
+`respell_strings` and `pretty` off. The test takes a source under 8 bytes per node, and one under 26 bytes per node when the blanks outside strings in
 its first 2 KB are at least a sixteenth of those bytes, since the rows win on compact text of longer tokens and the dense
 path wins wherever blanks are many. A longer-token document, any other spec and any other option take the rows. The two paths write the same bytes, a
 leading byte order mark is left out by both, and a text nested past `MAX_DEPTH` is written by the dense path with no

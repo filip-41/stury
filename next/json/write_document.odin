@@ -69,7 +69,7 @@ Emit :: struct {
 	opts:    core.Write_Options,
 	cap:     int, // the deepest level the stack holds
 	line_at: int, // the deepest level whose line fits `NODE_ROOM`
-	copy:    bool, // a string is copied as it was read. False when `ascii` or `escape_html` ask for another spelling
+	copy:    bool, // a string is copied as it was read. False when `ascii`, `escape_html` or `respell_strings` ask for another spelling
 	hi:      V, // with `copy` false, the bytes from which a string is written by the rare path: 0x80 under `ascii`, else 0xFF
 	html:    [4]V, // with `copy` false, more such bytes: `<`, `>`, `&` and 0xE2 under `escape_html`, else a backslash
 }
@@ -85,7 +85,7 @@ put_start :: proc(e: ^Emit, out: ^write.Out, src: []u8, doc: ^core.Document, opt
 		}
 		stack = raw_data(wide)
 	}
-	e.copy = !opts.ascii && !opts.escape_html
+	e.copy = copies_strings(opts)
 	e.hi = V(0x80) if opts.ascii else V(0xFF)
 	e.html = {V('\\'), V('\\'), V('\\'), V('\\')}
 	if opts.escape_html {
@@ -334,6 +334,12 @@ put_token_string :: proc(out: ^write.Out, src: []u8, doc: ^core.Document, i: cor
 	return put_string(out, s, opts)
 }
 
+// Whether a string read from a source is written as it was authored under `opts`.
+@(private)
+copies_strings :: #force_inline proc "contextless" (opts: core.Write_Options) -> bool {
+	return !opts.ascii && !opts.escape_html && !opts.respell_strings
+}
+
 // Names JSON of spec `spec` as the target of `core.write`. `.Json` drops a document's comments, `.Jsonc` and `.Json5`
 // keep them, and a JSON5 document is spelled again unless the target is `.Json5`. `dropped` counts the facts of `doc` that
 // the target cannot hold, as `commit` does, and is not an error: a document of another format drops all its facts. A
@@ -348,36 +354,45 @@ as :: proc(spec: Spec) -> core.As {
 	return {&SPELLING, {spec = u8(spec)}}
 }
 
-// The spelling's `write`: `doc` as the spec `read` names.
+// The spelling's `write`: node `node` of `doc` as the spec `read` names.
 @(private)
-write_spec :: proc(doc: ^core.Document, opts: core.Write_Options, read: core.Read_As, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, core.Typed_Error) {
-	return write_text(doc, opts, Spec(read.spec), stream, allocator)
+write_spec :: proc(doc: ^core.Document, opts: core.Write_Options, read: core.Read_As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, core.Typed_Error) {
+	return write_text(doc, opts, Spec(read.spec), node, stream, allocator)
 }
 
 // The size to ask the output for: the source, and for pretty text what eight levels of indent make on each node.
 @(private)
-document_hint :: proc(doc: ^core.Document, opts: core.Write_Options) -> int {
-	hint := len(doc.src) + write.ROOM_MAX
+document_hint :: proc(src, nodes: int, opts: core.Write_Options) -> int {
+	hint := src + write.ROOM_MAX
 	if opts.pretty {
-		hint += len(doc.nodes) * (3 + 8 * (1 if opts.tab else int(opts.indent)))
+		hint += nodes * (3 + 8 * (1 if opts.tab else int(opts.indent)))
 	}
 	return hint
 }
 
+// Writes node `node` of `doc`, which `core.write` checked is a value the document holds.
 @(private)
-write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: Spec, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
-	if len(doc.nodes) == 0 || doc.partial && !opts.partial {
+write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: Spec, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
+	if doc.partial && !opts.partial {
 		return nil, 0, {kind = .Unsupported}
 	}
+	// The source bytes and the nodes the write covers. A partial document's node holds no span of its own text, so its
+	// output grows from the least room.
+	src, count := doc.src, len(doc.nodes)
+	if node != core.ROOT {
+		t := doc.nodes[node]
+		src, count = nil if doc.partial else core.span(doc, node), 1 if t.kind < .Array else int(t.n)
+	}
+	hint := document_hint(len(src), count, opts)
 	own := doc.spelling == &SPELLING
-	if doc.partial || document_cold(doc, opts, own) {
-		return write_tree(doc, opts, stream, allocator, .Json if doc.partial else as)
+	if doc.partial || document_cold(doc, opts, own, node) {
+		return write_tree(doc, opts, stream, allocator, .Json if doc.partial else as, node, hint)
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	out: write.Out
-	write.init(&out, &spill, allocator, stream, document_hint(doc, opts))
-	if dense_route(doc, opts) {
-		write_dense(&out, doc.src)
+	write.init(&out, &spill, allocator, stream, hint)
+	if dense_route(doc, opts, src, count) {
+		write_dense(&out, src)
 		text, err = write.finish((^write.Out)(rawptr(&out)))
 		return
 	}
@@ -389,7 +404,7 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: Spec, stre
 		return nil, 0, {kind = .Out_Of_Memory}
 	}
 	defer put_end(&e)
-	if kind := rows(&e, doc); kind != .None {
+	if kind := rows(&e, doc, u32(node)); kind != .None {
 		write.destroy(&out)
 		return nil, 0, {kind = kind}
 	}
@@ -412,19 +427,21 @@ rows_stop :: proc(doc: ^core.Document) -> u32 {
 	return u32(stop)
 }
 
-// Writes the rows: `rows_run` over chunks of them that the output's room holds, and by the rare path each row it stops at.
+// Writes the rows of the subtree at `node`: `rows_run` over chunks of them that the output's room holds, and by the rare
+// path each row it stops at.
 // A chunk's room counts every row at `1 << ROW_ROOM_SHIFT` and the closes of the containers open at its start, so no row tests room.
 // A chunk starts on a row inside the innermost container, the one state `rows_run` can stop in and account for: the close
 // of a container that ends at `i`, an empty one the rare path opened among them, is `rare_close`'s.
 @(private)
-rows :: proc(e: ^Emit, doc: ^core.Document) -> core.Typed_Error_Kind {
+rows :: proc(e: ^Emit, doc: ^core.Document, node: u32) -> core.Typed_Error_Kind {
 	count := u32(len(doc.nodes))
-	stop := rows_stop(doc)
+	// No chunk runs past the subtree, since `rows_run` writes on past the close of the container it entered first.
+	stop := min(rows_stop(doc), node + (1 if doc.nodes[node].kind < .Array else doc.nodes[node].n))
 	c := &e.c
-	if kind := rare_row(e, doc.nodes[0], 0); kind != .None {
+	if kind := rare_row(e, doc.nodes[node], node); kind != .None {
 		return kind
 	}
-	i := u32(1)
+	i := node + 1
 	for c.top > 0 {
 		if c.safe != 0 && i < stop && c.stack[c.top].end != i {
 			free := int(uintptr(e.out.buf) + uintptr(e.out.size) - uintptr(c.p)) - c.top * (c.top * c.unit + 2)
@@ -621,6 +638,6 @@ format :: proc(src: []u8, $S: Spec, opts := core.Write_Options{}, read := Option
 		return nil, {kind = .Walk if err.kind == .Walk else .Out_Of_Memory, at = err.at, inner = err.inner}
 	}
 	defer core.destroy(&doc)
-	text, _, werr := write_text(&doc, opts, S, {}, allocator)
+	text, _, werr := write_text(&doc, opts, S, core.ROOT, {}, allocator)
 	return text, werr
 }

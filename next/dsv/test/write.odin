@@ -220,7 +220,7 @@ dsv_document_writes_in_its_spec :: proc(t: ^testing.T) {
 	got, _, werr := core.write(&doc, {}, allocator = context.temp_allocator)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(got), "id;name\n1;\"a;b\"\n2;\n")
-	tsv, _, terr := core.write(&doc, {}, dsv.as(.Tsv), context.temp_allocator)
+	tsv, _, terr := core.write(&doc, {}, dsv.as(.Tsv), allocator = context.temp_allocator)
 	testing.expect_value(t, terr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(tsv), "id\tname\n1\ta;b\n2\t\n")
 }
@@ -230,21 +230,21 @@ json_records_write_as_a_table :: proc(t: ^testing.T) {
 	src := `[{"a":1,"b":"x,y"},{"b":null,"c":true,"a":2.50}]`
 	doc, err := json.build(transmute([]u8)src, .Json, {}, false, context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	got, _, werr := core.write(&doc, {}, dsv.as(.Csv), context.temp_allocator)
+	got, _, werr := core.write(&doc, {}, dsv.as(.Csv), allocator = context.temp_allocator)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(got), "a,b,c\n1,\"x,y\",\n2.50,,true\n")
 	rows := `[[1,"a"],[2,"b"]]`
 	doc2, _ := json.build(transmute([]u8)rows, .Json, {}, false, context.temp_allocator)
-	got, _, werr = core.write(&doc2, {}, dsv.as(.Tsv), context.temp_allocator)
+	got, _, werr = core.write(&doc2, {}, dsv.as(.Tsv), allocator = context.temp_allocator)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(got), "1\ta\n2\tb\n")
 	nested := `[{"a":[1]}]`
 	doc3, _ := json.build(transmute([]u8)nested, .Json, {}, false, context.temp_allocator)
-	_, _, werr = core.write(&doc3, {}, dsv.as(.Csv), context.temp_allocator)
+	_, _, werr = core.write(&doc3, {}, dsv.as(.Csv), allocator = context.temp_allocator)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.Unsupported)
 	scalar := `[1]`
 	doc4, _ := json.build(transmute([]u8)scalar, .Json, {}, false, context.temp_allocator)
-	_, _, werr = core.write(&doc4, {}, dsv.as(.Csv), context.temp_allocator)
+	_, _, werr = core.write(&doc4, {}, dsv.as(.Csv), allocator = context.temp_allocator)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.Unsupported)
 }
 
@@ -284,7 +284,7 @@ marshal_under_failing_allocators :: proc(t: ^testing.T) {
 
 @(private)
 document_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
-	text, _, err := core.write((^core.Document)(data), {}, dsv.as(.Csv), allocator)
+	text, _, err := core.write((^core.Document)(data), {}, dsv.as(.Csv), allocator = allocator)
 	return text, err.kind
 }
 
@@ -299,7 +299,7 @@ document_under_failing_allocators :: proc(t: ^testing.T) {
 	defer core.destroy(&foreign_doc)
 	testing.expect_value(t, ferr.kind, core.Document_Error_Kind.None)
 	for doc in ([?]^core.Document{&headed, &foreign_doc}) {
-		want, _, err := core.write(doc, {}, dsv.as(.Csv), context.temp_allocator)
+		want, _, err := core.write(doc, {}, dsv.as(.Csv), allocator = context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		walktest.sweep_write(t, document_try, doc, string(want))
 	}

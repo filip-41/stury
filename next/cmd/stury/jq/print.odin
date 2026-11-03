@@ -1,9 +1,12 @@
 package jq
 
-// Values printed as jq 1.8 prints them, token by token into a `write.Out`: its layout and its colours, strings in
-// JSON's shortest escapes, a number read or written in the program as its text, and a computed one in the library's
-// layout.
+// Values printed as jq 1.8 prints them into a `write.Out`: its layout and its colours, strings in JSON's shortest
+// escapes, a number read or written in the program as its text, and a computed one in the library's layout. A container
+// of an input document is written by the library's document writer where that writes what jq prints, and everything
+// else token by token.
 
+import "base:runtime"
+import "core:io"
 import "core:math"
 import "../../../core/spell"
 import core_pkg "../../../core"
@@ -39,9 +42,10 @@ OBJECT_COLOR :: int(Kind.Object)
 
 @(private = "file")
 Printer :: struct {
-	out:   ^write.Out,
+	out:      ^write.Out,
 	using layout: Layout,
-	depth: int,
+	depth:    int,
+	streamed: bool, // the library's writer handed the printer bytes
 }
 
 // One byte at the output's cursor.
@@ -75,7 +79,7 @@ spill :: #force_inline proc(p: ^Printer) {
 // after. A container's punctuation in its colour, reset before each member, and an object's keys in theirs. A NaN is
 // a number painting a null.
 write_value :: proc(out: ^write.Out, v: Value, l: Layout, depth := 0) {
-	p := Printer{out, l, depth}
+	p := Printer{out = out, layout = l, depth = depth}
 	emit(&p, v)
 }
 
@@ -85,6 +89,7 @@ emit :: proc(p: ^Printer, v: Value) {
 	switch {
 	case p.depth > MAX_DEPTH:
 		token(p, int(k), "<skipped: too deep>") // what jq prints past its depth limit
+	case k >= .Array && write_node(p, v):
 	case k == .Null:
 		token(p, int(k), "null")
 	case k == .False:
@@ -138,6 +143,40 @@ emit :: proc(p: ^Printer, v: Value) {
 		}
 		close(p, k, '}')
 	}
+}
+
+// Writes `v` by the library's document writer and returns true, when it is a container of an input JSON document that
+// the writer prints as jq does: with no colours, with no line indented by the printer's own depth, with no object in it
+// that repeats a key, and with no level past jq's depth or the writer's for sorted keys. A string is spelled again in
+// JSON's shortest escapes, as jq spells it.
+@(private = "file")
+write_node :: proc(p: ^Printer, v: Value) -> bool {
+	// The deepest level the library's tree writer, which writes sorted keys, enters.
+	TREE_DEPTH :: 4096
+	r, is_ref := v.(Ref)
+	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || r.doc.spelling != json.as(.Json).spelling ||
+	   p.depth + max(int(r.doc.read.max_depth), core_pkg.MAX_DEPTH) > TREE_DEPTH || repeats_key(r) {
+		return false
+	}
+	opts := p.opts
+	opts.respell_strings = true
+	p.streamed = false
+	to_out := io.Stream {
+		data = p,
+		procedure = proc(data: rawptr, mode: io.Stream_Mode, b: []byte, _: i64, _: io.Seek_From) -> (i64, io.Error) {
+			if mode != .Write {
+				return 0, .Unsupported
+			}
+			p := (^Printer)(data)
+			p.streamed = true
+			write.put_text(p.out, string(b))
+			spill(p)
+			return i64(len(b)), .None
+		},
+	}
+	_, err := core_pkg.write_stream(to_out, r.doc, opts, json.as(.Json), r.node, runtime.heap_allocator())
+	// Only an allocation fails, and the printer walks the value when the writer handed it nothing.
+	return err.kind == .None || p.streamed
 }
 
 // `text` in the colour `color`.
@@ -220,7 +259,7 @@ put_string :: proc(out: ^write.Out, s: string, opts: core_pkg.Write_Options) {
 
 // The punctuation `c` of a container of kind `k`, painted in its colour when the layout has colours.
 write_punct :: proc(out: ^write.Out, l: Layout, k: Kind, c: u8) {
-	p := Printer{out, l, 0}
+	p := Printer{out = out, layout = l}
 	paint(&p, int(k))
 	put_byte(out, c)
 	unpaint(&p)

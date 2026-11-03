@@ -410,6 +410,17 @@ has_repeated_key :: proc(r: Ref) -> bool {
 	return false
 }
 
+// Whether an object in the subtree of `r` repeats a key.
+repeats_key :: proc(r: Ref) -> bool {
+	end := r.node + core_pkg.Node_Index(r.doc.nodes[r.node].n)
+	for i := r.node; i < end; i += 1 {
+		if r.doc.nodes[i].kind == .Map && has_repeated_key({r.doc, i}) {
+			return true
+		}
+	}
+	return false
+}
+
 // Slots of `repeats_in_table`'s open-addressed table, kept at most half full.
 @(private = "file")
 KEY_TABLE :: 256

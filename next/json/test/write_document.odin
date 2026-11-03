@@ -119,6 +119,27 @@ check_write :: proc(t: ^testing.T, src: []u8) -> bool {
 		if !testing.expect(t, serr.kind == .None && string(bytes.buffer_to_bytes(&buf)) == string(text), "the stream differs from core.write") {
 			return false
 		}
+		if !check_subtrees(t, &doc, opts) {
+			return false
+		}
+	}
+	return true
+}
+
+// Checks that every value node of `doc` writes the text its span formats to.
+check_subtrees :: proc(t: ^testing.T, doc: ^core.Document, opts: core.Write_Options) -> bool {
+	for x, i in doc.nodes {
+		if x.role == .Key {
+			continue
+		}
+		node := core.Node_Index(i)
+		text, _, err := core.write(doc, opts, node = node)
+		defer delete(text)
+		want, _ := json.format(core.span(doc, node), .Json, opts)
+		defer delete(want)
+		if !testing.expectf(t, err.kind == .None && string(text) == string(want), "node %d of %q writes %q, its span %q", i, doc.src, text, want) {
+			return false
+		}
 	}
 	return true
 }
@@ -214,6 +235,50 @@ write_document_string_options :: proc(t: ^testing.T) {
 			testing.expect(t, !opts.escape_html || (b != '<' && b != '>' && b != '&'))
 		}
 	}
+}
+
+// `respell_strings` writes a string read from a source as a computed one is written, and leaves the rest as it was read.
+@(test)
+write_document_respell_strings :: proc(t: ^testing.T) {
+	src := `{"\u0061":["\u00e9\/x","\ud83d\ude00","é","\n\"\\",1E2]}`
+	doc, _ := json.build(transmute([]u8)string(src), .Json)
+	defer core.destroy(&doc)
+	kept, _, _ := core.write(&doc)
+	defer delete(kept)
+	testing.expect_value(t, string(kept), src)
+	for opts in ([?]core.Write_Options{{respell_strings = true}, {respell_strings = true, pretty = true, indent = 1}}) {
+		text, _, err := core.write(&doc, opts)
+		defer delete(text)
+		want := `{"a":["é/x","😀","é","\n\"\\",1E2]}`
+		if opts.pretty {
+			want = "{\n \"a\": [\n  \"é/x\",\n  \"😀\",\n  \"é\",\n  \"\\n\\\"\\\\\",\n  1E2\n ]\n}"
+		}
+		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+		testing.expect_value(t, string(text), want)
+	}
+	jsonc, _ := json.build(transmute([]u8)string(`[/* \/ */ "\/"]`), .Jsonc)
+	defer core.destroy(&jsonc)
+	text, _, _ := core.write(&jsonc, {respell_strings = true})
+	defer delete(text)
+	testing.expect_value(t, string(text), `[/* \/ */"/"]`)
+}
+
+// A subtree of a delimited target is the array's records, and a key or a node past the document is refused.
+@(test)
+write_document_nodes :: proc(t: ^testing.T) {
+	doc, _ := json.build(transmute([]u8)string(`{"n":1,"rows":[{"a":1,"b":"x"},{"a":2}]}`), .Json)
+	defer core.destroy(&doc)
+	rows, _ := core.member(&doc, core.ROOT, "rows")
+	csv, _, err := core.write(&doc, as = dsv.as(.Csv), node = rows)
+	defer delete(csv)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(csv), "a,b\n1,x\n2,\n")
+	for node in ([?]core.Node_Index{1, core.Node_Index(len(doc.nodes)), core.NO_NODE}) {
+		_, _, err = core.write(&doc, node = node)
+		testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
+	}
+	_, _, err = core.write(&doc, as = dsv.as(.Csv), node = 2)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
 }
 
 @(test)
@@ -384,6 +449,37 @@ check_commented :: proc(t: ^testing.T, src: []u8) -> bool {
 			return false
 		}
 		if !same_tree(t, &doc, &strict, "strict") {
+			return false
+		}
+		if !check_commented_subtrees(t, &doc, opts) {
+			return false
+		}
+	}
+	return true
+}
+
+// Checks that every value node of `doc` writes a JSONC text, with at least the comments inside its span, and as JSON
+// the text its span writes as JSON.
+check_commented_subtrees :: proc(t: ^testing.T, doc: ^core.Document, opts: core.Write_Options) -> bool {
+	for x, i in doc.nodes {
+		if x.role == .Key {
+			continue
+		}
+		node := core.Node_Index(i)
+		text, _, err := core.write(doc, opts, node = node)
+		defer delete(text)
+		again, rerr := json.build(text, .Jsonc)
+		defer core.destroy(&again)
+		span, _ := json.build(core.span(doc, node), .Jsonc)
+		defer core.destroy(&span)
+		if !testing.expectf(t, err.kind == .None && rerr.kind == .None && len(again.facts) >= len(span.facts), "node %d of %q writes %q", i, doc.src, text) {
+			return false
+		}
+		plain, dropped, _ := core.write(doc, opts, json.as(.Json), node)
+		defer delete(plain)
+		want, _, _ := core.write(&span, opts, json.as(.Json))
+		defer delete(want)
+		if !testing.expectf(t, string(plain) == string(want) && dropped == len(core.subtree_facts(doc, node)), "node %d of %q writes %q as JSON", i, doc.src, plain) {
 			return false
 		}
 	}

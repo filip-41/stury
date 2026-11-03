@@ -41,28 +41,29 @@ read_layout :: proc(read: core.Read_As) -> (Spec, Options) {
 
 // The spelling's `write`: `doc` as the spec and layout `read` holds.
 @(private)
-document_write :: proc(doc: ^core.Document, opts: core.Write_Options, read: core.Read_As, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
+document_write :: proc(doc: ^core.Document, opts: core.Write_Options, read: core.Read_As, node: core.Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> (text: []u8, dropped: int, err: core.Typed_Error) {
 	spec, layout := read_layout(read)
 	if !layout_ok(spec, layout) {
 		return nil, 0, {kind = .Bad_Option}
 	}
-	if doc.partial || len(doc.nodes) == 0 || doc.nodes[0].kind != .Array {
+	if doc.partial || doc.nodes[node].kind != .Array {
 		return nil, 0, {kind = .Unsupported}
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	w: Rows
 	hint := len(doc.src) + write.ROOM_MAX if doc.spelling == &SPELLING else 0
 	rows_start(&w, &spill, layout, spec, opts, stream, allocator, hint)
-	text, err = rows_end((^Rows)(rawptr(&w)), write_records(&w, doc))
+	text, err = rows_end((^Rows)(rawptr(&w)), write_records(&w, doc, node))
 	if err.kind != .None {
 		return nil, 0, err
 	}
-	return text, len(doc.facts) + w.dropped, err
+	return text, len(core.subtree_facts(doc, node)) + w.dropped, err
 }
 
-// The header, then each record. The header is the document's shared keys, else the keys of its objects, each once.
+// The header, then each record of the array at `list`. The header is the document's shared keys, else the keys of its
+// objects, each once.
 @(private)
-write_records :: proc(w: ^Rows, doc: ^core.Document) -> core.Typed_Error_Kind {
+write_records :: proc(w: ^Rows, doc: ^core.Document, list: core.Node_Index) -> core.Typed_Error_Kind {
 	scratch := runtime.arena_allocator(&w.arena)
 	header := make([dynamic]string, scratch)
 	column := make(map[string]int, scratch)
@@ -78,7 +79,7 @@ write_records :: proc(w: ^Rows, doc: ^core.Document) -> core.Typed_Error_Kind {
 		}
 	}
 	maps, arrays := 0, 0
-	records := core.children(doc, core.ROOT)
+	records := core.children(doc, list)
 	for rec, more := core.child_next(&records); more; rec, more = core.child_next(&records) {
 		#partial switch core.kind(doc, rec) {
 		case .Map:
@@ -115,7 +116,7 @@ write_records :: proc(w: ^Rows, doc: ^core.Document) -> core.Typed_Error_Kind {
 	if no_cells != nil {
 		return .Out_Of_Memory
 	}
-	records = core.children(doc, core.ROOT)
+	records = core.children(doc, list)
 	i := 0
 	for rec, more := core.child_next(&records); more; rec, more = core.child_next(&records) {
 		start := total(w)
