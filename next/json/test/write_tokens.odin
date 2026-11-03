@@ -209,7 +209,7 @@ token_misuse_is_refused :: proc(t: ^testing.T) {
 			W.close(tw)
 			return W.open_array(tw)
 		}, .Out_Of_Order)
-	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.end_row(tw)}, .Unsupported)
+	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.end_record(tw)}, .Unsupported)
 	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_float(tw, math.inf_f64(1))}, .Non_Finite)
 	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_float(tw, math.nan_f64())}, .Non_Finite)
 	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_string(tw, "\xff")}, .Bad_Utf8)

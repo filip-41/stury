@@ -56,7 +56,7 @@ write.tokens_init   :: proc(t: ^write.Tokens, as: core.As, opts := core.Write_Op
 write.tokens_finish :: proc(t: ^write.Tokens) -> (bytes: []u8, err: core.Typed_Error)
 write.open_object, write.open_array, write.close :: proc(t: ^write.Tokens) -> core.Typed_Error_Kind
 write.key, write.value_string :: proc(t: ^write.Tokens, s: string) -> core.Typed_Error_Kind
-write.value_int, write.value_uint, write.value_float, write.value_bool, write.value_null, write.end_row // a value each, and a delimited record's end
+write.value_int, write.value_uint, write.value_float, write.value_bool, write.value_null, write.end_record // a value each, and a delimited record's end
 core.write        :: proc(doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Typed_Error)
 core.write_stream :: proc(w: io.Stream, doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, allocator := context.allocator) -> (dropped: int, err: core.Typed_Error)
 json.as           :: proc(spec: json.Spec) -> core.As

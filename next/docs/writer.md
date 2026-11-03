@@ -216,7 +216,7 @@ text, err := write.tokens_finish(&t)
 
 `Tokens` holds `core.MAX_DEPTH` levels in itself and allocates nothing for depth, and it is not copied after `tokens_init`.
 The calls are `open_object`, `open_array`, `close`, `key`, `value_string`, `value_int`, `value_uint`, `value_float`,
-`value_bool` and `value_null`, and `end_row` for a flat format. Each returns the kind that refused it, `.None` for a
+`value_bool` and `value_null`, and `end_record` for a flat format. Each returns the kind that refused it, `.None` for a
 written one. The first refusal sticks: later calls write nothing and return it, and `tokens_finish` returns it with no
 bytes, as `finish` does for an output that failed. A stream that failed leaves a prefix in the stream.
 
@@ -227,8 +227,8 @@ bytes, as `finish` does for an output that failed. A stream that failed leaves a
   between a key and its value, and a second root value are `.Out_Of_Order`, and so is `tokens_finish` inside a container,
   after a key, or before any value. Every JSON spec writes the same text, so `.Json5` and `.Jsonc` write plain JSON.
 - Delimited text takes cells, not containers. A scalar call is a cell, written under the rules of the typed write above, and
-  null is an empty cell. `end_row` writes the layout's line end, and a record that wrote no byte is `.Unwritable`.
-  `open_object`, `open_array`, `close` and `key` are `.Unsupported`. `tokens_finish` with cells waiting for `end_row` is
+  null is an empty cell. `end_record` writes the layout's line end, and a record that wrote no byte is `.Unwritable`.
+  `open_object`, `open_array`, `close` and `key` are `.Unsupported`. `tokens_finish` with cells waiting for `end_record` is
   `.Out_Of_Order`. A header is a record of strings the caller writes.
 - A format supplies a `write.Token_Spelling` through `core.Spelling.tokens`: its tree, one `value` procedure that writes a
   string, a number or a word, and for a flat format `start`, `line` and `stop`.

@@ -39,7 +39,7 @@ token_rows :: proc(rows: []Token_Row, spec: dsv.Spec, layout: dsv.Options, strea
 		for name in ([?]string{"id", "name", "ok", "score", "small"}) {
 			write.value_string(&tw, name)
 		}
-		write.end_row(&tw)
+		write.end_record(&tw)
 	}
 	for r in rows {
 		write.value_int(&tw, r.id)
@@ -47,7 +47,7 @@ token_rows :: proc(rows: []Token_Row, spec: dsv.Spec, layout: dsv.Options, strea
 		write.value_bool(&tw, r.ok)
 		write.value_float(&tw, r.score)
 		write.value_uint(&tw, r.small)
-		write.end_row(&tw)
+		write.end_record(&tw)
 	}
 	return write.tokens_finish(&tw)
 }
@@ -108,7 +108,7 @@ a_bom_is_quoted_only_at_the_start :: proc(t: ^testing.T) {
 	tw: write.Tokens
 	write.tokens_init(&tw, dsv.as(.Csv))
 	write.value_string(&tw, bom)
-	write.end_row(&tw)
+	write.end_record(&tw)
 	got, _ := write.tokens_finish(&tw)
 	defer delete(got)
 	testing.expect_value(t, string(got), "\"\xEF\xBB\xBFx\"\n")
@@ -121,10 +121,10 @@ null_is_an_empty_cell :: proc(t: ^testing.T) {
 	write.value_int(&tw, 1)
 	write.value_null(&tw)
 	write.value_null(&tw)
-	write.end_row(&tw)
+	write.end_record(&tw)
 	write.value_null(&tw)
 	write.value_int(&tw, 2)
-	write.end_row(&tw)
+	write.end_record(&tw)
 	got, err := write.tokens_finish(&tw)
 	defer delete(got)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
@@ -153,9 +153,9 @@ token_misuse_is_refused :: proc(t: ^testing.T) {
 	expect_token_refused(t, .Csv, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_string(tw, "\xff\xfe")}, .Bad_Utf8)
 	expect_token_refused(t, .Tsv, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {
 			W.value_string(tw, "")
-			return W.end_row(tw)
+			return W.end_record(tw)
 		}, .Unwritable)
-	expect_token_refused(t, .Csv, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.end_row(tw)}, .Unwritable)
+	expect_token_refused(t, .Csv, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.end_record(tw)}, .Unwritable)
 	expect_token_refused(t, .Plain, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_string(tw, "a,b")}, .Unwritable)
 	expect_token_refused(t, .Plain, {comment = '#'}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_string(tw, "#a")}, .Unwritable)
 	expect_token_refused(t, .Csv, {delimiter = '"'}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return .None}, .Bad_Option)
@@ -166,7 +166,7 @@ a_record_left_open_is_refused :: proc(t: ^testing.T) {
 	tw: write.Tokens
 	write.tokens_init(&tw, dsv.as(.Csv))
 	write.value_int(&tw, 1)
-	write.end_row(&tw)
+	write.end_record(&tw)
 	write.value_int(&tw, 2)
 	got, err := write.tokens_finish(&tw)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Out_Of_Order)

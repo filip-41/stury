@@ -125,7 +125,7 @@ value_null :: proc(t: ^Tokens) -> core.Typed_Error_Kind {return value(t, Tree_Pa
 
 // Ends the record of a flat format with the layout's line end. A JSON write is `.Unsupported`, and a record that wrote
 // no byte is `.Unwritable` as `marshal` refuses it.
-end_row :: proc(t: ^Tokens) -> core.Typed_Error_Kind {
+end_record :: proc(t: ^Tokens) -> core.Typed_Error_Kind {
 	if t.err != .None || t.spell.line == nil {
 		return refuse(t, .Unsupported)
 	}

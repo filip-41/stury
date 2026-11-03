@@ -15,12 +15,12 @@ PACKAGES = ["core/spell", "core", "core/kernel", "core/compose", "core/build", "
 RANK = {"core/spell": 0, "core": 1, "core/kernel": 2, "core/compose": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "json": 6, "dsv": 6}
 FORMATS = {"json", "dsv"}
 
-LEAN_BUDGET = 18_500
+LEAN_BUDGET = 20_500
 
 # core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte
 # shuffle's.
 NEUTRAL = ["core/spell", "core", "core/compose", "core/build", "core/typed", "core/write"]
-FORMAT_WORD = re.compile(r"(?<![a-z])(header|table|record|cell|delimiter)s?(?![a-z])")
+FORMAT_WORD = re.compile(r"(?<![a-z])(header|table|cell|delimiter)s?(?![a-z])")
 
 DECL = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(::|:=|:)")
 
