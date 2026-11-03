@@ -18,7 +18,7 @@ DENSE_BYTES_PER_NODE :: 26
 
 // The same bound for a source with more blanks, where a block pays a compress for them.
 @(private)
-DENSE_BYTES_PER_NODE_BLANK :: 8
+DENSE_BYTES_PER_NODE_BLANK :: 11
 
 // The source bytes `write_dense` reserves output for at a time, a whole number of blocks.
 @(private)

@@ -168,7 +168,7 @@ give the bytes inside strings, the blanks outside them are dropped, and `kernel.
 string mask comes from the quotes no backslash escapes, and a byte below 0x21 inside a string can only be a space, which
 stays. The route is one test at entry, with the document read as `.Json` and without the
 `Invalid_Utf8` tolerance (the build records the tolerances in `read.opts[0]`), and `ascii`, `escape_html`,
-`respell_strings` and `pretty` off. The test takes a source under 8 bytes per node, and one under 26 bytes per node when the blanks outside strings in
+`respell_strings` and `pretty` off. The test takes a source under 11 bytes per node, and one under 26 bytes per node when the blanks outside strings in
 its first 2 KB are under a sixteenth of those bytes, since each blank costs the dense path a compress and the rows win on
 text of longer tokens. A run of 2 KB starts without the escape mask when the run before met no backslash, and hands
 the rest of its bytes to a run with the mask at the first block that holds one, so a text with no backslash pays none. A longer-token document, any other spec and any other option take the rows. The two paths write the same bytes, a

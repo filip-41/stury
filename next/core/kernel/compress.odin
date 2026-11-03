@@ -85,7 +85,9 @@ compress :: #force_inline proc "contextless" (b: Block, keep: u64, out: [^]u8) -
 		shift := 16 * uint(k)
 		lo := keep >> shift & 0xff
 		hi := keep >> (shift + 8) & 0xff
-		lanes := transmute(V)[2]u64{KEEP_LANES[lo], KEEP_LANES[hi] + 0x0808_0808_0808_0808}
+		// A vector add moves the second row's indices to lanes 8 to 15, where adding to the row as an integer would move
+		// it from a general register into a vector lane, which is slow on arm64.
+		lanes := transmute(V)[2]u64{KEEP_LANES[lo], KEEP_LANES[hi]} + V{8 = 8, 9 = 8, 10 = 8, 11 = 8, 12 = 8, 13 = 8, 14 = 8, 15 = 8}
 		packed := transmute([2]u64)lookup(Tier(0), b[k], lanes)
 		intrinsics.unaligned_store((^u64)(out[int(running >> shift & 0xff):]), packed[0])
 		intrinsics.unaligned_store((^u64)(out[int(running >> (shift + 8) & 0xff):]), packed[1])

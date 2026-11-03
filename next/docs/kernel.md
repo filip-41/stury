@@ -151,7 +151,8 @@ lane. Instead:
   shift (`shrn`) keeps four bits per lane and the trailing zero count is divided by four.
 - **`compress`** stores the lanes of a block that a 64-bit mask keeps, in order, and returns how many: per 8 lanes one
   table shuffle half (`KEEP_LANES`, the positions of an 8-bit mask's set bits) and one 8-byte store, and one vector
-  popcount for the eight counts. It stores up to 64 bytes from its start. The shuffle is `lookup` at its 16-byte width on
+  popcount for the eight counts. Two table rows are loaded straight into one register and the second is moved to the
+  high lanes by a vector add, since moving a general register into a vector lane is slow on arm64. It stores up to 64 bytes from its start. The shuffle is `lookup` at its 16-byte width on
   every tier, since `vpcompressb` needs VBMI2, which `.V4` does not promise.
 
 ## Tier-dependent kernels
