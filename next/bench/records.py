@@ -7,7 +7,7 @@ import fcntl, os, subprocess, sys
 from doc import BUILD, LOCK, path as fixture
 
 FIXTURES = ["logs.ndjson", "docs.ndjson", "twitter.ndjson"]
-LANES = ["frame", "check"]
+LANES = ["frame", "check", "read"]
 ITERS = 41
 
 
@@ -19,12 +19,14 @@ def main():
         print(f"{'fixture':<16}" + "".join(f"{lane:>8}" for lane in LANES))
         for name in FIXTURES:
             path = fixture(name)
+            # `read` reads into the struct of the logs records alone.
+            lanes = LANES if name == "logs.ndjson" else LANES[:2]
             best = {lane: 0.0 for lane in LANES}
             for _ in range(rounds):
-                for lane in LANES:
+                for lane in lanes:
                     out = subprocess.run([probe, lane, path, str(ITERS)], capture_output=True, text=True, check=True)
                     best[lane] = max(best[lane], float(out.stdout.split()[1]))
-            print(f"{name:<16}" + "".join(f"{best[lane]:>8.2f}" for lane in LANES), flush=True)
+            print(f"{name:<16}" + "".join(f"{best[lane]:>8.2f}" if lane in lanes else f"{'':>8}" for lane in LANES), flush=True)
 
 
 if __name__ == "__main__":

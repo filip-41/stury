@@ -114,8 +114,10 @@ typed.unmarshal :: proc {unmarshal_node, unmarshal_answer} // (doc, node or answ
 The record reader, for every format, whose framings and faults are in [docs/records.md](docs/records.md):
 
 ```odin
-records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines) -> records.Reader
+records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> records.Reader
 records.next  :: proc(it: ^records.Reader) -> (records.Record, bool) // the record's text, its offset, and its key under .Entries
+records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error)
+records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Document_Error)
 records.close :: proc(it: ^records.Reader)
 records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> (faults: []core.Fault, err: runtime.Allocator_Error)
 ```

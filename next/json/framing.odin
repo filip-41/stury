@@ -3,14 +3,18 @@
 package json
 
 import "base:intrinsics"
+import "base:runtime"
 import core "../core"
 import kernel "../core/kernel"
+import typed "../core/typed"
 import records "../core/records"
 
 @(private, rodata)
 RECORDS := records.Services {
 	next  = next_record,
 	judge = judge_record,
+	read  = read_record,
+	build = build_record,
 }
 
 @(private)
@@ -88,11 +92,76 @@ judge_spec :: proc(it: ^records.Reader, rec: records.Record, $S: Spec) -> Maybe(
 	h: core.No_Hooks
 	regs: core.Hook_Regs
 	opts := options_of(it.as.read)
-	fault, cold := walk_line(it.src, rec, S, opts, &h, &regs, core.no_hook)
+	fault, cold := walk_line(it.src, rec.at, rec.at + u64(len(rec.text)), S, opts, &h, &regs, core.no_hook)
 	if cold {
 		return walk_text(it.src[:rec.at + u64(len(rec.text))], rec.at, S, opts, &h, &regs, core.no_hook)
 	}
 	return fault
+}
+
+@(private)
+read_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
+	switch Spec(it.as.read.spec) {
+	case .Json:  return read_spec(it, target, T, plan, read, allocator, err, .Json)
+	case .Jsonc: return read_spec(it, target, T, plan, read, allocator, err, .Jsonc)
+	case .Json5: return read_spec(it, target, T, plan, read, allocator, err, .Json5)
+	}
+	return false
+}
+
+// Reads the next record into `target` in place in the input. When only a read of the record alone tells the answer,
+// that read goes into a scratch value, so `target` keeps what the read in place wrote and allocated, and the errors
+// `read.collect` holds are the ones of the record alone.
+@(private)
+read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
+	rec, ok := next_record(it)
+	if !ok {
+		return false
+	}
+	lo := rec.at
+	cut := lo + u64(len(rec.text))
+	opts := options_of(it.as.read)
+	c := read.collect
+	kept: typed.Collected
+	if c != nil {
+		kept = c^
+	}
+	if !read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, err, true) {
+		return true
+	}
+	if c != nil {
+		resize(&c.errors, len(kept.errors))
+		c.truncated = kept.truncated
+	}
+	scratch, failed := runtime.mem_alloc(type_info_of(T).size, type_info_of(T).align, context.temp_allocator)
+	if failed != nil {
+		err^ = {kind = .Out_Of_Memory}
+		return true
+	}
+	err^ = {}
+	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, context.temp_allocator, err, false)
+	return true
+}
+
+// Builds the document of `rec`'s text. Its offsets in a fault count from the input's first byte.
+@(private)
+build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Document_Error) {
+	spec := Spec(it.as.read.spec)
+	// A BOM is the input's, and passed over only at its first byte.
+	if rec.at > 0 && spec != .Json5 && len(rec.text) >= 3 && rec.text[0] == 0xef && rec.text[1] == 0xbb && rec.text[2] == 0xbf {
+		return {}, {kind = .Walk, at = rec.at, inner = {at = rec.at, rules = &RULES, kind = .Bad_Char}}
+	}
+	opts := options_of(it.as.read)
+	switch spec {
+	case .Json:  doc, err = build(rec.text, .Json, opts, false, allocator)
+	case .Jsonc: doc, err = build(rec.text, .Jsonc, opts, false, allocator)
+	case .Json5: doc, err = build(rec.text, .Json5, opts, false, allocator)
+	}
+	if err.kind != .None {
+		err.at += rec.at
+		err.inner.at += rec.at
+	}
+	return
 }
 
 @(private)
@@ -104,16 +173,15 @@ options_of :: #force_inline proc "contextless" (read: core.Read_As) -> Options {
 	return {max_depth = read.max_depth, tolerate = transmute(bit_set[Tolerance; u8])read.opts[0]}
 }
 
-// Walks record `rec` of a `.Lines` or `.Seq` text in place in `src`. Returns the fault that a walk of the record's
+// Walks the record `src[lo:cut]` of a `.Lines` or `.Seq` text in place in `src`. Returns the fault that a walk of the record's
 // text alone gives, as `walk_text` on `src` cut at the record's end, or `cold` when only that walk can tell: the walk
 // in place ran past the record's end, by a value spread over lines, or faulted near it. A fault depends on no byte
 // more than `FAULT_REACH` past the byte it names, as a lone surrogate's escape is judged by the escape after it, so one
 // further from the end is the same in both walks. The walk reads at most 64 bytes past the record, so a value spread
 // over many lines costs no more than one.
 @(private)
-walk_line :: #force_inline proc(src: []u8, rec: records.Record, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (fault: Maybe(core.Fault), cold: bool) {
-	cut := rec.at + u64(len(rec.text))
-	hi, f, _ := walk_from(src[:min(u64(len(src)), cut + 64)], raw_data(src)[rec.at:], S, opts, h, regs, on)
+walk_line :: #force_inline proc(src: []u8, lo, cut: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (fault: Maybe(core.Fault), cold: bool) {
+	hi, f, _ := walk_from(src[:min(u64(len(src)), cut + 64)], raw_data(src)[lo:], S, opts, h, regs, on)
 	if x, bad := f.?; bad {
 		return f, x.at + FAULT_REACH >= cut
 	}

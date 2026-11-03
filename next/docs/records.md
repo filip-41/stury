@@ -4,8 +4,10 @@
 format once, through the `core.As` value it opens with, and the calls after that name none.
 
 ```odin
-records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines) -> records.Reader
+records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> records.Reader
 records.next  :: proc(it: ^records.Reader) -> (records.Record, bool)
+records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error)
+records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Document_Error)
 records.close :: proc(it: ^records.Reader)
 records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> (faults: []core.Fault, err: runtime.Allocator_Error)
 ```
@@ -56,6 +58,29 @@ records: the next one is read past it.
 `check` judges every record and returns the faults of the refused ones in source order, then the fault that ended the
 records, if any. `check` runs on the calling thread.
 
+## Typed reads and documents
+
+`read` frames the next record and reads it into `target` by `plan`, as the format's `unmarshal` of the record's text
+reads it, refusals included, with every offset from the input's first byte. It returns false at the input's end, on
+the fault in `it.fault`, or with `.Out_Of_Memory` when the reader's own memory is refused. A refused record returns
+true and its error, and the next `read` goes on past it. It reads the record in place, so it costs less than `next`
+and an `unmarshal` of `rec.text`.
+
+```odin
+for {
+	v: Log_Line
+	more, err := records.read(&it, &v, &plan)
+	if !more { break }
+	if err.kind != .None { continue } // a refused record
+}
+```
+
+The reader's first `read` allocates its open containers with `open`'s allocator, and `close` frees them. When a
+refused record's value runs past the record's end, `target` may hold values read past it.
+
+`build` builds the document of a record `next` gave, as the format's `build` of `rec.text` does, with offsets from the
+input's first byte.
+
 ## How JSON reads a record
 
 A record is walked in place in the whole input, not in a slice cut from it, and the walk stops at the record's end
@@ -72,4 +97,4 @@ The walk in place reads at most 64 bytes past the record, so a value spread over
 
 A format gives its record reader as a `records.Services` table in its rodata, which its `core.Spelling.records` points
 at. `next` frames the next record and stores the fault that ends the records in `it.fault`. `judge` returns a record's
-fault. `core` stores the table as a `rawptr`, since `core/records` imports `core`.
+fault, `read` and `build` read one. `core` stores the table as a `rawptr`, since `core/records` imports `core`.

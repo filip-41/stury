@@ -1,9 +1,11 @@
 package json_tests
 
+import "core:fmt"
 import "core:math/rand"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import typed "../../core/typed"
 import records "../../core/records"
 import json ".."
 
@@ -217,4 +219,147 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	it2 := records.open(transmute([]u8)string(" 1\x1e2\n"), json.as(.Json), .Seq)
 	_, ok = records.next(&it2)
 	testing.expect(t, !ok && it2.fault == core.Fault{at = 1, rules = &json.RULES, kind = .Bad_Char})
+}
+
+@(private = "file")
+Typed_Piece :: struct {
+	a: Maybe(int),
+	b: []Maybe(bool),
+	k: struct {
+		x: []string,
+	},
+}
+
+// A typed error with its offsets moved by `at`, and its steps as text, which name keys by their bytes.
+@(private = "file")
+error_text :: proc(e: core.Typed_Error, at: u64) -> string {
+	e := e
+	if e.kind != .None {
+		e.at += at
+		if e.kind == .Walk {
+			e.inner.at += at
+		}
+	}
+	return fmt.tprint(e.kind, e.truncated, e.at, e.inner, e.steps[:e.n_steps])
+}
+
+// `records.read` against `json.unmarshal` of each record's text the model frames, with the model's BOM rule.
+@(private = "file")
+expect_read :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, read: typed.Read_Options, plan: ^typed.Plan) -> bool {
+	want, framed := model_frame(src, framing, spec)
+	it := records.open(transmute([]u8)src, json.as(spec), framing)
+	defer records.close(&it)
+	got_sink, want_sink: typed.Collected
+	got_sink.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
+	want_sink.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
+	got_read, want_read := read, read
+	if read.collect != nil {
+		got_read.collect = &got_sink
+		want_read.collect = &want_sink
+	}
+	n := 0
+	for {
+		v: Typed_Piece
+		more, err := records.read(&it, &v, plan, got_read, context.temp_allocator)
+		if !more {
+			break
+		}
+		if n >= len(want) {
+			return testing.expectf(t, false, "%v %v %q: record %d past the model's", framing, spec, src, n)
+		}
+		r := want[n]
+		w: Typed_Piece
+		want_err: string
+		if r.at > 0 && has_bom(r.text) && spec != .Json5 {
+			bom := core.Typed_Error{kind = .Walk, at = r.at, inner = {at = r.at, rules = &json.RULES, kind = .Bad_Char}}
+			want_err = error_text(bom, 0)
+			if want_read.collect != nil {
+				append(&want_sink.errors, bom)
+			}
+		} else {
+			mark := len(want_sink.errors)
+			e: core.Typed_Error
+			switch spec {
+			case .Json:  e = json.unmarshal(transmute([]u8)r.text, .Json, &w, plan, want_read, {}, context.temp_allocator)
+			case .Jsonc: e = json.unmarshal(transmute([]u8)r.text, .Jsonc, &w, plan, want_read, {}, context.temp_allocator)
+			case .Json5: e = json.unmarshal(transmute([]u8)r.text, .Json5, &w, plan, want_read, {}, context.temp_allocator)
+			}
+			want_err = error_text(e, r.at)
+			for &x in want_sink.errors[mark:] {
+				x.at += r.at
+				if x.kind == .Walk {
+					x.inner.at += r.at
+				}
+			}
+		}
+		got_err := error_text(err, 0)
+		if !testing.expectf(t, got_err == want_err, "%v %v %v %q: record %d at %d: %s, want %s", framing, spec, read, src, n, r.at, got_err, want_err) {
+			return false
+		}
+		if err.kind == .None && !testing.expectf(t, fmt.tprint(v) == fmt.tprint(w), "%v %v %q: record %d read %v, want %v", framing, spec, src, n, v, w) {
+			return false
+		}
+		n += 1
+	}
+	if !testing.expectf(t, n == len(want) && it.fault == framed, "%v %v %q: %d records, fault %v, want %d, %v", framing, spec, src, n, it.fault, len(want), framed) {
+		return false
+	}
+	return testing.expectf(t, fmt.tprint(got_sink.errors[:]) == fmt.tprint(want_sink.errors[:]), "%v %v %q: collected %v, want %v", framing, spec, src, got_sink.errors[:], want_sink.errors[:])
+}
+
+@(test)
+records_read_as_unmarshal :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	plan, err := json.plan_make(Typed_Piece)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	defer typed.plan_destroy(&plan)
+	state := rand.create(2)
+	gen := rand.default_random_generator(&state)
+	breakers := "x\"}],:\n\r \x1e\\1"
+	sink: typed.Collected
+	reads := []typed.Read_Options{{}, {collect = &sink}, {refuse_duplicates = true}, {unknown = .Refuse}}
+	for round in 0 ..< 16 {
+		framing := core.Framing.Lines if round % 2 == 0 else core.Framing.Seq
+		src := seeded_text(gen, framing)
+		buf := make([]u8, len(src), context.temp_allocator)
+		for i in -1 ..< len(src) {
+			for c in transmute([]u8)breakers {
+				copy(buf, src)
+				if i >= 0 {
+					buf[i] = c
+				}
+				for spec in json.Spec {
+					for read in reads {
+						if !expect_read(t, string(buf), framing, spec, read, &plan) {
+							return
+						}
+					}
+				}
+				if i < 0 {
+					break
+				}
+			}
+		}
+		free_all(context.temp_allocator)
+	}
+}
+
+@(test)
+records_build_places_faults :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "{\"a\":[1,2]}\n[1,}\n\xef\xbb\xbf2\n"
+	it := records.open(transmute([]u8)src, json.as(.Json))
+	defer records.close(&it)
+	rec, _ := records.next(&it)
+	doc, err := records.build(&it, rec, context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	path, _ := core.parse_path(".a[1]", context.temp_allocator)
+	answers, _ := core.query(&doc, path, allocator = context.temp_allocator)
+	testing.expect_value(t, len(answers), 1)
+	rec, _ = records.next(&it)
+	_, err = records.build(&it, rec, context.temp_allocator)
+	testing.expect_value(t, err, core.Document_Error{kind = .Walk, at = 15, inner = {at = 15, rules = &json.RULES, kind = .Bad_Char}})
+	rec, _ = records.next(&it)
+	_, err = records.build(&it, rec, context.temp_allocator)
+	testing.expect_value(t, err, core.Document_Error{kind = .Walk, at = 17, inner = {at = 17, rules = &json.RULES, kind = .Bad_Char}})
 }

@@ -1,5 +1,6 @@
 package json
 
+import "base:runtime"
 import core "../core"
 import typed "../core/typed"
 
@@ -27,16 +28,42 @@ unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Opti
 
 @(private)
 unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
-	if read.refuse_duplicates {
-		doc, built := build(src, S, opts, true, context.temp_allocator)
+	stack: [core.MAX_DEPTH + 2]typed.Frame = ---
+	frames := stack[:]
+	if opts.max_depth > core.MAX_DEPTH {
+		wide, failed := make([]typed.Frame, int(opts.max_depth) + 2, context.temp_allocator)
+		if failed != nil {
+			return {kind = .Out_Of_Memory}
+		}
+		frames = wide
+	}
+	err: core.Typed_Error
+	read_value(src, 0, u64(len(src)), S, target, T, plan, read, opts, frames, allocator, &err, false)
+	return err
+}
+
+// Reads the document of `src[lo:cut]` into `target` with `frames`, one more than `opts` lets a text open, and stores
+// its error in `err`, with every offset from `src`'s first byte. A record's read (`LINE`) walks it in place in `src`
+// as `walk_line` does, and `cold` says only a read of `src[:cut]` tells its answer. The error goes out by pointer, as
+// copies of it through the record reader's calls cost a record's read more than its tokens.
+@(private)
+read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator: runtime.Allocator, err: ^core.Typed_Error, $LINE: bool) -> (cold: bool) {
+	// A BOM past the input's first byte is the read's `Bad_Char`, in a spec where it is no whitespace, and `build` of
+	// the text from `lo` would pass over it.
+	if read.refuse_duplicates && (lo == 0 || S == .Json5 || core.text_start(src[lo:cut], 0) == 0) {
+		doc, built := build(src[lo:cut], S, opts, true, context.temp_allocator)
 		if built.kind == .Walk {
-			return {kind = .Walk, at = built.at, inner = built.inner}
+			built.inner.at += lo
+			err^ = {kind = .Walk, at = built.at + lo, inner = built.inner}
+			return
 		}
 		if built.kind == .Duplicate_Key {
-			return {kind = .Duplicate_Key, at = built.at}
+			err^ = {kind = .Duplicate_Key, at = built.at + lo}
+			return
 		}
 		if built.kind != .None {
-			return {kind = .Out_Of_Memory}
+			err^ = {kind = .Out_Of_Memory}
+			return
 		}
 		core.destroy(&doc)
 	}
@@ -48,23 +75,22 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 		_, s.fault = walk(h.src, at, S, (^Options)(h.format)^, &s, nil, typed.on_tag_token)
 		return s
 	}
-	stack: [core.MAX_DEPTH + 2]typed.Frame = ---
-	frames := stack[:]
-	if opts.max_depth > core.MAX_DEPTH {
-		wide, failed := make([]typed.Frame, int(opts.max_depth) + 2, context.temp_allocator)
-		if failed != nil {
-			return {kind = .Out_Of_Memory}
-		}
-		frames = wide
+	text := src if LINE else src[:cut]
+	regs, started := typed.read_start(&h, text, plan, &SPELLING, T, target, read, frames, allocator)
+	if started.kind != .None {
+		err^ = started
+		return
 	}
-	regs, err := typed.read_start(&h, src, plan, &SPELLING, T, target, read, frames, allocator)
-	if err.kind != .None {
-		return err
-	}
-	when S == .Json5 {
-		fault := walk_text(src, 0, S, opts, &h, &regs, typed.on_token_spelled)
+	on :: typed.on_token_spelled when S == .Json5 else typed.on_token
+	fault: Maybe(core.Fault)
+	when LINE {
+		fault, cold = walk_line(src, lo, cut, S, opts, &h, &regs, on)
 	} else {
-		fault := walk_text(src, 0, S, opts, &h, &regs, typed.on_token)
+		fault = walk_text(text, lo, S, opts, &h, &regs, on)
 	}
-	return typed.read_end(&h, regs, fault)
+	// `read_end` only reports, so a read with no fault and no refusal leaves `err` as it is.
+	if fault != nil || h.first.kind != .None {
+		err^ = typed.read_end(&h, regs, fault)
+	}
+	return
 }
