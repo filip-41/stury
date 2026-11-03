@@ -242,9 +242,6 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 					fault = pos - 1
 				} else if bad != 0 {
 					fault = pos + int(intrinsics.count_trailing_zeros(bad))
-					if bare & (bad & -bad) != 0 {
-						detail = .Bare_Quote
-					}
 				}
 				// All ones when the block ended inside a quoted field, the mask the next block's run starts from.
 				w.in_quote = u64(0) - (instr >> 63)
@@ -325,8 +322,8 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			check = true
 		}
 		if check && !kernel.utf8_clean(T, w.utf8) && .Invalid_Utf8 not_in w.tolerate {
-			if at, k := utf8_fault(src, int(lo), pos); at >= 0 && (fault < 0 || at < fault) {
-				fault, kind, detail = at, k, .None
+			if at, k, d := utf8_fault(src, int(lo), pos); at >= 0 && (fault < 0 || at < fault) {
+				fault, kind, detail = at, k, d
 			}
 		}
 
@@ -358,6 +355,11 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		}
 
 		if fault >= 0 {
+			// A mask fault names its rule by its byte: a CR with no LF, a quote in an unquoted cell, else a byte after a
+			// closing quote.
+			if kind == .Bad_Char && detail == .None {
+				detail = .Bare_Quote if base[fault] == '"' else .Lone_Cr if base[fault] == '\r' else .After_Quote
+			}
 			return core.fault_at(u64(fault), kind, u8(detail))
 		}
 		pos += 64
@@ -366,7 +368,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 	// Faults that only the text's end shows, in text order. They are a CR or backslash left open by the last block, a
 	// quoted field never closed, a UTF-8 sequence left open, then the last cell's width.
 	if w.cr != 0 {
-		return core.fault_at(u64(n - 1), .Bad_Char)
+		return core.fault_at(u64(n - 1), .Bad_Char, u8(Detail.Lone_Cr))
 	}
 	when S == .Tsv {
 		if w.esc != 0 {
@@ -377,12 +379,12 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 	// ill-formed, and `utf8_fault` reports it at `n`.
 	when S == .Csv {
 		if w.in_quote != 0 {
-			return core.fault_at(u64(scan_record(src, w.rec_lo, 0, S, delim).quote), .Truncated)
+			return core.fault_at(u64(scan_record(src, w.rec_lo, 0, S, delim).quote), .Truncated, u8(Detail.Open_Quote))
 		}
 	}
 	if w.prev_high && !kernel.utf8_ok(w.utf8) && .Invalid_Utf8 not_in w.tolerate {
-		if at, k := utf8_fault(src, int(lo), n); at >= 0 {
-			return core.fault_at(u64(at), k)
+		if at, k, d := utf8_fault(src, int(lo), n); at >= 0 {
+			return core.fault_at(u64(at), k, u8(d))
 		}
 	}
 	when EMIT || H == Batch {

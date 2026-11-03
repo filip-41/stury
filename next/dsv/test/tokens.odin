@@ -134,9 +134,9 @@ Want :: struct {
 @(rodata)
 WALKED := []Walked {
 	{"junk\na,b\n1,2\n", 5, 13, {}, {{5, 0, .Array, .Value, 0}, {9, 0, .Map, .Value, 0}, {5, 1, .Plain, .Key, 0}, {9, 1, .Plain, .Value, 0}, {7, 1, .Plain, .Key, 0}, {11, 1, .Plain, .Value, 0}, {12, 1, .End, .Value, 0}, {13, 0, .End, .Value, 0}}},
-	{"\xc3\xa9", 1, 1, {1, .Bad_Char, .None}, {{1, 0, .Array, .Value, 0}}},
-	{"\xf0\x9f,\x98\x80", 2, 3, {3, .Bad_Char, .None}, {{2, 0, .Array, .Value, 0}}},
-	{"\xe6\x97", 1, 1, {1, .Bad_Char, .None}, {{1, 0, .Array, .Value, 0}}},
+	{"\xc3\xa9", 1, 1, {1, .Bad_Char, .Bad_Utf8}, {{1, 0, .Array, .Value, 0}}},
+	{"\xf0\x9f,\x98\x80", 2, 3, {3, .Bad_Char, .Bad_Utf8}, {{2, 0, .Array, .Value, 0}}},
+	{"\xe6\x97", 1, 1, {1, .Bad_Char, .Bad_Utf8}, {{1, 0, .Array, .Value, 0}}},
 	{"a,b", 100, 3, {}, {{3, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
 	{"", 0, 0, {}, {{0, 0, .Array, .Value, 0}, {0, 0, .End, .Value, 0}}},
 	{"\r\n\n", 0, 3, {}, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
@@ -398,7 +398,32 @@ detail_rules :: proc(t: ^testing.T) {
 	testing.expect_value(t, strings.to_string(b), "dsv.bare_quote")
 	strings.builder_reset(&b)
 	core.render(strings.to_writer(&b), transmute([]u8)string("a\"b\n"), f)
-	testing.expect_value(t, strings.to_string(b), "1:2: Quote in an unquoted cell")
+	testing.expect_value(t, strings.to_string(b), "1:2: Quote inside an unquoted field")
+}
+
+// Each CSV fault reads as a sentence that says what is wrong, at the byte the rule names.
+@(test)
+fault_sentences :: proc(t: ^testing.T) {
+	Case :: struct {
+		text, line: string,
+	}
+	cases := [?]Case {
+		{"a,b\n3\n", "2:2: Record has the wrong number of fields"},
+		{"a,b\n1,2,3\n", "2:4: Record has the wrong number of fields"},
+		{"a,b\n1,\xe9\n", "2:3: Invalid UTF-8"},
+		{"a,b\n1,2\xc3", "2:5: Unfinished UTF-8 sequence"},
+		{"a,b\n1,2\r3,4\n", "2:4: Carriage return not before a line feed"},
+		{"a,b\n\"3\"x,4\n", "2:4: Character after a closing quote"},
+		{"a,b\nx\"y,4\n", "2:2: Quote inside an unquoted field"},
+		{"a,b\n1,\"2\n3,4\n", "2:3: Unfinished quoted field"},
+	}
+	b := strings.builder_make(context.temp_allocator)
+	for c in cases {
+		f, bad := dsv.validate(transmute([]u8)c.text, .Csv).?
+		strings.builder_reset(&b)
+		core.render(strings.to_writer(&b), transmute([]u8)c.text, f)
+		testing.expectf(t, bad && strings.to_string(b) == c.line, "%q: %q, want %q", c.text, strings.to_string(b), c.line)
+	}
 }
 
 // Whether a token's span holds what its kind says. A cell holds no line end outside quotes and is quoted where its

@@ -146,12 +146,12 @@ ESCAPE_LETTERS := kernel.Nibble_Table {
 }
 
 // The first malformed UTF-8 sequence in the block at `pos`, starting from the lead byte of the sequence that holds
-// `pos` but never before `floor`. Returns `Bad_Char` at the sequence's lead byte, `Truncated` at `len(src)` when the
-// text ends inside a sequence that is valid so far, or -1 when there is none. A block whose error mask is set comes
+// `pos` but never before `floor`. Returns `Bad_Char` (`Bad_Utf8`) at the sequence's lead byte, `Truncated` (`Cut_Utf8`)
+// at `len(src)` when the text ends inside a sequence that is valid so far, or -1 when there is none. A block whose error mask is set comes
 // here, and so does the text's end when a sequence is left open there, where the lead byte alone decides `Truncated`
 // from its sequence's length.
 @(private, cold)
-utf8_fault :: #force_no_inline proc "contextless" (src: []u8, floor, pos: int) -> (fault: int, kind: core.Fault_Kind) {
+utf8_fault :: #force_no_inline proc "contextless" (src: []u8, floor, pos: int) -> (fault: int, kind: core.Fault_Kind, detail: Detail) {
 	i := pos
 	for i > max(pos - 3, floor) && src[i - 1] & 0xc0 == 0x80 {
 		i -= 1
@@ -169,13 +169,13 @@ utf8_fault :: #force_no_inline proc "contextless" (src: []u8, floor, pos: int) -
 		q, k := kernel.utf8_char(base[i:], end)
 		if k != .None {
 			if k == .Truncated {
-				return len(src), .Truncated
+				return len(src), .Truncated, .Cut_Utf8
 			}
-			return i, .Bad_Char
+			return i, .Bad_Char, .Bad_Utf8
 		}
 		i = int(intrinsics.ptr_sub(q, base))
 	}
-	return -1, .Bad_Char
+	return -1, .Bad_Char, .None
 }
 
 // Whether the first separator in `seps` at or after `pos` ends the cell that starts at `lo` more than `max(u32)` bytes

@@ -59,11 +59,16 @@ Detail :: enum u8 {
 	None,
 	Field_Count, // `Bad_Char`, at the delimiter past the width of a wide record or the line end of a narrow one
 	Bare_Quote, // `Bad_Char`, a quote inside an unquoted CSV cell
+	Bad_Utf8, // `Bad_Char`, at the lead byte of an ill-formed sequence
+	Lone_Cr, // `Bad_Char`, a CR with no LF after it
+	After_Quote, // `Bad_Char`, a byte after a closing quote that is not a quote, the delimiter or a line end
+	Open_Quote, // `Truncated`, at the opening quote of a quoted cell the text never closes
+	Cut_Utf8, // `Truncated`, at `len(src)`, where the text ends inside a UTF-8 sequence
 }
 
 // A delimited text's rules, indexed by `Detail`. Every fault the walk returns points to this table.
 @(rodata)
-RULES := core.Rules{"dsv", {{}, {"field_count", "Record has the wrong number of fields"}, {"bare_quote", "Quote in an unquoted cell"}}}
+RULES := core.Rules{"dsv", {{}, {"field_count", "Record has the wrong number of fields"}, {"bare_quote", "Quote inside an unquoted field"}, {"bad_utf8", "Invalid UTF-8"}, {"lone_cr", "Carriage return not before a line feed"}, {"after_quote", "Character after a closing quote"}, {"open_quote", "Unfinished quoted field"}, {"cut_utf8", "Unfinished UTF-8 sequence"}}}
 
 // The delimiter a walk of `S` reads. `opts.delimiter` 0 selects the spec's own, `,` for CSV and Plain and a tab for
 // TSV. The pass reads it once into a register and compares each block against it.

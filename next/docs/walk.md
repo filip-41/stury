@@ -195,6 +195,10 @@ independently, 0 for none. `at` is the byte the kind names. A count or limit is 
 `line:col: message`) from that table without calling into the format, so a format outside stury can add its own table
 and render the same way. A code is stable across releases and a message may change.
 
+dsv names what is wrong within `Bad_Char` and `Truncated`: `field_count` (a record of another width, at the delimiter past
+the width or at the line end), `bare_quote`, `after_quote` (a byte after a closing quote that is no quote, delimiter or line
+end), `lone_cr`, `bad_utf8` (at the lead byte), and for `Truncated` `open_quote` (at the opening quote) and `cut_utf8`.
+
 `locate` returns a byte's line and column, both counted from 1, with the column in bytes. It continues from the
 position a `Lines` count reached, so faults met in offset order scan each byte once.
 

@@ -10,7 +10,7 @@ import "core:reflect"
 // and the byte `at` names.
 Fault_Kind :: enum u8 {
 	None, // no fault
-	Truncated, // json, dsv: the input ended inside a construct, at `len(src)`
+	Truncated, // json, dsv: the input ended inside a construct, at `len(src)`, or dsv's quoted cell never closed, at its opening quote
 	Bad_Char, // json, dsv: the first byte that cannot extend the construct or the text, or that is not UTF-8
 	Bad_Escape, // json: at the escape's letter, or a lone surrogate half at its backslash, dsv (TSV): at the backslash
 	Bad_Number, // json: at the byte that breaks the number

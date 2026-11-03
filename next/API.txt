@@ -426,7 +426,7 @@ walk :: proc (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^co
 # dsv
 Detail :: enum u8 {
 Options :: struct {
-RULES := core.Rules{, {{}, {, }, {, }}}
+RULES := core.Rules{, {{}, {, }, {, }, {, }, {, }, {, }, {, }, {, }}}
 Spec :: enum u8 {
 Tolerance :: enum u8 {
 as :: proc (spec: Spec, layout := Options{}) -> core.As {

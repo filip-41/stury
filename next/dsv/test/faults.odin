@@ -134,9 +134,22 @@ expect_fault :: proc(t: ^testing.T, c: Case, got: Maybe(core.Fault), shift := 0,
 	if kind == FIELD_COUNT {
 		kind, detail = .Bad_Char, u8(dsv.Detail.Field_Count)
 	}
-	// A quote byte is a fault only inside an unquoted CSV cell.
-	if c.kind == .Bad_Char && !tsv && c.offset < u64(len(c.text)) && c.text[c.offset] == '"' {
-		detail = u8(dsv.Detail.Bare_Quote)
+	// The rule within the kind follows the byte the fault names. A quote byte is a fault only inside an unquoted CSV cell,
+	// and a text cut short ends in a quote's cell or a UTF-8 sequence.
+	if c.kind != FIELD_COUNT && c.kind != .Bad_Escape && c.kind != nil {
+		at := c.text[c.offset] if c.offset < u64(len(c.text)) else 0
+		switch {
+		case c.kind == .Truncated:
+			detail = u8(dsv.Detail.Open_Quote if at == '"' else dsv.Detail.Cut_Utf8)
+		case at == '"' && !tsv:
+			detail = u8(dsv.Detail.Bare_Quote)
+		case at == '\r':
+			detail = u8(dsv.Detail.Lone_Cr)
+		case at >= 0x80:
+			detail = u8(dsv.Detail.Bad_Utf8)
+		case !tsv:
+			detail = u8(dsv.Detail.After_Quote)
+		}
 	}
 	want := core.Fault{c.offset + u64(shift), &dsv.RULES, kind, detail}
 	return testing.expectf(t, got == want, "%q shifted %d: %v, want %v", c.text, shift, got, want, loc = loc)
@@ -161,7 +174,7 @@ bare_quote_detail :: proc(t: ^testing.T) {
 		testing.expectf(t, fault == f && hi == c.offset, "%q: walk %d %v, validate %v", c.text, hi, fault, f)
 	}
 	f, bad := dsv.validate(transmute([]u8)string("\"a\"b\n"), .Csv).?
-	testing.expectf(t, bad && f.kind == .Bad_Char && f.at == 3 && f.detail == u8(dsv.Detail.None), "%v", f)
+	testing.expectf(t, bad && f.kind == .Bad_Char && f.at == 3 && f.detail == u8(dsv.Detail.After_Quote), "%v", f)
 }
 
 // Each case after 0 to 129 empty lines, which are no records. Every quote, CR, escape and UTF-8 sequence of a case
