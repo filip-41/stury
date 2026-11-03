@@ -39,8 +39,8 @@ BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
 
 // Returns a builder over `src` with an open stack of `depth` slots, none when `depth` is 0, room for `facts` facts, and
 // at least 16 nodes, `nodes` when that is larger. The hook pushes an open container's frame with no capacity test, so
-// `depth` must be at least the walk's depth limit. The nodes are allocated last, so an arena gets their unused tail back
-// at `builder_end`. A format's `build` passes the builder to its walk with a builder hook and ends it with `builder_end`.
+// `depth` must be at least the walk's depth limit. The nodes are allocated last, and a document keeps the reservation
+// they were given, whose unused tail an arena shrinking it would write zeros over. A format's `build` passes the builder to its walk with a builder hook and ends it with `builder_end`.
 // A refused allocation returns a builder whose `err` is `.No_Memory` and whose node array is nil.
 builder_start :: proc(src: []u8, spelling: ^core.Spelling, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, depth: int, facts := 0) -> Builder {
 	b := Builder{refuse = refuse_duplicates, pending = -1, last = core.NO_NODE}
@@ -125,16 +125,6 @@ builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault))
 	if len(b.doc.facts) > 1 {
 		slice.stable_sort_by(b.doc.facts, proc(a, b: core.Fact) -> bool { return a.node < b.node })
 	}
-	// The build wrote fewer nodes and facts than it reserved. Return the tail where the allocator can resize. An arena
-	// resizes only its last block, which is the nodes in a text with no facts, and the document owns what it keeps.
-	shrink :: proc(allocator: runtime.Allocator, arr: ^[]$T, n: int) {
-		if fresh := trim(allocator, arr^, n); len(fresh) == n {
-			arr^ = fresh
-		}
-	}
-	shrink(b.doc.allocator, &b.doc.nodes_alloc, n)
-	shrink(b.doc.allocator, &b.doc.facts_alloc, b.n_facts)
-	shrink(b.doc.allocator, &b.doc.counts_alloc, len(b.doc.counts))
 	b.doc.nodes = b.doc.nodes_alloc[:n]
 	b.doc.facts = b.doc.facts_alloc[:b.n_facts]
 	b.doc.counts = b.doc.counts_alloc[:len(b.doc.counts)]

@@ -70,7 +70,7 @@ Emit :: struct {
 	cap:     int, // the deepest level the stack holds
 	line_at: int, // the deepest level whose line fits `NODE_ROOM`
 	copy:    bool, // a string is copied as it was read. False when `ascii`, `escape_html` or `respell_strings` ask for another spelling
-	hi:      V, // with `copy` false, the bytes from which a string is written by the rare path: 0x80 under `ascii`, else 0xFF
+	hi:      V, // with `copy` false, the bytes from which a string is written by the rare path: DEL under `ascii`, else 0xFF
 	html:    [4]V, // with `copy` false, more such bytes: `<`, `>`, `&` and 0xE2 under `escape_html`, else a backslash
 }
 
@@ -86,7 +86,7 @@ put_start :: proc(e: ^Emit, out: ^write.Out, src: []u8, doc: ^core.Document, opt
 		stack = raw_data(wide)
 	}
 	e.copy = copies_strings(opts)
-	e.hi = V(0x80) if opts.ascii else V(0xFF)
+	e.hi = V(0x7f) if opts.ascii else V(0xFF)
 	e.html = {V('\\'), V('\\'), V('\\'), V('\\')}
 	if opts.escape_html {
 		e.html = {V('<'), V('>'), V('&'), V(0xE2)}

@@ -133,7 +133,7 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 					return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 				}
 			}
-			return fault(w, hs, p, .Bad_Char, .Identifier)
+			return fault(w, hs, p, .Bad_Char)
 		}
 	}
 	when intrinsics.type_has_field(H, "expect") {

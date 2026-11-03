@@ -112,7 +112,8 @@ The builder is package `core/build`, which imports `core`. Both run the walk wit
 `build.builder_end`, and store the spec in `doc.read.spec`. `build.builder_start` reserves a stack of `depth` slots, or
 1 when `depth` is 0, the `facts` it is given, and at least 16 nodes, `nodes` when that is larger. The hook pushes a
 frame with no capacity test, so `depth` must be at least the walk's depth limit. The node buffer is not zeroed, and it
-is allocated last, so an arena gets its unused tail back at `builder_end`. A refused allocation leaves the builder with
+is allocated last, so `builder_free` frees it first. A document keeps its buffer whole, since an arena that shrank it would
+zero, and so touch, the unused tail. A refused allocation leaves the builder with
 `.No_Memory` and no nodes, and no hook runs over a nil array.
 
 A build that ends in `.No_Memory` reads the text again with `build.builder_hook_count` or

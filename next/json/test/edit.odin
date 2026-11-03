@@ -723,7 +723,7 @@ render_inner_cause :: proc(t: ^testing.T) {
 	testing.expect_value(t, ce.kind, core.Document_Error_Kind.Bad_Result)
 	strings.builder_reset(&b)
 	core.render(strings.to_writer(&b), j5.src, ce)
-	testing.expect_value(t, strings.to_string(b), "The edited text does not read\n  caused by Invalid unquoted key")
+	testing.expect_value(t, strings.to_string(b), "The edited text does not read\n  caused by Unexpected character")
 }
 
 // `span` on a string or a key returns its source bytes with the quotes, which the splice writer copies.

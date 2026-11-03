@@ -203,7 +203,7 @@ JSON5_IN_JSONC := []Case {
 	{"NaN", .Bad_Char, 0},
 }
 
-// Holds bytes where an object's key must start, with `Detail.Identifier`.
+// Holds bytes where an object's key must start, which JSON and JSONC fault with no detail.
 @(rodata)
 KEY_CASES := []Case {
 	{"{1:2}", .Bad_Char, 1},
@@ -263,10 +263,10 @@ faults_at_their_byte :: proc(t: ^testing.T) {
 		expect_fault(t, c, .Jsonc, .None)
 	}
 	for c in KEY_CASES {
-		expect_fault(t, c, .Json, .Identifier)
+		expect_fault(t, c, .Json, .None)
 	}
 	for c in KEY_CASES_JSONC {
-		expect_fault(t, c, .Jsonc, .Identifier)
+		expect_fault(t, c, .Jsonc, .None)
 	}
 	for c in COLON_CASES {
 		expect_fault(t, c, .Json, .Colon)

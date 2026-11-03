@@ -84,7 +84,7 @@ model_string :: proc(s: []u8, opts: core.Write_Options) -> (text: [dynamic]u8, o
 			model_unit(&text, cp)
 		case opts.escape_html && (cp == '<' || cp == '>' || cp == '&' || cp == 0x2028 || cp == 0x2029):
 			model_unit(&text, cp)
-		case opts.ascii && cp >= 0x80:
+		case opts.ascii && cp >= 0x7f:
 			if cp >= 0x10000 {
 				model_unit(&text, 0xD800 + (cp - 0x10000) >> 10)
 				model_unit(&text, 0xDC00 + (cp - 0x10000) & 0x3FF)

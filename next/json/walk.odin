@@ -55,7 +55,7 @@ Tolerance :: enum u8 {
 Detail :: enum u8 {
 	None,
 	Literal, // `Bad_Char`: a byte breaking `true`, `false` or `null`
-	Identifier, // `Bad_Char`: a byte that starts no key, quoted or not, where an object's key must start
+	Identifier, // `Bad_Char`: JSON5 only, a byte that starts no key, quoted or not, where an object's key must start
 	Colon, // `Bad_Char`: a byte where a member's colon must be
 }
 

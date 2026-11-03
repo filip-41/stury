@@ -71,16 +71,6 @@ sparse_text_fits_small_arena :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(doc.nodes), 1)
 }
 
-// A heap build returns the node and fact allocations' unused tails, so a document does not hold its reservation.
-@(test)
-build_trims_allocations :: proc(t: ^testing.T) {
-	doc, err := json.build(transmute([]u8)string(`[1,2,3]`), .Json)
-	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, len(doc.nodes_alloc), len(doc.nodes))
-	testing.expect_value(t, len(doc.facts_alloc), len(doc.facts))
-}
-
 // A `.Duplicate_Key` found before an allocation that then fails stays the error: `.No_Memory` names no byte and does
 // not replace it.
 @(test)

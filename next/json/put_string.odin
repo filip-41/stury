@@ -122,8 +122,8 @@ dirty :: #force_inline proc "contextless" (v: V) -> bool {
 	return kernel.any_lane16(simd.lanes_lt(transmute(#simd[16]i8)v, (#simd[16]i8)(0x20)) | simd.lanes_eq(v, QUOTE) | simd.lanes_eq(v, BACKSLASH))
 }
 
-// Writes `s` as a JSON string at the output's cursor and returns `.Bad_Utf8` when it is not UTF-8. With `ascii` every
-// rune past U+007F is written as `\uXXXX`, and with `escape_html` `<`, `>`, `&`, U+2028 and U+2029 are.
+// Writes `s` as a JSON string at the output's cursor and returns `.Bad_Utf8` when it is not UTF-8. With `ascii` DEL and
+// every rune past U+007F are written as `\uXXXX`, and with `escape_html` `<`, `>`, `&`, U+2028 and U+2029 are.
 put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind {
 	switch {
 	case opts.ascii && opts.escape_html:
@@ -367,7 +367,7 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int) -> core.
 	return .None
 }
 
-// Writes `s` one byte at a time with the stops `ascii` and `escape_html` add: a rune past U+007F as `\uXXXX`, a surrogate
+// Writes `s` one byte at a time with the stops `ascii` and `escape_html` add: DEL and a rune past U+007F as `\uXXXX`, a surrogate
 // pair past U+FFFF, and `<`, `>`, `&`, U+2028 and U+2029 as `\u00xx` and `\u202x`. Any other rune is copied as it is.
 @(private)
 put_escaped :: proc(out: ^write.Out, s: string, $ASCII, $HTML: bool) -> core.Typed_Error_Kind #no_bounds_check {
@@ -387,9 +387,8 @@ put_escaped :: proc(out: ^write.Out, s: string, $ASCII, $HTML: bool) -> core.Typ
 				if i + 16 <= end {
 					v := intrinsics.unaligned_load((^V)(src[i:]))
 					stop := dirty(v)
-					when HTML {
-						stop ||= kernel.any_lane16(simd.lanes_eq(v, V('<')) | simd.lanes_eq(v, V('>')) | simd.lanes_eq(v, V('&')))
-					}
+					stop ||= HTML && kernel.any_lane16(simd.lanes_eq(v, V('<')) | simd.lanes_eq(v, V('>')) | simd.lanes_eq(v, V('&')))
+					stop ||= ASCII && kernel.any_lane16(simd.lanes_eq(v, V(0x7f)))
 					if !stop {
 						intrinsics.unaligned_store((^V)(base[o:]), v)
 						o += 16
@@ -402,7 +401,7 @@ put_escaped :: proc(out: ^write.Out, s: string, $ASCII, $HTML: bool) -> core.Typ
 			}
 			b := src[i]
 			if b < 0x80 {
-				if HTML && (b == '<' || b == '>' || b == '&') {
+				if HTML && (b == '<' || b == '>' || b == '&') || ASCII && b == 0x7f {
 					o += u_escape(base[o:], u16(b))
 				} else {
 					seq := ESC_SEQ[b]
