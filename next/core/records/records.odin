@@ -357,8 +357,8 @@ stream_next :: proc(it: ^Reader) -> (rec: Record, ok: bool) {
 }
 
 // Whether what a service answered for the record looked for from `pos` stands. While more input may come, a walked
-// framing cannot tell a fault within `REACH` bytes of the window's end, or a record that ends there, and no framing can
-// tell the window's end from the input's. Then `pos` and `state` come back and it returns false. A `Truncated` at the
+// framing cannot tell a fault within `REACH` bytes of the window's end, or a record whose framing read no byte past it,
+// and no framing can tell the window's end from the input's. Then `pos` and `state` come back and it returns false. A `Truncated` at the
 // input's end holds the bytes past the last whole record, but under `.Entries`, which reads as text in memory does.
 @(private)
 window_settled :: proc(it: ^Reader, ok: bool, pos: u64, state: [2]u8) -> bool {
@@ -378,7 +378,7 @@ window_settled :: proc(it: ^Reader, ok: bool, pos: u64, state: [2]u8) -> bool {
 			}
 			return true
 		}
-	} else if it.last || ok && (!walked || it.pos + REACH <= n) {
+	} else if it.last || ok && (!walked || it.pos < n) {
 		return true
 	}
 	// A window cut at an end byte has no record left to look for.

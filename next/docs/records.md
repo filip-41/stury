@@ -234,8 +234,9 @@ for rec in records.next(&it) {
 ```
 
 - The window always ends on a whole record. Under `.Lines` and `.Seq` it ends at the last LF or 0x1E it holds. Under
-  `.Concatenated` a record whose walk faults within 12 bytes of the window's end, while more input may come, is walked
-  again once more is read, since the bytes after it may make it whole. Under `.Entries` the whole input is read first.
+  `.Concatenated` a record whose walk faults within 12 bytes of the window's end, or ends at it, while more input may
+  come, is walked again once more is read, since the bytes after it may make it whole. A record with a byte after it,
+  such as the LF a pipe's writer ends a text with, is given at once. Under `.Entries` the whole input is read first.
 - When the input ends inside a record that a longer input could finish, a `Truncated` fault at the input's end, the
   records end with no fault and the bytes past the last whole record in `it.held`, at offset `it.held_at`. Under
   `.Concatenated` those bytes start after the last record, gap included. The same text in memory ends on the
@@ -267,8 +268,8 @@ text by. `column` and `cell` are a format's with named columns, and `close` free
 `rawptr`, since `core/records` imports `core`.
 
 dsv reads a stream under `.Lines`. A quoted cell may hold an LF, so the window is found by walking, as under
-`.Concatenated`: a row, or a fault, within 12 bytes of the window's end, and any `Truncated` fault while more input may
-come, is read again once more is read. Its batch of rows is dropped when the window moves, and the walk resumes at the
+`.Concatenated`: a row that ends at the window's end, a fault within 12 bytes of it, and any `Truncated` fault while
+more input may come, are read again once more is read. Its batch of rows is dropped when the window moves, and the walk resumes at the
 byte past the last row given. The header's cells are kept as a copy of its line, so on a stream `build` gives a
 document over that line and the row's, which lasts until the next call and whose offsets count from it, and `read`
 reports its errors at the input's own offsets.

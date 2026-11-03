@@ -976,8 +976,8 @@ records_stream_limits_and_failures :: proc(t: ^testing.T) {
 		records.close(&it)
 	}
 
-	// A failing input ends the records it gave whole and holds the bytes past them. Under `.Concatenated` a record
-	// within 12 bytes of the window's end is not known to be whole.
+	// A failing input ends the records it gave whole and holds the bytes past them. Under `.Concatenated` a record is
+	// whole once a byte past it is read.
 	for framing in ([]core.Framing{.Lines, .Concatenated, .Entries}) {
 		text := "[1,22,333,4444,55555,666666]" if framing == .Entries else "1\n22\n333\n4444\n55555\n666666\n"
 		c := Chunked{src = transmute([]u8)text, sizes = {2}, fail_at = 24}
@@ -992,7 +992,7 @@ records_stream_limits_and_failures :: proc(t: ^testing.T) {
 		case .Lines:
 			want, held = {"1", "22", "333", "4444", "55555"}, text[20:24]
 		case .Concatenated:
-			want, held = {"1", "22", "333"}, text[8:24]
+			want, held = {"1", "22", "333", "4444", "55555"}, text[19:24]
 		}
 		testing.expectf(t, fmt.tprint(got[:]) == fmt.tprint(want) && it.fault == nil && it.cause == .Unknown && string(it.held) == held, "%v: %v, %v %v, held %q", framing, got[:], it.fault, it.cause, it.held)
 		records.close(&it)
