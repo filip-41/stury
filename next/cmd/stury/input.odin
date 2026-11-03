@@ -313,7 +313,7 @@ text_fault :: proc(ins: ^Inputs, f: core.Fault, at: int, end := -1) -> (jq.Value
 	if json.Spec(ins.as.spec) != .Json {
 		fail_dialect(ins, data, f)
 	}
-	ins.note = fault_note(data, f, ins)
+	ins.note = fault_note(data, f, ins.as, &ins.run.opts)
 	if !ins.run.opts.stream {
 		ins.line, ins.text_end = lines_read(ins, int(f.at) + 1), 0
 		// A record of NDJSON ends at its line's end, where jq ends a literal.
@@ -420,15 +420,11 @@ open_next :: proc(ins: ^Inputs) -> bool {
 	for ins.next_file < len(ins.files) {
 		path := ins.files[ins.next_file]
 		ins.next_file += 1
-		ins.name, ins.line, ins.line_end, ins.file_lines, ins.text_end = "<stdin>" if path == "-" else path, 0, 0, 0, 0
-		f := os.stdin
-		if path != "-" {
-			err: os.Error
-			if f, err = open_input(path); err != nil {
-				message.write_stderr("stury: error: Could not open file %s: %s\n", path, strerror(err))
-				ins.failures += 1
-				continue
-			}
+		ins.name, ins.line, ins.line_end, ins.file_lines, ins.text_end = file_name(path), 0, 0, 0, 0
+		f, opened := open_file(path)
+		if !opened {
+			ins.failures += 1
+			continue
 		}
 		// A JSONC or JSON5 file is one text, its comments around it, so it is read whole, and so is a delimited one, whose
 		// header heads all of it.
@@ -438,14 +434,9 @@ open_next :: proc(ins: ^Inputs) -> bool {
 			take_data(ins, nil)
 			return true
 		}
-		data, err := read_whole(f, runtime.heap_allocator())
-		if f != os.stdin {
-			os.close(f)
-		}
-		if err != nil {
-			message.write_stderr("stury: error: %s\n", strerror(err))
+		data, read := read_file(f)
+		if !read {
 			ins.failures += 1
-			delete(data)
 			continue
 		}
 		ins.run.route.input += len(data)
@@ -454,6 +445,40 @@ open_next :: proc(ins: ^Inputs) -> bool {
 		return true
 	}
 	return false
+}
+
+// The name messages give the file `path` names, "-" being stdin.
+file_name :: proc(path: string) -> string {
+	return "<stdin>" if path == "-" else path
+}
+
+// The file `path` names opened, "-" being stdin, or false, told, when it does not open.
+open_file :: proc(path: string) -> (f: ^os.File, ok: bool) {
+	if path == "-" {
+		return os.stdin, true
+	}
+	err: os.Error
+	if f, err = open_input(path); err != nil {
+		message.write_stderr("stury: error: Could not open file %s: %s\n", path, strerror(err))
+		return nil, false
+	}
+	return f, true
+}
+
+// All of `f`, on the heap, and `f` closed but for stdin, or false, told, when it does not read.
+read_file :: proc(f: ^os.File) -> (data: []byte, ok: bool) {
+	heap := runtime.heap_allocator()
+	err: os.Error
+	data, err = read_whole(f, heap)
+	if f != os.stdin {
+		os.close(f)
+	}
+	if err != nil {
+		message.write_stderr("stury: error: %s\n", strerror(err))
+		delete(data, heap)
+		return nil, false
+	}
+	return data, true
 }
 
 // `data` as the open file's bytes in memory, with its texts read from the start.
@@ -720,40 +745,47 @@ cut_bom_len :: proc(data: []byte) -> int {
 	return k if k < len(BOM) else 0
 }
 
-// A JSONC or JSON5 text the library refuses, told as `NAME:LINE:COLUMN: SENTENCE`, with the line and a caret under the
-// byte when `--max-depth` cures it. Ends the run.
+// A JSONC or JSON5 text the library refuses, told as `fault_told` tells it, with `fault_note` after. Ends the run.
 @(private = "file")
 fail_dialect :: proc(ins: ^Inputs, data: []byte, f: core.Fault) -> ! {
 	run := ins.run
 	flush_some(&run.output, force = true)
+	message.write_stderr("stury: error: %s\n%s", fault_told(ins.name, data, f, ins.as, ins.file_lines), fault_note(data, f, ins.as, &run.opts))
+	finish(run, EXIT_INPUT)
+}
+
+// The fault `f` of the text `data` of file `name`, read as `as`, told as `NAME:LINE:COLUMN: SENTENCE`, its line counted
+// on from the `lines` before `data`, or as `NAME: SENTENCE` when it is at no byte. A JSON text's sentence is the one jq's
+// messages use (`jq.fault_sentence`).
+fault_told :: proc(name: string, data: []byte, f: core.Fault, as: core.As, lines := 0) -> string {
+	if f.rules != &json.RULES {
+		line, col := core.locate(data, f.at)
+		return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, core.rule_of(f).message)
+	}
 	if f.kind in core.AT_NO_BYTE {
-		message.write_stderr("stury: error: %s: %s\n", ins.name, jq.fault_sentence(f, ""))
-		finish(run, EXIT_INPUT)
+		return message.build_temp("%s: %s", name, jq.fault_sentence(f, ""))
 	}
 	line, col := core.locate(data, f.at)
-	line += u64(ins.file_lines)
 	rest := string(data[f.at:])
 	sentence := jq.fault_sentence(f, rest)
 	// JSON5 spells them, JSON has no value for them, and the library refuses them as a literal.
 	unsigned := strings.trim_left(rest, "+-")
-	if json.Spec(ins.as.spec) == .Json5 && f.kind == .Bad_Char && (strings.has_prefix(unsigned, "Infinity") || strings.has_prefix(unsigned, "NaN")) {
+	if json.Spec(as.spec) == .Json5 && f.kind == .Bad_Char && (strings.has_prefix(unsigned, "Infinity") || strings.has_prefix(unsigned, "NaN")) {
 		sentence = "Infinity and NaN have no JSON value"
 	}
-	message.write_stderr("stury: error: %s:%d:%d: %s\n", ins.name, line, col, sentence)
-	message.write_stderr("%s", fault_note(data, f, ins))
-	finish(run, EXIT_INPUT)
+	return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, sentence)
 }
 
 // For the faults whose cure is a flag of stury's own, the line of `data` the fault `f` is at, a caret under its byte,
 // and the flag, else "". A trailing comma and a comment are JSONC's, and a nesting past the cap is raised by
 // --max-depth, which the hint asks for only when it was not given. The text ends in a newline.
-fault_note :: proc(data: []byte, f: core.Fault, ins: ^Inputs) -> string {
+fault_note :: proc(data: []byte, f: core.Fault, as: core.As, o: ^Opts) -> string {
 	at := int(f.at)
 	hint: string
 	switch {
 	case f.kind == .Too_Deep:
-		hint = "a larger --max-depth reads it" if ins.run.opts.max_depth != 0 else "--max-depth N raises the nesting limit"
-	case f.kind != .Bad_Char || at >= len(data) || json.Spec(ins.as.spec) != .Json:
+		hint = "a larger --max-depth reads it" if o.max_depth != 0 else "--max-depth N raises the nesting limit"
+	case f.kind != .Bad_Char || at >= len(data) || json.Spec(as.spec) != .Json:
 		return ""
 	case data[at] == '/' && at + 1 < len(data) && (data[at + 1] == '/' || data[at + 1] == '*'):
 		hint = "--from jsonc reads comments"

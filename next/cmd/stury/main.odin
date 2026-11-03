@@ -22,6 +22,7 @@ package main
 //	stream_fault.odin                --stream for a text that does not parse
 //	route.odin                       the path scan or the interpreter, which answers the filter
 //	explain.odin                     --explain's report of the route and the run
+//	check.odin                       `stury check`, which judges the inputs
 //	filter.odin                      the jq interpreter over each input
 //	print.odin                       output as jq prints it, and what it comes to (`Output`)
 //	message/                         the text of every message, built from a format and its values (package `message`)
@@ -78,7 +79,10 @@ main :: proc() {
 	case o.raw_input && validating:
 		usage_error("check reads JSON texts, not -R's lines")
 	}
-	if validating || cli.formatting {
+	if validating {
+		check_main(&run, &cli)
+	}
+	if cli.formatting {
 		message.write_stderr("stury: this build does not run that yet\n")
 		os.exit(EXIT_USAGE)
 	}

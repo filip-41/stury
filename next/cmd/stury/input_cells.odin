@@ -24,7 +24,7 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 		}
 		if !ins.header_judged {
 			ins.header_judged = true
-			if text, twice := repeated_header(ins, &doc); twice {
+			if text, twice := repeated_header(ins.name, ins.data, &doc); twice {
 				return nil, text, .Error, false
 			}
 			if cols != nil {
@@ -41,26 +41,26 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 
 // The fault `f` of the open file, told as `NAME:LINE:COLUMN: SENTENCE`. The file is read past.
 cells_fault :: proc(ins: ^Inputs, f: core.Fault) -> (jq.Value, string, jq.Parse_Status) {
-	line, col := core.locate(ins.data, f.at)
+	msg := fault_told(ins.name, ins.data, f, ins.as, ins.file_lines)
 	ins.note = ""
 	close_file(ins)
-	return nil, message.build_temp("%s:%d:%d: %s", ins.name, line + u64(ins.file_lines), col, core.rule_of(f).message), .Error
+	return nil, msg, .Error
 }
 
-// The message for a header that names a column twice, at the second, read from the keys of the file's record `doc`.
-@(private = "file")
-repeated_header :: proc(ins: ^Inputs, doc: ^core.Document) -> (msg: string, twice: bool) {
+// The message for a header that names a column twice, at the second, read from the keys of the record `doc` of the
+// text `data` of file `name`.
+repeated_header :: proc(name: string, data: []byte, doc: ^core.Document) -> (msg: string, twice: bool) {
 	names := make([dynamic]string, context.temp_allocator)
 	it := core.pairs(doc, core.ROOT)
 	for k in core.pair_next(&it) {
-		name := jq.node_string(doc, k)
+		key := jq.node_string(doc, k)
 		for seen in names {
-			if seen == name {
-				line, col := core.locate(ins.data, doc.nodes[k].lo)
-				return message.build_temp("%s:%d:%d: Duplicate header name %q", ins.name, line, col, name), true
+			if seen == key {
+				line, col := core.locate(data, doc.nodes[k].lo)
+				return message.build_temp("%s:%d:%d: Duplicate header name %q", name, line, col, key), true
 			}
 		}
-		append(&names, name)
+		append(&names, key)
 	}
 	return
 }
