@@ -72,7 +72,7 @@ build :: proc(src: []u8, $S: Spec, opts := Options{}, refuse_duplicates := false
 	// its brackets, a key its colon, and a scalar its comma or its parent's close. A walk faults at the first byte past
 	// a token, so the last token may be missing its second byte. So a text makes at most `(len(src) + 1 + depth) / 2`
 	// nodes, the hooks test no capacity, and `builder_end` returns the unused tail.
-	depth := max(core.MAX_DEPTH, int(opts.max_depth))
+	depth := core.reserve_depth(opts.max_depth, len(src))
 	doc, err := build_reserved(src, q, S, opts, refuse_duplicates, allocator, (len(src) + depth) / 2 + 16, depth, 0)
 	if err.kind != .No_Memory {
 		return doc, err
@@ -336,7 +336,7 @@ edit_comment :: proc(doc: ^core.Document, spec: u8) -> (core.Comment_Spelling, u
 // must read strictly, since the source's reading under its own spec is no evidence. A delimited document is another
 // format family and is refused before the splice.
 commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
-	if list.doc != nil && core.is_flat(list.doc) {
+	if list.doc != nil && list.doc.spelling != nil && core.is_flat(list.doc) {
 		return nil, 0, {kind = .Bad_Spec}
 	}
 	return compose.commit(list, u8(as), nil, allocator)

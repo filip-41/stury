@@ -5,6 +5,7 @@ import "core:strings"
 import "core:testing"
 import core "../../core"
 import json ".."
+import walktest "../../walktest"
 
 // Each text with the steps it reads as.
 @(test)
@@ -724,4 +725,32 @@ read_options_follow_paths :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, json.each_answer(src, .Json, path, &seen, on, {dups = .First}).kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, seen, "got")
+}
+
+// A refused allocation anywhere in a many-path read, of text or of a built document, is `.No_Memory` and frees what the
+// read took.
+@(test)
+many_path_reads_survive_refused_allocations :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":[1,2,{"a":3}],"b":4}`)
+	a, _ := core.parse_path("...a")
+	defer core.path_destroy(&a)
+	b, _ := core.parse_path(".a[-1]")
+	defer core.path_destroy(&b)
+	paths := [?]core.Path{a, b}
+	built, berr := json.build(src, .Json)
+	defer core.destroy(&built)
+	testing.expect_value(t, berr.kind, core.Document_Error_Kind.None)
+	for hold in ([?]bool{false, true}) {
+		for at := 0; at < 24; at += 1 {
+			f := walktest.Failing_Alloc{inner = context.allocator, fail_at = at, fail_on = hold}
+			alloc := walktest.failing_allocator(&f)
+			doc, err := json.scan(src, .Json, paths[:], allocator = alloc)
+			testing.expectf(t, err.kind == .None || err.kind == .No_Memory, "scan fail_at %d: %v", at, err.kind)
+			core.destroy(&doc)
+			f = {inner = context.allocator, fail_at = at, fail_on = hold}
+			answers, qerr := core.query(&built, paths[:], allocator = alloc)
+			testing.expectf(t, qerr.kind == .None || qerr.kind == .No_Memory, "query fail_at %d: %v", at, qerr.kind)
+			delete(answers, alloc)
+		}
+	}
 }

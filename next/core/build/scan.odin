@@ -331,7 +331,7 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 	h.b.doc = doc^
 	h.b.doc.allocator = allocator
 	h.positional = doc.shared_keys != 0
-	depth := max(core.MAX_DEPTH, int(doc.read.max_depth))
+	depth := core.reserve_depth(doc.read.max_depth, len(doc.nodes))
 	if e := scan_plan(&h, paths, {dups = read.dups, every_key = read.every_key}, depth, false, allocator); e.kind != .None {
 		many_free(&h, allocator)
 		return nil, e
@@ -344,9 +344,14 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 		replay(false, &h, 0, u32(len(doc.nodes)), &regs, ends[:])
 	} else {
 		h.rewalk = replay_rewalk
-		h.b.stack = make([]u64, depth + 2, allocator)
-		h.ends = make([]u32, depth + 2, allocator)
-		replay(true, &h, 0, u32(len(doc.nodes)), &regs, h.ends)
+		no_stack, no_ends: runtime.Allocator_Error
+		h.b.stack, no_stack = make([]u64, depth + 2, allocator)
+		h.ends, no_ends = make([]u32, depth + 2, allocator)
+		if no_stack != nil || no_ends != nil {
+			h.b.err = {kind = .No_Memory}
+		} else {
+			replay(true, &h, 0, u32(len(doc.nodes)), &regs, h.ends)
+		}
 		if h.b.err.kind == .None {
 			many_answers(&h)
 		}

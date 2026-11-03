@@ -82,7 +82,7 @@ write :: proc(wr: ^Writer, value: any, plan: ^typed.Plan) -> core.Typed_Error_Ki
 
 @(private)
 mismatched :: proc(wr: ^Writer, id: typeid, plan: ^typed.Plan) -> bool {
-	return id != plan.type || plan.spelling == nil || plan.spelling.tokens != rawptr(wr.tokens.spell)
+	return plan == nil || id != plan.type || plan.spelling == nil || plan.spelling.tokens != rawptr(wr.tokens.spell)
 }
 
 @(private)

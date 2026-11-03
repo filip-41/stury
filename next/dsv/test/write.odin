@@ -49,6 +49,15 @@ struct_rows_write_a_header_then_records :: proc(t: ^testing.T) {
 }
 
 @(test)
+map_rows_without_a_header_are_refused :: proc(t: ^testing.T) {
+	row := make(map[string]int, allocator = context.temp_allocator)
+	row["a"] = 1
+	rows := []map[string]int{row}
+	expect_refused(t, rows, .Csv, {no_header = true}, .Unsupported)
+	expect_text(t, rows, .Csv, {}, "a\n1\n")
+}
+
+@(test)
 sort_keys_orders_the_columns :: proc(t: ^testing.T) {
 	Two :: struct {b, a: int}
 	rows := []Two{{1, 2}}

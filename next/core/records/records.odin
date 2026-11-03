@@ -21,7 +21,8 @@ Record :: struct {
 // one, and `close` frees what it allocated. `fault` is the fault that ended the records, nil when the input ended.
 // `pos` is the byte of `src` the next record is looked for from, and `from` the byte the records start at. `state` is
 // the format's own framing state, and `format` the memory a format keeps for it. `frames` are the typed reads' open
-// containers, allocated with `allocator` by the first.
+// containers, allocated with `allocator` by the first. A reader is not copied, since a copy and the original would free
+// the same memory, and the plans it reads by outlive it.
 //
 // A stream's: `input` is read into `buf`, whose first of `filled` bytes is the byte before the unread ones, so no
 // window but the input's first starts a record at its offset 0. `src` is a window of `buf` that ends on a whole
@@ -91,7 +92,7 @@ Services :: struct {
 open :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> Reader {
 	it := Reader{src = src, pos = core.text_start(src, at), from = at, as = as, framing = framing, allocator = allocator}
 	it.services = (^Services)(as.spelling.records) if as.spelling != nil else nil
-	if it.services == nil || it.services.next[framing] == nil {
+	if it.services == nil || it.services.next[framing] == nil || at > u64(len(src)) {
 		it.fault = core.Fault{kind = .Bad_Option}
 	}
 	return it
@@ -136,7 +137,9 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 		return false, {kind = .Plan_Mismatch}
 	}
 	if it.frames == nil {
-		frames, failed := make([]typed.Frame, max(core.MAX_DEPTH, int(it.as.read.max_depth)) + 2, it.allocator)
+		// A stream's window moves, so a record may be as long as the stream's bound.
+		bound := len(it.src) if it.input.procedure == nil else it.max_bytes
+		frames, failed := make([]typed.Frame, core.reserve_depth(it.as.read.max_depth, bound) + 2, it.allocator)
 		if failed != nil {
 			return false, {kind = .Out_Of_Memory}
 		}
@@ -179,8 +182,12 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 }
 
 // Builds the document of `rec`, a record `next` gave, as the format's `build` of its text does, with every offset in
-// an error from the input's first byte.
+// an error from the input's first byte. The nodes' offsets index the document's `src`, which is JSON's record text and
+// dsv's input. A streamed record's document lives until the next call on `it`.
 build :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+	if it.services == nil || it.services.build == nil {
+		return {}, {kind = .Bad_Index}
+	}
 	return it.services.build(it, rec, allocator)
 }
 

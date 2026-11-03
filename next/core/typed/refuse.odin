@@ -1,6 +1,7 @@
 package typed
 
 import "base:runtime"
+import "core:strings"
 import core ".."
 
 // The sink that reads past a refusal. A read given one adds each refusal to `errors` up to `max_errors`, 100 for 0, and
@@ -11,6 +12,25 @@ Collected :: struct {
 	errors:     [dynamic]core.Typed_Error,
 	max_errors: int,
 	truncated:  bool,
+}
+
+// Copies the names in `e`'s steps into the temp allocator, for an error that outlives the plan its names point into.
+own_names :: proc(e: ^core.Typed_Error) {
+	for &s in e.steps[:e.n_steps] {
+		if name, named := s.(core.Name); named {
+			text, failed := strings.clone(string(name), context.temp_allocator)
+			s = core.Name(text if failed == nil else "")
+		}
+	}
+}
+
+// `own_names` for each error a read collected.
+own_collected :: proc(c: ^Collected) {
+	if c != nil {
+		for &e in c.errors {
+			own_names(&e)
+		}
+	}
 }
 
 // The one refusal: records `e` and says how the walk goes on, which is `.Stop` unless a `Collected` reads on. The hot

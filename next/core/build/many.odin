@@ -129,11 +129,18 @@ many_plan :: proc(h: ^Scan, paths: []core.Path, depth: int, allocator: runtime.A
 	if len(paths) > core.MAX_PATHS {
 		return {kind = .Over_Capacity}
 	}
-	m := new(Scan_Many, allocator)
+	m, no_state := new(Scan_Many, allocator)
+	if no_state != nil {
+		return {kind = .No_Memory}
+	}
 	h.many = m
 	h.free = max(int)
 	h.keep = h.free
-	m.paths = make([]Scan_Path, len(paths), allocator)
+	no_paths: runtime.Allocator_Error
+	m.paths, no_paths = make([]Scan_Path, len(paths), allocator)
+	if no_paths != nil {
+		return {kind = .No_Memory}
+	}
 	frames, total := 0, 0
 	for path, p in paths {
 		x := &m.paths[p]
@@ -166,10 +173,14 @@ many_plan :: proc(h: ^Scan, paths: []core.Path, depth: int, allocator: runtime.A
 		frames = max(frames, depth)
 	}
 	frames += 2
-	m.frames = make([]Many_Frame, frames, allocator)
-	m.marks = make([]int, total, allocator)
+	no_frames, no_marks, no_deep: runtime.Allocator_Error
+	m.frames, no_frames = make([]Many_Frame, frames, allocator)
+	m.marks, no_marks = make([]int, total, allocator)
 	if m.deeps > 0 {
-		m.deep = make([]Deep_Row, frames * m.deeps, allocator)
+		m.deep, no_deep = make([]Deep_Row, frames * m.deeps, allocator)
+	}
+	if no_frames != nil || no_marks != nil || no_deep != nil {
+		return {kind = .No_Memory}
 	}
 	return {}
 }
@@ -239,8 +250,12 @@ many_settle :: proc(h: ^Scan) {
 many_answers :: proc(h: ^Scan) {
 	m := h.many
 	many_settle(h)
-	h.answers = make([]core.Answer, m.n_placed, h.b.doc.allocator)
-	h.n_answers = m.n_placed
+	answers, refused := make([]core.Answer, m.n_placed, h.b.doc.allocator)
+	if refused != nil {
+		h.b.err = {kind = .No_Memory}
+		return
+	}
+	h.answers, h.n_answers = answers, m.n_placed
 	for a, i in m.placed[:m.n_placed] {
 		h.answers[i] = a.answer
 	}

@@ -171,7 +171,8 @@ Plan_Options :: struct {
 }
 
 // A plan is a value the caller owns, for one type and one format. `plan_make` builds it and `plan_destroy` frees it. It
-// is read only while reading, so a read needs nothing else and any number of reads may share it.
+// is read only while reading, so a read needs nothing else and any number of reads may share it. A plan is not copied,
+// since a copy and the original would free the same memory. It outlives every reader and writer that was given it.
 Plan :: struct {
 	fields:    []Field,
 	// Each of `fields` followed by a `Never` record, the place a key found out of order moves the cursor to when no
@@ -248,6 +249,7 @@ plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := Plan_Options{}, a
 	}
 	if b.err.kind != .None {
 		err = b.err
+		own_names(&err)
 		plan_destroy(&p)
 		return {}, err
 	}
@@ -434,12 +436,12 @@ hooked_kind :: proc(base: ^runtime.Type_Info) -> Read_Kind {
 	return .Never
 }
 
-// Whether `ti` is an integer the plan's stores write.
+// Whether `ti` is an integer of at most `max_size` bytes that the plan's stores write.
 @(private)
-plain_integer :: proc(ti: ^runtime.Type_Info) -> bool {
+plain_integer :: proc(ti: ^runtime.Type_Info, max_size := 8) -> bool {
 	base := runtime.type_info_base(ti)
 	v := base.variant.(runtime.Type_Info_Integer)
-	return base.size <= 8 && platform_order(v.endianness)
+	return base.size <= max_size && platform_order(v.endianness)
 }
 
 @(private)
@@ -566,7 +568,7 @@ fill_bit_set :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v
 	elem := runtime.type_info_base(v.elem)
 	_, is_int := elem.variant.(runtime.Type_Info_Integer)
 	_, is_enum := elem.variant.(runtime.Type_Info_Enum)
-	if !is_int && !is_enum || (v.underlying != nil && !plain_integer(v.underlying)) {
+	if !is_int && !is_enum || (v.underlying != nil && !plain_integer(v.underlying, 16)) {
 		refuse_plan(b, .Unsupported, name)
 		return
 	}
@@ -813,6 +815,10 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	required: [dynamic]i32
 	for x, i in members {
 		if x.required {
+			// A write would leave out what the read then finds missing.
+			if x.omit {
+				refuse_plan(b, .Unsupported, x.name)
+			}
 			if _, failed := append(&required, i32(i)); failed != nil {
 				refuse_plan(b, .Out_Of_Memory)
 			}

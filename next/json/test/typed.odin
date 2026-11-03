@@ -451,6 +451,36 @@ unknown_members_capture_or_refuse :: proc(t: ^testing.T) {
 }
 
 @(test)
+first_duplicates_keep_the_first_captured_member :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	S :: struct {
+		rest: map[string]typed.Raw `json:"rest,unknown"`,
+	}
+	s: S
+	e := read(`{"x":1,"x":2}`, &s, {dups = core.Duplicates.First})
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, s.rest["x"], typed.Raw(`1`))
+}
+
+@(test)
+wide_bit_sets_round_trip_and_required_omitempty_is_refused :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Wide :: struct {
+		b: bit_set[0 ..= 127; u128],
+	}
+	w: Wide
+	e := read(`{"b":[0,127]}`, &w)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, w.b, bit_set[0 ..= 127; u128]{0, 127})
+
+	Bad :: struct {
+		a: i32 `json:"a,required,omitempty"`,
+	}
+	b: Bad
+	testing.expect_value(t, read(`{"a":1}`, &b).kind, core.Typed_Error_Kind.Unsupported)
+}
+
+@(test)
 type_hooks_read_whole_values :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	Hex :: struct {
@@ -894,6 +924,40 @@ an_enum_map_key_past_i64_is_no_member :: proc(t: ^testing.T) {
 	src := `{"18446744073709551615":1}`
 	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &m, &plan, {}, {}, context.temp_allocator)
 	testing.expect(t, e.kind != .None)
+}
+
+@(test)
+a_plan_error_names_its_field_after_the_plan_is_gone :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	inner := Poison_Free_Alloc{inner = context.allocator}
+	poisoned := runtime.Allocator{poison_free_alloc_proc, &inner}
+	_, e := json.plan_make(struct {
+			a: f16 `json:"alpha"`,
+		}, {}, poisoned)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unsupported)
+	testing.expect_value(t, e.n_steps, 1)
+	testing.expect_value(t, string(e.steps[0].(core.Name)), "alpha")
+}
+
+@(test)
+a_one_shot_read_error_names_its_field_after_the_plan_is_gone :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	S :: struct {
+		a: i32 `json:"alpha"`,
+		b: i32 `json:"beta"`,
+	}
+	inner := Poison_Free_Alloc{inner = context.temp_allocator}
+	kept: typed.Collected
+	kept.errors.allocator = context.temp_allocator
+	{
+		context.temp_allocator = runtime.Allocator{poison_free_alloc_proc, &inner}
+		s: S
+		src := `{"alpha":"x","beta":"y"}`
+		e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, {collect = &kept}, {}, inner.inner)
+		testing.expect_value(t, string(e.steps[0].(core.Name)), "alpha")
+	}
+	testing.expect_value(t, len(kept.errors), 2)
+	testing.expect_value(t, string(kept.errors[1].steps[0].(core.Name)), "beta")
 }
 
 @(test)

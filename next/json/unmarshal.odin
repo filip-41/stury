@@ -23,15 +23,18 @@ unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Opti
 		return err
 	}
 	defer typed.plan_destroy(&plan)
-	return unmarshal_plan(src, S, target, &plan, read, opts, allocator)
+	err = unmarshal_plan(src, S, target, &plan, read, opts, allocator)
+	typed.own_names(&err)
+	typed.own_collected(read.collect)
+	return err
 }
 
 @(private)
 unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
 	stack: [core.MAX_DEPTH + 2]typed.Frame = ---
 	frames := stack[:]
-	if opts.max_depth > core.MAX_DEPTH {
-		wide, failed := make([]typed.Frame, int(opts.max_depth) + 2, context.temp_allocator)
+	if need := core.reserve_depth(opts.max_depth, len(src)) + 2; need > len(stack) {
+		wide, failed := make([]typed.Frame, need, context.temp_allocator)
 		if failed != nil {
 			return {kind = .Out_Of_Memory}
 		}

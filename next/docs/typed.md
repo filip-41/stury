@@ -47,7 +47,8 @@ See From a document below.
 
 A plan is a value the caller owns, for one type and one format. There is no global cache. It is read only during a
 read, so any number of reads may share one. `unmarshal_once` builds and frees a plan per call, and a program that reads
-one type many times builds it once. A plan for another type or format is `.Plan_Mismatch`, a nil target `.Bad_Option`. A dsv read takes only a plan from
+one type many times builds it once. A plan is not copied, since two copies free the same memory, and it outlives every
+reader and writer given it. A plan for another type or format is `.Plan_Mismatch`, a nil target `.Bad_Option`. A dsv read takes only a plan from
 `dsv.plan_make`, which checks that the type is a list of rows or a row, and a plan from `typed.plan_make` is `.Plan_Mismatch`.
 
 ```odin
@@ -77,7 +78,7 @@ Item :: struct {
 
 - The value is `name,flag,flag`. `-` leaves the field out. An empty name keeps the field's own, renamed by
   `Plan_Options.rename`. In the name a backslash makes the next byte literal, so a comma is `\,` and a backslash `\\`.
-- `omitempty` is a writer's flag, see `docs/writer.md`, and a read accepts it and does nothing with it. `required` makes an absent member `.Missing_Field`. `unknown` on a
+- `omitempty` is a writer's flag, see `docs/writer.md`, and a read accepts it and does nothing with it. `required` makes an absent member `.Missing_Field`, and with `omitempty` on the same member the plan is `.Unsupported`, since the write would leave out what the read then finds missing. `unknown` on a
   `map[string]Raw` field captures every member the type does not name. Any other flag is `.Bad_Tag`.
 - An absent member keeps what the target holds. That is how defaults work: fill the target, then read.
 - `Read_Options.unknown` is `.Ignore` or `.Refuse`, which makes a member the type does not name `.Unknown_Field`.
@@ -115,7 +116,8 @@ fixed array whose element has no size, and the rest of Odin's kinds that hold no
   member the arms may not declare. An object with no tag member is `.Missing_Tag`, with two `.Repeated_Tag`, and a name
   no arm has `.Not_A_Member`.
 - A repeated member follows `Read_Options.dups`: `.Last` when nil, `.First`, or `.Refuse` through `refuse_duplicates`.
-  `.First` still judges the later value against the type. `refuse_duplicates` reads the whole text once first, into a
+  `.First` still judges the later value against the type, and keeps the first of a repeated unknown member a `unknown`
+  field captures (a key the destination's map already holds counts as met). `refuse_duplicates` reads the whole text once first, into a
   temporary document, and is `.Duplicate_Key` on any repeat anywhere in it, skipped members included.
 - A path is not an entry: a text is read from its root, and a path's value from the answer it gave.
 
@@ -298,9 +300,11 @@ columns are bound once, when the walk reaches the first record, or the text's en
   as spelled. A required field no column names is `.Missing_Field` at the header's first byte, ahead of any fault in the
   records.
 - A repeated column reads as its last occurrence, as its first under `.First`, and `refuse_duplicates` makes it
-  `.Duplicate_Key` at the repeat.
+  `.Duplicate_Key` at the repeat. The other occurrence's cells are read into a scratch value, so they are judged against
+  the field's type as a skipped repeat is in JSON.
 - `no_header` reads a struct's fields in order. A list row takes every record, with or without `no_header`. A map row
-  needs a header, and `no_header` on one is `.Unsupported`.
+  needs a header, and `no_header` on one is `.Unsupported`, in a write as in a read. A plan of a row reads a built
+  document as it reads a text: the first record, and a later one is `.Wrong_Length`.
 - A text with a header and no record leaves an empty list, and a row as it was. A text with no header line where one is wanted leaves the
   target as it was.
 - A row's path is its index, then the field or key. Two faults in one row refuse by the first in the text, since a cell

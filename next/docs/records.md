@@ -37,9 +37,9 @@ if f, bad := it.fault.?; bad {
 | `at` | the offset of `text`'s first byte from the input's first byte |
 | `key` | the key of an object member under `.Entries`, as written, nil otherwise |
 
-Every offset, in a record and in a fault, counts from the input's first byte, never from the record's.
+Every offset, in a record and in a fault (not a built document's nodes, see `build`), counts from the input's first byte, never from the record's.
 
-`open` starts reading at `src[at]`, and its offsets still count from `src[0]`: a caller that stopped at a record
+`open` with an `at` past `len(src)` ends the records with the fault `.Bad_Option`. It starts reading at `src[at]`, and its offsets still count from `src[0]`: a caller that stopped at a record
 resumes at that record's `at` with the same offsets. `open_stream`'s `at` names the input byte the reader's first byte
 is, for a stream opened part way into a file. Both read from `at` as from the first byte of a record, and pass over a
 byte order mark only when `at` is 0.
@@ -127,8 +127,11 @@ refused record's value runs past the record's end, `target` may hold values read
 Under `.Concatenated` and `.Entries`, `read` reads a record by the walk that frames it, and gives the records `next`
 gives: a record that would fault after a refusal is no record, and what its read collected is taken back.
 
-`build` builds the document of a record `next` gave, as the format's `build` of `rec.text` does, with offsets from the
-input's first byte.
+`build` builds the document of a record `next` gave, as the format's `build` of `rec.text` does. A refusal's offsets
+count from the input's first byte, and the document's node offsets index `doc.src` as in every document. What `doc.src`
+is depends on the format: JSON's is the record's text, so a node's offsets are the record's own, and dsv's is the input
+(for a streamed dsv reader, the header joined with the row). A document built from a streamed record lives until the
+next call on the reader. `build` on a reader whose format builds no records is `.Bad_Index`.
 
 ## Rows
 

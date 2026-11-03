@@ -260,6 +260,10 @@ write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, named
 			return put_header(w, names)
 		}
 	case .Map:
+		// The reader names a map row's keys from the header, so a text without one is not read back.
+		if w.opts.no_header {
+			return .Unsupported
+		}
 		info := pl.meta[row.meta].map_info
 		keys := make([dynamic]string, scratch)
 		seen := make(map[string]struct{}, scratch)
@@ -283,7 +287,7 @@ write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, named
 		}
 		slice.sort(keys[:])
 		w.keys = keys[:]
-		if named && !w.opts.no_header && len(keys) > 0 {
+		if named && len(keys) > 0 {
 			return put_header(w, w.keys)
 		}
 	}

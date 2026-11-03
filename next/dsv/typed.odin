@@ -35,10 +35,7 @@ plan_make :: proc(T: typeid, spec: Spec, layout := Options{}, opts := typed.Plan
 		return {}, {kind = .Bad_Option}
 	}
 	plan.layout = {u8(spec), spec_delimiter(spec, layout.delimiter), layout.comment, u8(layout.no_header), u8(layout.crlf)}
-	plan.marshal = marshal_text
-	if _, listed := row_of(&plan); listed {
-		plan.node_read = document_read
-	}
+	plan.marshal, plan.node_read = marshal_text, document_read
 	return plan, {}
 }
 
@@ -49,7 +46,10 @@ unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Opti
 		return err
 	}
 	defer typed.plan_destroy(&plan)
-	return unmarshal_plan(src, S, target, &plan, read, opts, allocator)
+	err = unmarshal_plan(src, S, target, &plan, read, opts, allocator)
+	typed.own_names(&err)
+	typed.own_collected(read.collect)
+	return err
 }
 
 @(private)
@@ -136,6 +136,7 @@ Column :: struct {
 	kind:     typed.Read_Kind,
 	must:     bool,
 	required: bool,
+	repeat:   bool, // an `.Inside` column of a field another column reads, whose cells are judged and dropped
 	offset:   u32,
 	stride:   u32,
 	step:     u32,
@@ -368,6 +369,20 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	case .Inside:
 		return next, .Next
 	case .Never:
+		if col.repeat {
+			// The cell is read into a scratch value, so it is judged and the other column's value stands.
+			if t.n == 0 {
+				return next, .Next
+			}
+			fld := typed.field_at(at.b)
+			scratch, no_scratch := runtime.mem_alloc(int(h.r.plan.meta[fld.meta].size), 16, context.temp_allocator)
+			reason := read_cell(h, fld, t, uintptr(raw_data(scratch))) if no_scratch == nil else .Out_Of_Memory
+			if reason == .None {
+				return next, .Next
+			}
+			_, action := typed.refuse(&h.r, at, {kind = reason, at = t.lo})
+			return next, action
+		}
 		if !h.r.refuse_unknown {
 			return next, .Next
 		}
@@ -603,9 +618,12 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64) -> core.Action {
 				return .Stop
 			}
 			if h.r.first_key {
+				if k >= 0 {
+					col.kind, col.rec, col.repeat = .Never, &fields[k + 1], true
+				}
 				continue
 			}
-			cols[prev].kind = .Inside
+			cols[prev].kind, cols[prev].repeat = .Never if k >= 0 else .Inside, k >= 0
 		}
 		bound[name] = c
 		if k >= 0 {

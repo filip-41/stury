@@ -71,6 +71,15 @@ a_document_reads_as_its_text :: proc(t: ^testing.T) {
 }
 
 @(test)
+a_document_reads_a_single_row_plan_as_its_text_does :: proc(t: ^testing.T) {
+	agree(t, "a,b\n1,x\n", struct { a: i64, b: string }, .Csv)
+	agree(t, "a,b\n1,x\n2,y\n", struct { a: i64, b: string }, .Csv)
+	agree(t, "a\nx\n", struct { a: i64 }, .Csv)
+	agree(t, "a,a\nx,1\n", struct { a: i64 }, .Csv)
+	agree(t, "a,a\n1,x\n", struct { a: i64 }, .Csv, read = {dups = .First})
+}
+
+@(test)
 a_document_reads_the_required_fields_as_its_text_does :: proc(t: ^testing.T) {
 	agree(t, "b\nx\n", []Required_Row, .Csv)
 	agree(t, "b,a\nx,1\ny,\n", []Required_Row, .Csv)

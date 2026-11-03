@@ -24,7 +24,7 @@ Root_Spelling :: struct {
 // counted.
 commit :: proc(list: ^core.Edit_List, spec: u8, root: ^Root_Spelling, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	doc := list.doc
-	if doc == nil {
+	if doc == nil || doc.spelling == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
 	// A partial document does not hold the members a commit composes.

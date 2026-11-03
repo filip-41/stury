@@ -798,7 +798,18 @@ unknown_cold :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook
 		}
 		mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
 		base := uintptr(f.data)
-		slot, reason := map_slot(h, &h.plan.meta[rec.meta], (^runtime.Raw_Map)(base + uintptr(rec.offset)), key, t)
+		slot: rawptr
+		reason: core.Typed_Error_Kind
+		// Under `.First` a repeat of a captured key is read into a scratch value, so it is judged and leaves the first.
+		if captured := (^map[string]Raw)(base + uintptr(rec.offset)); h.first_key && key in captured^ {
+			scratch, no_scratch := runtime.mem_alloc(size_of(Raw), align_of(Raw), context.temp_allocator)
+			if no_scratch != nil {
+				return refuse(h, regs, {kind = .Out_Of_Memory, at = t.lo})
+			}
+			slot = raw_data(scratch)
+		} else {
+			slot, reason = map_slot(h, &h.plan.meta[rec.meta], (^runtime.Raw_Map)(captured), key, t)
+		}
 		if reason != .None {
 			return refuse(h, regs, {kind = reason, at = t.lo})
 		}

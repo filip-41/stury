@@ -623,12 +623,15 @@ pointer_index :: proc(token: string) -> (index: int, ok: bool) {
 // so it is `.Unsupported`. An `Answer`'s nodes are `doc`'s.
 @(private)
 query_one :: proc(doc: ^Document, path: Path, read := Query_Options{}, allocator := context.allocator) -> (answers: []Answer, err: Path_Error) {
-	return doc.spelling.query(doc, []Path{path}, read, allocator)
+	return query_many(doc, []Path{path}, read, allocator)
 }
 
 // Answers `paths` over a document built whole, as for one path, each answer tagged with its path's number.
 @(private)
 query_many :: proc(doc: ^Document, paths: []Path, read := Query_Options{}, allocator := context.allocator) -> (answers: []Answer, err: Path_Error) {
+	if doc == nil || doc.spelling == nil || doc.spelling.query == nil {
+		return nil, {kind = .Unsupported}
+	}
 	return doc.spelling.query(doc, paths, read, allocator)
 }
 

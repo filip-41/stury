@@ -216,7 +216,7 @@ walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec
 @(private, cold)
 walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, depth: u64, tolerate: bit_set[Tolerance; u8], h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	context = runtime.default_context()
-	stack, err := make([]u8, depth)
+	stack, err := make([]u8, min(depth, u64(len(src)) + 16))
 	if err != nil {
 		return core.fault_at(0, .No_Memory)
 	}

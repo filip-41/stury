@@ -107,6 +107,18 @@ a_repeated_column_reads_as_its_last :: proc(t: ^testing.T) {
 	expect_refusal(t, read_rows("a,a\n1,2\n", &rows, {refuse_duplicates = true}), .Duplicate_Key, 2)
 }
 
+// The column a repeat leaves out is judged against the field's type, as JSON judges a repeated member it skips.
+@(test)
+a_skipped_repeated_column_is_judged :: proc(t: ^testing.T) {
+	Row :: struct { a: i64 }
+	rows: []Row
+	expect_refusal(t, read_rows("a,a\nx,1\n", &rows), .Wrong_Kind, 4)
+	expect_refusal(t, read_rows("a,a\n1,x\n", &rows, {dups = .First}), .Wrong_Kind, 6)
+	testing.expect_value(t, read_rows("a,a\n1,\n", &rows, {dups = .First}).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, read_rows("a,a,a\n1,2,3\n", &rows).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, rows[0].a, 3)
+}
+
 @(test)
 unknown_columns_pass_or_refuse :: proc(t: ^testing.T) {
 	Row :: struct { a: i64 }

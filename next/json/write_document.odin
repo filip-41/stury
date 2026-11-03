@@ -388,7 +388,7 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.Read_
 	// The stack holds the open containers and the sentinel under them.
 	local: [core.MAX_DEPTH + 1]Open = ---
 	e: Emit
-	if !put_start(&e, &out, doc.src, doc, opts, local[:], max(core.MAX_DEPTH, int(doc.read.max_depth))) {
+	if !put_start(&e, &out, doc.src, doc, opts, local[:], core.reserve_depth(doc.read.max_depth, len(doc.nodes))) {
 		write.destroy(&out)
 		return nil, 0, {kind = .Out_Of_Memory}
 	}

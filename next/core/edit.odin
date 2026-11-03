@@ -235,7 +235,7 @@ fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) 
 // and role are `.Conflicting_Edits` at the byte where the two meet. A result that reads less strictly than the source is
 // `.Bad_Result`. `dropped` counts the source facts and fact edits the output cannot hold.
 commit :: proc(list: ^Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
-	if list.doc == nil {
+	if list.doc == nil || list.doc.spelling == nil || list.doc.spelling.edit == nil {
 		return nil, 0, {kind = .Bad_Index}
 	}
 	return list.doc.spelling.edit.commit(list, list.doc.read.spec, allocator)

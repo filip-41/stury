@@ -6,6 +6,13 @@ package core
 // bracket.
 MAX_DEPTH :: 1024
 
+// The depth to reserve room for when a walk of `n` bytes or nodes runs under the limit `max_depth` (0 for `MAX_DEPTH`).
+// Nothing nests deeper than it has bytes, so the limit decides `Too_Deep` and never the size of an allocation.
+reserve_depth :: #force_inline proc "contextless" (max_depth: u32, n: int) -> int {
+	depth := max(MAX_DEPTH, int(max_depth))
+	return depth if n >= depth else min(depth, n + 16)
+}
+
 // `Kind` names what a token is: `Array` and `Map` open a container, `End` closes the innermost one, and the other
 // kinds are scalars. `Plain` is text whose type the format resolves for the consumer. Each member names the formats
 // that give it.

@@ -161,7 +161,7 @@ marshal_once :: proc(value: any, make_plan: proc(T: typeid, opts: typed.Plan_Opt
 
 @(private)
 check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Error_Kind {
-	if plan.marshal == nil {
+	if plan == nil || plan.marshal == nil {
 		return .Unsupported
 	}
 	if value.id != plan.type || value.data == nil {
