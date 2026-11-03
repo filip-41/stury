@@ -290,6 +290,11 @@ spine_named :: proc(data: []byte, at: u64, ps: ^Pieces, names: []string) -> bool
 	return doc.nodes[node].kind == .Array && u64(doc.nodes[node].lo) == at
 }
 
+// The arenas a thread's pieces share, mapped at its first piece and emptied after each record, so a piece does not map
+// and unmap its own. They are not freed, the process ends with its threads.
+@(private = "file", thread_local)
+piece_values, piece_temp: virtual.Arena
+
 // A piece's records answered as the serial route answers them, into the piece's own output, up to the first it cannot
 // answer alone. After a refused text it stops at the record before, so the serial route reads that text as it follows
 // a record and not a cut.
@@ -300,15 +305,13 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 	table := o.table
 	init_output(o, &r)
 	o.held, o.piece = true, true
+	o.buf.hint = 1 << 16
 	if table != nil {
 		o.table.shape, o.table.header = table.shape, table.header
 	}
-	values, temp: virtual.Arena
-	failed := virtual.arena_init_growing(&values) != nil || virtual.arena_init_growing(&temp) != nil
-	defer virtual.arena_destroy(&values)
-	defer virtual.arena_destroy(&temp)
-	context.allocator = {scratch_allocator_proc, &values}
-	context.temp_allocator = {scratch_allocator_proc, &temp}
+	failed := piece_temp.curr_block == nil && (virtual.arena_init_growing(&piece_values) != nil || virtual.arena_init_growing(&piece_temp) != nil)
+	context.allocator = {scratch_allocator_proc, &piece_values}
+	context.temp_allocator = {scratch_allocator_proc, &piece_temp}
 	lo, end := it.pos, it.pos
 	stop := u64(len(it.src))
 	scanned := r.route.scanning && scans(r.route.path) && !reads_cells(&r.opts)
