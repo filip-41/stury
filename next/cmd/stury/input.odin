@@ -443,6 +443,11 @@ set_data :: proc(ins: ^Inputs, data: []byte) {
 @(private = "file")
 next_window :: proc(ins: ^Inputs, from: int) {
 	advance_past(ins, from)
+	// --stream's lines are counted to `line_end`, which the window moves.
+	if ins.run.opts.stream {
+		ins.line +=bytes.count(ins.data[min(ins.line_end, from):from], {'\n'})
+		ins.line_end = max(ins.line_end - from, 0)
+	}
 	take_data(ins, ins.data[from:])
 }
 
