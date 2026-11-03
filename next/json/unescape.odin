@@ -180,12 +180,9 @@ replacement :: #force_inline proc "contextless" () -> [4]u8 {
 
 // JSON's `Spelling.text`, exported so a caller that knows the format calls it without the table. A scalar with
 // `SPELLING_DECODE` clear returns its span. A node that needs decoding is written into `buf`, and the call returns false
-// when `buf` is too short. A container and an index past the last node return false, as `core.text` does.
-text :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool) {
-	if int(i) >= len(doc.nodes) {
-		return "", false
-	}
-	n := doc.nodes[i]
+// when `buf` is too short. A container returns false, as `core.text` does. `doc.view` and `doc.nodes[i]` are its arguments
+// for node `i` of a document.
+text :: #force_inline proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {
 	// A container's `n` is a node count and its `spelling` a child count, not a span and a decode bit.
 	if n.kind > .Plain {
 		return "", false
@@ -196,14 +193,13 @@ text :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -
 	if n.spelling & core.SPELLING_LAX != 0 {
 		return spell.decode_text(buf, decoded_init(doc.src, n), decoded_next)
 	}
-	return decode_plain(doc, i, buf)
+	return decode_plain(doc, n, buf)
 }
 
 // Decodes a short token byte by byte with one 32-bit store per escape. `decode_plain` picks it for a token under
 // 256 bytes, where finding escapes in 64-byte blocks does more work than the byte walk.
 @(private)
-decode_scalar :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (string, bool) {
-	n := doc.nodes[i]
+decode_scalar :: proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (string, bool) {
 	// A JSON escape decodes to no more bytes than it spells, so a buffer as long as the token holds every result.
 	if int(n.n) > len(buf) {
 		return "", false
@@ -235,8 +231,7 @@ decode_scalar :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (st
 // escapes by its backslash mask, copying the run before each escape and decoding the escape in place. A block is not
 // reloaded after an escape.
 @(private)
-decode_block :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (string, bool) {
-	n := doc.nodes[i]
+decode_block :: proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (string, bool) {
 	if int(n.n) > len(buf) {
 		return "", false
 	}
@@ -337,11 +332,11 @@ put_word :: #force_inline proc(dst: []u8, w: int, spelled: [4]u8, size: int) {
 
 // Decodes a token under 256 bytes with `decode_scalar` and a longer one with `decode_block`.
 @(private)
-decode_plain :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (string, bool) {
-	if doc.nodes[i].n < 256 {
-		return decode_scalar(doc, i, buf)
+decode_plain :: #force_inline proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (string, bool) {
+	if n.n < 256 {
+		return decode_scalar(doc, n, buf)
 	}
-	return decode_block(doc, i, buf)
+	return decode_block(doc, n, buf)
 }
 
 // Stores a 64-byte block as four 16-byte stores.
@@ -391,8 +386,7 @@ copy_up_to :: #force_inline proc(dst: []u8, w: int, src: [^]u8, p, n: int) {
 // between escapes, with no allocation. A key holding a tolerated ill-formed sequence compares through `decoded_next`,
 // so it matches what `text` returns.
 @(private)
-key_equals_decode :: #force_inline proc "contextless" (doc: ^core.Document, i: core.Node_Index, name: string) -> bool {
-	n := doc.nodes[i]
+key_equals_decode :: #force_inline proc "contextless" (doc: ^core.Token_View, n: core.Node, name: string) -> bool {
 	if n.spelling & core.SPELLING_LAX != 0 {
 		return spell.decoded_equals(decoded_init(doc.src, n), decoded_next, name)
 	}
@@ -432,13 +426,9 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index, opts: core.Res
 	return doc.nodes[i].kind
 }
 
-// JSON's `Spelling.number`, exported beside `text`. An index past the last node is `.Wide`, as `core.number` answers. A pure integer of at most 19 digits folds here from the recorded
-// shape with no grammar search. Every other token, and a negative below `i64`, is passed to `number_slow`.
-number :: #force_inline proc(doc: ^core.Document, i: core.Node_Index) -> core.Number {
-	if int(i) >= len(doc.nodes) {
-		return {0, .Wide}
-	}
-	n := doc.nodes[i]
+// JSON's `Spelling.number`, exported beside `text`. A token that is no number is `.Wide`, as `core.number` answers. A pure
+// integer of at most 19 digits folds here from the recorded shape with no grammar search. Every other token, and a negative below `i64`, is passed to `number_slow`.
+number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
 	// Any kind but `.Number` is no number and returns `.Wide`.
 	if n.kind == .Number {
 		sp := n.spelling
@@ -467,14 +457,14 @@ number :: #force_inline proc(doc: ^core.Document, i: core.Node_Index) -> core.Nu
 				}
 			}
 		}
-		return number_slow(doc, i, n)
+		return number_slow(doc, n)
 	}
 	return {0, .Wide}
 }
 
 // Decodes the number shapes that are not a plain integer: decimal, hex, infinity and NaN.
 @(private, cold)
-number_slow :: #force_no_inline proc(doc: ^core.Document, i: core.Node_Index, n: core.Node) -> core.Number {
+number_slow :: #force_no_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
 	lo, hi := n.lo, n.lo + u64(n.n)
 	switch number_spelling_of(n.spelling) {
 	case .Json, .Decimal:

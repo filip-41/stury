@@ -123,11 +123,11 @@ strings_of :: proc(src: []u8) -> (strs: []string, total: int) {
 	pool := make([]u8, len(src))
 	used := 0
 	list := make([dynamic]string)
-	for n, i in doc.nodes {
+	for n in doc.nodes {
 		if n.role != .Value || n.kind != .String {
 			continue
 		}
-		s, ok := json.text(&doc, core.Node_Index(i), pool[used:])
+		s, ok := json.text(&doc.view, n, pool[used:])
 		if !ok {
 			fmt.eprintln("string too long")
 			os.exit(1)

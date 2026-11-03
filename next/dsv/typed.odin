@@ -64,7 +64,7 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 	if err.kind != .None {
 		return err
 	}
-	h.r.token_doc.read.spec = u8(S)
+	h.r.read.spec = u8(S)
 	rows_of(&h, plan, len(src))
 	if h.row.kind == .Map && opts.no_header {
 		return {kind = .Unsupported}

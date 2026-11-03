@@ -725,16 +725,16 @@ text_refuses_containers :: proc(t: ^testing.T) {
 	// Node 0 is an array of 5 children, node 1 of 1, node 3 of 3, node 7 an object of 1 member, and
 	// `len(doc.nodes)` is past the last node.
 	for i in ([]core.Node_Index{0, 1, 3, 7, core.Node_Index(len(doc.nodes))}) {
-		s, ok := json.text(&doc, i, buf[:])
+		s, ok := core.text(&doc, i, buf[:])
 		testing.expectf(t, !ok && s == "", "node %d: %q, %v", i, s, ok)
 	}
-	n, nok := json.text(&doc, 10, buf[:])
+	n, nok := core.text(&doc, 10, buf[:])
 	testing.expect(t, nok)
 	testing.expect_value(t, n, "7")
-	s, ok := json.text(&doc, 11, buf[:])
+	s, ok := core.text(&doc, 11, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "s")
-	testing.expect_value(t, json.number(&doc, core.Node_Index(len(doc.nodes))).kind, core.Number_Kind.Wide)
+	testing.expect_value(t, core.number(&doc, core.Node_Index(len(doc.nodes))).kind, core.Number_Kind.Wide)
 }
 
 // `core.pairs` walks every member pair of a `Map` container in source order. An empty object yields an empty

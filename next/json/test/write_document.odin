@@ -668,7 +668,7 @@ write_document_json5_generated :: proc(t: ^testing.T) {
 					return
 				}
 				if n.kind == .Number {
-					x, y := doc.spelling.number(&doc, core.Node_Index(i)), again.spelling.number(&again, core.Node_Index(i))
+					x, y := core.number(&doc, core.Node_Index(i)), core.number(&again, core.Node_Index(i))
 					if !testing.expectf(t, x == y, "number %d is %v, written %v: %q", i, x, y, text) {
 						return
 					}

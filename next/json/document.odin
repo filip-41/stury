@@ -299,7 +299,7 @@ edit_reads :: proc(doc: ^core.Document, src: []u8, tolerate: bool, $S: Spec) -> 
 
 // The three services dispatch on `doc.read.spec`, since a proc pointer carries no compile-time spec.
 @(private)
-edit_value_at :: proc(doc: ^core.Document, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
+edit_value_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
 	switch Spec(doc.read.spec) {
 	case .Json:  return edit_value(src, allocator, doc.read.max_depth, .Json)
 	case .Jsonc: return edit_value(src, allocator, doc.read.max_depth, .Jsonc)

@@ -213,7 +213,7 @@ read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HA
 			text_ok: bool
 			size := 0
 			when DIRECT {
-				s, ok := json.text(doc, core.Node_Index(i), buf)
+				s, ok := json.text(&doc.view, n, buf)
 				text_ok = ok
 				size = len(s)
 			} else {
@@ -242,7 +242,7 @@ read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HA
 		if n.kind == .Number {
 			num: core.Number
 			when DIRECT {
-				num = json.number(doc, core.Node_Index(i))
+				num = json.number(&doc.view, doc.nodes[i])
 			} else {
 				num = core.number(doc, core.Node_Index(i))
 			}
@@ -261,7 +261,7 @@ read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HA
 @(private)
 read_name :: #force_no_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8, alloc: mem.Allocator, direct: bool) -> (name: string, cloned: bool, ok: bool) {
 	if direct {
-		name, ok = json.text(doc, i, buf)
+		name, ok = json.text(&doc.view, doc.nodes[i], buf)
 	} else {
 		name, ok = core.text(doc, i, buf)
 	}

@@ -361,8 +361,8 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 		return -1
 	}
 	for &key, c in b.keys {
-		doc := core.Document{src = b.key_src, nodes = ([^]core.Node)(&key)[:1], read = it.as.read}
-		if spelling_key_equals(&doc, 0, name) {
+		view := core.Token_View{src = b.key_src, read = it.as.read}
+		if spelling_key_equals(&view, key, name) {
 			return c
 		}
 	}
@@ -464,9 +464,9 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 	stream := it.input.procedure != nil
 	kept := len(read.collect.errors) if read.collect != nil else 0
 	if stream {
-		h.r.src, h.r.base, h.r.token_doc.src, h.hot_end = src, raw_data(src), src, u64(max(len(src) - HOT_REACH, 0))
+		h.r.src, h.r.base, h.hot_end = src, raw_data(src), u64(max(len(src) - HOT_REACH, 0))
 	}
-	h.r.token_doc.read.spec = u8(spec)
+	h.r.read.spec = u8(spec)
 	h.no_header = opts.no_header || h.opens == .Array
 	if !h.no_header {
 		h.keys = b.keys

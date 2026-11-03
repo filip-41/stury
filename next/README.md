@@ -46,8 +46,8 @@ core.text       :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (
 core.text_clone :: proc(doc: ^core.Document, i: core.Node_Index, allocator := context.allocator) -> (s: string, ok: bool)
 core.float_value :: proc(doc: ^core.Document, i: core.Node_Index) -> (f64, bool)
 core.commit     :: proc(list: ^core.Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error)
-json.text       :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool)
-json.number     :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Number
+json.text       :: proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool)
+json.number     :: proc(doc: ^core.Token_View, n: core.Node) -> core.Number
 json.commit     :: proc(list: ^core.Edit_List, as: json.Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error)
 core.write_code :: proc {write_fault_code, write_document_code, write_path_code, write_edit_code, write_typed_code}
 core.render     :: proc {render_fault, render_document, render_path, render_edit, render_typed}

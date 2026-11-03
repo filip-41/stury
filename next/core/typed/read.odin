@@ -78,14 +78,12 @@ Reader :: struct {
 	borrow:    bool,
 	first_key: bool, // `.First`
 	refuse_unknown: bool,
-	src:       []u8,
+	// The source, the format and its read, which a token's text and number read through.
+	using view: core.Token_View,
 	plan:      ^Plan,
 	ctx:       runtime.Context,
 	first:     core.Typed_Error,
 	collect:   ^Collected,
-	// The one-node document a token is handed to `Spelling`'s procedures in.
-	token:     core.Node,
-	token_doc: core.Document,
 	// Finds the member `Plan.union_tag` of the object at a byte, for a union that reads by its tag.
 	find_tag:  proc(h: ^Reader, at: u64) -> Tag_Scan,
 	// The format's own options, for `find_tag`.
@@ -109,7 +107,7 @@ read_start :: proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling,
 	frames[0].seen = 0
 	r.base, r.frames, r.sp, r.src, r.plan = raw_data(src), raw_data(frames), 1, src, plan
 	r.borrow, r.collect = read.borrow_strings, read.collect
-	r.token_doc.src, r.token_doc.nodes = src, ([^]core.Node)(&r.token)[:1]
+	r.spelling = spelling
 	r.first_key = read.dups == .First
 	r.refuse_unknown = read.unknown == .Refuse
 	return {NO_LIMIT, u64(uintptr(plan.root)), u64(uintptr(target))}, {}
@@ -269,8 +267,7 @@ token_text :: proc(h: ^Reader, t: core.Token, allocator: runtime.Allocator) -> (
 	if err != nil {
 		return "", false
 	}
-	h.token = t
-	return h.plan.spelling.text(&h.token_doc, 0, buf)
+	return h.plan.spelling.text(&h.view, t, buf)
 }
 
 // Stores a string token's text: a decoded buffer, or the span as the read keeps one.

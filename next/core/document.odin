@@ -165,6 +165,14 @@ pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bo
 	return k, v, true
 }
 
+// What a format's token readers need besides the token: the source it spans, the format's table and how the text was
+// read. A document starts with one, and a typed read holds one for the walk's tokens.
+Token_View :: struct {
+	src:      []u8,
+	spelling: ^Spelling,
+	read:     Read_As,
+}
+
 // A `Document` holds the walk's tokens over the caller's bytes, the facts beside them, and the format's `Spelling`
 // table. `src` is borrowed and must outlive the document. `nodes_alloc` is the allocation behind `nodes`, whose length
 // is its capacity, so `destroy` frees it after `nodes` shrank to the node count.
@@ -174,19 +182,17 @@ pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bo
 // children, at `shared_keys + 1` on, are the keys of every member `Map`: a `Map`'s `i`th value has key `i`. It is 0 for
 // a document with no shared keys, for every JSON text, and for a dsv text read without a header.
 Document :: struct {
-	src:         []u8,
+	using view:  Token_View,
 	nodes:       []Node,
 	nodes_alloc: []Node,
 	facts:       []Fact,
 	facts_alloc: []Fact,
-	spelling:    ^Spelling,
 	allocator:   runtime.Allocator,
 	shared_keys: Node_Index,
 	// The byte just past the root value's authored bytes: the close of a root container, or the end of a root scalar,
 	// quotes included. 0 when the build did not record it. `span(ROOT)` and a whole-document writer read it instead
 	// of calling the format's `close_end`.
 	root_close:  u64,
-	read:        Read_As,
 	// The true child count of every container whose count saturated `MAX_CHILDREN`, sorted by node, and the
 	// allocation behind it. It is empty when no container is that wide.
 	counts:       []Child_Count,
@@ -262,9 +268,9 @@ Resolve_Options :: struct {
 // reader. Both are a `rawptr` since `core/write` and `core/records` import `core`, and each is cast back to that type
 // unchecked, so a format sets them to a table of exactly that type or leaves them nil.
 Spelling :: struct {
-	text:       proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool),
-	key_equals: proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool,
-	number:     proc(doc: ^Document, i: Node_Index) -> Number,
+	text:       proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
+	key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
+	number:     proc(v: ^Token_View, t: Token) -> Number,
 	resolve:    proc(doc: ^Document, i: Node_Index, opts: Resolve_Options) -> Kind,
 	close_end:  proc(doc: ^Document, i: Node_Index) -> u64,
 	query:      proc(doc: ^Document, paths: []Path, read: Query_Options, allocator: runtime.Allocator) -> (answers: []Answer, err: Path_Error),
@@ -296,7 +302,7 @@ Spelling :: struct {
 // removes every member of the root. `plan` runs first on a commit and may turn the whole list into plain edits, which
 // `out` receives with their texts borrowed or allocated with `allocator`, and it returns false to keep the list as it is.
 Edit_Spelling :: struct {
-	value:         proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
+	value:         proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:      proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
 	reads:         proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
 	comment:       proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
@@ -450,7 +456,13 @@ key_equals :: #force_inline proc "contextless" (doc: ^Document, i: Node_Index, n
 			return spell.bytes_equal(doc.src[n.lo:n.lo + u64(n.n)], transmute([]u8)name)
 		}
 	}
-	return doc.spelling.key_equals(doc, i, name)
+	return key_equals_decode(doc, i, name)
+}
+
+// Out of line, so the hot loop of `member` passes the document and index as before and holds no token.
+@(private, cold)
+key_equals_decode :: #force_no_inline proc "contextless" (doc: ^Document, i: Node_Index, name: string) -> bool {
+	return doc.spelling.key_equals(&doc.view, doc.nodes[i], name)
 }
 
 // Returns the first source byte of node `n`. A quoted string's token starts one byte past its opening quote.
@@ -695,7 +707,7 @@ text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: stri
 	if n.spelling & SPELLING_DECODE == 0 {
 		return string(node_text(doc.src, n)), true
 	}
-	return doc.spelling.text(doc, i, buf)
+	return doc.spelling.text(&doc.view, n, buf)
 }
 
 // Returns a copy of node `i`'s decoded text, allocated from `allocator`. The result is the allocation the caller frees
@@ -725,7 +737,7 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 	if err != nil {
 		return "", false
 	}
-	s, ok = doc.spelling.text(doc, i, raw)
+	s, ok = doc.spelling.text(&doc.view, n, raw)
 	if !ok {
 		delete(raw, allocator)
 		return "", false
@@ -749,7 +761,7 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 // `.Wide`. The format's reader refuses a key or a string of its own.
 number :: #force_inline proc(doc: ^Document, i: Node_Index) -> Number {
 	if int(i) < len(doc.nodes) && doc.nodes[i].kind <= .Plain {
-		return doc.spelling.number(doc, i)
+		return doc.spelling.number(&doc.view, doc.nodes[i])
 	}
 	return {0, .Wide}
 }

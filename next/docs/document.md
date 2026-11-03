@@ -236,8 +236,8 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 ```
 
 `text` returns a source slice or a decode in `buf`. It returns false for a container, an index past the last node, or a
-`buf` too short for the decoded text. `json.text` is the same read without the table, for a caller that knows the
-format.
+`buf` too short for the decoded text. `json.text(&doc.view, doc.nodes[i], buf)` is the same read without the table, for a
+caller that knows the format.
 
 `text_clone` always allocates, and the result is exactly what the caller passes to `delete(s, allocator)`: a text that
 is its source is copied, and a decode's over-long buffer is trimmed, so `len(s)` is the allocation's length. A caller
@@ -277,7 +277,9 @@ A `Spelling` holds five services, `text`, `key_equals`, `number`, `resolve` and 
 dispatches through, which each format points at `core/build`'s, and a pointer to the format's `Edit_Spelling`. A document points at its format's table in rodata,
 one table for every spec of the format: a JSON token holds no form that only JSON5 reads, so `text` reads any JSON
 string, and dsv's `text` and `key_equals` read `Document.read.spec`, since a CSV backslash is a byte, a TSV
-backslash is an escape, and a `Plain` cell has neither.
+backslash is an escape, and a `Plain` cell has neither. `text`, `key_equals` and `number` take a `Token_View`, the
+source, the table and the read, and the token by value, so a typed read hands them a walk's token with no document.
+`Document` starts with `using view: Token_View`, and `Edit_Spelling.value` takes one too.
 
 | Service | JSON | dsv |
 |---|---|---|
@@ -289,7 +291,7 @@ backslash is an escape, and a `Plain` cell has neither.
 
 ```odin
 Edit_Spelling :: struct {
-	value:        proc(doc: ^Document, src: []u8, allocator: runtime.Allocator) -> Document_Error,
+	value:        proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:     proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
 	reads:         proc(doc: ^Document, src: []u8, tolerate: bool, spec: u8) -> (fault: Fault, faulted: bool),
 	comment:       proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),

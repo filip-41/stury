@@ -109,6 +109,7 @@ Step :: union #no_nil {
 TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Bad_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 Token :: struct {
 Token_Answer :: struct {
+Token_View :: struct {
 Typed_Error :: struct {
 Typed_Error_Kind :: enum u8 {
 Write_Options :: struct {
@@ -395,14 +396,14 @@ each_answer :: proc {each_answer_one, each_answer_many}
 find :: proc(src: []u8, $S: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
 format :: proc(src: []u8, $S: Spec, opts := core.Write_Options{}, read := Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
 marshal :: proc(value: any, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
-number :: #force_inline proc(doc: ^core.Document, i: core.Node_Index) -> core.Number {
+number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
 number_spelling_of :: #force_inline proc (spelling: u16) -> Number_Spelling {
 plan_make :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
 put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind {
 scan :: proc {scan_one, scan_many}
 set :: proc(src: []u8, $S: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 spine :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool) {
-text :: #force_inline proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool) {
+text :: #force_inline proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 validate :: proc (src: []u8, $S: Spec, opts := Options{}) -> Maybe(core.Fault) {
 walk :: proc (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault)) {

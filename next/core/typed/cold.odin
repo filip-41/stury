@@ -176,9 +176,8 @@ Tag_Scan :: struct {
 on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	if t.role == .Key {
 		if s.depth == 1 {
-			node := t
-			doc := core.Document{src = s.src, nodes = ([^]core.Node)(&node)[:1]}
-			s.on_tag = s.spelling.key_equals(&doc, 0, s.name)
+			view := core.Token_View{src = s.src}
+			s.on_tag = s.spelling.key_equals(&view, t, s.name)
 			if s.on_tag {
 				s.found += 1
 				if s.found == 2 {
@@ -342,8 +341,7 @@ copy_cstring :: proc(s: string, dest: uintptr) -> core.Typed_Error_Kind {
 // Reads a number token by its spelling.
 @(private)
 read_number :: proc(h: ^Reader, t: core.Token) -> core.Number {
-	h.token = t
-	return h.plan.spelling.number(&h.token_doc, 0)
+	return h.plan.spelling.number(&h.view, t)
 }
 
 @(private)

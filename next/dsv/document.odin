@@ -31,7 +31,7 @@ flags_of :: #force_inline proc(no_header, crlf: bool) -> u8 {
 
 // Returns the delimiter, comment byte and `no_header` flag packed in `doc.read.opts`.
 @(private)
-read_opts :: #force_inline proc(doc: ^core.Document) -> (delimiter: u8, comment: u8, no_header: bool) {
+read_opts :: #force_inline proc(doc: ^core.Token_View) -> (delimiter: u8, comment: u8, no_header: bool) {
 	return doc.read.opts[0], doc.read.opts[1], doc.read.opts[2] & READ_NO_HEADER != 0
 }
 
@@ -320,8 +320,8 @@ plain_quoted :: proc "contextless" (src: []u8, n: core.Node) -> bool {
 // `""` and with well-formed UTF-8 as its inner span, and another cell as its span. It decodes a quoted cell holding
 // `""`, a TSV escape and a `lax` cell into `buf`, and returns false when `buf` is too short.
 @(private)
-spelling_text :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool) {
-	return cell_text(doc.src, doc.nodes[i], Spec(doc.read.spec), buf)
+spelling_text :: proc(v: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {
+	return cell_text(v.src, n, Spec(v.read.spec), buf)
 }
 
 // The text of cell `n` of `src`, a text of spec `spec`, as `spelling_text` gives it.
@@ -344,8 +344,7 @@ cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string,
 // decode is compared by its span, or by its inner span for a quoted cell without `""`, and one that needs it byte by
 // byte as it decodes.
 @(private)
-spelling_key_equals :: proc "contextless" (doc: ^core.Document, i: core.Node_Index, name: string) -> bool {
-	n := doc.nodes[i]
+spelling_key_equals :: proc "contextless" (doc: ^core.Token_View, n: core.Node, name: string) -> bool {
 	spec := Spec(doc.read.spec)
 	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(doc.src, n) {
 		lo, hi := inner_span(doc.src, n)
@@ -364,8 +363,7 @@ spelling_key_equals :: proc "contextless" (doc: ^core.Document, i: core.Node_Ind
 // a key cell all return `Wide`, since no JSON number holds a quote, a backslash or a byte past 0x7F. A header cell names
 // a column and answers as a JSON key node does.
 @(private)
-spelling_number :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Number {
-	n := doc.nodes[i]
+spelling_number :: proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
 	if n.role != .Value {
 		return {0, .Wide}
 	}
@@ -439,7 +437,7 @@ shape_hook :: proc "contextless" (h: ^Text_Shape, s: core.Hook_Regs, t: core.Tok
 // as no record. A CSV or TSV cell holding the delimiter must be quoted or escaped by the caller. Plain has no quote, so
 // its cells cannot hold the delimiter at all. Returns the cell count.
 @(private)
-edit_record :: proc(doc: ^core.Document, src: []u8, _: runtime.Allocator, $S: Spec) -> (cells: int, err: core.Document_Error) {
+edit_record :: proc(doc: ^core.Token_View, src: []u8, _: runtime.Allocator, $S: Spec) -> (cells: int, err: core.Document_Error) {
 	h: Text_Shape
 	regs: core.Hook_Regs
 	delimiter, comment, _ := read_opts(doc)
@@ -542,7 +540,7 @@ edit_cell_sep :: proc(doc: ^core.Document) -> string {
 
 // Checks that a cell's text is empty or exactly one cell under the document's grammar.
 @(private)
-edit_value_at :: proc(doc: ^core.Document, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
+edit_value_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
 	if len(src) == 0 {
 		return {}
 	}
@@ -634,7 +632,7 @@ edit_record_sep :: proc(doc: ^core.Document) -> string {
 }
 
 @(private)
-edit_record_at :: proc(doc: ^core.Document, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: core.Document_Error) {
+edit_record_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: core.Document_Error) {
 	switch Spec(doc.read.spec) {
 	case .Csv:   return edit_record(doc, src, allocator, .Csv)
 	case .Tsv:   return edit_record(doc, src, allocator, .Tsv)
