@@ -9,6 +9,7 @@ tests and benchmarks on its own and imports nothing outside this directory.
 |---|---|
 | `core/spell` | the number decoders and their tables, the byte decode and compare helpers, and number text: shortest floats and integers |
 | `core` | what every format shares: the token, hook and fault types, error rendering, `Number` and its bounds, the document, its readers, the edit list, paths and their answers |
+| `host` | `Pool`, the threads a caller keeps between parallel calls and lends through `core.Runner` (nil means the caller's thread alone): helpers wake in a tree, a task nobody has started is taken back, and each task's width is learned from how long the caller waits |
 | `core/kernel` | vector code: 64-byte blocks, byte classes, masks, escapes, UTF-8 validation, per CPU tier |
 | `core/build` | the builder: the hooks that write a document, its reservation, the duplicate-key check, and the path engine |
 | `core/typed` | the typed read: the type plan, the read's hook, refusal and collection, for any format |
@@ -17,7 +18,7 @@ tests and benchmarks on its own and imports nothing outside this directory.
 | `dsv` | the delimited-text walk for the `Csv`, `Tsv` and `Plain` specs, its `build`, its path reads and its spelling and edit services |
 | `walktest` | helpers the test packages share |
 
-Imports point down: `core/spell` imports no package of this tree, `core` imports `core/spell`, `core/kernel`,
+Imports point down: `host` imports `core` only, `core/spell` imports no package of this tree, `core` imports `core/spell`, `core/kernel`,
 `core/build` and `core/typed` import `core`, `core/write` imports `core`, `core/spell` and `core/typed`, `json` and `dsv` import all of
 them, and no format imports another.
 

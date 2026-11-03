@@ -1,8 +1,8 @@
 ODIN ?= $(or $(wildcard $(abspath ../../Odin-master/bin/odin)),odin)
 
 # The library packages, and the test packages that read them.
-LIB_PKGS  := core/spell core core/kernel core/compose core/build core/typed core/write json dsv
-TEST_PKGS := core/spell/test core/kernel/test core/test core/write/test json/test dsv/test
+LIB_PKGS  := core/spell core host core/kernel core/compose core/build core/typed core/write json dsv
+TEST_PKGS := core/spell/test host/test core/kernel/test core/test core/write/test json/test dsv/test
 # The packages the tests share, checked by `lint` and built through their imports.
 SUPPORT_PKGS := walktest
 # The test packages that read `-define:TIER`.

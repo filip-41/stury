@@ -1,0 +1,83 @@
+package host_test
+
+import "core:sync"
+import "core:testing"
+import core "../../core"
+import host ".."
+
+// Runs `task(arg)` on the caller and on the runner's threads, as a parallel procedure does.
+run :: proc(runner: ^core.Runner, n: int, task: proc(arg: rawptr), arg: rawptr) {
+	runner.start(runner.data, n, task, arg)
+	task(arg)
+	runner.finish(runner.data)
+}
+
+bump :: proc(arg: rawptr) {
+	sync.atomic_add((^int)(arg), 1)
+}
+
+bump_twice :: proc(arg: rawptr) {
+	sync.atomic_add((^int)(arg), 2)
+}
+
+// The caller's call always runs, a helper's may be taken back unstarted, and none runs after `finish`.
+@(test)
+every_started_call_returns_before_finish :: proc(t: ^testing.T) {
+	pool: host.Pool
+	host.pool_init(&pool, 4)
+	defer host.pool_destroy(&pool)
+	for _ in 0 ..< 2000 {
+		count: int
+		run(&pool.runner, pool.runner.threads, bump, &count)
+		testing.expect(t, 1 <= count && count <= pool.runner.threads + 1)
+	}
+}
+
+@(test)
+no_more_calls_than_asked :: proc(t: ^testing.T) {
+	pool: host.Pool
+	host.pool_init(&pool, 4)
+	defer host.pool_destroy(&pool)
+	for _ in 0 ..< 200 {
+		count: int
+		run(&pool.runner, 1, bump, &count)
+		testing.expect(t, 1 <= count && count <= 2)
+	}
+}
+
+@(test)
+pool_of_one_runs_on_the_caller :: proc(t: ^testing.T) {
+	pool: host.Pool
+	host.pool_init(&pool, 1)
+	defer host.pool_destroy(&pool)
+	testing.expect_value(t, pool.runner.threads, 0)
+	count: int
+	run(&pool.runner, 0, bump, &count)
+	testing.expect_value(t, count, 1)
+}
+
+// More tasks than the pool remembers widths for, alternating, each still runs.
+@(test)
+many_tasks_share_the_pool :: proc(t: ^testing.T) {
+	pool: host.Pool
+	host.pool_init(&pool, 3)
+	defer host.pool_destroy(&pool)
+	count: int
+	for i in 0 ..< 400 {
+		run(&pool.runner, pool.runner.threads, bump if i % 2 == 0 else bump_twice, &count)
+	}
+	testing.expect(t, count >= 600)
+	testing.expect(t, count <= 400 * 3 * (pool.runner.threads + 1) / 2)
+}
+
+@(test)
+writing_calls_balance :: proc(t: ^testing.T) {
+	pool: host.Pool
+	host.pool_init(&pool, 2)
+	defer host.pool_destroy(&pool)
+	host.writing(&pool, true)
+	host.writing(&pool, false)
+	count: int
+	run(&pool.runner, pool.runner.threads, bump, &count)
+	testing.expect(t, count >= 1)
+}

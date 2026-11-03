@@ -11,8 +11,8 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The library packages, and the order imports of them take. json and dsv share the last rank.
-PACKAGES = ["core/spell", "core", "core/kernel", "core/compose", "core/build", "core/typed", "core/write", "json", "dsv"]
-RANK = {"core/spell": 0, "core": 1, "core/kernel": 2, "core/compose": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "json": 6, "dsv": 6}
+PACKAGES = ["core/spell", "core", "host", "core/kernel", "core/compose", "core/build", "core/typed", "core/write", "json", "dsv"]
+RANK = {"core/spell": 0, "core": 1, "host": 2, "core/kernel": 2, "core/compose": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "json": 6, "dsv": 6}
 FORMATS = {"json", "dsv"}
 
 LEAN_BUDGET = 20_500
