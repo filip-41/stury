@@ -78,12 +78,13 @@ SPELLING := core.Spelling {
 	tag_key    = "csv",
 	write      = document_write,
 	tokens     = &TOKENS,
+	records    = &RECORDS,
 }
 
 // The spelling bits dsv sets. Bit 0 (`SPELLING_DECODE`) means `text` must decode a cell, bit 1 (`SPELLING_QUOTED`) a
 // quoted CSV cell, and bit 2 (`SPELLING_LAX`) that a tolerated ill-formed sequence may grow its decode.
 
-// `Token.spelling`'s bit for a quoted CSV cell holding a `""`, set only on a walk for `Cells`.
+// `Token.spelling`'s bit for a quoted CSV cell holding a `""`, set only on a walk for `Cells` or `Batch`.
 @(private)
 SPELLING_DOUBLED :: u16(8)
 
@@ -327,19 +328,23 @@ plain_quoted :: proc "contextless" (src: []u8, n: core.Node) -> bool {
 // `""`, a TSV escape and a `lax` cell into `buf`, and returns false when `buf` is too short.
 @(private)
 spelling_text :: proc(doc: ^core.Document, i: core.Node_Index, buf: []u8) -> (s: string, ok: bool) {
-	n := doc.nodes[i]
-	spec := Spec(doc.read.spec)
-	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(doc.src, n) {
-		lo, hi := inner_span(doc.src, n)
-		return string(doc.src[lo:hi]), true
+	return cell_text(doc.src, doc.nodes[i], Spec(doc.read.spec), buf)
+}
+
+// The text of cell `n` of `src`, a text of spec `spec`, as `spelling_text` gives it.
+@(private)
+cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string, ok: bool) {
+	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(src, n) {
+		lo, hi := inner_span(src, n)
+		return string(src[lo:hi]), true
 	}
 	if n.spelling & core.SPELLING_DECODE == 0 {
-		return string(doc.src[n.lo:n.lo + u64(n.n)]), true
+		return string(src[n.lo:n.lo + u64(n.n)]), true
 	}
 	// A cell carries `SPELLING_DECODE` when its span must be decoded. That is a quoted CSV cell holding `""`, a TSV
 	// cell with a backslash, which the pass's block mask answers, and any cell under `lax`, where a tolerated ill-formed
 	// sequence reads as U+FFFD.
-	return spell.decode_text(buf, dsv_decoded_init(doc.src, n, spec), dsv_decoded_next)
+	return spell.decode_text(buf, dsv_decoded_init(src, n, spec), dsv_decoded_next)
 }
 
 // dsv's `Spelling.key_equals`. It returns whether cell `i` decodes to `name`, with no allocation. A cell that needs no

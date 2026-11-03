@@ -8,6 +8,8 @@ records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, all
 records.next  :: proc(it: ^records.Reader) -> (records.Record, bool)
 records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error)
 records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Document_Error)
+records.column :: proc(it: ^records.Reader, name: string) -> int
+records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
 records.close :: proc(it: ^records.Reader)
 records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> (faults: []core.Fault, err: runtime.Allocator_Error)
 ```
@@ -93,6 +95,39 @@ gives: a record that would fault after a refusal is no record, and what its read
 `build` builds the document of a record `next` gave, as the format's `build` of `rec.text` does, with offsets from the
 input's first byte.
 
+## Rows
+
+A dsv text is read under `.Lines`, the zero value, so `records.open(src, dsv.as(.Csv))` takes no framing. A record is a
+row: `text` runs from its first byte to its line end, less a CR before the LF, and a quoted cell may hold line ends. The
+header, empty lines and comment lines are no record. The other framings end the records with `.Bad_Option`.
+
+```odin
+it := records.open(src, dsv.as(.Csv))
+defer records.close(&it)
+price := records.column(&it, "price")
+buf: [64]u8
+for rec in records.next(&it) {
+	text, ok := records.cell(&it, rec, price, buf[:])
+}
+```
+
+- `next` frames rows by a walk of the text, which judges them, so a fault ends the records with the fault `validate`
+  gives for the whole text, and every row whose line end comes before it is given first. `check` returns that fault.
+- The walk reads rows in batches of up to 256 and keeps each cell's position. A batch ends early when its buffer is
+  three quarters full, and a row too wide for the buffer grows it. The next walk restarts at the next row's first byte
+  with the header and the row width carried in.
+- `column` returns the index of the first header cell that decodes to `name`, and -1 with no header. It reads the
+  first batch, whose rows `next` then gives.
+- `cell` returns cell `column` of the row `next` gave last, as a slice of the input when it needs no decode, else
+  decoded into `buf`. It returns false for another row, a column past the row, or a `buf` too short.
+- `read` reads a row into a row type, from a plan of the row type, not of a list of rows. It reads as `dsv.unmarshal`
+  reads a text of the header and that row into the row, refusals of the header included. A list row reads as the row
+  alone, since it takes the header as data. A plan of a list of rows is `.Plan_Mismatch`, and a map row with no
+  header `.Unsupported`. The read replays the cells the walk kept, so nothing is read twice.
+- `build` of the row `next` gave last is a document over the whole input: a `Map` keyed by the header's cells, or an
+  `Array` with no header. Its offsets are the input's. Another row is `.Bad_Index`.
+- An unclosed quoted field is a `Truncated` fault at its opening quote, the same in `validate`, `unmarshal` and `build`.
+
 ## How JSON reads a record
 
 A record is walked in place in the whole input, not in a slice cut from it, and the walk stops at the record's end
@@ -110,4 +145,5 @@ The walk in place reads at most 64 bytes past the record, so a value spread over
 A format gives its record reader as a `records.Services` table in its rodata, which its `core.Spelling.records` points
 at. `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
 and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault, `read` and `build` read
-one. `core` stores the table as a `rawptr`, since `core/records` imports `core`.
+one. `column` and `cell` are a format's with named columns, and `close` frees the memory the format keeps in
+`Reader.format`. `core` stores the table as a `rawptr`, since `core/records` imports `core`.

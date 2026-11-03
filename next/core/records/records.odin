@@ -17,13 +17,15 @@ Record :: struct {
 
 // Reads the records of `src`. `open` makes one, and `close` frees what its reads allocated. `fault` is the fault that
 // ended the records, nil when the input ended. `pos` is the byte the next record is looked for from. `state` is the
-// format's own framing state. `frames` are the typed reads' open containers, allocated with `allocator` by the first.
+// format's own framing state, and `format` the memory a format keeps for it. `frames` are the typed reads' open
+// containers, allocated with `allocator` by the first.
 Reader :: struct {
 	src:       []u8,
 	pos:       u64,
 	as:        core.As,
 	services:  ^Services,
 	frames:    []typed.Frame,
+	format:    rawptr,
 	allocator: runtime.Allocator,
 	fault:     Maybe(core.Fault),
 	framing:   core.Framing,
@@ -34,12 +36,16 @@ Reader :: struct {
 // under each framing the format takes, nil for one it does not, and returns false at the input's end or on a fault,
 // which it stores in `it.fault`. `judge` returns the fault of a record `next` gave, or nil, as the format's validate of
 // the record's text at its place in the input says. `read` is `next` and a typed read of the record into `target`, a
-// `T`. `build` builds a record's document.
+// `T`. `build` builds a record's document. `column` and `cell` are a format's with named columns, nil for another, and
+// `close` frees `it.format`, nil for a format that keeps none.
 Services :: struct {
-	next:  [core.Framing]proc(it: ^Reader) -> (Record, bool),
-	judge: proc(it: ^Reader, rec: Record) -> Maybe(core.Fault),
-	read:  proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
-	build: proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
+	next:   [core.Framing]proc(it: ^Reader) -> (Record, bool),
+	judge:  proc(it: ^Reader, rec: Record) -> Maybe(core.Fault),
+	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
+	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
+	column: proc(it: ^Reader, name: string) -> int,
+	cell:   proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool),
+	close:  proc(it: ^Reader),
 }
 
 // Opens the records of `src` in format `as` under `framing`. The reader's own memory comes from `allocator`. A UTF-8
@@ -88,8 +94,29 @@ build :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (core
 	return it.services.build(it, rec, allocator)
 }
 
+// Returns the index of the first column `name` names, or -1 when none does or the format has no named columns. It may
+// read the first records, which `next` then gives.
+column :: proc(it: ^Reader, name: string) -> int {
+	if it.fault != nil || it.services.column == nil {
+		return -1
+	}
+	return it.services.column(it, name)
+}
+
+// Returns the text of cell `column` of `rec`, the record `next` gave last, decoded into `buf` when it must be, and false
+// when the record has no such cell, `buf` is too short, or the format has no cells.
+cell :: proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool) {
+	if it.services == nil || it.services.cell == nil {
+		return "", false
+	}
+	return it.services.cell(it, rec, column, buf)
+}
+
 // Frees what the reads of `it` allocated.
 close :: proc(it: ^Reader) {
+	if it.services != nil && it.services.close != nil {
+		it.services.close(it)
+	}
 	delete(it.frames, it.allocator)
 	it^ = {}
 }

@@ -1,6 +1,7 @@
-// `records <frame|check|read> <file> <iters>`: reads the NDJSON records of the file and prints best and median GB/s.
-// `frame` frames each record and reads no value, `check` judges each one, `read` reads each one of `logs.ndjson` into
-// a `Log_Record`, strings borrowed.
+// `records <frame|check|read|cells|rows> <file> <iters>`: reads the records of the file and prints best and median GB/s.
+// On NDJSON, `frame` frames each record and reads no value, `check` judges each one, `read` reads each one of
+// `logs.ndjson` into a `Log_Record`, strings borrowed. On CSV, `cells` reads each row's first cell, and `rows` reads each
+// row of `table.csv` into a `Table_Row`, strings borrowed.
 package main
 
 import "base:runtime"
@@ -12,6 +13,7 @@ import "core:time"
 import typed "../../core/typed"
 import records "../../core/records"
 import json "../../json"
+import dsv "../../dsv"
 
 frame :: proc(src: []u8) -> int {
 	it := records.open(src, json.as(.Json))
@@ -52,6 +54,43 @@ read :: proc(src: []u8) -> int {
 	}
 }
 
+cells :: proc(src: []u8) -> int {
+	it := records.open(src, dsv.as(.Csv))
+	defer records.close(&it)
+	buf: [256]u8
+	n := 0
+	for rec in records.next(&it) {
+		text, _ := records.cell(&it, rec, 0, buf[:])
+		n += len(text) & 1
+	}
+	return n
+}
+
+Table_Row :: struct {
+	id, ts:       i64,
+	lat, lon:     f64,
+	qty:          i64,
+	price, score: f64,
+	ok:           bool,
+	code:         string,
+}
+
+row_plan: typed.Plan
+
+rows :: proc(src: []u8) -> int {
+	it := records.open(src, dsv.as(.Csv))
+	defer records.close(&it)
+	n := 0
+	for {
+		v: Table_Row
+		more, err := records.read(&it, &v, &row_plan, {borrow_strings = true})
+		if !more {
+			return n
+		}
+		n += int(err.kind != .None)
+	}
+}
+
 main :: proc() {
 	if len(os.args) != 4 {
 		fmt.eprintln("usage: records <frame|check|read> <file> <iters>")
@@ -70,6 +109,10 @@ main :: proc() {
 	case "read":
 		lane = read
 		log_plan, _ = json.plan_make(Log_Record)
+	case "cells": lane = cells
+	case "rows":
+		lane = rows
+		row_plan, _ = dsv.plan_make(Table_Row, .Csv)
 	case:
 		fmt.eprintln("no lane", os.args[1])
 		os.exit(2)
@@ -79,7 +122,7 @@ main :: proc() {
 		t0 := time.tick_now()
 		n := lane(src)
 		ts[i] = time.duration_seconds(time.tick_since(t0))
-		if os.args[1] != "frame" && n != 0 {
+		if os.args[1] != "frame" && os.args[1] != "cells" && n != 0 {
 			fmt.eprintln(n, "records refused")
 			os.exit(1)
 		}

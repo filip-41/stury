@@ -114,6 +114,9 @@ validate_agrees :: proc(t: ^testing.T, src: []u8, c: gen.Options_Case, refused: 
 	if got.kind == .Bad_Structure && got.detail == u8(dsv.Detail.Field_Count) {
 		// The current tree puts `Field_Count` at the record's first byte, and a fault at a later byte comes before it.
 		same = want.kind == .Bad_Structure && want.detail == u8(dsv.Detail.Field_Count) || want.offset >= got.at
+	} else if got.kind == .Truncated {
+		// The walk puts an unclosed quoted field's fault at its opening quote, the current tree at the text's end.
+		same = want.kind == .Truncated && got.at <= want.offset
 	} else {
 		same = fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.at && detail_agrees
 	}

@@ -43,7 +43,7 @@ document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	}
 	h.r.token_doc.read.spec = doc.read.spec
 	// A node says less of a quoted cell than the walk's token, so every cell takes the cold read.
-	rows_of(h, plan, regs, 0)
+	rows_of(h, plan, 0)
 	if h.row.kind == .Map && headless {
 		return {kind = .Unsupported}
 	}

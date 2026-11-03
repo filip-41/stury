@@ -48,7 +48,7 @@ See From a document below.
 A plan is a value the caller owns, for one type and one format. There is no global cache. It is read only during a
 read, so any number of reads may share one. `unmarshal_once` builds and frees a plan per call, and a program that reads
 one type many times builds it once. A plan for another type or format is `.Plan_Mismatch`, a nil target `.Bad_Option`. A dsv read takes only a plan from
-`dsv.plan_make`, which checks that the type is a list of rows, and a plan from `typed.plan_make` is `.Plan_Mismatch`.
+`dsv.plan_make`, which checks that the type is a list of rows or a row, and a plan from `typed.plan_make` is `.Plan_Mismatch`.
 
 ```odin
 Plan_Options :: struct {
@@ -275,8 +275,9 @@ original spelling of a number (JSON5) uses `on_token_spelled`.
 
 ## Delimited text
 
-`dsv.unmarshal` reads a text into a slice or dynamic array of rows, over the same plan, frames, lists and refusals. A row
-is a struct whose fields the header names, a list of cells, or a map with string keys. `dsv.plan_make` refuses any other
+`dsv.unmarshal` reads a text into a slice or dynamic array of rows, over the same plan, frames, lists and refusals, or into
+one row, which reads the first record and refuses a second as `.Wrong_Length` at its first byte, so a row reads back the
+text `dsv.marshal` writes of it. A row is a struct whose fields the header names, a list of cells, or a map with string keys. `dsv.plan_make` refuses any other
 `T` as `.Unsupported`, and a cell of a type with no text: nested containers, pointers, `any`, `Raw`, `Number_Text`, `Number`,
 `Scalar`, `rune`, a union of more than one arm. `Maybe` of a cell type reads.
 
@@ -300,7 +301,7 @@ columns are bound once, when the walk reaches the first record, or the text's en
   `.Duplicate_Key` at the repeat.
 - `no_header` reads a struct's fields in order. A list row takes every record, with or without `no_header`. A map row
   needs a header, and `no_header` on one is `.Unsupported`.
-- A text with a header and no record leaves an empty list. A text with no header line where one is wanted leaves the
+- A text with a header and no record leaves an empty list, and a row as it was. A text with no header line where one is wanted leaves the
   target as it was.
 - A row's path is its index, then the field or key. Two faults in one row refuse by the first in the text, since a cell
   is read as the walk passes it.

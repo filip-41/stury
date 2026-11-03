@@ -91,7 +91,7 @@ comment_span :: #force_inline proc "contextless" (nl, starts: u64, in_comment: b
 pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool, $COMMENTS: bool,
 	src: []u8, lo: u64, opts: Options, h: ^$H, regs: ^core.Hook_Regs,
 	$on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action),
-	keys: []core.Token) -> u64 {
+	keys: []core.Token, width: int) -> u64 {
 	base := raw_data(src)
 	n := len(src)
 	w := Pass(S, H) {
@@ -103,7 +103,8 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		tolerate = opts.tolerate,
 		start = 1,
 		line = 1,
-		in_header = !opts.no_header,
+		width = width,
+		in_header = !opts.no_header && width == 0,
 	}
 	hs := regs^
 	delim := w.delim
@@ -234,7 +235,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				}
 				// A quote that opens right after a closing one is a `""`'s second. The typed read keeps a cell free of
 				// them from a second scan, through the mask TSV's backslashes use.
-				when H == Cells {
+				when H == Cells || H == Batch {
 					bs = (closing << 1 | w.close) & q
 				}
 				if carried {
@@ -361,7 +362,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 	}
 
 	// Faults that only the text's end shows, in text order. They are a CR or backslash left open by the last block, a
-	// UTF-8 sequence left open, a quoted field never closed, then the last cell's width.
+	// quoted field never closed, a UTF-8 sequence left open, then the last cell's width.
 	if w.cr != 0 {
 		return core.fault_at(u64(n - 1), .Bad_Char)
 	}
@@ -370,16 +371,16 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			return core.fault_at(u64(n - 1), .Bad_Escape)
 		}
 	}
-	// A UTF-8 sequence the text cuts short is ill-formed, and `utf8_fault` reports it at `n`. An unclosed quoted field is
-	// a separate `Truncated` fault at `n`.
+	// An unclosed quoted field is a `Truncated` fault at its opening quote. A UTF-8 sequence the text cuts short is
+	// ill-formed, and `utf8_fault` reports it at `n`.
+	when S == .Csv {
+		if w.in_quote != 0 {
+			return core.fault_at(u64(scan_record(src, w.rec_lo, 0, S, delim).quote), .Truncated)
+		}
+	}
 	if w.prev_high && !kernel.utf8_ok(w.utf8) && .Invalid_Utf8 not_in w.tolerate {
 		if at, k := utf8_fault(src, int(lo), n); at >= 0 {
 			return core.fault_at(u64(at), k)
-		}
-	}
-	when S == .Csv {
-		if w.in_quote != 0 {
-			return core.fault_at(u64(n), .Truncated)
 		}
 	}
 	when EMIT {

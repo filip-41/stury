@@ -1,4 +1,4 @@
-"""records.py: the record reader's lanes on the NDJSON fixtures, the best round of each lane's median GB/s.
+"""records.py: the record reader's lanes on the NDJSON and CSV fixtures, the best round of each lane's median GB/s.
 
 Usage: ROUNDS=5 python3 next/bench/records.py
 """
@@ -6,8 +6,8 @@ import fcntl, os, subprocess, sys
 
 from doc import BUILD, LOCK, path as fixture
 
-FIXTURES = ["logs.ndjson", "docs.ndjson", "twitter.ndjson"]
-LANES = ["frame", "check", "read"]
+FIXTURES = ["logs.ndjson", "docs.ndjson", "twitter.ndjson", "table.csv", "text.csv", "wide.csv"]
+LANES = ["frame", "check", "read", "cells", "rows"]
 ITERS = 41
 
 
@@ -19,8 +19,11 @@ def main():
         print(f"{'fixture':<16}" + "".join(f"{lane:>8}" for lane in LANES))
         for name in FIXTURES:
             path = fixture(name)
-            # `read` reads into the struct of the logs records alone.
-            lanes = LANES if name == "logs.ndjson" else LANES[:2]
+            # `read` and `rows` read into the struct of the logs records and the table rows alone.
+            if name.endswith(".csv"):
+                lanes = LANES[3:] if name == "table.csv" else LANES[3:4]
+            else:
+                lanes = LANES[:3] if name == "logs.ndjson" else LANES[:2]
             best = {lane: 0.0 for lane in LANES}
             for _ in range(rounds):
                 for lane in lanes:

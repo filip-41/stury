@@ -118,8 +118,11 @@ def at_of(line):
     """A refusal's byte."""
     return int(line.split(' ')[2])
 
-def accepted(old, new):
+def accepted(old, new, text):
     """The reason a difference is a listed one, or None."""
+    # The walk puts a quoted field never closed at its opening quote, and the old tree at the text's end.
+    if old.startswith('R Walk') and new.startswith('R Walk') and at_of(new) < at_of(old) and text[at_of(new):at_of(new) + 1] == b'"':
+        return 'unclosed quote at its opening quote'
     # The walk refuses a record wider than the first under `.Ragged` with a header, where the old tree read past it.
     if RAGGED and new.startswith('R Width'):
         return 'wide record under ragged'
@@ -173,7 +176,7 @@ for shape, columns in SHAPES:
         refused += a.startswith('R ')
         if a == b:
             same += 1
-        elif reason := accepted(a, b):
+        elif reason := accepted(a, b, cs[i]):
             why[reason] = why.get(reason, 0) + 1
         else:
             bad += 1

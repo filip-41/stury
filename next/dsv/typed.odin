@@ -11,16 +11,16 @@ import spell "../core/spell"
 import core "../core"
 import typed "../core/typed"
 
-// Reads `src`, a text of spec `S`, into `target`, a slice or dynamic array of rows, replacing what it held. A row is a
-// struct whose fields the header names, a list of cells, or a map of string keys to cells. See `docs/typed.md`. The form
+// Reads `src`, a text of spec `S`, into `target`, a slice or dynamic array of rows, replacing what it held, or into one
+// row, which reads the first record and refuses a second as `.Wrong_Length`. A row is a struct whose fields the header
+// names, a list of cells, or a map of string keys to cells. See `docs/typed.md`. The form
 // with no plan builds and frees one for the call, and a plan built once with `plan_make` is the form for many reads. A
 // refusal leaves everything the read allocated reachable from `target`.
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
 // Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows and no
 // row. A write by the plan is of spec `spec` with the delimiter, comment byte, `no_header` and `crlf` of `layout`, and
-// `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call, and a row's plan, which
-// a record writer takes, reads nothing.
+// `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call.
 plan_make :: proc(T: typeid, spec: Spec, layout := Options{}, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
 	plan, err := typed.plan_make(T, &SPELLING, opts, allocator)
 	if err.kind != .None {
@@ -54,8 +54,8 @@ unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Opti
 
 @(private)
 unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
-	// Only `plan_make` checks that a type is a list of rows of cells.
-	if plan != nil && plan.node_read == nil {
+	// Only `plan_make` checks that a type is a list of rows of cells or a row.
+	if plan != nil && plan.marshal == nil {
 		return {kind = .Plan_Mismatch}
 	}
 	h := Cells{refuse_repeats = read.refuse_duplicates}
@@ -65,7 +65,7 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 		return err
 	}
 	h.r.token_doc.read.spec = u8(S)
-	rows_of(&h, plan, regs, len(src))
+	rows_of(&h, plan, len(src))
 	if h.row.kind == .Map && opts.no_header {
 		return {kind = .Unsupported}
 	}
@@ -97,11 +97,13 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 	return typed.read_end(&h.r, regs, fault)
 }
 
-// Reads the plan's row type into `h`: the token that opens a row, the register that names no field, and where a hot read
-// stops short of the text's end.
+// Reads the plan's row type into `h`: the row, whether the target is one row, the token that opens a row, the register
+// that names no field, and where a hot read stops short of the text's end.
 @(private)
-rows_of :: proc "contextless" (h: ^Cells, plan: ^typed.Plan, regs: core.Hook_Regs, text_len: int) {
-	h.row = typed.field_at(u64(uintptr(typed.field_at(regs.b).first)))
+rows_of :: proc(h: ^Cells, plan: ^typed.Plan, text_len: int) {
+	listed: bool
+	h.row, listed = row_of(plan)
+	h.single = !listed
 	h.opens = .Array if h.row.kind == .Slice || h.row.kind == .Dynamic else .Map
 	// A record's own `Never`, which the typed read's check at a row's close counts as past every member. Any other row
 	// has no check and takes the plan's.
@@ -112,9 +114,15 @@ rows_of :: proc "contextless" (h: ^Cells, plan: ^typed.Plan, regs: core.Hook_Reg
 	h.hot_end = u64(text_len - HOT_REACH) if text_len > HOT_REACH else 0
 }
 
-// A text nests a record in the list of records, over the frame below the root's.
+// A text nests a record in the list of records, over the frame below the root's. A row target has no frame for the list.
 @(private)
 ROW_FRAMES :: 4
+
+// The read's depth inside a row.
+@(private)
+row_depth :: #force_inline proc "contextless" (h: ^Cells) -> int {
+	return ROW_FRAMES - 1 - int(h.single)
+}
 
 // The bytes from a cell's first that a hot read may load, so the last cells of a text take the cold read.
 @(private)
@@ -137,7 +145,9 @@ Column :: struct {
 }
 
 // `Hook_Regs` inside a row: `b` is the column of the next cell, and `c` the row or, in a list row, the next cell's
-// element. A map row keeps `a` and `c` 0, so the room test sends each cell to the read that makes its entry.
+// element. A map row keeps `a` and `c` 0, so the room test sends each cell to the read that makes its entry. `single`
+// says the target is one row, which reads the text's first record, and `opens` counts the text's open and the rows a
+// single read has met.
 @(private)
 Cells :: struct {
 	r:              typed.Reader,
@@ -147,6 +157,8 @@ Cells :: struct {
 	past:           u64, // the `Hook_Regs.b` that names no field
 	hot_end:        u64,
 	opens:          core.Kind, // the token that opens a row
+	met:            int,
+	single:         bool,
 	no_header:      bool,
 	refuse_repeats: bool,
 }
@@ -279,7 +291,7 @@ cell_f64 :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: f64, ok: 
 row_token :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	regs := regs
 	if t.kind == .End {
-		if h.r.sp == ROW_FRAMES - 1 {
+		if h.r.sp == row_depth(h) {
 			col := (^Column)(uintptr(regs.b))
 			if col.must {
 				return missing_cell(h, regs, col, t)
@@ -290,10 +302,24 @@ row_token :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 				return regs, action
 			}
 		}
+		if h.single && h.r.sp == 1 {
+			return regs, .Next
+		}
 		return typed.on_token(&h.r, regs, t)
 	}
 	if h.r.sp == 1 {
-		return typed.on_token(&h.r, regs, t)
+		if !h.single {
+			return typed.on_token(&h.r, regs, t)
+		}
+		// The text's open, then its first row. A row target holds one row, and a later one is refused and passed over.
+		h.met += 1
+		if h.met == 1 {
+			return regs, .Next
+		}
+		if h.met > 2 {
+			_, action := typed.refuse(&h.r, regs, {kind = .Wrong_Length, at = t.lo})
+			return regs, .Stop if action == .Stop else .Skip
+		}
 	}
 	if h.cols == nil {
 		if action := bind_columns(h, regs, t.lo); action != .Next {
@@ -627,7 +653,7 @@ fault_position :: proc(h: ^Cells, regs: ^core.Hook_Regs) {
 		} else {
 			bind_columns(h, regs^, 0)
 		}
-	} else if h.r.sp == ROW_FRAMES - 1 {
+	} else if h.r.sp == row_depth(h) {
 		regs.b = h.past
 		if h.opens == .Map {
 			h.r.frames[h.r.sp - 1].b = regs.b

@@ -48,13 +48,14 @@ header_cells :: #force_no_inline proc "contextless" (src: []u8, start: int, $S: 
 // A record read from its first byte by `scan_record`. `cells` is its cell count, at least 1. `fault_at` is the index
 // of the first delimiter that opens a cell past `width`, -1 when there is none, and width 0 counts cells only.
 // `line_end` is the index of its LF, or `len(src)` when the text ends first. `line_end_lo` is the index of the CR in a
-// CR LF, else the same as `line_end`.
+// CR LF, else the same as `line_end`. `quote` is the index of the last quote that opened a quoted field.
 @(private)
 Record_Scan :: struct {
 	cells:       int,
 	fault_at:    int,
 	line_end:    int,
 	line_end_lo: int,
+	quote:       int,
 }
 
 // Reads one record from `start`, with `delim` between cells. Quotes (CSV) and escapes (TSV) are read as the pass reads
@@ -121,8 +122,8 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 			s.cells += 1
 		}
 		when S == .Csv {
-			if c == '"' {
-				quoted = first
+			if c == '"' && first {
+				quoted, s.quote = true, i
 			}
 			first = c == delim
 		}
