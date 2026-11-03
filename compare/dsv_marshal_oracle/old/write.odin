@@ -6,6 +6,13 @@ read_table :: proc(src: []u8, v: ^[]Table_Row) {assert(csv.unmarshal(src, v, {bo
 read_text :: proc(src: []u8, v: ^[]Text_Row) {assert(csv.unmarshal(src, v, {borrow_strings = true}, nil, context.allocator) == nil)}
 
 arm :: proc(name: string, rows: $T, spec: Spec, layout: Layout) {
+	// The new tree refuses map rows without a header, since a map's keys give no column order to read them back by.
+	when T == []map[string]string {
+		if layout.no_header {
+			write_text(name, transmute([]u8)string("REFUSED\n"))
+			return
+		}
+	}
 	quoting := csv.Quoting.Quotes
 	switch spec {
 	case .Csv:

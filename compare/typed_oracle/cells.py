@@ -118,8 +118,21 @@ def at_of(line):
     """A refusal's byte."""
     return int(line.split(' ')[2])
 
+def repeats_a_column(text):
+    """Whether the header names a column twice."""
+    if NO_HEADER:
+        return False
+    lines = text.removeprefix(b'\xef\xbb\xbf').decode('utf8', 'replace').splitlines()
+    head = next((l for l in lines if not (COMMENT and l.startswith('#'))), '')
+    names = [n.strip('"') for n in head.split(DELIM)]
+    return len(set(names)) < len(names)
+
 def accepted(old, new, text):
     """The reason a difference is a listed one, or None."""
+    # Every cell of a repeated column is judged, where the old tree judged only the one it kept, so the walk refuses
+    # at the first bad cell of either.
+    if new.startswith('R ') and (not old.startswith('R ') or at_of(new) < at_of(old)) and repeats_a_column(text):
+        return 'repeated column judged'
     # The walk puts a quoted field never closed at its opening quote, and the old tree at the text's end.
     if old.startswith('R Walk') and new.startswith('R Walk') and at_of(new) < at_of(old) and text[at_of(new):at_of(new) + 1] == b'"':
         return 'unclosed quote at its opening quote'
