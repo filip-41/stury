@@ -7,7 +7,7 @@ import fcntl, os, subprocess, sys
 from doc import BUILD, LOCK, path as fixture
 
 FIXTURES = ["logs.ndjson", "docs.ndjson", "twitter.ndjson", "table.csv", "text.csv", "wide.csv"]
-LANES = ["frame", "check", "read", "cells", "rows"]
+LANES = ["frame", "check", "stream", "read", "cells", "rows"]
 ITERS = 41
 
 
@@ -21,9 +21,9 @@ def main():
             path = fixture(name)
             # `read` and `rows` read into the struct of the logs records and the table rows alone.
             if name.endswith(".csv"):
-                lanes = LANES[3:] if name == "table.csv" else LANES[3:4]
+                lanes = LANES[4:] if name == "table.csv" else LANES[4:5]
             else:
-                lanes = LANES[:3] if name == "logs.ndjson" else LANES[:2]
+                lanes = LANES[:4] if name == "logs.ndjson" else LANES[:3]
             best = {lane: 0.0 for lane in LANES}
             for _ in range(rounds):
                 for lane in lanes:

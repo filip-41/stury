@@ -4,12 +4,14 @@
 format once, through the `core.As` value it opens with, and the calls after that name none.
 
 ```odin
-records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> records.Reader
+records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> records.Reader
+records.open_stream :: proc(input: io.Reader, as: core.As, framing := core.Framing.Lines, opts := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader
 records.next  :: proc(it: ^records.Reader) -> (records.Record, bool)
 records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error)
 records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Document_Error)
 records.column :: proc(it: ^records.Reader, name: string) -> int
 records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
+records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok: bool)
 records.close :: proc(it: ^records.Reader)
 records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> (faults: []core.Fault, err: runtime.Allocator_Error)
 ```
@@ -34,6 +36,11 @@ if f, bad := it.fault.?; bad {
 | `key` | the key of an object member under `.Entries`, as written, nil otherwise |
 
 Every offset, in a record and in a fault, counts from the input's first byte, never from the record's.
+
+`open` starts reading at `src[at]`, and its offsets still count from `src[0]`: a caller that stopped at a record
+resumes at that record's `at` with the same offsets. `open_stream`'s `at` names the input byte the reader's first byte
+is, for a stream opened part way into a file. Both read from `at` as from the first byte of a record, and pass over a
+byte order mark only when `at` is 0.
 
 ## Framings
 
@@ -140,10 +147,50 @@ record is walked again cut at its end:
 
 The walk in place reads at most 64 bytes past the record, so a value spread over many lines costs no more than one.
 
+## Streams
+
+`open_stream` reads the records an `io.Reader` gives, with the same `next`, `read` and `build`, and
+gives the same records and faults as `open` on the whole input, with the same offsets. The input is read in 64 KiB
+reads into a window that doubles while a record does not fit, up to `Stream_Options.max_bytes` (0 for no limit). A
+record's `text` and `key` are slices of the window and last until the next call on the reader.
+
+```odin
+it := records.open_stream(os.to_reader(f), json.as(.Json), .Lines, {max_bytes = 1 << 26})
+defer records.close(&it)
+for rec in records.next(&it) {
+	// rec.text lasts until the next call
+}
+```
+
+- The window always ends on a whole record. Under `.Lines` and `.Seq` it ends at the last LF or 0x1E it holds. Under
+  `.Concatenated` a record whose walk faults within 12 bytes of the window's end, while more input may come, is walked
+  again once more is read, since the bytes after it may make it whole. Under `.Entries` the whole input is read first.
+- When the input ends inside a record that a longer input could finish, a `Truncated` fault at the input's end, the
+  records end with no fault and the bytes past the last whole record in `it.held`, at offset `it.held_at`. Under
+  `.Concatenated` those bytes start after the last record, gap included. The same text in memory ends on the
+  `Truncated` fault. A last record that is whole with no LF after it is a record, as in memory, and any other fault is
+  a fault.
+- A record that does not fit in `max_bytes` ends the records with the fault `.Too_Long`, at the first byte after the
+  record before it.
+- When the reader fails, the records end with no fault, the error in `it.cause`, and the bytes past the last whole
+  record in `it.held`. A read that gives no bytes and no error is `.No_Progress`.
+- Under `.Concatenated`, `read` of a record that crosses the window's end reads it twice, and what the first read
+  allocated is not freed: pass an arena.
+
+`next_window` gives the records in whole windows instead of one at a time, each with the input offset of its first
+byte, for a caller that hands each window to another thread. A reader on text in memory gives the text past `pos` as
+one window. A window holds the records and the gaps between them, so a window past the first may start with
+whitespace, and its records are read with offsets from `base`.
+
 ## The format's services
 
 A format gives its record reader as a `records.Services` table in its rodata, which its `core.Spelling.records` points
 at. `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
 and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault, `read` and `build` read
 one. `column` and `cell` are a format's with named columns, and `close` frees the memory the format keeps in
-`Reader.format`. `core` stores the table as a `rawptr`, since `core/records` imports `core`.
+`Reader.format`. `ends` names, per framing, the byte a backward scan finds a whole record's end by (JSON's LF and 0x1E),
+0 where only a walk of the records finds it, and 0xff where the format reads no stream. `core` stores the table as a
+`rawptr`, since `core/records` imports `core`.
+
+dsv reads no stream yet: a quoted cell may hold an LF, so only a walk finds a row's end, and its batch holds rows past
+the one `next` gave, as offsets in the text, which a moving window would leave stale.

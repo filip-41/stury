@@ -1,10 +1,11 @@
-// `records <frame|check|read|cells|rows> <file> <iters>`: reads the records of the file and prints best and median GB/s.
-// On NDJSON, `frame` frames each record and reads no value, `check` judges each one, `read` reads each one of
-// `logs.ndjson` into a `Log_Record`, strings borrowed. On CSV, `cells` reads each row's first cell, and `rows` reads each
-// row of `table.csv` into a `Table_Row`, strings borrowed.
+// `records <frame|check|stream|read|cells|rows> <file> <iters>`: reads the records of the file and prints best and
+// median GB/s. On NDJSON, `frame` frames each record and reads no value, `check` judges each one, `stream` judges each
+// one through a stream's window, `read` reads each one of `logs.ndjson` into a `Log_Record`, strings borrowed. On CSV,
+// `cells` reads each row's first cell, and `rows` reads each row of `table.csv` into a `Table_Row`, strings borrowed.
 package main
 
 import "base:runtime"
+import "core:bytes"
 import "core:fmt"
 import "core:os"
 import "core:slice"
@@ -29,6 +30,21 @@ check :: proc(src: []u8) -> int {
 	faults, _ := records.check(src, json.as(.Json), .Lines, context.temp_allocator)
 	defer free_all(context.temp_allocator)
 	return len(faults)
+}
+
+// `check`'s work on a stream of the text in memory, read through the 64 KiB window.
+stream :: proc(src: []u8) -> int {
+	r: bytes.Reader
+	it := records.open_stream(bytes.reader_init(&r, src), json.as(.Json))
+	defer records.close(&it)
+	n := 0
+	for rec in records.next(&it) {
+		// `judge` takes offsets in the window.
+		in_window := rec
+		in_window.at -= it.base
+		n += int(it.services.judge(&it, in_window) != nil)
+	}
+	return n
 }
 
 Log_Record :: struct {
@@ -93,7 +109,7 @@ rows :: proc(src: []u8) -> int {
 
 main :: proc() {
 	if len(os.args) != 4 {
-		fmt.eprintln("usage: records <frame|check|read> <file> <iters>")
+		fmt.eprintln("usage: records <frame|check|stream|read|cells|rows> <file> <iters>")
 		os.exit(2)
 	}
 	src, err := os.read_entire_file(os.args[2], runtime.default_allocator())
@@ -106,6 +122,7 @@ main :: proc() {
 	switch os.args[1] {
 	case "frame": lane = frame
 	case "check": lane = check
+	case "stream": lane = stream
 	case "read":
 		lane = read
 		log_plan, _ = json.plan_make(Log_Record)

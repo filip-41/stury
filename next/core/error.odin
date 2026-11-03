@@ -20,6 +20,7 @@ Fault_Kind :: enum u8 {
 	Too_Wide, // json, dsv: the first byte of a token longer than `Token.n` holds
 	No_Memory, // json (depth stack past `MAX_DEPTH`), dsv (header's keys): the walk's scratch allocation failed, no byte
 	Bad_Option, // dsv: an option the spec does not take, found before any byte is read
+	Too_Long, // records: a stream's record past its `max_bytes`, at the first byte after the record before it
 }
 
 // The kinds that name no byte of the text. Their `at` is 0.
@@ -61,6 +62,7 @@ KIND_RULES := [Fault_Kind]Rule {
 	.Too_Wide      = {"too_wide", "Token is longer than 4 GiB"},
 	.No_Memory     = {"no_memory", "Out of memory"},
 	.Bad_Option    = {"bad_option", "An option the format does not take"},
+	.Too_Long      = {"too_long", "Record is longer than the limit"},
 }
 
 // Returns the `Rule` for `f`: `f.rules.details[f.detail]` when `detail` is nonzero, `rules` is set and the index is
@@ -399,7 +401,6 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 }
 
 // The kinds that name no byte of a source.
-@(private)
 TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Bad_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 
 @(private)

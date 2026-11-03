@@ -17,6 +17,8 @@ RECORDS := records.Services {
 	column = column_of,
 	cell   = cell_of,
 	close  = close_rows,
+	// A batch holds rows past the one `next` gave and offsets in the text, so a window cannot move under it.
+	ends   = #partial {.Lines = 0xff},
 }
 
 // The rows a batch holds at most.

@@ -12,6 +12,7 @@ import records "../core/records"
 
 @(private, rodata)
 RECORDS := records.Services {
+	ends  = {.Lines = '\n', .Seq = 0x1e, .Concatenated = 0, .Entries = 0},
 	next  = {.Lines = frame_line, .Seq = frame_line, .Concatenated = next_walked, .Entries = next_walked},
 	judge = judge_record,
 	read  = read_record,
@@ -44,7 +45,7 @@ next_framed :: proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
 //
 // `.Entries`: each element of the root array, or the value of each member of the root object, whose key is in
 // `rec.key`. Each value is walked one level below the root. A scalar root has no entries and is judged whole. Any
-// fault ends the records with the fault of a walk of the whole text, which `validate` gives, as a fault in the root's
+// fault ends the records with the fault of a walk of the text from `it.from`, which `validate` gives, as a fault in the root's
 // own bytes depends on what came before. `state[0]` is the root's open bracket once it is read and 1 after its close,
 // and `state[1]` is 1 after an entry.
 @(private)
@@ -138,7 +139,7 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		return {text = src[at:hi], at = at, key = key}, true, stop
 	}
 	it.state[0] = 1
-	it.fault = walk_text(src, 0, S, opts, &none, &zero, core.no_hook)
+	it.fault = walk_text(src, it.from, S, opts, &none, &zero, core.no_hook)
 	return
 }
 

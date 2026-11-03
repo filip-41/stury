@@ -1,5 +1,6 @@
 package dsv_tests
 
+import "core:bytes"
 import "core:fmt"
 import "core:math/rand"
 import "core:strings"
@@ -267,6 +268,13 @@ rows_columns_cells_and_documents :: proc(t: ^testing.T) {
 	it3 := records.open(transmute([]u8)string("a\n1\n"), dsv.as(.Csv), .Seq)
 	_, ok = records.next(&it3)
 	testing.expect(t, !ok && it3.fault.?.kind == .Bad_Option)
+
+	// No dsv framing reads a stream.
+	r: bytes.Reader
+	it4 := records.open_stream(bytes.reader_init(&r, transmute([]u8)string("a\n1\n")), dsv.as(.Csv))
+	defer records.close(&it4)
+	_, ok = records.next(&it4)
+	testing.expect(t, !ok && it4.fault.?.kind == .Bad_Option)
 }
 
 @(private = "file")

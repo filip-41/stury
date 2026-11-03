@@ -1,6 +1,7 @@
 package json_tests
 
 import "core:fmt"
+import "core:io"
 import "core:math/rand"
 import "core:strings"
 import "core:testing"
@@ -543,4 +544,320 @@ records_build_places_faults :: proc(t: ^testing.T) {
 	rec, _ = records.next(&it)
 	_, err = records.build(&it, rec, context.temp_allocator)
 	testing.expect_value(t, err, core.Document_Error{kind = .Walk, at = 17, inner = {at = 17, rules = &json.RULES, kind = .Bad_Char}})
+}
+
+// An input that gives at most `sizes[i % len(sizes)]` bytes on its `i`-th read, a random count up to 16 when `sizes`
+// is empty, and fails with `.Unknown` once `fail_at` bytes are read.
+@(private = "file")
+Chunked :: struct {
+	src:     []u8,
+	sizes:   []int,
+	gen:     rand.Generator,
+	reads:   int,
+	at:      int,
+	fail_at: int,
+}
+
+@(private = "file")
+chunked :: proc(c: ^Chunked) -> io.Reader {
+	return {data = c, procedure = proc(data: rawptr, mode: io.Stream_Mode, p: []u8, _: i64, _: io.Seek_From) -> (i64, io.Error) {
+		c := (^Chunked)(data)
+		if mode != .Read {
+			return 0, .Unsupported
+		}
+		if c.at == c.fail_at {
+			return 0, .Unknown
+		}
+		if c.at == len(c.src) {
+			return 0, .EOF
+		}
+		k := c.sizes[c.reads % len(c.sizes)] if len(c.sizes) > 0 else 1 + rand.int_max(16, c.gen)
+		c.reads += 1
+		k = min(k, c.fail_at - c.at) if c.fail_at >= 0 else k
+		n := copy(p[:min(len(p), k)], c.src[c.at:])
+		c.at += n
+		return i64(n), nil
+	}}
+}
+
+@(private = "file")
+Got :: struct {
+	recs:  [dynamic]records.Record,
+	errs:  [dynamic]string,
+	fault: Maybe(core.Fault),
+	held:  string,
+	at:    u64,
+}
+
+// Every record of `it` with its built document's error, copied, since a stream's record text is gone at the next call.
+@(private = "file")
+drain :: proc(it: ^records.Reader) -> (g: Got) {
+	g.recs = make([dynamic]records.Record, context.temp_allocator)
+	g.errs = make([dynamic]string, context.temp_allocator)
+	for rec in records.next(it) {
+		_, err := records.build(it, rec, context.temp_allocator)
+		text := strings.clone(string(rec.text), context.temp_allocator)
+		key := strings.clone(string(rec.key), context.temp_allocator)
+		append(&g.recs, records.Record{text = transmute([]u8)text, key = transmute([]u8)key, at = rec.at})
+		append(&g.errs, fmt.tprint(err))
+	}
+	g.fault, g.held, g.at = it.fault, strings.clone(string(it.held), context.temp_allocator), it.held_at
+	return
+}
+
+// A stream of `src` read in chunks gives the records and faults `src` in memory gives, but for a last record the input
+// ends inside, which it holds.
+@(private = "file")
+expect_window_law :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, sizes: []int, gen: rand.Generator) -> bool {
+	mem := records.open(transmute([]u8)src, json.as(spec), framing)
+	defer records.close(&mem)
+	want := drain(&mem)
+	c := Chunked{src = transmute([]u8)src, sizes = sizes, gen = gen, fail_at = -1}
+	st := records.open_stream(chunked(&c), json.as(spec), framing)
+	defer records.close(&st)
+	got := drain(&st)
+	n := len(got.recs)
+	same := n <= len(want.recs)
+	for i in 0 ..< min(n, len(want.recs)) {
+		r, w := got.recs[i], want.recs[i]
+		same &&= r.at == w.at && string(r.text) == string(w.text) && string(r.key) == string(w.key) && got.errs[i] == want.errs[i]
+	}
+	end := u64(len(src))
+	if len(got.held) == 0 {
+		same &&= n == len(want.recs) && got.fault == want.fault
+	} else {
+		// The held bytes run to the input's end, and in memory they are a record refused as cut off, or that fault.
+		cut := core.Fault{at = end, rules = &json.RULES, kind = .Truncated}
+		extra := len(want.recs) - n
+		same &&= got.fault == nil && got.at + u64(len(got.held)) == end && src[got.at:] == got.held
+		same &&= extra == 0 && want.fault == cut || extra == 1 && want.fault == nil && strings.contains(want.errs[n], "Truncated")
+	}
+	return testing.expectf(t, same && st.cause == nil, "%v %v %v %q: stream %v %v held %q at %d, memory %v %v %v", framing, spec, sizes, src, got.recs[:], got.fault, got.held, got.at, want.recs[:], want.errs[:], want.fault)
+}
+
+@(test)
+records_stream_as_in_memory :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	state := rand.create(3)
+	gen := rand.default_random_generator(&state)
+	sizes := [][]int{{1}, {2}, {3}, {7}, {64}, {}}
+	// Tokens and gaps longer than a window that cuts them.
+	long := []string{"1 /* a comment longer than a window */ 2", "1 // a line comment longer than a window\n2", "[\"a string longer than the window\"]"}
+	for src in long {
+		for spec in json.Spec {
+			for s in sizes {
+				if !expect_window_law(t, src, .Concatenated, spec, s, gen) {
+					return
+				}
+			}
+		}
+	}
+	breakers := "x\"}],:\n\r \x1e\x00\\"
+	for round in 0 ..< 800 {
+		framing := core.Framing(round % 4)
+		src := seeded_text(gen, framing)
+		if round % 8 >= 4 {
+			// A byte that breaks or ends a value, at a random place.
+			buf := transmute([]u8)strings.clone(src, context.temp_allocator)
+			buf[rand.int_max(len(buf), gen)] = breakers[rand.int_max(len(breakers), gen)]
+			src = string(buf)
+		}
+		for spec in json.Spec {
+			for s in sizes {
+				if !expect_window_law(t, src, framing, spec, s, gen) {
+					return
+				}
+			}
+		}
+		free_all(context.temp_allocator)
+	}
+}
+
+// `records.read` on a stream gives what it gives in memory, with offsets from the input's first byte.
+@(test)
+records_stream_read :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	plan, perr := json.plan_make(Typed_Piece)
+	testing.expect_value(t, perr.kind, core.Typed_Error_Kind.None)
+	defer typed.plan_destroy(&plan)
+	state := rand.create(4)
+	gen := rand.default_random_generator(&state)
+	for round in 0 ..< 200 {
+		framing := core.Framing(round % 4)
+		src := seeded_text(gen, framing)
+		for spec in json.Spec {
+			mem := records.open(transmute([]u8)src, json.as(spec), framing)
+			c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 5}, fail_at = -1}
+			st := records.open_stream(chunked(&c), json.as(spec), framing)
+			ms, ss: typed.Collected
+			ms.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
+			ss.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
+			for {
+				v, w: Typed_Piece
+				more, err := records.read(&st, &v, &plan, {collect = &ss}, context.temp_allocator)
+				wmore, werr := records.read(&mem, &w, &plan, {collect = &ms}, context.temp_allocator)
+				if !more {
+					// A record the stream holds is the last one memory reads.
+					if len(st.held) > 0 && wmore {
+						resize(&ms.errors, len(ss.errors))
+						wmore, _ = records.read(&mem, &w, &plan, {collect = &ms}, context.temp_allocator)
+					}
+					testing.expectf(t, !wmore && (st.fault == mem.fault || len(st.held) > 0), "%v %v %q: stream ends %v, memory %v %v", framing, spec, src, st.fault, wmore, mem.fault)
+					break
+				}
+				if !testing.expectf(t, wmore && error_text(err, 0) == error_text(werr, 0) && (err.kind != .None || fmt.tprint(v) == fmt.tprint(w)), "%v %v %q: read %v %s, memory %v %s", framing, spec, src, v, error_text(err, 0), w, error_text(werr, 0)) {
+					return
+				}
+			}
+			if len(st.held) == 0 {
+				testing.expectf(t, fmt.tprint(ss.errors[:]) == fmt.tprint(ms.errors[:]), "%v %v %q: collected %v, memory %v", framing, spec, src, ss.errors[:], ms.errors[:])
+			}
+			records.close(&mem)
+			records.close(&st)
+		}
+		free_all(context.temp_allocator)
+	}
+}
+
+// An input that ends at any byte inside its last record holds that record's bytes and ends with no fault.
+@(test)
+records_stream_holds_a_cut_record :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	last := `{"k":["xé",-1.5e3,true,null]}`
+	heads := [3]string{"1\n[2]\n", "\x1e1\n\x1e[2]\n\x1e", "1 [2] "}
+	for head, i in heads {
+		framing := core.Framing(i)
+		src := strings.concatenate({head, last}, context.temp_allocator)
+		for k in len(head) + 1 ..< len(src) {
+			c := Chunked{src = transmute([]u8)src[:k], sizes = {3}, fail_at = -1}
+			it := records.open_stream(chunked(&c), json.as(.Json), framing)
+			n := 0
+			for _ in records.next(&it) {
+				n += 1
+			}
+			// The held bytes start past the last whole record, which under `.Concatenated` is before the gap.
+			from := len(head) - int(framing == .Concatenated)
+			testing.expectf(t, n == 2 && it.fault == nil && it.held_at == u64(from) && string(it.held) == src[from:k], "%v cut at %d: %d records, %v, held %q at %d", framing, k, n, it.fault, it.held, it.held_at)
+			records.close(&it)
+		}
+		// A whole last record with no end byte is a record.
+		c := Chunked{src = transmute([]u8)src, sizes = {3}, fail_at = -1}
+		it := records.open_stream(chunked(&c), json.as(.Json), framing)
+		n := 0
+		for _ in records.next(&it) {
+			n += 1
+		}
+		testing.expectf(t, n == 3 && it.fault == nil && len(it.held) == 0, "%v whole: %d records, %v", framing, n, it.fault)
+		records.close(&it)
+	}
+}
+
+@(test)
+records_stream_limits_and_failures :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := strings.concatenate({"1\n22\n\"", strings.repeat("a", 100, context.temp_allocator), "\"\n4\n"}, context.temp_allocator)
+	for limit in ([]int{32, 200}) {
+		c := Chunked{src = transmute([]u8)src, sizes = {7}, fail_at = -1}
+		it := records.open_stream(chunked(&c), json.as(.Json), .Lines, {max_bytes = limit})
+		n := 0
+		for _ in records.next(&it) {
+			n += 1
+		}
+		if limit == 32 {
+			testing.expectf(t, n == 2 && it.fault == core.Fault{at = 5, kind = .Too_Long}, "%d records, %v", n, it.fault)
+		} else {
+			testing.expectf(t, n == 4 && it.fault == nil, "%d records, %v", n, it.fault)
+		}
+		records.close(&it)
+	}
+
+	// A failing input ends the records it gave whole and holds the bytes past them. Under `.Concatenated` a record
+	// within 12 bytes of the window's end is not known to be whole.
+	for framing in ([]core.Framing{.Lines, .Concatenated, .Entries}) {
+		text := "[1,22,333,4444,55555,666666]" if framing == .Entries else "1\n22\n333\n4444\n55555\n666666\n"
+		c := Chunked{src = transmute([]u8)text, sizes = {2}, fail_at = 24}
+		it := records.open_stream(chunked(&c), json.as(.Json), framing)
+		got := make([dynamic]string, context.temp_allocator)
+		for rec in records.next(&it) {
+			append(&got, strings.clone(string(rec.text), context.temp_allocator))
+		}
+		want: []string
+		held := text[:24]
+		#partial switch framing {
+		case .Lines:
+			want, held = {"1", "22", "333", "4444", "55555"}, text[20:24]
+		case .Concatenated:
+			want, held = {"1", "22", "333"}, text[8:24]
+		}
+		testing.expectf(t, fmt.tprint(got[:]) == fmt.tprint(want) && it.fault == nil && it.cause == .Unknown && string(it.held) == held, "%v: %v, %v %v, held %q", framing, got[:], it.fault, it.cause, it.held)
+		records.close(&it)
+	}
+}
+
+// A reader opened at a byte of the input, on the text in memory or on a stream of the text past that byte, gives the
+// records from that byte with offsets from the input's first byte.
+@(test)
+records_open_at_an_offset :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Case :: struct {
+		src:     string,
+		framing: core.Framing,
+		at:      u64,
+	}
+	cases := []Case{{"1\n[2]\n\xef\xbb\xbf3\n4", .Lines, 2}, {"x\x1e1\x1e2", .Seq, 1}, {"1 [2] 3x", .Concatenated, 1}, {"xx [1, {}]", .Entries, 2}, {"xx [1, }", .Entries, 2}}
+	for c in cases {
+		// The text past `at` read alone, with its offsets moved by `at`. None of these starts with a BOM.
+		past := records.open(transmute([]u8)c.src[c.at:], json.as(.Json), c.framing)
+		want := drain(&past)
+		records.close(&past)
+		for &r in want.recs {
+			r.at += c.at
+		}
+		fault := want.fault
+		if f, bad := fault.?; bad {
+			f.at += c.at
+			fault = f
+		}
+		mem := records.open(transmute([]u8)c.src, json.as(.Json), c.framing, c.at)
+		from := drain(&mem)
+		records.close(&mem)
+		ch := Chunked{src = transmute([]u8)c.src[c.at:], sizes = {2}, fail_at = -1}
+		st := records.open_stream(chunked(&ch), json.as(.Json), c.framing, at = c.at)
+		streamed := drain(&st)
+		records.close(&st)
+		testing.expectf(t, fmt.tprint(from.recs[:]) == fmt.tprint(want.recs[:]) && from.fault == fault, "%q at %d: %v %v, want %v %v", c.src, c.at, from.recs[:], from.fault, want.recs[:], fault)
+		testing.expectf(t, fmt.tprint(streamed.recs[:]) == fmt.tprint(want.recs[:]) && streamed.fault == fault, "%q stream at %d: %v %v, want %v %v", c.src, c.at, streamed.recs[:], streamed.fault, want.recs[:], fault)
+	}
+}
+
+// `next_window` gives windows of whole records that hold every record `next` gives.
+@(test)
+records_next_window :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	state := rand.create(5)
+	gen := rand.default_random_generator(&state)
+	for round in 0 ..< 300 {
+		framing := core.Framing(round % 3)
+		src := seeded_text(gen, framing)
+		mem := records.open(transmute([]u8)src, json.as(.Json), framing)
+		want := drain(&mem)
+		records.close(&mem)
+		c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 9}, fail_at = -1}
+		st := records.open_stream(chunked(&c), json.as(.Json), framing)
+		n := 0
+		end := u64(0)
+		for window, base in records.next_window(&st) {
+			if !testing.expectf(t, base >= end && src[base:][:len(window)] == string(window), "%v %q: window %q at %d", framing, src, window, base) {
+				return
+			}
+			end = base + u64(len(window))
+			for r in want.recs {
+				n += int(r.at >= base && r.at + u64(len(r.text)) <= end)
+			}
+		}
+		held := u64(len(st.held))
+		testing.expectf(t, n == len(want.recs) - int(held > 0 && want.fault == nil) && end + held <= u64(len(src)), "%v %q: windows hold %d records of %d", framing, src, n, len(want.recs))
+		records.close(&st)
+		free_all(context.temp_allocator)
+	}
 }
