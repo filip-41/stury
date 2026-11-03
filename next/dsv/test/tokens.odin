@@ -141,8 +141,8 @@ WALKED := []Walked {
 	{"", 0, 0, {}, {{0, 0, .Array, .Value, 0}, {0, 0, .End, .Value, 0}}},
 	{"\r\n\n", 0, 3, {}, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
 	{"\xef\xbb\xbf", 0, 3, {}, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
-	{"a,b\n1,2,3\n", 0, 7, {7, .Bad_Structure, .Field_Count}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
-	{"a,b\n1,2,3", 0, 7, {7, .Bad_Structure, .Field_Count}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
+	{"a,b\n1,2,3\n", 0, 7, {7, .Bad_Char, .Field_Count}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
+	{"a,b\n1,2,3", 0, 7, {7, .Bad_Char, .Field_Count}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
 }
 
 // A cell's span in a generated text.
@@ -268,7 +268,7 @@ wrong_width_records :: proc(t: ^testing.T) {
 							}
 							log^ = {}
 							hi, fault := walk(text[:], tsv, !header, log, &core.Hook_Regs{}, walktest.log_hook)
-							want_fault := core.Fault{u64(fault_at), &dsv.RULES, .Bad_Structure, u8(dsv.Detail.Field_Count)}
+							want_fault := core.Fault{u64(fault_at), &dsv.RULES, .Bad_Char, u8(dsv.Detail.Field_Count)}
 							if !testing.expectf(t, hi == u64(fault_at) && fault == want_fault, "%q tsv %v header %v quoted %v lf %v: %d %v, want %d %v", text[:], tsv, header, quoted, final_lf, hi, fault, fault_at, want_fault) {
 								return
 							}
@@ -386,7 +386,7 @@ bom_mid_text :: proc(t: ^testing.T) {
 detail_rules :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(dsv.RULES.details), len(dsv.Detail))
 	b := strings.builder_make(context.temp_allocator)
-	f := core.Fault{4, &dsv.RULES, .Bad_Structure, u8(dsv.Detail.Field_Count)}
+	f := core.Fault{4, &dsv.RULES, .Bad_Char, u8(dsv.Detail.Field_Count)}
 	core.write_code(strings.to_writer(&b), f)
 	testing.expect_value(t, strings.to_string(b), "dsv.field_count")
 	strings.builder_reset(&b)

@@ -54,10 +54,14 @@ Reader :: struct {
 }
 
 // `max_bytes` is the most bytes past the last whole record a stream's window holds, 0 for no limit. When they hold no
-// whole record, the records end with the fault `.Too_Long`.
+// whole record, the records end with the fault `.Too_Wide` and code `records.too_long`.
 Stream_Options :: struct {
 	max_bytes: int,
 }
+
+// The records' one rule, detail 1, for a record past `max_bytes`.
+@(rodata)
+RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limit"}}}
 
 // A format's record services, in its rodata, which `core.Spelling.records` points at. `next` frames the next record
 // under each framing the format takes, nil for one it does not, and returns false at the input's end or on a fault,
@@ -336,7 +340,7 @@ window_move :: proc(it: ^Reader) -> bool {
 			if it.cause != nil {
 				it.held, it.held_at, it.eof = it.buf[1:it.filled], at, true
 			} else {
-				it.fault = core.Fault{at = at, kind = .Too_Long}
+				it.fault = core.Fault{at = at, rules = &RULES, kind = .Too_Wide, detail = 1}
 			}
 			return false
 		}

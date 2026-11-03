@@ -57,11 +57,12 @@ Detail :: enum u8 {
 	Literal, // `Bad_Char`: a byte breaking `true`, `false` or `null`
 	Identifier, // `Bad_Char`: JSON5 only, a byte that starts no key, quoted or not, where an object's key must start
 	Colon, // `Bad_Char`: a byte where a member's colon must be
+	Trailing, // `Bad_Char`: the first byte after the document that is no whitespace or comment
 }
 
 // `RULES` is JSON's `core.Rules`, one per `Detail` value, which every fault the walk returns points to.
 @(rodata)
-RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}}}
+RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}, {"trailing", "Unexpected text after the value"}}}
 
 // Checks that `src` holds exactly one document: an optional leading BOM, the document, then whitespace and, in a
 // spec with comments, comments up to the text's end. Returns the fault, or nil.
@@ -88,7 +89,7 @@ walk_text :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opt
 }
 
 // Returns the fault for the bytes after a document that ends at `hi`, or nil when only whitespace and, in a spec
-// with comments, comments up to the text's end follow it. Any other byte faults `Trailing`.
+// with comments, comments up to the text's end follow it. Any other byte faults `Bad_Char` with `Detail.Trailing`.
 @(private)
 tail_fault :: proc "contextless" (src: []u8, hi: u64, $S: Spec) -> Maybe(core.Fault) {
 	p := raw_data(src)
@@ -102,7 +103,7 @@ tail_fault :: proc "contextless" (src: []u8, hi: u64, $S: Spec) -> Maybe(core.Fa
 		}
 	}
 	if q != end {
-		return core.fault_of(core.fault_at(u64(intrinsics.ptr_sub(q, p)), .Trailing), &RULES)
+		return core.fault_of(core.fault_at(u64(intrinsics.ptr_sub(q, p)), .Bad_Char, u8(Detail.Trailing)), &RULES)
 	}
 	return nil
 }

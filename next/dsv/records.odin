@@ -30,7 +30,7 @@ read_cells :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H
 			}
 			if fault, _ := record_width(w, cells + 1, &width); fault {
 				w.rec_lo, w.cells, w.width = rec_lo, cells, width
-				return core.fault_at(u64(rec_lo), .Bad_Structure, u8(Detail.Field_Count)), true
+				return core.fault_at(u64(rec_lo), .Bad_Char, u8(Detail.Field_Count)), true
 			}
 			when H == Batch {
 				// A record batch stops past the row that fills it, with the width the next frame checks rows against.
@@ -218,7 +218,7 @@ drop_line :: #force_inline proc "contextless" (m, lf: ^u64, d: u64) {
 // no tokens keeps no position for the fault, so the scan reads its separators.
 @(private, cold)
 wide_fault :: #force_no_inline proc "contextless" (base: []u8, lo, width: int, $S: Spec, delim: u8) -> u64 {
-	return core.fault_at(u64(scan_record(base, lo, width, S, delim).fault_at), .Bad_Structure, u8(Detail.Field_Count))
+	return core.fault_at(u64(scan_record(base, lo, width, S, delim).fault_at), .Bad_Char, u8(Detail.Field_Count))
 }
 
 // Emits the cells of a record wider than `width` up to the one that ends at `width`'s delimiter, then returns the fault
@@ -236,7 +236,7 @@ read_wide :: #force_no_inline proc "contextless" ($KEYS: bool, h: ^$H, $on: proc
 	if done {
 		return r
 	}
-	return core.fault_at(u64(pos + int(intrinsics.count_trailing_zeros(last))), .Bad_Structure, u8(Detail.Field_Count))
+	return core.fault_at(u64(pos + int(intrinsics.count_trailing_zeros(last))), .Bad_Char, u8(Detail.Field_Count))
 }
 
 // Emits a run of a record's cells as `Plain` values. `$ESC` compiles the TSV backslash test in or out, chosen per block
@@ -433,7 +433,7 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 			if wide {
 				return wide_fault(base[:w.n], rec_lo, width, S, w.delim), true
 			}
-			return core.fault_at(u64(hi), .Bad_Structure, u8(Detail.Field_Count)), true
+			return core.fault_at(u64(hi), .Bad_Char, u8(Detail.Field_Count)), true
 		}
 		if !muted && !header {
 			if emit(h, on, hs, u64(hi), u32(at + 1 - hi), .End, .Value, 0) == .Stop {
@@ -484,7 +484,7 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^
 		}
 	}
 	if fault, _ := record_width(w, w.cells + 1, &w.width); fault {
-		return core.fault_at(u64(hi), .Bad_Structure, u8(Detail.Field_Count)), true
+		return core.fault_at(u64(hi), .Bad_Char, u8(Detail.Field_Count)), true
 	}
 	if !w.muted {
 		if emit(w.h, on, hs, u64(hi), 0, .End, .Value, 0) == .Stop {

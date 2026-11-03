@@ -14,6 +14,9 @@ Case :: struct {
 	offset: u64,
 }
 
+// The kind a case names for `Bad_Char` with `Detail.Field_Count`, a record of the wrong width.
+FIELD_COUNT :: core.Fault_Kind(0xff)
+
 // CSV texts and the fault each raises, at the byte the fault's rule names. `nil` for a valid text.
 @(rodata)
 CSV_CASES := []Case {
@@ -26,9 +29,9 @@ CSV_CASES := []Case {
 	{"\"a\rb\nc,d\"\n", nil, 0},
 	{"a,\"\"\r\n", nil, 0},
 	{"a\\,b\n", nil, 0},
-	{"a,b\n1\n", .Bad_Structure, 5},
-	{"a,b\n1,2,3", .Bad_Structure, 7},
-	{"a\n\nb,c\n", .Bad_Structure, 4},
+	{"a,b\n1\n", FIELD_COUNT, 5},
+	{"a,b\n1,2,3", FIELD_COUNT, 7},
+	{"a\n\nb,c\n", FIELD_COUNT, 4},
 	{"a\"b\n", .Bad_Char, 1},
 	{"\"a\"b\n", .Bad_Char, 3},
 	{"\"a\" ,b\n", .Bad_Char, 3},
@@ -55,7 +58,7 @@ TSV_CASES := []Case {
 	{"a\\xb\n", .Bad_Escape, 1},
 	{"a\\", .Bad_Escape, 1},
 	{"a\\\n", .Bad_Escape, 1},
-	{"a\tb\n1\n", .Bad_Structure, 5},
+	{"a\tb\n1\n", FIELD_COUNT, 5},
 	{"a\rb", .Bad_Char, 1},
 	{"a\r", .Bad_Char, 1},
 	{"\\\xff", .Bad_Escape, 0},
@@ -127,12 +130,15 @@ expect_fault :: proc(t: ^testing.T, c: Case, got: Maybe(core.Fault), shift := 0,
 	if c.kind == nil {
 		return testing.expectf(t, got == nil, "%q shifted %d: %v, want none", c.text, shift, got, loc = loc)
 	}
-	detail := u8(dsv.Detail.Field_Count) if c.kind == .Bad_Structure else 0
+	kind, detail := c.kind, u8(0)
+	if kind == FIELD_COUNT {
+		kind, detail = .Bad_Char, u8(dsv.Detail.Field_Count)
+	}
 	// A quote byte is a fault only inside an unquoted CSV cell.
 	if c.kind == .Bad_Char && !tsv && c.offset < u64(len(c.text)) && c.text[c.offset] == '"' {
 		detail = u8(dsv.Detail.Bare_Quote)
 	}
-	want := core.Fault{c.offset + u64(shift), &dsv.RULES, c.kind, detail}
+	want := core.Fault{c.offset + u64(shift), &dsv.RULES, kind, detail}
 	return testing.expectf(t, got == want, "%q shifted %d: %v, want %v", c.text, shift, got, want, loc = loc)
 }
 
@@ -235,9 +241,9 @@ TOLERATED := []Tolerated {
 	{{"a,b,c\n1,2\n3\n", nil, 0}, false, false, {.Ragged}},
 	{{"a,b\n1", nil, 0}, false, false, {.Ragged}},
 	{{"1,2\n3\n4,5,6\n7,8,9,10", nil, 0}, false, true, {.Ragged}},
-	{{"a,b\n1,2,3\n", .Bad_Structure, 7}, false, false, {.Ragged}},
-	{{"a,b\n1,2,3", .Bad_Structure, 7}, false, false, {.Ragged}},
-	{{"a,b\n1\n", .Bad_Structure, 5}, false, false, {.Invalid_Utf8, .Bare_Quote}},
+	{{"a,b\n1,2,3\n", FIELD_COUNT, 7}, false, false, {.Ragged}},
+	{{"a,b\n1,2,3", FIELD_COUNT, 7}, false, false, {.Ragged}},
+	{{"a,b\n1\n", FIELD_COUNT, 5}, false, false, {.Invalid_Utf8, .Bare_Quote}},
 	{{"a\tb\tc\n1\n", nil, 0}, true, false, {.Ragged}},
 	{{"a,5\" pipe,b\n", nil, 0}, false, false, {.Bare_Quote}},
 	{{"x\"y\"z\n", nil, 0}, false, false, {.Bare_Quote}},

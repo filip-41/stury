@@ -16,6 +16,9 @@ Case :: struct {
 	offset: u64,
 }
 
+// The kind a case names for `Bad_Char` with `Detail.Trailing`, which only `validate` reports.
+TRAILING :: core.Fault_Kind(0xff)
+
 // Holds each fault of a JSON text at the byte its rule names. A `nil` kind is a valid text.
 @(rodata)
 CASES := []Case {
@@ -66,8 +69,8 @@ CASES := []Case {
 	{"-a", .Bad_Number, 1},
 	{"1.x", .Bad_Number, 2},
 	{"[1e+]", .Bad_Number, 4},
-	{"1 2", .Trailing, 2},
-	{"{}x", .Trailing, 2},
+	{"1 2", TRAILING, 2},
+	{"{}x", TRAILING, 2},
 	// Texts `core:encoding/json` accepts in `.JSON` mode that the walk refuses (odin-lang/Odin#8061).
 	{"[\"a\x01b\"]", .Bad_Char, 3},
 	{"[\"\\q\"]", .Bad_Escape, 3},
@@ -78,7 +81,7 @@ CASES := []Case {
 	{"[01]", .Bad_Number, 2},
 	{"[1.]", .Bad_Number, 3},
 	{"\v[1]", .Bad_Char, 0},
-	{"[1]\x00garbage", .Trailing, 3},
+	{"[1]\x00garbage", TRAILING, 3},
 	// Number elements and number-valued members after a number, each read as its own number run.
 	{"[1, -2, 3.5e1, 0]", nil, 0},
 	{"{\"a\": 1, \"b\" : -2, \"c\":3, \"d\": [4, 5]}", nil, 0},
@@ -123,8 +126,8 @@ JSONC_CASES := []Case {
 	{"[,]", .Bad_Char, 1},
 	{"[1,,]", .Bad_Char, 3},
 	{"[1, /* a */ ,]", .Bad_Char, 12},
-	{"1 // a\n2", .Trailing, 7},
-	{"1 /* a */ 2", .Trailing, 10},
+	{"1 // a\n2", TRAILING, 7},
+	{"1 /* a */ 2", TRAILING, 10},
 }
 
 // Holds JSONC texts that raise a fault under `.Json`.
@@ -133,7 +136,7 @@ JSONC_IN_JSON := []Case {
 	{"// a\n[1]", .Bad_Char, 0},
 	{"[1 /* a */]", .Bad_Char, 3},
 	{"[1, 2, ]", .Bad_Char, 7},
-	{"1 // a", .Trailing, 2},
+	{"1 // a", TRAILING, 2},
 }
 
 @(rodata)
@@ -163,7 +166,7 @@ JSON5_CASES := []Case {
 	{"+-1", .Bad_Number, 1},
 	{"Infinit", .Truncated, 7},
 	{"Inf]", .Bad_Number, 3},
-	{"-NaN1", .Trailing, 4},
+	{"-NaN1", TRAILING, 4},
 	{"[1, Infinityx]", .Bad_Char, 12},
 	{"5.e", .Truncated, 3},
 	{"'abc", .Truncated, 4},
@@ -309,7 +312,7 @@ colon_detail_after_skip :: proc(t: ^testing.T) {
 	}
 }
 
-// Checks `validate`'s fault against `c`, then checks that a hooked walk returns the same fault, except `Trailing`,
+// Checks `validate`'s fault against `c`, then checks that a hooked walk returns the same fault, except `TRAILING`,
 // which only `validate` reports, and a text with no value, where the walk returns no fault.
 expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec, detail: json.Detail) {
 	src := transmute([]u8)c.text
@@ -317,10 +320,12 @@ expect_fault :: proc(t: ^testing.T, c: Case, $S: json.Spec, detail: json.Detail)
 	f, bad := verdict.?
 	if c.kind == nil {
 		testing.expectf(t, !bad, "%v %q: %v", S, c.text, f)
+	} else if c.kind == TRAILING {
+		testing.expectf(t, bad && f == {c.offset, &json.RULES, .Bad_Char, u8(json.Detail.Trailing)}, "%v %q: %v, want trailing at %d", S, c.text, f, c.offset)
 	} else {
 		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset && f.detail == u8(detail), "%v %q: %v, want %v at %d", S, c.text, f, c.kind, c.offset)
 	}
-	if c.kind != .Trailing {
+	if c.kind != TRAILING {
 		log := new(walktest.Log)
 		defer free(log)
 		_, fault := json.walk(src, 0, S, {}, log, &core.Hook_Regs{}, walktest.log_hook)
@@ -879,9 +884,10 @@ rendered_faults :: proc(t: ^testing.T) {
 		kind: core.Fault_Kind,
 		text: string,
 	}
-	for want in ([]Want{{0, .Bad_Char, "1:1: Unexpected character"}, {6, .Bad_Number, "2:5: Invalid number"}, {14, .Truncated, "3:2: Unfinished input"}, {2, .Trailing, "2:1: Unexpected text after the value"}, {0, .No_Memory, "Out of memory"}, {0, .None, "No fault"}}) {
+	for want in ([]Want{{0, .Bad_Char, "1:1: Unexpected character"}, {6, .Bad_Number, "2:5: Invalid number"}, {14, .Truncated, "3:2: Unfinished input"}, {2, .Bad_Char, "2:1: Unexpected text after the value"}, {0, .No_Memory, "Out of memory"}, {0, .None, "No fault"}}) {
 		strings.builder_reset(&b)
-		core.render(strings.to_writer(&b), src, core.Fault{want.at, &json.RULES, want.kind, 0}, &lines)
+		detail := u8(json.Detail.Trailing) if want.text == "2:1: Unexpected text after the value" else 0
+		core.render(strings.to_writer(&b), src, core.Fault{want.at, &json.RULES, want.kind, detail}, &lines)
 		testing.expect_value(t, strings.to_string(b), want.text)
 	}
 	strings.builder_reset(&b)

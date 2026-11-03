@@ -54,7 +54,7 @@ Tolerance :: enum u8 {
 // The `core.Fault.detail` values a delimited text's faults use.
 Detail :: enum u8 {
 	None,
-	Field_Count, // `Bad_Structure`, at the delimiter past the width of a wide record or the line end of a narrow one
+	Field_Count, // `Bad_Char`, at the delimiter past the width of a wide record or the line end of a narrow one
 	Bare_Quote, // `Bad_Char`, a quote inside an unquoted CSV cell
 }
 
@@ -226,10 +226,10 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 		if at <= u64(s.line_end) {
 			if s.fault_at >= 0 {
 				if detail == u8(Detail.Field_Count) || u64(s.fault_at) < at {
-					return core.fault_at(u64(s.fault_at), .Bad_Structure, u8(Detail.Field_Count))
+					return core.fault_at(u64(s.fault_at), .Bad_Char, u8(Detail.Field_Count))
 				}
 			} else if detail == u8(Detail.Field_Count) && s.cells < width {
-				return core.fault_at(u64(s.line_end_lo), .Bad_Structure, u8(Detail.Field_Count))
+				return core.fault_at(u64(s.line_end_lo), .Bad_Char, u8(Detail.Field_Count))
 			}
 			return r
 		}

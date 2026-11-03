@@ -111,7 +111,7 @@ validate_agrees :: proc(t: ^testing.T, src: []u8, c: gen.Options_Case, refused: 
 	// The walk's own `Bad_Char` detail has no member in the current tree, which carries none.
 	detail_agrees := want.detail == got.detail || want.detail == 0 && got.kind == .Bad_Char && got.detail == u8(dsv.Detail.Bare_Quote)
 	same := false
-	if got.kind == .Bad_Structure && got.detail == u8(dsv.Detail.Field_Count) {
+	if got.kind == .Bad_Char && got.detail == u8(dsv.Detail.Field_Count) {
 		// The current tree puts `Field_Count` at the record's first byte, and a fault at a later byte comes before it.
 		same = want.kind == .Bad_Structure && want.detail == u8(dsv.Detail.Field_Count) || want.offset >= got.at
 	} else if got.kind == .Truncated {

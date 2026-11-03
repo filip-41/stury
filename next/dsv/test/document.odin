@@ -317,18 +317,18 @@ refuse_fault_header_oom :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 }
 
-// A record of the wrong width fails the build with `.Walk` and a `Bad_Structure` fault in `inner`.
+// A record of the wrong width fails the build with `.Walk` and a `Bad_Char` fault in `inner`.
 @(test)
 errors :: proc(t: ^testing.T) {
 	doc, err := build("a,b\n1,2,3\n", .Csv)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Walk)
-	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Bad_Structure)
+	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Bad_Char)
 	testing.expect_value(t, err.inner.at, 7)
 	testing.expect_value(t, len(doc.nodes), 0)
 
 	doc, err = build("a,b\n1\n", .Csv)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Walk)
-	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Bad_Structure)
+	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Bad_Char)
 
 	b := strings.builder_make(context.temp_allocator)
 	core.render(strings.to_writer(&b), transmute([]u8)string("a,b\n1,2,3\n"), err)
@@ -698,7 +698,7 @@ empty_and_ragged_header_cells :: proc(t: ^testing.T) {
 	// A record wider than the header is still a fault under `.Ragged`.
 	doc, err = build("a,b\n1,2,3\n", .Csv, {tolerate = {.Ragged}})
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Walk)
-	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Bad_Structure)
+	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Bad_Char)
 	core.destroy(&doc)
 }
 

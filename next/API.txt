@@ -355,6 +355,7 @@ value_null :: proc(t: ^Tokens) -> core.Typed_Error_Kind {return value(t, Tree_Pa
 value_string :: proc(t: ^Tokens, s: string) -> core.Typed_Error_Kind {return value(t, s)}
 value_uint :: proc(t: ^Tokens, x: u64) -> core.Typed_Error_Kind {return value(t, core.Number{x, .Uint})}
 # core/records
+RULES := core.Rules{, {{}, {, }}}
 Reader :: struct {
 Record :: struct {
 Services :: struct {
@@ -383,7 +384,7 @@ writer_init :: proc(wr: ^Writer, w: io.Stream, as: core.As, framing := core.Fram
 Detail :: enum u8 {
 Number_Spelling :: enum u16 {
 Options :: struct {
-RULES := core.Rules{, {{}, {, }, {, }, {, }}}
+RULES := core.Rules{, {{}, {, }, {, }, {, }, {, }}}
 SPINE_LEVELS :: 4
 Spec :: enum u8 {
 Tolerance :: enum u8 {

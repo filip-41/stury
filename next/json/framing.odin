@@ -152,7 +152,7 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		hi, fault, stop := walk_from(src, q, S, opts, h, regs, on)
 		it.pos = hi
 		if fault == nil && !stop && runs_on(src, q, hi, S) {
-			fault = core.fault_of(core.fault_at(hi, .Trailing), &RULES)
+			fault = core.fault_of(core.fault_at(hi, .Bad_Char, u8(Detail.Trailing)), &RULES)
 		}
 		if fault != nil || q == end {
 			it.fault = fault

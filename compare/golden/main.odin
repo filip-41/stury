@@ -67,7 +67,7 @@ json_answer :: proc(src: []u8, spec: njson.Spec) -> (answer, marker: string, ok:
 	if old_bad && (old.kind == .Limit_Digits || old.kind == .Limit_Scale) {
 		return answer, "cap", true
 	}
-	if old_bad == got_bad && (!got_bad || (fmt.tprint(old.kind) == fmt.tprint(got.kind) && old.offset == got.at)) {
+	if old_bad == got_bad && (!got_bad || ((fmt.tprint(old.kind) == fmt.tprint(got.kind) || old.kind == .Trailing && got.detail == u8(njson.Detail.Trailing)) && old.offset == got.at)) {
 		return answer, "", true
 	}
 	if spec == .Json5 {

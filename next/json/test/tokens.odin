@@ -241,7 +241,7 @@ documents_one_walk_each :: proc(t: ^testing.T) {
 	_, fault = json.walk(transmute([]u8)string(" \x1e x"), 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expect_value(t, fault, core.Fault{3, &json.RULES, .Bad_Char, 0})
 	testing.expect_value(t, json.validate(transmute([]u8)string("\x1e1"), .Json), core.Fault{0, &json.RULES, .Bad_Char, 0})
-	testing.expect_value(t, json.validate(transmute([]u8)string("1 2"), .Json), core.Fault{2, &json.RULES, .Trailing, 0})
+	testing.expect_value(t, json.validate(transmute([]u8)string("1 2"), .Json), core.Fault{2, &json.RULES, .Bad_Char, u8(json.Detail.Trailing)})
 	testing.expect_value(t, json.validate(transmute([]u8)string(" \n"), .Json), core.Fault{2, &json.RULES, .Truncated, 0})
 }
 

@@ -45,7 +45,7 @@ agrees_with_current_tree :: proc(t: ^testing.T) {
 			return true
 		}
 		tally.compared += 1
-		same := refused == bad && (!bad || fmt.tprint(want.kind) == fmt.tprint(got.kind) && want.offset == got.at && detail_agrees(want, got))
+		same := refused == bad && (!bad || (fmt.tprint(want.kind) == fmt.tprint(got.kind) || want.kind == .Trailing && got.detail == u8(json.Detail.Trailing)) && want.offset == got.at && detail_agrees(want, got))
 		when S == .Json5 {
 			if !same {
 				if part := json5_parts(src, got if bad else {}, want if refused else {}); part != .None {
@@ -100,7 +100,7 @@ detail_agrees :: proc(want: cur.Error, got: core.Fault) -> bool {
 	if want.detail == got.detail {
 		return true
 	}
-	return want.detail == 0 && got.kind == .Bad_Char && (got.detail == u8(json.Detail.Identifier) || got.detail == u8(json.Detail.Colon))
+	return want.detail == 0 && got.kind == .Bad_Char && (got.detail == u8(json.Detail.Identifier) || got.detail == u8(json.Detail.Colon) || got.detail == u8(json.Detail.Trailing))
 }
 
 Tally :: struct {

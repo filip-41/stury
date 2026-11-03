@@ -11,16 +11,13 @@ import "core:reflect"
 Fault_Kind :: enum u8 {
 	None, // no fault
 	Truncated, // json, dsv: the input ended inside a construct, at `len(src)`
-	Bad_Char, // json, dsv: the first byte that cannot extend the construct, or that is not UTF-8
+	Bad_Char, // json, dsv: the first byte that cannot extend the construct or the text, or that is not UTF-8
 	Bad_Escape, // json: at the escape's letter, or a lone surrogate half at its backslash, dsv (TSV): at the backslash
 	Bad_Number, // json: at the byte that breaks the number
 	Too_Deep, // json: at the bracket past the depth limit
-	Trailing, // json's `validate`: at the first byte after the document
-	Bad_Structure, // dsv: well-formed text breaking a rule of the format's structure, at the construct's first byte
-	Too_Wide, // json, dsv: the first byte of a token longer than `Token.n` holds
+	Too_Wide, // json, dsv: the first byte of a token longer than `Token.n` holds, records: of a record past `max_bytes`
 	No_Memory, // json (depth stack past `MAX_DEPTH`), dsv (header's keys): the walk's scratch allocation failed, no byte
 	Bad_Option, // dsv: an option the spec does not take, found before any byte is read
-	Too_Long, // records: a stream's record past its `max_bytes`, at the first byte after the record before it
 }
 
 // The kinds that name no byte of the text. Their `at` is 0.
@@ -58,12 +55,9 @@ KIND_RULES := [Fault_Kind]Rule {
 	.Bad_Escape    = {"bad_escape", "Invalid escape"},
 	.Bad_Number    = {"bad_number", "Invalid number"},
 	.Too_Deep      = {"too_deep", "Exceeds depth limit for parsing"},
-	.Trailing      = {"trailing", "Unexpected text after the value"},
-	.Bad_Structure = {"bad_structure", "Text breaks a rule of its format"},
 	.Too_Wide      = {"too_wide", "Token is longer than 4 GiB"},
 	.No_Memory     = {"no_memory", "Out of memory"},
 	.Bad_Option    = {"bad_option", "An option the format does not take"},
-	.Too_Long      = {"too_long", "Record is longer than the limit"},
 }
 
 // Returns the `Rule` for `f`: `f.rules.details[f.detail]` when `detail` is nonzero, `rules` is set and the index is

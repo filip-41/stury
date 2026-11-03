@@ -201,8 +201,8 @@ for rec in records.next(&it) {
   `.Concatenated` those bytes start after the last record, gap included. The same text in memory ends on the
   `Truncated` fault. A last record that is whole with no LF after it is a record, as in memory, and any other fault is
   a fault.
-- A record that does not fit in `max_bytes` ends the records with the fault `.Too_Long`, at the first byte after the
-  record before it.
+- A record that does not fit in `max_bytes` ends the records with the fault `.Too_Wide` with code `records.too_long`, at the first
+  byte after the record before it.
 - When the reader fails, the records end with no fault, the error in `it.cause`, and the bytes past the last whole
   record in `it.held`. A read that gives no bytes and no error is `.No_Progress`.
 - Under `.Concatenated`, `read` of a record that crosses the window's end reads it twice, and what the first read

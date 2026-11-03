@@ -408,7 +408,7 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	faults, _ := records.check(transmute([]u8)string("{\"a\":\n1}\n2"), json.as(.Json), .Lines, context.temp_allocator)
 	testing.expect_value(t, len(faults), 2)
 	testing.expect_value(t, faults[0], core.Fault{at = 5, rules = &json.RULES, kind = .Truncated})
-	testing.expect_value(t, faults[1], core.Fault{at = 7, rules = &json.RULES, kind = .Trailing})
+	testing.expect_value(t, faults[1], core.Fault{at = 7, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Trailing)})
 
 	// The members of a root object, keys as written, and a root at the deepest level, whose entries may be no container.
 	obj := transmute([]u8)string(`{"a": 1, "b\"c" :[2] , "a":{}}`)
@@ -434,7 +434,7 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	testing.expect(t, len(faults) == 1 && faults[0].kind == .Too_Deep && faults[0].at == 4)
 	// Concatenated documents: a number runs on into a letter as one bad token.
 	faults, _ = records.check(transmute([]u8)string("1 [2]{}\"s\"3x"), json.as(.Json), .Concatenated, context.temp_allocator)
-	testing.expect(t, len(faults) == 1 && faults[0].kind == .Trailing && faults[0].at == 11)
+	testing.expect(t, len(faults) == 1 && faults[0].detail == u8(json.Detail.Trailing) && faults[0].at == 11)
 
 	// A line of JSON5 whitespace is no record, in JSON it is a refused one.
 	ws := transmute([]u8)string("1\n\x0b\n\xc2\xa0\n2")
@@ -858,7 +858,7 @@ records_stream_limits_and_failures :: proc(t: ^testing.T) {
 			n += 1
 		}
 		if limit == 32 {
-			testing.expectf(t, n == 2 && it.fault == core.Fault{at = 5, kind = .Too_Long}, "%d records, %v", n, it.fault)
+			testing.expectf(t, n == 2 && it.fault == core.Fault{at = 5, rules = &records.RULES, kind = .Too_Wide, detail = 1}, "%d records, %v", n, it.fault)
 		} else {
 			testing.expectf(t, n == 4 && it.fault == nil, "%d records, %v", n, it.fault)
 		}

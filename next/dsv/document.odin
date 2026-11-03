@@ -645,10 +645,6 @@ edit_record_at :: proc(doc: ^core.Document, src: []u8, allocator: runtime.Alloca
 
 @(private)
 edit_reads_at :: proc(doc: ^core.Document, src: []u8, tolerate: bool, spec: u8) -> (core.Fault, bool) {
-	// A spec change would respell every cell, which is the writer's job, so the text must use the document's own grammar.
-	if spec != doc.read.spec {
-		return {kind = .Bad_Structure}, true
-	}
 	switch Spec(spec) {
 	case .Csv:   return edit_reads(doc, src, tolerate, spec, .Csv)
 	case .Tsv:   return edit_reads(doc, src, tolerate, spec, .Tsv)

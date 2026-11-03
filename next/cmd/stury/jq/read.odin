@@ -109,7 +109,7 @@ read_json :: proc(src: string, r: Reading) -> (Value, string) {
 	switch {
 	case len(strings.trim(src, " \t\n\r")) == 0:
 		msg = "Expected JSON value"
-	case f.kind == .Trailing && validate_text(text[f.at:], r) == nil:
+	case f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) && validate_text(text[f.at:], r) == nil:
 		msg = "Unexpected extra JSON values"
 	case:
 		msg = parse_message(text, f)
@@ -142,7 +142,7 @@ fault_sentence :: proc(f: core_pkg.Fault, rest: string) -> string {
 		return "Unfinished JSON term"
 	case f.kind == .Bad_Number:
 		return "Invalid numeric literal"
-	case f.kind == .Trailing:
+	case f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing):
 		return "Unexpected text after the JSON value"
 	}
 	return core_pkg.rule_of(f).message
