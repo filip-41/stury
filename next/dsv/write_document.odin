@@ -34,10 +34,11 @@ as :: proc "contextless" (spec: Spec, layout := Options{}) -> core.As {
 	return {spelling = &SPELLING, spec = u8(spec), tolerate = transmute(u8)layout.tolerate, opts = opts}
 }
 
-// The options a handle `as` made holds.
+// The options a handle `as` made holds. The spec's own delimiter reads as 0, so a default handle's options are `{}`,
+// which the walk's passes fold.
 @(private)
 options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
-	return {delimiter = as.opts[0], comment = as.opts[1], no_header = as.opts[2] != 0, crlf = as.opts[3] != 0, infer = as.opts[4] != 0, tolerate = transmute(bit_set[Tolerance; u8])as.tolerate}
+	return {delimiter = 0 if as.opts[0] == spec_delimiter(Spec(as.spec), 0) else as.opts[0], comment = as.opts[1], no_header = as.opts[2] != 0, crlf = as.opts[3] != 0, infer = as.opts[4] != 0, tolerate = transmute(bit_set[Tolerance; u8])as.tolerate}
 }
 
 // The spelling's `write`: `doc` as the handle `as` says.
