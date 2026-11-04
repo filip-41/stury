@@ -136,7 +136,8 @@ printf '{"a":1}\n' >"$T/small.json"
 explained explain_small_file 'stury: explain: run: texts=1 scanned=1 interpreted=0 pieces=none' -c .a "$T/small.json"
 explained explain_small_interpreter 'stury: explain: run: texts=1 scanned=0 interpreted=1 pieces=none' -c '.a | tostring' "$T/small.json"
 
-# Recursion jq runs in constant memory, a million levels deep: the answer, and a peak RSS under 32 MB.
+# Recursion jq runs in constant memory, a million levels deep: the answer, and a peak RSS under 30 MB above the
+# binary's own.
 # macOS caps no memory with ulimit, so the peak is read from time(1): BSD's -l in bytes, GNU's %M in KB; a
 # 10 s CPU limit stops a runaway case. (Under a sanitizer, which runs the interpreter 10x slower, it stops none.)
 cpu=10
@@ -151,20 +152,22 @@ peak_mb() {
 	[ -n "$STURY_SANITIZED" ] && mb=0
 	echo "$mb"
 }
-# capped NAME CAP_MB WANT_STDOUT STURY_ARGS...
+# The binary's own peak, doing nothing: its code pages and runtime, which differ by platform, are not the filter's.
+idle=$(peak_mb -n empty)
+# capped NAME CAP_MB WANT_STDOUT STURY_ARGS...: the answer, and a peak under CAP_MB above the idle one.
 capped() {
 	name=$1 cap=$2 want=$3
 	shift 3
-	got=$(peak_mb "$@")
+	got=$(($(peak_mb "$@") - idle))
 	if [ "$(cat "$T/out")" != "$want" ] || [ "${got:-999}" -ge "$cap" ]; then
-		printf 'FAIL %s: %s MB\n got: %s\nwant: %s\n' "$name" "$got" "$(cat "$T/out")" "$want"
+		printf 'FAIL %s: %s MB above idle\n got: %s\nwant: %s\n' "$name" "$got" "$(cat "$T/out")" "$want"
 		fails=$((fails + 1))
 	fi
 }
 lean() {
 	name=$1
 	shift
-	capped "$name" 32 "$@"
+	capped "$name" 30 "$@"
 }
 lean bind_tail 1000000 -n 'def f: . as $x | if $x < 1000000 then $x+1|f else $x end; 0|f'
 lean def_tail 1000000 -n 'def f: def g: .+1; if . < 1000000 then g|f else . end; 0|f'
@@ -174,52 +177,52 @@ lean reduce_string 100000 -n 'reduce range(100000) as $i (""; . + "x") | length'
 lean reduce_path_string 100000 -n 'reduce range(100000) as $i ({a: ""}; .a += "x") | .a | length'
 lean reduce_merge 20000 -n 'reduce range(20000) as $i ({}; . * {($i | tostring): $i}) | length'
 # Idioms that build, take apart or loop over something big, each under about four times jq's own peak at
-# the same size (a floor of 11 MB): any of them going quadratic lands far past its cap.
-capped reduce_array 14 8000 -n 'reduce range(8000) as $i ([]; . + [$i]) | length'
-capped reduce_object 14 3000 -n 'reduce range(3000) as $i ({}; . + {($i|tostring): $i}) | length'
-capped reduce_merge_nested 15 3000 -n 'reduce range(3000) as $i ({}; . * {a: {($i|tostring): $i}}) | .a | length'
-capped reduce_count 14 100 -n 'reduce range(40000) as $i ({}; .[$i % 100 | tostring] += 1) | length'
-capped reduce_nested_array 17 8000 -n 'reduce range(8000) as $i ({a: []}; .a += [$i]) | .a | length'
-capped reduce_interpolate 14 228890 -n 'reduce range(40000) as $i (""; . + "\($i),") | length'
-capped foreach_string 21 800020000 -n '[foreach range(40000) as $i (""; . + "x"; utf8bytelength)] | add'
-capped foreach_array 17 8000 -n 'last(foreach range(8000) as $i ([]; . + [$i])) | length'
-capped foreach_array_kept 16 8000 -n '[foreach range(8000) as $i ([]; . + [$i])] | length' # jq: 555 MB
-capped foreach_object 14 3000 -n '[foreach range(3000) as $i ({}; . + {($i|tostring): $i}; length)] | max'
-capped foreach_setpath 14 3000 -n 'last(foreach range(3000) as $i ({}; setpath([$i|tostring]; $i); length))'
-capped add_arrays 15 8000 -n '[range(8000) | [.]] | add | length'
-capped add_objects 20 3000 -n '[range(3000) | {(tostring): .}] | add | length'
-capped join 32 228889 -n '[range(40000) | tostring] | join(",") | length'
-capped tostring_add 33 188890 -n '[range(40000)] | [.[] | tostring] | add | length'
-capped entries 32 3000 -n '[range(3000) | {(tostring): .}] | add | to_entries | from_entries | with_entries(.value += 1) | length'
-capped group_by 60 100 -n '[range(20000) | {k: (. % 100), v: .}] | group_by(.k) | length'
-capped unique_by 58 1000 -n '[range(20000) | {k: (. % 1000), v: .}] | unique_by(.k) | length'
-capped paths 86 40000 -n '[range(20000) | {a: .}] | [paths] | length'
-capped paths_streamed 51 40000 -n 'reduce ([range(20000) | {a: .}] | paths) as $p (0; . + 1)'
-capped paths_deep 30 6000 -n 'reduce range(6000) as $i (1; [.]) | reduce paths as $p (0; . + 1)'
-capped setpath_reduce 14 3000 -n 'reduce range(3000) as $i ({}; setpath([$i|tostring]; $i)) | length'
-capped del_reduce 15 0 -n 'reduce range(3000) as $i ([range(3000)]; del(.[0])) | length'
-capped del_wide 94 0 -n '[range(20000) | {(tostring): .}] | add | del(.[]) | length'
-capped limit 11 5 -n '[limit(5; range(1e12))] | length'
-capped first 11 11 -n 'first(range(1e12) | select(. > 10))'
-capped splits 93 20001 -n '[("a," * 20000) | splits(",")] | length'
-capped gsub 92 40000 -n '"ab" * 20000 | gsub("a"; "x") | length'
-capped ascii_downcase 188 400000 -n '"AB" * 200000 | ascii_downcase | length'
-capped tojson_roundtrip 59 20000 -n '[range(20000) | {a: .}] | tojson | fromjson | length'
-capped tojson_loop 14 49995000 -n 'reduce range(10000) as $i (0; . + ({a: $i} | tojson | fromjson | .a))'
-capped getpath_loop 16 199990000 -n '[range(20000)] as $a | reduce range(20000) as $i (0; . + ($a | getpath([$i])))'
-capped env_loop 12 100000 -n 'reduce range(100000) as $i (0; . + ($ENV | length | if . > 0 then 1 else 0 end) * $__loc__.line + (env | type | length) - 6)'
-capped range 11 2999999 -n 'last(range(3000000))'
-capped range_collect 114 300000 -n '[range(300000)] | length'
-capped recurse_deep 26 10000 -n 'reduce range(9999) as $_ ([]; [.]) | [recurse] | length'
+# the same size (a floor of 9 MB above the binary's own peak): any of them going quadratic lands far past its cap.
+capped reduce_array 12 8000 -n 'reduce range(8000) as $i ([]; . + [$i]) | length'
+capped reduce_object 12 3000 -n 'reduce range(3000) as $i ({}; . + {($i|tostring): $i}) | length'
+capped reduce_merge_nested 13 3000 -n 'reduce range(3000) as $i ({}; . * {a: {($i|tostring): $i}}) | .a | length'
+capped reduce_count 12 100 -n 'reduce range(40000) as $i ({}; .[$i % 100 | tostring] += 1) | length'
+capped reduce_nested_array 15 8000 -n 'reduce range(8000) as $i ({a: []}; .a += [$i]) | .a | length'
+capped reduce_interpolate 12 228890 -n 'reduce range(40000) as $i (""; . + "\($i),") | length'
+capped foreach_string 19 800020000 -n '[foreach range(40000) as $i (""; . + "x"; utf8bytelength)] | add'
+capped foreach_array 15 8000 -n 'last(foreach range(8000) as $i ([]; . + [$i])) | length'
+capped foreach_array_kept 14 8000 -n '[foreach range(8000) as $i ([]; . + [$i])] | length' # jq: 555 MB
+capped foreach_object 12 3000 -n '[foreach range(3000) as $i ({}; . + {($i|tostring): $i}; length)] | max'
+capped foreach_setpath 12 3000 -n 'last(foreach range(3000) as $i ({}; setpath([$i|tostring]; $i); length))'
+capped add_arrays 13 8000 -n '[range(8000) | [.]] | add | length'
+capped add_objects 18 3000 -n '[range(3000) | {(tostring): .}] | add | length'
+capped join 30 228889 -n '[range(40000) | tostring] | join(",") | length'
+capped tostring_add 31 188890 -n '[range(40000)] | [.[] | tostring] | add | length'
+capped entries 30 3000 -n '[range(3000) | {(tostring): .}] | add | to_entries | from_entries | with_entries(.value += 1) | length'
+capped group_by 58 100 -n '[range(20000) | {k: (. % 100), v: .}] | group_by(.k) | length'
+capped unique_by 56 1000 -n '[range(20000) | {k: (. % 1000), v: .}] | unique_by(.k) | length'
+capped paths 84 40000 -n '[range(20000) | {a: .}] | [paths] | length'
+capped paths_streamed 49 40000 -n 'reduce ([range(20000) | {a: .}] | paths) as $p (0; . + 1)'
+capped paths_deep 28 6000 -n 'reduce range(6000) as $i (1; [.]) | reduce paths as $p (0; . + 1)'
+capped setpath_reduce 12 3000 -n 'reduce range(3000) as $i ({}; setpath([$i|tostring]; $i)) | length'
+capped del_reduce 13 0 -n 'reduce range(3000) as $i ([range(3000)]; del(.[0])) | length'
+capped del_wide 92 0 -n '[range(20000) | {(tostring): .}] | add | del(.[]) | length'
+capped limit 9 5 -n '[limit(5; range(1e12))] | length'
+capped first 9 11 -n 'first(range(1e12) | select(. > 10))'
+capped splits 91 20001 -n '[("a," * 20000) | splits(",")] | length'
+capped gsub 90 40000 -n '"ab" * 20000 | gsub("a"; "x") | length'
+capped ascii_downcase 186 400000 -n '"AB" * 200000 | ascii_downcase | length'
+capped tojson_roundtrip 57 20000 -n '[range(20000) | {a: .}] | tojson | fromjson | length'
+capped tojson_loop 12 49995000 -n 'reduce range(10000) as $i (0; . + ({a: $i} | tojson | fromjson | .a))'
+capped getpath_loop 14 199990000 -n '[range(20000)] as $a | reduce range(20000) as $i (0; . + ($a | getpath([$i])))'
+capped env_loop 10 100000 -n 'reduce range(100000) as $i (0; . + ($ENV | length | if . > 0 then 1 else 0 end) * $__loc__.line + (env | type | length) - 6)'
+capped range 9 2999999 -n 'last(range(3000000))'
+capped range_collect 112 300000 -n '[range(300000)] | length'
+capped recurse_deep 24 10000 -n 'reduce range(9999) as $_ ([]; [.]) | [recurse] | length'
 # Values nested past jq's limit are refused by every comparison, as jq refuses them.
 for f in 'max' 'min' 'max_by(.)' 'bsearch([$x])' 'index($x)' 'indices($x)' '. - [[$x]]'; do
 	check "too_deep $f" 5 '' -n "reduce range(10002) as \$_ ([]; [.]) as \$x | [\$x, [\$x]] | $f"
 done
-capped walk_wide 93 20000 -n '[range(20000) | {a: [.]}] | walk(if type == "number" then . + 1 else . end) | length'
-capped explode_implode 39 200000 -n '"aé" * 100000 | explode | implode | length'
-capped base64d 17 300000 -n '"abc" * 100000 | @base64 | @base64d | length'
-capped test_regex 44 true -n '"ab" * 100000 + "c" | test("(ab)*c$")'
-capped tostream 29 4000 -n '[range(4000) | {a: .}] | [tostream] | fromstream(.[]) | length'
+capped walk_wide 91 20000 -n '[range(20000) | {a: [.]}] | walk(if type == "number" then . + 1 else . end) | length'
+capped explode_implode 37 200000 -n '"aé" * 100000 | explode | implode | length'
+capped base64d 15 300000 -n '"abc" * 100000 | @base64 | @base64d | length'
+capped test_regex 42 true -n '"ab" * 100000 + "c" | test("(ab)*c$")'
+capped tostream 27 4000 -n '[range(4000) | {a: .}] | [tostream] | fromstream(.[]) | length'
 
 # What stury tells of itself where jq tells of jq: -V as jq's `jq-VERSION`, the build configuration as the
 # Odin command it was built with, and the help, which lists stury's own options too.
@@ -279,41 +282,41 @@ paused cut_bom_seq 0 "$(printf '\0361')" '\357\273\277\0361\n' '' --seq -c .
 got=$(cat "$T/big.ndjson" | peak_mb -c .id)
 [ "$(tail -1 "$T/out")" = 1399999 ] && [ "${got:-999}" -lt 64 ] || { echo "FAIL pipe_rss: $got MB, last $(tail -1 "$T/out")"; fails=$((fails + 1)); }
 # So is a regular file of records past 64 MB.
-capped file_rss 64 1399999 -c 'select(.id == 1399999) | .id' "$T/big.ndjson"
+capped file_rss 62 1399999 -c 'select(.id == 1399999) | .id' "$T/big.ndjson"
 rm -f "$T/big.ndjson"
 
 # A long reduce frees each update's garbage as jq's reference counts do, its state copied with what it shares
 # shared once; `[inputs]` under -n keeps a small text in about what it takes.
-capped reduce_scoped 11 999999 -n 'reduce range(1000000) as $i ({}; .a = $i) | .a'
-capped reduce_scoped_shared 40 2 -n 'reduce range(100000) as $i (null; [., .]) | length'
-capped reduce_scoped_string 48 200000 -n '("x" * 100000) as $s | reduce range(200000) as $i ([]; . + [$s]) | length'
+capped reduce_scoped 9 999999 -n 'reduce range(1000000) as $i ({}; .a = $i) | .a'
+capped reduce_scoped_shared 38 2 -n 'reduce range(100000) as $i (null; [., .]) | length'
+capped reduce_scoped_string 46 200000 -n '("x" * 100000) as $s | reduce range(200000) as $i ([]; . + [$s]) | length'
 "$S" -n 'range(200000)' >"$T/nums"
-capped inputs_small 128 200000 -n '[inputs] | length' "$T/nums"
+capped inputs_small 126 200000 -n '[inputs] | length' "$T/nums"
 rm -f "$T/nums"
 
 # Under -n the outputs printed and the inputs read past are let go as the run goes, as jq's reference counts
 # let them go: 35 MB of records each through a peak under 48 MB.
 "$S" -nc 'range(400000) | {id: ., level: (if . % 10 == 0 then "error" else "info" end), msg: "a line of text that makes each record seventy bytes"}' >"$T/big.ndjson"
 mkfifo "$T/fifo"
-capped reduce_inputs 48 400000 -n 'reduce inputs as $x (0; . + 1)' "$T/big.ndjson"
+capped reduce_inputs 46 400000 -n 'reduce inputs as $x (0; . + 1)' "$T/big.ndjson"
 cat "$T/big.ndjson" >"$T/fifo" &
-capped reduce_inputs_pipe 48 400000 -n 'reduce inputs as $x (0; . + 1)' <"$T/fifo"
+capped reduce_inputs_pipe 46 400000 -n 'reduce inputs as $x (0; . + 1)' <"$T/fifo"
 cat "$T/big.ndjson" >"$T/fifo" &
-capped inputs_select_pipe 48 399990 -n 'inputs | select(.level == "error" and .id > 399980) | .id' <"$T/fifo"
-capped foreach_inputs 48 400000 -n 'foreach inputs as $x (0; . + 1) | select(. == 400000)' "$T/big.ndjson"
-capped foreach_inputs_extract 48 '[400000,399999]' -nc 'foreach inputs as $x (0; . + 1; select(. == 400000) | [., $x.id])' "$T/big.ndjson"
+capped inputs_select_pipe 46 399990 -n 'inputs | select(.level == "error" and .id > 399980) | .id' <"$T/fifo"
+capped foreach_inputs 46 400000 -n 'foreach inputs as $x (0; . + 1) | select(. == 400000)' "$T/big.ndjson"
+capped foreach_inputs_extract 46 '[400000,399999]' -nc 'foreach inputs as $x (0; . + 1; select(. == 400000) | [., $x.id])' "$T/big.ndjson"
 # `inputs` into what keeps none of them, or only its last output, or a reduce's state: each read past is let go.
-capped first_inputs 48 399999 -n 'first(inputs | select(.id == 399999)) | .id' "$T/big.ndjson"
-capped last_inputs 48 399999 -n 'last(inputs | select(.level == "info")) | .id' "$T/big.ndjson"
-capped all_inputs 48 true -n 'all(inputs; .id >= 0)' "$T/big.ndjson"
-capped reduce_inputs_select 48 400 -n 'reduce (inputs | select(.id % 1000 == 0)) as $x (0; . + 1)' "$T/big.ndjson"
-capped outputs_scoped 20 '{"a":"1999999"}' -nc 'range(2000000) | tostring | {a: .} | select(.a == "1999999")'
+capped first_inputs 46 399999 -n 'first(inputs | select(.id == 399999)) | .id' "$T/big.ndjson"
+capped last_inputs 46 399999 -n 'last(inputs | select(.level == "info")) | .id' "$T/big.ndjson"
+capped all_inputs 46 true -n 'all(inputs; .id >= 0)' "$T/big.ndjson"
+capped reduce_inputs_select 46 400 -n 'reduce (inputs | select(.id % 1000 == 0)) as $x (0; . + 1)' "$T/big.ndjson"
+capped outputs_scoped 18 '{"a":"1999999"}' -nc 'range(2000000) | tostring | {a: .} | select(.a == "1999999")'
 # Each faulty --seq record is placed by line and column from the last, not from the start.
 "$S" -nr 'range(200000) | "\u001e{\"a\":tru}"' >"$T/seq_errors.seq"
-capped seq_error_records 25 '' --seq -c . "$T/seq_errors.seq"
+capped seq_error_records 23 '' --seq -c . "$T/seq_errors.seq"
 # A text the path scan leaves to the interpreter (`.a` on a number) frees its document.
 "$S" -nr 'range(300000)' >"$T/numbers.txt"
-capped scan_fallback_free 80 '' .a "$T/numbers.txt"
+capped scan_fallback_free 78 '' .a "$T/numbers.txt"
 rm -f "$T/big.ndjson" "$T/fifo"
 
 # A coloured print of an array under an object runs on the batch pool, framed in the colours the single thread
@@ -354,11 +357,11 @@ rows=600000
 [ -n "$STURY_SANITIZED" ] && rows=100000
 last=$((rows - 1))
 "$S" -nr --argjson n $rows '"id,msg,level", (range($n) | "\(.),a line of text that makes each record long,\(if . % 10 == 0 then "error" else "info" end)")' >"$T/big.csv"
-capped csv_file_rss 48 $last --from csv -r "select(.id == \"$last\") | .id" "$T/big.csv"
+capped csv_file_rss 46 $last --from csv -r "select(.id == \"$last\") | .id" "$T/big.csv"
 got=$(cat "$T/big.csv" | peak_mb --from csv -r "select(.id == \"$last\") | .id")
 [ "$(tail -1 "$T/out")" = $last ] && [ "${got:-999}" -lt 48 ] || { echo "FAIL csv_pipe_rss: $got MB, last $(tail -1 "$T/out")"; fails=$((fails + 1)); }
-capped csv_inputs_rss 48 $rows --from csv -n 'reduce inputs as $x (0; . + 1)' "$T/big.csv"
-capped csv_slurp 600 $rows --from csv -s 'length' "$T/big.csv"
+capped csv_inputs_rss 46 $rows --from csv -n 'reduce inputs as $x (0; . + 1)' "$T/big.csv"
+capped csv_slurp 598 $rows --from csv -s 'length' "$T/big.csv"
 # A column-only filter is answered from the cells in pieces on the pool, with the interpreter's output bytes. On a
 # fault in the last piece, every earlier record is printed, followed by the interpreter's message.
 got=$(peak_mb --from csv -r '.msg, .id' "$T/big.csv")
