@@ -2,6 +2,10 @@
 
 ## 0.1.0 (2026-11-04)
 
+The rebuilt tree, and the first release of the `stury:core`, `stury:json` and `stury:dsv` packages. It builds with
+Odin `dev-2026-11` or later and targets 64-bit little-endian systems (darwin and linux, on amd64 and arm64; the
+command line also builds on Windows).
+
 ### The rebuilt library
 
 The library and the command line are rebuilt on one interface for every format. Code written against the earlier names

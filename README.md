@@ -30,9 +30,9 @@ surrogate), CSV against RFC 4180.
 
 ## Install
 
-**Library.** stury needs [Odin](https://odin-lang.org/docs/install/) and a 64-bit little-endian target (darwin
-or linux, amd64 or arm64, and the command line also builds on Windows). Clone it into your project and add it as a
-collection:
+**Library.** stury needs [Odin](https://odin-lang.org/docs/install/) `dev-2026-11` or later, and a 64-bit
+little-endian target (darwin or linux, amd64 or arm64, and the command line also builds on Windows). Clone it into
+your project and add it as a collection:
 
 ```sh
 git clone https://github.com/filip-41/stury vendor/stury
