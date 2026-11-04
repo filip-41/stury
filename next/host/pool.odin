@@ -12,12 +12,13 @@ import core "../core"
 // Helper threads kept between calls, so a caller that makes many pays for starting them once. Pass `&pool.runner`.
 //
 //	- Helpers spin briefly after a call, when the calls come close together, then sleep.
-//	- The caller owns the pool: `pool_init` starts the threads and `pool_destroy` joins them. It must not move
-//	  between the two, and runs one call at a time.
+//	- The caller owns the pool: the first call starts the threads, so a pool that runs none starts none, and
+//	  `pool_destroy` joins them. It must not move between `pool_init` and `pool_destroy`, and runs one call at a time.
 Pool :: struct {
 	runner:      core.Runner,
 	helpers:     []Helper,
-	// Helpers whose thread has been started or refused.
+	// Whether the first call started the helpers' threads, and how many have been started or refused.
+	spawned:     bool,
 	settled:     int,
 	// The current call, and how many helpers it was handed to.
 	task:        proc(arg: rawptr),
@@ -99,8 +100,8 @@ TAKEN :: 2
 @(private)
 REVOKED :: 3
 
-// Start `workers - 1` parked threads (`workers <= 0` means one per core, the caller counted). A failed allocation
-// returns its error and leaves a pool that runs calls on the caller alone.
+// Make a pool of `workers - 1` helpers (`workers <= 0` means one per core, the caller counted), whose threads the
+// first call starts. A failed allocation returns its error and leaves a pool that runs calls on the caller alone.
 //
 //	- The caller starts two threads and each helper starts two more, so the caller does not wait for every start,
 //	  and a call may begin before every helper has. A helper handed a call before it starts takes it as it starts.
@@ -114,7 +115,6 @@ pool_init :: proc(pool: ^Pool, workers := 0) -> runtime.Allocator_Error {
 	for &h, i in pool.helpers {
 		h = {pool = pool, index = i}
 	}
-	spawn_children(pool, -1)
 	return nil
 }
 
@@ -141,7 +141,7 @@ spawn_children :: proc(pool: ^Pool, index: int) {
 // The pool is not usable afterwards.
 pool_destroy :: proc(pool: ^Pool) {
 	// Until every start has been tried, a helper's `thread` may not yet tell whether it runs.
-	for sync.atomic_load(&pool.settled) < len(pool.helpers) {
+	for pool.spawned && sync.atomic_load(&pool.settled) < len(pool.helpers) {
 		thread.yield()
 	}
 	pool.task = nil
@@ -184,6 +184,10 @@ start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
 	}
 	for &h in pool.helpers[:min(2, pool.handed)] {
 		sync.futex_signal(&h.ready)
+	}
+	if !pool.spawned {
+		pool.spawned = true
+		spawn_children(pool, -1)
 	}
 }
 

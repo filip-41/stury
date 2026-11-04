@@ -58,6 +58,20 @@ pool_of_one_runs_on_the_caller :: proc(t: ^testing.T) {
 	testing.expect_value(t, count, 1)
 }
 
+// A pool that runs no call starts no thread, and one that runs a call starts them.
+@(test)
+threads_start_at_the_first_call :: proc(t: ^testing.T) {
+	pool: host.Pool
+	host.pool_init(&pool, 3)
+	testing.expect_value(t, pool.settled, 0)
+	host.pool_destroy(&pool)
+	host.pool_init(&pool, 3)
+	defer host.pool_destroy(&pool)
+	count: int
+	run(&pool.runner, pool.runner.threads, bump, &count)
+	testing.expect(t, pool.spawned)
+}
+
 // More tasks than the pool remembers widths for, alternating, each still runs.
 @(test)
 many_tasks_share_the_pool :: proc(t: ^testing.T) {
