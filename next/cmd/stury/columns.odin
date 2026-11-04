@@ -5,6 +5,7 @@ package main
 // `select(F)` where F reads the record only as `.name`: F runs on an object of those columns, and each of its outputs
 // is the whole record. A column the header lacks is null, as `.name` is on an object without it.
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:slice"
 import "core:strings"
@@ -187,19 +188,36 @@ place_columns :: proc(run: ^Run, cols: ^Columns, texts: ^records.Reader, header:
 		slice.stable_sort_by(cols.members, proc(a, b: Column_Member) -> bool {return a.key < b.key})
 	}
 	for &m, i in cols.members {
-		m.lead = strings.concatenate({"{" if i == 0 else ",", jq.to_json(m.key, allocator = heap), ":"}, heap)
+		lead := strings.concatenate({"{" if i == 0 else ",", jq.to_json(m.key, allocator = heap), ":", LEAD_PAD}, heap)
+		m.lead = lead[:len(lead) - len(LEAD_PAD)]
 	}
 }
 
-// Answers the filter on the record `rec` that `it` read and prints its outputs, as `run_once` would.
+// The bytes past a member's lead, so that `put_lead` reads 32 bytes of it.
+@(private = "file")
+LEAD_PAD :: "                                "
+
+// Writes the member's `lead` in two 16-byte stores when it is no longer than 32 bytes, reading 32 bytes of it, which its
+// padding holds.
+@(private = "file")
+put_lead :: #force_inline proc(out: ^write.Out, lead: string) #no_bounds_check {
+	if len(lead) > len(LEAD_PAD) {
+		write.put_text(out, lead)
+		return
+	}
+	p, src := write.room(out, len(LEAD_PAD)), raw_data(lead)
+	intrinsics.unaligned_store((^[16]u8)(p), intrinsics.unaligned_load((^[16]u8)(src)))
+	intrinsics.unaligned_store((^[16]u8)(p[16:]), intrinsics.unaligned_load((^[16]u8)(src[16:])))
+	out.cursor += len(lead)
+}
+
+// Answers the filter on the record `rec` that `it` read and prints its outputs, as `run_once` would. What it allocates
+// is the caller's to free.
 answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 	cols := run.route.columns
 	o := &run.output
-	defer {
-		free_all(context.allocator)
-		free_all(context.temp_allocator)
-	}
-	buf := make([]u8, len(rec.text))
+	short: [256]u8 = ---
+	buf := short[:len(rec.text)] if len(rec.text) <= len(short) else make([]u8, len(rec.text))
 	if len(cols.at) > 1 {
 		// The reader splits a record at each cell asked for, from its start, unless a cell it has none of split it all.
 		records.cell(it, rec, -1, nil)
@@ -221,14 +239,18 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 		case !l.opts.pretty && l.colors == nil && !l.opts.ascii && !l.comments && o.table == nil:
 			// Compact JSON, written as the printer writes the object.
 			for m in cols.members {
-				write.put_text(&o.buf, m.lead)
+				put_lead(&o.buf, m.lead)
 				if s, text := column_cell(it, rec, m.at, &buf).(string); text {
 					jq.put_string(&o.buf, s, {})
 				} else {
-					write.put_text(&o.buf, "null")
+					intrinsics.unaligned_store((^u32)(write.room(&o.buf, 4)), 0x6c6c756e) // "null"
+					o.buf.cursor += 4
 				}
 			}
-			write.put_text(&o.buf, "}" if len(cols.members) > 0 else "{}")
+			if len(cols.members) == 0 {
+				jq.put_byte(&o.buf, '{')
+			}
+			jq.put_byte(&o.buf, '}')
 			o.result = JQ_OK
 			end_output(o)
 		case o.table != nil && !o.opts.grow_header:

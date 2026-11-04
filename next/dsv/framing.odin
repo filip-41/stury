@@ -476,7 +476,16 @@ cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8
 	b := (^Batch)(it.format)
 	spec := Spec(it.as.spec)
 	row, held := held_row(it, rec)
-	if held && b.split_row != b.at && 0 <= column && column < len(b.cells) {
+	if held && b.split_row == b.at {
+		if column < 0 || column >= b.split {
+			return "", false
+		}
+		if t := b.cells[column]; t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0 {
+			return string(it.src[t.lo:t.lo + u64(t.n)]), true
+		}
+		return cell_text(it.src, b.cells[column], spec, buf)
+	}
+	if held && 0 <= column && column < len(b.cells) {
 		opts := options_of(it.as)
 		sp := Split{out = b.cells[:column + 1]}
 		split_any(it.src, row, spec, opts, .Value, &sp, {}, on_split)

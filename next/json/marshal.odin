@@ -44,7 +44,7 @@ TOKENS := write.Token_Spelling {
 
 @(private)
 put_plain :: #force_inline proc(out: ^write.Out, p: [^]u8, s: string, _: ^core.Write_Options) -> core.Typed_Error_Kind {
-	return put_short(out, p, s)
+	return put_short(out, p, s, false)
 }
 
 @(private)

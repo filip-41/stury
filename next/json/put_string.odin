@@ -135,10 +135,10 @@ put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> 
 		return put_escaped(out, s, false, true, true)
 	case opts.escape_html:
 		return put_escaped(out, s, false, true, false)
-	case opts.escape_del && has_del(s):
-		return put_escaped(out, s, false, false, true)
+	case opts.escape_del:
+		return put_short(out, write.room(out, 18), s, DEL = true)
 	}
-	return put_short(out, write.room(out, 18), s)
+	return put_short(out, write.room(out, 18), s, false)
 }
 
 // Whether `s` holds a DEL. A string of 16 bytes or more is read in blocks, the last overlapping the one before it.
@@ -163,10 +163,11 @@ has_del :: proc "contextless" (s: string) -> bool #no_bounds_check {
 	return kernel.any_lane16(simd.lanes_eq(intrinsics.unaligned_load((^V)(src[n - 16:])), V(0x7f)))
 }
 
-// Writes `s` as a JSON string. `p` is `write.room(out, 18)`, the 18 free bytes at the cursor, with every byte before
-// the cursor written already. The caller moves nothing, `out.cursor` is moved past the string.
+// Writes `s` as a JSON string, with `DEL` a DEL as `\u007f`. `p` is `write.room(out, 18)`, the 18 free bytes at the
+// cursor, with every byte before the cursor written already. The caller moves nothing, `out.cursor` is moved past the
+// string.
 @(private)
-put_short :: #force_inline proc(out: ^write.Out, p: [^]u8, s: string) -> core.Typed_Error_Kind #no_bounds_check {
+put_short :: #force_inline proc(out: ^write.Out, p: [^]u8, s: string, $DEL: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	if len(s) < 16 {
 		v, live, ok := kernel.head16(raw_data(s), len(s))
 		if ok {
@@ -174,12 +175,17 @@ put_short :: #force_inline proc(out: ^write.Out, p: [^]u8, s: string) -> core.Ty
 		} else {
 			v = short_block(raw_data(s), len(s))
 		}
-		if !dirty(v) {
+		if !dirty(v) && !(DEL && kernel.any_lane16(simd.lanes_eq(v, V(0x7f)))) {
 			p[0] = '"'
 			intrinsics.unaligned_store((^V)(p[1:]), v)
 			p[1 + len(s)] = '"'
 			out.cursor += len(s) + 2
 			return .None
+		}
+	}
+	when DEL {
+		if has_del(s) {
+			return put_escaped(out, s, false, false, true)
 		}
 	}
 	return put_string_mid(out, s)
@@ -398,7 +404,7 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int) -> core.
 // U+007F, as `\uXXXX`, a surrogate pair past U+FFFF, and `<`, `>`, `&`, U+2028 and U+2029 as `\u00xx` and `\u202x`. Any
 // other rune is copied as it is.
 @(private)
-put_escaped :: proc(out: ^write.Out, s: string, $ASCII, $HTML, $DEL: bool) -> core.Typed_Error_Kind #no_bounds_check {
+put_escaped :: #force_no_inline proc(out: ^write.Out, s: string, $ASCII, $HTML, $DEL: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	n := len(s)
 	src := raw_data(s)
 	write.put_byte(out, '"')

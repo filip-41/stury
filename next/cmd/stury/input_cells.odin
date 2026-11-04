@@ -14,7 +14,6 @@ import "message"
 // route has printed its outputs. The first record built of a file shows whether its header names a column twice, which
 // a build takes as the last of the two.
 cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: string, status: jq.Parse_Status, answered: bool) {
-	ins.pinned = true
 	ins.text_end = int(rec.at) + len(rec.text)
 	cols := ins.run.route.columns
 	if cols == nil || !ins.header_judged {
@@ -38,10 +37,14 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 			}
 		}
 		if cols == nil {
+			// The value lies in the file's bytes until its outputs are printed. What the column route prints holds none.
+			ins.pinned = true
 			return jq.document_value(doc), "", .Value, false
 		}
 	}
 	answer_columns(ins.run, &ins.texts, rec)
+	free_all(context.allocator)
+	free_all(context.temp_allocator)
 	return nil, "", .Value, true
 }
 
