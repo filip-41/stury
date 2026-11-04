@@ -9,7 +9,7 @@ deep pretty	1
 cli.tsv parse	593
 cli.tsv nofilter	17
 cli.tsv stream	206
-cli.tsv seq	68
+cli.tsv seq	69
 cli.tsv options	298
 cli.tsv jq	38
 cli.tsv modules	63

@@ -674,8 +674,9 @@ line and column in the stream, without a file's name.
 
 #### `--seq` reads each record as one text
 
-- The bytes up to the next `0x1E` are one text. A record of two texts is a parse error, where jq reads several
-  texts in a record and passes silently over an unfinished array or object.
+- The bytes up to the next `0x1E` are one text. A record of two texts is a parse error and is skipped whole
+  (`␞{}{}` prints nothing), where jq reads several texts in a record and passes silently over an unfinished array
+  or object.
 - The files are one byte stream: a text cut at a file's end goes on in the next file, and a separator in a later
   file ends it, as jq reads them. A text that is whole where its file ends is not read on: `1` and a newline in
   one file and `2` in the next are two texts. A number or literal with nothing after it is read on, as it may go

@@ -152,7 +152,7 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 			return rec, sep_error(src, sep), true
 		}
 	}
-	if it.framing == .Seq && (it.state[1] == UNFRAMED || it.state[1] == STRAY) {
+	if it.framing == .Seq && it.state[1] == UNFRAMED {
 		f := seq_fault(it, rec, nil).?
 		return rec, {kind = .Walk, at = f.at, inner = f}, true
 	}
@@ -167,8 +167,11 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	}
 	if !walked {
 		err = scan_walk(h, src, q, S, opts, false, last)
-		if it.framing == .Seq {
-			err = scan_seq(it, h, &rec, last, path, read, opts, room, q, err, S)
+		if it.framing == .Seq && err.kind != .Walk {
+			// A number the walk passed may have been cut short whatever the path asks of it.
+			if f, bad := seq_fault(it, rec, nil).?; bad {
+				err = {kind = .Walk, at = f.at, inner = f}
+			}
 		}
 		return rec, err, true
 	}
@@ -210,26 +213,4 @@ scan_begin :: proc(h: ^engine.Scan, it: ^records.Reader, src: []u8, last: ^core.
 	started := engine.scan_start(h, src, it.as, []core.Path{path}, read, false, it.allocator, depth, room)
 	h.again = started.kind == .None && h.many == nil && int(opts.max_depth) <= core.MAX_DEPTH
 	return started
-}
-
-// The error of the `.Seq` record `rec` that a scan in place gave `err`, as `seq_fault` frames it: a record whose scan
-// fails and whose value is whole before more bytes is scanned again up to that value's end.
-@(private)
-scan_seq :: proc(it: ^records.Reader, h: ^engine.Scan, rec: ^records.Record, last: ^core.Document, path: core.Path, read: core.Path_Options, opts: Options, room: []u64, q: [^]u8, err: core.Path_Error, $S: Spec) -> core.Path_Error {
-	if err.kind != .None {
-		if hi, at, whole := value_end(it.src, rec^, S, opts); whole {
-			it.pos, it.state[1] = at, AFTER_VALUE
-			rec.text = rec.text[:hi - rec.at]
-			if e := scan_begin(h, it, it.src[:hi], last, path, read, opts, room); e.kind != .None {
-				return e
-			}
-			return scan_walk(h, it.src[:hi], q, S, opts, false, last)
-		}
-	}
-	if err.kind != .Walk {
-		if f, bad := seq_fault(it, rec^, nil).?; bad {
-			return {kind = .Walk, at = f.at, inner = f}
-		}
-	}
-	return err
 }

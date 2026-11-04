@@ -77,31 +77,19 @@ model_fault :: proc(text: string, at: u64, spec: json.Spec) -> Maybe(core.Fault)
 }
 
 // The fault of the `.Seq` record `src[k:hi]`, whose text alone faults with `fault`: bytes before the first 0x1E are
-// unframed, a whole array, object or string with more after it is a record and its rest stray, and a number alone
-// with no byte after it may be cut short.
+// unframed, and a number alone with no byte after it may be cut short.
 @(private = "file")
 model_seq_fault :: proc(src: string, k, hi: int, spec: json.Spec, fault: Maybe(core.Fault), first: bool) -> Maybe(core.Fault) {
 	if first {
 		return core.Fault{at = u64(k), rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Unframed)}
 	}
 	if fault != nil {
-		if _, t, whole := model_seq_value(src, k, hi, spec); whole {
-			return core.Fault{at = u64(t), rules = &json.RULES, kind = .Bad_Char}
-		}
 		return fault
 	}
 	if strings.trim_left(src[k:hi], "0123456789-+.eE") == "" {
 		return core.Fault{at = u64(hi), rules = &json.RULES, kind = .Bad_Number, detail = u8(json.Detail.Cut_Number)}
 	}
 	return nil
-}
-
-// Whether the `.Seq` record `src[k:hi]` is a whole array, object or string that ends at `j`, with more bytes from `t`.
-@(private = "file")
-model_seq_value :: proc(src: string, k, hi: int, spec: json.Spec) -> (j, t: int, whole: bool) {
-	j = model_value_end(src[:hi], k, spec)
-	t = model_gap(src[:hi], j, spec, false)
-	return j, t, strings.contains_rune("[{\"'", rune(src[k])) && t < hi && model_fault(src[k:j], u64(k), spec) == nil
 }
 
 // Returns the first offset at or past `i` that is no whitespace, in a spec with comments no comment, and with `rs` no
@@ -174,10 +162,9 @@ is_ident :: proc(c: u8, first: bool) -> bool {
 	return c == '_' || c == '$' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || !first && c >= '0' && c <= '9'
 }
 
-// Frames `src` byte by byte. Returns the records and the framing's own fault. With `split` a `.Seq` record whose value
-// is whole before more bytes is two, as a read gives them.
+// Frames `src` byte by byte. Returns the records and the framing's own fault.
 @(private = "file")
-model_frame :: proc(src: string, framing: core.Framing, spec: json.Spec, split := false) -> (out: [dynamic]Model_Record, fault: Maybe(core.Fault)) {
+model_frame :: proc(src: string, framing: core.Framing, spec: json.Spec) -> (out: [dynamic]Model_Record, fault: Maybe(core.Fault)) {
 	out = make([dynamic]Model_Record, context.temp_allocator)
 	start := 3 if has_bom(src) else 0
 	if framing == .Concatenated {
@@ -270,21 +257,11 @@ model_frame :: proc(src: string, framing: core.Framing, spec: json.Spec, split :
 		}
 		if k < hi {
 			bad := model_fault(src[k:hi], u64(k), spec)
-			end, t, whole := 0, 0, false
-			if framing == .Seq && split && !first && bad != nil {
-				end, t, whole = model_seq_value(src, k, hi, spec)
+			text_bad := bad
+			if framing == .Seq {
+				bad = model_seq_fault(src, k, hi, spec, bad, first)
 			}
-			if whole {
-				// A read ends the record at its value, and the bytes after it are a record of their own.
-				append(&out, Model_Record{at = u64(k), text = src[k:end]})
-				append(&out, Model_Record{at = u64(t), text = src[t:hi], fault = core.Fault{at = u64(t), rules = &json.RULES, kind = .Bad_Char}, framed = true})
-			} else {
-				text_bad := bad
-				if framing == .Seq {
-					bad = model_seq_fault(src, k, hi, spec, bad, first)
-				}
-				append(&out, Model_Record{at = u64(k), text = src[k:hi], fault = bad, framed = framing == .Seq && (first || text_bad == nil && bad != nil)})
-			}
+			append(&out, Model_Record{at = u64(k), text = src[k:hi], fault = bad, framed = framing == .Seq && (first || text_bad == nil && bad != nil)})
 		}
 		first = false
 		i = j + 1
@@ -438,7 +415,7 @@ records_follow_the_model :: proc(t: ^testing.T) {
 	}
 }
 
-// `scan` gives the records `next` gives, under `.Seq` the ones a read gives, each with what `scan` of its text alone
+// `scan` gives the records `next` gives, under `.Seq` with the model's framing fault, each with what `scan` of its text alone
 // answers, its offsets from the input.
 @(private = "file")
 expect_scan :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, path: core.Path) -> bool {
@@ -446,7 +423,7 @@ expect_scan :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: jso
 	defer records.close(&want)
 	got := records.open(transmute([]u8)src, json.as(spec), framing)
 	defer records.close(&got)
-	seq, _ := model_frame(src, framing, spec, split = true)
+	seq, _ := model_frame(src, framing, spec)
 	for n := 0;; n += 1 {
 		rec, more := records.next(&want)
 		framed: Maybe(core.Fault)
@@ -651,7 +628,7 @@ error_text :: proc(e: core.Typed_Error, at: u64) -> string {
 // `records.read` against `json.unmarshal` of each record's text the model frames, with the model's BOM rule.
 @(private = "file")
 expect_read :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, read: typed.Read_Options, plan: ^typed.Plan, $T: typeid) -> bool {
-	want, framed := model_frame(src, framing, spec, split = true)
+	want, framed := model_frame(src, framing, spec)
 	it := records.open(transmute([]u8)src, json.as(spec), framing)
 	defer records.close(&it)
 	got_sink, want_sink: typed.Collected
@@ -1238,11 +1215,11 @@ records_seq_reads_frame_as_build :: proc(t: ^testing.T) {
 		want: []Maybe(core.Fault),
 	}
 	cases := []Case {
-		{"\x1e{}{}", {nil, bad(3, .Bad_Char)}},
+		{"\x1e{}{}", {bad(3, .Bad_Char, .Trailing)}},
 		{"\x1e3", {bad(2, .Bad_Number, .Cut_Number)}},
 		{" 1\x1e{}", {bad(1, .Bad_Char, .Unframed), nil}},
-		{"\x1e{\"a\":1}[2]\n\x1e{}", {nil, bad(8, .Bad_Char), nil}},
-		{"\x1e{} 7\x1e{\"a\":\"x\"}{}", {nil, bad(4, .Bad_Char), nil, bad(15, .Bad_Char)}},
+		{"\x1e{\"a\":1}[2]\n\x1e{}", {bad(8, .Bad_Char, .Trailing), nil}},
+		{"\x1e{} 7\x1e{\"a\":1}{}", {bad(4, .Bad_Char, .Trailing), bad(13, .Bad_Char, .Trailing)}},
 	}
 	as := json.as(.Json)
 	for c in cases {

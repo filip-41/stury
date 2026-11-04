@@ -353,7 +353,7 @@ gap_end :: #force_inline proc "contextless" (q, end: [^]u8, $S: Spec) -> [^]u8 {
 
 // Frames the next record under `.Lines` or `.Seq`: from its first byte that is no whitespace up to the next LF or
 // 0x1E, less a CR before the LF. Whitespace alone is no record. A 0x1E in a line and an LF in a `.Seq` record are the
-// record's. Under `.Seq` it notes in `it.state[1]` what the record is (`UNFRAMED`, `STRAY` or 0, a record).
+// record's. Under `.Seq` it notes in `it.state[1]` whether the record is `UNFRAMED`.
 @(private)
 frame_line :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) #no_bounds_check {
 	src := it.src
@@ -377,7 +377,7 @@ frame_line :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) #no_b
 			continue
 		}
 		if stop == 0x1e {
-			it.state[1] = UNFRAMED if it.pos == core.text_start(src, 0) else STRAY if it.state[1] == AFTER_VALUE else 0
+			it.state[1] = UNFRAMED if it.pos == core.text_start(src, 0) else 0
 		}
 		hi := find_byte(src, q, stop)
 		it.pos = min(hi + 1, u64(len(src)))
@@ -425,34 +425,20 @@ judge_spec :: proc(it: ^records.Reader, rec: records.Record, $S: Spec) -> Maybe(
 	return seq_fault(it, rec, fault) if it.framing == .Seq else fault
 }
 
-// What a `.Seq` record is, in `it.state[1]`: bytes before the first 0x1E, bytes after a record's value, or, set by
-// a read that ended a record at its value, the mark that the bytes framed next are `STRAY`. 0 is a record.
+// A `.Seq` record of the bytes before the first 0x1E, in `it.state[1]`.
 @(private)
-UNFRAMED, STRAY, AFTER_VALUE :: 1, 2, 3
+UNFRAMED :: 1
 
-// The fault of a `.Seq` record given `fault`, its text's alone, as RFC 7464 and jq's reader frame it. Bytes before the
-// first 0x1E are `Unframed`, and bytes after a record's value `Bad_Char`, at their first. An array, object or string
-// followed by bytes that are no whitespace is the record, which is whole, and the reader goes on at those bytes. A
-// number with no whitespace after it may have been cut short, so it is `Cut_Number`.
+// The fault of a `.Seq` record given `fault`, its text's alone, as RFC 7464 frames it. Bytes before the first 0x1E are
+// `Unframed` at their first. A record holds one text, so a value with more after it is refused whole with its text's
+// `Trailing` fault. A number with no whitespace after it may have been cut short, so it is `Cut_Number`.
 @(private)
 seq_fault :: proc(it: ^records.Reader, rec: records.Record, fault: Maybe(core.Fault)) -> Maybe(core.Fault) {
-	switch it.state[1] {
-	case UNFRAMED: return core.fault_of(core.fault_at(rec.at, .Bad_Char, u8(Detail.Unframed)), &RULES)
-	case STRAY:    return core.fault_of(core.fault_at(rec.at, .Bad_Char), &RULES)
+	if it.state[1] == UNFRAMED {
+		return core.fault_of(core.fault_at(rec.at, .Bad_Char, u8(Detail.Unframed)), &RULES)
 	}
 	if fault != nil {
-		at: u64
-		whole: bool
-		switch Spec(it.as.spec) {
-		case .Json:  _, at, whole = value_end(it.src, rec, .Json, options_of(it.as))
-		case .Jsonc: _, at, whole = value_end(it.src, rec, .Jsonc, options_of(it.as))
-		case .Json5: _, at, whole = value_end(it.src, rec, .Json5, options_of(it.as))
-		}
-		if !whole {
-			return fault
-		}
-		it.pos, it.state[1] = at, AFTER_VALUE
-		return nil
+		return fault
 	}
 	for c in rec.text {
 		switch c {
@@ -461,24 +447,6 @@ seq_fault :: proc(it: ^records.Reader, rec: records.Record, fault: Maybe(core.Fa
 		}
 	}
 	return core.fault_of(core.fault_at(rec.at + u64(len(rec.text)), .Bad_Number, u8(Detail.Cut_Number)), &RULES)
-}
-
-// One past the value of `rec`, and the first byte past it that is no whitespace or comment, when the value is an
-// array, object or string that is whole and that byte is in the record.
-@(private)
-value_end :: proc(src: []u8, rec: records.Record, $S: Spec, opts: Options) -> (hi, at: u64, whole: bool) {
-	switch rec.text[0] {
-	case '[', '{', '"', '\'':
-	case: return
-	}
-	p := raw_data(src)
-	end := rec.at + u64(len(rec.text))
-	none: core.No_Hooks
-	zero: core.Hook_Regs
-	fault: Maybe(core.Fault)
-	hi, fault, _ = walk_from(src[:end], p[rec.at:], S, opts, &none, &zero, core.no_hook)
-	at = u64(intrinsics.ptr_sub(gap_end(p[hi:], p[end:], S), p))
-	return hi, at, fault == nil && at < end
 }
 
 @(private)
@@ -505,8 +473,7 @@ read_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	return false
 }
 
-// Reads the next record into `target`, under `.Seq` as `seq_fault` frames it: a record whose read fails and whose
-// value is whole before more bytes is read again up to that value's end.
+// Reads the next record into `target`.
 @(private)
 read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
 	rec, ok := frame_line(it)
@@ -518,29 +485,19 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 	return true
 }
 
-// `read_spec` under `.Seq`.
+// `read_spec` under `.Seq`, as `seq_fault` frames the record.
 @(private)
 read_seq :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
 	rec, ok := frame_line(it)
 	if !ok {
 		return false
 	}
-	if it.state[1] == UNFRAMED || it.state[1] == STRAY {
+	if it.state[1] == UNFRAMED {
 		seq_refuse(it, rec, read.collect, err)
 		return true
 	}
-	lo := rec.at
 	kept := typed.collected_mark(read.collect)
-	read_line(it, lo, lo + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
-	if err.kind != .None {
-		if hi, at, whole := value_end(it.src, rec, S, options_of(it.as)); whole {
-			typed.collected_restore(read.collect, kept)
-			err^ = {}
-			it.pos, it.state[1] = at, AFTER_VALUE
-			read_line(it, lo, hi, target, T, plan, read, allocator, err, S)
-			return true
-		}
-	}
+	read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
 	// A number the walk passed may have been cut short whatever the target makes of it.
 	if _, bad := seq_fault(it, rec, nil).?; bad && err.kind != .Walk {
 		typed.collected_restore(read.collect, kept)
@@ -628,7 +585,7 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 	seq := it.framing == .Seq
 	// `seq_fault` takes the record's offset in the window, which a stream's `rec.at` is not.
 	local := records.Record{text = rec.text, at = rec.at - it.base}
-	if seq && (it.state[1] == UNFRAMED || it.state[1] == STRAY) {
+	if seq && it.state[1] == UNFRAMED {
 		f := seq_fault(it, local, nil).?
 		f.at += it.base
 		return {}, {kind = .Walk, at = f.at, inner = f}
@@ -637,15 +594,11 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 		return {}, {kind = .Walk, at = rec.at, inner = {at = rec.at, rules = &RULES, kind = .Bad_Char}}
 	}
 	doc, err = build_as(rec.text, it.as, false, allocator)
-	if seq && (err.kind == .None || err.kind == .Walk) {
-		f, bad := seq_fault(it, local, err.inner if err.kind == .Walk else nil).?
-		if bad && err.kind == .None {
+	if seq && err.kind == .None {
+		if f, bad := seq_fault(it, local, nil).?; bad {
 			core.destroy(&doc)
 			f.at += it.base
 			return {}, {kind = .Walk, at = f.at, inner = f}
-		}
-		if !bad && err.kind == .Walk {
-			doc, err = build_as(rec.text[:it.pos - local.at], it.as, false, allocator)
 		}
 	}
 	core.move_document_error(&err, rec.at)

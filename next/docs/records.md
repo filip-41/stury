@@ -108,9 +108,8 @@ A record whose text does not read returns true and its error, and the next `scan
 - Under `.Lines`, a 0x1E in a line is the record's, and JSON refuses it. Under `.Seq`, an LF is the record's, and a
   `.Seq` record's `text` keeps the whitespace before the next 0x1E.
 - Under `.Seq`, the bytes before the first 0x1E are a record when one is no whitespace, and its fault is `Bad_Char` at
-  that byte (detail `Unframed`). A record that is a whole array, object or string with more after it faults with
-  `Bad_Char` at the first byte after it, and that rest is read as a record of its own: `build`, `read` and `scan` give
-  the value as a record and then the rest as one with that fault. A record of number characters alone faults with
+  that byte (detail `Unframed`). A record holds one text: a value with more after it faults as a text does, with
+  `Bad_Char` at the first byte after it (detail `Trailing`), and is refused whole. A record of number characters alone faults with
   `Bad_Number` at its end (detail `Cut_Number`), as RFC 7464 asks a reader to drop it, whatever a typed target makes
   of it.
 - Under `.Concatenated`, whitespace, 0x1E and comments lie between documents. A number or literal that runs on into a
