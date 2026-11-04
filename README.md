@@ -10,23 +10,18 @@ surrogate), CSV against RFC 4180.
 
 ## Features
 
-- **Validate** JSON without allocating, with the line and column of the first fault.
-- **Read one value by path** (`.tags[1]`) without parsing the rest of the input, or answer several paths in
-  one pass.
-- **Decode into Odin types and encode them back** (`unmarshal`, `marshal`): structs, slices, maps, unions,
-  bit sets and `any`, from the type alone. Field tags and hooks cover custom names and types.
-- **Build a document** and query it by path, with strings that point into the input.
-- **Edit a text**: change, insert or remove a value and keep every other byte, formatting and comments
-  included.
-- **JSONC, JSON5, NDJSON and RFC 7464** text sequences, with comments kept and written back.
-- **CSV, TSV and other delimited text** through the same struct mapping, documents and edits as JSON, with
-  options for the delimiter, comment lines and files without a header.
-- **One interface for every format.** A format is a `Spec` passed to the same calls, and every format returns
-  the same error types.
-- **Optional threads**: process records in parallel on a `stury:host` pool. The library starts no thread and
-  keeps no global state.
-- **A jq 1.8 command line** that gives jq's answers and exit codes, reads and writes CSV and TSV, and reports
-  faults with their line and column.
+- **Validate** without allocating, with the line and column of the first fault.
+- **Scan a path**: read one value (`.tags[1]`) without parsing the rest of the input, or answer several paths
+  in one pass.
+- **Decode into Odin types and encode them back** (`unmarshal`, `marshal`) from the type alone, with field
+  tags and hooks for custom names and types.
+- **Build, query and edit**: a document with strings that point into the input, and edits that keep every
+  other byte, formatting and comments included.
+- **Every format through the same calls**: JSON, JSONC, JSON5, NDJSON and RFC 7464, CSV and TSV; a format is
+  a `Spec` passed to the same functions, and every format returns the same error types.
+- **Optional threads** on a `stury:host` pool. The library starts no thread and keeps no global state.
+- **A jq 1.8 command line** with jq's answers and exit codes, CSV and TSV in and out, and faults reported
+  with their line and column.
 
 ## Install
 
@@ -174,13 +169,48 @@ Bergen,286000
 [docs/cli.md](docs/cli.md) lists every option, the CSV rules and recipes, and
 [each difference from jq](docs/cli.md#differences-from-jq). `--explain` shows how a filter is run.
 
+## Benchmarks
+
+stury is built so a program that reads a lot of JSON does little work per byte: values are views into the
+input, numbers are judged during the walk and converted only when read, and a typed read fills the struct
+during the shape scan instead of walking the text twice. Records are framed, judged and built by that same
+walk, about 5× faster on six `stury:host` threads than on one.
+
+Measured on this tree on one machine (Apple M5 Max, macOS 27.2, Odin `dev-2026-10`, `-o:speed`), with the
+tables in [docs/benchmarks.md](docs/benchmarks.md):
+
+| Lane | stury |
+| --- | --- |
+| Build and validate a document | 1.2–2.1× faster than yyjson, simdjson and sonic-rs |
+| Read every value | 1.3–2.3× faster |
+| Look up a key in every object | 1.4–2.5× faster |
+| Build a document per NDJSON record | 1.6–2.7× faster than sonic-rs, 3.7–7.9× than serde_json |
+| Validate NDJSON records | 1.5–4.5× faster, and up to 1.5× slower than simdjson |
+| Write a struct | 1.2–3.7× faster, except the case below |
+| Command line, JSON (23 cases) | 2.1× at the narrowest; 7.6–14× geomean over jaq, gojq and jq, 66× over yq |
+| Command line, CSV | 5.5× at the narrowest (qsv); 16–44× over Miller |
+
+Where it loses:
+
+- **One object with 342,000 keys** takes 15–20× as long to write as the peers. Every other write lane is
+  ahead.
+- **NDJSON validation** trails simdjson by up to 1.5×.
+- **One field of a large object**, when both tools stop at the value: sonic-rs answers an early key about 4×
+  sooner, and stury's stopped scan is 2.6–3.9× ahead from the middle of the text on.
+- **x86**: validate and DOM `logs` trail simdjson there. Unmeasured in this run, and open.
+
+The comparisons hold each tool to the same job under the same guarantee, use its fastest route, run one
+process per arm in interleaved rounds, and hash the input before timing anything.
+[docs/benchmarks.md](docs/benchmarks.md) has the protocol, the fairness rules and the figures;
+[bench/README.md](bench/README.md) describes the harness. A number that is not on that page was not
+measured here.
+
 ## Documentation
 
 - [Library guide](docs/guide.md): usage, allocation and ownership, limits, delimited-text specifics.
 - API reference: the doc comment on each public name, and [API.txt](API.txt), which lists them all.
 - [Command line](docs/cli.md), and its manual page [docs/stury.1](docs/stury.1) (`man ./docs/stury.1`).
-- [Benchmarks](docs/benchmarks.md): the comparisons, their method and their fairness rules. The figures are
-  written there once they are measured on this tree. [bench/README.md](bench/README.md) describes the harness.
+- [Benchmarks](docs/benchmarks.md): the protocol, the fairness rules and the figures.
 - Internals, for contributors, one file per part: [walk](docs/walk.md), [document](docs/document.md),
   [paths](docs/paths.md), [typed reads](docs/typed.md), [writer](docs/writer.md), [records](docs/records.md),
   [kernel](docs/kernel.md) and [hot paths](docs/hotpaths.md).

@@ -1,8 +1,10 @@
 # Benchmarks
 
 This page describes what the harness in [bench/](../bench/README.md) measures, how, and what each comparison does the
-same for every tool. It holds no figures yet: they are measured on the merged tree, on one machine, and written here
-with that machine's name, the Odin version and `-o:speed`. Other data, filters and hardware give other numbers.
+same for every tool. The figures under [Figures](#figures) were measured on branch `redesign` at 762c667 on
+2026-11-04, on an Apple M5 Max (18 cores), macOS 27.2, with Odin `dev-2026-10` from `Odin-master` (2026-10-27) and
+`-o:speed`. The document, path and typed lanes ran at `ROUNDS=5`, the record and write lanes at `ROUNDS=3`, and the
+command line with hyperfine's defaults. Other data, filters and hardware give other numbers.
 
 A figure that is not on this page was not measured on the current tree.
 
@@ -12,7 +14,7 @@ A figure that is not on this page was not measured on the current tree.
 | --- | --- | --- | --- |
 | Document lanes | build a document, read every value, look up one key | yyjson, simdjson, sonic-rs | `make bench-doc` |
 | Path lanes | answer one path or several without a document | the same libraries | `make bench-paths` |
-| Typed read | decode into structs, strings borrowed and copied | the same libraries, serde_json | `make bench-typed` |
+| Typed read | decode into structs, strings borrowed and copied | stury alone; the harness has no peer arm for this lane yet | `make bench-typed` |
 | Record lanes | frame, judge, build and read the records of NDJSON and CSV | simdjson, serde_json, sonic-rs, simd-csv | `make bench-records` |
 | Write lanes | write a struct or a document, compact and pretty | yyjson, simdjson, serde_json, sonic-rs | `make bench-write` |
 | Kernels | the vector code and the number text writers | none | `make bench` |
@@ -72,6 +74,134 @@ make bench-records ROUNDS=3
 `ROUNDS` sets the interleaved rounds and `BENCH_FILES` the fixtures. The harness needs Odin, a C and a C++ compiler,
 Cargo and Python 3.11 or later; the command line comparisons also need hyperfine and the tools they compare. A
 comparison whose tool is missing says so and stops before it times anything.
+
+## Figures
+
+Document lanes, GB/s, the best round of each arm's median. The peers read plain JSON only.
+
+| File | Lane | stury | yyjson | simdjson | sonic-rs |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `logs.json` | build | 4.03 | 2.90 | 2.91 | 3.16 |
+| `logs.json` | read | 3.25 | 2.45 | 2.39 | 1.89 |
+| `logs.json` | key | 3.32 | 2.29 | 2.27 | 1.87 |
+| `citm_catalog.json` | build | 7.35 | 5.12 | 5.98 | 3.51 |
+| `citm_catalog.json` | read | 5.81 | 4.42 | 4.54 | 2.52 |
+| `citm_catalog.json` | key | 6.01 | 3.99 | 4.34 | 2.38 |
+| `table.csv` | build, read, key | 4.01, 2.70, 3.25 | — | — | — |
+| `logs.jsonc` | build, read, key | 3.60, 2.88, 2.95 | — | — | — |
+| `logs.json5` | build, read, key | 2.09, 1.77, 1.85 | — | — | — |
+
+Peak RSS, MiB, the median of the rounds' kernel maxima:
+
+| File | stury | yyjson | simdjson | sonic-rs |
+| --- | ---: | ---: | ---: | ---: |
+| `logs.json` | 20.1 | 27.6 | 37.1 | 29.1 |
+| `citm_catalog.json` | 5.1 | 7.0 | 7.0 | 6.7 |
+| `table.csv` | 55.5 | — | — | — |
+
+Path lanes, ns per call, the best round of each arm's median. `stop` is stury's scan that stops at the value;
+`query` builds a document once outside the clock and times the lookup.
+
+| Lane | stury scan | stury stop | stury query | sonic-rs | simdjson |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| get early | 1,747,995 | 166 | 917,994 | 42 | 1,070,306 |
+| get middle | 1,712,384 | 862,309 | 927,915 | 2,604,598 | 1,403,367 |
+| get late | 1,738,468 | 1,729,115 | 961,084 | 5,240,273 | 1,756,818 |
+| get absent | 1,746,285 | 1,806,298 | 937,287 | 7,052,231 | 1,786,906 |
+| get last root key | 119,041 | 115,791 | 83 | 299,893 | 91,875 |
+| `.logs[].id` | 2,419,370 | — | 1,276,447 | — | — |
+| `.logs[][]` | 4,301,005 | — | 2,425,877 | — | — |
+| `.logs[-1]` | 2,071,996 | — | 366,584 | — | — |
+| `.logs[-20]` | 2,063,585 | — | 332,062 | — | — |
+| five keys per record | 8,063,713 | — | 6,122,231 | — | — |
+
+Record lanes, GB/s. `simd` runs simdjson's stage 1 in a thread of its own, `simd_nt` on the caller's. stury's threads
+lane uses six threads.
+
+| NDJSON check | stury | stury threads | simdjson | simd_nt | simd On-Demand | od_nt | serde_json | sonic-rs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `logs.ndjson` | 4.31 | 23.94 | 4.69 | 2.87 | 6.47 | 4.72 | 1.47 | 0.96 |
+| `docs.ndjson` | 0.82 | 4.55 | 1.08 | 0.87 | 3.34 | 2.15 | 0.64 | 0.54 |
+| `twitter.ndjson` | 4.35 | 21.80 | 6.40 | 3.88 | 6.87 | 5.53 | 2.00 | 1.23 |
+
+A document per record, GB/s:
+
+| File | stury | serde_json | sonic-rs |
+| --- | ---: | ---: | ---: |
+| `logs.ndjson` | 1.49 | 0.33 | 0.74 |
+| `docs.ndjson` | 0.66 | 0.18 | 0.41 |
+| `twitter.ndjson` | 3.49 | 0.44 | 1.27 |
+
+Frame, CSV, GB/s:
+
+| File | stury | simd-csv |
+| --- | ---: | ---: |
+| `table.csv` | 9.46 | 5.46 |
+| `text.csv` | 5.23 | 2.75 |
+
+Write lanes, GB/s. `simd_min` is simdjson's minified write.
+
+Typed write:
+
+| File | stury | yyjson | sonic-rs | serde_json |
+| --- | ---: | ---: | ---: | ---: |
+| `logs.json` | 6.71 | 2.54 | 2.99 | 1.83 |
+| `twitter.json` | 6.56 | 2.74 | 4.99 | 2.18 |
+| `citm_catalog.json` | 3.96 | 3.06 | 3.03 | 2.10 |
+| `canada.json` | 2.04 | 1.26 | 1.76 | 1.76 |
+| `nested.json` | 2.75 | 1.49 | 1.13 | 1.08 |
+| `wide.json` | 0.13 | 2.73 | 2.47 | 2.02 |
+
+Typed write, pretty:
+
+| File | stury | yyjson | sonic-rs | serde_json |
+| --- | ---: | ---: | ---: | ---: |
+| `logs.json` | 7.15 | 3.00 | 2.71 | 1.75 |
+| `twitter.json` | 7.19 | 2.98 | 3.54 | 1.97 |
+| `citm_catalog.json` | 5.43 | 4.05 | 2.17 | 1.81 |
+| `canada.json` | 4.20 | 2.64 | 1.61 | 1.70 |
+| `nested.json` | 3.85 | 2.26 | 1.30 | 1.22 |
+| `wide.json` | 0.15 | 3.02 | 2.45 | 2.34 |
+
+Document write, compact:
+
+| File | stury | yyjson | simdjson | `simd_min` | sonic-rs | serde_json |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `logs.json` | 26.45 | 4.68 | 1.46 | 14.15 | 2.21 | 1.23 |
+| `twitter.json` | 22.29 | 9.37 | 2.26 | 14.94 | 4.56 | 2.74 |
+| `citm_catalog.json` | 28.33 | 17.63 | 4.73 | 15.02 | 6.10 | 6.12 |
+| `canada.json` | 40.62 | 1.91 | 1.17 | 14.12 | 1.51 | 1.53 |
+| `pretty.json` | 15.67 | 7.06 | 1.76 | 15.04 | 1.96 | 1.61 |
+| `utf8.json` | 35.60 | 0.80 | 0.82 | 14.20 | 21.56 | 3.64 |
+| `escape.json` | 35.96 | 1.63 | 0.96 | 13.99 | 0.89 | 1.05 |
+| `longtext.json` | 33.75 | 4.18 | 0.82 | 14.16 | 21.40 | 3.66 |
+
+Typed read, GB/s. The harness has no peer arms for this lane yet, so these are stury alone:
+
+| File | strings borrowed | strings copied |
+| --- | ---: | ---: |
+| `logs.json` | 4.11 | 2.43 |
+| `twitter.json` | 4.16 | 3.98 |
+| `citm_catalog.json` | 7.58 | 7.29 |
+| `table.csv` | 1.50 | 1.31 |
+| `text.csv` | 1.84 | 1.01 |
+
+Command line, the other tool's median wall time divided by stury's over the same filter and file, process start
+included:
+
+| Tool | Cases | Geomean | Narrowest | Answers differ |
+| --- | ---: | ---: | ---: | ---: |
+| jaq | 23 | 7.57 | 2.08 | 0 |
+| gojq | 23 | 11.01 | 3.38 | 0 |
+| jq | 23 | 14.20 | 4.12 | 0 |
+| yq | 10 | 65.58 | 7.20 | 0 |
+| qsv, CSV | 3 | 6.89 | 5.48 | 0 |
+| Miller, CSV | 4 | 29.67 | 16.35 | 0 |
+| jq `-R`, CSV | 2 | 69.99 | 36.04 | 0 |
+
+Where stury trails: NDJSON check against simdjson's two arms, typed write of `wide.json` (a single object with
+342,000 keys) against every peer, and the `stop` arm of the early get lane against sonic-rs, which judges the text
+only as far as the value.
 
 ## Reading a result
 
