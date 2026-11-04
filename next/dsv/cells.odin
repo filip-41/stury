@@ -176,40 +176,25 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 	return -1
 }
 
-// A cell below the split buffer's length splits the row only up to it. A quoted cell with a `""` the split marked, read
-// strictly, is undoubled with no general decode.
+// The row is split only up to the cell. A quoted cell with a `""` the split marked, read strictly, is undoubled with no
+// general decode.
 @(private)
 cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) {
-	b := (^Batch)(it.format)
-	spec := Spec(it.as.spec)
-	row, held := held_row(it, rec)
-	if held && b.split_row == b.at && column < b.split_cap {
-		if column < 0 || column >= b.split {
-			return "", false
-		}
-		t := b.cells[column]
-		if t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0 {
-			return string(it.src[t.lo:t.lo + u64(t.n)]), true
-		}
-		if t.spelling & (SPELLING_DOUBLED | core.SPELLING_LAX) == SPELLING_DOUBLED && len(buf) >= int(t.n) {
-			return undoubled(buf, string(it.src[t.lo + 1:t.lo + u64(t.n) - 1])), true
-		}
-		return cell_text(it.src, t, spec, buf)
-	}
-	if held && 0 <= column && column < len(b.cells) {
-		opts := options_of(it.as)
-		sp := Split{out = b.cells[:column + 1]}
-		split_any(it.src, row, spec, opts, .Value, &sp, {}, on_split)
-		if sp.n <= column {
-			return "", false
-		}
-		return cell_text(it.src, sp.out[column], spec, buf)
-	}
-	cells, ok := cells_of(it, rec)
-	if !ok || column < 0 || column >= len(cells) {
+	if column < 0 {
 		return "", false
 	}
-	return cell_text(it.src, cells[column], spec, buf)
+	cells, ok := cells_of(it, rec, column + 1)
+	if !ok || column >= len(cells) {
+		return "", false
+	}
+	t := cells[column]
+	if t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0 {
+		return string(it.src[t.lo:t.lo + u64(t.n)]), true
+	}
+	if t.spelling & (SPELLING_DOUBLED | core.SPELLING_LAX) == SPELLING_DOUBLED && len(buf) >= int(t.n) {
+		return undoubled(buf, string(it.src[t.lo + 1:t.lo + u64(t.n) - 1])), true
+	}
+	return cell_text(it.src, t, Spec(it.as.spec), buf)
 }
 
 // The texts of the first `upto` cells of `rec`, the row `next` gave last, in `b.texts`, nil for an empty unquoted cell.
