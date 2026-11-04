@@ -7,6 +7,7 @@ package main
 import "core:os"
 import "core:slice"
 import "core:strings"
+import core "../../core"
 import json "../../json"
 import "jq"
 import "message"
@@ -31,14 +32,12 @@ Opts :: struct {
 	stream_errors:    bool, // and an error as a [message, path] event
 	from:             Format, // how the input is read
 	to:               Format, // how the outputs are written
-	from_opts:        Format_Opts, // `from`'s options block, its table's preset (`set_formats`)
-	to_opts:          Format_Opts,
 	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
-	strict_limits:    bool, // check: the library's depth, digit and scale caps hold
 	explain:          bool, // --explain: write the filter's plan and what the run did to stderr
-	max_depth_given:  bool, // --max-depth was on the command line
+	max_depth:        u32, // --max-depth, 0 when it was not given
 	in_place:         bool,
 	check:            bool,
+	follow:           bool, // --follow: the one file is read on as it grows
 }
 
 // What the command line gives besides the options.
@@ -51,6 +50,9 @@ Cli :: struct {
 	var_names:  [dynamic]string,
 	var_values: [dynamic]jq.Value,
 	positional: [dynamic]jq.Value, // --args and --jsonargs
+	// How --argjson, --jsonargs, --slurpfile and `fromjson` read their texts, as --from and --max-depth say: as JSON, or
+	// the JSON dialect --from names.
+	json_reading: core.As,
 	binding_flag: string,
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
@@ -82,13 +84,12 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		format_option(&cli, args, i)
 		if args[i] == "--max-depth" && i + 1 < len(args) {
 			if n, ok := parse_max_depth(args[i + 1]); ok {
-				jq.lifted.max_depth = n
-				o.max_depth_given = true
+				o.max_depth = u32(n)
 			}
 		}
 	}
-	set_formats(o, cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json)
-	jq.read_dialect = source_dialect(o)
+	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
+	cli.json_reading = json.as(FORMATS[o.from].spec, {max_depth = o.max_depth})
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
 		a := args[i]
@@ -102,7 +103,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			case rest_as == .Args:
 				append(&cli.positional, jq.valid_utf8(a))
 			case rest_as == .Json_Args:
-				append(&cli.positional, json_arg(a, "--jsonargs"))
+				append(&cli.positional, json_arg(cli.json_reading, a, "--jsonargs"))
 			case:
 				append(&cli.files, a)
 			}
@@ -136,7 +137,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 				usage_error("--max-depth takes one parameter")
 			}
 			if _, ok := parse_max_depth(args[i + 1]); !ok {
-				usage_error("--max-depth takes a number between 1 and %d", json.DEPTH_CEILING)
+				usage_error("--max-depth takes a number between 1 and %d", DEPTH_CEILING)
 			}
 			i += option_arity(a)
 		case "raw-output0":
@@ -163,10 +164,10 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			i += option_arity(a)
 		case "grow-header":
 			o.grow_header = true
-		case "strict-limits":
-			o.strict_limits = true
 		case "explain":
 			o.explain = true
+		case "follow":
+			o.follow = true
 		case "in-place":
 			o.in_place = true
 		case "check":
@@ -194,7 +195,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	// fmt writes each input as its own format unless --to says otherwise, so its --to follows --from when --to
 	// was not given. `--to ndjson` is what sets the compact layout here, since fmt refuses -c.
 	if cli.formatting && cli.formats.to == nil {
-		set_formats(o, o.from, FORMATS[o.from].written_as.? or_else o.from)
+		o.to = FORMATS[o.from].written_as.? or_else o.from
 	}
 	if writes_lines(o) {
 		o.compact = true
@@ -286,10 +287,10 @@ bind_variable_option :: proc(cli: ^Cli, args: []string, i: int) {
 	case "arg":
 		v = jq.valid_utf8(args[i + 2])
 	case "argjson":
-		v = json_arg(args[i + 2], a)
+		v = json_arg(cli.json_reading, args[i + 2], a)
 	case:
 		msg: string
-		v, msg = load_file(args[i + 2], name == "rawfile")
+		v, msg = load_file(args[i + 2], name == "rawfile", cli.json_reading)
 		if msg != "" {
 			message.write_stderr("stury: Bad JSON in %s %s %s: %s\n", a, args[i + 1], args[i + 2], msg)
 			os.exit(EXIT_USAGE)
@@ -305,24 +306,16 @@ is_option :: proc(a: string) -> bool {
 	return len(a) >= 2 && a[0] == '-' && (a[1] == '-' || ('a' <= a[1] && a[1] <= 'z') || ('A' <= a[1] && a[1] <= 'Z'))
 }
 
-// Whether the short options `a` hold -f: an `f` before any `L`, whose rest is a directory (`-Lfoo`).
-@(private = "file")
-has_from_file_flag :: proc(a: string) -> bool {
-	flags := a[1:]
-	if l := strings.index_byte(flags, 'L'); l >= 0 {
-		flags = flags[:l]
-	}
-	return strings.contains_rune(flags, 'f')
-}
-
 // Where `check` (or `validate`) or `fmt` stands in `args`, or -1: the first argument that is not an option, before
-// `--`. Under -f that argument is the program file's name, which stays a file.
+// `--`. Under -f that argument is the program file's name, which stays a file. Short options hold -f when an `f` comes
+// before any `L`, whose rest is a directory (`-Lfoo`).
 @(private = "file")
 subcommand_index :: proc(args: []string) -> int {
 	for i := 0; i < len(args) && args[i] != "--"; i += 1 {
 		a := args[i]
+		f, l := strings.index_byte(a, 'f'), strings.index_byte(a, 'L')
 		switch {
-		case a == "--from-file" || is_option(a) && a[1] != '-' && has_from_file_flag(a):
+		case a == "--from-file" || is_option(a) && a[1] != '-' && f > 0 && (l < 0 || f < l):
 			return -1
 		case is_option(a):
 			i += option_arity(a)
@@ -435,8 +428,7 @@ add_lib_dir :: proc(cli: ^Cli, dir: string) {
 	if cli.lib_dirs == nil {
 		cli.lib_dirs = make([dynamic]string)
 	}
-	dirs := &cli.lib_dirs.?
-	append(dirs, jq.real_path(dir))
+	append(&cli.lib_dirs.?, jq.real_path(dir))
 }
 
 // --indent's number as jq's strtol reads it: a sign, then decimal digits to the end, from -1 to 7.
@@ -469,10 +461,29 @@ parse_digits :: proc(s: string, cap: u64) -> (n: u64, ok: bool) {
 	return n, true
 }
 
-// --max-depth's number: decimal digits, from 1 to the library's ceiling.
+// The deepest --max-depth: the interpreter and the printer recurse once per level, on a stack sized for this.
+@(private = "file")
+DEPTH_CEILING :: 1 << 20
+
+// --max-depth's number: decimal digits, from 1 to DEPTH_CEILING.
 @(private = "file")
 parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
-	n, ok = parse_digits(s, json.DEPTH_CEILING + 1) // past the ceiling is refused
-	return n, ok && 1 <= n && n <= json.DEPTH_CEILING
+	n, ok = parse_digits(s, DEPTH_CEILING + 1) // past the ceiling is refused
+	return n, ok && 1 <= n && n <= DEPTH_CEILING
 }
 
+
+// Refuses what --follow cannot do: it answers the records of one file as they are appended, so it needs the file
+// named, a filter run, and an input that is records rather than whole texts.
+refuse_follow :: proc(o: ^Opts, cli: ^Cli) {
+	other := "check" if cli.validating else "fmt" if cli.formatting else "--slurp" if o.slurp else "--null-input" if o.null_input else "--stream" if o.stream else ""
+	if other != "" {
+		usage_error("--follow answers each record of a file as it is appended: it cannot be combined with %s", other)
+	}
+	if len(cli.files) != 1 || cli.files[0] == "-" {
+		usage_error("--follow follows one named file, not stdin or %d files", len(cli.files))
+	}
+	if FORMATS[o.from].spec != .Json {
+		usage_error("--follow reads records: --from %s makes one text of a file", FORMATS[o.from].name)
+	}
+}

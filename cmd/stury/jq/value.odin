@@ -1,6 +1,6 @@
 package jq
 
-// jq's values. An input value stays a row of its `json.Document` (`Ref`) until something builds a new
+// jq's values. An input value stays a node of its `core.Document` (`Ref`) until something builds a new
 // value out of it, so a filter that only reads pays for what it reads. Built containers are immutable
 // once made, except inside an update that owns them (`eval_update`). Key and value lookup is in
 // lookup.odin, order and equality in compare.odin.
@@ -8,6 +8,8 @@ package jq
 import "core:hash"
 import "core:slice"
 import "core:strconv"
+import "../../../core/spell"
+import "../message"
 import core_pkg "../../../core"
 import json "../../../json"
 
@@ -22,8 +24,8 @@ Value :: union {
 	Path,
 }
 
-// `lit` is the number as written, for a number read from input or the program and not yet computed on:
-// jq prints such a number in its canonical form of that literal, and a computed one from `f`.
+// `lit` is the number as written, for a number read from input or the program and not yet computed on. It prints as
+// written and a computed number prints from `f`.
 Number :: struct {
 	f:   f64,
 	lit: string,
@@ -40,22 +42,30 @@ Object :: struct {
 	index: map[string]int,
 }
 
-// A value of an input document: rows over a text in any format, read by json's readers, which decode a row the
-// document's dialect spells.
+// A value of an input document: a node of a text in any format, read by core's readers, which decode a node the
+// document's format spells.
 Ref :: struct {
 	doc:  ^core_pkg.Document,
-	node: core_pkg.Node,
+	node: core_pkg.Node_Index,
 }
 
 // A built document as a value: its root, the document moved to the heap.
-document_value :: proc(d: json.Document) -> Value {
-	doc := new(json.Document)
+document_value :: proc(d: core_pkg.Document) -> Value {
+	doc := new(core_pkg.Document)
 	doc^ = d
-	return Ref{doc, json.ROOT}
+	return Ref{doc, core_pkg.ROOT}
 }
 
-
-Kind :: json.Kind
+// jq's kinds, in jq's order of values.
+Kind :: enum u8 {
+	Null,
+	False,
+	True,
+	Number,
+	String,
+	Array,
+	Object,
+}
 
 num :: proc(f: f64) -> Value {
 	return Number{f = f}
@@ -76,10 +86,24 @@ kind :: proc(v: Value) -> Kind {
 	case ^Object:
 		return .Object
 	case Ref:
-		kd, _ := core_pkg.kind(x.doc, x.node)
-		return kd
+		return node_kind(x.doc, x.node)
 	}
 	return .Null
+}
+
+// A document node's jq kind. A dsv cell is a string.
+node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Kind {
+	#partial switch k := core_pkg.kind(doc, i); k {
+	case .Array:
+		return .Array
+	case .Map:
+		return .Object
+	case .Plain:
+		// A delimited cell: an empty unquoted one is null, a quoted one keeps its quotes in its span.
+		return .Null if doc.nodes[i].n == 0 && doc.nodes[i].role == .Value else .String
+	case:
+		return Kind(k)
+	}
 }
 
 type_name :: proc(v: Value) -> string {
@@ -105,14 +129,13 @@ truthy :: proc(v: Value) -> bool {
 	return k != .Null && k != .False
 }
 
-// A `Ref` scalar as its own value. Containers stay rows.
+// A `Ref` scalar as its own value. Containers stay nodes.
 scalar :: proc(v: Value) -> Value {
 	r, is_ref := v.(Ref)
 	if !is_ref {
 		return v
 	}
-	n := r.doc.rows[r.node]
-	switch n.kind {
+	switch node_kind(r.doc, r.node) {
 	case .Null:
 		return nil
 	case .False:
@@ -120,43 +143,82 @@ scalar :: proc(v: Value) -> Value {
 	case .True:
 		return true
 	case .Number:
-		lit, _ := json.number_text(r.doc, r.node) // a JSON5 spelling is respelled as JSON's
-		// The library's correctly rounded value. Only one with none (`1e400`) is left to strconv's infinity.
-		if num, _ := core_pkg.get_number(r.doc, r.node); num.exactness != .None {
-			return Number{f = num.value, lit = lit}
-		}
-		f, _ := strconv.parse_f64(lit)
-		return Number{f = f, lit = lit}
+		return node_number(r.doc, r.node)
 	case .String:
-		s, _ := core_pkg.get_string(r.doc, r.node)
-		return s
+		return node_string(r.doc, r.node)
 	case .Array, .Object:
 	}
 	return v
 }
 
-// The scalar of kind `kind` spelled at src[lo:hi], by the library's reader as `scalar` reads a row's: nil also for a
-// container or a span that is not one scalar. A string with an escape decodes into `allocator`.
-span_value :: proc(src: []byte, lo, hi: u64, kind: json.Kind, allocator := context.allocator) -> Value {
-	lit := string(src[lo:hi])
-	d, _, _ := json.decode_span(src, lo, hi, kind, allocator)
-	switch x in d {
-	case json.Null:
-	case bool:
-		return x
-	case i64:
-		return Number{f = f64(x), lit = lit}
-	case u64:
-		return Number{f = f64(x), lit = lit}
-	case json.Number:
-		return Number{f = x.value, lit = lit}
-	case json.Digits:
-		f, _ := strconv.parse_f64(lit)
-		return Number{f = f, lit = lit}
-	case string:
-		return x
+// Number node `i`. Its text is kept as the literal jq prints, but for a JSON5 spelling, which jq cannot read back.
+node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
+	lit := string(core_pkg.span(doc, i))
+	n := core_pkg.number(doc, i)
+	f: f64
+	switch n.kind {
+	case .Int:
+		// `-0` is an integer node whose bits carry no sign
+		f = -0.0 if n.bits == 0 && lit[0] == '-' else f64(i64(n.bits))
+	case .Uint:
+		f = f64(n.bits)
+	case .Float:
+		f = transmute(f64)n.bits
+	case .Wide:
+		// past binary64's digits or range, `1e400` among them, which strconv reads as infinity
+		f, _ = strconv.parse_f64(lit)
 	}
-	return nil
+	return Number{f = f, lit = json5_literal(lit) if doc.as.spec == u8(json.Spec.Json5) else lit}
+}
+
+// A JSON5 decimal as the library's writer spells it in JSON (`+1.50` as `1.50`, `.5` as `0.5`, `5.` as `5`), so that
+// `tostring` gives what `-c .` prints. `Infinity` and `NaN` are no literal, and print as computed.
+@(private = "file")
+json5_literal :: proc(text: string) -> string {
+	if _, plain := spell.number_json(transmute([]u8)text, 0, u64(len(text))); plain {
+		return text
+	}
+	p := 1 if text[0] == '+' || text[0] == '-' else 0
+	if text[p] != '.' && text[p] - '0' >= 10 {
+		return ""
+	}
+	if p + 1 < len(text) && (text[p + 1] == 'x' || text[p + 1] == 'X') {
+		// the exact integer, which binary64 would round past 2^53
+		n, ok := strconv.parse_u64_of_base(text[p + 2:], 16)
+		if !ok {
+			return ""
+		}
+		return message.build("%s%d", "-" if text[0] == '-' else "", n)
+	}
+	b := make([dynamic]u8, 0, len(text) + 1)
+	if text[0] == '-' {
+		append(&b, '-')
+	}
+	if text[p] == '.' {
+		append(&b, '0')
+	}
+	for k in p ..< len(text) {
+		if text[k] != '.' || k + 1 < len(text) && text[k + 1] - '0' < 10 {
+			append(&b, text[k])
+		}
+	}
+	return string(b[:])
+}
+
+// `text` as a number's kept literal: itself when JSON spells a number so (a JSON5 `+1`, `.5` or `0x10` is no
+// literal, and prints as computed).
+json_literal :: proc(text: string) -> string {
+	_, plain := spell.number_json(transmute([]u8)text, 0, u64(len(text)))
+	return text if plain else ""
+}
+
+// The decoded text of string or key node `i`: a slice of the source, or a decode made in the context allocator.
+node_string :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> string {
+	if s, ok := core_pkg.text(doc, i, nil); ok {
+		return s
+	}
+	s, _ := core_pkg.text_clone(doc, i)
+	return s
 }
 
 number_of :: proc(v: Value) -> (Number, bool) {
@@ -166,7 +228,10 @@ number_of :: proc(v: Value) -> (Number, bool) {
 
 string_of :: proc(v: Value) -> (string, bool) {
 	if r, is_ref := v.(Ref); is_ref {
-		return core_pkg.get_string(r.doc, r.node)
+		if node_kind(r.doc, r.node) != .String {
+			return "", false
+		}
+		return node_string(r.doc, r.node), true
 	}
 	s, ok := v.(string)
 	return s, ok
@@ -181,9 +246,8 @@ length_of :: proc(v: Value) -> int {
 	case ^Object:
 		return len(x.keys)
 	case Ref:
-		n := core_pkg.child_count(x.doc, x.node)
-		kd, _ := core_pkg.kind(x.doc, x.node)
-		if n > 1 && kd == .Object && has_repeated_key(x) {
+		n := core_pkg.length(x.doc, x.node)
+		if n > 1 && core_pkg.kind(x.doc, x.node) == .Map && has_repeated_key(x) {
 			return distinct_keys(x)
 		}
 		return n
@@ -196,19 +260,28 @@ length_of :: proc(v: Value) -> int {
 // this does not count them as `length_of` does.
 is_empty :: proc(v: Value) -> bool {
 	if r, is_ref := v.(Ref); is_ref {
-		return core_pkg.child_count(r.doc, r.node) == 0
+		return core_pkg.length(r.doc, r.node) == 0
 	}
 	return length_of(v) == 0
+}
+
+// The keys of a document object in source order, a repeated one each time.
+@(private = "file")
+next_key :: #force_inline proc(it: ^core_pkg.Pair_Iter) -> (string, bool) {
+	k, _, ok := core_pkg.pair_next(it)
+	if !ok {
+		return "", false
+	}
+	return node_string(it.doc, k), true
 }
 
 // The members of an object with a repeated key, which is one member, as jq reads it. Kept out of
 // length_of, whose frame would otherwise cost every call, the hot ones from compare and iterate too.
 @(private = "file")
 distinct_keys :: #force_no_inline proc(r: Ref) -> int {
-	n := core_pkg.child_count(r.doc, r.node)
-	seen := make(map[string]bool, n, context.temp_allocator)
-	m := core_pkg.members(r.doc, r.node)
-	for k in core_pkg.members(&m) {
+	seen := make(map[string]bool, core_pkg.length(r.doc, r.node), context.temp_allocator)
+	it := core_pkg.pairs(r.doc, r.node)
+	for k in next_key(&it) {
 		seen[k] = true
 	}
 	return len(seen)
@@ -220,10 +293,10 @@ array_at :: proc(v: Value, i: int) -> Value {
 	case ^Array:
 		return x.items[i] if i >= 0 && i < len(x.items) else nil
 	case Ref:
-		if i < 0 || i >= core_pkg.child_count(x.doc, x.node) {
-			return nil
+		if node, ok := core_pkg.child_at(x.doc, x.node, i); ok {
+			return Ref{x.doc, node}
 		}
-		return Ref{x.doc, core_pkg.child(x.doc, x.node, i)}
+		return nil
 	case Path:
 		if i < 0 || i >= x.depth {
 			return nil
@@ -248,11 +321,11 @@ object_get :: proc(v: Value, k: string) -> (Value, bool) {
 		}
 		return x.vals[i], true
 	case Ref:
-		row := core_pkg.child(x.doc, x.node, k)
-		if row == json.NO_NODE {
+		node, ok := core_pkg.member(x.doc, x.node, k)
+		if !ok {
 			return nil, false
 		}
-		return Ref{x.doc, row}, true
+		return Ref{x.doc, node}, true
 	case nil, bool, Number, string, ^Array, Path:
 	}
 	return nil, false
@@ -310,9 +383,10 @@ own :: proc(v: Value) -> Value {
 Members :: struct {
 	v:     Value,
 	i, n:  int,
-	rows:  core_pkg.Members,
-	array: bool, // a document's array: its rows have no keys
-	seen:  ^map[string]bool, // made at the first repeated key
+	items: core_pkg.Child_Iter, // a document array's
+	pairs: core_pkg.Pair_Iter, // a document object's
+	array: bool, // a document's array: its nodes have no keys
+	last:  ^map[string]core_pkg.Node_Index, // when a key repeats: a key's last node, 0 once yielded
 	dupes: bool,
 }
 
@@ -321,47 +395,77 @@ iterate :: proc(v: Value) -> Members {
 	if !is_ref {
 		return Members{v = v, n = length_of(v)}
 	}
-	it := Members{v = v, n = core_pkg.child_count(r.doc, r.node)} // the rows, a repeated key's too
+	it := Members{v = v, n = core_pkg.length(r.doc, r.node)} // the nodes, a repeated key's too
 	if it.n > 0 {
-		it.rows = core_pkg.children(r.doc, r.node)
-		kd, _ := core_pkg.kind(r.doc, r.node)
-		it.array = kd == .Array
-		it.dupes = kd == .Object && has_repeated_key(r)
+		if core_pkg.kind(r.doc, r.node) == .Array {
+			it.array = true
+			it.items = core_pkg.children(r.doc, r.node)
+		} else {
+			it.pairs = core_pkg.pairs(r.doc, r.node)
+			it.dupes = has_repeated_key(r)
+			if it.dupes {
+				it.last = new(map[string]core_pkg.Node_Index)
+				all := it.pairs
+				for kn, vn in core_pkg.pair_next(&all) {
+					it.last[node_string(r.doc, kn)] = vn
+				}
+			}
+		}
 	}
 	return it
 }
 
 has_repeated_key :: proc(r: Ref) -> bool {
-	n := core_pkg.child_count(r.doc, r.node)
-	if n < 2 || r.doc.distinct_keys {
+	n := core_pkg.length(r.doc, r.node)
+	if n < 2 {
 		return false
 	}
+	it := core_pkg.pairs(r.doc, r.node)
 	if n <= 16 {
-		keys: [16]string
-		m := core_pkg.members(r.doc, r.node)
+		keys: [16]string = ---
+		// A key's length and end bytes set a bit, so only a key whose bit is set is compared with the ones before it.
+		seen: [4]u64
 		i := 0
-		for k in core_pkg.members(&m) {
-			for prev in keys[:i] {
-				if prev == k {
-					return true
+		for k in next_key(&it) {
+			h := u32(len(k))
+			if len(k) > 0 {
+				h = h * 7 + u32(k[0]) * 31 + u32(k[len(k) - 1]) * 131
+			}
+			bit := u64(1) << (h & 63)
+			if seen[(h >> 6) & 3] & bit != 0 {
+				for prev in keys[:i] {
+					if prev == k {
+						return true
+					}
 				}
 			}
+			seen[(h >> 6) & 3] |= bit
 			keys[i] = k
 			i += 1
 		}
 		return false
 	}
 	if n <= KEY_TABLE / 2 {
-		return repeats_in_table(r)
+		return repeats_in_table(&it)
 	}
 	seen := make(map[string]bool, n, context.temp_allocator)
 	defer delete(seen)
-	m := core_pkg.members(r.doc, r.node)
-	for k in core_pkg.members(&m) {
+	for k in next_key(&it) {
 		if k in seen {
 			return true
 		}
 		seen[k] = true
+	}
+	return false
+}
+
+// Whether an object in the subtree of `r` repeats a key.
+repeats_key :: proc(r: Ref) -> bool {
+	end := r.node + core_pkg.Node_Index(r.doc.nodes[r.node].n)
+	for i := r.node; i < end; i += 1 {
+		if r.doc.nodes[i].kind == .Map && has_repeated_key({r.doc, i}) {
+			return true
+		}
 	}
 	return false
 }
@@ -372,12 +476,11 @@ KEY_TABLE :: 256
 
 // `has_repeated_key` for an object of up to KEY_TABLE / 2 members, hashed on the stack, not in a map.
 @(private = "file")
-repeats_in_table :: proc(r: Ref) -> bool {
-	slots: [KEY_TABLE]u8 // a key's place in `keys`, plus one; 0 is empty
+repeats_in_table :: proc(it: ^core_pkg.Pair_Iter) -> bool {
+	slots: [KEY_TABLE]u8 // a key's place in `keys`, plus one, 0 is empty
 	keys: [KEY_TABLE / 2]string = ---
-	m := core_pkg.members(r.doc, r.node)
 	i := 0
-	for k in core_pkg.members(&m) {
+	for k in next_key(it) {
 		h := hash.fnv32a(transmute([]byte)k)
 		for s := h % KEY_TABLE;; s = (s + 1) % KEY_TABLE {
 			if slots[s] == 0 {
@@ -408,22 +511,21 @@ next_member :: #force_inline proc(it: ^Members) -> (key: string, v: Value, ok: b
 		case ^Object:
 			return x.keys[i], x.vals[i], true
 		case Ref:
-			row, _ := core_pkg.children(&it.rows)
 			if it.array {
-				return "", Ref{x.doc, row}, true
+				node, _ := core_pkg.child_next(&it.items)
+				return "", Ref{x.doc, node}, true
 			}
-			k, _ := core_pkg.get_key(x.doc, row)
+			kn, vn, _ := core_pkg.pair_next(&it.pairs)
+			k := node_string(x.doc, kn)
 			if !it.dupes {
-				return k, Ref{x.doc, row}, true
+				return k, Ref{x.doc, vn}, true
 			}
-			if it.seen == nil {
-				it.seen = new(map[string]bool)
-			}
-			if it.seen[k] {
+			if it.last[k] == 0 {
 				continue
 			}
-			it.seen[k] = true
-			return k, Ref{x.doc, core_pkg.child(x.doc, x.node, k)}, true
+			vn = it.last[k]
+			it.last[k] = 0
+			return k, Ref{x.doc, vn}, true
 		case nil, bool, Number, string:
 		}
 	}

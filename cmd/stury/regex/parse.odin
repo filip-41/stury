@@ -164,9 +164,10 @@ fail :: proc(p: ^Parser, msg: string) -> ^Node {
 	return nil
 }
 
-new_node :: proc(kind: Node_Kind) -> ^Node {
+new_node :: proc(kind: Node_Kind, kids: ..^Node) -> ^Node {
 	n := new(Node)
 	n.kind = kind
+	append(&n.kids, ..kids)
 	return n
 }
 
@@ -189,8 +190,7 @@ parse_alt :: proc(p: ^Parser) -> ^Node {
 	if p.err != "" || at_end(p) || peek(p) != '|' {
 		return first
 	}
-	alt := new_node(.Alt)
-	append(&alt.kids, first)
+	alt := new_node(.Alt, first)
 	for !at_end(p) && peek(p) == '|' {
 		p.i += 1
 		append(&alt.kids, parse_cat(p))
@@ -287,9 +287,8 @@ parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 		if invalid_repeat_target(atom) {
 			return fail(p, "target of repeat operator is invalid")
 		}
-		rep := new_node(.Repeat)
+		rep := new_node(.Repeat, atom)
 		rep.min, rep.max, rep.greedy = lo, hi, true
-		append(&rep.kids, atom)
 		if peek(p) == '?' && !at_end(p) {
 			rep.greedy = false
 			p.i += 1
@@ -306,12 +305,15 @@ parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 
 @(private = "file")
 Nested :: enum u8 {
+	// The inner repeat's body under the outer repeat made the simple repeat of simple_repeat's number.
+	Q,
+	A, // *
+	P, // +
+	QQ, // ??
+	AQ, // *?
+	PQ,
 	Asis, // as it is
 	Del, // the inner repeat alone
-	A, // *
-	AQ, // *?
-	QQ, // ??
-	P, // +
 	P_QQ, // (?:a+)??
 }
 
@@ -339,24 +341,16 @@ reduce_nested :: proc(outer: ^Node) {
 		}
 		return
 	}
-	switch REDUCE_NESTED[i][o] {
+	switch r := REDUCE_NESTED[i][o]; r {
 	case .Asis:
 	case .Del:
 		possessive := outer.possessive
 		outer^ = inner^
 		outer.possessive = possessive
-	case .A:
+	case .Q, .A, .P, .QQ, .AQ, .PQ:
+		s := int(r)
 		outer.kids[0] = inner.kids[0]
-		outer.min, outer.max, outer.greedy = 0, -1, true
-	case .AQ:
-		outer.kids[0] = inner.kids[0]
-		outer.min, outer.max, outer.greedy = 0, -1, false
-	case .QQ:
-		outer.kids[0] = inner.kids[0]
-		outer.min, outer.max, outer.greedy = 0, 1, false
-	case .P:
-		outer.kids[0] = inner.kids[0]
-		outer.min, outer.max, outer.greedy = 1, -1, true
+		outer.min, outer.max, outer.greedy = int(s % 3 == 2), 1 if s % 3 == 0 else -1, s < 3
 	case .P_QQ:
 		outer.min, outer.max, outer.greedy = 0, 1, false
 		inner.min, inner.max, inner.greedy = 1, -1, true
@@ -518,10 +512,8 @@ expect_close :: proc(p: ^Parser, body: ^Node) -> ^Node {
 
 @(private = "file")
 look_node :: proc(p: ^Parser, kind: Look_Kind) -> ^Node {
-	n := new_node(.Look)
+	n := new_node(.Look, parse_alt(p))
 	n.look = kind
-	body := parse_alt(p)
-	append(&n.kids, body)
 	return expect_close(p, n)
 }
 
@@ -630,9 +622,8 @@ parse_absent :: proc(p: ^Parser) -> ^Node {
 	if peek(p) != '|' {
 		any := new_node(.Any)
 		any.dotall = true
-		rest := new_node(.Repeat)
+		rest := new_node(.Repeat, any)
 		rest.min, rest.max, rest.greedy = 0, -1, true
-		append(&rest.kids, any)
 		p.head = true
 		append(&n.kids, parse_alt(p), rest)
 		return expect_close(p, n)
@@ -656,8 +647,7 @@ parse_absent :: proc(p: ^Parser) -> ^Node {
 	}
 	exp := body.kids[1]
 	if len(body.kids) > 2 {
-		exp = new_node(.Alt)
-		append(&exp.kids, ..body.kids[1:])
+		exp = new_node(.Alt, ..body.kids[1:])
 	}
 	append(&n.kids, body.kids[0], exp)
 	return expect_close(p, n)
@@ -750,16 +740,9 @@ parse_cond_expr :: proc(p: ^Parser) -> ^Node {
 	if !cond_branches(p, branches) {
 		return nil
 	}
-	atomic, absent := new_node(.Look), new_node(.Look)
+	atomic, absent := new_node(.Look, cond), new_node(.Look, cond)
 	atomic.look, absent.look = .Atomic, .Not_Ahead
-	append(&atomic.kids, cond)
-	append(&absent.kids, cond)
-	yes, no := new_node(.Cat), new_node(.Cat)
-	append(&yes.kids, atomic, branches.kids[0])
-	append(&no.kids, absent, branches.kids[1])
-	n := new_node(.Alt)
-	append(&n.kids, yes, no)
-	return expect_close(p, n)
+	return expect_close(p, new_node(.Alt, new_node(.Cat, atomic, branches.kids[0]), new_node(.Cat, absent, branches.kids[1])))
 }
 
 // A condition's yes and no branches, as n.kids[0] and [1]: alternatives past the first are no's. A group's

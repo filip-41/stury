@@ -1,183 +1,143 @@
-# stury's benchmarks
+# Document lanes
 
-Three comparisons, all runnable from this tree:
+`bench/doc` builds a document from a fixture, then measures one of three lanes. `doc.py` times it against
+yyjson, simdjson and sonic-rs, whose drivers are in `peers/`. Run every command below from the repository root.
 
-- **JSON libraries** (`compare.py`): stury's read side against simdjson, yyjson, RapidJSON, serde_json and
-  sonic-rs. Jobs: validate, build a DOM, decode into typed values, get one field.
-- **CSV libraries** (`compare.py`, the `csv` jobs): stury's CSV codec against the Rust `csv` and `simd-csv`
-  crates. Jobs: validate, read records, build a document, decode into typed rows, write them.
-- **Command lines** (`cli/jq_compare.sh`, `cli/csv_compare.sh`): the `stury` CLI against jq, jaq, gojq and yq
-  on JSON, and against qsv, Miller and jq on CSV, end to end.
+## Fetch and generate
 
-Each result states what it measured and under which guarantee. In the library comparison, a number taken on a
-loaded machine, from a dirty tree, or without the answer check is marked as not quotable in its report.
-
-## Running
-
-```bash
-make bench-compare
+```sh
+make fixtures
 ```
 
-```bash
-make bench-cli
+`bench/fetch.py` downloads the pinned corpus (`twitter.json`, `citm_catalog.json`, `canada.json`) into
+`bench/fixtures/corpus/` and the peers' sources into `build/bench/deps/`, checking each SHA-256. `bench/gen.py
+--check` writes the synthetic fixtures into `bench/fixtures/` and exits non-zero when one's hash is not
+`manifest.toml`'s.
+
+## Build and run
+
+```sh
+make bench-doc
+make bench-paths   # the path lanes, with the peers bench-doc built
+make bench-typed   # the typed read's lanes
 ```
 
-Or step by step:
+That builds the probe at `-o:speed` into `build/bench/doc`, builds the peers whose compiler and sources are
+present (`make bench-peers` alone), names any it left out, and runs `bench/doc.py`. The probe builds each document in a 512 MiB arena whose
+backing is not zeroed, so only the pages a lane touches count toward its RSS. `ROUNDS` sets the interleaved rounds
+(default 5) and `BENCH_FILES` the fixtures (default `logs.json citm_catalog.json table.csv logs.jsonc logs.json5`):
 
-```bash
-python3 bench/fetch.py              # the pinned corpus and the other libraries' sources (sources.toml)
-make fixtures                       # the synthetic fixtures, checked against manifest.toml
-python3 bench/compare.py build      # every arm, into build/bench
-python3 bench/compare.py check      # every arm must answer as stury does
-python3 bench/compare.py time --runs 11 --out build/bench/report
+```sh
+make bench-doc ROUNDS=3 BENCH_FILES="logs.json table.csv"
 ```
 
-You need Odin (the version in the top README), a C++20 compiler, a C compiler, Cargo and Python 3.11+. The CLI
-comparisons also need zsh, perl, hyperfine, jq, jaq, gojq and yq (JSON), and qsv and Miller (`mlr`) (CSV). The
-fixture hashes in `manifest.toml` were checked on CPython 3.14. Another release's `random` may change the bytes,
-so `gen.py --check` can fail there.
+`python3 bench/doc.py --rounds 3 logs.json` runs it directly. Without an `ARMS` environment variable the runner
+uses every arm whose binary exists. `ARMS=next,yy` keeps a subset.
 
-A library whose toolchain, sources or binary are missing is reported as left out, never dropped silently. The
-CLI comparison stops before timing when a tool it runs is not installed.
+## Lanes
 
-- `compare.py time --jobs typed,dom` picks jobs. `--jobs csv` is the five CSV jobs (`csv_validate`,
-  `csv_records`, `csv_dom`, `csv_typed`, `csv_marshal`).
-- `compare.py cycles` counts retired instructions and cycles, for close calls.
-- `compare.py time --out DIR` writes `DIR/results.json` and `DIR/report.md`, with the run's metadata and
-  whether it is quotable. `make bench-compare` uses `build/bench/report`.
-- `cli/jq_compare.sh` writes `build/bench/jq_compare/report.md`, `cli/csv_compare.sh`
-  `build/bench/csv_compare/report.md`.
+- `build` builds the document and stops. Its `check` is the document's node count, then each node's kind and role.
+- `read` builds, then reads every value once. A JSON string goes through `json.text` and a dsv cell through
+  `core.text`, and each number is read as a `core.Number`. The timed read folds each value's text length or number
+  bits into one sink. One untimed read after the timed calls hashes the tags, decoded text lengths and number bits.
+- `key` builds, then looks up one key in every object. The key is the first key of the first object (or the first
+  header cell for a headed dsv text).
 
-Environment variables:
+`logs.jsonc` and `logs.json5` carry `logs.json`'s records with trailing commas, and comments in the first or JSON5
+spellings (unquoted keys, single quotes, hex and `+` numbers) in the second. A `.jsonc` or `.json5` file is read as that spec, and a `.csv` or `.tsv` file as a headed dsv text; any other file
+is read as JSON. Each lane prints `gb_per_s`, the median of ten timed calls after two warm-ups, and `check`, an
+FNV-1a hash of what it read, from one untimed call after the timed ones. The runner refuses to time a fixture when
+the arms' `check` values differ, holds `build/bench/timing.lock`, and kills a child that passes 1 GB of live RSS.
+The GB/s table gives the best round of each arm's median; the RSS MiB table gives the median across rounds of each
+child's kernel-tracked peak RSS, from `wait4`.
 
-| variable | what |
-| --- | --- |
-| `SIMDJSON_SRC`, `RAPIDJSON_INC`, `YYJSON_SRC` | where `compare.py build` finds each library's sources (default: what `fetch.py` put in `build/bench/deps`). Setting one makes the report take that library's version from `pkg-config` (yyjson: from its header) instead of `sources.toml` |
-| `STURY_PROBE` | the stury probe binary `compare.py` times (default `build/probe`) |
-| `ROUNDS`, `RUNS` | `cli/jq_compare.sh` and `cli/csv_compare.sh`: hyperfine rounds per case (default 5), timings per tool in each (default 3) |
+The peers run only on plain `.json`. Any other fixture is timed for `next` alone.
 
-## What is in here
+## Typed lanes
 
-| path | what |
-| --- | --- |
-| `gen.py`, `manifest.toml` | the synthetic fixtures, deterministic, each pinned by SHA-256 |
-| `fetch.py`, `sources.toml` | the real-world corpus and the other libraries' C/C++ sources, each pinned by URL and SHA-256 |
-| `probe/` | stury's arms: one Odin program, one lane per run (`make probe`, then `build/probe --lane NAME --fixture F`). The lanes `compare.py` does not run (encode, marshal, edit, record streaming, wildcard paths, duplicate-key and fault handling) measure stury alone |
-| `peers/` | the other libraries' arms: `cpp_bench.cpp` (simdjson, RapidJSON), `yy_bench.c` (yyjson), `rust/` (serde_json, sonic-rs, csv, simd-csv, versions in `Cargo.lock`; `read.rs` is the JSON arm, `csv_bench.rs` the CSV one) |
-| `core_compare/` | stury against Odin's own `core:encoding/json` and `core:encoding/csv`: `odin build bench/core_compare -o:speed -collection:stury=. -out:build/core_compare && build/core_compare [fixtures_dir] [rounds]` |
-| `compare.py` | builds the arms, checks their answers, times them, writes the report |
-| `cli/` | the CLI comparisons and their answer check |
+`bench/typed` reads `logs.json`, `twitter.json`, `citm_catalog.json`, `table.csv` and `text.csv` into their own struct
+types, in an arena, with strings borrowed and with strings copied. `bench/typed.py` prints each lane's median GB/s, the best of `ROUNDS` rounds,
+each string mode a program of its own.
 
-## Inputs
+## Record lanes
 
-- **Synthetic** (`gen.py`): mostly large (1–75 MB) compact documents, each stressing one cost: numbers,
-  escapes, long strings, UTF-8, depth, width, record logs. They are not typical documents.
-- **Corpus** (`fetch.py`): the eleven files other parsers' benchmarks use (twitter, citm_catalog, canada,
-  github_events, gsoc-2018, marine_ik, mesh, numbers, instruments, apache_builds, update-center), from
-  simdjson-data at one commit. They are smaller (64 KB–3.3 MB), pretty-printed and mixed, so per-document
-  setup and whitespace weigh more.
-- **CSV** (`gen.py`): four synthetic files, deterministic and pinned in `manifest.toml`: `table.csv` (16 MB,
-  numeric columns and a short code), `text.csv` (16 MB, UTF-8 names and quoted cells holding commas, doubled
-  quotes and LFs), `wide.csv` (8 MB, 200 columns) and `table.tsv` (8 MB, tab-separated, no quoting). Every
-  row has the header's width. The `csv` crate's own bench files are not copied here or read at run time.
+```sh
+make bench-records ROUNDS=3
+```
 
-The synthetic and corpus sets can rank tools differently. Report both, and say which set a number comes from.
+`bench/records` reads the records of `logs.ndjson`, `docs.ndjson`, `twitter.ndjson`, `table.csv`, `text.csv` and
+`wide.csv` by lane: `frame` (record boundaries), `check`, `build` (a document per record), `stream` (through a 64 KiB
+window), `read` and `rows`/`text` (into a struct), `write` (a list of structs written as records, counting the bytes
+written), `threads`, `validate` and `each` (on a pool of 6 threads) and `cells`. `bench/records.py` times them beside the
+peers' record readers, each doing the same job the fastest way that library gives:
 
-## Protocol
+| Arm | Job |
+|---|---|
+| `simd` | simdjson `parse_many` over the NDJSON text: every document judged and a tape built |
+| `simd_od` | simdjson On-Demand `iterate_many`, each document skipped: the structure is judged, not the escapes or number syntax |
+| `serde_validate`, `serde_value` | serde_json `StreamDeserializer` to `IgnoredAny`, to a `Value` |
+| `sonic_validate`, `sonic_value` | sonic-rs `StreamDeserializer` to `IgnoredAny`, to a `Value` |
+| `csv_frame` | simd-csv `Splitter`, each record's bytes after the header and no cells |
 
-- Every arm is its own process. It reads the file, then times only the job, in process: 2 warm-up calls,
-  then the median of 10. File reading, process start and output are outside the clock.
-- `compare.py time` runs each arm `--runs` times, interleaved round by round with the arm order rotated, and
-  keeps the median of the medians. Each table gives each arm's time over stury's (above 1: stury is faster).
-- `check` runs first and must pass. Every typed arm's decoded value equals stury's, and every GetOne arm agrees
-  on the answer. Every arm is also run over faulty documents, and the report prints what each accepts; only
-  stury's verdicts gate the run, so read that table beside the timings. `--skip-check` times anyway, and the
-  report says so.
-- Each other library is built from pinned source with `-O3 -DNDEBUG` and the host's native CPU flags
-  (`-mcpu=native` / `-march=native`); yyjson also gets `-flto`. The Rust arms build in release with fat LTO,
-  one codegen unit and `target-cpu=native`. stury builds at `-o:speed`.
-- The report records the commit, a dirty tree, the CPU, the load average, each library's version, each
-  input's SHA-256 and each arm binary's SHA-256. A run is quotable only from a clean tree, on the pinned
-  inputs, with `check` run, at a 1-minute load at or below 2.
+simdjson runs stage 1 of the next batch in a thread of its own unless its parser's `threaded` is cleared, so `simd` and
+`simd_od` have an `_nt` arm with threading off. sonic-rs's stream ends with an end-of-input error, which the driver
+counts as the end. Every arm prints the number of records it passed, and `records.py` times nothing until they agree.
 
-## Fairness rules
+## Write lanes
 
-Each pair does the same work under the same guarantee, or the table names the difference:
+`bench/write.py` times the other libraries' writers, and stury's writer once `bench/write/` exists. Run from the repository root:
 
-- **Strictness.** The whole-document probes print what each validate and DOM arm accepts (UTF-8, numbers,
-  structure). stury's `.Lazy` level judges only what it reads, so it appears only as a separately labelled
-  arm, never as the head.
-- **Deferred work.** stury's DOM checks every number but converts it only when read, and its strings are
-  views into the input when they hold no escape. The other libraries convert numbers while parsing. So each
-  DOM table's head arm is `stury DOM + read every value`: it builds, then reads every value in one pass in
-  document order, not by a recursive walk, which the other arms do not pay for. `stury .Dom build` is the
-  build alone.
-- **Allocation.** Every arm reuses what its API lets a user reuse across calls (a parser, a document
-  buffer). stury's typed head arm allocates on the heap like the other libraries. Its arena-reset variant and
-  simdjson's output-reuse variant are separate labelled arms.
-- **Hand-written vs generic.** The simdjson and yyjson typed arms are readers written by hand for each shape,
-  labelled `hand-written`. stury, serde_json and sonic-rs derive their decoders from the type.
-- **Each tool's fastest route at the guarantee.** serde_json reads `&str` after a UTF-8 check inside the
-  clock. RapidJSON parses with `kParseValidateEncodingFlag | kParseFullPrecisionFlag`, the guarantee the
-  others give.
-- **GetOne** times a batch of calls per sample, so each sample is well above the timer's resolution.
-- **`core_compare`'s load (DOM) arm** builds a `.Dom` document and reads every value once in document order,
-  since `core:encoding/json` converts every number while parsing. stury borrows strings where core copies
-  each one, so stury still does less work on this arm.
-- **`core_compare`'s CSV arms** read table.csv and text.csv. Core's Reader runs with `reuse_record` and
-  `reuse_record_buffer` and makes no UTF-8 check; stury judges every byte. The write arm loops core's
-  `Writer.write`, since `write_all` ends in a flush that a `strings.Builder` refuses, against stury's
-  `write_record` per record.
+```sh
+make bench-write                       # every lane
+make bench-write LANES="doc" ROUNDS=3  # the lanes named, three rounds
+```
 
-## The CSV comparison
+It builds the peers as `bench-doc` does, builds next's probe from `bench/write/` when that directory is there, and
+runs the lanes. The rounds interleave the arms, and each cell is the best round of an arm's median of ten calls after
+two warm-ups. The runner holds `build/bench/timing.lock` and caps each child at 1 GB of live RSS.
 
-`compare.py` runs five jobs on each fixture they apply to, with stury as each table's head:
+| lane | job | fixtures | GB/s counts |
+|---|---|---|---|
+| `typed` | a struct value to compact text | `logs`, `twitter`, `citm_catalog`, `canada`, `nested`, `wide` | the output's bytes |
+| `typed_pretty` | the same, two-space pretty | the same | the output's bytes |
+| `doc` | a parsed document to compact text | `logs`, `twitter`, `citm_catalog`, `canada`, `pretty`, `utf8`, `escape`, `longtext` | the source's bytes |
+| `doc_pretty` | the same, two-space pretty | the same | the source's bytes |
 
-- **validate**: stury's `.Strict` `csv.validate` (structure, UTF-8, field counts) against the `csv` crate's
-  `StringRecord` and `ByteRecord` reads and `simd-csv`'s `Reader` and `Splitter`.
-- **records**: stury's `records` with `field_text` on every field against the same peers reading every record.
-- **dom**: stury's `Document` build plus a read of every cell (the head), and the build alone, against peers
-  that keep every record in a `Vec` and then read every field once, inside the clock. stury decodes a quoted
-  cell only when it is read, so each side reads every cell.
-- **typed**: `unmarshal` into `[]Row` (strings copied, and strings borrowed from the input) against the `csv`
-  crate's serde `Deserialize`, on `table.csv` and `text.csv`.
-- **marshal**: `marshal` of those rows against the `csv` crate's serde `Writer`.
+Reading the fixture into the value, or into the document, is outside the clock. Each call's text and document are
+freed outside it too.
 
-Each arm's label states what it guarantees:
+### Arms
 
-- The `csv` crate's `StringRecord` checks UTF-8 and field counts; `ByteRecord` does not check UTF-8. Both take
-  a quote inside an unquoted field as text and accept an unterminated quote, which stury refuses.
-- `simd-csv`'s `Reader` checks UTF-8 and field counts but accepts a bare CR and quote misuse. `TotalReader`
-  checks neither UTF-8 nor field counts. `Splitter` only finds record boundaries. `simd-csv` cannot switch
-  quoting off, so on `table.tsv` it runs with the tab delimiter and quoting on.
-- `check` prints each arm's verdict on faulty CSV. It also compares every record and field count across the
-  arms and every typed arm's rows with the file's own cells, and reads each marshalled output back.
+Each arm does the job the way its library does it fastest, and writes to a buffer that the arm sized once or that the
+library allocates once.
 
-Run `python3 bench/compare.py time --jobs csv --runs 11 --out build/bench/report_csv` on a clean, quiet tree,
-after `fetch.py`, `gen.py --check`, `build` and `check`. The `csv` jobs need neither the C/C++ sources nor the
-corpus, so `build` and `check` run for them with only Odin and Cargo; the JSON jobs whose inputs are missing
-are reported as left out.
+| arm | typed | document |
+|---|---|---|
+| `yy` (yyjson 0.13) | builds a mutable document from C structs with borrowed strings, then `yyjson_mut_write_opts`. The build is inside the clock, since yyjson writes no struct without a document. | `yyjson_write_opts` of the read document, `YYJSON_WRITE_PRETTY_TWO_SPACES` for pretty |
+| `simd` (simdjson) | none: its typed writer needs C++26 reflection | `simdjson::to_string` of a DOM element, compact only. The parser keeps numbers as text, as `bench-doc`'s does, so `escape.json` parses. |
+| `simd_min` | none | `simdjson::minify` of the source text. It reads no values and is not checked against the others. |
+| `sonic` (sonic-rs) | `sonic_rs::to_writer` and `to_writer_pretty` of a serde struct | the same, of a `sonic_rs::Value`, which keeps string and number text as read |
+| `serde` (serde_json) | `serde_json::to_writer` and `to_writer_pretty` of the same struct | the same, of a `serde_json::Value` with `preserve_order` |
+| `next` | `bench/write/` | `bench/write/` |
 
-`cli/csv_compare.sh` times four cases on `table.csv` and `text.csv`: two columns picked, rows filtered
-(`qty >= 9000`), two columns picked from quoted cells, and CSV to JSON lines. Each tool's output is kept, and
-`jq_report.py` compares it with stury's line by line (`*_raw` cases) or as decoded JSON. The jq arm splits at
-commas, so it runs only the two cases on `table.csv`, where no cell is quoted. qsv has no JSON-lines arm: it
-types the values it converts (numbers, booleans), where stury and Miller's `-S` keep strings.
+The Rust structs in `peers/rust/src/bin/write.rs` and the C structs in `peers/yy_bench.c` carry the same fields, in
+the same order, so the typed arms write the same text. `twitter` and `citm_catalog` keep a subset of the source's
+fields, so their output is smaller than the source. A JSON object of any keys is a list of pairs in source order
+(`citm_catalog`'s maps, `wide`). `serde_json` reads its numbers with `float_roundtrip`, so every arm writes the same
+doubles.
 
-## The CLI comparison
+An arm that has no writer for a lane is left out of that lane and shows `-`.
 
-`cli/jq_compare.sh` times each case on the synthetic fixtures and on twitter, citm_catalog and canada. Each
-tool's answer is kept, and `cli/jq_report.py` compares it with stury's as decoded JSON values. Reordered
-object keys pass, and so do numbers that agree as float64 (yq respells a long literal); anything else is
-reported as differing. Timing is hyperfine without a shell, in rounds with the tools' order rotated. The
-summary gives each tool's geometric mean and smallest ratio over the cases it answered as stury did, and
-counts the ones it did not. The JSONC case is not like for like: jq, jaq, gojq and yq read it through an extra
-`sh` and `perl` process that strips the comments and trailing commas, which stury does not pay. The comparison
-clears its output directory first, and refuses to when the directory exists and holds no `answers/` from an
-earlier run.
+### Agreement
 
-## Not covered
+Arms that write the same job must write the same text. Each prints `check=`, an FNV-1a hash of its output, and the
+runner stops when they differ. `nested.json` and `escape.json` are the exceptions, since each library spells an
+exponent, an escape or a very large integer its own way, and the runner times them without the check.
 
-Writing is compared only for CSV (marshal against the `csv` crate). JSON marshal and output, parallel record
-reads, and inputs larger than memory are not compared. Typed decode is compared only on the synthetic shapes,
-not on the corpus.
+### Where next's arm goes
+
+next's probe is `bench/write/`, an Odin package built to `build/bench/write`. Its command line is `write MODE FILE
+[pretty]`, with MODE `typed` or `doc`. It prints one line of `gb_per_s=`, `ns=`, `out=` and `check=`, with the
+timing protocol of the other arms and `check` the FNV-1a hash of the output text. `typed` reads the fixture into the
+types of the file named, as the Rust and C arms do. Until the package exists, `make bench-write` names `next` as left
+out and `write.py` runs the peers alone.

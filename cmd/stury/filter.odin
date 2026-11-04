@@ -1,12 +1,11 @@
 package main
 
-// A filter the path scan cannot answer runs on the jq interpreter, on each input in turn as jq's main loop
-// runs it, and each output is printed as jq prints it.
+// The jq interpreter over each input, as jq's main loop runs it, each output printed as jq prints it.
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:mem/virtual"
 import "core:strings"
-import core_pkg "../../core"
 import "jq"
 import "message"
 
@@ -14,77 +13,6 @@ import "message"
 JQ_OK :: 0
 JQ_OK_NULL_KIND :: -1 // the last output was false or null
 JQ_OK_NO_OUTPUT :: -4
-
-// Run the filter once on null (-n), with the inputs left to `input` and `inputs`, or else on each input.
-run_filter :: proc(run: ^Run, ins: ^Inputs) {
-	ready_interpreter(run)
-	// Each input's values live in an arena emptied once its outputs are printed, and so does the temporary
-	// allocator, which nothing holds past a call.
-	arena: virtual.Arena
-	context.allocator = input_arena(run, &arena)
-	if run.opts.null_input {
-		run_once(run, nil)
-		return
-	}
-	// jq's main loop: until a file has failed, the stream ends, a text does not parse (under --seq it is
-	// passed over), or the filter halts. An input's memory is emptied once the next is wanted, so the last
-	// input's goes back with the process rather than unmapped first: emptying zeroes what the arena used.
-	ran, fetched := false, false
-	// The first input is fetched whatever the files before it did: `scan_inputs` hands over after the fetch that
-	// met a file not opening, as jq's loop tests its errors before a fetch and not in it.
-	for (ins.failures == 0 || !fetched) && !run.halted {
-		if ran {
-			if stream_ended(ins) {
-				return
-			}
-			virtual.arena_free_all(&arena)
-			free_all(context.temp_allocator)
-			free_spent(ins)
-		}
-		v, msg, status := next_input(ins, run.prog)
-		fetched = true
-		if status != .More {
-			explain_interpreted(run)
-		}
-		switch status {
-		case .Value:
-			run_once(run, v)
-			ran = true
-		case .Error:
-			if !run.opts.seq {
-				parse_failed(run, msg, ins.fault_note)
-				return
-			}
-			flush_some(run, force = true)
-			message.write_stderr("stury: ignoring parse error: %s\n%s", msg, ins.fault_note)
-			ins.fault_note = ""
-			ran = ins.slurped == nil // the message's memory goes back before the next input, as a value's does
-		case .More:
-			return
-		}
-	}
-}
-
-// `arena` started as a growing arena, whose allocator it returns, or the run ended for want of memory.
-input_arena :: proc(run: ^Run, arena: ^virtual.Arena) -> runtime.Allocator {
-	if virtual.arena_init_growing(arena) != nil {
-		out_of_memory(run)
-	}
-	return virtual.arena_allocator(arena)
-}
-
-// Ends the run for want of memory.
-out_of_memory :: proc(run: ^Run) -> ! {
-	message.write_stderr("stury: error: out of memory\n")
-	finish(run, EXIT_INPUT)
-}
-
-// Ends the run on a fault in the input: the output so far, then jq's parse error message and the note after it.
-parse_failed :: proc(run: ^Run, msg: string, note := "") {
-	flush_some(run, force = true)
-	message.write_stderr("stury: parse error: %s\n%s", msg, note)
-	run.ret = EXIT_INPUT
-}
 
 // The interpreter's stack: 4 GiB of address space reserved, committed only as far as a filter recurses
 // (the main thread's 8 MiB gives out near 20000 levels). jq keeps its stack on the heap, so where jq runs
@@ -100,65 +28,99 @@ Deep_Job :: struct {
 	ctx:  runtime.Context,
 }
 
-// Run the filter on one input text, `base` bytes into the input: a path whose step does not apply, which
-// the scan left to jq's rules.
-run_text :: proc(run: ^Run, src: []byte, base: u64) {
-	explain_interpreted(run)
-	ready_interpreter(run)
-	d, err := jq.build_rows(src, run.read.dialect)
-	if e, bad := err.?; bad {
-		e.offset += base
-		fail_input(run, e)
+// Run the filter once on null (-n), with the inputs left to `input` and `inputs`, or else on each input.
+run_filter :: proc(run: ^Run, ins: ^Inputs) {
+	// Each input's values live in an arena emptied once its outputs are printed, and so does the temporary
+	// allocator, which nothing holds past a call.
+	inputs, temp: virtual.Arena
+	if virtual.arena_init_growing(&inputs) != nil || virtual.arena_init_growing(&temp) != nil {
+		message.write_stderr("stury: error: out of memory\n")
+		finish(run, EXIT_INPUT)
 	}
-	defer core_pkg.row_document_destroy(&d)
-	run_once(run, jq.Ref{&d, core_pkg.ROOT})
+	context.allocator = {scratch_allocator_proc, &inputs}
+	context.temp_allocator = {scratch_allocator_proc, &temp}
+	if run.opts.null_input {
+		run_once(run, nil)
+		return
+	}
+	// jq's main loop: until a file has failed, the files end, a text does not parse, or the filter halts. The first
+	// input is fetched whatever the files before it did, as jq tests its errors before a fetch and not in it.
+	for fetched := false; (ins.failures == 0 || !fetched) && !run.halted; fetched = true {
+		v, msg, status := next_input(ins)
+		// A text that does not parse is the interpreter's, which tells its fault.
+		run.route.interpreted += int(status != .More)
+		switch status {
+		case .Value:
+			run_once(run, v)
+		case .Error:
+			if !run.opts.seq {
+				flush_some(&run.output, force = true)
+				message.write_stderr("stury: parse error: %s\n%s", msg, ins.note)
+				finish_input(&run.output, EXIT_INPUT)
+				return
+			}
+			tell_ignored(ins, msg)
+		case .More:
+			return
+		}
+		free_all(context.allocator)
+		free_all(context.temp_allocator)
+		release_spent(ins)
+	}
 }
 
-Print_Sink :: struct {
-	using sink: jq.Sink,
-	run:        ^Run,
-}
-
-// Runs the filter on one input and prints its outputs. Returns the signal the run ended with.
-eval_input :: proc(run: ^Run, v: jq.Value) -> jq.Signal {
-	s := Print_Sink{sink = {emit = proc(s: ^jq.Sink, it: jq.Item) -> jq.Signal {
-				run := ((^Print_Sink)(s)).run
-				// jq's message goes to stderr at once and its output waits in a buffer: an output's messages
-				// come before it, never after all of the run's output.
-				if len(run.ip.messages) > 0 {
-					jq.flush_messages(&run.ip)
-				}
-				if sel := run.selected; sel != nil {
-					print_cells(run, sel.cols, sel.rec)
-					return .Go
-				}
-				if !print_jq(run, it.v) {
-					run.ip.err = "Cannot dump a string containing NUL with --raw-output0 option"
-					return .Fail
-				}
-				return .Go
-			}}, run = run}
-	ip := &run.ip
-	ip.free_envs = nil // the last input's, emptied with its memory
-	run.ret = JQ_OK_NO_OUTPUT
-	ip.printer = &s
-	sig := jq.eval(ip, run.prog, {v = v}, ip.globals, false, &s)
-	ip.printer = nil
-	run.pieces_root = {}
-	return sig
+// A growing arena whose emptying keeps its first block and writes no zeros over it: only `.Alloc` and `.Resize`
+// promise zeros, and they write them over what they give.
+scratch_allocator_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old: rawptr, old_size: int, loc := #caller_location) -> (out: []byte, err: runtime.Allocator_Error) {
+	arena := (^virtual.Arena)(data)
+	switch mode {
+	case .Free_All:
+		for arena.curr_block != nil && arena.curr_block.prev != nil {
+			virtual.arena_growing_free_last_memory_block(arena, loc)
+		}
+		if arena.curr_block != nil {
+			arena.curr_block.used = 0
+		}
+		arena.total_used = 0
+		return
+	case .Resize, .Resize_Non_Zeroed:
+		if old != nil && 0 < size && size <= old_size && uintptr(old) & uintptr(alignment - 1) == 0 {
+			// The tail of the block's last allocation goes back to the block, so that it can grow again in place.
+			if b := arena.curr_block; b != nil && uintptr(old) + uintptr(old_size) == uintptr(b.base) + uintptr(b.used) {
+				b.used -= uint(old_size - size)
+				arena.total_used -= uint(old_size - size)
+			}
+			return ([^]byte)(old)[:size], nil
+		}
+	case .Alloc, .Alloc_Non_Zeroed, .Free, .Query_Features, .Query_Info:
+	}
+	out, err = virtual.arena_allocator_proc(data, mode, size, alignment, old, old_size, loc)
+	if err == nil && (mode == .Alloc || mode == .Resize) {
+		kept := 0 if old == nil else min(old_size, len(out))
+		intrinsics.mem_zero(raw_data(out[kept:]), len(out) - kept)
+	}
+	return
 }
 
 // Runs the filter on one input, prints its outputs and reports its error, as jq's process() does.
 run_once :: proc(run: ^Run, v: jq.Value) {
 	ip := &run.ip
-	sig := eval_input(run, v)
+	ip.free_envs = nil // the last input's, emptied with its memory
+	ip.printer = &run.output
+	sig := jq.eval(ip, run.prog, {v = v}, ip.globals, false, &run.output)
+	ip.printer = nil
+	if run.output.piece && (sig == .Fail || ip.halted != nil) {
+		run.output.refused = true
+		return
+	}
 	if len(ip.messages) > 0 {
 		jq.flush_messages(ip)
-		flush_some(run, force = true)
+		flush_some(&run.output, force = true)
 	}
+	ended: Maybe(int)
 	#partial switch sig {
 	case .Fail:
-		flush_some(run, force = true)
+		flush_some(&run.output, force = true)
 		name, line := ip.inputs.position(ip.inputs.data)
 		at := message.build_temp("%s:%d", name, line) if name != "" else "<unknown>"
 		if msg, is_str := jq.string_of(ip.err); is_str {
@@ -170,14 +132,11 @@ run_once :: proc(run: ^Run, v: jq.Value) {
 		} else {
 			message.write_stderr("stury: error (at %s) (not a string): %s\n", at, jq.to_json(ip.err))
 		}
-		run.ret = EXIT_INPUT
+		ended = EXIT_INPUT
 	case .Break:
 		if code, halted := ip.halted.?; halted {
-			run.ret, run.halted = code, true
+			ended, run.halted = code, true
 		}
 	}
-	if run.ret <= 0 && run.ret != JQ_OK_NO_OUTPUT {
-		run.last_result = int(run.ret != JQ_OK_NULL_KIND)
-	}
-	flush_some(run)
+	finish_input(&run.output, ended)
 }

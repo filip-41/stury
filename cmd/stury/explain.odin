@@ -1,127 +1,25 @@
 package main
 
-// --explain writes `stury: explain: KEY: FACTS` lines to stderr (docs/cli.md lists the keys). The code that takes
-// each decision records its reason here, so the report never derives one again.
+// --explain writes `stury: explain: KEY: FACTS` lines to stderr: the filter and its route before the run, what the run
+// did after it. The code that takes each decision records its reason in `Route`, so the report never derives one again.
 
 import "core:strings"
-import "core:sync"
 import "core:time"
-import core_pkg "../../core"
-import json "../../json"
+import core "../../core"
 import "jq"
 import "message"
 
-Explain_Why :: enum u8 {
-	Null_Input,
-	Slurp,
-	Sort_Keys,
-	Raw_Input,
-	Seq,
-	Stream,
-	Exit_Status,
-	Raw0,
-	Ascii,
-	Color,
-	Cells_Out,
-	Not_Path,
-	Dialect_Select,
-	Select_Redefined,
-	Select_Compare,
-	Select_Path,
-	Imports,
-	Not_Columns,
-	Home_Module,
-	Dot_To_Cells,
-	Object_Key,
-	Object_Member,
-	Select_Columns,
-	Layout,
-	Grow_Header,
-	Several_Files,
-	Own_Spelling,
-}
-
-Explain_Whys :: bit_set[Explain_Why]
-
-Explain_Fallback :: enum u8 {
-	Step_Kind,
-	Comment_Slash,
-	Scan_Limit,
-	Bad_Text,
-}
-
-Explain_Piece :: enum u8 {
-	Root,
-	Lines,
-	Csv,
-}
-
-// Pool threads add to these, atomically.
-Explain_Bytes :: struct {
-	input, output: int,
-}
-
 Explain :: struct {
 	on:          bool,
-	routed:      bool,
-	whys:        Explain_Whys,
-	began, ran:  time.Tick, // the filter was known; the route was chosen
-	scanned:     int,
-	interpreted: int,
-	files:       int,
-	pieces:      bit_set[Explain_Piece],
-	engines:     bool,
+	began, ran:  time.Tick, // the filter was known, the route was chosen
+	scanned:     int, // texts the path scan answered
+	interpreted: int, // inputs the interpreter ran on
 	fallback:    struct {
-		text: int, // the first text the scan handed back, 1 for the first; 0 when none
-		why:  Explain_Fallback,
-		rest: bool,
+		text: int, // the first text the scan left to the interpreter, 1 for the first, 0 when none
+		why:  Fallback,
 	},
-	bytes:       Explain_Bytes,
-}
-
-// nil without --explain.
-@(private = "file")
-counted: ^Explain_Bytes
-
-explain_input :: proc(n: int) {
-	if counted != nil {
-		sync.atomic_add(&counted.input, n)
-	}
-}
-
-explain_output :: proc(n: int) {
-	if counted != nil {
-		sync.atomic_add(&counted.output, n)
-	}
-}
-
-scan_stops :: proc(o: ^Opts) -> (stops: Explain_Whys) {
-	if o.null_input {stops += {.Null_Input}}
-	if o.slurp {stops += {.Slurp}}
-	if o.sort_keys {stops += {.Sort_Keys}}
-	if o.raw_input {stops += {.Raw_Input}}
-	if o.seq {stops += {.Seq}}
-	if o.stream {stops += {.Stream}}
-	if o.exit_status {stops += {.Exit_Status}}
-	if o.raw0 {stops += {.Raw0}}
-	if o.ascii {stops += {.Ascii}}
-	if writes_cells(o) {stops += {.Cells_Out}}
-	if json.grammar_of(source_dialect(o)) & json.OWN_SPELLING != {} {stops += {.Own_Spelling}}
-	return
-}
-
-column_stops :: proc(o: ^Opts) -> (stops: Explain_Whys) {
-	stops = scan_stops(o) & {.Null_Input, .Slurp, .Exit_Status, .Raw0, .Ascii}
-	if o.color {stops += {.Color}}
-	return
-}
-
-// Whether the caller goes on to find the other reasons: only --explain wants them all.
-explain_why :: proc(run: ^Run, whys: Explain_Whys) -> (more: bool) {
-	if run.explain.on {
-		run.explain.whys += whys
-	}
-	return run.explain.on
+	input:       int, // bytes read
+	pieces:      int, // pieces answered on the pool's threads
 }
 
 @(private = "file")
@@ -129,212 +27,115 @@ explain_line :: proc(format: string, args: ..any) {
 	message.write_stderr("stury: explain: %s\n", message.build_temp(format, ..args))
 }
 
+// The lowercase name of an enum value, as the report spells it.
 @(private = "file")
 token :: proc(v: $T) -> string {
 	return strings.to_lower(message.build_temp("%v", v), context.temp_allocator)
 }
 
-@(private = "file")
-tokens :: proc(set: bit_set[$E]) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	for e in E {
-		if e in set {
-			strings.write_string(&b, "," if strings.builder_len(b) > 0 else "")
-			strings.write_string(&b, token(e))
-		}
-	}
-	return strings.to_string(b) if strings.builder_len(b) > 0 else "none"
-}
-
-@(private = "file")
-yes :: proc(v: bool) -> string {
-	return "yes" if v else "no"
-}
-
 // Before the filter is compiled, so one that fails still shows.
 explain_filter :: proc(run: ^Run) {
-	if run.explain.on {
-		run.explain.began = time.tick_now()
+	if run.route.on {
+		run.route.began = time.tick_now()
 		explain_line("program: %q", strings.trim_space(run.program.text))
 	}
 }
 
 explain_route :: proc(run: ^Run) {
-	e := &run.explain
-	if !e.on {
+	r := &run.route
+	if !r.on {
 		return
 	}
 	o := &run.opts
+	records := "none" if o.null_input else "ndjson" if reads_lines(o) else "seq" if o.seq else "raw_lines" if o.raw_input else "whole"
 	if reads_cells(o) {
-		explain_line("input: format=%s", token(o.from))
+		explain_line("input: format=%s", FORMATS[o.from].name)
 	} else {
-		dup := run.read.duplicates
-		explain_line("input: format=%s dialect=%s records=%s duplicates=%s", token(o.from), token(run.read.dialect), records_of(o), token(.Last if dup == .Default else dup))
+		explain_line("input: format=%s dialect=%s records=%s duplicates=last", FORMATS[o.from].name, token(FORMATS[o.from].spec), records)
 	}
-	switch {
-	case run.columns != nil:
+	if cols := r.columns; cols != nil {
 		explain_line("route: columns")
-		explain_columns(run.columns)
-	case run.scanning:
+		read := "*" if cols.every else strings.join(cols.names[:], ",", context.temp_allocator)
+		shape := "all" if cols.every || cols.shape == .Select else token(cols.shape)
+		explain_line("columns: read=%s shape=%s selecting=%s", read, shape, "yes" if cols.shape == .Select else "no")
+	} else if r.scanning {
 		explain_line("route: path_scan")
-		explain_path(run)
-	case:
+		sel := "none"
+		if r.select.op != .None {
+			sel = message.build_temp("%s literal=%s", token(r.select.op), jq.to_json(r.select.literal))
+		}
+		any_at := "none"
+		for s, i in r.path.steps {
+			if _, every := s.(core.All); every {
+				any_at = message.build_temp("%d", i)
+				break
+			}
+		}
+		explain_line("path: %s any_at=%s select=%s limit=%d", spell_path(r.path), any_at, sel, r.path.limit.? or_else 0)
+	} else {
 		explain_line("route: interpreter")
-		explain_line("refused: %s", tokens(e.whys))
+		b := strings.builder_make(context.temp_allocator)
+		for why in Route_Why {
+			if why in r.whys {
+				strings.write_string(&b, "," if strings.builder_len(b) > 0 else "")
+				strings.write_string(&b, token(why))
+			}
+		}
+		explain_line("refused: %s", strings.to_string(b))
 	}
-	explain_line("compile_time: %dus", i64(time.duration_microseconds(time.tick_since(e.began))))
-	e.routed, e.ran = true, time.tick_now()
-	counted = &e.bytes
+	explain_line("compile_time: %dus", i64(time.duration_microseconds(time.tick_since(r.began))))
+	r.ran = time.tick_now()
 }
 
+// `p` as jq text: `.a."b c"[0][]`.
 @(private = "file")
-records_of :: proc(o: ^Opts) -> string {
-	switch {
-	case o.null_input:
-		return "none"
-	case reads_lines(o):
-		return "ndjson"
-	case o.seq:
-		return "seq"
-	case o.raw_input:
-		return "raw_lines"
-	}
-	return "whole"
-}
-
-@(private = "file")
-explain_columns :: proc(cols: ^Columns) {
-	read := cols.watch if cols.selecting else cols.names
-	shape := "all" if cols.all else "object" if cols.object else "array" if cols.array else "column"
-	explain_line("columns: read=%s shape=%s selecting=%s", strings.join(read, ",", context.temp_allocator) if len(read) > 0 else "*", shape, yes(cols.selecting))
-}
-
-@(private = "file")
-explain_path :: proc(run: ^Run) {
-	sel := "none"
-	if run.select.op != .None {
-		sel = message.build_temp("%s literal=%s", token(run.select.op), jq.to_json(run.select.literal))
-	}
-	any_at := message.build_temp("%v", run.any_at) if run.any_at >= 0 else "none"
-	explain_line("path: %s any_at=%s select=%s limit=%d tried=%s", spell(run.paths[1].steps), any_at, sel, run.paths[1].limit, yes(run.tried))
-}
-
-@(private = "file")
-spell :: proc(steps: []json.Step) -> string {
-	if len(steps) == 0 {
-		return "."
-	}
+spell_path :: proc(p: core.Path) -> string {
 	b := strings.builder_make(context.temp_allocator)
-	if _, named := steps[0].(json.Name); !named {
-		strings.write_byte(&b, '.')
-	}
-	for s in steps {
-		core_pkg.write_step(strings.to_writer(&b), s)
-	}
-	return strings.to_string(b)
-}
-
-// At the first text: the engine depends on whether the root is an object.
-explain_engines :: proc(run: ^Run, src: []byte) {
-	e := &run.explain
-	if !e.on || e.engines {
-		return
-	}
-	e.engines = true
-	say_engine(run, src, run.paths[:1])
-	if run.tried {
-		say_engine(run, src, run.paths[1:])
-	}
-}
-
-@(private = "file")
-say_engine :: proc(run: ^Run, src: []byte, paths: []json.Path) {
-	route, err := json.route_of(src, paths, 0, run.read)
-	engine := message.build_temp("%s why=%s", token(route.class), token(route.why))
-	if e, refused := err.?; refused {
-		engine = message.build_temp("refused why=%s", token(e.kind))
-	}
-	explain_line("engine: %s per_element=%s engine=%s", spell(paths[0].steps), yes(paths[0].per_element), engine)
-}
-
-explain_demand :: proc(run: ^Run, d: jq.Entry_Demand) {
-	if run.explain.on {
-		explain_line("demand: head=%d tail=%d counted=%s", d.head, d.tail, yes(d.counted))
-	}
-}
-
-// A `.Type_Mismatch` answer sends the text to the interpreter (`print_answers`).
-explain_answered :: proc(run: ^Run, answers: []json.Answer, rest: bool) {
-	if !run.explain.on {
-		return
-	}
-	for a in answers {
-		if a.outcome == .Type_Mismatch {
-			explain_fallback(run, .Step_Kind, rest)
-			return
+	for s, i in p.steps {
+		#partial switch v in s {
+		case core.Name:
+			plain := len(v) > 0 && !('0' <= v[0] && v[0] <= '9')
+			for c in transmute([]u8)string(v) {
+				plain &&= c == '_' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9'
+			}
+			strings.write_string(&b, ".")
+			strings.write_string(&b, string(v) if plain else jq.to_json(string(v)))
+		case core.Index:
+			if i == 0 {
+				strings.write_byte(&b, '.')
+			}
+			message.write(&b, "[%d]", int(v))
+		case core.All:
+			strings.write_string(&b, ".[]" if i == 0 else "[]")
+		}
+		if i in p.optional {
+			strings.write_byte(&b, '?')
 		}
 	}
-	run.explain.scanned += 1
+	return strings.to_string(b) if len(p.steps) > 0 else "."
 }
 
-explain_fallback :: proc(run: ^Run, why: Explain_Fallback, rest: bool) {
-	e := &run.explain
-	if e.on && e.fallback.text == 0 {
-		e.fallback = {e.scanned + e.interpreted + 1, why, rest}
-	}
-}
-
-explain_interpreted :: proc(run: ^Run) {
-	if run.explain.on {
-		run.explain.interpreted += 1
-	}
-}
-
-explain_records :: proc(run: ^Run, answered: []byte) {
-	if !run.explain.on {
-		return
-	}
-	run.explain.pieces += {.Lines}
-	it := json.records(answered, {framing = .NDJSON})
-	for _ in json.next_record(&it) {
-		run.explain.scanned += 1
-	}
-}
-
-// `interpreted` is the count before the root was read: the text was the scan's unless it grew.
-explain_root :: proc(run: ^Run, interpreted: int) {
-	e := &run.explain
-	if e.on {
-		e.pieces += {.Root}
-		e.scanned += int(e.interpreted == interpreted)
-	}
-}
-
-explain_piece :: proc(run: ^Run, piece: Explain_Piece) {
-	if run.explain.on {
-		run.explain.pieces += {piece}
-	}
-}
-
-explain_file :: proc(run: ^Run) {
-	if run.explain.on {
-		run.explain.files += 1
+// Records the first text the scan left to the interpreter.
+explain_fallback :: proc(r: ^Route, why: Fallback) {
+	if r.on && r.fallback.text == 0 {
+		r.fallback = {r.scanned + r.interpreted + 1, why}
 	}
 }
 
 explain_end :: proc(run: ^Run) {
-	e := &run.explain
-	if !e.on || !e.routed || run.held {
+	r := &run.route
+	if !r.on || r.ran == {} {
 		return
 	}
-	if run.columns != nil {
-		explain_line("run: files=%d pieces=%s workers=%d", e.files, tokens(e.pieces), run.pool_width)
+	pieces := message.build_temp("%d", r.pieces) if r.pieces > 0 else "none"
+	if r.columns != nil {
+		explain_line("run: files=%d pieces=%s", r.columns.files, pieces)
 	} else {
-		explain_line("run: texts=%d scanned=%d interpreted=%d pieces=%s workers=%d", e.scanned + e.interpreted, e.scanned, e.interpreted, tokens(e.pieces), run.pool_width)
+		explain_line("run: texts=%d scanned=%d interpreted=%d pieces=%s", r.scanned + r.interpreted, r.scanned, r.interpreted, pieces)
 	}
-	if f := e.fallback; f.text > 0 {
-		explain_line("fallback: text=%d why=%s rest=%s", f.text, token(f.why), yes(f.rest))
+	if r.fallback.text > 0 {
+		explain_line("fallback: text=%d why=%s", r.fallback.text, token(r.fallback.why))
 	}
-	explain_line("run_time: %dus", i64(time.duration_microseconds(time.tick_since(e.ran))))
-	explain_line("cost: peak_rss=%d input=%d output=%d", peak_rss(), sync.atomic_load(&e.bytes.input), sync.atomic_load(&e.bytes.output))
+	explain_line("run_time: %dus", i64(time.duration_microseconds(time.tick_since(r.ran))))
+	explain_line("cost: peak_rss=%d input=%d output=%d", peak_rss(), r.input, run.output.written)
 }

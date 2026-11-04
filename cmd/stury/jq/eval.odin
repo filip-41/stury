@@ -9,6 +9,7 @@ package jq
 // at, which `path`, `paths`, `del` and the assignments build on.
 
 import "core:strings"
+import core_pkg "../../../core"
 import "../message"
 
 Signal :: enum u8 {
@@ -75,7 +76,8 @@ Interp :: struct {
 	labels:       int, // label ids handed out so far (`fresh_label`)
 	globals:      ^Env, // the prelude's functions and the command line's variables
 	inputs:       Input_Source,
-	env_obj:      Value, // $ENV, nil until `env_value` makes it
+	reading:      core_pkg.As, // how `fromjson` reads a text, as `--from` and `--max-depth` read input
+	env_obj:     Value, // $ENV, nil until `env_value` makes it
 	halted:       Maybe(int), // `halt`'s exit code
 	messages:     [dynamic]byte, // `debug` and `stderr` output, written by the caller
 	debug_layout: Layout, // how `debug` prints its message: jq's output options, compact
@@ -83,7 +85,7 @@ Interp :: struct {
 	prog_origin:  string, // under -f, the real path of the filter file's directory
 	// jq's jv_load_file, which modules are read with: the file as one string (`raw`) or as the array of its
 	// JSON texts, or jq's message for why not.
-	load_file:    proc(path: string, raw: bool) -> (Value, string),
+	load_file:    proc(path: string, raw: bool, r: core_pkg.As) -> (Value, string),
 	// Scopes no evaluation reads any more, linked by `parent`, for `new_env` to hand out again. They live
 	// in the input's memory, so the caller empties the list with it.
 	free_envs:    ^Env,
@@ -134,12 +136,6 @@ brief :: proc(v: Value, size := 30) -> string {
 fresh_label :: proc(ip: ^Interp) -> int {
 	ip.labels += 1
 	return ip.labels - 1
-}
-
-break_error :: proc(id: int) -> Value {
-	o := new_object()
-	object_put(o, "__jq", num(f64(id)))
-	return o
 }
 
 // Whether `err` is a break to label `id`, as jq's label compares what it catches: `{"__jq": id}`.
@@ -351,7 +347,7 @@ eval_scoped :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^E
 		id := fresh_label(ip)
 		e := Env{parent = env, kind = .Label, name = n.name, label = id}
 		g := Guard_Sink{sink = {emit = guard_emit}, out = out, ip = ip}
-		sig := eval(ip, n.a, input, &e, track, &g)
+		sig := eval(ip, n.a, input, (^Env)(rawptr(&e)), track, &g) // on the stack, as in `bind_emit`
 		if sig == .Fail && !consumer_failed(ip, &g) && breaks_to(ip.err, id) {
 			return .Go
 		}
@@ -359,7 +355,9 @@ eval_scoped :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^E
 	case .Break:
 		for e := env; e != nil; e = e.parent {
 			if e.kind == .Label && e.name == n.name {
-				ip.err = break_error(e.label)
+				o := new_object()
+				object_put(o, "__jq", num(f64(e.label)))
+				ip.err = o
 				ip.raised += 1
 				return .Fail
 			}

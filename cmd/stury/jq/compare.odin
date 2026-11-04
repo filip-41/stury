@@ -6,7 +6,6 @@ import "core:math"
 import "core:slice"
 import "core:strings"
 import core_pkg "../../../core"
-import json "../../../json"
 
 // The members from which compare() and -S sort keys and values together: a key lookup in a document object scans
 // every member, so past this many one walk over both sorted lists beats a lookup per key. Below it, a
@@ -20,7 +19,7 @@ is_wide :: proc(v: Value) -> bool {
 	case ^Object:
 		return len(x.keys) >= WIDE_OBJECT
 	case Ref:
-		return core_pkg.child_count(x.doc, x.node) >= WIDE_OBJECT
+		return core_pkg.length(x.doc, x.node) >= WIDE_OBJECT
 	}
 	return false
 }
@@ -61,8 +60,106 @@ compare_members :: proc(a, b: []Member, depth: int, eq: bool) -> int {
 	return 0
 }
 
-// The order of two number literals as exact decimals.
-compare_decimals :: json.compare_literals
+// A number literal as a decimal: 0.(head ++ tail) × 10^point, without leading or trailing zeros.
+// `head` and `tail` slice the literal on either side of its `.`, so no buffer is allocated.
+@(private = "file")
+Decimal :: struct {
+	neg:        bool,
+	head, tail: string, // both "" for zero
+	point:      int,
+}
+
+// `lit` as a decimal in decNumber's range, which jq keeps a literal inside: past an adjusted exponent of 999999999 the
+// number keeps no literal (false), and below -1147483646 it is a zero.
+@(private = "file")
+decimal_of :: proc(lit: string) -> (d: Decimal, ok: bool) {
+	s := lit
+	if len(s) > 0 && (s[0] == '-' || s[0] == '+') {
+		d.neg, s = s[0] == '-', s[1:]
+	}
+	exp := 0
+	if i := strings.index_any(s, "eE"); i >= 0 {
+		exp = literal_exponent(s[i + 1:])
+		s = s[:i]
+	}
+	int_s, frac_s := s, ""
+	if dot := strings.index_byte(s, '.'); dot >= 0 {
+		int_s, frac_s = s[:dot], s[dot + 1:]
+	}
+	head := strings.trim_left(int_s, "0")
+	tail := frac_s
+	lead := len(int_s) - len(head)
+	if head == "" {
+		trimmed := strings.trim_left(tail, "0")
+		lead += len(tail) - len(trimmed)
+		head = strings.trim_right(trimmed, "0")
+		tail = ""
+	} else {
+		tail = strings.trim_right(tail, "0")
+		if tail == "" {
+			head = strings.trim_right(head, "0")
+		}
+	}
+	d.point = len(int_s) + exp - lead
+	switch {
+	case head == "":
+	case d.point - 1 > 999999999:
+		return d, false
+	case d.point - 1 < -1147483646:
+		head, tail = "", ""
+	}
+	d.head, d.tail = head, tail
+	d.neg = d.neg && head != ""
+	return d, true
+}
+
+// The exponent field of a literal, the text after its `e`: it saturates at 2^31 however many digits it has, where a
+// plain parse would wrap.
+@(private = "file")
+literal_exponent :: proc(field: string) -> int {
+	i := 0
+	neg := len(field) > 0 && field[0] == '-'
+	if len(field) > 0 && (field[0] == '-' || field[0] == '+') {
+		i = 1
+	}
+	e := 0
+	for ; i < len(field) && '0' <= field[i] && field[i] <= '9'; i += 1 {
+		e = min(e * 10 + int(field[i] - '0'), 1 << 31)
+	}
+	return -e if neg else e
+}
+
+// The order of two decimals (`-1` to `1`), as jq compares two literals: `1.0` equals `1`, and `-1e-400` is below `0`
+// though it is `-0.0` as a double.
+@(private = "file")
+compare_decimals :: proc(x, y: Decimal) -> int {
+	if x.neg != y.neg {
+		return -1 if x.neg else 1
+	}
+	mag: int
+	switch {
+	case x.head == "" || y.head == "":
+		mag = int(x.head != "") - int(y.head != "")
+	case x.point != y.point:
+		mag = -1 if x.point < y.point else 1
+	case x.tail == "" && y.tail == "":
+		mag = strings.compare(x.head, y.head)
+	case:
+		nx, ny := len(x.head) + len(x.tail), len(y.head) + len(y.tail)
+		for i in 0 ..< min(nx, ny) {
+			cx := x.head[i] if i < len(x.head) else x.tail[i - len(x.head)]
+			cy := y.head[i] if i < len(y.head) else y.tail[i - len(y.head)]
+			if cx != cy {
+				mag = -1 if cx < cy else 1
+				break
+			}
+		}
+		if mag == 0 {
+			mag = -1 if nx < ny else (1 if nx > ny else 0)
+		}
+	}
+	return -mag if x.neg else mag
+}
 
 // How deep jq nests values it parses, prints, compares, checks for containment or merges.
 MAX_DEPTH :: 10000
@@ -101,8 +198,10 @@ compare :: proc(a, b: Value, depth := 0, eq := false) -> int {
 		}
 		if x.f == y.f && x.lit != y.lit && x.lit != "" && y.lit != "" {
 			// jq compares two literals as decimals, unless one is past decNumber's range and so a plain double.
-			if lx, ly := json.jq_literal(x.lit), json.jq_literal(y.lit); lx != "" && ly != "" {
-				return compare_decimals(lx, ly)
+			dx, x_ok := decimal_of(x.lit)
+			dy, y_ok := decimal_of(y.lit)
+			if x_ok && y_ok {
+				return compare_decimals(dx, dy)
 			}
 		}
 		return -1 if x.f < y.f else (1 if x.f > y.f else 0)

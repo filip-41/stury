@@ -287,12 +287,9 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 		if m, ok := c.made[{x.doc, -1}]; ok {
 			return Ref{m.(Ref).doc, x.node}
 		}
-		// The rows and the text, and what the scan decoded. What was decoded since is decoded again.
 		d := new(core_pkg.Document)
-		d^ = {src = transmute([]byte)copy_string(c, string(x.doc.src)), spelling = x.doc.spelling, deep = x.doc.deep, distinct_keys = x.doc.distinct_keys, pruned = x.doc.pruned}
-		d.rows = slice.clone_to_dynamic(x.doc.rows[:])
-		d.values = slice.clone_to_dynamic(x.doc.values[:])
-		d.facts = slice.clone_to_dynamic(x.doc.facts[:])
+		d^, _ = core_pkg.clone(x.doc)
+		d.src = transmute([]byte)copy_string(c, string(x.doc.src))
 		c.made[{x.doc, -1}] = Ref{d, core_pkg.ROOT}
 		return Ref{d, x.node}
 	case Number:
@@ -307,17 +304,8 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 			return m
 		}
 		a := new_array(len(x.items))
-		append(&a.items, ..x.items[:]) // one block; only the members that point into the arenas are made anew
-		for &m in a.items {
-			switch t in m {
-			case nil, bool:
-			case Number:
-				if len(t.lit) > 0 {
-					m = copy_value(c, m)
-				}
-			case string, ^Array, ^Object, Ref, Path:
-				m = copy_value(c, m)
-			}
+		for m in x.items {
+			append(&a.items, copy_value(c, m))
 		}
 		return made_container(c, x, a)
 	case Path:

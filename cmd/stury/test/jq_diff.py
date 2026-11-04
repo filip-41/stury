@@ -21,6 +21,7 @@ import resource
 import signal
 import subprocess
 import sys
+from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -359,6 +360,15 @@ def strict_texts(stdin):
     return True
 
 
+# jq prints a number literal in its own canonical spelling (`1E+3`), stury as written (`1e3`). A text with its literals
+# spelled as jq prints them, which a string keeps as it is, makes stury print what jq does.
+STRING_OR_NUMBER = re.compile(r'"(?:[^"\\]|\\.)*"|(?<![\w$.@])-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?')
+
+
+def jq_spelling(text):
+    return STRING_OR_NUMBER.sub(lambda m: m.group() if m.group()[0] == '"' else str(Decimal(m.group())), text)
+
+
 def documented(stdin, got, want):
     """Which of docs/cli.md's "Differences from jq" explains stury's answer `got` where jq's is `want`, or None."""
     parse_error = lambda err: b"parse error: " in err
@@ -387,6 +397,10 @@ def compare(stury, jq, case, parallel=False):
     if got == want:
         return None
     if documented(stdin, got, want):
+        return "documented"
+    spelled = run(stury, opts, jq_spelling(prog), jq_spelling(stdin))
+    spelled = (spelled[0], spelled[1], re.sub(rb"stury: (?=error \(|parse error)", b"jq: ", as_jq(spelled[2])))
+    if spelled == want or documented(stdin, spelled, want):
         return "documented"
     return f"{' '.join(opts)} {prog!r}\n  stdin {stdin!r}\n  stury: exit {got[0]} out {got[1][:300]!r} err {got[2][:300]!r}\n  jq:    exit {want[0]} out {want[1][:300]!r} err {want[2][:300]!r}"
 

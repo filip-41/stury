@@ -1,34 +1,45 @@
-// Read one value by path with `find`, and every value of a path with a `Request`, without building a document.
+// Read one value by path with `find`, and every value of a path with `scan`, without building a whole document.
 //
 // Run from the repository root: odin run examples/scan -collection:stury=.
 package main
 
-import json "stury:json"
+import "stury:core"
+import "stury:json"
 import "core:fmt"
 import "core:os"
 
 main :: proc() {
 	src := transmute([]byte)string(`{"name": "ada", "tags": ["math", "engines"]}`)
 
-	// One walk answers one path, and nothing is kept.
-	a, err := json.find(src, ".tags[1]")
-	if err != nil {
+	// The path text is parsed once. The path owns its steps, and borrows the text.
+	second_tag, perr := core.parse_path(".tags[1]")
+	if perr.kind != .None {
 		os.exit(1)
 	}
-	if a.outcome == .Found {
-		fmt.println(string(src[a.lo:a.hi])) // "engines", quotes and all
-		text, _, _ := json.answer_text(src, a) // decoded, a slice of src unless it held an escape
+	defer core.path_destroy(&second_tag)
+
+	// One walk answers one path and stops at the answer. The document holds the nodes the answer needs and borrows `src`.
+	doc, answer, err := json.find(src, .Json, second_tag)
+	if err.kind != .None {
+		os.exit(1)
+	}
+	defer core.destroy(&doc)
+	if a, found := answer.?; found && a.outcome == .Found {
+		fmt.println(string(core.span(&doc, a.node))) // "engines", quotes and all
+		buf: [32]u8
+		text, _ := core.text(&doc, a.node, buf[:]) // decoded into the caller's buffer, never allocated
 		fmt.println(text) // engines
 	}
 
-	// A request holds every answer of its paths, and can be scanned again over other records.
-	req: json.Request({.Path})
-	defer json.destroy(&req)
-	if json.request_init(&req, ".tags[]") != nil || json.scan(src, &req) != nil {
+	// A path with `[]` gives one answer per value it reaches, in text order.
+	every_tag, _ := core.parse_path(".tags[]")
+	defer core.path_destroy(&every_tag)
+	tags, serr := json.scan(src, .Json, every_tag)
+	if serr.kind != .None {
 		os.exit(1)
 	}
-	tags, _ := json.answers(&req, 0) // one path: nothing to group, so no error
-	for t in tags {
-		fmt.println(string(src[t.lo:t.hi])) // "math", then "engines"
+	defer core.destroy(&tags)
+	for a in tags.answers {
+		fmt.println(string(core.span(&tags, a.node))) // "math", then "engines"
 	}
 }

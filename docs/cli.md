@@ -305,11 +305,12 @@ $ stury fmt --from ndjson --to csv records.ndjson
 
 ### Grammar
 
-Every input is read by one grammar, the library's: `validate` with `dialect = .Json`, or `.Jsonc` under
-`--from jsonc`.
+Every input is read by one grammar, the library's: `json.validate` with `.Json`, or `.Jsonc` under `--from jsonc` and
+`.Json5` under `--from json5`.
 
 - **Nesting:** to `--max-depth N` levels (1024 by default, up to 2^20).
-- **Numbers:** of any length, with an exponent up to 2^31-1. A larger one is refused as out of range.
+- **Numbers:** of any length and any exponent. A number is kept as it was written and read as a double only where a
+  filter computes with it, so `1e400` prints as `1e400` and `1e400 + 0` is `1.7976931348623157e+308`.
 - **Where it applies:** every input mode, `fromjson`, `--argjson`, `--jsonargs`, `--slurpfile` and `check`.
   So does `--from jsonc`; a `--slurpfile` file is then one document, as an input is.
 - **Option JSON:** `--argjson` and `--jsonargs` keep jq's `invalid JSON text passed to` and add the fault, as
@@ -620,7 +621,7 @@ these places:
   (`.@base64 "x"`), and that still parses as jq's.
 - They only read: `path(.@comment)` and `.@comment = 1` are errors. A comment sits beside a value rather
   than inside it, so jq's paths, and `=`, `|=` and `del` with them, have nothing to address. To change the
-  comments of a file, use the library's `insert_comment`, `set_comment` and `remove_comment`.
+  comments of a file, use the library's `core.set_fact` and `core.remove_fact`.
 
 ## Differences from jq
 
@@ -770,15 +771,18 @@ change a text's length, and the script, emoji and other Unicode properties. Two 
 
 ## For library users
 
-The CLI reads input as the library's `validate` and `build` do with their defaults (`.Json`, `.Strict`,
-duplicates `.Last`), and its numbers are uncapped. It differs from the library on purpose:
+The CLI reads input as `json.build` and `json.validate` do with their defaults (`.Json`, `core.Duplicates.Last`), and
+its numbers are uncapped. It differs from the library on purpose:
 
 | | CLI | Library |
 | --- | --- | --- |
-| A key repeated in one object | keeps its last value (`.Last`) and cannot be refused | any `Duplicates` policy, `.Refuse` included |
-| Strings and keys | jq's escapes (`"\/"` is `"/"`), DEL as `\u007f`. Of a repeated key, only the last value prints, at the first one's position | the source text, DEL as the byte unless the writer's `escape_del` is set |
+| A key repeated in one object | keeps its last value and cannot be refused | `core.Duplicates.First` or `.Last` on a read, `every_key` for each, and `refuse_duplicates` on a build |
+| Strings and keys | jq's escapes (`"\/"` is `"/"`), DEL as `\u007f`. Of a repeated key, only the last value prints, at the first one's position | the source text, DEL as the byte unless the writer's `escape_del` is set, and `respell_strings` to write them in the writer's own escapes |
 | Numbers | printed as written (`1E2` stays `1E2`); when computed, as jq's double layout | the source text |
 
-- A JSONC `Document` keeps its comments as `stury --from jsonc --to jsonc` prints them (a repeated key with its last value's).
-  That does not apply to `marshal` of an `any`.
-- How the CLI runs a filter is described in [docs/codec.md](codec.md#9-how-the-cli-runs-a-filter).
+- A JSONC document keeps its comments as facts, and `core.write` puts them back where they were read, as
+  `stury --from jsonc --to jsonc` prints them (a repeated key with its last value's). That does not apply to
+  `marshal` of an `any`.
+- The CLI runs a filter by one of three routes, which `--explain` names: the path scan, the column route and the
+  interpreter ([`--explain`](#--explain)). The path scan is the library's `records.scan`, and the interpreter runs over a
+  document built whole.

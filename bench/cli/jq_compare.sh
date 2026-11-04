@@ -75,9 +75,6 @@ ask logs_id -c '.logs[].id' logs.json -I0
 # Every member value of every record.
 ask logs_all -c '.logs[][]' logs.json -I0
 
-# A column over a root array.
-ask batch_s -c '.[].s' batch_131072.json -I0
-
 # A negative index under a wildcard, on array values only (yq selects them with a tag test).
 bench_case neg_index \
 	-n stury "$S -c '.[].msg | arrays | .[-1]' documents.json" \
@@ -93,8 +90,8 @@ ask logs_pretty '' '.logs[]' logs.json -
 ask logs_msg_raw -r '.logs[].msg' logs.json -r
 
 # NDJSON: one member of every record, and every record re-emitted compact.
-STURY_FLAGS="--from ndjson" ask ndjson_v -c .v records.ndjson -I0
-STURY_FLAGS="--from ndjson" ask ndjson_all -c . records.ndjson -I0
+STURY_FLAGS="--from ndjson" ask ndjson_v -c .id logs.ndjson -I0
+STURY_FLAGS="--from ndjson" ask ndjson_all -c . logs.ndjson -I0
 
 # JSONC: stury reads it; the others read it after strip_jsonc.sh.
 bench_case jsonc_id \

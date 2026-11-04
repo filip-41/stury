@@ -78,13 +78,12 @@ bind_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	x := (^Bind_Sink)(s)
 	if p := x.n.patterns[0]; len(x.n.patterns) == 1 && p.kind == .Var {
 		e := Env{parent = x.env, kind = .Var, name = p.name, value = it.v}
-		return eval(x.ip, x.n.b, x.input, &e, x.track, x.out)
-	}
-	if !x.track {
-		return bind_alternatives(x, it.v, bind_body, nil)
+		// A scope on the stack, which the call reads only until it returns: `release_scopes` gives back only the scopes
+		// made below it.
+		return eval(x.ip, x.n.b, x.input, (^Env)(rawptr(&e)), x.track, x.out)
 	}
 	st := state_of(x.input)
-	return bind_alternatives(x, it.v, bind_body, &st)
+	return bind_alternatives(x, it.v, bind_body, &st if x.track else nil)
 }
 
 bind_body :: proc(x: ^Bind_Sink, e: ^Env, st: ^Path_State) -> Signal {
@@ -208,7 +207,7 @@ bind_each :: proc(b: ^Binder, todo: ^Pending, env: ^Env, st: ^Path_State) -> Sig
 			return bind_each(b, todo.next, bind_var(b.ip, env, p.name, v), st)
 		}
 		e := Env{parent = env, kind = .Var, name = p.name, value = v}
-		return bind_each(b, todo.next, &e, st)
+		return bind_each(b, todo.next, (^Env)(rawptr(&e)), st) // on the stack, as in `bind_emit`
 	case .Array:
 		if todo.from == len(p.elems) {
 			return bind_each(b, todo.next, env, st)
@@ -279,7 +278,7 @@ key_emit :: proc(s: ^Sink, it: Item) -> Signal {
 			e = bind_var(x.b.ip, e, m.var, member)
 		} else {
 			local = {parent = e, kind = .Var, name = m.var, value = member}
-			e = &local
+			e = (^Env)(rawptr(&local)) // on the stack, as in `bind_emit`
 		}
 	}
 	rest := Pending{p = p, v = v, from = from + 1, next = x.todo.next}
@@ -316,8 +315,7 @@ lookup_var :: proc(ip: ^Interp, name: string, env: ^Env) -> (Value, Signal) {
 			return e.value, .Go
 		}
 	}
-	switch name {
-	case "ENV":
+	if name == "ENV" {
 		return env_value(ip)
 	}
 	return nil, fail(ip, "$%s is not defined", name)

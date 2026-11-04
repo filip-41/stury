@@ -27,14 +27,15 @@ HELP_HEAD :: "stury - commandline JSON processor [version " + VERSION + `]
 Usage:	stury [options] <jq filter> [file...]
 	stury [options] --args <jq filter> [strings...]
 	stury [options] --jsonargs <jq filter> [JSON_TEXTS...]
-	stury check [--from format|--seq] [--strict-limits] [--max-depth n] [file...]
+	stury check [--from format|--seq] [--max-depth n] [file...]
 	stury fmt [--from format] [--to format] [--in-place|--check]
 	          [--indent n|--tab] [--max-depth n] [file...]
 
 stury applies the filter to its JSON text inputs and writes the results as
 JSON, as jq 1.8.2 does, but reads strictly (RFC 8259): 01, 1., NaN, nan,
 Infinity, invalid UTF-8 in a string, a NUL after a value and nesting past
---max-depth are parse errors. For filters see jq(1) and https://jqlang.org/.
+--max-depth are parse errors, and a number prints as it was written (1E2,
+not jq's 1E+2). For filters see jq(1) and https://jqlang.org/.
 
 `
 
@@ -91,7 +92,8 @@ stury's own options:
                             not already formatted;
       --grow-header         with --to csv or tsv, write a header of every key;
       --max-depth n         refuse nesting past n levels (default 1024);
-      --strict-limits       with check, keep the library's number limits;
+      --follow              with one file, answer each record as it is
+                            appended, like tail -f FILE | stury;
       --explain             write the filter's route, its plan and what the
                             run did to stderr, and run the filter.
 

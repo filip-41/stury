@@ -16,7 +16,7 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 		p.prog = {body = v[3].node, meta = v[1].value, deps = dep_values(v[2].nodes[:])}
 	case 3:
 		p.prog = {defs = v[3].node, meta = v[1].value, deps = dep_values(v[2].nodes[:])}
-	case 4, 6, 8, 153:
+	case 4, 6, 8, 54, 59, 153:
 		r = {}
 	case 5:
 		r = {}
@@ -96,8 +96,6 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 		r = {text = "text"}
 	case 53:
 		r = {node = string_node(p, v[2].nodes[:], at)}
-	case 54:
-		r = {}
 	case 55:
 		if text, ok := v[2].value.(string); ok {
 			parts := len(r.nodes)
@@ -115,8 +113,6 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 		r = {node = node(.If, v[2].node, v[4].node, v[5].node, at = at)}
 	case 58:
 		r = v[2]
-	case 59:
-		r = {}
 	case 60, 110, 111, 113:
 		r = {node = node(.Identity, at = at)}
 	case 61:

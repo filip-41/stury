@@ -61,32 +61,25 @@ fn_test :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, S
 	return len(ms) > 0, sig
 }
 
-gen_match :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
-	return each_match(ip, input, args, track, out, false)
-}
-
-gen_capture :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
-	return each_match(ip, input, args, track, out, true)
-}
-
 // Every match as `match` gives it, or under `capture` as its named groups.
-@(private = "file")
-each_match :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink, capture: bool) -> Signal {
-	r, s, ms, sig := regex_on(ip, input.v, args)
-	if sig != .Go {
-		return sig
-	}
-	if track {
-		return match_path_error(ip, &r, s, ms)
-	}
-	walk: Char_Walk
-	for m in ms {
-		v: Value = capture_object(&r, s, m) if capture else match_object(&r, s, m, &walk)
-		if sig = emit_made(out, input, v, track); sig != .Go {
+each_match :: proc($capture: bool) -> Generator {
+	return proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
+		r, s, ms, sig := regex_on(ip, input.v, args)
+		if sig != .Go {
 			return sig
 		}
+		if track {
+			return match_path_error(ip, &r, s, ms)
+		}
+		walk: Char_Walk
+		for m in ms {
+			v: Value = capture_object(&r, s, m) if capture else match_object(&r, s, m, &walk)
+			if sig = emit_made(out, input, v, track); sig != .Go {
+				return sig
+			}
+		}
+		return .Go
 	}
-	return .Go
 }
 
 // jq's `match` is `_match_impl(...) | .[]`: under `path(...)` that `.[]` meets an array no path leads to.

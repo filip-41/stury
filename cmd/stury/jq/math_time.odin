@@ -1,6 +1,6 @@
 package jq
 
-// Numeric builtins (`fn_abs`, `fn_isinfinite`, `fn_isnan`, `fn_isnormal`, `fn_number_pair`, `fn_bsearch`) and
+// Numeric builtins (`fn_abs`, `fn_float_class`, `fn_number_pair`, `fn_bsearch`) and
 // dates (`gmtime`, `localtime`, `mktime`, `strftime`, `strflocaltime`, `strptime`).
 
 import "core:c/libc"
@@ -15,7 +15,7 @@ fn_abs :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Si
 	switch kind(v) {
 	case .Number:
 		// `. < 0` compares a literal as a decimal, so -1e-400 is below 0 though it is -0.0.
-		if n, _ := number_of(v); n.f < 0 || n.f == 0 && n.lit != "" && compare_decimals(n.lit, "0") < 0 {
+		if n, _ := number_of(v); n.f < 0 || n.f == 0 && compare(n, Number{0, "0"}) < 0 {
 			return negate(n), .Go
 		}
 	case .Null, .False, .True:
@@ -25,19 +25,11 @@ fn_abs :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Si
 	return v, .Go
 }
 
-fn_isinfinite :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+// isinfinite, isnan and isnormal.
+fn_float_class :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	n, ok := number_of(v)
-	return ok && math.is_inf(n.f), .Go
-}
-
-fn_isnan :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	n, ok := number_of(v)
-	return ok && math.is_nan(n.f), .Go
-}
-
-fn_isnormal :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	n, ok := number_of(v)
-	return ok && math.classify(n.f) == .Normal, .Go
+	classes: bit_set[math.Float_Class] = {.Inf, .Neg_Inf} if name == "isinfinite" else ({.NaN} if name == "isnan" else {.Normal})
+	return ok && math.classify(n.f) in classes, .Go
 }
 
 // frexp, modf and lgamma_r: a number's two parts, as an array.
@@ -90,16 +82,10 @@ fn_bsearch :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value
 // ---- Dates, as jq's: libc's broken-down time as [year, month 0-11, day, hours, minutes, seconds, weekday,
 // yearday], the seconds with the input's fraction. TZ sets the zone `localtime` and `strflocaltime` read.
 
-// `secs` as C converts a double to time_t on this machine: truncated toward zero, saturated, NaN as 0.
-@(private = "file")
-time_of :: proc(secs: f64) -> libc.time_t {
-	return libc.time_t(double_to_i64(secs))
-}
-
 // jq's f_gmtime and f_localtime.
 @(private = "file")
 broken_time :: proc(ip: ^Interp, secs: f64, local: bool) -> (Value, Signal) {
-	t := time_of(secs)
+	t := libc.time_t(double_to_i64(secs)) // as C converts a double to time_t on this machine
 	tm: libc.tm
 	if !(local_time(t, &tm) if local else utc_time(t, &tm)) {
 		return nil, fail(ip, "error converting number of seconds since epoch to datetime")
@@ -223,7 +209,10 @@ fn_strptime :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 		return nil, fail(ip, "date \"%s\" does not match format \"%s\"", input, format)
 	}
 	// The weekday and yearday are the calendar's for the array's own year, month and day. A day never read is day 0.
-	tm.tm_wday, tm.tm_yday = civil_wday_yday(tm)
+	year := i64(tm.tm_year) + 1900
+	n := days_from_civil(year, i64(tm.tm_mon) + 1, i64(tm.tm_mday))
+	tm.tm_wday = libc.int((n + 4) %% 7) // 1970-01-01 was a Thursday
+	tm.tm_yday = libc.int(n - days_from_civil(year, 1, 1))
 	r := tm_value(tm, f64(tm.tm_sec))
 	if len(rest) > 0 {
 		append(&r.items, strings.clone(rest))
@@ -240,12 +229,3 @@ days_from_civil :: proc(y, m, d: i64) -> i64 {
 	return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
 }
 
-// The weekday (Sunday is 0) and the zero-based day of the year of a date, by integer day counting.
-@(private = "file")
-civil_wday_yday :: proc(tm: libc.tm) -> (wday, yday: libc.int) {
-	year := i64(tm.tm_year) + 1900
-	n := days_from_civil(year, i64(tm.tm_mon) + 1, i64(tm.tm_mday))
-	wday = libc.int((n + 4) %% 7) // 1970-01-01 was a Thursday
-	yday = libc.int(n - days_from_civil(year, 1, 1))
-	return
-}

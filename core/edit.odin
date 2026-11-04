@@ -1,212 +1,275 @@
 package core
 
-// The parts of text editing shared by every codec: the byte-span edit, its ordering rule, its application, an
-// allocator wrapper that distinguishes a refused allocation from an edit that found nothing, and the driver of
-// the path edits (`path_edit`) over a format's `Edits`.
-
 import "base:runtime"
-import "core:mem"
-import "core:slice"
+import "core:bytes"
 
-// One edit: `src[lo:hi]` is replaced by `bytes`.
-Edit :: struct {
-	lo, hi: u64,
-	bytes:  []u8,
-}
+// A log of edits kept apart from a document, which does not change after its build. A reader sees an edit only after
+// the caller commits and builds the output again. Any number of lists may share one document, each with its own edits.
+//
+// `set`, `insert` and `remove` append an edit, checked when it is recorded, in O(its text). A commit resolves every
+// edit to a source range, refuses the colliding ones, and splices the edits into the source. Every byte no edit
+// touched stays, and the format's `Edit_Spelling` supplies the separators.
+//
+// A fact edit names a node and a role, and a set also a body. The commit writes the body where the role reads it, or
+// drops it and counts it when the output cannot hold it, and refuses a second fact edit of one node and role. A fact
+// no edit names keeps its bytes, in order, unless it is removed with a removed node or lies inside the span a set
+// replaces, which is the only removed or replaced case. Its node and role afterwards follow the comments around it and
+// are not preserved.
 
-// Where `insert` puts its entry: a member name for an object, an entry index for an array (a CSV text's
-// records are one), `APPEND` after the last entry whatever the count. JSON counts a negative index from the end
-// (`-1` places the entry before the last one); CSV refuses it and a name.
-Insert_At :: union #no_nil {
-	string,
-	int,
-}
-
-// An `Insert_At` after the last entry, whatever the count.
-APPEND :: max(int)
-
-// Whether `edits` are sorted by `lo`, disjoint, and inside `src`.
-edits_ordered :: proc(src: []byte, edits: []Edit) -> bool {
-	at: u64
-	for e in edits {
-		if e.lo < at || e.hi < e.lo || e.hi > u64(len(src)) {
-			return false
-		}
-		at = e.hi
-	}
-	return true
-}
-
-// Returns `src` with sorted, disjoint edits applied, built with one copy per gap and one per replacement into an
-// exact, uninitialized allocation. Returns `oom` when the allocation is refused.
-edits_apply :: proc(src: []byte, edits: []Edit, allocator: runtime.Allocator, oom: $E) -> (out: []byte, err: Maybe(E)) {
-	n := len(src)
-	for e in edits {
-		n += len(e.bytes) - int(e.hi - e.lo)
-	}
-	buf, aerr := mem.alloc_bytes_non_zeroed(n, allocator = allocator)
-	if aerr != nil {
-		return nil, oom
-	}
-	w := 0
-	at: u64
-	for e in edits {
-		w += copy(buf[w:], src[at:e.lo])
-		w += copy(buf[w:], e.bytes)
-		at = e.hi
-	}
-	copy(buf[w:], src[at:])
-	return buf, nil
-}
-
-// `edits_apply` behind `edits_ordered`: a list a scan or a placement bug left unordered is `.Bad_Edit` rather
-// than a panic in `edits_apply`'s `src[at:e.lo]`.
-edits_apply_checked :: proc(src: []byte, edits: []Edit, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	if !edits_ordered(src, edits) {
-		return nil, Path_Error{kind = .Bad_Edit}
-	}
-	return edits_apply(src, edits, allocator, PATH_OUT_OF_MEMORY)
-}
-
-// An edited text `out` as its validation `fault` judged it: `out` when it reads, else freed and `.Bad_Result`.
-judged_result :: proc(out: []byte, fault: Maybe(Error), allocator: runtime.Allocator) -> ([]byte, Maybe(Path_Error)) {
-	if e, bad := fault.?; bad {
-		delete(out, allocator)
-		return nil, path_error_of(e, .Bad_Result)
-	}
-	return out, nil
-}
-
-// Nil when a path edit found `found` targets, else `.Not_Found`, or `.Type_Mismatch` when every one of its
-// `answered` answers was a step meeting a value of another kind (`mismatched`).
-edit_found :: proc(found: int, mismatched := 0, answered := 0) -> Maybe(Path_Error) {
-	if found > 0 {
-		return nil
-	}
-	return Path_Error{kind = .Type_Mismatch if mismatched == answered && mismatched > 0 else .Not_Found}
-}
-
-// Refusal_Watch wraps a path edit's allocator `backing` and records any refusal. An edit whose scratch lost an
-// entry to a refusal then returns out of memory (`unless_refused`) instead of a result missing an edit.
-Refusal_Watch :: struct {
-	backing: runtime.Allocator,
-	refused: bool,
-}
-
-watched :: proc(w: ^Refusal_Watch) -> runtime.Allocator {
-	return {watch_proc, w}
-}
-
-@(private = "file")
-watch_proc :: proc(
-	data: rawptr,
-	mode: runtime.Allocator_Mode,
-	size, alignment: int,
-	old_memory: rawptr,
-	old_size: int,
-	loc := #caller_location,
-) -> (
-	[]byte,
-	runtime.Allocator_Error,
-) {
-	w := (^Refusal_Watch)(data)
-	out, err := w.backing.procedure(w.backing.data, mode, size, alignment, old_memory, old_size, loc)
-	if err == .Out_Of_Memory {
-		w.refused = true
-	}
-	return out, err
-}
-
-// Returns the edit's result, or frees `out` and returns `oom` when the watch recorded a refusal.
-unless_refused :: proc(w: ^Refusal_Watch, out: []byte, err: Maybe($E), oom: E) -> ([]byte, Maybe(E)) {
-	if w.refused {
-		delete(out, w.backing)
-		return nil, oom
-	}
-	return out, err
-}
-
-// A path edit's verb, with what it writes: `value` for all but `.Remove`, `at` for `.Insert`.
+// An `Edit_Op` names the change an edit makes to its node.
 Edit_Op :: enum u8 {
-	Set,
-	// `.Set`, and the member added to each object the path's last name is missing from.
-	Upsert,
-	Insert,
-	Remove,
+	Set, // the node's own bytes become `text`
+	Insert, // `text`, with `key` for a member, is inserted into the container at `at`
+	Remove, // removes the member the node is, and its key
+	Set_Fact, // every fact of the node with `role` becomes `text`
+	Remove_Fact, // every fact of the node with `role` is removed
 }
 
-Edit_Args :: struct {
-	op:    Edit_Op,
-	value: any,
-	at:    Insert_At,
+// A recorded edit. `node` names a node of the document the list was made with: a value or a key for `Set`, a
+// container for `Insert`, a value that is a member of a container for `Remove`, and any node but a key for the fact
+// edits, whose `role` says which facts they change. `at` is an insert's position, 0 through the container's length at
+// the time the edit was recorded. `role` is a fact edit's role, or `.Key` when an insert is a member or a set's text
+// is a decoded key name. `key` is a member insert's decoded name, and `text` is a value's source text, a record, a
+// cell, a key's decoded name for a key set, or a fact's body, each copied into the list's allocator.
+Edit :: struct {
+	node: Node_Index,
+	op:   Edit_Op,
+	role: Role,
+	at:   u32,
+	key:  []u8,
+	text: []u8,
 }
 
-// One edit whose bytes live in a shared text buffer: `src[at:cut]` becomes `text[from:to]`.
-Place :: struct {
-	at, cut:  u64,
-	from, to: int,
+// A log of edits against one document. `edits` holds the recorded edits, grows as edits are recorded, and
+// `edit_list_destroy` frees it. `allocator` supplies the log and the edits' copies. The document is borrowed and
+// must outlive the list.
+Edit_List :: struct {
+	doc:       ^Document,
+	edits:     [dynamic]Edit,
+	allocator: runtime.Allocator,
 }
 
-// A format's half of the path edits (`path_edit`) and its span edit. `shared` and `own`, the format's options
-// block, are the format's read options, as every capability takes them.
-Edits :: struct {
-	// The edits `args` makes at `p` in `src`, appended to `places` with their bytes in `text`. Places need not
-	// be sorted; each must be disjoint from the others. Scratch comes from `allocator`.
-	plan:     proc(src: []byte, p: Path, args: Edit_Args, shared: Read_Opts, own: rawptr, text: ^[dynamic]u8, places: ^[dynamic]Place, allocator: runtime.Allocator) -> Maybe(Path_Error),
-	// The edited text `out` of `src` judged: nil when it reads as the format reads its source.
-	judge:    proc(src, out: []byte, op: Edit_Op, shared: Read_Opts, own: rawptr, allocator: runtime.Allocator) -> Maybe(Path_Error),
-	// What a path past `MAX_PATH_STEPS` steps is refused as.
-	too_long: Path_Error_Kind,
+// Returns an edit list over `doc`. It allocates nothing until the first edit is recorded.
+edit_list_init :: proc(doc: ^Document, allocator := context.allocator) -> Edit_List {
+	edits, _ := make([dynamic]Edit, allocator)
+	return {doc = doc, edits = edits, allocator = allocator}
 }
 
-// `src` with the path edit `args` at `path` made through `e`: the path resolved, the format's places applied
-// once, and the result judged. Every allocation, scratch included, is `allocator`'s; a refused one is
-// `.Out_Of_Memory` rather than a result missing an edit.
-@(require_results)
-path_edit :: proc(e: Edits, src: []byte, path: Path_Spec, args: Edit_Args, shared: Read_Opts, own: rawptr, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	watch := Refusal_Watch{backing = allocator}
-	out, err = path_edit_watched(e, src, path, args, shared, own, watched(&watch))
-	return unless_refused(&watch, out, err, PATH_OUT_OF_MEMORY)
+// Frees every edit's copies and the log, and sets the list to the zero value. The document is the caller's.
+edit_list_destroy :: proc(list: ^Edit_List) {
+	for e in list.edits {
+		// A key and its text share one allocation, with the key first, so freeing the key frees the text.
+		if e.key != nil { delete(e.key, list.allocator) } else if e.text != nil { delete(e.text, list.allocator) }
+	}
+	delete(list.edits)
+	list^ = {}
 }
 
-@(private = "file")
-path_edit_watched :: proc(e: Edits, src: []byte, path: Path_Spec, args: Edit_Args, shared: Read_Opts, own: rawptr, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	buf: Path_Buf
-	p, perr := path_resolve(path, &buf, allocator)
-	defer delete(buf.heap, allocator)
-	if fault, bad := perr.?; bad {
-		if fault.kind == .Over_Capacity {
-			fault.kind = e.too_long
+// Whether a document is flat: its text has no brackets, so a container has no bytes of its own, and its root's members
+// are lines the format composes itself. A flat format writes the spec it was read as, since another
+// spec would respell every member.
+is_flat :: #force_inline proc(doc: ^Document) -> bool {
+	return doc.spelling.edit != nil && doc.spelling.edit.flat
+}
+
+// Checks a recorded text as a value. A member's key is a decoded name, so no text is judged as a key.
+@(private)
+judge :: proc(doc: ^Document, text: string, allocator: runtime.Allocator) -> Document_Error {
+	if doc.spelling.edit != nil && doc.spelling.edit.value != nil {
+		return doc.spelling.edit.value(doc, transmute([]u8)text, allocator)
+	}
+	return {}
+}
+
+// Returns node `node` of `list`'s document, or `.Bad_Index` when the list has no document or the index is past the
+// last node.
+@(private)
+node_of :: proc(list: ^Edit_List, node: Node_Index) -> (doc: ^Document, n: Node, err: Document_Error) {
+	doc = list.doc
+	if doc == nil || int(node) >= len(doc.nodes) {
+		return doc, {}, {kind = .Bad_Index}
+	}
+	return doc, doc.nodes[node], {}
+}
+
+// Makes `text` the source bytes of node `node`, a value or a key. A key's text is its decoded name, which the commit
+// writes in the format's own spelling, a value's text is source text and must read as one value, and in a flat text a
+// key is a member like any other, so its text is checked as a value. A fact node or a flat text's container returns
+// `.Bad_Index`.
+// Runs in O(len(text)), checking the text once and copying it once.
+set :: proc(list: ^Edit_List, node: Node_Index, text: string) -> Document_Error {
+	doc, n, err := node_of(list, node)
+	if err.kind != .None {
+		return err
+	}
+	flat := is_flat(doc)
+	if n.role > .Key || flat && (n.kind == .Array || n.kind == .Map) {
+		return {kind = .Bad_Index}
+	}
+	if n.role == .Key && !flat {
+		return edit_add(list, node, .Set, .Key, 0, "", text)
+	}
+	if e := judge(doc, text, list.allocator); e.kind != .None {
+		return e
+	}
+	return edit_add(list, node, .Set, .Value, 0, "", text)
+}
+
+// Makes `text` the value of the member of `obj` named `name`: a set of the member the document holds, or an insert after
+// `obj`'s last member when it has none. `dups` picks the member of a repeated key.
+set_member :: proc(list: ^Edit_List, obj: Node_Index, name, text: string, dups := Duplicates.Last) -> Document_Error {
+	doc := list.doc
+	if doc == nil {
+		return {kind = .Bad_Index}
+	}
+	v, presence := member_of(doc, obj, name, dups)
+	switch presence {
+	case .Found:
+		return set(list, v, text)
+	case .Missing:
+		return insert_member(list, obj, length(doc, obj), name, text)
+	case .Wrong_Kind, .Not_Loaded:
+	}
+	return {kind = .Bad_Index}
+}
+
+// Inserts `text` into the array `container` before its element `at`, or after its last when `at` is its length.
+@(private)
+insert_value :: proc(list: ^Edit_List, container: Node_Index, at: int, text: string) -> Document_Error {
+	return insert_at(list, container, at, "", false, text)
+}
+
+// Inserts `key` and `text` as a member of the object `container` before its member `at`, or after its last when
+// `at` is its length.
+@(private)
+insert_member :: proc(list: ^Edit_List, container: Node_Index, at: int, key, text: string) -> Document_Error {
+	return insert_at(list, container, at, key, true, text)
+}
+
+// `insert` is `insert_value` for an array and `insert_member` for an object.
+insert :: proc {
+	insert_value,
+	insert_member,
+}
+
+@(private)
+insert_at :: proc(list: ^Edit_List, container: Node_Index, at: int, key: string, member: bool, text: string) -> Document_Error {
+	doc := list.doc
+	if doc == nil || int(container) >= len(doc.nodes) {
+		return {kind = .Bad_Index}
+	}
+	if doc.nodes[container].kind != (Kind.Map if member else .Array) {
+		return {kind = .Wrong_Container}
+	}
+	n_members := length(doc, container)
+	if at < 0 || at > n_members {
+		return {kind = .Bad_Position}
+	}
+	if member && doc.spelling.edit.key_text == nil {
+		return {kind = .Wrong_Container}
+	}
+	e: Document_Error
+	if !member && doc.spelling.edit != nil && doc.spelling.edit.insert_check != nil {
+		e = doc.spelling.edit.insert_check(doc, container, text, list.allocator)
+	} else {
+		e = judge(doc, text, list.allocator)
+	}
+	if e.kind != .None {
+		return e
+	}
+	return edit_add(list, container, .Insert, .Key if member else .Value, u32(at), key, text)
+}
+
+// Appends the removal edit. The commit removes the member with its key and one adjacent separator. A delimited
+// text's record is removed with its line end, and a header cell or a record's cell by the format's column rules.
+remove :: proc(list: ^Edit_List, node: Node_Index) -> Document_Error {
+	doc, n, err := node_of(list, node)
+	// A key is removed with its value and a header row is no member of its own, but a flat text's key is a cell.
+	flat_key := n.role == .Key && is_flat(doc) && n.kind != .Array
+	if err.kind != .None || node == ROOT || n.role != .Value && !flat_key {
+		return {kind = .Bad_Index}
+	}
+	return edit_add(list, node, .Remove, .Value, 0, "", "")
+}
+
+// Makes `text` the body of every fact of node `node` and `role`. A `Comment_Inline` body holds no LF or CR. A
+// `Comment` or `Comment_Foot` body may. Runs in O(len(text)), checking the shape once and copying the text once.
+set_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) -> Document_Error {
+	if e := fact_node(list, node, role, text); e.kind != .None {
+		return e
+	}
+	return edit_add(list, node, .Set_Fact, role, 0, "", text)
+}
+
+// Removes every fact of node `node` and `role`, with its source bytes.
+remove_fact :: proc(list: ^Edit_List, node: Node_Index, role: Role) -> Document_Error {
+	if e := fact_node(list, node, role, ""); e.kind != .None {
+		return e
+	}
+	return edit_add(list, node, .Remove_Fact, role, 0, "", "")
+}
+
+// The checks every fact edit makes: the node accepts a fact and the role has a body shape. A role at or below `.Key`
+// is refused with `.Bad_Index`, and an unhandled role past `.Key` with `.Bad_Fact`. A commit refuses a second edit of
+// one node and role.
+@(private)
+fact_node :: proc(list: ^Edit_List, node: Node_Index, role: Role, text: string) -> Document_Error {
+	_, n, err := node_of(list, node)
+	if err.kind != .None || n.role == .Key || role <= .Key {
+		return {kind = .Bad_Index}
+	}
+	#partial switch role {
+	case .Comment_Inline:
+		if has_line_end(transmute([]u8)text) {
+			return {kind = .Bad_Fact}
 		}
-		return nil, fault
+	case .Comment, .Comment_Foot:
+	case:
+		return {kind = .Bad_Fact}
 	}
-	text := make([dynamic]u8, allocator)
-	defer delete(text)
-	places := make([dynamic]Place, allocator)
-	defer delete(places)
-	e.plan(src, p, args, shared, own, &text, &places, allocator) or_return
-	out = places_apply(src, places[:], text[:], allocator) or_return
-	if fault := e.judge(src, out, args.op, shared, own, allocator); fault != nil {
-		delete(out, allocator)
-		return nil, fault
-	}
-	return out, nil
+	return {}
 }
 
-// `places` sorted and applied to `src`, their bytes from `text`; places at one byte keep their order. None is
-// `.Not_Found`; an overlap `.Bad_Edit`.
-places_apply :: proc(src: []byte, places: []Place, text: []u8, allocator: runtime.Allocator) -> (out: []byte, err: Maybe(Path_Error)) {
-	edit_found(len(places)) or_return
-	slice.stable_sort_by(places, proc(a, b: Place) -> bool {
-		return a.at < b.at
-	})
-	edits, aerr := make([]Edit, len(places), allocator)
-	if aerr != nil {
-		return nil, PATH_OUT_OF_MEMORY
+// Returns the source bytes `list`'s edits make, in the document's own spec, through the format's commit. The caller frees
+// the result with `allocator`. An edit that another covers, a second edit of one node, and a second fact edit of one node
+// and role are `.Conflicting_Edits` at the byte where the two meet. A result that reads less strictly than the source is
+// `.Bad_Result`. `dropped` counts the source facts and fact edits the output cannot hold.
+commit :: proc(list: ^Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
+	if list.doc == nil || list.doc.spelling == nil || list.doc.spelling.edit == nil {
+		return nil, 0, {kind = .Bad_Index}
 	}
-	defer delete(edits, allocator)
-	for p, i in places {
-		edits[i] = {lo = p.at, hi = p.cut, bytes = text[p.from:p.to]}
-	}
-	return edits_apply_checked(src, edits, allocator)
+	return list.doc.spelling.edit.commit(list, list.doc.as.spec, allocator)
 }
+
+// Whether `body` holds LF or CR, the only line ends a delimited text's comment line ends at. U+2028 is a byte in its
+// body.
+has_line_end :: #force_inline proc(body: []u8) -> bool {
+	return bytes.index_byte(body, '\n') >= 0 || bytes.index_byte(body, '\r') >= 0
+}
+
+// Copies an edit's key and text into one allocation, then appends the edit to the log. A refused append frees the
+// copy.
+@(private)
+edit_add :: proc(list: ^Edit_List, node: Node_Index, op: Edit_Op, role: Role, at: u32, key, text: string) -> Document_Error {
+	k, t, fresh: []u8
+	if n := len(key) + len(text); n > 0 {
+		err: runtime.Allocator_Error
+		if fresh, err = make([]u8, n, list.allocator); err != nil {
+			return {kind = .No_Memory}
+		}
+		copy(fresh, transmute([]u8)key)
+		copy(fresh[len(key):], transmute([]u8)text)
+		if len(key) > 0 {
+			k = fresh[:len(key)]
+		}
+		if len(text) > 0 {
+			t = fresh[len(key):]
+		}
+	}
+	if _, err := append(&list.edits, Edit{node = node, op = op, role = role, at = at, key = k, text = t}); err != nil {
+		delete(fresh, list.allocator)
+		return {kind = .No_Memory}
+	}
+	return {}
+}
+

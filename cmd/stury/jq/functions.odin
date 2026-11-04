@@ -200,27 +200,20 @@ fn_fromjson :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 	if !ok {
 		return nil, fail(ip, "%s (%s) only strings can be parsed", type_name(v), brief(v))
 	}
-	parsed, msg := read_json(s)
+	parsed, msg := read_json(s, ip.reading)
 	if msg != "" {
 		return nil, fail(ip, "%s", msg)
 	}
 	return parsed, .Go
 }
 
-fn_ascii_downcase :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return flip_ascii_case(ip, v, 'A')
-}
-
-fn_ascii_upcase :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return flip_ascii_case(ip, v, 'a')
-}
-
-@(private = "file")
-flip_ascii_case :: proc(ip: ^Interp, v: Value, from: byte) -> (Value, Signal) {
+// ascii_downcase and ascii_upcase.
+fn_ascii_case :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	s, ok := string_of(v)
 	if !ok {
 		return nil, fail(ip, "explode input must be a string") // jq's are `explode | ... | implode`
 	}
+	from: byte = 'A' if name == "ascii_downcase" else 'a'
 	// The letters of the case being changed, flipped by their 0x20 bit as they are copied, in a loop
 	// without branches, which vectorizes.
 	b := make([]byte, len(s))
@@ -262,12 +255,8 @@ fn_implode :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value
 	return strings.to_string(b), .Go
 }
 
-fn_startswith :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return affix(ip, v, args[0], start = true, trim = false)
-}
-
-fn_endswith :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return affix(ip, v, args[0], start = false, trim = false)
+fn_has_affix :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+	return affix(ip, v, args[0], start = name == "startswith", trim = false)
 }
 
 fn_ltrimstr :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
@@ -299,18 +288,6 @@ affix :: #force_inline proc(ip: ^Interp, v, of: Value, start, trim: bool) -> (Va
 	return v, .Go
 }
 
-fn_trim :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return trimmed(ip, v, left = true, right = true)
-}
-
-fn_ltrim :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return trimmed(ip, v, left = true, right = false)
-}
-
-fn_rtrim :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return trimmed(ip, v, left = false, right = true)
-}
-
 // The Unicode White_Space property, which is what jq trims: not U+200B, U+200E, U+200F or U+FEFF.
 @(private = "file")
 is_trimmed :: proc(r: rune) -> bool {
@@ -321,17 +298,17 @@ is_trimmed :: proc(r: rune) -> bool {
 	return false
 }
 
-@(private = "file")
-trimmed :: #force_inline proc(ip: ^Interp, v: Value, left, right: bool) -> (Value, Signal) {
+// trim, ltrim and rtrim.
+fn_trim :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	whole, ok := string_of(v)
 	if !ok {
 		return nil, fail(ip, "trim input must be a string")
 	}
 	s := whole
-	if left {
+	if name != "rtrim" {
 		s = strings.trim_left_proc(s, is_trimmed)
 	}
-	if right {
+	if name != "ltrim" {
 		s = strings.trim_right_proc(s, is_trimmed)
 	}
 	if len(s) == len(whole) {

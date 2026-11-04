@@ -51,11 +51,6 @@ compare_path_members :: proc(a, b: Value, depth: int, eq: bool) -> int {
 	return compare_items(xs[0], xs[1], depth, eq)
 }
 
-// The path as a value that reads as its array of keys without making it.
-path_value :: proc(p: ^Path_Step) -> Value {
-	return Path(p) if p != nil else path_array(nil)
-}
-
 // The path of a value no path leads to, made by an expression that is not a path: a path expression
 // fails where it next steps into the value, or outputs it.
 @(rodata)

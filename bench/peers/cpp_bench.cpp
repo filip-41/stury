@@ -4,29 +4,28 @@
 #include <algorithm>
 #include <string>
 #include <chrono>
-#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <type_traits>
 
-#include <rapidjson/document.h>
-#include <rapidjson/error/en.h>
 #include <simdjson.h>
 
-// Timing jobs for bench/compare.py that match stury's bench lanes. Each job makes WARMUP + RUNS calls on one
-// input and prints the median as key=value tokens. Parsers, allocators and output buffers persist across
-// calls; file I/O is outside the clock.
-//   typed SHAPE [strict] [reuse]
-//                          reads with simdjson On-Demand into the shapes of stury's bench_unmarshal.odin
-//                          (logs, logs_subset, nested, config). Every member is visited, the last duplicate
-//                          wins, keys are compared unescaped, and every field is required. `strict` also
-//                          validates the members the shape skips; `reuse` keeps the output containers'
-//                          capacity across reads. STURY_DUMP names a file to receive the decoded value as JSON.
-//   validate               On-Demand, reading every value
-//   simd_dom | rapid_dom_warm   simdjson DOM, RapidJSON DOM (UTF-8 validated, full-precision floats)
-//   get KEY                On-Demand find_field on one root member, taking its raw text. One sample is
-//                          GET_BATCH calls; the printed time is per call.
-namespace od = simdjson::ondemand;
+// Timing jobs for doc.py. Each job makes WARMUP + TIMED calls on one input and prints the median as key=value
+// tokens. Parsers and output buffers persist across calls; file I/O is outside the clock.
+//   simd_dom               simdjson DOM
+//   simd_dom_read          simdjson DOM, then a visit of every value (string lengths, numbers, bools, nulls)
+//   simd_key               the first object's first key, then one at_key of it per object
+//   simd_get KEY           On-Demand find_field of one root key, and the value's raw text
+//   simd_minify            simdjson::minify of the text, which does not read the text's values
+//   simd_doc_write         simdjson::to_string of a parsed DOM element, compact
+//   simd_stream[_nothread] parse_many over an NDJSON text: every document judged and its tape built. The text is
+//                          read in 1 MB batches (simdjson's default), and stage 1 of the next batch runs in a
+//                          thread of its own unless `_nothread`
+//   simd_stream_skip[_nothread]  iterate_many (On-Demand) over the same text, each document skipped: the structure
+//                          is judged, string escapes and number syntax are not
+// The stream jobs print the document count as `check` and whether stage 1 ran threaded as `threads`.
+// The write lanes count the source's bytes. simdjson has no pretty writer, and its typed writer needs C++26 reflection.
 using clk = std::chrono::steady_clock;
 using simdjson::error_code;
 using simdjson::SUCCESS;
@@ -37,24 +36,22 @@ using simdjson::SUCCESS;
     } while (0)
 
 static const int WARMUP = 2;
-// Calls per GetOne sample, since one early-key call takes only a few timer ticks. The other GetOne arms use
-// the same count.
-static const int GET_BATCH = 256;
-// BENCH_RUNS overrides the timed iteration count.
-static int RUNS = 10;
-static bool g_judge_skipped = false;
+static const int TIMED = 10;
 
-// Sets RUNS from BENCH_RUNS. Exits 2 unless BENCH_RUNS, when set, is an integer >= 1.
-static void read_runs() {
-    const char* s = getenv("BENCH_RUNS");
-    if (!s) return;
-    char* end;
-    long v = strtol(s, &end, 10);
-    if (end == s || *end || v < 1 || v > INT_MAX) {
-        std::cerr << "BENCH_RUNS must be an integer >= 1, got \"" << s << "\"" << std::endl;
-        exit(2);
-    }
-    RUNS = int(v);
+// The checksum every arm of a lane prints, so the runner can refuse a fixture whose arms disagree.
+static const uint64_t CHECK_OFFSET = 14695981039346656037ULL;
+static const uint64_t CHECK_PRIME = 1099511628211ULL;
+
+static inline uint64_t fnv_byte(uint64_t h, uint8_t b) { return (h ^ b) * CHECK_PRIME; }
+
+static uint64_t fnv_bytes(uint64_t h, const char* p, size_t n) {
+    for (size_t i = 0; i < n; i++) h = fnv_byte(h, static_cast<uint8_t>(p[i]));
+    return h;
+}
+
+static uint64_t fnv_u64(uint64_t h, uint64_t v) {
+    for (int i = 0; i < 8; i++) h = fnv_byte(h, static_cast<uint8_t>(v >> (8 * i)));
+    return h;
 }
 
 // Keeps `x` and what it points to from being optimized away.
@@ -65,370 +62,133 @@ static int64_t since(clk::time_point t0) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(clk::now() - t0).count();
 }
 
-// Sets `k` to the member's key, unescaped only when it contains a backslash, so an escaped spelling of a field
-// name matches.
-static error_code field_key(od::field& f, std::string_view& k) {
-    k = f.escaped_key();
-    if (k.find('\\') != std::string_view::npos) TRY(f.unescaped_key().get(k));
-    return SUCCESS;
+// What one simd_dom_read visit saw. `sum` keeps every string's length and every number's value in one
+// accumulator so the visit cannot be optimized away, and `check` is the checksum the runner compares.
+struct VisitCounts {
+    double sum = 0;
+    uint64_t check = 0;
+};
+
+// The binary64 bits of `x`, the value next's `core.Number` keeps for a float. Zero folds as +0, since sonic's reader
+// keeps no sign on it.
+static uint64_t double_bits(double x) {
+    uint64_t b = 0;
+    if (x != 0) std::memcpy(&b, &x, sizeof b);
+    return b;
 }
 
-// Reads every value under `v`, so all of `v` is validated.
-static error_code judge(od::value v) {
-    od::json_type t;
-    TRY(v.type().get(t));
-    switch (t) {
-    case od::json_type::array: {
-        od::array a;
-        TRY(v.get_array().get(a));
-        for (auto er : a) {
-            od::value c;
-            TRY(std::move(er).get(c));
-            TRY(judge(c));
-        }
-        return SUCCESS;
+// Touches the first byte of a string of `n` bytes.
+static void touch_first(std::string_view s) {
+    if (!s.empty()) {
+        unsigned char first = static_cast<unsigned char>(s[0]);
+        keep(first);
     }
-    case od::json_type::object: {
-        od::object o;
-        TRY(v.get_object().get(o));
-        for (auto fr : o) {
-            od::field f;
-            std::string_view k;
-            TRY(std::move(fr).get(f));
-            TRY(f.unescaped_key().get(k));
-            TRY(judge(f.value()));
-        }
-        return SUCCESS;
-    }
-    case od::json_type::number: {
-        od::number n;
-        return v.get_number().get(n);
-    }
-    case od::json_type::string: {
+}
+
+// Visits every value of a simdjson DOM. A string adds its length to the sum and touches its first byte, a number
+// is read as its own type and added, bools and nulls are noted, and containers are walked in document order.
+// Keys are not values, so the visit skips them and the key lane looks them up. `HASH` true is the untimed check,
+// which also folds each value's tag, then its text length or its number bits.
+template <bool HASH>
+static error_code dom_visit(simdjson::dom::element v, VisitCounts& c) {
+    switch (v.type()) {
+    case simdjson::dom::element_type::STRING: {
         std::string_view s;
-        return v.get_string().get(s);
+        TRY(v.get_string().get(s));
+        if constexpr (HASH) {
+            c.check = fnv_byte(c.check, 's');
+            c.check = fnv_u64(c.check, static_cast<uint64_t>(s.size()));
+        }
+        c.sum += static_cast<double>(s.size());
+        touch_first(s);
+        break;
     }
-    case od::json_type::boolean: {
+    case simdjson::dom::element_type::INT64: {
+        int64_t x;
+        TRY(v.get_int64().get(x));
+        if constexpr (HASH) {
+            c.check = fnv_byte(c.check, 'n');
+            c.check = fnv_u64(c.check, double_bits(static_cast<double>(x)));
+        }
+        c.sum += static_cast<double>(x);
+        break;
+    }
+    case simdjson::dom::element_type::UINT64: {
+        uint64_t x;
+        TRY(v.get_uint64().get(x));
+        if constexpr (HASH) {
+            c.check = fnv_byte(c.check, 'n');
+            c.check = fnv_u64(c.check, double_bits(static_cast<double>(x)));
+        }
+        c.sum += static_cast<double>(x);
+        break;
+    }
+    case simdjson::dom::element_type::DOUBLE: {
+        double x;
+        TRY(v.get_double().get(x));
+        if constexpr (HASH) {
+            c.check = fnv_byte(c.check, 'n');
+            c.check = fnv_u64(c.check, double_bits(x));
+        }
+        c.sum += x;
+        break;
+    }
+    case simdjson::dom::element_type::ARRAY: {
+        simdjson::dom::array a;
+        if constexpr (HASH) c.check = fnv_byte(c.check, 'a');
+        TRY(v.get_array().get(a));
+        for (simdjson::dom::element e : a) TRY(dom_visit<HASH>(e, c));
+        break;
+    }
+    case simdjson::dom::element_type::OBJECT: {
+        simdjson::dom::object o;
+        if constexpr (HASH) c.check = fnv_byte(c.check, 'o');
+        TRY(v.get_object().get(o));
+        for (auto kv : o) TRY(dom_visit<HASH>(kv.value, c));
+        break;
+    }
+    case simdjson::dom::element_type::BOOL: {
         bool b;
-        return v.get_bool().get(b);
+        TRY(v.get_bool().get(b));
+        if constexpr (HASH) c.check = fnv_byte(c.check, b ? 't' : 'f');
+        break;
     }
-    case od::json_type::null: {
-        bool n;
-        TRY(v.is_null().get(n));
-        return n ? SUCCESS : simdjson::N_ATOM_ERROR;
+    case simdjson::dom::element_type::NULL_VALUE:
+        if constexpr (HASH) c.check = fnv_byte(c.check, 'z');
+        break;
+    case simdjson::dom::element_type::BIGINT: {
+        // The document parsers keep an integer past 64 bits as text. It is one number value, and next reads it as
+        // the binary64 it rounds to.
+        std::string_view raw;
+        TRY(v.get_bigint().get(raw));
+        std::string text(raw);
+        double x = std::strtod(text.c_str(), nullptr);
+        if constexpr (HASH) {
+            c.check = fnv_byte(c.check, 'n');
+            c.check = fnv_u64(c.check, double_bits(x));
+        }
+        c.sum += x;
+        break;
     }
     default:
-        return simdjson::INCORRECT_TYPE;
-    }
-}
-
-static error_code skip(od::value& v) { return g_judge_skipped ? judge(v) : SUCCESS; }
-
-struct LogRecord {
-    std::string_view ts, level, service, msg;
-    int64_t status, bytes;
-    double duration_ms;
-    std::string_view id;
-};
-struct LogSubset {
-    int64_t status;
-    std::string_view id;
-};
-struct NestedB {
-    int64_t c;
-};
-struct NestedInner {
-    std::vector<double> a;
-    NestedB b;
-};
-struct NestedRec {
-    int64_t id;
-    std::string_view name;
-    std::vector<int64_t> tags;
-    NestedInner nested;
-    bool ok;
-};
-struct ConfigHead {
-    std::string_view name;
-    int64_t port;
-};
-
-static error_code read_record(od::object o, LogRecord& r) {
-    unsigned seen = 0;
-    for (auto mr : o) {
-        od::field m;
-        std::string_view k;
-        TRY(std::move(mr).get(m));
-        TRY(field_key(m, k));
-        od::value& v = m.value();
-        if (k == "ts") { TRY(v.get_string().get(r.ts)); seen |= 1; }
-        else if (k == "level") { TRY(v.get_string().get(r.level)); seen |= 2; }
-        else if (k == "service") { TRY(v.get_string().get(r.service)); seen |= 4; }
-        else if (k == "msg") { TRY(v.get_string().get(r.msg)); seen |= 8; }
-        else if (k == "status") { TRY(v.get_int64().get(r.status)); seen |= 16; }
-        else if (k == "bytes") { TRY(v.get_int64().get(r.bytes)); seen |= 32; }
-        else if (k == "duration_ms") { TRY(v.get_double().get(r.duration_ms)); seen |= 64; }
-        else if (k == "id") { TRY(v.get_string().get(r.id)); seen |= 128; }
-        else TRY(skip(v));
-    }
-    return seen == 0xFF ? SUCCESS : simdjson::NO_SUCH_FIELD;
-}
-
-static error_code read_record(od::object o, LogSubset& r) {
-    unsigned seen = 0;
-    for (auto mr : o) {
-        od::field m;
-        std::string_view k;
-        TRY(std::move(mr).get(m));
-        TRY(field_key(m, k));
-        od::value& v = m.value();
-        if (k == "status") { TRY(v.get_int64().get(r.status)); seen |= 1; }
-        else if (k == "id") { TRY(v.get_string().get(r.id)); seen |= 2; }
-        else TRY(skip(v));
-    }
-    return seen == 3 ? SUCCESS : simdjson::NO_SUCH_FIELD;
-}
-
-// Reads the records of the root object's last `logs` member into `out`.
-template <class Rec>
-static error_code read_logs(od::document& doc, std::vector<Rec>& out) {
-    od::object root;
-    TRY(doc.get_object().get(root));
-    bool found = false;
-    for (auto fr : root) {
-        od::field f;
-        std::string_view k;
-        TRY(std::move(fr).get(f));
-        TRY(field_key(f, k));
-        if (k != "logs") {
-            TRY(skip(f.value()));
-            continue;
-        }
-        found = true;
-        out.clear();
-        od::array arr;
-        TRY(f.value().get_array().get(arr));
-        for (auto er : arr) {
-            od::object o;
-            Rec r{};
-            TRY(er.get_object().get(o));
-            TRY(read_record(o, r));
-            out.push_back(r);
-        }
-    }
-    return found ? SUCCESS : simdjson::NO_SUCH_FIELD;
-}
-
-// Has no sizing pass: On-Demand knows an array's length only after reading it, so `out` grows by push_back.
-template <class T>
-static error_code read_array(od::value v, std::vector<T>& out) {
-    od::array a;
-    TRY(v.get_array().get(a));
-    for (auto er : a) {
-        T x;
-        TRY(std::move(er).get(x));
-        out.push_back(x);
+        break;
     }
     return SUCCESS;
 }
 
-static error_code read_inner(od::value v, NestedInner& n) {
-    od::object o;
-    TRY(v.get_object().get(o));
-    unsigned seen = 0;
-    for (auto mr : o) {
-        od::field m;
-        std::string_view k;
-        TRY(std::move(mr).get(m));
-        TRY(field_key(m, k));
-        if (k == "a") {
-            n.a.clear();
-            TRY(read_array(m.value(), n.a));
-            seen |= 1;
-        } else if (k == "b") {
-            od::object b;
-            unsigned b_seen = 0;
-            TRY(m.value().get_object().get(b));
-            for (auto br : b) {
-                od::field bf;
-                std::string_view bk;
-                TRY(std::move(br).get(bf));
-                TRY(field_key(bf, bk));
-                if (bk == "c") { TRY(bf.value().get_int64().get(n.b.c)); b_seen = 1; }
-                else TRY(skip(bf.value()));
-            }
-            if (!b_seen) return simdjson::NO_SUCH_FIELD;
-            seen |= 2;
-        } else TRY(skip(m.value()));
-    }
-    return seen == 3 ? SUCCESS : simdjson::NO_SUCH_FIELD;
-}
-
-static error_code read_nested(od::document& doc, std::vector<NestedRec>& out) {
-    od::array arr;
-    TRY(doc.get_array().get(arr));
-    size_t i = 0;
-    for (auto er : arr) {
-        od::object o;
-        if (i == out.size()) out.emplace_back();
-        NestedRec& r = out[i++];
-        unsigned seen = 0;
-        TRY(er.get_object().get(o));
-        for (auto mr : o) {
-            od::field m;
-            std::string_view k;
-            TRY(std::move(mr).get(m));
-            TRY(field_key(m, k));
-            od::value& v = m.value();
-            if (k == "id") { TRY(v.get_int64().get(r.id)); seen |= 1; }
-            else if (k == "name") { TRY(v.get_string().get(r.name)); seen |= 2; }
-            else if (k == "tags") {
-                r.tags.clear();
-                TRY(read_array(v, r.tags));
-                seen |= 4;
-            } else if (k == "nested") { TRY(read_inner(v, r.nested)); seen |= 8; }
-            else if (k == "ok") { TRY(v.get_bool().get(r.ok)); seen |= 16; }
-            else TRY(skip(v));
-        }
-        if (seen != 31) return simdjson::NO_SUCH_FIELD;
-    }
-    out.resize(i);
-    return SUCCESS;
-}
-
-static error_code read_config(od::document& doc, ConfigHead& c) {
-    od::object root;
-    TRY(doc.get_object().get(root));
-    unsigned seen = 0;
-    for (auto fr : root) {
-        od::field f;
-        std::string_view k;
-        TRY(std::move(fr).get(f));
-        TRY(field_key(f, k));
-        if (k == "name") { TRY(f.value().get_string().get(c.name)); seen |= 1; }
-        else if (k == "port") { TRY(f.value().get_int64().get(c.port)); seen |= 2; }
-        else TRY(skip(f.value()));
-    }
-    return seen == 3 ? SUCCESS : simdjson::NO_SUCH_FIELD;
-}
-
-static error_code read_doc(od::document& doc, std::vector<LogRecord>& out) { return read_logs(doc, out); }
-static error_code read_doc(od::document& doc, std::vector<LogSubset>& out) { return read_logs(doc, out); }
-static error_code read_doc(od::document& doc, std::vector<NestedRec>& out) { return read_nested(doc, out); }
-static error_code read_doc(od::document& doc, ConfigHead& out) { return read_config(doc, out); }
-
-// Writes the value as JSON for compare.py to compare with stury's. Strings are escaped although these
-// fixtures have no escapes; floats print enough digits to read back as the same binary64.
-static void dump_str(std::string& o, std::string_view s) {
-    o += '"';
-    for (unsigned char ch : s) {
-        if (ch == '"' || ch == '\\') {
-            o += '\\';
-            o += ch;
-        } else if (ch < 0x20) {
-            char b[8];
-            snprintf(b, sizeof b, "\\u%04x", ch);
-            o += b;
-        } else o += ch;
-    }
-    o += '"';
-}
-static void dump_num(std::string& o, int64_t v) { o += std::to_string(v); }
-static void dump_num(std::string& o, double v) {
-    char b[32];
-    snprintf(b, sizeof b, "%.17g", v);
-    o += b;
-}
-static void dump(std::string& o, int64_t v);
-static void dump(std::string& o, double v);
-static void dump(std::string& o, const LogRecord& r);
-static void dump(std::string& o, const LogSubset& r);
-static void dump(std::string& o, const NestedRec& r);
-template <class T>
-static void dump_list(std::string& o, const std::vector<T>& xs) {
-    o += '[';
-    for (size_t i = 0; i < xs.size(); i++) {
-        if (i) o += ',';
-        dump(o, xs[i]);
-    }
-    o += ']';
-}
-static void dump(std::string& o, int64_t v) { dump_num(o, v); }
-static void dump(std::string& o, double v) { dump_num(o, v); }
-static void dump(std::string& o, const LogRecord& r) {
-    o += "{\"ts\":";
-    dump_str(o, r.ts);
-    o += ",\"level\":";
-    dump_str(o, r.level);
-    o += ",\"service\":";
-    dump_str(o, r.service);
-    o += ",\"msg\":";
-    dump_str(o, r.msg);
-    o += ",\"status\":";
-    dump_num(o, r.status);
-    o += ",\"bytes\":";
-    dump_num(o, r.bytes);
-    o += ",\"duration_ms\":";
-    dump_num(o, r.duration_ms);
-    o += ",\"id\":";
-    dump_str(o, r.id);
-    o += '}';
-}
-static void dump(std::string& o, const LogSubset& r) {
-    o += "{\"status\":";
-    dump_num(o, r.status);
-    o += ",\"id\":";
-    dump_str(o, r.id);
-    o += '}';
-}
-static void dump(std::string& o, const NestedRec& r) {
-    o += "{\"id\":";
-    dump_num(o, r.id);
-    o += ",\"name\":";
-    dump_str(o, r.name);
-    o += ",\"tags\":";
-    dump_list(o, r.tags);
-    o += ",\"nested\":{\"a\":";
-    dump_list(o, r.nested.a);
-    o += ",\"b\":{\"c\":";
-    dump_num(o, r.nested.b.c);
-    o += "}},\"ok\":";
-    o += r.ok ? "true" : "false";
-    o += '}';
-}
-template <class Rec>
-static void dump_logs_root(std::string& o, const std::vector<Rec>& v) {
-    o += "{\"logs\":";
-    dump_list(o, v);
-    o += '}';
-}
-static void dump_root(std::string& o, const std::vector<LogRecord>& v) { dump_logs_root(o, v); }
-static void dump_root(std::string& o, const std::vector<LogSubset>& v) { dump_logs_root(o, v); }
-static void dump_root(std::string& o, const std::vector<NestedRec>& v) { dump_list(o, v); }
-static void dump_root(std::string& o, const ConfigHead& c) {
-    o += "{\"name\":";
-    dump_str(o, c.name);
-    o += ",\"port\":";
-    dump_num(o, c.port);
-    o += '}';
-}
-static size_t records(const ConfigHead&) { return 1; }
-template <class T>
-static size_t records(const std::vector<T>& v) { return v.size(); }
-
-// Returns the median nanoseconds of RUNS timed calls after WARMUP calls, or -1 when a call fails. `once`
+// Returns the median nanoseconds of TIMED timed calls after WARMUP calls, or -1 when a call fails. `once`
 // returns one call's nanoseconds, or -1.
 template <class F>
 static int64_t median_ns(F&& once) {
     std::vector<int64_t> times;
-    for (int i = 0; i < WARMUP + RUNS; i++) {
+    for (int i = 0; i < WARMUP + TIMED; i++) {
         int64_t ns = once();
         if (ns < 0) return -1;
         if (i >= WARMUP) times.push_back(ns);
     }
     std::sort(times.begin(), times.end());
     // The mean of the two middle samples.
-    return (times[(RUNS - 1) / 2] + times[RUNS / 2]) / 2;
+    return (times[(TIMED - 1) / 2] + times[TIMED / 2]) / 2;
 }
 
 static int report(size_t len, int64_t ns, const std::string& extra) {
@@ -437,122 +197,265 @@ static int report(size_t len, int64_t ns, const std::string& extra) {
     return 0;
 }
 
-// Times the typed read of one shape. With `reuse` the output containers keep their capacity across reads (the
-// readers clear them), as when a caller keeps one result object; this matches stury's arena arm.
-template <class Out>
-static int typed_job(const simdjson::padded_string& in, bool reuse) {
-    od::parser parser;
-    Out out{};
+// The build lane's check: the node count, then each node's kind tag and role in document order. A key is a node of
+// role `.Key`, as next's document has it.
+static error_code summary_count(simdjson::dom::element v, uint64_t& n) {
+    n = 1;
+    switch (v.type()) {
+    case simdjson::dom::element_type::ARRAY: {
+        simdjson::dom::array a;
+        TRY(v.get_array().get(a));
+        for (auto e : a) {
+            uint64_t c;
+            TRY(summary_count(e, c));
+            n += c;
+        }
+        break;
+    }
+    case simdjson::dom::element_type::OBJECT: {
+        simdjson::dom::object o;
+        TRY(v.get_object().get(o));
+        for (auto kv : o) {
+            uint64_t c;
+            TRY(summary_count(kv.value, c));
+            n += 1 + c;
+        }
+        break;
+    }
+    default: break;
+    }
+    return SUCCESS;
+}
+
+static error_code summary_hash(simdjson::dom::element v, uint64_t& h) {
+    switch (v.type()) {
+    case simdjson::dom::element_type::ARRAY: {
+        h = fnv_byte(h, 'a');
+        h = fnv_byte(h, 0);
+        simdjson::dom::array a;
+        TRY(v.get_array().get(a));
+        for (auto e : a) TRY(summary_hash(e, h));
+        break;
+    }
+    case simdjson::dom::element_type::OBJECT: {
+        h = fnv_byte(h, 'o');
+        h = fnv_byte(h, 0);
+        simdjson::dom::object o;
+        TRY(v.get_object().get(o));
+        for (auto kv : o) {
+            h = fnv_byte(h, 's');
+            h = fnv_byte(h, 1);
+            TRY(summary_hash(kv.value, h));
+        }
+        break;
+    }
+    case simdjson::dom::element_type::STRING: h = fnv_byte(h, 's'); h = fnv_byte(h, 0); break;
+    case simdjson::dom::element_type::INT64:
+    case simdjson::dom::element_type::UINT64:
+    case simdjson::dom::element_type::DOUBLE:
+    case simdjson::dom::element_type::BIGINT: h = fnv_byte(h, 'n'); h = fnv_byte(h, 0); break;
+    case simdjson::dom::element_type::BOOL: {
+        bool b;
+        TRY(v.get_bool().get(b));
+        h = fnv_byte(h, b ? 't' : 'f');
+        h = fnv_byte(h, 0);
+        break;
+    }
+    case simdjson::dom::element_type::NULL_VALUE: h = fnv_byte(h, 'z'); h = fnv_byte(h, 0); break;
+    default: break;
+    }
+    return SUCCESS;
+}
+
+static error_code build_summary(simdjson::dom::element root, uint64_t& chk) {
+    uint64_t count;
+    TRY(summary_count(root, count));
+    chk = fnv_u64(CHECK_OFFSET, count);
+    return summary_hash(root, chk);
+}
+
+// The first object in document order, as docprobe's `key` lane finds the document's first Map node. Its first
+// member's key is the lane's key.
+static error_code first_object(simdjson::dom::element v, std::string_view& key, bool& found) {
+    if (found) return SUCCESS;
+    switch (v.type()) {
+    case simdjson::dom::element_type::ARRAY: {
+        simdjson::dom::array a;
+        TRY(v.get_array().get(a));
+        for (auto e : a) {
+            TRY(first_object(e, key, found));
+            if (found) return SUCCESS;
+        }
+        break;
+    }
+    case simdjson::dom::element_type::OBJECT: {
+        simdjson::dom::object o;
+        TRY(v.get_object().get(o));
+        auto it = o.begin();
+        if (it != o.end()) {
+            key = (*it).key;
+            found = true;
+        }
+        break;
+    }
+    default: break;
+    }
+    return SUCCESS;
+}
+
+// The `key` lane's work: one at_key of `key` in every object, then every member's value.
+static error_code key_walk(simdjson::dom::element v, std::string_view key, size_t& answers, size_t& objects) {
+    switch (v.type()) {
+    case simdjson::dom::element_type::ARRAY: {
+        simdjson::dom::array a;
+        TRY(v.get_array().get(a));
+        for (auto e : a) TRY(key_walk(e, key, answers, objects));
+        break;
+    }
+    case simdjson::dom::element_type::OBJECT: {
+        simdjson::dom::object o;
+        TRY(v.get_object().get(o));
+        objects++;
+        if (o.at_key(key).error() == SUCCESS) answers++;
+        for (auto kv : o) TRY(key_walk(kv.value, key, answers, objects));
+        break;
+    }
+    default: break;
+    }
+    return SUCCESS;
+}
+
+// Times a simdjson DOM parse plus the key lane: the first object's first key, then one at_key of it per
+// object. The key is taken from the DOM the lane itself parsed.
+static int simd_key_job(const simdjson::padded_string& in) {
+    simdjson::dom::parser parser;
+    parser.number_as_string(true);
+    size_t answers = 0;
+    size_t objects = 0;
+    std::string key_copy;
     error_code err = SUCCESS;
     int64_t ns = median_ns([&]() -> int64_t {
-        // Without `reuse` each read builds new records, as a generic decoder does; the previous read's records
-        // are freed here, outside the clock. The parser keeps its buffers.
-        if (!reuse) out = Out{};
         auto t0 = clk::now();
-        od::document doc;
-        err = parser.iterate(in).get(doc);
-        if (!err) err = read_doc(doc, out);
-        if (!err && !doc.at_end()) err = simdjson::TRAILING_CONTENT;
-        keep(out);
-        int64_t d = since(t0);
-        return err ? -1 : d;
-    });
-    if (err) {
-        std::cerr << "simdjson typed read failed: " << err << std::endl;
-        return 1;
-    }
-    if (const char* path = getenv("STURY_DUMP")) {
-        std::string o;
-        dump_root(o, out);
-        std::ofstream(path, std::ios::binary) << o;
-    }
-    return report(in.size(), ns, "records=" + std::to_string(records(out)));
-}
-
-// Times RapidJSON's DOM with one pool allocator and one Document kept across iterations. Clear() frees every
-// chunk except a user-supplied buffer, so the pool is one buffer sized by an untimed first parse, and the
-// timed parses never call malloc. The parse stack stays with the Document.
-static int rapid_dom_job(const std::string& text) {
-    // These flags give RapidJSON the other arms' checks. kParseValidateEncodingFlag rejects invalid UTF-8,
-    // which passes by default. kParseFullPrecisionFlag parses numbers to the correctly rounded double; the
-    // faster default may be off by a few ulps.
-    constexpr unsigned flags = rapidjson::kParseValidateEncodingFlag | rapidjson::kParseFullPrecisionFlag;
-    size_t need;
-    {
-        rapidjson::Document sizing;
-        sizing.Parse<flags>(text.data(), text.size());
-        if (sizing.HasParseError()) {
-            std::cerr << "rapidjson parse failed: " << rapidjson::GetParseError_En(sizing.GetParseError())
-                      << " at offset " << sizing.GetErrorOffset() << std::endl;
-            return 1;
+        simdjson::dom::element root;
+        error_code e = parser.parse(in).get(root);
+        size_t a = 0;
+        size_t o = 0;
+        if (!e) {
+            std::string_view key;
+            bool found = false;
+            e = first_object(root, key, found);
+            // No object, or an object with no members: the lane has no key to look up.
+            if (!e && found) e = key_walk(root, key, a, o);
+            if (!e && found && key_copy.empty()) key_copy.assign(key);
         }
-        need = sizing.GetAllocator().Capacity();
-    }
-    std::vector<char> pool(need + 4096);
-    rapidjson::MemoryPoolAllocator<> alloc(pool.data(), pool.size());
-    const size_t pool_capacity = alloc.Capacity();
-    rapidjson::Document doc(&alloc);
-    int64_t ns = median_ns([&]() -> int64_t {
-        auto t0 = clk::now();
-        doc.Parse<flags>(text.data(), text.size());
-        keep(doc);
+        keep(a);
+        keep(o);
         int64_t d = since(t0);
-        if (doc.HasParseError()) {
-            std::cerr << "rapidjson parse failed: " << rapidjson::GetParseError_En(doc.GetParseError())
-                      << " at offset " << doc.GetErrorOffset() << std::endl;
+        if (e) {
+            err = e;
             return -1;
         }
-        if (alloc.Capacity() != pool_capacity) {
-            std::cerr << "rapidjson pool outgrew its buffer: a timed parse called malloc" << std::endl;
-            return -1;
-        }
-        doc.SetNull();
-        alloc.Clear();
+        answers = a;
+        objects = o;
         return d;
     });
-    return report(text.size(), ns, "");
+    if (ns < 0) {
+        std::cerr << "simdjson key failed: " << err << std::endl;
+        return 1;
+    }
+    uint64_t chk = fnv_bytes(CHECK_OFFSET, key_copy.data(), key_copy.size());
+    chk = fnv_u64(fnv_u64(chk, answers), objects);
+    return report(in.size(), ns, "check=" + std::to_string(chk) + " answers=" + std::to_string(answers) +
+                                      " objects=" + std::to_string(objects) + " key=" + key_copy);
 }
 
-static int warm_job(const std::string& buffer, const std::string& job, int argc, char* argv[]) {
-    simdjson::padded_string in(buffer);
-    if (job == "typed") {
-        if (argc < 4) return 2;
-        std::string shape = argv[3];
-        bool reuse = false;
-        for (int i = 4; i < argc; i++) {
-            std::string flag = argv[i];
-            if (flag == "strict") g_judge_skipped = true;
-            else if (flag == "reuse") reuse = true;
-            else return 2;
-        }
-        if (shape == "logs") return typed_job<std::vector<LogRecord>>(in, reuse);
-        if (shape == "logs_subset") return typed_job<std::vector<LogSubset>>(in, reuse);
-        if (shape == "nested") return typed_job<std::vector<NestedRec>>(in, reuse);
-        if (shape == "config") return typed_job<ConfigHead>(in, reuse);
-        return 2;
+// Times a document_stream over `in` and counts its documents, which the runner compares across arms. `Parser` is
+// simdjson::dom::parser (parse_many, a tape per document) or simdjson::ondemand::parser (iterate_many, each document
+// skipped). A document that fails to parse or skip ends the job.
+template <class Parser>
+static int stream_job(const simdjson::padded_string& in, bool threaded) {
+    constexpr bool DOM = std::is_same_v<Parser, simdjson::dom::parser>;
+    Parser parser;
+    parser.threaded = threaded && parser.threaded;
+    uint64_t docs = 0;
+    bool failed = false;
+    int64_t ns = median_ns([&]() -> int64_t {
+        auto t0 = clk::now();
+        uint64_t n = 0;
+        std::conditional_t<DOM, simdjson::dom::document_stream, simdjson::ondemand::document_stream> stream;
+        error_code opened = SUCCESS;
+        if constexpr (DOM) opened = parser.parse_many(in).get(stream);
+        else opened = parser.iterate_many(in).get(stream);
+        if (opened) failed = true;
+        else
+            for (auto doc : stream) {
+                if constexpr (DOM) {
+                    if (doc.error()) { failed = true; break; }
+                } else {
+                    simdjson::ondemand::document_reference d;
+                    std::string_view raw;
+                    if (doc.get(d) || d.raw_json().get(raw)) { failed = true; break; }
+                    keep(raw);
+                }
+                n++;
+            }
+        keep(n);
+        int64_t d = since(t0);
+        docs = n;
+        return failed ? -1 : d;
+    });
+    if (failed) {
+        std::cerr << "simdjson stream failed" << std::endl;
+        return 1;
     }
-    if (job == "validate") {
-        od::parser parser;
-        return report(in.size(), median_ns([&]() -> int64_t {
+    return report(in.size(), ns, "check=" + std::to_string(docs) + " threads=" + std::to_string(int(parser.threaded)));
+}
+
+static uint64_t fnv_all(const char* p, size_t n) { return fnv_bytes(CHECK_OFFSET, p, n); }
+
+static int run_job(const std::string& buffer, const std::string& job) {
+    simdjson::padded_string in(buffer);
+    if (job == "simd_minify") {
+        std::vector<char> out(in.size());
+        size_t out_len = 0;
+        int64_t ns = median_ns([&]() -> int64_t {
             auto t0 = clk::now();
-            od::document doc;
-            od::value root;
-            error_code e = parser.iterate(in).get(doc);
-            if (!e) e = doc.get_value().get(root);
-            if (!e) e = judge(root);
-            if (!e && !doc.at_end()) e = simdjson::TRAILING_CONTENT;
-            keep(doc);
+            error_code e = simdjson::minify(in.data(), in.size(), out.data(), out_len);
+            keep(out);
             int64_t d = since(t0);
             if (e) {
-                std::cerr << "simdjson validate failed: " << e << std::endl;
+                std::cerr << "simdjson minify failed: " << e << std::endl;
                 return -1;
             }
             return d;
-        }), "");
+        });
+        return report(in.size(), ns, "out=" + std::to_string(out_len) + " check=" + std::to_string(fnv_all(out.data(), out_len)));
+    }
+    if (job == "simd_doc_write") {
+        simdjson::dom::parser parser;
+        // As simd_dom reads, so a number too big for 64 bits stays as text instead of failing the parse.
+        parser.number_as_string(true);
+        simdjson::dom::element root;
+        if (error_code e = parser.parse(in).get(root)) {
+            std::cerr << "simdjson dom parse failed: " << e << std::endl;
+            return 1;
+        }
+        std::string out;
+        int64_t ns = median_ns([&]() -> int64_t {
+            auto t0 = clk::now();
+            std::string text = simdjson::to_string(root);
+            keep(text);
+            int64_t d = since(t0);
+            // The previous call's text is freed outside the clock, as the other arms free theirs.
+            out = std::move(text);
+            return d;
+        });
+        return report(in.size(), ns, "out=" + std::to_string(out.size()) + " check=" + std::to_string(fnv_all(out.data(), out.size())));
     }
     if (job == "simd_dom") {
         simdjson::dom::parser parser;
-        return report(in.size(), median_ns([&]() -> int64_t {
+        parser.number_as_string(true);
+        int64_t ns = median_ns([&]() -> int64_t {
             auto t0 = clk::now();
             simdjson::dom::element root;
             error_code e = parser.parse(in).get(root);
@@ -563,56 +466,95 @@ static int warm_job(const std::string& buffer, const std::string& job, int argc,
                 return -1;
             }
             return d;
-        }), "");
+        });
+        if (ns < 0) return 1;
+        // The check is work outside the clock, on a fresh parse.
+        simdjson::dom::element root;
+        uint64_t chk = 0;
+        error_code e = parser.parse(in).get(root);
+        if (!e) e = build_summary(root, chk);
+        if (e) {
+            std::cerr << "simdjson dom summary failed: " << e << std::endl;
+            return 1;
+        }
+        return report(in.size(), ns, "check=" + std::to_string(chk));
     }
-    if (job == "rapid_dom_warm") return rapid_dom_job(buffer);
-    if (job == "get") {
-        if (argc < 4) return 2;
-        std::string_view key = argv[3];
-        od::parser parser;
-        size_t answer = 0;
+    if (job == "simd_dom_read") {
+        simdjson::dom::parser parser;
+        parser.number_as_string(true);
+        VisitCounts counts;
+        error_code err = SUCCESS;
         int64_t ns = median_ns([&]() -> int64_t {
-            error_code e = SUCCESS;
-            std::string_view raw;
             auto t0 = clk::now();
-            for (int i = 0; i < GET_BATCH && !e; i++) {
-                od::document doc;
-                od::value v;
-                e = parser.iterate(in).get(doc);
-                if (!e) e = doc.find_field(key).get(v);
-                if (e == simdjson::NO_SUCH_FIELD) {
-                    raw = {};
-                    e = SUCCESS;
-                } else if (!e) {
-                    e = v.raw_json().get(raw);
-                }
-                keep(raw);
-            }
+            simdjson::dom::element root;
+            error_code e = parser.parse(in).get(root);
+            VisitCounts c;
+            if (!e) e = dom_visit<false>(root, c);
+            keep(c);
             int64_t d = since(t0);
-            // raw_json() of a container runs to the next structural character, trailing whitespace included.
-            while (!raw.empty() && strchr(" \t\r\n", raw.back())) raw.remove_suffix(1);
-            answer = raw.size();
             if (e) {
-                std::cerr << "simdjson get failed: " << e << std::endl;
+                err = e;
                 return -1;
             }
             return d;
         });
-        if (ns < 0) return 1;
-        double per_call = double(ns) / GET_BATCH;
-        printf("gb_per_s=%.4f ns=%.1f answer_bytes=%zu\n", double(in.size()) / per_call, per_call, answer);
-        return 0;
+        if (ns < 0) {
+            std::cerr << "simdjson dom_read failed: " << err << std::endl;
+            return 1;
+        }
+        // The check is work outside the clock, on a fresh parse.
+        simdjson::dom::element root;
+        counts.check = CHECK_OFFSET;
+        error_code e = parser.parse(in).get(root);
+        if (!e) e = dom_visit<true>(root, counts);
+        if (e) {
+            std::cerr << "simdjson dom_read check failed: " << e << std::endl;
+            return 1;
+        }
+        return report(in.size(), ns, "check=" + std::to_string(counts.check));
     }
+    if (job == "simd_key") return simd_key_job(in);
+    if (job == "simd_stream") return stream_job<simdjson::dom::parser>(in, true);
+    if (job == "simd_stream_nothread") return stream_job<simdjson::dom::parser>(in, false);
+    if (job == "simd_stream_skip") return stream_job<simdjson::ondemand::parser>(in, true);
+    if (job == "simd_stream_skip_nothread") return stream_job<simdjson::ondemand::parser>(in, false);
     return 2;
 }
 
+// Times one On-Demand `find_field` of `key` in the root object. A value's raw text ends at its last byte, so the check
+// folds the bytes every arm's span holds.
+static int simd_get_job(const simdjson::padded_string& in, const std::string& key) {
+    simdjson::ondemand::parser parser;
+    std::string_view found;
+    int64_t ns = median_ns([&] {
+        auto t0 = clk::now();
+        std::string_view raw;
+        simdjson::ondemand::document doc;
+        if (!parser.iterate(in).get(doc)) {
+            simdjson::ondemand::value v;
+            if (!doc.find_field(key).get(v) && v.raw_json().get(raw)) raw = {};
+        }
+        keep(raw);
+        int64_t d = since(t0);
+        found = raw;
+        return d;
+    });
+    while (!found.empty() && (found.back() == ' ' || found.back() == '\n' || found.back() == '\t' || found.back() == '\r'))
+        found.remove_suffix(1);
+    return report(in.size(), ns, "check=" + std::to_string(fnv_bytes(CHECK_OFFSET, found.data(), found.size())));
+}
+
 int main(int argc, char* argv[]) {
-    if (argc < 3) {
+    if (argc == 4 && std::string(argv[2]) == "simd_get") {
+        simdjson::padded_string in;
+        if (simdjson::padded_string::load(argv[1]).get(in)) return 1;
+        return simd_get_job(in, argv[3]);
+    }
+    if (argc != 3) {
         std::cerr << "Usage: cpp_bench <fixture_path> <mode>" << std::endl;
         return 1;
     }
 
-    read_runs();
     std::string fixture_path = argv[1];
     std::string mode = argv[2];
 
@@ -630,11 +572,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (mode == "typed" || mode == "validate" || mode == "simd_dom" || mode == "rapid_dom_warm" || mode == "get") {
-        int rc = warm_job(buffer, mode, argc, argv);
-        if (rc == 2) std::cerr << "bad arguments for " << mode << std::endl;
-        return rc;
-    }
-    std::cerr << "Unknown mode: " << mode << std::endl;
-    return 1;
+    int rc = run_job(buffer, mode);
+    if (rc == 2) std::cerr << "bad arguments for " << mode << std::endl;
+    return rc;
 }

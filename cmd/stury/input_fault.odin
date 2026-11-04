@@ -1,173 +1,173 @@
 package main
 
-// Where a faulty text is and what is said of it: its line and column as jq's parser counts them, jq's message for
-// it, and where the stream reads on afterwards. --stream and --stream-errors hand the text to `fault_walk`
-// (stream_fault.odin), which gives the events before the fault.
+// A text's fault told: as jq's parser tells it, as `NAME:LINE:COLUMN: SENTENCE` for a format of stury's own, or under
+// --stream as the events jq's parser makes of the text before it, and the note that names the flag that reads it.
 
 import "base:runtime"
 import "core:bytes"
 import "core:strings"
+import core "../../core"
+import records "../../core/records"
 import json "../../json"
 import "jq"
 import "message"
 
-// The text data[at:limit] as its framing tells it (`judge_record`), given `read`, what reading it alone reported.
-judge_text :: proc(ins: ^Inputs, at, limit: int, read: Maybe(json.Error)) -> (end: int, err: Maybe(json.Error)) {
-	o := &ins.run.opts
-	framing := json.Framing.JSON_Seq if o.seq else .NDJSON if reads_lines(o) else .None
-	opts := json.Record_Opts{read = {dialect = ins.run.read.dialect, limits = ins.run.read.limits}, framing = framing}
-	return json.judge_record(ins.data, {bytes = ins.data[at:limit], at = u64(at)}, read, opts)
+// jq's message for the fault `f` of `data`, a record of which ends at `end`, but a later file's fault is told in that
+// file, as `fault_told` tells it, since jq's line and column count from the first file's start.
+@(private = "file")
+fault_message :: proc(ins: ^Inputs, data: []byte, f: core.Fault, end := -1) -> string {
+	if ins.next_file > 1 {
+		return fault_told(ins.name, data, f, ins.file_lines)
+	}
+	return jq.parse_message(data, f, ins.parsed.line, ins.parsed.column, "", end)
 }
 
-// Where data[at] is, as jq's parser counts lines and columns. The next place asked is counted from this one.
-@(private)
-text_place :: proc(ins: ^Inputs, at: int) -> (line, column: int) {
-	if ins.fault_at.line == 0 || ins.fault_at.at > at {
-		ins.fault_at = {ins.skip, ins.at_line, ins.at_column}
+// The fault `found` of the text at or after data[at:] as jq tells it, or under --stream the events jq's parser makes of
+// the text before it. An NDJSON record ends at `end`.
+text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (jq.Value, string, jq.Parse_Status) {
+	data := ins.data
+	if reads_cells(&ins.run.opts) {
+		return cells_fault(ins, found)
 	}
-	line, column = ins.fault_at.line, ins.fault_at.column
-	jq.advance(&line, &column, ins.data[ins.fault_at.at:at])
-	ins.fault_at = {at, line, column}
-	return
-}
-
-// Where data starts to be counted from: past data[:upto], from the last fault's place when it is known, as
-// jq does not count the rest of a line it drops.
-@(private)
-place_past :: proc(ins: ^Inputs, upto: int) {
-	start := ins.skip
-	if f := ins.fault_at; f.line != 0 && f.at <= upto {
-		start, ins.at_line, ins.at_column = f.at, f.line, f.column
+	if ins.spec != .Json {
+		fail_text(ins, found)
 	}
-	jq.advance(&ins.at_line, &ins.at_column, ins.data[start:upto])
-}
-
-// The text at data[at:] faulty: jq's message for it, at its line and column in the stream, and the stream read
-// on from the next line, or under --seq from the next record (`limit`), as jq's parser goes on after an error.
-// Under --stream-errors the message is an event, `[message, []]`, where `[]` stands for the path.
-@(private)
-text_fault :: proc(ins: ^Inputs, at, limit: int, found: json.Error, what := "") -> (jq.Value, string, jq.Parse_Status) {
-	e := found
-	line, column := text_place(ins, at)
-	msg: string
-	// A later file, or a fmt file, is told at its own line and column, as check tells it.
-	if (ins.next_file > 1 || ins.run.name_faults) && !ins.seq_joined {
-		at_error := e
-		at_error.offset += u64(at)
-		msg = fault_in_file(ins.name, ins.data, at_error, what, ins.lines_before)
-	} else if reads_lines(&ins.run.opts) { // each line is one text, so a fault at its end is reported at EOF, past the newline
-		msg = jq.parse_message(ins.data[at:min(limit + 1, len(ins.data))], e, line, column, what, limit - at)
-	} else {
-		msg = jq.parse_message(ins.data[at:], e, line, column, what)
-	}
-	if ins.run.opts.stream_errors && !reads_lines(&ins.run.opts) {
-		return stream_errors_fault(ins, at, limit, line, column)
-	}
-	whole_error := e
-	whole_error.offset += u64(at)
-	ins.fault_note = fault_context(ins.data, whole_error, &ins.run.opts)
-	fault := min(at + int(e.offset), len(ins.data))
-	ins.pos, ins.seen = limit, fault
-	if !ins.run.opts.seq {
-		ins.pos = len(ins.data)
-		if k := bytes.index_byte(ins.data[fault:], '\n'); k >= 0 {
-			ins.pos = fault + k + 1
+	f := literal_cut(data, found, ins.framing)
+	ins.note = fault_note(data, f, ins.spec, &ins.run.opts)
+	stop := min(int(f.at), len(data))
+	nl := bytes.index_byte(data[stop:], '\n')
+	resume := len(data) if nl < 0 else stop + nl + 1
+	if !ins.run.opts.stream {
+		ins.line, ins.text_end = lines_read(ins, int(f.at) + 1), 0
+		msg := fault_message(ins, data, f, end)
+		// Under --seq the reader goes on at the next record, and jq's parser elsewhere from the line after the fault,
+		// which `input` reads next.
+		if ins.framing == .Seq {
+			return nil, msg, .Error
 		}
+		records.close(&ins.texts)
+		ins.texts = records.open(data, ins.as, ins.framing, u64(resume), runtime.heap_allocator())
+		ins.several = true
+		return nil, msg, .Error
 	}
-	// --stream gives jq's events of what comes before the fault first.
-	if ins.run.opts.stream && ins.run.opts.from == .Json && fault > at {
-		heap := runtime.heap_allocator()
-		ins.fault_walk = fault_walk(ins.data[at:fault], line, column, ins.run.opts.seq, false, false, ins.fault_spare)
-		ins.fault_text, ins.fault_end = at, fault
-		ins.fault_error, ins.fault_note = strings.clone(msg, heap), strings.clone(ins.fault_note, heap) // to outlive the events' arenas
-		return next_value(ins)
+	// jq's parser gives the events of the bytes before the fault, and with --stream-errors the fault as one, then
+	// goes on from the line after the fault, or under --seq at the next record, where the reader is.
+	seq, errors := ins.framing == .Seq, ins.run.opts.stream_errors
+	if seq {
+		rs := bytes.index_byte(data[at:], 0x1e)
+		resume = len(data) if rs < 0 else at + rs
 	}
-	return nil, msg, .Error
-}
-
-// The faulty text's walk done with: the stream read on past the text as jq's parser goes on, from the next line, or
-// under --seq from the next record. Plain --stream's message for the text, else "".
-@(private)
-end_fault_walk :: proc(ins: ^Inputs) -> string {
-	w := ins.fault_walk
-	ins.fault_walk, ins.fault_spare = nil, w
-	if ins.fault_error != "" { // text_fault has placed the stream past the text
-		heap := runtime.heap_allocator()
-		msg, note := strings.clone(ins.fault_error), strings.clone(ins.fault_note)
-		delete(ins.fault_error, heap)
-		delete(ins.fault_note, heap)
-		ins.fault_error, ins.fault_note, ins.seen = "", note, ins.fault_end
-		return msg
-	}
-	fault := ins.fault_text + w.at
-	ins.seen = fault
-	ins.pos = ins.fault_end if ins.run.opts.seq else len(ins.data)
-	if w.errored && !ins.run.opts.seq {
-		if k := bytes.index_byte(ins.data[fault:], '\n'); k >= 0 {
-			ins.pos = fault + k + 1
+	if seq && errors && f.rules == &json.RULES && f.detail == u8(json.Detail.Unframed) {
+		// jq passes over what comes before the first separator, and tells a stream with none that it was abandoned.
+		if resume < len(data) {
+			return next_value(ins, false)
 		}
-		// jq drops the rest of the line unread, and does not count it.
-		ins.fault_at = {ins.pos, w.line, w.column}
+		return abandoned(ins, data)
 	}
-	return ""
+	text := data[at:resume]
+	if !errors {
+		text = data[at:max(at, stop)]
+		ins.fault_error = strings.clone(fault_message(ins, data, f), runtime.heap_allocator())
+	}
+	l, c := ins.parsed.line, ins.parsed.column
+	jq.advance(&l, &c, data[:at])
+	ins.pinned = true
+	ins.walk, ins.walk_at = fault_walk(text, l, c, seq && errors, seq && errors && resume < len(data), ins.bom_broken, ins.walk_spare), at
+	if !seq && errors {
+		records.close(&ins.texts)
+		ins.texts = records.open(data, ins.as, ins.framing, u64(resume), runtime.heap_allocator())
+		ins.several = true
+	} else if !seq {
+		close_file(ins)
+	}
+	return next_value(ins, false)
 }
 
-// --stream-errors under --seq: a stream with no separator at all, which jq reads through to its end and
-// then tells it was abandoned.
-@(private)
-abandoned_text :: proc(ins: ^Inputs, at: int) -> (jq.Value, string, jq.Parse_Status) {
-	line, column := text_place(ins, at)
-	jq.advance(&line, &column, ins.data[at:])
-	ins.pos, ins.seen = len(ins.data), len(ins.data)
+// --stream-errors under --seq: the event jq gives at the end of a stream with no separator, its place past `counted`.
+abandoned :: proc(ins: ^Inputs, counted: []byte) -> (jq.Value, string, jq.Parse_Status) {
+	l, c := ins.parsed.line, ins.parsed.column
+	jq.advance(&l, &c, counted)
 	ev := jq.new_array(2)
-	append(&ev.items, message.build("Unfinished abandoned text at EOF at line %d, column %d", line, column), jq.new_array())
+	append(&ev.items, message.build("Unfinished abandoned text at EOF at line %d, column %d", l, c), jq.new_array())
 	return ev, "", .Value
 }
 
-// The length of the byte order mark's start that `data` opens with when the mark is cut short, else 0.
-@(private)
-cut_bom_len :: proc(data: []byte) -> int {
-	k := 0
-	for k < len(data) && k < len(UTF8_BOM) && data[k] == UTF8_BOM[k] {
-		k += 1
-	}
-	return k if k < len(UTF8_BOM) else 0
+// The fault of the open file ends the run, told as `NAME:LINE:COLUMN: SENTENCE` with `fault_note` after, a JSON or CSV
+// text's as a parse error, as jq calls it, and a JSONC or JSON5 text's as an error.
+fail_text :: proc(ins: ^Inputs, fault: core.Fault) -> ! {
+	run := ins.run
+	flush_some(&run.output, force = true)
+	f := literal_cut(ins.data, fault, ins.framing)
+	what := "parse error" if reads_cells(&run.opts) || ins.spec == .Json else "error"
+	message.write_stderr("stury: %s: %s\n%s", what, fault_told(ins.name, ins.data, f, ins.file_lines), fault_note(ins.data, f, ins.spec, &run.opts))
+	finish(run, EXIT_INPUT)
 }
 
-// --stream-errors: the events of the faulty text at data[at:] as jq's streaming parser makes them, the error's
-// last (`fault_walk`), the first returned now and the rest by `next_value`. The stream goes on past the
-// fault as jq's does: from the next line, or under --seq from the next record (`end_fault_walk`).
-@(private)
-stream_errors_fault :: proc(ins: ^Inputs, at, limit, line, column: int) -> (jq.Value, string, jq.Parse_Status) {
-	seq := ins.run.opts.seq
-	if k := cut_bom_len(ins.data); at == 0 && ins.next_file <= 1 && k > 0 {
-		ins.skip, ins.pos, ins.fault_at = k, k, {} // jq drops the bytes of the mark it matched, unread and uncounted
-		switch {
-		case k == len(ins.data): // nothing follows: the stream is what the mark left
-			ins.seq_head = .Unread
-		case !seq:
-			// jq refuses the stream whole, having read its first line.
-			ins.pos = len(ins.data)
-			ins.seen = ins.pos
-			if nl := bytes.index_byte(ins.data, '\n'); nl >= 0 {
-				ins.seen = nl
-			}
-			return nil, "Malformed BOM", .Error
-		case:
-			ins.bom_broken, ins.seq_head = true, .Read
+// The fault `f` of the text `data` of file `name` told as `NAME:LINE:COLUMN: SENTENCE`, its line counted on from the
+// `lines` before `data`, or as `NAME: SENTENCE` when it is at no byte. A JSON-like text's sentence is the one jq's
+// messages use (`jq.fault_sentence`).
+fault_told :: proc(name: string, data: []byte, f: core.Fault, lines := 0) -> string {
+	if f.rules != &json.RULES {
+		line, col := core.locate(data, f.at)
+		return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, core.rule_of(f).message)
+	}
+	if f.kind in core.AT_NO_BYTE {
+		return message.build_temp("%s: %s", name, jq.fault_sentence(f, ""))
+	}
+	line, col := core.locate(data, f.at)
+	return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, jq.fault_sentence(f, string(data[f.at:])))
+}
+
+// The fault `f` of the records of `data` framed by `framing`, but under `.Lines` and `.Seq` a word cut short by its
+// record's end, where jq ends a literal, is an invalid literal.
+literal_cut :: proc(data: []byte, f: core.Fault, framing: core.Framing) -> core.Fault {
+	if (framing == .Lines || framing == .Seq) && f.kind == .Truncated && f.detail == 0 && f.rules == &json.RULES && f.at > 0 && int(f.at) < len(data) && 'a' <= data[f.at - 1] | 0x20 && data[f.at - 1] | 0x20 <= 'z' {
+		return {at = f.at, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Literal)}
+	}
+	return f
+}
+
+// For the faults whose cure is a flag of stury's own, the line of `data` the fault `f` is at, a caret under its byte,
+// and the flag, else "". A trailing comma and a comment are JSONC's, and a nesting past the cap is raised by
+// --max-depth, which the hint asks for only when it was not given. The text ends in a newline.
+fault_note :: proc(data: []byte, f: core.Fault, spec: Maybe(json.Spec), o: ^Opts) -> string {
+	at := int(f.at)
+	hint: string
+	switch {
+	case f.kind == .Too_Deep:
+		hint = "a larger --max-depth reads it" if o.max_depth != 0 else "--max-depth N raises the nesting limit"
+	case f.kind != .Bad_Char || at >= len(data) || spec != .Json:
+		return ""
+	case data[at] == '/' && at + 1 < len(data) && (data[at + 1] == '/' || data[at + 1] == '*'):
+		hint = "--from jsonc reads comments"
+	case data[at] == ']' || data[at] == '}':
+		before := at
+		for before > 0 && jq.is_space(data[before - 1]) {
+			before -= 1
 		}
-		return next_value(ins)
+		if before == 0 || data[before - 1] != ',' {
+			return ""
+		}
+		hint = "--from jsonc reads a trailing comma"
+	case:
+		return ""
 	}
-	end := limit if seq else len(ins.data)
-	ins.fault_walk = fault_walk(ins.data[at:end], line, column, seq, seq && limit < len(ins.data), ins.bom_broken, ins.fault_spare)
-	ins.fault_text, ins.fault_end = at, limit
-	return next_value(ins)
-}
-
-// A JSONC or JSON5 text the library refuses, which ends the run as `check --from jsonc` reports it.
-jsonc_fault :: proc(ins: ^Inputs, e: json.Error, at: int) -> ! {
-	e := e
-	e.offset += u64(at)
-	ins.run.name, ins.run.whole = ins.name, ins.data
-	fail_input(ins.run, e)
+	at = min(at, len(data) - 1)
+	// The line, cut to a screenful around the byte.
+	first, last := at, at
+	for first > 0 && data[first - 1] != '\n' && at - first < 40 {
+		first -= 1
+	}
+	for last < len(data) && data[last] != '\n' && data[last] != '\r' && last - at < 40 {
+		last += 1
+	}
+	// The note outlives the memory of the input whose events come before it.
+	heap := runtime.heap_allocator()
+	pad := bytes.repeat({' '}, at - first, heap)
+	for &c, i in pad {
+		if data[first + i] == '\t' {
+			c = '\t'
+		}
+	}
+	return message.build("%s\n%s^\n(%s)\n", data[first:last], pad, hint, allocator = heap)
 }

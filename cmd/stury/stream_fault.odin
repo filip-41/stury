@@ -4,7 +4,7 @@ package main
 // over the faulty text, which gives the events of everything before the fault and then, for --stream-errors, the
 // error as an event, `[message, path]`, in jq's words and count of lines and columns. The library validates a text
 // whole and so cannot say which events precede a fault. This walk is reached only for a text it has refused, so a
-// valid stream never pays for it. Plain --stream ends the events with the library's report (`text_fault`).
+// valid stream never pays for it. Plain --stream ends the events with the library's report (input.odin).
 
 import "base:runtime"
 import "core:mem/virtual"
@@ -115,14 +115,6 @@ fault_walk :: proc(src: []byte, line, column: int, seq, rs_follows, reset_each: 
 		arenas = w.arenas,
 	}
 	return w
-}
-
-// The next event, made in the context allocator, or false once the walk has ended.
-fault_event :: proc(w: ^Fault_Walk) -> (ev: Fault_Event, ok: bool) {
-	ev = fault_peek(w) or_return
-	w.given += 1
-	ev.value = jq.event_clone(ev.value)
-	return ev, true
 }
 
 // The next event, as the walk holds it, without giving it.
@@ -286,8 +278,10 @@ classify :: proc(c: byte) -> Class {
 		return .Quote
 	case '[', ',', ']', '{', ':', '}':
 		return .Structure
+	case ' ', '\t', '\n', '\r':
+		return .Space
 	}
-	return .Literal if is_literal_byte(c) else .Space
+	return .Literal
 }
 
 // jq's scan for the byte at src[i]: its reason to refuse it, if any.
@@ -404,19 +398,12 @@ found_string :: proc(p: ^Parser, i: int) -> string {
 	stury_only_at := -1
 	if msg := jq.decode_string(&out, string(p.src[p.string_start + 1:i]), &stury_only_at); msg != "" {
 		if stury_only_at >= 0 { // a refusal of stury's own, put where the library puts it: at the backslash
-			p.refusal = place_of(p, p.string_start + 1 + stury_only_at)
+			p.refusal = {p.line0, p.column0}
+			jq.advance(&p.refusal.line, &p.refusal.column, p.src[:p.string_start + stury_only_at + 2])
 		}
 		return msg
 	}
 	return value(p, jq.valid_utf8(strings.to_string(out)))
-}
-
-// jq's line and column of src[at].
-@(private = "file")
-place_of :: proc(p: ^Parser, at: int) -> Place {
-	line, column := p.line0, p.column0
-	jq.advance(&line, &column, p.src[:at + 1])
-	return {line, column}
 }
 
 @(private = "file")
