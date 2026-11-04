@@ -34,7 +34,8 @@ Usage:	stury [options] <jq filter> [file...]
 stury applies the filter to its JSON text inputs and writes the results as
 JSON, as jq 1.8.2 does, but reads strictly (RFC 8259): 01, 1., NaN, nan,
 Infinity, invalid UTF-8 in a string, a NUL after a value and nesting past
---max-depth are parse errors. For filters see jq(1) and https://jqlang.org/.
+--max-depth are parse errors, and a number prints as it was written (1E2,
+not jq's 1E+2). For filters see jq(1) and https://jqlang.org/.
 
 `
 
