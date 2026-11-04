@@ -765,11 +765,16 @@ def load(text):
     return jq_value(DECODER.decode(text))
 
 
+NUMBER = re.compile(rb"-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
+
+
 def same_output(a, b):
-    """Whether two outputs are the same bytes, or the same JSON values in any layout and number spelling: stury prints a
-    number as it was written, where jq prints decNumber's spelling."""
+    """Whether two outputs are the same bytes, or the same JSON values laid out alike and apart only in how numbers are
+    spelled: stury prints a number as it was written, where jq prints decNumber's spelling."""
     if a == b:
         return True
+    if NUMBER.sub(b"0", a) != NUMBER.sub(b"0", b):
+        return False
     try:
         values = []
         for raw in (a, b):
