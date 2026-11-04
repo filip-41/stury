@@ -52,6 +52,10 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 			run.route.interpreted += 1
 			run_once(run, v)
 		case .Error:
+			if run.opts.seq {
+				tell_ignored(ins, msg)
+				continue
+			}
 			flush_some(&run.output, force = true)
 			message.write_stderr("stury: parse error: %s\n%s", msg, ins.note)
 			finish_input(&run.output, EXIT_INPUT)

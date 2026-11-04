@@ -106,7 +106,10 @@ A record whose text does not read returns true and its error, and the next `scan
   and JSON refuses it, except in JSON5, where it is whitespace.
 - Under `.Lines`, a 0x1E in a line is the record's, and JSON refuses it. Under `.Seq`, an LF is the record's, and a
   `.Seq` record's `text` keeps the whitespace before the next 0x1E.
-- Under `.Seq`, a byte that is no whitespace before the first 0x1E ends the records with `Bad_Char` at that byte.
+- Under `.Seq`, the bytes before the first 0x1E are a record when one is no whitespace, and its fault is `Bad_Char` at
+  that byte (detail `Unframed`). A record that is a whole array, object or string with more after it faults with
+  `Bad_Char` at the first byte after it, and that rest is read as a record of its own. A record of number characters
+  alone faults with `Bad_Number` at its end (detail `Cut_Number`), as RFC 7464 asks a reader to drop it.
 - Under `.Concatenated`, whitespace, 0x1E and comments lie between documents. A number or literal that runs on into a
   byte that may not follow a value, as in `1x`, `1,` or `1]`, or into a `/` where no comment may start, is one bad
   token, as jq reads it, and no record.

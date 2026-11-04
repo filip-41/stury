@@ -118,7 +118,9 @@ parse_message :: proc(src: []byte, f: core_pkg.Fault, line := 1, column := 0, wh
 // for a number with no digits yet), a bad number and a second text after the first.
 fault_sentence :: proc(f: core_pkg.Fault, rest: string) -> string {
 	switch {
-	case f.kind == .Truncated || f.kind == .Bad_Number && len(strings.trim_space(rest)) == 0:
+	case f.rules == &json.RULES && f.detail == u8(json.Detail.Cut_Number):
+		return core_pkg.rule_of(f).message
+	case f.kind == .Truncated && f.detail == 0 || f.kind == .Bad_Number && len(strings.trim_space(rest)) == 0:
 		return "Unfinished JSON term"
 	case f.kind == .Bad_Number:
 		return "Invalid numeric literal"

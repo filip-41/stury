@@ -70,6 +70,27 @@ model_fault :: proc(text: string, at: u64, spec: json.Spec) -> Maybe(core.Fault)
 	return nil
 }
 
+// The fault of the `.Seq` record `src[k:hi]`, whose text alone faults with `fault`: bytes before the first 0x1E are
+// unframed, a whole array, object or string with more after it is a record and its rest stray, and a number alone
+// with no byte after it may be cut short.
+@(private = "file")
+model_seq_fault :: proc(src: string, k, hi: int, spec: json.Spec, fault: Maybe(core.Fault), first: bool) -> Maybe(core.Fault) {
+	if first {
+		return core.Fault{at = u64(k), rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Unframed)}
+	}
+	if fault != nil {
+		j := model_value_end(src[:hi], k, spec)
+		if t := model_gap(src[:hi], j, spec, false); strings.contains_rune("[{\"'", rune(src[k])) && t < hi && model_fault(src[k:j], u64(k), spec) == nil {
+			return core.Fault{at = u64(t), rules = &json.RULES, kind = .Bad_Char}
+		}
+		return fault
+	}
+	if strings.trim_left(src[k:hi], "0123456789-+.eE") == "" {
+		return core.Fault{at = u64(hi), rules = &json.RULES, kind = .Bad_Number, detail = u8(json.Detail.Cut_Number)}
+	}
+	return nil
+}
+
 // Returns the first offset at or past `i` that is no whitespace, in a spec with comments no comment, and with `rs` no
 // 0x1E.
 @(private = "file")
@@ -233,12 +254,12 @@ model_frame :: proc(src: string, framing: core.Framing, spec: json.Spec) -> (out
 		for k < hi && ws_len(src[k:hi], spec) > 0 {
 			k += ws_len(src[k:hi], spec)
 		}
-		if framing == .Seq && first {
-			if k < hi {
-				return out, core.Fault{at = u64(k), rules = &json.RULES, kind = .Bad_Char}
+		if k < hi {
+			bad := model_fault(src[k:hi], u64(k), spec)
+			if framing == .Seq {
+				bad = model_seq_fault(src, k, hi, spec, bad, first)
 			}
-		} else if k < hi {
-			append(&out, Model_Record{at = u64(k), text = src[k:hi], fault = model_fault(src[k:hi], u64(k), spec)})
+			append(&out, Model_Record{at = u64(k), text = src[k:hi], fault = bad})
 		}
 		first = false
 		i = j + 1
@@ -560,10 +581,10 @@ records_frame_and_place :: proc(t: ^testing.T) {
 		testing.expect_value(t, n, 2 if spec == .Json5 else 4)
 	}
 
-	// RFC 7464: text before the first 0x1E ends the records.
-	it2 := records.open(transmute([]u8)string(" 1\x1e2\n"), json.as(.Json), .Seq)
-	_, ok = records.next(&it2)
-	testing.expect(t, !ok && it2.fault == core.Fault{at = 1, rules = &json.RULES, kind = .Bad_Char})
+	// RFC 7464: text before the first 0x1E is a record of its own, faulty, and the records go on.
+	unframed, unframed_err := records.check(transmute([]u8)string(" 1\x1e2\n"), json.as(.Json), .Seq, context.temp_allocator)
+	testing.expect_value(t, unframed_err, nil)
+	testing.expect(t, len(unframed) == 1 && unframed[0] ==core.Fault{at = 1, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Unframed)})
 }
 
 @(private = "file")

@@ -58,11 +58,13 @@ Detail :: enum u8 {
 	Identifier, // `Bad_Char`: JSON5 only, a byte that starts no key, quoted or not, where an object's key must start
 	Colon, // `Bad_Char`: a byte where a member's colon must be
 	Trailing, // `Bad_Char`: the first byte after the document that is no whitespace or comment
+	Unframed, // `Bad_Char`: under `.Seq` records, the first byte before the first 0x1E that is no whitespace
+	Cut_Number, // `Bad_Number`: under `.Seq` records, a record that is a number with no whitespace after it, at its end
 }
 
 // `RULES` is JSON's `core.Rules`, one per `Detail` value, which every fault the walk returns points to.
 @(rodata)
-RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}, {"trailing", "Unexpected text after the value"}}}
+RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}, {"trailing", "Unexpected text after the value"}, {"unframed", "Text before the first RS"}, {"cut_number", "Potentially truncated top-level numeric value"}}}
 
 // Checks that `src` holds exactly one document: an optional leading BOM, the document, then whitespace and, in a
 // spec with comments, comments up to the text's end. Returns the fault, or nil. It is `core.validate` with
