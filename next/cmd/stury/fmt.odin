@@ -153,7 +153,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) {
 		doc, fault, texts := build_whole(data, ins.source, heap)
 		// A delimited text's fault is told at the record it is in, which the records below reach.
 		if f, bad := fault.?; bad && !cells {
-			fmt_failed(run, ins, f)
+			fail_text(ins, f)
 		} else if !bad && !texts {
 			put_document(run, ins, &doc)
 			core.destroy(&doc)
@@ -174,7 +174,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) {
 		doc, fault := jq.judge_build(built, err, rec.at)
 		if f, bad := fault.?; bad {
 			cells_cut(run, ins, cut)
-			fmt_failed(run, ins, f)
+			fail_text(ins, f)
 		}
 		switch {
 		case cells && writes_cells(o):
@@ -187,7 +187,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) {
 	}
 	if f, bad := it.fault.?; bad {
 		cells_cut(run, ins, cut)
-		fmt_failed(run, ins, f)
+		fail_text(ins, f)
 	}
 }
 
@@ -229,17 +229,6 @@ put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) {
 		jq.put_byte(&out.buf, '\n')
 	}
 	flush_some(out)
-}
-
-// A fault in the open file ends the run, told as `NAME:LINE:COLUMN: SENTENCE`, a JSON or CSV text's as a parse error,
-// as jq calls it, and a JSONC or JSON5 text's as a filter run tells it.
-@(private = "file")
-fmt_failed :: proc(run: ^Run, ins: ^Inputs, fault: core.Fault) -> ! {
-	flush_some(&run.output, force = true)
-	f := literal_cut(ins.data, fault, ins.framing)
-	what := "parse error" if reads_cells(&run.opts) || ins.spec == .Json else "error"
-	message.write_stderr("stury: %s: %s\n%s", what, fault_told(ins.name, ins.data, f), fault_note(ins.data, f, ins.spec, &run.opts))
-	finish(run, EXIT_INPUT)
 }
 
 // Replaces `path` with `text` through a temporary file beside it, so a reader sees the old file or the new one.

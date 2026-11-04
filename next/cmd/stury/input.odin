@@ -558,9 +558,16 @@ read_file :: proc(f: ^os.File) -> (data: []byte, ok: bool) {
 // `data` as the open file's bytes in memory, with its texts read from the start.
 @(private = "file")
 set_data :: proc(ins: ^Inputs, data: []byte, mapped := false) {
-	retire(ins)
+	// The bytes before are freed, or kept in `spent` while a value lies in them. --stream's events and the walk of a
+	// faulty text read the text as they go, so it is kept for the run.
+	records.close(&ins.texts)
+	if ins.pinned || ins.run.opts.stream {
+		append(&ins.spent, Spent{ins.data, ins.mapped})
+	} else {
+		free_spent({ins.data, ins.mapped})
+	}
 	// A window that opens with the header is a file's whose header is judged.
-	ins.data, ins.mapped, ins.raw_at, ins.pieces, ins.header_judged, ins.parallel_from, ins.skip_below, ins.rows_end = data, mapped, 0, {}, ins.headed, 0, 0, 0
+	ins.data, ins.mapped, ins.pinned, ins.raw_at, ins.pieces, ins.header_judged, ins.parallel_from, ins.skip_below, ins.rows_end = data, mapped, false, 0, {}, ins.headed, 0, 0, 0
 	ins.several = ins.framing != .Concatenated || !ins.last
 	ins.texts = records.open(data, ins.as, ins.framing, allocator = runtime.heap_allocator())
 	// jq counts a column from past the input's byte order mark.
@@ -662,19 +669,6 @@ settle_line :: proc(ins: ^Inputs) {
 	if ins.text_end > 0 {
 		ins.line, ins.text_end = lines_read(ins, ins.text_end), 0
 	}
-}
-
-// The bytes of `data` freed, or kept in `spent` while a value lies in them.
-@(private = "file")
-retire :: proc(ins: ^Inputs) {
-	records.close(&ins.texts)
-	if ins.pinned || ins.run.opts.stream {
-		// --stream's events and the walk of a faulty text read the text as they go, so it is kept for the run.
-		append(&ins.spent, Spent{ins.data, ins.mapped})
-	} else {
-		free_spent({ins.data, ins.mapped})
-	}
-	ins.data, ins.pinned = nil, false
 }
 
 // A file's bytes read past, and whether they are its mapping.

@@ -286,8 +286,10 @@ classify :: proc(c: byte) -> Class {
 		return .Quote
 	case '[', ',', ']', '{', ':', '}':
 		return .Structure
+	case ' ', '\t', '\n', '\r':
+		return .Space
 	}
-	return .Literal if is_literal_byte(c) else .Space
+	return .Literal
 }
 
 // jq's scan for the byte at src[i]: its reason to refuse it, if any.
@@ -404,19 +406,12 @@ found_string :: proc(p: ^Parser, i: int) -> string {
 	stury_only_at := -1
 	if msg := jq.decode_string(&out, string(p.src[p.string_start + 1:i]), &stury_only_at); msg != "" {
 		if stury_only_at >= 0 { // a refusal of stury's own, put where the library puts it: at the backslash
-			p.refusal = place_of(p, p.string_start + 1 + stury_only_at)
+			p.refusal = {p.line0, p.column0}
+			jq.advance(&p.refusal.line, &p.refusal.column, p.src[:p.string_start + stury_only_at + 2])
 		}
 		return msg
 	}
 	return value(p, jq.valid_utf8(strings.to_string(out)))
-}
-
-// jq's line and column of src[at].
-@(private = "file")
-place_of :: proc(p: ^Parser, at: int) -> Place {
-	line, column := p.line0, p.column0
-	jq.advance(&line, &column, p.src[:at + 1])
-	return {line, column}
 }
 
 @(private = "file")
@@ -542,14 +537,4 @@ close_container :: proc(p: ^Parser, empty: jq.Value) {
 		append(&p.staged, jq.event_of(path_copy(p), empty))
 	}
 	p.last = .None if len(p.path) == 0 else .Value
-}
-
-// Whether jq's scanner reads byte `c` as part of a literal: any byte but JSON's whitespace and structure.
-@(private = "file")
-is_literal_byte :: proc(c: byte) -> bool {
-	switch c {
-	case ' ', '\t', '\n', '\r', '"', '[', ',', ']', '{', ':', '}':
-		return false
-	}
-	return true
 }

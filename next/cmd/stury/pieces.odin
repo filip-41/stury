@@ -442,7 +442,12 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 		}
 	}
 	if stopped {
-		n = restore_sum(&r, before)
+		// The records past those `before` counts undone.
+		o.buf.cursor, o.ret, o.last_result, r.route.explain, n = before.cursor, before.ret, before.last_result, before.explain, before.records
+		o.refused = false
+		if o.table != nil {
+			o.table.count = before.rows
+		}
 	}
 	slot := Piece_Slot{lo = lo, hi = stop, end = end, sum = piece_sum(&r, n), stopped = stopped, crossed = crossed}
 	if o.table != nil {
@@ -483,18 +488,6 @@ piece_record :: proc(r: ^Run, it: ^records.Reader, rec: records.Record, part: ^c
 piece_sum :: proc(r: ^Run, records: int) -> Piece_Sum {
 	o := &r.output
 	return {o.buf.cursor, o.ret, o.last_result, records, o.table.count if o.table != nil else 0, r.route.explain}
-}
-
-// Undoes the records past those `s` counts, and returns their count.
-@(private = "file")
-restore_sum :: proc(r: ^Run, s: Piece_Sum) -> int {
-	o := &r.output
-	o.buf.cursor, o.ret, o.last_result, r.route.explain = s.cursor, s.ret, s.last_result, s.explain
-	o.refused = false
-	if o.table != nil {
-		o.table.count = s.rows
-	}
-	return s.records
 }
 
 // Keeps a piece's slot and writes every slot that follows the written ones in the text. Entries are written once

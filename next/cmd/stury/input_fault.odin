@@ -30,7 +30,7 @@ text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (jq.V
 		return cells_fault(ins, found)
 	}
 	if ins.spec != .Json {
-		fail_dialect(ins, data, found)
+		fail_text(ins, found)
 	}
 	f := literal_cut(data, found, ins.framing)
 	ins.note = fault_note(data, f, ins.spec, &ins.run.opts)
@@ -94,17 +94,14 @@ abandoned :: proc(ins: ^Inputs, counted: []byte) -> (jq.Value, string, jq.Parse_
 	return ev, "", .Value
 }
 
-@(private = "file")
-is_letter :: proc(c: byte) -> bool {
-	return c | 0x20 >= 'a' && c | 0x20 <= 'z'
-}
-
-// A JSONC or JSON5 text the library refuses, told as `fault_told` tells it, with `fault_note` after. Ends the run.
-@(private = "file")
-fail_dialect :: proc(ins: ^Inputs, data: []byte, f: core.Fault) -> ! {
+// The fault of the open file ends the run, told as `NAME:LINE:COLUMN: SENTENCE` with `fault_note` after, a JSON or CSV
+// text's as a parse error, as jq calls it, and a JSONC or JSON5 text's as an error.
+fail_text :: proc(ins: ^Inputs, fault: core.Fault) -> ! {
 	run := ins.run
 	flush_some(&run.output, force = true)
-	message.write_stderr("stury: error: %s\n%s", fault_told(ins.name, data, f, ins.file_lines), fault_note(data, f, ins.spec, &run.opts))
+	f := literal_cut(ins.data, fault, ins.framing)
+	what := "parse error" if reads_cells(&run.opts) || ins.spec == .Json else "error"
+	message.write_stderr("stury: %s: %s\n%s", what, fault_told(ins.name, ins.data, f, ins.file_lines), fault_note(ins.data, f, ins.spec, &run.opts))
 	finish(run, EXIT_INPUT)
 }
 
@@ -126,7 +123,7 @@ fault_told :: proc(name: string, data: []byte, f: core.Fault, lines := 0) -> str
 // The fault `f` of the records of `data` framed by `framing`, but under `.Lines` and `.Seq` a word cut short by its
 // record's end, where jq ends a literal, is an invalid literal.
 literal_cut :: proc(data: []byte, f: core.Fault, framing: core.Framing) -> core.Fault {
-	if (framing == .Lines || framing == .Seq) && f.kind == .Truncated && f.detail == 0 && f.rules == &json.RULES && f.at > 0 && int(f.at) < len(data) && is_letter(data[f.at - 1]) {
+	if (framing == .Lines || framing == .Seq) && f.kind == .Truncated && f.detail == 0 && f.rules == &json.RULES && f.at > 0 && int(f.at) < len(data) && 'a' <= data[f.at - 1] | 0x20 && data[f.at - 1] | 0x20 <= 'z' {
 		return {at = f.at, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Literal)}
 	}
 	return f

@@ -102,20 +102,13 @@ scratch_allocator_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size,
 	return
 }
 
-// Runs the filter on one input and prints its outputs. Returns the signal the run ended with.
-eval_input :: proc(run: ^Run, v: jq.Value) -> jq.Signal {
+// Runs the filter on one input, prints its outputs and reports its error, as jq's process() does.
+run_once :: proc(run: ^Run, v: jq.Value) {
 	ip := &run.ip
 	ip.free_envs = nil // the last input's, emptied with its memory
 	ip.printer = &run.output
 	sig := jq.eval(ip, run.prog, {v = v}, ip.globals, false, &run.output)
 	ip.printer = nil
-	return sig
-}
-
-// Runs the filter on one input, prints its outputs and reports its error, as jq's process() does.
-run_once :: proc(run: ^Run, v: jq.Value) {
-	ip := &run.ip
-	sig := eval_input(run, v)
 	if run.output.piece && (sig == .Fail || ip.halted != nil) {
 		run.output.refused = true
 		return

@@ -306,24 +306,16 @@ is_option :: proc(a: string) -> bool {
 	return len(a) >= 2 && a[0] == '-' && (a[1] == '-' || ('a' <= a[1] && a[1] <= 'z') || ('A' <= a[1] && a[1] <= 'Z'))
 }
 
-// Whether the short options `a` hold -f: an `f` before any `L`, whose rest is a directory (`-Lfoo`).
-@(private = "file")
-has_from_file_flag :: proc(a: string) -> bool {
-	flags := a[1:]
-	if l := strings.index_byte(flags, 'L'); l >= 0 {
-		flags = flags[:l]
-	}
-	return strings.contains_rune(flags, 'f')
-}
-
 // Where `check` (or `validate`) or `fmt` stands in `args`, or -1: the first argument that is not an option, before
-// `--`. Under -f that argument is the program file's name, which stays a file.
+// `--`. Under -f that argument is the program file's name, which stays a file. Short options hold -f when an `f` comes
+// before any `L`, whose rest is a directory (`-Lfoo`).
 @(private = "file")
 subcommand_index :: proc(args: []string) -> int {
 	for i := 0; i < len(args) && args[i] != "--"; i += 1 {
 		a := args[i]
+		f, l := strings.index_byte(a, 'f'), strings.index_byte(a, 'L')
 		switch {
-		case a == "--from-file" || is_option(a) && a[1] != '-' && has_from_file_flag(a):
+		case a == "--from-file" || is_option(a) && a[1] != '-' && f > 0 && (l < 0 || f < l):
 			return -1
 		case is_option(a):
 			i += option_arity(a)
@@ -436,8 +428,7 @@ add_lib_dir :: proc(cli: ^Cli, dir: string) {
 	if cli.lib_dirs == nil {
 		cli.lib_dirs = make([dynamic]string)
 	}
-	dirs := &cli.lib_dirs.?
-	append(dirs, jq.real_path(dir))
+	append(&cli.lib_dirs.?, jq.real_path(dir))
 }
 
 // --indent's number as jq's strtol reads it: a sign, then decimal digits to the end, from -1 to 7.

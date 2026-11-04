@@ -169,19 +169,6 @@ exit_compile :: proc(count: int) -> ! {
 	os.exit(EXIT_COMPILE)
 }
 
-// The modules the filter imports, and `~/.jq`, loaded, or exit as jq does when one cannot be.
-link_program :: proc(run: ^Run, parsed: jq.Program) -> (linked: jq.Linked) {
-	if len(parsed.deps) == 0 && !run.home_module {
-		return
-	}
-	linked = jq.link(&run.ip, parsed.deps, jq.program_origin(&run.ip))
-	if linked.errors > 0 {
-		message.write_stderr("%s", linked.messages)
-		exit_compile(linked.errors)
-	}
-	return
-}
-
 // Parse and check the filter and bind its globals, before the interpreter first runs.
 ready_interpreter :: proc(run: ^Run) {
 	parsed, errors := jq.parse(run.program.text)
@@ -190,7 +177,15 @@ ready_interpreter :: proc(run: ^Run) {
 		message.write_stderr("stury: error: Top-level program not given (try \".\")\n")
 		exit_compile(1)
 	}
-	linked := link_program(run, parsed)
+	// The modules the filter imports, and `~/.jq`, loaded, or exit as jq does when one cannot be.
+	linked: jq.Linked
+	if len(parsed.deps) > 0 || run.home_module {
+		linked = jq.link(&run.ip, parsed.deps, jq.program_origin(&run.ip))
+		if linked.errors > 0 {
+			message.write_stderr("%s", linked.messages)
+			exit_compile(linked.errors)
+		}
+	}
 	prog, check_errors, prelude := jq.check(parsed.body, run.program.names, linked)
 	compile_errors(run.program.text, check_errors)
 	run.prog = prog

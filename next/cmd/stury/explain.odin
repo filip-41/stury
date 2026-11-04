@@ -3,7 +3,6 @@ package main
 // --explain writes `stury: explain: KEY: FACTS` lines to stderr: the filter and its route before the run, what the run
 // did after it. The code that takes each decision records its reason in `Route`, so the report never derives one again.
 
-import "core:fmt"
 import "core:strings"
 import "core:time"
 import core "../../core"
@@ -105,7 +104,7 @@ spell_path :: proc(p: core.Path) -> string {
 			if i == 0 {
 				strings.write_byte(&b, '.')
 			}
-			fmt.sbprintf(&b, "[%d]", int(v))
+			message.write(&b, "[%d]", int(v))
 		case core.All:
 			strings.write_string(&b, ".[]" if i == 0 else "[]")
 		}
