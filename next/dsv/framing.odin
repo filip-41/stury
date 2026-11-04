@@ -48,9 +48,9 @@ Batch_Row :: struct {
 // `done` says the text ended or faulted, with the fault in `fault`, given once the batch's rows are. `cols` are the
 // columns a typed read bound, for the plan and read flags beside them.
 //
-// On a stream, `seen` is the `pos`, `base` and length of the window as the last call left them, so a different one
-// says the window moved and the batch is stale. `from` is `pos` where the batch was framed, `past` says a row stood
-// in its window, and `head_at` the input offset of the header's line.
+// On a stream, `moves` is the reader's `moves` as the last call left it, so a different one says the window moved or
+// `pos` came back and the batch is stale. `from` is `pos` where the batch was framed, `past` says a row stood in its
+// window, and `head_at` the input offset of the header's line.
 @(private)
 Batch :: struct {
 	rows:      [BATCH]Batch_Row,
@@ -61,7 +61,7 @@ Batch :: struct {
 	keys:      []core.Token,
 	key_src:   []u8,
 	comb:      [dynamic]u8,
-	seen:      [3]u64,
+	moves:     u64,
 	from:      u64,
 	past:      bool,
 	head_at:   u64,
@@ -288,7 +288,7 @@ next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
 	b := (^Batch)(it.format)
 	stream := it.input.procedure != nil
 	if stream && b != nil {
-		if b.seen == {it.pos, it.base, u64(len(it.src))} {
+		if b.moves == it.moves {
 			// The window held after the last row, so that row stands.
 			b.past ||= b.at > 0
 		} else {
@@ -311,7 +311,7 @@ next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
 	b.at += 1
 	if stream {
 		it.pos = u64(min(int(row.hi) + 1 + int(int(row.hi) < len(it.src) && it.src[row.hi] == '\r'), len(it.src)))
-		b.seen = {it.pos, it.base, u64(len(it.src))}
+		b.moves = it.moves
 	}
 	return {text = it.src[row.at:row.hi], at = row.at}, true
 }
@@ -450,7 +450,6 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 			b.at = 0
 			if it.input.procedure != nil {
 				it.pos = b.from
-				b.seen = {it.pos, it.base, u64(len(it.src))}
 			}
 		}
 	}

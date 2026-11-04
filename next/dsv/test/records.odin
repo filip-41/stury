@@ -701,6 +701,26 @@ rows_stream_as_in_memory :: proc(t: ^testing.T) {
 	}
 }
 
+// Every chunk size up to a text's length moves the window at a different byte, the header's line and quoted line ends
+// included.
+@(test)
+rows_stream_at_every_chunk_size :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	state := rand.create(11)
+	gen := rand.default_random_generator(&state)
+	texts := []string{"a,b,c\r\n1,\"x\ny\",3\r\n4,5,6\r\n\"7\"\"\",8,9", "a,b\n1,2\n3\n4,5\n", "a\tb\n1\t2\n3\t4\n"}
+	for src, i in texts {
+		spec := dsv.Spec.Tsv if i == 2 else .Csv
+		for size in 1 ..= len(src) {
+			for opts in LAYOUTS {
+				if !expect_stream(t, src, spec, opts, {size}, gen) {
+					return
+				}
+			}
+		}
+	}
+}
+
 // An input that ends at any byte of its last row holds that row or gives the fault memory gives, never a wrong row.
 @(test)
 rows_stream_holds_a_cut_row :: proc(t: ^testing.T) {

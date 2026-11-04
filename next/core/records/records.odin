@@ -32,7 +32,9 @@ Record :: struct {
 // window but the input's first starts a record at its offset 0. `src` is a window of `buf` that ends on a whole
 // record, and `base` the input offset of `src[0]`. `last` says the window holds the input's end, `eof` that `input`
 // ended, and `cause` is the error it failed with. `held` holds the bytes past the last whole record when the input
-// ended inside a record or failed, and `held_at` their offset. `scan` is what `scan` keeps, allocated at its first call.
+// ended inside a record or failed, and `held_at` their offset. `moves` counts the window's moves and the times `pos`
+// came back to a record the window could not tell, so a format that keeps a frame between calls sees it is stale. `scan`
+// is what `scan` keeps, allocated at its first call.
 // `scratch` is the temp allocator of the format's `read`, emptied by the next, so what one record's read binds or decodes
 // for itself takes no memory past it.
 Reader :: struct {
@@ -58,6 +60,7 @@ Reader :: struct {
 	cause:     io.Error,
 	held:      []u8,
 	held_at:   u64,
+	moves:     u64,
 	scan:      ^Scanned,
 	scratch:   runtime.Arena,
 }
@@ -427,6 +430,7 @@ window_settled :: proc(it: ^Reader, ok: bool, pos: u64, state: [2]u8) -> bool {
 	// A window cut at an end byte has no record left to look for.
 	if walked {
 		it.pos, it.state, it.fault = pos, state, nil
+		it.moves += 1
 	}
 	return false
 }
@@ -488,6 +492,7 @@ window_move :: proc(it: ^Reader) -> bool {
 				return false
 			}
 		}
+		it.moves += 1
 		return true
 	}
 }
