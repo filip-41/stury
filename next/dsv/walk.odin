@@ -71,64 +71,29 @@ Detail :: enum u8 {
 @(rodata)
 RULES := core.Rules{"dsv", {{}, {"too_many_fields", "Record has more fields than the first record"}, {"too_few_fields", "Record has fewer fields than the first record"}, {"bare_quote", "Quote inside an unquoted field"}, {"bad_utf8", "Invalid UTF-8"}, {"lone_cr", "Carriage return not before a line feed"}, {"after_quote", "Character after a closing quote"}, {"open_quote", "Unfinished quoted field"}, {"cut_utf8", "Unfinished UTF-8 sequence"}}}
 
-// The delimiter a walk of `S` reads. `opts.delimiter` 0 selects the spec's own, `,` for CSV and Plain and a tab for
-// TSV. The pass reads it once into a register and compares each block against it.
+// The delimiter byte of `spec` when `delimiter` is 0: `,` for CSV and Plain and a tab for TSV. A walk reads it once
+// into a register and compares each block against it.
 @(private)
-delimiter_of :: #force_inline proc "contextless" ($S: Spec, opts: Options) -> byte {
-	if opts.delimiter != 0 {
-		return opts.delimiter
-	}
-	when S == .Tsv {
-		return '\t'
-	} else {
-		return ','
-	}
+spec_delimiter :: #force_inline proc "contextless" (spec: Spec, delimiter: u8) -> u8 {
+	return delimiter if delimiter != 0 else '\t' if spec == .Tsv else ','
 }
 
-// Whether `S` can read the delimiter and comment byte in `opts`. A delimiter is refused when it is CR, LF, non-ASCII
-// or, under CSV, a quote, and under TSV also a backslash or one of `t`, `n`, `r`, `0`. A comment byte is refused when
-// it is CR, LF, the delimiter, non-ASCII or, under CSV, a quote, and under TSV also a backslash.
-@(private)
-options_ok :: #force_inline proc "contextless" ($S: Spec, opts: Options) -> bool {
-	delim := delimiter_of(S, opts)
-	if delim == '\r' || delim == '\n' || delim >= 0x80 {
-		return false
-	}
-	when S == .Csv {
-		if delim == '"' {
-			return false
-		}
-	}
-	when S == .Tsv {
-		if delim == '\\' || delim == 't' || delim == 'n' || delim == 'r' || delim == '0' {
-			return false
-		}
-	}
-	if c := opts.comment; c != 0 {
-		if c == '\r' || c == '\n' || c == delim || c >= 0x80 {
-			return false
-		}
-		when S == .Csv {
-			if c == '"' {
-				return false
-			}
-		}
-		when S == .Tsv {
-			if c == '\\' {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-// The `.Bad_Option` fault at byte 0 for options `S` cannot read, or nil.
+// The `.Bad_Option` fault at byte 0 for options `S` cannot read, or nil. A delimiter is refused when it is CR, LF,
+// non-ASCII or, under CSV, a quote, and under TSV also a backslash or one of `t`, `n`, `r`, `0`. A comment byte is refused
+// when it is CR, LF, the delimiter, non-ASCII or, under CSV, a quote, and under TSV also a backslash.
 @(private)
 option_fault :: #force_inline proc "contextless" ($S: Spec, opts: Options) -> Maybe(core.Fault) {
-	if options_ok(S, opts) {
-		return nil
+	delim, c := spec_delimiter(S, opts.delimiter), opts.comment
+	bad := delim == '\r' || delim == '\n' || delim >= 0x80 || c != 0 && (c == '\r' || c == '\n' || c == delim || c >= 0x80)
+	when S == .Csv {
+		bad ||= delim == '"' || c == '"'
+	} else when S == .Tsv {
+		bad ||= delim == '\\' || delim == 't' || delim == 'n' || delim == 'r' || delim == '0' || c == '\\'
 	}
-	return core.Fault{at = 0, rules = &RULES, kind = .Bad_Option}
+	if bad {
+		return core.Fault{rules = &RULES, kind = .Bad_Option}
+	}
+	return nil
 }
 
 // Reads a text of spec `S` from `lo`, past one BOM at its first byte, with hook `on`. Returns `hi`, one past the last
@@ -187,12 +152,6 @@ validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Opt
 	return core.validate(src, as(spec, opts))
 }
 
-// The handle's validate: the walk compiled for the handle's spec.
-@(private)
-validate_as :: proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {
-	return validate_from(src, as, 0, 0)
-}
-
 // The handle's verdict on the text from `lo`, a record's start, checking records against `width` when it is above 0.
 @(private)
 validate_from :: proc "contextless" (src: []u8, as: core.As, lo: u64, width: int) -> Maybe(core.Fault) {
@@ -245,7 +204,7 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 	if pos >= end {
 		return r
 	}
-	delim := delimiter_of(S, opts)
+	delim := spec_delimiter(S, opts.delimiter)
 	width := width
 	if width == 0 {
 		width = header_cells(src, pos, S, opts) if !opts.no_header else scan_record(src, pos, 0, S, delim).cells

@@ -98,7 +98,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		n = n,
 		h = h,
 		keys = keys,
-		delim = delimiter_of(S, opts),
+		delim = spec_delimiter(S, opts.delimiter),
 		no_header = opts.no_header,
 		tolerate = opts.tolerate,
 		start = 1,

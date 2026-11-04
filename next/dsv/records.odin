@@ -91,18 +91,12 @@ put_value :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (
 	return emit(h, on, hs, u64(field_lo), u32(hi - field_lo), .Plain, .Value, spelling(base, field_lo, hi, esc, lax, S)), u64(field_lo), u32(hi - field_lo)
 }
 
-// A header cell from `field_lo` to `hi` as a `Plain` token of role `Key`.
-@(private)
-key_of :: #force_inline proc "contextless" (base: [^]u8, field_lo, hi: int, esc, lax: bool, $S: Spec) -> core.Token {
-	return {u64(field_lo), u32(hi - field_lo), .Plain, .Key, spelling(base, field_lo, hi, esc, lax, S)}
-}
-
-// Stores the header cell from `field_lo` to `hi` at `keys[cells]` when `cells` is below `len(keys)`. A buffer sized
-// from `header_cells` holds every header cell.
+// Stores the header cell from `field_lo` to `hi` at `keys[cells]` as a `Plain` token of role `Key`, when `cells` is
+// below `len(keys)`. A buffer sized from `header_cells` holds every header cell.
 @(private)
 put_header_key :: #force_inline proc "contextless" (keys: []core.Token, cells: int, base: [^]u8, field_lo, hi: int, esc, lax: bool, $S: Spec) {
 	if cells < len(keys) {
-		keys[cells] = key_of(base, field_lo, hi, esc, lax, S)
+		keys[cells] = {u64(field_lo), u32(hi - field_lo), .Plain, .Key, spelling(base, field_lo, hi, esc, lax, S)}
 	}
 }
 

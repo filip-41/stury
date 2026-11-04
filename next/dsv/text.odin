@@ -42,7 +42,7 @@ record_start :: #force_inline proc "contextless" (src: []u8, start: int, comment
 // fault.
 @(private, cold, require_results)
 header_cells :: #force_no_inline proc "contextless" (src: []u8, start: int, $S: Spec, opts: Options) -> int {
-	return scan_record(src, record_start(src, start, opts.comment), 0, S, delimiter_of(S, opts)).cells
+	return scan_record(src, record_start(src, start, opts.comment), 0, S, spec_delimiter(S, opts.delimiter)).cells
 }
 
 // A record read from its first byte by `scan_record`. `cells` is its cell count, at least 1. `fault_at` is the index

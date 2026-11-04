@@ -60,7 +60,7 @@ split_cells :: proc "contextless" (src: []u8, row: Batch_Row, $S: Spec, opts: Op
 	T :: kernel.Tier(0)
 	base := raw_data(src)
 	lo, hi := int(row.at), int(row.hi)
-	delim := delimiter_of(S, opts)
+	delim := spec_delimiter(S, opts.delimiter)
 	lax := .Invalid_Utf8 in opts.tolerate
 	field_lo := lo
 	carry := false

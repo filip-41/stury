@@ -89,10 +89,6 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 	return rows_end((^Rows)(rawptr(&w)), write_rows(&w, uintptr(value)))
 }
 
-// The delimiter byte of `spec` when `layout` leaves it 0.
-@(private)
-spec_delimiter :: proc "contextless" (spec: Spec, delimiter: u8) -> u8 {return delimiter if delimiter != 0 else '\t' if spec == .Tsv else ','}
-
 // The handle of the rows a plan writes: `spec`, and `layout`'s delimiter, comment byte, `no_header` and `crlf`.
 @(private)
 layout_as :: proc(spec: Spec, layout: Options) -> core.As {
