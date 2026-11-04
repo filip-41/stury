@@ -351,13 +351,6 @@ union_arm :: proc(m: ^typed.Meta, v: uintptr) -> ^typed.Arm {
 	return nil
 }
 
-// Whether the `.Required` struct `f` captures unknown members, which only the entries route writes.
-@(private)
-holds_capture :: proc(w: ^Walker, f: ^typed.Field) -> bool {
-	m := &w.meta[f.meta]
-	return w.meta[m.block + m.members].capture >= 0
-}
-
 // Adds a member to the entries with its key written in `keys`.
 @(private)
 add_entry :: proc(w: ^Walker, name: string, value: uintptr, rec: ^typed.Field, $put: Put) -> core.Typed_Error_Kind {
@@ -623,17 +616,6 @@ enter_target :: proc(w: ^Walker, top: int, target: rawptr, rec: ^typed.Field) ->
 	w.ptrs[w.n_ptrs] = {target, rec}
 	w.n_ptrs += 1
 	return .None
-}
-
-// What a hook writes in place of its value, which it may allocate from `Walker.arena`. A hook with no write proc refuses
-// the value.
-// The arena lasts the call, so a list of hooked values holds every stand-in until the end.
-@(private)
-hook_value :: proc(w: ^Walker, m: ^typed.Meta, v: uintptr) -> (any, core.Typed_Error_Kind) {
-	if m.write == nil {
-		return nil, .Unsupported
-	}
-	return m.write(rawptr(v), runtime.arena_allocator(&w.arena))
 }
 
 // Writes an `any`, or a hook's stand-in, that holds a nil or a scalar, and returns nil. Any other value is left to a frame,

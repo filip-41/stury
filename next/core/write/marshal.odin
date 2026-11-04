@@ -446,7 +446,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				case .Struct, .Required:
 					if top == core.MAX_DEPTH {
 						k = .Too_Deep
-					} else if w.opts.sort_keys || vf.kind == .Required && holds_capture(w, vf) {
+					} else if w.opts.sort_keys || vf.kind == .Required && w.meta[w.meta[vf.meta].block + w.meta[vf.meta].members].capture >= 0 {
 						k = list_struct(w, vf, va, nil, put)
 						if k == .None {
 							break value
@@ -529,10 +529,13 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					}
 				case .Any, .Hook:
 					a: any
+					// A hook's stand-in may come from `Walker.arena`, which lasts the call. A hook with no write proc refuses the value.
 					if vf.kind == .Any {
 						a = (^any)(va)^
+					} else if write := w.meta[vf.meta].write; write == nil {
+						k = .Unsupported
 					} else {
-						a, k = hook_value(w, &w.meta[vf.meta], va)
+						a, k = write(rawptr(va), runtime.arena_allocator(&w.arena))
 					}
 					if k == .None {
 						rec, e := any_value(w, a, top, T, put)
