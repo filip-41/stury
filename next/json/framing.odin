@@ -451,20 +451,6 @@ seq_fault :: proc(it: ^records.Reader, rec: records.Record, fault: Maybe(core.Fa
 
 @(private)
 read_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
-	if it.framing >= .Concatenated {
-		switch Spec(it.as.spec) {
-		case .Json:  return read_framed(it, target, T, plan, read, allocator, err, .Json)
-		case .Jsonc: return read_framed(it, target, T, plan, read, allocator, err, .Jsonc)
-		case .Json5: return read_framed(it, target, T, plan, read, allocator, err, .Json5)
-		}
-	}
-	if it.framing == .Seq {
-		switch Spec(it.as.spec) {
-		case .Json:  return read_seq(it, target, T, plan, read, allocator, err, .Json)
-		case .Jsonc: return read_seq(it, target, T, plan, read, allocator, err, .Jsonc)
-		case .Json5: return read_seq(it, target, T, plan, read, allocator, err, .Json5)
-		}
-	}
 	switch Spec(it.as.spec) {
 	case .Json:  return read_spec(it, target, T, plan, read, allocator, err, .Json)
 	case .Jsonc: return read_spec(it, target, T, plan, read, allocator, err, .Jsonc)
@@ -473,24 +459,20 @@ read_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	return false
 }
 
-// Reads the next record into `target`.
+// Reads the next record into `target`, under `.Seq` as `seq_fault` frames it.
 @(private)
 read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
+	if it.framing >= .Concatenated {
+		return read_framed(it, target, T, plan, read, allocator, err, S)
+	}
 	rec, ok := frame_line(it)
 	if !ok {
 		return false
 	}
-	// Inlined, with the read in place in it, so the reader of each line is one procedure.
-	#force_inline read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
-	return true
-}
-
-// `read_spec` under `.Seq`, as `seq_fault` frames the record.
-@(private)
-read_seq :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
-	rec, ok := frame_line(it)
-	if !ok {
-		return false
+	if it.framing == .Lines {
+		// Inlined, with the read in place in it, so the reader of each line is one procedure.
+		#force_inline read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
+		return true
 	}
 	if it.state[1] == UNFRAMED {
 		seq_refuse(it, rec, read.collect, err)
