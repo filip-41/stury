@@ -154,6 +154,16 @@ Document_Error_Kind :: enum u8 {
 @(private)
 DOCUMENT_AT_NO_BYTE :: bit_set[Document_Error_Kind]{.None, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Fact, .Bad_Width, .Bad_Spec, .Bad_Result}
 
+// Moves the bytes of the source `e` names by `by`, for an error found in a text that starts `by` bytes in.
+move_document_error :: proc(e: ^Document_Error, by: u64) {
+	if e.kind not_in DOCUMENT_AT_NO_BYTE {
+		e.at += by
+		if e.kind == .Walk {
+			e.inner.at += by
+		}
+	}
+}
+
 // A value layer error. `at` is the byte `kind` names: the walk's fault byte for `.Walk`, the first byte of the
 // repeated key for `.Duplicate_Key`. `inner` is the fault, set for `.Walk`, `.Bad_Value` and `.Bad_Result`, whose
 // `inner.at` is a byte of the recorded text or of the commit's output, not of the source.
@@ -391,6 +401,16 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 
 // The kinds that name no byte of a source.
 TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Bad_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
+
+// Moves the bytes of the source `e` names by `by`, for an error found in a text that starts `by` bytes in.
+move_typed_error :: proc(e: ^Typed_Error, by: u64) {
+	if e.kind not_in TYPED_AT_NO_BYTE {
+		e.at += by
+		if e.kind == .Walk {
+			e.inner.at += by
+		}
+	}
+}
 
 @(private)
 write_typed_code :: proc(w: io.Writer, e: Typed_Error) -> io.Error {return write_coded(w, "typed.", TYPED_KIND_RULES[e.kind].code)}

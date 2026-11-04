@@ -193,19 +193,16 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 		runtime.arena_free_all(&it.scratch)
 	}
 	if it.input.procedure == nil {
-		from := len(opts.collect.errors) if opts.collect != nil else 0
+		kept := typed.collected_mark(opts.collect)
 		more = it.services.read(it, target, T, plan, opts, allocator, &err)
 		if opts.collect != nil {
-			keep_collected(it, opts.collect, from)
+			keep_collected(it, opts.collect, kept.errors)
 		}
 		return
 	}
 	// A record the window cannot tell yet is read again after a refill, so what its first read collected and wrote goes.
 	// The restore is shallow, so what a first read allocated for `target` stays allocated.
-	kept: typed.Collected
-	if opts.collect != nil {
-		kept = opts.collect^
-	}
+	kept := typed.collected_mark(opts.collect)
 	before := target^
 	for {
 		if it.src == nil && (it.eof || !window_move(it)) {
@@ -217,19 +214,16 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 		if window_settled(it, more, pos, state) {
 			break
 		}
-		if opts.collect != nil {
-			resize(&opts.collect.errors, len(kept.errors))
-			opts.collect.truncated = kept.truncated
-		}
+		typed.collected_restore(opts.collect, kept)
 		target^ = before
 		if !window_move(it) {
 			return false, {}
 		}
 	}
 	if opts.collect != nil {
-		keep_collected(it, opts.collect, len(kept.errors))
+		keep_collected(it, opts.collect, kept.errors)
 	}
-	shift_error(&err, it.base)
+	core.move_typed_error(&err, it.base)
 	return
 }
 
@@ -238,7 +232,7 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 @(private)
 keep_collected :: proc(it: ^Reader, c: ^typed.Collected, from: int) {
 	for &e in c.errors[from:] {
-		shift_error(&e, it.base)
+		core.move_typed_error(&e, it.base)
 		for &s in e.steps[:e.n_steps] {
 			name, named := s.(core.Name)
 			for b := it.scratch.curr_block; named && b != nil; b = b.prev {
@@ -526,15 +520,4 @@ fill :: proc(it: ^Reader) -> (gained: int, ok: bool) {
 		}
 	}
 	return gained, true
-}
-
-// Moves a typed error's offsets by `base`, for a kind that names a byte.
-@(private)
-shift_error :: proc(e: ^core.Typed_Error, base: u64) {
-	if e.kind not_in core.TYPED_AT_NO_BYTE {
-		e.at += base
-		if e.kind == .Walk {
-			e.inner.at += base
-		}
-	}
 }

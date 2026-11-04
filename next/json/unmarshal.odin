@@ -58,13 +58,9 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 		arena := runtime.Arena{backing_allocator = scratch, minimum_block_size = 4096}
 		defer runtime.arena_destroy(&arena)
 		_, built := build_spec(src[lo:cut], S, opts, true, runtime.arena_allocator(&arena))
-		if built.kind == .Walk {
-			built.inner.at += lo
-			err^ = {kind = .Walk, at = built.at + lo, inner = built.inner}
-			return
-		}
-		if built.kind == .Duplicate_Key {
-			err^ = {kind = .Duplicate_Key, at = built.at + lo}
+		core.move_document_error(&built, lo)
+		if built.kind == .Walk || built.kind == .Duplicate_Key {
+			err^ = {kind = .Walk if built.kind == .Walk else .Duplicate_Key, at = built.at, inner = built.inner}
 			return
 		}
 		if built.kind != .None {

@@ -442,15 +442,11 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 	lo := rec.at
 	cut := lo + u64(len(rec.text))
 	opts := options_of(it.as)
-	c := read.collect
-	kept: typed.Collected
-	if c != nil {
-		kept = c^
-	}
+	kept := typed.collected_mark(read.collect)
 	if !read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, true) {
 		return true
 	}
-	uncollect(c, kept)
+	typed.collected_restore(read.collect, kept)
 	// The scratch value and what its read allocates are dropped with the arena.
 	arena := runtime.Arena{backing_allocator = it.allocator, minimum_block_size = 4096}
 	defer runtime.arena_destroy(&arena)
@@ -489,10 +485,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	}
 	on :: typed.on_token_spelled when S == .Json5 else typed.on_token
 	pos, state := it.pos, it.state
-	kept: typed.Collected
-	if read.collect != nil {
-		kept = read.collect^
-	}
+	kept := typed.collected_mark(read.collect)
 	_, ok, stopped := frame_value(it, S, opts, &h, &regs, on)
 	// A walk with a hook reads the comments after a value, so a fault there is past the record, which a walk with no
 	// hook ends where `next` does.
@@ -501,20 +494,11 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 		_, ok = next_framed(it, S)
 	}
 	if !ok {
-		uncollect(read.collect, kept)
+		typed.collected_restore(read.collect, kept)
 	} else if h.first.kind != .None {
 		err^ = typed.read_end(&h, regs, nil)
 	}
 	return ok
-}
-
-// Takes back what the read of a record whose answer is another read's collected in `c`.
-@(private)
-uncollect :: proc(c: ^typed.Collected, kept: typed.Collected) {
-	if c != nil {
-		resize(&c.errors, len(kept.errors))
-		c.truncated = kept.truncated
-	}
 }
 
 // Builds the document of `rec`'s text. Its offsets in a fault count from the input's first byte.
@@ -526,10 +510,7 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 		return {}, {kind = .Walk, at = rec.at, inner = {at = rec.at, rules = &RULES, kind = .Bad_Char}}
 	}
 	doc, err = build_as(rec.text, it.as, false, allocator)
-	if err.kind != .None {
-		err.at += rec.at
-		err.inner.at += rec.at
-	}
+	core.move_document_error(&err, rec.at)
 	return
 }
 

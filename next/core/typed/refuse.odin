@@ -14,6 +14,24 @@ Collected :: struct {
 	truncated:  bool,
 }
 
+// What a collection held before a read, so a read taken back leaves it as it was. A nil collection's is zero.
+Collected_Mark :: struct {
+	errors:    int,
+	truncated: bool,
+}
+
+collected_mark :: #force_inline proc(c: ^Collected) -> Collected_Mark {
+	return {len(c.errors), c.truncated} if c != nil else {}
+}
+
+// Takes back what the reads since `m` collected in `c`, nil for none.
+collected_restore :: proc(c: ^Collected, m: Collected_Mark) {
+	if c != nil {
+		resize(&c.errors, m.errors)
+		c.truncated = m.truncated
+	}
+}
+
 // Copies the names in `e`'s steps into the temp allocator, for an error that outlives the plan its names point into.
 own_names :: proc(e: ^core.Typed_Error) {
 	for &s in e.steps[:e.n_steps] {

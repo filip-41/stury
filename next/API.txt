@@ -141,6 +141,8 @@ member :: #force_inline proc(doc: ^Document, obj: Node_Index, name: string, dups
 member_next :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool) {
 member_of :: proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplicates.Last) -> (Node_Index, Presence) {
 members_named :: proc(doc: ^Document, obj: Node_Index, name: string) -> Member_Iter {
+move_document_error :: proc(e: ^Document_Error, by: u64) {
+move_typed_error :: proc(e: ^Typed_Error, by: u64) {
 no_hook :: #force_inline proc (h: ^No_Hooks, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
 node_start :: #force_inline proc(n: Node) -> u64 {
 number :: #force_inline proc(doc: ^Document, i: Node_Index) -> Number {
@@ -274,6 +276,7 @@ set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := 
 # core/typed
 Arm :: struct {
 Collected :: struct {
+Collected_Mark :: struct {
 Enum_Spelling :: enum u8 {
 Field :: struct {
 Frame :: struct {
@@ -298,6 +301,8 @@ Type_Hook :: struct {
 Unknown_Fields :: enum u8 {
 Unmarshal_Hook :: #type proc(v: Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind)
 Value_Class :: enum u8 {
+collected_mark :: #force_inline proc(c: ^Collected) -> Collected_Mark {
+collected_restore :: proc(c: ^Collected, m: Collected_Mark) {
 field_at :: #force_inline proc (b: u64) -> ^Field {
 grow_list :: #force_no_inline proc (h: ^Reader, regs: core.Hook_Regs) -> (core.Hook_Regs, core.Typed_Error_Kind) {
 map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: core.Token) -> (slot: rawptr, reason: core.Typed_Error_Kind) {
