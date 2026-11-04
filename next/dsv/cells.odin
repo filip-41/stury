@@ -10,7 +10,7 @@ import records "../core/records"
 // Splits `row` into `b.cells`, which grows to hold them all, or its first `upto` cells. Returns the cell count, whether
 // it is the row's, or false when they do not fit in memory.
 @(private)
-split_all :: proc(it: ^records.Reader, b: ^Batch, src: []u8, row: Batch_Row, spec: Spec, opts: Options, role: core.Role, upto := max(int)) -> (n: int, whole, ok: bool) {
+split_all :: #force_inline proc(it: ^records.Reader, b: ^Batch, src: []u8, row: Batch_Row, spec: Spec, opts: Options, role: core.Role, upto := max(int)) -> (n: int, whole, ok: bool) {
 	for {
 		sp := Split{out = b.cells[:min(len(b.cells), upto)]}
 		if _, a := split_any(src, row, spec, opts, role, &sp, {}, on_split); a != .Stop || sp.n == upto {
