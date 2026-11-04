@@ -102,17 +102,17 @@ emit_row :: proc(o: ^Output, v: jq.Value) {
 }
 
 // Writes the output object of `cells` under `keys` as a table row, when every output is such an object of the same
-// keys, or ends the run on a row the table refuses.
-table_object :: proc(o: ^Output, keys: []string, cells: []Maybe(string)) {
+// keys, `ordered` when they are the header's, or ends the run on a row the table refuses.
+table_object :: proc(o: ^Output, keys: []string, cells: []Maybe(string), ordered: bool) {
 	o.table.count += 1
 	o.table.shape = .Objects
 	o.result = JQ_OK
-	object_row(o, keys, cells)
+	object_row(o, keys, cells, ordered)
 }
 
 // Writes an object's `cells`, under `keys`, as a row under the header, which the first object's keys make.
 @(private = "file")
-object_row :: proc(o: ^Output, keys: []string, cells: []Maybe(string)) {
+object_row :: proc(o: ^Output, keys: []string, cells: []Maybe(string), ordered := false) {
 	t := o.table
 	fresh := len(t.header) == 0
 	if fresh {
@@ -124,7 +124,7 @@ object_row :: proc(o: ^Output, keys: []string, cells: []Maybe(string)) {
 		}
 	}
 	row := cells
-	if !slice.equal(t.header[:], keys) {
+	if !ordered && !slice.equal(t.header[:], keys) {
 		for k in keys {
 			if !slice.contains(t.header[:], k) {
 				unknown_key(o, k)

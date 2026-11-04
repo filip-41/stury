@@ -25,7 +25,7 @@ cli.tsv json5	41
 cli.tsv stury	62
 cli.tsv libc	14
 cli.tsv compile	6
-cli.tsv csv	360
+cli.tsv csv	361
 cli.tsv fmt	42
 cli.tsv explain	60
 terminal	9

@@ -34,6 +34,7 @@ Columns :: struct {
 	upto:    int,
 	members: []Column_Member,
 	heads:   []string, // the members' keys, a table row's
+	ordered: bool, // the table's header is `heads`, or the next row makes it
 	files:   int,
 }
 
@@ -199,6 +200,9 @@ place_columns :: proc(run: ^Run, cols: ^Columns, texts: ^records.Reader, header:
 		lead := strings.concatenate({"{" if i == 0 else ",", jq.to_json(m.key, allocator = heap), ":", LEAD_PAD}, heap)
 		m.lead = lead[:len(lead) - len(LEAD_PAD)]
 	}
+	if t := run.output.table; t != nil {
+		cols.ordered = len(t.header) == 0 || slice.equal(t.header[:], cols.heads)
+	}
 }
 
 // The bytes past a member's lead, so that `put_lead` reads 32 bytes of it.
@@ -268,7 +272,7 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			for m, i in cols.members {
 				cells[i] = column_cell(it, rec, row, m.at, buf)
 			}
-			table_object(o, cols.heads, cells)
+			table_object(o, cols.heads, cells, cols.ordered)
 		case cols.every:
 			built, _ := records.build(it, rec, context.allocator)
 			emit(o, jq.document_value(built))

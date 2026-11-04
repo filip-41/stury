@@ -425,8 +425,13 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 		}
 		n += 1
 		end = rec.at + u64(len(rec.text))
-		free_all(context.allocator)
-		free_all(context.temp_allocator)
+		// The column route's records most often allocate nothing.
+		if piece_values.total_used > 0 {
+			free_all(context.allocator)
+		}
+		if piece_temp.total_used > 0 {
+			free_all(context.temp_allocator)
+		}
 	}
 	if stopped {
 		n = restore_sum(&r, before)
