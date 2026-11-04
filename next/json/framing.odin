@@ -7,6 +7,7 @@ import "base:intrinsics"
 import "base:runtime"
 import core "../core"
 import kernel "../core/kernel"
+import build "../core/build"
 import typed "../core/typed"
 import records "../core/records"
 
@@ -22,6 +23,7 @@ RECORDS := records.Services {
 	whole = whole_text,
 	read  = read_record,
 	build = build_record,
+	build_next = build_next,
 }
 
 // The byte of `Reader.state` past the framing's own two: the objects around an `.Entries` reader's array.
@@ -647,6 +649,20 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 		}
 	}
 	core.move_document_error(&err, rec.at)
+	return
+}
+
+// Frames the next record under `.Concatenated` or `.Entries` by the walk that writes its nodes to `b`. Strict JSON
+// alone, whose walk gives no comment, which the builder's plain hooks take for a node.
+@(private)
+build_next :: proc(it: ^records.Reader, b: ^build.Builder, regs: ^core.Hook_Regs) -> (rec: records.Record, ok: bool) {
+	if Spec(it.as.spec) != .Json || it.framing < .Concatenated {
+		it.fault = core.Fault{kind = .Bad_Option}
+	} else if b.refuse {
+		rec, ok, _ = frame_walked(it, .Json, options_of(it.as), b, regs, build.builder_hook_plain_refuse)
+	} else {
+		rec, ok, _ = frame_walked(it, .Json, options_of(it.as), b, regs, build.builder_hook_plain)
+	}
 	return
 }
 

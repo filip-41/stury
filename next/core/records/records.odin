@@ -125,6 +125,9 @@ Services :: struct {
 	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
 	// Builds a record's document.
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
+	// `next`, and the record's nodes written to `b` by the walk that frames it, with the offsets of `it.src`. nil for a
+	// format whose whole text `build` reads on one thread.
+	build_next: proc(it: ^Reader, b: ^engine.Builder, regs: ^core.Hook_Regs) -> (Record, bool),
 	// A format's with named columns, nil for another.
 	column: proc(it: ^Reader, name: string) -> int,
 	cell:   proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool),
@@ -298,7 +301,8 @@ scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec:
 // Builds the document of `rec`, a record `next` gave, as the format's `build` of its text does, with every offset in
 // an error from the input's first byte. The nodes' offsets index the document's `src`, which is JSON's record text and
 // dsv's input. A streamed record's document lives until the next call on `it`.
-build :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+@(private)
+build_record :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 	if it.services == nil || it.services.build == nil {
 		return {}, {kind = .Bad_Index}
 	}

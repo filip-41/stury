@@ -6,6 +6,7 @@ import "core:slice"
 import "core:sync"
 import core ".."
 import "../kernel"
+import engine "../build"
 
 // Returns the fault of each refused record of `src` read from byte `at`, in source order, and last the fault that ended
 // the records, if any. The slice is allocated with `allocator`. An allocation that fails returns its error and no
@@ -335,5 +336,174 @@ run_pieces :: proc(arg: rawptr) {
 			}
 		}
 		close(&piece)
+	}
+}
+
+// Builds a record's document, or a whole text's.
+build :: proc {build_record, build_whole}
+
+// Builds `src` as one whole text of format `as`, as `core.build` does. With a `runner`, a long text whose bulk is the
+// entries of one array, its `whole` records, has them built in pieces on the runner's threads and joined into the
+// document `core.build` gives, node for node. A text that is not so, or that does not build so, is built on the
+// calling thread, which gives its refusal.
+@(private)
+build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocator := context.allocator, runner: ^core.Runner = nil) -> (core.Document, core.Document_Error) {
+	services := (^Services)(as.spelling.records) if as.spelling != nil else nil
+	if runner != nil && runner.threads > 0 && services != nil && services.build_next != nil && u64(len(src)) >= 4 * SLICE {
+		whole, framing, at := services.whole(src, as)
+		job := Build_Job{refuse = refuse_duplicates}
+		job.pieces.allocator = runtime.heap_allocator()
+		defer {
+			for &p in job.pieces {
+				core.destroy(&p.doc)
+			}
+			delete(job.pieces)
+		}
+		if each(src, whole, framing, build_piece, &job, runner, at) == nil && !job.failed {
+			if doc, ok := join(src, as, &job, allocator, runner); ok {
+				return doc, {}
+			}
+		}
+	}
+	return core.build(src, as, refuse_duplicates, allocator)
+}
+
+// A piece of `build_whole`: the document of its entries, each a root of it, and the bytes from its first entry's
+// first byte to its last entry's end. `base` is the node its nodes start at in the joined document.
+@(private)
+Built :: struct {
+	doc:     core.Document,
+	entries: int,
+	lo, hi:  u64,
+	base:    int,
+}
+
+@(private)
+Build_Job :: struct {
+	refuse:  bool,
+	lock:    sync.Mutex,
+	pieces:  [dynamic]Built,
+	failed:  bool,
+	nodes:   []core.Node,
+	claimed: int,
+}
+
+// Builds a piece's entries into one document on the heap, as the roots of a text of values one after another. The
+// reader reads the text up to the piece's end alone, so its walk writes at most one node per two of those bytes, as
+// a whole text's build reserves, even past a fault whose text the piece's cuts misread.
+@(private)
+build_piece :: proc(job: ^Build_Job, it: ^Reader, k: int) -> bool {
+	if it.to != 0 && it.to < u64(len(it.src)) {
+		// The separator at `to` stays, so the entry before it is judged as in the whole text.
+		it.src = it.src[:it.to + 1]
+	}
+	bytes := len(it.src) - int(it.pos)
+	depth := core.reserve_depth(it.as.max_depth, bytes)
+	b := engine.builder_start(it.src, it.as, job.refuse, runtime.heap_allocator(), (bytes + depth) / 2 + 16, depth)
+	regs := engine.BUILDER_REGS
+	p: Built
+	ok := len(b.doc.nodes) > 0
+	for ok {
+		rec, more := it.services.build_next(it, &b, &regs)
+		if !more {
+			break
+		}
+		// A member's key makes no node, so an object's entries do not join.
+		ok = rec.key == nil
+		p.lo = p.lo if p.entries > 0 else rec.at
+		p.hi = rec.at + u64(len(rec.text))
+		p.entries += 1
+	}
+	err: core.Document_Error
+	p.doc, err = engine.builder_end(&b, regs, it.fault if ok else core.Fault{kind = .Bad_Option})
+	ok &&= err.kind == .None
+	sync.guard(&job.lock)
+	if k >= len(job.pieces) {
+		resize(&job.pieces, k + 1)
+	}
+	job.pieces[k] = p
+	job.failed ||= !ok
+	return ok
+}
+
+// The document of `src` with the pieces' entries in its array, or false when the text around them does not build
+// with the array empty. That text is built alone, and its nodes past the array move by the bytes cut out.
+@(private)
+join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocator, runner: ^core.Runner) -> (doc: core.Document, ok: bool) {
+	lo, hi := u64(len(src)), u64(0)
+	n, entries := 0, 0
+	for &p in job.pieces {
+		if p.entries > 0 {
+			lo, hi = min(lo, p.lo), p.hi
+			p.base = n
+			n += len(p.doc.nodes)
+			entries += p.entries
+		}
+	}
+	if entries == 0 {
+		return
+	}
+	cut := hi - lo
+	heap := runtime.heap_allocator()
+	shell := make([]u8, u64(len(src)) - cut, heap)
+	defer delete(shell, heap)
+	copy(shell, src[:lo])
+	copy(shell[lo:], src[hi:])
+	frame, err := core.build(shell, as, job.refuse, heap)
+	defer core.destroy(&frame)
+	// The array is the last node to open before the first entry.
+	array := 0
+	for array < len(frame.nodes) && frame.nodes[array].lo < lo {
+		array += 1
+	}
+	array -= 1
+	if err.kind != .None || array < 0 || frame.nodes[array].kind != .Array || frame.nodes[array].n != 1 || len(frame.facts) > 0 {
+		return
+	}
+	raw, failed := runtime.mem_alloc_non_zeroed((len(frame.nodes) + n) * size_of(core.Node), align_of(core.Node), allocator)
+	if failed != nil {
+		return
+	}
+	nodes := ([^]core.Node)(raw_data(raw))[:len(frame.nodes) + n]
+	copy(nodes, frame.nodes[:array + 1])
+	// The array's subtree and each one around it grow by the entries' nodes.
+	for &t, i in nodes[:array + 1] {
+		if (t.kind == .Array || t.kind == .Map) && i + int(t.n) > array {
+			t.n += u32(n)
+		}
+	}
+	nodes[array].spelling = u16(min(entries, int(core.MAX_CHILDREN)))
+	for t, i in frame.nodes[array + 1:] {
+		nodes[array + 1 + n + i] = {t.lo + cut, t.n, t.kind, t.role, t.spelling}
+	}
+	for &p in job.pieces {
+		p.base += array + 1
+	}
+	job.nodes = nodes
+	fan(runner, copy_pieces, job)
+	counts := make([dynamic]core.Child_Count, allocator)
+	for c in frame.counts {
+		append(&counts, core.Child_Count{c.node + core.Node_Index(n) if int(c.node) > array else c.node, c.count})
+	}
+	if entries >= int(core.MAX_CHILDREN) {
+		append(&counts, core.Child_Count{core.Node_Index(array), u32(entries)})
+	}
+	for p in job.pieces {
+		for c in p.doc.counts {
+			append(&counts, core.Child_Count{c.node + core.Node_Index(p.base), c.count})
+		}
+	}
+	slice.sort_by(counts[:], proc(a, b: core.Child_Count) -> bool { return a.node < b.node })
+	doc = {view = {src, as}, nodes = nodes, nodes_alloc = nodes, counts = counts[:], counts_alloc = counts[:], allocator = allocator}
+	doc.root_close = frame.root_close + cut if frame.root_close > lo else frame.root_close
+	return doc, true
+}
+
+// Claims pieces until none is left, and copies each one's nodes to its place in the joined document.
+@(private)
+copy_pieces :: proc(arg: rawptr) {
+	job := (^Build_Job)(arg)
+	for k := sync.atomic_add(&job.claimed, 1); k < len(job.pieces); k = sync.atomic_add(&job.claimed, 1) {
+		copy(job.nodes[job.pieces[k].base:], job.pieces[k].doc.nodes)
 	}
 }

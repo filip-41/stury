@@ -211,6 +211,85 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.validate(src, deep), json.validate(src, .Json, {max_depth = 2}))
 }
 
+// A whole text built on threads against the same text built on one: the same nodes, child counts and close, or the
+// same refusal. `joined` says the entries were built in pieces, which a joined document's exact node array tells.
+@(private = "file")
+expect_build_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, as: core.As, refuse: bool, joined: bool) -> bool {
+	text := transmute([]u8)src
+	want, want_err := core.build(text, as, refuse)
+	defer core.destroy(&want)
+	for &pool in pools {
+		got, err := records.build(text, as, refuse, runner = &pool.runner)
+		defer core.destroy(&got)
+		same := err == want_err && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close
+		if !testing.expectf(t, same, "%q at width %d: %v, want %v", src[:min(len(src), 200)], pool.runner.threads + 1, err, want_err) {
+			return false
+		}
+		if !testing.expectf(t, !joined || pool.runner.threads == 0 || len(got.nodes_alloc) == len(got.nodes), "%q at width %d: built on one thread", src[:min(len(src), 200)], pool.runner.threads + 1) {
+			return false
+		}
+	}
+	return true
+}
+
+@(test)
+records_build_a_spine :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	pools: [len(WIDTHS)]host.Pool
+	for w, i in WIDTHS {
+		host.pool_init(&pools[i], w)
+	}
+	defer for &p in pools {
+		host.pool_destroy(&p)
+	}
+	array := long_array()
+	strict := json.as(.Json)
+	for text, i in SPINES {
+		src, _ := strings.replace(text, "@", array, 1, context.temp_allocator)
+		for refuse in ([]bool{false, true}) {
+			// The deep text has no spine, and the last but one has text past its root.
+			if !expect_build_law(t, pools[:], src, strict, refuse, i != 3 && i != 4) {
+				return
+			}
+		}
+		// Broken near either end and through the middle, and cut there.
+		for at in ([]int{1, 9, 30, len(src) / 2, len(src) - 12, len(src) - 2}) {
+			for c in ([]string{"x", "]", ",", "\""}) {
+				broken := strings.concatenate({src[:at], c, src[at + 1:]}, context.temp_allocator)
+				if !expect_build_law(t, pools[:], broken, strict, false, false) || !expect_build_law(t, pools[:], src[:at], strict, false, false) {
+					return
+				}
+			}
+		}
+	}
+	// A repeated key in an entry, and at the root around the array.
+	dups, _ := strings.replace(array, `"s":`, `"a":`, 40, context.temp_allocator)
+	for refuse in ([]bool{false, true}) {
+		expect_build_law(t, pools[:], dups, strict, refuse, !refuse)
+		expect_build_law(t, pools[:], strings.concatenate({`{"n":1,"logs":`, array, `,"n":2}`}, context.temp_allocator), strict, refuse, !refuse)
+	}
+	// Entries nested to the deepest level a text may open, and one past it.
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_string(&b, `{"d":[`)
+	for i in 0 ..< 600 {
+		strings.write_string(&b, "[[[1]]]," if i != 300 else "[[[[1]]]],")
+	}
+	strings.write_string(&b, "0]}")
+	shallow := strict
+	shallow.max_depth = 5
+	nested := strings.to_string(b)
+	level, _ := strings.replace(nested, "[[[[1]]]]", "[[[1]]]", 1, context.temp_allocator)
+	expect_build_law(t, pools[:], nested, shallow, false, false)
+	expect_build_law(t, pools[:], level, shallow, false, true)
+	expect_build_law(t, pools[:], nested, strict, false, true)
+	// An array and two arrays inside it wider than a node's child count holds.
+	wide := strings.repeat("0,", 70000, context.temp_allocator)
+	inner := strings.concatenate({"[", wide, "1]"}, context.temp_allocator)
+	expect_build_law(t, pools[:], strings.concatenate({"[", wide, inner, ",", inner, "]"}, context.temp_allocator), strict, false, true)
+	// A root object with no spine: its members are entries with keys, which a document does not join.
+	expect_build_law(t, pools[:], `{"a":[1,2,3],"b":{"c":"d"},"e":[4,5,6]}`, strict, false, false)
+}
+
 // The duplicate check of a record's read builds its document on the reader's allocator, not the temporary one.
 @(test)
 records_refuse_duplicates_on_the_reader :: proc(t: ^testing.T) {

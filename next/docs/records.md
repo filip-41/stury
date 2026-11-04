@@ -10,6 +10,7 @@ records.open_stream :: proc(input: io.Reader, as: core.As, framing := core.Frami
 records.next  :: proc(it: ^records.Reader) -> (records.Record, bool)
 records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error)
 records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Document_Error)
+records.build :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocator := context.allocator, runner: ^core.Runner = nil) -> (core.Document, core.Document_Error)
 records.scan  :: proc(it: ^records.Reader, path: core.Path, read := core.Path_Options{}) -> (rec: records.Record, doc: core.Document, err: core.Path_Error, more: bool)
 records.column :: proc(it: ^records.Reader, name: string) -> int
 records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
@@ -267,6 +268,12 @@ sum_piece :: proc(job: ^Job, piece: ^records.Reader, k: int) -> bool {
 fault := records.each(src, json.as(.Json), .Lines, sum_piece, &job, &pool.runner)
 ```
 
+`build` of a whole text gives the document `core.build` gives, node for node, with the same refusal. With a `runner`,
+a long strict JSON text whose bulk is one array, at its root or on its spine, has the array's entries built in pieces
+by `each` on the threads, then joined: the text around the array is built alone and the pieces' nodes are copied in
+after the array's own. A text that is not so, or a piece that does not build, is built on the calling thread, which
+gives its refusal.
+
 ## Writing
 
 `records.Writer` writes a list one record at a time, with `records.write` for a typed value by its plan, `write_text` for a
@@ -279,7 +286,8 @@ record is framed as the reader reads it under the same `framing`. The calls and 
 A format gives its record reader as a `records.Services` table in its rodata, which its `core.Spelling.records` points
 at. `next` holds one procedure per framing, nil for a framing the format does not take, which frames the next record
 and stores the fault that ends the records in `it.fault`. `judge` returns a record's fault, `read`, `build` and `scan` read
-one. `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
+one, and `build_next` frames the next record by the walk that writes its nodes to a builder (nil where the format
+builds whole texts on one thread). `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
 without the cost of finding the whole text's fault. `exact` gives the scan whose cuts `each` starts pieces at, and `piece` turns a copy of a reader past its
 first record into a piece's reader. `whole` names the framing and offset `validate` reads a whole
 text by. `column`, `cell` and `cells` are a format's with named columns, and `close` frees the memory the format keeps in
