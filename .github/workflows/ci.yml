@@ -24,12 +24,14 @@ jobs:
       - uses: ./.github/actions/setup-odin
       - run: make lint
       # The generated fixtures against bench/manifest.toml's hashes, which hold for the CPython the generators were
-      # checked on (writes ~180 MB under bench/fixtures), and the man page.
+      # checked on (writes ~180 MB under bench/fixtures), and the man page. twitter.ndjson is made from the fetched
+      # corpus.
       - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.14"
       - name: Docs
         run: |
+          python3 bench/fetch.py corpus
           python3 bench/gen.py --check > /dev/null
           sudo apt-get install -y mandoc
           mandoc -T lint -W warning docs/stury.1
