@@ -1,11 +1,14 @@
 package dsv_tests
 
+import "base:runtime"
 import "core:bytes"
 import "core:fmt"
 import "core:io"
 import "core:math/rand"
 import "core:slice"
+import "core:strconv"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import core "../../core"
 import host "../../host"
@@ -824,6 +827,142 @@ rows_read_in_bounded_memory :: proc(t: ^testing.T) {
 			walktest.expect_bounded_reads(t, few, many, as, &ints, map[string]int) &&
 			walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Row) &&
 			walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Row, {unknown = .Refuse, refuse_duplicates = true})
+		}
+	}
+}
+
+// How a reader's records are answered when the ways to read them are compared.
+@(private = "file")
+Way :: enum {
+	Build,
+	Read,
+	Scan,
+}
+
+// What `gather` keeps: each record's answer by the input offset it starts at. Pieces on threads add under `lock`.
+@(private = "file")
+Gathered :: struct {
+	way:   Way,
+	plan:  ^typed.Plan,
+	path:  core.Path,
+	name:  string,
+	lock:  sync.Mutex,
+	by_at: map[u64]string,
+}
+
+@(private = "file")
+fresh :: proc(way: Way, plan: ^typed.Plan, path: core.Path, name: string) -> Gathered {
+	return {way = way, plan = plan, path = path, name = name, by_at = make(map[u64]string, runtime.heap_allocator())}
+}
+
+// Adds every record of `it` to `g` as the column that names `g.name` and, by `g.way`, the value under that name: a
+// built document's, a map's, or a scanned path's. Returns false when the reader ends on a fault.
+@(private = "file")
+gather :: proc(g: ^Gathered, it: ^records.Reader, _: int) -> bool {
+	buf: [64]u8
+	col := records.column(it, g.name)
+	for {
+		rec: records.Record
+		text: string
+		switch g.way {
+		case .Build:
+			ok: bool
+			if rec, ok = records.next(it); !ok {
+				return it.fault == nil
+			}
+			doc, err := records.build(it, rec, context.temp_allocator)
+			if answers, _ := core.query(&doc, g.path, allocator = context.temp_allocator); err.kind == .None && len(answers) == 1 {
+				text, _ = core.text(&doc, answers[0].node, buf[:])
+			}
+		case .Read:
+			m: map[string]string
+			more, _ := records.read(it, &m, g.plan, {}, context.temp_allocator)
+			if !more {
+				return it.fault == nil
+			}
+			text = m[g.name]
+			// A read gives no offset, so the record is told by its `id` cell.
+			rec.at, _ = strconv.parse_u64(m["id"])
+		case .Scan:
+			more: bool
+			doc: core.Document
+			if rec, doc, _, more = records.scan(it, g.path); !more {
+				return it.fault == nil
+			}
+			if len(doc.answers) == 1 {
+				text, _ = core.text(&doc, doc.answers[0].node, buf[:])
+			}
+		}
+		line := fmt.aprint(col, text, allocator = runtime.heap_allocator())
+		sync.guard(&g.lock)
+		g.by_at[rec.at] = line
+	}
+}
+
+@(private = "file")
+expect_same_answers :: proc(t: ^testing.T, what: string, got, want: map[u64]string) {
+	ok := len(got) == len(want)
+	for at, line in want {
+		ok &&= got[at] == line
+	}
+	testing.expectf(t, ok, "%s: %d records, want %d", what, len(got), len(want))
+}
+
+// Every way to read the records of a text gives each record the keys a read of the whole text on one thread gives it:
+// in pieces on threads, and on a stream whose windows hold a few records or many.
+@(test)
+records_keep_their_keys_past_the_first_window :: proc(t: ^testing.T) {
+	pools: [3]host.Pool
+	for w, i in ([3]int{1, 2, 6}) {
+		host.pool_init(&pools[i], w)
+	}
+	defer for &p in pools {
+		host.pool_destroy(&p)
+	}
+	heap := runtime.heap_allocator()
+	for spec in ([]dsv.Spec{.Csv, .Tsv}) {
+		delim := "\t" if spec == .Tsv else ","
+		for opts in ([]dsv.Options{{}, {no_header = true}}) {
+			b := strings.builder_make(heap)
+			defer strings.builder_destroy(&b)
+			if !opts.no_header {
+				strings.write_string(&b, strings.join({"id", "b", "c\n"}, delim, heap))
+			}
+			for i in 0 ..< 20_000 {
+				// A CSV cell with a delimiter and a line end, so cuts fall inside quoted cells.
+				cell := fmt.aprintf("\"q,%d\nz\"" if spec == .Csv && i % 3 == 0 else "v%d", i, allocator = heap)
+				strings.write_string(&b, fmt.aprintf("%d%s%s%sc\n", i, delim, cell, delim, allocator = heap))
+			}
+			src, as := transmute([]u8)strings.to_string(b), dsv.as(spec, opts)
+			plan, _ := dsv.plan_make(map[string]string, spec, allocator = heap)
+			name, path_text := "b", ".b"
+			if opts.no_header {
+				name, path_text = "", ".[1]"
+			}
+			path, _ := core.parse_path(path_text, heap)
+			for way in Way {
+				if way == .Read && opts.no_header {
+					continue
+				}
+				want := fresh(way, &plan, path, name)
+				it := records.open(src, as, allocator = heap)
+				gather(&want, &it, 0)
+				records.close(&it)
+				testing.expectf(t, len(want.by_at) == 20_000, "%v %v %v: %d records in memory", spec, opts, way, len(want.by_at))
+				for &pool in pools {
+					got := fresh(way, &plan, path, name)
+					records.each(src, as, .Lines, gather, &got, &pool.runner)
+					expect_same_answers(t, fmt.tprint(spec, opts, way, "width", pool.runner.threads + 1), got.by_at, want.by_at)
+				}
+				for size in ([]int{1, 700, 1 << 20}) {
+					got := fresh(way, &plan, path, name)
+					c := Chunked{src = src, sizes = {size}}
+					st := records.open_stream(chunked(&c), as, allocator = heap)
+					gather(&got, &st, 0)
+					records.close(&st)
+					expect_same_answers(t, fmt.tprint(spec, opts, way, "stream of", size), got.by_at, want.by_at)
+				}
+			}
 		}
 	}
 }
