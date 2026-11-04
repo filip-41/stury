@@ -56,7 +56,7 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 
 // On 100 valid and mutated texts of each spec, a hook keeping its state behind `h` and one keeping it in `Hook_Regs`
 // see the same tokens, with `.Skip` and `.Stop` chosen at random, and those are the tokens the full walk leaves after
-// them. The private suite runs the same law on 4000 texts of each spec.
+// them.
 @(test)
 hooks_agree :: proc(t: ^testing.T) {
 	_ = hooks_agree_in(t, .Json) && hooks_agree_in(t, .Jsonc) && hooks_agree_in(t, .Json5)

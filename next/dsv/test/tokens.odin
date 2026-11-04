@@ -53,8 +53,7 @@ walk :: proc(src: []u8, tsv, no_header: bool, h: ^$H, regs: ^core.Hook_Regs, $on
 
 // On 100 valid and broken texts, with and without a header, a hook that keeps its state behind `h` and a hook that
 // keeps it in `Hook_Regs` see the same tokens, with `Skip` and `Stop` at random, and those are the tokens `Skip` and
-// `Stop` leave of the full walk. The full walk's verdict is `validate`'s. The private suite runs the same law on 4000
-// texts.
+// `Stop` leave of the full walk. The full walk's verdict is `validate`'s.
 @(test)
 hooks_agree :: proc(t: ^testing.T) {
 	state := rand.create(1)
