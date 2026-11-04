@@ -260,13 +260,11 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 		}
 		return d if d < base else -1
 	}
+	if k := strings.index_byte("tnrfae", c); k >= 0 {
+		values := "\t\n\r\f\a\x1b"
+		return rune(values[k]), false, true
+	}
 	switch c {
-	case 't': return '\t', false, true
-	case 'n': return '\n', false, true
-	case 'r': return '\r', false, true
-	case 'f': return '\f', false, true
-	case 'a': return 0x07, false, true
-	case 'e': return 0x1B, false, true
 	case 'x':
 		if peek(p) == '{' && !at_end(p) && digit(peek(p, 1), 16) >= 0 {
 			p.i += 1

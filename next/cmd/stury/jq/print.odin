@@ -103,12 +103,8 @@ emit :: proc(p: ^Printer, v: Value) {
 	case p.depth > MAX_DEPTH:
 		token(p, int(k), "<skipped: too deep>") // what jq prints past its depth limit
 	case (k >= .Array || p.comments && p.depth == 0) && write_node(p, v):
-	case k == .Null:
-		token(p, int(k), "null")
-	case k == .False:
-		token(p, int(k), "false")
-	case k == .True:
-		token(p, int(k), "true")
+	case k <= .True:
+		token(p, int(k), "null" if k == .Null else ("true" if k == .True else "false"))
 	case k == .Number:
 		n, _ := number_of(v)
 		paint(p, int(k))
