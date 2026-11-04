@@ -24,10 +24,9 @@ RECORDS := records.Services {
 	build = build_record,
 }
 
-// The bytes of `Reader.state` past the framing's own two: the objects around an `.Entries` reader's array, and 1 in a
-// piece's reader.
+// The byte of `Reader.state` past the framing's own two: the objects around an `.Entries` reader's array.
 @(private)
-LEVELS, PIECE :: 2, 3
+LEVELS :: 2
 
 // Under `.Lines` and `.Seq` the end byte, and in strict JSON the LF between texts and the comma between entries, outside
 // strings at the level of the first record. Comments and single quotes would hide brackets from the count.
@@ -68,7 +67,7 @@ guess_start :: proc(it: ^records.Reader, to: u64) -> bool {
 	if it.framing >= .Concatenated || it.src[it.pos - 1] != b {
 		it.pos = find_byte(it.src[:to], it.pos, b) + u64(it.framing != .Entries)
 	}
-	it.state[1], it.state[PIECE] = 1, 1
+	it.state[1] = 1
 	return it.pos < to
 }
 
@@ -213,7 +212,7 @@ frame_entry :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 	value := opts
 	levels := u32(it.state[LEVELS])
 	value.max_depth = (opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH) - 1 - levels
-	piece := it.state[PIECE] == 1
+	piece := it.guessed
 	key: []u8
 	none: core.No_Hooks
 	zero: core.Hook_Regs

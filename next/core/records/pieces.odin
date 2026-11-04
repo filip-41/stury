@@ -125,7 +125,7 @@ chain_pieces :: proc(arg: rawptr) {
 		hi := min(lo + SLICE, u64(len(c.start.src)))
 		for from := lo; from < hi; {
 			it := c.start
-			it.pos = from
+			it.pos, it.guessed = from, true
 			if !it.services.guess(&it, hi) {
 				break
 			}

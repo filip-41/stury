@@ -42,6 +42,8 @@ Reader :: struct {
 	// The fault that ended the records, nil when the input ended.
 	fault:     Maybe(core.Fault),
 	framing:   core.Framing,
+	// Whether the records start where the format's `guess` placed them, so a fault ends them with no search for its place.
+	guessed:   bool,
 	// The format's own state, which a copy of the reader takes along and a record read again restores with `pos`.
 	state:     [8]u8,
 	// A stream's input, read into `buf`, whose first of `filled` bytes is the byte before the unread ones, so no
