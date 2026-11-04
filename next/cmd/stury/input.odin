@@ -283,7 +283,9 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	stray_bom := ins.has_text && bytes.has_prefix(data, {0xef, 0xbb, 0xbf})
 	ins.has_text = true
 	run := ins.run
-	if !stray_bom && (entries_pieces(ins) || run.route.scanning && answer_path(run, data, ins.as)) {
+	route := &run.route
+	dot := route.scanning && len(route.path.steps) == 0 && route.path.limit == nil && route.select.op == .None
+	if !stray_bom && (dot && spine_print(ins, put_dot) || spine_length(ins) || entries_pieces(ins) || route.scanning && answer_path(run, data, ins.as)) {
 		close_file(ins)
 		return nil, "", .More, ins.failures > 0
 	}

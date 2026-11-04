@@ -30,7 +30,7 @@ def build(odin, out, defines):
 
 
 def record(i):
-    return '{"i":%d,"v":%d,"s":"r%d","o":{"k":[%d,true,null]}}' % (i, i * 7, i, i % 5)
+    return '{"i":%d,"v":%d,"s":"r%d\\u00e9\\/","o":{"k":[%d,true,null],"z":{}}}' % (i, i * 7, i, i % 5)
 
 
 # The fault each input carries, at record `at`: a text that does not parse, or a record the filter fails on.
@@ -56,6 +56,10 @@ def csv_text(at):
 FILTERS = [".v", ".o.k[0]", ".v + 1", "select(.i % 97 == 0) | .s", "if .i == %d then error(\"x\") else .i end" % (COUNT // 3)]
 SPINE = [".logs[].v", ".logs[] | .v + 1", ".logs[] | select(.i > 2900) | .s", ".logs[][]"]
 CSV = [".id", "[.id, .qty]", "select(.qty | tonumber > 8000) | .name", "."]
+# The whole text printed or counted, under each printer option.
+WHOLE = [["."], ["-c", "."], ["--tab", "."], ["--indent", "1", "."], ["--indent", "0", "."], ["-S", "."], ["--seq", "-c", "."],
+         ["-j", "."], ["-a", "-c", "."], ["-C", "-c", "."], ["-e", "-c", "."], ["length"], ["fmt"], ["fmt", "--tab"],
+         ["fmt", "--check"]]
 
 
 def cases(directory):
@@ -80,6 +84,12 @@ def cases(directory):
         out.append(["--explain", "--from", "ndjson", "-c", ".v", nd])
         for f in SPINE:
             out.append(["-c", f, spine])
+        for w in WHOLE:
+            out.append(w + [arr])
+            out.append(w + [spine])
+        out.append(["-c", ".logs | length", spine])
+        out.append(["--explain", "-c", ".", arr])
+        out.append(["--explain", "length", spine])
         out.append(["--explain", "-c", ".logs[].v", spine])
         out.append(["--explain", "-c", ".[] | .v + 1", arr])
         out.append(["--explain", "--from", "csv", "-c", ".id", table])
@@ -91,6 +101,13 @@ def cases(directory):
     twice = file("twice.json", '{"logs":%s,"logs":[1,2]}' % array_text(None, False))
     out.append(["-c", ".logs[]", twice])
     out.append(["-c", ".logs[].v?", twice])
+    # A key repeated in an entry, and at the root around the array.
+    entries = [record(i) if i % 1000 != 7 else '{"i":%d,"i":0,"v":1}' % i for i in range(COUNT)]
+    repeated = file("repeated.json", '{"n":1,"logs":[%s],"n":2}' % ",".join(entries))
+    out.append(["-c", ".logs | length", twice])
+    for w in WHOLE:
+        out.append(w + [twice])
+        out.append(w + [repeated])
     return out
 
 

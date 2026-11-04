@@ -48,7 +48,6 @@ eval_count :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^En
 }
 
 // Whether `n` calls the builtin `length`, not a definition of that name.
-@(private)
 is_length :: proc(n: ^Node) -> bool {
 	b, native := n.native.?
 	return n.kind == .Call && native && b.fn == fn_length

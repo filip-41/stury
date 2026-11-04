@@ -192,7 +192,7 @@ entries_pieces :: proc(ins: ^Inputs) -> bool {
 		path.optional = transmute(bit_set[0 ..< core.MAX_STEPS;u64])(transmute(u64)path.optional >> uint(levels + 1))
 	}
 	flush_some(&run.output, force = true)
-	if records.each(data, entries, .Entries, piece_task, &ps, run_pool(run), at) != nil || ps.stopped || !spine_named(data, at, &ps, names[:]) {
+	if records.each(data, entries, .Entries, piece_task, &ps, run_pool(run), at) != nil || ps.stopped || !spine_named(data, at, array_close(data, at, entries_end(ps.slots[:])), ps.plain, names[:]) {
 		return false
 	}
 	answered, interpreted := 0, false
@@ -249,51 +249,76 @@ strip_spine :: proc(n: ^jq.Node, names: ^[dynamic]string) -> (stripped: ^jq.Node
 	return stripped, true
 }
 
-// Whether `names` lead from the root of `data` to its spine array at `at`, each the one key of that name in its object,
-// as jq's last-key-wins reads them. Read from the text with the array's entries cut out.
-@(private = "file")
-spine_named :: proc(data: []byte, at: u64, ps: ^Pieces, names: []string) -> bool {
-	if len(names) == 0 {
-		return true
+// The byte past the last entry of the pieces `slots`.
+entries_end :: proc(slots: []$S) -> (end: u64) {
+	for s in slots {
+		end = max(end, s.end)
 	}
-	close := at + 1
-	for s in ps.slots {
-		close = max(close, s.end)
-	}
+	return
+}
+
+// The byte of the close of the spine array at `at` of `data`, whose last entry ends before `end`.
+array_close :: proc(data: []byte, at, end: u64) -> u64 {
+	close := max(at + 1, end)
 	for close < u64(len(data)) && data[close] != ']' {
 		close += 1
 	}
+	return close
+}
+
+// Whether `names` lead from the root of `data` to its spine array at `at`, which closes at `close`, each the one key of
+// that name in its object, as jq's last-key-wins reads them.
+@(private = "file")
+spine_named :: proc(data: []byte, at, close: u64, plain: core.As, names: []string) -> bool {
+	if len(names) == 0 {
+		return true
+	}
+	doc, node, found := spine_walk(data, at, close, plain, names)
+	return found && doc.nodes[node].kind == .Array && u64(doc.nodes[node].lo) == at
+}
+
+// The document of `data` with the entries of its spine array at `at`, which closes at `close`, cut out, and the node
+// `names` lead to from its root, each the one key of that name in its object, as jq's last-key-wins reads them. False
+// when the text does not build or a name is missing or repeated.
+spine_walk :: proc(data: []byte, at, close: u64, plain: core.As, names: []string) -> (doc: core.Document, node: core.Node_Index, found: bool) {
 	shell := make([]byte, int(at) + 1 + len(data) - int(close), context.temp_allocator)
 	copy(shell, data[:at + 1])
 	copy(shell[at + 1:], data[close:])
-	doc, fault := jq.build_text(shell, ps.plain, context.temp_allocator)
-	if fault != nil {
-		return false
+	fault: Maybe(core.Fault)
+	if doc, fault = jq.build_text(shell, plain, context.temp_allocator); fault != nil {
+		return
 	}
-	node := core.ROOT
 	for name in names {
-		found := core.NO_NODE
+		next := core.NO_NODE
 		it := core.pairs(&doc, node)
 		for k, v in core.pair_next(&it) {
 			if jq.node_string(&doc, k) == name {
-				if found != core.NO_NODE {
-					return false
+				if next != core.NO_NODE {
+					return
 				}
-				found = v
+				next = v
 			}
 		}
-		if found == core.NO_NODE {
-			return false
+		if next == core.NO_NODE {
+			return
 		}
-		node = found
+		node = next
 	}
-	return doc.nodes[node].kind == .Array && u64(doc.nodes[node].lo) == at
+	return doc, node, true
 }
 
 // The arenas a thread's pieces share, mapped at its first piece and emptied after each record, so a piece does not map
 // and unmap its own. They are not freed, the process ends with its threads.
 @(private = "file", thread_local)
 piece_values, piece_temp: virtual.Arena
+
+// The calling thread's piece arenas as allocators, false when they could not be mapped.
+piece_arenas :: proc() -> (values, temp: runtime.Allocator, ok: bool) {
+	if piece_temp.curr_block == nil && (virtual.arena_init_growing(&piece_values) != nil || virtual.arena_init_growing(&piece_temp) != nil) {
+		return
+	}
+	return {scratch_allocator_proc, &piece_values}, {scratch_allocator_proc, &piece_temp}, true
+}
 
 // A piece's records answered as the serial route answers them, into the piece's own output, up to the first it cannot
 // answer alone. After a refused text it stops at the record before, so the serial route reads that text as it follows
@@ -309,9 +334,9 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 	if table != nil {
 		o.table.shape, o.table.header = table.shape, table.header
 	}
-	failed := piece_temp.curr_block == nil && (virtual.arena_init_growing(&piece_values) != nil || virtual.arena_init_growing(&piece_temp) != nil)
-	context.allocator = {scratch_allocator_proc, &piece_values}
-	context.temp_allocator = {scratch_allocator_proc, &piece_temp}
+	values, temp, mapped := piece_arenas()
+	failed := !mapped
+	context.allocator, context.temp_allocator = values, temp
 	lo, end := it.pos, it.pos
 	stop := u64(len(it.src))
 	scanned := r.route.scanning && scans(r.route.path) && !reads_cells(&r.opts)

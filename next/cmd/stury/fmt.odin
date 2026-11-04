@@ -146,6 +146,9 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) {
 		return
 	}
 	heap := runtime.heap_allocator()
+	if !cells && ins.framing == .Concatenated && spine_print(ins, put_fmt) {
+		return
+	}
 	if cells == writes_cells(o) && (cells || ins.framing == .Concatenated) {
 		doc, fault := jq.build_text(data, ins.as, heap)
 		f, bad := fault.?
