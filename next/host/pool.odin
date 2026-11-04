@@ -11,7 +11,7 @@ import core "../core"
 
 // Helper threads kept between calls, so a caller that makes many pays for starting them once. Pass `&pool.runner`.
 //
-//	- Helpers spin briefly after a call, then sleep.
+//	- Helpers spin briefly after a call, when the calls come close together, then sleep.
 //	- The caller owns the pool: `pool_init` starts the threads and `pool_destroy` joins them. It must not move
 //	  between the two, and runs one call at a time.
 Pool :: struct {
@@ -29,6 +29,10 @@ Pool :: struct {
 	widths:      [4]Width,
 	current:     ^Width,
 	began:       time.Tick,
+	// When the last call finished, and whether idle helpers spin before they sleep: until the first call, and after
+	// a call that came within `SPIN` of the one before.
+	ended:       time.Tick,
+	spin:        bool,
 	// How many tasks are in a write (`writing`).
 	in_write:    int,
 }
@@ -103,7 +107,7 @@ REVOKED :: 3
 //	- A helper the system refuses never runs: a call handed to it is taken back by `finish`.
 //	- A pool with none still runs calls, on the caller alone.
 pool_init :: proc(pool: ^Pool, workers := 0) -> runtime.Allocator_Error {
-	pool^ = {runner = {data = pool, start = start, finish = finish}}
+	pool^ = {runner = {data = pool, start = start, finish = finish}, spin = true}
 	w := workers > 0 ? workers : os.get_processor_core_count()
 	pool.helpers = make([]Helper, max(w - 1, 0), runtime.heap_allocator()) or_return
 	pool.runner.threads = len(pool.helpers)
@@ -169,6 +173,7 @@ pool_destroy :: proc(pool: ^Pool) {
 start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
 	pool := (^Pool)(data)
 	pool.began = time.tick_now()
+	sync.atomic_store(&pool.spin, pool.ended != {} && time.tick_diff(pool.ended, pool.began) < SPIN)
 	pool.task, pool.arg = task, arg
 	pool.current = width_of(pool, task)
 	pool.handed = clamp(n, 0, pool.current.width)
@@ -194,6 +199,7 @@ finish :: proc(data: rawptr) {
 	waited := time.tick_now()
 	wait_done(pool, waited)
 	adapt_width(pool, time.tick_since(pool.began), time.tick_since(waited))
+	pool.ended = time.tick_now()
 }
 
 // Wait until no handed task is pending: spin first, then yield, and sleep once a helper stalls on a write.
@@ -255,7 +261,7 @@ helper_main :: proc(t: ^thread.Thread) {
 	for {
 		switch sync.atomic_load(&h.ready) {
 		case IDLE:
-			park(&h.ready)
+			park(&h.ready, sync.atomic_load(&pool.spin))
 			continue
 		case REVOKED:
 			sync.atomic_compare_exchange_strong(&h.ready, REVOKED, IDLE)
@@ -281,12 +287,12 @@ helper_main :: proc(t: ^thread.Thread) {
 	}
 }
 
-// Wait for `ready` to leave `IDLE`: spin for `SPIN` first, then sleep.
+// Wait for `ready` to leave `IDLE`: spin for `SPIN` first when `spin`, then sleep.
 @(private)
-park :: proc(ready: ^sync.Futex) {
+park :: proc(ready: ^sync.Futex, spin: bool) {
 	began := time.tick_now()
 	for spins := 0; sync.atomic_load(ready) == IDLE; spins += 1 {
-		if spins % 64 == 0 && time.tick_since(began) > SPIN {
+		if spins % 64 == 0 && (!spin || time.tick_since(began) > SPIN) {
 			sync.futex_wait(ready, IDLE)
 			return
 		}
