@@ -304,17 +304,8 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 			return m
 		}
 		a := new_array(len(x.items))
-		append(&a.items, ..x.items[:]) // one block; only the members that point into the arenas are made anew
-		for &m in a.items {
-			switch t in m {
-			case nil, bool:
-			case Number:
-				if len(t.lit) > 0 {
-					m = copy_value(c, m)
-				}
-			case string, ^Array, ^Object, Ref, Path:
-				m = copy_value(c, m)
-			}
+		for m in x.items {
+			append(&a.items, copy_value(c, m))
 		}
 		return made_container(c, x, a)
 	case Path:
