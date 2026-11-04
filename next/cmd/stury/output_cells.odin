@@ -123,7 +123,7 @@ object_row :: proc(o: ^Output, keys: []string, cells: []Maybe(string)) {
 			slice.sort(t.header[:])
 		}
 	}
-	row := aligned(t.header[:], keys, cells)
+	row := cells if slice.equal(t.header[:], keys) else aligned(t.header[:], keys, cells)
 	head := -1
 	if fresh {
 		head = o.buf.flushed + o.buf.cursor

@@ -351,8 +351,15 @@ rows_give_all_their_cells :: proc(t: ^testing.T) {
 		it := records.open_stream(chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
 		buf: [8]u8
 		rec, _ := records.next(&it)
-		cells, ok := records.cells(&it, rec, buf[:])
+		// A row split short of its end gives the cells past the split when they are asked for.
+		cells, ok := records.cells(&it, rec, buf[:], 2)
+		testing.expectf(t, ok && fmt.tprint(cells) == `[nil, ""]`, "stream %v: %v", stream, cells)
+		s, got := records.cell(&it, rec, 3, buf[:])
+		testing.expectf(t, got && s == `p"q`, "stream %v: %q", stream, s)
+		cells, ok = records.cells(&it, rec, buf[:])
 		testing.expectf(t, ok && fmt.tprint(cells) == `[nil, "", "x", "p\"q"]`, "stream %v: %v", stream, cells)
+		cells, ok = records.cells(&it, rec, buf[:], 9)
+		testing.expectf(t, ok && len(cells) == 4, "stream %v: %v", stream, cells)
 		_, ok = records.cells(&it, rec, buf[:2])
 		testing.expect(t, !ok)
 		first := rec

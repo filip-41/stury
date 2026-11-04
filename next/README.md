@@ -145,7 +145,7 @@ records.build       :: proc(it: ^records.Reader, rec: records.Record, allocator 
 records.scan        :: proc(it: ^records.Reader, path: core.Path, read := core.Path_Options{}) -> (rec: records.Record, doc: core.Document, err: core.Path_Error, more: bool)
 records.column      :: proc(it: ^records.Reader, name: string) -> int // a delimited text's column by header name, -1 for none
 records.cell        :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
-records.cells       :: proc(it: ^records.Reader, rec: records.Record, buf: []u8) -> ([]Maybe(string), bool) // every cell of a row, as write_cells takes them
+records.cells       :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto := max(int)) -> ([]Maybe(string), bool) // a row's cells, or its first upto, as write_cells takes them
 records.close       :: proc(it: ^records.Reader)
 records.check       :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
 records.validate    :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault) // the fault a whole-text validate gives

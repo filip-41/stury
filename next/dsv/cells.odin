@@ -7,18 +7,18 @@ import core "../core"
 import kernel "../core/kernel"
 import records "../core/records"
 
-// Splits `row` into `b.cells`, which grows to hold them all. Returns the cell count, or false when they do not fit in
-// memory.
+// Splits `row` into `b.cells`, which grows to hold them all, or its first `upto` cells. Returns the cell count, whether
+// it is the row's, or false when they do not fit in memory.
 @(private)
-split_all :: proc(it: ^records.Reader, b: ^Batch, src: []u8, row: Batch_Row, spec: Spec, opts: Options, role: core.Role) -> (int, bool) {
+split_all :: proc(it: ^records.Reader, b: ^Batch, src: []u8, row: Batch_Row, spec: Spec, opts: Options, role: core.Role, upto := max(int)) -> (n: int, whole, ok: bool) {
 	for {
-		sp := Split{out = b.cells[:]}
-		if _, a := split_any(src, row, spec, opts, role, &sp, {}, on_split); a != .Stop {
-			return sp.n, true
+		sp := Split{out = b.cells[:min(len(b.cells), upto)]}
+		if _, a := split_any(src, row, spec, opts, role, &sp, {}, on_split); a != .Stop || sp.n == upto {
+			return sp.n, a != .Stop, true
 		}
 		b.cells.allocator = it.allocator
 		if resize(&b.cells, max(2 * len(b.cells), 64)) != nil {
-			return 0, false
+			return
 		}
 	}
 }
@@ -125,23 +125,24 @@ held_row :: #force_inline proc(it: ^records.Reader, rec: records.Record) -> (Bat
 	return row, row.at + it.base == rec.at
 }
 
-// The value tokens of `rec`, the row `next` gave last, or false for another or when they do not fit in memory.
+// The value tokens of `rec`, the row `next` gave last, or its first `upto`, or false for another or when they do not fit
+// in memory.
 @(private)
-cells_of :: proc(it: ^records.Reader, rec: records.Record) -> ([]core.Token, bool) {
+cells_of :: proc(it: ^records.Reader, rec: records.Record, upto := max(int)) -> ([]core.Token, bool) {
 	row, held := held_row(it, rec)
 	if !held {
 		return nil, false
 	}
 	b := (^Batch)(it.format)
-	if b.split_row != b.at {
+	if b.split_row != b.at || upto > b.split_cap {
 		spec, opts := Spec(it.as.spec), options_of(it.as)
-		ok: bool
-		if b.split, ok = split_all(it, b, it.src, row, spec, opts, .Value); !ok {
+		whole, ok: bool
+		if b.split, whole, ok = split_all(it, b, it.src, row, spec, opts, .Value, upto); !ok {
 			return nil, false
 		}
-		b.split_row = b.at
+		b.split_row, b.split_cap = b.at, max(int) if whole else upto
 	}
-	return b.cells[:b.split], true
+	return b.cells[:min(b.split, upto)], true
 }
 
 @(private)
@@ -182,7 +183,7 @@ cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8
 	b := (^Batch)(it.format)
 	spec := Spec(it.as.spec)
 	row, held := held_row(it, rec)
-	if held && b.split_row == b.at {
+	if held && b.split_row == b.at && column < b.split_cap {
 		if column < 0 || column >= b.split {
 			return "", false
 		}
@@ -211,10 +212,10 @@ cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8
 	return cell_text(it.src, cells[column], spec, buf)
 }
 
-// The texts of the cells of `rec`, the row `next` gave last, in `b.texts`, nil for an empty unquoted cell.
+// The texts of the first `upto` cells of `rec`, the row `next` gave last, in `b.texts`, nil for an empty unquoted cell.
 @(private)
-cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8) -> ([]Maybe(string), bool) #no_bounds_check {
-	cells, ok := cells_of(it, rec)
+cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: int) -> ([]Maybe(string), bool) #no_bounds_check {
+	cells, ok := cells_of(it, rec, upto)
 	b := (^Batch)(it.format)
 	if !ok {
 		return nil, false

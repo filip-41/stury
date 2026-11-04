@@ -13,7 +13,7 @@ records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := con
 records.scan  :: proc(it: ^records.Reader, path: core.Path, read := core.Path_Options{}) -> (rec: records.Record, doc: core.Document, err: core.Path_Error, more: bool)
 records.column :: proc(it: ^records.Reader, name: string) -> int
 records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
-records.cells  :: proc(it: ^records.Reader, rec: records.Record, buf: []u8) -> ([]Maybe(string), bool)
+records.cells  :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto := max(int)) -> ([]Maybe(string), bool)
 records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok: bool)
 records.close :: proc(it: ^records.Reader)
 records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
@@ -170,8 +170,8 @@ for rec in records.next(&it) {
 - A stream's `read` of a row the window cut is read again once the window holds it, from the target as it was.
 - `cell` returns cell `column` of the row `next` gave last, as a slice of the input when it needs no decode, else
   decoded into `buf`. It returns false for another row, a column past the row, or a `buf` too short.
-- `cells` returns every cell of the row `next` gave last, as `write_cells` takes them: nil for an empty unquoted
-  cell, `""` for a quoted one. They last until the next call on the reader, and the decoded ones share `buf`.
+- `cells` returns every cell of the row `next` gave last, or its first `upto`, as `write_cells` takes them: nil for an
+  empty unquoted cell, `""` for a quoted one. A row is split no further than its cells asked for. They last until the next call on the reader, and the decoded ones share `buf`.
 - `read` reads a row into a row type, from a plan of the row type, not of a list of rows. It reads as `dsv.unmarshal`
   reads a text of the header and that row into the row, refusals of the header included. A list row reads as the row
   alone, since it takes the header as data. A plan of a list of rows is `.Plan_Mismatch`, and a map row with no

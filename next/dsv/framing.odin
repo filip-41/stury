@@ -42,9 +42,9 @@ Batch_Row :: struct {
 // The rows of a reader's last frame, kept in `Reader.format`. The frame is `validate`'s pass, which records each row, and
 // the header's line in `head`, and stops once `BATCH` rows are held. `width` is the row width a frame checks rows
 // against, 0 until the first record sets it, and each row framed keeps it for the next frame. A row's cells are
-// split from its text when one is asked for. `cells` holds the `split` cells of row `split_row - 1`, and `keys` the
-// header's cells, empty with no header, as tokens of `key_src`. That is the text itself, and on a stream a copy of the
-// header's line, since the window moves. `comb` joins the header's line and a row for a read or a build on a stream.
+// split from its text when one is asked for. `cells` holds the `split` cells of row `split_row - 1`, its first
+// `split_cap` when the split stopped short of the row's end, and `keys` the header's cells, empty with no header, as
+// tokens of `key_src`. That is the text itself, and on a stream a copy of the header's line, since the window moves. `comb` joins the header's line and a row for a read or a build on a stream.
 // `done` says the text ended or faulted, with the fault in `fault`, given once the batch's rows are. `cols` are the
 // columns a typed read bound, for the plan and read flags beside them.
 //
@@ -68,6 +68,7 @@ Batch :: struct {
 	n, at:     int,
 	split:     int,
 	split_row: int,
+	split_cap: int,
 	width:     int,
 	done:      bool,
 	fault:     Maybe(core.Fault),
@@ -159,7 +160,7 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 			copy(text, src[head.at:head.hi])
 			src, head, b.key_src = text, {0, u64(len(text))}, text
 		}
-		n, ok := split_all(it, b, src, head, S, opts, .Key)
+		n, _, ok := split_all(it, b, src, head, S, opts, .Key)
 		keys, err := make([]core.Token, n, it.allocator)
 		if !ok || err != nil {
 			b.done, b.fault = true, core.Fault{rules = &RULES, kind = .No_Memory}

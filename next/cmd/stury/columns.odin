@@ -28,10 +28,12 @@ Columns :: struct {
 	// The columns read in output order, or those `select`'s F reads, and an object's key for each.
 	names:   [dynamic]string,
 	keys:    [dynamic]string,
-	// The open file's index of each name, -1 for one its header lacks, and an object's members in the order compact
-	// JSON prints them: sorted under -S, each led by `{"key":` or `,"key":`.
+	// The open file's index of each name, -1 for one its header lacks, the cells up to the last of them, and an object's
+	// members in the order compact JSON prints them: sorted under -S, each led by `{"key":` or `,"key":`.
 	at:      []int,
+	upto:    int,
 	members: []Column_Member,
+	heads:   []string, // the members' keys, a table row's
 	files:   int,
 }
 
@@ -174,14 +176,18 @@ place_columns :: proc(run: ^Run, cols: ^Columns, texts: ^records.Reader, header:
 	}
 	delete(cols.at, heap)
 	cols.at = make([]int, len(cols.names), heap)
+	cols.upto = 0
 	for name, i in cols.names {
 		cols.at[i] = records.column(texts, name)
+		cols.upto = max(cols.upto, cols.at[i] + 1)
 	}
 	if cols.shape != .Object {
 		return
 	}
 	delete(cols.members, heap)
+	delete(cols.heads, heap)
 	cols.members = make([]Column_Member, len(cols.keys), heap)
+	cols.heads = make([]string, len(cols.keys), heap)
 	for k, i in cols.keys {
 		cols.members[i] = {key = k, at = cols.at[i]}
 	}
@@ -189,6 +195,7 @@ place_columns :: proc(run: ^Run, cols: ^Columns, texts: ^records.Reader, header:
 		slice.stable_sort_by(cols.members, proc(a, b: Column_Member) -> bool {return a.key < b.key})
 	}
 	for &m, i in cols.members {
+		cols.heads[i] = m.key
 		lead := strings.concatenate({"{" if i == 0 else ",", jq.to_json(m.key, allocator = heap), ":", LEAD_PAD}, heap)
 		m.lead = lead[:len(lead) - len(LEAD_PAD)]
 	}
@@ -222,7 +229,7 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 	// One column is read alone, which splits the record only up to it.
 	row: []Maybe(string)
 	if len(cols.at) > 1 {
-		row, _ = records.cells(it, rec, buf)
+		row, _ = records.cells(it, rec, buf, cols.upto)
 	}
 	switch cols.shape {
 	case .Column:
@@ -256,13 +263,12 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			o.result = JQ_OK
 			end_output(o)
 		case o.table != nil && !o.opts.grow_header:
-			keys := make([]string, len(cols.members))
-			cells := make([]Maybe(string), len(cols.members))
+			few: [32]Maybe(string) = ---
+			cells := few[:len(cols.members)] if len(cols.members) <= len(few) else make([]Maybe(string), len(cols.members))
 			for m, i in cols.members {
-				keys[i] = m.key
 				cells[i] = column_cell(it, rec, row, m.at, buf)
 			}
-			table_object(o, keys, cells)
+			table_object(o, cols.heads, cells)
 		case cols.every:
 			built, _ := records.build(it, rec, context.allocator)
 			emit(o, jq.document_value(built))

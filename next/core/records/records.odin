@@ -128,7 +128,7 @@ Services :: struct {
 	// A format's with named columns, nil for another.
 	column: proc(it: ^Reader, name: string) -> int,
 	cell:   proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool),
-	cells:  proc(it: ^Reader, rec: Record, buf: []u8) -> ([]Maybe(string), bool),
+	cells:  proc(it: ^Reader, rec: Record, buf: []u8, upto: int) -> ([]Maybe(string), bool),
 	// Frees `it.format`, nil for a format that keeps none.
 	close:  proc(it: ^Reader),
 	// The byte that ends a record under each framing where a backward scan for it finds the end of a whole record, 0
@@ -323,15 +323,15 @@ cell :: proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool)
 	return it.services.cell(it, rec, column, buf)
 }
 
-// Returns the texts of the cells of `rec`, the record `next` gave last, as `write_cells` takes them: nil for an empty
-// unquoted cell. They last until the next call on `it`. A text that must be decoded takes the front of `buf`, which
-// holds what the record's decoded cells need. Returns false for another record, a `buf` too short, or a format with
-// no cells.
-cells :: proc(it: ^Reader, rec: Record, buf: []u8) -> ([]Maybe(string), bool) {
+// Returns the texts of the cells of `rec`, the record `next` gave last, or of its first `upto`, as `write_cells` takes
+// them: nil for an empty unquoted cell. They last until the next call on `it`. A text that must be decoded takes the
+// front of `buf`, which holds what the record's decoded cells need. Returns false for another record, a `buf` too
+// short, or a format with no cells.
+cells :: proc(it: ^Reader, rec: Record, buf: []u8, upto := max(int)) -> ([]Maybe(string), bool) {
 	if it.services == nil || it.services.cells == nil {
 		return nil, false
 	}
-	return it.services.cells(it, rec, buf)
+	return it.services.cells(it, rec, buf, upto)
 }
 
 // Frees what the reads of `it` allocated.
