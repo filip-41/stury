@@ -339,6 +339,30 @@ rows_scan_by_their_header :: proc(t: ^testing.T) {
 }
 
 @(test)
+rows_give_all_their_cells :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "a,b,c,d\n,\"\",x,\"p\"\"q\"\n1,2,3,4\n"
+	for stream in ([]bool{false, true}) {
+		c := Chunked{src = transmute([]u8)src, sizes = {1}}
+		as := dsv.as(.Csv)
+		it := records.open_stream(chunked(&c), as) if stream else records.open(transmute([]u8)src, as)
+		buf: [8]u8
+		rec, _ := records.next(&it)
+		cells, ok := records.cells(&it, rec, buf[:])
+		testing.expectf(t, ok && fmt.tprint(cells) == `[nil, "", "x", "p\"q"]`, "stream %v: %v", stream, cells)
+		_, ok = records.cells(&it, rec, buf[:2])
+		testing.expect(t, !ok)
+		first := rec
+		rec, _ = records.next(&it)
+		_, ok = records.cells(&it, first, buf[:])
+		testing.expect(t, !ok)
+		cells, ok = records.cells(&it, rec, nil)
+		testing.expectf(t, ok && fmt.tprint(cells) == `["1", "2", "3", "4"]`, "stream %v: %v", stream, cells)
+		records.close(&it)
+	}
+}
+
+@(test)
 rows_columns_cells_and_documents :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "\xef\xbb\xbfid,\"pri\"\"ce\",note\r\n1,\"2,5\",\"a\"\"b\"\n\n2,7,\"x\ny\"\n"

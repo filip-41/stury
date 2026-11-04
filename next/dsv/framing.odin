@@ -25,6 +25,7 @@ RECORDS := records.Services {
 	build  = build_row,
 	column = column_of,
 	cell   = cell_of,
+	cells  = cells_texts,
 	close  = close_rows,
 }
 
@@ -56,6 +57,7 @@ Batch :: struct {
 	head:      Batch_Row,
 	to:        u64,
 	cells:     [dynamic]core.Token,
+	texts:     [dynamic]Maybe(string),
 	keys:      []core.Token,
 	key_src:   []u8,
 	comb:      [dynamic]u8,
@@ -470,9 +472,22 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 	return -1
 }
 
-// A cell below the split buffer's length splits the row only up to it.
+// A cell of the row split last that needs no decode is read here, with no call. The rest go to `cell_split`.
 @(private)
-cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) {
+cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) #no_bounds_check {
+	b := (^Batch)(it.format)
+	if b != nil && b.at > 0 && b.split_row == b.at && b.rows[b.at - 1].at + it.base == rec.at && uint(column) < uint(b.split) {
+		if t := b.cells[column]; t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0 {
+			return string(it.src[t.lo:t.lo + u64(t.n)]), true
+		}
+	}
+	return cell_split(it, rec, column, buf)
+}
+
+// A cell below the split buffer's length splits the row only up to it. A quoted cell with a `""` the split marked, read
+// strictly, is undoubled with no general decode.
+@(private)
+cell_split :: #force_no_inline proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) {
 	b := (^Batch)(it.format)
 	spec := Spec(it.as.spec)
 	row, held := held_row(it, rec)
@@ -480,10 +495,11 @@ cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8
 		if column < 0 || column >= b.split {
 			return "", false
 		}
-		if t := b.cells[column]; t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0 {
-			return string(it.src[t.lo:t.lo + u64(t.n)]), true
+		t := b.cells[column]
+		if t.spelling & (SPELLING_DOUBLED | core.SPELLING_LAX) == SPELLING_DOUBLED && len(buf) >= int(t.n) {
+			return undoubled(buf, string(it.src[t.lo + 1:t.lo + u64(t.n) - 1])), true
 		}
-		return cell_text(it.src, b.cells[column], spec, buf)
+		return cell_text(it.src, t, spec, buf)
 	}
 	if held && 0 <= column && column < len(b.cells) {
 		opts := options_of(it.as)
@@ -499,6 +515,36 @@ cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8
 		return "", false
 	}
 	return cell_text(it.src, cells[column], spec, buf)
+}
+
+// The texts of the cells of `rec`, the row `next` gave last, in `b.texts`, nil for an empty unquoted cell.
+@(private)
+cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8) -> ([]Maybe(string), bool) #no_bounds_check {
+	cells, ok := cells_of(it, rec)
+	b := (^Batch)(it.format)
+	b.texts.allocator = it.allocator
+	if !ok || resize(&b.texts, len(cells)) != nil {
+		return nil, false
+	}
+	buf := buf
+	for t, i in cells {
+		switch {
+		case t.n == 0:
+			b.texts[i] = nil
+		case t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0:
+			b.texts[i] = string(it.src[t.lo:t.lo + u64(t.n)])
+		case:
+			s, decoded := cell_split(it, rec, i, buf)
+			if !decoded {
+				return nil, false
+			}
+			if raw_data(s) == raw_data(buf) {
+				buf = buf[len(s):]
+			}
+			b.texts[i] = s
+		}
+	}
+	return b.texts[:], true
 }
 
 // Builds `rec`, the row `next` gave last, as a document over the whole input: a `Map` keyed by the header's cells, or an
@@ -644,6 +690,7 @@ place_error :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row, e: ^core.Typ
 close_rows :: proc(it: ^records.Reader) {
 	if b := (^Batch)(it.format); b != nil {
 		delete(b.cells)
+		delete(b.texts)
 		delete(b.keys, it.allocator)
 		if it.input.procedure != nil {
 			delete(b.key_src, it.allocator)

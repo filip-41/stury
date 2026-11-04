@@ -218,19 +218,20 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 	o := &run.output
 	short: [256]u8 = ---
 	buf := short[:len(rec.text)] if len(rec.text) <= len(short) else make([]u8, len(rec.text))
+	// One column is read alone, which splits the record only up to it.
+	row: []Maybe(string)
 	if len(cols.at) > 1 {
-		// The reader splits a record at each cell asked for, from its start, unless a cell it has none of split it all.
-		records.cell(it, rec, -1, nil)
+		row, _ = records.cells(it, rec, buf)
 	}
 	switch cols.shape {
 	case .Column:
 		for at in cols.at {
-			emit(o, column_cell(it, rec, at, &buf))
+			emit(o, value_of(column_cell(it, rec, row, at, buf)))
 		}
 	case .Array:
 		a := jq.new_array(len(cols.at))
 		for at in cols.at {
-			append(&a.items, column_cell(it, rec, at, &buf))
+			append(&a.items, value_of(column_cell(it, rec, row, at, buf)))
 		}
 		emit(o, a)
 	case .Object:
@@ -240,7 +241,7 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			// Compact JSON, written as the printer writes the object.
 			for m in cols.members {
 				put_lead(&o.buf, m.lead)
-				if s, text := column_cell(it, rec, m.at, &buf).(string); text {
+				if s, text := column_cell(it, rec, row, m.at, buf).?; text {
 					jq.put_string(&o.buf, s, {})
 				} else {
 					intrinsics.unaligned_store((^u32)(write.room(&o.buf, 4)), 0x6c6c756e) // "null"
@@ -258,9 +259,7 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			cells := make([]Maybe(string), len(cols.members))
 			for m, i in cols.members {
 				keys[i] = m.key
-				if s, text := column_cell(it, rec, m.at, &buf).(string); text {
-					cells[i] = s
-				}
+				cells[i] = column_cell(it, rec, row, m.at, buf)
 			}
 			table_object(o, keys, cells)
 		case cols.every:
@@ -269,14 +268,14 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 		case:
 			obj := jq.new_object()
 			for at, i in cols.at {
-				jq.object_put(obj, cols.keys[i], column_cell(it, rec, at, &buf))
+				jq.object_put(obj, cols.keys[i], value_of(column_cell(it, rec, row, at, buf)))
 			}
 			emit(o, obj)
 		}
 	case .Select:
 		watched := jq.new_object()
 		for name, i in cols.names {
-			jq.object_put(watched, name, column_cell(it, rec, cols.at[i], &buf))
+			jq.object_put(watched, name, value_of(column_cell(it, rec, row, cols.at[i], buf)))
 		}
 		o.whole = {it, rec}
 		run_once(run, watched)
@@ -286,11 +285,15 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 	finish_input(o)
 }
 
-// The cell at column `at` of `rec` as the record's object holds it: its text, or null for an empty unquoted cell and
-// for a column the header lacks. A decoded cell takes the front of `buf`, which holds as many bytes as the record.
+// The cell at column `at` of `rec` as the record's object holds it: its text, or nil for an empty unquoted cell and for
+// a column the header lacks. `row` holds the record's cells, or is nil when the one column read is read alone, into
+// `buf`.
 @(private = "file")
-column_cell :: proc(it: ^records.Reader, rec: records.Record, at: int, buf: ^[]u8) -> jq.Value {
-	s, ok := records.cell(it, rec, at, buf^)
+column_cell :: #force_inline proc(it: ^records.Reader, rec: records.Record, row: []Maybe(string), at: int, buf: []u8) -> Maybe(string) {
+	if row != nil {
+		return row[at] if uint(at) < uint(len(row)) else nil
+	}
+	s, ok := records.cell(it, rec, at, buf)
 	if !ok {
 		return nil
 	}
@@ -299,8 +302,13 @@ column_cell :: proc(it: ^records.Reader, rec: records.Record, at: int, buf: ^[]u
 		p := int(uintptr(raw_data(s)) - uintptr(raw_data(it.src)))
 		return "" if 0 < p && p < len(it.src) && it.src[p] == '"' else nil
 	}
-	if raw_data(s) == raw_data(buf^) {
-		buf^ = buf[len(s):]
-	}
 	return s
+}
+
+@(private = "file")
+value_of :: #force_inline proc(cell: Maybe(string)) -> jq.Value {
+	if s, text := cell.?; text {
+		return s
+	}
+	return nil
 }

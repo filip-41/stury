@@ -81,10 +81,10 @@ RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limi
 // under each framing the format takes, nil for one it does not, and returns false at the input's end or on a fault,
 // which it stores in `it.fault`. `judge` returns the fault of a record `next` gave, or nil, as the format's validate of
 // the record's text at its place in the input says. `read` is `next` and a typed read of the record into `target`, a
-// `T`. `build` builds a record's document. `column` and `cell` are a format's with named columns, nil for another, and
-// `close` frees `it.format`, nil for a format that keeps none. `ends` is the byte that ends a record under each framing
-// where a backward scan for it finds the end of a whole record, 0 where only a walk of the records does, and 0xff where
-// the format reads no stream.
+// `T`. `build` builds a record's document. `column`, `cell` and `cells` are a format's with named columns, nil for
+// another, and `close` frees `it.format`, nil for a format that keeps none. `ends` is the byte that ends a record under
+// each framing where a backward scan for it finds the end of a whole record, 0 where only a walk of the records does,
+// and 0xff where the format reads no stream.
 //
 // `guess` moves a copy of a reader to the first place at or past its `pos` and before `to` where a record may start,
 // and marks it as a piece's, whose `next` may end on any fault with no cost to find the one `validate` gives. It returns
@@ -111,6 +111,7 @@ Services :: struct {
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
 	column: proc(it: ^Reader, name: string) -> int,
 	cell:   proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool),
+	cells:  proc(it: ^Reader, rec: Record, buf: []u8) -> ([]Maybe(string), bool),
 	close:  proc(it: ^Reader),
 	ends:   [core.Framing]u8,
 }
@@ -276,6 +277,17 @@ cell :: proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool)
 		return "", false
 	}
 	return it.services.cell(it, rec, column, buf)
+}
+
+// Returns the texts of the cells of `rec`, the record `next` gave last, as `write_cells` takes them: nil for an empty
+// unquoted cell. They last until the next call on `it`. A text that must be decoded takes the front of `buf`, which
+// holds what the record's decoded cells need. Returns false for another record, a `buf` too short, or a format with
+// no cells.
+cells :: proc(it: ^Reader, rec: Record, buf: []u8) -> ([]Maybe(string), bool) {
+	if it.services == nil || it.services.cells == nil {
+		return nil, false
+	}
+	return it.services.cells(it, rec, buf)
 }
 
 // Frees what the reads of `it` allocated.

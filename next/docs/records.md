@@ -12,6 +12,7 @@ records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := con
 records.scan  :: proc(it: ^records.Reader, path: core.Path, read := core.Path_Options{}) -> (rec: records.Record, doc: core.Document, err: core.Path_Error, more: bool)
 records.column :: proc(it: ^records.Reader, name: string) -> int
 records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
+records.cells  :: proc(it: ^records.Reader, rec: records.Record, buf: []u8) -> ([]Maybe(string), bool)
 records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok: bool)
 records.close :: proc(it: ^records.Reader)
 records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
@@ -198,6 +199,8 @@ for rec in records.next(&it) {
 - A stream's `read` of a row the window cut is read again once the window holds it, from the target as it was.
 - `cell` returns cell `column` of the row `next` gave last, as a slice of the input when it needs no decode, else
   decoded into `buf`. It returns false for another row, a column past the row, or a `buf` too short.
+- `cells` returns every cell of the row `next` gave last, as `write_cells` takes them: nil for an empty unquoted
+  cell, `""` for a quoted one. They last until the next call on the reader, and the decoded ones share `buf`.
 - `read` reads a row into a row type, from a plan of the row type, not of a list of rows. It reads as `dsv.unmarshal`
   reads a text of the header and that row into the row, refusals of the header included. A list row reads as the row
   alone, since it takes the header as data. A plan of a list of rows is `.Plan_Mismatch`, and a map row with no
@@ -262,7 +265,7 @@ and stores the fault that ends the records in `it.fault`. `judge` returns a reco
 one. `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
 without the cost of finding the whole text's fault. `exact` gives the scan whose cuts `each` starts pieces at, and `piece` turns a copy of a reader past its
 first record into a piece's reader. `whole` names the framing and offset `validate` reads a whole
-text by. `column` and `cell` are a format's with named columns, and `close` frees the memory the format keeps in
+text by. `column`, `cell` and `cells` are a format's with named columns, and `close` frees the memory the format keeps in
 `Reader.format`. `ends` names, per framing, the byte a backward scan finds a whole record's end by (JSON's LF and 0x1E),
 0 where only a walk of the records finds it, and 0xff where the format reads no stream under that framing. `core` stores the table as a
 `rawptr`, since `core/records` imports `core`.

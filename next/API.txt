@@ -379,6 +379,7 @@ Stream_Options :: struct {
 Writer :: struct {
 build :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 cell :: proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool) {
+cells :: proc(it: ^Reader, rec: Record, buf: []u8) -> ([]Maybe(string), bool) {
 check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error) {
 close :: proc(it: ^Reader) {
 column :: proc(it: ^Reader, name: string) -> int {
