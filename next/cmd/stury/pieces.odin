@@ -319,7 +319,6 @@ array_close :: proc(data: []byte, at, end: u64) -> u64 {
 
 // Whether `names` lead from the root of `data` to its spine array at `at`, which closes at `close`, each the one key of
 // that name in its object, as jq's last-key-wins reads them.
-@(private = "file")
 spine_named :: proc(data: []byte, at, close: u64, plain: core.As, names: []string) -> bool {
 	if len(names) == 0 {
 		return true

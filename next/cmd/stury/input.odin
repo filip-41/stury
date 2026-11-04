@@ -285,7 +285,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	run := ins.run
 	route := &run.route
 	dot := route.scanning && len(route.path.steps) == 0 && route.path.limit == nil && route.select.op == .None
-	if !stray_bom && (dot && spine_print(ins, put_dot) || spine_length(ins) || entries_pieces(ins) || route.scanning && answer_path(run, data, ins.as)) {
+	if !stray_bom && (dot && spine_print(ins, put_dot) || spine_length(ins) || entries_pieces(ins) || collect_pieces(ins) || route.scanning && answer_path(run, data, ins.as)) {
 		close_file(ins)
 		return nil, "", .More, ins.failures > 0
 	}

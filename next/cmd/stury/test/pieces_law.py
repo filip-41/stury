@@ -55,6 +55,18 @@ def csv_text(at):
 
 FILTERS = [".v", ".o.k[0]", ".v + 1", "select(.i % 97 == 0) | .s", "if .i == %d then error(\"x\") else .i end" % (COUNT // 3)]
 SPINE = [".logs[].v", ".logs[] | .v + 1", ".logs[] | select(.i > 2900) | .s", ".logs[][]"]
+# A filter collected over a root array's entries, and then a tail, with a fault or a jump inside the collected filter.
+COLLECT = ["map(.v)", "[.[] | .s]", "[.[]]", "map(select(.i % 97 == 0)) | length", "map(.v) | add", "[.[] | .o.k[0]] | .[7]",
+           "map(select(.i < 0))", "map(if .i == %d then error(\"x\") else .i end)" % (COUNT // 2),
+           "map(if .i == %d then .s + 1 else .i end) | length" % (COUNT // 2), "map(limit(2; .o.k[]))", "map(first(.o.k[]))",
+           "map(input)", "map($__loc__) | .[0]", "map(path(.o.k[]))", "map(getpath([\"o\", \"k\", 0]))",
+           "map(reduce .o.k[] as $x (0; . + 1)) | add", "map([foreach .o.k[] as $x (0; . + 1)])",
+           "map(label $out | .o.k[] | if . == true then break $out else . end)", "map(.o) | .[0]", ". | map(.i) | .[-1]"]
+# The same over a spine array, and a collect's array printed under each printer option.
+SPINE_COLLECT = [".logs | map(.v)", "[.logs[] | select(.i > 2900) | .s]", ".logs | map(.v) | length", "[.logs | .[] | .o]",
+                 ".logs | map(error)"]
+PRINTED = [["map(.o)"], ["--tab", "map(.s)"], ["--indent", "0", "map(.o)"], ["-S", "map(.o)"], ["--seq", "-c", "map(.i)"],
+           ["-j", "map(.i)"], ["-a", "-c", "map(.s)"], ["-C", "-c", "map(.o)"], ["-e", "map(select(.i < 0))"], ["-e", "-c", "map(.i)"]]
 CSV = [".id", "[.id, .qty]", "select(.qty | tonumber > 8000) | .name", "."]
 # The whole text printed or counted, under each printer option.
 WHOLE = [["."], ["-c", "."], ["--tab", "."], ["--indent", "1", "."], ["--indent", "0", "."], ["-S", "."], ["--seq", "-c", "."],
@@ -84,6 +96,14 @@ def cases(directory):
         out.append(["--explain", "--from", "ndjson", "-c", ".v", nd])
         for f in SPINE:
             out.append(["-c", f, spine])
+        for f in COLLECT:
+            out.append(["-c", f, arr])
+        for f in SPINE_COLLECT:
+            out.append(["-c", f, spine])
+        for p in PRINTED:
+            out.append(p + [arr])
+        out.append(["--explain", "-c", "map(.v) | length", arr])
+        out.append(["--explain", "-c", ".logs | map(.v)", spine])
         for w in WHOLE:
             out.append(w + [arr])
             out.append(w + [spine])
@@ -105,6 +125,8 @@ def cases(directory):
     entries = [record(i) if i % 1000 != 7 else '{"i":%d,"i":0,"v":1}' % i for i in range(COUNT)]
     repeated = file("repeated.json", '{"n":1,"logs":[%s],"n":2}' % ",".join(entries))
     out.append(["-c", ".logs | length", twice])
+    out.append(["-c", ".logs | map(.v)", twice])
+    out.append(["-c", "[.logs[] | .i]", repeated])
     for w in WHOLE:
         out.append(w + [twice])
         out.append(w + [repeated])

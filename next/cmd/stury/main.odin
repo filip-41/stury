@@ -62,6 +62,7 @@ Run :: struct {
 	pool:        ^host.Pool,
 	spares:      Spare_Outs, // the pieces' output buffers, kept from one file to the next
 	parallel:    Maybe(bool), // whether the filter runs on pieces, once `parallel` has decided it
+	collects:    int, // the collect jobs started, which number them from 1
 }
 
 main :: proc() {
