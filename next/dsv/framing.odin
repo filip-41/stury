@@ -472,22 +472,10 @@ column_of :: proc(it: ^records.Reader, name: string) -> int {
 	return -1
 }
 
-// A cell of the row split last that needs no decode is read here, with no call. The rest go to `cell_split`.
-@(private)
-cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) #no_bounds_check {
-	b := (^Batch)(it.format)
-	if b != nil && b.at > 0 && b.split_row == b.at && b.rows[b.at - 1].at + it.base == rec.at && uint(column) < uint(b.split) {
-		if t := b.cells[column]; t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0 {
-			return string(it.src[t.lo:t.lo + u64(t.n)]), true
-		}
-	}
-	return cell_split(it, rec, column, buf)
-}
-
 // A cell below the split buffer's length splits the row only up to it. A quoted cell with a `""` the split marked, read
 // strictly, is undoubled with no general decode.
 @(private)
-cell_split :: #force_no_inline proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) {
+cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool) {
 	b := (^Batch)(it.format)
 	spec := Spec(it.as.spec)
 	row, held := held_row(it, rec)
@@ -496,6 +484,9 @@ cell_split :: #force_no_inline proc(it: ^records.Reader, rec: records.Record, co
 			return "", false
 		}
 		t := b.cells[column]
+		if t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0 {
+			return string(it.src[t.lo:t.lo + u64(t.n)]), true
+		}
 		if t.spelling & (SPELLING_DOUBLED | core.SPELLING_LAX) == SPELLING_DOUBLED && len(buf) >= int(t.n) {
 			return undoubled(buf, string(it.src[t.lo + 1:t.lo + u64(t.n) - 1])), true
 		}
@@ -539,7 +530,7 @@ cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8) -> ([]M
 		case t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) == 0:
 			b.texts[i] = string(it.src[t.lo:t.lo + u64(t.n)])
 		case:
-			s, decoded := cell_split(it, rec, i, buf)
+			s, decoded := cell_of(it, rec, i, buf)
 			if !decoded {
 				return nil, false
 			}
