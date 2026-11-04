@@ -47,20 +47,22 @@ Piece_Slot :: struct {
 	room, k:       int, // the bytes `out`'s buffer holds, and the piece's number
 	sum:           Piece_Sum,
 	done, stopped: bool,
+	crossed:       bool, // it stopped on a text that runs past its end
 }
 
 Pieces :: struct {
 	run:      ^Run,
 	template: Run, // what each piece's run starts as: the run with no counts and no messages of its own
 	plain:    core.As, // how a record's text reads on its own
+	framing:  core.Framing, // how a piece's records are read, whatever cut the pieces
 	start:    u64, // records before it are answered already
 	entries:  bool,
 	lock:     sync.Mutex,
 	slots:    [dynamic]Piece_Slot,
 	next:     int, // the first slot not written
 	at:       u64, // the records written end here
-	// A piece stopped, and that piece is written.
-	stopped, ended: bool,
+	// A piece stopped, and that piece is written, and it stopped on a text that runs past its end.
+	stopped, ended, crossed: bool,
 }
 
 // Whether the filter can run on pieces of the input, decided at its first use. A filter that reads inputs, writes
@@ -142,8 +144,8 @@ give_spare :: proc(spares: ^Spare_Outs, out: []u8, room: int, k: int) {
 
 // The run each piece starts as, and the slots its pieces write into.
 @(private = "file")
-pieces_init :: proc(ps: ^Pieces, run: ^Run, plain: core.As) {
-	ps.run, ps.template, ps.plain = run, run^, plain
+pieces_init :: proc(ps: ^Pieces, run: ^Run, plain: core.As, framing: core.Framing) {
+	ps.run, ps.template, ps.plain, ps.framing = run, run^, plain, framing
 	ps.template.route.explain, ps.template.ip.messages = {on = run.route.on}, {}
 	ps.slots.allocator = runtime.heap_allocator()
 }
@@ -168,15 +170,16 @@ records_pieces :: proc(ins: ^Inputs) -> bool {
 		return false
 	}
 	flush_some(&run.output, force = true)
-	ps: Pieces
-	pieces_init(&ps, run, ins.as)
-	defer pieces_destroy(&ps)
-	// A delimited text's pieces read its header at its start.
-	ps.start, ps.at = from, 0 if cells else from
-	records.each(ins.data, ins.as, ins.framing, piece_task, &ps, run_pool(run), ps.at)
-	ins.has_text ||= ps.at > from
+	// Strict JSON texts are cut at line ends, with no pass over the text to find the cuts, and read as texts. A cut
+	// inside a text ends the piece before it on the text it cuts short, and the pieces past that cut are not written.
+	// The text past it is then cut where the texts end.
+	at, crossed := records_run(ins, .Lines if ins.framing == .Concatenated && json.Spec(ins.as.spec) == .Json else ins.framing, from, cells)
+	if crossed {
+		at, _ = records_run(ins, ins.framing, at, cells)
+	}
+	ins.has_text ||= at > from
 	// The serial route goes on at the first record no piece answered.
-	at := max(ps.at, from)
+	at = max(at, from)
 	if cells {
 		// Opened anywhere but at its start, a delimited text's reader takes its first record for the header.
 		ins.skip_below = at
@@ -187,6 +190,19 @@ records_pieces :: proc(ins: ^Inputs) -> bool {
 	// Past the record a piece stopped at, which the serial route reads first.
 	ins.parallel_from = at + max(POOLED_BYTES, 1)
 	return true
+}
+
+// Answers the open file's records from `from` in pieces cut under `framing`, and returns where the records they wrote
+// end, and whether the last piece written stopped on a text its cut ran through.
+@(private = "file")
+records_run :: proc(ins: ^Inputs, framing: core.Framing, from: u64, cells: bool) -> (at: u64, crossed: bool) {
+	ps: Pieces
+	pieces_init(&ps, ins.run, ins.as, ins.framing)
+	defer pieces_destroy(&ps)
+	// A delimited text's pieces read its header at its start.
+	ps.start, ps.at = from, 0 if cells else from
+	records.each(ins.data, ins.as, framing, piece_task, &ps, run_pool(ins.run), ps.at)
+	return ps.at, ps.crossed
 }
 
 // Answers the whole JSON text `ins.data` through the entries of its spine array on the pool's threads, when the text
@@ -206,7 +222,7 @@ entries_pieces :: proc(ins: ^Inputs) -> bool {
 		return false
 	}
 	ps: Pieces
-	pieces_init(&ps, run, ins.as)
+	pieces_init(&ps, run, ins.as, .Entries)
 	defer pieces_destroy(&ps)
 	ps.entries, ps.template.prog = true, prog
 	if run.route.scanning {
@@ -372,10 +388,11 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 	values, temp, mapped := piece_arenas()
 	failed := !mapped
 	context.allocator, context.temp_allocator = values, temp
+	it.framing = ps.framing
 	lo, end := it.pos, it.pos
 	stop := u64(len(it.src))
 	scanned := r.route.scanning && scans(r.route.path) && !reads_cells(&r.opts)
-	n, before_at, stopped := 0, lo, failed
+	n, before_at, stopped, crossed := 0, lo, failed, false
 	before := piece_sum(&r, n)
 	for !stopped {
 		rec: records.Record
@@ -388,8 +405,9 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 			rec, more = records.next(it)
 		}
 		if !more {
-			if it.fault != nil {
+			if f, bad := it.fault.?; bad {
 				stop, stopped = before_at, true
+				crossed = f.kind == .Truncated && f.at == u64(len(it.src))
 			}
 			break
 		}
@@ -408,7 +426,7 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 	if stopped {
 		n = restore_sum(&r, before)
 	}
-	slot := Piece_Slot{lo = lo, hi = stop, end = end, sum = piece_sum(&r, n), stopped = stopped}
+	slot := Piece_Slot{lo = lo, hi = stop, end = end, sum = piece_sum(&r, n), stopped = stopped, crossed = crossed}
 	if o.table != nil {
 		records.writer_destroy(&o.table.wr)
 		free(o.table, runtime.heap_allocator())
@@ -485,7 +503,7 @@ publish :: proc(ps: ^Pieces, k: int, slot: Piece_Slot) {
 		}
 		write_piece(ps, s)
 		ps.next = i + 1
-		ps.ended = s.stopped
+		ps.ended, ps.crossed = s.stopped, s.crossed
 	}
 }
 
