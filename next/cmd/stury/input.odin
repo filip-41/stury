@@ -352,16 +352,17 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	}
 	doc: core.Document
 	fault: Maybe(core.Fault)
+	texts: bool
 	if stray_bom {
 		fault = core.Fault{kind = .Bad_Char}
 	} else {
-		doc, fault = jq.build_text(data, ins.as, runtime.heap_allocator() if run.opts.stream else context.allocator)
+		doc, fault, texts = build_whole(data, ins.source, runtime.heap_allocator() if run.opts.stream else context.allocator)
+	}
+	if texts {
+		route.fallback = fallback
+		return
 	}
 	if f, bad := fault.?; bad {
-		if !stray_bom && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) && ins.spec == .Json {
-			route.fallback = fallback
-			return
-		}
 		v, msg, status = text_fault(ins, f, 0)
 		return v, msg, status, true
 	}
@@ -369,6 +370,22 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	// The file's one text: it is read past whole.
 	close_file(ins)
 	return v, msg, status, true
+}
+
+// The document of `data` built whole, or its fault. `texts`, with no fault, when the fault is a text after the first,
+// which strict JSON reads as the next text, so that `data` is read as texts one after another.
+build_whole :: proc(data: []byte, src: Source, allocator: runtime.Allocator) -> (doc: core.Document, fault: Maybe(core.Fault), texts: bool) {
+	doc, fault = jq.build_text(data, src.as, allocator)
+	if f, bad := fault.?; bad && texts_follow(f, src.spec) {
+		return {}, nil, true
+	}
+	return
+}
+
+// Whether the fault `f` of a text read as `spec` is a text after the first, which strict JSON reads as the next text,
+// where `validate` and a build, judging one, refuse it as trailing text.
+texts_follow :: proc(f: core.Fault, spec: Maybe(json.Spec)) -> bool {
+	return spec == .Json && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing)
 }
 
 // Whether the records of a window that is not the file's last ended on a text cut short at the window's end. A

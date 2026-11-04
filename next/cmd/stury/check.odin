@@ -62,9 +62,9 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 		fault = records.validate(data, src.as, runner)
 	case src.framing == .Concatenated:
 		fault = records.validate(data, src.as, runner)
-		// Strict JSON reads texts one after another, which `validate`, judging one, refuses as trailing text. A byte no
-		// text starts with, right after a text, stays trailing text, as the reader of the texts from the first tells it.
-		if f, bad := fault.?; bad && src.spec == .Json && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) {
+		// A byte no text starts with, right after a text, stays trailing text, as the reader of the texts from the first
+		// tells it.
+		if f, bad := fault.?; bad && texts_follow(f, src.spec) {
 			if next, more := first_fault(data, src.as, .Concatenated, runner, f.at).?; !more || next.at != f.at || jq.is_space(data[f.at - 1]) {
 				fault = next if more else nil
 			}

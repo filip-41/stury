@@ -150,16 +150,14 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) {
 		return
 	}
 	if cells == writes_cells(o) && (cells || ins.framing == .Concatenated) {
-		doc, fault := jq.build_text(data, ins.as, heap)
-		f, bad := fault.?
-		if !bad {
+		doc, fault, texts := build_whole(data, ins.source, heap)
+		// A delimited text's fault is told at the record it is in, which the records below reach.
+		if f, bad := fault.?; bad && !cells {
+			fmt_failed(run, ins, f)
+		} else if !bad && !texts {
 			put_document(run, ins, &doc)
 			core.destroy(&doc)
 			return
-		}
-		// Strict JSON reads texts one after another, which a build, reading one, refuses as trailing text.
-		if !cells && (ins.spec != .Json || f.rules != &json.RULES || f.detail != u8(json.Detail.Trailing)) {
-			fmt_failed(run, ins, f)
 		}
 	}
 	it := records.open(data, ins.as, ins.framing, allocator = heap)
