@@ -42,6 +42,9 @@ FOLLOW_POLL :: 50 * time.Millisecond
 // Set by SIGINT and SIGTERM (`catch_stop`) for a --follow run, which then ends as if its file ended.
 stopped: bool
 
+// The file whose mapping is read, which a SIGBUS on POSIX names.
+mapped_input_name: string
+
 // How the inputs are read: `as`, the format's handle, which `core.build` and `core.validate` read a text through
 // whatever the format is, and how a file's texts follow each other.
 Source :: struct {
@@ -64,6 +67,7 @@ Inputs :: struct {
 	// is whole: most files hold one, which one build reads.
 	open:      bool,
 	data:      []byte,
+	mapped:    bool, // data is the file's mapping (`map_file`), not the heap's
 	last:      bool,
 	pipe:      ^Pipe,
 	texts:     records.Reader,
@@ -77,7 +81,7 @@ Inputs :: struct {
 	head:      []byte,
 	headed:    bool,
 	fresh:     bool, // --follow: the file was truncated, so what follows the last window taken is a new file
-	spent:     [dynamic][]byte,
+	spent:     [dynamic]Spent,
 	raw_at:    int, // -R: where the next line starts in data
 	raw_done:  bool, // -R -s: the one string is read
 	// Where jq's parser stands at data[0], counted over every byte read before it, and the lines of the open file
@@ -458,14 +462,23 @@ open_next :: proc(ins: ^Inputs) -> bool {
 			take_data(ins, nil)
 			return true
 		}
-		data, read := read_file(f)
+		data, mapped := map_file(f)
+		read := mapped
+		if mapped {
+			mapped_input_name = ins.name
+			if f != os.stdin {
+				os.close(f)
+			}
+		} else {
+			data, read = read_file(f)
+		}
 		if !read {
 			ins.failures += 1
 			continue
 		}
 		ins.run.route.input += len(data)
 		ins.open, ins.last = true, true
-		set_data(ins, data)
+		set_data(ins, data, mapped)
 		return true
 	}
 	return false
@@ -507,9 +520,9 @@ read_file :: proc(f: ^os.File) -> (data: []byte, ok: bool) {
 
 // `data` as the open file's bytes in memory, with its texts read from the start.
 @(private = "file")
-set_data :: proc(ins: ^Inputs, data: []byte) {
+set_data :: proc(ins: ^Inputs, data: []byte, mapped := false) {
 	retire(ins)
-	ins.data, ins.raw_at, ins.pieces, ins.header_judged, ins.parallel_from, ins.skip_below = data, 0, {}, false, 0, 0
+	ins.data, ins.mapped, ins.raw_at, ins.pieces, ins.header_judged, ins.parallel_from, ins.skip_below = data, mapped, 0, {}, false, 0, 0
 	ins.several = ins.framing != .Concatenated || !ins.last
 	ins.texts = records.open(data, ins.as, ins.framing, allocator = runtime.heap_allocator())
 }
@@ -589,11 +602,26 @@ retire :: proc(ins: ^Inputs) {
 	records.close(&ins.texts)
 	if ins.pinned || ins.run.opts.stream {
 		// --stream's events and the walk of a faulty text read the text as they go, so it is kept for the run.
-		append(&ins.spent, ins.data)
+		append(&ins.spent, Spent{ins.data, ins.mapped})
 	} else {
-		delete(ins.data, runtime.heap_allocator())
+		free_spent({ins.data, ins.mapped})
 	}
 	ins.data, ins.pinned = nil, false
+}
+
+// A file's bytes read past, and whether they are its mapping.
+Spent :: struct {
+	data:   []byte,
+	mapped: bool,
+}
+
+@(private = "file")
+free_spent :: proc(d: Spent) {
+	if d.mapped {
+		unmap_file(d.data)
+	} else {
+		delete(d.data, runtime.heap_allocator())
+	}
 }
 
 // The bytes read past freed, once the values the main loop read from them are printed.
@@ -602,7 +630,7 @@ release_spent :: proc(ins: ^Inputs) {
 		return
 	}
 	for d in ins.spent {
-		delete(d, runtime.heap_allocator())
+		free_spent(d)
 	}
 	clear(&ins.spent)
 	ins.pinned = false
