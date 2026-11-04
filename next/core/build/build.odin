@@ -1,6 +1,7 @@
 package build
 
 import "base:runtime"
+import "core:hash"
 import "core:slice"
 import core ".."
 
@@ -145,9 +146,6 @@ builder_finish :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Faul
 	if len(b.doc.facts) > 1 {
 		slice.stable_sort_by(b.doc.facts, proc(a, b: core.Fact) -> bool { return a.node < b.node })
 	}
-	b.doc.nodes = b.doc.nodes_alloc[:n]
-	b.doc.facts = b.doc.facts_alloc[:b.n_facts]
-	b.doc.counts = b.doc.counts_alloc[:len(b.doc.counts)]
 	b.doc.root_close = b.root_close
 	return {}
 }
@@ -510,17 +508,6 @@ builder_grow :: #force_no_inline proc "contextless" (h: ^Builder) {
 	h.doc.nodes_alloc = fresh
 }
 
-// Doubles the fact buffer. A text with no facts does not call this. Returns false when a growth is refused.
-@(private, cold)
-builder_facts_grow :: #force_no_inline proc "contextless" (h: ^Builder) -> bool {
-	fresh, ok := grow(h.doc.allocator, h.doc.facts_alloc, 8)
-	if !ok {
-		return false
-	}
-	h.doc.facts_alloc = fresh
-	return true
-}
-
 // Handles a fact token out of line. A head comment is held until the value it marks arrives, an inline comment
 // belongs to the last value completed, and a foot belongs to the innermost open container, or to the root at depth 0.
 @(private, cold)
@@ -545,12 +532,14 @@ builder_fact :: #force_no_inline proc "contextless" (h: ^Builder, s: core.Hook_R
 		pending = true
 	}
 	if h.n_facts == len(h.doc.facts_alloc) {
-		if !builder_facts_grow(h) {
+		fresh, ok := grow(h.doc.allocator, h.doc.facts_alloc, 8)
+		if !ok {
 			if h.err.kind == .None {
 				h.err = {kind = .No_Memory}
 			}
 			return
 		}
+		h.doc.facts_alloc = fresh
 	}
 	h.doc.facts_alloc[h.n_facts] = core.Fact{lo = t.lo, node = node, n = t.n, role = t.role, spelling = t.spelling}
 	h.n_facts += 1
@@ -589,12 +578,8 @@ builder_keys_lo :: #force_inline proc "contextless" (h: ^Builder) -> u64 {
 duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open, end: core.Node_Index, allocator: runtime.Allocator) -> core.Document_Error {
 	context = runtime.default_context()
 	keys := 0
-	for i := int(open) + 1; i < int(end); {
-		n := doc.nodes[i]
-		if n.role == .Key {
-			keys += 1
-		}
-		i += int(n.n) if n.kind == .Array || n.kind == .Map else 1
+	for i := open + 1; i < end; i += core.Node_Index(doc.nodes[i].n) if doc.nodes[i].kind > .Plain else 1 {
+		keys += int(doc.nodes[i].role == .Key)
 	}
 	size := 8
 	for size < 2 * keys {
@@ -602,61 +587,44 @@ duplicate_key :: #force_no_inline proc "contextless" (doc: ^core.Document, open,
 	}
 	small: [64]Key_Entry
 	slots := small[:]
-	heap: []Key_Entry
 	if size > len(small) {
 		fresh, err := make([]Key_Entry, size, allocator)
 		if err != nil {
 			return {kind = .No_Memory}
 		}
-		heap = fresh
 		slots = fresh
 	}
-	defer if heap != nil {
-		delete(heap, allocator)
+	defer if size > len(small) {
+		delete(slots, allocator)
 	}
 	mask := u64(size - 1)
-	for i := int(open) + 1; i < int(end); {
-		n := doc.nodes[i]
-		if n.role != .Key {
-			i += int(n.n) if n.kind == .Array || n.kind == .Map else 1
+	for key := open + 1; key < end; key += core.Node_Index(doc.nodes[key].n) if doc.nodes[key].kind > .Plain else 1 {
+		if doc.nodes[key].role != .Key {
 			continue
 		}
-		key := core.Node_Index(i)
 		buf: [256]u8
 		s, owned, ok := key_text(doc, key, allocator, buf[:])
+		defer delete(owned, allocator)
 		if !ok {
 			return {kind = .No_Memory}
 		}
-		hash := hash_bytes(transmute([]u8)s)
-		at := hash & mask
-		for {
-			e := &slots[at]
-			if !e.used {
-				e^ = {hash = hash, node = key, used = true}
-				break
+		code := hash.fnv64a(transmute([]u8)s)
+		at := code & mask
+		for ; slots[at].used; at = (at + 1) & mask {
+			if slots[at].hash != code {
+				continue
 			}
-			if e.hash == hash {
-				same: bool
-				same, ok = text_equals(doc, e.node, s, allocator)
-				if !ok {
-					if owned != nil {
-						delete(owned, allocator)
-					}
-					return {kind = .No_Memory}
-				}
-				if same {
-					if owned != nil {
-						delete(owned, allocator)
-					}
-					return {kind = .Duplicate_Key, at = core.node_start(n)}
-				}
+			other: [256]u8
+			t, also, read := key_text(doc, slots[at].node, allocator, other[:])
+			defer delete(also, allocator)
+			if !read {
+				return {kind = .No_Memory}
 			}
-			at = (at + 1) & mask
+			if t == s {
+				return {kind = .Duplicate_Key, at = core.node_start(doc.nodes[key])}
+			}
 		}
-		if owned != nil {
-			delete(owned, allocator)
-		}
-		i += int(n.n) if n.kind == .Array || n.kind == .Map else 1
+		slots[at] = {hash = code, node = key, used = true}
 	}
 	return {}
 }
@@ -676,33 +644,9 @@ key_text :: proc(doc: ^core.Document, i: core.Node_Index, allocator: runtime.All
 	return
 }
 
-// Returns whether key node `i`'s text equals `s`, both read through `text`.
-@(private)
-text_equals :: proc(doc: ^core.Document, i: core.Node_Index, s: string, allocator: runtime.Allocator) -> (bool, bool) {
-	buf: [256]u8
-	t, owned, ok := key_text(doc, i, allocator, buf[:])
-	if !ok {
-		return false, false
-	}
-	same := t == s
-	if owned != nil {
-		delete(owned, allocator)
-	}
-	return same, true
-}
-
 @(private)
 Key_Entry :: struct {
 	hash: u64,
 	node: core.Node_Index,
 	used: bool,
-}
-
-@(private)
-hash_bytes :: proc(s: []u8) -> u64 {
-	h := u64(0xcbf2_9ce4_8422_2325)
-	for b in s {
-		h = (h ~ u64(b)) * 0x100_0000_01b3
-	}
-	return h
 }

@@ -288,48 +288,31 @@ many_found :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, set: u64,
 	}
 }
 
-// Gives `on` what is known.
+// Gives `on` what is known. `on` returning false stops the read.
 @(private)
 many_flush :: proc "contextless" (h: ^Scan) {
 	m := h.many
 	context = m.ctx
-	for m.flushed < m.n_placed {
-		a := &m.placed[m.flushed]
-		if a.answer.path != DEAD {
-			if !many_give(h, a^) {
-				return
+	for ; m.flushed < m.n_placed; m.flushed += 1 {
+		a := m.placed[m.flushed]
+		if a.answer.path == DEAD {
+			continue
+		}
+		lo, hi: u64
+		if a.answer.outcome == .Found {
+			lo, hi = core.scalar_ends(a.token)
+			if a.token.kind == .Array || a.token.kind == .Map {
+				hi = a.hi
 			}
 		}
-		m.flushed += 1
+		if !m.on(m.state, core.Token_Answer{a.token, lo, hi, a.answer.path, a.answer.outcome}) {
+			h.stopped = true
+			m.flushed = m.n_placed
+			return
+		}
 	}
 	m.flushed = 0
 	m.n_placed = 0
-}
-
-// Calls `on` for one answer. Returning false stops the read.
-@(private = "file")
-many_give :: proc(h: ^Scan, a: Placed) -> bool {
-	m := h.many
-	lo, hi: u64
-	if a.answer.outcome == .Found {
-		lo, hi = core.scalar_ends(a.token)
-		if a.token.kind == .Array || a.token.kind == .Map {
-			hi = a.hi
-		}
-	}
-	if m.on(m.state, core.Token_Answer{a.token, lo, hi, a.answer.path, a.answer.outcome}) {
-		return true
-	}
-	h.stopped = true
-	m.flushed = m.n_placed
-	return false
-}
-
-// Gives `on` what a read held to its end. Under a limit on a late path that is everything.
-@(private)
-many_stream_end :: proc(h: ^Scan) {
-	many_settle(h)
-	many_flush(h)
 }
 
 // Takes back path `p`'s answers through the earlier match of step `k`. A step past a `Descend` is live in many

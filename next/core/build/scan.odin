@@ -277,7 +277,9 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	h.b.n_counts = w
 	if _, bad := fault.?; !bad && h.many != nil {
 		if streamed {
-			many_stream_end(h)
+			// Under a limit on a late path everything was held to the end.
+			many_settle(h)
+			many_flush(h)
 		} else {
 			many_answers(h)
 		}
