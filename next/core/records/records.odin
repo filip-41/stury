@@ -156,6 +156,10 @@ next :: #force_inline proc(it: ^Reader) -> (Record, bool) {
 	if it.input.procedure != nil {
 		return stream_next(it)
 	}
+	if it.services == nil {
+		it.fault = core.Fault{kind = .Bad_Option}
+		return {}, false
+	}
 	return it.services.next[it.framing](it)
 }
 
@@ -261,7 +265,7 @@ scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec:
 		}
 	}
 	s := it.scan
-	if it.services.scan != nil && it.input.procedure == nil {
+	if it.services != nil && it.services.scan != nil && it.input.procedure == nil {
 		rec, err, more = it.services.scan(it, &s.h, &s.last, path, read)
 		// A record that fails before its walk leaves `last` and its buffers for the next.
 		return rec, s.last if err.kind == .None else {}, err, more
@@ -293,7 +297,7 @@ build :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (core
 // Returns the index of the first column `name` names, or -1 when none does or the format has no named columns. It may
 // read the first records, which `next` then gives.
 column :: proc(it: ^Reader, name: string) -> int {
-	if it.fault != nil || it.services.column == nil {
+	if it.fault != nil || it.services == nil || it.services.column == nil {
 		return -1
 	}
 	return it.services.column(it, name)

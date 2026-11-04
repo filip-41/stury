@@ -167,8 +167,8 @@ pool_destroy :: proc(pool: ^Pool) {
 	pool^ = {}
 }
 
-// Hand the task to the first `n` helpers, none for a negative `n`, then wake two. Each helper wakes two more once it starts, so the caller
-// pays for two wakes, not one per helper.
+// Hand the task to the first `n` helpers, none for a negative `n` or a nil task, then wake two. Each helper wakes
+// two more once it starts, so the caller pays for two wakes, not one per helper.
 @(private)
 start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
 	pool := (^Pool)(data)
@@ -176,7 +176,8 @@ start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
 	sync.atomic_store(&pool.spin, pool.ended != {} && time.tick_diff(pool.ended, pool.began) < SPIN)
 	pool.task, pool.arg = task, arg
 	pool.current = width_of(pool, task)
-	pool.handed = clamp(n, 0, pool.current.width)
+	// A helper handed a nil task stops, as `pool_destroy` has it.
+	pool.handed = clamp(n, 0, pool.current.width) if task != nil else 0
 	sync.atomic_store(&pool.pending, pool.handed)
 	for &h in pool.helpers[:pool.handed] {
 		sync.atomic_store(&h.ready, HANDED)

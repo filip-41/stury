@@ -42,6 +42,13 @@ records_past_the_input_or_without_services_are_refused :: proc(t: ^testing.T) {
 	defer records.close(&bare)
 	_, err := records.build(&bare, {text = src})
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Bad_Index)
+	// A reader no `open` made reads nothing.
+	zero: records.Reader
+	_, more = records.next(&zero)
+	_, _, _, scanned := records.scan(&zero, {})
+	f, faulted = zero.fault.?
+	testing.expect(t, !more && !scanned && faulted && f.kind == .Bad_Option && records.column(&zero, "a") == -1)
+	records.close(&zero)
 }
 
 // Remembers the largest request made through it.

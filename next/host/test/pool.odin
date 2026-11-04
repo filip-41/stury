@@ -103,6 +103,25 @@ helpers_run_the_task_beside_the_caller :: proc(t: ^testing.T) {
 	testing.expect(t, started >= 2)
 }
 
+// A nil task is handed to no helper, which keeps every helper for the next call and for `pool_destroy`.
+@(test)
+nil_task_runs_nowhere :: proc(t: ^testing.T) {
+	pool: host.Pool
+	host.pool_init(&pool, 3)
+	defer host.pool_destroy(&pool)
+	// Every width the pool learns names a task, so nil is a task it has not met.
+	count: int
+	for task in ([]proc(arg: rawptr){bump, bump_twice, meet, proc(arg: rawptr) {}}) {
+		run(&pool.runner, pool.runner.threads, task, &count)
+	}
+	pool.runner.start(pool.runner.data, pool.runner.threads, nil, nil)
+	time.sleep(10 * time.Millisecond)
+	pool.runner.finish(pool.runner.data)
+	started: int
+	run(&pool.runner, pool.runner.threads, meet, &started)
+	testing.expect(t, started >= 2)
+}
+
 // A call ended before its helpers woke: none runs the task after `finish`, and a negative count hands out none.
 @(test)
 no_call_runs_after_finish :: proc(t: ^testing.T) {
