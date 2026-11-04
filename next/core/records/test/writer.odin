@@ -167,7 +167,7 @@ cells_keep_the_old_guards :: proc(t: ^testing.T) {
 	defer records.writer_destroy(&wr)
 	records.write_cells(&wr, {BOM + "a", "b"})
 	records.write_cells(&wr, {"a", nil, "x,y"})
-	records.write_cells(&wr, {nil})
+	testing.expect_value(t, records.write_cells(&wr, {nil}), core.Typed_Error_Kind.Unwritable)
 	records.write_cells(&wr, {""})
 	testing.expect_value(t, records.write_cells(&wr, {}), core.Typed_Error_Kind.Unwritable)
 	testing.expect_value(t, records.write_cells(&wr, {"ok", "\xff"}), core.Typed_Error_Kind.Bad_Utf8)
@@ -175,7 +175,7 @@ cells_keep_the_old_guards :: proc(t: ^testing.T) {
 	records.write_text(&wr, transmute([]u8)string("p,q"))
 	text, err := records.writer_end(&wr)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(text), "\"" + BOM + "a\",b\na,,\"x,y\"\n\"\"\n\"\"\n" + BOM + "not first\np,q\n")
+	testing.expect_value(t, string(text), "\"" + BOM + "a\",b\na,,\"x,y\"\n\"\"\n" + BOM + "not first\np,q\n")
 
 	// Every record of a TSV text ends a line, and an empty one would vanish.
 	records.writer_init(&wr, {}, dsv.as(.Tsv), allocator = context.temp_allocator)

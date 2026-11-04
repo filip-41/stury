@@ -124,12 +124,12 @@ object_row :: proc(o: ^Output, keys: []string, cells: []Maybe(string)) {
 		}
 	}
 	row := aligned(t.header[:], keys, cells)
+	head := -1
 	if fresh {
-		// A first row the table refuses leaves no header behind it.
-		refuse_blank(o, row)
+		head = o.buf.flushed + o.buf.cursor
 		write_header(o)
 	}
-	put_row(o, row)
+	put_row(o, row, head)
 }
 
 // The cells of an object row under `header`: each key's cell in the header's order, empty for a key the row lacks.
@@ -183,12 +183,14 @@ write_header :: proc(o: ^Output) {
 }
 
 // Writes one record and moves the writer's text into the run's output, or ends the run on a record the writer
-// refuses. A record of no cell or one empty cell is refused here, since it reads back as no record.
+// refuses, dropping the output from `head` on when it is not yet flushed: a refused first row takes its header with it.
 @(private = "file")
-put_row :: proc(o: ^Output, cells: []Maybe(string)) {
+put_row :: proc(o: ^Output, cells: []Maybe(string), head := -1) {
 	t := o.table
-	refuse_blank(o, cells)
 	if kind := records.write_cells(&t.wr, cells); kind != .None {
+		if head >= o.buf.flushed {
+			o.buf.cursor = head - o.buf.flushed
+		}
 		table_fail(o, "%s", row_refusal(t, kind))
 	}
 	// The writer's buffer is emptied as a stream's flush empties it, so a later refusal still finds its record's start.
@@ -197,17 +199,6 @@ put_row :: proc(o: ^Output, cells: []Maybe(string)) {
 	out.flushed += out.cursor
 	out.cursor = 0
 	flush_some(o)
-}
-
-// Ends the run on a record of one empty cell, which TSV writes as a blank line and CSV, unquoted, would.
-@(private = "file")
-refuse_blank :: proc(o: ^Output, cells: []Maybe(string)) {
-	if len(cells) == 1 {
-		s, present := cells[0].?
-		if !present || o.table.format == "tsv" && s == "" {
-			table_fail(o, "%s", row_refusal(o.table, .Unwritable))
-		}
-	}
 }
 
 @(private = "file")

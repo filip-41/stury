@@ -104,8 +104,8 @@ write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind {
 }
 
 // Writes `cells` as one row of a delimited text, each as the typed write writes a string. A nil cell is empty and has
-// no quotes, and a row of one nil cell is written as an empty quoted cell, since an empty line is no record. A writer
-// of another format is `.Unsupported`.
+// no quotes. A row that would be an empty line, which reads back as no record, is `.Unwritable`: no cell, one nil cell,
+// and in a format that cannot quote it one empty cell. A writer of another format is `.Unsupported`.
 write_cells :: proc(wr: ^Writer, cells: []Maybe(string)) -> core.Typed_Error_Kind {
 	t := &wr.tokens
 	if wr.final {
@@ -115,9 +115,13 @@ write_cells :: proc(wr: ^Writer, cells: []Maybe(string)) -> core.Typed_Error_Kin
 		wr.err = {kind = .Unsupported}
 		return .Unsupported
 	}
+	if len(cells) == 1 && cells[0] == nil {
+		wr.err = {kind = .Unwritable}
+		return .Unwritable
+	}
 	begin(wr)
 	for c in cells {
-		if s, ok := c.?; ok || len(cells) == 1 {
+		if s, ok := c.?; ok {
 			cw.value_string(t, s)
 		} else {
 			cw.value_null(t)
