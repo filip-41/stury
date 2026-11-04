@@ -10,7 +10,7 @@ records.open_stream :: proc(input: io.Reader, as: core.As, framing := core.Frami
 records.next  :: proc(it: ^records.Reader) -> (records.Record, bool)
 records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error)
 records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Document_Error)
-records.build :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocator := context.allocator, runner: ^core.Runner = nil) -> (core.Document, core.Document_Error)
+records.build :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Document_Error)
 records.scan  :: proc(it: ^records.Reader, path: core.Path, read := core.Path_Options{}) -> (rec: records.Record, doc: core.Document, err: core.Path_Error, more: bool)
 records.column :: proc(it: ^records.Reader, name: string) -> int
 records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
@@ -270,8 +270,10 @@ fault := records.each(src, json.as(.Json), .Lines, sum_piece, &job, &pool.runner
 `build` of a whole text gives the document `core.build` gives, node for node, with the same refusal. With a `runner`,
 a long strict JSON text whose bulk is one array, at its root or on its spine, has the array's entries built in pieces
 by `each` on the threads, then joined: the text around the array is built alone and the pieces' nodes are copied in
-after the array's own. A text that is not so, or a piece that does not build, is built on the calling thread, which
-gives its refusal.
+after the array's own. The joined nodes take the room a serial build reserves, and one thread at a time writes its
+pages as the pieces finish, since threads that write fresh pages of one allocation at once wait on each other. A text
+that is not so, or a piece that does not build, is built on the calling thread, which gives its refusal. `pieces` is
+set to the pieces a joined build cut, and left alone otherwise.
 
 ## Writing
 

@@ -358,7 +358,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	} else {
 		// A long strict text's array is built on the pool's threads.
 		pool := run_pool(run) if len(data) >= POOLED_BYTES && ins.spec == .Json else nil
-		doc, fault, texts = build_whole(data, ins.source, runtime.heap_allocator() if run.opts.stream else context.allocator, pool)
+		doc, fault, texts = build_whole(data, ins.source, runtime.heap_allocator() if run.opts.stream else context.allocator, pool, &route.pieces)
 	}
 	if texts {
 		route.fallback = fallback
@@ -374,11 +374,15 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	return v, msg, status, true
 }
 
-// The document of `data` built whole, on `pool`'s threads when it has them, or its fault. `texts`, with no fault, when
-// the fault is a text after the first, which strict JSON reads as the next text, so that `data` is read as texts one
-// after another.
-build_whole :: proc(data: []byte, src: Source, allocator: runtime.Allocator, pool: ^core.Runner = nil) -> (doc: core.Document, fault: Maybe(core.Fault), texts: bool) {
-	doc, fault = jq.judge_build(records.build(data, src.as, allocator = allocator, runner = pool))
+// The document of `data` built whole, on `pool`'s threads when it has them, adding the pieces it cut to `pieces`, or
+// its fault. `texts`, with no fault, when the fault is a text after the first, which strict JSON reads as the next
+// text, so that `data` is read as texts one after another.
+build_whole :: proc(data: []byte, src: Source, allocator: runtime.Allocator, pool: ^core.Runner = nil, pieces: ^int = nil) -> (doc: core.Document, fault: Maybe(core.Fault), texts: bool) {
+	cut: int
+	doc, fault = jq.judge_build(records.build(data, src.as, allocator = allocator, runner = pool, pieces = &cut))
+	if pieces != nil {
+		pieces^ += cut
+	}
 	if f, bad := fault.?; bad && texts_follow(f, src.spec) {
 		return {}, nil, true
 	}

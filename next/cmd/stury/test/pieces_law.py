@@ -135,6 +135,8 @@ def cases(directory):
         out.append(["--explain", "length", spine])
         out.append(["--explain", "-c", ".logs[].v", spine])
         out.append(["--explain", "-c", ".[] | .v + 1", arr])
+        out.append(["--explain", "-c", DOCUMENT[0], arr])
+        out.append(["--explain", "-c", SPINE_DOCUMENT[0], spine])
         out.append(["--explain", "--from", "csv", "-c", ".id", table])
         for f in CSV:
             out.append(["--from", "csv", "-c", f, table])

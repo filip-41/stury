@@ -216,7 +216,7 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 RECORDS_SLICE :: #config(RECORDS_SLICE, 64 * 1024)
 
 // A whole text built on threads against the same text built on one: the same nodes, child counts and close, or the
-// same refusal. `joined` says the entries were built in pieces, which a joined document's exact node array tells.
+// same refusal. `joined` says the entries were built in pieces, which the count of pieces `records.build` gives tells.
 @(private = "file")
 expect_build_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, as: core.As, refuse: bool, joined: bool) -> bool {
 	in_pieces := joined && len(src) >= 4 * RECORDS_SLICE
@@ -224,13 +224,14 @@ expect_build_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, as: cor
 	want, want_err := core.build(text, as, refuse)
 	defer core.destroy(&want)
 	for &pool in pools {
-		got, err := records.build(text, as, refuse, runner = &pool.runner)
+		pieces: int
+		got, err := records.build(text, as, refuse, runner = &pool.runner, pieces = &pieces)
 		defer core.destroy(&got)
 		same := err == want_err && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close
 		if !testing.expectf(t, same, "%q at width %d: %v, want %v", src[:min(len(src), 200)], pool.runner.threads + 1, err, want_err) {
 			return false
 		}
-		if !testing.expectf(t, !in_pieces || pool.runner.threads == 0 || len(got.nodes_alloc) == len(got.nodes), "%q at width %d: built on one thread", src[:min(len(src), 200)], pool.runner.threads + 1) {
+		if !testing.expectf(t, !in_pieces || pool.runner.threads == 0 || pieces > 0, "%q at width %d: built on one thread", src[:min(len(src), 200)], pool.runner.threads + 1) {
 			return false
 		}
 	}

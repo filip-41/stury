@@ -345,9 +345,10 @@ build :: proc {build_record, build_whole}
 // Builds `src` as one whole text of format `as`, as `core.build` does. With a `runner`, a long text whose bulk is the
 // entries of one array, its `whole` records, has them built in pieces on the runner's threads and joined into the
 // document `core.build` gives, node for node. A text that is not so, or that does not build so, is built on the
-// calling thread, which gives its refusal.
+// calling thread, which gives its refusal. `pieces`, when given, is set to the pieces a joined build cut, and left
+// alone by a build on the calling thread.
 @(private)
-build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocator := context.allocator, runner: ^core.Runner = nil) -> (core.Document, core.Document_Error) {
+build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Document_Error) {
 	services := (^Services)(as.spelling.records) if as.spelling != nil else nil
 	if runner != nil && runner.threads > 0 && services != nil && services.build_next != nil && u64(len(src)) >= 4 * SLICE {
 		whole, framing, at := services.whole(src, as)
@@ -356,6 +357,13 @@ build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocato
 		}
 		job := Build_Job{refuse = refuse_duplicates}
 		job.pieces.allocator = runtime.heap_allocator()
+		// The joined nodes take the room a serial build reserves.
+		depth := core.reserve_depth(as.max_depth, len(src))
+		room, refused := runtime.mem_alloc_non_zeroed(((len(src) + depth) / 2 + 16) * size_of(core.Node), align_of(core.Node), allocator)
+		if refused != nil {
+			return core.build(src, as, refuse_duplicates, allocator)
+		}
+		job.nodes = ([^]core.Node)(raw_data(room))[:len(room) / size_of(core.Node)]
 		defer {
 			for &p in job.pieces {
 				core.destroy(&p.doc)
@@ -364,9 +372,13 @@ build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocato
 		}
 		if each(src, whole, framing, build_piece, &job, runner, at) == nil && !job.failed {
 			if doc, ok := join(src, as, &job, allocator, runner); ok {
+				if pieces != nil {
+					pieces^ = len(job.pieces)
+				}
 				return doc, {}
 			}
 		}
+		delete(job.nodes, allocator)
 	}
 	return core.build(src, as, refuse_duplicates, allocator)
 }
@@ -391,14 +403,19 @@ Built :: struct {
 	base:    int,
 }
 
+// `nodes` is the joined document's, `built` the nodes the built pieces hold, and `faulted` the nodes of `nodes` whose
+// pages `fault_ahead` wrote, on the thread that holds `faulting`.
 @(private)
 Build_Job :: struct {
-	refuse:  bool,
-	lock:    sync.Mutex,
-	pieces:  [dynamic]Built,
-	failed:  bool,
-	nodes:   []core.Node,
-	claimed: int,
+	refuse:   bool,
+	lock:     sync.Mutex,
+	pieces:   [dynamic]Built,
+	failed:   bool,
+	nodes:    []core.Node,
+	claimed:  int,
+	built:    int,
+	faulted:  int,
+	faulting: bool,
 }
 
 // Builds a piece's entries into one document on the heap, as the roots of a text of values one after another. The
@@ -430,13 +447,32 @@ build_piece :: proc(job: ^Build_Job, it: ^Reader, k: int) -> bool {
 	err: core.Document_Error
 	p.doc, err = engine.builder_end(&b, regs, it.fault if ok else core.Fault{kind = .Bad_Option})
 	ok &&= err.kind == .None
-	sync.guard(&job.lock)
-	if k >= len(job.pieces) {
-		resize(&job.pieces, k + 1)
+	{
+		sync.guard(&job.lock)
+		if k >= len(job.pieces) {
+			resize(&job.pieces, k + 1)
+		}
+		job.pieces[k] = p
+		job.failed ||= !ok
 	}
-	job.pieces[k] = p
-	job.failed ||= !ok
+	sync.atomic_add(&job.built, len(p.doc.nodes))
+	fault_ahead(job)
 	return ok
+}
+
+// Writes `nodes` a page at a time up to the nodes the built pieces hold, on one thread at a time. Threads that write
+// fresh pages of one allocation at once wait on each other, and each piece's own allocation does not, so the pieces
+// build on every thread while the join's copy finds its pages already written.
+@(private)
+fault_ahead :: proc(job: ^Build_Job) {
+	if _, took := sync.atomic_compare_exchange_strong(&job.faulting, false, true); !took {
+		return
+	}
+	for job.faulted < min(sync.atomic_load(&job.built), len(job.nodes)) {
+		job.nodes[job.faulted] = {}
+		job.faulted += 4096 / size_of(core.Node)
+	}
+	sync.atomic_store(&job.faulting, false)
 }
 
 // The document of `src` with the pieces' entries in its array, or false when the text around them does not build
@@ -473,11 +509,10 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 	if err.kind != .None || array < 0 || frame.nodes[array].kind != .Array || frame.nodes[array].n != 1 || len(frame.facts) > 0 {
 		return
 	}
-	raw, failed := runtime.mem_alloc_non_zeroed((len(frame.nodes) + n) * size_of(core.Node), align_of(core.Node), allocator)
-	if failed != nil {
+	if len(frame.nodes) + n > len(job.nodes) {
 		return
 	}
-	nodes := ([^]core.Node)(raw_data(raw))[:len(frame.nodes) + n]
+	nodes := job.nodes[:len(frame.nodes) + n]
 	copy(nodes, frame.nodes[:array + 1])
 	// The array's subtree and each one around it grow by the entries' nodes.
 	for &t, i in nodes[:array + 1] {
@@ -492,7 +527,6 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 	for &p in job.pieces {
 		p.base += array + 1
 	}
-	job.nodes = nodes
 	fan(runner, copy_pieces, job)
 	counts := make([dynamic]core.Child_Count, allocator)
 	for c in frame.counts {
@@ -507,7 +541,7 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 		}
 	}
 	slice.sort_by(counts[:], proc(a, b: core.Child_Count) -> bool { return a.node < b.node })
-	doc = {view = {src, as}, nodes = nodes, nodes_alloc = nodes, counts = counts[:], counts_alloc = counts[:], allocator = allocator}
+	doc = {view = {src, as}, nodes = nodes, nodes_alloc = job.nodes, counts = counts[:], counts_alloc = counts[:], allocator = allocator}
 	doc.root_close = frame.root_close + cut if frame.root_close > lo else frame.root_close
 	return doc, true
 }
