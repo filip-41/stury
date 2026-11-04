@@ -215,7 +215,10 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 		// A text the window cuts short, or one --seq's separator may yet end, waits for the next window, and --seq reads
 		// the files as one stream, so such a record in a file's last window runs on into the next file.
 		unended := ok && ins.framing == .Seq && bytes.index_byte(ins.data[rec.at:], 0x1e) < 0
-		if unended || !ok && !ins.last && cut_short(ins) {
+		// A delimited record's open quote is a fault at the quote, where the record starts.
+		f, bad := ins.texts.fault.?
+		cut_short := !bad || f.kind == .Truncated && (int(f.at) >= len(ins.data) || reads_cells(&ins.run.opts))
+		if unended || !ok && !ins.last && cut_short {
 			// The reader has passed the record's separator, which the next window must start with.
 			if ok {
 				rs := bytes.last_index_byte(ins.data[:rec.at], 0x1e)
@@ -230,7 +233,7 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 			}
 		}
 		if !ok {
-			if f, bad := ins.texts.fault.?; bad {
+			if bad {
 				if route.scanning {
 					explain_fallback(route, .Bad_Text)
 				}
@@ -284,8 +287,10 @@ held_event :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 		ins.events = nil
 	}
 	if ins.walk != nil {
-		ev, more := fault_event(ins.walk)
+		ev, more := fault_peek(ins.walk)
 		if more && (ins.fault_error == "" || !ev.error && ev.at < len(ins.walk.p.src)) {
+			ins.walk.given += 1
+			ev.value = jq.event_clone(ev.value)
 			lines_through(ins, ins.walk_at + ev.at)
 			return ev.value, "", .Value, true
 		}
@@ -395,14 +400,6 @@ texts_follow :: proc(f: core.Fault, spec: Maybe(json.Spec)) -> bool {
 	return spec == .Json && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing)
 }
 
-// Whether the records of a window that is not the file's last ended on a text cut short at the window's end. A
-// delimited record's open quote is a fault at the quote, where the record starts.
-@(private = "file")
-cut_short :: proc(ins: ^Inputs) -> bool {
-	f, bad := ins.texts.fault.?
-	return !bad || f.kind == .Truncated && (int(f.at) >= len(ins.data) || reads_cells(&ins.run.opts))
-}
-
 // The value of the document `doc` of a text at data[at:], or its first --stream event.
 @(private = "file")
 text_value :: proc(ins: ^Inputs, built: core.Document, at: int, own: bool) -> (jq.Value, string, jq.Parse_Status) {
@@ -494,7 +491,10 @@ open_next :: proc(ins: ^Inputs) -> bool {
 		// A JSONC or JSON5 file is one text, its comments around it, so it is read whole.
 		follow := ins.run.opts.follow
 		if follow || !is_regular_file(f) && (reads_cells(&ins.run.opts) || ins.spec == .Json) {
-			ins.pipe = pipe_start(f, follow, ins.name, ins.run)
+			p := new(Pipe, runtime.heap_allocator())
+			p.file, p.run, p.follow, p.name = f, ins.run, follow, ins.name
+			p.lines = records.open_stream({pipe_read, p}, json.as(.Json), .Lines, allocator = runtime.heap_allocator())
+			ins.pipe = p
 			ins.open = true
 			take_data(ins, nil)
 			return true
@@ -631,11 +631,16 @@ take_data :: proc(ins: ^Inputs, carry: []byte) {
 	ins.fresh, ins.headed = restarted, ins.head != nil
 	ins.run.route.input += len(window) - len(carry) - len(ins.head)
 	ins.last = ended
-	if ended {
-		if err := pipe_end(ins.pipe); err != nil {
-			message.write_stderr("stury: error: %s\n", strerror(err))
+	if p := ins.pipe; ended {
+		records.close(&p.lines)
+		if p.file != os.stdin {
+			os.close(p.file)
+		}
+		if p.err != nil {
+			message.write_stderr("stury: error: %s\n", strerror(p.err))
 			ins.failures += 1
 		}
+		free(p, runtime.heap_allocator())
 		ins.pipe = nil
 	}
 	set_data(ins, window[:])
@@ -713,15 +718,6 @@ Pipe :: struct {
 	read:    i64,
 	restart: bool,
 	taken:   u64, // the stream's bytes the windows hold end here
-}
-
-@(private = "file")
-pipe_start :: proc(f: ^os.File, follow: bool, name: string, run: ^Run) -> ^Pipe {
-	heap := runtime.heap_allocator()
-	p := new(Pipe, heap)
-	p.file, p.run, p.follow, p.name = f, run, follow, name
-	p.lines = records.open_stream({pipe_read, p}, json.as(.Json), .Lines, allocator = heap)
-	return p
 }
 
 @(private = "file")
@@ -818,18 +814,6 @@ pipe_append :: proc(p: ^Pipe, window: ^[dynamic]byte, b: []byte, at: u64) {
 
 @(private = "file")
 BOM :: []byte{0xef, 0xbb, 0xbf}
-
-// The pipe's stream closed and its memory freed. Returns the error its last read failed with.
-@(private = "file")
-pipe_end :: proc(p: ^Pipe) -> os.Error {
-	records.close(&p.lines)
-	err := p.err
-	if p.file != os.stdin {
-		os.close(p.file)
-	}
-	free(p, runtime.heap_allocator())
-	return err
-}
 
 // The lines of the open file read once a text ends at data[end]: through the line end after the text's last byte. jq
 // counts through the piece its fgets reads, which on a line past 4 KiB ends before the line does. `ins.pieces` counts

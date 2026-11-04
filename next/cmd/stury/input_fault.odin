@@ -34,6 +34,9 @@ text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (jq.V
 	}
 	f := literal_cut(data, found, ins.framing)
 	ins.note = fault_note(data, f, ins.spec, &ins.run.opts)
+	stop := min(int(f.at), len(data))
+	nl := bytes.index_byte(data[stop:], '\n')
+	resume := len(data) if nl < 0 else stop + nl + 1
 	if !ins.run.opts.stream {
 		ins.line, ins.text_end = lines_read(ins, int(f.at) + 1), 0
 		msg := fault_message(ins, data, f, end)
@@ -42,19 +45,14 @@ text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (jq.V
 		if ins.framing == .Seq {
 			return nil, msg, .Error
 		}
-		stop := min(int(f.at), len(data))
-		nl := bytes.index_byte(data[stop:], '\n')
 		records.close(&ins.texts)
-		ins.texts = records.open(data, ins.as, ins.framing, u64(len(data) if nl < 0 else stop + nl + 1), runtime.heap_allocator())
+		ins.texts = records.open(data, ins.as, ins.framing, u64(resume), runtime.heap_allocator())
 		ins.several = true
 		return nil, msg, .Error
 	}
 	// jq's parser gives the events of the bytes before the fault, and with --stream-errors the fault as one, then
 	// goes on from the line after the fault, or under --seq at the next record, where the reader is.
 	seq, errors := ins.framing == .Seq, ins.run.opts.stream_errors
-	stop := min(int(f.at), len(data))
-	nl := bytes.index_byte(data[stop:], '\n')
-	resume := len(data) if nl < 0 else stop + nl + 1
 	if seq {
 		rs := bytes.index_byte(data[at:], 0x1e)
 		resume = len(data) if rs < 0 else at + rs

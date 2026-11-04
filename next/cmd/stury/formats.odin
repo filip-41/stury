@@ -2,11 +2,9 @@ package main
 
 // The formats `--from` reads and `--to` writes, one row of FORMATS each, and the options a format refuses.
 
-import "core:strings"
 import core "../../core"
 import dsv "../../dsv"
 import json "../../json"
-import "message"
 
 Format :: enum u8 {
 	Json,
@@ -120,9 +118,4 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 	if o.grow_header && !writes_cells(o) {
 		usage_error("--grow-header applies to --to csv or tsv")
 	}
-}
-
-// What `check` says an input with nothing in it lacks: "No JSON text", "No CSV text".
-no_text :: proc(o: ^Opts) -> string {
-	return message.build_temp("No %s text", "JSON" if !reads_cells(o) else strings.to_upper(FORMATS[o.from].name, context.temp_allocator))
 }

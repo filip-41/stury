@@ -51,7 +51,7 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 	cells := reads_cells(o)
 	if cells && len(strings.trim_prefix(string(data), "\xef\xbb\xbf")) == 0 ||!cells && !o.seq && json.blank(data, src.spec.?) {
 		line, col := core.locate(data, u64(len(data)))
-		return message.build_temp("%s:%d:%d: %s\n", name, line, col, no_text(o))
+		return message.build_temp("%s:%d:%d: No %s text\n", name, line, col, "JSON" if !cells else strings.to_upper(FORMATS[o.from].name, context.temp_allocator))
 	}
 	fault: Maybe(core.Fault)
 	switch {

@@ -117,14 +117,6 @@ fault_walk :: proc(src: []byte, line, column: int, seq, rs_follows, reset_each: 
 	return w
 }
 
-// The next event, made in the context allocator, or false once the walk has ended.
-fault_event :: proc(w: ^Fault_Walk) -> (ev: Fault_Event, ok: bool) {
-	ev = fault_peek(w) or_return
-	w.given += 1
-	ev.value = jq.event_clone(ev.value)
-	return ev, true
-}
-
 // The next event, as the walk holds it, without giving it.
 fault_peek :: proc(w: ^Fault_Walk) -> (Fault_Event, bool) {
 	for w.given == len(w.p.events) {
