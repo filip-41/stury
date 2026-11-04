@@ -198,13 +198,20 @@ tree_pairs :: proc(w: ^Tree, i: core.Node_Index) -> (list: [dynamic]Pair, ok: bo
 	return list, true
 }
 
-// Writes the value at `i`: a scalar, or a container with its members and its feet, which are among its `facts`.
+// Writes the value at `i`: a scalar, or a container with its members and its feet, which are among its `facts`. A
+// delimited text's cell is what `core.resolve` reads it as.
 @(private)
 tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int, facts: []core.Fact) -> bool {
 	doc := w.doc
 	t := doc.nodes[i]
 	if t.kind < .Array {
-		return tree_scalar(w, i, t)
+		if w.respell && t.kind == .Number {
+			return tree_number(w, t)
+		}
+		cell := t
+		cell.kind = core.resolve(doc, i) if t.kind == .Plain && w.resolve else t.kind
+		w.kind = put_token(w.out, doc.src, doc, i, cell, w.opts, w.json, w.copy)
+		return w.kind == .None
 	}
 	if depth >= TREE_DEPTH {
 		w.kind = .Too_Deep
@@ -262,18 +269,6 @@ tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int, facts: []core.Fact)
 	}
 	write.put_byte(w.out, '}' if map_ else ']')
 	return true
-}
-
-// Writes scalar `i`. A delimited text's cell is what `core.resolve` reads it as.
-@(private)
-tree_scalar :: proc(w: ^Tree, i: core.Node_Index, t: core.Token) -> bool {
-	if w.respell && t.kind == .Number {
-		return tree_number(w, t)
-	}
-	cell := t
-	cell.kind = core.resolve(w.doc, i) if t.kind == .Plain && w.resolve else t.kind
-	w.kind = put_token(w.out, w.doc.src, w.doc, i, cell, w.opts, w.json, w.copy)
-	return w.kind == .None
 }
 
 // Writes a JSON5 number as JSON spells it.
