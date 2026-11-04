@@ -508,127 +508,24 @@ fold_u64 :: #force_inline proc(src: []u8, at, n: u64) -> (mag: u64, over: bool) 
 }
 
 // Returns the correctly rounded binary64 of `n` in `src`, or false when the magnitude overflows. Uses `mant` and
-// Eisel-Lemire for a significand of at most 19 digits, and `dom_acc_wide` and `parse_f64` for a longer one.
+// Eisel-Lemire for a significand of at most 19 digits, and `strconv.parse_f64` of the span for a longer one.
 @(private)
 f64_of_lex :: #force_inline proc(src: []u8, lo, hi: u64, n: Number_Lex) -> (f64, bool) {
 	digits := n.int_digits + n.frac_digits
-	e := n.exp - i64(n.frac_digits)
-	neg := n.neg
 	if digits <= 19 {
-		return f64_of_significand(n.mant, e, neg, digits <= 15)
+		return f64_of_significand(n.mant, n.exp - i64(n.frac_digits), n.neg, digits <= 15)
 	}
-	// A significand past the 19 digits a word holds, so the wide accumulator collects it, Eisel-Lemire brackets
-	// it, and `strconv.parse_f64` handles only the tokens the bracket leaves `.Undecided`.
-	el: EL_Facts
-	dom_acc_wide(src, n, &el)
-	if el.m == 0 {
-		return (-0.0 if neg else 0.0), true
-	}
-	value, res := el_settle(el.m, el.e, el.nz, neg)
-	switch res {
-	case .Decided:
-		return value, true
-	case .Refused:
-		return 0, false
-	case .Undecided:
-	}
-	parsed, ok := strconv.parse_f64(string(src[lo:hi]))
-	return parsed, ok
+	return wide_f64(string(src[lo:hi]))
 }
 
-// The outcome of `el_settle` for one token.
-@(private)
-El_Decode :: enum u8 {
-	Decided,
-	Refused,
-	Undecided,
+// Returns the binary64 of a decimal span past 19 significant digits, or false when it overflows.
+@(private, cold)
+wide_f64 :: #force_no_inline proc(span: string) -> (f64, bool) {
+	v, ok := strconv.parse_f64(span)
+	return v, ok && transmute(u64)v & F64_INF_BITS != F64_INF_BITS
 }
 
-// The significand and exponent Eisel-Lemire decides from: at most 19 digits in `m`, the decimal exponent `e`, and
-// `nz`, which says a nonzero digit was dropped past `m`.
-@(private)
-EL_Facts :: struct {
-	m:  u64,
-	e:  i64,
-	nz: bool,
-}
-
-// The significant digits kept in `m`: 19 fit a `u64` and decide every input of 19 or fewer digits.
-@(private)
-EL_MAX_DIGITS :: 19
-
-// Returns the correctly rounded binary64 of `m * 10^q` for a nonzero significand of at most 19 digits. `neg` sets the
-// sign bit, and `.Refused` reports overflow. `nz` says a nonzero digit was dropped past `m`. Equal endpoints settle
-// the result because rounding is monotone, and endpoints that round apart return `.Undecided`.
-@(private)
-el_settle :: proc(m: u64, q: i64, nz, neg: bool) -> (f64, El_Decode) {
-	b := strconv.fast_float_compute_float(f64, int(q), m)
-	if nz && b != strconv.fast_float_compute_float(f64, int(q), m + 1) {
-		return 0, .Undecided
-	}
-	if b == F64_INF_BITS {
-		return 0, .Refused
-	}
-	return transmute(f64)(b | u64(neg) << 63), .Decided
-}
-
-// Computes `el_settle`'s facts for a token whose significand does not fit the 19 digits in `mant`. The fraction's
-// leading zeros are skipped only when the integer part is the single digit `0`, so a multi-digit run keeps every
-// digit, leading zero included.
-@(private)
-dom_acc_wide :: proc(src: []u8, n: Number_Lex, out: ^EL_Facts) {
-	#no_bounds_check {
-		sig_int := n.int_digits
-		if sig_int == 1 && src[n.int_at] == '0' {
-			sig_int = 0
-		}
-		fold_int := min(sig_int, u64(EL_MAX_DIGITS))
-		m := fold_run(0, src, n.int_at, fold_int)
-		room := u64(EL_MAX_DIGITS) - fold_int
-		dropped_int := i64(sig_int - fold_int)
-		nz := digits_nonzero(src, n.int_at + fold_int, sig_int - fold_int)
-		lz := u64(0)
-		if sig_int == 0 {
-			for lz < n.frac_digits && src[n.frac_at + lz] == '0' {
-				lz += 1
-			}
-		}
-		frac_kept := i64(lz)
-		fold_frac := min(n.frac_digits - lz, room)
-		m = fold_run(m, src, n.frac_at + lz, fold_frac)
-		frac_kept += i64(fold_frac)
-		nz = nz || digits_nonzero(src, n.frac_at + lz + fold_frac, n.frac_digits - lz - fold_frac)
-		out^ = {m = m, e = dropped_int - frac_kept + n.exp, nz = nz}
-	}
-}
-
-// Returns `m` followed by the `n` digits at `src[at:]`, folded 8 at a time.
-@(private = "file")
-fold_run :: #force_inline proc "contextless" (m: u64, src: []u8, at, n: u64) -> u64 #no_bounds_check {
-	m, j := m, u64(0)
-	for n - j >= 8 {
-		m = m * 10000_0000 + digits8_value(load8_le(src, at + j))
-		j += 8
-	}
-	for j < n {
-		m = m * 10 + u64(src[at + j] - '0')
-		j += 1
-	}
-	return m
-}
-
-// Reports whether any of the `n` digits at `src[at:]` is nonzero. Digits past the cap only move the bracket.
-@(private = "file")
-digits_nonzero :: #force_inline proc "contextless" (src: []u8, at, n: u64) -> bool {
-	for k in 0 ..< n {
-		if src[at + k] != '0' {
-			return true
-		}
-	}
-	return false
-}
-
-// The SWAR decimal-digit primitives used by `digit_end`, `fold_run` and `fold_digits_end`. The code requires a
+// The SWAR decimal-digit primitives used by `digit_end` and `fold_digits_end`. The code requires a
 // little-endian target: `src[p]` is the low byte of a loaded word, and byte 0 holds the most significant digit.
 when ODIN_ENDIAN != .Little {
 	#panic("spell: digits8_value requires a little-endian target")
