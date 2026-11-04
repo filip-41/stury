@@ -215,11 +215,14 @@ entries_pieces :: proc(ins: ^Inputs) -> bool {
 	if len(data) < POOLED_BYTES || ins.spec != .Json || run.route.select.op != .None || !parallel(run) {
 		return false
 	}
-	entries, at, found := json.spine(data, ins.as)
-	levels := int(entries.opts[0])
 	names := make([dynamic]string, context.temp_allocator)
 	prog, spined := strip_spine(run.prog, &names)
-	if !found || !spined || len(names) != levels {
+	if !spined {
+		return false
+	}
+	entries, at, found := json.spine(data, ins.as)
+	levels := int(entries.opts[0])
+	if !found || len(names) != levels {
 		return false
 	}
 	ps: Pieces

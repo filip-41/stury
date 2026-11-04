@@ -100,9 +100,6 @@ put_joined :: proc(run: ^Run, text: []u8, slots: []Spine_Slot, dot: bool) -> boo
 	}
 	o := &run.output
 	flush_some(o, force = true)
-	if run.opts.seq && dot {
-		jq.put_byte(&o.buf, 0x1e)
-	}
 	write.put_text(&o.buf, string(head))
 	first := true
 	for &s in slots {
