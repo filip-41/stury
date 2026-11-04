@@ -6,23 +6,24 @@ package jq
 //
 // Where builtin X lives, by the `Builtin` field the table below fills:
 //	native     (`Native`)     takes its arguments as filters: natives.odin (select, path, limit, the type
-//	                          selectors, sub/gsub)
-//	gen        (`Generator`)  takes values, may give several: natives.odin (getpath, range, match, capture,
-//	                          halt_error)
-//	fn         (`Function`)   takes values, gives one: natives.odin (setpath, test, split/2), math_time.odin
-//	                          (time and number functions), functions.odin and sort.odin (the rest)
+//	                          selectors), regex_natives.odin (sub/gsub)
+//	gen        (`Generator`)  takes values, may give several: natives.odin (getpath, range, halt_error),
+//	                          regex_natives.odin (match, capture)
+//	fn         (`Function`)   takes values, gives one: natives.odin (setpath), regex_natives.odin (test,
+//	                          split/2), math_time.odin (time and number functions), functions.odin and
+//	                          sort.odin (the rest)
 //	math1/math2               libm functions of one or two numbers
 //	PRELUDE                   everything jq writes in jq itself
 
 import "base:runtime"
 import "core:c/libc"
-import "core:fmt"
 import "core:math"
 import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:time"
 import "core:unicode/utf8"
+import "../message"
 
 Native :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal
 Generator :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal
@@ -71,15 +72,15 @@ fill_table :: proc() {
 	table = make(map[string][MAX_ARITY]Builtin, 256, runtime.heap_allocator())
 	put("empty", 0, {native = native_empty})
 	put("select", 1, {native = native_select})
-	put("values", 0, {native = native_values})
-	put("nulls", 0, {native = native_nulls})
-	put("booleans", 0, {native = native_booleans})
-	put("numbers", 0, {native = native_numbers})
-	put("strings", 0, {native = native_strings})
-	put("arrays", 0, {native = native_arrays})
-	put("objects", 0, {native = native_objects})
-	put("iterables", 0, {native = native_iterables})
-	put("scalars", 0, {native = native_scalars})
+	put("values", 0, {native = kept_by_kind(~{.Null})})
+	put("nulls", 0, {native = kept_by_kind({.Null})})
+	put("booleans", 0, {native = kept_by_kind({.False, .True})})
+	put("numbers", 0, {native = kept_by_kind({.Number})})
+	put("strings", 0, {native = kept_by_kind({.String})})
+	put("arrays", 0, {native = kept_by_kind({.Array})})
+	put("objects", 0, {native = kept_by_kind({.Object})})
+	put("iterables", 0, {native = kept_by_kind({.Array, .Object})})
+	put("scalars", 0, {native = kept_by_kind(~{.Array, .Object})})
 	put("error", 0, {native = native_error})
 	put("error", 1, {gen = proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
 			ip.err = args[0]
@@ -110,10 +111,10 @@ fill_table :: proc() {
 	put("sub", 3, {native = native_sub})
 	put("gsub", 2, {native = native_sub})
 	put("gsub", 3, {native = native_sub})
-	put("match", 1, {gen = gen_match, in_jq = true})
-	put("match", 2, {gen = gen_match, in_jq = true})
-	put("capture", 1, {gen = gen_capture, in_jq = true})
-	put("capture", 2, {gen = gen_capture, in_jq = true})
+	put("match", 1, {gen = each_match(false), in_jq = true})
+	put("match", 2, {gen = each_match(false), in_jq = true})
+	put("capture", 1, {gen = each_match(true), in_jq = true})
+	put("capture", 2, {gen = each_match(true), in_jq = true})
 	put("test", 1, {fn = fn_test, in_jq = true})
 	put("test", 2, {fn = fn_test, in_jq = true})
 	put("split", 2, {fn = fn_split_regex, in_jq = true})
@@ -154,28 +155,28 @@ fill_table :: proc() {
 	put("tojson", 0, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return to_json(v), .Go}})
 	put("tonumber", 0, {fn = fn_tonumber})
 	put("fromjson", 0, {fn = fn_fromjson})
-	put("ascii_downcase", 0, {fn = fn_ascii_downcase})
-	put("ascii_upcase", 0, {fn = fn_ascii_upcase})
+	put("ascii_downcase", 0, {fn = fn_ascii_case})
+	put("ascii_upcase", 0, {fn = fn_ascii_case})
 	put("explode", 0, {fn = fn_explode})
 	put("implode", 0, {fn = fn_implode})
 	put("ltrimstr", 1, {fn = fn_ltrimstr, in_jq = true})
 	put("rtrimstr", 1, {fn = fn_rtrimstr, in_jq = true})
-	put("startswith", 1, {fn = fn_startswith})
-	put("endswith", 1, {fn = fn_endswith})
+	put("startswith", 1, {fn = fn_has_affix})
+	put("endswith", 1, {fn = fn_has_affix})
 	put("trim", 0, {fn = fn_trim})
-	put("ltrim", 0, {fn = fn_ltrim})
-	put("rtrim", 0, {fn = fn_rtrim})
+	put("ltrim", 0, {fn = fn_trim})
+	put("rtrim", 0, {fn = fn_trim})
 	put("split", 1, {fn = fn_split})
 	put("join", 1, {fn = fn_join, in_jq = true})
 	put("sort", 0, {fn = fn_sort})
-	put("unique", 0, {fn = fn_unique})
-	put("sort_by", 1, {native = native_sort_by})
-	put("group_by", 1, {native = native_group_by})
-	put("unique_by", 1, {native = native_unique_by})
-	put("min_by", 1, {native = native_min_by})
-	put("max_by", 1, {native = native_max_by})
-	put("min", 0, {fn = fn_min})
-	put("max", 0, {fn = fn_max})
+	put("unique", 0, {fn = fn_sort})
+	put("sort_by", 1, {native = sort_by(.Sorted)})
+	put("group_by", 1, {native = sort_by(.Grouped)})
+	put("unique_by", 1, {native = sort_by(.Unique)})
+	put("min_by", 1, {native = extreme_by(false)})
+	put("max_by", 1, {native = extreme_by(true)})
+	put("min", 0, {fn = fn_extreme})
+	put("max", 0, {fn = fn_extreme})
 	put("reverse", 0, {fn = fn_reverse})
 	put("flatten", 0, {fn = fn_flatten, in_jq = true})
 	put("flatten", 1, {fn = fn_flatten, in_jq = true})
@@ -193,9 +194,9 @@ fill_table :: proc() {
 	put("abs", 0, {fn = fn_abs})
 	put("lgamma_r", 0, {fn = fn_number_pair})
 	put("bsearch", 1, {fn = fn_bsearch})
-	put("isinfinite", 0, {fn = fn_isinfinite})
-	put("isnan", 0, {fn = fn_isnan})
-	put("isnormal", 0, {fn = fn_isnormal})
+	put("isinfinite", 0, {fn = fn_float_class})
+	put("isnan", 0, {fn = fn_float_class})
+	put("isnormal", 0, {fn = fn_float_class})
 	put("gmtime", 0, {fn = fn_gmtime})
 	put("localtime", 0, {fn = fn_gmtime})
 	put("mktime", 0, {fn = fn_mktime})
@@ -502,13 +503,13 @@ fn_builtins :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 		}
 		for b, arity in row {
 			if b != {} {
-				append(&names, fmt.aprintf("%s/%d", fname, arity))
+				append(&names, message.build("%s/%d", fname, arity))
 			}
 		}
 	}
 	for d in prelude_defs() {
 		def_name, arity := def_signature(d)
-		append(&names, fmt.aprintf("%s/%d", def_name, arity))
+		append(&names, message.build("%s/%d", def_name, arity))
 	}
 	slice.sort(names[:]) // the table is a map: sorted, every run lists the same order
 	a := new_array(len(names))
@@ -569,7 +570,7 @@ apply_builtin :: #force_no_inline proc(x: ^Args_Sink) -> Signal {
 defined_path :: proc(x: ^Args_Sink) -> (sig: Signal, done: bool) {
 	t := x.input
 	switch {
-	case x.b.fn == fn_ascii_downcase || x.b.fn == fn_ascii_upcase:
+	case x.b.fn == fn_ascii_case:
 		codes, esig := fn_explode(x.ip, "explode", t.v, nil)
 		if esig != .Go {
 			return esig, true

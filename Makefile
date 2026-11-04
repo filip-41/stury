@@ -1,19 +1,47 @@
 ODIN ?= odin
-OPT  ?= -o:speed
 
-# Library packages and test packages. Library packages have
-# no entry point, and the test packages pull in the libraries they exercise.
-LIB_PKGS  := host core core/spell csv json json/encode json/scan json/scan/walk json/scan/lex json/scan/number json/scan/index json/test/stock
-TEST_PKGS := core/test csv/test json/test/api
-# `make test` builds the suites at -o:minimal because the build is most of their run time.
-TEST_OPT := -o:minimal
-# The CLI's size cap; raise it deliberately when a feature earns the bytes.
-CLI_MAX_BYTES := 3145728
+# A plain `make` runs the gate.
+.DEFAULT_GOAL := gate
 
-VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -strict-style
+# The library packages, and the test packages that read them.
+LIB_PKGS  := core/spell core host core/kernel core/compose core/build core/typed core/write core/records json dsv
+TEST_PKGS := core/spell/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test
+# The packages the tests share, checked by `lint` and built through their imports.
+SUPPORT_PKGS := walktest
+# The test packages that read `-define:TIER`.
+TIER_PKGS := core/kernel/test
+TEST_OPT  := -o:minimal
+# A leak or a bad free fails the test that made it.
+TEST_MEMORY := -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
+# A text read on threads is cut at every byte in pieces of one byte, and at -o:speed chains run over several records.
+TEST_PIECES := -define:RECORDS_SLICE=1
+TEST_CHAINS := -define:RECORDS_SLICE=16
+BUILD     := build
+# The optimization of the command line, which a release build overrides for its target.
+OPT       ?= -o:speed
+
+# One target per compile, so `make -j` builds the tests in parallel and each compile writes its own binary.
+TEST_MINIMAL  := $(foreach p,$(TEST_PKGS),$(BUILD)/test/minimal/$(p))
+TEST_SPEED    := $(foreach p,$(TEST_PKGS),$(BUILD)/test/speed/$(p))
+TEST_TARGETS  := $(TEST_MINIMAL) $(TEST_SPEED)
+ASAN_TARGETS  := $(foreach p,$(TEST_PKGS),$(BUILD)/test/asan/$(p))
+# The test packages that run threads, which only `host` does.
+TSAN_PKGS     := host/test
+TSAN_TARGETS  := $(foreach p,$(TSAN_PKGS),$(BUILD)/test/tsan/$(p))
+X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS),$(BUILD)/test/x86/$(o)/$(t)/$(p))))
+
+VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: build-cli test test-lib test-one test-cli test-jq test-examples test-x86 test-modes diff test-asan test-tsan lint probe fixtures bench-compare bench-cli
+.PHONY: check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite test-x86 test-wide test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers bench-cli fixtures surface \
+	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
+
+# The document lanes' probe and peers, and the fixtures they read.
+BENCH      := $(BUILD)/bench
+BENCH_CC    ?= cc
+BENCH_CXX   ?= c++
+BENCH_CARGO ?= cargo
+BENCH_FILES ?= logs.json citm_catalog.json table.csv logs.jsonc logs.json5
 
 # `$(call odin_each,VERB,PACKAGES,FLAGS,LABEL)` runs `odin VERB` over each package and stops at the first failure.
 define odin_each
@@ -22,159 +50,245 @@ define odin_each
 done
 endef
 
-# `$(call odin_build,ARGS,OUT)` runs `odin build ARGS` for OUT in a directory of the call's own under build/
-define odin_build
-@mkdir -p build
-d=$$(mktemp -d build/.out.XXXXXX) && trap 'rm -rf $$d' EXIT && \
-$(ODIN) build $(1) -out:$$d/$(notdir $(2)) && \
-if [ -d $$d/$(notdir $(2)).dSYM ]; then rm -rf $(2).dSYM && mv $$d/$(notdir $(2)).dSYM $(2).dSYM; fi && \
-mv $$d/$(notdir $(2)) $(2)
-endef
-
-# The private targets requiring internal, not published, machinery.
-PRIVATE_TARGETS := all bench selftest test-diff test-private lint-gate
-ifndef GATE
-.PHONY: $(PRIVATE_TARGETS)
-$(PRIVATE_TARGETS):
-	@if [ -f Makefile.gate ]; then exec $(MAKE) -f Makefile.gate $@; fi; \
-	echo "make $@ is the private gate: it needs Makefile.gate and the private checkout, which are not published." >&2; \
-	echo "This file's targets are: lint test test-modes test-x86 test-asan test-tsan diff build-cli probe fixtures bench-compare bench-cli." >&2; \
-	exit 1
-endif
-
-# `make` with no target is the release gate where Makefile.gate is present, and `test` elsewhere.
-.DEFAULT_GOAL := $(if $(wildcard Makefile.gate),all,test)
-
+# The command line at $(OPT). STURY_VERSION names the version `-V` prints, the commit's short hash by default.
 ifeq ($(shell uname -s),Darwin)
 CLI_LINK := "-extra-linker-flags:-L$(shell xcrun --show-sdk-path)/usr/lib/system -lsystem_m -lsystem_c -lsystem_kernel -lsystem_pthread -lsystem_malloc"
 else ifeq ($(shell uname -s),Linux)
-# Not position-independent, as test-x86's linux_amd64 link is: a PIE's relocations put the binary over
-# CLI_MAX_BYTES. Build PIE if a distribution asks for it.
 CLI_LINK := -reloc-mode:static
 endif
-
-
-CLI_VERSION := $(or $(STURY_VERSION),$(shell p=$$(git rev-parse --show-prefix 2>/dev/null) && [ -z "$$p" ] && git log -1 --format=%h 2>/dev/null),dev)
-# The CLI never asks for `Duplicates.Refuse` (jq keeps a repeated key's last value), so it is built without that
-# key-checking copy of every scan walk.
-CLI_DEFINES := -define:STURY_VERSION='"$(CLI_VERSION)"' -define:REFUSE_DUPLICATES=false
+CLI_VERSION := $(or $(STURY_VERSION),$(shell git log -1 --format=%h 2>/dev/null),dev)
+CLI_DEFINES := -define:STURY_VERSION='"$(CLI_VERSION)"'
 build-cli:
-	$(call odin_build,cmd/stury $(OPT) $(CLI_LINK) $(CLI_DEFINES),build/stury)
+	@mkdir -p $(BUILD)
+	$(ODIN) build cmd/stury $(OPT) $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury
 
-test: test-lib test-cli test-jq test-examples
+# The checks a change can reach, in `tools/gate.py`: `check` while editing, `gate` before a branch lands.
+check:
+	@ODIN=$(ODIN) python3 tools/gate.py quick
 
-test-lib:
-	$(call odin_each,test,$(TEST_PKGS),$(TEST_OPT),)
+gate:
+	@ODIN=$(ODIN) python3 tools/gate.py merge
 
-# `make test-one P=json/test/api T=test_name` runs one test of one test package.
+# The library suites, the examples, then the command line against its smoke cases and the jq corpus.
+test: test-lib test-examples test-cli test-jq
+
+# Each program under examples/ is built and run from here, and its output is the `expected.txt` beside it.
+test-examples:
+	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for e in examples/*/; do e=$${e%/}; echo "== $$e"; \
+		$(ODIN) build $$e $(TEST_OPT) -collection:stury=. -out:$$d/x && $$d/x > $$d/out && diff $$d/out $$e/expected.txt || exit 1; \
+	done
+
+# The library suites at -o:minimal and at -o:speed, where the optimizer reasons about loads that the walk makes past an
+# input's end. Each compile is its own target, so `make -j test-lib` runs them at once.
+test-lib: $(TEST_TARGETS)
+
+# `make test-one P=json/test T=test_name` runs one test of one test package.
 test-one:
 	@[ -n "$(P)" ] && [ -n "$(T)" ] || { echo "usage: make test-one P=<package dir> T=<test name>" >&2; exit 2; }
-	$(call odin_each,test,$(P),$(TEST_OPT) -collection:stury=. -define:ODIN_TEST_NAMES=$(T),)
+	$(ODIN) test $(P) $(TEST_OPT) $(TEST_MEMORY) $(TEST_PIECES) -define:ODIN_TEST_NAMES=$(T) -out:$(BUILD)/test-one
 
+# The command line end to end on what jq has not, held to smoke.floor.
 test-cli: build-cli
 	@echo "== cmd/stury"
-	sh cmd/stury/test/smoke.sh build/stury
-	@n=$$(wc -c < build/stury); [ $$n -le $(CLI_MAX_BYTES) ] || { echo "build/stury is $$n B, over the $(CLI_MAX_BYTES) B cap"; exit 1; }
+	python3 cmd/stury/test/smoke_floor.py $(BUILD)/stury
 
+# jq 1.8.2's corpus and cli.tsv, every row passing. The gate holds each area to the count in jq_suite.floor.
 test-jq: build-cli
-	python3 cmd/stury/test/jq_suite.py build/stury
+	python3 cmd/stury/test/jq_suite.py $(BUILD)/stury
 
-test-examples:
-	@for e in examples/*/; do e=$${e%/}; echo "== $$e"; d=$$(mktemp -d) && $(ODIN) build $$e $(TEST_OPT) -collection:stury=. -out:$$d/x && $$d/x; s=$$?; rm -rf $$d; [ $$s -eq 0 ] || exit 1; done
-
-# The suites built for x86-64, which takes the portable paths arm64 never runs, and the runtime's software
-# conversions where arm64 has an instruction. On Apple silicon they run under Rosetta.
-test-x86:
-	$(call odin_each,test,$(TEST_PKGS),$(OPT) -collection:stury=. -target:darwin_amd64, (x86-64))
-	@echo "== cmd/stury (linux_amd64)"
-	@# Odin links linux_amd64 only on Linux; elsewhere `zig cc`, when there is one, links the object it leaves.
-	@mkdir -p build; d=$$(mktemp -d build/.out.XXXXXX) && trap 'rm -rf $$d' EXIT; b=build/stury-linux-amd64; o=$$d/stury-linux-amd64; rm -f $$b; \
-	$(ODIN) build cmd/stury $(OPT) $(CLI_DEFINES) -target:linux_amd64 -out:$$o >/dev/null || exit 1; \
-	[ -f $$o ] || ! command -v zig >/dev/null || zig cc -target x86_64-linux-gnu -no-pie $$o.o -o $$o -lm -lc -lpthread || exit 1; \
-	[ ! -f $$o ] || mv $$o $$b || exit 1; \
-	if [ ! -f $$b ]; then echo "$$b: no linker for linux_amd64 here, its size is not checked"; \
-	else n=$$(wc -c < $$b); [ $$n -le $(CLI_MAX_BYTES) ] || { echo "$$b is $$n B, over the $(CLI_MAX_BYTES) B cap"; exit 1; }; fi
-
-# The CLI against jq 1.8.2: its suite, and jq_diff with regex_diff over each seed, a target per seed so that
-# `make -j` runs the seeds at once. Without jq 1.8.2 on PATH only the jq suite runs.
+# The command line against jq 1.8.2: the suite in diff mode, and jq_diff with regex_diff over each seed, a target per
+# seed so that `make -j` runs the seeds at once. Without jq 1.8.2 on PATH only the jq suite runs.
 DIFF_SEEDS ?= 77 1016 5
 DIFF_SEED_TARGETS := $(DIFF_SEEDS:%=diff-seed-%)
-JQ_VERSION := $(shell jq --version 2>/dev/null)
-.PHONY: diff-suite $(DIFF_SEED_TARGETS)
-ifeq ($(JQ_VERSION),jq-1.8.2)
+.PHONY: $(DIFF_SEED_TARGETS)
+ifeq ($(shell jq --version 2>/dev/null),jq-1.8.2)
 diff: diff-suite $(DIFF_SEED_TARGETS)
 else
 diff: test-jq
 	@echo "== diff: no jq 1.8.2 on PATH, only the jq suite ran"
 endif
 diff-suite: build-cli
-	STURY_TEST_TIMEOUT=60 python3 cmd/stury/test/jq_suite.py build/stury --diff
+	STURY_TEST_TIMEOUT=60 python3 cmd/stury/test/jq_suite.py $(BUILD)/stury --diff
 $(DIFF_SEED_TARGETS): diff-seed-%: build-cli
-	python3 cmd/stury/test/jq_diff.py build/stury --seed $*
-	python3 cmd/stury/test/regex_diff.py build/stury --seed $*
+	python3 cmd/stury/test/jq_diff.py $(BUILD)/stury --seed=$*
+	python3 cmd/stury/test/regex_diff.py $(BUILD)/stury --seed=$*
 
-# The engines a default build routes around, and the build the CLI ships (REFUSE_DUPLICATES=false), each under the
-# whole api suite. csv/test has no mode: none of these defines reaches package csv.
-test-modes:
-	$(call odin_each,test,json/test/api,$(OPT) -collection:stury=. -define:FORCE_AUTOMATON=true, (FORCE_AUTOMATON))
-	$(call odin_each,test,json/test/api,$(OPT) -collection:stury=. -define:SCAN_FORCE_SLOW=true, (SCAN_FORCE_SLOW))
-	$(call odin_each,test,json/test/api,$(TEST_OPT) -collection:stury=. -define:REFUSE_DUPLICATES=false, (REFUSE_DUPLICATES=false))
+$(TEST_MINIMAL): $(BUILD)/test/minimal/%:
+	@mkdir -p $(@D)
+	@echo "== $* (-o:minimal)"
+	@$(ODIN) test $* $(TEST_OPT) $(TEST_MEMORY) $(TEST_PIECES) -out:$@ || { echo "== $* (-o:minimal) failed"; exit 1; }
 
-lint:
-	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS),-no-entry-point -collection:stury=. $(LINT_FLAGS),)
-	@for e in examples/*/ bench/probe/ bench/core_compare/; do echo "== $${e%/}"; $(ODIN) check $${e%/} -collection:stury=. $(LINT_FLAGS) || exit 1; done
-	@# A program that uses the library builds under plain -vet (unused imports included, which $(VET) leaves out).
-	@echo "== examples/quickstart (-vet, host and x86-64)"
-	@$(ODIN) check examples/quickstart -collection:stury=. -vet -terse-errors || exit 1
-	@$(ODIN) check examples/quickstart -collection:stury=. -vet -terse-errors -target:linux_amd64 || exit 1
-	@echo "== cmd/stury"
-	@$(ODIN) check cmd/stury $(LINT_FLAGS)
-	@echo "== cmd/stury (linux_amd64)"
-	@$(ODIN) check cmd/stury -target:linux_amd64 $(LINT_FLAGS)
-	@echo "== cmd/stury (windows_amd64 objects)"
-	@# Odin targets Windows only given an SDK path, which objects read nothing from: an empty directory serves.
-	@d=$$(mktemp -d) && $(ODIN) build cmd/stury -build-mode:obj -target:windows_amd64 -windows-sdk-root:$$d $(LINT_FLAGS) -out:$$d/stury.obj; s=$$?; rm -rf $$d; exit $$s
-	@# The code guard reads source text alone: a release archive runs it like a checkout does.
-	@echo "== no mutable globals"; python3 tools/no_mutable_globals.py
+$(TEST_SPEED): $(BUILD)/test/speed/%:
+	@mkdir -p $(@D)
+	@echo "== $* (-o:speed)"
+	@$(ODIN) test $* -o:speed $(TEST_MEMORY) $(TEST_CHAINS) -out:$@ || { echo "== $* (-o:speed) failed"; exit 1; }
 
-# The bench probe (`build/probe --lane NAME`, bench/README.md), and build/probe50, which times 50 iterations.
-probe:
-	$(call odin_build,bench/probe -collection:stury=. $(OPT),build/probe)
-	$(call odin_build,bench/probe -collection:stury=. $(OPT) -define:TIMED_ITERS=50,build/probe50)
+# The x86-64 tiers v2 and v3 in a build for Odin's default CPU, as a caller's build is, at -o:none, where no kernel
+# is inlined into the tier's procedures, and at -o:speed. TIER picks the kernels' tier and WALK_TIER the walks'.
+# On Apple silicon they run under Rosetta. v4 runs only on a machine with AVX-512 (TIER=2), and `lint` compiles it.
+test-x86: $(X86_TARGETS)
 
-# Every generated fixture, checked against bench/manifest.toml.
-fixtures:
-	python3 bench/gen.py --check
+# `build/test/x86/OPT/TIER/PACKAGE` runs one package at one tier, `TIER` defined only where it is read.
+$(X86_TARGETS): $(BUILD)/test/x86/%:
+	@mkdir -p $(@D)
+	@o=$(word 1,$(subst /, ,$*)); t=$(word 2,$(subst /, ,$*)); p=$(patsubst $(word 1,$(subst /, ,$*))/$(word 2,$(subst /, ,$*))/%,%,$*); \
+	echo "== $$p (x86 tier $$t -o:$$o)"; \
+	$(ODIN) test $$p -o:$$o -target:darwin_amd64 -define:WALK_TIER=$$t \
+		$(if $(filter %/kernel/test,$*),-define:TIER=$$t) -out:$@ || { echo "== $$p (x86 tier $$t -o:$$o) failed"; exit 1; }
 
-# The comparison with other libraries and with other jq-like command lines (bench/README.md). bench-compare
-# downloads its pinned inputs and the other libraries first; bench-cli fetches the corpus and needs jq, jaq, gojq and yq
-# installed. Neither result is quotable unless the machine is idle.
-bench-compare: fixtures
-	python3 bench/fetch.py
-	python3 bench/compare.py build
-	python3 bench/compare.py time --out build/bench/report
+# The AVX2 and AVX-512 tiers on a machine that lacks them: each package built for linux_amd64 with the tier forced, and
+# run under Intel SDE (`SDE=sde64`) emulating a Haswell for v3 and a Sapphire Rapids for v4.
+SDE ?= sde64
+test-wide:
+	@mkdir -p $(BUILD)/wide
+	@for spec in 1:hsw 2:spr; do t=$${spec%%:*}; cpu=$${spec##*:}; for p in $(TEST_PKGS); do \
+		echo "== $$p (tier $$t on $$cpu)"; \
+		case " $(TIER_PKGS) " in *" $$p "*) tier=-define:TIER=$$t ;; *) tier= ;; esac; \
+		$(ODIN) build $$p -build-mode:test -target:linux_amd64 -o:minimal $(TEST_MEMORY) $(TEST_PIECES) \
+			-define:ODIN_TEST_FANCY=false -define:WALK_TIER=$$t $$tier -out:$(BUILD)/wide/test || exit 1; \
+		$(SDE) -$$cpu -- $(BUILD)/wide/test || exit 1; \
+	done; done
 
-bench-cli: build-cli fixtures
-	python3 bench/fetch.py corpus
-	zsh bench/cli/jq_compare.sh
+# Every binary32 pattern read back and checked shortest, on F32_THREADS threads at -o:speed, which the gate's full tier runs.
+F32_THREADS ?= 6
+test-f32:
+	@mkdir -p $(BUILD)/test/f32
+	$(ODIN) test core/spell/test -o:speed -define:F32_STRIDE=1 -define:F32_THREADS=$(F32_THREADS) \
+		-define:ODIN_TEST_NAMES=spell_tests.f32_exhaustive -out:$(BUILD)/test/f32/spell
 
-# The public suites and the command line under a sanitizer. TSan otherwise sleeps a second at every exit of a
-# process that ran threads, which is most of smoke.sh's wall time.
+# The command line under a sanitizer, with its smoke cases and jq corpus. TSan otherwise sleeps a second at every exit of
+# a process that ran threads, which is most of smoke.sh's wall time.
 SAN_ENV := STURY_SANITIZED=1 STURY_TEST_TIMEOUT=300 ASAN_OPTIONS=use_sigaltstack=0:detect_leaks=0 TSAN_OPTIONS=atexit_sleep_ms=0
 SAN_STACK := ulimit -s 65520 2>/dev/null || ulimit -s unlimited
 
-# `$(call sanitized,SANITIZER)` runs the suites and smoke.sh under -sanitize:SANITIZER.
-define sanitized
-	$(call odin_each,test,$(TEST_PKGS),-o:minimal -debug -sanitize:$(1) -collection:stury=., ($(1)))
-	$(call odin_build,cmd/stury $(OPT) -debug -sanitize:$(1) $(CLI_DEFINES) $(if $(filter thread,$(1)),-define:BATCH_START_BUDGET_US=100000),build/stury-$(1))
-	$(SAN_STACK); $(SAN_ENV) sh cmd/stury/test/smoke.sh build/stury-$(1)
+# `$(call sanitized_cli,SANITIZER)` builds the command line with -sanitize:SANITIZER and runs both suites on it.
+define sanitized_cli
+@mkdir -p $(BUILD)
+$(ODIN) build cmd/stury $(OPT) -debug -sanitize:$(1) $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury-$(1)
+$(SAN_STACK); $(SAN_ENV) python3 cmd/stury/test/smoke_floor.py $(BUILD)/stury-$(1)
+$(SAN_STACK); $(SAN_ENV) python3 cmd/stury/test/jq_suite.py $(BUILD)/stury-$(1)
 endef
 
-# AddressSanitizer: out-of-bounds reads and writes, use after free, stack overflow past a guard.
-test-asan:
-	$(call sanitized,address)
-	$(SAN_STACK); $(SAN_ENV) python3 cmd/stury/test/jq_suite.py build/stury-address
+.PHONY: test-asan-cli test-tsan-cli
+test-asan-cli:
+	$(call sanitized_cli,address)
+test-tsan-cli:
+	$(call sanitized_cli,thread)
 
-# ThreadSanitizer
-test-tsan:
-	$(call sanitized,thread)
+test-asan: $(ASAN_TARGETS)
+	@$(MAKE) --no-print-directory test-asan-cli
+
+$(ASAN_TARGETS): $(BUILD)/test/asan/%:
+	@mkdir -p $(@D)
+	@echo "== $* (address)"
+	@$(ODIN) test $* -o:speed -sanitize:address -debug $(TEST_PIECES) -out:$@ || { echo "== $* (address) failed"; exit 1; }
+
+# The pool's start budget is raised, since a loaded host would otherwise stop it short of every helper under the sanitizer.
+test-tsan: $(TSAN_TARGETS)
+	@$(MAKE) --no-print-directory test-tsan-cli
+
+$(TSAN_TARGETS): $(BUILD)/test/tsan/%:
+	@mkdir -p $(@D)
+	@echo "== $* (thread)"
+	@TSAN_OPTIONS=atexit_sleep_ms=0 $(ODIN) test $* -o:speed -sanitize:thread -debug -out:$@ || { echo "== $* (thread) failed"; exit 1; }
+
+# Host, then the other architectures' sources: x86-64 and a target with neither NEON nor x86 vectors.
+lint:
+	python3 tools/checks.py imports
+	python3 tools/checks.py words
+	python3 tools/checks.py globals
+	python3 tools/checks.py api
+	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS),)
+	$(ODIN) check bench $(LINT_FLAGS)
+	$(ODIN) check bench/doc $(LINT_FLAGS)
+	$(ODIN) check bench/editbench $(LINT_FLAGS)
+	$(ODIN) check bench/paths $(LINT_FLAGS)
+	$(ODIN) check bench/records $(LINT_FLAGS)
+	$(ODIN) check bench/typed $(LINT_FLAGS)
+	$(ODIN) check bench/write $(LINT_FLAGS)
+	$(ODIN) check cmd/stury $(LINT_FLAGS)
+	$(ODIN) check cmd/stury $(LINT_FLAGS) -target:linux_amd64
+	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && echo "== cmd/stury (windows_amd64 objects)" && \
+		$(ODIN) build cmd/stury -build-mode:obj -target:windows_amd64 -windows-sdk-root:$$d $(LINT_FLAGS) -out:$$d/stury.obj
+	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_amd64, (linux_amd64))
+	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for p in $(TIER_PKGS); do for o in none speed; do \
+		echo "== $$p (linux_amd64 v4 -o:$$o)"; \
+		$(ODIN) test $$p -build-mode:obj -target:linux_amd64 -define:TIER=2 -o:$$o $(LINT_FLAGS) -out:$$d/t.o || exit 1; \
+	done; done
+	$(call odin_each,check,$(LIB_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_riscv64, (linux_riscv64))
+
+# The public declarations of each library package, sorted. `api` compares their signatures with API.txt, and
+# `python3 tools/checks.py api --write` regenerates it.
+surface:
+	python3 tools/checks.py surface
+
+# Kernel timings at release optimization, of the tier at place TIER of `Tier`. ROUNDS, CASES and COUNT pass through
+# to run.py.
+TIER ?= 0
+bench: ROUNDS ?= 5
+bench:
+	@mkdir -p $(BUILD)
+	$(ODIN) build bench -o:speed -define:TIER=$(TIER) -out:$(BUILD)/kernelbench
+	ROUNDS=$(ROUNDS) python3 -I bench/run.py $(BUILD)/kernelbench
+
+# The document lanes' fixtures: the pinned corpus and peer sources, then the generated JSON and dsv files.
+fixtures:
+	python3 bench/fetch.py
+	python3 bench/gen.py --check
+
+# The path lanes' probe at -o:speed, then paths.py over the peers `bench-doc` built. ROUNDS passes through.
+bench-paths: ROUNDS ?= 5
+bench-paths:
+	@mkdir -p $(BENCH)
+	$(ODIN) build bench/paths -o:speed -out:$(BENCH)/paths
+	ROUNDS=$(ROUNDS) python3 bench/paths.py
+
+# The typed read's probe at -o:speed, then typed.py. ROUNDS passes through.
+bench-typed: ROUNDS ?= 5
+bench-typed:
+	@mkdir -p $(BENCH)
+	$(ODIN) build bench/typed -o:speed -out:$(BENCH)/typed
+	ROUNDS=$(ROUNDS) python3 bench/typed.py
+
+# The record lanes on the NDJSON and CSV fixtures, beside the peers' record readers. ROUNDS passes through.
+bench-records: ROUNDS ?= 5
+bench-records: bench-peers
+	$(ODIN) build bench/records -o:speed -out:$(BENCH)/records
+	ROUNDS=$(ROUNDS) python3 bench/records.py
+
+# The peers whose toolchain and sources are present: yyjson, simdjson (threaded, as its document_stream runs stage 1 in a
+# thread of its own), and the Rust binaries (sonic-rs, serde_json, simd-csv).
+bench-peers:
+	@mkdir -p $(BENCH)
+	@if command -v $(BENCH_CC) >/dev/null && [ -f $(BENCH)/deps/yyjson/yyjson.c ]; then \
+		$(BENCH_CC) -O3 -DNDEBUG -o $(BENCH)/yy_bench bench/peers/yy_bench.c \
+			$(BENCH)/deps/yyjson/yyjson.c -I$(BENCH)/deps/yyjson && echo "yy: built"; \
+	else echo "yy: left out (C compiler or yyjson source missing; run make fixtures)"; fi
+	@if command -v $(BENCH_CXX) >/dev/null && [ -f $(BENCH)/deps/simdjson/simdjson.cpp ]; then \
+		$(BENCH_CXX) -O3 -DNDEBUG -std=c++17 -pthread -o $(BENCH)/cpp_bench bench/peers/cpp_bench.cpp \
+			$(BENCH)/deps/simdjson/simdjson.cpp -I$(BENCH)/deps/simdjson && echo "simd: built"; \
+	else echo "simd: left out (C++ compiler or simdjson source missing; run make fixtures)"; fi
+	@if command -v $(BENCH_CARGO) >/dev/null; then \
+		CARGO_TARGET_DIR=$(abspath $(BENCH)/rust) $(BENCH_CARGO) build --release --locked \
+			--manifest-path bench/peers/rust/Cargo.toml && echo "sonic, serde, simd-csv: built"; \
+	else echo "sonic, serde, simd-csv: left out (cargo missing)"; fi
+
+# The command line against jq, jaq, gojq and yq on the fixtures and the corpus. Needs zsh, hyperfine and the tools
+# installed (bench/README.md), and an idle machine for a quotable result.
+bench-cli: build-cli
+	python3 bench/gen.py --check
+	python3 bench/fetch.py corpus
+	zsh bench/cli/jq_compare.sh
+
+# The write lanes: next's probe at -o:speed when bench/write exists, the peers, then write.py. ROUNDS passes through.
+bench-write: ROUNDS ?= 5
+bench-write: bench-peers
+	@if [ -d bench/write ]; then $(ODIN) build bench/write -o:speed -out:$(BENCH)/write; \
+	else echo "next: left out (bench/write is not there yet)"; fi
+	ROUNDS=$(ROUNDS) python3 bench/write.py $(LANES)
+
+# The document lanes' probe at -o:speed, the peers, then doc.py. ROUNDS and BENCH_FILES pass through.
+bench-doc: ROUNDS ?= 5
+bench-doc: bench-peers
+	$(ODIN) build bench/doc -o:speed -out:$(BENCH)/doc
+	ROUNDS=$(ROUNDS) python3 bench/doc.py $(BENCH_FILES)

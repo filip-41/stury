@@ -133,7 +133,7 @@ number_key_order :: proc(ks: []Keyed, items: []Value = nil) -> (order: []int, ti
 			return nil, nil
 		}
 		u: u64
-		#partial switch key.kind {
+		switch key.kind {
 		case .Null, .False, .True:
 			u = u64(key.kind) // below every number's bits, -inf's 0x000f_ffff_ffff_ffff
 		case .Number:
@@ -147,7 +147,7 @@ number_key_order :: proc(ks: []Keyed, items: []Value = nil) -> (order: []int, ti
 			// The bits in the numbers' order: a negative's all flipped, a positive's sign set.
 			u = transmute(u64)f
 			u ~= ~u64(0) if u >> 63 != 0 else 1 << 63
-		case:
+		case .String, .Array, .Object:
 			return nil, nil
 		}
 		a[i] = {u, i}
@@ -345,44 +345,45 @@ Sort_Shape :: enum {
 	Unique,
 }
 
-// What the sort builtin of `shape` makes of `items` in sort_keyed()'s order: them in order, runs of equal
-// keys as groups (group_by), or each run's first (unique). `ks` are their keys, compared where `ties` is nil.
+// What the sort builtin of `shape` makes of the elements in sort_keyed()'s order: them in order, runs of equal
+// keys as groups (group_by), or each run's first (unique). The elements are `ks`' when it is given, else `items`,
+// and `ks` are their keys, compared where `ties` is nil.
 @(private = "file")
 sorted_result :: proc(shape: Sort_Shape, items: []Value, ks: []Keyed, order: []int, ties: []bool) -> Value {
-	grouping := shape == .Grouped
-	unique := shape == .Unique
-	a := new_array(0 if grouping || unique else len(items))
-	group: ^Array
-	for at, i in order {
-		new_run := (grouping || unique) && (i == 0 || (!ties[i] if ties != nil else compare_keys(ks[order[i - 1]].key, ks[at].key) != 0))
-		switch {
-		case grouping:
-			if new_run {
-				group = new_array()
-				append(&a.items, group)
-			}
-			append(&group.items, items[at])
-		case unique:
-			if new_run {
-				append(&a.items, items[at])
-			}
-		case:
-			append(&a.items, items[at])
+	element :: #force_inline proc(items: []Value, ks: []Keyed, at: int) -> Value {
+		return ks[at].v if ks != nil else items[at]
+	}
+	if shape == .Sorted {
+		a := new_array(len(order))
+		for at in order {
+			append(&a.items, element(items, ks, at))
 		}
+		return a
+	}
+	// A run of equal keys at a time, so that its group is made at its size.
+	a := new_array()
+	for i := 0; i < len(order); {
+		j := i + 1
+		for j < len(order) && (ties[j] if ties != nil else compare_keys(ks[order[j - 1]].key, ks[order[j]].key) == 0) {
+			j += 1
+		}
+		if shape == .Unique {
+			append(&a.items, element(items, ks, order[i]))
+		} else {
+			group := new_array(j - i)
+			for at in order[i:j] {
+				append(&group.items, element(items, ks, at))
+			}
+			append(&a.items, group)
+		}
+		i = j
 	}
 	return a
 }
 
+// `sort` and `unique`.
 fn_sort :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return sort_array(ip, v, .Sorted)
-}
-
-fn_unique :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return sort_array(ip, v, .Unique)
-}
-
-@(private = "file")
-sort_array :: proc(ip: ^Interp, v: Value, shape: Sort_Shape) -> (Value, Signal) {
+	shape: Sort_Shape = .Unique if name == "unique" else .Sorted
 	if kind(v) != .Array {
 		return nil, fail(ip, "%s (%s) cannot be sorted, as it is not an array", type_name(v), brief(v))
 	}
@@ -409,27 +410,31 @@ Atom_Sink :: struct {
 	atoms:      ^[dynamic]Sort_Atom,
 }
 
-// The sort keys of `items` under `f`: its outputs on each, read into their atoms without building the arrays
-// jq's `map([f])` makes.
+// The elements of `v` each with its sort key under `f`: its outputs on that element, read into their atoms without
+// building the arrays jq's `map([f])` makes. A document's elements are listed in the pass that keys them, so each
+// element's node is read while its members are.
 @(private = "file")
-keys_by :: proc(ip: ^Interp, f: ^Node, items: []Value, env: ^Env) -> ([]Keyed, Signal) {
-	atoms := make([dynamic]Sort_Atom, 0, len(items))
-	ends := make([]int, len(items))
+keys_by :: proc(ip: ^Interp, f: ^Node, v: Value, env: ^Env) -> ([]Keyed, Signal) {
+	n := length_of(v)
+	ks := make([dynamic]Keyed, 0, n)
+	atoms := make([dynamic]Sort_Atom, 0, n)
+	ends := make([dynamic]int, 0, n)
 	s := Atom_Sink{sink = {emit = proc(s: ^Sink, it: Item) -> Signal {
 				append((^Atom_Sink)(s).atoms, sort_atom(it.v))
 				return .Go
 			}}, atoms = &atoms}
-	for x, i in items {
+	it := iterate(v)
+	for _, x in next_member(&it) {
+		append(&ks, Keyed{v = x})
 		if sig := eval(ip, f, {v = x}, env, false, &s); sig != .Go {
 			return nil, sig
 		}
-		ends[i] = len(atoms)
+		append(&ends, len(atoms))
 	}
-	ks := make([]Keyed, len(items))
-	for x, i in items {
-		ks[i] = {key = atoms[ends[i - 1] if i > 0 else 0:ends[i]], v = x}
+	for &k, i in ks {
+		k.key = atoms[ends[i - 1] if i > 0 else 0:ends[i]]
 	}
-	return ks, .Go
+	return ks[:], .Go
 }
 
 // `ks`' keys as the arrays jq's `map([f])` would have made, for an error message.
@@ -446,45 +451,32 @@ keys_array :: proc(ks: []Keyed) -> ^Array {
 	return keys
 }
 
-// The elements of `input` that sort_by and min_by iterate and their keys under `f`.
+// The elements of `input` that sort_by and min_by iterate, each with its key under `f`.
 @(private = "file")
-keyed_elements :: proc(ip: ^Interp, f: ^Node, input: Item, env: ^Env) -> (items: []Value, ks: []Keyed, sig: Signal) {
+keyed_elements :: proc(ip: ^Interp, f: ^Node, input: Item, env: ^Env) -> ([]Keyed, Signal) {
 	if k := kind(input.v); k != .Array && k != .Object {
-		return nil, nil, fail(ip, "Cannot iterate over %s (%s)", type_name(input.v), brief(input.v))
+		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(input.v), brief(input.v))
 	}
-	items = elements(input.v)
-	ks, sig = keys_by(ip, f, items, env)
-	return
+	return keys_by(ip, f, input.v, env)
 }
 
 // `sort_by(f)`, `group_by(f)` and `unique_by(f)`, which jq defines as their `_impl` of `map([f])`: the
 // same keys, each `f`'s outputs on an element, read into their atoms without building the arrays.
-native_sort_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return sort_by(ip, n, input, env, track, out, .Sorted)
-}
-
-native_group_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return sort_by(ip, n, input, env, track, out, .Grouped)
-}
-
-native_unique_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return sort_by(ip, n, input, env, track, out, .Unique)
-}
-
-@(private = "file")
-sort_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink, shape: Sort_Shape) -> Signal {
-	items, ks, sig := keyed_elements(ip, n.args[0], input, env)
-	if sig != .Go {
-		return sig
+sort_by :: proc($shape: Sort_Shape) -> Native {
+	return proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
+		ks, sig := keyed_elements(ip, n.args[0], input, env)
+		if sig != .Go {
+			return sig
+		}
+		if kind(input.v) != .Array {
+			return not_both_arrays(ip, input.v, keys_array(ks))
+		}
+		order, ties, sorted_sig := sort_keyed(ip, ks, 1)
+		if sorted_sig != .Go {
+			return sorted_sig
+		}
+		return emit_made(out, input, sorted_result(shape, nil, ks, order, ties), track)
 	}
-	if kind(input.v) != .Array {
-		return not_both_arrays(ip, input.v, keys_array(ks))
-	}
-	order, ties, sorted_sig := sort_keyed(ip, ks, 1)
-	if sorted_sig != .Go {
-		return sorted_sig
-	}
-	return emit_made(out, input, sorted_result(shape, items, ks, order, ties), track)
 }
 
 // The place of the first least element of `xs` under `cmp`, or of the last greatest, as jq's min and max keep.
@@ -506,44 +498,30 @@ extreme_place :: proc(xs: []$T, want_max: bool, $cmp: proc(a, b: T) -> int) -> i
 
 // `min_by(f)` and `max_by(f)`, jq's `_min_by_impl(map([f]))` over the same keys as sort_by: the first least
 // element, or the last greatest, found in one pass.
-native_min_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return extreme_by(ip, n, input, env, track, out, false)
-}
-
-native_max_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return extreme_by(ip, n, input, env, track, out, true)
-}
-
-@(private = "file")
-extreme_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink, want_max: bool) -> Signal {
-	items, ks, sig := keyed_elements(ip, n.args[0], input, env)
-	if sig != .Go {
-		return sig
+extreme_by :: proc($want_max: bool) -> Native {
+	return proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
+		ks, sig := keyed_elements(ip, n.args[0], input, env)
+		if sig != .Go {
+			return sig
+		}
+		if kind(input.v) != .Array {
+			keys := keys_array(ks)
+			return fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(input.v), brief(input.v), type_name(keys), brief(keys))
+		}
+		too_deep = false
+		atom_depth = 1
+		sort_object_keys(ks)
+		best := extreme_place(ks, want_max, proc(a, b: Keyed) -> int {return compare_keys(a.key, b.key)})
+		if failed := compare_failed(ip, false); failed != .Go {
+			return failed
+		}
+		return emit_made(out, input, ks[best].v if best >= 0 else nil, track)
 	}
-	if kind(input.v) != .Array {
-		keys := keys_array(ks)
-		return fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(input.v), brief(input.v), type_name(keys), brief(keys))
-	}
-	too_deep = false
-	atom_depth = 1
-	sort_object_keys(ks)
-	best := extreme_place(ks, want_max, proc(a, b: Keyed) -> int {return compare_keys(a.key, b.key)})
-	if failed := compare_failed(ip, false); failed != .Go {
-		return failed
-	}
-	return emit_made(out, input, items[best] if best >= 0 else nil, track)
 }
 
-fn_min :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return extreme(ip, v, false)
-}
-
-fn_max :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return extreme(ip, v, true)
-}
-
-@(private = "file")
-extreme :: proc(ip: ^Interp, v: Value, want_max: bool) -> (Value, Signal) {
+// `min` and `max`.
+fn_extreme :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+	want_max := name == "max"
 	if kind(v) != .Array {
 		return nil, fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(v), brief(v), type_name(v), brief(v))
 	}

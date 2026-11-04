@@ -1,55 +1,77 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 (2026-11-04)
 
-### Library
+### The rebuilt library
 
-- `Dialect.Json5` reads JSON5 1.0.0 in `validate`, `scan`, `find`, `query`, `build` and `unmarshal`. A JSON5
-  document marshals as JSON with its comments kept; `Infinity` and `NaN` are refused. The edits and
-  `Record_Read` refuse JSON5.
-- `plain_json`, `has_comments` and `own_spelling` say what a dialect reads, without comparing it.
-- csv gains `Request`, `request_init`, `scan` and `answers`, reading every path in one pass as JSON's do.
-  `csv.find_column` is removed: use a path.
-- `route_of` (json and csv) says which engine answers each path of a request, without scanning.
-- `json.query_in(doc, n, path, out)` answers a path from node `n`. `json.query` returns `Answer`s, as
-  `csv.query` does, and `csv.query` takes no allocator.
-- A path with no `Any` step that does not match gives one `.Missing` answer from `query` and a csv `Request`,
-  as `find` does.
-- `json.upsert` sets a value and adds a missing last member; `set` drops its `upsert` flag.
-- Repeated keys under `.Default`: every reader takes the last copy, csv's `unmarshal` and `Record_Read`
-  included, and the edits refuse a key or header name repeated on their path. Under `.First` and `.Last`,
-  `remove` and `insert` act on the copy `set` finds. A `.Duplicate_Key` refusal is at the repeated key's opening
-  quote.
-- CSV reads and writes `f16` fields.
-- CSV refuses what JSON refuses: an enum value no member has under `enums = .Int`, the `omitempty` tag, a NUL
-  read into a `cstring`, and a `Maybe` of a `cstring`.
-- A refused allocation while an edit's result is validated is `.Out_Of_Memory`.
-- Renamed or changed signatures:
-  - `json.Path_Answer` is `Answer` and `Path_Outcome` is `Answer_Outcome`; both formats share them with `Kind`,
-    `Node` and `NO_NODE`.
-  - JSON's framing is `Read_Opts.framing`: `records(src, opts, allocator)`,
-    `each_record(src, task, data, opts, runner)` and `validate_records(src, opts, runner, allocator)`. `.None`
-    framing keeps the whitespace after the text in its record.
-  - `json.validate(src, opts, runner)` takes a runner, as csv's does. `validate_facts` collects a JSONC text's
-    facts.
-  - The JSON edits and `csv.splice` take `opts: Read_Opts` in place of `dialect`. `csv.insert` takes the path `.`
-    and an `Insert_At` row.
-  - `Records.base` is removed: a record's `at` is its offset in the bytes iterated.
-- The types both formats share are `core`'s, and each format names them: `Read_Opts`, `Unmarshal_Opts`,
-  `Request`, `Route`, `Answer`, the row document (`json.Document` is `core.Row_Document`), `Insert_At`, the
-  writers' put layer (`core/spell`), and the decimal readers `number_of_loose_text` and `fold_int`.
+The library and the command line are rebuilt on one interface for every format. Code written against the earlier names
+changes as follows.
+
+- `csv` is now `dsv`, and reads `Csv`, `Tsv` and `Plain` delimited text. `json` and `dsv` take the format as an
+  argument: `json.Spec` is `.Json`, `.Jsonc` or `.Json5` (it replaces `Dialect`), and `dsv.Spec` is `.Csv`, `.Tsv` or
+  `.Plain`. A call reads `json.unmarshal(src, .Json, &v)` and `dsv.unmarshal(src, .Csv, &rows)`. The walk settings
+  are one `Options` struct per package: `max_depth` and `tolerate` for JSON, and `no_header`, `delimiter`, `comment`,
+  `tolerate`, `crlf` and `infer` for dsv.
+- Everything a caller uses across formats lives in `core`: documents, readers, paths, edits, `Write_Options` and
+  errors. `json` and `dsv` give each format's `validate`, `build`, `find`, `scan`, `set`, `commit`, `unmarshal`,
+  `marshal` and `as`. `json.format` formats a text.
+- Errors are values with a `kind`, not optional enums or strings. `core.Fault` is a text that breaks the grammar,
+  `core.Document_Error`, `core.Path_Error`, `core.Path_Edit_Error` and `core.Typed_Error` the others. One
+  `core.render` writes any of them as `line:col: message`, with the path for a typed error, so
+  `json.render_error` and `csv.render_error` are gone.
+- `find` and `scan` return a `core.Document` and `core.Answer` records, and `core.query` collects the values a path
+  reaches from a built document. They replace `Request`, its kinds and `answers`. A path is parsed with
+  `core.parse_path` or `core.parse_pointer` once, owns its steps and is freed with `core.path_destroy`.
+- Records are in `core/records`: `check`, `open`, `open_stream`, `next`, `each` and a record writer
+  (`writer_init`, `write`, `write_text`, `write_cells`, `writer_end`). They replace `records`, `each_record`,
+  `validate_records`, `Record_Reader`, `Record_Read` and `records_from`. Framings are `.Lines`, `.Seq`,
+  `.Concatenated` and `.Entries`. A stream reads through a window.
+- Threads are `host.Pool`, started with `host.pool_init` and lent to `records.each` through `pool.runner`. It
+  replaces `host.Batch_Pool`.
+- Edits are an `Edit_List` made with `core.edit_list_init`, recorded with `core.set`, `core.set_member`,
+  `core.insert` and `core.remove`, each checked as it is recorded, and applied with `json.commit`, `dsv.commit` or
+  `core.commit`. `json.set` and `dsv.set` still replace one value at a path. A delimited text commits through the
+  list, and removing a cell from every row drops its column.
+- Typed reads take an explicit plan from `json.plan_make` or `dsv.plan_make`. A plan belongs to the caller and there
+  is no global plan cache, so `plan_cache_clear` is gone. `typed.Read_Options` holds `dups`, `refuse_duplicates`,
+  `unknown`, `borrow_strings` and `collect`, and `typed.Plan_Options` holds `enums`, `union_tag`, `tag_names`,
+  `hooks` and `rename`. The `unknown` tag flag captures unnamed members into a `map[string]typed.Raw`.
+- `core.Duplicates` is `.First` or `.Last`. Refusing a repeated key is the `refuse_duplicates` argument of `build`,
+  `find`, `set` and the typed read, and `every_key` is a path read option that answers every matching key.
+- `.Lazy` and `Strictness` are gone: a value that is read is always judged by the format's grammar.
+  `Options.tolerate` names the rules a text may break, `Invalid_Utf8` and `Lone_Surrogate`.
+- Comments are facts on a node with a `core.Role` of `Comment`, `Comment_Inline` or `Comment_Foot`. Read them with
+  `core.facts_of` and edit them with `core.set_fact` and `core.remove_fact`.
+- `core.Write_Options` sets `pretty`, `indent`, `tab`, `ascii`, `escape_html`, `escape_del`, `sort_keys` and
+  `respell_strings` for `marshal`, `format`, `core.write` and the record writer, whichever the format.
+- A document keeps its buffers whole, and a build that runs out of memory counts the text and builds again at the
+  exact size. `core.length_exact`, `core.member_of` and `core.element_of` read a partial document, where a miss is
+  `.Missing` or `.Wrong_Kind`.
+- The `stury:core`, `stury:json`, `stury:dsv`, `stury:core/records`, `stury:core/typed` and `stury:host` imports
+  replace `stury:json`, `stury:csv` and `stury:host` as they were.
 
 ### Command line
 
+- A number keeps any exponent: `1e2147483648` prints as written, and a computation that overflows gives the largest
+  double. The "exponent out of range" error and `--strict-limits` are gone.
+- `--follow` answers each record of one named file as it is appended. `--max-depth` takes up to 1048576.
+- `--to json5` is refused, and `fmt --in-place` and `fmt --check` are refused for JSON5 input. `--to jsonc` writes the
+  values and their comments.
 - `--explain` writes the filter's plan (route, path or columns, engine, refusals) and what the run did to stderr,
   and runs the filter as without it.
-- `--from json5` reads JSON5 in filters, `fmt` and `check`. Error lines and `input_line_number` count the
-  text's own lines. `--to json5` is refused.
-- `--stream` gives the events of a faulty text before its fault, as jq does, and `input_line_number` and the
-  error positions under `--stream` count jq's lines.
-- `--stream-errors` gives a faulty text's events as it reads them, not all before the first.
+- `--from json5` reads JSON5 in filters, `fmt` and `check`. Error lines and `input_line_number` count the text's
+  own lines.
+- `check` validates a large root array, or the array of a root object, on the thread pool.
+- `--stream` gives the events of a faulty text before its fault, as jq does, and `input_line_number` and the error
+  positions under `--stream` count jq's lines. `--stream-errors` gives a faulty text's events as it reads them, not
+  all before the first.
+- A JSONC or JSON5 input of only comments and whitespace is no input, as a whitespace-only one is.
+- Windows: `strftime`'s `%k` and `%l` pad the hour with a space, as jq does, not a zero.
+- Regex `\R` no longer matches the trailing byte of a multibyte character that a global match steps into.
 - macOS: a pipe named as a path (`/dev/stdin`, `<(...)`) is read wherever a file is: inputs, `--slurpfile`,
   `--rawfile`, `-f`, `check` and `fmt`.
+- The differences from jq recorded in `docs/cli.md` are unchanged.
+- The command line and the library give the same answer on every format.
 
 ## 0.0.3 (2026-10-26)
 

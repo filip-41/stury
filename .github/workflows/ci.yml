@@ -23,34 +23,43 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
       - run: make lint
-      # The fixtures against bench/manifest.toml's hashes (CPython 3.11+, writes ~480 MB under bench/fixtures),
-      # and the man page.
+      # The generated fixtures against bench/manifest.toml's hashes, which hold for the CPython the generators were
+      # checked on (writes ~180 MB under bench/fixtures), and the man page. twitter.ndjson is made from the fetched
+      # corpus.
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.14"
       - name: Docs
         run: |
+          python3 bench/fetch.py corpus
           python3 bench/gen.py --check > /dev/null
           sudo apt-get install -y mandoc
           mandoc -T lint -W warning docs/stury.1
 
+  # The library suites with their compiles at once, then the command line against its smoke cases and the jq corpus.
+  # The command line's suites time their runs, so they do not share the host with the compiles.
   test:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-15]
-        target: [test test-modes]
-        include:
-          # Odin has no macOS Intel toolchain: cross-compile the x86 suites from the
-          # arm64 runner and run them under Rosetta.
-          - os: macos-15
-            target: test-x86
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
-      - run: make ${{ matrix.target }}
+      - run: make -j4 test-lib
+      - run: make test-cli test-jq
 
-  # The jq 1.8.2 differential: jq_suite in diff mode, jq_diff and regex_diff
-  # over every seed. The other test job runs the corpus but cannot compare
-  # against jq itself. A seed per runner: each driver keeps every core busy.
+  # Odin has no macOS Intel toolchain: the x86 suites are cross-compiled from the arm64 runner and run under Rosetta.
+  test-x86:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/setup-odin
+      - run: make -j4 test-x86
+
+  # The jq 1.8.2 differential: jq_suite in diff mode, jq_diff and regex_diff over every seed. The test job runs the
+  # corpus but cannot compare against jq itself. A seed per runner: each driver keeps every core busy.
   diff:
     strategy:
       fail-fast: false
@@ -69,10 +78,9 @@ jobs:
           jq --version | grep -qx 'jq-1.8.2'
       - run: make -j -O diff DIFF_SEEDS=${{ matrix.seed }}
 
-  # The AVX2 and AVX-512BW routes. A hosted x64 runner's processor varies (AVX-512BW is not guaranteed) and
-  # Rosetta has neither, so the api suite is built once and run under Intel SDE emulating a Haswell and a
-  # Sapphire Rapids (SDE's Skylake-X has no brand string, which core:sys/info's init indexes past);
-  # STURY_REQUIRE_WIDE makes a run without the route a failure instead of a skip.
+  # The AVX2 and AVX-512 routes. A hosted x64 runner's processor varies (AVX-512BW is not guaranteed) and Rosetta has
+  # neither AVX-512 nor a way to force it, so every suite is built for each tier and run under Intel SDE emulating a
+  # Haswell and a Sapphire Rapids (SDE's Skylake-X has no brand string, which core:sys/info's init indexes past).
   wide:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -82,10 +90,6 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
-      - name: Build the api suite
-        run: |
-          mkdir -p build
-          odin build json/test/api -build-mode:test -collection:stury=. -o:minimal -define:ODIN_TEST_FANCY=false -out:build/api-test
       - name: Install Intel SDE
         run: |
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/sde.tar.xz" "$SDE_URL"
@@ -95,10 +99,7 @@ jobs:
           echo "$RUNNER_TEMP/sde" >> "$GITHUB_PATH"
           # SDE injects itself with ptrace, which Ubuntu's yama setting forbids.
           echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
-      - name: AVX2 without AVX-512BW (Haswell)
-        run: STURY_REQUIRE_WIDE=avx2 sde64 -hsw -- build/api-test
-      - name: AVX-512BW (Sapphire Rapids)
-        run: STURY_REQUIRE_WIDE=avx512 sde64 -spr -- build/api-test
+      - run: make test-wide
 
   # Sanitizer runs are checked where they were made to pass: macOS on Apple silicon.
   sanitizers:
@@ -112,8 +113,9 @@ jobs:
       - uses: ./.github/actions/setup-odin
       - run: make ${{ matrix.target }}
 
-  # Windows is built only here. It builds the library suites and the CLI, then runs a few answers end to end.
-  # smoke.sh is not run here: its CPU and memory guards need ulimit and time(1), and it uses FIFOs and modes.
+  # Windows is built only here. It builds the library suites that do not read the POSIX-only walktest helper (json and
+  # dsv do) and the CLI, then runs a few answers end to end. smoke.sh is not run here: its CPU and memory guards need
+  # ulimit and time(1), and it uses FIFOs and modes.
   windows:
     runs-on: windows-latest
     steps:
@@ -121,10 +123,11 @@ jobs:
       - uses: ./.github/actions/setup-odin
       - shell: bash
         run: |
-          odin test core/test -collection:stury=.
-          odin test json/test/api -collection:stury=.
-          odin test csv/test -collection:stury=.
-          odin build cmd/stury -o:speed -collection:stury=. -define:REFUSE_DUPLICATES=false -define:STURY_VERSION='"ci"' -out:stury.exe
+          set -e
+          for p in core/spell/test host/test core/kernel/test core/test core/write/test core/records/test; do
+            odin test $p -o:minimal -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:RECORDS_SLICE=1 -out:test.exe
+          done
+          odin build cmd/stury -o:speed -define:STURY_VERSION='"ci"' -out:stury.exe
       - name: Answers through files and pipes
         shell: bash
         run: |

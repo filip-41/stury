@@ -4,10 +4,10 @@ package jq
 // timegm or strptime: time_windows.odin has them in Odin.
 
 import "core:c/libc"
-import "core:fmt"
 import "core:os"
 import "core:strings"
 import win "core:sys/windows"
+import "../message"
 
 foreign import ucrt "system:libucrt.lib"
 
@@ -85,11 +85,14 @@ c_strftime :: proc(buf: []byte, format: cstring, tm: ^libc.tm) -> uint {
 		switch f[i] {
 		case 's':
 			t := tm^
-			fmt.sbprint(&b, _mktime64(&t))
-		case 'k':
-			fmt.sbprintf(&b, "%2d", tm.tm_hour)
-		case 'l':
-			fmt.sbprintf(&b, "%2d", (tm.tm_hour + 11) % 12 + 1)
+			message.write(&b, "%d", _mktime64(&t))
+		case 'k', 'l':
+			// The hour padded with a space to two places, as glibc's `%k` and `%l`.
+			hour := tm.tm_hour if f[i] == 'k' else (tm.tm_hour + 11) % 12 + 1
+			if hour < 10 {
+				strings.write_byte(&b, ' ')
+			}
+			message.write(&b, "%d", hour)
 		case:
 			strings.write_byte(&b, '%')
 			strings.write_byte(&b, f[i])

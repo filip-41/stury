@@ -1,10 +1,9 @@
 package main
 
-// The formats `--from` reads and `--to` writes. A format is one row of FORMATS: its grammar, how its input is cut
-// into texts, whether it is cells, and who answers a filter on it. print.odin and output_cells.odin write the
-// outputs.
+// The formats `--from` reads and `--to` writes, one row of FORMATS each, and the options a format refuses.
 
-import csv "../../csv"
+import core "../../core"
+import dsv "../../dsv"
 import json "../../json"
 
 Format :: enum u8 {
@@ -16,38 +15,28 @@ Format :: enum u8 {
 	Tsv,
 }
 
-// How a JSON-like format's input is cut into texts: one after another as jq reads them, one a line, or the whole
-// input one document.
-Framing :: enum u8 {
-	Texts,
-	Lines,
-	Whole,
-}
-
 Format_Spec :: struct {
-	name:    string,
-	// The grammar the text is spelled in, for a JSON-like format.
-	source:  json.Dialect,
-	framing: Framing,
+	name:       string,
+	// A delimited format: the first record is the header, and each later record is an object keyed by it.
+	cells:      bool,
+	// Each line is one text.
+	lines:      bool,
+	// The format keeps the comments read with a value.
+	comments:   bool,
 	// The format a read-only format is written as, by default and by `--to`. Such a format is not itself written.
 	written_as: Maybe(Format),
-	// Written, its values keep the comments read with them.
-	keeps_comments: bool,
-	// A CSV-like format: the first record is the header, and each later record is an object keyed by it.
-	cells:   bool,
-	dialect: csv.Dialect, // for a format with `cells`
-	// Chooses who answers the filter on an input of the format (`Run.scanning`, `Run.columns`).
-	route:   proc(run: ^Run, text: string, files: int),
+	// The spec its JSON texts are read in: `--argjson`, `fromjson` and a JSON-like format's input.
+	spec:       json.Spec,
 }
 
 @(rodata)
 FORMATS := [Format]Format_Spec {
-	.Json   = {name = "json", route = choose_scan},
-	.Jsonc  = {name = "jsonc", source = .Jsonc, framing = .Whole, keeps_comments = true, route = choose_scan},
-	.Json5  = {name = "json5", source = .Json5, framing = .Whole, written_as = .Jsonc, route = choose_scan},
-	.Ndjson = {name = "ndjson", framing = .Lines, route = choose_scan},
-	.Csv    = {name = "csv", cells = true, route = choose_columns},
-	.Tsv    = {name = "tsv", cells = true, dialect = csv.TSV, route = choose_columns},
+	.Json   = {name = "json"},
+	.Jsonc  = {name = "jsonc", comments = true, spec = .Jsonc},
+	.Json5  = {name = "json5", comments = true, written_as = .Jsonc, spec = .Json5},
+	.Ndjson = {name = "ndjson", lines = true},
+	.Csv    = {name = "csv", cells = true},
+	.Tsv    = {name = "tsv", cells = true},
 }
 
 format_named :: proc(name: string) -> (f: Format, ok: bool) {
@@ -74,22 +63,45 @@ format_names :: proc(writing: bool) -> string {
 	return string(b[:])
 }
 
-// Reports whether the input format is CSV-like.
+// How the inputs are read, as --from and --seq say. A JSON-like format's texts are read as `json_reading` reads them.
+input_source :: proc(o: ^Opts, json_reading: core.As) -> Source {
+	if reads_cells(o) {
+		return {as = dsv.as(.Csv if o.from == .Csv else .Tsv), framing = .Lines}
+	}
+	return {as = json_reading, framing = .Seq if o.seq else .Lines if reads_lines(o) else .Concatenated, spec = json.Spec(json_reading.spec)}
+}
+
+// Reports whether the input format is a delimited one.
 reads_cells :: #force_inline proc(o: ^Opts) -> bool {
 	return FORMATS[o.from].cells
 }
 
-// Reports whether the output format is CSV-like.
+// Reports whether the output format is a delimited one.
 writes_cells :: #force_inline proc(o: ^Opts) -> bool {
 	return FORMATS[o.to].cells
 }
 
+// Reports whether each line of the input is one text.
+reads_lines :: #force_inline proc(o: ^Opts) -> bool {
+	return FORMATS[o.from].lines
+}
+
+// Reports whether each output is written on a line of its own.
+writes_lines :: #force_inline proc(o: ^Opts) -> bool {
+	return FORMATS[o.to].lines
+}
+
+// Reports whether the outputs, written, keep the comments read with their values.
+writes_comments :: #force_inline proc(o: ^Opts) -> bool {
+	return FORMATS[o.to].comments
+}
+
 // Refuses options that conflict with the chosen formats. A non-JSON input format splits the input itself, so -R,
-// --seq and --stream do not apply. A CSV-like output writes no JSON text, so JSON layout options do not apply.
+// --seq and --stream do not apply. A delimited output writes no JSON text, so JSON layout options do not apply.
 refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 	from, to := FORMATS[o.from].name, FORMATS[o.to].name
 	if o.from != .Json {
-		other := "--seq" if o.seq else "-R" if o.raw_input else "--stream" if o.stream && o.from != .Ndjson else ""
+		other := "--seq" if o.seq else "-R" if o.raw_input else "--stream" if o.stream && !reads_lines(o) else ""
 		if other != "" {
 			usage_error("--from %s cannot be combined with %s", from, other)
 		}
@@ -98,7 +110,7 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 		if cli.validating {
 			usage_error("check writes nothing: --to %s has no use there", to)
 		}
-		other := cli.json_flag if writes_cells(o) else "--seq" if o.seq else cli.layout_flag if o.to == .Ndjson else ""
+		other := cli.json_flag if writes_cells(o) else "--seq" if o.seq else cli.layout_flag if writes_lines(o) else ""
 		if other != "" {
 			usage_error("%s cannot be combined with --to %s", other, to)
 		}

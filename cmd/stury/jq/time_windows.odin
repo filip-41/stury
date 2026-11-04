@@ -5,6 +5,7 @@ package jq
 
 import "core:c/libc"
 import "core:math"
+import "core:strings"
 
 @(private = "file")
 DAY :: 86400
@@ -101,17 +102,8 @@ name :: proc(p: ^Parse, names: []string) -> (int, bool) {
 	rest := p.s[p.at:]
 	for full, i in names {
 		for n in ([]int{len(full), 3}) {
-			if len(rest) < n {
-				continue
-			}
-			same := true
-			for k in 0 ..< n {
-				if lower(rest[k]) != lower(full[k]) {
-					same = false
-					break
-				}
-			}
-			if same {
+			// rest[:n] folds to n ASCII letters only when it is ASCII itself.
+			if len(rest) >= n && strings.equal_fold(string(rest[:n]), full[:n]) {
 				p.at += n
 				return i, true
 			}

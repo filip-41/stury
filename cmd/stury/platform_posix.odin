@@ -3,11 +3,13 @@ package main
 
 // The command line's calls into the system on POSIX. platform_windows.odin has Windows's.
 
-import "core:fmt"
 import "core:io"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:sys/posix"
+import "core:time"
+import "message"
 
 @(private = "file")
 STACK_GUARD :: 1 << 20
@@ -59,14 +61,14 @@ run_deep :: proc(run: ^Run, ins: ^Inputs, body: proc(run: ^Run, ins: ^Inputs)) {
 // The line a fault in the stack's guard prints (and jq's, for memory run out), then exit 2: the stack was not had.
 @(private = "file")
 out_of_memory :: proc() -> ! {
-	fmt.eprintln("stury: error: cannot allocate memory")
+	message.write_stderr("stury: error: cannot allocate memory\n")
 	os.exit(EXIT_USAGE)
 }
 
 // A fault in the guard below the interpreter's stack: jq's message for memory run out, then abort as jq does.
-// A SIGBUS with an input mapped is that file shrinking under its mapping: say so and exit 2, as for a failed
-// read. Only write(2) and _exit(2) run here. Any other fault is left to the default action, which the access
-// meets again once this returns.
+// A SIGBUS with an input mapped is that file shrinking under its mapping: say so and exit 2, as for a failed read.
+// Only write(2) and _exit(2) run here. Any other fault is left to the default action, which the access meets again
+// once this returns.
 @(private = "file")
 fault :: proc "c" (sig: posix.Signal, info: ^posix.siginfo_t, _: rawptr) {
 	say :: proc "contextless" (s: string) {
@@ -80,7 +82,7 @@ fault :: proc "c" (sig: posix.Signal, info: ^posix.siginfo_t, _: rawptr) {
 		say("stury: error: ")
 		say(mapped_input_name)
 		say(": input file shrank while reading\n")
-		posix._exit(2)
+		posix._exit(EXIT_USAGE)
 	}
 }
 
@@ -174,9 +176,22 @@ open_input :: proc(path: string) -> (f: ^os.File, err: os.Error) {
 	return
 }
 
+// SIGINT and SIGTERM set `stopped`, which a --follow run takes as its file's end.
+catch_stop :: proc() {
+	act := posix.sigaction_t{sa_handler = proc "c" (_: posix.Signal) {sync.atomic_store(&stopped, true)}, sa_flags = {.RESTART}}
+	posix.sigaction(.SIGINT, &act, nil)
+	posix.sigaction(.SIGTERM, &act, nil)
+}
+
 is_regular_file :: proc(f: ^os.File) -> bool {
 	st: posix.stat_t
 	return posix.fstat(posix.FD(os.fd(f)), &st) == .OK && posix.S_ISREG(st.st_mode)
+}
+
+// Whether a read of `f` gives bytes, or its end, within `wait`.
+readable :: proc(f: ^os.File, wait: time.Duration = 0) -> bool {
+	fds := [1]posix.pollfd{{fd = posix.FD(os.fd(f)), events = {.IN}}}
+	return posix.poll(raw_data(fds[:]), 1, i32(wait / time.Millisecond)) > 0
 }
 
 // os.read, but a failed read(2) as its errno (EISDIR), which jq prints: os.read tells it only as Unknown.
@@ -185,7 +200,6 @@ read_some :: proc(f: ^os.File, p: []byte) -> (int, os.Error) {
 	if err == io.Error.Unknown {
 		err = os.Platform_Error(i32(posix.errno()))
 	}
-	explain_input(n)
 	return n, err
 }
 
@@ -194,10 +208,10 @@ platform_error_text :: proc(e: os.Platform_Error) -> string {
 	return string(posix.strerror(posix.Errno(i32(e))))
 }
 
-// Regular file `f`, from its current offset to its end, mapped copy-on-write, as its readers may write into it
-// (`stand_in`). It returns false if it does not map (nothing left, a file system that maps none), and it is to be
-// read. Stdin is mapped too, and left at its end as a read would leave it. The mapping starts at the page before the
-// offset (`unmap_file` finds it again).
+// Regular file `f`, from its current offset to its end, mapped read-only: nothing writes into an input. It returns
+// false if it does not map (nothing left, a file system that maps none), and it is to be read. Stdin is mapped too,
+// and left at its end as a read would leave it. The mapping starts at the page before the offset (`unmap_file` finds
+// it again).
 map_file :: proc(f: ^os.File) -> ([]byte, bool) {
 	if !is_regular_file(f) {
 		return nil, false
@@ -210,12 +224,11 @@ map_file :: proc(f: ^os.File) -> ([]byte, bool) {
 	}
 	page := i64(posix.sysconf(._PAGESIZE))
 	lo := i64(at) / page * page
-	p := posix.mmap(nil, uint(size - lo), {.READ, .WRITE}, {.PRIVATE}, fd, posix.off_t(lo))
+	p := posix.mmap(nil, uint(size - lo), {.READ}, {.PRIVATE}, fd, posix.off_t(lo))
 	if p == posix.MAP_FAILED {
 		return nil, false
 	}
 	posix.lseek(fd, posix.off_t(size), .SET)
-	explain_input(int(size) - int(at))
 	return ([^]byte)(p)[i64(at) - lo:size - lo], true
 }
 

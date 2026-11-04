@@ -159,20 +159,8 @@ made_atomic :: proc(n, next: ^Node) -> bool {
 	return x != nil && y != nil && exclusive(x, y)
 }
 
-// The first byte of the character every match of `n` starts with, when Oniguruma's get_tree_head_literal finds
-// one exactly (no class, no case folding).
-@(private)
-head_byte :: proc(n: ^Node) -> (byte, bool) {
-	h := head_literal(n)
-	if h == nil || h.kind != .Char || h.fold || !utf8.valid_rune(h.r) {
-		return 0, false
-	}
-	b, _ := utf8.encode_rune(h.r)
-	return b[0], true
-}
-
 // The character or class every match of `n` starts with, as Oniguruma's get_tree_head_literal finds it.
-@(private = "file")
+@(private)
 head_literal :: proc(n: ^Node) -> ^Node {
 	#partial switch n.kind {
 	case .Char, .Class:

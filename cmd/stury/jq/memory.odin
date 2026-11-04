@@ -6,7 +6,7 @@ import "base:runtime"
 import "core:mem/virtual"
 import "core:slice"
 import "core:strings"
-import json "../../../json"
+import core_pkg "../../../core"
 
 // The outputs of a pipe or a binding whose outputs are printed (`Interp.printer`): what the rest makes for each
 // output of `n` (its left side) and the output itself, if `input` read it, is made in an arena that is emptied once
@@ -287,13 +287,10 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 		if m, ok := c.made[{x.doc, -1}]; ok {
 			return Ref{m.(Ref).doc, x.node}
 		}
-		// The rows and the text, and what the scan decoded. What was decoded since is decoded again.
-		d := new(json.Document)
-		d^ = {src = transmute([]byte)copy_string(c, string(x.doc.src)), dialect = x.doc.dialect, deep = x.doc.deep, distinct_keys = x.doc.distinct_keys}
-		d.rows = slice.clone_to_dynamic(x.doc.rows[:])
-		d.values = slice.clone_to_dynamic(x.doc.values[:])
-		d.facts = slice.clone_to_dynamic(x.doc.facts[:])
-		c.made[{x.doc, -1}] = Ref{d, json.ROOT}
+		d := new(core_pkg.Document)
+		d^, _ = core_pkg.clone(x.doc)
+		d.src = transmute([]byte)copy_string(c, string(x.doc.src))
+		c.made[{x.doc, -1}] = Ref{d, core_pkg.ROOT}
 		return Ref{d, x.node}
 	case Number:
 		return Number{f = x.f, lit = copy_string(c, x.lit)}
@@ -307,17 +304,8 @@ copy_value :: proc(c: ^Copier, v: Value) -> Value {
 			return m
 		}
 		a := new_array(len(x.items))
-		append(&a.items, ..x.items[:]) // one block; only the members that point into the arenas are made anew
-		for &m in a.items {
-			switch t in m {
-			case nil, bool:
-			case Number:
-				if len(t.lit) > 0 {
-					m = copy_value(c, m)
-				}
-			case string, ^Array, ^Object, Ref, Path:
-				m = copy_value(c, m)
-			}
+		for m in x.items {
+			append(&a.items, copy_value(c, m))
 		}
 		return made_container(c, x, a)
 	case Path:

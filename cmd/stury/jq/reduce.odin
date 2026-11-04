@@ -51,11 +51,8 @@ reduce_init_emit :: proc(s: ^Sink, it: Item) -> Signal {
 
 reduce_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	x := (^Bind_Sink)(s)
-	if !x.track {
-		return bind_alternatives(x, it.v, reduce_step, nil)
-	}
 	st := state_of(it)
-	return bind_alternatives(x, it.v, reduce_step, &st)
+	return bind_alternatives(x, it.v, reduce_step, &st if x.track else nil)
 }
 
 // A reduce runs its first REDUCE_SCOPED_FROM updates in the memory of the input. From then on each update runs in a
@@ -259,11 +256,8 @@ foreach_init_emit :: proc(s: ^Sink, it: Item) -> Signal {
 
 foreach_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	x := (^Bind_Sink)(s)
-	if !x.track {
-		return bind_alternatives(x, it.v, foreach_step, nil)
-	}
 	st := state_of(it)
-	return bind_alternatives(x, it.v, foreach_step, &st)
+	return bind_alternatives(x, it.v, foreach_step, &st if x.track else nil)
 }
 
 foreach_step :: proc(x: ^Bind_Sink, e: ^Env, st: ^Path_State) -> Signal {

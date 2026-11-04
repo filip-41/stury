@@ -9,9 +9,9 @@ package jq
 // arguments of a call to a function written in jq). The arguments of a builtin that takes values are
 // instructions of the caller's level.
 
-import "core:fmt"
 import "core:slice"
 import "core:strings"
+import "../message"
 
 @(private)
 Scope :: struct {
@@ -307,7 +307,7 @@ check_level :: proc(c: ^Checker, n: ^Node, s: ^Scope) {
 @(private = "file")
 undefined :: proc(c: ^Checker, n: ^Node, format: string, args: ..any) {
 	if !c.reach {
-		append(&c.errors, Compile_Error{msg = fmt.aprintf(format, ..args), loc = n.loc, file = c.file, src = c.src})
+		append(&c.errors, Compile_Error{msg = message.build(format, ..args), loc = n.loc, file = c.file, src = c.src})
 	}
 }
 

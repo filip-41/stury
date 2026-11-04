@@ -4,107 +4,13 @@ package main
 // together (`-nr`), `-L` taking the rest of its argument or the next one. Each option's error is jq's, reported as
 // soon as it is read.
 
-import "core:bytes"
-import "core:fmt"
 import "core:os"
 import "core:slice"
 import "core:strings"
-import "core:sys/posix"
+import core "../../core"
 import json "../../json"
 import "jq"
-
-// What `-V` prints after `stury-`: the version the Makefile passes (a release version, or the short commit
-// hash from a git checkout), else "dev". The Makefile hands it over in quotes, as odin's -define would read
-// `1.0` or `2` as a number, not a string.
-VERSION_DEFINE :: #config(STURY_VERSION, "dev")
-VERSION :: VERSION_DEFINE[1:len(VERSION_DEFINE) - 1] when len(VERSION_DEFINE) >= 2 && VERSION_DEFINE[0] == '"' else VERSION_DEFINE
-
-// What `--build-configuration` prints and `$JQ_BUILD_CONFIGURATION` holds, where jq has its configure flags.
-BUILD_CONFIGURATION ::
-	"odin " + ODIN_VERSION + " -target:" + ODIN_OS_STRING + "_" + ODIN_ARCH_STRING + " " + OPTIMIZATION
-@(private = "file")
-OPTIMIZATION ::
-	"-o:speed" when ODIN_OPTIMIZATION_MODE == .Speed else "-o:aggressive" when ODIN_OPTIMIZATION_MODE == .Aggressive else "-o:size" when ODIN_OPTIMIZATION_MODE == .Size else "-o:minimal" when ODIN_OPTIMIZATION_MODE == .Minimal else "-o:none"
-
-// jq's usage(): this, then the options or where to find them.
-@(private = "file")
-HELP_HEAD :: "stury - commandline JSON processor [version " + VERSION + `]
-
-Usage:	stury [options] <jq filter> [file...]
-	stury [options] --args <jq filter> [strings...]
-	stury [options] --jsonargs <jq filter> [JSON_TEXTS...]
-	stury check [--from format|--seq] [--strict-limits] [--max-depth n] [file...]
-	stury fmt [--from format] [--to format] [--in-place|--check]
-	          [--indent n|--tab] [--max-depth n] [file...]
-
-stury applies the filter to its JSON text inputs and writes the results as
-JSON, as jq 1.8.2 does, but reads strictly (RFC 8259): 01, 1., NaN, nan,
-Infinity, invalid UTF-8 in a string, a NUL after a value and nesting past
---max-depth are parse errors. For filters see jq(1) and https://jqlang.org/.
-
-`
-
-@(private = "file")
-HELP_OPTIONS :: `Command options:
-  -n, --null-input          use ` + "`null`" + ` as the single input value;
-  -R, --raw-input           read each line as string instead of JSON;
-  -s, --slurp               read all inputs into an array and use it as
-                            the single input value;
-  -c, --compact-output      compact instead of pretty-printed output;
-  -r, --raw-output          output strings without escapes and quotes;
-      --raw-output0         implies -r and output NUL after each output;
-  -j, --join-output         implies -r and output without newline after
-                            each output;
-  -a, --ascii-output        output strings by only ASCII characters
-                            using escape sequences;
-  -S, --sort-keys           sort keys of each object on output;
-  -C, --color-output        colorize JSON output;
-  -M, --monochrome-output   disable colored output;
-      --tab                 use tabs for indentation;
-      --indent n            use n spaces for indentation (at most 7;
-                            -1 is --tab);
-      --unbuffered          flush output stream after each output;
-      --stream              parse the input value in streaming fashion;
-      --stream-errors       implies --stream and report parse error as
-                            an array;
-      --seq                 parse input/output as application/json-seq;
-  -f, --from-file           load the filter from a file;
-  -L, --library-path dir    search modules from the directory;
-      --arg name value      set $name to the string value;
-      --argjson name value  set $name to the JSON value;
-      --slurpfile name file set $name to an array of JSON values read
-                            from the file;
-      --rawfile name file   set $name to string contents of file;
-      --args                consume remaining arguments as positional
-                            string values;
-      --jsonargs            consume remaining arguments as positional
-                            JSON values;
-  -e, --exit-status         set exit status code based on the output;
-  -V, --version             show the version;
-  --build-configuration     show stury's build configuration;
-  -h, --help                show the help;
-  --                        terminates argument processing;
-
-stury's own options:
-  check                     judge the inputs, print nothing when valid;
-  fmt                       write each input in the printer's layout, or
-                            transcode it (--from, --to);
-      --from format         read json (default), jsonc, json5, ndjson,
-                            csv or tsv;
-      --to format           write json (default), jsonc, ndjson, csv or tsv;
-      --in-place            with fmt, rewrite each file in place;
-      --check               with fmt, print nothing: exit 1 when a file is
-                            not already formatted;
-      --grow-header         with --to csv or tsv, write a header of every key;
-      --max-depth n         refuse nesting past n levels (default 1024);
-      --strict-limits       with check, keep the library's number limits;
-      --explain             write the filter's route, its plan and what the
-                            run did to stderr, and run the filter.
-
-Named arguments are also available as $ARGS.named[], positional ones as
-$ARGS.positional[]. The input differences from jq and each stury option in
-full: docs/cli.md in stury's source, or man stury.
-`
+import "message"
 
 Opts :: struct {
 	compact:          bool,
@@ -127,11 +33,11 @@ Opts :: struct {
 	from:             Format, // how the input is read
 	to:               Format, // how the outputs are written
 	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
-	strict_limits:    bool, // check: the library's depth, digit and scale caps hold
 	explain:          bool, // --explain: write the filter's plan and what the run did to stderr
-	max_depth_given:  bool, // --max-depth was on the command line
+	max_depth:        u32, // --max-depth, 0 when it was not given
 	in_place:         bool,
 	check:            bool,
+	follow:           bool, // --follow: the one file is read on as it grows
 }
 
 // What the command line gives besides the options.
@@ -144,6 +50,9 @@ Cli :: struct {
 	var_names:  [dynamic]string,
 	var_values: [dynamic]jq.Value,
 	positional: [dynamic]jq.Value, // --args and --jsonargs
+	// How --argjson, --jsonargs, --slurpfile and `fromjson` read their texts, as --from and --max-depth say: as JSON, or
+	// the JSON dialect --from names.
+	json_reading: core.As,
 	binding_flag: string,
 	lib_dirs:   Maybe([dynamic]string), // -L's, made real paths
 	color_set:  bool, // -C
@@ -175,13 +84,12 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		format_option(&cli, args, i)
 		if args[i] == "--max-depth" && i + 1 < len(args) {
 			if n, ok := parse_max_depth(args[i + 1]); ok {
-				jq.lifted.max_depth = n
-				o.max_depth_given = true
+				o.max_depth = u32(n)
 			}
 		}
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
-	jq.read_dialect = FORMATS[o.from].source
+	cli.json_reading = json.as(FORMATS[o.from].spec, {max_depth = o.max_depth})
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
 		a := args[i]
@@ -195,7 +103,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			case rest_as == .Args:
 				append(&cli.positional, jq.valid_utf8(a))
 			case rest_as == .Json_Args:
-				append(&cli.positional, json_arg(a, "--jsonargs"))
+				append(&cli.positional, json_arg(cli.json_reading, a, "--jsonargs"))
 			case:
 				append(&cli.files, a)
 			}
@@ -229,7 +137,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 				usage_error("--max-depth takes one parameter")
 			}
 			if _, ok := parse_max_depth(args[i + 1]); !ok {
-				usage_error("--max-depth takes a number between 1 and %d", json.DEPTH_CEILING)
+				usage_error("--max-depth takes a number between 1 and %d", DEPTH_CEILING)
 			}
 			i += option_arity(a)
 		case "raw-output0":
@@ -248,7 +156,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			note_binding_flag(&cli, a)
 			rest_as = .Json_Args
 		case "build-configuration":
-			fmt.println(BUILD_CONFIGURATION)
+			message.write_stdout("%s\n", BUILD_CONFIGURATION)
 			os.exit(0)
 		case "library-path":
 			i = lib_dir_arg(&cli, args, i)
@@ -256,10 +164,10 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			i += option_arity(a)
 		case "grow-header":
 			o.grow_header = true
-		case "strict-limits":
-			o.strict_limits = true
 		case "explain":
 			o.explain = true
+		case "follow":
+			o.follow = true
 		case "in-place":
 			o.in_place = true
 		case "check":
@@ -279,7 +187,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 				}
 			}
 			if c == 0 || !letter_option(o, &cli, c) {
-				fmt.eprintf("stury: Unknown option %s\n", a)
+				message.write_stderr("stury: Unknown option %s\n", a)
 				die()
 			}
 		}
@@ -289,7 +197,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	if cli.formatting && cli.formats.to == nil {
 		o.to = FORMATS[o.from].written_as.? or_else o.from
 	}
-	if o.to == .Ndjson {
+	if writes_lines(o) {
 		o.compact = true
 	}
 	return
@@ -353,7 +261,7 @@ short_options :: proc(o: ^Opts, cli: ^Cli, args: []string, i: int) -> int {
 			break
 		}
 		if !letter_option(o, cli, a[j]) {
-			fmt.eprintf("stury: Unknown option -%s\n", a[j:j + 1])
+			message.write_stderr("stury: Unknown option -%s\n", a[j:j + 1])
 			die()
 		}
 	}
@@ -379,12 +287,12 @@ bind_variable_option :: proc(cli: ^Cli, args: []string, i: int) {
 	case "arg":
 		v = jq.valid_utf8(args[i + 2])
 	case "argjson":
-		v = json_arg(args[i + 2], a)
+		v = json_arg(cli.json_reading, args[i + 2], a)
 	case:
 		msg: string
-		v, msg = load_file(args[i + 2], name == "rawfile")
+		v, msg = load_file(args[i + 2], name == "rawfile", cli.json_reading)
 		if msg != "" {
-			fmt.eprintf("stury: Bad JSON in %s %s %s: %s\n", a, args[i + 1], args[i + 2], msg)
+			message.write_stderr("stury: Bad JSON in %s %s %s: %s\n", a, args[i + 1], args[i + 2], msg)
 			os.exit(EXIT_USAGE)
 		}
 	}
@@ -398,24 +306,16 @@ is_option :: proc(a: string) -> bool {
 	return len(a) >= 2 && a[0] == '-' && (a[1] == '-' || ('a' <= a[1] && a[1] <= 'z') || ('A' <= a[1] && a[1] <= 'Z'))
 }
 
-// Whether the short options `a` hold -f: an `f` before any `L`, whose rest is a directory (`-Lfoo`).
-@(private = "file")
-has_from_file_flag :: proc(a: string) -> bool {
-	flags := a[1:]
-	if l := strings.index_byte(flags, 'L'); l >= 0 {
-		flags = flags[:l]
-	}
-	return strings.contains_rune(flags, 'f')
-}
-
 // Where `check` (or `validate`) or `fmt` stands in `args`, or -1: the first argument that is not an option, before
-// `--`. Under -f that argument is the program file's name, which stays a file.
+// `--`. Under -f that argument is the program file's name, which stays a file. Short options hold -f when an `f` comes
+// before any `L`, whose rest is a directory (`-Lfoo`).
 @(private = "file")
 subcommand_index :: proc(args: []string) -> int {
 	for i := 0; i < len(args) && args[i] != "--"; i += 1 {
 		a := args[i]
+		f, l := strings.index_byte(a, 'f'), strings.index_byte(a, 'L')
 		switch {
-		case a == "--from-file" || is_option(a) && a[1] != '-' && has_from_file_flag(a):
+		case a == "--from-file" || is_option(a) && a[1] != '-' && f > 0 && (l < 0 || f < l):
 			return -1
 		case is_option(a):
 			i += option_arity(a)
@@ -503,7 +403,7 @@ letter_option :: proc(o: ^Opts, cli: ^Cli, c: byte) -> bool {
 	case 'h':
 		usage(0, false)
 	case 'V':
-		fmt.printf("stury-%s\n", VERSION)
+		message.write_stdout("stury-%s\n", VERSION)
 		os.exit(0)
 	case:
 		return false
@@ -515,7 +415,7 @@ letter_option :: proc(o: ^Opts, cli: ^Cli, c: byte) -> bool {
 @(private = "file")
 lib_dir_arg :: proc(cli: ^Cli, args: []string, i: int) -> int {
 	if i + 1 >= len(args) {
-		fmt.eprintln("-L takes a parameter: (e.g. -L /search/path or -L/search/path)")
+		message.write_stderr("-L takes a parameter: (e.g. -L /search/path or -L/search/path)\n")
 		die()
 	}
 	add_lib_dir(cli, args[i + 1])
@@ -528,104 +428,7 @@ add_lib_dir :: proc(cli: ^Cli, dir: string) {
 	if cli.lib_dirs == nil {
 		cli.lib_dirs = make([dynamic]string)
 	}
-	dirs := &cli.lib_dirs.?
-	append(dirs, jq.real_path(dir))
-}
-
-// jq's usage(): to stdout and exit 0 for --help, else to stderr and exit `code`. The options, or with `short` where
-// to find them.
-usage :: proc(code: int, short: bool) -> ! {
-	w := os.to_writer(os.stdout if code == 0 else os.stderr)
-	fmt.wprint(w, HELP_HEAD)
-	// The jq manpage, which the footer sends on, does not tell how stury's input differs.
-	fmt.wprint(w, "How stury's input differs from jq's is in stury(1), not in the jq manpage.\nFor listing the command options, use stury --help.\n" if short else HELP_OPTIONS)
-	os.exit(code)
-}
-
-// jq's die(): an option it cannot use, reported, then exit 2.
-usage_error :: proc(format: string, args: ..any) -> ! {
-	fmt.eprint("stury: ")
-	fmt.eprintf(format, ..args)
-	fmt.eprint("\n")
-	die()
-}
-
-@(private = "file")
-die :: proc() -> ! {
-	fmt.eprint("Use stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n")
-	os.exit(EXIT_USAGE)
-}
-
-// A JSON text given to `option` on the command line: exactly one value.
-json_arg :: proc(text, option: string) -> jq.Value {
-	v, err := jq.read_text(transmute([]byte)text)
-	if e, bad := err.?; bad {
-		usage_error("invalid JSON text passed to %s: %s", option, jq.parse_message(transmute([]byte)text, e))
-	}
-	return v
-}
-
-// jq's jv_load_file: file `path` as one string (`raw`) or as the array of its JSON texts, or jq's message
-// for why not.
-load_file :: proc(path: string, raw: bool) -> (v: jq.Value, msg: string) {
-	f, err := open_input(path)
-	if err != nil {
-		return nil, fmt.tprintf("Could not open %s: %s", path, strerror(err))
-	}
-	defer os.close(f)
-	if fi, ferr := os.fstat(f, context.temp_allocator); ferr != nil || fi.type == .Directory {
-		return nil, fmt.tprintf("Could not open %s: It's a directory", path)
-	}
-	data, rerr := read_whole(f, context.allocator)
-	if rerr != nil {
-		return nil, fmt.tprintf("Error reading from %s", path)
-	}
-	if raw {
-		return jq.valid_utf8(string(data)), ""
-	}
-	all := jq.new_array()
-	// Positions count from past a byte order mark, as the input reader counts them.
-	start := len(UTF8_BOM) if bytes.has_prefix(data, UTF8_BOM[:]) else 0
-	at := start
-	for {
-		for at < len(data) && jq.is_space(data[at]) {
-			at += 1
-		}
-		if at == len(data) {
-			return all, ""
-		}
-		end, trailing := text_span(data, at)
-		if !json.plain_json(jq.read_dialect) { // one document per input, as for the files
-			end, trailing = len(data), false
-		}
-		n, _, _ := validate_text(data[at:end], {dialect = jq.read_dialect, limits = jq.lifted}, trailing)
-		end = at + n
-		x, err := jq.read_text(data[at:end])
-		if e, bad := err.?; bad {
-			line, column := 1, 0
-			jq.advance(&line, &column, data[start:at])
-			return nil, jq.parse_message(data[at:], e, line, column)
-		}
-		append(&all.items, x)
-		at = end
-	}
-}
-
-// -f: the filter in file `path` as jq loads it, or jq's message and exit 2. The file's directory is where
-// `get_prog_origin` says the filter came from.
-program_file :: proc(run: ^Run, path: string) -> string {
-	v, msg := load_file(path, true)
-	if msg != "" {
-		fmt.eprintf("stury: %s\n", msg)
-		os.exit(EXIT_USAGE)
-	}
-	text, _ := jq.string_of(v)
-	if strings.index_byte(text, 0) >= 0 {
-		fmt.eprintln("stury: program file contains NUL bytes")
-		os.exit(EXIT_USAGE)
-	}
-	run.ip.prog_origin = jq.real_path(jq.dir_name(path))
-	return text
+	append(&cli.lib_dirs.?, jq.real_path(dir))
 }
 
 // --indent's number as jq's strtol reads it: a sign, then decimal digits to the end, from -1 to 7.
@@ -658,62 +461,29 @@ parse_digits :: proc(s: string, cap: u64) -> (n: u64, ok: bool) {
 	return n, true
 }
 
-// --max-depth's number: decimal digits, from 1 to the library's ceiling.
+// The deepest --max-depth: the interpreter and the printer recurse once per level, on a stack sized for this.
+@(private = "file")
+DEPTH_CEILING :: 1 << 20
+
+// --max-depth's number: decimal digits, from 1 to DEPTH_CEILING.
 @(private = "file")
 parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
-	n, ok = parse_digits(s, json.DEPTH_CEILING + 1) // past the ceiling is refused
-	return n, ok && 1 <= n && n <= json.DEPTH_CEILING
+	n, ok = parse_digits(s, DEPTH_CEILING + 1) // past the ceiling is refused
+	return n, ok && 1 <= n && n <= DEPTH_CEILING
 }
 
-// jq's colours (jv_print.c), in its order: null, false, true, numbers, strings, arrays, objects, and an
-// object's keys.
-@(rodata)
-DEFAULT_COLORS := [8]string{"\e[0;90m", "\e[0;39m", "\e[0;39m", "\e[0;39m", "\e[0;32m", "\e[1;39m", "\e[1;39m", "\e[1;34m"}
 
-// $JQ_COLORS as jq_set_colors reads it: up to eight colon-separated codes of digits and `;`, each over the default in
-// its place, and an empty last one not counted. It returns false, and the defaults, at any other byte before the
-// eighth. What follows the eighth is not read.
-parse_colors :: proc(spec: string) -> (colors: [8]string, ok: bool) {
-	colors = DEFAULT_COLORS
-	codes: [8]string
-	n, rest := 0, spec
-	for {
-		span := 0
-		for span < len(rest) && (rest[span] == ';' || '0' <= rest[span] && rest[span] <= '9') {
-			span += 1
-		}
-		codes[n], rest = rest[:span], rest[span:]
-		if len(rest) == 0 || n + 1 == len(codes) {
-			break
-		}
-		if rest[0] != ':' {
-			return DEFAULT_COLORS, false
-		}
-		rest = rest[1:]
-		n += 1
+// Refuses what --follow cannot do: it answers the records of one file as they are appended, so it needs the file
+// named, a filter run, and an input that is records rather than whole texts.
+refuse_follow :: proc(o: ^Opts, cli: ^Cli) {
+	other := "check" if cli.validating else "fmt" if cli.formatting else "--slurp" if o.slurp else "--null-input" if o.null_input else "--stream" if o.stream else ""
+	if other != "" {
+		usage_error("--follow answers each record of a file as it is appended: it cannot be combined with %s", other)
 	}
-	if codes[n] != "" {
-		n += 1
+	if len(cli.files) != 1 || cli.files[0] == "-" {
+		usage_error("--follow follows one named file, not stdin or %d files", len(cli.files))
 	}
-	for code, k in codes[:n] {
-		colors[k] = fmt.aprintf("\e[%sm", code)
-	}
-	return colors, true
-}
-
-// jq's choice of colour: with -C, or when stdout is a terminal and $NO_COLOR is unset or empty. Never with -M, and
-// never for fmt, which ignores $JQ_COLORS too.
-set_colors :: proc(run: ^Run, cli: Cli) {
-	no_color := posix.getenv("NO_COLOR")
-	run.opts.color = (cli.color_set || is_terminal(os.stdout) && (no_color == nil || no_color == "")) && !cli.mono && !cli.formatting
-	if run.opts.color {
-		enable_color()
-	}
-	run.colors = DEFAULT_COLORS
-	if spec := posix.getenv("JQ_COLORS"); spec != nil && !cli.formatting {
-		ok: bool
-		if run.colors, ok = parse_colors(string(spec)); !ok {
-			fmt.eprintln("Failed to set $JQ_COLORS")
-		}
+	if FORMATS[o.from].spec != .Json {
+		usage_error("--follow reads records: --from %s makes one text of a file", FORMATS[o.from].name)
 	}
 }

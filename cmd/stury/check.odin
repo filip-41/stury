@@ -1,134 +1,110 @@
 package main
 
-// `stury check` validates each input as `stury .` reads it and prints nothing. An input of no text fails, as the
-// library refuses an empty document. Its caps are the library's with the digit and scale caps lifted (`jq.lifted`),
-// or held under --strict-limits, and nesting is capped at --max-depth either way. --from ndjson and --seq validate each
-// record as one text, and --from jsonc reads JSONC as the library does, which jq does not.
+// `stury check` judges each input as `stury .` reads it and prints nothing. The run ends at the first fault, told as
+// the filter run tells a JSONC text's, and an input with no text in it fails, as the library refuses an empty
+// document. --from ndjson and --seq judge each record as a text, and a long input is judged on the threads of a pool.
 
-import "core:bytes"
-import "core:fmt"
+import "base:runtime"
+import "core:os"
 import "core:strings"
+import core "../../core"
+import records "../../core/records"
 import json "../../json"
 import "jq"
+import "message"
 
-// check: each file in turn, and how many did not open or read.
-check_files :: proc(run: ^Run, files: []string) -> (failures: int) {
-	for &f in files {
-		ins: Inputs
-		inputs_init(&ins, run, ([^]string)(&f)[:1])
-		open_next(&ins)
-		if ins.failures > 0 {
+// Each file in turn, until one holds a fault. Exits 0, 2 after a file that did not open or read, or 5 at a fault.
+check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
+	o := &run.opts
+	if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
+		// As stury with no filter, rather than wait on the keyboard.
+		usage(EXIT_USAGE, true)
+	}
+	src := input_source(o, cli.json_reading)
+	failures := 0
+	for path in (cli.files[:] if len(cli.files) > 0 else STDIN_ONLY) {
+		f, read := open_file(path)
+		data: []byte
+		if read {
+			data, read = read_file(f)
+		}
+		if !read {
 			failures += 1
 			continue
 		}
-		check_input(run, &ins)
-		free_data({ins.data, ins.mapped})
+		runner: ^core.Runner
+		if len(data) >= POOLED_BYTES {
+			runner = run_pool(run)
+		}
+		if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
+			message.write_stderr("stury: error: %s", msg)
+			os.exit(EXIT_USAGE if failures > 0 else EXIT_INPUT)
+		}
+		delete(data, runtime.heap_allocator())
 	}
-	return
+	os.exit(EXIT_USAGE if failures > 0 else 0)
 }
 
-// check on one input, read whole.
+// The first fault of the text `data` of file `name`, read as `src` reads it, told with its note and a newline, or "".
 @(private = "file")
-check_input :: proc(run: ^Run, ins: ^Inputs) {
-	run.name, run.whole = ins.name, ins.data
-	if reads_cells(&run.opts) {
-		check_cells(run, ins)
-		return
+check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^core.Runner) -> string {
+	cells := reads_cells(o)
+	if cells && len(strings.trim_prefix(string(data), "\xef\xbb\xbf")) == 0 ||!cells && !o.seq && json.blank(data, src.spec.?) {
+		line, col := core.locate(data, u64(len(data)))
+		return message.build_temp("%s:%d:%d: No %s text\n", name, line, col, "JSON" if !cells else strings.to_upper(FORMATS[o.from].name, context.temp_allocator))
 	}
-	// No text: no JSON document, as the library's `.Truncated` for an empty one. Under --seq an empty input is
-	// no records, as jq reads it.
-	blank := !run.opts.seq
-	for c in bytes.trim_prefix(ins.data, UTF8_BOM[:]) {
-		if !jq.is_space(c) {
-			blank = false
-			break
-		}
-	}
-	if blank {
-		fail_input(run, {kind = .Truncated, offset = u64(len(ins.data))}, "No JSON text")
-	}
+	fault: Maybe(core.Fault)
 	switch {
-	case FORMATS[run.opts.from].framing == .Lines || run.opts.seq:
-		check_records(run, ins.data)
-	case !json.plain_json(run.req.dialect):
-		if e, bad := json.validate(ins.data, {dialect = FORMATS[run.opts.from].source, limits = check_limits(run)}).?; bad {
-			fail_input(run, e)
+	case cells:
+		if msg := header_fault(name, data, src.as); msg != "" {
+			return msg
+		}
+		fault = records.validate(data, src.as, runner)
+	case src.framing == .Concatenated:
+		fault = records.validate(data, src.as, runner)
+		// A byte no text starts with, right after a text, stays trailing text, as the reader of the texts from the first
+		// tells it.
+		if f, bad := fault.?; bad && texts_follow(f, src.spec) {
+			if next, more := first_fault(data, src.as, .Concatenated, runner, f.at).?; !more || next.at != f.at || jq.is_space(data[f.at - 1]) {
+				fault = next if more else nil
+			}
 		}
 	case:
-		check_texts(run, ins)
+		fault = first_fault(data, src.as, src.framing, runner, 0)
 	}
+	f, bad := fault.?
+	if !bad {
+		return ""
+	}
+	f = literal_cut(data, f, src.framing)
+	return message.build_temp("%s\n%s", fault_told(name, data, f), fault_note(data, f, src.spec, o))
 }
 
-// Runs `check` on one CSV input. An input of only a byte order mark fails as an input with no JSON
-// text does. A fault is reported with the message a filter run gives.
+// The first fault of the records of `data` from byte `at`, framed by `framing`.
 @(private = "file")
-check_cells :: proc(run: ^Run, ins: ^Inputs) {
-	dialect := FORMATS[run.opts.from].dialect
-	msg: string
-	if len(bytes.trim_prefix(ins.data, UTF8_BOM[:])) == 0 {
-		e := json.Error {
-			kind   = .Truncated,
-			offset = u64(len(ins.data)),
-		}
-		msg = fault_in_file(ins.name, ins.data, e, fmt.tprintf("No %s text", strings.to_upper(FORMATS[run.opts.from].name, context.temp_allocator)))
-	} else {
-		msg = check_cells_text(ins, dialect, batch_runner(run, len(ins.data)))
+first_fault :: proc(data: []byte, as: core.As, framing: core.Framing, runner: ^core.Runner, at: u64) -> Maybe(core.Fault) {
+	heap := runtime.heap_allocator()
+	faults, err := records.check(data, as, framing, heap, runner, at)
+	defer delete(faults, heap)
+	if err != nil {
+		return core.Fault{kind = .No_Memory}
 	}
-	if msg != "" {
-		flush_some(run, force = true)
-		fmt.eprintf("stury: error: %s\n", msg)
-		finish(run, EXIT_USAGE if run.unopened else EXIT_INPUT)
-	}
+	return faults[0] if len(faults) > 0 else nil
 }
 
-// The caps check validates against.
+// A header that names a column twice, told with a newline, or "". A header the format refuses is `validate`'s to tell.
 @(private = "file")
-check_limits :: proc(run: ^Run) -> json.Limits {
-	return {max_depth = jq.lifted.max_depth} if run.opts.strict_limits else jq.lifted
-}
-
-// The texts of the open file, until one is refused, which ends the run.
-@(private = "file")
-check_texts :: proc(run: ^Run, ins: ^Inputs) {
-	limits := check_limits(run)
-	for {
-		at, limit, trailing, found := next_text(ins)
-		if !found {
-			return
-		}
-		end, e, bad := validate_text(ins.data[at:limit], {limits = limits}, trailing)
-		if bad {
-			e = cut_by_next_byte(ins.data, at, limit, e, .Json, limits)
-			e.offset += u64(at)
-			fail_input(run, e)
-		}
-		ins.pos = at + end
+header_fault :: proc(name: string, data: []byte, as: core.As) -> string {
+	it := records.open(data, as, .Lines, allocator = runtime.heap_allocator())
+	defer records.close(&it)
+	rec, more := records.next(&it)
+	if !more {
+		return ""
 	}
-}
-
-// Every record of `src`, validated in parallel by `validate_records` against the library's own caps: a record it
-// refuses is validated again against check's, and the first fault that stands ends the run.
-@(private = "file")
-check_records :: proc(run: ^Run, src: []byte) {
-	framing := json.Framing.NDJSON if FORMATS[run.opts.from].framing == .Lines else .JSON_Seq
-	// A buffer of one NDJSON record has nothing to share among workers: the caller validates it alone.
-	nl := bytes.index_byte(src, '\n')
-	lone := FORMATS[run.opts.from].framing == .Lines && (nl < 0 || nl + 1 == len(src))
-	faults, err := json.validate_records(src, {framing = framing}, nil if lone else batch_runner(run, len(src)))
-	defer delete(faults)
-	limits := check_limits(run)
-	// The framing fault stands unless a record before it does. Under --seq a `.Truncated` one is a number the next
-	// separator or the input's end may have cut.
-	first := err
-	for f in faults {
-		if e, bad := json.validate(src[f.lo:f.hi], {limits = limits}).?; bad {
-			e = cut_by_next_byte(src, int(f.lo), int(f.hi), e, .Json, limits)
-			e.offset += f.lo
-			first = e
-			break
-		}
+	doc, err := records.build(&it, rec, context.temp_allocator)
+	if err.kind != .None {
+		return ""
 	}
-	if e, bad := first.?; bad {
-		fail_input(run, e, jq.TRUNCATED_NUMBER_NOTE if first == err && e.kind == .Truncated else "")
-	}
+	msg, twice := repeated_header(name, data, &doc)
+	return message.build_temp("%s\n", msg) if twice else ""
 }

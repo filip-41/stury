@@ -1,5 +1,11 @@
 package spell
 
+import "core:strconv"
+
+// The rows of `_POWER_OF_FIVE_128` are 5^-342 to 5^341. A rename at a compiler update stops the build, and a change of the
+// range stops it here.
+#assert(len(strconv._POWER_OF_FIVE_128) == 684)
+
 // Shortest round-trip digits for a finite binary64: a port of zmij's `to_decimal` (the `zmij` crate 1.0.23,
 // `src/lib.rs`, MIT). A Schubfach variant: the significand is scaled by 10^(-e-1), so the shorter candidate
 // (15 or 16 digits) is the integral part of the product and the 17th digit is read off its fraction. When
@@ -57,16 +63,17 @@ to_decimal :: #force_inline proc "contextless" (
 		// floor(log10(3/4 * 2^bin_exp)), for -1334 <= bin_exp <= 2620.
 		dec_exp := (bin_exp * 315653 - 131072) >> 20
 		shift := u64(compute_exp_shift(bin_exp, dec_exp + 1) + EXTRA_SHIFT) & 63
-		pow10 := POW10_SIG[-dec_exp - 1 - POW10_MIN]
+		p_hi, p_lo := pow10_of(int(-dec_exp - 1))
+		pow10 := [2]u64{p_hi, p_lo}
 		hi, lo := umul192_hi128(pow10[0], pow10[1], bin_sig << shift)
 		integral := hi >> EXTRA_SHIFT
 		fractional := hi << (64 - EXTRA_SHIFT) | lo >> EXTRA_SHIFT
 		half_ulp := pow10[0] >> ((EXTRA_SHIFT + 1 - shift) & 63)
 		round_up := half_ulp > max(u64) - fractional
-		round_down := half_ulp >> 1 > fractional
+		round_down := half_ulp >> 1 >= fractional
 		digit := max(
 			umul128_add_hi64(fractional, 10, 1 << 63 - 1),
-			umul128_add_hi64(fractional - half_ulp >> 1, 10, max(u64)),
+			umul128_add_hi64(fractional - half_ulp >> 1, 10, max(u64) - (1 << 32)),
 		)
 		return integral + u64(round_up), dec_exp, digit, !(round_up || round_down)
 	}
@@ -76,7 +83,8 @@ to_decimal :: #force_inline proc "contextless" (
 	dec_exp := i32(u64((u128(raw_exp - EXP_OFFSET) * u128(78913 << 46)) >> 64))
 	shift := u64(EXP_SHIFT[raw_exp]) & 63
 	even := 1 - bin_sig & 1
-	pow10 := POW10_SIG[-dec_exp - 1 - POW10_MIN]
+	p_hi, p_lo := pow10_of(int(-dec_exp - 1))
+	pow10 := [2]u64{p_hi, p_lo}
 	hi, lo := umul192_hi128(pow10[0], pow10[1], bin_sig << shift)
 	integral := hi >> EXTRA_SHIFT
 	fractional := hi << (64 - EXTRA_SHIFT) | lo >> EXTRA_SHIFT
@@ -89,4 +97,11 @@ to_decimal :: #force_inline proc "contextless" (
 		digit = 2
 	}
 	return integral + u64(round_up), dec_exp, digit, !(round_up || round_down)
+}
+
+// The 128-bit significand of 10^k, as (high, low) words. For k in -27..-1 the low word is one below the library row.
+@(private)
+pow10_of :: #force_inline proc "contextless" (k: int) -> (u64, u64) #no_bounds_check {
+	e := strconv._POWER_OF_FIVE_128[k + 342]
+	return e[0], e[1] - u64(uint(k + 27) < 27)
 }

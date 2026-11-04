@@ -1,27 +1,18 @@
 # Build outputs
 /build/
-/stury
 *.o
 *.obj
 *.exe
+*.a
 
-# Test binaries `odin test` drops in the package directory it ran in. 
-/api
-# `/scan` is the private suite's scan package's: `make -C ../stury-tests` runs
-# `odin test` from this root, which removes the binary only when the run passes.
-/scan
-/test
-/json/test/api/api
-/core/test/test
-# Their debug symbols, which `make test-asan` and `test-tsan` (built with -debug) leave on macOS.
+# Debug symbols that sanitizer builds (built with -debug) leave on macOS.
 *.dSYM/
 
 # Benchmark inputs: bench/gen.py writes the synthetic fixtures, bench/fetch.py the pinned corpus under corpus/.
 /bench/fixtures/
+# A peer built in place with cargo, without CARGO_TARGET_DIR.
+/bench/peers/rust/target/
 __pycache__/
-
-# Library output from `odin build ./json -build-mode:lib`
-*.a
 
 # Logs, dumps and crash output.
 *.log
@@ -46,18 +37,3 @@ __pycache__/
 *.tmp
 *.temp
 tmp/
-
-# Git worktrees (nested checkouts, not part of the tree)
-/.worktrees/
-
-# Internal A/B and measurement machinery
-/lab/
-
-
-# The internal API contract: kept locally, never committed.
-/API.md
-
-# The private release gate: its makefile, the public-surface checker, and the editor config.
-/Makefile.gate
-/tools/api_surface.py
-/ols.json

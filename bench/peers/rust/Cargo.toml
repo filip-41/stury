@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-# float_roundtrip: parse floats correctly rounded, as the other arms do.
-serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 sonic-rs = "0.5.10"
-csv = "1.4.0"
-# `str` enables StringRecord and Reader::read_record, which check each record is UTF-8.
-simd-csv = { version = "0.14.0", features = ["str"] }
+# The record boundary reader of the dsv frame lane.
+simd-csv = "=0.14.0"
+serde = { version = "1", features = ["derive"] }
+# preserve_order keeps a document's keys in source order, as every other arm writes them. float_roundtrip makes the
+# fixture's decimals read to the nearest double, so every arm writes the same values.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
 [profile.release]
 lto = "fat"

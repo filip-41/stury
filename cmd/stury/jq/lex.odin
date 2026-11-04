@@ -1,9 +1,14 @@
 package jq
 
-// jq's lexer, src/lexer.l: the longest match wins, then the earlier rule.
+// jq's lexer, src/lexer.l: the longest match wins, then the earlier rule. Also jq's readings of a program's text: numbers
+// as decNumber reads them, a string's escapes, and bytes that are not UTF-8.
 
-import "core:fmt"
+import "core:math"
+import "core:strconv"
 import "core:strings"
+import "core:unicode/utf8"
+import "../../../core/spell"
+import "../message"
 
 @(private)
 lex :: proc(p: ^Parser) -> (Sym, Sem, Loc) {
@@ -77,10 +82,7 @@ OPERATORS := [?]struct {
 // key, which stays so: no jq program has one of these.
 @(private = "file")
 fact_accessor :: proc(rest: string) -> string {
-	end := 1
-	for end < len(rest) && ident_byte(rest[end]) {
-		end += 1
-	}
+	end := run_end(rest, 1, ident_byte)
 	name := rest[:end]
 	if name != "@comment" && name != "@comment_inline" && name != "@comment_foot" {
 		return ""
@@ -105,13 +107,8 @@ lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 		p.pos += 1 + len(fact)
 		return .Field, {text = fact}
 	case c == '.' && ident_start(next):
-		p.pos += 1
-		end := p.pos
-		for end < len(s) && ident_byte(s[end]) {
-			end += 1
-		}
-		p.pos = end
-		return .Field, {text = s[start + 1:end]}
+		p.pos = run_end(s, start + 1, ident_byte)
+		return .Field, {text = s[start + 1:p.pos]}
 	case c == '$' && ident_start(next):
 		p.pos += 1
 		name := take_ident(p)
@@ -124,13 +121,9 @@ lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 			}
 		}
 		return .Ident, {text = name}
-	case c == '@' && (ident_byte(next)):
-		end := start + 1
-		for end < len(s) && ident_byte(s[end]) {
-			end += 1
-		}
-		p.pos = end
-		return .Format, {text = s[start + 1:end]}
+	case c == '@' && ident_byte(next):
+		p.pos = run_end(s, start + 1, ident_byte)
+		return .Format, {text = s[start + 1:p.pos]}
 	case c == '"':
 		p.pos += 1
 		append(&p.modes, Mode.String)
@@ -162,25 +155,14 @@ lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 // A closing bracket ends the innermost (), [], {} or interpolation it matches, or is invalid.
 @(private = "file")
 close :: proc(p: ^Parser, c: u8) -> Sym {
-	if len(p.modes) == 0 {
+	CLOSING := [Mode]struct {
+		c:   u8,
+		sym: Sym,
+	}{.Paren = {')', .RParen}, .Bracket = {']', .RBracket}, .Brace = {'}', .RBrace}, .Interp = {')', .QQ_Interp_End}, .String = {}}
+	if len(p.modes) == 0 || CLOSING[p.modes[len(p.modes) - 1]].c != c {
 		return .Invalid
 	}
-	top := p.modes[len(p.modes) - 1]
-	sym: Sym
-	switch {
-	case top == .Paren && c == ')':
-		sym = .RParen
-	case top == .Bracket && c == ']':
-		sym = .RBracket
-	case top == .Brace && c == '}':
-		sym = .RBrace
-	case top == .Interp && c == ')':
-		sym = .QQ_Interp_End
-	case:
-		return .Invalid
-	}
-	pop(&p.modes)
-	return sym
+	return CLOSING[pop(&p.modes)].sym
 }
 
 // `([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?`, as a number that keeps its original text.
@@ -188,15 +170,9 @@ close :: proc(p: ^Parser, c: u8) -> Sym {
 lex_number :: proc(p: ^Parser) -> Value {
 	s := p.src
 	start := p.pos
-	i := start
-	for i < len(s) && is_digit(s[i]) {
-		i += 1
-	}
+	i := run_end(s, start, is_digit)
 	if i < len(s) && s[i] == '.' {
-		i += 1
-		for i < len(s) && is_digit(s[i]) {
-			i += 1
-		}
+		i = run_end(s, i + 1, is_digit)
 	}
 	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
 		j := i + 1
@@ -204,10 +180,7 @@ lex_number :: proc(p: ^Parser) -> Value {
 			j += 1
 		}
 		if j < len(s) && is_digit(s[j]) {
-			for j < len(s) && is_digit(s[j]) {
-				j += 1
-			}
-			i = j
+			i = run_end(s, j, is_digit)
 		}
 	}
 	p.pos = i
@@ -240,7 +213,7 @@ lex_in_string :: proc(p: ^Parser) -> (sym: Sym, sem: Sem, loc: Loc) {
 				continue
 			}
 			j := end + 2
-			for j < len(s) && j < end + 6 && is_alnum(s[j]) {
+			for j < len(s) && j < end + 6 && ident_byte(s[j]) && s[j] != '_' {
 				j += 1
 			}
 			end = j
@@ -282,18 +255,13 @@ unescape :: proc(p: ^Parser, run: string, at: Loc) -> Value {
 			line, column = line + 1, 0
 		}
 	}
-	report(p, at, fmt.aprintf("%s at line %d, column %d (while parsing '\"%s\"')", msg, line, column + 1, run))
+	report(p, at, message.build("%s at line %d, column %d (while parsing '\"%s\"')", msg, line, column + 1, run))
 	return nil
 }
 
 @(private = "file")
 is_digit :: proc(c: u8) -> bool {
 	return c >= '0' && c <= '9'
-}
-
-@(private = "file")
-is_alnum :: proc(c: u8) -> bool {
-	return is_digit(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 @(private = "file")
@@ -305,19 +273,197 @@ ident_byte :: proc(c: u8) -> bool {
 	return ident_start(c) || is_digit(c)
 }
 
+// The end of the run of bytes `in_run` takes in `s` from `at`.
+@(private = "file")
+run_end :: proc(s: string, at: int, in_run: proc(c: u8) -> bool) -> int {
+	end := at
+	for end < len(s) && in_run(s[end]) {
+		end += 1
+	}
+	return end
+}
+
 // `([a-zA-Z_][a-zA-Z_0-9]*::)*[a-zA-Z_][a-zA-Z_0-9]*` from `p.pos`, which starts one.
 @(private = "file")
 take_ident :: proc(p: ^Parser) -> string {
 	s := p.src
 	start := p.pos
 	for {
-		for p.pos < len(s) && ident_byte(s[p.pos]) {
-			p.pos += 1
-		}
+		p.pos = run_end(s, p.pos, ident_byte)
 		if p.pos + 2 < len(s) && s[p.pos] == ':' && s[p.pos + 1] == ':' && ident_start(s[p.pos + 2]) {
 			p.pos += 2
 			continue
 		}
 		return s[start:p.pos]
 	}
+}
+
+// `text` as decNumber reads a number (jv_number_with_literal): a sign, then digits with a point and an exponent,
+// `Inf` or `Infinity`, or `NaN` with no payload. It returns false if it is none of them.
+read_number :: proc(text: string) -> (Value, bool) {
+	t := text
+	neg := false
+	if len(t) > 0 && (t[0] == '+' || t[0] == '-') {
+		neg = t[0] == '-'
+		t = t[1:]
+	}
+	if len(t) > 0 && t[0] | 0x20 >= 'a' && t[0] | 0x20 <= 'z' {
+		lower := strings.to_lower(t, context.temp_allocator)
+		switch {
+		case lower == "inf" || lower == "infinity":
+			return Number{f = math.inf_f64(-1 if neg else 1)}, true
+		case strings.has_prefix(lower, "nan") || strings.has_prefix(lower, "snan"):
+			payload := lower[3:] if lower[0] == 'n' else lower[4:]
+			if strings.trim_left(payload, "0") != "" {
+				return nil, false
+			}
+			return Number{f = math.nan_f64()}, true
+		}
+	}
+	// Digits around an optional point, at least one, then an optional exponent (`.5` and `1.` count).
+	if len(t) == 0 || t[0] == '-' || t[0] == '+' {
+		return nil, false
+	}
+	if _, _, ok := spell.number_loose(transmute([]byte)t, 0, u64(len(t))); !ok {
+		return nil, false
+	}
+	f, _ := strconv.parse_f64(text)
+	return Number{f = f, lit = json_literal(text)}, true
+}
+
+// The bytes a one-letter escape stands for, 0 for a letter that is no escape.
+@(private = "file", rodata)
+ESCAPED := [256]u8 {
+	'"'  = '"',
+	'\\' = '\\',
+	'/'  = '/',
+	'b'  = '\b',
+	'f'  = '\f',
+	'n'  = '\n',
+	'r'  = '\r',
+	't'  = '\t',
+}
+
+// The body of a JSON string decoded into `out` as jq's JSON parser decodes it, or why it cannot be, in jq's
+// words. A lone low surrogate, which only stury refuses, sets `stury_only_at` to its backslash's offset.
+decode_string :: proc(out: ^strings.Builder, in_: string, stury_only_at: ^int = nil) -> string {
+	s := transmute([]byte)in_
+	for i := 0; i < len(s); {
+		plain := i
+		for i < len(s) && s[i] != '\\' && s[i] >= 0x20 {
+			i += 1
+		}
+		strings.write_string(out, in_[plain:i])
+		if i == len(s) {
+			break
+		}
+		if s[i] != '\\' {
+			return "Invalid string: control characters from U+0000 through U+001F must be escaped"
+		}
+		if i + 1 == len(s) {
+			return "Expected escape character at end of string"
+		}
+		if b := ESCAPED[s[i + 1]]; b != 0 {
+			strings.write_byte(out, b)
+			i += 2
+			continue
+		}
+		if s[i + 1] != 'u' {
+			return "Invalid escape"
+		}
+		if len(s) - (i + 2) < 4 {
+			return "Invalid \\uXXXX escape"
+		}
+		cp, hex_ok := spell.hex4(raw_data(s[i + 2:]))
+		if !hex_ok {
+			return "Invalid characters in \\uXXXX escape"
+		}
+		next := i + 6
+		if spell.low_surrogate(cp) {
+			if stury_only_at != nil {
+				stury_only_at^ = i // the escape's backslash, where stury reports it
+			}
+			return "Invalid escape" // a lone low surrogate: jq makes it U+FFFD, stury refuses it as its JSON reader does
+		}
+		if spell.high_surrogate(cp) {
+			if next + 6 > len(s) || s[next] != '\\' || s[next + 1] != 'u' {
+				return "Invalid \\uXXXX\\uXXXX surrogate pair escape"
+			}
+			low, low_ok := spell.hex4(raw_data(s[next + 2:]))
+			if !low_ok || !spell.low_surrogate(low) {
+				return "Invalid \\uXXXX\\uXXXX surrogate pair escape"
+			}
+			cp = 0x10000 + (cp - 0xD800) * 0x400 + (low - 0xDC00)
+			next += 6
+		}
+		strings.write_rune(out, rune(cp))
+		i = next
+	}
+	return ""
+}
+
+// `s` as jq makes a string of it: each sequence that is not UTF-8, as far as jvp_utf8_next reads it,
+// one U+FFFD.
+valid_utf8 :: proc(s: string) -> string {
+	b := strings.builder_make()
+	write_valid_utf8(&b, s)
+	return strings.to_string(b)
+}
+
+write_valid_utf8 :: proc(b: ^strings.Builder, s: string) {
+	run := 0 // s[run:i] is UTF-8 not yet written
+	for i := 0; i < len(s); {
+		if s[i] < 0x80 {
+			i += 1
+			continue
+		}
+		n, ok := utf8_next(s[i:])
+		if !ok {
+			strings.write_string(b, s[run:i])
+			strings.write_rune(b, utf8.RUNE_ERROR)
+			run = i + n
+		}
+		i += n
+	}
+	strings.write_string(b, s[run:])
+}
+
+// The length of the sequence `s` starts with as jvp_utf8_next reads it, and whether it is UTF-8: a bad
+// lead byte alone, a lead byte with what continues it, or all that is left when `s` ends first.
+utf8_next :: proc(s: string) -> (n: int, ok: bool) {
+	c := s[0]
+	switch {
+	case c < 0x80:
+		return 1, true
+	case c < 0xc2 || c > 0xf4:
+		return 1, false
+	}
+	n = utf8_length(c)
+	if n > len(s) {
+		return len(s), false
+	}
+	cp := rune(c) & (0x1f if n == 2 else 0x0f if n == 3 else 0x07)
+	for i in 1 ..< n {
+		if s[i] & 0xc0 != 0x80 {
+			return i, false
+		}
+		cp = cp << 6 | rune(s[i] & 0x3f)
+	}
+	first := [5]rune{0, 0, 0x80, 0x800, 0x10000}
+	return n, cp >= first[n] && !(0xd800 <= cp && cp <= 0xdfff) && cp <= 0x10ffff
+}
+
+// The length of the UTF-8 sequence lead byte `c` begins: 1 to 4, or 0 for a byte that begins none.
+utf8_length :: proc(c: byte) -> int {
+	switch c {
+	case 0x00 ..= 0x7f:
+		return 1
+	case 0xc2 ..= 0xdf:
+		return 2
+	case 0xe0 ..= 0xef:
+		return 3
+	case 0xf0 ..= 0xf4:
+		return 4
+	}
+	return 0
 }
