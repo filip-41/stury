@@ -306,12 +306,15 @@ parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 
 @(private = "file")
 Nested :: enum u8 {
+	// The inner repeat's body under the outer repeat made the simple repeat of simple_repeat's number.
+	Q,
+	A, // *
+	P, // +
+	QQ, // ??
+	AQ, // *?
+	PQ,
 	Asis, // as it is
 	Del, // the inner repeat alone
-	A, // *
-	AQ, // *?
-	QQ, // ??
-	P, // +
 	P_QQ, // (?:a+)??
 }
 
@@ -339,24 +342,16 @@ reduce_nested :: proc(outer: ^Node) {
 		}
 		return
 	}
-	switch REDUCE_NESTED[i][o] {
+	switch r := REDUCE_NESTED[i][o]; r {
 	case .Asis:
 	case .Del:
 		possessive := outer.possessive
 		outer^ = inner^
 		outer.possessive = possessive
-	case .A:
+	case .Q, .A, .P, .QQ, .AQ, .PQ:
+		s := int(r)
 		outer.kids[0] = inner.kids[0]
-		outer.min, outer.max, outer.greedy = 0, -1, true
-	case .AQ:
-		outer.kids[0] = inner.kids[0]
-		outer.min, outer.max, outer.greedy = 0, -1, false
-	case .QQ:
-		outer.kids[0] = inner.kids[0]
-		outer.min, outer.max, outer.greedy = 0, 1, false
-	case .P:
-		outer.kids[0] = inner.kids[0]
-		outer.min, outer.max, outer.greedy = 1, -1, true
+		outer.min, outer.max, outer.greedy = int(s % 3 == 2), 1 if s % 3 == 0 else -1, s < 3
 	case .P_QQ:
 		outer.min, outer.max, outer.greedy = 0, 1, false
 		inner.min, inner.max, inner.greedy = 1, -1, true

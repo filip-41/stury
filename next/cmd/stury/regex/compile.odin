@@ -523,10 +523,11 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 	patch(c, loop, loop + 1 if n.greedy else exit, exit if n.greedy else loop + 1)
 	if empty {
 		patch(c, check, mark, exit)
-	} else if head, ok := head_byte(x); ok && n.greedy && n.min <= 1 {
-		// Oniguruma's OP_PUSH_OR_JUMP_EXACT1: no alternative is kept for an iteration that cannot start,
-		// which its retry limit counts.
-		c.insts[loop] = {op = .Split_Head, a = i32(head), b = i32(exit)}
+	} else if h := head_literal(x); h != nil && h.kind == .Char && !h.fold && utf8.valid_rune(h.r) && n.greedy && n.min <= 1 {
+		// Oniguruma's OP_PUSH_OR_JUMP_EXACT1: no alternative is kept for an iteration that cannot start (one that
+		// starts with an exact character, no class, no case folding), which its retry limit counts.
+		head, _ := utf8.encode_rune(h.r)
+		c.insts[loop] = {op = .Split_Head, a = i32(head[0]), b = i32(exit)}
 	}
 }
 
@@ -546,7 +547,21 @@ emit_counted :: proc(c: ^Compiler, n: ^Node) {
 	for i in 0 ..< n.max {
 		// A call reuses the slots, so a counter is only kept where no group can be entered again.
 		if i == 1 && c.addr == nil && (len(c.insts) - start) * n.max > COUNTED_WRITTEN_OUT {
-			emit_counter_loop(c, x, max(n.min - 1, 0), n.max - 1, n.greedy, mark, &splits, &checks)
+			// The rest in a counter loop: its Count is an exit, as a Split is.
+			slot := c.slots
+			c.slots += 1
+			add(c, .Count_Reset, slot)
+			loop := add(c, .Count if n.greedy else .Count_Lazy, slot)
+			add(c, .Count, max(n.min - 1, 0), n.max - 1)
+			append(&splits, loop)
+			if mark >= 0 {
+				add(c, .Save, mark)
+			}
+			emit(c, x)
+			if mark >= 0 {
+				append(&checks, add(c, .Check, mark))
+			}
+			add(c, .Count_Next, slot, loop)
 			break
 		}
 		if i >= n.min {
@@ -584,26 +599,6 @@ emit_counted :: proc(c: ^Compiler, n: ^Node) {
 @(private = "file")
 COUNTED_WRITTEN_OUT :: 1024
 
-// `x` repeated `lo` to `hi` times by a counter, its Count appended to `exits` and its empty check to
-// `checks`, which emit_counted points at the end.
-@(private = "file")
-emit_counter_loop :: proc(c: ^Compiler, x: ^Node, lo, hi: int, greedy: bool, mark: int, exits, checks: ^[dynamic]int) {
-	slot := c.slots
-	c.slots += 1
-	add(c, .Count_Reset, slot)
-	loop := add(c, .Count if greedy else .Count_Lazy, slot)
-	add(c, .Count, lo, hi)
-	append(exits, loop)
-	if mark >= 0 {
-		add(c, .Save, mark)
-	}
-	emit(c, x)
-	if mark >= 0 {
-		append(checks, add(c, .Check, mark))
-	}
-	add(c, .Count_Next, slot, loop)
-}
-
 @(private = "file")
 emit_look :: proc(c: ^Compiler, n: ^Node) {
 	body := n.kids[0]
@@ -633,29 +628,25 @@ emit_look :: proc(c: ^Compiler, n: ^Node) {
 
 
 class_match_slow :: proc(cls: ^Class, r: rune) -> bool {
-	found := class_raw(cls, r)
-	if !found && cls.fold {
-		for x := fold_next(r); x != r; x = fold_next(x) {
-			if class_raw(cls, x) {
-				found = true
-				break
+	// `r`, then each character of its case fold orbit when the class folds.
+	x := r
+	for {
+		for g in cls.ranges {
+			if x >= g[0] && x <= g[1] {
+				return !cls.negated
 			}
 		}
-	}
-	return found != cls.negated
-}
-
-@(private = "file")
-class_raw :: proc(cls: ^Class, r: rune) -> bool {
-	for x in cls.ranges {
-		if r >= x[0] && r <= x[1] {
-			return true
+		for it in cls.props {
+			if in_table(int(it.table), x) != it.neg {
+				return !cls.negated
+			}
+		}
+		if !cls.fold {
+			return cls.negated
+		}
+		x = fold_next(x)
+		if x == r {
+			return cls.negated
 		}
 	}
-	for it in cls.props {
-		if in_table(int(it.table), r) != it.neg {
-			return true
-		}
-	}
-	return false
 }

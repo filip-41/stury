@@ -90,16 +90,10 @@ fn_bsearch :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value
 // ---- Dates, as jq's: libc's broken-down time as [year, month 0-11, day, hours, minutes, seconds, weekday,
 // yearday], the seconds with the input's fraction. TZ sets the zone `localtime` and `strflocaltime` read.
 
-// `secs` as C converts a double to time_t on this machine: truncated toward zero, saturated, NaN as 0.
-@(private = "file")
-time_of :: proc(secs: f64) -> libc.time_t {
-	return libc.time_t(double_to_i64(secs))
-}
-
 // jq's f_gmtime and f_localtime.
 @(private = "file")
 broken_time :: proc(ip: ^Interp, secs: f64, local: bool) -> (Value, Signal) {
-	t := time_of(secs)
+	t := libc.time_t(double_to_i64(secs)) // as C converts a double to time_t on this machine
 	tm: libc.tm
 	if !(local_time(t, &tm) if local else utc_time(t, &tm)) {
 		return nil, fail(ip, "error converting number of seconds since epoch to datetime")
@@ -223,7 +217,10 @@ fn_strptime :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 		return nil, fail(ip, "date \"%s\" does not match format \"%s\"", input, format)
 	}
 	// The weekday and yearday are the calendar's for the array's own year, month and day. A day never read is day 0.
-	tm.tm_wday, tm.tm_yday = civil_wday_yday(tm)
+	year := i64(tm.tm_year) + 1900
+	n := days_from_civil(year, i64(tm.tm_mon) + 1, i64(tm.tm_mday))
+	tm.tm_wday = libc.int((n + 4) %% 7) // 1970-01-01 was a Thursday
+	tm.tm_yday = libc.int(n - days_from_civil(year, 1, 1))
 	r := tm_value(tm, f64(tm.tm_sec))
 	if len(rest) > 0 {
 		append(&r.items, strings.clone(rest))
@@ -240,12 +237,3 @@ days_from_civil :: proc(y, m, d: i64) -> i64 {
 	return era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468
 }
 
-// The weekday (Sunday is 0) and the zero-based day of the year of a date, by integer day counting.
-@(private = "file")
-civil_wday_yday :: proc(tm: libc.tm) -> (wday, yday: libc.int) {
-	year := i64(tm.tm_year) + 1900
-	n := days_from_civil(year, i64(tm.tm_mon) + 1, i64(tm.tm_mday))
-	wday = libc.int((n + 4) %% 7) // 1970-01-01 was a Thursday
-	yday = libc.int(n - days_from_civil(year, 1, 1))
-	return
-}
