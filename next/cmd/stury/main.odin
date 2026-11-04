@@ -139,7 +139,6 @@ main :: proc() {
 	reserve(&run.ip.messages, 1 << 12)
 	// The interpreter recurses, and so does printing an answer.
 	run_deep(&run, &ins, run_filter)
-	abandon_inputs(&ins)
 	// jq's exit status: the last input's result, 5 after a text that does not parse, 2 after a file that did not
 	// open. Under -e, from the last output when the last input had none.
 	code := EXIT_USAGE if ins.failures > 0 else run.output.ret

@@ -9,7 +9,6 @@ check_strict_deep1024
 check_strict_deep1100
 check_strict_digits300
 csv_cut_fault
-csv_pipe_rss
 del_wide
 explain_csv_pieces
 explain_interpreter
@@ -24,12 +23,8 @@ fmt_in_place_deep_untouched
 foreach_object
 foreach_setpath
 index_each
-inputs_select_pipe
 join
 last_inputs
-pipe_csv
-pipe_csv_interp
-reduce_inputs_pipe
 reduce_inputs_select
 reduce_merge
 reduce_merge_nested

@@ -1,7 +1,7 @@
 package main
 
 // --from csv and --from tsv: each file's first record is its header, and each later record is one object keyed by it,
-// an empty unquoted cell null. A file is read whole, as its records' documents point into all of it.
+// an empty unquoted cell null. A pipe's windows after its first open with the header's bytes, so each reads as a file.
 
 import "base:runtime"
 import "core:bytes"
@@ -15,6 +15,9 @@ import "message"
 // a build takes as the last of the two.
 cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: string, status: jq.Parse_Status, answered: bool) {
 	ins.text_end = int(rec.at) + len(rec.text)
+	end := rec.at + u64(len(rec.text))
+	end += u64(end < u64(len(ins.data)) && ins.data[end] == '\r')
+	ins.rows_end = end + u64(end < u64(len(ins.data)) && ins.data[end] == '\n')
 	cols := ins.run.route.columns
 	if cols == nil || !ins.header_judged {
 		built, err := records.build(&ins.texts, rec, context.allocator)
@@ -25,7 +28,7 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 		}
 		if !ins.header_judged {
 			ins.header_judged = true
-			if ins.run.opts.follow && ins.head == nil {
+			if !ins.last && ins.head == nil {
 				// The first record built is the first row, so the header is what lies before it.
 				ins.head = bytes.clone(ins.data[:rec.at], runtime.heap_allocator())
 			}

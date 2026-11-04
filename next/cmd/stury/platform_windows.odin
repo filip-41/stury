@@ -6,6 +6,7 @@ package main
 import "core:io"
 import "core:os"
 import win "core:sys/windows"
+import "core:time"
 
 foreign import kernel32 "system:Kernel32.lib"
 
@@ -108,6 +109,17 @@ catch_stop :: proc() {}
 
 is_regular_file :: proc(f: ^os.File) -> bool {
 	return win.GetFileType(win.HANDLE(os.fd(f))) == win.FILE_TYPE_DISK
+}
+
+// Whether a read of `f` gives bytes within `wait`: a pipe holding some.
+readable :: proc(f: ^os.File, wait: time.Duration = 0) -> bool {
+	held: u32
+	peek := bool(win.PeekNamedPipe(win.HANDLE(os.fd(f)), nil, 0, nil, &held, nil)) && held > 0
+	if !peek && wait > 0 {
+		time.sleep(wait)
+		peek = bool(win.PeekNamedPipe(win.HANDLE(os.fd(f)), nil, 0, nil, &held, nil)) && held > 0
+	}
+	return peek
 }
 
 // os.read, with a pipe closed by its writer as its end: ReadFile fails it as ERROR_BROKEN_PIPE.

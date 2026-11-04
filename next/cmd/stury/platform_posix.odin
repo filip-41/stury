@@ -8,6 +8,7 @@ import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:sys/posix"
+import "core:time"
 import "message"
 
 @(private = "file")
@@ -185,6 +186,12 @@ catch_stop :: proc() {
 is_regular_file :: proc(f: ^os.File) -> bool {
 	st: posix.stat_t
 	return posix.fstat(posix.FD(os.fd(f)), &st) == .OK && posix.S_ISREG(st.st_mode)
+}
+
+// Whether a read of `f` gives bytes, or its end, within `wait`.
+readable :: proc(f: ^os.File, wait: time.Duration = 0) -> bool {
+	fds := [1]posix.pollfd{{fd = posix.FD(os.fd(f)), events = {.IN}}}
+	return posix.poll(raw_data(fds[:]), 1, i32(wait / time.Millisecond)) > 0
 }
 
 // os.read, but a failed read(2) as its errno (EISDIR), which jq prints: os.read tells it only as Unknown.

@@ -349,11 +349,12 @@ close :: proc(it: ^Reader) {
 
 // Returns the next window of whole records, with the gaps between them, and the input offset of its first byte, or
 // false when the records end. A reader on text in memory gives the text past `pos` as one window. Under `.Entries` the
-// window is the whole input.
+// window is the whole input. Under a framing with an end byte, the last window holds the bytes past the last end byte,
+// whole or not, as the window's reader judges them.
 next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool) {
 	stream := it.input.procedure != nil
 	for it.fault == nil {
-		if it.src == nil && (!stream || it.eof || !window_move(it)) {
+		if it.src == nil && (!stream || it.eof || !window_move(it, hold_cut = false)) {
 			return
 		}
 		lo := it.pos
@@ -372,7 +373,7 @@ next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool) {
 		if it.pos > lo {
 			return it.src[lo:it.pos], it.base + lo, true
 		}
-		if !stream || !window_move(it) {
+		if !stream || !window_move(it, hold_cut = false) {
 			return
 		}
 	}
@@ -441,10 +442,10 @@ settle_window :: proc(it: ^Reader, ok: bool, pos: u64, state: [2]u8) -> bool {
 }
 
 // Moves a stream's window past the bytes read, keeping the byte before them, and reads until a window of whole records
-// is found. Returns false when the records end: past the input's end, on the input's failure or a last record cut off,
-// with the unread bytes in `held`, or on a fault.
+// is found. Returns false when the records end: past the input's end, on the input's failure or, with `hold_cut`, a
+// last record cut off, with the unread bytes in `held`, or on a fault.
 @(private)
-window_move :: proc(it: ^Reader) -> bool {
+window_move :: proc(it: ^Reader, hold_cut := true) -> bool {
 	at := it.base + it.pos
 	if it.buf == nil {
 		buf, failed := make([]u8, min(CHUNK, it.max_bytes) + 1, it.allocator)
@@ -485,7 +486,7 @@ window_move :: proc(it: ^Reader) -> bool {
 		it.src, it.base = it.buf[lo:cut], at - 1 + u64(lo)
 		it.pos = core.text_start(it.src, 0) if lo == 1 else 1
 		it.last = it.eof && cut == it.filled
-		if it.last && stop != 0 {
+		if it.last && stop != 0 && hold_cut {
 			// The input's last record has no end byte, so it is held unless its judgement says it is whole.
 			pos, state := it.pos, it.state
 			rec, more := it.services.next[it.framing](it)
@@ -502,12 +503,14 @@ window_move :: proc(it: ^Reader) -> bool {
 	}
 }
 
-// Reads into a stream's buffer until it gains as many bytes as it held, or under `.Entries` the whole input, or the
-// input ends or fails, or the buffer holds `max_bytes` unread bytes. The buffer doubles as it fills. Returns the bytes
-// gained, or false with the fault `.No_Memory` when the buffer cannot grow.
+// Reads into a stream's buffer until it gains as many bytes as it held, or a read gains the framing's end byte, so a
+// record a slow input ends is given once its end comes, or under `.Entries` the whole input, or the input ends or
+// fails, or the buffer holds `max_bytes` unread bytes. The buffer doubles as it fills. Returns the bytes gained, or
+// false with the fault `.No_Memory` when the buffer cannot grow.
 @(private)
 fill :: proc(it: ^Reader) -> (gained: int, ok: bool) {
 	want := it.filled + max(it.filled - 1, 1) if it.framing != .Entries else max(int)
+	stop := it.services.ends[it.framing]
 	for !it.eof && it.cause == nil && it.filled < want {
 		if it.filled == len(it.buf) {
 			size := min(2 * len(it.buf), it.max_bytes + 1)
@@ -522,12 +525,16 @@ fill :: proc(it: ^Reader) -> (gained: int, ok: bool) {
 			it.buf = buf
 		}
 		n, err := io.read(it.input, it.buf[it.filled:min(len(it.buf), it.filled + CHUNK)])
+		ended := stop != 0 && kernel.index_byte(it.buf[it.filled:][:n], stop) >= 0
 		it.filled += n
 		gained += n
 		if err == .EOF {
 			it.eof = true
 		} else if err != nil || n == 0 {
 			it.cause = err if err != nil else .No_Progress
+		}
+		if ended {
+			break
 		}
 	}
 	return gained, true

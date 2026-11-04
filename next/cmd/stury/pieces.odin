@@ -183,7 +183,7 @@ records_pieces :: proc(ins: ^Inputs) -> bool {
 	at = max(at, from)
 	if cells {
 		// Opened anywhere but at its start, a delimited text's reader takes its first record for the header.
-		ins.skip_below = at
+		ins.skip_below, ins.rows_end = at, at
 	} else {
 		records.close(&ins.texts)
 		ins.texts = records.open(ins.data, ins.as, ins.framing, at, runtime.heap_allocator())
