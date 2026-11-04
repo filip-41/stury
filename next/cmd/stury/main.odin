@@ -60,6 +60,7 @@ Run :: struct {
 	halted:      bool,
 	pool:        host.Pool, // `run_pool`'s, started once `pooled`
 	pooled:      bool,
+	spares:      Spare_Outs, // the pieces' output buffers, kept from one file to the next
 	parallel:    Maybe(bool), // whether the filter runs on pieces, once `parallel` has decided it
 }
 

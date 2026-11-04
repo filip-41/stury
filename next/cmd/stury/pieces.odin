@@ -44,6 +44,7 @@ Piece_Sum :: struct {
 Piece_Slot :: struct {
 	lo, hi, end:   u64,
 	out:           []u8,
+	room, k:       int, // the bytes `out`'s buffer holds, and the piece's number
 	sum:           Piece_Sum,
 	done, stopped: bool,
 }
@@ -106,6 +107,39 @@ serial_node :: proc(p: ^^jq.Node, w: ^Serial_Walk) -> bool {
 	return jq.any_child(n, w, serial_node)
 }
 
+// The output buffers of the pieces written, kept by piece number for the next file's pieces, which are cut alike and so
+// need buffers of the same sizes. A buffer is allocated and doubled once, however many files follow, so the allocator
+// does not hold a run's freed doublings.
+Spare_Outs :: struct {
+	lock: sync.Mutex,
+	bufs: [dynamic][]u8,
+}
+
+// Piece `k`'s spare buffer given to `out`, if there is one.
+take_spare :: proc(spares: ^Spare_Outs, out: ^write.Out, k: int) {
+	sync.guard(&spares.lock)
+	if k < len(spares.bufs) && spares.bufs[k] != nil {
+		out.buf, out.size = raw_data(spares.bufs[k]), len(spares.bufs[k])
+		spares.bufs[k] = nil
+	}
+}
+
+// Piece `k`'s `out`, which holds `room` bytes, kept as its spare.
+give_spare :: proc(spares: ^Spare_Outs, out: []u8, room: int, k: int) {
+	if out == nil {
+		return
+	}
+	sync.guard(&spares.lock)
+	spares.bufs.allocator = runtime.heap_allocator()
+	if k >= len(spares.bufs) {
+		resize(&spares.bufs, k + 1)
+	}
+	if spares.bufs[k] != nil {
+		delete(spares.bufs[k], runtime.heap_allocator())
+	}
+	spares.bufs[k] = raw_data(out)[:room]
+}
+
 // The run each piece starts as, and the slots its pieces write into.
 @(private = "file")
 pieces_init :: proc(ps: ^Pieces, run: ^Run, plain: core.As) {
@@ -117,7 +151,7 @@ pieces_init :: proc(ps: ^Pieces, run: ^Run, plain: core.As) {
 @(private = "file")
 pieces_destroy :: proc(ps: ^Pieces) {
 	for s in ps.slots {
-		delete(s.out, runtime.heap_allocator())
+		give_spare(&ps.run.spares, s.out, s.room, s.k)
 	}
 	delete(ps.slots)
 }
@@ -331,6 +365,7 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 	init_output(o, &r)
 	o.held, o.piece = true, true
 	o.buf.hint = 1 << 16
+	take_spare(&ps.run.spares, &o.buf, k)
 	if table != nil {
 		o.table.shape, o.table.header = table.shape, table.header
 	}
@@ -378,6 +413,7 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 		records.writer_destroy(&o.table.wr)
 		free(o.table, runtime.heap_allocator())
 	}
+	slot.room, slot.k = o.buf.size, k
 	out, err := write.finish(&o.buf)
 	if err.kind != .None {
 		slot.hi, slot.stopped = lo, true
@@ -485,7 +521,7 @@ write_piece :: proc(ps: ^Pieces, s: ^Piece_Slot) {
 		host.writing(&run.pool, false)
 		o.written += len(s.out)
 	}
-	delete(s.out, runtime.heap_allocator())
+	give_spare(&run.spares, s.out, s.room, s.k)
 	s.out = nil
 	ps.at = s.hi
 }

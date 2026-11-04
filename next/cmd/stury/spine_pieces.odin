@@ -22,6 +22,7 @@ Spine_Put :: #type proc(run: ^Run, doc: ^core.Document, out: ^write.Out) -> bool
 
 Spine_Slot :: struct {
 	out:     []u8,
+	room, k: int, // the bytes `out`'s buffer holds, and the piece's number
 	inner:   []u8, // the text of `out` between the innermost brackets
 	end:     u64, // the byte past the piece's last entry
 	entries: int,
@@ -98,7 +99,7 @@ spine_print :: proc(ins: ^Inputs, put: Spine_Put) -> bool {
 			write_out(s.inner)
 			o.written += len(s.inner)
 		}
-		delete(s.out, runtime.heap_allocator())
+		give_spare(&run.spares, s.out, s.room, s.k)
 		s.out = nil
 	}
 	write.put_text(&o.buf, string(text[mark + len(MARKER):]))
@@ -202,7 +203,7 @@ spine_run :: proc(ins: ^Inputs, put: Spine_Put) -> (job: Spine_Job, at: u64, ok:
 @(private = "file")
 spine_free :: proc(job: ^Spine_Job) {
 	for s in job.slots {
-		delete(s.out, runtime.heap_allocator())
+		give_spare(&job.run.spares, s.out, s.room, s.k)
 	}
 	delete(job.slots)
 }
@@ -214,7 +215,7 @@ WHITE := " \t\r\n"
 // output.
 @(private = "file")
 spine_task :: proc(job: ^Spine_Job, it: ^records.Reader, k: int) -> bool {
-	s: Spine_Slot
+	s := Spine_Slot{k = k}
 	lo: u64
 	ok := true
 	for rec in records.next(it) {
@@ -263,7 +264,9 @@ spine_put :: proc(job: ^Spine_Job, text: []u8, s: ^Spine_Slot) -> bool {
 	out: write.Out
 	spare: [write.ROOM_MAX]u8
 	write.init(&out, &spare, runtime.heap_allocator(), hint = 2 * len(text) + 1024)
+	take_spare(&job.run.spares, &out, s.k)
 	ok := job.put(job.run, &doc, &out)
+	s.room = out.size
 	printed, err := write.finish(&out)
 	s.out = printed
 	if !ok || err.kind != .None {
