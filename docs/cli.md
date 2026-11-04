@@ -354,7 +354,7 @@ no pipe.
 - It reads NDJSON, `--seq`, `-R`, several texts per file as jq reads them, CSV and TSV.
 - A record cut short waits for its delimiter. The output is written after each record.
 - A file that shrinks is read again from its start, with `stury: FILE: file truncated` on stderr.
-- SIGINT and SIGTERM end the run with the status of the records it answered.
+- SIGINT and SIGTERM, and Ctrl-C or Ctrl-Break on Windows, end the run with the status of the records it answered.
 - It is a usage error (exit 2) with standard input or more than one file, `-s`, `-n`, `--stream`, JSONC, JSON5,
   `check` and `fmt`.
 

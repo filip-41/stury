@@ -5,6 +5,7 @@ package main
 
 import "core:io"
 import "core:os"
+import "core:sync"
 import win "core:sys/windows"
 import "core:time"
 
@@ -104,8 +105,16 @@ open_input :: proc(path: string) -> (^os.File, os.Error) {
 	return os.open(path)
 }
 
-// Ctrl-C ends a --follow run as it ends any other, the output having been flushed at each record.
-catch_stop :: proc() {}
+// Ctrl-C and Ctrl-Break set `stopped`, which a --follow run takes as its file's end, as SIGINT does on POSIX.
+catch_stop :: proc() {
+	win.SetConsoleCtrlHandler(proc "system" (kind: win.DWORD) -> win.BOOL {
+		if kind != win.CTRL_C_EVENT && kind != win.CTRL_BREAK_EVENT {
+			return false
+		}
+		sync.atomic_store(&stopped, true)
+		return true
+	}, true)
+}
 
 is_regular_file :: proc(f: ^os.File) -> bool {
 	return win.GetFileType(win.HANDLE(os.fd(f))) == win.FILE_TYPE_DISK
