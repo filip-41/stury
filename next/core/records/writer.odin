@@ -92,6 +92,19 @@ record :: #force_inline proc(wr: ^Writer, value: rawptr, plan: ^typed.Plan) -> c
 	return end(wr, t.spell.record(t, plan, value, &wr.err), true)
 }
 
+// The text a buffer writer wrote since the last take, valid until its next call. The writer then goes on as after a
+// stream's flush, so a later refusal still goes back to its record's start. A stream writer has none.
+writer_take :: proc(wr: ^Writer) -> []u8 {
+	out := wr.tokens.out
+	if out == nil || out.stream.procedure != nil {
+		return nil
+	}
+	text := out.buf[:out.cursor]
+	out.flushed += out.cursor
+	out.cursor = 0
+	return text
+}
+
 // Writes `text` as one record, framed. It is the caller's text of one value or row and is written as it is, not judged.
 write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind {
 	t := &wr.tokens

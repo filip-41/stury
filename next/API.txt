@@ -405,6 +405,7 @@ write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind {
 writer_destroy :: proc(wr: ^Writer) {
 writer_end :: proc(wr: ^Writer) -> ([]u8, core.Typed_Error) {
 writer_init :: proc(wr: ^Writer, w: io.Stream, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind {
+writer_take :: proc(wr: ^Writer) -> []u8 {
 # json
 Detail :: enum u8 {
 Number_Spelling :: enum u16 {

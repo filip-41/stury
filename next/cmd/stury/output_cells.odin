@@ -193,11 +193,7 @@ put_row :: proc(o: ^Output, cells: []Maybe(string), head := -1) {
 		}
 		table_fail(o, "%s", row_refusal(t, kind))
 	}
-	// The writer's buffer is emptied as a stream's flush empties it, so a later refusal still finds its record's start.
-	out := t.wr.tokens.out
-	write.put_text(&o.buf, string(out.buf[:out.cursor]))
-	out.flushed += out.cursor
-	out.cursor = 0
+	write.put_text(&o.buf, string(records.writer_take(&t.wr)))
 	flush_some(o)
 }
 
