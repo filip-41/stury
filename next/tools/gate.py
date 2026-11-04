@@ -223,6 +223,7 @@ def checks(odin, seed):
         out.append(Check("cli pieces law", 2, 0, [at(CLI)], ["python3", law, f"--odin={odin}"], trees=[law]))
         follow = at(f"{CLI}/test/follow_test.py")
         out.append(Check("cli follow", 2, 0, [at(CLI)], ["python3", follow, f"--odin={odin}"], trees=[follow]))
+        out.append(Check("cli size cap", 2, 0, [at(CLI)], make(odin, "check-cli-size"), fails=SIZE_FAILS))
         out += cli_suites(odin, absent)
     for package in TEST_PKGS:
         name = package.replace("/", "-")

@@ -31,7 +31,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: check gate build-cli test test-x86 test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers fixtures size surface \
+.PHONY: check gate build-cli check-cli-size test test-x86 test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers fixtures size surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
@@ -59,6 +59,11 @@ CLI_DEFINES := -define:STURY_VERSION='"$(CLI_VERSION)"'
 build-cli:
 	@mkdir -p $(BUILD)
 	$(ODIN) build cmd/stury -o:speed $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury
+
+# The binary build-cli makes stays under this many bytes. Raise it deliberately when a feature earns the bytes.
+CLI_MAX_BYTES := 3145728
+check-cli-size:
+	@n=$$(wc -c < $(BUILD)/stury); [ $$n -le $(CLI_MAX_BYTES) ] || { echo "$(BUILD)/stury is $$n B, over the $(CLI_MAX_BYTES) B cap"; exit 1; }
 
 # The checks a change can reach, in `tools/gate.py`: `check` while editing, `gate` before a branch lands.
 check:
