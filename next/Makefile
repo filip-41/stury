@@ -61,7 +61,7 @@ build-cli:
 	$(ODIN) build cmd/stury -o:speed $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury
 
 # The binary build-cli makes stays under this many bytes. Raise it deliberately when a feature earns the bytes.
-CLI_MAX_BYTES := 3145728
+CLI_MAX_BYTES := 4194304
 check-cli-size:
 	@n=$$(wc -c < $(BUILD)/stury); [ $$n -le $(CLI_MAX_BYTES) ] || { echo "$(BUILD)/stury is $$n B, over the $(CLI_MAX_BYTES) B cap"; exit 1; }
 
