@@ -133,12 +133,17 @@ write_cells :: proc(wr: ^Writer, cells: []Maybe(string)) -> core.Typed_Error_Kin
 		return .Unwritable
 	}
 	begin(wr)
+	// A flat format takes every scalar in any order, so each cell goes to the format's cell write with no token check.
 	for c in cells {
+		v: cw.Scalar = cw.Tree_Part.Null
 		if s, ok := c.?; ok {
-			cw.value_string(t, s)
-		} else {
-			cw.value_null(t)
+			v = s
 		}
+		if kind := t.spell.value(t, v); kind != .None {
+			t.err = kind
+			break
+		}
+		t.first = false
 	}
 	return end(wr, cw.end_record(t), false)
 }
