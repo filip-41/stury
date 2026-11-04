@@ -114,7 +114,7 @@ test-tsan: $(TSAN_TARGETS)
 $(TSAN_TARGETS): $(BUILD)/test/tsan/%:
 	@mkdir -p $(@D)
 	@echo "== $* (thread)"
-	@TSAN_OPTIONS=atexit_sleep_ms=0 $(ODIN) test $* -o:speed -sanitize:thread -debug -define:HOST_START_BUDGET_US=100000 -out:$@ || { echo "== $* (thread) failed"; exit 1; }
+	@TSAN_OPTIONS=atexit_sleep_ms=0 $(ODIN) test $* -o:speed -sanitize:thread -debug -out:$@ || { echo "== $* (thread) failed"; exit 1; }
 
 # Host, then the other architectures' sources: x86-64 and a target with neither NEON nor x86 vectors.
 lint:

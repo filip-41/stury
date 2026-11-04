@@ -17,7 +17,8 @@ import core "../core"
 Pool :: struct {
 	runner:      core.Runner,
 	helpers:     []Helper,
-	max_helpers: int,
+	// Helpers whose thread has been started or refused.
+	settled:     int,
 	// The current call, and how many helpers it was handed to.
 	task:        proc(arg: rawptr),
 	arg:         rawptr,
@@ -75,11 +76,6 @@ STALL :: 1 * time.Millisecond
 @(private)
 FINISH_NAP :: 50 * time.Microsecond
 
-// A thread start slower than this pauses initial helper spawning until calm calls ask for more. The define is for
-// the ThreadSanitizer run, whose loaded host would otherwise stop the pool short of every core.
-@(private)
-START_BUDGET :: time.Duration(#config(HOST_START_BUDGET_US, 250)) * time.Microsecond
-
 @(private)
 Helper :: struct {
 	thread: ^thread.Thread,
@@ -102,64 +98,68 @@ REVOKED :: 3
 // Start `workers - 1` parked threads (`workers <= 0` means one per core, the caller counted). A failed allocation
 // returns its error and leaves a pool that runs calls on the caller alone.
 //
-//	- Fewer start initially when the system refuses one, or when starting one took over `START_BUDGET`. The rest
-//	  start lazily across calm calls.
+//	- The caller starts two threads and each helper starts two more, so the caller does not wait for every start,
+//	  and a call may begin before every helper has. A helper handed a call before it starts takes it as it starts.
+//	- A helper the system refuses never runs: a call handed to it is taken back by `finish`.
 //	- A pool with none still runs calls, on the caller alone.
 pool_init :: proc(pool: ^Pool, workers := 0) -> runtime.Allocator_Error {
 	pool^ = {runner = {data = pool, start = start, finish = finish}}
 	w := workers > 0 ? workers : os.get_processor_core_count()
-	helpers := make([]Helper, max(w - 1, 0), runtime.heap_allocator()) or_return
-	pool.helpers = helpers[:0]
-	pool.max_helpers = len(helpers)
-	for _ in helpers {
-		t := time.tick_now()
-		if !spawn_one(pool) || time.tick_since(t) > START_BUDGET {
-			break
-		}
+	pool.helpers = make([]Helper, max(w - 1, 0), runtime.heap_allocator()) or_return
+	pool.runner.threads = len(pool.helpers)
+	for &h, i in pool.helpers {
+		h = {pool = pool, index = i}
 	}
+	spawn_children(pool, -1)
 	return nil
 }
 
+// Start helper `index`'s two children in the tree that also wakes them, `index` -1 being the caller, and the
+// children of one the system refuses.
 @(private)
-spawn_one :: proc(pool: ^Pool) -> bool {
-	if len(pool.helpers) >= pool.max_helpers {
-		return false
-	}
+spawn_children :: proc(pool: ^Pool, index: int) {
 	// The pool's own bookkeeping is heap-owned, never the caller's arena.
-	prev := context.allocator
 	context.allocator = runtime.heap_allocator()
-	defer context.allocator = prev
-	idx := len(pool.helpers)
-	h := &raw_data(pool.helpers)[idx]
-	h^ = {pool = pool, index = idx}
-	h.thread = thread.create(helper_main)
-	if h.thread == nil {
-		return false
+	for &h in pool.helpers[min(2 * index + 2, len(pool.helpers)):min(2 * index + 4, len(pool.helpers))] {
+		h.thread = thread.create(helper_main)
+		if h.thread != nil {
+			h.thread.data = &h
+			thread.start(h.thread)
+		}
+		sync.atomic_add(&pool.settled, 1)
+		if h.thread == nil {
+			spawn_children(pool, h.index)
+		}
 	}
-	h.thread.data = h
-	thread.start(h.thread)
-	pool.helpers = raw_data(pool.helpers)[:idx + 1]
-	pool.runner.threads = idx + 1
-	return true
 }
 
 // Stop the helper threads and free what `pool_init` allocated. Call it once, after the last call has returned.
 // The pool is not usable afterwards.
 pool_destroy :: proc(pool: ^Pool) {
+	// Until every start has been tried, a helper's `thread` may not yet tell whether it runs.
+	for sync.atomic_load(&pool.settled) < len(pool.helpers) {
+		thread.yield()
+	}
 	pool.task = nil
 	// Each helper counts itself out as it stops.
-	sync.atomic_store(&pool.pending, len(pool.helpers))
+	live := 0
+	for h in pool.helpers {
+		live += int(h.thread != nil)
+	}
+	sync.atomic_store(&pool.pending, live)
 	for &h in pool.helpers {
-		sync.atomic_store(&h.ready, HANDED)
-		sync.futex_signal(&h.ready)
+		if h.thread != nil {
+			sync.atomic_store(&h.ready, HANDED)
+			sync.futex_signal(&h.ready)
+		}
 	}
 	for &h in pool.helpers {
-		thread.destroy(h.thread)
+		if h.thread != nil {
+			thread.destroy(h.thread)
+		}
 	}
 	assert(pool.pending == 0)
-	if pool.max_helpers > 0 {
-		delete(raw_data(pool.helpers)[:pool.max_helpers], runtime.heap_allocator())
-	}
+	delete(pool.helpers, runtime.heap_allocator())
 	pool^ = {}
 }
 
@@ -228,9 +228,6 @@ adapt_width :: proc(pool: ^Pool, span, wait: time.Duration) {
 	} else if wait * WAIT_LOW < span {
 		pool.current.calm += 1
 		if pool.current.calm >= CALM {
-			if w^ == len(pool.helpers) && len(pool.helpers) < pool.max_helpers {
-				spawn_one(pool)
-			}
 			w^ = min(w^ + 1, len(pool.helpers))
 			pool.current.calm = 0
 		}
@@ -254,6 +251,7 @@ width_of :: proc(pool: ^Pool, task: proc(arg: rawptr)) -> ^Width {
 helper_main :: proc(t: ^thread.Thread) {
 	h := (^Helper)(t.data)
 	pool := h.pool
+	spawn_children(pool, h.index)
 	for {
 		switch sync.atomic_load(&h.ready) {
 		case IDLE:
