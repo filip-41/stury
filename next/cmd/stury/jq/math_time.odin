@@ -1,6 +1,6 @@
 package jq
 
-// Numeric builtins (`fn_abs`, `fn_isinfinite`, `fn_isnan`, `fn_isnormal`, `fn_number_pair`, `fn_bsearch`) and
+// Numeric builtins (`fn_abs`, `fn_float_class`, `fn_number_pair`, `fn_bsearch`) and
 // dates (`gmtime`, `localtime`, `mktime`, `strftime`, `strflocaltime`, `strptime`).
 
 import "core:c/libc"
@@ -25,19 +25,11 @@ fn_abs :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Si
 	return v, .Go
 }
 
-fn_isinfinite :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+// isinfinite, isnan and isnormal.
+fn_float_class :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	n, ok := number_of(v)
-	return ok && math.is_inf(n.f), .Go
-}
-
-fn_isnan :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	n, ok := number_of(v)
-	return ok && math.is_nan(n.f), .Go
-}
-
-fn_isnormal :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	n, ok := number_of(v)
-	return ok && math.classify(n.f) == .Normal, .Go
+	classes: bit_set[math.Float_Class] = {.Inf, .Neg_Inf} if name == "isinfinite" else ({.NaN} if name == "isnan" else {.Normal})
+	return ok && math.classify(n.f) in classes, .Go
 }
 
 // frexp, modf and lgamma_r: a number's two parts, as an array.

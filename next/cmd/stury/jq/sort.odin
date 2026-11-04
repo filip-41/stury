@@ -381,16 +381,9 @@ sorted_result :: proc(shape: Sort_Shape, items: []Value, ks: []Keyed, order: []i
 	return a
 }
 
+// `sort` and `unique`.
 fn_sort :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return sort_array(ip, v, .Sorted)
-}
-
-fn_unique :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return sort_array(ip, v, .Unique)
-}
-
-@(private = "file")
-sort_array :: proc(ip: ^Interp, v: Value, shape: Sort_Shape) -> (Value, Signal) {
+	shape: Sort_Shape = .Unique if name == "unique" else .Sorted
 	if kind(v) != .Array {
 		return nil, fail(ip, "%s (%s) cannot be sorted, as it is not an array", type_name(v), brief(v))
 	}
@@ -469,32 +462,21 @@ keyed_elements :: proc(ip: ^Interp, f: ^Node, input: Item, env: ^Env) -> ([]Keye
 
 // `sort_by(f)`, `group_by(f)` and `unique_by(f)`, which jq defines as their `_impl` of `map([f])`: the
 // same keys, each `f`'s outputs on an element, read into their atoms without building the arrays.
-native_sort_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return sort_by(ip, n, input, env, track, out, .Sorted)
-}
-
-native_group_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return sort_by(ip, n, input, env, track, out, .Grouped)
-}
-
-native_unique_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return sort_by(ip, n, input, env, track, out, .Unique)
-}
-
-@(private = "file")
-sort_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink, shape: Sort_Shape) -> Signal {
-	ks, sig := keyed_elements(ip, n.args[0], input, env)
-	if sig != .Go {
-		return sig
+sort_by :: proc($shape: Sort_Shape) -> Native {
+	return proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
+		ks, sig := keyed_elements(ip, n.args[0], input, env)
+		if sig != .Go {
+			return sig
+		}
+		if kind(input.v) != .Array {
+			return not_both_arrays(ip, input.v, keys_array(ks))
+		}
+		order, ties, sorted_sig := sort_keyed(ip, ks, 1)
+		if sorted_sig != .Go {
+			return sorted_sig
+		}
+		return emit_made(out, input, sorted_result(shape, nil, ks, order, ties), track)
 	}
-	if kind(input.v) != .Array {
-		return not_both_arrays(ip, input.v, keys_array(ks))
-	}
-	order, ties, sorted_sig := sort_keyed(ip, ks, 1)
-	if sorted_sig != .Go {
-		return sorted_sig
-	}
-	return emit_made(out, input, sorted_result(shape, nil, ks, order, ties), track)
 }
 
 // The place of the first least element of `xs` under `cmp`, or of the last greatest, as jq's min and max keep.
@@ -516,44 +498,30 @@ extreme_place :: proc(xs: []$T, want_max: bool, $cmp: proc(a, b: T) -> int) -> i
 
 // `min_by(f)` and `max_by(f)`, jq's `_min_by_impl(map([f]))` over the same keys as sort_by: the first least
 // element, or the last greatest, found in one pass.
-native_min_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return extreme_by(ip, n, input, env, track, out, false)
-}
-
-native_max_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return extreme_by(ip, n, input, env, track, out, true)
-}
-
-@(private = "file")
-extreme_by :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink, want_max: bool) -> Signal {
-	ks, sig := keyed_elements(ip, n.args[0], input, env)
-	if sig != .Go {
-		return sig
+extreme_by :: proc($want_max: bool) -> Native {
+	return proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
+		ks, sig := keyed_elements(ip, n.args[0], input, env)
+		if sig != .Go {
+			return sig
+		}
+		if kind(input.v) != .Array {
+			keys := keys_array(ks)
+			return fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(input.v), brief(input.v), type_name(keys), brief(keys))
+		}
+		too_deep = false
+		atom_depth = 1
+		sort_object_keys(ks)
+		best := extreme_place(ks, want_max, proc(a, b: Keyed) -> int {return compare_keys(a.key, b.key)})
+		if failed := compare_failed(ip, false); failed != .Go {
+			return failed
+		}
+		return emit_made(out, input, ks[best].v if best >= 0 else nil, track)
 	}
-	if kind(input.v) != .Array {
-		keys := keys_array(ks)
-		return fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(input.v), brief(input.v), type_name(keys), brief(keys))
-	}
-	too_deep = false
-	atom_depth = 1
-	sort_object_keys(ks)
-	best := extreme_place(ks, want_max, proc(a, b: Keyed) -> int {return compare_keys(a.key, b.key)})
-	if failed := compare_failed(ip, false); failed != .Go {
-		return failed
-	}
-	return emit_made(out, input, ks[best].v if best >= 0 else nil, track)
 }
 
-fn_min :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return extreme(ip, v, false)
-}
-
-fn_max :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return extreme(ip, v, true)
-}
-
-@(private = "file")
-extreme :: proc(ip: ^Interp, v: Value, want_max: bool) -> (Value, Signal) {
+// `min` and `max`.
+fn_extreme :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+	want_max := name == "max"
 	if kind(v) != .Array {
 		return nil, fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(v), brief(v), type_name(v), brief(v))
 	}
