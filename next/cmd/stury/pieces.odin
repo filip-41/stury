@@ -181,7 +181,10 @@ records_pieces :: proc(ins: ^Inputs) -> bool {
 	ins.has_text ||= at > from
 	// The serial route goes on at the first record no piece answered.
 	at = max(at, from)
-	if cells {
+	if cells && ins.last && at == u64(len(ins.data)) {
+		// The pieces answered every record.
+		close_file(ins)
+	} else if cells {
 		// Opened anywhere but at its start, a delimited text's reader takes its first record for the header.
 		ins.skip_below, ins.rows_end = at, at
 	} else {
