@@ -155,42 +155,52 @@ next_walked :: proc(it: ^records.Reader) -> (records.Record, bool) {
 next_framed :: proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	rec, ok, _ := frame_value(it, S, options_of(it.as), &h, &regs, core.no_hook)
+	rec, ok, _ := frame_walked(it, S, options_of(it.as), &h, &regs, core.no_hook)
 	return rec, ok
 }
 
 // Frames the next record under `.Concatenated` or `.Entries` by a walk of its value through the hook. `stopped` says
 // the hook stopped the walk, so the record's end is not known and `it.pos` is no boundary.
-//
-// `.Concatenated`: each document of the text, as a loop of `walk` reads them, from its value's first byte. A fault ends
-// the records.
-//
-// `.Entries`: each element of the root array, or the value of each member of the root object, whose key is in
-// `rec.key`. Each value is walked one level below the root. A scalar root has no entries and is judged whole. Any
-// fault ends the records with the fault of a walk of the text from `it.from`, which `validate` gives, as a fault in the root's
-// own bytes depends on what came before. `state[0]` is the root's open bracket once it is read and 1 after its close,
-// and `state[1]` is 1 after an entry. The entries of the array `spine` finds, when the records start at its `[`, sit
-// `levels` objects deeper, and at its close the text with them cut out is walked whole. A piece's reader ends on a fault whose place is not looked for.
 @(private)
-frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (rec: records.Record, ok: bool, stopped: bool) {
+frame_walked :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (records.Record, bool, bool) {
+	if it.framing == .Entries {
+		return frame_entry(it, S, opts, h, regs, on)
+	}
+	return frame_document(it, S, opts, h, regs, on)
+}
+
+// `frame_walked` under `.Concatenated`: each document of the text, as a loop of `walk` reads them, from its value's
+// first byte. A fault ends the records.
+@(private)
+frame_document :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (rec: records.Record, ok: bool, stopped: bool) {
+	src := it.src
+	q, _ := document_start(src, it.pos, S)
+	q = gap_end(q, raw_data(src)[len(src):], S)
+	hi, fault, stop := walk_from(src, q, S, opts, h, regs, on)
+	it.pos = hi
+	if fault == nil && !stop && runs_on(src, q, hi, S, true) {
+		fault = core.fault_of(core.fault_at(hi, .Bad_Char, u8(Detail.Trailing)), &RULES)
+	}
+	at := u64(intrinsics.ptr_sub(q, raw_data(src)))
+	if fault != nil || at == u64(len(src)) {
+		it.fault = fault
+		return
+	}
+	return {text = src[at:hi], at = at}, true, stop
+}
+
+// `frame_walked` under `.Entries`: each element of the root array, or the value of each member of the root object,
+// whose key is in `rec.key`. Each value is walked one level below the root. A scalar root has no entries and is judged
+// whole. Any fault ends the records with the fault of a walk of the text from `it.from`, which `validate` gives, as a
+// fault in the root's own bytes depends on what came before. `state[0]` is the root's open bracket once it is read and
+// 1 after its close, and `state[1]` is 1 after an entry. The entries of the array `spine` finds, when the records start
+// at its `[`, sit `levels` objects deeper, and at its close the text with them cut out is walked whole. A piece's
+// reader ends on a fault whose place is not looked for.
+@(private)
+frame_entry :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (rec: records.Record, ok: bool, stopped: bool) {
 	src := it.src
 	p := raw_data(src)
 	end := p[len(src):]
-	if it.framing == .Concatenated {
-		q, _ := document_start(src, it.pos, S)
-		q = gap_end(q, end, S)
-		hi, fault, stop := walk_from(src, q, S, opts, h, regs, on)
-		it.pos = hi
-		if fault == nil && !stop && runs_on(src, q, hi, S, true) {
-			fault = core.fault_of(core.fault_at(hi, .Bad_Char, u8(Detail.Trailing)), &RULES)
-		}
-		if fault != nil || q == end {
-			it.fault = fault
-			return
-		}
-		at := u64(intrinsics.ptr_sub(q, p))
-		return {text = src[at:hi], at = at}, true, stop
-	}
 	if it.state[0] == 1 {
 		return
 	}
@@ -525,7 +535,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	opts := options_of(it.as)
 	if read.refuse_duplicates {
 		// The duplicate check builds the record's text, so the framing's walk finds its end first.
-		rec, ok := next_framed(it, S)
+		rec, ok := RECORDS.next[it.framing](it)
 		if ok {
 			read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, false)
 		}
@@ -542,12 +552,12 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	on :: typed.on_token_spelled when S == .Json5 else typed.on_token
 	pos, state := it.pos, it.state
 	kept := typed.collected_mark(read.collect)
-	_, ok, stopped := frame_value(it, S, opts, &h, &regs, on)
+	_, ok, stopped := frame_walked(it, S, opts, &h, &regs, on)
 	// A walk with a hook reads the comments after a value, so a fault there is past the record, which a walk with no
 	// hook ends where `next` does.
 	if stopped || it.fault != nil {
 		it.pos, it.state, it.fault = pos, state, nil
-		_, ok = next_framed(it, S)
+		_, ok = RECORDS.next[it.framing](it)
 	}
 	if !ok {
 		typed.collected_restore(read.collect, kept)

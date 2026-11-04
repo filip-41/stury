@@ -166,7 +166,7 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	}
 	if started.kind != .None {
 		if walked {
-			rec, ok = next_framed(it, S)
+			rec, ok = RECORDS.next[it.framing](it)
 		}
 		return rec, started, ok || !walked
 	}
@@ -178,15 +178,15 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	h.opts = &opts
 	defer h.opts = nil
 	if h.many == nil {
-		rec, ok, stopped = frame_value(it, .Json, opts, h, &regs, engine.scan_hook)
+		rec, ok, stopped = frame_walked(it, .Json, opts, h, &regs, engine.scan_hook)
 	} else {
 		h.rewalk = rewalk_many(.Json)
-		rec, ok, stopped = frame_value(it, .Json, opts, h, &regs, engine.scan_hook_many)
+		rec, ok, stopped = frame_walked(it, .Json, opts, h, &regs, engine.scan_hook_many)
 	}
 	// A stop leaves the record's end to a walk with no hook.
 	if stopped {
 		it.pos, it.state = pos, state
-		rec, ok = next_framed(it, .Json)
+		rec, ok = RECORDS.next[it.framing](it)
 	}
 	// The input's end, which ends the records with no fault, ends the read with one and is no error.
 	fault := it.fault
