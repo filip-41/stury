@@ -242,6 +242,9 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 		}
 		if !ok {
 			if f, bad := ins.texts.fault.?; bad {
+				if route.scanning {
+					explain_fallback(route, .Bad_Text)
+				}
 				return text_fault(ins, f, int(from))
 			}
 			if !ins.last {
@@ -318,6 +321,8 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	run := ins.run
 	route := &run.route
 	dot := route.scanning && len(route.path.steps) == 0 && route.path.limit == nil && route.select.op == .None
+	// A file of several texts is no text the scan left, its texts are each scanned in turn.
+	fallback := route.fallback
 	if !stray_bom && (dot && spine_print(ins, put_dot) || spine_length(ins) || entries_pieces(ins) || collect_pieces(ins) || route.scanning && answer_path(run, data, ins.as)) {
 		close_file(ins)
 		return nil, "", .More, ins.failures > 0
@@ -331,6 +336,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	}
 	if f, bad := fault.?; bad {
 		if !stray_bom && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) && json.Spec(ins.as.spec) == .Json {
+			route.fallback = fallback
 			return
 		}
 		v, msg, status = text_fault(ins, f, 0)

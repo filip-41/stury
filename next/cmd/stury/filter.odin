@@ -47,9 +47,10 @@ run_filter :: proc(run: ^Run, ins: ^Inputs) {
 	// input is fetched whatever the files before it did, as jq tests its errors before a fetch and not in it.
 	for fetched := false; (ins.failures == 0 || !fetched) && !run.halted; fetched = true {
 		v, msg, status := next_input(ins)
+		// A text that does not parse is the interpreter's, which tells its fault.
+		run.route.interpreted += int(status != .More)
 		switch status {
 		case .Value:
-			run.route.interpreted += 1
 			run_once(run, v)
 		case .Error:
 			if !run.opts.seq {
