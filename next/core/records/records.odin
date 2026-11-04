@@ -29,8 +29,8 @@ Reader :: struct {
 	pos:       u64,
 	// The byte the records start at.
 	from:      u64,
-	// 0 but in `check` and `validate`, where a format whose frame judges its records may give those from `pos` up to
-	// the first at or past `to` as one record, the first alone when it starts there.
+	// The byte at or past which a piece's reader of `each` gives no record, set by the format's `piece` when it keeps
+	// the text past it, and 0 for none.
 	to:        u64,
 	as:        core.As,
 	services:  ^Services,
@@ -100,6 +100,10 @@ Services :: struct {
 	// marks it as a piece's, whose `next` may end on any fault with no cost to find the one `validate` gives. Returns
 	// false when there is none. nil reads a text on the calling thread alone.
 	guess:  proc(it: ^Reader, to: u64) -> bool,
+	// Frames the records from `it.pos` up to the first that starts at or past `to` as one record, judged as `next`
+	// judges them, the first alone when it starts there, and with `to` `max(u64)` the rest of the text. `check` and
+	// `validate` take it in place of `next`. nil frames each record alone.
+	span:   proc(it: ^Reader, to: u64) -> (Record, bool),
 	// The scan whose cuts, a byte past a separator it finds from the end of an open reader's first record, are each the
 	// end of a record and the start of the next, and false when the format has none under the reader's framing or
 	// options.

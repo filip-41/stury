@@ -16,6 +16,7 @@ import records "../core/records"
 RECORDS := records.Services {
 	next   = #partial {.Lines = next_row},
 	judge  = proc(it: ^records.Reader, rec: records.Record) -> Maybe(core.Fault) { return nil },
+	span   = next_span,
 	guess  = guess_row,
 	exact  = exact_row,
 	piece  = piece_rows,
@@ -174,9 +175,6 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 // the window may have cut it.
 @(private)
 next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
-	if it.to != 0 {
-		return next_span(it)
-	}
 	b := (^Batch)(it.format)
 	stream := it.input.procedure != nil
 	if stream && b != nil {
@@ -208,16 +206,13 @@ next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
 	return {text = it.src[row.at:row.hi], at = row.at}, true
 }
 
-// Gives the rows from `it.pos` up to the first that starts at or past `it.to` as one record, the first row alone when it
+// Gives the rows from `it.pos` up to the first that starts at or past `to` as one record, the first row alone when it
 // starts there. The frame judged them, and a fault ends the records on the next call. The width the first record sets
 // is kept in `it.state[0:4]`, so a piece's reader, a copy of this one past its first record, checks rows against it.
 @(private)
-next_span :: proc(it: ^records.Reader) -> (records.Record, bool) {
-	if it.fault != nil {
-		return {}, false
-	}
-	b := Batch{width = int(intrinsics.unaligned_load((^u32)(&it.state[0]))), to = it.to}
-	if it.to == max(u64) {
+next_span :: proc(it: ^records.Reader, to: u64) -> (records.Record, bool) {
+	b := Batch{width = int(intrinsics.unaligned_load((^u32)(&it.state[0]))), to = to}
+	if to == max(u64) {
 		// The rest of the text is one record, judged by the walk with no hook.
 		lo := it.pos
 		it.pos, it.fault = u64(len(it.src)), validate_from(it.src, it.as, lo, b.width)
@@ -229,7 +224,7 @@ next_span :: proc(it: ^records.Reader) -> (records.Record, bool) {
 		frame(it, &b)
 		if b.n > 0 {
 			lo = min(lo, b.rows[0].at)
-			if last := b.rows[b.n - 1].at; last >= it.to {
+			if last := b.rows[b.n - 1].at; last >= to {
 				// The row the frame stopped on starts the next span, unless it is this span's first.
 				it.pos = it.pos if last == lo else last
 				break

@@ -68,7 +68,7 @@ judge_all :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, runner
 	it := open(src, as, framing, at)
 	defer close(&it)
 	// The first record comes alone, so the pieces can start past it.
-	it.to = 1
+	to := it.pos + 1
 	c: Chain
 	// Run in reverse: the faults go before the pieces that hold them.
 	defer delete(c.pieces, runtime.heap_allocator())
@@ -76,7 +76,7 @@ judge_all :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, runner
 		delete(p.faults)
 	}
 	for {
-		rec, more := next(&it)
+		rec, more := next_span(&it, to)
 		fault := it.fault
 		if more {
 			// A record before the pieces' start wraps `k` past them.
@@ -95,9 +95,9 @@ judge_all :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, runner
 			}
 			// A record comes alone at a piece's start, where it may be the piece's first, and the text before the next
 			// piece's start comes as one, or with no pieces the rest of the text.
-			it.to = max(u64)
+			to = max(u64)
 			if c.pieces != nil {
-				it.to = c.start.pos + (k + 1) * SLICE if rec.at >= c.start.pos else c.start.pos
+				to = c.start.pos + (k + 1) * SLICE if rec.at >= c.start.pos else c.start.pos
 			}
 		}
 		if f, bad := fault.?; bad {
@@ -125,7 +125,7 @@ chain_pieces :: proc(arg: rawptr) {
 		hi := min(lo + SLICE, u64(len(c.start.src)))
 		for from := lo; from < hi; {
 			it := c.start
-			it.pos, it.to = from, hi
+			it.pos = from
 			if !it.services.guess(&it, hi) {
 				break
 			}
@@ -134,7 +134,7 @@ chain_pieces :: proc(arg: rawptr) {
 			clear(&p.faults)
 			for {
 				pos, state := it.pos, it.state
-				rec, more := it.services.next[it.framing](&it)
+				rec, more := next_span(&it, hi)
 				if !more || rec.at >= hi {
 					it.pos, it.state = pos, state
 					break
@@ -154,6 +154,15 @@ chain_pieces :: proc(arg: rawptr) {
 			from = max(from, it.pos)
 		}
 	}
+}
+
+// Returns the next record, or with the format's `span` service the records up to the first at or past `to` as one.
+@(private)
+next_span :: proc(it: ^Reader, to: u64) -> (Record, bool) {
+	if it.fault != nil || it.services.span == nil {
+		return next(it)
+	}
+	return it.services.span(it, to)
 }
 
 // Runs `task(arg)` on the calling thread and on `runner`'s, and returns once every call has.

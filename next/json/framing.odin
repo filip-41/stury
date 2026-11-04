@@ -24,12 +24,10 @@ RECORDS := records.Services {
 	build = build_record,
 }
 
-// The bytes of `Reader.state` past the framing's own two: the objects around an `.Entries` reader's array, and
-// `PIECE` in a piece's reader or `EXACT` in an `each` piece's under `.Entries`, which ends at the comma at `to`.
+// The bytes of `Reader.state` past the framing's own two: the objects around an `.Entries` reader's array, and 1 in a
+// piece's reader.
 @(private)
-LEVELS, MODE :: 2, 3
-@(private)
-PIECE, EXACT :: 1, 2
+LEVELS, PIECE :: 2, 3
 
 // Under `.Lines` and `.Seq` the end byte, and in strict JSON the LF between texts and the comma between entries, outside
 // strings at the level of the first record. Comments and single quotes would hide brackets from the count.
@@ -53,7 +51,8 @@ piece_of :: proc(it: ^records.Reader, lo, hi: u64) -> bool {
 		it.pos = lo - back
 	}
 	if it.framing == .Entries {
-		it.to, it.state[MODE] = end, EXACT
+		// The piece ends at the comma at `to`.
+		it.to = end
 	} else {
 		it.src = it.src[:min(end, u64(len(it.src)))]
 	}
@@ -69,7 +68,7 @@ guess_start :: proc(it: ^records.Reader, to: u64) -> bool {
 	if it.framing >= .Concatenated || it.src[it.pos - 1] != b {
 		it.pos = find_byte(it.src[:to], it.pos, b) + u64(it.framing != .Entries)
 	}
-	it.state[1], it.state[MODE] = 1, PIECE
+	it.state[1], it.state[PIECE] = 1, 1
 	return it.pos < to
 }
 
@@ -204,7 +203,7 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 	value := opts
 	levels := u32(it.state[LEVELS])
 	value.max_depth = (opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH) - 1 - levels
-	piece := it.state[MODE] == PIECE
+	piece := it.state[PIECE] == 1
 	key: []u8
 	none: core.No_Hooks
 	zero: core.Hook_Regs
@@ -220,7 +219,7 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		close := it.state[0] + 2
 		closes := q < end && q[0] == close
 		if it.state[1] == 1 && !closes {
-			if it.state[MODE] == EXACT && u64(intrinsics.ptr_sub(q, p)) >= it.to {
+			if it.to != 0 && u64(intrinsics.ptr_sub(q, p)) >= it.to {
 				return
 			}
 			if q == end || q[0] != ',' {
