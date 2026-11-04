@@ -24,8 +24,10 @@ RECORDS := records.Services {
 	build = build_record,
 }
 
-// `As.opts[1]` is `PIECE` in a piece's reader, and `EXACT` in an `each` piece's under `.Entries`, which ends at the
-// comma at `to`.
+// The bytes of `Reader.state` past the framing's own two: the objects around an `.Entries` reader's array, and
+// `PIECE` in a piece's reader or `EXACT` in an `each` piece's under `.Entries`, which ends at the comma at `to`.
+@(private)
+LEVELS, MODE :: 2, 3
 @(private)
 PIECE, EXACT :: 1, 2
 
@@ -51,7 +53,7 @@ piece_of :: proc(it: ^records.Reader, lo, hi: u64) -> bool {
 		it.pos = lo - back
 	}
 	if it.framing == .Entries {
-		it.to, it.as.opts[1] = end, EXACT
+		it.to, it.state[MODE] = end, EXACT
 	} else {
 		it.src = it.src[:min(end, u64(len(it.src)))]
 	}
@@ -67,16 +69,15 @@ guess_start :: proc(it: ^records.Reader, to: u64) -> bool {
 	if it.framing >= .Concatenated || it.src[it.pos - 1] != b {
 		it.pos = find_byte(it.src[:to], it.pos, b) + u64(it.framing != .Entries)
 	}
-	it.state[1] = 1
-	it.as.opts[1] = PIECE
+	it.state[1], it.state[MODE] = 1, PIECE
 	return it.pos < to
 }
 
 // The whole text is the entries of its spine, or of its root.
 @(private)
 whole_text :: proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) {
-	entries, at, ok := spine(src, as)
-	return entries if ok else as, .Entries, at if ok && entries.opts[0] > 0 else 0
+	at, levels, ok := spine(src, as)
+	return as, .Entries, at if ok && levels > 0 else 0
 }
 
 // The most objects deep `spine` looks for an array, and the most members and bytes of each it passes before one in an
@@ -87,24 +88,21 @@ SIDE_MEMBERS, SIDE_BYTES :: 16, 4096
 
 // Finds the array that holds the bulk of `src`, read as `as`: its root array, or the array a root object holds up to
 // `SPINE_LEVELS` objects deep, past at most `SIDE_MEMBERS` members in each object whose values end within `SIDE_BYTES`.
-// A key on the way must be quoted with `"`. `at` is the array's `[`, and `records.open(src, entries, .Entries, at)`
-// gives its elements, each judged at its depth in the text, then judges the text around the array once, at its close,
-// so that every fault is the one `validate` gives for the whole text. False when there is none. Allocates nothing.
-spine :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool) {
-	levels: u8
+// A key on the way must be quoted with `"`. `at` is the array's `[` and `levels` the objects around it, and
+// `records.open(src, as, .Entries, at)` gives its elements, each judged at its depth in the text, then judges the text
+// around the array once, at its close, so that every fault is the one `validate` gives for the whole text. False when
+// there is none. Allocates nothing.
+spine :: proc(src: []u8, as: core.As) -> (at: u64, levels: int, ok: bool) {
 	switch Spec(as.spec) {
-	case .Json:  at, levels, ok = spine_of(src, options_of(as), .Json)
-	case .Jsonc: at, levels, ok = spine_of(src, options_of(as), .Jsonc)
-	case .Json5: at, levels, ok = spine_of(src, options_of(as), .Json5)
+	case .Json:  return spine_of(src, options_of(as), .Json)
+	case .Jsonc: return spine_of(src, options_of(as), .Jsonc)
+	case .Json5: return spine_of(src, options_of(as), .Json5)
 	}
-	entries = as
-	// The number of objects around the array.
-	entries.opts[0] = levels
 	return
 }
 
 @(private)
-spine_of :: proc(src: []u8, opts: Options, $S: Spec) -> (at: u64, levels: u8, ok: bool) {
+spine_of :: proc(src: []u8, opts: Options, $S: Spec) -> (at: u64, levels: int, ok: bool) {
 	p := raw_data(src)
 	end := p[len(src):]
 	none: core.No_Hooks
@@ -172,8 +170,8 @@ next_framed :: proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
 // `rec.key`. Each value is walked one level below the root. A scalar root has no entries and is judged whole. Any
 // fault ends the records with the fault of a walk of the text from `it.from`, which `validate` gives, as a fault in the root's
 // own bytes depends on what came before. `state[0]` is the root's open bracket once it is read and 1 after its close,
-// and `state[1]` is 1 after an entry. The entries of a `Spine` sit `levels` objects deeper, and at its close the text
-// with them cut out is walked whole. A piece's reader ends on a fault whose place is not looked for.
+// and `state[1]` is 1 after an entry. The entries of the array `spine` finds, when the records start at its `[`, sit
+// `levels` objects deeper, and at its close the text with them cut out is walked whole. A piece's reader ends on a fault whose place is not looked for.
 @(private)
 frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (rec: records.Record, ok: bool, stopped: bool) {
 	src := it.src
@@ -197,11 +195,16 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 	if it.state[0] == 1 {
 		return
 	}
+	if it.state[0] == 0 && it.from > 0 {
+		if at, levels, found := spine_of(src, opts, S); found && at == it.from {
+			it.state[LEVELS] = u8(levels)
+		}
+	}
 	q := gap_end(p[it.pos:], end, S)
 	value := opts
-	levels := u32(it.as.opts[0])
+	levels := u32(it.state[LEVELS])
 	value.max_depth = (opts.max_depth if opts.max_depth != 0 else core.MAX_DEPTH) - 1 - levels
-	piece := it.as.opts[1] == PIECE
+	piece := it.state[MODE] == PIECE
 	key: []u8
 	none: core.No_Hooks
 	zero: core.Hook_Regs
@@ -217,7 +220,7 @@ frame_value :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		close := it.state[0] + 2
 		closes := q < end && q[0] == close
 		if it.state[1] == 1 && !closes {
-			if it.as.opts[1] == EXACT && u64(intrinsics.ptr_sub(q, p)) >= it.to {
+			if it.state[MODE] == EXACT && u64(intrinsics.ptr_sub(q, p)) >= it.to {
 				return
 			}
 			if q == end || q[0] != ',' {

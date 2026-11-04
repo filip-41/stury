@@ -233,7 +233,7 @@ main :: proc() {
 	case "threads", "validate", "each":
 		lane = threads if os.args[1] == "threads" else validate if os.args[1] == "validate" else each
 		if lane == each && strings.has_suffix(os.args[2], ".json") {
-			handle, each_at, _ = json.spine(src, handle)
+			each_at, _, _ = json.spine(src, handle)
 			each_framing = .Entries
 		}
 		width := 6

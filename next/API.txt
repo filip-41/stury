@@ -428,7 +428,7 @@ plan_make :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.
 put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind {
 scan :: proc {scan_one, scan_many}
 set :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
-spine :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool) {
+spine :: proc(src: []u8, as: core.As) -> (at: u64, levels: int, ok: bool) {
 text :: #force_inline proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 validate :: #force_inline proc (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {

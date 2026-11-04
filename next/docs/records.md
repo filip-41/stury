@@ -19,7 +19,7 @@ records.close :: proc(it: ^records.Reader)
 records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
 records.validate :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
 records.each :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> Maybe(core.Fault)
-json.spine :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool)
+json.spine :: proc(src: []u8, as: core.As) -> (at: u64, levels: int, ok: bool)
 ```
 
 ```odin
@@ -136,8 +136,8 @@ entries of its spine or its root, and `.Bad_Option` for a format that does not t
 Under `.Entries` a text is read in pieces across its root's entries. A text whose bulk is an array inside objects,
 as `{"meta":{...},"logs":[...]}`, has one root entry, so `json.spine` finds that array: the root array, or the value
 of the member of a root object, up to `json.SPINE_LEVELS` objects deep, that does not end within the first bytes of
-it, past at most 16 members in each object whose values end within 4096 bytes. `records.open(src, entries, .Entries, at)` then gives the array's
-elements, each judged at its depth in the text, and at the array's close the text with the elements cut out is
+it, past at most 16 members in each object whose values end within 4096 bytes. `at` is the array's `[` and `levels`
+the objects around it. `records.open(src, as, .Entries, at)` then gives the array's elements, each judged at its depth in the text, and at the array's close the text with the elements cut out is
 walked whole, so the frame around them is judged once. Any fault is the one `validate` gives for the whole text.
 `records.validate` reads a JSON text this way when it has a spine.
 

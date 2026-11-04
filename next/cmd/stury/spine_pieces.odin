@@ -206,14 +206,14 @@ spine_run :: proc(ins: ^Inputs, put: Spine_Put) -> (job: Spine_Job, at: u64, ok:
 	if len(data) < POOLED_BYTES || ins.spec != .Json || !parallel(run) {
 		return
 	}
-	entries: core.As
-	entries, at, ok = json.spine(data, ins.as)
+	levels: int
+	at, levels, ok = json.spine(data, ins.as)
 	if !ok {
 		return
 	}
-	job = {run = run, plain = ins.as, levels = int(entries.opts[0]) + 1, put = put}
+	job = {run = run, plain = ins.as, levels = levels + 1, put = put}
 	job.slots.allocator = runtime.heap_allocator()
-	ok = records.each(data, entries, .Entries, spine_task, &job, run_pool(run), at) == nil && !job.failed
+	ok = records.each(data, ins.as, .Entries, spine_task, &job, run_pool(run), at) == nil && !job.failed
 	return
 }
 
@@ -361,8 +361,8 @@ collect_pieces :: proc(ins: ^Inputs) -> bool {
 	if !shaped {
 		return false
 	}
-	entries, at, found := json.spine(data, ins.as)
-	if !found || int(entries.opts[0]) != len(names) {
+	at, levels, found := json.spine(data, ins.as)
+	if !found || levels != len(names) {
 		return false
 	}
 	layout := run.output.layout
@@ -376,7 +376,7 @@ collect_pieces :: proc(ins: ^Inputs) -> bool {
 		spine_free(run, job.slots)
 		run.ip.err = nil // an error the tail raised may lie in a piece arena
 	}
-	if records.each(data, entries, .Entries, collect_task, &job, run_pool(run), at) != nil || job.failed || !spine_named(data, at, array_close(data, at, entries_end(job.slots[:])), ins.as, names[:]) {
+	if records.each(data, ins.as, .Entries, collect_task, &job, run_pool(run), at) != nil || job.failed || !spine_named(data, at, array_close(data, at, entries_end(job.slots[:])), ins.as, names[:]) {
 		return false
 	}
 	n := 0

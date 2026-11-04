@@ -49,8 +49,8 @@ expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, framing
 	if !walktest.expect_each_law(t, pools, text, json.as(spec), framing) {
 		return false
 	}
-	entries, at, ok := json.spine(text, json.as(spec))
-	return framing != .Entries || !ok || walktest.expect_each_law(t, pools, text, entries, .Entries, at)
+	at, _, ok := json.spine(text, json.as(spec))
+	return framing != .Entries || !ok || walktest.expect_each_law(t, pools, text, json.as(spec), .Entries, at)
 }
 
 // Strings of commas and brackets, arrays inside entries and faults near either end.
@@ -157,9 +157,9 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 	for text, i in SPINES {
 		texts[i], _ = strings.replace(text, "@", array, 1, context.temp_allocator)
 	}
-	entries, at, ok := json.spine(transmute([]u8)texts[0], json.as(.Json))
-	testing.expect(t, ok && entries.opts[0] == 1 && at == 23)
-	it := records.open(transmute([]u8)texts[0], entries, .Entries, at)
+	at, levels, ok := json.spine(transmute([]u8)texts[0], json.as(.Json))
+	testing.expect(t, ok && levels == 1 && at == 23)
+	it := records.open(transmute([]u8)texts[0], json.as(.Json), .Entries, at)
 	defer records.close(&it)
 	n := 0
 	for rec in records.next(&it) {
@@ -167,12 +167,12 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 		n += 1
 	}
 	testing.expect(t, n == 301 && it.fault == nil)
-	entries, _, ok = json.spine(transmute([]u8)texts[1], json.as(.Json))
-	testing.expect(t, ok && entries.opts[0] == 2)
+	_, levels, ok = json.spine(transmute([]u8)texts[1], json.as(.Json))
+	testing.expect(t, ok && levels == 2)
 	_, _, ok = json.spine(transmute([]u8)texts[4], json.as(.Json))
 	testing.expect(t, !ok)
-	entries, at, ok = json.spine(transmute([]u8)texts[5], json.as(.Json))
-	testing.expect(t, ok && entries.opts[0] == 0 && at == 0)
+	at, levels, ok = json.spine(transmute([]u8)texts[5], json.as(.Json))
+	testing.expect(t, ok && levels == 0 && at == 0)
 	_, _, ok = json.spine(transmute([]u8)string(`{"a":[1]}`), json.as(.Json))
 	testing.expect(t, !ok)
 

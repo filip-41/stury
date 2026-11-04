@@ -220,8 +220,7 @@ entries_pieces :: proc(ins: ^Inputs) -> bool {
 	if !spined {
 		return false
 	}
-	entries, at, found := json.spine(data, ins.as)
-	levels := int(entries.opts[0])
+	at, levels, found := json.spine(data, ins.as)
 	if !found || len(names) != levels {
 		return false
 	}
@@ -246,7 +245,7 @@ entries_pieces :: proc(ins: ^Inputs) -> bool {
 		path.optional = transmute(bit_set[0 ..< core.MAX_STEPS;u64])(transmute(u64)path.optional >> uint(levels + 1))
 	}
 	flush_some(&run.output, force = true)
-	if records.each(data, entries, .Entries, piece_task, &ps, run_pool(run), at) != nil || ps.stopped || !spine_named(data, at, array_close(data, at, entries_end(ps.slots[:])), ps.plain, names[:]) {
+	if records.each(data, ins.as, .Entries, piece_task, &ps, run_pool(run), at) != nil || ps.stopped || !spine_named(data, at, array_close(data, at, entries_end(ps.slots[:])), ps.plain, names[:]) {
 		return false
 	}
 	answered, interpreted := 0, false

@@ -210,13 +210,13 @@ next_row :: proc(it: ^records.Reader) -> (records.Record, bool) {
 
 // Gives the rows from `it.pos` up to the first that starts at or past `it.to` as one record, the first row alone when it
 // starts there. The frame judged them, and a fault ends the records on the next call. The width the first record sets
-// is kept in `it.as.opts[6:10]`, so a piece's reader, a copy of this one past its first record, checks rows against it.
+// is kept in `it.state[0:4]`, so a piece's reader, a copy of this one past its first record, checks rows against it.
 @(private)
 next_span :: proc(it: ^records.Reader) -> (records.Record, bool) {
 	if it.fault != nil {
 		return {}, false
 	}
-	b := Batch{width = int(intrinsics.unaligned_load((^u32)(&it.as.opts[6]))), to = it.to}
+	b := Batch{width = int(intrinsics.unaligned_load((^u32)(&it.state[0]))), to = it.to}
 	if it.to == max(u64) {
 		// The rest of the text is one record, judged by the walk with no hook.
 		lo := it.pos
@@ -240,7 +240,7 @@ next_span :: proc(it: ^records.Reader) -> (records.Record, bool) {
 			break
 		}
 	}
-	intrinsics.unaligned_store((^u32)(&it.as.opts[6]), u32(b.width))
+	intrinsics.unaligned_store((^u32)(&it.state[0]), u32(b.width))
 	if lo == max(u64) {
 		return {}, false
 	}

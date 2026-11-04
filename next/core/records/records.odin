@@ -42,8 +42,8 @@ Reader :: struct {
 	// The fault that ended the records, nil when the input ended.
 	fault:     Maybe(core.Fault),
 	framing:   core.Framing,
-	// The format's own framing state.
-	state:     [2]u8,
+	// The format's own state, which a copy of the reader takes along and a record read again restores with `pos`.
+	state:     [8]u8,
 	// A stream's input, read into `buf`, whose first of `filled` bytes is the byte before the unread ones, so no
 	// window but the input's first starts a record at its offset 0.
 	input:     io.Reader,
@@ -413,7 +413,7 @@ stream_next :: proc(it: ^Reader) -> (rec: Record, ok: bool) {
 // come back and it returns false. A `Truncated` at the input's end holds the bytes past the last whole record, but under
 // `.Entries`, which reads as text in memory does.
 @(private)
-settle_window :: proc(it: ^Reader, ok: bool, pos: u64, state: [2]u8) -> bool {
+settle_window :: proc(it: ^Reader, ok: bool, pos: u64, state: [8]u8) -> bool {
 	n := u64(len(it.src))
 	walked := it.services.ends[it.framing] == 0
 	if f, bad := it.fault.?; bad {

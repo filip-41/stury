@@ -47,7 +47,7 @@ SLICE :: #config(RECORDS_SLICE, 64 * 1024)
 Piece :: struct {
 	first:  u64,
 	pos:    u64,
-	state:  [2]u8,
+	state:  [8]u8,
 	faults: [dynamic]core.Fault,
 }
 
