@@ -31,6 +31,10 @@ def main():
     new = [name for name in failing if name not in known]
     print(f"smoke: {len(failing)} failing, {len(known)} listed in smoke.floor")
     if new:
+        lines = done.stdout.splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith("FAIL ") and line[5:].split(":")[0] in new:
+                print("\n".join(lines[i:i + 3]))
         sys.exit("failing and not in smoke.floor: " + " ".join(new))
 
 

@@ -744,8 +744,9 @@ line and column in the stream, without a file's name.
 
 **Dates and times**
 
-- A time past year 2^31 keeps its year: `67767976233532800 | todate` is `"2147483648-01-01T00:00:00Z"`, where jq
-  wraps the year to a negative one (`"-2147481748-01-01T00:00:00Z"`).
+- A time past year 2^31 keeps its year: `67767976233532800 | gmtime` is `[2147483648,0,1,0,0,0,3,0]`, where jq
+  wraps the year to a negative one (`[-2147483648,0,1,0,0,0,3,0]`). `strftime` and `todate` print the year with
+  the C library's `%Y`, which glibc wraps.
 - `now` has sub-microsecond resolution where the clock has it, so `now - now` need not be 0.
 - `strftime`, `todate` and `mktime` of a broken-down UTC time read it as UTC on every OS (`0 |
   strftime("%z %s")` is `+0000 0` whatever `TZ` is); jq does so on macOS only. `strflocaltime` stays local.
