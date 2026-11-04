@@ -23,6 +23,10 @@ Fault_Kind :: enum u8 {
 // The kinds that name no byte of the text. Their `at` is 0.
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
 
+// A fault's judgement reads no byte more than this past the byte it names, in any format: a lone surrogate's escape,
+// judged by the escape after it, is 12. So a fault further than this from a text's cut is the fault of the whole text.
+FAULT_REACH :: 16
+
 // A walk's fault. `at` is the byte the kind names, `detail` is the format's rule within the kind (0 for none), and
 // `rules` points at the format's table of those rules.
 Fault :: struct {

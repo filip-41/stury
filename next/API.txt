@@ -51,6 +51,7 @@ Edit_List :: struct {
 Edit_Op :: enum u8 {
 Edit_Spelling :: struct {
 Expected_Key :: struct {
+FAULT_REACH :: 16
 Fact :: struct {
 Fact_Iter :: struct {
 Fault :: struct {

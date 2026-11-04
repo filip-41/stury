@@ -20,48 +20,53 @@ Record :: struct {
 }
 
 // Reads the records of `src`, or those of a stream through a window of it in `src`. `open` or `open_stream` makes
-// one, and `close` frees what it allocated. `fault` is the fault that ended the records, nil when the input ended.
-// `pos` is the byte of `src` the next record is looked for from, and `from` the byte the records start at. `state` is
-// the format's own framing state, and `format` the memory a format keeps for it. `frames` are the typed reads' open
-// containers, allocated with `allocator` by the first. A reader is not copied, since a copy and the original would free
-// the same memory, and the plans it reads by outlive it. `to` is 0 but in `check` and `validate`, where a format whose
-// frame judges its records may give those from `pos` up to the first at or past `to` as one record, the first alone
-// when it starts there.
-//
-// A stream's: `input` is read into `buf`, whose first of `filled` bytes is the byte before the unread ones, so no
-// window but the input's first starts a record at its offset 0. `src` is a window of `buf` that ends on a whole
-// record, and `base` the input offset of `src[0]`. `last` says the window holds the input's end, `eof` that `input`
-// ended, and `cause` is the error it failed with. `held` holds the bytes past the last whole record when the input
-// ended inside a record or failed, and `held_at` their offset. `moves` counts the window's moves and the times `pos`
-// came back to a record the window could not tell, so a format that keeps a frame between calls sees it is stale. `scan`
-// is what `scan` keeps, allocated at its first call.
-// `scratch` is the temp allocator of the format's `read`, emptied by the next, so what one record's read binds or decodes
-// for itself takes no memory past it.
+// one, and `close` frees what it allocated. A reader is not copied, since a copy and the original would free the same
+// memory, and the plans it reads by outlive it.
 Reader :: struct {
+	// The text, or on a stream a window of `buf` that ends on a whole record.
 	src:       []u8,
+	// The byte of `src` the next record is looked for from.
 	pos:       u64,
+	// The byte the records start at.
 	from:      u64,
+	// 0 but in `check` and `validate`, where a format whose frame judges its records may give those from `pos` up to
+	// the first at or past `to` as one record, the first alone when it starts there.
 	to:        u64,
 	as:        core.As,
 	services:  ^Services,
+	// The typed reads' open containers, allocated with `allocator` by the first.
 	frames:    []typed.Frame,
+	// The memory a format keeps for its framing.
 	format:    rawptr,
 	allocator: runtime.Allocator,
+	// The fault that ended the records, nil when the input ended.
 	fault:     Maybe(core.Fault),
 	framing:   core.Framing,
+	// The format's own framing state.
 	state:     [2]u8,
+	// A stream's input, read into `buf`, whose first of `filled` bytes is the byte before the unread ones, so no
+	// window but the input's first starts a record at its offset 0.
 	input:     io.Reader,
 	buf:       []u8,
 	filled:    int,
 	max_bytes: int,
+	// The input offset of `src[0]`.
 	base:      u64,
+	// Whether the window holds the input's end.
 	last:      bool,
+	// Whether `input` ended, and the error it failed with.
 	eof:       bool,
 	cause:     io.Error,
+	// The bytes past the last whole record when the input ended inside a record or failed, and their offset.
 	held:      []u8,
 	held_at:   u64,
+	// The window's moves and the times `pos` came back to a record the window could not tell, so a format that keeps
+	// a frame between calls sees it is stale.
 	moves:     u64,
+	// What `scan` keeps, allocated at its first call.
 	scan:      ^Scanned,
+	// The temp allocator of the format's `read`, emptied by the next, so what one record's read binds or decodes for
+	// itself takes no memory past it.
 	scratch:   runtime.Arena,
 }
 
@@ -84,42 +89,44 @@ Stream_Options :: struct {
 @(rodata)
 RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limit"}}}
 
-// A format's record services, in its rodata, which `core.Spelling.records` points at. `next` frames the next record
-// under each framing the format takes, nil for one it does not, and returns false at the input's end or on a fault,
-// which it stores in `it.fault`. `judge` returns the fault of a record `next` gave, or nil, as the format's validate of
-// the record's text at its place in the input says. `read` is `next` and a typed read of the record into `target`, a
-// `T`, whose typed reader takes `it.scratch` as its temp allocator. `build` builds a record's document. `column`, `cell` and `cells` are a format's with named columns, nil for
-// another, and `close` frees `it.format`, nil for a format that keeps none. `ends` is the byte that ends a record under
-// each framing where a backward scan for it finds the end of a whole record, 0 where only a walk of the records does,
-// and 0xff where the format reads no stream.
-//
-// `guess` moves a copy of a reader to the first place at or past its `pos` and before `to` where a record may start,
-// and marks it as a piece's, whose `next` may end on any fault with no cost to find the one `validate` gives. It returns
-// false when there is none. nil reads a text on the calling thread alone. `whole` returns the format, framing and
-// offset whose records make up the whole of `src`, for `validate`, nil for a format that does not take it.
-//
-// `scan` is `next` and a read of `path` in the record by one walk, into `last`, a document whose text is the input up to
-// the record's end. It starts `h` at the first call, and then with `engine.scan_again` while `h.again` is set, which
-// writes the buffers `last` shares with the builder. nil reads a record as `next` gives it.
-//
-// `exact` returns the scan whose cuts, a byte past a separator it finds from the end of an open reader's first record,
-// are each the end of a record and the start of the next, and false when the format has none under the reader's
-// framing or options. `piece` makes a copy of a reader past its first record, or a new reader for `lo` 0, read the
-// records from the cut `lo` up to the cut or text end `hi`, and returns false when its memory is refused.
+// A format's record services, in its rodata, which `core.Spelling.records` points at.
 Services :: struct {
+	// Frames the next record under each framing the format takes, nil for one it does not, and returns false at the
+	// input's end or on a fault, which it stores in `it.fault`.
 	next:   [core.Framing]proc(it: ^Reader) -> (Record, bool),
+	// The fault of a record `next` gave, or nil, as the format's validate of the record's text at its place says.
 	judge:  proc(it: ^Reader, rec: Record) -> Maybe(core.Fault),
+	// Moves a copy of a reader to the first place at or past its `pos` and before `to` where a record may start, and
+	// marks it as a piece's, whose `next` may end on any fault with no cost to find the one `validate` gives. Returns
+	// false when there is none. nil reads a text on the calling thread alone.
 	guess:  proc(it: ^Reader, to: u64) -> bool,
+	// The scan whose cuts, a byte past a separator it finds from the end of an open reader's first record, are each the
+	// end of a record and the start of the next, and false when the format has none under the reader's framing or
+	// options.
 	exact:  proc(it: ^Reader) -> (kernel.Quotes, bool),
+	// Makes a copy of a reader past its first record, or a new reader for `lo` 0, read the records from the cut `lo` up
+	// to the cut or text end `hi`, and returns false when its memory is refused.
 	piece:  proc(it: ^Reader, lo, hi: u64) -> bool,
+	// `next` and a read of `path` in the record by one walk, into `last`, a document whose text is the input up to the
+	// record's end. It starts `h` at the first call, and then with `engine.scan_again` while `h.again` is set, which
+	// writes the buffers `last` shares with the builder. nil reads a record as `next` gives it.
 	scan:   proc(it: ^Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (Record, core.Path_Error, bool),
+	// The format, framing and offset whose records make up the whole of `src`, for `validate`, nil for a format that
+	// does not take it.
 	whole:  proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64),
+	// `next` and a typed read of the record into `target`, a `T`, whose typed reader takes `it.scratch` as its temp
+	// allocator.
 	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
+	// Builds a record's document.
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
+	// A format's with named columns, nil for another.
 	column: proc(it: ^Reader, name: string) -> int,
 	cell:   proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool),
 	cells:  proc(it: ^Reader, rec: Record, buf: []u8) -> ([]Maybe(string), bool),
+	// Frees `it.format`, nil for a format that keeps none.
 	close:  proc(it: ^Reader),
+	// The byte that ends a record under each framing where a backward scan for it finds the end of a whole record, 0
+	// where only a walk of the records does, and 0xff where the format reads no stream.
 	ends:   [core.Framing]u8,
 }
 
@@ -211,7 +218,8 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 		pos, state := it.pos, it.state
 		err = {}
 		more = it.services.read(it, target, T, plan, opts, allocator, &err)
-		if window_settled(it, more, pos, state) {
+		settled := settle_window(it, more, pos, state)
+		if settled {
 			break
 		}
 		typed.collected_restore(opts.collect, kept)
@@ -355,7 +363,8 @@ next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool) {
 			for {
 				pos, state := it.pos, it.state
 				_, more := it.services.next[it.framing](it)
-				if !window_settled(it, more, pos, state) || !more {
+				settled := settle_window(it, more, pos, state)
+				if !settled || !more {
 					break
 				}
 			}
@@ -374,10 +383,6 @@ next_window :: proc(it: ^Reader) -> (window: []u8, base: u64, ok: bool) {
 @(private)
 CHUNK :: 64 * 1024
 
-// The bytes past a fault's byte that its judgement may depend on: an escaped surrogate pair is 12.
-@(private)
-REACH :: 12
-
 @(private)
 stream_next :: proc(it: ^Reader) -> (rec: Record, ok: bool) {
 	for {
@@ -386,7 +391,12 @@ stream_next :: proc(it: ^Reader) -> (rec: Record, ok: bool) {
 		}
 		pos, state := it.pos, it.state
 		rec, ok = it.services.next[it.framing](it)
-		if ok && it.services.ends[it.framing] != 0 || window_settled(it, ok, pos, state) {
+		// A framing with an end byte gives only whole records, so a record it gives stands.
+		settled := ok && it.services.ends[it.framing] != 0
+		if !settled {
+			settled = settle_window(it, ok, pos, state)
+		}
+		if settled {
 			rec.at += it.base
 			return
 		}
@@ -396,12 +406,13 @@ stream_next :: proc(it: ^Reader) -> (rec: Record, ok: bool) {
 	}
 }
 
-// Whether what a service answered for the record looked for from `pos` stands. While more input may come, a walked
-// framing cannot tell a fault within `REACH` bytes of the window's end, or a record whose framing read no byte past it,
-// and no framing can tell the window's end from the input's. Then `pos` and `state` come back and it returns false. A `Truncated` at the
-// input's end holds the bytes past the last whole record, but under `.Entries`, which reads as text in memory does.
+// Settles what a service answered for the record looked for from `pos`, and returns true when it stands. While more
+// input may come, a walked framing cannot tell a fault within `core.FAULT_REACH` bytes of the window's end, or a record
+// whose framing read no byte past it, and no framing can tell the window's end from the input's. Then `pos` and `state`
+// come back and it returns false. A `Truncated` at the input's end holds the bytes past the last whole record, but under
+// `.Entries`, which reads as text in memory does.
 @(private)
-window_settled :: proc(it: ^Reader, ok: bool, pos: u64, state: [2]u8) -> bool {
+settle_window :: proc(it: ^Reader, ok: bool, pos: u64, state: [2]u8) -> bool {
 	n := u64(len(it.src))
 	walked := it.services.ends[it.framing] == 0
 	if f, bad := it.fault.?; bad {
@@ -411,7 +422,7 @@ window_settled :: proc(it: ^Reader, ok: bool, pos: u64, state: [2]u8) -> bool {
 			return true
 		}
 		// A `Truncated` may name a byte far back, such as an opening quote, and the next bytes may close it.
-		if it.last || !walked || f.kind != .Truncated && f.at + REACH <= n {
+		if it.last || !walked || f.kind != .Truncated && f.at + core.FAULT_REACH <= n {
 			if f.kind not_in core.AT_NO_BYTE {
 				f.at += it.base
 				it.fault = f

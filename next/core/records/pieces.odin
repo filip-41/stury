@@ -182,23 +182,24 @@ each :: #force_inline proc(src: []u8, as: core.As, framing: core.Framing, task: 
 // `each`'s pieces: piece 0 runs from the text's start and piece k past it from the first cut in slice k - 1 of the text
 // past the first record, each up to the next cut. `cuts` holds where a quoted cut stands at each slice's start, for the
 // first `folded` slices, and a slice's own run past them. `state` is where a cut stands past the folded slices.
+// `fault_piece` is the first piece whose records ended on a fault, `max(int)` before one, and `fault` that fault.
 @(private)
 Each :: struct {
-	start:   Reader,
-	rule:    kernel.Quotes,
-	cuts:    []Cut,
-	state:   kernel.Quotes,
-	folded:  int,
-	sliced:  int,
-	base:    u64,
-	slices:  int,
-	task:    proc(data: rawptr, piece: ^Reader, k: int) -> bool,
-	data:    rawptr,
-	claimed: int,
-	stop:    bool,
-	lock:    sync.Mutex,
-	first:   int,
-	fault:   Maybe(core.Fault),
+	start:       Reader,
+	rule:        kernel.Quotes,
+	cuts:        []Cut,
+	state:       kernel.Quotes,
+	folded:      int,
+	sliced:      int,
+	base:        u64,
+	slices:      int,
+	task:        proc(data: rawptr, piece: ^Reader, k: int) -> bool,
+	data:        rawptr,
+	claimed:     int,
+	stop:        bool,
+	lock:        sync.Mutex,
+	fault_piece: int,
+	fault:       Maybe(core.Fault),
 }
 
 @(private)
@@ -209,7 +210,7 @@ Cut :: struct {
 
 @(private)
 each_piece :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: rawptr, piece: ^Reader, k: int) -> bool, data: rawptr, runner: ^core.Runner, at: u64) -> Maybe(core.Fault) {
-	e := Each{start = open(src, as, framing, at, runtime.heap_allocator()), task = task, data = data, first = max(int)}
+	e := Each{start = open(src, as, framing, at, runtime.heap_allocator()), task = task, data = data, fault_piece = max(int)}
 	defer close(&e.start)
 	if e.start.fault != nil {
 		return e.start.fault
@@ -294,7 +295,7 @@ run_pieces :: proc(arg: rawptr) {
 	for !sync.atomic_load(&e.stop) {
 		k := sync.atomic_add(&e.claimed, 1)
 		// A piece past a piece that faulted has cuts found as if the text before were well-formed.
-		if k > e.slices || sync.atomic_load(&e.first) < k {
+		if k > e.slices || sync.atomic_load(&e.fault_piece) < k {
 			return
 		}
 		// Every slice is claimed, so each one waited for is being read.
@@ -319,9 +320,9 @@ run_pieces :: proc(arg: rawptr) {
 		if f, bad := piece.fault.?; bad || !more {
 			sync.atomic_store(&e.stop, true)
 			sync.guard(&e.lock)
-			if bad && k < e.first {
+			if bad && k < e.fault_piece {
 				e.fault = f
-				sync.atomic_store(&e.first, k)
+				sync.atomic_store(&e.fault_piece, k)
 			}
 		}
 		close(&piece)

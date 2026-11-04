@@ -514,9 +514,6 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 	return
 }
 
-@(private)
-FAULT_REACH :: 16
-
 // The walk options a handle holds.
 @(private)
 options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
@@ -525,15 +522,14 @@ options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
 
 // Walks the record `src[lo:cut]` of a `.Lines` or `.Seq` text in place in `src`. Returns the fault that a walk of the record's
 // text alone gives, as `walk_text` on `src` cut at the record's end, or `cold` when only that walk can tell: the walk
-// in place ran past the record's end, by a value spread over lines, or faulted near it. A fault depends on no byte
-// more than `FAULT_REACH` past the byte it names, as a lone surrogate's escape is judged by the escape after it, so one
-// further from the end is the same in both walks. The walk reads at most 64 bytes past the record, so a value spread
+// in place ran past the record's end, by a value spread over lines, or faulted within `core.FAULT_REACH` bytes of it.
+// A fault further from the end is the same in both walks. The walk reads at most 64 bytes past the record, so a value spread
 // over many lines costs no more than one.
 @(private)
 walk_line :: #force_inline proc(src: []u8, lo, cut: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (fault: Maybe(core.Fault), cold: bool) {
 	hi, f, _ := walk_from(src[:min(u64(len(src)), cut + 64)], raw_data(src)[lo:], S, opts, h, regs, on)
 	if x, bad := f.?; bad {
-		return f, x.at + FAULT_REACH >= cut
+		return f, x.at + core.FAULT_REACH >= cut
 	}
 	if hi > cut {
 		return nil, true
