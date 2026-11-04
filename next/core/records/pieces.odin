@@ -351,6 +351,9 @@ build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocato
 	services := (^Services)(as.spelling.records) if as.spelling != nil else nil
 	if runner != nil && runner.threads > 0 && services != nil && services.build_next != nil && u64(len(src)) >= 4 * SLICE {
 		whole, framing, at := services.whole(src, as)
+		if !entries_unkeyed(src, whole, framing, at) {
+			return core.build(src, as, refuse_duplicates, allocator)
+		}
 		job := Build_Job{refuse = refuse_duplicates}
 		job.pieces.allocator = runtime.heap_allocator()
 		defer {
@@ -366,6 +369,16 @@ build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocato
 		}
 	}
 	return core.build(src, as, refuse_duplicates, allocator)
+}
+
+// Whether the first of the records at `at` is an array's entry, not an object's member, which no piece of a whole
+// text's build joins: a text with no array to split is built on one thread without a run of pieces before it.
+@(private)
+entries_unkeyed :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool {
+	it := open(src, as, framing, at, runtime.heap_allocator())
+	defer close(&it)
+	rec, more := next(&it)
+	return more && rec.key == nil
 }
 
 // A piece of `build_whole`: the document of its entries, each a root of it, and the bytes from its first entry's
