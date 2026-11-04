@@ -82,11 +82,8 @@ bind_emit :: proc(s: ^Sink, it: Item) -> Signal {
 		// made below it.
 		return eval(x.ip, x.n.b, x.input, (^Env)(rawptr(&e)), x.track, x.out)
 	}
-	if !x.track {
-		return bind_alternatives(x, it.v, bind_body, nil)
-	}
 	st := state_of(x.input)
-	return bind_alternatives(x, it.v, bind_body, &st)
+	return bind_alternatives(x, it.v, bind_body, &st if x.track else nil)
 }
 
 bind_body :: proc(x: ^Bind_Sink, e: ^Env, st: ^Path_State) -> Signal {
@@ -318,8 +315,7 @@ lookup_var :: proc(ip: ^Interp, name: string, env: ^Env) -> (Value, Signal) {
 			return e.value, .Go
 		}
 	}
-	switch name {
-	case "ENV":
+	if name == "ENV" {
 		return env_value(ip)
 	}
 	return nil, fail(ip, "$%s is not defined", name)

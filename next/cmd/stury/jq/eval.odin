@@ -138,12 +138,6 @@ fresh_label :: proc(ip: ^Interp) -> int {
 	return ip.labels - 1
 }
 
-break_error :: proc(id: int) -> Value {
-	o := new_object()
-	object_put(o, "__jq", num(f64(id)))
-	return o
-}
-
 // Whether `err` is a break to label `id`, as jq's label compares what it catches: `{"__jq": id}`.
 breaks_to :: proc(err: Value, id: int) -> bool {
 	if kind(err) != .Object || length_of(err) != 1 {
@@ -361,7 +355,9 @@ eval_scoped :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^E
 	case .Break:
 		for e := env; e != nil; e = e.parent {
 			if e.kind == .Label && e.name == n.name {
-				ip.err = break_error(e.label)
+				o := new_object()
+				object_put(o, "__jq", num(f64(e.label)))
+				ip.err = o
 				ip.raised += 1
 				return .Fail
 			}

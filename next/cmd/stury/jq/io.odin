@@ -100,11 +100,7 @@ native_debug :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool,
 
 // A string's own text, anything else as compact JSON.
 native_stderr :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	if s, is_str := string_of(input.v); is_str {
-		append(&ip.messages, s)
-	} else {
-		append(&ip.messages, to_json(input.v))
-	}
+	append(&ip.messages, text_of(input.v))
 	if len(ip.messages) >= MESSAGE_FLUSH {
 		flush_messages(ip)
 	}

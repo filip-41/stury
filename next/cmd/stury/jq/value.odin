@@ -267,17 +267,12 @@ is_empty :: proc(v: Value) -> bool {
 
 // The keys of a document object in source order, a repeated one each time.
 @(private = "file")
-Key_Iter :: struct {
-	pairs: core_pkg.Pair_Iter,
-}
-
-@(private = "file")
-next_key :: #force_inline proc(it: ^Key_Iter) -> (string, bool) {
-	k, _, ok := core_pkg.pair_next(&it.pairs)
+next_key :: #force_inline proc(it: ^core_pkg.Pair_Iter) -> (string, bool) {
+	k, _, ok := core_pkg.pair_next(it)
 	if !ok {
 		return "", false
 	}
-	return node_string(it.pairs.doc, k), true
+	return node_string(it.doc, k), true
 }
 
 // The members of an object with a repeated key, which is one member, as jq reads it. Kept out of
@@ -285,7 +280,7 @@ next_key :: #force_inline proc(it: ^Key_Iter) -> (string, bool) {
 @(private = "file")
 distinct_keys :: #force_no_inline proc(r: Ref) -> int {
 	seen := make(map[string]bool, core_pkg.length(r.doc, r.node), context.temp_allocator)
-	it := Key_Iter{core_pkg.pairs(r.doc, r.node)}
+	it := core_pkg.pairs(r.doc, r.node)
 	for k in next_key(&it) {
 		seen[k] = true
 	}
@@ -425,7 +420,7 @@ has_repeated_key :: proc(r: Ref) -> bool {
 	if n < 2 {
 		return false
 	}
-	it := Key_Iter{core_pkg.pairs(r.doc, r.node)}
+	it := core_pkg.pairs(r.doc, r.node)
 	if n <= 16 {
 		keys: [16]string = ---
 		// A key's length and end bytes set a bit, so only a key whose bit is set is compared with the ones before it.
@@ -481,7 +476,7 @@ KEY_TABLE :: 256
 
 // `has_repeated_key` for an object of up to KEY_TABLE / 2 members, hashed on the stack, not in a map.
 @(private = "file")
-repeats_in_table :: proc(it: ^Key_Iter) -> bool {
+repeats_in_table :: proc(it: ^core_pkg.Pair_Iter) -> bool {
 	slots: [KEY_TABLE]u8 // a key's place in `keys`, plus one, 0 is empty
 	keys: [KEY_TABLE / 2]string = ---
 	i := 0

@@ -72,15 +72,15 @@ fill_table :: proc() {
 	table = make(map[string][MAX_ARITY]Builtin, 256, runtime.heap_allocator())
 	put("empty", 0, {native = native_empty})
 	put("select", 1, {native = native_select})
-	put("values", 0, {native = native_values})
-	put("nulls", 0, {native = native_nulls})
-	put("booleans", 0, {native = native_booleans})
-	put("numbers", 0, {native = native_numbers})
-	put("strings", 0, {native = native_strings})
-	put("arrays", 0, {native = native_arrays})
-	put("objects", 0, {native = native_objects})
-	put("iterables", 0, {native = native_iterables})
-	put("scalars", 0, {native = native_scalars})
+	put("values", 0, {native = kept_by_kind(~{.Null})})
+	put("nulls", 0, {native = kept_by_kind({.Null})})
+	put("booleans", 0, {native = kept_by_kind({.False, .True})})
+	put("numbers", 0, {native = kept_by_kind({.Number})})
+	put("strings", 0, {native = kept_by_kind({.String})})
+	put("arrays", 0, {native = kept_by_kind({.Array})})
+	put("objects", 0, {native = kept_by_kind({.Object})})
+	put("iterables", 0, {native = kept_by_kind({.Array, .Object})})
+	put("scalars", 0, {native = kept_by_kind(~{.Array, .Object})})
 	put("error", 0, {native = native_error})
 	put("error", 1, {gen = proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
 			ip.err = args[0]
@@ -155,17 +155,17 @@ fill_table :: proc() {
 	put("tojson", 0, {fn = proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {return to_json(v), .Go}})
 	put("tonumber", 0, {fn = fn_tonumber})
 	put("fromjson", 0, {fn = fn_fromjson})
-	put("ascii_downcase", 0, {fn = fn_ascii_downcase})
-	put("ascii_upcase", 0, {fn = fn_ascii_upcase})
+	put("ascii_downcase", 0, {fn = fn_ascii_case})
+	put("ascii_upcase", 0, {fn = fn_ascii_case})
 	put("explode", 0, {fn = fn_explode})
 	put("implode", 0, {fn = fn_implode})
 	put("ltrimstr", 1, {fn = fn_ltrimstr, in_jq = true})
 	put("rtrimstr", 1, {fn = fn_rtrimstr, in_jq = true})
-	put("startswith", 1, {fn = fn_startswith})
-	put("endswith", 1, {fn = fn_endswith})
+	put("startswith", 1, {fn = fn_has_affix})
+	put("endswith", 1, {fn = fn_has_affix})
 	put("trim", 0, {fn = fn_trim})
-	put("ltrim", 0, {fn = fn_ltrim})
-	put("rtrim", 0, {fn = fn_rtrim})
+	put("ltrim", 0, {fn = fn_trim})
+	put("rtrim", 0, {fn = fn_trim})
 	put("split", 1, {fn = fn_split})
 	put("join", 1, {fn = fn_join, in_jq = true})
 	put("sort", 0, {fn = fn_sort})
@@ -570,7 +570,7 @@ apply_builtin :: #force_no_inline proc(x: ^Args_Sink) -> Signal {
 defined_path :: proc(x: ^Args_Sink) -> (sig: Signal, done: bool) {
 	t := x.input
 	switch {
-	case x.b.fn == fn_ascii_downcase || x.b.fn == fn_ascii_upcase:
+	case x.b.fn == fn_ascii_case:
 		codes, esig := fn_explode(x.ip, "explode", t.v, nil)
 		if esig != .Go {
 			return esig, true

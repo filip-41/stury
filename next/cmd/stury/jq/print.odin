@@ -298,14 +298,6 @@ put_valid :: #force_no_inline proc(out: ^write.Out, s: string, opts: core_pkg.Wr
 	json.put_string(out, valid_utf8(s), {ascii = opts.ascii, escape_del = true})
 }
 
-// The punctuation `c` of a container of kind `k`, painted in its colour when the layout has colours.
-write_punct :: proc(out: ^write.Out, l: Layout, k: Kind, c: u8) {
-	p := Printer{out = out, layout = l}
-	paint(&p, int(k))
-	put_byte(out, c)
-	unpaint(&p)
-}
-
 // The text `tostring` and string interpolation give a value: a string as itself, anything else as
 // compact JSON.
 text_of :: proc(v: Value) -> string {

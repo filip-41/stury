@@ -82,10 +82,7 @@ OPERATORS := [?]struct {
 // key, which stays so: no jq program has one of these.
 @(private = "file")
 fact_accessor :: proc(rest: string) -> string {
-	end := 1
-	for end < len(rest) && ident_byte(rest[end]) {
-		end += 1
-	}
+	end := run_end(rest, 1, ident_byte)
 	name := rest[:end]
 	if name != "@comment" && name != "@comment_inline" && name != "@comment_foot" {
 		return ""
@@ -110,13 +107,8 @@ lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 		p.pos += 1 + len(fact)
 		return .Field, {text = fact}
 	case c == '.' && ident_start(next):
-		p.pos += 1
-		end := p.pos
-		for end < len(s) && ident_byte(s[end]) {
-			end += 1
-		}
-		p.pos = end
-		return .Field, {text = s[start + 1:end]}
+		p.pos = run_end(s, start + 1, ident_byte)
+		return .Field, {text = s[start + 1:p.pos]}
 	case c == '$' && ident_start(next):
 		p.pos += 1
 		name := take_ident(p)
@@ -129,13 +121,9 @@ lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 			}
 		}
 		return .Ident, {text = name}
-	case c == '@' && (ident_byte(next)):
-		end := start + 1
-		for end < len(s) && ident_byte(s[end]) {
-			end += 1
-		}
-		p.pos = end
-		return .Format, {text = s[start + 1:end]}
+	case c == '@' && ident_byte(next):
+		p.pos = run_end(s, start + 1, ident_byte)
+		return .Format, {text = s[start + 1:p.pos]}
 	case c == '"':
 		p.pos += 1
 		append(&p.modes, Mode.String)
@@ -167,25 +155,14 @@ lex_token :: proc(p: ^Parser) -> (Sym, Sem) {
 // A closing bracket ends the innermost (), [], {} or interpolation it matches, or is invalid.
 @(private = "file")
 close :: proc(p: ^Parser, c: u8) -> Sym {
-	if len(p.modes) == 0 {
+	CLOSING := [Mode]struct {
+		c:   u8,
+		sym: Sym,
+	}{.Paren = {')', .RParen}, .Bracket = {']', .RBracket}, .Brace = {'}', .RBrace}, .Interp = {')', .QQ_Interp_End}, .String = {}}
+	if len(p.modes) == 0 || CLOSING[p.modes[len(p.modes) - 1]].c != c {
 		return .Invalid
 	}
-	top := p.modes[len(p.modes) - 1]
-	sym: Sym
-	switch {
-	case top == .Paren && c == ')':
-		sym = .RParen
-	case top == .Bracket && c == ']':
-		sym = .RBracket
-	case top == .Brace && c == '}':
-		sym = .RBrace
-	case top == .Interp && c == ')':
-		sym = .QQ_Interp_End
-	case:
-		return .Invalid
-	}
-	pop(&p.modes)
-	return sym
+	return CLOSING[pop(&p.modes)].sym
 }
 
 // `([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?`, as a number that keeps its original text.
@@ -193,15 +170,9 @@ close :: proc(p: ^Parser, c: u8) -> Sym {
 lex_number :: proc(p: ^Parser) -> Value {
 	s := p.src
 	start := p.pos
-	i := start
-	for i < len(s) && is_digit(s[i]) {
-		i += 1
-	}
+	i := run_end(s, start, is_digit)
 	if i < len(s) && s[i] == '.' {
-		i += 1
-		for i < len(s) && is_digit(s[i]) {
-			i += 1
-		}
+		i = run_end(s, i + 1, is_digit)
 	}
 	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
 		j := i + 1
@@ -209,10 +180,7 @@ lex_number :: proc(p: ^Parser) -> Value {
 			j += 1
 		}
 		if j < len(s) && is_digit(s[j]) {
-			for j < len(s) && is_digit(s[j]) {
-				j += 1
-			}
-			i = j
+			i = run_end(s, j, is_digit)
 		}
 	}
 	p.pos = i
@@ -245,7 +213,7 @@ lex_in_string :: proc(p: ^Parser) -> (sym: Sym, sem: Sem, loc: Loc) {
 				continue
 			}
 			j := end + 2
-			for j < len(s) && j < end + 6 && is_alnum(s[j]) {
+			for j < len(s) && j < end + 6 && ident_byte(s[j]) && s[j] != '_' {
 				j += 1
 			}
 			end = j
@@ -297,11 +265,6 @@ is_digit :: proc(c: u8) -> bool {
 }
 
 @(private = "file")
-is_alnum :: proc(c: u8) -> bool {
-	return is_digit(c) || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
-
-@(private = "file")
 ident_start :: proc(c: u8) -> bool {
 	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
@@ -310,15 +273,23 @@ ident_byte :: proc(c: u8) -> bool {
 	return ident_start(c) || is_digit(c)
 }
 
+// The end of the run of bytes `in_run` takes in `s` from `at`.
+@(private = "file")
+run_end :: proc(s: string, at: int, in_run: proc(c: u8) -> bool) -> int {
+	end := at
+	for end < len(s) && in_run(s[end]) {
+		end += 1
+	}
+	return end
+}
+
 // `([a-zA-Z_][a-zA-Z_0-9]*::)*[a-zA-Z_][a-zA-Z_0-9]*` from `p.pos`, which starts one.
 @(private = "file")
 take_ident :: proc(p: ^Parser) -> string {
 	s := p.src
 	start := p.pos
 	for {
-		for p.pos < len(s) && ident_byte(s[p.pos]) {
-			p.pos += 1
-		}
+		p.pos = run_end(s, p.pos, ident_byte)
 		if p.pos + 2 < len(s) && s[p.pos] == ':' && s[p.pos + 1] == ':' && ident_start(s[p.pos + 2]) {
 			p.pos += 2
 			continue

@@ -311,18 +311,12 @@ reads_input :: proc(n: ^Node) -> bool {
 	#partial switch n.kind {
 	case .Literal, .Var:
 		return false
-	case .Field, .Iterate:
+	case .Field, .Iterate, .Pipe, .Neg, .Array:
 		return reads_input(n.a)
 	case .Index, .Slice:
 		return reads_input(n.a) || reads_input(n.b) || reads_input(n.c)
-	case .Pipe:
-		return reads_input(n.a)
 	case .Comma, .Binary, .And, .Or, .Alt:
 		return reads_input(n.a) || reads_input(n.b)
-	case .Neg:
-		return reads_input(n.a)
-	case .Array:
-		return reads_input(n.a)
 	case .String, .Object:
 		for p in n.args {
 			if p == nil || reads_input(p) { // an object's `{"key"}` reads the input's member

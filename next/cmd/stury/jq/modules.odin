@@ -20,6 +20,7 @@ package jq
 // errors and the list goes on.
 
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "../message"
 
@@ -152,13 +153,16 @@ process :: proc(l: ^Linker, deps: []Value, origin: string) -> (imports: []Import
 			message.write(&l.messages, "%s: error: %s\n\n", NAME, msg)
 			return imports, 1
 		}
-		for p in l.loading {
-			if p == path {
-				message.write(&l.messages, "%s: error: circular import of %s\n\n", NAME, path)
-				return imports, 1
+		if slice.contains(l.loading[:], path) {
+			message.write(&l.messages, "%s: error: circular import of %s\n\n", NAME, path)
+			return imports, 1
+		}
+		lib: ^Library
+		for x in l.libs {
+			if !is_data && !x.is_data && x.path == path {
+				lib = x
 			}
 		}
-		lib := cached(l, path) if !is_data else nil
 		if lib == nil {
 			n: int
 			lib, n = load(l, path, is_data, raw)
@@ -167,16 +171,6 @@ process :: proc(l: ^Linker, deps: []Value, origin: string) -> (imports: []Import
 		imports[i] = {lib, name if has_name else ""}
 	}
 	return
-}
-
-@(private = "file")
-cached :: proc(l: ^Linker, path: string) -> ^Library {
-	for lib in l.libs {
-		if !lib.is_data && lib.path == path {
-			return lib
-		}
-	}
-	return nil
 }
 
 // The module or data file at `path`, and its errors. It is nil if it has any.
@@ -202,18 +196,11 @@ load :: proc(l: ^Linker, path: string, is_data, raw: bool) -> (^Library, int) {
 		return nil, n
 	}
 	lib := new_clone(Library{path = path, src = src, imports = imports})
-	count := 0
+	defs: [dynamic]Lib_Def
 	for d := prog.defs; d != nil; d = d.a {
-		count += 1
+		append(&defs, Lib_Def{env = new_clone(Env{kind = .Func, name = d.fn.name, arity = len(d.fn.params), fn = d.fn}), lib = lib})
 	}
-	lib.defs = make([]Lib_Def, count)
-	i := 0
-	for d := prog.defs; d != nil; d = d.a {
-		e := new(Env)
-		e^ = {kind = .Func, name = d.fn.name, arity = len(d.fn.params), fn = d.fn}
-		lib.defs[i] = {env = e, lib = lib}
-		i += 1
-	}
+	lib.defs = defs[:]
 	append(&l.libs, lib)
 	return lib, 0
 }
@@ -272,16 +259,12 @@ find_module :: proc(ip: ^Interp, relpath: string, search: Value, suffix: string,
 		if dir == "" {
 			continue
 		}
-		for alt in 0 ..< 3 {
-			try: string
-			switch alt {
-			case 0:
-				try = message.build_temp("%s/%s%s", dir, relpath, suffix)
-			case 1:
-				try = message.build_temp("%s/%s/jq/main%s", dir, relpath, suffix)
-			case:
-				try = message.build_temp("%s/%s/%s%s", dir, relpath, base, suffix)
-			}
+		tries := [?]string {
+			message.build_temp("%s/%s%s", dir, relpath, suffix),
+			message.build_temp("%s/%s/jq/main%s", dir, relpath, suffix),
+			message.build_temp("%s/%s/%s%s", dir, relpath, base, suffix),
+		}
+		for try in tries {
 			kind := path_kind(strings.clone_to_cstring(try, context.temp_allocator))
 			if kind == .File || kind == .Dir {
 				return real_path(try), ""

@@ -17,7 +17,6 @@ Native_Sink :: struct {
 	out:        ^Sink,
 	label:      int,
 	count:      int,
-	found:      bool,
 	downstream: bool, // an output's consumer failed or broke, which a label lets pass
 	last:       Item,
 }
@@ -156,8 +155,10 @@ native_select :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool
 // `arrays`, `nulls`, `values` and the other selections by type: the input when jq's
 // `select(type == ...)` keeps it, as its kind is in `keep`.
 @(private)
-kept_by_kind :: #force_inline proc(keep: bit_set[Kind], input: Item, out: ^Sink) -> Signal {
-	return out.emit(out, input) if kind(input.v) in keep else .Go
+kept_by_kind :: proc($keep: bit_set[Kind]) -> Native {
+	return proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
+		return out.emit(out, input) if kind(input.v) in keep else .Go
+	}
 }
 
 native_empty :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
@@ -174,43 +175,6 @@ native_halt :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, 
 	ip.halted = 0
 	ip.brk = -1
 	return .Break
-}
-
-// The kind selectors: each keeps the input when its kind is in the set (`kept_by_kind`).
-native_values :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return kept_by_kind(~{.Null}, input, out)
-}
-
-native_nulls :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return kept_by_kind({.Null}, input, out)
-}
-
-native_booleans :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return kept_by_kind({.False, .True}, input, out)
-}
-
-native_numbers :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return kept_by_kind({.Number}, input, out)
-}
-
-native_strings :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return kept_by_kind({.String}, input, out)
-}
-
-native_arrays :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return kept_by_kind({.Array}, input, out)
-}
-
-native_objects :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return kept_by_kind({.Object}, input, out)
-}
-
-native_iterables :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return kept_by_kind({.Array, .Object}, input, out)
-}
-
-native_scalars :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	return kept_by_kind(~{.Array, .Object}, input, out)
 }
 
 // `limit` and `skip`: each value of the count, through `count_emit`.
