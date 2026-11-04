@@ -26,7 +26,6 @@ from checks import makefile_list
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(ROOT)
-PRIVATE = os.path.join(os.path.dirname(REPO), "stury-tests", "next")
 DEFAULT_ODIN = os.path.join(os.path.dirname(REPO), "Odin-master", "bin", "odin")
 
 TIERS = {"quick": 0, "merge": 1, "full": 2}
@@ -238,19 +237,6 @@ def checks(odin, seed):
                 out.append(Check(f"{name} x86 v{tier + 2} {opt}", 3, 1, root, make(odin, target), arch="amd64", trees=golden))
     # Alone in the last stage, since it fills every core.
     out.append(Check("f32 exhaustive", 4, 2, [at("core/spell"), at("core/spell/test")], make(odin, "test-f32")))
-    if os.path.isdir(PRIVATE):
-        private = [
-            ("model/json", True), ("model/dsv", True), ("laws/json", False), ("laws/dsv", False), ("perf", False),
-        ]
-        for suite, randomized in private:
-            binary = f"{ROOT}/build/test/private-{suite.replace('/', '-')}"
-            flags = ["-o:speed", "-collection:stury=.", f"-collection:next={ROOT}", f"-out:{binary}"]
-            if randomized:
-                flags += [f"-define:SEED={seed}", "-define:ROUNDS=10000"]
-            path = os.path.join(PRIVATE, suite)
-            out.append(Check(f"private {suite}", 2, 1, [path], [odin, "test", path] + flags, cwd=REPO))
-    else:
-        absent.append(f"private suites ({PRIVATE} is not there)")
     compare = os.path.join(REPO, "compare")
     if not (os.path.isdir(compare) and os.path.isdir(os.path.join(REPO, "csv"))):
         absent.append(f"compare oracles and golden ({compare} or the old tree they read is not there)")

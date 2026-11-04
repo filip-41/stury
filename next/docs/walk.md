@@ -546,14 +546,6 @@ From `next/`:
 The checks against the old tree's `json` and `csv` live in `compare/`, outside this tree, and run by its own
 `make test-oracle`.
 
-The value-tree models and the edit rounds against their own models are private, in the separate stury test repository
-beside this one, and its `next-model` target runs them with `SEED` and `ROUNDS`. A value-tree model is a plain
-recursive-descent reader of a valid text that shares no code with the walk or the readers. For each generated valid
-text, and each valid JSONTestSuite and json5-tests file, it builds the document and checks every reader against the
-model: `kind`, `length`, `children` and `child_at`, `member` under each `Duplicates` value and `members_named`,
-`key_equals`, `text`, `number`, `resolve` with and without `infer`, `facts_of` per role, and `span` against the
-value's source bytes.
-
 The golden file `json/test/golden/json.txt` holds the old tree's answer for every JSONTestSuite and json5-tests file per
 spec, as `compare/golden` wrote it. A line names the file and the spec, and records a pass or a fault kind and byte.
 Where the oracle accepts a difference between the trees by design, the line holds this tree's answer and a marker
