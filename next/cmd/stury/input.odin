@@ -96,7 +96,7 @@ Inputs :: struct {
 	file_lines: int,
 	pieces:     struct {
 		at, lines: int,
-	}, // `lines_read`'s place: the first piece of data fgets has not read, and the line ends before it
+	}, // `lines_read`'s place: past the line end it counted through, and the line ends before it
 	line:       int, // the lines of the open file jq's parser has read
 	text_end:   int, // the end in data of the text read last, while `line` does not count its lines yet, else 0
 	line_end:   int, // --stream: the byte after the newline `line` counts last
@@ -879,23 +879,21 @@ pipe_end :: proc(p: ^Pipe) -> os.Error {
 	return err
 }
 
-// The lines jq's parser has read of the open file once a text ends at data[end]: through the piece fgets reads that
-// holds the text's last byte. `ins.pieces` counts on from the call before, so a file's texts are counted in one pass.
+// The lines of the open file read once a text ends at data[end]: through the line end after the text's last byte. jq
+// counts through the piece its fgets reads, which on a line past 4 KiB ends before the line does. `ins.pieces` counts
+// on from the call before, so a file's texts are counted in one pass.
 @(private = "file")
 lines_read :: proc(ins: ^Inputs, end: int) -> int {
-	last := max(end - 1, 0)
+	data := ins.data
+	last := min(max(end - 1, 0), len(data))
+	nl := bytes.index_byte(data[last:], '\n')
+	stop := len(data) if nl < 0 else last + nl + 1
 	c := &ins.pieces
-	if last < c.at {
+	if stop < c.at {
 		c^ = {}
 	}
-	for c.at < len(ins.data) {
-		n, newline := next_piece(ins.data[c.at:])
-		if c.at + n > last {
-			return ins.file_lines + c.lines + int(newline)
-		}
-		c.at += n
-		c.lines += int(newline)
-	}
+	c.lines += bytes.count(data[c.at:stop], {'\n'})
+	c.at = stop
 	return ins.file_lines + c.lines
 }
 
