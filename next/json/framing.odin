@@ -447,7 +447,7 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 	if c != nil {
 		kept = c^
 	}
-	if !read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, it.allocator, err, true) {
+	if !read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, true) {
 		return true
 	}
 	uncollect(c, kept)
@@ -461,7 +461,7 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 		return true
 	}
 	err^ = {}
-	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, scratch_allocator, it.allocator, err, false)
+	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, scratch_allocator, runtime.arena_allocator(&it.scratch), err, false)
 	return true
 }
 
@@ -475,13 +475,14 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 		// The duplicate check builds the record's text, so the framing's walk finds its end first.
 		rec, ok := next_framed(it, S)
 		if ok {
-			read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, it.allocator, err, false)
+			read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, false)
 		}
 		return ok
 	}
 	h: typed.Reader
 	json_reader(&h, &opts, S)
 	regs, started := typed.read_start(&h, it.src, plan, &SPELLING, T, target, read, it.frames, allocator)
+	h.ctx.temp_allocator = runtime.arena_allocator(&it.scratch)
 	if started.kind != .None {
 		err^ = started
 		return false

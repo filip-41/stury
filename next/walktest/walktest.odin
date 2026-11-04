@@ -1,9 +1,12 @@
 // The walk tests share this harness. It holds a hook that logs every token and hashes it, the rule that picks `Skip`
-// and `Stop`, a mutation of a seeded text, the json5-tests suites, and the law of `records.each`.
+// and `Stop`, a mutation of a seeded text, the json5-tests suites, the law of `records.each`, and the bound on a
+// reader's memory.
 package walktest
 
 import "base:runtime"
+import "core:bytes"
 import "core:fmt"
+import "core:mem"
 import "core:math/rand"
 import "core:slice"
 import "core:strings"
@@ -12,6 +15,7 @@ import "core:sys/posix"
 import "core:testing"
 import core "../core"
 import host "../host"
+import typed "../core/typed"
 import records "../core/records"
 
 // The capacity of `Log.tokens` is the most tokens a test text may hold.
@@ -795,6 +799,67 @@ expect_each_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.A
 		delete(g.pieces)
 		if !testing.expectf(t, unique && f == fault && slice.equal(got[:], want[:]), "%v %q at width %d: each %v %v, want %v %v", framing, src, pool.runner.threads + 1, got, f, want, fault) {
 			return false
+		}
+	}
+	return true
+}
+
+@(private = "file")
+Read_Way :: enum {
+	Read,
+	Build,
+	Scan,
+}
+
+// The bytes a reader and its caller's temp allocator hold after reading every record of `src` one way, `one` reading
+// a typed record.
+@(private = "file")
+reads_used :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, read: typed.Read_Options, way: Read_Way, stream: bool, one: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> bool) -> [2]int {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, runtime.heap_allocator())
+	defer mem.tracking_allocator_destroy(&track)
+	temp, values: runtime.Arena
+	defer runtime.arena_destroy(&temp)
+	defer runtime.arena_destroy(&values)
+	context.temp_allocator = runtime.arena_allocator(&temp)
+	path, _ := core.parse_path(".a", runtime.arena_allocator(&values))
+	r: bytes.Reader
+	it := records.open(src, as, framing, 0, mem.tracking_allocator(&track))
+	if stream {
+		it = records.open_stream(bytes.reader_init(&r, src), as, framing, {}, 0, mem.tracking_allocator(&track))
+	}
+	defer records.close(&it)
+	for more := true; more; {
+		switch way {
+		case .Read:
+			more = one(&it, plan, read, runtime.arena_allocator(&values))
+		case .Build:
+			rec: records.Record
+			if rec, more = records.next(&it); more {
+				_, _ = records.build(&it, rec, runtime.arena_allocator(&values))
+			}
+		case .Scan:
+			_, _, _, more = records.scan(&it, path)
+		}
+	}
+	return {int(track.current_memory_allocated), int(temp.total_used)}
+}
+
+// Reading the records of `many`, ten times those of `few`, leaves a reader and the temp allocator its caller reads with
+// holding no more memory than reading `few` does, in memory and on a stream: what a record's `read`, `build` or `scan`
+// allocates for itself is gone by the next. A record's value is freed after each.
+expect_bounded_reads :: proc(t: ^testing.T, few, many: []u8, as: core.As, plan: ^typed.Plan, $T: typeid, read := typed.Read_Options{}, framing := core.Framing.Lines) -> bool {
+	one :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> bool {
+		v: T
+		more, _ := records.read(it, &v, plan, read, allocator)
+		return more
+	}
+	for way in Read_Way {
+		for stream in ([]bool{false, true}) {
+			a, b := reads_used(few, as, framing, plan, read, way, stream, one), reads_used(many, as, framing, plan, read, way, stream, one)
+			if !testing.expectf(t, b[0] <= a[0] && b[1] <= a[1], "%v %v stream %v: reader and temp bytes %v, ten times the records %v", typeid_of(T), way, stream, a, b) {
+				return false
+			}
 		}
 	}
 	return true

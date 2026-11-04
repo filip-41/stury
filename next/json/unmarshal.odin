@@ -49,7 +49,7 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 // its error in `err`, with every offset from `src`'s first byte. A record's read (`LINE`) walks it in place in `src`
 // as `walk_line` does, and `cold` says only a read of `src[:cut]` tells its answer. The error goes out by pointer, as
 // copies of it through the record reader's calls cost a record's read more than its tokens. The duplicate check's
-// document lives in an arena on `scratch`, freed before the read.
+// document lives in an arena on `scratch`, freed before the read, and `scratch` is the read's temp allocator.
 @(private)
 read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Error, $LINE: bool) -> (cold: bool) {
 	// A BOM past the input's first byte is the read's `Bad_Char`, in a spec where it is no whitespace, and `build` of
@@ -77,6 +77,7 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 	json_reader(&h, &walk_opts, S)
 	text := src if LINE else src[:cut]
 	regs, started := typed.read_start(&h, text, plan, &SPELLING, T, target, read, frames, allocator)
+	h.ctx.temp_allocator = scratch
 	if started.kind != .None {
 		err^ = started
 		return

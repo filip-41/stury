@@ -586,6 +586,7 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 	spec, opts := Spec(it.as.spec), options_of(it.as)
 	h := Cells{refuse_repeats = read.refuse_duplicates}
 	regs, started := typed.read_start(&h.r, it.src, plan, &SPELLING, T, target, read, it.frames, allocator)
+	h.r.ctx.temp_allocator = runtime.arena_allocator(&it.scratch)
 	if started.kind == .None && plan.marshal == nil {
 		started.kind = .Plan_Mismatch
 	}
@@ -658,10 +659,6 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 				place_error(it, b, row, &e)
 			}
 		}
-	}
-	// A wide row under `.Ragged` binds its columns again, so the row's columns may be new past its open.
-	if raw_data(h.cols) != raw_data(b.cols) {
-		delete(h.cols, context.temp_allocator)
 	}
 	return true
 }

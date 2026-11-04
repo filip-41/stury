@@ -69,7 +69,10 @@ for {
 ```
 
 The reader's first `read` allocates its open containers with `open`'s allocator, and `close` frees them. When a
-refused record's value runs past the record's end, `target` may hold values read past it.
+refused record's value runs past the record's end, `target` may hold values read past it. What a read allocates for
+itself, such as the columns a dsv row binds and the keys it decodes, goes to the reader's scratch, which the next `read`
+empties, so the reader's memory does not grow with the records it reads. A name the read decoded for its error lasts
+until the next call on the reader, and one in a collected error is copied to the caller's temp allocator.
 
 Under `.Concatenated` and `.Entries`, `read` reads a record by the walk that frames it, and gives the records `next`
 gives: a record that would fault after a refusal is no record, and what its read collected is taken back.

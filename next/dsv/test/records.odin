@@ -767,3 +767,33 @@ rows_stream_read_as_in_memory :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 	}
 }
+
+// A reader's memory does not grow with the rows it reads: map and struct rows, refused rows, and wide rows.
+@(test)
+rows_read_in_bounded_memory :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Number_Row :: struct {
+		a: int,
+		b: string,
+	}
+	text :: proc(spec: dsv.Spec, body: string, n: int) -> []u8 {
+		s := strings.concatenate({"a,b,\"c\"\"d\"\n", strings.repeat(body, n, context.temp_allocator)}, context.temp_allocator)
+		if spec == .Tsv {
+			s, _ = strings.replace_all(s, ",", "\t", context.temp_allocator)
+		}
+		return transmute([]u8)s
+	}
+	for spec in ([]dsv.Spec{.Csv, .Tsv}) {
+		for opts in ([]dsv.Options{{}, {tolerate = {.Ragged}}}) {
+			body := "1,x,\"q\"\"r\"\ny,2,3\n4,5,6,7,8\n" if .Ragged in opts.tolerate else "1,x,\"q\"\"r\"\ny,2,3\n"
+			few, many, as := text(spec, body, 100), text(spec, body, 1000), dsv.as(spec, opts)
+			maps, _ := dsv.plan_make(map[string]string, spec, allocator = context.temp_allocator)
+			ints, _ := dsv.plan_make(map[string]int, spec, allocator = context.temp_allocator)
+			rows, _ := dsv.plan_make(Number_Row, spec, allocator = context.temp_allocator)
+			_ = walktest.expect_bounded_reads(t, few, many, as, &maps, map[string]string) &&
+			walktest.expect_bounded_reads(t, few, many, as, &ints, map[string]int) &&
+			walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Row) &&
+			walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Row, {unknown = .Refuse, refuse_duplicates = true})
+		}
+	}
+}

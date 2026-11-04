@@ -10,6 +10,7 @@ import core "../../core"
 import typed "../../core/typed"
 import records "../../core/records"
 import json ".."
+import walktest "../../walktest"
 
 // The record reader against a model: a plain framer per framing, then `validate` of each record's text alone.
 
@@ -715,6 +716,42 @@ records_read_a_union :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+// A reader's memory does not grow with the records it reads, refused ones and decoded keys included, and a collected
+// error's decoded name outlives the reads after it.
+@(test)
+records_read_in_bounded_memory :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Number_Record :: struct {
+		a: int,
+		b: string,
+	}
+	body := "{\"\\u0063\":\"q\",\"a\":1,\"b\":\"x\"}\n{\"a\":\"y\",\"b\":2,\"b\":3}\n"
+	few := transmute([]u8)strings.repeat(body, 100, context.temp_allocator)
+	many := transmute([]u8)strings.repeat(body, 1000, context.temp_allocator)
+	maps, _ := json.plan_make(map[string]string, allocator = context.temp_allocator)
+	ints, _ := json.plan_make(map[string]int, allocator = context.temp_allocator)
+	rows, _ := json.plan_make(Number_Record, allocator = context.temp_allocator)
+	for framing in ([]core.Framing{.Lines, .Concatenated}) {
+		as := json.as(.Json)
+		_ = walktest.expect_bounded_reads(t, few, many, as, &maps, map[string]string, {dups = .First}, framing) &&
+		walktest.expect_bounded_reads(t, few, many, as, &ints, map[string]int, {}, framing) &&
+		walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Record, {}, framing) &&
+		walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Record, {unknown = .Refuse, refuse_duplicates = true}, framing)
+	}
+	it := records.open(few, json.as(.Json))
+	defer records.close(&it)
+	c := typed.Collected{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
+	for {
+		v: Number_Record
+		more, _ := records.read(&it, &v, &rows, {unknown = .Refuse, collect = &c}, context.temp_allocator)
+		if !more {
+			break
+		}
+	}
+	name, _ := c.errors[0].steps[0].(core.Name)
+	testing.expectf(t, len(c.errors) == 100 && name == "c", "%d errors, the first %v", len(c.errors), c.errors[0])
 }
 
 // A plan of another type is refused the same way under every framing, before any record is read.

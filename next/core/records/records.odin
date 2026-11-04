@@ -5,6 +5,7 @@ package records
 
 import "base:runtime"
 import "core:io"
+import "core:strings"
 import core ".."
 import "../kernel"
 import engine "../build"
@@ -32,6 +33,8 @@ Record :: struct {
 // record, and `base` the input offset of `src[0]`. `last` says the window holds the input's end, `eof` that `input`
 // ended, and `cause` is the error it failed with. `held` holds the bytes past the last whole record when the input
 // ended inside a record or failed, and `held_at` their offset. `scan` is what `scan` keeps, allocated at its first call.
+// `scratch` is the temp allocator of the format's `read`, emptied by the next, so what one record's read binds or decodes
+// for itself takes no memory past it.
 Reader :: struct {
 	src:       []u8,
 	pos:       u64,
@@ -56,6 +59,7 @@ Reader :: struct {
 	held:      []u8,
 	held_at:   u64,
 	scan:      ^Scanned,
+	scratch:   runtime.Arena,
 }
 
 // What `scan` keeps between records: the planned read, the document it returned last, and that document's answers
@@ -81,7 +85,7 @@ RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limi
 // under each framing the format takes, nil for one it does not, and returns false at the input's end or on a fault,
 // which it stores in `it.fault`. `judge` returns the fault of a record `next` gave, or nil, as the format's validate of
 // the record's text at its place in the input says. `read` is `next` and a typed read of the record into `target`, a
-// `T`. `build` builds a record's document. `column`, `cell` and `cells` are a format's with named columns, nil for
+// `T`, whose typed reader takes `it.scratch` as its temp allocator. `build` builds a record's document. `column`, `cell` and `cells` are a format's with named columns, nil for
 // another, and `close` frees `it.format`, nil for a format that keeps none. `ends` is the byte that ends a record under
 // each framing where a backward scan for it finds the end of a whole record, 0 where only a walk of the records does,
 // and 0xff where the format reads no stream.
@@ -159,7 +163,8 @@ next :: #force_inline proc(it: ^Reader) -> (Record, bool) {
 // offset from the input's first byte. Returns false at the input's end, on a fault in `it.fault`, with `.Plan_Mismatch`
 // when `plan` is no plan of `T` by the format, or with `.Out_Of_Memory` when the reader's memory is refused. A refused
 // record returns true and its error, and the next read goes on after it. When a refused record's value runs past its
-// end, `target` may hold values read past it.
+// end, `target` may hold values read past it. A name the read decoded for `err` lasts until the next call on `it`, and
+// one in a collected error as long as the caller's temp allocator.
 read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error) {
 	if it.fault != nil {
 		return false, {}
@@ -175,9 +180,17 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 			return false, {kind = .Out_Of_Memory}
 		}
 		it.frames = frames
+		it.scratch = {backing_allocator = it.allocator, minimum_block_size = 4096}
+	}
+	if it.scratch.total_used != 0 {
+		runtime.arena_free_all(&it.scratch)
 	}
 	if it.input.procedure == nil {
+		from := len(opts.collect.errors) if opts.collect != nil else 0
 		more = it.services.read(it, target, T, plan, opts, allocator, &err)
+		if opts.collect != nil {
+			keep_collected(it, opts.collect, from)
+		}
 		return
 	}
 	// A record the window cannot tell yet is read again after a refill, so what its first read collected and wrote goes.
@@ -207,12 +220,28 @@ read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Opt
 		}
 	}
 	if opts.collect != nil {
-		for &e in opts.collect.errors[len(kept.errors):] {
-			shift_error(&e, it.base)
-		}
+		keep_collected(it, opts.collect, len(kept.errors))
 	}
 	shift_error(&err, it.base)
 	return
+}
+
+// Moves the offsets of the errors `c` collected past `from` by the window's base, and copies their names that lie in
+// the reader's scratch to the temp allocator, where a collected error's decoded names live.
+@(private)
+keep_collected :: proc(it: ^Reader, c: ^typed.Collected, from: int) {
+	for &e in c.errors[from:] {
+		shift_error(&e, it.base)
+		for &s in e.steps[:e.n_steps] {
+			name, named := s.(core.Name)
+			for b := it.scratch.curr_block; named && b != nil; b = b.prev {
+				if uintptr(raw_data(name)) - uintptr(b.base) < uintptr(b.used) {
+					s = core.Name(strings.clone(string(name), context.temp_allocator) or_else "")
+					break
+				}
+			}
+		}
+	}
 }
 
 // Reads the next record and the answers of `path` in it, as `scan` of `core/build` reads the record's text, into a
@@ -305,6 +334,7 @@ close :: proc(it: ^Reader) {
 	}
 	delete(it.frames, it.allocator)
 	delete(it.buf, it.allocator)
+	runtime.arena_destroy(&it.scratch)
 	it^ = {}
 }
 
