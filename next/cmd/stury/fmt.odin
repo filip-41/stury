@@ -142,7 +142,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) {
 	o := &run.opts
 	data := ins.data
 	cells := reads_cells(o)
-	if !cells && blank(data, json.Spec(ins.as.spec)) {
+	if !cells && json.blank(data, json.Spec(ins.as.spec)) {
 		return
 	}
 	heap := runtime.heap_allocator()

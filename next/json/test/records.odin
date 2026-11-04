@@ -1124,3 +1124,20 @@ records_next_window :: proc(t: ^testing.T) {
 		free_all(context.temp_allocator)
 	}
 }
+
+// `blank` says a text holds no document exactly when its documents, read one after another, are none and end with no
+// fault.
+@(test)
+records_none_when_blank :: proc(t: ^testing.T) {
+	texts := []string{"", " \n\t\r", "\xef\xbb\xbf", "\xef\xbb\xbf ", "\v", "\f", "\u00a0", "\ufeff", "\u2028", "\u2029", " \v\u00a0\u2028 ", "// c\n", "/* c */ ", "/* c", "/", "// c\n\v", "1", " x", "\xef\xbb"}
+	for spec in json.Spec {
+		for text in texts {
+			it := records.open(transmute([]u8)text, json.as(spec), .Concatenated)
+			_, some := records.next(&it)
+			none := !some && it.fault == nil
+			records.close(&it)
+			blank := json.blank(transmute([]u8)text, spec)
+			testing.expectf(t, blank == none, "%v %q: blank %v, records none %v", spec, text, blank, none)
+		}
+	}
+}

@@ -45,6 +45,7 @@ Validating and building a document, in `json` and in `dsv`, then reading and edi
 
 ```odin
 json.validate  :: proc(src: []u8, spec: json.Spec, opts := json.Options{}) -> Maybe(core.Fault)
+json.blank     :: proc(src: []u8, spec: json.Spec) -> bool // no document: only the spec's whitespace and whole comments
 json.build     :: proc(src: []u8, spec: json.Spec, opts := json.Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error)
 core.destroy   :: proc(doc: ^core.Document)
 core.kind, core.length, core.span, core.int_value, core.number // a node's kind, its member or element count, its source bytes and its numbers

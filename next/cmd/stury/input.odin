@@ -309,7 +309,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	if ins.framing != .Concatenated || !ins.last {
 		return
 	}
-	if blank(data, json.Spec(ins.as.spec)) {
+	if json.blank(data, json.Spec(ins.as.spec)) {
 		close_file(ins)
 		return
 	}
@@ -893,34 +893,6 @@ lines_through :: proc(ins: ^Inputs, at: int) {
 	stop := len(data) if nl < 0 else at + nl + 1
 	ins.line += bytes.count(data[ins.line_end:stop], {'\n'})
 	ins.line_end = stop
-}
-
-// Whether `data` holds no text: only space, after a byte order mark, and under JSONC or JSON5 only space and finished
-// comments.
-blank :: proc(data: []byte, spec := json.Spec.Json) -> bool {
-	data := data
-	if len(data) >= 3 && data[0] == 0xef && data[1] == 0xbb && data[2] == 0xbf {
-		data = data[3:]
-	}
-	for i := 0; i < len(data); i += 1 {
-		switch {
-		case jq.is_space(data[i]):
-		case spec == .Json || data[i] != '/' || i + 1 == len(data):
-			return false
-		case data[i + 1] == '/':
-			nl := bytes.index_byte(data[i:], '\n')
-			i = len(data) if nl < 0 else i + nl
-		case data[i + 1] == '*':
-			end := bytes.index(data[i + 2:], {'*', '/'})
-			if end < 0 {
-				return false
-			}
-			i += end + 3
-		case:
-			return false
-		}
-	}
-	return true
 }
 
 // The length of the byte order mark's start that `data` opens with when the mark is cut short, else 0.

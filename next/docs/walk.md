@@ -42,7 +42,7 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 
 Each format package exposes the names a caller uses: `Spec`, `Options`, `Detail`, `RULES`, `walk`, `validate` and
 `build`, plus the token spelling detail its walk documents (`json.Number_Spelling` and `json.number_spelling_of`).
-`json` also exposes `Tolerance`, `commit`, `text` and `number`, and `dsv` exposes `Tolerance`, `text` and `number`. `make surface` lists every public name.
+`json` also exposes `Tolerance`, `commit`, `text`, `number` and `blank`, and `dsv` exposes `Tolerance`, `text` and `number`. `make surface` lists every public name.
 
 `core`'s walk interface is what a format author uses: `Kind` and `Role` are a token's fields, `Token`, `Action` and
 `Hook_Regs` are a hook's signature, `Fault`, `Fault_Kind` and `Rules` are a walk's result, `fault_at` and `fault_of`

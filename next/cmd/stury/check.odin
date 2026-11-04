@@ -49,7 +49,7 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 @(private = "file")
 check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^core.Runner) -> string {
 	cells := reads_cells(o)
-	if cells && len(strings.trim_prefix(string(data), "\xef\xbb\xbf")) == 0 ||!cells && !o.seq && blank(data, json.Spec(src.as.spec)) {
+	if cells && len(strings.trim_prefix(string(data), "\xef\xbb\xbf")) == 0 ||!cells && !o.seq && json.blank(data, json.Spec(src.as.spec)) {
 		line, col := core.locate(data, u64(len(data)))
 		return message.build_temp("%s:%d:%d: %s\n", name, line, col, no_text(o))
 	}

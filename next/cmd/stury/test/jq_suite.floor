@@ -21,7 +21,7 @@ cli.tsv differential	137
 cli.tsv pipe	16
 cli.tsv grammar	21
 cli.tsv jsonc	39
-cli.tsv json5	38
+cli.tsv json5	41
 cli.tsv stury	62
 cli.tsv libc	14
 cli.tsv compile	6

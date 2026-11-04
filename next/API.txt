@@ -414,6 +414,7 @@ SPINE_LEVELS :: 4
 Spec :: enum u8 {
 Tolerance :: enum u8 {
 as :: proc (spec: Spec, opts := Options{}) -> core.As {
+blank :: proc (src: []u8, spec: Spec) -> bool {
 build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
 commit :: proc(list: ^core.Edit_List, as: Spec, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 each_answer :: proc {each_answer_one, each_answer_many}

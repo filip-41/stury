@@ -73,6 +73,20 @@ validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Opt
 	return core.validate(src, as(spec, opts))
 }
 
+// Whether `src` holds no document: past an optional leading BOM, only the spec's whitespace and, in a spec with
+// comments, comments that end. `validate` refuses such a text with `Truncated`, as it does a document cut short.
+blank :: proc "contextless" (src: []u8, spec: Spec) -> bool {
+	p := raw_data(src)
+	end := p[len(src):]
+	q := p[core.text_start(src, 0):]
+	switch spec {
+	case .Json:  return gap_end(q, end, .Json) == end
+	case .Jsonc: return gap_end(q, end, .Jsonc) == end
+	case .Json5: return gap_end(q, end, .Json5) == end
+	}
+	return false
+}
+
 // The handle's validate: the walk compiled for the handle's spec.
 @(private)
 validate_as :: proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {
