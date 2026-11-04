@@ -97,7 +97,8 @@ serial_node :: proc(p: ^^jq.Node, w: ^Serial_Walk) -> bool {
 	if n.kind == .Call && (slice.contains(SERIAL_CALLS, n.name) || n.name == "recurse" && len(n.args) > 0) {
 		return true
 	}
-	if f := n.callee; n.kind == .Call && f != nil && !slice.contains(w.done[:], f) {
+	// A call of a filter parameter runs its argument, which the walk sees where it is passed.
+	if f := n.callee; n.kind == .Call && f != nil && !n.is_param && !slice.contains(w.done[:], f) {
 		recursive := slice.contains(w.on[:], f)
 		append(&w.on, f)
 		if recursive || serial_node(&f.body, w) {
