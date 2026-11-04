@@ -488,6 +488,13 @@ read_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 		case .Json5: return read_framed(it, target, T, plan, read, allocator, err, .Json5)
 		}
 	}
+	if it.framing == .Seq {
+		switch Spec(it.as.spec) {
+		case .Json:  return read_seq(it, target, T, plan, read, allocator, err, .Json)
+		case .Jsonc: return read_seq(it, target, T, plan, read, allocator, err, .Jsonc)
+		case .Json5: return read_seq(it, target, T, plan, read, allocator, err, .Json5)
+		}
+	}
 	switch Spec(it.as.spec) {
 	case .Json:  return read_spec(it, target, T, plan, read, allocator, err, .Json)
 	case .Jsonc: return read_spec(it, target, T, plan, read, allocator, err, .Jsonc)
@@ -504,20 +511,25 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 	if !ok {
 		return false
 	}
-	lo := rec.at
-	cut := lo + u64(len(rec.text))
-	if it.framing != .Seq {
-		read_line(it, lo, cut, target, T, plan, read, allocator, err, S)
-		return true
+	// Inlined, with the read in place in it, so the reader of each line is one procedure.
+	#force_inline read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
+	return true
+}
+
+// `read_spec` under `.Seq`.
+@(private)
+read_seq :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
+	rec, ok := frame_line(it)
+	if !ok {
+		return false
 	}
 	if it.state[1] == UNFRAMED || it.state[1] == STRAY {
-		f := seq_fault(it, rec, nil).?
-		err^ = {kind = .Walk, at = f.at, inner = f}
-		typed.collect_error(read.collect, err^)
+		seq_refuse(it, rec, read.collect, err)
 		return true
 	}
+	lo := rec.at
 	kept := typed.collected_mark(read.collect)
-	read_line(it, lo, cut, target, T, plan, read, allocator, err, S)
+	read_line(it, lo, lo + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
 	if err.kind != .None {
 		if hi, at, whole := value_end(it.src, rec, S, options_of(it.as)); whole {
 			typed.collected_restore(read.collect, kept)
@@ -528,12 +540,9 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 		}
 	}
 	// A number the walk passed may have been cut short whatever the target makes of it.
-	if err.kind != .Walk {
-		if f, bad := seq_fault(it, rec, nil).?; bad {
-			typed.collected_restore(read.collect, kept)
-			err^ = {kind = .Walk, at = f.at, inner = f}
-			typed.collect_error(read.collect, err^)
-		}
+	if _, bad := seq_fault(it, rec, nil).?; bad && err.kind != .Walk {
+		typed.collected_restore(read.collect, kept)
+		seq_refuse(it, rec, read.collect, err)
 	}
 	return true
 }
@@ -545,7 +554,7 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 read_line :: proc(it: ^records.Reader, lo, cut: u64, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) {
 	opts := options_of(it.as)
 	kept := typed.collected_mark(read.collect)
-	if !read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, true) {
+	if !#force_inline read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, true) {
 		return
 	}
 	typed.collected_restore(read.collect, kept)
@@ -560,6 +569,14 @@ read_line :: proc(it: ^records.Reader, lo, cut: u64, target: rawptr, T: typeid, 
 	}
 	err^ = {}
 	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, scratch_allocator, runtime.arena_allocator(&it.scratch), err, false)
+}
+
+// Refuses the `.Seq` record `rec` with the fault `seq_fault` gives it.
+@(private)
+seq_refuse :: proc(it: ^records.Reader, rec: records.Record, collect: ^typed.Collected, err: ^core.Typed_Error) {
+	f := seq_fault(it, rec, nil).?
+	err^ = {kind = .Walk, at = f.at, inner = f}
+	typed.collect_error(collect, err^)
 }
 
 // Reads the next record under `.Concatenated` or `.Entries` into `target` by the framing's own walk. A refusal stops

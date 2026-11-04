@@ -158,7 +158,7 @@ chain_pieces :: proc(arg: rawptr) {
 
 // Returns the next record, or with the format's `span` service the records up to the first at or past `to` as one.
 @(private)
-next_span :: proc(it: ^Reader, to: u64) -> (Record, bool) {
+next_span :: #force_inline proc(it: ^Reader, to: u64) -> (Record, bool) {
 	if it.fault != nil || it.services.span == nil {
 		return next(it)
 	}
