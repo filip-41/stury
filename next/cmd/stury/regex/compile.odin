@@ -185,7 +185,7 @@ expand_folds :: proc(n: ^Node, behind := false) -> ^Node {
 		}
 	case .Char:
 		if runes, ok := multi_fold(n.r); ok && n.fold && !behind {
-			return either(n, fold_string(runes))
+			return new_node(.Alt, n, fold_string(runes))
 		}
 		return n
 	case .Class:
@@ -193,7 +193,7 @@ expand_folds :: proc(n: ^Node, behind := false) -> ^Node {
 		if len(strs) == 0 {
 			return n
 		}
-		alt := either(n)
+		alt := new_node(.Alt, n)
 		for s in strs {
 			append(&alt.kids, fold_string(s))
 		}
@@ -215,11 +215,9 @@ expand_folds :: proc(n: ^Node, behind := false) -> ^Node {
 					runes[k] = n.kids[i + k].r
 				}
 				if r, ok := unfold(runes[:w]); ok {
-					seg := new_node(.Cat)
-					append(&seg.kids, ..n.kids[i:i + w])
-					one := new(Node)
-					one.kind, one.r, one.fold = .Char, r, true
-					append(&kids, either(seg, one))
+					one := new_node(.Char)
+					one.r, one.fold = r, true
+					append(&kids, new_node(.Alt, new_node(.Cat, ..n.kids[i:i + w]), one))
 					width = w
 				}
 			}
@@ -258,13 +256,6 @@ class_strings :: proc(cls: ^Class) -> [dynamic][]u32 {
 		append(&out, s)
 	}
 	return out
-}
-
-@(private = "file")
-either :: proc(kids: ..^Node) -> ^Node {
-	n := new_node(.Alt)
-	append(&n.kids, ..kids)
-	return n
 }
 
 @(private = "file")
