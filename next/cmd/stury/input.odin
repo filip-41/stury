@@ -53,6 +53,7 @@ mapped_input_name: string
 Source :: struct {
 	as:      core.As,
 	framing: core.Framing,
+	spec:    Maybe(json.Spec), // the JSON-like format's, none for a delimited one
 }
 
 Inputs :: struct {
@@ -317,7 +318,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	if ins.framing != .Concatenated || !ins.last {
 		return
 	}
-	if json.blank(data, json.Spec(ins.as.spec)) {
+	if json.blank(data, ins.spec.?) {
 		close_file(ins)
 		return
 	}
@@ -340,7 +341,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 		doc, fault = jq.build_text(data, ins.as, runtime.heap_allocator() if run.opts.stream else context.allocator)
 	}
 	if f, bad := fault.?; bad {
-		if !stray_bom && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) && json.Spec(ins.as.spec) == .Json {
+		if !stray_bom && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) && ins.spec == .Json {
 			route.fallback = fallback
 			return
 		}
@@ -380,7 +381,7 @@ text_value :: proc(ins: ^Inputs, built: core.Document, at: int, own: bool) -> (j
 @(private = "file")
 fault_message :: proc(ins: ^Inputs, data: []byte, f: core.Fault, end := -1) -> string {
 	if ins.next_file > 1 {
-		return fault_told(ins.name, data, f, ins.as, ins.file_lines)
+		return fault_told(ins.name, data, f, ins.spec, ins.file_lines)
 	}
 	return jq.parse_message(data, f, ins.parsed.line, ins.parsed.column, "", end)
 }
@@ -393,11 +394,11 @@ text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (jq.V
 	if reads_cells(&ins.run.opts) {
 		return cells_fault(ins, found)
 	}
-	if json.Spec(ins.as.spec) != .Json {
+	if ins.spec != .Json {
 		fail_dialect(ins, data, found)
 	}
 	f := literal_cut(data, found, ins.framing)
-	ins.note = fault_note(data, f, ins.as, &ins.run.opts)
+	ins.note = fault_note(data, f, ins.spec, &ins.run.opts)
 	if !ins.run.opts.stream {
 		ins.line, ins.text_end = lines_read(ins, int(f.at) + 1), 0
 		msg := fault_message(ins, data, f, end)
@@ -535,7 +536,7 @@ open_next :: proc(ins: ^Inputs) -> bool {
 		}
 		// A JSONC or JSON5 file is one text, its comments around it, so it is read whole.
 		follow := ins.run.opts.follow
-		if follow || !is_regular_file(f) && (reads_cells(&ins.run.opts) || json.Spec(ins.as.spec) == .Json) {
+		if follow || !is_regular_file(f) && (reads_cells(&ins.run.opts) || ins.spec == .Json) {
 			ins.pipe = pipe_start(f, follow, ins.name, ins.run)
 			ins.open = true
 			take_data(ins, nil)
@@ -932,14 +933,14 @@ cut_bom_len :: proc(data: []byte) -> int {
 fail_dialect :: proc(ins: ^Inputs, data: []byte, f: core.Fault) -> ! {
 	run := ins.run
 	flush_some(&run.output, force = true)
-	message.write_stderr("stury: error: %s\n%s", fault_told(ins.name, data, f, ins.as, ins.file_lines), fault_note(data, f, ins.as, &run.opts))
+	message.write_stderr("stury: error: %s\n%s", fault_told(ins.name, data, f, ins.spec, ins.file_lines), fault_note(data, f, ins.spec, &run.opts))
 	finish(run, EXIT_INPUT)
 }
 
-// The fault `f` of the text `data` of file `name`, read as `as`, told as `NAME:LINE:COLUMN: SENTENCE`, its line counted
+// The fault `f` of the text `data` of file `name`, read as `spec` or delimited, told as `NAME:LINE:COLUMN: SENTENCE`, its line counted
 // on from the `lines` before `data`, or as `NAME: SENTENCE` when it is at no byte. A JSON text's sentence is the one jq's
 // messages use (`jq.fault_sentence`).
-fault_told :: proc(name: string, data: []byte, f: core.Fault, as: core.As, lines := 0) -> string {
+fault_told :: proc(name: string, data: []byte, f: core.Fault, spec: Maybe(json.Spec), lines := 0) -> string {
 	if f.rules != &json.RULES {
 		line, col := core.locate(data, f.at)
 		return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, core.rule_of(f).message)
@@ -952,7 +953,7 @@ fault_told :: proc(name: string, data: []byte, f: core.Fault, as: core.As, lines
 	sentence := jq.fault_sentence(f, rest)
 	// JSON5 spells them, JSON has no value for them, and the library refuses them as a literal.
 	unsigned := strings.trim_left(rest, "+-")
-	if json.Spec(as.spec) == .Json5 && f.kind == .Bad_Char && (strings.has_prefix(unsigned, "Infinity") || strings.has_prefix(unsigned, "NaN")) {
+	if spec == .Json5 && f.kind == .Bad_Char && (strings.has_prefix(unsigned, "Infinity") || strings.has_prefix(unsigned, "NaN")) {
 		sentence = "Infinity and NaN have no JSON value"
 	}
 	return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, sentence)
@@ -970,13 +971,13 @@ literal_cut :: proc(data: []byte, f: core.Fault, framing: core.Framing) -> core.
 // For the faults whose cure is a flag of stury's own, the line of `data` the fault `f` is at, a caret under its byte,
 // and the flag, else "". A trailing comma and a comment are JSONC's, and a nesting past the cap is raised by
 // --max-depth, which the hint asks for only when it was not given. The text ends in a newline.
-fault_note :: proc(data: []byte, f: core.Fault, as: core.As, o: ^Opts) -> string {
+fault_note :: proc(data: []byte, f: core.Fault, spec: Maybe(json.Spec), o: ^Opts) -> string {
 	at := int(f.at)
 	hint: string
 	switch {
 	case f.kind == .Too_Deep:
 		hint = "a larger --max-depth reads it" if o.max_depth != 0 else "--max-depth N raises the nesting limit"
-	case f.kind != .Bad_Char || at >= len(data) || json.Spec(as.spec) != .Json:
+	case f.kind != .Bad_Char || at >= len(data) || spec != .Json:
 		return ""
 	case data[at] == '/' && at + 1 < len(data) && (data[at + 1] == '/' || data[at + 1] == '*'):
 		hint = "--from jsonc reads comments"

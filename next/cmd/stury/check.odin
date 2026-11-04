@@ -49,7 +49,7 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 @(private = "file")
 check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^core.Runner) -> string {
 	cells := reads_cells(o)
-	if cells && len(strings.trim_prefix(string(data), "\xef\xbb\xbf")) == 0 ||!cells && !o.seq && json.blank(data, json.Spec(src.as.spec)) {
+	if cells && len(strings.trim_prefix(string(data), "\xef\xbb\xbf")) == 0 ||!cells && !o.seq && json.blank(data, src.spec.?) {
 		line, col := core.locate(data, u64(len(data)))
 		return message.build_temp("%s:%d:%d: %s\n", name, line, col, no_text(o))
 	}
@@ -64,7 +64,7 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 		fault = records.validate(data, src.as, runner)
 		// Strict JSON reads texts one after another, which `validate`, judging one, refuses as trailing text. A byte no
 		// text starts with, right after a text, stays trailing text, as the reader of the texts from the first tells it.
-		if f, bad := fault.?; bad && json.Spec(src.as.spec) == .Json && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) {
+		if f, bad := fault.?; bad && src.spec == .Json && f.rules == &json.RULES && f.detail == u8(json.Detail.Trailing) {
 			if next, more := first_fault(data, src.as, .Concatenated, runner, f.at).?; !more || next.at != f.at || jq.is_space(data[f.at - 1]) {
 				fault = next if more else nil
 			}
@@ -77,7 +77,7 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 		return ""
 	}
 	f = literal_cut(data, f, src.framing)
-	return message.build_temp("%s\n%s", fault_told(name, data, f, src.as), fault_note(data, f, src.as, o))
+	return message.build_temp("%s\n%s", fault_told(name, data, f, src.spec), fault_note(data, f, src.spec, o))
 }
 
 // The first fault of the records of `data` from byte `at`, framed by `framing`.

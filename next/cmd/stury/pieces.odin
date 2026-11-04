@@ -174,7 +174,7 @@ records_pieces :: proc(ins: ^Inputs) -> bool {
 	// Strict JSON texts are cut at line ends, with no pass over the text to find the cuts, and read as texts. A cut
 	// inside a text ends the piece before it on the text it cuts short, and the pieces past that cut are not written.
 	// The text past it is then cut where the texts end.
-	at, crossed := records_run(ins, .Lines if ins.framing == .Concatenated && json.Spec(ins.as.spec) == .Json else ins.framing, from, cells)
+	at, crossed := records_run(ins, .Lines if ins.framing == .Concatenated && ins.spec == .Json else ins.framing, from, cells)
 	if crossed {
 		at, _ = records_run(ins, ins.framing, at, cells)
 	}
@@ -212,7 +212,7 @@ records_run :: proc(ins: ^Inputs, framing: core.Framing, from: u64, cells: bool)
 entries_pieces :: proc(ins: ^Inputs) -> bool {
 	run := ins.run
 	data := ins.data
-	if len(data) < POOLED_BYTES || json.Spec(ins.as.spec) != .Json || run.route.select.op != .None || !parallel(run) {
+	if len(data) < POOLED_BYTES || ins.spec != .Json || run.route.select.op != .None || !parallel(run) {
 		return false
 	}
 	entries, at, found := json.spine(data, ins.as)

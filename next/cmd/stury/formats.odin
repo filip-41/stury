@@ -70,7 +70,7 @@ input_source :: proc(o: ^Opts, json_reading: core.As) -> Source {
 	if reads_cells(o) {
 		return {as = dsv.as(.Csv if o.from == .Csv else .Tsv), framing = .Lines}
 	}
-	return {as = json_reading, framing = .Seq if o.seq else .Lines if reads_lines(o) else .Concatenated}
+	return {as = json_reading, framing = .Seq if o.seq else .Lines if reads_lines(o) else .Concatenated, spec = json.Spec(json_reading.spec)}
 }
 
 // Reports whether the input format is a delimited one.

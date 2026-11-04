@@ -206,7 +206,7 @@ length_of_names :: proc(n: ^jq.Node, names: ^[dynamic]string) -> bool {
 spine_run :: proc(ins: ^Inputs, put: Spine_Put) -> (job: Spine_Job, at: u64, ok: bool) {
 	run := ins.run
 	data := ins.data
-	if len(data) < POOLED_BYTES || json.Spec(ins.as.spec) != .Json || !parallel(run) {
+	if len(data) < POOLED_BYTES || ins.spec != .Json || !parallel(run) {
 		return
 	}
 	entries: core.As
@@ -356,7 +356,7 @@ Collect_Job :: struct {
 collect_pieces :: proc(ins: ^Inputs) -> bool {
 	run := ins.run
 	data := ins.data
-	if len(data) < POOLED_BYTES || json.Spec(ins.as.spec) != .Json || !parallel(run) {
+	if len(data) < POOLED_BYTES || ins.spec != .Json || !parallel(run) {
 		return false
 	}
 	names := make([dynamic]string, context.temp_allocator)
