@@ -746,19 +746,44 @@ def as_jq(stderr):
     return re.sub(rb"(?m)^stury: ", b"jq: ", stderr).replace(b"Use stury --help", b"Use jq --help")
 
 
+CONSTS = {"NaN": Decimal("NaN"), "Infinity": Decimal("Infinity"), "-Infinity": Decimal("-Infinity")}
+DECODER = json.JSONDecoder(parse_float=Decimal, parse_int=Decimal, parse_constant=CONSTS.__getitem__)
+
+
+def jq_value(v):
+    """A decoded value whose equality is jq's: U+FFFD for a lone surrogate."""
+    fix = lambda v: (re.sub("[\ud800-\udfff]", "�", v) if isinstance(v, str) else v)
+    if isinstance(v, list):
+        return [jq_value(x) for x in v]
+    if isinstance(v, dict):
+        return {fix(k): jq_value(x) for k, x in v.items()}
+    return fix(v)
+
+
 def load(text):
     """A JSON text as a value whose equality is jq's: decimal numbers, U+FFFD for a lone surrogate."""
-    fix = lambda v: (re.sub("[\ud800-\udfff]", "�", v) if isinstance(v, str) else v)
+    return jq_value(DECODER.decode(text))
 
-    def walk(v):
-        if isinstance(v, list):
-            return [walk(x) for x in v]
-        if isinstance(v, dict):
-            return {fix(k): walk(x) for k, x in v.items()}
-        return fix(v)
 
-    consts = {"NaN": Decimal("NaN"), "Infinity": Decimal("Infinity"), "-Infinity": Decimal("-Infinity")}
-    return walk(json.loads(text, parse_float=Decimal, parse_int=Decimal, parse_constant=consts.__getitem__))
+def same_output(a, b):
+    """Whether two outputs are the same bytes, or the same JSON values in any layout and number spelling: stury prints a
+    number as it was written, where jq prints decNumber's spelling."""
+    if a == b:
+        return True
+    try:
+        values = []
+        for raw in (a, b):
+            text, at, found = raw.decode("utf-8", "surrogateescape"), 0, []
+            while at < len(text):
+                if text[at] in " \t\r\n":
+                    at += 1
+                    continue
+                value, at = DECODER.raw_decode(text, at)
+                found.append(jq_value(value))
+            values.append(found)
+        return same(*values)
+    except ValueError:
+        return False
 
 
 def same(a, b):
@@ -818,7 +843,7 @@ def check_suite(stury, diff, case):
         why = judge(case, code, out, err)
     if why is None and diff and not own:
         jq = run(["jq"] + argv[1:], stdin)
-        if (code, out, as_jq(err)) != jq:
+        if (code, as_jq(err)) != (jq[0], jq[2]) or not same_output(out, jq[1]):
             why = f"differs from jq:\n     stury: exit {code} out {out!r} err {as_jq(err)!r}\n     jq:    exit {jq[0]} out {jq[1]!r} err {jq[2]!r}"
     return case["file"], describe(case) + f"\n     input: {stdin.strip()}", why
 
@@ -833,7 +858,7 @@ def check_fast_route(stury, diff, opts, stdin, *whole):
         jq = run(["jq"] + jq_args(opts), stdin + "\n")
         # A parse error names the library's fault, at its byte, not jq's message (docs/cli.md, "Differences from jq").
         parse_errors = all(e.startswith(b"jq: parse error: ") for e in (as_jq(fast[2]), jq[2]))
-        if (fast[0], fast[1]) != jq[:2] or as_jq(fast[2]) != jq[2] and not parse_errors:
+        if fast[0] != jq[0] or not same_output(fast[1], jq[1]) or as_jq(fast[2]) != jq[2] and not parse_errors:
             why = f"differs from jq: {fast} vs {jq}"
     return "fast route", f"fast route: stury {' '.join(opts)} <<< {stdin[:200]!r}", why
 
