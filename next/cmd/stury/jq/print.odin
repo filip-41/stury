@@ -288,9 +288,14 @@ put_number :: proc(p: ^Printer, n: Number) {
 put_string :: proc(out: ^write.Out, s: string, opts: core_pkg.Write_Options) {
 	mark := out.cursor
 	if json.put_string(out, s, {ascii = opts.ascii, escape_del = true}) == .Bad_Utf8 {
-		out.cursor = mark
-		json.put_string(out, valid_utf8(s), {ascii = opts.ascii, escape_del = true})
+		put_valid(out, s, opts, mark)
 	}
+}
+
+@(private = "file", cold)
+put_valid :: #force_no_inline proc(out: ^write.Out, s: string, opts: core_pkg.Write_Options, mark: int) {
+	out.cursor = mark
+	json.put_string(out, valid_utf8(s), {ascii = opts.ascii, escape_del = true})
 }
 
 // The punctuation `c` of a container of kind `k`, painted in its colour when the layout has colours.

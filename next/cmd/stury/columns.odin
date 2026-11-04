@@ -12,6 +12,7 @@ import "core:strings"
 import core "../../core"
 import "../../core/write"
 import records "../../core/records"
+import json "../../json"
 import "jq"
 
 Column_Shape :: enum u8 {
@@ -238,11 +239,11 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 		l := o.layout
 		switch {
 		case !l.opts.pretty && l.colors == nil && !l.opts.ascii && !l.comments && o.table == nil:
-			// Compact JSON, written as the printer writes the object.
+			// Compact JSON, written as the printer writes the object. A cell the walk judged is UTF-8.
 			for m in cols.members {
 				put_lead(&o.buf, m.lead)
 				if s, text := column_cell(it, rec, row, m.at, buf).?; text {
-					jq.put_string(&o.buf, s, {})
+					json.put_string(&o.buf, s, {escape_del = true})
 				} else {
 					intrinsics.unaligned_store((^u32)(write.room(&o.buf, 4)), 0x6c6c756e) // "null"
 					o.buf.cursor += 4
