@@ -141,7 +141,6 @@ advance :: proc(line, column: ^int, b: []byte) {
 }
 
 // The newlines in `b`: 64 bytes at a time into byte counters, which are summed before one can overflow.
-@(private = "file")
 count_newlines :: proc(b: []byte) -> (n: int) #no_bounds_check {
 	V :: #simd[16]u8
 	ROUNDS :: 255

@@ -73,6 +73,18 @@ CSV = [".id", "[.id, .qty]", "select(.qty | tonumber > 8000) | .name", "."]
 WHOLE = [["."], ["-c", "."], ["--tab", "."], ["--indent", "1", "."], ["--indent", "0", "."], ["-S", "."], ["--seq", "-c", "."],
          ["-j", "."], ["-a", "-c", "."], ["-C", "-c", "."], ["-e", "-c", "."], ["length"], ["fmt"], ["fmt", "--tab"],
          ["fmt", "--check"]]
+# Filters over the whole document, which build it on the pool's threads.
+DOCUMENT = ["group_by(.i % 5) | map([.[0].o.k[0], length])", "reduce .[] as $r (0; . + $r.v)", "sort_by(-.i) | .[0:2]",
+            "[paths] | length", "to_entries | .[-1]"]
+SPINE_DOCUMENT = [".logs | group_by(.i % 5) | map([.[0].o.k[0], length])", "reduce .logs[] as $r (0; . + $r.v)",
+                  "[.n, .tail, (.logs | length)]", "del(.logs) | keys"]
+# Entries nested `DEPTH` deep under the root array, one of them a level deeper at the fault's place.
+DEPTH = 40
+
+
+def nested_text(at):
+    entries = ["[" * (DEPTH + (i == at)) + str(i) + "]" * (DEPTH + (i == at)) for i in range(COUNT // 4)]
+    return "[" + ",".join(entries) + "]"
 
 
 def cases(directory):
@@ -112,6 +124,13 @@ def cases(directory):
             out.append(w + [arr])
             out.append(w + [spine])
         out.append(["-c", ".logs | length", spine])
+        for f in DOCUMENT:
+            out.append(["-c", f, arr])
+        for f in SPINE_DOCUMENT:
+            out.append(["-c", f, spine])
+        nested = file(f"nested-{fault}.json", nested_text(at if at is None else at // 4))
+        out.append(["--max-depth", str(DEPTH + 1), "-c", "flatten | add", nested])
+        out.append(["--max-depth", str(DEPTH + 2), "-c", "flatten | add", nested])
         out.append(["--explain", "-c", ".", arr])
         out.append(["--explain", "length", spine])
         out.append(["--explain", "-c", ".logs[].v", spine])
@@ -131,6 +150,10 @@ def cases(directory):
     out.append(["-c", ".logs | length", twice])
     out.append(["-c", ".logs | map(.v)", twice])
     out.append(["-c", "[.logs[] | .i]", repeated])
+    for f in SPINE_DOCUMENT:
+        out.append(["-c", f, twice])
+        out.append(["-c", f, repeated])
+    out.append(["-c", "[.logs[] | .i] | add", repeated])
     # Spines with no entries, and a root object whose length is its count of keys.
     empty = file("empty.json", '{"n":1,"logs":[%s],"tail":"x"}' % (" " * (SLICE * 16)))
     blank = file("blank.json", "[%s]" % ("\n" * (SLICE * 16)))

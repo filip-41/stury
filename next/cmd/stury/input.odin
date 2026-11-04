@@ -356,7 +356,9 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	if stray_bom {
 		fault = core.Fault{kind = .Bad_Char}
 	} else {
-		doc, fault, texts = build_whole(data, ins.source, runtime.heap_allocator() if run.opts.stream else context.allocator)
+		// A long strict text's array is built on the pool's threads.
+		pool := run_pool(run) if len(data) >= POOLED_BYTES && ins.spec == .Json else nil
+		doc, fault, texts = build_whole(data, ins.source, runtime.heap_allocator() if run.opts.stream else context.allocator, pool)
 	}
 	if texts {
 		route.fallback = fallback
@@ -372,10 +374,11 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	return v, msg, status, true
 }
 
-// The document of `data` built whole, or its fault. `texts`, with no fault, when the fault is a text after the first,
-// which strict JSON reads as the next text, so that `data` is read as texts one after another.
-build_whole :: proc(data: []byte, src: Source, allocator: runtime.Allocator) -> (doc: core.Document, fault: Maybe(core.Fault), texts: bool) {
-	doc, fault = jq.build_text(data, src.as, allocator)
+// The document of `data` built whole, on `pool`'s threads when it has them, or its fault. `texts`, with no fault, when
+// the fault is a text after the first, which strict JSON reads as the next text, so that `data` is read as texts one
+// after another.
+build_whole :: proc(data: []byte, src: Source, allocator: runtime.Allocator, pool: ^core.Runner = nil) -> (doc: core.Document, fault: Maybe(core.Fault), texts: bool) {
+	doc, fault = jq.judge_build(records.build(data, src.as, allocator = allocator, runner = pool))
 	if f, bad := fault.?; bad && texts_follow(f, src.spec) {
 		return {}, nil, true
 	}
@@ -568,7 +571,7 @@ next_window :: proc(ins: ^Inputs, from: int) {
 	advance_past(ins, from)
 	// --stream's lines are counted to `line_end`, which the window moves.
 	if ins.run.opts.stream {
-		ins.line +=bytes.count(ins.data[min(ins.line_end, from):from], {'\n'})
+		ins.line += jq.count_newlines(ins.data[min(ins.line_end, from):from])
 		ins.line_end = max(ins.line_end - from, 0)
 	}
 	take_data(ins, ins.data[from:])
@@ -606,7 +609,7 @@ take_data :: proc(ins: ^Inputs, carry: []byte) {
 	}
 	if ins.head != nil && !ins.headed {
 		// The window's lines are counted from past the header, as the lines before it were.
-		ins.file_lines -= bytes.count(ins.head, {'\n'})
+		ins.file_lines -= jq.count_newlines(ins.head)
 	}
 	// Each window takes the room the longest takes, so the heap reuses one window's room for the next rather than
 	// keeping the rooms a window grew through.
@@ -842,7 +845,7 @@ lines_read :: proc(ins: ^Inputs, end: int) -> int {
 	if stop < c.at {
 		c^ = {}
 	}
-	c.lines += bytes.count(data[c.at:stop], {'\n'})
+	c.lines += jq.count_newlines(data[c.at:stop])
 	c.at = stop
 	return ins.file_lines + c.lines
 }
@@ -857,7 +860,7 @@ lines_through :: proc(ins: ^Inputs, at: int) {
 	data := ins.data
 	nl := bytes.index_byte(data[at:], '\n')
 	stop := len(data) if nl < 0 else at + nl + 1
-	ins.line += bytes.count(data[ins.line_end:stop], {'\n'})
+	ins.line += jq.count_newlines(data[ins.line_end:stop])
 	ins.line_end = stop
 }
 
