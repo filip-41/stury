@@ -120,8 +120,14 @@ read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> 
 		e := core.Typed_Error{kind = .Walk, at = f.at, inner = f}
 		note(r, regs, e)
 	}
-	if r.first.kind != .None {
-		publish_open(r, regs)
+	// A read ended early gives each open list to its destination.
+	top, child := regs, false
+	for i := r.sp - 1; r.first.kind != .None && i >= 1; i -= 1 {
+		f := &r.frames[i]
+		if owner := frame_owner(f); owner.kind == .Slice || owner.kind == .Dynamic || owner.kind == .Fixed_List {
+			publish_list(r, f, owner, top.a, top.c, child)
+		}
+		top, child = {f.a, f.b, f.c}, true
 	}
 	return r.first
 }
@@ -335,7 +341,11 @@ close_container :: #force_no_inline proc "contextless" (h: ^Reader, f: ^Frame, o
 			h.sp += 1
 			return regs, .Next
 		}
-		return close_whole(h, f, owner, back, t)
+		context = h.ctx
+		lo := u64(uintptr(f.data))
+		if reason := store_whole(h, owner, &h.plan.meta[owner.meta], list_dest(f, owner), f.kind, lo, t.lo + u64(t.n), t); reason != .None {
+			return refuse(h, back, {kind = reason, at = lo})
+		}
 	case .Required:
 		if at := missing_member(h, f, owner, regs); at >= 0 {
 			// The struct's frame is reopened for the path, whose last step this name replaces.
@@ -382,20 +392,4 @@ list_dest :: #force_inline proc "contextless" (f: ^Frame, owner: ^Field) -> uint
 		return f.target
 	}
 	return uintptr(f.c) + uintptr(owner.offset)
-}
-
-// Gives each open list to its destination after a read ended early.
-@(private)
-publish_open :: proc(h: ^Reader, regs: core.Hook_Regs) {
-	top := regs
-	child := false
-	for i := h.sp - 1; i >= 1; i -= 1 {
-		f := &h.frames[i]
-		owner := frame_owner(f)
-		if owner.kind == .Slice || owner.kind == .Dynamic || owner.kind == .Fixed_List {
-			publish_list(h, f, owner, top.a, top.c, child)
-		}
-		top = {f.a, f.b, f.c}
-		child = true
-	}
 }

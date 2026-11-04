@@ -46,7 +46,7 @@ indirect :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Reg
 	case .Number:
 		reason = .Wrong_Kind
 		if t.kind == .Number {
-			(^core.Number)(dest)^ = read_number(h, t)
+			(^core.Number)(dest)^ = h.plan.spelling.number(&h.view, t)
 		}
 	case .Scalar:
 		reason = store_decoded(h, t, (^Scalar)(dest))
@@ -271,18 +271,6 @@ store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core
 	return m.read(v, rawptr(dest), context.allocator).? or_else .None
 }
 
-// The close of a value read whole.
-@(private)
-close_whole :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, back: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	context = h.ctx
-	lo := u64(uintptr(f.data))
-	reason := store_whole(h, owner, &h.plan.meta[owner.meta], list_dest(f, owner), f.kind, lo, t.lo + u64(t.n), t)
-	if reason != .None {
-		return refuse(h, back, {kind = reason, at = lo})
-	}
-	return back, .Next
-}
-
 // A slice of `src`, or its copy when the read copies.
 @(private)
 store_span :: #force_inline proc(h: ^Reader, lo, n: u64, dest: ^string) -> core.Typed_Error_Kind {
@@ -336,12 +324,6 @@ copy_cstring :: proc(s: string, dest: uintptr) -> core.Typed_Error_Kind {
 	}
 	(^cstring)(dest)^ = c
 	return .None
-}
-
-// Reads a number token by its spelling.
-@(private)
-read_number :: proc(h: ^Reader, t: core.Token) -> core.Number {
-	return h.plan.spelling.number(&h.view, t)
 }
 
 @(private)
@@ -472,7 +454,7 @@ integer_number :: proc(h: ^Reader, t: core.Token) -> core.Number {
 			return n
 		}
 	}
-	return read_number(h, t)
+	return h.plan.spelling.number(&h.view, t)
 }
 
 // An integer token as an i64.
@@ -611,7 +593,7 @@ spelled_number :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 	if fld.kind < .I8 || fld.kind > .F64 {
 		return indirect(h, regs, t)
 	}
-	n := integer_number(h, t) if fld.kind <= .U64 else read_number(h, t)
+	n := integer_number(h, t) if fld.kind <= .U64 else h.plan.spelling.number(&h.view, t)
 	if reason := store_number(n, h, t, fld, uintptr(regs.c) + uintptr(fld.offset)); reason != .None {
 		return refuse_value(h, regs, t, reason)
 	}
@@ -688,7 +670,11 @@ seen_set :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, i: int) ->
 	}
 	context = h.ctx
 	if f.extra == nil {
-		f.extra = raw_data(make([]u64, (h.plan.meta[owner.meta].members - 63) / 64 + 1, context.temp_allocator))
+		words, failed := make([]u64, (h.plan.meta[owner.meta].members - 63) / 64 + 1, context.temp_allocator)
+		if failed != nil {
+			return false
+		}
+		f.extra = raw_data(words)
 	}
 	past := i - 63
 	bit := u64(1) << uint(past % 64)
@@ -878,7 +864,13 @@ map_key :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, 
 	}
 	m := &h.plan.meta[owner.meta]
 	if h.first_key {
-		if keys := first_keys(h, f); key in keys^ {
+		// The keys a map frame has met under `.First` are in the frame's `seen`, which a map does not use otherwise.
+		if f.seen == 0 {
+			fresh := new(map[string]struct {}, context.temp_allocator)
+			fresh.allocator = context.temp_allocator
+			f.seen = u64(uintptr(fresh))
+		}
+		if keys := (^map[string]struct {})(uintptr(f.seen)); key in keys^ {
 			scratch, err := runtime.mem_alloc(max(int(m.elem_size), 1), 16, context.temp_allocator)
 			if err != nil {
 				return refuse(h, regs, {kind = .Out_Of_Memory, at = t.lo})
@@ -895,17 +887,6 @@ map_key :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, 
 	}
 	regs.c = u64(uintptr(slot))
 	return regs, .Next
-}
-
-// The keys a map frame has met under `.First`, in the frame's `seen`, which a map does not use otherwise.
-@(private)
-first_keys :: proc(h: ^Reader, f: ^Frame) -> ^map[string]struct {} {
-	if f.seen == 0 {
-		keys := new(map[string]struct {}, context.temp_allocator)
-		keys.allocator = context.temp_allocator
-		f.seen = u64(uintptr(keys))
-	}
-	return (^map[string]struct {})(uintptr(f.seen))
 }
 
 // The zeroed value slot of map key `key`, spelled as the map's key type reads it.
@@ -976,7 +957,7 @@ missing_member :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs
 	if f.seen != 0 {
 		mark_run(h, f, owner, (^Field)(uintptr(regs.b)))
 		for at in end.required {
-			if !seen_test(f, int(at)) {
+			if !seen_set(h, f, owner, int(at)) {
 				return at
 			}
 		}
@@ -989,12 +970,4 @@ missing_member :: proc "contextless" (h: ^Reader, f: ^Frame, owner: ^Field, regs
 		}
 	}
 	return -1
-}
-
-@(private)
-seen_test :: proc "contextless" (f: ^Frame, i: int) -> bool {
-	if i < 63 {
-		return f.seen & (1 << uint(i)) != 0
-	}
-	return f.extra != nil && f.extra[(i - 63) / 64] & (1 << uint((i - 63) % 64)) != 0
 }

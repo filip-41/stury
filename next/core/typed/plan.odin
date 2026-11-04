@@ -505,7 +505,12 @@ fill_base :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti, base: ^runtime.Type_Info
 		b.widest = max(b.widest, v.value.size)
 		list(b, m, ti, v.value, 0)
 	case runtime.Type_Info_Enum:
-		fill_enum(b, f, m, base, v, name)
+		if !plain_integer(v.base) {
+			refuse_plan(b, .Unsupported, name)
+			return
+		}
+		f.kind = .Enum
+		m.enum_info = &base.variant.(runtime.Type_Info_Enum)
 	case runtime.Type_Info_Pointer:
 		if v.elem == nil {
 			refuse_plan(b, .Unsupported, name)
@@ -533,16 +538,6 @@ fill_base :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti, base: ^runtime.Type_Info
 			refuse_plan(b, .Unsupported, name)
 		}
 	}
-}
-
-@(private)
-fill_enum :: proc(b: ^Builder, f: ^Field, m: ^Meta, base: ^runtime.Type_Info, v: runtime.Type_Info_Enum, name: string) {
-	if !plain_integer(v.base) {
-		refuse_plan(b, .Unsupported, name)
-		return
-	}
-	f.kind = .Enum
-	m.enum_info = &base.variant.(runtime.Type_Info_Enum)
 }
 
 @(private)
@@ -689,11 +684,6 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 		}
 	}
 	m.tagged = named >= 2 && len(b.union_tag) > 0
-	union_arms_check(b, m, v)
-}
-
-@(private)
-union_arms_check :: proc(b: ^Builder, m: ^Meta, v: runtime.Type_Info_Union) {
 	taken: bit_set[Value_Class]
 	untagged_objects := 0
 	for &arm, k in m.arms {
