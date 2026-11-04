@@ -1,0 +1,20 @@
+Ho, Chi Minh nil
+City,population,lat,lon
+Oslo,709000,59.91,10.75
+"Ho, Chi Minh",,10.82,106.63
+2:6: Value does not fit the field's type at [0].population
+Oslo 709000
+1 59.91
+2 59.91
+Ho, Chi Minh
+City,population,lat,lon
+Oslo,710000,59.91,10.75
+"Ho, Chi Minh",,10.82,106.63
+Bergen,,60.39,5.32
+City,lat,lon
+Oslo,59.91,10.75
+"Ho, Chi Minh",10.82,106.63
+24 23 Oslo,709000,59.91,10.75
+48 28 "Ho, Chi Minh",,10.82,106.63
+2
+Tromsø,,69.65,18.96

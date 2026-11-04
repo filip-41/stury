@@ -31,7 +31,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: check gate build-cli check-cli-size test test-x86 test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers fixtures size surface \
+.PHONY: check gate build-cli check-cli-size test test-examples test-x86 test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers fixtures size surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
@@ -74,7 +74,13 @@ gate:
 
 # The tests at -o:minimal and at -o:speed, where the optimizer reasons about loads that the walk makes past an input's
 # end. Each compile is its own target, so `make -j test` runs them at once.
-test: $(TEST_TARGETS)
+test: $(TEST_TARGETS) test-examples
+
+# Each program under examples/ is built and run from here, and its output is the `expected.txt` beside it.
+test-examples:
+	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && for e in examples/*/; do e=$${e%/}; echo "== $$e"; \
+		$(ODIN) build $$e $(TEST_OPT) -collection:stury=. -out:$$d/x && $$d/x > $$d/out && diff $$d/out $$e/expected.txt || exit 1; \
+	done
 
 $(TEST_MINIMAL): $(BUILD)/test/minimal/%:
 	@mkdir -p $(@D)
