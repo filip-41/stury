@@ -170,6 +170,11 @@ fan :: proc(runner: ^core.Runner, task: proc(arg: rawptr), arg: rawptr) {
 // its threads, cut where the format finds a record's end by a scan from the first record's, and with none, or no such
 // cut in the format, the whole text is piece 0. Once a task returns false or a piece's records end on a fault, no
 // further piece is handed out. A piece's own memory comes from the heap.
+//
+// A piece's cuts are found as if the text before them were well-formed, so a piece that starts past the returned
+// fault's `at`, which a thread started before the fault was found, may give records that are no records of the text.
+// The caller drops what tasks found at or past that byte. What they found before it is each record `next` gives there,
+// once.
 each :: #force_inline proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> Maybe(core.Fault) {
 	return each_piece(src, as, framing, cast(proc(data: rawptr, piece: ^Reader, k: int) -> bool)task, data, runner, at)
 }
@@ -288,7 +293,8 @@ run_pieces :: proc(arg: rawptr) {
 	// A piece claimed before the one that stops the run still runs, so every piece before a fault runs.
 	for !sync.atomic_load(&e.stop) {
 		k := sync.atomic_add(&e.claimed, 1)
-		if k > e.slices {
+		// A piece past a piece that faulted has cuts found as if the text before were well-formed.
+		if k > e.slices || sync.atomic_load(&e.first) < k {
 			return
 		}
 		// Every slice is claimed, so each one waited for is being read.
@@ -314,7 +320,8 @@ run_pieces :: proc(arg: rawptr) {
 			sync.atomic_store(&e.stop, true)
 			sync.guard(&e.lock)
 			if bad && k < e.first {
-				e.first, e.fault = k, f
+				e.fault = f
+				sync.atomic_store(&e.first, k)
 			}
 		}
 		close(&piece)

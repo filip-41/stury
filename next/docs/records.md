@@ -248,7 +248,9 @@ both guesses of whether the slice starts in a string, then settled in order. A t
 under those two framings, and a CSV text with comment lines or tolerated bare quotes, is one piece. Pieces are
 numbered in source order, with gaps where a slice holds no cut. A task returns false to stop the run, and a piece's
 records that end on a fault stop it too: every piece before it is still handed out, and the first fault in source
-order is returned. A dsv piece past the first keeps the header the first record's read found.
+order is returned. A piece past that fault, which a thread started before the fault was found, may give records that
+are none, since its cut was found as if the text before it were well-formed: drop what the tasks found at or past the
+fault's `at`. What they found before it is each record `next` gives there, once. A dsv piece past the first keeps the header the first record's read found.
 
 ```odin
 sum_piece :: proc(job: ^Job, piece: ^records.Reader, k: int) -> bool {

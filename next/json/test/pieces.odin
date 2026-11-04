@@ -98,6 +98,9 @@ records_check_on_threads :: proc(t: ^testing.T) {
 			}
 		}
 	}
+	// Past a bad string, strings hold text that a piece cut inside them reads as documents.
+	docs := strings.repeat("{\"s\":\"\\n\\\"\\n\"}\n[\"\n{\\\"a\\\":1}\n\"]\n", 3, context.temp_allocator)
+	expect_chain_law(t, pools[:], strings.concatenate({"0\n1\n\"x\x01\"\n", docs}, context.temp_allocator), .Concatenated, .Json)
 	// Root arrays of the pieces, each cut at every byte.
 	for n in 1 ..= 8 {
 		b := strings.builder_make(context.temp_allocator)

@@ -753,8 +753,8 @@ check :: proc(t: ^testing.T, src, want: string, build: Build, spec: any, edit: p
 	return expect_commit(t, &list, want, build, spec)
 }
 
-// `each` on each pool gives the records `next` gives, each once and in piece order, up to and with the piece the first
-// fault ends, and that fault.
+// `each` on each pool returns the fault `next` ends on, and before its byte gives the records `next` gives, each once and in
+// piece order, from every piece the tasks were handed, those past the fault included.
 expect_each_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.As, framing: core.Framing, at: u64 = 0) -> bool {
 	it := records.open(src, as, framing, at, context.temp_allocator)
 	want := make([dynamic][2]u64, context.temp_allocator)
@@ -763,10 +763,14 @@ expect_each_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.A
 	}
 	fault := it.fault
 	records.close(&it)
+	// A piece past the fault may give records that are none, which the caller drops.
+	past := max(u64)
+	if f, bad := fault.?; bad && f.kind not_in core.AT_NO_BYTE {
+		past = f.at
+	}
 	Piece :: struct {
-		k:      int,
-		ended:  bool,
-		recs:   [dynamic][2]u64,
+		k:    int,
+		recs: [dynamic][2]u64,
 	}
 	Got :: struct {
 		lock:   sync.Mutex,
@@ -777,7 +781,6 @@ expect_each_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.A
 		for rec in records.next(piece) {
 			append(&p.recs, [2]u64{rec.at, u64(len(rec.text))})
 		}
-		p.ended = piece.fault != nil
 		sync.guard(&g.lock)
 		append(&g.pieces, p)
 		return true
@@ -787,12 +790,13 @@ expect_each_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.A
 		f := records.each(src, as, framing, collect, &g, &pool.runner, at)
 		slice.sort_by(g.pieces[:], proc(a, b: Piece) -> bool { return a.k < b.k })
 		got := make([dynamic][2]u64, context.temp_allocator)
-		ended, unique := false, true
+		unique := true
 		for p, i in g.pieces {
 			unique &&= i == 0 || p.k != g.pieces[i - 1].k
-			if !ended {
-				append(&got, ..p.recs[:])
-				ended = p.ended
+			for r in p.recs {
+				if r[0] < past {
+					append(&got, r)
+				}
 			}
 			delete(p.recs)
 		}

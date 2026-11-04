@@ -274,6 +274,9 @@ records_check_on_threads :: proc(t: ^testing.T) {
 		}
 		free_all(context.temp_allocator)
 	}
+	// Past a bare quote, quoted cells hold text that a piece cut inside them reads as rows.
+	cells := strings.repeat("2,\"a\n7,8\n9,10\nb\"\n", 4, context.temp_allocator)
+	expect_chain_law(t, pools[:], strings.concatenate({"h,k\n0,ok\n1,x\"y\n", cells}, context.temp_allocator), .Csv, {})
 }
 
 // Under `.Ragged` a wide row's cells past the header's last are columns named by position, in memory, on a stream and in
