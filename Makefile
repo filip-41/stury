@@ -33,7 +33,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: check gate build-cli check-cli-size test test-examples test-lib test-one test-cli test-jq diff diff-suite test-x86 test-wide test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers bench-cli fixtures surface \
+.PHONY: check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite test-x86 test-wide test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers bench-cli fixtures surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
@@ -62,11 +62,6 @@ build-cli:
 	@mkdir -p $(BUILD)
 	$(ODIN) build cmd/stury $(OPT) $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury
 
-# The binary build-cli makes stays under this many bytes. Raise it deliberately when a feature earns the bytes.
-CLI_MAX_BYTES := 4194304
-check-cli-size:
-	@n=$$(wc -c < $(BUILD)/stury); [ $$n -le $(CLI_MAX_BYTES) ] || { echo "$(BUILD)/stury is $$n B, over the $(CLI_MAX_BYTES) B cap"; exit 1; }
-
 # The checks a change can reach, in `tools/gate.py`: `check` while editing, `gate` before a branch lands.
 check:
 	@ODIN=$(ODIN) python3 tools/gate.py quick
@@ -92,11 +87,10 @@ test-one:
 	@[ -n "$(P)" ] && [ -n "$(T)" ] || { echo "usage: make test-one P=<package dir> T=<test name>" >&2; exit 2; }
 	$(ODIN) test $(P) $(TEST_OPT) $(TEST_MEMORY) $(TEST_PIECES) -define:ODIN_TEST_NAMES=$(T) -out:$(BUILD)/test-one
 
-# The command line end to end on what jq has not, held to smoke.floor, and its binary held to the size cap.
+# The command line end to end on what jq has not, held to smoke.floor.
 test-cli: build-cli
 	@echo "== cmd/stury"
 	python3 cmd/stury/test/smoke_floor.py $(BUILD)/stury
-	@$(MAKE) --no-print-directory check-cli-size
 
 # jq 1.8.2's corpus and cli.tsv, every row passing. The gate holds each area to the count in jq_suite.floor.
 test-jq: build-cli

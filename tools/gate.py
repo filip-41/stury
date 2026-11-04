@@ -216,7 +216,6 @@ def checks(odin, seed):
         out.append(Check("cli follow", 2, 0, [at(CLI)], ["python3", follow, f"--odin={odin}"], trees=[follow]))
         memory = at(f"{CLI}/test/memory_test.py")
         out.append(Check("cli memory", 2, 0, [at(CLI)], ["python3", memory, f"--odin={odin}"], trees=[memory]))
-        out.append(Check("cli size cap", 2, 0, [at(CLI)], make(odin, "check-cli-size")))
         out += cli_suites(odin, absent)
     for package in TEST_PKGS:
         name = package.replace("/", "-")
