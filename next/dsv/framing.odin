@@ -522,9 +522,14 @@ cell_split :: #force_no_inline proc(it: ^records.Reader, rec: records.Record, co
 cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8) -> ([]Maybe(string), bool) #no_bounds_check {
 	cells, ok := cells_of(it, rec)
 	b := (^Batch)(it.format)
-	b.texts.allocator = it.allocator
-	if !ok || resize(&b.texts, len(cells)) != nil {
+	if !ok {
 		return nil, false
+	}
+	if len(b.texts) != len(cells) {
+		b.texts.allocator = it.allocator
+		if resize(&b.texts, len(cells)) != nil {
+			return nil, false
+		}
 	}
 	buf := buf
 	for t, i in cells {
