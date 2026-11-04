@@ -70,7 +70,7 @@ emit_row :: proc(o: ^Output, v: jq.Value) {
 		it := jq.iterate(v)
 		for k, e in jq.next_member(&it) {
 			if object && !o.opts.grow_header && t.shape == .Objects && !slice.contains(t.header[:], k) {
-				table_fail(o, "output %d has the key %q, which the header lacks (the header is output 1's keys; --grow-header adds keys as they come)", t.count, k)
+				unknown_key(o, k)
 			}
 			append(&keys, k)
 			append(&cells, cell_of(o, e, k if object else nil, len(cells) + 1))
@@ -123,13 +123,27 @@ object_row :: proc(o: ^Output, keys: []string, cells: []Maybe(string)) {
 			slice.sort(t.header[:])
 		}
 	}
-	row := cells if slice.equal(t.header[:], keys) else aligned(t.header[:], keys, cells)
+	row := cells
+	if !slice.equal(t.header[:], keys) {
+		for k in keys {
+			if !slice.contains(t.header[:], k) {
+				unknown_key(o, k)
+			}
+		}
+		row = aligned(t.header[:], keys, cells)
+	}
 	head := -1
 	if fresh {
 		head = o.buf.flushed + o.buf.cursor
 		write_header(o)
 	}
 	put_row(o, row, head)
+}
+
+// Ends the run on the key `k` of an object, which the header lacks.
+@(private = "file")
+unknown_key :: proc(o: ^Output, k: string) {
+	table_fail(o, "output %d has the key %q, which the header lacks (the header is output 1's keys; --grow-header adds keys as they come)", o.table.count, k)
 }
 
 // The cells of an object row under `header`: each key's cell in the header's order, empty for a key the row lacks.
