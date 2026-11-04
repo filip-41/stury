@@ -592,6 +592,10 @@ set_data :: proc(ins: ^Inputs, data: []byte, mapped := false) {
 	ins.data, ins.mapped, ins.raw_at, ins.pieces, ins.header_judged, ins.parallel_from, ins.skip_below = data, mapped, 0, {}, false, 0, 0
 	ins.several = ins.framing != .Concatenated || !ins.last
 	ins.texts = records.open(data, ins.as, ins.framing, allocator = runtime.heap_allocator())
+	// jq counts a column from past the input's byte order mark.
+	if ins.parsed == {line = 1} {
+		ins.parsed.column = -int(core.text_start(data, 0))
+	}
 }
 
 // The open file's next window: data[from:], a text the last window cut short, then the pipe's next whole lines.

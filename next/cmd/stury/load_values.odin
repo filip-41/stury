@@ -49,12 +49,12 @@ load_file :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: str
 		built, err := records.build(&texts, rec)
 		doc, fault := jq.judge_build(built, err, rec.at)
 		if f, bad := fault.?; bad {
-			return nil, jq.parse_message(data, f)
+			return nil, jq.parse_message(data, f, column = -int(core.text_start(data, 0)))
 		}
 		append(&all.items, jq.document_value(doc))
 	}
 	if f, bad := texts.fault.?; bad {
-		return nil, jq.parse_message(data, f)
+		return nil, jq.parse_message(data, f, column = -int(core.text_start(data, 0)))
 	}
 	return all, ""
 }
