@@ -17,6 +17,7 @@ import hashlib
 import os
 import re
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -38,6 +39,8 @@ TEST_PKGS = makefile_list("TEST_PKGS")
 TSAN_PKGS = makefile_list("TSAN_PKGS")
 LIB_PKGS = makefile_list("LIB_PKGS") + makefile_list("SUPPORT_PKGS")
 CLI = "cmd/stury"
+# regex_diff's seeds, as the old command line's Makefile runs them.
+REGEX_SEEDS = (77, 1016, 5)
 BENCH_PKGS = ["bench", "bench/doc", "bench/editbench", "bench/paths", "bench/typed", "bench/write", "bench/records"]
 
 IMPORT = re.compile(r'^\s*import\s+(?:[A-Za-z_]\w*\s+)?"([^"]+)"', re.MULTILINE)
@@ -187,6 +190,25 @@ def rosetta():
     return platform.machine() == "x86_64" or os.path.exists("/Library/Apple/usr/libexec/oah/libRosettaRuntime")
 
 
+def cli_suites(odin, absent):
+    """The command line's suites against jq: the jq and cli.tsv cases and the smoke cases hold the counts recorded beside
+    them, and the random cases of regex_diff and jq_diff hold none different. They run on the binary `build-cli` makes,
+    which is built first when absent, after every other stage so that a loaded host does not time them out."""
+    test = at(f"{CLI}/test")
+    suite = lambda *argv: ["sh", "-c", f'[ -x build/stury ] || make -s ODIN={odin} build-cli || exit 1; exec "$@"', "sh", *argv]
+    out = [
+        Check("cli jq suite", 5, 1, [at(CLI)], suite("python3", f"{test}/jq_suite.py", "build/stury", f"--floors={test}/jq_suite.floor"), trees=[test]),
+        Check("cli smoke", 5, 1, [at(CLI)], suite("python3", f"{test}/smoke_floor.py", "build/stury"), trees=[test]),
+    ]
+    for seed in REGEX_SEEDS:
+        out.append(Check(f"cli regex diff seed {seed}", 6, 1, [at(CLI)], suite("python3", f"{test}/regex_diff.py", "build/stury", f"--seed={seed}"), trees=[test]))
+    if shutil.which("jq") and subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip() == "jq-1.8.2":
+        out.append(Check("cli jq diff", 6, 1, [at(CLI)], suite("python3", f"{test}/jq_diff.py", "build/stury", "--seed=1"), trees=[test]))
+    else:
+        absent.append("cli jq diff (no jq 1.8.2 on PATH)")
+    return out
+
+
 def checks(odin, seed):
     """Every check, cheapest stage first, and the groups left out because their checkout is absent. Each package is its
     own check, so a diff reruns only what imports it."""
@@ -201,6 +223,7 @@ def checks(odin, seed):
         out.append(Check("cli pieces law", 2, 0, [at(CLI)], ["python3", law, f"--odin={odin}"], trees=[law]))
         follow = at(f"{CLI}/test/follow_test.py")
         out.append(Check("cli follow", 2, 0, [at(CLI)], ["python3", follow, f"--odin={odin}"], trees=[follow]))
+        out += cli_suites(odin, absent)
     for package in TEST_PKGS:
         name = package.replace("/", "-")
         root = [at(package)]

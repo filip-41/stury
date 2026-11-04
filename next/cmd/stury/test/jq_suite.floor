@@ -1,0 +1,31 @@
+jq.test	550
+onig.test	47
+fast route	232
+stdin file	12
+memory	8
+stdout closed	4
+stdout nonblocking	3
+deep pretty	1
+cli.tsv parse	575
+cli.tsv nofilter	17
+cli.tsv stream	186
+cli.tsv seq	34
+cli.tsv options	293
+cli.tsv jq	38
+cli.tsv modules	63
+cli.tsv conformance	349
+cli.tsv regex	96
+cli.tsv update	114
+cli.tsv peers	80
+cli.tsv differential	136
+cli.tsv pipe	16
+cli.tsv grammar	21
+cli.tsv jsonc	39
+cli.tsv json5	38
+cli.tsv stury	60
+cli.tsv libc	14
+cli.tsv compile	6
+cli.tsv csv	356
+cli.tsv fmt	42
+cli.tsv explain	54
+terminal	9
