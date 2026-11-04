@@ -251,16 +251,14 @@ has_line_end :: #force_inline proc(body: []u8) -> bool {
 // copy.
 @(private)
 edit_add :: proc(list: ^Edit_List, node: Node_Index, op: Edit_Op, role: Role, at: u32, key, text: string) -> Document_Error {
-	k, t: []u8
-	owned: []u8
+	k, t, fresh: []u8
 	if n := len(key) + len(text); n > 0 {
-		fresh, err := make([]u8, n, list.allocator)
-		if err != nil {
+		err: runtime.Allocator_Error
+		if fresh, err = make([]u8, n, list.allocator); err != nil {
 			return {kind = .No_Memory}
 		}
 		copy(fresh, transmute([]u8)key)
 		copy(fresh[len(key):], transmute([]u8)text)
-		owned = fresh
 		if len(key) > 0 {
 			k = fresh[:len(key)]
 		}
@@ -269,9 +267,7 @@ edit_add :: proc(list: ^Edit_List, node: Node_Index, op: Edit_Op, role: Role, at
 		}
 	}
 	if _, err := append(&list.edits, Edit{node = node, op = op, role = role, at = at, key = k, text = t}); err != nil {
-		if owned != nil {
-			delete(owned, list.allocator)
-		}
+		delete(fresh, list.allocator)
 		return {kind = .No_Memory}
 	}
 	return {}

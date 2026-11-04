@@ -51,7 +51,9 @@ commit :: proc(list: ^core.Edit_List, spec: u8, root: ^Root_Spelling, allocator 
 		}
 	}
 	cx := Compose{doc = doc, list = &planned, root = root, allocator = scratch, err = {kind = .No_Memory}}
-	cx.style, cx.comment_byte = comment_style(doc, spec)
+	if edit := doc.spelling.edit; edit != nil && edit.comment != nil {
+		cx.style, cx.comment_byte = edit.comment(doc, spec)
+	}
 	if !compose_tree(&cx) {
 		return nil, 0, cx.err
 	}
@@ -198,16 +200,6 @@ push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool) {
 		return 0, false
 	}
 	return len(vs), true
-}
-
-// Returns how `spec`'s output spells a comment and its marker byte, from the format's `edit.comment`. Returns
-// `.None` and 0 for a format with no comment service.
-@(private)
-comment_style :: #force_inline proc(doc: ^core.Document, spec: u8) -> (style: core.Comment_Spelling, b: u8) {
-	if edit := doc.spelling.edit; edit != nil && edit.comment != nil {
-		return edit.comment(doc, spec)
-	}
-	return .None, 0
 }
 
 // Whether the output can hold a fact of `role` on `node`. A tree writes a foot on a container or the root, whose close

@@ -311,11 +311,15 @@ number_hex :: proc(src: []u8, lo, hi: u64) -> Number {
 			return num
 		}
 	}
-	v, ok := hex_to_f64(src, at, hi, neg)
+	// A longer one reads as a hex float with a zero exponent, which `strconv` rounds to nearest even.
+	buf: [MAX_NUMBER_DIGITS + 4]u8
+	n := copy(buf[:], src[at - 2:hi])
+	n += copy(buf[n:], "p0")
+	v, ok := strconv.parse_f64(string(buf[:n]))
 	if !ok {
 		return {0, .Wide}
 	}
-	return {transmute(u64)v, .Float}
+	return {transmute(u64)(-v if neg else v), .Float}
 }
 
 // Lexes the decimal in `src[lo:hi]`. `strict` selects RFC 8259's grammar, and false the looser grammar a JSON5 token
@@ -622,71 +626,6 @@ digits_nonzero :: #force_inline proc "contextless" (src: []u8, at, n: u64) -> bo
 		}
 	}
 	return false
-}
-
-// Returns a hexadecimal integer past `u64` as a binary64, correctly rounded to nearest even, or false on overflow.
-// Keeps the integer's top 54 bits and a sticky bit for the rest, in a single pass with no allocation.
-@(private)
-hex_to_f64 :: proc(src: []u8, at, hi: u64, neg: bool) -> (f64, bool) {
-	i := at
-	for i < hi && src[i] == '0' {
-		i += 1
-	}
-	if i == hi {
-		return (-0.0 if neg else 0.0), true
-	}
-	nd := hi - i
-	first := HEX_NIBBLE[src[i]]
-	nbits := 4 * nd - u64(clz4(first))
-	if nbits <= 53 {
-		mag: u64
-		for k in i ..< hi {
-			mag = mag << 4 | u64(HEX_NIBBLE[src[k]])
-		}
-		v := f64(mag)
-		return (-v if neg else v), true
-	}
-	kept: u64
-	count := u64(0)
-	sticky := false
-	for k in i ..< hi {
-		d := HEX_NIBBLE[src[k]]
-		start := int(3)
-		if k == i {
-			start = 3 - int(clz4(d))
-		}
-		for bit := start; bit >= 0; bit -= 1 {
-			b := (d >> u8(bit)) & 1
-			if count < 54 {
-				kept = kept << 1 | u64(b)
-				count += 1
-			} else if b != 0 {
-				sticky = true
-			}
-		}
-	}
-	m := kept >> 1
-	round_bit := kept & 1
-	if round_bit != 0 && (sticky || m & 1 != 0) {
-		m += 1
-	}
-	e := i64(nbits) - 53
-	if m == u64(1) << 53 {
-		m >>= 1
-		e += 1
-	}
-	exp := e + 1075
-	if exp >= 2047 {
-		return 0, false
-	}
-	bits := u64(neg) << 63 | u64(exp) << 52 | (m & ((u64(1) << 52) - 1))
-	return transmute(f64)bits, true
-}
-
-// Returns the number of leading zero bits in the 4-bit value of hex digit `d`.
-@(private)
-clz4 :: #force_inline proc(d: u8) -> u32 {
-	return intrinsics.count_leading_zeros(u32(d)) - 28
 }
 
 // The SWAR decimal-digit primitives used by `digit_end`, `fold_run` and `fold_digits_end`. The code requires a

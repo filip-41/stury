@@ -723,22 +723,14 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 	if n.kind > .Plain {
 		return "", false
 	}
-	if n.spelling & SPELLING_DECODE == 0 {
-		raw, err := runtime.mem_alloc_non_zeroed(int(n.n), 1, allocator)
-		if err != nil {
-			return "", false
-		}
-		copy(raw, node_text(doc.src, n))
-		return string(raw[:int(n.n)]), true
-	}
 	// A tolerated ill-formed sequence reads as U+FFFD, three bytes for one source byte, so three bytes per token byte
 	// is an upper bound on the decoded length of every format's decode.
-	size := 3 * int(n.n) + 4
+	size := int(n.n) if n.spelling & SPELLING_DECODE == 0 else 3 * int(n.n) + 4
 	raw, err := runtime.mem_alloc_non_zeroed(size, 1, allocator)
 	if err != nil {
 		return "", false
 	}
-	s, ok = doc.spelling.text(&doc.view, n, raw)
+	s, ok = text(doc, i, raw)
 	if !ok {
 		delete(raw, allocator)
 		return "", false
