@@ -294,6 +294,13 @@ records_build_a_spine :: proc(t: ^testing.T) {
 	expect_build_law(t, pools[:], strings.concatenate({"[", wide, inner, ",", inner, "]"}, context.temp_allocator), strict, false, true)
 	// A root object with no spine: its members are entries with keys, which a document does not join.
 	expect_build_law(t, pools[:], `{"a":[1,2,3],"b":{"c":"d"},"e":[4,5,6]}`, strict, false, false)
+	// A spine whose first entry holds most of the text is built on one thread.
+	one := strings.concatenate({`{"type":"x","features":[{"c":`, array, `},1]}`}, context.temp_allocator)
+	expect_build_law(t, pools[:], one, strict, false, false)
+	pieces: int
+	doc, _ := records.build(transmute([]u8)one, strict, runner = &pools[len(pools) - 1].runner, pieces = &pieces)
+	core.destroy(&doc)
+	testing.expect_value(t, pieces, 0)
 }
 
 // The duplicate check of a record's read builds its document on the reader's allocator, not the temporary one.

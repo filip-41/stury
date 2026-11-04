@@ -251,7 +251,8 @@ is the LF, outside quoted cells in CSV. A strict JSON text under `.Concatenated`
 at a comma, both outside strings and nested values. Strings and levels are counted in each slice on the threads from
 both guesses of whether the slice starts in a string, then settled in order. A text with comments or single quotes
 under those two framings, and a CSV text with comment lines or tolerated bare quotes, is one piece. Pieces are
-numbered in source order, with gaps where a slice holds no cut. A task returns false to stop the run, and a piece's
+numbered in source order, with gaps where a slice holds no cut. A first record that no cut ends before the text's last
+two slices is one piece, found by the scan alone, with no walk of it before the piece's. A task returns false to stop the run, and a piece's
 records that end on a fault stop it too: every piece before it is still handed out, and the first fault in source
 order is returned. A piece past that fault, which a thread started before the fault was found, may give records that
 are none, since its cut was found as if the text before it were well-formed: drop what the tasks found at or past the
@@ -270,7 +271,8 @@ fault := records.each(src, json.as(.Json), .Lines, sum_piece, &job, &pool.runner
 `build` of a whole text gives the document `core.build` gives, node for node, with the same refusal. With a `runner`,
 a long strict JSON text whose bulk is one array, at its root or on its spine, has the array's entries built in pieces
 by `each` on the threads, then joined: the text around the array is built alone and the pieces' nodes are copied in
-after the array's own. The joined nodes take the room a serial build reserves, and one thread at a time writes its
+after the array's own. The array's first entry must end in the first quarter of the bytes past its `[`, found by a
+scan for its comma, since a piece holding most of the array would build as long as the text does. The joined nodes take the room a serial build reserves, and one thread at a time writes its
 pages as the pieces finish, since threads that write fresh pages of one allocation at once wait on each other. A text
 that is not so, or a piece that does not build, is built on the calling thread, which gives its refusal. `pieces` is
 set to the pieces a joined build cut, and left alone otherwise.

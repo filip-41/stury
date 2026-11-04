@@ -228,10 +228,13 @@ each_piece :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(dat
 	if runner != nil && runner.threads > 0 && e.start.services.exact != nil {
 		exact: bool
 		e.rule, exact = e.start.services.exact(&e.start)
-		// The slices start past the first record, where the reader knows the framing's state.
-		if rec, ok := next(&e.start); exact && ok && u64(len(src)) >= rec.at + u64(len(rec.text)) + 2 * SLICE {
-			e.base = rec.at + u64(len(rec.text))
-			e.slices = int((u64(len(src)) - e.base + SLICE - 1) / SLICE)
+		// The slices start past the first record, where the reader knows the framing's state. A first record that no cut
+		// ends before the last two slices is not walked here, as piece 0 walks it.
+		if exact && u64(len(src)) >= at + 2 * SLICE && kernel.quote_cut(src[at:u64(len(src)) - 2 * SLICE], e.rule) >= 0 {
+			if rec, ok := next(&e.start); ok && u64(len(src)) >= rec.at + u64(len(rec.text)) + 2 * SLICE {
+				e.base = rec.at + u64(len(rec.text))
+				e.slices = int((u64(len(src)) - e.base + SLICE - 1) / SLICE)
+			}
 		}
 	}
 	defer delete(e.cuts, runtime.heap_allocator())
@@ -352,7 +355,7 @@ build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocato
 	services := (^Services)(as.spelling.records) if as.spelling != nil else nil
 	if runner != nil && runner.threads > 0 && services != nil && services.build_next != nil && u64(len(src)) >= 4 * SLICE {
 		whole, framing, at := services.whole(src, as)
-		if !entries_unkeyed(src, whole, framing, at) {
+		if !entries_cut(src, whole, framing, at) {
 			return core.build(src, as, refuse_duplicates, allocator)
 		}
 		job := Build_Job{refuse = refuse_duplicates}
@@ -383,12 +386,21 @@ build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocato
 	return core.build(src, as, refuse_duplicates, allocator)
 }
 
-// Whether the first of the records at `at` is an array's entry, not an object's member, which no piece of a whole
-// text's build joins: a text with no array to split is built on one thread without a run of pieces before it.
+// Whether the records at `at` are cut exactly, the first ends in the first quarter of the bytes past `at`, and it is
+// an array's entry, not an object's member, which no piece of a whole text's build joins. A text whose bulk is no
+// array, or is the array's first entry, is built on one thread without a run of pieces, or a walk of that entry,
+// before it.
 @(private)
-entries_unkeyed :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool {
+entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool {
 	it := open(src, as, framing, at, runtime.heap_allocator())
 	defer close(&it)
+	if it.services.exact == nil {
+		return false
+	}
+	rule, exact := it.services.exact(&it)
+	if !exact || kernel.quote_cut(src[at:at + (u64(len(src)) - at) / 4], rule) < 0 {
+		return false
+	}
 	rec, more := next(&it)
 	return more && rec.key == nil
 }
