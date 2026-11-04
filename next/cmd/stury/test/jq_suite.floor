@@ -6,9 +6,9 @@ memory	8
 stdout closed	4
 stdout nonblocking	3
 deep pretty	1
-cli.tsv parse	592
+cli.tsv parse	593
 cli.tsv nofilter	17
-cli.tsv stream	204
+cli.tsv stream	206
 cli.tsv seq	68
 cli.tsv options	298
 cli.tsv jq	38
@@ -27,5 +27,5 @@ cli.tsv libc	14
 cli.tsv compile	6
 cli.tsv csv	359
 cli.tsv fmt	42
-cli.tsv explain	54
+cli.tsv explain	60
 terminal	9
