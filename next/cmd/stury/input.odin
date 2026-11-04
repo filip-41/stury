@@ -364,6 +364,16 @@ text_value :: proc(ins: ^Inputs, built: core.Document, at: int, own: bool) -> (j
 	return jq.document_value(doc), "", .Value
 }
 
+// jq's message for the fault `f` of `data`, a record of which ends at `end`, but a later file's fault is told in that
+// file, as `fault_told` tells it, since jq's line and column count from the first file's start.
+@(private = "file")
+fault_message :: proc(ins: ^Inputs, data: []byte, f: core.Fault, end := -1) -> string {
+	if ins.next_file > 1 {
+		return fault_told(ins.name, data, f, ins.as, ins.file_lines)
+	}
+	return jq.parse_message(data, f, ins.parsed.line, ins.parsed.column, "", end)
+}
+
 // The fault `found` of the text at or after data[at:] as jq tells it, or under --stream the events jq's parser makes of
 // the text before it. An NDJSON record ends at `end`.
 @(private = "file")
@@ -379,7 +389,7 @@ text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (jq.V
 	ins.note = fault_note(data, f, ins.as, &ins.run.opts)
 	if !ins.run.opts.stream {
 		ins.line, ins.text_end = lines_read(ins, int(f.at) + 1), 0
-		msg := jq.parse_message(data, f, ins.parsed.line, ins.parsed.column, "", end)
+		msg := fault_message(ins, data, f, end)
 		// Under --seq the reader goes on at the next record, and jq's parser elsewhere from the line after the fault,
 		// which `input` reads next.
 		if ins.framing == .Seq {
@@ -412,7 +422,7 @@ text_fault :: proc(ins: ^Inputs, found: core.Fault, at: int, end := -1) -> (jq.V
 	text := data[at:resume]
 	if !errors {
 		text = data[at:max(at, stop)]
-		ins.fault_error = strings.clone(jq.parse_message(data, f, ins.parsed.line, ins.parsed.column), runtime.heap_allocator())
+		ins.fault_error = strings.clone(fault_message(ins, data, f), runtime.heap_allocator())
 	}
 	l, c := ins.parsed.line, ins.parsed.column
 	jq.advance(&l, &c, data[:at])
