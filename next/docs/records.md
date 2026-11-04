@@ -1,7 +1,8 @@
 # Records
 
 `core/records` reads a text that holds a list of records, one record at a time, for every format. A caller names the
-format once, through the `core.As` value it opens with, and the calls after that name none.
+format once, through the `core.As` value it opens with, and the calls after that name none. `open` reads text in memory and `open_stream` an
+`io.Reader`, and both give the records the same calls do.
 
 ```odin
 records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> records.Reader
@@ -51,6 +52,42 @@ byte order mark only when `at` is 0.
 identifier. A quoted key is a string, so `json.unmarshal(rec.key, spec, &name, &plan)` into a `string` with a plan of
 `string` decodes it, and a bare one is its own text.
 
+## Typed reads and documents
+
+`read` frames the next record and reads it into `target` by `plan`, as the format's `unmarshal` of the record's text
+reads it, refusals included, with every offset from the input's first byte. It returns false at the input's end, on
+the fault in `it.fault`, with `.Plan_Mismatch` when `plan` is no plan of `T` by the format, or with `.Out_Of_Memory`
+when the reader's own memory is refused. A refused record returns true and its error, and the next `read` goes on past it.
+
+```odin
+for {
+	v: Log_Line
+	more, err := records.read(&it, &v, &plan)
+	if !more { break }
+	if err.kind != .None { continue } // a refused record
+}
+```
+
+The reader's first `read` allocates its open containers with `open`'s allocator, and `close` frees them. When a
+refused record's value runs past the record's end, `target` may hold values read past it.
+
+Under `.Concatenated` and `.Entries`, `read` reads a record by the walk that frames it, and gives the records `next`
+gives: a record that would fault after a refusal is no record, and what its read collected is taken back.
+
+`build` builds the document of a record `next` gave, as the format's `build` of `rec.text` does. A refusal's offsets
+count from the input's first byte, and the document's node offsets index `doc.src` as in every document. What `doc.src`
+is depends on the format: JSON's is the record's text, so a node's offsets are the record's own, and dsv's is the input
+(for a streamed dsv reader, the header joined with the row). A document built from a streamed record lives until the
+next call on the reader. `build` on a reader whose format builds no records is `.Bad_Index`.
+
+`scan` frames the next record and answers `path` in it, as `scan` of `core/build` answers it in the record's text, with
+every offset in an error from the input's first byte. The path is planned at the first call and reused, and the
+document's buffers too, so the document lives until the next call on the reader, and every call passes the same `path`
+and `read`. JSON reads the record in place: the document's `src` is the input up to the record's end, and under
+`.Concatenated` strict JSON one walk both frames the record and answers the path. A stream, and a format with no
+scan of its own (dsv), build the record and query it, where `read.stop_early` and `read.refuse_duplicates` do not apply.
+A record whose text does not read returns true and its error, and the next `scan` goes on past it.
+
 ## Framings
 
 | Framing | A record is |
@@ -86,91 +123,17 @@ the records. Under `.Entries` that fault is the one `validate` gives for the who
 
 `check` judges every record from `at` and returns the faults of the refused ones in source order, then the fault that
 ended the records, if any. `validate` returns the fault the format's `validate` gives for the whole text, read as the
-entries of its spine or its root.
-
-## Threads
-
-With a `runner`, such as a `host.Pool`'s, `check` and `validate` read a long text in pieces on its threads and the
-caller's, with the answer one thread gives: the same faults at the same bytes. Each piece guesses where a record may
-start in it, past an LF or 0x1E, or at a comma under `.Entries`, and reads records from there until one starts past
-the piece. A guess that leads to a fault is dropped for the next one. Then the records are read in source order on
-the caller, and a piece whose first record is the next one read gives its faults and jumps the reading past it. A
-guess inside a string, a comment or a nested value is never a record the in-order reading meets, so it costs time and
-never the answer. A runner with no threads and a short text read on the caller alone.
-
-A dsv text is read in pieces of rows. A piece's guess is the byte past an LF, and its rows are checked against the
-width the text's first record set. A guess inside a quoted cell either faults, and the piece guesses again, or gives
-rows the in-order reading never meets. In `check` and `validate` the walk that frames the rows judges them, so the
-in-order reading takes the rows between two pieces' starts as one walk.
-
-`each` hands a task readers over pieces of the text, whose records together are those `next` gives, each once. The
-pieces are cut exactly, since a task may act on what it reads: past the first record, a scan from where it ends finds
-the byte past each separator at the first record's level and outside strings or quoted cells, and the first such cut
-in each slice of the text starts a piece. Under `.Lines` and `.Seq` the separator is the LF or 0x1E, and a dsv text's
-is the LF, outside quoted cells in CSV. A strict JSON text under `.Concatenated` is cut at an LF and under `.Entries`
-at a comma, both outside strings and nested values. Strings and levels are counted in each slice on the threads from
-both guesses of whether the slice starts in a string, then settled in order. A text with comments or single quotes
-under those two framings, and a CSV text with comment lines or tolerated bare quotes, is one piece. Pieces are
-numbered in source order, with gaps where a slice holds no cut. A task returns false to stop the run, and a piece's
-records that end on a fault stop it too: every piece before it is still handed out, and the first fault in source
-order is returned. A dsv piece past the first keeps the header the first record's read found.
-
-```odin
-sum_piece :: proc(job: ^Job, piece: ^records.Reader, k: int) -> bool {
-	for rec in records.next(piece) {
-		// rec.text, rec.at, offsets from the input's first byte
-	}
-	return true
-}
-fault := records.each(src, json.as(.Json), .Lines, sum_piece, &job, &pool.runner)
-```
+entries of its spine or its root, and `.Bad_Option` for a format that does not take it.
 
 ## Spines
 
 Under `.Entries` a text is read in pieces across its root's entries. A text whose bulk is an array inside objects,
 as `{"meta":{...},"logs":[...]}`, has one root entry, so `json.spine` finds that array: the root array, or the value
 of the member of a root object, up to `json.SPINE_LEVELS` objects deep, that does not end within the first bytes of
-it, past at most a few members whose values do. `records.open(src, entries, .Entries, at)` then gives the array's
+it, past at most 16 members in each object whose values end within 4096 bytes. `records.open(src, entries, .Entries, at)` then gives the array's
 elements, each judged at its depth in the text, and at the array's close the text with the elements cut out is
 walked whole, so the frame around them is judged once. Any fault is the one `validate` gives for the whole text.
 `records.validate` reads a JSON text this way when it has a spine.
-
-## Typed reads and documents
-
-`read` frames the next record and reads it into `target` by `plan`, as the format's `unmarshal` of the record's text
-reads it, refusals included, with every offset from the input's first byte. It returns false at the input's end, on
-the fault in `it.fault`, with `.Plan_Mismatch` when `plan` is no plan of `T` by the format, or with `.Out_Of_Memory`
-when the reader's own memory is refused. A refused record returns true and its error, and the next `read` goes on past it. It reads the record in place, so it costs less than `next`
-and an `unmarshal` of `rec.text`.
-
-```odin
-for {
-	v: Log_Line
-	more, err := records.read(&it, &v, &plan)
-	if !more { break }
-	if err.kind != .None { continue } // a refused record
-}
-```
-
-The reader's first `read` allocates its open containers with `open`'s allocator, and `close` frees them. When a
-refused record's value runs past the record's end, `target` may hold values read past it.
-
-Under `.Concatenated` and `.Entries`, `read` reads a record by the walk that frames it, and gives the records `next`
-gives: a record that would fault after a refusal is no record, and what its read collected is taken back.
-
-`build` builds the document of a record `next` gave, as the format's `build` of `rec.text` does. A refusal's offsets
-count from the input's first byte, and the document's node offsets index `doc.src` as in every document. What `doc.src`
-is depends on the format: JSON's is the record's text, so a node's offsets are the record's own, and dsv's is the input
-(for a streamed dsv reader, the header joined with the row). A document built from a streamed record lives until the
-next call on the reader. `build` on a reader whose format builds no records is `.Bad_Index`.
-
-`scan` frames the next record and answers `path` in it, as `scan` of `core/build` answers it in the record's text, with
-every offset in an error from the input's first byte. The path is planned at the first call and reused, and the
-document's buffers too, so the document lives until the next call on the reader, and every call passes the same `path`
-and `read`. JSON reads the record in place: the document's `src` is the input up to the record's end, and under
-`.Concatenated` strict JSON one walk both frames the record and answers the path. A stream, and a format with no
-scan of its own (dsv), build the record and query it, where `read.stop_early` and `read.refuse_duplicates` do not apply.
-A record whose text does not read returns true and its error, and the next `scan` goes on past it.
 
 ## Rows
 
@@ -190,8 +153,8 @@ for rec in records.next(&it) {
 
 - `next` frames rows by a walk of the text, which judges them, so a fault ends the records with the fault `validate`
   gives for the whole text, and every row whose line end comes before it is given first. `check` returns that fault.
-- The walk reads rows in batches of up to 256 and keeps each cell's position. A batch ends early when its buffer is
-  three quarters full, and a row too wide for the buffer grows it. The next walk restarts at the next row's first byte
+- The walk frames rows in batches of up to 256 and keeps each row's first byte and line end. A cell is split from its
+  row's text when `cell`, `cells`, `read` or `build` asks for it. The next walk restarts at the next row's first byte
   with the header and the row width carried in.
 - `column` returns the index of the first header cell that decodes to `name`, and -1 with no header. It reads the
   first batch, whose rows `next` then gives. Under `.Ragged` a decimal `name` past the header's width is the column
@@ -204,7 +167,7 @@ for rec in records.next(&it) {
 - `read` reads a row into a row type, from a plan of the row type, not of a list of rows. It reads as `dsv.unmarshal`
   reads a text of the header and that row into the row, refusals of the header included. A list row reads as the row
   alone, since it takes the header as data. A plan of a list of rows is `.Plan_Mismatch`, and a map row with no
-  header `.Unsupported`. The read replays the cells the walk kept, so nothing is read twice.
+  header `.Unsupported`. The row's text is split once, into the plan's fields.
 - `build` of the row `next` gave last is a document over the whole input: a `Map` keyed by the header's cells, or an
   `Array` with no header. Its offsets are the input's. Another row is `.Bad_Index`.
 - An unclosed quoted field is a `Truncated` fault at its opening quote, the same in `validate`, `unmarshal` and `build`.
@@ -256,6 +219,50 @@ for rec in records.next(&it) {
 byte, for a caller that hands each window to another thread. A reader on text in memory gives the text past `pos` as
 one window. A window holds the records and the gaps between them, so a window past the first may start with
 whitespace, and its records are read with offsets from `base`.
+
+## Threads
+
+With a `runner`, such as a `host.Pool`'s, `check` and `validate` read a long text in pieces on its threads and the
+caller's, with the answer one thread gives: the same faults at the same bytes. Each piece guesses where a record may
+start in it, past an LF or 0x1E, or at a comma under `.Entries`, and reads records from there until one starts past
+the piece. A guess that leads to a fault is dropped for the next one. Then the records are read in source order on
+the caller, and a piece whose first record is the next one read gives its faults and jumps the reading past it. A
+guess inside a string, a comment or a nested value is never a record the in-order reading meets, so it costs time and
+never the answer. A runner with no threads and a short text read on the caller alone.
+
+A dsv text is read in pieces of rows. A piece's guess is the byte past an LF, and its rows are checked against the
+width the text's first record set. A guess inside a quoted cell either faults, and the piece guesses again, or gives
+rows the in-order reading never meets. In `check` and `validate` the walk that frames the rows judges them, so the
+in-order reading takes the rows between two pieces' starts as one walk.
+
+`each` hands a task readers over pieces of the text, whose records together are those `next` gives, each once. The
+pieces are cut exactly, since a task may act on what it reads: past the first record, a scan from where it ends finds
+the byte past each separator at the first record's level and outside strings or quoted cells, and the first such cut
+in each slice of the text starts a piece. Under `.Lines` and `.Seq` the separator is the LF or 0x1E, and a dsv text's
+is the LF, outside quoted cells in CSV. A strict JSON text under `.Concatenated` is cut at an LF and under `.Entries`
+at a comma, both outside strings and nested values. Strings and levels are counted in each slice on the threads from
+both guesses of whether the slice starts in a string, then settled in order. A text with comments or single quotes
+under those two framings, and a CSV text with comment lines or tolerated bare quotes, is one piece. Pieces are
+numbered in source order, with gaps where a slice holds no cut. A task returns false to stop the run, and a piece's
+records that end on a fault stop it too: every piece before it is still handed out, and the first fault in source
+order is returned. A dsv piece past the first keeps the header the first record's read found.
+
+```odin
+sum_piece :: proc(job: ^Job, piece: ^records.Reader, k: int) -> bool {
+	for rec in records.next(piece) {
+		// rec.text, rec.at, offsets from the input's first byte
+	}
+	return true
+}
+fault := records.each(src, json.as(.Json), .Lines, sum_piece, &job, &pool.runner)
+```
+
+## Writing
+
+`records.Writer` writes a list one record at a time, with `records.write` for a typed value by its plan, `write_text` for a
+caller's text and `write_cells` for a row of cells, and `records.marshal` and `marshal_stream` write a whole list. A
+record is framed as the reader reads it under the same `framing`. The calls and their refusals are in
+[writer.md](writer.md#records).
 
 ## The format's services
 
