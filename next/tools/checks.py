@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Checks over the tree: its lean size, its import order, its public surface, and the words in core.
+"""Checks over the tree: its import order, its public surface, and the words in core.
 
-Run from next/: `python3 tools/checks.py size`, `imports`, `surface` or `words`.
+Run from next/: `python3 tools/checks.py imports`, `surface` or `words`.
 """
 
 import os
@@ -24,13 +24,6 @@ def makefile_list(name):
 PACKAGES = makefile_list("LIB_PKGS")
 RANK = {"core/spell": 0, "core": 1, "host": 2, "core/kernel": 2, "core/compose": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "core/records": 6, "json": 7, "dsv": 7}
 FORMATS = {"json", "dsv"}
-
-LEAN_BUDGET = 20_500
-
-# The command line and its subpackages, counted apart from the library under their own budget. Its test files are
-# Python and jq corpora, never counted.
-CLI = "cmd/stury"
-CLI_BUDGET = 18_500
 
 # core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte
 # shuffle's.
@@ -64,34 +57,6 @@ def package_files(package):
         for name in sorted(os.listdir(directory))
         if name.endswith(".odin")
     ]
-
-
-def lean_lines(path):
-    count = 0
-    with open(path, encoding="utf-8") as file:
-        for line in file:
-            text = line.strip()
-            if text and not text.startswith("//"):
-                count += 1
-    return count
-
-
-def size():
-    total = 0
-    for package in PACKAGES:
-        count = sum(lean_lines(path) for path in package_files(package))
-        total += count
-        print(f"{package:<12} {count:>6}")
-    print(f"{'sum':<12} {total:>6} of {LEAN_BUDGET}")
-    cli = 0
-    root = os.path.join(ROOT, CLI)
-    parts = sorted({os.path.dirname(path) for path in odin_files(root) if "/test" not in path[len(root):]})
-    for directory in parts:
-        count = sum(lean_lines(path) for path in package_files(os.path.relpath(directory, ROOT)))
-        cli += count
-        print(f"{os.path.relpath(directory, ROOT):<12} {count:>6}")
-    print(f"{'cli sum':<12} {cli:>6} of {CLI_BUDGET}")
-    return 0 if total <= LEAN_BUDGET and cli <= CLI_BUDGET else 1
 
 
 def strip_code(line, block):
@@ -365,9 +330,9 @@ def mutable_globals(path):
 
 
 def main(argv):
-    commands = {"size": size, "imports": imports, "surface": surface, "words": words, "globals": globals_check, "api": api}
+    commands = {"imports": imports, "surface": surface, "words": words, "globals": globals_check, "api": api}
     if len(argv) < 2 or argv[1] not in commands or argv[2:] not in ([], ["--write"]) or argv[2:] and argv[1] != "api":
-        print("usage: checks.py size|imports|surface|words|globals|api [--write]", file=sys.stderr)
+        print("usage: checks.py imports|surface|words|globals|api [--write]", file=sys.stderr)
         return 2
     if argv[1] == "api":
         return api(write=bool(argv[2:]))

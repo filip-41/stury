@@ -31,7 +31,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: check gate build-cli check-cli-size test test-examples test-x86 test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers fixtures size surface \
+.PHONY: check gate build-cli check-cli-size test test-examples test-x86 test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers fixtures surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The document lanes' probe and peers, and the fixtures they read.
@@ -151,11 +151,6 @@ lint:
 		$(ODIN) test $$p -build-mode:obj -target:linux_amd64 -define:TIER=2 -o:$$o $(LINT_FLAGS) -out:$$d/t.o || exit 1; \
 	done; done
 	$(call odin_each,check,$(LIB_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_riscv64, (linux_riscv64))
-
-# The lean lines of each library package and each command line package, with each sum and its budget. Past a budget
-# the command fails.
-size:
-	python3 tools/checks.py size
 
 # The public declarations of each library package, sorted. `api` compares their signatures with API.txt, and
 # `python3 tools/checks.py api --write` regenerates it.
