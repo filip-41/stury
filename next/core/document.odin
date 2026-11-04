@@ -74,46 +74,22 @@ Pair_Iter :: struct {
 }
 
 // Starts a `Pair_Iter` over the key/value pairs of `obj`. On a non-`Map` container, a scalar, or an index past the last
-// node, returns an empty iterator.
+// node, returns an empty iterator. `pair_next` tests the ends, so an empty `Map` needs no test here.
 pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter {
-	if int(obj) >= len(doc.nodes) {
+	if int(obj) >= len(doc.nodes) || doc.nodes[obj].kind != .Map {
 		return {doc = doc, done = true}
 	}
-	n := doc.nodes[obj]
-	if n.kind != .Map {
-		return {doc = doc, done = true}
-	}
+	end := obj + Node_Index(doc.nodes[obj].n)
 	if doc.shared_keys != 0 {
-		h := doc.nodes[doc.shared_keys]
-		it := Pair_Iter{
-			doc     = doc,
-			key_at  = doc.shared_keys + 1,
-			val_at  = obj + 1,
-			key_end = doc.shared_keys + Node_Index(h.n),
-			val_end = obj + Node_Index(n.n),
-			shared  = true,
-		}
-		if it.key_at >= it.key_end || it.val_at >= it.val_end {
-			it.done = true
-		}
-		return it
+		keys := doc.shared_keys
+		return {doc = doc, key_at = keys + 1, val_at = obj + 1, key_end = keys + Node_Index(doc.nodes[keys].n), val_end = end, shared = true}
 	}
-	it := Pair_Iter{
-		doc     = doc,
-		key_at  = obj + 1,
-		val_at  = obj + 2,
-		key_end = obj + Node_Index(n.n),
-		val_end = obj + Node_Index(n.n),
-		shared  = false,
-	}
-	if it.key_at >= it.key_end {
-		it.done = true
-	}
-	return it
+	return {doc = doc, key_at = obj + 1, key_end = end}
 }
 
 // Returns the next key and value node of the `Map`. For an inline-key `Map`, key and value alternate in preorder.
-// For a shared-key `Map`, keys come from `doc.shared_keys` while values advance within `obj`.
+// For a shared-key `Map`, keys come from `doc.shared_keys` while values advance within `obj`. An inline-key `Map`
+// reads neither `val_at` nor `val_end`.
 pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool) {
 	if it.done {
 		return NO_NODE, NO_NODE, false
