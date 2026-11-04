@@ -19,7 +19,9 @@ answer those instead; a stury-only row (`check`) has null for jq's. DIFFERS is t
 cases. The terminal cases run with no filter on a pseudo-terminal, where jq prints
 its usage and exits 2 when both stdin and stdout are terminals, and reads `.` otherwise; a host with no
 pseudo-terminal devices (Windows) skips them and says so. On Windows the cases that need POSIX are not run
-either, and the report says so: the pipe and memory cases, and the cli.tsv rows `posix_only` picks.
+either, and the report says so: the pipe and memory cases, and the cli.tsv rows `posix_only` picks. Under
+ThreadSanitizer the deepest recursion and the 128 MB pretty case are not run, and the report says so: its
+stack frames and resident shadow memory pass what those cases bound in a plain build.
 
 --floors=FILE holds each area to the pass count FILE records (a tab-separated area and count per line) and fails only
 when an area passes fewer, or is missing; --write-floors=FILE records the counts of this run.
@@ -53,6 +55,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SUITE = os.path.join(HERE, "jq-1.8.2")
 # Seconds a case may take; STURY_TEST_TIMEOUT raises it for a sanitized build (make test-asan).
 TIMEOUT = float(os.environ.get("STURY_TEST_TIMEOUT", "10"))
+# The sanitizer a build was made with, `address` or `thread` (make test-asan, test-tsan), or empty.
+SANITIZER = os.environ.get("STURY_SANITIZER", "")
 sys.setrecursionlimit(100000)
 # Megabytes a case may hold; macOS enforces no RLIMIT_AS, so a runaway case such as `[repeat(1)]` would
 # otherwise take tens of GB before TIMEOUT stops it.
@@ -184,17 +188,21 @@ def parse_suite(path):
 def parse_cli(path):
     """cli.tsv: area, then as JSON the arguments, stdin, files and, once recorded, jq's exit status,
     stdout and stderr. The arguments may be {"env": {NAME: VALUE}, "args": [...]}, to run with those
-    variables set."""
+    variables set. An area starting with `!` marks a case too deep for ThreadSanitizer's stack: it runs
+    everywhere else, and the sanitizer report names it as not run."""
     cases = []
     for n, row in enumerate(open(path, encoding="utf-8").read().split("\n"), 1):
         if not row or row.startswith("#"):
             continue
         area, *cols = row.split("\t")
+        slow = area.startswith("!")
+        if slow:
+            area = area[1:]
         args, stdin, files, *want = [json.loads(c) for c in cols]
         env = {}
         if isinstance(args, dict):
             env, args = args["env"], args["args"]
-        cases.append({"line": n, "area": area, "args": args, "env": env, "stdin": stdin, "files": files, "want": want, "row": row})
+        cases.append({"line": n, "area": area, "args": args, "env": env, "stdin": stdin, "files": files, "want": want, "row": row, "slow": slow})
     return cases
 
 
@@ -594,6 +602,10 @@ def check_stdout_nonblocking(stury, diff, filter, text, want):
 # Pretty-printing a deep nest holds a bounded part of it (the layout is written out as it goes, not whole): at
 # 8000 levels the output is 128 MB, and a run that held it whole is past the cap.
 def check_deep_pretty(stury, diff, depth):
+    # ThreadSanitizer's shadow memory is resident over every byte the writer touches, so a cap that
+    # catches a whole-output buffer in a plain build is already past under it.
+    if SANITIZER == "thread":
+        return "deep pretty (not run under ThreadSanitizer)", f"pretty {depth} levels", None
     cap = 64
     text = b"[" * depth + b"]" * depth
     try:
@@ -895,6 +907,8 @@ def check_cli(stury, diff, case):
     stdin = case["stdin"] if len(case["stdin"]) < 200 else case["stdin"][:200] + "..."
     files = f" files {case['files']}" if case["files"] else ""
     area, what = f"cli.tsv {case['area']}", f"cli.tsv:{case['line']}: stury {' '.join(case['args'])} <<< {stdin!r}{files}"
+    if case["slow"] and SANITIZER == "thread":
+        return f"{area} (deep recursion, not run under ThreadSanitizer)", what, None
     # cli.tsv is recorded on macOS. A `libc` row's answer is the C library's (libm's last digits, the fields
     # strptime derives, timegm's range), so elsewhere it is checked against this platform's jq.
     on_platform_jq = case["area"] == "libc" and sys.platform != "darwin"

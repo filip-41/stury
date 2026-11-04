@@ -165,8 +165,8 @@ SAN_STACK := ulimit -s 65520 2>/dev/null || ulimit -s unlimited
 define sanitized_cli
 @mkdir -p $(BUILD)
 $(ODIN) build cmd/stury $(OPT) -debug -sanitize:$(1) $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury-$(1)
-$(SAN_STACK); $(SAN_ENV) python3 cmd/stury/test/smoke_floor.py $(BUILD)/stury-$(1)
-$(SAN_STACK); $(SAN_ENV) python3 cmd/stury/test/jq_suite.py $(BUILD)/stury-$(1)
+$(SAN_STACK); STURY_SANITIZER=$(1) $(SAN_ENV) python3 cmd/stury/test/smoke_floor.py $(BUILD)/stury-$(1)
+$(SAN_STACK); STURY_SANITIZER=$(1) $(SAN_ENV) python3 cmd/stury/test/jq_suite.py $(BUILD)/stury-$(1)
 endef
 
 .PHONY: test-asan-cli test-tsan-cli

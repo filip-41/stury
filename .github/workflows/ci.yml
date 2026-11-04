@@ -108,6 +108,9 @@ jobs:
       matrix:
         target: [test-asan, test-tsan]
     runs-on: macos-15
+    # The sanitized CLI builds take most of this: 66 min for ASan and 47 for TSan on 2026-11-04. A job
+    # that hangs would otherwise hold the release for GitHub's 6-hour default.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/setup-odin
