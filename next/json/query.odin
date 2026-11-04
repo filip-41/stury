@@ -55,7 +55,7 @@ scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_
 // Walks `src` as spec `S` with the scan's hook, the stream's when `on` is set, judges what the walk leaves and ends the
 // read.
 @(private)
-scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
+scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Path_Error) {
 	q, sep := document_start(src, 0, S)
 	if sep != nil {
 		return {}, sep_error(src, sep)
@@ -68,7 +68,8 @@ scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read
 	if e := engine.scan_start(h, src, handle, paths, read, false, allocator, core.reserve_depth(opts.max_depth, len(src)), frames[:], on != nil, state, on); e.kind != .None {
 		return {}, e
 	}
-	return scan_walk(h, src, q, S, opts, on != nil)
+	err = scan_walk(h, src, q, S, opts, on != nil, &doc)
+	return
 }
 
 @(private)
@@ -78,9 +79,9 @@ sep_error :: proc(src: []u8, sep: [^]u8) -> core.Path_Error {
 }
 
 // Walks the text at `q` of `src` with the hook of the read `h` started on `src`, the stream's when `stream` is set,
-// judges what the walk leaves and ends the read.
+// judges what the walk leaves and ends the read into `doc`.
 @(private)
-scan_walk :: proc(h: ^engine.Scan, src: []u8, q: [^]u8, $S: Spec, opts: Options, stream: bool) -> (core.Document, core.Path_Error) {
+scan_walk :: proc(h: ^engine.Scan, src: []u8, q: [^]u8, $S: Spec, opts: Options, stream: bool, doc: ^core.Document) -> core.Path_Error {
 	regs := engine.BUILDER_REGS
 	hi: u64
 	fault: Maybe(core.Fault)
@@ -111,7 +112,7 @@ scan_walk :: proc(h: ^engine.Scan, src: []u8, q: [^]u8, $S: Spec, opts: Options,
 	when .Comments in FEATURES[S] {
 		hi = 0
 	}
-	return engine.scan_end(h, regs, hi, fault)
+	return engine.scan_end(h, regs, hi, fault, doc)
 }
 
 @(private)
@@ -125,17 +126,17 @@ rewalk_many :: proc "contextless" ($S: Spec) -> proc "contextless" (h: ^engine.S
 // The record service `scan`. A text of concatenated strict JSON is framed by the walk that reads it, and any other
 // record is framed first and then read in place.
 @(private)
-scan_record :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (records.Record, core.Document, core.Path_Error, bool) {
+scan_record :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (records.Record, core.Path_Error, bool) {
 	switch Spec(it.as.spec) {
 	case .Json:  return scan_record_spec(it, h, last, path, read, .Json)
 	case .Jsonc: return scan_record_spec(it, h, last, path, read, .Jsonc)
 	case .Json5: return scan_record_spec(it, h, last, path, read, .Json5)
 	}
-	return {}, {}, {}, false
+	return {}, {}, false
 }
 
 @(private)
-scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options, $S: Spec) -> (rec: records.Record, doc: core.Document, err: core.Path_Error, ok: bool) {
+scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options, $S: Spec) -> (rec: records.Record, err: core.Path_Error, ok: bool) {
 	opts := options_of(it.as)
 	walked := it.framing == .Concatenated && S == .Json
 	src := it.src
@@ -148,7 +149,7 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 		src = src[:rec.at + u64(len(rec.text))]
 		sep: [^]u8
 		if q, sep = document_start(src, rec.at, S); sep != nil {
-			return rec, {}, sep_error(src, sep), true
+			return rec, sep_error(src, sep), true
 		}
 	}
 	frames: [core.MAX_DEPTH]u64 = ---
@@ -167,11 +168,10 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 		if walked {
 			rec, ok = next_framed(it, S)
 		}
-		return rec, {}, started, ok || !walked
+		return rec, started, ok || !walked
 	}
 	if !walked {
-		doc, err = scan_walk(h, src, q, S, opts, false)
-		return rec, doc, err, true
+		return rec, scan_walk(h, src, q, S, opts, false, last), true
 	}
 	regs := engine.BUILDER_REGS
 	stopped: bool
@@ -193,9 +193,9 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	if !ok && fault == nil {
 		fault = core.fault_of(core.fault_at(u64(len(src)), .Truncated), &RULES)
 	}
-	d, e := engine.scan_end(h, regs, rec.at + u64(len(rec.text)) if ok && !stopped else 0, fault)
+	e := engine.scan_end(h, regs, rec.at + u64(len(rec.text)) if ok && !stopped else 0, fault, last)
 	if !ok && it.fault == nil {
-		return rec, {}, {}, false
+		return rec, {}, false
 	}
-	return rec, d, e, ok
+	return rec, e, ok
 }

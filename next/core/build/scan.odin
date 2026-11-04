@@ -249,10 +249,10 @@ scan_free :: proc(h: ^Scan, allocator: runtime.Allocator) {
 	many_free(h, allocator)
 }
 
-// Returns the partial document the walk built, its answers in text order, or the error that stopped it. `root_close` is
-// the root's end when the walk gives one, else 0. On an error every allocation is freed, but for the lists of a read
-// with `again`.
-scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(core.Fault)) -> (core.Document, core.Path_Error) {
+// Writes to `doc` the partial document the walk built, its answers in text order, or returns the error that stopped it
+// with `doc` zero. `root_close` is the root's end when the walk gives one, else 0. On an error every
+// allocation is freed, but for the lists of a read with `again`.
+scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(core.Fault), doc: ^core.Document) -> core.Path_Error {
 	regs := regs
 	allocator := h.b.doc.allocator
 	streamed := h.many != nil && h.many.on != nil
@@ -282,27 +282,28 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	}
 	h.b.wide_more = h.b.wide_count != 0
 	h.b.root_close = 0 if h.stopped else root_close
-	doc, e := builder_end(&h.b, regs, fault)
+	e: core.Document_Error
+	doc^, e = builder_end(&h.b, regs, fault)
 	if e.kind != .None {
 		if !h.again {
 			scan_free(h, allocator)
 		}
-		return {}, core.path_error(e)
+		return core.path_error(e)
 	}
 	doc.partial = true
 	doc.stopped = h.stopped
 	doc.positional = h.positional
 	if h.again {
 		doc.answers, doc.kept, doc.missing = h.answers[:h.n_answers], h.kept[:h.n_kept], h.missing[:h.n_missing]
-		return doc, {}
+		return {}
 	}
-	ok := attach_reads(&doc, h.answers[:h.n_answers], h.kept[:h.n_kept], h.missing[:h.n_missing])
+	ok := attach_reads(doc, h.answers[:h.n_answers], h.kept[:h.n_kept], h.missing[:h.n_missing])
 	scan_free(h, allocator)
 	if !ok {
-		core.destroy(&doc)
-		return {}, {kind = .No_Memory}
+		core.destroy(doc)
+		return {kind = .No_Memory}
 	}
-	return doc, {}
+	return {}
 }
 
 // Copies a read's lists, and the names in `missing`, into one block `doc` owns, so only `src` outlives the read. Returns

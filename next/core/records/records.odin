@@ -91,9 +91,9 @@ RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limi
 // false when there is none. nil reads a text on the calling thread alone. `whole` returns the format, framing and
 // offset whose records make up the whole of `src`, for `validate`, nil for a format that does not take it.
 //
-// `scan` is `next` and a read of `path` in the record by one walk, into a document whose text is the input up to the
-// record's end. It starts `h` at the first call, and then with `engine.scan_again` while `h.again` is set, from `last`,
-// the document it returned before. nil reads a record as `next` gives it.
+// `scan` is `next` and a read of `path` in the record by one walk, into `last`, a document whose text is the input up to
+// the record's end. It starts `h` at the first call, and then with `engine.scan_again` while `h.again` is set, from the
+// document `last` held. nil reads a record as `next` gives it.
 //
 // `exact` returns the scan whose cuts, a byte past a separator it finds from the end of an open reader's first record,
 // are each the end of a record and the start of the next, and false when the format has none under the reader's
@@ -105,7 +105,7 @@ Services :: struct {
 	guess:  proc(it: ^Reader, to: u64) -> bool,
 	exact:  proc(it: ^Reader) -> (kernel.Quotes, bool),
 	piece:  proc(it: ^Reader, lo, hi: u64) -> bool,
-	scan:   proc(it: ^Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (Record, core.Document, core.Path_Error, bool),
+	scan:   proc(it: ^Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (Record, core.Path_Error, bool),
 	whole:  proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64),
 	read:   proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool,
 	build:  proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error),
@@ -232,12 +232,9 @@ scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec:
 	}
 	s := it.scan
 	if it.services.scan != nil && it.input.procedure == nil {
-		rec, doc, err, more = it.services.scan(it, &s.h, &s.last, path, read)
+		rec, err, more = it.services.scan(it, &s.h, &s.last, path, read)
 		// A record that fails before its walk leaves `last` and its buffers for the next.
-		if doc.nodes_alloc != nil {
-			s.last = doc
-		}
-		return
+		return rec, s.last if err.kind == .None else {}, err, more
 	}
 	core.destroy(&s.last)
 	delete(s.answers, it.allocator)

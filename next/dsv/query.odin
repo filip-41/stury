@@ -54,7 +54,7 @@ scan_as :: proc(src: []u8, handle: core.As, paths: []core.Path, read: core.Path_
 
 // Walks `src` as spec `S` with the scan's hook, the stream's when `on` is set, and ends the read.
 @(private)
-scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (core.Document, core.Path_Error) {
+scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read: core.Path_Options, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Path_Error) {
 	opts := options_of(handle)
 	h: engine.Scan
 	// A record is a container inside the document's array, so a dsv text nests at most two containers.
@@ -73,7 +73,8 @@ scan_spec :: proc(src: []u8, $S: Spec, handle: core.As, paths: []core.Path, read
 	} else {
 		hi, fault = walk_many(src, S, opts, &h, &records, &regs, engine.scan_hook_many)
 	}
-	return engine.scan_end((^engine.Scan)(rawptr(&h)), regs, hi, fault)
+	err = engine.scan_end((^engine.Scan)(rawptr(&h)), regs, hi, fault, &doc)
+	return
 }
 
 // What a re-walk of one record needs: the header's cells, which the record's own walk does not read, and the hook.
