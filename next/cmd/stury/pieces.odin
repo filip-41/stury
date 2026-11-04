@@ -27,9 +27,9 @@ POOLED_BYTES :: #config(STURY_POOLED_BYTES, 1 << 20)
 
 // The run's pool, started at its first use. A pool that could not start runs every piece on the caller.
 run_pool :: proc(run: ^Run) -> ^core.Runner {
-	if !run.pooled {
-		run.pooled = true
-		host.pool_init(&run.pool, THREADS)
+	if run.pool == nil {
+		run.pool = new(host.Pool, runtime.heap_allocator())
+		host.pool_init(run.pool, THREADS)
 	}
 	return &run.pool.runner
 }
@@ -534,9 +534,9 @@ write_piece :: proc(ps: ^Pieces, s: ^Piece_Slot) {
 	}
 	r.pieces += 1
 	if len(s.out) > 0 {
-		host.writing(&run.pool, true)
+		host.writing(run.pool, true)
 		write_out(s.out)
-		host.writing(&run.pool, false)
+		host.writing(run.pool, false)
 		o.written += len(s.out)
 	}
 	give_spare(&run.spares, s.out, s.room, s.k)

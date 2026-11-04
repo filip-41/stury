@@ -58,8 +58,8 @@ Run :: struct {
 	ip:          jq.Interp,
 	output:      Output,
 	halted:      bool,
-	pool:        host.Pool, // `run_pool`'s, started once `pooled`
-	pooled:      bool,
+	// `run_pool`'s, started at its first use. Held by pointer: a piece copies the run while helpers still start.
+	pool:        ^host.Pool,
 	spares:      Spare_Outs, // the pieces' output buffers, kept from one file to the next
 	parallel:    Maybe(bool), // whether the filter runs on pieces, once `parallel` has decided it
 }
