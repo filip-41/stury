@@ -11,6 +11,7 @@ tests and benchmarks on its own and imports nothing outside this directory.
 | `core` | what every format shares: the token, hook and fault types, error rendering, `Number` and its bounds, the document, its readers, the edit list, paths and their answers |
 | `host` | `Pool`, the threads a caller keeps between parallel calls and lends through `core.Runner` (nil means the caller's thread alone): helpers wake in a tree, a task nobody has started is taken back, and each task's width is learned from how long the caller waits |
 | `core/kernel` | vector code: 64-byte blocks, byte classes, masks, escapes, UTF-8 validation, per CPU tier |
+| `core/compose` | a commit's composition of edits into containers, which a format's table points at |
 | `core/build` | the builder: the hooks that write a document, its reservation, the duplicate-key check, and the path engine |
 | `core/typed` | the typed read: the type plan, the read's hook, refusal and collection, for any format |
 | `core/write` | the output a written text goes into, a buffer that grows or one flushed to a stream, and the typed write over a type plan and the token write |
@@ -19,9 +20,10 @@ tests and benchmarks on its own and imports nothing outside this directory.
 | `dsv` | the delimited-text walk for the `Csv`, `Tsv` and `Plain` specs, its `build`, its path reads and its spelling and edit services |
 | `walktest` | helpers the test packages share |
 
-Imports point down: `host` imports `core` only, `core/spell` imports no package of this tree, `core` imports `core/spell`, `core/kernel`,
-`core/build` and `core/typed` import `core`, `core/write` imports `core`, `core/spell` and `core/typed`, `core/records` imports
-`core`, `core/typed` and `core/write`, `json` and `dsv` import all of them but `host`, and no format imports another.
+Imports point down: `core/spell` imports no package of this tree, `core` imports `core/spell`, `host`, `core/kernel` and
+`core/compose` import `core`, `core/build` imports `core` and `core/spell`, `core/typed` imports those and `core/build`,
+`core/write` imports `core`, `core/spell` and `core/typed`, `core/records` imports `core`, `core/kernel`, `core/build`,
+`core/typed` and `core/write`, `json` and `dsv` import all of them but `host`, and no format imports another.
 
 ## Docs
 
@@ -38,6 +40,18 @@ Imports point down: `host` imports `core` only, `core/spell` imports no package 
 | `bench/README.md` | the document lanes, their fixtures and the other libraries they run beside; the kernel bench is `bench/run.py` |
 
 ## API
+
+Validating and building a document, in `json` and in `dsv`, then reading and editing it through `core`:
+
+```odin
+json.validate  :: proc(src: []u8, spec: json.Spec, opts := json.Options{}) -> Maybe(core.Fault)
+json.build     :: proc(src: []u8, spec: json.Spec, opts := json.Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error)
+core.destroy   :: proc(doc: ^core.Document)
+core.kind, core.length, core.span, core.int_value, core.number // a node's kind, its member or element count, its source bytes and its numbers
+core.member, core.children, core.pairs // a member by name, and the iterators over a container
+core.edit_list_init :: proc(doc: ^core.Document, allocator := context.allocator) -> core.Edit_List
+core.set, core.set_member, core.insert, core.remove // one edit each, recorded on the list and checked when recorded
+```
 
 The readers and writers a caller names:
 
@@ -63,11 +77,17 @@ write.value_int, write.value_uint, write.value_float, write.value_bool, write.va
 records.writer_init :: proc(wr: ^records.Writer, w: io.Stream, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind
 records.write, records.write_text, records.write_cells // one record each: a typed value by its plan, a caller's text, a delimited row of cells
 records.writer_end :: proc(wr: ^records.Writer) -> ([]u8, core.Typed_Error)
+records.writer_destroy :: proc(wr: ^records.Writer) // frees a writer that was not ended
 records.marshal    :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
-core.write        :: proc(doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Typed_Error)
-core.write_stream :: proc(w: io.Stream, doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, allocator := context.allocator) -> (dropped: int, err: core.Typed_Error)
-json.as           :: proc(spec: json.Spec) -> core.As
+records.marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}) -> core.Typed_Error
+core.write        :: proc(doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Typed_Error)
+core.write_stream :: proc(w: io.Stream, doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (dropped: int, err: core.Typed_Error)
+json.as           :: proc(spec: json.Spec, opts := json.Options{}) -> core.As
 dsv.as            :: proc(spec: dsv.Spec, layout := dsv.Options{}) -> core.As
+json.marshal      :: proc(value: any, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
+dsv.marshal       :: proc(value: any, spec := dsv.Spec.Csv, layout := dsv.Options{}, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
+write.marshal     :: proc(value: any, plan: ^typed.Plan, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
+write.marshal_stream :: proc(w: io.Stream, value: any, plan: ^typed.Plan, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error
 json.format       :: proc(src: []u8, $S: json.Spec, opts := core.Write_Options{}, read := json.Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
 ```
 
@@ -111,16 +131,34 @@ A built document or a path's answer is read by one call for every format, which 
 typed.unmarshal :: proc {unmarshal_node, unmarshal_answer} // (doc, node or answer, target, plan, read, allocator)
 ```
 
-The record reader, for every format, whose framings and faults are in [docs/records.md](docs/records.md):
+The record reader, for every format, whose framings and faults are in [docs/records.md](docs/records.md). A reader is made by
+`open` on text in memory or by `open_stream` on an `io.Reader`, and is read by the calls after it:
 
 ```odin
-records.open  :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator) -> records.Reader
-records.next  :: proc(it: ^records.Reader) -> (records.Record, bool) // the record's text, its offset, and its key under .Entries
-records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error)
-records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Document_Error)
-records.close :: proc(it: ^records.Reader)
-records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
-records.validate :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault) // on a runner's threads too
+records.open        :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, at: u64 = 0, allocator := context.allocator) -> records.Reader
+records.open_stream :: proc(input: io.Reader, as: core.As, framing := core.Framing.Lines, opts := records.Stream_Options{}, at: u64 = 0, allocator := context.allocator) -> records.Reader
+records.next        :: proc(it: ^records.Reader) -> (records.Record, bool) // the record's text, its offset, and its key under .Entries
+records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok: bool) // whole records and their gaps, for a caller that hands them to a thread
+records.read        :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error)
+records.build       :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Document_Error)
+records.scan        :: proc(it: ^records.Reader, path: core.Path, read := core.Path_Options{}) -> (rec: records.Record, doc: core.Document, err: core.Path_Error, more: bool)
+records.column      :: proc(it: ^records.Reader, name: string) -> int // a delimited text's column by header name, -1 for none
+records.cell        :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
+records.cells       :: proc(it: ^records.Reader, rec: records.Record, buf: []u8) -> ([]Maybe(string), bool) // every cell of a row, as write_cells takes them
+records.close       :: proc(it: ^records.Reader)
+records.check       :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
+records.validate    :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault) // the fault a whole-text validate gives
+records.each        :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> Maybe(core.Fault) // a task per piece of the text, on the runner's threads
+json.spine          :: proc(src: []u8, as: core.As) -> (entries: core.As, at: u64, ok: bool) // the array inside a root object that holds the text's bulk
+```
+
+`check`, `validate` and `each` take a `core.Runner` to read a long text on more threads than the caller's. `host.Pool` is the
+runner a caller lends: it keeps its threads between calls, and nil runs on the caller's thread alone.
+
+```odin
+host.pool_init    :: proc(pool: ^host.Pool, workers := 0) -> runtime.Allocator_Error // pass &pool.runner as the runner
+host.pool_destroy :: proc(pool: ^host.Pool)
+host.writing      :: proc(pool: ^host.Pool, on: bool) // a task tells the pool it is in a write that may block
 ```
 
 ## Make targets
