@@ -158,7 +158,7 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	depth := core.reserve_depth(opts.max_depth, len(src))
 	started: core.Path_Error
 	if h.again {
-		started = engine.scan_again(h, src, it.as, last, it.allocator, room[:depth])
+		started = engine.scan_again(h, src, it.as, it.allocator, room[:depth])
 	} else {
 		core.destroy(last)
 		started = engine.scan_start(h, src, it.as, []core.Path{path}, read, false, it.allocator, depth, room)

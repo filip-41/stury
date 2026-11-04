@@ -221,17 +221,19 @@ scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: c
 }
 
 // Starts the next walk over `src` of a one-path read with a borrowed stack that `scan_end` ended with `again`, with its
-// plan and lists, the stack `frames`, and the buffers of `last`, the document that walk returned, which goes.
-scan_again :: proc(h: ^Scan, src: []u8, as: core.As, last: ^core.Document, allocator: runtime.Allocator, frames: []u64) -> core.Path_Error {
-	if last.nodes_alloc == nil {
+// plan and lists, the stack `frames`, and the builder's buffers, which the document that walk returned shares until
+// the next `scan_end` writes over it.
+scan_again :: proc(h: ^Scan, src: []u8, as: core.As, allocator: runtime.Allocator, frames: []u64) -> core.Path_Error {
+	if h.b.doc.nodes_alloc == nil {
 		// The last walk failed, and freed its buffers.
 		if h.b = builder_start(src, as, false, allocator, 64, 0); h.b.err.kind != .None {
 			return {kind = .No_Memory}
 		}
 	} else {
-		h.b = {pending = -1, last = core.NO_NODE, doc = {src = src, as = as, allocator = allocator, nodes = last.nodes_alloc, nodes_alloc = last.nodes_alloc, facts_alloc = last.facts_alloc, counts_alloc = last.counts_alloc}}
+		h.b.doc.src, h.b.doc.as, h.b.doc.nodes = src, as, h.b.doc.nodes_alloc
+		h.b.n_facts, h.b.pending, h.b.last, h.b.root_close, h.b.n_counts = 0, -1, core.NO_NODE, 0, 0
+		h.b.wide_count, h.b.wide_more = 0, false
 	}
-	last^ = {}
 	h.b.stack, h.b.borrowed = frames, true
 	h.keep, h.next = h.free, 1 if h.path.limit > 0 else 0
 	h.matched, h.maps, h.cut, h.stopped, h.path.count = 0, 0, 0, false, 0
@@ -283,7 +285,13 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	h.b.wide_more = h.b.wide_count != 0
 	h.b.root_close = 0 if h.stopped else root_close
 	e: core.Document_Error
-	doc^, e = builder_end(&h.b, regs, fault)
+	if h.again {
+		// The builder keeps its buffers for `scan_again`, and is zero when `builder_finish` freed them.
+		e = builder_finish(&h.b, regs, fault)
+		doc^ = h.b.doc
+	} else {
+		doc^, e = builder_end(&h.b, regs, fault)
+	}
 	if e.kind != .None {
 		if !h.again {
 			scan_free(h, allocator)

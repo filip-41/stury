@@ -258,7 +258,7 @@ find :: proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{
 query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error) {
 query_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Path_Error) {
 scan :: proc {scan_one, scan_many}
-scan_again :: proc(h: ^Scan, src: []u8, as: core.As, last: ^core.Document, allocator: runtime.Allocator, frames: []u64) -> core.Path_Error {
+scan_again :: proc(h: ^Scan, src: []u8, as: core.As, allocator: runtime.Allocator, frames: []u64) -> core.Path_Error {
 scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(core.Fault), doc: ^core.Document) -> core.Path_Error {
 scan_free :: proc(h: ^Scan, allocator: runtime.Allocator) {
 scan_hook :: #force_inline proc (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {

@@ -80,10 +80,25 @@ builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator
 	return b
 }
 
-// Returns the document the walk built, or the error that stopped it. A walk fault returns `.Walk` with the fault
-// in `inner`, a repeated key under `refuse_duplicates` returns `.Duplicate_Key` at the later key's byte, and a refused
-// allocation returns `.No_Memory`. On an error the document is the zero value and every allocation is freed.
+// Returns the document the walk built, or the error that stopped it, and leaves the builder zero. The errors are
+// `builder_finish`'s. On an error the document is the zero value.
 builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> (core.Document, core.Document_Error) {
+	if e := builder_finish(b, regs, fault); e.kind != .None {
+		return {}, e
+	}
+	doc := b.doc
+	if b.stack != nil && !b.borrowed {
+		delete(b.stack, b.doc.allocator)
+	}
+	b^ = {}
+	return doc, {}
+}
+
+// Completes the document the walk built in `b.doc`, or returns the error that stopped it. A walk fault returns `.Walk`
+// with the fault in `inner`, a repeated key under `refuse_duplicates` returns `.Duplicate_Key` at the later key's byte,
+// and a refused allocation returns `.No_Memory`. On an error every allocation is freed and the builder is zero.
+@(private)
+builder_finish :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Document_Error {
 	if _, bad := fault.?; bad {
 		// The walk stopped before an open object closed, so its close-time duplicate check never ran. A key read
 		// before the fault is still a repeat.
@@ -92,11 +107,11 @@ builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault))
 	if b.err.kind != .None {
 		e := b.err
 		builder_free(b)
-		return {}, e
+		return e
 	}
 	if f, bad := fault.?; bad {
 		builder_free(b)
-		return {}, {kind = .Walk, at = f.at, inner = f}
+		return {kind = .Walk, at = f.at, inner = f}
 	}
 	n := int(regs.a)
 	b.doc.nodes = b.doc.nodes_alloc[:n]
@@ -107,13 +122,13 @@ builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault))
 		if !builder_counts(b, n) {
 			e := b.err
 			builder_free(b)
-			return {}, e
+			return e
 		}
 	} else if b.wide_count != 0 {
 		fresh, ok := grow(b.doc.allocator, b.doc.counts_alloc, 1)
 		if !ok {
 			builder_free(b)
-			return {}, {kind = .No_Memory}
+			return {kind = .No_Memory}
 		}
 		fresh[0] = {node = b.wide_node, count = b.wide_count}
 		b.doc.counts_alloc = fresh
@@ -134,12 +149,7 @@ builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault))
 	b.doc.facts = b.doc.facts_alloc[:b.n_facts]
 	b.doc.counts = b.doc.counts_alloc[:len(b.doc.counts)]
 	b.doc.root_close = b.root_close
-	doc := b.doc
-	if b.stack != nil && !b.borrowed {
-		delete(b.stack, b.doc.allocator)
-	}
-	b^ = {}
-	return doc, {}
+	return {}
 }
 
 // Frees the builder's buffers, last allocated first. An arena ignores a free and takes a last block's tail back at a

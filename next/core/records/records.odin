@@ -92,8 +92,8 @@ RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limi
 // offset whose records make up the whole of `src`, for `validate`, nil for a format that does not take it.
 //
 // `scan` is `next` and a read of `path` in the record by one walk, into `last`, a document whose text is the input up to
-// the record's end. It starts `h` at the first call, and then with `engine.scan_again` while `h.again` is set, from the
-// document `last` held. nil reads a record as `next` gives it.
+// the record's end. It starts `h` at the first call, and then with `engine.scan_again` while `h.again` is set, which
+// writes the buffers `last` shares with the builder. nil reads a record as `next` gives it.
 //
 // `exact` returns the scan whose cuts, a byte past a separator it finds from the end of an open reader's first record,
 // are each the end of a record and the start of the next, and false when the format has none under the reader's
