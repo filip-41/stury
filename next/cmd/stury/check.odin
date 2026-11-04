@@ -77,7 +77,7 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 		return ""
 	}
 	f = literal_cut(data, f, src.framing)
-	return message.build_temp("%s\n%s", fault_told(name, data, f, src.spec), fault_note(data, f, src.spec, o))
+	return message.build_temp("%s\n%s", fault_told(name, data, f), fault_note(data, f, src.spec, o))
 }
 
 // The first fault of the records of `data` from byte `at`, framed by `framing`.

@@ -410,7 +410,7 @@ writer_take :: proc(wr: ^Writer) -> []u8 {
 Detail :: enum u8 {
 Number_Spelling :: enum u16 {
 Options :: struct {
-RULES := core.Rules{, {{}, {, }, {, }, {, }, {, }, {, }, {, }}}
+RULES := core.Rules{, {{}, {, }, {, }, {, }, {, }, {, }, {, }, {, }}}
 SPINE_LEVELS :: 4
 Spec :: enum u8 {
 Tolerance :: enum u8 {

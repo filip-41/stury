@@ -17,7 +17,7 @@ import "message"
 @(private = "file")
 fault_message :: proc(ins: ^Inputs, data: []byte, f: core.Fault, end := -1) -> string {
 	if ins.next_file > 1 {
-		return fault_told(ins.name, data, f, ins.spec, ins.file_lines)
+		return fault_told(ins.name, data, f, ins.file_lines)
 	}
 	return jq.parse_message(data, f, ins.parsed.line, ins.parsed.column, "", end)
 }
@@ -104,14 +104,14 @@ is_letter :: proc(c: byte) -> bool {
 fail_dialect :: proc(ins: ^Inputs, data: []byte, f: core.Fault) -> ! {
 	run := ins.run
 	flush_some(&run.output, force = true)
-	message.write_stderr("stury: error: %s\n%s", fault_told(ins.name, data, f, ins.spec, ins.file_lines), fault_note(data, f, ins.spec, &run.opts))
+	message.write_stderr("stury: error: %s\n%s", fault_told(ins.name, data, f, ins.file_lines), fault_note(data, f, ins.spec, &run.opts))
 	finish(run, EXIT_INPUT)
 }
 
-// The fault `f` of the text `data` of file `name`, read as `spec` or delimited, told as `NAME:LINE:COLUMN: SENTENCE`, its line counted
-// on from the `lines` before `data`, or as `NAME: SENTENCE` when it is at no byte. A JSON text's sentence is the one jq's
+// The fault `f` of the text `data` of file `name` told as `NAME:LINE:COLUMN: SENTENCE`, its line counted on from the
+// `lines` before `data`, or as `NAME: SENTENCE` when it is at no byte. A JSON-like text's sentence is the one jq's
 // messages use (`jq.fault_sentence`).
-fault_told :: proc(name: string, data: []byte, f: core.Fault, spec: Maybe(json.Spec), lines := 0) -> string {
+fault_told :: proc(name: string, data: []byte, f: core.Fault, lines := 0) -> string {
 	if f.rules != &json.RULES {
 		line, col := core.locate(data, f.at)
 		return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, core.rule_of(f).message)
@@ -120,14 +120,7 @@ fault_told :: proc(name: string, data: []byte, f: core.Fault, spec: Maybe(json.S
 		return message.build_temp("%s: %s", name, jq.fault_sentence(f, ""))
 	}
 	line, col := core.locate(data, f.at)
-	rest := string(data[f.at:])
-	sentence := jq.fault_sentence(f, rest)
-	// JSON5 spells them, JSON has no value for them, and the library refuses them as a literal.
-	unsigned := strings.trim_left(rest, "+-")
-	if spec == .Json5 && f.kind == .Bad_Char && (strings.has_prefix(unsigned, "Infinity") || strings.has_prefix(unsigned, "NaN")) {
-		sentence = "Infinity and NaN have no JSON value"
-	}
-	return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, sentence)
+	return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, jq.fault_sentence(f, string(data[f.at:])))
 }
 
 // The fault `f` of the records of `data` framed by `framing`, but under `.Lines` and `.Seq` a word cut short by its

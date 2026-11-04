@@ -53,7 +53,7 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 
 // The fault `f` of the open file, told as `NAME:LINE:COLUMN: SENTENCE`. The file is read past.
 cells_fault :: proc(ins: ^Inputs, f: core.Fault) -> (jq.Value, string, jq.Parse_Status) {
-	msg := fault_told(ins.name, ins.data, f, nil, ins.file_lines)
+	msg := fault_told(ins.name, ins.data, f, ins.file_lines)
 	ins.note = ""
 	close_file(ins)
 	return nil, msg, .Error

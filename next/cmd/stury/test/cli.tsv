@@ -1802,7 +1802,7 @@ json5	["--from", "json5", "-c", "."]	"{\n  a: [1, 2],\n  b: {c: 0x},\n}\n"	{}	nu
 json5	["--from", "json5", "-c", ".b | error"]	"{\n  a: 1,\n  b: 'bad',\n}\n"	{}	null	null	null	5	""	"stury: error (at <stdin>:4): bad\n"
 json5	["--from", "json5", "-c", "."]	"{a: 1}\n{a: 2}\n"	{}	null	null	null	5	""	"stury: error: <stdin>:2:1: Unexpected text after the JSON value\n"
 json5	["--from", "json5", "-c", "."]	"[1,\n 2,\n Infinity]\n"	{}	null	null	null	5	""	"stury: error: <stdin>:3:2: Infinity and NaN have no JSON value\n"
-json5	["--from", "json5", "-c", "-n", "\"[1, Infinity]\" | fromjson"]	""	{}	null	null	null	5	""	"stury: error (at <unknown>): Invalid literal at line 1, column 5 (while parsing '[1, Infinity]')\n"
+json5	["--from", "json5", "-c", "-n", "\"[1, Infinity]\" | fromjson"]	""	{}	null	null	null	5	""	"stury: error (at <unknown>): Infinity and NaN have no JSON value at line 1, column 5 (while parsing '[1, Infinity]')\n"
 json5	["--from", "json5", "-c", "-n", "\"[0x10, +.5, 'a']\" | fromjson"]	""	{}	null	null	null	0	"[16,0.5,\"a\"]\n"	""
 json5	["--from", "json5", "-c", "-n", "--argjson", "v", "{a: 0x10, 'b': .5}", "$v"]	""	{}	null	null	null	0	"{\"a\":16,\"b\":0.5}\n"	""
 json5	["--from", "json5", "-c", "-n", "--jsonargs", "$ARGS.positional", "0x10", "'a'"]	""	{}	null	null	null	0	"[16,\"a\"]\n"	""

@@ -238,7 +238,7 @@ fmt_failed :: proc(run: ^Run, ins: ^Inputs, fault: core.Fault) -> ! {
 	flush_some(&run.output, force = true)
 	f := literal_cut(ins.data, fault, ins.framing)
 	what := "parse error" if reads_cells(&run.opts) || ins.spec == .Json else "error"
-	message.write_stderr("stury: %s: %s\n%s", what, fault_told(ins.name, ins.data, f, ins.spec), fault_note(ins.data, f, ins.spec, &run.opts))
+	message.write_stderr("stury: %s: %s\n%s", what, fault_told(ins.name, ins.data, f), fault_note(ins.data, f, ins.spec, &run.opts))
 	finish(run, EXIT_INPUT)
 }
 

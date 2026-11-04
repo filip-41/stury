@@ -29,14 +29,14 @@ build_text :: proc(src: []byte, r: core_pkg.As, allocator := context.allocator) 
 	return judge_build(core_pkg.build(src, r, allocator = allocator))
 }
 
-// A build's document `doc`, or the fault its error `err` tells. A JSON5 `Infinity` or `NaN` is refused as a bad
-// literal, since jq has no spelling for it, at its offset in `doc.src` plus `at`.
+// A build's document `doc`, or the fault its error `err` tells. A JSON5 `Infinity` or `NaN` is refused as
+// `Non_Finite`, since jq has no value for it, at its offset in `doc.src` plus `at`.
 judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Document_Error, at: u64 = 0) -> (core_pkg.Document, Maybe(core_pkg.Fault)) {
 	doc := doc
 	if json.Spec(doc.as.spec) == .Json5 && err.kind == .None {
 		if bad, found := non_finite_at(&doc); found {
 			core_pkg.destroy(&doc)
-			return {}, core_pkg.Fault{at = at + bad, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Literal)}
+			return {}, core_pkg.Fault{at = at + bad, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Non_Finite)}
 		}
 	}
 	switch err.kind {
