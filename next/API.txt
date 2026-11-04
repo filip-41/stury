@@ -302,6 +302,7 @@ Type_Hook :: struct {
 Unknown_Fields :: enum u8 {
 Unmarshal_Hook :: #type proc(v: Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind)
 Value_Class :: enum u8 {
+collect_error :: proc(c: ^Collected, e: core.Typed_Error) {
 collected_mark :: #force_inline proc(c: ^Collected) -> Collected_Mark {
 collected_restore :: proc(c: ^Collected, m: Collected_Mark) {
 field_at :: #force_inline proc (b: u64) -> ^Field {

@@ -443,9 +443,9 @@ seq_fault :: proc(it: ^records.Reader, rec: records.Record, fault: Maybe(core.Fa
 		at: u64
 		whole: bool
 		switch Spec(it.as.spec) {
-		case .Json:  at, whole = value_end(it.src, rec, .Json, options_of(it.as))
-		case .Jsonc: at, whole = value_end(it.src, rec, .Jsonc, options_of(it.as))
-		case .Json5: at, whole = value_end(it.src, rec, .Json5, options_of(it.as))
+		case .Json:  _, at, whole = value_end(it.src, rec, .Json, options_of(it.as))
+		case .Jsonc: _, at, whole = value_end(it.src, rec, .Jsonc, options_of(it.as))
+		case .Json5: _, at, whole = value_end(it.src, rec, .Json5, options_of(it.as))
 		}
 		if !whole {
 			return fault
@@ -462,21 +462,22 @@ seq_fault :: proc(it: ^records.Reader, rec: records.Record, fault: Maybe(core.Fa
 	return core.fault_of(core.fault_at(rec.at + u64(len(rec.text)), .Bad_Number, u8(Detail.Cut_Number)), &RULES)
 }
 
-// The first byte past the value of `rec` that is no whitespace or comment, when the value is an array, object or
-// string that is whole and that byte is in the record.
+// One past the value of `rec`, and the first byte past it that is no whitespace or comment, when the value is an
+// array, object or string that is whole and that byte is in the record.
 @(private)
-value_end :: proc(src: []u8, rec: records.Record, $S: Spec, opts: Options) -> (u64, bool) {
+value_end :: proc(src: []u8, rec: records.Record, $S: Spec, opts: Options) -> (hi, at: u64, whole: bool) {
 	switch rec.text[0] {
 	case '[', '{', '"', '\'':
-	case: return 0, false
+	case: return
 	}
 	p := raw_data(src)
 	end := rec.at + u64(len(rec.text))
 	none: core.No_Hooks
 	zero: core.Hook_Regs
-	hi, fault, _ := walk_from(src[:end], p[rec.at:], S, opts, &none, &zero, core.no_hook)
-	at := u64(intrinsics.ptr_sub(gap_end(p[hi:], p[end:], S), p))
-	return at, fault == nil && at < end
+	fault: Maybe(core.Fault)
+	hi, fault, _ = walk_from(src[:end], p[rec.at:], S, opts, &none, &zero, core.no_hook)
+	at = u64(intrinsics.ptr_sub(gap_end(p[hi:], p[end:], S), p))
+	return hi, at, fault == nil && at < end
 }
 
 @(private)
@@ -496,9 +497,8 @@ read_record :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	return false
 }
 
-// Reads the next record into `target` in place in the input. When only a read of the record alone tells the answer,
-// that read goes into a scratch value, so `target` keeps what the read in place wrote and allocated, and the errors
-// `read.collect` holds are the ones of the record alone.
+// Reads the next record into `target`, under `.Seq` as `seq_fault` frames it: a record whose read fails and whose
+// value is whole before more bytes is read again up to that value's end.
 @(private)
 read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
 	rec, ok := frame_line(it)
@@ -507,10 +507,47 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 	}
 	lo := rec.at
 	cut := lo + u64(len(rec.text))
+	if it.framing != .Seq {
+		read_line(it, lo, cut, target, T, plan, read, allocator, err, S)
+		return true
+	}
+	if it.state[1] == UNFRAMED || it.state[1] == STRAY {
+		f := seq_fault(it, rec, nil).?
+		err^ = {kind = .Walk, at = f.at, inner = f}
+		typed.collect_error(read.collect, err^)
+		return true
+	}
+	kept := typed.collected_mark(read.collect)
+	read_line(it, lo, cut, target, T, plan, read, allocator, err, S)
+	if err.kind != .None {
+		if hi, at, whole := value_end(it.src, rec, S, options_of(it.as)); whole {
+			typed.collected_restore(read.collect, kept)
+			err^ = {}
+			it.pos, it.state[1] = at, AFTER_VALUE
+			read_line(it, lo, hi, target, T, plan, read, allocator, err, S)
+			return true
+		}
+	}
+	// A number the walk passed may have been cut short whatever the target makes of it.
+	if err.kind != .Walk {
+		if f, bad := seq_fault(it, rec, nil).?; bad {
+			typed.collected_restore(read.collect, kept)
+			err^ = {kind = .Walk, at = f.at, inner = f}
+			typed.collect_error(read.collect, err^)
+		}
+	}
+	return true
+}
+
+// Reads `it.src[lo:cut]` into `target` in place in the input. When only a read of the text alone tells the answer,
+// that read goes into a scratch value, so `target` keeps what the read in place wrote and allocated, and the errors
+// `read.collect` holds are the ones of the text alone.
+@(private)
+read_line :: proc(it: ^records.Reader, lo, cut: u64, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) {
 	opts := options_of(it.as)
 	kept := typed.collected_mark(read.collect)
 	if !read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, true) {
-		return true
+		return
 	}
 	typed.collected_restore(read.collect, kept)
 	// The scratch value and what its read allocates are dropped with the arena.
@@ -520,11 +557,10 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 	scratch, failed := runtime.mem_alloc(type_info_of(T).size, type_info_of(T).align, scratch_allocator)
 	if failed != nil {
 		err^ = {kind = .Out_Of_Memory}
-		return true
+		return
 	}
 	err^ = {}
 	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, scratch_allocator, runtime.arena_allocator(&it.scratch), err, false)
-	return true
 }
 
 // Reads the next record under `.Concatenated` or `.Entries` into `target` by the framing's own walk. A refusal stops

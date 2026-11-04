@@ -152,26 +152,25 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 			return rec, sep_error(src, sep), true
 		}
 	}
+	if it.framing == .Seq && (it.state[1] == UNFRAMED || it.state[1] == STRAY) {
+		f := seq_fault(it, rec, nil).?
+		return rec, {kind = .Walk, at = f.at, inner = f}, true
+	}
 	frames: [core.MAX_DEPTH]u64 = ---
 	// The builder keeps `room` past the read, unread until `scan_again` replaces it.
 	room := ([^]u64)(rawptr(&frames))[:core.MAX_DEPTH]
-	depth := core.reserve_depth(opts.max_depth, len(src))
-	started: core.Path_Error
-	if h.again {
-		started = engine.scan_again(h, src, it.as, it.allocator, room[:depth])
-	} else {
-		core.destroy(last)
-		started = engine.scan_start(h, src, it.as, []core.Path{path}, read, false, it.allocator, depth, room)
-		h.again = started.kind == .None && h.many == nil && int(opts.max_depth) <= core.MAX_DEPTH
-	}
-	if started.kind != .None {
+	if started := scan_begin(h, it, src, last, path, read, opts, room); started.kind != .None {
 		if walked {
 			rec, ok = RECORDS.next[it.framing](it)
 		}
 		return rec, started, ok || !walked
 	}
 	if !walked {
-		return rec, scan_walk(h, src, q, S, opts, false, last), true
+		err = scan_walk(h, src, q, S, opts, false, last)
+		if it.framing == .Seq {
+			err = scan_seq(it, h, &rec, last, path, read, opts, room, q, err, S)
+		}
+		return rec, err, true
 	}
 	regs := engine.BUILDER_REGS
 	stopped: bool
@@ -198,4 +197,39 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 		return rec, {}, false
 	}
 	return rec, e, ok
+}
+
+// Starts the read `h` of the record text `src`, again on the path it holds when it can.
+@(private)
+scan_begin :: proc(h: ^engine.Scan, it: ^records.Reader, src: []u8, last: ^core.Document, path: core.Path, read: core.Path_Options, opts: Options, room: []u64) -> core.Path_Error {
+	depth := core.reserve_depth(opts.max_depth, len(src))
+	if h.again {
+		return engine.scan_again(h, src, it.as, it.allocator, room[:depth])
+	}
+	core.destroy(last)
+	started := engine.scan_start(h, src, it.as, []core.Path{path}, read, false, it.allocator, depth, room)
+	h.again = started.kind == .None && h.many == nil && int(opts.max_depth) <= core.MAX_DEPTH
+	return started
+}
+
+// The error of the `.Seq` record `rec` that a scan in place gave `err`, as `seq_fault` frames it: a record whose scan
+// fails and whose value is whole before more bytes is scanned again up to that value's end.
+@(private)
+scan_seq :: proc(it: ^records.Reader, h: ^engine.Scan, rec: ^records.Record, last: ^core.Document, path: core.Path, read: core.Path_Options, opts: Options, room: []u64, q: [^]u8, err: core.Path_Error, $S: Spec) -> core.Path_Error {
+	if err.kind != .None {
+		if hi, at, whole := value_end(it.src, rec^, S, opts); whole {
+			it.pos, it.state[1] = at, AFTER_VALUE
+			rec.text = rec.text[:hi - rec.at]
+			if e := scan_begin(h, it, it.src[:hi], last, path, read, opts, room); e.kind != .None {
+				return e
+			}
+			return scan_walk(h, it.src[:hi], q, S, opts, false, last)
+		}
+	}
+	if err.kind != .Walk {
+		if f, bad := seq_fault(it, rec^, nil).?; bad {
+			return {kind = .Walk, at = f.at, inner = f}
+		}
+	}
+	return err
 }

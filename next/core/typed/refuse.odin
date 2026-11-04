@@ -88,12 +88,18 @@ note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error) {
 	if h.first.kind == .None {
 		h.first = e
 	}
-	if c := h.collect; c != nil {
-		if len(c.errors) >= (c.max_errors if c.max_errors != 0 else 100) {
-			c.truncated = true
-		} else {
-			append(&c.errors, e)
-		}
+	collect_error(h.collect, e)
+}
+
+// Adds `e` to `c`, nil for none, and past its cap only marks it truncated.
+collect_error :: proc(c: ^Collected, e: core.Typed_Error) {
+	if c == nil {
+		return
+	}
+	if len(c.errors) >= (c.max_errors if c.max_errors != 0 else 100) {
+		c.truncated = true
+	} else {
+		append(&c.errors, e)
 	}
 }
 
