@@ -52,9 +52,7 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 // document lives in an arena on `scratch`, freed before the read, and `scratch` is the read's temp allocator.
 @(private)
 read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Error, $LINE: bool) -> (cold: bool) {
-	// A BOM past the input's first byte is the read's `Bad_Char`, in a spec where it is no whitespace, and `build` of
-	// the text from `lo` would pass over it.
-	if read.refuse_duplicates && (lo == 0 || S == .Json5 || core.text_start(src[lo:cut], 0) == 0) {
+	if read.refuse_duplicates && !stray_bom(src[lo:cut], lo, S) {
 		arena := runtime.Arena{backing_allocator = scratch, minimum_block_size = 4096}
 		defer runtime.arena_destroy(&arena)
 		_, built := build_spec(src[lo:cut], S, opts, true, runtime.arena_allocator(&arena))

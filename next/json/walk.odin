@@ -157,6 +157,13 @@ walk :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: 
 	return h2, f2
 }
 
+// Whether `text`, at offset `at` of the input, starts with a BOM that is not the input's, which a walk in place refuses
+// with `Bad_Char` in a spec where it is no whitespace, and which `build` of `text` would pass over.
+@(private)
+stray_bom :: #force_inline proc "contextless" (text: []u8, at: u64, spec: Spec) -> bool {
+	return at > 0 && spec != .Json5 && core.text_start(text, 0) > 0
+}
+
 // Reads the run before a document, for `walk` and `build`: one BOM at the text's first byte, whitespace, record
 // separators 0x1E, and comments that no document follows before the text's end or a 0x1E. Returns the document's
 // first byte or the text's end, and the first 0x1E crossed, which a stream passes over and `build` refuses.

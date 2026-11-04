@@ -571,7 +571,6 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 // input's first byte.
 @(private)
 build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Document_Error) {
-	spec := Spec(it.as.spec)
 	seq := it.framing == .Seq
 	// `seq_fault` takes the record's offset in the window, which a stream's `rec.at` is not.
 	local := records.Record{text = rec.text, at = rec.at - it.base}
@@ -580,8 +579,7 @@ build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtim
 		f.at += it.base
 		return {}, {kind = .Walk, at = f.at, inner = f}
 	}
-	// A BOM is the input's, and passed over only at its first byte.
-	if rec.at > 0 && spec != .Json5 && len(rec.text) >= 3 && rec.text[0] == 0xef && rec.text[1] == 0xbb && rec.text[2] == 0xbf {
+	if stray_bom(rec.text, rec.at, Spec(it.as.spec)) {
 		return {}, {kind = .Walk, at = rec.at, inner = {at = rec.at, rules = &RULES, kind = .Bad_Char}}
 	}
 	doc, err = build_as(rec.text, it.as, false, allocator)
