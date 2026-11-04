@@ -701,6 +701,8 @@ line and column in the stream, without a file's name.
 - In a filter's string literal (an interpolated string and an object key included) a lone low surrogate is a
   compile error, `Invalid escape`, where jq reads U+FFFD. A lone high one is refused, as jq refuses it.
 - After a parse error, `input` reads on from the next line, where jq reads on from its next 4 KiB read.
+- `input_line_number` and an error's line count through the end of the line a text ends on. jq counts through
+  its last 4 KiB read, which on a longer line has not reached the line's end, so it reports 0 there.
 - `range/3` refuses a bound or step that is not a number (`Range bounds must be numeric`), as jq's `range/2`
   does; jq's `range/3` adds it with `+` (`[range(null; 3; 1)]` is `[null,1,2]` there).
 - `range` with a NaN bound or step gives no values. jq gives none for some (`[range(0; 3; nan)]`), counts on
