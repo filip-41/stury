@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A run on pieces answers as the serial run does: the same output, the same messages and the same exit status, at
-every pool width, on records, a root array, a spine array and CSV, with a fault in the first, a middle and the last
-piece. The serial reference never reaches the pool, and each pooled build cuts every input into many pieces.
+every pool width, on records, texts in the default framing, a root array, a spine array, an empty spine and CSV,
+with a fault in the first, a middle and the last piece. The serial reference never reaches the pool, and each pooled
+build cuts every input into many pieces.
 
     pieces_law.py [--odin PATH]
 """
@@ -89,9 +90,12 @@ def cases(directory):
         arr = file(f"array-{fault}.json", array_text(at, False))
         spine = file(f"spine-{fault}.json", array_text(at, True))
         table = file(f"table-{fault}.csv", csv_text(at))
+        # Many texts in the default framing, one to a line and run on with spaces.
+        texts = file(f"texts-{fault}.json", records_text(at).replace("\n", " \n  ", COUNT // 2))
         for f in FILTERS:
             out.append(["--from", "ndjson", "-c", f, nd])
             out.append(["-c", ".[] | " + f, arr])
+            out.append(["-c", f, texts])
         out.append(["-e", "--from", "ndjson", ".o.k[1]", nd])
         out.append(["--explain", "--from", "ndjson", "-c", ".v", nd])
         for f in SPINE:
@@ -127,9 +131,18 @@ def cases(directory):
     out.append(["-c", ".logs | length", twice])
     out.append(["-c", ".logs | map(.v)", twice])
     out.append(["-c", "[.logs[] | .i]", repeated])
+    # Spines with no entries, and a root object whose length is its count of keys.
+    empty = file("empty.json", '{"n":1,"logs":[%s],"tail":"x"}' % (" " * (SLICE * 16)))
+    blank = file("blank.json", "[%s]" % ("\n" * (SLICE * 16)))
+    keys = file("keys.json", "{%s}" % ",".join('"k%d":%s' % (i, record(i)) for i in range(COUNT)))
     for w in WHOLE:
         out.append(w + [twice])
         out.append(w + [repeated])
+        out.append(w + [empty])
+        out.append(w + [blank])
+    out.append(["-c", ".logs | length", empty])
+    out.append(["length", keys])
+    out.append(["-c", "keys | length", keys])
     return out
 
 

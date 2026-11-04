@@ -53,6 +53,14 @@ spine_print :: proc(ins: ^Inputs, put: Spine_Put) -> bool {
 	if !ok {
 		return false
 	}
+	entries := 0
+	for s in job.slots {
+		entries += s.entries
+	}
+	// An empty spine prints as `[]`, which only the whole text's print gives.
+	if entries == 0 {
+		return false
+	}
 	close := array_close(data, at, entries_end(job.slots[:]))
 	shell := make([]byte, int(at) + 1 + len(MARKER) + len(data) - int(close), context.temp_allocator)
 	copy(shell, data[:at + 1])
