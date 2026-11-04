@@ -100,10 +100,10 @@ put_header_key :: #force_inline proc "contextless" (keys: []core.Token, cells: i
 	}
 }
 
-// A cell's `Token.spelling`. Bit 0 (`SPELLING_DECODE`) says the reader passes the cell to `spelling_text`, bit 1
+// A cell's `Token.spelling`. Bit 0 (`SPELLING_DECODE`) says the reader passes the cell to `cell_text`, bit 1
 // (`SPELLING_QUOTED`) that it is a quoted CSV cell. A quoted cell's first byte is a quote, and an unquoted cell's never
 // is, since a quote at a cell's first byte opens a quoted field and one anywhere else is refused or, under
-// `.Bare_Quote`, a cell byte. Every quoted CSV cell sets both bits, and `spelling_text` and `spelling_key_equals` cut
+// `.Bare_Quote`, a cell byte. Every quoted CSV cell sets both bits, and `cell_text` and `spelling_key_equals` cut
 // it to its inner span without decoding when `plain_quoted` holds, which is when the span holds no `""` and is
 // well-formed UTF-8. An unquoted CSV cell sets bit 0 under `lax`. A TSV cell sets it when its span holds a backslash,
 // which the pass's block mask answers, or under `lax`. On a walk for `Cells` the mask holds a quoted cell's `""`, and
@@ -242,7 +242,7 @@ read_ragged :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "contextle
 }
 
 // The `Key` token of column `c`: its header cell, or past the header's last, which only `.Ragged` reads, a key named by
-// its 1-based position. That key holds no bytes: `n` is the position, which `spelling_text` writes out, and `lo` the
+// its 1-based position. That key holds no bytes: `n` is the position, which `cell_text` writes out, and `lo` the
 // header's first byte, so the span stays inside the text, which holds the header's line and the `c` delimiters before
 // the cell.
 @(private)

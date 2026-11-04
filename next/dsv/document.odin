@@ -5,6 +5,7 @@ package dsv
 import "base:intrinsics"
 import "base:runtime"
 import "core:bytes"
+import "core:unicode/utf8"
 import spell "../core/spell"
 import core "../core"
 import compose "../core/compose"
@@ -22,14 +23,15 @@ import build "../core/build"
 EDIT := core.Edit_Spelling {
 	value         = edit_value_at,
 	key_text      = edit_key_text,
-	comment       = edit_comment,
-	member_sep    = edit_cell_sep,
+	// A delimited text's comment spelling is `.Byte` with the document's comment byte, or `.None` when the byte is 0.
+	comment       = proc(doc: ^core.Document, _: u8) -> (core.Comment_Spelling, u8) {return (.Byte if doc.as.opts[1] != 0 else .None), doc.as.opts[1]},
+	member_sep    = proc(doc: ^core.Document) -> string {return string(doc.as.opts[:1])},
 	insert_check  = edit_insert_check,
 	interior      = edit_interior,
 	fact_slot     = edit_fact_slot,
 	emptied       = edit_emptied,
 	plan          = edit_plan,
-	commit        = edit_commit,
+	commit        = proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {return compose.commit(list, spec, &ROOT_EDIT, allocator)},
 	flat          = true,
 }
 
@@ -39,17 +41,12 @@ ROOT_EDIT := compose.Root_Spelling {
 	root_junction = compose_root_junction,
 }
 
-@(private)
-edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
-	return compose.commit(list, spec, &ROOT_EDIT, allocator)
-}
-
 // dsv's spelling services, in rodata, the same table for every spec. A service dispatches on `doc.as.spec`, since the
 // specs decode a cell differently: a CSV cell's backslash is a byte and its `""` a quote, a TSV cell's backslash is an
 // escape, and a Plain cell has neither quotes nor escapes.
 @(private)
 SPELLING := core.Spelling {
-	text       = spelling_text,
+	text       = proc(v: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {return cell_text(v.src, n, Spec(v.spec), buf)},
 	key_equals = spelling_key_equals,
 	number     = spelling_number,
 	build      = build_as,
@@ -226,18 +223,10 @@ build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bo
 	return doc, err
 }
 
-// Returns node `n`'s span without a surrounding quote pair, if it has one. A quoted CSV cell has that shape.
+// Returns quoted CSV cell `n`'s span without its quote pair. The walk gives a quoted cell only once it closes it.
 @(private)
-inner_span :: #force_inline proc "contextless" (src: []u8, n: core.Node) -> (lo, hi: u64) {
-	lo, hi = n.lo, n.lo + u64(n.n)
-	if hi >= lo + 2 {
-		a, b := src[lo], src[hi - 1]
-		if (a == '"' || a == '\'') && a == b {
-			lo += 1
-			hi -= 1
-		}
-	}
-	return
+inner_span :: #force_inline proc "contextless" (n: core.Node) -> (lo, hi: u64) {
+	return n.lo + 1, n.lo + u64(n.n) - 1
 }
 
 // Decodes one cell. A CSV cell's inner bytes have each `""` read as `"`, or a TSV cell's bytes have each accepted
@@ -256,7 +245,7 @@ Dsv_Decoded :: struct {
 dsv_decoded_init :: proc "contextless" (src: []u8, n: core.Node, spec: Spec) -> Dsv_Decoded {
 	if spec == .Csv {
 		if n.spelling & core.SPELLING_QUOTED != 0 {
-			lo, hi := inner_span(src, n)
+			lo, hi := inner_span(n)
 			return {src = src, p = lo, end = hi, quoted = true}
 		}
 		return {src = src, p = n.lo, end = n.lo + u64(n.n)}
@@ -310,55 +299,23 @@ dsv_decoded_next :: proc "contextless" (d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
 }
 
 // Whether a quoted cell's inner span is its text: it holds no `""` and its bytes are well-formed UTF-8. A cell holding
-// `""` decodes to fewer bytes, and one under `lax` held an ill-formed sequence that decodes as U+FFFD. The byte scan
-// moves eight bytes at a time while they are ASCII and hold no quote byte.
+// `""` decodes to fewer bytes, and one under `lax` may hold an ill-formed sequence that decodes as U+FFFD. The walk
+// accepted the cell, so a quote in its inner span is the first of a `""` pair, and only a `lax` cell can hold an
+// ill-formed sequence.
 @(private)
 plain_quoted :: proc "contextless" (src: []u8, n: core.Node) -> bool {
-	lo, hi := inner_span(src, n)
-	b := src[lo:hi]
-	i := 0
-	base := raw_data(b)
-	for i + 8 <= len(b) {
-		w := intrinsics.unaligned_load((^u64)(base[i:]))
-		x := w ~ 0x2222_2222_2222_2222
-		quotes := (x - 0x0101_0101_0101_0101) & ~x & 0x8080_8080_8080_8080
-		if quotes != 0 || w & 0x8080_8080_8080_8080 != 0 {
-			break
-		}
-		i += 8
-	}
-	for i < len(b) {
-		c := b[i]
-		if c == '"' {
-			// The walk accepted the cell, so a quote in its inner span is the first of a `""` pair.
-			return false
-		}
-		if c < 0x80 {
-			i += 1
-			continue
-		}
-		q, kind := kernel.utf8_char(base[i:], base[len(b):])
-		if kind != .None {
-			return false
-		}
-		i += int(intrinsics.ptr_sub(q, base[i:]))
-	}
-	return true
+	lo, hi := inner_span(n)
+	return kernel.index_byte(src[lo:hi], '"') < 0 && (n.spelling & core.SPELLING_LAX == 0 || utf8.valid_string(string(src[lo:hi])))
 }
 
-// dsv's `Spelling.text`. It returns a cell that needs no decode as a slice of the source: a quoted CSV cell without
-// `""` and with well-formed UTF-8 as its inner span, and another cell as its span. It decodes a quoted cell holding
-// `""`, a TSV escape and a `lax` cell into `buf`, and returns false when `buf` is too short.
-@(private)
-spelling_text :: proc(v: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {
-	return cell_text(v.src, n, Spec(v.spec), buf)
-}
-
-// The text of cell `n` of `src`, a text of spec `spec`, as `spelling_text` gives it.
+// The text of cell `n` of `src`, a text of spec `spec`, and dsv's `Spelling.text`. It returns a cell that needs no
+// decode as a slice of the source: a quoted CSV cell without `""` and with well-formed UTF-8 as its inner span, and
+// another cell as its span. It decodes a quoted cell holding `""`, a TSV escape and a `lax` cell into `buf`, and returns
+// false when `buf` is too short.
 @(private)
 cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string, ok: bool) {
 	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(src, n) {
-		lo, hi := inner_span(src, n)
+		lo, hi := inner_span(n)
 		return string(src[lo:hi]), true
 	}
 	if n.spelling & core.SPELLING_DECODE == 0 {
@@ -382,7 +339,7 @@ cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string,
 spelling_key_equals :: proc "contextless" (doc: ^core.Token_View, n: core.Node, name: string) -> bool {
 	spec := Spec(doc.spec)
 	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(doc.src, n) {
-		lo, hi := inner_span(doc.src, n)
+		lo, hi := inner_span(n)
 		return spell.bytes_equal(doc.src[lo:hi], transmute([]u8)name)
 	}
 	if n.spelling & core.SPELLING_DECODE == 0 {
@@ -440,32 +397,6 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	return .String
 }
 
-// The shape of an edit's text. `arrays` counts its `Array` tokens, `cells` its `Plain` tokens, `record_lo` is the
-// second `Array`'s byte, and `last_cell_end` is one past the last `Plain`'s bytes.
-@(private)
-Text_Shape :: struct {
-	arrays:        int,
-	cells:         int,
-	record_lo:     u64,
-	last_cell_end: u64,
-}
-
-@(private)
-shape_hook :: proc "contextless" (h: ^Text_Shape, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	switch t.kind {
-	case .Array:
-		h.arrays += 1
-		if h.arrays == 2 {
-			h.record_lo = t.lo
-		}
-	case .Plain:
-		h.cells += 1
-		h.last_cell_end = t.lo + u64(t.n)
-	case .End, .Null, .False, .True, .Number, .String, .Map:
-	}
-	return s, .Next
-}
-
 // Checks that an edit's text is a record of at least one cell, with its record at the text's start and its last cell
 // ending at the text's end, so the text writes no line end of its own. A recorded text that holds the delimiter outside
 // quotes reads as two cells and is refused, and so is one that starts a line with the comment byte, which the walk reads
@@ -473,17 +404,16 @@ shape_hook :: proc "contextless" (h: ^Text_Shape, s: core.Hook_Regs, t: core.Tok
 // its cells cannot hold the delimiter at all. Returns the cell count.
 @(private)
 edit_record :: proc(doc: ^core.Token_View, src: []u8, _: runtime.Allocator, $S: Spec) -> (cells: int, err: core.Document_Error) {
-	h: Text_Shape
-	regs: core.Hook_Regs
 	layout := options_of(doc.as)
-	_, fault := walk(src, 0, S, {no_header = true, delimiter = layout.delimiter, comment = layout.comment}, &h, &regs, shape_hook)
-	if f, bad := fault.?; bad {
+	opts := Options{no_header = true, delimiter = layout.delimiter, comment = layout.comment}
+	if f, bad := validate_spec(src, S, opts).?; bad {
 		return 0, {kind = .Bad_Value, inner = f}
 	}
-	if h.arrays != 2 || h.cells < 1 || h.record_lo != 0 || h.last_cell_end != u64(len(src)) {
+	s := scan_record(src, 0, 0, S, spec_delimiter(S, opts.delimiter))
+	if len(src) == 0 || record_start(src, int(core.text_start(src, 0)), opts.comment) != 0 || s.line_end != len(src) {
 		return 0, {kind = .Bad_Value}
 	}
-	return h.cells, {}
+	return s.cells, {}
 }
 
 // Returns the cell count every record of a delimited text has: its header's, its first record's, or 0 for an empty text.
@@ -558,12 +488,6 @@ edit_emptied :: proc(doc: ^core.Document, list: ^core.Edit_List) -> bool {
 	return removed > 0 && removed == core.length(doc, core.ROOT)
 }
 
-// Returns the single-byte string of the delimiter.
-@(private)
-edit_cell_sep :: proc(doc: ^core.Document) -> string {
-	return string(doc.as.opts[:1])
-}
-
 // Checks that a cell's text is empty or exactly one cell under the document's grammar.
 @(private)
 edit_value_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
@@ -626,31 +550,26 @@ edit_key_text :: proc(doc: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bo
 	return true
 }
 
-// Returns the line end record `i` ends with, or an empty string when it has none.
+// Returns the line end that ends just before byte `p` of `src`, or an empty string when none does.
 @(private)
-record_line_end :: proc(doc: ^core.Document, i: core.Node_Index) -> string {
-	p := record_end(doc, i)
-	if p == 0 || doc.src[p-1] != '\n' {
+line_end_before :: proc(src: []u8, p: u64) -> string {
+	if p == 0 || src[p-1] != '\n' {
 		return ""
 	}
-	return "\r\n" if p >= 2 && doc.src[p-2] == '\r' else "\n"
+	return "\r\n" if p >= 2 && src[p-2] == '\r' else "\n"
 }
 
 // The line end a record insert writes. It is the first line end a record has, else its header's, else LF.
 @(private)
 edit_record_sep :: proc(doc: ^core.Document) -> string {
 	it := core.children(doc, core.ROOT)
-	for {
-		rec, ok := core.child_next(&it)
-		if !ok {
-			break
-		}
-		if e := record_line_end(doc, rec); e != "" {
+	for rec, more := core.child_next(&it); more; rec, more = core.child_next(&it) {
+		if e := line_end_before(doc.src, record_end(doc, rec)); e != "" {
 			return e
 		}
 	}
 	if doc.shared_keys != 0 {
-		if e := record_line_end(doc, doc.shared_keys); e != "" {
+		if e := line_end_before(doc.src, record_end(doc, doc.shared_keys)); e != "" {
 			return e
 		}
 	}
@@ -665,13 +584,6 @@ edit_record_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allo
 	case .Plain: return edit_record(doc, src, allocator, .Plain)
 	}
 	return 0, {kind = .Bad_Value}
-}
-
-// A delimited text's comment spelling. It is `.Byte` with the document's comment byte, or `.None` when the byte is 0.
-@(private)
-edit_comment :: proc(doc: ^core.Document, _: u8) -> (core.Comment_Spelling, u8) {
-	comment := doc.as.opts[1]
-	return (.Byte if comment != 0 else .None), comment
 }
 
 // The byte just past record `i`'s line end, CR LF included. A record at the text's end stops past its last cell. The

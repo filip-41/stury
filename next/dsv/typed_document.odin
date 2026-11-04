@@ -199,13 +199,7 @@ document_close :: proc(d: ^Document_Cells, regs: core.Hook_Regs, t: core.Token, 
 	t := t
 	if (^Column)(uintptr(regs.b)).must {
 		end := close_end(d.doc, at)
-		t.lo = end
-		if end > 0 && d.doc.src[end - 1] == '\n' {
-			t.lo -= 1
-			if end > 1 && d.doc.src[end - 2] == '\r' {
-				t.lo -= 1
-			}
-		}
+		t.lo = end - u64(len(line_end_before(d.doc.src, end)))
 		t.n = u32(end - t.lo)
 	}
 	return row_token(&d.cells, regs, t)

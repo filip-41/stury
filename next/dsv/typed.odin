@@ -482,7 +482,7 @@ read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) ->
 			return .None if store_undoubled(h, t, dest) else .Out_Of_Memory
 		}
 		if t.spelling & (core.SPELLING_QUOTED | SPELLING_DOUBLED) == core.SPELLING_QUOTED && plain_quoted(h.r.src, t) {
-			lo, hi := inner_span(h.r.src, t)
+			lo, hi := inner_span(t)
 			cell = core.Token{lo = lo, n = u32(hi - lo)}
 		}
 		return typed.store_string(&h.r, cell, (^string)(dest))
