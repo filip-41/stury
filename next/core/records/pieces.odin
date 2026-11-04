@@ -1,5 +1,6 @@
 package records
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:slice"
 import "core:sync"
@@ -174,12 +175,16 @@ each :: #force_inline proc(src: []u8, as: core.As, framing: core.Framing, task: 
 }
 
 // `each`'s pieces: piece 0 runs from the text's start and piece k past it from the first cut in slice k - 1 of the text
-// past the first record, each up to the next cut. `cuts` holds where a quoted cut stands at each slice's start.
+// past the first record, each up to the next cut. `cuts` holds where a quoted cut stands at each slice's start, for the
+// first `folded` slices, and a slice's own run past them. `state` is where a cut stands past the folded slices.
 @(private)
 Each :: struct {
 	start:   Reader,
 	rule:    kernel.Quotes,
-	cuts:    []kernel.Quotes,
+	cuts:    []Cut,
+	state:   kernel.Quotes,
+	folded:  int,
+	sliced:  int,
 	base:    u64,
 	slices:  int,
 	task:    proc(data: rawptr, piece: ^Reader, k: int) -> bool,
@@ -189,6 +194,12 @@ Each :: struct {
 	lock:    sync.Mutex,
 	first:   int,
 	fault:   Maybe(core.Fault),
+}
+
+@(private)
+Cut :: struct {
+	quotes: kernel.Quotes,
+	read:   bool,
 }
 
 @(private)
@@ -209,29 +220,13 @@ each_piece :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(dat
 	}
 	defer delete(e.cuts, runtime.heap_allocator())
 	if e.slices > 0 && e.rule.quote != 0 {
-		cuts, err := make([]kernel.Quotes, e.slices, runtime.heap_allocator())
+		cuts, err := make([]Cut, e.slices, runtime.heap_allocator())
 		if err != nil {
 			return core.Fault{kind = .No_Memory}
 		}
 		e.cuts = cuts
-		fan(runner, run_slices, &e)
-		e.claimed = 0
-		// Each slice's state is the one the slices before it leave, read again when an escape run crosses into it.
-		st := e.rule
-		st.depth[0] = st.want
-		for &r, k in e.cuts {
-			if st.odd != 0 {
-				r = e.rule
-				r.odd = st.odd
-				kernel.quote_run(slice_of(&e, k), &r)
-			}
-			run, g := r, int(st.quoted)
-			r = st
-			// A level that fell below the first record's ends the cuts.
-			st.depth[0] = st.depth[0] + run.depth[g] if st.depth[0] + run.low[g] >= st.want else min(int) / 2
-			st.quoted = run.quoted != st.quoted
-			st.odd = run.odd
-		}
+		e.state = e.rule
+		e.state.depth[0] = e.rule.want
 	}
 	if e.slices > 0 {
 		fan(runner, run_pieces, &e)
@@ -247,13 +242,28 @@ slice_of :: proc(e: ^Each, k: int) -> []u8 {
 	return e.start.src[lo:min(lo + SLICE, u64(len(e.start.src)))]
 }
 
-// Claims slices until none is left, and reads each from an even escape run under both starts.
+// Keeps slice `k`'s `raw` run, read from an even escape run under both starts, then turns each run that follows the folded
+// slices into the state its slice starts at: the one the slices before it leave, read again when an escape run crosses
+// into it.
 @(private)
-run_slices :: proc(arg: rawptr) {
-	e := (^Each)(arg)
-	for k := sync.atomic_add(&e.claimed, 1); k < e.slices; k = sync.atomic_add(&e.claimed, 1) {
-		e.cuts[k] = e.rule
-		kernel.quote_run(slice_of(e, k), &e.cuts[k])
+fold :: proc(e: ^Each, k: int, raw: kernel.Quotes) {
+	sync.guard(&e.lock)
+	e.cuts[k] = {raw, true}
+	st := &e.state
+	for f := e.folded; f < len(e.cuts) && e.cuts[f].read; f += 1 {
+		r := &e.cuts[f].quotes
+		if st.odd != 0 {
+			r^ = e.rule
+			r.odd = st.odd
+			kernel.quote_run(slice_of(e, f), r)
+		}
+		run, g := r^, int(st.quoted)
+		r^ = st^
+		// A level that fell below the first record's ends the cuts.
+		st.depth[0] = st.depth[0] + run.depth[g] if st.depth[0] + run.low[g] >= st.want else min(int) / 2
+		st.quoted = run.quoted != st.quoted
+		st.odd = run.odd
+		sync.atomic_store(&e.folded, f + 1)
 	}
 }
 
@@ -261,19 +271,29 @@ run_slices :: proc(arg: rawptr) {
 @(private)
 cut_from :: proc(e: ^Each, k: int, on: bool) -> (u64, bool) {
 	lo := e.base + u64(k) * SLICE
-	i := kernel.quote_cut(e.start.src[lo:] if on else slice_of(e, k), e.cuts[k] if e.cuts != nil else e.rule)
+	i := kernel.quote_cut(e.start.src[lo:] if on else slice_of(e, k), e.cuts[k].quotes if e.cuts != nil else e.rule)
 	return lo + u64(i) + 1, i >= 0
 }
 
-// Claims pieces until none is left or one stops the run, and runs the task on each that starts at a cut.
+// Claims slices until none is left, then pieces until none is left or one stops the run, and runs the task on each
+// that starts at a cut, once the slices it starts and ends in are folded.
 @(private)
 run_pieces :: proc(arg: rawptr) {
 	e := (^Each)(arg)
+	for k := sync.atomic_add(&e.sliced, 1); k < len(e.cuts); k = sync.atomic_add(&e.sliced, 1) {
+		raw := e.rule
+		kernel.quote_run(slice_of(e, k), &raw)
+		fold(e, k, raw)
+	}
 	// A piece claimed before the one that stops the run still runs, so every piece before a fault runs.
 	for !sync.atomic_load(&e.stop) {
 		k := sync.atomic_add(&e.claimed, 1)
 		if k > e.slices {
 			return
+		}
+		// Every slice is claimed, so each one waited for is being read.
+		for sync.atomic_load(&e.folded) <= min(k, len(e.cuts) - 1) {
+			intrinsics.cpu_relax()
 		}
 		lo, hi: u64 = 0, u64(len(e.start.src))
 		if k > 0 {
