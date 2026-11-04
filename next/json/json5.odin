@@ -342,25 +342,9 @@ ident5_char :: #force_inline proc "contextless" (q, end: [^]u8, start: bool) -> 
 @(private)
 ident5 :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: core.Fault_Kind) #no_bounds_check {
 	q = p
-	// The first character, where a digit may not be, is read apart from the rest, so the loop after it has no test for
-	// the start.
-	if q < end {
-		c := q[0]
-		if c < 0x80 && c != '\\' {
-			if IDENT[c] == 0 || IDENT[c] == IDENT_DIGIT {
-				return
-			}
-			q = q[1:]
-		} else {
-			r, e, k := ident5_char(q, end, true)
-			if k != .None {
-				return r, e, k
-			}
-			if r == q {
-				return
-			}
-			q, esc = r, e
-		}
+	// A digit may not be the first character.
+	if q < end && q[0] - '0' < 10 {
+		return
 	}
 	for q < end {
 		c := q[0]
@@ -371,7 +355,7 @@ ident5 :: proc "contextless" (p, end: [^]u8) -> (q: [^]u8, esc: bool, kind: core
 			q = q[1:]
 			continue
 		}
-		r, e, k := ident5_char(q, end, false)
+		r, e, k := ident5_char(q, end, q == p)
 		if k != .None {
 			return r, esc, k
 		}
@@ -400,17 +384,14 @@ ident_char :: #force_no_inline proc "contextless" (r: rune, start: bool) -> bool
 	return unicode.in_range(r, unicode.mn_ranges) || unicode.in_range(r, unicode.mc_ranges) || unicode.in_range(r, unicode.nd_ranges) || unicode.in_range(r, unicode.pc_ranges)
 }
 
-// The `IDENT` value for a decimal digit, 2. `IDENT` holds 1 for a letter, `$` or `_` and 2 for a digit.
-@(private)
-IDENT_DIGIT :: 2
-
+// 1 for an ASCII byte an identifier may hold: a letter, `$`, `_` or a digit.
 @(private, rodata)
 IDENT := [128]u8 {
 	'a' ..= 'z' = 1,
 	'A' ..= 'Z' = 1,
 	'$' = 1,
 	'_' = 1,
-	'0' ..= '9' = IDENT_DIGIT,
+	'0' ..= '9' = 1,
 }
 
 // Returns the length in bytes of the JSON5 whitespace character at `p` that JSON lacks: VT, FF, U+00A0, U+FEFF,

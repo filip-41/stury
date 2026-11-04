@@ -140,7 +140,10 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 		}
 	}
 	if key != core.NO_NODE {
-		tree_string(w, key) or_return
+		w.kind = put_token_string(w.out, doc.src, doc, key, doc.nodes[key], w.opts, w.json, w.copy)
+		if w.kind != .None {
+			return false
+		}
 		write.put_text(w.out, ": " if w.opts.pretty else ":")
 		for f in facts {
 			if f.role == .Comment && f.lo > key_lo {
@@ -270,13 +273,6 @@ tree_scalar :: proc(w: ^Tree, i: core.Node_Index, t: core.Token) -> bool {
 	cell := t
 	cell.kind = core.resolve(w.doc, i) if t.kind == .Plain && w.resolve else t.kind
 	w.kind = put_token(w.out, w.doc.src, w.doc, i, cell, w.opts, w.json, w.copy)
-	return w.kind == .None
-}
-
-// Writes the string or key at `i`.
-@(private)
-tree_string :: proc(w: ^Tree, i: core.Node_Index) -> bool {
-	w.kind = put_token_string(w.out, w.doc.src, w.doc, i, w.doc.nodes[i], w.opts, w.json, w.copy)
 	return w.kind == .None
 }
 

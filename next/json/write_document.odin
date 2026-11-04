@@ -119,14 +119,6 @@ put_start :: proc(e: ^Emit, out: ^write.Out, src: []u8, doc: ^core.Document, opt
 	return true
 }
 
-// Frees the stack of a document nested past `MAX_DEPTH`.
-@(private)
-put_end :: proc(e: ^Emit) {
-	if e.cap > core.MAX_DEPTH {
-		free(e.c.stack, e.out.allocator)
-	}
-}
-
 // Sets the cursor from the output after a rare step, with `NODE_ROOM` free at it.
 @(private)
 resume :: proc(e: ^Emit) {
@@ -357,16 +349,6 @@ as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 	return {spelling = &SPELLING, max_depth = opts.max_depth, spec = u8(spec), tolerate = transmute(u8)opts.tolerate}
 }
 
-// The size to ask the output for: the source, and for pretty text what eight levels of indent make on each node.
-@(private)
-document_hint :: proc(src, nodes: int, opts: core.Write_Options) -> int {
-	hint := src + write.ROOM_MAX
-	if opts.pretty {
-		hint += nodes * (3 + 8 * (1 if opts.tab else int(opts.indent)))
-	}
-	return hint
-}
-
 // The spelling's `write`: node `node` of `doc`, which `core.write` checked is a value the document holds, as the spec
 // `as` names.
 @(private)
@@ -378,7 +360,11 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 		t := doc.nodes[node]
 		src, count = nil if doc.partial else core.span(doc, node), 1 if t.kind < .Array else int(t.n)
 	}
-	hint := document_hint(len(src), count, opts)
+	// The size to ask the output for: the source, and for pretty text what eight levels of indent make on each node.
+	hint := len(src) + write.ROOM_MAX
+	if opts.pretty {
+		hint += count * (3 + 8 * (1 if opts.tab else int(opts.indent)))
+	}
 	own := doc.spelling == &SPELLING
 	if doc.partial || document_cold(doc, opts, own, node) {
 		return write_tree(doc, opts, stream, allocator, .Json if doc.partial else Spec(as.spec), node, hint)
@@ -406,7 +392,10 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 		write.destroy(&out)
 		return nil, 0, {kind = .Out_Of_Memory}
 	}
-	defer put_end(&e)
+	// The stack of a document nested past `MAX_DEPTH` is the allocator's.
+	defer if e.cap > core.MAX_DEPTH {
+		free(e.c.stack, e.out.allocator)
+	}
 	if kind := rows(&e, doc, u32(node)); kind != .None {
 		write.destroy(&out)
 		return nil, 0, {kind = kind}

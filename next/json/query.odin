@@ -90,15 +90,12 @@ scan_walk :: proc(h: ^engine.Scan, src: []u8, q: [^]u8, $S: Spec, opts: Options,
 	h.opts = &opts
 	defer h.opts = nil
 	if stream {
-		h.rewalk = proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, _: core.Node_Index) {
-			src := h.b.doc.src
-			walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.scan_hook_stream)
-		}
+		h.rewalk = rewalk(S, engine.scan_hook_stream)
 		hi, fault, stopped = walk_from(src, q, S, opts, h, &regs, engine.scan_hook_stream)
 	} else if h.many == nil {
 		hi, fault, stopped = walk_from(src, q, S, opts, h, &regs, engine.scan_hook)
 	} else {
-		h.rewalk = rewalk_many(S)
+		h.rewalk = rewalk(S, engine.scan_hook_many)
 		hi, fault, stopped = walk_from(src, q, S, opts, h, &regs, engine.scan_hook_many)
 	}
 	if fault == nil && !stopped {
@@ -115,11 +112,12 @@ scan_walk :: proc(h: ^engine.Scan, src: []u8, q: [^]u8, $S: Spec, opts: Options,
 	return engine.scan_end(h, regs, hi, fault, doc)
 }
 
+// The scan's `rewalk` with the hook `on`: a walk from `lo` of the text the scan reads.
 @(private)
-rewalk_many :: proc "contextless" ($S: Spec) -> proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index) {
+rewalk :: proc "contextless" ($S: Spec, $on: proc "contextless" (h: ^engine.Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, at: core.Node_Index) {
 	return proc "contextless" (h: ^engine.Scan, s: ^core.Hook_Regs, lo: u64, _: core.Node_Index) {
 		src := h.b.doc.src
-		walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, engine.scan_hook_many)
+		walk_from(src, raw_data(src)[lo:], S, (^Options)(h.opts)^, h, s, on)
 	}
 }
 
@@ -182,7 +180,7 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	if h.many == nil {
 		rec, ok, stopped = frame_walked(it, .Json, opts, h, &regs, engine.scan_hook)
 	} else {
-		h.rewalk = rewalk_many(.Json)
+		h.rewalk = rewalk(.Json, engine.scan_hook_many)
 		rec, ok, stopped = frame_walked(it, .Json, opts, h, &regs, engine.scan_hook_many)
 	}
 	// A stop leaves the record's end to a walk with no hook.

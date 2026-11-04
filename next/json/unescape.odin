@@ -193,10 +193,14 @@ text :: #force_inline proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (s
 	if n.spelling & core.SPELLING_LAX != 0 {
 		return spell.decode_text(buf, decoded_init(doc.src, n), decoded_next)
 	}
-	return decode_plain(doc, n, buf)
+	// A token under 256 bytes is decoded byte by byte, a longer one by blocks.
+	if n.n < 256 {
+		return decode_scalar(doc, n, buf)
+	}
+	return decode_block(doc, n, buf)
 }
 
-// Decodes a short token byte by byte with one 32-bit store per escape. `decode_plain` picks it for a token under
+// Decodes a short token byte by byte with one 32-bit store per escape. `text` picks it for a token under
 // 256 bytes, where finding escapes in 64-byte blocks does more work than the byte walk.
 @(private)
 decode_scalar :: proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (string, bool) {
@@ -328,15 +332,6 @@ put_word :: #force_inline proc(dst: []u8, w: int, spelled: [4]u8, size: int) {
 			}
 		}
 	}
-}
-
-// Decodes a token under 256 bytes with `decode_scalar` and a longer one with `decode_block`.
-@(private)
-decode_plain :: #force_inline proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (string, bool) {
-	if n.n < 256 {
-		return decode_scalar(doc, n, buf)
-	}
-	return decode_block(doc, n, buf)
 }
 
 // Stores a 64-byte block as four 16-byte stores.

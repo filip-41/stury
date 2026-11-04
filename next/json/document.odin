@@ -19,19 +19,11 @@ EDIT := core.Edit_Spelling {
 	value      = edit_value_at,
 	key_text   = edit_key_text,
 	comment    = edit_comment,
-	member_sep = edit_member_sep,
+	member_sep = proc(_: ^core.Document) -> string {return ","},
 	key_sep    = ":",
-	commit     = edit_commit,
-}
-
-@(private)
-edit_commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
-	return compose.commit(list, spec, nil, allocator)
-}
-
-@(private)
-edit_member_sep :: proc(_: ^core.Document) -> string {
-	return ","
+	commit     = proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+		return compose.commit(list, spec, nil, allocator)
+	},
 }
 
 // `SPELLING` holds JSON's spelling services, in rodata, the same table for every spec, for a caller that knows no
@@ -318,13 +310,7 @@ edit_value_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Alloc
 // shape rule.
 @(private)
 edit_comment :: proc(doc: ^core.Document, spec: u8) -> (core.Comment_Spelling, u8) {
-	switch Spec(spec) {
-	case .Json:
-		return .None, 0
-	case .Jsonc, .Json5:
-		return .Line, 0
-	}
-	return .None, 0
+	return .Line if Spec(spec) == .Jsonc || Spec(spec) == .Json5 else .None, 0
 }
 
 // Writes `list`'s edits as spec `as`, returning the text the caller frees with `allocator`. A text of another spec
