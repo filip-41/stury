@@ -493,6 +493,9 @@ list_map :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, $put: Put) -> core.Typ
 add_map_entries :: proc(w: ^Walker, f: ^typed.Field, m: ^typed.Meta, v: uintptr, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
 	raw := (^runtime.Raw_Map)(v)^
 	info := m.map_info
+	if reserve(&w.entries, len(w.entries) + int(raw.len)) != nil {
+		return .Out_Of_Memory
+	}
 	ks, vs, hs, _, _ := runtime.map_kvh_data_dynamic(raw, info)
 	rec := elem_of(f)
 	for i in 0 ..< uintptr(runtime.map_cap(raw)) {

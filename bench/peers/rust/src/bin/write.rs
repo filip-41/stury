@@ -7,6 +7,7 @@
 use serde::de::{MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use std::fmt;
 use std::hint::black_box;
 use std::marker::PhantomData;
@@ -49,6 +50,42 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Pairs<T> {
                     v.push(e);
                 }
                 Ok(Pairs(v))
+            }
+        }
+        d.deserialize_map(V(PhantomData))
+    }
+}
+
+// A JSON object as a hash map, whose `Serialize` sorts the keys in the timed write, as a map write in
+// stury does. `Pairs` keeps an object's source order for the lanes that need it.
+struct SortedMap<T>(HashMap<String, T>);
+
+impl<T: Serialize> Serialize for SortedMap<T> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut keys: Vec<&String> = self.0.keys().collect();
+        keys.sort_unstable();
+        let mut m = s.serialize_map(Some(keys.len()))?;
+        for k in keys {
+            m.serialize_entry(k, &self.0[k])?;
+        }
+        m.end()
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for SortedMap<T> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<T>(PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for V<T> {
+            type Value = SortedMap<T>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("an object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<SortedMap<T>, A::Error> {
+                let mut map = HashMap::with_capacity(m.size_hint().unwrap_or(0));
+                while let Some((k, v)) = m.next_entry()? {
+                    map.insert(k, v);
+                }
+                Ok(SortedMap(map))
             }
         }
         d.deserialize_map(V(PhantomData))
@@ -254,7 +291,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 "citm_catalog" => typed::<Citm>(lib, pretty, &data),
                 "canada" => typed::<Canada>(lib, pretty, &data),
                 "nested" => typed::<Vec<NestedRecord>>(lib, pretty, &data),
-                "wide" => typed::<Pairs<i64>>(lib, pretty, &data),
+                "wide" => typed::<SortedMap<i64>>(lib, pretty, &data),
                 _ => Err(format!("no typed lane for {stem}")),
             }
         }

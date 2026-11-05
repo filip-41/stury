@@ -882,18 +882,51 @@ typedef struct {
 	size_t n;
 } wide;
 
+// A map has no order; a hash map's iteration starts from an arbitrary permutation. Shuffle once outside the
+// clock, then sort the key indexes inside each write, as a map's write does.
+static uint64_t wide_rng = 0x9e3779b97f4a7c15ULL;
+static uint64_t wide_rand(void) {
+	wide_rng ^= wide_rng << 13;
+	wide_rng ^= wide_rng >> 7;
+	wide_rng ^= wide_rng << 17;
+	return wide_rng;
+}
+
 static const void *load_wide(yyjson_val *root) {
 	wide *w = pool_alloc(sizeof *w);
 	w->v = pairs_of(root, &w->n);
+	for (size_t i = w->n; i > 1; i--) {
+		size_t j = wide_rand() % i;
+		pair t = w->v[i - 1];
+		w->v[i - 1] = w->v[j];
+		w->v[j] = t;
+	}
 	return w;
+}
+
+static const pair *wide_pairs;
+
+static int wide_cmp(const void *a, const void *b) {
+	const pair *x = &wide_pairs[*(const size_t *)a], *y = &wide_pairs[*(const size_t *)b];
+	size_t n = x->k.n < y->k.n ? x->k.n : y->k.n;
+	int c = memcmp(x->k.p, y->k.p, n);
+	if (c) return c;
+	return (x->k.n > y->k.n) - (x->k.n < y->k.n);
 }
 
 static yyjson_mut_val *build_wide(yyjson_mut_doc *m, const void *p) {
 	const wide *w = p;
 	yyjson_mut_val *root = yyjson_mut_obj(m);
+	size_t *idx = malloc(w->n * sizeof *idx);
+	if (!idx) abort();
+	for (size_t i = 0; i < w->n; i++) idx[i] = i;
+	wide_pairs = w->v;
+	qsort(idx, w->n, sizeof *idx, wide_cmp);
 	for (size_t i = 0; i < w->n; i++) {
-		yyjson_mut_obj_add(root, key_of(m, w->v[i].k), yyjson_mut_sint(m, yyjson_get_sint(w->v[i].v.p)));
+		const pair *e = &w->v[idx[i]];
+		yyjson_mut_obj_add(root, key_of(m, e->k), yyjson_mut_sint(m, yyjson_get_sint(e->v.p)));
 	}
+	free(idx);
 	return root;
 }
 

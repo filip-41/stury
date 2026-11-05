@@ -8,7 +8,6 @@ package spell
 // them with whole-word stores, which is why the caller's room exceeds the longest output.
 
 import "base:intrinsics"
-import "core:strconv"
 
 // Room `f64_text` and `f32_text` need at `dst`: the sign, then the farthest store, a 16-byte one at p[17].
 F64_ROOM :: 1 + 17 + 16
@@ -26,7 +25,7 @@ f64_text :: proc "contextless" (dst: [^]u8, f: f64) -> int #no_bounds_check {
 	neg := int(bits >> 63)
 	dst[0] = '-'
 	p := dst[neg:]
-	k, n := decimal_digits(p, bits)
+	k, n := f64_decimal_digits(p, bits)
 	if k == 0 {
 		p[0] = '0'
 		return neg + 1
@@ -41,29 +40,47 @@ f32_text :: proc "contextless" (dst: [^]u8, f: f32) -> int #no_bounds_check {
 	neg := int(bits >> 31)
 	dst[0] = '-'
 	p := dst[neg:]
-	exp := int(bits >> 23) & 0xff
-	mant := u64(bits & (1 << 23 - 1))
-	if exp == 0 {
-		exp = 1
-	} else {
-		mant |= 1 << 23
-	}
-	buf: [40]u8 = ---
-	d := strconv._shortest_decimal(buf[:], mant, exp, 23)
-	if d.count == 0 {
+	k, n := f32_decimal_digits(p, bits)
+	if k == 0 {
 		p[0] = '0'
 		return neg + 1
 	}
-	// The 16 bytes after the digits are '0', and at most 9 digits are set.
-	intrinsics.unaligned_store((^u128)(&p[1]), intrinsics.unaligned_load((^u128)(raw_data(d.digits))))
-	p[17] = '0'
-	return neg + layout(p, d.count, d.decimal_point)
+	return neg + layout(p, k, n)
 }
 
-// The digits of finite `bits`' float, sign ignored: d1..dk at p[1..], '0' past dk through p[18), so `p` has room for 19
+// The digits of finite `bits`' binary32, sign ignored: d1..dk at p[1..], '0' past dk through p[18), so `p` has room for
+// 19 bytes. The value is 0.d1..dk * 10^n: the decimal point sits after digit n. A zero is k = 0.
+@(private)
+f32_decimal_digits :: #force_inline proc "contextless" (p: [^]u8, bits: u32) -> (k, n: int) #no_bounds_check {
+	raw_exp := u64(bits >> 23) & 0xff
+	bin_sig := u64(bits & (1 << SINGLE_MANTISSA_BITS - 1))
+	if raw_exp == 0 {
+		if bin_sig == 0 {
+			return 0, 0
+		}
+		raw_exp = 1
+	} else {
+		bin_sig |= 1 << SINGLE_MANTISSA_BITS
+	}
+	sig, exp, last, has_last := to_decimal_f32(bin_sig, raw_exp, bin_sig != 1 << SINGLE_MANTISSA_BITS)
+	bcd := bcd8(sig)
+	// `sig` is zero for the six smallest subnormals (raw_exp 1, mantissa 1..6); `last` is then their first digit.
+	start := int(intrinsics.count_trailing_zeros(bcd) >> 3)
+	intrinsics.unaligned_store((^u64)(&p[1]), bcd >> (8 * uint(start)) | ZEROS8)
+	intrinsics.unaligned_store((^u64)(&p[9]), ZEROS8)
+	p[17] = '0'
+	k = 8 - int(intrinsics.count_leading_zeros(bcd) >> 3) - start
+	if has_last && last != 0 {
+		k = 9 - start
+		p[9 - start] = '0' + u8(last)
+	}
+	return k, 9 - start + int(exp)
+}
+
+// The digits of finite `bits`' binary64, sign ignored: d1..dk at p[1..], '0' past dk through p[18), so `p` has room for 19
 // bytes. The value is 0.d1..dk * 10^n: the decimal point sits after digit n. A zero is k = 0.
 @(private)
-decimal_digits :: #force_inline proc "contextless" (p: [^]u8, bits: u64) -> (k, n: int) #no_bounds_check {
+f64_decimal_digits :: #force_inline proc "contextless" (p: [^]u8, bits: u64) -> (k, n: int) #no_bounds_check {
 	bin_sig := bits & (1 << DOUBLE_MANTISSA_BITS - 1)
 	raw_exp := bits >> DOUBLE_MANTISSA_BITS & 0x7ff
 	sig, last: u64

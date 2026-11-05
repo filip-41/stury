@@ -191,7 +191,7 @@ document; the other arms write a value they hold.
 | citm_catalog.json | 3.98 | 2.94 | 3.31 | 1.77 |
 | canada.json | 2.10 | 1.28 | 1.83 | 1.84 |
 | nested.json | 2.95 | 1.53 | 1.16 | 1.11 |
-| wide.json | 0.18 | 2.89 | 2.53 | 2.06 |
+| wide.json | 0.20 | 0.15 | 0.23 | 0.22 |
 
 | Document, compact | stury | yyjson | simdjson | simdjson minify | sonic-rs | serde_json |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -204,9 +204,8 @@ document; the other arms write a value they hold.
 | escape.json | 42.84 | 1.67 | 0.99 | 14.42 | 0.92 | 1.11 |
 | longtext.json | 44.97 | 4.52 | 0.86 | 14.35 | 22.62 | 3.80 |
 
-The pretty lanes keep the same order. `wide.json` is the exception in the typed lanes: stury writes it at 0.18 GB/s
-where yyjson writes it at 2.89, the one large loss in this set, and it is open. It is a wide object, and stury's
-typed writer is the slowest on it while it is the fastest on every other typed file.
+The pretty lanes keep the same order. `wide.json` is a 342,658-key map. Every arm sorts the keys inside the timed
+write, so the row compares map writes; stury is within about 10% of sonic-rs and serde_json, and ahead of yyjson.
 
 ### Command line (`make bench-cli`)
 

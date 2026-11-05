@@ -1,16 +1,10 @@
 package spell
 
-import "core:strconv"
-
-// The rows of `_POWER_OF_FIVE_128` are 5^-342 to 5^341. A rename at a compiler update stops the build, and a change of the
-// range stops it here.
-#assert(len(strconv._POWER_OF_FIVE_128) == 684)
-
-// Shortest round-trip digits for a finite binary64: a port of zmij's `to_decimal` (the `zmij` crate 1.0.23,
-// `src/lib.rs`, MIT). A Schubfach variant: the significand is scaled by 10^(-e-1), so the shorter candidate
-// (15 or 16 digits) is the integral part of the product and the 17th digit is read off its fraction. When
-// a shorter candidate rounds back to the same bits, `has_last` is false and the trailing zeros of `sig`
-// are the caller's to drop.
+// Shortest round-trip digits for a finite binary64 or binary32: a port of zmij's `to_decimal` (the `zmij` crate
+// 1.0.23, `src/lib.rs`, MIT). A Schubfach variant: for binary64 the significand is scaled by 10^(-e-1), so the
+// shorter candidate (15 or 16 digits) is the integral part of the product and the 17th digit is read off its
+// fraction. When a shorter candidate rounds back to the same bits, `has_last` is false and the trailing zeros of
+// `sig` are the caller's to drop. The binary32 path keeps the same shape with a 34-bit fraction.
 
 @(private)
 DOUBLE_MANTISSA_BITS :: 52
@@ -20,8 +14,17 @@ EXP_OFFSET :: 1023 + DOUBLE_MANTISSA_BITS
 @(private)
 EXTRA_SHIFT :: 6
 
+@(private)
+SINGLE_MANTISSA_BITS :: 23
+@(private)
+SINGLE_EXP_OFFSET :: 127 + SINGLE_MANTISSA_BITS
+// The binary32 product is 64 bits wide, so its fraction sits 34 bits below the integral part.
+@(private)
+SINGLE_EXTRA_SHIFT :: 34
+
 // The shift that puts the binary point of bin_sig * 2^bin_exp * 10^-dec_exp at a fixed place in the
-// 192-bit product, for -350 <= dec_exp <= 350.
+// 192-bit product. The approximation holds for -350 <= dec_exp <= 350; the table limits callers to
+// -342 <= dec_exp <= 341.
 @(private)
 compute_exp_shift :: #force_inline proc "contextless" (bin_exp, dec_exp: i32) -> i32 {
 	return bin_exp + ((-dec_exp * 217707) >> 16) + 1
@@ -99,9 +102,77 @@ to_decimal :: #force_inline proc "contextless" (
 	return integral + u64(round_up), dec_exp, digit, !(round_up || round_down)
 }
 
-// The 128-bit significand of 10^k, as (high, low) words. For k in -27..-1 the low word is one below the library row.
+// The 128-bit floor of 10^k, as (high, low) words. `k` is -342..341; callers stay inside that range.
 @(private)
 pow10_of :: #force_inline proc "contextless" (k: int) -> (u64, u64) #no_bounds_check {
-	e := strconv._POWER_OF_FIVE_128[k + 342]
-	return e[0], e[1] - u64(uint(k + 27) < 27)
+	e := POW10_SIG[k + 342]
+	return e[0], e[1]
+}
+
+// The binary32 arm for a power of two: its lower neighbour is half as far, so the rounding interval is asymmetric. The
+// binary64 arm stays inline so the hot path's layout does not move.
+@(private)
+to_decimal_irregular :: #force_no_inline proc "contextless" (
+	bin_sig: u64,
+	bin_exp: i32,
+) -> (
+	sig: u64,
+	exp: i32,
+	last: u64,
+	has_last: bool,
+) #no_bounds_check {
+	// floor(log10(3/4 * 2^bin_exp)), for -1334 <= bin_exp <= 2620.
+	dec_exp := (bin_exp * 315653 - 131072) >> 20
+	shift := u64(compute_exp_shift(bin_exp, dec_exp + 1) + EXTRA_SHIFT) & 63
+	p_hi, p_lo := pow10_of(int(-dec_exp - 1))
+	hi, lo := umul192_hi128(p_hi, p_lo, bin_sig << shift)
+	integral := hi >> EXTRA_SHIFT
+	fractional := hi << (64 - EXTRA_SHIFT) | lo >> EXTRA_SHIFT
+	half_ulp := p_hi >> ((EXTRA_SHIFT + 1 - shift) & 63)
+	round_up := half_ulp > max(u64) - fractional
+	round_down := half_ulp >> 1 >= fractional
+	digit := max(
+		umul128_add_hi64(fractional, 10, 1 << 63 - 1),
+		umul128_add_hi64(fractional - half_ulp >> 1, 10, max(u64) - (1 << 32)),
+	)
+	return integral + u64(round_up), dec_exp, digit, !(round_up || round_down)
+}
+
+// Shortest round-trip digits for a finite binary32: `bin_sig * 2^(raw_exp - SINGLE_EXP_OFFSET)` as
+// `(sig * 10 + last) * 10^exp` when `has_last`, else `sig * 10^(exp + 1)`, the same shape as `to_decimal`. The
+// product is 64 bits wide, so the significand is scaled by 10^(-exp-1) into a 34-bit fraction.
+@(private)
+to_decimal_f32 :: #force_inline proc "contextless" (
+	bin_sig: u64,
+	raw_exp: u64,
+	regular: bool,
+) -> (
+	sig: u64,
+	exp: i32,
+	last: u64,
+	has_last: bool,
+) #no_bounds_check {
+	bin_exp := i32(raw_exp) - SINGLE_EXP_OFFSET
+	if !regular {
+		return to_decimal_irregular(bin_sig, bin_exp)
+	}
+	dec_exp := (bin_exp * 315653) >> 20
+	shift := u64(compute_exp_shift(bin_exp, dec_exp + 1) + SINGLE_EXTRA_SHIFT) & 63
+	even := 1 - bin_sig & 1
+	p_hi, _ := pow10_of(int(-dec_exp - 1))
+	// Only the high word is used, so round the truncated table entry up.
+	p := u64((u128(p_hi + 1) * u128(bin_sig << shift)) >> 64)
+	integral := p >> SINGLE_EXTRA_SHIFT
+	fractional := p & (1 << SINGLE_EXTRA_SHIFT - 1)
+	// 65 is the 64-bit product plus the table's implicit leading bit.
+	half_ulp := p_hi >> ((65 - shift) & 63) + even
+	round_up := ((fractional + half_ulp) >> SINGLE_EXTRA_SHIFT) != 0
+	round_down := half_ulp > fractional
+	integral += u64(round_up)
+	digit := (fractional * 10 + (1 << (SINGLE_EXTRA_SHIFT - 1))) >> SINGLE_EXTRA_SHIFT
+	if fractional == 1 << (SINGLE_EXTRA_SHIFT - 2) {
+		// Exactly .25 scales to 2.5, which ties to the even 2.
+		digit = 2
+	}
+	return integral, dec_exp, digit, !(round_up || round_down)
 }
