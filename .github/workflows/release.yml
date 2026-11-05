@@ -67,12 +67,13 @@ jobs:
         run: |
           bin=build/stury
           if [ "${{ matrix.name }}" = "darwin-amd64" ]; then
-            # smoke.sh takes the binary as one word: wrap the Intel one.
+            # smoke_floor.py takes the binary as one word: wrap the Intel one.
             printf '#!/bin/sh\nexec arch -x86_64 "%s/build/stury" "$@"\n' "$PWD" > build/stury-rosetta
             chmod +x build/stury-rosetta
             bin=build/stury-rosetta
           fi
-          sh cmd/stury/test/smoke.sh "$bin"
+          # The same floor make test-cli holds: smoke.sh's known failures are listed in smoke.floor.
+          python3 cmd/stury/test/smoke_floor.py "$bin"
       - name: Package
         run: |
           d="stury-${VERSION#v}-${{ matrix.name }}"

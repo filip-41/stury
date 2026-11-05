@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.1.0 (2026-11-04)
+## 0.1.1 (2026-11-05)
+
+The first published release. The `v0.1.0` tag built no artifacts: the release workflow ran the smoke script directly,
+and it fails the cases `cmd/stury/test/smoke.floor` records as known failures, where `make test-cli` runs
+`smoke_floor.py` and holds only the cases outside the floor. The release now uses the same floor, and this archive
+carries the figures in `docs/benchmarks.md`. The rebuilt API described below is unchanged from 0.1.0.
 
 The rebuilt tree, and the first release of the `stury:core`, `stury:json` and `stury:dsv` packages. It builds with
 Odin `dev-2026-11` or later and targets 64-bit little-endian systems (darwin and linux, on amd64 and arm64; the

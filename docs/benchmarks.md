@@ -1,7 +1,7 @@
 # Benchmarks
 
 This page describes what the harness in [bench/](../bench/README.md) measures, how, and what each comparison does the
-same for every tool, and records the figures measured on the 0.1.0 tree. They come from one machine, named with the
+same for every tool, and records the figures measured on the released tree. They come from one machine, named with the
 set, and `-o:speed`. Other data, filters and hardware give other numbers.
 
 A figure that is not on this page was not measured on the current tree.
