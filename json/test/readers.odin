@@ -164,16 +164,16 @@ readers_refuse_containers :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.kind(&doc, 0), core.Kind.Map)
 	testing.expect_value(t, core.kind(&doc, 2), core.Kind.Array)
 	// `number` on a container, a key and a string returns `.Wide`, and `int_value` on a key returns false.
-	testing.expect_value(t, core.number(&doc, 0).kind, core.Number_Kind.Wide)
-	testing.expect_value(t, core.number(&doc, 2).kind, core.Number_Kind.Wide)
-	testing.expect_value(t, core.number(&doc, 1).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, 0))
+	testing.expect(t, !is_number(&doc, 2))
+	testing.expect(t, !is_number(&doc, 1))
 	_, is_int := core.int_value(&doc, 1)
 	testing.expect(t, !is_int)
 	core.destroy(&doc)
 
 	doc, err = build(`["123"]`, .Json)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.number(&doc, 1).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, 1))
 }
 
 // `child_at` returns the node `child_next` reaches at step `k`. It indexes when each member is one node and walks the
@@ -502,7 +502,7 @@ readers_refuse_no_node :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.kind(&doc, i), core.Kind.Null)
 	testing.expect_value(t, core.length(&doc, i), 0)
 	testing.expect_value(t, len(core.span(&doc, i)), 0)
-	testing.expect_value(t, core.number(&doc, i).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, i))
 	testing.expect_value(t, core.resolve(&doc, i), core.Kind.Null)
 	_, ok := core.text(&doc, i, buf[:])
 	testing.expect(t, !ok)
@@ -870,7 +870,7 @@ text_refuses_containers :: proc(t: ^testing.T) {
 	s, ok := core.text(&doc, 11, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "s")
-	testing.expect_value(t, core.number(&doc, core.Node_Index(len(doc.nodes))).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, core.Node_Index(len(doc.nodes))))
 }
 
 // `core.pairs` walks every member pair of a `Map` container in source order. An empty object yields an empty
@@ -933,3 +933,10 @@ pairs_iteration :: proc(t: ^testing.T) {
 	testing.expect(t, !ook)
 }
 
+
+// Whether node `i` is a number, which `core.number` reports.
+@(private = "file")
+is_number :: proc(doc: ^core.Document, i: core.Node_Index) -> bool {
+	_, ok := core.number(doc, i)
+	return ok
+}

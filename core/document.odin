@@ -215,7 +215,8 @@ Duplicates :: enum u8 {
 
 // A `Spelling` holds a format's read services, in its rodata. `text` decodes a node's text into `buf` and returns false
 // when `buf` is too short, so a read never allocates. A node whose `SPELLING_DECODE` bit is clear is its span without
-// the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token.
+// the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token, and returns false for a token
+// that is no number of the format's.
 // `number_f32` reads a number token whose kind is above `NUMBER_DECIMAL` into an f32 with one rounding, and returns
 // false when narrowing `number`'s binary64 already rounds once. It is nil for a format with no such kinds.
 // `build` reads a text into a document and `validate` judges one without building, each as the handle says, see
@@ -235,7 +236,7 @@ Duplicates :: enum u8 {
 Spelling :: struct {
 	text:       proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
-	number:     proc(v: ^Token_View, t: Token) -> Number,
+	number:     proc(v: ^Token_View, t: Token) -> (Number, bool),
 	number_f32: proc(v: ^Token_View, t: Token) -> (f32, bool),
 	build:      proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error),
 	validate:   proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
@@ -824,13 +825,13 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 	return string(raw[:len(s)]), true
 }
 
-// Returns the number node `i` writes, decoded from its span. A container and an index past the last node return
-// `.Wide`. The format's reader refuses a key or a string of its own.
-number :: #force_inline proc(doc: ^Document, i: Node_Index) -> Number {
+// Returns the number node `i` writes, decoded from its span, and false for a node that is no number: a container, a
+// string, a key, a cell that spells no number, and an index past the last node.
+number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool) {
 	if int(i) < len(doc.nodes) && doc.nodes[i].kind <= .Plain {
 		return doc.spelling.number(&doc.view, doc.nodes[i])
 	}
-	return {0, .Wide}
+	return {}, false
 }
 
 // Reads `src` into a document as `as` says: its format, spec, depth, tolerance and the format's own options.
@@ -864,7 +865,10 @@ resolve :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind {
 
 // Returns the `i64` an `Int` node writes. Returns false for any other number.
 int_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (i64, bool) {
-	n := number(doc, i)
+	n, ok := number(doc, i)
+	if !ok {
+		return 0, false
+	}
 	switch n.kind {
 	case .Int:
 		return i64(n.bits), true
@@ -875,7 +879,10 @@ int_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (i64, bool) {
 
 // Returns the `u64` a `Uint` node or a nonnegative `Int` node writes. Unmarshal reads unsigned targets with it.
 uint_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (u64, bool) {
-	n := number(doc, i)
+	n, ok := number(doc, i)
+	if !ok {
+		return 0, false
+	}
 	switch n.kind {
 	case .Int:
 		if i64(n.bits) >= 0 {
@@ -891,7 +898,10 @@ uint_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (u64, bool) {
 // Returns the binary64 an `Int`, `Uint` or `Float` node writes. A `Wide` number has no decoded value in this tree, so
 // the call returns false for it and the caller reads its span. Returns false for a node that is no number.
 float_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (f64, bool) {
-	n := number(doc, i)
+	n, ok := number(doc, i)
+	if !ok {
+		return 0, false
+	}
 	switch n.kind {
 	case .Int:
 		return f64(i64(n.bits)), true

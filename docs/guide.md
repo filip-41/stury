@@ -339,9 +339,9 @@ A text past a limit gets a fault with a kind, never a crash or a wrong answer.
 
 ## Numbers
 
-`core.number(&doc, node)` returns a `Number` of kind `Int`, `Uint`, `Float` or `Wide`, decoded when read. `int_value`,
-`uint_value` and `float_value` return the value and whether the node is that kind of number. A `Wide` number is read
-from its span. A number is judged when the text is validated, and converted only when it is read.
+`core.number(&doc, node)` returns a `Number` of kind `Int`, `Uint`, `Float` or `Wide`, decoded when read, and false
+for a node that is no number. `int_value`, `uint_value` and `float_value` return the value and whether the node is
+that kind of number. A `Wide` number is read from its span. A number is judged when the text is validated, and converted only when it is read.
 
 ## Strictness
 

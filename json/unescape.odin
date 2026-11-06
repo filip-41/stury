@@ -421,9 +421,9 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	return doc.nodes[i].kind
 }
 
-// JSON's `Spelling.number`. A token that is not a number is `.Wide`. A decimal of at most 19 digits is decoded from the
+// JSON's `Spelling.number`, false for a token that is not a number. A decimal of at most 19 digits is decoded from the
 // walk's digit counts, and the rest go to `number_slow`.
-number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
+number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool) {
 	if n.kind == .Number {
 		sp := n.spelling
 		if sp & core.NUMBER_KIND_MASK <= u16(Number_Spelling.Decimal) {
@@ -432,23 +432,23 @@ number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number
 			if sp & (core.NUMBER_FRAC_MASK | core.NUMBER_EXP) == 0 {
 				if int_digits <= 19 {
 					if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
-						return num
+						return num, true
 					}
 				}
 			} else {
 				frac_digits := int(sp >> core.NUMBER_FRAC_SHIFT & core.NUMBER_FRAC_MAX)
 				if sp & core.NUMBER_EXP != 0 {
-					return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits)
+					return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits), true
 				}
 				// A saturated count is 31, so a long run fails this test.
 				if int_digits + frac_digits <= 19 {
-					return spell.number_fraction(doc.src, lo, hi, int_digits, frac_digits)
+					return spell.number_fraction(doc.src, lo, hi, int_digits, frac_digits), true
 				}
 			}
 		}
-		return number_slow(doc, n)
+		return number_slow(doc, n), true
 	}
-	return {0, .Wide}
+	return {}, false
 }
 
 // JSON's `Spelling.number_f32`. Hex past `u64` has rounded once into binary64, so it is read again from its digits.

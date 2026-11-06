@@ -57,7 +57,8 @@ number_digit_count :: proc(t: ^testing.T) {
 			doc, err := build(src, .Json)
 			testing.expectf(t, err.kind == .None, "%q: %v", src, err)
 			if err.kind == .None {
-				got := core.number(&doc, 0)
+				got, got_ok := core.number(&doc, 0)
+				testing.expect(t, got_ok)
 				want, ok := strconv.parse_f64(src)
 				testing.expectf(t, ok && got.kind == .Float && got.bits == transmute(u64)want, "%q: %v, want %x", src, got, transmute(u64)want)
 				core.destroy(&doc)
@@ -89,7 +90,8 @@ json5 :: proc(t: ^testing.T) {
 		}
 	}
 	v, _ := core.member(&doc, 0, "c")
-	num := core.number(&doc, v)
+	num, num_ok := core.number(&doc, v)
+	testing.expect(t, num_ok)
 	testing.expect_value(t, num.kind, core.Number_Kind.Int)
 	testing.expect_value(t, num.bits, u64(16))
 	core.destroy(&doc)
@@ -124,7 +126,8 @@ json5 :: proc(t: ^testing.T) {
 	it := core.children(&doc, 0)
 	first, _ := core.child_next(&it)
 	for w, i in want {
-		n := core.number(&doc, first + core.Node_Index(i))
+		n, n_ok := core.number(&doc, first + core.Node_Index(i))
+		testing.expect(t, n_ok)
 		testing.expectf(t, n.kind == w.kind && n.bits == w.bits, "number %d: %v, want %v", i, n, w)
 	}
 	core.destroy(&doc)
@@ -196,7 +199,8 @@ numbers :: proc(t: ^testing.T) {
 		if err.kind != .None {
 			continue
 		}
-		n := core.number(&doc, 0)
+		n, n_ok := core.number(&doc, 0)
+		testing.expect(t, n_ok)
 		testing.expectf(t, n.kind == c.kind && n.bits == c.bits, "%q: %v, want %v", c.text, n, c)
 		core.destroy(&doc)
 	}
@@ -209,7 +213,8 @@ numbers :: proc(t: ^testing.T) {
 	long_doc, long_err := build(string(long[:]), .Json)
 	testing.expect_value(t, long_err.kind, core.Document_Error_Kind.None)
 	if long_err.kind == .None {
-		testing.expect_value(t, core.number(&long_doc, 0).kind, core.Number_Kind.Wide)
+		long, long_ok := core.number(&long_doc, 0)
+		testing.expect(t, long_ok && long.kind == .Wide)
 		core.destroy(&long_doc)
 	}
 
@@ -255,7 +260,8 @@ numbers :: proc(t: ^testing.T) {
 		if err.kind != .None {
 			return
 		}
-		got := core.number(&doc, 0)
+		got, got_ok := core.number(&doc, 0)
+		testing.expect(t, got_ok)
 		want, ok := strconv.parse_f64(src)
 		if !ok {
 			testing.expectf(t, got.kind == .Wide, "%q: %v, strconv refused", src, got)

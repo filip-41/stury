@@ -154,7 +154,7 @@ move_document_error :: proc(e: ^Document_Error, by: u64) {
 move_typed_error :: proc(e: ^Typed_Error, by: u64) {
 no_hook :: #force_inline proc (h: ^No_Hooks, s: Hook_Regs, t: Token) -> (Hook_Regs, Action) {
 node_start :: #force_inline proc(n: Node) -> u64 {
-number :: #force_inline proc(doc: ^Document, i: Node_Index) -> Number {
+number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool) {
 number_digits :: #force_inline proc (spelling: u16) -> (frac, sum: u16) {
 number_shape :: #force_inline proc (spelling: u16) -> u16 {
 pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool) {
@@ -431,7 +431,7 @@ each_answer :: proc {each_answer_one, each_answer_many}
 find :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, read := core.Path_Options{}, opts := Options{}, allocator := context.allocator) -> (doc: core.Document, answer: Maybe(core.Answer), err: core.Path_Error) {
 format :: proc(src: []u8, $S: Spec, opts := core.Write_Options{}, read := Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
 marshal :: proc(value: any, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
-number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
+number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool) {
 number_spelling_of :: #force_inline proc (spelling: u16) -> Number_Spelling {
 plan_make :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
 put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind {

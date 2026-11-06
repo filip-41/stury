@@ -154,7 +154,7 @@ scalar :: proc(v: Value) -> Value {
 // `0x10`), where it is the JSON text the library writes for it.
 node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 	lit := string(core_pkg.span(doc, i))
-	n := core_pkg.number(doc, i)
+	n, _ := core_pkg.number(doc, i)
 	f: f64
 	switch n.kind {
 	case .Int:
@@ -168,9 +168,11 @@ node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 		// past binary64's digits or range, `1e400` among them, which strconv reads as infinity
 		f, _ = strconv.parse_f64(lit)
 	}
-	if doc.nodes[i].spelling & core_pkg.NUMBER_KIND_MASK != 0 {
-		text, _, _ := core_pkg.write(doc, {}, json.as(.Json), i)
-		lit = string(text)
+	// The `NUMBER_*` layout holds only for a `.Number` token. A dsv cell is `.Plain`, its spelling bits mean other things.
+	if doc.nodes[i].kind == .Number && doc.nodes[i].spelling & core_pkg.NUMBER_KIND_MASK != 0 {
+		// A number JSON cannot write has no literal and prints as computed.
+		text, _, err := core_pkg.write(doc, {}, json.as(.Json), i)
+		lit = string(text) if err.kind == .None else ""
 	}
 	return Number{f = f, lit = lit}
 }

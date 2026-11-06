@@ -212,6 +212,17 @@ numbers_read_alike_at_each_width :: proc(t: ^testing.T) {
 }
 
 @(test)
+number_field_holds_the_number :: proc(t: ^testing.T) {
+	N :: struct {
+		h: core.Number,
+	}
+	n: N
+	testing.expect_value(t, json.unmarshal(transmute([]u8)string(`{"h":12.5}`), .Json, &n).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, n.h, core.Number{transmute(u64)f64(12.5), .Float})
+	testing.expect_value(t, json.unmarshal(transmute([]u8)string(`{"h":"5"}`), .Json, &n).kind, core.Typed_Error_Kind.Wrong_Kind)
+}
+
+@(test)
 roots_other_than_objects_read_alike :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	agree(t, `[1,2,3]`, []i32{})

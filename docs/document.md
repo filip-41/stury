@@ -197,7 +197,7 @@ A reader given an index no node holds answers as it does for a node of the wrong
 | `member_of`, `element_of` | a node and a `Presence`, for a partial document (see `docs/paths.md`) | `.Missing` | `.Wrong_Kind` |
 | `length_exact` | `length`, and whether it is the true count | 0, true | 0, true |
 | `text` | the node's text, and whether it read | `false` | `false` |
-| `number` | a `Number` | `.Wide` | `.Wide` |
+| `number` | a `Number`, and whether the node is a number | false | false |
 | `resolve` | the value's kind | `.Null` | the format's answer |
 | `int_value`, `uint_value`, `float_value` | an integer or a binary64, and whether it is one | false | false |
 
@@ -267,7 +267,8 @@ caller that knows the format.
 is its source is copied, and a decode's over-long buffer is trimmed, so `len(s)` is the allocation's length. A caller
 that has a buffer reads through `text` first and falls back to `text_clone` only for a text too long for it.
 
-`number(doc, i)` returns a 16-byte `Number`, `bits` and `kind`, decoded from the node's span when it is read. The
+`number(doc, i)` returns a 16-byte `Number`, `bits` and `kind`, decoded from the node's span when it is read, and
+whether the node is a number. The
 node holds the token's bytes and the format's packed shape, never a value. `Number_Kind` is `Int`, `Uint`, `Float` or
 `Wide`. The decoders are in package `core/spell`, and `core.Number` and `core.Number_Kind` alias `spell`'s names, so a
 caller of a reader writes `core.Number`.
@@ -279,11 +280,11 @@ caller of a reader writes `core.Number`.
   `Float` -0.0.
 - `Wide` means the number is too large for binary64 or over the caps under Limits, so the caller has to read its span.
 
-A container and a miss return `{0, .Wide}`. JSON's reader folds a pure integer of at most 19 digits
+A container, a string, a key and a miss return false. JSON's reader folds a pure integer of at most 19 digits
 from the recorded digit counts with no search for a point or an exponent, and reads every other token by its packed
 shape: a JSON decimal, a decimal JSON does not write, a hex integer, `Infinity` or `NaN`; a fraction whose integer part
 is empty or whose digits pass 19 reads by the full decimal decoder. dsv's reader returns a value cell that is exactly a
-JSON number, and `.Wide` for a quoted cell, a TSV escape, a key cell or any other cell.
+JSON number, and false for a quoted cell, a TSV escape, a key cell or any other cell.
 
 `int_value` returns an `Int`'s value. `uint_value` returns a `Uint`, or a
 nonnegative `Int`. `float_value` returns an `Int`, `Uint` or `Float` as a binary64. All three return false for a kind

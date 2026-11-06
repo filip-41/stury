@@ -46,7 +46,10 @@ indirect :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Reg
 	case .Number:
 		reason = .Wrong_Kind
 		if t.kind == .Number {
-			(^core.Number)(dest)^ = h.plan.spelling.number(&h.view, t)
+			if n, ok := h.plan.spelling.number(&h.view, t); ok {
+				(^core.Number)(dest)^ = n
+				reason = .None
+			}
 		}
 	case .Scalar:
 		reason = store_decoded(h, t, (^Scalar)(dest))
@@ -340,7 +343,10 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 		}
 		dest^ = s
 	case .Number:
-		n := h.plan.spelling.number(&h.view, t)
+		n, ok := h.plan.spelling.number(&h.view, t)
+		if !ok {
+			return .Wrong_Kind
+		}
 		switch n.kind {
 		case .Int:
 			// `-0` has no integer, and the float keeps its sign.
@@ -447,7 +453,10 @@ write_uint :: proc "contextless" (dest: uintptr, v: u64, size: u32) {
 // An integer token as an i64.
 @(private)
 number_i64 :: proc(h: ^Reader, t: core.Token) -> (v: i64, reason: core.Typed_Error_Kind) {
-	n := h.plan.spelling.number(&h.view, t)
+	n, ok := h.plan.spelling.number(&h.view, t)
+	if !ok {
+		return 0, .Wrong_Kind
+	}
 	#partial switch n.kind {
 	case .Int:
 		return i64(n.bits), .None
@@ -509,11 +518,15 @@ number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, f
 		if core.number_shape(t.spelling) >= 32 {
 			return .Wrong_Kind
 		}
-	} else if frac, sum := core.number_digits(t.spelling); sum <= 19 && t.spelling & core.NUMBER_KIND_MASK <= core.NUMBER_DECIMAL {
-		// `mant` holds all the digits of a decimal.
+	} else if frac, sum := core.number_digits(t.spelling); sum <= 19 && t.spelling & core.NUMBER_KIND_MASK == 0 {
+		// `mant` holds all the digits of a plain decimal, the one kind the walk folds.
 		return store_number(spell.number_significand(h.mant, -i64(frac), h.base[t.lo] == '-', sum <= 15), h, t, fld, dest)
 	}
-	return store_number(h.plan.spelling.number(&h.view, t), h, t, fld, dest)
+	n, ok := h.plan.spelling.number(&h.view, t)
+	if !ok {
+		return .Wrong_Kind
+	}
+	return store_number(n, h, t, fld, dest)
 }
 
 // Stores a number read from its span.
@@ -595,8 +608,12 @@ spelled_number :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 	if fld.kind < .I8 || fld.kind > .F64 {
 		return indirect(h, regs, t)
 	}
-	n := h.plan.spelling.number(&h.view, t)
-	if reason := store_number(n, h, t, fld, uintptr(regs.c) + uintptr(fld.offset)); reason != .None {
+	n, ok := h.plan.spelling.number(&h.view, t)
+	reason := core.Typed_Error_Kind.Wrong_Kind
+	if ok {
+		reason = store_number(n, h, t, fld, uintptr(regs.c) + uintptr(fld.offset))
+	}
+	if reason != .None {
 		return refuse_value(h, regs, t, reason)
 	}
 	regs.c += u64(fld.stride)

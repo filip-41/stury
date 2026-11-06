@@ -238,7 +238,8 @@ resolve_infer :: proc(t: ^testing.T) {
 		testing.expectf(t, got == w, "key %q: %v, want %v", key, got, w)
 	}
 	v, _ := core.member(&doc, rec, "d")
-	n := core.number(&doc, v)
+	n, n_ok := core.number(&doc, v)
+	testing.expect(t, n_ok)
 	testing.expect_value(t, n.kind, core.Number_Kind.Float)
 	testing.expect_value(t, n.bits, 0x3ff8000000000000)
 	// Without `infer` every cell is a string.
@@ -433,19 +434,19 @@ readers_refuse_containers :: proc(t: ^testing.T) {
 	doc, err := build(",,\n,,\n", .Csv, {no_header = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.number(&doc, 0).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, 0))
 	rec, ok := first_member(&doc, 0)
 	testing.expect(t, ok)
-	testing.expect_value(t, core.number(&doc, rec).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, rec))
 	_, is_int := core.int_value(&doc, rec)
 	testing.expect(t, !is_int)
 	core.destroy(&doc)
 
 	doc, err = build("a\n1\n", .Csv)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.number(&doc, doc.shared_keys + 1).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, doc.shared_keys + 1))
 	rec, _ = first_member(&doc, 0)
-	testing.expect_value(t, core.number(&doc, rec).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, rec))
 }
 
 // A quoted cell is not a number, so `resolve` reads it as `.String` and `number` as `.Wide`.
@@ -457,7 +458,7 @@ quoted_number :: proc(t: ^testing.T) {
 	rec, _ := first_member(&doc, 0)
 	cell, _ := core.member(&doc, rec, "n")
 	testing.expect_value(t, core.resolve(&doc, cell), core.Kind.String)
-	testing.expect_value(t, core.number(&doc, cell).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, cell))
 }
 
 // A quoted cell without `""` is its inner span, and one with `""` reads the pair as a quote. Neither is a number and
@@ -474,13 +475,13 @@ quoted_cell_text :: proc(t: ^testing.T) {
 	s, ok := core.text(&doc, plain, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "1")
-	testing.expect_value(t, core.number(&doc, plain).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, plain))
 	testing.expect_value(t, core.resolve(&doc, plain), core.Kind.String)
 	escaped, _ := core.member(&doc, rec, "b")
 	s, ok = core.text(&doc, escaped, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\"y")
-	testing.expect_value(t, core.number(&doc, escaped).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, escaped))
 	testing.expect_value(t, core.resolve(&doc, escaped), core.Kind.String)
 	// A quoted empty cell is no empty cell: it is text, not `.Null`.
 	empty, err2 := build("a\n\"\"\n", .Csv, {infer = true})
@@ -507,7 +508,7 @@ escaped_cell_text :: proc(t: ^testing.T) {
 	testing.expect(t, ok)
 	want := []u8{'1', 0, '2'}
 	testing.expect_value(t, s, string(want))
-	testing.expect_value(t, core.number(&doc, cell).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, cell))
 	testing.expect_value(t, core.resolve(&doc, cell), core.Kind.String)
 	rec2 := core.Node_Index(0)
 	it := core.children(&doc, 0)
@@ -530,13 +531,13 @@ tolerated_cell_text :: proc(t: ^testing.T) {
 	rec, _ := first_member(&doc, 0)
 	buf: [8]u8
 	num, _ := core.member(&doc, rec, "a")
-	testing.expect_value(t, core.number(&doc, num).kind, core.Number_Kind.Int)
+	testing.expect(t, is_int(&doc, num))
 	testing.expect_value(t, core.resolve(&doc, num), core.Kind.Number)
 	bad, _ := core.member(&doc, rec, "b")
 	s, ok := core.text(&doc, bad, buf[:])
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "x\uFFFdy")
-	testing.expect_value(t, core.number(&doc, bad).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, bad))
 	testing.expect_value(t, core.resolve(&doc, bad), core.Kind.String)
 
 	tsv_doc, terr := build("a\n2\nx\xffy\n", .Tsv, {tolerate = {.Invalid_Utf8}})
@@ -544,7 +545,7 @@ tolerated_cell_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, terr.kind, core.Document_Error_Kind.None)
 	first, _ := first_member(&tsv_doc, 0)
 	ncell, _ := core.member(&tsv_doc, first, "a")
-	testing.expect_value(t, core.number(&tsv_doc, ncell).kind, core.Number_Kind.Int)
+	testing.expect(t, is_int(&tsv_doc, ncell))
 	second := core.Node_Index(0)
 	it := core.children(&tsv_doc, 0)
 	core.child_next(&it)
@@ -566,7 +567,7 @@ empty_tail_cell :: proc(t: ^testing.T) {
 	_, _ = core.child_next(&it)
 	cell, _ := core.child_next(&it)
 	testing.expect_value(t, core.resolve(&doc, cell), core.Kind.Null)
-	testing.expect_value(t, core.number(&doc, cell).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, cell))
 	s, ok := core.text(&doc, cell, nil)
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "")
@@ -587,7 +588,7 @@ read_does_not_allocate :: proc(t: ^testing.T) {
 	rec, _ := first_member(&doc, 0)
 	cell, _ := core.member(&doc, rec, "n")
 	before := arena.offset
-	_ = core.number(&doc, cell)
+	_, _ = core.number(&doc, cell)
 	_ = core.resolve(&doc, cell)
 	testing.expect_value(t, arena.offset, before)
 }
@@ -1004,7 +1005,7 @@ header_cell_is_a_key :: proc(t: ^testing.T) {
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	h := doc.shared_keys
 	testing.expect_value(t, doc.nodes[h + 1].role, core.Role.Key)
-	testing.expect_value(t, core.number(&doc, h + 1).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&doc, h + 1))
 	testing.expect_value(t, core.resolve(&doc, h + 1), core.Kind.String)
 	buf: [8]u8
 	s, ok := core.text(&doc, h + 1, buf[:])
@@ -1013,7 +1014,7 @@ header_cell_is_a_key :: proc(t: ^testing.T) {
 	testing.expect(t, core.key_equals(&doc, h + 1, "12.5"))
 	// A value cell of the record is still a number.
 	rec, _ := first_member(&doc, 0)
-	testing.expect_value(t, core.number(&doc, rec + 1).kind, core.Number_Kind.Int)
+	testing.expect(t, is_int(&doc, rec + 1))
 }
 
 // `core.text` and `core.number` read a TSV escape, a short buffer and a quoted number, and `dsv.commit` writes the
@@ -1036,10 +1037,11 @@ readers_and_commit :: proc(t: ^testing.T) {
 	testing.expect_value(t, nerr.kind, core.Document_Error_Kind.None)
 	nrec, _ := first_member(&nums, 0)
 	num, _ := core.member(&nums, nrec, "a")
-	n := core.number(&nums, num)
+	n, n_ok := core.number(&nums, num)
+	testing.expect(t, n_ok)
 	testing.expect(t, n.kind == .Int && n.bits == 42)
 	quoted, _ := core.member(&nums, nrec, "b")
-	testing.expect_value(t, core.number(&nums, quoted).kind, core.Number_Kind.Wide)
+	testing.expect(t, !is_number(&nums, quoted))
 
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
@@ -1287,4 +1289,18 @@ smallest_arena :: proc(t: ^testing.T) {
 		testing.expectf(t, derr.kind == .None, "%d bytes: %v", need, derr)
 		testing.expect_value(t, len(doc.nodes), len(first.nodes))
 	}
+}
+
+// Whether node `i` is a number, which `core.number` reports.
+@(private = "file")
+is_number :: proc(doc: ^core.Document, i: core.Node_Index) -> bool {
+	_, ok := core.number(doc, i)
+	return ok
+}
+
+// Whether node `i` is an `Int` number.
+@(private = "file")
+is_int :: proc(doc: ^core.Document, i: core.Node_Index) -> bool {
+	n, ok := core.number(doc, i)
+	return ok && n.kind == .Int
 }
