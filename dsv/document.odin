@@ -63,9 +63,6 @@ SPELLING := core.Spelling {
 	records    = &RECORDS,
 }
 
-// The spelling bits dsv sets. Bit 0 (`SPELLING_DECODE`) means `text` must decode a cell, bit 1 (`SPELLING_QUOTED`) a
-// quoted CSV cell, and bit 2 (`SPELLING_LAX`) that a tolerated ill-formed sequence may grow its decode.
-
 // `Token.spelling`'s bit for a quoted CSV cell holding a `""`, set only on a walk for `Cells` or `Batch`.
 @(private)
 SPELLING_DOUBLED :: u16(8)
@@ -285,17 +282,9 @@ dsv_decoded_next :: proc "contextless" (d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
 		return c, true
 	}
 	base := raw_data(d.src)
-	q, kind := kernel.utf8_char(base[d.p:], base[d.end:])
-	if kind == .None {
-		n := int(intrinsics.ptr_sub(q, base[d.p:]))
-		spelled: [4]u8
-		copy(spelled[:], d.src[d.p:d.p + u64(n)])
-		d.p += u64(n)
-		return spell.pending_give(&d.pending, spelled, n), true
-	}
-	q = kernel.utf8_subpart(base[d.p:], base[d.end:])
-	d.p += u64(intrinsics.ptr_sub(q, base[d.p:]))
-	return spell.pending_give(&d.pending, {0xEF, 0xBF, 0xBD, 0}, 3), true
+	spelled, n, q := kernel.utf8_lax_char(base[d.p:], base[d.end:])
+	d.p = u64(intrinsics.ptr_sub(q, base))
+	return spell.pending_give(&d.pending, spelled, n), true
 }
 
 // Whether a quoted cell's inner span is its text: it holds no `""` and its bytes are well-formed UTF-8. A cell holding

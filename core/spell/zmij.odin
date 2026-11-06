@@ -62,23 +62,7 @@ to_decimal :: #force_inline proc "contextless" (
 	// shift here is below 64 (and EXTRA_SHIFT + 1 - shift is never negative), so the `& 63` masks only drop
 	// those guards.
 	if !regular {
-		bin_exp := i32(raw_exp) - EXP_OFFSET
-		// floor(log10(3/4 * 2^bin_exp)), for -1334 <= bin_exp <= 2620.
-		dec_exp := (bin_exp * 315653 - 131072) >> 20
-		shift := u64(compute_exp_shift(bin_exp, dec_exp + 1) + EXTRA_SHIFT) & 63
-		p_hi, p_lo := pow10_of(int(-dec_exp - 1))
-		pow10 := [2]u64{p_hi, p_lo}
-		hi, lo := umul192_hi128(pow10[0], pow10[1], bin_sig << shift)
-		integral := hi >> EXTRA_SHIFT
-		fractional := hi << (64 - EXTRA_SHIFT) | lo >> EXTRA_SHIFT
-		half_ulp := pow10[0] >> ((EXTRA_SHIFT + 1 - shift) & 63)
-		round_up := half_ulp > max(u64) - fractional
-		round_down := half_ulp >> 1 >= fractional
-		digit := max(
-			umul128_add_hi64(fractional, 10, 1 << 63 - 1),
-			umul128_add_hi64(fractional - half_ulp >> 1, 10, max(u64) - (1 << 32)),
-		)
-		return integral + u64(round_up), dec_exp, digit, !(round_up || round_down)
+		return #force_inline to_decimal_irregular(bin_sig, i32(raw_exp) - EXP_OFFSET)
 	}
 	// floor(log10(2^bin_exp)) as one multiply-high, the crate's choice on Apple targets. A negative
 	// bin_exp wraps to 2^64 + bin_exp, which adds the multiplier itself to the product's high word. Its low
@@ -87,11 +71,10 @@ to_decimal :: #force_inline proc "contextless" (
 	shift := u64(EXP_SHIFT[raw_exp]) & 63
 	even := 1 - bin_sig & 1
 	p_hi, p_lo := pow10_of(int(-dec_exp - 1))
-	pow10 := [2]u64{p_hi, p_lo}
-	hi, lo := umul192_hi128(pow10[0], pow10[1], bin_sig << shift)
+	hi, lo := umul192_hi128(p_hi, p_lo, bin_sig << shift)
 	integral := hi >> EXTRA_SHIFT
 	fractional := hi << (64 - EXTRA_SHIFT) | lo >> EXTRA_SHIFT
-	half_ulp := pow10[0] >> ((EXTRA_SHIFT + 1 - shift) & 63) + even
+	half_ulp := p_hi >> ((EXTRA_SHIFT + 1 - shift) & 63) + even
 	round_up := fractional + half_ulp < fractional
 	round_down := half_ulp > fractional
 	digit := umul128_add_hi64(fractional, 10, 1 << 63 + 6)
@@ -109,10 +92,11 @@ pow10_of :: #force_inline proc "contextless" (k: int) -> (u64, u64) #no_bounds_c
 	return e[0], e[1]
 }
 
-// The binary32 arm for a power of two: its lower neighbour is half as far, so the rounding interval is asymmetric. The
-// binary64 arm stays inline so the hot path's layout does not move.
+// The arm of both widths for a power of two above the subnormals: its lower neighbour is half as far, so the rounding
+// interval is asymmetric. The binary64 path inlines it, since a call there costs every double a frame, and the binary32
+// path calls it.
 @(private)
-to_decimal_irregular :: #force_no_inline proc "contextless" (
+to_decimal_irregular :: proc "contextless" (
 	bin_sig: u64,
 	bin_exp: i32,
 ) -> (
@@ -154,7 +138,7 @@ to_decimal_f32 :: #force_inline proc "contextless" (
 ) #no_bounds_check {
 	bin_exp := i32(raw_exp) - SINGLE_EXP_OFFSET
 	if !regular {
-		return to_decimal_irregular(bin_sig, bin_exp)
+		return #force_no_inline to_decimal_irregular(bin_sig, bin_exp)
 	}
 	dec_exp := (bin_exp * 315653) >> 20
 	shift := u64(compute_exp_shift(bin_exp, dec_exp + 1) + SINGLE_EXTRA_SHIFT) & 63

@@ -33,12 +33,6 @@ number_spelling :: #force_inline proc "contextless" (kind: Number_Spelling, int_
 	return core.number_spelling(u16(kind), int_digits, frac_digits)
 }
 
-// `number_spelling` with `NUMBER_EXP` set. Cold, since only a number with an exponent calls it.
-@(private, cold)
-number_spelling_exp :: #force_no_inline proc "contextless" (kind: Number_Spelling, int_digits, frac_digits: u64) -> u16 {
-	return number_spelling(kind, int_digits, frac_digits) | core.NUMBER_EXP
-}
-
 // `p` is at a number JSON's leaf refused or read only up to an `x`. Reads the JSON5 number, then what follows it.
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_number5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
@@ -199,7 +193,7 @@ number5 :: proc "contextless" (p, end: [^]u8, $shape: bool) -> (q: [^]u8, spelli
 			return q, u16(kind5), kind
 		}
 		when shape {
-			return r, number_spelling_exp(kind5, int_digits, frac_digits), .None
+			return r, number_spelling(kind5, int_digits, frac_digits) | core.NUMBER_EXP, .None
 		}
 		q = r
 	}

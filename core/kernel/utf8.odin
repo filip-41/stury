@@ -63,6 +63,21 @@ utf8_ascii_block :: #force_inline proc "contextless" ($T: Tier, s: ^Utf8_State) 
 	s.prev = {}
 }
 
+// Adds the errors of `b`, which `is_ascii` reports as `ascii`, to `s`. `*high` says whether the block before had a
+// byte past 0x7F and is set for `b`. An ASCII block after an ASCII block adds nothing. Returns whether `s.err` may have
+// grown.
+utf8_next :: #force_inline proc "contextless" ($T: Tier, b: Block, ascii: bool, s: ^Utf8_State, high: ^bool) -> bool {
+	if !ascii {
+		utf8_block(T, b, s)
+	} else if high^ {
+		utf8_ascii_block(T, s)
+	} else {
+		return false
+	}
+	high^ = !ascii
+	return true
+}
+
 // Reports whether the blocks given so far hold no error, ignoring a sequence the last block leaves open. For a reader
 // that stops inside the last block. An error anywhere in the blocks counts, including in bytes past the stop.
 utf8_clean :: #force_inline proc "contextless" ($T: Tier, s: Utf8_State) -> bool {
@@ -157,6 +172,24 @@ utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8 {
 		n += 1
 	}
 	return p[n:]
+}
+
+// Reads the character whose lead is at `p`, where `p < end` and `*p >= 0x80`, as a decoder that tolerates ill-formed
+// UTF-8 reads it. Returns its bytes, their count and one past it, or U+FFFD over the maximal subpart of a sequence that
+// is ill-formed or that `end` cuts short.
+utf8_lax_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (spelled: [4]u8, size: int, q: [^]u8) #no_bounds_check {
+	kind: core.Fault_Kind
+	q, kind = utf8_char(p, end)
+	if kind != .None {
+		return {0xEF, 0xBF, 0xBD, 0}, 3, utf8_subpart(p, end)
+	}
+	size = int(uintptr(q) - uintptr(p))
+	#unroll for i in 0 ..< 4 {
+		if i < size {
+			spelled[i] = p[i]
+		}
+	}
+	return spelled, size, q
 }
 
 // Returns a non-zero lane where one of the last bytes of `prev` starts a sequence longer than the bytes left: a

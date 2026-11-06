@@ -309,18 +309,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 
 		// UTF-8 is checked on a block with a byte past 0x7F, and on an ASCII block only when the block before left a
 		// sequence open. `utf8_fault` searches back no further than `lo`.
-		check := false
-		if kernel.is_ascii(b) {
-			if w.prev_high {
-				kernel.utf8_ascii_block(T, &w.utf8)
-				w.prev_high = false
-				check = true
-			}
-		} else {
-			kernel.utf8_block(T, b, &w.utf8)
-			w.prev_high = true
-			check = true
-		}
+		check := kernel.utf8_next(T, b, kernel.is_ascii(b), &w.utf8, &w.prev_high)
 		if check && !kernel.utf8_clean(T, w.utf8) && .Invalid_Utf8 not_in w.tolerate {
 			if at, k, d := utf8_fault(src, int(lo), pos); at >= 0 && (fault < 0 || at < fault) {
 				fault, kind, detail = at, k, d

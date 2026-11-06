@@ -229,7 +229,7 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 	return r
 }
 
-// Runs the pass for the CPU's vector tier (`kernel.tier()`), or for the tier `-define:WALK_TIER=<n>` forces in a test
+// Runs the pass for the CPU's vector tier (`kernel.tier()`), or for the tier `-define:TIER=<n>` forces in a test
 // build. A text with no comment byte runs the pass instance with `$COMMENTS` false, which holds no comment code.
 @(private)
 run :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, keys: []core.Token, width := 0) -> u64 {

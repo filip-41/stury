@@ -26,10 +26,6 @@ f64_text :: proc "contextless" (dst: [^]u8, f: f64) -> int #no_bounds_check {
 	dst[0] = '-'
 	p := dst[neg:]
 	k, n := f64_decimal_digits(p, bits)
-	if k == 0 {
-		p[0] = '0'
-		return neg + 1
-	}
 	return neg + layout(p, k, n)
 }
 
@@ -41,10 +37,6 @@ f32_text :: proc "contextless" (dst: [^]u8, f: f32) -> int #no_bounds_check {
 	dst[0] = '-'
 	p := dst[neg:]
 	k, n := f32_decimal_digits(p, bits)
-	if k == 0 {
-		p[0] = '0'
-		return neg + 1
-	}
 	return neg + layout(p, k, n)
 }
 
@@ -99,7 +91,7 @@ f64_decimal_digits :: #force_inline proc "contextless" (p: [^]u8, bits: u64) -> 
 	extra := int(sig >= 1_000_000_000_000_000)
 	hi8 := sig / 100_000_000
 	lo8 := sig - hi8 * 100_000_000
-	intrinsics.unaligned_store((^#simd[16]u8)(&p[extra]), bcd16(hi8, lo8) | 0x30)
+	sixteen_text(&p[extra], hi8, lo8)
 	intrinsics.unaligned_store((^u16)(&p[extra + 16]), u16('0' + (last if has_last else 0)) | u16('0') << 8)
 	// k significant digits, d1 at p[1]. Branch-free: `has_last` is unpredictable on random input. k is the count
 	// written, which the caller's next store waits on, so it comes from a scalar bcd8 of the half that ends the
@@ -110,9 +102,14 @@ f64_decimal_digits :: #force_inline proc "contextless" (p: [^]u8, bits: u64) -> 
 	return k, int(dec_exp) + 16 + extra
 }
 
-// The text of digits d1..dk, k > 0, at p[1..19) with the decimal point after digit n, written from p[0]. Returns the count.
+// The text of digits d1..dk at p[1..19) with the decimal point after digit n, or of zero when k = 0, written from p[0].
+// Returns the count.
 @(private)
 layout :: #force_inline proc "contextless" (p: [^]u8, k, n: int) -> int #no_bounds_check {
+	if k == 0 {
+		p[0] = '0'
+		return 1
+	}
 	// One unsigned compare for -3 <= n <= k + 15, the range jq prints without an exponent.
 	if u64(n + 3) <= u64(k + 18) {
 		digits := intrinsics.unaligned_load((^u128)(&p[1]))

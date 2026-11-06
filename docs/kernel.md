@@ -12,7 +12,7 @@ part of the shape works around.
 
 | File | Builds on | Holds |
 |---|---|---|
-| `kernel.odin` | every target | `Block`, the copied tail, the nibble table and `classes`, `escaped` |
+| `kernel.odin` | every target | `Block`, `below`, `either`, `has` and `any_lane`, the copied tail, the nibble table and `classes`, `escaped` |
 | `arm64.odin` | arm64 | the block operations on NEON, one 16-byte register at a time |
 | `lanes64.odin` | everything but arm64 | the same operations on one 64-lane vector that LLVM splits to the target's width |
 | `amd64.odin` | x86-64 | `Tier` with v2, v3 and v4, `tier()`, and the kernels whose instructions differ by tier |
@@ -20,10 +20,11 @@ part of the shape works around.
 | `utf8.odin` | every target | UTF-8 validation |
 | `compress.odin` | every target | `compress`, which gathers the lanes a mask keeps |
 
-The package splits in two independent ways. The block operations (`load`, `eq`, `below`, `either`, `has`, `pack`,
-`pack_n`, `is_ascii`, `any_lane`, `first_lane`) split by how the target packs a mask. The kernels that take a tier
-(`lookup`, `prefix_xor`, `load_padded`) split by whether the target has more than one instruction set to choose at run
-time. A target with neither NEON nor x86 vectors, such as riscv64, builds `lanes64.odin` and `single_tier.odin`,
+The package splits in two independent ways. The block operations (`load`, `eq`, `pack`, `pack_n`, `is_ascii`,
+`first_lane`) split by how the target packs a mask. `below`, `either` and `has` are written on 64 lanes for every target,
+since LLVM splits them to NEON registers as well as the code written one register at a time, and `any_lane` is
+`is_ascii` of a mask. The kernels that take a tier (`lookup`, `prefix_xor`, `load_padded`) split by whether the
+target has more than one instruction set to choose at run time. A target with neither NEON nor x86 vectors, such as riscv64, builds `lanes64.odin` and `single_tier.odin`,
 portable code that LLVM lowers to the target.
 
 Shared code is in `kernel.odin`. Each architecture file holds only what differs.
@@ -99,8 +100,8 @@ when ODIN_ARCH == .amd64 {
 The switch runs once per call of the whole loop, not per block. `#force_no_inline` keeps each wrapper a separate
 function with its own features.
 
-The tests and the bench do not dispatch: `-define:TIER=n` picks the tier at index `n` of `Tier`, and every test and
-bench loop is compiled with `FEATURES[T]`.
+`-define:TIER=n` makes `tier()` return the tier at index `n` of `Tier`. The kernel tests and the bench do not dispatch:
+the same define picks their tier, and every test and bench loop is compiled with `FEATURES[T]`.
 
 ### Why the code has this shape
 
@@ -121,10 +122,10 @@ Each rule below works around a behaviour of Odin or LLVM:
   `ssse3` named, even though SSE4.2 implies it.
 - **v3 and v4 add `-slow-unaligned-mem-32`.** Features add instructions to the build's CPU without changing how LLVM
   tunes for it, and Odin's default CPU, x86-64-v2, splits every unaligned 32-byte load in two.
-- **Two shuffles are declared as LLVM intrinsics** (`llvm.x86.avx2.pshuf.b`, `llvm.x86.avx512.pshuf.b.512`).
-  `core:simd/x86` in Odin dev-2026-10 lacks them.
-- **Kernels that index arrays are `#no_bounds_check`.** The LLVM that dev-2026-10 links keeps a bounds check on
-  indexing inside `#unroll` even where the index is a constant.
+- **The 64-byte shuffle is declared as an LLVM intrinsic** (`llvm.x86.avx512.pshuf.b.512`). `core:simd/x86` lacks
+  it.
+- **Kernels that index arrays are `#no_bounds_check`.** LLVM keeps a bounds check on indexing inside `#unroll` even
+  where the index is a constant.
 
 ## The block operations
 
@@ -144,8 +145,9 @@ lane. Instead:
   register instead of one cmtst.
 - **`pack_n`** packs two to four masks, sharing the last round of adds between two masks. The walk packs its masks
   together for this reason.
-- **`any_lane` and `is_ascii`** reduce with `umaxv`, one instruction per block after the ORs. On x86 `any_lane` uses
-  `pack` instead, since a packed mask uses one instruction per register, the same as a vector test.
+- **`is_ascii`** reduces with `umaxv`, one instruction per block after the ORs. On x86 it tests the packed top bits,
+  one instruction per register, the same as a vector test. `any_lane` is `is_ascii` of a mask, since a lane mask is set
+  exactly when its top bit is.
 - **`first_lane`** finds the first set lane of one 16-byte mask, for a reader that looks at a short span before it
   takes a whole block. x86 gathers one bit per lane with `pmovmskb`. NEON has no such instruction, so a narrowing
   shift (`shrn`) keeps four bits per lane and the trailing zero count is divided by four.
@@ -201,11 +203,12 @@ no add.
 ## UTF-8
 
 `utf8.odin` follows Keiser and Lemire: three 16-entry tables, indexed by the high and low nibble of the byte before and
-the high nibble of the byte itself, flag every error a pair of bytes can show. The bytes two and three before a byte
-say whether it must be a continuation. A caller checks each block with `utf8_block`, or with `utf8_ascii_block` when
-`is_ascii` says the block is all ASCII, and calls `utf8_ok` once at the end. A reader that stops inside a block, at a
-string's closing quote, calls `utf8_clean` instead, which allows a sequence the last block leaves open because the
-bytes past the stop are not the reader's to judge.
+the high nibble of the byte itself, flag every error a pair of bytes can show. The bytes two and three before a byte say
+whether it must be a continuation. A caller checks each block with `utf8_block`, or with `utf8_ascii_block` when
+`is_ascii` says the block is all ASCII, and calls `utf8_ok` once at the end. `utf8_next` makes that choice and skips an
+ASCII block after an ASCII block, which adds no error. A reader that stops inside a block, at a string's closing quote,
+calls `utf8_clean` instead, which allows a sequence the last block leaves open because the bytes past the stop are not
+the reader's to judge.
 
 - **Validation works one register of the tier at a time.** Written on all 64 lanes, the 16-byte tiers keep four
   registers live at each step and spill to the stack.

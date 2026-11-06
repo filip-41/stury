@@ -57,18 +57,9 @@ decoded_next :: proc "contextless" (d: ^Decoded) -> (b: u8, ok: bool) {
 		return c, true
 	}
 	base := raw_data(d.src)
-	q, kind := kernel.utf8_char(base[d.p:], base[d.end:])
-	if kind == .None {
-		size := int(intrinsics.ptr_sub(q, base[d.p:]))
-		spelled: [4]u8
-		copy(spelled[:], d.src[d.p:d.p + u64(size)])
-		d.p += u64(size)
-		return spell.pending_give(&d.pending, spelled, size), true
-	}
-	// An ill-formed sequence reads as U+FFFD over its maximal subpart, the step `utf8_lax` makes.
-	q2, _, _ := utf8_lax(base[d.p:], base[d.end:], {.Invalid_Utf8})
-	d.p += u64(intrinsics.ptr_sub(q2, base[d.p:]))
-	return spell.pending_give(&d.pending, replacement(), 3), true
+	spelled, size, q := kernel.utf8_lax_char(base[d.p:], base[d.end:])
+	d.p = u64(intrinsics.ptr_sub(q, base))
+	return spell.pending_give(&d.pending, spelled, size), true
 }
 
 // Decodes the escape at `src[p] == '\\'`. Returns up to four bytes, their count, and the byte after the escape. The
@@ -80,41 +71,29 @@ decoded_escape :: #force_inline proc "contextless" (src: []u8, p, end: u64) -> (
 			return replacement(), 3, end
 		}
 		e := src[p + 1]
-		if ent := ESC_WORD[e]; ent != 0 {
-			spelled[0] = u8(ent)
+		if b := spell.ESCAPED[e]; b != 0 {
+			spelled[0] = b
 			return spelled, 1, p + 2
 		}
 		if e == 'u' {
-			if p + 6 > end {
-				spelled[0] = 'u'
-				return spelled, 1, p + 2
-			}
-			unit, ok := spell.hex4(raw_data(src)[p + 2:])
-			if !ok {
-				spelled[0] = 'u'
-				return spelled, 1, p + 2
-			}
-			next = p + 6
-			// One range test covers both halves: a high half pairs with the low `\u` right after it, and a low half
-			// with no high half before it reads as U+FFFD.
-			if unit - 0xD800 < 0x800 {
-				if unit >= 0xDC00 || next + 6 > end || src[next] != '\\' || src[next + 1] != 'u' {
-					return replacement(), 3, next
-				}
-				low, low_ok := spell.hex4(raw_data(src)[next + 2:])
-				if !low_ok || low - 0xDC00 >= 0x400 {
-					return replacement(), 3, next
-				}
-				unit = 0x10000 + (unit - 0xD800) * 0x400 + (low - 0xDC00)
-				next += 6
-			}
-			// A code unit outside the surrogate range already is the rune's value.
-			s, n := utf8.encode_rune(rune(unit))
-			return s, n, next
+			return decoded_unicode(src, p, end)
 		}
 		// JSON5's other escapes, and a byte a backslash spells as itself, in `decoded_escape_other`.
 		return decoded_escape_other(src, p, end, e)
 	}
+}
+
+// `decoded_escape` for a `\u` escape. Out of line, so the block decoder's loop keeps its registers.
+@(private)
+decoded_unicode :: #force_no_inline proc "contextless" (src: []u8, p, end: u64) -> (spelled: [4]u8, size: int, next: u64) {
+	r, n := spell.unicode_escape(raw_data(src)[p:], int(end - p))
+	if n == 0 {
+		// The walk accepted the escape, so its four digits are hex, and it is a surrogate half no other half pairs
+		// with.
+		return replacement(), 3, p + 6
+	}
+	s, k := utf8.encode_rune(r)
+	return s, k, p + u64(n)
 }
 
 // `decoded_escape_other` is `decoded_escape` for an escape that is no one-letter JSON escape and no `\u`: JSON5's
@@ -159,17 +138,13 @@ decoded_escape_other :: proc "contextless" (src: []u8, p, end: u64, e: u8) -> (s
 			return spelled, 1, p + 2
 		}
 		base := raw_data(src)
-		q, kind := kernel.utf8_char(base[p + 1:], base[end:])
-		if kind != .None {
-			q, _, _ = utf8_lax(base[p + 1:], base[end:], {.Invalid_Utf8})
-			return replacement(), 3, p + 1 + u64(intrinsics.ptr_sub(q, base[p + 1:]))
+		s, n, q := kernel.utf8_lax_char(base[p + 1:], base[end:])
+		next = u64(intrinsics.ptr_sub(q, base))
+		// U+2028 and U+2029 after a backslash are line continuations.
+		if s[0] == 0xE2 && s[1] == 0x80 && s[2] | 1 == 0xA9 {
+			return spelled, 0, next
 		}
-		n := int(intrinsics.ptr_sub(q, base[p + 1:]))
-		if n == 3 && e == 0xE2 && src[p + 2] == 0x80 && src[p + 3] | 1 == 0xA9 {
-			return spelled, 0, p + 4
-		}
-		copy(spelled[:], src[p + 1:p + 1 + u64(n)])
-		return spelled, n, p + 1 + u64(n)
+		return s, n, next
 	}
 }
 
@@ -430,20 +405,15 @@ number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Numbe
 			lo, hi := n.lo, n.lo + u64(n.n)
 			int_digits := core.number_int_digits(sp)
 			if core.number_shape(sp) < 32 {
-				if int_digits <= 19 {
-					if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
-						return num, true
-					}
+				if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
+					return num, true
 				}
 			} else {
 				frac_digits := core.number_frac_digits(sp)
 				if sp & core.NUMBER_EXP != 0 {
 					return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits), true
 				}
-				// A saturated count is 31, so a long run fails this test.
-				if int_digits + frac_digits <= 19 {
-					return spell.number_fraction(doc.src, lo, hi, int_digits, frac_digits), true
-				}
+				return spell.number_fraction(doc.src, lo, hi, int_digits, frac_digits), true
 			}
 		}
 		return number_slow(doc, n), true

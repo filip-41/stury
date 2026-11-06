@@ -8,7 +8,7 @@ LIB_PKGS  := core/spell core host core/kernel core/compose core/build core/typed
 TEST_PKGS := core/spell/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test
 # The packages the tests share, checked by `lint` and built through their imports.
 SUPPORT_PKGS := walktest
-# The test packages that read `-define:TIER`.
+# The test packages whose loops are compiled for the tier `-define:TIER` names.
 TIER_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
 # A leak or a bad free fails the test that made it.
@@ -124,17 +124,17 @@ $(TEST_SPEED): $(BUILD)/test/speed/%:
 	@$(ODIN) test $* -o:speed $(TEST_MEMORY) $(TEST_CHAINS) -out:$@ || { echo "== $* (-o:speed) failed"; exit 1; }
 
 # The x86-64 tiers v2 and v3 in a build for Odin's default CPU, as a caller's build is, at -o:none, where no kernel
-# is inlined into the tier's procedures, and at -o:speed. TIER picks the kernels' tier and WALK_TIER the walks'.
+# is inlined into the tier's procedures, and at -o:speed. TIER picks the tier of the kernel tests' loops and of `tier()`.
 # On Apple silicon they run under Rosetta. v4 runs only on a machine with AVX-512 (TIER=2), and `lint` compiles it.
 test-x86: $(X86_TARGETS)
 
-# `build/test/x86/OPT/TIER/PACKAGE` runs one package at one tier, `TIER` defined only where it is read.
+# `build/test/x86/OPT/TIER/PACKAGE` runs one package at one tier.
 $(X86_TARGETS): $(BUILD)/test/x86/%:
 	@mkdir -p $(@D)
 	@o=$(word 1,$(subst /, ,$*)); t=$(word 2,$(subst /, ,$*)); p=$(patsubst $(word 1,$(subst /, ,$*))/$(word 2,$(subst /, ,$*))/%,%,$*); \
 	echo "== $$p (x86 tier $$t -o:$$o)"; \
-	$(ODIN) test $$p -o:$$o -target:darwin_amd64 -define:WALK_TIER=$$t \
-		$(if $(filter %/kernel/test,$*),-define:TIER=$$t) -out:$@ || { echo "== $$p (x86 tier $$t -o:$$o) failed"; exit 1; }
+	$(ODIN) test $$p -o:$$o -target:darwin_amd64 -define:TIER=$$t -out:$@ || \
+		{ echo "== $$p (x86 tier $$t -o:$$o) failed"; exit 1; }
 
 # Each x86 tier on a machine that lacks it: each package built for linux_amd64 with the tier forced, and run under
 # Intel SDE (`SDE=sde64`) emulating a Nehalem for v2 (x86-64-v2, no PCLMULQDQ), a Haswell for v3 and a Sapphire Rapids
@@ -144,9 +144,8 @@ test-wide:
 	@mkdir -p $(BUILD)/wide
 	@for spec in 0:nhm 1:hsw 2:spr; do t=$${spec%%:*}; cpu=$${spec##*:}; for p in $(TEST_PKGS); do \
 		echo "== $$p (tier $$t on $$cpu)"; \
-		case " $(TIER_PKGS) " in *" $$p "*) tier=-define:TIER=$$t ;; *) tier= ;; esac; \
 		$(ODIN) build $$p -build-mode:test -target:linux_amd64 -o:minimal $(TEST_MEMORY) $(TEST_PIECES) \
-			-define:ODIN_TEST_FANCY=false -define:WALK_TIER=$$t $$tier -out:$(BUILD)/wide/test || exit 1; \
+			-define:ODIN_TEST_FANCY=false -define:TIER=$$t -out:$(BUILD)/wide/test || exit 1; \
 		$(SDE) -$$cpu -- $(BUILD)/wide/test || exit 1; \
 	done; done
 

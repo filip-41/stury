@@ -31,14 +31,15 @@ NO_NODE :: Node_Index(max(u32))
 ROOT :: Node_Index(0)
 
 // Bit 0 of a string, key or dsv cell's `spelling` is set when its text is read through the format's `text`, which
-// decodes it or, for a quoted dsv cell with no `""`, returns its inner span. A reader tests it before the call. An unmarked node's span is its text: a JSON string's token leaves its quote pair out,
-// an unquoted JSON5 key is bare, and a dsv cell's span is its source bytes.
+// decodes it or, for a quoted dsv cell with no `""`, returns its inner span. A reader tests it before the call. An
+// unmarked node's span is its text: a JSON string's token leaves its quote pair out, an unquoted JSON5 key is bare, and
+// a dsv cell's span is its source bytes.
 SPELLING_DECODE :: u16(1)
 // Bit 1 of a JSON string or a dsv cell is set when the token is quoted. A JSON string's token span is the bytes
 // between its quotes, so `span` adds the pair back. A quoted dsv cell's span already holds them.
 SPELLING_QUOTED :: u16(2)
-// Bit 2 of a JSON string is set when it holds an ill-formed UTF-8 sequence that `Invalid_Utf8` reads as U+FFFD, so its
-// decode may grow past its span.
+// Bit 2 is set on a JSON string that holds an ill-formed UTF-8 sequence `Invalid_Utf8` reads as U+FFFD, and on every
+// dsv cell read under `Invalid_Utf8`, so its decode may grow past its span.
 SPELLING_LAX :: u16(4)
 
 // A `Fact` holds a comment token, the node it belongs to and its role. Facts are sorted by the node they belong to,

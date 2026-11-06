@@ -71,7 +71,7 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape, $fold: bo
 			return q2, 0, k2, 0
 		}
 		when shape {
-			return r, number_spelling_exp(.Json, int_digits, frac_digits), .None, mant
+			return r, number_spelling(.Json, int_digits, frac_digits) | core.NUMBER_EXP, .None, mant
 		}
 		q = r
 	}

@@ -331,19 +331,6 @@ read_number :: proc(text: string) -> (Value, bool) {
 	return Number{f = f, lit = json_literal(text)}, true
 }
 
-// The bytes a one-letter escape stands for, 0 for a letter that is no escape.
-@(private = "file", rodata)
-ESCAPED := [256]u8 {
-	'"'  = '"',
-	'\\' = '\\',
-	'/'  = '/',
-	'b'  = '\b',
-	'f'  = '\f',
-	'n'  = '\n',
-	'r'  = '\r',
-	't'  = '\t',
-}
-
 // The body of a JSON string decoded into `out` as jq's JSON parser decodes it, or why it cannot be, in jq's
 // words. A lone low surrogate, which only stury refuses, sets `stury_only_at` to its backslash's offset.
 decode_string :: proc(out: ^strings.Builder, in_: string, stury_only_at: ^int = nil) -> string {
@@ -363,7 +350,7 @@ decode_string :: proc(out: ^strings.Builder, in_: string, stury_only_at: ^int = 
 		if i + 1 == len(s) {
 			return "Expected escape character at end of string"
 		}
-		if b := ESCAPED[s[i + 1]]; b != 0 {
+		if b := spell.ESCAPED[s[i + 1]]; b != 0 {
 			strings.write_byte(out, b)
 			i += 2
 			continue

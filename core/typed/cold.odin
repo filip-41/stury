@@ -3,6 +3,7 @@ package typed
 import "base:runtime"
 import "core:mem"
 import "core:reflect"
+import "core:strconv"
 import "core:strings"
 import spell "../spell"
 import core ".."
@@ -574,7 +575,10 @@ store_number :: proc(n: core.Number, h: ^Reader, t: core.Token, fld: ^Field, des
 		case:
 			v = f32(x)
 			if t.spelling & core.NUMBER_KIND_MASK <= core.NUMBER_DECIMAL {
-				v = f32(off_halfway(h.base[t.lo:][:t.n], x))
+				if f32_double_rounds(x) {
+					// Rounds the decimal once. Past `max(f32)` it is infinity, refused below.
+					v, _ = strconv.parse_f32(string(h.base[t.lo:][:t.n]))
+				}
 			} else if read := h.plan.spelling.number_f32; read != nil {
 				if exact, ok := read(&h.view, t); ok {
 					v = exact

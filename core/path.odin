@@ -450,7 +450,7 @@ parse_quoted :: proc(p: ^Parser) -> bool {
 	escape := false
 	for i < len(t) && t[i] != '"' {
 		if t[i] == '\\' {
-			_, n := quoted_escape(t, i)
+			_, n := spell.string_escape(raw_data(t)[i:], len(t) - i)
 			if n == 0 {
 				return bad_path(p, i)
 			}
@@ -530,31 +530,6 @@ parse_int :: proc(p: ^Parser) -> (value: int, ok: bool) {
 	return -n if minus else n, true
 }
 
-// Decodes the escape at `raw[i]` and returns its rune and length, 0 for a bad one.
-@(private = "file")
-quoted_escape :: proc(raw: string, i: int) -> (r: rune, n: int) {
-	if i + 1 >= len(raw) {
-		return 0, 0
-	}
-	switch raw[i + 1] {
-	case '"', '\\', '/':
-		return rune(raw[i + 1]), 2
-	case 'b':
-		return '\b', 2
-	case 'f':
-		return '\f', 2
-	case 'n':
-		return '\n', 2
-	case 'r':
-		return '\r', 2
-	case 't':
-		return '\t', 2
-	case 'u':
-		return spell.unicode_escape(raw_data(raw)[i:], len(raw) - i)
-	}
-	return 0, 0
-}
-
 // Decodes a judged quoted name into `out`, which holds `len(raw)` bytes, as no escape grows. Returns the bytes written.
 @(private = "file")
 decode_quoted :: proc(raw: string, out: []u8) -> int {
@@ -566,7 +541,7 @@ decode_quoted :: proc(raw: string, out: []u8) -> int {
 			i += 1
 			continue
 		}
-		r, n := quoted_escape(raw, i)
+		r, n := spell.string_escape(raw_data(raw)[i:], len(raw) - i)
 		bytes, size := utf8.encode_rune(r)
 		copy(out[w:], bytes[:size])
 		w += size

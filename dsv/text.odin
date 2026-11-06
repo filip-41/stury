@@ -128,10 +128,7 @@ scan_record :: #force_no_inline proc "contextless" (src: []u8, start, width: int
 // and `\\`, read as one class mask, so the byte loop runs only when a block holds a bad escape.
 @(private, cold)
 escape_fault :: #force_inline proc "contextless" ($T: kernel.Tier, b: kernel.Block, bs: u64, pos: int, esc: ^u64) -> int {
-	odd := esc^
-	after := kernel.escaped(bs, &odd)
-	esc^ = odd
-	bad := after & ~kernel.pack(kernel.has(kernel.classes(T, b, ESCAPE_LETTERS), 0x0f))
+	bad := kernel.escaped(bs, esc) & ~kernel.pack(kernel.has(kernel.classes(T, b, ESCAPE_LETTERS), 0x0f))
 	if bad == 0 {
 		return -1
 	}

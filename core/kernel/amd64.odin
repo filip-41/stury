@@ -25,7 +25,7 @@ Tier :: enum u8 {
 FEATURES :: [Tier]string {
 	.V2 = "ssse3,sse4.1,sse4.2,popcnt",
 	.V3 = "avx,avx2,bmi,bmi2,popcnt,pclmul,-slow-unaligned-mem-32",
-	.V4 = "avx,avx2,bmi,bmi2,popcnt,pclmul,avx512f,avx512bw,avx512vl,evex512,-slow-unaligned-mem-32",
+	.V4 = "avx,avx2,bmi,bmi2,popcnt,pclmul,avx512f,avx512bw,avx512vl,-slow-unaligned-mem-32",
 }
 
 // The width of each tier's vector registers.
@@ -36,23 +36,22 @@ VECTOR_BYTES :: [Tier]int {
 	.V4 = 64,
 }
 
-// Returns the highest tier this CPU supports, or `Tier(WALK_TIER)` when the build defines `-define:WALK_TIER=<n>`.
+// Returns the highest tier this CPU supports, or `Tier(TIER)` when the build defines `-define:TIER=<n>`.
 // `core:sys/info` reports AVX and AVX-512 only where the OS saves their registers.
 tier :: proc "contextless" () -> Tier {
-	FORCED :: #config(WALK_TIER, -1)
+	FORCED :: #config(TIER, -1)
 	when FORCED >= 0 {
 		return Tier(FORCED)
-	} else {
-		f := info.cpu_features()
-		V3 :: info.CPU_Features{.avx, .avx2, .bmi1, .bmi2, .popcnt, .pclmulqdq}
-		switch {
-		case V3 + {.avx512f, .avx512bw, .avx512vl} <= f:
-			return .V4
-		case V3 <= f:
-			return .V3
-		}
-		return .V2
 	}
+	f := info.cpu_features()
+	V3 :: info.CPU_Features{.avx, .avx2, .bmi1, .bmi2, .popcnt, .pclmulqdq}
+	switch {
+	case V3 + {.avx512f, .avx512bw, .avx512vl} <= f:
+		return .V4
+	case V3 <= f:
+		return .V3
+	}
+	return .V2
 }
 
 @(private = "file")
@@ -79,7 +78,7 @@ lookup_v2 :: proc "contextless" (t, i: V) -> V {
 
 @(private = "file", enable_target_feature = FEATURES[.V3])
 lookup_v3 :: proc "contextless" (t: V, i: [2]V) -> [2]V {
-	return transmute([2]V)pshufb256(transmute(H)[2]V{t, t}, transmute(H)i)
+	return transmute([2]V)x86._mm256_shuffle_epi8(transmute(x86.__m256i)[2]V{t, t}, transmute(x86.__m256i)i)
 }
 
 @(private = "file", enable_target_feature = FEATURES[.V4])
@@ -125,12 +124,9 @@ masked_tail :: proc "contextless" (src: []u8, lo: int) -> Block {
 	return transmute(Block)simd.masked_load((^W)(raw_data(src)[lo:]), W(0), live)
 }
 
-// Declares the 64-byte shuffle and the 32-byte shuffle. Odin's `core:simd/x86` has the 32-byte version only after
-// dev-2026-10 and lacks the 64-byte version.
+// Declares the 64-byte shuffle, which Odin's `core:simd/x86` lacks.
 @(private = "file", default_calling_convention = "none")
 foreign _ {
-	@(link_name = "llvm.x86.avx2.pshuf.b")
-	pshufb256 :: proc(table, index: H) -> H ---
 	@(link_name = "llvm.x86.avx512.pshuf.b.512")
 	pshufb512 :: proc(table, index: W) -> W ---
 }

@@ -268,14 +268,9 @@ walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec,
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
-// `STATE_TIER` is the CPU tier every state is built for: `V2` on x86-64, `Base` elsewhere.
-when ODIN_ARCH == .amd64 {
-	@(private)
-	STATE_TIER :: kernel.Tier.V2
-} else {
-	@(private)
-	STATE_TIER :: kernel.Tier.Base
-}
+// `STATE_TIER` is the CPU tier every state is built for, the lowest: `V2` on x86-64, `Base` elsewhere.
+@(private)
+STATE_TIER :: kernel.Tier(0)
 
 @(private)
 STATE_FEATURES :: kernel.FEATURES[STATE_TIER]

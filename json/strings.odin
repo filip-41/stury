@@ -316,9 +316,8 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 	bs := p[1:]
 	skip: u64
 	u: kernel.Utf8_State
-	// Whether any block had a byte past 0x7F, and whether the last block did. An ASCII block after one closes the
-	// UTF-8 state.
-	high, last_high: bool
+	// Whether the last block had a byte past 0x7F. An ASCII block after one closes the UTF-8 state.
+	high: bool
 	for {
 		live := u64(intrinsics.ptr_sub(end, bs))
 		b: kernel.Block
@@ -335,13 +334,7 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 		ascii := kernel.is_ascii(b)
 		// A block with no stop is skipped without packing its mask, unless an escape ran into it.
 		if skip == 0 && !kernel.any_lane(sv) {
-			if !ascii {
-				kernel.utf8_block(T, b, &u)
-				high, last_high = true, true
-			} else if last_high {
-				kernel.utf8_ascii_block(T, &u)
-				last_high = false
-			}
+			kernel.utf8_next(T, b, ascii, &u, &high)
 			bs = bs[64:]
 			continue
 		}
@@ -357,11 +350,10 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 				// The string ends in this block, so only the vectors up to its quote are read.
 				if !ascii {
 					kernel.utf8_head(T, b, &u, k)
-					high = true
-				} else if last_high {
+				} else if high {
 					kernel.utf8_ascii_block(T, &u)
 				}
-				if high && !kernel.utf8_clean(T, u) {
+				if !kernel.utf8_clean(T, u) {
 					return nil, false
 				}
 				return bs[k + 1:], esc
@@ -396,13 +388,7 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 			}
 			stop &= max(u64) << k
 		}
-		if !ascii {
-			kernel.utf8_block(T, b, &u)
-			high, last_high = true, true
-		} else if last_high {
-			kernel.utf8_ascii_block(T, &u)
-			last_high = false
-		}
+		kernel.utf8_next(T, b, ascii, &u, &high)
 		bs = bs[64:]
 	}
 }
@@ -410,18 +396,8 @@ string_span :: #force_inline proc "contextless" ($T: kernel.Tier, p, end: [^]u8,
 // The length in bytes of the escape at the backslash `e` when the block reading accepts it: a one-letter escape, a
 // `\u` escape outside the surrogates, or a high half followed by a low half. Returns 0 for anything else.
 @(private)
-escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 #no_bounds_check {
-	room := intrinsics.ptr_sub(end, e)
-	if room < 2 {
-		return 0
-	}
-	if ESC_WORD[e[1]] != 0 {
-		return 2
-	}
-	if e[1] != 'u' {
-		return 0
-	}
-	_, n := spell.unicode_escape(e, room)
+escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 {
+	_, n := spell.string_escape(e, intrinsics.ptr_sub(end, e))
 	return u64(n)
 }
 
@@ -478,7 +454,7 @@ escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) 
 	if q >= end {
 		return end, .Truncated, false
 	}
-	if ESC_WORD[q[0]] != 0 {
+	if spell.ESCAPED[q[0]] != 0 {
 		return q[1:], .None, false
 	}
 	if q[0] != 'u' {

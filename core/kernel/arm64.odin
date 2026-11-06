@@ -13,30 +13,11 @@ load :: #force_inline proc "contextless" (p: [^]u8) -> Block {
 	}
 }
 
-// Returns a mask with 0xFF in each lane where `b`'s byte equals `c`.
+// Returns a mask with 0xFF in each lane where `b`'s byte equals `c`. Written one register at a time, since the 64-lane
+// form changes how LLVM inlines the walks that call it.
 eq :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
 	k := V(c)
 	return {simd.lanes_eq(b[0], k), simd.lanes_eq(b[1], k), simd.lanes_eq(b[2], k), simd.lanes_eq(b[3], k)}
-}
-
-// Returns a mask with 0xFF in each lane where `b`'s byte is below `c`.
-below :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
-	k := V(c)
-	return {simd.lanes_lt(b[0], k), simd.lanes_lt(b[1], k), simd.lanes_lt(b[2], k), simd.lanes_lt(b[3], k)}
-}
-
-// Returns `a` OR `b` lane by lane, 0xFF where either mask is set.
-either :: #force_inline proc "contextless" (a, b: Block) -> Block {
-	return {simd.bit_or(a[0], b[0]), simd.bit_or(a[1], b[1]), simd.bit_or(a[2], b[2]), simd.bit_or(a[3], b[3])}
-}
-
-// Returns 0xFF in each lane whose class bits in `c`, as `classes` returned them, share a bit with `bits`.
-has :: #force_inline proc "contextless" (c: Block, bits: u8) -> (m: Block) {
-	k := V(bits)
-	#unroll for i in 0 ..< 4 {
-		m[i] = simd.lanes_ne(simd.bit_and(c[i], k), V(0))
-	}
-	return
 }
 
 // Returns one bit per lane of `m`, 64 bits in all. NEON has no instruction that gathers lane bits, so each lane
@@ -75,12 +56,6 @@ fold :: #force_inline proc "contextless" (m: Block) -> V {
 // Whether every byte of `b` is below 0x80.
 is_ascii :: #force_inline proc "contextless" (b: Block) -> bool {
 	return simd.reduce_max(simd.bit_or(simd.bit_or(b[0], b[1]), simd.bit_or(b[2], b[3]))) < 0x80
-}
-
-// Reports whether any lane mask in `m` is set. `umaxv` reduces a register in one instruction, where an OR reduction
-// would use scalar registers.
-any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
-	return simd.reduce_max(simd.bit_or(simd.bit_or(m[0], m[1]), simd.bit_or(m[2], m[3]))) != 0
 }
 
 // Reports whether any lane of the 16-lane mask `m` is set, by `umaxv`.

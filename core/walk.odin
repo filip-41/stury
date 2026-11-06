@@ -22,7 +22,7 @@ Kind :: enum u8 {
 	True, // json
 	Number, // json
 	String, // json
-	Plain, // dsv: every cell
+	Plain, // json: a comment, dsv: every cell and a comment line
 	Array, // json: `[`, dsv: the document, and a record with no header
 	Map, // json: `{`, dsv: a record with a header
 	End, // json: `]` and `}`, dsv: a record's line end (`n` 1 or 2, 0 at the text's end) and the text's end (`n` 0)
@@ -48,10 +48,11 @@ Role :: enum u8 {
 // A token the walk passes to a hook. Tokens come in the order the walk reads them, text order except for a dsv `Key`,
 // whose span is its column's header cell, before the record that names it. `lo` is the first byte and `n` the length,
 // 0 where the format writes nothing. A token longer than `n` can hold is the fault `Too_Wide`. `spelling` is the
-// format's detail, read only by that format. json sets bit 0 for a string or key that needs decoding, bit 1 when it
-// is quoted, bit 2 for a tolerated ill-formed sequence, a comment's marker lengths in the low two bytes, and a
-// number's packed shape. dsv sets bit 0 for a cell that needs decoding, bit 1 for a quoted CSV cell, and the lead
-// length 1 for a comment line.
+// format's detail. Core reads bits 0 to 2 of a value or key and a comment's marker lengths, and the rest is the
+// format's own. json sets bit 0 for a string or key that needs decoding, bit 1 when it is quoted, bit 2 for a
+// tolerated ill-formed sequence, and a number's packed shape. dsv sets bit 0 for a cell that needs decoding, bit 1 for
+// a quoted CSV cell, bits 0 and 2 for every cell read under `Invalid_Utf8`, bit 3 for a quoted cell holding a `""` on a
+// walk for `Cells` or `Batch`, and bit 4 for the key of a column past the header's last cell.
 Token :: struct {
 	lo:       u64,
 	n:        u32,

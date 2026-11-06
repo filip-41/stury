@@ -17,12 +17,11 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 | `core/result.odin` | the result word: `fault_at`, `STOPPED`, `fault_of`, and the empty hook `No_Hooks`/`no_hook` |
 | `core/build/build.odin` | `Builder`, the hooks a format's `build` passes its walk, the header row, the duplicate-key check |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the decimal and hex decoders, the digit reader |
-| `core/spell/text.odin` | `decode_text` and `bytes_equal` |
+| `core/spell/text.odin` | `decode_text`, `bytes_equal`, and the escape table and hex and surrogate helpers JSON's walk and decoder share with paths and the CLI |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`/`insert`/`remove`, `commit` |
 | `core/compose/` | the commit the format tables point at, and the composition a format's root junctions share |
 | `core/error.odin` | `Fault_Kind`, `Fault`, `Rules`, `Rule`, the codes, line and column, the renderer |
-| `json/escape.odin` | the escape-byte table and the hex and surrogate helpers JSON's walk and decoder share |
 | `json/walk.odin` | JSON's interface, the result word, `Walk`, `walk_document`, the hook calls |
 | `json/document.odin` | JSON's `build` and its spelling table |
 | `json/unescape.odin` | JSON's string decoder, its key compare and its number reader |
@@ -133,12 +132,12 @@ order the walk reads them, which is text order except for a dsv `Key`, whose spa
 the record that names it. `kind` says what the token is: a scalar (`Null`, `False`, `True`, `Number`, `String`,
 `Plain`), a container's opening (`Array`, `Map`), or its `End`. `role` is `Key` for a JSON member's name and for the
 header cell that names a dsv cell's column, and past `Key` a fact: a comment, `Plain`, as `Comment`, `Comment_Inline`
-or `Comment_Foot`. A consumer that wants values only tests `role == .Value`. `spelling` is a detail the format writes
+or `Comment_Foot`. A consumer that wants values only tests `role <= .Key`. `spelling` is a detail the format writes
 and core reads through three bits: bit 0 says `text` must be decoded, bit 1 says the token is quoted (a JSON string,
-whose token span leaves its quotes out, or a quoted dsv cell, whose span holds them), and bit 2 says a JSON string
-holds a tolerated ill-formed UTF-8 sequence. For a comment token, the low byte of `spelling` holds the lead marker's
-length and the next byte the tail's. The other bits are the format's own. A token longer than `n` can hold is
-the fault `Too_Wide`.
+whose token span leaves its quotes out, or a quoted dsv cell, whose span holds them), and bit 2 says the decode may
+grow past the span (a JSON string with a tolerated ill-formed UTF-8 sequence, or any dsv cell read under
+`Invalid_Utf8`). For a comment token, the low byte of `spelling` holds the lead marker's length and the next byte the
+tail's. The other bits are the format's own. A token longer than `n` can hold is the fault `Too_Wide`.
 
 ### Hooks
 
@@ -537,7 +536,7 @@ From the repository root:
 | Command | What it runs |
 |---|---|
 | `make test` | the tests at -o:minimal and -o:speed, one target per compile so `make -j` runs them in parallel, and the golden answers `json/test` checks |
-| `make test-x86` | the tests at v2 and v3 under Rosetta, `-define:WALK_TIER` picking the walks' tier |
+| `make test-x86` | the tests at v2 and v3 under Rosetta, `-define:TIER` picking the tier |
 | `make test-asan` | the tests under AddressSanitizer |
 | `make lint` | the import order, then vet on the host, x86-64 and riscv64 |
 | `make surface` | each library package's public declarations, sorted |

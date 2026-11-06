@@ -38,12 +38,10 @@ SPELLING := core.Spelling {
 	tag_key = "json", key_open = "\"", key_close = "\":",
 }
 
-// A number's spelling leaves bit 0 (`SPELLING_DECODE`) and bit 15 clear.
+// A number's kind fits core's kind bits and leaves bit 0 (`SPELLING_DECODE`) clear.
 #assert(u16(Number_Spelling.Nan) & core.SPELLING_DECODE == 0)
 #assert(u16(Number_Spelling.Nan) <= core.NUMBER_KIND_MASK)
 #assert(u16(Number_Spelling.Decimal) == core.NUMBER_DECIMAL)
-#assert(core.NUMBER_EXP < 1 << 15)
-#assert(u16(Number_Spelling.Nan) < 1 << 15)
 
 // Reads `src` as spec `spec` into a document, as `core.build` does with `as(spec, opts)`.
 build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {

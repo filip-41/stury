@@ -22,12 +22,11 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/build/many.odin` | what only `$MANY` reads hold: armed path sets, rings of negative indexes, answers placed in text order, the stream |
 | `json/query.odin`, `dsv/query.odin` | each format's `Spelling.scan` walk, and `scan`, `find`, `each_answer` and `set` as forwarders |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, every decoder |
-| `core/spell/text.odin` | `decode_text`, `decoded_equals`, `bytes_equal` and `Pending`, the decoders' and readers' byte helpers |
+| `core/spell/text.odin` | `decode_text`, `decoded_equals`, `bytes_equal`, `Pending` and the escape table, the decoders' and readers' byte helpers |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
 | `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, `render`, `write_code` |
 | `json/document.odin` | JSON's `build`, `Spelling` and `Edit_Spelling` tables, `close_end`, the edit checks |
 | `dsv/compose.odin` | a delimited text's root junctions and the comments above its header |
-| `json/escape.odin` | the escape-byte table its walk and decoder share |
 | `json/unescape.odin` | JSON's `text` and `number` readers and the decoder behind them |
 | `dsv/document.odin` | dsv's `build`, its `Spelling` table, its edit table, `close_end`, the record check |
 | `dsv/plan.odin` | a commit's column changes, turned into plain cell edits before core composes the list |

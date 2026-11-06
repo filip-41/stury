@@ -1,5 +1,3 @@
-// `simd` is used only in a generic procedure, which the unused-import check does not read.
-#+vet !unused-imports
 package kernel
 
 import "base:intrinsics"
@@ -12,8 +10,8 @@ import "core:simd"
 // CPU take a `Tier` as `$T` (amd64.odin,
 // single_tier.odin).
 
-// 64 input bytes, or the 64 lane masks (0x00 or 0xFF) made from them, as four 16-byte vectors. lanes64.odin
-// reinterprets it as one 64-lane vector. It is an array so that a block crosses a call between procedures built for
+// 64 input bytes, or the 64 lane masks (0x00 or 0xFF) made from them, as four 16-byte vectors. The block operations
+// reinterpret it as one 64-lane vector. It is an array so that a block crosses a call between procedures built for
 // different x86 tiers in the same registers on both sides, since a 64-lane vector returns in one register from an
 // AVX-512 procedure and in four from an SSE one.
 Block :: [4]#simd[16]u8
@@ -23,6 +21,29 @@ Block :: [4]#simd[16]u8
 V :: #simd[16]u8
 @(private)
 W :: #simd[64]u8
+
+// The block operations whose 64-lane form compiles on NEON as one register at a time does. LLVM splits a 64-lane vector
+// to the target's width.
+
+// Returns a mask with 0xFF in each lane where `b`'s byte is below `c`.
+below :: #force_inline proc "contextless" (b: Block, c: u8) -> Block {
+	return transmute(Block)simd.lanes_lt(transmute(W)b, W(c))
+}
+
+// Returns `a` OR `b` lane by lane, 0xFF where either mask is set.
+either :: #force_inline proc "contextless" (a, b: Block) -> Block {
+	return transmute(Block)simd.bit_or(transmute(W)a, transmute(W)b)
+}
+
+// Returns 0xFF in each lane whose class bits in `c`, as `classes` returned them, share a bit with `bits`.
+has :: #force_inline proc "contextless" (c: Block, bits: u8) -> Block {
+	return transmute(Block)simd.lanes_ne(simd.bit_and(transmute(W)c, W(bits)), W(0))
+}
+
+// Reports whether any lane mask in `m` is set. A lane mask is set exactly when its top bit is.
+any_lane :: #force_inline proc "contextless" (m: Block) -> bool {
+	return !is_ascii(m)
+}
 
 // The mask a load at `16 - n` gives: `n` lanes of 0xFF, then zeros.
 @(private, rodata)

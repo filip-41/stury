@@ -63,10 +63,10 @@ Each pair does the same work under the same guarantee, or the table names the di
 
 ## Results
 
-Measured on 2026-11-05 on an Apple M5 Max (18 cores), macOS 27.2, with Odin `dev-2026-11` (the `Odin-master`
-checkout of 2026-10-27; the `dev-2026-10` release does not build the tree) at `-o:speed`, with `ROUNDS=5` for the
-library lanes. Every peer was present. GB/s unless the table says otherwise; `-` is an arm the harness left out or a
-lane it does not run.
+Measured on 2026-11-05 on an Apple M5 Max (18 cores), macOS 27.2, with Odin's master at `7e313bd6f` (2026-10-27,
+between the `dev-2026-10` release, which does not build the tree, and `dev-2026-11`) at `-o:speed`, with `ROUNDS=5`
+for the library lanes. Every peer was present. GB/s unless the table says otherwise; `-` is an arm the harness left
+out or a lane it does not run.
 
 ### Document lanes (`make bench-doc`)
 

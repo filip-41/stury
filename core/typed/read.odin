@@ -136,9 +136,15 @@ field_at :: #force_inline proc "contextless" (b: u64) -> ^Field {
 	return ([^]Field)(uintptr(b))[-1:]
 }
 
-// Below this, or with its low 29 bits on a midpoint's, a binary64 does not narrow to an f32 by a cast alone.
 @(private)
 F32_NORMAL :: 1.1754943508222875e-38
+
+// Whether the binary64 `v` of a decimal may narrow to a different f32 than the decimal rounds to: its low 29 bits are
+// a normal f32's midpoint, or it is below the normal range, where an f32 keeps fewer bits. Otherwise a cast rounds once.
+@(private)
+f32_double_rounds :: #force_inline proc "contextless" (v: f64) -> bool {
+	return transmute(u64)v & (1 << 29 - 1) == 1 << 28 || abs(v) < F32_NORMAL && v != 0
+}
 
 @(rodata, private)
 POW10 := [16]f64{1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15}
@@ -197,7 +203,7 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 				v = -v if h.base[t.lo] == '-' else v
 				if fld.kind == .F64 {
 					(^f64)(dest)^ = v
-				} else if transmute(u64)v & (1 << 29 - 1) != 1 << 28 && (abs(v) >= F32_NORMAL || v == 0) {
+				} else if !f32_double_rounds(v) {
 					(^f32)(dest)^ = f32(v)
 				} else {
 					reason = number_cold(h, t, fld, dest)
