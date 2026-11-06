@@ -230,8 +230,9 @@ member. It returns true when reads of `i` by position need no walk: for a contai
 which needs no entry, and for one indexed before. A scalar, a miss, a `Partial` container and a failed allocation
 give false. It writes the document, so nothing else may read `doc` during the call. A call on a container it listed
 before writes nothing, so a document that more than one thread reads has its containers indexed before it is shared.
-A walk that finds fewer members than the count lists nothing. `destroy` frees the entries and `clone` does not copy
-them.
+A walk that finds fewer members than the count lists nothing. A container that could not be listed keeps an entry with
+no members, so a later call gives false and writes nothing, and `child_at` walks it. `destroy` frees the entries and
+`clone` does not copy them.
 
 `children_from(doc, i, k)` starts a `Child_Iter` at member `k`. Out of range, on a scalar and on a miss it is done.
 

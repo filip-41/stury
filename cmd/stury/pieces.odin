@@ -37,6 +37,16 @@ POOLED_BYTES :: #config(STURY_POOLED_BYTES, 1 << 20)
 // The run's pool, started at its first use. A pool that could not start runs every piece on the caller.
 run_pool :: proc(run: ^Run) -> ^core.Runner {
 	if run.pool == nil {
+		// Indexed before any thread starts, so the threads' reads of these values write nothing.
+		for v in run.program.values {
+			jq.index_shared(v)
+		}
+		for v in run.program.positional {
+			jq.index_shared(v)
+		}
+		for v in run.ip.data {
+			jq.index_shared(v)
+		}
 		run.pool = new(host.Pool, runtime.heap_allocator())
 		host.pool_init(run.pool, THREADS)
 	}

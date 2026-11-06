@@ -62,6 +62,7 @@ Child_Count :: struct {
 }
 
 // A container's member value nodes as `index_children` lists them: `members[k]` is what `child_at` returns for `k`.
+// `members` is nil for a container `index_children` could not list.
 Child_Index :: struct {
 	node:    Node_Index,
 	members: []Node_Index,
@@ -538,8 +539,9 @@ indexed_members :: proc(doc: ^Document, i: Node_Index) -> ([]Node_Index, bool) {
 
 // Lists container `i`'s member values in `Document.indexed`, so `child_at` and `children_from` reach any member
 // without a walk. Returns whether `i` is now read by position without a walk. A container whose members are one node
-// each needs no entry. A scalar, a node past the last, a `Partial` container and a failed allocation give false. It
-// writes the document, so nothing else may read `doc` during the call.
+// each needs no entry. A scalar, a node past the last, a `Partial` container and a failed allocation give false. A
+// container that could not be listed keeps an entry with no members, so a later call writes nothing and gives false.
+// It writes the document, so nothing else may read `doc` during the call.
 index_children :: proc(doc: ^Document, i: Node_Index) -> bool {
 	if int(i) >= len(doc.nodes) {
 		return false
@@ -557,7 +559,12 @@ index_children :: proc(doc: ^Document, i: Node_Index) -> bool {
 	}
 	at := lower_node(doc.indexed[:], i)
 	if at < len(doc.indexed) && doc.indexed[at].node == i {
-		return true
+		return doc.indexed[at].members != nil
+	}
+	// The entry goes in before its list, so a list that fails stays recorded as an entry with no members.
+	doc.indexed.allocator = doc.allocator
+	if _, err := inject_at(&doc.indexed, at, Child_Index{node = i}); err != nil {
+		return false
 	}
 	members, merr := make([]Node_Index, count, doc.allocator)
 	if merr != nil {
@@ -577,11 +584,7 @@ index_children :: proc(doc: ^Document, i: Node_Index) -> bool {
 		delete(members, doc.allocator)
 		return false
 	}
-	doc.indexed.allocator = doc.allocator
-	if _, err := inject_at(&doc.indexed, at, Child_Index{i, members}); err != nil {
-		delete(members, doc.allocator)
-		return false
-	}
+	doc.indexed[at].members = members
 	return true
 }
 

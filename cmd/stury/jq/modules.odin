@@ -182,6 +182,7 @@ load :: proc(l: ^Linker, path: string, is_data, raw: bool) -> (^Library, int) {
 		return nil, 1
 	}
 	if is_data {
+		append(&l.ip.data, v)
 		return new_clone(Library{path = path, data = v, is_data = true}), 0
 	}
 	src, _ := string_of(v)

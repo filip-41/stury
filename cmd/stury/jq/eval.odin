@@ -86,6 +86,7 @@ Interp :: struct {
 	// jq's jv_load_file, which modules are read with: the file as one string (`raw`) or as the array of its
 	// JSON texts, or jq's message for why not.
 	load_file:    proc(path: string, raw: bool, r: core_pkg.As) -> (Value, string),
+	data:         [dynamic]Value, // the modules' data files, which every thread of a run reads (`index_shared`)
 	// Scopes no evaluation reads any more, linked by `parent`, for `new_env` to hand out again. They live
 	// in the input's memory, so the caller empties the list with it.
 	free_envs:    ^Env,

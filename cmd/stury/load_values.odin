@@ -10,18 +10,17 @@ import records "../../core/records"
 import "jq"
 import "message"
 
-// A JSON text given to `option` on the command line, read as `r` says: exactly one value, which every thread may read.
+// A JSON text given to `option` on the command line, read as `r` says: exactly one value.
 json_arg :: proc(r: core.As, text, option: string) -> jq.Value {
 	v, fault := jq.read_text(transmute([]byte)text, r)
 	if f, bad := fault.?; bad {
 		usage_error("invalid JSON text passed to %s: %s", option, jq.parse_message(transmute([]byte)text, f))
 	}
-	jq.index_shared(v)
 	return v
 }
 
 // jq's jv_load_file: file `path` as one string (`raw`) or as the array of its JSON text, read as `r` says, or jq's
-// message for why not. The array is a variable's or a module's data, which every thread may read.
+// message for why not.
 load_file :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: string) {
 	f, err := open_input(path)
 	if err != nil {
@@ -57,7 +56,6 @@ load_file :: proc(path: string, raw: bool, r: core.As) -> (v: jq.Value, msg: str
 	if f, bad := texts.fault.?; bad {
 		return nil, jq.parse_message(data, f, column = -int(core.text_start(data, 0)))
 	}
-	jq.index_shared(all)
 	return all, ""
 }
 

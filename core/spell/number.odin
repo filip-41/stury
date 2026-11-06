@@ -287,7 +287,7 @@ short_integer :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: i64,
 
 // Parses an optional sign, up to 8 digits, an optional point and up to 8 more digits, with at most 15 digits in total.
 // Returns false for anything else. The digits and the power of ten both fit an f64 exactly, so the one division is
-// correctly rounded. It may read up to 8 bytes past the span.
+// correctly rounded. It may read up to 9 bytes past the span.
 short_decimal :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: f64, ok: bool) {
 	skip := u64(1) if p[0] == '-' || p[0] == '+' else 0
 	q := p[skip:]

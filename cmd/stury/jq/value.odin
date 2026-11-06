@@ -264,7 +264,7 @@ distinct_keys :: #force_no_inline proc(r: Ref) -> int {
 INDEX_MEMBERS_FROM :: 256
 
 // Indexes every array of `v`'s documents that `array_at` or `array_slice` would index, for a value every thread of a
-// run reads: their `index_children` calls then find the entry and write nothing.
+// run reads, before the threads start: their `index_children` calls then find the entry and write nothing.
 index_shared :: proc(v: Value) {
 	switch x in v {
 	case Ref:
@@ -292,7 +292,8 @@ array_at :: proc(v: Value, i: int) -> Value {
 	case ^Array:
 		return x.items[i] if i >= 0 && i < len(x.items) else nil
 	case Ref:
-		if i >= INDEX_MEMBERS_FROM {
+		// Only an array `index_shared` would index, so a shared document is never written here.
+		if i >= INDEX_MEMBERS_FROM && i < core_pkg.length(x.doc, x.node) {
 			core_pkg.index_children(x.doc, x.node)
 		}
 		if node, ok := core_pkg.child_at(x.doc, x.node, i); ok {
