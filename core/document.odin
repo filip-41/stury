@@ -216,6 +216,8 @@ Duplicates :: enum u8 {
 // A `Spelling` holds a format's read services, in its rodata. `text` decodes a node's text into `buf` and returns false
 // when `buf` is too short, so a read never allocates. A node whose `SPELLING_DECODE` bit is clear is its span without
 // the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token.
+// `number_f32` reads a number token whose kind is above `NUMBER_DECIMAL` into an f32 with one rounding, and returns
+// false when narrowing `number`'s binary64 already rounds once. It is nil for a format with no such kinds.
 // `build` reads a text into a document and `validate` judges one without building, each as the handle says, see
 // `core.build` and `core.validate`. `scan` reads paths over a text as the handle says into a partial document, or gives
 // each answer to `on` when it is set, see `core/build`'s `scan` and `each_answer`. `resolve` returns what a `Plain` node
@@ -234,6 +236,7 @@ Spelling :: struct {
 	text:       proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
 	number:     proc(v: ^Token_View, t: Token) -> Number,
+	number_f32: proc(v: ^Token_View, t: Token) -> (f32, bool),
 	build:      proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error),
 	validate:   proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
 	scan:       proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error),

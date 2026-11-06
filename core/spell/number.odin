@@ -1,6 +1,7 @@
 package spell
 
 import "base:intrinsics"
+import "core:math"
 import "core:strconv"
 
 // A number's value. `Int` fits `i64`, `Uint` fits only `u64`, and `-0` is `Int` 0. `Float` is a correctly rounded
@@ -314,48 +315,66 @@ short_decimal :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: f64,
 // Decodes `0x` and hex digits with an optional sign. Past `u64` it returns the nearest `Float`, or `Wide` past
 // binary64. A malformed span is `Wide`.
 number_hex :: proc(src: []u8, lo, hi: u64) -> Number {
+	top, shift, neg, ok := hex_significand(src, lo, hi)
+	if !ok {
+		return {0, .Wide}
+	}
+	if shift == 0 {
+		if num, is_int := integer_number(top, neg); is_int {
+			return num
+		}
+	}
+	v := math.ldexp(f64(top), shift)
+	if math.is_inf(v) {
+		return {0, .Wide}
+	}
+	return {transmute(u64)(-v if neg else v), .Float}
+}
+
+// The f32 nearest hex `src[lo:hi]`, rounded once, and false if the span is not hex. Past `max(f32)` it is infinite.
+number_hex_f32 :: proc(src: []u8, lo, hi: u64) -> (f32, bool) {
+	top, shift, neg, ok := hex_significand(src, lo, hi)
+	if !ok {
+		return 0, false
+	}
+	// `f32(top)` scaled by a power of two is exact in binary64 until it is past `max(f32)`.
+	v := f32(math.ldexp(f64(f32(top)), shift))
+	return -v if neg else v, true
+}
+
+// Hex `src[lo:hi]` as `top << shift`. Past `u64`, `top` keeps its leading 64 bits and sets its least bit when a dropped
+// bit is set, so one conversion to binary64 or f32 rounds it correctly.
+@(private)
+hex_significand :: proc(src: []u8, lo, hi: u64) -> (top: u64, shift: int, neg: bool, ok: bool) {
 	p := lo
-	neg := false
 	if p < hi && (src[p] == '+' || src[p] == '-') {
 		neg = src[p] == '-'
 		p += 1
 	}
 	if hi - p < 3 || src[p] != '0' || src[p + 1] | 0x20 != 'x' {
-		return {0, .Wide}
+		return
 	}
-	at := p + 2
-	if hi - at > MAX_NUMBER_DIGITS {
-		return {0, .Wide}
+	p += 2
+	if hi - p > MAX_NUMBER_DIGITS {
+		return
 	}
-	p = at
-	mag: u64
-	over := false
-	for p < hi {
-		d := HEX_NIBBLE[src[p]]
+	sticky := false
+	for ; p < hi; p += 1 {
+		d := u64(HEX_NIBBLE[src[p]])
 		if d > 15 {
-			return {0, .Wide}
+			return
 		}
-		over ||= mag > max(u64) >> 4
-		mag = mag << 4 | u64(d)
-		p += 1
-	}
-	if p == at {
-		return {0, .Wide}
-	}
-	if !over {
-		if num, ok := integer_number(mag, neg); ok {
-			return num
+		if top <= max(u64) >> 4 {
+			top = top << 4 | d
+			continue
 		}
+		// `top` is at least 2^60, so it takes `room` more bits, at most 3.
+		room := uint(intrinsics.count_leading_zeros(top))
+		sticky ||= d & (1 << (4 - room) - 1) != 0
+		top = top << room | d >> (4 - room)
+		shift += 4 - int(room)
 	}
-	// Read as a hex float with exponent 0, which `strconv` rounds to nearest even.
-	buf: [MAX_NUMBER_DIGITS + 4]u8
-	n := copy(buf[:], src[at - 2:hi])
-	n += copy(buf[n:], "p0")
-	v, ok := strconv.parse_f64(string(buf[:n]))
-	if !ok {
-		return {0, .Wide}
-	}
-	return {transmute(u64)(-v if neg else v), .Float}
+	return top | u64(sticky), shift, neg, true
 }
 
 // Lexes `src[lo:hi]` with the strict or loose grammar. `n.ok` is false if the span is not a number.

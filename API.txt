@@ -24,6 +24,7 @@ low_surrogate :: #force_inline proc (unit: u32) -> bool {
 number_exponent :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> Number {
 number_fraction :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> Number {
 number_hex :: proc(src: []u8, lo, hi: u64) -> Number {
+number_hex_f32 :: proc(src: []u8, lo, hi: u64) -> (f32, bool) {
 number_int :: #force_inline proc(src: []u8, lo, hi: u64, digits: int) -> (Number, bool) {
 number_loose :: proc(src: []u8, lo, hi: u64) -> (num: Number, integer, ok: bool) {
 number_significand :: #force_inline proc(mant: u64, e: i64, neg: bool, exact: bool) -> Number {

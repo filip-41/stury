@@ -968,3 +968,53 @@ a_map_key_with_an_escape_decodes :: proc(t: ^testing.T) {
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s["a\nb"], "x")
 }
+
+// Numbers read into f32 with one rounding, streamed and from a document. The cases sit on or next to an f32 midpoint
+// where the binary64 lands on the midpoint.
+@(test)
+f32_rounds_once :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	OUT :: 0x7f800000 // infinity, which a read refuses as out of range
+	cases := []struct {
+		text: string,
+		want: u32,
+	} {
+		{"1.000000059604644775390625", 0x3f800000},
+		{"1000000059604644775390625000001000000059e-39", 0x3f800001},
+		{"1000000059604644775390624999998999999940e-39", 0x3f800000},
+		{"1.000000178813934326171875", 0x3f800002},
+		{"1000000178813934326171875000001000000178e-39", 0x3f800002},
+		{"1000000178813934326171874999998999999821e-39", 0x3f800001},
+		{"2101947696487225606385594374934874196920392912814773657635602425834686624028790902229957282543182373046875e-150", 0x00000002},
+		{"2101947696487225606385594374936976144616e-84", 0x00000002},
+		{"2101947696487225606385594374932772249223e-84", 0x00000001},
+		{"700649232162408535461864791644958065640130970938257885878534141944895541342930300743319094181060791015625e-150", 0x00000000},
+		{"7006492321624085354618647916456587148722e-85", 0x00000001},
+		{"7006492321624085354618647916442574164079e-85", 0x00000000},
+		{"340282356779733661637539395458142568448", OUT},
+		{"3402823567797336616375393954578022860912e-1", 0x7f7fffff},
+		{"0xe5c9908000000001", 0x5f65c991},
+		{"0x2633b3dffffffff", 0x5c18cecf},
+		{"0x100000100000000000000001", 0x6d800001},
+		{"-0x100000100000000000000001", 0xed800001},
+		{"0x1000000fffffffffffffffff", 0x6d800000},
+		{"0x1000000000000000000000000000000000", OUT},
+	}
+	plan, _ := json.plan_make([]f32, allocator = context.temp_allocator)
+	for c in cases {
+		src := transmute([]u8)strings.concatenate({"[", c.text, "]"}, context.temp_allocator)
+		streamed: []f32
+		e := json.unmarshal(src, .Json5, &streamed, allocator = context.temp_allocator)
+		doc, _ := json.build(src, .Json5, allocator = context.temp_allocator)
+		built: []f32
+		e2 := typed.unmarshal(&doc, core.ROOT, &built, &plan, allocator = context.temp_allocator)
+		for got in ([]struct {v: []f32, e: core.Typed_Error} {{streamed, e}, {built, e2}}) {
+			if c.want == OUT {
+				testing.expectf(t, got.e.kind == .Out_Of_Range, "%s: %v, want Out_Of_Range", c.text, got.e.kind)
+			} else {
+				ok := got.e.kind == .None && len(got.v) == 1 && transmute(u32)got.v[0] == c.want
+				testing.expectf(t, ok, "%s: %v %v, want %08x", c.text, got.v, got.e.kind, c.want)
+			}
+		}
+	}
+}

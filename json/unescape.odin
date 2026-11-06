@@ -451,6 +451,15 @@ number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number
 	return {0, .Wide}
 }
 
+// JSON's `Spelling.number_f32`. Hex past `u64` has rounded once into binary64, so it is read again from its digits.
+@(private)
+number_f32 :: proc(doc: ^core.Token_View, n: core.Node) -> (f32, bool) {
+	if number_spelling_of(n.spelling) != .Hex {
+		return 0, false
+	}
+	return spell.number_hex_f32(doc.src, n.lo, n.lo + u64(n.n))
+}
+
 // Decodes what `number` does not: long decimals, hex, `Infinity` and `NaN`.
 @(private, cold)
 number_slow :: #force_no_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {

@@ -509,8 +509,8 @@ number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, f
 		if core.number_shape(t.spelling) >= 32 {
 			return .Wrong_Kind
 		}
-	} else if frac, sum := core.number_digits(t.spelling); sum <= 19 {
-		// `mant` holds all the digits.
+	} else if frac, sum := core.number_digits(t.spelling); sum <= 19 && t.spelling & core.NUMBER_KIND_MASK <= core.NUMBER_DECIMAL {
+		// `mant` holds all the digits of a decimal.
 		return store_number(spell.number_significand(h.mant, -i64(frac), h.base[t.lo] == '-', sum <= 15), h, t, fld, dest)
 	}
 	return store_number(h.plan.spelling.number(&h.view, t), h, t, fld, dest)
@@ -551,7 +551,23 @@ store_number :: proc(n: core.Number, h: ^Reader, t: core.Token, fld: ^Field, des
 		return .Out_Of_Range
 	}
 	if fld.kind == .F32 {
-		v := f32(x if t.spelling & core.NUMBER_KIND_MASK > core.NUMBER_DECIMAL else off_halfway(h.base[t.lo:][:t.n], x))
+		// Every case rounds the exact value once.
+		v: f32
+		#partial switch n.kind {
+		case .Int:
+			v = f32(i64(n.bits)) if n.bits != 0 else f32(x)
+		case .Uint:
+			v = f32(n.bits)
+		case:
+			v = f32(x)
+			if t.spelling & core.NUMBER_KIND_MASK <= core.NUMBER_DECIMAL {
+				v = f32(off_halfway(h.base[t.lo:][:t.n], x))
+			} else if read := h.plan.spelling.number_f32; read != nil {
+				if exact, ok := read(&h.view, t); ok {
+					v = exact
+				}
+			}
+		}
 		if abs(v) > max(f32) {
 			return .Out_Of_Range
 		}

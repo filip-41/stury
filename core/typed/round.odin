@@ -5,8 +5,8 @@ package typed
 
 import "core:strconv/decimal"
 
-// `x`, the binary64 of decimal `t`, made safe to narrow to an f32 with one more rounding. A decimal on a midpoint goes to
-// the even neighbour, since the runtime's narrowing cast does not tie to even on x86.
+// `x`, the binary64 of decimal `t`, made safe to narrow to an f32 with one more rounding. A decimal on a midpoint stays
+// there, and the cast ties it to even.
 @(private)
 off_halfway :: proc(t: []byte, x: f64) -> f64 {
 	bits := transmute(u64)x & (1 << 63 - 1)
@@ -27,9 +27,10 @@ off_halfway :: proc(t: []byte, x: f64) -> f64 {
 	decimal.assign(&d, m)
 	decimal.shift(&d, int(e - 52))
 	cmp := decimal_cmp(t, d.digits[:d.count], i64(d.decimal_point))
-	// Bit `drop` of the significand is the target's least bit, clear when the lower neighbour is even.
-	up := cmp > 0 || (cmp == 0 && m & (1 << drop) != 0)
-	ax := abs(x) + (half if up else -half)
+	if cmp == 0 {
+		return x
+	}
+	ax := abs(x) + (half if cmp > 0 else -half)
 	return -ax if x < 0 else ax
 }
 

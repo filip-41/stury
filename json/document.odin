@@ -33,7 +33,7 @@ EDIT := core.Edit_Spelling {
 // accepts it.
 @(private)
 SPELLING := core.Spelling {
-	text = text, key_equals = key_equals_decode, number = number, build = build_as, validate = validate_as, scan = scan_as,
+	text = text, key_equals = key_equals_decode, number = number, number_f32 = number_f32, build = build_as, validate = validate_as, scan = scan_as,
 	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT, write = write_text, tokens = &TOKENS, records = &RECORDS,
 	tag_key = "json", key_open = "\"", key_close = "\":",
 }
