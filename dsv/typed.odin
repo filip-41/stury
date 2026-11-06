@@ -448,7 +448,7 @@ read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) ->
 		if h.r.plan.enums != .Int {
 			return typed.store_enum(&h.r, cell, m.enum_info, dest, m.size)
 		}
-		text, ok := typed.token_text(&h.r, t, context.temp_allocator)
+		text, ok := core.token_text(h.r.plan.spelling, &h.r.view, t, context.temp_allocator)
 		if !ok {
 			return .Out_Of_Memory
 		}
@@ -577,7 +577,7 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 		// A column past the header's last is named by its position, and a refusal names it once, when it is bound.
 		key := column_key(h.keys, c)
 		positional, refusing := key.spelling & SPELLING_COLUMN != 0, c >= from
-		name, ok := typed.token_text(&h.r, key, context.temp_allocator)
+		name, ok := core.token_text(h.r.plan.spelling, &h.r.view, key, context.temp_allocator)
 		if !ok {
 			return refuse_header(h, regs, .Out_Of_Memory, key.lo, "")
 		}

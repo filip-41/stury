@@ -30,9 +30,7 @@ number_spelling_of :: #force_inline proc "contextless" (spelling: u16) -> Number
 // Packs a decimal's kind and digit counts into its `spelling`.
 @(private)
 number_spelling :: #force_inline proc "contextless" (kind: Number_Spelling, int_digits, frac_digits: u64) -> u16 {
-	n := u16(min(int_digits, u64(core.NUMBER_DIGITS_MAX)))
-	f := u16(min(frac_digits, u64(core.NUMBER_FRAC_MAX))) << core.NUMBER_FRAC_SHIFT
-	return u16(kind) | n << core.NUMBER_INT_SHIFT | f
+	return core.number_spelling(u16(kind), int_digits, frac_digits)
 }
 
 // `number_spelling` with `NUMBER_EXP` set. Cold, since only a number with an exponent calls it.

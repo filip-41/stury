@@ -42,8 +42,6 @@ SPELLING := core.Spelling {
 #assert(u16(Number_Spelling.Nan) & core.SPELLING_DECODE == 0)
 #assert(u16(Number_Spelling.Nan) <= core.NUMBER_KIND_MASK)
 #assert(u16(Number_Spelling.Decimal) == core.NUMBER_DECIMAL)
-#assert(core.NUMBER_INT_SHIFT + 5 <= 15)
-#assert(core.NUMBER_FRAC_SHIFT + 5 <= 15)
 #assert(core.NUMBER_EXP < 1 << 15)
 #assert(u16(Number_Spelling.Nan) < 1 << 15)
 

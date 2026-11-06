@@ -65,31 +65,10 @@ copied_tail :: #force_inline proc "contextless" (src: []u8, lo: int) -> Block {
 }
 
 // Two 16-byte tables that sort bytes into up to 8 sets. Byte `b` is in set k when `lo[b & 15] & hi[b >> 4]` shares a
-// bit with `bits[k]`, as `nibble_table` returns them. Each pair of a set and a high nibble owns one bit, so
-// membership is exact while the sets have at most 8 such pairs between them.
+// bit with `bits[k]`. Each pair of a set and a high nibble owns one bit, so membership is exact while the sets have at
+// most 8 such pairs between them.
 Nibble_Table :: struct {
 	lo, hi: #simd[16]u8,
-}
-
-nibble_table :: proc(sets: []string) -> (t: Nibble_Table, bits: [8]u8) {
-	assert(len(sets) <= 8, "more than eight sets")
-	lo, hi: [16]u8
-	next: uint
-	for set, k in sets {
-		pair: [16]u8
-		for c in transmute([]u8)set {
-			h := c >> 4
-			if pair[h] == 0 {
-				assert(next < 8, "more than eight pairs of a set and a high nibble")
-				pair[h] = 1 << next
-				next += 1
-			}
-			hi[h] |= pair[h]
-			lo[c & 15] |= pair[h]
-			bits[k] |= pair[h]
-		}
-	}
-	return {transmute(#simd[16]u8)lo, transmute(#simd[16]u8)hi}, bits
 }
 
 // Returns, for each byte of `b`, the class bits its two nibbles give from `t`. Looks up both nibbles one vector

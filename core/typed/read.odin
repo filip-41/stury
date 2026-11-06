@@ -262,24 +262,12 @@ on_token_cold :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hoo
 	return on_token_spelled(h, regs, t)
 }
 
-// A value's text as `Spelling.text` gives it, the buffer allocated when the token needs decoding.
-token_text :: proc(h: ^Reader, t: core.Token, allocator: runtime.Allocator) -> (s: string, ok: bool) {
-	if t.spelling & core.SPELLING_DECODE == 0 {
-		return string(h.base[t.lo:][:t.n]), true
-	}
-	buf, err := runtime.mem_alloc_non_zeroed(core.decoded_room(t.spelling, int(t.n)), 1, allocator)
-	if err != nil {
-		return "", false
-	}
-	return h.plan.spelling.text(&h.view, t, buf)
-}
-
 // Stores a string token's text: a decoded buffer, or the span as the read keeps one.
 @(cold)
 store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, dest: ^string) -> core.Typed_Error_Kind {
 	context = h.ctx
 	if t.spelling & core.SPELLING_DECODE != 0 {
-		s, ok := token_text(h, t, context.allocator)
+		s, ok := core.token_text(h.plan.spelling, &h.view, t, context.allocator)
 		if !ok {
 			return .Out_Of_Memory
 		}

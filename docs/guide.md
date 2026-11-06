@@ -135,7 +135,7 @@ document is.
 ## Build a document
 
 `json.build` or `dsv.build` returns a `core.Document`: a table of nodes that borrows the input. Strings are not
-decoded until `core.text` is called, and numbers not until `core.number`, `int_value`, `uint_value` or `float_value`.
+decoded until `core.text` is called, and numbers not until `core.number` or `int_value`.
 [examples/roundtrip](../examples/roundtrip/main.odin):
 
 ```odin
@@ -340,8 +340,7 @@ A text past a limit gets a fault with a kind, never a crash or a wrong answer.
 ## Numbers
 
 `core.number(&doc, node)` returns a `Number` of kind `Int`, `Uint`, `Float` or `Wide`, decoded when read, and false
-for a node that is no number. `int_value`, `uint_value` and `float_value` return the value and whether the node is
-that kind of number. A `Wide` number is read from its span. A number is judged when the text is validated, and converted only when it is read.
+for a node that is no number. `int_value` returns an `Int`'s `i64`, and false for any other node. A `Wide` number is read from its span. A number is judged when the text is validated, and converted only when it is read.
 
 ## Strictness
 

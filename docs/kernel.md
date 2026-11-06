@@ -185,8 +185,8 @@ whitespace. It has two ways:
 - **A nibble table.** `nibble_table` builds two 16-byte tables from up to 8 sets, and `classes` looks up each byte's
   low and high nibble and ANDs the results. Then `has(c, bits[k])` gives set k's lanes. Each pair of a set and a high
   nibble owns one bit of the table, so membership is exact while the sets need at most 8 such pairs between them. The
-  cost is two lookups per register whatever the number of sets. Only the bench and the kernel tests call
-  `nibble_table`. The walk's escape and surrogate classes are constant tables passed to `classes`.
+  cost is two lookups per register whatever the number of sets. `nibble_table` lives in the kernel tests,
+  which the bench imports. The walk's escape and surrogate classes are constant tables passed to `classes`.
 
 `classes` works one vector register of the tier at a time (16, 32 or 64 bytes), because the lookup is one instruction
 per register on every tier.

@@ -222,7 +222,7 @@ pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core
 			return 0, .Repeated_Tag, {}
 		}
 		if s.value.kind == .String {
-			name, ok := token_text(h, s.value, context.temp_allocator)
+			name, ok := core.token_text(h.plan.spelling, &h.view, s.value, context.temp_allocator)
 			if !ok {
 				return 0, .Out_Of_Memory, {}
 			}
@@ -264,7 +264,7 @@ store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core
 	v.decoded = v.text
 	if kind == .String {
 		ok: bool
-		if v.decoded, ok = token_text(h, t, context.temp_allocator); !ok {
+		if v.decoded, ok = core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator); !ok {
 			return .Out_Of_Memory
 		}
 	}
@@ -309,7 +309,7 @@ store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Typed_Er
 	if t.kind != .String {
 		return .Wrong_Kind
 	}
-	s, ok := token_text(h, t, context.temp_allocator)
+	s, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
 	if !ok {
 		return .Out_Of_Memory
 	}
@@ -413,7 +413,7 @@ store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, des
 	if t.kind != .String {
 		return .Wrong_Kind
 	}
-	name, ok := token_text(h, t, context.temp_allocator)
+	name, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
 	if !ok {
 		return .Out_Of_Memory
 	}
@@ -865,7 +865,7 @@ member_found :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.To
 @(private)
 key_decoded :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, f: ^Frame, owner: ^Field) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
-	key, ok := token_text(h, t, context.temp_allocator)
+	key, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
 	if !ok {
 		return refuse(h, regs, {kind = .Out_Of_Memory, at = t.lo})
 	}
@@ -877,7 +877,7 @@ map_key :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, 
 	context = h.ctx
 	regs := regs
 	f.extra, f.run = cast([^]u64)raw_data(h.src)[t.lo:], (^Field)(uintptr(t.n))
-	key, ok := token_text(h, t, context.temp_allocator)
+	key, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
 	if !ok {
 		return refuse(h, regs, {kind = .Out_Of_Memory, at = t.lo})
 	}

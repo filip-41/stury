@@ -76,6 +76,30 @@ hex4 :: #force_inline proc "contextless" (h: [^]u8) -> (unit: u32, ok: bool) {
 	}
 }
 
+// Decodes the `\u` escape whose backslash is at `e`, with `room` bytes from `e` to the end: a code unit outside the
+// surrogates, or a high half and the low half's `\u` right after it. Returns its rune and its length, 6 or 12, and a
+// length of 0 for a short escape, a bad hex digit or a lone half. The caller has read `\u` at `e`.
+unicode_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: rune, n: int) #no_bounds_check {
+	if room < 6 {
+		return 0, 0
+	}
+	unit, ok := hex4(e[2:])
+	if !ok || low_surrogate(unit) {
+		return 0, 0
+	}
+	if !high_surrogate(unit) {
+		return rune(unit), 6
+	}
+	if room < 12 || e[6] != '\\' || e[7] != 'u' {
+		return 0, 0
+	}
+	low, low_ok := hex4(e[8:])
+	if !low_ok || !low_surrogate(low) {
+		return 0, 0
+	}
+	return 0x10000 + rune(unit - 0xD800) << 10 + rune(low - 0xDC00), 12
+}
+
 // Reports whether `unit` is a UTF-16 high surrogate, 0xD800 to 0xDBFF.
 high_surrogate :: #force_inline proc "contextless" (unit: u32) -> bool {
 	return unit - 0xD800 < 0x400

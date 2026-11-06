@@ -428,15 +428,15 @@ number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Numbe
 		sp := n.spelling
 		if sp & core.NUMBER_KIND_MASK <= u16(Number_Spelling.Decimal) {
 			lo, hi := n.lo, n.lo + u64(n.n)
-			int_digits := int(sp >> core.NUMBER_INT_SHIFT & core.NUMBER_DIGITS_MAX)
-			if sp & (core.NUMBER_FRAC_MASK | core.NUMBER_EXP) == 0 {
+			int_digits := core.number_int_digits(sp)
+			if core.number_shape(sp) < 32 {
 				if int_digits <= 19 {
 					if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
 						return num, true
 					}
 				}
 			} else {
-				frac_digits := int(sp >> core.NUMBER_FRAC_SHIFT & core.NUMBER_FRAC_MAX)
+				frac_digits := core.number_frac_digits(sp)
 				if sp & core.NUMBER_EXP != 0 {
 					return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits), true
 				}
@@ -473,7 +473,7 @@ number_slow :: #force_no_inline proc(doc: ^core.Token_View, n: core.Node) -> cor
 		return spell.number_hex(doc.src, lo, hi)
 	case .Infinity:
 		// JSON5's `Infinity`, signed by a `-` before it, and its `NaN`, a quiet one with a zero sign.
-		return {spell.F64_INF_BITS | u64(lo < hi && doc.src[lo] == '-') << 63, .Float}
+		return {0x7ff0_0000_0000_0000 | u64(lo < hi && doc.src[lo] == '-') << 63, .Float}
 	case .Nan:
 		return {0x7ff8_0000_0000_0000, .Float}
 	}

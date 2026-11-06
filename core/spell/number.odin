@@ -22,10 +22,11 @@ Number :: struct {
 #assert(size_of(Number) == 16)
 
 // Binary64 infinity. `strconv.fast_float_compute_float` returns it on overflow.
+@(private)
 F64_INF_BITS :: u64(0x7FF) << 52
 
 // The powers of ten that are exact in binary64, for the Clinger fast path.
-@(rodata)
+@(private, rodata)
 POW10_F64 := [23]f64{
 	1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
 	1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
@@ -448,7 +449,7 @@ lex_decimal :: proc(src: []u8, lo, hi: u64, strict: bool) -> (n: Number_Lex) {
 	return
 }
 
-@(rodata)
+@(private, rodata)
 POW10_U64: [20]u64 = {
 	1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000,
 	10_000_000_000, 100_000_000_000, 1_000_000_000_000, 10_000_000_000_000, 100_000_000_000_000,

@@ -199,7 +199,7 @@ A reader given an index no node holds answers as it does for a node of the wrong
 | `text` | the node's text, and whether it read | `false` | `false` |
 | `number` | a `Number`, and whether the node is a number | false | false |
 | `resolve` | the value's kind | `.Null` | the format's answer |
-| `int_value`, `uint_value`, `float_value` | an integer or a binary64, and whether it is one | false | false |
+| `int_value` | an `i64`, and whether the node is an `Int` | false | false |
 
 ### Children and members
 
@@ -287,10 +287,7 @@ shape: a JSON decimal, a decimal JSON does not write, a hex integer, `Infinity` 
 is empty or whose digits pass 19 reads by the full decimal decoder. dsv's reader returns a value cell that is exactly a
 JSON number, and false for a quoted cell, a TSV escape, a key cell or any other cell.
 
-`int_value` returns an `Int`'s value. `uint_value` returns a `Uint`, or a
-nonnegative `Int`. `float_value` returns an `Int`, `Uint` or `Float` as a binary64. All three return false for a kind
-they do not read; `float_value` returns false for `Wide`, which the caller reads from its span. A node that is no
-number returns false from each.
+`int_value` returns an `Int`'s value, and false for any other node.
 
 `resolve(doc, i)` returns what a node is: `.Null` for a miss, and otherwise the format's answer. JSON's is the node's
 own kind. dsv's returns `.String` for a key cell, for a quoted or escaped cell, and for every cell of a document read

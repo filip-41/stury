@@ -188,12 +188,32 @@ Document :: struct {
 //	bit 14        `NUMBER_EXP`
 NUMBER_KIND_MASK :: u16(0xF)
 NUMBER_DECIMAL :: u16(2)
-NUMBER_INT_SHIFT :: 4
-NUMBER_FRAC_SHIFT :: 9
-NUMBER_FRAC_MAX :: 31
-NUMBER_FRAC_MASK :: u16(NUMBER_FRAC_MAX) << NUMBER_FRAC_SHIFT
 NUMBER_EXP :: u16(1 << 14)
+@(private)
+NUMBER_INT_SHIFT :: 4
+@(private)
+NUMBER_FRAC_SHIFT :: 9
+@(private)
 NUMBER_DIGITS_MAX :: 31
+
+#assert(NUMBER_INT_SHIFT + 5 <= NUMBER_FRAC_SHIFT && NUMBER_FRAC_SHIFT + 5 <= 14)
+
+// Packs a decimal's number kind and its integer and fraction digit counts, each saturated at 31, into its `spelling`.
+number_spelling :: #force_inline proc "contextless" (kind: u16, int_digits, frac_digits: u64) -> u16 {
+	n := u16(min(int_digits, u64(NUMBER_DIGITS_MAX)))
+	f := u16(min(frac_digits, u64(NUMBER_DIGITS_MAX)))
+	return kind | n << NUMBER_INT_SHIFT | f << NUMBER_FRAC_SHIFT
+}
+
+// Returns a number token's integer digit count, saturated at 31.
+number_int_digits :: #force_inline proc "contextless" (spelling: u16) -> int {
+	return int(spelling >> NUMBER_INT_SHIFT & NUMBER_DIGITS_MAX)
+}
+
+// Returns a number token's fraction digit count, saturated at 31.
+number_frac_digits :: #force_inline proc "contextless" (spelling: u16) -> int {
+	return int(spelling >> NUMBER_FRAC_SHIFT & NUMBER_DIGITS_MAX)
+}
 
 // Returns a number token's integer digit count, and the count plus 32 or more when it has a fraction or an exponent.
 number_shape :: #force_inline proc "contextless" (spelling: u16) -> u16 {
@@ -203,7 +223,7 @@ number_shape :: #force_inline proc "contextless" (spelling: u16) -> u16 {
 // Returns a number token's fraction digit count and its integer and fraction digit counts' sum, or at least 256 for the
 // sum when it has an exponent.
 number_digits :: #force_inline proc "contextless" (spelling: u16) -> (frac, sum: u16) {
-	frac = spelling >> NUMBER_FRAC_SHIFT & u16(NUMBER_FRAC_MAX)
+	frac = spelling >> NUMBER_FRAC_SHIFT & u16(NUMBER_DIGITS_MAX)
 	sum = (spelling >> NUMBER_INT_SHIFT & u16(NUMBER_DIGITS_MAX)) + frac
 	return frac, sum | (spelling & NUMBER_EXP) >> 6
 }
@@ -784,11 +804,25 @@ text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: stri
 // Returns the bytes that hold the decode of a token of `n` span bytes with `spelling`. A decode never yields more
 // bytes than its span, except that a tolerated ill-formed sequence reads as U+FFFD, three bytes for one source byte,
 // and a token that holds one carries `SPELLING_LAX`.
+@(private)
 decoded_room :: #force_inline proc "contextless" (spelling: u16, n: int) -> int {
 	if spelling & (SPELLING_DECODE | SPELLING_LAX) == SPELLING_DECODE | SPELLING_LAX {
 		return 3 * n + 4
 	}
 	return n
+}
+
+// Returns token `t`'s text as `spelling.text` gives it: its span when the token needs no decode, else a decode into a
+// buffer allocated from `allocator`. Returns false for a refused allocation or a failed decode.
+token_text :: proc(spelling: ^Spelling, view: ^Token_View, t: Token, allocator: runtime.Allocator) -> (s: string, ok: bool) {
+	if t.spelling & SPELLING_DECODE == 0 {
+		return string(node_text(view.src, t)), true
+	}
+	buf, err := runtime.mem_alloc_non_zeroed(decoded_room(t.spelling, int(t.n)), 1, allocator)
+	if err != nil {
+		return "", false
+	}
+	return spelling.text(view, t, buf)
 }
 
 // Returns a copy of node `i`'s decoded text, allocated from `allocator`. The result is the allocation the caller frees
@@ -876,43 +910,6 @@ int_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (i64, bool) {
 	case .Int:
 		return i64(n.bits), true
 	case .Uint, .Float, .Wide:
-	}
-	return 0, false
-}
-
-// Returns the `u64` a `Uint` node or a nonnegative `Int` node writes. Unmarshal reads unsigned targets with it.
-uint_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (u64, bool) {
-	n, ok := number(doc, i)
-	if !ok {
-		return 0, false
-	}
-	switch n.kind {
-	case .Int:
-		if i64(n.bits) >= 0 {
-			return n.bits, true
-		}
-	case .Uint:
-		return n.bits, true
-	case .Float, .Wide:
-	}
-	return 0, false
-}
-
-// Returns the binary64 an `Int`, `Uint` or `Float` node writes. A `Wide` number has no decoded value in this tree, so
-// the call returns false for it and the caller reads its span. Returns false for a node that is no number.
-float_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (f64, bool) {
-	n, ok := number(doc, i)
-	if !ok {
-		return 0, false
-	}
-	switch n.kind {
-	case .Int:
-		return f64(i64(n.bits)), true
-	case .Uint:
-		return f64(n.bits), true
-	case .Float:
-		return transmute(f64)n.bits, true
-	case .Wide:
 	}
 	return 0, false
 }

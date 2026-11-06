@@ -550,24 +550,7 @@ quoted_escape :: proc(raw: string, i: int) -> (r: rune, n: int) {
 	case 't':
 		return '\t', 2
 	case 'u':
-		if len(raw) - i < 6 {
-			return 0, 0
-		}
-		unit, ok := spell.hex4(raw_data(raw)[i + 2:])
-		if !ok || spell.low_surrogate(unit) {
-			return 0, 0
-		}
-		if !spell.high_surrogate(unit) {
-			return rune(unit), 6
-		}
-		if len(raw) - i < 12 || raw[i + 6] != '\\' || raw[i + 7] != 'u' {
-			return 0, 0
-		}
-		low, low_ok := spell.hex4(raw_data(raw)[i + 8:])
-		if !low_ok || !spell.low_surrogate(low) {
-			return 0, 0
-		}
-		return 0x10000 + rune(unit - 0xD800) << 10 + rune(low - 0xDC00), 12
+		return spell.unicode_escape(raw_data(raw)[i:], len(raw) - i)
 	}
 	return 0, 0
 }
