@@ -170,16 +170,12 @@ Document :: struct {
 	positional:   bool,
 }
 
-// A number token's `spelling` holds these fields. A format's spelling kinds are even, so bit 0 (`SPELLING_DECODE`) is
-// always clear.
+// A number token's `spelling`. Kinds are even, so bit 0 (`SPELLING_DECODE`) is clear.
 //
 //	bits 0 to 3   the format's number kind, 0 for its plain decimal
 //	bits 4 to 8   the integer digit count (saturated at 31)
 //	bits 9 to 13  the fraction digit count (saturated at 31, 0 for no fraction)
 //	bit 14        `NUMBER_EXP`
-//
-// A pure integer is a decimal with no fraction and no exponent, so a reader folds its significand without lexing the
-// span.
 NUMBER_KIND_MASK :: u16(0xF)
 NUMBER_INT_SHIFT :: 4
 NUMBER_FRAC_SHIFT :: 9

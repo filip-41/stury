@@ -38,8 +38,7 @@ SPELLING := core.Spelling {
 	tag_key = "json", key_open = "\"", key_close = "\":",
 }
 
-// No field of a number's spelling reaches bit 0 or bit 15. Every kind value is even, so bit 0 (`SPELLING_DECODE`) is
-// clear, and the counts and `core.NUMBER_EXP` stay below bit 15.
+// A number's spelling leaves bit 0 (`SPELLING_DECODE`) and bit 15 clear.
 #assert(u16(Number_Spelling.Nan) & core.SPELLING_DECODE == 0)
 #assert(u16(Number_Spelling.Nan) <= core.NUMBER_KIND_MASK)
 #assert(core.NUMBER_INT_SHIFT + 5 <= 15)

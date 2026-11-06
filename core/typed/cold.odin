@@ -450,7 +450,7 @@ write_uint :: proc "contextless" (dest: uintptr, v: u64, size: u32) {
 integer_number :: proc(h: ^Reader, t: core.Token) -> core.Number {
 	if t.spelling & core.NUMBER_KIND_MASK == 2 && core.number_shape(t.spelling) < 32 {
 		hi := t.lo + u64(t.n)
-		if n, ok := spell.number_json(h.src, t.lo + (1 if h.base[t.lo] == '+' else 0), hi - (1 if h.base[hi - 1] == '.' else 0)); ok {
+		if n, ok := spell.number_strict(h.src, t.lo + (1 if h.base[t.lo] == '+' else 0), hi - (1 if h.base[hi - 1] == '.' else 0)); ok {
 			return n
 		}
 	}
@@ -513,7 +513,7 @@ store_int :: #force_no_inline proc "contextless" (mag: u64, neg: bool, kind: Rea
 	return .None
 }
 
-// Every number the hot cases do not take, read from its span.
+// Numbers the hot cases do not take.
 @(cold)
 @(private)
 number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind {
@@ -522,12 +522,11 @@ number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, f
 		if core.number_shape(t.spelling) >= 32 {
 			return .Wrong_Kind
 		}
+	} else if frac, sum := core.number_digits(t.spelling); sum <= 19 {
+		// `mant` holds all the digits.
+		return store_number(spell.number_significand(h.mant, -i64(frac), h.base[t.lo] == '-', sum <= 15), h, t, fld, dest)
 	}
-	n, ok := spell.number_json(h.src, t.lo, t.lo + u64(t.n))
-	if !ok {
-		return .Wrong_Kind
-	}
-	return store_number(n, h, t, fld, dest)
+	return store_number(h.plan.spelling.number(&h.view, t), h, t, fld, dest)
 }
 
 // Stores a number read from its span.
@@ -935,7 +934,7 @@ map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: co
 
 @(private)
 key_number :: proc(key: string) -> (core.Number, bool) {
-	n, ok := spell.number_json(transmute([]u8)key, 0, u64(len(key)))
+	n, ok := spell.number_strict(transmute([]u8)key, 0, u64(len(key)))
 	return n, ok && (n.kind == .Int || n.kind == .Uint)
 }
 

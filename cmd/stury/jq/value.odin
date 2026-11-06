@@ -175,7 +175,7 @@ node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 // `tostring` gives what `-c .` prints. `Infinity` and `NaN` are no literal, and print as computed.
 @(private = "file")
 json5_literal :: proc(text: string) -> string {
-	if _, plain := spell.number_json(transmute([]u8)text, 0, u64(len(text))); plain {
+	if _, plain := spell.number_strict(transmute([]u8)text, 0, u64(len(text))); plain {
 		return text
 	}
 	p := 1 if text[0] == '+' || text[0] == '-' else 0
@@ -208,7 +208,7 @@ json5_literal :: proc(text: string) -> string {
 // `text` as a number's kept literal: itself when JSON spells a number so (a JSON5 `+1`, `.5` or `0x10` is no
 // literal, and prints as computed).
 json_literal :: proc(text: string) -> string {
-	_, plain := spell.number_json(transmute([]u8)text, 0, u64(len(text)))
+	_, plain := spell.number_strict(transmute([]u8)text, 0, u64(len(text)))
 	return text if plain else ""
 }
 

@@ -12,8 +12,8 @@ import kernel "../core/kernel"
 // unquoted keys and whitespace. A token JSON spells alike is read by JSON's leaf, and a state here runs only where that
 // leaf refuses a token or no JSON start matches. JSON5's whitespace is read with the comments (comments.odin).
 
-// `Number_Spelling` names the number grammar a token's `spelling` records. It is JSON's own, a decimal JSON does not
-// write (`+1`, `.5`, `5.`), a hexadecimal integer, or `Infinity` or `NaN` with either sign.
+// The number grammar a token's `spelling` records: JSON's, a decimal JSON does not allow (`+1`, `.5`, `5.`), hex,
+// `Infinity` or `NaN`.
 Number_Spelling :: enum u16 {
 	Json     = 0,
 	Decimal  = 2,
@@ -22,13 +22,12 @@ Number_Spelling :: enum u16 {
 	Nan      = 8,
 }
 
-// Returns the `Number_Spelling` in a token's `spelling`, for a test or a consumer that reads the detail.
+// Returns the `Number_Spelling` in a token's `spelling`.
 number_spelling_of :: #force_inline proc "contextless" (spelling: u16) -> Number_Spelling {
 	return Number_Spelling(spelling & core.NUMBER_KIND_MASK)
 }
 
-// Builds the `spelling` of a decimal token from its kind and its integer and fraction digit counts. A pure integer
-// has a zero fraction count and no `NUMBER_EXP`.
+// Packs a decimal's kind and digit counts into its `spelling`.
 @(private)
 number_spelling :: #force_inline proc "contextless" (kind: Number_Spelling, int_digits, frac_digits: u64) -> u16 {
 	n := u16(min(int_digits, u64(core.NUMBER_DIGITS_MAX)))
@@ -36,8 +35,7 @@ number_spelling :: #force_inline proc "contextless" (kind: Number_Spelling, int_
 	return u16(kind) | n << core.NUMBER_INT_SHIFT | f
 }
 
-// Returns `number_spelling` plus `NUMBER_EXP`, from the walk's counts, without scanning the span again. Cold, since
-// only a token with an `e` reaches it.
+// `number_spelling` with `NUMBER_EXP` set. Cold, since only a number with an exponent calls it.
 @(private, cold)
 number_spelling_exp :: #force_no_inline proc "contextless" (kind: Number_Spelling, int_digits, frac_digits: u64) -> u16 {
 	return number_spelling(kind, int_digits, frac_digits) | core.NUMBER_EXP

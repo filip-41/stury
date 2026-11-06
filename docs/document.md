@@ -260,8 +260,9 @@ caller of a reader writes `core.Number`.
 - `Int` is an integer that fits `i64`, in two's complement in `bits`. `-0` is `Int` 0.
 - `Uint` is a positive integer that fits `u64` and not `i64`.
 - `Float` is a binary64, correctly rounded to nearest even, for a fraction, an exponent, an integer past `u64`, or a
-  negative integer past `i64`'s floor, when a binary64 represents the value. `-0.0` is `Float` -0.0.
-- `Wide` is a number no `i64`, `u64` or `f64` holds, and the caller reads its span.
+  negative integer past `i64`'s floor. Values too small for binary64 round to a zero with the same sign. `-0.0` gives
+  `Float` -0.0.
+- `Wide` means the number is too large for binary64 or over the caps under Limits, so the caller has to read its span.
 
 A container and a miss return `{0, .Wide}`. JSON's reader folds a pure integer of at most 19 digits
 from the recorded digit counts with no search for a point or an exponent, and reads every other token by its packed
@@ -573,7 +574,7 @@ next, so each byte is scanned once.
 
 | Bound | Value | Effect |
 |---|---|---|
-| `spell.MAX_NUMBER_DIGITS` | 256 | more authored mantissa digits read as `.Wide` |
+| `spell.MAX_NUMBER_DIGITS` | 256 | a mantissa with more digits than this, counting zeros, reads as `.Wide` |
 | `spell.MAX_NUMBER_SCALE` | 4096 | an exponent or scale beyond ±this reads as `.Wide` |
 | `MAX_CHILDREN` | 65535 | the largest child count `spelling` holds, with the true count in `Document.counts` |
 | `core.MAX_DEPTH` | 1024 | the deepest nesting when `Options.max_depth` is 0 |

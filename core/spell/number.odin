@@ -3,14 +3,9 @@ package spell
 import "base:intrinsics"
 import "core:strconv"
 
-// A number token's value, decoded from its span when it is read. The walk stores no number, so a document holds the
-// token's bytes and the spelling facts the walk recorded.
-//
-// `Int` is an integer that fits `i64`, stored in two's complement in `bits`. `Uint` is a positive integer that fits
-// `u64` and not `i64`. `Float` is a binary64 in `bits`, correctly rounded to nearest even, for a fraction, an
-// exponent, an integer past `u64`, or a negative integer past `i64`'s floor, when a binary64 represents the value.
-// `Wide` is a number that no `i64`, `u64` or `f64` holds, for which the caller reads the span. `-0` is `Int` 0, as
-// integer parsing reads it, and `-0.0` is `Float` -0.0.
+// A number's value. `Int` fits `i64`, `Uint` fits only `u64`, and `-0` is `Int` 0. `Float` is a correctly rounded
+// binary64 that keeps the sign of `-0.0` and of an underflow to zero. `Wide` is too large for binary64 or over the caps
+// below, and the caller reads its span.
 Number_Kind :: enum u8 {
 	Int,
 	Uint,
@@ -25,17 +20,17 @@ Number :: struct {
 
 #assert(size_of(Number) == 16)
 
-// The bits of binary64 infinity, which `strconv.fast_float_compute_float` returns on overflow.
+// Binary64 infinity. `strconv.fast_float_compute_float` returns it on overflow.
 F64_INF_BITS :: u64(0x7FF) << 52
 
-// The powers of ten from 1e0 to 1e22, each exact as a binary64, used by the Clinger window.
+// The powers of ten that are exact in binary64, for the Clinger fast path.
 @(rodata)
 POW10_F64 := [23]f64{
 	1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
 	1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
 }
 
-// A hex digit's value, 0 to 15, and 0xFF for any byte that is not one.
+// A hex digit's value, or 0xFF for any other byte.
 @(rodata)
 HEX_NIBBLE: [256]u8 = {
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -56,10 +51,8 @@ HEX_NIBBLE: [256]u8 = {
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 }
 
-// A lexed decimal. `int_at` and `int_digits` locate the integer run, `frac_at` and `frac_digits` the fraction run,
-// and `mant` folds both runs (the significand itself when they total at most 19 digits). `exp` is the exponent,
-// `neg` is the sign, `has_frac` and `has_exp` say which parts the token has, and `ok` says the span is exactly one
-// number.
+// A lexed decimal. `mant` folds both digit runs and is exact when they total at most 19 digits. `ok` is set when the
+// span is exactly one number.
 @(private)
 Number_Lex :: struct {
 	int_at, int_digits:   u64,
@@ -70,25 +63,23 @@ Number_Lex :: struct {
 	has_exp, ok:          bool,
 }
 
-// The value a lexed exponent saturates at, `max(i32) + 1`, past the `i32` range so it still reads as out of it.
+// A lexed exponent stops growing here. It is past the `i32` range, so it still reads as out of range.
 @(private)
 EXP_SATURATED :: i64(max(i32)) + 1
 
-// Limits on a number handed to a decoder. A number with more authored mantissa digits than `MAX_NUMBER_DIGITS`, or
-// with an exponent or scale beyond ±`MAX_NUMBER_SCALE`, is `Wide` and its span is not decoded.
+// A number is `Wide` when its mantissa has more than `MAX_NUMBER_DIGITS` digits, counting zeros, or when its
+// exponent or scale is outside ±`MAX_NUMBER_SCALE`.
 MAX_NUMBER_DIGITS :: 256
 MAX_NUMBER_SCALE :: 4096
 
-// Returns the value of the decimal in `src[lo:hi]`, a span the walk accepted as a number. The caller must have
-// checked the span, or call `number_json`, which checks it.
+// Decodes `src[lo:hi]` with the loose grammar, without checking that the span is a number.
+@(private)
 number_decimal :: proc(src: []u8, lo, hi: u64) -> Number {
 	return number_of_lex(src, lo, hi, lex_decimal(src, lo, hi, false))
 }
 
-// Returns the integer in `src[lo:hi]` whose digit count the walk recorded, `digits` of them, at most 19. The span is
-// a decimal integer with an optional sign, so the run's end is known and the fold does not search. Returns `ok` false
-// for a span the counts do not describe, or a negative value past `i64`'s floor, which the caller reads with the full
-// decimal decoder.
+// Decodes a signed decimal integer of `digits` digits, at most 19. Returns false when the span has another length or
+// the value is below `i64`'s minimum.
 number_int :: #force_inline proc(src: []u8, lo, hi: u64, digits: int) -> (Number, bool) {
 	base := raw_data(src)
 	p := lo
@@ -102,14 +93,11 @@ number_int :: #force_inline proc(src: []u8, lo, hi: u64, digits: int) -> (Number
 	if digits <= 0 || digits > 19 || p + u64(digits) != hi {
 		return {}, false
 	}
-	// The digits end at `hi`. Each word load is anchored there and a mask drops the bytes before the run, so the
-	// fold has no branch on the run's length and no tail loop.
 	mag := fold_digits_end(src, hi, u64(digits))
 	return integer_number(mag, neg)
 }
 
-// Returns `mag` with sign `neg` as a `Number`: `Int` when it fits `i64`, `Uint` when positive and past `i64`, and
-// false when a negative magnitude is past `i64`'s floor (the caller reads the value as a float).
+// Returns false for a negative magnitude past `i64`'s minimum.
 @(private)
 integer_number :: #force_inline proc(mag: u64, neg: bool) -> (Number, bool) {
 	if neg {
@@ -124,11 +112,8 @@ integer_number :: #force_inline proc(mag: u64, neg: bool) -> (Number, bool) {
 	return {}, false
 }
 
-// Returns the correctly rounded binary64 of `mant * 10^e`, or false on overflow. With `e` 0 it converts `mant`
-// directly. With `mant_exact` set and `e` within ±22 it uses the exact Clinger window, else Eisel-Lemire.
-// `mant_exact` says `mant` is exact as a binary64, which a digit count below 10^15 proves because a binary64 holds
-// every integer below 2^53, so the choice of arm uses a fact the walk recorded rather than a test on the folded
-// significand.
+// Returns the correctly rounded binary64 of `mant * 10^e`, or false on overflow. `mant_exact` says `mant` is below
+// 2^53, which at most 15 digits guarantees, and allows the Clinger fast path for `e` within ±22.
 @(private)
 f64_of_significand :: #force_inline proc(mant: u64, e: i64, neg: bool, mant_exact: bool) -> (f64, bool) {
 	if e == 0 {
@@ -147,10 +132,18 @@ f64_of_significand :: #force_inline proc(mant: u64, e: i64, neg: bool, mant_exac
 	return transmute(f64)(b | u64(neg) << 63), true
 }
 
-// Returns the decimal in `src[lo:hi]` whose shape the walk recorded: `int_digits` digits after an optional sign, a
-// point, then `frac_digits` digits, and no exponent. The runs are folded from their ends into one significand, so the
-// span is read without the grammar search `number_decimal` does. A span the counts do not describe, and a leading
-// point, falls back to the full decimal read.
+// Returns the binary64 of `mant * 10^e` with sign `neg`, or `Wide` on overflow. `mant` holds every digit of the
+// significand, and `exact` says it has at most 15.
+number_significand :: #force_inline proc(mant: u64, e: i64, neg: bool, exact: bool) -> Number {
+	v, ok := f64_of_significand(mant, e, neg, exact)
+	if !ok {
+		return {0, .Wide}
+	}
+	return {transmute(u64)v, .Float}
+}
+
+// Decodes a signed decimal of `int_digits` digits, a point and `frac_digits` digits, with no exponent. The counts are
+// trusted and only the point's position is checked. A leading point or more than 19 digits goes to `number_decimal`.
 number_fraction :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> Number {
 	base := raw_data(src)
 	p := lo
@@ -161,29 +154,19 @@ number_fraction :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_d
 	} else if p < hi && base[p] == '+' {
 		p += 1
 	}
-	// Folds the significand as two runs from their ends: the integer run ends at the point and the fraction run at
-	// `hi`, each word masked to its run, so neither fold branches on the run's length.
 	if int_digits > 0 && int_digits + frac_digits <= 19 {
 		point := hi - u64(frac_digits) - 1
 		if base[point] == '.' {
 			whole := fold_digits_end(src, point, u64(int_digits))
 			frac := fold_digits_end(src, hi, u64(frac_digits))
 			sig := whole * POW10_U64[frac_digits] + frac
-			e := -i64(frac_digits)
-			v, ok := f64_of_significand(sig, e, neg, int_digits + frac_digits <= 15)
-			if !ok {
-				return {0, .Wide}
-			}
-			return {transmute(u64)v, .Float}
+			return number_significand(sig, -i64(frac_digits), neg, int_digits + frac_digits <= 15)
 		}
 	}
 	return number_decimal(src, lo, hi)
 }
 
-// Returns the decimal in `src[lo:hi]` whose shape the walk recorded with an exponent: `int_digits` digits after an
-// optional sign, an optional point and `frac_digits` digits, then `e` or `E` and the exponent. Folds the significand
-// from the two runs and reads the exponent digits, without lexing the span again. A span the counts do not describe
-// falls back to the full decimal read.
+// Decodes a decimal with an exponent from its digit counts. A span the counts do not match goes to `number_decimal`.
 number_exponent :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_digits: int) -> Number {
 	if int_digits + frac_digits > 19 {
 		return number_decimal(src, lo, hi)
@@ -254,9 +237,8 @@ number_exponent :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_d
 	return number_of_lex(src, lo, hi, n)
 }
 
-// Returns the value of `src[lo:hi]` as a decimal in RFC 8259's grammar, and false when the span is not one. A dsv
-// cell uses the false result to ask whether the cell is a number at all.
-number_json :: proc(src: []u8, lo, hi: u64) -> (Number, bool) {
+// Decodes `src[lo:hi]` with RFC 8259's number grammar. Returns false if the span is not a valid number.
+number_strict :: proc(src: []u8, lo, hi: u64) -> (Number, bool) {
 	n := lex_decimal(src, lo, hi, true)
 	if !n.ok {
 		return {0, .Wide}, false
@@ -264,8 +246,9 @@ number_json :: proc(src: []u8, lo, hi: u64) -> (Number, bool) {
 	return number_of_lex(src, lo, hi, n), true
 }
 
-// Returns the value of `src[lo:hi]` as a decimal in `lex_decimal`'s looser grammar, whether the span is one, and whether
-// it is a bare integer, with no point and no exponent. A typed read of a dsv cell asks these of the cell's own text.
+// Decodes `src[lo:hi]` with the loose grammar, and also returns whether the span is a plain integer and whether it is
+// a valid number. The loose grammar is the strict one plus a leading `+`, leading zeros, and a point with no digits on
+// one side.
 number_loose :: proc(src: []u8, lo, hi: u64) -> (num: Number, integer, ok: bool) {
 	n := lex_decimal(src, lo, hi, false)
 	if !n.ok {
@@ -274,9 +257,62 @@ number_loose :: proc(src: []u8, lo, hi: u64) -> (num: Number, integer, ok: bool)
 	return number_of_lex(src, lo, hi, n), !n.has_frac && !n.has_exp, true
 }
 
-// Returns a JSON5 hexadecimal integer: `0x` and one or more hex digits, with either sign. An integer that fits `i64`
-// returns `Int`, one that fits only `u64` returns `Uint`, and a longer one returns `Float` when a binary64 represents
-// it, else `Wide`. A malformed span returns `Wide`.
+// Parses the first `n` bytes at `p`, at most 8, and reports whether all are digits. Always loads 8 bytes.
+@(private = "file")
+short_digits :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: u64, ok: bool) {
+	x := (intrinsics.unaligned_load((^u64)(p)) ~ 0x3030_3030_3030_3030) << ((8 - n) * 8)
+	ok = ((x + 0x0606_0606_0606_0606) | x) & 0xf0f0_f0f0_f0f0_f0f0 == 0
+	return digits8_value(x), ok
+}
+
+// Parses an optional sign followed by 1 to 16 digits, and returns false for anything else. It may read up to 8 bytes
+// past the span.
+short_integer :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: i64, ok: bool) {
+	skip := u64(1) if p[0] == '-' || p[0] == '+' else 0
+	digits := n - skip
+	if digits - 1 >= 16 {
+		return
+	}
+	mag: u64
+	if digits <= 8 {
+		mag, ok = short_digits(p[skip:], digits)
+	} else {
+		high, high_ok := short_digits(p[skip:], digits - 8)
+		low, low_ok := short_digits(p[skip + digits - 8:], 8)
+		mag, ok = high * 100_000_000 + low, high_ok && low_ok
+	}
+	return -i64(mag) if p[0] == '-' else i64(mag), ok
+}
+
+// Parses an optional sign, up to 8 digits, an optional point and up to 8 more digits, with at most 15 digits in total.
+// Returns false for anything else. The digits and the power of ten both fit an f64 exactly, so the one division is
+// correctly rounded. It may read up to 8 bytes past the span.
+short_decimal :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: f64, ok: bool) {
+	skip := u64(1) if p[0] == '-' || p[0] == '+' else 0
+	q := p[skip:]
+	chars := n - skip
+	if chars - 1 >= 16 {
+		return
+	}
+	dots := intrinsics.unaligned_load((^u64)(q)) ~ 0x2e2e_2e2e_2e2e_2e2e
+	point := intrinsics.count_trailing_zeros((dots - 0x0101_0101_0101_0101) & ~dots & 0x8080_8080_8080_8080) / 8
+	frac: u64
+	if point >= chars {
+		point = chars
+	} else {
+		frac = chars - point - 1
+	}
+	if frac > 8 || point > 8 || point + frac > 15 || point + frac == 0 || (point < chars && q[point] != '.') {
+		return
+	}
+	whole, whole_ok := short_digits(q, point)
+	part, part_ok := short_digits(q[point + 1:], frac)
+	v = f64(whole * POW10_U64[frac] + part) / POW10_F64[frac]
+	return -v if p[0] == '-' else v, whole_ok && part_ok
+}
+
+// Decodes `0x` and hex digits with an optional sign. Past `u64` it returns the nearest `Float`, or `Wide` past
+// binary64. A malformed span is `Wide`.
 number_hex :: proc(src: []u8, lo, hi: u64) -> Number {
 	p := lo
 	neg := false
@@ -311,7 +347,7 @@ number_hex :: proc(src: []u8, lo, hi: u64) -> Number {
 			return num
 		}
 	}
-	// A longer one reads as a hex float with a zero exponent, which `strconv` rounds to nearest even.
+	// Read as a hex float with exponent 0, which `strconv` rounds to nearest even.
 	buf: [MAX_NUMBER_DIGITS + 4]u8
 	n := copy(buf[:], src[at - 2:hi])
 	n += copy(buf[n:], "p0")
@@ -322,9 +358,7 @@ number_hex :: proc(src: []u8, lo, hi: u64) -> Number {
 	return {transmute(u64)(-v if neg else v), .Float}
 }
 
-// Lexes the decimal in `src[lo:hi]`. `strict` selects RFC 8259's grammar, and false the looser grammar a JSON5 token
-// or a dsv cell may use, which allows a `+` and a leading or trailing point. `n.ok` is false when the span is not one
-// number.
+// Lexes `src[lo:hi]` with the strict or loose grammar. `n.ok` is false if the span is not a number.
 @(private)
 lex_decimal :: proc(src: []u8, lo, hi: u64, strict: bool) -> (n: Number_Lex) {
 	if lo >= hi || hi > u64(len(src)) {
@@ -403,13 +437,12 @@ POW10_U64: [20]u64 = {
 	10_000_000_000_000_000_000,
 }
 
-// Returns the `k` digits ending at `end` as the integer they write. Each word load is anchored at `end`, and a mask
-// drops the bytes before the run. Folds byte by byte when `end < 24`.
+// Returns the value of the `k` digits that end at `end`. The word loads end at `end` and are masked to the run. Below
+// 24 a load could start before `src`, so the digits are read one at a time.
 @(private)
 fold_digits_end :: #force_inline proc(src: []u8, end, k: u64) -> u64 {
 	base := raw_data(src)
 	if end < 24 {
-		// A word load would start before the source, so the run is folded byte by byte.
 		m := u64(0)
 		for i in end - k ..< end {
 			m = m * 10 + u64(base[i] - '0')
@@ -427,8 +460,7 @@ fold_digits_end :: #force_inline proc(src: []u8, end, k: u64) -> u64 {
 	return (digits8_value(load8_le(src, end - 24) & KEEP_DIGITS_MASK[k - 16]) * 10000_0000 + mid) * 10000_0000 + low
 }
 
-// Returns the end of the digit run at `p` and, when `$fold` is set, accumulates the digits into `mant`, 8 bytes at a
-// time while at least 8 remain. Both the walk and this decoder use this digit reader.
+// Returns the end of the digit run at `p`. With `$fold` it also adds the digits to `mant`.
 digit_end :: #force_inline proc "contextless" (p, end: [^]u8, mant: ^u64, $fold: bool) -> [^]u8 {
 	q := p
 	#no_bounds_check {
@@ -463,8 +495,8 @@ digit_end :: #force_inline proc "contextless" (p, end: [^]u8, mant: ^u64, $fold:
 	return q
 }
 
-// Returns the value of a lexed decimal. An integer within `i64` or `u64` returns its exact magnitude, and every other
-// token returns the correctly rounded binary64, or `Wide` when it overflows or passes the caps.
+// An integer that fits `i64` or `u64` stays exact. Anything else is the correctly rounded binary64, or `Wide` on
+// overflow or past the caps.
 @(private)
 number_of_lex :: #force_inline proc(src: []u8, lo, hi: u64, n: Number_Lex) -> Number {
 	digits := n.int_digits + n.frac_digits
@@ -473,8 +505,7 @@ number_of_lex :: #force_inline proc(src: []u8, lo, hi: u64, n: Number_Lex) -> Nu
 		return {0, .Wide}
 	}
 	if !n.has_frac && !n.has_exp {
-		// `digit_end` already folded the integer's digits when they fit a word, and 19 digits are exact in `u64`,
-		// so this arm folds nothing when `int_digits <= 19`.
+		// `mant` is exact up to 19 digits.
 		if n.int_digits <= 19 {
 			if num, ok := integer_number(n.mant, n.neg); ok {
 				return num
@@ -507,8 +538,7 @@ fold_u64 :: #force_inline proc(src: []u8, at, n: u64) -> (mag: u64, over: bool) 
 	return
 }
 
-// Returns the correctly rounded binary64 of `n` in `src`, or false when the magnitude overflows. Uses `mant` and
-// Eisel-Lemire for a significand of at most 19 digits, and `strconv.parse_f64` of the span for a longer one.
+// Returns false on overflow. Uses `mant` up to 19 digits and `strconv.parse_f64` past that.
 @(private)
 f64_of_lex :: #force_inline proc(src: []u8, lo, hi: u64, n: Number_Lex) -> (f64, bool) {
 	digits := n.int_digits + n.frac_digits
@@ -518,15 +548,14 @@ f64_of_lex :: #force_inline proc(src: []u8, lo, hi: u64, n: Number_Lex) -> (f64,
 	return wide_f64(string(src[lo:hi]))
 }
 
-// Returns the binary64 of a decimal span past 19 significant digits, or false when it overflows.
+// Returns false on overflow.
 @(private, cold)
 wide_f64 :: #force_no_inline proc(span: string) -> (f64, bool) {
 	v, ok := strconv.parse_f64(span)
 	return v, ok && transmute(u64)v & F64_INF_BITS != F64_INF_BITS
 }
 
-// The SWAR decimal-digit primitives used by `digit_end` and `fold_digits_end`. The code requires a
-// little-endian target: `src[p]` is the low byte of a loaded word, and byte 0 holds the most significant digit.
+// The word-at-a-time digit code needs a little-endian target, where the first byte is the low byte of a word.
 when ODIN_ENDIAN != .Little {
 	#panic("spell: digits8_value requires a little-endian target")
 }
@@ -550,7 +579,7 @@ DIGIT8_POW10: [9]u64 = {
 	1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000,
 }
 
-// Returns the 8 bytes at `src[p:]` as one little-endian word. The caller must guarantee `p + 8 <= len(src)`.
+// Requires `p + 8 <= len(src)`.
 @(private = "file")
 load8_le :: #force_inline proc "contextless" (src: []u8, p: u64) -> u64 {
 	#no_bounds_check {
@@ -558,7 +587,7 @@ load8_le :: #force_inline proc "contextless" (src: []u8, p: u64) -> u64 {
 	}
 }
 
-// Returns the 8 ASCII digits in `w`, with byte 0 the most significant, as the integer they write.
+// Returns the value of the 8 ASCII digits in `w`, first byte most significant.
 @(private = "file")
 digits8_value :: #force_inline proc "contextless" (w: u64) -> u64 {
 	v := w & 0x0F0F_0F0F_0F0F_0F0F

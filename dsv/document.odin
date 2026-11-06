@@ -363,7 +363,7 @@ spelling_number :: proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
 		return {0, .Wide}
 	}
 	s := doc.src[n.lo:n.lo + u64(n.n)]
-	if num, is_number := spell.number_json(s, 0, u64(len(s))); is_number {
+	if num, is_number := spell.number_strict(s, 0, u64(len(s))); is_number {
 		return num
 	}
 	return {0, .Wide}
@@ -391,7 +391,7 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	case "false":
 		return .False
 	}
-	if _, is_number := spell.number_json(s, 0, u64(len(s))); is_number {
+	if _, is_number := spell.number_strict(s, 0, u64(len(s))); is_number {
 		return .Number
 	}
 	return .String

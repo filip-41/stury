@@ -333,7 +333,7 @@ population reports at its own position in each format:
 |---|---|
 | Nesting depth | `core.MAX_DEPTH`, 1024. `Options.max_depth` raises or lowers it per call. A depth beyond `MAX_DEPTH` allocates one byte per level |
 | Children counted in a node | `core.MAX_CHILDREN`, 65535. A larger container is still read in full, and its true count is `core.length_exact` |
-| Numbers | a number no `i64`, `u64` or `f64` holds reads as `.Wide` from its span. The digit and scale bounds are in `core/spell` |
+| Numbers | a number too large for binary64 or over the digit and scale caps in `core/spell` comes back as `.Wide`, and the caller reads its span |
 
 A text past a limit gets a fault with a kind, never a crash or a wrong answer.
 
