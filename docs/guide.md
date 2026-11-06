@@ -273,6 +273,9 @@ out, _ := dsv.marshal(cities)
 - An empty cell is an absent value for `Maybe(T)`, and writes back as an empty cell.
 - A cell the field cannot hold is an error at that cell:
   `2:6: Value does not fit the field's type at [0].population`.
+- A number field reads its cell as a loose number: a leading `+`, leading zeros and a point with no digits on one side
+  are allowed, so `007` reads as 7 and `.5` as 0.5. `infer`, below, takes only an exact JSON number, so a document
+  keeps `007` as the text it is.
 - `Options{delimiter = ';', comment = '#'}` reads other delimiters and skips lines starting with `#`.
 - A dsv document is an array of objects keyed by the header. `core.length(&doc, core.ROOT)` is the row count, since the
   header is no record. `dsv.find` reads one cell by `.[1].City` without building the table, `dsv.set` replaces a cell and

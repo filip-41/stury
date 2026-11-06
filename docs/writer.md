@@ -347,12 +347,11 @@ The text is the shortest decimal that reads back as the same bits, and the close
 significand is scaled by a power of ten from the 128-bit table, the integral part of the product is a 15- or 16-digit
 candidate, and the 17th digit is read off the fraction when the candidate does not read back.
 
-- The power-of-ten significands are `strconv._POWER_OF_FIVE_128`, the table the reader's `fast_float_compute_float`
-  uses. It is an underscore name of the standard library, so a rename stops the build at a compiler update, and a
-  `#assert` on its length stops it if the range of powers changes.
+- The power-of-ten significands are `POW10_SIG` (`zmij_tables.odin`), the 128-bit floor of 10^k for -342 <= k <= 341,
+  which `zmij_tables.py` writes with exact integer arithmetic.
 - `EXP_SHIFT` (`exp_shift.odin`) holds the shift the scaling needs for each biased exponent of a regular double. It
-  replaces a multiply and a shift on every value. A power of two, whose lower neighbour is closer, and a subnormal still
-  compute the shift.
+  replaces a multiply and a shift on every value. A subnormal reads the entry of biased exponent 1. A power of two,
+  whose lower neighbour is closer, computes the shift.
 - The 16 or 17 digits are made by `bcd16`, which splits two 8-digit halves into digit values in one 16-byte vector.
   The count of significant digits comes from a scalar split of the half that ends the digits, so that it does not wait
   on the vector. Digits past the last significant one are `'0'`.

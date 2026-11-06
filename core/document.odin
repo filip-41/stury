@@ -819,11 +819,16 @@ token_text :: proc(spelling: ^Spelling, view: ^Token_View, t: Token, allocator: 
 	if t.spelling & SPELLING_DECODE == 0 {
 		return string(node_text(view.src, t)), true
 	}
-	buf, err := runtime.mem_alloc_non_zeroed(decoded_room(t.spelling, int(t.n)), 1, allocator)
+	room := decoded_room(t.spelling, int(t.n))
+	buf, err := runtime.mem_alloc_non_zeroed(room, 1, allocator)
 	if err != nil {
 		return "", false
 	}
-	return spelling.text(view, t, buf)
+	s, ok = spelling.text(view, t, buf)
+	if !ok {
+		runtime.mem_free_with_size(raw_data(buf), room, allocator)
+	}
+	return s, ok
 }
 
 // Returns a copy of node `i`'s decoded text, allocated from `allocator`. The result is the allocation the caller frees
