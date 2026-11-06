@@ -78,9 +78,9 @@ jobs:
           jq --version | grep -qx 'jq-1.8.2'
       - run: make -j -O diff DIFF_SEEDS=${{ matrix.seed }}
 
-  # The AVX2 and AVX-512 routes. A hosted x64 runner's processor varies (AVX-512BW is not guaranteed) and Rosetta has
-  # neither AVX-512 nor a way to force it, so every suite is built for each tier and run under Intel SDE emulating a
-  # Haswell and a Sapphire Rapids (SDE's Skylake-X has no brand string, which core:sys/info's init indexes past).
+  # The x86 tiers. A hosted x64 runner's processor varies (AVX-512BW is not guaranteed) and Rosetta has neither AVX-512
+  # nor a way to force it, so every suite is built for each tier and run under Intel SDE emulating a Nehalem (the
+  # x86-64-v2 floor), a Haswell and a Sapphire Rapids (SDE's Skylake-X has no brand string, which core:sys/info's init indexes past).
   wide:
     runs-on: ubuntu-latest
     timeout-minutes: 45

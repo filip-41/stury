@@ -42,6 +42,19 @@ head16 :: #force_inline proc "contextless" (src: [^]u8, n: int) -> (v, live: V, 
 	}
 }
 
+// `prefix_xor` with six shifts and XORs, for a tier without a carry-less multiply.
+@(private)
+shift_prefix_xor :: #force_inline proc "contextless" (x: u64) -> u64 {
+	x := x
+	x ~= x << 1
+	x ~= x << 2
+	x ~= x << 4
+	x ~= x << 8
+	x ~= x << 16
+	x ~= x << 32
+	return x
+}
+
 // Returns the bytes of `src` from `lo` to `len(src)` copied into a zeroed 64-byte buffer and loaded as a `Block`.
 // `load_padded` uses it where no masked load exists.
 @(private)
