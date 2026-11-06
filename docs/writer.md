@@ -356,8 +356,9 @@ candidate, and the 17th digit is read off the fraction when the candidate does n
 - The 16 or 17 digits are made by `bcd16`, which splits two 8-digit halves into digit values in one 16-byte vector.
   The count of significant digits comes from a scalar split of the half that ends the digits, so that it does not wait
   on the vector. Digits past the last significant one are `'0'`.
-- `f32_text` takes its digits from `strconv._shortest_decimal` with 23 mantissa bits. They are at most 9, and the 16
-  bytes after them are `'0'`, so one 16-byte load fills the digit slots.
+- `f32_text` takes its digits from the port's binary32 path, `to_decimal_f32`, which scales into a 64-bit product
+  with a 34-bit fraction. They are at most 9, and the bytes after them are `'0'`, so one 16-byte load fills the digit
+  slots.
 
 Both procedures hand `layout` the digits d1..dk at `p[1..]`, with the decimal point after digit `n`. It places them with
 whole-word stores:

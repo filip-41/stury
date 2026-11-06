@@ -33,17 +33,15 @@ EDIT := core.Edit_Spelling {
 // accepts it.
 @(private)
 SPELLING := core.Spelling {
-	text = text, key_equals = key_equals_decode, number = number, build = build_as, validate = validate_as, scan = scan_as,
+	text = text, key_equals = key_equals_decode, number = number, number_f32 = number_f32, build = build_as, validate = validate_as, scan = scan_as,
 	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT, write = write_text, tokens = &TOKENS, records = &RECORDS,
 	tag_key = "json", key_open = "\"", key_close = "\":",
 }
 
-// No field of a number's spelling reaches bit 0 or bit 15. Every kind value is even, so bit 0 (`SPELLING_DECODE`) is
-// clear, and the counts and `core.NUMBER_EXP` stay below bit 15.
+// A number's spelling leaves bit 0 (`SPELLING_DECODE`) and bit 15 clear.
 #assert(u16(Number_Spelling.Nan) & core.SPELLING_DECODE == 0)
 #assert(u16(Number_Spelling.Nan) <= core.NUMBER_KIND_MASK)
-#assert(core.NUMBER_INT_SHIFT + 5 <= 15)
-#assert(core.NUMBER_FRAC_SHIFT + 5 <= 15)
+#assert(u16(Number_Spelling.Decimal) == core.NUMBER_DECIMAL)
 #assert(core.NUMBER_EXP < 1 << 15)
 #assert(u16(Number_Spelling.Nan) < 1 << 15)
 

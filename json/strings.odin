@@ -418,24 +418,11 @@ escape_len :: #force_inline proc "contextless" (e, end: [^]u8) -> u64 #no_bounds
 	if ESC_WORD[e[1]] != 0 {
 		return 2
 	}
-	if e[1] != 'u' || room < 6 {
+	if e[1] != 'u' {
 		return 0
 	}
-	unit, ok := spell.hex4(e[2:])
-	if !ok {
-		return 0
-	}
-	if spell.low_surrogate(unit) {
-		return 0
-	}
-	if !spell.high_surrogate(unit) {
-		return 6
-	}
-	if room < 12 || e[6] != '\\' || e[7] != 'u' {
-		return 0
-	}
-	low, low_ok := spell.hex4(e[8:])
-	return 12 if low_ok && spell.low_surrogate(low) else 0
+	_, n := spell.unicode_escape(e, room)
+	return u64(n)
 }
 
 // Reads the string whose opening quote is at `p` one byte at a time. Returns one past its closing quote, whether it

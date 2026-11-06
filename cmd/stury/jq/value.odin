@@ -9,7 +9,6 @@ import "core:hash"
 import "core:slice"
 import "core:strconv"
 import "../../../core/spell"
-import "../message"
 import core_pkg "../../../core"
 import json "../../../json"
 
@@ -151,10 +150,11 @@ scalar :: proc(v: Value) -> Value {
 	return v
 }
 
-// Number node `i`. Its text is kept as the literal jq prints, but for a JSON5 spelling, which jq cannot read back.
+// Number node `i`. Its literal is its text, but for a spelling other than its format's plain decimal (JSON5's `+1.5`,
+// `0x10`), where it is the JSON text the library writes for it.
 node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 	lit := string(core_pkg.span(doc, i))
-	n := core_pkg.number(doc, i)
+	n, _ := core_pkg.number(doc, i)
 	f: f64
 	switch n.kind {
 	case .Int:
@@ -168,47 +168,19 @@ node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 		// past binary64's digits or range, `1e400` among them, which strconv reads as infinity
 		f, _ = strconv.parse_f64(lit)
 	}
-	return Number{f = f, lit = json5_literal(lit) if doc.as.spec == u8(json.Spec.Json5) else lit}
+	// The `NUMBER_*` layout holds only for a `.Number` token. A dsv cell is `.Plain`, its spelling bits mean other things.
+	if doc.nodes[i].kind == .Number && doc.nodes[i].spelling & core_pkg.NUMBER_KIND_MASK != 0 {
+		// A number JSON cannot write has no literal and prints as computed.
+		text, _, err := core_pkg.write(doc, {}, json.as(.Json), i)
+		lit = string(text) if err.kind == .None else ""
+	}
+	return Number{f = f, lit = lit}
 }
 
-// A JSON5 decimal as the library's writer spells it in JSON (`+1.50` as `1.50`, `.5` as `0.5`, `5.` as `5`), so that
-// `tostring` gives what `-c .` prints. `Infinity` and `NaN` are no literal, and print as computed.
-@(private = "file")
-json5_literal :: proc(text: string) -> string {
-	if _, plain := spell.number_json(transmute([]u8)text, 0, u64(len(text))); plain {
-		return text
-	}
-	p := 1 if text[0] == '+' || text[0] == '-' else 0
-	if text[p] != '.' && text[p] - '0' >= 10 {
-		return ""
-	}
-	if p + 1 < len(text) && (text[p + 1] == 'x' || text[p + 1] == 'X') {
-		// the exact integer, which binary64 would round past 2^53
-		n, ok := strconv.parse_u64_of_base(text[p + 2:], 16)
-		if !ok {
-			return ""
-		}
-		return message.build("%s%d", "-" if text[0] == '-' else "", n)
-	}
-	b := make([dynamic]u8, 0, len(text) + 1)
-	if text[0] == '-' {
-		append(&b, '-')
-	}
-	if text[p] == '.' {
-		append(&b, '0')
-	}
-	for k in p ..< len(text) {
-		if text[k] != '.' || k + 1 < len(text) && text[k + 1] - '0' < 10 {
-			append(&b, text[k])
-		}
-	}
-	return string(b[:])
-}
-
-// `text` as a number's kept literal: itself when JSON spells a number so (a JSON5 `+1`, `.5` or `0x10` is no
-// literal, and prints as computed).
+// `text` as a number's kept literal: itself when it is a JSON number, else none (`.5`, `1.`), and the number prints
+// as computed.
 json_literal :: proc(text: string) -> string {
-	_, plain := spell.number_json(transmute([]u8)text, 0, u64(len(text)))
+	_, plain := spell.number_strict(transmute([]u8)text, 0, u64(len(text)))
 	return text if plain else ""
 }
 
@@ -287,12 +259,43 @@ distinct_keys :: #force_no_inline proc(r: Ref) -> int {
 	return len(seen)
 }
 
+// A document array read at or past this position is indexed first, so each read is a lookup and not a walk from the
+// first member. Below it the walk is cheaper than the index.
+INDEX_MEMBERS_FROM :: 256
+
+// Indexes every array of `v`'s documents that `array_at` or `array_slice` would index, for a value every thread of a
+// run reads, before the threads start: their `index_children` calls then find the entry and write nothing.
+index_shared :: proc(v: Value) {
+	switch x in v {
+	case Ref:
+		for n, i in x.doc.nodes {
+			at := core_pkg.Node_Index(i)
+			if n.kind == .Array && core_pkg.length(x.doc, at) >= INDEX_MEMBERS_FROM {
+				core_pkg.index_children(x.doc, at)
+			}
+		}
+	case ^Array:
+		for item in x.items {
+			index_shared(item)
+		}
+	case ^Object:
+		for val in x.vals {
+			index_shared(val)
+		}
+	case nil, bool, Number, string, Path:
+	}
+}
+
 // Element `i` of an array, or null past its end.
 array_at :: proc(v: Value, i: int) -> Value {
 	switch x in v {
 	case ^Array:
 		return x.items[i] if i >= 0 && i < len(x.items) else nil
 	case Ref:
+		// Only an array `index_shared` would index, so a shared document is never written here.
+		if i >= INDEX_MEMBERS_FROM && i < core_pkg.length(x.doc, x.node) {
+			core_pkg.index_children(x.doc, x.node)
+		}
 		if node, ok := core_pkg.child_at(x.doc, x.node, i); ok {
 			return Ref{x.doc, node}
 		}
@@ -329,6 +332,27 @@ object_get :: proc(v: Value, k: string) -> (Value, bool) {
 	case nil, bool, Number, string, ^Array, Path:
 	}
 	return nil, false
+}
+
+// Elements `lo` to `hi` of an array as a new array, for `lo <= hi <= length_of(v)`.
+array_slice :: proc(v: Value, lo, hi: int) -> ^Array {
+	a := new_array(hi - lo)
+	r, is_ref := v.(Ref)
+	if !is_ref {
+		for i in lo ..< hi {
+			append(&a.items, array_at(v, i))
+		}
+		return a
+	}
+	if lo >= INDEX_MEMBERS_FROM {
+		core_pkg.index_children(r.doc, r.node)
+	}
+	it := core_pkg.children_from(r.doc, r.node, lo)
+	for _ in lo ..< hi {
+		node, _ := core_pkg.child_next(&it)
+		append(&a.items, Ref{r.doc, node})
+	}
+	return a
 }
 
 new_array :: proc(n := 0) -> ^Array {

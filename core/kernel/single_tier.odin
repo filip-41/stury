@@ -35,17 +35,9 @@ lookup :: #force_inline proc "contextless" ($T: Tier, t, i: V) -> V {
 }
 
 // Returns a mask with bit i set when an odd number of bits of `x` at or below i are set. With a block's quote bits
-// as `x`, the set bits mark the bytes from each opening quote to its closing quote, excluding the close. Computed
-// with six shifts and XORs.
+// as `x`, the set bits mark the bytes from each opening quote to its closing quote, excluding the close.
 prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64 {
-	x := x
-	x ~= x << 1
-	x ~= x << 2
-	x ~= x << 4
-	x ~= x << 8
-	x ~= x << 16
-	x ~= x << 32
-	return x
+	return shift_prefix_xor(x)
 }
 
 // Returns the bytes of `src` from `lo` to `len(src)`, followed by zeros to fill a `Block`. For a check that reads

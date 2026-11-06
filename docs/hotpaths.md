@@ -28,7 +28,7 @@ row says so.
 | `st_open_run` beside `st_value` | `json/states.odin` | JSON walk | Without it `deep.json` runs 42-51% more instructions. Every other lane is within 0.1%. |
 | `indent_fast` beside `skip_indent` | `json/whitespace.odin` | JSON walk | Without the prediction indented text runs 28-52% more instructions. |
 | `string_short`, `string_lean` and `string_escaped` beside `string_long` | `json/strings.odin` | JSON walk | Without `string_short` logs runs 5-7% more instructions, without `string_lean` longtext 8-14% and logs 5-7%, without `string_escaped` longtext 19-33% and escape 3-5%. |
-| `json.number`'s fast arms beside `number_decimal` | `json/unescape.odin` | read | Without them canada read runs +59% instructions, wide +52%, logs +22%, citm +16%, twitter +5%. |
+| `json.number`'s fast arms beside `number_loose` | `json/unescape.odin` | read | Without them canada read runs +59% instructions, wide +52%, logs +22%, citm +16%, twitter +5%. |
 | `decode_block` beside `decode_scalar` | `json/unescape.odin` | read | Without it longtext read runs +577% instructions and utf8 +300%. |
 | `json.text` beside `core.text` | `json/unescape.odin` | read | A compile-time caller inlines the decode. Going through `core.text` runs 0.4-1.1% more instructions on read lanes. |
 | `EXP_SHIFT` beside `compute_exp_shift` | `core/spell/zmij.odin`, `core/spell/exp_shift.odin` | float text | A regular double reads its shift from a 2 KiB table, a power of two and a subnormal compute it. The table runs canada 8.7% faster, prices 5.5% and integral values 5.3%, and random bits are even. |

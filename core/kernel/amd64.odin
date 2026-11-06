@@ -7,7 +7,8 @@ import "core:simd/x86"
 import "core:sys/info"
 
 // The x86-64 instruction tiers. `.V2` has SSE4.2 and 16-byte vector registers, `.V3` AVX2 and 32-byte registers,
-// `.V4` AVX-512BW, 64-byte registers and mask registers. Every tier has POPCNT and PCLMULQDQ, so `.V2` is the floor.
+// `.V4` AVX-512BW, 64-byte registers and mask registers. `.V2` is x86-64-v2, the floor, and the other two add
+// PCLMULQDQ.
 // A caller builds each hot loop once per tier as a `#force_no_inline` procedure with the tier's `FEATURES` and
 // chooses one with `tier()`. The kernels here take the tier as `$T` and keep the tier's instructions in a procedure
 // carrying its features, which LLVM inlines into that loop. Odin refuses `#force_inline` into a procedure without
@@ -22,7 +23,7 @@ Tier :: enum u8 {
 // build's CPU without changing how LLVM tunes for it. Odin's default CPU, x86-64-v2, splits every unaligned 32-byte
 // load in two, and `.V3` and `.V4` set `-slow-unaligned-mem-32` to stop that.
 FEATURES :: [Tier]string {
-	.V2 = "ssse3,sse4.1,sse4.2,popcnt,pclmul",
+	.V2 = "ssse3,sse4.1,sse4.2,popcnt",
 	.V3 = "avx,avx2,bmi,bmi2,popcnt,pclmul,-slow-unaligned-mem-32",
 	.V4 = "avx,avx2,bmi,bmi2,popcnt,pclmul,avx512f,avx512bw,avx512vl,evex512,-slow-unaligned-mem-32",
 }
@@ -87,10 +88,14 @@ lookup_v4 :: proc "contextless" (t: V, i: Block) -> Block {
 }
 
 // Returns a mask with bit i set when an odd number of bits of `x` at or below i are set. With a block's quote bits
-// as `x`, the set bits mark the bytes from each opening quote to its closing quote, excluding the close. Calls
-// `clmul_prefix_xor`, which uses one carry-less multiplication on every tier.
+// as `x`, the set bits mark the bytes from each opening quote to its closing quote, excluding the close. x86-64-v2
+// has no carry-less multiply, so `.V2` shifts.
 prefix_xor :: #force_inline proc "contextless" ($T: Tier, x: u64) -> u64 {
-	return clmul_prefix_xor(x)
+	when T == .V2 {
+		return shift_prefix_xor(x)
+	} else {
+		return clmul_prefix_xor(x)
+	}
 }
 
 // Returns bit i as the XOR of bits 0 to i of `x`, computed as bit i of the carry-less product of `x` and all ones.

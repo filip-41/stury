@@ -4,10 +4,9 @@ import "base:intrinsics"
 import spell "../core/spell"
 import core "../core"
 
-// Reads the number at `p`, which starts with `-` or a digit. Returns one past it and its `spelling`, or the fault's
-// kind and the byte it is at. With `$shape` false the spelling is 0 and the digit counts are not counted, for a walk
-// with no hook. With `$fold` true `mant` is the integer the digits of the integer and fraction runs spell, which wraps
-// past 19 digits.
+// Reads the number at `p`, which starts with `-` or a digit. Returns its end and `spelling`, or a fault and the byte it
+// is at. `$shape` false skips the digit counts and returns spelling 0. `$fold` true returns the integer and fraction
+// digits in `mant`, which wraps past 19 digits.
 @(private)
 number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape, $fold: bool) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind, mant: u64) #no_bounds_check {
 	q = p
@@ -61,7 +60,6 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape, $fold: bo
 		}
 		c = q[0]
 	}
-	// `c | 0x20 == 'e'` is true for `e` and `E` and no other byte.
 	if c | 0x20 == 'e' {
 		q = q[1:]
 		if q < end && (q[0] == '+' || q[0] == '-') {

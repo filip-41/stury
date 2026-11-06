@@ -282,6 +282,26 @@ faults_at_their_byte :: proc(t: ^testing.T) {
 	}
 }
 
+// `refuse_non_finite` faults at the first byte of a JSON5 `Infinity` or `NaN`, sign included, with
+// `Detail.Non_Finite`, and leaves hex and JSON5's decimals read.
+@(test)
+non_finite_refused :: proc(t: ^testing.T) {
+	refuse := json.Options{refuse_non_finite = true}
+	for c in ([]Case{{"[1, NaN]", .Bad_Char, 4}, {"{a: -Infinity}", .Bad_Char, 4}, {"+NaN", .Bad_Char, 0}, {"[0x10, +1, .5, 5.]", nil, 0}}) {
+		src := transmute([]u8)c.text
+		want: Maybe(core.Fault)
+		if c.kind != nil {
+			want = core.Fault{c.offset, &json.RULES, .Bad_Char, u8(json.Detail.Non_Finite)}
+		}
+		verdict := core.validate(src, json.as(.Json5, refuse))
+		testing.expectf(t, verdict == want, "%q: validate %v, want %v", c.text, verdict, want)
+		log := new(walktest.Log)
+		defer free(log)
+		_, fault := json.walk(src, 0, .Json5, refuse, log, &core.Hook_Regs{}, walktest.log_hook)
+		testing.expectf(t, fault == want, "%q: hooked walk %v, want %v", c.text, fault, want)
+	}
+}
+
 // A walk whose hook skips a key still faults at the byte where its colon must stand, with `Detail.Colon`, the
 // comments around the colon passed over.
 @(test)

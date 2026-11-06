@@ -421,54 +421,59 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	return doc.nodes[i].kind
 }
 
-// JSON's `Spelling.number`, exported beside `text`. A token that is no number is `.Wide`, as `core.number` answers. A pure
-// integer of at most 19 digits folds here from the recorded shape with no grammar search. Every other token, and a negative below `i64`, is passed to `number_slow`.
-number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
-	// Any kind but `.Number` is no number and returns `.Wide`.
+// JSON's `Spelling.number`, false for a token that is not a number. A decimal of at most 19 digits is decoded from the
+// walk's digit counts, and the rest go to `number_slow`.
+number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool) {
 	if n.kind == .Number {
 		sp := n.spelling
-		// The walk's `spelling` holds the kind and the two digit counts. Each arm reads the fields it uses.
 		if sp & core.NUMBER_KIND_MASK <= u16(Number_Spelling.Decimal) {
 			lo, hi := n.lo, n.lo + u64(n.n)
-			int_digits := int((sp >> core.NUMBER_INT_SHIFT) & 0x1f)
-			if sp & (core.NUMBER_FRAC_MASK | core.NUMBER_EXP) == 0 {
+			int_digits := core.number_int_digits(sp)
+			if core.number_shape(sp) < 32 {
 				if int_digits <= 19 {
 					if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
-						return num
+						return num, true
 					}
 				}
 			} else {
-				frac_digits := int((sp >> core.NUMBER_FRAC_SHIFT) & 0x1f)
+				frac_digits := core.number_frac_digits(sp)
 				if sp & core.NUMBER_EXP != 0 {
-					return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits)
+					return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits), true
 				}
-				// A set `core.NUMBER_FRAC_MASK` without `core.NUMBER_EXP` is a fraction of at least one digit.
-				// `number_fraction`'s first arm checks the point byte at `hi - frac_digits - 1` and folds both
-				// runs to their recorded lengths, without testing that the bytes are digits, since the walk
-				// recorded them from this span. A saturated count records 31, so `int_digits + frac_digits`
-				// exceeds 19 and `number_slow` reads the token.
+				// A saturated count is 31, so a long run fails this test.
 				if int_digits + frac_digits <= 19 {
-					return spell.number_fraction(doc.src, lo, hi, int_digits, frac_digits)
+					return spell.number_fraction(doc.src, lo, hi, int_digits, frac_digits), true
 				}
 			}
 		}
-		return number_slow(doc, n)
+		return number_slow(doc, n), true
 	}
-	return {0, .Wide}
+	return {}, false
 }
 
-// Decodes the number shapes that are not a plain integer: decimal, hex, infinity and NaN.
+// JSON's `Spelling.number_f32`. Hex past `u64` has rounded once into binary64, so it is read again from its digits.
+@(private)
+number_f32 :: proc(doc: ^core.Token_View, n: core.Node) -> (f32, bool) {
+	if number_spelling_of(n.spelling) != .Hex {
+		return 0, false
+	}
+	return spell.number_hex_f32(doc.src, n.lo, n.lo + u64(n.n))
+}
+
+// Decodes what `number` does not: long decimals, hex, `Infinity` and `NaN`.
 @(private, cold)
 number_slow :: #force_no_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
 	lo, hi := n.lo, n.lo + u64(n.n)
 	switch number_spelling_of(n.spelling) {
 	case .Json, .Decimal:
-		return spell.number_decimal(doc.src, lo, hi)
+		// JSON5's `5.` has no fraction digit, so it is the integer `5`.
+		num, _, _ := spell.number_loose(doc.src, lo, hi - u64(doc.src[hi - 1] == '.'))
+		return num
 	case .Hex:
 		return spell.number_hex(doc.src, lo, hi)
 	case .Infinity:
 		// JSON5's `Infinity`, signed by a `-` before it, and its `NaN`, a quiet one with a zero sign.
-		return {spell.F64_INF_BITS | u64(lo < hi && doc.src[lo] == '-') << 63, .Float}
+		return {0x7ff0_0000_0000_0000 | u64(lo < hi && doc.src[lo] == '-') << 63, .Float}
 	case .Nan:
 		return {0x7ff8_0000_0000_0000, .Float}
 	}

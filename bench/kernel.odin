@@ -15,9 +15,9 @@ package bench
 //   float_random, float_canada, float_price, float_int   `f64_text` of random bit patterns, of the coordinates of
 //                   canada.json, of two-decimal prices and of integral values, unit: a value. `arg` is unused.
 //   int_random <digits>   `u64_text` of random integers of `digits` digits, unit: a value.
-// The `json` and `utf8` cases time a `nibble_table` built from JSON's sets. The walk builds no such table, it uses
-// compares and its own constant class tables. `-define:TIER=n` times the tier at place n of `k.Tier`, with its loops
-// compiled with the tier's features.
+// The `json` and `utf8` cases time a table the kernel tests' `nibble_table` builds from JSON's sets. The walk builds
+// no such table, it uses compares and its own constant class tables. `-define:TIER=n` times the tier at place n of
+// `k.Tier`, with its loops compiled with the tier's features.
 
 import "base:intrinsics"
 import "core:fmt"
@@ -28,6 +28,7 @@ import "core:strconv"
 import "core:time"
 import "../core/spell"
 import k "../core/kernel"
+import kt "../core/kernel/test"
 
 T :: k.Tier(#config(TIER, 0))
 
@@ -236,7 +237,7 @@ main :: proc() {
 	switch os.args[1] {
 	case "pack", "json", "csv":
 		json_sets := JSON_SETS
-		table, set_bits := k.nibble_table(json_sets[:])
+		table, set_bits := kt.nibble_table(json_sets[:])
 		buf := make([]u8, L1_BYTES)
 		fill(buf, arg, os.args[1] == "pack" ? "\"" : os.args[1] == "json" ? "\"\\,:[]{} \t\n\r" : CSV_BYTES)
 		units = L1_BYTES / 64
@@ -259,7 +260,7 @@ main :: proc() {
 		elapsed = time.tick_since(t)
 	case "utf8", "utf8all":
 		json_sets := JSON_SETS
-		table, set_bits := k.nibble_table(json_sets[:])
+		table, set_bits := kt.nibble_table(json_sets[:])
 		buf := make([]u8, L1_BYTES)
 		fill(buf, 16, "\"\\,:[]{} \t\n\r")
 		for _ in 0 ..< L1_BYTES / arg {

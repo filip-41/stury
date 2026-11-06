@@ -81,11 +81,12 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
   resize, and an arena does that for its last block, which is the nodes in a text with no facts. `facts` and `facts_alloc`, both `[]Fact`, are
   alike, and a document with no facts holds nil. `counts` and `counts_alloc`, both `[]Child_Count`, hold the true child
   count of every container whose count saturated `MAX_CHILDREN`, sorted by node, and are nil when no container is that
-  wide.
+  wide. `indexed`, a `[dynamic]Child_Index` in `allocator`, holds the member nodes of every container
+  `index_children` indexed, sorted by node, and is empty until a caller indexes one.
 - `spelling` is a `^Spelling` that points at a format's table in rodata, and `allocator` is the one the build
-  received. `destroy` frees the three allocations and sets the document to zero. `clone` copies them, and a read's
-  answers block, into another allocator, so the original may go while the copy lives, and the copy borrows the same
-  `src`. A reader that allocates takes its own allocator.
+  received. `destroy` frees the allocations, the child index with them, and sets the document to zero. `clone` copies
+  the nodes, facts, counts and a read's answers block into another allocator, so the original may go while the copy
+  lives, and the copy borrows the same `src` and holds no child index. A reader that allocates takes its own allocator.
 - `shared_keys` is the dsv header row's node, 0 for a text read without a header, for a partial document and for every
   JSON document.
 - `root_close` is one past the root value's authored bytes: the close of a root container, or the last byte of a root
@@ -94,7 +95,7 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
 - `as: core.As` is the handle the text was read with, in 24 bytes: the `spelling`, the `spec` in one byte, so an edit
   service can dispatch on it when a procedure pointer carries no compile-time spec, the `tolerate` set, `max_depth`, and
   ten format bytes core passes along unread, which dsv uses for its delimiter, comment byte, `no_header`, `crlf` and
-  `infer`. `max_depth` is `Options.max_depth`, 0 for the default: JSON's edit services read a recorded value at that
+  `infer`, and JSON for `refuse_non_finite`. `max_depth` is `Options.max_depth`, 0 for the default: JSON's edit services read a recorded value at that
   depth, and a delimited text has no depth option and leaves it 0. `json.as` and `dsv.as` make a handle.
 - A path read fills `answers`, and for a partial document `kept`, `missing`, `partial` and `stopped`, all in `paths.md`.
   `answers`, `kept` and `missing` share `reads_block`, which `destroy` frees.
@@ -188,16 +189,17 @@ A reader given an index no node holds answers as it does for a node of the wrong
 | `kind` | the node's `Kind` | `.Null` | its own kind |
 | `span` | the node's source bytes | nil | its own bytes |
 | `length` | the member count | 0 | 0 |
-| `children`, `members_named`, `pairs`, `facts_of`, `fact_next` | a walk, or a body | an empty walk | an empty walk |
+| `children`, `children_from`, `members_named`, `pairs`, `facts_of`, `fact_next` | a walk, or a body | an empty walk | an empty walk |
 | `child_next`, `child_at`, `member`, `member_next` | a node or false | false | false |
+| `index_children` | whether `child_at` now indexes | false | false |
 | `pair_next` | a key and value node or false | false | false |
 | `key_equals` | whether a key decodes to a name | false | false |
 | `member_of`, `element_of` | a node and a `Presence`, for a partial document (see `docs/paths.md`) | `.Missing` | `.Wrong_Kind` |
 | `length_exact` | `length`, and whether it is the true count | 0, true | 0, true |
 | `text` | the node's text, and whether it read | `false` | `false` |
-| `number` | a `Number` | `.Wide` | `.Wide` |
+| `number` | a `Number`, and whether the node is a number | false | false |
 | `resolve` | the value's kind | `.Null` | the format's answer |
-| `int_value`, `uint_value`, `float_value` | an integer or a binary64, and whether it is one | false | false |
+| `int_value` | an `i64`, and whether the node is an `Int` | false | false |
 
 ### Children and members
 
@@ -218,7 +220,21 @@ cell.
 node: at `i + 2 + 2k` in an inline-key `Map` whose `n` is twice its count plus one, at `i + 1 + k` in a shared-key
 `Map` whose `n` is its count plus one, and at `i + 1 + k` in an `Array` whose `n` is its count plus one. A count that
 saturated `MAX_CHILDREN` is read from `Document.counts`, so the stride test uses the true count; any other container is
-walked. A negative `k`, a scalar, a miss and a `k` past the last member return no node.
+read from its child index when one was built, else walked. A negative `k`, a scalar, a miss and a `k` past the last
+member return no node.
+
+`index_children(doc, i)` lists container `i`'s member values in `Document.indexed` in one walk. After it, `child_at`
+reads any `k` of a container whose members span several nodes (an array of objects, a text's records) without a walk.
+Call it once before reading many positions of one container, since each read is otherwise a walk from the first
+member. It returns true when reads of `i` by position need no walk: for a container whose members are one node each,
+which needs no entry, and for one indexed before. A scalar, a miss, a `Partial` container and a failed allocation
+give false. It writes the document, so nothing else may read `doc` during the call. A call on a container it listed
+before writes nothing, so a document that more than one thread reads has its containers indexed before it is shared.
+A walk that finds fewer members than the count lists nothing. A container that could not be listed keeps an entry with
+no members, so a later call gives false and writes nothing, and `child_at` walks it. `destroy` frees the entries and
+`clone` does not copy them.
+
+`children_from(doc, i, k)` starts a `Child_Iter` at member `k`. Out of range, on a scalar and on a miss it is done.
 
 `pairs` starts a `Pair_Iter` over a `Map` container's key/value member pairs and `pair_next` yields `(key, val, ok)` in
 source order. For an inline-key `Map`, key and value alternate in preorder. For a shared-key `Map`, keys come from
@@ -252,7 +268,8 @@ caller that knows the format.
 is its source is copied, and a decode's over-long buffer is trimmed, so `len(s)` is the allocation's length. A caller
 that has a buffer reads through `text` first and falls back to `text_clone` only for a text too long for it.
 
-`number(doc, i)` returns a 16-byte `Number`, `bits` and `kind`, decoded from the node's span when it is read. The
+`number(doc, i)` returns a 16-byte `Number`, `bits` and `kind`, decoded from the node's span when it is read, and
+whether the node is a number. The
 node holds the token's bytes and the format's packed shape, never a value. `Number_Kind` is `Int`, `Uint`, `Float` or
 `Wide`. The decoders are in package `core/spell`, and `core.Number` and `core.Number_Kind` alias `spell`'s names, so a
 caller of a reader writes `core.Number`.
@@ -260,19 +277,17 @@ caller of a reader writes `core.Number`.
 - `Int` is an integer that fits `i64`, in two's complement in `bits`. `-0` is `Int` 0.
 - `Uint` is a positive integer that fits `u64` and not `i64`.
 - `Float` is a binary64, correctly rounded to nearest even, for a fraction, an exponent, an integer past `u64`, or a
-  negative integer past `i64`'s floor, when a binary64 represents the value. `-0.0` is `Float` -0.0.
-- `Wide` is a number no `i64`, `u64` or `f64` holds, and the caller reads its span.
+  negative integer past `i64`'s floor. Values too small for binary64 round to a zero with the same sign. `-0.0` gives
+  `Float` -0.0.
+- `Wide` means the number is too large for binary64 or over the caps under Limits, so the caller has to read its span.
 
-A container and a miss return `{0, .Wide}`. JSON's reader folds a pure integer of at most 19 digits
+A container, a string, a key and a miss return false. JSON's reader folds a pure integer of at most 19 digits
 from the recorded digit counts with no search for a point or an exponent, and reads every other token by its packed
 shape: a JSON decimal, a decimal JSON does not write, a hex integer, `Infinity` or `NaN`; a fraction whose integer part
 is empty or whose digits pass 19 reads by the full decimal decoder. dsv's reader returns a value cell that is exactly a
-JSON number, and `.Wide` for a quoted cell, a TSV escape, a key cell or any other cell.
+JSON number, and false for a quoted cell, a TSV escape, a key cell or any other cell.
 
-`int_value` returns an `Int`'s value. `uint_value` returns a `Uint`, or a
-nonnegative `Int`. `float_value` returns an `Int`, `Uint` or `Float` as a binary64. All three return false for a kind
-they do not read; `float_value` returns false for `Wide`, which the caller reads from its span. A node that is no
-number returns false from each.
+`int_value` returns an `Int`'s value, and false for any other node.
 
 `resolve(doc, i)` returns what a node is: `.Null` for a miss, and otherwise the format's answer. JSON's is the node's
 own kind. dsv's returns `.String` for a key cell, for a quoted or escaped cell, and for every cell of a document read
@@ -573,7 +588,7 @@ next, so each byte is scanned once.
 
 | Bound | Value | Effect |
 |---|---|---|
-| `spell.MAX_NUMBER_DIGITS` | 256 | more authored mantissa digits read as `.Wide` |
+| `spell.MAX_NUMBER_DIGITS` | 256 | a mantissa with more digits than this, counting zeros, reads as `.Wide` |
 | `spell.MAX_NUMBER_SCALE` | 4096 | an exponent or scale beyond ±this reads as `.Wide` |
 | `MAX_CHILDREN` | 65535 | the largest child count `spelling` holds, with the true count in `Document.counts` |
 | `core.MAX_DEPTH` | 1024 | the deepest nesting when `Options.max_depth` is 0 |

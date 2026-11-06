@@ -46,7 +46,10 @@ indirect :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Reg
 	case .Number:
 		reason = .Wrong_Kind
 		if t.kind == .Number {
-			(^core.Number)(dest)^ = h.plan.spelling.number(&h.view, t)
+			if n, ok := h.plan.spelling.number(&h.view, t); ok {
+				(^core.Number)(dest)^ = n
+				reason = .None
+			}
 		}
 	case .Scalar:
 		reason = store_decoded(h, t, (^Scalar)(dest))
@@ -219,7 +222,7 @@ pick_arm :: proc(h: ^Reader, t: core.Token, m: ^Meta) -> (arm: int, reason: core
 			return 0, .Repeated_Tag, {}
 		}
 		if s.value.kind == .String {
-			name, ok := token_text(h, s.value, context.temp_allocator)
+			name, ok := core.token_text(h.plan.spelling, &h.view, s.value, context.temp_allocator)
 			if !ok {
 				return 0, .Out_Of_Memory, {}
 			}
@@ -261,7 +264,7 @@ store_whole :: proc(h: ^Reader, fld: ^Field, m: ^Meta, dest: uintptr, kind: core
 	v.decoded = v.text
 	if kind == .String {
 		ok: bool
-		if v.decoded, ok = token_text(h, t, context.temp_allocator); !ok {
+		if v.decoded, ok = core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator); !ok {
 			return .Out_Of_Memory
 		}
 	}
@@ -306,7 +309,7 @@ store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Typed_Er
 	if t.kind != .String {
 		return .Wrong_Kind
 	}
-	s, ok := token_text(h, t, context.temp_allocator)
+	s, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
 	if !ok {
 		return .Out_Of_Memory
 	}
@@ -340,7 +343,10 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 		}
 		dest^ = s
 	case .Number:
-		n := integer_number(h, t)
+		n, ok := h.plan.spelling.number(&h.view, t)
+		if !ok {
+			return .Wrong_Kind
+		}
 		switch n.kind {
 		case .Int:
 			// `-0` has no integer, and the float keeps its sign.
@@ -407,7 +413,7 @@ store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, des
 	if t.kind != .String {
 		return .Wrong_Kind
 	}
-	name, ok := token_text(h, t, context.temp_allocator)
+	name, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
 	if !ok {
 		return .Out_Of_Memory
 	}
@@ -444,23 +450,13 @@ write_uint :: proc "contextless" (dest: uintptr, v: u64, size: u32) {
 	}
 }
 
-// A number read for an integer target. The kind `2` is a decimal the format writes with a sign or a point of its own,
-// so `+5` and `5.` read as `5`.
-@(private)
-integer_number :: proc(h: ^Reader, t: core.Token) -> core.Number {
-	if t.spelling & core.NUMBER_KIND_MASK == 2 && core.number_shape(t.spelling) < 32 {
-		hi := t.lo + u64(t.n)
-		if n, ok := spell.number_json(h.src, t.lo + (1 if h.base[t.lo] == '+' else 0), hi - (1 if h.base[hi - 1] == '.' else 0)); ok {
-			return n
-		}
-	}
-	return h.plan.spelling.number(&h.view, t)
-}
-
 // An integer token as an i64.
 @(private)
 number_i64 :: proc(h: ^Reader, t: core.Token) -> (v: i64, reason: core.Typed_Error_Kind) {
-	n := integer_number(h, t)
+	n, ok := h.plan.spelling.number(&h.view, t)
+	if !ok {
+		return 0, .Wrong_Kind
+	}
 	#partial switch n.kind {
 	case .Int:
 		return i64(n.bits), .None
@@ -513,7 +509,7 @@ store_int :: #force_no_inline proc "contextless" (mag: u64, neg: bool, kind: Rea
 	return .None
 }
 
-// Every number the hot cases do not take, read from its span.
+// Numbers the hot cases do not take.
 @(cold)
 @(private)
 number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind {
@@ -522,8 +518,11 @@ number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, f
 		if core.number_shape(t.spelling) >= 32 {
 			return .Wrong_Kind
 		}
+	} else if frac, sum := core.number_digits(t.spelling); sum <= 19 && t.spelling & core.NUMBER_KIND_MASK == 0 {
+		// `mant` holds all the digits of a plain decimal, the one kind the walk folds.
+		return store_number(spell.number_significand(h.mant, -i64(frac), h.base[t.lo] == '-', sum <= 15), h, t, fld, dest)
 	}
-	n, ok := spell.number_json(h.src, t.lo, t.lo + u64(t.n))
+	n, ok := h.plan.spelling.number(&h.view, t)
 	if !ok {
 		return .Wrong_Kind
 	}
@@ -565,7 +564,23 @@ store_number :: proc(n: core.Number, h: ^Reader, t: core.Token, fld: ^Field, des
 		return .Out_Of_Range
 	}
 	if fld.kind == .F32 {
-		v := f32(x if t.spelling & core.NUMBER_KIND_MASK > 2 else off_halfway(h.base[t.lo:][:t.n], x))
+		// Every case rounds the exact value once.
+		v: f32
+		#partial switch n.kind {
+		case .Int:
+			v = f32(i64(n.bits)) if n.bits != 0 else f32(x)
+		case .Uint:
+			v = f32(n.bits)
+		case:
+			v = f32(x)
+			if t.spelling & core.NUMBER_KIND_MASK <= core.NUMBER_DECIMAL {
+				v = f32(off_halfway(h.base[t.lo:][:t.n], x))
+			} else if read := h.plan.spelling.number_f32; read != nil {
+				if exact, ok := read(&h.view, t); ok {
+					v = exact
+				}
+			}
+		}
 		if abs(v) > max(f32) {
 			return .Out_Of_Range
 		}
@@ -593,8 +608,12 @@ spelled_number :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 	if fld.kind < .I8 || fld.kind > .F64 {
 		return indirect(h, regs, t)
 	}
-	n := integer_number(h, t) if fld.kind <= .U64 else h.plan.spelling.number(&h.view, t)
-	if reason := store_number(n, h, t, fld, uintptr(regs.c) + uintptr(fld.offset)); reason != .None {
+	n, ok := h.plan.spelling.number(&h.view, t)
+	reason := core.Typed_Error_Kind.Wrong_Kind
+	if ok {
+		reason = store_number(n, h, t, fld, uintptr(regs.c) + uintptr(fld.offset))
+	}
+	if reason != .None {
 		return refuse_value(h, regs, t, reason)
 	}
 	regs.c += u64(fld.stride)
@@ -846,7 +865,7 @@ member_found :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.To
 @(private)
 key_decoded :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, f: ^Frame, owner: ^Field) -> (core.Hook_Regs, core.Action) {
 	context = h.ctx
-	key, ok := token_text(h, t, context.temp_allocator)
+	key, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
 	if !ok {
 		return refuse(h, regs, {kind = .Out_Of_Memory, at = t.lo})
 	}
@@ -858,7 +877,7 @@ map_key :: proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, 
 	context = h.ctx
 	regs := regs
 	f.extra, f.run = cast([^]u64)raw_data(h.src)[t.lo:], (^Field)(uintptr(t.n))
-	key, ok := token_text(h, t, context.temp_allocator)
+	key, ok := core.token_text(h.plan.spelling, &h.view, t, context.temp_allocator)
 	if !ok {
 		return refuse(h, regs, {kind = .Out_Of_Memory, at = t.lo})
 	}
@@ -935,7 +954,7 @@ map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: co
 
 @(private)
 key_number :: proc(key: string) -> (core.Number, bool) {
-	n, ok := spell.number_json(transmute([]u8)key, 0, u64(len(key)))
+	n, ok := spell.number_strict(transmute([]u8)key, 0, u64(len(key)))
 	return n, ok && (n.kind == .Int || n.kind == .Uint)
 }
 

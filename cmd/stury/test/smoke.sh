@@ -119,6 +119,9 @@ got=$("$S" -c .a "$T/bom.ndjson" 2>/dev/null | wc -l | tr -d ' ')
 "$S" -nc '{u: [range(200000) | {a: .}]}' >"$T/wide.json"
 quick slice_tail 0 '100000' -c '.u[100000:] | length' "$T/wide.json"
 quick index_each 0 '199999' -c 'last(range(100000; 200000) as $i | .u[$i].a)' "$T/wide.json"
+# A variable that every piece reads by position, which no thread may write.
+"$S" -nc '[range(2000) | {n: .}]' >"$T/table.json"
+quick shared_index 0 '1999' --slurpfile t "$T/table.json" -c '$t[0][.a % 2000].n as $n | select(.a == 399999) | $n' "$T/many.ndjson"
 if [ "$cores" -ge 2 ]; then
 	{ head -n 300000 "$T/many.ndjson"; printf '{bad\n{"a":1}\n'; } >"$T/many_bad.ndjson"
 	{ head -n 300000 "$T/many.ndjson"; printf '5\n{"a":1}\n'; } >"$T/many_step.ndjson"

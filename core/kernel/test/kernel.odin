@@ -4,6 +4,28 @@ import "core:math/rand"
 import "core:testing"
 import k ".."
 
+// Returns the table sorting bytes into `sets`, and each set's bits. The bench uses it too.
+nibble_table :: proc(sets: []string) -> (t: k.Nibble_Table, bits: [8]u8) {
+	assert(len(sets) <= 8, "more than eight sets")
+	lo, hi: [16]u8
+	next: uint
+	for set, s in sets {
+		pair: [16]u8
+		for c in transmute([]u8)set {
+			h := c >> 4
+			if pair[h] == 0 {
+				assert(next < 8, "more than eight pairs of a set and a high nibble")
+				pair[h] = 1 << next
+				next += 1
+			}
+			hi[h] |= pair[h]
+			lo[c & 15] |= pair[h]
+			bits[s] |= pair[h]
+		}
+	}
+	return {transmute(#simd[16]u8)lo, transmute(#simd[16]u8)hi}, bits
+}
+
 // The tier under test, by its index in `k.Tier`: `-define:TIER=2` is v4 on x86-64. The kernels run in procedures
 // compiled with the tier's features, as a caller's hot loops are.
 T :: k.Tier(#config(TIER, 0))
@@ -69,7 +91,7 @@ reference_set :: proc(src: []u8, set: string) -> (m: u64) {
 // neighbours, and checks `pack_n` against `pack` for the four masks.
 @(enable_target_feature = FEATURES)
 check_sets :: proc(t: ^testing.T, sets: []string) {
-	table, bits := k.nibble_table(sets)
+	table, bits := nibble_table(sets)
 	near: [dynamic]u8
 	defer delete(near)
 	for set in sets {

@@ -205,12 +205,12 @@ on_cell :: #force_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t:
 		}
 	case .I64:
 		v: i64
-		if v, ok = cell_i64(p, u64(t.n)); ok {
+		if v, ok = spell.short_integer(p, u64(t.n)); ok {
 			(^i64)(dest)^ = v
 		}
 	case .F64:
 		v: f64
-		if v, ok = cell_f64(p, u64(t.n)); ok {
+		if v, ok = spell.short_decimal(p, u64(t.n)); ok {
 			(^f64)(dest)^ = v
 		}
 	case .Bool:
@@ -227,63 +227,6 @@ on_cell :: #force_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t:
 	regs.b += u64(col.step)
 	regs.c += u64(col.stride)
 	return regs, .Next
-}
-
-// The value of the first `n` bytes at `p`, 8 or fewer, and whether they all are digits. The fold takes the eight bytes
-// at once with the cell's digits at the top, so the bytes past the cell shift out.
-@(private)
-digits_at :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: u64, ok: bool) {
-	x := (intrinsics.unaligned_load((^u64)(p)) ~ 0x3030_3030_3030_3030) << ((8 - n) * 8)
-	ok = ((x + 0x0606_0606_0606_0606) | x) & 0xf0f0_f0f0_f0f0_f0f0 == 0
-	x = (x * 2561) >> 8 & 0x00ff_00ff_00ff_00ff
-	x = (x * 6553601) >> 16 & 0x0000_ffff_0000_ffff
-	return (x * 42949672960001) >> 32, ok
-}
-
-// A cell of a sign and at most 16 digits.
-@(private)
-cell_i64 :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: i64, ok: bool) {
-	skip := u64(1) if p[0] == '-' || p[0] == '+' else 0
-	digits := n - skip
-	if digits - 1 >= 16 {
-		return
-	}
-	mag: u64
-	if digits <= 8 {
-		mag, ok = digits_at(p[skip:], digits)
-	} else {
-		high, high_ok := digits_at(p[skip:], digits - 8)
-		low, low_ok := digits_at(p[skip + digits - 8:], 8)
-		mag, ok = high * 100_000_000 + low, high_ok && low_ok
-	}
-	return -i64(mag) if p[0] == '-' else i64(mag), ok
-}
-
-// A cell of a sign, digits and a point, at most 15 digits and at most 8 on each side of the point. Those digits and the
-// power of ten are exact in an f64, so their quotient is correctly rounded.
-@(private)
-cell_f64 :: #force_inline proc "contextless" (p: [^]u8, n: u64) -> (v: f64, ok: bool) {
-	skip := u64(1) if p[0] == '-' || p[0] == '+' else 0
-	q := p[skip:]
-	chars := n - skip
-	if chars - 1 >= 16 {
-		return
-	}
-	dots := intrinsics.unaligned_load((^u64)(q)) ~ 0x2e2e_2e2e_2e2e_2e2e
-	point := intrinsics.count_trailing_zeros((dots - 0x0101_0101_0101_0101) & ~dots & 0x8080_8080_8080_8080) / 8
-	frac: u64
-	if point >= chars {
-		point = chars
-	} else {
-		frac = chars - point - 1
-	}
-	if frac > 8 || point > 8 || point + frac > 15 || point + frac == 0 || (point < chars && q[point] != '.') {
-		return
-	}
-	whole, whole_ok := digits_at(q, point)
-	part, part_ok := digits_at(q[point + 1:], frac)
-	v = f64(whole * spell.POW10_U64[frac] + part) / spell.POW10_F64[frac]
-	return -v if p[0] == '-' else v, whole_ok && part_ok
 }
 
 // A row's open and close, and the text's. The first row's open, or the text's close when it has no row, comes after the
@@ -505,7 +448,7 @@ read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) ->
 		if h.r.plan.enums != .Int {
 			return typed.store_enum(&h.r, cell, m.enum_info, dest, m.size)
 		}
-		text, ok := typed.token_text(&h.r, t, context.temp_allocator)
+		text, ok := core.token_text(h.r.plan.spelling, &h.r.view, t, context.temp_allocator)
 		if !ok {
 			return .Out_Of_Memory
 		}
@@ -634,7 +577,7 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 		// A column past the header's last is named by its position, and a refusal names it once, when it is bound.
 		key := column_key(h.keys, c)
 		positional, refusing := key.spelling & SPELLING_COLUMN != 0, c >= from
-		name, ok := typed.token_text(&h.r, key, context.temp_allocator)
+		name, ok := core.token_text(h.r.plan.spelling, &h.r.view, key, context.temp_allocator)
 		if !ok {
 			return refuse_header(h, regs, .Out_Of_Memory, key.lo, "")
 		}

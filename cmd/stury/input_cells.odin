@@ -21,7 +21,7 @@ cells_value :: proc(ins: ^Inputs, rec: records.Record) -> (v: jq.Value, msg: str
 	cols := ins.run.route.columns
 	if cols == nil || !ins.header_judged {
 		built, err := records.build(&ins.texts, rec, context.allocator)
-		doc, fault := jq.judge_build(built, err, rec.at)
+		doc, fault := jq.judge_build(built, err)
 		if f, bad := fault.?; bad {
 			v, msg, status = cells_fault(ins, f)
 			return

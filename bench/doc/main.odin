@@ -242,9 +242,9 @@ read_nodes :: proc(a: ^Arena, doc: ^core.Document, buf: []u8, $DIRECT: bool, $HA
 		if n.kind == .Number {
 			num: core.Number
 			when DIRECT {
-				num = json.number(&doc.view, doc.nodes[i])
+				num, _ = json.number(&doc.view, doc.nodes[i])
 			} else {
-				num = core.number(doc, core.Node_Index(i))
+				num, _ = core.number(doc, core.Node_Index(i))
 			}
 			when HASH {
 				check = fnv_u64(check, number_bits(num))

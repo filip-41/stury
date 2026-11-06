@@ -241,12 +241,11 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
 5. **The edits.** `Edit_Spelling.commit` calls `compose.commit`. A format whose root has no brackets passes a
    `compose.Root_Spelling`, sets `flat` and supplies `interior`, `fact_slot`, `emptied` and `plan`.
 6. **The typed read.** `unmarshal` runs the format's `walk` over `typed.Reader`'s hook. A format that reads its values
-   as JSON does needs no more. A format with its own value reader, as dsv has for a cell, stores through `token_text`,
+   as JSON does needs no more. A format with its own value reader, as dsv has for a cell, stores through `core.token_text`,
    `store_whole`, `store_cstring`, `store_enum`, `store_number`, `store_enum_value` and `map_slot`, and reads the
    target's field by `field_at` and `Plan.node_read`. `read_start` opens the read in either case.
 
-`core/spell` holds the number decoders a format with its own number grammar calls: `POW10_F64`, `POW10_U64` and
-`number_loose` are public for that.
+`core/spell` holds the number decoders a format with its own number grammar calls, such as `number_loose`.
 
 ## The JSON walk
 

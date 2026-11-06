@@ -136,12 +136,13 @@ $(X86_TARGETS): $(BUILD)/test/x86/%:
 	$(ODIN) test $$p -o:$$o -target:darwin_amd64 -define:WALK_TIER=$$t \
 		$(if $(filter %/kernel/test,$*),-define:TIER=$$t) -out:$@ || { echo "== $$p (x86 tier $$t -o:$$o) failed"; exit 1; }
 
-# The AVX2 and AVX-512 tiers on a machine that lacks them: each package built for linux_amd64 with the tier forced, and
-# run under Intel SDE (`SDE=sde64`) emulating a Haswell for v3 and a Sapphire Rapids for v4.
+# Each x86 tier on a machine that lacks it: each package built for linux_amd64 with the tier forced, and run under
+# Intel SDE (`SDE=sde64`) emulating a Nehalem for v2 (x86-64-v2, no PCLMULQDQ), a Haswell for v3 and a Sapphire Rapids
+# for v4.
 SDE ?= sde64
 test-wide:
 	@mkdir -p $(BUILD)/wide
-	@for spec in 1:hsw 2:spr; do t=$${spec%%:*}; cpu=$${spec##*:}; for p in $(TEST_PKGS); do \
+	@for spec in 0:nhm 1:hsw 2:spr; do t=$${spec%%:*}; cpu=$${spec##*:}; for p in $(TEST_PKGS); do \
 		echo "== $$p (tier $$t on $$cpu)"; \
 		case " $(TIER_PKGS) " in *" $$p "*) tier=-define:TIER=$$t ;; *) tier= ;; esac; \
 		$(ODIN) build $$p -build-mode:test -target:linux_amd64 -o:minimal $(TEST_MEMORY) $(TEST_PIECES) \

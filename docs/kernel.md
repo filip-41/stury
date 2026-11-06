@@ -54,8 +54,8 @@ tiers:
 
 | Tier | Instructions | Register |
 |---|---|---|
-| `.V2` | SSE4.2, SSSE3, POPCNT, PCLMULQDQ | 16 bytes |
-| `.V3` | AVX2, BMI2 | 32 bytes |
+| `.V2` | SSE4.2, SSSE3, POPCNT (x86-64-v2) | 16 bytes |
+| `.V3` | AVX2, BMI2, PCLMULQDQ | 32 bytes |
 | `.V4` | AVX-512BW, mask registers | 64 bytes |
 
 `tier()` reads the CPU through `core:sys/info`, which reports AVX and AVX-512 only where the OS saves their registers.
@@ -162,9 +162,9 @@ the table repeated in each 16-byte lane), `tbl` on arm64 through `simd.runtime_s
 through `classes` and the UTF-8 code.
 
 **`prefix_xor`** returns a mask with bit i set when an odd number of bits at or below i are set. Given a block's quote
-bits, the set bits are the bytes inside the strings. On x86 it is a carry-less multiplication by all ones
-(`pclmulqdq`), which every tier has. On arm64 six shifts and XORs avoid the carry-less multiply (`pmull`), which also
-needs the value moved into a vector register and back.
+bits, the set bits are the bytes inside the strings. On `.V3` and `.V4` it is a carry-less multiplication by
+all ones (`pclmulqdq`). x86-64-v2 has no carry-less multiply, so `.V2` uses six shifts and XORs, as arm64 does to avoid
+`pmull`, which needs the value moved into a vector register and back.
 
 **`load_padded`** is below.
 
@@ -185,8 +185,8 @@ whitespace. It has two ways:
 - **A nibble table.** `nibble_table` builds two 16-byte tables from up to 8 sets, and `classes` looks up each byte's
   low and high nibble and ANDs the results. Then `has(c, bits[k])` gives set k's lanes. Each pair of a set and a high
   nibble owns one bit of the table, so membership is exact while the sets need at most 8 such pairs between them. The
-  cost is two lookups per register whatever the number of sets. Only the bench and the kernel tests call
-  `nibble_table`. The walk's escape and surrogate classes are constant tables passed to `classes`.
+  cost is two lookups per register whatever the number of sets. `nibble_table` lives in the kernel tests,
+  which the bench imports. The walk's escape and surrogate classes are constant tables passed to `classes`.
 
 `classes` works one vector register of the tier at a time (16, 32 or 64 bytes), because the lookup is one instruction
 per register on every tier.

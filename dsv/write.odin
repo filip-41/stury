@@ -24,6 +24,7 @@ V :: #simd[16]u8
 // The room a number's text takes, and the quotes a guard adds to it.
 @(private)
 CELL_ROOM :: 64
+#assert(CELL_ROOM >= spell.F64_ROOM + 2 && CELL_ROOM >= spell.INT_ROOM + 2)
 
 // The source bytes one reservation of an escaped text covers. Every byte is written as at most 2.
 @(private)

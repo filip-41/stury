@@ -290,6 +290,9 @@ scan_end :: proc(h: ^Scan, regs: core.Hook_Regs, root_close: u64, fault: Maybe(c
 	if h.again {
 		// The builder keeps its buffers for `scan_again`, and is zero when `builder_finish` freed them.
 		e = builder_finish(&h.b, regs, fault)
+		// `doc` is the last record's, whose buffers are the builder's, but a child index built on it is its own.
+		stale := core.Document{indexed = doc.indexed, allocator = doc.allocator}
+		core.destroy(&stale)
 		doc^ = h.b.doc
 	} else {
 		doc^, e = builder_end(&h.b, regs, fault)

@@ -660,7 +660,8 @@ edit_deep_document :: proc(t: ^testing.T) {
 	back, berr := json.build(out, .Json, {max_depth = 4096})
 	defer core.destroy(&back)
 	testing.expectf(t, berr.kind == .None, "read back: %v", berr)
-	num := core.number(&back, core.Node_Index(depth))
+	num, num_ok := core.number(&back, core.Node_Index(depth))
+	testing.expect(t, num_ok)
 	testing.expect_value(t, num.kind, core.Number_Kind.Int)
 	testing.expect_value(t, num.bits, u64(1))
 }

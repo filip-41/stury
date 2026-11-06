@@ -89,7 +89,7 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 		}
 	}
 	o.from, o.to = cli.formats.from.? or_else .Json, cli.formats.to.? or_else .Json
-	cli.json_reading = json.as(FORMATS[o.from].spec, {max_depth = o.max_depth})
+	cli.json_reading = json.as(FORMATS[o.from].spec, {max_depth = o.max_depth, refuse_non_finite = true})
 	args_done := false
 	for i := 0; i < len(args); i += 1 {
 		a := args[i]

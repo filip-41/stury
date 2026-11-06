@@ -39,7 +39,10 @@ Options :: struct {
 	// `walk_document`'s frame, and a larger one allocates one byte per level on the default heap.
 	max_depth: u32,
 	// The rules a text may break, each with a fixed reading. Empty by default.
-	tolerate:  bit_set[Tolerance; u8],
+	tolerate:          bit_set[Tolerance; u8],
+	// Refuse JSON5's `Infinity` and `NaN` as `.Bad_Char` with `Detail.Non_Finite`, for a reader that has no value for
+	// them.
+	refuse_non_finite: bool,
 }
 
 // `Tolerance` names a rule a caller lets a text break. The walk does not fault there, and the decoded string shows the
@@ -60,7 +63,7 @@ Detail :: enum u8 {
 	Trailing, // `Bad_Char`: the first byte after the document that is no whitespace or comment
 	Unframed, // `Bad_Char`: under `.Seq` records, the first byte before the first 0x1E that is no whitespace
 	Cut_Number, // `Bad_Number`: under `.Seq` records, a record that is a number with no whitespace after it, at its end
-	Non_Finite, // `Bad_Char`: JSON5's `Infinity` or `NaN`, for a reader that has no value for them. The walk reads them.
+	Non_Finite, // `Bad_Char`: JSON5's `Infinity` or `NaN`, under `Options.refuse_non_finite`
 }
 
 // `RULES` is JSON's `core.Rules`, one per `Detail` value, which every fault the walk returns points to.
@@ -221,6 +224,8 @@ Walk :: struct($S: Spec, $H: typeid) {
 	crossed:  bool,
 	// `Options.tolerate`, read only where a string faults.
 	tolerate: bit_set[Tolerance; u8],
+	// `Options.refuse_non_finite`, read only where a JSON5 number is read.
+	finite:   bool,
 	// Where the next state continues: for `string_escaped`, the block holding the string's first backslash, for
 	// `st_comments_after`, the run's first comment, which the previous state has read up to.
 	resume:   [^]u8,
@@ -239,26 +244,27 @@ PASS_END :: 4
 @(private)
 walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	if opts.max_depth > core.MAX_DEPTH {
-		return walk_deep(src, p, S, u64(opts.max_depth), opts.tolerate, h, regs, on)
+		return walk_deep(src, p, S, opts, h, regs, on)
 	}
 	// `= ---` leaves the array unwritten, where a struct would be zeroed. Every slot is written before it is read.
 	stack: [core.MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, opts.tolerate, nil, 0}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, nil, 0}
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
 // `walk_document` for a depth past `MAX_DEPTH`. Allocates `depth` bytes on the default heap and frees them before
 // returning, so a hook can call the walk.
 @(private, cold)
-walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, depth: u64, tolerate: bit_set[Tolerance; u8], h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	context = runtime.default_context()
+	depth := u64(opts.max_depth)
 	stack, err := make([]u8, min(depth, u64(len(src)) + 16))
 	if err != nil {
 		return core.fault_at(0, .No_Memory)
 	}
 	defer delete(stack)
-	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), false, tolerate, nil, 0}
+	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, nil, 0}
 	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
 }
 
@@ -280,7 +286,7 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d, ind: u64, $open: bool) -> u64 {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, core.No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, false, w.tolerate, nil, 0}
+	v := Walk(S, core.No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, false, w.tolerate, w.finite, nil, 0}
 	when open {
 		return st_open(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
 	} else {

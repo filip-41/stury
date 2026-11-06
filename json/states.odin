@@ -605,7 +605,7 @@ st_keep :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 			parent := d >> 1 - 1
 			w.stack[parent] |= PASS_END
 			regs := hs
-			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack, &regs, w.depth, w.tier, false, w.tolerate, nil, 0}
+			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack, &regs, w.depth, w.tier, false, w.tolerate, w.finite, nil, 0}
 			r := st_open(p, end, d, ind, &v, hs.a, hs.b, hs.c, build.builder_hook_plain)
 			if r & 0xff != 0 {
 				w.regs^ = regs

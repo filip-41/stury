@@ -61,6 +61,13 @@ Child_Count :: struct {
 	count: u32,
 }
 
+// A container's member value nodes as `index_children` lists them: `members[k]` is what `child_at` returns for `k`.
+// `members` is nil for a container `index_children` could not list.
+Child_Index :: struct {
+	node:    Node_Index,
+	members: []Node_Index,
+}
+
 // A `Pair_Iter` walks every (key, value) member pair of a `Map` container. `pairs` starts it and `pair_next` returns
 // each pair in source order.
 Pair_Iter :: struct {
@@ -157,6 +164,8 @@ Document :: struct {
 	// allocation behind it. It is empty when no container is that wide.
 	counts:       []Child_Count,
 	counts_alloc: []Child_Count,
+	// The containers `index_children` listed, sorted by node, in `allocator`. Each `members` is its own allocation.
+	indexed:      [dynamic]Child_Index,
 	// What a read by paths gives beside its nodes, in one block. `partial` says the document holds only what the paths
 	// reached, and `stopped` that the read stopped early, so the containers it left open have a `Partial` role, the count
 	// of what was read, and text past the stop that no walk judged. See `core/path.odin`.
@@ -170,23 +179,41 @@ Document :: struct {
 	positional:   bool,
 }
 
-// A number token's `spelling` holds these fields. A format's spelling kinds are even, so bit 0 (`SPELLING_DECODE`) is
-// always clear.
+// A number token's `spelling`. Kinds are even, so bit 0 (`SPELLING_DECODE`) is clear.
 //
-//	bits 0 to 3   the format's number kind, 0 for its plain decimal
+//	bits 0 to 3   the format's number kind: 0 for its plain decimal, `NUMBER_DECIMAL` for a decimal it writes with a
+//	              sign or a point of its own, and above that a number whose text is not a decimal
 //	bits 4 to 8   the integer digit count (saturated at 31)
 //	bits 9 to 13  the fraction digit count (saturated at 31, 0 for no fraction)
 //	bit 14        `NUMBER_EXP`
-//
-// A pure integer is a decimal with no fraction and no exponent, so a reader folds its significand without lexing the
-// span.
 NUMBER_KIND_MASK :: u16(0xF)
-NUMBER_INT_SHIFT :: 4
-NUMBER_FRAC_SHIFT :: 9
-NUMBER_FRAC_MAX :: 31
-NUMBER_FRAC_MASK :: u16(NUMBER_FRAC_MAX) << NUMBER_FRAC_SHIFT
+NUMBER_DECIMAL :: u16(2)
 NUMBER_EXP :: u16(1 << 14)
+@(private)
+NUMBER_INT_SHIFT :: 4
+@(private)
+NUMBER_FRAC_SHIFT :: 9
+@(private)
 NUMBER_DIGITS_MAX :: 31
+
+#assert(NUMBER_INT_SHIFT + 5 <= NUMBER_FRAC_SHIFT && NUMBER_FRAC_SHIFT + 5 <= 14)
+
+// Packs a decimal's number kind and its integer and fraction digit counts, each saturated at 31, into its `spelling`.
+number_spelling :: #force_inline proc "contextless" (kind: u16, int_digits, frac_digits: u64) -> u16 {
+	n := u16(min(int_digits, u64(NUMBER_DIGITS_MAX)))
+	f := u16(min(frac_digits, u64(NUMBER_DIGITS_MAX)))
+	return kind | n << NUMBER_INT_SHIFT | f << NUMBER_FRAC_SHIFT
+}
+
+// Returns a number token's integer digit count, saturated at 31.
+number_int_digits :: #force_inline proc "contextless" (spelling: u16) -> int {
+	return int(spelling >> NUMBER_INT_SHIFT & NUMBER_DIGITS_MAX)
+}
+
+// Returns a number token's fraction digit count, saturated at 31.
+number_frac_digits :: #force_inline proc "contextless" (spelling: u16) -> int {
+	return int(spelling >> NUMBER_FRAC_SHIFT & NUMBER_DIGITS_MAX)
+}
 
 // Returns a number token's integer digit count, and the count plus 32 or more when it has a fraction or an exponent.
 number_shape :: #force_inline proc "contextless" (spelling: u16) -> u16 {
@@ -196,7 +223,7 @@ number_shape :: #force_inline proc "contextless" (spelling: u16) -> u16 {
 // Returns a number token's fraction digit count and its integer and fraction digit counts' sum, or at least 256 for the
 // sum when it has an exponent.
 number_digits :: #force_inline proc "contextless" (spelling: u16) -> (frac, sum: u16) {
-	frac = spelling >> NUMBER_FRAC_SHIFT & u16(NUMBER_FRAC_MAX)
+	frac = spelling >> NUMBER_FRAC_SHIFT & u16(NUMBER_DIGITS_MAX)
 	sum = (spelling >> NUMBER_INT_SHIFT & u16(NUMBER_DIGITS_MAX)) + frac
 	return frac, sum | (spelling & NUMBER_EXP) >> 6
 }
@@ -209,7 +236,10 @@ Duplicates :: enum u8 {
 
 // A `Spelling` holds a format's read services, in its rodata. `text` decodes a node's text into `buf` and returns false
 // when `buf` is too short, so a read never allocates. A node whose `SPELLING_DECODE` bit is clear is its span without
-// the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token.
+// the quotes that surround it. `key_equals` compares a key without allocating. `number` reads a number token, and returns false for a token
+// that is no number of the format's.
+// `number_f32` reads a number token whose kind is above `NUMBER_DECIMAL` into an f32 with one rounding, and returns
+// false when narrowing `number`'s binary64 already rounds once. It is nil for a format with no such kinds.
 // `build` reads a text into a document and `validate` judges one without building, each as the handle says, see
 // `core.build` and `core.validate`. `scan` reads paths over a text as the handle says into a partial document, or gives
 // each answer to `on` when it is set, see `core/build`'s `scan` and `each_answer`. `resolve` returns what a `Plain` node
@@ -227,7 +257,8 @@ Duplicates :: enum u8 {
 Spelling :: struct {
 	text:       proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
-	number:     proc(v: ^Token_View, t: Token) -> Number,
+	number:     proc(v: ^Token_View, t: Token) -> (Number, bool),
+	number_f32: proc(v: ^Token_View, t: Token) -> (f32, bool),
 	build:      proc(src: []u8, as: As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (Document, Document_Error),
 	validate:   proc "contextless" (src: []u8, as: As) -> Maybe(Fault),
 	scan:       proc(src: []u8, as: As, paths: []Path, read: Path_Options, state: rawptr, on: proc(state: rawptr, a: Token_Answer) -> bool, allocator: runtime.Allocator) -> (Document, Path_Error),
@@ -284,22 +315,28 @@ Comment_Spelling :: enum u8 {
 	Byte,
 }
 
-// Frees `doc`'s node, fact and child-count allocations and sets `doc` to the zero value.
+// Frees `doc`'s node, fact, child-count and child-index allocations and sets `doc` to the zero value.
 destroy :: proc(doc: ^Document) {
 	// A nil slice frees nothing.
 	delete(doc.nodes_alloc, doc.allocator)
 	delete(doc.facts_alloc, doc.allocator)
 	delete(doc.counts_alloc, doc.allocator)
+	for x in doc.indexed {
+		delete(x.members, doc.allocator)
+	}
+	delete(doc.indexed)
 	delete(doc.reads_block, doc.allocator)
 	doc^ = {}
 }
 
 // Returns a copy of `doc` whose nodes, facts, child counts and path answers are new allocations from `allocator`, so
-// `doc` may be destroyed while the copy lives. The text is not copied: the copy borrows `doc.src` as `doc` does.
+// `doc` may be destroyed while the copy lives. The text is not copied: the copy borrows `doc.src` as `doc` does. The
+// copy has no child index.
 clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, err: runtime.Allocator_Error) {
 	c = doc^
 	c.allocator = allocator
 	c.nodes_alloc, c.facts_alloc, c.counts_alloc, c.reads_block = nil, nil, nil, nil
+	c.indexed = nil
 	defer if err != nil {
 		destroy(&c)
 	}
@@ -453,7 +490,8 @@ node_start :: #force_inline proc(n: Node) -> u64 {
 // Returns container `i`'s `k`th member value, counted from 0: for an inline-key `Map`, the value after its `k`th key,
 // which is the node after the key. A `k` past the last member, a negative `k`, and a node that holds no members return no
 // node. A container whose members are one node each is indexed, since its subtree size gives the stride: an
-// `Array`'s is its member count plus one, a shared-key `Map`'s its count plus one, and an inline-key `Map`'s twice its count plus one. Any other container is walked,
+// `Array`'s is its member count plus one, a shared-key `Map`'s its count plus one, and an inline-key `Map`'s twice its
+// count plus one. Any other container is read from its child index when `index_children` built one, else walked,
 // stepping one subtree size per member. A count that saturated `MAX_CHILDREN` is read from `Document.counts`, so
 // the stride test uses the true member count.
 child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
@@ -473,32 +511,32 @@ child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_I
 	if k >= count {
 		return NO_NODE, false
 	}
-	#partial switch n.kind {
-	case .Map:
-		if doc.shared_keys == 0 {
-			if int(n.n) == 2 * count + 1 {
-				return i + Node_Index(2 + 2 * k), true
-			}
-		} else {
-			if int(n.n) == count + 1 {
-				return i + Node_Index(1 + k), true
-			}
-		}
-	case .Array:
-		// The dsv header row is a child of the root that names no member, so a root with one is walked.
-		if int(n.n) == count + 1 {
-			return i + Node_Index(1 + k), true
-		}
-	case:
+	if n.kind != .Array && n.kind != .Map {
 		return NO_NODE, false
+	}
+	if stride := one_node_stride(doc, n, count); stride != 0 {
+		return i + Node_Index(stride * (k + 1)), true
 	}
 	return child_at_walk(doc, i, k)
 }
 
-// Walks a container whose members are not all one node. `child_at` calls it for a container whose subtree size does
-// not give one node per member.
+// The distance in nodes between members of `n` when each member is one node: 2 for an inline-key `Map`, else 1. It is
+// 0 when a member spans more nodes. The dsv header row is a child of the root but no member, so such a root gets 0.
+@(private)
+one_node_stride :: #force_inline proc(doc: ^Document, n: Node, count: int) -> int {
+	if n.kind == .Map && doc.shared_keys == 0 {
+		return 2 if int(n.n) == 2 * count + 1 else 0
+	}
+	return 1 if int(n.n) == count + 1 else 0
+}
+
+// `child_at` for a container whose members are not all one node, with `k` below the member count. It reads the child
+// index if there is one, else walks.
 @(private, cold)
 child_at_walk :: #force_no_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
+	if members, indexed := indexed_members(doc, i); indexed && k < len(members) {
+		return members[k], true
+	}
 	it := children(doc, i)
 	for _ in 0 ..< k {
 		if _, ok := child_next(&it); !ok {
@@ -507,6 +545,82 @@ child_at_walk :: #force_no_inline proc(doc: ^Document, i: Node_Index, k: int) ->
 	}
 	v, ok := child_next(&it)
 	return v, ok
+}
+
+// Container `i`'s entry in `Document.indexed`, and whether it has one.
+@(private)
+indexed_members :: proc(doc: ^Document, i: Node_Index) -> ([]Node_Index, bool) {
+	at := lower_node(doc.indexed[:], i)
+	if at < len(doc.indexed) && doc.indexed[at].node == i {
+		return doc.indexed[at].members, true
+	}
+	return nil, false
+}
+
+// Lists container `i`'s member values in `Document.indexed`, so `child_at` and `children_from` reach any member
+// without a walk. Returns whether `i` is now read by position without a walk. A container whose members are one node
+// each needs no entry. A scalar, a node past the last, a `Partial` container and a failed allocation give false. A
+// container that could not be listed keeps an entry with no members, so a later call writes nothing and gives false.
+// It writes the document, so nothing else may read `doc` during the call.
+index_children :: proc(doc: ^Document, i: Node_Index) -> bool {
+	if int(i) >= len(doc.nodes) {
+		return false
+	}
+	n := doc.nodes[i]
+	if n.kind != .Array && n.kind != .Map || n.role == .Partial {
+		return false
+	}
+	count := int(n.spelling)
+	if n.spelling == MAX_CHILDREN {
+		count = wide_length(doc, i)
+	}
+	if one_node_stride(doc, n, count) != 0 {
+		return true
+	}
+	at := lower_node(doc.indexed[:], i)
+	if at < len(doc.indexed) && doc.indexed[at].node == i {
+		return doc.indexed[at].members != nil
+	}
+	// The entry goes in before its list, so a list that fails stays recorded as an entry with no members.
+	doc.indexed.allocator = doc.allocator
+	if _, err := inject_at(&doc.indexed, at, Child_Index{node = i}); err != nil {
+		return false
+	}
+	members, merr := make([]Node_Index, count, doc.allocator)
+	if merr != nil {
+		return false
+	}
+	k := 0
+	it := children(doc, i)
+	for v in child_next(&it) {
+		if k == len(members) {
+			break
+		}
+		members[k] = v
+		k += 1
+	}
+	// A count the walk disagrees with lists nothing.
+	if k != count {
+		delete(members, doc.allocator)
+		return false
+	}
+	doc.indexed[at].members = members
+	return true
+}
+
+// A `Child_Iter` over container `i`'s member values from the `k`th on. A `k` out of range, a scalar and a node past
+// the last give a finished iterator.
+children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter {
+	it := children(doc, i)
+	if k == 0 || it.done {
+		return it
+	}
+	if v, ok := child_at(doc, i, k); ok {
+		it.at = v
+	} else {
+		it.done = true
+	}
+	return it
 }
 
 // A `Child_Iter` walks one container's member values. `children` starts it and `child_next` returns the next value.
@@ -670,8 +784,8 @@ member_next_shared :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool)
 
 // Returns the decoded text of string or plain node `i`. A node whose `SPELLING_DECODE` bit is clear is its span
 // without its quotes. A node that needs decoding is written into `buf`, and the call returns false when `buf` is too
-// short. It allocates nothing, so a caller that has no buffer long enough uses `text_clone`. Returns false for a
-// container or a node past the last.
+// short, and its content is then unspecified. It allocates nothing, so a caller that has no buffer long enough uses
+// `text_clone`. Returns false for a container or a node past the last.
 text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool) {
 	if int(i) >= len(doc.nodes) {
 		return "", false
@@ -687,6 +801,30 @@ text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: stri
 	return doc.spelling.text(&doc.view, n, buf)
 }
 
+// Returns the bytes that hold the decode of a token of `n` span bytes with `spelling`. A decode never yields more
+// bytes than its span, except that a tolerated ill-formed sequence reads as U+FFFD, three bytes for one source byte,
+// and a token that holds one carries `SPELLING_LAX`.
+@(private)
+decoded_room :: #force_inline proc "contextless" (spelling: u16, n: int) -> int {
+	if spelling & (SPELLING_DECODE | SPELLING_LAX) == SPELLING_DECODE | SPELLING_LAX {
+		return 3 * n + 4
+	}
+	return n
+}
+
+// Returns token `t`'s text as `spelling.text` gives it: its span when the token needs no decode, else a decode into a
+// buffer allocated from `allocator`. Returns false for a refused allocation or a failed decode.
+token_text :: proc(spelling: ^Spelling, view: ^Token_View, t: Token, allocator: runtime.Allocator) -> (s: string, ok: bool) {
+	if t.spelling & SPELLING_DECODE == 0 {
+		return string(node_text(view.src, t)), true
+	}
+	buf, err := runtime.mem_alloc_non_zeroed(decoded_room(t.spelling, int(t.n)), 1, allocator)
+	if err != nil {
+		return "", false
+	}
+	return spelling.text(view, t, buf)
+}
+
 // Returns a copy of node `i`'s decoded text, allocated from `allocator`. The result is the allocation the caller frees
 // with `delete(s, allocator)`, for a text that needed no decode too, and its length is the allocation's length. A
 // decode may write fewer bytes than the buffer it was given, so an over-long allocation is trimmed. Returns false for
@@ -699,9 +837,7 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 	if n.kind > .Plain {
 		return "", false
 	}
-	// A tolerated ill-formed sequence reads as U+FFFD, three bytes for one source byte, so three bytes per token byte
-	// is an upper bound on the decoded length of every format's decode.
-	size := int(n.n) if n.spelling & SPELLING_DECODE == 0 else 3 * int(n.n) + 4
+	size := decoded_room(n.spelling, int(n.n))
 	raw, err := runtime.mem_alloc_non_zeroed(size, 1, allocator)
 	if err != nil {
 		return "", false
@@ -726,13 +862,13 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 	return string(raw[:len(s)]), true
 }
 
-// Returns the number node `i` writes, decoded from its span. A container and an index past the last node return
-// `.Wide`. The format's reader refuses a key or a string of its own.
-number :: #force_inline proc(doc: ^Document, i: Node_Index) -> Number {
+// Returns the number node `i` writes, decoded from its span, and false for a node that is no number: a container, a
+// string, a key, a cell that spells no number, and an index past the last node.
+number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool) {
 	if int(i) < len(doc.nodes) && doc.nodes[i].kind <= .Plain {
 		return doc.spelling.number(&doc.view, doc.nodes[i])
 	}
-	return {0, .Wide}
+	return {}, false
 }
 
 // Reads `src` into a document as `as` says: its format, spec, depth, tolerance and the format's own options.
@@ -766,42 +902,14 @@ resolve :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind {
 
 // Returns the `i64` an `Int` node writes. Returns false for any other number.
 int_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (i64, bool) {
-	n := number(doc, i)
+	n, ok := number(doc, i)
+	if !ok {
+		return 0, false
+	}
 	switch n.kind {
 	case .Int:
 		return i64(n.bits), true
 	case .Uint, .Float, .Wide:
-	}
-	return 0, false
-}
-
-// Returns the `u64` a `Uint` node or a nonnegative `Int` node writes. Unmarshal reads unsigned targets with it.
-uint_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (u64, bool) {
-	n := number(doc, i)
-	switch n.kind {
-	case .Int:
-		if i64(n.bits) >= 0 {
-			return n.bits, true
-		}
-	case .Uint:
-		return n.bits, true
-	case .Float, .Wide:
-	}
-	return 0, false
-}
-
-// Returns the binary64 an `Int`, `Uint` or `Float` node writes. A `Wide` number has no decoded value in this tree, so
-// the call returns false for it and the caller reads its span. Returns false for a node that is no number.
-float_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (f64, bool) {
-	n := number(doc, i)
-	switch n.kind {
-	case .Int:
-		return f64(i64(n.bits)), true
-	case .Uint:
-		return f64(n.bits), true
-	case .Float:
-		return transmute(f64)n.bits, true
-	case .Wide:
 	}
 	return 0, false
 }

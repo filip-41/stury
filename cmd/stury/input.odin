@@ -316,7 +316,7 @@ record_value :: proc(ins: ^Inputs, rec: records.Record, own: bool) -> (jq.Value,
 	// An own scalar's document is let go once its value is taken, so `[inputs]` of numbers holds only the numbers.
 	own_scalar := own && !stream && len(rec.text) > 0 && rec.text[0] != '[' && rec.text[0] != '{'
 	built, err := records.build(&ins.texts, rec, runtime.heap_allocator() if stream || own_scalar else context.allocator)
-	doc, fault := jq.judge_build(built, err, rec.at)
+	doc, fault := jq.judge_build(built, err)
 	if f, bad := fault.?; bad {
 		return text_fault(ins, f, int(rec.at), int(rec.at) + len(rec.text) if ins.framing == .Lines else -1)
 	}

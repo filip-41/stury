@@ -28,7 +28,7 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 A format is a `Spec` value passed to each call. `json.Spec` is `.Json`, `.Jsonc` or `.Json5`, and `dsv.Spec` is `.Csv`,
 `.Tsv` or `.Plain`. `.Json` is strict RFC 8259. `.Jsonc` also takes comments and trailing commas, and `.Json5` takes the
 JSON5 grammar. A call that takes both a `Spec` and `Options` reads `Options` for the format's own settings, which for
-JSON are `max_depth` and `tolerate`, and for dsv `no_header`, `delimiter`, `comment`, `tolerate`, `crlf` and `infer`.
+JSON are `max_depth`, `tolerate` and `refuse_non_finite`, and for dsv `no_header`, `delimiter`, `comment`, `tolerate`, `crlf` and `infer`.
 
 ## Errors
 
@@ -135,7 +135,7 @@ document is.
 ## Build a document
 
 `json.build` or `dsv.build` returns a `core.Document`: a table of nodes that borrows the input. Strings are not
-decoded until `core.text` is called, and numbers not until `core.number`, `int_value`, `uint_value` or `float_value`.
+decoded until `core.text` is called, and numbers not until `core.number` or `int_value`.
 [examples/roundtrip](../examples/roundtrip/main.odin):
 
 ```odin
@@ -333,22 +333,22 @@ population reports at its own position in each format:
 |---|---|
 | Nesting depth | `core.MAX_DEPTH`, 1024. `Options.max_depth` raises or lowers it per call. A depth beyond `MAX_DEPTH` allocates one byte per level |
 | Children counted in a node | `core.MAX_CHILDREN`, 65535. A larger container is still read in full, and its true count is `core.length_exact` |
-| Numbers | a number no `i64`, `u64` or `f64` holds reads as `.Wide` from its span. The digit and scale bounds are in `core/spell` |
+| Numbers | a number too large for binary64 or over the digit and scale caps in `core/spell` comes back as `.Wide`, and the caller reads its span |
 
 A text past a limit gets a fault with a kind, never a crash or a wrong answer.
 
 ## Numbers
 
-`core.number(&doc, node)` returns a `Number` of kind `Int`, `Uint`, `Float` or `Wide`, decoded when read. `int_value`,
-`uint_value` and `float_value` return the value and whether the node is that kind of number. A `Wide` number is read
-from its span. A number is judged when the text is validated, and converted only when it is read.
+`core.number(&doc, node)` returns a `Number` of kind `Int`, `Uint`, `Float` or `Wide`, decoded when read, and false
+for a node that is no number. `int_value` returns an `Int`'s `i64`, and false for any other node. A `Wide` number is read from its span. A number is judged when the text is validated, and converted only when it is read.
 
 ## Strictness
 
 `.Json` is RFC 8259 with nothing extra: no leading zero, no `NaN`, no invalid UTF-8 and no lone surrogate. `.Jsonc`
 and `.Json5` accept their own additions and nothing else. `json.Options.tolerate` lets a text break a named rule with a
 fixed reading: `Invalid_Utf8` reads each ill-formed sequence as U+FFFD, and `Lone_Surrogate` does the same for an
-unpaired `\u` escape. A tolerated text is never reported as valid under strict rules.
+unpaired `\u` escape. A tolerated text is never reported as valid under strict rules. `json.Options.refuse_non_finite`
+refuses JSON5's `Infinity` and `NaN`, for a reader that has no value for them.
 
 ## Examples
 
