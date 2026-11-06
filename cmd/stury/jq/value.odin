@@ -257,12 +257,42 @@ distinct_keys :: #force_no_inline proc(r: Ref) -> int {
 	return len(seen)
 }
 
+// A document array read at or past this position is indexed first, so each read is a lookup and not a walk from the
+// first member. Below it the walk is cheaper than the index.
+INDEX_MEMBERS_FROM :: 256
+
+// Indexes every array of `v`'s documents that `array_at` or `array_slice` would index, for a value every thread of a
+// run reads: their `index_children` calls then find the entry and write nothing.
+index_shared :: proc(v: Value) {
+	switch x in v {
+	case Ref:
+		for n, i in x.doc.nodes {
+			at := core_pkg.Node_Index(i)
+			if n.kind == .Array && core_pkg.length(x.doc, at) >= INDEX_MEMBERS_FROM {
+				core_pkg.index_children(x.doc, at)
+			}
+		}
+	case ^Array:
+		for item in x.items {
+			index_shared(item)
+		}
+	case ^Object:
+		for val in x.vals {
+			index_shared(val)
+		}
+	case nil, bool, Number, string, Path:
+	}
+}
+
 // Element `i` of an array, or null past its end.
 array_at :: proc(v: Value, i: int) -> Value {
 	switch x in v {
 	case ^Array:
 		return x.items[i] if i >= 0 && i < len(x.items) else nil
 	case Ref:
+		if i >= INDEX_MEMBERS_FROM {
+			core_pkg.index_children(x.doc, x.node)
+		}
 		if node, ok := core_pkg.child_at(x.doc, x.node, i); ok {
 			return Ref{x.doc, node}
 		}
@@ -299,6 +329,27 @@ object_get :: proc(v: Value, k: string) -> (Value, bool) {
 	case nil, bool, Number, string, ^Array, Path:
 	}
 	return nil, false
+}
+
+// Elements `lo` to `hi` of an array as a new array, for `lo <= hi <= length_of(v)`.
+array_slice :: proc(v: Value, lo, hi: int) -> ^Array {
+	a := new_array(hi - lo)
+	r, is_ref := v.(Ref)
+	if !is_ref {
+		for i in lo ..< hi {
+			append(&a.items, array_at(v, i))
+		}
+		return a
+	}
+	if lo >= INDEX_MEMBERS_FROM {
+		core_pkg.index_children(r.doc, r.node)
+	}
+	it := core_pkg.children_from(r.doc, r.node, lo)
+	for _ in lo ..< hi {
+		node, _ := core_pkg.child_next(&it)
+		append(&a.items, Ref{r.doc, node})
+	}
+	return a
 }
 
 new_array :: proc(n := 0) -> ^Array {

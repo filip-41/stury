@@ -22,7 +22,6 @@ fmt_in_place_deep
 fmt_in_place_deep_untouched
 foreach_object
 foreach_setpath
-index_each
 join
 last_inputs
 reduce_inputs_select
@@ -30,5 +29,4 @@ reduce_merge
 reduce_merge_nested
 reduce_object
 setpath_reduce
-slice_tail
 tostring_add

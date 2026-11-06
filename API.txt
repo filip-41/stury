@@ -41,6 +41,7 @@ Answer :: struct {
 Answer_Outcome :: enum u8 {
 As :: struct {
 Child_Count :: struct {
+Child_Index :: struct {
 Child_Iter :: struct {
 Comment_Spelling :: enum u8 {
 Descend :: struct {}
@@ -120,6 +121,7 @@ build :: proc(src: []u8, as: As, refuse_duplicates := false, allocator := contex
 child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
 child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool) {
 children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
+children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter {
 clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, err: runtime.Allocator_Error) {
 commit :: proc(list: ^Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
 destroy :: proc(doc: ^Document) {
@@ -132,6 +134,7 @@ fault_at :: #force_inline proc (pos: u64, kind: Fault_Kind, detail: u8 = 0) -> u
 fault_of :: #force_inline proc (r: u64, rules: ^Rules) -> Maybe(Fault) {
 float_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (f64, bool) {
 has_line_end :: #force_inline proc(body: []u8) -> bool {
+index_children :: proc(doc: ^Document, i: Node_Index) -> bool {
 insert :: proc {
 int_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (i64, bool) {
 is_flat :: #force_inline proc(doc: ^Document) -> bool {

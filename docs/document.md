@@ -81,11 +81,12 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
   resize, and an arena does that for its last block, which is the nodes in a text with no facts. `facts` and `facts_alloc`, both `[]Fact`, are
   alike, and a document with no facts holds nil. `counts` and `counts_alloc`, both `[]Child_Count`, hold the true child
   count of every container whose count saturated `MAX_CHILDREN`, sorted by node, and are nil when no container is that
-  wide.
+  wide. `indexed`, a `[dynamic]Child_Index` in `allocator`, holds the member nodes of every container
+  `index_children` indexed, sorted by node, and is empty until a caller indexes one.
 - `spelling` is a `^Spelling` that points at a format's table in rodata, and `allocator` is the one the build
-  received. `destroy` frees the three allocations and sets the document to zero. `clone` copies them, and a read's
-  answers block, into another allocator, so the original may go while the copy lives, and the copy borrows the same
-  `src`. A reader that allocates takes its own allocator.
+  received. `destroy` frees the allocations, the child index with them, and sets the document to zero. `clone` copies
+  the nodes, facts, counts and a read's answers block into another allocator, so the original may go while the copy
+  lives, and the copy borrows the same `src` and holds no child index. A reader that allocates takes its own allocator.
 - `shared_keys` is the dsv header row's node, 0 for a text read without a header, for a partial document and for every
   JSON document.
 - `root_close` is one past the root value's authored bytes: the close of a root container, or the last byte of a root
@@ -188,8 +189,9 @@ A reader given an index no node holds answers as it does for a node of the wrong
 | `kind` | the node's `Kind` | `.Null` | its own kind |
 | `span` | the node's source bytes | nil | its own bytes |
 | `length` | the member count | 0 | 0 |
-| `children`, `members_named`, `pairs`, `facts_of`, `fact_next` | a walk, or a body | an empty walk | an empty walk |
+| `children`, `children_from`, `members_named`, `pairs`, `facts_of`, `fact_next` | a walk, or a body | an empty walk | an empty walk |
 | `child_next`, `child_at`, `member`, `member_next` | a node or false | false | false |
+| `index_children` | whether `child_at` now indexes | false | false |
 | `pair_next` | a key and value node or false | false | false |
 | `key_equals` | whether a key decodes to a name | false | false |
 | `member_of`, `element_of` | a node and a `Presence`, for a partial document (see `docs/paths.md`) | `.Missing` | `.Wrong_Kind` |
@@ -218,7 +220,20 @@ cell.
 node: at `i + 2 + 2k` in an inline-key `Map` whose `n` is twice its count plus one, at `i + 1 + k` in a shared-key
 `Map` whose `n` is its count plus one, and at `i + 1 + k` in an `Array` whose `n` is its count plus one. A count that
 saturated `MAX_CHILDREN` is read from `Document.counts`, so the stride test uses the true count; any other container is
-walked. A negative `k`, a scalar, a miss and a `k` past the last member return no node.
+read from its child index when one was built, else walked. A negative `k`, a scalar, a miss and a `k` past the last
+member return no node.
+
+`index_children(doc, i)` lists container `i`'s member values in `Document.indexed` in one walk. After it, `child_at`
+reads any `k` of a container whose members span several nodes (an array of objects, a text's records) without a walk.
+Call it once before reading many positions of one container, since each read is otherwise a walk from the first
+member. It returns true when reads of `i` by position need no walk: for a container whose members are one node each,
+which needs no entry, and for one indexed before. A scalar, a miss, a `Partial` container and a failed allocation
+give false. It writes the document, so nothing else may read `doc` during the call. A call on a container it listed
+before writes nothing, so a document that more than one thread reads has its containers indexed before it is shared.
+A walk that finds fewer members than the count lists nothing. `destroy` frees the entries and `clone` does not copy
+them.
+
+`children_from(doc, i, k)` starts a `Child_Iter` at member `k`. Out of range, on a scalar and on a miss it is done.
 
 `pairs` starts a `Pair_Iter` over a `Map` container's key/value member pairs and `pair_next` yields `(key, val, ok)` in
 source order. For an inline-key `Map`, key and value alternate in preorder. For a shared-key `Map`, keys come from

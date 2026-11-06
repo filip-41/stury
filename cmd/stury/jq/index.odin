@@ -230,11 +230,7 @@ slice_value :: proc(ip: ^Interp, t: Value, key: Value) -> (v: Value, sig: Signal
 	switch kind(t) {
 	case .Array:
 		lo, hi := slice_bounds(ip, length_of(t), key) or_return
-		a := new_array(hi - lo)
-		for i in lo ..< hi {
-			append(&a.items, array_at(t, i))
-		}
-		return a, .Go
+		return array_slice(t, lo, hi), .Go
 	case .String:
 		s, _ := string_of(t)
 		runes := codepoints(s)

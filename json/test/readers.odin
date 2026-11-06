@@ -249,6 +249,142 @@ child_at_reader :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 }
 
+// After `index_children`, `child_at` gives the nodes `child_next` reaches. A container of one-node members gets no
+// entry, a second call adds none, a scalar and a miss give false, entries sort by node, and a clone has none.
+@(test)
+index_children_reader :: proc(t: ^testing.T) {
+	doc, err := build(`[{"a":1},{"a":[2,3]},{"b":{"c":4}},5,[],{"d":[{"e":6},{"e":7}]}]`, .Json)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	want: [6]core.Node_Index
+	it := core.children(&doc, 0)
+	for k in 0 ..< 6 {
+		want[k], _ = core.child_next(&it)
+	}
+	testing.expect(t, core.index_children(&doc, 0))
+	testing.expect_value(t, len(doc.indexed), 1)
+	for k in 0 ..< 6 {
+		got, ok := core.child_at(&doc, 0, k)
+		testing.expect(t, ok)
+		testing.expect_value(t, got, want[k])
+	}
+	_, ok := core.child_at(&doc, 0, 6)
+	testing.expect(t, !ok)
+	_, ok = core.child_at(&doc, 0, -1)
+	testing.expect(t, !ok)
+	testing.expect(t, core.index_children(&doc, 0))
+	testing.expect_value(t, len(doc.indexed), 1)
+	// `{"a":1}` is read by stride and gets no entry.
+	testing.expect(t, core.index_children(&doc, want[0]))
+	testing.expect_value(t, len(doc.indexed), 1)
+	testing.expect(t, !core.index_children(&doc, want[3]))
+	testing.expect(t, !core.index_children(&doc, core.NO_NODE))
+	// Indexed out of node order, the entries still sort by node. An inline-key `Map`'s member is the value after its key.
+	inner := want[5] + 2
+	testing.expect_value(t, core.kind(&doc, inner), core.Kind.Array)
+	testing.expect(t, core.index_children(&doc, inner))
+	testing.expect(t, core.index_children(&doc, want[1]))
+	testing.expect_value(t, len(doc.indexed), 3)
+	testing.expect_value(t, doc.indexed[0].node, core.Node_Index(0))
+	testing.expect_value(t, doc.indexed[1].node, want[1])
+	testing.expect_value(t, doc.indexed[2].node, inner)
+	second, has := core.child_at(&doc, inner, 1)
+	testing.expect(t, has)
+	testing.expect_value(t, second, inner + 4)
+	value, vok := core.child_at(&doc, want[1], 0)
+	testing.expect(t, vok)
+	testing.expect_value(t, value, want[1] + 2)
+	testing.expect_value(t, doc.nodes[value - 1].role, core.Role.Key)
+	// A clone has no index and walks to the same members.
+	c, cerr := core.clone(&doc)
+	testing.expect(t, cerr == nil)
+	testing.expect_value(t, len(c.indexed), 0)
+	last, lok := core.child_at(&c, 0, 5)
+	testing.expect(t, lok)
+	testing.expect_value(t, last, want[5])
+	core.destroy(&c)
+	core.destroy(&doc)
+
+	// A count past `MAX_CHILDREN` is indexed by its true count.
+	text: [dynamic]u8
+	defer delete(text)
+	append(&text, '[')
+	for i in 0 ..< int(core.MAX_CHILDREN) + 1 {
+		if i > 0 {
+			append(&text, ',')
+		}
+		append(&text, ..transmute([]u8)string("[1]"))
+	}
+	append(&text, ']')
+	doc, err = build(string(text[:]), .Json)
+	testing.expectf(t, err.kind == .None, "wide array: %v", err)
+	if err.kind != .None {
+		return
+	}
+	walk := core.children(&doc, 0)
+	want_last := core.NO_NODE
+	for v in core.child_next(&walk) {
+		want_last = v
+	}
+	testing.expect(t, core.index_children(&doc, 0))
+	testing.expect_value(t, len(doc.indexed[0].members), int(core.MAX_CHILDREN) + 1)
+	last, lok = core.child_at(&doc, 0, int(core.MAX_CHILDREN))
+	testing.expect(t, lok)
+	testing.expect_value(t, last, want_last)
+	_, lok = core.child_at(&doc, 0, int(core.MAX_CHILDREN) + 1)
+	testing.expect(t, !lok)
+}
+
+// `children_from` yields from member `k` what `children` yields from that member on, with and without an index. Out of
+// range, on a scalar and on a miss it is done.
+@(test)
+children_from_reader :: proc(t: ^testing.T) {
+	doc, err := build(`[{"a":1},[2,3],"c",{"d":{"e":4}},5]`, .Json)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	want: [5]core.Node_Index
+	it := core.children(&doc, 0)
+	for k in 0 ..< 5 {
+		want[k], _ = core.child_next(&it)
+	}
+	for pass in 0 ..< 2 {
+		for from in 0 ..< 5 {
+			tail := core.children_from(&doc, 0, from)
+			k := from
+			for v in core.child_next(&tail) {
+				testing.expect_value(t, v, want[k])
+				k += 1
+			}
+			testing.expect_value(t, k, 5)
+		}
+		for from in ([]int{5, -1}) {
+			tail := core.children_from(&doc, 0, from)
+			testing.expect(t, tail.done)
+			_, more := core.child_next(&tail)
+			testing.expect(t, !more)
+		}
+		testing.expect(t, core.children_from(&doc, want[2], 0).done)
+		testing.expect(t, core.children_from(&doc, core.NO_NODE, 1).done)
+		if pass == 0 {
+			testing.expect(t, core.index_children(&doc, 0))
+		}
+	}
+	core.destroy(&doc)
+
+	// An inline-key `Map` from member 1 yields the value after the second key, then the rest.
+	doc, err = build(`{"a":[1],"b":2,"c":{"d":3}}`, .Json)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	tail := core.children_from(&doc, 0, 1)
+	v, more := core.child_next(&tail)
+	testing.expect(t, more)
+	testing.expect(t, core.key_equals(&doc, v - 1, "b"))
+	v, more = core.child_next(&tail)
+	testing.expect(t, more)
+	testing.expect(t, core.key_equals(&doc, v - 1, "c"))
+	_, more = core.child_next(&tail)
+	testing.expect(t, !more)
+}
+
 // A container of `core.MAX_CHILDREN` members records 65535 as its child count, the saturation value. `child_at`
 // reads the true count from `Document.counts`, so a uniform array still indexes and a `k` past the last member is
 // false without a walk.

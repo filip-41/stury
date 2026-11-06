@@ -61,6 +61,12 @@ Child_Count :: struct {
 	count: u32,
 }
 
+// A container's member value nodes as `index_children` lists them: `members[k]` is what `child_at` returns for `k`.
+Child_Index :: struct {
+	node:    Node_Index,
+	members: []Node_Index,
+}
+
 // A `Pair_Iter` walks every (key, value) member pair of a `Map` container. `pairs` starts it and `pair_next` returns
 // each pair in source order.
 Pair_Iter :: struct {
@@ -157,6 +163,8 @@ Document :: struct {
 	// allocation behind it. It is empty when no container is that wide.
 	counts:       []Child_Count,
 	counts_alloc: []Child_Count,
+	// The containers `index_children` listed, sorted by node, in `allocator`. Each `members` is its own allocation.
+	indexed:      [dynamic]Child_Index,
 	// What a read by paths gives beside its nodes, in one block. `partial` says the document holds only what the paths
 	// reached, and `stopped` that the read stopped early, so the containers it left open have a `Partial` role, the count
 	// of what was read, and text past the stop that no walk judged. See `core/path.odin`.
@@ -282,22 +290,28 @@ Comment_Spelling :: enum u8 {
 	Byte,
 }
 
-// Frees `doc`'s node, fact and child-count allocations and sets `doc` to the zero value.
+// Frees `doc`'s node, fact, child-count and child-index allocations and sets `doc` to the zero value.
 destroy :: proc(doc: ^Document) {
 	// A nil slice frees nothing.
 	delete(doc.nodes_alloc, doc.allocator)
 	delete(doc.facts_alloc, doc.allocator)
 	delete(doc.counts_alloc, doc.allocator)
+	for x in doc.indexed {
+		delete(x.members, doc.allocator)
+	}
+	delete(doc.indexed)
 	delete(doc.reads_block, doc.allocator)
 	doc^ = {}
 }
 
 // Returns a copy of `doc` whose nodes, facts, child counts and path answers are new allocations from `allocator`, so
-// `doc` may be destroyed while the copy lives. The text is not copied: the copy borrows `doc.src` as `doc` does.
+// `doc` may be destroyed while the copy lives. The text is not copied: the copy borrows `doc.src` as `doc` does. The
+// copy has no child index.
 clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, err: runtime.Allocator_Error) {
 	c = doc^
 	c.allocator = allocator
 	c.nodes_alloc, c.facts_alloc, c.counts_alloc, c.reads_block = nil, nil, nil, nil
+	c.indexed = nil
 	defer if err != nil {
 		destroy(&c)
 	}
@@ -451,7 +465,8 @@ node_start :: #force_inline proc(n: Node) -> u64 {
 // Returns container `i`'s `k`th member value, counted from 0: for an inline-key `Map`, the value after its `k`th key,
 // which is the node after the key. A `k` past the last member, a negative `k`, and a node that holds no members return no
 // node. A container whose members are one node each is indexed, since its subtree size gives the stride: an
-// `Array`'s is its member count plus one, a shared-key `Map`'s its count plus one, and an inline-key `Map`'s twice its count plus one. Any other container is walked,
+// `Array`'s is its member count plus one, a shared-key `Map`'s its count plus one, and an inline-key `Map`'s twice its
+// count plus one. Any other container is read from its child index when `index_children` built one, else walked,
 // stepping one subtree size per member. A count that saturated `MAX_CHILDREN` is read from `Document.counts`, so
 // the stride test uses the true member count.
 child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
@@ -471,32 +486,32 @@ child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_I
 	if k >= count {
 		return NO_NODE, false
 	}
-	#partial switch n.kind {
-	case .Map:
-		if doc.shared_keys == 0 {
-			if int(n.n) == 2 * count + 1 {
-				return i + Node_Index(2 + 2 * k), true
-			}
-		} else {
-			if int(n.n) == count + 1 {
-				return i + Node_Index(1 + k), true
-			}
-		}
-	case .Array:
-		// The dsv header row is a child of the root that names no member, so a root with one is walked.
-		if int(n.n) == count + 1 {
-			return i + Node_Index(1 + k), true
-		}
-	case:
+	if n.kind != .Array && n.kind != .Map {
 		return NO_NODE, false
+	}
+	if stride := one_node_stride(doc, n, count); stride != 0 {
+		return i + Node_Index(stride * (k + 1)), true
 	}
 	return child_at_walk(doc, i, k)
 }
 
-// Walks a container whose members are not all one node. `child_at` calls it for a container whose subtree size does
-// not give one node per member.
+// The distance in nodes between members of `n` when each member is one node: 2 for an inline-key `Map`, else 1. It is
+// 0 when a member spans more nodes. The dsv header row is a child of the root but no member, so such a root gets 0.
+@(private)
+one_node_stride :: #force_inline proc(doc: ^Document, n: Node, count: int) -> int {
+	if n.kind == .Map && doc.shared_keys == 0 {
+		return 2 if int(n.n) == 2 * count + 1 else 0
+	}
+	return 1 if int(n.n) == count + 1 else 0
+}
+
+// `child_at` for a container whose members are not all one node, with `k` below the member count. It reads the child
+// index if there is one, else walks.
 @(private, cold)
 child_at_walk :: #force_no_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_Index, bool) {
+	if members, indexed := indexed_members(doc, i); indexed && k < len(members) {
+		return members[k], true
+	}
 	it := children(doc, i)
 	for _ in 0 ..< k {
 		if _, ok := child_next(&it); !ok {
@@ -505,6 +520,80 @@ child_at_walk :: #force_no_inline proc(doc: ^Document, i: Node_Index, k: int) ->
 	}
 	v, ok := child_next(&it)
 	return v, ok
+}
+
+// Container `i`'s entry in `Document.indexed`, and whether it has one.
+@(private)
+indexed_members :: proc(doc: ^Document, i: Node_Index) -> ([]Node_Index, bool) {
+	at := lower_node(doc.indexed[:], i)
+	if at < len(doc.indexed) && doc.indexed[at].node == i {
+		return doc.indexed[at].members, true
+	}
+	return nil, false
+}
+
+// Lists container `i`'s member values in `Document.indexed`, so `child_at` and `children_from` reach any member
+// without a walk. Returns whether `i` is now read by position without a walk. A container whose members are one node
+// each needs no entry. A scalar, a node past the last, a `Partial` container and a failed allocation give false. It
+// writes the document, so nothing else may read `doc` during the call.
+index_children :: proc(doc: ^Document, i: Node_Index) -> bool {
+	if int(i) >= len(doc.nodes) {
+		return false
+	}
+	n := doc.nodes[i]
+	if n.kind != .Array && n.kind != .Map || n.role == .Partial {
+		return false
+	}
+	count := int(n.spelling)
+	if n.spelling == MAX_CHILDREN {
+		count = wide_length(doc, i)
+	}
+	if one_node_stride(doc, n, count) != 0 {
+		return true
+	}
+	at := lower_node(doc.indexed[:], i)
+	if at < len(doc.indexed) && doc.indexed[at].node == i {
+		return true
+	}
+	members, merr := make([]Node_Index, count, doc.allocator)
+	if merr != nil {
+		return false
+	}
+	k := 0
+	it := children(doc, i)
+	for v in child_next(&it) {
+		if k == len(members) {
+			break
+		}
+		members[k] = v
+		k += 1
+	}
+	// A count the walk disagrees with lists nothing.
+	if k != count {
+		delete(members, doc.allocator)
+		return false
+	}
+	doc.indexed.allocator = doc.allocator
+	if _, err := inject_at(&doc.indexed, at, Child_Index{i, members}); err != nil {
+		delete(members, doc.allocator)
+		return false
+	}
+	return true
+}
+
+// A `Child_Iter` over container `i`'s member values from the `k`th on. A `k` out of range, a scalar and a node past
+// the last give a finished iterator.
+children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter {
+	it := children(doc, i)
+	if k == 0 || it.done {
+		return it
+	}
+	if v, ok := child_at(doc, i, k); ok {
+		it.at = v
+	} else {
+		it.done = true
+	}
+	return it
 }
 
 // A `Child_Iter` walks one container's member values. `children` starts it and `child_next` returns the next value.
