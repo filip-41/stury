@@ -2,35 +2,24 @@ package spell
 
 import "base:intrinsics"
 
-// The byte helpers the readers and decoders share: a two-pass decode into a caller's buffer, and a byte-for-byte
-// compare.
+// The byte helpers the readers and decoders share: a decode into a caller's buffer, and a byte-for-byte compare.
 
-// Decodes a node's bytes into `buf`: `d` is the decoder's initial state and `next` returns one byte at a time. The
-// decoder makes two passes, one to count the bytes and one to write them, and returns false when `buf` is too short.
+// Decodes a node's bytes into `buf`: `d` is the decoder's initial state and `next` returns one byte at a time. It
+// returns false as soon as `buf` is full while the decoder has more, and `buf`'s content is then unspecified.
 decode_text :: proc(buf: []u8, d: $D, $next: proc "contextless" (^D) -> (u8, bool)) -> (s: string, ok: bool) {
-	count := 0
 	c := d
-	for {
-		_, more := next(&c)
-		if !more {
-			break
-		}
-		count += 1
-	}
-	if count > len(buf) {
-		return "", false
-	}
-	c = d
 	w := 0
 	for {
 		b, more := next(&c)
 		if !more {
-			break
+			return string(buf[:w]), true
+		}
+		if w == len(buf) {
+			return "", false
 		}
 		buf[w] = b
 		w += 1
 	}
-	return string(buf[:w]), true
 }
 
 // Returns whether the bytes `next` returns from `d` are `name`, with no allocation.

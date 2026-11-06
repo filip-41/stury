@@ -292,6 +292,21 @@ number_spelling_bits :: proc(t: ^testing.T) {
 	testing.expect_value(t, i, len(want))
 }
 
+// A decode that stops short of its buffer's end returns false, and one that fits exactly returns true.
+@(test)
+text_lax_buffer_bound :: proc(t: ^testing.T) {
+	doc, err := build("\"a\xffb\"", .Json, json.Options{tolerate = {.Invalid_Utf8}})
+	defer core.destroy(&doc)
+	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+		return
+	}
+	buf: [5]u8
+	s, ok := core.text(&doc, 0, buf[:4])
+	testing.expect(t, !ok)
+	s, ok = core.text(&doc, 0, buf[:])
+	testing.expect(t, ok && s == "a\uFFFDb")
+}
+
 // `text` writes a decode into the caller's buffer and never allocates, and returns false when the buffer is too short.
 // `text_clone` always allocates, and the allocation is exactly the string the caller frees with `delete`, for a decoded
 // text and for one that is its source.

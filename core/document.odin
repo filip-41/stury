@@ -760,8 +760,8 @@ member_next_shared :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool)
 
 // Returns the decoded text of string or plain node `i`. A node whose `SPELLING_DECODE` bit is clear is its span
 // without its quotes. A node that needs decoding is written into `buf`, and the call returns false when `buf` is too
-// short. It allocates nothing, so a caller that has no buffer long enough uses `text_clone`. Returns false for a
-// container or a node past the last.
+// short, and its content is then unspecified. It allocates nothing, so a caller that has no buffer long enough uses
+// `text_clone`. Returns false for a container or a node past the last.
 text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool) {
 	if int(i) >= len(doc.nodes) {
 		return "", false
@@ -777,6 +777,16 @@ text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: stri
 	return doc.spelling.text(&doc.view, n, buf)
 }
 
+// Returns the bytes that hold the decode of a token of `n` span bytes with `spelling`. A decode never yields more
+// bytes than its span, except that a tolerated ill-formed sequence reads as U+FFFD, three bytes for one source byte,
+// and a token that holds one carries `SPELLING_LAX`.
+decoded_room :: #force_inline proc "contextless" (spelling: u16, n: int) -> int {
+	if spelling & (SPELLING_DECODE | SPELLING_LAX) == SPELLING_DECODE | SPELLING_LAX {
+		return 3 * n + 4
+	}
+	return n
+}
+
 // Returns a copy of node `i`'s decoded text, allocated from `allocator`. The result is the allocation the caller frees
 // with `delete(s, allocator)`, for a text that needed no decode too, and its length is the allocation's length. A
 // decode may write fewer bytes than the buffer it was given, so an over-long allocation is trimmed. Returns false for
@@ -789,9 +799,7 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 	if n.kind > .Plain {
 		return "", false
 	}
-	// A tolerated ill-formed sequence reads as U+FFFD, three bytes for one source byte, so three bytes per token byte
-	// is an upper bound on the decoded length of every format's decode.
-	size := int(n.n) if n.spelling & SPELLING_DECODE == 0 else 3 * int(n.n) + 4
+	size := decoded_room(n.spelling, int(n.n))
 	raw, err := runtime.mem_alloc_non_zeroed(size, 1, allocator)
 	if err != nil {
 		return "", false

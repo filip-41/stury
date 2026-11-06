@@ -1,24 +1,15 @@
 package spell
 
-// Decimal integers, written left to right straight into the destination in groups of eight digits. The
-// leading group of a short value is written branch-free from its BCD form. The full groups below it are
-// four digit pairs from DIGITS2.
+// Decimal integers, written left to right straight into the destination. The leading group of at most eight digits
+// is written branch-free from its BCD form, and a full group of eight below it is one store.
 //
-// Stores are unchecked and may run past the count returned: `lead8_text` always stores 8 bytes, the low
-// sixteen digits of a 17- to 20-digit value go in one 16-byte store, and `i64_text` writes its `-` either
-// way. No store reaches past 20 bytes, which every caller reserves. `u64_text`'s split keeps each group below
-// 10^8, so `pair_text` indexes DIGITS2 with a pair below 100.
+// Stores are unchecked and may run past the count returned: `lead8_text` always stores 8 bytes, the last group of
+// eight is stored whole at the position after the leading one (at most 8 + 8 bytes), the low sixteen digits of a
+// 17- to 20-digit value go in one 16-byte store after a leading group of at most four digits (at most 4 + 16 bytes),
+// and `i64_text` writes its `-` either way. No store reaches past 20 bytes, which every caller reserves.
 
 import "base:intrinsics"
 import "core:simd"
-
-// The digit pairs of 00..99, so one division by 100 yields two digits.
-@(private, rodata)
-DIGITS2 := "0001020304050607080910111213141516171819" +
-	"2021222324252627282930313233343536373839" +
-	"4041424344454647484950515253545556575859" +
-	"6061626364656667686970717273747576777879" +
-	"8081828384858687888990919293949596979899"
 
 // The room `u64_text` and `i64_text` need at `dst`: `-9223372036854775808` and `18446744073709551615` are 20 bytes.
 INT_ROOM :: 20
@@ -31,14 +22,14 @@ u64_text :: #force_inline proc "contextless" (dst: [^]u8, u: u64) -> int {
 	if u < 10_000_000_000_000_000 {
 		hi := u / 100_000_000
 		n := lead8_text(dst, hi)
-		eight_text(dst[n:], u32(u - hi * 100_000_000))
+		intrinsics.unaligned_store((^u64)(dst[n:]), bcd8(u - hi * 100_000_000) | ZEROS8)
 		return n + 8
 	}
 	// At most four digits above the low sixteen.
 	top := u / 10_000_000_000_000_000
 	rest := u - top * 10_000_000_000_000_000
 	mid := rest / 100_000_000
-	n := lead4_text(dst, u32(top))
+	n := lead8_text(dst, top)
 	sixteen_text(dst[n:], mid, rest - mid * 100_000_000)
 	return n + 16
 }
@@ -51,22 +42,6 @@ i64_text :: #force_inline proc "contextless" (dst: [^]u8, v: i64) -> int {
 	dst[0] = '-'
 	u := u64(v)
 	return neg + u64_text(dst[neg:], 0 - u if neg != 0 else u)
-}
-
-@(private)
-pair_text :: #force_inline proc "contextless" (dst: [^]u8, x: u32) #no_bounds_check {
-	intrinsics.unaligned_store((^u16)(dst), intrinsics.unaligned_load((^u16)(&raw_data(DIGITS2)[2 * x])))
-}
-
-// Exactly eight digits of `x` < 10^8, leading zeros included.
-@(private)
-eight_text :: #force_inline proc "contextless" (dst: [^]u8, x: u32) {
-	hi := x / 10000
-	lo := x - hi * 10000
-	pair_text(dst, hi / 100)
-	pair_text(dst[2:], hi % 100)
-	pair_text(dst[4:], lo / 100)
-	pair_text(dst[6:], lo % 100)
 }
 
 // Exactly sixteen digits, `hi` then `lo` (each < 10^8, leading zeros included), in one 16-byte store.
@@ -102,25 +77,4 @@ lead8_text :: #force_inline proc "contextless" (dst: [^]u8, x: u64) -> int {
 	skip := int(intrinsics.count_trailing_zeros(b | 1 << 56)) / 8
 	intrinsics.unaligned_store((^u64)(dst), (b + ZEROS8) >> (8 * uint(skip)))
 	return 8 - skip
-}
-
-// `x` < 10^4 with no leading zeros. Returns the count written.
-@(private)
-lead4_text :: #force_inline proc "contextless" (dst: [^]u8, x: u32) -> int {
-	if x < 100 {
-		if x < 10 {
-			dst[0] = '0' + u8(x)
-			return 1
-		}
-		pair_text(dst, x)
-		return 2
-	}
-	if x < 1000 {
-		dst[0] = '0' + u8(x / 100)
-		pair_text(dst[1:], x % 100)
-		return 3
-	}
-	pair_text(dst, x / 100)
-	pair_text(dst[2:], x % 100)
-	return 4
 }

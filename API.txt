@@ -125,6 +125,7 @@ children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
 children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter {
 clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, err: runtime.Allocator_Error) {
 commit :: proc(list: ^Edit_List, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error) {
+decoded_room :: #force_inline proc (spelling: u16, n: int) -> int {
 destroy :: proc(doc: ^Document) {
 edit_list_destroy :: proc(list: ^Edit_List) {
 edit_list_init :: proc(doc: ^Document, allocator := context.allocator) -> Edit_List {

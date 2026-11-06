@@ -3,7 +3,6 @@ package json
 import "base:runtime"
 import "core:io"
 import "core:slice"
-import "core:strconv"
 import "core:unicode/utf8"
 import spell "../core/spell"
 import core "../core"
@@ -330,14 +329,14 @@ put_hex_decimal :: proc(out: ^write.Out, hex: string) -> bool {
 		write.put_byte(out, '0')
 		return true
 	}
-	buf: [16]u8
-	write.put_text(out, strconv.write_uint(buf[:], u64(words[len(words) - 1]), 10))
+	buf: [spell.INT_ROOM]u8
+	write.put_text(out, string(buf[:spell.u64_text(&buf[0], u64(words[len(words) - 1]))]))
 	#reverse for w in words[:len(words) - 1] {
-		s := strconv.write_uint(buf[:], u64(w), 10)
-		for _ in len(s) ..< 9 {
+		size := spell.u64_text(&buf[0], u64(w))
+		for _ in size ..< 9 {
 			write.put_byte(out, '0')
 		}
-		write.put_text(out, s)
+		write.put_text(out, string(buf[:size]))
 	}
 	return true
 }

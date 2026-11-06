@@ -267,9 +267,7 @@ token_text :: proc(h: ^Reader, t: core.Token, allocator: runtime.Allocator) -> (
 	if t.spelling & core.SPELLING_DECODE == 0 {
 		return string(h.base[t.lo:][:t.n]), true
 	}
-	// A tolerated ill-formed sequence reads as U+FFFD, three bytes for one.
-	n := 3 * int(t.n) + 4 if t.spelling & core.SPELLING_LAX != 0 else int(t.n)
-	buf, err := runtime.mem_alloc_non_zeroed(n, 1, allocator)
+	buf, err := runtime.mem_alloc_non_zeroed(core.decoded_room(t.spelling, int(t.n)), 1, allocator)
 	if err != nil {
 		return "", false
 	}
