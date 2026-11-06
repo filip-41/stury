@@ -398,24 +398,26 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 }
 
 // Writes `text` as the value at every answer of `path` over the built `doc`, and returns the new text. A `Name` the path ends
-// in that its container lacks is inserted there. Any other answer that is no value, a mismatch or a missing position or
-// parent, is `.Bad_Index`.
+// in that its container lacks is inserted there, and a `?` on it passes a container that is no object and no null. Any
+// other answer that is no value, a mismatch or a missing position or parent, is `.Bad_Index`.
 set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
 	list := core.edit_list_init(doc, allocator)
 	defer core.edit_list_destroy(&list)
 	// A `Name` at the end is set through its container, so that a missing name is told from a missing parent.
 	read_path := path
 	name: core.Name
-	named, whole := false, false
-	if n := len(path.steps); n > 0 && n - 1 not_in path.optional {
+	named, whole, optional := false, false, false
+	if n := len(path.steps); n > 0 {
 		name, named = path.steps[n - 1].(core.Name)
 		// A zero `Step` is left for the read to refuse.
 		named &&= raw_data(string(name)) != nil
+		optional = named && n - 1 in path.optional
 		// A `Descend` answers in the order its containers close, which is not the order it reaches them, so under a limit
 		// the answers of the whole path pick the containers.
 		whole = named && path.limit != nil && n > 1 && path.steps[n - 2] == core.Descend{}
 		if named && !whole {
 			read_path.steps = path.steps[:n - 1]
+			read_path.optional -= {n - 1}
 		}
 	}
 	answers, qerr := query(doc, []core.Path{read_path}, read, allocator)
@@ -425,10 +427,17 @@ set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := 
 	}
 	for a in answers {
 		e := core.Document_Error{kind = .Bad_Index}
-		if a.outcome == .Found && (!named || whole) {
+		switch {
+		case a.outcome == .Found && (!named || whole):
 			e = core.set(&list, a.node, text)
-		} else if (a.outcome == .Found || whole && a.outcome == .Missing) && doc.nodes[a.node].kind == .Map {
+		case a.outcome == .Found && doc.nodes[a.node].kind == .Map:
 			e = set_named(&list, a.node, string(name), text, read)
+		// A missing member names the container that lacks it.
+		case whole && a.outcome == .Missing && doc.nodes[a.owner].kind == .Map:
+			e = set_named(&list, a.owner, string(name), text, read)
+		// `?` drops the name a container that is no object cannot take, as a read of the whole path does.
+		case optional && a.outcome == .Found && doc.nodes[a.node].kind != .Null:
+			continue
 		}
 		if e.kind != .None {
 			return nil, {kind = .Edit, edit = e}
@@ -876,6 +885,9 @@ scan_picked :: #force_inline proc "contextless" ($MANY: bool, h: ^Scan, path: ^S
 @(private)
 scan_name :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token, f: ^Many_Frame, path: ^Scan_Path, p: uint, k, d: int, name: string) -> (core.Hook_Regs, bool) {
 	s := s
+	if !scan_key_is(SINK != .Replay, h, s, t, name) {
+		return s, false
+	}
 	when MANY {
 		m := h.many
 		matched := &f.matched
@@ -889,7 +901,7 @@ scan_name :: #force_inline proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Sca
 		bit := u64(1) << uint(k)
 	}
 	seen := matched^ & bit != 0
-	if seen && !h.last && !h.every_key || !scan_key_is(SINK != .Replay, h, s, t, name) {
+	if seen && !h.last && !h.every_key {
 		return s, false
 	}
 	when MANY {
@@ -1026,7 +1038,7 @@ scan_reach :: proc "contextless" ($MANY: bool, $SINK: Sink, h: ^Scan, s: core.Ho
 				at += 1
 			}
 		}
-		pos := u64(at) << 32 when SINK == .Replay else 2 * t.lo
+		pos := u64(at) << 32 when SINK == .Replay else text_pos(t.lo, d, false)
 		child := many_arrivals(SINK, h, t, d, at, owner, pos)
 		enter := child != 0
 		ended := m.ended

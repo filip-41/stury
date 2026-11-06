@@ -348,10 +348,12 @@ for a node that is no number. `int_value` returns an `Int`'s `i64`, and false fo
 ## Strictness
 
 `.Json` is RFC 8259 with nothing extra: no leading zero, no `NaN`, no invalid UTF-8 and no lone surrogate. `.Jsonc`
-and `.Json5` accept their own additions and nothing else. `json.Options.tolerate` lets a text break a named rule with a
-fixed reading: `Invalid_Utf8` reads each ill-formed sequence as U+FFFD, and `Lone_Surrogate` does the same for an
-unpaired `\u` escape. A tolerated text is never reported as valid under strict rules. `json.Options.refuse_non_finite`
-refuses JSON5's `Infinity` and `NaN`, for a reader that has no value for them.
+and `.Json5` accept their own additions and nothing else. `Options.tolerate` lets a text break a named rule, a
+`core.Tolerance`, with a fixed reading: `Invalid_Utf8` reads each ill-formed sequence in a string or a cell as U+FFFD,
+`Lone_Surrogate` does the same for an unpaired `\u` escape, `Ragged` takes a dsv record of any width, and `Bare_Quote`
+a quote inside an unquoted CSV cell. A rule a format has no instance of changes nothing there. A tolerated text is
+never reported as valid under strict rules. `json.Options.refuse_non_finite` refuses JSON5's `Infinity` and `NaN`, for
+a reader that has no value for them.
 
 ## Examples
 

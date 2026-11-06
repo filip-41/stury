@@ -95,7 +95,7 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 json_reader :: #force_inline proc(h: ^typed.Reader, opts: ^Options, $S: Spec) {
 	h.format = opts
 	h.find_tag = proc(h: ^typed.Reader, at: u64) -> typed.Tag_Scan {
-		s := typed.Tag_Scan{spelling = &SPELLING, src = h.src, name = h.plan.union_tag}
+		s := typed.Tag_Scan{view = {src = h.src, as = h.plan.as}, name = h.plan.union_tag}
 		_, s.fault = walk(h.src, at, S, (^Options)(h.format)^, &s, nil, typed.on_tag_token)
 		return s
 	}

@@ -171,6 +171,9 @@ refusals_name_the_row_and_the_field :: proc(t: ^testing.T) {
 	expect_refusal(t, read_rows("a\n128\n", &rows), .Out_Of_Range, 2)
 	expect_refusal(t, read_rows("b\nTrue\n", &rows), .Wrong_Kind, 2)
 	expect_refusal(t, read_rows("c\n1e\n", &rows), .Wrong_Kind, 2)
+	expect_refusal(t, read_rows("c\n1e400\n", &rows), .Out_Of_Range, 2)
+	expect_refusal(t, read_rows("c\nNaN\n", &rows), .Wrong_Kind, 2)
+	expect_refusal(t, read_rows("c\nInfinity\n", &rows), .Wrong_Kind, 2)
 	expect_refusal(t, read_rows("d\nPurple\n", &rows), .Not_A_Member, 2)
 	expect_refusal(t, read_rows("a,b\n1\n", &rows), .Walk, 5)
 }

@@ -167,8 +167,7 @@ wrapped :: proc(h: ^Reader, regs: core.Hook_Regs, t: core.Token, fld: ^Field, m:
 
 // What `find_tag` finds of an object's tag member, and the walk's hook that finds it.
 Tag_Scan :: struct {
-	spelling: ^core.Spelling,
-	src:      []u8,
+	view:     core.Token_View,
 	name:     string,
 	depth:    int,
 	on_tag:   bool,
@@ -180,8 +179,7 @@ Tag_Scan :: struct {
 on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	if t.role == .Key {
 		if s.depth == 1 {
-			view := core.Token_View{src = s.src}
-			s.on_tag = s.spelling.key_equals(&view, t, s.name)
+			s.on_tag = s.view.spelling.key_equals(&s.view, t, s.name)
 			if s.on_tag {
 				s.found += 1
 				if s.found == 2 {
@@ -360,7 +358,7 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 			dest^ = n.bits
 		case .Float:
 			x := transmute(f64)n.bits
-			if x != x || abs(x) > max(f64) {
+			if past_binary64(x, t.spelling) {
 				return .Out_Of_Range
 			}
 			dest^ = x
@@ -458,13 +456,11 @@ number_i64 :: proc(h: ^Reader, t: core.Token) -> (v: i64, reason: core.Typed_Err
 	if !ok {
 		return 0, .Wrong_Kind
 	}
-	#partial switch n.kind {
-	case .Int:
+	if n.kind == .Int {
 		return i64(n.bits), .None
-	case .Uint:
-		return 0, .Out_Of_Range
 	}
-	return 0, .Wrong_Kind
+	// An integer past `i64` reads as `.Uint`, a float or wide, as `store_number` judges it.
+	return 0, .Out_Of_Range if core.number_shape(t.spelling) < 32 else .Wrong_Kind
 }
 
 // One element of a bit_set: a member's name, or an integer of its range or a member's.
@@ -515,33 +511,28 @@ store_int :: #force_no_inline proc "contextless" (mag: u64, neg: bool, kind: Rea
 @(private)
 number_cold :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind {
 	context = h.ctx
-	if fld.kind >= .I8 && fld.kind <= .U64 {
-		if core.number_shape(t.spelling) >= 32 {
-			return .Wrong_Kind
-		}
-	} else if frac, sum := core.number_digits(t.spelling); sum <= 19 && t.spelling & core.NUMBER_KIND_MASK == 0 {
+	if frac, sum := core.number_digits(t.spelling); fld.kind > .U64 && sum <= 19 && t.spelling & core.NUMBER_KIND_MASK == 0 {
 		// `mant` holds all the digits of a plain decimal, the one kind the walk folds.
-		return store_number(spell.number_significand(h.mant, -i64(frac), h.base[t.lo] == '-', sum <= 15), h, t, fld, dest)
+		return store_number(spell.number_significand(h.mant, -i64(frac), h.base[t.lo] == '-', sum <= 15), false, h, t, fld, dest)
 	}
 	n, ok := h.plan.spelling.number(&h.view, t)
 	if !ok {
 		return .Wrong_Kind
 	}
-	return store_number(n, h, t, fld, dest)
+	return store_number(n, core.number_shape(t.spelling) < 32, h, t, fld, dest)
 }
 
-// Stores a number read from its span.
-store_number :: proc(n: core.Number, h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind {
+// Stores a number read from its span. `integer` says the span spells an integer: no fraction digit and no exponent.
+store_number :: proc(n: core.Number, integer: bool, h: ^Reader, t: core.Token, fld: ^Field, dest: uintptr) -> core.Typed_Error_Kind {
 	if fld.kind >= .I8 && fld.kind <= .U64 {
-		switch n.kind {
-		case .Int, .Uint:
-			return store_integer(n, fld.kind, dest)
-		case .Float:
-			// An integer past `u64` reads as a float.
-			return .Out_Of_Range if core.number_shape(t.spelling) < 32 else .Wrong_Kind
-		case .Wide:
-			return .Out_Of_Range
+		if !integer {
+			return .Wrong_Kind
 		}
+		if n.kind == .Int || n.kind == .Uint {
+			return store_integer(n, fld.kind, dest)
+		}
+		// An integer past `u64` reads as a float or as wide.
+		return .Out_Of_Range
 	}
 	if fld.kind != .F64 && fld.kind != .F32 {
 		return .Wrong_Kind
@@ -561,7 +552,7 @@ store_number :: proc(n: core.Number, h: ^Reader, t: core.Token, fld: ^Field, des
 	case .Wide:
 		return .Out_Of_Range
 	}
-	if x != x || abs(x) > max(f64) {
+	if past_binary64(x, t.spelling) {
 		return .Out_Of_Range
 	}
 	if fld.kind == .F32 {
@@ -585,7 +576,7 @@ store_number :: proc(n: core.Number, h: ^Reader, t: core.Token, fld: ^Field, des
 				}
 			}
 		}
-		if abs(v) > max(f32) {
+		if abs(v) > max(f32) && !spells_non_finite(x, t.spelling) {
 			return .Out_Of_Range
 		}
 		(^f32)(dest)^ = v
@@ -595,11 +586,23 @@ store_number :: proc(n: core.Number, h: ^Reader, t: core.Token, fld: ^Field, des
 	return .None
 }
 
+// Whether `x`, read from a token with `spelling`, is a format's own `Infinity` or `NaN`. A float takes it, and a walk
+// that refuses it has faulted before the token. A number past binary64 in a decimal spelling is not.
+@(private)
+spells_non_finite :: #force_inline proc "contextless" (x: f64, spelling: u16) -> bool {
+	return spelling & core.NUMBER_KIND_MASK > core.NUMBER_DECIMAL && (x != x || abs(x) > max(f64))
+}
+
+// Whether `x`, read from a token with `spelling`, is past what a binary64 holds.
+@(private)
+past_binary64 :: #force_inline proc "contextless" (x: f64, spelling: u16) -> bool {
+	return (x != x || abs(x) > max(f64)) && !spells_non_finite(x, spelling)
+}
+
 // A number whose spelling the walk does not fold: `+5` and `5.` spell an integer a plain decimal writes as `5`.
 @(cold)
 @(private)
 spelled_number :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	context = h.ctx
 	regs := regs
 	if regs.c >= regs.a {
 		reason: core.Typed_Error_Kind
@@ -612,12 +615,7 @@ spelled_number :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 	if fld.kind < .I8 || fld.kind > .F64 {
 		return indirect(h, regs, t)
 	}
-	n, ok := h.plan.spelling.number(&h.view, t)
-	reason := core.Typed_Error_Kind.Wrong_Kind
-	if ok {
-		reason = store_number(n, h, t, fld, uintptr(regs.c) + uintptr(fld.offset))
-	}
-	if reason != .None {
+	if reason := number_cold(h, t, fld, uintptr(regs.c) + uintptr(fld.offset)); reason != .None {
 		return refuse_value(h, regs, t, reason)
 	}
 	regs.c += u64(fld.stride)

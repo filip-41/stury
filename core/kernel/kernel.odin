@@ -94,7 +94,7 @@ Nibble_Table :: struct {
 
 // Returns, for each byte of `b`, the class bits its two nibbles give from `t`. Looks up both nibbles one vector
 // register at a time.
-classes :: #force_inline proc "contextless" ($T: Tier, b: Block, t: Nibble_Table) -> Block #no_bounds_check {
+classes :: #force_inline proc "contextless" ($T: Tier, b: Block, t: Nibble_Table) -> Block {
 	N :: VECTOR_BYTES[T]
 	U :: #simd[N]u8
 	w := transmute([64 / N]U)b
@@ -171,7 +171,7 @@ Scan_Op :: enum u8 {
 // The loops `scan` builds once per tier: `index_byte` and `last_index_byte` for `c`, then `quote_run` and `quote_cut`.
 // The zeros of a padded last block are no quote, escape, separator or bracket.
 @(private)
-scan_op :: #force_inline proc "contextless" ($T: Tier, src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int #no_bounds_check {
+scan_op :: #force_inline proc "contextless" ($T: Tier, src: []u8, c: u8, s: ^Quotes, $OP: Scan_Op) -> int {
 	when OP <= .Back {
 		return scan_loop(src, c, OP == .Back)
 	} else {
@@ -241,7 +241,7 @@ depth_low :: #force_inline proc "contextless" (low, depth: int, open, close: u64
 
 // The loop of `index_byte` and `last_index_byte`.
 @(private)
-scan_loop :: #force_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) -> int #no_bounds_check {
+scan_loop :: #force_inline proc "contextless" (src: []u8, c: u8, $BACK: bool) -> int {
 	p := raw_data(src)
 	i := len(src)
 	when BACK {

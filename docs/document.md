@@ -22,7 +22,7 @@ describes the walks that make the tokens and `kernel.md` the vector code behind 
 | `core/build/many.odin` | what only `$MANY` reads hold: armed path sets, rings of negative indexes, answers placed in text order, the stream |
 | `json/query.odin`, `dsv/query.odin` | each format's `Spelling.scan` walk, and `scan`, `find`, `each_answer` and `set` as forwarders |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the digit and scale bounds, every decoder |
-| `core/spell/text.odin` | `decode_text`, `decoded_equals`, `bytes_equal`, `Pending` and the escape table, the decoders' and readers' byte helpers |
+| `core/spell/text.odin` | `decode_text`, `decoded_equals`, `bytes_equal`, `Pending`, the escape table and `utf8_lax_char`, the decoders' and readers' byte helpers |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
 | `core/error.odin` | `Document_Error`, its kinds and rules, `inner`, `render`, `write_code` |
 | `json/document.odin` | JSON's `build`, `Spelling` and `Edit_Spelling` tables, `close_end`, the edit checks |
@@ -61,7 +61,7 @@ Core reads three bits of a node's `spelling`:
 |---|---|---|---|
 | 0 | `SPELLING_DECODE` | a string, key or dsv cell | the text is read through the format's `text` |
 | 1 | `SPELLING_QUOTED` | a JSON string, a quoted CSV cell | the token is quoted |
-| 2 | `SPELLING_LAX` | a JSON string | a tolerated ill-formed sequence may grow its decode |
+| 2 | `SPELLING_LAX` | a JSON string, a dsv cell | a tolerated ill-formed sequence may grow its decode |
 
 A node whose decode bit is clear is its own text: a JSON string's span leaves its quote pair out, an unquoted JSON5 key
 is bare, and an unquoted dsv cell is its bytes. The other bits are the format's own: a number's packed shape, and a

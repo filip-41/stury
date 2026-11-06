@@ -46,9 +46,11 @@ Pass :: struct($S: Spec, $H: typeid) {
 	// Whether any block so far has held a quote byte. While it is false, a block with no quote uses the path with no
 	// quote judgement and no quoted-field state.
 	quoted:    bool,
-	// `Options.tolerate`. The pass reads it at a block fault, at a record width check, and once per block in
-	// `read_tokens`, for `lax`.
-	tolerate:  bit_set[Tolerance; u8],
+	// `Options.tolerate`. The pass reads it at a block fault and at a record width check.
+	tolerate:  bit_set[core.Tolerance; u8],
+	// Whether the cell open at the block's end holds an ill-formed sequence `.Invalid_Utf8` tolerated, on a hooked
+	// pass, or the line open there, on `validate`'s. The next block's `ill_carry` starts from it.
+	open_ill:  bool,
 }
 
 // Returns the CR bytes with no LF after them in `bad`, leaving out bit 63, whose CR the next block judges. `carried` is
@@ -308,11 +310,29 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		_ = bs
 
 		// UTF-8 is checked on a block with a byte past 0x7F, and on an ASCII block only when the block before left a
-		// sequence open. `utf8_fault` searches back no further than `lo`.
+		// sequence open. `utf8_fault` searches back no further than `lo`. Under `.Invalid_Utf8` a block whose check
+		// fails is read for the leads of its ill-formed sequences, as the mask `ill`, and `ill_back` is the lead of one
+		// that starts in the block before and that this block's check found. The tolerance is for cells: an ill-formed
+		// sequence in a comment line is still a fault, as it is in a JSONC comment.
+		ill: u64
+		ill_back := -1
 		check := kernel.utf8_next(T, b, kernel.is_ascii(b), &w.utf8, &w.prev_high)
-		if check && !kernel.utf8_clean(T, w.utf8) && .Invalid_Utf8 not_in w.tolerate {
-			if at, k, d := utf8_fault(src, int(lo), pos); at >= 0 && (fault < 0 || at < fault) {
-				fault, kind, detail = at, k, d
+		if check && !kernel.utf8_clean(T, w.utf8) {
+			if .Invalid_Utf8 not_in w.tolerate {
+				if at, k, d := utf8_fault(src, int(lo), pos); at >= 0 && (fault < 0 || at < fault) {
+					fault, kind, detail = at, k, d
+				}
+			} else {
+				// The error state starts clean again, so the next block's check reports that block's errors only.
+				w.utf8.err = {}
+				when EMIT || H == Batch || COMMENTS {
+					ill, ill_back = ill_leads(base, int(lo), pos, n)
+				}
+				when COMMENTS {
+					if at, k, d := comment_utf8_fault(src, pos, ill, ill_back, cb | clfs); at >= 0 && (fault < 0 || at < fault) {
+						fault, kind, detail = at, k, d
+					}
+				}
 			}
 		}
 
@@ -334,11 +354,18 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			}
 		}
 		when EMIT {
-			if r, done := read_tokens(COMMENTS, &w, base, pos, seps, lfs, clfs, bs, &hs, on); done {
+			// A block that holds an ill-formed sequence, or that a cell holding one is open across, reads its cells'
+			// spellings through a cold instance, so the clean instance holds no test of them. The test reads `opts`,
+			// which is a constant in a literal-options pass, where `w.tolerate` is not.
+			if .Invalid_Utf8 in opts.tolerate && (ill != 0 || ill_back >= 0 || w.open_ill) {
+				if r, done := read_lax_tokens(COMMENTS, &w, base, pos, seps, lfs, clfs, bs, ill, ill_back, &hs, on); done {
+					return r
+				}
+			} else if r, done := read_tokens(false, COMMENTS, &w, base, pos, seps, lfs, clfs, bs, 0, -1, &hs, on); done {
 				return r
 			}
 		} else {
-			if r, done := read_cells(COMMENTS, &w, base, pos, seps, lfs, clfs); done {
+			if r, done := read_cells(COMMENTS, &w, base, pos, seps, lfs, clfs, ill, ill_back, .Invalid_Utf8 in opts.tolerate); done {
 				return r
 			}
 		}
@@ -371,9 +398,19 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 			return core.fault_at(u64(scan_record(src, w.rec_lo, 0, S, delim).quote), .Truncated, u8(Detail.Open_Quote))
 		}
 	}
-	if w.prev_high && !kernel.utf8_ok(w.utf8) && .Invalid_Utf8 not_in w.tolerate {
-		if at, k, d := utf8_fault(src, int(lo), n); at >= 0 {
-			return core.fault_at(u64(at), k, u8(d))
+	if w.prev_high && !kernel.utf8_ok(w.utf8) {
+		comment_open := false
+		when COMMENTS {
+			comment_open = w.comment != 0
+		}
+		if .Invalid_Utf8 not_in w.tolerate || comment_open {
+			if at, k, d := utf8_fault(src, int(lo), n); at >= 0 {
+				return core.fault_at(u64(at), k, u8(d))
+			}
+		}
+		when EMIT || H == Batch {
+			_, back := ill_leads(base, int(lo), n, n)
+			w.open_ill ||= back >= (w.field_lo when EMIT else w.rec_lo)
 		}
 	}
 	when EMIT || H == Batch {
@@ -388,9 +425,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 	when COMMENTS {
 		last = last && w.comment == 0
 		if w.comment != 0 && w.rec_lo < n {
-			switch emit(h, on, &hs, u64(w.rec_lo), u32(n - w.rec_lo), .Plain, .Comment, 1) {
-			case .Next, .Keep, .Skip:
-			case .Stop:
+			if emit(h, on, &hs, u64(w.rec_lo), u32(n - w.rec_lo), .Plain, .Comment, core.comment_spelling(1, 0)) == .Stop {
 				return stopped(u64(w.rec_lo), u32(n - w.rec_lo))
 			}
 		}
@@ -408,7 +443,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				return core.fault_at(u64(w.rec_lo), .Bad_Char, u8(Detail.Too_Many if wide else Detail.Too_Few))
 			}
 			when H == Batch {
-				frame_row(h, w.rec_lo, n, header, w.width)
+				frame_row(h, w.rec_lo, n, header, w.width, w.open_ill)
 			}
 		}
 	}

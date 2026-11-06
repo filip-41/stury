@@ -427,6 +427,42 @@ refuse_wide_header :: proc(t: ^testing.T) {
 	}
 }
 
+// A header of `MAX_CHILDREN` cells or more saturates its row's count and every record's, so the build counts each
+// record's cells again, one per column under the shared keys.
+@(test)
+saturated_header :: proc(t: ^testing.T) {
+	for count in ([]int{int(core.MAX_CHILDREN), int(core.MAX_CHILDREN) + 1}) {
+		b := strings.builder_make()
+		defer strings.builder_destroy(&b)
+		for i in 0 ..< count {
+			if i > 0 {
+				strings.write_byte(&b, ',')
+			}
+			strings.write_byte(&b, 'a' + u8(i % 26))
+		}
+		for _ in 0 ..< 2 {
+			strings.write_byte(&b, '\n')
+			for i in 0 ..< count {
+				if i > 0 {
+					strings.write_byte(&b, ',')
+				}
+				strings.write_byte(&b, '1')
+			}
+		}
+		doc, err := build(strings.to_string(b), .Csv)
+		defer core.destroy(&doc)
+		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+		testing.expect_value(t, core.length(&doc, core.ROOT), 2)
+		for k in 0 ..< 2 {
+			rec, ok := core.child_at(&doc, core.ROOT, k)
+			testing.expect(t, ok)
+			testing.expect_value(t, core.length(&doc, rec), count)
+			last, lok := core.child_at(&doc, rec, count - 1)
+			testing.expect(t, lok && last == rec + core.Node_Index(count))
+		}
+	}
+}
+
 // `number` returns `.Wide` for a container and for a key. `text` and `key_equals` return no text or false for a
 // container.
 @(test)
@@ -493,6 +529,27 @@ quoted_cell_text :: proc(t: ^testing.T) {
 	testing.expect(t, ok)
 	testing.expect_value(t, s, "")
 	testing.expect_value(t, core.resolve(&empty, ecell), core.Kind.String)
+}
+
+// `text_clone` of a quoted empty cell, whose text is shorter than its span by the whole span, reads under an allocator
+// that frees nothing, as under one that frees.
+@(test)
+quoted_empty_cell_clone :: proc(t: ^testing.T) {
+	doc, err := build("a\n\"\"\n", .Csv)
+	defer core.destroy(&doc)
+	if !testing.expect_value(t, err.kind, core.Document_Error_Kind.None) {
+		return
+	}
+	rec, _ := first_member(&doc, 0)
+	cell, _ := core.member(&doc, rec, "a")
+	arena: mem.Arena
+	backing: [64]u8
+	mem.arena_init(&arena, backing[:])
+	for alloc in ([]mem.Allocator{mem.arena_allocator(&arena), context.allocator}) {
+		s, ok := core.text_clone(&doc, cell, alloc)
+		testing.expectf(t, ok && s == "", "clone: %q %v", s, ok)
+		delete(s, alloc)
+	}
 }
 
 // A TSV escape reads as the byte it spells, so its cell is text and no number.

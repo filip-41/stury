@@ -151,13 +151,18 @@ builder_finish :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Faul
 }
 
 // Frees the builder's buffers, last allocated first. An arena ignores a free and takes a last block's tail back at a
-// resize, so each buffer shrinks first and a retry after `.No_Memory` finds that room.
+// resize, so each buffer shrinks to one element first and a retry after `.No_Memory` finds that room. The default
+// allocator frees a block whole, so it takes no resize.
 @(private)
 builder_free :: proc(b: ^Builder) {
 	release :: proc(allocator: runtime.Allocator, old: []$T) {
-		if old != nil {
-			delete(trim(allocator, old, 1), allocator)
+		old := old
+		if len(old) > 1 && allocator.procedure != runtime.default_allocator_proc {
+			if raw, err := runtime.non_zero_mem_resize(raw_data(old), len(old) * size_of(T), size_of(T), align_of(T), allocator); err == nil {
+				old = ([^]T)(raw_data(raw))[:1]
+			}
 		}
+		delete(old, allocator)
 	}
 	release(b.doc.allocator, b.doc.counts_alloc)
 	release(b.doc.allocator, b.doc.facts_alloc)
@@ -303,14 +308,8 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYL
 	if t.kind != .End {
 		#no_bounds_check h.doc.nodes[a] = t
 		// The parent's frame, its open index above its count, is pushed, and the new container's count starts at
-		// zero.
-		when KEYLESS {
-			s.b += 1
-		} else {
-			if t.role == .Value {
-				s.b += 1
-			}
-		}
+		// zero. A container is never a key, so it is counted with no role test.
+		s.b += 1
 		#no_bounds_check h.stack[s.c] = s.b
 		s.c += 1
 		s.a = u64(a + 1)
@@ -321,9 +320,7 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYL
 				// to the root since no record precedes it to take it.
 				builder_resolve_pending(h, core.Node_Index(a), builder_keys_lo(h))
 			} else {
-				if t.role == .Value {
-					builder_resolve_pending(h, core.Node_Index(a))
-				}
+				builder_resolve_pending(h, core.Node_Index(a))
 			}
 		}
 		when KEYLESS {
@@ -340,9 +337,7 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYL
 	open := core.Node_Index(s.b >> 32)
 	builder_close_node(h, a, open, u32(s.b))
 	when FACTS && !KEYLESS {
-		if h.doc.nodes[int(open)].role == .Value {
-			h.last = open
-		}
+		h.last = open
 	}
 	// No close node is stored, so the cursor is already where the next token is written.
 	s.c -= 1
@@ -381,9 +376,6 @@ builder_refuse_open :: proc "contextless" (h: ^Builder, regs: core.Hook_Regs) {
 		return
 	}
 	depth := int(regs.c)
-	if depth == 0 || core.Node_Index(regs.b >> 32) == core.NO_NODE {
-		return
-	}
 	open := core.Node_Index(regs.b >> 32)
 	stop := core.Node_Index(regs.a)
 	for open != core.NO_NODE {
@@ -472,24 +464,6 @@ grow :: #force_no_inline proc "contextless" (allocator: runtime.Allocator, old: 
 		return nil, false
 	}
 	return ([^]T)(raw_data(raw))[:n], true
-}
-
-// Returns `old` shortened to `n` where the allocator can resize it, and `old` unchanged where it cannot. The caller
-// sets both the array and the allocation behind it to the result. An arena returns the tail of its last block and keeps
-// any other block's, so this is not a promise about every allocator. The default allocator keeps the reservation: the
-// pages past the nodes were never touched, and a shrunk large block is returned to the system when freed, so a document
-// built and destroyed in a loop would fault its pages in again each time.
-@(private, cold)
-trim :: #force_no_inline proc (allocator: runtime.Allocator, old: []$T, n: int) -> []T {
-	// A short buffer's tail is not worth the allocator's call.
-	if n <= 0 || n >= len(old) || len(old) * size_of(T) <= 4096 || allocator.procedure == runtime.default_allocator_proc {
-		return old
-	}
-	raw, err := runtime.non_zero_mem_resize(raw_data(old), len(old) * size_of(T), n * size_of(T), align_of(T), allocator)
-	if err != nil {
-		return old
-	}
-	return ([^]T)(raw_data(raw))[:n]
 }
 
 // Doubles the node buffer. A text that fits its reservation does not call this. A refused allocation sets `err`

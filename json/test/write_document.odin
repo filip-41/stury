@@ -1,6 +1,7 @@
 package json_tests
 
 import "core:bytes"
+import "core:fmt"
 import "core:io"
 import "core:math/rand"
 import "core:slice"
@@ -372,19 +373,26 @@ COMMENT_TEXTS :: [?]string {
 	"[[1 //\n,2,/**/],{},{\"k\":{/**/}}]//\n",
 }
 
-// The comments of a document without their places, in a canonical order.
+// The comments of a document with their nodes and roles, in a canonical order.
 fact_bodies :: proc(doc: ^core.Document) -> [dynamic]string {
 	list: [dynamic]string
 	for f in doc.facts {
-		append(&list, string(doc.src[f.lo:f.lo + u64(f.n)]))
+		append(&list, fmt.aprintf("%d %v %s", f.node, f.role, doc.src[f.lo:f.lo + u64(f.n)]))
 	}
 	slice.sort(list[:])
 	return list
 }
 
+fact_bodies_destroy :: proc(list: [dynamic]string) {
+	for s in list {
+		delete(s)
+	}
+	delete(list)
+}
+
 // Writes `src` read as JSONC under every option and checks that each text reads again as JSONC into the same nodes and the
-// same comments, that writing it again changes nothing, and that every entry writes the same text. As JSON the comments
-// are dropped and counted.
+// same comments, each of the same node in the same role, that writing it again changes nothing, and that every entry
+// writes the same text. As JSON the comments are dropped and counted.
 check_commented :: proc(t: ^testing.T, src: []u8) -> bool {
 	doc, err := json.build(src, .Jsonc)
 	if !testing.expectf(t, err.kind == .None, "build %q: %v", src, err) {
@@ -392,7 +400,7 @@ check_commented :: proc(t: ^testing.T, src: []u8) -> bool {
 	}
 	defer core.destroy(&doc)
 	bodies := fact_bodies(&doc)
-	defer delete(bodies)
+	defer fact_bodies_destroy(bodies)
 	for opts, k in WRITE_OPTS {
 		text, _, werr := core.write(&doc, opts)
 		if !testing.expectf(t, werr.kind == .None, "write %q under %d: %v", src, k, werr) {
@@ -408,7 +416,7 @@ check_commented :: proc(t: ^testing.T, src: []u8) -> bool {
 			return false
 		}
 		got := fact_bodies(&again)
-		defer delete(got)
+		defer fact_bodies_destroy(got)
 		if !testing.expectf(t, slice.equal(got[:], bodies[:]), "comments of %q under %d became %q", src, k, text) {
 			return false
 		}
@@ -525,6 +533,13 @@ write_document_comment_layout :: proc(t: ^testing.T) {
 	text, _, _ := core.write(&foot_doc, core.PRETTY)
 	defer delete(text)
 	testing.expect_value(t, string(text), "[\n  // x\n  1\n  // foot\n]")
+	// Compact text ends a value's line before a comment that is not the value's inline comment.
+	lines := "[1, /* i */\n /* head */ 2 /* i */\n /* foot */]\n/* root foot */"
+	lines_doc, _ := json.build(transmute([]u8)lines, .Jsonc)
+	defer core.destroy(&lines_doc)
+	broken, _, _ := core.write(&lines_doc)
+	defer delete(broken)
+	testing.expect_value(t, string(broken), "[1,/* i */\n/* head */2/* i */\n/* foot */]\n/* root foot */")
 }
 
 @(test)
@@ -745,6 +760,37 @@ write_document_kept :: proc(t: ^testing.T) {
 	defer delete(text)
 	testing.expect_value(t, kerr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(text), `{"a":[2,{"k":[4]}],"b":{"d":2}}`)
+}
+
+// A partial document is written as the target spec says, as the same nodes of a full build are.
+@(test)
+write_document_kept_as_target :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("[{id:0x1F,v:Infinity,'s':'q'},2]")
+	path, perr := core.parse_path(".[0]")
+	defer core.path_destroy(&path)
+	if !testing.expect_value(t, perr.kind, core.Path_Error_Kind.None) {
+		return
+	}
+	doc, err := json.scan(src, .Json5, path)
+	defer core.destroy(&doc)
+	if !testing.expect_value(t, err.kind, core.Path_Error_Kind.None) {
+		return
+	}
+	full, ferr := json.build(src, .Json5)
+	defer core.destroy(&full)
+	testing.expect_value(t, ferr.kind, core.Document_Error_Kind.None)
+	answer := doc.answers[0].node
+	for target in ([]json.Spec{.Json, .Jsonc, .Json5}) {
+		kept, _, kerr := core.write(&doc, as = json.as(target), node = answer)
+		defer delete(kept)
+		whole, _, werr := core.write(&full, as = json.as(target), node = 1)
+		defer delete(whole)
+		testing.expectf(t, kerr == werr && string(kept) == string(whole), "%v: %q %v, full %q %v", target, kept, kerr.kind, whole, werr.kind)
+	}
+	own, _, oerr := core.write(&doc)
+	defer delete(own)
+	testing.expect_value(t, oerr.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(own), "[{id:0x1F,v:Infinity,'s':'q'}]")
 }
 
 // A JSONC document with no comment is written as JSON, and `format` removes its trailing comma.

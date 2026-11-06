@@ -246,7 +246,7 @@ Tolerated :: struct {
 	using c:   Case,
 	tsv:       bool,
 	no_header: bool,
-	tol:       bit_set[dsv.Tolerance; u8],
+	tol:       bit_set[core.Tolerance; u8],
 }
 
 // Texts each tolerance set accepts, and faults no tolerance in the set accepts, which stay the same without it.
@@ -278,6 +278,21 @@ TOLERATED := []Tolerated {
 	{{"a\xf0\x9f\x98", nil, 0}, true, false, {.Invalid_Utf8}},
 	{{"a\\xb\n", .Bad_Escape, 1}, true, false, {.Invalid_Utf8, .Ragged, .Bare_Quote}},
 	{{"a\xff\n", .Bad_Char, 1}, false, false, {.Ragged, .Bare_Quote}},
+	{{"a,b\n\xff,x\"y\n1\n", nil, 0}, false, false, {.Invalid_Utf8, .Lone_Surrogate, .Ragged, .Bare_Quote}},
+	{{"a\xff\n", .Bad_Char, 1}, false, false, {.Lone_Surrogate}},
+	{{"a\t\"b\n1\n", TOO_FEW, 6}, true, false, {.Bare_Quote}},
+}
+
+// Texts with `#` comment lines. `.Invalid_Utf8` is for cells, so an ill-formed sequence in a comment line is still a
+// fault.
+@(rodata)
+COMMENTED := []Tolerated {
+	{{"a,b\n# ok\n1,\xff\n", nil, 0}, false, false, {.Invalid_Utf8}},
+	{{"a,b\n# x\xffy\n1,2\n", .Bad_Char, 7}, false, false, {.Invalid_Utf8}},
+	{{"a,\xff\n# \xff\n", .Bad_Char, 6}, false, false, {.Invalid_Utf8}},
+	{{"a\n#\xf0\x9f\x98\n", .Bad_Char, 3}, false, false, {.Invalid_Utf8}},
+	{{"a,b\n1,2\n# x\xe2\x82", .Truncated, 13}, false, false, {.Invalid_Utf8}},
+	{{"a\tb\n# \xc3(\n", .Bad_Char, 6}, true, false, {.Invalid_Utf8}},
 }
 
 // Each tolerance, through `validate` and `walk`, after 0 to 129 empty lines so what it accepts falls on every byte of
@@ -288,30 +303,33 @@ tolerances :: proc(t: ^testing.T) {
 	buf: [dynamic]u8
 	defer delete(buf)
 	for k in 0 ..< 130 {
-		for c in TOLERATED {
-			clear(&buf)
-			for _ in 0 ..< k {
-				append(&buf, '\n')
-			}
-			append(&buf, c.text)
-			opts := dsv.Options{no_header = c.no_header, tolerate = c.tol}
-			strict, got, fault: Maybe(core.Fault)
-			hi: u64
-			if c.tsv {
-				strict = dsv.validate(buf[:], .Tsv, {no_header = c.no_header})
-				got = dsv.validate(buf[:], .Tsv, opts)
-				hi, fault = dsv.walk(buf[:], 0, .Tsv, opts, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
-			} else {
-				strict = dsv.validate(buf[:], .Csv, {no_header = c.no_header})
-				got = dsv.validate(buf[:], .Csv, opts)
-				hi, fault = dsv.walk(buf[:], 0, .Csv, opts, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
-			}
-			if !expect_fault(t, c, got, k, c.tsv) || !expect_fault(t, c, fault, k, c.tsv) || !testing.expectf(t, c.kind != nil || strict != nil, "%q: strict takes it", c.text) {
-				return
-			}
-			end := c.offset + u64(k) if c.kind != nil else u64(len(buf))
-			if !testing.expectf(t, hi == end, "%q shifted %d: hi %d, want %d", c.text, k, hi, end) {
-				return
+		for commented in ([]bool{false, true}) {
+			comment := u8('#') if commented else 0
+			for c in (COMMENTED if commented else TOLERATED) {
+				clear(&buf)
+				for _ in 0 ..< k {
+					append(&buf, '\n')
+				}
+				append(&buf, c.text)
+				opts := dsv.Options{no_header = c.no_header, comment = comment, tolerate = c.tol}
+				strict, got, fault: Maybe(core.Fault)
+				hi: u64
+				if c.tsv {
+					strict = dsv.validate(buf[:], .Tsv, {no_header = c.no_header, comment = comment})
+					got = dsv.validate(buf[:], .Tsv, opts)
+					hi, fault = dsv.walk(buf[:], 0, .Tsv, opts, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
+				} else {
+					strict = dsv.validate(buf[:], .Csv, {no_header = c.no_header, comment = comment})
+					got = dsv.validate(buf[:], .Csv, opts)
+					hi, fault = dsv.walk(buf[:], 0, .Csv, opts, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
+				}
+				if !expect_fault(t, c, got, k, c.tsv) || !expect_fault(t, c, fault, k, c.tsv) || !testing.expectf(t, c.kind != nil || strict != nil, "%q: strict takes it", c.text) {
+					return
+				}
+				end := c.offset + u64(k) if c.kind != nil else u64(len(buf))
+				if !testing.expectf(t, hi == end, "%q shifted %d: hi %d, want %d", c.text, k, hi, end) {
+					return
+				}
 			}
 		}
 	}
@@ -324,7 +342,7 @@ tolerated_tokens :: proc(t: ^testing.T) {
 	defer free(log)
 	Tokens :: struct {
 		text:   string,
-		tol:    bit_set[dsv.Tolerance; u8],
+		tol:    bit_set[core.Tolerance; u8],
 		tokens: []core.Token,
 	}
 	for c in ([]Tokens {

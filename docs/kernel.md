@@ -17,7 +17,7 @@ part of the shape works around.
 | `lanes64.odin` | everything but arm64 | the same operations on one 64-lane vector that LLVM splits to the target's width |
 | `amd64.odin` | x86-64 | `Tier` with v2, v3 and v4, `tier()`, and the kernels whose instructions differ by tier |
 | `single_tier.odin` | everything but x86-64 | `Tier` with one member, and the same tier-dependent kernels in portable or arm64 form |
-| `utf8.odin` | every target | UTF-8 validation |
+| `utf8.odin` | every target | UTF-8 validation of blocks |
 | `compress.odin` | every target | `compress`, which gathers the lanes a mask keeps |
 
 The package splits in two independent ways. The block operations (`load`, `eq`, `pack`, `pack_n`, `is_ascii`,
@@ -124,8 +124,9 @@ Each rule below works around a behaviour of Odin or LLVM:
   tunes for it, and Odin's default CPU, x86-64-v2, splits every unaligned 32-byte load in two.
 - **The 64-byte shuffle is declared as an LLVM intrinsic** (`llvm.x86.avx512.pshuf.b.512`). `core:simd/x86` lacks
   it.
-- **Kernels that index arrays are `#no_bounds_check`.** LLVM keeps a bounds check on indexing inside `#unroll` even
-  where the index is a constant.
+- **Only `head16` and `compress` are `#no_bounds_check`.** Their table indices are computed at run time: `16 - n` with
+  `n` below 16, and a mask's byte, whose check the v3 and v4 builds of `compress` keep. A constant index, as `#unroll`
+  gives, and a multi-pointer index carry no check.
 
 ## The block operations
 

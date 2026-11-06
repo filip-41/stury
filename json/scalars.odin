@@ -5,58 +5,81 @@ import spell "../core/spell"
 import core "../core"
 
 // Reads the number at `p`, which starts with `-` or a digit. Returns its end and `spelling`, or a fault and the byte it
-// is at. `$shape` false skips the digit counts and returns spelling 0. `$fold` true returns the integer and fraction
-// digits in `mant`, which wraps past 19 digits.
+// is at, `Bad_Number` at the `x` of JSON5's hex. `$lax` reads a JSON5 number instead, which may also start with `+`,
+// `.`, `I` or `N`, and whose decimal integer or fraction part may be empty, but not both. The states read JSON's and
+// leave the rest to `st_number5`, so the common number pays no test for JSON5's. `$fold` true returns the integer and
+// fraction digits in `mant`, which wraps past 19 digits. Inlined, so a caller that drops `spelling` does not count
+// digits.
 @(private)
-number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape, $fold: bool) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind, mant: u64) #no_bounds_check {
+number_run :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec, $lax, $fold: bool) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind, mant: u64) #no_bounds_check {
 	q = p
-	if q[0] == '-' {
+	k := Number_Spelling.Json
+	if q[0] == '-' || lax && q[0] == '+' {
+		if q[0] == '+' {
+			k = .Decimal
+		}
 		q = q[1:]
 		if q >= end {
 			return end, 0, .Truncated, 0
 		}
 	}
-	when shape {
-		int_at := q
+	when lax {
+		switch q[0] {
+		case 'I':
+			q, kind = word5(q, end, "Infinity")
+			return q, u16(Number_Spelling.Infinity), kind, 0
+		case 'N':
+			q, kind = word5(q, end, "NaN")
+			return q, u16(Number_Spelling.Nan), kind, 0
+		}
+		if q[0] == '0' && intrinsics.ptr_sub(end, q) > 1 && q[1] | 0x20 == 'x' {
+			r := hex_run(q[2:], end)
+			if r == q[2:] {
+				q, kind = bad_or_truncated(r, end)
+				return q, 0, kind, 0
+			}
+			return r, u16(Number_Spelling.Hex), .None, 0
+		}
 	}
+	int_at := q
 	if q[0] == '0' {
 		q = q[1:]
-		if q < end && q[0] - '0' < 10 {
+		if q < end && (q[0] - '0' < 10 || .Es5 in FEATURES[S] && q[0] | 0x20 == 'x') {
 			return q, 0, .Bad_Number, 0
 		}
 	} else {
 		r := spell.digit_end(q, end, &mant, fold)
-		if r == q {
+		if r == q && !(lax && q[0] == '.') {
 			return q, 0, .Bad_Number, 0
 		}
 		q = r
 	}
-	when shape {
-		int_digits := u64(intrinsics.ptr_sub(q, int_at))
-		frac_digits: u64
-	}
+	int_digits := u64(intrinsics.ptr_sub(q, int_at))
+	frac_digits: u64
 	if q >= end {
-		when shape {
-			return q, number_spelling(.Json, int_digits, frac_digits), .None, mant
-		}
-		return q, 0, .None, 0
+		return q, core.number_spelling(u16(k), int_digits, frac_digits), .None, mant
 	}
 	c := q[0]
 	if c == '.' {
 		r := spell.digit_end(q[1:], end, &mant, fold)
-		if r == q[1:] {
-			q2, k2 := bad_or_truncated(r, end)
-			return q2, 0, k2, 0
+		when lax {
+			if r == q[1:] || q == int_at {
+				if r == q[1:] && q == int_at {
+					q2, k2 := bad_or_truncated(r, end)
+					return q2, 0, k2, 0
+				}
+				k = .Decimal
+			}
+		} else {
+			if r == q[1:] {
+				q2, k2 := bad_or_truncated(r, end)
+				return q2, 0, k2, 0
+			}
 		}
-		when shape {
-			frac_digits = u64(intrinsics.ptr_sub(r, q[1:]))
-		}
+		frac_digits = u64(intrinsics.ptr_sub(r, q[1:]))
 		q = r
 		if q >= end {
-			when shape {
-				return q, number_spelling(.Json, int_digits, frac_digits), .None, mant
-			}
-			return q, 0, .None, 0
+			return q, core.number_spelling(u16(k), int_digits, frac_digits), .None, mant
 		}
 		c = q[0]
 	}
@@ -70,27 +93,18 @@ number_run :: #force_inline proc "contextless" (p, end: [^]u8, $shape, $fold: bo
 			q2, k2 := bad_or_truncated(r, end)
 			return q2, 0, k2, 0
 		}
-		when shape {
-			return r, number_spelling(.Json, int_digits, frac_digits) | core.NUMBER_EXP, .None, mant
-		}
-		q = r
+		return r, core.number_spelling(u16(k), int_digits, frac_digits) | core.NUMBER_EXP, .None, mant
 	}
-	when shape {
-		return q, number_spelling(.Json, int_digits, frac_digits), .None, mant
-	}
-	return q, 0, .None, 0
+	return q, core.number_spelling(u16(k), int_digits, frac_digits), .None, mant
 }
 
-// Calls `number_run` with `$shape` true for a hook and false for `core.No_Hooks`, and hands `mant` to a hook with a
-// field `mant`.
+// Calls `number_run`, and hands `mant` to a hook with a field `mant`.
 @(private)
 number_h :: #force_inline proc "contextless" (p, end: [^]u8, w: ^Walk($S, $H)) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind) {
-	when H == core.No_Hooks {
-		q, spelling, kind, _ = number_run(p, end, false, false)
-	} else when intrinsics.type_has_field(H, "mant") {
-		q, spelling, kind, w.hooks.mant = number_run(p, end, true, true)
+	when intrinsics.type_has_field(H, "mant") {
+		q, spelling, kind, w.hooks.mant = number_run(p, end, S, false, true)
 	} else {
-		q, spelling, kind, _ = number_run(p, end, true, false)
+		q, spelling, kind, _ = number_run(p, end, S, false, false)
 	}
 	return
 }
@@ -162,19 +176,64 @@ word_end :: #force_inline proc "contextless" (p, end: [^]u8, word: string) -> (q
 // `end` and `Truncated`.
 @(private, cold)
 literal_fault :: #force_no_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: core.Fault_Kind) {
-	word := "null"
-	if p[0] == 't' {
-		word = "true"
-	} else if p[0] == 'f' {
-		word = "false"
+	q, _ = word_end(p, end, "true" if p[0] == 't' else ("false" if p[0] == 'f' else "null"))
+	return q, .Truncated if q >= end else .Bad_Char
+}
+
+// JSON's `Spelling.resolve` returns the node's kind, which is its value's kind.
+@(private)
+spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
+	return doc.nodes[i].kind
+}
+
+// JSON's `Spelling.number`, false for a token that is not a number. A decimal of at most 19 digits is decoded from the
+// walk's digit counts, and the rest go to `number_slow`.
+number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool) {
+	if n.kind == .Number {
+		sp := n.spelling
+		if sp & core.NUMBER_KIND_MASK <= u16(Number_Spelling.Decimal) {
+			lo, hi := n.lo, n.lo + u64(n.n)
+			int_digits, frac_digits := core.number_digit_counts(sp)
+			if core.number_shape(sp) < 32 {
+				if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
+					return num, true
+				}
+			} else if sp & core.NUMBER_EXP != 0 {
+				return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits), true
+			} else {
+				return spell.number_fraction(doc.src, lo, hi, int_digits, frac_digits), true
+			}
+		}
+		return number_slow(doc, n), true
 	}
-	ok: bool
-	q, ok = word_end(p, end, word)
-	if ok {
-		unreachable()
+	return {}, false
+}
+
+// JSON's `Spelling.number_f32`. Hex past `u64` has rounded once into binary64, so it is read again from its digits.
+@(private)
+number_f32 :: proc(doc: ^core.Token_View, n: core.Node) -> (f32, bool) {
+	if number_spelling_of(n.spelling) != .Hex {
+		return 0, false
 	}
-	if q >= end {
-		return end, .Truncated
+	return spell.number_hex_f32(doc.src, n.lo, n.lo + u64(n.n))
+}
+
+// Decodes what `number` does not: long decimals, hex, `Infinity` and `NaN`.
+@(private, cold)
+number_slow :: #force_no_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
+	lo, hi := n.lo, n.lo + u64(n.n)
+	switch number_spelling_of(n.spelling) {
+	case .Json, .Decimal:
+		// JSON5's `5.` has no fraction digit, so it is the integer `5`.
+		num, _, _, _ := spell.number_loose(doc.src, lo, hi - u64(doc.src[hi - 1] == '.'))
+		return num
+	case .Hex:
+		return spell.number_hex(doc.src, lo, hi)
+	case .Infinity:
+		// JSON5's `Infinity`, signed by a `-` before it, and its `NaN`, a quiet one with a zero sign.
+		return {0x7ff0_0000_0000_0000 | u64(lo < hi && doc.src[lo] == '-') << 63, .Float}
+	case .Nan:
+		return {0x7ff8_0000_0000_0000, .Float}
 	}
-	return q, .Bad_Char
+	return {0, .Wide}
 }

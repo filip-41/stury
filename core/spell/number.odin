@@ -163,9 +163,7 @@ number_exponent :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_d
 	}
 	p += u64(int_digits)
 	frac_at := p
-	has_frac := false
 	if p < hi && base[p] == '.' {
-		has_frac = true
 		p += 1
 		frac_at = p
 		if frac_digits < 0 || p + u64(frac_digits) > hi {
@@ -182,22 +180,19 @@ number_exponent :: #force_inline proc(src: []u8, lo, hi: u64, int_digits, frac_d
 	if !has_digits || end != hi {
 		return number_decimal(src, lo, hi)
 	}
+	e := exp - i64(frac_digits)
+	if scale_wide(exp, e) {
+		return {0, .Wide}
+	}
 	whole := fold_digits_end(src, int_at + u64(int_digits), u64(int_digits)) if int_digits > 0 else 0
 	frac := fold_digits_end(src, frac_at + u64(frac_digits), u64(frac_digits)) if frac_digits > 0 else 0
-	mant := whole * POW10_U64[frac_digits] + frac
-	n := Number_Lex {
-		int_at     = int_at,
-		int_digits = u64(int_digits),
-		frac_at    = frac_at,
-		frac_digits = u64(frac_digits),
-		exp        = exp,
-		mant       = mant,
-		neg        = neg,
-		has_frac   = has_frac,
-		has_exp    = true,
-		ok         = true,
-	}
-	return number_of_lex(src, lo, hi, n)
+	return number_significand(whole * POW10_U64[frac_digits] + frac, e, neg, int_digits + frac_digits <= 15)
+}
+
+// Whether an exponent `exp`, or the scale `e` it gives the significand's digits, is outside ±`MAX_NUMBER_SCALE`.
+@(private)
+scale_wide :: #force_inline proc "contextless" (exp, e: i64) -> bool {
+	return exp > MAX_NUMBER_SCALE || exp < -MAX_NUMBER_SCALE || e > MAX_NUMBER_SCALE || e < -MAX_NUMBER_SCALE
 }
 
 // Decodes `src[lo:hi]` with RFC 8259's number grammar. Returns false if the span is not a valid number.
@@ -209,15 +204,17 @@ number_strict :: proc(src: []u8, lo, hi: u64) -> (Number, bool) {
 	return number_of_lex(src, lo, hi, n), true
 }
 
-// Decodes `src[lo:hi]` with the loose grammar, and also returns whether the span is a plain integer and whether it is
-// a valid number. The loose grammar is the strict one plus a leading `+`, leading zeros, and a point with no digits on
-// one side.
-number_loose :: proc(src: []u8, lo, hi: u64) -> (num: Number, integer, ok: bool) {
+// Decodes `src[lo:hi]` with the loose grammar, and also returns whether the span is a plain integer, whether it is a
+// valid number with the strict grammar, and whether it is a valid number. The loose grammar is the strict one plus a
+// leading `+`, leading zeros, and a point with no digits on one side.
+number_loose :: proc(src: []u8, lo, hi: u64) -> (num: Number, integer, strict, ok: bool) {
 	n := lex_decimal(src, lo, hi, false)
 	if !n.ok {
-		return {0, .Wide}, false, false
+		return {0, .Wide}, false, false, false
 	}
-	return number_of_lex(src, lo, hi, n), !n.has_frac && !n.has_exp, true
+	strict = n.int_at == lo + u64(n.neg) && n.int_digits > 0 && (n.int_digits == 1 || src[n.int_at] != '0')
+	strict &&= !n.has_frac || n.frac_digits > 0
+	return number_of_lex(src, lo, hi, n), !n.has_frac && !n.has_exp, strict, true
 }
 
 // Parses the first `n` bytes at `p`, at most 8, and reports whether all are digits. Always loads 8 bytes.
@@ -454,12 +451,12 @@ digit_end :: #force_inline proc "contextless" (p, end: [^]u8, mant: ^u64, $fold:
 				tz := intrinsics.count_trailing_zeros(m)
 				k := tz >> 3
 				when fold {
-					mant^ = mant^ * DIGIT8_POW10[k] + digits8_value((w << (~tz & 0x38)) << 8)
+					mant^ = mant^ * POW10_U64[k] + digits8_value((w << (~tz & 0x38)) << 8)
 				}
 				return q[k:]
 			}
 			when fold {
-				mant^ = mant^ * DIGIT8_POW10[8] + digits8_value(w)
+				mant^ = mant^ * POW10_U64[8] + digits8_value(w)
 			}
 			q = q[8:]
 		}
@@ -483,7 +480,7 @@ digit_end :: #force_inline proc "contextless" (p, end: [^]u8, mant: ^u64, $fold:
 number_of_lex :: #force_inline proc(src: []u8, lo, hi: u64, n: Number_Lex) -> Number {
 	digits := n.int_digits + n.frac_digits
 	e := n.exp - i64(n.frac_digits)
-	if digits > MAX_NUMBER_DIGITS || n.exp > MAX_NUMBER_SCALE || n.exp < -MAX_NUMBER_SCALE || e > MAX_NUMBER_SCALE || e < -MAX_NUMBER_SCALE {
+	if digits > MAX_NUMBER_DIGITS || scale_wide(n.exp, e) {
 		return {0, .Wide}
 	}
 	if !n.has_frac && !n.has_exp {
@@ -544,11 +541,6 @@ KEEP_DIGITS_MASK: [9]u64 = {
 	0x0F0F_0F0F_0F0F << 16,
 	0x0F_0F0F_0F0F_0F0F << 8,
 	0x0F0F_0F0F_0F0F_0F0F,
-}
-
-@(rodata, private = "file")
-DIGIT8_POW10: [9]u64 = {
-	1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000,
 }
 
 // Requires `p + 8 <= len(src)`.

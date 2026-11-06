@@ -166,8 +166,8 @@ A compact write of a document whose tokens are short is not made from its rows. 
 runs over the source's bytes in 64-byte blocks: `kernel` masks of the quotes, the backslashes and the bytes below 0x21
 give the bytes inside strings, the blanks outside them are dropped, and `kernel.compress` stores the rest. The block's
 string mask comes from the quotes no backslash escapes, and a byte below 0x21 inside a string can only be a space, which
-stays. The route is one test at entry, with the document read as `.Json` and without the
-`Invalid_Utf8` tolerance (the build records the tolerances in `read.opts[0]`), and `ascii`, `escape_html`,
+stays. The route is one test at entry, with the document read as `.Json` and with no
+tolerance (`as.tolerate` empty), and `ascii`, `escape_html`,
 `respell_strings` and `pretty` off. The test takes a source under 11 bytes per node, and one under 26 bytes per node when the blanks outside strings in
 its first 2 KB are under a sixteenth of those bytes, since each blank costs the dense path a compress and the rows win on
 text of longer tokens. A run of 2 KB starts without the escape mask when the run before met no backslash, and hands
@@ -185,7 +185,7 @@ The tree writer returns `.Too_Deep` past 4096 levels.
 
 A comment is written where it was read: before a key on a line of its own, between a key and its value, after a value on
 the value's line, and before a close on a line of its own. A comment after the root stays on a line of its own. A line comment is followed by a
-line break, in compact text too. Under `ascii` or `escape_html` a comment's text is spelled again with `\uXXXX`. A
+line break, in compact text too, and compact text ends a value's line before a comment that is not that value's inline comment. Under `ascii` or `escape_html` a comment's text is spelled again with `\uXXXX`. A
 document is written in the spec it was read in, or in the spec `as` names. A target
 that cannot hold a fact drops it, and `dropped` counts the drops, in every format's entry.
 

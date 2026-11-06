@@ -14,14 +14,14 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 |---|---|
 | `core/walk.odin` | `Kind`, `Role`, `Token`, `Action`, `Hook_Regs`, `text_start` |
 | `core/document.odin` | `Node`, `Document`, the readers, `Duplicates`, `Spelling`, `Edit_Spelling`, `destroy` |
-| `core/result.odin` | the result word: `fault_at`, `STOPPED`, `fault_of`, and the empty hook `No_Hooks`/`no_hook` |
+| `core/result.odin` | the result word: `fault_at`, `STOPPED`, `result_of`, and the empty hook `No_Hooks`/`no_hook` |
 | `core/build/build.odin` | `Builder`, the hooks a format's `build` passes its walk, the header row, the duplicate-key check |
 | `core/spell/number.odin` | `Number`, `Number_Kind`, the decimal and hex decoders, the digit reader |
-| `core/spell/text.odin` | `decode_text`, `bytes_equal`, and the escape table and hex and surrogate helpers JSON's walk and decoder share with paths and the CLI |
+| `core/spell/text.odin` | `decode_text`, `bytes_equal`, the escape table and hex and surrogate helpers JSON's walk and decoder share with paths and the CLI, `Fault_Kind` and the UTF-8 character readers |
 | `core/number.odin` | core's aliases for `Number`, `Number_Kind` and the two number bounds |
 | `core/edit.odin` | `Edit_List`, `Edit`, `set`/`insert`/`remove`, `commit` |
 | `core/compose/` | the commit the format tables point at, and the composition a format's root junctions share |
-| `core/error.odin` | `Fault_Kind`, `Fault`, `Rules`, `Rule`, the codes, line and column, the renderer |
+| `core/error.odin` | core's alias for `Fault_Kind`, `Fault`, `Rules`, `Rule`, the codes, line and column, the renderer |
 | `json/walk.odin` | JSON's interface, the result word, `Walk`, `walk_document`, the hook calls |
 | `json/document.odin` | JSON's `build` and its spelling table |
 | `json/unescape.odin` | JSON's string decoder, its key compare and its number reader |
@@ -41,13 +41,14 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 
 Each format package exposes the names a caller uses: `Spec`, `Options`, `Detail`, `RULES`, `walk`, `validate` and
 `build`, plus the token spelling detail its walk documents (`json.Number_Spelling` and `json.number_spelling_of`).
-`json` also exposes `Tolerance`, `commit`, `text`, `number` and `blank`, and `dsv` exposes `Tolerance`, `text` and `number`. `make surface` lists every public name.
+`json` also exposes `commit`, `text`, `number` and `blank`, and `dsv` exposes `text` and `number`. `make surface` lists every public name.
 
 `core`'s walk interface is what a format author uses: `Kind` and `Role` are a token's fields, `Token`, `Action` and
-`Hook_Regs` are a hook's signature, `Fault`, `Fault_Kind` and `Rules` are a walk's result, `fault_at` and `fault_of`
-make a fault, `STOPPED` is the result word's stopped detail, `No_Hooks` and `no_hook` make a walk without hooks, and
-`text_start` skips a byte-order mark at byte 0. A caller of `build` and the readers does not name them: the document
-and its readers are the caller's interface.
+`Hook_Regs` are a hook's signature, `Fault`, `Fault_Kind` and `Rules` are a walk's result, `fault_at` makes the result
+word and `result_of` reads it, `STOPPED` is the result word's stopped detail, `No_Hooks` and `no_hook` make a walk
+without hooks, `text_start` skips a byte-order mark at byte 0, and `Tolerance` names the rules `Options.tolerate` lets
+a text break. A caller of `build` and the readers does not name them: the document and its readers are the caller's
+interface.
 
 ```odin
 Spec     :: enum u8 { ... }    // the grammar, at compile time
@@ -135,8 +136,7 @@ header cell that names a dsv cell's column, and past `Key` a fact: a comment, `P
 or `Comment_Foot`. A consumer that wants values only tests `role <= .Key`. `spelling` is a detail the format writes
 and core reads through three bits: bit 0 says `text` must be decoded, bit 1 says the token is quoted (a JSON string,
 whose token span leaves its quotes out, or a quoted dsv cell, whose span holds them), and bit 2 says the decode may
-grow past the span (a JSON string with a tolerated ill-formed UTF-8 sequence, or any dsv cell read under
-`Invalid_Utf8`). For a comment token, the low byte of `spelling` holds the lead marker's length and the next byte the
+grow past the span (a JSON string or a dsv cell with a tolerated ill-formed UTF-8 sequence). For a comment token, the low byte of `spelling` holds the lead marker's length and the next byte the
 tail's. The other bits are the format's own. A token longer than `n` can hold is the fault `Too_Wide`.
 
 ### Hooks
@@ -204,9 +204,11 @@ position a `Lines` count reached, so faults met in offset order scan each byte o
 
 ### Tolerances
 
-`Options.tolerate` is a `bit_set` of the format's `Tolerance`, the rules a caller allows a text to break. A rule in
-the set has one fixed reading, and a rule outside it faults. No tolerance is set by default, and a tolerated fault
-produces no warning.
+`Options.tolerate` is a `bit_set` of `core.Tolerance`, the rules a caller allows a text to break, one enum for every
+format. A rule in the set has one fixed reading, and a rule outside it faults. A rule that a format's grammar has no
+instance of is never broken there, so naming it changes nothing: `Ragged` and `Bare_Quote` in JSON, `Lone_Surrogate`
+in dsv, and `Bare_Quote` in TSV and Plain. One set can then be given to every format. No tolerance is set by default,
+and a tolerated fault produces no warning.
 
 | Tolerance | Format | Reading |
 |---|---|---|
@@ -220,8 +222,8 @@ produces no warning.
 - A tolerated fault is found at the same byte as in a strict walk, on the branch that handles the fault, so clean text
   runs no tolerance code.
 - Some faults no tolerance covers: a number's grammar, text after a closing quote, anything structural, ill-formed
-  UTF-8 outside a string or a cell (a JSON comment or identifier, between tokens), and a sequence cut short by the end
-  of a string or quoted field that the text also cuts short (`Truncated`).
+  UTF-8 outside a string or a cell (a JSON comment or identifier, a dsv comment line, between tokens), and a sequence
+  cut short by the end of a string or quoted field that the text also cuts short (`Truncated`).
 
 ## For format authors
 
@@ -229,7 +231,7 @@ A format is a package of this repository that supplies a grammar and its spellin
 lives in `core`, so a format adds no reader, no `query` and no `commit` of its own, only what follows.
 
 1. **The walk.** `Spec`, `Options`, `Detail`, `RULES`, `walk` and `validate`, with the signatures in The interface. The
-   walk emits `core.Token`s to a hook and returns a `core.Fault` through `core.fault_at` or `core.fault_of`.
+   walk emits `core.Token`s to a hook and returns a `core.Fault` through `core.fault_at` and `core.result_of`.
 2. **The build.** `build` runs a count walk over `build.builder_hook_count`, reserves with `build.builder_start`, walks
    again with `build.builder_hook` and finishes the document. It is a thin entry that instantiates the walk for a spec.
 3. **The spelling.** One `core.Spelling` table in rodata, stored in the document, carries the services that need the
@@ -261,7 +263,7 @@ Every state takes the same arguments:
 | `p` | the cursor |
 | `end` | one past the text |
 | `d` | the depth shifted left once, the open container's kind in bit 0 (1 for an object) |
-| `ind` | the predicted indent: the last line's indent in the low half, the step per level in the high half |
+| `ind` | the predicted indent: the last line's indent and the byte it is made of in the low half, the step per level in the high half |
 | `w` | `^Walk`, what the states share beyond their registers |
 | `s0`, `s1`, `s2` | the hook's `Hook_Regs` |
 | `$on` | the hook, at compile time |
@@ -291,9 +293,9 @@ of its own:
   `indent_fast`, whose one masked vector compare replaces `skip_indent`'s loop.
 - A string that holds an escape goes to `st_string_escaped`, which keeps the escape masks' registers to itself.
 - A bad literal goes to `st_bad_literal`, so `st_value` saves nothing for its call.
-- In JSON5 a byte that starts no JSON value goes to `st_value5`, and one that opens no JSON key to `st_key5`, with the
-  comment run, the close after a trailing comma and the fault, so the states every document passes through keep their
-  size.
+- In JSONC and JSON5 a byte that starts no JSON value goes to `st_value_spec`, and one that opens no JSON key to
+  `st_key_spec`, with the comment run, the close after a trailing comma, JSON5's own starts and the fault, so the states
+  every document passes through keep their size.
 - A skipped value goes to `st_skip` and `st_skip_member`.
 
 Two states that differ only by a constant, such as `st_string` and `st_key_string` or `st_after` and
@@ -321,6 +323,8 @@ A string goes to the first reader that can read it whole, falling through to the
    `Invalid_Utf8` and `Lone_Surrogate` permit a fault, so the readers above it refuse what those tolerances would
    accept.
 
+A JSON5 single-quoted string goes to `string_short` and `string_lean` with `'` as its quote, then to `string_long`.
+
 ### Tiers
 
 The states are built for one tier per target, its floor (`STATE_TIER`: v2 on x86-64, the only tier elsewhere), with
@@ -333,11 +337,13 @@ reader differs by tier: `string_long` switches on `w.tier`, read once per walk f
 
 Compact text has no whitespace between tokens, and each state first tests that the next byte starts a token.
 Pretty-printed text puts a newline and an indent between most tokens. `indent_fast` predicts the indent: one step
-deeper after an open bracket, the same after a comma, one step out before a close. It checks the predicted run with
-one masked compare of up to 32 bytes, `spaces_lead`, and reads the token after it without a loop. `skip_indent` counts
-a run the prediction missed and records the indent after a newline and the step after an open bracket. A
-single space before the next token, as some compact printers write after a comma, is handled there too, after the
-newline test, so neither compact nor indented text runs extra code for it.
+deeper after an open bracket, the same after a comma, one step out before a close, made of the byte the last counted
+indent began with, a space or a tab. It checks the predicted run with one masked compare of up to 32 bytes,
+`indent_lead`, and reads the token after it without a loop. `indent_fast` predicts after an LF only. `skip_indent`, in
+the states for whitespace, predicts after an LF or a CRLF, counts a run the prediction missed, and records the indent
+and its byte after a line end and the step after an open bracket. A single space before the next token, as some
+compact printers write after a comma, is handled in `indent_fast` too, after the newline test, so neither compact nor
+indented text runs extra code for it.
 
 `st_key` reads the colon after a key on a fast path when the colon is flush against its value or followed by one
 space, with or without one space before it. `colon_fast`, a leaf, finds that spelling, and `st_member_run` uses it
@@ -358,16 +364,15 @@ read it, so the states every document passes through hold none of the runs' code
 ### Skip
 
 `pass_over` reads a skipped value: it is the same states instantiated with no hook, entered by a call, because
-`#must_tail` cannot jump between two instances of the walk. Before the call, the slot of the depth the skipped value
-closes back to is marked with `PASS_END`. A close compares its byte with `]` combined with the slot's bits shifted in,
-and that bit matches no byte of a valid text, so `st_close`'s loop stops as it reads the slot and the walk without
-hooks returns from `st_pass_end`. The walk with the hook clears the mark and continues in `st_after`.
+`#must_tail` cannot jump between two instances of the walk. It reads the value as a document's root whose depth stack
+starts at the slot of the depth the value closes back to, with the depth limit lowered by as much, so a close back to
+that depth is the root's end and the walk without hooks returns there. Its depths and faults are those the walk with
+the hook would meet. The walk with the hook continues in `st_after`.
 
 `Skip` on a `Key` stays in the walk with the hook for a value it can read inline: `st_member_run` reads a number and
 goes on, and `st_skip_member` reads a string or a number after a colon `colon_fast` takes, with no token, so a skip
-of every member of an object makes no call per member. `st_skip_member` passes the comments around any other colon
-itself, so the skipped value's first byte decides whether it is pushed. A container read as a document's root counts
-its depth from 0.
+of every member of an object makes no call per member. `st_skip_member` passes the comments before any other colon
+itself, and `pass_over` reads the value with the comments before it.
 
 ### Comments
 
@@ -395,9 +400,11 @@ document while it checks that only whitespace follows.
 
 A comment's bytes are judged as a string's raw bytes are: UTF-8, no control byte except a tab, and in a `/* */`
 comment also CR and LF. JSON5 keeps this rule, tighter than its grammar, which allows any control byte. A `//` comment
-ends at CR or LF, and in JSON5 also at U+2028 or U+2029. A `/` that opens no comment is `Bad_Char` at the `/`, and a `/*` that the text ends
-inside is `Truncated`. Every spec with comments also accepts a comma before a close bracket: a close after a run of
-comments is read without looking back at whether an open bracket or a comma came before the run.
+ends at CR or LF, and in JSON5 also at U+2028 or U+2029. A `/` that opens no comment faults as any other byte there
+would: `Bad_Char` with the detail of its place, such as `Colon` before a member's colon or `Trailing` after the
+document. A `/*` that the text ends inside is `Truncated`. Every spec with comments also accepts a comma before a close
+bracket: a close after a run of comments is read without looking back at whether an open bracket or a comma came before
+the run.
 
 A comment's body is stepped 16 bytes at a time to the first byte the reader must judge individually: a control byte,
 a byte past 0x7F, a `*` in a `/* */` comment, and a line end in a JSON5 `//` comment. Whitespace between comments is
@@ -411,8 +418,8 @@ with `Walk.crossed` for a comma read before it, so the run is not scanned twice.
 A token that JSON spells the same way is read by JSON's own leaf. A state passes to JSON5's readers only where
 that leaf refuses or no JSON construct starts:
 
-- `st_value` on `'`, `+`, `.`, `I` or `N`, and where JSON's number reader refuses or stops before an `x`, which the
-  number runs test too,
+- `st_value` on `'`, `+`, `.`, `I` or `N`, and where JSON's number reader refuses, as it refuses the `x` of a hex
+  number, in the number runs too,
 - `st_key` on a byte that opens no JSON key: a single-quoted key, an ECMAScript 5.1 IdentifierName, or else `Bad_Char`
   with `Identifier`,
 - `string_long`, where JSON's readers refuse a string: `string_exact` reads it again by JSON5's rules,
@@ -462,7 +469,9 @@ byte, its open cell and its cell count.
 - A CR is judged with the byte after it. The CR in a block's last byte is the next block's to judge, and one the text
   ends on is a fault.
 - UTF-8 is judged only in blocks that are not all ASCII, and in the first ASCII block after one, which settles a
-  sequence the block before left open. Under `Invalid_Utf8` the error is found the same way and not reported.
+  sequence the block before left open. Under `Invalid_Utf8` the error is found the same way and not reported: the
+  block's error state is cleared, and the cells that overlap a block whose check failed are read byte by byte for the
+  ill-formed sequence that marks them. A text with no ill-formed sequence reads no byte twice.
 - A fault cuts the masks at its byte, so no separator past it is read and no token past it is made.
 - The last, partial block is loaded zero-padded. A zero is no separator, no quote and ASCII, and `valid` clears the
   lanes past the text.
@@ -480,7 +489,7 @@ or holds only a CR is no record.
   the default heap and frees it before returning.
 - The delimiters before a block's next LF run in a loop of their own. That loop holds no LF test, no CR, no width and
   no `End`, and the kind of record is chosen once for the run, not per cell. A run proven to name one key per cell
-  reads its keys without a bounds test (`put_key_n`).
+  reads its keys without a bounds test (`put_key` with `$PAST` false).
 - The record's last cell and its `End` are the outer loop's work, once per record.
 - A record's state is held in locals for the block. `Pass` is one struct, and a field read per cell is a load per
   cell.

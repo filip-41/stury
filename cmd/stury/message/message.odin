@@ -16,8 +16,8 @@ import "base:runtime"
 import "core:io"
 import "core:os"
 import "core:reflect"
-import "core:strconv"
 import "core:strings"
+import "../../../core/spell"
 
 // `format` filled with `args`, on `allocator`.
 build :: proc(format: string, args: ..any, allocator := context.allocator) -> string {
@@ -135,18 +135,18 @@ write_plain :: proc(b: ^strings.Builder, value: any) {
 
 @(private = "file")
 write_integer :: proc(b: ^strings.Builder, value: any, width: int) {
-	digits: [24]u8
+	digits: [spell.INT_ROOM]u8
 	core := runtime.type_info_core(type_info_of(value.id))
 	assert(reflect.is_integer(core), "%d takes an integer")
-	text: string
+	n: int
 	if reflect.is_unsigned(core) {
 		u, _ := reflect.as_u64(value)
-		text = strconv.write_uint(digits[:], u, 10)
+		n = spell.u64_text(&digits[0], u)
 	} else {
 		i, _ := reflect.as_i64(value)
-		text = strconv.write_int(digits[:], i, 10)
+		n = spell.i64_text(&digits[0], i)
 	}
-	width := width
+	text, width := string(digits[:n]), width
 	if text[0] == '-' {
 		strings.write_byte(b, '-')
 		text, width = text[1:], width - 1

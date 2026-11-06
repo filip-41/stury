@@ -39,19 +39,10 @@ Options :: struct {
 	// `walk_document`'s frame, and a larger one allocates one byte per level on the default heap.
 	max_depth: u32,
 	// The rules a text may break, each with a fixed reading. Empty by default.
-	tolerate:          bit_set[Tolerance; u8],
+	tolerate:          bit_set[core.Tolerance; u8],
 	// Refuse JSON5's `Infinity` and `NaN` as `.Bad_Char` with `Detail.Non_Finite`, for a reader that has no value for
 	// them.
 	refuse_non_finite: bool,
-}
-
-// `Tolerance` names a rule a caller lets a text break. The walk does not fault there, and the decoded string shows the
-// tolerant reading.
-Tolerance :: enum u8 {
-	// Ill-formed UTF-8 in a string: each maximal subpart of an ill-formed sequence reads as U+FFFD.
-	Invalid_Utf8,
-	// A `\u` escape of a surrogate half that no other half pairs with reads as U+FFFD.
-	Lone_Surrogate,
 }
 
 // `Detail` holds JSON's detail for a `core.Fault_Kind`, in `core.Fault.detail`.
@@ -111,13 +102,11 @@ walk_text :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opt
 	p := raw_data(src)
 	end := p[len(src):]
 	r := walk_document(src, skip_ws(p[core.text_start(src, lo):], end), S, opts, h, regs, on)
-	if r & 0xff != 0 {
-		return core.fault_of(r, &RULES)
+	hi, fault, stopped := core.result_of(r, &RULES)
+	if fault != nil || stopped {
+		return fault
 	}
-	if u8(r >> 8) == core.STOPPED {
-		return nil
-	}
-	return tail_fault(src, r >> 16, S)
+	return tail_fault(src, hi, S)
 }
 
 // Returns the fault for the bytes after a document that ends at `hi`, or nil when only whitespace and, in a spec
@@ -126,16 +115,18 @@ walk_text :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opt
 tail_fault :: proc "contextless" (src: []u8, hi: u64, $S: Spec) -> Maybe(core.Fault) {
 	p := raw_data(src)
 	end := p[len(src):]
-	q := skip_ws(p[hi:], end)
+	q := p[hi:]
 	when .Comments in FEATURES[S] {
 		kind: core.Fault_Kind
 		q, _, kind = comment_run(q, end, false, S)
 		if kind != .None {
-			return core.fault_of(core.fault_at(u64(intrinsics.ptr_sub(q, p)), kind), &RULES)
+			return core.Fault{at = u64(intrinsics.ptr_sub(q, p)), rules = &RULES, kind = kind, detail = u8(Detail.Trailing) if stray_slash(q, kind) else 0}
 		}
+	} else {
+		q = skip_ws(q, end)
 	}
 	if q != end {
-		return core.fault_of(core.fault_at(u64(intrinsics.ptr_sub(q, p)), .Bad_Char, u8(Detail.Trailing)), &RULES)
+		return core.Fault{at = u64(intrinsics.ptr_sub(q, p)), rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Trailing)}
 	}
 	return nil
 }
@@ -204,8 +195,7 @@ walk_from :: #force_inline proc "contextless" (src: []u8, q: [^]u8, $S: Spec, op
 	if q == raw_data(src)[len(src):] {
 		return u64(len(src)), nil, false
 	}
-	r := walk_document(src, q, S, opts, h, regs, on)
-	return r >> 16, core.fault_of(r, &RULES), r & 0xff == 0 && u8(r >> 8) == core.STOPPED
+	return core.result_of(walk_document(src, q, S, opts, h, regs, on), &RULES)
 }
 
 // `Walk` holds the state a walk carries besides its registers. `stack[i]` bit 0 is set when the container at depth
@@ -223,7 +213,7 @@ Walk :: struct($S: Spec, $H: typeid) {
 	// padding after `tier`, so a spec without comments builds the same `Walk` size.
 	crossed:  bool,
 	// `Options.tolerate`, read only where a string faults.
-	tolerate: bit_set[Tolerance; u8],
+	tolerate: bit_set[core.Tolerance; u8],
 	// `Options.refuse_non_finite`, read only where a JSON5 number is read.
 	finite:   bool,
 	// Where the next state continues: for `string_escaped`, the block holding the string's first backslash, for
@@ -232,12 +222,6 @@ Walk :: struct($S: Spec, $H: typeid) {
 	// The length of the last string `st_skip_member` read whole, its guess at the next one's.
 	skip_len: int,
 }
-
-// `PASS_END` is set in the stack slot of the depth where a walk that passes over a skipped value ends, so a close to
-// that depth ends the pass. `]` with this bit shifted into bit 5 is no `]` or `}`, so the close loop stops when it
-// reads the slot.
-@(private)
-PASS_END :: 4
 
 // Reads the document whose first byte is `p`. Keeps the depth stack in this frame up to `MAX_DEPTH`, and allocates
 // it on the default heap above that.
@@ -250,22 +234,21 @@ walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec
 	stack: [core.MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH
 	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, nil, 0}
-	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
+	return st_value(p, w.base[len(src):], 0, INDENT_START, &w, regs.a, regs.b, regs.c, on)
 }
 
-// `walk_document` for a depth past `MAX_DEPTH`. Allocates `depth` bytes on the default heap and frees them before
-// returning, so a hook can call the walk.
+// `walk_document` for a depth past `MAX_DEPTH`. Allocates the stack `core.reserve_depth` sizes, a byte per level, on
+// the default heap and frees it before returning, so a hook can call the walk.
 @(private, cold)
 walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	context = runtime.default_context()
-	depth := u64(opts.max_depth)
-	stack, err := make([]u8, min(depth, u64(len(src)) + 16))
+	stack, err := make([]u8, core.reserve_depth(opts.max_depth, len(src)))
 	if err != nil {
 		return core.fault_at(0, .No_Memory)
 	}
 	defer delete(stack)
-	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, depth, kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, nil, 0}
-	return st_value(p, w.base[len(src):], 0, 0, &w, regs.a, regs.b, regs.c, on)
+	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, u64(opts.max_depth), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, nil, 0}
+	return st_value(p, w.base[len(src):], 0, INDENT_START, &w, regs.a, regs.b, regs.c, on)
 }
 
 // `STATE_TIER` is the CPU tier every state is built for, the lowest: `V2` on x86-64, `Base` elsewhere.
@@ -275,13 +258,15 @@ STATE_TIER :: kernel.Tier(0)
 @(private)
 STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 
-// Runs the walk without hooks from `p`, starting in `st_open` or `st_value`, until the stack marks `PASS_END` or a
-// root value ends. It is a call because `#must_tail` cannot jump between two instances of the walk.
+// Runs the walk without hooks from `p` as a document's root, whose stack starts at slot `slot` of this walk's, until
+// that root value ends, so its depths count past `slot` and its close back to depth 0 ends it. It starts in `st_open`
+// with `d` the container's, or in `st_value` with `d` 0. It is a call because `#must_tail` cannot jump between two
+// instances of the walk.
 @(private)
-pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, d, ind: u64, $open: bool) -> u64 {
+pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, slot, d, ind: u64, $open: bool) -> u64 {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, core.No_Hooks){w.base, &h, w.stack, &regs, w.depth, w.tier, false, w.tolerate, w.finite, nil, 0}
+	v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, nil, 0}
 	when open {
 		return st_open(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
 	} else {
@@ -302,9 +287,7 @@ emit :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextle
 // the pair as outside the span, so a read does not probe `src` for it and `span` adds it back.
 @(private)
 emit_string :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, kind: core.Kind, role: core.Role, p, q: [^]u8, spelling: u16) -> core.Action {
-	a: core.Action
-	hs^, a = on(w.hooks, hs^, core.Token{at(w, p) + 1, u32(intrinsics.ptr_sub(q, p) - 2), kind, role, spelling | core.SPELLING_QUOTED})
-	return a
+	return emit(w, on, hs, kind, role, p[1:], q[-1:], spelling | core.SPELLING_QUOTED)
 }
 
 @(private)

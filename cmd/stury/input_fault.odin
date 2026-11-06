@@ -19,7 +19,7 @@ fault_message :: proc(ins: ^Inputs, data: []byte, f: core.Fault, end := -1) -> s
 	if ins.next_file > 1 {
 		return fault_told(ins.name, data, f, ins.file_lines)
 	}
-	return jq.parse_message(data, f, ins.parsed.line, ins.parsed.column, "", end)
+	return jq.parse_message(data, f, ins.parsed.line, ins.parsed.column, end)
 }
 
 // The fault `found` of the text at or after data[at:] as jq tells it, or under --stream the events jq's parser makes of
@@ -107,15 +107,12 @@ fail_text :: proc(ins: ^Inputs, fault: core.Fault) -> ! {
 // `lines` before `data`, or as `NAME: SENTENCE` when it is at no byte. A JSON-like text's sentence is the one jq's
 // messages use (`jq.fault_sentence`).
 fault_told :: proc(name: string, data: []byte, f: core.Fault, lines := 0) -> string {
-	if f.rules != &json.RULES {
-		line, col := core.locate(data, f.at)
-		return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, core.rule_of(f).message)
-	}
 	if f.kind in core.AT_NO_BYTE {
-		return message.build_temp("%s: %s", name, jq.fault_sentence(f, ""))
+		return message.build_temp("%s: %s", name, core.rule_of(f).message)
 	}
 	line, col := core.locate(data, f.at)
-	return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, jq.fault_sentence(f, string(data[f.at:])))
+	sentence := jq.fault_sentence(f, string(data[f.at:])) if f.rules == &json.RULES else core.rule_of(f).message
+	return message.build_temp("%s:%d:%d: %s", name, line + u64(lines), col, sentence)
 }
 
 // The fault `f` of the records of `data` framed by `framing`, but under `.Lines` and `.Seq` a word cut short by its

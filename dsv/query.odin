@@ -131,12 +131,12 @@ record_hook :: proc "contextless" (r: ^Record_Read, s: core.Hook_Regs, t: core.T
 			t.kind = .Map
 		}
 		s, action = r.on(r.h, s, t)
-		return s, .Stop if action != .Next else .Next
+		return s, .Stop if action == .Skip || action == .Stop else .Next
 	}
 	r.cell += 1
 	if len(r.keys) > 0 {
 		s, action = r.on(r.h, s, column_key(r.keys, r.cell - 1))
-		if action != .Next {
+		if action == .Skip || action == .Stop {
 			return s, action if action == .Stop else .Next
 		}
 	}

@@ -32,8 +32,8 @@ writes each input back in the printer's layout, or in another format: it runs no
 \-\-from and writes it as \-\-to (the same format by default). JSON and JSONC are laid out as stury prints them, comments kept; ndjson is
 one compact value per line. Between these formats only the layout changes: each number, string and key is written
 as it was, and every member of an object is kept, a repeated key included. csv and tsv are a header and one record
-per row, re-spelled by the cell writer, each file a table of its own. A leading byte order mark is not written, and
-nesting past 1024 levels is refused with exit 5. The run is idempotent, and a file already in that layout comes
+per row, re-spelled by the cell writer, each file a table of its own. A leading byte order mark is not written, and a
+JSONC text with comments nesting past 4096 levels is refused with exit 5. The run is idempotent, and a file already in that layout comes
 back byte for byte.
 .SH OPTIONS
 .TP

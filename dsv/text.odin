@@ -1,10 +1,11 @@
 package dsv
 
 // The byte-at-a-time scans of the walk. The cell count of the header sizes the key buffer, the first malformed UTF-8
-// sequence in a block, the first backslash that opens no escape, and whether a cell is too long for `Token.n`. The walk
-// calls each only on a block whose masks say it is needed.
+// sequence in a block or a span, the first backslash that opens no escape, and whether a cell is too long for
+// `Token.n`. The walk calls each only on a block whose masks say it is needed.
 
 import "base:intrinsics"
+import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
 
@@ -156,23 +157,91 @@ utf8_fault :: #force_no_inline proc "contextless" (src: []u8, floor, pos: int) -
 	if i > floor && src[i - 1] >= 0xc0 {
 		i -= 1
 	}
-	base := raw_data(src)
-	end := base[len(src):]
-	for i < min(pos + 64, len(src)) {
-		if src[i] < 0x80 {
+	return span_fault(src, i, min(pos + 64, len(src)))
+}
+
+// The first malformed UTF-8 sequence led in `[lo, hi)` of `src`, read to the text's end, as `utf8_fault` returns it.
+@(private, cold)
+span_fault :: proc "contextless" (src: []u8, lo, hi: int) -> (fault: int, kind: core.Fault_Kind, detail: Detail) {
+	at, k := first_ill_formed(raw_data(src), lo, hi, len(src))
+	if at < 0 {
+		return -1, .Bad_Char, .None
+	}
+	if k == .Truncated {
+		return len(src), .Truncated, .Cut_Utf8
+	}
+	return at, .Bad_Char, .Bad_Utf8
+}
+
+// The first ill-formed UTF-8 sequence of the block at `pos` whose lead is in a comment line, as `utf8_fault` returns it.
+// `ill` and `back` are the block's leads and the lead before it as `ill_leads` returns them, and `comments` marks the
+// block's comment bytes and the LFs that end comment lines. Its bit 0 says whether `back` is in one, since only
+// continuation bytes lie between `back` and `pos`, so the two share a line.
+@(private, cold)
+comment_utf8_fault :: #force_no_inline proc "contextless" (src: []u8, pos: int, ill: u64, back: int, comments: u64) -> (fault: int, kind: core.Fault_Kind, detail: Detail) {
+	at := -1
+	if back >= 0 && comments & 1 != 0 {
+		at = back
+	} else if lead := ill & comments; lead != 0 {
+		at = pos + int(intrinsics.count_trailing_zeros(lead))
+	}
+	if at < 0 {
+		return -1, .Bad_Char, .None
+	}
+	return span_fault(src, at, at + 1)
+}
+
+// The leads of the ill-formed UTF-8 sequences that start in the block at `pos`, a bit each, each sequence read up to
+// `end`. `back` is the first lead of one that starts in the three bytes before `pos` and runs into the block, not
+// before `floor`, or -1. A lead is a byte that starts no well-formed character, so a sequence's every maximal subpart and its
+// stray continuations each have one, and a span that holds an ill-formed sequence holds a lead.
+@(private, cold)
+ill_leads :: #force_no_inline proc "contextless" (base: [^]u8, floor, pos, end: int) -> (leads: u64, back: int) #no_bounds_check {
+	back = -1
+	i := pos
+	for i > max(pos - 3, floor) && base[i - 1] & 0xc0 == 0x80 {
+		i -= 1
+	}
+	if i > floor && base[i - 1] >= 0xc0 {
+		i -= 1
+	}
+	for i < min(pos + 64, end) {
+		if base[i] < 0x80 {
 			i += 1
 			continue
 		}
-		q, k := kernel.utf8_char(base[i:], end)
+		q, k := spell.utf8_char(base[i:], base[end:])
+		if k == .None {
+			i = int(intrinsics.ptr_sub(q, base))
+			continue
+		}
+		if i < pos {
+			back = i if back < 0 else back
+		} else {
+			leads |= u64(1) << u64(i - pos)
+		}
+		i += 1
+	}
+	return
+}
+
+// The lead byte of the first ill-formed UTF-8 sequence that starts in `[lo, hi)`, each read up to `end`, and its fault
+// kind, `Truncated` when `end` cuts a sequence that is valid so far. Returns -1 when there is none.
+@(private)
+first_ill_formed :: #force_inline proc "contextless" (base: [^]u8, lo, hi, end: int) -> (at: int, kind: core.Fault_Kind) {
+	i := lo
+	for i < hi {
+		if base[i] < 0x80 {
+			i += 1
+			continue
+		}
+		q, k := spell.utf8_char(base[i:], base[end:])
 		if k != .None {
-			if k == .Truncated {
-				return len(src), .Truncated, .Cut_Utf8
-			}
-			return i, .Bad_Char, .Bad_Utf8
+			return i, k
 		}
 		i = int(intrinsics.ptr_sub(q, base))
 	}
-	return -1, .Bad_Char, .None
+	return -1, .None
 }
 
 // Whether the first separator in `seps` at or after `pos` ends the cell that starts at `lo` more than `max(u32)` bytes

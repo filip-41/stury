@@ -56,14 +56,30 @@ on_split :: proc "contextless" (s: ^Split, r: core.Hook_Regs, t: core.Token) -> 
 // spells them, and returns the hook's last action. The row starts outside a quoted field, so its quotes pair up from
 // its first byte.
 @(private)
-split_cells :: proc "contextless" (src: []u8, row: Batch_Row, $S: Spec, opts: Options, role: core.Role, h: ^$H, regs: core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (core.Hook_Regs, core.Action) #no_bounds_check {
+split_cells :: proc "contextless" (src: []u8, row: Batch_Row, $S: Spec, opts: Options, role: core.Role, h: ^$H, regs: core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (core.Hook_Regs, core.Action) {
+	if row.lax {
+		return split_lax_row(src, row, S, opts, role, h, regs, on)
+	}
+	return split_row(false, src, row, S, opts, role, h, regs, on)
+}
+
+// `split_cells` on a row that holds an ill-formed sequence `.Invalid_Utf8` tolerated.
+@(private, cold)
+split_lax_row :: #force_no_inline proc "contextless" (src: []u8, row: Batch_Row, $S: Spec, opts: Options, role: core.Role, h: ^$H, regs: core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (core.Hook_Regs, core.Action) {
+	return split_row(true, src, row, S, opts, role, h, regs, on)
+}
+
+// `split_cells`, with `$LAX` compiling in the reads of the row's ill-formed sequences.
+@(private)
+split_row :: #force_inline proc "contextless" ($LAX: bool, src: []u8, row: Batch_Row, $S: Spec, opts: Options, role: core.Role, h: ^$H, regs: core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (core.Hook_Regs, core.Action) #no_bounds_check {
 	T :: kernel.Tier(0)
 	base := raw_data(src)
 	lo, hi := int(row.at), int(row.hi)
 	delim := spec_delimiter(S, opts.delimiter)
-	lax := .Invalid_Utf8 in opts.tolerate
 	field_lo := lo
-	carry := false
+	// `carry` and `ill_open` say the cell open at the block's start holds a backslash or a `""`, and an ill-formed
+	// sequence.
+	carry, ill_open := false, false
 	regs := regs
 	a: core.Action
 	when S == .Csv {
@@ -96,11 +112,19 @@ split_cells :: proc "contextless" (src: []u8, row: Batch_Row, $S: Spec, opts: Op
 		} else when S == .Tsv {
 			bs = kernel.pack(kernel.eq(blk, '\\')) & live
 		}
-		plain := bs == 0 && !carry
+		ill: u64
+		ill_carry := ill_open
+		when LAX {
+			back: int
+			ill, back = ill_leads(base, lo, pos, hi)
+			ill_carry ||= back >= field_lo
+		}
+		plain := bs | ill == 0 && !(carry || ill_carry)
 		for d != 0 {
 			at := pos + int(intrinsics.count_trailing_zeros(d))
 			d &= d - 1
 			esc := !plain && span_esc(bs, pos, field_lo, at, carry)
+			lax := !plain && span_esc(ill, pos, field_lo, at, ill_carry)
 			if regs, a = on(h, regs, {u64(field_lo), u32(at - field_lo), .Plain, role, spelling(base, field_lo, at, esc, lax, S)}); a == .Stop {
 				return regs, a
 			}
@@ -108,9 +132,13 @@ split_cells :: proc "contextless" (src: []u8, row: Batch_Row, $S: Spec, opts: Op
 		}
 		if hi - pos <= 64 {
 			esc := !plain && span_esc(bs, pos, field_lo, hi, carry)
+			lax := !plain && span_esc(ill, pos, field_lo, hi, ill_carry)
 			return on(h, regs, {u64(field_lo), u32(hi - field_lo), .Plain, role, spelling(base, field_lo, hi, esc, lax, S)})
 		}
 		carry = !plain && span_esc(bs, pos, field_lo, pos + 64, carry)
+		when LAX {
+			ill_open = !plain && span_esc(ill, pos, field_lo, pos + 64, ill_carry)
+		}
 	}
 }
 

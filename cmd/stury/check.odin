@@ -63,9 +63,10 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 	case src.framing == .Concatenated:
 		fault = records.validate(data, src.as, runner)
 		// A byte no text starts with, right after a text, stays trailing text, as the reader of the texts from the first
-		// tells it.
+		// tells it. So does a text that runs on into the next, which only the reader from a scalar first text sees.
 		if f, bad := fault.?; bad && texts_follow(f, src.spec) {
-			if next, more := first_fault(data, src.as, .Concatenated, runner, f.at).?; !more || next.at != f.at || jq.is_space(data[f.at - 1]) {
+			from := f.at if closed_first(data) else 0
+			if next, more := first_fault(data, src.as, .Concatenated, runner, from).?; !more || next.at != f.at || jq.is_space(data[f.at - 1]) {
 				fault = next if more else nil
 			}
 		}
@@ -78,6 +79,17 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 	}
 	f = literal_cut(data, f, src.framing)
 	return message.build_temp("%s\n%s", fault_told(name, data, f), fault_note(data, f, src.spec, o))
+}
+
+// Whether the first text of `data` is a container or a string, which no byte after its close runs on from.
+@(private = "file")
+closed_first :: proc(data: []byte) -> bool {
+	for c in data {
+		if !jq.is_space(c) {
+			return c == '[' || c == '{' || c == '"'
+		}
+	}
+	return false
 }
 
 // The first fault of the records of `data` from byte `at`, framed by `framing`.

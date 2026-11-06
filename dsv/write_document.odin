@@ -31,14 +31,14 @@ marshal :: proc(value: any, spec := Spec.Csv, layout := Options{}, opts := core.
 // `layout` leaves it 0. See the file's header for what a document may hold.
 as :: proc "contextless" (spec: Spec, layout := Options{}) -> core.As {
 	opts := [10]u8{0 = spec_delimiter(spec, layout.delimiter), 1 = layout.comment, 2 = u8(layout.no_header), 3 = u8(layout.crlf), 4 = u8(layout.infer)}
-	return {spelling = &SPELLING, spec = u8(spec), tolerate = transmute(u8)layout.tolerate, opts = opts}
+	return {spelling = &SPELLING, spec = u8(spec), tolerate = layout.tolerate, opts = opts}
 }
 
 // The options a handle `as` made holds. The spec's own delimiter reads as 0, so a default handle's options are `{}`,
 // which the walk's passes fold.
 @(private)
 options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
-	return {delimiter = 0 if as.opts[0] == spec_delimiter(Spec(as.spec), 0) else as.opts[0], comment = as.opts[1], no_header = as.opts[2] != 0, crlf = as.opts[3] != 0, infer = as.opts[4] != 0, tolerate = transmute(bit_set[Tolerance; u8])as.tolerate}
+	return {delimiter = 0 if as.opts[0] == spec_delimiter(Spec(as.spec), 0) else as.opts[0], comment = as.opts[1], no_header = as.opts[2] != 0, crlf = as.opts[3] != 0, infer = as.opts[4] != 0, tolerate = as.tolerate}
 }
 
 // The spelling's `write`: `doc` as the handle `as` says.

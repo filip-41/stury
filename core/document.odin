@@ -38,9 +38,31 @@ SPELLING_DECODE :: u16(1)
 // Bit 1 of a JSON string or a dsv cell is set when the token is quoted. A JSON string's token span is the bytes
 // between its quotes, so `span` adds the pair back. A quoted dsv cell's span already holds them.
 SPELLING_QUOTED :: u16(2)
-// Bit 2 is set on a JSON string that holds an ill-formed UTF-8 sequence `Invalid_Utf8` reads as U+FFFD, and on every
-// dsv cell read under `Invalid_Utf8`, so its decode may grow past its span.
+// Bit 2 is set on a JSON string or a dsv cell that holds an ill-formed UTF-8 sequence `Invalid_Utf8` reads as U+FFFD,
+// so its decode may grow past its span.
 SPELLING_LAX :: u16(4)
+
+// The spelling bits of a text that holds an escape (`escaped`) or a sequence a tolerance accepted (`lax`):
+// `SPELLING_DECODE` for either and `SPELLING_LAX` for the latter.
+text_spelling :: #force_inline proc "contextless" (escaped, lax: bool) -> u16 {
+	return (SPELLING_DECODE if escaped || lax else 0) | (SPELLING_LAX if lax else 0)
+}
+
+// The `spelling` of a comment token, from the length of its leading marker and of its trailing one. `Fact` documents
+// the layout.
+comment_spelling :: #force_inline proc "contextless" (lead, tail: u8) -> u16 {
+	return u16(lead) | u16(tail) << 8
+}
+
+// The length of the leading marker of a comment token whose spelling is `spelling`.
+comment_lead :: #force_inline proc "contextless" (spelling: u16) -> u64 {
+	return u64(spelling & 0xFF)
+}
+
+// The length of the trailing marker of a comment token whose spelling is `spelling`.
+comment_tail :: #force_inline proc "contextless" (spelling: u16) -> u64 {
+	return u64(spelling >> 8)
+}
 
 // A `Fact` holds a comment token, the node it belongs to and its role. Facts are sorted by the node they belong to,
 // and two facts of one node keep their source order. `lo` is the first byte and `n` the span's length, markers
@@ -206,14 +228,9 @@ number_spelling :: #force_inline proc "contextless" (kind: u16, int_digits, frac
 	return kind | n << NUMBER_INT_SHIFT | f << NUMBER_FRAC_SHIFT
 }
 
-// Returns a number token's integer digit count, saturated at 31.
-number_int_digits :: #force_inline proc "contextless" (spelling: u16) -> int {
-	return int(spelling >> NUMBER_INT_SHIFT & NUMBER_DIGITS_MAX)
-}
-
-// Returns a number token's fraction digit count, saturated at 31.
-number_frac_digits :: #force_inline proc "contextless" (spelling: u16) -> int {
-	return int(spelling >> NUMBER_FRAC_SHIFT & NUMBER_DIGITS_MAX)
+// Returns a number token's integer and fraction digit counts, each saturated at 31.
+number_digit_counts :: #force_inline proc "contextless" (spelling: u16) -> (int_digits, frac_digits: int) {
+	return int(spelling >> NUMBER_INT_SHIFT & NUMBER_DIGITS_MAX), int(spelling >> NUMBER_FRAC_SHIFT & NUMBER_DIGITS_MAX)
 }
 
 // Returns a number token's integer digit count, and the count plus 32 or more when it has a fraction or an exponent.
@@ -482,10 +499,8 @@ key_equals_decode :: #force_no_inline proc "contextless" (doc: ^Document, i: Nod
 
 // Returns the first source byte of node `n`. A quoted string's token starts one byte past its opening quote.
 node_start :: #force_inline proc(n: Node) -> u64 {
-	if n.kind == .String && n.spelling & SPELLING_QUOTED != 0 {
-		return n.lo - 1
-	}
-	return n.lo
+	lo, _ := scalar_ends(n)
+	return lo
 }
 
 // Returns container `i`'s `k`th member value, counted from 0: for an inline-key `Map`, the value after its `k`th key,
@@ -853,7 +868,13 @@ text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator
 		delete(raw, allocator)
 		return "", false
 	}
-	if len(s) > 0 && raw_data(s) != raw_data(raw) {
+	if len(s) == 0 {
+		// A text that decodes to no bytes, as a quoted empty dsv cell does, keeps no allocation. A resize to 0 is a free,
+		// which an arena refuses.
+		delete(raw, allocator)
+		return "", true
+	}
+	if raw_data(s) != raw_data(raw) {
 		// A format may answer with a span of its source instead of a decode into `buf`.
 		copy(raw, s)
 	}
@@ -974,9 +995,7 @@ fact_next :: proc(it: ^Fact_Iter) -> (body: string, ok: bool) {
 
 @(private)
 fact_body :: #force_inline proc(doc: ^Document, f: Fact) -> []u8 {
-	lead := u64(f.spelling & 0xFF)
-	tail := u64(f.spelling >> 8)
-	return doc.src[f.lo + lead : f.lo + u64(f.n) - tail]
+	return doc.src[f.lo + comment_lead(f.spelling) : f.lo + u64(f.n) - comment_tail(f.spelling)]
 }
 
 // Returns the index of the first entry of `entries`, which are sorted by `node`, whose node is not below `node`.

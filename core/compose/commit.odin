@@ -78,13 +78,13 @@ commit :: proc(list: ^core.Edit_List, spec: u8, root: ^Root_Spelling, allocator 
 @(private)
 reads_as_source :: proc(doc: ^core.Document, out: []u8, spec: u8) -> core.Document_Error {
 	strict := doc.as
-	strict.spec, strict.tolerate = spec, 0
+	strict.spec, strict.tolerate = spec, {}
 	f, faulted := core.validate(out, strict).?
 	if !faulted {
 		return {}
 	}
 	tolerant := strict
-	tolerant.tolerate = 0xff
+	tolerant.tolerate = ~bit_set[core.Tolerance; u8]{}
 	if g, still := core.validate(out, tolerant).?; still {
 		return {kind = .Bad_Result, inner = g}
 	}

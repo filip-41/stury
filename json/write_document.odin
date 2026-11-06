@@ -346,7 +346,7 @@ copies_strings :: #force_inline proc "contextless" (opts: core.Write_Options) ->
 // once for each. A partial document keeps no comments. A document nested past `MAX_DEPTH` was built under a raised `max_depth` and is
 // written, except one with comments, shared keys or `sort_keys` past 4096 levels, which is `.Too_Deep`.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
-	return {spelling = &SPELLING, max_depth = opts.max_depth, spec = u8(spec), tolerate = transmute(u8)opts.tolerate, opts = {0 = u8(opts.refuse_non_finite)}}
+	return {spelling = &SPELLING, max_depth = opts.max_depth, spec = u8(spec), tolerate = opts.tolerate, opts = {0 = u8(opts.refuse_non_finite)}}
 }
 
 // The spelling's `write`: node `node` of `doc`, which `core.write` checked is a value the document holds, as the spec
@@ -367,7 +367,7 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 	}
 	own := doc.spelling == &SPELLING
 	if doc.partial || document_cold(doc, opts, own, node) {
-		return write_tree(doc, opts, stream, allocator, .Json if doc.partial else Spec(as.spec), node, hint)
+		return write_tree(doc, opts, stream, allocator, Spec(as.spec), node, hint)
 	}
 	spill: [write.ROOM_MAX]u8 = ---
 	out: write.Out

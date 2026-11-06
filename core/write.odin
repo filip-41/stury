@@ -26,8 +26,8 @@ As :: struct {
 	max_depth: u32,
 	// The format's spec, which its services dispatch on.
 	spec:      u8,
-	// The format's tolerance set.
-	tolerate:  u8,
+	// The rules a text read in the format may break.
+	tolerate:  bit_set[Tolerance; u8],
 	// The format's own bytes, opaque to core.
 	opts:      [10]u8,
 }

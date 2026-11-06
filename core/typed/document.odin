@@ -140,7 +140,7 @@ document_keyed :: proc "contextless" (d: ^Document_Read, _: core.Hook_Regs, i, o
 @(private)
 document_tag :: proc(h: ^Reader, _: u64) -> Tag_Scan {
 	d := (^Document_Read)(h.format)
-	s := Tag_Scan{spelling = h.plan.spelling, src = h.src, name = h.plan.union_tag}
+	s := Tag_Scan{view = {src = h.src, as = h.plan.as}, name = h.plan.union_tag}
 	regs: core.Hook_Regs
 	build.feed_nodes(d.doc, u32(d.at), u32(d.at) + d.doc.nodes[d.at].n, &s, &regs, d.spare, tag_step, tag_keyed, false)
 	return s

@@ -53,10 +53,10 @@ Ring_Entry :: struct {
 	at:     core.Node_Index,
 }
 
-// An answer and what places it. `pos` orders answers by text: twice the value's first byte, or one more than twice the
-// closing byte for an answer a close gives. A built document has no closing bytes, so there it is a node's index in the
-// high half, and a close is its container's last node with the deeper of two closes first. `chain` tells which `Descend` a `Descend` path's answer came through. `token`
-// and `hi` are what `.Stream` gives.
+// An answer and what places it. `pos` orders answers by text, as `text_pos` places them. A built document has no closing
+// bytes, so there it is a node's index in the high half, and a close is its container's last node with the deeper of two
+// closes first. `chain` tells which `Descend` a `Descend` path's answer came through. `token` and `hi` are what `.Stream`
+// gives.
 @(private)
 Placed :: struct {
 	pos:    u64,
@@ -64,6 +64,17 @@ Placed :: struct {
 	token:  core.Token,
 	hi:     u64,
 	chain:  u32,
+}
+
+// Where an answer of a text's walk stands in text order: at its value's first byte, or after the closing byte for an
+// answer a close gives. Only a dsv text, which nests three deep, has two answers at one byte, a record and its first
+// cell or the closes at its end, so the depth's two low bits order them: opens shallow first, closes deep first.
+@(private)
+text_pos :: #force_inline proc "contextless" (lo: u64, d: int, close: bool) -> u64 {
+	if close {
+		return (2 * lo + 1) << 2 | u64(3 - (d & 3))
+	}
+	return 2 * lo << 2 | u64(d & 3)
 }
 
 // The state of a `$MANY` read. `next_deep` holds the steps the paths in `Scan.next` picked the coming value at, by
@@ -283,7 +294,7 @@ many_found :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, set: u64,
 		for rest := set; rest != 0; rest &= rest - 1 {
 			p := uint(intrinsics.count_trailing_zeros(rest))
 			#no_bounds_check path := &h.many.paths[p]
-			scan_answer(true, h, path, p, core.Answer{}, 2 * open.lo, open, end, d - path.n)
+			scan_answer(true, h, path, p, core.Answer{}, text_pos(open.lo, d, false), open, end, d - path.n)
 		}
 	}
 }
@@ -526,7 +537,7 @@ many_close_ring :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, s: c
 many_misses :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token, f: ^Many_Frame, d, count: int) {
 	m := h.many
 	open := core.Node_Index(s.b >> 32)
-	pos := t.lo << 32 | u64(1 << 31 - d) when SINK == .Replay else 2 * t.lo + 1
+	pos := t.lo << 32 | u64(1 << 31 - d) when SINK == .Replay else text_pos(t.lo, d, true)
 	for set := f.armed; set != 0; set &= set - 1 {
 		p := uint(intrinsics.count_trailing_zeros(set))
 		#no_bounds_check path := &m.paths[p]

@@ -103,7 +103,7 @@ scan_walk :: proc(h: ^engine.Scan, src: []u8, q: [^]u8, $S: Spec, opts: Options,
 	}
 	// The root is counted whether it was kept or not. A text with no value is no document.
 	if fault == nil && !stopped && u32(regs.b) == 0 {
-		fault = core.fault_of(core.fault_at(u64(len(src)), .Truncated), &RULES)
+		fault = core.Fault{at = u64(len(src)), rules = &RULES, kind = .Truncated}
 	}
 	// A spec with comments walks past a comment after the root, so its `hi` is no close.
 	when .Comments in FEATURES[S] {
@@ -191,7 +191,7 @@ scan_record_spec :: proc(it: ^records.Reader, h: ^engine.Scan, last: ^core.Docum
 	// The input's end, which ends the records with no fault, ends the read with one and is no error.
 	fault := it.fault
 	if !ok && fault == nil {
-		fault = core.fault_of(core.fault_at(u64(len(src)), .Truncated), &RULES)
+		fault = core.Fault{at = u64(len(src)), rules = &RULES, kind = .Truncated}
 	}
 	e := engine.scan_end(h, regs, rec.at + u64(len(rec.text)) if ok && !stopped else 0, fault, last)
 	if !ok && it.fault == nil {

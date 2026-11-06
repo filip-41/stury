@@ -33,10 +33,12 @@ RECORDS := records.Services {
 @(private)
 BATCH :: 256
 
-// A row of a batch: its first byte and the byte its line end starts at.
+// A row of a batch: its first byte, the byte its line end starts at, and whether it holds an ill-formed sequence
+// `.Invalid_Utf8` tolerated, which its split then reads its blocks for.
 @(private)
 Batch_Row :: struct {
 	at, hi: u64,
+	lax:    bool,
 }
 
 // The rows of a reader's last frame, kept in `Reader.format`. The frame is `validate`'s pass, which records each row, and
@@ -80,12 +82,12 @@ Batch :: struct {
 // Records the record from `lo` to `hi`, the header's line when `header`, and the `width` its check left. The first record
 // sets the width and no later one changes it. Returns true once the batch is full or holds a record at or past `b.to`.
 @(private)
-frame_row :: #force_inline proc "contextless" (b: ^Batch, lo, hi: int, header: bool, width: int) -> bool #no_bounds_check {
+frame_row :: #force_inline proc "contextless" (b: ^Batch, lo, hi: int, header: bool, width: int, lax: bool) -> bool #no_bounds_check {
 	if header {
-		b.head, b.width = {u64(lo), u64(hi)}, width
+		b.head, b.width = {u64(lo), u64(hi), lax}, width
 		return false
 	}
-	b.rows[b.n] = {u64(lo), u64(hi)}
+	b.rows[b.n] = {u64(lo), u64(hi), lax}
 	b.n += 1
 	if b.n == 1 {
 		b.width = width
@@ -140,13 +142,14 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 	regs: core.Hook_Regs
 	r := run(it.src, it.pos, S, opts, b, &regs, on, false, nil, b.width)
 	r = field_count_fault(src = it.src, lo = it.pos, S = S, opts = opts, r = r, width = 0 if first else b.width)
-	if f := core.fault_of(r, &RULES); f != nil {
-		b.done, b.fault = true, f
-	} else if u8(r >> 8) != core.STOPPED {
+	hi, fault, stopped := core.result_of(r, &RULES)
+	if fault != nil {
+		b.done, b.fault = true, fault
+	} else if !stopped {
 		b.done = true
 	}
 	// A stopped frame returns the byte past the row end it stopped on. A restart reads no header.
-	it.pos = r >> 16
+	it.pos = hi
 	// A span reads no header's cells.
 	if first && b.head.hi > b.head.at && b.to == max(u64) {
 		src, head := it.src, b.head
@@ -158,7 +161,7 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 				return
 			}
 			copy(text, src[head.at:head.hi])
-			src, head, b.key_src = text, {0, u64(len(text))}, text
+			src, head, b.key_src = text, {0, u64(len(text)), head.lax}, text
 		}
 		n, _, ok := split_all(it, b, src, head, S, opts, .Key)
 		keys, err := make([]core.Token, n, it.allocator)
@@ -295,7 +298,7 @@ joined :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row) -> (src: []u8, at
 	}
 	copy(b.comb[:], b.key_src)
 	copy(b.comb[n:], it.src[row.at:row.hi])
-	return b.comb[:], {u64(n), u64(size)}, true
+	return b.comb[:], {u64(n), u64(size), row.lax}, true
 }
 
 // Builds `rec`, the row `next` gave last, as a document over the whole input: a `Map` keyed by the header's cells, or an

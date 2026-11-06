@@ -185,8 +185,6 @@ Plan :: struct {
 	// The format, and for a format whose writer reads them, the spec and option bytes a write by the plan takes.
 	using as:  core.As,
 	type:      typeid,
-	union_tag: string,
-	enums:     Enum_Spelling,
 	// What a key's writing adds to its name, `Field.n` less the name's length.
 	key_frame: u32,
 	// The name bytes of records and of renamed or unescaped names.
@@ -196,36 +194,43 @@ Plan :: struct {
 	node_read: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error,
 	// The format's value writer, which holds its spelling compiled in, where its plan maker sets it.
 	marshal:   Marshal_Text,
-	// The options the plan was built with, for the plans a write builds for a type met in an `any`.
-	options:   Plan_Options,
+	// The options the plan was built with, which its reads and writes take, and so do the plans a write builds for a type
+	// met in an `any`.
+	using options: Plan_Options,
 }
 
 // Writes the value of `plan`'s type at `value` as `opts` says, to `stream` when it has a procedure, else to new bytes
 // from `allocator`.
 Marshal_Text :: #type proc(plan: ^Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error)
 
+// The members a plan builder names in a refusal's path, the outermost ones when the type nests deeper.
+@(private)
+TRAIL_MAX :: 32
+
 @(private)
 Builder :: struct {
-	using opts: Plan_Options,
-	p:          ^Plan,
-	fields:     [dynamic]Field,
-	meta:       [dynamic]Meta,
-	blocks:     map[typeid]i32,
-	ends:       map[i32]i32, // a struct block's `Never` record
-	widest:     int,
-	err:        core.Typed_Error,
+	using options: ^Plan_Options, // the plan's, which own their strings
+	p:             ^Plan,
+	fields:        [dynamic]Field,
+	meta:          [dynamic]Meta,
+	blocks:        map[typeid]i32,
+	ends:          map[i32]i32, // a struct block's `Never` record
+	widest:        int,
+	err:           core.Typed_Error,
+	// The names of the members being filled, outermost first, which a refusal reports as its path.
+	trail:         [TRAIL_MAX]string,
+	depth:         int,
 }
 
 // Builds the plan of `T` for the format `spelling` gives, allocating with `allocator`. A type the read cannot take is
 // an error, with the path to it, and the plan is then the zero value. `opts`'s strings and slices are read here only.
 plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error) {
 	context.allocator = allocator
-	p = {spelling = spelling, type = T, union_tag = opts.union_tag, enums = opts.enums, key_frame = u32(len(spelling.key_open) + len(spelling.key_close)), allocator = allocator}
-	b := Builder{opts = opts, p = &p}
-	p.union_tag = owned_copy(&b, opts.union_tag)
+	p = {spelling = spelling, type = T, key_frame = u32(len(spelling.key_open) + len(spelling.key_close)), allocator = allocator}
+	b := Builder{options = &p.options, p = &p}
 	hooks, no_hooks := make([]Type_Hook, len(opts.hooks))
 	tag_names, no_names := make([]Tag_Name, len(opts.tag_names))
-	p.options = {enums = opts.enums, union_tag = p.union_tag, rename = opts.rename, hooks = hooks, tag_names = tag_names}
+	p.options = {enums = opts.enums, union_tag = owned_copy(&b, opts.union_tag), rename = opts.rename, hooks = hooks, tag_names = tag_names}
 	copy(hooks, opts.hooks)
 	for &t, i in tag_names {
 		t = {opts.tag_names[i].type, owned_copy(&b, opts.tag_names[i].name)}
@@ -239,6 +244,9 @@ plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := Plan_Options{}, a
 		never(&b, 2)
 		b.fields[2].kind = .Inside
 		never(&b, 3)
+	}
+	if b.err.kind == .None {
+		refuse_tag_members(&b)
 	}
 	solo, no_solo := make([]Field, 2 * len(b.fields))
 	zero, no_zero := make([]u8, max(b.widest, 1))
@@ -376,25 +384,52 @@ name_bit :: #force_inline proc "contextless" (name: string) -> u64 #no_bounds_ch
 
 @(private)
 refuse_plan :: proc(b: ^Builder, kind: core.Typed_Error_Kind, at := "") {
-	if b.err.kind == .None {
-		b.err.kind = kind
-		if len(at) > 0 {
-			b.err.steps[0], b.err.n_steps = core.Name(at), 1
-		}
+	if b.err.kind != .None {
+		return
 	}
+	b.err.kind = kind
+	names := b.trail[:min(b.depth, TRAIL_MAX)]
+	b.err.truncated = b.depth > TRAIL_MAX
+	total := len(names) + (1 if len(at) > 0 else 0)
+	if total > core.MAX_ERROR_STEPS {
+		b.err.truncated = true
+	}
+	n := 0
+	for name in names[max(0, total - core.MAX_ERROR_STEPS):] {
+		b.err.steps[n] = core.Name(name)
+		n += 1
+	}
+	if len(at) > 0 {
+		b.err.steps[n] = core.Name(at)
+		n += 1
+	}
+	b.err.n_steps = u8(n)
 }
 
 @(private)
 fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset, stride: u32) {
+	if len(name) > 0 {
+		if b.depth < TRAIL_MAX {
+			b.trail[b.depth] = name
+		}
+		b.depth += 1
+	}
+	defer if len(name) > 0 {
+		b.depth -= 1
+	}
 	base := runtime.type_info_base(ti)
 	f := Field{offset = offset, stride = stride, meta = u32(at)}
 	m := Meta{name = name, size = u32(base.size), block = -1}
+	// A record holds a size, offset, stride or count in 32 bits, and each of them is at most its type's size.
+	if base.size > int(max(u32)) {
+		refuse_plan(b, .Unsupported)
+	}
 	expect_name(b, &f, name)
 	if hook, hooked := hook_of(b, ti.id); hooked {
 		f.kind, m.read, m.write = .Hook, hook.read, hook.write
 		m.key_kind = hooked_kind(base)
 		if hook.read == nil && hook.write == nil {
-			refuse_plan(b, .Unsupported, name)
+			refuse_plan(b, .Unsupported)
 		}
 		b.fields[at], b.meta[at] = f, m
 		return
@@ -412,7 +447,7 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 		f.kind = .Any
 		m.block, m.list = any_block(b), true
 	case:
-		fill_base(b, &f, &m, ti, base, name)
+		fill_base(b, &f, &m, ti, base)
 	}
 	b.fields[at], b.meta[at] = f, m
 }
@@ -455,25 +490,25 @@ integer_kind :: proc(base: ^runtime.Type_Info, v: runtime.Type_Info_Integer) -> 
 
 // `fill` for a value the plan reads by its base type.
 @(private)
-fill_base :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti, base: ^runtime.Type_Info, name: string) {
+fill_base :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti, base: ^runtime.Type_Info) {
 	#partial switch v in base.variant {
 	case runtime.Type_Info_Boolean:
 		f.kind = .Bool if base.size == 1 else .Bool_Wide
 	case runtime.Type_Info_Integer:
 		if !plain_integer(base) {
-			refuse_plan(b, .Unsupported, name)
+			refuse_plan(b, .Unsupported)
 			return
 		}
 		f.kind = integer_kind(base, v)
 	case runtime.Type_Info_Float:
 		if base.size < 4 || !platform_order(v.endianness) {
-			refuse_plan(b, .Unsupported, name)
+			refuse_plan(b, .Unsupported)
 			return
 		}
 		f.kind = .F64 if base.size == 8 else .F32
 	case runtime.Type_Info_String:
 		if v.encoding != .UTF_8 {
-			refuse_plan(b, .Unsupported, name)
+			refuse_plan(b, .Unsupported)
 			return
 		}
 		f.kind = .Cstring if v.is_cstring else .String
@@ -498,7 +533,7 @@ fill_base :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti, base: ^runtime.Type_Info
 	case runtime.Type_Info_Map:
 		f.kind = .Map
 		m.map_info = v.map_info
-		m.key_kind = map_key_kind(b, v.key, name)
+		m.key_kind = map_key_kind(b, v.key)
 		if m.key_kind == .Enum {
 			m.enum_info = &runtime.type_info_base(v.key).variant.(runtime.Type_Info_Enum)
 		}
@@ -506,14 +541,14 @@ fill_base :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti, base: ^runtime.Type_Info
 		list(b, m, ti, v.value, 0)
 	case runtime.Type_Info_Enum:
 		if !plain_integer(v.base) {
-			refuse_plan(b, .Unsupported, name)
+			refuse_plan(b, .Unsupported)
 			return
 		}
 		f.kind = .Enum
 		m.enum_info = &base.variant.(runtime.Type_Info_Enum)
 	case runtime.Type_Info_Pointer:
 		if v.elem == nil {
-			refuse_plan(b, .Unsupported, name)
+			refuse_plan(b, .Unsupported)
 			return
 		}
 		f.kind = .Ptr
@@ -522,26 +557,26 @@ fill_base :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti, base: ^runtime.Type_Info
 		fill_union(b, f, m, ti, v)
 	case runtime.Type_Info_Struct:
 		if v.flags & {.raw_union} != {} || v.soa_kind != .None {
-			refuse_plan(b, .Unsupported, name)
+			refuse_plan(b, .Unsupported)
 			return
 		}
 		fill_struct(b, f, m, ti, v)
 	case runtime.Type_Info_Bit_Set:
-		fill_bit_set(b, f, m, ti, v, name)
+		fill_bit_set(b, f, m, ti, v)
 	case:
-		refuse_plan(b, .Unsupported, name)
+		refuse_plan(b, .Unsupported)
 	}
 	// A list's length is its stride's multiple, so an element of no size could spell no length.
 	#partial switch f.kind {
 	case .Slice, .Dynamic, .Array, .Fixed_List:
 		if m.elem_size == 0 {
-			refuse_plan(b, .Unsupported, name)
+			refuse_plan(b, .Unsupported)
 		}
 	}
 }
 
 @(private)
-map_key_kind :: proc(b: ^Builder, key: ^runtime.Type_Info, name: string) -> Read_Kind {
+map_key_kind :: proc(b: ^Builder, key: ^runtime.Type_Info) -> Read_Kind {
 	base := runtime.type_info_base(key)
 	#partial switch v in base.variant {
 	case runtime.Type_Info_String:
@@ -553,17 +588,17 @@ map_key_kind :: proc(b: ^Builder, key: ^runtime.Type_Info, name: string) -> Read
 			return integer_kind(base, v)
 		}
 	}
-	refuse_plan(b, .Unsupported, name)
+	refuse_plan(b, .Unsupported)
 	return .Never
 }
 
 @(private)
-fill_bit_set :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: runtime.Type_Info_Bit_Set, name: string) {
+fill_bit_set :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: runtime.Type_Info_Bit_Set) {
 	elem := runtime.type_info_base(v.elem)
 	_, is_int := elem.variant.(runtime.Type_Info_Integer)
 	_, is_enum := elem.variant.(runtime.Type_Info_Enum)
 	if !is_int && !is_enum || (v.underlying != nil && !plain_integer(v.underlying, 16)) {
-		refuse_plan(b, .Unsupported, name)
+		refuse_plan(b, .Unsupported)
 		return
 	}
 	f.kind = .Bit_Set
@@ -638,7 +673,7 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 	// A `Maybe`, the one arm reads on the hot kinds' own path.
 	if len(v.variants) == 1 && !v.no_nil {
 		elem := runtime.type_info_base(v.variants[0])
-		if p, is_ptr := elem.variant.(runtime.Type_Info_Pointer); is_ptr && m.tag_size == 0 {
+		if p, is_ptr := elem.variant.(runtime.Type_Info_Pointer); is_ptr && p.elem != nil && m.tag_size == 0 {
 			f.kind = .Ptr
 			m.whole = true
 			list(b, m, ti, p.elem, 0)
@@ -678,7 +713,7 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 			m.arms[k].name = n.name
 			for t in b.tag_names {
 				if t.type == arm.id {
-					m.arms[k].name = owned_copy(b, t.name)
+					m.arms[k].name = t.name
 				}
 			}
 		}
@@ -689,13 +724,6 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 	for &arm, k in m.arms {
 		if m.tagged && len(arm.name) > 0 {
 			b.meta[int(m.block) + k].tagged = true
-			if s, ok := runtime.type_info_base(v.variants[k]).variant.(runtime.Type_Info_Struct); ok {
-				for i in 0 ..< int(s.field_count) {
-					if s.names[i] == b.union_tag {
-						refuse_plan(b, .Unsupported)
-					}
-				}
-			}
 		} else {
 			arm.name = ""
 			if .Object in arm.classes {
@@ -709,6 +737,25 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 	}
 	if untagged_objects > 1 || (m.tagged && untagged_objects > 0) {
 		refuse_plan(b, .Ambiguous_Union)
+	}
+}
+
+// Refuses a struct arm of a union read by its tag that has a member keyed as the tag, which the tag's value would fill.
+// The pass runs once the type is filled, since an arm that holds the union has its members filled after the union.
+@(private)
+refuse_tag_members :: proc(b: ^Builder) {
+	for m in b.meta {
+		for arm in m.arms {
+			if len(arm.name) == 0 {
+				continue
+			}
+			s := &b.meta[arm.fields]
+			for j in 0 ..< int(s.members) {
+				if name := b.meta[int(s.block) + j].name; name == b.union_tag {
+					refuse_plan(b, .Unsupported, name)
+				}
+			}
+		}
 	}
 }
 
@@ -864,6 +911,9 @@ lay_out :: proc(b: ^Builder, v: runtime.Type_Info_Struct, base: uintptr, out: ^[
 		}
 		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit}
 		if tag.unknown {
+			if tag.required {
+				refuse_plan(b, .Bad_Tag, tag.name)
+			}
 			if v.types[i].id != typeid_of(map[string]Raw) || capture^ != nil {
 				refuse_plan(b, .Unsupported, tag.name)
 			}

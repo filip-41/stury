@@ -1,5 +1,6 @@
 package core
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:unicode/utf8"
 import spell "./spell"
@@ -239,7 +240,7 @@ bad_path :: proc(p: ^Parser, at: int) -> bool {
 
 // Reads jq path text: `.`, `.a`, `."a-b"`, `.["a-b"]`, `.[0]`, `.[-1]`, `.[]`, `.[2:5]`, `..` first in a path, `?` after
 // any step, and the wrappers `first(P)` and `limit(N; P)`. A quoted name's escapes are a JSON string's, a lone surrogate
-// escape is refused as in one, and its other bytes stand as written. Spaces may stand around the text and inside a
+// escape and an ill-formed UTF-8 sequence are refused as in one, and its other bytes stand as written. Spaces may stand around the text and inside a
 // wrapper, not inside a path. Text past this subset is refused, so a path means here what it means in jq. A bare name is
 // a jq identifier. `.Bad_Path`'s `at` is a byte of `text`.
 parse_path :: proc(text: string, allocator := context.allocator) -> (path: Path, err: Path_Error) {
@@ -289,7 +290,8 @@ parse_text :: proc(p: ^Parser) -> bool {
 }
 
 // Reads an RFC 6901 JSON Pointer: the empty text is the root, and each `/` starts a reference token, in which `~0` is `~`
-// and `~1` is `/`. A token that is an array index by the RFC's rule, with no leading zero, is an `Index_Or_Name`.
+// and `~1` is `/`, and an ill-formed UTF-8 sequence is refused. A token that is an array index by the RFC's rule, with no
+// leading zero, is an `Index_Or_Name`.
 parse_pointer :: proc(text: string, allocator := context.allocator) -> (path: Path, err: Path_Error) {
 	return parse(text, allocator, true)
 }
@@ -305,6 +307,14 @@ parse_tokens :: proc(p: ^Parser) -> bool {
 		hi := lo
 		tilde := false
 		for hi < len(t) && t[hi] != '/' {
+			if t[hi] >= 0x80 {
+				end, ok := utf8_end(t, hi)
+				if !ok {
+					return bad_path(p, hi)
+				}
+				hi = end
+				continue
+			}
 			if t[hi] == '~' {
 				if hi + 1 == len(t) || t[hi + 1] != '0' && t[hi + 1] != '1' {
 					return bad_path(p, hi)
@@ -456,6 +466,12 @@ parse_quoted :: proc(p: ^Parser) -> bool {
 			}
 			escape = true
 			i += n
+		} else if t[i] >= 0x80 {
+			end, ok := utf8_end(t, i)
+			if !ok {
+				return bad_path(p, i)
+			}
+			i = end
 		} else {
 			i += 1
 		}
@@ -470,6 +486,15 @@ parse_quoted :: proc(p: ^Parser) -> bool {
 	}
 	p.at = i + 1
 	return true
+}
+
+// Returns the byte past the character that starts at `t[i]`, a byte past ASCII, and false when it is ill-formed UTF-8 or
+// the text cuts it short.
+@(private = "file")
+utf8_end :: proc(t: string, i: int) -> (end: int, ok: bool) {
+	base := raw_data(t)
+	q, kind := spell.utf8_char(base[i:], base[len(t):])
+	return int(intrinsics.ptr_sub(q, base)), kind == .None
 }
 
 // Reads `[...]`: `[]`, a quoted name, an index or a slice.
@@ -502,32 +527,40 @@ parse_bracket :: proc(p: ^Parser) -> bool {
 	return eat(p, "]") || bad_path(p, p.at)
 }
 
-// Reads the digits at `t[i:]` as an `int`, returning the byte past them, and false when there is none or it overflows.
+// Reads the digits at `t[i:]` as an `int`, returning the byte past them. `ok` is false when there is none, and `fits` false
+// when the value passes `max(int)`, which `value` then is.
 @(private = "file")
-digits_int :: proc(t: string, i: int) -> (value: int, end: int, ok: bool) {
+digits_int :: proc(t: string, i: int) -> (value: int, end: int, ok: bool, fits: bool) {
 	end = i
+	fits = true
 	for end < len(t) && t[end] >= '0' && t[end] <= '9' {
 		d := int(t[end] - '0')
 		if value > (max(int) - d) / 10 {
-			return 0, i, false
+			fits = false
+			value = max(int)
+		} else {
+			value = value * 10 + d
 		}
-		value = value * 10 + d
 		end += 1
 	}
-	return value, end, end > i
+	return value, end, end > i, fits
 }
 
-// Reads an optional `-` and its digits, and leaves `p.at` where it was when they make no `int`.
+// Reads an optional `-` and its digits, which jq clamps to the `int` range as it clamps an index, and leaves `p.at` where it
+// was when there are none.
 @(private = "file")
 parse_int :: proc(p: ^Parser) -> (value: int, ok: bool) {
 	i := p.at
 	minus := i < len(p.text) && p.text[i] == '-'
-	n, end, good := digits_int(p.text, i + 1 if minus else i)
+	n, end, good, fits := digits_int(p.text, i + 1 if minus else i)
 	if !good {
 		return 0, false
 	}
 	p.at = end
-	return -n if minus else n, true
+	if minus {
+		return -n if fits else min(int), true
+	}
+	return n, true
 }
 
 // Decodes a judged quoted name into `out`, which holds `len(raw)` bytes, as no escape grows. Returns the bytes written.
@@ -566,14 +599,20 @@ decode_pointer :: proc(raw: string, out: []u8) -> int {
 	return w
 }
 
-// Returns the array index `token` spells: `0`, or digits with no leading zero, that fit an `int`.
+// Returns the array index `token` spells: `0`, or digits with no leading zero. An index past what an `int` holds is
+// `max(int)`, past the end of every array.
 @(private = "file")
 pointer_index :: proc(token: string) -> (index: int, ok: bool) {
 	if len(token) == 0 || len(token) > 1 && token[0] == '0' {
 		return 0, false
 	}
-	n, end, good := digits_int(token, 0)
-	return n, good && end == len(token)
+	for b in transmute([]u8)token {
+		if b < '0' || b > '9' {
+			return 0, false
+		}
+	}
+	n, _, _, _ := digits_int(token, 0)
+	return n, true
 }
 
 // Answers `path` over a document built whole, in the order a scan of its text answers, and allocates nothing but the

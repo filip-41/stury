@@ -27,17 +27,11 @@ number_spelling_of :: #force_inline proc "contextless" (spelling: u16) -> Number
 	return Number_Spelling(spelling & core.NUMBER_KIND_MASK)
 }
 
-// Packs a decimal's kind and digit counts into its `spelling`.
-@(private)
-number_spelling :: #force_inline proc "contextless" (kind: Number_Spelling, int_digits, frac_digits: u64) -> u16 {
-	return core.number_spelling(u16(kind), int_digits, frac_digits)
-}
-
 // `p` is at a number JSON's leaf refused or read only up to an `x`. Reads the JSON5 number, then what follows it.
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_number5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, spelling, kind := number5(p, end, H != core.No_Hooks)
+	q, spelling, kind, _ := number_run(p, end, S, true, false)
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
@@ -51,156 +45,6 @@ st_number5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w
 		return stopped(w, hs, q)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
-}
-
-// `st_value5` is `st_value` for a byte that starts no JSON value. It reads a comment run, one of JSON5's own starts, a
-// close bracket after a trailing comma, or faults. A separate state, so `st_value` compiles none of it.
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_value5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
-	hs := core.Hook_Regs{s0, s1, s2}
-	if gap(p, end, S) {
-		return #must_tail st_comments_value(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-	}
-	switch p[0] {
-	case '\'':
-		return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-	case '+', '.', 'I', 'N':
-		return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-	}
-	// An array's close where a value must start follows a comma, or an open bracket and comments.
-	if p[0] == ']' && d & 1 == 0 && d >= 2 {
-		return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-	}
-	return fault(w, hs, p, .Bad_Char)
-}
-
-// `st_key5` is `st_key` for a byte that opens no JSON key. It reads a comment run, the object's close after a trailing
-// comma, a single-quoted or unquoted key, then its colon. A byte that starts none of those faults `Bad_Char` with
-// detail `.Identifier`.
-@(private, enable_target_feature = STATE_FEATURES)
-st_key5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
-	hs := core.Hook_Regs{s0, s1, s2}
-	if gap(p, end, S) {
-		return #must_tail st_comments_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-	}
-	if p[0] == '}' {
-		return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-	}
-	q: [^]u8
-	esc, lax: bool
-	kind: core.Fault_Kind
-	if p[0] == '\'' {
-		q, esc, lax, kind = string_long(w, p, end)
-	} else {
-		q, esc, kind = ident5(p, end)
-	}
-	if kind != .None {
-		return fault(w, hs, q, kind)
-	}
-	if q == p {
-		return fault(w, hs, p, .Bad_Char, .Identifier)
-	}
-	if too_wide(p, q) {
-		return fault(w, hs, p, .Too_Wide)
-	}
-	a: core.Action
-	if p[0] == '\'' {
-		a = emit_string(w, on, &hs, .String, .Key, p, q, string_spelling(esc, lax))
-	} else {
-		// An unquoted key's token is its bare span, with `SPELLING_QUOTED` clear.
-		a = emit(w, on, &hs, .String, .Key, p, q, string_spelling(esc, lax))
-	}
-	switch a {
-	case .Next, .Keep:
-	case .Skip:
-		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
-	case .Stop:
-		return stopped(w, hs, q)
-	}
-	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
-}
-
-// Reads the JSON5 number at `p`, which starts with a sign, a digit, `.`, `I` or `N`. Returns one past it and its
-// spelling, or the fault's kind and the byte it is at. A decimal integer part is `0` or starts with a nonzero digit,
-// as in JSON, and the integer or the fraction part may be empty, but not both.
-@(private)
-number5 :: proc "contextless" (p, end: [^]u8, $shape: bool) -> (q: [^]u8, spelling: u16, kind: core.Fault_Kind) #no_bounds_check {
-	q = p
-	kind5 := Number_Spelling.Json
-	if q[0] == '+' {
-		kind5 = .Decimal
-	}
-	if q[0] == '+' || q[0] == '-' {
-		q = q[1:]
-		if q >= end {
-			return end, spelling, .Truncated
-		}
-	}
-	switch q[0] {
-	case 'I':
-		q, kind = word5(q, end, "Infinity")
-		return q, u16(Number_Spelling.Infinity), kind
-	case 'N':
-		q, kind = word5(q, end, "NaN")
-		return q, u16(Number_Spelling.Nan), kind
-	}
-	if q[0] == '0' && intrinsics.ptr_sub(end, q) > 1 && q[1] | 0x20 == 'x' {
-		r := hex_run(q[2:], end)
-		if r == q[2:] {
-			q, kind = bad_or_truncated(r, end)
-			return q, u16(Number_Spelling.Hex), kind
-		}
-		return r, u16(Number_Spelling.Hex), .None
-	}
-	whole := q
-	if q[0] == '0' {
-		q = q[1:]
-		if q < end && q[0] - '0' < 10 {
-			return q, u16(kind5), .Bad_Number
-		}
-	} else {
-		q = spell.digit_end(q, end, nil, false)
-	}
-	when shape {
-		int_digits := u64(intrinsics.ptr_sub(q, whole))
-		frac_digits: u64
-	}
-	if q < end && q[0] == '.' {
-		r := spell.digit_end(q[1:], end, nil, false)
-		if r == q[1:] || q == whole {
-			if r == q[1:] && q == whole {
-				q, kind = bad_or_truncated(r, end)
-				return q, u16(kind5), kind
-			}
-			kind5 = .Decimal
-		}
-		when shape {
-			frac_digits = u64(intrinsics.ptr_sub(r, q[1:]))
-		}
-		q = r
-	} else if q == whole {
-		q, kind = bad_or_truncated(q, end)
-		return q, u16(kind5), kind
-	}
-	if q < end && q[0] | 0x20 == 'e' {
-		q = q[1:]
-		if q < end && (q[0] == '+' || q[0] == '-') {
-			q = q[1:]
-		}
-		r := spell.digit_end(q, end, nil, false)
-		if r == q {
-			q, kind = bad_or_truncated(r, end)
-			return q, u16(kind5), kind
-		}
-		when shape {
-			return r, number_spelling(kind5, int_digits, frac_digits) | core.NUMBER_EXP, .None
-		}
-		q = r
-	}
-	when shape {
-		return q, number_spelling(kind5, int_digits, frac_digits), .None
-	}
-	return q, u16(kind5), .None
 }
 
 // Returns the lanes of `v` that are a hex digit: `0` to `9`, or `a` to `f` in either case.
@@ -249,7 +93,7 @@ word5 :: proc "contextless" (p, end: [^]u8, word: string) -> (q: [^]u8, kind: co
 // character but a digit, which spells that character. A digit after `\0`, and `\1` to `\9`, fault `Bad_Escape` at the
 // digit. `tol` is the walk's tolerances, and `lax` says an escaped ill-formed sequence was accepted as U+FFFD.
 @(private)
-escape5 :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind, lax: bool) #no_bounds_check {
+escape5 :: proc "contextless" (e, end: [^]u8, tol: bit_set[core.Tolerance; u8]) -> (q: [^]u8, kind: core.Fault_Kind, lax: bool) #no_bounds_check {
 	q = e[1:]
 	if q >= end {
 		return end, .Truncated, false
@@ -259,15 +103,8 @@ escape5 :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q
 	case c == 'u':
 		return escape_exact(e, end, tol)
 	case c == 'x':
-		for i in 1 ..= 2 {
-			if q[i:] >= end {
-				return end, .Truncated, false
-			}
-			if spell.HEX_NIBBLE[q[i]] == 0xff {
-				return q[i:], .Bad_Escape, false
-			}
-		}
-		return q[3:], .None, false
+		_, q, kind = escape_digits(q[1:], end, 2)
+		return q, kind, false
 	case c == '0':
 		if intrinsics.ptr_sub(end, q) > 1 && q[1] - '0' < 10 {
 			return q[1:], .Bad_Escape, false
@@ -288,9 +125,9 @@ escape5 :: proc "contextless" (e, end: [^]u8, tol: bit_set[Tolerance; u8]) -> (q
 
 // Reads one character of an identifier at `q` that is no ASCII identifier byte: a `\u` escape or a UTF-8 character,
 // which `r` steps past, or the fault. `r` is `q` when the character may not be there, which ends the identifier. `esc`
-// reports whether the character was an escape.
-@(private)
-ident5_char :: #force_inline proc "contextless" (q, end: [^]u8, start: bool) -> (r: [^]u8, esc: bool, kind: core.Fault_Kind) #no_bounds_check {
+// reports whether the character was an escape. Out of line, so `ident5` stays small enough for the compiler to inline into `st_key5`.
+@(private, cold)
+ident5_char :: #force_no_inline proc "contextless" (q, end: [^]u8, start: bool) -> (r: [^]u8, esc: bool, kind: core.Fault_Kind) #no_bounds_check {
 	c := q[0]
 	if c == '\\' {
 		if intrinsics.ptr_sub(end, q) < 2 {
@@ -299,22 +136,16 @@ ident5_char :: #force_inline proc "contextless" (q, end: [^]u8, start: bool) -> 
 		if q[1] != 'u' {
 			return q[1:], false, .Bad_Escape
 		}
-		for i in 2 ..< 6 {
-			if q[i:] >= end {
-				return end, false, .Truncated
-			}
-			if spell.HEX_NIBBLE[q[i]] == 0xff {
-				return q[i:], false, .Bad_Escape
-			}
+		unit: u32
+		if unit, r, kind = escape_digits(q[2:], end, 4); kind != .None {
+			return r, false, kind
 		}
-		unit, _ := spell.hex4(q[2:])
-		r = q[6:]
 		if !ident_char(rune(unit), start) {
 			return q, false, .Bad_Escape
 		}
 		return r, true, .None
 	}
-	r, kind = kernel.utf8_char(q, end)
+	r, kind = spell.utf8_char(q, end)
 	if kind != .None {
 		return r, false, kind
 	}

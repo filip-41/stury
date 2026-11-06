@@ -109,15 +109,15 @@ JSONC_CASES := []Case {
 	{"[1, /*", .Truncated, 6},
 	{"[1 /", .Bad_Char, 3},
 	{"/", .Bad_Char, 0},
-	{"1 /", .Bad_Char, 2},
+	{"1 /", TRAILING, 2},
+	{"1 /* a */ /", TRAILING, 10},
 	{"1 /* a", .Truncated, 6},
 	{"/* a */", .Truncated, 7},
 	{"// a", .Truncated, 4},
 	{"{\"a\" /* b */", .Truncated, 12},
 	{"[1 /x]", .Bad_Char, 3},
 	{"[/ 1]", .Bad_Char, 1},
-	{"1 /x", .Bad_Char, 2},
-	{"{\"a\" /x : 1}", .Bad_Char, 5},
+	{"1 /x", TRAILING, 2},
 	{"[// \xff\n1]", .Bad_Char, 4},
 	{"[/* \xc3\x28 */1]", .Bad_Char, 4},
 	{"[// a\x00\n1]", .Bad_Char, 5},
@@ -195,6 +195,7 @@ JSON5_KEY_CASES := []Case {
 	{"{a: 1, @: 2}", .Bad_Char, 7},
 	{"{\xcc\x81a: 1}", .Bad_Char, 1},
 	{"{a: 1,,}", .Bad_Char, 6},
+	{"{/}", .Bad_Char, 1},
 }
 
 // Holds JSON5 texts that raise a fault under `.Jsonc`.
@@ -234,12 +235,18 @@ COLON_CASES := []Case {
 COLON_CASES_JSONC := []Case {
 	{"{\"a\" 1}", .Bad_Char, 5},
 	{"{\"a\" /* c */ 1}", .Bad_Char, 13},
+	{"{\"a\" /x : 1}", .Bad_Char, 5},
+	{"{\"a\" /* c */ / : 1}", .Bad_Char, 13},
 }
 
 @(rodata)
 COLON_CASES_JSON5 := []Case {
 	{"{a b: 1}", .Bad_Char, 3},
 	{"{a /* c */ 1}", .Bad_Char, 11},
+	{"{a é: 1}", .Bad_Char, 3},
+	{"{\"a\" é: 1}", .Bad_Char, 6},
+	{"{a /* c */é: 1}", .Bad_Char, 10},
+	{"{a / 1}", .Bad_Char, 3},
 }
 
 @(test)
@@ -329,6 +336,41 @@ colon_detail_after_skip :: proc(t: ^testing.T) {
 		}
 		f := core.Fault{want.at, &json.RULES, .Bad_Char, u8(json.Detail.Colon)}
 		testing.expectf(t, fault == f, "%v %q: %v, want %v", want.spec, want.text, fault, f)
+	}
+}
+
+// A walk whose hook skips a container or a key faults at the first byte after the skipped container's close where
+// that byte is no close, whatever its value, so `0xDD` and `0xFD`, `]` and `}` with bit 7 set, are `Bad_Char`.
+@(test)
+byte_after_skipped_close :: proc(t: ^testing.T) {
+	Skipped :: struct {
+		text:  string,
+		token: int,
+		at:    u64,
+	}
+	for want in ([]Skipped {
+		{"[[1]\xdd,2]", 1, 4},
+		{"[{}\xdd]", 1, 3},
+		{"{\"x\":[1]\xfd,\"a\":1}", 1, 8},
+		{"{\"x\":[1]\xfd,\"a\":1}", 2, 8},
+		{"{\"x\":{\"y\":1}\xfd}", 1, 12},
+		{"{\"x\":{\"y\":1}\xfd}", 2, 12},
+	}) {
+		f := core.Fault{want.at, &json.RULES, .Bad_Char, 0}
+		testing.expectf(t, json.validate(transmute([]u8)want.text, .Json) == f, "%q: validate", want.text)
+		for spec in json.Spec {
+			skip := want.token
+			fault: Maybe(core.Fault)
+			switch spec {
+			case .Json:
+				_, fault = json.walk(transmute([]u8)want.text, 0, .Json, {}, &skip, &core.Hook_Regs{}, skip_hook)
+			case .Jsonc:
+				_, fault = json.walk(transmute([]u8)want.text, 0, .Jsonc, {}, &skip, &core.Hook_Regs{}, skip_hook)
+			case .Json5:
+				_, fault = json.walk(transmute([]u8)want.text, 0, .Json5, {}, &skip, &core.Hook_Regs{}, skip_hook)
+			}
+			testing.expectf(t, fault == f, "%v %q, token %d skipped: %v, want %v", spec, want.text, want.token, fault, f)
+		}
 	}
 }
 
@@ -504,8 +546,9 @@ escapes_by_byte :: proc(t: ^testing.T) {
 	}
 }
 
-// Tests every byte at every place of a predicted indent and in the token after it, judged as the same text with each
-// `\n` replaced by `\r`. Then texts that end in a predicted indent, which is `Truncated` at their end.
+// Tests every byte at every place of a predicted indent of spaces or tabs after an LF or a CRLF and in the token after
+// it, judged as the same text with each `\n` replaced by `\r`. Then texts that end in a predicted indent, which is
+// `Truncated` at their end.
 @(test)
 indents_by_byte :: proc(t: ^testing.T) {
 	text, plain: [dynamic]u8
@@ -513,21 +556,24 @@ indents_by_byte :: proc(t: ^testing.T) {
 	defer delete(plain)
 	fence := walktest.fence_init()
 	defer walktest.unfence(&fence)
-	for k in 0 ..< 40 {
+	for nl in ([]string{"\n", "\r\n"}) do for fill in ([]u8{' ', '\t'}) do for k in 0 ..< 40 {
 		for i in 0 ..= k {
 			for c in 0 ..< 256 {
 				clear(&text)
-				append(&text, "[\n")
+				append(&text, '[')
+				append(&text, nl)
 				for _ in 0 ..< k {
-					append(&text, ' ')
+					append(&text, fill)
 				}
-				append(&text, "1,\n")
+				append(&text, "1,")
+				append(&text, nl)
 				for _ in 0 ..< k {
-					append(&text, ' ')
+					append(&text, fill)
 				}
 				append(&text, '2')
 				text[len(text) - 1 - k + i] = u8(c)
-				append(&text, "\n]")
+				append(&text, nl)
+				append(&text, ']')
 				for _ in 0 ..< 40 {
 					append(&text, ' ')
 				}
@@ -542,7 +588,7 @@ indents_by_byte :: proc(t: ^testing.T) {
 				}
 			}
 		}
-		resize(&text, 2 + k + 3 + k)
+		resize(&text, 3 + 2 * len(nl) + 2 * k)
 		f, bad := validate_fenced(&fence, text[:], .Json).?
 		if !testing.expectf(t, bad && f.kind == .Truncated && f.at == u64(len(text)), "%q: %v", text[:], f) {
 			return
@@ -752,7 +798,7 @@ max_depth_comments_in :: proc(t: ^testing.T, $S: json.Spec) {
 Tolerated :: struct {
 	spec:   json.Spec,
 	text:   string,
-	tol:    bit_set[json.Tolerance; u8],
+	tol:    bit_set[core.Tolerance; u8],
 	kind:   core.Fault_Kind, // nil where `tol` tolerates every fault
 	offset: u64,
 }
@@ -779,13 +825,18 @@ TOLERATED := []Tolerated {
 	{.Json, "\"\\ud800\\u00g1\"", {.Lone_Surrogate}, .Bad_Escape, 11},
 	{.Json, "\"\\ud800\\u", {.Lone_Surrogate}, .Truncated, 9},
 	{.Json, "\"\xff\"", {.Lone_Surrogate}, .Bad_Char, 1},
+	{.Json, "\"\xff\\ud800\"", {.Invalid_Utf8, .Lone_Surrogate, .Ragged, .Bare_Quote}, nil, 0},
+	{.Json, "[\"\xff\",\"\\ud800\"]", {.Ragged, .Bare_Quote}, .Bad_Char, 2},
 	{.Jsonc, "\"\xff\" // \\ud800", {.Invalid_Utf8}, nil, 0},
 	{.Jsonc, "// \xff\n1", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Char, 3},
 	{.Jsonc, "/* \xff */1", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Char, 3},
+	{.Jsonc, "1 // \xe2\x82", {.Invalid_Utf8}, .Truncated, 7},
 	{.Json5, "'\xff'", {.Invalid_Utf8}, nil, 0},
 	{.Json5, "'\\\xff'", {.Invalid_Utf8}, nil, 0},
 	{.Json5, "'\\ud800'", {.Lone_Surrogate}, nil, 0},
 	{.Json5, "{\xff:1}", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Char, 1},
+	{.Json5, "// \xff\n1", {.Invalid_Utf8}, .Bad_Char, 3},
+	{.Json5, "1 /* \xc3( */", {.Invalid_Utf8}, .Bad_Char, 5},
 	{.Json5, "{a\\ud800:1}", {.Invalid_Utf8, .Lone_Surrogate}, .Bad_Escape, 2},
 }
 

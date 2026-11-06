@@ -8,7 +8,6 @@ package jq
 import "core:hash"
 import "core:slice"
 import "core:strconv"
-import "../../../core/spell"
 import core_pkg "../../../core"
 import json "../../../json"
 
@@ -155,19 +154,7 @@ scalar :: proc(v: Value) -> Value {
 node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 	lit := string(core_pkg.span(doc, i))
 	n, _ := core_pkg.number(doc, i)
-	f: f64
-	switch n.kind {
-	case .Int:
-		// `-0` is an integer node whose bits carry no sign
-		f = -0.0 if n.bits == 0 && lit[0] == '-' else f64(i64(n.bits))
-	case .Uint:
-		f = f64(n.bits)
-	case .Float:
-		f = transmute(f64)n.bits
-	case .Wide:
-		// past binary64's digits or range, `1e400` among them, which strconv reads as infinity
-		f, _ = strconv.parse_f64(lit)
-	}
+	f := number_f64(n, lit)
 	// The `NUMBER_*` layout holds only for a `.Number` token. A dsv cell is `.Plain`, its spelling bits mean other things.
 	if doc.nodes[i].kind == .Number && doc.nodes[i].spelling & core_pkg.NUMBER_KIND_MASK != 0 {
 		// A number JSON cannot write has no literal and prints as computed.
@@ -177,11 +164,21 @@ node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 	return Number{f = f, lit = lit}
 }
 
-// `text` as a number's kept literal: itself when it is a JSON number, else none (`.5`, `1.`), and the number prints
-// as computed.
-json_literal :: proc(text: string) -> string {
-	_, plain := spell.number_strict(transmute([]u8)text, 0, u64(len(text)))
-	return text if plain else ""
+// The binary64 of `n`, a number spelled `lit`.
+number_f64 :: proc(n: core_pkg.Number, lit: string) -> f64 {
+	switch n.kind {
+	case .Int:
+		// `-0` is an integer whose bits carry no sign
+		return -0.0 if n.bits == 0 && lit[0] == '-' else f64(i64(n.bits))
+	case .Uint:
+		return f64(n.bits)
+	case .Float:
+		return transmute(f64)n.bits
+	case .Wide:
+	}
+	// past binary64's digits or range, `1e400` among them, which strconv reads as infinity
+	f, _ := strconv.parse_f64(lit)
+	return f
 }
 
 // The decoded text of string or key node `i`: a slice of the source, or a decode made in the context allocator.

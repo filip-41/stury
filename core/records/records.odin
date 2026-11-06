@@ -87,7 +87,14 @@ Stream_Options :: struct {
 	max_bytes: int,
 }
 
-// The records' one rule, detail 1, for a record past `max_bytes`.
+// The `core.Fault.detail` values the records' faults use.
+@(private)
+Detail :: enum u8 {
+	None,
+	Too_Long, // `Too_Wide`, a record past `max_bytes`
+}
+
+// The records' rules, indexed by `Detail`.
 @(rodata)
 RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limit"}}}
 
@@ -479,7 +486,7 @@ window_move :: proc(it: ^Reader, hold_cut := true) -> bool {
 			if it.cause != nil {
 				it.held, it.held_at, it.eof = it.buf[1:it.filled], at, true
 			} else {
-				it.fault = core.Fault{at = at, rules = &RULES, kind = .Too_Wide, detail = 1}
+				it.fault = core.Fault{at = at, rules = &RULES, kind = .Too_Wide, detail = u8(Detail.Too_Long)}
 			}
 			return false
 		}

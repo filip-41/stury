@@ -3,6 +3,7 @@ package json
 import "base:runtime"
 import "core:io"
 import "core:slice"
+import "core:strings"
 import "core:unicode/utf8"
 import spell "../core/spell"
 import core "../core"
@@ -18,7 +19,6 @@ import write "../core/write"
 // stands on a line of its own before the close, and one of the root that follows the root's close stands after it.
 
 // The deepest container the recursion enters. A document built under a larger `max_depth` is `.Too_Deep` here.
-@(private)
 TREE_DEPTH :: 4096
 
 @(private)
@@ -36,6 +36,7 @@ Tree :: struct {
 	copy:    bool, // a string is written as it was authored
 	resolve: bool, // a `Plain` cell is written as `core.resolve` reads it, else as text
 	at:      int, // the first fact not before the node `node_facts` last answered for
+	held:    bool, // the line written last ends in a value, so a comment that follows it there reads as its inline one
 }
 
 // A member of a `Map` as the tree writer orders them. `name` is the decoded key under `sort_keys`.
@@ -59,7 +60,7 @@ write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, stream: io.Str
 	out: write.Out
 	write.init(&out, &spill, allocator, stream, hint)
 	w := Tree{doc = doc, root = node, out = &out, opts = opts, json = doc.spelling == &SPELLING}
-	w.keep = w.json && as != .Json
+	w.keep = w.json && as != .Json && !doc.partial
 	w.respell = w.json && Spec(doc.as.spec) == .Json5 && as != .Json5
 	w.copy = w.json && !w.respell && copies_strings(opts)
 	w.resolve = doc.spelling.resolves != nil && doc.spelling.resolves(doc.as)
@@ -105,7 +106,20 @@ tree_comment :: proc(w: ^Tree, f: core.Fact) -> (line: bool) {
 	if line && !w.opts.pretty {
 		write.put_byte(w.out, '\n')
 	}
+	// A block's LF or CR, which no spelling changes, ends the line too.
+	if line || strings.index_any(string(text), "\n\r") >= 0 {
+		w.held = false
+	}
 	return
+}
+
+// Ends the line in compact text when it ends in a value, before a comment that is not that value's inline comment.
+@(private)
+tree_break :: proc(w: ^Tree) {
+	if w.held && !w.opts.pretty {
+		write.put_byte(w.out, '\n')
+	}
+	w.held = false
 }
 
 // The facts of node `i`. A walk in row order reads them from `at` on without a search, and a node before the cursor, as
@@ -134,6 +148,7 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 	}
 	for f in facts {
 		if f.role == .Comment && f.lo < key_lo {
+			tree_break(w)
 			tree_comment(w, f)
 			write.put_line(w.out, w.opts, depth)
 		}
@@ -163,6 +178,9 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 		root_foot := i == w.root && f.role == .Comment_Foot && f.lo >= w.close
 		if f.role != .Comment_Inline && !root_foot {
 			continue
+		}
+		if root_foot {
+			tree_break(w)
 		}
 		if root_foot || after_line {
 			write.put_line(w.out, w.opts, depth)
@@ -204,6 +222,7 @@ tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int, facts: []core.Fact)
 	doc := w.doc
 	t := doc.nodes[i]
 	if t.kind < .Array {
+		w.held = true
 		if w.respell && t.kind == .Number {
 			return tree_number(w, t)
 		}
@@ -218,6 +237,7 @@ tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int, facts: []core.Fact)
 	}
 	map_ := t.kind == .Map
 	write.put_byte(w.out, '{' if map_ else '[')
+	w.held = false
 	members := 0
 	if map_ {
 		list, ok := tree_pairs(w, i)
@@ -257,6 +277,7 @@ tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int, facts: []core.Fact)
 	if w.keep {
 		for f in facts {
 			if f.role == .Comment_Foot && (i != w.root || f.lo < w.close) {
+				tree_break(w)
 				write.put_line(w.out, w.opts, depth + 1)
 				tree_comment(w, f)
 				feet = true
@@ -267,6 +288,7 @@ tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int, facts: []core.Fact)
 		write.put_line(w.out, w.opts, depth)
 	}
 	write.put_byte(w.out, '}' if map_ else ']')
+	w.held = true
 	return true
 }
 

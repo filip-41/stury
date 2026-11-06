@@ -18,7 +18,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 	// Branches on the first byte's class, so `true` and `false` share a branch.
 	switch VALUE_CLASS[p[0]] {
 	case .String:
-		q, escaped, stop := string_short(p, end)
+		q, escaped, stop := string_short(p, end, '"')
 		if q == nil {
 			// A string with an escape is read by `st_string_escaped`, past the plain ASCII reader.
 			if escaped {
@@ -38,7 +38,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 	case .Number:
 		q, spelling, kind := number_h(p, end, w)
 		when .Es5 in FEATURES[S] {
-			if kind != .None || q < end && q[0] | 0x20 == 'x' {
+			if kind != .None {
 				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
 		}
@@ -92,22 +92,10 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		}
 		return #must_tail st_open(p[1:], end, (d | 1) + 1, ind, w, hs.a, hs.b, hs.c, on)
 	case .Bad:
-		when .Es5 in FEATURES[S] {
-			// JSON5's own starts, a comment run, a close after a trailing comma, or the fault, all out of line, so this
-			// state compiles none of it.
-			return #must_tail st_value5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-		} else {
-			when .Comments in FEATURES[S] {
-				if gap(p, end, S) {
-					return #must_tail st_comments_value(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-				}
-			}
-			// An array's close where a value must start follows a comma, or an open bracket and comments.
-			when .Trailing_Commas in FEATURES[S] {
-				if p[0] == ']' && d & 1 == 0 && d >= 2 {
-					return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-				}
-			}
+		// A comment run, a close after a trailing comma, JSON5's own starts, or the fault, all out of line, so this state
+		// compiles none of it.
+		when FEATURES[S] != {} {
+			return #must_tail st_value_spec(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 	}
 	return fault(w, hs, p, .Bad_Char)
@@ -121,24 +109,12 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 		return fault(w, hs, end, .Truncated)
 	}
 	if p[0] != '"' {
-		when .Es5 in FEATURES[S] {
-			// A comment run, the object's close after a trailing comma, JSON5's own key, or the fault, all out of line,
-			// so this state compiles none of it.
-			return #must_tail st_key5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-		} else {
-			when .Comments in FEATURES[S] {
-				if gap(p, end, S) {
-					return #must_tail st_comments_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-				}
-			}
-			// An object's close where a key must start follows a comma, or an open bracket and comments.
-			when .Trailing_Commas in FEATURES[S] {
-				if p[0] == '}' {
-					return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-				}
-			}
-			return fault(w, hs, p, .Bad_Char)
+		// A comment run, the object's close after a trailing comma, JSON5's own key, or the fault, all out of line, so
+		// this state compiles none of it.
+		when FEATURES[S] != {} {
+			return #must_tail st_key_spec(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
+		return fault(w, hs, p, .Bad_Char)
 	}
 	when intrinsics.type_has_field(H, "expect") {
 		if r := expected_key(p, end, &hs, H); r != nil {
@@ -234,7 +210,7 @@ colon_fast :: #force_inline proc "contextless" (q, end: [^]u8) -> [^]u8 {
 @(private, enable_target_feature = STATE_FEATURES)
 st_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, escape := string_lean(p, end)
+	q, escape := string_lean(p, end, '"')
 	if q == nil {
 		if escape != nil {
 			w.resume = escape
@@ -304,7 +280,7 @@ st_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}
-	if emit_string(w, on, &hs, .String, .Value, p, q, string_spelling(esc, lax)) == .Stop {
+	if emit_string(w, on, &hs, .String, .Value, p, q, core.text_spelling(esc, lax)) == .Stop {
 		return stopped(w, hs, q)
 	}
 	return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -314,7 +290,7 @@ st_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 @(private, enable_target_feature = STATE_FEATURES)
 st_key_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, escape := string_lean(p, end)
+	q, escape := string_lean(p, end, '"')
 	if q == nil {
 		if escape != nil {
 			w.resume = escape
@@ -346,7 +322,7 @@ st_key_string_long :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}
-	switch emit_string(w, on, &hs, .String, .Key, p, q, string_spelling(esc, lax)) {
+	switch emit_string(w, on, &hs, .String, .Key, p, q, core.text_spelling(esc, lax)) {
 	case .Next, .Keep:
 	case .Skip:
 		return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -367,7 +343,7 @@ st_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 	q, kind := colon(p, end)
 	if kind != .None {
 		when .Comments in FEATURES[S] {
-			if kind == .Bad_Char && gap(q, end, S) {
+			if kind == .Bad_Char && gap_lead(q, S) {
 				return #must_tail st_comments_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
 		}
@@ -451,7 +427,7 @@ st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		// The root's inline and foot comments belong to its walk and are read only where a hook reads them. `validate`
 		// passes over them while it checks what follows the document.
 		when .Comments in FEATURES[S] && H != core.No_Hooks {
-			if x := skip_ws(p, end); x < end && gap(x, end, S) {
+			if x := skip_ws(p, end); x < end && gap_lead(x, S) {
 				w.resume, w.crossed = x, false
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
@@ -551,22 +527,11 @@ st_close :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		}
 		depth -= 1
 		p = p[1:]
-		if depth == 0 || p >= end || p[0] != ']' | stack[depth] << 5 {
+		if depth == 0 || p >= end || u32(p[0]) != ']' | u32(stack[depth]) << 5 {
 			break
 		}
 	}
-	k := stack[depth]
-	if k & PASS_END != 0 {
-		return #must_tail st_pass_end(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
-	}
-	return #must_tail st_after(p, end, depth << 1 | u64(k), ind, w, hs.a, hs.b, hs.c, on)
-}
-
-// `p` is right after the close that ends a walk passing over a skipped value. A separate state, so the close loop
-// does not carry the result's position from byte to byte.
-@(private, cold, enable_target_feature = STATE_FEATURES)
-st_pass_end :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
-	return ended(w, {s0, s1, s2}, p)
+	return #must_tail st_after(p, end, depth << 1 | u64(stack[depth]), ind, w, hs.a, hs.b, hs.c, on)
 }
 
 // `p` is at a literal that `literal` refused, where it breaks. Kept out of `st_value`, whose entry would save
@@ -578,20 +543,108 @@ st_bad_literal :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 	return fault(w, hs, q, kind, .Literal if kind == .Bad_Char else .None)
 }
 
+// `st_value_spec` is `st_value` for a byte that starts no JSON value, in a spec past RFC 8259. It reads a comment run,
+// a close bracket after a trailing comma, one of JSON5's own starts, or faults. A separate state, so `st_value` compiles
+// none of it.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_value_spec :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	if gap(p, end, S) {
+		return #must_tail st_comments_value(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+	// An array's close where a value must start follows a comma, or an open bracket and comments.
+	if p[0] == ']' && d & 1 == 0 && d >= 2 {
+		return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+	when .Es5 in FEATURES[S] {
+		switch p[0] {
+		case '\'':
+			if q := string_plain(p, end, '\''); q != nil {
+				if too_wide(p, q) {
+					return fault(w, hs, p, .Too_Wide)
+				}
+				if emit_string(w, on, &hs, .String, .Value, p, q, 0) == .Stop {
+					return stopped(w, hs, q)
+				}
+				return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+			}
+			return #must_tail st_string_long(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		case '+', '.', 'I', 'N':
+			return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+	}
+	return fault(w, hs, p, .Bad_Char)
+}
+
+// `st_key_spec` is `st_key` for a byte that opens no JSON key, in a spec past RFC 8259. It reads a comment run, the
+// object's close after a trailing comma, or faults, and in JSON5 a single-quoted or unquoted key, then its colon. In
+// JSON5 a byte that starts no key faults `Bad_Char` with detail `.Identifier`.
+@(private, enable_target_feature = STATE_FEATURES)
+st_key_spec :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	hs := core.Hook_Regs{s0, s1, s2}
+	if gap(p, end, S) {
+		return #must_tail st_comments_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+	// An object's close where a key must start follows a comma, or an open bracket and comments.
+	if p[0] == '}' {
+		return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+	when .Es5 not_in FEATURES[S] {
+		return fault(w, hs, p, .Bad_Char)
+	} else {
+		q: [^]u8
+		esc, lax: bool
+		kind: core.Fault_Kind
+		if p[0] == '\'' {
+			q = string_plain(p, end, '\'')
+			if q == nil {
+				q, esc, lax, kind = string_long(w, p, end)
+			}
+		} else {
+			q, esc, kind = ident5(p, end)
+		}
+		if kind != .None {
+			return fault(w, hs, q, kind)
+		}
+		if q == p {
+			return fault(w, hs, p, .Bad_Char, .Identifier)
+		}
+		if too_wide(p, q) {
+			return fault(w, hs, p, .Too_Wide)
+		}
+		a: core.Action
+		if p[0] == '\'' {
+			a = emit_string(w, on, &hs, .String, .Key, p, q, core.text_spelling(esc, lax))
+		} else {
+			// An unquoted key's token is its bare span, with `SPELLING_QUOTED` clear.
+			a = emit(w, on, &hs, .String, .Key, p, q, core.text_spelling(esc, lax))
+		}
+		switch a {
+		case .Next, .Keep:
+		case .Skip:
+			return #must_tail st_skip_member(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		case .Stop:
+			return stopped(w, hs, q)
+		}
+		if r := colon_fast(q, end); r != nil {
+			return #must_tail st_value(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
+		}
+		return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+	}
+}
+
 // `p` is right after the open bracket of a container whose hook returned `Skip`, and `d` is the container's. The walk
 // without hooks reads up to its close, and this walk continues after it.
 @(private, cold, enable_target_feature = STATE_FEATURES)
 st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	parent := d >> 1 - 1
-	w.stack[parent] |= PASS_END
-	r := pass_over(w, p, end, d, ind, true)
-	if r & 0xff != 0 {
-		w.regs^ = hs
-		return r
+	r := pass_over(w, p, end, parent, 2 | d & 1, ind, true)
+	if hi, f, _ := core.result_of(r, &RULES); f == nil {
+		return #must_tail st_after(w.base[hi:], end, parent << 1 | u64(w.stack[parent]), ind, w, hs.a, hs.b, hs.c, on)
 	}
-	w.stack[parent] &~= PASS_END
-	return #must_tail st_after(w.base[r >> 16:], end, parent << 1 | u64(w.stack[parent]), ind, w, hs.a, hs.b, hs.c, on)
+	w.regs^ = hs
+	return r
 }
 
 // `p` is right after the open bracket of a container a scan keeps whole, and `d` is the container's. A spec with no
@@ -602,21 +655,20 @@ st_keep :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 	hs := core.Hook_Regs{s0, s1, s2}
 	when H == build.Scan && .Comments not_in FEATURES[S] {
 		if build.scan_reserve(w.hooks, int(hs.a) + (intrinsics.ptr_sub(end, p) + int(w.depth)) / 2 + 16) {
+			// The builder's walk reads the container as a document's root, as `pass_over` does.
 			parent := d >> 1 - 1
-			w.stack[parent] |= PASS_END
 			regs := hs
-			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack, &regs, w.depth, w.tier, false, w.tolerate, w.finite, nil, 0}
-			r := st_open(p, end, d, ind, &v, hs.a, hs.b, hs.c, build.builder_hook_plain)
-			if r & 0xff != 0 {
-				w.regs^ = regs
-				return r
+			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack[parent:], &regs, w.depth - parent, w.tier, false, w.tolerate, w.finite, nil, 0}
+			r := st_open(p, end, 2 | d & 1, ind, &v, hs.a, hs.b, hs.c, build.builder_hook_plain)
+			if hi, f, _ := core.result_of(r, &RULES); f == nil {
+				q := w.base[hi:]
+				if build.scan_kept(w.hooks, int(regs.c)) {
+					return stopped(w, regs, q)
+				}
+				return #must_tail st_after(q, end, parent << 1 | u64(w.stack[parent]), ind, w, regs.a, regs.b, regs.c, on)
 			}
-			w.stack[parent] &~= PASS_END
-			q := w.base[r >> 16:]
-			if build.scan_kept(w.hooks, int(regs.c)) {
-				return stopped(w, regs, q)
-			}
-			return #must_tail st_after(q, end, parent << 1 | u64(w.stack[parent]), ind, w, regs.a, regs.b, regs.c, on)
+			w.regs^ = regs
+			return r
 		}
 	}
 	return #must_tail st_open(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
@@ -626,7 +678,7 @@ st_keep :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 @(private, enable_target_feature = STATE_FEATURES)
 st_skip_string :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, _ := string_lean(p, end)
+	q, _ := string_lean(p, end, '"')
 	if q == nil {
 		kind: core.Fault_Kind
 		q, _, _, kind = string_long(w, p, end)
@@ -648,7 +700,7 @@ st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 	hs := core.Hook_Regs{s0, s1, s2}
 	if r := colon_fast(p, end); r != nil {
 		if r[0] == '"' {
-			q, _, _ := string_short(r, end)
+			q, _, _ := string_short(r, end, '"')
 			if q == nil {
 				return #must_tail st_skip_string(r, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
@@ -661,55 +713,32 @@ st_skip_member :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 			return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		if r[0] == '-' || r[0] - '0' < 10 {
-			n, _, number, _ := number_run(r, end, false, false)
-			if number == .None && !too_wide(r, n) && !(.Es5 in FEATURES[S] && n < end && n[0] | 0x20 == 'x') {
+			n, _, number, _ := number_run(r, end, S, false, false)
+			if number == .None && !too_wide(r, n) {
 				return #must_tail st_after_number(n, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
 		}
 	}
 	q, kind := colon(p, end)
-	detail := Detail.Colon if kind == .Bad_Char else Detail.None
-	// The comments around the colon belong to the skipped value and are passed over here, so the value's first byte
-	// decides whether it is pushed.
+	// The comments before the colon are passed over here, and `pass_over` reads those after it with the value.
 	when .Comments in FEATURES[S] {
-		if kind == .Bad_Char && gap(q, end, S) {
-			detail = .None
+		if kind == .Bad_Char && gap_lead(q, S) {
 			q, _, kind = comment_run(q, end, false, S)
-			if kind == .None {
-				q, kind = colon(q, end)
-				if kind == .Bad_Char {
-					detail = .Colon
-				}
+			if kind != .None {
+				return fault(w, hs, q, kind, .Colon if stray_slash(q, kind) else .None)
 			}
-		}
-		if kind == .None && q < end && gap(q, end, S) {
-			q, _, kind = comment_run(q, end, false, S)
+			q, kind = colon(q, end)
 		}
 	}
 	if kind != .None {
-		return fault(w, hs, q, kind, detail)
+		return fault(w, hs, q, kind, .Colon if kind == .Bad_Char else .None)
 	}
-	// A scalar is read as a document's root, where the walk ends after one value. A container is pushed here as
-	// `st_value` pushes it, with this object's slot marked, so the walk ends at its close.
-	if q >= end || (q[0] != '{' && q[0] != '[') {
-		r := pass_over(w, q, end, 0, ind, false)
-		if r & 0xff != 0 {
-			w.regs^ = hs
-			return r
-		}
-		return #must_tail st_after(w.base[r >> 16:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+	r := pass_over(w, q, end, d >> 1, 0, ind, false)
+	if hi, f, _ := core.result_of(r, &RULES); f == nil {
+		return #must_tail st_after(w.base[hi:], end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
-	if d >> 1 >= w.depth {
-		return fault(w, hs, q, .Too_Deep)
-	}
-	w.stack[d >> 1] = u8(d & 1) | PASS_END
-	r := pass_over(w, q[1:], end, (d | 1) + (2 if q[0] == '{' else 1), ind, true)
-	if r & 0xff != 0 {
-		w.regs^ = hs
-		return r
-	}
-	w.stack[d >> 1] = u8(d & 1)
-	return #must_tail st_after(w.base[r >> 16:], end, d, ind, w, hs.a, hs.b, hs.c, on)
+	w.regs^ = hs
+	return r
 }
 
 // `st_after_number` is `st_after` for a number. When the next array element is also a number, `st_number_run` reads it
@@ -722,7 +751,7 @@ st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 	ind := ind
 	if d < 2 {
 		when .Comments in FEATURES[S] && H != core.No_Hooks {
-			if x := skip_ws(p, end); x < end && gap(x, end, S) {
+			if x := skip_ws(p, end); x < end && gap_lead(x, S) {
 				w.resume, w.crossed = x, false
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
@@ -784,7 +813,7 @@ st_number_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 	for {
 		q, spelling, kind = number_h(p, end, w)
 		when .Es5 in FEATURES[S] {
-			if kind != .None || q < end && q[0] | 0x20 == 'x' {
+			if kind != .None {
 				return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
 		}
@@ -872,7 +901,7 @@ st_member_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 		}
 		n, spelling, kind := number_h(r, end, w)
 		when .Es5 in FEATURES[S] {
-			if kind != .None || n < end && n[0] | 0x20 == 'x' {
+			if kind != .None {
 				if skip {
 					return #must_tail st_skip_member(key_end, end, d, ind, w, hs.a, hs.b, hs.c, on)
 				}

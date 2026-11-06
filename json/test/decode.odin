@@ -543,7 +543,7 @@ decode_into_token_sized_buffer :: proc(t: ^testing.T) {
 @(test)
 number_loose_leading_zero :: proc(t: ^testing.T) {
 	for src in ([]string{"012345678901234567890123456789", "0012345678901234567890123456789"}) {
-		got, _, _ := spell.number_loose(transmute([]u8)src, 0, u64(len(src)))
+		got, _, _, _ := spell.number_loose(transmute([]u8)src, 0, u64(len(src)))
 		want, ok := strconv.parse_f64(src)
 		testing.expectf(t, ok && got.kind == .Float && got.bits == transmute(u64)want, "%q: %v, want %x", src, got, transmute(u64)want)
 	}

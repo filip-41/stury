@@ -27,7 +27,8 @@ contract: what a path is, what a read gives, how the one engine works, and how a
 - `?` may follow any step. It drops a `Type_Mismatch` answer, as jq's empty does, and leaves `Missing` as it is. The
   mismatch of a `null` or an absent value with a `[]` still to come is that `[]`'s, so that `[]`'s `?` drops it.
 - Three spellings parse to one `Path`: jq text, RFC 6901 JSON Pointer, and Odin step literals, such as
-  `{Name("a"), Index(-1), All{}}`. Every parse error has a byte offset in the text.
+  `{Name("a"), Index(-1), All{}}`. Every parse error has a byte offset in the text. A name in either text is UTF-8, and
+  an ill-formed sequence is `Bad_Path` at its first byte.
 - `Slice` reads an array or a dsv record as `Index` does: on a `null` it is `Missing`, and on anything else a
   `Type_Mismatch`. Strings are not slices.
 - A path holds one `Descend`, and a second is `Bad_Path`. jq's text spells it first only.
@@ -220,7 +221,8 @@ An edit names a node, so a `Not_Loaded` member cannot be edited. `core.set_membe
 after the container's last member, by name, and on a name no path looked for is `Bad_Index`.
 
 `json.set(src, S, port, "8080")` and `dsv.set`, with `port` the parsed `.port`, are a build of the text, one edit per
-answer and a commit in one call. A path that ends in a `Name` inserts it where it is missing. Any other answer that is no value, a mismatch or a missing
+answer and a commit in one call. A path that ends in a `Name` inserts it where it is missing, and with a `?` on that
+`Name` it passes a container that is no object and no `null`. Any other answer that is no value, a mismatch or a missing
 position or parent, is `Bad_Index`. The error is a `Path_Edit_Error` with one `kind`: `.Path` for the read of the path,
 with `path` set, and `.Edit` for the build, the edit and the commit, with `edit` set.
 
@@ -280,8 +282,9 @@ walk.
 ## Errors
 
 `Path_Error` has its own kinds and holds the walk's `Fault` as its inner error: `Bad_Path` with the byte offset in the
-path text, `Over_Capacity` for more than `MAX_PATHS` paths, `MAX_STEPS` steps or a negative index past its ring,
-`No_Memory`. A missing value or a wrong kind is an answer's outcome, not an error. `path` is the number in the read of the
+path text, and 0 for a path of step literals, `Over_Capacity` for more than `MAX_PATHS` paths or `MAX_STEPS` steps, or
+`MAX_STEPS` steps with a `Descend`, `No_Memory`, and `Unsupported` for a query of a partial document or a handle with no
+format. A missing value or a wrong kind is an answer's outcome, not an error. `path` is the number in the read of the
 path a `Bad_Path` or a step's `Over_Capacity` names.
 
 `at` is a byte of the path's text for `Bad_Path` and of the source for `Walk` and `Duplicate_Key`. `Path_Edit_Error` has one `kind`: `.Path` holds the read's error in `path`, and `.Edit` the build's, the edit's or the

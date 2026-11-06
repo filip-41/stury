@@ -4,6 +4,7 @@ import "core:math/rand"
 import "core:slice"
 import "core:strings"
 import "core:testing"
+import "core:unicode/utf8"
 import core "../../core"
 import walktest "../../walktest"
 import dsv ".."
@@ -18,6 +19,10 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 		append(out, t)
 		switch a {
 		case .Stop:
+			// A stop on a key ends at the cell the key names.
+			if t.role == .Key && j + 1 < len(all) {
+				t = all[j + 1]
+			}
 			return t.lo + u64(t.n), true
 		case .Skip:
 			if t.role == .Key {
@@ -172,25 +177,24 @@ append_record :: proc(out: ^[dynamic]u8, cells: []string, sep: u8, quoted: bool,
 	return
 }
 
-// A cell's spelling: `SPELLING_DECODE` for a TSV cell whose span holds a backslash and for a `lax` cell, and
-// `SPELLING_QUOTED` for a quoted CSV cell.
+// A cell's spelling: `SPELLING_DECODE` for a TSV cell whose span holds a backslash, `SPELLING_QUOTED` with it for a
+// quoted CSV cell, and `SPELLING_DECODE | SPELLING_LAX` for a `lax` cell, one whose span holds an ill-formed UTF-8
+// sequence `Invalid_Utf8` tolerated.
 @(private)
 cell_spelling :: proc(src: []u8, lo, n: int, tsv, quoted: bool, lax := false) -> u16 {
+	bits := core.SPELLING_DECODE | core.SPELLING_LAX if lax else 0
 	if tsv {
-		if lax {
-			return core.SPELLING_DECODE
-		}
 		for c in src[lo:lo + n] {
 			if c == '\\' {
-				return core.SPELLING_DECODE
+				return core.SPELLING_DECODE | bits
 			}
 		}
-		return 0
+		return bits
 	}
 	if quoted {
-		return core.SPELLING_DECODE | core.SPELLING_QUOTED
+		return core.SPELLING_DECODE | core.SPELLING_QUOTED | bits
 	}
-	return core.SPELLING_DECODE if lax else 0
+	return bits
 }
 
 // Appends the tokens of a record: its opening, its cells (each naming its column's header cell when `with_header`), and
@@ -427,12 +431,12 @@ fault_sentences :: proc(t: ^testing.T) {
 
 // Whether a token's span holds what its kind says. A cell holds no line end outside quotes and is quoted where its
 // spelling says, a record's `End` is its line end, and an opening token and the text's `End` are empty.
-spans :: proc(src: []u8, t: core.Token, tsv: bool, tol := bit_set[dsv.Tolerance; u8]{}) -> bool {
+spans :: proc(src: []u8, t: core.Token, tsv: bool, tol := bit_set[core.Tolerance; u8]{}) -> bool {
 	b := src[t.lo:][:t.n]
 	switch t.kind {
 	case .Plain:
 		quoted := !tsv && len(b) > 0 && b[0] == '"'
-		want := cell_spelling(src, int(t.lo), int(t.n), tsv, quoted, .Invalid_Utf8 in tol)
+		want := cell_spelling(src, int(t.lo), int(t.n), tsv, quoted, .Invalid_Utf8 in tol && !utf8.valid_string(string(b)))
 		if t.spelling != want {
 			return false
 		}
@@ -469,5 +473,43 @@ walk_defaults :: proc(t: ^testing.T) {
 	testing.expect_value(t, bare.n, with.n)
 	for tok, i in with.tokens[:with.n] {
 		testing.expect_value(t, bare.tokens[i], tok)
+	}
+}
+
+// Stops the walk on the key numbered `target`, counting from 0.
+Key_Stopper :: struct {
+	target, keys: int,
+}
+
+stop_on_key :: proc "contextless" (h: ^Key_Stopper, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if t.role == .Key {
+		h.keys += 1
+		if h.keys > h.target {
+			return s, .Stop
+		}
+	}
+	return s, .Next
+}
+
+// A stop on a column's key ends the walk at the end of the record's cell the key names, for a header cell's key and for
+// a ragged cell's past the header, whether the cell is last in its record or ends at a delimiter.
+@(test)
+key_stop_ends_at_cell :: proc(t: ^testing.T) {
+	Case :: struct {
+		text: string,
+		tol:  bit_set[core.Tolerance; u8],
+		key:  int,
+		hi:   u64,
+	}
+	CASES := []Case {
+		{"a,b\n1,2\n", {}, 0, 5},
+		{"a,b\n1,2\n", {}, 1, 7},
+		{"a\n1,2,3\n", {.Ragged}, 1, 5},
+		{"a\n1,2,3\n", {.Ragged}, 2, 7},
+	}
+	for c in CASES {
+		stopper := Key_Stopper{target = c.key}
+		hi, fault := dsv.walk(transmute([]u8)c.text, 0, .Csv, {tolerate = c.tol}, &stopper, &core.Hook_Regs{}, stop_on_key)
+		testing.expectf(t, fault == nil && hi == c.hi, "%q key %d: stop at %d %v, want %d", c.text, c.key, hi, fault, c.hi)
 	}
 }

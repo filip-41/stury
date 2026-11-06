@@ -51,8 +51,8 @@ Role :: enum u8 {
 // format's detail. Core reads bits 0 to 2 of a value or key and a comment's marker lengths, and the rest is the
 // format's own. json sets bit 0 for a string or key that needs decoding, bit 1 when it is quoted, bit 2 for a
 // tolerated ill-formed sequence, and a number's packed shape. dsv sets bit 0 for a cell that needs decoding, bit 1 for
-// a quoted CSV cell, bits 0 and 2 for every cell read under `Invalid_Utf8`, bit 3 for a quoted cell holding a `""` on a
-// walk for `Cells` or `Batch`, and bit 4 for the key of a column past the header's last cell.
+// a quoted CSV cell, bits 0 and 2 for a tolerated ill-formed sequence, bit 3 for a quoted cell holding a `""` on a walk
+// for `Cells` or `Batch`, and bit 4 for the key of a column past the header's last cell.
 Token :: struct {
 	lo:       u64,
 	n:        u32,
@@ -101,6 +101,22 @@ text_start :: proc "contextless" (src: []u8, lo: u64) -> u64 {
 		return 3
 	}
 	return lo
+}
+
+// `Tolerance` names a rule a caller lets a text break, in a format's `Options.tolerate`. The walk does not fault where
+// the text breaks it, and the value a token decodes to shows the rule's one fixed reading. A rule that a format's grammar
+// has no instance of, such as `Ragged` in JSON or `Lone_Surrogate` in dsv, is never broken there, so naming it changes
+// nothing, and one set can be given to every format.
+Tolerance :: enum u8 {
+	// Ill-formed UTF-8 in a JSON string or a dsv cell. Each maximal subpart of an ill-formed sequence reads as U+FFFD.
+	Invalid_Utf8,
+	// A JSON `\u` escape of a surrogate half that no other half pairs with. It reads as U+FFFD.
+	Lone_Surrogate,
+	// A dsv record of any width. A narrower record's missing columns are absent. With a header, a wider record's cells
+	// past the header's last are columns named by their 1-based position, `"3"` for the third.
+	Ragged,
+	// A quote inside an unquoted CSV cell. It is a byte of the cell, and the block's quotes pair up without it.
+	Bare_Quote,
 }
 
 // `Framing` says how a text holds a list of records. `Lines` is one record per line end, a row in dsv and a value per

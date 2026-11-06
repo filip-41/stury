@@ -292,6 +292,15 @@ edit_wide_record :: proc(t: ^testing.T) {
 	refused(t, "a,b\n1,2,3\n4,5\n", ragged, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
 		return core.set_member(list, 9, "c", "z")
 	})
+	// The header row's bytes end at its last named cell, so a record inserted after a last record with no line end
+	// takes the header's CR LF.
+	check(t, "abc,de\r\n1,2,3", "abc,de\r\n1,2,3\r\n4,5,6", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
+		return core.insert(list, core.ROOT, 1, "4,5,6")
+	})
+	doc, err := dsv.build(transmute([]u8)string("abc,de\n1,2,3\n"), .Csv, ragged)
+	defer core.destroy(&doc)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, string(core.span(&doc, doc.shared_keys)), "abc,de\n")
 }
 
 // A cell removed from every record that holds it drops its column with the header cell. A short record is skipped.

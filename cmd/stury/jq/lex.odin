@@ -4,7 +4,6 @@ package jq
 // as decNumber reads them, a string's escapes, and bytes that are not UTF-8.
 
 import "core:math"
-import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
 import "../../../core/spell"
@@ -233,7 +232,8 @@ lex_in_string :: proc(p: ^Parser) -> (sym: Sym, sem: Sem, loc: Loc) {
 		}
 		p.pos = end
 		sym = .QQ_Text
-		sem.value = s[start:end]
+		text := s[start:end]
+		sem.value = text if utf8.valid_string(text) else valid_utf8(text)
 	}
 	p.last = {start, p.pos}
 	return sym, sem, p.last
@@ -320,15 +320,13 @@ read_number :: proc(text: string) -> (Value, bool) {
 			return Number{f = math.nan_f64()}, true
 		}
 	}
-	// Digits around an optional point, at least one, then an optional exponent (`.5` and `1.` count).
-	if len(t) == 0 || t[0] == '-' || t[0] == '+' {
+	// Digits around an optional point, at least one, then an optional exponent (`.5` and `1.` count). The literal is
+	// kept only when it is a JSON number.
+	n, _, strict, ok := spell.number_loose(transmute([]byte)text, 0, u64(len(text)))
+	if !ok {
 		return nil, false
 	}
-	if _, _, ok := spell.number_loose(transmute([]byte)t, 0, u64(len(t))); !ok {
-		return nil, false
-	}
-	f, _ := strconv.parse_f64(text)
-	return Number{f = f, lit = json_literal(text)}, true
+	return Number{f = number_f64(n, text), lit = text if strict else ""}, true
 }
 
 // The body of a JSON string decoded into `out` as jq's JSON parser decodes it, or why it cannot be, in jq's

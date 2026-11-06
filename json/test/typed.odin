@@ -1,6 +1,7 @@
 package json_tests
 
 import "base:runtime"
+import "core:math"
 import "core:mem"
 import "core:strings"
 import "core:testing"
@@ -155,6 +156,42 @@ a_bad_tag_or_a_clash_is_a_plan_error :: proc(t: ^testing.T) {
 }
 
 @(test)
+a_plan_refusal_names_the_path_to_the_member :: proc(t: ^testing.T) {
+	Leaf :: struct {
+		f: proc(),
+	}
+	Mid :: struct {
+		leaf: Leaf,
+	}
+	Arm :: struct {
+		u: union {
+			proc(),
+		},
+	}
+	Unknown :: struct {
+		rest: map[string]typed.Raw `json:",unknown,required"`,
+	}
+	_, e := json.plan_make(struct {
+		top: Mid,
+	})
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unsupported)
+	testing.expect_value(t, e.n_steps, 3)
+	if e.n_steps == 3 {
+		testing.expect_value(t, string(e.steps[0].(core.Name)), "top")
+		testing.expect_value(t, string(e.steps[1].(core.Name)), "leaf")
+		testing.expect_value(t, string(e.steps[2].(core.Name)), "f")
+	}
+	_, e = json.plan_make(Arm)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unsupported)
+	testing.expect_value(t, e.n_steps, 1)
+	if e.n_steps == 1 {
+		testing.expect_value(t, string(e.steps[0].(core.Name)), "u")
+	}
+	_, e = json.plan_make(Unknown)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Bad_Tag)
+}
+
+@(test)
 a_plan_for_another_type_is_refused :: proc(t: ^testing.T) {
 	plan, err := json.plan_make(Point)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
@@ -246,6 +283,29 @@ numbers_at_each_width :: proc(t: ^testing.T) {
 }
 
 @(test)
+json5_non_finite_numbers_fill_floats :: proc(t: ^testing.T) {
+	S :: struct {
+		f: f64,
+		g: f32,
+	}
+	s: S
+	src := transmute([]u8)string(`{f: -Infinity, g: Infinity}`)
+	testing.expect_value(t, json.unmarshal(src, json.Spec.Json5, &s, {}, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, s.f, math.inf_f64(-1))
+	testing.expect_value(t, s.g, math.inf_f32(1))
+	src = transmute([]u8)string(`{f: NaN, g: -NaN}`)
+	testing.expect_value(t, json.unmarshal(src, json.Spec.Json5, &s, {}, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	testing.expect(t, math.is_nan(s.f) && math.is_nan(f64(s.g)))
+	src = transmute([]u8)string(`{f: Infinity}`)
+	e := json.unmarshal(src, json.Spec.Json5, &s, {}, {refuse_non_finite = true}, context.temp_allocator)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Walk)
+	for text in ([]string{`{f: 1e400}`, `{g: 1e39}`, `{g: 0xffffffffffffffffffffffffffffffffffff}`}) {
+		kind := json.unmarshal(transmute([]u8)text, json.Spec.Json5, &s, {}, {}, context.temp_allocator).kind
+		testing.expectf(t, kind == .Out_Of_Range, "%s: %v", text, kind)
+	}
+}
+
+@(test)
 lists_arrays_and_their_lengths :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	S :: struct {
@@ -285,6 +345,9 @@ enums_bit_sets_and_map_keys :: proc(t: ^testing.T) {
 	testing.expect(t, s.me[.Green])
 	testing.expect_value(t, read(`{"e":"Pink"}`, &s).kind, core.Typed_Error_Kind.Not_A_Member)
 	testing.expect_value(t, read(`{"b":[10]}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
+	// An integer past `i64` is out of range, as it is for an integer field, and a fraction is no integer.
+	testing.expect_value(t, read(`{"b":[99999999999999999999]}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
+	testing.expect_value(t, read(`{"b":[1.0]}`, &s).kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, read(`{"mi":{"x":true}}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
 	ints, err := json.plan_make(Color, {enums = .Int})
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
@@ -381,6 +444,49 @@ unions_by_class_and_tag :: proc(t: ^testing.T) {
 	testing.expect_value(t, he.kind, core.Typed_Error_Kind.None)
 	he = json.unmarshal(transmute([]u8)outside, json.Spec.Json, &h, &hp, {unknown = .Refuse}, {}, context.temp_allocator)
 	testing.expect_value(t, he.kind, core.Typed_Error_Kind.Unknown_Field)
+}
+
+@(test)
+a_tagged_arm_may_not_key_a_member_as_the_tag :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	B :: struct {
+		y: i32,
+	}
+	Renamed :: struct {
+		kind: string `json:"type"`,
+	}
+	Inner :: struct {
+		type: string,
+	}
+	Flattened :: struct {
+		using inner: Inner,
+	}
+	Spelled :: struct {
+		the_type: string,
+	}
+	Keyed_Apart :: struct {
+		type: string `json:"kind"`,
+	}
+	Left_Out :: struct {
+		type: string `json:"-"`,
+	}
+	refused := []struct {
+		T:      typeid,
+		tag:    string,
+		rename: typed.Rename,
+	} {
+		{union {Renamed, B}, "type", .None},
+		{union {Flattened, B}, "type", .None},
+		{union {Spelled, B}, "theType", .Camel},
+	}
+	for c in refused {
+		_, err := json.plan_make(c.T, {union_tag = c.tag, rename = c.rename}, context.temp_allocator)
+		testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
+	}
+	for T in ([]typeid{union {Keyed_Apart, B}, union {Left_Out, B}}) {
+		_, err := json.plan_make(T, {union_tag = "type"}, context.temp_allocator)
+		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	}
 }
 
 @(test)
@@ -644,6 +750,11 @@ json5_and_jsonc_read_alike :: proc(t: ^testing.T) {
 	e = json.unmarshal(transmute([]u8)src5, json.Spec.Json5, &s, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s, S{1, 2, "y"})
+	// A fraction or an exponent is no integer in any spelling, however far out of range.
+	for text in ([]string{`{a:1e9999}`, `{a:+1e9999}`, `{a:.5e9999}`}) {
+		kind := json.unmarshal(transmute([]u8)text, json.Spec.Json5, &s, allocator = context.temp_allocator).kind
+		testing.expectf(t, kind == .Wrong_Kind, "%s: %v", text, kind)
+	}
 	// A bit_set reads an integer in any spelling a plain field does.
 	B :: struct {
 		b: bit_set[0 ..< 10],
@@ -770,6 +881,51 @@ a_list_of_elements_with_no_size_is_refused_at_the_plan :: proc(t: ^testing.T) {
 	}
 	_, set := json.plan_make(map[string]Empty, {}, context.temp_allocator)
 	testing.expect_value(t, set.kind, core.Typed_Error_Kind.None)
+}
+
+@(test)
+kinds_that_hold_no_data_a_text_spells_are_refused_at_the_plan :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Bits :: bit_field u8 {
+		a: u8 | 8,
+	}
+	refused := []typeid {
+		rawptr,
+		Maybe(rawptr),
+		[]Maybe(rawptr),
+		[^]i32,
+		proc(),
+		typeid,
+		Bits,
+		#simd[4]f32,
+		matrix[2, 2]f32,
+		complex64,
+		quaternion256,
+		rune,
+		string16,
+		#soa[]Point,
+	}
+	for T in refused {
+		_, err := json.plan_make(T, {}, context.temp_allocator)
+		testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
+	}
+}
+
+@(test)
+a_type_past_4_gib_is_refused_at_the_plan :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Huge :: struct {
+		big: [1 << 29]u64,
+		x:   i32,
+	}
+	Wide :: [1 << 32 + 8]u8
+	refused := []typeid{Huge, []Wide, ^Huge, map[string]Wide}
+	for T in refused {
+		_, err := json.plan_make(T, {}, context.temp_allocator)
+		testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
+	}
+	_, err := json.plan_make([1 << 32 - 1]u8, {}, context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 }
 
 @(test)

@@ -244,8 +244,8 @@ stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] 
   where `stury --from csv --to csv . a.csv b.csv` writes one table under the first file's header.
 - `fmt` never colours its output, and it refuses every option that shapes a filter run (`-C`, `-c`, `-r`, ...,
   `--indent 0`): exit 2. `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N` and, with a
-  CSV-like `--to`, `--grow-header` apply. A JSON-like output is written to 1024 levels of nesting at most:
-  `--max-depth` lets `fmt` read a deeper value, which it then refuses, with exit 5.
+  CSV-like `--to`, `--grow-header` apply. A JSON-like output is written at every depth `--max-depth` reads,
+  except a JSONC text with comments, which is written to 4096 levels and refused past them, with exit 5.
 
 | Flag | Effect |
 | --- | --- |

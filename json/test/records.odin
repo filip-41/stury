@@ -176,7 +176,7 @@ model_frame :: proc(src: string, framing: core.Framing, spec: json.Spec) -> (out
 			}
 			// As jq reads them, a scalar runs on into a ',', ':', ']', '}', or a '/' where no comment may start.
 			if j < len(src) && !strings.contains_rune("[{\"'", rune(src[i])) && (strings.contains_rune(",:]}", rune(src[j])) || src[j] == '/' && spec == .Json) {
-				return out, core.fault_of(core.fault_at(u64(j), .Bad_Char, u8(json.Detail.Trailing)), &json.RULES)
+				return out, core.Fault{at = u64(j), rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Trailing)}
 			}
 			append(&out, Model_Record{at = u64(i), text = src[i:j]})
 			i = j

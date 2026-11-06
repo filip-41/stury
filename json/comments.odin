@@ -2,6 +2,7 @@ package json
 
 import "base:intrinsics"
 import "core:simd"
+import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
 
@@ -32,7 +33,7 @@ comment_stops :: #force_inline proc "contextless" (v: #simd[16]u8, $star: bool) 
 comment_scan :: #force_inline proc "contextless" (q, end: [^]u8, $star: bool) -> [^]u8 #no_bounds_check {
 	q := q
 	for intrinsics.ptr_sub(end, q) >= 16 {
-		k := kernel.first_lane(comment_stops(intrinsics.unaligned_load((^#simd[16]u8)(q)), star))
+		k := kernel.first_lane(comment_stops(load16(q), star))
 		if k != 16 {
 			return q[k:]
 		}
@@ -64,7 +65,7 @@ comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]
 			}
 			if q[0] < 0x80 {
 				q = q[1:]
-			} else if q, kind = kernel.utf8_char(q, end); kind != .None {
+			} else if q, kind = spell.utf8_char(q, end); kind != .None {
 				return
 			}
 		}
@@ -82,12 +83,19 @@ comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]
 			}
 			if q[0] < 0x80 {
 				q = q[1:]
-			} else if q, kind = kernel.utf8_char(q, end); kind != .None {
+			} else if q, kind = spell.utf8_char(q, end); kind != .None {
 				return
 			}
 		}
 	}
 	return p, .Bad_Char
+}
+
+// Whether a run's fault `kind` at `q` is a `/` that opens no comment, so the fault belongs to the byte's place, not to a
+// comment. A comment faults at none of its `/` bytes.
+@(private)
+stray_slash :: #force_inline proc "contextless" (q: [^]u8, kind: core.Fault_Kind) -> bool {
+	return kind == .Bad_Char && q[0] == '/'
 }
 
 // Whether `p`, before `end`, opens a run that `comment_run` reads and JSON's whitespace readers do not: a comment, or
@@ -210,7 +218,7 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 		if too_wide(x, e) {
 			return x, false, .Too_Wide
 		}
-		if emit(w, on, hs, .Plain, role, x, e, u16(2) | (u16(2) if x[1] == '*' else 0) << 8) == .Stop {
+		if emit(w, on, hs, .Plain, role, x, e, core.comment_spelling(2, 2 if x[1] == '*' else 0)) == .Stop {
 			return e, true, .None
 		}
 		// A `//` comment ends at a line end that is no byte of it, so only a `/* */` body can move to the next line.
@@ -230,13 +238,14 @@ emit_comments :: proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (
 
 // Reads the run of comments at `p` up to the next token and emits each as `Comment`, or as `Comment_Foot` when the token
 // is the byte `close`, where 0 is no close. Returns the token's byte, or with `done` the fault or stop value the state
-// returns.
+// returns. A `/` that opens no comment faults with `stray`, the detail the state after the run gives any byte it
+// refuses.
 @(private)
-comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, p, end: [^]u8, close: u8) -> (q: [^]u8, done: bool, result: u64) {
+comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, p, end: [^]u8, close: u8, stray: Detail) -> (q: [^]u8, done: bool, result: u64) {
 	kind: core.Fault_Kind
 	q, _, kind = comment_run(p, end, false, S)
 	if kind != .None {
-		return q, true, fault(w, hs^, q, kind)
+		return q, true, fault(w, hs^, q, kind, stray if stray_slash(q, kind) else .None)
 	}
 	when H != core.No_Hooks {
 		foot := close != 0 && q < end && q[0] == close
@@ -256,7 +265,7 @@ comments_before :: #force_inline proc "contextless" (w: ^Walk($S, $H), $on: proc
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, done, result := comments_before(w, on, &hs, p, end, ']' if d & 1 == 0 && d >= 2 else 0)
+	q, done, result := comments_before(w, on, &hs, p, end, ']' if d & 1 == 0 && d >= 2 else 0, .None)
 	if done {
 		return result
 	}
@@ -268,7 +277,7 @@ st_comments_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, done, result := comments_before(w, on, &hs, p, end, '}')
+	q, done, result := comments_before(w, on, &hs, p, end, '}', .Identifier if .Es5 in FEATURES[S] else .None)
 	if done {
 		return result
 	}
@@ -280,9 +289,15 @@ st_comments_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 @(private, enable_target_feature = STATE_FEATURES)
 st_comments_colon :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
-	q, done, result := comments_before(w, on, &hs, p, end, 0)
+	q, done, result := comments_before(w, on, &hs, p, end, 0, .Colon)
 	if done {
 		return result
+	}
+	// `st_colon` tests the byte's class, so in JSON5 a byte of 0xC2 or more that opens no whitespace reads no run.
+	when .Es5 in FEATURES[S] {
+		if q == p {
+			return fault(w, hs, p, .Bad_Char, .Colon)
+		}
 	}
 	return #must_tail st_colon(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
@@ -299,7 +314,8 @@ st_comments_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 	crossed := w.crossed
 	q, more, kind := comment_run(w.resume, end, d >= 2 && !crossed, S)
 	crossed ||= more
-	if kind != .None {
+	// After the root, a `/` that opens no comment ends the run as any other byte does.
+	if kind != .None && (d >= 2 || !stray_slash(q, kind)) {
 		return fault(w, hs, q, kind)
 	}
 	close := ']' | u8(d & 1) << 5

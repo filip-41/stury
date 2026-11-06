@@ -176,6 +176,33 @@ path_record_ends :: proc(t: ^testing.T) {
 	testing.expect(t, strings.has_prefix(string(core.span(&stopped, stopped.answers[0].owner)), "1,"))
 }
 
+// A record and its first cell start at one byte, and the answers of a `Descend` read still come record first, as a
+// query gives them. A repeated header name under `.Last` takes back the first cell's answer there too.
+@(test)
+path_descend_record_first :: proc(t: ^testing.T) {
+	cases := []Read_Case {
+		{"b,c,b\nx,y,z\n1,2,3\n", "...b", {"T", "T", "T", "z", "T", "T", "T", "3", "T"}},
+		{"a,b\n1,2\n3,4\n5,6\n", "...[-2]", {"1", "T", "T", "3,4", "3", "T", "T", "5", "T", "T"}},
+	}
+	for c in cases {
+		path, _ := core.parse_path(c.path)
+		defer core.path_destroy(&path)
+		src := transmute([]u8)c.src
+		doc, err := dsv.scan(src, .Csv, path)
+		defer core.destroy(&doc)
+		testing.expectf(t, err.kind == .None, "%q: %v", c.path, err)
+		testing.expectf(t, slice_equal(answer_texts(&doc, doc.answers), c.want), "scan %q: %v", c.path, answer_texts(&doc, doc.answers))
+
+		full, _ := dsv.build(src, .Csv)
+		defer core.destroy(&full)
+		answers, qerr := core.query(&full, path)
+		defer delete(answers)
+		testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
+		testing.expectf(t, slice_equal(answer_texts(&full, answers), c.want), "query %q: %v", c.path, answer_texts(&full, answers))
+	}
+	free_all(context.temp_allocator)
+}
+
 PATH_ROUNDS :: #config(PATH_ROUNDS, 2000)
 PATH_FIXTURES :: #config(PATH_FIXTURES, "")
 

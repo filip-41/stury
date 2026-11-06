@@ -218,7 +218,7 @@ put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) {
 	if err.kind != .None {
 		flush_some(out, force = true)
 		if err.kind == .Too_Deep {
-			message.write_stderr("stury: error: %s: nesting past %d levels is not written in the format it was read in\n", ins.name, core.MAX_DEPTH)
+			message.write_stderr("stury: error: %s: nesting this deep is not written in the format it was read in\n", ins.name)
 		} else {
 			message.write_stderr("stury: error: %s: cannot write the value: %v\n", ins.name, err.kind)
 		}

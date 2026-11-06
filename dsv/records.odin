@@ -7,8 +7,14 @@ import core "../core"
 // counted with `count_ones`, so the work is per record, not per cell. `done` is true with `r` set when a width fault
 // ends the walk.
 @(private)
-read_cells :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H), base: [^]u8, pos: int, seps, lfs, clfs: u64) -> (r: u64, done: bool) {
+read_cells :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H), base: [^]u8, pos: int, seps, lfs, clfs, ill: u64, ill_back: int, lax_on: bool) -> (r: u64, done: bool) {
 	rec_lo, cells, width := w.rec_lo, w.cells, w.width
+	// On a batch, `ill_carry` is whether the line open at the block's start holds an ill-formed sequence, as `carry`
+	// is for a cell's backslash. `lax_on` is whether `.Invalid_Utf8` is tolerated.
+	when H == Batch {
+		ill_carry := lax_on && (w.open_ill || ill_back >= rec_lo)
+		clean := !lax_on || ill == 0 && !ill_carry
+	}
 	seps, m := seps, lfs
 	for m != 0 {
 		k := u64(intrinsics.count_trailing_zeros(m))
@@ -34,7 +40,7 @@ read_cells :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H
 			}
 			when H == Batch {
 				// A record batch stops past the row that fills it, with the width the next frame checks rows against.
-				if frame_row(w.h, rec_lo, at - int(base[at - 1] == '\r'), header, width) {
+				if frame_row(w.h, rec_lo, at - int(base[at - 1] == '\r'), header, width, !clean && span_esc(ill, pos, rec_lo, at, ill_carry)) {
 					return stopped(u64(at), 1), true
 				}
 			}
@@ -43,6 +49,7 @@ read_cells :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H
 	}
 	w.rec_lo, w.cells, w.width = rec_lo, cells + int(intrinsics.count_ones(seps)), width
 	when H == Batch {
+		w.open_ill = !clean && span_esc(ill, pos, rec_lo, pos + 64, ill_carry)
 		// The open cell starts past the block's last separator, for the cell width check of a long text.
 		if seps != 0 {
 			w.field_lo = pos + 64 - int(intrinsics.count_leading_zeros(seps))
@@ -68,21 +75,15 @@ record_width :: #force_inline proc "contextless" (w: ^Pass($S, $H), cells: int, 
 	return
 }
 
-// Emits a column's header cell as the `Key` token its cell names it by, and returns the hook's action with the token's
-// span. A `Stop` ends the walk. A cell past the header's last, which only `.Ragged` reads, is named by `column_key`.
+// Emits a column's header cell as the `Key` token its cell names it by, and returns the hook's action with the span of
+// the record's cell from `field_lo` to `hi`, which the key names and a `Stop` at the key reports. A `Stop` ends the walk. With `$PAST` a cell may lie past the header's last, which only `.Ragged` reads, and is
+// named by `column_key`. Without it the caller has proven the cell below the header's width.
 @(private)
-put_key :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, keys: []core.Token, cells: int) -> (a: core.Action, lo: u64, n: u32) {
-	k := column_key(keys, cells)
+put_key :: #force_inline proc "contextless" ($PAST: bool, h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, keys: []core.Token, cells: int, field_lo, hi: int) -> (a: core.Action, lo: u64, n: u32) {
+	k := column_key(keys, cells) when PAST else key_at(keys, cells)
 	// A `Key` is always a `Plain` of role `Key`. Both are passed as constants, so a hook that tells tokens apart by
 	// kind or role folds its whole call away for a header cell.
-	return emit(h, on, hs, k.lo, k.n, .Plain, .Key, k.spelling), k.lo, k.n
-}
-
-// `put_key` without the index test, for a run whose cells are known to be below `width`, one key per cell.
-@(private)
-put_key_n :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, keys: []core.Token, cells: int) -> (a: core.Action, lo: u64, n: u32) {
-	k := key_at(keys, cells)
-	return emit(h, on, hs, k.lo, k.n, .Plain, .Key, k.spelling), k.lo, k.n
+	return emit(h, on, hs, k.lo, k.n, .Plain, .Key, k.spelling), u64(field_lo), u32(hi - field_lo)
 }
 
 // Emits a cell as a `Plain` value token with its spelling, and returns the action with the token's span.
@@ -105,9 +106,10 @@ put_header_key :: #force_inline proc "contextless" (keys: []core.Token, cells: i
 // is, since a quote at a cell's first byte opens a quoted field and one anywhere else is refused or, under
 // `.Bare_Quote`, a cell byte. Every quoted CSV cell sets both bits, and `cell_text` and `spelling_key_equals` cut
 // it to its inner span without decoding when `plain_quoted` holds, which is when the span holds no `""` and is
-// well-formed UTF-8. An unquoted CSV cell sets bit 0 under `lax`. A TSV cell sets it when its span holds a backslash,
-// which the pass's block mask answers, or under `lax`. On a walk for `Cells` the mask holds a quoted cell's `""`, and
-// `esc` sets `SPELLING_DOUBLED`. A cell read under `lax` sets `SPELLING_LAX`, since its decode may grow past its span.
+// well-formed UTF-8. A TSV cell sets bit 0 when its span holds a backslash, which the pass's block mask answers. On a
+// walk for `Cells` the mask holds a quoted cell's `""`, and `esc` sets `SPELLING_DOUBLED`. `lax` says the span holds
+// an ill-formed sequence `.Invalid_Utf8` tolerated, which sets bits 0 and 2 (`SPELLING_LAX`), since its decode may
+// grow past its span. The pass's mask of the block's ill-formed leads answers it.
 @(private)
 spelling :: #force_inline proc "contextless" (base: [^]u8, field_lo, hi: int, esc, lax: bool, $S: Spec) -> u16 {
 	when S == .Csv {
@@ -119,7 +121,7 @@ spelling :: #force_inline proc "contextless" (base: [^]u8, field_lo, hi: int, es
 		quoted := -u16(base[field_lo] == '"')
 		return plain | quoted & (core.SPELLING_DECODE | core.SPELLING_QUOTED | (SPELLING_DOUBLED if esc else 0))
 	} else {
-		return (core.SPELLING_DECODE if esc || lax else 0) | (core.SPELLING_LAX if lax else 0)
+		return core.text_spelling(esc, lax)
 	}
 }
 
@@ -162,14 +164,9 @@ key_at :: #force_inline proc "contextless" (keys: []core.Token, i: int) -> core.
 @(private)
 put_cell :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, no_header: bool, cells: int, field_lo, hi: int, esc, lax: bool, $S: Spec) -> (a: core.Action, lo: u64, n: u32) {
 	if !no_header {
-		k, klo, kn := put_key(h, on, hs, keys, cells)
-		switch k {
-		case .Next, .Keep:
-		case .Skip:
-			// The hook passed this key over, so its cell's value is passed over too.
-			return .Skip, klo, kn
-		case .Stop:
-			return .Stop, klo, kn
+		// A key the hook passed over takes its cell's value with it.
+		if k, klo, kn := put_key(true, h, on, hs, keys, cells, field_lo, hi); k == .Skip || k == .Stop {
+			return k, klo, kn
 		}
 	}
 	return put_value(h, on, hs, base, field_lo, hi, esc, lax, S)
@@ -208,14 +205,14 @@ wide_fault :: #force_no_inline proc "contextless" (base: []u8, lo, width: int, $
 // at that delimiter. Such a record does not reach the returning caller. With `$KEYS` set the record is headed, so each
 // cell has a `Key` before it, else each cell is a `Plain` value. A caller with no header passes `keys` nil.
 @(private, cold)
-read_wide :: #force_no_inline proc "contextless" ($KEYS: bool, h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, cells, field_lo, width: int, bs: u64, carry, lax: bool, $S: Spec) -> u64 {
+read_wide :: #force_no_inline proc "contextless" ($KEYS: bool, h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, cells, field_lo, width: int, bs: u64, carry: bool, ill: u64, ill_carry: bool, $S: Spec) -> u64 {
 	// `last` is the delimiter that ends the cell numbered `width - 1`, the first cell past the width's delimiters.
 	last := d
 	for _ in 1 ..< width - cells {
 		last &= last - 1
 	}
 	last &= -last
-	_, _, r, done := values_run(true, KEYS, h, on, hs, base, keys, pos, d & (last | (last - 1)), field_lo, cells, bs, carry, lax, S)
+	_, _, r, done := values_run(true, KEYS, false, h, on, hs, base, keys, pos, d & (last | (last - 1)), field_lo, cells, bs, carry, ill, ill_carry, S)
 	if done {
 		return r
 	}
@@ -224,21 +221,8 @@ read_wide :: #force_no_inline proc "contextless" ($KEYS: bool, h: ^$H, $on: proc
 
 // Emits a run of a headed record's cells under `.Ragged` once it reaches the header's width, each after its column's key.
 @(private, cold)
-read_ragged :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, field_lo, cells: int, bs: u64, carry, lax: bool, $S: Spec) -> (field_lo2, cells2: int, r: u64, done: bool) {
-	field_lo2, cells2 = field_lo, cells
-	for dm := d; dm != 0; dm &= dm - 1 {
-		at := pos + int(intrinsics.count_trailing_zeros(dm))
-		esc := false
-		when S == .Tsv || H == Cells {
-			esc = span_esc(bs, pos, field_lo2, at, carry)
-		}
-		if a, lo, n := put_cell(h, on, hs, base, keys, false, cells2, field_lo2, at, esc, lax, S); a == .Stop {
-			return field_lo2, cells2, stopped(lo, n), true
-		}
-		cells2 += 1
-		field_lo2 = at + 1
-	}
-	return
+read_ragged :: #force_no_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, field_lo, cells: int, bs: u64, carry: bool, ill: u64, ill_carry: bool, $S: Spec) -> (field_lo2, cells2: int, r: u64, done: bool) {
+	return values_run(true, true, true, h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
 }
 
 // The `Key` token of column `c`: its header cell, or past the header's last, which only `.Ragged` reads, a key named by
@@ -253,27 +237,29 @@ column_key :: #force_inline proc "contextless" (keys: []core.Token, c: int) -> c
 	return {keys[0].lo if len(keys) > 0 else 0, u32(c + 1), .Plain, .Key, core.SPELLING_DECODE | SPELLING_COLUMN}
 }
 
-// Emits a run of a record's cells as `Plain` values. `$ESC` compiles the TSV backslash test in or out, chosen per block
-// by `plain_block`. With `$KEYS` the record is headed, so each cell's column key precedes its value and the cell's own
-// count is that key's index, which the run keeps no other counter for.
+// Emits a run of a record's cells as `Plain` values. `$ESC` compiles the TSV backslash test and the ill-formed UTF-8
+// test in or out, chosen per block by `plain_block`. With `$KEYS` the record is headed, so each cell's column key precedes its value and the cell's own
+// count is that key's index, which the run keeps no other counter for. `$PAST` lets that index pass the header's last
+// cell, for `.Ragged`.
 @(private)
-values_run :: #force_inline proc "contextless" ($ESC, $KEYS: bool, h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, field_lo, cells: int, bs: u64, carry, lax: bool, $S: Spec) -> (field_lo2, cells2: int, r: u64, done: bool) {
+values_run :: #force_inline proc "contextless" ($ESC, $KEYS, $PAST: bool, h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, base: [^]u8, keys: []core.Token, pos: int, d: u64, field_lo, cells: int, bs: u64, carry: bool, ill: u64, ill_carry: bool, $S: Spec) -> (field_lo2, cells2: int, r: u64, done: bool) {
 	dm := d
 	field_lo2, cells2 = field_lo, cells
 	for dm != 0 {
 		kk := intrinsics.count_trailing_zeros(dm)
 		at := pos + int(kk)
 		dm &= dm - 1
-		esc := false
+		esc, lax := false, false
 		when ESC {
 			when S == .Tsv || H == Cells {
 				esc = span_esc(bs, pos, field_lo2, at, carry)
 			}
+			lax = span_esc(ill, pos, field_lo2, at, ill_carry)
 		}
 		when KEYS {
-			if k, klo, kn := put_key_n(h, on, hs, keys, cells2); k == .Stop {
+			if k, klo, kn := put_key(PAST, h, on, hs, keys, cells2, field_lo2, at); k == .Stop {
 				return field_lo2, cells2, stopped(klo, kn), true
-			} else if k == .Next {
+			} else if k != .Skip {
 				if a, lo, n := put_value(h, on, hs, base, field_lo2, at, esc, lax, S); a == .Stop {
 					return field_lo2, cells2, stopped(lo, n), true
 				}
@@ -292,8 +278,10 @@ values_run :: #force_inline proc "contextless" ($ESC, $KEYS: bool, h: ^$H, $on: 
 // Emits the tokens a block's separators end. The delimiters before the block's next LF are the open record's cells and
 // run through a loop of their own, which holds no LF test, no CR, no width check and no `End`, and chooses the record's
 // state once per run. The record's last cell and its `End` are the outer loop's work, once per record.
+// `$LAX` compiles in the spelling of the cells that hold an ill-formed sequence `.Invalid_Utf8` tolerated, whose leads
+// are the mask `ill`.
 @(private)
-read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H), base: [^]u8, pos: int, seps, lfs, clfs, bs: u64, hs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (r: u64, done: bool) {
+read_tokens :: #force_inline proc "contextless" ($LAX, $COMMENTS: bool, w: ^Pass($S, $H), base: [^]u8, pos: int, seps, lfs, clfs, bs, ill: u64, ill_back: int, hs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (r: u64, done: bool) {
 	// The open record's state is copied into locals for the block, since a field read per cell is a load per cell.
 	// `carry` is whether the cell open at the block's start holds a backslash from an earlier block.
 	rec_lo, field_lo, cells := w.rec_lo, w.field_lo, w.cells
@@ -301,10 +289,16 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 	h, keys := w.h, w.keys
 	header, no_header, muted, open := w.in_header, w.no_header, w.muted, w.open
 	carry := w.field_esc
-	// A block with no backslash mask and no carry has no cell that starts in it with an escape, which is almost every
-	// block, so the runs below take `$ESC` false and the range work is a branch per block, not per cell.
-	plain_block := bs == 0 && !carry
-	lax := .Invalid_Utf8 in w.tolerate
+	// `ill_carry` is whether the cell open at the block's start holds an ill-formed sequence, from the blocks before or
+	// from the lead `ill_back` this block's check found.
+	ill_carry := false
+	when LAX {
+		ill_carry = w.open_ill || ill_back >= field_lo
+	}
+	// A block with no backslash mask, no ill-formed lead and no carry has no cell that starts in it with an escape or
+	// an ill-formed sequence, which is almost every block, so the runs below take `$ESC` false and the range work is a
+	// branch per block, not per cell.
+	plain_block := bs | ill == 0 && !(carry || ill_carry)
 	m, lf := seps, lfs
 	for m != 0 {
 		// `k` is the block's next LF, or 64 when the rest of the block holds none. The separators below `k` are
@@ -333,11 +327,12 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 				kk := intrinsics.count_trailing_zeros(dm)
 				at := pos + int(kk)
 				dm &= dm - 1
-				esc := false
-				when S == .Tsv || H == Cells {
-					if !plain_block {
+				esc, lax := false, false
+				if !plain_block {
+					when S == .Tsv || H == Cells {
 						esc = span_esc(bs, pos, field_lo, at, carry)
 					}
+					lax = span_esc(ill, pos, field_lo, at, ill_carry)
 				}
 				put_header_key(keys, cells, base, field_lo, at, esc, lax, S)
 				cells += 1
@@ -355,25 +350,25 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 		} else if no_header {
 			// No header, so every cell is a `Plain` value and no key is emitted.
 			if width != 0 && .Ragged not_in w.tolerate && cells + int(intrinsics.count_ones(d)) >= width {
-				return read_wide(false, h, on, hs, base, nil, pos, d, cells, field_lo, width, bs, carry, lax, S), true
+				return read_wide(false, h, on, hs, base, nil, pos, d, cells, field_lo, width, bs, carry, ill, ill_carry, S), true
 			}
 			rr: u64
 			dd: bool
 			if plain_block {
-				field_lo, cells, rr, dd = values_run(false, false, h, on, hs, base, nil, pos, d, field_lo, cells, bs, carry, lax, S)
+				field_lo, cells, rr, dd = values_run(false, false, false, h, on, hs, base, nil, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
 			} else {
-				field_lo, cells, rr, dd = values_run(true, false, h, on, hs, base, nil, pos, d, field_lo, cells, bs, carry, lax, S)
+				field_lo, cells, rr, dd = values_run(true, false, false, h, on, hs, base, nil, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
 			}
 			if dd {
 				return rr, true
 			}
 		} else if cells + int(intrinsics.count_ones(d)) >= width {
 			if .Ragged not_in w.tolerate {
-				return read_wide(true, h, on, hs, base, keys, pos, d, cells, field_lo, width, bs, carry, lax, S), true
+				return read_wide(true, h, on, hs, base, keys, pos, d, cells, field_lo, width, bs, carry, ill, ill_carry, S), true
 			}
 			rr: u64
 			dd: bool
-			if field_lo, cells, rr, dd = read_ragged(h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, lax, S); dd {
+			if field_lo, cells, rr, dd = read_ragged(h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S); dd {
 				return rr, true
 			}
 		} else {
@@ -382,9 +377,9 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 			rr: u64
 			dd: bool
 			if plain_block {
-				field_lo, cells, rr, dd = values_run(false, true, h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, lax, S)
+				field_lo, cells, rr, dd = values_run(false, true, false, h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
 			} else {
-				field_lo, cells, rr, dd = values_run(true, true, h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, lax, S)
+				field_lo, cells, rr, dd = values_run(true, true, false, h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
 			}
 			if dd {
 				return rr, true
@@ -411,9 +406,7 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 			if at > rec_lo && base[at - 1] == '\r' {
 				end = at - 1
 			}
-			switch emit(h, on, hs, u64(rec_lo), u32(end - rec_lo), .Plain, .Comment, 1) {
-			case .Next, .Keep, .Skip:
-			case .Stop:
+			if emit(h, on, hs, u64(rec_lo), u32(end - rec_lo), .Plain, .Comment, core.comment_spelling(1, 0)) == .Stop {
 				return stopped(u64(rec_lo), u32(end - rec_lo)), true
 			}
 			rec_lo, field_lo = at + 1, at + 1
@@ -434,11 +427,12 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 				}
 			}
 		}
-		esc := false
-		when S == .Tsv || H == Cells {
-			if !plain_block {
+		esc, lax := false, false
+		if !plain_block {
+			when S == .Tsv || H == Cells {
 				esc = span_esc(bs, pos, field_lo, at, carry)
 			}
+			lax = span_esc(ill, pos, field_lo, at, ill_carry)
 		}
 		if header {
 			put_header_key(keys, cells, base, field_lo, hi, esc, lax, S)
@@ -470,12 +464,25 @@ read_tokens :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $
 	w.in_header, w.muted, w.open = header, muted, open
 	// The cell still open at the block's end carries its backslash state into the next block, as `field_esc`.
 	w.field_esc = false
-	when S == .Tsv || H == Cells {
-		if !plain_block {
+	when LAX {
+		w.open_ill = false
+	}
+	if !plain_block {
+		when S == .Tsv || H == Cells {
 			w.field_esc = span_esc(bs, pos, field_lo, pos + 64, carry)
+		}
+		when LAX {
+			w.open_ill = span_esc(ill, pos, field_lo, pos + 64, ill_carry)
 		}
 	}
 	return 0, false
+}
+
+// `read_tokens` on a block that holds an ill-formed sequence `.Invalid_Utf8` tolerated, or that a cell holding one is
+// open across.
+@(private, cold)
+read_lax_tokens :: #force_no_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H), base: [^]u8, pos: int, seps, lfs, clfs, bs, ill: u64, ill_back: int, hs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (r: u64, done: bool) {
+	return read_tokens(true, COMMENTS, w, base, pos, seps, lfs, clfs, bs, ill, ill_back, hs, on)
 }
 
 // Emits the tokens of the record the text ends in, which no LF ends. It emits its opening token, its open cell, and an
@@ -490,7 +497,7 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^
 	hi := w.n
 	esc := w.field_esc
 	if w.in_header {
-		put_header_key(w.keys, w.cells, base, w.field_lo, hi, esc, (.Invalid_Utf8 in w.tolerate), S)
+		put_header_key(w.keys, w.cells, base, w.field_lo, hi, esc, w.open_ill, S)
 		return 0, false
 	}
 	if !w.muted && !w.open {
@@ -500,7 +507,7 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^
 		}
 	}
 	if !w.muted {
-		if a, lo, n := put_cell(w.h, on, hs, base, w.keys, w.no_header, w.cells, w.field_lo, hi, esc, (.Invalid_Utf8 in w.tolerate), S); a == .Stop {
+		if a, lo, n := put_cell(w.h, on, hs, base, w.keys, w.no_header, w.cells, w.field_lo, hi, esc, w.open_ill, S); a == .Stop {
 			return stopped(lo, n), true
 		}
 	}

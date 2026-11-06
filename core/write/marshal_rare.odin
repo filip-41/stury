@@ -547,7 +547,7 @@ list_struct :: proc(w: ^Walker, f: ^typed.Field, v: uintptr, tag: ^string, $put:
 	w.mark = w.keys.cursor
 	first := len(w.entries)
 	if tag != nil {
-		add_entry(w, w.plan.options.union_tag, uintptr(tag), &w.tag_field, put) or_return
+		add_entry(w, w.plan.union_tag, uintptr(tag), &w.tag_field, put) or_return
 	}
 	r := f.first
 	for ; r.kind != .Never; r = intrinsics.ptr_offset(r, 1) {

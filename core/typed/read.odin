@@ -90,8 +90,9 @@ Reader :: struct {
 	format:    rawptr,
 }
 
-// Starts a read of `src` into `target`, a value of `plan`'s type. `frames` holds one more than the walk's depth. The
-// walk then runs with `r` and the returned registers, and `read_end` ends it.
+// Starts a read of `src` into `target`, a value of `plan`'s type. `frames` holds two more than the walk's
+// depth, for the frame below the root's and the root's. The walk then runs with `r` and the returned registers, and
+// `read_end` ends it.
 read_start :: proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
 	if plan == nil || plan.spelling != spelling || plan.type != T {
 		err.kind = .Plan_Mismatch

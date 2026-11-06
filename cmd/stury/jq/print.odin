@@ -160,11 +160,9 @@ emit :: proc(p: ^Printer, v: Value) {
 // JSON's shortest escapes, as jq spells it.
 @(private = "file")
 write_node :: proc(p: ^Printer, v: Value) -> bool {
-	// The deepest level the library's tree writer, which writes sorted keys, enters.
-	TREE_DEPTH :: 4096
 	r, is_ref := v.(Ref)
 	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || r.doc.spelling != json.as(.Json).spelling ||
-	   p.depth + max(int(r.doc.as.max_depth), core_pkg.MAX_DEPTH) > TREE_DEPTH || repeats_key(r) {
+	   p.depth + max(int(r.doc.as.max_depth), core_pkg.MAX_DEPTH) > json.TREE_DEPTH || repeats_key(r) {
 		return false
 	}
 	opts := p.opts

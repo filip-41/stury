@@ -180,7 +180,7 @@ frame_document :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, reg
 	hi, fault, stop := walk_from(src, q, S, opts, h, regs, on)
 	it.pos = hi
 	if fault == nil && !stop && runs_on(src, q, hi, S, true) {
-		fault = core.fault_of(core.fault_at(hi, .Bad_Char, u8(Detail.Trailing)), &RULES)
+		fault = core.Fault{at = hi, rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Trailing)}
 	}
 	at := u64(intrinsics.ptr_sub(q, raw_data(src)))
 	if fault != nil || at == u64(len(src)) {
@@ -250,7 +250,7 @@ frame_entry :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 		}
 		if close == '}' {
 			k := q
-			if q < end && (q[0] == '"' || S == .Json5 && q[0] == '\'') {
+			if q < end && (q[0] == '"' || .Es5 in FEATURES[S] && q[0] == '\'') {
 				hi, fault, _ := walk_from(src, q, S, opts, &none, &zero, core.no_hook)
 				if fault != nil {
 					break whole
@@ -288,7 +288,7 @@ frame_entry :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: 
 	}
 	it.state[0] = 1
 	if piece {
-		it.fault = core.fault_of(core.fault_at(u64(intrinsics.ptr_sub(q, p)), .Bad_Char), &RULES)
+		it.fault = core.Fault{at = u64(intrinsics.ptr_sub(q, p)), rules = &RULES, kind = .Bad_Char}
 	} else {
 		it.fault = walk_text(src, 0 if levels > 0 else it.from, S, opts, &none, &zero, core.no_hook)
 	}
@@ -435,7 +435,7 @@ UNFRAMED :: 1
 @(private)
 seq_fault :: proc(it: ^records.Reader, rec: records.Record, fault: Maybe(core.Fault)) -> Maybe(core.Fault) {
 	if it.state[1] == UNFRAMED {
-		return core.fault_of(core.fault_at(rec.at, .Bad_Char, u8(Detail.Unframed)), &RULES)
+		return core.Fault{at = rec.at, rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Unframed)}
 	}
 	if fault != nil {
 		return fault
@@ -446,7 +446,7 @@ seq_fault :: proc(it: ^records.Reader, rec: records.Record, fault: Maybe(core.Fa
 		case: return nil
 		}
 	}
-	return core.fault_of(core.fault_at(rec.at + u64(len(rec.text)), .Bad_Number, u8(Detail.Cut_Number)), &RULES)
+	return core.Fault{at = rec.at + u64(len(rec.text)), rules = &RULES, kind = .Bad_Number, detail = u8(Detail.Cut_Number)}
 }
 
 @(private)
@@ -542,7 +542,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 		err^ = started
 		return false
 	}
-	on :: typed.on_token_spelled when S == .Json5 else typed.on_token
+	on :: typed.on_token_spelled when .Es5 in FEATURES[S] else typed.on_token
 	pos, state := it.pos, it.state
 	kept := typed.collected_mark(read.collect)
 	_, ok, stopped := frame_walked(it, S, opts, &h, &regs, on)
@@ -604,7 +604,7 @@ build_next :: proc(it: ^records.Reader, b: ^build.Builder, regs: ^core.Hook_Regs
 // The walk options a handle holds.
 @(private)
 options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
-	return {max_depth = as.max_depth, tolerate = transmute(bit_set[Tolerance; u8])as.tolerate, refuse_non_finite = as.opts[0] != 0}
+	return {max_depth = as.max_depth, tolerate = as.tolerate, refuse_non_finite = as.opts[0] != 0}
 }
 
 // Walks the record `src[lo:cut]` of a `.Lines` or `.Seq` text in place in `src`. Returns the fault that a walk of the record's

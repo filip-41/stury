@@ -14,12 +14,15 @@ fault_at :: #force_inline proc "contextless" (pos: u64, kind: Fault_Kind, detail
 // The walk read no further, so `hi` is not a document boundary.
 STOPPED :: 1
 
-// Returns the `Fault` in `r` with `rules` set, or nil when `r`'s kind is 0.
-fault_of :: #force_inline proc "contextless" (r: u64, rules: ^Rules) -> Maybe(Fault) {
-	if r & 0xff == 0 {
-		return nil
+// Splits a result word into where the walk ended, or the byte its fault names, the `Fault` with `rules` set or nil
+// when `r`'s kind is 0, and whether a hook stopped the walk. `pos` holds 48 bits, so a position past 2^48 wraps, and a
+// 47-bit user address space keeps every text shorter.
+result_of :: #force_inline proc "contextless" (r: u64, rules: ^Rules) -> (hi: u64, fault: Maybe(Fault), stopped: bool) {
+	hi = r >> 16
+	if r & 0xff != 0 {
+		fault = Fault{at = hi, rules = rules, kind = Fault_Kind(r & 0xff), detail = u8(r >> 8)}
 	}
-	return Fault{at = r >> 16, rules = rules, kind = Fault_Kind(r & 0xff), detail = u8(r >> 8)}
+	return hi, fault, r & 0xffff == STOPPED << 8
 }
 
 // An empty hook type. `validate` passes it, and the hook compiles to no code.

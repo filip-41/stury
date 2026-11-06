@@ -2,23 +2,13 @@ package core
 
 import "core:io"
 import "core:reflect"
+import spell "./spell"
 
 // The error types of the layers that walk and build a text. `Fault` is the walk's error and `Document_Error` the
 // value layer's, which holds a `Fault` by value in `inner`.
 
-// The kinds of fault a walk raises, shared by every format. Each member's comment names the formats that raise it
-// and the byte `at` names.
-Fault_Kind :: enum u8 {
-	None, // no fault
-	Truncated, // json, dsv: the input ended inside a construct, at `len(src)`, or dsv's quoted cell never closed, at its opening quote
-	Bad_Char, // json, dsv: the first byte that cannot extend the construct or the text, or that is not UTF-8
-	Bad_Escape, // json: at the escape's letter, or a lone surrogate half at its backslash, dsv (TSV): at the backslash
-	Bad_Number, // json: at the byte that breaks the number
-	Too_Deep, // json: at the bracket past the depth limit
-	Too_Wide, // json, dsv: the first byte of a token longer than `Token.n` holds, records: of a record past `max_bytes`
-	No_Memory, // json (depth stack past `MAX_DEPTH`), dsv (header's keys): the walk's scratch allocation failed, no byte
-	Bad_Option, // dsv: an option the spec does not take, found before any byte is read
-}
+// The kinds of fault a walk raises, from `core/spell`, whose readers return them.
+Fault_Kind :: spell.Fault_Kind
 
 // The kinds that name no byte of the text. Their `at` is 0.
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
@@ -150,7 +140,7 @@ Document_Error_Kind :: enum u8 {
 	Bad_Fact, // a recorded fact body does not have its role's shape
 	Bad_Width, // an edit would leave a delimited text a record the table cannot read
 	Bad_Spec, // a commit asks for a spec of another format family, or one a delimited text cannot write
-	Conflicting_Edits, // two edits of one node, or an edit inside what another replaces or removes
+	Conflicting_Edits, // two edits of one node, or an edit inside what another replaces or removes, at the first byte of the node or span they share
 	Bad_Result, // a committed text does not read, the walk's fault in `inner`
 }
 
@@ -158,9 +148,16 @@ Document_Error_Kind :: enum u8 {
 @(private)
 DOCUMENT_AT_NO_BYTE :: bit_set[Document_Error_Kind]{.None, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Fact, .Bad_Width, .Bad_Spec, .Bad_Result}
 
+// Whether `e` names a byte of the source: its kind does, and for `.Walk` its fault does too, as a bad option is found
+// before any byte is read.
+@(private)
+document_at_byte :: proc "contextless" (e: Document_Error) -> bool {
+	return e.kind not_in DOCUMENT_AT_NO_BYTE && (e.kind != .Walk || e.inner.kind not_in AT_NO_BYTE)
+}
+
 // Moves the bytes of the source `e` names by `by`, for an error found in a text that starts `by` bytes in.
 move_document_error :: proc(e: ^Document_Error, by: u64) {
-	if e.kind not_in DOCUMENT_AT_NO_BYTE {
+	if document_at_byte(e^) {
 		e.at += by
 		if e.kind == .Walk {
 			e.inner.at += by
@@ -169,8 +166,9 @@ move_document_error :: proc(e: ^Document_Error, by: u64) {
 }
 
 // A value layer error. `at` is the byte `kind` names: the walk's fault byte for `.Walk`, the first byte of the
-// repeated key for `.Duplicate_Key`. `inner` is the fault, set for `.Walk`, `.Bad_Value` and `.Bad_Result`, whose
-// `inner.at` is a byte of the recorded text or of the commit's output, not of the source.
+// repeated key for `.Duplicate_Key`, of the shared node or span for `.Conflicting_Edits`. `inner` is the fault, set for
+// `.Walk`, `.Bad_Value` and `.Bad_Result`, whose `inner.at` for the last two is a byte of the recorded text or of the
+// commit's output, not of the source.
 Document_Error :: struct {
 	kind:  Document_Error_Kind,
 	at:    u64,
@@ -213,39 +211,30 @@ write_coded :: proc(w: io.Writer, prefix, code: string) -> io.Error {
 // byte, since they describe a node, a recorded text or a position rather than a place in `src`.
 @(private)
 render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Lines = nil) -> io.Error {
-	// No position is written when `e.kind` is in `DOCUMENT_AT_NO_BYTE`, or when `e.kind` is `.Walk` and
-	// `e.inner.kind` names no byte, as a bad option is found before any byte is read.
-	no_byte := e.kind in DOCUMENT_AT_NO_BYTE || (e.kind == .Walk && e.inner.kind in AT_NO_BYTE)
-	if !no_byte {
+	if document_at_byte(e) {
 		write_position(w, src, e.at, lines) or_return
 	}
 	io.write_string(w, DOCUMENT_KIND_RULES[e.kind].message) or_return
-	#partial switch e.kind {
-	case .Walk:
-		if e.inner.kind != .None {
-			io.write_string(w, "\n  caused by ") or_return
-			render_fault(w, src, e.inner, lines) or_return
-		}
-	case .Bad_Value, .Bad_Result:
-		if e.inner.kind != .None {
-			io.write_string(w, "\n  caused by ") or_return
-			_, err := io.write_string(w, rule_of(e.inner).message)
-			return err
-		}
-	case:
+	if e.inner.kind == .None {
+		return nil
 	}
-	return nil
+	io.write_string(w, "\n  caused by ") or_return
+	if e.kind == .Walk {
+		return render_fault(w, src, e.inner, lines)
+	}
+	_, err := io.write_string(w, rule_of(e.inner).message)
+	return err
 }
 
 // The path layer's error kinds. A value a path does not reach is an `Answer`'s outcome, not an error.
 Path_Error_Kind :: enum u8 {
 	None,
 	Bad_Path, // the path's text does not parse, at the byte of that text
-	Over_Capacity, // a read past `MAX_PATHS` paths, or a path past `MAX_STEPS` steps, at no byte
+	Over_Capacity, // a read past `MAX_PATHS` paths, a path past `MAX_STEPS` steps or of `MAX_STEPS` with a `Descend`, at no byte
 	No_Memory, // an allocation the read owns was refused, at no byte
 	Walk, // the walk's fault, in `inner`
 	Duplicate_Key, // a read with `refuse_duplicates` met a key that repeats one of its object's, at the second key's first byte
-	Unsupported, // a step the engine does not read yet, or a read of a partial document, at no byte
+	Unsupported, // a query of a partial document, or a read through a handle with no format, at no byte
 }
 
 // A path layer error. `at` is the byte `kind` names: a byte of the path's text for `.Bad_Path`, and the walk's fault
@@ -266,7 +255,7 @@ PATH_KIND_RULES := [Path_Error_Kind]Rule {
 	.No_Memory     = {"no_memory", "Out of memory"},
 	.Walk          = {"walk", "Input does not parse"},
 	.Duplicate_Key = {"duplicate_key", "Duplicate key"},
-	.Unsupported   = {"unsupported", "Path is not supported"},
+	.Unsupported   = {"unsupported", "Read is not supported"},
 }
 
 // Returns the read error a build's error is.
@@ -408,7 +397,7 @@ TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch
 
 // Moves the bytes of the source `e` names by `by`, for an error found in a text that starts `by` bytes in.
 move_typed_error :: proc(e: ^Typed_Error, by: u64) {
-	if e.kind not_in TYPED_AT_NO_BYTE {
+	if e.kind not_in TYPED_AT_NO_BYTE && (e.kind != .Walk || e.inner.kind not_in AT_NO_BYTE) {
 		e.at += by
 		if e.kind == .Walk {
 			e.inner.at += by

@@ -24,6 +24,7 @@ parse_path_steps :: proc(t: ^testing.T) {
 		{`.a."b"["c"].["d"]`, {core.Name("a"), core.Name("b"), core.Name("c"), core.Name("d")}},
 		{`.""`, {core.Name("")}},
 		{`."a\"bé😀\n"`, {core.Name("a\"bé\U0001f600\n")}},
+		{`.["é"]`, {core.Name("é")}},
 		{".[0]", {core.Index(0)}},
 		{".[-1]", {core.Index(-1)}},
 		{".a[0][1]", {core.Name("a"), core.Index(0), core.Index(1)}},
@@ -37,6 +38,11 @@ parse_path_steps :: proc(t: ^testing.T) {
 		{"..", {core.Descend{}}},
 		{"...a", {core.Descend{}, core.Name("a")}},
 		{"..[0]", {core.Descend{}, core.Index(0)}},
+		{".[9223372036854775807]", {core.Index(max(int))}},
+		{".[99999999999999999999]", {core.Index(max(int))}},
+		{".[-9223372036854775808]", {core.Index(min(int))}},
+		{".[-99999999999999999999]", {core.Index(min(int))}},
+		{".[-99999999999999999999:99999999999999999999]", {core.Slice{min(int), max(int)}}},
 	}
 	for c in cases {
 		p, e := core.parse_path(c.text)
@@ -100,8 +106,11 @@ parse_path_refused :: proc(t: ^testing.T) {
 		{`."\x"`, 2},
 		{`."\ud83d"`, 2},
 		{`."\ude00"`, 2},
+		{".\"\xff\"", 2},
+		{".[\"a\xc3\"]", 4},
+		{".\"\xed\xa0\x80\"", 2},
+		{".\"\xe2\x82", 2},
 		{`.["a"`, 5},
-		{".[99999999999999999999]", 1},
 		{"first(.a", 8},
 		{"limit(-1; .a)", 6},
 		{"limit(1 .a)", 8},
@@ -135,7 +144,8 @@ parse_pointer_steps :: proc(t: ^testing.T) {
 		{"/12/a", {core.Index_Or_Name{"12", 12}, core.Name("a")}},
 		{"/01", {core.Name("01")}},
 		{"/-", {core.Name("-")}},
-		{"/99999999999999999999", {core.Name("99999999999999999999")}},
+		{"/é~1", {core.Name("é/")}},
+		{"/99999999999999999999", {core.Index_Or_Name{"99999999999999999999", max(int)}}},
 	}
 	for c in cases {
 		p, e := core.parse_pointer(c.text)
@@ -153,7 +163,7 @@ parse_pointer_steps :: proc(t: ^testing.T) {
 		text: string,
 		at:   u64,
 	}
-	refused := []Refused{{"a", 0}, {"/a~", 2}, {"/a~2", 2}}
+	refused := []Refused{{"a", 0}, {"/a~", 2}, {"/a~2", 2}, {"/a/b\xff", 4}, {"/\xe2\x82", 1}}
 	for c in refused {
 		p, e := core.parse_pointer(c.text)
 		defer core.path_destroy(&p)
@@ -324,6 +334,13 @@ path_set :: proc(t: ^testing.T) {
 	expect_set(t, `{"b":{}}`, "...a", "0", `{"b":{"a":0},"a":0}`)
 	expect_set(t, `{"a":1,"a":2}`, ".a", "3", `{"a":3,"a":2}`, {dups = .First})
 	expect_set(t, `{"a":1,"a":2}`, ".a", "3", `{"a":3,"a":3}`, {every_key = true})
+	// Under a limit the first answer of `...a` may be a container that lacks `a`.
+	expect_set(t, `{"x":{}}`, "first(...a)", "9", `{"x":{"a":9}}`)
+	expect_set(t, `{}`, "limit(1; ...a)", "9", `{"a":9}`)
+	// `?` on the last name drops a container that is no object and inserts into one that lacks the name.
+	expect_set(t, `{"x":{}}`, ".x.a?", "9", `{"x":{"a":9}}`)
+	expect_set(t, `[1,{},{"a":2}]`, ".[].a?", "9", `[1,{"a":9},{"a":9}]`)
+	expect_set(t, `{"x":5}`, ".x.a?", "9", `{"x":5}`)
 	refused := [?]string{".a.b", ".x.y", ".a[5]", ".a[]", "...a"}
 	for text in refused {
 		src := `{"a":1}`
@@ -715,6 +732,30 @@ pointer_reads :: proc(t: ^testing.T) {
 		a, some := answer.?
 		testing.expect(t, some && a.outcome == .Found)
 		testing.expect_value(t, string(core.span(&doc, a.node)), c.want)
+	}
+}
+
+// A pointer's index past an `int` is past the end of an array, as a smaller one is, and still names a member.
+@(test)
+pointer_index_past_int :: proc(t: ^testing.T) {
+	path, perr := core.parse_pointer("/a/99999999999999999999")
+	defer core.path_destroy(&path)
+	testing.expect_value(t, perr.kind, core.Path_Error_Kind.None)
+	Case :: struct {
+		src:     string,
+		outcome: core.Answer_Outcome,
+	}
+	for c in ([]Case{{`{"a":[1,2]}`, .Missing}, {`{"a":{"99999999999999999999":3}}`, .Found}}) {
+		doc, err := json.scan(transmute([]u8)c.src, .Json, path)
+		defer core.destroy(&doc)
+		testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+		testing.expectf(t, len(doc.answers) == 1 && doc.answers[0].outcome == c.outcome, "%s: %v", c.src, doc.answers)
+		full, _ := json.build(transmute([]u8)c.src, .Json)
+		defer core.destroy(&full)
+		answers, qerr := core.query(&full, path)
+		defer delete(answers)
+		testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
+		testing.expectf(t, len(answers) == 1 && answers[0].outcome == c.outcome, "%s: %v", c.src, answers)
 	}
 }
 

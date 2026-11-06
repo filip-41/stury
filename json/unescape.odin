@@ -57,7 +57,7 @@ decoded_next :: proc "contextless" (d: ^Decoded) -> (b: u8, ok: bool) {
 		return c, true
 	}
 	base := raw_data(d.src)
-	spelled, size, q := kernel.utf8_lax_char(base[d.p:], base[d.end:])
+	spelled, size, q := spell.utf8_lax_char(base[d.p:], base[d.end:])
 	d.p = u64(intrinsics.ptr_sub(q, base))
 	return spell.pending_give(&d.pending, spelled, size), true
 }
@@ -68,7 +68,7 @@ decoded_next :: proc "contextless" (d: ^Decoded) -> (b: u8, ok: bool) {
 decoded_escape :: #force_inline proc "contextless" (src: []u8, p, end: u64) -> (spelled: [4]u8, size: int, next: u64) {
 	#no_bounds_check {
 		if p + 1 >= end {
-			return replacement(), 3, end
+			return spell.REPLACEMENT, 3, end
 		}
 		e := src[p + 1]
 		if b := spell.ESCAPED[e]; b != 0 {
@@ -90,33 +90,24 @@ decoded_unicode :: #force_no_inline proc "contextless" (src: []u8, p, end: u64) 
 	if n == 0 {
 		// The walk accepted the escape, so its four digits are hex, and it is a surrogate half no other half pairs
 		// with.
-		return replacement(), 3, p + 6
+		return spell.REPLACEMENT, 3, p + 6
 	}
 	s, k := utf8.encode_rune(r)
 	return s, k, p + u64(n)
 }
 
 // `decoded_escape_other` is `decoded_escape` for an escape that is no one-letter JSON escape and no `\u`: JSON5's
-// `\x`, `\0`, `\v`, `\'` and line continuations, and the byte a backslash spells as itself. Out of line, so
-// `decoded_escape` compiles none of it.
+// `\x`, `\0`, `\v`, `\'` and line continuations, and the byte a backslash spells as itself. The walk accepted the
+// escape, so a `\x` has its two hex digits and a `\0` no digit after it. Out of line, so `decoded_escape` compiles
+// none of it.
 @(private)
 decoded_escape_other :: proc "contextless" (src: []u8, p, end: u64, e: u8) -> (spelled: [4]u8, size: int, next: u64) {
 	#no_bounds_check {
 		switch e {
 		case 'x':
-			if p + 4 > end {
-				break
-			}
-			hi, lo := spell.HEX_NIBBLE[src[p + 2]], spell.HEX_NIBBLE[src[p + 3]]
-			if hi > 15 || lo > 15 {
-				break
-			}
-			s, n := utf8.encode_rune(rune(hi << 4 | lo))
+			s, n := utf8.encode_rune(rune(spell.HEX_NIBBLE[src[p + 2]] << 4 | spell.HEX_NIBBLE[src[p + 3]]))
 			return s, n, p + 4
 		case '0':
-			if p + 2 < end && src[p + 2] - '0' < 10 {
-				break
-			}
 			spelled[0] = 0
 			return spelled, 1, p + 2
 		case 'v':
@@ -138,19 +129,13 @@ decoded_escape_other :: proc "contextless" (src: []u8, p, end: u64, e: u8) -> (s
 			return spelled, 1, p + 2
 		}
 		base := raw_data(src)
-		s, n, q := kernel.utf8_lax_char(base[p + 1:], base[end:])
-		next = u64(intrinsics.ptr_sub(q, base))
 		// U+2028 and U+2029 after a backslash are line continuations.
-		if s[0] == 0xE2 && s[1] == 0x80 && s[2] | 1 == 0xA9 {
-			return spelled, 0, next
+		if line_sep5(base[p + 1:], base[end:]) {
+			return spelled, 0, p + 4
 		}
-		return s, n, next
+		s, n, q := spell.utf8_lax_char(base[p + 1:], base[end:])
+		return s, n, u64(intrinsics.ptr_sub(q, base))
 	}
-}
-
-@(private)
-replacement :: #force_inline proc "contextless" () -> [4]u8 {
-	return {0xEF, 0xBF, 0xBD, 0}
 }
 
 // JSON's `Spelling.text`, exported so a caller that knows the format calls it without the table. A scalar with
@@ -183,13 +168,15 @@ decode_scalar :: proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (string
 	if int(n.n) > len(buf) {
 		return "", false
 	}
-	dst := buf
-	src := doc.src
+	return string(buf[:decode_bytes(buf, 0, doc.src, n.lo, n.lo + u64(n.n))]), true
+}
+
+// Decodes `src[p:end]` into `dst` from `w` byte by byte, with one 32-bit store per escape. Returns the end of the
+// bytes written.
+@(private)
+decode_bytes :: #force_inline proc(dst: []u8, w: int, src: []u8, p, end: u64) -> int {
 	out := raw_data(dst)
-	lo := n.lo
-	end := lo + u64(n.n)
-	p := lo
-	w := 0
+	p, w := p, w
 	#no_bounds_check for p < end {
 		c := src[p]
 		if c != '\\' {
@@ -203,7 +190,7 @@ decode_scalar :: proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (string
 		w += size
 		p = next
 	}
-	return string(dst[:w]), true
+	return w
 }
 
 // Decodes a long token. Loads each 64-byte block once, stores a block with no escape whole, and walks a block with
@@ -279,18 +266,8 @@ decode_block :: proc(doc: ^core.Token_View, n: core.Node, buf: []u8) -> (string,
 			continue
 		}
 		// The bytes before the text's end, fewer than 64, are read one at a time.
-		for p < end && src[p] != '\\' {
-			out[w] = src[p]
-			w += 1
-			p += 1
-		}
-		if p >= end {
-			break
-		}
-		spelled, size, next := decoded_escape(doc.src, p, end)
-		put_word(dst, w, spelled, size)
-		w += size
-		p = next
+		w = decode_bytes(dst, w, doc.src, p, end)
+		break
 	}
 	return string(dst[:w]), true
 }
@@ -388,64 +365,4 @@ key_equals_decode :: #force_inline proc "contextless" (doc: ^core.Token_View, n:
 		p = next
 	}
 	return at == len(name)
-}
-
-// JSON's `Spelling.resolve` returns the node's kind, which is its value's kind.
-@(private)
-spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
-	return doc.nodes[i].kind
-}
-
-// JSON's `Spelling.number`, false for a token that is not a number. A decimal of at most 19 digits is decoded from the
-// walk's digit counts, and the rest go to `number_slow`.
-number :: #force_inline proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool) {
-	if n.kind == .Number {
-		sp := n.spelling
-		if sp & core.NUMBER_KIND_MASK <= u16(Number_Spelling.Decimal) {
-			lo, hi := n.lo, n.lo + u64(n.n)
-			int_digits := core.number_int_digits(sp)
-			if core.number_shape(sp) < 32 {
-				if num, ok := spell.number_int(doc.src, lo, hi, int_digits); ok {
-					return num, true
-				}
-			} else {
-				frac_digits := core.number_frac_digits(sp)
-				if sp & core.NUMBER_EXP != 0 {
-					return spell.number_exponent(doc.src, lo, hi, int_digits, frac_digits), true
-				}
-				return spell.number_fraction(doc.src, lo, hi, int_digits, frac_digits), true
-			}
-		}
-		return number_slow(doc, n), true
-	}
-	return {}, false
-}
-
-// JSON's `Spelling.number_f32`. Hex past `u64` has rounded once into binary64, so it is read again from its digits.
-@(private)
-number_f32 :: proc(doc: ^core.Token_View, n: core.Node) -> (f32, bool) {
-	if number_spelling_of(n.spelling) != .Hex {
-		return 0, false
-	}
-	return spell.number_hex_f32(doc.src, n.lo, n.lo + u64(n.n))
-}
-
-// Decodes what `number` does not: long decimals, hex, `Infinity` and `NaN`.
-@(private, cold)
-number_slow :: #force_no_inline proc(doc: ^core.Token_View, n: core.Node) -> core.Number {
-	lo, hi := n.lo, n.lo + u64(n.n)
-	switch number_spelling_of(n.spelling) {
-	case .Json, .Decimal:
-		// JSON5's `5.` has no fraction digit, so it is the integer `5`.
-		num, _, _ := spell.number_loose(doc.src, lo, hi - u64(doc.src[hi - 1] == '.'))
-		return num
-	case .Hex:
-		return spell.number_hex(doc.src, lo, hi)
-	case .Infinity:
-		// JSON5's `Infinity`, signed by a `-` before it, and its `NaN`, a quiet one with a zero sign.
-		return {0x7ff0_0000_0000_0000 | u64(lo < hi && doc.src[lo] == '-') << 63, .Float}
-	case .Nan:
-		return {0x7ff8_0000_0000_0000, .Float}
-	}
-	return {0, .Wide}
 }

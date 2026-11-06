@@ -400,3 +400,29 @@ walk_defaults :: proc(t: ^testing.T) {
 		testing.expect_value(t, bare.tokens[i], tok)
 	}
 }
+
+// Stops the walk on the key numbered `target`, counting from 0.
+Key_Stopper :: struct {
+	target, keys: int,
+}
+
+stop_on_key :: proc "contextless" (h: ^Key_Stopper, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if t.role == .Key {
+		h.keys += 1
+		if h.keys > h.target {
+			return s, .Stop
+		}
+	}
+	return s, .Next
+}
+
+// A stop on a member's key ends the walk one past the key, closing quote included.
+@(test)
+key_stop_ends_past_key :: proc(t: ^testing.T) {
+	src := transmute([]u8)string(`{"a":1,"bc":2}`)
+	for want, key in ([]u64{4, 11}) {
+		stopper := Key_Stopper{target = key}
+		hi, fault := json.walk(src, 0, .Json, {}, &stopper, &core.Hook_Regs{}, stop_on_key)
+		testing.expectf(t, fault == nil && hi == want, "key %d: stop at %d %v, want %d", key, hi, fault, want)
+	}
+}

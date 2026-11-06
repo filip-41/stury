@@ -71,6 +71,31 @@ sparse_text_fits_small_arena :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(doc.nodes), 1)
 }
 
+// An arena that fits a build fits it at every larger size. A size that holds the first reservation but not a fact's
+// growth frees that reservation's room for the retry sized by a count.
+@(test)
+arena_fit_is_monotonic :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("{\"a\":1 // c\n,\"a\":1 // c\n,\"a\":1 // c\n}")
+	backing := make([]u8, 4096, context.allocator)
+	defer delete(backing)
+	fit := 0
+	for size := 16; size <= len(backing); size += 16 {
+		arena: mem.Arena
+		mem.arena_init(&arena, backing[:size])
+		doc, err := json.build(src, .Jsonc, {}, true, mem.arena_allocator(&arena))
+		core.destroy(&doc)
+		if err.kind == .No_Memory {
+			testing.expectf(t, fit == 0, "No_Memory in %d bytes after a fit in %d", size, fit)
+			continue
+		}
+		testing.expectf(t, err.kind == .Duplicate_Key && err.at == 13, "%d bytes: %v at %d", size, err.kind, err.at)
+		if fit == 0 {
+			fit = size
+		}
+	}
+	testing.expect(t, fit > 0)
+}
+
 // A `.Duplicate_Key` found before an allocation that then fails stays the error: `.No_Memory` names no byte and does
 // not replace it.
 @(test)

@@ -439,11 +439,11 @@ read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) ->
 	case .I8 ..= .F64:
 		text := inner_text(h, t)
 		lo := u64(uintptr(raw_data(text)) - uintptr(h.r.base))
-		n, integer, ok := spell.number_loose(h.r.src, lo, lo + u64(len(text)))
-		if !ok || !integer && fld.kind <= .U64 {
+		n, integer, _, ok := spell.number_loose(h.r.src, lo, lo + u64(len(text)))
+		if !ok {
 			return .Wrong_Kind
 		}
-		return typed.store_number(n, &h.r, core.Token{lo = lo, n = u32(len(text))}, fld, dest)
+		return typed.store_number(n, integer, &h.r, core.Token{lo = lo, n = u32(len(text))}, fld, dest)
 	case .Enum:
 		if h.r.plan.enums != .Int {
 			return typed.store_enum(&h.r, cell, m.enum_info, dest, m.size)
@@ -452,7 +452,7 @@ read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) ->
 		if !ok {
 			return .Out_Of_Memory
 		}
-		n, integer, is_number := spell.number_loose(transmute([]u8)text, 0, u64(len(text)))
+		n, integer, _, is_number := spell.number_loose(transmute([]u8)text, 0, u64(len(text)))
 		if !is_number || !integer {
 			return .Wrong_Kind
 		}

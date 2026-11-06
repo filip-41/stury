@@ -2,6 +2,7 @@ package json
 
 import "base:intrinsics"
 import "core:simd"
+import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
 import write "../core/write"
@@ -273,7 +274,7 @@ escape_block :: #force_inline proc "contextless" (base: [^]u8, o: int, v: V) -> 
 // block read, `bad` the faults so far and `high` whether `prev` ended after a byte past 0x7F. It stops before `end`, at
 // the first block with a stop, and returns the source offset and the offset in `base`.
 @(private)
-wide_run :: #force_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool) -> (int, int) #no_bounds_check {
+wide_run :: #force_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool) -> (int, int) {
 	i, o := i, o
 	for ; i + 64 <= end; i += 64 {
 		b := kernel.load(src[i:])
@@ -444,7 +445,7 @@ put_escaped :: #force_no_inline proc(out: ^write.Out, s: string, $ASCII, $HTML, 
 				i += 1
 				continue
 			}
-			q, kind := kernel.utf8_char(src[i:], src[n:])
+			q, kind := spell.utf8_char(src[i:], src[n:])
 			if kind != .None {
 				return .Bad_Utf8
 			}

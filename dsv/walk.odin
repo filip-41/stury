@@ -34,24 +34,12 @@ Options :: struct {
 	// A line whose first byte is this is no record, 0 for none. At any other byte, or inside a quoted field, it is
 	// cell text. A byte the spec cannot read is refused as `.Bad_Option`, like the delimiter.
 	comment:   byte,
-	// The rules a text may break. Empty by default.
-	tolerate:  bit_set[Tolerance; u8],
+	// The rules a text may break, each with a fixed reading. Empty by default.
+	tolerate:  bit_set[core.Tolerance; u8],
 	crlf:      bool, // a write ends each record with CR LF, where a read takes either
 	// A document's unquoted cell that is empty, `true`, `false` or exactly a JSON number resolves as Null, True, False or
 	// Number, as `core.resolve` and a JSON write read it. Off, every value cell is a String.
 	infer:     bool,
-}
-
-// A rule a caller lets a text break. The walk stops faulting on it. The tolerance shows in the value a cell decodes to
-// or in the record width check.
-Tolerance :: enum u8 {
-	// Ill-formed UTF-8 in a cell is not a fault. Each maximal subpart of an ill-formed sequence decodes as U+FFFD.
-	Invalid_Utf8,
-	// A record of any width is not a fault. A narrower record's missing columns are absent. With a header, a wider
-	// record's cells past the header's last are columns named by their 1-based position, `"3"` for the third.
-	Ragged,
-	// A quote inside an unquoted cell (CSV) is a cell byte, and the block's quotes pair up without it.
-	Bare_Quote,
 }
 
 // The `core.Fault.detail` values a delimited text's faults use.
@@ -134,7 +122,7 @@ walk_keys :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}
 		err: runtime.Allocator_Error
 		key_buf, err = make([]core.Token, header_cells(src, int(core.text_start(src, from)), S, opts))
 		if err != nil {
-			return 0, core.fault_of(core.fault_at(0, .No_Memory), &RULES)
+			return 0, core.Fault{rules = &RULES, kind = .No_Memory}
 		}
 		owned = key_buf
 	}
@@ -143,7 +131,8 @@ walk_keys :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}
 		context = runtime.default_context()
 		delete(owned)
 	}
-	return r >> 16, core.fault_of(r, &RULES)
+	hi, fault, _ = core.result_of(r, &RULES)
+	return
 }
 
 // The walk's verdict on `src` for spec `S`, with no hook and after one leading BOM. Whether the first record is a
@@ -168,7 +157,8 @@ validate_spec :: proc "contextless" (src: []u8, $S: Spec, opts: Options, lo: u64
 	if f, bad := option_fault(S, opts).?; bad {
 		return f
 	}
-	return core.fault_of(judge(src, lo, S, opts, width), &RULES)
+	_, fault, _ := core.result_of(judge(src, lo, S, opts, width), &RULES)
+	return fault
 }
 
 // The walk's verdict on the text from `lo`, with no hook, checking records against `width` when it is above 0. A cell can exceed `Token.n` only in a text longer than
@@ -193,12 +183,12 @@ judge :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, width 
 // checked rows against, and 0 reads it from the first record. `.Ragged` has no width fault to place.
 @(private, cold)
 field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, r: u64, width := 0) -> u64 {
-	kind := core.Fault_Kind(r & 0xff)
-	if kind == .None || .Ragged in opts.tolerate {
+	_, fault, _ := core.result_of(r, &RULES)
+	f, faulted := fault.?
+	if !faulted || .Ragged in opts.tolerate {
 		return r
 	}
-	at, detail := r >> 16, u8(r >> 8)
-	width_fault := detail == u8(Detail.Too_Many) || detail == u8(Detail.Too_Few)
+	width_fault := f.detail == u8(Detail.Too_Many) || f.detail == u8(Detail.Too_Few)
 	end := len(src)
 	pos := record_start(src, int(core.text_start(src, min(lo, u64(end)))), opts.comment)
 	if pos >= end {
@@ -210,13 +200,13 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 		width = header_cells(src, pos, S, opts) if !opts.no_header else scan_record(src, pos, 0, S, delim).cells
 	}
 	for pos < end {
-		if at < u64(pos) {
+		if f.at < u64(pos) {
 			return r
 		}
 		s := scan_record(src, pos, width, S, delim)
-		if at <= u64(s.line_end) {
+		if f.at <= u64(s.line_end) {
 			if s.fault_at >= 0 {
-				if width_fault || u64(s.fault_at) < at {
+				if width_fault || u64(s.fault_at) < f.at {
 					return core.fault_at(u64(s.fault_at), .Bad_Char, u8(Detail.Too_Many))
 				}
 			} else if width_fault && s.cells < width {
@@ -255,9 +245,8 @@ run_tier :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts
 		case .V3:
 			return pass_v3(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, DEFAULT, keys, width)
 		case .V2:
-			return pass_v2(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, DEFAULT, keys, width)
 		}
-		unreachable()
+		return pass_v2(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, DEFAULT, keys, width)
 	} else {
 		return pass_base(src, lo, S, opts, h, regs, on, EMIT, COMMENTS, DEFAULT, keys, width)
 	}

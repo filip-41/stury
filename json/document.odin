@@ -124,7 +124,7 @@ build_reserved :: proc(src: []u8, q: [^]u8, $S: Spec, opts: Options, refuse_dupl
 	}
 	// A text with no value is no document. A stream may hold one, a built document does not.
 	if fault == nil && regs.a == 0 {
-		fault = core.fault_of(core.fault_at(u64(len(src)), .Truncated), &RULES)
+		fault = core.Fault{at = u64(len(src)), rules = &RULES, kind = .Truncated}
 	}
 	return build.builder_end(&b, regs, fault)
 }
@@ -151,10 +151,8 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 		if m.kind == .Array || m.kind == .Map {
 			// The last node of a subtree is a scalar or an empty container, whose close is its open plus one.
 			p = m.lo + 1
-		} else if m.kind == .String && m.spelling & core.SPELLING_QUOTED != 0 {
-			p = m.lo + u64(m.n) + 1
 		} else {
-			p = m.lo + u64(m.n)
+			_, p = core.scalar_ends(m)
 		}
 	}
 	// Every container whose subtree ends here is on the rightmost spine, and its close is the next one to skip.
@@ -203,13 +201,14 @@ close_by_walk :: proc(doc: ^core.Document, lo: u64, spec: Spec) -> u64 {
 }
 
 // Returns the first byte at or past `p` that is no whitespace, comment or trailing comma, where a container's span
-// ends. `comment_run` reads the bytes as spec `spec`, the spec the document was built as, since a JSON5 `//` comment
-// ends at U+2028 and U+2029 and a JSONC one does not. The walk already judged these bytes, so the fault is ignored.
+// ends. JSON has neither a comment nor a trailing comma. `comment_run` reads the bytes as spec `spec`, the spec the
+// document was built as, since a JSON5 `//` comment ends at U+2028 and U+2029 and a JSONC one does not. The walk
+// already judged these bytes, so the fault is ignored.
 @(private)
 skip_to_close :: proc(src: []u8, p: u64, spec: Spec) -> u64 {
 	q: [^]u8
 	switch spec {
-	case .Json:  q, _, _ = comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, .Json)
+	case .Json:  q = skip_ws(raw_data(src)[p:], raw_data(src)[len(src):])
 	case .Jsonc: q, _, _ = comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, .Jsonc)
 	case .Json5: q, _, _ = comment_run(raw_data(src)[p:], raw_data(src)[len(src):], true, .Json5)
 	case:        return p

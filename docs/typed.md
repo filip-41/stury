@@ -61,7 +61,7 @@ Plan_Options :: struct {
 }
 ```
 
-`plan_make` refuses a type it cannot read, with the path to it: `.Unsupported`, `.Ambiguous_Union` or `.Bad_Tag`. The
+`plan_make` refuses a type it cannot read, with the path of member names to it: `.Unsupported`, `.Ambiguous_Union` or `.Bad_Tag`. The
 strings and slices of `opts` are read during the call only.
 
 ## Fields and tags
@@ -79,7 +79,7 @@ Item :: struct {
 - The value is `name,flag,flag`. `-` leaves the field out. An empty name keeps the field's own, renamed by
   `Plan_Options.rename`. In the name a backslash makes the next byte literal, so a comma is `\,` and a backslash `\\`.
 - `omitempty` is a writer's flag, see `docs/writer.md`, and a read accepts it and does nothing with it. `required` makes an absent member `.Missing_Field`, and with `omitempty` on the same member the plan is `.Unsupported`, since the write would leave out what the read then finds missing. `unknown` on a
-  `map[string]Raw` field captures every member the type does not name. Any other flag is `.Bad_Tag`.
+  `map[string]Raw` field captures every member the type does not name, and `required` on it is `.Bad_Tag`, as is any other flag.
 - An absent member keeps what the target holds. That is how defaults work: fill the target, then read.
 - `Read_Options.unknown` is `.Ignore` or `.Refuse`, which makes a member the type does not name `.Unknown_Field`.
   Capture takes the member first.
@@ -90,7 +90,7 @@ Item :: struct {
 |---|---|
 | `bool`, `b8`..`b64` | a bool |
 | `i8`..`i64`, `u8`..`u64` | a number spelled as an integer, in range, else `.Out_Of_Range`. A fraction or exponent is `.Wrong_Kind` |
-| `f32`, `f64` | any number. Past the type's range is `.Out_Of_Range` |
+| `f32`, `f64` | any number, and JSON5's `Infinity` and `NaN` unless the walk refuses them with `refuse_non_finite`. A decimal past the type's range is `.Out_Of_Range` |
 | `string`, `cstring` | a string |
 | `Raw` | any value, as the format spells it |
 | `Number_Text` | a number's text |
@@ -108,12 +108,12 @@ Item :: struct {
 | a type in `Plan_Options.hooks` | any value, through the hook, so as a union's arm it takes every class and shares them with the other arms |
 
 Refused at the plan: `f16`, 128-bit integers, `rune` as a text, other-endian numbers, `#raw_union`, `#soa`, a list or
-fixed array whose element has no size, and the rest of Odin's kinds that hold no data a text spells.
+fixed array whose element has no size, a type of 4 GiB or more, and the rest of Odin's kinds that hold no data a text spells.
 
 - `null` is a value for `^T`, `Maybe`, `any`, `Raw`, `cstring` (nil), `Scalar`, a union with a nil, and a hook. Every
   other target refuses it as `.Wrong_Kind`, a struct, a list and a map included.
-- Two arms of a union may not take one class of value. Named struct arms share objects only under `union_tag`, whose
-  member the arms may not declare. An object with no tag member is `.Missing_Tag`, with two `.Repeated_Tag`, and a name
+- Two arms of a union may not take one class of value. Named struct arms share objects only under `union_tag`, and no
+  member of an arm may have its key, by tag, `rename` or a `using` member. An object with no tag member is `.Missing_Tag`, with two `.Repeated_Tag`, and a name
   no arm has `.Not_A_Member`.
 - A repeated member follows `Read_Options.dups`: `.Last` when nil, `.First`, or `.Refuse` through `refuse_duplicates`.
   `.First` still judges the later value against the type, and keeps the first of a repeated unknown member a `unknown`

@@ -25,7 +25,7 @@ Event_Frame :: struct {
 	it:    core_pkg.Child_Iter,
 	array: bool,
 	index: int, // the step of the member read last: an array's index,
-	key:   string, // or an object's key
+	key:   core_pkg.Node_Index, // or an object's key node, decoded by each event, as a decoded key lives in its call's allocator
 }
 
 // The events of `doc`, which the heap holds.
@@ -60,7 +60,7 @@ next_event :: proc(e: ^Events) -> (Value, bool) {
 		if f.array {
 			f.index += 1
 		} else {
-			f.key = node_string(doc, row - 1)
+			f.key = row - 1
 		}
 		if is_leaf(doc, row) {
 			e.last, e.closing = row, false
@@ -113,7 +113,12 @@ push_frame :: proc(e: ^Events, n: core_pkg.Node_Index) {
 event :: proc(e: ^Events, leaf: core_pkg.Node_Index) -> Value {
 	path := new_array(len(e.frames))
 	for f in e.frames {
-		append(&path.items, num(f64(f.index)) if f.array else Value(strings.clone(f.key)))
+		if f.array {
+			append(&path.items, num(f64(f.index)))
+		} else {
+			key, _ := core_pkg.text_clone(&e.doc, f.key)
+			append(&path.items, key)
+		}
 	}
 	if leaf == core_pkg.NO_NODE {
 		return event_of(path)

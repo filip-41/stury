@@ -51,7 +51,7 @@ Dense_State :: struct {
 dense_route :: #force_inline proc "contextless" (doc: ^core.Document, opts: core.Write_Options, src: []u8, nodes: int) -> bool {
 	return !opts.pretty && copies_strings(opts) &&
 		len(src) < DENSE_BYTES_PER_NODE * nodes &&
-		Spec(doc.as.spec) == .Json && doc.as.tolerate == 0 && doc.spelling == &SPELLING &&
+		Spec(doc.as.spec) == .Json && doc.as.tolerate == {} && doc.spelling == &SPELLING &&
 		(len(src) < DENSE_BYTES_PER_NODE_BLANK * nodes || dense_sample(src))
 }
 
@@ -79,7 +79,7 @@ dense_sample :: proc "contextless" (src: []u8) -> bool {
 // with no space drops every byte below 0x21, since only a space can be inside a string, and so its string state is
 // owed to whoever runs the next block with a space.
 @(private)
-dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $MODE: Dense_Mode) -> (w, i: int) #no_bounds_check {
+dense_run :: #force_inline proc "contextless" ($T: kernel.Tier, out: [^]u8, src: []u8, lo, hi: int, s: ^Dense_State, $MODE: Dense_Mode) -> (w, i: int) {
 	in_string, odd, escapes := s.in_string, s.odd, u64(0)
 	for i = lo; i < hi; i += 64 {
 		b := kernel.load(raw_data(src)[i:]) if hi - i >= 64 else kernel.load_padded(T, src, i)

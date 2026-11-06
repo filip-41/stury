@@ -5,7 +5,6 @@ package dsv
 import "base:intrinsics"
 import "base:runtime"
 import "core:bytes"
-import "core:unicode/utf8"
 import spell "../core/spell"
 import core "../core"
 import compose "../core/compose"
@@ -174,10 +173,12 @@ build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bo
 	}
 	regs := build.BUILDER_REGS
 	// The header row is written before the walk, so the root's token steps over it and the walk's `Key` tokens name its
-	// cells. A text with no row leaves the root's next node zeroed for the hook's test.
+	// cells. A text with no row leaves the root's next node zeroed for the hook's test. The row is `shared_keys` before
+	// the walk, since `builder_end` recounts the members of a wide record through the readers, which read it.
 	count := len(keys)
 	if count > 0 {
 		b.doc.nodes[1] = core.Node{lo = u64(start), kind = .Array, role = .Key}
+		b.doc.shared_keys = 1
 		build.builder_close_node(&b, count + 2, 1, u32(count))
 	} else {
 		b.doc.nodes[1] = {}
@@ -209,15 +210,7 @@ build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bo
 			build.builder_refuse_result(&b, core.Node_Index(1), core.Node_Index(count + 2))
 		}
 	}
-	doc, err := build.builder_end(&b, regs, fault)
-	if err.kind != .None {
-		return doc, err
-	}
-	// The header row is the root's first child, an `Array` of role `Key`. A text without one has no such node.
-	if i := int(core.ROOT) + 1; i < len(doc.nodes) && doc.nodes[i].kind == .Array && doc.nodes[i].role == .Key {
-		doc.shared_keys = core.Node_Index(i)
-	}
-	return doc, err
+	return build.builder_end(&b, regs, fault)
 }
 
 // Returns quoted CSV cell `n`'s span without its quote pair. The walk gives a quoted cell only once it closes it.
@@ -228,7 +221,8 @@ inner_span :: #force_inline proc "contextless" (n: core.Node) -> (lo, hi: u64) {
 
 // Decodes one cell. A CSV cell's inner bytes have each `""` read as `"`, or a TSV cell's bytes have each accepted
 // escape read as the byte it spells. A byte past 0x7F reads as one UTF-8 character, or U+FFFD over its maximal subpart
-// when it is ill-formed. `pending` holds the rest of a character read in parts.
+// when it is ill-formed. `pending` holds the rest of a character read in parts. The walk accepted the cell, so a TSV
+// backslash has its letter.
 @(private)
 Dsv_Decoded :: struct {
 	src:     []u8,
@@ -260,10 +254,6 @@ dsv_decoded_next :: proc "contextless" (d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
 	}
 	c := d.src[d.p]
 	if d.tsv && c == '\\' {
-		if d.p + 1 >= d.end {
-			d.p = d.end
-			return '\\', true
-		}
 		e := d.src[d.p + 1]
 		d.p += 2
 		for k in 0 ..< len(TSV_LETTERS) {
@@ -282,33 +272,41 @@ dsv_decoded_next :: proc "contextless" (d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
 		return c, true
 	}
 	base := raw_data(d.src)
-	spelled, n, q := kernel.utf8_lax_char(base[d.p:], base[d.end:])
+	spelled, n, q := spell.utf8_lax_char(base[d.p:], base[d.end:])
 	d.p = u64(intrinsics.ptr_sub(q, base))
 	return spell.pending_give(&d.pending, spelled, n), true
 }
 
-// Whether a quoted cell's inner span is its text: it holds no `""` and its bytes are well-formed UTF-8. A cell holding
-// `""` decodes to fewer bytes, and one under `lax` may hold an ill-formed sequence that decodes as U+FFFD. The walk
-// accepted the cell, so a quote in its inner span is the first of a `""` pair, and only a `lax` cell can hold an
-// ill-formed sequence.
+// Whether a quoted cell's inner span is its text: it holds no `""` and no ill-formed sequence. A cell holding `""`
+// decodes to fewer bytes, and one marked `SPELLING_LAX` holds an ill-formed sequence that decodes as U+FFFD. The walk
+// accepted the cell, so a quote in its inner span is the first of a `""` pair.
 @(private)
 plain_quoted :: proc "contextless" (src: []u8, n: core.Node) -> bool {
 	lo, hi := inner_span(n)
-	return kernel.index_byte(src[lo:hi], '"') < 0 && (n.spelling & core.SPELLING_LAX == 0 || utf8.valid_string(string(src[lo:hi])))
+	return n.spelling & core.SPELLING_LAX == 0 && kernel.index_byte(src[lo:hi], '"') < 0
+}
+
+// The bytes of cell `n` of `src` that are its text, for a cell that needs no decode: a quoted CSV cell without `""` and
+// with well-formed UTF-8 is its inner span, and another cell its span. False for a cell that must be decoded.
+@(private)
+written_text :: #force_inline proc "contextless" (src: []u8, n: core.Node, spec: Spec) -> (text: []u8, ok: bool) {
+	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(src, n) {
+		lo, hi := inner_span(n)
+		return src[lo:hi], true
+	}
+	if n.spelling & core.SPELLING_DECODE == 0 {
+		return src[n.lo:n.lo + u64(n.n)], true
+	}
+	return nil, false
 }
 
 // The text of cell `n` of `src`, a text of spec `spec`, and dsv's `Spelling.text`. It returns a cell that needs no
-// decode as a slice of the source: a quoted CSV cell without `""` and with well-formed UTF-8 as its inner span, and
-// another cell as its span. It decodes a quoted cell holding `""`, a TSV escape and a `lax` cell into `buf`, and returns
+// decode as a slice of the source. It decodes a quoted cell holding `""`, a TSV escape and a `lax` cell into `buf`, and returns
 // false when `buf` is too short.
 @(private)
 cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string, ok: bool) {
-	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(src, n) {
-		lo, hi := inner_span(n)
-		return string(src[lo:hi]), true
-	}
-	if n.spelling & core.SPELLING_DECODE == 0 {
-		return string(src[n.lo:n.lo + u64(n.n)]), true
+	if text, written := written_text(src, n, spec); written {
+		return string(text), true
 	}
 	if n.spelling & SPELLING_COLUMN != 0 {
 		text: [spell.INT_ROOM]u8
@@ -316,8 +314,8 @@ cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string,
 		return string(buf[:copy(buf, name)]), len(buf) >= len(name)
 	}
 	// A cell carries `SPELLING_DECODE` when its span must be decoded. That is a quoted CSV cell holding `""`, a TSV
-	// cell with a backslash, which the pass's block mask answers, and any cell under `lax`, where a tolerated ill-formed
-	// sequence reads as U+FFFD.
+	// cell with a backslash, which the pass's block mask answers, and a cell holding an ill-formed sequence
+	// `.Invalid_Utf8` tolerated, which reads as U+FFFD.
 	return spell.decode_text(buf, dsv_decoded_init(src, n, spec), dsv_decoded_next)
 }
 
@@ -327,12 +325,8 @@ cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string,
 @(private)
 spelling_key_equals :: proc "contextless" (doc: ^core.Token_View, n: core.Node, name: string) -> bool {
 	spec := Spec(doc.spec)
-	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(doc.src, n) {
-		lo, hi := inner_span(n)
-		return spell.bytes_equal(doc.src[lo:hi], transmute([]u8)name)
-	}
-	if n.spelling & core.SPELLING_DECODE == 0 {
-		return spell.bytes_equal(doc.src[n.lo:n.lo + u64(n.n)], transmute([]u8)name)
+	if text, written := written_text(doc.src, n, spec); written {
+		return spell.bytes_equal(text, transmute([]u8)name)
 	}
 	if n.spelling & SPELLING_COLUMN != 0 {
 		text: [spell.INT_ROOM]u8
@@ -351,8 +345,7 @@ spelling_number :: proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bo
 	if n.role != .Value {
 		return {}, false
 	}
-	s := doc.src[n.lo:n.lo + u64(n.n)]
-	return spell.number_strict(s, 0, u64(len(s)))
+	return spell.number_strict(doc.src, n.lo, n.lo + u64(n.n))
 }
 
 // dsv's `Spelling.resolve`. It returns `.String` by default. With the document's `infer`, an empty value cell is `.Null`, a `true`
@@ -368,8 +361,8 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	if n.role != .Value || !options_of(doc.as).infer {
 		return .String
 	}
-	s := doc.src[n.lo:n.lo + u64(n.n)]
-	switch string(s) {
+	lo, hi := n.lo, n.lo + u64(n.n)
+	switch string(doc.src[lo:hi]) {
 	case "":
 		return .Null
 	case "true":
@@ -377,7 +370,7 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	case "false":
 		return .False
 	}
-	if _, is_number := spell.number_strict(s, 0, u64(len(s))); is_number {
+	if _, is_number := spell.number_strict(doc.src, lo, hi); is_number {
 		return .Number
 	}
 	return .String
@@ -572,15 +565,19 @@ edit_record_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allo
 	return 0, {kind = .Bad_Value}
 }
 
-// The byte just past record `i`'s line end, CR LF included. A record at the text's end stops past its last cell. The
-// root ends at `len(doc.src)`. Only a container span read calls it.
+// The byte just past record `i`'s line end, CR LF included. A record at the text's end stops past its last cell. A
+// header row `.Ragged` widened stops past its last named cell, since a key named by position has no bytes. The root
+// ends at `len(doc.src)`. Only a container span read calls it.
 @(private, cold)
 record_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 	n := doc.nodes[i]
 	p := n.lo
 	if n.n > 1 {
-		last := doc.nodes[int(i) + int(n.n) - 1]
-		p = last.lo + u64(last.n)
+		at := int(i) + int(n.n) - 1
+		for doc.nodes[at].spelling & SPELLING_COLUMN != 0 {
+			at -= 1
+		}
+		p = doc.nodes[at].lo + u64(doc.nodes[at].n)
 	}
 	if p < u64(len(doc.src)) && doc.src[p] == '\r' {
 		p += 1

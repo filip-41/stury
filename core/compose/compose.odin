@@ -142,7 +142,7 @@ add_items :: proc(cx: ^Compose, node: core.Node_Index, lo, hi: u64) -> bool {
 			continue
 		}
 		action, edit := fact_action(cx, f)
-		push(&cx.items, Item{lo = f.lo, hi = f.lo + u64(f.n), edit = edit, action = action, role = f.role, line = f.spelling >> 8 == 0}) or_return
+		push(&cx.items, Item{lo = f.lo, hi = f.lo + u64(f.n), edit = edit, action = action, role = f.role, line = core.comment_tail(f.spelling) == 0}) or_return
 	}
 	return true
 }

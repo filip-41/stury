@@ -75,13 +75,12 @@ read_json :: proc(src: string, r: core_pkg.As) -> (Value, string) {
 	return nil, message.build("%s (while parsing '%s')", msg, shown)
 }
 
-// The library's fault `f` in `src` as jq tells a parse error: its message (`what`, where jq words it its own way, and
-// `at EOF` when the text ended), then the line and 1-based column where jq's parser stands having read that byte,
-// counting on from `line` and `column` (the bytes of its line before `src`): the byte the fault is at, or, at the end
-// of the text, that last byte itself. A faulty newline is told at its own line and column, where jq's parser stands on
-// the next line's column 0. A text ends at `text_end` in `src` (default: all of it), `src` may run on past it by the
-// newline that ends its line.
-parse_message :: proc(src: []byte, f: core_pkg.Fault, line := 1, column := 0, what := "", text_end := -1) -> string {
+// The library's fault `f` in `src` as jq tells a parse error: its message, `at EOF` when the text ended, then the line
+// and 1-based column where jq's parser stands having read that byte, counting on from `line` and `column` (the bytes of
+// its line before `src`): the byte the fault is at, or, at the end of the text, that last byte itself. A faulty newline
+// is told at its own line and column, where jq's parser stands on the next line's column 0. A text ends at `text_end`
+// in `src` (default: all of it), `src` may run on past it by the newline that ends its line.
+parse_message :: proc(src: []byte, f: core_pkg.Fault, line := 1, column := 0, text_end := -1) -> string {
 	at := min(int(f.at), len(src))
 	eof := at >= (len(src) if text_end < 0 else text_end)
 	l, c := line, column
@@ -89,7 +88,7 @@ parse_message :: proc(src: []byte, f: core_pkg.Fault, line := 1, column := 0, wh
 	if !eof {
 		c += 1
 	}
-	return message.build("%s%s at line %d, column %d", what if what != "" else fault_sentence(f, string(src[at:])), " at EOF" if eof else "", l, c)
+	return message.build("%s%s at line %d, column %d", fault_sentence(f, string(src[at:])), " at EOF" if eof else "", l, c)
 }
 
 // The library's sentence for `f`, but jq's for a text cut short (`rest`, the bytes from the fault, may be only space
