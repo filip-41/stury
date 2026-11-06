@@ -172,11 +172,13 @@ Document :: struct {
 
 // A number token's `spelling`. Kinds are even, so bit 0 (`SPELLING_DECODE`) is clear.
 //
-//	bits 0 to 3   the format's number kind, 0 for its plain decimal
+//	bits 0 to 3   the format's number kind: 0 for its plain decimal, `NUMBER_DECIMAL` for a decimal it writes with a
+//	              sign or a point of its own, and above that a number whose text is not a decimal
 //	bits 4 to 8   the integer digit count (saturated at 31)
 //	bits 9 to 13  the fraction digit count (saturated at 31, 0 for no fraction)
 //	bit 14        `NUMBER_EXP`
 NUMBER_KIND_MASK :: u16(0xF)
+NUMBER_DECIMAL :: u16(2)
 NUMBER_INT_SHIFT :: 4
 NUMBER_FRAC_SHIFT :: 9
 NUMBER_FRAC_MAX :: 31

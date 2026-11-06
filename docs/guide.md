@@ -28,7 +28,7 @@ directory describe one part each: [document.md](document.md), [paths.md](paths.m
 A format is a `Spec` value passed to each call. `json.Spec` is `.Json`, `.Jsonc` or `.Json5`, and `dsv.Spec` is `.Csv`,
 `.Tsv` or `.Plain`. `.Json` is strict RFC 8259. `.Jsonc` also takes comments and trailing commas, and `.Json5` takes the
 JSON5 grammar. A call that takes both a `Spec` and `Options` reads `Options` for the format's own settings, which for
-JSON are `max_depth` and `tolerate`, and for dsv `no_header`, `delimiter`, `comment`, `tolerate`, `crlf` and `infer`.
+JSON are `max_depth`, `tolerate` and `refuse_non_finite`, and for dsv `no_header`, `delimiter`, `comment`, `tolerate`, `crlf` and `infer`.
 
 ## Errors
 
@@ -348,7 +348,8 @@ from its span. A number is judged when the text is validated, and converted only
 `.Json` is RFC 8259 with nothing extra: no leading zero, no `NaN`, no invalid UTF-8 and no lone surrogate. `.Jsonc`
 and `.Json5` accept their own additions and nothing else. `json.Options.tolerate` lets a text break a named rule with a
 fixed reading: `Invalid_Utf8` reads each ill-formed sequence as U+FFFD, and `Lone_Surrogate` does the same for an
-unpaired `\u` escape. A tolerated text is never reported as valid under strict rules.
+unpaired `\u` escape. A tolerated text is never reported as valid under strict rules. `json.Options.refuse_non_finite`
+refuses JSON5's `Infinity` and `NaN`, for a reader that has no value for them.
 
 ## Examples
 

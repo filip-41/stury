@@ -49,6 +49,9 @@ st_number5 :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w
 	if kind != .None {
 		return fault(w, hs, q, kind)
 	}
+	if w.finite && number_spelling_of(spelling) >= .Infinity {
+		return fault(w, hs, p, .Bad_Char, .Non_Finite)
+	}
 	if too_wide(p, q) {
 		return fault(w, hs, p, .Too_Wide)
 	}

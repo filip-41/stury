@@ -94,7 +94,7 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
 - `as: core.As` is the handle the text was read with, in 24 bytes: the `spelling`, the `spec` in one byte, so an edit
   service can dispatch on it when a procedure pointer carries no compile-time spec, the `tolerate` set, `max_depth`, and
   ten format bytes core passes along unread, which dsv uses for its delimiter, comment byte, `no_header`, `crlf` and
-  `infer`. `max_depth` is `Options.max_depth`, 0 for the default: JSON's edit services read a recorded value at that
+  `infer`, and JSON for `refuse_non_finite`. `max_depth` is `Options.max_depth`, 0 for the default: JSON's edit services read a recorded value at that
   depth, and a delimited text has no depth option and leaves it 0. `json.as` and `dsv.as` make a handle.
 - A path read fills `answers`, and for a partial document `kept`, `missing`, `partial` and `stopped`, all in `paths.md`.
   `answers`, `kept` and `missing` share `reads_block`, which `destroy` frees.

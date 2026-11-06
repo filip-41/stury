@@ -457,7 +457,8 @@ number_slow :: #force_no_inline proc(doc: ^core.Token_View, n: core.Node) -> cor
 	lo, hi := n.lo, n.lo + u64(n.n)
 	switch number_spelling_of(n.spelling) {
 	case .Json, .Decimal:
-		num, _, _ := spell.number_loose(doc.src, lo, hi)
+		// JSON5's `5.` has no fraction digit, so it is the integer `5`.
+		num, _, _ := spell.number_loose(doc.src, lo, hi - u64(doc.src[hi - 1] == '.'))
 		return num
 	case .Hex:
 		return spell.number_hex(doc.src, lo, hi)

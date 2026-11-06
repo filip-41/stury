@@ -29,16 +29,8 @@ build_text :: proc(src: []byte, r: core_pkg.As, allocator := context.allocator) 
 	return judge_build(core_pkg.build(src, r, allocator = allocator))
 }
 
-// A build's document `doc`, or the fault its error `err` tells. A JSON5 `Infinity` or `NaN` is refused as
-// `Non_Finite`, since jq has no value for it, at its offset in `doc.src` plus `at`.
-judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Document_Error, at: u64 = 0) -> (core_pkg.Document, Maybe(core_pkg.Fault)) {
-	doc := doc
-	if json.Spec(doc.as.spec) == .Json5 && err.kind == .None {
-		if bad, found := non_finite_at(&doc); found {
-			core_pkg.destroy(&doc)
-			return {}, core_pkg.Fault{at = at + bad, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Non_Finite)}
-		}
-	}
+// A build's document `doc`, or the fault its error `err` tells.
+judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Document_Error) -> (core_pkg.Document, Maybe(core_pkg.Fault)) {
 	switch err.kind {
 	case .None:
 		return doc, nil
@@ -47,20 +39,6 @@ judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Document_Error, at: u6
 	case .Duplicate_Key, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Fact, .Bad_Width, .Bad_Spec, .Conflicting_Edits, .Bad_Result:
 	}
 	return {}, core_pkg.Fault{kind = .No_Memory}
-}
-
-// The offset of the first number of `doc` that is not finite and no JSON literal (JSON5's `Infinity` and `NaN`).
-@(private = "file")
-non_finite_at :: proc(doc: ^core_pkg.Document) -> (at: u64, found: bool) {
-	for n, i in doc.nodes {
-		if n.kind == .Number && n.role == .Value {
-			f := node_number(doc, core_pkg.Node_Index(i))
-			if f.lit == "" && f.f - f.f != 0 {
-				return n.lo, true
-			}
-		}
-	}
-	return
 }
 
 // `src` as one JSON text, or the fault that it is not one.

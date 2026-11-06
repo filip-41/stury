@@ -604,7 +604,7 @@ build_next :: proc(it: ^records.Reader, b: ^build.Builder, regs: ^core.Hook_Regs
 // The walk options a handle holds.
 @(private)
 options_of :: #force_inline proc "contextless" (as: core.As) -> Options {
-	return {max_depth = as.max_depth, tolerate = transmute(bit_set[Tolerance; u8])as.tolerate}
+	return {max_depth = as.max_depth, tolerate = transmute(bit_set[Tolerance; u8])as.tolerate, refuse_non_finite = as.opts[0] != 0}
 }
 
 // Walks the record `src[lo:cut]` of a `.Lines` or `.Seq` text in place in `src`. Returns the fault that a walk of the record's

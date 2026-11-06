@@ -171,7 +171,7 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) {
 		// A record's document lives until the next record is read.
 		free_all(context.temp_allocator)
 		built, err := records.build(&it, rec, context.temp_allocator)
-		doc, fault := jq.judge_build(built, err, rec.at)
+		doc, fault := jq.judge_build(built, err)
 		if f, bad := fault.?; bad {
 			cells_cut(run, ins, cut)
 			fail_text(ins, f)

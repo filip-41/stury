@@ -340,7 +340,7 @@ store_decoded :: proc(h: ^Reader, t: core.Token, dest: ^Scalar) -> core.Typed_Er
 		}
 		dest^ = s
 	case .Number:
-		n := integer_number(h, t)
+		n := h.plan.spelling.number(&h.view, t)
 		switch n.kind {
 		case .Int:
 			// `-0` has no integer, and the float keeps its sign.
@@ -444,23 +444,10 @@ write_uint :: proc "contextless" (dest: uintptr, v: u64, size: u32) {
 	}
 }
 
-// A number read for an integer target. The kind `2` is a decimal the format writes with a sign or a point of its own,
-// so `+5` and `5.` read as `5`.
-@(private)
-integer_number :: proc(h: ^Reader, t: core.Token) -> core.Number {
-	if t.spelling & core.NUMBER_KIND_MASK == 2 && core.number_shape(t.spelling) < 32 {
-		hi := t.lo + u64(t.n)
-		if n, ok := spell.number_strict(h.src, t.lo + (1 if h.base[t.lo] == '+' else 0), hi - (1 if h.base[hi - 1] == '.' else 0)); ok {
-			return n
-		}
-	}
-	return h.plan.spelling.number(&h.view, t)
-}
-
 // An integer token as an i64.
 @(private)
 number_i64 :: proc(h: ^Reader, t: core.Token) -> (v: i64, reason: core.Typed_Error_Kind) {
-	n := integer_number(h, t)
+	n := h.plan.spelling.number(&h.view, t)
 	#partial switch n.kind {
 	case .Int:
 		return i64(n.bits), .None
@@ -564,7 +551,7 @@ store_number :: proc(n: core.Number, h: ^Reader, t: core.Token, fld: ^Field, des
 		return .Out_Of_Range
 	}
 	if fld.kind == .F32 {
-		v := f32(x if t.spelling & core.NUMBER_KIND_MASK > 2 else off_halfway(h.base[t.lo:][:t.n], x))
+		v := f32(x if t.spelling & core.NUMBER_KIND_MASK > core.NUMBER_DECIMAL else off_halfway(h.base[t.lo:][:t.n], x))
 		if abs(v) > max(f32) {
 			return .Out_Of_Range
 		}
@@ -592,7 +579,7 @@ spelled_number :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Ho
 	if fld.kind < .I8 || fld.kind > .F64 {
 		return indirect(h, regs, t)
 	}
-	n := integer_number(h, t) if fld.kind <= .U64 else h.plan.spelling.number(&h.view, t)
+	n := h.plan.spelling.number(&h.view, t)
 	if reason := store_number(n, h, t, fld, uintptr(regs.c) + uintptr(fld.offset)); reason != .None {
 		return refuse_value(h, regs, t, reason)
 	}

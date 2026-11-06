@@ -113,7 +113,7 @@ json5 :: proc(t: ^testing.T) {
 	}{
 		{.Int, 1},
 		{.Float, 0x3fe0000000000000},
-		{.Float, 0x4014000000000000},
+		{.Int, 5},
 		{.Float, 0x7ff0000000000000},
 		{.Float, 0xfff0000000000000},
 		{.Float, 0x7ff8000000000000},
