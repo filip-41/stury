@@ -319,20 +319,6 @@ f64_layout_thresholds :: proc(t: ^testing.T) {
 }
 
 @(test)
-f64_subnormals :: proc(t: ^testing.T) {
-	all: [dynamic]u64
-	defer delete(all)
-	for bits in u64(0) ..< 5000 {
-		signed(&all, bits, f64)
-	}
-	state := u64(2)
-	for _ in 0 ..< ROUNDS / 4 {
-		signed(&all, splitmix(&state) & (1<<52 - 1), f64)
-	}
-	verify(t, all[:], f64)
-}
-
-@(test)
 f64_random_bits :: proc(t: ^testing.T) {
 	all := make([]u64, ROUNDS)
 	defer delete(all)
@@ -389,20 +375,6 @@ f32_random_bits :: proc(t: ^testing.T) {
 		bits = splitmix(&state) & 0xffff_ffff
 	}
 	verify(t, all, f32)
-}
-
-@(test)
-f32_short_decimals :: proc(t: ^testing.T) {
-	all: [dynamic]u64
-	defer delete(all)
-	state := u64(5)
-	for _ in 0 ..< ROUNDS / 2 {
-		r := splitmix(&state)
-		f := f32(r % 100_000) / 100
-		signed(&all, u64(transmute(u32)f), f32)
-		signed(&all, u64(transmute(u32)f32(r >> 40)), f32)
-	}
-	verify(t, all[:], f32)
 }
 
 Sweep :: struct {

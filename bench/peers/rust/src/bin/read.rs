@@ -3,12 +3,12 @@
 //   read sonic dom FILE             sonic_rs::Value
 //   read sonic sonic_dom_read FILE  sonic_rs::Value, then a visit of every value
 //   read sonic sonic_key FILE       one .get of the first key in every object
-//   read sonic sonic_get FILE KEY   sonic_rs::get of one root key
+//   read sonic sonic_get FILE KEY [BATCH]   sonic_rs::get of one root key, BATCH calls to a sample
 use std::hint::black_box;
 
 #[path = "../timing.rs"]
 mod timing;
-use timing::{report, time_runs};
+use timing::{report, time_batches, time_runs};
 
 // The checksum every arm of a lane prints, so the runner can refuse a fixture whose arms disagree.
 const CHECK_OFFSET: u64 = 14695981039346656037;
@@ -278,9 +278,9 @@ fn key_job(data: &[u8]) -> Result<(), String> {
 }
 
 // One `sonic_rs::get` of `key`, which scans to the key and leaves the rest of the text unread.
-fn get_job(data: &[u8], key: &str) -> Result<(), String> {
+fn get_job(data: &[u8], key: &str, batch: usize) -> Result<(), String> {
     let path = [key];
-    let (ns, raw) = time_runs(|| {
+    let (ns, raw) = time_batches(batch, || {
         let found = sonic_rs::get_from_slice(data, path).ok().map(|v| v.as_raw_str().to_owned());
         black_box(&found);
         Ok(found)
@@ -301,7 +301,10 @@ fn run(args: &[String]) -> Result<(), String> {
         "dom" => dom(&data),
         "sonic_dom_read" => dom_read(&data),
         "sonic_key" => key_job(&data),
-        "sonic_get" => get_job(&data, args.get(4).ok_or("missing KEY")?),
+        "sonic_get" => {
+            let batch = args.get(5).map_or(Ok(1), |b| b.parse::<usize>()).map_err(|e| e.to_string())?;
+            get_job(&data, args.get(4).ok_or("missing KEY")?, batch)
+        }
         _ => Err(format!("unknown job {job}")),
     }
 }

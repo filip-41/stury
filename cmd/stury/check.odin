@@ -1,19 +1,19 @@
 package main
 
-// `stury check` judges each input as `stury .` reads it and prints nothing. The run ends at the first fault, told as
-// the filter run tells a JSONC text's, and an input with no text in it fails, as the library refuses an empty
-// document. --from ndjson and --seq judge each record as a text, and a long input is judged on the threads of a pool.
+// `stury check` judges each input as `stury .` reads it and prints nothing. Each file's first fault is told, as the
+// filter run tells a JSONC text's, and a JSON input with no text in it fails, as the library refuses an
+// empty document. An empty table is valid, as the library takes it. --from ndjson and --seq judge each record as a
+// text, and a long input is judged on the threads of a pool.
 
 import "base:runtime"
 import "core:os"
-import "core:strings"
 import core "../../core"
 import records "../../core/records"
 import json "../../json"
 import "jq"
 import "message"
 
-// Each file in turn, until one holds a fault. Exits 0, 2 after a file that did not open or read, or 5 at a fault.
+// Each file in turn. Exits 0, 2 after a file that did not open or read, or else 5 after a fault.
 check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	o := &run.opts
 	if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
@@ -21,12 +21,21 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		usage(EXIT_USAGE, true)
 	}
 	src := input_source(o, cli.json_reading)
-	failures := 0
+	failures, faults := 0, 0
 	for path in (cli.files[:] if len(cli.files) > 0 else STDIN_ONLY) {
-		f, read := open_file(path)
+		f, read := open_file(path, "check")
 		data: []byte
+		mapped: bool
 		if read {
-			data, read = read_file(f)
+			data, _, mapped = map_file(f)
+			if mapped {
+				mapped_input_name = file_name(path)
+				if f != os.stdin {
+					os.close(f)
+				}
+			} else {
+				data, read = read_file(f)
+			}
 		}
 		if !read {
 			failures += 1
@@ -37,21 +46,22 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 			runner = run_pool(run)
 		}
 		if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
-			message.write_stderr("stury: error: %s", msg)
-			os.exit(EXIT_USAGE if failures > 0 else EXIT_INPUT)
+			message.write_stderr("stury: parse error: %s", msg)
+			faults += 1
 		}
-		delete(data, runtime.heap_allocator())
+		free_spent({data, mapped})
+		free_all(context.temp_allocator)
 	}
-	os.exit(EXIT_USAGE if failures > 0 else 0)
+	os.exit(EXIT_USAGE if failures > 0 else EXIT_INPUT if faults > 0 else 0)
 }
 
 // The first fault of the text `data` of file `name`, read as `src` reads it, told with its note and a newline, or "".
 @(private = "file")
 check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^core.Runner) -> string {
 	cells := reads_cells(o)
-	if cells && len(strings.trim_prefix(string(data), "\xef\xbb\xbf")) == 0 ||!cells && !o.seq && json.blank(data, src.spec.?) {
+	if !cells && !o.seq && json.blank(data, src.spec.?) {
 		line, col := core.locate(data, u64(len(data)))
-		return message.build_temp("%s:%d:%d: No %s text\n", name, line, col, "JSON" if !cells else strings.to_upper(FORMATS[o.from].name, context.temp_allocator))
+		return message.build_temp("%s:%d:%d: No JSON text\n", name, line, col)
 	}
 	fault: Maybe(core.Fault)
 	switch {
@@ -59,9 +69,9 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 		if msg := header_fault(name, data, src.as); msg != "" {
 			return msg
 		}
-		fault = records.validate(data, src.as, runner)
+		fault = records.validate_parallel(data, src.as, runner)
 	case src.framing == .Concatenated:
-		fault = records.validate(data, src.as, runner)
+		fault = records.validate_parallel(data, src.as, runner)
 		// A byte no text starts with, right after a text, stays trailing text, as the reader of the texts from the first
 		// tells it. So does a text that runs on into the next, which only the reader from a scalar first text sees.
 		if f, bad := fault.?; bad && texts_follow(f, src.spec) {
@@ -78,7 +88,7 @@ check_text :: proc(name: string, data: []byte, src: Source, o: ^Opts, runner: ^c
 		return ""
 	}
 	f = literal_cut(data, f, src.framing)
-	return message.build_temp("%s\n%s", fault_told(name, data, f), fault_note(data, f, src.spec, o))
+	return message.build_temp("%s\n%s", fault_told(name, data, f), fault_note(name, data, f, src.spec, o))
 }
 
 // Whether the first text of `data` is a container or a string, which no byte after its close runs on from.
@@ -102,21 +112,4 @@ first_fault :: proc(data: []byte, as: core.As, framing: core.Framing, runner: ^c
 		return core.Fault{kind = .No_Memory}
 	}
 	return faults[0] if len(faults) > 0 else nil
-}
-
-// A header that names a column twice, told with a newline, or "". A header the format refuses is `validate`'s to tell.
-@(private = "file")
-header_fault :: proc(name: string, data: []byte, as: core.As) -> string {
-	it := records.open(data, as, .Lines, allocator = runtime.heap_allocator())
-	defer records.close(&it)
-	rec, more := records.next(&it)
-	if !more {
-		return ""
-	}
-	doc, err := records.build(&it, rec, context.temp_allocator)
-	if err.kind != .None {
-		return ""
-	}
-	msg, twice := repeated_header(name, data, &doc)
-	return message.build_temp("%s\n", msg) if twice else ""
 }

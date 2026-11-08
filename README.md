@@ -42,11 +42,13 @@ odin build . -collection:stury=vendor/stury -o:speed
 Then `import "stury:core"`, `import "stury:json"`, `import "stury:dsv"` for delimited text, and `import
 "stury:host"` for threads. Keep the package directories together. For the
 [ols](https://github.com/DanielGavin/ols) language server, add the same collection to `ols.json`:
-`{"collections": [{"name": "stury", "path": "vendor/stury"}]}`.
+`{"collections": [{"name": "stury", "path": "vendor/stury"}]}`. `Unknown library collection: 'stury'` means the build
+was not given `-collection:stury=<path>`.
 
-**Command line.** Download a binary for linux or darwin, amd64 or arm64, from
-[GitHub Releases](https://github.com/filip-41/stury/releases) and put it on your `PATH`. To build it yourself, run
-`make build-cli`, which writes `build/stury`.
+**Command line.** Download `stury-VERSION-OS-ARCH.tar.gz` (OS `linux` or `darwin`, ARCH `amd64` or `arm64`) from
+[GitHub Releases](https://github.com/filip-41/stury/releases), unpack it and put `stury` on your `PATH`. The manual
+page is `docs/stury.1` in the archive. There is no Windows binary: the command line builds there from source. To
+build it yourself, run `make build-cli`, which writes `build/stury`.
 
 ## Quick start
 
@@ -75,6 +77,14 @@ report :: proc(src: []u8, e: $E) {
 
 main :: proc() {
 	src := transmute([]byte)string(`{"name":"ada","n":1}`)
+	if len(os.args) > 1 {
+		data, rerr := os.read_entire_file(os.args[1], context.allocator)
+		if rerr != nil {
+			os.print_error(os.stderr, rerr, os.args[1])
+			os.exit(1)
+		}
+		src = data
+	}
 	if fault, bad := json.validate(src, .Json).?; bad {
 		report(src, fault)
 		os.exit(1)
@@ -103,7 +113,7 @@ main :: proc() {
 ```
 
 This is [examples/quickstart](examples/quickstart/main.odin). Run it from this directory with
-`odin run examples/quickstart -collection:stury=.`.
+`odin run examples/quickstart -collection:stury=.`, or add `-- file.json` to read a file in place of the built-in text.
 
 ## Examples
 
@@ -114,8 +124,8 @@ second_tag, _ := core.parse_path(".tags[1]")
 defer core.path_destroy(&second_tag)
 doc, answer, err := json.find(src, .Json, second_tag)
 defer core.destroy(&doc)
-if a, found := answer.?; found && a.outcome == .Found {
-	fmt.println(string(core.span(&doc, a.node))) // "engines"
+if answer.outcome == .Found {
+	fmt.println(string(core.span(&doc, answer.node))) // "engines"
 }
 ```
 
@@ -155,11 +165,12 @@ programs are in [examples/](examples). Each prints a fixed answer, and `make tes
 ## Command line
 
 `stury` runs [jq](https://jqlang.org) 1.8 filters with jq's results and exit codes. Input is strict JSON by
-default, so `01`, `NaN` and invalid UTF-8 are errors, reported with their line and column. `--from` and `--to`
-choose `json`, `jsonc`, `json5`, `ndjson`, `csv` or `tsv`.
+default, so `01`, `NaN` and invalid UTF-8 are errors, reported with their line and column. `--from` reads `json`,
+`jsonc`, `json5`, `ndjson`, `csv` or `tsv`, and `--to` writes all of them but `json5`.
 
 `stury fmt` formats files, rewriting them with `--in-place`, or transcodes them (`--from csv --to tsv`), with
-`--check` for CI. `stury check` validates without printing.
+`--check` for CI, which names each file that is not formatted. `stury check` validates every file without printing
+and reports each file's first fault. `stury check --help` and `stury fmt --help` list their options.
 
 ```sh
 $ echo '{"logs":[{"id":1}]}' | stury -c '.logs[].id'
@@ -177,10 +188,11 @@ Bergen,286000
 ## Documentation
 
 - [Library guide](docs/guide.md): usage, allocation and ownership, limits, delimited-text specifics.
-- API reference: the doc comment on each public name, and [API.txt](API.txt), which lists them all.
+- API reference: the doc comment on each public name, and [API.txt](API.txt), which lists the user surface.
+  [API_SHARED.txt](API_SHARED.txt) lists the public names that only the packages of this repository use.
 - [Command line](docs/cli.md), and its manual page [docs/stury.1](docs/stury.1) (`man ./docs/stury.1`).
-- [Benchmarks](docs/benchmarks.md): the comparisons, their method and their fairness rules. The figures are
-  written there once they are measured on this tree. [bench/README.md](bench/README.md) describes the harness.
+- [Benchmarks](docs/benchmarks.md): the comparisons, their method and their fairness rules. The figures there
+  were measured on the 0.1.1 tree, and the page marks the tables the harness has changed under since. [bench/README.md](bench/README.md) describes the harness.
 - Internals, for contributors, one file per part: [walk](docs/walk.md), [document](docs/document.md),
   [paths](docs/paths.md), [typed reads](docs/typed.md), [writer](docs/writer.md), [records](docs/records.md),
   [kernel](docs/kernel.md) and [hot paths](docs/hotpaths.md).
@@ -189,8 +201,8 @@ Bergen,286000
 
 | Package | Holds |
 |---|---|
-| `core` | what every format shares: the document, its readers, the edit list, paths and their answers, `Write_Options`, errors and their rendering |
-| `json` | the `Json`, `Jsonc` and `Json5` specs: `validate`, `build`, `find`, `scan`, `set`, `commit`, `unmarshal`, `marshal`, `format` |
+| `core` | what every format shares: the document, its readers, the edit list and its `commit`, paths and their answers, `write` and `format`, `Write_Options`, errors and their rendering |
+| `json` | the `Json`, `Jsonc` and `Json5` specs: `validate`, `build`, `find`, `scan`, `set`, `unmarshal`, `marshal` |
 | `dsv` | the `Csv`, `Tsv` and `Plain` specs, with the same calls |
 | `core/records` | a text that holds a list of records, read or written one record at a time, for any format |
 | `core/typed` | the type plan and the options of a typed read |
@@ -201,14 +213,21 @@ Bergen,286000
 
 ## Development
 
-Run these from this directory. `ODIN` names the compiler when it is not on `PATH`.
+Run these from this directory. `ODIN` names the compiler when it is not on `PATH`; the Makefile refuses a release older
+than its `MIN_ODIN`, `dev-2026-11`. `make help` lists every target.
 
 ```sh
 make check          # the checks the files you changed can reach, in seconds
-make gate           # the full gate, once, when a branch is finished
-make test           # the suites, the CLI tests and the examples
+make gate           # what a branch passes before it lands, once (python3 tools/gate.py full adds the long runs)
+make test           # the library suites, the examples, the CLI smoke cases and the jq corpus
+make test-lib       # the library suites alone, one package per test directory (make test-one P=json/test T=name)
 make test-examples  # build and run the eight example programs against their expected output
-make lint           # the vet set, with warnings as errors
+make test-cli       # cmd/stury/test/smoke.py against build/stury, held to smoke.floor
+make test-jq        # jq's corpus and cmd/stury/test/cli.tsv, whose row layout its first lines describe
+make lint           # the vet set, with warnings as errors, and the import, word, global, API.txt and API_SHARED.txt checks
+make api-write      # regenerate API.txt and API_SHARED.txt after a public change. A public name is shared when another
+                    # package or cmd/ calls it, and README.md, docs/guide.md, examples/ and the user-surface
+                    # signatures never name it
 make test-asan      # the suites under AddressSanitizer
 make test-tsan      # the suites under ThreadSanitizer
 ```

@@ -3,8 +3,10 @@ package dsv
 
 import "base:intrinsics"
 import "core:strconv"
+import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
+import write "../core/write"
 import records "../core/records"
 
 // Splits `row` into `b.cells`, which grows to hold them all, or its first `upto` cells. Returns the cell count, whether
@@ -93,20 +95,15 @@ split_row :: #force_inline proc "contextless" ($LAX: bool, src: []u8, row: Batch
 		when S == .Csv {
 			// With no branch on the row's quotes, since a text's quoted cells fall in no pattern.
 			q := kernel.pack(kernel.eq(blk, '"')) & live
-			instr := kernel.prefix_xor(T, q) ~ in_quote
+			instr, closing, outside, bare := quote_masks(T, q, d, in_quote, start, close)
 			if .Bare_Quote in opts.tolerate {
 				// A quote the pass read as a tolerated bare quote is text, so the quotes pair up without it.
-				for {
-					bare := q & instr & ~((d & ~instr) << 1 | start | (q & ~instr) << 1 | close)
-					if bare == 0 {
-						break
-					}
+				for bare != 0 {
 					q &~= bare & -bare
-					instr = kernel.prefix_xor(T, q) ~ in_quote
+					instr, closing, outside, bare = quote_masks(T, q, d, in_quote, start, close)
 				}
 			}
-			closing := q & ~instr
-			d &= ~instr
+			d = outside
 			bs = (closing << 1 | close) & q
 			in_quote, close, start = u64(0) - (instr >> 63), closing >> 63, d >> 63
 		} else when S == .Tsv {
@@ -154,7 +151,7 @@ held_row :: #force_inline proc(it: ^records.Reader, rec: records.Record) -> (Bat
 }
 
 // The value tokens of `rec`, the row `next` gave last, or its first `upto`, or false for another or when they do not fit
-// in memory.
+// in memory, which ends the records with `.No_Memory`.
 @(private)
 cells_of :: proc(it: ^records.Reader, rec: records.Record, upto := max(int)) -> ([]core.Token, bool) {
 	row, held := held_row(it, rec)
@@ -166,6 +163,7 @@ cells_of :: proc(it: ^records.Reader, rec: records.Record, upto := max(int)) -> 
 		spec, opts := Spec(it.as.spec), options_of(it.as)
 		whole, ok: bool
 		if b.split, whole, ok = split_all(it, b, it.src, row, spec, opts, .Value, upto); !ok {
+			it.fault = core.Fault{rules = &RULES, kind = .No_Memory}
 			return nil, false
 		}
 		b.split_row, b.split_cap = b.at, max(int) if whole else upto
@@ -225,9 +223,31 @@ cell_of :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8
 	return cell_text(it.src, t, Spec(it.as.spec), buf)
 }
 
-// The texts of the first `upto` cells of `rec`, the row `next` gave last, in `b.texts`, nil for an empty unquoted cell.
+// Makes each unquoted cell of `texts`, the texts of `cells`, the kind `infer` reads it as: a number, true or false.
+@(cold, private)
+infer_cells :: proc(cells: []core.Token, texts: []write.Scalar) {
+	for t, i in cells {
+		s, is_text := texts[i].(string)
+		if !is_text || t.spelling & (core.SPELLING_QUOTED | core.SPELLING_DECODE) != 0 {
+			continue
+		}
+		switch s {
+		case "true":
+			texts[i] = write.Tree_Part.True
+		case "false":
+			texts[i] = write.Tree_Part.False
+		case:
+			if _, is_number := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); is_number {
+				texts[i] = write.Number_Literal{s}
+			}
+		}
+	}
+}
+
+// The first `upto` cells of `rec`, the row `next` gave last, in `b.texts`, nil for an empty unquoted cell. Under `infer`
+// an unquoted cell that is a number, `true` or `false` is that kind.
 @(private)
-cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: int) -> ([]Maybe(string), bool) #no_bounds_check {
+cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: int) -> ([]write.Scalar, bool) #no_bounds_check {
 	cells, ok := cells_of(it, rec, upto)
 	b := (^Batch)(it.format)
 	if !ok {
@@ -236,6 +256,7 @@ cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: i
 	if len(b.texts) != len(cells) {
 		b.texts.allocator = it.allocator
 		if resize(&b.texts, len(cells)) != nil {
+			it.fault = core.Fault{rules = &RULES, kind = .No_Memory}
 			return nil, false
 		}
 	}
@@ -256,6 +277,9 @@ cells_texts :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto: i
 			}
 			b.texts[i] = s
 		}
+	}
+	if options_of(it.as).infer {
+		infer_cells(cells, b.texts[:])
 	}
 	return b.texts[:], true
 }

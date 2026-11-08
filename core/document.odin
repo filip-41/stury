@@ -91,7 +91,7 @@ Child_Index :: struct {
 	members: []Node_Index,
 }
 
-// A `Pair_Iter` walks every (key, value) member pair of a `Map` container. `pairs` starts it and `pair_next` returns
+// A `Pair_Iter` walks every (key, value) member pair of an `Object` container. `pairs` starts it and `pair_next` returns
 // each pair in source order.
 Pair_Iter :: struct {
 	doc:     ^Document,
@@ -103,10 +103,10 @@ Pair_Iter :: struct {
 	done:    bool,
 }
 
-// Starts a `Pair_Iter` over the key/value pairs of `obj`. On a non-`Map` container, a scalar, or an index past the last
-// node, returns an empty iterator. `pair_next` tests the ends, so an empty `Map` needs no test here.
+// Starts a `Pair_Iter` over the key/value pairs of `obj`. On a non-`Object` container, a scalar, or an index past the last
+// node, returns an empty iterator. `pair_next` tests the ends, so an empty `Object` needs no test here.
 pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter {
-	if int(obj) >= len(doc.nodes) || doc.nodes[obj].kind != .Map {
+	if int(obj) >= len(doc.nodes) || doc.nodes[obj].kind != .Object {
 		return {doc = doc, done = true}
 	}
 	end := obj + Node_Index(doc.nodes[obj].n)
@@ -117,8 +117,8 @@ pairs :: proc(doc: ^Document, obj: Node_Index) -> Pair_Iter {
 	return {doc = doc, key_at = obj + 1, key_end = end}
 }
 
-// Returns the next key and value node of the `Map`. For an inline-key `Map`, key and value alternate in preorder.
-// For a shared-key `Map`, keys come from `doc.shared_keys` while values advance within `obj`. An inline-key `Map`
+// Returns the next key and value node of the `Object`. For an inline-key `Object`, key and value alternate in preorder.
+// For a shared-key `Object`, keys come from `doc.shared_keys` while values advance within `obj`. An inline-key `Object`
 // reads neither `val_at` nor `val_end`.
 pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool) {
 	if it.done {
@@ -135,7 +135,7 @@ pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bo
 		it.key_at += 1
 		n := doc.nodes[v]
 		next_v := int(v) + 1
-		if n.kind == .Array || n.kind == .Map {
+		if n.kind == .Array || n.kind == .Object {
 			next_v = subtree_step(int(v), n.n)
 		}
 		it.val_at = Node_Index(next_v)
@@ -149,7 +149,7 @@ pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bo
 	v := k + 1
 	n := doc.nodes[v]
 	next_k := int(v) + 1
-	if n.kind == .Array || n.kind == .Map {
+	if n.kind == .Array || n.kind == .Object {
 		next_k = subtree_step(int(v), n.n)
 	}
 	it.key_at = Node_Index(next_k)
@@ -169,7 +169,7 @@ Token_View :: struct {
 //
 // A format whose root members share their keys keeps those keys as the root's first child, an `Array` of role `Key`, so
 // the root's readers step over it as they step over a member's key. `shared_keys` is that `Array`'s node, and its
-// children, at `shared_keys + 1` on, are the keys of every member `Map`: a `Map`'s `i`th value has key `i`. It is 0 for
+// children, at `shared_keys + 1` on, are the keys of every member `Object`: an `Object`'s `i`th value has key `i`. It is 0 for
 // a document with no shared keys, for every JSON text, and for a dsv text read without a header.
 Document :: struct {
 	using view:  Token_View,
@@ -246,10 +246,14 @@ number_digits :: #force_inline proc "contextless" (spelling: u16) -> (frac, sum:
 	return frac, sum | (spelling & NUMBER_EXP) >> 6
 }
 
-// How a reader treats an object's repeated keys. `.Last` is the default.
+// How a read treats an object's repeated keys. `.Last` answers the last, the default, and `.First` the first. `.All`
+// answers each of them, and `.Refuse` fails at a key that repeats one of its object's, at the second key's first byte.
+// A read of one member, as `member` is, picks under `.All` and `.Refuse` as under `.Last`.
 Duplicates :: enum u8 {
-	First,
 	Last,
+	First,
+	All,
+	Refuse,
 }
 
 // A `Spelling` holds a format's read services, in its rodata. `text` decodes a node's text into `buf` and returns false
@@ -261,8 +265,8 @@ Duplicates :: enum u8 {
 // `build` reads a text into a document and `validate` judges one without building, each as the handle says, see
 // `core.build` and `core.validate`. `scan` reads paths over a text as the handle says into a partial document, or gives
 // each answer to `on` when it is set, see `core/build`'s `scan` and `each_answer`. `resolve` returns what a `Plain` node
-// is, and `resolves` whether it can return anything but `.String` under handle `as`, nil for a format with no `Plain`
-// nodes, so a writer asks once per text. `close_end` returns the byte just past a container's closing bytes, found
+// is, and `resolves` whether it can return anything but `.String` for a node with bytes under handle `as`, nil for a
+// format with no `Plain` nodes, so a writer asks once per text. `close_end` returns the byte just past a container's closing bytes, found
 // from its last descendant or its open, over the whitespace and comments the format allows there, the root's close is
 // `Document.root_close`, so a service may return it without a scan. `edit` points at the
 // format's edit services, nil for a format that accepts no edits. `tag_key` is the format's own struct tag key, and
@@ -270,8 +274,9 @@ Duplicates :: enum u8 {
 // compare as text. `write` writes a node of the document as text of the format `as` names, into a buffer from `allocator` or to
 // `stream`, nil for a format with no document writer, see `core.write`. `tokens` is the format's `^write.Token_Spelling`,
 // nil for a format with no token writer. `records` is the format's `^records.Services`, nil for a format with no record
-// reader. Both are a `rawptr` since `core/write` and `core/records` import `core`, and each is cast back to that type
-// unchecked, so a format sets them to a table of exactly that type or leaves them nil.
+// reader. `plans` is the format's `typed.Plan_Make`, nil for a format whose plans need nothing past `typed.plan_build`.
+// Each is a `rawptr` since `core/write`, `core/records` and `core/typed` import `core`, and each is cast back to that
+// type unchecked, so a format sets them to exactly that type or leaves them nil.
 Spelling :: struct {
 	text:       proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
 	key_equals: proc "contextless" (v: ^Token_View, t: Token, name: string) -> bool,
@@ -288,6 +293,7 @@ Spelling :: struct {
 	write:      proc(doc: ^Document, opts: Write_Options, as: As, node: Node_Index, stream: io.Stream, allocator: runtime.Allocator) -> ([]u8, int, Typed_Error),
 	tokens:     rawptr,
 	records:    rawptr,
+	plans:      rawptr,
 	tag_key:    string,
 	key_open:   string,
 	key_close:  string,
@@ -299,7 +305,7 @@ Spelling :: struct {
 // insert's key and a key set take a decoded name, so no service judges a key. Each service receives the document, so it reads the run-time options the document holds. A text that is no value answers `.Bad_Value`, with
 // the walk's fault in `inner` where there is one, and `.No_Memory` when the service could not allocate.
 //
-// `member_sep` is what is written between two members of a container, and `key_sep` between a member's key and its
+// `member_sep` is what is written between two members of container `c`, a flat text's root included, and `key_sep` between a member's key and its
 // value. `comment` says how the output spells a comment under `spec` and is nil for a format that accepts no comment.
 // `insert_check` holds a format's rules on what a container takes.
 //
@@ -313,7 +319,8 @@ Edit_Spelling :: struct {
 	value:         proc(v: ^Token_View, src: []u8, allocator: runtime.Allocator) -> Document_Error,
 	key_text:      proc(doc: ^Document, name: []u8, text: ^[dynamic]u8) -> bool,
 	comment:       proc(doc: ^Document, spec: u8) -> (style: Comment_Spelling, b: u8),
-	member_sep:    proc(doc: ^Document) -> string,
+	separators:    proc(doc: ^Document, spec: u8) -> bool, // `spec` ends a line comment at U+2028 and U+2029, which `doc.as` does not
+	member_sep:    proc(doc: ^Document, c: Node_Index) -> string,
 	key_sep:       string,
 	insert_check:  proc(doc: ^Document, container: Node_Index, text: string, allocator: runtime.Allocator) -> Document_Error,
 	interior:      proc(doc: ^Document, c: Node_Index) -> (lo, hi: u64),
@@ -361,26 +368,53 @@ clone :: proc(doc: ^Document, allocator := context.allocator) -> (c: Document, e
 	c.nodes_alloc = slice.clone(doc.nodes, allocator) or_return
 	c.facts_alloc = slice.clone(doc.facts, allocator) or_return
 	c.counts_alloc = slice.clone(doc.counts, allocator) or_return
-	c.reads_block = runtime.make_aligned([]u8, len(doc.reads_block), 8, allocator) or_return
-	copy(c.reads_block, doc.reads_block)
 	c.nodes, c.facts, c.counts = c.nodes_alloc, c.facts_alloc, c.counts_alloc
-	// The answers, the kept children and the missing names' lists and bytes lie in `reads_block`, at the same offsets.
-	shift := uintptr(raw_data(c.reads_block)) - uintptr(raw_data(doc.reads_block))
-	c.answers = ([^]Answer)(uintptr(raw_data(doc.answers)) + shift)[:len(doc.answers)]
-	c.kept = ([^]Kept_Child)(uintptr(raw_data(doc.kept)) + shift)[:len(doc.kept)]
-	c.missing = ([^]Missing_Name)(uintptr(raw_data(doc.missing)) + shift)[:len(doc.missing)]
-	for &m in c.missing {
-		m.name = string(([^]u8)(uintptr(raw_data(m.name)) + shift)[:len(m.name)])
-	}
+	err = own_reads(&c)
 	return
 }
 
-// Returns the kind of node `i`, or `.Null` when `i` is past the last node.
+// Copies `doc`'s answers, kept children and missing names, the names' bytes included, into one block `doc` owns, and
+// points the lists at it, so the memory they were read into may go. The lists it held are not freed.
+own_reads :: proc(doc: ^Document) -> runtime.Allocator_Error {
+	a := len(doc.answers) * size_of(Answer)
+	k := a + len(doc.kept) * size_of(Kept_Child)
+	m := (k + 7) &~ 7
+	names := m + len(doc.missing) * size_of(Missing_Name)
+	size := names
+	for x in doc.missing {
+		size += len(x.name)
+	}
+	if size == 0 {
+		doc.answers, doc.kept, doc.missing, doc.reads_block = nil, nil, nil, nil
+		return nil
+	}
+	block := runtime.mem_alloc_non_zeroed(size, 8, doc.allocator) or_return
+	answers, kept, missing := doc.answers, doc.kept, doc.missing
+	doc.reads_block = block
+	doc.answers = ([^]Answer)(raw_data(block))[:len(answers)]
+	doc.kept = ([^]Kept_Child)(raw_data(block[a:]))[:len(kept)]
+	doc.missing = ([^]Missing_Name)(raw_data(block[m:]))[:len(missing)]
+	copy(doc.answers, answers)
+	copy(doc.kept, kept)
+	w := names
+	for x, i in missing {
+		copy(block[w:], x.name)
+		doc.missing[i] = {x.node, string(block[w:w + len(x.name)])}
+		w += len(x.name)
+	}
+	return nil
+}
+
+// Returns the kind of node `i`, or `.Null` when `i` is past the last node. A `Plain` cell is the kind the format reads
+// it as under the handle the document was read with.
 kind :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind {
 	if int(i) >= len(doc.nodes) {
 		return .Null
 	}
-	return doc.nodes[i].kind
+	if k := doc.nodes[i].kind; k != .Plain {
+		return k
+	}
+	return doc.spelling.resolve(doc, i)
 }
 
 // Returns the byte span of node `i`: a scalar's token, or a container's opening through its closing bytes. The
@@ -392,7 +426,7 @@ span :: #force_inline proc(doc: ^Document, i: Node_Index) -> []u8 {
 	}
 	n := doc.nodes[i]
 	#partial switch n.kind {
-	case .Array, .Map:
+	case .Array, .Object:
 		if i == ROOT && doc.root_close != 0 {
 			return doc.src[n.lo:doc.root_close]
 		}
@@ -439,7 +473,7 @@ length :: #force_inline proc(doc: ^Document, i: Node_Index) -> int {
 		return 0
 	}
 	n := doc.nodes[i]
-	if n.kind != .Array && n.kind != .Map {
+	if n.kind != .Array && n.kind != .Object {
 		return 0
 	}
 	if n.spelling != MAX_CHILDREN {
@@ -460,7 +494,7 @@ wide_length :: #force_no_inline proc(doc: ^Document, i: Node_Index) -> int {
 @(private)
 skip :: #force_inline proc(doc: ^Document, i: Node_Index) -> int {
 	n := doc.nodes[i]
-	return int(n.n) if n.kind == .Array || n.kind == .Map else 1
+	return int(n.n) if n.kind == .Array || n.kind == .Object else 1
 }
 
 // Returns the bytes of node `n`'s text, for a node that needs no decoding. A string token leaves its quote pair
@@ -503,10 +537,10 @@ node_start :: #force_inline proc(n: Node) -> u64 {
 	return lo
 }
 
-// Returns container `i`'s `k`th member value, counted from 0: for an inline-key `Map`, the value after its `k`th key,
+// Returns container `i`'s `k`th member value, counted from 0: for an inline-key `Object`, the value after its `k`th key,
 // which is the node after the key. A `k` past the last member, a negative `k`, and a node that holds no members return no
 // node. A container whose members are one node each is indexed, since its subtree size gives the stride: an
-// `Array`'s is its member count plus one, a shared-key `Map`'s its count plus one, and an inline-key `Map`'s twice its
+// `Array`'s is its member count plus one, a shared-key `Object`'s its count plus one, and an inline-key `Object`'s twice its
 // count plus one. Any other container is read from its child index when `index_children` built one, else walked,
 // stepping one subtree size per member. A count that saturated `MAX_CHILDREN` is read from `Document.counts`, so
 // the stride test uses the true member count.
@@ -527,7 +561,7 @@ child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_I
 	if k >= count {
 		return NO_NODE, false
 	}
-	if n.kind != .Array && n.kind != .Map {
+	if n.kind != .Array && n.kind != .Object {
 		return NO_NODE, false
 	}
 	if stride := one_node_stride(doc, n, count); stride != 0 {
@@ -536,11 +570,11 @@ child_at :: #force_inline proc(doc: ^Document, i: Node_Index, k: int) -> (Node_I
 	return child_at_walk(doc, i, k)
 }
 
-// The distance in nodes between members of `n` when each member is one node: 2 for an inline-key `Map`, else 1. It is
+// The distance in nodes between members of `n` when each member is one node: 2 for an inline-key `Object`, else 1. It is
 // 0 when a member spans more nodes. The dsv header row is a child of the root but no member, so such a root gets 0.
 @(private)
 one_node_stride :: #force_inline proc(doc: ^Document, n: Node, count: int) -> int {
-	if n.kind == .Map && doc.shared_keys == 0 {
+	if n.kind == .Object && doc.shared_keys == 0 {
 		return 2 if int(n.n) == 2 * count + 1 else 0
 	}
 	return 1 if int(n.n) == count + 1 else 0
@@ -583,7 +617,7 @@ index_children :: proc(doc: ^Document, i: Node_Index) -> bool {
 		return false
 	}
 	n := doc.nodes[i]
-	if n.kind != .Array && n.kind != .Map || n.role == .Partial {
+	if n.kind != .Array && n.kind != .Object || n.role == .Partial {
 		return false
 	}
 	count := int(n.spelling)
@@ -640,13 +674,13 @@ children_from :: proc(doc: ^Document, i: Node_Index, k: int) -> Child_Iter {
 }
 
 // A `Child_Iter` walks one container's member values. `children` starts it and `child_next` returns the next value.
-// For a `Map`, a value's key is the node before it.
+// For an `Object`, a value's key is the node before it.
 Child_Iter :: struct {
 	doc:    ^Document,
 	parent: Node_Index,
 	at:     Node_Index,
 	end:    Node_Index,
-	// The container is an inline-key `Map`, whose children are key/value pairs with a key of one node. A step skips the
+	// The container is an inline-key `Object`, whose children are key/value pairs with a key of one node. A step skips the
 	// value's span and then one node for the next key, with no role test: only a pair's first node is a key.
 	pairs:  bool,
 	done:   bool,
@@ -657,10 +691,10 @@ children :: proc(doc: ^Document, i: Node_Index) -> Child_Iter {
 		return {doc = doc, parent = i, done = true}
 	}
 	n := doc.nodes[i]
-	if n.kind != .Array && n.kind != .Map {
+	if n.kind != .Array && n.kind != .Object {
 		return {doc = doc, parent = i, done = true}
 	}
-	it := Child_Iter{doc = doc, parent = i, end = i + Node_Index(n.n), pairs = n.kind == .Map && doc.shared_keys == 0}
+	it := Child_Iter{doc = doc, parent = i, end = i + Node_Index(n.n), pairs = n.kind == .Object && doc.shared_keys == 0}
 	j := int(i) + 1
 	if it.pairs {
 		// The first member's key is one node.
@@ -696,7 +730,7 @@ child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool) {
 	doc := it.doc
 	n := doc.nodes[v]
 	j := int(v) + 1
-	if n.kind == .Array || n.kind == .Map {
+	if n.kind == .Array || n.kind == .Object {
 		j = subtree_step(int(v), n.n)
 	}
 	if it.pairs {
@@ -710,7 +744,7 @@ child_next :: #force_inline proc(it: ^Child_Iter) -> (Node_Index, bool) {
 	return v, true
 }
 
-// Returns the value of the member of `obj` whose key decodes to `name`, under `.First` or `.Last`. `members_named` yields
+// Returns the value of the member of `obj` whose key decodes to `name`, the first under `.First` and else the last. `members_named` yields
 // every match. A headed dsv record's members are its cells, named by the header's cells.
 member :: #force_inline proc(doc: ^Document, obj: Node_Index, name: string, dups := Duplicates.Last) -> (Node_Index, bool) {
 	// A single loop handles both shapes: `member_next` is inlined, so an object's step uses this frame's registers.
@@ -729,7 +763,7 @@ member :: #force_inline proc(doc: ^Document, obj: Node_Index, name: string, dups
 }
 
 // A `Member_Iter` walks every member of `obj` whose key decodes to `name`, in source order. A headed dsv record is a
-// `Map`, and its members are its cells. Column `i`'s key is header cell `i`, and a cell past the header's last
+// `Object`, and its members are its cells. Column `i`'s key is header cell `i`, and a cell past the header's last
 // matches no key. A cell's node is its record's node plus one plus its column.
 Member_Iter :: struct {
 	doc:  ^Document,
@@ -745,7 +779,7 @@ members_named :: proc(doc: ^Document, obj: Node_Index, name: string) -> Member_I
 		return {doc = doc, rec = NO_NODE, done = true}
 	}
 	n := doc.nodes[obj]
-	if n.kind != .Map {
+	if n.kind != .Object {
 		return {doc = doc, rec = NO_NODE, done = true}
 	}
 	if doc.shared_keys != 0 {
@@ -778,8 +812,8 @@ member_next :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool) {
 	return NO_NODE, false
 }
 
-// Returns the next of a shared-key `Map`'s values whose key decodes to `it.name`. The walk runs over the shared keys. A
-// key past the `Map`'s last value matches nothing, so a short `Map`'s missing members are absent.
+// Returns the next of a shared-key `Object`'s values whose key decodes to `it.name`. The walk runs over the shared keys. A
+// key past the `Object`'s last value matches nothing, so a short `Object`'s missing members are absent.
 @(private)
 member_next_shared :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool) {
 	width := int(it.doc.nodes[it.rec].n) - 1
@@ -799,9 +833,9 @@ member_next_shared :: #force_inline proc(it: ^Member_Iter) -> (Node_Index, bool)
 }
 
 // Returns the decoded text of string or plain node `i`. A node whose `SPELLING_DECODE` bit is clear is its span
-// without its quotes. A node that needs decoding is written into `buf`, and the call returns false when `buf` is too
-// short, and its content is then unspecified. It allocates nothing, so a caller that has no buffer long enough uses
-// `text_clone`. Returns false for a container or a node past the last.
+// without its quotes. A node that needs decoding is written into `buf`, and the call returns false when `buf` is too short,
+// which `text_room` bytes never are, and its content is then unspecified. It allocates nothing, so a caller that has no buffer long
+// enough uses `text_clone`. Returns false for a container or a node past the last.
 text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: string, ok: bool) {
 	if int(i) >= len(doc.nodes) {
 		return "", false
@@ -815,6 +849,15 @@ text :: #force_inline proc(doc: ^Document, i: Node_Index, buf: []u8) -> (s: stri
 		return string(node_text(doc.src, n)), true
 	}
 	return doc.spelling.text(&doc.view, n, buf)
+}
+
+// Returns a length of `buf` that always holds `text`'s decode of node `i`, which may pass the text's own length, and 0
+// for a node that needs no decode, a container and a node past the last.
+text_room :: proc(doc: ^Document, i: Node_Index) -> int {
+	if int(i) >= len(doc.nodes) || doc.nodes[i].kind > .Plain || doc.nodes[i].spelling & SPELLING_DECODE == 0 {
+		return 0
+	}
+	return decoded_room(doc.nodes[i].spelling, int(doc.nodes[i].n))
 }
 
 // Returns the bytes that hold the decode of a token of `n` span bytes with `spelling`. A decode never yields more
@@ -899,14 +942,14 @@ number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool) {
 }
 
 // Reads `src` into a document as `as` says: its format, spec, depth, tolerance and the format's own options.
-// `refuse_duplicates` fails at a key that repeats one of its object's, and false builds every member. The document
+// `.Refuse` fails at a key that repeats one of its object's, and every other `dups` builds every member. The document
 // borrows `src`, which must outlive it, and `destroy` frees it. A handle with no format's build returns `.Bad_Spec`, and
 // on any error the document is the zero value.
-build :: proc(src: []u8, as: As, refuse_duplicates := false, allocator := context.allocator) -> (Document, Document_Error) {
+build :: proc(src: []u8, as: As, dups := Duplicates.Last, allocator := context.allocator) -> (Document, Document_Error) {
 	if as.spelling == nil || as.spelling.build == nil {
 		return {}, {kind = .Bad_Spec}
 	}
-	return as.spelling.build(src, as, refuse_duplicates, allocator)
+	return as.spelling.build(src, as, dups == .Refuse, allocator)
 }
 
 // Judges `src` as `as` says without building or allocating. Returns the first fault, or nil for a text that reads. A
@@ -916,15 +959,6 @@ validate :: proc "contextless" (src: []u8, as: As) -> Maybe(Fault) {
 		return Fault{kind = .Bad_Option}
 	}
 	return as.spelling.validate(src, as)
-}
-
-// Returns what `Plain` node `i` is, through the format's `resolve`, as the handle the document was read with says. A node
-// of another kind returns its own kind, and an index past the last returns `.Null`.
-resolve :: #force_inline proc(doc: ^Document, i: Node_Index) -> Kind {
-	if int(i) >= len(doc.nodes) {
-		return .Null
-	}
-	return doc.spelling.resolve(doc, i)
 }
 
 // Returns the `i64` an `Int` node writes. Returns false for any other number.
@@ -941,14 +975,33 @@ int_value :: #force_inline proc(doc: ^Document, i: Node_Index) -> (i64, bool) {
 	return 0, false
 }
 
+// Returns the `f64` a number node writes: an `Int` or a `Uint` rounded once, and a `Float` as it is. `-0` keeps its
+// sign. Returns false for a `Wide` number and a node that is no number.
+float_value :: proc(doc: ^Document, i: Node_Index) -> (f64, bool) {
+	n, ok := number(doc, i)
+	if !ok {
+		return 0, false
+	}
+	switch n.kind {
+	case .Int:
+		if n.bits == 0 && doc.src[doc.nodes[i].lo] == '-' {
+			return -0.0, true
+		}
+		return f64(i64(n.bits)), true
+	case .Uint:
+		return f64(n.bits), true
+	case .Float:
+		return transmute(f64)n.bits, true
+	case .Wide:
+	}
+	return 0, false
+}
+
 // Returns a walk over the bodies of node `i`'s facts of `role`, in source order, with `fact_next` giving one at a
 // time. `NO_NODE` returns an empty walk. This is the public fact reader. A fact body is a slice of the source, so
 // a read allocates nothing.
 facts_of :: proc(doc: ^Document, i: Node_Index, role: Role) -> Fact_Iter {
-	if i == NO_NODE {
-		return {doc = doc, role = role}
-	}
-	return {doc = doc, at = lower_node(doc.facts, i), end = lower_node(doc.facts, i + 1), role = role}
+	return {doc = doc, facts = all_facts(doc, i), role = role}
 }
 
 // Returns the facts of node `i` and of every node in its subtree, all the document's for the root.
@@ -967,25 +1020,22 @@ all_facts :: #force_inline proc(doc: ^Document, i: Node_Index) -> []Fact {
 	if i == NO_NODE {
 		return nil
 	}
-	lo := lower_node(doc.facts, i)
-	hi := lower_node(doc.facts, i + 1)
-	return doc.facts[lo:hi]
+	return doc.facts[lower_node(doc.facts, i):lower_node(doc.facts, i + 1)]
 }
 
 // A `Fact_Iter` walk reads the bodies of one node's facts of one role, in source order. `fact_next` returns one at a time.
 Fact_Iter :: struct {
-	doc:  ^Document,
-	at:   int,
-	end:  int,
-	role: Role,
+	doc:   ^Document,
+	facts: []Fact,
+	role:  Role,
 }
 
 // Returns the next body without the markers its format writes: the fact's `spelling` gives the lead and tail
 // lengths, and core reads the bytes between them without knowing any format's marker.
 fact_next :: proc(it: ^Fact_Iter) -> (body: string, ok: bool) {
-	for it.at < it.end {
-		f := it.doc.facts[it.at]
-		it.at += 1
+	for len(it.facts) > 0 {
+		f := it.facts[0]
+		it.facts = it.facts[1:]
 		if f.role == it.role {
 			return string(fact_body(it.doc, f)), true
 		}

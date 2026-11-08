@@ -1,18 +1,11 @@
 package compose
 
 import "base:runtime"
-import "core:bytes"
+import "core:slice"
 import core ".."
 
 // A commit: what a format's `Edit_Spelling.commit` calls. It runs the format's plan, composes the junctions, splices the
 // chunks into the source and has the format read the result.
-
-// The two services that take the composing state, nil for a format whose text has brackets. A text with these is flat,
-// so its `Edit_Spelling.flat` is set.
-Root_Spelling :: struct {
-	root_head:     proc(cx: ^Compose, open: u64) -> bool,
-	root_junction: proc(cx: ^Compose, open, close: u64, l, r: int, inserts: []core.Edit) -> bool,
-}
 
 // Returns the source bytes the edits make: every byte no edit touched, the edits' texts in their places, and the
 // separators the format supplies, in the document's own spec. The caller frees the result with `allocator`. An edit
@@ -22,7 +15,7 @@ Root_Spelling :: struct {
 // source is `.Bad_Result`. A fact the output cannot hold is dropped with its source bytes. `dropped` counts the source
 // facts and fact edits the output cannot hold. A fact that is removed with a removed member or a set's span is not
 // counted.
-commit :: proc(list: ^core.Edit_List, spec: u8, root: ^Root_Spelling, allocator := context.allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
+commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {
 	doc := list.doc
 	if doc == nil || doc.spelling == nil {
 		return nil, 0, {kind = .Bad_Index}
@@ -50,7 +43,7 @@ commit :: proc(list: ^core.Edit_List, spec: u8, root: ^Root_Spelling, allocator 
 			planned.edits = written
 		}
 	}
-	cx := Compose{doc = doc, list = &planned, root = root, allocator = scratch, err = {kind = .No_Memory}}
+	cx := Compose{doc = doc, list = &planned, allocator = scratch, err = {kind = .No_Memory}}
 	if edit := doc.spelling.edit; edit != nil && edit.comment != nil {
 		cx.style, cx.comment_byte = edit.comment(doc, spec)
 	}
@@ -60,9 +53,18 @@ commit :: proc(list: ^core.Edit_List, spec: u8, root: ^Root_Spelling, allocator 
 	if !order_chunks(&cx) {
 		return nil, 0, cx.err
 	}
-	out, err = splice(doc, cx.chunks[:], cx.text[:], allocator)
+	seps: []u64
+	if edit := doc.spelling.edit; edit != nil && edit.separators != nil && edit.separators(doc, spec) {
+		seps = line_separators(doc, scratch)
+	}
+	out, err = splice(doc, cx.chunks[:], cx.text[:], cx.segments[:], seps, allocator)
 	if err.kind != .None {
 		return nil, 0, err
+	}
+	// A byte order mark at the output's start is the text's, not the edit's, so one only an edit put there is refused.
+	if core.text_start(out, 0) != 0 && core.text_start(doc.src, 0) == 0 {
+		delete(out, allocator)
+		return nil, 0, {kind = .Bad_Result}
 	}
 	if e := reads_as_source(doc, out, spec); e.kind != .None {
 		delete(out, allocator)
@@ -100,7 +102,15 @@ reads_as_source :: proc(doc: ^core.Document, out: []u8, spec: u8) -> core.Docume
 // Builds the output in one allocation: the source bytes between chunks, and each chunk's text in its place.
 // Returns `.No_Memory` when the allocation is refused.
 @(private)
-splice :: proc(doc: ^core.Document, chunks: []Chunk, text: []u8, allocator: runtime.Allocator) -> (out: []u8, err: core.Document_Error) {
+splice :: proc(doc: ^core.Document, chunks: []Chunk, text: []u8, segments: []Segment, seps: []u64, allocator: runtime.Allocator) -> (out: []u8, err: core.Document_Error) {
+	if len(segments) > 0 || len(seps) > 0 {
+		grown := make([dynamic]u8, 0, len(doc.src) + len(text) + 3 * len(seps), allocator)
+		if splice_range(&grown, doc, chunks, text, segments, seps, 0, u64(len(doc.src))) {
+			return grown[:], {}
+		}
+		delete(grown)
+		return nil, {kind = .No_Memory}
+	}
 	total := i64(len(doc.src))
 	for c in chunks {
 		total += i64(c.to-c.from) - i64(c.hi-c.lo)
@@ -123,71 +133,49 @@ splice :: proc(doc: ^core.Document, chunks: []Chunk, text: []u8, allocator: runt
 	return out, {}
 }
 
-// Replaces `src[lo:hi]` with `text[from:to]`. `rank` orders chunks at one byte. `cut` says the chunk takes a fact out and
-// writes nothing, and `drop` that the output cannot hold that fact, so it counts unless a set replaces its bytes.
+// Appends the source bytes `lo` through `hi` with `chunks`, the sorted chunks that lie inside them, applied. A
+// reordered container's chunk writes its segments, each source segment with the chunks inside it.
 @(private)
-Chunk :: struct {
-	lo, hi: u64,
-	from:   int,
-	to:     int,
-	rank:   Rank,
-	cut:    bool,
-	drop:   bool,
-}
-
-// Returns the first byte of member `v` of `parent`, without the comments it holds: its key's first byte or its own.
-// Only an inline-key `Map`'s member has a key node before it. A shared-key root's first member follows the shared keys,
-// whose last also has role `Key` and names no member of the root.
-@(private)
-value_lo :: proc(doc: ^core.Document, parent, v: core.Node_Index) -> u64 {
-	if doc.shared_keys == 0 && doc.nodes[parent].kind == .Map && doc.nodes[v-1].role == .Key {
-		return core.node_start(doc.nodes[v-1])
-	}
-	return core.node_start(doc.nodes[v])
-}
-
-// Returns the bytes where container `c`'s members go: those between its brackets, or a format's `interior`.
-@(private)
-interior :: proc(doc: ^core.Document, c: core.Node_Index) -> (lo, hi: u64) {
-	if edit := doc.spelling.edit; edit != nil && edit.interior != nil {
-		return edit.interior(doc, c)
-	}
-	hi = doc.spelling.close_end(doc, c)
-	return doc.nodes[c].lo + 1, hi - 1
-}
-
-// Returns `lo` moved past each space or tab before `hi`.
-@(private)
-blanks_end :: #force_inline proc(src: []u8, lo, hi: u64) -> u64 {
-	p := lo
-	for p < hi && (src[p] == ' ' || src[p] == '\t') {
-		p += 1
-	}
-	return p
-}
-
-// Whether `body` holds a line end a JSON line comment ends at: LF, CR, or a Unicode line separator. `line_end_len`
-// reads the same set.
-@(private)
-body_line_end :: #force_inline proc(body: []u8) -> bool {
-	return core.has_line_end(body) || bytes.index(body, transmute([]u8)string("\xE2\x80\xA8")) >= 0 || bytes.index(body, transmute([]u8)string("\xE2\x80\xA9")) >= 0
-}
-
-// Returns the indent of the line holding `pos` and whether bytes stand before `pos` on that line. A U+2028 or U+2029
-// separator is a line end only in a tree, as JSON5 reads one.
-@(private)
-line_shape :: proc(doc: ^core.Document, pos: u64) -> (indent: []u8, lead: bool) {
-	src := doc.src
-	unicode := !core.is_flat(doc)
-	lo := pos
-	for lo > 0 && src[lo-1] != '\n' && src[lo-1] != '\r' {
-		if unicode && lo >= 3 && src[lo-3] == 0xE2 && src[lo-2] == 0x80 && src[lo-1] | 1 == 0xA9 {
-			break
+splice_range :: proc(out: ^[dynamic]u8, doc: ^core.Document, chunks: []Chunk, text: []u8, segments: []Segment, seps: []u64, lo, hi: u64) -> bool {
+	at := lo
+	for i := 0; i < len(chunks); {
+		c := chunks[i]
+		j := i + 1
+		if c.ordered {
+			for j < len(chunks) && chunks[j].lo < c.hi {
+				j += 1
+			}
 		}
-		lo -= 1
+		if c.lo > at {
+			push_src(out, doc, seps, at, c.lo) or_return
+		}
+		if !c.ordered {
+			push_all(out, text[c.from:c.to]) or_return
+		}
+		inner := chunks[i + 1:j]
+		segs := segments[c.from:c.to] if c.ordered else nil
+		for s in segs {
+			if s.written {
+				push_all(out, text[s.lo:s.hi]) or_return
+				continue
+			}
+			a := 0
+			for a < len(inner) && inner[a].lo < s.lo {
+				a += 1
+			}
+			b := a
+			for b < len(inner) && inner[b].hi <= s.hi && (inner[b].lo < s.hi || inner[b].lo == s.lo) {
+				b += 1
+			}
+			splice_range(out, doc, inner[a:b], text, segments, seps, s.lo, s.hi) or_return
+		}
+		at = max(at, c.hi)
+		i = j
 	}
-	hi := blanks_end(src, lo, pos)
-	return src[lo:hi], hi < pos
+	if hi > at {
+		push_src(out, doc, seps, at, hi) or_return
+	}
+	return true
 }
 
 push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool) {
@@ -202,18 +190,38 @@ push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool) {
 	return len(vs), true
 }
 
-// Whether the output can hold a fact of `role` on `node`. A tree writes a foot on a container or the root, whose close
-// or text's end it precedes, and on no other node. A format with a `fact_slot` says its own. An output with no marker
-// holds no fact. The role's shape and the body's spelling are checked where the fact is written. `emptied` says the
-// list removes every member of the root.
+// The offsets of the U+2028 and U+2029 inside the source's line comments, sorted. JSON5 ends a line comment at one, so a
+// commit to JSON5 respells each as text.
 @(private)
-fact_slot :: #force_inline proc(doc: ^core.Document, node: core.Node_Index, role: core.Role, style: core.Comment_Spelling, emptied: bool) -> bool {
-	if style == .None {
-		return false
+line_separators :: proc(doc: ^core.Document, allocator: runtime.Allocator) -> []u64 {
+	found := make([dynamic]u64, allocator)
+	for f in doc.facts {
+		if core.comment_tail(f.spelling) != 0 {
+			continue
+		}
+		end := f.lo + u64(f.n)
+		for i := f.lo; i + 2 < end; i += 1 {
+			if doc.src[i] == 0xE2 && doc.src[i+1] == 0x80 && doc.src[i+2] | 1 == 0xA9 {
+				append(&found, i)
+			}
+		}
 	}
-	if edit := doc.spelling.edit; edit != nil && edit.fact_slot != nil {
-		return edit.fact_slot(doc, node, role, emptied)
+	slice.sort(found[:])
+	return found[:]
+}
+
+// Appends the source bytes `lo` through `hi`, a line separator in `seps` written as `\u2028` or `\u2029`.
+@(private)
+push_src :: proc(out: ^[dynamic]u8, doc: ^core.Document, seps: []u64, lo, hi: u64) -> bool {
+	at := lo
+	for s in seps {
+		if s < lo || s >= hi {
+			continue
+		}
+		push_all(out, doc.src[at:s]) or_return
+		push_all(out, transmute([]u8)string("\\u2028" if doc.src[s+2] == 0xA8 else "\\u2029")) or_return
+		at = s + 3
 	}
-	n := doc.nodes[node]
-	return role != .Comment_Foot || node == core.ROOT || n.kind == .Array || n.kind == .Map
+	_, ok := push_all(out, doc.src[at:hi])
+	return ok
 }

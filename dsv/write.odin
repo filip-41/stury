@@ -61,6 +61,8 @@ Rows :: struct {
 	words:   bool, // `true` and `false` hold neither the delimiter nor the comment byte
 	depth:   int,
 	dropped: int, // the cells a repeated key overwrote
+	kept:    int, // the comments a document's write wrote
+	width:   int, // a list row's cell count, set by the first row written, which the others keep unless `.Ragged`
 	cols:    []Named, // a struct row's columns, in the order written
 	keys:    []string, // a map row's columns, sorted
 	headed:  bool, // the columns are bound
@@ -90,10 +92,11 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 	return rows_end((^Rows)(rawptr(&w)), write_rows(&w, uintptr(value)))
 }
 
-// The handle of the rows a plan writes: `spec`, and `layout`'s delimiter, comment byte, `no_header` and `crlf`.
+// The handle of the rows a plan writes: `spec`, and `layout`'s delimiter, comment byte, `no_header`, `crlf` and
+// `.Ragged`.
 @(private)
 layout_as :: proc(spec: Spec, layout: Options) -> core.As {
-	return as(spec, {delimiter = layout.delimiter, comment = layout.comment, no_header = layout.no_header, crlf = layout.crlf})
+	return as(spec, {delimiter = layout.delimiter, comment = layout.comment, no_header = layout.no_header, crlf = layout.crlf, tolerate = layout.tolerate & {.Ragged}})
 }
 
 @(private)
@@ -133,13 +136,8 @@ rows_free :: proc(w: ^Rows) {
 @(private)
 rows_end :: proc(w: ^Rows, kind: core.Typed_Error_Kind) -> ([]u8, core.Typed_Error) {
 	rows_free(w)
-	if kind != .None {
-		write.destroy(&w.out)
-		w.err.kind = kind
-		w.err.cause = w.out.cause
-		return nil, w.err
-	}
-	return write.finish(&w.out)
+	w.err.kind = kind
+	return write.finish(&w.out, w.err)
 }
 
 @(private)
@@ -147,8 +145,13 @@ total :: #force_inline proc "contextless" (w: ^Rows) -> int {
 	return w.out.flushed + w.out.cursor
 }
 
+// The delimiter before a cell that is not its record's first.
 @(private)
-put_byte :: #force_inline proc(w: ^Rows, c: u8) {write.put_byte(&w.out, c)}
+put_sep :: #force_inline proc(w: ^Rows, more: bool) {
+	if more {
+		write.put_byte(&w.out, w.opts.delimiter)
+	}
+}
 
 // Writes the header: `names`, then the line end. A header that wrote nothing would be a blank line, and the first record
 // would read as the header.
@@ -156,15 +159,10 @@ put_byte :: #force_inline proc(w: ^Rows, c: u8) {write.put_byte(&w.out, c)}
 put_header :: proc(w: ^Rows, names: []string) -> core.Typed_Error_Kind {
 	start := total(w)
 	for name, k in names {
-		if k > 0 {
-			put_byte(w, w.opts.delimiter)
-		}
+		put_sep(w, k > 0)
 		put_string(w, name, k == 0, false) or_return
 	}
-	if total(w) == start {
-		return .Unwritable
-	}
-	return end_line(w)
+	return end_record(w, start, -1)
 }
 
 // Ends record `i`, which began at output offset `start`. A record that wrote nothing would be a blank line, which reads
@@ -239,7 +237,7 @@ write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, named
 		cols, failed := make([]Named, len(members), scratch)
 		names, no_names := make([]string, len(members), scratch)
 		if failed != nil || no_names != nil {
-			return .Out_Of_Memory
+			return .No_Memory
 		}
 		for &f, k in members {
 			cols[k] = {&f, pl.meta[f.meta].name}
@@ -276,7 +274,7 @@ write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, named
 				_, _, _, no_seen := map_entry(&seen, key)
 				_, no_key := append(&keys, key)
 				if no_seen != nil || no_key != nil {
-					return .Out_Of_Memory
+					return .No_Memory
 				}
 			}
 		}
@@ -292,7 +290,8 @@ write_header :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, named
 // Writes the rows of `list` by the columns `write_header` bound, as records `0 ..< list.len`, or as no record a path
 // names when `indexed` is false, as a record write's row is. A map row writes a cell per header key, an empty one where
 // the row lacks it, and refuses a key the header lacks. A cell that is present and empty would read back as no entry, so
-// it is refused too.
+// it is refused too. A list row whose cell count differs from the first row's is `.Wrong_Length` unless `.Ragged`, since
+// a read without it refuses the row.
 @(private)
 write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed: bool) -> core.Typed_Error_Kind {
 	pl := w.plan
@@ -303,9 +302,7 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 			start := total(w)
 			e := uintptr(list.data) + uintptr(i) * uintptr(row.stride)
 			for c, k in cols {
-				if k > 0 {
-					put_byte(w, w.opts.delimiter)
-				}
+				put_sep(w, k > 0)
 				if kind := write_cell(w, pl, c.f, e + uintptr(c.f.offset), k == 0, false); kind != .None {
 					return refuse_in(w, kind, i if indexed else -1, core.Name(c.name))
 				}
@@ -317,15 +314,17 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 		for i in 0 ..< list.len {
 			start := total(w)
 			inner := (^runtime.Raw_Slice)(uintptr(list.data) + uintptr(i) * uintptr(row.stride))^
+			if w.width != 0 && inner.len != w.width && .Ragged not_in w.opts.tolerate {
+				return refuse(w, .Wrong_Length, i if indexed else -1)
+			}
 			for k in 0 ..< inner.len {
-				if k > 0 {
-					put_byte(w, w.opts.delimiter)
-				}
+				put_sep(w, k > 0)
 				if kind := write_cell(w, pl, cell, uintptr(inner.data) + uintptr(k) * uintptr(cell.stride), k == 0, false); kind != .None {
 					return refuse_in(w, kind, i if indexed else -1, core.Index(k))
 				}
 			}
 			end_record(w, start, i if indexed else -1) or_return
+			w.width = inner.len
 		}
 	case .Map:
 		info := pl.meta[row.meta].map_info
@@ -335,9 +334,7 @@ write_list :: proc(w: ^Rows, row: ^typed.Field, list: runtime.Raw_Slice, indexed
 			m := (^runtime.Raw_Map)(uintptr(list.data) + uintptr(i) * uintptr(row.stride))
 			found := 0
 			for &key, k in w.keys {
-				if k > 0 {
-					put_byte(w, w.opts.delimiter)
-				}
+				put_sep(w, k > 0)
 				value := runtime.__dynamic_map_get(m, info, info.key_hasher(&key, runtime.map_seed(m^)), &key)
 				if value == nil {
 					continue
@@ -439,17 +436,13 @@ write_other :: #force_no_inline proc(w: ^Rows, pl: ^typed.Plan, f: ^typed.Field,
 			return put_string(w, string(cs), first, inner)
 		}
 	case .Enum:
-		m := &pl.meta[f.meta]
-		value := write.enum_value(m.enum_info, write.loaded(v, int(m.size)))
-		k := write.enum_member(m.enum_info, value)
-		if k < 0 {
-			return .Not_A_Member
-		}
+		info := pl.meta[f.meta].enum_info
+		p := write.room(out, CELL_ROOM)
+		name := write.enum_spelled(pl, info, write.enum_value(info, v), p) or_return
 		if pl.enums == .Int {
-			p := write.room(out, CELL_ROOM)
-			return put_number(w, p, write.enum_int_text(p, m.enum_info, value), first)
+			return put_number(w, p, len(name), first)
 		}
-		return put_string(w, m.enum_info.names[k], first, inner)
+		return put_string(w, name, first, inner)
 	case .Maybe:
 		if (^bool)(v + uintptr(pl.meta[f.meta].tag))^ {
 			return write_cell(w, pl, typed.field_at(u64(uintptr(f.first))), v, first, true)
@@ -556,7 +549,7 @@ put_string :: proc(w: ^Rows, s: string, first, inner: bool) -> core.Typed_Error_
 	bom := false
 	if high {
 		if !utf8.valid_string(s) {
-			return .Bad_Utf8
+			return .Invalid_Utf8
 		}
 		bom = out.cursor == 0 && out.flushed == 0 && strings.has_prefix(s, "\xEF\xBB\xBF")
 	}
@@ -566,6 +559,38 @@ put_string :: proc(w: ^Rows, s: string, first, inner: bool) -> core.Typed_Error_
 		return .None
 	}
 	return put_guarded(w, s, marked, bom)
+}
+
+// A string cell of a text read back with `infer`. One that would read back as a number, true or false is quoted, or
+// refused where the spec has no quotes.
+@(cold, private)
+put_inferred_string :: proc(w: ^Rows, s: string, first: bool) -> core.Typed_Error_Kind {
+	if s != "true" && s != "false" {
+		if _, is_number := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); !is_number {
+			return put_string(w, s, first, false)
+		}
+	}
+	if w.spec != .Csv {
+		return .Unwritable
+	}
+	return put_guarded(w, s, false, false)
+}
+
+// A number cell by its text, which must be a JSON number.
+@(cold, private)
+put_number_literal :: proc(w: ^Rows, s: string, first: bool) -> core.Typed_Error_Kind {
+	if _, is_number := spell.number_strict(transmute([]u8)s, 0, u64(len(s))); !is_number {
+		return .Bad_Raw
+	}
+	if !w.numbers {
+		write.put_text(&w.out, s)
+		return .None
+	}
+	if strings.index_byte(s, w.opts.delimiter) < 0 && !(first && w.opts.comment != 0 && s[0] == w.opts.comment) {
+		write.put_text(&w.out, s)
+		return .None
+	}
+	return put_guarded(w, s, true, false) if w.spec == .Csv else .Unwritable
 }
 
 // The longest cell `put_plain_cell` copies under one reservation.
@@ -766,16 +791,19 @@ TOKENS := write.Token_Spelling {
 @(private)
 token_cell :: proc(t: ^write.Tokens, v: write.Scalar) -> core.Typed_Error_Kind {
 	w := (^Rows)(t.state)
-	if !t.first {
-		put_byte(w, w.opts.delimiter)
-	}
+	put_sep(w, !t.first)
 	switch x in v {
 	case string:
+		if w.opts.infer {
+			return put_inferred_string(w, x, t.first)
+		}
 		return put_string(w, x, t.first, false)
 	case core.Number:
 		p := write.room(&w.out, CELL_ROOM)
 		size, kind := write.number_text(p, x)
 		return kind if kind != .None else put_number(w, p, size, t.first)
+	case write.Number_Literal:
+		return put_number_literal(w, x.text, t.first)
 	case write.Tree_Part:
 		if x != .Null {
 			return put_word(w, x == .True, t.first)
@@ -793,7 +821,7 @@ tokens_start :: proc(t: ^write.Tokens, as: core.As) -> core.Typed_Error_Kind {
 	}
 	w, err := new(Rows, t.base.allocator)
 	if err != nil {
-		return .Out_Of_Memory
+		return .No_Memory
 	}
 	rows_start(w, &t.spill, layout, spec, t.opts, t.base.stream, t.base.allocator, 0)
 	t.state, t.out = w, &w.out

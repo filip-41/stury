@@ -42,11 +42,12 @@ own_names :: proc(e: ^core.Typed_Error) {
 	}
 }
 
-// `own_names` for each error a read collected.
-own_collected :: proc(c: ^Collected) {
+// `own_names` for a read's error and each error it collected.
+own_errors :: proc(e: ^core.Typed_Error, c: ^Collected) {
+	own_names(e)
 	if c != nil {
-		for &e in c.errors {
-			own_names(&e)
+		for &x in c.errors {
+			own_names(&x)
 		}
 	}
 }
@@ -60,12 +61,26 @@ refuse :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs,
 	return regs, .Stop if h.collect == nil else .Skip
 }
 
-// Refuses the value `t`, which a collecting read then counts as read.
+// Refuses the value `t`, which a collecting read then counts as read. A refusal of what the value is names the type the
+// record reads and what the value holds.
 @(cold)
 refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action) {
-	lo, _ := core.scalar_ends(t)
-	regs, action := refuse(h, regs_in, {kind = kind, at = lo})
-	fld := field_at(regs.b)
+	lo, hi := core.scalar_ends(t)
+	e := core.Typed_Error{kind = kind, at = lo}
+	fld := field_at(regs_in.b)
+	if kind == .Wrong_Kind || kind == .Out_Of_Range || kind == .Not_A_Member {
+		e.found = t.kind
+		e.want.type = h.plan.meta[fld.meta].type
+		// A `Maybe` reads its element or null, and a null it takes, so its element is what the value failed.
+		if ti := type_info_of(e.want.type); ti == nil {
+		} else if u, maybe := runtime.type_info_base(ti).variant.(runtime.Type_Info_Union); maybe && len(u.variants) == 1 {
+			e.want.type = u.variants[0].id
+		}
+		if t.kind != .Object && t.kind != .Array {
+			e.want.text = string(h.src[lo:hi])
+		}
+	}
+	regs, action := refuse(h, regs_in, e)
 	if fld.stride != 0 {
 		runtime.mem_zero(rawptr(uintptr(regs.c)), int(fld.stride))
 		regs.c += u64(fld.stride)
@@ -103,36 +118,42 @@ collect_error :: proc(c: ^Collected, e: core.Typed_Error) {
 	}
 }
 
-// Builds `e`'s path, the innermost `MAX_ERROR_STEPS` steps, from the open frames. A step `e` holds already is the last,
-// in place of the step the registers stand at.
+// Builds `e`'s path from the open frames. A step `e` holds already is the last, in place of the step the registers stand
+// at.
 @(private)
 path_of :: proc(h: ^Reader, regs: core.Hook_Regs, e: ^core.Typed_Error) {
-	buf: [core.MAX_ERROR_STEPS]core.Step
-	n := 0
-	if e.n_steps > 0 {
-		buf[0], n = e.steps[0], 1
-	}
-	cur := regs
+	e.n_steps = min(e.n_steps, 1)
+	cur := h.wrap^ if int(h.wrap_sp) == h.sp else regs
 	skip := e.n_steps > 0
 	for i := h.sp - 1; i >= 1; i -= 1 {
 		f := &h.frames[i]
 		if !skip {
-			step, ok := step_at(h, f, cur)
-			if ok {
-				if n == len(buf) {
-					e.truncated = true
-					break
-				}
-				buf[n] = step
-				n += 1
+			if step, ok := step_at(h, f, cur); ok {
+				path_add(e, step)
 			}
 		}
 		skip = false
 		cur = {f.a, f.b, f.c}
 	}
-	e.n_steps = u8(n)
-	for k in 0 ..< n {
-		e.steps[k] = buf[n - 1 - k]
+	path_close(e)
+}
+
+// Adds `s`, the next step out, to the path of `e`, which `path_close` turns to read from the outermost. The path keeps
+// the innermost `MAX_ERROR_STEPS` steps, and `e.truncated` says when it dropped one.
+path_add :: proc "contextless" (e: ^core.Typed_Error, s: core.Step) {
+	if int(e.n_steps) == core.MAX_ERROR_STEPS {
+		e.truncated = true
+		return
+	}
+	e.steps[e.n_steps] = s
+	e.n_steps += 1
+}
+
+// Turns the path `path_add` built from the innermost step to read from the outermost.
+path_close :: proc "contextless" (e: ^core.Typed_Error) {
+	for i in 0 ..< int(e.n_steps) / 2 {
+		j := int(e.n_steps) - 1 - i
+		e.steps[i], e.steps[j] = e.steps[j], e.steps[i]
 	}
 }
 

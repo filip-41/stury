@@ -1,6 +1,6 @@
 package jq
 
-// Numeric builtins (`fn_abs`, `fn_float_class`, `fn_number_pair`, `fn_bsearch`) and
+// Numeric builtins (`fn_float_class`, `fn_number_pair`, `fn_bsearch`) and
 // dates (`gmtime`, `localtime`, `mktime`, `strftime`, `strflocaltime`, `strptime`).
 
 import "core:c/libc"
@@ -9,21 +9,6 @@ import "core:strings"
 import "core:sync"
 
 // ---- Numbers
-
-// jq's `if . < 0 then - . else . end`: null and the booleans sort below 0, and cannot be negated.
-fn_abs :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	switch kind(v) {
-	case .Number:
-		// `. < 0` compares a literal as a decimal, so -1e-400 is below 0 though it is -0.0.
-		if n, _ := number_of(v); n.f < 0 || n.f == 0 && compare(n, Number{0, "0"}) < 0 {
-			return negate(n), .Go
-		}
-	case .Null, .False, .True:
-		return nil, fail(ip, "%s (%s) cannot be negated", type_name(v), brief(v))
-	case .String, .Array, .Object:
-	}
-	return v, .Go
-}
 
 // isinfinite, isnan and isnormal.
 fn_float_class :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
@@ -36,7 +21,7 @@ fn_float_class :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (V
 fn_number_pair :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	n, ok := number_of(v)
 	if !ok {
-		return nil, fail(ip, "%s (%s) number required", type_name(v), brief(v))
+		return nil, fail(ip, "%s (%s) number required", type_name(v), brief(ip, v))
 	}
 	p, q: f64
 	switch name {
@@ -61,7 +46,7 @@ fn_number_pair :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (V
 // The index of `args[0]` in the sorted input, or -1 - where it would go.
 fn_bsearch :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	if kind(v) != .Array {
-		return nil, fail(ip, "%s (%s) cannot be searched from", type_name(v), brief(v))
+		return nil, fail(ip, "%s (%s) cannot be searched from", type_name(v), brief(ip, v))
 	}
 	lo, hi := 0, length_of(v)
 	too_deep = false

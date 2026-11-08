@@ -64,6 +64,18 @@ write_stdout :: proc(p: []byte) -> os.Error {
 	return err
 }
 
+// Closes stdout, which fails when the process has none.
+close_stdout :: proc() -> os.Error {
+	h := win.GetStdHandle(win.STD_OUTPUT_HANDLE)
+	if h == nil || h == win.INVALID_HANDLE_VALUE {
+		return os.Platform_Error(win.System_Error.INVALID_HANDLE)
+	}
+	if !win.CloseHandle(h) {
+		return os.Platform_Error(win.GetLastError())
+	}
+	return nil
+}
+
 // A console, as isatty tells one: GetConsoleMode fails on a pipe, a file and the NUL device.
 is_terminal :: proc(f: ^os.File) -> bool {
 	mode: win.DWORD
@@ -111,9 +123,29 @@ catch_stop :: proc() {
 		if kind != win.CTRL_C_EVENT && kind != win.CTRL_BREAK_EVENT {
 			return false
 		}
-		sync.atomic_store(&stopped, true)
+		sync.atomic_store(&stopped, 1)
 		return true
 	}, true)
+}
+
+// Ends the process with STATUS_CONTROL_C_EXIT once a stopped --follow run's answers are written, the status Ctrl-C
+// ends jq with.
+end_if_stopped :: proc() {
+	if sync.atomic_load(&stopped) != 0 {
+		os.exit(0xC000013A)
+	}
+}
+
+// Whether a read of `f` would not wait, found within `wait`. A file, a console and a pipe its writer closed are read
+// at once.
+read_ready :: proc(f: ^os.File, wait: time.Duration) -> bool {
+	held: u32
+	peek := !win.PeekNamedPipe(win.HANDLE(os.fd(f)), nil, 0, nil, &held, nil) || held > 0
+	if !peek && wait > 0 {
+		time.sleep(wait)
+		peek = !win.PeekNamedPipe(win.HANDLE(os.fd(f)), nil, 0, nil, &held, nil) || held > 0
+	}
+	return peek
 }
 
 is_regular_file :: proc(f: ^os.File) -> bool {
@@ -155,8 +187,10 @@ peak_rss :: proc() -> int {
 }
 
 // Every file is read.
-map_file :: proc(f: ^os.File) -> ([]byte, bool) {
-	return nil, false
+map_file :: proc(f: ^os.File) -> (data: []byte, at: i64, ok: bool) {
+	return
 }
+
+map_afresh :: proc(f: ^os.File, data: []byte, at: i64, from, to: int) {}
 
 unmap_file :: proc(data: []byte) {}

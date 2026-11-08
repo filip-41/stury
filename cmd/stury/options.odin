@@ -4,16 +4,17 @@ package main
 // together (`-nr`), `-L` taking the rest of its argument or the next one. Each option's error is jq's, reported as
 // soon as it is read.
 
-import "core:os"
 import "core:slice"
 import "core:strings"
 import core "../../core"
+import dsv "../../dsv"
 import json "../../json"
 import "jq"
 import "message"
 
 Opts :: struct {
 	compact:          bool,
+	layout_shown:     bool, // edit: a built value takes the layout of the container it lands in
 	indent:           i8, // pretty: N spaces, or -1 for a tab
 	raw:              bool,
 	join:             bool,
@@ -33,6 +34,8 @@ Opts :: struct {
 	from:             Format, // how the input is read
 	to:               Format, // how the outputs are written
 	grow_header:      bool, // --grow-header: --to csv or tsv holds all rows and writes a header of every key
+	cells_in:         dsv.Options, // how a --from csv or tsv text is read
+	cells_out:        dsv.Options, // how a --to csv or tsv text is written
 	explain:          bool, // --explain: write the filter's plan and what the run did to stderr
 	max_depth:        u32, // --max-depth, 0 when it was not given
 	in_place:         bool,
@@ -44,6 +47,7 @@ Opts :: struct {
 Cli :: struct {
 	validating: bool,
 	formatting: bool,
+	editing:    bool,
 	filter:     Maybe(string), // the filter, or under -f the file it is in
 	files:      [dynamic]string,
 	// --arg, --argjson, --slurpfile and --rawfile, the first of a name standing.
@@ -64,6 +68,9 @@ Cli :: struct {
 	},
 	// The first JSON-output-only option given (-r, -c, --indent...), and the first JSON layout option given.
 	json_flag, layout_flag: string,
+	// The first option given that reads a delimited text (--delimiter...), and the first that writes one (--crlf...).
+	cells_flag, cells_out_flag: string,
+	out_delimiter, out_comment: Maybe(byte),
 }
 
 // The command line `args` (os.args without the program) into `o`, as jq reads it.
@@ -71,8 +78,11 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	args := args
 	subcommand := subcommand_index(args)
 	if subcommand >= 0 {
-		cli.formatting = args[subcommand] == "fmt"
-		cli.validating = !cli.formatting
+		switch args[subcommand] {
+		case "fmt":  cli.formatting = true
+		case "edit": cli.editing = true
+		case:        cli.validating = true
+		}
 	}
 	rest_as: enum {
 		Files,
@@ -157,13 +167,40 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 			rest_as = .Json_Args
 		case "build-configuration":
 			message.write_stdout("%s\n", BUILD_CONFIGURATION)
-			os.exit(0)
+			exit_closing_stdout(0)
 		case "library-path":
 			i = lib_dir_arg(&cli, args, i)
 		case "from", "to":
 			i += option_arity(a)
 		case "grow-header":
 			o.grow_header = true
+		case "delimiter", "comment", "out-delimiter", "out-comment":
+			if i + 1 >= len(args) {
+				usage_error("%s takes one parameter", a)
+			}
+			c := cell_byte(a, args[i + 1])
+			switch name {
+			case "delimiter":     o.cells_in.delimiter = c
+			case "comment":       o.cells_in.comment = c
+			case "out-delimiter": cli.out_delimiter = c
+			case "out-comment":   cli.out_comment = c
+			}
+			note_cells_flag(&cli, a, strings.has_prefix(name, "out-"))
+			i += option_arity(a)
+		case "no-header", "infer", "ragged", "lazy-quotes":
+			switch name {
+			case "no-header":   o.cells_in.no_header = true
+			case "infer":       o.cells_in.infer = true
+			case "ragged":      o.cells_in.tolerate += {.Ragged}
+			case "lazy-quotes": o.cells_in.tolerate += {.Bare_Quote}
+			}
+			note_cells_flag(&cli, a, false)
+		case "out-no-header":
+			o.cells_out.no_header = true
+			note_cells_flag(&cli, a, true)
+		case "crlf":
+			o.cells_out.crlf = true
+			note_cells_flag(&cli, a, true)
 		case "explain":
 			o.explain = true
 		case "follow":
@@ -200,7 +237,39 @@ parse_args :: proc(o: ^Opts, args: []string) -> (cli: Cli) {
 	if writes_lines(o) {
 		o.compact = true
 	}
+	// A table written in the format read keeps the read's delimiter and headerless rows, and one written from any table
+	// keeps the read's comment character and --infer, so it reads back with the same options.
+	if o.to == o.from {
+		o.cells_out.delimiter = o.cells_in.delimiter
+		o.cells_out.no_header ||= o.cells_in.no_header
+	}
+	if reads_cells(o) && writes_cells(o) {
+		o.cells_out.comment, o.cells_out.infer = o.cells_in.comment, o.cells_in.infer
+	}
+	o.cells_out.delimiter = cli.out_delimiter.? or_else o.cells_out.delimiter
+	o.cells_out.comment = cli.out_comment.? or_else o.cells_out.comment
 	return
+}
+
+// The byte `arg` names for option `flag`: one ASCII character, or `\t` for a tab.
+@(private = "file")
+cell_byte :: proc(flag, arg: string) -> byte {
+	if arg == `\t` {
+		return '\t'
+	}
+	if len(arg) != 1 || arg[0] >= 0x80 {
+		usage_error("%s takes one ASCII character, or \\t for a tab, not %q", flag, arg)
+	}
+	return arg[0]
+}
+
+// Records `flag` as the first option that reads a delimited text, or with `out` the first that writes one.
+@(private = "file")
+note_cells_flag :: proc(cli: ^Cli, flag: string, out: bool) {
+	first := &cli.cells_out_flag if out else &cli.cells_flag
+	if first^ == "" {
+		first^ = flag
+	}
 }
 
 // Records a `--from NAME` or `--to NAME` option at `args[i]` in `cli.formats`. A later one overrides an earlier one.
@@ -290,10 +359,12 @@ bind_variable_option :: proc(cli: ^Cli, args: []string, i: int) {
 		v = json_arg(cli.json_reading, args[i + 2], a)
 	case:
 		msg: string
-		v, msg = load_file(args[i + 2], name == "rawfile", cli.json_reading)
+		read: bool
+		v, msg, read = load(args[i + 2], name == "rawfile", cli.json_reading)
 		if msg != "" {
-			message.write_stderr("stury: Bad JSON in %s %s %s: %s\n", a, args[i + 1], args[i + 2], msg)
-			os.exit(EXIT_USAGE)
+			// jq says "Bad JSON" of a file that did not open or read too.
+			message.write_stderr("stury: %s%s %s %s: %s\n", "Bad JSON in " if read else "", a, args[i + 1], args[i + 2], msg)
+			exit_closing_stdout(EXIT_USAGE)
 		}
 	}
 	append(&cli.var_names, args[i + 1])
@@ -306,7 +377,7 @@ is_option :: proc(a: string) -> bool {
 	return len(a) >= 2 && a[0] == '-' && (a[1] == '-' || ('a' <= a[1] && a[1] <= 'z') || ('A' <= a[1] && a[1] <= 'Z'))
 }
 
-// Where `check` (or `validate`) or `fmt` stands in `args`, or -1: the first argument that is not an option, before
+// Where `check` (or `validate`), `fmt` or `edit` stands in `args`, or -1: the first argument that is not an option, before
 // `--`. Under -f that argument is the program file's name, which stays a file. Short options hold -f when an `f` comes
 // before any `L`, whose rest is a directory (`-Lfoo`).
 @(private = "file")
@@ -320,7 +391,7 @@ subcommand_index :: proc(args: []string) -> int {
 		case is_option(a):
 			i += option_arity(a)
 		case:
-			return i if a == "check" || a == "validate" || a == "fmt" else -1
+			return i if a == "check" || a == "validate" || a == "fmt" || a == "edit" else -1
 		}
 	}
 	return -1
@@ -331,7 +402,7 @@ subcommand_index :: proc(args: []string) -> int {
 @(private = "file")
 option_arity :: proc(a: string) -> int {
 	switch a {
-	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to":
+	case "--indent", "--max-depth", "--library-path", "-L", "--from", "--to", "--delimiter", "--comment", "--out-delimiter", "--out-comment":
 		return 1
 	case "--arg", "--argjson", "--slurpfile", "--rawfile":
 		return 2
@@ -401,10 +472,10 @@ letter_option :: proc(o: ^Opts, cli: ^Cli, c: byte) -> bool {
 	case 'e':
 		o.exit_status = true
 	case 'h':
-		usage(0, false)
+		usage(0, false, command_name(cli))
 	case 'V':
 		message.write_stdout("stury-%s\n", VERSION)
-		os.exit(0)
+		exit_closing_stdout(0)
 	case:
 		return false
 	}
@@ -472,16 +543,58 @@ parse_max_depth :: proc(s: string) -> (n: u64, ok: bool) {
 	return n, ok && 1 <= n && n <= DEPTH_CEILING
 }
 
+// The command `cli` names, or "" for a filter run.
+command_name :: proc(cli: ^Cli) -> string {
+	return "check" if cli.validating else "fmt" if cli.formatting else "edit" if cli.editing else ""
+}
+
+// The first option given that `check`, `fmt` or `edit` has no use for, or "". fmt writes each input's own format, and
+// check prints nothing, so neither takes a layout or reshapes its input, but check takes --seq, which frames the records
+// it judges. edit writes each input back in its own format, so it takes no output format and no option that respells
+// the output as a whole, but its filter takes the options of a filter run's input and its bindings, and a built value
+// is written with -a, -S, --indent and --tab.
+command_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
+	editing := cli.editing
+	switch {
+	case editing && cli.formats.to != nil: return "--to"
+	case !cli.formatting && cli.cells_out_flag != "": return cli.cells_out_flag
+	case o.raw0:                 return "--raw-output0"
+	case o.raw:                  return "-j" if o.join else "-r"
+	case cli.compact_given && !editing: return "-c"
+	case o.ascii && !editing:    return "-a"
+	case o.sort_keys && !editing: return "-S"
+	case cli.color_set:          return "-C"
+	case o.raw_input && !editing: return "-R"
+	case o.null_input:           return "-n"
+	case o.slurp && !editing:    return "-s"
+	case o.from_file && !editing: return "-f"
+	case o.seq && cli.formatting: return "--seq"
+	case o.stream_errors:        return "--stream-errors"
+	case o.stream:               return "--stream"
+	case o.exit_status && !editing: return "-e"
+	case o.explain && !editing:  return "--explain"
+	case cli.binding_flag != "" && !editing: return cli.binding_flag
+	case !cli.formatting && !editing && cli.layout_flag != "": return cli.layout_flag
+	case cli.lib_dirs != nil && !editing: return "-L"
+	}
+	return ""
+}
 
 // Refuses what --follow cannot do: it answers the records of one file as they are appended, so it needs the file
 // named, a filter run, and an input that is records rather than whole texts.
 refuse_follow :: proc(o: ^Opts, cli: ^Cli) {
-	other := "check" if cli.validating else "fmt" if cli.formatting else "--slurp" if o.slurp else "--null-input" if o.null_input else "--stream" if o.stream else ""
+	other := command_name(cli)
+	other = other if other != "" else "--slurp" if o.slurp else "--null-input" if o.null_input else "--stream" if o.stream else ""
 	if other != "" {
 		usage_error("--follow answers each record of a file as it is appended: it cannot be combined with %s", other)
 	}
-	if len(cli.files) != 1 || cli.files[0] == "-" {
-		usage_error("--follow follows one named file, not stdin or %d files", len(cli.files))
+	switch {
+	case len(cli.files) == 0:
+		usage_error("--follow follows one named file, and none was given")
+	case len(cli.files) > 1:
+		usage_error("--follow follows one named file, not %d files", len(cli.files))
+	case cli.files[0] == "-":
+		usage_error("--follow follows one named file, not stdin")
 	}
 	if FORMATS[o.from].spec != .Json {
 		usage_error("--follow reads records: --from %s makes one text of a file", FORMATS[o.from].name)

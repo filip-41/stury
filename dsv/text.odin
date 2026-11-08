@@ -46,6 +46,23 @@ header_cells :: #force_no_inline proc "contextless" (src: []u8, start: int, $S: 
 	return scan_record(src, record_start(src, start, opts.comment), 0, S, spec_delimiter(S, opts.delimiter)).cells
 }
 
+// The header record of the text `src` read as `as` reads it: its first byte, and the byte past its line end. Both are
+// `len(src)` when the text holds no record. The comment lines before it lie before `lo`, those after it from `hi`.
+header_span :: proc(src: []u8, as: core.As) -> (lo, hi: int) {
+	opts := options_of(as)
+	lo = record_start(src, int(core.text_start(src, 0)), opts.comment)
+	if lo >= len(src) {
+		return len(src), len(src)
+	}
+	end: int
+	switch Spec(as.spec) {
+	case .Csv:   end = scan_record(src, lo, 0, .Csv, spec_delimiter(.Csv, opts.delimiter)).line_end
+	case .Tsv:   end = scan_record(src, lo, 0, .Tsv, spec_delimiter(.Tsv, opts.delimiter)).line_end
+	case .Plain: end = scan_record(src, lo, 0, .Plain, spec_delimiter(.Plain, opts.delimiter)).line_end
+	}
+	return lo, min(end + 1, len(src))
+}
+
 // A record read from its first byte by `scan_record`. `cells` is its cell count, at least 1. `fault_at` is the index
 // of the first delimiter that opens a cell past `width`, -1 when there is none, and width 0 counts cells only.
 // `line_end` is the index of its LF, or `len(src)` when the text ends first. `line_end_lo` is the index of the CR in a
@@ -144,19 +161,13 @@ ESCAPE_LETTERS := kernel.Nibble_Table {
 }
 
 // The first malformed UTF-8 sequence in the block at `pos`, starting from the lead byte of the sequence that holds
-// `pos` but never before `floor`. Returns `Bad_Char` (`Bad_Utf8`) at the sequence's lead byte, `Truncated` (`Cut_Utf8`)
+// `pos` but never before `floor`. Returns `Bad_Char` (`Invalid_Utf8`) at the sequence's lead byte, `Truncated` (`Cut_Utf8`)
 // at `len(src)` when the text ends inside a sequence that is valid so far, or -1 when there is none. A block whose error mask is set comes
 // here, and so does the text's end when a sequence is left open there, where the lead byte alone decides `Truncated`
 // from its sequence's length.
 @(private, cold)
 utf8_fault :: #force_no_inline proc "contextless" (src: []u8, floor, pos: int) -> (fault: int, kind: core.Fault_Kind, detail: Detail) {
-	i := pos
-	for i > max(pos - 3, floor) && src[i - 1] & 0xc0 == 0x80 {
-		i -= 1
-	}
-	if i > floor && src[i - 1] >= 0xc0 {
-		i -= 1
-	}
+	i := sequence_lead(raw_data(src), floor, pos)
 	return span_fault(src, i, min(pos + 64, len(src)))
 }
 
@@ -170,7 +181,7 @@ span_fault :: proc "contextless" (src: []u8, lo, hi: int) -> (fault: int, kind: 
 	if k == .Truncated {
 		return len(src), .Truncated, .Cut_Utf8
 	}
-	return at, .Bad_Char, .Bad_Utf8
+	return at, .Bad_Char, .Invalid_Utf8
 }
 
 // The first ill-formed UTF-8 sequence of the block at `pos` whose lead is in a comment line, as `utf8_fault` returns it.
@@ -198,13 +209,7 @@ comment_utf8_fault :: #force_no_inline proc "contextless" (src: []u8, pos: int, 
 @(private, cold)
 ill_leads :: #force_no_inline proc "contextless" (base: [^]u8, floor, pos, end: int) -> (leads: u64, back: int) #no_bounds_check {
 	back = -1
-	i := pos
-	for i > max(pos - 3, floor) && base[i - 1] & 0xc0 == 0x80 {
-		i -= 1
-	}
-	if i > floor && base[i - 1] >= 0xc0 {
-		i -= 1
-	}
+	i := sequence_lead(base, floor, pos)
 	for i < min(pos + 64, end) {
 		if base[i] < 0x80 {
 			i += 1
@@ -223,6 +228,19 @@ ill_leads :: #force_no_inline proc "contextless" (base: [^]u8, floor, pos, end: 
 		i += 1
 	}
 	return
+}
+
+// Steps back from `pos` over at most three continuation bytes and the lead byte before them, never past `floor`.
+@(private)
+sequence_lead :: #force_inline proc "contextless" (base: [^]u8, floor, pos: int) -> int #no_bounds_check {
+	i := pos
+	for i > max(pos - 3, floor) && base[i - 1] & 0xc0 == 0x80 {
+		i -= 1
+	}
+	if i > floor && base[i - 1] >= 0xc0 {
+		i -= 1
+	}
+	return i
 }
 
 // The lead byte of the first ill-formed UTF-8 sequence that starts in `[lo, hi)`, each read up to `end`, and its fault

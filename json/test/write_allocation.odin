@@ -9,7 +9,7 @@ import write "../../core/write"
 import json ".."
 import walktest "../../walktest"
 
-// Writing with an allocator that refuses an allocation: every write gives its text or `.Out_Of_Memory`.
+// Writing with an allocator that refuses an allocation: every write gives its text or `.No_Memory`.
 
 Sweep_Inner :: struct {
 	a: int,
@@ -56,7 +56,7 @@ Marshal_Try :: struct {
 @(private)
 marshal_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
 	m := (^Marshal_Try)(data)
-	text, err := json.marshal(m.value, m.opts, allocator)
+	text, err := json.marshal(m.value, write = m.opts, allocator = allocator)
 	return text, err.kind
 }
 
@@ -66,7 +66,7 @@ marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	v.first, v.second, v.arm = inner, other, inner
 	for opts in ([?]core.Write_Options{{}, {sort_keys = true}, {pretty = true, sort_keys = true, ascii = true}}) {
 		try := Marshal_Try{v, opts}
-		want, err := json.marshal(v, opts, context.temp_allocator)
+		want, err := json.marshal(v, write = opts, allocator = context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		walktest.sweep_write(t, marshal_try, &try, string(want))
 	}
@@ -144,7 +144,7 @@ Format_Try :: struct {
 @(private)
 format_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
 	f := (^Format_Try)(data)
-	text, err := json.format(f.src, .Json, f.opts, f.read, allocator)
+	text, err := core.format(f.src, json.as(.Json, f.read), f.opts, allocator)
 	return text, err.kind
 }
 
@@ -159,7 +159,7 @@ format_under_failing_allocators :: proc(t: ^testing.T) {
 		{src = transmute([]u8)deep, read = {max_depth = 5000}},
 	}
 	for &c in cases {
-		want, err := json.format(c.src, .Json, c.opts, c.read, context.temp_allocator)
+		want, err := core.format(c.src, json.as(.Json, c.read), c.opts, context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		walktest.sweep_write(t, format_try, &c, string(want))
 	}
@@ -172,7 +172,7 @@ marshal_keeps_off_the_temporary_allocator :: proc(t: ^testing.T) {
 	v.first, v.second, v.arm = inner, other, inner
 	f := walktest.Failing_Alloc{inner = context.temp_allocator, fail_at = -1}
 	context.temp_allocator = walktest.failing_allocator(&f)
-	text, err := json.marshal(v, {sort_keys = true})
+	text, err := json.marshal(v, write = {sort_keys = true})
 	defer delete(text)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, f.n, 0)

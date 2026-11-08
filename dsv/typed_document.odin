@@ -53,19 +53,14 @@ document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	if !h.no_header && doc.shared_keys == 0 && !doc.partial && core.length(doc, core.ROOT) == 0 {
 		return {}
 	}
-	defer delete(h.keys, context.temp_allocator)
+	d.per_record = !h.no_header && doc.shared_keys == 0
+	defer if d.per_record {
+		delete(h.keys, context.temp_allocator)
+	}
 	defer delete(h.cols, context.temp_allocator)
 	if !h.no_header && doc.shared_keys != 0 {
-		failed: runtime.Allocator_Error
-		h.keys, failed = make([]core.Token, core.length(doc, doc.shared_keys), context.temp_allocator)
-		if failed != nil {
-			return {kind = .Out_Of_Memory}
-		}
-		for &key, c in h.keys {
-			key = doc.nodes[int(doc.shared_keys) + 1 + c]
-		}
+		h.keys = header_keys(doc)
 	}
-	d.per_record = !h.no_header && doc.shared_keys == 0
 	action: core.Action
 	regs, action = row_token(h, regs, {kind = .Array, role = .Value, lo = doc.nodes[0].lo if root else 0})
 	if root && h.opens == .Array && doc.shared_keys != 0 && action == .Next {
@@ -115,7 +110,7 @@ record_row :: proc(d: ^Document_Cells, regs: core.Hook_Regs, rec: core.Node_Inde
 @(private)
 header_row :: proc(d: ^Document_Cells, regs: core.Hook_Regs) -> (core.Hook_Regs, core.Action) {
 	h := &d.cells
-	keys := d.doc.nodes[int(d.doc.shared_keys) + 1:][:core.length(d.doc, d.doc.shared_keys)]
+	keys := header_keys(d.doc)
 	out, action := row_token(h, regs, {kind = .Array, role = .Value, lo = keys[0].lo})
 	if action != .Next {
 		return out, action

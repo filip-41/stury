@@ -99,12 +99,10 @@ json5 :: proc(t: ^testing.T) {
 	doc, err = build(`['\x41\0\n\'\\', "\uD83D\uDE00"]`, .Json5)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	buf: [256]u8
-	s, ok := core.text(&doc, 1, buf[:])
-	testing.expect(t, ok)
-	testing.expect_value(t, s, "A\x00\n'\\")
-	s, ok = core.text(&doc, 2, buf[:])
-	testing.expect(t, ok)
-	testing.expect_value(t, s, "\U0001F600")
+	for want, i in ([]string{"A\x00\n'\\", "\U0001F600"}) {
+		s, ok := core.text(&doc, core.Node_Index(i + 1), buf[:])
+		testing.expectf(t, ok && s == want, "text %d: %q", i, s)
+	}
 	core.destroy(&doc)
 
 	doc, err = build(`[+1, .5, 5., Infinity, -Infinity, NaN, -NaN, 0x10, -0x10]`, .Json5)
@@ -137,29 +135,24 @@ json5 :: proc(t: ^testing.T) {
 // per maximal subpart.
 @(test)
 tolerated :: proc(t: ^testing.T) {
-	doc, err := build("\"a\xffb\"", .Json, {tolerate = {.Invalid_Utf8}})
-	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	buf: [64]u8
-	s, ok := core.text(&doc, 0, buf[:])
-	testing.expect(t, ok)
-	testing.expectf(t, s == "a\uFFFDb", "got %x want %x", transmute([]u8)s, transmute([]u8)string("a\uFFFDb"))
-	core.destroy(&doc)
-
-	doc, err = build("\"\\uD800\"", .Json, {tolerate = {.Lone_Surrogate}})
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	s, ok = core.text(&doc, 0, buf[:])
-	testing.expect(t, ok)
-	testing.expect_value(t, s, "\uFFFD")
-	core.destroy(&doc)
-
-	// `E1 80 41` is U+FFFD for the maximal subpart `E1 80`, then `A`.
-	doc, err = build("'\xe1\x80A'", .Json5, {tolerate = {.Invalid_Utf8}})
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	s, ok = core.text(&doc, 0, buf[:])
-	testing.expect(t, ok)
-	testing.expectf(t, s == "\uFFFDA", "got %x want %x", transmute([]u8)s, transmute([]u8)string("\uFFFDA"))
-	core.destroy(&doc)
+	for c in ([]struct {
+			src:  string,
+			spec: json.Spec,
+			opts: json.Options,
+			want: string,
+		}{
+			{"\"a\xffb\"", .Json, {tolerate = {.Invalid_Utf8}}, "a\uFFFDb"},
+			{"\"\\uD800\"", .Json, {tolerate = {.Lone_Surrogate}}, "\uFFFD"},
+			// `E1 80 41` is U+FFFD for the maximal subpart `E1 80`, then `A`.
+			{"'\xe1\x80A'", .Json5, {tolerate = {.Invalid_Utf8}}, "\uFFFDA"},
+		}) {
+		doc, err := json.build(transmute([]u8)c.src, c.spec, c.opts)
+		defer core.destroy(&doc)
+		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+		buf: [64]u8
+		s, ok := core.text(&doc, 0, buf[:])
+		testing.expectf(t, ok && s == c.want, "%q: got %x want %x", c.src, transmute([]u8)s, transmute([]u8)c.want)
+	}
 }
 
 // Checks a number's kind and bits at the i64 and u64 edges, at the binary64 edges, and against `strconv.parse_f64` on
@@ -306,10 +299,11 @@ text_lax_buffer_bound :: proc(t: ^testing.T) {
 	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
 		return
 	}
-	buf: [5]u8
+	buf: [16]u8
+	room := core.text_room(&doc, 0)
 	s, ok := core.text(&doc, 0, buf[:4])
 	testing.expect(t, !ok)
-	s, ok = core.text(&doc, 0, buf[:])
+	s, ok = core.text(&doc, 0, buf[:room])
 	testing.expect(t, ok && s == "a\uFFFDb")
 }
 
@@ -383,70 +377,36 @@ track_allocator :: proc(p: ^Track_Alloc) -> runtime.Allocator {
 // `\u0000`, a string of escapes only, and plain strings of 63, 64 and 65 bytes.
 @(test)
 decode_edges :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
 	buf: [256]u8
-	expect_decode :: proc(t: ^testing.T, src: string, want: []u8, buf: []u8) {
-		doc, err := build(src, .Json)
+	rep :: proc(c: string, n: int) -> string {
+		return strings.repeat(c, n, context.temp_allocator)
+	}
+	for c in ([]struct {
+			src:  string,
+			want: string,
+		}{
+			// The escape starts at byte 64, the second block's first byte.
+			{strings.concatenate({`"`, rep("a", 63), `\n"`}, context.temp_allocator), strings.concatenate({rep("a", 63), "\n"}, context.temp_allocator)},
+			// A surrogate pair whose second escape starts past byte 64.
+			{strings.concatenate({`"`, rep("a", 58), `\ud83d\ude00"`}, context.temp_allocator), strings.concatenate({rep("a", 58), "\xf0\x9f\x98\x80"}, context.temp_allocator)},
+			{`"\u0000"`, "\x00"},
+			{`"\n\t\r\"\\\/\b\f"`, "\n\t\r\"\\/\b\f"},
+			// Plain strings of 63, 64 and 65 bytes, and each with `\t` as its last byte.
+			{strings.concatenate({`"`, rep("b", 63), `"`}, context.temp_allocator), rep("b", 63)},
+			{strings.concatenate({`"`, rep("b", 64), `"`}, context.temp_allocator), rep("b", 64)},
+			{strings.concatenate({`"`, rep("b", 65), `"`}, context.temp_allocator), rep("b", 65)},
+			{strings.concatenate({`"`, rep("b", 62), `\t"`}, context.temp_allocator), strings.concatenate({rep("b", 62), "\t"}, context.temp_allocator)},
+			{strings.concatenate({`"`, rep("b", 63), `\t"`}, context.temp_allocator), strings.concatenate({rep("b", 63), "\t"}, context.temp_allocator)},
+			{strings.concatenate({`"`, rep("b", 64), `\t"`}, context.temp_allocator), strings.concatenate({rep("b", 64), "\t"}, context.temp_allocator)},
+		}) {
+		doc, err := build(c.src, .Json)
 		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "%q: %v", src, err) {
-			return
+		if !testing.expectf(t, err.kind == .None, "%q: %v", c.src, err) {
+			continue
 		}
-		s, ok := core.text(&doc, 0, buf)
-		testing.expectf(t, ok && string(want) == s, "%q: %q, want %q", src, s, want)
-	}
-
-	// 63 `a` bytes then `\n`: the escape starts at byte 64, the second block's first byte.
-	esc: [128]u8
-	esc[0] = '"'
-	for i in 1 ..= 63 {
-		esc[i] = 'a'
-	}
-	esc[64] = '\\'
-	esc[65] = 'n'
-	esc[66] = '"'
-	want: [64]u8
-	for i in 0 ..< 63 {
-		want[i] = 'a'
-	}
-	want[63] = '\n'
-	expect_decode(t, string(esc[:67]), want[:64], buf[:])
-
-	// A surrogate pair whose second escape starts past byte 64.
-	for i in 1 ..= 58 {
-		esc[i] = 'a'
-	}
-	copy(esc[59:], `\ud83d\ude00`)
-	esc[71] = '"'
-	for i in 0 ..< 58 {
-		want[i] = 'a'
-	}
-	copy(want[58:], "\xf0\x9f\x98\x80")
-	expect_decode(t, string(esc[:72]), want[:62], buf[:])
-
-	expect_decode(t, `"\u0000"`, []u8{0}, buf[:])
-	expect_decode(t, `"\n\t\r\"\\\/\b\f"`, []u8{'\n', '\t', '\r', '"', '\\', '/', '\b', '\f'}, buf[:])
-
-	// Plain strings of 63, 64 and 65 bytes, and each with `\t` as its last byte.
-	for n in 63 ..= 65 {
-		plain: [80]u8
-		plain[0] = '"'
-		for i in 1 ..= n {
-			plain[i] = 'b'
-		}
-		plain[n + 1] = '"'
-		got: [80]u8
-		for i in 0 ..< n {
-			got[i] = 'b'
-		}
-		expect_decode(t, string(plain[:n + 2]), got[:n], buf[:])
-
-		escaped: [80]u8
-		escaped[0] = '"'
-		for i in 1 ..< n {
-			escaped[i] = 'b'
-		}
-		copy(escaped[n:], `\t"`)
-		got[n - 1] = '\t'
-		expect_decode(t, string(escaped[:n + 3]), got[:n], buf[:])
+		s, ok := core.text(&doc, 0, buf[:])
+		testing.expectf(t, ok && s == c.want, "%q: %q, want %q", c.src, s, c.want)
 	}
 }
 
@@ -500,7 +460,7 @@ decode_into_token_sized_buffer :: proc(t: ^testing.T) {
 	alloc := mem.arena_allocator(&arena)
 	texts := []string{`"\u0041"`, `"\uD800"`}
 	for src in texts {
-		doc, err := json.build(transmute([]u8)src, .Json, {tolerate = {.Lone_Surrogate}}, false, alloc)
+		doc, err := json.build(transmute([]u8)src, .Json, {tolerate = {.Lone_Surrogate}}, .Last, alloc)
 		if !testing.expectf(t, err.kind == .None, "%q: %v", src, err) {
 			continue
 		}
@@ -524,7 +484,7 @@ decode_into_token_sized_buffer :: proc(t: ^testing.T) {
 	}
 	strings.write_string(&b, `\u0041"`)
 	src := strings.to_string(b)
-	doc, err := json.build(transmute([]u8)src, .Json, {}, false, alloc)
+	doc, err := json.build(transmute([]u8)src, .Json, {}, .Last, alloc)
 	defer core.destroy(&doc)
 	if !testing.expectf(t, err.kind == .None, "long: %v", err) {
 		return

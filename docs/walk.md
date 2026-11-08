@@ -29,6 +29,7 @@ Odin and LLVM behaviour behind the hot-path shape. `kernel.md` covers the vector
 | `json/states.odin` | the grammar states, one procedure each, and the value classes |
 | `json/strings.odin` | the string readers, from a two-load probe to a block reader per x86 tier |
 | `json/scalars.odin` | numbers and literals |
+| `json/number_blocks.odin` | arrays of arrays of numbers judged 64 bytes at a time |
 | `json/whitespace.odin` | whitespace, the colon after a key, the indent predictor |
 | `json/comments.odin` | comments: the reader, a run of them with JSON5's whitespace, and the states that give them roles |
 | `json/json5.odin` | JSON5's numbers, strings, unquoted keys and whitespace, and the states that read them |
@@ -57,7 +58,7 @@ Detail   :: enum u8 { None, ... }   // the format's own rules, in `Fault.detail`
 RULES    : core.Rules             // each rule's code and message, in rodata
 walk     :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
 validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault)
-build    :: proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error)
+build    :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Document_Error)
 ```
 
 The walks share one signature, and dsv's `build` writes the header's cells into a private key buffer: `walk` allocates
@@ -104,8 +105,9 @@ and a reader uses it to decode a string or number without running a second walk.
   document's own bytes say where it ends. Before its document, a JSON walk skips whitespace, the record separator
   0x1E, and in a spec with comments the comments, and in JSON5 its whitespace. When nothing but those remain before
   the text's end or a 0x1E, it emits no token and returns the text's end with no fault. A stream of documents
-  (NDJSON, RFC 7464, jq's input) is therefore a loop of walks, each starting where the last ended. A dsv text is one
-  table, so its walk reads to the text's end, and a walk started past the end reads an empty table.
+  (NDJSON, RFC 7464, jq's input) is therefore a loop of walks, each starting where the last ended, and jq's input,
+  the records under `.Concatenated`, refuses a 0x1E that a walk passed over. A dsv text is one table, so its walk
+  reads to the text's end, and a walk started past the end reads an empty table.
 - The walks are contextless, so a hook can call a walk. A walk that needs scratch sets the default context there,
   allocates from the default heap, and frees it before it returns; a walk that allocates nothing sets no context.
   `validate` allocates nothing unless `max_depth` is past `MAX_DEPTH`.
@@ -131,7 +133,7 @@ Token :: struct { lo: u64, n: u32, kind: Kind, role: Role, spelling: u16 }
 A token is 16 bytes and crosses a call in two registers. `lo` and `n` are its span in the text. Tokens come in the
 order the walk reads them, which is text order except for a dsv `Key`, whose span is its column's header cell, before
 the record that names it. `kind` says what the token is: a scalar (`Null`, `False`, `True`, `Number`, `String`,
-`Plain`), a container's opening (`Array`, `Map`), or its `End`. `role` is `Key` for a JSON member's name and for the
+`Plain`), a container's opening (`Array`, `Object`), or its `End`. `role` is `Key` for a JSON member's name and for the
 header cell that names a dsv cell's column, and past `Key` a fact: a comment, `Plain`, as `Comment`, `Comment_Inline`
 or `Comment_Foot`. A consumer that wants values only tests `role <= .Key`. `spelling` is a detail the format writes
 and core reads through three bits: bit 0 says `text` must be decoded, bit 1 says the token is quoted (a JSON string,
@@ -152,10 +154,10 @@ arguments in registers, while on x86-64 SysV two words spill to the stack under 
 The `Action` a hook returns:
 
 - `Next` continues the walk.
-- `Skip` on an `Array` or `Map` passes the container with no more tokens, its `End` included, and on a `Key` passes
+- `Skip` on an `Array` or `Object` passes the container with no more tokens, its `End` included, and on a `Key` passes
   the comments before the member's value and the value. The walk still judges the bytes it passes. The comments after
   a skipped value are still given. On a scalar it acts as `Next`.
-- `Keep` on an `Array` or `Map` is `Next`, and says every token up to its `End` is to be written as it comes, which
+- `Keep` on an `Array` or `Object` is `Next`, and says every token up to its `End` is to be written as it comes, which
   a walk may do by the builder's plain hook.
 - `Stop` ends the walk at once, with no fault and the rest of the text unjudged.
 
@@ -194,9 +196,17 @@ independently, 0 for none. `at` is the byte the kind names. A count or limit is 
 `line:col: message`) from that table without calling into the format, so a format outside stury can add its own table
 and render the same way. A code is stable across releases and a message may change.
 
-dsv names what is wrong within `Bad_Char` and `Truncated`: `too_many_fields` (a record wider than the first, at the
-delimiter that starts its extra cell), `too_few_fields` (a narrower one, at its line end), `bare_quote`, `after_quote` (a
-byte after a closing quote that is no quote, delimiter or line end), `lone_cr`, `bad_utf8` (at the lead byte), and for
+JSON names what is wrong within `Bad_Char` and `Bad_Number`: the separator an array or an object wants after a member
+(`array_separator`, `member_separator`), a comma before a close or where a value must start (`trailing_comma`,
+`lone_comma`), a close that matches no open (`unmatched_bracket`, `unmatched_brace`), a `'` string, a control byte or
+ill-formed UTF-8 (`control_char`, `invalid_utf8`, whose rendered message adds the code point or the byte), a number's
+leading zero, `.` or `+`, `Infinity` or `NaN`, a missing colon and a key that is no string. Each detail is chosen where
+the walk faults, in a cold state or after the walk returns, so the states that read valid text compile none of it.
+
+A record of another width than the first is dsv's own kind, `Bad_Width`, with `too_many_fields` (a record wider than
+the first, at the delimiter that starts its extra cell) or `too_few_fields` (a narrower one, at its line end). dsv names
+what is wrong within `Bad_Char` and `Truncated`: `bare_quote`, `after_quote` (a
+byte after a closing quote that is no quote, delimiter or line end), `lone_cr`, `invalid_utf8` (at the lead byte), and for
 `Truncated` `open_quote` (at the opening quote) and `cut_utf8`.
 
 `locate` returns a byte's line and column, both counted from 1, with the column in bytes. It continues from the
@@ -239,8 +249,8 @@ lives in `core`, so a format adds no reader, no `query` and no `commit` of its o
    takes `build.query` unless the format routes paths itself. Set `edit` to one `core.Edit_Spelling` table.
 4. **The paths.** `set` and the path walk instantiate `build.Scan` over the format's `walk`, and `Scan.rewalk` walks one
    value again for a ring's element. See `paths.md`.
-5. **The edits.** `Edit_Spelling.commit` calls `compose.commit`. A format whose root has no brackets passes a
-   `compose.Root_Spelling`, sets `flat` and supplies `interior`, `fact_slot`, `emptied` and `plan`.
+5. **The edits.** `Edit_Spelling.commit` is `compose.commit`. A format whose root has no brackets sets `flat`,
+   gives the root's line end as its `member_sep` and supplies `interior`, `fact_slot`, `emptied` and `plan`.
 6. **The typed read.** `unmarshal` runs the format's `walk` over `typed.Reader`'s hook. A format that reads its values
    as JSON does needs no more. A format with its own value reader, as dsv has for a cell, stores through `core.token_text`,
    `store_whole`, `store_cstring`, `store_enum`, `store_number`, `store_enum_value` and `map_slot`, and reads the
@@ -276,9 +286,11 @@ A tail call passes the same registers it received, so a move between states is a
   key are bit tests on a register. `]` with bit 5 set is `}`, so `p[0] == ']' | (d & 1) << 5` tests the right one.
 - The depth stack holds only what no register holds. An open bracket writes the kind of the container it leaves into
   that depth's slot, and a close reads it back into `d`. The stack is `MAX_DEPTH` bytes on the walk's stack and stays
-  unwritten (`= ---` on an array, where a struct would be zeroed), and no slot is read before it is written. An
-  `Options.max_depth` past `MAX_DEPTH` allocates its stack from the default heap in `walk_deep`, kept out of line so the
-  walk's entry does not change. An open compares the depth with `w.depth`.
+  unwritten (`= ---` on an array, where a struct would be zeroed), and no slot is read before it is written. An open
+  compares the depth with `w.depth`, the levels every stack holds, and past it the cold state `st_deepen` calls
+  `deepen`, which faults `.Too_Deep` at `w.limit` or doubles `w.depth` toward it: the byte stack moves to the default
+  heap, and the hook's stacks grow with it, a builder's and a path scan's words and a typed read's frames. A walk
+  frees a stack it grew before it returns.
 - Every state is `#force_no_inline`. Inlining one state into another would make a single procedure that saves the
   union of their registers on entry, and separate states save only their own.
 
@@ -360,6 +372,14 @@ at most one space in a loop. In an object, the next member enters `st_member_run
 key, a colon in a fast-path spelling and a number value in a loop. Either run passes anything else to the states that
 read it, so the states every document passes through hold none of the runs' code. `st_after_number` is separate from
 `st_after` for the same reason and has the same separator rules.
+
+When a number run ends at a close followed by `,[`, a walk whose hook takes every number and bracket with `Next`
+(`validate`, a skipping path scan, the document build and its count) enters `st_number_blocks`. It judges the text 64
+bytes at a time from masks of digits, `-`, `.`, `,`, `[`, `]` and `0`: the bytes of each number, the byte after each
+separator and bracket, and the depth, which may not pass the stacks the walk holds and may close only arrays. A block
+passes its tokens to the hook up to its last comma. At the first block it cannot judge, one with any other byte or no
+comma, the walk goes on in `st_after` from that comma with the depth there, so that block is read again by the states
+and faults where they fault.
 
 ### Skip
 
@@ -478,7 +498,7 @@ byte, its open cell and its cell count.
 
 ### Records and keys
 
-With a header, a record is a `Map` and each cell is a `Key` token, its column's header cell, then the cell as a `Plain`
+With a header, a record is an `Object` and each cell is a `Key` token, its column's header cell, then the cell as a `Plain`
 value. Without a header a record is an `Array` of `Plain` values. A record's `End` spans its LF or CRLF. A last record
 that the text does not end with an LF has an `End` of no bytes, and the text's `End` has no bytes. A line that is empty
 or holds only a CR is no record.
@@ -493,9 +513,9 @@ or holds only a CR is no record.
 - The record's last cell and its `End` are the outer loop's work, once per record.
 - A record's state is held in locals for the block. `Pass` is one struct, and a field read per cell is a load per
   cell.
-- A record wider than the first is found at the delimiter that opens the cell past the width. The walk gives its `Map`
+- A record wider than the first is found at the delimiter that opens the cell past the width. The walk gives its `Object`
   and its first `width` cells, then faults at that delimiter, and gives no `End`. `validate` reports the same byte,
-  which it finds by rescanning that record on the fault path. A narrower record makes its `Map` and all its cells, then
+  which it finds by rescanning that record on the fault path. A narrower record makes its `Object` and all its cells, then
   faults at its line end's first byte: the CR of a CRLF, else the LF, or the text's end.
 - Under `Ragged` no width faults. A headed record's cells past the header's last are read on a cold path
   (`read_ragged`), each after a `Key` that `column_key` makes: no bytes of its own, `lo` the header's first byte, `n` the

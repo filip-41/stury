@@ -8,8 +8,10 @@ sonic-rs = "0.5.10"
 # The record boundary reader of the dsv frame lane.
 simd-csv = "=0.14.0"
 serde = { version = "1", features = ["derive"] }
-# preserve_order keeps a document's keys in source order, as every other arm writes them. float_roundtrip makes the
-# fixture's decimals read to the nearest double, so every arm writes the same values.
+# Cargo unifies a dependency's features across a package's binaries, so these hold in every serde_json lane, and every
+# lane needs them for the job the other arms do. preserve_order keeps an object's members in source order, as stury's
+# document and every other arm's DOM keep them, and float_roundtrip reads every decimal to the nearest double, as
+# stury and the other libraries read it.
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 
 [profile.release]

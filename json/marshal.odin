@@ -2,6 +2,7 @@ package json
 
 import "base:runtime"
 import "core:io"
+import spell "../core/spell"
 import core "../core"
 import typed "../core/typed"
 import write "../core/write"
@@ -31,6 +32,11 @@ TOKENS := write.Token_Spelling {
 			return put_string(t.out, x, t.opts)
 		case core.Number:
 			return write.put_number(t.out, x)
+		case write.Number_Literal:
+			if _, is_number := spell.number_strict(transmute([]u8)x.text, 0, u64(len(x.text))); !is_number {
+				return .Bad_Raw
+			}
+			write.put_text(t.out, x.text)
 		case write.Tree_Part:
 			write.put_text(t.out, t.spell.tree[x])
 		}
@@ -58,8 +64,23 @@ marshal_text :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options,
 	return write.marshal_as(plan, value, opts, stream, allocator, TREE, put_plain, put_opted)
 }
 
-// Writes `value` as JSON into new bytes from `allocator`, by a plan built for the call. See `docs/writer.md`. A plan built
-// once with `plan_make`, with hooks or options, is written by `write.marshal`, and `write.marshal_stream` writes it to a stream.
-marshal :: proc(value: any, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
-	return write.marshal_once(value, plan_make, opts, allocator)
+// Writes `value` as JSON into new bytes from `allocator`, as `write` says. See `docs/writer.md`. The form with no plan
+// builds and frees one for the call, and a plan built once with `plan_make`, with hooks or options, is the form for many
+// writes. `write.marshal_stream` writes by a plan to a stream.
+marshal :: proc {marshal_once, write.marshal}
+
+// A nil `any` has no type to plan and is written as null.
+@(private)
+marshal_once :: proc(value: any, spec := Spec.Json, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+	v := value
+	nothing: any
+	if v.id == nil || v.data == nil {
+		v = any{&nothing, typeid_of(any)}
+	}
+	plan, err := plan_make(v.id, spec, opts, allocator = context.allocator)
+	if err.kind != .None {
+		return nil, err
+	}
+	defer typed.plan_destroy(&plan)
+	return plan.marshal(&plan, v.data, write, {}, allocator)
 }

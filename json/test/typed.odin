@@ -11,9 +11,22 @@ import json ".."
 
 // The typed read: each field rule, each refusal, the collecting sink and who owns what a failed read leaves.
 
+// Reads `text` into `target` and, unless the read collects or refuses duplicates, the root of its document into a
+// copy of `target`, which must give the same value and refusal.
 @(private = "file")
-read :: proc(text: string, target: ^$T, opts := typed.Read_Options{}) -> core.Typed_Error {
-	return json.unmarshal(transmute([]u8)text, json.Spec.Json, target, opts, {}, context.temp_allocator)
+read :: proc(t: ^testing.T, text: string, target: ^$T, opts := typed.Read_Options{}, loc := #caller_location) -> core.Typed_Error {
+	src := transmute([]u8)text
+	by_doc := target^
+	e := json.unmarshal(src, json.Spec.Json, target, read = opts, opts = {}, allocator = context.temp_allocator)
+	if opts.collect == nil && opts.dups != .Refuse {
+		plan, planned := json.plan_make(T, allocator = context.temp_allocator)
+		doc, built := json.build(src, json.Spec.Json, allocator = context.temp_allocator)
+		if planned.kind == .None && built.kind == .None {
+			errors_agree(t, e, typed.unmarshal(&doc, core.ROOT, &by_doc, &plan, opts, context.temp_allocator), text, loc)
+			testing.expectf(t, value_text(target^) == value_text(by_doc), "%s: a document gives %v, a text %v", text, value_text(by_doc), value_text(target^), loc = loc)
+		}
+	}
+	return e
 }
 
 @(private = "file")
@@ -32,7 +45,7 @@ Color :: enum u8 {
 absent_member_keeps_the_destination :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	p := Point{1, 2}
-	e := read(`{"y":5}`, &p)
+	e := read(t, `{"y":5}`, &p)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, p, Point{1, 5})
 }
@@ -46,7 +59,7 @@ members_in_any_order_and_repeated :: proc(t: ^testing.T) {
 		c: string,
 	}
 	s: S
-	e := read(`{"c":"x","b":[1],"a":{"x":1},"b":[2,3],"a":{"y":2},"c":"y"}`, &s)
+	e := read(t, `{"c":"x","b":[1],"a":{"x":1},"b":[2,3],"a":{"y":2},"c":"y"}`, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	// A later occurrence replaces the earlier one whole, so `a.x` does not survive.
 	testing.expect_value(t, s.a, Point{0, 2})
@@ -67,13 +80,13 @@ first_occurrence_is_kept_and_later_ones_judged :: proc(t: ^testing.T) {
 		dups = core.Duplicates.First,
 	}
 	s: S
-	e := read(`{"n":1,"a":{"x":1},"m":{"k":1,"k":2},"a":{"y":2},"n":2}`, &s, opts)
+	e := read(t, `{"n":1,"a":{"x":1},"m":{"k":1,"k":2},"a":{"y":2},"n":2}`, &s, opts)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s.a, Point{1, 0})
 	testing.expect_value(t, s.n, 1)
 	testing.expect_value(t, s.m["k"], 1)
 	s = {}
-	e = read(`{"n":1,"n":"no"}`, &s, opts)
+	e = read(t, `{"n":1,"n":"no"}`, &s, opts)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 }
 
@@ -81,9 +94,40 @@ first_occurrence_is_kept_and_later_ones_judged :: proc(t: ^testing.T) {
 refuse_duplicates_reads_the_whole_text_first :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	v: map[string]i32
-	e := read(`{"a":{"b":1,"b":2}}`, &v, {refuse_duplicates = true})
+	e := read(t, `{"a":{"b":1,"b":2}}`, &v, {dups = .Refuse})
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, e.at, 12)
+	// A collecting read holds what it returns, the text's fault included.
+	for text in ([]string{`{"a":{"b":1,"b":2}}`, `{"a":01}`}) {
+		sink: typed.Collected
+		sink.errors.allocator = context.temp_allocator
+		e = read(t, text, &v, {dups = .Refuse, collect = &sink})
+		testing.expect_value(t, len(sink.errors), 1)
+		testing.expect_value(t, sink.errors[0].kind, e.kind)
+	}
+}
+
+@(test)
+a_collecting_read_with_no_errors_allocator_uses_the_reads :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	S :: struct {
+		a: i32,
+	}
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	texts := []string{`{"a":"x"}`, `{"a":01}`, `{"a":1,"a":2}`}
+	for text in texts {
+		s: S
+		sink: typed.Collected
+		e := json.unmarshal(transmute([]u8)text, json.Spec.Json, &s, read = {dups = .Refuse, collect = &sink}, opts = {}, allocator = mem.tracking_allocator(&track))
+		testing.expect(t, e.kind != .None, text)
+		testing.expect_value(t, len(sink.errors), 1)
+		testing.expect(t, sink.errors.allocator.data == &track, text)
+		delete(sink.errors)
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
 }
 
 @(test)
@@ -101,12 +145,12 @@ members_past_the_tracked_word :: proc(t: ^testing.T) {
 		tail:                                            Point `json:"tail,required"`,
 	}
 	w: W
-	e := read(`{"last":{"x":1},"f0":1,"tail":{"x":2},"last":{"y":3}}`, &w)
+	e := read(t, `{"last":{"x":1},"f0":1,"tail":{"x":2},"last":{"y":3}}`, &w)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, w.last, Point{0, 3})
 	testing.expect_value(t, w.tail.x, 2)
 	w = {}
-	e = read(`{"f0":1,"last":{}}`, &w)
+	e = read(t, `{"f0":1,"last":{}}`, &w)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Missing_Field)
 	testing.expect_value(t, string(e.steps[e.n_steps - 1].(core.Name)), "tail")
 }
@@ -125,11 +169,11 @@ tags_flatten_and_rename :: proc(t: ^testing.T) {
 		own:        i32 `json:"mine"`,
 	}
 	s: S
-	e := read(`{"base_id":1,"long_name":2,"out":3,"common":4,"mine":5}`, &s)
+	e := read(t, `{"base_id":1,"long_name":2,"out":3,"common":4,"mine":5}`, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s, S{base = {1}, long_name = 2, shared = 4, own = 5})
 
-	plan, err := json.plan_make(S, {rename = .Camel})
+	plan, err := json.plan_make(S, plan = {rename = .Camel})
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	defer typed.plan_destroy(&plan)
 	s = {}
@@ -213,7 +257,7 @@ refusal_names_the_value :: proc(t: ^testing.T) {
 		m: map[string]Point,
 	}
 	s: S
-	e := read(`{"l":[{"x":1},{"y":"no"}]}`, &s)
+	e := read(t, `{"l":[{"x":1},{"y":"no"}]}`, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, e.at, 19)
 	testing.expect_value(t, e.n_steps, 3)
@@ -223,12 +267,12 @@ refusal_names_the_value :: proc(t: ^testing.T) {
 
 	src := `{"m":{"key":{"x":300000000000}}}`
 	s = {}
-	e = read(src, &s)
+	e = read(t, src, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Out_Of_Range)
 	testing.expect_value(t, string(e.steps[1].(core.Name)), "key")
 	b := strings.builder_make(context.temp_allocator)
 	testing.expect(t, core.render(strings.to_writer(&b), transmute([]u8)src, e) == nil)
-	testing.expect_value(t, strings.to_string(b), "1:18: Value is out of range for the field's type at .m.key.x")
+	testing.expect_value(t, strings.to_string(b), "1:18: 300000000000 is out of range for i32 at .m.key.x")
 	b2 := strings.builder_make(context.temp_allocator)
 	testing.expect(t, core.write_code(strings.to_writer(&b2), e) == nil)
 	testing.expect_value(t, strings.to_string(b2), "typed.out_of_range")
@@ -238,7 +282,7 @@ refusal_names_the_value :: proc(t: ^testing.T) {
 a_deep_path_keeps_its_innermost_steps :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	v: [][][][][][][][][][]i32
-	e := read(`[[[[[[[[[["no"]]]]]]]]]]`, &v)
+	e := read(t, `[[[[[[[[[["no"]]]]]]]]]]`, &v)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, e.n_steps, core.MAX_ERROR_STEPS)
 	testing.expect(t, e.truncated)
@@ -248,7 +292,7 @@ a_deep_path_keeps_its_innermost_steps :: proc(t: ^testing.T) {
 a_walk_fault_is_kept_whole :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	p: Point
-	e := read(`{"x":1,}`, &p)
+	e := read(t, `{"x":1,}`, &p)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Walk)
 	testing.expect_value(t, e.at, e.inner.at)
 	testing.expect(t, e.inner.kind != .None)
@@ -266,7 +310,7 @@ numbers_at_each_width :: proc(t: ^testing.T) {
 		f: f64,
 	}
 	s: S
-	e := read(`{"a":-128,"b":255,"c":-9223372036854775808,"d":18446744073709551615,"e":0.1,"f":-0}`, &s)
+	e := read(t, `{"a":-128,"b":255,"c":-9223372036854775808,"d":18446744073709551615,"e":0.1,"f":-0}`, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s.a, -128)
 	testing.expect_value(t, s.b, 255)
@@ -275,11 +319,11 @@ numbers_at_each_width :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.e, 0.1)
 	testing.expect_value(t, transmute(u64)s.f, u64(1) << 63)
 	for text in ([]string{`{"a":128}`, `{"b":-1}`, `{"c":9223372036854775808}`, `{"d":18446744073709551616}`, `{"f":1e400}`, `{"e":1e39}`}) {
-		kind := read(text, &s).kind
+		kind := read(t, text, &s).kind
 		testing.expectf(t, kind == .Out_Of_Range, "%s: %v", text, kind)
 	}
-	testing.expect_value(t, read(`{"a":1.0}`, &s).kind, core.Typed_Error_Kind.Wrong_Kind)
-	testing.expect_value(t, read(`{"a":null}`, &s).kind, core.Typed_Error_Kind.Wrong_Kind)
+	testing.expect_value(t, read(t, `{"a":1.0}`, &s).kind, core.Typed_Error_Kind.Wrong_Kind)
+	testing.expect_value(t, read(t, `{"a":null}`, &s).kind, core.Typed_Error_Kind.Wrong_Kind)
 }
 
 @(test)
@@ -290,17 +334,17 @@ json5_non_finite_numbers_fill_floats :: proc(t: ^testing.T) {
 	}
 	s: S
 	src := transmute([]u8)string(`{f: -Infinity, g: Infinity}`)
-	testing.expect_value(t, json.unmarshal(src, json.Spec.Json5, &s, {}, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, json.unmarshal(src, json.Spec.Json5, &s, read = {}, opts = {}, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s.f, math.inf_f64(-1))
 	testing.expect_value(t, s.g, math.inf_f32(1))
 	src = transmute([]u8)string(`{f: NaN, g: -NaN}`)
-	testing.expect_value(t, json.unmarshal(src, json.Spec.Json5, &s, {}, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, json.unmarshal(src, json.Spec.Json5, &s, read = {}, opts = {}, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
 	testing.expect(t, math.is_nan(s.f) && math.is_nan(f64(s.g)))
 	src = transmute([]u8)string(`{f: Infinity}`)
-	e := json.unmarshal(src, json.Spec.Json5, &s, {}, {refuse_non_finite = true}, context.temp_allocator)
+	e := json.unmarshal(src, json.Spec.Json5, &s, read = {}, opts = {refuse_non_finite = true}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Walk)
 	for text in ([]string{`{f: 1e400}`, `{g: 1e39}`, `{g: 0xffffffffffffffffffffffffffffffffffff}`}) {
-		kind := json.unmarshal(transmute([]u8)text, json.Spec.Json5, &s, {}, {}, context.temp_allocator).kind
+		kind := json.unmarshal(transmute([]u8)text, json.Spec.Json5, &s, read = {}, opts = {}, allocator = context.temp_allocator).kind
 		testing.expectf(t, kind == .Out_Of_Range, "%s: %v", text, kind)
 	}
 }
@@ -314,15 +358,17 @@ lists_arrays_and_their_lengths :: proc(t: ^testing.T) {
 		d: [dynamic]string,
 	}
 	s: S
-	e := read(`{"a":[1,2],"f":[3],"d":["x","y"]}`, &s)
+	e := read(t, `{"a":[1,2],"f":[3],"d":["x","y"]}`, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s.a, [2]i32{1, 2})
 	testing.expect_value(t, len(s.f), 1)
 	testing.expect_value(t, s.f[0], 3)
 	testing.expect_value(t, s.d[1], "y")
-	testing.expect_value(t, read(`{"a":[1]}`, &s).kind, core.Typed_Error_Kind.Wrong_Length)
-	testing.expect_value(t, read(`{"a":[1,2,3]}`, &s).kind, core.Typed_Error_Kind.Wrong_Length)
-	testing.expect_value(t, read(`{"f":[1,2,3]}`, &s).kind, core.Typed_Error_Kind.Wrong_Length)
+	testing.expect_value(t, read(t, `{"a":[1]}`, &s).kind, core.Typed_Error_Kind.Wrong_Length)
+	testing.expect_value(t, read(t, `{"a":[1,2,3]}`, &s).kind, core.Typed_Error_Kind.Wrong_Length)
+	testing.expect_value(t, read(t, `{"f":[1,2,3]}`, &s).kind, core.Typed_Error_Kind.Wrong_Length)
+	one: [1]string
+	testing.expect_value(t, read(t, `["a","b"]`, &one).at, 5)
 }
 
 @(test)
@@ -336,20 +382,22 @@ enums_bit_sets_and_map_keys :: proc(t: ^testing.T) {
 		me: map[Color]bool,
 	}
 	s: S
-	e := read(`{"e":"Blue","s":["Red","Blue"],"b":[1,9],"mi":{"-3":true},"me":{"Green":true}}`, &s)
+	e := read(t, `{"e":"Blue","s":["Red","Blue"],"b":[1,9],"mi":{"-3":true},"me":{"Green":true}}`, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s.e, Color.Blue)
 	testing.expect(t, .Blue in s.s && .Green not_in s.s)
 	testing.expect(t, 9 in s.b)
 	testing.expect(t, s.mi[-3])
 	testing.expect(t, s.me[.Green])
-	testing.expect_value(t, read(`{"e":"Pink"}`, &s).kind, core.Typed_Error_Kind.Not_A_Member)
-	testing.expect_value(t, read(`{"b":[10]}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
+	testing.expect_value(t, read(t, `{"e":"Pink"}`, &s).kind, core.Typed_Error_Kind.Not_A_Member)
+	testing.expect_value(t, read(t, `{"b":[10]}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
 	// An integer past `i64` is out of range, as it is for an integer field, and a fraction is no integer.
-	testing.expect_value(t, read(`{"b":[99999999999999999999]}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
-	testing.expect_value(t, read(`{"b":[1.0]}`, &s).kind, core.Typed_Error_Kind.Wrong_Kind)
-	testing.expect_value(t, read(`{"mi":{"x":true}}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
-	ints, err := json.plan_make(Color, {enums = .Int})
+	testing.expect_value(t, read(t, `{"b":[99999999999999999999]}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
+	testing.expect_value(t, read(t, `{"b":[1.0]}`, &s).kind, core.Typed_Error_Kind.Wrong_Kind)
+	testing.expect_value(t, read(t, `{"mi":{"x":true}}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
+	narrow: map[i8]i32
+	testing.expect_value(t, read(t, `{"300":1}`, &narrow).kind, core.Typed_Error_Kind.Out_Of_Range)
+	ints, err := json.plan_make(Color, plan = {enums = .Int})
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	defer typed.plan_destroy(&ints)
 	src := `7`
@@ -372,7 +420,7 @@ pointers_maybes_cstrings :: proc(t: ^testing.T) {
 	s := S {
 		p = &held,
 	}
-	e := read(`{"p":{"y":9},"l":[1,2],"m":4,"c":"aA"}`, &s)
+	e := read(t, `{"p":{"y":9},"l":[1,2],"m":4,"c":"aA"}`, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	// A pointer the destination holds is read through.
 	testing.expect(t, s.p == &held)
@@ -380,10 +428,10 @@ pointers_maybes_cstrings :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(s.l^), 2)
 	testing.expect_value(t, s.m.?, 4)
 	testing.expect_value(t, string(s.c), "aA")
-	e = read(`{"p":null,"m":null,"c":null}`, &s)
+	e = read(t, `{"p":null,"m":null,"c":null}`, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect(t, s.p == nil && s.m == nil && s.c == nil)
-	testing.expect_value(t, read(`{"c":"a\u0000"}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
+	testing.expect_value(t, read(t, `{"c":"a\u0000"}`, &s).kind, core.Typed_Error_Kind.Out_Of_Range)
 }
 
 @(test)
@@ -395,13 +443,13 @@ unions_by_class_and_tag :: proc(t: ^testing.T) {
 		[]i32,
 	}
 	us: []U
-	e := read(`[1,"s",[2],null]`, &us)
+	e := read(t, `[1,"s",[2],null]`, &us)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, us[0].(i64), 1)
 	testing.expect_value(t, us[1].(string), "s")
 	testing.expect_value(t, us[2].([]i32)[0], 2)
 	testing.expect(t, us[3] == nil)
-	testing.expect_value(t, read(`[true]`, &us).kind, core.Typed_Error_Kind.Wrong_Kind)
+	testing.expect_value(t, read(t, `[true]`, &us).kind, core.Typed_Error_Kind.Wrong_Kind)
 
 	A :: struct {
 		x: i32,
@@ -413,11 +461,11 @@ unions_by_class_and_tag :: proc(t: ^testing.T) {
 		A,
 		B,
 	}
-	plan, err := json.plan_make(T, {union_tag = "type", tag_names = {{B, "bee"}}})
+	plan, err := json.plan_make(T, plan = {union_tag = "type", tag_names = {{B, "bee"}}})
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	defer typed.plan_destroy(&plan)
 	check := proc(t: ^testing.T, plan: ^typed.Plan, text: string, want: core.Typed_Error_Kind) -> (v: T) {
-		e := json.unmarshal(transmute([]u8)text, json.Spec.Json, &v, plan, {}, {}, context.temp_allocator)
+		e := json.unmarshal(transmute([]u8)text, json.Spec.Json, &v, plan, read = {}, opts = {}, allocator = context.temp_allocator)
 		testing.expect_value(t, e.kind, want)
 		return
 	}
@@ -430,19 +478,27 @@ unions_by_class_and_tag :: proc(t: ^testing.T) {
 	check(t, plan = &plan, text = `{"type":"C"}`, want = .Not_A_Member)
 	// The walk's fault wins over what a broken text makes of the tag.
 	check(t, plan = &plan, text = `{"x":1,}`, want = .Walk)
+	// A collecting read ends at that fault, which it holds once.
+	sink: typed.Collected
+	sink.errors.allocator = context.temp_allocator
+	broken := `{"x":01,"type":"A"}`
+	bv: T
+	be := json.unmarshal(transmute([]u8)broken, json.Spec.Json, &bv, &plan, read = {collect = &sink}, opts = {}, allocator = context.temp_allocator)
+	testing.expect_value(t, be.kind, core.Typed_Error_Kind.Walk)
+	testing.expect_value(t, len(sink.errors), 1)
 	// Under `.Refuse` the tag's key is known in a tagged arm only.
 	H :: struct {
 		t: T,
 	}
-	hp, herr := json.plan_make(H, {union_tag = "type"})
+	hp, herr := json.plan_make(H, plan = {union_tag = "type"})
 	testing.expect_value(t, herr.kind, core.Typed_Error_Kind.None)
 	defer typed.plan_destroy(&hp)
 	inside := `{"t":{"type":"A","x":1}}`
 	outside := `{"type":1}`
 	h: H
-	he := json.unmarshal(transmute([]u8)inside, json.Spec.Json, &h, &hp, {unknown = .Refuse}, {}, context.temp_allocator)
+	he := json.unmarshal(transmute([]u8)inside, json.Spec.Json, &h, &hp, read = {unknown = .Refuse}, opts = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, he.kind, core.Typed_Error_Kind.None)
-	he = json.unmarshal(transmute([]u8)outside, json.Spec.Json, &h, &hp, {unknown = .Refuse}, {}, context.temp_allocator)
+	he = json.unmarshal(transmute([]u8)outside, json.Spec.Json, &h, &hp, read = {unknown = .Refuse}, opts = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, he.kind, core.Typed_Error_Kind.Unknown_Field)
 }
 
@@ -480,11 +536,11 @@ a_tagged_arm_may_not_key_a_member_as_the_tag :: proc(t: ^testing.T) {
 		{union {Spelled, B}, "theType", .Camel},
 	}
 	for c in refused {
-		_, err := json.plan_make(c.T, {union_tag = c.tag, rename = c.rename}, context.temp_allocator)
+		_, err := json.plan_make(c.T, plan = {union_tag = c.tag, rename = c.rename}, allocator = context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
 	}
 	for T in ([]typeid{union {Keyed_Apart, B}, union {Left_Out, B}}) {
-		_, err := json.plan_make(T, {union_tag = "type"}, context.temp_allocator)
+		_, err := json.plan_make(T, plan = {union_tag = "type"}, allocator = context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	}
 }
@@ -493,7 +549,7 @@ a_tagged_arm_may_not_key_a_member_as_the_tag :: proc(t: ^testing.T) {
 any_holds_what_the_text_holds :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	v: any
-	e := read(`{"a":[1,-0,1.5,18446744073709551615,1e400,"s",null,true]}`, &v)
+	e := read(t, `{"a":[1,-0,1.5,18446744073709551615,1e400,"s",null,true]}`, &v)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	m := v.(map[string]any)
 	l := m["a"].([dynamic]any)
@@ -517,7 +573,7 @@ raw_holds_the_span :: proc(t: ^testing.T) {
 	}
 	s: S
 	text := `{"a":{"k": [1, {}]},"b":["s\n",2,[3],null],"c":{"x":1}}`
-	e := read(text, &s)
+	e := read(t, text, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s.a, typed.Raw(`{"k": [1, {}]}`))
 	testing.expect_value(t, s.b[0], typed.Raw(`"s\n"`))
@@ -525,9 +581,9 @@ raw_holds_the_span :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.b[3], typed.Raw(`null`))
 	testing.expect_value(t, s.c.x, 1)
 	// A malformed value inside is the walk's to refuse.
-	testing.expect_value(t, read(`{"a":{"k":01}}`, &s).kind, core.Typed_Error_Kind.Walk)
+	testing.expect_value(t, read(t, `{"a":{"k":01}}`, &s).kind, core.Typed_Error_Kind.Walk)
 	s = {}
-	e = read(text, &s, {borrow_strings = true})
+	e = read(t, text, &s, {borrow_strings = true})
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect(t, raw_data(string(s.a)) == raw_data(text)[5:])
 }
@@ -541,7 +597,7 @@ unknown_members_capture_or_refuse :: proc(t: ^testing.T) {
 		b:    i32,
 	}
 	s: S
-	e := read(`{"x":[1,2],"a":1,"y":{"k":"v"},"b":2,"z":3}`, &s)
+	e := read(t, `{"x":[1,2],"a":1,"y":{"k":"v"},"b":2,"z":3}`, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s.a, 1)
 	testing.expect_value(t, s.b, 2)
@@ -550,22 +606,10 @@ unknown_members_capture_or_refuse :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.rest["z"], typed.Raw(`3`))
 
 	p: Point
-	e = read(`{"x":1,"nope":2}`, &p, {unknown = .Refuse})
+	e = read(t, `{"x":1,"nope":2}`, &p, {unknown = .Refuse})
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unknown_Field)
 	testing.expect_value(t, string(e.steps[e.n_steps - 1].(core.Name)), "nope")
-	testing.expect_value(t, read(`{"":1}`, &p, {unknown = .Refuse}).kind, core.Typed_Error_Kind.Unknown_Field)
-}
-
-@(test)
-first_duplicates_keep_the_first_captured_member :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	S :: struct {
-		rest: map[string]typed.Raw `json:"rest,unknown"`,
-	}
-	s: S
-	e := read(`{"x":1,"x":2}`, &s, {dups = core.Duplicates.First})
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, s.rest["x"], typed.Raw(`1`))
+	testing.expect_value(t, read(t, `{"":1}`, &p, {unknown = .Refuse}).kind, core.Typed_Error_Kind.Unknown_Field)
 }
 
 @(test)
@@ -575,7 +619,7 @@ wide_bit_sets_round_trip_and_required_omitempty_is_refused :: proc(t: ^testing.T
 		b: bit_set[0 ..= 127; u128],
 	}
 	w: Wide
-	e := read(`{"b":[0,127]}`, &w)
+	e := read(t, `{"b":[0,127]}`, &w)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, w.b, bit_set[0 ..= 127; u128]{0, 127})
 
@@ -583,7 +627,7 @@ wide_bit_sets_round_trip_and_required_omitempty_is_refused :: proc(t: ^testing.T
 		a: i32 `json:"a,required,omitempty"`,
 	}
 	b: Bad
-	testing.expect_value(t, read(`{"a":1}`, &b).kind, core.Typed_Error_Kind.Unsupported)
+	testing.expect_value(t, read(t, `{"a":1}`, &b).kind, core.Typed_Error_Kind.Unsupported)
 }
 
 @(test)
@@ -603,19 +647,19 @@ type_hooks_read_whole_values :: proc(t: ^testing.T) {
 		(^Hex)(dest).n = len(v.text)
 		return nil
 	}
-	plan, err := json.plan_make(S, {hooks = {{type = Hex, read = hook}}})
+	plan, err := json.plan_make(S, plan = {hooks = {{type = Hex, read = hook}}})
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	defer typed.plan_destroy(&plan)
 	s: S
 	src := `{"v":"a\n","w":{"k":[1]},"l":[12,[3]]}`
-	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, &plan, {}, {}, context.temp_allocator)
+	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s.v.n, 5)
 	testing.expect_value(t, s.w.n, 9)
 	testing.expect_value(t, s.l[0].n, 2)
 	testing.expect_value(t, s.l[1].n, 3)
 	src = `{"v":"bad"}`
-	e = json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, &plan, {}, {}, context.temp_allocator)
+	e = json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Out_Of_Range)
 }
 
@@ -625,10 +669,10 @@ strings_are_copied_unless_borrowed :: proc(t: ^testing.T) {
 	text := `["plain","a\nb"]`
 	src := transmute([]u8)text
 	v: []string
-	testing.expect_value(t, read(text, &v).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, read(t, text, &v).kind, core.Typed_Error_Kind.None)
 	testing.expect(t, raw_data(v[0]) != raw_data(src[2:]))
 	w: []string
-	testing.expect_value(t, read(text, &w, {borrow_strings = true}).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, read(t, text, &w, {borrow_strings = true}).kind, core.Typed_Error_Kind.None)
 	testing.expect(t, raw_data(w[0]) == raw_data(src[2:]))
 	testing.expect_value(t, w[1], "a\nb")
 }
@@ -648,7 +692,7 @@ collecting_reads_past_each_refusal :: proc(t: ^testing.T) {
 	s := S {
 		a = 7,
 	}
-	e := read(`{"a":"no","l":[1,"x",3],"p":{"x":"y","y":2},"q":1}`, &s, {collect = &sink})
+	e := read(t, `{"a":"no","l":[1,"x",3],"p":{"x":"y","y":2},"q":1}`, &s, {collect = &sink})
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.errors), 4)
 	testing.expect_value(t, sink.errors[0].at, 5)
@@ -667,14 +711,14 @@ collecting_reads_past_each_refusal :: proc(t: ^testing.T) {
 		max_errors = 2,
 	}
 	l: []i32
-	read(`["a","b","c","d"]`, &l, {collect = &few})
+	read(t, `["a","b","c","d"]`, &l, {collect = &few})
 	testing.expect_value(t, len(few.errors), 2)
 	testing.expect(t, few.truncated)
 	testing.expect_value(t, len(l), 4)
 
 	// The walk still judges a passed-over value.
 	sink.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
-	e = read(`{"a":[01]}`, &s, {collect = &sink})
+	e = read(t, `{"a":[01]}`, &s, {collect = &sink})
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, sink.errors[len(sink.errors) - 1].kind, core.Typed_Error_Kind.Walk)
 }
@@ -704,6 +748,8 @@ what_a_refused_read_allocated_stays_reachable :: proc(t: ^testing.T) {
 	mem.tracking_allocator_init(&tracking, context.allocator)
 	defer mem.tracking_allocator_destroy(&tracking)
 	alloc := mem.tracking_allocator(&tracking)
+	plan, _ := json.plan_make([]Row, allocator = context.temp_allocator)
+	defer free_all(context.temp_allocator)
 	texts := []string {
 		`[{"s":"a","l":["b","c"],"m":{"k":"v"},"p":{"x":1}},{"s":"d","l":["e",1]}]`,
 		`[{"s":"a","l":["b","c","d","e","f","g","h","i","j"]`,
@@ -712,16 +758,24 @@ what_a_refused_read_allocated_stays_reachable :: proc(t: ^testing.T) {
 		`[{"s":"a"},7]`,
 	}
 	for text in texts {
-		rows: []Row
-		e := json.unmarshal(transmute([]u8)text, json.Spec.Json, &rows, allocator = alloc)
-		testing.expect(t, e.kind != .None)
-		for r in rows {
-			context.allocator = alloc
-			free_row(r)
+		for from_document in ([]bool{false, true}) {
+			rows: []Row
+			e: core.Typed_Error
+			if from_document {
+				doc, _ := json.build(transmute([]u8)text, json.Spec.Json, allocator = context.temp_allocator)
+				e = typed.unmarshal(&doc, core.ROOT, &rows, &plan, {}, alloc)
+			} else {
+				e = json.unmarshal(transmute([]u8)text, json.Spec.Json, &rows, &plan, read = {}, opts = {}, allocator = alloc)
+			}
+			testing.expect(t, e.kind != .None)
+			for r in rows {
+				context.allocator = alloc
+				free_row(r)
+			}
+			delete(rows, alloc)
+			testing.expect_value(t, len(tracking.allocation_map), 0)
+			testing.expect_value(t, len(tracking.bad_free_array), 0)
 		}
-		delete(rows, alloc)
-		testing.expect_value(t, len(tracking.allocation_map), 0)
-		testing.expect_value(t, len(tracking.bad_free_array), 0)
 	}
 }
 
@@ -804,7 +858,7 @@ Wide :: struct {
 a_struct_past_the_tracked_word_starts_with_no_repeats :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	w: []Wide
-	e := read(`[{"g4":1,"g4":2},{"g4":3}]`, &w, {dups = core.Duplicates.First})
+	e := read(t, `[{"g4":1,"g4":2},{"g4":3}]`, &w, {dups = core.Duplicates.First})
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, w[0].g4, 1)
 	testing.expect_value(t, w[1].g4, 3)
@@ -825,13 +879,72 @@ a_repeat_under_first_leaves_the_next_elements_hook :: proc(t: ^testing.T) {
 	S :: struct {
 		h: Hooked,
 	}
-	plan, err := json.plan_make([]S, {hooks = {{type = Hooked, read = read_hooked}}}, context.temp_allocator)
+	plan, err := json.plan_make([]S, plan = {hooks = {{type = Hooked, read = read_hooked}}}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	s: []S
 	src := `[{"h":1,"h":22},{"h":333}]                `
-	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, &plan, {dups = core.Duplicates.First}, {}, context.temp_allocator)
+	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, &plan, read = {dups = core.Duplicates.First}, opts = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s[1].h, Hooked(3))
+}
+
+@(private = "file")
+read_onto_held :: proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind) {
+	(^Hooked)(dest)^ = (^Hooked)(dest)^ * 10 + Hooked(len(v.text))
+	return nil
+}
+
+@(test)
+a_repeat_reads_alike_whichever_way_its_key_came :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	S :: struct {
+		id: u64,
+		x:  i32,
+		s:  string,
+		h:  Hooked,
+	}
+	plan, err := json.plan_make(S, plan = {hooks = {{type = Hooked, read = read_onto_held}}}, allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	PAD :: `,"pad":"................................"}`
+	// A key in a text's last 16 bytes reaches the reader, and one before them the walk matches to the cursor.
+	refused := []string{`{"x":3,"id":1,"x":"s"}`, `{"x":3,"id":1,"x":"s"` + PAD}
+	hooked := []string{`{"h":1,"s":"a","h":22}`, `{"h":1,"s":"a","h":22` + PAD}
+	for text in refused {
+		by_text, by_doc: S
+		testing.expect_value(t, json.unmarshal(transmute([]u8)text, json.Spec.Json, &by_text, &plan, read = {}, opts = {}, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.Wrong_Kind)
+		doc, _ := json.build(transmute([]u8)text, json.Spec.Json, allocator = context.temp_allocator)
+		testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &by_doc, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Wrong_Kind)
+		testing.expect_value(t, by_text.x, 3)
+		testing.expect_value(t, by_doc.x, 3)
+	}
+	for text in hooked {
+		by_text, by_doc: S
+		testing.expect_value(t, json.unmarshal(transmute([]u8)text, json.Spec.Json, &by_text, &plan, read = {}, opts = {}, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
+		doc, _ := json.build(transmute([]u8)text, json.Spec.Json, allocator = context.temp_allocator)
+		testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &by_doc, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+		testing.expect_value(t, by_text.h, Hooked(12))
+		testing.expect_value(t, by_doc.h, Hooked(12))
+	}
+}
+
+@(test)
+a_hooked_list_element_starts_zero :: proc(t: ^testing.T) {
+	// An arena over bytes that are not zero, so an element left unwritten shows.
+	buf := make([]u8, 1 << 12, context.temp_allocator)
+	defer free_all(context.temp_allocator)
+	for &b in buf {
+		b = 0xab
+	}
+	arena: mem.Arena
+	mem.arena_init(&arena, buf)
+	plan, err := json.plan_make([]Hooked, plan = {hooks = {{type = Hooked, read = read_onto_held}}}, allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	l: []Hooked
+	e := json.unmarshal(transmute([]u8)string(`[1,22,333]`), json.Spec.Json, &l, &plan, read = {}, opts = {}, allocator = mem.arena_allocator(&arena))
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	if testing.expect_value(t, len(l), 3) {
+		testing.expect_value(t, [3]Hooked{l[0], l[1], l[2]}, [3]Hooked{1, 2, 3})
+	}
 }
 
 @(private = "file")
@@ -852,12 +965,12 @@ a_hooked_arm_takes_every_class :: proc(t: ^testing.T) {
 		Hooked_Struct,
 	}
 	hooks := []typed.Type_Hook{{type = Hooked_Struct, read = read_hooked_struct}}
-	plan, err := json.plan_make(U, {hooks = hooks}, context.temp_allocator)
+	plan, err := json.plan_make(U, plan = {hooks = hooks}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	sources := []string{`"abc"`, `[1,2]`, `{"a":1}`, `true`, `12`}
 	for src in sources {
 		u: U
-		e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &u, &plan, {}, {}, context.temp_allocator)
+		e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &u, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 		testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 		testing.expect_value(t, u.(Hooked_Struct).n, len(src))
 	}
@@ -866,84 +979,82 @@ a_hooked_arm_takes_every_class :: proc(t: ^testing.T) {
 		Hooked_Struct,
 		bool,
 	}
-	_, beside := json.plan_make(Beside, {hooks = hooks}, context.temp_allocator)
+	_, beside := json.plan_make(Beside, plan = {hooks = hooks}, allocator = context.temp_allocator)
 	testing.expect_value(t, beside.kind, core.Typed_Error_Kind.Ambiguous_Union)
 }
 
 @(test)
-a_list_of_elements_with_no_size_is_refused_at_the_plan :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	Empty :: struct {}
-	refused := []typeid{[]Empty, [dynamic]Empty, [2]Empty}
-	for T in refused {
-		_, err := json.plan_make(T, {}, context.temp_allocator)
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
-	}
-	_, set := json.plan_make(map[string]Empty, {}, context.temp_allocator)
-	testing.expect_value(t, set.kind, core.Typed_Error_Kind.None)
-}
-
-@(test)
-kinds_that_hold_no_data_a_text_spells_are_refused_at_the_plan :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	Bits :: bit_field u8 {
-		a: u8 | 8,
-	}
-	refused := []typeid {
-		rawptr,
-		Maybe(rawptr),
-		[]Maybe(rawptr),
-		[^]i32,
-		proc(),
-		typeid,
-		Bits,
-		#simd[4]f32,
-		matrix[2, 2]f32,
-		complex64,
-		quaternion256,
-		rune,
-		string16,
-		#soa[]Point,
-	}
-	for T in refused {
-		_, err := json.plan_make(T, {}, context.temp_allocator)
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
-	}
-}
-
-@(test)
-a_type_past_4_gib_is_refused_at_the_plan :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	Huge :: struct {
-		big: [1 << 29]u64,
-		x:   i32,
-	}
-	Wide :: [1 << 32 + 8]u8
-	refused := []typeid{Huge, []Wide, ^Huge, map[string]Wide}
-	for T in refused {
-		_, err := json.plan_make(T, {}, context.temp_allocator)
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
-	}
-	_, err := json.plan_make([1 << 32 - 1]u8, {}, context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
-}
-
-@(test)
-a_collecting_read_passes_a_container_a_pointer_refuses :: proc(t: ^testing.T) {
+a_value_a_wrapper_refuses_has_the_wrappers_path :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	S :: struct {
-		p: ^Point,
-		q: i32,
-		r: i32,
+		m: Maybe(i32),
+		p: ^i32,
+		u: union {
+			i32,
+			string,
+		},
+		w: Maybe(^Maybe(i32)),
 	}
-	c: typed.Collected
-	c.errors.allocator = context.temp_allocator
+	sink: typed.Collected
+	sink.errors.allocator = context.temp_allocator
 	s: S
-	e := read(`{"p":[1,2],"q":2,"r":3}`, &s, {collect = &c})
+	read(t, `{"m":1.5,"p":1.5,"u":1.5,"w":1.5}`, &s, {collect = &sink})
+	names := []string{"m", "p", "u", "w"}
+	testing.expect_value(t, len(sink.errors), len(names))
+	for &e, i in sink.errors {
+		testing.expect_value(t, e.n_steps, 1)
+		testing.expect_value(t, string(e.steps[0].(core.Name)), names[i])
+	}
+	l: []^i32
+	e := read(t, `[1,2,1.5]`, &l)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
-	testing.expect_value(t, len(c.errors), 1)
-	testing.expect_value(t, s.q, 2)
-	testing.expect_value(t, s.r, 3)
+	testing.expect_value(t, e.n_steps, 1)
+	testing.expect_value(t, int(e.steps[0].(core.Index)), 2)
+}
+
+@(test)
+a_collecting_read_leaves_a_wrapper_whose_element_it_refuses :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	alloc := mem.tracking_allocator(&track)
+	S :: struct {
+		m: Maybe(i32),
+		p: ^Point,
+		w: Maybe(^i32),
+		u: union {
+			i32,
+			string,
+		},
+		l: []Maybe(i32),
+		q: []^i32,
+	}
+	kept := i32(3)
+	s := S {
+		m = 5,
+		w = &kept,
+		u = "keep",
+	}
+	sink: typed.Collected
+	sink.errors.allocator = context.temp_allocator
+	src := `{"m":1.5,"p":[1],"w":"x","u":2.5,"l":[1,2.5],"q":[1,"x"]}`
+	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, read = {collect = &sink}, opts = {}, allocator = alloc)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
+	testing.expect_value(t, len(sink.errors), 6)
+	testing.expect_value(t, s.m, 5)
+	testing.expect(t, s.p == nil)
+	testing.expect(t, s.w == &kept)
+	testing.expect_value(t, s.u.(string), "keep")
+	testing.expect_value(t, len(s.l), 2)
+	testing.expect(t, s.l[1] == nil)
+	testing.expect_value(t, len(s.q), 2)
+	testing.expect(t, s.q[1] == nil)
+	free(s.q[0], alloc)
+	delete(s.q, alloc)
+	delete(s.l, alloc)
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
 }
 
 @(test)
@@ -956,7 +1067,7 @@ a_missing_member_keeps_the_path_to_its_struct :: proc(t: ^testing.T) {
 		a: In,
 	}
 	s: S
-	e := read(`{"a":{}}`, &s)
+	e := read(t, `{"a":{}}`, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Missing_Field)
 	testing.expect_value(t, e.n_steps, 2)
 	testing.expect_value(t, string(e.steps[0].(core.Name)), "a")
@@ -972,7 +1083,7 @@ a_capture_counts_the_members_read_since_the_last_key_found :: proc(t: ^testing.T
 		more: map[string]typed.Raw `json:",unknown"`,
 	}
 	s: S
-	e := read(`{"z":1,"a":1,"b":2,"y":3}                `, &s)
+	e := read(t, `{"z":1,"a":1,"b":2,"y":3}                `, &s)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 }
 
@@ -981,27 +1092,9 @@ a_tolerated_string_may_decode_longer_than_it_is :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	s: string
 	src := "\"\xff\xff\""
-	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, {}, {tolerate = {.Invalid_Utf8}}, context.temp_allocator)
+	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, read = {}, opts = {tolerate = {.Invalid_Utf8}}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, s, "��")
-}
-
-@(test)
-a_refused_read_leaves_a_fixed_list_its_elements :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	l: [dynamic; 4]i32
-	e := read(`[1,2,"x"]`, &l)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
-	testing.expect(t, len(l) >= 2)
-}
-
-@(test)
-a_number_of_the_platforms_order_reads :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	v: u32le
-	e := read(`7`, &v)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, v, 7)
 }
 
 @(test)
@@ -1018,7 +1111,7 @@ a_refused_plan_leaves_nothing_allocated :: proc(t: ^testing.T) {
 		bad:  i128,
 		need: i32 `json:",required"`,
 	}
-	_, err := json.plan_make(S, {}, mem.tracking_allocator(&track))
+	_, err := json.plan_make(S, plan = {}, allocator = mem.tracking_allocator(&track))
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
@@ -1038,7 +1131,7 @@ a_plan_holds_no_string_of_its_options :: proc(t: ^testing.T) {
 	}
 	tag := strings.clone("kind")
 	name := strings.clone("first")
-	plan, err := json.plan_make(U, {union_tag = tag, tag_names = {{A, name}}})
+	plan, err := json.plan_make(U, plan = {union_tag = tag, tag_names = {{A, name}}})
 	defer typed.plan_destroy(&plan)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	mem.zero(raw_data(tag), len(tag))
@@ -1047,25 +1140,8 @@ a_plan_holds_no_string_of_its_options :: proc(t: ^testing.T) {
 	delete(name)
 	u: U
 	src := `{"kind":"first","x":1}`
-	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &u, &plan, {}, {}, context.temp_allocator)
+	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &u, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
-}
-
-@(test)
-a_string_past_a_fixed_array_is_refused_at_its_quote :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	a: [1]string
-	e := read(`["a","b"]`, &a)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Length)
-	testing.expect_value(t, e.at, 5)
-}
-
-@(test)
-a_map_key_past_its_width_is_refused :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	m: map[i8]i32
-	e := read(`{"300":1}`, &m)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Out_Of_Range)
 }
 
 @(test)
@@ -1074,11 +1150,11 @@ an_enum_map_key_past_i64_is_no_member :: proc(t: ^testing.T) {
 	E :: enum i64 {
 		A = -1,
 	}
-	plan, err := json.plan_make(map[E]i32, {enums = .Int}, context.temp_allocator)
+	plan, err := json.plan_make(map[E]i32, plan = {enums = .Int}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	m: map[E]i32
 	src := `{"18446744073709551615":1}`
-	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &m, &plan, {}, {}, context.temp_allocator)
+	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &m, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 	testing.expect(t, e.kind != .None)
 }
 
@@ -1089,7 +1165,7 @@ a_plan_error_names_its_field_after_the_plan_is_gone :: proc(t: ^testing.T) {
 	poisoned := runtime.Allocator{poison_free_alloc_proc, &inner}
 	_, e := json.plan_make(struct {
 			a: f16 `json:"alpha"`,
-		}, {}, poisoned)
+		}, plan = {}, allocator = poisoned)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unsupported)
 	testing.expect_value(t, e.n_steps, 1)
 	testing.expect_value(t, string(e.steps[0].(core.Name)), "alpha")
@@ -1109,20 +1185,11 @@ a_one_shot_read_error_names_its_field_after_the_plan_is_gone :: proc(t: ^testing
 		context.temp_allocator = runtime.Allocator{poison_free_alloc_proc, &inner}
 		s: S
 		src := `{"alpha":"x","beta":"y"}`
-		e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, {collect = &kept}, {}, inner.inner)
+		e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, read = {collect = &kept}, opts = {}, allocator = inner.inner)
 		testing.expect_value(t, string(e.steps[0].(core.Name)), "alpha")
 	}
 	testing.expect_value(t, len(kept.errors), 2)
 	testing.expect_value(t, string(kept.errors[1].steps[0].(core.Name)), "beta")
-}
-
-@(test)
-a_map_key_with_an_escape_decodes :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	s: map[string]string
-	e := read(`{"a\nb":"x"}`, &s)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, s["a\nb"], "x")
 }
 
 // Numbers read into f32 with one rounding, streamed and from a document. The cases sit on or next to an f32 midpoint
@@ -1172,5 +1239,31 @@ f32_rounds_once :: proc(t: ^testing.T) {
 				testing.expectf(t, ok, "%s: %v %v, want %08x", c.text, got.v, got.e.kind, c.want)
 			}
 		}
+	}
+}
+
+@(test)
+types_the_plan_refuses :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Empty :: struct {}
+	Bits :: bit_field u8 {
+		a: u8 | 8,
+	}
+	Huge :: struct {
+		big: [1 << 29]u64,
+		x:   i32,
+	}
+	Past_4_Gib :: [1 << 32 + 8]u8
+	refused := []typeid {
+		[]Empty, [dynamic]Empty, [2]Empty, rawptr, Maybe(rawptr), []Maybe(rawptr), [^]i32, proc(), typeid, Bits, #simd[4]f32,
+		matrix[2, 2]f32, complex64, quaternion256, rune, string16, #soa[]Point, Huge, []Past_4_Gib, ^Huge, map[string]Past_4_Gib,
+	}
+	for T in refused {
+		_, err := json.plan_make(T, plan = {}, allocator = context.temp_allocator)
+		testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
+	}
+	for T in ([]typeid{map[string]Empty, [1 << 32 - 1]u8}) {
+		_, err := json.plan_make(T, plan = {}, allocator = context.temp_allocator)
+		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	}
 }

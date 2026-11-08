@@ -30,7 +30,7 @@ reservation_retry :: proc(t: ^testing.T) {
 		src[i] = 'a'
 	}
 	src[len(src) - 1] = '"'
-	doc, err := json.build(src, .Json, {}, false, alloc)
+	doc, err := json.build(src, .Json, {}, .Last, alloc)
 	testing.expectf(t, err.kind == .None, "longtext in 8 MB: %v", err)
 	core.destroy(&doc)
 
@@ -44,7 +44,7 @@ reservation_retry :: proc(t: ^testing.T) {
 		nested[len(nested) - 1 - i] = ']'
 	}
 	nested[depth] = '0'
-	doc, err = json.build(nested, .Json, {max_depth = u32(depth + 1)}, false, alloc)
+	doc, err = json.build(nested, .Json, {max_depth = u32(depth + 1)}, .Last, alloc)
 	testing.expectf(t, err.kind == .No_Memory, "deep in 8 MB: %v", err)
 	core.destroy(&doc)
 }
@@ -65,7 +65,7 @@ sparse_text_fits_small_arena :: proc(t: ^testing.T) {
 		src[i] = 'a'
 	}
 	src[len(src) - 1] = '"'
-	doc, err := json.build(src, .Json, {}, false, mem.arena_allocator(&arena))
+	doc, err := json.build(src, .Json, {}, .Last, mem.arena_allocator(&arena))
 	defer core.destroy(&doc)
 	testing.expectf(t, err.kind == .None, "8 MB string in 1 MB arena: %v", err)
 	testing.expect_value(t, len(doc.nodes), 1)
@@ -82,7 +82,7 @@ arena_fit_is_monotonic :: proc(t: ^testing.T) {
 	for size := 16; size <= len(backing); size += 16 {
 		arena: mem.Arena
 		mem.arena_init(&arena, backing[:size])
-		doc, err := json.build(src, .Jsonc, {}, true, mem.arena_allocator(&arena))
+		doc, err := json.build(src, .Jsonc, {}, .Refuse, mem.arena_allocator(&arena))
 		core.destroy(&doc)
 		if err.kind == .No_Memory {
 			testing.expectf(t, fit == 0, "No_Memory in %d bytes after a fit in %d", size, fit)
@@ -117,7 +117,7 @@ refuse_oom_keeps_duplicate :: proc(t: ^testing.T) {
 	// the error.
 	for fail_at in 1 ..= 3 {
 		f := walktest.Failing_Alloc{inner = context.allocator, fail_at = fail_at}
-		doc, err := json.build(src, .Json, {}, true, walktest.failing_allocator(&f))
+		doc, err := json.build(src, .Json, {}, .Refuse, walktest.failing_allocator(&f))
 		testing.expectf(t, err.kind == core.Document_Error_Kind.Duplicate_Key && err.at == 8, "fail_at %d: %v at %d", fail_at, err.kind, err.at)
 		core.destroy(&doc)
 	}
@@ -151,7 +151,7 @@ refuse_equal_long_escaped_keys :: proc(t: ^testing.T) {
 	strings.write_string(&b, `":2}`)
 	p := Poison_Free_Alloc{inner = context.allocator}
 	alloc := runtime.Allocator{procedure = poison_free_alloc_proc, data = &p}
-	doc, err := json.build(transmute([]u8)strings.to_string(b), .Json, {}, true, alloc)
+	doc, err := json.build(transmute([]u8)strings.to_string(b), .Json, {}, .Refuse, alloc)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 1806)
@@ -172,7 +172,7 @@ refuse_grow_keeps_earliest_repeat :: proc(t: ^testing.T) {
 	src := transmute([]u8)strings.to_string(b)
 	// Allocation 0 is the node array.
 	f := walktest.Failing_Alloc{inner = context.allocator, fail_at = 0}
-	doc, err := json.build(src, .Json, {}, true, walktest.failing_allocator(&f))
+	doc, err := json.build(src, .Json, {}, .Refuse, walktest.failing_allocator(&f))
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 7)
@@ -242,7 +242,7 @@ fits_arena :: proc(t: ^testing.T, src: string, $S: json.Spec, extra: int) {
 	defer delete(backing)
 	arena: mem.Arena
 	mem.arena_init(&arena, backing)
-	doc, err := json.build(transmute([]u8)src, S, {}, false, mem.arena_allocator(&arena))
+	doc, err := json.build(transmute([]u8)src, S, {}, .Last, mem.arena_allocator(&arena))
 	defer core.destroy(&doc)
 	testing.expectf(t, err.kind == .None, "%d bytes: %v", need, err)
 	testing.expect_value(t, len(doc.nodes), count.nodes)
@@ -267,7 +267,7 @@ arena_tail_returns :: proc(t: ^testing.T) {
 	arena: mem.Arena
 	mem.arena_init(&arena, backing)
 	src := strings.concatenate({"[\"", strings.repeat("a", 1 << 20, context.temp_allocator), "\"]"}, context.temp_allocator)
-	doc, err := json.build(transmute([]u8)src, .Json, {}, false, mem.arena_allocator(&arena))
+	doc, err := json.build(transmute([]u8)src, .Json, {}, .Last, mem.arena_allocator(&arena))
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	stack := core.MAX_DEPTH * size_of(u64)

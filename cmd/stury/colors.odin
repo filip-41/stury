@@ -42,11 +42,11 @@ parse_colors :: proc(spec: string) -> (colors: [8]string, ok: bool) {
 	return colors, true
 }
 
-// jq's choice of colour: with -C, or when stdout is a terminal and $NO_COLOR is unset or empty. Never with -M, and
-// never for fmt, which ignores $JQ_COLORS too.
+// jq's choice of colour: with -C, or when stdout is a terminal and $NO_COLOR is unset or empty. Never with -M, never
+// for fmt, which ignores $JQ_COLORS too, and never under --to jsonc, whose comments only the uncoloured writer keeps.
 set_colors :: proc(run: ^Run, cli: Cli) {
 	no_color := posix.getenv("NO_COLOR")
-	run.opts.color = (cli.color_set || is_terminal(os.stdout) && (no_color == nil || no_color == "")) && !cli.mono && !cli.formatting
+	run.opts.color = (cli.color_set || is_terminal(os.stdout) && (no_color == nil || no_color == "")) && !cli.mono && !cli.formatting && !writes_comments(&run.opts)
 	if run.opts.color {
 		enable_color()
 	}

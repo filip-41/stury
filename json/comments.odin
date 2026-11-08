@@ -52,43 +52,42 @@ comment :: #force_inline proc "contextless" (p, end: [^]u8, $S: Spec) -> (q: [^]
 	if intrinsics.ptr_sub(end, p) < 2 {
 		return p, .Bad_Char
 	}
-	q = p[2:]
 	switch p[1] {
 	case '/':
-		for {
-			q = comment_scan(q, end, false)
-			if q >= end || line_end(q, end, S) {
-				return q, .None
-			}
-			if q[0] < 0x20 && q[0] != '\t' {
-				return q, .Bad_Char
-			}
-			if q[0] < 0x80 {
-				q = q[1:]
-			} else if q, kind = spell.utf8_char(q, end); kind != .None {
-				return
-			}
-		}
+		return comment_body(p[2:], end, false, S)
 	case '*':
-		for {
-			q = comment_scan(q, end, true)
+		return comment_body(p[2:], end, true, S)
+	}
+	return p, .Bad_Char
+}
+
+// Reads a comment's body from `p` to one past its last byte, a block comment's when `star`, else a line comment's.
+@(private)
+comment_body :: #force_inline proc "contextless" (p, end: [^]u8, $star: bool, $S: Spec) -> (q: [^]u8, kind: core.Fault_Kind) #no_bounds_check {
+	q = p
+	for {
+		q = comment_scan(q, end, star)
+		when star {
 			if q >= end {
 				return end, .Truncated
 			}
 			if q[0] == '*' && intrinsics.ptr_sub(end, q) > 1 && q[1] == '/' {
 				return q[2:], .None
 			}
-			if q[0] < 0x20 && q[0] != '\t' && q[0] != '\n' && q[0] != '\r' {
-				return q, .Bad_Char
-			}
-			if q[0] < 0x80 {
-				q = q[1:]
-			} else if q, kind = spell.utf8_char(q, end); kind != .None {
-				return
+		} else {
+			if q >= end || line_end(q, end, S) {
+				return q, .None
 			}
 		}
+		if q[0] < 0x20 && q[0] != '\t' && !(star && (q[0] == '\n' || q[0] == '\r')) {
+			return q, .Bad_Char
+		}
+		if q[0] < 0x80 {
+			q = q[1:]
+		} else if q, kind = spell.utf8_char(q, end); kind != .None {
+			return
+		}
 	}
-	return p, .Bad_Char
 }
 
 // Whether a run's fault `kind` at `q` is a `/` that opens no comment, so the fault belongs to the byte's place, not to a
@@ -340,7 +339,7 @@ st_comments_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 		}
 	}
 	if d < 2 {
-		return ended(w, hs, r)
+		return fault(w, hs, r, .None)
 	}
 	if crossed {
 		if d & 1 != 0 {
@@ -354,5 +353,5 @@ st_comments_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind:
 	if q[0] == close {
 		return #must_tail st_close(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
-	return fault(w, hs, q, .Bad_Char)
+	return #must_tail st_bad_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }

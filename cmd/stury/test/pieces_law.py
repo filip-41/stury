@@ -7,7 +7,6 @@ build cuts every input into many pieces.
     pieces_law.py [--odin PATH]
 """
 
-import argparse
 import concurrent.futures
 import os
 import re
@@ -15,19 +14,18 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from harness import build, odin_flag
+
 WIDTHS = (1, 2, 6, 18)
+# Every width but this one fans out from the first record. This one keeps the rule that stays serial while the records
+# read so far are too large for a piece's guess to land, which records of this size are at this slice.
+DENSITY_RULE = 6
+FAN_ALWAYS = {"RECORDS_FAN_AFTER": 1, "RECORDS_SPARSE": 1 << 30}
 # Pieces of a few records each.
 SLICE = 256
 COUNT = 3000
-# `--explain`'s timings, its byte counts and its count of pieces differ between runs that answer alike.
-UNSTABLE = re.compile(r"^stury: explain: (run_time|cost|compile_time):.*$|pieces=\S+", re.MULTILINE)
-
-
-def build(odin, out, defines):
-    cmd = [odin, "build", "cmd/stury", "-o:minimal", f"-out:{out}"] + [f"-define:{k}={v}" for k, v in defines.items()]
-    subprocess.run(cmd, cwd=ROOT, check=True)
-    return out
+# `--explain`'s timings, its byte counts and its threads differ between runs that answer alike.
+UNSTABLE = re.compile(r"^stury: explain: (time|used|threads):.*$", re.MULTILINE)
 
 
 def record(i):
@@ -104,75 +102,37 @@ def cases(directory):
         table = file(f"table-{fault}.csv", csv_text(at))
         # Many texts in the default framing, one to a line and run on with spaces.
         texts = file(f"texts-{fault}.json", records_text(at).replace("\n", " \n  ", COUNT // 2))
-        for f in FILTERS:
-            out.append(["--from", "ndjson", "-c", f, nd])
-            out.append(["-c", ".[] | " + f, arr])
-            out.append(["-c", f, texts])
-        out.append(["-e", "--from", "ndjson", ".o.k[1]", nd])
-        out.append(["--explain", "--from", "ndjson", "-c", ".v", nd])
-        for f in SPINE:
-            out.append(["-c", f, spine])
-        for f in COLLECT:
-            out.append(["-c", f, arr])
-        for f in SPINE_COLLECT:
-            out.append(["-c", f, spine])
-        for p in PRINTED:
-            out.append(p + [arr])
-        out.append(["--explain", "-c", "map(.v) | length", arr])
-        out.append(["--explain", "-c", ".logs | map(.v)", spine])
-        for w in WHOLE:
-            out.append(w + [arr])
-            out.append(w + [spine])
-        out.append(["-c", ".logs | length", spine])
-        for f in DOCUMENT:
-            out.append(["-c", f, arr])
-        for f in SPINE_DOCUMENT:
-            out.append(["-c", f, spine])
         nested = file(f"nested-{fault}.json", nested_text(at if at is None else at // 4))
-        out.append(["--max-depth", str(DEPTH + 1), "-c", "flatten | add", nested])
-        out.append(["--max-depth", str(DEPTH + 2), "-c", "flatten | add", nested])
-        out.append(["--explain", "-c", ".", arr])
-        out.append(["--explain", "length", spine])
-        out.append(["--explain", "-c", ".logs[].v", spine])
-        out.append(["--explain", "-c", ".[] | .v + 1", arr])
-        out.append(["--explain", "-c", DOCUMENT[0], arr])
-        out.append(["--explain", "-c", SPINE_DOCUMENT[0], spine])
-        out.append(["--explain", "--from", "csv", "-c", ".id", table])
-        for f in CSV:
-            out.append(["--from", "csv", "-c", f, table])
-        out.append(["--from", "csv", "--to", "csv", "{id, qty}", table])
-        out.append(["check", nd])
+        for f in FILTERS:
+            out += [["--from", "ndjson", "-c", f, nd], ["-c", ".[] | " + f, arr], ["-c", f, texts]]
+        out += [["-c", f, spine] for f in SPINE + SPINE_COLLECT + SPINE_DOCUMENT + [".logs | length"]]
+        out += [["-c", f, arr] for f in COLLECT + DOCUMENT] + [p + [arr] for p in PRINTED]
+        out += [w + [x] for w in WHOLE for x in (arr, spine)] + [["--from", "csv", "-c", f, table] for f in CSV]
+        out += [["-e", "--from", "ndjson", ".o.k[1]", nd], ["--from", "csv", "--to", "csv", "{id, qty}", table], ["check", nd]]
+        out += [["--max-depth", str(DEPTH + d), "-c", "flatten | add", nested] for d in (1, 2)]
+        out += [["--explain", *a] for a in (["--from", "ndjson", "-c", ".v", nd], ["-c", "map(.v) | length", arr],
+                                            ["-c", ".logs | map(.v)", spine], ["-c", ".", arr], ["length", spine],
+                                            ["-c", ".logs[].v", spine], ["-c", ".[] | .v + 1", arr], ["-c", DOCUMENT[0], arr],
+                                            ["-c", SPINE_DOCUMENT[0], spine], ["--from", "csv", "-c", ".id", table])]
     # The spine names one key twice, and jq reads the last.
     twice = file("twice.json", '{"logs":%s,"logs":[1,2]}' % array_text(None, False))
-    out.append(["-c", ".logs[]", twice])
-    out.append(["-c", ".logs[].v?", twice])
     # A key repeated in an entry, and at the root around the array.
     entries = [record(i) if i % 1000 != 7 else '{"i":%d,"i":0,"v":1}' % i for i in range(COUNT)]
     repeated = file("repeated.json", '{"n":1,"logs":[%s],"n":2}' % ",".join(entries))
-    out.append(["-c", ".logs | length", twice])
-    out.append(["-c", ".logs | map(.v)", twice])
-    out.append(["-c", "[.logs[] | .i]", repeated])
-    for f in SPINE_DOCUMENT:
-        out.append(["-c", f, twice])
-        out.append(["-c", f, repeated])
-    out.append(["-c", "[.logs[] | .i] | add", repeated])
+    out += [["-c", f, twice] for f in (".logs[]", ".logs[].v?", ".logs | length", ".logs | map(.v)")]
+    out += [["-c", f, x] for f in SPINE_DOCUMENT for x in (twice, repeated)]
+    out += [["-c", f, repeated] for f in ("[.logs[] | .i]", "[.logs[] | .i] | add")]
     # Spines with no entries, and a root object whose length is its count of keys.
     empty = file("empty.json", '{"n":1,"logs":[%s],"tail":"x"}' % (" " * (SLICE * 16)))
     blank = file("blank.json", "[%s]" % ("\n" * (SLICE * 16)))
     keys = file("keys.json", "{%s}" % ",".join('"k%d":%s' % (i, record(i)) for i in range(COUNT)))
-    for w in WHOLE:
-        out.append(w + [twice])
-        out.append(w + [repeated])
-        out.append(w + [empty])
-        out.append(w + [blank])
-    out.append(["-c", ".logs | length", empty])
-    out.append(["length", keys])
-    out.append(["-c", "keys | length", keys])
+    out += [w + [x] for w in WHOLE for x in (twice, repeated, empty, blank)]
+    out += [["-c", ".logs | length", empty], ["length", keys], ["-c", "keys | length", keys]]
     return out
 
 
 # Where a run on an input with no fault must have taken pieces.
-POOLED = re.compile(r"pieces=[1-9]")
+POOLED = re.compile(r"^stury: explain: threads: [1-9][0-9]* pieces? over", re.MULTILINE)
 
 
 def run(binary, args):
@@ -184,14 +144,12 @@ def run(binary, args):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--odin", default=os.environ.get("ODIN", "odin"))
-    args = parser.parse_args()
+    odin = odin_flag()
     with tempfile.TemporaryDirectory() as directory:
         serial = {"STURY_POOLED_BYTES": 1 << 62}
-        builds = {"serial": serial} | {w: {"STURY_THREADS": w, "STURY_POOLED_BYTES": 0, "RECORDS_SLICE": SLICE} for w in WIDTHS}
+        builds = {"serial": serial} | {w: {"STURY_THREADS": w, "STURY_POOLED_BYTES": 0, "RECORDS_SLICE": SLICE} | ({} if w == DENSITY_RULE else FAN_ALWAYS) for w in WIDTHS}
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
-            binaries = dict(zip(builds, pool.map(lambda kv: build(args.odin, os.path.join(directory, f"stury-{kv[0]}"), kv[1]), builds.items())))
+            binaries = dict(zip(builds, pool.map(lambda kv: build(odin, os.path.join(directory, f"stury-{kv[0]}"), kv[1]), builds.items())))
         failures = 0
         runs = cases(directory)
         for case in runs:

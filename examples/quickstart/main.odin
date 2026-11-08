@@ -1,6 +1,7 @@
 // Validate a text, read it into a struct with `unmarshal`, and write it back with `marshal`.
 //
 // Run from the repository root: odin run examples/quickstart -collection:stury=.
+// With a file argument it reads that file in place of the built-in text.
 package main
 
 import "stury:core"
@@ -25,6 +26,14 @@ report :: proc(src: []u8, e: $E) {
 
 main :: proc() {
 	src := transmute([]byte)string(`{"name":"ada","n":1}`)
+	if len(os.args) > 1 {
+		data, rerr := os.read_entire_file(os.args[1], context.allocator)
+		if rerr != nil {
+			os.print_error(os.stderr, rerr, os.args[1])
+			os.exit(1)
+		}
+		src = data
+	}
 	if fault, bad := json.validate(src, .Json).?; bad {
 		report(src, fault)
 		os.exit(1)

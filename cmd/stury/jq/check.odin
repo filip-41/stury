@@ -408,48 +408,17 @@ walk_call :: proc(c: ^Checker, n: ^Node, s: ^Scope, later: ^[dynamic]Later) {
 @(private = "file")
 walk_patterns :: proc(c: ^Checker, pats: []^Pattern, s: ^Scope, later: ^[dynamic]Later) -> ^Scope {
 	inner := s
-	for p in pats {
-		inner = bind_pattern_vars(p, inner)
+	each_var(pats, &inner, proc(name: string, s: ^^Scope) {s^ = new_scope(s^, name, -1)})
+	Keys :: struct {
+		c:     ^Checker,
+		s:     ^Scope,
+		later: ^[dynamic]Later,
 	}
-	keys := s if len(pats) == 1 else inner
 	for p in pats {
-		walk_keys(c, p, keys, later)
+		any_key(p, Keys{c, s if len(pats) == 1 else inner, later}, proc(key: ^^Node, k: Keys) -> bool {
+			walk(k.c, key^, k.s, k.later)
+			return false
+		})
 	}
 	return inner
-}
-
-@(private = "file")
-bind_pattern_vars :: proc(p: ^Pattern, s: ^Scope) -> ^Scope {
-	s := s
-	switch p.kind {
-	case .Var:
-		s = new_scope(s, p.name, -1)
-	case .Array:
-		for e in p.elems {
-			s = bind_pattern_vars(e, s)
-		}
-	case .Object:
-		for m in p.members {
-			if m.var != "" {
-				s = new_scope(s, m.var, -1)
-			}
-			if m.pattern != nil {
-				s = bind_pattern_vars(m.pattern, s)
-			}
-		}
-	}
-	return s
-}
-
-@(private = "file")
-walk_keys :: proc(c: ^Checker, p: ^Pattern, s: ^Scope, later: ^[dynamic]Later) {
-	for e in p.elems {
-		walk_keys(c, e, s, later)
-	}
-	for m in p.members {
-		walk(c, m.key, s, later)
-		if m.pattern != nil {
-			walk_keys(c, m.pattern, s, later)
-		}
-	}
 }

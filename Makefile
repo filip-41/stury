@@ -1,5 +1,18 @@
 ODIN ?= odin
 
+# The oldest Odin release that passes `make lint`. It is checked once per make run, by the first make and not by the
+# makes that tools/gate.py and the sanitizer targets start, which inherit ODIN_CHECKED.
+MIN_ODIN := dev-2026-11
+ifndef ODIN_CHECKED
+ifeq ($(filter help,$(MAKECMDGOALS)),)
+ODIN_PROBLEM := $(shell python3 tools/checks.py odin "$(ODIN)")
+ifneq ($(ODIN_PROBLEM),)
+$(error $(ODIN_PROBLEM))
+endif
+export ODIN_CHECKED := 1
+endif
+endif
+
 # A plain `make` runs the gate.
 .DEFAULT_GOAL := gate
 
@@ -7,15 +20,17 @@ ODIN ?= odin
 LIB_PKGS  := core/spell core host core/kernel core/compose core/build core/typed core/write core/records json dsv
 TEST_PKGS := core/spell/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test
 # The packages the tests share, checked by `lint` and built through their imports.
-SUPPORT_PKGS := walktest
+SUPPORT_PKGS := walktest bench/timing
+# The benchmark programs, which `lint` and the gate compile.
+BENCH_PKGS := bench bench/doc bench/editbench bench/paths bench/typed bench/write bench/records
 # The test packages whose loops are compiled for the tier `-define:TIER` names.
 TIER_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
 # A leak or a bad free fails the test that made it.
 TEST_MEMORY := -define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true
 # A text read on threads is cut at every byte in pieces of one byte, and at -o:speed chains run over several records.
-TEST_PIECES := -define:RECORDS_SLICE=1
-TEST_CHAINS := -define:RECORDS_SLICE=16
+TEST_PIECES := -define:RECORDS_SLICE=1 -define:RECORDS_FAN_AFTER=1 -define:RECORDS_SPARSE=1000000000
+TEST_CHAINS := -define:RECORDS_SLICE=16 -define:RECORDS_FAN_AFTER=1 -define:RECORDS_SPARSE=1000000000
 BUILD     := build
 # The optimization of the command line, which a release build overrides for its target.
 OPT       ?= -o:speed
@@ -33,15 +48,19 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite test-x86 test-wide test-asan test-tsan test-f32 lint bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers bench-cli fixtures surface \
+.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite test-x86 test-wide test-asan test-tsan test-f32 lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers bench-cli fixtures surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
-# The document lanes' probe and peers, and the fixtures they read.
+# The bench lanes' probes and peers, and the fixtures they read. BENCH_CC, BENCH_CXX and BENCH_CARGO name the compilers
+# that build the peers. BENCH_FILES and RECORD_FILES name the fixtures of bench-doc and bench-records, LANES the lanes
+# of bench-typed and bench-write. Each runner has its own default.
 BENCH      := $(BUILD)/bench
 BENCH_CC    ?= cc
 BENCH_CXX   ?= c++
 BENCH_CARGO ?= cargo
-BENCH_FILES ?= logs.json citm_catalog.json table.csv logs.jsonc logs.json5
+BENCH_FILES ?=
+RECORD_FILES ?=
+LANES ?=
 
 # `$(call odin_each,VERB,PACKAGES,FLAGS,LABEL)` runs `odin VERB` over each package and stops at the first failure.
 define odin_each
@@ -62,7 +81,22 @@ build-cli:
 	@mkdir -p $(BUILD)
 	$(ODIN) build cmd/stury $(OPT) $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury
 
-# The checks a change can reach, in `tools/gate.py`: `check` while editing, `gate` before a branch lands.
+help:
+	@echo "make check        the checks the files you changed can reach (seconds)"
+	@echo "make gate         everything a branch passes before it lands (python3 tools/gate.py full adds the long runs)"
+	@echo "make test         library suites, examples, CLI smoke cases, jq corpus"
+	@echo "make test-lib     the library suites (-j runs the compiles at once)"
+	@echo "make test-one P=<package> T=<test>   one test"
+	@echo "make test-cli, test-jq, test-examples, diff   the CLI and examples"
+	@echo "make lint         vet and surface checks on every target; lint-man, lint-fixtures the docs"
+	@echo "make api-write    regenerate API.txt and API_SHARED.txt after a public change"
+	@echo "make test-asan, test-tsan, test-x86, test-wide, test-f32   sanitizers, x86 tiers, binary32"
+	@echo "make build-cli    build/stury (OPT=, STURY_VERSION=)"
+	@echo "make bench-doc, bench-paths, bench-typed, bench-records, bench-write, bench-cli   see bench/README.md"
+	@echo "ODIN=<path> names the compiler, and needs release $(MIN_ODIN) or later."
+
+# The checks a change can reach, in `tools/gate.py`: `check` while editing, `gate` before a branch lands. `gate` is the
+# merge tier. `python3 tools/gate.py full` adds the long randomized runs.
 check:
 	@ODIN=$(ODIN) python3 tools/gate.py quick
 
@@ -82,7 +116,7 @@ test-examples:
 # input's end. Each compile is its own target, so `make -j test-lib` runs them at once.
 test-lib: $(TEST_TARGETS)
 
-# `make test-one P=json/test T=test_name` runs one test of one test package.
+# `make test-one P=json/test T=test_name` runs one test of one test package. A failed suite names the test to pass as T.
 test-one:
 	@[ -n "$(P)" ] && [ -n "$(T)" ] || { echo "usage: make test-one P=<package dir> T=<test name>" >&2; exit 2; }
 	$(ODIN) test $(P) $(TEST_OPT) $(TEST_MEMORY) $(TEST_PIECES) -define:ODIN_TEST_NAMES=$(T) -out:$(BUILD)/test-one
@@ -90,9 +124,9 @@ test-one:
 # The command line end to end on what jq has not, held to smoke.floor.
 test-cli: build-cli
 	@echo "== cmd/stury"
-	python3 cmd/stury/test/smoke_floor.py $(BUILD)/stury
+	python3 cmd/stury/test/smoke.py $(BUILD)/stury
 
-# jq 1.8.2's corpus and cli.tsv, every row passing. The gate holds each area to the count in jq_suite.floor.
+# jq 1.8.2's corpus and cli.tsv, every row passing.
 test-jq: build-cli
 	python3 cmd/stury/test/jq_suite.py $(BUILD)/stury
 
@@ -116,12 +150,12 @@ $(DIFF_SEED_TARGETS): diff-seed-%: build-cli
 $(TEST_MINIMAL): $(BUILD)/test/minimal/%:
 	@mkdir -p $(@D)
 	@echo "== $* (-o:minimal)"
-	@$(ODIN) test $* $(TEST_OPT) $(TEST_MEMORY) $(TEST_PIECES) -out:$@ || { echo "== $* (-o:minimal) failed"; exit 1; }
+	@$(ODIN) test $* $(TEST_OPT) $(TEST_MEMORY) $(TEST_PIECES) -out:$@ || { echo "== $* (-o:minimal) failed: make test-one P=$* T=<failed test's name>"; exit 1; }
 
 $(TEST_SPEED): $(BUILD)/test/speed/%:
 	@mkdir -p $(@D)
 	@echo "== $* (-o:speed)"
-	@$(ODIN) test $* -o:speed $(TEST_MEMORY) $(TEST_CHAINS) -out:$@ || { echo "== $* (-o:speed) failed"; exit 1; }
+	@$(ODIN) test $* -o:speed $(TEST_MEMORY) $(TEST_CHAINS) -out:$@ || { echo "== $* (-o:speed) failed: make test-one P=$* T=<failed test's name> runs it at -o:minimal"; exit 1; }
 
 # The x86-64 tiers v2 and v3 in a build for Odin's default CPU, as a caller's build is, at -o:none, where no kernel
 # is inlined into the tier's procedures, and at -o:speed. TIER picks the tier of the kernel tests' loops and of `tier()`.
@@ -157,7 +191,7 @@ test-f32:
 		-define:ODIN_TEST_NAMES=spell_tests.f32_exhaustive -out:$(BUILD)/test/f32/spell
 
 # The command line under a sanitizer, with its smoke cases and jq corpus. TSan otherwise sleeps a second at every exit of
-# a process that ran threads, which is most of smoke.sh's wall time.
+# a process that ran threads, which is most of smoke.py's wall time.
 SAN_ENV := STURY_SANITIZED=1 STURY_TEST_TIMEOUT=300 ASAN_OPTIONS=use_sigaltstack=0:detect_leaks=0 TSAN_OPTIONS=atexit_sleep_ms=0
 SAN_STACK := ulimit -s 65520 2>/dev/null || ulimit -s unlimited
 
@@ -165,7 +199,7 @@ SAN_STACK := ulimit -s 65520 2>/dev/null || ulimit -s unlimited
 define sanitized_cli
 @mkdir -p $(BUILD)
 $(ODIN) build cmd/stury $(OPT) -debug -sanitize:$(1) $(CLI_LINK) $(CLI_DEFINES) -out:$(BUILD)/stury-$(1)
-$(SAN_STACK); STURY_SANITIZER=$(1) $(SAN_ENV) python3 cmd/stury/test/smoke_floor.py $(BUILD)/stury-$(1)
+$(SAN_STACK); STURY_SANITIZER=$(1) $(SAN_ENV) python3 cmd/stury/test/smoke.py $(BUILD)/stury-$(1)
 $(SAN_STACK); STURY_SANITIZER=$(1) $(SAN_ENV) python3 cmd/stury/test/jq_suite.py $(BUILD)/stury-$(1)
 endef
 
@@ -183,7 +217,6 @@ $(ASAN_TARGETS): $(BUILD)/test/asan/%:
 	@echo "== $* (address)"
 	@$(ODIN) test $* -o:speed -sanitize:address -debug $(TEST_PIECES) -out:$@ || { echo "== $* (address) failed"; exit 1; }
 
-# The pool's start budget is raised, since a loaded host would otherwise stop it short of every helper under the sanitizer.
 test-tsan: $(TSAN_TARGETS)
 	@$(MAKE) --no-print-directory test-tsan-cli
 
@@ -199,13 +232,7 @@ lint:
 	python3 tools/checks.py globals
 	python3 tools/checks.py api
 	$(call odin_each,check,$(LIB_PKGS) $(TEST_PKGS) $(SUPPORT_PKGS),-no-entry-point $(LINT_FLAGS),)
-	$(ODIN) check bench $(LINT_FLAGS)
-	$(ODIN) check bench/doc $(LINT_FLAGS)
-	$(ODIN) check bench/editbench $(LINT_FLAGS)
-	$(ODIN) check bench/paths $(LINT_FLAGS)
-	$(ODIN) check bench/records $(LINT_FLAGS)
-	$(ODIN) check bench/typed $(LINT_FLAGS)
-	$(ODIN) check bench/write $(LINT_FLAGS)
+	$(call odin_each,check,$(BENCH_PKGS),$(LINT_FLAGS),)
 	$(ODIN) check cmd/stury $(LINT_FLAGS)
 	$(ODIN) check cmd/stury $(LINT_FLAGS) -target:linux_amd64
 	@d=$$(mktemp -d) && trap 'rm -rf $$d' EXIT && echo "== cmd/stury (windows_amd64 objects)" && \
@@ -217,10 +244,23 @@ lint:
 	done; done
 	$(call odin_each,check,$(LIB_PKGS),-no-entry-point $(LINT_FLAGS) -target:linux_riscv64, (linux_riscv64))
 
-# The public declarations of each library package, sorted. `api` compares their signatures with API.txt, and
-# `python3 tools/checks.py api --write` regenerates it.
+# The public declarations of each library package, sorted. `api` compares their signatures with API.txt and
+# API_SHARED.txt, and `python3 tools/checks.py api --write` regenerates both.
 surface:
 	python3 tools/checks.py surface
+
+api-write:
+	python3 tools/checks.py api --write
+
+# The man page, and the generated fixtures against bench/manifest.toml's hashes, which hold for the CPython the
+# generators were checked on. `lint-fixtures` fetches the corpus and generates the files in memory, writing nothing
+# under bench/fixtures.
+lint-man:
+	mandoc -T lint -W warning docs/stury.1
+
+lint-fixtures:
+	python3 bench/fetch.py corpus
+	python3 bench/gen.py --check > /dev/null
 
 # Kernel timings at release optimization, of the tier at place TIER of `Tier`. ROUNDS, CASES and COUNT pass through
 # to run.py.
@@ -231,60 +271,66 @@ bench:
 	$(ODIN) build bench -o:speed -define:TIER=$(TIER) -out:$(BUILD)/kernelbench
 	ROUNDS=$(ROUNDS) python3 -I bench/run.py $(BUILD)/kernelbench
 
-# The document lanes' fixtures: the pinned corpus and peer sources, then the generated JSON and dsv files.
+# The bench fixtures: downloads the pinned corpus and the peers' sources (bench/fetch.py, checked by SHA-256), then
+# writes the synthetic files and fails when one's hash is not bench/manifest.toml's (bench/gen.py).
 fixtures:
 	python3 bench/fetch.py
-	python3 bench/gen.py --check
+	python3 bench/gen.py
 
-# The path lanes' probe at -o:speed, then paths.py over the peers `bench-doc` built. ROUNDS passes through.
+# The path lanes' probe at -o:speed, then paths.py over the peers `bench-doc` built. Its lanes are fixed. ROUNDS passes
+# through.
 bench-paths: ROUNDS ?= 5
 bench-paths:
 	@mkdir -p $(BENCH)
 	$(ODIN) build bench/paths -o:speed -out:$(BENCH)/paths
 	ROUNDS=$(ROUNDS) python3 bench/paths.py
 
-# The typed read's probe at -o:speed, then typed.py. ROUNDS passes through.
+# The typed read's probe at -o:speed, the peers, then typed.py. ROUNDS and LANES pass through.
 bench-typed: ROUNDS ?= 5
-bench-typed:
+bench-typed: bench-peers
 	@mkdir -p $(BENCH)
 	$(ODIN) build bench/typed -o:speed -out:$(BENCH)/typed
-	ROUNDS=$(ROUNDS) python3 bench/typed.py
+	ROUNDS=$(ROUNDS) python3 bench/typed.py $(LANES)
 
-# The record lanes on the NDJSON and CSV fixtures, beside the peers' record readers. ROUNDS passes through.
+# The record lanes on the NDJSON and CSV fixtures, beside the peers' record readers. ROUNDS and RECORD_FILES pass
+# through.
 bench-records: ROUNDS ?= 5
 bench-records: bench-peers
 	$(ODIN) build bench/records -o:speed -out:$(BENCH)/records
-	ROUNDS=$(ROUNDS) python3 bench/records.py
+	ROUNDS=$(ROUNDS) python3 bench/records.py $(RECORD_FILES)
 
 # The peers whose toolchain and sources are present: yyjson, simdjson (threaded, as its document_stream runs stage 1 in a
-# thread of its own), and the Rust binaries (sonic-rs, serde_json, simd-csv).
+# thread of its own), and the Rust binaries (sonic-rs, serde_json, simd-csv). The first Rust build downloads the crates
+# bench/peers/rust/Cargo.lock names.
 bench-peers:
 	@mkdir -p $(BENCH)
 	@if command -v $(BENCH_CC) >/dev/null && [ -f $(BENCH)/deps/yyjson/yyjson.c ]; then \
 		$(BENCH_CC) -O3 -DNDEBUG -o $(BENCH)/yy_bench bench/peers/yy_bench.c \
 			$(BENCH)/deps/yyjson/yyjson.c -I$(BENCH)/deps/yyjson && echo "yy: built"; \
-	else echo "yy: left out (C compiler or yyjson source missing; run make fixtures)"; fi
+	else echo "yy: left out ($(BENCH_CC) is not on PATH or the yyjson source is missing; run make fixtures)"; fi
 	@if command -v $(BENCH_CXX) >/dev/null && [ -f $(BENCH)/deps/simdjson/simdjson.cpp ]; then \
 		$(BENCH_CXX) -O3 -DNDEBUG -std=c++17 -pthread -o $(BENCH)/cpp_bench bench/peers/cpp_bench.cpp \
 			$(BENCH)/deps/simdjson/simdjson.cpp -I$(BENCH)/deps/simdjson && echo "simd: built"; \
-	else echo "simd: left out (C++ compiler or simdjson source missing; run make fixtures)"; fi
+	else echo "simd: left out ($(BENCH_CXX) is not on PATH or the simdjson source is missing; run make fixtures)"; fi
 	@if command -v $(BENCH_CARGO) >/dev/null; then \
+		echo "cargo: building the Rust peers (the first build downloads crates)"; \
 		CARGO_TARGET_DIR=$(abspath $(BENCH)/rust) $(BENCH_CARGO) build --release --locked \
 			--manifest-path bench/peers/rust/Cargo.toml && echo "sonic, serde, simd-csv: built"; \
-	else echo "sonic, serde, simd-csv: left out (cargo missing)"; fi
+	else echo "sonic, serde, simd-csv: left out ($(BENCH_CARGO) is not on PATH)"; fi
 
 # The command line against jq, jaq, gojq and yq on the fixtures and the corpus. Needs zsh, hyperfine and the tools
-# installed (bench/README.md), and an idle machine for a quotable result.
+# installed (bench/README.md), and an idle machine for a quotable result. ROUNDS, RUNS and CASES (a regex of case names)
+# pass through.
 bench-cli: build-cli
-	python3 bench/gen.py --check
+	python3 bench/gen.py
 	python3 bench/fetch.py corpus
 	zsh bench/cli/jq_compare.sh
 
-# The write lanes: next's probe at -o:speed when bench/write exists, the peers, then write.py. ROUNDS passes through.
+# The write lanes: stury's probe at -o:speed, the peers, then write.py. ROUNDS and LANES pass through.
 bench-write: ROUNDS ?= 5
 bench-write: bench-peers
-	@if [ -d bench/write ]; then $(ODIN) build bench/write -o:speed -out:$(BENCH)/write; \
-	else echo "next: left out (bench/write is not there yet)"; fi
+	@mkdir -p $(BENCH)
+	$(ODIN) build bench/write -o:speed -out:$(BENCH)/write
 	ROUNDS=$(ROUNDS) python3 bench/write.py $(LANES)
 
 # The document lanes' probe at -o:speed, the peers, then doc.py. ROUNDS and BENCH_FILES pass through.

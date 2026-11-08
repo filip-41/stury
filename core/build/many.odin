@@ -1,3 +1,4 @@
+#+private
 package build
 
 import "base:intrinsics"
@@ -11,12 +12,10 @@ import core ".."
 // depth `d`. A `Descend` path can be at several steps of a container at once, so it has a row of step bits per frame.
 
 // A tombstone for an answer a repeated key took back. It keeps the list's indexes, which the marks hold.
-@(private)
 DEAD :: max(u32)
 
 // One `Descend` path's steps in one frame, a bit per step: those live in the container, and the `Name`s among them that
 // met their key.
-@(private)
 Deep_Row :: struct {
 	live:    u64,
 	matched: u64,
@@ -27,7 +26,6 @@ Deep_Row :: struct {
 // it. `ring` is the frame's first entry in `Scan_Many.rings` and `ring_k` its entries, 0 for none. `delay` says a
 // `Slice` with a negative end feeds its elements late. `found` holds the paths that found the container under `.Stream`,
 // which answer at its close, and `open` is its token.
-@(private)
 Many_Frame :: struct {
 	armed:    u64,
 	matched:  u64,
@@ -45,7 +43,6 @@ Many_Frame :: struct {
 }
 
 // An element a ring holds: its tokens, and the nodes `.Replay` reads them at.
-@(private)
 Ring_Entry :: struct {
 	key:    core.Token,
 	value:  core.Token,
@@ -57,7 +54,6 @@ Ring_Entry :: struct {
 // bytes, so there it is a node's index in the high half, and a close is its container's last node with the deeper of two
 // closes first. `chain` tells which `Descend` a `Descend` path's answer came through. `token` and `hi` are what `.Stream`
 // gives.
-@(private)
 Placed :: struct {
 	pos:    u64,
 	answer: core.Answer,
@@ -69,7 +65,6 @@ Placed :: struct {
 // Where an answer of a text's walk stands in text order: at its value's first byte, or after the closing byte for an
 // answer a close gives. Only a dsv text, which nests three deep, has two answers at one byte, a record and its first
 // cell or the closes at its end, so the depth's two low bits order them: opens shallow first, closes deep first.
-@(private)
 text_pos :: #force_inline proc "contextless" (lo: u64, d: int, close: bool) -> u64 {
 	if close {
 		return (2 * lo + 1) << 2 | u64(3 - (d & 3))
@@ -80,7 +75,6 @@ text_pos :: #force_inline proc "contextless" (lo: u64, d: int, close: bool) -> u
 // The state of a `$MANY` read. `next_deep` holds the steps the paths in `Scan.next` picked the coming value at, by
 // `Scan_Path.deep`. `ended` holds the paths whose walk ended at the value, `keep` says it is kept whole, and `indexed` that
 // it needs a `Kept_Child`. `feeding` says the coming value's picks are already made.
-@(private)
 Scan_Many :: struct {
 	paths:      []Scan_Path,
 	frames:     []Many_Frame,
@@ -115,7 +109,6 @@ Scan_Many :: struct {
 }
 
 // The ring entries a step needs, 0 for none. `delayed` says the step feeds elements as later ones arrive.
-@(private)
 step_ring :: proc "contextless" (step: core.Step) -> (need: int, delayed: bool) {
 	#partial switch x in step {
 	case core.Index:
@@ -131,7 +124,6 @@ step_ring :: proc "contextless" (step: core.Step) -> (need: int, delayed: bool) 
 }
 
 // Reads `paths` into a `Scan_Many` for `h`. `depth` bounds the frames a `Descend` path opens.
-@(private)
 many_plan :: proc(h: ^Scan, paths: []core.Path, depth: int, allocator: runtime.Allocator) -> core.Path_Error {
 	if len(paths) > core.MAX_PATHS {
 		return {kind = .Over_Capacity}
@@ -193,7 +185,6 @@ many_plan :: proc(h: ^Scan, paths: []core.Path, depth: int, allocator: runtime.A
 }
 
 // Frees a `$MANY` read's state.
-@(private)
 many_free :: proc(h: ^Scan, allocator: runtime.Allocator) {
 	m := h.many
 	if m == nil {
@@ -209,7 +200,6 @@ many_free :: proc(h: ^Scan, allocator: runtime.Allocator) {
 	h.many = nil
 }
 
-@(private = "file")
 placed_less :: proc(a, b: Placed) -> bool {
 	if a.pos != b.pos {
 		return a.pos < b.pos
@@ -221,7 +211,6 @@ placed_less :: proc(a, b: Placed) -> bool {
 }
 
 // Puts what the read placed in text order, drops what a repeated key took back and what a late path's limit cuts.
-@(private)
 many_settle :: proc(h: ^Scan) {
 	m := h.many
 	// With no late path and nothing taken back, the answers were placed in order and each path stopped at its limit.
@@ -253,7 +242,6 @@ many_settle :: proc(h: ^Scan) {
 }
 
 // Moves the settled answers to the read's list, and sorts the names by node since an outer close follows an inner one.
-@(private)
 many_answers :: proc(h: ^Scan) {
 	m := h.many
 	many_settle(h)
@@ -271,24 +259,12 @@ many_answers :: proc(h: ^Scan) {
 	})
 }
 
-// The hook of a `$MANY` read into a document.
-scan_hook_many :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	return scan_step(true, .Document, h, s, t)
-}
-
-// The hook of `each_answer`.
-scan_hook_stream :: #force_inline proc "contextless" (h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	return many_step(.Stream, h, s, t)
-}
-
 // The step logic, out of line for a walk's many hook sites.
-@(private = "file")
 many_step :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	return scan_step(true, SINK, h, s, t)
 }
 
 // The paths in `set` answer the container at depth `d` that closed at `end`, which `open` opened.
-@(private)
 many_found :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, set: u64, open: core.Token, end: u64, d: int) {
 	when SINK == .Stream {
 		for rest := set; rest != 0; rest &= rest - 1 {
@@ -300,7 +276,6 @@ many_found :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, set: u64,
 }
 
 // Gives `on` what is known. `on` returning false stops the read.
-@(private)
 many_flush :: proc "contextless" (h: ^Scan) {
 	m := h.many
 	context = m.ctx
@@ -312,7 +287,7 @@ many_flush :: proc "contextless" (h: ^Scan) {
 		lo, hi: u64
 		if a.answer.outcome == .Found {
 			lo, hi = core.scalar_ends(a.token)
-			if a.token.kind == .Array || a.token.kind == .Map {
+			if a.token.kind == .Array || a.token.kind == .Object {
 				hi = a.hi
 			}
 		}
@@ -329,7 +304,7 @@ many_flush :: proc "contextless" (h: ^Scan) {
 // Takes back path `p`'s answers through the earlier match of step `k`. A step past a `Descend` is live in many
 // containers at once, so its answers are told by their chain back to the container's open, and a mark per step would
 // not do. That walk is quadratic in a container's repeats of a key beside other paths' answers.
-@(private, cold)
+@(cold)
 many_take_back :: proc "contextless" (m: ^Scan_Many, f: ^Many_Frame, path: ^Scan_Path, p: uint, k, d: int) {
 	if path.descend < 0 || k < path.descend {
 		#no_bounds_check for i in m.marks[path.marks + k] ..< m.n_placed {
@@ -353,7 +328,6 @@ many_take_back :: proc "contextless" (m: ^Scan_Many, f: ^Many_Frame, path: ^Scan
 
 // Runs `scan_arrive` for every path that picked the coming value, a `Descend` path at each step it picked it. Returns the
 // paths that go on inside it.
-@(private)
 many_arrivals :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, t: core.Token, d: int, at, owner: core.Node_Index, pos: u64) -> (child: u64) {
 	m := h.many
 	m.keep = false
@@ -393,7 +367,6 @@ many_arrivals :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, t: cor
 }
 
 // The negative steps of `path` live in the container at depth `d`.
-@(private = "file")
 ring_steps :: #force_inline proc "contextless" (h: ^Scan, path: ^Scan_Path, d: int) -> u64 {
 	m := h.many
 	bits := path.negative
@@ -406,7 +379,6 @@ ring_steps :: #force_inline proc "contextless" (h: ^Scan, path: ^Scan_Path, d: i
 }
 
 // Gives frame `g` the ring its armed paths' negative steps need, sized by the largest.
-@(private)
 many_ring_open :: #force_inline proc "contextless" (h: ^Scan, g: ^Many_Frame, d: int) {
 	m := h.many
 	rest := g.armed & m.ringed
@@ -442,7 +414,6 @@ many_ring_open :: #force_inline proc "contextless" (h: ^Scan, g: ^Many_Frame, d:
 
 // The element `index` of `count` a negative step picks, for each path armed in `f`. `offset` above 0 asks only for the
 // `Slice`s with that negative end, as elements arrive, and 0 for the steps that wait for the close.
-@(private = "file")
 many_ring_picks :: proc "contextless" (h: ^Scan, f: ^Many_Frame, d, index, count, offset: int) {
 	m := h.many
 	for rest := f.armed & m.ringed; rest != 0; rest &= rest - 1 {
@@ -471,14 +442,15 @@ many_ring_picks :: proc "contextless" (h: ^Scan, f: ^Many_Frame, d, index, count
 }
 
 // Feeds the elements a `Slice` with a negative end has learned are in it, now that element `i` has arrived.
-@(private)
 many_delayed :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, f: ^Many_Frame, d: int) -> core.Hook_Regs {
-	s := s
+	s, f := s, f
 	i := int(u32(s.b))
 	for offset in 1 ..= min(int(f.ring_k), i) {
 		many_ring_picks(h, f, d, i - offset, 0, offset)
 		if h.next != 0 {
 			s = many_feed(SINK, h, s, f, d, i - offset)
+			// A walk again may have grown the frames.
+			#no_bounds_check f = &h.many.frames[d]
 			if h.stopped {
 				break
 			}
@@ -489,7 +461,6 @@ many_delayed :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, f:
 
 // Gives the logic ring element `index` again, its picks made. A container is read again from its first byte, and only
 // a value that reaches the end of a path is read twice for no step.
-@(private = "file")
 many_feed :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, f: ^Many_Frame, d, index: int) -> core.Hook_Regs {
 	m := h.many
 	s := s
@@ -515,14 +486,14 @@ many_feed :: proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, f: ^M
 }
 
 // The elements a ring's close resolves, oldest first, then the steps past the end.
-@(private)
 many_close_ring :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, f: ^Many_Frame, d, count: int) -> core.Hook_Regs {
-	s := s
+	s, f := s, f
 	if f.ring_k != 0 {
 		for i in max(count - int(f.ring_k), 0) ..< count {
 			many_ring_picks(h, f, d, i, count, 0)
 			if h.next != 0 {
 				s = many_feed(SINK, h, s, f, d, i)
+				#no_bounds_check f = &h.many.frames[d]
 				if h.stopped {
 					break
 				}
@@ -533,7 +504,6 @@ many_close_ring :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, s: c
 }
 
 // Runs `scan_missed` for every step live in the container closing at depth `d`.
-@(private)
 many_misses :: #force_inline proc "contextless" ($SINK: Sink, h: ^Scan, s: core.Hook_Regs, t: core.Token, f: ^Many_Frame, d, count: int) {
 	m := h.many
 	open := core.Node_Index(s.b >> 32)

@@ -89,16 +89,13 @@ Helper :: struct {
 	ready:  sync.Futex,
 }
 
-// A helper's `ready`: parked, handed the pool's task, running it, or handed one `finish` took back before the
-// helper woke.
+// A helper's `ready`: parked, handed the pool's task, or running it. `finish` parks a helper it takes a task back from.
 @(private)
 IDLE :: 0
 @(private)
 HANDED :: 1
 @(private)
 TAKEN :: 2
-@(private)
-REVOKED :: 3
 
 // Make a pool of `workers - 1` helpers (`workers <= 0` means one per core, the caller counted), whose threads the
 // first call starts. A failed allocation returns its error and leaves a pool that runs calls on the caller alone.
@@ -197,7 +194,7 @@ start :: proc(data: rawptr, n: int, task: proc(arg: rawptr), arg: rawptr) {
 finish :: proc(data: rawptr) {
 	pool := (^Pool)(data)
 	for &h in pool.helpers[:pool.handed] {
-		if _, took := sync.atomic_compare_exchange_strong(&h.ready, HANDED, REVOKED); took {
+		if _, took := sync.atomic_compare_exchange_strong(&h.ready, HANDED, IDLE); took {
 			sync.atomic_sub(&pool.pending, 1)
 		}
 	}
@@ -264,12 +261,8 @@ helper_main :: proc(t: ^thread.Thread) {
 	pool := h.pool
 	spawn_children(pool, h.index)
 	for {
-		switch sync.atomic_load(&h.ready) {
-		case IDLE:
+		if sync.atomic_load(&h.ready) == IDLE {
 			park(&h.ready, sync.atomic_load(&pool.spin))
-			continue
-		case REVOKED:
-			sync.atomic_compare_exchange_strong(&h.ready, REVOKED, IDLE)
 			continue
 		}
 		if _, took := sync.atomic_compare_exchange_strong(&h.ready, HANDED, TAKEN); !took {

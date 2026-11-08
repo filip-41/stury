@@ -1,3 +1,4 @@
+#+private file
 package dsv
 
 import "base:runtime"
@@ -16,7 +17,6 @@ import compose "../core/compose"
 
 // A line a column reaches, the header row first. `gone` says the list removes it, and `emptied` that it writes an empty
 // cell in it.
-@(private = "file")
 Line :: struct {
 	node:    core.Node_Index,
 	n:       int,
@@ -27,7 +27,6 @@ Line :: struct {
 
 // New column `id`, placed before old column `p`, with `order` ranking the columns placed there. `cell` is its header
 // cell.
-@(private = "file")
 Column :: struct {
 	id, p, order: int,
 	cell:         []u8,
@@ -35,21 +34,18 @@ Column :: struct {
 
 // A cell a list writes. `slot` is an old column, or `-1 - i` for new column `i`, until `plan_write` makes it a place in
 // the row of all columns.
-@(private = "file")
 Fill :: struct {
 	line, slot: int,
 	text:       []u8,
 }
 
 // A column of the table a plan writes: old column `old`, or -1 for a new one with its header cell.
-@(private = "file")
 Slot :: struct {
 	old:  int,
 	cell: []u8,
 }
 
 // A procedure that returns false leaves its refusal in `err`, `.No_Memory` until one sets it.
-@(private = "file")
 Plan :: struct {
 	doc:       ^core.Document,
 	list:      ^core.Edit_List,
@@ -64,14 +60,13 @@ Plan :: struct {
 	allocator: runtime.Allocator,
 }
 
-@(private = "file")
 refuse :: proc(p: ^Plan, err: core.Document_Error) -> bool {
 	p.err = err
 	return false
 }
 
 // dsv's `Edit_Spelling.plan`.
-@(private)
+@(private = "package")
 edit_plan :: proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]core.Edit, allocator: runtime.Allocator) -> (changed: bool, err: core.Document_Error) {
 	cells, records, lone_empty := false, false, false
 	for e in list.edits {
@@ -102,25 +97,22 @@ edit_plan :: proc(doc: ^core.Document, list: ^core.Edit_List, out: ^[dynamic]cor
 }
 
 // Whether `node` is a header cell `.Ragged` named by its position, which the header's line does not hold.
-@(private = "file")
 positional :: #force_inline proc(doc: ^core.Document, node: core.Node_Index) -> bool {
 	return doc.nodes[node].spelling & SPELLING_COLUMN != 0
 }
 
-@(private = "file")
 is_line :: #force_inline proc(doc: ^core.Document, node: core.Node_Index) -> bool {
-	return doc.nodes[node].kind == .Array || doc.nodes[node].kind == .Map
+	return doc.nodes[node].kind == .Array || doc.nodes[node].kind == .Object
 }
 
 // Refuses an inserted record that does not hold `width` cells. An empty table has no width, so its records must agree.
-@(private = "file")
 record_widths :: proc(doc: ^core.Document, list: ^core.Edit_List, width: int, allocator: runtime.Allocator) -> core.Document_Error {
 	want := width
 	for e in list.edits {
 		if e.op != .Insert || e.node != core.ROOT {
 			continue
 		}
-		cells, err := edit_record_at(doc, e.text, allocator)
+		cells, err := edit_record_at(doc, e.text)
 		if err.kind != .None {
 			return err
 		}
@@ -135,7 +127,6 @@ record_widths :: proc(doc: ^core.Document, list: ^core.Edit_List, width: int, al
 }
 
 // Returns the table's width once the plan's columns are gone and added.
-@(private = "file")
 planned_width :: proc(p: ^Plan) -> int {
 	old := dsv_width(p.doc)
 	width := old
@@ -148,7 +139,6 @@ planned_width :: proc(p: ^Plan) -> int {
 	return width
 }
 
-@(private = "file")
 plan_columns :: proc(p: ^Plan) -> bool {
 	p.lines, _ = make([dynamic]Line, 0, core.length(p.doc, core.ROOT) + 1, p.allocator)
 	p.added, _ = make([dynamic]Column, p.allocator)
@@ -156,6 +146,12 @@ plan_columns :: proc(p: ^Plan) -> bool {
 	plan_lines(p) or_return
 	for e in p.list.edits {
 		switch e.op {
+		case .Reorder:
+			// A reordered line's cells are its own, so a column the plan adds or drops would not be in its order.
+			if e.node != core.ROOT {
+				return refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[e.node])})
+			}
+			compose.push(p.out, e) or_return
 		case .Set, .Set_Fact, .Remove_Fact:
 			compose.push(p.out, e) or_return
 		case .Insert:
@@ -174,23 +170,14 @@ plan_columns :: proc(p: ^Plan) -> bool {
 	return true
 }
 
-@(private = "file")
 plan_lines :: proc(p: ^Plan) -> bool {
 	doc := p.doc
 	if doc.shared_keys != 0 {
 		p.width = core.length(doc, doc.shared_keys)
-		n := p.width
-		for n > 0 && positional(doc, doc.shared_keys + core.Node_Index(n)) {
-			n -= 1
-		}
-		compose.push(&p.lines, Line{node = doc.shared_keys, n = n, header = true}) or_return
+		compose.push(&p.lines, Line{node = doc.shared_keys, n = len(header_keys(doc)), header = true}) or_return
 	}
 	it := core.children(doc, core.ROOT)
-	for {
-		rec, more := core.child_next(&it)
-		if !more {
-			break
-		}
+	for rec in core.child_next(&it) {
 		n := core.length(doc, rec)
 		p.width = max(p.width, n)
 		compose.push(&p.lines, Line{node = rec, n = n}) or_return
@@ -204,7 +191,6 @@ plan_lines :: proc(p: ^Plan) -> bool {
 }
 
 // Returns the line that holds `node`, or is it, from the line `at`, which is that line or one before it.
-@(private = "file")
 line_from :: #force_inline proc(lines: []Line, at: int, node: core.Node_Index) -> int {
 	i := at
 	for i + 1 < len(lines) && lines[i + 1].node <= node {
@@ -214,7 +200,6 @@ line_from :: #force_inline proc(lines: []Line, at: int, node: core.Node_Index) -
 }
 
 // Returns the line that holds `node`, or is it.
-@(private = "file")
 line_at :: proc(lines: []Line, node: core.Node_Index) -> int {
 	i, found := slice.binary_search_by(lines, node, proc(l: Line, n: core.Node_Index) -> slice.Ordering {
 		return slice.cmp(l.node, n)
@@ -223,7 +208,6 @@ line_at :: proc(lines: []Line, node: core.Node_Index) -> int {
 }
 
 // Decides which columns the removed cells drop, and empties the cells of the columns that stay.
-@(private = "file")
 plan_cuts :: proc(p: ^Plan) -> bool {
 	doc, lines := p.doc, p.lines[:]
 	cuts, _ := make([dynamic]core.Node_Index, p.allocator)
@@ -290,7 +274,6 @@ plan_cuts :: proc(p: ^Plan) -> bool {
 }
 
 // Sorts the list's cell inserts into new columns and the cells each record writes.
-@(private = "file")
 plan_fills :: proc(p: ^Plan) -> bool {
 	doc := p.doc
 	if doc.shared_keys != 0 {
@@ -345,7 +328,6 @@ plan_fills :: proc(p: ^Plan) -> bool {
 
 // Places a named insert: in the column that holds its name when its record lacks that cell, else in a new column, which
 // every insert of that name must place alike.
-@(private = "file")
 plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
 	doc := p.doc
 	line := line_at(p.lines[:], e.node)
@@ -371,7 +353,7 @@ plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
 		}
 	}
 	if col < 0 {
-		if bad := edit_value_at(doc, spelled[:], p.allocator); bad.kind != .None {
+		if bad := edit_cells(doc, spelled[:], false); bad.kind != .None {
 			return refuse(p, bad)
 		}
 		col = len(p.added)
@@ -382,7 +364,6 @@ plan_named :: proc(p: ^Plan, e: core.Edit) -> bool {
 	return plan_fill(p, line, -1 - col, e.text)
 }
 
-@(private = "file")
 plan_fill :: proc(p: ^Plan, line, slot: int, text: []u8) -> bool {
 	if slot >= 0 && p.dropped[slot] {
 		return refuse(p, {kind = .Conflicting_Edits, at = core.node_start(p.doc.nodes[p.lines[line].node])})
@@ -392,7 +373,6 @@ plan_fill :: proc(p: ^Plan, line, slot: int, text: []u8) -> bool {
 }
 
 // Writes each line's edits, walking the row of all columns.
-@(private = "file")
 plan_write :: proc(p: ^Plan) -> bool {
 	p.sets, _ = make([dynamic]core.Edit, p.allocator)
 	for e in p.out {
@@ -461,7 +441,6 @@ plan_write :: proc(p: ^Plan) -> bool {
 // Writes one line's edits. A cell before one of the line's own always goes in, and one past its end goes in when a
 // later cell needs it or the line holds every old column. A removed line keeps only the cells the list wrote, which the
 // commit refuses as a conflict.
-@(private = "file")
 plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> bool {
 	if l.header && l.n < p.width {
 		// The header's line names the table's last columns by position, which a column added or dropped before them
@@ -523,7 +502,6 @@ plan_line :: proc(p: ^Plan, l: Line, slots: []Slot, fills: []Fill) -> bool {
 
 // Whether a line still reads as its record. An empty line is no record, so it keeps a cell and its one cell is not empty,
 // and an old cell that becomes the first must not read as a comment or, on the text's first line, as a byte order mark.
-@(private = "file")
 line_reads :: proc(doc: ^core.Document, l: Line, kept: int, first: []u8, moved: bool) -> bool {
 	if kept == 0 || kept == 1 && len(first) == 0 {
 		return false

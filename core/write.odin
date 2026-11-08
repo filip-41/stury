@@ -3,7 +3,8 @@ package core
 import "base:runtime"
 import "core:io"
 
-// What a written text is spelled with, for every format. A field a format has no use for is ignored.
+// What a written text is spelled with, for every format. A field a format has no use for is ignored: a delimited text
+// reads `sort_keys` alone, and a token write puts keys in the order of its calls.
 Write_Options :: struct {
 	pretty:          bool, // one member or element a line. With `indent` 0 the lines carry no indent
 	indent:          u8, // pretty: spaces per level
@@ -47,6 +48,22 @@ write :: proc(doc: ^Document, opts := Write_Options{}, as: Maybe(As) = nil, node
 write_stream :: proc(w: io.Stream, doc: ^Document, opts := Write_Options{}, as: Maybe(As) = nil, node := ROOT, allocator := context.allocator) -> (dropped: int, err: Typed_Error) {
 	_, dropped, err = write_to(doc, opts, as, node, w, allocator)
 	return
+}
+
+// Reads `src` as `as` says and writes it back in `as` as `opts` says, into new bytes from `allocator`, as `build` then
+// `write` do. A text that is not a document of `as` is `.Walk` with the fault in `inner`, a refused allocation
+// `.No_Memory`, and a handle with no format's build `.Unsupported`.
+format :: proc(src: []u8, as: As, opts := Write_Options{}, allocator := context.allocator) -> ([]u8, Typed_Error) {
+	doc, err := build(src, as, allocator = allocator)
+	#partial switch err.kind {
+	case .None:
+	case .Walk:      return nil, {kind = .Walk, at = err.at, inner = err.inner}
+	case .No_Memory: return nil, {kind = .No_Memory, at = err.at}
+	case:            return nil, {kind = .Unsupported, at = err.at}
+	}
+	defer destroy(&doc)
+	text, _, werr := write_to(&doc, opts, nil, ROOT, {}, allocator)
+	return text, werr
 }
 
 @(private)

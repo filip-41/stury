@@ -42,8 +42,9 @@ PIPE_WAIT :: time.Millisecond
 // before anyone looks, long enough that an idle run is a few dozen stat calls a second.
 FOLLOW_POLL :: 50 * time.Millisecond
 
-// Set by SIGINT and SIGTERM (`catch_stop`) for a --follow run, which then ends as if its file ended.
-stopped: bool
+// The signal, SIGINT or SIGTERM, or on Windows the console event, that ends a --follow run (`catch_stop`). The run
+// ends as if its file ended, then as the signal ends a process (`end_if_stopped`).
+stopped: i32
 
 // The file whose mapping is read, which a SIGBUS on POSIX names.
 mapped_input_name: string
@@ -72,6 +73,13 @@ Inputs :: struct {
 	open:      bool,
 	data:      []byte,
 	mapped:    bool, // data is the file's mapping (`map_file`), not the heap's
+	// While the open file is mapped: the file, kept open so that the pages read past can be mapped afresh
+	// (`drop_read_past`), the offset in it of data[0], and how far into data the pages are mapped afresh.
+	mapping:   struct {
+		file:    ^os.File,
+		at:      i64,
+		dropped: int,
+	},
 	last:      bool,
 	pipe:      ^Pipe,
 	texts:     records.Reader,
@@ -79,6 +87,8 @@ Inputs :: struct {
 	parallel_from: u64, // where pieces may start again, past a record they stopped at
 	skip_below: u64, // a delimited text's records before it are answered by pieces
 	rows_end:   u64, // a delimited window's records read end here, past their line ends
+	prior_end:  u64, // where the row before the record `cells_value` reads ended, past its line end
+	first_row:  bool, // the record `cells_value` reads is the first of its file, so its header is built with it
 	pinned:    bool,
 	header_judged: bool, // --from csv or tsv: the open file's first record is read
 	// --follow with a delimited format: the header's bytes through its line end, which every window after the first
@@ -95,9 +105,13 @@ Inputs :: struct {
 		line, column: int,
 	},
 	file_lines: int,
+	// The bytes of data[0]'s line before it, read in an earlier window, which a fault's note on that line shows.
+	lead:       [NOTE_REACH]byte,
+	lead_len:   int,
 	pieces:     struct {
 		at, lines: int,
 	}, // `lines_read`'s place: past the line end it counted through, and the line ends before it
+	faults_counted: core.Lines, // the line ends before the last fault told in data
 	line:       int, // the lines of the open file jq's parser has read
 	text_end:   int, // the end in data of the text read last, while `line` does not count its lines yet, else 0
 	line_end:   int, // --stream: the byte after the newline `line` counts last
@@ -111,6 +125,9 @@ Inputs :: struct {
 	fault_error: string,
 	bom_broken:  bool, // --stream-errors --seq: a cut byte order mark began the stream, so jq's parser restarts at every call
 	note:        string, // what the parse error that ends the run adds on the lines after it
+	told:        string, // the last parse error `input` raised, which a run that does not catch it tells as one
+	// --from csv or tsv with --comment under -s: the comments the files hold outside their records.
+	head_notes, foot_notes: [dynamic]string,
 }
 
 // jq's next_input: the next value, or under -s every value as one array once the files are read, or a parse error as
@@ -118,8 +135,13 @@ Inputs :: struct {
 // after the array. An `own` value, which `input` reads, holds a copy of its text, so the bytes it was read from can go
 // while it lives on.
 next_input :: proc(ins: ^Inputs, own := false) -> (jq.Value, string, jq.Parse_Status) {
+	noted := ins.run.opts.cells_in.comment != 0
 	if !ins.slurp {
-		return next_value(ins, own)
+		v, msg, status := next_value(ins, own)
+		if noted && status == .Value {
+			row_noted(ins, &v)
+		}
+		return v, msg, status
 	}
 	if ins.run.opts.raw_input {
 		ins.slurp = false
@@ -133,6 +155,9 @@ next_input :: proc(ins: ^Inputs, own := false) -> (jq.Value, string, jq.Parse_St
 			}
 		}
 		v, msg, status := next_value(ins, own)
+		if noted && status == .Value {
+			row_noted(ins, &v)
+		}
 		switch status {
 		case .Error:
 			if !ins.run.opts.seq {
@@ -146,7 +171,7 @@ next_input :: proc(ins: ^Inputs, own := false) -> (jq.Value, string, jq.Parse_St
 		}
 	}
 	ins.slurp = false
-	return all, "", .Value
+	return slurped(ins, all), "", .Value
 }
 
 // Tells the parse error `msg` of a --seq record, which is passed over, as jq's parser goes on at the next separator.
@@ -200,6 +225,7 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 		// A window that opens with the header is carried on from past it. A delimited text's reader frames rows ahead of
 		// the one it gave last, so its window is carried on from past that row.
 		from := max(ins.rows_end if reads_cells(&ins.run.opts) else ins.texts.pos, u64(len(ins.head)) if ins.headed else 0)
+		drop_read_past(ins, from)
 		route := &ins.run.route
 		// The path's read frames the record it answers.
 		scanned := route.scanning && scans(route.path) && !reads_cells(&ins.run.opts)
@@ -243,6 +269,9 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 				next_window(ins, len(ins.data))
 				continue
 			}
+			if reads_cells(&ins.run.opts) && ins.run.opts.cells_in.comment != 0 {
+				cells_foot(ins)
+			}
 			close_file(ins)
 			continue
 		}
@@ -251,7 +280,7 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 		}
 		if ins.bom_broken {
 			// jq's parser, started afresh at every call, reads each record as a faulty one.
-			return text_fault(ins, {at = rec.at, kind = .Bad_Char}, int(rec.at))
+			return text_fault(ins, {at = rec.at, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Expected_Value)}, int(rec.at))
 		}
 		ins.has_text = true
 		if reads_cells(&ins.run.opts) {
@@ -264,7 +293,7 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 			}
 			continue
 		}
-		if route.scanning && (answer(ins.run, &part, part.answers, read, rec.text, ins.as) if scanned else answer_path(ins.run, rec.text, ins.as)) {
+		if route.scanning && answer_record(ins.run, rec, &part, read, scanned, ins.as) {
 			// As jq's main loop, which reads one input past a file that did not open.
 			if ins.failures > 0 {
 				return nil, "", .More
@@ -359,7 +388,7 @@ first_text :: proc(ins: ^Inputs) -> (v: jq.Value, msg: string, status: jq.Parse_
 	fault: Maybe(core.Fault)
 	texts: bool
 	if stray_bom {
-		fault = core.Fault{kind = .Bad_Char}
+		fault = core.Fault{rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Expected_Value)}
 	} else {
 		// A long strict text's array is built on the pool's threads.
 		pool := run_pool(run) if len(data) >= POOLED_BYTES && ins.spec == .Json else nil
@@ -480,7 +509,7 @@ open_next :: proc(ins: ^Inputs) -> bool {
 	for ins.next_file < len(ins.files) {
 		path := ins.files[ins.next_file]
 		ins.next_file += 1
-		ins.name, ins.line, ins.line_end, ins.file_lines, ins.text_end = file_name(path), 0, 0, 0, 0
+		ins.name, ins.line, ins.line_end, ins.file_lines, ins.text_end, ins.lead_len = file_name(path), 0, 0, 0, 0, 0
 		delete(ins.head, runtime.heap_allocator())
 		ins.head = nil
 		f, opened := open_file(path)
@@ -499,13 +528,10 @@ open_next :: proc(ins: ^Inputs) -> bool {
 			take_data(ins, nil)
 			return true
 		}
-		data, mapped := map_file(f)
+		data, at, mapped := map_file(f)
 		read := mapped
 		if mapped {
 			mapped_input_name = ins.name
-			if f != os.stdin {
-				os.close(f)
-			}
 		} else {
 			data, read = read_file(f)
 		}
@@ -516,6 +542,9 @@ open_next :: proc(ins: ^Inputs) -> bool {
 		ins.run.route.input += len(data)
 		ins.open, ins.last = true, true
 		set_data(ins, data, mapped)
+		if mapped {
+			ins.mapping = {f, at, 0}
+		}
 		return true
 	}
 	return false
@@ -526,14 +555,21 @@ file_name :: proc(path: string) -> string {
 	return "<stdin>" if path == "-" else path
 }
 
-// The file `path` names opened, "-" being stdin, or false, told, when it does not open.
-open_file :: proc(path: string) -> (f: ^os.File, ok: bool) {
+// The file `path` names opened, "-" being stdin, or false, told, when it does not open or is a directory. `.` given
+// to a `command` is most likely a filter, which the note says it takes none of.
+open_file :: proc(path: string, command := "") -> (f: ^os.File, ok: bool) {
 	if path == "-" {
 		return os.stdin, true
 	}
 	err: os.Error
 	if f, err = open_input(path); err != nil {
 		message.write_stderr("stury: error: Could not open file %s: %s\n", path, strerror(err))
+		return nil, false
+	}
+	if info, ferr := os.fstat(f, context.temp_allocator); ferr == nil && info.type == .Directory {
+		os.close(f)
+		note := message.build_temp("(%s takes no filter)\n", command) if command != "" && path == "." else ""
+		message.write_stderr("stury: error: Could not open file %s: Is a directory\n%s", path, note)
 		return nil, false
 	}
 	return f, true
@@ -562,12 +598,14 @@ set_data :: proc(ins: ^Inputs, data: []byte, mapped := false) {
 	// faulty text read the text as they go, so it is kept for the run.
 	records.close(&ins.texts)
 	if ins.pinned || ins.run.opts.stream {
+		// An `input` reads here in an arena the run empties before `release_spent`, so `spent` lives on the heap.
+		ins.spent.allocator = runtime.heap_allocator()
 		append(&ins.spent, Spent{ins.data, ins.mapped})
 	} else {
 		free_spent({ins.data, ins.mapped})
 	}
 	// A window that opens with the header is a file's whose header is judged.
-	ins.data, ins.mapped, ins.pinned, ins.raw_at, ins.pieces, ins.header_judged, ins.parallel_from, ins.skip_below, ins.rows_end = data, mapped, false, 0, {}, ins.headed, 0, 0, 0
+	ins.data, ins.mapped, ins.pinned, ins.raw_at, ins.pieces, ins.faults_counted, ins.header_judged, ins.parallel_from, ins.skip_below, ins.rows_end = data, mapped, false, 0, {}, {}, ins.headed, 0, 0, 0
 	ins.several = ins.framing != .Concatenated || !ins.last
 	ins.texts = records.open(data, ins.as, ins.framing, allocator = runtime.heap_allocator())
 	// jq counts a column from past the input's byte order mark.
@@ -579,13 +617,36 @@ set_data :: proc(ins: ^Inputs, data: []byte, mapped := false) {
 // The open file's next window: data[from:], a text the last window cut short, then the pipe's next whole lines.
 @(private = "file")
 next_window :: proc(ins: ^Inputs, from: int) {
+	from := from
+	// The next window opens with the line end before it, so a byte order mark after that line end is not taken for the
+	// input's, which the texts' reader passes over at its first byte.
+	if ins.framing == .Lines && !reads_cells(&ins.run.opts) && from > 0 && ins.data[from - 1] == '\n' {
+		from -= 1
+	}
 	advance_past(ins, from)
 	// --stream's lines are counted to `line_end`, which the window moves.
 	if ins.run.opts.stream {
 		ins.line += jq.count_newlines(ins.data[min(ins.line_end, from):from])
 		ins.line_end = max(ins.line_end - from, 0)
 	}
+	keep_lead(ins, from)
 	take_data(ins, ins.data[from:])
+}
+
+// Keeps the last bytes of data[from]'s line before it, after those kept from an earlier window when the line starts
+// before data[0].
+@(private = "file")
+keep_lead :: proc(ins: ^Inputs, from: int) {
+	first := max(bytes.last_index_byte(ins.data[:from], '\n') + 1, from - NOTE_REACH)
+	kept := ins.lead_len if first == 0 else 0
+	if n := from - first; n > 0 {
+		drop := max(kept + n - NOTE_REACH, 0)
+		copy(ins.lead[:], ins.lead[drop:kept])
+		kept -= drop
+		copy(ins.lead[kept:], ins.data[first:from])
+		kept += n
+	}
+	ins.lead_len = kept
 }
 
 // The open file's bytes from `from`, a --seq record no 0x1E ends, leading the next file that opens, as the open file's
@@ -614,7 +675,7 @@ seq_join :: proc(ins: ^Inputs, from: int) -> bool {
 take_data :: proc(ins: ^Inputs, carry: []byte) {
 	carry := carry
 	if ins.fresh {
-		carry, ins.file_lines, ins.parsed = nil, 0, {line = 1}
+		carry, ins.file_lines, ins.parsed, ins.lead_len = nil, 0, {line = 1}, 0
 		delete(ins.head, runtime.heap_allocator())
 		ins.head, ins.headed = nil, false
 	}
@@ -666,6 +727,40 @@ close_file :: proc(ins: ^Inputs) {
 		advance_past(ins, len(ins.data))
 	}
 	ins.open = false
+	if f := ins.mapping.file; f != nil && f != os.stdin {
+		os.close(f)
+	}
+	ins.mapping = {}
+}
+
+// The bytes past which the open file's mapped pages are mapped afresh, which drops them from what the process holds.
+DROPPED_STEP :: 4 << 20
+
+// The open file's mapped pages before data[to] mapped afresh, once DROPPED_STEP more bytes lie before it and no value
+// the main loop read lies in them. A value that does still reads the same bytes, from the file.
+drop_read_past :: proc(ins: ^Inputs, to: u64) {
+	if lo, hi := pages_read_past(ins, to, 0, 0); lo < hi {
+		// The lines read are counted while their pages are held, not read again at the file's end.
+		settle_line(ins)
+		map_afresh(ins.mapping.file, ins.data, ins.mapping.at, int(lo), int(hi))
+	}
+}
+
+// The bytes of the open file whose mapped pages are to be mapped afresh, taken from those not yet: those before `to`,
+// once DROPPED_STEP more lie there, or else the pieces' records data[lo:hi] when they lie that far past it.
+pages_read_past :: proc(ins: ^Inputs, to, lo, hi: u64) -> (u64, u64) {
+	m := &ins.mapping
+	switch {
+	case m.file == nil || ins.pinned:
+		return 0, 0
+	case int(to) - m.dropped >= DROPPED_STEP:
+		from := m.dropped
+		m.dropped = int(to)
+		return u64(from), to
+	case lo >= to + DROPPED_STEP:
+		return lo, hi
+	}
+	return 0, 0
 }
 
 // `ins.line` once it counts the lines of the text read last, which wait until something reads them.
@@ -682,7 +777,6 @@ Spent :: struct {
 	mapped: bool,
 }
 
-@(private = "file")
 free_spent :: proc(d: Spent) {
 	if d.mapped {
 		unmap_file(d.data)
@@ -730,6 +824,9 @@ pipe_read :: proc(data: rawptr, mode: io.Stream_Mode, buf: []byte, _: i64, _: io
 		flush_some(&p.run.output, force = true)
 	}
 	for {
+		if p.follow && !follow_wait(p) {
+			return 0, .EOF
+		}
 		n, err := read_some(p.file, buf)
 		p.read += i64(n)
 		switch {
@@ -748,6 +845,22 @@ pipe_read :: proc(data: rawptr, mode: io.Stream_Mode, buf: []byte, _: i64, _: io
 	}
 }
 
+// Waits until a read of a followed file does not wait, the output written first, and returns false if a stop comes
+// first. A read of a pipe with nothing in it restarts after the signal, so it is not begun until there is something.
+@(private = "file")
+follow_wait :: proc(p: ^Pipe) -> bool {
+	if read_ready(p.file, 0) {
+		return true
+	}
+	flush_some(&p.run.output, force = true)
+	for sync.atomic_load(&stopped) == 0 {
+		if read_ready(p.file, FOLLOW_POLL) {
+			return true
+		}
+	}
+	return false
+}
+
 // Waits one poll at the end of a followed file, then looks at what ended the wait: a stop, or a file shorter than the
 // bytes read, which is read again from its start once the stream has given the old file's lines. Returns true when the
 // stream ends.
@@ -755,7 +868,7 @@ pipe_read :: proc(data: rawptr, mode: io.Stream_Mode, buf: []byte, _: i64, _: io
 follow_idle :: proc(p: ^Pipe) -> bool {
 	flush_some(&p.run.output, force = true)
 	time.sleep(FOLLOW_POLL)
-	if sync.atomic_load(&stopped) {
+	if sync.atomic_load(&stopped) != 0 {
 		return true
 	}
 	if size, err := os.file_size(p.file); err == nil && size < p.read {

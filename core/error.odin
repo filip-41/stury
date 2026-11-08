@@ -48,10 +48,11 @@ KIND_RULES := [Fault_Kind]Rule {
 	.Bad_Char      = {"bad_char", "Unexpected character"},
 	.Bad_Escape    = {"bad_escape", "Invalid escape"},
 	.Bad_Number    = {"bad_number", "Invalid number"},
-	.Too_Deep      = {"too_deep", "Exceeds depth limit for parsing"},
+	.Too_Deep      = {"too_deep", "Exceeds the depth limit"},
 	.Too_Wide      = {"too_wide", "Token is longer than 4 GiB"},
 	.No_Memory     = {"no_memory", "Out of memory"},
-	.Bad_Option    = {"bad_option", "An option the format does not take"},
+	.Bad_Option    = {"bad_option", "Invalid option"},
+	.Bad_Width     = {"bad_width", "Record width differs from the first record"},
 }
 
 // Returns the `Rule` for `f`: `f.rules.details[f.detail]` when `detail` is nonzero, `rules` is set and the index is
@@ -104,8 +105,15 @@ locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (
 	return l.line + 1, at - l.line_lo + 1
 }
 
+// Writes `line:col: ` of byte `at` in `src`, or `at byte N: ` with no `src`, which has no lines to count.
 @(private)
 write_position :: proc(w: io.Writer, src: []u8, at: u64, lines: ^Lines) -> io.Error {
+	if src == nil && at > 0 {
+		io.write_string(w, "at byte ") or_return
+		io.write_u64(w, at) or_return
+		_, err := io.write_string(w, ": ")
+		return err
+	}
 	line, col := locate(src, at, lines)
 	io.write_u64(w, line) or_return
 	io.write_byte(w, ':') or_return
@@ -121,8 +129,29 @@ render_fault :: proc(w: io.Writer, src: []u8, f: Fault, lines: ^Lines = nil) -> 
 	if f.kind not_in AT_NO_BYTE {
 		write_position(w, src, f.at, lines) or_return
 	}
-	_, err := io.write_string(w, rule_of(f).message)
-	return err
+	return write_fault_message(w, src, f)
+}
+
+// Writes `rule_of(f).message`, then for the codes `control_char` and `invalid_utf8` of any format the byte of `src` the
+// fault is at, as in `Unescaped control character U+0009` or `Invalid UTF-8 byte 0xFF`.
+write_fault_message :: proc(w: io.Writer, src: []u8, f: Fault) -> io.Error {
+	r := rule_of(f)
+	io.write_string(w, r.message) or_return
+	if f.at >= u64(len(src)) {
+		return nil
+	}
+	hex := "0123456789ABCDEF"
+	b := src[f.at]
+	switch r.code {
+	case "control_char":
+		io.write_string(w, " U+00") or_return
+	case "invalid_utf8":
+		io.write_string(w, " byte 0x") or_return
+	case:
+		return nil
+	}
+	io.write_byte(w, hex[b >> 4]) or_return
+	return io.write_byte(w, hex[b & 15])
 }
 
 // The value layer's error kinds. `Document_Error.inner` holds a `Fault` by value for `.Walk`, `.Bad_Value` and
@@ -131,7 +160,7 @@ render_fault :: proc(w: io.Writer, src: []u8, f: Fault, lines: ^Lines = nil) -> 
 Document_Error_Kind :: enum u8 {
 	None,
 	Walk, // the walk's fault, in `inner`
-	Duplicate_Key, // a build with `refuse_duplicates` met a key that repeats one of its object's, at the second key's first byte, or a commit's named cell is one its record holds, at the header cell
+	Duplicate_Key, // a build under `.Refuse` met a key that repeats one of its object's, at the second key's first byte, or a commit's named cell is one its record holds, at the header cell
 	No_Memory, // an allocation the document or the edit list owns was refused, at no byte
 	Bad_Index, // an edit names no node it may change: no such node, a key of a member, the root, a table's record
 	Bad_Position, // an insert position is past the container's length
@@ -165,14 +194,31 @@ move_document_error :: proc(e: ^Document_Error, by: u64) {
 	}
 }
 
+// Why an edit is `.Bad_Index`.
+Edit_Reason :: enum u8 {
+	None,
+	No_Document, // the edit list has no document
+	No_Node, // the index is past the document's last node
+	Fact_Node, // the node is a fact, which takes only fact edits
+	Flat_Container, // the node is a flat text's container, whose members take the edit
+	Root, // the root is not removed
+	Key_Node, // a key is removed with its member and holds no facts
+	Not_Fact_Role, // the role is a value's or a key's, not a fact's
+	Not_Object, // a member is set in a node that is no object
+	Not_Array, // an element is set in a node that is no array
+	Not_Loaded, // the node is not loaded in a partial document
+	No_Parent, // a path reaches no container to set its last step in
+}
+
 // A value layer error. `at` is the byte `kind` names: the walk's fault byte for `.Walk`, the first byte of the
 // repeated key for `.Duplicate_Key`, of the shared node or span for `.Conflicting_Edits`. `inner` is the fault, set for
 // `.Walk`, `.Bad_Value` and `.Bad_Result`, whose `inner.at` for the last two is a byte of the recorded text or of the
-// commit's output, not of the source.
+// commit's output, not of the source. A `.Bad_Index` says why in `reason`.
 Document_Error :: struct {
-	kind:  Document_Error_Kind,
-	at:    u64,
-	inner: Fault,
+	kind:   Document_Error_Kind,
+	reason: Edit_Reason,
+	at:     u64,
+	inner:  Fault,
 }
 
 @(private, rodata)
@@ -192,6 +238,22 @@ DOCUMENT_KIND_RULES := [Document_Error_Kind]Rule {
 	.Bad_Result        = {"bad_result", "The edited text does not read"},
 }
 
+@(private, rodata)
+EDIT_REASONS := [Edit_Reason]string {
+	.None          = "",
+	.No_Document   = "the edit list has no document",
+	.No_Node       = "no node has that index",
+	.Fact_Node     = "the node is a comment, which takes a fact edit",
+	.Flat_Container    = "a flat text's container is edited through its members",
+	.Root          = "the root is set, not removed",
+	.Key_Node      = "a key is removed with its member and holds no comment",
+	.Not_Fact_Role = "the role is no comment's",
+	.Not_Object    = "the node is no object",
+	.Not_Array     = "the node is no array",
+	.Not_Loaded    = "the node is not loaded in this partial document",
+	.No_Parent     = "the path reaches no container to set its last step in",
+}
+
 // Writes `e`'s code: `document.` then the kind's code, as in `document.walk` or `document.duplicate_key`. The
 // `write_code` overload below exposes it beside the fault's code.
 @(private)
@@ -205,24 +267,31 @@ write_coded :: proc(w: io.Writer, prefix, code: string) -> io.Error {
 	return err
 }
 
-// Writes `line:col: message` for `e` in `src`. For `.Walk` it also writes `  caused by line:col: message` for
-// `e.inner`, and for `.Bad_Value` and `.Bad_Result` `  caused by message`, since `inner.at` is a byte of a
-// text that is not `src`. `lines` is as in `render_fault`. Errors from the edit list other than a conflict name no
-// byte, since they describe a node, a recorded text or a position rather than a place in `src`.
+// Writes `line:col: message` for `e` in `src`. `.Walk` writes its fault. `.Bad_Value` and `.Bad_Result` name their
+// fault and its offset in the recorded text or the commit's output, which is not `src`, and `.Bad_Index` its reason.
+// `lines` is as in `render_fault`. Errors from the edit list other than a conflict name no byte, since they describe a
+// node, a recorded text or a position rather than a place in `src`.
 @(private)
 render_document :: proc(w: io.Writer, src: []u8, e: Document_Error, lines: ^Lines = nil) -> io.Error {
+	if e.kind == .Walk {
+		return render_fault(w, src, e.inner, lines)
+	}
 	if document_at_byte(e) {
 		write_position(w, src, e.at, lines) or_return
 	}
 	io.write_string(w, DOCUMENT_KIND_RULES[e.kind].message) or_return
+	if e.reason != .None {
+		io.write_string(w, ": ") or_return
+		io.write_string(w, EDIT_REASONS[e.reason]) or_return
+	}
 	if e.inner.kind == .None {
 		return nil
 	}
-	io.write_string(w, "\n  caused by ") or_return
-	if e.kind == .Walk {
-		return render_fault(w, src, e.inner, lines)
-	}
-	_, err := io.write_string(w, rule_of(e.inner).message)
+	io.write_string(w, ": ") or_return
+	io.write_string(w, rule_of(e.inner).message) or_return
+	io.write_string(w, " at offset ") or_return
+	io.write_u64(w, e.inner.at) or_return
+	_, err := io.write_string(w, " of the new text" if e.kind == .Bad_Value else " of the edited text")
 	return err
 }
 
@@ -233,18 +302,42 @@ Path_Error_Kind :: enum u8 {
 	Over_Capacity, // a read past `MAX_PATHS` paths, a path past `MAX_STEPS` steps or of `MAX_STEPS` with a `Descend`, at no byte
 	No_Memory, // an allocation the read owns was refused, at no byte
 	Walk, // the walk's fault, in `inner`
-	Duplicate_Key, // a read with `refuse_duplicates` met a key that repeats one of its object's, at the second key's first byte
+	Duplicate_Key, // a read under `.Refuse` met a key that repeats one of its object's, at the second key's first byte
 	Unsupported, // a query of a partial document, or a read through a handle with no format, at no byte
+}
+
+// Why a path is `.Bad_Path`.
+Path_Reason :: enum u8 {
+	None,
+	No_Dot, // jq path text does not start with `.`
+	Pointer_Text, // jq path text starts with `/`, as a JSON Pointer does
+	No_Slash, // a JSON Pointer does not start with `/`
+	Bad_Name, // a `.` is followed by no name, quoted name or `[`
+	Bad_Bracket, // a `[` holds no quoted name, index or slice
+	Unclosed_Bracket, // a `[` is not closed by `]`
+	Unclosed_Quote, // a quoted name is not closed
+	Unclosed_Paren, // a `first(` or `limit(` is not closed
+	Bad_Escape, // a quoted name holds what is no JSON string escape
+	Invalid_Utf8, // an ill-formed UTF-8 sequence
+	Bad_Tilde, // a pointer's `~` is not followed by `0` or `1`
+	Bad_Limit, // a `limit` count is negative or no integer
+	No_Semicolon, // a `limit(N` is not followed by `;`
+	Trailing, // text past the end of the path
+	Two_Descends, // a path holds a second `Descend`
+	Unset_Step, // a path holds a zero `Step`
 }
 
 // A path layer error. `at` is the byte `kind` names: a byte of the path's text for `.Bad_Path`, and the walk's fault
 // byte for `.Walk`. `path` is the number in the read of the path a `.Bad_Path` or an `.Over_Capacity` of steps names, 0
-// for the other kinds.
+// for the other kinds. A `.Bad_Path` says why in `reason`, and one from `parse_path` or `parse_pointer` holds the text
+// it read in `text`, which lives as long as the caller's text.
 Path_Error :: struct {
-	kind:  Path_Error_Kind,
-	at:    u64,
-	path:  u32,
-	inner: Fault,
+	kind:   Path_Error_Kind,
+	reason: Path_Reason,
+	path:   u32,
+	at:     u64,
+	text:   string,
+	inner:  Fault,
 }
 
 @(private, rodata)
@@ -256,6 +349,27 @@ PATH_KIND_RULES := [Path_Error_Kind]Rule {
 	.Walk          = {"walk", "Input does not parse"},
 	.Duplicate_Key = {"duplicate_key", "Duplicate key"},
 	.Unsupported   = {"unsupported", "Read is not supported"},
+}
+
+@(private, rodata)
+PATH_REASONS := [Path_Reason]string {
+	.None             = "",
+	.No_Dot           = "a path starts with `.`",
+	.Pointer_Text     = "a path starts with `.`, and `parse_pointer` reads a JSON Pointer",
+	.No_Slash         = "a JSON Pointer starts with `/`",
+	.Bad_Name         = "`.` is followed by a name, a quoted name or `[`",
+	.Bad_Bracket      = "`[` holds a quoted name, an index or a slice",
+	.Unclosed_Bracket = "`[` is not closed",
+	.Unclosed_Quote   = "the quoted name is not closed",
+	.Unclosed_Paren   = "`(` is not closed",
+	.Bad_Escape       = "not a JSON string escape",
+	.Invalid_Utf8     = "ill-formed UTF-8",
+	.Bad_Tilde        = "`~` is followed by `0` or `1`",
+	.Bad_Limit        = "`limit` takes a count of 0 or more",
+	.No_Semicolon     = "`limit(N; P)` takes a `;` after its count",
+	.Trailing         = "text past the end of the path",
+	.Two_Descends     = "a path holds one `..`",
+	.Unset_Step       = "a step is unset",
 }
 
 // Returns the read error a build's error is.
@@ -274,18 +388,31 @@ path_error :: proc(e: Document_Error) -> Path_Error {
 @(private)
 write_path_code :: proc(w: io.Writer, e: Path_Error) -> io.Error {return write_coded(w, "path.", PATH_KIND_RULES[e.kind].code)}
 
-// Writes `line:col: message` for `e`. A `.Bad_Path`'s `at` is a byte of `path`, the path's text, and a `.Duplicate_Key`'s
-// a byte of `src`, so the caller passes both and never tests the kind. `.Walk` writes its fault. `lines` is as in
+// Writes `line:col: message` for `e`, the position in the path's text for a `.Bad_Path` that holds it and in `src` for
+// a `.Duplicate_Key`. A `.Bad_Path` names its text and its reason. `.Walk` writes its fault. `lines` is as in
 // `render_fault`.
 @(private)
-render_path :: proc(w: io.Writer, src: []u8, path: string, e: Path_Error, lines: ^Lines = nil) -> io.Error {
-	if e.kind == .Walk {
+render_path :: proc(w: io.Writer, src: []u8, e: Path_Error, lines: ^Lines = nil) -> io.Error {
+	#partial switch e.kind {
+	case .Walk:
 		return render_fault(w, src, e.inner, lines)
-	}
-	if e.kind == .Bad_Path {
-		write_position(w, transmute([]u8)path, e.at, lines) or_return
-	} else if e.kind == .Duplicate_Key {
+	case .Duplicate_Key:
 		write_position(w, src, e.at, lines) or_return
+	case .Bad_Path:
+		if len(e.text) > 0 {
+			write_position(w, transmute([]u8)e.text, e.at, nil) or_return
+		}
+		io.write_string(w, PATH_KIND_RULES[e.kind].message) or_return
+		if len(e.text) > 0 {
+			io.write_string(w, " \"") or_return
+			write_shown(w, e.text) or_return
+			io.write_byte(w, '"') or_return
+		}
+		if e.reason != .None {
+			io.write_string(w, ": ") or_return
+			io.write_string(w, PATH_REASONS[e.reason]) or_return
+		}
+		return nil
 	}
 	_, err := io.write_string(w, PATH_KIND_RULES[e.kind].message)
 	return err
@@ -305,17 +432,17 @@ write_edit_code :: proc(w: io.Writer, e: Path_Edit_Error) -> io.Error {
 
 // Writes the rendered line of `e`, as `render_path` for a path error and `render_document` for an edit's.
 @(private)
-render_edit :: proc(w: io.Writer, src: []u8, path: string, e: Path_Edit_Error, lines: ^Lines = nil) -> io.Error {
+render_edit :: proc(w: io.Writer, src: []u8, e: Path_Edit_Error, lines: ^Lines = nil) -> io.Error {
 	#partial switch e.kind {
 	case .Path:
-		return render_path(w, src, path, e.path, lines)
+		return render_path(w, src, e.path, lines)
 	case .Edit:
 		return render_document(w, src, e.edit, lines)
 	}
 	return write_coded(w, "", "No error")
 }
 
-// How a typed read or write refuses. `.None` is no error. The kinds from `Bad_Utf8` on are a write's, and none of them
+// How a typed read or write refuses. `.None` is no error. The kinds from `Invalid_Utf8` on are a write's, and none of them
 // names a byte of a source.
 Typed_Error_Kind :: enum u8 {
 	None,
@@ -328,14 +455,14 @@ Typed_Error_Kind :: enum u8 {
 	Unknown_Field, // a key the type does not name, the last step names it
 	Missing_Tag, // an object for a union that reads by tag has no tag member
 	Repeated_Tag, // an object for a union that reads by tag has two
-	Duplicate_Key, // a read with `refuse_duplicates` met a key that repeats one of its object's
-	Out_Of_Memory,
+	Duplicate_Key, // a read under `.Refuse` met a key that repeats one of its object's
+	No_Memory,
 	Bad_Option, // a nil target, at no byte
 	Plan_Mismatch, // a plan built for another type or format, at no byte
 	Unsupported, // a type a plan cannot read or write, the last step names the field
 	Ambiguous_Union, // a union whose arms a value's class cannot tell apart
 	Bad_Tag, // a field's tag holds a flag no reader knows
-	Bad_Utf8, // a string to write is not UTF-8
+	Invalid_Utf8, // a string to write is not UTF-8
 	Non_Finite, // a number to write is infinite or not a number
 	Too_Deep, // a value to write nests past `MAX_DEPTH`
 	Cycle, // a pointer to write leads back to itself
@@ -351,16 +478,42 @@ MAX_ERROR_STEPS :: 8
 // A typed read's or write's refusal. `at` is the value's byte in the source, 0 for a write and for a kind with no
 // byte. `steps[:n_steps]` is the path to the value from the target, the innermost `MAX_ERROR_STEPS` when `truncated`
 // says more were cut from the front. A step's name lives as long as `src` or the plan,
-// or for a decoded key as long as `context.temp_allocator`'s block. `.Walk` holds its fault in `inner`, and
-// `.Write_Failed` what the stream answered in `cause`, which is `.Unknown` for most failures of a `core:os` file stream.
+// or for a decoded key as long as `context.temp_allocator`'s block. `found` is the kind of the value a `.Wrong_Kind`
+// read. `.Write_Failed` holds what the stream answered in `cause`, which is `.Unknown` for most failures of a `core:os`
+// file stream. `detail` holds the rest by kind.
 Typed_Error :: struct {
-	kind:      Typed_Error_Kind,
-	truncated: bool,
-	n_steps:   u8,
-	cause:     io.Error,
-	at:        u64,
-	inner:     Fault,
-	steps:     [MAX_ERROR_STEPS]Step,
+	kind:         Typed_Error_Kind,
+	truncated:    bool,
+	n_steps:      u8,
+	found:        Kind,
+	cause:        io.Error,
+	at:           u64,
+	using detail: Typed_Detail,
+	steps:        [MAX_ERROR_STEPS]Step,
+}
+
+// What a refusal names beside its kind: `.Walk`'s fault in `inner`, what a `.Plan_Mismatch` met in `plans`, and
+// `want` for the other kinds. The three share their bytes, so a reader reads the one its kind names, as `core:fmt` does
+// by the tags.
+Typed_Detail :: struct #raw_union {
+	inner: Fault `raw_union_tag:"kind=Walk"`,
+	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union"`,
+	plans: Plan_Clash `raw_union_tag:"kind=Plan_Mismatch"`,
+}
+
+// `type` is the type a `.Wrong_Kind`, `.Out_Of_Range` or `.Not_A_Member` read wanted. `text` is the refused scalar's
+// source text for those kinds, which lives as long as `src`, the flag a `.Bad_Tag` names, or why a type is
+// `.Unsupported` or a union `.Ambiguous_Union`. Either may be empty.
+Typed_Want :: struct {
+	type: typeid,
+	text: string,
+}
+
+// The formats a `.Plan_Mismatch` met, the plan's and the read's, and the plan's type when the formats agree. Both are
+// nil where the refusal does not know them.
+Plan_Clash :: struct {
+	plan, read: ^Spelling,
+	type:       typeid,
 }
 
 @(private, rodata)
@@ -376,24 +529,24 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Missing_Tag   = {"missing_tag", "Object has no tag member"},
 	.Repeated_Tag  = {"repeated_tag", "Object repeats its tag member"},
 	.Duplicate_Key = {"duplicate_key", "Duplicate key"},
-	.Out_Of_Memory = {"out_of_memory", "Out of memory"},
+	.No_Memory     = {"no_memory", "Out of memory"},
 	.Bad_Option    = {"bad_option", "Invalid option"},
 	.Plan_Mismatch = {"plan_mismatch", "Plan does not read this target"},
 	.Unsupported   = {"unsupported", "Type is not supported"},
 	.Ambiguous_Union = {"ambiguous_union", "Union arms cannot be told apart"},
 	.Bad_Tag       = {"bad_tag", "Invalid field tag"},
-	.Bad_Utf8      = {"bad_utf8", "String is not valid UTF-8"},
+	.Invalid_Utf8  = {"invalid_utf8", "Invalid UTF-8"},
 	.Non_Finite    = {"non_finite", "Number is not finite"},
-	.Too_Deep      = {"too_deep", "Value nests past the depth limit"},
+	.Too_Deep      = {"too_deep", "Exceeds the depth limit"},
 	.Cycle         = {"cycle", "Value refers to itself"},
-	.Bad_Raw       = {"bad_raw", "Text is not one value of the format"},
+	.Bad_Raw       = {"bad_raw", "Not one value of the format"},
 	.Unwritable    = {"unwritable", "Value cannot be written in the format"},
 	.Out_Of_Order  = {"out_of_order", "Token written out of order"},
 	.Write_Failed  = {"write_failed", "Output refused the bytes"},
 }
 
 // The kinds that name no byte of a source.
-TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Bad_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
+TYPED_AT_NO_BYTE :: bit_set[Typed_Error_Kind]{.None, .Bad_Option, .Plan_Mismatch, .Unsupported, .Ambiguous_Union, .Bad_Tag, .Invalid_Utf8, .Non_Finite, .Too_Deep, .Cycle, .Bad_Raw, .Unwritable, .Out_Of_Order, .Write_Failed}
 
 // Moves the bytes of the source `e` names by `by`, for an error found in a text that starts `by` bytes in.
 move_typed_error :: proc(e: ^Typed_Error, by: u64) {
@@ -418,7 +571,7 @@ render_typed :: proc(w: io.Writer, src: []u8, e: Typed_Error, lines: ^Lines = ni
 	if e.kind not_in TYPED_AT_NO_BYTE {
 		write_position(w, src, e.at, lines) or_return
 	}
-	io.write_string(w, TYPED_KIND_RULES[e.kind].message) or_return
+	write_typed_message(w, e) or_return
 	if e.cause != .None {
 		io.write_string(w, " (") or_return
 		io.write_string(w, reflect.enum_string(e.cause)) or_return
@@ -432,18 +585,180 @@ render_typed :: proc(w: io.Writer, src: []u8, e: Typed_Error, lines: ^Lines = ni
 		io.write_string(w, "...") or_return
 	}
 	e := e
-	for s in e.steps[:e.n_steps] {
-		#partial switch v in s {
+	return write_steps(w, e.steps[:e.n_steps], !e.truncated)
+}
+
+// The most bytes of a refused value's text a message shows.
+@(private)
+SHOWN_TEXT_MAX :: 40
+
+// Writes `e`'s message, naming what `e.detail` holds where its kind has one.
+@(private)
+write_typed_message :: proc(w: io.Writer, e: Typed_Error) -> io.Error {
+	#partial switch e.kind {
+	case .Wrong_Kind:
+		if e.want.type != nil {
+			io.write_string(w, "Expected ") or_return
+			reflect.write_typeid(w, e.want.type) or_return
+			io.write_string(w, ", found ") or_return
+			// A plain value, as a dsv cell, has no kind of its own to name, so its text stands in quotes.
+			if e.found == .Plain && len(e.want.text) > 0 {
+				quoted := e.want.text[0] == '"'
+				if !quoted {
+					io.write_byte(w, '"') or_return
+				}
+				write_shown(w, e.want.text) or_return
+				return nil if quoted else io.write_byte(w, '"')
+			}
+			return write_kind_word(w, e.found)
+		}
+	case .Out_Of_Range:
+		if e.want.type != nil && len(e.want.text) > 0 {
+			write_shown(w, e.want.text) or_return
+			io.write_string(w, " is out of range for ") or_return
+			_, err := reflect.write_typeid(w, e.want.type)
+			return err
+		}
+	case .Not_A_Member:
+		if e.want.type != nil {
+			if len(e.want.text) > 0 {
+				write_shown(w, e.want.text) or_return
+				io.write_string(w, " is not a ") or_return
+			} else {
+				io.write_string(w, "Value is no member of ") or_return
+			}
+			_, err := reflect.write_typeid(w, e.want.type)
+			return err
+		}
+	case .Plan_Mismatch:
+		if p := e.plans; p.plan != nil && p.read != nil && p.plan != p.read {
+			io.write_string(w, "Plan is for ") or_return
+			io.write_string(w, p.plan.tag_key) or_return
+			io.write_string(w, ", the read is ") or_return
+			_, err := io.write_string(w, p.read.tag_key)
+			return err
+		} else if p.type != nil {
+			io.write_string(w, "Plan is for ") or_return
+			reflect.write_typeid(w, p.type) or_return
+			_, err := io.write_string(w, ", not the target's type")
+			return err
+		}
+	case .Bad_Tag:
+		if len(e.want.text) > 0 {
+			io.write_string(w, "Field tag flag \"") or_return
+			io.write_string(w, e.want.text) or_return
+			_, err := io.write_string(w, "\" is not one the field takes")
+			return err
+		}
+	case .Unsupported, .Ambiguous_Union:
+		io.write_string(w, TYPED_KIND_RULES[e.kind].message) or_return
+		if len(e.want.text) > 0 {
+			io.write_string(w, ": ") or_return
+			io.write_string(w, e.want.text) or_return
+		}
+		return nil
+	}
+	_, err := io.write_string(w, TYPED_KIND_RULES[e.kind].message)
+	return err
+}
+
+// Writes `text`, cut to `SHOWN_TEXT_MAX` bytes at a character's start with `...` after it.
+@(private)
+write_shown :: proc(w: io.Writer, text: string) -> io.Error {
+	if len(text) <= SHOWN_TEXT_MAX {
+		_, err := io.write_string(w, text)
+		return err
+	}
+	cut := SHOWN_TEXT_MAX
+	for cut > 0 && text[cut] & 0xC0 == 0x80 {
+		cut -= 1
+	}
+	io.write_string(w, text[:cut]) or_return
+	_, err := io.write_string(w, "...")
+	return err
+}
+
+// Writes the kind of a value as a word: `null`, `true`, `number`, `object`.
+@(private)
+write_kind_word :: proc(w: io.Writer, k: Kind) -> io.Error {
+	name := reflect.enum_string(k)
+	if name == "Map" {
+		name = "Object"
+	}
+	for i in 0 ..< len(name) {
+		c := name[i]
+		io.write_byte(w, c + 32 if c >= 'A' && c <= 'Z' else c) or_return
+	}
+	return nil
+}
+
+// Writes `steps` as stury path text, `.a[1]."b c"`, which `parse_path` reads back. `whole` says the steps start at the
+// root, so a first step that is no name opens with `.`.
+@(private)
+write_steps :: proc(w: io.Writer, steps: []Step, whole: bool) -> io.Error {
+	for s, i in steps {
+		if i == 0 && whole {
+			if _, named := s.(Name); !named {
+				io.write_byte(w, '.') or_return
+			}
+		}
+		switch v in s {
 		case Name:
 			io.write_byte(w, '.') or_return
-			io.write_string(w, string(v)) or_return
+			write_step_name(w, string(v)) or_return
 		case Index:
 			io.write_byte(w, '[') or_return
 			io.write_int(w, int(v)) or_return
 			io.write_byte(w, ']') or_return
+		case Index_Or_Name:
+			io.write_byte(w, '[') or_return
+			io.write_int(w, v.index) or_return
+			io.write_byte(w, ']') or_return
+		case All:
+			io.write_string(w, "[]") or_return
+		case Slice:
+			io.write_byte(w, '[') or_return
+			io.write_int(w, v.lo) or_return
+			io.write_byte(w, ':') or_return
+			if hi, bounded := v.hi.?; bounded {
+				io.write_int(w, hi) or_return
+			}
+			io.write_byte(w, ']') or_return
+		case Descend:
+			io.write_byte(w, '.') or_return
 		}
 	}
 	return nil
+}
+
+// Writes a member name as a path step spells it: bare when it is a jq identifier, else quoted as a JSON string.
+@(private)
+write_step_name :: proc(w: io.Writer, name: string) -> io.Error {
+	bare := len(name) > 0 && is_name_start(name[0])
+	for i in 1 ..< len(name) {
+		bare &&= is_name_start(name[i]) || name[i] >= '0' && name[i] <= '9'
+	}
+	if bare {
+		_, err := io.write_string(w, name)
+		return err
+	}
+	io.write_byte(w, '"') or_return
+	for i in 0 ..< len(name) {
+		c := name[i]
+		switch {
+		case c == '"' || c == '\\':
+			io.write_byte(w, '\\') or_return
+			io.write_byte(w, c) or_return
+		case c < 0x20:
+			hex := "0123456789abcdef"
+			io.write_string(w, "\\u00") or_return
+			io.write_byte(w, hex[c >> 4]) or_return
+			io.write_byte(w, hex[c & 15]) or_return
+		case:
+			io.write_byte(w, c) or_return
+		}
+	}
+	return io.write_byte(w, '"')
 }
 
 // `write_code` writes an error's code, `render` writes its rendered line.

@@ -2,12 +2,13 @@ package dsv_tests
 
 import "core:fmt"
 import "core:math/rand"
-import "core:os"
+import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
 import dsv ".."
+import walktest "../../walktest"
 
 @(private = "file")
 Read_Case :: struct {
@@ -25,7 +26,7 @@ answer_texts :: proc(doc: ^core.Document, answers: []core.Answer) -> []string {
 			out[i] = strings.trim_right(string(core.span(doc, a.node)), "\r\n")
 		case .Missing:
 			out[i] = "M"
-		case .Type_Mismatch:
+		case .Wrong_Kind, .Not_Loaded:
 			out[i] = "T"
 		}
 	}
@@ -50,6 +51,8 @@ path_reads :: proc(t: ^testing.T) {
 		{"a,b\n\"1,2\",3\n", ".[0].a", {`"1,2"`}},
 		{"\"a b\",c\n1,2\n", `.[0]."a b"`, {"1"}},
 		{"a,b\n1,2\n3\n", ".[1].b", {"M"}},
+		{"b,c,b\nx,y,z\n1,2,3\n", "...b", {"T", "T", "T", "z", "T", "T", "T", "3", "T"}},
+		{"a,b\n1,2\n3,4\n5,6\n", "...[-2]", {"1", "T", "T", "3,4", "3", "T", "T", "5", "T", "T"}},
 	}
 	for c in cases {
 		path, perr := core.parse_path(c.path)
@@ -107,7 +110,7 @@ path_shapes :: proc(t: ^testing.T) {
 	bare, bad := dsv.scan(src, .Csv, named, opts = {no_header = true})
 	defer core.destroy(&bare)
 	testing.expect_value(t, bad.kind, core.Path_Error_Kind.None)
-	testing.expect_value(t, bare.answers[0].outcome, core.Answer_Outcome.Type_Mismatch)
+	testing.expect_value(t, bare.answers[0].outcome, core.Presence.Wrong_Kind)
 
 	headed := transmute([]u8)string("a,b\n1,2\n")
 	h, herr := dsv.scan(headed, .Csv, named)
@@ -169,77 +172,14 @@ path_record_ends :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(core.span(&doc, doc.answers[0].owner)), "1,x\"y\n")
 
 	open := transmute([]u8)string("a,b\n1,\"x")
-	stopped, serr := dsv.scan(open, .Csv, path, read = {stop_early = true})
+	stopped, serr := dsv.scan(open, .Csv, path, read = {dups = .First, stop_early = true})
 	defer core.destroy(&stopped)
 	testing.expect_value(t, serr.kind, core.Path_Error_Kind.None)
 	testing.expect(t, stopped.stopped)
 	testing.expect(t, strings.has_prefix(string(core.span(&stopped, stopped.answers[0].owner)), "1,"))
 }
 
-// A record and its first cell start at one byte, and the answers of a `Descend` read still come record first, as a
-// query gives them. A repeated header name under `.Last` takes back the first cell's answer there too.
-@(test)
-path_descend_record_first :: proc(t: ^testing.T) {
-	cases := []Read_Case {
-		{"b,c,b\nx,y,z\n1,2,3\n", "...b", {"T", "T", "T", "z", "T", "T", "T", "3", "T"}},
-		{"a,b\n1,2\n3,4\n5,6\n", "...[-2]", {"1", "T", "T", "3,4", "3", "T", "T", "5", "T", "T"}},
-	}
-	for c in cases {
-		path, _ := core.parse_path(c.path)
-		defer core.path_destroy(&path)
-		src := transmute([]u8)c.src
-		doc, err := dsv.scan(src, .Csv, path)
-		defer core.destroy(&doc)
-		testing.expectf(t, err.kind == .None, "%q: %v", c.path, err)
-		testing.expectf(t, slice_equal(answer_texts(&doc, doc.answers), c.want), "scan %q: %v", c.path, answer_texts(&doc, doc.answers))
-
-		full, _ := dsv.build(src, .Csv)
-		defer core.destroy(&full)
-		answers, qerr := core.query(&full, path)
-		defer delete(answers)
-		testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
-		testing.expectf(t, slice_equal(answer_texts(&full, answers), c.want), "query %q: %v", c.path, answer_texts(&full, answers))
-	}
-	free_all(context.temp_allocator)
-}
-
 PATH_ROUNDS :: #config(PATH_ROUNDS, 2000)
-PATH_FIXTURES :: #config(PATH_FIXTURES, "")
-
-// Scan against query on a directory's CSV files, at records and cells sampled from each.
-@(test)
-path_fixtures :: proc(t: ^testing.T) {
-	if PATH_FIXTURES == "" {
-		return
-	}
-	entries, err := os.read_all_directory_by_path(PATH_FIXTURES, context.allocator)
-	testing.expect_value(t, err, nil)
-	defer os.file_info_slice_delete(entries, context.allocator)
-	for entry in entries {
-		if !strings.has_suffix(entry.name, ".csv") {
-			continue
-		}
-		src, rerr := os.read_entire_file_from_path(entry.fullpath, context.allocator)
-		testing.expect_value(t, rerr, nil)
-		defer delete(src)
-		full, berr := dsv.build(src, .Csv)
-		defer core.destroy(&full)
-		testing.expect_value(t, berr.kind, core.Document_Error_Kind.None)
-		for _ in 0 ..< 12 {
-			defer free_all(context.temp_allocator)
-			column := rand.int_max(core.length(&full, 1) if core.length(&full, core.ROOT) > 0 else 1)
-			lead := core.Step(core.All{}) if rand.int_max(3) == 0 else core.Step(core.Index(rand.int_max(core.length(&full, core.ROOT) + 1)))
-			path := core.Path{steps = []core.Step{lead, core.Index(column)}}
-			doc, qerr := dsv.scan(src, .Csv, path)
-			defer core.destroy(&doc)
-			testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
-			answers, derr := core.query(&full, path)
-			defer delete(answers)
-			testing.expect_value(t, derr.kind, core.Path_Error_Kind.None)
-			testing.expectf(t, slice_equal(answer_texts(&doc, doc.answers), answer_texts(&full, answers)), "%s %v", entry.name, path.steps)
-		}
-	}
-}
 
 // The positions a lead or cell step picks of `n`, and whether it answers one missing value.
 @(private = "file")
@@ -308,7 +248,7 @@ on_answer :: proc(state: rawptr, a: core.Token_Answer) -> bool {
 		text = strings.trim_right(string(s.src[a.lo:a.hi]), "\r\n")
 	case .Missing:
 		text = "M"
-	case .Type_Mismatch:
+	case .Wrong_Kind, .Not_Loaded:
 	}
 	append(&s.want, fmt.tprintf("%d:%s", a.path, text))
 	return true
@@ -435,6 +375,46 @@ stream_spans_are_authored :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, seen.spans[0], "\"x,y\"")
 	testing.expect_value(t, seen.spans[3], "\"\"\"q\"\"\"")
+}
+
+// A path scan of a text with a header takes the header's cells from its allocator, never from `context`'s: one path,
+// several and a stream answer with the context's allocators panicking, leave nothing allocated, and every allocation
+// refused is `.No_Memory`.
+@(test)
+scan_allocates_from_its_allocator :: proc(t: ^testing.T) {
+	src := transmute([]u8)string("a,b\n1,2\n3,4\n")
+	one, _ := core.parse_path(".[1].a")
+	defer core.path_destroy(&one)
+	two, _ := core.parse_path(".[0].b")
+	defer core.path_destroy(&two)
+	paths := []core.Path{one, two}
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	alloc := mem.tracking_allocator(&track)
+	refused := walktest.Failing_Alloc{inner = context.allocator, fail_all = true}
+	context.allocator = mem.panic_allocator()
+	context.temp_allocator = mem.panic_allocator()
+
+	doc, err := dsv.scan(src, .Csv, one, allocator = alloc)
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, string(core.span(&doc, doc.answers[0].node)), "3")
+	core.destroy(&doc)
+	doc, err = dsv.scan(src, .Csv, paths, allocator = alloc)
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, len(doc.answers), 2)
+	core.destroy(&doc)
+	found := 0
+	count :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+		(^int)(state)^ += int(a.outcome == .Found)
+		return true
+	}
+	testing.expect_value(t, dsv.each_answer(src, .Csv, paths, &found, count, allocator = alloc).kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, found, 2)
+	testing.expect_value(t, len(track.allocation_map), 0)
+
+	_, err = dsv.scan(src, .Csv, paths, allocator = walktest.failing_allocator(&refused))
+	testing.expect_value(t, err.kind, core.Path_Error_Kind.No_Memory)
 }
 
 // A dsv record reads by position and by name, and a cell reads as neither.

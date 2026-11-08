@@ -161,7 +161,21 @@ flush_some :: proc(o: ^Output, force := false) {
 // the exit status of a system error.
 write_out :: proc(p: []byte) {
 	if err := write_stdout(p); err != nil {
-		message.write_stderr("stury: error: writing output failed: %s\n", strerror(err))
-		os.exit(EXIT_USAGE)
+		output_failed(err)
 	}
+}
+
+// Exit with `code` once stdout is closed, as jq's fclose(stdout) at its exit does: a stdout that was not open, or one
+// whose close fails, ends the run as a failed write does, whatever `code` was and whether or not anything was written.
+exit_closing_stdout :: proc(code: int) -> ! {
+	if err := close_stdout(); err != nil {
+		output_failed(err)
+	}
+	os.exit(code)
+}
+
+@(private = "file")
+output_failed :: proc(err: os.Error) -> ! {
+	message.write_stderr("stury: error: writing output failed: %s\n", strerror(err))
+	os.exit(EXIT_USAGE)
 }

@@ -55,6 +55,12 @@ FOLDS = r"""
   | select(length == 1) | .[0]]]
 """
 
+# Oniguruma's message for each error code (*ERROR{n}) may end a search with, but those it has none for.
+ERRORS = r"""
+range(-600; 0) as $n | "a" | try (test("(*ERROR{\($n)})") | empty) catch "\($n) \(ltrimstr("Regex failure: "))"
+  | select(endswith(" undefined error code") | not)
+"""
+
 
 def jq(program, data):
     p = subprocess.run(["jq", "-c", program], input=json.dumps(data).encode(), capture_output=True, check=True)
@@ -169,6 +175,7 @@ def main():
         "name_tables": struct.pack(f"<{len(named)}H", *(t for _, t in named)),
         "folds": struct.pack(f"<{len(folds)}Q", *(c << 2 * FOLD_BITS | n << FOLD_BITS | f for c, n, f in folds)),
         "multi_folds": struct.pack(f"<{4 * len(multi)}I", *(x for c, f in multi for x in (c, *f))),
+        "errors": b"".join(e.encode() + b"\0" for e in jq(ERRORS, None)),
     }
     for name, data in blobs.items():
         (BLOBS / f"{name}.bin").write_bytes(data)
@@ -207,6 +214,9 @@ def main():
         "// Each character (?i) also matches a string of two or three to, in order, and the string's characters",
         "// folded (0 after two).",
         '@(rodata) MULTI_FOLDS := #load("tables/multi_folds.bin", [][4]u32)',
+        "",
+        "// Oniguruma's message for each error code it has one for, as `code message`, each ended by a NUL.",
+        'ERROR_MESSAGES :: #load("tables/errors.bin", string)',
         "",
     ]
     OUT.write_text("\n".join(out))

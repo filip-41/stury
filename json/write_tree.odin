@@ -1,25 +1,19 @@
 package json
 
-import "base:runtime"
-import "core:io"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
-import spell "../core/spell"
 import core "../core"
 import write "../core/write"
 
-// The tree writer: the documents the row walk leaves out. It walks the document by its containers, one level of the
-// call stack each, and writes each member's comments around it, so it is slow and handles everything: comments, sorted
-// keys, shared keys, the spelling of a JSON5 text in JSON, and a partial document. The row walk of `write_document.odin`
+// The tree writer: the documents the row walk leaves out. It walks the document by its containers, one frame of a stack
+// each, and writes each member's comments around it, so it is slow and handles everything: comments, sorted keys, shared
+// keys, the spelling of a JSON5 text in JSON, and a partial document. The row walk of `write_document.odin`
 // writes every other document and calls nothing of this file.
 //
 // A comment is a fact of the member's value node. A `Comment` stands before the member, or between its key and its value
 // when its bytes follow the key's. A `Comment_Inline` follows the member and its comma. A `Comment_Foot` of a container
 // stands on a line of its own before the close, and one of the root that follows the root's close stands after it.
-
-// The deepest container the recursion enters. A document built under a larger `max_depth` is `.Too_Deep` here.
-TREE_DEPTH :: 4096
 
 @(private)
 Tree :: struct {
@@ -33,35 +27,27 @@ Tree :: struct {
 	json:    bool, // the document is JSON's, in any spec
 	keep:    bool, // facts are written as comments
 	respell: bool, // JSON5's spelling of a string and a number is spelled again for JSON
+	seps:    bool, // U+2028 and U+2029 end a line comment in the target, JSON5
 	copy:    bool, // a string is written as it was authored
-	resolve: bool, // a `Plain` cell is written as `core.resolve` reads it, else as text
+	resolve: bool, // a `Plain` cell with bytes is written as `core.kind` reads it, else as text
 	at:      int, // the first fact not before the node `node_facts` last answered for
 	held:    bool, // the line written last ends in a value, so a comment that follows it there reads as its inline one
 }
 
-// A member of a `Map` as the tree writer orders them. `name` is the decoded key under `sort_keys`.
+// A member of an `Object` as the tree writer orders them. `name` is the decoded key under `sort_keys`.
 @(private)
 Pair :: struct {
 	key, val: core.Node_Index,
 	name:     string,
 }
 
-// Whether the row walk cannot write the subtree at `node`. A JSON5 document is the row walk's only when it is written as
-// it was authored.
+// Writes node `node` of `doc` as spec `as` into `out`. The count is the facts `as` cannot hold.
 @(private)
-document_cold :: proc(doc: ^core.Document, opts: core.Write_Options, own: bool, node: core.Node_Index) -> bool {
-	return !own || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || doc.shared_keys != 0 || Spec(doc.as.spec) == .Json5
-}
-
-// Writes node `node` of `doc` as spec `as`, into an output of `hint` bytes. The count is the facts `as` cannot hold.
-@(private)
-write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, as: Spec, node: core.Node_Index, hint: int) -> (text: []u8, dropped: int, err: core.Typed_Error) {
-	spill: [write.ROOM_MAX]u8 = ---
-	out: write.Out
-	write.init(&out, &spill, allocator, stream, hint)
-	w := Tree{doc = doc, root = node, out = &out, opts = opts, json = doc.spelling == &SPELLING}
+write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Out, as: Spec, node: core.Node_Index) -> (dropped: int, kind: core.Typed_Error_Kind) {
+	w := Tree{doc = doc, root = node, out = out, opts = opts, json = doc.spelling == &SPELLING}
 	w.keep = w.json && as != .Json && !doc.partial
 	w.respell = w.json && Spec(doc.as.spec) == .Json5 && as != .Json5
+	w.seps = as == .Json5
 	w.copy = w.json && !w.respell && copies_strings(opts)
 	w.resolve = doc.spelling.resolves != nil && doc.spelling.resolves(doc.as)
 	if w.keep {
@@ -73,27 +59,23 @@ write_tree :: proc(doc: ^core.Document, opts: core.Write_Options, stream: io.Str
 	} else {
 		w.dropped = len(core.subtree_facts(doc, node))
 	}
-	if !tree_entry(&w, node, core.NO_NODE, 0, false) {
-		write.destroy(&out)
-		return nil, 0, {kind = w.kind}
+	if !tree_walk(&w, node) {
+		return 0, w.kind
 	}
-	text, err = write.finish((^write.Out)(rawptr(&out)))
-	if err.kind != .None {
-		return nil, 0, err
-	}
-	return text, w.dropped, err
+	return w.dropped, .None
 }
 
 // Writes fact `f` with its markers. A line comment ends its line in compact text, since nothing may follow it there.
-// `ascii` and `escape_html` respell a comment's characters as they do a string's, as literal text. Returns whether it is a
-// line comment.
+// `ascii` and `escape_html` respell a comment's characters as they do a string's, as literal text, and so is a U+2028 or
+// U+2029 in a line comment that the target ends there. Returns whether it is a line comment.
 @(private)
 tree_comment :: proc(w: ^Tree, f: core.Fact) -> (line: bool) {
 	text := w.doc.src[f.lo:f.lo + u64(f.n)]
 	line = text[1] == '/'
-	if w.opts.ascii || w.opts.escape_html {
+	seps := w.opts.escape_html || line && w.seps
+	if w.opts.ascii || seps {
 		for r in string(text) {
-			if r >= 0x80 && w.opts.ascii || w.opts.escape_html && (r == '<' || r == '>' || r == '&' || r == 0x2028 || r == 0x2029) {
+			if r >= 0x80 && w.opts.ascii || w.opts.escape_html && (r == '<' || r == '>' || r == '&') || seps && (r == 0x2028 || r == 0x2029) {
 				w.out.cursor += unit_text(write.room(w.out, 12), u32(r))
 			} else {
 				encoded, n := utf8.encode_rune(r)
@@ -136,12 +118,92 @@ node_facts :: proc(w: ^Tree, i: core.Node_Index) -> []core.Fact {
 	return all[lo:w.at]
 }
 
-// Writes member `i` of the container at `depth`: the comments before it, its key `key` when it has one, its value, its
-// comma, and the comments that follow. The root is entered with no key.
+// An open container of the tree walk, the frame of its depth: the member that follows in its `Object` list or among its
+// `Array` nodes, and what its close and the comments after it need.
 @(private)
-tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -> bool {
+Tree_Frame :: struct {
+	i:       core.Node_Index,
+	facts:   []core.Fact, // the container's, its feet among them
+	object:  bool,
+	comma:   bool, // a comma follows the container
+	list:    [dynamic]Pair, // an `Object`'s members, written from `next` on, its room kept for the next at the depth
+	next:    int,
+	at, end: core.Node_Index, // an `Array`'s next node and the node past its last
+	members: int,
+}
+
+// Writes node `node` and everything in it. Each open container is a frame of a stack that grows with the depth, and a
+// container past the document's `max_depth`, which its read refuses, is `.Too_Deep`.
+@(private)
+tree_walk :: proc(w: ^Tree, node: core.Node_Index) -> bool #no_bounds_check {
+	frames: [dynamic]Tree_Frame
+	open := 0 // the containers open, each in the frame of its depth
+	defer {
+		for f in frames {
+			tree_free(f.list)
+		}
+		delete(frames)
+	}
+	limit := int(w.doc.as.max_depth) if w.doc.as.max_depth != 0 else core.MAX_DEPTH
+	i, key, comma := node, core.NO_NODE, false
+	for {
+		facts := tree_head(w, i, key, open) or_return
+		if w.doc.nodes[i].kind < .Array {
+			tree_scalar(w, i) or_return
+			tree_tail(w, i, open, comma, facts)
+		} else {
+			if open >= limit {
+				w.kind = .Too_Deep
+				return false
+			}
+			if open == len(frames) {
+				if _, failed := append(&frames, Tree_Frame{}); failed != nil {
+					w.kind = .No_Memory
+					return false
+				}
+			}
+			tree_open(w, &frames[open], i, comma, facts) or_return
+			open += 1
+		}
+		for found := false; !found; {
+			if open == 0 {
+				return true
+			}
+			top := &frames[open - 1]
+			if i, key, comma, found = tree_member(w, top); found {
+				write.put_line(w.out, w.opts, open)
+			} else {
+				open -= 1
+				tree_close(w, top, open)
+				tree_clear(&top.list)
+				tree_tail(w, top.i, open, top.comma, top.facts)
+			}
+		}
+	}
+}
+
+@(private)
+tree_free :: proc(list: [dynamic]Pair) {
+	list := list
+	tree_clear(&list)
+	delete(list)
+}
+
+// Empties `list` and keeps its room.
+@(private)
+tree_clear :: #force_inline proc(list: ^[dynamic]Pair) {
+	for p in list {
+		delete(p.name)
+	}
+	clear(list)
+}
+
+// Writes the comments before member `i` of the container at `depth`, its key `key` when it has one, and the comments
+// between the key and the value. The root is entered with no key. Returns the member's facts.
+@(private)
+tree_head :: #force_inline proc(w: ^Tree, i, key: core.Node_Index, depth: int) -> (facts: []core.Fact, ok: bool) {
 	doc := w.doc
-	facts := node_facts(w, i) if w.keep else nil
+	facts = node_facts(w, i) if w.keep else nil
 	key_lo := max(u64)
 	if key != core.NO_NODE {
 		key_lo = core.node_start(doc.nodes[key])
@@ -156,7 +218,7 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 	if key != core.NO_NODE {
 		w.kind = put_token_string(w.out, doc.src, doc, key, doc.nodes[key], w.opts, w.json, w.copy)
 		if w.kind != .None {
-			return false
+			return
 		}
 		write.put_text(w.out, ": " if w.opts.pretty else ":")
 		for f in facts {
@@ -169,7 +231,12 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 			}
 		}
 	}
-	tree_value(w, i, depth, facts) or_return
+	return facts, true
+}
+
+// Writes the comma after member `i` of the container at `depth`, and the comments that follow it.
+@(private)
+tree_tail :: #force_inline proc(w: ^Tree, i: core.Node_Index, depth: int, comma: bool, facts: []core.Fact) {
 	if comma {
 		write.put_byte(w.out, ',')
 	}
@@ -192,173 +259,100 @@ tree_entry :: proc(w: ^Tree, i, key: core.Node_Index, depth: int, comma: bool) -
 	if i == w.root && after_line && w.opts.pretty {
 		write.put_byte(w.out, '\n')
 	}
-	return true
 }
 
-// The members of the `Map` at `i`, in the order they are written.
+// Fills the empty `list` with the members of the `Object` at `i`, in the order they are written.
 @(private)
-tree_pairs :: proc(w: ^Tree, i: core.Node_Index) -> (list: [dynamic]Pair, ok: bool) {
+tree_pairs :: proc(w: ^Tree, i: core.Node_Index, list: ^[dynamic]Pair) -> bool {
 	it := core.pairs(w.doc, i)
 	for key, val in core.pair_next(&it) {
 		name: string
 		if w.opts.sort_keys {
 			name = core.text_clone(w.doc, key) or_return
 		}
-		if _, failed := append(&list, Pair{key, val, name}); failed != nil {
+		if _, failed := append(list, Pair{key, val, name}); failed != nil {
 			delete(name)
-			return
+			return false
 		}
 	}
 	if w.opts.sort_keys {
 		slice.stable_sort_by(list[:], proc(a, b: Pair) -> bool {return a.name < b.name})
 	}
-	return list, true
+	return true
 }
 
-// Writes the value at `i`: a scalar, or a container with its members and its feet, which are among its `facts`. A
-// delimited text's cell is what `core.resolve` reads it as.
+// Writes the scalar at `i`. A delimited text's cell is what `core.kind` reads it as.
 @(private)
-tree_value :: proc(w: ^Tree, i: core.Node_Index, depth: int, facts: []core.Fact) -> bool {
+tree_scalar :: #force_inline proc(w: ^Tree, i: core.Node_Index) -> bool {
 	doc := w.doc
 	t := doc.nodes[i]
-	if t.kind < .Array {
-		w.held = true
-		if w.respell && t.kind == .Number {
-			return tree_number(w, t)
-		}
-		cell := t
-		cell.kind = core.resolve(doc, i) if t.kind == .Plain && w.resolve else t.kind
-		w.kind = put_token(w.out, doc.src, doc, i, cell, w.opts, w.json, w.copy)
+	w.held = true
+	if w.respell && t.kind == .Number && t.spelling & core.NUMBER_KIND_MASK != 0 {
+		w.kind = write.put_decimal(w.out, string(doc.src[t.lo:t.lo + u64(t.n)]), t.spelling)
 		return w.kind == .None
 	}
-	if depth >= TREE_DEPTH {
-		w.kind = .Too_Deep
+	cell := t
+	cell.kind = doc.spelling.resolve(doc, i) if t.kind == .Plain && (w.resolve || t.n == 0) else t.kind
+	w.kind = put_token(w.out, doc.src, doc, i, cell, w.opts, w.json, w.copy)
+	return w.kind == .None
+}
+
+// Writes the open bracket of the container at `i` and fills its frame `f`, whose list is empty.
+@(private)
+tree_open :: proc(w: ^Tree, f: ^Tree_Frame, i: core.Node_Index, comma: bool, facts: []core.Fact) -> bool {
+	t := w.doc.nodes[i]
+	f.i, f.facts, f.object, f.comma, f.next, f.members = i, facts, t.kind == .Object, comma, 0, 0
+	f.at, f.end = i + 1, i + core.Node_Index(t.n)
+	write.put_byte(w.out, '{' if f.object else '[')
+	w.held = false
+	if f.object && !tree_pairs(w, i, &f.list) {
+		w.kind = .No_Memory
 		return false
 	}
-	map_ := t.kind == .Map
-	write.put_byte(w.out, '{' if map_ else '[')
-	w.held = false
-	members := 0
-	if map_ {
-		list, ok := tree_pairs(w, i)
-		defer {
-			for p in list {
-				delete(p.name)
-			}
-			delete(list)
+	return true
+}
+
+// The member of the container of `f` that is written next, with its key and whether a comma follows it.
+@(private)
+tree_member :: #force_inline proc(w: ^Tree, f: ^Tree_Frame) -> (i, key: core.Node_Index, comma, found: bool) #no_bounds_check {
+	doc := w.doc
+	if f.object {
+		if f.next == len(f.list) {
+			return
 		}
-		if !ok {
-			w.kind = .Out_Of_Memory
-			return false
-		}
-		for p, k in list {
-			write.put_line(w.out, w.opts, depth + 1)
-			tree_entry(w, p.val, p.key, depth + 1, k + 1 < len(list)) or_return
-		}
-		members = len(list)
-	} else {
-		end := i + core.Node_Index(t.n)
-		for at := i + 1; at < end; {
-			step := core.Node_Index(1)
-			if doc.nodes[at].kind >= .Array {
-				step = core.Node_Index(doc.nodes[at].n)
-			}
-			if at == doc.shared_keys {
-				at += step
-				continue
-			}
-			write.put_line(w.out, w.opts, depth + 1)
-			tree_entry(w, at, core.NO_NODE, depth + 1, at + step < end) or_return
-			at += step
-			members += 1
+		p := f.list[f.next]
+		f.next += 1
+		f.members += 1
+		return p.val, p.key, f.next < len(f.list), true
+	}
+	for f.at < f.end {
+		at := f.at
+		f.at += core.Node_Index(doc.nodes[at].n) if doc.nodes[at].kind >= .Array else 1
+		if at != doc.shared_keys {
+			f.members += 1
+			return at, core.NO_NODE, f.at < f.end, true
 		}
 	}
+	return
+}
+
+// Writes the feet of the container of `f` at `depth`, which are among its facts, and its close bracket.
+@(private)
+tree_close :: proc(w: ^Tree, f: ^Tree_Frame, depth: int) {
 	feet := false
 	if w.keep {
-		for f in facts {
-			if f.role == .Comment_Foot && (i != w.root || f.lo < w.close) {
+		for c in f.facts {
+			if c.role == .Comment_Foot && (f.i != w.root || c.lo < w.close) {
 				tree_break(w)
 				write.put_line(w.out, w.opts, depth + 1)
-				tree_comment(w, f)
+				tree_comment(w, c)
 				feet = true
 			}
 		}
 	}
-	if members > 0 || feet {
+	if f.members > 0 || feet {
 		write.put_line(w.out, w.opts, depth)
 	}
-	write.put_byte(w.out, '}' if map_ else ']')
+	write.put_byte(w.out, '}' if f.object else ']')
 	w.held = true
-	return true
-}
-
-// Writes a JSON5 number as JSON spells it.
-@(private)
-tree_number :: proc(w: ^Tree, t: core.Token) -> bool {
-	lit := string(w.doc.src[t.lo:t.lo + u64(t.n)])
-	p := 1 if lit[0] == '+' || lit[0] == '-' else 0
-	spelling := number_spelling_of(t.spelling)
-	if spelling != .Json && lit[0] == '-' {
-		write.put_byte(w.out, '-')
-	}
-	switch spelling {
-	case .Json:
-		write.put_text(w.out, lit)
-	case .Decimal:
-		if lit[p] == '.' {
-			write.put_byte(w.out, '0')
-		}
-		for k in p ..< len(lit) {
-			if lit[k] != '.' || k + 1 < len(lit) && lit[k + 1] - '0' < 10 {
-				write.put_byte(w.out, lit[k])
-			}
-		}
-	case .Hex:
-		if !put_hex_decimal(w.out, lit[p + 2:]) {
-			w.kind = .Out_Of_Memory
-			return false
-		}
-	case .Infinity, .Nan:
-		w.kind = .Non_Finite
-		return false
-	}
-	return true
-}
-
-// Writes the hex digits `hex` as the exact decimal integer they spell, at any length, kept in base 10^9 words with the
-// least significant first. Returns false when the words cannot be held.
-@(private)
-put_hex_decimal :: proc(out: ^write.Out, hex: string) -> bool {
-	BASE :: 1_000_000_000
-	words, failed := make([dynamic]u32, 0, len(hex) / 7 + 1)
-	if failed != nil {
-		return false
-	}
-	defer delete(words)
-	for c in transmute([]u8)hex {
-		carry := u64(spell.HEX_NIBBLE[c])
-		for &w in words {
-			x := u64(w) * 16 + carry
-			w, carry = u32(x % BASE), x / BASE
-		}
-		if carry > 0 {
-			if _, no_word := append(&words, u32(carry)); no_word != nil {
-				return false
-			}
-		}
-	}
-	if len(words) == 0 {
-		write.put_byte(out, '0')
-		return true
-	}
-	buf: [spell.INT_ROOM]u8
-	write.put_text(out, string(buf[:spell.u64_text(&buf[0], u64(words[len(words) - 1]))]))
-	#reverse for w in words[:len(words) - 1] {
-		size := spell.u64_text(&buf[0], u64(w))
-		for _ in size ..< 9 {
-			write.put_byte(out, '0')
-		}
-		write.put_text(out, string(buf[:size]))
-	}
-	return true
 }

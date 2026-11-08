@@ -60,6 +60,20 @@ cr_fault :: #force_inline proc "contextless" (w: ^Pass($S, $H), cr, nl: u64) -> 
 	return cr & ~(nl >> 1) & ~(u64(1) << 63), w.cr & ~nl != 0
 }
 
+// The masks of a CSV block's quotes `q` and separators `seps`: the bytes inside quoted fields, the closing quotes, the
+// separators outside quoted fields, and the bare quotes. `prefix_xor` of the quote mask marks the bytes inside quoted
+// fields, an opening quote starts a run and a closing quote ends it. A quote opens a field only at a cell's first byte,
+// and one that opens a run anywhere else is bare. `in_quote` is all ones when the block starts inside a quoted field,
+// and `start` and `close` have bit 0 set when its byte 0 follows a separator or a closing quote.
+@(private)
+quote_masks :: #force_inline proc "contextless" ($T: kernel.Tier, q, seps, in_quote, start, close: u64) -> (instr, closing, outside, bare: u64) {
+	instr = kernel.prefix_xor(T, q) ~ in_quote
+	closing = q & ~instr
+	outside = seps & ~instr
+	bare = q & instr & ~(outside << 1 | start | closing << 1 | close)
+	return
+}
+
 // Returns the block's bytes that are inside a comment line, and the LFs that end such a line. `starts` has a bit at
 // each comment byte that begins a line outside a quoted field, and `in_comment` says the block starts inside a comment
 // line. The LF that ends a comment line is not a comment byte, it is returned in `lfs`.
@@ -173,22 +187,30 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				}
 				remaining := ((nl << 1) | w.line) & kernel.pack(kernel.eq(b, comment))
 				for remaining != 0 {
-					instr0: u64
+					s := remaining & -remaining
+					remaining &~= s
 					if w.quoted || q != 0 {
-						instr0 = kernel.prefix_xor(T, q) ~ w.in_quote
+						// Under `.Bare_Quote` the quotes before a line start pair up without its bare ones, which the
+						// quote loop below would drop only after the comment lines are cleared.
+						if .Bare_Quote in w.tolerate {
+							for {
+								_, _, _, bare := quote_masks(T, q, d | nl, w.in_quote, w.start, w.close)
+								if bare &= s - 1; bare == 0 {
+									break
+								}
+								q &~= bare & -bare
+							}
+						}
+						if s & (kernel.prefix_xor(T, q) ~ w.in_quote) != 0 {
+							continue
+						}
 					}
-					live := remaining & ~instr0
-					if live == 0 {
-						break
-					}
-					s := live & -live
 					run, lf := comment_span(nl, s, false)
 					cb |= run
 					clfs |= lf
 					q &= ~run
 					d &= ~run
 					crm &= ~run
-					remaining &~= s
 				}
 				w.comment = cb >> 63
 			}
@@ -252,26 +274,19 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				w.cr = cr >> 63
 			}
 		} else {
+			m := kernel.pack_n([3]kernel.Block {
+				kernel.eq(b, delim),
+				kernel.eq(b, '\n'),
+				kernel.eq(b, '\r'),
+			})
+			d, nl, crm := m[0], m[1], m[2]
 			when S == .Tsv {
-				m := kernel.pack_n([3]kernel.Block {
-					kernel.eq(b, delim),
-					kernel.eq(b, '\n'),
-					kernel.eq(b, '\r'),
-				})
-				d, nl, crm := m[0], m[1], m[2]
 				// A block with no backslash holds no escaped cell, so the mask is packed only for a block that holds
 				// one. On arm64 `any_lane` is a horizontal maximum rather than the packing's lane fold.
 				bsm := kernel.eq(b, '\\')
 				if kernel.any_lane(bsm) {
 					bs = kernel.pack(bsm)
 				}
-			} else {
-				m := kernel.pack_n([3]kernel.Block {
-					kernel.eq(b, delim),
-					kernel.eq(b, '\n'),
-					kernel.eq(b, '\r'),
-				})
-				d, nl, crm := m[0], m[1], m[2]
 			}
 			seps = d | nl
 			lfs = nl
@@ -319,7 +334,9 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		check := kernel.utf8_next(T, b, kernel.is_ascii(b), &w.utf8, &w.prev_high)
 		if check && !kernel.utf8_clean(T, w.utf8) {
 			if .Invalid_Utf8 not_in w.tolerate {
-				if at, k, d := utf8_fault(src, int(lo), pos); at >= 0 && (fault < 0 || at < fault) {
+				// A sequence the text cuts short is reported at the text's end, after a quoted field the text leaves
+				// open, so a block padded past the end does not report it first.
+				if at, k, d := utf8_fault(src, int(lo), pos); at >= 0 && k != .Truncated && (fault < 0 || at < fault) {
 					fault, kind, detail = at, k, d
 				}
 			} else {
@@ -392,9 +409,15 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 		}
 	}
 	// An unclosed quoted field is a `Truncated` fault at its opening quote. A UTF-8 sequence the text cuts short is
-	// ill-formed, and `utf8_fault` reports it at `n`.
+	// ill-formed, and `utf8_fault` reports it at `n`. A sequence ill-formed before the end, as a lead the last block
+	// ends on that no sequence starts with, is a fault of that block and comes before a quoted field left open.
 	when S == .Csv {
 		if w.in_quote != 0 {
+			if w.prev_high && !kernel.utf8_ok(w.utf8) && .Invalid_Utf8 not_in w.tolerate {
+				if at, k, d := utf8_fault(src, int(lo), n); at >= 0 && k != .Truncated {
+					return core.fault_at(u64(at), k, u8(d))
+				}
+			}
 			return core.fault_at(u64(scan_record(src, w.rec_lo, 0, S, delim).quote), .Truncated, u8(Detail.Open_Quote))
 		}
 	}
@@ -440,7 +463,7 @@ pass :: #force_inline proc "contextless" ($T: kernel.Tier, $S: Spec, $EMIT: bool
 				header := w.width == 0 && !w.no_header
 			}
 			if fault, wide := record_width(&w, w.cells + 1, &w.width); fault {
-				return core.fault_at(u64(w.rec_lo), .Bad_Char, u8(Detail.Too_Many if wide else Detail.Too_Few))
+				return core.fault_at(u64(w.rec_lo), .Bad_Width, u8(Detail.Too_Many if wide else Detail.Too_Few))
 			}
 			when H == Batch {
 				frame_row(h, w.rec_lo, n, header, w.width, w.open_ill)

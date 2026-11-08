@@ -126,7 +126,7 @@ event :: proc(e: ^Events, leaf: core_pkg.Node_Index) -> Value {
 	#partial switch e.doc.nodes[leaf].kind {
 	case .Array:
 		return event_of(path, new_array())
-	case .Map:
+	case .Object:
 		return event_of(path, new_object())
 	}
 	return event_of(path, event_clone(scalar(Ref{&e.doc, leaf})))

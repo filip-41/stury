@@ -6,6 +6,7 @@ package regex
 // would grow without bound.
 
 import "base:runtime"
+import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
 
@@ -88,44 +89,64 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int) -> (found: bool, 
 	for &n in m.counts {
 		n = 0
 	}
-	if re.required != "" && strings.index(s[start:], re.required) < 0 {
-		return false, ""
-	}
-	for at := start; at <= len(s); {
-		if re.anchored && at != 0 {
-			break
+	first, last, limit, high := start, len(s), len(s), INFINITE_LEN
+	if re.narrowed {
+		ok: bool
+		if first, last, limit, high, ok = search_starts(re.opt, s, start); !ok {
+			return false, ""
 		}
-		if re.prefix != "" {
-			k := strings.index(s[at:], re.prefix)
-			if k < 0 {
+	}
+	// A string or map the optimizer finds at a bounded distance gives each window of starts, low to high, a match
+	// holding it there can have. Other searches take one window of every start.
+	windowed := high < last
+	at := first
+	starts: for at <= last {
+		end := last
+		if windowed {
+			if at = next_window(re.opt, s, at, limit, &high); at < 0 {
 				break
 			}
-			at += k
-		} else if re.has_first {
-			for at < len(s) && re.first[s[at] >> 6] & (1 << (u64(s[at]) & 63)) == 0 {
-				at += lead_width(s[at])
+			end = min(high, last)
+		}
+		for at <= end {
+			if re.prefix != "" {
+				k := strings.index(s[at:], re.prefix)
+				if k < 0 {
+					break starts
+				}
+				at += k
+			} else if re.has_first {
+				for at < len(s) && re.first[s[at] >> 6] & (1 << (u64(s[at]) & 63)) == 0 {
+					at += lead_width(s[at])
+				}
+				if at >= len(s) {
+					break starts
+				}
+			}
+			if at > end {
+				break
+			}
+			if re.calls_or_limits ? run(&m, at, true) : run(&m, at, false) {
+				return true, ""
+			}
+			if m.err != "" {
+				return false, m.err
 			}
 			if at >= len(s) {
-				break
+				break starts
 			}
+			at = max(at + lead_width(s[at]), m.skip)
 		}
-		if re.calls_or_limits ? run(&m, at, true) : run(&m, at, false) {
-			return true, ""
-		}
-		if m.err != "" {
-			return false, m.err
-		}
-		if at >= len(s) {
+		if !windowed {
 			break
 		}
-		at = max(at + lead_width(s[at]), m.skip)
 	}
 	return m.best_len >= 0, ""
 }
 
 // Bytes Oniguruma steps over from `b` to the next place a search tries, which inside a character (where
 // jq's global search can start one) is one byte.
-@(private = "file")
+@(private)
 lead_width :: #force_inline proc(b: byte) -> int {
 	switch {
 	case b < 0xC0:
@@ -206,6 +227,17 @@ push :: #force_inline proc(m: ^Matcher, e: Entry) {
 	append(m.stack, e)
 }
 
+// Pushes an entry the stack is capped for, or ends the search with Oniguruma's error.
+@(private = "file")
+push_branch :: #force_inline proc(m: ^Matcher, e: Entry) -> bool {
+	if len(m.stack) >= MAX_STACK {
+		m.err = "match-stack limit over"
+		return false
+	}
+	append(m.stack, e)
+	return true
+}
+
 // Runs the program from `at`: true on a match (written to m.caps), false on none or on an error in m.err.
 @(private = "file")
 run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
@@ -274,22 +306,14 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 			pos = next
 			pc += 1
 		case .Split:
-			if len(m.stack) >= MAX_STACK {
-				m.err = "match-stack limit over"
-				return false
-			}
-			push(m, {kind = .Branch, pc = ins.b, a = pos})
+			push_branch(m, {kind = .Branch, pc = ins.b, a = pos}) or_return
 			pc = int(ins.a)
 		case .Split_Head:
 			if pos >= len(s) || s[pos] != byte(ins.a) {
 				pc = int(ins.b)
 				continue
 			}
-			if len(m.stack) >= MAX_STACK {
-				m.err = "match-stack limit over"
-				return false
-			}
-			push(m, {kind = .Branch, pc = ins.b, a = pos})
+			push_branch(m, {kind = .Branch, pc = ins.b, a = pos}) or_return
 			pc += 1
 		case .Jmp:
 			pc = int(ins.a)
@@ -303,6 +327,9 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 				push(m, {kind = .Restore, a = int(ins.a) + 1, b = slots[ins.a + 1]})
 				slots[ins.a + 1] = -1
 			}
+			pc += 1
+		case .Set:
+			slots[ins.a] = pos
 			pc += 1
 		case .Assert:
 			kind := Assert_Kind(ins.a)
@@ -374,7 +401,11 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 		case .Cond:
 			pc = pc + 1 if slots[2 * ins.a + 1] >= 0 else int(ins.b)
 		case .Linebreak:
+			// Oniguruma's \R is (?>\r\n|[\n\v\f\r\x{85}\x{2028}\x{2029}]), whose second alternative costs a retry.
 			next := linebreak(s, pos)
+			if next != pos + 2 || s[pos] != '\r' {
+				m.retries += 1
+			}
 			ok = next >= 0
 			pos = next
 			pc += 1
@@ -435,17 +466,8 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 				pc = int(ins.b)
 				break
 			}
-			if len(m.stack) >= MAX_STACK {
-				m.err = "match-stack limit over"
-				return false
-			}
-			if ins.op == .Count {
-				push(m, {kind = .Branch, pc = ins.b, a = pos})
-				pc += 2
-			} else {
-				push(m, {kind = .Branch, pc = i32(pc + 2), a = pos})
-				pc = int(ins.b)
-			}
+			push_branch(m, {kind = .Branch, pc = ins.b if ins.op == .Count else i32(pc + 2), a = pos}) or_return
+			pc = pc + 2 if ins.op == .Count else int(ins.b)
 		case .Count_Next:
 			push(m, {kind = .Restore, a = int(ins.a), b = slots[ins.a]})
 			slots[ins.a] += 1
@@ -637,31 +659,18 @@ callout :: proc(m: ^Matcher, i: int) -> (ok: bool, end: bool) {
 			count^ += 1
 		}
 		if c.type != '>' {
-			if len(m.stack) >= MAX_STACK {
-				m.err = "match-stack limit over"
+			if !push_branch(m, {kind = .Retract, a = i}) {
 				return false, true
 			}
-			push(m, {kind = .Retract, a = i})
 		}
 		return true, false
 	case .Cmp:
-		x, y := operand(m, c.sides[0]), operand(m, c.sides[1])
-		switch c.op {
-		case "==":
-			return x == y, false
-		case "!=":
-			return x != y, false
-		case "<":
-			return x < y, false
-		case ">":
-			return x > y, false
-		case "<=":
-			return x <= y, false
-		case ">=":
-			return x >= y, false
+		if c.cmp == 0 {
+			m.err = "invalid callout arg"
+			return false, true
 		}
-		m.err = "invalid callout arg"
-		return false, true
+		x, y := operand(m, c.sides[0]), operand(m, c.sides[1])
+		return c.cmp & (1 if x < y else 2 if x == y else 4) != 0, false
 	case .Begin_Buf, .End_Buf, .Semi_End_Buf, .Begin_Line, .End_Line, .Word_Boundary, .Not_Word_Boundary,
 	     .Search_Start, .Fail, .Mismatch, .Skip:
 	}
@@ -690,92 +699,17 @@ operand :: #force_inline proc(m: ^Matcher, o: Operand) -> int {
 
 // Oniguruma's message for its error `code`, as onig_error_code_to_str gives it with no details: a code whose
 // message names a detail is taken as one (*ERROR) may not give.
-@(private = "file", rodata)
-ERROR_MESSAGES := [?]struct {
-	code: int,
-	text: string,
-}{
-	{-2, "no support in this configuration"},
-	{-3, "abort"},
-	{-5, "fail to memory allocation"},
-	{-6, "undefined type (bug)"},
-	{-11, "internal parser error (bug)"},
-	{-12, "stack error (bug)"},
-	{-13, "undefined bytecode (bug)"},
-	{-14, "unexpected bytecode (bug)"},
-	{-15, "match-stack limit over"},
-	{-16, "parse depth limit over"},
-	{-17, "retry-limit-in-match over"},
-	{-18, "retry-limit-in-search over"},
-	{-19, "subexp-call-limit-in-search over"},
-	{-21, "default multibyte-encoding is not set"},
-	{-22, "can't convert to wide-char on specified multibyte-encoding"},
-	{-23, "fail to initialize"},
-	{-30, "invalid argument"},
-	{-100, "end pattern at left brace"},
-	{-101, "end pattern at left bracket"},
-	{-102, "empty char-class"},
-	{-103, "premature end of char-class"},
-	{-104, "end pattern at escape"},
-	{-105, "end pattern at meta"},
-	{-106, "end pattern at control"},
-	{-108, "invalid meta-code syntax"},
-	{-109, "invalid control-code syntax"},
-	{-110, "char-class value at end of range"},
-	{-111, "char-class value at start of range"},
-	{-112, "unmatched range specifier in char-class"},
-	{-113, "target of repeat operator is not specified"},
-	{-114, "target of repeat operator is invalid"},
-	{-115, "nested repeat operator"},
-	{-116, "unmatched close parenthesis"},
-	{-117, "end pattern with unmatched parenthesis"},
-	{-118, "end pattern in group"},
-	{-119, "undefined group option"},
-	{-120, "invalid group option"},
-	{-121, "invalid POSIX bracket type"},
-	{-122, "invalid pattern in look-behind"},
-	{-123, "invalid repeat range {lower,upper}"},
-	{-200, "too big number"},
-	{-201, "too big number for repeat range"},
-	{-202, "upper is smaller than lower in repeat range"},
-	{-203, "empty range in char class"},
-	{-204, "mismatch multibyte code length in char-class range"},
-	{-205, "too many multibyte code ranges are specified"},
-	{-206, "too short multibyte code string"},
-	{-207, "too big backref number"},
-	{-208, "invalid backref number/name"},
-	{-209, "numbered backref/call is not allowed. (use name)"},
-	{-210, "too many captures"},
-	{-212, "too long wide-char value"},
-	{-213, "undefined operator"},
-	{-214, "group name is empty"},
-	{-221, "never ending recursion"},
-	{-222, "group number is too big for capture history"},
-	{-224, "invalid if-else syntax"},
-	{-225, "invalid absent group pattern"},
-	{-226, "invalid absent group generator pattern"},
-	{-227, "invalid callout pattern"},
-	{-228, "invalid callout name"},
-	{-229, "undefined callout name"},
-	{-231, "invalid callout tag name"},
-	{-232, "invalid callout arg"},
-	{-400, "invalid code point value"},
-	{-401, "too big wide-char value"},
-	{-402, "not supported encoding combination"},
-	{-403, "invalid combination of options"},
-	{-406, "very inefficient pattern"},
-	{-500, "library is not initialized"},
-}
-
 @(private = "file")
 error_message :: proc(code: int) -> string {
-	for e in ERROR_MESSAGES {
-		if e.code == code {
-			return e.text
-		}
-	}
-	if (code >= 0 && code < max(int)) || code == -223 || code == -230 || (code >= -220 && code <= -215) {
+	if code >= 0 {
 		return "invalid callout body"
+	}
+	messages := ERROR_MESSAGES
+	for each in strings.split_iterator(&messages, "\x00") {
+		at := strings.index_byte(each, ' ')
+		if n, _ := strconv.parse_int(each[:at]); n == code {
+			return each[at + 1:]
+		}
 	}
 	return "undefined error code"
 }

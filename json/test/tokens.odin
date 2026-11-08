@@ -34,11 +34,11 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 				}
 			}
 			// A container value is skipped whole, through its `End`.
-			if j < len(all) && (all[j].kind == .Array || all[j].kind == .Map) {
+			if j < len(all) && (all[j].kind == .Array || all[j].kind == .Object) {
 				depth := 0
 				for ; j < len(all); j += 1 {
 					#partial switch all[j].kind {
-					case .Array, .Map:
+					case .Array, .Object:
 						depth += 1
 					case .End:
 						depth -= 1
@@ -132,7 +132,7 @@ bom_at_the_start :: proc(t: ^testing.T) {
 	testing.expect_value(t, hi, 7)
 	testing.expect_value(t, log.tokens[0], core.Token{4, 1, .Array, .Value, 0})
 	_, fault = json.walk(transmute([]u8)string(" \xef\xbb\xbf[1]"), 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
-	testing.expect_value(t, fault, core.Fault{1, &json.RULES, .Bad_Char, 0})
+	testing.expect_value(t, fault, core.Fault{1, &json.RULES, .Bad_Char, u8(json.Detail.Expected_Value)})
 }
 
 // A walk from a byte inside a comment or a string starts there with no state, so that byte is `.Bad_Char`. A BOM past
@@ -146,12 +146,13 @@ walk_from_inside :: proc(t: ^testing.T) {
 		lo:   u64,
 		spec: json.Spec,
 		at:   u64, // 0 for a walk that faults nowhere
+		detail: json.Detail,
 	}{
-		{"/* abc */ 1", 3, .Json, 3},
-		{"/* abc */ 1", 4, .Json, 4},
-		{"\"abc\" 1", 2, .Json, 2},
-		{" \xef\xbb\xbf[1]", 1, .Json, 1},
-		{" \xef\xbb\xbf[1]", 1, .Json5, 0},
+		{"/* abc */ 1", 3, .Json, 3, .Literal},
+		{"/* abc */ 1", 4, .Json, 4, .Literal},
+		{"\"abc\" 1", 2, .Json, 2, .Literal},
+		{" \xef\xbb\xbf[1]", 1, .Json, 1, .Expected_Value},
+		{" \xef\xbb\xbf[1]", 1, .Json5, 0, .None},
 	}) {
 		log^ = {}
 		hi: u64
@@ -167,7 +168,7 @@ walk_from_inside :: proc(t: ^testing.T) {
 		if c.at == 0 {
 			testing.expectf(t, fault == nil && hi == u64(len(c.text)) && log.n == 3, "%v %q from %d: %d %v, %d tokens", c.spec, c.text, c.lo, hi, fault, log.n)
 		} else {
-			want := core.Fault{c.at, &json.RULES, .Bad_Char, 0}
+			want := core.Fault{c.at, &json.RULES, .Bad_Char, u8(c.detail)}
 			testing.expectf(t, fault == want && hi == c.at, "%v %q from %d: %d %v, want %d %v", c.spec, c.text, c.lo, hi, fault, c.at, want)
 		}
 	}
@@ -239,8 +240,8 @@ documents_one_walk_each :: proc(t: ^testing.T) {
 		testing.expectf(t, hi == u64(len(empty)) && fault == nil && log.n == 0, "%q: %d %v, %d tokens", empty, hi, fault, log.n)
 	}
 	_, fault = json.walk(transmute([]u8)string(" \x1e x"), 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
-	testing.expect_value(t, fault, core.Fault{3, &json.RULES, .Bad_Char, 0})
-	testing.expect_value(t, json.validate(transmute([]u8)string("\x1e1"), .Json), core.Fault{0, &json.RULES, .Bad_Char, 0})
+	testing.expect_value(t, fault, core.Fault{3, &json.RULES, .Bad_Char, u8(json.Detail.Literal)})
+	testing.expect_value(t, json.validate(transmute([]u8)string("\x1e1"), .Json), core.Fault{0, &json.RULES, .Bad_Char, u8(json.Detail.Control_Char)})
 	testing.expect_value(t, json.validate(transmute([]u8)string("1 2"), .Json), core.Fault{2, &json.RULES, .Bad_Char, u8(json.Detail.Trailing)})
 	testing.expect_value(t, json.validate(transmute([]u8)string(" \n"), .Json), core.Fault{2, &json.RULES, .Truncated, 0})
 }
@@ -288,7 +289,7 @@ spans :: proc(src: []u8, t: core.Token) -> bool {
 		return string(b) == "false"
 	case .True:
 		return string(b) == "true"
-	case .Array, .Map, .End:
+	case .Array, .Object, .End:
 		return string(b) == "[" || string(b) == "{" || string(b) == "]" || string(b) == "}"
 	case .Plain:
 		block := len(b) >= 4 && string(b[:2]) == "/*" && string(b[len(b) - 2:]) == "*/"
@@ -371,7 +372,7 @@ skip_past_comments :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("{\"a\" /* b */ : /* c */ [1, {}], \"d\": /* e */ 2 /* f */}")
 	_, fault := json.walk(src, 0, .Jsonc, {}, log, &core.Hook_Regs{}, skip_keys)
 	testing.expect_value(t, fault, nil)
-	want := []core.Kind{.Map, .String, .String, .Plain, .End}
+	want := []core.Kind{.Object, .String, .String, .Plain, .End}
 	testing.expectf(t, log.n == len(want), "%d tokens, want %d", log.n, len(want))
 	for k, i in want[:min(len(want), log.n)] {
 		testing.expectf(t, log.tokens[i].kind == k, "token %d: %v, want %v", i, log.tokens[i].kind, k)

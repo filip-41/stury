@@ -1,10 +1,9 @@
 package regex
 
 // What the compiler learns of a tree besides its program: a look-behind's body tuned to a fixed
-// length, and the bytes a match can start with or must hold, for the search to skip by.
+// length, and the bytes a match can start with, for the search to skip by.
 
 import "core:slice"
-import "core:strings"
 import "core:unicode/utf8"
 
 // A look-behind's body as Oniguruma's tune_look_behind leaves it, or its message. It checks what the body
@@ -17,25 +16,21 @@ tune_behind :: proc(body: ^Node, negative: bool) -> (^Node, string) {
 	if !behind_allows(body, negative, &keeps) {
 		return body, "invalid pattern in look-behind"
 	}
-	out := body
-	if body.kind == .Alt && !body.bag {
-		out = new(Node)
-		out^ = body^
-		out.kids = make([dynamic]^Node, len(body.kids))
-		for k, i in body.kids {
-			ok: bool
-			out.kids[i], ok = reduce_branch(k)
-			if !ok {
-				// Oniguruma returns its cut's "all removed" as though it were an error code.
-				return body, "undefined error code"
-			}
-		}
-	} else {
-		ok: bool
-		out, ok = reduce_branch(body)
+	alt := body.kind == .Alt && !body.bag
+	branches := make([dynamic]^Node, 0, len(body.kids))
+	for k in (body.kids[:] if alt else []^Node{body}) {
+		cut, ok := reduce_branch(k)
 		if !ok {
+			// Oniguruma returns its cut's "all removed" as though it were an error code.
 			return body, "undefined error code"
 		}
+		append(&branches, cut)
+	}
+	out := branches[0]
+	if alt {
+		out = new(Node)
+		out^ = body^
+		out.kids = branches
 	}
 	if least, sure := min_length(out); least == 0 && sure && !keeps {
 		return new_node(.Empty), ""
@@ -126,7 +121,7 @@ reducible :: proc(n: ^Node) -> bool {
 	}
 	t := n.kids[0]
 	#partial switch t.kind {
-	case .Char, .Class, .Any, .Backref, .Empty:
+	case .Char, .Str, .Class, .Any, .Backref, .Empty:
 		return !t.bag
 	case .Cat:
 		return !t.bag && is_string(t)
@@ -137,7 +132,7 @@ reducible :: proc(n: ^Node) -> bool {
 @(private = "file")
 is_string :: proc(n: ^Node) -> bool {
 	for k in n.kids {
-		if k.kind != .Char {
+		if k.kind != .Char && k.kind != .Str {
 			return false
 		}
 	}
@@ -152,7 +147,7 @@ made_atomic :: proc(n, next: ^Node) -> bool {
 		return false
 	}
 	t := n.kids[0]
-	if t.kind != .Char && t.kind != .Class && !(t.kind == .Cat && is_string(t)) {
+	if t.kind != .Char && t.kind != .Str && t.kind != .Class && !(t.kind == .Cat && is_string(t)) {
 		return false
 	}
 	x, y := head_literal(t), head_literal(next)
@@ -163,7 +158,7 @@ made_atomic :: proc(n, next: ^Node) -> bool {
 @(private)
 head_literal :: proc(n: ^Node) -> ^Node {
 	#partial switch n.kind {
-	case .Char, .Class:
+	case .Char, .Str, .Class:
 		return n
 	case .Cat:
 		return head_literal(n.kids[0]) if len(n.kids) > 0 else nil
@@ -184,25 +179,20 @@ exclusive :: proc(x, y: ^Node) -> bool {
 	if folded_string(x) && folded_string(y) {
 		return false // as found against jq: `(?i)(?<=σ*s)` and `(?i)(?<=k*[st])` are taken, `(?i)(?<=σ*[tu])` and `(?i)(?<=x*s)` are not
 	}
-	if x.kind == .Char && y.kind == .Char {
+	if x.kind != .Class && y.kind != .Class { // a Str by its first character
 		return fold(x.r) != fold(y.r) if x.fold || y.fold else x.r != y.r
 	}
-	if x.kind == .Char || y.kind == .Char {
+	if x.kind != .Class || y.kind != .Class {
 		ch, cl := x, y
-		if y.kind == .Char {
+		if y.kind != .Class {
 			ch, cl = y, x
 		}
-		if class_match_slow(cl.class, ch.r) {
-			return false
-		}
-		if ch.fold {
-			for r := fold_next(ch.r); r != ch.r; r = fold_next(r) {
-				if class_match_slow(cl.class, r) {
-					return false
-				}
+		for r := ch.r; !class_match_slow(cl.class, r); {
+			if r = fold_next(r) if ch.fold else r; r == ch.r {
+				return true
 			}
 		}
-		return true
+		return false
 	}
 	a, b := x.class, y.class
 	if word_type(a) && word_type(b) {
@@ -221,13 +211,6 @@ exclusive :: proc(x, y: ^Node) -> bool {
 // Oniguruma's is_exclusive does not tell from another such: `(?i)(?<=σ*[st])` is taken, as ſ folds with s.
 @(private = "file")
 folded_string :: proc(n: ^Node) -> bool {
-	folds_outside :: proc(r: rune) -> bool {
-		outside := r >= 0x80
-		for f := fold_next(r); f != r; f = fold_next(f) {
-			outside ||= f >= 0x80
-		}
-		return outside && fold_next(r) != r
-	}
 	if n.kind == .Char && n.fold {
 		return folds_outside(n.r)
 	}
@@ -248,7 +231,7 @@ word_type :: proc(cls: ^Class) -> bool {
 	return !cls.negated && len(cls.ranges) == 0 && len(cls.props) == 1 && cls.props[0].table == TABLE_WORD
 }
 
-@(private = "file")
+@(private)
 ascii_only :: proc(cls: ^Class) -> bool {
 	if cls.negated || len(cls.props) > 0 {
 		return false
@@ -280,6 +263,8 @@ min_length :: proc(n: ^Node) -> (least: int, sure: bool) {
 	#partial switch n.kind {
 	case .Char, .Any, .Class, .Linebreak:
 		return 1, true
+	case .Str:
+		return utf8.rune_count_in_string(n.text), true
 	case .Grapheme:
 		return 1, false // Oniguruma's \X is a tree with look-arounds, so `(?<=\X*)` is not taken as empty
 	case .Cat:
@@ -368,6 +353,8 @@ fixed_length :: proc(c: ^Compiler, n: ^Node, referred := false, untuned := false
 		return 0, true
 	case .Char:
 		return 1, !(untuned && n.fold)
+	case .Str:
+		return utf8.rune_count_in_string(n.text), true
 	case .Any, .Class:
 		return 1, true
 	case .Cat:
@@ -487,6 +474,9 @@ first_bytes :: proc(n: ^Node, set: ^[4]u64, like_onig: bool) -> (empty: bool, ok
 			}
 		}
 		return false, true
+	case .Str:
+		add_rune(set, n.r)
+		return false, true
 	case .Any:
 		for b in 0 ..< 256 {
 			if b != '\n' || n.dotall {
@@ -550,41 +540,38 @@ first_bytes :: proc(n: ^Node, set: ^[4]u64, like_onig: bool) -> (empty: bool, ok
 }
 
 // Whether (?i) takes a rune of `cls` to a non-ASCII one, as k to the Kelvin sign and s to the long s.
-@(private = "file")
+@(private)
 folds_out_of_ascii :: proc(cls: ^Class) -> bool {
 	for x in cls.ranges {
 		for r in x[0] ..= min(x[1], 0x7F) {
-			for f := fold_next(r); cls.fold && f != r; f = fold_next(f) {
-				if f >= 0x80 {
-					return true
-				}
+			if cls.fold && folds_outside(r) {
+				return true
 			}
 		}
 	}
 	return false
 }
 
-@(private)
-starts_at_buffer :: proc(n: ^Node) -> bool {
-	#partial switch n.kind {
-	case .Assert:
-		return n.assert == .Begin_Buf
-	case .Cat, .Group:
-		return len(n.kids) > 0 && starts_at_buffer(n.kids[0])
+// Whether `r` folds alike with others, and one of them, `r` too, is past ASCII.
+@(private = "file")
+folds_outside :: proc(r: rune) -> bool {
+	outside := r >= 0x80
+	for f := fold_next(r); f != r; f = fold_next(f) {
+		outside ||= f >= 0x80
 	}
-	return false
+	return outside && fold_next(r) != r
 }
 
 // The literal every match of `n` starts with, appended to `out`. Whether `n` is wholly that literal.
 @(private)
 literal_prefix :: proc(n: ^Node, out: ^[dynamic]byte) -> bool {
 	#partial switch n.kind {
-	case .Char:
+	case .Char, .Str:
 		if !literal(n) {
 			return false
 		}
-		buf, w := utf8.encode_rune(n.r)
-		append(out, ..buf[:w])
+		buf: [4]byte
+		append(out, literal_text(n, &buf))
 		return true
 	case .Cat:
 		for k in n.kids {
@@ -597,59 +584,4 @@ literal_prefix :: proc(n: ^Node, out: ^[dynamic]byte) -> bool {
 		return literal_prefix(n.kids[0], out)
 	}
 	return false
-}
-
-// A run of literal runes every match holds: the longest, the earliest of equals, as Oniguruma's optimizer
-// picks the text it searches for first. Which one it picks decides whether a hopeless search fails at
-// once or backtracks into the retry limit.
-@(private)
-required_literal :: proc(n: ^Node) -> string {
-	#partial switch n.kind {
-	case .Char:
-		if literal(n) {
-			buf, w := utf8.encode_rune(n.r)
-			return strings.clone(string(buf[:w]))
-		}
-	case .Group:
-		return required_literal(n.kids[0])
-	case .Alt:
-		// What every alternative's literal starts with, as Oniguruma merges its alternatives' literals.
-		common := required_literal(n.kids[0])
-		for k in n.kids[1:] {
-			lit := required_literal(k)
-			i := 0
-			for i < min(len(common), len(lit)) && common[i] == lit[i] {
-				i += 1
-			}
-			common = common[:i]
-		}
-		return common
-	case .Repeat:
-		if n.min >= 1 {
-			return required_literal(n.kids[0])
-		}
-	case .Look:
-		if n.look == .Atomic {
-			return required_literal(n.kids[0])
-		}
-	case .Cat:
-		// The run ended: kept if longer, and emptied.
-		ended :: proc(best: string, run: ^strings.Builder) -> string {
-			defer strings.builder_reset(run)
-			return strings.clone(strings.to_string(run^)) if strings.builder_len(run^) > len(best) else best
-		}
-		best, run := "", strings.builder_make(context.temp_allocator)
-		for k in n.kids {
-			if literal(k) {
-				strings.write_rune(&run, k.r)
-				continue
-			}
-			best = ended(best, &run)
-			if inner := required_literal(k); len(inner) > len(best) {
-				best = inner
-			}
-		}
-		return ended(best, &run)
-	}
-	return ""
 }

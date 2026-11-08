@@ -8,14 +8,15 @@ import json ".."
 import gen "gen"
 
 // Writes `src` as a JSON document, which the dense path writes when its tokens are short, and as a JSONC document, which
-// the rows path writes, and checks that the two and `format` give the same text.
-check_dense :: proc(t: ^testing.T, src: []u8) -> bool {
+// the rows path writes, and checks that the two and `format` give the same text. A `bound` above zero also checks that
+// the source has fewer bytes per node than that.
+check_dense :: proc(t: ^testing.T, src: []u8, bound := 26) -> bool {
 	doc, err := json.build(src, .Json)
 	if !testing.expectf(t, err.kind == .None, "build %q: %v", src, err) {
 		return false
 	}
 	defer core.destroy(&doc)
-	if !testing.expectf(t, len(src) < 26 * len(doc.nodes), "%d bytes in %d nodes is not a dense text", len(src), len(doc.nodes)) {
+	if !testing.expectf(t, bound == 0 || len(src) < bound * len(doc.nodes), "%d bytes in %d nodes is not a dense text", len(src), len(doc.nodes)) {
 		return false
 	}
 	rows_doc, rerr := json.build(src, .Jsonc)
@@ -27,7 +28,7 @@ check_dense :: proc(t: ^testing.T, src: []u8) -> bool {
 	defer delete(dense)
 	rows, _, wrerr := core.write(&rows_doc)
 	defer delete(rows)
-	direct, ferr := json.format(src, .Json)
+	direct, ferr := core.format(src, json.as(.Json))
 	defer delete(direct)
 	ok := derr.kind == .None && wrerr.kind == .None && ferr.kind == .None
 	if !testing.expectf(t, ok, "write %q: %v %v %v", src, derr, wrerr, ferr) {
@@ -186,6 +187,33 @@ write_dense_sampled_route :: proc(t: ^testing.T) {
 			}
 			append(&src, ']')
 			if !check_dense(t, src[:]) {
+				return
+			}
+		}
+	}
+}
+
+// Texts of long strings, which the dense path writes when the first 2 KB hold no backslash and the rows path writes when
+// they do. Either way the text is the same.
+@(test)
+write_dense_long_strings :: proc(t: ^testing.T) {
+	for spelling in ([?]string{"x", "x y", `x\n`, `x \"y\"`}) {
+		for width in ([?]int{20, 60, 100}) {
+			src: [dynamic]u8
+			defer delete(src)
+			append(&src, '[')
+			for i in 0 ..< 40 {
+				if i > 0 {
+					append(&src, ',')
+				}
+				append(&src, '"')
+				for _ in 0 ..< width {
+					append(&src, ..transmute([]u8)spelling)
+				}
+				append(&src, '"')
+			}
+			append(&src, ']')
+			if !check_dense(t, src[:], 0) {
 				return
 			}
 		}

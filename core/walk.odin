@@ -6,14 +6,15 @@ package core
 // bracket.
 MAX_DEPTH :: 1024
 
-// The depth to reserve room for when a walk of `n` bytes or nodes runs under the limit `max_depth` (0 for `MAX_DEPTH`).
-// Nothing nests deeper than it has bytes, so the limit decides `Too_Deep` and never the size of an allocation.
+// The deepest a text of `n` bytes or nodes can nest under the limit `max_depth` (0 for `MAX_DEPTH`), never less than
+// `MAX_DEPTH`, which bounds the nodes a build reserves. Every stack a walk or a replay keeps, a byte, a word or a frame a
+// level, starts at no more than `MAX_DEPTH` levels and grows with the nesting the text reaches.
 reserve_depth :: #force_inline proc "contextless" (max_depth: u32, n: int) -> int {
 	depth := max(MAX_DEPTH, int(max_depth))
 	return depth if n >= depth else min(depth, n + 16)
 }
 
-// `Kind` names what a token is: `Array` and `Map` open a container, `End` closes the innermost one, and the other
+// `Kind` names what a token is: `Array` and `Object` open a container, `End` closes the innermost one, and the other
 // kinds are scalars. `Plain` is text whose type the format resolves for the consumer. Each member names the formats
 // that give it.
 Kind :: enum u8 {
@@ -24,7 +25,7 @@ Kind :: enum u8 {
 	String, // json
 	Plain, // json: a comment, dsv: every cell and a comment line
 	Array, // json: `[`, dsv: the document, and a record with no header
-	Map, // json: `{`, dsv: a record with a header
+	Object, // json: `{`, dsv: a record with a header
 	End, // json: `]` and `}`, dsv: a record's line end (`n` 1 or 2, 0 at the text's end) and the text's end (`n` 0)
 }
 
@@ -64,10 +65,10 @@ Token :: struct {
 // 16 bytes with no padding, so a Token is passed in two registers.
 #assert(size_of(Token) == 16)
 
-// The action a hook returns to the walk. `Skip` on an `Array` or `Map`, or on a `Key` for its member's value, passes
+// The action a hook returns to the walk. `Skip` on an `Array` or `Object`, or on a `Key` for its member's value, passes
 // that value with no more tokens, its `End` included, and on a `Key` also the comments before the value, while the
 // walk still judges their bytes. The comments after the value are still given. On a scalar value `Skip` acts as
-// `Next`. `Keep` on an `Array` or `Map` is `Next` and says the hook wants every token up to its `End` written as they are,
+// `Next`. `Keep` on an `Array` or `Object` is `Next` and says the hook wants every token up to its `End` written as they are,
 // which a walk may do by the builder's plain hook, past this hook. `Stop` ends the walk at once with no fault, with the
 // rest of the text unjudged.
 Action :: enum u8 {

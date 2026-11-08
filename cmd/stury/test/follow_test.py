@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """`stury --follow FILTER FILE` answers each record as it is appended, holds a record cut short until its delimiter
-arrives, reads a truncated file again from its start, and ends on SIGTERM with a run's exit status. Each answer is
+arrives, reads a truncated file again from its start, and ends on SIGINT or SIGTERM by the signal, as jq does, on a
+file, a FIFO and a pipe named /dev/stdin. Each answer is
 read within a timeout while the process is still running, so an answer held until the file ends fails.
 
     follow_test.py [--odin PATH]
 """
 
-import argparse
 import atexit
 import os
 import queue
@@ -17,14 +17,14 @@ import tempfile
 import threading
 import time
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from harness import build, odin_flag
 TIMEOUT = 5
 
 
 class Follow:
-    def __init__(self, exe, path, args):
+    def __init__(self, exe, path, args, stdin=None):
         self.path = path
-        self.proc = subprocess.Popen([exe, "--follow", *args, path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.proc = subprocess.Popen([exe, "--follow", *args, path], stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         atexit.register(self.proc.kill)
         self.lines = queue.Queue()
         self.errors = queue.Queue()
@@ -46,13 +46,13 @@ class Follow:
         time.sleep(wait)
         assert self.lines.empty(), f"answered a record that is not whole: {self.lines.get()}"
 
-    def end(self):
-        self.proc.send_signal(signal.SIGTERM)
+    def end(self, sig=signal.SIGTERM):
+        self.proc.send_signal(sig)
         try:
             return self.proc.wait(timeout=TIMEOUT)
         except subprocess.TimeoutExpired:
             self.proc.kill()
-            sys.exit("did not end on SIGTERM")
+            sys.exit(f"did not end on {sig.name}")
 
 
 def check(name, got, want):
@@ -73,7 +73,7 @@ def lines_case(exe, tmp, name, args, first, cut, rest, answers):
     open(path, "w").write(rest)
     check(name + " truncated", run.get(run.errors), f"stury: {path}: file truncated")
     check(name + " after truncation", run.get(), answers[2])
-    check(name + " exit", run.end(), 0)
+    check(name + " exit", run.end(), -signal.SIGTERM)
 
 
 def seq_case(exe, tmp):
@@ -89,29 +89,49 @@ def seq_case(exe, tmp):
     check("seq truncated", run.get(run.errors), f"stury: {path}: file truncated")
     run.append('\x1e{"a":6}\n')
     check("seq after truncation", run.get(), "\x1e5")
-    check("seq exit", run.end(), 0)
+    check("seq exit", run.end(), -signal.SIGTERM)
     check("seq last", run.get(), "\x1e6")
 
 
+def stop_cases(exe, tmp):
+    """A FIFO and a pipe named /dev/stdin wait in a read: a signal ends the run there too, promptly."""
+    fifo = os.path.join(tmp, "fifo")
+    os.mkfifo(fifo)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        for kind in ("fifo", "stdin"):
+            name = f"{kind} {sig.name}"
+            if kind == "fifo":
+                run = Follow(exe, fifo, ["-c", ".a"])
+                writer = open(fifo, "w")
+            else:
+                r, w = os.pipe()
+                run = Follow(exe, "/dev/stdin", ["-c", ".a"], stdin=r)
+                os.close(r)
+                writer = os.fdopen(w, "w")
+            writer.write('{"a":1}\n')
+            writer.flush()
+            check(name + " answer", run.get(), "1")
+            check(name + " exit", run.end(sig), -sig)
+            writer.close()
+
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--odin", default="odin")
-    odin = parser.parse_args().odin
     with tempfile.TemporaryDirectory() as tmp:
-        exe = os.path.join(tmp, "stury")
-        subprocess.run([odin, "build", "cmd/stury", "-o:minimal", f"-out:{exe}"], cwd=ROOT, check=True)
+        exe = build(odin_flag(), os.path.join(tmp, "stury"))
         lines_case(exe, tmp, "ndjson", ["-c", "--from", "ndjson", ".a"], '{"a":1}\n', ('{"a":', '2}\n'), '{"a":3}\n', ["1", "2", "3"])
         lines_case(exe, tmp, "texts", ["-c", ".a"], '{"a":1}\n', ('{"a":\n', "2}\n"), '{"a":3} {"a":4}\n', ["1", "2", "3"])
         lines_case(exe, tmp, "raw", ["-R", "."], "one\n", ("tw", "o\n"), "three\n", ['"one"', '"two"', '"three"'])
         seq_case(exe, tmp)
         lines_case(exe, tmp, "csv", ["-c", "--from", "csv", "."], "k,v\na,1\n", ("b,", "2\n"), "k,v\nc,3\n", ['{"k":"a","v":"1"}', '{"k":"b","v":"2"}', '{"k":"c","v":"3"}'])
         lines_case(exe, tmp, "csv-path", ["--from", "csv", ".v"], "k,v\na,1\n", ('b,"x\n', 'y"\n'), "k,v\nc,3\n", ['"1"', '"x\\ny"', '"3"'])
-        # The status of a run is the one after the records it answered.
+        lines_case(exe, tmp, "csv-comment", ["-c", "--from", "csv", "--comment", "#", ".@comment"], "# t\nk,v\n#a\na,1\n", ("#b\nb,", "2\n"), "k,v\n#c\nc,3\n", ['["a"]', '["b"]', '["c"]'])
+        # A signal ends the run by the signal, after an error too.
         path = os.path.join(tmp, "bad")
         open(path, "w").write('{"a":1}\n')
         run = Follow(exe, path, ["-c", "--from", "ndjson", ".a.b"])
         check("error text", run.get(run.errors), "stury: error (at " + path + ":1): Cannot index number with string (\"b\")")
-        check("error exit", run.end(), 5)
+        check("error exit", run.end(signal.SIGINT), -signal.SIGINT)
+        stop_cases(exe, tmp)
         # What it refuses.
         for args, message in (
             ([], "--follow follows one named file"),

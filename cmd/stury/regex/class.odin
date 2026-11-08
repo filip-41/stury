@@ -76,15 +76,6 @@ parse_class :: proc(p: ^Parser) -> ^Node {
 			return n
 		}
 		leading = false
-		if c == '[' && peek(p, 1) == ':' {
-			if it, matched := parse_posix(p); matched {
-				if p.err != "" {
-					return nil
-				}
-				append(&cls.props, it)
-				continue
-			}
-		}
 		lo, it, is_prop, lo_lone, ok := class_item(p)
 		if !ok {
 			return nil
@@ -96,11 +87,6 @@ parse_class :: proc(p: ^Parser) -> ^Node {
 		hi, hi_lone := lo, lo_lone
 		if peek(p) == '-' && p.i + 1 < len(p.src) && peek(p, 1) != ']' {
 			p.i += 1
-			if peek(p) == '[' && peek(p, 1) == ':' {
-				if _, matched := parse_posix(p); matched {
-					return nil if p.err != "" else fail(p, "char-class value at end of range")
-				}
-			}
 			hi_r, _, hi_prop, hi_r_lone, hi_ok := class_item(p)
 			if !hi_ok {
 				return nil
@@ -150,10 +136,15 @@ parse_posix :: proc(p: ^Parser) -> (it: Prop_Item, matched: bool) {
 	return {table = POSIX_TABLES[k], neg = neg}, true
 }
 
-// One member of a class: a character, a byte that starts none (`lone`), or a type (\w, \p{...}), where a
-// word is a POSIX word.
+// One member of a class: a character, a byte that starts none (`lone`), or a type (\w, \p{...}, [:name:]), where
+// a word is a POSIX word.
 @(private = "file")
 class_item :: proc(p: ^Parser) -> (r: rune, it: Prop_Item, is_prop: bool, lone: bool, ok: bool) {
+	if peek(p) == '[' && peek(p, 1) == ':' {
+		if posix, matched := parse_posix(p); matched {
+			return 0, posix, true, false, p.err == ""
+		}
+	}
 	if peek(p) == '\\' && p.i + 1 < len(p.src) {
 		switch c := peek(p, 1); c {
 		case 'w', 'W', 'd', 'D', 's', 'S':

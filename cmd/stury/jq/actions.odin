@@ -26,14 +26,11 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 	case 7:
 		append(&r.nodes, ..v[2].nodes[:])
 	case 9, 10:
-		r = {node = node(.Def, v[2].node, at = at)}
-		r.node.fn = v[1].fn
+		r = {node = new_clone(Node{kind = .Def, a = v[2].node, fn = v[1].fn, loc = at})}
 	case 11:
-		r = {node = node(.Bind, v[1].node, v[5].node, at = at)}
-		r.node.patterns = v[3].pats[:]
+		r = {node = new_clone(Node{kind = .Bind, a = v[1].node, b = v[5].node, patterns = v[3].pats[:], loc = at})}
 	case 12:
-		r = {node = node(.Label, v[4].node, at = at)}
-		r.node.name = v[2].text
+		r = {node = new_clone(Node{kind = .Label, a = v[4].node, name = v[2].text, loc = at})}
 	case 13:
 		r = {node = node(.Pipe, v[1].node, v[3].node, at = at)}
 	case 14:
@@ -41,8 +38,7 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 	case 16:
 		r = {node = node(.Alt, v[1].node, v[3].node, at = at)}
 	case 17, 20, 21, 23, 25, 27, 30, 31:
-		r = {node = node(.Update, v[1].node, v[3].node, at = at)}
-		r.node.op = UPDATE_OPS[rule]
+		r = {node = new_clone(Node{kind = .Update, a = v[1].node, b = v[3].node, op = UPDATE_OPS[rule], loc = at})}
 	case 18:
 		r = {node = node(.Or, v[1].node, v[3].node, at = at)}
 	case 19:
@@ -50,8 +46,7 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 	case 22, 24, 26, 28, 29, 32, 33, 34, 35, 36, 37:
 		r = {node = binop(p, BINARY_OPS[rule], v[1].node, v[3].node, at)}
 	case 39:
-		r = {}
-		append(&r.nodes, literal(v[1].value, at))
+		r = {nodes = list(literal(v[1].value, at))}
 	case 40:
 		r = {}
 		if !meta_error(p, v[2].node, l[2]) {
@@ -84,8 +79,7 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 	case 46:
 		r = {fn = new_clone(Func{name = v[2].text, params = v[4].names[:], body = v[7].node})}
 	case 47:
-		r = {}
-		append(&r.names, v[1].text)
+		r = {names = list(v[1].text)}
 	case 48:
 		append(&r.names, v[3].text)
 	case 49:
@@ -106,9 +100,7 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 			}
 		}
 	case 56:
-		f := node(.Format, v[3].node, at = l[3])
-		f.name = v[0].text
-		append(&r.nodes, f)
+		append(&r.nodes, new_clone(Node{kind = .Format, a = v[3].node, name = v[0].text, loc = l[3]}))
 	case 57, 100:
 		r = {node = node(.If, v[2].node, v[4].node, v[5].node, at = at)}
 	case 58:
@@ -116,11 +108,9 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 	case 60, 110, 111, 113:
 		r = {node = node(.Identity, at = at)}
 	case 61:
-		r = {node = node(.Call, at = at)}
-		r.node.name = "recurse"
+		r = {node = new_clone(Node{kind = .Call, name = "recurse", loc = at})}
 	case 62:
-		r = {node = node(.Break, at = at)}
-		r.node.name = v[2].text
+		r = {node = new_clone(Node{kind = .Break, name = v[2].text, loc = at})}
 	case 63:
 		report(p, at, "break requires a label to break to")
 		r = {node = node(.Identity, at = at)}
@@ -148,24 +138,19 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 	case 76, 77:
 		r = {node = index(v[1].node, v[4].node, rule == 76, at)}
 	case 78, 79, 80, 81:
-		r = {node = node(.Iterate, v[1].node, at = at)}
-		r.node.opt = rule == 78 || rule == 80
+		r = {node = new_clone(Node{kind = .Iterate, a = v[1].node, opt = rule == 78 || rule == 80, loc = at})}
 	case 82, 85:
-		r = {node = node(.Slice, v[1].node, v[3].node, v[5].node, at = at)}
-		r.node.opt = rule == 82
+		r = {node = new_clone(Node{kind = .Slice, a = v[1].node, b = v[3].node, c = v[5].node, opt = rule == 82, loc = at})}
 	case 83, 86:
-		r = {node = node(.Slice, v[1].node, v[3].node, at = at)}
-		r.node.opt = rule == 83
+		r = {node = new_clone(Node{kind = .Slice, a = v[1].node, b = v[3].node, opt = rule == 83, loc = at})}
 	case 84, 87:
-		r = {node = node(.Slice, v[1].node, nil, v[4].node, at = at)}
-		r.node.opt = rule == 84
+		r = {node = new_clone(Node{kind = .Slice, a = v[1].node, c = v[4].node, opt = rule == 84, loc = at})}
 	case 88:
 		r = {node = node(.Try, v[1].node, at = at)}
 	case 89:
 		r = {node = literal(v[1].value, at)}
 	case 91:
-		r = {node = node(.Format, at = at)}
-		r.node.name = v[1].text
+		r = {node = new_clone(Node{kind = .Format, name = v[1].text, loc = at})}
 	case 92:
 		r = {node = node(.Neg, v[2].node, at = at)}
 	case 93:
@@ -177,14 +162,9 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 	case 96:
 		r = {node = object_node(v[2].nodes[:], at)}
 	case 97:
-		r = {node = node(.Reduce, v[2].node, v[6].node, v[8].node, at = at)}
-		r.node.patterns = v[4].pats[:]
-	case 98:
-		r = {node = node(.Foreach, v[2].node, v[6].node, v[8].node, v[10].node, at)}
-		r.node.patterns = v[4].pats[:]
-	case 99:
-		r = {node = node(.Foreach, v[2].node, v[6].node, v[8].node, at = at)}
-		r.node.patterns = v[4].pats[:]
+		r = {node = new_clone(Node{kind = .Reduce, a = v[2].node, b = v[6].node, c = v[8].node, patterns = v[4].pats[:], loc = at})}
+	case 98, 99:
+		r = {node = new_clone(Node{kind = .Foreach, a = v[2].node, b = v[6].node, c = v[8].node, d = v[10].node if rule == 98 else nil, patterns = v[4].pats[:], loc = at})}
 	case 101:
 		report(p, at, "Possibly unterminated 'if' statement")
 		r = v[2]
@@ -208,25 +188,20 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 		case "null":
 			r = {node = literal(nil, at)}
 		case:
-			r = {node = node(.Call, at = at)}
-			r.node.name = v[1].text
+			r = {node = new_clone(Node{kind = .Call, name = v[1].text, loc = at})}
 		}
 	case 109:
-		r = {node = node(.Call, at = l[1])}
-		r.node.name = v[1].text
-		r.node.args = v[3].nodes[:]
+		r = {node = new_clone(Node{kind = .Call, name = v[1].text, args = v[3].nodes[:], loc = l[1]})}
 	case 112:
 		r = v[1]
 	case 114:
-		r = {}
-		append(&r.nodes, v[1].node)
+		r = {nodes = list(v[1].node)}
 	case 115:
 		append(&r.nodes, v[3].node)
 	case 117, 119, 125:
 		append(&r.pats, v[3].pat)
 	case 118, 120, 124:
-		r = {}
-		append(&r.pats, v[1].pat)
+		r = {pats = list(v[1].pat)}
 	case 121:
 		r = {pat = new_clone(Pattern{kind = .Var, name = v[1].text})}
 	case 122:
@@ -236,51 +211,38 @@ act :: proc(p: ^Parser, rule: int, v: []Sem, l: []Loc, at: Loc) -> (r: Sem) {
 	case 127:
 		append(&r.members, ..v[3].members[:])
 	case 128:
-		r = {}
-		append(&r.members, Pattern_Member{key = literal(v[1].text, l[1]), var = v[1].text})
+		r = {members = list(Pattern_Member{key = literal(v[1].text, l[1]), var = v[1].text})}
 	case 129:
-		r = {}
-		append(&r.members, Pattern_Member{key = literal(v[1].text, l[1]), var = v[1].text, pattern = v[3].pat})
+		r = {members = list(Pattern_Member{key = literal(v[1].text, l[1]), var = v[1].text, pattern = v[3].pat})}
 	case 130, 131:
-		r = {}
-		append(&r.members, Pattern_Member{key = literal(v[1].text, l[1]), pattern = v[3].pat})
+		r = {members = list(Pattern_Member{key = literal(v[1].text, l[1]), pattern = v[3].pat})}
 	case 132:
-		r = {}
-		append(&r.members, Pattern_Member{key = v[1].node, pattern = v[3].pat})
+		r = {members = list(Pattern_Member{key = v[1].node, pattern = v[3].pat})}
 	case 133:
 		check_object_key(p, v[2].node, l[2])
-		r = {}
-		append(&r.members, Pattern_Member{key = v[2].node, pattern = v[5].pat})
+		r = {members = list(Pattern_Member{key = v[2].node, pattern = v[5].pat})}
 	case 134:
 		report(p, at, "May need parentheses around object key expression")
 		r = {}
 	case 155:
 		append(&r.nodes, ..v[3].nodes[:])
 	case 156, 157:
-		r = {}
-		append(&r.nodes, literal(v[1].text, l[1]), v[3].node)
+		r = {nodes = list(literal(v[1].text, l[1]), v[3].node)}
 	case 158:
-		r = {}
-		append(&r.nodes, v[1].node, v[3].node)
+		r = {nodes = list(v[1].node, v[3].node)}
 	case 159:
-		r = {}
-		append(&r.nodes, v[1].node, nil)
+		r = {nodes = list(v[1].node, nil)}
 	case 160:
-		r = {}
-		append(&r.nodes, var_node(v[1].text, at), v[3].node)
+		r = {nodes = list(var_node(v[1].text, at), v[3].node)}
 	case 161:
-		r = {}
-		append(&r.nodes, literal(v[1].text, l[1]), var_node(v[1].text, at))
+		r = {nodes = list(literal(v[1].text, l[1]), var_node(v[1].text, at))}
 	case 162, 164:
-		r = {}
-		append(&r.nodes, literal(v[1].text, l[1]), index(node(.Identity, at = at), literal(v[1].text, l[1]), false, at))
+		r = {nodes = list(literal(v[1].text, l[1]), index(node(.Identity, at = at), literal(v[1].text, l[1]), false, at))}
 	case 163:
-		r = {}
-		append(&r.nodes, literal("__loc__", at), loc_literal(p, at))
+		r = {nodes = list(literal("__loc__", at), loc_literal(p, at))}
 	case 165:
 		check_object_key(p, v[2].node, l[2])
-		r = {}
-		append(&r.nodes, v[2].node, v[5].node)
+		r = {nodes = list(v[2].node, v[5].node)}
 	case 166:
 		report(p, l[1], "May need parentheses around object key expression")
 		r = {}
@@ -317,8 +279,16 @@ BINARY_OPS := [38]Op {
 	37 = .Ge,
 }
 @(private = "file")
-node :: proc(kind: Node_Kind, a: ^Node = nil, b: ^Node = nil, c: ^Node = nil, d: ^Node = nil, at := Loc{}) -> ^Node {
-	return new_clone(Node{kind = kind, a = a, b = b, c = c, d = d, loc = at})
+list :: proc(first: $T, rest: ..T) -> [dynamic]T {
+	l := make([dynamic]T, 0, 1 + len(rest))
+	append(&l, first)
+	append(&l, ..rest)
+	return l
+}
+
+@(private = "file")
+node :: proc(kind: Node_Kind, a: ^Node = nil, b: ^Node = nil, c: ^Node = nil, at := Loc{}) -> ^Node {
+	return new_clone(Node{kind = kind, a = a, b = b, c = c, loc = at})
 }
 
 @(private = "file")
@@ -348,26 +318,26 @@ literal_string :: proc(n: ^Node) -> (string, bool) {
 // `target[key]`. A constant string key is a field.
 @(private = "file")
 index :: proc(target, key: ^Node, opt: bool, at: Loc) -> ^Node {
-	n: ^Node
 	if name, ok := literal_string(key); ok {
-		n = node(.Field, target, at = at)
-		n.name = name
-	} else {
-		n = node(.Index, target, key, at = at)
+		return new_clone(Node{kind = .Field, a = target, name = name, opt = opt, loc = at})
 	}
-	n.opt = opt
-	return n
+	return new_clone(Node{kind = .Index, a = target, b = key, opt = opt, loc = at})
 }
 
-// `target.name`. A fact accessor, which the lexer reads as a field named `@...` (`fact_accessor`), is a
-// call on `target` of the builtin of that name.
+// `target.name`. A fact accessor, which the lexer reads as a field named `@...` (`fact_accessor`), is `target`
+// indexed by the path step of that comment role.
 @(private = "file")
 field :: proc(target: ^Node, name: string, name_at: Loc, opt: bool, at: Loc) -> ^Node {
 	if name[0] != '@' {
 		return index(target, literal(name, name_at), opt, at)
 	}
-	read := new_clone(Node{kind = .Call, name = name, loc = name_at})
-	return node(.Pipe, target, read, at = at)
+	names := COMMENT_ROLE_NAMES
+	for role_name, role in names {
+		if role_name == name[1:] {
+			return index(target, literal(fact_key(role), name_at), opt, at)
+		}
+	}
+	unreachable()
 }
 
 // `a op b`, computed now when both are constants and the operation succeeds (jq's constant_fold).
@@ -378,9 +348,7 @@ binop :: proc(p: ^Parser, op: Op, a, b: ^Node, at: Loc) -> ^Node {
 			return literal(v, at)
 		}
 	}
-	n := node(.Binary, a, b, at = at)
-	n.op = op
-	return n
+	return new_clone(Node{kind = .Binary, op = op, a = a, b = b, loc = at})
 }
 
 // A string literal: its text parts and its interpolations, or a constant when it interpolates nothing.
@@ -394,9 +362,7 @@ string_node :: proc(p: ^Parser, parts: []^Node, at: Loc) -> ^Node {
 	case len(parts) == 1 && parts[0].kind == .Literal:
 		return literal(parts[0].value, at)
 	}
-	n := node(.String, at = at)
-	n.args = parts
-	return n
+	return new_clone(Node{kind = .String, args = parts, loc = at})
 }
 
 // `[q]`: a constant when `q` is constants joined by `,` from the left (jq's gen_const_array).
@@ -428,9 +394,7 @@ array_node :: proc(q: ^Node, at: Loc) -> ^Node {
 object_node :: proc(entries: []^Node, at: Loc) -> ^Node {
 	for i := 0; i < len(entries); i += 2 {
 		if _, ok := literal_string(entries[i]); !ok || !is_literal(entries[i + 1]) {
-			n := node(.Object, at = at)
-			n.args = entries
-			return n
+			return new_clone(Node{kind = .Object, args = entries, loc = at})
 		}
 	}
 	o := new_object()
@@ -453,7 +417,7 @@ loc_literal :: proc(p: ^Parser, at: Loc) -> ^Node {
 @(private = "file")
 check_object_key :: proc(p: ^Parser, key: ^Node, at: Loc) {
 	if is_literal(key) && kind(key.value) != .String {
-		report(p, at, message.build("Cannot use %s (%s) as object key", type_name(key.value), brief(key.value)))
+		report(p, at, message.build("Cannot use %s (%s) as object key", type_name(key.value), brief(nil, key.value)))
 	}
 }
 

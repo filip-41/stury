@@ -13,52 +13,66 @@ import typed "../core/typed"
 
 // Reads `src`, a text of spec `S`, into `target`, a slice or dynamic array of rows, replacing what it held, or into one
 // row, which reads the first record and refuses a second as `.Wrong_Length`. A row is a struct whose fields the header
-// names, a list of cells, or a map of string keys to cells. See `docs/typed.md`. The form
-// with no plan builds and frees one for the call, and a plan built once with `plan_make` is the form for many reads. A
-// refusal leaves everything the read allocated reachable from `target`.
+// names, a list of cells, or a map of string keys to cells. See `docs/typed.md`. The form with no plan builds one with
+// `context.allocator` and frees it before it returns, and a plan built once with `plan_make` is the form for many
+// reads. A refusal leaves everything the read allocated reachable from `target`.
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
 // Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows and no
-// row. A write by the plan is of spec `spec` with the delimiter, comment byte, `no_header` and `crlf` of `layout`, and
-// `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call.
-plan_make :: proc(T: typeid, spec: Spec, layout := Options{}, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
-	plan, err := typed.plan_make(T, &SPELLING, opts, allocator)
-	if err.kind != .None {
-		return plan, err
-	}
-	if err = rows_supported(&plan); err.kind != .None {
-		typed.plan_destroy(&plan)
-		return {}, err
-	}
+// row. A write by the plan is of spec `spec` with the delimiter, comment byte, `no_header`, `crlf` and `.Ragged` of
+// `opts`, and `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call.
+plan_make :: proc(T: typeid, spec := Spec.Csv, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
+	return plan_as(T, as(spec, opts), plan, allocator)
+}
+
+// The spelling's `plans`.
+@(private)
+plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {
+	spec, layout := Spec(as.spec), options_of(as)
 	if !layout_ok(spec, layout) {
-		typed.plan_destroy(&plan)
 		return {}, {kind = .Bad_Option}
 	}
-	plan.as = layout_as(spec, layout)
-	plan.marshal, plan.node_read = marshal_text, document_read
-	return plan, {}
+	p, err := typed.plan_build(T, layout_as(spec, layout), opts, allocator)
+	if err.kind != .None {
+		return p, err
+	}
+	if err = rows_supported(&p); err.kind != .None {
+		typed.plan_destroy(&p)
+		return {}, err
+	}
+	p.marshal, p.node_read = marshal_text, document_read
+	return p, {}
 }
 
 @(private)
-unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
-	plan, err := plan_make(T, S, allocator = context.temp_allocator)
+unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
+	plan, err := plan_make(T, spec)
 	if err.kind != .None {
 		return err
 	}
 	defer typed.plan_destroy(&plan)
-	err = unmarshal_plan(src, S, target, &plan, read, opts, allocator)
-	typed.own_names(&err)
-	typed.own_collected(read.collect)
+	err = unmarshal_plan(src, spec, target, &plan, opts, read, allocator)
+	typed.own_errors(&err, read.collect)
 	return err
 }
 
 @(private)
-unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
+unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
 	// Only `plan_make` checks that a type is a list of rows of cells or a row.
-	if plan != nil && plan.marshal == nil {
+	if plan != nil && plan.marshal == nil && plan.err.kind == .None {
 		return {kind = .Plan_Mismatch}
 	}
-	h := Cells{refuse_repeats = read.refuse_duplicates}
+	switch spec {
+	case .Csv:   return read_text(src, .Csv, T, target, plan, opts, read, allocator)
+	case .Tsv:   return read_text(src, .Tsv, T, target, plan, opts, read, allocator)
+	case .Plain: return read_text(src, .Plain, T, target, plan, opts, read, allocator)
+	}
+	return {kind = .Bad_Option}
+}
+
+@(private)
+read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+	h := Cells{refuse_repeats = read.dups == .Refuse}
 	frames: [ROW_FRAMES]typed.Frame = ---
 	regs, err := typed.read_start(&h.r, src, plan, &SPELLING, T, target, read, frames[:], allocator)
 	if err.kind != .None {
@@ -85,7 +99,7 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 		failed: runtime.Allocator_Error
 		h.keys, failed = make([]core.Token, header_cells(src, start, S, opts), context.temp_allocator)
 		if failed != nil {
-			return {kind = .Out_Of_Memory}
+			return {kind = .No_Memory}
 		}
 	}
 	defer delete(h.keys, context.temp_allocator)
@@ -104,7 +118,7 @@ rows_of :: proc(h: ^Cells, plan: ^typed.Plan, text_len: int) {
 	listed: bool
 	h.row, listed = row_of(plan)
 	h.single = !listed
-	h.opens = .Array if h.row.kind == .Slice || h.row.kind == .Dynamic else .Map
+	h.opens = .Array if h.row.kind == .Slice || h.row.kind == .Dynamic else .Object
 	// A record's own `Never`, which the typed read's check at a row's close counts as past every member. Any other row
 	// has no check and takes the plan's.
 	h.past = u64(uintptr(plan.root)) + size_of(typed.Field)
@@ -186,7 +200,7 @@ on_cell :: #force_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t:
 	}
 	regs := regs
 	dest := uintptr(regs.c) + uintptr(col.offset)
-	p := h.r.base[t.lo:]
+	p := raw_data(h.r.src)[t.lo:]
 	ok := false
 	#partial switch col.kind {
 	case .Inside:
@@ -197,7 +211,7 @@ on_cell :: #force_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, t:
 		if t.spelling == u16(quotes * 3) && t.n != 0 {
 			lo, n := t.lo + quotes, u64(t.n) - 2 * quotes
 			if h.r.borrow {
-				(^runtime.Raw_String)(dest)^ = {h.r.base[lo:], int(n)}
+				(^runtime.Raw_String)(dest)^ = {raw_data(h.r.src)[lo:], int(n)}
 				ok = true
 			} else {
 				ok = typed.store_string(&h.r, core.Token{lo = lo, n = u32(n)}, (^string)(dest)) == .None
@@ -325,7 +339,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 			}
 			fld := typed.field_at(at.b)
 			scratch, no_scratch := runtime.mem_alloc(int(h.r.plan.meta[fld.meta].size), 16, context.temp_allocator)
-			reason := read_cell(h, fld, t, uintptr(raw_data(scratch))) if no_scratch == nil else .Out_Of_Memory
+			reason := read_cell(h, fld, t, uintptr(raw_data(scratch))) if no_scratch == nil else .No_Memory
 			if reason == .None {
 				return next, .Next
 			}
@@ -357,14 +371,10 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	reason: core.Typed_Error_Kind
 	if map_row {
 		f := &h.r.frames[h.r.sp - 1]
-		if col.key.spelling & SPELLING_COLUMN != 0 {
-			f.extra, f.run = cast([^]u64)raw_data(col.name), (^typed.Field)(uintptr(len(col.name)))
-		} else {
-			quotes := u64(col.key.spelling >> 1 & 1)
-			f.extra, f.run = cast([^]u64)raw_data(h.r.src)[col.key.lo + quotes:], (^typed.Field)(uintptr(u64(col.key.n) - 2 * quotes))
-		}
+		spelled := col.name if col.key.spelling & SPELLING_COLUMN != 0 else inner_text(h, col.key)
+		f.extra, f.run = cast([^]u64)raw_data(spelled), (^typed.Field)(uintptr(len(spelled)))
 		slot: rawptr
-		slot, reason = typed.map_slot(&h.r, &h.r.plan.meta[h.row.meta], (^runtime.Raw_Map)(f.data), col.name, col.key)
+		slot, reason = typed.map_slot(&h.r, &h.r.plan.meta[h.row.meta], (^runtime.Raw_Map)(f.data), col.name, col.key, typed.field_at(at.b), false)
 		at.c = u64(uintptr(slot))
 		if reason != .None {
 			_, action := typed.refuse(&h.r, at, {kind = reason, at = t.lo})
@@ -411,8 +421,9 @@ inner_text :: #force_inline proc "contextless" (h: ^Cells, t: core.Token) -> str
 	return string(h.r.src[t.lo + quotes:t.lo + u64(t.n) - quotes])
 }
 
-// Reads a present cell into the field `fld` at `dest`. A number and a bool read the cell's bytes, since what decodes to
-// other bytes spells neither. The rest read as a string token, whose text `Spelling.text` gives.
+// Reads a present cell into the field `fld` at `dest`. A number, a bool and an enum's value read the cell's bytes,
+// since what decodes to other bytes spells none of them. The rest read as a string token, whose text `Spelling.text`
+// gives.
 @(private)
 read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind {
 	m := &h.r.plan.meta[fld.meta]
@@ -422,7 +433,7 @@ read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) ->
 	case .String:
 		// The walk marked it, so a `""` takes no scan and no general decode.
 		if t.spelling & (SPELLING_DOUBLED | core.SPELLING_LAX) == SPELLING_DOUBLED {
-			return .None if store_undoubled(h, t, dest) else .Out_Of_Memory
+			return .None if store_undoubled(h, t, dest) else .No_Memory
 		}
 		if t.spelling & (core.SPELLING_QUOTED | SPELLING_DOUBLED) == core.SPELLING_QUOTED && plain_quoted(h.r.src, t) {
 			lo, hi := inner_span(t)
@@ -436,46 +447,27 @@ read_cell :: proc(h: ^Cells, fld: ^typed.Field, t: core.Token, dest: uintptr) ->
 		}
 		runtime.mem_zero(rawptr(dest), int(m.size))
 		(^bool)(dest)^ = text == "true"
-	case .I8 ..= .F64:
-		text := inner_text(h, t)
-		lo := u64(uintptr(raw_data(text)) - uintptr(h.r.base))
-		n, integer, _, ok := spell.number_loose(h.r.src, lo, lo + u64(len(text)))
-		if !ok {
-			return .Wrong_Kind
-		}
-		return typed.store_number(n, integer, &h.r, core.Token{lo = lo, n = u32(len(text))}, fld, dest)
-	case .Enum:
-		if h.r.plan.enums != .Int {
+	case .I8 ..= .F64, .Enum:
+		if fld.kind == .Enum && h.r.plan.enums != .Int {
 			return typed.store_enum(&h.r, cell, m.enum_info, dest, m.size)
 		}
-		text, ok := core.token_text(h.r.plan.spelling, &h.r.view, t, context.temp_allocator)
-		if !ok {
-			return .Out_Of_Memory
-		}
-		n, integer, _, is_number := spell.number_loose(transmute([]u8)text, 0, u64(len(text)))
-		if !is_number || !integer {
+		text := inner_text(h, t)
+		lo := u64(uintptr(raw_data(text)) - uintptr(raw_data(h.r.src)))
+		n, integer, _, ok := spell.number_loose(h.r.src, lo, lo + u64(len(text)))
+		if !ok || !integer && fld.kind == .Enum {
 			return .Wrong_Kind
 		}
-		if n.kind != .Int {
-			return .Out_Of_Range
+		if fld.kind == .Enum {
+			return typed.store_enum_value(m.enum_info, n, dest, m.size)
 		}
-		return typed.store_enum_value(m.enum_info, i64(n.bits), dest, m.size)
+		return typed.store_number(n, integer, &h.r, core.Token{lo = lo, n = u32(len(text))}, fld, dest)
 	case .Cstring:
 		return typed.store_cstring(&h.r, cell, dest)
 	case .Hook:
 		return typed.store_whole(&h.r, fld, m, dest, .String, t.lo, t.lo + u64(t.n), cell)
-	case .Maybe:
-		if reason := read_cell(h, typed.field_at(u64(uintptr(fld.first))), t, dest); reason != .None {
-			return reason
-		}
-		(^u8)(dest + uintptr(m.tag))^ = 1
-	case .Union:
-		if reason := read_cell(h, one_arm(h.r.plan, m), t, dest); reason != .None {
-			return reason
-		}
-		if m.tag_size != 0 {
-			typed.write_uint(dest + uintptr(m.tag), u64(m.arms[0].tag), u32(m.tag_size))
-		}
+	case .Maybe, .Union:
+		read_cell(h, typed.field_at(u64(uintptr(fld.first))) if fld.kind == .Maybe else one_arm(h.r.plan, m), t, dest) or_return
+		typed.mark_arm(dest, fld, m, 0)
 	}
 	return .None
 }
@@ -513,7 +505,7 @@ one_arm :: #force_inline proc "contextless" (plan: ^typed.Plan, m: ^typed.Meta) 
 
 // Binds the columns to the row's fields, the first time the read needs them: the header's when the text has one, else
 // the fields in order. Returns how the walk goes on. A refused header leaves the target as it was. `from` above 0 binds
-// one more column, past the `from` bound before, and refuses for that column alone.
+// one more column, past the `from` bound before, and refuses for that column alone, which keeps the rows read before it.
 @(private, cold)
 bind_columns :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, at: u64, from := 0) -> core.Action {
 	context = h.r.ctx
@@ -521,7 +513,7 @@ bind_columns :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_
 	// A header's refusal has its field alone as a path.
 	h.r.sp = 1
 	action := columns_of(h, regs, at, from)
-	if action != .Stop {
+	if action != .Stop || from > 0 {
 		h.r.sp = sp
 	}
 	return action
@@ -555,7 +547,7 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 	width := max(len(h.keys), from + 1) if !h.no_header else len(members) if record else 1
 	cols, failed := make([]Column, width + 1, context.temp_allocator)
 	if failed != nil {
-		return refuse_header(h, regs, .Out_Of_Memory, at, "")
+		return refuse_header(h, regs, .No_Memory, at, "")
 	}
 	h.cols = cols
 	elem := typed.field_at(u64(uintptr(row.first)))
@@ -579,7 +571,7 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 		positional, refusing := key.spelling & SPELLING_COLUMN != 0, c >= from
 		name, ok := core.token_text(h.r.plan.spelling, &h.r.view, key, context.temp_allocator)
 		if !ok {
-			return refuse_header(h, regs, .Out_Of_Memory, key.lo, "")
+			return refuse_header(h, regs, .No_Memory, key.lo, "")
 		}
 		spelled := name if positional else inner_text(h, key)
 		k := -1
@@ -615,7 +607,7 @@ columns_of :: proc(h: ^Cells, regs: core.Hook_Regs, at: u64, from: int) -> core.
 		} else if !record {
 			col.kind, col.offset, col.stride, col.rec = elem.kind, elem.offset, elem.stride, row.first
 			col.name, col.key = name, key
-			if at := uintptr(raw_data(name)) - uintptr(h.r.base); at < uintptr(len(h.r.src)) {
+			if at := uintptr(raw_data(name)) - uintptr(raw_data(h.r.src)); at < uintptr(len(h.r.src)) {
 				col.key = core.Token{lo = u64(at), n = u32(len(name))}
 			}
 		}
@@ -657,7 +649,7 @@ fault_position :: proc(h: ^Cells, regs: ^core.Hook_Regs) {
 		}
 	} else if h.r.sp == row_depth(h) {
 		regs.b = h.past
-		if h.opens == .Map {
+		if h.opens == .Object {
 			h.r.frames[h.r.sp - 1].b = regs.b
 		} else if !is_record(h.row) {
 			// A list row closes, to be counted where it opened.
@@ -680,6 +672,10 @@ row_of :: proc(plan: ^typed.Plan) -> (row: ^typed.Field, listed: bool) {
 	return root, false
 }
 
+// Why a type that is no row, or no list of rows, is refused.
+@(private)
+NOT_FLAT :: "CSV and TSV hold flat records, so a row is a struct, a map or a list, and a cell a scalar"
+
 // Refuses a type no text can be made of: a row or cell of a kind this format has no spelling for.
 @(private)
 rows_supported :: proc(plan: ^typed.Plan) -> core.Typed_Error {
@@ -688,22 +684,22 @@ rows_supported :: proc(plan: ^typed.Plan) -> core.Typed_Error {
 	case .Struct, .Required:
 		m := &plan.meta[row.meta]
 		if plan.meta[int(m.block) + int(m.members)].capture >= 0 {
-			return {kind = .Unsupported, steps = {0 = core.All{}}, n_steps = 1}
+			return {kind = .Unsupported, want = {text = NOT_FLAT}, steps = {0 = core.All{}}, n_steps = 1}
 		}
 		for &f in ([^]typed.Field)(row.first)[:m.members] {
 			if !cell_supported(plan, &f) {
-				return {kind = .Unsupported, steps = {0 = core.All{}, 1 = core.Name(plan.meta[f.meta].name)}, n_steps = 2}
+				return {kind = .Unsupported, want = {text = NOT_FLAT}, steps = {0 = core.All{}, 1 = core.Name(plan.meta[f.meta].name)}, n_steps = 2}
 			}
 		}
 	case .Slice, .Dynamic, .Map:
 		if row.kind == .Map && plan.meta[row.meta].key_kind != .String {
-			return {kind = .Unsupported, steps = {0 = core.All{}}, n_steps = 1}
+			return {kind = .Unsupported, want = {text = NOT_FLAT}, steps = {0 = core.All{}}, n_steps = 1}
 		}
 		if !cell_supported(plan, typed.field_at(u64(uintptr(row.first)))) {
-			return {kind = .Unsupported, steps = {0 = core.All{}, 1 = core.All{}}, n_steps = 2}
+			return {kind = .Unsupported, want = {text = NOT_FLAT}, steps = {0 = core.All{}, 1 = core.All{}}, n_steps = 2}
 		}
 	case:
-		return {kind = .Unsupported, steps = {0 = core.All{}}, n_steps = 1}
+		return {kind = .Unsupported, want = {text = NOT_FLAT}, steps = {0 = core.All{}}, n_steps = 1}
 	}
 	return {}
 }

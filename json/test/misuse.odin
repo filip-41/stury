@@ -17,7 +17,7 @@ a_zero_document_is_refused :: proc(t: ^testing.T) {
 	testing.expect_value(t, qerr.kind, core.Path_Error_Kind.Unsupported)
 	_, _, cerr := core.commit(&core.Edit_List{doc = &zero})
 	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.Bad_Index)
-	_, _, jerr := json.commit(&core.Edit_List{doc = &zero}, .Json)
+	_, _, jerr := core.commit(&core.Edit_List{doc = &zero}, json.as(.Json))
 	testing.expect_value(t, jerr.kind, core.Document_Error_Kind.Bad_Index)
 }
 
@@ -73,7 +73,7 @@ a_huge_depth_limit_reserves_by_the_input :: proc(t: ^testing.T) {
 	alloc := runtime.Allocator{largest_proc, &big}
 	src := transmute([]u8)string("[1]")
 	opts := json.Options{max_depth = 1 << 30}
-	doc, err := json.build(src, .Json, opts, false, alloc)
+	doc, err := json.build(src, .Json, opts, .Last, alloc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	text, _, werr := core.write(&doc, allocator = alloc)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
@@ -87,14 +87,14 @@ a_huge_depth_limit_reserves_by_the_input :: proc(t: ^testing.T) {
 		core.destroy(&scanned)
 	}
 	n: [1]i32
-	testing.expect_value(t, json.unmarshal(src, json.Spec.Json, &n, {}, opts, alloc).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, json.unmarshal(src, json.Spec.Json, &n, read = {}, opts = opts, allocator = alloc).kind, core.Typed_Error_Kind.None)
 	as := json.as(.Json)
 	as.max_depth = 1 << 30
 	it := records.open(src, as, allocator = alloc)
 	defer records.close(&it)
 	plan, _ := json.plan_make([1]i32, allocator = context.temp_allocator)
 	defer typed.plan_destroy(&plan)
-	_, rerr := records.read(&it, &n, &plan)
+	rerr, _ := records.read(&it, &n, &plan)
 	testing.expect_value(t, rerr.kind, core.Typed_Error_Kind.None)
 	testing.expect(t, big.size < 1 << 20, "largest request was too large")
 	testing.expect_value(t, json.validate(src, .Json, opts) == nil, true)

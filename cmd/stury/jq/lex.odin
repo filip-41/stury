@@ -232,8 +232,7 @@ lex_in_string :: proc(p: ^Parser) -> (sym: Sym, sem: Sem, loc: Loc) {
 		}
 		p.pos = end
 		sym = .QQ_Text
-		text := s[start:end]
-		sem.value = text if utf8.valid_string(text) else valid_utf8(text)
+		sem.value = s[start:end]
 	}
 	p.last = {start, p.pos}
 	return sym, sem, p.last

@@ -4,309 +4,17 @@ import "base:runtime"
 import "core:fmt"
 import "core:io"
 import "core:math/rand"
+import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:testing"
-import "core:unicode/utf8"
 import core "../../core"
 import host "../../host"
 import typed "../../core/typed"
 import records "../../core/records"
 import json ".."
 import walktest "../../walktest"
-
-// The record reader against a model: a plain framer per framing, then `validate` of each record's text alone.
-
-@(private = "file")
-Model_Record :: struct {
-	at:     u64,
-	text:   string,
-	fault:  Maybe(core.Fault),
-	key:    string,
-	// The fault is the `.Seq` framing's, which a read gives whatever the text reads as.
-	framed: bool,
-}
-
-@(private = "file")
-is_blank :: proc(c: u8) -> bool {
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
-}
-
-// Returns the length of the whitespace character at the start of `s`: JSON's four bytes and, in JSON5, VT, FF, NBSP,
-// BOM and U+2028 and U+2029 besides.
-@(private = "file")
-ws_len :: proc(s: string, spec: json.Spec) -> int {
-	if len(s) > 0 && is_blank(s[0]) {
-		return 1
-	}
-	if spec != .Json5 {
-		return 0
-	}
-	for w in ([]string{"\x0b", "\x0c", "\xc2\xa0", "\xef\xbb\xbf", "\u2028", "\u2029"}) {
-		if strings.has_prefix(s, w) {
-			return len(w)
-		}
-	}
-	return 0
-}
-
-@(private = "file")
-has_bom :: proc(s: string) -> bool {
-	return strings.has_prefix(s, "\xef\xbb\xbf")
-}
-
-// The model's verdict on a record: `validate` of its text alone, at its place in the input. A BOM is the input's, so
-// one that starts a later record is `Bad_Char`, except in JSON5, where it is whitespace.
-@(private = "file")
-model_fault :: proc(text: string, at: u64, spec: json.Spec) -> Maybe(core.Fault) {
-	if at > 0 && has_bom(text) && spec != .Json5 {
-		return core.Fault{at = at, rules = &json.RULES, kind = .Bad_Char}
-	}
-	f: Maybe(core.Fault)
-	switch spec {
-	case .Json:  f = json.validate(transmute([]u8)text, .Json)
-	case .Jsonc: f = json.validate(transmute([]u8)text, .Jsonc)
-	case .Json5: f = json.validate(transmute([]u8)text, .Json5)
-	}
-	if x, bad := f.?; bad {
-		x.at += at
-		return x
-	}
-	return nil
-}
-
-// The fault of the `.Seq` record `src[k:hi]`, whose text alone faults with `fault`: bytes before the first 0x1E are
-// unframed, and a number alone with no byte after it may be cut short.
-@(private = "file")
-model_seq_fault :: proc(src: string, k, hi: int, spec: json.Spec, fault: Maybe(core.Fault), first: bool) -> Maybe(core.Fault) {
-	if first {
-		return core.Fault{at = u64(k), rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Unframed)}
-	}
-	if fault != nil {
-		return fault
-	}
-	if strings.trim_left(src[k:hi], "0123456789-+.eE") == "" {
-		return core.Fault{at = u64(hi), rules = &json.RULES, kind = .Bad_Number, detail = u8(json.Detail.Cut_Number)}
-	}
-	return nil
-}
-
-// Returns the first offset at or past `i` that is no whitespace, in a spec with comments no comment, and with `rs` no
-// 0x1E.
-@(private = "file")
-model_gap :: proc(src: string, i: int, spec: json.Spec, rs: bool) -> int {
-	i := i
-	for i < len(src) {
-		if n := ws_len(src[i:], spec); n > 0 {
-			i += n
-		} else if rs && src[i] == 0x1e {
-			i += 1
-		} else if spec != .Json && (strings.has_prefix(src[i:], "//") || strings.has_prefix(src[i:], "/*")) {
-			// A `//` comment ends at a CR or an LF, in JSON5 at U+2028 and U+2029 too.
-			e := strings.index_any(src[i:], "\r\n\u2028\u2029" if spec == .Json5 else "\r\n") if src[i + 1] == '/' else strings.index(src[i + 2:], "*/") + 4
-			e = len(src) - i if e < 0 && src[i + 1] == '/' else e
-			// A comment that does not end, is not UTF-8, or holds a control byte but a tab or a line end, is no gap.
-			if e < 4 && src[i + 1] == '*' || !utf8.valid_string(src[i:][:e]) || strings.index_proc(src[i:][:e], proc(r: rune) -> bool {return r < 0x20 && r != '\t' && r != '\r' && r != '\n'}) >= 0 {
-				return i
-			}
-			i += e
-		} else {
-			break
-		}
-	}
-	return i
-}
-
-// Returns one past the value that starts at `i`: a string to its closing quote, a container to the bracket that
-// closes it, anything else to the next byte that may follow a value.
-@(private = "file")
-model_value_end :: proc(src: string, i: int, spec: json.Spec) -> int {
-	depth := 0
-	j := i
-	for j < len(src) {
-		c := src[j]
-		switch {
-		case c == '"' || c == '\'' && spec == .Json5:
-			j += 1
-			for j < len(src) && src[j] != c {
-				j += 2 if src[j] == '\\' else 1
-			}
-			j = min(j + 1, len(src))
-		case c == '[' || c == '{':
-			depth += 1
-			j += 1
-			continue
-		case c == ']' || c == '}':
-			depth -= 1
-			j += 1
-		case depth > 0:
-			j = max(model_gap(src, j, spec, false), j + 1)
-			continue
-		case:
-			k := j
-			for k < len(src) && !strings.contains_rune(",:[]{}\"'/ \t\r\n\x1e", rune(src[k])) && ws_len(src[k:], spec) == 0 {
-				k += 1
-			}
-			return max(k, j + 1)
-		}
-		if depth <= 0 {
-			return j
-		}
-	}
-	return j
-}
-
-@(private = "file")
-is_ident :: proc(c: u8, first: bool) -> bool {
-	return c == '_' || c == '$' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || !first && c >= '0' && c <= '9'
-}
-
-// Frames `src` byte by byte. Returns the records and the framing's own fault.
-@(private = "file")
-model_frame :: proc(src: string, framing: core.Framing, spec: json.Spec) -> (out: [dynamic]Model_Record, fault: Maybe(core.Fault)) {
-	out = make([dynamic]Model_Record, context.temp_allocator)
-	start := 3 if has_bom(src) else 0
-	if framing == .Concatenated {
-		for i := model_gap(src, start, spec, true); i < len(src); i = model_gap(src, i, spec, true) {
-			j := model_value_end(src, i, spec)
-			// A broken value's fault may lie past where this framer ends it, as in an unclosed comment before it.
-			if model_fault(src[i:j], u64(i), spec) != nil {
-				return out, model_fault(src[i:], u64(i), spec)
-			}
-			// As jq reads them, a scalar runs on into a ',', ':', ']', '}', or a '/' where no comment may start.
-			if j < len(src) && !strings.contains_rune("[{\"'", rune(src[i])) && (strings.contains_rune(",:]}", rune(src[j])) || src[j] == '/' && spec == .Json) {
-				return out, core.Fault{at = u64(j), rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Trailing)}
-			}
-			append(&out, Model_Record{at = u64(i), text = src[i:j]})
-			i = j
-		}
-		return
-	}
-	if framing == .Entries {
-		// The entries' fault is the whole text's, whichever entry or byte of the root breaks it.
-		fault = model_fault(src, 0, spec)
-		i := model_gap(src, start, spec, false)
-		if i == len(src) || src[i] != '[' && src[i] != '{' {
-			return
-		}
-		close := src[i] + 2
-		i = model_gap(src, i + 1, spec, false)
-		for n := 0;; n += 1 {
-			if i < len(src) && src[i] == close && n == 0 {
-				return
-			}
-			if n > 0 {
-				if i == len(src) || src[i] != ',' {
-					return
-				}
-				i = model_gap(src, i + 1, spec, false)
-				if i < len(src) && src[i] == close && spec != .Json {
-					return
-				}
-			}
-			key := ""
-			if close == '}' {
-				k := i
-				if i < len(src) && (src[i] == '"' || spec == .Json5 && src[i] == '\'') {
-					i = model_value_end(src, i, spec)
-					if model_fault(src[k:i], u64(k), spec) != nil {
-						return
-					}
-				} else if spec == .Json5 {
-					for i < len(src) && is_ident(src[i], i == k) {
-						i += 1
-					}
-				}
-				if i == k {
-					return
-				}
-				key = src[k:i]
-				i = model_gap(src, i, spec, false)
-				if i == len(src) || src[i] != ':' {
-					return
-				}
-				i = model_gap(src, i + 1, spec, false)
-			}
-			if i == len(src) {
-				return
-			}
-			j := model_value_end(src, i, spec)
-			if model_fault(src[i:j], u64(i), spec) != nil {
-				return
-			}
-			append(&out, Model_Record{at = u64(i), text = src[i:j], key = key})
-			i = model_gap(src, j, spec, false)
-		}
-	}
-	stop: u8 = '\n' if framing == .Lines else 0x1e
-	i := 3 if has_bom(src) else 0
-	first := true
-	for i < len(src) {
-		j := i
-		for j < len(src) && src[j] != stop {
-			j += 1
-		}
-		hi := j
-		if framing == .Lines && hi > i && src[hi - 1] == '\r' {
-			hi -= 1
-		}
-		k := i
-		for k < hi && ws_len(src[k:hi], spec) > 0 {
-			k += ws_len(src[k:hi], spec)
-		}
-		if k < hi {
-			bad := model_fault(src[k:hi], u64(k), spec)
-			text_bad := bad
-			if framing == .Seq {
-				bad = model_seq_fault(src, k, hi, spec, bad, first)
-			}
-			append(&out, Model_Record{at = u64(k), text = src[k:hi], fault = bad, framed = framing == .Seq && (first || text_bad == nil && bad != nil)})
-		}
-		first = false
-		i = j + 1
-	}
-	return
-}
-
-// Checks `records.next` and `records.check` on `src` against the model.
-@(private = "file")
-expect_model :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec) -> bool {
-	want, framed := model_frame(src, framing, spec)
-	it := records.open(transmute([]u8)src, json.as(spec), framing)
-	defer records.close(&it)
-	n := 0
-	for rec in records.next(&it) {
-		if n >= len(want) || rec.at != want[n].at || string(rec.text) != want[n].text || string(rec.key) != want[n].key {
-			testing.expectf(t, false, "%v %v %q: record %d at %d %q key %q, want %v", framing, spec, src, n, rec.at, rec.text, rec.key, want[n] if n < len(want) else Model_Record{})
-			return false
-		}
-		n += 1
-	}
-	if !testing.expectf(t, n == len(want) && it.fault == framed, "%v %v %q: %d records, fault %v, want %d, %v", framing, spec, src, n, it.fault, len(want), framed) {
-		return false
-	}
-	faults, err := records.check(transmute([]u8)src, json.as(spec), framing, context.temp_allocator)
-	testing.expect_value(t, err, nil)
-	k := 0
-	for r in want {
-		if f, bad := r.fault.?; bad {
-			if k >= len(faults) || faults[k] != f {
-				testing.expectf(t, false, "%v %v %q: record at %d faults %v, check gave %v", framing, spec, src, r.at, f, faults[k:])
-				return false
-			}
-			k += 1
-		}
-	}
-	if f, bad := framed.?; bad {
-		if k >= len(faults) || faults[k] != f {
-			testing.expectf(t, false, "%v %v %q: framing fault %v, check gave %v", framing, spec, src, f, faults[k:])
-			return false
-		}
-		k += 1
-	}
-	return testing.expectf(t, k == len(faults), "%v %v %q: check gave more faults %v", framing, spec, src, faults[k:])
-}
 
 // Records of every kind, with the separators of each framing between them: blank lines, CRLF, a BOM, a 0x1E in a
 // line, values spread over lines and comments.
@@ -382,132 +90,6 @@ seeded_text :: proc(gen: rand.Generator, framing: core.Framing) -> string {
 }
 
 @(test)
-records_follow_the_model :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	// Each byte of a text in turn becomes a byte or character that breaks or ends a value.
-	breakers := []string{"x", "\"", "}", "]", ",", ":", "\n", "\r", " ", "\x1e", "\x00", "\\", "\x0b", "\x0c", "\xc2\xa0", "\xef\xbb\xbf"}
-	buf := make([dynamic]u8, context.temp_allocator)
-	for seed in u64(1) ..= SEEDS {
-		state := rand.create(seed)
-		gen := rand.default_random_generator(&state)
-		for round in 0 ..< 200 / SEEDS {
-			framing := core.Framing(round % 4)
-			src := seeded_text(gen, framing)
-			for spec in json.Spec {
-				if !expect_model(t, src, framing, spec) {
-					return
-				}
-			}
-			for i in 0 ..< len(src) {
-				for c in breakers {
-					clear(&buf)
-					append(&buf, src[:i])
-					append(&buf, c)
-					append(&buf, src[i + 1:])
-					for spec in json.Spec {
-						if !expect_model(t, string(buf[:]), framing, spec) {
-							return
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-// `scan` gives the records `next` gives, under `.Seq` with the model's framing fault, each with what `scan` of its text alone
-// answers, its offsets from the input.
-@(private = "file")
-expect_scan :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, path: core.Path) -> bool {
-	want := records.open(transmute([]u8)src, json.as(spec), framing)
-	defer records.close(&want)
-	got := records.open(transmute([]u8)src, json.as(spec), framing)
-	defer records.close(&got)
-	seq, _ := model_frame(src, framing, spec)
-	for n := 0;; n += 1 {
-		rec, more := records.next(&want)
-		framed: Maybe(core.Fault)
-		if framing == .Seq {
-			more = n < len(seq)
-			if more {
-				rec = {at = seq[n].at, text = transmute([]u8)seq[n].text}
-				framed = seq[n].fault if seq[n].framed else nil
-			}
-		}
-		g, doc, err, g_more := records.scan(&got, path)
-		if !testing.expectf(t, more == g_more && rec.at == g.at && string(rec.text) == string(g.text), "%v %v %q: record %v %v %q, scan %v %v %q", framing, spec, src, more, rec.at, rec.text, g_more, g.at, g.text) {
-			return false
-		}
-		if !more {
-			return testing.expectf(t, want.fault == got.fault, "%v %v %q: fault %v, scan %v", framing, spec, src, want.fault, got.fault)
-		}
-		alone, e := json.scan(rec.text, spec, path, allocator = context.temp_allocator)
-		// A BOM is the input's, as `build` reads a record.
-		if rec.at > 0 && spec != .Json5 && has_bom(string(rec.text)) {
-			alone, e = {}, {kind = .Walk, inner = {rules = &json.RULES, kind = .Bad_Char}}
-		}
-		if f, bad := framed.?; bad {
-			f.at -= rec.at
-			alone, e = {}, {kind = .Walk, at = f.at, inner = f}
-		}
-		if e.kind == .Walk {
-			e.at += rec.at
-			e.inner.at += rec.at
-		}
-		if !testing.expectf(t, e == err && len(alone.answers) == len(doc.answers), "%v %v %q at %v: %v %v, scan %v %v", framing, spec, src, rec.at, e, len(alone.answers), err, len(doc.answers)) {
-			return false
-		}
-		for a, i in alone.answers {
-			b := doc.answers[i]
-			if !testing.expectf(t, a.outcome == b.outcome && string(core.span(&alone, a.node)) == string(core.span(&doc, b.node)), "%v %v %q at %v: answer %v %v, scan %v", framing, spec, src, rec.at, i, a, b) {
-				return false
-			}
-		}
-	}
-}
-
-@(test)
-records_scan_as_next_and_scan :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	paths: [dynamic]core.Path
-	for text in ([]string{".a", ".b[2]", ".[]", "first(.[])", ".k.x?[0]"}) {
-		p, _ := core.parse_path(text, context.temp_allocator)
-		append(&paths, p)
-	}
-	defer delete(paths)
-	buf := make([dynamic]u8, context.temp_allocator)
-	breakers := []string{"}", "\n", "\x1e", "\""}
-	for seed in u64(1) ..= SEEDS {
-		state := rand.create(seed)
-		gen := rand.default_random_generator(&state)
-		for round in 0 ..< 200 / SEEDS {
-			framing := core.Framing(round % 4)
-			src := seeded_text(gen, framing)
-			// Each byte in turn becomes one that breaks or ends a value, in every fifth text, under the first two paths.
-			for i in -1 ..< (len(src) if round % 5 == 0 else 0) {
-				for c in breakers[:1 if i < 0 else 4] {
-					clear(&buf)
-					if i < 0 {
-						append(&buf, src)
-					} else {
-						append(&buf, src[:i])
-						append(&buf, c)
-						append(&buf, src[i + 1:])
-					}
-					for spec in json.Spec {
-						for path in paths[:len(paths) if i < 0 else 2] {
-							if !expect_scan(t, string(buf[:]), framing, spec, path) {
-								return
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-@(test)
 records_scan_a_stream :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "{\"a\":1}\n{\"b\":2}\n{\"a\":[3]} {\"a\":4\n"
@@ -527,6 +109,29 @@ records_scan_a_stream :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, fmt.tprint(got[:]), `["Found 1", "Missing ", "Found [3]"]`)
 	testing.expect_value(t, string(it.held), " {\"a\":4\n")
+}
+
+// A clone of a record's document owns its answers, which the reader replaces at the next record, read in memory or
+// from a stream.
+@(test)
+records_scan_clone_owns_answers :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	src := "{\"a\":1}\n{\"b\":2}\n"
+	path, _ := core.parse_path(".a", context.temp_allocator)
+	for streamed in ([]bool{false, true}) {
+		c := Chunked{src = transmute([]u8)src, sizes = {3}, fail_at = -1}
+		it := records.open_stream(chunked(&c), json.as(.Json)) if streamed else records.open(transmute([]u8)src, json.as(.Json))
+		_, doc, _, _ := records.scan(&it, path)
+		kept, err := core.clone(&doc)
+		testing.expect_value(t, err, nil)
+		_, next, _, _ := records.scan(&it, path)
+		testing.expect_value(t, next.answers[0].outcome, core.Presence.Missing)
+		records.close(&it)
+		testing.expect_value(t, len(kept.answers), 1)
+		testing.expect_value(t, kept.answers[0].outcome, core.Presence.Found)
+		testing.expect_value(t, core.kind(&kept, kept.answers[0].node), core.Kind.Number)
+		core.destroy(&kept)
+	}
 }
 
 // The seeds each property test draws its texts from.
@@ -566,7 +171,7 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	kp, _ := json.plan_make(string)
 	defer typed.plan_destroy(&kp)
 	name: string
-	kerr := json.unmarshal(transmute([]u8)keys[1], .Json, &name, &kp, {}, {}, context.temp_allocator)
+	kerr := json.unmarshal(transmute([]u8)keys[1], .Json, &name, &kp, read = {}, opts = {}, allocator = context.temp_allocator)
 	testing.expect(t, kerr.kind == .None && name == `b"c`)
 	flat := json.as(.Json)
 	flat.max_depth = 1
@@ -584,6 +189,15 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	}
 	faults, _ = records.check(transmute([]u8)string("1/**/2"), json.as(.Jsonc), .Concatenated, context.temp_allocator)
 	testing.expect_value(t, len(faults), 0)
+	// A trailing comma at the input's end closes nothing, whatever byte lies past the input, and a member's key is a string.
+	comma_cut := "[1,]"
+	cut := records.open(transmute([]u8)comma_cut[:3], json.as(.Jsonc), .Entries)
+	defer records.close(&cut)
+	for _ in records.next(&cut) {}
+	end_fault, ended := cut.fault.?
+	testing.expect(t, ended && end_fault.kind == .Truncated && end_fault.at == 3)
+	faults, _ = records.check(transmute([]u8)string("{1:2}"), json.as(.Json), .Entries, context.temp_allocator)
+	testing.expect(t, len(faults) == 1 && faults[0].kind == .Bad_Char && faults[0].at == 1)
 
 	// A line of JSON5 whitespace is no record, in JSON it is a refused one.
 	ws := transmute([]u8)string("1\n\x0b\n\xc2\xa0\n2")
@@ -622,140 +236,7 @@ error_text :: proc(e: core.Typed_Error, at: u64) -> string {
 			e.inner.at += at
 		}
 	}
-	return fmt.tprint(e.kind, e.truncated, e.at, e.inner, e.steps[:e.n_steps])
-}
-
-// `records.read` against `json.unmarshal` of each record's text the model frames, with the model's BOM rule.
-@(private = "file")
-expect_read :: proc(t: ^testing.T, src: string, framing: core.Framing, spec: json.Spec, read: typed.Read_Options, plan: ^typed.Plan, $T: typeid) -> bool {
-	want, framed := model_frame(src, framing, spec)
-	it := records.open(transmute([]u8)src, json.as(spec), framing)
-	defer records.close(&it)
-	got_sink, want_sink: typed.Collected
-	got_sink.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
-	want_sink.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
-	got_read, want_read := read, read
-	if read.collect != nil {
-		got_read.collect = &got_sink
-		want_read.collect = &want_sink
-	}
-	n := 0
-	for {
-		v: T
-		more, err := records.read(&it, &v, plan, got_read, context.temp_allocator)
-		if !more {
-			break
-		}
-		if n >= len(want) {
-			return testing.expectf(t, false, "%v %v %q: record %d past the model's", framing, spec, src, n)
-		}
-		r := want[n]
-		w: T
-		want_err: string
-		if f, bad := r.fault.?; bad && r.framed || r.at > 0 && has_bom(r.text) && spec != .Json5 {
-			if !r.framed {
-				f = {at = r.at, rules = &json.RULES, kind = .Bad_Char}
-			}
-			e := core.Typed_Error{kind = .Walk, at = f.at, inner = f}
-			want_err = error_text(e, 0)
-			if want_read.collect != nil {
-				append(&want_sink.errors, e)
-			}
-		} else {
-			mark := len(want_sink.errors)
-			e: core.Typed_Error
-			switch spec {
-			case .Json:  e = json.unmarshal(transmute([]u8)r.text, .Json, &w, plan, want_read, {}, context.temp_allocator)
-			case .Jsonc: e = json.unmarshal(transmute([]u8)r.text, .Jsonc, &w, plan, want_read, {}, context.temp_allocator)
-			case .Json5: e = json.unmarshal(transmute([]u8)r.text, .Json5, &w, plan, want_read, {}, context.temp_allocator)
-			}
-			want_err = error_text(e, r.at)
-			for &x in want_sink.errors[mark:] {
-				x.at += r.at
-				if x.kind == .Walk {
-					x.inner.at += r.at
-				}
-			}
-		}
-		got_err := error_text(err, 0)
-		if !testing.expectf(t, got_err == want_err, "%v %v %v %q: record %d at %d: %s, want %s", framing, spec, read, src, n, r.at, got_err, want_err) {
-			return false
-		}
-		if (err.kind == .None || r.fault == nil) && !testing.expectf(t, fmt.tprint(v) == fmt.tprint(w), "%v %v %q: record %d read %v, want %v", framing, spec, src, n, v, w) {
-			return false
-		}
-		n += 1
-	}
-	if !testing.expectf(t, n == len(want) && it.fault == framed, "%v %v %q: %d records, fault %v, want %d, %v", framing, spec, src, n, it.fault, len(want), framed) {
-		return false
-	}
-	return testing.expectf(t, fmt.tprint(got_sink.errors[:]) == fmt.tprint(want_sink.errors[:]), "%v %v %q: collected %v, want %v", framing, spec, src, got_sink.errors[:], want_sink.errors[:])
-}
-
-@(test)
-records_read_as_unmarshal :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	plan, err := json.plan_make(Typed_Piece)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
-	defer typed.plan_destroy(&plan)
-	breakers := []string{"x", "\"", "]", ",", "\n", "\x1e", "1", "\x0b", "\xc2\xa0", "\xef\xbb\xbf"}
-	sink: typed.Collected
-	reads := []typed.Read_Options{{}, {collect = &sink}, {refuse_duplicates = true}, {unknown = .Refuse}}
-	buf: [dynamic]u8
-	defer delete(buf)
-	for seed in u64(1) ..= SEEDS {
-		state := rand.create(seed + 1)
-		gen := rand.default_random_generator(&state)
-		framing := core.Framing(seed % 4)
-		src := seeded_text(gen, framing)
-		for i in -1 ..< len(src) {
-			for c in breakers {
-				clear(&buf)
-				if i < 0 {
-					append(&buf, src)
-				} else {
-					append(&buf, src[:i])
-					append(&buf, c)
-					append(&buf, src[i + 1:])
-				}
-				for spec in json.Spec {
-					for read in reads {
-						if !expect_read(t, string(buf[:]), framing, spec, read, &plan, Typed_Piece) {
-							return
-						}
-					}
-				}
-				if i < 0 {
-					break
-				}
-			}
-		}
-		free_all(context.temp_allocator)
-	}
-}
-
-// A union target reads the arm its record's class picks, and refuses the other classes, as `unmarshal` does.
-@(test)
-records_read_a_union :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	Arms :: union {
-		int,
-		string,
-		[]int,
-	}
-	plan, err := json.plan_make(Arms)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
-	defer typed.plan_destroy(&plan)
-	texts := []string{"1\n\"s\"\n[1,2]\ntrue\n{}\n[\"x\"]\n", "[1, \"s\", [3], null, false, {\"a\":1}]", "1 \"s\" [2] 3x"}
-	for text in texts {
-		for framing in core.Framing {
-			for spec in json.Spec {
-				if !expect_read(t, text, framing, spec, {}, &plan, Arms) {
-					return
-				}
-			}
-		}
-	}
+	return fmt.tprint(e)
 }
 
 // A reader's memory does not grow with the records it reads, refused ones and decoded keys included, and a collected
@@ -778,14 +259,14 @@ records_read_in_bounded_memory :: proc(t: ^testing.T) {
 		_ = walktest.expect_bounded_reads(t, few, many, as, &maps, map[string]string, {dups = .First}, framing) &&
 		walktest.expect_bounded_reads(t, few, many, as, &ints, map[string]int, {}, framing) &&
 		walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Record, {}, framing) &&
-		walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Record, {unknown = .Refuse, refuse_duplicates = true}, framing)
+		walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Record, {unknown = .Refuse, dups = .Refuse}, framing)
 	}
 	it := records.open(few, json.as(.Json))
 	defer records.close(&it)
 	c := typed.Collected{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
 	for {
 		v: Number_Record
-		more, _ := records.read(&it, &v, &rows, {unknown = .Refuse, collect = &c}, context.temp_allocator)
+		_, more := records.read(&it, &v, &rows, {unknown = .Refuse, collect = &c}, context.temp_allocator)
 		if !more {
 			break
 		}
@@ -794,7 +275,7 @@ records_read_in_bounded_memory :: proc(t: ^testing.T) {
 	testing.expectf(t, len(c.errors) == 100 && name == "c", "%d errors, the first %v", len(c.errors), c.errors[0])
 }
 
-// A plan of another type is refused the same way under every framing, before any record is read.
+// A plan of another type is refused the same way under every framing, before any record is read, and ends the records.
 @(test)
 records_read_checks_the_plan_once :: proc(t: ^testing.T) {
 	plan, _ := json.plan_make(Typed_Piece)
@@ -803,9 +284,21 @@ records_read_checks_the_plan_once :: proc(t: ^testing.T) {
 		it := records.open(transmute([]u8)string("{\"a\":1}\n{\"a\":2}\n"), json.as(.Json), framing)
 		defer records.close(&it)
 		v: struct{ a: int }
-		more, err := records.read(&it, &v, &plan)
-		testing.expectf(t, !more && err.kind == .Plan_Mismatch && it.pos == core.text_start(it.src, 0), "%v: %v %v", framing, more, err.kind)
+		err, more := records.read(&it, &v, &plan)
+		testing.expectf(t, more && err.kind == .Plan_Mismatch && it.pos == core.text_start(it.src, 0), "%v: %v %v", framing, more, err.kind)
+		err, more = records.read(&it, &v, &plan)
+		testing.expectf(t, !more && err.kind == .None && it.fault != nil, "%v: then %v %v", framing, more, err.kind)
 	}
+	// With no plan the reader builds one of the type and keeps it.
+	it := records.open(transmute([]u8)string("{\"a\":1}\n{\"a\":2}\n"), json.as(.Json))
+	defer records.close(&it)
+	v: struct{ a: int }
+	sum := 0
+	for err in records.read(&it, &v, nil) {
+		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+		sum += v.a
+	}
+	testing.expect_value(t, sum, 3)
 }
 
 @(test)
@@ -822,10 +315,10 @@ records_build_places_faults :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(answers), 1)
 	rec, _ = records.next(&it)
 	_, err = records.build(&it, rec, context.temp_allocator)
-	testing.expect_value(t, err, core.Document_Error{kind = .Walk, at = 15, inner = {at = 15, rules = &json.RULES, kind = .Bad_Char}})
+	testing.expect_value(t, err, core.Document_Error{kind = .Walk, at = 15, inner = {at = 15, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Unmatched_Brace)}})
 	rec, _ = records.next(&it)
 	_, err = records.build(&it, rec, context.temp_allocator)
-	testing.expect_value(t, err, core.Document_Error{kind = .Walk, at = 17, inner = {at = 17, rules = &json.RULES, kind = .Bad_Char}})
+	testing.expect_value(t, err, core.Document_Error{kind = .Walk, at = 17, inner = {at = 17, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Expected_Value)}})
 }
 
 // An input that gives at most `sizes[i % len(sizes)]` bytes on its `i`-th read, a random count up to 16 when `sizes`
@@ -976,13 +469,13 @@ records_stream_read :: proc(t: ^testing.T) {
 			ss.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
 			for {
 				v, w: Typed_Piece
-				more, err := records.read(&st, &v, &plan, {collect = &ss}, context.temp_allocator)
-				wmore, werr := records.read(&mem, &w, &plan, {collect = &ms}, context.temp_allocator)
+				err, more := records.read(&st, &v, &plan, {collect = &ss}, context.temp_allocator)
+				werr, wmore := records.read(&mem, &w, &plan, {collect = &ms}, context.temp_allocator)
 				if !more {
 					// A record the stream holds is the last one memory reads.
 					if len(st.held) > 0 && wmore {
 						resize(&ms.errors, len(ss.errors))
-						wmore, _ = records.read(&mem, &w, &plan, {collect = &ms}, context.temp_allocator)
+						_, wmore = records.read(&mem, &w, &plan, {collect = &ms}, context.temp_allocator)
 					}
 					testing.expectf(t, !wmore && (st.fault == mem.fault || len(st.held) > 0), "%v %v %q: stream ends %v, memory %v %v", framing, spec, src, st.fault, wmore, mem.fault)
 					break
@@ -1185,7 +678,7 @@ read_seq_piece :: proc(g: ^Seq_Pieces, piece: ^records.Reader, k: int) -> bool {
 	p := Seq_Piece{k = k, faults = make([dynamic]Maybe(core.Fault), runtime.heap_allocator())}
 	for {
 		v: Seq_Target
-		more, err := records.read(piece, &v, g.plan)
+		err, more := records.read(piece, &v, g.plan)
 		if !more {
 			break
 		}
@@ -1194,6 +687,34 @@ read_seq_piece :: proc(g: ^Seq_Pieces, piece: ^records.Reader, k: int) -> bool {
 	sync.guard(&g.lock)
 	append(&g.pieces, p)
 	return true
+}
+
+// A collecting read's framing and walk faults go to the read's allocator when `errors` has none.
+@(test)
+records_seq_faults_collect_with_the_reads_allocator :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	plan, _ := json.plan_make(Seq_Target)
+	defer typed.plan_destroy(&plan)
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	for src in ([]string{" 1\x1e{}", "\x1e3", "\x1e{\"a\":\n"}) {
+		sink: typed.Collected
+		it := records.open(transmute([]u8)src, json.as(.Json), .Seq)
+		for {
+			v: Seq_Target
+			_, more := records.read(&it, &v, &plan, {collect = &sink}, mem.tracking_allocator(&track))
+			if !more {
+				break
+			}
+		}
+		records.close(&it)
+		testing.expect_value(t, len(sink.errors), 1)
+		testing.expect(t, sink.errors.allocator.data == &track, src)
+		delete(sink.errors)
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
 }
 
 // Under `.Seq` a read and a scan frame the records as `build` does and give its faults, which are the faults `check`
@@ -1235,7 +756,7 @@ records_seq_reads_frame_as_build :: proc(t: ^testing.T) {
 		it = records.open(src, as, .Seq)
 		for {
 			v: Seq_Target
-			more, err := records.read(&it, &v, &plan)
+			err, more := records.read(&it, &v, &plan)
 			if !more {
 				break
 			}

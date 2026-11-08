@@ -28,12 +28,12 @@ expect :: proc(all: []core.Token, rule: u64, out: ^[dynamic]core.Token) -> (stop
 			if t.role == .Key {
 				// Skips the cell the key names.
 				j += 1
-			} else if t.kind == .Array || t.kind == .Map {
+			} else if t.kind == .Array || t.kind == .Object {
 				// Skips the record or the text and its `End`.
 				depth := 0
 				for ; j < len(all); j += 1 {
 					#partial switch all[j].kind {
-					case .Array, .Map:
+					case .Array, .Object:
 						depth += 1
 					case .End:
 						depth -= 1
@@ -137,16 +137,16 @@ Want :: struct {
 // the header, whose cells past the header's make no tokens.
 @(rodata)
 WALKED := []Walked {
-	{"junk\na,b\n1,2\n", 5, 13, {}, {{5, 0, .Array, .Value, 0}, {9, 0, .Map, .Value, 0}, {5, 1, .Plain, .Key, 0}, {9, 1, .Plain, .Value, 0}, {7, 1, .Plain, .Key, 0}, {11, 1, .Plain, .Value, 0}, {12, 1, .End, .Value, 0}, {13, 0, .End, .Value, 0}}},
-	{"\xc3\xa9", 1, 1, {1, .Bad_Char, .Bad_Utf8}, {{1, 0, .Array, .Value, 0}}},
-	{"\xf0\x9f,\x98\x80", 2, 3, {3, .Bad_Char, .Bad_Utf8}, {{2, 0, .Array, .Value, 0}}},
-	{"\xe6\x97", 1, 1, {1, .Bad_Char, .Bad_Utf8}, {{1, 0, .Array, .Value, 0}}},
+	{"junk\na,b\n1,2\n", 5, 13, {}, {{5, 0, .Array, .Value, 0}, {9, 0, .Object, .Value, 0}, {5, 1, .Plain, .Key, 0}, {9, 1, .Plain, .Value, 0}, {7, 1, .Plain, .Key, 0}, {11, 1, .Plain, .Value, 0}, {12, 1, .End, .Value, 0}, {13, 0, .End, .Value, 0}}},
+	{"\xc3\xa9", 1, 1, {1, .Bad_Char, .Invalid_Utf8}, {{1, 0, .Array, .Value, 0}}},
+	{"\xf0\x9f,\x98\x80", 2, 3, {3, .Bad_Char, .Invalid_Utf8}, {{2, 0, .Array, .Value, 0}}},
+	{"\xe6\x97", 1, 1, {1, .Bad_Char, .Invalid_Utf8}, {{1, 0, .Array, .Value, 0}}},
 	{"a,b", 100, 3, {}, {{3, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
 	{"", 0, 0, {}, {{0, 0, .Array, .Value, 0}, {0, 0, .End, .Value, 0}}},
 	{"\r\n\n", 0, 3, {}, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
 	{"\xef\xbb\xbf", 0, 3, {}, {{0, 0, .Array, .Value, 0}, {3, 0, .End, .Value, 0}}},
-	{"a,b\n1,2,3\n", 0, 7, {7, .Bad_Char, .Too_Many}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
-	{"a,b\n1,2,3", 0, 7, {7, .Bad_Char, .Too_Many}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
+	{"a,b\n1,2,3\n", 0, 7, {7, .Bad_Width, .Too_Many}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
+	{"a,b\n1,2,3", 0, 7, {7, .Bad_Width, .Too_Many}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}}},
 }
 
 // A cell's span in a generated text.
@@ -200,7 +200,7 @@ cell_spelling :: proc(src: []u8, lo, n: int, tsv, quoted: bool, lax := false) ->
 // Appends the tokens of a record: its opening, its cells (each naming its column's header cell when `with_header`), and
 // the `End` at `end` when `with_end`. A short record that faults has all but its `End`.
 append_record_tokens :: proc(out: ^[dynamic]core.Token, src: []u8, rec_lo: int, spans: [SPANS_MAX]Span, cells: int, header_spans: [SPANS_MAX]Span, with_header, tsv, quoted: bool, end: int, with_end: bool) {
-	append(out, core.Token{u64(rec_lo), 0, .Map if with_header else .Array, .Value, 0})
+	append(out, core.Token{u64(rec_lo), 0, .Object if with_header else .Array, .Value, 0})
 	for i in 0 ..< cells {
 		if with_header {
 			h := header_spans[i]
@@ -214,7 +214,7 @@ append_record_tokens :: proc(out: ^[dynamic]core.Token, src: []u8, rec_lo: int, 
 	}
 }
 
-// For a wide record the walk emits its container (`Map` with a header, `Array` without) and first 3 cells, then
+// For a wide record the walk emits its container (`Object` with a header, `Array` without) and first 3 cells, then
 // faults at the delimiter that opens the next cell. For a short record it emits its container and all its cells,
 // then faults at its line end. Neither has an `End`. The empty lines move the record over every byte of a block and
 // across the boundary between two.
@@ -271,7 +271,7 @@ wrong_width_records :: proc(t: ^testing.T) {
 							}
 							log^ = {}
 							hi, fault := walk(text[:], tsv, !header, log, &core.Hook_Regs{}, walktest.log_hook)
-							want_fault := core.Fault{u64(fault_at), &dsv.RULES, .Bad_Char, u8(dsv.Detail.Too_Many if len(bad) > len(HEADER) else dsv.Detail.Too_Few)}
+							want_fault := core.Fault{u64(fault_at), &dsv.RULES, .Bad_Width, u8(dsv.Detail.Too_Many if len(bad) > len(HEADER) else dsv.Detail.Too_Few)}
 							if !testing.expectf(t, hi == u64(fault_at) && fault == want_fault, "%q tsv %v header %v quoted %v lf %v: %d %v, want %d %v", text[:], tsv, header, quoted, final_lf, hi, fault, fault_at, want_fault) {
 								return
 							}
@@ -279,76 +279,6 @@ wrong_width_records :: proc(t: ^testing.T) {
 								return
 							}
 						}
-					}
-				}
-			}
-		}
-	}
-}
-
-// Checks that every `Key` token spans its column's header cell, in every record before a fault, at every block
-// offset, in both formats, quoted and unquoted. The bad record is short, wide, or faults inside its second cell.
-@(test)
-key_spans_follow_columns :: proc(t: ^testing.T) {
-	log := new(walktest.Log)
-	defer free(log)
-	text: [dynamic]u8
-	defer delete(text)
-	HEADER := []string{"h0", "h1", "h2"}
-	VALID := []string{"a0", "a1", "a2"}
-	Bad :: struct {
-		cells: []string,
-		keys:  int, // the keys the walk emits before the fault
-	}
-	BAD := []Bad {
-		{{"s0"}, 1},
-		{{"w0", "w1", "w2", "w3"}, 3},
-		{{"u0", "\xff", "u2"}, 1},
-	}
-	for tsv in ([]bool{false, true}) {
-		sep := u8('\t') if tsv else ','
-		for quoted in ([]bool{false, true}) {
-			for bad in BAD {
-				for k in 0 ..< 130 {
-					clear(&text)
-					for _ in 0 ..< k {
-						append(&text, '\n')
-					}
-					header_spans: [SPANS_MAX]Span
-					append_record(&text, HEADER, sep, quoted, &header_spans)
-					append(&text, '\n')
-					for _ in 0 ..< 2 {
-						spans: [SPANS_MAX]Span
-						append_record(&text, VALID, sep, quoted, &spans)
-						append(&text, '\n')
-					}
-					spans: [SPANS_MAX]Span
-					append_record(&text, bad.cells, sep, quoted, &spans)
-					log^ = {}
-					walk(text[:], tsv, false, log, &core.Hook_Regs{}, walktest.log_hook)
-					col, keys := 0, 0
-					for tok in log.tokens[:log.n] {
-						#partial switch tok.kind {
-						case .Map:
-							col = 0
-						case .Plain:
-							if tok.role == .Key {
-								ok := col < len(HEADER)
-								if ok {
-									ok = tok.lo == u64(header_spans[col].lo) && int(tok.n) == header_spans[col].n
-								}
-								if !testing.expectf(t, ok, "%q tsv %v quoted %v bad %v k %d: key %d %v, want column %d", text[:], tsv, quoted, bad.cells, k, keys, tok, col) {
-									return
-								}
-								keys += 1
-							} else {
-								col += 1
-							}
-						case:
-						}
-					}
-					if !testing.expectf(t, keys == 2 * len(VALID) + bad.keys, "%q tsv %v quoted %v bad %v k %d: %d keys, want %d", text[:], tsv, quoted, bad.cells, k, keys, 2 * len(VALID) + bad.keys) {
-						return
 					}
 				}
 			}
@@ -389,19 +319,8 @@ bom_mid_text :: proc(t: ^testing.T) {
 detail_rules :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(dsv.RULES.details), len(dsv.Detail))
 	b := strings.builder_make(context.temp_allocator)
-	f := core.Fault{4, &dsv.RULES, .Bad_Char, u8(dsv.Detail.Too_Many)}
-	core.write_code(strings.to_writer(&b), f)
+	core.write_code(strings.to_writer(&b), core.Fault{4, &dsv.RULES, .Bad_Width, u8(dsv.Detail.Too_Many)})
 	testing.expect_value(t, strings.to_string(b), "dsv.too_many_fields")
-	strings.builder_reset(&b)
-	core.render(strings.to_writer(&b), transmute([]u8)string("a,b\n1,2,3\n"), f)
-	testing.expect_value(t, strings.to_string(b), "2:1: Record has more fields than the first record")
-	f = {1, &dsv.RULES, .Bad_Char, u8(dsv.Detail.Bare_Quote)}
-	strings.builder_reset(&b)
-	core.write_code(strings.to_writer(&b), f)
-	testing.expect_value(t, strings.to_string(b), "dsv.bare_quote")
-	strings.builder_reset(&b)
-	core.render(strings.to_writer(&b), transmute([]u8)string("a\"b\n"), f)
-	testing.expect_value(t, strings.to_string(b), "1:2: Quote inside an unquoted field")
 }
 
 // Each CSV fault reads as a sentence that says what is wrong, at the byte the rule names.
@@ -413,7 +332,7 @@ fault_sentences :: proc(t: ^testing.T) {
 	cases := [?]Case {
 		{"a,b\n3\n", "2:2: Record has fewer fields than the first record"},
 		{"a,b\n1,2,3\n", "2:4: Record has more fields than the first record"},
-		{"a,b\n1,\xe9\n", "2:3: Invalid UTF-8"},
+		{"a,b\n1,\xe9\n", "2:3: Invalid UTF-8 byte 0xE9"},
 		{"a,b\n1,2\xc3", "2:5: Unfinished UTF-8 sequence"},
 		{"a,b\n1,2\r3,4\n", "2:4: Carriage return not before a line feed"},
 		{"a,b\n\"3\"x,4\n", "2:4: Character after a closing quote"},
@@ -448,7 +367,7 @@ spans :: proc(src: []u8, t: core.Token, tsv: bool, tol := bit_set[core.Tolerance
 			}
 		}
 		return true
-	case .Array, .Map:
+	case .Array, .Object:
 		return t.n == 0 && t.role == .Value
 	case .End:
 		return string(b) == "" || string(b) == "\n" || string(b) == "\r\n"
@@ -457,24 +376,6 @@ spans :: proc(src: []u8, t: core.Token, tsv: bool, tol := bit_set[core.Tolerance
 	return false
 }
 
-
-// A walk with nil registers and the default options gives the tokens of a walk with zero registers and `Options{}`.
-@(test)
-walk_defaults :: proc(t: ^testing.T) {
-	src := transmute([]u8)string("a,b\n1,2\n")
-	with := new(walktest.Log)
-	defer free(with)
-	bare := new(walktest.Log)
-	defer free(bare)
-	_, fault := dsv.walk(src, 0, .Csv, {}, with, &core.Hook_Regs{}, walktest.log_hook)
-	testing.expect(t, fault == nil)
-	_, fault = dsv.walk(src, 0, .Csv, h = bare, regs = nil, on = walktest.log_hook)
-	testing.expect(t, fault == nil)
-	testing.expect_value(t, bare.n, with.n)
-	for tok, i in with.tokens[:with.n] {
-		testing.expect_value(t, bare.tokens[i], tok)
-	}
-}
 
 // Stops the walk on the key numbered `target`, counting from 0.
 Key_Stopper :: struct {

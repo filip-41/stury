@@ -115,7 +115,7 @@ ask :: proc "contextless" (rule, i: u64, t: core.Token) -> core.Action {
 	if i == rule & 0xffff_ffff {
 		return .Stop
 	}
-	if (t.kind == .Array || t.kind == .Map || t.role == .Key) && ((i + rule >> 32) * 0x9e37_79b9_7f4a_7c15) >> 62 == 0 {
+	if (t.kind == .Array || t.kind == .Object || t.role == .Key) && ((i + rule >> 32) * 0x9e37_79b9_7f4a_7c15) >> 62 == 0 {
 		return .Skip
 	}
 	return .Next
@@ -172,7 +172,7 @@ expect_nodes :: proc(t: ^testing.T, doc: ^core.Document, want: []Node_Want) -> b
 			return false
 		}
 		// A container's spelling is its 16-bit child count, every other node stays below bit 15.
-		if n.kind != .Array && n.kind != .Map && !testing.expectf(t, n.spelling < 1 << 15, "node %d spelling %d", i, n.spelling) {
+		if n.kind != .Array && n.kind != .Object && !testing.expectf(t, n.spelling < 1 << 15, "node %d spelling %d", i, n.spelling) {
 			return false
 		}
 	}
@@ -221,7 +221,7 @@ check_containers :: proc(t: ^testing.T, doc: ^core.Document, tokens: []core.Toke
 		if depth > 0 && tok.role == .Value {
 			stack[depth - 1].count += 1
 		}
-		if tok.kind == .Array || tok.kind == .Map {
+		if tok.kind == .Array || tok.kind == .Object {
 			if !testing.expect(t, depth < len(stack)) {
 				return false
 			}
@@ -312,7 +312,7 @@ tree_touched :: proc(doc: ^core.Document, list: ^core.Edit_List, node: core.Node
 			continue
 		}
 		n := doc.nodes[e.node]
-		span := n.n if n.kind == .Array || n.kind == .Map else 1
+		span := n.n if n.kind == .Array || n.kind == .Object else 1
 		if e.node <= node && node < e.node + core.Node_Index(span) {
 			return true
 		}
@@ -331,7 +331,7 @@ tree_written :: proc(doc: ^core.Document, list: ^core.Edit_List, f: Fact_Model) 
 		switch e.op {
 		case .Remove:
 			n := doc.nodes[e.node]
-			span := n.n if n.kind == .Array || n.kind == .Map else 1
+			span := n.n if n.kind == .Array || n.kind == .Object else 1
 			if e.node <= f.node && f.node < e.node + core.Node_Index(span) {
 				return true
 			}
@@ -341,7 +341,7 @@ tree_written :: proc(doc: ^core.Document, list: ^core.Edit_List, f: Fact_Model) 
 			if f.lo >= lo && f.lo + f.n <= hi {
 				return true
 			}
-		case .Insert, .Set_Fact, .Remove_Fact:
+		case .Insert, .Set_Fact, .Remove_Fact, .Reorder:
 		}
 	}
 	return false
@@ -351,8 +351,8 @@ tree_written :: proc(doc: ^core.Document, list: ^core.Edit_List, f: Fact_Model) 
 nodes_disjoint :: proc(doc: ^core.Document, touched: []core.Node_Index, node: core.Node_Index) -> bool {
 	for t in touched {
 		nt, nn := doc.nodes[t], doc.nodes[node]
-		ts := nt.n if nt.kind == .Array || nt.kind == .Map else 1
-		ns := nn.n if nn.kind == .Array || nn.kind == .Map else 1
+		ts := nt.n if nt.kind == .Array || nt.kind == .Object else 1
+		ns := nn.n if nn.kind == .Array || nn.kind == .Object else 1
 		if t <= node && node < t + core.Node_Index(ts) {
 			return false
 		}
@@ -396,7 +396,7 @@ fact_holdable :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Rol
 	if !table {
 		if role == .Comment_Foot {
 			n := doc.nodes[node]
-			if node != core.ROOT && n.kind != .Array && n.kind != .Map {
+			if node != core.ROOT && n.kind != .Array && n.kind != .Object {
 				return false
 			}
 		}
@@ -412,7 +412,7 @@ fact_holdable :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Rol
 				}
 			} else {
 				n := doc.nodes[node]
-				if n.role != .Value || (n.kind != .Array && n.kind != .Map) {
+				if n.role != .Value || (n.kind != .Array && n.kind != .Object) {
 					return false
 				}
 			}
@@ -692,7 +692,7 @@ failing_allocator :: proc(f: ^Failing_Alloc) -> runtime.Allocator {
 Write_Try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind)
 
 // Fails each allocation of a write in turn, then that one and every later one, on the output's allocator and on
-// `context.allocator`. A write gives `want` or `.Out_Of_Memory`, whatever fails, and the test's tracker sees a leak.
+// `context.allocator`. A write gives `want` or `.No_Memory`, whatever fails, and the test's tracker sees a leak.
 sweep_write :: proc(t: ^testing.T, try: Write_Try, data: rawptr, want: string, loc := #caller_location) {
 	for on_context in ([?]bool{false, true}) {
 		for hold in ([?]bool{false, true}) {
@@ -707,7 +707,7 @@ sweep_write :: proc(t: ^testing.T, try: Write_Try, data: rawptr, want: string, l
 				} else {
 					text, kind = try(data, failing_allocator(&f))
 				}
-				fine := kind == .Out_Of_Memory && len(text) == 0 || kind == .None && string(text) == want
+				fine := kind == .No_Memory && len(text) == 0 || kind == .None && string(text) == want
 				testing.expectf(t, fine, "allocation %d, later ones too %v, on the context %v: %v %q", at, hold, on_context, kind, text, loc = loc)
 				delete(text)
 				if f.n <= at {
@@ -855,7 +855,7 @@ reads_used :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.P
 expect_bounded_reads :: proc(t: ^testing.T, few, many: []u8, as: core.As, plan: ^typed.Plan, $T: typeid, read := typed.Read_Options{}, framing := core.Framing.Lines) -> bool {
 	one :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> bool {
 		v: T
-		more, _ := records.read(it, &v, plan, read, allocator)
+		_, more := records.read(it, &v, plan, read, allocator)
 		return more
 	}
 	for way in Read_Way {

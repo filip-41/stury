@@ -5,8 +5,11 @@ package json
 
 import "base:intrinsics"
 import "base:runtime"
+import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
+import engine "../core/build"
+import typed "../core/typed"
 
 // `Spec` is the grammar a text follows, a compile-time parameter, so a build compiles only the specs it names.
 Spec :: enum u8 {
@@ -45,27 +48,217 @@ Options :: struct {
 	refuse_non_finite: bool,
 }
 
-// `Detail` holds JSON's detail for a `core.Fault_Kind`, in `core.Fault.detail`.
+// `Detail` holds JSON's detail for a `core.Fault_Kind`, in `core.Fault.detail`. The walk's states and `describe`
+// choose it once a fault is found, from the byte and the state that refused it.
 Detail :: enum u8 {
 	None,
-	Literal, // `Bad_Char`: a byte breaking `true`, `false` or `null`
+	Literal, // `Bad_Char`: a byte breaking `true`, `false` or `null`, or a word that is none of them
 	Identifier, // `Bad_Char`: JSON5 only, a byte that starts no key, quoted or not, where an object's key must start
 	Colon, // `Bad_Char`: a byte where a member's colon must be
 	Trailing, // `Bad_Char`: the first byte after the document that is no whitespace or comment
 	Unframed, // `Bad_Char`: under `.Seq` records, the first byte before the first 0x1E that is no whitespace
 	Cut_Number, // `Bad_Number`: under `.Seq` records, a record that is a number with no whitespace after it, at its end
-	Non_Finite, // `Bad_Char`: JSON5's `Infinity` or `NaN`, under `Options.refuse_non_finite`
+	Non_Finite, // `Bad_Char`: JSON5's `Infinity` or `NaN`, under `Options.refuse_non_finite`, or either word in JSON, `Bad_Number` after a minus
+	Array_Separator, // `Bad_Char`: a byte after an array's element that is no comma and no `]`
+	Member_Separator, // `Bad_Char`: a byte after an object's member that is no comma and no `}`
+	Trailing_Comma, // `Bad_Char`: a container's close right after a comma
+	Lone_Comma, // `Bad_Char`: a comma where a value or a key must start
+	Unmatched_Bracket, // `Bad_Char`: a `]` that closes no array
+	Unmatched_Brace, // `Bad_Char`: a `}` that closes no object
+	Single_Quote, // `Bad_Char`: a `'` where a string must start
+	Control_Char, // `Bad_Char`: a byte below 0x20 that is no whitespace there, as in a string
+	Invalid_Utf8, // `Bad_Char`: at the lead byte of an ill-formed UTF-8 sequence
+	Leading_Zero, // `Bad_Number`: a digit after a number's leading zero
+	Leading_Dot, // `Bad_Char`: a `.` where a value must start
+	Leading_Plus, // `Bad_Char`: a `+` where a value must start
+	Key_Not_String, // `Bad_Char`: a byte that opens no string where an object's key must start
+	Expected_Value, // `Bad_Char`: any other byte where a value must start
 }
 
 // `RULES` is JSON's `core.Rules`, one per `Detail` value, which every fault the walk returns points to.
 @(rodata)
-RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}, {"trailing", "Unexpected text after the value"}, {"unframed", "Text before the first RS"}, {"cut_number", "Potentially truncated top-level numeric value"}, {"non_finite", "Infinity and NaN have no JSON value"}}}
+RULES := core.Rules{"json", {{}, {"literal", "Invalid literal"}, {"identifier", "Invalid unquoted key"}, {"colon", "Missing colon after key"}, {"trailing", "Unexpected text after the value"}, {"unframed", "Text before the first RS"}, {"cut_number", "Potentially truncated top-level numeric value"}, {"non_finite", "Infinity and NaN have no JSON value"}, {"array_separator", "Expected ',' or ']' after an array element"}, {"member_separator", "Expected ',' or '}' after an object member"}, {"trailing_comma", "Trailing comma before the closing bracket"}, {"lone_comma", "Expected value before ','"}, {"unmatched_bracket", "Unmatched ']'"}, {"unmatched_brace", "Unmatched '}'"}, {"single_quote", "Invalid string literal; expected \", but got '"}, {"control_char", "Unescaped control character"}, {"invalid_utf8", "Invalid UTF-8"}, {"leading_zero", "Leading zero in a number"}, {"leading_dot", "A number cannot start with '.'"}, {"leading_plus", "A number cannot start with '+'"}, {"key_not_string", "Object keys must be strings"}, {"expected_value", "Expected a value"}}}
+
+// The detail for the byte at `p` where a value must start and none does, in container `d` (the states' `d`). A close
+// of its own array there follows a comma, since an empty container's close is read where it opens, and an object's
+// value follows its colon.
+@(private, cold)
+value_detail :: proc "contextless" (p, end: [^]u8, d: u64) -> Detail {
+	b := p[0]
+	switch b {
+	case ']', '}':
+		if d < 2 || b != ']' | u8(d & 1) << 5 {
+			return .Unmatched_Bracket if b == ']' else .Unmatched_Brace
+		}
+		return .Expected_Value if d & 1 != 0 else .Trailing_Comma
+	case ',':
+		return .Lone_Comma
+	case '\'':
+		return .Single_Quote
+	case '.':
+		return .Leading_Dot
+	case '+':
+		return .Leading_Plus
+	case 'N', 'I':
+		if non_finite_word(p, end) {
+			return .Non_Finite
+		}
+	}
+	if 'a' <= b | 0x20 && b | 0x20 <= 'z' {
+		return .Literal
+	}
+	return byte_detail(p, end, .Expected_Value)
+}
+
+// The detail for the byte at `p` where an object's key must start and no string does. A close of the object there
+// follows a comma, since an empty object's close is read where it opens.
+@(private, cold)
+key_detail :: proc "contextless" (p, end: [^]u8) -> Detail {
+	switch p[0] {
+	case '}':
+		return .Trailing_Comma
+	case ']':
+		return .Unmatched_Bracket
+	case ',':
+		return .Lone_Comma
+	case '\'':
+		return .Single_Quote
+	}
+	return byte_detail(p, end, .Key_Not_String)
+}
+
+// The detail for the byte at `p` after a value of container `d`, which is no comma and no close of that container.
+@(private, cold)
+after_detail :: proc "contextless" (p: [^]u8, d: u64) -> Detail {
+	switch p[0] {
+	case ']':
+		return .Unmatched_Bracket
+	case '}':
+		return .Unmatched_Brace
+	}
+	return .Member_Separator if d & 1 != 0 else .Array_Separator
+}
+
+// `.Control_Char` for a control byte at `p`, `.Invalid_Utf8` for the lead of an ill-formed UTF-8 sequence, else `other`.
+@(private, cold)
+byte_detail :: proc "contextless" (p, end: [^]u8, other: Detail) -> Detail {
+	if p[0] < 0x20 {
+		return .Control_Char
+	}
+	if p[0] >= 0x80 {
+		if _, kind := spell.utf8_char(p, end); kind == .Bad_Char {
+			return .Invalid_Utf8
+		}
+	}
+	return other
+}
+
+// The byte before src[at] and the whitespace before it, or 0 at the text's start.
+@(private, cold)
+byte_before :: proc "contextless" (src: []u8, at: u64) -> u8 {
+	for i := at; i > 0; i -= 1 {
+		if b := src[i - 1]; b != ' ' && b != '\t' && b != '\n' && b != '\r' {
+			return b
+		}
+	}
+	return 0
+}
+
+// Whether `p` starts the word `NaN` or `Infinity`.
+@(private, cold)
+non_finite_word :: proc "contextless" (p, end: [^]u8) -> bool {
+	n := intrinsics.ptr_sub(end, p)
+	for word in ([]string{"NaN", "Infinity"}) {
+		if n >= len(word) && string(p[:len(word)]) == word {
+			return true
+		}
+	}
+	return false
+}
+
+// `f` with the detail a string's or a number's fault names, which their readers return as a kind alone: a control
+// byte or an ill-formed UTF-8 sequence in a string, a leading zero, or a minus before `Infinity` or `NaN`, and the
+// detail of a key RFC 8259's `st_key` refuses. A `}` after a colon is a missing value, wherever the walk read it.
+@(private, cold)
+describe :: #force_no_inline proc "contextless" (src: []u8, f: core.Fault, $S: Spec) -> core.Fault {
+	f := f
+	// A skipped member's value is read as a root, where a `}` is unmatched.
+	if f.detail == u8(Detail.Unmatched_Brace) && byte_before(src, f.at) == ':' {
+		f.detail = u8(Detail.Expected_Value)
+	}
+	if f.detail != 0 || f.at >= u64(len(src)) {
+		return f
+	}
+	p := raw_data(src)
+	end := p[len(src):]
+	q := p[f.at:]
+	#partial switch f.kind {
+	case .Bad_Char:
+		f.detail = u8(byte_detail(q, end, .None))
+		if b := byte_before(src, f.at); f.detail == 0 && (b == '{' || b == ',') {
+			f.detail = u8(key_detail(q, end))
+		}
+	case .Bad_Number:
+		when S != .Json5 {
+			lo := f.at
+			for lo > 0 && (src[lo - 1] - '0' < 10 || src[lo - 1] == '-') {
+				lo -= 1
+			}
+			digits := lo + 1 if src[lo] == '-' else lo
+			if f.at == digits && f.at > lo && non_finite_word(q, end) {
+				f.detail = u8(Detail.Non_Finite)
+			} else if f.at == digits + 1 && src[digits] == '0' && src[f.at] - '0' < 10 {
+				f.detail = u8(Detail.Leading_Zero)
+			}
+		}
+	}
+	return f
+}
 
 // Checks that `src` holds exactly one document: an optional leading BOM, the document, then whitespace and, in a
 // spec with comments, comments up to the text's end. Returns the fault, or nil. It is `core.validate` with
 // `as(spec, opts)`.
 validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
 	return core.validate(src, as(spec, opts))
+}
+
+// Reads `src` as spec `spec` into a document, as `core.build` does with `as(spec, opts)`.
+build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+	return core.build(src, as(spec, opts), dups, allocator)
+}
+
+// The path reads of `core/build` over the handle. `scan`, `each_answer`, `find` and `set` take `spec` and `opts` and
+// forward to the same names in `core/build` with `as(spec, opts)`.
+@(private)
+scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+	return engine.scan_one(src, as(spec, opts), path, read, allocator)
+}
+
+@(private)
+scan_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+	return engine.scan_many(src, as(spec, opts), paths, read, allocator)
+}
+
+scan :: proc {scan_one, scan_many}
+
+@(private)
+each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+	return engine.each_answer_one(src, as(spec, opts), path, state, on, read, allocator)
+}
+
+@(private)
+each_answer_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+	return engine.each_answer_many(src, as(spec, opts), paths, state, on, read, allocator)
+}
+
+each_answer :: proc {each_answer_one, each_answer_many}
+
+find :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Path_Error) {
+	return engine.find(src, as(spec, opts), path, read, allocator)
+}
+
+set :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+	return engine.set(src, as(spec, opts), path, text, read, allocator)
 }
 
 // Whether `src` holds no document: past an optional leading BOM, only the spec's whitespace and, in a spec with
@@ -103,8 +296,11 @@ walk_text :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opt
 	end := p[len(src):]
 	r := walk_document(src, skip_ws(p[core.text_start(src, lo):], end), S, opts, h, regs, on)
 	hi, fault, stopped := core.result_of(r, &RULES)
-	if fault != nil || stopped {
-		return fault
+	if f, bad := fault.?; bad {
+		return describe(src, f, S)
+	}
+	if stopped {
+		return nil
 	}
 	return tail_fault(src, hi, S)
 }
@@ -120,7 +316,7 @@ tail_fault :: proc "contextless" (src: []u8, hi: u64, $S: Spec) -> Maybe(core.Fa
 		kind: core.Fault_Kind
 		q, _, kind = comment_run(q, end, false, S)
 		if kind != .None {
-			return core.Fault{at = u64(intrinsics.ptr_sub(q, p)), rules = &RULES, kind = kind, detail = u8(Detail.Trailing) if stray_slash(q, kind) else 0}
+			return describe(src, core.Fault{at = u64(intrinsics.ptr_sub(q, p)), rules = &RULES, kind = kind, detail = u8(Detail.Trailing) if stray_slash(q, kind) else 0}, S)
 		}
 	} else {
 		q = skip_ws(q, end)
@@ -195,7 +391,11 @@ walk_from :: #force_inline proc "contextless" (src: []u8, q: [^]u8, $S: Spec, op
 	if q == raw_data(src)[len(src):] {
 		return u64(len(src)), nil, false
 	}
-	return core.result_of(walk_document(src, q, S, opts, h, regs, on), &RULES)
+	hi, fault, stopped = core.result_of(walk_document(src, q, S, opts, h, regs, on), &RULES)
+	if f, bad := fault.?; bad {
+		fault = describe(src, f, S)
+	}
+	return
 }
 
 // `Walk` holds the state a walk carries besides its registers. `stack[i]` bit 0 is set when the container at depth
@@ -216,39 +416,31 @@ Walk :: struct($S: Spec, $H: typeid) {
 	tolerate: bit_set[core.Tolerance; u8],
 	// `Options.refuse_non_finite`, read only where a JSON5 number is read.
 	finite:   bool,
+	// Whether `stack` is this walk's own, grown on the default heap by `deepen`, which the walk's end frees.
+	owned:    bool,
 	// Where the next state continues: for `string_escaped`, the block holding the string's first backslash, for
 	// `st_comments_after`, the run's first comment, which the previous state has read up to.
 	resume:   [^]u8,
 	// The length of the last string `st_skip_member` read whole, its guess at the next one's.
 	skip_len: int,
+	// The deepest nesting the text may have from this walk's root. `depth` is less while the stacks hold fewer
+	// levels, and `deepen` grows them as the text nests.
+	limit:    u64,
 }
 
-// Reads the document whose first byte is `p`. Keeps the depth stack in this frame up to `MAX_DEPTH`, and allocates
-// it on the default heap above that.
+// Reads the document whose first byte is `p`. Keeps the depth stack in this frame, which `deepen` grows on the default
+// heap for a text that nests past it, freed before returning, so a hook can call the walk.
 @(private)
 walk_document :: #force_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
-	if opts.max_depth > core.MAX_DEPTH {
-		return walk_deep(src, p, S, opts, h, regs, on)
-	}
 	// `= ---` leaves the array unwritten, where a struct would be zeroed. Every slot is written before it is read.
 	stack: [core.MAX_DEPTH]u8 = ---
 	depth := u64(opts.max_depth) if opts.max_depth != 0 else core.MAX_DEPTH
-	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth, kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, nil, 0}
-	return st_value(p, w.base[len(src):], 0, INDENT_START, &w, regs.a, regs.b, regs.c, on)
-}
-
-// `walk_document` for a depth past `MAX_DEPTH`. Allocates the stack `core.reserve_depth` sizes, a byte per level, on
-// the default heap and frees it before returning, so a hook can call the walk.
-@(private, cold)
-walk_deep :: #force_no_inline proc "contextless" (src: []u8, p: [^]u8, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
-	context = runtime.default_context()
-	stack, err := make([]u8, core.reserve_depth(opts.max_depth, len(src)))
-	if err != nil {
-		return core.fault_at(0, .No_Memory)
+	w := Walk(S, H){raw_data(src), h, raw_data(stack[:]), regs, depth_held(h, regs, depth), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, false, nil, 0, depth}
+	r := st_value(p, w.base[len(src):], 0, INDENT_START, &w, regs.a, regs.b, regs.c, on)
+	if w.owned {
+		drop_stack(w.stack)
 	}
-	defer delete(stack)
-	w := Walk(S, H){raw_data(src), h, raw_data(stack), regs, u64(opts.max_depth), kernel.tier(), false, opts.tolerate, opts.refuse_non_finite, nil, 0}
-	return st_value(p, w.base[len(src):], 0, INDENT_START, &w, regs.a, regs.b, regs.c, on)
+	return r
 }
 
 // `STATE_TIER` is the CPU tier every state is built for, the lowest: `V2` on x86-64, `Base` elsewhere.
@@ -266,12 +458,16 @@ STATE_FEATURES :: kernel.FEATURES[STATE_TIER]
 pass_over :: #force_inline proc "contextless" (w: ^Walk($S, $H), p, end: [^]u8, slot, d, ind: u64, $open: bool) -> u64 {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, nil, 0}
+	v := Walk(S, core.No_Hooks){w.base, &h, w.stack[slot:], &regs, w.depth - slot, w.tier, false, w.tolerate, w.finite, false, nil, 0, w.limit - slot}
 	when open {
-		return st_open(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
+		r := st_open(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
 	} else {
-		return st_value(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
+		r := st_value(p, end, d, ind, &v, 0, 0, 0, core.no_hook)
 	}
+	if v.owned {
+		drop_stack(v.stack)
+	}
+	return r
 }
 
 // Passes the token over `p..q` to the hook and returns its `Action`. The readers refuse a token wider than `Token.n`
@@ -295,17 +491,66 @@ at :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8) -> u64 {
 	return u64(intrinsics.ptr_sub(p, w.base))
 }
 
+// The depth a walk with hooks `h` and registers `regs` checks first under the limit `limit`: at most the `MAX_DEPTH`
+// levels its byte stack starts with, and the levels the hooks' own stacks hold past the depth they start at, which a
+// typed read's caller gives as many as its text can nest when that is fewer. `deepen` grows them all.
+@(private)
+depth_held :: #force_inline proc "contextless" (h: ^$H, regs: ^core.Hook_Regs, limit: u64) -> u64 {
+	when H == typed.Reader {
+		return min(limit, core.MAX_DEPTH, u64(len(h.src)) + 16)
+	} else when H == engine.Builder {
+		return min(limit, core.MAX_DEPTH, u64(len(h.stack)) - regs.c)
+	} else when H == engine.Scan {
+		return min(limit, core.MAX_DEPTH, u64(engine.scan_room(h)) - regs.c)
+	} else {
+		return min(limit, core.MAX_DEPTH)
+	}
+}
+
+// The fault of an open bracket at the depth the walk checks, `.None` once the check is raised past it: the byte stack
+// and the hooks' stacks grow to twice the levels, up to the limit, so they take the room the text's nesting needs.
+@(private, cold)
+deepen :: #force_no_inline proc "contextless" (w: ^Walk($S, $H)) -> core.Fault_Kind {
+	if w.depth >= w.limit {
+		return .Too_Deep
+	}
+	want := min(w.limit, max(2 * w.depth, w.depth + 1))
+	when H == typed.Reader {
+		room, grown := typed.grow_frames(w.hooks, int(w.depth) + 2, int(want) + 2)
+		if !grown {
+			return .No_Memory
+		}
+		want = min(w.limit, u64(room) - 2)
+	} else when H == engine.Builder {
+		if !engine.builder_deepen(w.hooks, int(want - w.depth)) {
+			return .No_Memory
+		}
+	} else when H == engine.Scan {
+		if !engine.scan_deepen(w.hooks, int(want - w.depth)) {
+			return .No_Memory
+		}
+	}
+	stack := runtime.heap_resize(w.stack, int(want)) if w.owned else runtime.heap_alloc(int(want), false)
+	if stack == nil {
+		return .No_Memory
+	}
+	if !w.owned {
+		intrinsics.mem_copy_non_overlapping(stack, w.stack, w.depth)
+	}
+	w.stack, w.owned, w.depth = ([^]u8)(stack), true, want
+	return .None
+}
+
+// Frees the byte stack a walk run inside another grew.
+@(private, cold)
+drop_stack :: #force_no_inline proc "contextless" (stack: [^]u8) {
+	runtime.heap_free(stack)
+}
+
 @(private)
 fault :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8, kind: core.Fault_Kind, detail := Detail.None) -> u64 {
 	w.regs^ = hs
 	return core.fault_at(at(w, p), kind, u8(detail))
-}
-
-// Returns the fault value for a document that ended at `p`, with kind `.None`.
-@(private)
-ended :: #force_inline proc "contextless" (w: ^Walk($S, $H), hs: core.Hook_Regs, p: [^]u8) -> u64 {
-	w.regs^ = hs
-	return core.fault_at(at(w, p), .None)
 }
 
 // Returns the fault value for a hook that stopped the walk at the token ending at `p`, with `core.STOPPED` in the

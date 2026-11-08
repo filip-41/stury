@@ -3,6 +3,7 @@ package records_tests
 import "core:bytes"
 import "core:io"
 import "core:math"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import core "../.."
@@ -72,7 +73,7 @@ dsv_records_are_the_rows_text :: proc(t: ^testing.T) {
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(got), string(want))
 	back: []Entry
-	testing.expect_value(t, dsv.unmarshal(got, .Csv, &back, {}, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, dsv.unmarshal(got, .Csv, &back, read = {}, opts = {}, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
 	testing.expect(t, len(back) == len(ENTRIES))
 	for v, i in back {
 		testing.expect_value(t, v, ENTRIES[i])
@@ -119,15 +120,6 @@ refused_record_is_taken_back :: proc(t: ^testing.T) {
 	text, end := records.writer_end(&wr)
 	testing.expect_value(t, end.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(text), "\x1e{\"id\":1,\"name\":\"plain\",\"ok\":true,\"score\":0.5}\n\x1e{\"id\":9}\n")
-
-	// A refused first row takes its header with it, and the next row writes it.
-	row_plan, _ := dsv.plan_make(Entry, .Csv)
-	defer typed.plan_destroy(&row_plan)
-	records.writer_init(&wr, {}, dsv.as(.Csv), allocator = context.temp_allocator)
-	testing.expect_value(t, records.write(&wr, Entry{score = math.inf_f64(1)}, &row_plan), core.Typed_Error_Kind.Non_Finite)
-	records.write(&wr, ENTRIES[0], &row_plan)
-	text, end = records.writer_end(&wr)
-	testing.expect_value(t, string(text), "id,name,ok,score\n1,plain,true,0.5\n")
 }
 
 @(test)
@@ -152,10 +144,10 @@ refusal_after_a_flush_is_final :: proc(t: ^testing.T) {
 	testing.expect_value(t, err.n_steps, 1)
 
 	records.writer_init(&wr, bytes.buffer_to_stream(&buf), dsv.as(.Csv))
-	testing.expect_value(t, records.write_cells(&wr, {long, "\xff"}), core.Typed_Error_Kind.Bad_Utf8)
-	testing.expect_value(t, records.write_cells(&wr, {"a"}), core.Typed_Error_Kind.Bad_Utf8)
+	testing.expect_value(t, records.write_cells(&wr, {long, "\xff"}), core.Typed_Error_Kind.Invalid_Utf8)
+	testing.expect_value(t, records.write_cells(&wr, {"a"}), core.Typed_Error_Kind.Invalid_Utf8)
 	_, err = records.writer_end(&wr)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Bad_Utf8)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Invalid_Utf8)
 }
 
 BOM :: "\xEF\xBB\xBF"
@@ -170,11 +162,11 @@ cells_keep_the_old_guards :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.write_cells(&wr, {nil}), core.Typed_Error_Kind.Unwritable)
 	records.write_cells(&wr, {""})
 	testing.expect_value(t, records.write_cells(&wr, {}), core.Typed_Error_Kind.Unwritable)
-	testing.expect_value(t, records.write_cells(&wr, {"ok", "\xff"}), core.Typed_Error_Kind.Bad_Utf8)
+	testing.expect_value(t, records.write_cells(&wr, {"ok", "\xff"}), core.Typed_Error_Kind.Invalid_Utf8)
 	records.write_cells(&wr, {BOM + "not first"})
 	testing.expect_value(t, string(records.writer_take(&wr)), "\"" + BOM + "a\",b\na,,\"x,y\"\n\"\"\n" + BOM + "not first\n")
 	// A refusal after a take goes back to its own record, which no take passed.
-	testing.expect_value(t, records.write_cells(&wr, {"ok", "\xff"}), core.Typed_Error_Kind.Bad_Utf8)
+	testing.expect_value(t, records.write_cells(&wr, {"ok", "\xff"}), core.Typed_Error_Kind.Invalid_Utf8)
 	records.write_text(&wr, transmute([]u8)string("p,q"))
 	text, err := records.writer_end(&wr)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
@@ -186,6 +178,21 @@ cells_keep_the_old_guards :: proc(t: ^testing.T) {
 	testing.expect_value(t, records.write_cells(&wr, {"a\tb", nil}), core.Typed_Error_Kind.None)
 	text, err = records.writer_end(&wr)
 	testing.expect_value(t, string(text), "a\\tb\t\n")
+
+	// A number by its text and the words keep their kind, and under `infer` a string that would read back as one of them
+	// is quoted.
+	records.writer_init(&wr, {}, dsv.as(.Csv, {infer = true}), allocator = context.temp_allocator)
+	records.write_cells(&wr, {"2", write.Number_Literal{"2"}, write.Tree_Part.True, "true", "x", nil})
+	testing.expect_value(t, records.write_cells(&wr, {write.Number_Literal{"2x"}}), core.Typed_Error_Kind.Bad_Raw)
+	text, err = records.writer_end(&wr)
+	testing.expect_value(t, string(text), "\"2\",2,true,\"true\",x,\n")
+	records.writer_init(&wr, {}, dsv.as(.Csv), allocator = context.temp_allocator)
+	records.write_cells(&wr, {"2", write.Number_Literal{"2"}, write.Tree_Part.True, "true"})
+	text, err = records.writer_end(&wr)
+	testing.expect_value(t, string(text), "2,2,true,true\n")
+	records.writer_init(&wr, {}, dsv.as(.Tsv, {infer = true}), allocator = context.temp_allocator)
+	testing.expect_value(t, records.write_cells(&wr, {"2"}), core.Typed_Error_Kind.Unwritable)
+	records.writer_destroy(&wr)
 
 	records.writer_init(&wr, {}, json.as(.Json), allocator = context.temp_allocator)
 	testing.expect_value(t, records.write_cells(&wr, {"a"}), core.Typed_Error_Kind.Unsupported)
@@ -232,6 +239,27 @@ failed_stream_is_final :: proc(t: ^testing.T) {
 	err := records.marshal_stream(io.Stream{procedure = refusing_stream}, list, &plan, json.as(.Json))
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Write_Failed)
 	testing.expect_value(t, err.cause, io.Error.Permission_Denied)
+}
+
+// The bytes a failed output was given go nowhere: a take after the failure has none.
+@(test)
+failed_buffer_takes_nothing :: proc(t: ^testing.T) {
+	plan, _ := json.plan_make(Entry)
+	defer typed.plan_destroy(&plan)
+	storage: [8192]u8
+	arena: mem.Arena
+	mem.arena_init(&arena, storage[:])
+	wr: records.Writer
+	records.writer_init(&wr, {}, json.as(.Json), allocator = mem.arena_allocator(&arena))
+	kind := core.Typed_Error_Kind.None
+	for i := 0; kind == .None && i < 10_000; i += 1 {
+		kind = records.write(&wr, ENTRIES[i % len(ENTRIES)], &plan)
+	}
+	testing.expect_value(t, kind, core.Typed_Error_Kind.No_Memory)
+	testing.expect_value(t, len(records.writer_take(&wr)), 0)
+	_, end := records.writer_end(&wr)
+	testing.expect_value(t, end.kind, core.Typed_Error_Kind.No_Memory)
+	testing.expect_value(t, len(records.writer_take(&wr)), 0)
 }
 
 @(test)

@@ -86,18 +86,6 @@ many_tasks_share_the_pool :: proc(t: ^testing.T) {
 	testing.expect(t, count <= 400 * 3 * (pool.runner.threads + 1) / 2)
 }
 
-@(test)
-writing_calls_balance :: proc(t: ^testing.T) {
-	pool: host.Pool
-	host.pool_init(&pool, 2)
-	defer host.pool_destroy(&pool)
-	host.writing(&pool, true)
-	host.writing(&pool, false)
-	count: int
-	run(&pool.runner, pool.runner.threads, bump, &count)
-	testing.expect(t, count >= 1)
-}
-
 // Every call waits for a second one to start, so a pool that hands the task to no helper leaves it waiting.
 meet :: proc(arg: rawptr) {
 	sync.atomic_add((^int)(arg), 1)

@@ -107,14 +107,8 @@ decoded_escape_other :: proc "contextless" (src: []u8, p, end: u64, e: u8) -> (s
 		case 'x':
 			s, n := utf8.encode_rune(rune(spell.HEX_NIBBLE[src[p + 2]] << 4 | spell.HEX_NIBBLE[src[p + 3]]))
 			return s, n, p + 4
-		case '0':
-			spelled[0] = 0
-			return spelled, 1, p + 2
-		case 'v':
-			spelled[0] = 0x0B
-			return spelled, 1, p + 2
-		case '\'':
-			spelled[0] = '\''
+		case '0', 'v':
+			spelled[0] = 0x0B if e == 'v' else 0
 			return spelled, 1, p + 2
 		case '\n':
 			return spelled, 0, p + 2
@@ -329,40 +323,9 @@ copy_up_to :: #force_inline proc(dst: []u8, w: int, src: [^]u8, p, n: int) {
 	}
 }
 
-// `Spelling.key_equals` for a key with `SPELLING_DECODE` set. Compares its decoded bytes against `name` span by span
-// between escapes, with no allocation. A key holding a tolerated ill-formed sequence compares through `decoded_next`,
-// so it matches what `text` returns.
+// `Spelling.key_equals` for a key with `SPELLING_DECODE` set. Compares its decoded bytes against `name` with no
+// allocation, through `decoded_next`, so it matches what `text` returns.
 @(private)
 key_equals_decode :: #force_inline proc "contextless" (doc: ^core.Token_View, n: core.Node, name: string) -> bool {
-	if n.spelling & core.SPELLING_LAX != 0 {
-		return spell.decoded_equals(decoded_init(doc.src, n), decoded_next, name)
-	}
-	src := doc.src
-	end := n.lo + u64(n.n)
-	p := n.lo
-	at := 0
-	// Most keys differ from `name` early, so the read ends at the first byte that differs.
-	#no_bounds_check for p < end {
-		c := src[p]
-		if c != '\\' {
-			if at >= len(name) || name[at] != c {
-				return false
-			}
-			p += 1
-			at += 1
-			continue
-		}
-		spelled, size, next := decoded_escape(src, p, end)
-		if at + size > len(name) {
-			return false
-		}
-		for k in 0 ..< size {
-			if name[at + k] != spelled[k] {
-				return false
-			}
-		}
-		at += size
-		p = next
-	}
-	return at == len(name)
+	return spell.decoded_equals(decoded_init(doc.src, n), decoded_next, name)
 }

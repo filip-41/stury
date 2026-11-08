@@ -7,7 +7,7 @@ package jq
 regex_input :: proc(ip: ^Interp, v: Value) -> (string, Signal) {
 	s, ok := string_of(v)
 	if !ok {
-		return "", fail(ip, "%s (%s) cannot be matched, as it is not a string", type_name(v), brief(v))
+		return "", fail(ip, "%s (%s) cannot be matched, as it is not a string", type_name(v), brief(ip, v))
 	}
 	return s, .Go
 }
@@ -18,7 +18,7 @@ regex_input :: proc(ip: ^Interp, v: Value) -> (string, Signal) {
 regex_run :: proc(ip: ^Interp, re, flags: Value, s: string, global: Maybe(bool)) -> (r: Regex, ms: []Match, sig: Signal) {
 	pattern, ok := string_of(re)
 	if !ok {
-		return {}, nil, fail(ip, "%s (%s) is not a string", type_name(re), brief(re))
+		return {}, nil, fail(ip, "%s (%s) is not a string", type_name(re), brief(ip, re))
 	}
 	if r, sig = compile_regex(ip, pattern, flags); sig != .Go {
 		return
@@ -90,7 +90,7 @@ match_path_error :: proc(ip: ^Interp, r: ^Regex, s: string, ms: []Match) -> Sign
 	for m in ms {
 		append(&a.items, match_object(r, s, m, &walk))
 	}
-	return fail(ip, "Invalid path expression near attempt to iterate through %s", brief(a))
+	return fail(ip, "Invalid path expression near attempt to iterate through %s", brief(ip, a))
 }
 
 // `split/2` as jq defines it, cutting at its matches' character offsets. jq's `match($re; flags + "g")`
@@ -127,6 +127,10 @@ native_sub :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, o
 		if flags, sig = collect(ip, n.args[2], input, env); sig != .Go {
 			return sig
 		}
+	}
+	// A binding that makes no output makes none, before the input's type is judged.
+	if len(res) == 0 || len(flags) == 0 {
+		return .Go
 	}
 	s: string
 	if s, sig = regex_input(ip, input.v); sig != .Go {

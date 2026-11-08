@@ -4,17 +4,24 @@ package jq
 
 import "core:math"
 
-// `.name`, `.[e]`, `.[e:f]` and `.[]`: `n.a`'s outputs indexed.
+// `.name`, `.[e]`, `.[e:f]` and `.[]`: `n.a`'s outputs indexed. As in jq, `e` and `f` run first, on the input of the
+// whole term, and `n.a` runs for each key they give: `(t1, t2)[0, 1]` is `t1[0], t2[0], t1[1], t2[1]`.
 @(private)
 eval_step :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
 	s := Index_Sink{ip = ip, track = track, out = out, opt = n.opt}
 	#partial switch n.kind {
 	case .Field:
-		s.sink.emit, s.key = index_emit, n.name
+		s.sink.emit, s.at = index_target_emit, n.name
 	case .Index:
-		s.sink.emit, s.n, s.env, s.input = index_by_expr, n, env, input
+		s.sink.emit, s.n, s.env, s.input = index_key_emit, n, env, input
+		return eval(ip, n.b, input, env, false, &s)
 	case .Slice:
-		s.sink.emit, s.n, s.env, s.input = slice_emit, n, env, input
+		s.n, s.env, s.input = n, env, input
+		if n.b == nil {
+			return slice_to(&s, nil)
+		}
+		s.sink.emit = slice_from_emit
+		return eval(ip, n.b, input, env, false, &s)
 	case:
 		s.sink.emit = iterate_emit
 	}
@@ -24,25 +31,22 @@ eval_step :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env
 Index_Sink :: struct {
 	using sink: Sink,
 	ip:         ^Interp,
-	key:        string,
 	n:          ^Node,
 	env:        ^Env,
-	input:         Item,
+	input:      Item,
 	track:      bool,
 	out:        ^Sink,
-	target:     Item,
+	at:         Value, // `.name`'s name, `.[e]`'s key, or `.[e:f]`'s `{start, end}`
 	from:       Value,
 	opt:        bool, // `?`: the step's own error outputs nothing
 }
 
-index_emit :: proc(s: ^Sink, it: Item) -> Signal {
-	x := (^Index_Sink)(s)
-	return index_and_emit(x.ip, it, x.key, x.track, x.out, x.opt)
-}
-
 index_and_emit :: proc(ip: ^Interp, t: Item, key: Value, track: bool, out: ^Sink, opt := false) -> Signal {
 	if track && pathless(t.path) {
-		return fail(ip, "Invalid path expression near attempt to access element %s of %s", brief(key), brief(t.v))
+		return fail(ip, "Invalid path expression near attempt to access element %s of %s", brief(ip, key), brief(ip, t.v))
+	}
+	if track && ends_in_fact(t.path) {
+		return fact_step_not_last(ip)
 	}
 	v, sig := index_value(ip, t.v, key)
 	if sig != .Go {
@@ -51,29 +55,21 @@ index_and_emit :: proc(ip: ^Interp, t: Item, key: Value, track: bool, out: ^Sink
 	return out.emit(out, {v = v, path = extend(t.path, key) if track else nil})
 }
 
-// `.[e]`: `e` reads the input of the whole term, not the value being indexed.
-index_by_expr :: proc(s: ^Sink, it: Item) -> Signal {
-	x := (^Index_Sink)(s)
-	inner := x^
-	inner.sink.emit = index_key_emit
-	inner.target = it
-	return eval(x.ip, x.n.b, x.input, x.env, false, &inner)
-}
-
 index_key_emit :: proc(s: ^Sink, it: Item) -> Signal {
-	x := (^Index_Sink)(s)
-	return index_and_emit(x.ip, x.target, scalar(it.v), x.track, x.out, x.opt)
+	return index_targets((^Index_Sink)(s), scalar(it.v))
 }
 
-slice_emit :: proc(s: ^Sink, it: Item) -> Signal {
-	x := (^Index_Sink)(s)
+// `n.a`'s outputs, each indexed by `at`.
+index_targets :: proc(x: ^Index_Sink, at: Value) -> Signal {
 	inner := x^
-	inner.target = it
-	if x.n.b == nil {
-		return slice_to(&inner, nil)
-	}
-	inner.sink.emit = slice_from_emit
-	return eval(x.ip, x.n.b, x.input, x.env, false, &inner)
+	inner.sink.emit = index_target_emit
+	inner.at = at
+	return eval(x.ip, x.n.a, x.input, x.env, x.track, &inner)
+}
+
+index_target_emit :: proc(s: ^Sink, it: Item) -> Signal {
+	x := (^Index_Sink)(s)
+	return index_and_emit(x.ip, it, x.at, x.track, x.out, x.opt)
 }
 
 slice_from_emit :: proc(s: ^Sink, it: Item) -> Signal {
@@ -98,20 +94,23 @@ slice_finish :: proc(x: ^Index_Sink, to: Value) -> Signal {
 	key := new_object()
 	object_put(key, "start", x.from)
 	object_put(key, "end", to)
-	return index_and_emit(x.ip, x.target, key, x.track, x.out, x.opt)
+	return index_targets(x, key)
 }
 
 iterate_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	x := (^Index_Sink)(s)
 	if x.track && pathless(it.path) {
-		return fail(x.ip, "Invalid path expression near attempt to iterate through %s", brief(it.v))
+		return fail(x.ip, "Invalid path expression near attempt to iterate through %s", brief(x.ip, it.v))
+	}
+	if x.track && ends_in_fact(it.path) {
+		return fact_step_not_last(x.ip)
 	}
 	k := kind(it.v)
 	if k != .Array && k != .Object {
 		if x.opt {
 			return .Go
 		}
-		return fail(x.ip, "Cannot iterate over %s (%s)", type_name(it.v), brief(it.v))
+		return fail(x.ip, "Cannot iterate over %s (%s)", type_name(it.v), brief(x.ip, it.v))
 	}
 	members := iterate(it.v)
 	i := 0
@@ -141,7 +140,7 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 		if tk == .Null {
 			return nil, .Go
 		}
-		return nil, fail(ip, "Cannot index %s with string (%s)", type_name(t), brief(k))
+		return nil, fail(ip, "Cannot index %s with string (%s)", type_name(t), brief(ip, k))
 	case Number:
 		if tk == .Array {
 			if math.is_nan(k.f) {
@@ -156,10 +155,13 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 		if tk == .Null {
 			return nil, .Go
 		}
-		return nil, fail(ip, "Cannot index %s with number (%s)", type_name(t), brief(key))
-	case ^Object, ^Array, Ref, Path:
+		return nil, fail(ip, "Cannot index %s with number (%s)", type_name(t), brief(ip, key))
+	case ^Object, ^Array, Ref, Path, ^Commented:
 		switch kind(key) {
 		case .Object:
+			if role, is_fact := fact_step(key); is_fact {
+				return comments_value(t, role), .Go
+			}
 			if tk == .Null {
 				return nil, .Go
 			}
@@ -176,7 +178,7 @@ index_value :: proc(ip: ^Interp, t: Value, key: Value) -> (Value, Signal) {
 		}
 	case nil, bool:
 	}
-	return nil, fail(ip, "Cannot index %s with %s (%s)", type_name(t), type_name(key), brief(key))
+	return nil, fail(ip, "Cannot index %s with %s (%s)", type_name(t), type_name(key), brief(ip, key))
 }
 
 // Bounds of the slice `key` ({"start", "end"}) of length `n`: negative counts from the end, the start
@@ -245,7 +247,7 @@ slice_value :: proc(ip: ^Interp, t: Value, key: Value) -> (v: Value, sig: Signal
 		return char_slice(&w, s, lo, hi), .Go
 	case .Null, .False, .True, .Number, .Object:
 	}
-	return nil, fail(ip, "Cannot index %s with object (%s)", type_name(t), brief(key))
+	return nil, fail(ip, "Cannot index %s with object (%s)", type_name(t), brief(ip, key))
 }
 
 indices_of :: proc(t: Value, sub: Value) -> Value {

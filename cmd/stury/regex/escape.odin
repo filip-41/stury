@@ -18,18 +18,9 @@ parse_escape :: proc(p: ^Parser) -> ^Node {
 	switch c {
 	case 'w', 'W', 'd', 'D', 's', 'S':
 		return prop_node(escape_prop(c))
-	case 'b':
-		return assert_node(.Word_Boundary)
-	case 'B':
-		return assert_node(.Not_Word_Boundary)
-	case 'A':
-		return assert_node(.Begin_Buf)
-	case 'z':
-		return assert_node(.End_Buf)
-	case 'Z':
-		return assert_node(.Semi_End_Buf)
-	case 'G':
-		return assert_node(.Search_Start)
+	case 'b', 'B', 'A', 'z', 'Z', 'G':
+		kinds := [?]Assert_Kind{.Word_Boundary, .Not_Word_Boundary, .Begin_Buf, .End_Buf, .Semi_End_Buf, .Search_Start}
+		return assert_node(kinds[strings.index_byte("bBAzZG", c)])
 	case 'K':
 		return new_node(.Keep)
 	case 'R':
@@ -141,11 +132,8 @@ parse_call :: proc(p: ^Parser) -> ^Node {
 		p.i += w
 		return r
 	}
-	digit :: proc(r: rune) -> bool {
-		return r >= '0' && r <= '9'
-	}
 	c := next(p)
-	numeric, sign := digit(c), c == '-' || c == '+'
+	numeric, sign := c >= '0' && c <= '9', c == '-' || c == '+'
 	if !numeric && !sign && !is_word(c) {
 		for !at_end(p) {
 			if c = next(p); c == close || c == ')' {
@@ -161,7 +149,7 @@ parse_call :: proc(p: ^Parser) -> ^Node {
 		if c = next(p); c == close || c == ')' {
 			break
 		}
-		numeric &&= digit(c)
+		numeric &&= c >= '0' && c <= '9'
 	}
 	name := p.src[start:name_end]
 	if c != close {
@@ -173,11 +161,10 @@ parse_call :: proc(p: ^Parser) -> ^Node {
 	if !numeric {
 		return n
 	}
-	num := 0
-	for d in transmute([]byte)(name[1:] if sign else name) {
-		if num = num * 10 + int(d - '0'); num > int(max(i32)) {
-			return fail(p, "too big number")
-		}
+	j := int(sign)
+	num, _ := number(name, &j, int(max(i32)) + 1)
+	if num > int(max(i32)) {
+		return fail(p, "too big number")
 	}
 	if sign && num == 0 {
 		return fail(p, strings.concatenate({"invalid group name <", name, ">"}))
@@ -251,29 +238,15 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 	}
 	c := peek(p)
 	p.i += 1
-	digit :: proc(c: byte, base: int) -> int {
-		d := -1
-		switch c {
-		case '0' ..= '9': d = int(c - '0')
-		case 'a' ..= 'f': d = int(c - 'a') + 10
-		case 'A' ..= 'F': d = int(c - 'A') + 10
-		}
-		return d if d < base else -1
-	}
 	if k := strings.index_byte("tnrfae", c); k >= 0 {
 		values := "\t\n\r\f\a\x1b"
 		return rune(values[k]), false, true
 	}
 	switch c {
 	case 'x':
-		if peek(p) == '{' && !at_end(p) && digit(peek(p, 1), 16) >= 0 {
+		if peek(p) == '{' && !at_end(p) && digit(peek(p, 1)) < 16 {
 			p.i += 1
-			n, v := 0, 0
-			for !at_end(p) && digit(peek(p), 16) >= 0 {
-				v = v * 16 + digit(peek(p), 16)
-				n += 1
-				p.i += 1
-			}
+			v, n := number(p.src, &p.i, 1 << 40, 16)
 			if n > 8 {
 				fail(p, "too long wide-char value")
 				return 0, false, false
@@ -285,20 +258,12 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 			p.i += 1
 			return rune(v), false, true
 		}
-		v := 0
-		for k := 0; k < 2 && !at_end(p) && digit(peek(p), 16) >= 0; k += 1 {
-			v = v * 16 + digit(peek(p), 16)
-			p.i += 1
-		}
+		v, _ := number(p.src, &p.i, 0xFF, 16, 2)
 		return rune(v), true, true
 	case 'o':
 		if peek(p) == '{' && !at_end(p) {
 			p.i += 1
-			v := 0
-			for !at_end(p) && digit(peek(p), 8) >= 0 {
-				v = min(v * 8 + digit(peek(p), 8), 0x7FFFFFFF)
-				p.i += 1
-			}
+			v, _ := number(p.src, &p.i, 0x7FFFFFFF, 8)
 			if at_end(p) || peek(p) != '}' {
 				fail(p, "invalid code point value")
 				return 0, false, false
@@ -307,11 +272,8 @@ escape_unit :: proc(p: ^Parser) -> (r: rune, is_byte: bool, ok: bool) {
 			return rune(v), false, true
 		}
 	case '0' ..= '7':
-		v := int(c - '0')
-		for k := 0; k < 2 && !at_end(p) && digit(peek(p), 8) >= 0; k += 1 {
-			v = v * 8 + digit(peek(p), 8)
-			p.i += 1
-		}
+		p.i -= 1
+		v, _ := number(p.src, &p.i, 0x1FF, 8, 3)
 		return rune(v & 0xFF), true, true
 	case 'c':
 		if at_end(p) {

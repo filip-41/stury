@@ -6,6 +6,7 @@ codes](#errors-and-exit-codes)). On top of jq it:
 
 - validates JSON without running a filter (`stury check`);
 - writes each input back in the printer's layout, or transcodes it (`stury fmt`);
+- edits each input with a jq filter, keeping every byte the edit does not touch (`stury edit`);
 - reads and writes JSONC, NDJSON, CSV and TSV (`--from FORMAT`, `--to FORMAT`, [Formats](#formats));
 - reads input strictly, as RFC 8259 says ([Differences from jq](#differences-from-jq)).
 
@@ -20,6 +21,7 @@ stury [-c] [-r] [-j] [--raw-output0] [-a] [-S] [-C|-M] [--tab|--indent N] [--unb
       [FILTER] [FILE...] [--args STRING...|--jsonargs JSON...]
 stury check [--from FORMAT|--seq] [--max-depth N] [FILE...]
 stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] [--max-depth N] [FILE...]
+stury edit [--from FORMAT|--seq] [--in-place|--check] [--max-depth N] [-f FILE] [-L DIR] [--arg...] FILTER [FILE...]
 stury -h | -V | --build-configuration
 ```
 
@@ -37,7 +39,9 @@ $ echo '{"a": {"b": [1, 2, 3]}}' | stury '.a.b[]'
 3
 
 $ printf '{"foo": 01}' | stury check
-stury: error: <stdin>:1:10: Invalid numeric literal
+stury: parse error: <stdin>:1:10: Leading zero in a number
+{"foo": 01}
+         ^
 
 $ printf '{"n": 1}\n{"n": 2}\n' | stury --from ndjson '.n'
 1
@@ -58,10 +62,10 @@ $ tail -f log | stury .msg
 
 ## Options
 
-stury takes all of jq's options except `--run-tests` (jq's test-file runner, which stury does not have) and
-adds its own. Each letter has jq's long form (`--compact-output`,
-`--null-input`, `--from-file`, `--library-path`, ...); the synopsis above gives the full list. `FILTER` is a
-jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
+stury takes all of jq's options except `--run-tests`, `--debug-dump-disasm` and `--debug-trace` (jq's test-file
+runner and its bytecode listings, which stury does not have) and adds its own. Each letter has jq's long form
+(`--compact-output`, `--null-input`, `--from-file`, `--library-path`, ...); the synopsis above gives the full list.
+`FILTER` is a jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 
 `FILE` and `FILTER` are positional:
 
@@ -77,11 +81,14 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 | --- | --- |
 | `check`, `validate` | A subcommand, recognised when it is the first argument that is not an option, before any `--` (`stury -c check FILE`); under `-f` that argument is the program file. See [`check`](#check). |
 | `fmt` | A subcommand, recognised as `check` is: writes each input back in the printer's layout, or in another format, and runs no filter. See [`fmt`](#fmt). |
+| `edit` | A subcommand, recognised as `check` is: runs the filter on each input and splices its one output into the input's bytes. See [`edit`](#edit). |
 | `--from FORMAT` | Read `json` (the default), `jsonc`, `json5`, `ndjson`, `csv` or `tsv` ([Formats](#formats)). |
 | `--to FORMAT` | Write `json` (the default), `jsonc`, `ndjson`, `csv` or `tsv` ([Formats](#formats), [CSV and TSV output](#csv-and-tsv-output)). `fmt` writes the `--from` format when `--to` is not given. |
-| `--in-place` | `fmt` only: rewrite each file through a temporary one and a rename, when `--to` is `--from` ([`fmt`](#fmt)). |
-| `--check` | `fmt` only: write nothing, and exit 1 when a file is not already formatted ([`fmt`](#fmt)). |
+| `--in-place` | `fmt` and `edit` only: rewrite each file through a temporary one and a rename, when `--to` is `--from` ([`fmt`](#fmt), [`edit`](#edit)). |
+| `--check` | `fmt` and `edit` only: write nothing, name each file that would change on stderr, and exit 1 ([`fmt`](#fmt), [`edit`](#edit)). |
 | `--grow-header` | With `--to csv` or `--to tsv`, write a header of every key of every object output ([CSV and TSV output](#csv-and-tsv-output)). |
+| `--delimiter C`, `--no-header`, `--comment C`, `--infer`, `--ragged`, `--lazy-quotes` | How `--from csv` or `--from tsv` reads ([CSV and TSV options](#csv-and-tsv-options)). |
+| `--out-delimiter C`, `--out-comment C`, `--out-no-header`, `--crlf` | How `--to csv` or `--to tsv` writes ([CSV and TSV options](#csv-and-tsv-options)). |
 | `--max-depth N` | Refuse nesting past N levels (1024 by default, up to 2^20, where jq's limit is 10000). A value deeper than the default also runs on one thread. |
 | `--follow` | With one named file, answer each record as it is appended, like `tail -f FILE | stury FILTER` without the pipe ([`--follow`](#--follow)). |
 | `--explain` | Write the plan the filter runs under and what the run did to stderr ([`--explain`](#--explain)), and run the filter as without it. |
@@ -90,11 +97,11 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 
 | Option | Behaviour |
 | --- | --- |
-| `-C`, `-M` | `-C` colours output with jq's defaults or `JQ_COLORS`. It is on by default when stdout is a terminal and `NO_COLOR` is unset; `-M` turns it off. |
+| `-C`, `-M` | `-C` colours output with jq's defaults or `JQ_COLORS`. It is on by default when stdout is a terminal and `NO_COLOR` is unset; `-M` turns it off. Under `--to jsonc` the output is not coloured, since only the uncoloured printer keeps the comments. |
 | `--tab`, `--indent N` | `--indent 0` prints each line with no indent, as jq does. N is -1 to 7; -1 is `--tab`. |
 | `-b` | Does nothing outside Windows. |
 | `-V` | Prints `stury-` and the version it was built with: the release version (for example `0.1.1`), or the short commit hash from a source build (`dev` outside a checkout). |
-| `--help` | It and the short usage point to stury(1) (`docs/stury.1`) and this page. |
+| `--help` | It and the short usage point to stury(1) (`docs/stury.1`) and this page, and list `check` and `fmt` under Commands. `stury check --help` and `stury fmt --help` give that command's own help. A usage error ends with `or see stury(1), or docs/cli.md at https://github.com/filip-41/stury`, where jq names its manpage and jqlang.org. |
 
 ### Behaviour notes
 
@@ -113,88 +120,92 @@ jq 1.8 program, modules included (`import`, `include`, `-L`, `~/.jq`).
 
 ### `--explain`
 
-`--explain` writes `stury: explain: KEY: FACTS` lines to stderr and runs the filter as it would without the
-option: the same stdout, the same exit status, the same other stderr. The facts are `key=value` tokens, named as
-the code names them, in lower case. The plan block is written once the route is chosen, before any input is read; the
-run block when the run ends, whether it ends normally or on an error. A filter that does not compile has the
-`program` line and its compile error alone.
+`--explain` writes `stury: explain: KEY: SENTENCE` lines to stderr and runs the filter as it would without the
+option: the same stdout, the same exit status, the same other stderr. The plan block is written once the plan is
+chosen, before any input is read; the run block when the run ends, whether it ends normally or on an error. A filter
+that does not compile has the `filter` line and its compile error alone.
 
 ```sh
 $ stury --explain -c '.logs[].id' in.json
-stury: explain: program: ".logs[].id"
-stury: explain: input: format=json dialect=json records=whole duplicates=last
-stury: explain: route: path_scan
-stury: explain: path: .logs[].id any_at=1 select=none limit=0
-stury: explain: compile_time: 88us
+stury: explain: filter: ".logs[].id"
+stury: explain: input: JSON texts one after another, a repeated key keeping its last value
+stury: explain: plan: reads only the path .logs[].id of each text, without building the values it passes by
+stury: explain: decides: the bytes read decide the speed, and memory holds only the answers
 1
 2
-stury: explain: run: texts=1 scanned=1 interpreted=0 pieces=none
-stury: explain: run_time: 66us
-stury: explain: cost: peak_rss=2818048 input=35 output=4
+stury: explain: ran: 1 input, 1 read by path and 0 built
+stury: explain: threads: one
+stury: explain: time: planned in 65us, ran in 123us
+stury: explain: used: 3555328 bytes of memory at the peak, 35 bytes read, 4 bytes written
 $ stury --explain -c '.a | tostring' in.json
-stury: explain: program: ".a | tostring"
-stury: explain: input: format=json dialect=json records=whole duplicates=last
-stury: explain: route: interpreter
-stury: explain: refused: not_path
-stury: explain: compile_time: 142us
+stury: explain: filter: ".a | tostring"
+stury: explain: input: JSON texts one after another, a repeated key keeping its last value
+stury: explain: plan: builds each text whole and runs the filter on it
+stury: explain: because: the filter is not a path, and not select(PATH op LITERAL)
+stury: explain: decides: the filter's work on each built value decides the speed, and memory holds one built input at a time
 "1"
-stury: explain: run: texts=1 scanned=0 interpreted=1 pieces=none
-stury: explain: run_time: 140us
-stury: explain: cost: peak_rss=3096576 input=35 output=4
+stury: explain: ran: 1 input, each built
+stury: explain: threads: one
+stury: explain: time: planned in 86us, ran in 102us
+stury: explain: used: 3768320 bytes of memory at the peak, 35 bytes read, 4 bytes written
 ```
 
-| Key | Facts |
+The keys come in this order, each line once unless said:
+
+| Key | Says |
 | --- | --- |
-| `program` | The filter, quoted. Written as soon as it is known, so a compile error follows it; a `-f` file that cannot be read has no line. |
-| `input` | `format` (`json`, `jsonc`, `ndjson`, `csv`, `tsv`), and for the JSON formats `dialect` (`json`, `jsonc`, `json5`), `records` and `duplicates` (a repeated key answers with its last value). `records` is how the input is cut into texts: `whole` (texts as jq reads them), `ndjson`, `seq` (`--seq`), `raw_lines` (`-R`) or `none` (`-n`). |
-| `route` | `path_scan`, `columns` or `interpreter`. |
-| `path` | The path scan answers this path: `any_at` is the index of its first `[]` step or `none`; `select` is `none`, or the comparison of `select(PATH op LITERAL)` as `eq`, `ne`, `lt`, `le`, `gt` or `ge` and its `literal`, and the path is PATH; `limit` is the count of `first(P)` or `limit(N; P)`, 0 for every answer. |
-| `columns` | The column route answers: `read` the columns it reads (`*` for every column), `shape` of the output (`column`: a single column; `array`; `object`; `all`: every column of the record) and `selecting` (`yes` for `select(F)`, where F runs on an object of the columns it reads and a kept record is printed from its cells). |
-| `refused` | The interpreter answers because of these reasons, every one that holds, comma-joined. |
-| `compile_time` | From reading the filter to the route chosen. The interpreter's parse is in it only when the route needs the interpreter before the first input. |
-| `run` | Texts read: `texts` is `scanned` (the scan answered) plus `interpreted` (the interpreter ran on it). Under the interpreter the unit is what its main loop reads: a text, a `--stream` event, a CSV record. `-n` reads none of its own. The column route has `files` (CSV files opened) instead. `pieces` is how many pieces of the input were answered on the pool's threads ([Long input](#long-input)), or `none`. |
-| `fallback` | The first text the scan handed to the interpreter: its number from 1 and the `why`. Not written when the scan kept every text. |
-| `run_time` | From the route chosen to the end of the run. |
-| `cost` | `peak_rss` bytes, `input` bytes taken (a file mapped or read whole counts in full) and `output` bytes written to stdout. |
+| `filter` | The filter, quoted. Written as soon as it is known, so a compile error follows it. A `-f` file that cannot be read has no line. |
+| `input` | The format and how it is cut into inputs: JSON texts one after another (as jq reads them), one per line (`ndjson`), in RFC 7464 records (`--seq`), lines of text (`-R`), CSV or TSV records as objects or, under `--no-header`, arrays, or none (`-n`). |
+| `plan` | How each input is answered, one of three ways. Reading only a path, `select(PATH op LITERAL)` or `first`/`limit` of a path from the text, without building the values the path passes by, with a second `plan` line when the read stops after the first answers. Reading only the named columns of each CSV or TSV record, straight from its text. Or building each input whole (the whole input under `-s`, nothing under `-n`) and running the filter on it. |
+| `because` | Under a built plan, one line per reason the filter needs it, every one that holds, in the order of the table below. |
+| `decides` | What the speed and the memory follow under this plan. |
+| `ran` | How many inputs were read, how many were answered by their path and how many were built. A column plan counts the files whose records it read. Under a built plan the unit is what the filter runs on: a text, a `--stream` event, a CSV record. |
+| `threads` | `one`, or how many pieces of a long input were answered over how many threads ([Long input](#long-input)). |
+| `fallback` | The first input that a path plan built after all, and why. Not written when every input was read by its path. |
+| `time` | From reading the filter to the plan chosen, and from then to the end of the run. |
+| `used` | The peak memory, the bytes taken (a file mapped or read whole counts in full) and the bytes written to stdout. |
 
-Reasons in `refused`:
+The reasons on `because` lines:
 
-| Token | Meaning |
+| Reason | When |
 | --- | --- |
-| `null_input` | `-n` reads no input. |
-| `slurp` | `-s` needs the input whole. |
-| `sort_keys` | `-S` sorts keys on output. |
-| `raw_input` | `-R` reads lines as strings. |
-| `seq` | `--seq` writes record separators. |
-| `stream` | `--stream` reads jq's events. |
-| `exit_status` | `-e` reads each output. |
-| `raw0` | `--raw-output0` writes NUL. |
-| `ascii` | `-a` writes ASCII only. |
-| `cells_out` | `--to csv|tsv` writes each output as a record. |
-| `comments_out` | `--to jsonc` prints a value's comments, which a path answer does not keep. |
-| `not_path` | The filter is not a path and not `select(PATH op LITERAL)`. |
-| `dialect_select` | `--from jsonc` scans plain paths only, as its texts print with their comments. |
-| `select_redefined` | `select` is redefined, by the filter or by `~/.jq`. |
-| `select_compare` | `select(F)`: F is not `PATH op LITERAL` with a scalar `LITERAL`. |
-| `select_path` | `select(F)`: PATH is not a path the scan answers, or has a `[]`. |
-| `not_columns` | `--from csv|tsv`: the filter does not name only columns. |
-| `object_key` | An object key is not a constant, or repeats. |
-| `object_member` | An object member is not a column of the input. |
-| `select_columns` | `select(F)`: F reads more than named columns. |
-| `own_spelling` | `--from json5`: a path answer would print a token as written (`'a'`, `0x1F`). |
+| -n reads no input | `-n` |
+| -s holds the whole input as one array | `-s` |
+| -S sorts the keys of every object | `-S` |
+| -R reads each line as a string | `-R` |
+| --seq writes a record separator before each output | `--seq` |
+| --stream turns each text into jq's path events | `--stream` |
+| -e looks at each output | `-e` |
+| --raw-output0 ends each output with a NUL | `--raw-output0` |
+| -a writes ASCII only | `-a` |
+| --to csv or tsv writes each output as a record | `--to csv` or `--to tsv` |
+| --to jsonc prints a value's comments, which reading a path does not keep | `--to jsonc` |
+| the filter is not a path, and not select(PATH op LITERAL) | any other filter |
+| --from jsonc reads only a plain path without building, as a text prints with its comments | `select` or `first`/`limit` under `--from jsonc` |
+| select is redefined, by the filter or by ~/.jq | a `def select` |
+| select(F): F is not PATH op LITERAL with a scalar LITERAL | another `select` |
+| select(F): its PATH has a [] or is not a path stury reads without building | `select(.a[] == 1)` |
+| the filter does not name only columns of the record | `--from csv` or `tsv` with any other filter |
+| an object key is not a constant, or repeats | `{(.a): .b}`, `{a, a}` |
+| an object member is not a column of the input | `{a: 1}` |
+| select(F): F reads more than named columns | `select(.a == .b + 1)` |
+| --no-header makes each record an array | `--no-header` |
+| --infer reads each cell's kind from its text | `--infer` |
+| --comment lines above a record are written with it, which the column route does not hold | `.` or `select(...)` with `--comment` and `--to csv` or `tsv` with a comment character |
+| --from json5 would print a path's answer as written ('a', 0x1F), not as JSON | a path under `--from json5` |
 
-`refused` lists them in this order. For `--from csv|tsv` they are the column route's, for any other input the scan's.
+For `--from csv|tsv` the reasons are the column plan's, for any other input the path plan's.
 
-Why the scan handed a text back (`fallback`'s `why`):
+Why a path plan built an input after all, on the `fallback` line:
 
-| Token | Meaning |
+| Reason | When |
 | --- | --- |
-| `step_kind` | A step met a value of another kind (`.a` over a number, `[]` over a string): jq's rules answer the text. |
-| `bad_text` | The text does not parse as the scan reads it: the interpreter reports the fault. |
-| `object_members` | A `[]` met an object, whose repeated keys jq gives once and the scan gives each time. |
+| a step met a value it does not apply to (.a over a number), where jq's rules answer | `.a` over a number, `[]` over a string |
+| it does not parse, and the filter run reports the fault | a text that is not valid |
+| a [] met an object, whose repeated keys jq gives once | `.[]` over an object that repeats a key |
 
-The counts, `pieces` and `cost` differ between hosts and runs, and so do the times. `check` and `fmt`
-refuse `--explain` as a usage error.
+The counts, `threads`, `time` and `used` differ between hosts and runs. `check` and `fmt` refuse `--explain` as a
+usage error.
 
 ## `check`
 
@@ -204,20 +215,24 @@ refuse `--explain` as a usage error.
 - It requires at least one JSON text. An empty or whitespace-only input fails with `No JSON text` and exit 5,
   where `stury .` reads it as a stream of no texts and exits 0.
 - With no `FILE` on a terminal it prints the short usage and exits 2, as `stury` with no filter does.
-- It stops at the first fault. A long input is judged on all cores and tells the fault a serial read tells.
+- It judges every file and reports each file's first fault. A long input is judged on all cores and tells the fault a
+  serial read tells.
+- It refuses every option that shapes a filter run, as `fmt` does (`-n`, `-r`, `-c`, `-C`, `--arg`, `-L`, ...), and
+  the layout options `--indent` and `--tab`: exit 2. A directory given as `FILE` is reported as one, and `stury
+  check .` adds `(check takes no filter)`.
 
 | Flag | Effect |
 | --- | --- |
 | `--from ndjson`, `--seq` | Validate one record per line or per `0x1E` separator, each record being one text. `--seq` uses `check`'s records, not jq's text sequence; each `FILE` is read alone, so a text cut at a file's end is a fault. |
 | `--from jsonc` | Validate JSONC as `stury --from jsonc .` reads it, to the same limits. A comment's text holds no escape. |
 | `--from json5` | Validate JSON5 as `stury --from json5 .` reads it, to the same limits. `Infinity` and `NaN` fail, since jq has no value for them. |
-| `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input fails with `No CSV text` or `No TSV text`; a header alone is valid. |
+| `--from csv`, `--from tsv` | Validate as `stury --from FORMAT .` reads. A fault is told as a filter run tells it ([CSV and TSV](#csv-and-tsv)). An empty input is valid, as the library takes it, and so is a header alone. |
 | `--max-depth N` | As [above](#sturys-own-options). |
 | `FILE...` | One file per argument, read as the filter reads them. |
 
 `check` writes nothing, so `--to` with a format other than the default is a usage error.
 
-Exit codes: 0 on success, 5 for invalid input, 2 for a usage or file error.
+Exit codes: 0 on success, 5 when any input is invalid, 2 for a usage or file error (which wins over 5).
 
 ## `fmt`
 
@@ -230,9 +245,9 @@ stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] 
 
 | Format | What `fmt` writes |
 | --- | --- |
-| `json`, `jsonc` (the default is `json`) | Each text laid out as `stury .` lays it out: pretty by default, `--indent N` (1 to 7) or `--tab` as given, keys in their order. Only the layout changes: every number and string is written as it was (`1e2`, `"\u00e9"`, `"\/"`) and every member of an object is kept, a repeated key included. JSONC keeps its comments where `stury --from jsonc --to jsonc .` puts them and drops its trailing commas, so a file already in that layout comes back byte for byte. |
+| `json`, `jsonc` (the default is `json`) | Each text laid out as `stury .` lays it out: pretty by default, `--indent N` (0 to 7) or `--tab` as given, keys in their order. Only the layout changes: every number and string is written as it was (`1e2`, `"\u00e9"`, `"\/"`) and every member of an object is kept, a repeated key included. JSONC keeps its comments where `stury --from jsonc --to jsonc .` puts them and drops its trailing commas, so a file already in that layout comes back byte for byte. |
 | `ndjson` | One compact value per line, as `--to ndjson` writes it, spelled as above. |
-| `csv`, `tsv` | The header, then one record per row, re-spelled by the CSV writer: a field that needs no quotes loses them, one that does gains them, and `""` and an empty cell stay distinct ([CSV and TSV output](#csv-and-tsv-output)). A header with no records is written. An object with a key the header lacks ends the run, as `--to csv` does. |
+| `csv`, `tsv` | The header, then one record per row, re-spelled by the CSV writer: a field that needs no quotes loses them, one that does gains them, and `""` and an empty cell stay distinct ([CSV and TSV output](#csv-and-tsv-output)). A header with no records is written. A JSON text whose root is an array is a list of rows, as the library's writer takes it, and any other text, or an NDJSON record, is one row. An object with a key the header lacks ends the run, as `--to csv` does. |
 
 - `--from` chooses how each file is read, and `--to` how it is written; `--to` defaults to `--from`, so a plain
   `stury fmt FILE` formats `FILE` as JSON. Each half is chosen on its own, so `stury fmt --from csv --to json`
@@ -242,16 +257,17 @@ stury fmt [--from FORMAT] [--to FORMAT] [--in-place|--check] [--indent N|--tab] 
 - `fmt` is idempotent: `stury fmt` on its own output gives the same bytes. A leading byte order mark is not written.
 - Each file is formatted as a table of its own: `stury fmt --from csv a.csv b.csv` writes each file's header,
   where `stury --from csv --to csv . a.csv b.csv` writes one table under the first file's header.
+- A CSV or TSV header that names a column twice is refused (`Duplicate header name`), as `check` and a filter run
+  refuse it, whatever `--to` is.
 - `fmt` never colours its output, and it refuses every option that shapes a filter run (`-C`, `-c`, `-r`, ...,
-  `--indent 0`): exit 2. `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N` and, with a
-  CSV-like `--to`, `--grow-header` apply. A JSON-like output is written at every depth `--max-depth` reads,
-  except a JSONC text with comments, which is written to 4096 levels and refused past them, with exit 5.
+  `--seq`): exit 2. `--indent N` and `--tab` apply to a JSON-like `--to`, and `--max-depth N` and, with a
+  CSV-like `--to`, `--grow-header` apply. A JSON-like output is written at every depth `--max-depth` reads.
 
 | Flag | Effect |
 | --- | --- |
-| `--check` | Write nothing. Exit 1 when any file's formatted bytes differ from its bytes (a compact JSON text, a CSV field that needs no quotes, a CRLF line ending), 0 when every file is already formatted. A fault still exits 5. |
-| `--in-place` | Rewrite each file through a temporary file in its directory and a rename; mode (and owner and group where permitted) are kept; other hard links keep the old bytes. Only when `--to` is `--from`; refused with `--check`, with standard input, and on a non-regular file (exit 2). |
-| `FILE...` | In argument order. A fault names the file and its position, as `check` does: `stury: parse error: FILE:L:C: ...`, and `stury: error: FILE:L:C: ...` under `--from jsonc`. A text that ends mid-value is told one byte past its end (`printf '[1] [2' | stury fmt` gives `<stdin>:1:7: Unfinished JSON term`), where a filter run tells it at the last byte. The run exits 5, and later files are not read. A file that does not open is reported and the run goes on, with exit 2. |
+| `--check` | Write nothing to stdout. Name each file whose formatted bytes differ from its bytes (a compact JSON text, a CSV field that needs no quotes, a CRLF line ending) on stderr, `stury: FILE is not formatted`, and exit 1; 0 when every file is already formatted. A fault exits 5. |
+| `--in-place` | Rewrite each file through a temporary file in its directory and a rename; mode (and owner and group where permitted) are kept; other hard links keep the old bytes. A read-only (0444) file in a writable directory is replaced, as `sed -i` does. Only when `--to` is `--from`; refused with `--check`, with standard input, and on a non-regular file (exit 2). Files are rewritten one after another: when a later file fails, the earlier ones stay rewritten, and the run exits with the worst status. |
+| `FILE...` | In argument order. A fault names the file and its position, as `check` does: `stury: parse error: FILE:L:C: ...`. A text that ends mid-value is told at its last byte, as in a filter run (`printf '[1] [2' | stury fmt` gives `<stdin>:1:6: Unfinished input`). Each file's first fault is told and the run goes on with the next file, which `--in-place` leaves unwritten; the run exits 5. A file that does not open is reported and the run goes on, with exit 2. |
 | no `FILE` | Reads standard input (`-`). On a terminal it prints the short usage and exits 2, as `check` does. `--in-place` refuses standard input. |
 
 ```sh
@@ -282,6 +298,102 @@ $ stury fmt --from ndjson --to csv records.ndjson
 - A long JSON text whose bulk is one array, at its root or under its keys, is printed on all cores, with the output of a
   serial run.
 
+## `edit`
+
+`edit` runs the filter on each input and splices its outputs into the input's own bytes. Every byte the edit does not
+touch stays as written: whitespace, number and string spelling, comments, line ends and a repeated key. The identity
+run is byte for byte. Anything new follows its container's layout.
+
+```
+stury edit [--from FORMAT|--seq|-R] [-s] [--in-place|--check] [OPTIONS] FILTER [FILE...]
+```
+
+```sh
+$ printf '{"a":1, "b":[2,3]}\n' | stury edit '.a = 2'
+{"a":2, "b":[2,3]}
+$ printf '{\n  "a": 1\n}\n' | stury edit '.b = [2]'
+{
+  "a": 1,
+  "b": [2]
+}
+$ printf '{"b": 1, "a": 2}\n' | stury edit '{a, b}'
+{"a": 2, "b": 1}
+$ printf 'a,b\n1,2\n3,4\n' | stury --from csv edit 'select(.a != "1") | {b, a}'
+b,a
+4,3
+$ stury edit --in-place '.port = 9090' config.json
+$ printf '{"a":1}' | stury edit --check '.a = 2'; echo $?
+stury: <stdin> would change
+1
+```
+
+- JSON, JSONC and JSON5 are one text each, and the filter must make exactly one output for it: none or more is an
+  error (exit 5), since a file holds one document.
+- CSV and TSV, NDJSON, `--seq` and `-R` lines run the filter on each record, and the outputs are the records written
+  back. A record with no output is dropped with its line end and the comments attached to it. Each output past a
+  record's first is a new record after it, written in the input's spelling, and the first keeps the record's bytes. A
+  record the filter reads with `input` or `inputs` is consumed and writes no record of its own.
+- `-s` runs the filter once on the array of the records, and each output must be an array, whose items are the records
+  written back in its order. A record the output keeps, moved or not, keeps its bytes. Under `-R -s` the file is one
+  string and the outputs, written raw, are the file.
+- The output replaces the document. An object edits its members: a kept member keeps its bytes, a new one is
+  inserted, and a dropped one is removed with the comments attached to it. Members take the output's order: a moved
+  member takes its bytes and comments along, and the separators, lines, indent and trailing comma stay in their
+  places, so `{a,b}` on `{"b":1,"a":2}` is `{"a":2,"b":1}` and `del(.b) | .b = 1` puts `b` last. An array is edited
+  the same way: a kept element, one the output took from the source, keeps its bytes wherever it goes, so `sort`,
+  `reverse` and `map(select(...))` move and drop elements rather than rewrite the array. Any other value replaces the
+  one at that place.
+- In a table, a column order, a new column and a dropped one change the header and every row the same way, and each
+  kept cell keeps its bytes: `{b, a}`, `del(.a)` and `.c = 1` reorder, drop and add a column. A row output may be an
+  object, by the header's names, or an array or a scalar, filling the columns in order. A cell is a text, a number,
+  true, false or null, as for `--to csv`: an array or an object is refused, and `tojson` makes text of it. A delimited
+  cell or column name is written with the table's quotes or escapes, and a CSV one that starts with a byte order mark
+  is quoted. A cell the table cannot write, an empty TSV string (an empty TSV cell is null) or a TSV cell or name that
+  starts the text with a byte order mark, is refused with the file, the record's line and the reason.
+- A value the filter took from the input keeps its source spelling, and a value it built is written by jq's writer,
+  `-a` escaping non-ASCII and `-S` sorting its keys, in the layout of the container it lands in. Where that
+  container's first member starts a line, a built object or array is written one member or element a line, at every
+  level, in the container's indent step (spaces or a tab) and with the spacing around its colon. Where the members
+  share the bracket's line, it is compact. An empty container shows no layout and takes its parent's, and so does a
+  container whose indent step is not a run of spaces or one tab. The root's own layout, when the output replaces it
+  with another kind of value, is compact. `-c`, `--indent N` and `--tab` write every built value in their layout
+  instead. A number is
+  an f64: a literal that rounds to the filter's value is left as written. `-S` also puts every object of the output in
+  key order, moving the members as a reorder does, and puts a table's columns in order.
+- A new member or element follows its container's layout: its line, its indent and the blanks around a key's colon.
+- A repeated key is read as the CLI reads it, the last member winning: the filter edits that member, and the other
+  members with that name keep their bytes. Dropping the key removes every member with that name.
+- `-e` sets the exit status by the last output, as for a filter run: 1 when it is false or null, 4 when there is none.
+- `.@comment` and its kin read and write comments as in a filter run ([Comments in the CLI](#comments-in-the-cli)), and
+  `edit` writes the comments of the output value: a role the filter wrote, each of its strings one comment, and `null`
+  removes the role with its line when a comment stood alone on it. A value the output takes from another node
+  (`.b = .a`) brings that node's comments for the roles it has. A moved member takes its comments along, and a written
+  one goes where the member lands.
+- A new member or element, and a value the filter built in place of one, is written with its comments and those of the
+  values nested in it: `.a = 1 | .a.@comment = "new"` on `{"b": 2}` gives `{"b": 2,` and then `// new` and `"a": 1}`
+  on lines of their own.
+- A new comment is written as `// text`, or as `/* text */` where the line goes on after it. A head or foot of
+  several comments takes a line for each, and several inline comments follow the value on its line.
+- In a CSV or TSV table read with `--comment C`, a comment is a line `C text` above a record or after the last one:
+  `.@comment` on a kept or new record writes its strings as such lines above it, a list taking a line for each. Under
+  `-s` the output array's `.@comment` goes above the header and its `.@comment_foot` after the last record. A
+  comment a table cannot place, on a cell, inline, or holding a line end, is refused with exit 5, and so is any comment
+  on a table read without `--comment`.
+- `edit` refuses with exit 5 a comment in a format that holds none (`json`, `ndjson`), and one on a value a record of
+  `--seq` or NDJSON input writes new.
+- Each input is written back in its own format, so `edit` refuses `--to` and the options that respell output as a
+  whole, `-r`, `-j`, `--raw-output0` and `-C`. It refuses `-n`, since the filter would not see the file, `--stream` and
+  `--stream-errors`, whose outputs are events rather than the document, and `--follow`, since a file is written once it is read whole (exit 2). `stury edit --help` lists its
+  options.
+
+| Option | Effect |
+| --- | --- |
+| `--in-place` | Rewrite each named file through a temporary file and a rename, as `fmt` does. A file whose bytes do not change is left untouched. Standard input is refused (exit 2). |
+| `--check` | Write nothing to stdout. Name each file the edit would change on stderr, `stury: FILE would change`, and exit 1; 0 when none would change. A fault exits 5. |
+| `FILE...` | In argument order, or standard input. Without `--in-place` each file's edited text is written in turn. A fault is told for its file, as `fmt` tells it, and the next file is edited; the run exits with the worst file's status. |
+
+Errors name `<stdin>` or the file, with the line and column where the input has them.
+
 ## Formats
 
 `--from` chooses how the input is cut into values, and `--to` how the outputs are written.
@@ -296,10 +408,11 @@ $ stury fmt --from ndjson --to csv records.ndjson
 
 - Each half is chosen on its own: `--from csv` alone prints JSON, and `--from csv --to csv` writes CSV back.
   `--from ndjson` alone reads lines and prints as `-c`, `--indent` and `--tab` say.
-- Reading CSV or TSV is a usage error with `-R`, `--seq` and `--stream`. Writing it is one with `-r`, `-j`,
-  `-a`, `-C`, `-c`, `--indent`, `--tab`, `--seq` and `--raw-output0`, which shape JSON text. `-S`, `-e`, `-n`,
-  `-s`, `--arg` and the rest still apply to a filter run; `fmt` refuses them ([`fmt`](#fmt)). `--to ndjson` takes
-  the place of `-c`, so it is refused with `--indent`, `--tab` and `--seq`.
+- Every format but `json` cuts the input itself, so reading it is a usage error with `-R` and `--seq`, and reading
+  any but `ndjson` with `--stream` and `--stream-errors`. Writing CSV or TSV is one with `-r`, `-j`, `-a`, `-C`,
+  `-c`, `--indent`, `--tab`, `--seq` and `--raw-output0`, which shape JSON text. `-S`, `-e`, `-n`, `-s`, `--arg`
+  and the rest still apply to a filter run; `fmt` refuses them ([`fmt`](#fmt)). `--to ndjson` takes the place of
+  `-c`, so it is refused with `--indent`, `--tab` and `--seq`, and `--to jsonc` is refused with `--seq`.
 
 ## Input
 
@@ -355,7 +468,8 @@ no pipe.
 - It reads NDJSON, `--seq`, `-R`, several texts per file as jq reads them, CSV and TSV.
 - A record cut short waits for its delimiter. The output is written after each record.
 - A file that shrinks is read again from its start, with `stury: FILE: file truncated` on stderr.
-- SIGINT and SIGTERM, and Ctrl-C or Ctrl-Break on Windows, end the run with the status of the records it answered.
+- SIGINT and SIGTERM end the run, a FIFO's or a pipe's included, once the answers so far are written, by the signal,
+  as they end jq. Ctrl-C and Ctrl-Break on Windows end it with jq's status for Ctrl-C, `STATUS_CONTROL_C_EXIT`.
 - It is a usage error (exit 2) with standard input or more than one file, `-s`, `-n`, `--stream`, JSONC, JSON5,
   `check` and `fmt`.
 
@@ -365,7 +479,7 @@ no pipe.
 | --- | --- |
 | `--seq` | Passes over a record that does not parse with `stury: ignoring parse error: ...` and puts `0x1E` before each output. |
 | `--stream` | Gives jq's `[path, leaf]` and `[path]` events of each text. Of a text that does not parse it gives jq's events before the fault, then refuses the text as any input. |
-| `--stream-errors` | Gives what jq gives of a faulty text: the events before the fault, then `[message, path]`. `[1,` gives `[[0],1]` and then `["Unfinished JSON term at EOF at line 1, column 3",[1]]`. Its messages, positions, exit code and `--seq` resync are jq's. |
+| `--stream-errors` | Gives what jq gives of a faulty text: the events before the fault, then `[message, path]`. `[1,` gives `[[0],1]` and then `["Unfinished JSON term at EOF at line 1, column 3",[1]]`. Its messages, positions, exit code and `--seq` resync are jq's, but for a text read on past the line of its fault and the place of a fault after the first in a stream ([Edge cases](#edge-cases)). |
 
 ### CSV and TSV
 
@@ -380,8 +494,8 @@ $ printf 'name,age\nAda,36\n"Grace ""Amazing"" Hopper",85\n' | stury --from csv 
 $ stury --from csv -r '[.name, .age] | @csv' people.csv
 ```
 
-- **Cells are strings or null.** A cell is never read as a number or a boolean; convert with `tonumber`
-  (`.age | tonumber`). A quoted field is its text without the quotes, with `""` read as one quote, and may
+- **Cells are strings or null.** A cell is read as a number or a boolean only under `--infer`
+  ([CSV and TSV options](#csv-and-tsv-options)); else convert with `tonumber` (`.age | tonumber`). A quoted field is its text without the quotes, with `""` read as one quote, and may
   hold the delimiter and line breaks. An empty unquoted cell is `null` and a quoted `""` is `""`. In TSV,
   which has no quotes, every empty cell is `null`. `// ""` or `.a // empty` replaces a `null`. An empty line
   is no record, so a one-column file spells an empty cell `""`.
@@ -404,6 +518,8 @@ $ stury --from csv -r '[.name, .age] | @csv' people.csv
   $ printf 'a,b\n1,2\n3\n' | stury --from csv -c .
   {"a":"1","b":"2"}
   stury: parse error: <stdin>:3:2: Record has fewer fields than the first record
+  3
+   ^
   ```
 - **Memory.** A regular file is read whole. A pipe is read a window at a time, and memory holds a window and the
   longest record. Records from a pipe are answered as they arrive, each once the reader holds the 64-byte block it
@@ -414,8 +530,64 @@ $ stury --from csv -r '[.name, .age] | @csv' people.csv
   holds for an object of columns (`{id, q: .qty}`, under `-c` or `--to csv|tsv`, not with `--grow-header`),
   for `.` under `-c`, and for `select(F)` when F reads only `.name` keys of the record
   (`select(.qty | tonumber >= 9000)`). There the interpreter is given only those cells, and each output prints
-  the record. A whole file of a few hundred KiB or more is split across all cores and printed in file order.
-  Any other filter, and `-n`, `-s`, `-e`, `-a`, `-C` and `--raw-output0`, run on the interpreter.
+  the record. A whole file of 1 MiB or more is split across all cores and printed in file order.
+  Any other filter, and `-n`, `-s`, `--no-header` and `--infer`, run on the interpreter. Under `--ragged`, `.` and a filter
+  that reads a column the header lacks, or a column named by digits, build each record.
+
+### CSV and TSV options
+
+These options set how a delimited text is read and written. They are the library's `dsv.Options`, one flag each.
+A reading option without `--from csv` or `--from tsv`, or a writing one without `--to csv` or `--to tsv`, is a usage
+error. They work for a filter run, `check`, `fmt` and `edit`. `check` and `edit` write no table of their own, so they
+refuse the writing options, and `edit` writes each record back with the delimiter and comment character it read.
+
+| Option | Reads or writes |
+| --- | --- |
+| `--delimiter C` | Cells are split at `C`, one ASCII character (`\t` for a tab), in place of `,` for CSV or a tab for TSV. CR, LF, and under CSV a quote, under TSV a backslash, `t`, `n`, `r` and `0`, are usage errors. |
+| `--no-header` | The first record is data. Each record is an array of its cells, and the filter runs on the interpreter. |
+| `--comment C` | A line whose first byte is `C` is no record. `C` inside a cell, or at a later byte of a line, is text. CR, LF, the delimiter, and under CSV a quote, under TSV a backslash, are usage errors. |
+| `--infer` | An unquoted cell that is exactly a JSON number, `true` or `false` reads as that value, as the library's `core.resolve` reads it. A quoted cell stays a string: `"1"` is `"1"`. The empty cell is `null` with or without it. A table written from a table read with `--infer` (a filter's `--to csv`, `fmt`, `edit`) quotes a string that would read back as a number, `true` or `false`, so it reads back the same, and TSV, which has no quotes, refuses one. |
+| `--ragged` | A record of any width. A narrower record lacks its missing columns, and a wider one's cells past the header are columns named by their position from 1 (`"3"` for the third). |
+| `--lazy-quotes` | CSV: a quote inside an unquoted cell is a byte of it, where it is a fault by default. |
+| `--out-delimiter C` | A written table splits cells at `C`. By default a table written as the format read (`--from csv --to csv`, and `fmt`) keeps the read's delimiter, so it reads back with the same options, and any other uses its format's own. |
+| `--out-comment C` | A written table's comment lines start with `C`, which a first cell starting with `C` is quoted against. By default a table written from a table keeps the read's `--comment`, and any other has none. The bytes `--comment` refuses are usage errors. |
+| `--out-no-header` | A written table of objects has no header line. A table written as the format read under `--no-header` has none either. |
+| `--crlf` | Each written record ends with CR LF. |
+
+```sh
+$ printf '# prices\nitem;price;sold\npen;1.50;true\n"ink";"2";false\n' | stury --from csv --delimiter ';' --comment '#' --infer -c .
+{"item":"pen","price":1.50,"sold":true}
+{"item":"ink","price":"2","sold":false}
+$ printf '1,2\n3,4\n' | stury --from csv --no-header -c '{a: .[0], b: .[1]}'
+{"a":"1","b":"2"}
+{"a":"3","b":"4"}
+$ stury fmt --from csv --delimiter ';' --out-delimiter , prices.csv
+```
+
+`fmt` of a table into a table keeps its comment lines, as the library's writer keeps a document's comments when the
+output has a comment character (the read's `--comment`, or `--out-comment`): a comment above the header, above a record
+or after the last record stays there. When the output has none, they are dropped. A filter's `--to csv` output writes
+each output's `.@comment` as `C text` lines above its row when the output has a comment character, and `fmt` from JSONC
+to a table with `--out-comment C` places the text's comments the same way: the root array's above the header, each
+element's above its row, the root's foot comments after the last row. Inline and cell comments, and one holding a line
+end, are dropped.
+
+A filter run over a table read with `--comment C` sees the comment lines above a record as that record's `.@comment`
+(the text after `C` and one space, a line each), and `null` for a record with none, so `stury --from csv --comment '#'
+--to csv .` writes every comment line back. The lines before the header are the table's: written above the header of a
+`--to csv` or `tsv` output, and under `-s` the array's `.@comment`. The lines after the last record are written after the
+last row, and under `-s` are the array's `.@comment_foot`. A table output has one header, so of several files only the
+first one's lines before its header are written, and every file's lines after its last record come after the last row.
+A comment line is written as `C text`, so `#a` reads back as `# a`. A filter that names only columns (`.name`,
+`{name}`) reads no comments and keeps the column route; `.` and `select(...)` into a table with a comment character are
+built whole, and a long input is then answered on one thread.
+
+The names follow the tools people know: `--delimiter` as in csvkit, xsv and qsv (DuckDB's `delim`), `--no-header`
+as xsv's `--no-headers` and csvkit's `--no-header-row`, `--comment` as qsv's comment character and DuckDB's
+`comment`, `--ragged` and `--lazy-quotes` as in Miller, `--out-delimiter` as in csvkit and xsv, `--crlf` as in xsv.
+Inference is off by default, as in the library, where csvkit and Miller infer by default. None takes a short letter:
+xsv's `-n` is jq's `--null-input`, and a letter of stury's own could clash with a later jq release. No jq 1.8.2
+option has these names.
 
 ### CSV and TSV output
 
@@ -553,7 +725,9 @@ Grace	85
 ```sh
 $ stury check --from csv cities.csv
 $ printf 'a,b\n1,2\n3\n' | stury check --from csv
-stury: error: <stdin>:3:2: Record has fewer fields than the first record
+stury: parse error: <stdin>:3:2: Record has fewer fields than the first record
+3
+ ^
 ```
 
 ## Errors and exit codes
@@ -563,21 +737,27 @@ The exit codes are jq's, but the messages are stury's.
 | Fault | Message |
 | --- | --- |
 | A file that cannot be opened | `stury: error: Could not open file NAME: REASON` |
-| A directory given as a file | `stury: error: Is a directory` (as jq) |
-| A text that does not parse | `stury: parse error: MSG at line L, column C` |
-| The same, in a file after the first, and under `fmt` | `stury: parse error: NAME:L:C: SENTENCE`, counted in that file (a `--seq` text that runs between files has the stream's position instead) |
-| Any fault under `check` or `--from jsonc`, `fmt` included | `stury: error: NAME:L:C: SENTENCE`, such as `<stdin>:1:7: Invalid numeric literal` |
+| A directory given as a file | `stury: error: Could not open file NAME: Is a directory`, where jq says `jq: error: Is a directory`. `.` under `check` or `fmt` adds `(check takes no filter)` |
+| An error the filter raises | `stury: error (at FILE:LINE): MSG` as jq, but with no input to name, as under `-n`, `stury: error: MSG`, where jq says `(at <unknown>)`. `input` past the last input says `No more inputs`, where jq prints the `break` that `inputs` catches (`try input catch .` still gives `"break"`) |
+| `--rawfile` or `--slurpfile` naming a file that does not open | `stury: --rawfile NAME FILE: Could not open FILE: REASON`, where jq calls it `Bad JSON in --rawfile ...` |
+| A filter of one word a letter or two from `check` or `fmt` | jq's compile error, then `stury: chek is not a command: did you mean stury check?` |
+| A JSON text that does not parse, in a filter run on standard input or one file | `stury: parse error: MSG at line L, column C`, as jq |
+| Any other text that does not parse: under `check` and `fmt`, under `--from` another format or `ndjson`, under `--seq`, several files, or `input` under `-n` | `stury: parse error: NAME:L:C: SENTENCE`, NAME `<stdin>` for standard input, counted in that file (a `--seq` text that runs between files has the stream's position instead), such as `<stdin>:1:10: Leading zero in a number` |
+| Output that cannot be written, or a stdout that is closed (as jq, even when nothing was written; not under `check`, `fmt --check` or `fmt --in-place`, which write nothing to it) | `stury: error: writing output failed: REASON`, exit 2 whatever the run came to |
 
-L and C are the line and 1-based byte column of the byte the fault is at. Where a text that ends mid-value is
-told, in a filter run and under `check` and `fmt`, is in [Different parse errors](#different-parse-errors).
+L and C are the line and 1-based byte column of the byte the fault is at. A text that ends mid-value is told at its
+last byte in every mode, and at column 0 of the next line when its last byte is a newline, as jq places it. An
+NDJSON record cut short by its line's end is told at the line's last byte.
 
-A trailing comma, a comment or nesting past `--max-depth` is followed by the source line, a caret under the
-byte, and the flag that would read it (`--from jsonc`, `--max-depth N`), in a filter run and under `check` alike.
+Every parse error is followed by the source line, cut to a screenful around the byte, and a caret under it. A
+trailing comma, a comment or nesting past `--max-depth` adds the flag that would read it (`--from jsonc`,
+`--max-depth N`), in a filter run and under `check` alike. So does any other fault of a file read as JSON whose name ends `.csv`, `.tsv`, `.jsonc`, `.json5` or `.ndjson`: `stury .
+data.csv` adds `(--from csv reads it)`, except under `--seq`.
 
 | Code | Meaning |
 | --- | --- |
 | 1 | Under `-e`: the last output is `false` or `null`; under `fmt --check`: a file is not already formatted |
-| 2 | A usage or file error |
+| 2 | A usage or file error, or output that cannot be written |
 | 3 | A filter that does not compile |
 | 4 | Under `-e`: there is no output |
 | 5 | Invalid input, or an error on the last input |
@@ -604,7 +784,7 @@ these places:
   in the printer's layout, including the space stury puts before a line comment and the compact spacing
   around a block comment.
 
-### Reading
+### Reading and writing
 
 | Accessor | Gives |
 | --- | --- |
@@ -613,22 +793,37 @@ these places:
 | `.@comment_foot` | the footer comments |
 
 - Each gives a list of texts in source order, each without its `//` or `/* */` and one space inside them
-  (`// a` and `/* a */` read `"a"`), or `null` when there are none. That holds on a value the filter made
-  and on any value of plain JSON.
+  (`// a` and `/* a */` read `"a"`), or `null` when there are none, as on a value the filter made and on any
+  value of plain JSON that the filter has written none on.
 - A document's leading comments lead its root and its trailing ones trail it. On `{"a": 1} // x` the root's
   `.@comment_inline` is `["x"]` and its `.@comment` is `null`, as no comment comes before it.
 - They parse with or without `--from jsonc`, where jq refuses them. jq reads `.@name` only before a string
   (`.@base64 "x"`), and that still parses as jq's.
-- They only read: `path(.@comment)` and `.@comment = 1` are errors. A comment sits beside a value rather
-  than inside it, so jq's paths, and `=`, `|=` and `del` with them, have nothing to address. To change the
-  comments of a file, use the library's `core.set_fact` and `core.remove_fact`.
+- Each is also a path step, so `=`, `|=`, `+=` and the other updates, `del`, `path`, `getpath`, `setpath` and
+  `delpaths` take it. In a path it is the object `{"fact": "comment"}` (`"comment_inline"`, `"comment_foot"`):
+  `path(.a.@comment)` is `["a",{"fact":"comment"}]`. It must be the last step; a step after it is an error.
+- A filter writes comments on any value of any format, strict JSON too: `.a.@comment = "x" | .a.@comment` is
+  `["x"]`. A string is one comment, an array of strings one per element, and `null` or `[]` removes them, as
+  `del(.a.@comment)` does. Anything else is the error `a comment is a string, an array of strings, or null`.
+  A role written replaces that role's comments from the input, and the other roles keep theirs.
+- Comments travel with their value: through pipes, variables, `.a`, `.[]`, `.[n]`, `select`, `if`, `first`,
+  `limit`, array and object construction, and assignment (`.b = .a` gives `b` the comments of `a`, those read
+  from the input included). A value computed from others (`.a + 1`, `tostring`, `tojson`, `keys`, `add`,
+  `length`) has none.
+- A value put in place of another keeps the old one's comments for each role the new value brings none of:
+  under `--from jsonc`, `.a = 5` leaves `.a.@comment` as the input had it, and `.a = .b` takes `b`'s comments
+  for the roles `b` has and keeps `a`'s for the rest. This holds for `=`, every update operator and `setpath`.
+- A write is no side effect: `(.a.@comment = "x") as $_ | .a.@comment` reads the input's comments.
+- Comments are not data. `==`, `<`, `sort`, `unique`, `group_by`, `contains`, `inside`, `has`, `keys`,
+  `length`, `tojson`, `tostring`, `paths`, `tostream`, `to_entries` and the `@` formats answer as if there
+  were none, and `paths` yields no comment step.
 
 ## Differences from jq
 
 stury reads strict RFC 8259 JSON and reports faults its own way. The rest of the language and the options are
-jq's. jq has no `check` and no `fmt`, and `--from` and `--to` read and write formats jq does not. `.@comment`,
-`.@comment_inline` and `.@comment_foot`, a syntax error in jq, read a value's comments ([Comments in the
-CLI](#comments-in-the-cli)); outside `--from jsonc` they give `null`.
+jq's. jq has no `check`, `fmt` or `edit`, and `--from` and `--to` read and write formats jq does not. `.@comment`,
+`.@comment_inline` and `.@comment_foot`, a syntax error in jq, read and write a value's comments ([Comments in
+the CLI](#comments-in-the-cli)); outside `--from jsonc` they give `null` until a filter writes one.
 
 ### Common differences
 
@@ -649,16 +844,21 @@ Nesting past 1024 levels (jq: 10000) is refused, `fromjson` included, unless `--
 
 #### Different parse errors
 
-A parse error names the fault (`Invalid numeric literal`, `Unexpected character`, `Unfinished JSON term`,
-`Invalid escape`, `Unexpected text after the JSON value`, `Exceeds depth limit for parsing`, ...) at the line
-and column of the byte it was found at. A text that ends mid-value is told at its last byte, which is jq's
-position, so the plain path and `--stream-errors` agree at the end of the input. `fromjson`, the option JSON and a
-module's data file say the same. `check` and `fmt` keep the library's one past it
-([Errors and exit codes](#errors-and-exit-codes)).
+A parse error names the fault at the line and column of the byte it was found at. A JSON fault says what was found
+and what was expected: `Expected ',' or ']' after an array element`, `Trailing comma before the closing bracket`,
+`Expected value before ','`, `Unmatched '}'`, `Missing colon after key`, `Object keys must be strings`,
+`Invalid string literal; expected ", but got '`, `Unescaped control character U+0009`, `Invalid UTF-8 byte 0xFF`,
+`Infinity and NaN have no JSON value`, `Leading zero in a number`, `A number cannot start with '.'`, `A number
+cannot start with '+'`, `Expected a value`. A filter run on JSON keeps jq's sentence where jq's names the fault
+(`Unfinished JSON term`, `Invalid numeric literal`, `Exceeds depth limit for parsing`, `Unexpected text after the
+JSON value`), and `check` and every other mode say the library's (`Unfinished input`, `Invalid number`, `Exceeds the
+depth limit`). A text that ends mid-value is told at its last byte, which is jq's position, so the plain path,
+`--stream-errors`, `check` and `fmt` agree at the end of the input. `fromjson`, the option JSON and a module's data
+file say the same.
 
 | | stury | jq |
 | --- | --- | --- |
-| Message | names the fault | jq's own wording |
+| Message | names what was found and what was expected | jq's own wording: `Expected separator between values` for a missing `,` or `:`, `Expected another array element` for `[1,]`, `Objects must consist of key:value pairs` for `[1}`, `Unmatched '}'` for `{"a":}`, `Expected string key before ':'` for `{:1}`, `Invalid string: control characters from U+0000 through U+001F must be escaped` |
 | Position | the byte the fault is at | where its parser stood after that byte |
 | At the end of input | the last byte | the last byte |
 | At a newline (`1e` then a newline) | line 1, column 3 | line 2, column 0 |
@@ -669,7 +869,7 @@ module's data file say the same. `check` and `fmt` keep the library's one past i
 
 Each file ends its texts, except under `--seq` ([below](#--seq-reads-each-record-as-one-text)). jq reads `1` in
 one file and `2` in the next as `12`. A parse error in a file after the first names the file
-and counts its line and column in that file (`b.json:1:4: Unexpected character`), where jq counts on across the
+and counts its line and column in that file (`b.json:1:3: Invalid literal` for `2 x`), where jq counts on across the
 files it joins; a text that runs from one file into the next under `--seq` is the exception, and is told at its
 line and column in the stream, without a file's name.
 
@@ -710,17 +910,31 @@ line and column in the stream, without a file's name.
 - `range` with a NaN bound or step gives no values. jq gives none for some (`[range(0; 3; nan)]`), counts on
   for others (`[limit(3; range(0; nan))]` is `[0,1,2]`, `[range(0; -3; nan)]` is `[0]`) and, for
   `[range(nan)]`, aborts on an assertion.
-- jq's `--run-tests` is absent, since stury has no test-file runner.
+- `sort`, `sort_by`, `group_by` and `unique_by` keep two elements in input order where their keys first differ by a
+  nan against a nan, as they keep equal keys. jq calls each nan below the other, which leaves the order to the C
+  library's `qsort`: on macOS, `[range(9)] | sort_by(nan)` is `[8,1,2,3,0,5,6,7,4]`, and `sort` reorders eight
+  arrays that each start with nan.
+- jq's `--run-tests` is absent, since stury has no test-file runner, and so are `--debug-dump-disasm` and
+  `--debug-trace`, which list jq's bytecode. Each is an unknown option (exit 2).
 
 **`--stream` and `--seq`**
 
 - `--stream` gives each scalar the full path to it, as jq does, so a value nested n levels deep gives Θ(n²)
   bytes of events (nested empty arrays: about 1 MB at depth 1000, 100 MB at 10000). There is no clamp;
   `--max-depth` bounds it.
+- Under `--stream-errors` without `--seq`, the walk of a faulty text stops at the end of the line its fault is on,
+  and the stream goes on from the next line. A string a raw line break cuts (`"a`, a newline, `b"`) gives
+  `Unfinished string at EOF at line 2, column 0` and then the next line's own fault, where jq reads on through the
+  string and gives `Invalid string: control characters ...` at line 2, column 2. A fault after the first is told
+  at its line and column in the stream.
+  jq's parser passes over the rest of the line a fault is on without counting it, so jq tells a later fault short
+  of its place: `}`, a newline and `:` give `':' not as part of an object at line 1, column 2`, where stury says
+  line 2, column 1.
 - A number cut by `0x1E` or the stream's end is refused under `--stream` too (`Potentially truncated
   top-level numeric value`), where jq reads it. `check --seq` refuses it the same way.
-- `check` fails on an input of no text (`No JSON text`), but under `--seq` an empty input, like one of
-  separators alone, is no records and passes. `stury .` reads such an input as jq does.
+- `check` fails on a JSON input of no text (`No JSON text`), but under `--seq` an empty input, like one of
+  separators alone, is no records and passes. `stury .` reads either as no input and says nothing. jq says nothing
+  of separators alone, but tells an empty or blank input `ignoring parse error: Unfinished abandoned text`.
 - Under `--seq`, separators with only whitespace after them are no record, and a BOM at the input's first
   byte is stepped over, as jq does. Whitespace before the first `0x1E` is not a text, in jq or in stury.
 
@@ -753,6 +967,7 @@ line and column in the stream, without a file's name.
 - `scalb` and `scalbln` cut a fractional exponent toward zero and saturate a huge one on every OS, as jq on
   macOS does: `[scalb(1;2.5), scalbln(1;1e30)]` is `[4,1.7976931348623157e+308]`. glibc's jq gives
   `[null,0]`.
+- `builtins` lists the same names as jq, sorted. jq lists them in the order of its own tables.
 - `gamma` is log-gamma on every OS, as glibc's `gamma` is (so jq on Linux): `[1, 2] | map(gamma)` is `[0,0]`.
   macOS has no `gamma` in libm, and jq there answers `tgamma`, `[1,1]`.
 - `strptime` gives, on every OS, the weekday and yearday as the calendar's values for the array's own year,
@@ -777,7 +992,7 @@ its numbers are uncapped. It differs from the library on purpose:
 
 | | CLI | Library |
 | --- | --- | --- |
-| A key repeated in one object | keeps its last value and cannot be refused | `core.Duplicates.First` or `.Last` on a read, `every_key` for each, and `refuse_duplicates` on a build |
+| A key repeated in one object | keeps its last value and cannot be refused | `dups`: `core.Duplicates.Last`, `.First`, `.All` for each, or `.Refuse` |
 | Strings and keys | jq's escapes (`"\/"` is `"/"`), DEL as `\u007f`. Of a repeated key, only the last value prints, at the first one's position | the source text, DEL as the byte unless the writer's `escape_del` is set, and `respell_strings` to write them in the writer's own escapes |
 | Numbers | printed as written (`1E2` stays `1E2`); when computed, as jq's double layout | the source text |
 

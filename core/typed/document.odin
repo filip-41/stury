@@ -14,11 +14,12 @@ import build "../build"
 // slice of `doc.src`. Every other string, and everything a read allocates, is the read's `allocator`'s, so the target
 // outlives `core.destroy(doc)` and needs `doc.src` only for what it borrowed.
 
-// Reads the value at `node` of `doc` into `target`, with `plan`. See `Read_Options` for the options. A plan built for
+// Reads the value at `node` of `doc` into `target`, with `plan`, or with a nil `plan` by one `plan_make` builds for
+// the call from `doc.as` with `context.allocator` and frees. See `Read_Options` for the options. A plan built for
 // another type, for another format than `doc`'s, or not by `dsv.plan_make` for a delimited document, is `.Plan_Mismatch`,
 // and a nil target, a nil document, a node past
-// the document, a key and `refuse_duplicates` are `.Bad_Option`: a document that must hold no repeated key is built with
-// `refuse_duplicates`.
+// the document, a key and `.Refuse` are `.Bad_Option`: a document that must hold no repeated key is built under
+// `.Refuse`.
 unmarshal :: proc {unmarshal_node, unmarshal_answer}
 
 unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
@@ -39,13 +40,22 @@ Document_Read :: struct {
 	reader: Reader,
 	doc:    ^core.Document,
 	at:     core.Node_Index,
-	spare:  []u32, // the replay stack of `document_tag`, which runs inside the read's
+	room:   int, // the frames the reader holds
 }
 
 @(private)
 read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
-	if doc == nil || doc.spelling == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key || read.refuse_duplicates {
+	if doc == nil || doc.spelling == nil || int(node) >= len(doc.nodes) || doc.nodes[node].role == .Key || read.dups == .Refuse {
 		return {kind = .Bad_Option}
+	}
+	if plan == nil {
+		made, err := plan_make(T, doc.as)
+		if err.kind == .None {
+			err = read_document(doc, node, T, target, &made, read, allocator)
+		}
+		own_errors(&err, read.collect)
+		plan_destroy(&made)
+		return err
 	}
 	// A format that writes no key frame has tokens that do not type their values, so only its own plan maker's plan reads it.
 	if plan != nil && plan.spelling == doc.spelling && len(doc.spelling.key_open) == 0 {
@@ -54,29 +64,29 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 		}
 		return plan.node_read(doc, node, T, target, plan, read, allocator)
 	}
-	// Only the containers the value opens need a frame, but the value's depth is not known without a walk.
-	depth := core.reserve_depth(doc.as.max_depth, len(doc.nodes)) + 2
-	frames_fixed: [core.MAX_DEPTH + 2]Frame = ---
-	ends_fixed: [3 * (core.MAX_DEPTH + 2)]u32 = ---
-	frames, ends := frames_fixed[:], ends_fixed[:]
-	if depth > len(frames) {
-		wide, failed := make([]Frame, depth, context.temp_allocator)
-		stack, failed_stack := make([]u32, 3 * depth,context.temp_allocator)
-		if failed != nil || failed_stack != nil {
-			return {kind = .Out_Of_Memory}
-		}
-		frames, ends = wide, stack
-	}
-	d := Document_Read{doc = doc, spare = ends[2 * depth:]}
-	regs, err := read_start(&d.reader, doc.src, plan, doc.spelling, T, target, read, frames, allocator)
+	// The frames and the replay's two words a level grow as the value nests past them.
+	frames: [core.MAX_DEPTH + 2]Frame = ---
+	ends: [2 * core.MAX_DEPTH]u32 = ---
+	d := Document_Read{doc = doc, room = len(frames)}
+	regs, err := read_start(&d.reader, doc.src, plan, doc.spelling, T, target, read, frames[:], allocator)
 	if err.kind != .None {
 		return err
 	}
+	defer read_release(&d.reader, frames[:])
 	d.reader.format = &d
 	d.reader.find_tag = document_tag
 	to := u32(node) + (doc.nodes[node].n if doc.nodes[node].kind > .Plain else 1)
-	build.feed_nodes(doc, u32(node), to, &d, &regs, ends[:2 * depth], document_step, document_keyed, true)
+	if !build.feed_nodes(doc, u32(node), to, &d, &regs, ends[:], document_step, document_keyed, document_deepen, true) {
+		return {kind = .No_Memory}
+	}
 	return read_end(&d.reader, regs, nil)
+}
+
+@(private)
+document_deepen :: proc "contextless" (d: ^Document_Read, extra: int) -> bool {
+	room, grown := grow_frames(&d.reader, d.room, d.room + extra)
+	d.room = room
+	return grown
 }
 
 // A token as the walk would have given it: a container a path left partial is a value, an `End` has its bracket's byte,
@@ -133,7 +143,7 @@ fold_digits :: #force_inline proc "contextless" (src: []u8, t: core.Token) -> (m
 // The key of the value at node `i` of the record `open`, whose cells are its scalar children in column order.
 @(private)
 document_keyed :: proc "contextless" (d: ^Document_Read, _: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool) {
-	return d.doc.shared_keys + 1 + (i - open - 1), d.doc.nodes[open].kind == .Map
+	return d.doc.shared_keys + 1 + (i - open - 1), d.doc.nodes[open].kind == .Object
 }
 
 // Finds the tag member of the object at the node the replay is giving, by replaying that object alone.
@@ -142,13 +152,21 @@ document_tag :: proc(h: ^Reader, _: u64) -> Tag_Scan {
 	d := (^Document_Read)(h.format)
 	s := Tag_Scan{view = {src = h.src, as = h.plan.as}, name = h.plan.union_tag}
 	regs: core.Hook_Regs
-	build.feed_nodes(d.doc, u32(d.at), u32(d.at) + d.doc.nodes[d.at].n, &s, &regs, d.spare, tag_step, tag_keyed, false)
+	// The replay opens the object alone, so it needs no more than two levels of ends.
+	ends: [2]u32
+	build.feed_nodes(d.doc, u32(d.at), u32(d.at) + d.doc.nodes[d.at].n, &s, &regs, ends[:], tag_step, tag_keyed, build.no_deepen, false)
 	return s
 }
 
+// The tag scan's step, which passes over the containers inside the object.
 @(private)
 tag_step :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.Token, _: core.Node_Index) -> (core.Hook_Regs, core.Action) {
-	return on_tag_token(s, regs, t)
+	next, action := on_tag_token(s, regs, t)
+	if action == .Next && (t.kind == .Array || t.kind == .Object) && s.depth > 1 {
+		s.depth -= 1
+		return next, .Skip
+	}
+	return next, action
 }
 
 @(private)

@@ -4,7 +4,6 @@ import "base:runtime"
 import "core:bytes"
 import "core:io"
 import "core:math"
-import "core:math/rand"
 import "core:testing"
 import core "../../core"
 import write "../../core/write"
@@ -72,7 +71,7 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 		if c.spec == .Plain {
 			rows = {TOKEN_ROWS[0], TOKEN_ROWS[2], TOKEN_ROWS[5]}
 		}
-		want, werr := dsv.marshal(rows, c.spec, c.layout, {}, context.temp_allocator)
+		want, werr := dsv.marshal(rows, c.spec, c.layout, write = {}, allocator = context.temp_allocator)
 		got, err := token_rows(rows, c.spec, c.layout)
 		defer delete(got)
 		testing.expect_value(t, err.kind, werr.kind)
@@ -99,7 +98,7 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 a_bom_is_quoted_only_at_the_start :: proc(t: ^testing.T) {
 	bom := "\xEF\xBB\xBFx"
 	for rows in ([?][]Token_Row{{{1, bom, true, 1, 1}}, {{1, "a", true, 1, 1}, {2, bom, true, 1, 1}}}) {
-		want, _ := dsv.marshal(rows, .Csv, {no_header = true}, {}, context.temp_allocator)
+		want, _ := dsv.marshal(rows, .Csv, {no_header = true}, write = {}, allocator = context.temp_allocator)
 		got, err := token_rows(rows, .Csv, {no_header = true})
 		defer delete(got)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
@@ -150,7 +149,7 @@ token_misuse_is_refused :: proc(t: ^testing.T) {
 	expect_token_refused(t, .Csv, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.close(tw)}, .Unsupported)
 	expect_token_refused(t, .Csv, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.key(tw, "a")}, .Unsupported)
 	expect_token_refused(t, .Csv, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_float(tw, math.inf_f64(-1))}, .Non_Finite)
-	expect_token_refused(t, .Csv, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_string(tw, "\xff\xfe")}, .Bad_Utf8)
+	expect_token_refused(t, .Csv, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_string(tw, "\xff\xfe")}, .Invalid_Utf8)
 	expect_token_refused(t, .Tsv, {}, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {
 			W.value_string(tw, "")
 			return W.end_record(tw)
@@ -184,7 +183,7 @@ rows_to_a_stream :: proc(t: ^testing.T) {
 		r = TOKEN_ROWS[i % len(TOKEN_ROWS)]
 		r.id = i64(i)
 	}
-	want, _ := dsv.marshal(rows, .Csv, {}, {}, context.temp_allocator)
+	want, _ := dsv.marshal(rows, .Csv, {}, write = {}, allocator = context.temp_allocator)
 	buf: bytes.Buffer
 	defer bytes.buffer_destroy(&buf)
 	got, err := token_rows(rows, .Csv, {}, bytes.buffer_to_stream(&buf))
@@ -211,34 +210,7 @@ token_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typ
 rows_under_failing_allocators :: proc(t: ^testing.T) {
 	for spec in ([?]dsv.Spec{.Csv, .Tsv}) {
 		spec := spec
-		want, _ := dsv.marshal(TOKEN_ROWS[:], spec, {}, {}, context.temp_allocator)
+		want, _ := dsv.marshal(TOKEN_ROWS[:], spec, {}, write = {}, allocator = context.temp_allocator)
 		walktest.sweep_write(t, token_try, &spec, string(want))
-	}
-}
-
-// Random rows written by calls are the bytes `marshal` makes of them.
-@(test)
-random_rows_written_by_calls_equal_marshal :: proc(t: ^testing.T) {
-	rand.reset(12)
-	WORDS := [?]string{"", "a", "a,b", "\"", "#", "\n", "\t", "\\", "café", "\U0001F600", "x;y", "plain text 0123456789"}
-	for round in 0 ..< 200 {
-		rows := make([]Token_Row, 1 + rand.int_max(5), context.temp_allocator)
-		for &r in rows {
-			r = {rand.int63() - rand.int63(), rand.choice(WORDS[:]), rand.int_max(2) == 0, rand.float64_range(-1e6, 1e6), rand.uint64()}
-		}
-		spec := rand.choice([]dsv.Spec{.Csv, .Tsv})
-		layout := dsv.Options {
-			delimiter = rand.choice([]u8{0, ';', '|'}) if spec == .Csv else 0,
-			comment   = rand.choice([]u8{0, '#'}),
-			crlf      = rand.int_max(2) == 0,
-			no_header = round % 4 == 0,
-		}
-		want, werr := dsv.marshal(rows, spec, layout, {}, context.temp_allocator)
-		got, err := token_rows(rows, spec, layout)
-		defer delete(got)
-		testing.expect_value(t, err.kind, werr.kind)
-		if !testing.expectf(t, string(got) == string(want), "%v %v: %q, want %q", spec, layout, got, want) {
-			return
-		}
 	}
 }

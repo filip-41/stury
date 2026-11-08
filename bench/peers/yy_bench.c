@@ -414,11 +414,12 @@ static int key_job(const char *path) {
 }
 
 // ---- Write lanes.
-//   write_doc FILE [pretty]    yyjson_write of the parsed document
-//   write_typed FILE [pretty]  a mutable document built from the fixture's C structs, then yyjson_mut_write
-// A document's GB/s counts the source's bytes. A typed lane's counts the output's, and its clock includes building
-// the mutable document, since yyjson writes no struct without one. Strings are borrowed, never copied. Loading the
-// fixture into the structs is outside the clock, and so is freeing each call's text and document.
+//   write_doc FILE [pretty]    yyjson_write_buf of the parsed document
+//   write_typed FILE [pretty]  a mutable document built from the fixture's C structs, then yyjson_mut_write_buf
+// Every call writes into one buffer, allocated once and reused. A document's GB/s counts the source's bytes. A typed
+// lane's counts the output's, and its clock includes building the mutable document, since yyjson writes no struct
+// without one. Strings are borrowed, never copied. Loading the fixture into the structs is outside the clock, and so
+// is freeing each call's document.
 
 typedef struct {
 	const char *p;
@@ -430,7 +431,7 @@ typedef struct {
 	size_t n;
 } int_list;
 
-// An object with any keys, kept as pairs in source order.
+// An object with any keys, kept as pairs.
 typedef struct {
 	str k;
 	union {
@@ -486,6 +487,45 @@ static pair *pairs_of(yyjson_val *o, size_t *n) {
 	return v;
 }
 
+// A map has no order; a hash map's iteration starts from an arbitrary permutation. A map's pairs are shuffled once
+// outside the clock, and each write sorts their indexes, as a map's write does.
+static uint64_t map_rng = 0x9e3779b97f4a7c15ULL;
+static uint64_t map_rand(void) {
+	map_rng ^= map_rng << 13;
+	map_rng ^= map_rng >> 7;
+	map_rng ^= map_rng << 17;
+	return map_rng;
+}
+
+static void shuffle(pair *v, size_t n) {
+	for (size_t i = n; i > 1; i--) {
+		size_t j = map_rand() % i;
+		pair t = v[i - 1];
+		v[i - 1] = v[j];
+		v[j] = t;
+	}
+}
+
+static const pair *sorted_pairs;
+
+static int key_cmp(const void *a, const void *b) {
+	const pair *x = &sorted_pairs[*(const size_t *)a], *y = &sorted_pairs[*(const size_t *)b];
+	size_t n = x->k.n < y->k.n ? x->k.n : y->k.n;
+	int c = memcmp(x->k.p, y->k.p, n);
+	if (c) return c;
+	return (x->k.n > y->k.n) - (x->k.n < y->k.n);
+}
+
+// The indexes of `v` in key order, for the caller to free.
+static size_t *sorted_order(const pair *v, size_t n) {
+	size_t *idx = malloc((n ? n : 1) * sizeof *idx);
+	if (!idx) abort();
+	for (size_t i = 0; i < n; i++) idx[i] = i;
+	sorted_pairs = v;
+	qsort(idx, n, sizeof *idx, key_cmp);
+	return idx;
+}
+
 static pair *string_pairs(yyjson_val *o, size_t *n) {
 	pair *v = pairs_of(o, n);
 	for (size_t i = 0; i < *n; i++) {
@@ -506,7 +546,12 @@ static yyjson_mut_val *add_ints(yyjson_mut_doc *m, yyjson_mut_val *arr, int_list
 
 static void add_string_map(yyjson_mut_doc *m, yyjson_mut_val *root, const char *name, const pair *v, size_t n) {
 	yyjson_mut_val *o = yyjson_mut_obj_add_obj(m, root, name);
-	for (size_t i = 0; i < n; i++) yyjson_mut_obj_add(o, key_of(m, v[i].k), yyjson_mut_strn(m, v[i].v.s.p, v[i].v.s.n));
+	size_t *idx = sorted_order(v, n);
+	for (size_t i = 0; i < n; i++) {
+		const pair *e = &v[idx[i]];
+		yyjson_mut_obj_add(o, key_of(m, e->k), yyjson_mut_strn(m, e->v.s.p, e->v.s.n));
+	}
+	free(idx);
 }
 
 // logs.json
@@ -692,6 +737,11 @@ static const void *load_citm(yyjson_val *root) {
 	}
 	c->topics = pairs_of(yyjson_obj_get(root, "topicSubTopics"), &c->ntopics);
 	for (size_t i = 0; i < c->ntopics; i++) c->topics[i].v.l = ints_of(c->topics[i].v.p);
+	shuffle(c->area, c->narea);
+	shuffle(c->block, c->nblock);
+	shuffle(c->venue, c->nvenue);
+	shuffle(c->events, c->nevents);
+	shuffle(c->topics, c->ntopics);
 	yyjson_val *a = yyjson_obj_get(root, "performances"), *e;
 	c->nperfs = yyjson_arr_size(a);
 	c->perfs = pool_alloc(c->nperfs * sizeof *c->perfs);
@@ -719,15 +769,18 @@ static yyjson_mut_val *build_citm(yyjson_mut_doc *m, const void *p) {
 	add_string_map(m, root, "areaNames", c->area, c->narea);
 	add_string_map(m, root, "blockNames", c->block, c->nblock);
 	yyjson_mut_val *ev = yyjson_mut_obj_add_obj(m, root, "events");
+	size_t *idx = sorted_order(c->events, c->nevents);
 	for (size_t i = 0; i < c->nevents; i++) {
-		const citm_event *e = c->events[i].v.p;
+		const pair *p = &c->events[idx[i]];
+		const citm_event *e = p->v.p;
 		yyjson_mut_val *o = yyjson_mut_obj(m);
-		yyjson_mut_obj_add(ev, key_of(m, c->events[i].k), o);
+		yyjson_mut_obj_add(ev, key_of(m, p->k), o);
 		yyjson_mut_obj_add_sint(m, o, "id", e->id);
 		add_str(m, o, "name", e->name);
 		add_ints(m, yyjson_mut_obj_add_arr(m, o, "subTopicIds"), e->sub);
 		add_ints(m, yyjson_mut_obj_add_arr(m, o, "topicIds"), e->top);
 	}
+	free(idx);
 	yyjson_mut_val *pf = yyjson_mut_obj_add_arr(m, root, "performances");
 	for (size_t i = 0; i < c->nperfs; i++) {
 		const citm_perf *f = &c->perfs[i];
@@ -745,9 +798,12 @@ static yyjson_mut_val *build_citm(yyjson_mut_doc *m, const void *p) {
 		}
 	}
 	yyjson_mut_val *ts = yyjson_mut_obj_add_obj(m, root, "topicSubTopics");
+	idx = sorted_order(c->topics, c->ntopics);
 	for (size_t i = 0; i < c->ntopics; i++) {
-		yyjson_mut_obj_add(ts, key_of(m, c->topics[i].k), add_ints(m, yyjson_mut_arr(m), c->topics[i].v.l));
+		const pair *p = &c->topics[idx[i]];
+		yyjson_mut_obj_add(ts, key_of(m, p->k), add_ints(m, yyjson_mut_arr(m), p->v.l));
 	}
+	free(idx);
 	add_string_map(m, root, "venueNames", c->venue, c->nvenue);
 	return root;
 }
@@ -882,46 +938,17 @@ typedef struct {
 	size_t n;
 } wide;
 
-// A map has no order; a hash map's iteration starts from an arbitrary permutation. Shuffle once outside the
-// clock, then sort the key indexes inside each write, as a map's write does.
-static uint64_t wide_rng = 0x9e3779b97f4a7c15ULL;
-static uint64_t wide_rand(void) {
-	wide_rng ^= wide_rng << 13;
-	wide_rng ^= wide_rng >> 7;
-	wide_rng ^= wide_rng << 17;
-	return wide_rng;
-}
-
 static const void *load_wide(yyjson_val *root) {
 	wide *w = pool_alloc(sizeof *w);
 	w->v = pairs_of(root, &w->n);
-	for (size_t i = w->n; i > 1; i--) {
-		size_t j = wide_rand() % i;
-		pair t = w->v[i - 1];
-		w->v[i - 1] = w->v[j];
-		w->v[j] = t;
-	}
+	shuffle(w->v, w->n);
 	return w;
-}
-
-static const pair *wide_pairs;
-
-static int wide_cmp(const void *a, const void *b) {
-	const pair *x = &wide_pairs[*(const size_t *)a], *y = &wide_pairs[*(const size_t *)b];
-	size_t n = x->k.n < y->k.n ? x->k.n : y->k.n;
-	int c = memcmp(x->k.p, y->k.p, n);
-	if (c) return c;
-	return (x->k.n > y->k.n) - (x->k.n < y->k.n);
 }
 
 static yyjson_mut_val *build_wide(yyjson_mut_doc *m, const void *p) {
 	const wide *w = p;
 	yyjson_mut_val *root = yyjson_mut_obj(m);
-	size_t *idx = malloc(w->n * sizeof *idx);
-	if (!idx) abort();
-	for (size_t i = 0; i < w->n; i++) idx[i] = i;
-	wide_pairs = w->v;
-	qsort(idx, w->n, sizeof *idx, wide_cmp);
+	size_t *idx = sorted_order(w->v, w->n);
 	for (size_t i = 0; i < w->n; i++) {
 		const pair *e = &w->v[idx[i]];
 		yyjson_mut_obj_add(root, key_of(m, e->k), yyjson_mut_sint(m, yyjson_get_sint(e->v.p)));
@@ -954,14 +981,14 @@ static const typed_lane *typed_lane_of(const char *path) {
 	return NULL;
 }
 
-// One timed write. It returns the call's nanoseconds and leaves the text in *out and its length in *len, for the caller
-// to check and free.
-typedef long long (*write_once)(const void *, yyjson_write_flag, char **, size_t *);
+// One timed write into `out`, `cap` bytes reused by every call. It returns the call's nanoseconds and the text's length
+// in *len, 0 on a failure.
+typedef long long (*write_once)(const void *, yyjson_write_flag, char *, size_t, size_t *);
 
-static long long write_doc_once(const void *doc, yyjson_write_flag flg, char **out, size_t *len) {
+static long long write_doc_once(const void *doc, yyjson_write_flag flg, char *out, size_t cap, size_t *len) {
 	long long t = now_ns();
-	*out = yyjson_write_opts((yyjson_doc *)doc, flg, NULL, len, NULL);
-	keep(*out);
+	*len = yyjson_write_buf(out, cap, (yyjson_doc *)doc, flg, NULL);
+	keep(out);
 	return now_ns() - t;
 }
 
@@ -970,13 +997,13 @@ typedef struct {
 	const void *data;
 } typed_job;
 
-static long long write_typed_once(const void *job, yyjson_write_flag flg, char **out, size_t *len) {
+static long long write_typed_once(const void *job, yyjson_write_flag flg, char *out, size_t cap, size_t *len) {
 	const typed_job *j = job;
 	long long t = now_ns();
 	yyjson_mut_doc *m = yyjson_mut_doc_new(NULL);
 	yyjson_mut_doc_set_root(m, j->lane->build(m, j->data));
-	*out = yyjson_mut_write_opts(m, flg, NULL, len, NULL);
-	keep(*out);
+	*len = yyjson_mut_write_buf(out, cap, m, flg, NULL);
+	keep(out);
 	long long el = now_ns() - t;
 	yyjson_mut_doc_free(m);
 	return el;
@@ -1004,12 +1031,12 @@ static int write_job(const char *path, bool typed, bool pretty) {
 	write_once once = typed ? write_typed_once : write_doc_once;
 	const void *arg = typed ? (const void *)&job : (const void *)d;
 	long long ns[TIMED];
-	char *out = NULL;
-	size_t len = 0;
+	size_t cap = 16 * (size_t)n + (64 << 10), len = 0;
+	char *out = malloc(cap);
+	if (!out) abort();
 	for (int i = 0; i < WARMUP + TIMED; i++) {
-		free(out);
-		long long el = once(arg, flg, &out, &len);
-		if (!out) {
+		long long el = once(arg, flg, out, cap, &len);
+		if (!len) {
 			fprintf(stderr, "yyjson write failed\n");
 			return 1;
 		}

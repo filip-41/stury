@@ -40,7 +40,7 @@ update_paths :: proc(ip: ^Interp, n: ^Node, v: Value, env: ^Env, rhs: Value, own
 		}
 		state := new_array(2)
 		append(&state.items, x.cur, gone)
-		return nil, fail(ip, "Invalid path expression near attempt to access element 0 of %s", brief(state))
+		return nil, fail(ip, "Invalid path expression near attempt to access element 0 of %s", brief(ip, state))
 	}
 	if x.gone_null {
 		return nil, fail(ip, "Paths must be specified as an array")
@@ -143,6 +143,12 @@ modify_step :: proc(x: ^Path_Update, p: []Value) -> Signal {
 		at.path = x.top.path if same else &no_path
 	}
 	got, outputs, fsig := first_of(x.ip, label, x.n.b, at, x.env, x.top != nil)
+	if c := container(old); c != nil && outputs > 0 && !identical(got.v, old) && (x.owned[c] || len(p) > 0 && kind(p[len(p) - 1]) == .Object) {
+		// An owned container has one holder, and `f` may have placed what it was given twice (`{x: ., y: .}`). Only an
+		// owned `old` holds an owned container, as every container above one is owned, or a slice, a new array of
+		// owned elements.
+		disown(old, x.owned)
+	}
 	switch {
 	case fsig != .Go:
 		return fsig
@@ -169,8 +175,8 @@ whole_slice :: proc(p: []Value, old, v: Value) -> bool {
 
 // Whether a reduce's update only writes into its state, so the state may change in place: an
 // assignment to one path whose right side does not read `.`, `|=` on one path, `. + x` with `x` not
-// reading `.` and chains of these (`. + x + y`), `setpath`, `delpaths` or `del`, a value that does not read
-// `.`, and pipes and `if`s of these. A right side is single: with more outputs, jq stores the state each
+// reading `.` and chains of these (`. + x + y`), `.[e:f]` and `.[e:f] + x`, `setpath`, `delpaths` or `del`,
+// a value that does not read `.`, and pipes and `if`s of these. A right side is single: with more outputs, jq stores the state each
 // makes, so the last one's before an error is the state, and the first to fail is the error (`. + (1, "a", 2)`
 // on 0). (A path expression with more outputs reads the state between updates.)
 in_place_update :: proc(n: ^Node) -> bool {
@@ -183,7 +189,9 @@ in_place_update :: proc(n: ^Node) -> bool {
 		}
 		// Built one operand at a time, a chain's intermediate is the state's only holder, as jq's
 		// reference counts find it, and grows in place too.
-		return n.a.kind == .Identity || n.a.kind == .Binary && in_place_update(n.a)
+		return n.a.kind == .Identity || (n.a.kind == .Binary || n.a.kind == .Slice) && in_place_update(n.a)
+	case .Slice:
+		return n.single && n.a.kind == .Identity
 	case .Identity, .Var, .Literal:
 		return true
 	case .Pipe:
@@ -215,6 +223,34 @@ adds_to_state :: proc(n: ^Node) -> bool {
 		return adds_to_state(n.a) && adds_to_state(n.b)
 	}
 	return false
+}
+
+// `.[e:f]` on the state. The state is dropped for its slice, so the slice of an owned array no other slice
+// holds takes over its items up to their capacity, and what is added to it next goes in place. A slice of a
+// document's array is made anew, and so is the update's own.
+@(private = "file")
+update_by_slice :: proc(ip: ^Interp, n: ^Node, state: Value, env: ^Env, owned: ^Owned) -> (Value, bool, Signal) {
+	x, is_array := plain(state).(^Array)
+	sole := is_array && owned[x] && !lent(x)
+	it, found, sig := eval_single(ip, n, {v = state}, env, false)
+	v, sliced := it.v.(^Array)
+	if !sliced || sig != .Go || !found {
+		return it.v, found, sig
+	}
+	if _, is_ref := plain(state).(Ref); is_ref {
+		owned[v] = true
+	}
+	if !sole {
+		return v, true, .Go
+	}
+	items := (^runtime.Raw_Dynamic_Array)(&v.items)
+	from := uintptr(raw_data(x.items))
+	if uintptr(items.data) < from || uintptr(items.data) >= from + uintptr(cap(x.items) * size_of(Value)) {
+		return v, true, .Go // an empty slice is a new array
+	}
+	items.cap = cap(x.items) - int((uintptr(items.data) - from) / size_of(Value))
+	owned[v] = true
+	return v, true, .Go
 }
 
 // `adds_to_state`'s update: the state plus the last value added, each value before it only checked to add,
@@ -340,6 +376,8 @@ update_value :: proc(ip: ^Interp, n: ^Node, state: Value, env: ^Env, owned: ^Own
 	#partial switch n.kind {
 	case .Call:
 		return update_by_call(ip, n, state, env, owned)
+	case .Slice:
+		return update_by_slice(ip, n, state, env, owned)
 	case .Identity:
 		return state, true, .Go
 	case .Var, .Literal:
@@ -370,7 +408,7 @@ update_value :: proc(ip: ^Interp, n: ^Node, state: Value, env: ^Env, owned: ^Own
 	switch {
 	case n.kind == .Update:
 		v, sig = assign(ip, n, state, rhs.it.v, env, owned)
-	case n.a.kind == .Binary:
+	case n.a.kind == .Binary || n.a.kind == .Slice:
 		// The right operand runs first, as jq's arithmetic runs it outermost.
 		if v, found, sig = update_value(ip, n.a, state, env, owned); sig != .Go || !found {
 			return
@@ -415,6 +453,8 @@ holds_owned :: proc(v: Value, owned: ^Owned, budget: ^int) -> bool {
 		members = x.items[:]
 	case ^Object:
 		members = x.vals[:]
+	case ^Commented:
+		return holds_owned(x.v, owned, budget)
 	}
 	for m in members {
 		budget^ -= 1

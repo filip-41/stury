@@ -5,6 +5,8 @@ package jq
 // once made, except inside an update that owns them (`eval_update`). Key and value lookup is in
 // lookup.odin, order and equality in compare.odin.
 
+import "base:intrinsics"
+import "base:runtime"
 import "core:hash"
 import "core:slice"
 import "core:strconv"
@@ -20,6 +22,7 @@ Value :: union {
 	^Object,
 	Ref,
 	Path,
+	^Commented,
 }
 
 // `lit` is the number as written, for a number read from input or the program and not yet computed on. It prints as
@@ -29,8 +32,11 @@ Number :: struct {
 	lit: string,
 }
 
+// A slice of an array shares its items (`array_slice`), and the array is then lent: an update that owns it copies it
+// before changing it, as the slice would see the change.
 Array :: struct {
 	items: [dynamic]Value,
+	lent:  bool,
 }
 
 // Keys keep their insertion order. `index` maps a key to its slot once the object is wide.
@@ -51,6 +57,7 @@ Ref :: struct {
 document_value :: proc(d: core_pkg.Document) -> Value {
 	doc := new(core_pkg.Document)
 	doc^ = d
+	store_inferred_kinds(doc)
 	return Ref{doc, core_pkg.ROOT}
 }
 
@@ -69,6 +76,8 @@ num :: proc(f: f64) -> Value {
 	return Number{f = f}
 }
 
+// The readers of a value's data see through a `^Commented`, which never wraps another, in a case of their own, so a
+// value without comments pays nothing for them.
 kind :: proc(v: Value) -> Kind {
 	switch x in v {
 	case nil:
@@ -85,16 +94,19 @@ kind :: proc(v: Value) -> Kind {
 		return .Object
 	case Ref:
 		return node_kind(x.doc, x.node)
+	case ^Commented:
+		return x.kind
 	}
 	return .Null
 }
 
-// A document node's jq kind. A dsv cell is a string.
+// A document node's jq kind. A dsv cell is a string. The stored kind is read, which reads a cell as `core.kind` does
+// without `infer` and asks no format.
 node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Kind {
-	#partial switch k := core_pkg.kind(doc, i); k {
+	#partial switch k := doc.nodes[i].kind if int(i) < len(doc.nodes) else core_pkg.Kind.Null; k {
 	case .Array:
 		return .Array
-	case .Map:
+	case .Object:
 		return .Object
 	case .Plain:
 		// A delimited cell: an empty unquoted one is null, a quoted one keeps its quotes in its span.
@@ -104,7 +116,7 @@ node_kind :: #force_inline proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index)
 	}
 }
 
-type_name :: proc(v: Value) -> string {
+type_name :: #force_inline proc(v: Value) -> string {
 	switch kind(v) {
 	case .Null:
 		return "null"
@@ -131,7 +143,11 @@ truthy :: proc(v: Value) -> bool {
 scalar :: proc(v: Value) -> Value {
 	r, is_ref := v.(Ref)
 	if !is_ref {
-		return v
+		c, is_commented := v.(^Commented)
+		if !is_commented {
+			return v
+		}
+		return scalar(c.v)
 	}
 	switch node_kind(r.doc, r.node) {
 	case .Null:
@@ -191,11 +207,15 @@ node_string :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> string {
 }
 
 number_of :: proc(v: Value) -> (Number, bool) {
+	if n, is_number := v.(Number); is_number {
+		return n, true
+	}
 	n, ok := scalar(v).(Number)
 	return n, ok
 }
 
-string_of :: proc(v: Value) -> (string, bool) {
+string_of :: #force_inline proc(value: Value) -> (string, bool) {
+	v := plain(value)
 	if r, is_ref := v.(Ref); is_ref {
 		if node_kind(r.doc, r.node) != .String {
 			return "", false
@@ -216,10 +236,12 @@ length_of :: proc(v: Value) -> int {
 		return len(x.keys)
 	case Ref:
 		n := core_pkg.length(x.doc, x.node)
-		if n > 1 && core_pkg.kind(x.doc, x.node) == .Map && has_repeated_key(x) {
+		if n > 1 && core_pkg.kind(x.doc, x.node) == .Object && has_repeated_key(x) {
 			return distinct_keys(x)
 		}
 		return n
+	case ^Commented:
+		return length_of(x.v)
 	case nil, bool, Number, string:
 	}
 	return 0
@@ -228,7 +250,7 @@ length_of :: proc(v: Value) -> int {
 // Whether `v` has no element or member. A document's object holds one or more however its keys repeat, so
 // this does not count them as `length_of` does.
 is_empty :: proc(v: Value) -> bool {
-	if r, is_ref := v.(Ref); is_ref {
+	if r, is_ref := plain(v).(Ref); is_ref {
 		return core_pkg.length(r.doc, r.node) == 0
 	}
 	return length_of(v) == 0
@@ -279,6 +301,8 @@ index_shared :: proc(v: Value) {
 		for val in x.vals {
 			index_shared(val)
 		}
+	case ^Commented:
+		index_shared(x.v)
 	case nil, bool, Number, string, Path:
 	}
 }
@@ -306,6 +330,8 @@ array_at :: proc(v: Value, i: int) -> Value {
 			s = s.parent
 		}
 		return s.key
+	case ^Commented:
+		return array_at(x.v, i)
 	case nil, bool, Number, string, ^Object:
 	}
 	return nil
@@ -326,13 +352,25 @@ object_get :: proc(v: Value, k: string) -> (Value, bool) {
 			return nil, false
 		}
 		return Ref{x.doc, node}, true
+	case ^Commented:
+		return object_get(x.v, k)
 	case nil, bool, Number, string, ^Array, Path:
 	}
 	return nil, false
 }
 
 // Elements `lo` to `hi` of an array as a new array, for `lo <= hi <= length_of(v)`.
-array_slice :: proc(v: Value, lo, hi: int) -> ^Array {
+array_slice :: proc(value: Value, lo, hi: int) -> ^Array {
+	v := plain(value)
+	if x, is_array := v.(^Array); is_array && lo < hi {
+		a := new(Array)
+		// At its capacity, the slice moves before anything appends to it, so it writes nothing into `x`.
+		(^runtime.Raw_Dynamic_Array)(&a.items)^ = {data = &x.items[lo], len = hi - lo, cap = hi - lo, allocator = context.allocator}
+		if !lent(x) {
+			intrinsics.atomic_store_explicit(&x.lent, true, .Relaxed) // a global array may be sliced on many threads
+		}
+		return a
+	}
 	a := new_array(hi - lo)
 	r, is_ref := v.(Ref)
 	if !is_ref {
@@ -352,6 +390,10 @@ array_slice :: proc(v: Value, lo, hi: int) -> ^Array {
 	return a
 }
 
+lent :: #force_inline proc(a: ^Array) -> bool {
+	return intrinsics.atomic_load_explicit(&a.lent, .Relaxed)
+}
+
 new_array :: proc(n := 0) -> ^Array {
 	a := new(Array)
 	a.items = make([dynamic]Value, 0, n)
@@ -363,7 +405,8 @@ new_object :: proc() -> ^Object {
 }
 
 // A container's own copy, one level deep: its members are shared. Scalars are returned as they are.
-own :: proc(v: Value) -> Value {
+own :: proc(value: Value) -> Value {
+	v := plain(value)
 	switch kind(v) {
 	case .Array:
 		a := new_array(length_of(v))
@@ -411,7 +454,8 @@ Members :: struct {
 	dupes: bool,
 }
 
-iterate :: proc(v: Value) -> Members {
+iterate :: proc(value: Value) -> Members {
+	v := plain(value)
 	r, is_ref := v.(Ref)
 	if !is_ref {
 		return Members{v = v, n = length_of(v)}
@@ -484,7 +528,7 @@ has_repeated_key :: proc(r: Ref) -> bool {
 repeats_key :: proc(r: Ref) -> bool {
 	end := r.node + core_pkg.Node_Index(r.doc.nodes[r.node].n)
 	for i := r.node; i < end; i += 1 {
-		if r.doc.nodes[i].kind == .Map && has_repeated_key({r.doc, i}) {
+		if r.doc.nodes[i].kind == .Object && has_repeated_key({r.doc, i}) {
 			return true
 		}
 	}
@@ -547,7 +591,7 @@ next_member :: #force_inline proc(it: ^Members) -> (key: string, v: Value, ok: b
 			vn = it.last[k]
 			it.last[k] = 0
 			return k, Ref{x.doc, vn}, true
-		case nil, bool, Number, string:
+		case nil, bool, Number, string, ^Commented: // `iterate` takes off a `^Commented`
 		}
 	}
 	return "", nil, false

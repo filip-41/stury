@@ -40,3 +40,6 @@ FOLD_BITS :: 21
 // Each character (?i) also matches a string of two or three to, in order, and the string's characters
 // folded (0 after two).
 @(rodata) MULTI_FOLDS := #load("tables/multi_folds.bin", [][4]u32)
+
+// Oniguruma's message for each error code it has one for, as `code message`, each ended by a NUL.
+ERROR_MESSAGES :: #load("tables/errors.bin", string)

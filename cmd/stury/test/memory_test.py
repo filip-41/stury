@@ -6,13 +6,11 @@ pool. Each file is long enough to be answered in pieces on the pool's threads.
     memory_test.py [--odin PATH]
 """
 
-import argparse
 import os
-import subprocess
 import sys
 import tempfile
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from harness import build, odin_flag, peak
 COPIES = 20
 RECORDS = 100000
 # The peak over many files may pass the peak over one by this share and this many bytes: threads that join in later
@@ -27,25 +25,20 @@ def fixtures():
     return {"ndjson": "\n".join(rows) + "\n", "json": "[" + ",\n".join(rows) + "]\n", "csv": "\n".join(csv) + "\n"}
 
 
-def peak(exe, args, files):
+def peak_over(exe, args, files):
     """The most resident bytes a run of `exe` over `files` held."""
-    proc = subprocess.Popen([exe, *args, *files], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    _, status, usage = os.wait4(proc.pid, 0)
-    assert status == 0, (args, status, proc.stderr.read())
-    # ru_maxrss is in bytes on macOS and in kibibytes elsewhere.
-    return usage.ru_maxrss if sys.platform == "darwin" else usage.ru_maxrss << 10
+    status, err, held = peak([exe, *args, *files])
+    assert status == 0, (args, status, err)
+    return held
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--odin", default="odin")
-    odin = parser.parse_args().odin
+    odin = odin_flag()
     failed = []
     with tempfile.TemporaryDirectory() as tmp:
         exes = {}
-        for threads, define in (("1 thread", ["-define:STURY_THREADS=1"]), ("default", [])):
-            exes[threads] = os.path.join(tmp, "stury-" + threads.split()[0])
-            subprocess.run([odin, "build", "cmd/stury", "-o:minimal", *define, f"-out:{exes[threads]}"], cwd=ROOT, check=True)
+        for threads, define in (("1 thread", {"STURY_THREADS": 1}), ("default", {})):
+            exes[threads] = build(odin, os.path.join(tmp, "stury-" + threads.split()[0]), define)
         paths = {}
         for kind, text in fixtures().items():
             first = os.path.join(tmp, f"{kind}-0")
@@ -56,7 +49,7 @@ def main():
         lanes = (("ndjson", ["-c", "."]), ("json", ["-c", "."]), ("csv", ["-c", "--from", "csv", "."]), ("ndjson", ["-R", "."]))
         for threads, exe in exes.items():
             for kind, args in lanes:
-                one, many = peak(exe, args, paths[kind][:1]), peak(exe, args, paths[kind])
+                one, many = peak_over(exe, args, paths[kind][:1]), peak_over(exe, args, paths[kind])
                 ok = many <= one * SHARE + SLACK
                 print(f"{'ok  ' if ok else 'FAIL'} {threads:9} {kind:7} {' '.join(args):18} 1 file {one >> 20:4} MiB, {COPIES} files {many >> 20:4} MiB")
                 if not ok:

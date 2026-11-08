@@ -60,16 +60,13 @@ add_ref :: proc(p: ^Parser, n: ^Node) {
 @(private)
 resolve_refs :: proc(p: ^Parser, referenced: []bool) {
 	for n in p.refs {
-		if n.name != "" {
-			continue
+		if n.name == "" {
+			g := n.group if n.kind == .Cond else n.refs[0]
+			if g <= 0 || g >= len(p.names) {
+				fail(p, "invalid backref number/name")
+				return
+			}
 		}
-		g := n.group if n.kind == .Cond else n.refs[0]
-		if g <= 0 || g >= len(p.names) {
-			fail(p, "invalid backref number/name")
-			return
-		}
-	}
-	for n in p.refs {
 		if n.kind == .Cond {
 			referenced[n.group] = true
 		}

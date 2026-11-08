@@ -49,7 +49,7 @@ format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 		for i := 0; i < len(s) && s[i] != '='; i += 1 {
 			d := strings.index_byte(B64, s[i])
 			if d < 0 {
-				return nil, fail(ip, "string (%s) is not valid base64 data", brief(s))
+				return nil, fail(ip, "string (%s) is not valid base64 data", brief(ip, s))
 			}
 			code, have = code << 6 | u32(d), have + 1
 			if have == 4 {
@@ -59,7 +59,7 @@ format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 		}
 		switch have {
 		case 1:
-			return nil, fail(ip, "string (%s) trailing base64 byte found", brief(s))
+			return nil, fail(ip, "string (%s) trailing base64 byte found", brief(ip, s))
 		case 2:
 			append(&b, byte(code >> 4))
 		case 3:
@@ -79,13 +79,13 @@ format :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 				hi, lo = spell.HEX_NIBBLE[s[i + 1]], spell.HEX_NIBBLE[s[i + 2]]
 			}
 			if hi | lo > 15 {
-				return nil, fail(ip, "string (%s) is not a valid uri encoding", brief(s))
+				return nil, fail(ip, "string (%s) is not a valid uri encoding", brief(ip, s))
 			}
 			append(&b, hi << 4 | lo)
 			i += 2
 		}
 		if !utf8.valid_string(string(b[:])) {
-			return nil, fail(ip, "string (%s) is not a valid uri encoding", brief(s))
+			return nil, fail(ip, "string (%s) is not a valid uri encoding", brief(ip, s))
 		}
 		return string(b[:]), .Go
 	}
@@ -110,7 +110,7 @@ write_escaped :: proc(b: ^strings.Builder, s: string, from: string, to: []string
 @(private = "file")
 delimited :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 	if kind(v) != .Array {
-		return nil, fail(ip, "%s (%s) cannot be %s-formatted, only array", type_name(v), brief(v), name)
+		return nil, fail(ip, "%s (%s) cannot be %s-formatted, only array", type_name(v), brief(ip, v), name)
 	}
 	b := strings.builder_make()
 	for m, i in elements(v) {
@@ -136,7 +136,7 @@ delimited :: proc(ip: ^Interp, name: string, v: Value) -> (Value, Signal) {
 				write_escaped(&b, s, "\\\t\n\r\x00", {`\\`, `\t`, `\n`, `\r`, `\0`})
 			}
 		case .Array, .Object:
-			return nil, fail(ip, "%s (%s) is not valid in a csv row", type_name(m), brief(m))
+			return nil, fail(ip, "%s (%s) is not valid in a csv row", type_name(m), brief(ip, m))
 		}
 	}
 	return strings.to_string(b), .Go
@@ -158,7 +158,7 @@ shell_quote :: proc(ip: ^Interp, v: Value) -> (Value, Signal) {
 		case .Null, .False, .True, .Number:
 			strings.write_string(&b, to_json(m))
 		case .Array, .Object:
-			return nil, fail(ip, "%s (%s) can not be escaped for shell", type_name(m), brief(m))
+			return nil, fail(ip, "%s (%s) can not be escaped for shell", type_name(m), brief(ip, m))
 		}
 	}
 	return strings.to_string(b), .Go

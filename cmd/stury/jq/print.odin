@@ -28,6 +28,7 @@ Layout :: struct {
 	colors:   ^Colors,
 	spill:    ^Spill,
 	comments: bool,
+	colon:    string, // the bytes between a member's key and its value, when they are not jq's
 }
 
 // A layout's way to empty the output it writes into, once it holds `at` bytes, so a deep value is not held whole.
@@ -156,13 +157,13 @@ emit :: proc(p: ^Printer, v: Value) {
 
 // Writes `v` by the library's document writer and returns true, when it is a container of an input JSON document that
 // the writer prints as jq does: with no colours, with no line indented by the printer's own depth, with no object in it
-// that repeats a key, and with no level past jq's depth or the writer's for sorted keys. A string is spelled again in
-// JSON's shortest escapes, as jq spells it.
+// that repeats a key, and with no level past jq's depth. A string is spelled again in JSON's shortest escapes, as jq
+// spells it.
 @(private = "file")
 write_node :: proc(p: ^Printer, v: Value) -> bool {
 	r, is_ref := v.(Ref)
-	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || r.doc.spelling != json.as(.Json).spelling ||
-	   p.depth + max(int(r.doc.as.max_depth), core_pkg.MAX_DEPTH) > json.TREE_DEPTH || repeats_key(r) {
+	if !is_ref || p.colors != nil || p.opts.pretty && p.depth > 0 || len(p.colon) > 0 || r.doc.spelling != json.as(.Json).spelling ||
+	   p.depth + max(int(r.doc.as.max_depth), core_pkg.MAX_DEPTH) > MAX_DEPTH || repeats_key(r) {
 		return false
 	}
 	opts := p.opts
@@ -243,10 +244,15 @@ member :: proc(p: ^Printer, key: string, v: Value, i: int) {
 	put_string(p.out, key, p.opts)
 	unpaint(p)
 	paint(p, OBJECT_COLOR)
-	put_byte(p.out, ':')
-	unpaint(p)
-	if p.opts.pretty {
-		put_byte(p.out, ' ')
+	if len(p.colon) > 0 {
+		write.put_text(p.out, p.colon)
+		unpaint(p)
+	} else {
+		put_byte(p.out, ':')
+		unpaint(p)
+		if p.opts.pretty {
+			put_byte(p.out, ' ')
+		}
 	}
 	emit(p, v)
 }
@@ -281,7 +287,7 @@ put_number :: proc(p: ^Printer, n: Number) {
 // so the cursor goes back over what a refused string wrote.
 put_string :: proc(out: ^write.Out, s: string, opts: core_pkg.Write_Options) {
 	mark := out.cursor
-	if json.put_string(out, s, {ascii = opts.ascii, escape_del = true}) == .Bad_Utf8 {
+	if json.put_string(out, s, {ascii = opts.ascii, escape_del = true}) == .Invalid_Utf8 {
 		put_valid(out, s, opts, mark)
 	}
 }
@@ -303,10 +309,15 @@ text_of :: proc(v: Value) -> string {
 
 // `v` printed with layout `l` into a string from `allocator`.
 to_json :: proc(v: Value, l := Layout{}, allocator := context.allocator) -> string {
-	spare: [write.ROOM_MAX]u8
+	spare: [write.ROOM_MAX]u8 = ---
 	out: write.Out
 	write.init(&out, &spare, allocator)
 	write_value(&out, v, l)
+	size := out.size
 	text, _ := write.finish(&out)
+	// The buffer holds at least a ROOM_MAX, so a short text gives the rest back, as the arena's last allocation.
+	if 0 < len(text) && len(text) < size {
+		text, _ = runtime.non_zero_mem_resize(raw_data(text), size, len(text), 1, allocator)
+	}
 	return string(text)
 }

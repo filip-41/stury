@@ -1,9 +1,14 @@
 package json_tests
 
+import "core:fmt"
 import "core:mem"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
+import scan "../../core/build"
+import typed "../../core/typed"
+import records "../../core/records"
 import json ".."
 import walktest "../../walktest"
 
@@ -38,11 +43,6 @@ parse_path_steps :: proc(t: ^testing.T) {
 		{"..", {core.Descend{}}},
 		{"...a", {core.Descend{}, core.Name("a")}},
 		{"..[0]", {core.Descend{}, core.Index(0)}},
-		{".[9223372036854775807]", {core.Index(max(int))}},
-		{".[99999999999999999999]", {core.Index(max(int))}},
-		{".[-9223372036854775808]", {core.Index(min(int))}},
-		{".[-99999999999999999999]", {core.Index(min(int))}},
-		{".[-99999999999999999999:99999999999999999999]", {core.Slice{min(int), max(int)}}},
 	}
 	for c in cases {
 		p, e := core.parse_path(c.text)
@@ -84,43 +84,46 @@ parse_path_marks :: proc(t: ^testing.T) {
 	core.path_destroy(&p)
 }
 
-// Each refused text with the byte it is refused at.
+// Each refused text with the byte it is refused at and why.
 @(test)
 parse_path_refused :: proc(t: ^testing.T) {
 	Case :: struct {
-		text: string,
-		at:   u64,
+		text:   string,
+		at:     u64,
+		reason: core.Path_Reason,
 	}
 	cases := []Case {
-		{"", 0},
-		{"a", 0},
-		{".a.", 2},
-		{".a b", 3},
-		{".a..b", 2},
-		{".a-b", 2},
-		{".[", 1},
-		{".[0", 3},
-		{".[:]", 1},
-		{".[a]", 1},
-		{`."a`, 1},
-		{`."\x"`, 2},
-		{`."\ud83d"`, 2},
-		{`."\ude00"`, 2},
-		{".\"\xff\"", 2},
-		{".[\"a\xc3\"]", 4},
-		{".\"\xed\xa0\x80\"", 2},
-		{".\"\xe2\x82", 2},
-		{`.["a"`, 5},
-		{"first(.a", 8},
-		{"limit(-1; .a)", 6},
-		{"limit(1 .a)", 8},
-		{".a | .b", 3},
-		{"..a", 2},
+		{"", 0, .No_Dot},
+		{"a", 0, .No_Dot},
+		{"/a", 0, .Pointer_Text},
+		{".a.", 2, .Bad_Name},
+		{".a b", 3, .Trailing},
+		{".a..b", 2, .Bad_Name},
+		{".a-b", 2, .Trailing},
+		{".[", 1, .Unclosed_Bracket},
+		{".[0", 3, .Unclosed_Bracket},
+		{".[:]", 1, .Bad_Bracket},
+		{".[a]", 1, .Bad_Bracket},
+		{`."a`, 1, .Unclosed_Quote},
+		{`."\x"`, 2, .Bad_Escape},
+		{`."\ud83d"`, 2, .Bad_Escape},
+		{`."\ude00"`, 2, .Bad_Escape},
+		{".\"\xff\"", 2, .Invalid_Utf8},
+		{".[\"a\xc3\"]", 4, .Invalid_Utf8},
+		{".\"\xed\xa0\x80\"", 2, .Invalid_Utf8},
+		{".\"\xe2\x82", 2, .Invalid_Utf8},
+		{`.["a"`, 5, .Unclosed_Bracket},
+		{".[99999999999999999999]", 1, .Bad_Bracket},
+		{"first(.a", 8, .Unclosed_Paren},
+		{"limit(-1; .a)", 6, .Bad_Limit},
+		{"limit(1 .a)", 8, .No_Semicolon},
+		{".a | .b", 3, .Trailing},
+		{"..a", 2, .Trailing},
 	}
 	for c in cases {
 		p, e := core.parse_path(c.text)
 		defer core.path_destroy(&p)
-		testing.expectf(t, e.kind == .Bad_Path && e.at == c.at, "%q: %v", c.text, e)
+		testing.expectf(t, e.kind == .Bad_Path && e.at == c.at && e.reason == c.reason && e.text == c.text, "%q: %v", c.text, e)
 	}
 	long := strings.repeat(".a", core.MAX_STEPS + 1)
 	defer delete(long)
@@ -160,14 +163,15 @@ parse_pointer_steps :: proc(t: ^testing.T) {
 		}
 	}
 	Refused :: struct {
-		text: string,
-		at:   u64,
+		text:   string,
+		at:     u64,
+		reason: core.Path_Reason,
 	}
-	refused := []Refused{{"a", 0}, {"/a~", 2}, {"/a~2", 2}, {"/a/b\xff", 4}, {"/\xe2\x82", 1}}
+	refused := []Refused{{"a", 0, .No_Slash}, {"/a~", 2, .Bad_Tilde}, {"/a~2", 2, .Bad_Tilde}, {"/a/b\xff", 4, .Invalid_Utf8}, {"/\xe2\x82", 1, .Invalid_Utf8}}
 	for c in refused {
 		p, e := core.parse_pointer(c.text)
 		defer core.path_destroy(&p)
-		testing.expectf(t, e.kind == .Bad_Path && e.at == c.at, "%q: %v", c.text, e)
+		testing.expectf(t, e.kind == .Bad_Path && e.at == c.at && e.reason == c.reason && e.text == c.text, "%q: %v", c.text, e)
 	}
 }
 
@@ -182,7 +186,7 @@ Read_Case :: struct {
 
 @(private = "file")
 Want :: struct {
-	outcome: core.Answer_Outcome,
+	outcome: core.Presence,
 	// The `.Found` value's bytes, or the owner's, "" for no node.
 	text:    string,
 }
@@ -207,9 +211,9 @@ check_answers :: proc(t: ^testing.T, c: Read_Case, doc: ^core.Document, answers:
 
 @(test)
 path_reads :: proc(t: ^testing.T) {
-	F :: core.Answer_Outcome.Found
-	M :: core.Answer_Outcome.Missing
-	T :: core.Answer_Outcome.Type_Mismatch
+	F :: core.Presence.Found
+	M :: core.Presence.Missing
+	T :: core.Presence.Wrong_Kind
 	nested := `{"a":{"b":[1,{"c":2}]},"z":0}`
 	cases := []Read_Case {
 		{`{"a":1,"b":2}`, ".", {{F, `{"a":1,"b":2}`}}, {}},
@@ -250,6 +254,8 @@ path_reads :: proc(t: ^testing.T) {
 		{`{"p":1,"q":2}`, ".[]", {{F, "1"}, {F, "2"}}, {}},
 		{`{"ab":1}`, ".ab", {{F, "1"}}, {}},
 		{`{"ab":1}`, `."ab"`, {{F, "1"}}, {}},
+		{`{"\u0061":1}`, ".a", {{F, "1"}}, {}},
+		{`[0,1,2,3,4,5,6,7,8]`, ".[]", {{F, "0"}, {F, "1"}, {F, "2"}, {F, "3"}, {F, "4"}, {F, "5"}, {F, "6"}, {F, "7"}, {F, "8"}}, {}},
 	}
 	for c in cases {
 		path, perr := core.parse_path(c.path)
@@ -264,7 +270,7 @@ path_reads :: proc(t: ^testing.T) {
 		full, berr := json.build(transmute([]u8)c.src, .Json)
 		defer core.destroy(&full)
 		testing.expect_value(t, berr.kind, core.Document_Error_Kind.None)
-		answers, qerr := core.query(&full, path, {dups = c.opts.dups, every_key = c.opts.every_key})
+		answers, qerr := core.query(&full, path, {dups = c.opts.dups})
 		defer delete(answers)
 		testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
 		check_answers(t, c, &full, answers, "query")
@@ -316,7 +322,7 @@ expect_set :: proc(t: ^testing.T, src, path_text, text, want: string, read := co
 	path, perr := core.parse_path(path_text)
 	defer core.path_destroy(&path)
 	testing.expect_value(t, perr.kind, core.Path_Error_Kind.None, loc)
-	out, err := json.set(transmute([]u8)src, .Json, path, text, read)
+	out, err := json.set(transmute([]u8)src, .Json, path, text, read = read)
 	defer delete(out)
 	testing.expect_value(t, err.kind, core.Path_Edit_Error_Kind.None, loc)
 	testing.expect_value(t, string(out), want, loc)
@@ -333,7 +339,7 @@ path_set :: proc(t: ^testing.T) {
 	expect_set(t, `{"a":1,"a":2}`, ".a", "3", `{"a":1,"a":3}`)
 	expect_set(t, `{"b":{}}`, "...a", "0", `{"b":{"a":0},"a":0}`)
 	expect_set(t, `{"a":1,"a":2}`, ".a", "3", `{"a":3,"a":2}`, {dups = .First})
-	expect_set(t, `{"a":1,"a":2}`, ".a", "3", `{"a":3,"a":3}`, {every_key = true})
+	expect_set(t, `{"a":1,"a":2}`, ".a", "3", `{"a":3,"a":3}`, {dups = .All})
 	// Under a limit the first answer of `...a` may be a container that lacks `a`.
 	expect_set(t, `{"x":{}}`, "first(...a)", "9", `{"x":{"a":9}}`)
 	expect_set(t, `{}`, "limit(1; ...a)", "9", `{"a":9}`)
@@ -341,6 +347,7 @@ path_set :: proc(t: ^testing.T) {
 	expect_set(t, `{"x":{}}`, ".x.a?", "9", `{"x":{"a":9}}`)
 	expect_set(t, `[1,{},{"a":2}]`, ".[].a?", "9", `[1,{"a":9},{"a":9}]`)
 	expect_set(t, `{"x":5}`, ".x.a?", "9", `{"x":5}`)
+	expect_set(t, `{"a":[1]}`, ".a[1]", "9", `{"a":[1,9]}`)
 	refused := [?]string{".a.b", ".x.y", ".a[5]", ".a[]", "...a"}
 	for text in refused {
 		src := `{"a":1}`
@@ -365,10 +372,10 @@ path_set_refusals :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"a":1,"a":2}`)
 	a, _ := core.parse_path(".a")
 	defer core.path_destroy(&a)
-	_, dup := json.set(src, .Json, a, "3", refuse_duplicates = true)
+	_, dup := json.set(src, .Json, a, "3", read = {dups = .Refuse})
 	testing.expect(t, dup.kind == .Edit && dup.edit.kind == .Duplicate_Key)
 	b := strings.builder_make(context.temp_allocator)
-	core.render(strings.to_writer(&b), src, "", dup)
+	core.render(strings.to_writer(&b), src, dup)
 	testing.expect_value(t, strings.to_string(b), "1:8: Duplicate key")
 	strings.builder_reset(&b)
 	core.write_code(strings.to_writer(&b), dup)
@@ -378,21 +385,21 @@ path_set_refusals :: proc(t: ^testing.T) {
 	_, bad := json.set(src, .Json, core.Path{steps = unset}, "3")
 	testing.expect_value(t, bad.kind, core.Path_Edit_Error_Kind.Path)
 	strings.builder_reset(&b)
-	core.render(strings.to_writer(&b), src, "", bad)
-	testing.expect_value(t, strings.to_string(b), "1:1: Invalid path")
+	core.render(strings.to_writer(&b), src, bad)
+	testing.expect_value(t, strings.to_string(b), "Invalid path: a step is unset")
 	strings.builder_reset(&b)
 	core.write_code(strings.to_writer(&b), bad)
 	testing.expect_value(t, strings.to_string(b), "path.bad_path")
 
-	// A path error points into the path's text and a walk error into the source, and the caller passes both.
+	// A path error points into the path's text, which it holds, and a walk error into the source.
 	_, perr := core.parse_path(".a[")
 	strings.builder_reset(&b)
-	core.render(strings.to_writer(&b), src, ".a[", perr)
-	testing.expect_value(t, strings.to_string(b), "1:3: Invalid path")
+	core.render(strings.to_writer(&b), src, perr)
+	testing.expect_value(t, strings.to_string(b), "1:3: Invalid path \".a[\": `[` is not closed")
 	_, werr := json.scan(transmute([]u8)string(`{"a":!}`), .Json, a)
 	strings.builder_reset(&b)
-	core.render(strings.to_writer(&b), transmute([]u8)string(`{"a":!}`), ".a", werr)
-	testing.expect_value(t, strings.to_string(b), "1:6: Unexpected character")
+	core.render(strings.to_writer(&b), transmute([]u8)string(`{"a":!}`), werr)
+	testing.expect_value(t, strings.to_string(b), "1:6: Expected a value")
 }
 
 // A failed path names its number in the read, and a read past the limits says which one.
@@ -413,11 +420,11 @@ path_errors_name_the_path :: proc(t: ^testing.T) {
 	_, e = json.scan(src, .Json, many[:])
 	testing.expect_value(t, e.kind, core.Path_Error_Kind.Over_Capacity)
 	b := strings.builder_make(context.temp_allocator)
-	core.render(strings.to_writer(&b), src, "", e)
+	core.render(strings.to_writer(&b), src, e)
 	testing.expect(t, strings.contains(strings.to_string(b), "MAX_PATHS"))
 }
 
-// `refuse_duplicates` holds in every object of the text with several paths, in a query and in `each_answer`, and `on`
+// `.Refuse` holds in every object of the text with several paths, in a query and in `each_answer`, and `on`
 // ends a read by returning false.
 @(test)
 stream_stops_and_refuses :: proc(t: ^testing.T) {
@@ -427,7 +434,7 @@ stream_stops_and_refuses :: proc(t: ^testing.T) {
 	b, _ := core.parse_path(".b")
 	defer core.path_destroy(&b)
 	paths := [2]core.Path{a, b}
-	doc, err := json.scan(src, .Json, paths[:], read = {refuse_duplicates = true})
+	doc, err := json.scan(src, .Json, paths[:], read = {dups = .Refuse})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.Duplicate_Key)
 	seen := 0
@@ -435,7 +442,7 @@ stream_stops_and_refuses :: proc(t: ^testing.T) {
 		(^int)(state)^ += 1
 		return false
 	}
-	serr := json.each_answer(src, .Json, paths[:], &seen, first_only, read = {refuse_duplicates = true})
+	serr := json.each_answer(src, .Json, paths[:], &seen, first_only, read = {dups = .Refuse})
 	testing.expect_value(t, serr.kind, core.Path_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, seen, 0)
 	testing.expect_value(t, json.each_answer(src, .Json, paths[:], &seen, first_only).kind, core.Path_Error_Kind.None)
@@ -507,7 +514,7 @@ stop_early_reads :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"a":1,"b":[1,2],"c":!`)
 	path, _ := core.parse_path(".a")
 	defer core.path_destroy(&path)
-	doc, err := json.scan(src, .Json, path, read = {stop_early = true})
+	doc, err := json.scan(src, .Json, path, read = {dups = .First, stop_early = true})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, len(doc.answers), 1)
@@ -526,7 +533,7 @@ stop_early_reads :: proc(t: ^testing.T) {
 	testing.expect_value(t, nerr.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, len(named.answers), 1)
 
-	_, dup := json.scan(transmute([]u8)string(`{"a":1,"a":2}`), .Json, path, read = {refuse_duplicates = true})
+	_, dup := json.scan(transmute([]u8)string(`{"a":1,"a":2}`), .Json, path, read = {dups = .Refuse})
 	testing.expect_value(t, dup.kind, core.Path_Error_Kind.Duplicate_Key)
 }
 
@@ -547,7 +554,7 @@ a_negative_index_past_sixty_four_reads_its_element :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, len(doc.answers), 1)
-	testing.expect_value(t, doc.answers[0].outcome, core.Answer_Outcome.Found)
+	testing.expect_value(t, doc.answers[0].outcome, core.Presence.Found)
 }
 
 @(test)
@@ -559,7 +566,7 @@ path_refusals :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		testing.expect_value(t, deep.kind, core.Path_Error_Kind.None)
 		testing.expect_value(t, len(doc.answers), 1)
-		testing.expect_value(t, doc.answers[0].outcome, core.Answer_Outcome.Missing)
+		testing.expect_value(t, doc.answers[0].outcome, core.Presence.Missing)
 	}
 	twice := core.Path{steps = []core.Step{core.Descend{}, core.Name("a"), core.Descend{}}}
 	_, again := json.scan(src, .Json, twice)
@@ -642,13 +649,13 @@ clone_outlives_document :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(c.answers), 1)
 	_, listed := core.member_of(&c, c.answers[0].owner, "host")
 	testing.expect_value(t, listed, core.Presence.Missing)
-	testing.expect_value(t, core.kind(&c, c.answers[0].owner), core.Kind.Map)
+	testing.expect_value(t, core.kind(&c, c.answers[0].owner), core.Kind.Object)
 }
 
 // `each_answer` gives the bytes `span` gives for the same value, a string's quotes and a container's brackets included.
 @(test)
 stream_spans_are_authored :: proc(t: ^testing.T) {
-	src := transmute([]u8)string(`{"a":"x","b":[1, 2],"c":{"d":null},"e":"A"}`)
+	src := transmute([]u8)string(`{"a":[["x"]],"b":[1, 2],"c":{"d":null},"e":"A"}`)
 	texts := [?]string{".a", ".b", ".c", ".c.d", ".e", ".b[1]"}
 	paths: [len(texts)]core.Path
 	for text, i in texts {
@@ -674,7 +681,7 @@ stream_spans_are_authored :: proc(t: ^testing.T) {
 	for a in doc.answers {
 		testing.expect_value(t, seen.spans[a.path], string(core.span(&doc, a.node)))
 	}
-	testing.expect_value(t, seen.spans[0], `"x"`)
+	testing.expect_value(t, seen.spans[0], `[["x"]]`)
 	testing.expect_value(t, seen.spans[4], `"A"`)
 }
 
@@ -704,7 +711,7 @@ presence_of_wrong_kinds :: proc(t: ^testing.T) {
 
 	path, _ := core.parse_path(".a[0]")
 	defer core.path_destroy(&path)
-	doc, _ := json.scan(src, .Json, path, read = {stop_early = true})
+	doc, _ := json.scan(src, .Json, path, read = {dups = .First, stop_early = true})
 	defer core.destroy(&doc)
 	open, _ := core.member_of(&doc, core.ROOT, "a")
 	n_read, exact := core.length_exact(&doc, open)
@@ -729,9 +736,8 @@ pointer_reads :: proc(t: ^testing.T) {
 		doc, answer, err := json.find(src, .Json, path)
 		defer core.destroy(&doc)
 		testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
-		a, some := answer.?
-		testing.expect(t, some && a.outcome == .Found)
-		testing.expect_value(t, string(core.span(&doc, a.node)), c.want)
+		testing.expect_value(t, answer.outcome, core.Presence.Found)
+		testing.expect_value(t, string(core.span(&doc, answer.node)), c.want)
 	}
 }
 
@@ -743,7 +749,7 @@ pointer_index_past_int :: proc(t: ^testing.T) {
 	testing.expect_value(t, perr.kind, core.Path_Error_Kind.None)
 	Case :: struct {
 		src:     string,
-		outcome: core.Answer_Outcome,
+		outcome: core.Presence,
 	}
 	for c in ([]Case{{`{"a":[1,2]}`, .Missing}, {`{"a":{"99999999999999999999":3}}`, .Found}}) {
 		doc, err := json.scan(transmute([]u8)c.src, .Json, path)
@@ -802,20 +808,20 @@ read_options_follow_paths :: proc(t: ^testing.T) {
 	src := transmute([]u8)string(`{"a":1,"a":2}`)
 	path, _ := core.parse_path(".a")
 	defer core.path_destroy(&path)
-	doc, err := json.scan(src, .Json, path, {dups = .First})
+	doc, err := json.scan(src, .Json, path, read = {dups = .First})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, string(core.span(&doc, doc.answers[0].node)), "1")
-	found, answer, ferr := json.find(src, .Json, path, {dups = .First})
+	found, answer, ferr := json.find(src, .Json, path, read = {dups = .First})
 	defer core.destroy(&found)
 	testing.expect_value(t, ferr.kind, core.Path_Error_Kind.None)
-	testing.expect_value(t, string(core.span(&found, answer.?.node)), "1")
+	testing.expect_value(t, string(core.span(&found, answer.node)), "1")
 	seen: string
 	on :: proc(state: rawptr, a: core.Token_Answer) -> bool {
 		(^string)(state)^ = "got"
 		return true
 	}
-	testing.expect_value(t, json.each_answer(src, .Json, path, &seen, on, {dups = .First}).kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, json.each_answer(src, .Json, path, &seen, on, read = {dups = .First}).kind, core.Path_Error_Kind.None)
 	testing.expect_value(t, seen, "got")
 }
 
@@ -845,4 +851,106 @@ many_path_reads_survive_refused_allocations :: proc(t: ^testing.T) {
 			delete(answers, alloc)
 		}
 	}
+}
+
+// Several paths: a `..` read below the depth of its steps, answers at one place in path order, and a repeated key
+// under a `..`. Each answer reads as its path and its value's text, or `-` for no value.
+@(test)
+many_path_reads :: proc(t: ^testing.T) {
+	Case :: struct {
+		src:   string,
+		paths: [2]string,
+		want:  []string,
+	}
+	cases := []Case {
+		{`[[[[[{"c":2}]]]]]`, {"...c", ".z"}, {"0 -", "1 -", "0 -", "0 -", "0 -", "0 -", "0 2", "0 -"}},
+		{`{"a":1}`, {".a.b", ".a"}, {"0 -", "1 1"}},
+		{`{"x":{"a":1,"a":2}}`, {"...a", ".z"}, {"0 -", "0 2", "0 -", "0 -", "1 -"}},
+	}
+	for c in cases {
+		paths: [2]core.Path
+		for text, i in c.paths {
+			paths[i], _ = core.parse_path(text)
+		}
+		doc, err := json.scan(transmute([]u8)c.src, .Json, paths[:])
+		testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+		got := make([dynamic]string, context.temp_allocator)
+		for a in doc.answers {
+			append(&got, fmt.tprintf("%d %s", a.path, string(core.span(&doc, a.node)) if a.outcome == .Found else "-"))
+		}
+		testing.expectf(t, slice.equal(got[:], c.want), "%q %v: %v", c.src, c.paths, got)
+		core.destroy(&doc)
+		for &path in paths {
+			core.path_destroy(&path)
+		}
+	}
+}
+
+// A limit counts the members a path ends in, not the containers a `..` reads before them.
+@(test)
+path_set_limit_counts_members :: proc(t: ^testing.T) {
+	src := `{"aaaaaaaaaaaaaaaaaaaaaaaac":{ "a":12} }`
+	path := core.Path{steps = {core.Descend{}, core.Name("a")}, limit = 1}
+	full, _ := json.build(transmute([]u8)src, .Json)
+	defer core.destroy(&full)
+	got, err := scan.set_answers(&full, path, "0")
+	defer delete(got)
+	testing.expect_value(t, err.edit.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, string(got), `{"aaaaaaaaaaaaaaaaaaaaaaaac":{ "a":0} }`)
+}
+
+// Under a raised `max_depth` every read of a text nested past `MAX_DEPTH` grows its stacks with the nesting: a build,
+// a query of the document, a typed read and a write of it, a scan that descends, keeps a value or streams, and a scan
+// of each record.
+@(test)
+deep_reads_grow_their_stacks :: proc(t: ^testing.T) {
+	n := 3 * core.MAX_DEPTH
+	text := strings.concatenate({strings.repeat("[", n, context.temp_allocator), strings.repeat("]", n, context.temp_allocator)}, context.temp_allocator)
+	src := transmute([]u8)text
+	as := json.as(.Json, {max_depth = max(u32)})
+	descend, _ := core.parse_path("..[0]", context.temp_allocator)
+	first, _ := core.parse_path("[0]", context.temp_allocator)
+	doc, berr := core.build(src, as)
+	defer core.destroy(&doc)
+	if !testing.expect_value(t, berr.kind, core.Document_Error_Kind.None) {
+		return
+	}
+	answers, qerr := scan.query(&doc, []core.Path{descend})
+	testing.expect_value(t, qerr.kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, len(answers), n)
+	delete(answers)
+	v: any
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &v, nil, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	out, _, werr := core.write(&doc, allocator = context.temp_allocator)
+	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(out), text)
+	deep, derr := scan.scan(src, as, []core.Path{descend})
+	testing.expect_value(t, derr.kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, len(deep.answers), n)
+	core.destroy(&deep)
+	kept, kerr := scan.scan(src, as, first)
+	testing.expect_value(t, kerr.kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, len(kept.nodes), n)
+	core.destroy(&kept)
+	count := 0
+	on :: proc(state: rawptr, a: core.Token_Answer) -> bool {
+		(^int)(state)^ += 1
+		return true
+	}
+	testing.expect_value(t, scan.each_answer(src, as, []core.Path{descend}, &count, on).kind, core.Path_Error_Kind.None)
+	testing.expect_value(t, count, n)
+	lines := strings.concatenate({"[1]\n", text, "\n", text, "\n"}, context.temp_allocator)
+	it := records.open(transmute([]u8)lines, as)
+	defer records.close(&it)
+	nodes: [dynamic]int
+	defer delete(nodes)
+	for {
+		_, rec, err, more := records.scan(&it, first)
+		if !more {
+			break
+		}
+		testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+		append(&nodes, len(rec.nodes))
+	}
+	testing.expect_value(t, fmt.tprint(nodes[:]), fmt.tprint([]int{2, n, n}))
 }

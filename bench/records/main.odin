@@ -1,4 +1,4 @@
-// `records <frame|check|build|stream|read|write|cells|rows|text|threads|validate|each> <file> <iters> [width]`: reads the
+// `records <frame|check|build|stream|read|write|cells|rows|text|threads|validate|each> <file> [width]`: reads the
 // records of the file and prints best and median GB/s. A `.csv` file is read as CSV by `frame`, `check`, `threads`,
 // `validate` and `each`. `frame` frames each record and reads no value, `check` judges each one, `build` builds the
 // document of each, `threads` is `check` on a pool of `width` threads (6 by default), `stream` judges each one through a
@@ -18,12 +18,12 @@ import "core:fmt"
 import "core:mem/virtual"
 import "core:os"
 import "core:path/filepath"
-import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:time"
 import core "../../core"
+import "../timing"
 import host "../../host"
 import typed "../../core/typed"
 import records "../../core/records"
@@ -82,7 +82,7 @@ threads :: proc(src: []u8) -> int {
 }
 
 validate :: proc(src: []u8) -> int {
-	return int(records.validate(src, handle, &pool.runner) != nil)
+	return int(records.validate_parallel(src, handle, &pool.runner) != nil)
 }
 
 // The framing `each` reads the file by, and the byte the records start at: a `.json` file's spine.
@@ -179,17 +179,15 @@ load :: proc(src: []u8, as: core.As, plan: ^typed.Plan, list: ^[dynamic]$T) -> i
 	it := records.open(src, as)
 	defer records.close(&it)
 	n := 0
-	for {
-		v: T
-		more, err := records.read(&it, &v, plan, {borrow_strings = true})
-		if !more {
-			return n
-		}
+	v: T
+	for err in records.read(&it, &v, plan, {borrow_strings = true}) {
 		n += int(err.kind != .None)
 		if list != nil {
 			append(list, v)
 		}
+		v = {}
 	}
+	return n
 }
 
 // The `write` lane's records, read once outside the clock, and the bytes one pass writes.
@@ -214,8 +212,8 @@ write_rows :: proc(_: []u8) -> int { return write(table_list[:], &row_plan) }
 write_text :: proc(_: []u8) -> int { return write(text_list[:], &text_plan) }
 
 main :: proc() {
-	if len(os.args) != 4 && len(os.args) != 5 {
-		fmt.eprintln("usage: records <frame|check|build|stream|read|write|cells|rows|text|threads|validate|each> <file> <iters> [width]")
+	if len(os.args) != 3 && len(os.args) != 4 {
+		fmt.eprintln("usage: records <frame|check|build|stream|read|write|cells|rows|text|threads|validate|each> <file> [width]")
 		os.exit(2)
 	}
 	src, err := os.read_entire_file(os.args[2], runtime.default_allocator())
@@ -223,7 +221,6 @@ main :: proc() {
 		fmt.eprintln(err)
 		os.exit(1)
 	}
-	iters, _ := strconv.parse_int(os.args[3])
 	lane: proc(src: []u8) -> int
 	handle = dsv.as(.Csv) if strings.has_suffix(os.args[2], ".csv") else json.as(.Json)
 	switch os.args[1] {
@@ -237,8 +234,8 @@ main :: proc() {
 			each_framing = .Entries
 		}
 		width := 6
-		if len(os.args) == 5 {
-			width, _ = strconv.parse_int(os.args[4])
+		if len(os.args) == 4 {
+			width, _ = strconv.parse_int(os.args[3])
 		}
 		host.pool_init(&pool, width)
 	case "stream": lane = stream
@@ -273,21 +270,24 @@ main :: proc() {
 			os.exit(2)
 		}
 	case:
-		fmt.eprintln("no lane", os.args[1])
+		fmt.eprintln("no lane", os.args[1], "(lanes: frame, check, build, stream, read, write, cells, rows, text, threads, validate, each)")
 		os.exit(2)
 	}
-	ts := make([]f64, iters)
-	for i in 0 ..< iters {
+	ts: [timing.TIMED]i64
+	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		t0 := time.tick_now()
 		n := lane(src)
-		ts[i] = time.duration_seconds(time.tick_since(t0))
+		d := i64(time.tick_since(t0))
+		if i >= timing.WARMUP {
+			ts[i - timing.WARMUP] = d
+		}
 		if os.args[1] != "frame" && os.args[1] != "cells" && n != 0 {
 			fmt.eprintln(n, "records refused")
 			os.exit(1)
 		}
 	}
-	slice.sort(ts)
 	// The write lane counts the bytes it writes and every other lane the bytes it reads.
 	size := f64(written if os.args[1] == "write" else len(src))
-	fmt.printf("gb_per_s=%.4f best=%.4f check=%d\n", size / ts[iters / 2] / 1e9, size / ts[0] / 1e9, count(src))
+	median := timing.median(&ts)
+	fmt.printf("gb_per_s=%.4f best=%.4f check=%d\n", size / f64(median), size / f64(ts[0]), count(src))
 }

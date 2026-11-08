@@ -20,10 +20,10 @@ check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator :
 	return out[:], nil
 }
 
-// Returns the fault of `src` as one whole text of format `as`, which is the fault the format's `validate` gives, or nil.
-// A format that does not take it answers `.Bad_Option`. With a `runner`, a long text is read in pieces on its threads,
-// with the same answer.
-validate :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault) {
+// Returns the fault of `src` as one whole text of format `as`, which is the fault the format's `validate` gives, or nil,
+// read in pieces on the threads of `runner`. A format that does not take it answers `.Bad_Option`. With no runner, or
+// for a short text, it reads on the caller alone.
+validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault) {
 	services := (^Services)(as.spelling.records) if as.spelling != nil else nil
 	if services == nil || services.whole == nil {
 		return core.Fault{kind = .Bad_Option}
@@ -41,6 +41,13 @@ validate :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(co
 // The bytes each piece of a text read on threads spans. The tests set it to 1, so that every byte is a cut.
 @(private)
 SLICE :: #config(RECORDS_SLICE, 64 * 1024)
+
+// The records `judge_all` reads before it decides to fan out, and the mean record size past which a piece's guess is
+// not expected to land on a record. The tests set them so that every text fans out.
+@(private)
+FAN_AFTER :: #config(RECORDS_FAN_AFTER, 8)
+@(private)
+SPARSE :: #config(RECORDS_SPARSE, SLICE / 4)
 
 // What the chain of records from a piece's first guess found: the offset of its first record, 0 when no chain reached
 // the piece's end or the text's with no fault, where it arrived past its last record, and the faults of its records.
@@ -76,6 +83,10 @@ judge_all :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, runner
 	defer for &p in c.pieces {
 		delete(p.faults)
 	}
+	// Until `FAN_AFTER` records are read the records come one at a time, to see whether they are dense enough for a
+	// piece's guess to land on one.
+	origin, seen := it.pos, 0
+	sampling := runner != nil && runner.threads > 0 && it.services.guess != nil && u64(len(src)) >= it.pos + 2 * SLICE
 	for {
 		rec, more := next_span(&it, to)
 		fault := it.fault
@@ -88,17 +99,26 @@ judge_all :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64, runner
 				continue
 			}
 			fault = it.services.judge(&it, rec)
-			// The pieces start past the first record, where the reader knows the framing's state.
-			if c.pieces == nil && runner != nil && runner.threads > 0 && it.services.guess != nil && u64(len(src)) >= it.pos + 2 * SLICE {
-				c.start = it
-				c.pieces = make([]Piece, (u64(len(src)) - it.pos + SLICE - 1) / SLICE, runtime.heap_allocator()) or_return
-				fan(runner, chain_pieces, &c)
+			// The pieces start past the sampled records, where the reader knows the framing's state.
+			if sampling {
+				seen += 1
+				if seen >= FAN_AFTER {
+					sampling = false
+					if it.pos - origin <= u64(seen) * SPARSE && u64(len(src)) >= it.pos + 2 * SLICE {
+						c.start = it
+						c.pieces = make([]Piece, (u64(len(src)) - it.pos + SLICE - 1) / SLICE, runtime.heap_allocator()) or_return
+						fan(runner, chain_pieces, &c)
+					}
+				}
 			}
 			// A record comes alone at a piece's start, where it may be the piece's first, and the text before the next
 			// piece's start comes as one, or with no pieces the rest of the text.
 			to = max(u64)
-			if c.pieces != nil {
+			switch {
+			case c.pieces != nil:
 				to = c.start.pos + (k + 1) * SLICE if rec.at >= c.start.pos else c.start.pos
+			case sampling:
+				to = it.pos + 1
 			}
 		}
 		if f, bad := fault.?; bad {
@@ -351,20 +371,20 @@ build :: proc {build_record, build_whole}
 // calling thread, which gives its refusal. `pieces`, when given, is set to the pieces a joined build cut, and left
 // alone by a build on the calling thread.
 @(private)
-build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Document_Error) {
+build_whole :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Document_Error) {
 	services := (^Services)(as.spelling.records) if as.spelling != nil else nil
 	if runner != nil && runner.threads > 0 && services != nil && services.build_next != nil && u64(len(src)) >= 4 * SLICE {
 		whole, framing, at := services.whole(src, as)
 		if !entries_cut(src, whole, framing, at) {
-			return core.build(src, as, refuse_duplicates, allocator)
+			return core.build(src, as, dups, allocator)
 		}
-		job := Build_Job{refuse = refuse_duplicates}
+		job := Build_Job{refuse = dups == .Refuse}
 		job.pieces.allocator = runtime.heap_allocator()
 		// The joined nodes take the room a serial build reserves.
 		depth := core.reserve_depth(as.max_depth, len(src))
 		room, refused := runtime.mem_alloc_non_zeroed(((len(src) + depth) / 2 + 16) * size_of(core.Node), align_of(core.Node), allocator)
 		if refused != nil {
-			return core.build(src, as, refuse_duplicates, allocator)
+			return core.build(src, as, dups, allocator)
 		}
 		job.nodes = ([^]core.Node)(raw_data(room))[:len(room) / size_of(core.Node)]
 		defer {
@@ -383,14 +403,13 @@ build_whole :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocato
 		}
 		delete(job.nodes, allocator)
 	}
-	return core.build(src, as, refuse_duplicates, allocator)
+	return core.build(src, as, dups, allocator)
 }
 
 // Whether the records at `at` are cut exactly, the first ends in the first quarter of the bytes past `at`, and it is
 // an array's entry, not an object's member, which no piece of a whole text's build joins. A text whose bulk is no
 // array, or is the array's first entry, is built on one thread without a run of pieces, or a walk of that entry,
-// before it.
-@(private)
+// before it. A caller that cuts a whole text's spine array into pieces asks it first.
 entries_cut :: proc(src: []u8, as: core.As, framing: core.Framing, at: u64) -> bool {
 	it := open(src, as, framing, at, runtime.heap_allocator())
 	defer close(&it)
@@ -441,7 +460,7 @@ build_piece :: proc(job: ^Build_Job, it: ^Reader, k: int) -> bool {
 	}
 	bytes := len(it.src) - int(it.pos)
 	depth := core.reserve_depth(it.as.max_depth, bytes)
-	b := engine.builder_start(it.src, it.as, job.refuse, runtime.heap_allocator(), (bytes + depth) / 2 + 16, depth)
+	b := engine.builder_start(it.src, it.as, job.refuse, runtime.heap_allocator(), (bytes + depth) / 2 + 16, min(depth, core.MAX_DEPTH))
 	regs := engine.BUILDER_REGS
 	p: Built
 	ok := len(b.doc.nodes) > 0
@@ -461,10 +480,12 @@ build_piece :: proc(job: ^Build_Job, it: ^Reader, k: int) -> bool {
 	ok &&= err.kind == .None
 	{
 		sync.guard(&job.lock)
-		if k >= len(job.pieces) {
-			resize(&job.pieces, k + 1)
+		if k >= len(job.pieces) && resize(&job.pieces, k + 1) != nil {
+			core.destroy(&p.doc)
+			ok = false
+		} else {
+			job.pieces[k] = p
 		}
-		job.pieces[k] = p
 		job.failed ||= !ok
 	}
 	sync.atomic_add(&job.built, len(p.doc.nodes))
@@ -506,11 +527,14 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 	}
 	cut := hi - lo
 	heap := runtime.heap_allocator()
-	shell := make([]u8, u64(len(src)) - cut, heap)
+	shell, refused := make([]u8, u64(len(src)) - cut, heap)
+	if refused != nil {
+		return
+	}
 	defer delete(shell, heap)
 	copy(shell, src[:lo])
 	copy(shell[lo:], src[hi:])
-	frame, err := core.build(shell, as, job.refuse, heap)
+	frame, err := core.build(shell, as, .Refuse if job.refuse else .Last, heap)
 	defer core.destroy(&frame)
 	// The array is the last node to open before the first entry.
 	array := 0
@@ -528,7 +552,7 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 	copy(nodes, frame.nodes[:array + 1])
 	// The array's subtree and each one around it grow by the entries' nodes.
 	for &t, i in nodes[:array + 1] {
-		if (t.kind == .Array || t.kind == .Map) && i + int(t.n) > array {
+		if (t.kind == .Array || t.kind == .Object) && i + int(t.n) > array {
 			t.n += u32(n)
 		}
 	}
@@ -536,15 +560,22 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 	for t, i in frame.nodes[array + 1:] {
 		nodes[array + 1 + n + i] = {t.lo + cut, t.n, t.kind, t.role, t.spelling}
 	}
+	wide := entries >= int(core.MAX_CHILDREN)
+	n_counts := len(frame.counts) + int(wide)
 	for &p in job.pieces {
 		p.base += array + 1
+		n_counts += len(p.doc.counts)
+	}
+	counts, failed := make([dynamic]core.Child_Count, 0, n_counts, allocator)
+	if failed != nil {
+		return
 	}
 	fan(runner, copy_pieces, job)
-	counts := make([dynamic]core.Child_Count, allocator)
+	// The appends fit the room reserved, so `counts_alloc` is the whole allocation.
 	for c in frame.counts {
 		append(&counts, core.Child_Count{c.node + core.Node_Index(n) if int(c.node) > array else c.node, c.count})
 	}
-	if entries >= int(core.MAX_CHILDREN) {
+	if wide {
 		append(&counts, core.Child_Count{core.Node_Index(array), u32(entries)})
 	}
 	for p in job.pieces {

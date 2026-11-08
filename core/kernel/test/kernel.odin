@@ -255,13 +255,17 @@ below_every_byte_and_lane :: proc(t: ^testing.T) {
 	}
 }
 
-// Checks `first_lane` on the empty mask (16), on each lane alone, and on each lane under random lanes above it.
+// Checks `first_lane` and `any_lane16` on the empty mask, on each lane alone, and `first_lane` on each lane under random lanes above it.
 @(test, enable_target_feature = FEATURES)
 first_lane_every_lane :: proc(t: ^testing.T) {
 	state := rand.create(8)
 	context.random_generator = rand.default_random_generator(&state)
 	testing.expect_value(t, k.first_lane(#simd[16]u8{}), 16)
+	testing.expect(t, !k.any_lane16(#simd[16]u8{}))
 	for lane in 0 ..< 16 {
+		single: [16]u8
+		single[lane] = 0xff
+		testing.expectf(t, k.any_lane16(transmute(#simd[16]u8)single), "lane %d", lane)
 		for round in 0 ..< 64 {
 			m: [16]u8
 			m[lane] = 0xff
@@ -273,17 +277,6 @@ first_lane_every_lane :: proc(t: ^testing.T) {
 			got := k.first_lane(transmute(#simd[16]u8)m)
 			testing.expectf(t, got == u64(lane), "% x: %d, want %d", m, got, lane)
 		}
-	}
-}
-
-// Checks `any_lane16` on the empty mask and on each lane alone.
-@(test, enable_target_feature = FEATURES)
-any_lane16_every_lane :: proc(t: ^testing.T) {
-	testing.expect(t, !k.any_lane16(#simd[16]u8{}))
-	for lane in 0 ..< 16 {
-		m: [16]u8
-		m[lane] = 0xff
-		testing.expectf(t, k.any_lane16(transmute(#simd[16]u8)m), "lane %d", lane)
 	}
 }
 

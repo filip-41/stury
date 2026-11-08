@@ -1,54 +1,48 @@
 // `build` is used only in a generic procedure, which the unused-import check does not read.
 #+vet !unused-imports
+#+private
 package dsv
 
 import "base:intrinsics"
 import "base:runtime"
-import "core:bytes"
 import spell "../core/spell"
 import core "../core"
 import compose "../core/compose"
 import kernel "../core/kernel"
 import build "../core/build"
 
-// dsv's document, built from the walk's tokens over the caller's bytes. A headed text is an `Array` of `Map` records
+// dsv's document, built from the walk's tokens over the caller's bytes. A headed text is an `Array` of `Object` records
 // whose first child is the header row, an `Array` of role `Key` whose cells name every record's columns. A text without
-// a header is an `Array` of `Array`s. A cell is text until a reader calls `resolve`, and a headed record's shared keys
+// a header is an `Array` of `Array`s. A cell is `Plain` until a reader asks `core.kind`, and a headed record's shared keys
 // sit in `Document.shared_keys`.
 
 // dsv's edit services, in rodata. The three specs share this table, and each service dispatches on `doc.as.spec`,
 // since the specs differ only in how a recorded text is read.
-@(private, rodata)
+@(rodata)
 EDIT := core.Edit_Spelling {
-	value         = edit_value_at,
+	value         = proc(doc: ^core.Token_View, src: []u8, _: runtime.Allocator) -> core.Document_Error {return edit_cells(doc, src, false)},
 	key_text      = edit_key_text,
 	// A delimited text's comment spelling is `.Byte` with the document's comment byte, or `.None` when the byte is 0.
 	comment       = proc(doc: ^core.Document, _: u8) -> (core.Comment_Spelling, u8) {return (.Byte if doc.as.opts[1] != 0 else .None), doc.as.opts[1]},
-	member_sep    = proc(doc: ^core.Document) -> string {return string(doc.as.opts[:1])},
-	insert_check  = edit_insert_check,
+	member_sep    = proc(doc: ^core.Document, c: core.Node_Index) -> string {return edit_record_sep(doc) if c == core.ROOT else string(doc.as.opts[:1])},
+	insert_check  = proc(doc: ^core.Document, c: core.Node_Index, text: string, _: runtime.Allocator) -> core.Document_Error {return edit_cells(doc, transmute([]u8)text, c == core.ROOT)},
 	interior      = edit_interior,
 	fact_slot     = edit_fact_slot,
 	emptied       = edit_emptied,
 	plan          = edit_plan,
-	commit        = proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) -> (out: []u8, dropped: int, err: core.Document_Error) {return compose.commit(list, spec, &ROOT_EDIT, allocator)},
+	commit        = compose.commit,
 	flat          = true,
-}
-
-@(private, rodata)
-ROOT_EDIT := compose.Root_Spelling {
-	root_head     = compose_root_head,
-	root_junction = compose_root_junction,
 }
 
 // dsv's spelling services, in rodata, the same table for every spec. A service dispatches on `doc.as.spec`, since the
 // specs decode a cell differently: a CSV cell's backslash is a byte and its `""` a quote, a TSV cell's backslash is an
 // escape, and a Plain cell has neither quotes nor escapes.
-@(private)
 SPELLING := core.Spelling {
 	text       = proc(v: ^core.Token_View, n: core.Node, buf: []u8) -> (s: string, ok: bool) {return cell_text(v.src, n, Spec(v.spec), buf)},
 	key_equals = spelling_key_equals,
 	number     = spelling_number,
 	build      = build_as,
+	plans      = rawptr(plan_as),
 	validate   = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_from(src, as, 0, 0)},
 	scan       = scan_as,
 	resolve    = spelling_resolve,
@@ -63,24 +57,13 @@ SPELLING := core.Spelling {
 }
 
 // `Token.spelling`'s bit for a quoted CSV cell holding a `""`, set only on a walk for `Cells` or `Batch`.
-@(private)
 SPELLING_DOUBLED :: u16(8)
 
 // `Token.spelling`'s bit for the key of a column past the header's last cell, which `column_key` makes. Its text is
 // `n`, the column's 1-based position, in decimal.
-@(private)
 SPELLING_COLUMN :: u16(16)
 
-// Reads a delimited text as spec `S` into a document, allocating its nodes with `allocator`. `opts.no_header` makes the
-// first record data. `refuse_duplicates` returns an error at a header name that repeats another in the header row. The
-// document borrows `src`, which must outlive it, and `core.destroy` frees the document. It is `core.build` with
-// `as(spec, opts)`.
-build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, refuse_duplicates := false, allocator := context.allocator) -> (core.Document, core.Document_Error) {
-	return core.build(src, as(spec, opts), refuse_duplicates, allocator)
-}
-
 // The handle's build: the walk compiled for the handle's spec.
-@(private)
 build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	switch Spec(as.spec) {
 	case .Csv:   return build_spec(src, .Csv, options_of(as), refuse_duplicates, allocator)
@@ -90,7 +73,6 @@ build_as :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator: run
 	return {}, {kind = .Bad_Spec}
 }
 
-@(private)
 build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	if f, bad := option_fault(S, opts).?; bad {
 		return {}, {kind = .Walk, inner = f}
@@ -128,10 +110,17 @@ build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, 
 		walk_keys(src, 0, S, opts, &need, &regs, build.builder_hook_count_keyless, keys)
 		doc, err = build_reserved(src, S, opts, refuse_duplicates, allocator, need.nodes + count + 2, need.facts, start, keys)
 	}
+	opts := opts
+	if err.kind == .None {
+		// A write ends its lines as the text's first row ends, header or record, read before a widened header has keys
+		// with no bytes. A line end inside a quoted cell is the cell's text.
+		opts.crlf = len(doc.nodes) > 1 && line_end_before(src, record_end(&doc, 1)) == "\r\n"
+		doc.as = as(S, opts)
+	}
 	wide := count
 	if .Ragged in opts.tolerate && count > 0 && err.kind == .None {
 		it := core.children(&doc, core.ROOT)
-		for rec, more := core.child_next(&it); more; rec, more = core.child_next(&it) {
+		for rec in core.child_next(&it) {
 			wide = max(wide, core.length(&doc, rec))
 		}
 	}
@@ -157,16 +146,12 @@ build_spec :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, 
 
 // Reads `src` into a builder with room for `nodes` nodes and `facts` facts, which the hooks grow past. `keys` holds a
 // token per header cell, and `start` is the header's first byte.
-@(private)
 build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bool, allocator: runtime.Allocator, nodes, facts, start: int, keys: []core.Token) -> (core.Document, core.Document_Error) {
 	// A record is a container inside the document's array, so a dsv text nests at most two containers and 8 stack slots
 	// cover it.
 	// The document holds the options it was read with, so every edit service judges a recorded text and writes its
 	// separators the way this text reads.
-	line := bytes.index_byte(src, '\n')
-	layout := opts
-	layout.crlf = line > 0 && src[line - 1] == '\r'
-	b := build.builder_start(src, as(S, layout), refuse_duplicates, allocator, nodes, 8, facts)
+	b := build.builder_start(src, as(S, opts), refuse_duplicates, allocator, nodes, 8, facts)
 	if len(b.doc.nodes) == 0 {
 		// The reservation was refused and the node array is nil, so no hook may run.
 		return build.builder_end(&b, build.BUILDER_REGS, nil)
@@ -214,7 +199,6 @@ build_reserved :: proc(src: []u8, $S: Spec, opts: Options, refuse_duplicates: bo
 }
 
 // Returns quoted CSV cell `n`'s span without its quote pair. The walk gives a quoted cell only once it closes it.
-@(private)
 inner_span :: #force_inline proc "contextless" (n: core.Node) -> (lo, hi: u64) {
 	return n.lo + 1, n.lo + u64(n.n) - 1
 }
@@ -223,7 +207,6 @@ inner_span :: #force_inline proc "contextless" (n: core.Node) -> (lo, hi: u64) {
 // escape read as the byte it spells. A byte past 0x7F reads as one UTF-8 character, or U+FFFD over its maximal subpart
 // when it is ill-formed. `pending` holds the rest of a character read in parts. The walk accepted the cell, so a TSV
 // backslash has its letter.
-@(private)
 Dsv_Decoded :: struct {
 	src:     []u8,
 	p, end:  u64,
@@ -232,7 +215,6 @@ Dsv_Decoded :: struct {
 	pending: spell.Pending,
 }
 
-@(private)
 dsv_decoded_init :: proc "contextless" (src: []u8, n: core.Node, spec: Spec) -> Dsv_Decoded {
 	if spec == .Csv {
 		if n.spelling & core.SPELLING_QUOTED != 0 {
@@ -244,7 +226,6 @@ dsv_decoded_init :: proc "contextless" (src: []u8, n: core.Node, spec: Spec) -> 
 	return {src = src, p = n.lo, end = n.lo + u64(n.n), tsv = spec == .Tsv}
 }
 
-@(private)
 dsv_decoded_next :: proc "contextless" (d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
 	if b, ok = spell.pending_next(&d.pending); ok {
 		return
@@ -280,7 +261,6 @@ dsv_decoded_next :: proc "contextless" (d: ^Dsv_Decoded) -> (b: u8, ok: bool) {
 // Whether a quoted cell's inner span is its text: it holds no `""` and no ill-formed sequence. A cell holding `""`
 // decodes to fewer bytes, and one marked `SPELLING_LAX` holds an ill-formed sequence that decodes as U+FFFD. The walk
 // accepted the cell, so a quote in its inner span is the first of a `""` pair.
-@(private)
 plain_quoted :: proc "contextless" (src: []u8, n: core.Node) -> bool {
 	lo, hi := inner_span(n)
 	return n.spelling & core.SPELLING_LAX == 0 && kernel.index_byte(src[lo:hi], '"') < 0
@@ -288,7 +268,6 @@ plain_quoted :: proc "contextless" (src: []u8, n: core.Node) -> bool {
 
 // The bytes of cell `n` of `src` that are its text, for a cell that needs no decode: a quoted CSV cell without `""` and
 // with well-formed UTF-8 is its inner span, and another cell its span. False for a cell that must be decoded.
-@(private)
 written_text :: #force_inline proc "contextless" (src: []u8, n: core.Node, spec: Spec) -> (text: []u8, ok: bool) {
 	if spec == .Csv && n.spelling & core.SPELLING_QUOTED != 0 && plain_quoted(src, n) {
 		lo, hi := inner_span(n)
@@ -303,7 +282,6 @@ written_text :: #force_inline proc "contextless" (src: []u8, n: core.Node, spec:
 // The text of cell `n` of `src`, a text of spec `spec`, and dsv's `Spelling.text`. It returns a cell that needs no
 // decode as a slice of the source. It decodes a quoted cell holding `""`, a TSV escape and a `lax` cell into `buf`, and returns
 // false when `buf` is too short.
-@(private)
 cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string, ok: bool) {
 	if text, written := written_text(src, n, spec); written {
 		return string(text), true
@@ -322,7 +300,6 @@ cell_text :: proc(src: []u8, n: core.Node, spec: Spec, buf: []u8) -> (s: string,
 // dsv's `Spelling.key_equals`. It returns whether cell `i` decodes to `name`, with no allocation. A cell that needs no
 // decode is compared by its span, or by its inner span for a quoted cell without `""`, and one that needs it byte by
 // byte as it decodes.
-@(private)
 spelling_key_equals :: proc "contextless" (doc: ^core.Token_View, n: core.Node, name: string) -> bool {
 	spec := Spec(doc.spec)
 	if text, written := written_text(doc.src, n, spec); written {
@@ -340,7 +317,6 @@ spelling_key_equals :: proc "contextless" (doc: ^core.Token_View, n: core.Node, 
 // dsv's `Spelling.number`. It returns the JSON number a value cell spells, and false for any other cell. A quoted cell,
 // a TSV escape and a key cell are never numbers, since no JSON number holds a quote, a backslash or a byte past 0x7F. A
 // header cell names a column and answers as a JSON key node does.
-@(private)
 spelling_number :: proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bool) {
 	if n.role != .Value {
 		return {}, false
@@ -348,23 +324,24 @@ spelling_number :: proc(doc: ^core.Token_View, n: core.Node) -> (core.Number, bo
 	return spell.number_strict(doc.src, n.lo, n.lo + u64(n.n))
 }
 
-// dsv's `Spelling.resolve`. It returns `.String` by default. With the document's `infer`, an empty value cell is `.Null`, a `true`
-// or `false` value cell is `.True` or `.False`, and a value cell that is exactly a JSON number is `.Number`. A quoted
-// cell and a TSV escape are `.String`, since no number, `true` or `false` holds a quote or a backslash.
-@(private)
+// dsv's `Spelling.resolve` of a cell. An empty value cell, which holds no quotes, is `.Null`, as a typed read and the
+// CLI read it, and any other cell is `.String`. With the document's `infer`, a `true` or `false` value cell is `.True`
+// or `.False`, and a value cell that is exactly a JSON number is `.Number`. A quoted cell and a TSV escape are
+// `.String`, since no number, `true` or `false` holds a quote or a backslash.
 spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 	n := doc.nodes[i]
-	if n.kind != .Plain {
-		return n.kind
-	}
 	// A key cell is text, as a JSON key node is, since a header cell names a column whatever it spells.
-	if n.role != .Value || !options_of(doc.as).infer {
+	if n.role != .Value {
+		return .String
+	}
+	if n.n == 0 {
+		return .Null
+	}
+	if !options_of(doc.as).infer {
 		return .String
 	}
 	lo, hi := n.lo, n.lo + u64(n.n)
 	switch string(doc.src[lo:hi]) {
-	case "":
-		return .Null
 	case "true":
 		return .True
 	case "false":
@@ -379,24 +356,23 @@ spelling_resolve :: proc(doc: ^core.Document, i: core.Node_Index) -> core.Kind {
 // Checks that an edit's text is a record of at least one cell, with its record at the text's start and its last cell
 // ending at the text's end, so the text writes no line end of its own. A recorded text that holds the delimiter outside
 // quotes reads as two cells and is refused, and so is one that starts a line with the comment byte, which the walk reads
-// as no record. A CSV or TSV cell holding the delimiter must be quoted or escaped by the caller. Plain has no quote, so
-// its cells cannot hold the delimiter at all. Returns the cell count.
-@(private)
-edit_record :: proc(doc: ^core.Token_View, src: []u8, _: runtime.Allocator, $S: Spec) -> (cells: int, err: core.Document_Error) {
+// as no record. A byte order mark the text starts with is a cell byte, as it is past the text's first byte, and the
+// commit refuses an output that it starts. A CSV or TSV cell holding the delimiter must be quoted or escaped by the
+// caller. Plain has no quote, so its cells cannot hold the delimiter at all. Returns the cell count.
+edit_record :: proc(doc: ^core.Token_View, src: []u8, $S: Spec) -> (cells: int, err: core.Document_Error) {
 	layout := options_of(doc.as)
 	opts := Options{no_header = true, delimiter = layout.delimiter, comment = layout.comment}
 	if f, bad := validate_spec(src, S, opts).?; bad {
 		return 0, {kind = .Bad_Value, inner = f}
 	}
 	s := scan_record(src, 0, 0, S, spec_delimiter(S, opts.delimiter))
-	if len(src) == 0 || record_start(src, int(core.text_start(src, 0)), opts.comment) != 0 || s.line_end != len(src) {
+	if len(src) == 0 || record_start(src, 0, opts.comment) != 0 || s.line_end != len(src) {
 		return 0, {kind = .Bad_Value}
 	}
 	return s.cells, {}
 }
 
 // Returns the cell count every record of a delimited text has: its header's, its first record's, or 0 for an empty text.
-@(private)
 dsv_width :: proc(doc: ^core.Document) -> int {
 	if doc.shared_keys != 0 {
 		return core.length(doc, doc.shared_keys)
@@ -408,9 +384,19 @@ dsv_width :: proc(doc: ^core.Document) -> int {
 	return 0
 }
 
+// The cells of the header's line, the start of `Document.shared_keys`, which goes on with a key for each column a wider
+// record names by its position.
+header_keys :: proc(doc: ^core.Document) -> []core.Node {
+	keys := doc.nodes[int(doc.shared_keys) + 1:][:core.length(doc, doc.shared_keys)]
+	n := len(keys)
+	for n > 0 && keys[n - 1].spelling & SPELLING_COLUMN != 0 {
+		n -= 1
+	}
+	return keys[:n]
+}
+
 // The bytes a container's members lie in. The root's records start after its header row and run to the text's end, and
 // a record's cells stop at its last cell, since its line end is the root's.
-@(private)
 edit_interior :: proc(doc: ^core.Document, c: core.Node_Index) -> (lo, hi: u64) {
 	if c == core.ROOT {
 		if doc.shared_keys != 0 {
@@ -427,7 +413,6 @@ edit_interior :: proc(doc: ^core.Document, c: core.Node_Index) -> (lo, hi: u64) 
 
 // Whether the output holds a fact: a comment on a record, or on the root above its first record, and a foot on the root.
 // A comment above a header reads on the root only when a record follows it, which resolves it there.
-@(private)
 edit_fact_slot :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Role, emptied: bool) -> bool {
 	if role == .Comment_Foot {
 		return node == core.ROOT
@@ -439,12 +424,11 @@ edit_fact_slot :: proc(doc: ^core.Document, node: core.Node_Index, role: core.Ro
 		return doc.shared_keys != 0 && core.length(doc, core.ROOT) > 0 && !emptied
 	}
 	n := doc.nodes[node]
-	return n.role == .Value && (n.kind == .Array || n.kind == .Map)
+	return n.role == .Value && (n.kind == .Array || n.kind == .Object)
 }
 
 // Whether the list removes every record. A record is the only value container of a table, so one pass over the edits
 // counts the removals. A root insert keeps a record, and a text with no record is no removal.
-@(private)
 edit_emptied :: proc(doc: ^core.Document, list: ^core.Edit_List) -> bool {
 	removed := 0
 	for e in list.edits {
@@ -458,47 +442,33 @@ edit_emptied :: proc(doc: ^core.Document, list: ^core.Edit_List) -> bool {
 				continue
 			}
 			n := doc.nodes[e.node]
-			if n.role == .Value && (n.kind == .Array || n.kind == .Map) {
+			if n.role == .Value && (n.kind == .Array || n.kind == .Object) {
 				removed += 1
 			}
-		case .Set, .Set_Fact, .Remove_Fact:
+		case .Set, .Set_Fact, .Remove_Fact, .Reorder:
 		}
 	}
 	return removed > 0 && removed == core.length(doc, core.ROOT)
 }
 
-// Checks that a cell's text is empty or exactly one cell under the document's grammar.
-@(private)
-edit_value_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> core.Document_Error {
-	if len(src) == 0 {
+// Checks a cell's text, empty or exactly one cell under the document's grammar, or with `record` a record inserted into
+// the root, whose width is the commit's to judge.
+edit_cells :: proc(doc: ^core.Token_View, src: []u8, record: bool) -> core.Document_Error {
+	if len(src) == 0 && !record {
 		return {}
 	}
-	cells, err := edit_record_at(doc, src, allocator)
-	if err.kind != .None {
-		return err
-	}
-	return {} if cells == 1 else {kind = .Bad_Value}
+	cells, err := edit_record_at(doc, src)
+	return err if err.kind != .None || record || cells == 1 else {kind = .Bad_Value}
 }
 
-// Checks an insert's text: a record into the root, or a cell into a record. Its width is the commit's to judge.
-@(private)
-edit_insert_check :: proc(doc: ^core.Document, container: core.Node_Index, text: string, allocator: runtime.Allocator) -> core.Document_Error {
-	if container == core.ROOT {
-		_, e := edit_record_at(doc, transmute([]u8)text, allocator)
-		return e
-	}
-	return edit_value_at(doc, transmute([]u8)text, allocator)
-}
-
-// Writes a decoded name as one cell of the document's spec. A CSV name that would not read back bare is quoted, and a
-// TSV name's escapes are written. Plain has neither, and neither has a spelling for every name, so what is written may
+// Writes a decoded name as one cell of the document's spec. A CSV name that would not read back bare is quoted, as is
+// one a byte order mark starts, which would read as the text's mark at its start, and a TSV name's escapes are written. Plain has neither, and neither has a spelling for every name, so what is written may
 // still be no cell, which the caller checks. Returns false when `text` cannot grow.
-@(private)
 edit_key_text :: proc(doc: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bool {
 	delimiter, comment := doc.as.opts[0], doc.as.opts[1]
 	#partial switch Spec(doc.as.spec) {
 	case .Csv:
-		quoted := len(name) > 0 && name[0] == comment
+		quoted := len(name) > 0 && name[0] == comment || core.text_start(name, 0) != 0
 		for b in name {
 			quoted = quoted || b == delimiter || b == '"' || b == '\r' || b == '\n'
 		}
@@ -530,7 +500,6 @@ edit_key_text :: proc(doc: ^core.Document, name: []u8, text: ^[dynamic]u8) -> bo
 }
 
 // Returns the line end that ends just before byte `p` of `src`, or an empty string when none does.
-@(private)
 line_end_before :: proc(src: []u8, p: u64) -> string {
 	if p == 0 || src[p-1] != '\n' {
 		return ""
@@ -539,10 +508,9 @@ line_end_before :: proc(src: []u8, p: u64) -> string {
 }
 
 // The line end a record insert writes. It is the first line end a record has, else its header's, else LF.
-@(private)
 edit_record_sep :: proc(doc: ^core.Document) -> string {
 	it := core.children(doc, core.ROOT)
-	for rec, more := core.child_next(&it); more; rec, more = core.child_next(&it) {
+	for rec in core.child_next(&it) {
 		if e := line_end_before(doc.src, record_end(doc, rec)); e != "" {
 			return e
 		}
@@ -555,12 +523,11 @@ edit_record_sep :: proc(doc: ^core.Document) -> string {
 	return "\n"
 }
 
-@(private)
-edit_record_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allocator) -> (cells: int, err: core.Document_Error) {
+edit_record_at :: proc(doc: ^core.Token_View, src: []u8) -> (cells: int, err: core.Document_Error) {
 	switch Spec(doc.spec) {
-	case .Csv:   return edit_record(doc, src, allocator, .Csv)
-	case .Tsv:   return edit_record(doc, src, allocator, .Tsv)
-	case .Plain: return edit_record(doc, src, allocator, .Plain)
+	case .Csv:   return edit_record(doc, src, .Csv)
+	case .Tsv:   return edit_record(doc, src, .Tsv)
+	case .Plain: return edit_record(doc, src, .Plain)
 	}
 	return 0, {kind = .Bad_Value}
 }
@@ -568,7 +535,7 @@ edit_record_at :: proc(doc: ^core.Token_View, src: []u8, allocator: runtime.Allo
 // The byte just past record `i`'s line end, CR LF included. A record at the text's end stops past its last cell. A
 // header row `.Ragged` widened stops past its last named cell, since a key named by position has no bytes. The root
 // ends at `len(doc.src)`. Only a container span read calls it.
-@(private, cold)
+@(cold)
 record_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 	n := doc.nodes[i]
 	p := n.lo
@@ -590,7 +557,7 @@ record_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 
 // The byte just past container `i`'s close. The root uses `root_close`, or `len(doc.src)` when the build did not
 // record it, a record ends at its line end.
-@(private, cold)
+@(cold)
 close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 	if i == core.ROOT {
 		if doc.root_close != 0 {
@@ -605,12 +572,10 @@ close_end :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 }
 
 // What a walk from a record's first byte finds: the end of the first record's line.
-@(private)
 Record_End :: struct {
 	end: u64,
 }
 
-@(private)
 record_end_hook :: proc "contextless" (h: ^Record_End, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	if t.kind != .End {
 		return s, .Next
@@ -622,7 +587,7 @@ record_end_hook :: proc "contextless" (h: ^Record_End, s: core.Hook_Regs, t: cor
 // Returns the byte past record `i`'s line end by walking the record, since a partial document may not hold its last cell.
 // The walk tolerates every fault, since the read may have tolerated any and a judged text's record bounds stay. A
 // stopped read may leave text no walk judged, where this returns the fault's byte.
-@(private, cold)
+@(cold)
 record_end_by_walk :: proc(doc: ^core.Document, i: core.Node_Index) -> u64 {
 	h: Record_End
 	regs: core.Hook_Regs

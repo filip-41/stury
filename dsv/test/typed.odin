@@ -32,7 +32,7 @@ Required_Row :: struct {
 read_rows :: proc(src: string, target: ^$T, read := typed.Read_Options{}) -> core.Typed_Error {
 	read := read
 	read.borrow_strings = true
-	return dsv.unmarshal(transmute([]u8)src, .Csv, target, read, {}, context.temp_allocator)
+	return dsv.unmarshal(transmute([]u8)src, .Csv, target, read = read, opts = {}, allocator = context.temp_allocator)
 }
 
 expect_refusal :: proc(t: ^testing.T, e: core.Typed_Error, kind: core.Typed_Error_Kind, at: u64, loc := #caller_location) {
@@ -46,7 +46,7 @@ tolerated_ill_formed_cell_outgrows_its_span :: proc(t: ^testing.T) {
 	Row :: struct {a: string}
 	rows: []Row
 	src := "a\n\xfe\n"
-	e := dsv.unmarshal(transmute([]u8)src, .Csv, &rows, {}, {tolerate = {.Invalid_Utf8}}, context.temp_allocator)
+	e := dsv.unmarshal(transmute([]u8)src, .Csv, &rows, read = {}, opts = {tolerate = {.Invalid_Utf8}}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, len(rows), 1)
 	testing.expect_value(t, rows[0].a, "�")
@@ -97,14 +97,36 @@ a_quoted_number_reads_and_a_doubled_quote_is_one :: proc(t: ^testing.T) {
 }
 
 @(test)
-a_repeated_column_reads_as_its_last :: proc(t: ^testing.T) {
+repeated_and_unknown_columns :: proc(t: ^testing.T) {
 	Row :: struct { a: i64 }
-	rows: []Row
-	testing.expect_value(t, read_rows("a,a\n1,2\n", &rows).kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, rows[0].a, 2)
-	testing.expect_value(t, read_rows("a,a\n1,2\n", &rows, {dups = .First}).kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, rows[0].a, 1)
-	expect_refusal(t, read_rows("a,a\n1,2\n", &rows, {refuse_duplicates = true}), .Duplicate_Key, 2)
+	Case :: struct {
+		src:  string,
+		read: typed.Read_Options,
+		kind: core.Typed_Error_Kind,
+		at:   u64, // of a refusal
+		a:    i64, // of a read
+	}
+	// The column a repeat leaves out is judged against the field's type, as JSON judges a repeated member it skips.
+	for c in ([]Case {
+		{"a,a\n1,2\n", {}, .None, 0, 2},
+		{"a,a\n1,2\n", {dups = .First}, .None, 0, 1},
+		{"a,a\n1,2\n", {dups = .Refuse}, .Duplicate_Key, 2, 0},
+		{"a,a\nx,1\n", {}, .Wrong_Kind, 4, 0},
+		{"a,a\n1,x\n", {dups = .First}, .Wrong_Kind, 6, 0},
+		{"a,a\n1,\n", {dups = .First}, .None, 0, 1},
+		{"a,a,a\n1,2,3\n", {}, .None, 0, 3},
+		{"zz,a\nx,2\n", {}, .None, 0, 2},
+		{"a,zz\n1,x\n", {unknown = .Refuse}, .Unknown_Field, 2, 0},
+	}) {
+		rows: []Row
+		e := read_rows(c.src, &rows, c.read)
+		expect_refusal(t, e, c.kind, c.at)
+		if c.kind == .None {
+			testing.expectf(t, len(rows) == 1 && rows[0].a == c.a, "%q: %v", c.src, rows)
+		} else if c.kind == .Unknown_Field {
+			testing.expect_value(t, string(e.steps[0].(core.Name)), "zz")
+		}
+	}
 }
 
 // Under `.Ragged` a wide record's cell past the header's last reads the field its 1-based position names. A header cell
@@ -114,7 +136,7 @@ a_repeated_column_reads_as_its_last :: proc(t: ^testing.T) {
 a_wide_record_names_its_cells_by_position :: proc(t: ^testing.T) {
 	Row :: struct { a: i64, three: i64 `csv:"3"` }
 	read :: proc(src: string, rows: ^[]Row, read := typed.Read_Options{}) -> core.Typed_Error {
-		return dsv.unmarshal(transmute([]u8)src, .Csv, rows, read, {tolerate = {.Ragged}}, context.temp_allocator)
+		return dsv.unmarshal(transmute([]u8)src, .Csv, rows, read = read, opts = {tolerate = {.Ragged}}, allocator = context.temp_allocator)
 	}
 	rows: []Row
 	testing.expect_value(t, read("a,b\n1,2,3\n4\n5,6,7,8\n", &rows).kind, core.Typed_Error_Kind.None)
@@ -126,37 +148,14 @@ a_wide_record_names_its_cells_by_position :: proc(t: ^testing.T) {
 	testing.expect(t, rows[0].three == 1 && rows[1].three == 6)
 	testing.expect_value(t, read(src, &rows, {dups = .First}).kind, core.Typed_Error_Kind.None)
 	testing.expect(t, rows[0].three == 1 && rows[1].three == 4)
-	expect_refusal(t, read(src, &rows, {refuse_duplicates = true}), .Duplicate_Key, 0)
+	expect_refusal(t, read(src, &rows, {dups = .Refuse}), .Duplicate_Key, 0)
 	expect_refusal(t, read("3,a\n1,2\n4,5,x\n", &rows, {dups = .First}), .Wrong_Kind, 12)
-	e := dsv.unmarshal(transmute([]u8)string("a,b\n1,2,3\n"), .Csv, &rows, {}, {}, context.temp_allocator)
+	e := dsv.unmarshal(transmute([]u8)string("a,b\n1,2,3\n"), .Csv, &rows, read = {}, opts = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Walk)
 	maps: []map[string]i64
-	e = dsv.unmarshal(transmute([]u8)string("rap\r\n1,x\r\n"), .Csv, &maps, {}, {tolerate = {.Ragged}}, context.temp_allocator)
+	e = dsv.unmarshal(transmute([]u8)string("rap\r\n1,x\r\n"), .Csv, &maps, read = {}, opts = {tolerate = {.Ragged}}, allocator = context.temp_allocator)
 	expect_refusal(t, e, .Wrong_Kind, 7)
 	testing.expect(t, e.n_steps == 2 && e.steps[1] == core.Step(core.Name("2")))
-}
-
-// The column a repeat leaves out is judged against the field's type, as JSON judges a repeated member it skips.
-@(test)
-a_skipped_repeated_column_is_judged :: proc(t: ^testing.T) {
-	Row :: struct { a: i64 }
-	rows: []Row
-	expect_refusal(t, read_rows("a,a\nx,1\n", &rows), .Wrong_Kind, 4)
-	expect_refusal(t, read_rows("a,a\n1,x\n", &rows, {dups = .First}), .Wrong_Kind, 6)
-	testing.expect_value(t, read_rows("a,a\n1,\n", &rows, {dups = .First}).kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, read_rows("a,a,a\n1,2,3\n", &rows).kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, rows[0].a, 3)
-}
-
-@(test)
-unknown_columns_pass_or_refuse :: proc(t: ^testing.T) {
-	Row :: struct { a: i64 }
-	rows: []Row
-	testing.expect_value(t, read_rows("zz,a\nx,2\n", &rows).kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, rows[0].a, 2)
-	e := read_rows("a,zz\n1,x\n", &rows, {unknown = .Refuse})
-	expect_refusal(t, e, .Unknown_Field, 2)
-	testing.expect_value(t, string(e.steps[0].(core.Name)), "zz")
 }
 
 @(test)
@@ -214,7 +213,7 @@ list_and_map_rows :: proc(t: ^testing.T) {
 	e := read_rows("\"a\"\nx\n", &ints)
 	expect_refusal(t, e, .Wrong_Kind, 4)
 	testing.expect_value(t, string(e.steps[1].(core.Name)), "a")
-	e = dsv.unmarshal(transmute([]u8)string("1\n"), .Csv, &ints, {}, {no_header = true}, context.temp_allocator)
+	e = dsv.unmarshal(transmute([]u8)string("1\n"), .Csv, &ints, read = {}, opts = {no_header = true}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unsupported)
 }
 
@@ -223,10 +222,10 @@ the_specs_spell_their_cells :: proc(t: ^testing.T) {
 	Row :: struct { a: string, b: i64 }
 	rows: []Row
 	src := "a\tb\nx\\ty\t1\n"
-	testing.expect_value(t, dsv.unmarshal(transmute([]u8)src, .Tsv, &rows, {}, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, dsv.unmarshal(transmute([]u8)src, .Tsv, &rows, read = {}, opts = {}, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, rows[0].a, "x\ty")
 	plain := "a,b\n\"x\",1\n"
-	testing.expect_value(t, dsv.unmarshal(transmute([]u8)plain, .Plain, &rows, {}, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, dsv.unmarshal(transmute([]u8)plain, .Plain, &rows, read = {}, opts = {}, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, rows[0].a, `"x"`)
 }
 
@@ -234,7 +233,7 @@ the_specs_spell_their_cells :: proc(t: ^testing.T) {
 no_header_reads_fields_in_order :: proc(t: ^testing.T) {
 	Row :: struct { a: i64, b: string }
 	rows: []Row
-	e := dsv.unmarshal(transmute([]u8)string("1,x\n2,y\n"), .Csv, &rows, {borrow_strings = true}, {no_header = true}, context.temp_allocator)
+	e := dsv.unmarshal(transmute([]u8)string("1,x\n2,y\n"), .Csv, &rows, read = {borrow_strings = true}, opts = {no_header = true}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, len(rows), 2)
 	testing.expect_value(t, rows[1].b, "y")
@@ -284,9 +283,19 @@ a_refusal_leaves_what_it_allocated_with_the_target :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&tracker)
 	alloc := mem.tracking_allocator(&tracker)
 	rows: []Row
-	e := dsv.unmarshal(transmute([]u8)string("name,n\n\"a\"\"b\",1\ncopy,2\nz,x\n"), .Csv, &rows, {}, {}, alloc)
+	e := dsv.unmarshal(transmute([]u8)string("name,n\n\"a\"\"b\",1\ncopy,2\nz,x\n"), .Csv, &rows, read = {}, opts = {}, allocator = alloc)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(rows), 3)
+	for r in rows {
+		delete(r.name, alloc)
+	}
+	delete(rows, alloc)
+	testing.expect_value(t, len(tracker.allocation_map), 0)
+	// A column a wide record names by its position is refused when the read binds it, past the rows before it.
+	rows = nil
+	e = dsv.unmarshal(transmute([]u8)string("name,n\ncopy,1\nz,2,x\n"), .Csv, &rows, read = {unknown = .Refuse}, opts = {tolerate = {.Ragged}}, allocator = alloc)
+	expect_refusal(t, e, .Unknown_Field, 0)
+	testing.expect_value(t, len(rows), 2)
 	for r in rows {
 		delete(r.name, alloc)
 	}

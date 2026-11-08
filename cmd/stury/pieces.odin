@@ -80,6 +80,7 @@ Pieces :: struct {
 	plain:    core.As, // how a record's text reads on its own
 	framing:  core.Framing, // how a piece's records are read, whatever cut the pieces
 	start:    u64, // records before it are answered already
+	ins:      ^Inputs, // the records' file, whose pages read past are let go as the pieces are written
 	entries:  bool,
 	lock:     sync.Mutex,
 	slots:    [dynamic]Piece_Slot,
@@ -99,7 +100,9 @@ parallel :: proc(run: ^Run) -> bool {
 	walk: Serial_Walk
 	defer delete(walk.on)
 	defer delete(walk.done)
-	p := !(o.null_input || o.slurp || o.raw_input || o.stream || o.stream_errors || o.unbuffered || o.grow_header) && o.max_depth <= core.MAX_DEPTH && !serial_node(&run.prog, &walk)
+	// A piece builds its records alone, without the comment lines above them that the interpreter's filter may read.
+	comments := reads_cells(o) && o.cells_in.comment != 0 && run.route.columns == nil
+	p := !(o.null_input || o.slurp || o.raw_input || o.stream || o.stream_errors || o.unbuffered || o.grow_header || comments) && o.max_depth <= core.MAX_DEPTH && !serial_node(&run.prog, &walk)
 	run.parallel = p
 	return p
 }
@@ -171,7 +174,8 @@ give_spare :: proc(spares: ^Spare_Outs, out: []u8, room: int, k: int) {
 @(private = "file")
 pieces_init :: proc(ps: ^Pieces, run: ^Run, plain: core.As, framing: core.Framing) {
 	ps.run, ps.template, ps.plain, ps.framing = run, run^, plain, framing
-	ps.template.route.explain, ps.template.ip.messages = {on = run.route.on}, {}
+	ps.template.route.explain = {on = run.route.on}
+	jq.detach_memory(&ps.template.ip)
 	ps.slots.allocator = runtime.heap_allocator()
 }
 
@@ -229,7 +233,7 @@ records_run :: proc(ins: ^Inputs, framing: core.Framing, from: u64, cells: bool)
 	pieces_init(&ps, ins.run, ins.as, ins.framing)
 	defer free_slots(ps.run, ps.slots)
 	// A delimited text's pieces read its header at its start.
-	ps.start, ps.at = from, 0 if cells else from
+	ps.start, ps.at, ps.ins = from, 0 if cells else from, ins
 	records.each(ins.data, ins.as, framing, piece_task, &ps, run_pool(ins.run), ps.at)
 	return ps.at, ps.crossed
 }
@@ -328,13 +332,18 @@ strip_spine :: proc(n: ^jq.Node, names: ^[dynamic]string) -> (stripped: ^jq.Node
 }
 
 // The spine array of the open file's one text, at `at` inside `levels` objects, when the text is a long strict JSON
-// text and the filter can run on pieces.
+// text whose entries are cut exactly and the filter can run on pieces.
 @(private = "file")
 spine_of :: proc(ins: ^Inputs) -> (at: u64, levels: int, ok: bool) {
 	if len(ins.data) < POOLED_BYTES || ins.spec != .Json || !parallel(ins.run) {
 		return
 	}
-	return json.spine(ins.data, ins.as)
+	at, levels, ok = json.spine(ins.data, ins.as)
+	// An array most of whose bytes are one entry has no cuts for pieces to read between.
+	if ok && !records.entries_cut(ins.data, ins.as, .Entries, at) {
+		return {}, 0, false
+	}
+	return
 }
 
 // `data` with the entries of its spine array at `at`, which the pieces `slots` hold, replaced by `middle`.
@@ -390,7 +399,7 @@ piece_arenas :: proc() -> (values, temp: runtime.Allocator, ok: bool) {
 	if piece_temp.curr_block == nil && (virtual.arena_init_growing(&piece_values) != nil || virtual.arena_init_growing(&piece_temp) != nil) {
 		return
 	}
-	return {scratch_allocator_proc, &piece_values}, {scratch_allocator_proc, &piece_temp}, true
+	return jq.arena_allocator(&piece_values), jq.arena_allocator(&piece_temp), true
 }
 
 // A piece's records answered as the serial route answers them, into the piece's own output, up to the first it cannot
@@ -470,6 +479,7 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 		slot.hi, slot.stopped = lo, true
 	}
 	slot.out = out
+	jq.free_detached(&r.ip)
 	publish(ps, k, slot)
 	return !slot.stopped
 }
@@ -481,7 +491,7 @@ piece_record :: proc(r: ^Run, it: ^records.Reader, rec: records.Record, part: ^c
 	cells := reads_cells(&r.opts)
 	if cells && r.route.columns != nil {
 		answer_columns(r, it, rec)
-	} else if cells || !r.route.scanning || !(answer(r, part, part.answers, read, rec.text, plain) if scanned else answer_path(r, rec.text, plain)) {
+	} else if cells || !r.route.scanning || !answer_record(r, rec, part, read, scanned, plain) {
 		built, err := records.build(it, rec, context.allocator)
 		doc, fault := jq.judge_build(built, err)
 		if fault != nil {
@@ -504,6 +514,17 @@ piece_sum :: proc(r: ^Run, records: int) -> Piece_Sum {
 // every piece has run.
 @(private = "file")
 publish :: proc(ps: ^Pieces, k: int, slot: Piece_Slot) {
+	lo, hi := publish_locked(ps, k, slot)
+	// Past the lock, which the other pieces wait on.
+	if lo < hi {
+		map_afresh(ps.ins.mapping.file, ps.ins.data, ps.ins.mapping.at, int(lo), int(hi))
+	}
+}
+
+// `publish` under the pieces' lock. It returns the bytes whose mapped pages are then mapped afresh: those before the
+// records written, or the piece's own records when they lie far past them, as a piece still running holds those back.
+@(private = "file")
+publish_locked :: proc(ps: ^Pieces, k: int, slot: Piece_Slot) -> (u64, u64) {
 	sync.guard(&ps.lock)
 	if k >= len(ps.slots) {
 		resize(&ps.slots, k + 1)
@@ -512,7 +533,7 @@ publish :: proc(ps: ^Pieces, k: int, slot: Piece_Slot) {
 	ps.slots[k].done = true
 	ps.stopped ||= slot.stopped
 	if ps.entries {
-		return
+		return 0, 0
 	}
 	for i := ps.next; i < len(ps.slots) && !ps.ended; i += 1 {
 		s := &ps.slots[i]
@@ -526,6 +547,10 @@ publish :: proc(ps: ^Pieces, k: int, slot: Piece_Slot) {
 		ps.next = i + 1
 		ps.ended, ps.crossed = s.stopped, s.crossed
 	}
+	if ps.ins == nil {
+		return 0, 0
+	}
+	return pages_read_past(ps.ins, ps.at, slot.lo, slot.hi)
 }
 
 // Writes a piece's outputs and merges what its records came to into the run's.
@@ -694,7 +719,8 @@ put_joined :: proc(run: ^Run, text: []u8, slots: []Piece_Slot, dot: bool) -> boo
 spine_length :: proc(ins: ^Inputs) -> bool {
 	run := ins.run
 	names := make([dynamic]string, context.temp_allocator)
-	if !length_of_names(run.prog, &names) {
+	n := run.prog
+	if !jq.is_length(n) && (n.kind != .Pipe || !jq.is_length(n.b) || !names_of(n.a, &names) || len(names) == 0) {
 		return false
 	}
 	at, levels, found := spine_of(ins)
@@ -703,40 +729,24 @@ spine_length :: proc(ins: ^Inputs) -> bool {
 	if !found || len(names) > levels || !spine_run(ins, &job, at) {
 		return false
 	}
-	n := entries_of(job.slots[:])
+	count := entries_of(job.slots[:])
 	if levels > 0 {
 		// The names lead to the array or to an object, whose length is its keys.
 		doc, node, walked := spine_walk(ins.data, at, job.slots[:], ins.as, names[:])
 		if !walked {
 			return false
 		}
-		if t := doc.nodes[node]; t.kind == .Map {
-			n = jq.length_of(jq.Ref{&doc, node})
+		if t := doc.nodes[node]; t.kind == .Object {
+			count = jq.length_of(jq.Ref{&doc, node})
 		} else if t.kind != .Array || u64(t.lo) != at {
 			return false
 		}
 	}
 	run.route.interpreted += 1
 	run.route.pieces += len(job.slots)
-	emit(&run.output, jq.num(f64(n)))
+	emit(&run.output, jq.num(f64(count)))
 	finish_input(&run.output)
 	return true
-}
-
-// Whether `n` is `length` after `.NAME...`, whose names are appended to `names`.
-@(private = "file")
-length_of_names :: proc(n: ^jq.Node, names: ^[dynamic]string) -> bool {
-	if jq.is_length(n) {
-		return true
-	}
-	if n.kind != .Pipe || !jq.is_length(n.b) {
-		return false
-	}
-	f := n.a
-	for ; f.kind == .Field && !f.opt; f = f.a {
-		inject_at(names, 0, f.name)
-	}
-	return f.kind == .Identity && len(names) > 0
 }
 
 // A piece's entries counted, and built and put, or collected, in the pool thread's arena.
@@ -859,8 +869,7 @@ collect_pieces :: proc(ins: ^Inputs) -> bool {
 	run.collects += 1
 	job := Spine_Job{ip = run.ip, id = run.collects, f = f, levels = len(names) + 1}
 	job.print = tail == nil && layout.colors == nil && !layout.comments && run.output.table == nil
-	// A piece's interpreter keeps nothing of the run's arenas and caches.
-	job.ip.scope, job.ip.recycler, job.ip.text, job.ip.free_envs, job.ip.messages = {}, {}, {}, nil, {}
+	jq.detach_memory(&job.ip)
 	defer {
 		free_slots(run, job.slots)
 		run.ip.err = nil // an error the tail raised may lie in a piece arena
@@ -976,13 +985,19 @@ collect_entries :: proc(job: ^Spine_Job, text: []u8, s: ^Piece_Slot) -> bool {
 		node, _ = core.child_next(&c)
 	}
 	s.items = make([dynamic]jq.Value, 0, s.entries if job.f == nil else 0)
+	collect := jq.region_collect(&ip, job.f, ip.globals, &s.items)
+	defer jq.free_regions(&ip)
+	sig := jq.Signal.Go
 	ch := core.children(doc, node)
 	for e in core.child_next(&ch) {
 		if job.f == nil {
 			append(&s.items, jq.Ref{doc, e})
-		} else if jq.collect_into(&ip, job.f, {v = jq.Ref{doc, e}}, ip.globals, &s.items) != .Go {
-			return false
+		} else if sig = collect.emit(&collect, {v = jq.Ref{doc, e}}); sig != .Go {
+			break
 		}
+	}
+	if jq.end_region_collect(&collect, sig) != .Go {
+		return false
 	}
 	if len(ip.messages) > 0 || ip.halted != nil {
 		return false
@@ -995,7 +1010,7 @@ collect_entries :: proc(job: ^Spine_Job, text: []u8, s: ^Piece_Slot) -> bool {
 	out: write.Out
 	spare: [write.ROOM_MAX]u8
 	piece_out(&out, &spare, job.run, len(text), s.k)
-	a := jq.Array{s.items}
+	a := jq.Array{items = s.items}
 	jq.write_value(&out, &a, layout)
 	return out.err == .None && piece_inner(&out, 1, s)
 }

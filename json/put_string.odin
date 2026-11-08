@@ -2,18 +2,20 @@ package json
 
 import "base:intrinsics"
 import "core:simd"
+import "core:unicode/utf8"
 import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
 import write "../core/write"
 
 // The JSON string writer. A string is checked as UTF-8 and written with `"`, `\` and the control bytes escaped as
-// RFC 8259 asks, in the shortest spelling, and DEL and every other byte of a valid sequence written raw. It takes one of
-// three paths by length. Under 16 bytes `put_short` builds one block from loads that stay inside the string. From 16
-// bytes `put_string_mid` copies 16-byte blocks and ends with an overlapping store, while the text holds only plain ASCII.
-// Anything else goes to `put_mixed`, which steps 16 bytes at a time with an escape table, and 64 bytes at a time over
-// the stretches with no escape. A string with `ascii` or `escape_html` set goes to `put_escaped` instead, which copies
-// 16-byte blocks of plain ASCII and steps one byte at a time through the rest.
+// RFC 8259 asks, in the shortest spelling, and every other byte of a valid sequence written raw, DEL as well unless
+// `escape_del` is set. It takes one of three paths by length. Under 16 bytes `put_short` builds one block from loads
+// that stay inside the string. From 16 bytes `put_string_mid` copies 16-byte blocks and ends with an overlapping store,
+// while the text holds only plain ASCII. Anything else goes to `put_mixed`, which steps 16 bytes at a time with an
+// escape table, and 64 bytes at a time over the stretches with no escape. With `escape_del` DEL is one more stop of
+// each path. A string with `ascii` or `escape_html` set goes to `put_escaped` instead, which copies 16-byte blocks of
+// plain ASCII and steps one byte at a time through the rest.
 
 @(private)
 V :: #simd[16]u8
@@ -110,6 +112,11 @@ HIGH :: V(0x80)
 PAD :: V(0x61)
 @(private)
 PAD_WORD :: u64(0x6161616161616161)
+@(private)
+DEL :: V(0x7f)
+// `\u007f` as an entry of `ESC_SEQ`.
+@(private)
+DEL_SEQ :: u64(0x060066373030755c)
 
 // Returns the lanes of `v` that hold `"`, `\` or a control byte.
 @(private)
@@ -117,13 +124,18 @@ esc_lanes :: #force_inline proc "contextless" (v: V) -> V {
 	return simd.lanes_lt(v, SPACE) | simd.lanes_eq(v, QUOTE) | simd.lanes_eq(v, BACKSLASH)
 }
 
-// Whether `v` holds a byte that needs a closer look: an escape or a byte past 0x7F, which as a signed byte is below 0x20.
+// Whether `v` holds a byte that needs a closer look: an escape, a byte past 0x7F, which as a signed byte is below 0x20,
+// and with `ESC_DEL` a DEL.
 @(private)
-dirty :: #force_inline proc "contextless" (v: V) -> bool {
-	return kernel.any_lane16(simd.lanes_lt(transmute(#simd[16]i8)v, (#simd[16]i8)(0x20)) | simd.lanes_eq(v, QUOTE) | simd.lanes_eq(v, BACKSLASH))
+dirty :: #force_inline proc "contextless" (v: V, $ESC_DEL: bool) -> bool {
+	m := simd.lanes_lt(transmute(#simd[16]i8)v, (#simd[16]i8)(0x20)) | simd.lanes_eq(v, QUOTE) | simd.lanes_eq(v, BACKSLASH)
+	when ESC_DEL {
+		m |= simd.lanes_eq(v, DEL)
+	}
+	return kernel.any_lane16(m)
 }
 
-// Writes `s` as a JSON string at the output's cursor and returns `.Bad_Utf8` when it is not UTF-8. With `ascii` DEL and
+// Writes `s` as a JSON string at the output's cursor and returns `.Invalid_Utf8` when it is not UTF-8. With `ascii` DEL and
 // every rune past U+007F are written as `\uXXXX`, with `escape_del` DEL is, and with `escape_html` `<`, `>`, `&`, U+2028
 // and U+2029 are.
 put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind {
@@ -137,38 +149,16 @@ put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> 
 	case opts.escape_html:
 		return put_escaped(out, s, false, true, false)
 	case opts.escape_del:
-		return put_short(out, write.room(out, 18), s, DEL = true)
+		return put_short(out, write.room(out, 18), s, true)
 	}
 	return put_short(out, write.room(out, 18), s, false)
 }
 
-// Whether `s` holds a DEL. A string of 16 bytes or more is read in blocks, the last overlapping the one before it.
-@(private)
-has_del :: proc "contextless" (s: string) -> bool #no_bounds_check {
-	n := len(s)
-	src := raw_data(s)
-	if n < 16 {
-		v, live, ok := kernel.head16(src, n)
-		if ok {
-			v = simd.select(simd.lanes_ne(live, V(0)), v, PAD)
-		} else {
-			v = short_block(src, n)
-		}
-		return kernel.any_lane16(simd.lanes_eq(v, V(0x7f)))
-	}
-	for i := 0; i + 16 < n; i += 16 {
-		if kernel.any_lane16(simd.lanes_eq(intrinsics.unaligned_load((^V)(src[i:])), V(0x7f))) {
-			return true
-		}
-	}
-	return kernel.any_lane16(simd.lanes_eq(intrinsics.unaligned_load((^V)(src[n - 16:])), V(0x7f)))
-}
-
-// Writes `s` as a JSON string, with `DEL` a DEL as `\u007f`. `p` is `write.room(out, 18)`, the 18 free bytes at the
+// Writes `s` as a JSON string, with `ESC_DEL` a DEL as `\u007f`. `p` is `write.room(out, 18)`, the 18 free bytes at the
 // cursor, with every byte before the cursor written already. The caller moves nothing, `out.cursor` is moved past the
 // string.
 @(private)
-put_short :: #force_inline proc(out: ^write.Out, p: [^]u8, s: string, $DEL: bool) -> core.Typed_Error_Kind #no_bounds_check {
+put_short :: #force_inline proc(out: ^write.Out, p: [^]u8, s: string, $ESC_DEL: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	if len(s) < 16 {
 		v, live, ok := kernel.head16(raw_data(s), len(s))
 		if ok {
@@ -176,7 +166,7 @@ put_short :: #force_inline proc(out: ^write.Out, p: [^]u8, s: string, $DEL: bool
 		} else {
 			v = short_block(raw_data(s), len(s))
 		}
-		if !dirty(v) && !(DEL && kernel.any_lane16(simd.lanes_eq(v, V(0x7f)))) {
+		if !dirty(v, ESC_DEL) {
 			p[0] = '"'
 			intrinsics.unaligned_store((^V)(p[1:]), v)
 			p[1 + len(s)] = '"'
@@ -184,35 +174,30 @@ put_short :: #force_inline proc(out: ^write.Out, p: [^]u8, s: string, $DEL: bool
 			return .None
 		}
 	}
-	when DEL {
-		if has_del(s) {
-			return put_escaped(out, s, false, false, true)
-		}
-	}
-	return put_string_mid(out, s)
+	return put_string_mid(out, s, ESC_DEL)
 }
 
 // Writes a string of 16 bytes or more while it holds only plain ASCII, 16 bytes at a time under one reservation, then
 // leaves the rest to `put_mixed`. A string past `MID_MAX` bytes cannot be reserved at once, so it goes there whole.
 @(private)
-put_string_mid :: proc(out: ^write.Out, s: string) -> core.Typed_Error_Kind #no_bounds_check {
+put_string_mid :: proc(out: ^write.Out, s: string, $ESC_DEL: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	n := len(s)
 	if n < 16 || n > MID_MAX {
-		return put_mixed(out, s, 0)
+		return put_mixed(out, s, 0, ESC_DEL)
 	}
 	src := raw_data(s)
 	p := write.room(out, n + 18)
 	i := 0
 	for ; i + 16 < n; i += 16 {
 		v := intrinsics.unaligned_load((^V)(src[i:]))
-		if dirty(v) {
-			return put_mixed(out, s, i)
+		if dirty(v, ESC_DEL) {
+			return put_mixed(out, s, i, ESC_DEL)
 		}
 		intrinsics.unaligned_store((^V)(p[1 + i:]), v)
 	}
 	v := intrinsics.unaligned_load((^V)(src[n - 16:]))
-	if dirty(v) {
-		return put_mixed(out, s, i)
+	if dirty(v, ESC_DEL) {
+		return put_mixed(out, s, i, ESC_DEL)
 	}
 	intrinsics.unaligned_store((^V)(p[1 + n - 16:]), v)
 	p[0], p[1 + n] = '"', '"'
@@ -256,9 +241,15 @@ tail_block :: #force_inline proc "contextless" (src: [^]u8, i, n: int) -> V #no_
 	return short_block(src[i:], live)
 }
 
-// Writes the 16 bytes of `v` through the escape table at `o` in `base` and returns the offset after them.
+// Writes the 16 bytes of `v` through the escape table at `o` in `base`, with `ESC_DEL` a DEL as `\u007f`, and returns
+// the offset after them.
 @(private)
-escape_block :: #force_inline proc "contextless" (base: [^]u8, o: int, v: V) -> int #no_bounds_check {
+escape_block :: #force_inline proc "contextless" (base: [^]u8, o: int, v: V, $ESC_DEL: bool) -> int #no_bounds_check {
+	when ESC_DEL {
+		if kernel.any_lane16(simd.lanes_eq(v, DEL)) {
+			return escape_del_block(base, o, v)
+		}
+	}
 	blk := transmute([16]u8)v
 	o := o
 	for b in blk {
@@ -269,16 +260,34 @@ escape_block :: #force_inline proc "contextless" (base: [^]u8, o: int, v: V) -> 
 	return o
 }
 
-// Copies the 64-byte blocks of `src` from `i` while they hold no stop, checking the UTF-8 of those with a byte past 0x7F.
+// `escape_block` of a block that holds a DEL, out of line since a DEL is rare.
+@(private)
+escape_del_block :: #force_no_inline proc "contextless" (base: [^]u8, o: int, v: V) -> int #no_bounds_check {
+	blk := transmute([16]u8)v
+	o := o
+	for b in blk {
+		seq := DEL_SEQ if b == 0x7f else ESC_SEQ[b]
+		intrinsics.unaligned_store((^u64)(&base[o]), seq)
+		o += int(seq >> 56)
+	}
+	return o
+}
+
+// Copies the 64-byte blocks of `src` from `i` while they hold no stop, with `ESC_DEL` a DEL among them, checking the
+// UTF-8 of those with a byte past 0x7F.
 // Out of line so the four registers of a block stay out of `put_mixed`'s loop, which spills them. `prev` is the last
 // block read, `bad` the faults so far and `high` whether `prev` ended after a byte past 0x7F. It stops before `end`, at
 // the first block with a stop, and returns the source offset and the offset in `base`.
 @(private)
-wide_run :: #force_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool) -> (int, int) {
+wide_run :: #force_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
 	i, o := i, o
 	for ; i + 64 <= end; i += 64 {
 		b := kernel.load(src[i:])
-		if kernel.any_lane(kernel.either(kernel.either(kernel.eq(b, '"'), kernel.eq(b, '\\')), kernel.below(b, 0x20))) {
+		stop := kernel.either(kernel.either(kernel.eq(b, '"'), kernel.eq(b, '\\')), kernel.below(b, 0x20))
+		when ESC_DEL {
+			stop = kernel.either(stop, kernel.eq(b, 0x7f))
+		}
+		if kernel.any_lane(stop) {
 			break
 		}
 		if !kernel.is_ascii(b) {
@@ -299,46 +308,46 @@ wide_run :: #force_inline proc "contextless" (base, src: [^]u8, i, o, end: int, 
 // use the tier's registers.
 when ODIN_ARCH == .amd64 {
 	@(private, enable_target_feature = kernel.FEATURES[.V2])
-	wide_run_v2 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool) -> (int, int) {
-		return wide_run(base, src, i, o, end, prev, bad, high)
+	wide_run_v2 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
+		return wide_run(base, src, i, o, end, prev, bad, high, ESC_DEL)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V3])
-	wide_run_v3 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool) -> (int, int) {
-		return wide_run(base, src, i, o, end, prev, bad, high)
+	wide_run_v3 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
+		return wide_run(base, src, i, o, end, prev, bad, high, ESC_DEL)
 	}
 	@(private, enable_target_feature = kernel.FEATURES[.V4])
-	wide_run_v4 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool) -> (int, int) {
-		return wide_run(base, src, i, o, end, prev, bad, high)
+	wide_run_v4 :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
+		return wide_run(base, src, i, o, end, prev, bad, high, ESC_DEL)
 	}
 } else {
 	@(private)
-	wide_run_base :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool) -> (int, int) {
-		return wide_run(base, src, i, o, end, prev, bad, high)
+	wide_run_base :: #force_no_inline proc "contextless" (base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
+		return wide_run(base, src, i, o, end, prev, bad, high, ESC_DEL)
 	}
 }
 
 @(private)
-wide_run_tier :: #force_inline proc "contextless" (tier: kernel.Tier, base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool) -> (int, int) {
+wide_run_tier :: #force_inline proc "contextless" (tier: kernel.Tier, base, src: [^]u8, i, o, end: int, prev, bad: ^V, high: ^bool, $ESC_DEL: bool) -> (int, int) {
 	when ODIN_ARCH == .amd64 {
 		switch tier {
 		case .V4:
-			return wide_run_v4(base, src, i, o, end, prev, bad, high)
+			return wide_run_v4(base, src, i, o, end, prev, bad, high, ESC_DEL)
 		case .V3:
-			return wide_run_v3(base, src, i, o, end, prev, bad, high)
+			return wide_run_v3(base, src, i, o, end, prev, bad, high, ESC_DEL)
 		case .V2:
 		}
-		return wide_run_v2(base, src, i, o, end, prev, bad, high)
+		return wide_run_v2(base, src, i, o, end, prev, bad, high, ESC_DEL)
 	} else {
-		return wide_run_base(base, src, i, o, end, prev, bad, high)
+		return wide_run_base(base, src, i, o, end, prev, bad, high, ESC_DEL)
 	}
 }
 
-// Writes `s` as a JSON string, its first `i0` bytes already copied past the cursor as the plain ASCII `put_string_mid`
-// found. It reserves `SEGMENT` source bytes at a time, so it takes any length, and carries the UTF-8 state between them.
+// Writes `s` as a JSON string, with `ESC_DEL` a DEL as `\u007f`, its first `i0` bytes already copied past the cursor
+// as the plain ASCII `put_string_mid` found. It reserves `SEGMENT` source bytes at a time, so it takes any length, and carries the UTF-8 state between them.
 // Steps by 16 bytes, through the escape table when the block holds a stop. After a stop it does not try 64-byte blocks
 // for 80 bytes, since a string with one escape has more.
 @(private)
-put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int) -> core.Typed_Error_Kind #no_bounds_check {
+put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int, $ESC_DEL: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	n := len(s)
 	src := raw_data(s)
 	if i0 > 0 {
@@ -362,7 +371,7 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int) -> core.
 			if i >= try_from && left >= 64 && i + 64 <= end {
 				// Copies, so that the address the call takes keeps `prev`, `bad` and `high` out of memory in this loop.
 				run_prev, run_bad, run_high := prev, bad, high
-				i, o = wide_run_tier(tier, base, src, i, o, end, &run_prev, &run_bad, &run_high)
+				i, o = wide_run_tier(tier, base, src, i, o, end, &run_prev, &run_bad, &run_high, ESC_DEL)
 				prev, bad, high = run_prev, run_bad, run_high
 				try_from = i + 64
 				if i >= end {
@@ -377,9 +386,13 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int) -> core.
 				bad |= kernel.utf8_window(prev, v)
 			}
 			prev, high = v, h
-			if kernel.any_lane16(esc_lanes(v)) {
+			esc := esc_lanes(v)
+			when ESC_DEL {
+				esc |= simd.lanes_eq(v, DEL)
+			}
+			if kernel.any_lane16(esc) {
 				try_from = i + 80
-				o = escape_block(base, o, v) - (16 - take)
+				o = escape_block(base, o, v, ESC_DEL) - (16 - take)
 			} else {
 				intrinsics.unaligned_store((^V)(base[o:]), v)
 				o += take
@@ -391,7 +404,7 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int) -> core.
 				bad |= kernel.utf8_window(prev, PAD)
 			}
 			if simd.reduce_or(bad) != 0 {
-				return .Bad_Utf8
+				return .Invalid_Utf8
 			}
 			base[o] = '"'
 			o += 1
@@ -405,7 +418,7 @@ put_mixed :: #force_no_inline proc(out: ^write.Out, s: string, i0: int) -> core.
 // U+007F, as `\uXXXX`, a surrogate pair past U+FFFF, and `<`, `>`, `&`, U+2028 and U+2029 as `\u00xx` and `\u202x`. Any
 // other rune is copied as it is.
 @(private)
-put_escaped :: #force_no_inline proc(out: ^write.Out, s: string, $ASCII, $HTML, $DEL: bool) -> core.Typed_Error_Kind #no_bounds_check {
+put_escaped :: #force_no_inline proc(out: ^write.Out, s: string, $ASCII, $HTML, $ESC_DEL: bool) -> core.Typed_Error_Kind #no_bounds_check {
 	n := len(s)
 	src := raw_data(s)
 	write.put_byte(out, '"')
@@ -420,9 +433,8 @@ put_escaped :: #force_no_inline proc(out: ^write.Out, s: string, $ASCII, $HTML, 
 			if i >= next_block {
 				if i + 16 <= end {
 					v := intrinsics.unaligned_load((^V)(src[i:]))
-					stop := dirty(v)
+					stop := dirty(v, ASCII || ESC_DEL)
 					stop ||= HTML && kernel.any_lane16(simd.lanes_eq(v, V('<')) | simd.lanes_eq(v, V('>')) | simd.lanes_eq(v, V('&')))
-					stop ||= (ASCII || DEL) && kernel.any_lane16(simd.lanes_eq(v, V(0x7f)))
 					if !stop {
 						intrinsics.unaligned_store((^V)(base[o:]), v)
 						o += 16
@@ -435,7 +447,7 @@ put_escaped :: #force_no_inline proc(out: ^write.Out, s: string, $ASCII, $HTML, 
 			}
 			b := src[i]
 			if b < 0x80 {
-				if HTML && (b == '<' || b == '>' || b == '&') || (ASCII || DEL) && b == 0x7f {
+				if HTML && (b == '<' || b == '>' || b == '&') || (ASCII || ESC_DEL) && b == 0x7f {
 					o += u_escape(base[o:], u16(b))
 				} else {
 					seq := ESC_SEQ[b]
@@ -445,12 +457,11 @@ put_escaped :: #force_no_inline proc(out: ^write.Out, s: string, $ASCII, $HTML, 
 				i += 1
 				continue
 			}
-			q, kind := spell.utf8_char(src[i:], src[n:])
-			if kind != .None {
-				return .Bad_Utf8
+			if _, kind := spell.utf8_char(src[i:], src[n:]); kind != .None {
+				return .Invalid_Utf8
 			}
-			size := intrinsics.ptr_sub(q, src[i:])
-			cp := decode_rune(src[i:], size)
+			r, size := utf8.decode_rune(src[i:n])
+			cp := u32(r)
 			if ASCII || HTML && (cp == 0x2028 || cp == 0x2029) {
 				o += unit_text(base[o:], cp)
 			} else {
@@ -475,18 +486,6 @@ unit_text :: proc "contextless" (p: [^]u8, cp: u32) -> int {
 	}
 	c := cp - 0x10000
 	return u_escape(p, u16(0xD800 + c >> 10)) + u_escape(p[6:], u16(0xDC00 + c & 0x3FF))
-}
-
-// Returns the code point of the valid sequence of `size` bytes at `p`.
-@(private)
-decode_rune :: #force_inline proc "contextless" (p: [^]u8, size: int) -> u32 {
-	switch size {
-	case 2:
-		return u32(p[0] & 0x1F) << 6 | u32(p[1] & 0x3F)
-	case 3:
-		return u32(p[0] & 0x0F) << 12 | u32(p[1] & 0x3F) << 6 | u32(p[2] & 0x3F)
-	}
-	return u32(p[0] & 0x07) << 18 | u32(p[1] & 0x3F) << 12 | u32(p[2] & 0x3F) << 6 | u32(p[3] & 0x3F)
 }
 
 // Writes `\u` and the four lowercase hex digits of `unit` at `p` and returns 6.

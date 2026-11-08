@@ -14,7 +14,7 @@ fn_length :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value,
 	case .Null:
 		return num(0), .Go
 	case .False, .True:
-		return nil, fail(ip, "boolean (%s) has no length", brief(v))
+		return nil, fail(ip, "boolean (%s) has no length", brief(ip, v))
 	case .Number:
 		// jq's jv_number_abs: a literal without its sign, a negative zero's (`-0.0`) too, else fabs. Either is a new
 		// number, not the input (`1 | path(length)` fails).
@@ -57,7 +57,7 @@ codepoints :: proc(s: string) -> int {
 fn_utf8bytelength :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	s, ok := string_of(v)
 	if !ok {
-		return nil, fail(ip, "%s (%s) only strings have UTF-8 byte length", type_name(v), brief(v))
+		return nil, fail(ip, "%s (%s) only strings have UTF-8 byte length", type_name(v), brief(ip, v))
 	}
 	return num(f64(len(s))), .Go
 }
@@ -90,7 +90,7 @@ fn_keys_unsorted :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> 
 		return a, .Go
 	case .Null, .False, .True, .Number, .String:
 	}
-	return nil, fail(ip, "%s (%s) has no keys", type_name(v), brief(v))
+	return nil, fail(ip, "%s (%s) has no keys", type_name(v), brief(ip, v))
 }
 
 fn_has :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
@@ -111,7 +111,7 @@ fn_has :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Si
 
 fn_contains :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	if kind(v) != kind(args[0]) { // jq's kinds: true and false are two
-		return nil, fail(ip, "%s (%s) and %s (%s) cannot have their containment checked", type_name(v), brief(v), type_name(args[0]), brief(args[0]))
+		return nil, fail(ip, "%s (%s) and %s (%s) cannot have their containment checked", type_name(v), brief(ip, v), type_name(args[0]), brief(ip, args[0]))
 	}
 	too_deep = false
 	r := contains(v, args[0])
@@ -192,19 +192,19 @@ fn_tonumber :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Valu
 		}
 	case .Null, .False, .True, .Array, .Object:
 	}
-	return nil, fail(ip, "%s (%s) cannot be parsed as a number", type_name(v), brief(v))
+	return nil, fail(ip, "%s (%s) cannot be parsed as a number", type_name(v), brief(ip, v))
 }
 
 fn_fromjson :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	s, ok := string_of(v)
 	if !ok {
-		return nil, fail(ip, "%s (%s) only strings can be parsed", type_name(v), brief(v))
+		return nil, fail(ip, "%s (%s) only strings can be parsed", type_name(v), brief(ip, v))
 	}
 	parsed, msg := read_json(s, ip.reading)
 	if msg != "" {
 		return nil, fail(ip, "%s", msg)
 	}
-	return parsed, .Go
+	return scalar(parsed), .Go // a scalar holds nothing of its document
 }
 
 // ascii_downcase and ascii_upcase.
@@ -244,7 +244,7 @@ fn_implode :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value
 	for _, m in next_member(&it) {
 		n, ok := number_of(m)
 		if !ok || math.is_nan(n.f) {
-			return nil, fail(ip, "%s (%s) can't be imploded, unicode codepoint needs to be numeric", type_name(m), brief(m))
+			return nil, fail(ip, "%s (%s) can't be imploded, unicode codepoint needs to be numeric", type_name(m), brief(ip, m))
 		}
 		r := rune(n.f)
 		if n.f < 0 || n.f > 0x10ffff || (r >= 0xd800 && r < 0xe000) {
@@ -255,24 +255,13 @@ fn_implode :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value
 	return strings.to_string(b), .Go
 }
 
-fn_has_affix :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return affix(ip, v, args[0], start = name == "startswith", trim = false)
-}
-
-fn_ltrimstr :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return affix(ip, v, args[0], start = true, trim = true)
-}
-
-fn_rtrimstr :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	return affix(ip, v, args[0], start = false, trim = true)
-}
-
-// startswith and endswith (the affix at the `start` or not), and ltrimstr and rtrimstr, which jq writes
-// with them (`trim`): the input without the affix it has, or else the very input.
-@(private = "file")
-affix :: #force_inline proc(ip: ^Interp, v, of: Value, start, trim: bool) -> (Value, Signal) {
+// startswith and endswith, and ltrimstr and rtrimstr, which jq writes with them: the input without the affix it
+// has, or else the very input.
+fn_affix :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
+	// The four names start with distinct letters.
+	start, trim := name[0] == 's' || name[0] == 'l', name[0] == 'l' || name[0] == 'r'
 	s, sok := string_of(v)
-	t, tok := string_of(of)
+	t, tok := string_of(args[0])
 	if !sok || !tok {
 		return nil, fail(ip, "%s() requires string inputs", "startswith" if start else "endswith")
 	}
@@ -327,58 +316,34 @@ fn_split :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, 
 }
 
 // jq's `reduce .[] as $i (null; (if . == null then "" else . + $x end) + ($i | if type == "boolean" or
-// type == "number" then tostring else . // "" end)) // ""`, its errors included, with the string built
-// in place while the operands are strings.
+// type == "number" then tostring else . // "" end)) // ""`, its errors included: only a string or null adds to the
+// string so far.
 fn_join :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	k := kind(v)
 	if k != .Array && k != .Object {
-		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(v), brief(v))
+		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(v), brief(ip, v))
 	}
 	sep, sep_is_str := string_of(args[0])
 	b := strings.builder_make()
-	acc: Value // the result so far once it is not a string, nil while it is (in `b`)
-	first := true
 	it := iterate(v)
 	for _, m in next_member(&it) {
-		item: Value
+		if it.i > 1 && sep_is_str {
+			strings.write_string(&b, sep)
+		} else if it.i > 1 && kind(args[0]) != .Null {
+			return add(ip, strings.to_string(b), args[0])
+		}
 		switch kind(m) {
 		case .False, .True, .Number:
-			item = to_json(m)
+			strings.write_string(&b, to_json(m))
+		case .String:
+			s, _ := string_of(m)
+			strings.write_string(&b, s)
 		case .Null:
-			item = ""
-		case .String, .Array, .Object:
-			item = m
-		}
-		left: Value = ""
-		if !first {
-			if acc == nil && sep_is_str {
-				strings.write_string(&b, sep)
-			} else {
-				sig: Signal
-				if left, sig = binary_op(ip, .Add, acc if acc != nil else Value(strings.to_string(b)), args[0]); sig != .Go {
-					return nil, sig
-				}
-				acc = left
-			}
-		}
-		first = false
-		text, item_is_str := item.(string)
-		if acc == nil && item_is_str {
-			strings.write_string(&b, text)
-			continue
-		}
-		sig: Signal
-		if acc == nil {
-			left = strings.to_string(b)
-		}
-		if acc, sig = binary_op(ip, .Add, left if acc == nil else acc, item); sig != .Go {
-			return nil, sig
+		case .Array, .Object:
+			return add(ip, strings.to_string(b), m)
 		}
 	}
-	if acc == nil {
-		return strings.to_string(b), .Go
-	}
-	return acc if truthy(acc) else Value(""), .Go
+	return strings.to_string(b), .Go
 }
 
 // jq's `[.[length - 1 - range(0; length)]]`: an array reversed, and for anything else with a length
@@ -415,7 +380,7 @@ fn_flatten :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value
 	}
 	k := kind(v)
 	if k != .Array && k != .Object {
-		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(v), brief(v))
+		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(v), brief(ip, v))
 	}
 	a := new_array()
 	return a, flatten_into(ip, a, v, depth)
@@ -440,28 +405,15 @@ flatten_into :: proc(ip: ^Interp, a: ^Array, v: Value, depth: Value) -> Signal {
 	return .Go
 }
 
-fn_indices :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	i := args[0]
-	switch {
-	case kind(v) == .Array && kind(i) != .Array:
-		wrap := new_array(1)
-		append(&wrap.items, i)
-		return index_value(ip, v, wrap)
-	case kind(v) == .String && kind(i) == .String:
-		return fn_strindices(ip, name, v, args)
-	}
-	return index_value(ip, v, i)
-}
-
 // `_strindices`: where `t` starts in the string, in codepoints, overlaps included.
 fn_strindices :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	s, sok := string_of(v)
 	if !sok {
-		return nil, fail(ip, "%s (%s) cannot be searched, as it is not a string", type_name(v), brief(v))
+		return nil, fail(ip, "%s (%s) cannot be searched, as it is not a string", type_name(v), brief(ip, v))
 	}
 	t, tok := string_of(args[0])
 	if !tok {
-		return nil, fail(ip, "%s (%s) is not a string", type_name(args[0]), brief(args[0]))
+		return nil, fail(ip, "%s (%s) is not a string", type_name(args[0]), brief(ip, args[0]))
 	}
 	a := new_array()
 	if len(t) > 0 {
@@ -483,7 +435,7 @@ fn_strindices :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Va
 fn_add :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	k := kind(v)
 	if k != .Array && k != .Object {
-		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(v), brief(v))
+		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(v), brief(ip, v))
 	}
 	owned: Owned
 	acc: Value
@@ -500,7 +452,7 @@ fn_add :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Si
 fn_to_entries :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	k := kind(v)
 	if k != .Object && k != .Array {
-		return nil, fail(ip, "%s (%s) has no keys", type_name(v), brief(v))
+		return nil, fail(ip, "%s (%s) has no keys", type_name(v), brief(ip, v))
 	}
 	a := new_array(length_of(v))
 	it := iterate(v)

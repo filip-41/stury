@@ -49,7 +49,7 @@ main :: proc() {
 
 	bad := transmute([]byte)string("City,population,lat,lon\nOslo,lots,59.91,10.75\n")
 	if err := dsv.unmarshal(bad, .Csv, &cities, allocator = context.temp_allocator); err.kind != .None {
-		report(bad, err) // 2:6: Value does not fit the field's type at [0].population
+		report(bad, err) // 2:6: Expected i64, found "lots" at .[0].population
 	}
 
 	dialects(&cities)
@@ -60,7 +60,8 @@ main :: proc() {
 // A Spec and Options read other delimited text through the same calls.
 dialects :: proc(cities: ^[]City) {
 	tsv := transmute([]byte)string("City\tpopulation\tlat\tlon\nOslo\t709000\t59.91\t10.75\n")
-	if dsv.unmarshal(tsv, .Tsv, cities, allocator = context.temp_allocator).kind != .None {
+	if err := dsv.unmarshal(tsv, .Tsv, cities, allocator = context.temp_allocator); err.kind != .None {
+		report(tsv, err)
 		os.exit(1)
 	}
 	fmt.println(cities[0].name, cities[0].population) // Oslo 709000
@@ -68,7 +69,8 @@ dialects :: proc(cities: ^[]City) {
 	// No header: column k is the struct's field k. A semicolon delimiter, and lines starting with # skipped.
 	plain := transmute([]byte)string("# name;population;lat;lon\nOslo;709000;59.91;10.75\n")
 	layout := dsv.Options{no_header = true, delimiter = ';', comment = '#'}
-	if dsv.unmarshal(plain, .Csv, cities, opts = layout, allocator = context.temp_allocator).kind != .None {
+	if err := dsv.unmarshal(plain, .Csv, cities, opts = layout, allocator = context.temp_allocator); err.kind != .None {
+		report(plain, err)
 		os.exit(1)
 	}
 	fmt.println(len(cities^), cities[0].lat) // 1 59.91
@@ -79,6 +81,7 @@ dialects :: proc(cities: ^[]City) {
 document_and_edits :: proc(src: []byte) {
 	doc, derr := dsv.build(src, .Csv)
 	if derr.kind != .None {
+		report(src, derr)
 		os.exit(1)
 	}
 	defer core.destroy(&doc)
@@ -91,17 +94,23 @@ document_and_edits :: proc(src: []byte) {
 	city, _ := core.parse_path(".[1].City")
 	defer core.path_destroy(&city)
 	fdoc, answer, ferr := dsv.find(src, .Csv, city)
-	if ferr.kind != .None || answer == nil {
+	if ferr.kind != .None {
+		report(src, ferr)
+		os.exit(1)
+	}
+	if answer.outcome != .Found {
+		fmt.println("not found")
 		os.exit(1)
 	}
 	defer core.destroy(&fdoc)
-	text, _ = core.text(&fdoc, answer.?.node, buf[:])
+	text, _ = core.text(&fdoc, answer.node, buf[:])
 	fmt.println(text) // Ho, Chi Minh
 
 	population, _ := core.parse_path(".[0].population")
 	defer core.path_destroy(&population)
 	edited, eerr := dsv.set(src, .Csv, population, "710000")
 	if eerr.kind != .None {
+		report(src, eerr)
 		os.exit(1)
 	}
 	defer delete(edited)
@@ -112,11 +121,13 @@ document_and_edits :: proc(src: []byte) {
 	// Edits on a document are recorded on a list and applied by one commit.
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	if core.insert(&list, core.ROOT, 2, "Bergen,,60.39,5.32").kind != .None {
+	if ierr := core.insert(&list, core.ROOT, 2, "Bergen,,60.39,5.32"); ierr.kind != .None {
+		report(src, ierr)
 		os.exit(1)
 	}
 	added, _, aerr := core.commit(&list)
 	if aerr.kind != .None {
+		report(src, aerr)
 		os.exit(1)
 	}
 	defer delete(added)
@@ -127,18 +138,21 @@ document_and_edits :: proc(src: []byte) {
 	defer core.path_destroy(&every)
 	cells, qerr := core.query(&doc, every)
 	if qerr.kind != .None {
+		report(src, qerr)
 		os.exit(1)
 	}
 	defer delete(cells)
 	dropping := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&dropping)
 	for c in cells {
-		if core.remove(&dropping, c.node).kind != .None {
+		if rerr := core.remove(&dropping, c.node); rerr.kind != .None {
+			report(src, rerr)
 			os.exit(1)
 		}
 	}
 	trimmed, _, rerr := core.commit(&dropping)
 	if rerr.kind != .None {
+		report(src, rerr)
 		os.exit(1)
 	}
 	defer delete(trimmed)
@@ -157,12 +171,14 @@ streaming :: proc(src: []byte) {
 	for rec in records.next(&rr) {
 		fmt.println(rec.at, len(rec.text), string(rec.text)) // 24 and Oslo's row, then 48: the header is no record
 	}
-	if rr.fault != nil {
+	if fault, bad := rr.fault.?; bad {
+		report(src, fault)
 		os.exit(1)
 	}
 
 	pool: host.Pool
-	if host.pool_init(&pool) != nil { // one worker per core
+	if perr := host.pool_init(&pool); perr != nil { // one worker per core
+		fmt.eprintln(perr)
 		os.exit(1)
 	}
 	defer host.pool_destroy(&pool)
@@ -173,21 +189,25 @@ streaming :: proc(src: []byte) {
 		}
 		return true
 	}
-	if _, bad := records.each(src, as, .Lines, count, &rows, &pool.runner).?; bad {
+	if fault, bad := records.each(src, as, .Lines, count, &rows, &pool.runner).?; bad {
+		report(src, fault)
 		os.exit(1)
 	}
 	fmt.println(rows) // 2: the header is no record
 
 	wr: records.Writer
-	if records.writer_init(&wr, {}, as) != .None {
+	if kind := records.writer_init(&wr, {}, as); kind != .None {
+		report(nil, core.Typed_Error{kind = kind})
 		os.exit(1)
 	}
 	defer records.writer_destroy(&wr)
-	if records.write_cells(&wr, []Maybe(string){"Tromsø", nil, "69.65", "18.96"}) != .None {
+	if kind := records.write_cells(&wr, {"Tromsø", nil, "69.65", "18.96"}); kind != .None {
+		report(nil, core.Typed_Error{kind = kind})
 		os.exit(1)
 	}
 	line, werr := records.writer_end(&wr)
 	if werr.kind != .None {
+		report(nil, werr)
 		os.exit(1)
 	}
 	defer delete(line)

@@ -2,6 +2,7 @@ package typed
 
 import "base:runtime"
 import "core:mem"
+import spell "../spell"
 import core ".."
 
 // `Hook_Regs` while reading: `b` walks the plan's records, `c` is the struct the members are read into or the list's
@@ -30,15 +31,14 @@ Frame :: struct {
 @(private)
 SEEN_ON :: u64(1) << 63
 
-// A typed read's options. `dups` is nil for `.Last`, and `refuse_duplicates` reads the whole text first and refuses a
-// repeated key anywhere in it. `unknown` says what a key the type does not name does. `borrow_strings` makes a string
+// A typed read's options. `dups` picks among a repeated key, `.Refuse` reads the whole text first and refuses a
+// repeated key anywhere in it, and `.All` is `.Bad_Option`, since a field holds one value. `unknown` says what a key the type does not name does. `borrow_strings` makes a string
 // with nothing to decode a slice of `src` in place of a copy. `collect`, when set, reads past a refusal.
 Read_Options :: struct {
-	dups:              Maybe(core.Duplicates),
-	refuse_duplicates: bool,
-	unknown:           Unknown_Fields,
-	borrow_strings:    bool,
-	collect:           ^Collected,
+	dups:           core.Duplicates,
+	unknown:        Unknown_Fields,
+	borrow_strings: bool,
+	collect:        ^Collected,
 }
 
 // What a key the type does not name does.
@@ -72,15 +72,18 @@ Scalar :: union {
 Reader :: struct {
 	expect:    ^Field,
 	mant:      u64,
-	base:      [^]u8,
 	frames:    [^]Frame,
 	sp:        int,
 	borrow:    bool,
 	first_key: bool, // `.First`
 	refuse_unknown: bool,
+	wrap_sp:   u32, // the depth `wrap`'s element is read at, 0 for none
 	// The source, the format and its read, which a token's text and number read through.
 	using view: core.Token_View,
 	plan:      ^Plan,
+	// The registers of the outermost wrapper whose element is read at depth `wrap_sp`. A refusal of that element takes
+	// its path from them, since the element's own registers name no member and no index.
+	wrap:      ^core.Hook_Regs,
 	ctx:       runtime.Context,
 	first:     core.Typed_Error,
 	collect:   ^Collected,
@@ -95,7 +98,7 @@ Reader :: struct {
 // `read_end` ends it.
 read_start :: proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
 	if plan == nil || plan.spelling != spelling || plan.type != T {
-		err.kind = .Plan_Mismatch
+		err = plan_mismatch(plan, spelling, T)
 		return
 	}
 	if target == nil {
@@ -106,18 +109,72 @@ read_start :: proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling,
 	r.ctx.allocator = allocator
 	// The frame below the root's is read as a parent's and never written past `seen`.
 	frames[0].seen = 0
-	r.base, r.frames, r.sp, r.src, r.plan = raw_data(src), raw_data(frames), 1, src, plan
+	r.frames, r.sp, r.src, r.plan = raw_data(frames), 1, src, plan
 	r.borrow, r.collect = read.borrow_strings, read.collect
 	r.spelling = spelling
+	if read.dups == .All {
+		err.kind = .Bad_Option
+		return
+	}
 	r.first_key = read.dups == .First
 	r.refuse_unknown = read.unknown == .Refuse
 	return {NO_LIMIT, u64(uintptr(plan.root)), u64(uintptr(target))}, {}
+}
+
+// Gives the read room for at least `want` frames in place of the `have` it holds, on the default heap with the frames
+// open, for a walk that nests past those it has. Returns the room, or false when it does not fit in memory. A copy holds
+// the old frames beside the new, so the room grows eightfold, and to as deep as the text can nest once a step would
+// pass half of that. The frames a read starts with are its caller's and at most `MAX_DEPTH + 2`, and `read_release`
+// frees a grown copy.
+@(cold)
+grow_frames :: #force_no_inline proc "contextless" (h: ^Reader, have, want: int) -> (int, bool) {
+	bound := len(h.src) + 18
+	n := min(max(want, 8 * have), bound)
+	if 2 * n > bound {
+		n = bound
+	}
+	if n <= have {
+		return have, true
+	}
+	grown := have > core.MAX_DEPTH + 2
+	wide := runtime.heap_resize(h.frames, n * size_of(Frame)) if grown else runtime.heap_alloc(n * size_of(Frame), false)
+	if wide == nil {
+		return have, false
+	}
+	if !grown {
+		mem.copy_non_overlapping(wide, h.frames, min(h.sp + 1, have) * size_of(Frame))
+	}
+	h.frames = ([^]Frame)(wide)
+	return n, true
+}
+
+// Frees the frames `grow_frames` gave a read that started with `frames`.
+read_release :: proc "contextless" (r: ^Reader, frames: []Frame) {
+	if r.frames != raw_data(frames) {
+		runtime.heap_free(r.frames)
+	}
+}
+
+// The refusal of a read or write given `plan` for a value of `T` in the format `spelling`, which the plan does not
+// read: the plan's own error when `plan_make` refused it, else `.Plan_Mismatch` naming the two formats, or the plan's
+// type when the formats agree.
+plan_mismatch :: proc "contextless" (plan: ^Plan, spelling: ^core.Spelling, T: typeid) -> core.Typed_Error {
+	e := core.Typed_Error{kind = .Plan_Mismatch}
+	if plan == nil {
+		return e
+	}
+	if plan.err.kind != .None {
+		return plan.err
+	}
+	e.plans = {plan.spelling, spelling, plan.type if plan.spelling == spelling else nil}
+	return e
 }
 
 // Ends a read: gives the open lists to their destinations, so what the read allocated is reachable from the target, and
 // returns the first refusal or `fault`.
 read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Error {
 	if f, faulted := fault.?; faulted {
+		context = r.ctx
 		e := core.Typed_Error{kind = .Walk, at = f.at, inner = f}
 		note(r, regs, e)
 	}
@@ -146,9 +203,6 @@ F32_NORMAL :: 1.1754943508222875e-38
 f32_double_rounds :: #force_inline proc "contextless" (v: f64) -> bool {
 	return transmute(u64)v & (1 << 29 - 1) == 1 << 28 || abs(v) < F32_NORMAL && v != 0
 }
-
-@(rodata, private)
-POW10 := [16]f64{1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15}
 
 // The hook. A value's open takes no call on the hot kinds, and every kind past `F64` fails the compares here and
 // reaches `indirect`.
@@ -187,21 +241,21 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 		if t.spelling & core.SPELLING_DECODE != 0 || !h.borrow {
 			reason = store_string(h, t, (^string)(dest))
 		} else {
-			(^runtime.Raw_String)(dest)^ = {h.base[t.lo:], int(t.n)}
+			(^runtime.Raw_String)(dest)^ = {raw_data(h.src)[t.lo:], int(t.n)}
 		}
 	case .Number:
 		#partial switch fld.kind {
 		case .I64:
 			if core.number_shape(t.spelling) <= 19 && h.mant >> 63 == 0 {
-				(^i64)(dest)^ = -i64(h.mant) if h.base[t.lo] == '-' else i64(h.mant)
+				(^i64)(dest)^ = -i64(h.mant) if raw_data(h.src)[t.lo] == '-' else i64(h.mant)
 			} else {
 				reason = number_cold(h, t, fld, dest)
 			}
 		case .F64, .F32:
 			frac, sum := core.number_digits(t.spelling)
 			if sum <= 15 {
-				v := f64(h.mant) / POW10[frac]
-				v = -v if h.base[t.lo] == '-' else v
+				v := f64(h.mant) / spell.POW10_F64[frac]
+				v = -v if raw_data(h.src)[t.lo] == '-' else v
 				if fld.kind == .F64 {
 					(^f64)(dest)^ = v
 				} else if !f32_double_rounds(v) {
@@ -214,7 +268,7 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 			}
 		case .I8 ..= .I32, .U8 ..= .U64:
 			if core.number_shape(t.spelling) <= 19 {
-				reason = store_int(h.mant, h.base[t.lo] == '-', fld.kind, dest)
+				reason = store_int(h.mant, raw_data(h.src)[t.lo] == '-', fld.kind, dest)
 			} else {
 				reason = number_cold(h, t, fld, dest)
 			}
@@ -226,7 +280,7 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 			return indirect(h, regs, t)
 		}
 		(^bool)(dest)^ = t.kind == .True
-	case .Map:
+	case .Object:
 		if fld.kind != .Struct {
 			return open_map(h, regs, fld, dest, t)
 		}
@@ -276,7 +330,7 @@ store_string :: #force_no_inline proc "contextless" (h: ^Reader, t: core.Token, 
 	if t.spelling & core.SPELLING_DECODE != 0 {
 		s, ok := core.token_text(h.plan.spelling, &h.view, t, context.allocator)
 		if !ok {
-			return .Out_Of_Memory
+			return .No_Memory
 		}
 		dest^ = s
 		return .None
@@ -303,7 +357,7 @@ grow_list :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Re
 	wide := max(8, room * 2)
 	bytes, err := runtime.non_zero_mem_resize(f.data, int(room * stride), int(wide * stride), int(m.align), context.allocator)
 	if err != nil {
-		return regs, .Out_Of_Memory
+		return regs, .No_Memory
 	}
 	if m.zeroed {
 		mem.zero(raw_data(bytes)[room * stride:], int((wide - room) * stride))

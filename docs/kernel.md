@@ -236,9 +236,10 @@ From the repository root:
 
 | Command | What it runs |
 |---|---|
-| `make test` | the tests on the host at -o:minimal and -o:speed |
+| `make test-lib` | the library suites on the host at -o:minimal and -o:speed |
 | `make test-x86` | v2 and v3 under Rosetta at -o:none and -o:speed, in a build for Odin's default CPU |
-| `make test-asan` | the tests under AddressSanitizer |
+| `make test-wide` | every tier on a machine that lacks it, under Intel SDE |
+| `make test-asan` | the library suites and the command line under AddressSanitizer |
 | `make lint` | vet on the host, x86-64 and riscv64, and a v4 object build at -o:none and -o:speed |
 | `make bench TIER=n` | the kernel timings of tier n |
 

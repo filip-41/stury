@@ -24,6 +24,21 @@ object_put :: proc(o: ^Object, k: string, v: Value) {
 		o.vals[i] = v
 		return
 	}
+	object_append(o, k, v)
+}
+
+// Set `k` in an object an update owns, in place: a member replaced keeps the comments `v` does not bring.
+object_set :: proc(o: ^Object, k: string, v: Value) {
+	if i := object_slot(o, k); i >= 0 {
+		o.vals[i] = keep_comments(o.vals[i], v)
+		return
+	}
+	object_append(o, k, v)
+}
+
+// `k`, which `o` does not have, set to `v`.
+@(private = "file")
+object_append :: #force_inline proc(o: ^Object, k: string, v: Value) {
 	make_room(&o.keys)
 	make_room(&o.vals)
 	append(&o.keys, k)

@@ -19,9 +19,10 @@ Field_Tag :: struct {
 
 // Reads a field's tag: `name,flag,flag`, or `-` to leave the field out. An empty name keeps the field's own, renamed by
 // `Plan_Options.rename`. In the name a backslash makes the byte after it literal, so a comma or a backslash is written
-// `\,` or `\\`. The flags are `omitempty`, which only a writer reads, `required` and `unknown`. Any other is a refusal.
+// `\,` or `\\`. The flags are `omitempty`, which only a writer reads, `required` and `unknown`. Any other is returned in
+// `bad_flag`.
 @(private)
-field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, ok: bool) {
+field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, bad_flag: string) {
 	value, found := reflect.struct_tag_lookup(reflect.Struct_Tag(tag), b.p.spelling.tag_key)
 	if !found {
 		value, found = reflect.struct_tag_lookup(reflect.Struct_Tag(tag), SHARED_TAG_KEY)
@@ -29,15 +30,15 @@ field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, ok: bool) {
 	t.keep = true
 	if !found {
 		t.name = renamed(b, name)
-		return t, true
+		return t, ""
 	}
 	if value == "-" {
-		return {}, true
+		return {}, ""
 	}
 	out, failed := make([dynamic]u8, 0, len(value))
 	if failed != nil {
-		refuse_plan(b, .Out_Of_Memory)
-		return {}, true
+		refuse_plan(b, .No_Memory)
+		return {}, ""
 	}
 	i := 0
 	for ; i < len(value) && value[i] != ','; i += 1 {
@@ -63,11 +64,11 @@ field_tag :: proc(b: ^Builder, name, tag: string) -> (t: Field_Tag, ok: bool) {
 			case "unknown":
 				t.unknown = true
 			case:
-				return {}, false
+				return {}, flag
 			}
 		}
 	}
-	return t, true
+	return t, ""
 }
 
 // Spells a `snake_case` name as `Plan_Options.rename` says.
@@ -78,7 +79,7 @@ renamed :: proc(b: ^Builder, name: string) -> string {
 	}
 	out, failed := make([]u8, len(name))
 	if failed != nil {
-		refuse_plan(b, .Out_Of_Memory)
+		refuse_plan(b, .No_Memory)
 		return name
 	}
 	n := 0

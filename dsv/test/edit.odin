@@ -1,582 +1,412 @@
 package dsv_tests
 
 import "core:mem"
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import dsv ".."
 import walktest "../../walktest"
 
-// Edits over a delimited text: a cell's text, a record's line, and the table's columns, which a commit decides from the
-// whole list.
+// Edits over a delimited text: a cell's text, a record's line, the table's columns and the comment lines, which a commit
+// decides from the whole list. Each case records its ops on a list over `src`, commits, and expects `want` and the count
+// of dropped facts. A case with `fail` expects the first op or the commit to refuse with that kind.
 
 @(private = "file")
-Dsv_Read :: struct {
-	spec: dsv.Spec,
-	opts: dsv.Options,
+Op_Kind :: enum {
+	Set,
+	Insert,
+	Add,
+	Remove,
+	Member,
+	Fact,
+	Unfact,
+	Facts,
 }
 
 @(private = "file")
-read_dsv :: proc(src: []u8, spec: any) -> (core.Document, core.Document_Error) {
-	r := spec.(Dsv_Read)
-	switch r.spec {
-	case .Csv:
-		return dsv.build(src, .Csv, r.opts)
-	case .Tsv:
-		return dsv.build(src, .Tsv, r.opts)
-	case .Plain:
-		return dsv.build(src, .Plain, r.opts)
+Op :: struct {
+	kind: Op_Kind,
+	node: core.Node_Index,
+	at:   int,
+	role: core.Role,
+	a, b: string,
+}
+
+@(private = "file")
+Edit_Case :: struct {
+	src, want: string,
+	spec:      dsv.Spec,
+	opts:      dsv.Options,
+	ops:       []Op,
+	fail:      core.Document_Error_Kind,
+	dropped:   int,
+}
+
+@(private = "file")
+put :: proc(node: core.Node_Index, text: string) -> Op {
+	return {kind = .Set, node = node, a = text}
+}
+
+@(private = "file")
+ins :: proc(node: core.Node_Index, at: int, text: string) -> Op {
+	return {kind = .Insert, node = node, at = at, a = text}
+}
+
+@(private = "file")
+add :: proc(node: core.Node_Index, at: int, name, text: string) -> Op {
+	return {kind = .Add, node = node, at = at, a = name, b = text}
+}
+
+@(private = "file")
+drop :: proc(node: core.Node_Index) -> Op {
+	return {kind = .Remove, node = node}
+}
+
+@(private = "file")
+drops :: proc(nodes: ..core.Node_Index) -> []Op {
+	ops := make([]Op, len(nodes), context.temp_allocator)
+	for n, i in nodes {
+		ops[i] = drop(n)
 	}
-	return {}, {kind = .Bad_Value}
-}
-
-// Commits `list`, expects `want`, and rebuilds it as `S` under `opts`.
-expect_commit :: proc(t: ^testing.T, list: ^core.Edit_List, want: string, $S: dsv.Spec, opts := dsv.Options{}) -> bool {
-	return walktest.expect_commit(t, list, want, read_dsv, Dsv_Read{S, opts})
-}
-
-check :: proc(t: ^testing.T, src, want: string, $S: dsv.Spec, opts: dsv.Options, edit: proc(list: ^core.Edit_List) -> core.Document_Error) -> bool {
-	return walktest.check(t, src, want, read_dsv, Dsv_Read{S, opts}, edit)
+	return ops
 }
 
 @(private = "file")
-set_cell :: proc(list: ^core.Edit_List, node: core.Node_Index, text: string) -> core.Document_Error {
-	return core.set(list, node, text)
-}
-
-// A cell becomes its text, quoted or plain as written, and every other byte stays.
-@(test)
-edit_set_cell :: proc(t: ^testing.T) {
-	check(t, "a,b\n1,2\n", "a,b\n9,2\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 5, "9")
-	})
-	check(t, "a,b\n\"x,y\",2\n", "a,b\nz,2\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 5, "z")
-	})
-	check(t, "a,b\nx,2\n", "a,b\n\"p,q\",2\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 5, "\"p,q\"")
-	})
-	check(t, "a,b\nx,2\n", "a,b\n,2\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 5, "")
-	})
-	// A header cell is a cell too, and its text names the column.
-	check(t, "a,b\n1,2\n", "z,b\n1,2\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 2, "z")
-	})
-	check(t, "a\tb\n1\t2\n", "a\tb\n1\t9\n", .Tsv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 6, "9")
-	})
-	check(t, "a\tb\nx\t2\n", "a\tb\nx\\ty\t2\n", .Tsv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 5, "x\\ty")
-	})
-	check(t, "1,2\n3,4", "5,2\n3,4", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 2, "5")
-	})
-}
-
-// A record inserted first, in the middle and last, and into an empty text. The table's width becomes the record's.
-@(test)
-edit_insert_record :: proc(t: ^testing.T) {
-	check(t, "a,b\n1,2\n", "a,b\n7,8\n1,2\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("7,8"))
-	})
-	check(t, "a,b\n1,2\n3,4\n", "a,b\n1,2\n7,8\n3,4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 1, string("7,8"))
-	})
-	check(t, "a,b\n1,2\n", "a,b\n1,2\n7,8\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 1, string("7,8"))
-	})
-	// A text with no final line end has one written before the record, and the record then ends the text.
-	check(t, "a,b\n1,2", "a,b\n1,2\n7,8", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 1, string("7,8"))
-	})
-	check(t, "", "7,8\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("7,8"))
-	})
-	// A headed text with no data record puts the first record after the header.
-	check(t, "a,b\n", "a,b\n7,8\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("7,8"))
-	})
-	check(t, "a,b", "a,b\n7,8", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("7,8"))
-	})
-	// The text keeps the line end the table uses.
-	check(t, "a,b\r\n1,2\r\n", "a,b\r\n1,2\r\n7,8\r\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 1, string("7,8"))
-	})
-	check(t, "1,2\n", "3,4\n1,2\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("3,4"))
-	})
-	// A quoted cell keeps its delimiters and line ends inside.
-	check(t, "a,b\n1,2\n", "a,b\n1,2\n\"x,y\",\"m\nn\"\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 1, string("\"x,y\",\"m\nn\""))
-	})
-	check(t, "a\tb\n1\t2\n", "a\tb\n1\t2\n3\t4\n", .Tsv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 1, string("3\t4"))
-	})
-}
-
-// A cell inserted into a record: it fills a cell a short record lacks, and otherwise adds a column.
-@(test)
-edit_insert_cell :: proc(t: ^testing.T) {
-	// A table of one record follows the record's width.
-	check(t, "1,2\n", "1,2,3\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 1, 2, string("3"))
-	})
-	check(t, "1,2", "1,2,3", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 1, 2, string("3"))
-	})
-	check(t, "1,2\n", "1,0,2\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 1, 1, string("0"))
-	})
-	// A header with no data record is the whole table, so a column may join it.
-	check(t, "a,b\n", "a,b,c\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 1, 2, string("c"))
-	})
-	// A headerless record narrower than the first record is ragged, and an edit may add a cell to it while it stays under the width.
-	check(t, "1,2\n3\n", "1,2\n3,4\n", .Csv, {no_header = true, tolerate = {.Ragged}}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 4, 1, string("4"))
-	})
-	// A headed record is a Map, so an array-element insert is refused as Wrong_Container.
-	doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n3,4\n"), .Csv)
-	defer core.destroy(&doc)
-	list := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.insert(&list, 4, 2, string("9")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.insert(&list, 4, 0, string("x,y")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, len(list.edits), 0)
-
-	// A headerless record is an Array, and a recorded cell is one cell at a position of the record.
-	nh_doc, _ := dsv.build(transmute([]u8)string("1,2\n3,4\n"), .Csv, {no_header = true})
-	defer core.destroy(&nh_doc)
-	nh_list := core.edit_list_init(&nh_doc)
-	defer core.edit_list_destroy(&nh_list)
-	testing.expect_value(t, core.insert(&nh_list, 1, 0, string("x,y")).kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, core.insert(&nh_list, 1, 9, string("7")).kind, core.Document_Error_Kind.Bad_Position)
-	testing.expect_value(t, len(nh_list.edits), 0)
-}
-
-// Two cells of one record inserted at one byte keep the order they were recorded in: the cell before the empty last
-// cell, then the cell appended after it.
-@(test)
-edit_insert_cells_order :: proc(t: ^testing.T) {
-	check(t, "a,", "a,x,,y", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, 1, 1, string("x")); e.kind != .None {
-			return e
-		}
-		return core.insert(list, 1, 2, string("y"))
-	})
-}
-
-// Removing a record removes its line end, first, middle or last. The header row is no record to remove.
-@(test)
-edit_remove_record :: proc(t: ^testing.T) {
-	check(t, "a,b\n1,2\n3,4\n", "a,b\n3,4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 4)
-	})
-	check(t, "a,b\n1,2\n3,4\n", "a,b\n1,2\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 7)
-	})
-	check(t, "a,b\n1,2", "a,b\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 4)
-	})
-	check(t, "1,2\n", "", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 1)
-	})
-	check(t, "a,b\r\n1,2\r\n", "a,b\r\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 4)
-	})
-	check(t, "a\tb\n1\t2\n", "a\tb\n", .Tsv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 4)
-	})
-	// Two adjacent records removed together remove the line end between them once.
-	{
-		doc, _ := dsv.build(transmute([]u8)string("a\n1\n2\n3\n"), .Csv, {no_header = true})
-		defer core.destroy(&doc)
-		list := core.edit_list_init(&doc)
-		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.remove(&list, 3).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.remove(&list, 5).kind, core.Document_Error_Kind.None)
-		testing.expect(t, expect_commit(t, &list, "a\n3\n", .Csv, {no_header = true}))
-	}
-	// The header row is the table's keys, not a record.
-	doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n"), .Csv)
-	defer core.destroy(&doc)
-	list := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.remove(&list, 0).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, len(list.edits), 0)
-}
-
-// Removing a cell removes one delimiter with it, and only where the table still reads. A table of one record follows
-// its record's width, and every other record keeps its width.
-@(test)
-edit_remove_cell :: proc(t: ^testing.T) {
-	check(t, "1,2\n", "2\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 2)
-	})
-	check(t, "1,2\n", "1\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 3)
-	})
-	check(t, "1,2,3\n", "1,3\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 3)
-	})
-	// A header cell is a column's name, and removing it drops the column.
-	check(t, "a,b\n", "a\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 3)
-	})
-	// A cell removed from only some records is emptied, and its column stays.
-	check(t, "a,b\n1,2\n3,4\n", "a,b\n,2\n3,4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 5)
-	})
-	// A record cannot become empty.
-	single, _ := dsv.build(transmute([]u8)string("1,2\n"), .Csv, {no_header = true})
-	defer core.destroy(&single)
-	list := core.edit_list_init(&single)
-	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.remove(&list, 3).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.remove(&list, 2).kind, core.Document_Error_Kind.None)
-	_, _, e := core.commit(&list)
-	testing.expect_value(t, e.kind, core.Document_Error_Kind.Bad_Width)
+fact :: proc(node: core.Node_Index, role: core.Role, text: string) -> Op {
+	return {kind = .Fact, node = node, role = role, a = text}
 }
 
 @(private = "file")
-Column_Edit :: proc(list: ^core.Edit_List) -> core.Document_Error
-
-// Expects `edit` to record and the commit to refuse the list with `want`.
-@(private = "file")
-refused :: proc(t: ^testing.T, src: string, opts: dsv.Options, want: core.Document_Error_Kind, edit: Column_Edit) {
-	doc, err := dsv.build(transmute([]u8)src, .Csv, opts)
-	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	list := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, edit(&list).kind, core.Document_Error_Kind.None)
-	out, _, e := core.commit(&list)
-	delete(out)
-	testing.expectf(t, e.kind == want, "%q: commit %v, want %v", src, e.kind, want)
-}
-
-// Removes each node in turn.
-@(private = "file")
-remove_all :: proc(list: ^core.Edit_List, nodes: ..core.Node_Index) -> core.Document_Error {
-	for n in nodes {
-		if e := core.remove(list, n); e.kind != .None {
-			return e
-		}
+apply :: proc(list: ^core.Edit_List, op: Op) -> core.Document_Error {
+	switch op.kind {
+	case .Set:
+		return core.set(list, op.node, op.a)
+	case .Insert:
+		return core.insert(list, op.node, op.at, op.a)
+	case .Add:
+		return core.insert(list, op.node, op.at, op.a, op.b)
+	case .Remove:
+		return core.remove(list, op.node)
+	case .Member:
+		return core.set_member(list, op.node, op.a, op.b)
+	case .Fact:
+		return core.set_fact(list, op.node, op.role, op.a)
+	case .Facts:
+		return core.set_facts(list, op.node, op.role, strings.split(op.a, "|", context.temp_allocator), padded = true)
+	case .Unfact:
+		return core.remove_fact(list, op.node, op.role)
 	}
 	return {}
 }
 
-// A wide record's cells past the header's last are cells like any other, and its positional column drops with them. A
-// header named by position has no cell to set, and a column added or dropped before the positional ones would rename
-// them, so both are refused.
+@(private = "file")
+expect_edits :: proc(t: ^testing.T, cases: []Edit_Case) {
+	for c in cases {
+		if !run_edit(t, c) {
+			return
+		}
+	}
+}
+
+@(private = "file")
+run_edit :: proc(t: ^testing.T, c: Edit_Case) -> bool {
+	doc, err := build_any(c.src, c.spec, c.opts)
+	defer core.destroy(&doc)
+	if !testing.expectf(t, err.kind == .None, "%q: build %v", c.src, err) {
+		return false
+	}
+	list := core.edit_list_init(&doc)
+	defer core.edit_list_destroy(&list)
+	got: core.Document_Error
+	for op in c.ops {
+		if got = apply(&list, op); got.kind != .None {
+			break
+		}
+	}
+	out: []u8
+	dropped: int
+	if got.kind == .None {
+		out, dropped, got = core.commit(&list)
+	}
+	defer if len(out) > 0 {
+		delete(out)
+	}
+	if !testing.expectf(t, got.kind == c.fail, "%q %v: %v, want %v", c.src, c.ops, got, c.fail) || c.fail != .None {
+		return c.fail != .None
+	}
+	if !testing.expectf(t, string(out) == c.want && dropped == c.dropped, "%q %v: committed %q with %d dropped, want %q with %d", c.src, c.ops, out, dropped, c.want, c.dropped) {
+		return false
+	}
+	back, berr := build_any(string(out), c.spec, c.opts)
+	defer core.destroy(&back)
+	return testing.expectf(t, berr.kind == .None, "committed %q does not read: %v", out, berr)
+}
+
+@(private = "file")
+RAGGED :: dsv.Options{tolerate = {.Ragged}}
+
+@(private = "file")
+NO_HEADER :: dsv.Options{no_header = true}
+
+@(private = "file")
+COMMENT :: dsv.Options{comment = '#'}
+
+@(test)
+edit_cells :: proc(t: ^testing.T) {
+	expect_edits(t, {
+		{src = "a,b\n1,2\n", want = "a,b\n9,2\n", ops = {put(5, "9")}},
+		{src = "a,b\n\"x,y\",2\n", want = "a,b\nz,2\n", ops = {put(5, "z")}},
+		{src = "a,b\nx,2\n", want = "a,b\n\"p,q\",2\n", ops = {put(5, "\"p,q\"")}},
+		{src = "a,b\nx,2\n", want = "a,b\n,2\n", ops = {put(5, "")}},
+		{src = "a,b\n1,2\n", want = "z,b\n1,2\n", ops = {put(2, "z")}},
+		{src = "a\tb\n1\t2\n", want = "a\tb\n1\t9\n", spec = .Tsv, ops = {put(6, "9")}},
+		{src = "a\tb\nx\t2\n", want = "a\tb\nx\\ty\t2\n", spec = .Tsv, ops = {put(5, "x\\ty")}},
+		{src = "1,2\n3,4", want = "5,2\n3,4", opts = NO_HEADER, ops = {put(2, "5")}},
+		{src = "a\n1\n2\n", fail = .Bad_Width, ops = {put(4, "")}},
+		{src = "a\n1\n", fail = .Bad_Width, ops = {put(2, "")}},
+		{src = "1,2\n3\n", opts = {no_header = true, tolerate = {.Ragged}}, fail = .Bad_Width, ops = {put(5, "")}},
+		{src = "1,2\n", want = ",2\n", opts = NO_HEADER, ops = {put(2, "")}},
+		{src = "1\n", opts = NO_HEADER, fail = .Bad_Width, ops = {put(2, "")}},
+	})
+}
+
+@(test)
+edit_insert_record :: proc(t: ^testing.T) {
+	expect_edits(t, {
+		{src = "a,b\n1,2\n", want = "a,b\n7,8\n1,2\n", ops = {ins(core.ROOT, 0, "7,8")}},
+		{src = "a,b\n1,2\n3,4\n", want = "a,b\n1,2\n7,8\n3,4\n", ops = {ins(core.ROOT, 1, "7,8")}},
+		{src = "a,b\n1,2\n", want = "a,b\n1,2\n7,8\n", ops = {ins(core.ROOT, 1, "7,8")}},
+		{src = "a,b\n1,2", want = "a,b\n1,2\n7,8", ops = {ins(core.ROOT, 1, "7,8")}},
+		{src = "", want = "7,8\n", ops = {ins(core.ROOT, 0, "7,8")}},
+		{src = "a,b\n", want = "a,b\n7,8\n", ops = {ins(core.ROOT, 0, "7,8")}},
+		{src = "a,b", want = "a,b\n7,8", ops = {ins(core.ROOT, 0, "7,8")}},
+		{src = "a,b\r\n1,2\r\n", want = "a,b\r\n1,2\r\n7,8\r\n", ops = {ins(core.ROOT, 1, "7,8")}},
+		{src = "1,2\n", want = "3,4\n1,2\n", opts = NO_HEADER, ops = {ins(core.ROOT, 0, "3,4")}},
+		{src = "a,b\n1,2\n", want = "a,b\n1,2\n\"x,y\",\"m\nn\"\n", ops = {ins(core.ROOT, 1, "\"x,y\",\"m\nn\"")}},
+		{src = "a\tb\n1\t2\n", want = "a\tb\n1\t2\n3\t4\n", spec = .Tsv, ops = {ins(core.ROOT, 1, "3\t4")}},
+		{src = "a,b\r\n1,2", want = "a,b\r\nv,v\r\n1,2", ops = {ins(core.ROOT, 0, "v,v")}},
+		{src = "a,b\r\n1,2\r\n3,4\r\n", want = "a,b\r\nv,v\r\n1,2\r\n3,4\r\n", ops = {ins(core.ROOT, 0, "v,v")}},
+		{src = "a,b\r\n", want = "a,b\r\nv,v\r\n", ops = {ins(core.ROOT, 0, "v,v")}},
+		{src = "abc,de\r\n1,2,3", want = "abc,de\r\n1,2,3\r\n4,5,6", opts = RAGGED, ops = {ins(core.ROOT, 1, "4,5,6")}},
+		{src = "a,b\n1,2\n", fail = .Bad_Width, ops = {ins(core.ROOT, 0, "7")}},
+		{src = "a,b\n1,2\n", fail = .Bad_Width, ops = {drop(3), ins(core.ROOT, 0, "7,8")}},
+		{src = "", fail = .Bad_Width, ops = {ins(core.ROOT, 0, "1,2"), ins(core.ROOT, 0, "3")}},
+	})
+}
+
+@(test)
+edit_insert_cell :: proc(t: ^testing.T) {
+	expect_edits(t, {
+		{src = "1,2\n", want = "1,2,3\n", opts = NO_HEADER, ops = {ins(1, 2, "3")}},
+		{src = "1,2", want = "1,2,3", opts = NO_HEADER, ops = {ins(1, 2, "3")}},
+		{src = "1,2\n", want = "1,0,2\n", opts = NO_HEADER, ops = {ins(1, 1, "0")}},
+		{src = "a,b\n", want = "a,b,c\n", ops = {ins(1, 2, "c")}},
+		{src = "1,2\n3\n", want = "1,2\n3,4\n", opts = {no_header = true, tolerate = {.Ragged}}, ops = {ins(4, 1, "4")}},
+		{src = "a,", want = "a,x,,y", opts = NO_HEADER, ops = {ins(1, 1, "x"), ins(1, 2, "y")}},
+		{src = "a,b\n1,2\n3,4\n", fail = .Wrong_Container, ops = {ins(4, 2, "9")}},
+		{src = "a,b\n1,2\n3,4\n", fail = .Wrong_Container, ops = {ins(4, 0, "x,y")}},
+		{src = "1,2\n3,4\n", fail = .Bad_Value, opts = NO_HEADER, ops = {ins(1, 0, "x,y")}},
+		{src = "1,2\n3,4\n", fail = .Bad_Position, opts = NO_HEADER, ops = {ins(1, 9, "7")}},
+	})
+}
+
+@(test)
+edit_remove :: proc(t: ^testing.T) {
+	expect_edits(t, {
+		{src = "a,b\n1,2\n3,4\n", want = "a,b\n3,4\n", ops = {drop(4)}},
+		{src = "a,b\n1,2\n3,4\n", want = "a,b\n1,2\n", ops = {drop(7)}},
+		{src = "a,b\n1,2", want = "a,b\n", ops = {drop(4)}},
+		{src = "1,2\n", want = "", opts = NO_HEADER, ops = {drop(1)}},
+		{src = "a,b\r\n1,2\r\n", want = "a,b\r\n", ops = {drop(4)}},
+		{src = "a\tb\n1\t2\n", want = "a\tb\n", spec = .Tsv, ops = {drop(4)}},
+		{src = "a\n1\n2\n3\n", want = "a\n3\n", opts = NO_HEADER, ops = {drop(3), drop(5)}},
+		{src = "a,b\n1,2\n", fail = .Bad_Index, ops = {drop(0)}},
+		{src = "a,b\n1,2\n", fail = .Bad_Index, ops = {drop(1)}},
+		{src = "1,2\n", want = "2\n", opts = NO_HEADER, ops = {drop(2)}},
+		{src = "1,2\n", want = "1\n", opts = NO_HEADER, ops = {drop(3)}},
+		{src = "1,2,3\n", want = "1,3\n", opts = NO_HEADER, ops = {drop(3)}},
+		{src = "a,b\n", want = "a\n", ops = {drop(3)}},
+		{src = "a,b\n1,2\n3,4\n", want = "a,b\n,2\n3,4\n", ops = {drop(5)}},
+		{src = "1,2\n", fail = .Bad_Width, opts = NO_HEADER, ops = {drop(3), drop(2)}},
+	})
+}
+
 @(test)
 edit_wide_record :: proc(t: ^testing.T) {
-	ragged := dsv.Options{tolerate = {.Ragged}}
-	check(t, "a,b\n1,2,3\n4,5\n", "a,b\n1,2,9\n4,5\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.set(list, 8, "9")
+	wide := "a,b\n1,2,3\n4,5\n"
+	expect_edits(t, {
+		{src = wide, want = "a,b\n1,2,9\n4,5\n", opts = RAGGED, ops = {put(8, "9")}},
+		{src = wide, want = "a,b\n1,2\n4,5\n", opts = RAGGED, ops = {drop(8)}},
+		{src = wide, want = "a,b\n1,2,3\n4,5,z\n", opts = RAGGED, ops = {{kind = .Member, node = 9, a = "3", b = "z"}}},
+		{src = wide, fail = .Bad_Index, opts = RAGGED, ops = {put(4, "c")}},
+		{src = wide, fail = .Bad_Width, opts = RAGGED, ops = {drop(2)}},
+		{src = wide, fail = .Bad_Width, opts = RAGGED, ops = {{kind = .Member, node = 9, a = "c", b = "z"}}},
 	})
-	check(t, "a,b\n1,2,3\n4,5\n", "a,b\n1,2\n4,5\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 8)
-	})
-	check(t, "a,b\n1,2,3\n4,5\n", "a,b\n1,2,3\n4,5,z\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.set_member(list, 9, "3", "z")
-	})
-	refused(t, "a,b\n1,2,3\n4,5\n", ragged, .Bad_Index, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.set(list, 4, "c")
-	})
-	refused(t, "a,b\n1,2,3\n4,5\n", ragged, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 2)
-	})
-	refused(t, "a,b\n1,2,3\n4,5\n", ragged, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.set_member(list, 9, "c", "z")
-	})
-	// The header row's bytes end at its last named cell, so a record inserted after a last record with no line end
-	// takes the header's CR LF.
-	check(t, "abc,de\r\n1,2,3", "abc,de\r\n1,2,3\r\n4,5,6", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 1, "4,5,6")
-	})
-	doc, err := dsv.build(transmute([]u8)string("abc,de\n1,2,3\n"), .Csv, ragged)
+	doc, err := dsv.build(transmute([]u8)string("abc,de\n1,2,3\n"), .Csv, RAGGED)
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, string(core.span(&doc, doc.shared_keys)), "abc,de\n")
 }
 
-// A cell removed from every record that holds it drops its column with the header cell. A short record is skipped.
 @(test)
 edit_drop_column :: proc(t: ^testing.T) {
-	check(t, "a,b,c\n1,2,3\n4,5,6\n", "b,c\n2,3\n5,6\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return remove_all(list, 6, 10)
-	})
-	check(t, "a,b,c\n1,2,3\n4,5,6\n", "a,c\n1,3\n4,6\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return remove_all(list, 7, 11)
-	})
-	check(t, "a,b,c\n1,2,3\n4,5,6\n", "a,b\n1,2\n4,5\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return remove_all(list, 8, 12)
-	})
-	// The header cell alone names the same column.
-	check(t, "a,b,c\n1,2,3\n4,5,6\n", "a,c\n1,3\n4,6\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 3)
-	})
-	check(t, "a,b\r\n1,2\r\n3,4\r\n", "a\r\n1\r\n3\r\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return remove_all(list, 6, 9)
-	})
-	check(t, "a,\"b,c\",d\n1,\"2\n3\",4\n", "\"b,c\",d\n\"2\n3\",4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 6)
-	})
-	// A headerless text has no names, and a column is every record's cell at one position.
-	check(t, "1,2\n3,4\n", "1\n3\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return remove_all(list, 3, 6)
-	})
-	ragged := dsv.Options{tolerate = {.Ragged}}
-	check(t, "a,b,c\n1\n2,3\n4,5,6\n", "a,c\n1\n2\n4,6\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return remove_all(list, 9, 12)
-	})
-	check(t, "a,b,c\n1\n2,3\n4,5,6\n", "a,b\n1\n2,3\n4,5\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 13)
-	})
-	// A removed record does not hold the column.
-	check(t, "a,b\n1,2\n3,4\n", "a\n1\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return remove_all(list, 7, 6)
-	})
-	// The refusals: no column left, and a line that would stop reading as the record it was.
-	refused(t, "a\n1\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 4)
-	})
-	refused(t, "a,b\n1,2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return remove_all(list, 2, 3)
-	})
-	refused(t, "a\n1\n2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 4)
-	})
-	refused(t, "a,b\n1,#2\n", {comment = '#'}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 2)
-	})
-	refused(t, "a,b,c\n1,#2,3\n", {comment = '#'}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 2)
-	})
-	refused(t, "a,\xEF\xBB\xBFb\n1,2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 2)
-	})
-	// A quoted cell starts with its quote, so it may become the first.
-	check(t, "a,b\n1,\"#2\"\n", "b\n\"#2\"\n", .Csv, {comment = '#'}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 2)
-	})
-	// One cell removed twice is a conflict, and so is a set of a cell the list drops.
-	refused(t, "a,b\n1,2\n", {}, .Conflicting_Edits, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return remove_all(list, 5, 5)
-	})
-	refused(t, "a,b\n1,2\n", {}, .Conflicting_Edits, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.remove(list, 2); e.kind != .None {
-			return e
-		}
-		return core.set(list, 5, string("9"))
+	abc := "a,b,c\n1,2,3\n4,5,6\n"
+	lines := "a,b,c\n1\n2,3\n4,5,6\n"
+	expect_edits(t, {
+		{src = abc, want = "b,c\n2,3\n5,6\n", ops = drops(6, 10)},
+		{src = abc, want = "a,c\n1,3\n4,6\n", ops = drops(7, 11)},
+		{src = abc, want = "a,b\n1,2\n4,5\n", ops = drops(8, 12)},
+		{src = abc, want = "a,c\n1,3\n4,6\n", ops = {drop(3)}},
+		{src = "a,b\r\n1,2\r\n3,4\r\n", want = "a\r\n1\r\n3\r\n", ops = drops(6, 9)},
+		{src = "a,\"b,c\",d\n1,\"2\n3\",4\n", want = "\"b,c\",d\n\"2\n3\",4\n", ops = {drop(6)}},
+		{src = "1,2\n3,4\n", want = "1\n3\n", opts = NO_HEADER, ops = drops(3, 6)},
+		{src = lines, want = "a,c\n1\n2\n4,6\n", opts = RAGGED, ops = drops(9, 12)},
+		{src = lines, want = "a,b\n1\n2,3\n4,5\n", opts = RAGGED, ops = {drop(13)}},
+		{src = "a,b\n1,2\n3,4\n", want = "a\n1\n", ops = drops(7, 6)},
+		{src = "a,b\n\"\"\n1,2\n3,4\n", want = "a\n\"\"\n1\n3\n", opts = RAGGED, ops = drops(8, 11)},
+		{src = "a,b\n1,\"#2\"\n", want = "b\n\"#2\"\n", opts = COMMENT, ops = {drop(2)}},
+		{src = "a\n1\n", fail = .Bad_Width, ops = {drop(4)}},
+		{src = "a,b\n1,2\n", fail = .Bad_Width, ops = drops(2, 3)},
+		{src = "a\n1\n2\n", fail = .Bad_Width, ops = {drop(4)}},
+		{src = "a,b\n1,#2\n", fail = .Bad_Width, opts = COMMENT, ops = {drop(2)}},
+		{src = "a,b,c\n1,#2,3\n", fail = .Bad_Width, opts = COMMENT, ops = {drop(2)}},
+		{src = "a,\xEF\xBB\xBFb\n1,2\n", fail = .Bad_Width, ops = {drop(2)}},
+		{src = "a,b\n1,2\n", fail = .Conflicting_Edits, ops = drops(5, 5)},
+		{src = "a,b\n1,2\n", fail = .Conflicting_Edits, ops = {drop(2), put(5, "9")}},
 	})
 }
 
-// An insert of a name the header lacks adds one column, however many records name it, and the others get an empty cell.
 @(test)
 edit_add_column :: proc(t: ^testing.T) {
-	check(t, "a,b\n1,2\n3,4\n", "a,b,c\n1,2,9\n3,4,\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 4, 2, string("c"), string("9"))
-	})
-	check(t, "a,b\n1,2\n3,4\n", "a,b,c\n1,2,8\n3,4,9\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, 4, 2, string("c"), string("8")); e.kind != .None {
-			return e
-		}
-		return core.insert(list, 7, 2, string("c"), string("9"))
-	})
-	check(t, "a,b\n1,2\n", "a,b,c,d\n1,2,8,9\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, 4, 2, string("c"), string("8")); e.kind != .None {
-			return e
-		}
-		return core.insert(list, 4, 2, string("d"), string("9"))
-	})
-	// A position inside the record places the column, and every record naming it must agree.
-	check(t, "a,b\n1,2\n3,4\n", "a,c,b\n1,9,2\n3,,4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 4, 1, string("c"), string("9"))
-	})
-	refused(t, "a,b\n1,2\n3,4\n", {}, .Bad_Position, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, 4, 1, string("c"), string("8")); e.kind != .None {
-			return e
-		}
-		return core.insert(list, 7, 0, string("c"), string("9"))
-	})
-	// A name is spelled as a cell of the text, and a header cell inserted by name is the same column.
-	check(t, "a\n1\n", "a,\"x,\"\"y\"\n1,9\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 3, 1, string("x,\"y"), string("9"))
-	})
-	check(t, "a\tb\n1\t2\n", "a\tb\tx\\ty\n1\t2\t9\n", .Tsv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 4, 2, string("x\ty"), string("9"))
-	})
-	check(t, "a,b\n1,2\n3,4\n", "a,b,c\n1,2,9\n3,4,\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, 1, 2, string("c")); e.kind != .None {
-			return e
-		}
-		return core.insert(list, 4, 2, string("c"), string("9"))
-	})
-	// A header cell inserted alone adds an empty column.
-	check(t, "a,b\n1,2\n3,4\n", "c,a,b\n,1,2\n,3,4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 1, 0, string("c"))
-	})
-	// Plain cannot spell a name holding its delimiter.
-	{
-		doc, _ := dsv.build(transmute([]u8)string("a|b\n1|2\n"), .Plain, dsv.Options{delimiter = '|'})
-		defer core.destroy(&doc)
-		list := core.edit_list_init(&doc)
-		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.insert(&list, 4, 2, string("x|y"), string("9")).kind, core.Document_Error_Kind.None)
-		_, _, e := core.commit(&list)
-		testing.expect_value(t, e.kind, core.Document_Error_Kind.Bad_Value)
-	}
-	// A record that holds the name already refuses it.
-	refused(t, "a,b\n1,2\n", {}, .Duplicate_Key, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 4, 2, string("b"), string("9"))
-	})
-	// A headerless record's position is the column, and the records at one position share it.
-	check(t, "1,2\n3,4\n", "1,2,9\n3,4,\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 1, 2, string("9"))
-	})
-	check(t, "1,2\n3,4\n", "1,2,8\n3,4,9\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, 1, 2, string("8")); e.kind != .None {
-			return e
-		}
-		return core.insert(list, 4, 2, string("9"))
-	})
-	check(t, "1,2\n3,4\n", "8,1,2\n,3,4\n", .Csv, {no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 1, 0, string("8"))
-	})
-	// A column goes while another comes, and an inserted record is judged against what the table becomes.
-	check(t, "a,b\n1,2\n", "a,c\n1,9\n3,4\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.remove(list, 3); e.kind != .None {
-			return e
-		}
-		if e := core.insert(list, 4, 2, string("c"), string("9")); e.kind != .None {
-			return e
-		}
-		return core.insert(list, core.ROOT, 1, string("3,4"))
-	})
-	refused(t, "a,b\n1,2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("7"))
-	})
-	refused(t, "a,b\n1,2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.remove(list, 3); e.kind != .None {
-			return e
-		}
-		return core.insert(list, core.ROOT, 0, string("7,8"))
-	})
-	refused(t, "", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, core.ROOT, 0, string("1,2")); e.kind != .None {
-			return e
-		}
-		return core.insert(list, core.ROOT, 0, string("3"))
+	ab := "a,b\n1,2\n3,4\n"
+	expect_edits(t, {
+		{src = ab, want = "a,b,c\n1,2,9\n3,4,\n", ops = {add(4, 2, "c", "9")}},
+		{src = ab, want = "a,b,c\n1,2,8\n3,4,9\n", ops = {add(4, 2, "c", "8"), add(7, 2, "c", "9")}},
+		{src = "a,b\n1,2\n", want = "a,b,c,d\n1,2,8,9\n", ops = {add(4, 2, "c", "8"), add(4, 2, "d", "9")}},
+		{src = ab, want = "a,c,b\n1,9,2\n3,,4\n", ops = {add(4, 1, "c", "9")}},
+		{src = ab, fail = .Bad_Position, ops = {add(4, 1, "c", "8"), add(7, 0, "c", "9")}},
+		{src = "a\n1\n", want = "a,\"x,\"\"y\"\n1,9\n", ops = {add(3, 1, "x,\"y", "9")}},
+		{src = "a\tb\n1\t2\n", want = "a\tb\tx\\ty\n1\t2\t9\n", spec = .Tsv, ops = {add(4, 2, "x\ty", "9")}},
+		{src = ab, want = "a,b,c\n1,2,9\n3,4,\n", ops = {ins(1, 2, "c"), add(4, 2, "c", "9")}},
+		{src = ab, want = "c,a,b\n,1,2\n,3,4\n", ops = {ins(1, 0, "c")}},
+		{src = "a|b\n1|2\n", spec = .Plain, opts = {delimiter = '|'}, fail = .Bad_Value, ops = {add(4, 2, "x|y", "9")}},
+		{src = "a,b\n1,2\n", fail = .Duplicate_Key, ops = {add(4, 2, "b", "9")}},
+		{src = "1,2\n3,4\n", want = "1,2,9\n3,4,\n", opts = NO_HEADER, ops = {ins(1, 2, "9")}},
+		{src = "1,2\n3,4\n", want = "1,2,8\n3,4,9\n", opts = NO_HEADER, ops = {ins(1, 2, "8"), ins(4, 2, "9")}},
+		{src = "1,2\n3,4\n", want = "8,1,2\n,3,4\n", opts = NO_HEADER, ops = {ins(1, 0, "8")}},
+		{src = "a,b\n1,2\n", want = "a,c\n1,9\n3,4\n", ops = {drop(3), add(4, 2, "c", "9"), ins(core.ROOT, 1, "3,4")}},
+		{src = "a,b,c\n1\n", want = "a,b,c\n1,,9\n", opts = RAGGED, ops = {add(5, 1, "c", "9")}},
+		{src = "a,b\n1\n2,3\n", want = "a,b,c\n1\n2,3,\n", opts = RAGGED, ops = {ins(1, 2, "c")}},
+		{src = "a,b\n1\n2,3\n", want = "a,b,c\n1,,9\n2,3,\n", opts = RAGGED, ops = {add(4, 1, "c", "9")}},
+		{src = "a,b\n1\n", fail = .Conflicting_Edits, opts = RAGGED, ops = {add(4, 1, "b", "8"), add(4, 1, "b", "9")}},
 	})
 }
 
-// A short record fills a column it lacks, padding the ones before it, and stays short when nothing is written past it.
-@(test)
-edit_fill_short_record :: proc(t: ^testing.T) {
-	ragged := dsv.Options{tolerate = {.Ragged}}
-	check(t, "a,b,c\n1\n", "a,b,c\n1,,9\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 5, 1, string("c"), string("9"))
-	})
-	check(t, "a,b\n1\n2,3\n", "a,b,c\n1\n2,3,\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 1, 2, string("c"))
-	})
-	check(t, "a,b\n1\n2,3\n", "a,b,c\n1,,9\n2,3,\n", .Csv, ragged, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 4, 1, string("c"), string("9"))
-	})
-	check(t, "1,2\n3\n", "1,2\n3,4\n", .Csv, {no_header = true, tolerate = {.Ragged}}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 4, 1, string("4"))
-	})
-	refused(t, "a,b\n1\n", ragged, .Conflicting_Edits, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, 4, 1, string("b"), string("8")); e.kind != .None {
-			return e
-		}
-		return core.insert(list, 4, 1, string("b"), string("9"))
-	})
-}
-
-// A set to the empty text changes no column, so only a line left as one empty cell is refused.
-@(test)
-edit_set_empty :: proc(t: ^testing.T) {
-	check(t, "a,b\n1,2\n", "a,b\n,2\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.set(list, 5, string(""))
-	})
-	refused(t, "a\n1\n2\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.set(list, 4, string(""))
-	})
-	refused(t, "a\n1\n", {}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.set(list, 2, string(""))
-	})
-	refused(t, "1,2\n3\n", {no_header = true, tolerate = {.Ragged}}, .Bad_Width, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.set(list, 5, string(""))
-	})
-}
-
-// A column edit judges the lines it changes, and a line it leaves alone may hold what no edit could write.
-@(test)
-edit_column_keeps_other_lines :: proc(t: ^testing.T) {
-	check(t, "a,b\n\"\"\n1,2\n3,4\n", "a\n\"\"\n1\n3\n", .Csv, {tolerate = {.Ragged}}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return remove_all(list, 8, 11)
-	})
-}
-
-// The refused edits, each with the kind that names what is wrong.
 @(test)
 edit_errors :: proc(t: ^testing.T) {
-	doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n"), .Csv)
-	defer core.destroy(&doc)
-	list := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set(&list, 0, string("x")).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, core.set(&list, 4, string("x")).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, core.set(&list, 99, string("x")).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, core.set(&list, 5, string("x,y")).kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, core.set(&list, 5, string("x\ny")).kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, core.insert(&list, 4, 0, string("x,y")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.insert(&list, core.ROOT, 3, string("7,8")).kind, core.Document_Error_Kind.Bad_Position)
-	testing.expect_value(t, core.insert(&list, 4, 9, string("7")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.insert(&list, 5, 0, string(`k`), string("v")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.remove(&list, 0).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, core.remove(&list, 99).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, len(list.edits), 0)
-
-	nh_doc, _ := dsv.build(transmute([]u8)string("1,2\n3,4\n"), .Csv, {no_header = true})
-	defer core.destroy(&nh_doc)
-	nh_list := core.edit_list_init(&nh_doc)
-	defer core.edit_list_destroy(&nh_list)
-	testing.expect_value(t, core.insert(&nh_list, 1, 0, string("x,y")).kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, core.insert(&nh_list, 1, 9, string("7")).kind, core.Document_Error_Kind.Bad_Position)
-
-	// An empty record text reads as no record, so inserting it is refused.
-	empty := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&empty)
-	testing.expect_value(t, core.insert(&empty, core.ROOT, 0, string("")).kind, core.Document_Error_Kind.Bad_Value)
+	ab := "a,b\n1,2\n"
+	expect_edits(t, {
+		{src = ab, fail = .Bad_Index, ops = {put(0, "x")}},
+		{src = ab, fail = .Bad_Index, ops = {put(4, "x")}},
+		{src = ab, fail = .Bad_Index, ops = {put(99, "x")}},
+		{src = ab, fail = .Bad_Value, ops = {put(5, "x,y")}},
+		{src = ab, fail = .Bad_Value, ops = {put(5, "x\ny")}},
+		{src = ab, fail = .Wrong_Container, ops = {ins(4, 0, "x,y")}},
+		{src = ab, fail = .Bad_Position, ops = {ins(core.ROOT, 3, "7,8")}},
+		{src = ab, fail = .Wrong_Container, ops = {ins(4, 9, "7")}},
+		{src = ab, fail = .Wrong_Container, ops = {add(5, 0, "k", "v")}},
+		{src = ab, fail = .Bad_Index, ops = {drop(99)}},
+		{src = ab, fail = .Bad_Value, ops = {ins(core.ROOT, 0, "")}},
+	})
 }
 
-// Setting a record's only cell to nothing would leave a line that reads as no record, so the commit refuses it.
 @(test)
-edit_empty_record :: proc(t: ^testing.T) {
-	doc, _ := dsv.build(transmute([]u8)string("1,2\n"), .Csv, {no_header = true})
-	defer core.destroy(&doc)
-	list := core.edit_list_init(&doc)
-	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set(&list, 2, string("")).kind, core.Document_Error_Kind.None)
-	out, _, e := core.commit(&list)
-	testing.expect_value(t, e.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, string(out), ",2\n")
-	delete(out)
+edit_options :: proc(t: ^testing.T) {
+	semi := dsv.Options{delimiter = ';'}
+	bar := dsv.Options{delimiter = '|'}
+	expect_edits(t, {
+		{src = "a;b\n1;2\n", want = "a;b\n9;2\n", opts = semi, ops = {put(5, "9")}},
+		{src = "a;b\n1;2\n", want = "a;b\n1;2\n3;4\n", opts = semi, ops = {ins(core.ROOT, 1, "3;4")}},
+		{src = "1;2\n", want = "1;2;3\n", opts = {delimiter = ';', no_header = true}, ops = {ins(1, 2, "3")}},
+		{src = "a;b\nx;2\n", want = "a;b\na,b;2\n", opts = semi, ops = {put(5, "a,b")}},
+		{src = "a;b\nx;2\n", fail = .Bad_Value, opts = semi, ops = {put(5, "p;q")}},
+		{src = "a;b\nx;2\n", want = "a;b\n\"p;q\";2\n", opts = semi, ops = {put(5, "\"p;q\"")}},
+		{src = "a|b\nx|2\n", fail = .Bad_Value, spec = .Plain, opts = bar, ops = {put(5, "p|q")}},
+		{src = "a|b\nx|2\n", fail = .Bad_Value, spec = .Plain, opts = bar, ops = {put(5, "\"p|q\"")}},
+		{src = "a|b\nx|2\n", want = "a|b\np q|2\n", spec = .Plain, opts = bar, ops = {put(5, "p q")}},
+		{src = "a|b\n1|2\n", want = "a|b\n9|2\n", spec = .Plain, opts = bar, ops = {put(5, "9")}},
+		{src = "a|b\n1|2\n", want = "a|b\n1|2\n3|4\n", spec = .Plain, opts = bar, ops = {ins(core.ROOT, 1, "3|4")}},
+	})
+}
 
-	single, _ := dsv.build(transmute([]u8)string("1\n"), .Csv, {no_header = true})
-	defer core.destroy(&single)
-	one := core.edit_list_init(&single)
-	defer core.edit_list_destroy(&one)
-	testing.expect_value(t, core.set(&one, 2, string("")).kind, core.Document_Error_Kind.None)
-	out, _, e = core.commit(&one)
-	testing.expect_value(t, e.kind, core.Document_Error_Kind.Bad_Width)
+@(test)
+edit_beside_comment :: proc(t: ^testing.T) {
+	headless := dsv.Options{comment = '#', no_header = true}
+	expect_edits(t, {
+		{src = "#c\na,b\n1,2\n", want = "1,2\n", opts = headless, ops = {drop(1)}},
+		{src = "a,b\n#c\n1,2\n", want = "#c\n1,2\n", opts = headless, ops = {drop(1)}},
+		{src = "a,b\n#c\n1,2\n", want = "a,b\n", opts = headless, ops = {drop(4)}},
+		{src = "a,b\n#c\n", want = "#c\n", opts = headless, ops = {drop(1)}},
+		{src = "#c\r\na\tb\r\n", want = "", spec = .Tsv, opts = headless, ops = {drop(1)}},
+		{src = "#c\na,b\n", want = "x,y\n#c\na,b\n", opts = headless, ops = {ins(core.ROOT, 0, "x,y")}},
+		{src = "a,b\n#c\n", want = "a,b\nx,y\n#c\n", opts = headless, ops = {ins(core.ROOT, 1, "x,y")}},
+		{src = "#c", want = "x,y\n#c", opts = headless, ops = {ins(core.ROOT, 0, "x,y")}},
+		{src = "a,b\n1,2\n", fail = .Bad_Value, opts = COMMENT, ops = {put(5, "#x")}},
+		{src = "a,b\n1,2\n", want = "a,b\n\"#x\",2\n", opts = COMMENT, ops = {put(5, "\"#x\"")}},
+		{src = "a,b\n1,2\n", fail = .Bad_Value, opts = COMMENT, ops = {ins(core.ROOT, 0, "#x,y")}},
+	})
+}
+
+@(test)
+edit_with_removed_records :: proc(t: ^testing.T) {
+	expect_edits(t, {
+		{src = "a,b\n1,2\n3,4\n", want = "a,b\n7,7\n8,8\n3,4\n", ops = {drop(4), ins(core.ROOT, 1, "7,7"), ins(core.ROOT, 1, "8,8")}},
+		{src = "a,b\n1,2\n3,4", want = "a,b\n1,2\n9,9", ops = {drop(7), ins(core.ROOT, 1, "9,9")}},
+		{src = "a,b\n1,2\n3,4", want = "a,b\n1,2\n9,9", ops = {drop(7), ins(core.ROOT, 2, "9,9")}},
+		{src = "h\n1\n2\n", want = "h\nA\nB\n2\n", spec = .Plain, ops = {ins(core.ROOT, 1, "B"), ins(core.ROOT, 0, "A"), drop(3)}},
+		{src = "a;b;c", want = "a;b;d\ne;f;g", opts = {no_header = true, delimiter = ';'}, ops = {ins(1, 3, "d"), drop(4), ins(core.ROOT, 1, "e;f;g")}},
+		{src = "h\n1\n#f\n", want = "h\nA\n#f\n", spec = .Plain, opts = COMMENT, ops = {ins(core.ROOT, 1, "A"), drop(3)}},
+		{src = "|1\n", fail = .Conflicting_Edits, spec = .Plain, opts = {no_header = true, delimiter = '|'}, ops = {drop(1), put(2, "x")}},
+		{src = "1\n", fail = .Conflicting_Edits, spec = .Plain, opts = NO_HEADER, ops = {drop(1), ins(1, 0, "x")}},
+	})
+}
+
+@(test)
+edit_zero_width_cells :: proc(t: ^testing.T) {
+	expect_edits(t, {
+		{src = "a,b\n,2\n", want = "a,b\n3,4\n9,2\n", ops = {ins(core.ROOT, 0, "3,4"), put(5, "9")}},
+		{src = "1,2\n3,", want = "1,2\n3,9\n7,8", opts = NO_HEADER, ops = {ins(core.ROOT, 2, "7,8"), put(6, "9")}},
+		{src = "a,\n", want = "a,x,9,y\n", opts = NO_HEADER, ops = {ins(1, 1, "x"), ins(1, 2, "y"), put(3, "9")}},
+	})
+}
+
+@(test)
+set_and_remove_of_a_cell :: proc(t: ^testing.T) {
+	for text in ([]string{"z", ""}) {
+		for set_first in ([]bool{true, false}) {
+			doc, _ := dsv.build(transmute([]u8)string("a\n1\n2\n"), .Csv)
+			defer core.destroy(&doc)
+			list := core.edit_list_init(&doc)
+			defer core.edit_list_destroy(&list)
+			first, second := put(4, text), drop(4)
+			if !set_first {
+				first, second = second, first
+			}
+			testing.expect_value(t, apply(&list, first).kind, core.Document_Error_Kind.None)
+			testing.expect_value(t, apply(&list, second).kind, core.Document_Error_Kind.None)
+			out, _, e := core.commit(&list)
+			delete(out)
+			testing.expectf(t, e.kind == .Conflicting_Edits && e.at == 2, "%q set first %v: %v", text, set_first, e)
+		}
+	}
+}
+
+@(test)
+edit_tolerated_source :: proc(t: ^testing.T) {
+	expect_edits(t, {
+		{src = "a,b\n1\n", want = "a,b\n1\n", opts = RAGGED},
+		{src = "a,b\n1\n", want = "a,b\n5\n", opts = RAGGED, ops = {put(5, "5")}},
+	})
 }
 
 @(test)
@@ -589,9 +419,9 @@ edit_no_leak :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	list := core.edit_list_init(&doc, allocator = alloc)
-	testing.expect_value(t, core.set(&list, 5, string("9")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.insert(&list, core.ROOT, 2, string("7,8")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.set(&list, 6, string("9")).kind, core.Document_Error_Kind.None)
+	for op in ([]Op{put(5, "9"), ins(core.ROOT, 2, "7,8"), put(6, "9")}) {
+		testing.expect_value(t, apply(&list, op).kind, core.Document_Error_Kind.None)
+	}
 	out, _, cerr := core.commit(&list, allocator = alloc)
 	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
 	delete(out, allocator = alloc)
@@ -640,250 +470,50 @@ edit_out_of_memory :: proc(t: ^testing.T) {
 	f.fail_at = -1
 }
 
-// The edit services use the document's options, so the cell separator is its delimiter, and a recorded cell or record
-// is judged with its delimiter and comment byte.
+// A spec change would respell every cell, so it is refused with `Bad_Spec` before anything is written.
 @(test)
-edit_options :: proc(t: ^testing.T) {
-	// A semicolon CSV text writes semicolons, and a comma is a cell byte.
-	opts := dsv.Options{delimiter = ';'}
-	check(t, "a;b\n1;2\n", "a;b\n9;2\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 5, "9")
-	})
-	check(t, "a;b\n1;2\n", "a;b\n1;2\n3;4\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 1, string("3;4"))
-	})
-	check(t, "1;2\n", "1;2;3\n", .Csv, dsv.Options{delimiter = ';', no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, 1, 2, string("3"))
-	})
-	check(t, "a;b\nx;2\n", "a;b\na,b;2\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 5, "a,b")
-	})
-	// A recorded cell or record holding the delimiter unquoted is two cells, so it is refused. A quoted CSV cell
-	// holding it is one cell, so it is accepted.
-	{
-		doc, _ := dsv.build(transmute([]u8)string("a;b\nx;2\n"), .Csv, opts)
-		defer core.destroy(&doc)
-		list := core.edit_list_init(&doc)
-		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.set(&list, 5, string("p;q")).kind, core.Document_Error_Kind.Bad_Value)
-		testing.expect_value(t, core.set(&list, 5, string("\"p;q\"")).kind, core.Document_Error_Kind.None)
-	}
-	// Plain has no quoting, so it cannot hold the delimiter at all.
-	{
-		doc, _ := dsv.build(transmute([]u8)string("a|b\nx|2\n"), .Plain, dsv.Options{delimiter = '|'})
-		defer core.destroy(&doc)
-		list := core.edit_list_init(&doc)
-		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.set(&list, 5, string("p|q")).kind, core.Document_Error_Kind.Bad_Value)
-		testing.expect_value(t, core.set(&list, 5, string("\"p|q\"")).kind, core.Document_Error_Kind.Bad_Value)
-		testing.expect_value(t, core.set(&list, 5, string("p q")).kind, core.Document_Error_Kind.None)
-	}
-	// Plain writes its delimiter between cells and its line end between records like the other specs.
-	check(t, "a|b\n1|2\n", "a|b\n9|2\n", .Plain, dsv.Options{delimiter = '|'}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return set_cell(list, 5, "9")
-	})
-	check(t, "a|b\n1|2\n", "a|b\n1|2\n3|4\n", .Plain, dsv.Options{delimiter = '|'}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 1, string("3|4"))
-	})
-}
-
-// A comment line is no record and no part of one. A record edit beside it leaves its bytes and its line end.
-@(test)
-edit_beside_comment :: proc(t: ^testing.T) {
-	opts := dsv.Options{comment = '#', no_header = true}
-	// A comment line above the removed record stays.
-	check(t, "#c\na,b\n1,2\n", "1,2\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 1)
-	})
-	// A comment line between records stays when either record is removed.
-	check(t, "a,b\n#c\n1,2\n", "#c\n1,2\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 1)
-	})
-	check(t, "a,b\n#c\n1,2\n", "a,b\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 4)
-	})
-	// A comment line below the removed record stays, with its line end.
-	check(t, "a,b\n#c\n", "#c\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 1)
-	})
-	check(t, "#c\r\na\tb\r\n", "", .Tsv, dsv.Options{comment = '#', no_header = true}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.remove(list, 1)
-	})
-	// A record inserted before a record that a comment line introduces is written before the comment, so the comment
-	// stays with its record. A record inserted after the last record is written before a trailing comment line.
-	check(t, "#c\na,b\n", "x,y\n#c\na,b\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("x,y"))
-	})
-	check(t, "a,b\n#c\n", "a,b\nx,y\n#c\n", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 1, string("x,y"))
-	})
-	// A comment with no record after it is the root's foot, and a new record goes before a foot.
-	check(t, "#c", "x,y\n#c", .Csv, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("x,y"))
-	})
-	// A cell whose text starts a line with the comment byte reads as no record, so it is refused. A quoted CSV cell
-	// is a cell, because the quote comes first.
-	{
-		doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n"), .Csv, dsv.Options{comment = '#'})
-		defer core.destroy(&doc)
-		list := core.edit_list_init(&doc)
-		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.set(&list, 5, string("#x")).kind, core.Document_Error_Kind.Bad_Value)
-		testing.expect_value(t, core.set(&list, 5, string("\"#x\"")).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.insert(&list, core.ROOT, 0, string("#x,y")).kind, core.Document_Error_Kind.Bad_Value)
-	}
-}
-
-// A table built with a tolerance commits with no edit and with an edit. An edit keeps the tolerance the source
-// needed, and a ragged table stays ragged.
-@(test)
-edit_tolerated_source :: proc(t: ^testing.T) {
-	src := "a,b\n1\n"
-	opts := dsv.Options{tolerate = {.Ragged}}
-	doc, err := dsv.build(transmute([]u8)string(src), .Csv, opts)
+fact_spec_change_refused :: proc(t: ^testing.T) {
+	doc, _ := dsv.build(transmute([]u8)string("a,b\n1,2\n"), .Csv)
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
-		return
-	}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	out, _, cerr := core.commit(&list)
-	if !testing.expectf(t, cerr.kind == .None, "empty commit: %v", cerr) {
-		return
-	}
-	testing.expect_value(t, string(out), src)
-	delete(out)
-	testing.expect_value(t, set_cell(&list, 5, "5").kind, core.Document_Error_Kind.None)
-	expect_commit(t, &list, "a,b\n5\n", .Csv, opts)
+	out, _, err := core.commit(&list, dsv.as(.Tsv))
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.Bad_Spec)
+	testing.expect(t, out == nil)
 }
 
-// A record insert writes the line end the text uses, even when the only data record has none of its own.
+// A comment line belongs to the record that follows it, or to the root as its foot after the last record. Each role is
+// written where the walk reads it, and a fact a text cannot spell is dropped and counted.
 @(test)
-edit_record_sep_crlf :: proc(t: ^testing.T) {
-	check(t, "a,b\r\n1,2", "a,b\r\nv,v\r\n1,2", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("v,v"))
+fact_edits :: proc(t: ^testing.T) {
+	ab := "a,b\n1,2\n"
+	expect_edits(t, {
+		{src = ab, want = "a,b\n#c\n1,2\n", opts = COMMENT, ops = {fact(4, .Comment, "c")}},
+		{src = ab, want = ab, opts = COMMENT, dropped = 1, ops = {fact(4, .Comment_Inline, "c")}},
+		{src = ab, want = "a,b\n1,2\n#c\n", opts = COMMENT, ops = {fact(core.ROOT, .Comment_Foot, "c")}},
+		{src = ab, want = ab, opts = COMMENT, dropped = 1, ops = {fact(6, .Comment, "c")}},
+		{src = ab, want = ab, opts = COMMENT, dropped = 1, ops = {fact(4, .Comment_Foot, "c")}},
+		{src = ab, want = ab, opts = COMMENT, dropped = 1, ops = {fact(4, .Comment, "one\ntwo")}},
+		{src = ab, want = ab, dropped = 1, ops = {fact(4, .Comment, "c")}},
+		{src = ab, fail = .Bad_Fact, opts = COMMENT, ops = {fact(4, .Comment_Inline, "a\nb")}},
+		{src = ab, want = "a,b\n#a b\n1,2\n", opts = COMMENT, ops = {fact(4, .Comment, "a b")}},
+		{src = ab, want = "#c\na,b\n1,2\n", opts = COMMENT, ops = {fact(core.ROOT, .Comment, "c")}},
+		{src = ab, want = ab, opts = {comment = '#', no_header = true}, dropped = 1, ops = {fact(core.ROOT, .Comment, "c")}},
+		{src = ab, want = "a,b\n", opts = COMMENT, dropped = 1, ops = {fact(core.ROOT, .Comment, "c"), drop(4)}},
+		{src = "#top\nh\n1\n", want = "#top\nh\n", opts = COMMENT, ops = {drop(3)}},
+		{src = "a,b\n#old\n1,2\n", want = "a,b\n#new\n1,2\n", opts = COMMENT, ops = {fact(4, .Comment, "new")}},
+		// Padded bodies, each on a line of its own.
+		{src = "a,b\n#old\n1,2\n", want = "a,b\n# x\n# y\n1,2\n", opts = COMMENT, ops = {{kind = .Facts, node = 4, role = .Comment, a = "x|y"}}},
+		{src = "a,b\n1,2\n", want = "a,b\n1,2\n# x\n# y\n", opts = COMMENT, ops = {{kind = .Facts, node = core.ROOT, role = .Comment_Foot, a = "x|y"}}},
+		{src = "a,b\n#old\n1,2\n", want = "a,b\n1,2\n", opts = COMMENT, ops = {{kind = .Unfact, node = 4, role = .Comment}}},
+		{src = "a,b\n1,2\n#old\n", want = "a,b\n1,2\n#new\n", opts = COMMENT, ops = {fact(core.ROOT, .Comment_Foot, "new")}},
+		{src = "a,b\n1,2\n#old\n", want = "a,b\n1,2\n", opts = COMMENT, ops = {{kind = .Unfact, node = core.ROOT, role = .Comment_Foot}}},
+		{src = "a,b\n#old\n1,2\n", want = "a,b\n#old\n1,9\n", opts = COMMENT, ops = {put(6, "9")}},
+		{src = "1,2\n", want = "#c\n9,1,2\n", opts = {comment = '#', no_header = true}, ops = {fact(1, .Comment, "c"), ins(1, 0, "9")}},
+		{src = "#h\nk\n", want = "#x\nk\n", opts = COMMENT, ops = {fact(core.ROOT, .Comment_Foot, "x")}},
+		{src = "a\tb\n1\t2\n\t", want = "a\tb\n1\t2\n\t\n!x\n", spec = .Tsv, opts = {comment = '!'}, ops = {fact(core.ROOT, .Comment_Foot, "x")}},
+		{src = "!#\n sp ^\"q\"\nx\\y^", want = "!#\n sp ^\"q\"\nx\\y^x\\y\n!\n", spec = .Plain, opts = {no_header = true, delimiter = '^', comment = '!'}, ops = {put(6, "x\\y"), fact(core.ROOT, .Comment_Foot, "")}},
+		// A removed comment line leaves the next record's leading blanks, which are its cell's data.
+		{src = "\xef\xbb\xbf& ;a\r\n12.5\r\na\r\n\"q\"\r\n&\\\\,\r\n sp \r\n", want = "\xef\xbb\xbf& ;a\r\n12.5\r\né\r\n\"q\"\r\n sp \r\n", opts = {no_header = true, delimiter = '#', comment = '&'}, ops = {put(4, "é"), {kind = .Unfact, node = 7, role = .Comment}}},
 	})
-	check(t, "a,b\r\n1,2\r\n3,4\r\n", "a,b\r\nv,v\r\n1,2\r\n3,4\r\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("v,v"))
-	})
-	check(t, "a,b\r\n", "a,b\r\nv,v\r\n", .Csv, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		return core.insert(list, core.ROOT, 0, string("v,v"))
-	})
-}
-
-// A set or insert inside a record the same list removes is refused, including a cell of no bytes at the record's first
-// byte. The removal takes the written bytes, so the edit cannot read back.
-@(test)
-edit_edit_inside_removed_record :: proc(t: ^testing.T) {
-	{
-		// The first cell is empty, so its set writes no bytes at the record's first byte.
-		doc, err := dsv.build(transmute([]u8)string("|1\n"), .Plain, dsv.Options{no_header = true, delimiter = '|'})
-		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "build: %v", err) {
-			return
-		}
-		list := core.edit_list_init(&doc)
-		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.set(&list, 2, string("x")).kind, core.Document_Error_Kind.None)
-		out, _, cerr := core.commit(&list)
-		if len(out) > 0 {
-			delete(out)
-		}
-		testing.expectf(t, cerr.kind == .Conflicting_Edits, "set: commit %v", cerr)
-	}
-	{
-		// The record is the table's only one, so it may take a cell.
-		doc, err := dsv.build(transmute([]u8)string("1\n"), .Plain, dsv.Options{no_header = true})
-		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "build: %v", err) {
-			return
-		}
-		list := core.edit_list_init(&doc)
-		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.insert(&list, 1, 0, string("x")).kind, core.Document_Error_Kind.None)
-		out, _, cerr := core.commit(&list)
-		if len(out) > 0 {
-			delete(out)
-		}
-		testing.expectf(t, cerr.kind == .Conflicting_Edits, "insert: commit %v", cerr)
-	}
-}
-
-// Two records inserted at the ends of one run of removed records keep their `at` order in the output.
-@(test)
-edit_inserts_at_removed_run_end :: proc(t: ^testing.T) {
-	check(t, "h\n1\n2\n", "h\nA\nB\n2\n", .Plain, {}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, core.ROOT, 1, string("B")); e.kind != .None {
-			return e
-		}
-		if e := core.insert(list, core.ROOT, 0, string("A")); e.kind != .None {
-			return e
-		}
-		return core.remove(list, 3)
-	})
-}
-
-// A cell appended to the last record and a record appended after it are written at the text's end. The cell's bytes
-// come first, or they would join the record after it.
-@(test)
-edit_insert_cell_and_record_at_text_end :: proc(t: ^testing.T) {
-	check(t, "a;b;c", "a;b;d\ne;f;g", .Csv, {no_header = true, delimiter = ';'}, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, 1, 3, string("d")); e.kind != .None {
-			return e
-		}
-		if e := core.remove(list, 4); e.kind != .None {
-			return e
-		}
-		return core.insert(list, core.ROOT, 1, string("e;f;g"))
-	})
-}
-
-// A record appended after the last record is removed ends with a line end. The root's foot comment then keeps a line
-// of its own and reads back on the root.
-@(test)
-edit_append_after_removed_last :: proc(t: ^testing.T) {
-	opts := dsv.Options{comment = '#'}
-	check(t, "h\n1\n#f\n", "h\nA\n#f\n", .Plain, opts, proc(list: ^core.Edit_List) -> core.Document_Error {
-		if e := core.insert(list, core.ROOT, 1, string("A")); e.kind != .None {
-			return e
-		}
-		return core.remove(list, 3)
-	})
-	doc, err := dsv.build(transmute([]u8)string("h\nA\n#f\n"), .Plain, opts)
-	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
-		return
-	}
-	it := core.facts_of(&doc, core.ROOT, .Comment_Foot)
-	b, ok := core.fact_next(&it)
-	testing.expectf(t, ok && string(b) == "f", "foot: %q %v", b, ok)
-}
-
-// A cell a list both sets and removes is a conflict at the cell, in either order of the list, though the removal alone
-// would leave a one-cell line empty.
-@(test)
-set_and_remove_of_a_cell :: proc(t: ^testing.T) {
-	for text in ([]string{"z", ""}) {
-		for set_first in ([]bool{true, false}) {
-			src := "a\n1\n2\n"
-			doc, err := dsv.build(transmute([]u8)src, .Csv)
-			defer core.destroy(&doc)
-			testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-			list := core.edit_list_init(&doc)
-			defer core.edit_list_destroy(&list)
-			cell := core.Node_Index(4)
-			if set_first {
-				testing.expect_value(t, core.set(&list, cell, text).kind, core.Document_Error_Kind.None)
-			}
-			testing.expect_value(t, core.remove(&list, cell).kind, core.Document_Error_Kind.None)
-			if !set_first {
-				testing.expect_value(t, core.set(&list, cell, text).kind, core.Document_Error_Kind.None)
-			}
-			out, _, e := core.commit(&list)
-			delete(out)
-			testing.expectf(t, e.kind == .Conflicting_Edits && e.at == 2, "%q set first %v: %v", text, set_first, e)
-		}
-	}
 }

@@ -22,7 +22,7 @@ OPTIMIZATION ::
 
 // jq's usage(): this, then the options or where to find them.
 @(private = "file")
-HELP_HEAD :: "stury - commandline JSON processor [version " + VERSION + `]
+HELP_HEAD :: "stury - command-line JSON and CSV processor [version " + VERSION + `]
 
 Usage:	stury [options] <jq filter> [file...]
 	stury [options] --args <jq filter> [strings...]
@@ -30,6 +30,7 @@ Usage:	stury [options] <jq filter> [file...]
 	stury check [--from format|--seq] [--max-depth n] [file...]
 	stury fmt [--from format] [--to format] [--in-place|--check]
 	          [--indent n|--tab] [--max-depth n] [file...]
+	stury edit [--from format|--seq] [--in-place|--check] <jq filter> [file...]
 
 stury applies the filter to its JSON text inputs and writes the results as
 JSON, as jq 1.8.2 does, but reads strictly (RFC 8259): 01, 1., NaN, nan,
@@ -40,7 +41,15 @@ not jq's 1E+2). For filters see jq(1) and https://jqlang.org/.
 `
 
 @(private = "file")
-HELP_OPTIONS :: `Command options:
+HELP_OPTIONS :: `Commands:
+  check                     judge the inputs, print nothing when valid
+                            (stury check --help);
+  fmt                       write each input in the printer's layout, or
+                            transcode it (stury fmt --help);
+  edit                      splice the filter's one output into each
+                            input's own bytes (stury edit --help);
+
+Command options:
   -n, --null-input          use ` + "`null`" + ` as the single input value;
   -R, --raw-input           read each line as string instead of JSON;
   -s, --slurp               read all inputs into an array and use it as
@@ -59,6 +68,7 @@ HELP_OPTIONS :: `Command options:
       --indent n            use n spaces for indentation (at most 7;
                             -1 is --tab);
       --unbuffered          flush output stream after each output;
+  -b, --binary              no effect outside Windows;
       --stream              parse the input value in streaming fashion;
       --stream-errors       implies --stream and report parse error as
                             an array;
@@ -81,34 +91,152 @@ HELP_OPTIONS :: `Command options:
   --                        terminates argument processing;
 
 stury's own options:
-  check                     judge the inputs, print nothing when valid;
-  fmt                       write each input in the printer's layout, or
-                            transcode it (--from, --to);
       --from format         read json (default), jsonc, json5, ndjson,
                             csv or tsv;
       --to format           write json (default), jsonc, ndjson, csv or tsv;
-      --in-place            with fmt, rewrite each file in place;
-      --check               with fmt, print nothing: exit 1 when a file is
-                            not already formatted;
+      --in-place            with fmt or edit, rewrite each file in place;
+      --check               with fmt or edit, name each file it would
+                            change and exit 1;
       --grow-header         with --to csv or tsv, write a header of every key;
       --max-depth n         refuse nesting past n levels (default 1024);
       --follow              with one file, answer each record as it is
                             appended, like tail -f FILE | stury;
-      --explain             write the filter's route, its plan and what the
-                            run did to stderr, and run the filter.
+      --explain             write how the filter runs and what the run did
+                            to stderr, and run the filter.
+
+CSV and TSV options:
+      --delimiter c         read cells split at c (one character, \t a tab);
+      --no-header           read the first record as data: records are arrays;
+      --comment c           skip lines that start with c;
+      --infer               read an unquoted cell that is a number, true or
+                            false as one (an empty one is null either way);
+      --ragged              read records of any width;
+      --lazy-quotes         read a quote inside an unquoted cell as text;
+      --out-delimiter c     write cells split at c (default: --delimiter when
+                            --to is --from, else the format's own);
+      --out-comment c       write comment lines that start with c (default:
+                            --comment when --from is csv or tsv);
+      --out-no-header       write no header line;
+      --crlf                end each written record with CR LF.
 
 Named arguments are also available as $ARGS.named[], positional ones as
 $ARGS.positional[]. The input differences from jq and each stury option in
 full: docs/cli.md in stury's source, or man stury.
 `
 
+// `stury check --help`.
+@(private = "file")
+CHECK_HELP :: `Usage:	stury check [--from format|--seq] [--max-depth n] [file...]
+
+stury check judges each input as stury . reads it and prints nothing when it
+is valid. Every file is judged, and each file's first fault is reported.
+
+Options:
+      --from format         read json (default), jsonc, json5, ndjson,
+                            csv or tsv;
+      --seq                 judge each record after a 0x1E separator as
+                            one text;
+      --max-depth n         refuse nesting past n levels (default 1024);
+      --delimiter c, --no-header, --comment c, --ragged, --lazy-quotes
+                            read csv or tsv as stury --help says;
+  -h, --help                show this help.
+
+Exit status: 0 when every input is valid, 5 when one holds a fault, 2 for a
+usage or file error. In full: stury(1), or docs/cli.md in stury's source.
+`
+
+// `stury fmt --help`.
+@(private = "file")
+FMT_HELP :: `Usage:	stury fmt [--from format] [--to format] [--in-place|--check]
+	          [--indent n|--tab] [--max-depth n] [file...]
+
+stury fmt writes each input back in the printer's layout, or transcodes it
+from --from to --to. It runs no filter. Every file is formatted, and each
+file's first fault is reported.
+
+Options:
+      --from format         read json (default), jsonc, json5, ndjson,
+                            csv or tsv;
+      --to format           write json, jsonc, ndjson, csv or tsv (default
+                            the --from format);
+      --in-place            rewrite each file in place;
+      --check               write nothing, name each file that is not
+                            already formatted, and exit 1;
+      --indent n            use n spaces for indentation (0 to 7);
+      --tab                 use tabs for indentation;
+      --grow-header         with --to csv or tsv, write a header of every key;
+      --max-depth n         refuse nesting past n levels (default 1024);
+      --delimiter c, --no-header, --comment c, --infer, --ragged,
+      --lazy-quotes, --out-delimiter c, --out-comment c, --out-no-header,
+      --crlf                read and write csv or tsv as stury --help says;
+                            a table written as the format read keeps its
+                            delimiter and comment character, and its
+                            comments when it has a comment character;
+  -h, --help                show this help.
+
+Exit status: 0, or 1 under --check when a file is not formatted, 5 when one
+holds a fault, 2 for a usage or file error. In full: stury(1), or docs/cli.md
+in stury's source.
+`
+
+// `stury edit --help`.
+@(private = "file")
+EDIT_HELP :: `Usage:	stury edit [--from format|--seq|-R] [-s] [--in-place|--check] <jq filter> [file...]
+
+stury edit runs the filter on each input and writes the input back with the
+filter's outputs spliced in: the bytes the edit does not reach, comments,
+spacing and number spellings among them, stay as written. A JSON text takes
+one output. A table, NDJSON, --seq and -R lines are edited record by record: a
+record with no output is dropped, and each output past the first is a new
+record after it. Members, elements and columns take the output's order, a
+moved one keeping its bytes and comments. Of a repeated key the last member is
+edited. Every file is edited, and each file's first fault is reported.
+
+Options:
+      --from format         read json (default), jsonc, json5, ndjson,
+                            csv or tsv;
+      --seq                 edit each record after a 0x1E separator;
+  -R, --raw-input           edit each line as a string;
+  -s, --slurp               run the filter once on the array of records;
+      --in-place            rewrite each file in place;
+      --check               write nothing, name each file the filter would
+                            change, and exit 1;
+  -a, --ascii-output        write built values with ASCII escapes;
+  -S, --sort-keys           sort the keys of every object, and the columns;
+      --indent n            write built values with n spaces (0 to 7);
+      --tab                 write built values with a tab;
+  -e, --exit-status         set the exit status by the last output;
+      --max-depth n         refuse nesting past n levels (default 1024);
+  -f, --from-file           load the filter from a file;
+  -L, --library-path dir    search modules from the directory;
+      --arg name value      set $name to the string value, and --argjson,
+                            --slurpfile, --rawfile, --args, --jsonargs as in
+                            stury --help;
+      --delimiter c, --no-header, --comment c, --infer, --ragged,
+      --lazy-quotes         read csv or tsv as stury --help says;
+  -h, --help                show this help.
+
+Exit status: 0, or 1 under --check when a file would change, 5 when one holds
+a fault or the filter fails on it, 2 for a usage or file error, and under -e
+as for a filter run. In full: stury(1), or docs/cli.md in stury's source.
+`
+
 // jq's usage(): to stdout and exit 0 for --help, else to stderr and exit `code`. The options, or with `short` where
-// to find them.
-usage :: proc(code: int, short: bool) -> ! {
+// to find them. A `command`'s help is its own.
+usage :: proc(code: int, short: bool, command := "") -> ! {
 	w := os.to_writer(os.stdout if code == 0 else os.stderr)
-	io.write_string(w, HELP_HEAD)
-	// The jq manpage, which the footer sends on, does not tell how stury's input differs.
-	io.write_string(w, "How stury's input differs from jq's is in stury(1), not in the jq manpage.\nFor listing the command options, use stury --help.\n" if short else HELP_OPTIONS)
+	switch command {
+	case "check":
+		io.write_string(w, CHECK_HELP)
+	case "fmt":
+		io.write_string(w, FMT_HELP)
+	case "edit":
+		io.write_string(w, EDIT_HELP)
+	case:
+		io.write_string(w, HELP_HEAD)
+		// The jq manpage, which the footer sends on, does not tell how stury's input differs.
+		io.write_string(w, "How stury's input differs from jq's is in stury(1), not in the jq manpage.\nFor listing the command options, use stury --help.\n" if short else HELP_OPTIONS)
+	}
 	os.exit(code)
 }
 
@@ -118,8 +246,9 @@ usage_error :: proc(format: string, args: ..any) -> ! {
 	die()
 }
 
+// jq's footer, but it sends the reader to stury's pages, which tell what jq's do not.
 @(private)
 die :: proc() -> ! {
-	message.write_stderr("Use stury --help for help with command-line options,\nor see the jq manpage, or online docs at https://jqlang.org\n")
+	message.write_stderr("Use stury --help for help with command-line options,\nor see stury(1), or docs/cli.md at https://github.com/filip-41/stury\n")
 	os.exit(EXIT_USAGE)
 }

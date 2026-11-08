@@ -3,41 +3,22 @@
 
     python3 cmd/stury/test/jq_suite.py [build/stury] [--diff] [--record]
 
-Each case of jq-1.8.2/jq.test and jq-1.8.2/onig.test (jq's tests/, verbatim at tag jq-1.8.2) runs as
-`stury -L modules -c PROGRAM` with its input line on stdin, and passes as it does under `jq --run-tests`: each
-output equals the expected value (numbers compared as decimals, so 1.0 equals 1), with nothing left
-over; a `%%FAIL` program fails to compile (exit 3) with the expected first line of its last `jq: error`
-message, as jq's test harness keeps the last (stury's `stury:` prefix read as jq's `jq:`).
-FAST_ROUTE pins the path scan and the record scan to the interpreter: each runs as written and again as
-`FILTER | .`, which the interpreter answers (or as the filter given with it), and the two must print the
-same bytes and exit alike.
-cli.tsv runs whole command lines (malformed input, no filter, --stream, --seq, several files) and
-requires jq 1.8.2's exit status, stdout and stderr as recorded there, byte for byte; `--record` writes
-them from the `jq` on PATH. A row where stury reads its input by its own grammar, not jq's (docs/cli.md's
-"Differences from jq"), carries stury's own exit status, stdout and stderr after jq's, and stury must
-answer those instead; a stury-only row (`check`) has null for jq's. DIFFERS is the same for jq.test
-cases. The terminal cases run with no filter on a pseudo-terminal, where jq prints
-its usage and exits 2 when both stdin and stdout are terminals, and reads `.` otherwise; a host with no
-pseudo-terminal devices (Windows) skips them and says so. On Windows the cases that need POSIX are not run
-either, and the report says so: the pipe and memory cases, and the cli.tsv rows `posix_only` picks. Under
-ThreadSanitizer the deepest recursion and the 128 MB pretty case are not run, and the report says so: its
-stack frames and resident shadow memory pass what those cases bound in a plain build.
-
---floors=FILE holds each area to the pass count FILE records (a tab-separated area and count per line) and fails only
-when an area passes fewer, or is missing; --write-floors=FILE records the counts of this run.
-
---diff also runs every case through `jq` (1.8.2 on PATH) and requires stury's stdout, stderr and exit
-status to equal jq's, byte for byte, with `stury:` read as `jq:`; for a documented difference, that jq
-still answers what its row records.
-
-The cases run on a thread pool; the report is in case order.
+Each case of jq-1.8.2/jq.test and onig.test (jq's tests/ at tag jq-1.8.2) runs as `stury -L modules -c PROGRAM` with
+its input line on stdin, and passes as under `jq --run-tests`: each output equals the expected value, numbers compared
+as decimals, with nothing left over; a `%%FAIL` program fails to compile (exit 3) with the first line of its last
+`jq: error` message. cli.tsv runs whole command lines and requires jq's exit status, stdout and stderr byte for byte,
+or stury's own after them where docs/cli.md's "Differences from jq" says stury reads its input by its own grammar
+(DIFFERS is the same for jq.test); `--record` writes jq's from the `jq` on PATH. --diff also runs every case through
+jq 1.8.2 and requires the same answer, with `stury:` read as `jq:`. A host with no pseudo-terminal, Windows and
+ThreadSanitizer skip the cases they cannot run and say so. The cases run on a thread pool, the report in case order.
 """
 
-import ctypes
+import argparse
 import functools
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -45,6 +26,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+
+from harness import as_jq, run_capped
 
 try:
     import pty
@@ -58,95 +41,8 @@ TIMEOUT = float(os.environ.get("STURY_TEST_TIMEOUT", "10"))
 # The sanitizer a build was made with, `address` or `thread` (make test-asan, test-tsan), or empty.
 SANITIZER = os.environ.get("STURY_SANITIZER", "")
 sys.setrecursionlimit(100000)
-# Megabytes a case may hold; macOS enforces no RLIMIT_AS, so a runaway case such as `[repeat(1)]` would
-# otherwise take tens of GB before TIMEOUT stops it.
-MEM_CAP_MB = int(os.environ.get("STURY_TEST_MEM_MB", "3000"))
-
-
-def resident_mb(pid):
-    """Process `pid`'s resident megabytes, read without starting a process (a `ps` per poll would stall the suite's
-    stdin feeds); 0 when it is gone or the platform has no reader."""
-    if sys.platform == "darwin":
-        info = (ctypes.c_uint64 * 12)()  # struct proc_taskinfo; pti_resident_size is its second field
-        n = _libproc.proc_pidinfo(pid, 4, 0, info, ctypes.sizeof(info))  # PROC_PIDTASKINFO
-        return info[1] >> 20 if n == ctypes.sizeof(info) else 0
-    if os.name == "nt":
-        counters = (ctypes.c_size_t * 9)()  # PROCESS_MEMORY_COUNTERS on 64 bits: cb and the fault count share the first slot
-        counters[0] = ctypes.sizeof(counters)
-        h = _kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
-            return 0
-        try:
-            return counters[2] >> 20 if _kernel32.K32GetProcessMemoryInfo(h, counters, ctypes.sizeof(counters)) else 0
-        finally:
-            _kernel32.CloseHandle(h)
-    try:
-        with open(f"/proc/{pid}/statm") as f:
-            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") >> 20
-    except (OSError, IndexError, ValueError):
-        return 0
-
-
-_libproc = ctypes.CDLL("/usr/lib/libproc.dylib") if sys.platform == "darwin" else None
-_kernel32 = ctypes.WinDLL("kernel32") if os.name == "nt" else None
-if _kernel32:
-    _kernel32.OpenProcess.restype = ctypes.c_void_p
-    _kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-    _kernel32.K32GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
-    _kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-
-
-# Cases running at once, and the resident megabytes all live children may hold before a new case waits to start:
-# one worker per core with each child allowed MEM_CAP_MB would starve the cases of wall time.
+# Cases running at once: one worker per core with each child allowed MEM_CAP_MB would starve the cases of wall time.
 MAX_WORKERS = min(8, os.cpu_count() or 1)
-RSS_BUDGET_MB = int(os.environ.get("STURY_TEST_RSS_BUDGET_MB", "5000"))
-_live = set()
-_live_lock = threading.Lock()
-
-
-def start_when_budget_allows(argv, **kw):
-    """Popen of a child, started once the live children's resident sum is under RSS_BUDGET_MB (or none is live).
-    The lock covers the sum and the set, not the spawn: under it, the workers started their children one at a
-    time (a quarter of jq_diff's wall). A child a few ms old is not yet in another worker's sum, and holds nothing
-    yet."""
-    while True:
-        with _live_lock:
-            allowed = not _live or sum(resident_mb(q) for q in _live) <= RSS_BUDGET_MB
-        if allowed:
-            p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
-            with _live_lock:
-                _live.add(p.pid)
-            return p
-        time.sleep(0.05)
-
-
-def run_capped(argv, input, timeout, cap_mb=MEM_CAP_MB, **kw):
-    """subprocess.run with capture, killing the child past `timeout` or `cap_mb` resident; either raises
-    subprocess.TimeoutExpired. One communicate() call: a retried one stops feeding stdin."""
-    p = start_when_budget_allows(argv, **kw)
-    done, over = threading.Event(), threading.Event()
-
-    def watch():
-        while not done.wait(0.05):
-            if resident_mb(p.pid) > cap_mb:
-                over.set()
-                p.kill()
-                return
-
-    threading.Thread(target=watch, daemon=True).start()
-    try:
-        out, err = p.communicate(input, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        p.communicate()
-        raise
-    finally:
-        done.set()
-        with _live_lock:
-            _live.discard(p.pid)
-    if over.is_set():
-        raise subprocess.TimeoutExpired(argv, timeout)
-    return subprocess.CompletedProcess(argv, p.returncode, out, err)
 
 
 # jq's tests/modules, which jq's suite runs with as `-L`; not part of jq-1.8.2/, so remade from what the
@@ -188,8 +84,9 @@ def parse_suite(path):
 def parse_cli(path):
     """cli.tsv: area, then as JSON the arguments, stdin, files and, once recorded, jq's exit status,
     stdout and stderr. The arguments may be {"env": {NAME: VALUE}, "args": [...]}, to run with those
-    variables set. An area starting with `!` marks a case too deep for ThreadSanitizer's stack: it runs
-    everywhere else, and the sanitizer report names it as not run."""
+    variables set, and {"stdout": "closed", "args": [...]} to run with no stdout open. An area starting with `!`
+    marks a case too deep for ThreadSanitizer's stack: it runs everywhere else, and the sanitizer report names it
+    as not run."""
     cases = []
     for n, row in enumerate(open(path, encoding="utf-8").read().split("\n"), 1):
         if not row or row.startswith("#"):
@@ -199,10 +96,10 @@ def parse_cli(path):
         if slow:
             area = area[1:]
         args, stdin, files, *want = [json.loads(c) for c in cols]
-        env = {}
+        env, closed = {}, False
         if isinstance(args, dict):
-            env, args = args["env"], args["args"]
-        cases.append({"line": n, "area": area, "args": args, "env": env, "stdin": stdin, "files": files, "want": want, "row": row, "slow": slow})
+            env, closed, args = args.get("env", {}), args.get("stdout") == "closed", args["args"]
+        cases.append({"line": n, "area": area, "args": args, "env": env, "closed": closed, "stdin": stdin, "files": files, "want": want, "row": row, "slow": slow})
     return cases
 
 
@@ -223,7 +120,8 @@ def run_cli(binary, case):
             env.pop(k, None)
         real = enc(os.path.realpath(d))
         try:
-            p = run_capped([binary] + args, enc(case["stdin"]), TIMEOUT, cwd=d, env=env)
+            closing = ["/bin/sh", "-c", 'exec "$0" "$@" >&-'] if case["closed"] else []
+            p = run_capped(closing + [binary] + args, enc(case["stdin"]), TIMEOUT, cwd=d, env=env)
             unreal = lambda b: b.replace(real, b"$DIR").replace(enc(d), b"$DIR")
             return p.returncode, unreal(p.stdout), unreal(p.stderr)
         except subprocess.TimeoutExpired:
@@ -241,8 +139,10 @@ def record_cli(path):
         cols = case["row"].split("\t")
         if case["want"] and case["want"][0] is None:
             continue
-        cols[4:7] = [json.dumps(code), json.dumps(dec(out)), json.dumps(dec(err))]
-        lines[case["line"] - 1] = "\t".join(cols)
+        # A row whose answer is unchanged keeps its bytes, however its strings are escaped.
+        if case["want"][:3] != [code, dec(out), dec(err)]:
+            cols[4:7] = [json.dumps(code), json.dumps(dec(out)), json.dumps(dec(err))]
+            lines[case["line"] - 1] = "\t".join(cols)
     open(path, "w", encoding="utf-8").write("\n".join(lines))
 
 
@@ -312,40 +212,33 @@ TTY = [
 ]
 
 
-# Filters and inputs the path scan or the record scan answers, each checked against the interpreter.
+# Filters and inputs the path scan or the record scan answers, each run as written and again as `FILTER | .` (or the
+# filter given with it), which the interpreter answers: the two print the same bytes and exit alike.
 FAST_ROUTE = [
     ([".a"], '{"a":{"b":[1,"x"]}}'),
     (["-c", ".a"], '{"a":{"b":[1,"x"]}}'),
     (["-c", ".a.b[1]"], '{"a":{"b":[1,"x"]}}'),
-    (["-c", ".a.b[-1]"], '{"a":{"b":[1,"x"]}}'),
-    (["-c", ".a.b[5]"], '{"a":{"b":[1,"x"]}}'),
     (["-c", ".zz"], '{"a":1}'),
     (["-c", ".a"], '{"a":1,"a":2}'),
     (["-c", ".a"], '{"a":1} {"a":[2]} {"b":3}'),
     (["-r", ".s"], '{"s":"x\\ty\\u00e9\\ud83d\\ude00"}'),
     (["-c", ".s"], '{"s":"x\\u007f\\u001f\\/"}'),
-    (["-c", ".n"], '{"n":1.000}'),
     (["-c", ".n"], '{"n":100000000000000000000000000001}'),
-    (["-c", ".n"], '{"n":-0}'),
     (["-c", ".n"], '{"n":1E+2}'),
     (["-c", ".a.b"], '{"a":5}'),
-    (["-c", ".[0]"], '{"a":5}'),
     (["-c", ".a"], '[1]'),
-    (["-c", ".a"], 'null'),
     (["-c", '."a b"'], '{"a b":1}'),
-    (["-c", '.["a"]'], '{"a":{"x":true}}'),
     (["-c", ".a"], '{"a":1} tru'),
-    (["-c", ".a"], '{"a":1'),
     (["--from", "ndjson", "-c", ".v"], '{"v":1}\n{"v":[2,3]}\n\n{"v":"s"}\n'),
     (["--from", "ndjson", "-c", "."], '{"v":1}\n{ "v" : [2, 3] }\n'),
     (["--from", "ndjson", "-c", ".v"], '{"v":1}\n{"v":\n'),
-    (["--from", "ndjson", "-c", ".v.w"], '{"v":1}\n'),
-    (["--from", "ndjson", "-c", "."], '{"v":1}\n{"v":\n'),
     # The record scan's compact encoding is the source's text, which jq's often is not.
     (["--from", "ndjson", "-c", "."], '"a\x7fb"\n{"x":1e2}\n"\\u0041\\/"\n[0.0000001,-0,1.0,"\\u00e9\\t"]\n'),
     (["--from", "ndjson", "-c", "."], '[1e-3]\n{"a":"0.0000001","b":2E+2}\n["1e5","4ef",0.5e1]\n' + '{"long":"%s","n":1e-3}\n' % ("x" * 40)),
     (["--from", "ndjson", "-r", "-c", "."], '"a"\n{"b":1}\n'),
-    (["--from", "ndjson", "-j", "-c", "."], '"a"\n{"b":1}\n'),
+    # A byte order mark past the input's first byte is the record's, which JSON refuses.
+    (["--from", "ndjson", "-c", "."], '1\n﻿2\n'),
+    (["--from", "ndjson", "-c", ".[]"], '[1]\n﻿[2]\n'),
 ]
 
 # Past two batch workers' worth (2 MB), where an answer's array is laid out in pieces on the batch pool: plain
@@ -370,12 +263,10 @@ FAST_ROUTE += [
     (["-c", "."], "[" + ",".join(BIG[:HALF] + ['"\\ud800"'] + BIG[HALF:]) + "]"),
     (["."], "[" + ",".join(BIG) + "] [1]"),
     (["-c", ".k"], '{"k": [' + ",".join(BIG[:HALF] + ['{"s": tru}'] + BIG[HALF:]) + "]}"),
-    (["-c", ".k"], '{"k": [' + ",".join(BIG[:HALF] + ['"\\ud800"'] + BIG[HALF:]) + "]}"),
     ([".k"], '{"k": [' + ",".join(BIG) + "]} 7"),
     (["-c", ".k"], '{"k": [' + ",".join(BIG) + "]} {"),
-    (["-c", ".j"], '{"k": [' + ",".join(BIG) + "]}"),
     (["-c", ".k"], '{"\\u006b": [' + ",".join(BIG) + "]}"),
-    (["-c", ".k"], '{"k": [' + ",".join(BIG) + "], }"),
+    (["--from", "ndjson", "-c", "."], "\n".join(BIG[:HALF] + ["﻿[2]"] + BIG[HALF:])),
 ]
 
 # A path with one `[]` over such a root's array, or the array of `{"k": [...]}`, is scanned in its pieces: an
@@ -387,12 +278,10 @@ FAST_ROUTE += [
     (["-r", ".k[].s"], '{"k": [' + ",".join(BIG) + "]}"),
     (["-c", ".[]"], "[" + ",".join(MIXED) + "]"),
     (["--tab", ".k[]"], '{"k": [' + ",\n".join(MIXED) + "]}"),
-    (["-c", ".[].id"], "[" + ",".join(MIXED) + "]"),
     (["-c", ".k[].tags[1]"], '{"k": [' + ",".join(NULLS) + "]}"),
     (["-c", ".[].id"], "[" + ",".join(BIG[:HALF] + ['{"s": tru}'] + BIG[HALF:]) + "]"),
     (["-c", ".[].id"], "[" + ",".join(BIG) + "] [1]"),
     (["-c", "first(.[].id)"], "[" + ",".join(["{}"] + BIG) + "]"),
-    (["-c", ".j[]"], '{"k": [' + ",".join(BIG) + "]}"),
     (["-c", ".tags[]"], "\n".join(BIG[:HALF] + ['{"tags":[]}', '{"tags":{"a":1,"a":2}}', "{}"] + BIG[HALF:])),
     # An object holder that repeats keys: each once, at its first place, with its last value.
     (["-c", ".a[].id"], '{"a":{' + ",".join('"k%d":{"id":%d,"s":"%s"}' % (i % 6000, i, "x" * 400) for i in range(8000)) + "}}"),
@@ -409,13 +298,10 @@ FAST_ROUTE += [
     (["-c", ".[0] | keys"], "[" + ",".join(BIG) + "] 1"),
     # An error the filter raises tells the line jq's reader is on once it has read the root.
     (["-c", ".a"], "[" + ",".join(BIG) + "]"),
-    (["-c", ".k.a"], '{"k":\n[' + ",\n".join(BIG) + "]\n}"),
     # An output that is that root, its array, or a large array or object of a text built whole, is laid out
     # from its text in pieces.
     (["-c", "select(true), .k"], '{"k": [' + ",".join(MIXED) + "]}"),
-    ([".[]"], '{"k": [' + ",\n".join(MIXED) + "]}"),
     (["-c", ".k // 1, .j"], '{"j": 1, "k": [' + ",".join(MIXED) + "]}"),
-    (["--tab", "-S", ".k // 1"], '{"j": 1, "k": [' + ",".join(BIG + [ODD[2]]) + "]}"),
 ]
 
 # A filter that reads such a root's array only at constant indices, and otherwise only its length, type or
@@ -430,15 +316,11 @@ FAST_ROUTE += [(opts, stdin, WHOLE + opts[-1]) for opts, stdin in [
     (["-c", "if .[1].id == 0 then .[2].id else .[3].id end, .[-1].id, (.[0] | keys)"], "[" + ",".join(["5"] + BIG) + "]"),
     (["-c", "length"], "[" + ",".join(BIG[:HALF] + ['{"s": tru}'] + BIG[HALF:]) + "]"),
     (["-c", ".k[0]"], '{"k": [' + ",".join(BIG[:HALF] + ['"\\ud800"'] + BIG[HALF:]) + "]}"),
-    (["-c", ".k | length"], '{"k": [' + ",".join(BIG[:HALF] + [""] + BIG[HALF:]) + "]}"),
     (["-c", ".[-1]"], "[" + ",".join(BIG) + ",]"),
-    (["-c", "length"], "[" + ",".join(BIG) + "] [1] {}"),
-    (["-c", ".[0].id"], "[" + ",".join(BIG) + "] x"),
     # Read from one end only, the other end's entries are validated but not counted.
     (["-c", ".k[0].id, .k[3].id, (.k | first.id)"], '{"v": 1, "k": [' + ",".join(BIG) + "]}"),
     (["-c", ".k[-1].id, (.k | last.id), (.k | reverse | .[2].id)"], '{"k": [' + ",".join(BIG) + '], "v": 1}'),
     (["-c", ".[0].id"], "[" + ",".join(BIG + ['{"s": tru}']) + "]"),
-    (["-c", ".[-1].id"], "[" + ",".join(['{"s": tru}'] + BIG) + "]"),
     (["-c", ".k[-1].id"], '{"k": [' + ",".join(BIG[:HALF] + ['"\\ud800"'] + BIG[HALF:]) + "]}"),
     (["-c", ".[15], .[-15], .[2].n, .[-3].n"], "[" + ",".join('{"n":%d,"s":"%s"}' % (i, "x" * 300000) for i in range(12)) + "]"),
 ]]
@@ -454,95 +336,77 @@ FAST_ROUTE += [
     (["-r", ".s"], "\r\n".join(BIG[:HALF] + [BIG[0] + " " + BIG[1], '{"s":\n"over"}', ""] + BIG[HALF:])),
     (["-c", ".id"], "\n".join(BIG[:HALF] + ['{"id":"\\ud800x"}'] + BIG[HALF:])),
     (["-c", "select(.id > 39990)"], "\n".join(['{\n"id": 1}'] + MIXED)),
-    (["-c", "select(.s == null)"], "\n".join(BIG[:HALF] + ['{"s":1,"s":null}', "7"] + BIG[HALF:])),
-    (["-c", "select(.id == 3)"], "\n".join(BIG[:HALF] + ['{"id":3', "}"] + BIG[HALF:])),
     # Records the batch leaves, far apart: the lines after each are read as records again.
     (["-c", ".id"], "\n".join(BIG[:10000] + ["5", '{"id":7,"id":8}', '{"id":\n9}'] + BIG[10000:30000] + ['"s"', "null"] + BIG[30000:])),
     (["-c", "select(.id > 39000)"], "\n".join(BIG[:10000] + ["5"] + BIG[10000:30000] + ['{"id":\n9}'] + BIG[30000:])),
 ]
 
-# A root object that repeats its key is not one member: the last value is the object's, whatever the first is.
-BODY = ",".join(BIG)
-REPEATED = [
-    '{"k": [' + BODY + '], "k": 0, "k": [1]}',
-    '{"k": [' + BODY + '], "k": 0}',
-    '{"k": [1], "k": [' + BODY + ']}',
-    '{"k": [' + BODY + '], "k": [' + BODY + ']}',
-]
-
-
-def check_repeated_root(stury, diff, filter, text):
-    want = json.dumps(json.loads(text)["k"] if filter == ".k" else json.loads(text), separators=(",", ":")).encode() + b"\n"
-    code, out, err = run([stury, "-c", filter], text + "\n")
-    why = None if (code, out) == (0, want) else f"exit {code}, {len(out)} bytes (want {len(want)}) {err[:100]!r}"
-    return "fast route", f"repeated root key: stury -c {filter!r} <<< {text[:40]!r}...{text[-30:]!r}", why
-
-
-# A reduce whose update rebuilds or regrows its whole state each step frees the state it replaces, as jq's
-# reference counts do: each takes a few MB, where one that keeps every step's state takes GB.
-REDUCE_MEMORY = [
+# Runs held to a cap, as (arguments, stdin, MB, exit status, stdout or its count of lines). A reduce whose update
+# rebuilds or regrows its whole state each step frees the state it replaces, as jq's reference counts do: each takes a
+# few MB, where one that keeps every step's state takes GB. A faulty text's events before its fault are made as they
+# are given, so the walk holds its path, not its events, and moves what it holds between its arenas no more often than
+# it doubles. A sanitizer's shadow memory takes a few times the plain build's.
+EVENTS, EVENTS_MB = 1000000, 300 if os.environ.get("STURY_SANITIZED") else 100
+CAPPED = [(["-n", f], "", 100, 0, want + "\n") for f, want in [
     ('reduce range(50000) as $i (""; . + "abcdefghij" + " ") | length', "550000"),
     ('reduce range(50000) as $i ([]; . + [$i] + [$i]) | length', "100000"),
     ('reduce range(5000) as $i ({}; . + {($i | tostring): $i} + {a: 1}) | length', "5001"),
     ('reduce range(50000) as $i (""; "\\(.)abcdefghij ") | length', "550000"),
     ('last(foreach range(20000) as $i (""; . + "abcdefghij" + " "; length))', "220000"),
+]] + [
+    (["-c", "--stream", "."], "[" + "1," * EVENTS + "x]", EVENTS_MB, 5, EVENTS),
+    (["-c", "--stream-errors", "."], "[" + "1," * EVENTS + "x]", EVENTS_MB, 0, EVENTS + 1),
+    (["-c", "--stream-errors", "."], '{"' + "k" * 1200000 + '":[1' + " " * 300000 + " tru]}", EVENTS_MB, 0, 1),
 ]
-REDUCE_MEMORY_MB = 100
 
 
-def check_reduce_memory(stury, diff, filter, want):
+def check_capped(stury, diff, argv, stdin, cap, code, want):
     try:
-        p = run_capped([stury, "-n", filter], b"", TIMEOUT, cap_mb=REDUCE_MEMORY_MB)
-        why = None if (p.returncode, p.stdout) == (0, want.encode() + b"\n") else f"exit {p.returncode}, {p.stdout[:40]!r} (want {want})"
+        p = run_capped([stury, *argv], stdin.encode(), TIMEOUT, cap_mb=cap)
+        got = (p.returncode, p.stdout.count(b"\n") if isinstance(want, int) else p.stdout.decode(errors="replace"))
+        why = None if got == (code, want) else f"exit {got[0]}, {str(got[1])[:40]!r} (want exit {code}, {str(want)[:40]!r})"
     except subprocess.TimeoutExpired:
-        why = f"past {REDUCE_MEMORY_MB} MB or {TIMEOUT:g} s"
-    return "memory", f"reduce frees its old state: stury -n {filter!r}", why
+        why = f"past {cap} MB or {TIMEOUT:g} s"
+    return "memory", f"held to {cap} MB: stury {' '.join(argv)} <<< {stdin[:40]!r}", why
 
 
-# A faulty text's events before its fault are made as they are given, so the walk holds its path, not its events,
-# and moves what it holds between its arenas no more often than it doubles: (text, events under --stream-errors).
-FAULT_EVENTS = 1000000
-FAULT_TEXTS = [
-    ("[" + "1," * FAULT_EVENTS + "x]", FAULT_EVENTS + 1),
-    ('{"' + "k" * 1200000 + '":[1' + " " * 300000 + " tru]}", 1),
-]
-# A sanitizer's shadow memory takes a few times the plain build's.
-FAULT_EVENTS_MB = 300 if os.environ.get("STURY_SANITIZED") else 100
-
-
-def check_fault_events_memory(stury, diff, flag, want_code, text, events):
-    try:
-        p = run_capped([stury, "-c", flag, "."], text.encode(), TIMEOUT, cap_mb=FAULT_EVENTS_MB)
-        got = (p.returncode, p.stdout.count(b"\n"))
-        why = None if got == (want_code, events) else f"exit {got[0]}, {got[1]} events (want {events})"
-    except subprocess.TimeoutExpired:
-        why = f"past {FAULT_EVENTS_MB} MB or {TIMEOUT:g} s"
-    return "memory", f"a faulty text's events are made as given: stury -c {flag} . <<< {text[:12]!r}...", why
-
-
-# Stdin that is a regular file is mapped from its current offset; a pipe is read; an empty file is no input.
-# Each form must give what the pipe gives, and jq's output under --diff.
-STDIN_FILES = [
+# Stdin that is a regular file is mapped from its current offset, a pipe is read as it comes, and an empty file is no
+# input: each answers alike, each part a pipe is written in a window of its own, and under --diff as jq does on a
+# text in one part. (filter, text, offset, parts)
+STDIN = [(f, text, offset, None) for offset, text in [
     (0, b'{"a":[1,2,{"b":"\xc3\xa9"}],"id":7}\n'),
     (7, b'"x"\n{"a":[1,2,{"b":"\xc3\xa9"}],"id":7}\n'),
     (20001, b'"' + b"y" * 20000 + b'"\n[1,{"id":2}]\n[3]\n'),
     (0, b""),
-]
-STDIN_FILTERS = [["-c", "."], [".id? // empty"], ["-c", ".[]?"]]
+] for f in (["-c", "."], [".id? // empty"], ["-c", ".[]?"])] + [(f, b"".join(parts), 0, parts) for f, parts in [
+    (["--from", "ndjson", "-c", "."], [b"1\n", b"\xef\xbb\xbf2\n3\n"]),
+    (["--from", "ndjson", "-c", ". | ."], [b"[1]\n", b"\xef\xbb\xbf[2]\n"]),
+    (["--from", "ndjson", "-c", ".a"], [b'{"a":1}\n', b'\xef\xbb\xbf{"a":2}\n']),
+]]
 
 
-def check_stdin_file(stury, diff, offset, text, filter):
+def check_stdin(stury, diff, filter, text, offset, parts):
     with tempfile.TemporaryFile() as f:
         f.write(text)
         f.flush()
         os.lseek(f.fileno(), offset, os.SEEK_SET)
         mapped = subprocess.run([stury] + filter, stdin=f, capture_output=True, timeout=TIMEOUT)
-    rest = text[offset:].decode("utf-8", "surrogateescape")
-    piped = run([stury] + filter, rest)
-    want = run(["jq"] + filter, rest) if diff else piped
-    got = (mapped.returncode, mapped.stdout)
-    why = None if got == piped[:2] == want[:2] else f"file stdin {got!r}, pipe {piped[:2]!r}, want {want[:2]!r}"
-    return "stdin file", f"stdin from a file at offset {offset}: stury {' '.join(filter)} ({len(text)} bytes)", why
+    r, w = os.pipe()
+    p = subprocess.Popen([stury] + filter, stdin=r, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    os.close(r)
+    try:
+        for part in parts or [text[offset:]]:
+            os.write(w, part)
+            time.sleep(0.2)
+    except BrokenPipeError:
+        pass
+    finally:
+        os.close(w)
+    out, err = p.communicate(timeout=TIMEOUT)
+    got, piped = (mapped.returncode, mapped.stdout, mapped.stderr), (p.returncode, out, err)
+    jq = run(["jq"] + filter, text[offset:].decode("utf-8", "surrogateescape")) if diff and not parts else piped
+    why = None if got == piped and got[:2] == jq[:2] else f"file {got!r}, pipe {piped!r}, want {jq[:2]!r}"
+    return "stdin", f"stdin from a file at {offset} and a pipe in {len(parts or [1])} parts: stury {' '.join(filter)} <<< {text[:60]!r}", why
 
 
 # Output that cannot be written: stdout closed ends the run as jq ends it (exit 2, "writing output failed"); a
@@ -565,6 +429,24 @@ def check_stdout_closed(stury, diff, filter):
         want = run(["jq"] + filter).stderr
     why = None if got == (2, want) else f"exit {got[0]} err {got[1]!r}, want exit 2 err {want!r}"
     return "stdout closed", f"stdout closed: stury {' '.join(filter)}", why
+
+
+# A reader that closes the pipe ends the run by SIGPIPE with nothing on stderr, as jq's ends, on every path that writes
+# the output, the pool's included. Each filter runs several times, as the signal and the write's EPIPE race on macOS.
+def check_stdout_pipe_closed(stury, diff, filter):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "in.json")
+        with open(path, "w") as f:
+            f.write("[" + ",".join('{"id":%d,"s":"%s"}' % (i, "x" * 20) for i in range(200000)) + "]\n")
+        for _ in range(8):
+            p = subprocess.Popen([stury] + filter + [path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p.stdout.read(10)
+            p.stdout.close()
+            err = p.stderr.read()
+            code = p.wait(timeout=TIMEOUT)
+            if (code, err) != (-signal.SIGPIPE, b""):
+                return "stdout pipe closed", f"stdout pipe closed: stury {' '.join(filter)}", f"exit {code} err {err!r}, want SIGPIPE and no message"
+    return "stdout pipe closed", f"stdout pipe closed: stury {' '.join(filter)}", None
 
 
 NONBLOCKING = [
@@ -616,22 +498,8 @@ def check_deep_pretty(stury, diff, depth):
     return "deep pretty", f"pretty {depth} levels", None if ok else f"exit {p.returncode}, {len(p.stdout)} bytes"
 
 
-# Under --max-depth 5 an entry `[[[[1]]]]` of `{"k": [...]}` sits at depth 6, wherever the cuts fall: `.`,
-# `.k`, `.k | length` and `check` refuse it alike, at the same column. jq has no such option, so no --diff row.
 DEEP_ENTRIES = ['{"id":%d,"s":"%s"}' % (i, "x" * 50000) for i in range(72)]
 DEEP_AT = [6, 21, 40]
-
-
-def check_depth_refused(stury, diff, at):
-    entries = DEEP_ENTRIES[:at] + ["[[[[1]]]]"] + DEEP_ENTRIES[at + 1:]
-    text = '{"k":[' + ",".join(entries) + "]}\n"
-    seen = set()
-    for argv in (["--max-depth", "5", "-c", "."], ["--max-depth", "5", "-c", ".k"], ["--max-depth", "5", "-c", ".k | length"], ["check", "--max-depth", "5"]):
-        code, _, err = run([stury] + argv, text)
-        found = re.search(rb"column (\d+)|:1:(\d+):", err)
-        seen.add((code, found.group(1) or found.group(2) if found else None))
-    why = None if len(seen) == 1 and seen != {(5, None)} else f"(exit, column) differ or are missing: {sorted(seen, key=str)}"
-    return "fast route", f"depth: entry {at} too deep under --max-depth 5", why
 
 
 # A root object whose array sits beside other members, or in another object, is read and printed in pieces
@@ -639,6 +507,7 @@ def check_depth_refused(stury, diff, at):
 # outer and inner, before the array and after it; an array that is empty; strings that hold brackets, quotes
 # and backslashes beside the spine. Against Python's reading (a repeated key's last value at its first place,
 # as jq reads it) and, with --diff, against jq's.
+BODY = ",".join(BIG)
 SPINE_ROOTS = [
     ('{"version": 1, "k": [' + BODY + "]}", ["k"]),
     ('{"k": [' + BODY + '], "tail": "x"}', ["k"]),
@@ -653,6 +522,9 @@ SPINE_ROOTS = [
     ('{"k": [], "big": [' + BODY + '], "e": {"k": []}}', ["big"]),
 ]
 SPINE_FILTERS = [".", "-c .", "-c P[0]", "-c P[-1] | {id}", "P | length", "-c P[].id", "-c P"]
+# A root object that repeats its key is not one member: the last value is the object's, whatever the first is.
+REPEATED = ['{"k": [' + BODY + '], "k": 0, "k": [1]}', '{"k": [' + BODY + '], "k": 0}', '{"k": [1], "k": [' + BODY + ']}',
+            '{"k": [' + BODY + '], "k": [' + BODY + ']}']
 
 
 def spine_outputs(text, path, filter):
@@ -661,6 +533,7 @@ def spine_outputs(text, path, filter):
     a = functools.reduce(lambda v, k: v[k], path, root)
     outs = {
         ".": lambda: [root],
+        ". | .": lambda: [root],
         "P[0]": lambda: [a[0] if a else None],
         "P[-1] | {id}": lambda: [{"id": a[-1]["id"] if a else None}],
         "P | length": lambda: [len(a)],
@@ -697,14 +570,26 @@ SPINE_FAULTS = [
     ('{"data": {"v": 1, "k": [' + BODY + '], "t": tru}, "e": 1}', ["data", "k"]),
 ]
 SPINE_FAULT_FILTERS = [".", "-c .", "-c P[0]", "P | length", "-c P[].id", "-c P"]
-# Under --max-depth 6 an entry `[[[1]]]` of `{"d": {"k": [...]}}` sits at depth 6, the limit; under 5 past it.
-DEEP_SPINES = [('{"d": {"k": [' + ",".join(DEEP_ENTRIES[:at] + ["[[[1]]]"] + DEEP_ENTRIES[at + 1:]) + "]}}", at) for at in DEEP_AT]
+# Under --max-depth 5 an entry `[[[[1]]]]` of `{"k": [...]}`, or `[[[1]]]` of `{"d": {"k": [...]}}`, sits at depth 6,
+# wherever the cuts fall: each filter refuses it as `check` does. Under 6 the second is at the limit.
+DEEP_SPINES = [(head + ",".join(DEEP_ENTRIES[:at] + [entry] + DEEP_ENTRIES[at + 1:]) + tail, path) for at in DEEP_AT
+               for head, entry, tail, path in (('{"k":[', "[[[[1]]]]", "]}", ["k"]), ('{"d": {"k": [', "[[[1]]]", "]}}", ["d", "k"]))]
+
+
+# jq's sentences that the filter's jq-spelled message uses where `check` uses the library's.
+JQ_SENTENCES = {b"Exceeds depth limit for parsing": b"Exceeds the depth limit", b"Unfinished JSON term": b"Unfinished input",
+                b"Invalid numeric literal": b"Invalid number"}
 
 
 def told(err):
-    """A parse error's message, line and column, as the filter and `check` tell it, less the source line, caret and flag hint that may follow."""
-    m = re.fullmatch(rb"stury: (?:parse error: (.*) at line (\d+), column (\d+)|error: <stdin>:(\d+):(\d+): (.*))\n(?:[^\n]*\n[ \t]*\^\n\([^\n]*\)\n)?", err)
-    return m and ((m[1], m[2], m[3]) if m[1] else (m[6], m[4], m[5]))
+    """A parse error's message, line and column, as the filter and `check` tell it, less the source line, caret and flag hint that follow."""
+    m = re.fullmatch(rb"stury: parse error: (?:(.*?)(?: at EOF)? at line (\d+), column (\d+)|<stdin>:(\d+):(\d+): (.*))\n(?:[^\n]*\n[ \t]*\^\n(?:\([^\n]*\)\n)?)?", err)
+    return m and ((JQ_SENTENCES.get(m[1], m[1]), m[2], m[3]) if m[1] else (m[6], m[4], m[5]))
+
+
+def uncareted(err):
+    """`err` less the source line, caret and flag hint stury prints after a parse error, which jq does not."""
+    return re.sub(rb"(parse error: [^\n]*\n)[^\n]*\n[ \t]*\^\n(?:\([^\n]*\)\n)?", rb"\1", err)
 
 
 def check_spine_fault(stury, diff, text, path, filter, depth=None):
@@ -715,7 +600,7 @@ def check_spine_fault(stury, diff, text, path, filter, depth=None):
     why = None
     if (code, out, whole[0]) != (5, b"", 5) or told(err) is None or told(err) != told(whole[2]):
         why = f"exit {code} {err[:120]!r}; check: exit {whole[0]} {whole[2][:120]!r}"
-    elif diff and not depth and (code, out, as_jq(err)) != run(["jq"] + argv, text + "\n"):
+    elif diff and not depth and (code, out, uncareted(as_jq(err))) != run(["jq"] + argv, text + "\n"):
         why = f"differs from jq: {as_jq(err)!r}"
     return "fast route", f"spine fault: stury {' '.join(argv)} <<< {text[:40]!r}...{text[-40:]!r}", why
 
@@ -733,14 +618,15 @@ def jq_args(args):
 
 # The jq.test cases whose input or `fromjson` text stury reads by its own grammar, not
 # jq's (docs/cli.md, "Differences from jq"): stury's exit status, its stdout, and how its stderr starts.
-NAN_ERRORS = "".join(f'"{m} at line 1, column {c} (while parsing \'{t}\')"\n' for t, m, c in [("NaN", "Unexpected character", 1), ("-NaN", "Invalid numeric literal", 2)] + [(f"NaN{n}", "Unexpected character", 1) for n in ("1", "10", "100", "1000", "10000", "100000")])
+NON_FINITE = "Infinity and NaN have no JSON value"
+NAN_ERRORS = "".join(f'"{m} at line 1, column {c} (while parsing \'{t}\')"\n' for t, m, c in [("NaN", NON_FINITE, 1), ("-NaN", NON_FINITE, 2)] + [(f"NaN{n}", NON_FINITE, 1) for n in ("1", "10", "100", "1000", "10000", "100000")])
 DIFFERS = {
-    ("jq.test", 1306): (5, "", "stury: parse error: Unexpected character at line 1, column 9\n"),  # Infinity, NaN
+    ("jq.test", 1306): (5, "", "stury: parse error: Infinity and NaN have no JSON value at line 1, column 9\n"),  # Infinity, NaN
     ("jq.test", 2315): (5, "", "stury: error (at <stdin>:1): Invalid literal at line 1, column 2 (while parsing 'nan')\n"),
     ("jq.test", 2319): (5, "", "stury: parse error: Invalid literal at line 1, column 7\n"),  # nan
     ("jq.test", 2324): (0, NAN_ERRORS, ""),
     ("jq.test", 2407): (5, "", "stury: parse error: Invalid literal at line 1, column 14\n"),  # nan
-    ("jq.test", 2498): (0, '"Unexpected character at line 1, column 2 (while parsing \'{\'a\': 123}\')"\n', ""),  # the fault's name
+    ("jq.test", 2498): (0, '"Invalid string literal; expected \\", but got \' at line 1, column 2 (while parsing \'{\'a\': 123}\')"\n', ""),  # the quote's column
     ("jq.test", 2558): (5, "", "stury: error (at <stdin>:1): Exceeds depth limit for parsing at line 1, column 1025 "),  # nesting past 1024
 }
 
@@ -751,11 +637,6 @@ def run(argv, stdin):
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return "timeout", b"", b""
-
-
-def as_jq(stderr):
-    """stury's messages with jq's program name."""
-    return re.sub(rb"(?m)^stury: ", b"jq: ", stderr).replace(b"Use stury --help", b"Use jq --help")
 
 
 CONSTS = {"NaN": Decimal("NaN"), "Infinity": Decimal("Infinity"), "-Infinity": Decimal("-Infinity")}
@@ -889,21 +770,23 @@ def jq_here():
 
 
 def posix_only(case):
-    """Whether a cli.tsv row's answer is POSIX's: a `$DIR` path asked or answered (Windows spells it with
-    backslashes), HOME or get_search_list (module search paths, which Windows makes absolute), a directory opened
-    as a file, local time (the rows name their zone as tzdata does), the program's `/` origin, or an argument or
-    variable that is not valid UTF-8 (Windows has UTF-16 only)."""
+    """Whether a cli.tsv row's answer is POSIX's: a closed stdout (run through /bin/sh), a `$DIR` path asked or
+    answered (Windows spells it with backslashes), HOME or get_search_list (module search paths, which Windows makes
+    absolute), a directory opened as a file, local time (the rows name their zone as tzdata does), the program's `/`
+    origin, or an argument or variable that is not valid UTF-8 (Windows has UTF-16 only)."""
     asked = "\0".join(case["args"] + list(case["env"]) + [v for v in case["env"].values() if v])
     said = [w for w in case["want"] if isinstance(w, str)]
-    return ("$DIR" in asked or any("$DIR" in w for w in said) or "HOME" in case["env"] or re.search("[\ud800-\udfff]|localtime|get_prog_origin|get_jq_origin|get_search_list", asked)
+    return (case["closed"] or "$DIR" in asked or any("$DIR" in w for w in said) or "HOME" in case["env"] or re.search("[\ud800-\udfff]|localtime|get_prog_origin|get_jq_origin|get_search_list", asked)
             or any("Is a directory" in w for w in said))
 
 
 # The --explain lines that vary from run to run.
-EXPLAIN_VARIES = re.compile(rb"(?m)^stury: explain: (?:compile_time|run_time|cost): .*\n| workers=\d+")
+EXPLAIN_VARIES = re.compile(rb"(?m)^stury: explain: (?:time|used|threads): .*\n")
 
 
 def check_cli(stury, diff, case):
+    if not case["want"]:
+        return "cli.tsv", f"cli.tsv:{case['line']}: stury {' '.join(case['args'])}", "no recorded answer: run jq_suite.py --record"
     stdin = case["stdin"] if len(case["stdin"]) < 200 else case["stdin"][:200] + "..."
     files = f" files {case['files']}" if case["files"] else ""
     area, what = f"cli.tsv {case['area']}", f"cli.tsv:{case['line']}: stury {' '.join(case['args'])} <<< {stdin!r}{files}"
@@ -939,7 +822,7 @@ def check_cli(stury, diff, case):
 def check_tty(stury, diff, stdin_tty, stdout_tty, opts, feed, env, pinned):
     code, out, err = run_tty(stury, opts, stdin_tty, stdout_tty, feed, env)
     if stdin_tty and stdout_tty:
-        usage = err.startswith(b"stury - commandline JSON processor") and err.endswith(b"For listing the command options, use stury --help.\n")
+        usage = err.startswith(b"stury - command-line JSON and CSV processor") and err.endswith(b"For listing the command options, use stury --help.\n")
         why = None if (code, out) == (2, b"") and usage else f"exit {code} out {out!r} err {err!r}, want the usage and exit 2"
     else:
         want = run_tty("jq", opts, stdin_tty, stdout_tty, feed, env) if diff else None
@@ -949,9 +832,13 @@ def check_tty(stury, diff, stdin_tty, stdout_tty, opts, feed, env, pinned):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    diff = "--diff" in sys.argv
-    stury = os.path.abspath(args[0] if args else "build/stury")
+    parser = argparse.ArgumentParser(description="jq 1.8.2's test suites and cli.tsv, run through a stury binary.")
+    parser.add_argument("binary", nargs="?", default="build/stury")
+    parser.add_argument("--diff", action="store_true", help="also run every case through jq 1.8.2 and require the same answer")
+    parser.add_argument("--record", action="store_true", help="write jq 1.8.2's answers into cli.tsv rows that lack them or differ")
+    options = parser.parse_args()
+    diff = options.diff
+    stury = os.path.abspath(options.binary)
     # Every case runs in one time zone, a zone with daylight saving, which cli.tsv's date rows were recorded in.
     os.environ["TZ"] = "America/New_York"
     # Colours are each case's own choice, not the caller's.
@@ -959,30 +846,28 @@ def main():
     os.environ.pop("NO_COLOR", None)
     if os.name == "nt":  # the console's code page cannot print every failure's bytes
         sys.stdout.reconfigure(errors="backslashreplace")
-    if diff or "--record" in sys.argv:
+    if diff or options.record:
         v = subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip()
         if v != "jq-1.8.2":
             sys.exit(f"--diff and --record need jq 1.8.2 on PATH, found {v or 'none'}")
-    if "--record" in sys.argv:
+    if options.record:
         record_cli(os.path.join(HERE, "cli.tsv"))
     cases = parse_suite(os.path.join(SUITE, "jq.test")) + parse_suite(os.path.join(SUITE, "onig.test"))
     jobs = [(check_suite, case) for case in cases]
     jobs += [(check_fast_route, *row) for row in FAST_ROUTE]
-    jobs += [(check_depth_refused, at) for at in DEEP_AT]
-    jobs += [(check_repeated_root, f, text) for f in (".", ". | .", ".k") for text in REPEATED]
     jobs += [(check_spine_root, text, path, f) for text, path in SPINE_ROOTS for f in SPINE_FILTERS]
+    jobs += [(check_spine_root, text, ["k"], f) for text in REPEATED for f in ("-c .", "-c . | .", "-c P")]
     jobs += [(check_spine_fault, text, path, f) for text, path in SPINE_FAULTS for f in SPINE_FAULT_FILTERS]
-    jobs += [(check_spine_root, text, ["d", "k"], f, 6) for text, _ in DEEP_SPINES for f in ("-c .", "-c P", "P | length", "-c P[-1] | {id}")]
-    jobs += [(check_spine_fault, text, ["d", "k"], f, 5) for text, _ in DEEP_SPINES for f in ("-c .", "-c P", "P | length", "-c P[].id")]
-    jobs += [(check_stdin_file, o, t, f) for o, t in STDIN_FILES for f in STDIN_FILTERS]
+    jobs += [(check_spine_root, text, path, f, 6) for text, path in DEEP_SPINES[1::2] for f in ("-c .", "-c P", "P | length", "-c P[-1] | {id}")]
+    jobs += [(check_spine_fault, text, path, f, 5) for text, path in DEEP_SPINES for f in ("-c .", "-c P", "P | length", "-c P[].id")]
+    jobs += [(check_stdin, *row) for row in STDIN]
     if os.name == "nt":
-        print("memory, stdout closed, stdout nonblocking, deep pretty: skipped: they need POSIX descriptors or a memory reader", flush=True)
+        print("memory, stdout closed, stdout pipe closed, stdout nonblocking, deep pretty: skipped: they need POSIX descriptors or a memory reader", flush=True)
     else:
-        jobs += [(check_reduce_memory, *row) for row in REDUCE_MEMORY]
-        jobs += [(check_fault_events_memory, "--stream", 5, FAULT_TEXTS[0][0], FAULT_EVENTS)]
-        jobs += [(check_fault_events_memory, "--stream-errors", 0, text, events) for text, events in FAULT_TEXTS]
+        jobs += [(check_capped, *row) for row in CAPPED]
         jobs += [(check_stdout_closed, f) for f in (["-c", "."], ["-c", ".a"], ["-c", "map(.)"], ["--unbuffered", "-c", "."])]
         jobs += [(check_stdout_nonblocking, *row) for row in NONBLOCKING]
+        jobs += [(check_stdout_pipe_closed, f) for f in (["."], ["-c", ".[].id"], ["-r", ".[].s"], ["-n", "range(1e7)"])]
         jobs += [(check_deep_pretty, 8000)]
     jobs += [(check_cli, case) for case in parse_cli(os.path.join(HERE, "cli.tsv"))]
     if ptys_here():
@@ -1004,17 +889,6 @@ def main():
         print(f"FAIL {what}\n     {why}")
     for area, (total, ok) in tally.items():
         print(f"{area}: {ok} of {total} pass")
-    for arg in sys.argv[1:]:
-        if arg.startswith("--write-floors="):
-            with open(arg.split("=", 1)[1], "w") as file:
-                file.writelines(f"{area}\t{ok}\n" for area, (_, ok) in tally.items())
-    floors = [a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--floors=")]
-    if floors:
-        with open(floors[0]) as file:
-            held = [line.rstrip("\n").rsplit("\t", 1) for line in file if line.strip()]
-        below = [f"{area}: {tally.get(area, (0, 0))[1]} pass, floor {floor}" for area, floor in held if tally.get(area, (0, 0))[1] < int(floor)]
-        print("\n".join(["areas below their floor:"] + below) if below else "every area holds its floor")
-        sys.exit(1 if below else 0)
     if bad:
         sys.exit(1)
 

@@ -2,9 +2,9 @@ package write_bench
 
 import "core:fmt"
 import "core:os"
-import "core:slice"
 import "core:time"
 import core "../../core"
+import "../timing"
 import write "../../core/write"
 import dsv "../../dsv"
 
@@ -23,8 +23,6 @@ Text_Row :: struct {
 	name, city, quote, note: string,
 }
 
-// Timed passes after two of warm-up. `-define:DSV_ITERS=1` against the default gives a pass's instructions from two runs.
-ITERS :: #config(DSV_ITERS, 41)
 
 // `write dsv <file>`: `write.marshal` of the file's rows through a plan, chosen by its name: each pass allocates its text and frees it outside the clock. `write dsvdoc <file>`:
 // `core.write` of the file read into a document. GB/s counts the source's bytes in both.
@@ -48,7 +46,7 @@ dsv_lane :: proc(src: []u8, name: string, document: bool) {
 
 dsv_rows_lane :: proc($R: typeid, src: []u8) {
 	rows: []R
-	if err := dsv.unmarshal(src, .Csv, &rows, {borrow_strings = true}); err.kind != .None {
+	if err := dsv.unmarshal(src, .Csv, &rows, read = {borrow_strings = true}); err.kind != .None {
 		fmt.eprintln("read:", err)
 		os.exit(1)
 	}
@@ -57,9 +55,9 @@ dsv_rows_lane :: proc($R: typeid, src: []u8) {
 		fmt.eprintln("plan:", perr)
 		os.exit(1)
 	}
-	times: [ITERS]i64
+	times: [timing.TIMED]i64
 	text: []u8
-	for i in 0 ..< ITERS + 2 {
+	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		start := time.tick_now()
 		out, err := write.marshal(rows, &plan, {}, context.allocator)
 		d := i64(time.tick_since(start))
@@ -67,27 +65,27 @@ dsv_rows_lane :: proc($R: typeid, src: []u8) {
 			fmt.eprintln("write:", err)
 			os.exit(1)
 		}
-		if i >= 2 {
-			times[i - 2] = d
+		if i >= timing.WARMUP {
+			times[i - timing.WARMUP] = d
 		}
-		if i < ITERS + 1 {
+		if i < timing.WARMUP + timing.TIMED - 1 {
 			delete(out)
 		} else {
 			text = out
 		}
 	}
-	dsv_report(src, text, times[:])
+	dsv_report(src, text, &times)
 }
 
 dsv_document_lane :: proc(src: []u8) {
-	doc, derr := dsv.build(src, .Csv, {}, false, context.allocator)
+	doc, derr := dsv.build(src, .Csv, {}, .Last, context.allocator)
 	if derr.kind != .None {
 		fmt.eprintln("document error:", derr)
 		os.exit(1)
 	}
-	times: [ITERS]i64
+	times: [timing.TIMED]i64
 	text: []u8
-	for i in 0 ..< ITERS + 2 {
+	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		start := time.tick_now()
 		out, _, err := core.write(&doc)
 		d := i64(time.tick_since(start))
@@ -95,24 +93,23 @@ dsv_document_lane :: proc(src: []u8) {
 			fmt.eprintln("write:", err)
 			os.exit(1)
 		}
-		if i >= 2 {
-			times[i - 2] = d
+		if i >= timing.WARMUP {
+			times[i - timing.WARMUP] = d
 		}
-		if i < ITERS + 1 {
+		if i < timing.WARMUP + timing.TIMED - 1 {
 			delete(out)
 		} else {
 			text = out
 		}
 	}
-	dsv_report(src, text, times[:])
+	dsv_report(src, text, &times)
 }
 
-dsv_report :: proc(src, text: []u8, times: []i64) {
+dsv_report :: proc(src, text: []u8, times: ^[timing.TIMED]i64) {
 	h := CHECK_OFFSET
 	for b in text {
 		h = (h ~ u64(b)) * CHECK_PRIME
 	}
-	slice.sort(times)
-	median := times[len(times) / 2]
+	median := timing.median(times)
 	fmt.printfln("gb_per_s=%.3f best=%.3f ns=%d out=%d check=%d", f64(len(src)) / f64(median), f64(len(src)) / f64(times[0]), median, len(text), h)
 }

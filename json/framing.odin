@@ -82,9 +82,8 @@ whole_text :: proc(src: []u8, as: core.As) -> (core.As, core.Framing, u64) {
 
 // The most objects deep `spine` looks for an array, and the most members and bytes of each it passes before one in an
 // object.
-SPINE_LEVELS :: 4
 @(private)
-SIDE_MEMBERS, SIDE_BYTES :: 16, 4096
+SPINE_LEVELS, SIDE_MEMBERS, SIDE_BYTES :: 4, 16, 4096
 
 // Finds the array that holds the bulk of `src`, read as `as`: its root array, or the array a root object holds up to
 // `SPINE_LEVELS` objects deep, past at most `SIDE_MEMBERS` members in each object whose values end within `SIDE_BYTES`.
@@ -143,21 +142,15 @@ spine_of :: proc(src: []u8, opts: Options, $S: Spec) -> (at: u64, levels: int, o
 }
 
 @(private)
-next_walked :: proc(it: ^records.Reader) -> (records.Record, bool) {
-	switch Spec(it.as.spec) {
-	case .Json:  return next_framed(it, .Json)
-	case .Jsonc: return next_framed(it, .Jsonc)
-	case .Json5: return next_framed(it, .Json5)
-	}
-	return {}, false
-}
-
-@(private)
-next_framed :: proc(it: ^records.Reader, $S: Spec) -> (records.Record, bool) {
+next_walked :: proc(it: ^records.Reader) -> (rec: records.Record, ok: bool) {
 	h: core.No_Hooks
 	regs: core.Hook_Regs
-	rec, ok, _ := frame_walked(it, S, options_of(it.as), &h, &regs, core.no_hook)
-	return rec, ok
+	switch Spec(it.as.spec) {
+	case .Json:  rec, ok, _ = frame_walked(it, .Json, options_of(it.as), &h, &regs, core.no_hook)
+	case .Jsonc: rec, ok, _ = frame_walked(it, .Jsonc, options_of(it.as), &h, &regs, core.no_hook)
+	case .Json5: rec, ok, _ = frame_walked(it, .Json5, options_of(it.as), &h, &regs, core.no_hook)
+	}
+	return
 }
 
 // Frames the next record under `.Concatenated` or `.Entries` by a walk of its value through the hook. `stopped` says
@@ -171,11 +164,15 @@ frame_walked :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs:
 }
 
 // `frame_walked` under `.Concatenated`: each document of the text, as a loop of `walk` reads them, from its value's
-// first byte. A fault ends the records.
+// first byte. A fault ends the records, and a 0x1E between documents is one, as jq reads its input.
 @(private)
 frame_document :: proc(it: ^records.Reader, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (rec: records.Record, ok: bool, stopped: bool) {
 	src := it.src
-	q, _ := document_start(src, it.pos, S)
+	q, sep := document_start(src, it.pos, S)
+	if sep != nil {
+		it.fault = core.Fault{at = u64(intrinsics.ptr_sub(sep, raw_data(src))), rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Control_Char)}
+		return
+	}
 	q = gap_end(q, raw_data(src)[len(src):], S)
 	hi, fault, stop := walk_from(src, q, S, opts, h, regs, on)
 	it.pos = hi
@@ -474,17 +471,20 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 		#force_inline read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
 		return true
 	}
-	if it.state[1] == UNFRAMED {
-		seq_refuse(it, rec, read.collect, err)
-		return true
-	}
 	kept := typed.collected_mark(read.collect)
-	read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
-	// A number the walk passed may have been cut short whatever the target makes of it.
-	if _, bad := seq_fault(it, rec, nil).?; bad && err.kind != .Walk {
+	if it.state[1] != UNFRAMED {
+		read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
+		// A number the walk passed may have been cut short whatever the target makes of it.
+		if _, bad := seq_fault(it, rec, nil).?; !bad || err.kind == .Walk {
+			return true
+		}
 		typed.collected_restore(read.collect, kept)
-		seq_refuse(it, rec, read.collect, err)
 	}
+	// The record is refused with its `seq_fault`, collected with the read's allocator.
+	f := seq_fault(it, rec, nil).?
+	err^ = {kind = .Walk, at = f.at, inner = f}
+	context.allocator = allocator
+	typed.collect_error(read.collect, err^)
 	return true
 }
 
@@ -505,19 +505,11 @@ read_line :: proc(it: ^records.Reader, lo, cut: u64, target: rawptr, T: typeid, 
 	scratch_allocator := runtime.arena_allocator(&arena)
 	scratch, failed := runtime.mem_alloc(type_info_of(T).size, type_info_of(T).align, scratch_allocator)
 	if failed != nil {
-		err^ = {kind = .Out_Of_Memory}
+		err^ = {kind = .No_Memory}
 		return
 	}
 	err^ = {}
 	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, scratch_allocator, runtime.arena_allocator(&it.scratch), err, false)
-}
-
-// Refuses the `.Seq` record `rec` with the fault `seq_fault` gives it.
-@(private)
-seq_refuse :: proc(it: ^records.Reader, rec: records.Record, collect: ^typed.Collected, err: ^core.Typed_Error) {
-	f := seq_fault(it, rec, nil).?
-	err^ = {kind = .Walk, at = f.at, inner = f}
-	typed.collect_error(collect, err^)
 }
 
 // Reads the next record under `.Concatenated` or `.Entries` into `target` by the framing's own walk. A refusal stops
@@ -526,7 +518,7 @@ seq_refuse :: proc(it: ^records.Reader, rec: records.Record, collect: ^typed.Col
 @(private)
 read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
 	opts := options_of(it.as)
-	if read.refuse_duplicates {
+	if read.dups == .Refuse {
 		// The duplicate check builds the record's text, so the framing's walk finds its end first.
 		rec, ok := RECORDS.next[it.framing](it)
 		if ok {
@@ -542,6 +534,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 		err^ = started
 		return false
 	}
+	defer typed.read_release(&h, it.frames)
 	on :: typed.on_token_spelled when .Es5 in FEATURES[S] else typed.on_token
 	pos, state := it.pos, it.state
 	kept := typed.collected_mark(read.collect)
@@ -564,20 +557,16 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 // input's first byte.
 @(private)
 build_record :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (doc: core.Document, err: core.Document_Error) {
-	seq := it.framing == .Seq
-	// `seq_fault` takes the record's offset in the window, which a stream's `rec.at` is not.
-	local := records.Record{text = rec.text, at = rec.at - it.base}
-	if seq && it.state[1] == UNFRAMED {
-		f := seq_fault(it, local, nil).?
-		f.at += it.base
-		return {}, {kind = .Walk, at = f.at, inner = f}
+	// An unframed `.Seq` record is refused whole by `seq_fault`.
+	if it.framing != .Seq || it.state[1] != UNFRAMED {
+		if stray_bom(rec.text, rec.at, Spec(it.as.spec)) {
+			return {}, {kind = .Walk, at = rec.at, inner = {at = rec.at, rules = &RULES, kind = .Bad_Char, detail = u8(Detail.Expected_Value)}}
+		}
+		doc, err = build_as(rec.text, it.as, false, allocator)
 	}
-	if stray_bom(rec.text, rec.at, Spec(it.as.spec)) {
-		return {}, {kind = .Walk, at = rec.at, inner = {at = rec.at, rules = &RULES, kind = .Bad_Char}}
-	}
-	doc, err = build_as(rec.text, it.as, false, allocator)
-	if seq && err.kind == .None {
-		if f, bad := seq_fault(it, local, nil).?; bad {
+	if it.framing == .Seq && err.kind == .None {
+		// `seq_fault` takes the record's offset in the window, which a stream's `rec.at` is not.
+		if f, bad := seq_fault(it, {text = rec.text, at = rec.at - it.base}, nil).?; bad {
 			core.destroy(&doc)
 			f.at += it.base
 			return {}, {kind = .Walk, at = f.at, inner = f}

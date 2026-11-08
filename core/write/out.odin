@@ -20,7 +20,7 @@ Out :: struct {
 	flushed:   int, // the bytes the stream took
 	stream:    io.Stream, // a nil procedure means a buffer output
 	allocator: runtime.Allocator,
-	err:       core.Typed_Error_Kind, // `.Out_Of_Memory` or `.Write_Failed`, set once and kept
+	err:       core.Typed_Error_Kind, // `.No_Memory` or `.Write_Failed`, set once and kept
 	cause:     io.Error, // what the stream answered, for `.Write_Failed`
 	hint:      int, // a buffer output's first allocation, in bytes
 	spill:     ^[ROOM_MAX]u8,
@@ -46,8 +46,15 @@ room :: #force_inline proc(out: ^Out, n: int) -> [^]u8 #no_bounds_check {
 }
 
 // Ends the output and returns its error. A buffer output also returns its bytes, which the caller owns, or nil when it
-// failed. A stream output flushes what it holds and returns no bytes. Neither is usable afterwards.
-finish :: proc(out: ^Out) -> (bytes: []u8, err: core.Typed_Error) {
+// failed. A stream output flushes what it holds and returns no bytes. Neither is usable afterwards. A `refused` write
+// frees the output and returns `refused` with the stream's cause.
+finish :: proc(out: ^Out, refused := core.Typed_Error{}) -> (bytes: []u8, err: core.Typed_Error) {
+	if refused.kind != .None {
+		destroy(out)
+		err = refused
+		err.cause = out.cause
+		return
+	}
 	if out.stream.procedure != nil {
 		if out.err == .None && out.cursor > 0 {
 			if cause := flush(out); cause != .None {
@@ -95,7 +102,7 @@ refill :: #force_no_inline proc(out: ^Out, n: int) -> [^]u8 {
 	}
 	next, err := runtime.non_zero_mem_resize(rawptr(out.buf), out.size, size, 1, out.allocator)
 	if err != nil {
-		return fail(out, .Out_Of_Memory)
+		return fail(out, .No_Memory)
 	}
 	out.buf, out.size = raw_data(next), size
 	return out.buf[out.cursor:]

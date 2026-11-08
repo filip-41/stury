@@ -21,7 +21,8 @@ eval_array :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^En
 	a := new_array(1 if n.a != nil && n.a.single else iterated_length(n.a, input.v))
 	// Under a path expression jq collects with the paths tracked, so a step into a value no path leads to fails.
 	if n.a != nil && (track || !column_into(n.a, input.v, &a.items)) {
-		if sig := collect_into(ip, n.a, input, env, &a.items, track); sig != .Go {
+		regioned := !track && n.a.kind == .Pipe && !n.a.a.single
+		if sig := collect_regioned(ip, n.a, input, env, &a.items) if regioned else collect_into(ip, n.a, input, env, &a.items, track); sig != .Go {
 			return sig
 		}
 	}
@@ -108,7 +109,7 @@ column_into :: proc(n: ^Node, v: Value, into: ^[dynamic]Value) -> bool {
 			}
 		}
 		return true
-	case nil, bool, Number, string, ^Object, Path:
+	case nil, bool, Number, string, ^Object, Path, ^Commented:
 	}
 	return false
 }
@@ -135,7 +136,7 @@ append_field :: #force_inline proc(into: ^[dynamic]Value, e: Value, name: string
 	case nil:
 		append(into, nil)
 		return true
-	case bool, Number, string, ^Array, Path:
+	case bool, Number, string, ^Array, Path, ^Commented:
 	}
 	return false
 }
@@ -325,7 +326,7 @@ object_key_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	x := (^Args_Sink)(s)
 	k, ok := string_of(it.v)
 	if !ok {
-		return fail(x.ip, "Cannot use %s (%s) as object key", type_name(it.v), brief(it.v))
+		return fail(x.ip, "Cannot use %s (%s) as object key", type_name(it.v), brief(x.ip, it.v))
 	}
 	return args_emit(s, {v = k})
 }

@@ -23,6 +23,9 @@ import os
 import statistics
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from doc import machine
+
 
 def values(text):
     dec = json.JSONDecoder(parse_float=decimal.Decimal, parse_int=decimal.Decimal)
@@ -99,7 +102,8 @@ def main(out):
     if not os.path.isdir(answers):
         raise SystemExit("%s has no answers/ directory; run bench/cli/jq_compare.sh first" % out)
     verdicts, ok = check(answers)
-    lines = ["| case | tool | median ms | × stury | answer |", "| --- | --- | ---: | ---: | --- |"]
+    lines = [machine(), "Median ms is the median of every timing of the tool over all rounds (ROUNDS rounds of RUNS runs), "
+             "process start to exit.", "", "| case | tool | median ms | × stury | answer |", "| --- | --- | ---: | ---: | --- |"]
     ratios, differs = collections.defaultdict(list), collections.Counter()
     for case in verdicts:
         runs = medians(out, case)

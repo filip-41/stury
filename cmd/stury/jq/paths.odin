@@ -112,13 +112,7 @@ identical :: proc(a, b: Value) -> bool {
 	if k != kind(b) {
 		return false
 	}
-	if k == .Null || k == .True || k == .False {
-		return true
-	}
-	switch x in a {
-	case Ref:
-		y, is_ref := b.(Ref)
-		return is_ref && x == y
+	#partial switch x in a {
 	case Number:
 		y, is_num := b.(Number)
 		if !is_num {
@@ -131,18 +125,8 @@ identical :: proc(a, b: Value) -> bool {
 	case string:
 		y, is_str := b.(string)
 		return is_str && raw_data(x) == raw_data(y) && len(x) == len(y)
-	case ^Array:
-		y, is_arr := b.(^Array)
-		return is_arr && x == y
-	case Path:
-		y, is_path := b.(Path)
-		return is_path && x == y
-	case ^Object:
-		y, is_obj := b.(^Object)
-		return is_obj && x == y
-	case bool:
 	}
-	return true
+	return k <= .True || same(a, b)
 }
 
 // `v`, made from `input` without a step.
@@ -153,7 +137,7 @@ emit_made :: proc(out: ^Sink, input: Item, v: Value, track: bool) -> Signal {
 // The path a path expression output `it` by, or jq's error for a value no path leads to.
 path_of :: proc(ip: ^Interp, it: Item) -> (^Path_Step, Signal) {
 	if pathless(it.path) {
-		return nil, fail(ip, "Invalid path expression with result %s", brief(it.v))
+		return nil, fail(ip, "Invalid path expression with result %s", brief(ip, it.v))
 	}
 	return it.path, .Go
 }
@@ -179,9 +163,14 @@ in_state :: proc(v: Value, st: ^Path_State) -> Item {
 // writes into its state keeps one set for the whole reduction.
 Owned :: map[rawptr]bool
 
-owned_copy :: proc(v: Value, owned: ^Owned) -> Value {
+// The container `value` is, or the one it holds comments on, as the update may change it: itself if `owned` names it and
+// no slice shares its items, else a copy, which `owned` names from here. The callers keep the comments.
+owned_copy :: proc(value: Value, owned: ^Owned) -> Value {
+	v := plain(value)
 	if p := container(v); p != nil && owned[p] {
-		return v
+		if a, is_array := v.(^Array); !is_array || !lent(a) {
+			return v
+		}
 	}
 	c := own(v)
 	if p := container(c); p != nil {
@@ -202,9 +191,32 @@ container :: proc(v: Value) -> rawptr {
 	return nil
 }
 
+// `v`, and the containers in it that `owned` names, no longer named, as they may now have a second holder. A container
+// `owned` does not name holds none that it names, so the walk stops there.
+disown :: proc(v: Value, owned: ^Owned) {
+	delete_key(owned, container(v))
+	members: []Value
+	#partial switch x in v {
+	case ^Array:
+		members = x.items[:]
+	case ^Object:
+		members = x.vals[:]
+	}
+	for m in members {
+		if p := container(m); p != nil && owned[p] {
+			disown(m, owned)
+		}
+	}
+}
+
 getpath :: proc(ip: ^Interp, v: Value, path: []Value) -> (Value, Signal) {
 	cur := v
-	for key in path {
+	for key, i in path {
+		if i > 0 && kind(path[i - 1]) == .Object {
+			if _, is_fact := fact_step(path[i - 1]); is_fact {
+				return nil, fact_step_not_last(ip)
+			}
+		}
 		next, sig := index_value(ip, cur, key)
 		if sig != .Go {
 			return nil, sig
@@ -220,11 +232,19 @@ MAX_PATH_DEPTH :: 10000
 // `v` with `path` set to `nv`, as jq's jv_setpath: each step reads what is there, then sets it.
 setpath :: proc(ip: ^Interp, v: Value, path: []Value, nv: Value, owned: ^Owned) -> (Value, Signal) {
 	if len(path) == 0 {
-		return nv, .Go
+		return keep_comments(v, nv), .Go
 	}
 	key := scalar(path[0])
 	if len(path) == 1 && indexes_without_error(v, key) {
 		return set_key(ip, v, key, nv, owned)
+	}
+	if kind(key) == .Object {
+		if role, is_fact := fact_step(key); is_fact {
+			if len(path) > 1 {
+				return nil, fact_step_not_last(ip)
+			}
+			return write_comments(ip, v, role, nv)
+		}
 	}
 	child, sig := index_value(ip, v, key)
 	if sig != .Go {
@@ -293,9 +313,17 @@ array_set_index :: proc(ip: ^Interp, size: int, key: Value) -> (int, Signal) {
 }
 
 // `t` with `key` set to `v`, as jq's jv_set: null becomes an object under a key and an array under an
-// index or a slice, and an array grows with nulls to reach an index.
+// index or a slice, and an array grows with nulls to reach an index. A member or element replaced keeps the comments
+// `v` does not bring (`keep_comments`), and `t` keeps its own.
 @(private = "file")
 set_key :: proc(ip: ^Interp, t: Value, key: Value, v: Value, owned: ^Owned) -> (Value, Signal) {
+	if c, is_commented := t.(^Commented); is_commented {
+		inner, sig := set_key(ip, c.v, key, v, owned)
+		if sig != .Go {
+			return nil, sig
+		}
+		return rewrap(c, inner), .Go
+	}
 	tk := kind(t)
 	switch kind(key) {
 	case .String:
@@ -308,7 +336,7 @@ set_key :: proc(ip: ^Interp, t: Value, key: Value, v: Value, owned: ^Owned) -> (
 			} else {
 				o = owned_copy(t, owned).(^Object)
 			}
-			object_put(o, k, v)
+			object_set(o, k, v)
 			return o, .Go
 		}
 	case .Number:
@@ -333,7 +361,7 @@ set_key :: proc(ip: ^Interp, t: Value, key: Value, v: Value, owned: ^Owned) -> (
 			for len(a.items) <= i {
 				append(&a.items, nil)
 			}
-			a.items[i] = v
+			a.items[i] = keep_comments(a.items[i], v)
 			return a, .Go
 		}
 	case .Object:
@@ -416,6 +444,9 @@ delpaths_sorted :: proc(ip: ^Interp, v: Value, paths: [][]Value, start: int, own
 		if len(paths[i]) == start + 1 {
 			append(&gone, key)
 		} else {
+			if _, is_fact := fact_step(key); is_fact {
+				return nil, fact_step_not_last(ip)
+			}
 			child, sig := index_value(ip, cur, key)
 			if sig != .Go {
 				return nil, sig
@@ -434,9 +465,23 @@ delpaths_sorted :: proc(ip: ^Interp, v: Value, paths: [][]Value, start: int, own
 	return delete_keys(ip, cur, gone[:], owned)
 }
 
-// `t` without the members `keys` name, as jq's jv_dels.
+// `t` without the members `keys` name, as jq's jv_dels, and without the comments of the roles they name.
 @(private = "file")
 delete_keys :: proc(ip: ^Interp, t: Value, keys: []Value, owned: ^Owned) -> (Value, Signal) {
+	if rest, roles := split_fact_steps(keys); roles != {} {
+		v, sig := delete_keys(ip, t, rest, owned)
+		if sig != .Go {
+			return nil, sig
+		}
+		return remove_comments(ip, v, roles)
+	}
+	if c, is_commented := t.(^Commented); is_commented && len(keys) > 0 {
+		inner, sig := delete_keys(ip, c.v, keys, owned)
+		if sig != .Go {
+			return nil, sig
+		}
+		return rewrap(c, inner), .Go
+	}
 	if kind(t) == .Null || len(keys) == 0 {
 		return t, .Go
 	}

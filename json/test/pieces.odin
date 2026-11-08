@@ -34,7 +34,7 @@ expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, framing
 	text := transmute([]u8)src
 	serial, _ := records.check(text, json.as(spec), framing, context.temp_allocator)
 	whole := whole_fault(text, spec)
-	if !testing.expectf(t, records.validate(text, json.as(spec)) == whole, "%v %q: validate %v, want %v", spec, src, records.validate(text, json.as(spec)), whole) {
+	if !testing.expectf(t, records.validate_parallel(text, json.as(spec)) == whole, "%v %q: validate %v, want %v", spec, src, records.validate_parallel(text, json.as(spec)), whole) {
 		return false
 	}
 	for &pool in pools {
@@ -42,7 +42,7 @@ expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, framing
 		if !testing.expectf(t, slice.equal(got, serial), "%v %v %q at width %d: %v, want %v", framing, spec, src, pool.runner.threads + 1, got, serial) {
 			return false
 		}
-		if v := records.validate(text, json.as(spec), &pool.runner); !testing.expectf(t, v == whole, "%v %q at width %d: validate %v, want %v", spec, src, pool.runner.threads + 1, v, whole) {
+		if v := records.validate_parallel(text, json.as(spec), &pool.runner); !testing.expectf(t, v == whole, "%v %q at width %d: validate %v, want %v", spec, src, pool.runner.threads + 1, v, whole) {
 			return false
 		}
 	}
@@ -116,6 +116,35 @@ records_check_on_threads :: proc(t: ^testing.T) {
 					return
 				}
 			}
+		}
+	}
+}
+
+// Records of about half a piece, which a default build finds too sparse to fan out, read in order. A forced build
+// fans out, so the records are small there, and the answers are the same in either.
+@(test)
+records_check_large_records :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	pools: [len(WIDTHS)]host.Pool
+	for w, i in WIDTHS {
+		host.pool_init(&pools[i], w)
+	}
+	defer for &p in pools {
+		host.pool_destroy(&p)
+	}
+	pad := strings.repeat("x", RECORDS_SLICE / 2 + 64, context.temp_allocator)
+	for faults in ([]u16{0, 1 << 3, 1 << 0 | 1 << 9 | 1 << 11}) {
+		lines := strings.builder_make(context.temp_allocator)
+		entries := strings.builder_make(context.temp_allocator)
+		strings.write_byte(&entries, '[')
+		for i in 0 ..< 12 {
+			end := `",]` if faults >> uint(i) & 1 != 0 else `"]`
+			fmt.sbprintf(&lines, "[\"%s%s\n", pad, end)
+			fmt.sbprintf(&entries, "[\"%s%s%s", pad, end, "," if i < 11 else "]")
+		}
+		if !expect_chain_law(t, pools[:], strings.to_string(lines), .Lines, .Json) ||
+		   !expect_chain_law(t, pools[:], strings.to_string(entries), .Entries, .Json) {
+			return
 		}
 	}
 }
@@ -208,7 +237,7 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 	deep := json.as(.Json)
 	deep.max_depth = 2
 	src := transmute([]u8)texts[1]
-	testing.expect_value(t, records.validate(src, deep), json.validate(src, .Json, {max_depth = 2}))
+	testing.expect_value(t, records.validate_parallel(src, deep), json.validate(src, .Json, {max_depth = 2}))
 }
 
 // The bytes of a piece as `core/records` reads it: a text shorter than four is built on one thread.
@@ -221,11 +250,11 @@ RECORDS_SLICE :: #config(RECORDS_SLICE, 64 * 1024)
 expect_build_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, as: core.As, refuse: bool, joined: bool) -> bool {
 	in_pieces := joined && len(src) >= 4 * RECORDS_SLICE
 	text := transmute([]u8)src
-	want, want_err := core.build(text, as, refuse)
+	want, want_err := core.build(text, as, .Refuse if refuse else .Last)
 	defer core.destroy(&want)
 	for &pool in pools {
 		pieces: int
-		got, err := records.build(text, as, refuse, runner = &pool.runner, pieces = &pieces)
+		got, err := records.build(text, as, .Refuse if refuse else .Last, runner = &pool.runner, pieces = &pieces)
 		defer core.destroy(&got)
 		same := err == want_err && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close
 		if !testing.expectf(t, same, "%q at width %d: %v, want %v", src[:min(len(src), 200)], pool.runner.threads + 1, err, want_err) {
@@ -303,6 +332,34 @@ records_build_a_spine :: proc(t: ^testing.T) {
 	testing.expect_value(t, pieces, 0)
 }
 
+// A joined build whose allocator refuses one request, or that one and every later one, gives the document a build on
+// one thread gives or `.No_Memory`, never a document short of its child counts.
+@(test)
+records_build_under_a_failing_allocator :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	pool: host.Pool
+	host.pool_init(&pool, 6)
+	defer host.pool_destroy(&pool)
+	inner := strings.concatenate({"[", strings.repeat("0,", 70000, context.temp_allocator), "1]"}, context.temp_allocator)
+	src := transmute([]u8)strings.concatenate({`{"m":[1],"w":`, inner, `}`}, context.temp_allocator)
+	strict := json.as(.Json)
+	want, _ := core.build(src, strict)
+	defer core.destroy(&want)
+	for hold in ([]bool{false, true}) {
+		for at := 0;; at += 1 {
+			f := walktest.Failing_Alloc{inner = context.allocator, fail_at = at, fail_on = hold}
+			pieces: int
+			got, err := records.build(src, strict, allocator = walktest.failing_allocator(&f), runner = &pool.runner, pieces = &pieces)
+			same := err.kind == .None && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close
+			testing.expectf(t, same || err.kind == .No_Memory, "allocation %d, later ones too %v: %v, %d counts of %d", at, hold, err, len(got.counts), len(want.counts))
+			core.destroy(&got)
+			if f.n <= at {
+				break
+			}
+		}
+	}
+}
+
 // The duplicate check of a record's read builds its document on the reader's allocator, not the temporary one.
 @(test)
 records_refuse_duplicates_on_the_reader :: proc(t: ^testing.T) {
@@ -321,7 +378,7 @@ records_refuse_duplicates_on_the_reader :: proc(t: ^testing.T) {
 		{
 			context.temp_allocator = mem.tracking_allocator(&track)
 			for {
-				if more, _ := records.read(&it, &row, &plan, {refuse_duplicates = true}); !more {
+				if _, more := records.read(&it, &row, &plan, {dups = .Refuse}); !more {
 					break
 				}
 			}

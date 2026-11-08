@@ -8,10 +8,13 @@
 #   python3 bench/gen.py && python3 bench/fetch.py corpus
 #   zsh bench/cli/jq_compare.sh [out_dir]         # default build/bench/jq_compare
 #
-# ROUNDS and RUNS set a case's hyperfine rounds and timings per tool (bench_case.zsh).
+# ROUNDS and RUNS set a case's hyperfine rounds and timings per tool, and CASES=<regex> keeps the cases whose name
+# matches (bench_case.zsh).
 set -e
 setopt no_glob # the answers are captured with eval, where `.logs[]` would glob
 HERE=${0:A:h} # resolved before the cd below makes a relative $0 point elsewhere
+# Runs the whole script under the lock and the memory cap of bench/guard.py.
+[[ -n ${STURY_BENCH_GUARDED:-} ]] || exec env STURY_BENCH_GUARDED=1 python3 "$HERE/../guard.py" zsh "${0:A}" "$@"
 ROOT=${HERE:h:h}
 S=$ROOT/build/stury
 OUT=${1:-$ROOT/build/bench/jq_compare}

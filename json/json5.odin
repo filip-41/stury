@@ -4,6 +4,7 @@ import "base:intrinsics"
 import "base:runtime"
 import "core:simd"
 import "core:unicode"
+import "core:unicode/utf8"
 import spell "../core/spell"
 import core "../core"
 import kernel "../core/kernel"
@@ -149,10 +150,7 @@ ident5_char :: #force_no_inline proc "contextless" (q, end: [^]u8, start: bool) 
 	if kind != .None {
 		return r, false, kind
 	}
-	ch := rune(c & (0x7f >> u8(intrinsics.ptr_sub(r, q))))
-	for b in q[1:intrinsics.ptr_sub(r, q)] {
-		ch = ch << 6 | rune(b & 0x3f)
-	}
+	ch, _ := utf8.decode_rune_in_bytes(q[:intrinsics.ptr_sub(r, q)])
 	if !ident_char(ch, start) {
 		return q, false, .None
 	}

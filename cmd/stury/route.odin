@@ -6,6 +6,7 @@ package main
 import "core:slice"
 import core "../../core"
 import engine "../../core/build"
+import records "../../core/records"
 import "jq"
 
 // Why a filter is the interpreter's. `--explain` lists them in this order.
@@ -30,6 +31,9 @@ Route_Why :: enum u8 {
 	Object_Key,
 	Object_Member,
 	Select_Columns,
+	No_Header, // a record without a header is an array
+	Infer, // a cell's kind is the library's inference
+	Comments_In, // a record's comment lines are written with the record
 	Own_Spelling,
 }
 
@@ -159,6 +163,20 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 	return answer(run, &doc, answers if answers != nil else doc.answers, err, data, r)
 }
 
+// Answers the scanned filter over the record `rec`, as `answer_path` does a text: from `part`, the path's read of it
+// that ended with `read`, when `scanned`. A record that opens with a byte order mark past the input's first byte is the
+// interpreter's, since a build of its text alone passes over the mark that the record's own build judges.
+answer_record :: proc(run: ^Run, rec: records.Record, part: ^core.Document, read: core.Path_Error, scanned: bool, r: core.As) -> bool {
+	if scanned {
+		return answer(run, part, part.answers, read, rec.text, r)
+	}
+	if rec.at > 0 && core.text_start(rec.text, 0) > 0 {
+		explain_fallback(&run.route, .Bad_Text)
+		return false
+	}
+	return answer_path(run, rec.text, r)
+}
+
 // Whether a scan answers `path`. When its steps are all `[]`, every value the text holds may answer, and a whole build
 // costs less than a scan that keeps them all.
 scans :: proc(path: core.Path) -> bool {
@@ -176,7 +194,7 @@ answer :: proc(run: ^Run, doc: ^core.Document, answers: []core.Answer, err: core
 	case err.kind != .None:
 		explain_fallback(route, .Bad_Text)
 		return false
-	case slice.any_of_proc(answers, proc(a: core.Answer) -> bool {return a.outcome == .Type_Mismatch}):
+	case slice.any_of_proc(answers, proc(a: core.Answer) -> bool {return a.outcome == .Wrong_Kind}):
 		explain_fallback(route, .Step_Kind)
 		return false
 	case iterates_object(doc, core.ROOT, route.path.steps):
@@ -217,7 +235,7 @@ iterates_object :: proc(doc: ^core.Document, i: core.Node_Index, steps: []core.S
 	if len(steps) == 0 || int(i) >= len(doc.nodes) {
 		return false
 	}
-	if _, every := steps[0].(core.All); every && doc.nodes[i].kind == .Map {
+	if _, every := steps[0].(core.All); every && doc.nodes[i].kind == .Object {
 		return true
 	}
 	it := core.children(doc, i)

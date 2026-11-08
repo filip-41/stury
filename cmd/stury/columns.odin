@@ -36,6 +36,10 @@ Columns :: struct {
 	heads:   []string, // the members' keys, a table row's
 	ordered: bool, // the table's header is `heads`, or the next row makes it
 	files:   int,
+	ragged:  bool, // --ragged: a record's object holds the columns it has, which the header does not fix
+	// The open file's records are built and the filter runs on each: a ragged record's columns that the header does
+	// not name are found by a build.
+	whole:   bool,
 }
 
 Column_Member :: struct {
@@ -49,13 +53,20 @@ choose_columns :: proc(run: ^Run) {
 	r := &run.route
 	if o.null_input {r.whys += {.Null_Input}}
 	if o.slurp {r.whys += {.Slurp}}
+	if o.cells_in.no_header {r.whys += {.No_Header}}
+	if o.cells_in.infer {r.whys += {.Infer}}
 	if r.whys != {} && !r.on {
 		return
 	}
 	// The columns live for the run, and a file's header names are set when it opens.
 	cols := new(Columns)
+	cols.ragged = .Ragged in o.cells_in.tolerate
 	cols.names.allocator, cols.keys.allocator = context.allocator, context.allocator
 	r.whys += columns_of(run.prog, cols)
+	// The record passes through, and with it the comment lines above it, to a table that writes them.
+	if r.whys == {} && o.cells_in.comment != 0 && o.cells_out.comment != 0 && writes_cells(o) && (cols.every || cols.shape == .Select) {
+		r.whys += {.Comments_In}
+	}
 	if r.whys == {} {
 		r.columns = cols
 	}
@@ -178,9 +189,12 @@ place_columns :: proc(run: ^Run, cols: ^Columns, texts: ^records.Reader, header:
 	delete(cols.at, heap)
 	cols.at = make([]int, len(cols.names), heap)
 	cols.upto = 0
+	cols.whole = cols.ragged && cols.every
 	for name, i in cols.names {
 		cols.at[i] = records.column(texts, name)
 		cols.upto = max(cols.upto, cols.at[i] + 1)
+		// A ragged record's cells past the header are columns named by their position.
+		cols.whole ||= cols.ragged && (cols.at[i] < 0 || strings.trim_left(name, "0123456789") == "")
 	}
 	if cols.shape != .Object {
 		return
@@ -228,10 +242,15 @@ put_lead :: #force_inline proc(out: ^write.Out, lead: string) #no_bounds_check {
 answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 	cols := run.route.columns
 	o := &run.output
+	if cols.whole {
+		built, _ := records.build(it, rec, context.allocator)
+		run_once(run, jq.document_value(built))
+		return
+	}
 	short: [256]u8 = ---
 	buf := short[:len(rec.text)] if len(rec.text) <= len(short) else make([]u8, len(rec.text))
 	// One column is read alone, which splits the record only up to it.
-	row: []Maybe(string)
+	row: []write.Scalar
 	if len(cols.at) > 1 {
 		row, _ = records.cells(it, rec, buf, cols.upto)
 	}
@@ -253,7 +272,7 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			// Compact JSON, written as the printer writes the object. A cell the walk judged is UTF-8.
 			for m in cols.members {
 				put_lead(&o.buf, m.lead)
-				if s, text := column_cell(it, rec, row, m.at, buf).?; text {
+				if s, text := column_cell(it, rec, row, m.at, buf).(string); text {
 					json.put_string(&o.buf, s, {escape_del = true})
 				} else {
 					intrinsics.unaligned_store((^u32)(write.room(&o.buf, 4)), 0x6c6c756e) // "null"
@@ -267,12 +286,21 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 			o.result = JQ_OK
 			end_output(o)
 		case o.table != nil && !o.opts.grow_header:
-			few: [32]Maybe(string) = ---
-			cells := few[:len(cols.members)] if len(cols.members) <= len(few) else make([]Maybe(string), len(cols.members))
-			for m, i in cols.members {
-				cells[i] = column_cell(it, rec, row, m.at, buf)
+			few: [32]write.Scalar = ---
+			cells := few[:len(cols.members)] if len(cols.members) <= len(few) else make([]write.Scalar, len(cols.members))
+			if cols.ordered {
+				for m, i in cols.members {
+					cells[i] = column_cell(it, rec, row, m.at, buf)
+				}
+				table_object(o, cols.heads, cells, true)
+			} else {
+				// A row the header does not order is refused at the first key it lacks in the object's own order, which -S
+				// does not sort, as the interpreter's row is.
+				for at, i in cols.at {
+					cells[i] = column_cell(it, rec, row, at, buf)
+				}
+				table_object(o, cols.keys[:], cells, false)
 			}
-			table_object(o, cols.heads, cells, cols.ordered)
 		case cols.every:
 			built, _ := records.build(it, rec, context.allocator)
 			emit(o, jq.document_value(built))
@@ -300,7 +328,7 @@ answer_columns :: proc(run: ^Run, it: ^records.Reader, rec: records.Record) {
 // a column the header lacks. `row` holds the record's cells, or is nil when the one column read is read alone, into
 // `buf`.
 @(private = "file")
-column_cell :: #force_inline proc(it: ^records.Reader, rec: records.Record, row: []Maybe(string), at: int, buf: []u8) -> Maybe(string) {
+column_cell :: #force_inline proc(it: ^records.Reader, rec: records.Record, row: []write.Scalar, at: int, buf: []u8) -> write.Scalar {
 	if row != nil {
 		return row[at] if uint(at) < uint(len(row)) else nil
 	}
@@ -317,8 +345,8 @@ column_cell :: #force_inline proc(it: ^records.Reader, rec: records.Record, row:
 }
 
 @(private = "file")
-value_of :: #force_inline proc(cell: Maybe(string)) -> jq.Value {
-	if s, text := cell.?; text {
+value_of :: #force_inline proc(cell: write.Scalar) -> jq.Value {
+	if s, text := cell.(string); text {
 		return s
 	}
 	return nil

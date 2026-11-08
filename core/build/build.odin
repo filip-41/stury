@@ -41,8 +41,8 @@ BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
 
 // Returns a builder over `src`, read as `as`, with an open stack of `depth` slots, none when `depth` is 0, room for `facts` facts, and
 // at least 16 nodes, `nodes` when that is larger. The stack is the caller's `frames` when they hold `depth` slots, else
-// it is allocated. The hook pushes an open container's frame with no capacity test, so
-// `depth` must be at least the walk's depth limit. The nodes are allocated last, and a document keeps the reservation
+// it is allocated. The hook pushes an open container's frame with no capacity test, so a walk that nests past `depth`
+// grows the stack with `builder_deepen` first. The nodes are allocated last, and a document keeps the reservation
 // they were given, whose unused tail an arena shrinking it would write zeros over. A format's `build` passes the builder
 // to its walk with a builder hook and ends it with `builder_end`.
 // A refused allocation returns a builder whose `err` is `.No_Memory` and whose node array is nil.
@@ -81,6 +81,21 @@ builder_start :: proc(src: []u8, as: core.As, refuse_duplicates: bool, allocator
 	return b
 }
 
+// Grows the open stack by `extra` slots, for a walk about to nest past it. Returns false when the allocator refuses.
+builder_deepen :: #force_no_inline proc "contextless" (b: ^Builder, extra: int) -> bool {
+	context = runtime.default_context()
+	stack, err := make([]u64, len(b.stack) + extra, b.doc.allocator)
+	if err != nil {
+		return false
+	}
+	copy(stack, b.stack)
+	if !b.borrowed {
+		delete(b.stack, b.doc.allocator)
+	}
+	b.stack, b.borrowed = stack, false
+	return true
+}
+
 // Returns the document the walk built, or the error that stopped it, and leaves the builder zero. The errors are
 // `builder_finish`'s. On an error the document is the zero value.
 builder_end :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> (core.Document, core.Document_Error) {
@@ -112,6 +127,10 @@ builder_finish :: proc(b: ^Builder, regs: core.Hook_Regs, fault: Maybe(core.Faul
 	}
 	if f, bad := fault.?; bad {
 		builder_free(b)
+		// A stack the walk could not grow is the allocator's refusal, not the text's.
+		if f.kind == .No_Memory {
+			return {kind = .No_Memory}
+		}
 		return {kind = .Walk, at = f.at, inner = f}
 	}
 	n := int(regs.a)
@@ -193,7 +212,7 @@ builder_hook_plain_refuse :: #force_inline proc "contextless" (h: ^Builder, s: c
 	return builder_step(false, false, true, false, h, s, t)
 }
 
-// Builds a keyless document. It drops every inline key, keeps a headed record as a `Map`, and steps over a header row written
+// Builds a keyless document. It drops every inline key, keeps a headed record as an `Object`, and steps over a header row written
 // before the walk. These are document-model rules, not a grammar's, and `builder_step`'s `$KEYLESS` holds them. The
 // key drop covers facts too (`role` past `.Key`): a fact is not a value. A row written before the walk is the root's
 // next node, role `Key` where a record is a value, and the root's token moves the cursor past it. A build that refuses
@@ -343,7 +362,7 @@ builder_step :: #force_inline proc "contextless" ($FACTS, $CHECK, $REFUSE, $KEYL
 	s.c -= 1
 	#no_bounds_check s.b = h.stack[s.c]
 	when REFUSE {
-		if h.refuse && h.doc.nodes[int(open)].kind == .Map {
+		if h.refuse && h.doc.nodes[int(open)].kind == .Object {
 			builder_refuse_result(h, open, core.Node_Index(a))
 		}
 	}
@@ -379,7 +398,7 @@ builder_refuse_open :: proc "contextless" (h: ^Builder, regs: core.Hook_Regs) {
 	open := core.Node_Index(regs.b >> 32)
 	stop := core.Node_Index(regs.a)
 	for open != core.NO_NODE {
-		if h.doc.nodes[open].kind == .Map {
+		if h.doc.nodes[open].kind == .Object {
 			builder_refuse_result(h, open, stop)
 		}
 		stop = open
@@ -419,15 +438,12 @@ builder_counts :: #force_no_inline proc(h: ^Builder, n: int) -> bool {
 	k := h.n_counts
 	for i in 0 ..< n {
 		node := h.doc.nodes[i]
-		if node.spelling != core.MAX_CHILDREN || node.role == .Partial || (node.kind != .Array && node.kind != .Map) {
+		if node.spelling != core.MAX_CHILDREN || node.role == .Partial || (node.kind != .Array && node.kind != .Object) {
 			continue
 		}
 		count := 0
 		it := core.children(&h.doc, core.Node_Index(i))
-		for {
-			if _, more := core.child_next(&it); !more {
-				break
-			}
+		for _ in core.child_next(&it) {
 			count += 1
 		}
 		if k == len(fresh) {

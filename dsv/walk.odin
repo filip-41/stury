@@ -15,7 +15,7 @@ package dsv
 import "base:runtime"
 import core "../core"
 import kernel "../core/kernel"
-import build "../core/build"
+import engine "../core/build"
 
 // The grammar a text follows, chosen at compile time. Each spec instantiates its own pass, so a CSV build holds no TSV
 // code.
@@ -37,18 +37,18 @@ Options :: struct {
 	// The rules a text may break, each with a fixed reading. Empty by default.
 	tolerate:  bit_set[core.Tolerance; u8],
 	crlf:      bool, // a write ends each record with CR LF, where a read takes either
-	// A document's unquoted cell that is empty, `true`, `false` or exactly a JSON number resolves as Null, True, False or
-	// Number, as `core.resolve` and a JSON write read it. Off, every value cell is a String.
+	// A document's unquoted cell that is `true`, `false` or exactly a JSON number is True, False or Number, as `core.kind`
+	// and a JSON write read it. Off, every value cell is a String but an empty one, which is Null either way.
 	infer:     bool,
 }
 
 // The `core.Fault.detail` values a delimited text's faults use.
 Detail :: enum u8 {
 	None,
-	Too_Many, // `Bad_Char`, a record wider than the first, at the delimiter that starts its extra cell
-	Too_Few, // `Bad_Char`, a record narrower than the first, at its line end
+	Too_Many, // `Bad_Width`, a record wider than the first, at the delimiter that starts its extra cell
+	Too_Few, // `Bad_Width`, a record narrower than the first, at its line end
 	Bare_Quote, // `Bad_Char`, a quote inside an unquoted CSV cell
-	Bad_Utf8, // `Bad_Char`, at the lead byte of an ill-formed sequence
+	Invalid_Utf8, // `Bad_Char`, at the lead byte of an ill-formed sequence
 	Lone_Cr, // `Bad_Char`, a CR with no LF after it
 	After_Quote, // `Bad_Char`, a byte after a closing quote that is not a quote, the delimiter or a line end
 	Open_Quote, // `Truncated`, at the opening quote of a quoted cell the text never closes
@@ -57,7 +57,7 @@ Detail :: enum u8 {
 
 // A delimited text's rules, indexed by `Detail`. Every fault the walk returns points to this table.
 @(rodata)
-RULES := core.Rules{"dsv", {{}, {"too_many_fields", "Record has more fields than the first record"}, {"too_few_fields", "Record has fewer fields than the first record"}, {"bare_quote", "Quote inside an unquoted field"}, {"bad_utf8", "Invalid UTF-8"}, {"lone_cr", "Carriage return not before a line feed"}, {"after_quote", "Character after a closing quote"}, {"open_quote", "Unfinished quoted field"}, {"cut_utf8", "Unfinished UTF-8 sequence"}}}
+RULES := core.Rules{"dsv", {{}, {"too_many_fields", "Record has more fields than the first record"}, {"too_few_fields", "Record has fewer fields than the first record"}, {"bare_quote", "Quote inside an unquoted field"}, {"invalid_utf8", "Invalid UTF-8"}, {"lone_cr", "Carriage return not before a line feed"}, {"after_quote", "Character after a closing quote"}, {"open_quote", "Unfinished quoted field"}, {"cut_utf8", "Unfinished UTF-8 sequence"}}}
 
 // The delimiter byte of `spec` when `delimiter` is 0: `,` for CSV and Plain and a tab for TSV. A walk reads it once
 // into a register and compares each block against it.
@@ -88,7 +88,7 @@ option_fault :: #force_inline proc "contextless" ($S: Spec, opts: Options) -> Ma
 // byte read, or the fault. A BOM at a later byte is a cell byte. A `lo` past `len(src)` reads an empty text. When the
 // hook stops the walk, `hi` is one past the token it stopped on and the text past it is unread, so `hi` is no document
 // boundary.
-// The tokens are an `Array` for the text, then for each record a `Map` (an `Array` when `opts.no_header`), each cell as
+// The tokens are an `Array` for the text, then for each record an `Object` (an `Array` when `opts.no_header`), each cell as
 // its column's header cell (`Plain`, role `Key`) and the cell itself (`Plain`, role `Value`), and an `End` over the
 // record's line end, 1 byte for LF and 2 for CR LF. The text's `End` is at its end, with `n` 0. A cell's span keeps its
 // quotes and leaves out the CR of a CR LF. The header makes no tokens, and an empty line or a line holding only a CR is
@@ -139,6 +139,48 @@ walk_keys :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}
 // header changes the verdict only under `.Ragged`. It is `core.validate` with `as(spec, opts)`.
 validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
 	return core.validate(src, as(spec, opts))
+}
+
+// Reads a delimited text as spec `spec` into a document, allocating its nodes with `allocator`. `opts.no_header` makes the
+// first record data. `.Refuse` returns an error at a header name that repeats another in the header row. The
+// document borrows `src`, which must outlive it, and `core.destroy` frees the document. It is `core.build` with
+// `as(spec, opts)`.
+build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+	return core.build(src, as(spec, opts), dups, allocator)
+}
+
+// The path reads of `core/build` over the handle. `scan`, `each_answer`, `find` and `set` take `spec` and `opts` and
+// forward to the same names in `core/build` with `as(spec, opts)`.
+@(private)
+scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+	return engine.scan_one(src, as(spec, opts), path, read, allocator)
+}
+
+@(private)
+scan_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+	return engine.scan_many(src, as(spec, opts), paths, read, allocator)
+}
+
+scan :: proc {scan_one, scan_many}
+
+@(private)
+each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+	return engine.each_answer_one(src, as(spec, opts), path, state, on, read, allocator)
+}
+
+@(private)
+each_answer_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+	return engine.each_answer_many(src, as(spec, opts), paths, state, on, read, allocator)
+}
+
+each_answer :: proc {each_answer_one, each_answer_many}
+
+find :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Path_Error) {
+	return engine.find(src, as(spec, opts), path, read, allocator)
+}
+
+set :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+	return engine.set(src, as(spec, opts), path, text, read, allocator)
 }
 
 // The handle's verdict on the text from `lo`, a record's start, checking records against `width` when it is above 0.
@@ -207,10 +249,10 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 		if f.at <= u64(s.line_end) {
 			if s.fault_at >= 0 {
 				if width_fault || u64(s.fault_at) < f.at {
-					return core.fault_at(u64(s.fault_at), .Bad_Char, u8(Detail.Too_Many))
+					return core.fault_at(u64(s.fault_at), .Bad_Width, u8(Detail.Too_Many))
 				}
 			} else if width_fault && s.cells < width {
-				return core.fault_at(u64(s.line_end_lo), .Bad_Char, u8(Detail.Too_Few))
+				return core.fault_at(u64(s.line_end_lo), .Bad_Width, u8(Detail.Too_Few))
 			}
 			return r
 		}
@@ -225,7 +267,7 @@ field_count_fault :: #force_no_inline proc "contextless" (src: []u8, lo: u64, $S
 run :: #force_inline proc "contextless" (src: []u8, lo: u64, $S: Spec, opts: Options, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), $EMIT: bool, keys: []core.Token, width := 0) -> u64 {
 	// A document build or a record batch with the default options runs its own pass instance with literal options,
 	// which fold the option tests and leave the instance for other options out of its registers.
-	when H == build.Builder || H == Batch {
+	when H == engine.Builder || H == Batch {
 		if opts == {} {
 			return run_tier(src, lo, S, opts, h, regs, on, EMIT, false, true, keys, width)
 		}

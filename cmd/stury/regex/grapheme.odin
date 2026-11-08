@@ -63,34 +63,26 @@ grapheme_behind :: proc(b: ^Grapheme_Behind, s: string, pos: int) -> (emoji, reg
 	// The characters the walk reads start at stop or after. Those before it are what b kept, the one holding byte
 	// stop among them.
 	stop := b.pos if 0 < b.pos && b.pos <= pos else 0
-	found := false
-	for q := pos; q > stop; {
-		if q = char_start(s, q - 1); q < stop {
-			break
-		}
-		if r, _ := decode(s, q); !in_table(TABLE_GCB_EXTEND, r) {
-			emoji, found = in_table(TABLE_PICTOGRAPHIC, r), true
-			break
-		}
-	}
-	if !found && stop > 0 {
-		emoji = b.emoji
-	}
-	found = false
-	for q := pos; q > stop; {
-		if q = char_start(s, q - 1); q < stop {
-			break
-		}
-		if r, _ := decode(s, q); !in_table(TABLE_REGIONAL, r) {
-			found = true
-			break
-		}
-		regional = !regional
-	}
-	if !found && stop > 0 {
-		regional = regional != b.regional
-	}
+	r, _, found := run_back(s, pos, stop, TABLE_GCB_EXTEND)
+	emoji = in_table(TABLE_PICTOGRAPHIC, r) if found else stop > 0 && b.emoji
+	_, n, ended := run_back(s, pos, stop, TABLE_REGIONAL)
+	regional = (n & 1 == 1) != (!ended && stop > 0 && b.regional)
 	b^ = {pos, emoji, regional}
+	return
+}
+
+// The characters of `table` that end s[stop:pos], counted back from pos, and the one before them when the walk
+// `found` it.
+@(private = "file")
+run_back :: proc(s: string, pos, stop, table: int) -> (r: rune, n: int, found: bool) {
+	for q := pos; q > stop; n += 1 {
+		if q = char_start(s, q - 1); q < stop {
+			return
+		}
+		if r, _ = decode(s, q); !in_table(table, r) {
+			return r, n, true
+		}
+	}
 	return
 }
 

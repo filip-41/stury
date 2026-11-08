@@ -24,7 +24,7 @@ compile_regex :: proc(ip: ^Interp, pattern: string, flags: Value) -> (r: Regex, 
 	if kind(flags) != .Null {
 		f, ok := string_of(flags)
 		if !ok {
-			return r, fail(ip, "%s (%s) is not a string", type_name(flags), brief(flags))
+			return r, fail(ip, "%s (%s) is not a string", type_name(flags), brief(ip, flags))
 		}
 		for c in f {
 			switch c {

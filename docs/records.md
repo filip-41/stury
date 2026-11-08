@@ -10,15 +10,15 @@ records.open_stream :: proc(input: io.Reader, as: core.As, framing := core.Frami
 records.next  :: proc(it: ^records.Reader) -> (records.Record, bool)
 records.read  :: proc(it: ^records.Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (more: bool, err: core.Typed_Error)
 records.build :: proc(it: ^records.Reader, rec: records.Record, allocator := context.allocator) -> (core.Document, core.Document_Error)
-records.build :: proc(src: []u8, as: core.As, refuse_duplicates := false, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Document_Error)
+records.build :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Document_Error)
 records.scan  :: proc(it: ^records.Reader, path: core.Path, read := core.Path_Options{}) -> (rec: records.Record, doc: core.Document, err: core.Path_Error, more: bool)
 records.column :: proc(it: ^records.Reader, name: string) -> int
 records.cell   :: proc(it: ^records.Reader, rec: records.Record, column: int, buf: []u8) -> (string, bool)
-records.cells  :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto := max(int)) -> ([]Maybe(string), bool)
+records.cells  :: proc(it: ^records.Reader, rec: records.Record, buf: []u8, upto := max(int)) -> ([]write.Scalar, bool)
 records.next_window :: proc(it: ^records.Reader) -> (window: []u8, base: u64, ok: bool)
 records.close :: proc(it: ^records.Reader)
 records.check :: proc(src: []u8, as: core.As, framing := core.Framing.Lines, allocator := context.allocator, runner: ^core.Runner = nil, at: u64 = 0) -> (faults: []core.Fault, err: runtime.Allocator_Error)
-records.validate :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
+records.validate_parallel :: proc(src: []u8, as: core.As, runner: ^core.Runner = nil) -> Maybe(core.Fault)
 records.each :: proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^records.Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> Maybe(core.Fault)
 json.spine :: proc(src: []u8, as: core.As) -> (at: u64, levels: int, ok: bool)
 ```
@@ -55,18 +55,20 @@ identifier. A quoted key is a string, so `json.unmarshal(rec.key, spec, &name, &
 
 ## Typed reads and documents
 
-`read` frames the next record and reads it into `target` by `plan`, as the format's `unmarshal` of the record's text
-reads it, refusals included, with every offset from the input's first byte. It returns false at the input's end, on
-the fault in `it.fault`, with `.Plan_Mismatch` when `plan` is no plan of `T` by the format, or with `.Out_Of_Memory`
-when the reader's own memory is refused. A refused record returns true and its error, and the next `read` goes on past it.
+`read` frames the next record and reads it into `target` by `plan`, or by a plan of `T` the reader builds and keeps when
+`plan` is nil, as the format's `unmarshal` of the record's text
+reads it, refusals included, with every offset from the input's first byte. It returns its error and whether there was
+a record, so a `for` loop reads every record. It returns false at the input's end and after the fault in `it.fault`. A
+refused record returns its error and true, and the next `read` goes on past it. An error that ends the records returns
+true too, and sets `it.fault` when no fault of the text did: `.Plan_Mismatch` when `plan` is no plan of `T` by the
+format, the plan's own error when it failed, and `.No_Memory` when the reader's own memory is refused.
 
 ```odin
-for {
-	v: Log_Line
-	more, err := records.read(&it, &v, &plan)
-	if !more { break }
+v: Log_Line
+for err in records.read(&it, &v, &plan) {
 	if err.kind != .None { continue } // a refused record
 }
+if fault, faulted := it.fault.?; faulted { ... } // the fault that ended the records
 ```
 
 The reader's first `read` allocates its open containers with `open`'s allocator, and `close` frees them. When a
@@ -89,7 +91,7 @@ every offset in an error from the input's first byte. The path is planned at the
 document's buffers too, so the document lives until the next call on the reader, and every call passes the same `path`
 and `read`. JSON reads the record in place: the document's `src` is the input up to the record's end, and under
 `.Concatenated` strict JSON one walk both frames the record and answers the path. A stream, and a format with no
-scan of its own (dsv), build the record and query it, where `read.stop_early` and `read.refuse_duplicates` do not apply.
+scan of its own (dsv), build the record and query it, where `read.stop_early` and `.Refuse` do not apply.
 A record whose text does not read returns true and its error, and the next `scan` goes on past it.
 
 ## Framings
@@ -112,9 +114,9 @@ A record whose text does not read returns true and its error, and the next `scan
   `Bad_Char` at the first byte after it (detail `Trailing`), and is refused whole. A record of number characters alone faults with
   `Bad_Number` at its end (detail `Cut_Number`), as RFC 7464 asks a reader to drop it, whatever a typed target makes
   of it.
-- Under `.Concatenated`, whitespace, 0x1E and comments lie between documents. A number or literal that runs on into a
-  byte that may not follow a value, as in `1x`, `1,` or `1]`, or into a `/` where no comment may start, is one bad
-  token, as jq reads it, and no record.
+- Under `.Concatenated`, whitespace and comments lie between documents, and a 0x1E there is `Bad_Char`. A number or
+  literal that runs on into a byte that may not follow a value, as in `1x`, `1,` or `1]`, or into a `/` where no
+  comment may start, is one bad token and no record. Both are as jq reads its input.
 - Under `.Entries`, a scalar root has no entries and is judged whole. A value is judged one level below the root, so
   under a root at the deepest level an entry may be no container.
 - A format with no record reader, or one that does not take the framing, ends the records with `.Bad_Option` before
@@ -130,18 +132,18 @@ records: the next one is read past it.
 the records. Under `.Entries` that fault is the one `validate` gives for the whole text.
 
 `check` judges every record from `at` and returns the faults of the refused ones in source order, then the fault that
-ended the records, if any. `validate` returns the fault the format's `validate` gives for the whole text, read as the
+ended the records, if any. `validate_parallel` returns the fault the format's `validate` gives for the whole text, read as the
 entries of its spine or its root, and `.Bad_Option` for a format that does not take it.
 
 ## Spines
 
 Under `.Entries` a text is read in pieces across its root's entries. A text whose bulk is an array inside objects,
 as `{"meta":{...},"logs":[...]}`, has one root entry, so `json.spine` finds that array: the root array, or the value
-of the member of a root object, up to `json.SPINE_LEVELS` objects deep, that does not end within the first bytes of
+of the member of a root object, up to four objects deep, that does not end within the first bytes of
 it, past at most 16 members in each object whose values end within 4096 bytes. `at` is the array's `[` and `levels`
 the objects around it. `records.open(src, as, .Entries, at)` then gives the array's elements, each judged at its depth in the text, and at the array's close the text with the elements cut out is
 walked whole, so the frame around them is judged once. Any fault is the one `validate` gives for the whole text.
-`records.validate` reads a JSON text this way when it has a spine.
+`records.validate_parallel` reads a JSON text this way when it has a spine.
 
 ## Rows
 
@@ -171,12 +173,13 @@ for rec in records.next(&it) {
 - `cell` returns cell `column` of the row `next` gave last, as a slice of the input when it needs no decode, else
   decoded into `buf`. It returns false for another row, a column past the row, or a `buf` too short.
 - `cells` returns every cell of the row `next` gave last, or its first `upto`, as `write_cells` takes them: nil for an
-  empty unquoted cell, `""` for a quoted one. A row is split no further than its cells asked for. They last until the next call on the reader, and the decoded ones share `buf`.
+  empty unquoted cell, `""` for a quoted one, a string for a text, and under `infer` an unquoted number, `true` or
+  `false` as a `write.Number_Literal` or `.True` or `.False`, so a row written back with the same handle reads the same. A row is split no further than its cells asked for. They last until the next call on the reader, and the decoded ones share `buf`.
 - `read` reads a row into a row type, from a plan of the row type, not of a list of rows. It reads as `dsv.unmarshal`
   reads a text of the header and that row into the row, refusals of the header included. A list row reads as the row
   alone, since it takes the header as data. A plan of a list of rows is `.Plan_Mismatch`, and a map row with no
   header `.Unsupported`. The row's text is split once, into the plan's fields.
-- `build` of the row `next` gave last is a document over the whole input: a `Map` keyed by the header's cells, or an
+- `build` of the row `next` gave last is a document over the whole input: an `Object` keyed by the header's cells, or an
   `Array` with no header. Its offsets are the input's. Another row is `.Bad_Index`.
 - An unclosed quoted field is a `Truncated` fault at its opening quote, the same in `validate`, `unmarshal` and `build`.
 
@@ -230,7 +233,7 @@ whitespace, and its records are read with offsets from `base`.
 
 ## Threads
 
-With a `runner`, such as a `host.Pool`'s, `check` and `validate` read a long text in pieces on its threads and the
+With a `runner`, such as a `host.Pool`'s, `check` and `validate_parallel` read a long text in pieces on its threads and the
 caller's, with the answer one thread gives: the same faults at the same bytes. Each piece guesses where a record may
 start in it, past an LF or 0x1E, or at a comma under `.Entries`, and reads records from there until one starts past
 the piece. A guess that leads to a fault is dropped for the next one. Then the records are read in source order on
@@ -240,7 +243,7 @@ never the answer. A runner with no threads and a short text read on the caller a
 
 A dsv text is read in pieces of rows. A piece's guess is the byte past an LF, and its rows are checked against the
 width the text's first record set. A guess inside a quoted cell either faults, and the piece guesses again, or gives
-rows the in-order reading never meets. In `check` and `validate` the walk that frames the rows judges them, so the
+rows the in-order reading never meets. In `check` and `validate_parallel` the walk that frames the rows judges them, so the
 in-order reading takes the rows between two pieces' starts as one walk.
 
 `each` hands a task readers over pieces of the text, whose records together are those `next` gives, each once. The
@@ -292,10 +295,10 @@ and stores the fault that ends the records in `it.fault`. `judge` returns a reco
 one, and `build_next` frames the next record by the walk that writes its nodes to a builder (nil where the format
 builds whole texts on one thread). `guess` moves a piece's reader to where a record may start, and marks it so that a fault ends its records
 without the cost of finding the whole text's fault. `exact` gives the scan whose cuts `each` starts pieces at, and `piece` turns a copy of a reader past its
-first record into a piece's reader. `whole` names the framing and offset `validate` reads a whole
+first record into a piece's reader. `whole` names the framing and offset `validate_parallel` reads a whole
 text by. `column`, `cell` and `cells` are a format's with named columns, and `close` frees the memory the format keeps in
 `Reader.format`. `ends` names, per framing, the byte a backward scan finds a whole record's end by (JSON's LF and 0x1E),
-0 where only a walk of the records finds it, and 0xff where the format reads no stream under that framing. `core` stores the table as a
+and 0 where only a walk of the records finds it. `core` stores the table as a
 `rawptr`, since `core/records` imports `core`.
 
 dsv reads a stream under `.Lines`. A quoted cell may hold an LF, so the window is found by walking, as under

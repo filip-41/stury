@@ -3,7 +3,11 @@
 
 The output is deterministic (no clock, no network, only seeded PRNGs), so it matches manifest.toml's [fixtures]
 hashes. Most generators use CPython's `random` module; the hashes were checked on CPython 3.14. With no NAME every
-fixture is written. After a generator change, paste the printed hashes into the manifest.
+fixture is written. Exit status 1 means a fixture the manifest pins came out with other bytes. `--check` writes nothing
+and also fails on a fixture the manifest does not pin.
+
+To add a fixture, add its generator to FIXTURES, run `python3 bench/gen.py NAME`, and paste the printed line into
+manifest.toml. After a generator change, paste the printed hashes the same way.
 
     python3 bench/gen.py [NAME...] [--check]
 """
@@ -531,7 +535,7 @@ FIXTURES = {
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--check", action="store_true", help="exit 1 when a fixture's hash is not the manifest's")
+    ap.add_argument("--check", action="store_true", help="write nothing, exit 1 when a fixture's hash is not the manifest's")
     ap.add_argument("names", nargs="*", metavar="NAME", help="write only these fixtures")
     a = ap.parse_args()
     unknown = [n for n in a.names if n not in FIXTURES]
@@ -540,20 +544,22 @@ def main() -> int:
     names = sorted(a.names or FIXTURES)
     with open(os.path.join(HERE, "manifest.toml"), "rb") as f:
         pinned = tomllib.load(f)["fixtures"]
-    os.makedirs(OUT, exist_ok=True)
+    if not a.check:
+        os.makedirs(OUT, exist_ok=True)
     off = []
     for name in names:
         gen, args = FIXTURES[name]
         data = gen(*args)
-        with open(os.path.join(OUT, name), "wb") as f:
-            f.write(data)
+        if not a.check:
+            with open(os.path.join(OUT, name), "wb") as f:
+                f.write(data)
         digest = hashlib.sha256(data).hexdigest()
         if digest != pinned.get(name):
             off.append(name)
         print('"%s" = "%s"' % (name, digest))
     if off:
         print("not the manifest's bytes: " + ", ".join(off), file=sys.stderr)
-        return 1 if a.check else 0
+        return 1 if a.check or any(name in pinned for name in off) else 0
     return 0
 
 

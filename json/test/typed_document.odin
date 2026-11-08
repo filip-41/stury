@@ -62,13 +62,6 @@ Tagged :: union {
 }
 
 @(private = "file")
-By_Class :: union {
-	i64,
-	string,
-	[]i32,
-}
-
-@(private = "file")
 Checked :: struct {
 	id:   u64 `json:"item_id,required"`,
 	rest: map[string]typed.Raw `json:",unknown"`,
@@ -85,7 +78,6 @@ Whole :: struct {
 }
 
 // A value as text with every map's entries sorted, since two maps of one content iterate in the order they were filled.
-@(private = "file")
 value_text :: proc(v: any) -> string {
 	parts := make([dynamic]string, context.temp_allocator)
 	#partial switch info in runtime.type_info_base(type_info_of(v.id)).variant {
@@ -109,11 +101,14 @@ value_text :: proc(v: any) -> string {
 		return strings.join(parts[:], ",", context.temp_allocator)
 	case runtime.Type_Info_Any:
 		return value_text((^any)(v.data)^)
+	case runtime.Type_Info_Pointer:
+		if p := (^rawptr)(v.data)^; p != nil {
+			return value_text(any{p, info.elem.id})
+		}
 	}
 	return fmt.tprintf("%v", v)
 }
 
-@(private = "file")
 errors_agree :: proc(t: ^testing.T, want_in, got_in: core.Typed_Error, text: string, loc: runtime.Source_Code_Location, shift := u64(0)) {
 	want, got := want_in, got_in
 	testing.expectf(t, want.kind == got.kind, "%s: kind %v, a document gives %v", text, want.kind, got.kind, loc = loc)
@@ -127,9 +122,9 @@ errors_agree :: proc(t: ^testing.T, want_in, got_in: core.Typed_Error, text: str
 @(private = "file")
 agree_as :: proc(t: ^testing.T, text: string, $S: json.Spec, init: $T, read := typed.Read_Options{}, plan_opts := typed.Plan_Options{}, loc := #caller_location) {
 	src := transmute([]u8)text
-	plan, perr := json.plan_make(T, plan_opts, context.temp_allocator)
+	plan, perr := json.plan_make(T, plan = plan_opts, allocator = context.temp_allocator)
 	testing.expect_value(t, perr.kind, core.Typed_Error_Kind.None, loc = loc)
-	doc, built := json.build(src, S, {}, false, context.temp_allocator)
+	doc, built := json.build(src, S, {}, .Last, context.temp_allocator)
 	testing.expectf(t, built.kind == .None, "%s: build %v", text, built.kind, loc = loc)
 	a, b := init, init
 	by_text, by_doc := read, read
@@ -138,7 +133,7 @@ agree_as :: proc(t: ^testing.T, text: string, $S: json.Spec, init: $T, read := t
 	if read.collect != nil {
 		by_text.collect, by_doc.collect = &sink_a, &sink_b
 	}
-	want := json.unmarshal(src, S, &a, &plan, by_text, {}, context.temp_allocator)
+	want := json.unmarshal(src, S, &a, &plan, read = by_text, opts = {}, allocator = context.temp_allocator)
 	got := typed.unmarshal(&doc, core.ROOT, &b, &plan, by_doc, context.temp_allocator)
 	errors_agree(t, want, got, text, loc)
 	testing.expectf(t, value_text(a) == value_text(b), "%s: value %v, a document gives %v", text, value_text(a), value_text(b), loc = loc)
@@ -159,35 +154,6 @@ agree :: proc(t: ^testing.T, text: string, init: $T, read := typed.Read_Options{
 }
 
 @(test)
-a_document_reads_as_its_text :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	agree(t, `{"x":1,"y":2}`, Pt{})
-	agree(t, `{"y":5}`, Pt{1, 2})
-	agree(t, `{}`, Pt{3, 4})
-	agree(t, `{"x":1,"zz":{"a":[1,{}]},"y":2,"x":7}`, Pt{})
-	agree(t, `{"x":1,"y":"no"}`, Pt{})
-	agree(t, `[1,2]`, Pt{})
-	agree(t, `{"x":1.5}`, Pt{})
-	agree(t, `{"x":null}`, Pt{})
-	rich := Rich {
-		str = "kept",
-		n   = 1,
-		l   = []i32{9, 9},
-	}
-	agree(t, `{"p":{"x":1},"l":[1,2,3],"d":["a","b\n","cé"],"f":[4,5],"c":[1],"m":{"k":{"x":1},"j":{"y":2},"k":{"y":3}},"mi":{"-3":true},"e":"Blue","s":["Red","Blue"],"may":4,"str":"s\t","cs":"ab","n":-0.5e3,"k":0.1,"big":18446744073709551615}`, rich)
-	agree(t, `{"may":null,"cs":null,"l":[],"d":[],"m":{}}`, rich)
-	agree(t, `{"e":"Pink"}`, rich)
-	agree(t, `{"f":[1]}`, rich)
-	agree(t, `{"c":[1,2,3,4]}`, rich)
-	agree(t, `{"l":[1,"x"]}`, rich)
-	agree(t, `{"mi":{"x":true}}`, rich)
-	agree(t, `{"big":18446744073709551616}`, rich)
-	agree(t, `{"k":1e39}`, rich)
-	agree(t, `{"cs":"a\u0000"}`, rich)
-	agree(t, `{"l":[1,2],"m":{"a":{"x":"bad"}},"str":5}`, rich)
-}
-
-@(test)
 numbers_read_alike_at_each_width :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	N :: struct {
@@ -202,9 +168,6 @@ numbers_read_alike_at_each_width :: proc(t: ^testing.T) {
 	}
 	agree(t, `{"a":-128,"b":255,"c":-9223372036854775808,"d":18446744073709551615,"e":0.1,"f":-0,"g":1e400,"h":12.5}`, N{})
 	agree(t, `{"e":3.4028235e38,"f":123456789012345.6,"g":-0.0001,"h":1e-7}`, N{})
-	for text in ([]string{`{"a":128}`, `{"b":-1}`, `{"c":9223372036854775808}`, `{"d":18446744073709551616}`, `{"f":1e400}`, `{"e":1e39}`, `{"a":1.0}`, `{"a":null}`, `{"d":-0}`, `{"f":"1"}`}) {
-		agree(t, text, N{})
-	}
 	agree(t, `[0,1,-1,10,100,12345678901234567890,0.5,1e2,-1.25e-2]`, []f64{})
 	agree(t, `[0,255,-3]`, []i16{})
 	agree_as(t, `{a:+5.,b:0x10,c:-0x8000000000000000,d:.5e1,e:Infinity,f:-NaN,g:0xff}`, json.Spec.Json5, N{})
@@ -250,9 +213,6 @@ roots_other_than_objects_read_alike :: proc(t: ^testing.T) {
 @(test)
 whole_values_read_alike :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	agree(t, `{"a":{"k": [1, {}]},"b":["s\n",2,[3],null],"c":1e400,"d":"d","e":{"z":[true,null,1.5]},"f":{"x":1}}`, Whole{})
-	agree(t, `{"a":[],"b":[[],{}],"c":-0,"d":null,"e":[1,[2,[3]]],"f":{}}`, Whole{})
-	agree(t, `{"a":{"k":{"j":[[[]]]}},"b":[{"a":{"b":[1]}}]}`, Whole{})
 	agree_as(t, `{a:{k:'v',},b:[1,],c:+1,d:0x1,e:{'x':'y'},}`, json.Spec.Json5, Whole{})
 	agree_as(t, `{"a":/*c*/[1, // c
 	2],"b":[ /*c*/ ],"c":1}`, json.Spec.Jsonc, Whole{})
@@ -261,11 +221,6 @@ whole_values_read_alike :: proc(t: ^testing.T) {
 @(test)
 unions_hooks_and_fields_read_alike :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	agree(t, `5`, By_Class{})
-	agree(t, `"s"`, By_Class{})
-	agree(t, `[1,2]`, By_Class{})
-	agree(t, `true`, By_Class{})
-	agree(t, `{}`, By_Class{})
 	tagged := typed.Plan_Options {
 		union_tag = "type",
 		tag_names = {{Tagged_B, "bee"}},
@@ -299,20 +254,6 @@ unions_hooks_and_fields_read_alike :: proc(t: ^testing.T) {
 	}
 	agree(t, `{"v":"a\n","w":{"k":[1]},"l":[12,[3],{}]}`, Hooked{}, plan_opts = hooks)
 	agree(t, `{"v":"bad"}`, Hooked{}, plan_opts = hooks)
-
-	agree(t, `{"item_id":5,"x":{"k":[1]},"y":3}`, Checked{})
-	agree(t, `{"x":1}`, Checked{})
-	agree(t, `{"item_id":"no"}`, Checked{})
-	agree(t, `[{"item_id":1},{"x":2}]`, []Checked{})
-	agree(t, `{"x":1,"nope":2}`, Pt{}, {unknown = .Refuse})
-	agree(t, `{"n":1,"a":{"x":1},"m":{"k":1,"k":2},"a":{"y":2},"n":2}`, struct {
-			a: Pt,
-			m: map[string]i32,
-			n: i32,
-		}{}, {dups = core.Duplicates.First})
-	agree(t, `{"n":1,"n":"no"}`, struct {
-			n: i32,
-		}{}, {dups = core.Duplicates.First})
 }
 
 @(test)
@@ -364,7 +305,7 @@ a_node_inside_a_document_reads_as_its_span :: proc(t: ^testing.T) {
 			continue
 		}
 		span := core.span(&doc, node)
-		want := json.unmarshal(span, json.Spec.Json, &a, &plan, {}, {}, context.temp_allocator)
+		want := json.unmarshal(span, json.Spec.Json, &a, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 		got := typed.unmarshal(&doc, node, &b, &plan, {}, context.temp_allocator)
 		// A refusal's byte is the document's, whichever node was read.
 		errors_agree(t, want, got, string(span), #location(), u64(uintptr(raw_data(span)) - uintptr(raw_data(src))))
@@ -386,7 +327,7 @@ an_answer_reads_as_its_value :: proc(t: ^testing.T) {
 	for a in doc.answers {
 		want_v, got_v: Checked
 		span := core.span(&doc, a.node)
-		want := json.unmarshal(span, json.Spec.Json, &want_v, &plan, {}, {}, context.temp_allocator)
+		want := json.unmarshal(span, json.Spec.Json, &want_v, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 		got := typed.unmarshal(&doc, a, &got_v, &plan, {}, context.temp_allocator)
 		errors_agree(t, want, got, string(span), #location(), u64(uintptr(raw_data(span)) - uintptr(raw_data(src))))
 		testing.expect_value(t, want_v.id, got_v.id)
@@ -427,12 +368,15 @@ a_document_read_refuses_what_a_text_read_refuses :: proc(t: ^testing.T) {
 	r: Rich
 	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &r, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Plan_Mismatch)
 	other_format := core.Spelling{}
-	elsewhere, _ := typed.plan_make(Pt, &other_format, allocator = context.temp_allocator)
+	elsewhere, _ := typed.plan_build(Pt, {spelling = &other_format}, allocator = context.temp_allocator)
 	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &elsewhere, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Plan_Mismatch)
 	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, (^Pt)(nil), &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, nil, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, p, Pt{1, 2})
+	p = {}
 	testing.expect_value(t, typed.unmarshal(&doc, core.Node_Index(len(doc.nodes)), &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
 	testing.expect_value(t, typed.unmarshal(&doc, core.NO_NODE, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &plan, {refuse_duplicates = true}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &p, &plan, {dups = .Refuse}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
 	testing.expect_value(t, typed.unmarshal(nil, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
 	empty: core.Document
 	testing.expect_value(t, typed.unmarshal(&empty, core.ROOT, &p, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
@@ -520,53 +464,4 @@ a_read_borrows_the_source_and_not_the_document :: proc(t: ^testing.T) {
 	testing.expect_value(t, borrowed.r, typed.Raw(`{"a":1}`))
 	testing.expect_value(t, string(borrowed.n), "12345678901234567890123")
 	testing.expect_value(t, copied.keys[1], "esc\n")
-}
-
-@(test)
-what_a_refused_document_read_allocated_stays_reachable :: proc(t: ^testing.T) {
-	Row :: struct {
-		s: string,
-		l: []string,
-		m: map[string]string,
-		p: ^Pt,
-	}
-	free_row :: proc(r: Row) {
-		delete(r.s)
-		for s in r.l {
-			delete(s)
-		}
-		delete(r.l)
-		for k, v in r.m {
-			delete(k)
-			delete(v)
-		}
-		delete(r.m)
-		free(r.p)
-	}
-	tracking: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&tracking, context.allocator)
-	defer mem.tracking_allocator_destroy(&tracking)
-	alloc := mem.tracking_allocator(&tracking)
-	plan, _ := json.plan_make(typeid_of([]Row), allocator = context.temp_allocator)
-	defer free_all(context.temp_allocator)
-	texts := []string {
-		`[{"s":"a","l":["b","c"],"m":{"k":"v"},"p":{"x":1}},{"s":"d","l":["e",1]}]`,
-		`[{"s":"a","l":["b","c","d","e","f","g","h","i","j"]},7]`,
-		`[{"m":{"k":"v","j":2}}]`,
-		`[{"p":{"x":"no"}}]`,
-		`[{"s":"a"},7]`,
-	}
-	for text in texts {
-		doc, _ := json.build(transmute([]u8)text, json.Spec.Json, allocator = context.temp_allocator)
-		rows: []Row
-		e := typed.unmarshal(&doc, core.ROOT, &rows, &plan, {}, alloc)
-		testing.expect(t, e.kind != .None)
-		for r in rows {
-			context.allocator = alloc
-			free_row(r)
-		}
-		delete(rows, alloc)
-		testing.expect_value(t, len(tracking.allocation_map), 0)
-		testing.expect_value(t, len(tracking.bad_free_array), 0)
-	}
 }

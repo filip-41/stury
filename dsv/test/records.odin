@@ -13,6 +13,7 @@ import "core:testing"
 import core "../../core"
 import host "../../host"
 import typed "../../core/typed"
+import write "../../core/write"
 import records "../../core/records"
 import dsv ".."
 import walktest "../../walktest"
@@ -224,7 +225,7 @@ rows_across_batches :: proc(t: ^testing.T) {
 	expect_rows(t, strings.to_string(wide), .Csv, {no_header = true})
 }
 
-// A text read in pieces on threads against the same text read on one, and `records.validate` against `validate`: the
+// A text read in pieces on threads against the same text read on one, and `records.validate_parallel` against `validate`: the
 // same faults at the same bytes, at every width. The tests build pieces of one byte, so every byte is a cut, inside
 // quoted cells and CRLF pairs among them.
 @(private = "file")
@@ -232,7 +233,7 @@ expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: d
 	text, as := transmute([]u8)src, dsv.as(spec, opts)
 	serial, _ := records.check(text, as, .Lines, context.temp_allocator)
 	whole := dsv.validate(text, spec, opts)
-	if v := records.validate(text, as); !testing.expectf(t, v == whole, "%v %v %q: validate %v, want %v", spec, opts, src, v, whole) {
+	if v := records.validate_parallel(text, as); !testing.expectf(t, v == whole, "%v %v %q: validate %v, want %v", spec, opts, src, v, whole) {
 		return false
 	}
 	for &pool in pools {
@@ -240,7 +241,7 @@ expect_chain_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, spec: d
 		if !testing.expectf(t, slice.equal(got, serial), "%v %v %q at width %d: %v, want %v", spec, opts, src, pool.runner.threads + 1, got, serial) {
 			return false
 		}
-		if v := records.validate(text, as, &pool.runner); !testing.expectf(t, v == whole, "%v %v %q at width %d: validate %v, want %v", spec, opts, src, pool.runner.threads + 1, v, whole) {
+		if v := records.validate_parallel(text, as, &pool.runner); !testing.expectf(t, v == whole, "%v %v %q at width %d: validate %v, want %v", spec, opts, src, pool.runner.threads + 1, v, whole) {
 			return false
 		}
 	}
@@ -294,7 +295,7 @@ rows_name_wide_cells_by_position :: proc(t: ^testing.T) {
 	defer host.pool_destroy(&pool)
 	faults, _ := records.check(transmute([]u8)src, as, .Lines, context.temp_allocator, &pool.runner)
 	testing.expect_value(t, len(faults), 0)
-	testing.expect_value(t, records.validate(transmute([]u8)src, as, &pool.runner), nil)
+	testing.expect_value(t, records.validate_parallel(transmute([]u8)src, as, &pool.runner), nil)
 	path, _ := core.parse_path(`.["4"]`, context.temp_allocator)
 	same, _ := core.parse_path(`.["3"]`, context.temp_allocator)
 	for stream in ([]bool{false, true}) {
@@ -325,26 +326,6 @@ rows_name_wide_cells_by_position :: proc(t: ^testing.T) {
 }
 
 @(test)
-rows_scan_by_their_header :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	src := "a,b\n1,2\n3,5\n\"x,\"\"y\",4\n"
-	path, _ := core.parse_path(".a", context.temp_allocator)
-	it := records.open(transmute([]u8)src, dsv.as(.Csv))
-	defer records.close(&it)
-	got := make([dynamic]string, context.temp_allocator)
-	buf: [8]u8
-	for {
-		_, doc, err, more := records.scan(&it, path)
-		if !more {
-			break
-		}
-		text, _ := core.text(&doc, doc.answers[0].node, buf[:])
-		append(&got, fmt.tprint(err.kind, text))
-	}
-	testing.expect_value(t, fmt.tprint(got[:]), `["None 1", "None 3", "None x,\"y"]`)
-}
-
-@(test)
 rows_give_all_their_cells :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	src := "a,b,c,d\n,\"\",x,\"p\"\"q\"\n1,2,3,4\n"
@@ -372,6 +353,58 @@ rows_give_all_their_cells :: proc(t: ^testing.T) {
 		cells, ok = records.cells(&it, rec, nil)
 		testing.expectf(t, ok && fmt.tprint(cells) == `["1", "2", "3", "4"]`, "stream %v: %v", stream, cells)
 		records.close(&it)
+	}
+}
+
+// Under `infer` an unquoted number, `true` or `false` is that kind, and the writer writes the cells back as they read.
+@(test)
+cells_take_the_inferred_kinds :: proc(t: ^testing.T) {
+	src := "a,b,c,d,e\n1,\"2\",true,\"false\",\n"
+	as := dsv.as(.Csv, {infer = true})
+	it := records.open(transmute([]u8)src, as)
+	defer records.close(&it)
+	rec, _ := records.next(&it)
+	buf: [16]u8
+	cells, ok := records.cells(&it, rec, buf[:])
+	testing.expect(t, ok && len(cells) == 5)
+	testing.expect_value(t, cells[0], write.Scalar(write.Number_Literal{"1"}))
+	testing.expect_value(t, cells[1], write.Scalar("2"))
+	testing.expect_value(t, cells[2], write.Scalar(write.Tree_Part.True))
+	testing.expect_value(t, cells[3], write.Scalar("false"))
+	testing.expect(t, cells[4] == nil)
+	wr: records.Writer
+	records.writer_init(&wr, {}, as, allocator = context.temp_allocator)
+	records.write_cells(&wr, cells)
+	text, err := records.writer_end(&wr)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(text), "1,\"2\",true,\"false\",\n")
+}
+
+// A refused allocation in `cells` ends the records with `.No_Memory`, which a short buffer does not.
+@(test)
+cells_under_failing_allocators :: proc(t: ^testing.T) {
+	src := "a,b\n\"x\"\"y\",z\n"
+	for at := 0;; at += 1 {
+		f := walktest.Failing_Alloc{inner = context.allocator, fail_at = at, fail_on = true}
+		it := records.open(transmute([]u8)src, dsv.as(.Csv), allocator = walktest.failing_allocator(&f))
+		buf: [8]u8
+		cells: []write.Scalar
+		rec, more := records.next(&it)
+		ok := more
+		if more {
+			cells, ok = records.cells(&it, rec, buf[:])
+		}
+		failed := f.n > at
+		if ok {
+			testing.expectf(t, fmt.tprint(cells) == `["x\"y", "z"]`, "allocation %d: %v", at, cells)
+		} else {
+			fault, faulted := it.fault.?
+			testing.expectf(t, failed && faulted && fault.kind == .No_Memory, "allocation %d: %v", at, it.fault)
+		}
+		records.close(&it)
+		if !failed {
+			break
+		}
 	}
 }
 
@@ -459,15 +492,15 @@ moved_error :: proc(e: core.Typed_Error, from, by: u64) -> string {
 	if e.kind == .Walk && e.inner.at >= from {
 		e.inner.at += by
 	}
-	return fmt.tprint(e.kind, e.truncated, e.at, e.inner, e.steps[:e.n_steps])
+	return fmt.tprint(e)
 }
 
 @(private = "file")
 unmarshal_as :: proc(src: string, spec: dsv.Spec, target: ^$T, plan: ^typed.Plan, read: typed.Read_Options, opts: dsv.Options) -> core.Typed_Error {
 	switch spec {
-	case .Csv:   return dsv.unmarshal(transmute([]u8)src, .Csv, target, plan, read, opts, context.temp_allocator)
-	case .Tsv:   return dsv.unmarshal(transmute([]u8)src, .Tsv, target, plan, read, opts, context.temp_allocator)
-	case .Plain: return dsv.unmarshal(transmute([]u8)src, .Plain, target, plan, read, opts, context.temp_allocator)
+	case .Csv:   return dsv.unmarshal(transmute([]u8)src, .Csv, target, plan, read = read, opts = opts, allocator = context.temp_allocator)
+	case .Tsv:   return dsv.unmarshal(transmute([]u8)src, .Tsv, target, plan, read = read, opts = opts, allocator = context.temp_allocator)
+	case .Plain: return dsv.unmarshal(transmute([]u8)src, .Plain, target, plan, read = read, opts = opts, allocator = context.temp_allocator)
 	}
 	return {}
 }
@@ -493,15 +526,12 @@ expect_read :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Option
 	n := 0
 	for {
 		v: T
-		more, err := records.read(&it, &v, &plan, got_read, context.temp_allocator)
+		err, more := records.read(&it, &v, &plan, got_read, context.temp_allocator)
 		if !more {
-			if T == map[string]string && opts.no_header {
-				return testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
-			}
-			if !testing.expectf(t, err.kind == .None, "%v %q: read ended with %v", spec, src, err) {
-				return false
-			}
 			break
+		}
+		if T == map[string]string && opts.no_header {
+			return testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unsupported)
 		}
 		if n >= len(want) {
 			return testing.expectf(t, false, "%v %q: row %d past the model's", spec, src, n)
@@ -549,7 +579,7 @@ rows_read_as_unmarshal :: proc(t: ^testing.T) {
 	headers := []string{"a,b,c", "b,a,x", "a,a,c", "c,b,\"a\"", "x,y,z", "4,a,b"}
 	breakers := "\",\n1x"
 	sink: typed.Collected
-	reads := []typed.Read_Options{{borrow_strings = true}, {collect = &sink}, {refuse_duplicates = true}, {unknown = .Refuse}}
+	reads := []typed.Read_Options{{borrow_strings = true}, {collect = &sink}, {dups = .Refuse}, {unknown = .Refuse}}
 	for round in 0 ..< 30 {
 		spec := dsv.Spec(round % 3)
 		header := rand.choice(headers, gen)
@@ -579,22 +609,6 @@ rows_read_as_unmarshal :: proc(t: ^testing.T) {
 		}
 		free_all(context.temp_allocator)
 	}
-}
-
-@(test)
-row_target_reads_one_record :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	row: Record_Row
-	e := dsv.unmarshal(transmute([]u8)string("a,b\n1,x\n"), .Csv, &row, {borrow_strings = true}, {}, context.temp_allocator)
-	testing.expect(t, e.kind == .None && row.a == 1 && row.b == "x")
-	e = dsv.unmarshal(transmute([]u8)string("a,b\n1,x\n2,y\n"), .Csv, &row, {}, {}, context.temp_allocator)
-	testing.expectf(t, e.kind == .Wrong_Length && e.at == 8 && row.a == 1, "%v %v", e, row)
-	// A row written by `marshal` reads back.
-	text, merr := dsv.marshal(Record_Row{a = 3, b = "q,r", c = 1.5}, .Csv, allocator = context.temp_allocator)
-	testing.expect_value(t, merr.kind, core.Typed_Error_Kind.None)
-	back: Record_Row
-	e = dsv.unmarshal(text, .Csv, &back, {}, {}, context.temp_allocator)
-	testing.expect(t, e.kind == .None && back.a == 3 && back.b == "q,r" && back.c.? == 1.5)
 }
 
 // A reader that gives `sizes[n]` bytes at a time, cycling, or random sizes when `sizes` is empty.
@@ -712,9 +726,10 @@ rows_stream_as_in_memory :: proc(t: ^testing.T) {
 }
 
 // Every chunk size up to a text's length moves the window at a different byte, the header's line and quoted line ends
-// included.
+// included. An input that ends at any byte of its last row holds that row or gives the fault memory gives, never a wrong
+// row, and a cut inside an encoded character is held.
 @(test)
-rows_stream_at_every_chunk_size :: proc(t: ^testing.T) {
+rows_stream_at_every_chunk_size_and_cut :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	state := rand.create(11)
 	gen := rand.default_random_generator(&state)
@@ -729,24 +744,15 @@ rows_stream_at_every_chunk_size :: proc(t: ^testing.T) {
 			}
 		}
 	}
-}
-
-// An input that ends at any byte of its last row holds that row or gives the fault memory gives, never a wrong row.
-@(test)
-rows_stream_holds_a_cut_row :: proc(t: ^testing.T) {
-	defer free_all(context.temp_allocator)
-	state := rand.create(9)
-	gen := rand.default_random_generator(&state)
 	head := "a,b,c\n1,2,3\n"
-	src := strings.concatenate({head, "\"q,\nx\",é,\"é\"\"\"\n"}, context.temp_allocator)
-	for k in len(head) + 1 ..< len(src) {
+	cut := strings.concatenate({head, "\"q,\nx\",é,\"é\"\"\"\n"}, context.temp_allocator)
+	for k in len(head) + 1 ..< len(cut) {
 		for s in ([][]int{{1}, {3}, {}}) {
-			if !expect_stream(t, src[:k], .Csv, {}, s, gen) {
+			if !expect_stream(t, cut[:k], .Csv, {}, s, gen) {
 				return
 			}
 		}
 	}
-	// A cut inside an encoded character is held.
 	c := Chunked{src = transmute([]u8)string("a,b\n1,\xc3"), sizes = {2}}
 	it := records.open_stream(chunked(&c), dsv.as(.Csv))
 	defer records.close(&it)
@@ -755,6 +761,45 @@ rows_stream_holds_a_cut_row :: proc(t: ^testing.T) {
 		n += 1
 	}
 	testing.expectf(t, n == 0 && it.fault == nil && string(it.held) == "a,b\n1,\xc3", "%d rows, %v, held %q", n, it.fault, it.held)
+}
+
+// A reader given a new plan in the place of a destroyed one binds the columns again, for another type or other options.
+@(test)
+rows_read_rebinds_a_new_plan :: proc(t: ^testing.T) {
+	A :: struct {
+		a, b: int,
+	}
+	B :: struct {
+		b, a: int,
+	}
+	Camel :: struct {
+		first_name: int,
+	}
+	it := records.open(transmute([]u8)string("a,b\n1,2\n3,4\n"), dsv.as(.Csv))
+	defer records.close(&it)
+	plan, _ := dsv.plan_make(A, .Csv)
+	x: A
+	err, _ := records.read(&it, &x, &plan)
+	testing.expect_value(t, x, A{1, 2})
+	typed.plan_destroy(&plan)
+	plan, _ = dsv.plan_make(B, .Csv)
+	y: B
+	err, _ = records.read(&it, &y, &plan)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, y, B{b = 4, a = 3})
+	typed.plan_destroy(&plan)
+
+	named := records.open(transmute([]u8)string("first_name,firstName\n1,2\n3,4\n"), dsv.as(.Csv))
+	defer records.close(&named)
+	plan, _ = dsv.plan_make(Camel, .Csv)
+	z: Camel
+	records.read(&named, &z, &plan)
+	testing.expect_value(t, z, Camel{1})
+	typed.plan_destroy(&plan)
+	plan, _ = dsv.plan_make(Camel, .Csv, plan = {rename = .Camel})
+	records.read(&named, &z, &plan)
+	testing.expect_value(t, z, Camel{4})
+	typed.plan_destroy(&plan)
 }
 
 // `records.read` on a stream gives what it gives in memory, with the same offsets in its errors.
@@ -779,8 +824,8 @@ rows_stream_read_as_in_memory :: proc(t: ^testing.T) {
 		ss.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
 		for {
 			v, w: Required_Record_Row
-			more, err := records.read(&st, &v, &plan, {collect = &ss, unknown = .Refuse}, context.temp_allocator)
-			wmore, werr := records.read(&mem, &w, &plan, {collect = &ms, unknown = .Refuse}, context.temp_allocator)
+			err, more := records.read(&st, &v, &plan, {collect = &ss, unknown = .Refuse}, context.temp_allocator)
+			werr, wmore := records.read(&mem, &w, &plan, {collect = &ms, unknown = .Refuse}, context.temp_allocator)
 			if !more {
 				break
 			}
@@ -788,8 +833,8 @@ rows_stream_read_as_in_memory :: proc(t: ^testing.T) {
 				return
 			}
 			m, wm: map[string]string
-			_, merr := records.read(&st, &m, &mplan, {}, context.temp_allocator)
-			_, wmerr := records.read(&mem, &wm, &mplan, {}, context.temp_allocator)
+			merr, _ := records.read(&st, &m, &mplan, {}, context.temp_allocator)
+			wmerr, _ := records.read(&mem, &wm, &mplan, {}, context.temp_allocator)
 			if !testing.expectf(t, moved_error(merr, 0, 0) == moved_error(wmerr, 0, 0) && len(m) == len(wm), "%q: map %v %v, memory %v %v", src, m, merr, wm, wmerr) {
 				return
 			}
@@ -826,7 +871,7 @@ rows_read_in_bounded_memory :: proc(t: ^testing.T) {
 			_ = walktest.expect_bounded_reads(t, few, many, as, &maps, map[string]string) &&
 			walktest.expect_bounded_reads(t, few, many, as, &ints, map[string]int) &&
 			walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Row) &&
-			walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Row, {unknown = .Refuse, refuse_duplicates = true})
+			walktest.expect_bounded_reads(t, few, many, as, &rows, Number_Row, {unknown = .Refuse, dups = .Refuse})
 		}
 	}
 }
@@ -876,7 +921,7 @@ gather :: proc(g: ^Gathered, it: ^records.Reader, _: int) -> bool {
 			}
 		case .Read:
 			m: map[string]string
-			more, _ := records.read(it, &m, g.plan, {}, context.temp_allocator)
+			_, more := records.read(it, &m, g.plan, {}, context.temp_allocator)
 			if !more {
 				return it.fault == nil
 			}

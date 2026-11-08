@@ -16,8 +16,8 @@ import dsv ".."
 agree :: proc(t: ^testing.T, src: string, $T: typeid, $S: dsv.Spec, opts := dsv.Options{}, read := typed.Read_Options{}, loc := #caller_location) {
 	bytes := transmute([]u8)src
 	want, got: T
-	want_err := dsv.unmarshal(bytes, S, &want, read, opts, context.temp_allocator)
-	doc, built := dsv.build(bytes, S, opts, false, context.temp_allocator)
+	want_err := dsv.unmarshal(bytes, S, &want, read = read, opts = opts, allocator = context.temp_allocator)
+	doc, built := dsv.build(bytes, S, opts, .Last, context.temp_allocator)
 	defer core.destroy(&doc)
 	if built.kind != .None {
 		// A text the walk faults on builds no document.
@@ -80,19 +80,15 @@ a_document_reads_wide_records_as_its_text :: proc(t: ^testing.T) {
 	agree(t, "3,a\n1,2\n4,5,6\n", []Row, .Csv, ragged)
 	agree(t, "3,a\n1,2\n4,5,6\n", []Row, .Csv, ragged, {dups = .First})
 	agree(t, "3,a\n1,2\n4,5,x\n", []Row, .Csv, ragged, {dups = .First})
-}
-
-@(test)
-a_document_reads_a_single_row_plan_as_its_text_does :: proc(t: ^testing.T) {
+	// A column named by its position is bound when a cell reaches it, so a refusal of an earlier cell comes first, and a
+	// list row's header row holds the header's cells alone.
+	agree(t, "a\nx,2,3,4\n", []Row, .Csv, ragged, {unknown = .Refuse})
+	agree(t, "c\n1,2,3\n", [][]string, .Csv, ragged)
 	agree(t, "a,b\n1,x\n", struct { a: i64, b: string }, .Csv)
 	agree(t, "a,b\n1,x\n2,y\n", struct { a: i64, b: string }, .Csv)
 	agree(t, "a\nx\n", struct { a: i64 }, .Csv)
 	agree(t, "a,a\nx,1\n", struct { a: i64 }, .Csv)
 	agree(t, "a,a\n1,x\n", struct { a: i64 }, .Csv, read = {dups = .First})
-}
-
-@(test)
-a_document_reads_the_required_fields_as_its_text_does :: proc(t: ^testing.T) {
 	agree(t, "b\nx\n", []Required_Row, .Csv)
 	agree(t, "b,a\nx,1\ny,\n", []Required_Row, .Csv)
 	agree(t, "b,a\ny,\"2\"", []Required_Row, .Csv)
@@ -102,10 +98,6 @@ a_document_reads_the_required_fields_as_its_text_does :: proc(t: ^testing.T) {
 	agree(t, "b,a\ny\nz,1\n", []Required_Row, .Csv, {tolerate = {.Ragged}})
 	agree(t, "b,a\ny\r\nz,1\n", []Required_Row, .Csv, {tolerate = {.Ragged}})
 	agree(t, "b,a\nz,1\ny", []Required_Row, .Csv, {tolerate = {.Ragged}})
-}
-
-@(test)
-a_document_reads_each_row_form_as_its_text_does :: proc(t: ^testing.T) {
 	agree(t, "a,b\n1,\n", [][]string, .Csv)
 	agree(t, "1,\n", [][]Maybe(i32), .Csv)
 	agree(t, "a,\"b\"\"\"\n1,\n", []map[string]string, .Csv)
@@ -131,10 +123,6 @@ a_document_reads_each_spec_and_tolerance_as_its_text_does :: proc(t: ^testing.T)
 	agree(t, "a,b\n\"\xff\",1\n\xfe,2\n", []Row, .Csv, {tolerate = {.Invalid_Utf8}})
 	agree(t, "a,b\n\"\xffq\"\"\",1\n", []Row, .Csv, {tolerate = {.Invalid_Utf8}}, {borrow_strings = true})
 	agree(t, "a,b\n\"x\"y,1\n", []Row, .Csv, {tolerate = {.Bare_Quote}})
-}
-
-@(test)
-a_document_reads_a_long_text_as_its_text_does :: proc(t: ^testing.T) {
 	text := make([dynamic]u8, context.temp_allocator)
 	append(&text, "id,name,score\n")
 	for i in 0 ..< 300 {
@@ -228,7 +216,7 @@ a_document_read_refuses_what_a_text_read_cannot_take :: proc(t: ^testing.T) {
 	doc, _ := dsv.build(src, .Csv, allocator = context.temp_allocator)
 	plan, _ := dsv.plan_make([]Pair, .Csv, allocator = context.temp_allocator)
 	rows: []Pair
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {refuse_duplicates = true}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {dups = .Refuse}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
 	// The header row's cells are keys, and a cell is no row.
 	testing.expect_value(t, typed.unmarshal(&doc, 2, &rows, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
 	testing.expect_value(t, typed.unmarshal(&doc, 5, &rows, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Unsupported)
@@ -248,12 +236,15 @@ a_plan_not_made_by_dsv_refuses_a_document :: proc(t: ^testing.T) {
 	}
 	src := "a,b\n1,x\n"
 	doc, _ := dsv.build(transmute([]u8)src, .Csv, allocator = context.temp_allocator)
-	plan, planned := typed.plan_make([]Row, doc.spelling, allocator = context.temp_allocator)
+	plan, planned := typed.plan_build([]Row, doc.as, allocator = context.temp_allocator)
 	testing.expect_value(t, planned.kind, core.Typed_Error_Kind.None)
 	rows: []Row
 	e := typed.unmarshal(&doc, core.ROOT, &rows, &plan, {}, context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Plan_Mismatch)
 	testing.expect_value(t, len(rows), 0)
-	e = dsv.unmarshal(transmute([]u8)src, .Csv, &rows, &plan, {}, {}, context.temp_allocator)
+	e = dsv.unmarshal(transmute([]u8)src, .Csv, &rows, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Plan_Mismatch)
+	e = typed.unmarshal(&doc, core.ROOT, &rows, nil, {}, context.temp_allocator)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, len(rows), 1)
 }

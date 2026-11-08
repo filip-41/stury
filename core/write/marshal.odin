@@ -96,7 +96,12 @@ Entry :: struct {
 	rec:   ^typed.Field,
 }
 
-// A typed write's state. `frames` has `MAX_DEPTH + 1` slots and `ptrs` `MAX_DEPTH`, on `marshal_as`'s stack or in a
+// The frames a write holds: the root's, `MAX_DEPTH` containers', and one for each of the `MAX_DEPTH` pointers and
+// `any`s the open path may hold.
+@(private)
+FRAMES :: 2 * core.MAX_DEPTH + 1
+
+// A typed write's state. `frames` has `FRAMES` slots and `ptrs` `MAX_DEPTH`, on `marshal_as`'s stack or in a
 // `Held_Walker`. Between two values it holds no frame, so one walker writes a run of values. `out` is held in place, so
 // a store to it does not alias the walker's other fields.
 @(private)
@@ -122,59 +127,47 @@ Walker :: struct {
 	err:       core.Typed_Error,
 }
 
-// Writes `value` by `plan`, which a format built, as `opts` says. `plan` must be of `value`'s type, and the bytes are the
-// caller's. A nil `value` writes the format's null only through a plan of its type, see `marshal_once`.
-marshal :: proc(value: any, plan: ^typed.Plan, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
-	if err := check_value(value, plan); err != .None {
-		return nil, {kind = err}
+// Writes `value` by `plan`, which a format built, as `write` says. `plan` must be of `value`'s type, and the bytes are
+// the caller's. A nil `value` writes the format's null only through a plan of its type. Each format's `marshal` takes
+// this form beside the one that builds a plan for the call.
+marshal :: proc(value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+	if err := check_value(value, plan); err.kind != .None {
+		return nil, err
 	}
-	return plan.marshal(plan, value.data, opts, {}, allocator)
+	return plan.marshal(plan, value.data, write, {}, allocator)
 }
 
 // `marshal` to `w`, as the text is made. On a refusal `w` may hold a prefix of the text.
-marshal_stream :: proc(w: io.Stream, value: any, plan: ^typed.Plan, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error {
-	if err := check_value(value, plan); err != .None {
-		return {kind = err}
+marshal_stream :: proc(w: io.Stream, value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error {
+	if err := check_value(value, plan); err.kind != .None {
+		return err
 	}
-	_, err := plan.marshal(plan, value.data, opts, w, allocator)
+	_, err := plan.marshal(plan, value.data, write, w, allocator)
 	return err
 }
 
-// `marshal` of a value with no plan of its own: a plan is built for the call. A nil `any` has no type to plan and is
-// written as a null value of an `any`.
-marshal_once :: proc(value: any, make_plan: proc(T: typeid, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error), opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
-	v := value
-	nothing: any
-	if v.id == nil || v.data == nil {
-		v = any{&nothing, typeid_of(any)}
-	}
-	plan, err := make_plan(v.id, {}, context.allocator)
-	if err.kind != .None {
-		return nil, err
-	}
-	defer typed.plan_destroy(&plan)
-	if plan.marshal == nil {
-		return nil, {kind = .Unsupported}
-	}
-	return plan.marshal(&plan, v.data, opts, {}, allocator)
-}
-
 @(private)
-check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Error_Kind {
+check_value :: proc(value: any, plan: ^typed.Plan) -> core.Typed_Error {
+	if plan != nil && plan.err.kind != .None {
+		return plan.err
+	}
 	if plan == nil || plan.marshal == nil {
-		return .Unsupported
+		return {kind = .Unsupported}
 	}
-	if value.id != plan.type || value.data == nil {
-		return .Plan_Mismatch
+	if value.data == nil {
+		return {kind = .Plan_Mismatch}
 	}
-	return .None
+	if value.id != plan.type {
+		return typed.plan_mismatch(plan, plan.spelling, value.id)
+	}
+	return {}
 }
 
 // The compact and pretty instances of a format's walk, each with the plain string writer `put` and with `put_opted`, the
 // one a call with `ascii` or `escape_html` takes. `Plan.marshal` is a format's one call of this. The text comes from
 // `allocator`, and what lasts only the call from `context.allocator`.
 marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, stream: io.Stream, allocator: runtime.Allocator, $T: Tree, $put, $put_opted: Put) -> ([]u8, core.Typed_Error) {
-	frames: [core.MAX_DEPTH + 1]Frame = ---
+	frames: [FRAMES]Frame = ---
 	ptrs: [core.MAX_DEPTH]Target = ---
 	spill: [ROOM_MAX]u8 = ---
 	w: Walker
@@ -182,16 +175,11 @@ marshal_as :: proc(plan: ^typed.Plan, value: rawptr, opts: core.Write_Options, s
 	walker_init(&w, opts, raw_data(frames[:]), raw_data(ptrs[:]))
 	kind := walker_value(&w, plan, uintptr(value), T, put, put_opted)
 	release_walker(&w)
-	if kind != .None {
-		destroy(&w.out)
-		w.err.kind = kind
-		w.err.cause = w.out.cause
-		return nil, w.err
-	}
-	return finish((^Out)(rawptr(&w.out)))
+	w.err.kind = kind
+	return finish((^Out)(rawptr(&w.out)), w.err)
 }
 
-// Starts a walker that writes to its started `out` as `opts` says, over `frames` of `MAX_DEPTH + 1` slots and `ptrs` of
+// Starts a walker that writes to its started `out` as `opts` says, over `frames` of `FRAMES` slots and `ptrs` of
 // `MAX_DEPTH`. What it allocates for itself comes from `context.allocator`, and `release_walker` frees it.
 @(private)
 walker_init :: proc(w: ^Walker, opts: core.Write_Options, frames: [^]Frame, ptrs: [^]Target) {
@@ -226,7 +214,7 @@ walker_value :: proc(w: ^Walker, plan: ^typed.Plan, value: uintptr, $T: Tree, $p
 @(private)
 Held_Walker :: struct {
 	w:      Walker,
-	frames: [core.MAX_DEPTH + 1]Frame,
+	frames: [FRAMES]Frame,
 	ptrs:   [core.MAX_DEPTH]Target,
 }
 
@@ -240,8 +228,8 @@ tokens_marshal :: proc(t: ^Tokens, plan: ^typed.Plan, value: rawptr, err: ^core.
 		// The stacks are written before they are read, so only the walker is zeroed.
 		made, failed := runtime.mem_alloc_non_zeroed(size_of(Held_Walker), align_of(Held_Walker))
 		if failed != nil {
-			err^ = {kind = .Out_Of_Memory}
-			return .Out_Of_Memory
+			err^ = {kind = .No_Memory}
+			return .No_Memory
 		}
 		h = (^Held_Walker)(raw_data(made))
 		h.w = {}
@@ -283,6 +271,8 @@ tokens_release :: proc(t: ^Tokens) {
 walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
 	out := &w.out
 	cur := Frame{r = &w.plan.fields[0], at = value, left = 1, mode = .Target}
+	// `top` counts the open pointers' and `any`s' frames besides the containers', which `too_deep` takes away, so a
+	// container past `MAX_DEPTH` is refused as a read refuses it.
 	top, nest := 0, 0
 	next: for {
 		vf: ^typed.Field
@@ -444,7 +434,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 				case .Bool:
 					out.cursor += put_bool(p, (^bool)(va)^, T)
 				case .Struct, .Required:
-					if top == core.MAX_DEPTH {
+					if too_deep(w, top) {
 						k = .Too_Deep
 					} else if w.opts.sort_keys || vf.kind == .Required && w.meta[w.meta[vf.meta].block + w.meta[vf.meta].members].capture >= 0 {
 						k = list_struct(w, vf, va, nil, put)
@@ -460,7 +450,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						}
 					}
 				case .Slice, .Dynamic, .Array, .Fixed_List:
-					if top == core.MAX_DEPTH {
+					if too_deep(w, top) {
 						k = .Too_Deep
 					} else {
 						at := va
@@ -485,7 +475,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						out.cursor += 1
 					}
 				case .Map:
-					if top == core.MAX_DEPTH {
+					if too_deep(w, top) {
 						k = .Too_Deep
 					} else {
 						k = list_map(w, vf, va, put)
@@ -499,7 +489,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						out.cursor += put_word(p, T[.Null])
 					} else {
 						e := elem_of(vf)
-						k = enter_target(w, top, target, e)
+						k = enter_target(w, target, e)
 						if k == .None {
 							top += 1
 							w.frames[top] = cur
@@ -519,7 +509,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 					} else if len(arm.name) == 0 {
 						vf = &w.plan.fields[arm.fields]
 						continue value
-					} else if top == core.MAX_DEPTH {
+					} else if too_deep(w, top) {
 						k = .Too_Deep
 					} else {
 						k = list_struct(w, &w.plan.fields[arm.fields], va, &arm.name, put)
@@ -538,7 +528,7 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 						a, k = write(rawptr(va), runtime.arena_allocator(&w.arena))
 					}
 					if k == .None {
-						rec, e := any_value(w, a, top, T, put)
+						rec, e := any_value(w, a, T, put)
 						k = e
 						if rec != nil {
 							top += 1
@@ -563,6 +553,13 @@ walk :: #force_no_inline proc(w: ^Walker, value: uintptr, $P: bool, $T: Tree, $p
 			nest += 1
 		}
 	}
+}
+
+// Whether a container opened over the `top` frames open would nest past `MAX_DEPTH`. The pointers' and `any`s' frames
+// count only once `top` reaches it.
+@(private)
+too_deep :: #force_inline proc(w: ^Walker, top: int) -> bool {
+	return top >= core.MAX_DEPTH && top - w.n_ptrs == core.MAX_DEPTH
 }
 
 // Writes a line break and the indent of `nest` levels at `p`, under a reservation of `1 + LINE_ROOM + 16` bytes, and

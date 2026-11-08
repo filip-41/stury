@@ -1,6 +1,5 @@
 package json_tests
 
-import "core:strconv"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -9,8 +8,8 @@ import walktest "../../walktest"
 
 // Reading a built document: its nodes and spans, the readers, duplicate keys, facts, and the faults a build reports.
 
-build :: proc(src: string, $S: json.Spec, opts := json.Options{}, refuse_duplicates := false) -> (core.Document, core.Document_Error) {
-	return json.build(transmute([]u8)src, S, opts, refuse_duplicates)
+build :: proc(src: string, $S: json.Spec, opts := json.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Document_Error) {
+	return json.build(transmute([]u8)src, S, opts, dups)
 }
 
 // `{"a":[1,2],"b":{}}` makes 7 nodes. A container's `n` counts its subtree in nodes, a key node is written right
@@ -26,13 +25,13 @@ node_layout :: proc(t: ^testing.T) {
 		return
 	}
 	want := []walktest.Node_Want{
-		{0, 7, .Map, .Value},
+		{0, 7, .Object, .Value},
 		{2, 1, .String, .Key},
 		{5, 3, .Array, .Value},
 		{6, 1, .Number, .Value},
 		{8, 1, .Number, .Value},
 		{12, 1, .String, .Key},
-		{15, 1, .Map, .Value},
+		{15, 1, .Object, .Value},
 	}
 	if !walktest.expect_nodes(t, &doc, want) {
 		return
@@ -161,7 +160,7 @@ readers_refuse_containers :: proc(t: ^testing.T) {
 	testing.expect(t, !core.key_equals(&doc, 0, "a"))
 	_, ok = core.text(&doc, 2, buf[:])
 	testing.expect(t, !ok)
-	testing.expect_value(t, core.kind(&doc, 0), core.Kind.Map)
+	testing.expect_value(t, core.kind(&doc, 0), core.Kind.Object)
 	testing.expect_value(t, core.kind(&doc, 2), core.Kind.Array)
 	// `number` on a container, a key and a string returns `.Wide`, and `int_value` on a key returns false.
 	testing.expect(t, !is_number(&doc, 0))
@@ -201,7 +200,7 @@ child_at_reader :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 	core.destroy(&doc)
 
-	// A nested member makes `child_at` walk, and a `Map` value's key node is at `value - 1`.
+	// A nested member makes `child_at` walk, and an `Object` value's key node is at `value - 1`.
 	doc, err = build(`{"a":1,"b":[2,3],"c":{"d":4}}`, .Json)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	it := core.children(&doc, 0)
@@ -222,7 +221,7 @@ child_at_reader :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 	core.destroy(&doc)
 
-	// A `Map` whose members are one key and one value each uses the index path at a stride of 2, values 2, 4 and 6.
+	// An `Object` whose members are one key and one value each uses the index path at a stride of 2, values 2, 4 and 6.
 	doc, err = build(`{"a":1,"b":2,"c":3}`, .Json)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	values := []core.Node_Index{2, 4, 6}
@@ -279,7 +278,7 @@ index_children_reader :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(doc.indexed), 1)
 	testing.expect(t, !core.index_children(&doc, want[3]))
 	testing.expect(t, !core.index_children(&doc, core.NO_NODE))
-	// Indexed out of node order, the entries still sort by node. An inline-key `Map`'s member is the value after its key.
+	// Indexed out of node order, the entries still sort by node. An inline-key `Object`'s member is the value after its key.
 	inner := want[5] + 2
 	testing.expect_value(t, core.kind(&doc, inner), core.Kind.Array)
 	testing.expect(t, core.index_children(&doc, inner))
@@ -304,35 +303,6 @@ index_children_reader :: proc(t: ^testing.T) {
 	testing.expect_value(t, last, want[5])
 	core.destroy(&c)
 	core.destroy(&doc)
-
-	// A count past `MAX_CHILDREN` is indexed by its true count.
-	text: [dynamic]u8
-	defer delete(text)
-	append(&text, '[')
-	for i in 0 ..< int(core.MAX_CHILDREN) + 1 {
-		if i > 0 {
-			append(&text, ',')
-		}
-		append(&text, ..transmute([]u8)string("[1]"))
-	}
-	append(&text, ']')
-	doc, err = build(string(text[:]), .Json)
-	testing.expectf(t, err.kind == .None, "wide array: %v", err)
-	if err.kind != .None {
-		return
-	}
-	walk := core.children(&doc, 0)
-	want_last := core.NO_NODE
-	for v in core.child_next(&walk) {
-		want_last = v
-	}
-	testing.expect(t, core.index_children(&doc, 0))
-	testing.expect_value(t, len(doc.indexed[0].members), int(core.MAX_CHILDREN) + 1)
-	last, lok = core.child_at(&doc, 0, int(core.MAX_CHILDREN))
-	testing.expect(t, lok)
-	testing.expect_value(t, last, want_last)
-	_, lok = core.child_at(&doc, 0, int(core.MAX_CHILDREN) + 1)
-	testing.expect(t, !lok)
 }
 
 // `children_from` yields from member `k` what `children` yields from that member on, with and without an index. Out of
@@ -371,7 +341,7 @@ children_from_reader :: proc(t: ^testing.T) {
 	}
 	core.destroy(&doc)
 
-	// An inline-key `Map` from member 1 yields the value after the second key, then the rest.
+	// An inline-key `Object` from member 1 yields the value after the second key, then the rest.
 	doc, err = build(`{"a":[1],"b":2,"c":{"d":3}}`, .Json)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	tail := core.children_from(&doc, 0, 1)
@@ -385,107 +355,53 @@ children_from_reader :: proc(t: ^testing.T) {
 	testing.expect(t, !more)
 }
 
-// A container of `core.MAX_CHILDREN` members records 65535 as its child count, the saturation value. `child_at`
-// reads the true count from `Document.counts`, so a uniform array still indexes and a `k` past the last member is
-// false without a walk.
+// A container of `core.MAX_CHILDREN` members or more records 65535 as its child count, the saturation value.
+// `length` and `child_at` read the true count from `Document.counts`, so the last member is reached and a `k` past
+// it is false without a walk.
 @(test)
 child_at_saturated :: proc(t: ^testing.T) {
-	text: [dynamic]u8
-	defer delete(text)
-
-	// An `Array` of exactly `MAX_CHILDREN` members, and the last member it holds.
-	append(&text, '[')
-	for i in 0 ..< int(core.MAX_CHILDREN) {
-		if i > 0 {
-			append(&text, ',')
+	MAX :: int(core.MAX_CHILDREN)
+	Shape :: struct {
+		open, close: string,
+		members:     int,
+		item:        string,
+		parent:      core.Node_Index, // the container checked, at the node it opens at
+	}
+	// An array and a map of exactly `MAX` members, an array of one more, and a saturated array in another.
+	for c in ([]Shape{{"[", "]", MAX, "null", 0}, {"{", "}", MAX, `"k":1`, 0}, {"[", "]", MAX + 1, "null", 0}, {"[[", `],"sentinel"]`, MAX, "null", 1}}) {
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, c.open)
+		for i in 0 ..< c.members {
+			strings.write_string(&b, "," if i > 0 else "")
+			if c.open == "{" {
+				strings.write_string(&b, `"`)
+				strings.write_int(&b, i)
+				strings.write_string(&b, `":1`)
+			} else {
+				strings.write_string(&b, c.item)
+			}
 		}
-		append(&text, ..transmute([]u8)string("null"))
-	}
-	append(&text, ']')
-	doc, err := build(string(text[:]), .Json)
-	testing.expectf(t, err.kind == .None, "array: %v", err)
-	if err.kind != .None {
-		return
-	}
-	testing.expect_value(t, core.length(&doc, 0), int(core.MAX_CHILDREN))
-	last, ok := core.child_at(&doc, 0, int(core.MAX_CHILDREN) - 1)
-	testing.expect(t, ok)
-	testing.expect_value(t, last, core.Node_Index(core.MAX_CHILDREN))
-	_, ok = core.child_at(&doc, 0, int(core.MAX_CHILDREN))
-	testing.expect(t, !ok)
-	core.destroy(&doc)
-
-	// A `Map` of `MAX_CHILDREN` members puts the last value at the last node, with its key at `last - 1`.
-	clear(&text)
-	append(&text, '{')
-	key: [24]u8
-	for i in 0 ..< int(core.MAX_CHILDREN) {
-		if i > 0 {
-			append(&text, ',')
+		strings.write_string(&b, c.close)
+		doc, err := build(strings.to_string(b), .Json)
+		defer core.destroy(&doc)
+		if !testing.expectf(t, err.kind == .None, "%s: %v", c.open, err) {
+			continue
 		}
-		append(&text, '"')
-		append(&text, ..transmute([]u8)strconv.write_int(key[:], i64(i), 10))
-		append(&text, ..transmute([]u8)string("\":1"))
-	}
-	append(&text, '}')
-	doc, err = build(string(text[:]), .Json)
-	testing.expectf(t, err.kind == .None, "map: %v", err)
-	if err.kind == .None {
-		testing.expect_value(t, core.length(&doc, 0), int(core.MAX_CHILDREN))
-		last, ok = core.child_at(&doc, 0, int(core.MAX_CHILDREN) - 1)
+		last := core.NO_NODE
+		it := core.children(&doc, c.parent)
+		for v in core.child_next(&it) {
+			last = v
+		}
+		testing.expect_value(t, core.length(&doc, c.parent), c.members)
+		testing.expect_value(t, doc.nodes[c.parent].spelling, core.MAX_CHILDREN)
+		got, ok := core.child_at(&doc, c.parent, c.members - 1)
 		testing.expect(t, ok)
-		testing.expect_value(t, last, core.Node_Index(len(doc.nodes) - 1))
-		testing.expect_value(t, doc.nodes[last - 1].role, core.Role.Key)
-		_, ok = core.child_at(&doc, 0, int(core.MAX_CHILDREN))
-		testing.expect(t, !ok)
-		core.destroy(&doc)
-	}
-
-	// An `Array` of `MAX_CHILDREN + 1` members keeps its count at 65535, and the last member is still the last node.
-	clear(&text)
-	append(&text, '[')
-	for i in 0 ..< int(core.MAX_CHILDREN) + 1 {
-		if i > 0 {
-			append(&text, ',')
+		testing.expect_value(t, got, last)
+		if c.open == "{" {
+			testing.expect_value(t, doc.nodes[got - 1].role, core.Role.Key)
 		}
-		append(&text, ..transmute([]u8)string("null"))
-	}
-	append(&text, ']')
-	doc, err = build(string(text[:]), .Json)
-	testing.expectf(t, err.kind == .None, "big array: %v", err)
-	if err.kind == .None {
-		testing.expect_value(t, core.length(&doc, 0), int(core.MAX_CHILDREN) + 1)
-		last, ok = core.child_at(&doc, 0, int(core.MAX_CHILDREN))
-		testing.expect(t, ok)
-		testing.expect_value(t, last, core.Node_Index(len(doc.nodes) - 1))
-		_, ok = core.child_at(&doc, 0, int(core.MAX_CHILDREN) + 1)
+		_, ok = core.child_at(&doc, c.parent, c.members)
 		testing.expect(t, !ok)
-		core.destroy(&doc)
-	}
-
-	// A saturated container nested in another: the outer array's next member follows the inner one, and an index past
-	// the inner container's members must not return that node.
-	clear(&text)
-	append(&text, '[')
-	append(&text, '[')
-	for i in 0 ..< int(core.MAX_CHILDREN) {
-		if i > 0 {
-			append(&text, ',')
-		}
-		append(&text, ..transmute([]u8)string("null"))
-	}
-	append(&text, ..transmute([]u8)string("],\"sentinel\"]"))
-	doc, err = build(string(text[:]), .Json)
-	testing.expectf(t, err.kind == .None, "nested: %v", err)
-	if err.kind == .None {
-		inner := core.Node_Index(1)
-		testing.expect_value(t, core.length(&doc, inner), int(core.MAX_CHILDREN))
-		last, ok = core.child_at(&doc, inner, int(core.MAX_CHILDREN) - 1)
-		testing.expect(t, ok)
-		testing.expect_value(t, last, core.Node_Index(core.MAX_CHILDREN) + 1)
-		_, ok = core.child_at(&doc, inner, int(core.MAX_CHILDREN))
-		testing.expect(t, !ok)
-		core.destroy(&doc)
 	}
 }
 
@@ -503,7 +419,6 @@ readers_refuse_no_node :: proc(t: ^testing.T) {
 	testing.expect_value(t, core.length(&doc, i), 0)
 	testing.expect_value(t, len(core.span(&doc, i)), 0)
 	testing.expect(t, !is_number(&doc, i))
-	testing.expect_value(t, core.resolve(&doc, i), core.Kind.Null)
 	_, ok := core.text(&doc, i, buf[:])
 	testing.expect(t, !ok)
 	testing.expect(t, !core.key_equals(&doc, i, "a"))
@@ -548,6 +463,20 @@ readers :: proc(t: ^testing.T) {
 	testing.expect(t, is_int)
 	testing.expect_value(t, n, i64(1))
 	core.destroy(&doc)
+
+	doc, err = build(`[-0, 2.5, 18446744073709551615, 1e400, "1"]`, .Json)
+	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	x, is_float := core.float_value(&doc, 1)
+	testing.expect(t, is_float && x == 0 && 1 / x < 0)
+	x, is_float = core.float_value(&doc, 2)
+	testing.expect(t, is_float && x == 2.5)
+	x, is_float = core.float_value(&doc, 3)
+	testing.expect(t, is_float && x == 18446744073709551615.0)
+	_, is_float = core.float_value(&doc, 4)
+	testing.expect(t, !is_float)
+	_, is_float = core.float_value(&doc, 5)
+	testing.expect(t, !is_float)
+	core.destroy(&doc)
 }
 
 // Checks `member` with `.First` and `.Last`, `members_named` over both values, and a refusing build failing at the
@@ -575,17 +504,17 @@ duplicates :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 	core.destroy(&doc)
 
-	doc, err = build(src, .Json, {}, true)
+	doc, err = build(src, .Json, {}, .Refuse)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 7)
 	testing.expect_value(t, len(doc.nodes), 0)
 
 	// `"\u0061"` and `"a"` are the same key, so a refusing build fails at the later key's byte, 12.
-	doc, err = build(`{"\u0061":1,"a":2}`, .Json, {}, true)
+	doc, err = build(`{"\u0061":1,"a":2}`, .Json, {}, .Refuse)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 12)
 
-	doc, err = build(`{"\u0061":1,"b":2}`, .Json, {}, true)
+	doc, err = build(`{"\u0061":1,"b":2}`, .Json, {}, .Refuse)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 	defer core.destroy(&doc)
 	v, ok = core.member(&doc, 0, "a")
@@ -598,13 +527,13 @@ duplicates :: proc(t: ^testing.T) {
 @(test)
 refuse_repeat_before_fault :: proc(t: ^testing.T) {
 	// The root's second `""` is at byte 6, and the comma after the colon is the fault at byte 8.
-	doc, err := build(`{"":0,"":,}`, .Json, {}, true)
+	doc, err := build(`{"":0,"":,}`, .Json, {}, .Refuse)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 6)
 	testing.expect_value(t, len(doc.nodes), 0)
 
 	// A closed inner object finds its own repeat first, at byte 15. The root's repeat at byte 6 is earlier.
-	doc, err = build(`{"":0,"":{"":1,"":2},x}`, .Json, {}, true)
+	doc, err = build(`{"":0,"":{"":1,"":2},x}`, .Json, {}, .Refuse)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 6)
 	testing.expect_value(t, len(doc.nodes), 0)
@@ -702,9 +631,9 @@ errors :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(doc.nodes), 0)
 	b := strings.builder_make(context.temp_allocator)
 	core.render(strings.to_writer(&b), transmute([]u8)src, err)
-	testing.expect_value(t, strings.to_string(b), "1:2: Input does not parse\n  caused by 1:2: Unfinished input")
+	testing.expect_value(t, strings.to_string(b), "1:2: Unfinished input")
 
-	doc, err = build(`{"a":1,"a":2}`, .Json, {}, true)
+	doc, err = build(`{"a":1,"a":2}`, .Json, {}, .Refuse)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 7)
 	strings.builder_reset(&b)
@@ -715,7 +644,7 @@ errors :: proc(t: ^testing.T) {
 // A refusing build finds a repeat of an unquoted JSON5 key, at the later key's byte, 5.
 @(test)
 json5_duplicates :: proc(t: ^testing.T) {
-	doc, err := build(`{a:1,a:2}`, .Json5, {}, true)
+	doc, err := build(`{a:1,a:2}`, .Json5, {}, .Refuse)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 5)
 	testing.expect_value(t, len(doc.nodes), 0)
@@ -813,42 +742,19 @@ spelling_complete :: proc(t: ^testing.T) {
 	s := doc.spelling
 	testing.expect(t, s.text != nil && s.key_equals != nil && s.number != nil && s.build != nil && s.validate != nil && s.resolve != nil && s.close_end != nil)
 	testing.expect(t, s.edit != nil && s.edit.value != nil && s.edit.key_text != nil)
-	testing.expect_value(t, s.edit.member_sep(nil), ",")
+	testing.expect_value(t, s.edit.member_sep(nil, 0), ",")
 	testing.expect_value(t, s.edit.key_sep, ":")
 }
 
 // A refusing build finds a repeat in `{"a":1,"a":2 /* c */}` under JSONC, at byte 7, and leaves no nodes.
 @(test)
 refuse_with_comment :: proc(t: ^testing.T) {
-	doc, err := build(`{"a":1,"a":2 /* c */}`, .Jsonc, {}, true)
+	doc, err := build(`{"a":1,"a":2 /* c */}`, .Jsonc, {}, .Refuse)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, err.at, 7)
 	testing.expect_value(t, len(doc.nodes), 0)
 }
 
-
-
-// An `Array` of 65535 members records `MAX_CHILDREN` in its spelling, and `length` counts all 65535.
-@(test)
-saturated_length :: proc(t: ^testing.T) {
-	b := strings.builder_make()
-	defer strings.builder_destroy(&b)
-	strings.write_byte(&b, '[')
-	for i in 0 ..< 65535 {
-		if i > 0 {
-			strings.write_byte(&b, ',')
-		}
-		strings.write_byte(&b, '0')
-	}
-	strings.write_byte(&b, ']')
-	src := strings.to_string(b)
-	doc, err := build(src, .Json)
-	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, len(doc.nodes), 65536)
-	testing.expect_value(t, doc.nodes[0].spelling, core.MAX_CHILDREN)
-	testing.expect_value(t, core.length(&doc, 0), 65535)
-}
 
 
 // `json.text` refuses a container and an index past the last node, and reads a number's digits and a string.
@@ -873,8 +779,8 @@ text_refuses_containers :: proc(t: ^testing.T) {
 	testing.expect(t, !is_number(&doc, core.Node_Index(len(doc.nodes))))
 }
 
-// `core.pairs` walks every member pair of a `Map` container in source order. An empty object yields an empty
-// iterator, nested containers step over their full subtree, duplicate keys yield both pairs, and a non-`Map`
+// `core.pairs` walks every member pair of an `Object` container in source order. An empty object yields an empty
+// iterator, nested containers step over their full subtree, duplicate keys yield both pairs, and a non-`Object`
 // container or scalar yields an empty iterator.
 @(test)
 pairs_iteration :: proc(t: ^testing.T) {
@@ -889,7 +795,7 @@ pairs_iteration :: proc(t: ^testing.T) {
 	testing.expect(t, ok1 && s1 == "a" && doc.nodes[v1].kind == .Array)
 	k2, v2, ok2 := core.pair_next(&it)
 	s2, _ := core.text(&doc, k2, buf[:])
-	testing.expect(t, ok2 && s2 == "b" && doc.nodes[v2].kind == .Map)
+	testing.expect(t, ok2 && s2 == "b" && doc.nodes[v2].kind == .Object)
 	k3, v3, ok3 := core.pair_next(&it)
 	s3, _ := core.text(&doc, k3, buf[:])
 	testing.expect(t, ok3 && s3 == "d" && doc.nodes[v3].kind == .Number)

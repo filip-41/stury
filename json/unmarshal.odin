@@ -5,44 +5,56 @@ import core "../core"
 import typed "../core/typed"
 
 // Reads `src`, one document, into `target`. An absent member keeps what `target` holds. See `docs/typed.md`. The form
-// with no plan builds and frees one for the call, and a plan built once with `plan_make` is the form for many reads.
-// A refusal leaves everything the read allocated reachable from `target`.
+// with no plan builds one with `context.allocator` and frees it before it returns, and a plan built once with
+// `plan_make` is the form for many reads. A refusal leaves everything the read allocated reachable from `target`. A
+// repeated key frees the text this read stored for a string member or a map entry, and leaves allocated any other
+// value it replaces, a list, map, pointer or `any`, so a text not trusted to be free of repeats reads into an arena.
+// A decoded key's text goes to `context.temp_allocator`.
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
-// Builds the plan of `T` for JSON's spelling, as `typed.plan_make` does.
-plan_make :: proc(T: typeid, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
-	plan, err := typed.plan_make(T, &SPELLING, opts, allocator)
-	plan.marshal = marshal_text
-	return plan, err
+// Builds the plan of `T` for spec `spec` read with `opts`, as `typed.plan_make` does. A plan of any spec writes JSON.
+plan_make :: proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
+	return plan_as(T, as(spec, opts), plan, allocator)
+}
+
+// The spelling's `plans`.
+@(private)
+plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: runtime.Allocator) -> (typed.Plan, core.Typed_Error) {
+	p, err := typed.plan_build(T, as, opts, allocator)
+	p.marshal = marshal_text
+	return p, err
 }
 
 @(private)
-unmarshal_once :: proc(src: []u8, $S: Spec, target: ^$T, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
-	plan, err := plan_make(T, allocator = context.temp_allocator)
+unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
+	plan, err := plan_make(T, spec, opts)
 	if err.kind != .None {
 		return err
 	}
 	defer typed.plan_destroy(&plan)
-	err = unmarshal_plan(src, S, target, &plan, read, opts, allocator)
-	typed.own_names(&err)
-	typed.own_collected(read.collect)
+	err = unmarshal_plan(src, spec, target, &plan, opts, read, allocator)
+	typed.own_errors(&err, read.collect)
 	return err
 }
 
 @(private)
-unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read := typed.Read_Options{}, opts := Options{}, allocator := context.allocator) -> core.Typed_Error {
+unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
+	// A text that nests deeper under a raised `max_depth` grows the frames as it goes.
 	stack: [core.MAX_DEPTH + 2]typed.Frame = ---
 	frames := stack[:]
-	if need := core.reserve_depth(opts.max_depth, len(src)) + 2; need > len(stack) {
-		wide, failed := make([]typed.Frame, need, context.temp_allocator)
-		if failed != nil {
-			return {kind = .Out_Of_Memory}
-		}
-		frames = wide
-	}
 	err: core.Typed_Error
-	read_value(src, 0, u64(len(src)), S, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false)
-	return err
+	switch spec {
+	case .Json:
+		read_value(src, 0, u64(len(src)), .Json, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false)
+		return err
+	case .Jsonc:
+		read_value(src, 0, u64(len(src)), .Jsonc, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false)
+		return err
+	case .Json5:
+		read_value(src, 0, u64(len(src)), .Json5, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false)
+		return err
+	}
+	return {kind = .Bad_Option}
 }
 
 // Reads the document of `src[lo:cut]` into `target` with `frames`, one more than `opts` lets a text open, and stores
@@ -52,17 +64,19 @@ unmarshal_plan :: proc(src: []u8, $S: Spec, target: ^$T, plan: ^typed.Plan, read
 // document lives in an arena on `scratch`, freed before the read, and `scratch` is the read's temp allocator.
 @(private)
 read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Error, $LINE: bool) -> (cold: bool) {
-	if read.refuse_duplicates && !stray_bom(src[lo:cut], lo, S) {
+	if read.dups == .Refuse && !stray_bom(src[lo:cut], lo, S) {
 		arena := runtime.Arena{backing_allocator = scratch, minimum_block_size = 4096}
 		defer runtime.arena_destroy(&arena)
 		_, built := build_spec(src[lo:cut], S, opts, true, runtime.arena_allocator(&arena))
 		core.move_document_error(&built, lo)
 		if built.kind == .Walk || built.kind == .Duplicate_Key {
 			err^ = {kind = .Walk if built.kind == .Walk else .Duplicate_Key, at = built.at, inner = built.inner}
+			context.allocator = allocator
+			typed.collect_error(read.collect, err^)
 			return
 		}
 		if built.kind != .None {
-			err^ = {kind = .Out_Of_Memory}
+			err^ = {kind = .No_Memory}
 			return
 		}
 	}
@@ -76,6 +90,7 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 		err^ = started
 		return
 	}
+	defer typed.read_release(&h, frames)
 	on :: typed.on_token_spelled when S == .Json5 else typed.on_token
 	fault: Maybe(core.Fault)
 	when LINE {

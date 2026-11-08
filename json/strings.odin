@@ -481,21 +481,8 @@ escape_exact :: proc "contextless" (e, end: [^]u8, tol: bit_set[core.Tolerance; 
 			if q[i:] >= end {
 				return end, .Truncated, false
 			}
-			c := q[i]
-			h := spell.HEX_NIBBLE[c]
-			ok: bool
-			switch i {
-			case 0:
-				ok = c == '\\'
-			case 1:
-				ok = c == 'u'
-			case 2:
-				ok = h == 0xd
-			case 3:
-				ok = h >= 0xc && h <= 0xf
-			case:
-				ok = h != 0xff
-			}
+			h := spell.HEX_NIBBLE[q[i]]
+			ok := q[i] == ('\\' if i == 0 else 'u') if i < 2 else (h == 0xd if i == 2 else (h - 0xc < 4 if i == 3 else h != 0xff))
 			if !ok {
 				if .Lone_Surrogate in tol {
 					return q, .None, true

@@ -69,6 +69,7 @@ KEY_SIZE_MAX :: 240
 // What only the cold paths read, indexed like `Plan.fields`.
 Meta :: struct {
 	name:       string,
+	type:       typeid, // what a refusal of a value read by the record names
 	map_info:   ^runtime.Map_Info,
 	enum_info:  ^runtime.Type_Info_Enum,
 	arms:       []Arm, // a `Union`'s
@@ -197,6 +198,11 @@ Plan :: struct {
 	// The options the plan was built with, which its reads and writes take, and so do the plans a write builds for a type
 	// met in an `any`.
 	using options: Plan_Options,
+	// What `plan_make` refused a plan with, which a read or write given the refused plan returns.
+	err:       core.Typed_Error,
+	// A hash of the type, format and options the plan was built from, so a reader that kept what it bound to one plan's
+	// records can tell a plan built the same at their address from another made there after the first was destroyed.
+	stamp:     u64,
 }
 
 // Writes the value of `plan`'s type at `value` as `opts` says, to `stream` when it has a procedure, else to new bytes
@@ -222,11 +228,30 @@ Builder :: struct {
 	depth:         int,
 }
 
-// Builds the plan of `T` for the format `spelling` gives, allocating with `allocator`. A type the read cannot take is
-// an error, with the path to it, and the plan is then the zero value. `opts`'s strings and slices are read here only.
-plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error) {
+// A format's plan maker, which `core.Spelling.plans` points at: `plan_build` and what the format's reads and writes add.
+Plan_Make :: #type proc(T: typeid, as: core.As, opts: Plan_Options, allocator: runtime.Allocator) -> (Plan, core.Typed_Error)
+
+// Builds the plan of `T` for format `as`, by the format's plan maker, allocating with `allocator`. A type the read
+// cannot take is an error, with the path to it, and the plan is then the zero value with that error in `err`. `opts`'s
+// strings and slices are read here only. A format with no plan maker gets `plan_build`'s plan, and a nil spelling is
+// `.Bad_Option`.
+plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, core.Typed_Error) {
+	if as.spelling == nil {
+		err := core.Typed_Error{kind = .Bad_Option}
+		return {err = err}, err
+	}
+	if as.spelling.plans != nil {
+		return (Plan_Make)(as.spelling.plans)(T, as, opts, allocator)
+	}
+	return plan_build(T, as, opts, allocator)
+}
+
+// The plan of `T` for format `as` with nothing a format adds: no writer and no document read of its own. A format's
+// plan maker starts from it, and so does a write's plan for a type met in an `any`.
+plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error) {
 	context.allocator = allocator
-	p = {spelling = spelling, type = T, key_frame = u32(len(spelling.key_open) + len(spelling.key_close)), allocator = allocator}
+	spelling := as.spelling
+	p = {as = as, type = T, key_frame = u32(len(spelling.key_open) + len(spelling.key_close)), allocator = allocator}
 	b := Builder{options = &p.options, p = &p}
 	hooks, no_hooks := make([]Type_Hook, len(opts.hooks))
 	tag_names, no_names := make([]Tag_Name, len(opts.tag_names))
@@ -252,13 +277,13 @@ plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := Plan_Options{}, a
 	zero, no_zero := make([]u8, max(b.widest, 1))
 	p.solo, p.zero, p.fields, p.meta = solo, zero, b.fields[:], b.meta[:]
 	if no_hooks != nil || no_names != nil || no_solo != nil || no_zero != nil {
-		refuse_plan(&b, .Out_Of_Memory)
+		refuse_plan(&b, .No_Memory)
 	}
 	if b.err.kind != .None {
 		err = b.err
 		own_names(&err)
 		plan_destroy(&p)
-		return {}, err
+		return {err = err}, err
 	}
 	for i in 0 ..< len(b.fields) {
 		m := &b.meta[i]
@@ -277,7 +302,40 @@ plan_make :: proc(T: typeid, spelling: ^core.Spelling, opts := Plan_Options{}, a
 		p.solo[2 * i + 1] = b.fields[1]
 	}
 	p.root = &b.fields[1]
+	p.stamp = plan_stamp(T, as, opts)
 	return
+}
+
+@(private)
+plan_stamp :: proc(T: typeid, as: core.As, opts: Plan_Options) -> u64 {
+	h := u64(0xcbf29ce484222325)
+	mix :: proc(h: ^u64, x: u64) {
+		h^ = (h^ ~ x) * 0x100000001b3
+	}
+	text :: proc(h: ^u64, s: string) {
+		mix(h, u64(len(s)))
+		for c in transmute([]u8)s {
+			mix(h, u64(c))
+		}
+	}
+	mix(&h, transmute(u64)T)
+	mix(&h, u64(uintptr(as.spelling)))
+	mix(&h, u64(as.max_depth) | u64(as.spec) << 32 | u64(transmute(u8)as.tolerate) << 40)
+	for b in as.opts {
+		mix(&h, u64(b))
+	}
+	mix(&h, u64(opts.enums) | u64(opts.rename) << 8)
+	text(&h, opts.union_tag)
+	for t in opts.tag_names {
+		mix(&h, transmute(u64)t.type)
+		text(&h, t.name)
+	}
+	for x in opts.hooks {
+		mix(&h, transmute(u64)x.type)
+		mix(&h, u64(uintptr(rawptr(x.read))))
+		mix(&h, u64(uintptr(rawptr(x.write))))
+	}
+	return h
 }
 
 // Frees what `plan_make` allocated and sets `p` to the zero value.
@@ -307,7 +365,7 @@ reserve_block :: proc(b: ^Builder, n: int, id: typeid) -> i32 {
 	at := len(b.fields)
 	_, slot, _, no_slot := map_entry(&b.blocks, id)
 	if no_slot != nil || resize(&b.fields, at + n) != nil || resize(&b.meta, at + n) != nil {
-		refuse_plan(b, .Out_Of_Memory)
+		refuse_plan(b, .No_Memory)
 		return -1
 	}
 	slot^ = i32(at)
@@ -326,7 +384,7 @@ never :: proc(b: ^Builder, at: int) {
 @(private)
 owned :: proc(b: ^Builder, s: []u8) -> string {
 	if _, failed := append(&b.p.strings, string(s)); failed != nil {
-		refuse_plan(b, .Out_Of_Memory)
+		refuse_plan(b, .No_Memory)
 		delete(s)
 		return ""
 	}
@@ -337,7 +395,7 @@ owned :: proc(b: ^Builder, s: []u8) -> string {
 owned_copy :: proc(b: ^Builder, s: string) -> string {
 	text, failed := strings.clone(s)
 	if failed != nil {
-		refuse_plan(b, .Out_Of_Memory)
+		refuse_plan(b, .No_Memory)
 		return ""
 	}
 	return owned(b, transmute([]u8)text)
@@ -361,7 +419,7 @@ expect_name :: proc(b: ^Builder, f: ^Field, name: string) {
 	n := len(open) + len(name) + len(close)
 	buf, failed := make([]u8, max(n, 16))
 	if failed != nil {
-		refuse_plan(b, .Out_Of_Memory)
+		refuse_plan(b, .No_Memory)
 		return
 	}
 	copy(buf[copy(buf, open):], name)
@@ -382,28 +440,23 @@ name_bit :: #force_inline proc "contextless" (name: string) -> u64 #no_bounds_ch
 	return 1 << ((u32(name[0]) * 31 + u32(name[len(name) - 1]) * 5 + u32(len(name))) & 63)
 }
 
+// Records the plan's first refusal, `kind` at the members being filled and then the member `at`, with `text` saying
+// what the kind's message names.
 @(private)
-refuse_plan :: proc(b: ^Builder, kind: core.Typed_Error_Kind, at := "") {
+refuse_plan :: proc(b: ^Builder, kind: core.Typed_Error_Kind, at := "", text := "") {
 	if b.err.kind != .None {
 		return
 	}
 	b.err.kind = kind
-	names := b.trail[:min(b.depth, TRAIL_MAX)]
+	b.err.want.text = text
 	b.err.truncated = b.depth > TRAIL_MAX
-	total := len(names) + (1 if len(at) > 0 else 0)
-	if total > core.MAX_ERROR_STEPS {
-		b.err.truncated = true
-	}
-	n := 0
-	for name in names[max(0, total - core.MAX_ERROR_STEPS):] {
-		b.err.steps[n] = core.Name(name)
-		n += 1
-	}
 	if len(at) > 0 {
-		b.err.steps[n] = core.Name(at)
-		n += 1
+		path_add(&b.err, core.Name(at))
 	}
-	b.err.n_steps = u8(n)
+	#reverse for name in b.trail[:min(b.depth, TRAIL_MAX)] {
+		path_add(&b.err, core.Name(name))
+	}
+	path_close(&b.err)
 }
 
 @(private)
@@ -419,7 +472,7 @@ fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset,
 	}
 	base := runtime.type_info_base(ti)
 	f := Field{offset = offset, stride = stride, meta = u32(at)}
-	m := Meta{name = name, size = u32(base.size), block = -1}
+	m := Meta{name = name, type = ti.id, size = u32(base.size), block = -1}
 	// A record holds a size, offset, stride or count in 32 bits, and each of them is at most its type's size.
 	if base.size > int(max(u32)) {
 		refuse_plan(b, .Unsupported)
@@ -648,6 +701,8 @@ list :: proc(b: ^Builder, m: ^Meta, ti, elem: ^runtime.Type_Info, stride: u32) {
 	m.align = u32(base.align)
 	#partial switch _ in base.variant {
 	case runtime.Type_Info_Boolean, runtime.Type_Info_Integer, runtime.Type_Info_Float, runtime.Type_Info_String:
+		// A hook is handed the element as its `dest`, which must hold what the target held.
+		_, m.zeroed = hook_of(b, elem.id)
 	case:
 		m.zeroed = true
 	}
@@ -699,7 +754,7 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 	}
 	arms, failed := make([]Arm, len(v.variants))
 	if failed != nil {
-		refuse_plan(b, .Out_Of_Memory)
+		refuse_plan(b, .No_Memory)
 		return
 	}
 	m.arms = arms
@@ -731,12 +786,12 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 			}
 		}
 		if arm.classes & taken - {.Object} != {} {
-			refuse_plan(b, .Ambiguous_Union)
+			refuse_plan(b, .Ambiguous_Union, text = "two arms read the same kind of value")
 		}
 		taken |= arm.classes
 	}
 	if untagged_objects > 1 || (m.tagged && untagged_objects > 0) {
-		refuse_plan(b, .Ambiguous_Union)
+		refuse_plan(b, .Ambiguous_Union, text = "two arms read objects, so set Plan_Options.union_tag to the member that names the arm")
 	}
 }
 
@@ -841,7 +896,7 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	}
 	_, end_slot, _, no_end := map_entry(&b.ends, at)
 	if no_end != nil {
-		refuse_plan(b, .Out_Of_Memory)
+		refuse_plan(b, .No_Memory)
 		return
 	}
 	end_slot^ = at + i32(n)
@@ -856,7 +911,7 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 				refuse_plan(b, .Unsupported, x.name)
 			}
 			if _, failed := append(&required, i32(i)); failed != nil {
-				refuse_plan(b, .Out_Of_Memory)
+				refuse_plan(b, .No_Memory)
 			}
 		}
 	}
@@ -896,9 +951,9 @@ plain_name :: proc(name: string) -> bool {
 @(private)
 lay_out :: proc(b: ^Builder, v: runtime.Type_Info_Struct, base: uintptr, out: ^[dynamic]Member, capture: ^Maybe(Member)) {
 	for i in 0 ..< int(v.field_count) {
-		tag, ok := field_tag(b, v.names[i], v.tags[i])
-		if !ok {
-			refuse_plan(b, .Bad_Tag)
+		tag, bad_flag := field_tag(b, v.names[i], v.tags[i])
+		if len(bad_flag) > 0 {
+			refuse_plan(b, .Bad_Tag, v.names[i], bad_flag)
 			return
 		}
 		if !tag.keep {
@@ -912,7 +967,7 @@ lay_out :: proc(b: ^Builder, v: runtime.Type_Info_Struct, base: uintptr, out: ^[
 		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit}
 		if tag.unknown {
 			if tag.required {
-				refuse_plan(b, .Bad_Tag, tag.name)
+				refuse_plan(b, .Bad_Tag, tag.name, "required")
 			}
 			if v.types[i].id != typeid_of(map[string]Raw) || capture^ != nil {
 				refuse_plan(b, .Unsupported, tag.name)
@@ -921,7 +976,7 @@ lay_out :: proc(b: ^Builder, v: runtime.Type_Info_Struct, base: uintptr, out: ^[
 			continue
 		}
 		if _, failed := append(out, x); failed != nil {
-			refuse_plan(b, .Out_Of_Memory)
+			refuse_plan(b, .No_Memory)
 			return
 		}
 	}

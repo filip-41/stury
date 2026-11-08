@@ -2,7 +2,7 @@ Ho, Chi Minh nil
 City,population,lat,lon
 Oslo,709000,59.91,10.75
 "Ho, Chi Minh",,10.82,106.63
-2:6: Value does not fit the field's type at [0].population
+2:6: Expected i64, found "lots" at .[0].population
 Oslo 709000
 1 59.91
 2 59.91

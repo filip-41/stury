@@ -75,9 +75,9 @@ main :: proc() {
 	bad_csv := transmute([]byte)string("City,population,lat,lon\nOslo,lots,59.91,10.75\n")
 	bad_json := transmute([]byte)string(`[{"city":"Oslo","population":"lots","lat":59.91,"lon":10.75}]`)
 	if err := load(.Csv, bad_csv, &cities); err.kind != .None {
-		report(bad_csv, err) // 2:6: Value does not fit the field's type at [0].population
+		report(bad_csv, err) // 2:6: Expected i64, found "lots" at .[0].population
 	}
 	if err := load(.Json, bad_json, &cities); err.kind != .None {
-		report(bad_json, err) // 1:30: Value does not fit the field's type at [0].population
+		report(bad_json, err) // 1:30: Expected i64, found string at .[0].population
 	}
 }

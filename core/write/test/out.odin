@@ -47,16 +47,6 @@ buffer_grows_and_keeps_every_byte :: proc(t: ^testing.T) {
 }
 
 @(test)
-empty_output_finishes_with_no_bytes :: proc(t: ^testing.T) {
-	spill: [write.ROOM_MAX]u8 = ---
-	out: write.Out
-	write.init(&out, &spill)
-	data, err := write.finish(&out)
-	testing.expect_value(t, len(data), 0)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
-}
-
-@(test)
 stream_flushes_when_the_buffer_fills :: proc(t: ^testing.T) {
 	sink: bytes.Buffer
 	defer bytes.buffer_destroy(&sink)
@@ -138,28 +128,24 @@ silent_stream :: proc(taken: ^i64) -> io.Stream {
 	}
 }
 
+// A stream that names no error and takes nothing is a short write, and one that takes a few bytes at a time is written whole.
 @(test)
-stream_taking_none_with_no_error_is_a_short_write :: proc(t: ^testing.T) {
-	spill: [write.ROOM_MAX]u8 = ---
-	out: write.Out
-	taken: i64
-	write.init(&out, &spill, stream = silent_stream(&taken))
-	put_pieces(&out, 1, 50)
-	_, err := write.finish(&out)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Write_Failed)
-	testing.expect_value(t, err.cause, io.Error.Short_Write)
-}
-
-@(test)
-stream_taking_a_few_bytes_at_a_time_is_written_whole :: proc(t: ^testing.T) {
-	spill: [write.ROOM_MAX]u8 = ---
-	out: write.Out
-	taken: i64 = 7
-	write.init(&out, &spill, stream = silent_stream(&taken))
-	put_pieces(&out, 1, 50)
-	_, err := write.finish(&out)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, out.flushed, 50)
+silent_streams :: proc(t: ^testing.T) {
+	for taken, want in ([]i64{0, 7}) {
+		spill: [write.ROOM_MAX]u8 = ---
+		out: write.Out
+		taken := taken
+		write.init(&out, &spill, stream = silent_stream(&taken))
+		put_pieces(&out, 1, 50)
+		_, err := write.finish(&out)
+		if want == 0 {
+			testing.expect_value(t, err.kind, core.Typed_Error_Kind.Write_Failed)
+			testing.expect_value(t, err.cause, io.Error.Short_Write)
+		} else {
+			testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+			testing.expect_value(t, out.flushed, 50)
+		}
+	}
 }
 
 @(test)
@@ -173,51 +159,36 @@ refused_allocation_gives_no_bytes :: proc(t: ^testing.T) {
 	put_pieces(&out, 1000, 100)
 	data, err := write.finish(&out)
 	testing.expect(t, data == nil)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Out_Of_Memory)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.No_Memory)
 }
 
 @(test)
-write_kinds_render_without_a_position :: proc(t: ^testing.T) {
-	kinds := [?]struct {
-		kind:    core.Typed_Error_Kind,
+write_kinds_render :: proc(t: ^testing.T) {
+	Case :: struct {
+		err:     core.Typed_Error,
 		code:    string,
 		message: string,
-	} {
-		{.Bad_Utf8, "typed.bad_utf8", "String is not valid UTF-8"},
-		{.Non_Finite, "typed.non_finite", "Number is not finite"},
-		{.Too_Deep, "typed.too_deep", "Value nests past the depth limit"},
-		{.Cycle, "typed.cycle", "Value refers to itself"},
-		{.Bad_Raw, "typed.bad_raw", "Text is not one value of the format"},
-		{.Unwritable, "typed.unwritable", "Value cannot be written in the format"},
-		{.Write_Failed, "typed.write_failed", "Output refused the bytes"},
 	}
-	for k in kinds {
-		e := core.Typed_Error{kind = k.kind, at = 7}
+	steps := core.Typed_Error{kind = .Non_Finite, n_steps = 2}
+	steps.steps[0], steps.steps[1] = core.Name("price"), core.Index(3)
+	cases := [?]Case {
+		{{kind = .Invalid_Utf8, at = 7}, "typed.invalid_utf8", "Invalid UTF-8"},
+		{{kind = .Non_Finite, at = 7}, "typed.non_finite", "Number is not finite"},
+		{{kind = .Too_Deep, at = 7}, "typed.too_deep", "Exceeds the depth limit"},
+		{{kind = .Cycle, at = 7}, "typed.cycle", "Value refers to itself"},
+		{{kind = .Bad_Raw, at = 7}, "typed.bad_raw", "Not one value of the format"},
+		{{kind = .Unwritable, at = 7}, "typed.unwritable", "Value cannot be written in the format"},
+		{{kind = .Write_Failed, at = 7}, "typed.write_failed", "Output refused the bytes"},
+		{{kind = .Write_Failed, cause = .Closed}, "typed.write_failed", "Output refused the bytes (Closed)"},
+		{steps, "typed.non_finite", "Number is not finite at .price[3]"},
+	}
+	for c in cases {
 		b: strings.Builder
 		defer strings.builder_destroy(&b)
-		core.render(strings.to_writer(&b), transmute([]u8)string("abc\ndef"), e)
-		testing.expect_value(t, strings.to_string(b), k.message)
+		core.render(strings.to_writer(&b), transmute([]u8)string("abc\ndef"), c.err)
+		testing.expect_value(t, strings.to_string(b), c.message)
 		strings.builder_reset(&b)
-		core.write_code(strings.to_writer(&b), e)
-		testing.expect_value(t, strings.to_string(b), k.code)
+		core.write_code(strings.to_writer(&b), c.err)
+		testing.expect_value(t, strings.to_string(b), c.code)
 	}
-}
-
-@(test)
-write_failed_renders_its_cause :: proc(t: ^testing.T) {
-	b: strings.Builder
-	defer strings.builder_destroy(&b)
-	core.render(strings.to_writer(&b), nil, core.Typed_Error{kind = .Write_Failed, cause = .Closed})
-	testing.expect_value(t, strings.to_string(b), "Output refused the bytes (Closed)")
-}
-
-@(test)
-write_kinds_render_their_path :: proc(t: ^testing.T) {
-	e := core.Typed_Error{kind = .Non_Finite, n_steps = 2}
-	e.steps[0] = core.Name("price")
-	e.steps[1] = core.Index(3)
-	b: strings.Builder
-	defer strings.builder_destroy(&b)
-	core.render(strings.to_writer(&b), nil, e)
-	testing.expect_value(t, strings.to_string(b), "Number is not finite at .price[3]")
 }

@@ -1,14 +1,15 @@
 # Library guide
 
 How to use `stury:core`, `stury:json` and `stury:dsv`, with snippets from the programs in [examples/](../examples).
-Each public name's doc comment is its contract, and [API.txt](../API.txt) lists every public name. The files in this
+Each public name's doc comment is its contract, and [API.txt](../API.txt) lists the user surface. [API_SHARED.txt](../API_SHARED.txt) lists the public names that only the
+packages of this repository use. The files in this
 directory describe one part each: [document.md](document.md), [paths.md](paths.md), [typed.md](typed.md),
 [writer.md](writer.md) and [records.md](records.md).
 
 ## Requirements
 
-- A recent Odin. The collection is named `stury` and points at this directory: `-collection:stury=.`. The imports are
-  `stury:core`, `stury:json`, `stury:dsv`, `stury:core/records`, `stury:core/typed` and `stury:host`.
+- Odin `dev-2026-11` or later. The collection is named `stury` and points at this directory: `-collection:stury=.`.
+  The imports are `stury:core`, `stury:json`, `stury:dsv`, `stury:core/records`, `stury:core/typed` and `stury:host`.
 - 64-bit little-endian targets: darwin and linux, on amd64 and arm64. The command line also builds on Windows.
 - On amd64 the floor is x86-64-v2. Long strings are scanned wider on processors that have AVX-512BW, chosen at run
   time.
@@ -32,12 +33,13 @@ JSON are `max_depth`, `tolerate` and `refuse_non_finite`, and for dsv `no_header
 
 ## Errors
 
-An error is a value with a `kind` and the byte it concerns, never a pointer or a string. `err.kind != .None` is the
-test. The types are `core.Fault` (a text broke the grammar, from `validate`), `core.Document_Error`,
+An error is a value with a `kind` and the byte it concerns, allocated nowhere: a text it names is a view of the input,
+the path's text or the plan. `err.kind != .None` is the test. The types are `core.Fault` (a text broke the grammar, from `validate`), `core.Document_Error`,
 `core.Path_Error`, `core.Typed_Error` (a read or write of an Odin value) and the path edit errors.
 
-`core.render(writer, src, err)` writes any of them as `line:col: message`, with `at path` for a typed error. Pass
-`nil` for `src` when the error has no text, such as a `marshal` refusal.
+`core.render(writer, src, err)` writes any of them as `line:col: message`, with `at path` for a typed error. A path
+error's position is in the path's text, which it holds. Pass `nil` for `src` when the error has no text, such as a
+`marshal` refusal. A fault rendered with `nil` names its byte offset, `at byte 5: message`, in place of a line.
 
 ```odin
 report :: proc(src: []u8, e: $E) {
@@ -62,7 +64,7 @@ if fault, bad := json.validate(src, .Json).?; bad {
 shows that `.Json` refuses a comment that `.Jsonc` takes:
 
 ```
-2:9: Unexpected character
+2:9: Expected ',' or '}' after an object member
 ```
 
 ## Read into Odin values
@@ -82,7 +84,7 @@ out, err := json.marshal(person, allocator = alloc)  // {"name":"ada","n":1}
 - A member the struct does not have is skipped, and `Read_Options{unknown = .Refuse}` makes it an error. A field
   tagged `unknown` on a `map[string]typed.Raw` captures them.
 - A member absent from the text keeps the value the target already holds, so defaults are written before the read.
-- A repeated key follows `Read_Options.dups`: `.Last` by default, `.First`, or `refuse_duplicates` for an error.
+- A repeated key follows `Read_Options.dups`: `.Last` by default, `.First`, or `.Refuse` for an error.
 - `Maybe(T)` and pointers take `null`. Enums read by name, unions by the arm their value picks, and a type in
   `Plan_Options.hooks` is read by your procedure.
 - `Read_Options.collect` reads on after a refused value and gathers every refusal instead of stopping at the first.
@@ -107,10 +109,10 @@ second_tag, _ := core.parse_path(".tags[1]")
 defer core.path_destroy(&second_tag)
 doc, answer, err := json.find(src, .Json, second_tag)
 defer core.destroy(&doc)
-if a, found := answer.?; found && a.outcome == .Found {
-	fmt.println(string(core.span(&doc, a.node))) // "engines", quotes and all
+if answer.outcome == .Found {
+	fmt.println(string(core.span(&doc, answer.node))) // "engines", quotes and all
 	buf: [32]u8
-	text, _ := core.text(&doc, a.node, buf[:])    // engines, decoded into the caller's buffer
+	text, _ := core.text(&doc, answer.node, buf[:])    // engines, decoded into the caller's buffer
 }
 
 every_tag, _ := core.parse_path(".tags[]")
@@ -177,9 +179,9 @@ defer core.edit_list_destroy(&list)
 tags, _ := core.member(&doc, core.ROOT, "tags")
 core.set_member(&list, core.ROOT, "n", "1")
 core.remove(&list, tags)
-committed, _, cerr := json.commit(&list, .Json)
+committed, _, cerr := core.commit(&list)
 defer delete(committed)
-// {"name": "ada","n":1}
+// {"name": "ada",  "n": 1}
 ```
 
 `core.insert` adds an element, `core.set` replaces a node, and `core.remove` drops one. In a dsv document,
@@ -205,7 +207,7 @@ Comments are facts attached to a node, with a role of `Comment`, `Comment_Inline
 
 | Field | Effect |
 |---|---|
-| `pretty`, `indent`, `tab` | one member a line, with `indent` spaces or a tab per level. `core.PRETTY` is two spaces |
+| `pretty`, `indent`, `tab` | one member a line, with `indent` spaces or a tab per level, and no indent at `indent` 0 as jq's `--indent 0`. `core.PRETTY` is two spaces |
 | `ascii` | a rune past U+007F is written as `\uXXXX` |
 | `escape_html` | `<`, `>`, `&`, U+2028 and U+2029 are escaped |
 | `escape_del` | DEL is written as `\u007f` |
@@ -213,7 +215,26 @@ Comments are facts attached to a node, with a role of `Comment`, `Comment_Inline
 | `respell_strings` | a string read from a source is written in the writer's own escapes |
 
 A document written back keeps each string and number as its source spelled it unless `respell_strings` is set.
-[writer.md](writer.md) holds the tag flags (`omitempty`, `string`), the hooks and what a format may refuse to write.
+[writer.md](writer.md) holds the `omitempty` tag flag, the hooks and what a format may refuse to write.
+
+### Format a text
+
+`core.format` reads a text and writes it again in the layout `Write_Options` names, judging it on the way. `stury fmt`
+is this call.
+
+```odin
+out, err := core.format(src, json.as(.Json), core.PRETTY)
+if err.kind != .None {
+	report(src, err)
+	return
+}
+defer delete(out)
+```
+
+`json.as(.Json)` is an `As`, the handle of a format. The calls in `core` and `core/records` that work on any format
+(`core.validate`, `core.build`, `core.format`, `records.check`, `records.open` and the rest) take one where a `json` or
+`dsv` call takes a `Spec`, and `core.write` and `core.commit` take one to change the format. `json.as(spec, opts)` and
+`dsv.as(spec, opts)` make it, and a document holds the one it was read with.
 
 ## Records and threads
 
@@ -272,7 +293,7 @@ out, _ := dsv.marshal(cities)
   name. With `Options{no_header = true}`, column k is the struct's field k.
 - An empty cell is an absent value for `Maybe(T)`, and writes back as an empty cell.
 - A cell the field cannot hold is an error at that cell:
-  `2:6: Value does not fit the field's type at [0].population`.
+  `2:6: Expected i64, found "lots" at .[0].population`.
 - A number field reads its cell as a loose number: a leading `+`, leading zeros and a point with no digits on one side
   are allowed, so `007` reads as 7 and `.5` as 0.5. `infer`, below, takes only an exact JSON number, so a document
   keeps `007` as the text it is.
@@ -280,10 +301,15 @@ out, _ := dsv.marshal(cities)
 - A dsv document is an array of objects keyed by the header. `core.length(&doc, core.ROOT)` is the row count, since the
   header is no record. `dsv.find` reads one cell by `.[1].City` without building the table, `dsv.set` replaces a cell and
   keeps every other byte, and an edit list can insert a row or remove a cell.
-- A cell reads as text unless `Options.infer` is set, which resolves an empty cell as null, `true` and `false` as
-  booleans and an exact JSON number as a number.
+- `core.kind` reads an empty unquoted cell as `.Null`, as a typed read and the CLI do, and any other cell as
+  `.String`. `Options.infer` also reads `true` and `false` as booleans and an exact JSON number as a number. A JSON
+  write of the document writes each cell as the kind it reads as.
 
-A cell is quoted on write when it holds the delimiter, a quote or a line break.
+A cell is quoted on write when it holds the delimiter, a quote or a line break. A list row (`[][]string`) writes one
+cell per element, and a row whose length differs from the first row's is refused as `.Wrong_Length`, with the row's
+index, since a read without `.Ragged` refuses it. With `Options{tolerate = {.Ragged}}`, given to the write as to the
+read, rows of any length are written as they are and read back as they were written. No row is padded, since an empty
+cell added on write would read back as data the list did not hold.
 
 ## One program, several formats
 
@@ -310,8 +336,8 @@ The program reads the CSV, writes it as JSON, reads the JSON back, and writes CS
 population reports at its own position in each format:
 
 ```
-2:6: Value does not fit the field's type at [0].population
-1:30: Value does not fit the field's type at [0].population
+2:6: Expected i64, found "lots" at .[0].population
+1:30: Expected i64, found string at .[0].population
 ```
 
 ## Memory and ownership

@@ -63,12 +63,22 @@ format_names :: proc(writing: bool) -> string {
 	return string(b[:])
 }
 
-// How the inputs are read, as --from and --seq say. A JSON-like format's texts are read as `json_reading` reads them.
+// How the inputs are read, as --from, --seq and the CSV options say. A JSON-like format's texts are read as `json_reading` reads them.
 input_source :: proc(o: ^Opts, json_reading: core.As) -> Source {
 	if reads_cells(o) {
-		return {as = dsv.as(.Csv if o.from == .Csv else .Tsv), framing = .Lines}
+		return {as = dsv.as(cells_spec(o.from), o.cells_in), framing = .Lines}
 	}
 	return {as = json_reading, framing = .Seq if o.seq else .Lines if reads_lines(o) else .Concatenated, spec = json.Spec(json_reading.spec)}
+}
+
+// How the delimited outputs are written, as --to and the CSV options say.
+cells_written_as :: proc(o: ^Opts) -> core.As {
+	return dsv.as(cells_spec(o.to), o.cells_out)
+}
+
+@(private = "file")
+cells_spec :: #force_inline proc(f: Format) -> dsv.Spec {
+	return .Csv if f == .Csv else .Tsv
 }
 
 // Reports whether the input format is a delimited one.
@@ -117,5 +127,29 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 	}
 	if o.grow_header && !writes_cells(o) {
 		usage_error("--grow-header applies to --to csv or tsv")
+	}
+	if cli.cells_flag != "" && !reads_cells(o) {
+		usage_error("%s applies to --from csv or tsv", cli.cells_flag)
+	}
+	// check and edit refuse the options that write a table as options they have no use for.
+	if cli.cells_out_flag != "" && !writes_cells(o) && !cli.validating && !cli.editing {
+		usage_error("%s applies to --to csv or tsv", cli.cells_out_flag)
+	}
+	if reads_cells(o) {
+		refuse_cell_bytes(cells_spec(o.from), o.cells_in, from, "--delimiter", "--comment")
+	}
+	if writes_cells(o) {
+		refuse_cell_bytes(cells_spec(o.to), o.cells_out, to, "--out-delimiter" if cli.out_delimiter != nil else "--delimiter", "--out-comment" if cli.out_comment != nil else "--comment")
+	}
+}
+
+// Refuses a delimiter or comment character that `format` cannot read, as the library's walk refuses it.
+@(private = "file")
+refuse_cell_bytes :: proc(spec: dsv.Spec, opts: dsv.Options, format, delimiter_flag, comment_flag: string) {
+	if _, bad := core.validate(nil, dsv.as(spec, {delimiter = opts.delimiter})).?; bad {
+		usage_error("%s %q is not a byte %s can separate cells with", delimiter_flag, string([]byte{opts.delimiter}), format)
+	}
+	if _, bad := core.validate(nil, dsv.as(spec, opts)).?; bad {
+		usage_error("%s %q is not a byte %s can start a comment line with", comment_flag, string([]byte{opts.comment}), format)
 	}
 }

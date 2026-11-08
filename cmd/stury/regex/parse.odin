@@ -8,10 +8,15 @@ import "core:unicode/utf8"
 
 MAX_REPEAT :: 100000 // ONIG_MAX_REPEAT_NUM
 MAX_BACKREF :: 1000 // ONIG_MAX_BACKREF_NUM
+MAX_CAPTURES :: 32767 // ONIG_MAX_CAPTURE_NUM
+// The nesting jq's Oniguruma refuses past: the pattern and each group count two, each quantifier on an atom one more.
+// It bounds the tree's depth, which compiling and analysing recurse over.
+MAX_PARSE_DEPTH :: 1024
 
 Node_Kind :: enum u8 {
 	Empty,
 	Char,
+	Str, // a run of two or more plain characters outside (?i), `text`, as written in the pattern
 	Any,
 	Class,
 	Cat,
@@ -58,7 +63,7 @@ Callout :: struct {
 	// it, '<' counts only then. Any other ends the search when it is reached.
 	type:  rune,
 	sides: [2]Operand, // MAX's most in [0]; CMP's two sides
-	op:    string, // CMP's, read when it is reached
+	cmp:   u8, // CMP's operator as the outcomes it holds for: 1 less, 2 equal, 4 greater, 0 for none
 	index: int, // its count's slot
 }
 
@@ -82,22 +87,23 @@ Node :: struct {
 	kind:       Node_Kind,
 	fold:       bool, // Char, Class, Backref: under (?i)
 	dotall:     bool, // Any: also matches "\n"
-	r:          rune, // Char
+	greedy:     bool,
+	possessive: bool,
+	assert:     Assert_Kind,
+	look:       Look_Kind,
+	bag:        bool, // the body of an option group `(?i:...)`, which Oniguruma keeps as a group of its own
+	r:          rune, // Char, and Str's first character
+	recursion:  bool, // Backref: within a group it names
+	used:       bool, // Group: a backreference, condition or call reads it, so a look-behind is not cut to nothing
+	text:       string, // Str
 	class:      ^Class,
 	kids:       [dynamic]^Node, // Cat, Alt; Group, Repeat and Look have one; Cond its yes and no
 	min, max:   int, // Repeat; max -1 for no bound
-	greedy:     bool,
-	possessive: bool,
 	group:      int, // Group's capture number (0 for none), Cond's group
 	refs:       [dynamic]int, // Backref's groups, which a name may give several of
 	name:       string, // Backref or Cond by name, until resolved
-	assert:     Assert_Kind,
 	callout:    ^Callout, // a callout of data
-	look:       Look_Kind,
-	bag:        bool, // the body of an option group `(?i:...)`, which Oniguruma keeps as a group of its own
 	target:     ^Node, // Call's group, once resolved (`resolve_calls`)
-	recursion:  bool, // Backref: within a group it names
-	used:       bool, // Group: a backreference, condition or call reads it, so a look-behind is not cut to nothing
 }
 
 Flags :: struct {
@@ -127,6 +133,7 @@ Parser :: struct {
 	tags:   [dynamic]string, // callouts' [tag]s
 	callouts: [dynamic]^Callout,
 	err:    string,
+	depth:  int, // the groups being parsed and the quantifiers on the atom, as MAX_PARSE_DEPTH counts them
 	head:   bool, // at an absent's first atom, where Oniguruma keeps a `(?:...)` as a group of its own (group_head)
 }
 
@@ -186,6 +193,11 @@ at_end :: proc(p: ^Parser) -> bool {
 parse_alt :: proc(p: ^Parser) -> ^Node {
 	saved := p.flags
 	defer p.flags = saved
+	p.depth += 2
+	defer p.depth -= 2
+	if p.depth > MAX_PARSE_DEPTH {
+		return fail(p, "parse depth limit over")
+	}
 	first := parse_cat(p)
 	if p.err != "" || at_end(p) || peek(p) != '|' {
 		return first
@@ -203,17 +215,40 @@ parse_alt :: proc(p: ^Parser) -> ^Node {
 
 @(private = "file")
 parse_cat :: proc(p: ^Parser) -> ^Node {
-	cat := new_node(.Cat)
+	// The Cat is made at the second element, so a lone one takes no node.
+	first, cat: ^Node
+	add :: proc(first, cat: ^^Node, n: ^Node) {
+		switch {
+		case first^ == nil:
+			first^ = n
+		case cat^ == nil:
+			cat^ = new_node(.Cat, first^, n)
+		case:
+			append(&cat^.kids, n)
+		}
+	}
 	for {
 		skip_extended(p)
 		if at_end(p) || peek(p) == '|' || peek(p) == ')' {
 			break
 		}
+		if run := plain_run(p); run != nil {
+			p.head = false
+			add(&first, &cat, run)
+			continue
+		}
 		head := p.head && strings.has_prefix(p.src[p.i:], "(?:")
+		quoted := strings.has_prefix(p.src[p.i:], `\Q`)
 		p.head = false
 		atom := parse_atom(p)
 		if p.err != "" {
 			return nil
+		}
+		if quoted && len(atom.kids) > 1 { // a quantifier after \Q...\E repeats its last character
+			for k in atom.kids[:len(atom.kids) - 1] {
+				add(&first, &cat, k)
+			}
+			atom = atom.kids[len(atom.kids) - 1]
 		}
 		if head && atom != nil {
 			atom.bag = true // so a repeat of it is valid, whatever it holds
@@ -225,15 +260,86 @@ parse_cat :: proc(p: ^Parser) -> ^Node {
 		if p.err != "" {
 			return nil
 		}
-		append(&cat.kids, atom)
+		add(&first, &cat, atom)
 	}
-	switch len(cat.kids) {
-	case 0:
-		cat.kind = .Empty
-	case 1:
-		return cat.kids[0]
+	if cat != nil {
+		return cat
 	}
-	return cat
+	return first if first != nil else new_node(.Empty)
+}
+
+// The plain characters from here, and the escaped ASCII punctuation, as one Str node, short of one a quantifier
+// follows, which repeats it alone. Nil for fewer than two, under (?i) or (?x), where each character is its own node.
+// The text is the pattern's own bytes until an escape, then a copy.
+@(private = "file")
+plain_run :: proc(p: ^Parser) -> ^Node {
+	if p.flags.fold || p.flags.extend {
+		return nil
+	}
+	copied: [dynamic]byte
+	owned := false
+	seg, end, runes := p.i, p.i, 0
+	last, last_len := p.i, 0 // where the last character starts in the pattern, and the text's length before it
+	scan: for end < len(p.src) {
+		w := 0
+		switch c := p.src[end]; c {
+		case '\\':
+			if end + 1 >= len(p.src) || !escaped_punctuation(p.src[end + 1]) {
+				break scan
+			}
+			w = 2
+		case '(', ')', '[', '.', '^', '$', '|', '*', '+', '?', '{':
+			break scan
+		case:
+			r: rune
+			if r, w = utf8.decode_rune_in_string(p.src[end:]); r == utf8.RUNE_ERROR {
+				break scan
+			}
+		}
+		last, last_len = end, len(copied) + end - seg
+		if w == 2 && p.src[end] == '\\' {
+			append(&copied, p.src[seg:end])
+			append(&copied, p.src[end + 1])
+			owned, seg = true, end + 2
+		}
+		end += w
+		runes += 1
+	}
+	repeated := false
+	if end < len(p.src) {
+		switch p.src[end] {
+		case '*', '+', '?', '{':
+			repeated = true
+			runes -= 1
+		}
+	}
+	if runes < 2 {
+		delete(copied)
+		return nil
+	}
+	n := new_node(.Str)
+	if owned {
+		append(&copied, p.src[seg:end])
+		if repeated {
+			resize(&copied, last_len)
+		}
+		n.text = string(copied[:])
+	} else {
+		n.text = p.src[p.i:last if repeated else end]
+	}
+	p.i = last if repeated else end
+	n.r, _ = utf8.decode_rune_in_string(n.text)
+	return n
+}
+
+// Whether `\c` is the character c itself, as an escaped ASCII character other than a letter or digit is.
+@(private = "file")
+escaped_punctuation :: proc(c: byte) -> bool {
+	switch c {
+	case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9':
+		return false
+	}
+	return c < 0x80
 }
 
 // Under (?x), white space and `#` comments between tokens.
@@ -256,6 +362,7 @@ skip_extended :: proc(p: ^Parser) {
 @(private = "file")
 parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 	atom := atom
+	quantifiers := 0
 	for {
 		skip_extended(p)
 		if at_end(p) {
@@ -264,14 +371,8 @@ parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 		c := peek(p)
 		lo, hi: int
 		switch c {
-		case '*':
-			lo, hi = 0, -1
-			p.i += 1
-		case '+':
-			lo, hi = 1, -1
-			p.i += 1
-		case '?':
-			lo, hi = 0, 1
+		case '*', '+', '?':
+			lo, hi = int(c == '+'), 1 if c == '?' else -1
 			p.i += 1
 		case '{':
 			ok: bool
@@ -286,6 +387,9 @@ parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 		}
 		if invalid_repeat_target(atom) {
 			return fail(p, "target of repeat operator is invalid")
+		}
+		if quantifiers += 1; p.depth + quantifiers > MAX_PARSE_DEPTH {
+			return fail(p, "parse depth limit over")
 		}
 		rep := new_node(.Repeat, atom)
 		rep.min, rep.max, rep.greedy = lo, hi, true
@@ -394,29 +498,41 @@ invalid_repeat_target :: proc(n: ^Node) -> bool {
 	return false
 }
 
-// The decimal digits at s[j^:], read past, their value capped at `cap`.
+// The digits of `base` at s[j^:], at most `most` of them, read past: their value capped at `cap`, and how many.
 @(private)
-number :: proc(s: string, j: ^int, cap: int) -> (n: int, digits: bool) {
-	for j^ < len(s) && s[j^] >= '0' && s[j^] <= '9' {
-		n = min(n * 10 + int(s[j^] - '0'), cap)
+number :: proc(s: string, j: ^int, cap: int, base := 10, most := max(int)) -> (n: int, digits: int) {
+	for ; digits < most && j^ < len(s) && digit(s[j^]) < base; digits += 1 {
+		n = min(n * base + digit(s[j^]), cap)
 		j^ += 1
-		digits = true
 	}
 	return
+}
+
+@(private)
+digit :: proc(c: byte) -> int {
+	switch c {
+	case '0' ..= '9':
+		return int(c - '0')
+	case 'a' ..= 'f':
+		return int(c - 'a') + 10
+	case 'A' ..= 'F':
+		return int(c - 'A') + 10
+	}
+	return 16
 }
 
 // `{n}`, `{n,}` or `{n,m}` at `{`, read past when it is one. Anything else leaves `{` a literal.
 @(private = "file")
 parse_interval :: proc(p: ^Parser) -> (lo, hi: int, ok: bool) {
 	j := p.i + 1
-	got: bool
-	if lo, got = number(p.src, &j, MAX_REPEAT + 1); !got {
+	digits: int
+	if lo, digits = number(p.src, &j, MAX_REPEAT + 1); digits == 0 {
 		return
 	}
 	hi = lo
 	if j < len(p.src) && p.src[j] == ',' {
 		j += 1
-		if hi, got = number(p.src, &j, MAX_REPEAT + 1); !got {
+		if hi, digits = number(p.src, &j, MAX_REPEAT + 1); digits == 0 {
 			hi = -1
 		}
 	}
@@ -519,6 +635,9 @@ look_node :: proc(p: ^Parser, kind: Look_Kind) -> ^Node {
 
 @(private = "file")
 capture_node :: proc(p: ^Parser, name: string) -> ^Node {
+	if len(p.names) > MAX_CAPTURES {
+		return fail(p, "too many captures")
+	}
 	n := new_node(.Group)
 	append(&p.names, name)
 	append(&p.groups, n)
@@ -645,11 +764,7 @@ parse_absent :: proc(p: ^Parser) -> ^Node {
 		append(&n.kids, body)
 		return expect_close(p, n)
 	}
-	exp := body.kids[1]
-	if len(body.kids) > 2 {
-		exp = new_node(.Alt, ..body.kids[1:])
-	}
-	append(&n.kids, body.kids[0], exp)
+	append(&n.kids, body.kids[0], alt_rest(body))
 	return expect_close(p, n)
 }
 
@@ -755,16 +870,15 @@ cond_branches :: proc(p: ^Parser, n: ^Node) -> bool {
 		return false
 	}
 	if body.kind == .Alt && !body.bag {
-		append(&n.kids, body.kids[0])
-		if len(body.kids) == 2 {
-			append(&n.kids, body.kids[1])
-		} else {
-			rest := new_node(.Alt)
-			append(&rest.kids, ..body.kids[1:])
-			append(&n.kids, rest)
-		}
+		append(&n.kids, body.kids[0], alt_rest(body))
 	} else {
 		append(&n.kids, body, new_node(.Empty))
 	}
 	return true
+}
+
+// The alternatives of `alt` past its first, as one node.
+@(private = "file")
+alt_rest :: proc(alt: ^Node) -> ^Node {
+	return alt.kids[1] if len(alt.kids) == 2 else new_node(.Alt, ..alt.kids[1:])
 }

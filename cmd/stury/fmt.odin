@@ -9,11 +9,13 @@ package main
 
 import "base:runtime"
 import "core:bytes"
+import "core:math/rand"
 import "core:os"
+import "core:strconv"
+import "core:strings"
 import core "../../core"
 import "../../core/write"
 import records "../../core/records"
-import dsv "../../dsv"
 import json "../../json"
 import "jq"
 import "message"
@@ -24,9 +26,6 @@ FMT_EXIT_DIFFERS :: 1
 // `stury fmt`, which reads and writes the files and exits.
 fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	o := &run.opts
-	if flag := fmt_refused_option(o, cli); flag != "" {
-		usage_error("%s has no use with fmt: it runs no filter and writes each input's own format", flag)
-	}
 	files := cli.files[:] if len(cli.files) > 0 else STDIN_ONLY
 	if len(cli.files) == 0 && is_terminal(os.stdin) && is_terminal(os.stdout) {
 		// As check, rather than wait on the keyboard.
@@ -42,16 +41,7 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	case o.in_place && o.to != o.from:
 		usage_error("--in-place writes each file back as its own format: --from %s and --to %s differ", FORMATS[o.from].name, FORMATS[o.to].name)
 	case o.in_place:
-		for path in files {
-			if path == "-" {
-				usage_error("--in-place needs a FILE: it cannot rewrite standard input")
-			}
-			// A temporary file and a rename replace a name with a regular file, so a symbolic link, a pipe, a device and
-			// a directory are refused. `lstat` does not open the path, which would block on a pipe.
-			if info, err := os.lstat(path, context.temp_allocator); err == nil && info.type != .Regular {
-				usage_error("--in-place needs a regular file: %s is not one", path)
-			}
-		}
+		refuse_in_place_inputs(files)
 	}
 	init_output(&run.output, run)
 	run.output.held = o.check || o.in_place
@@ -66,43 +56,16 @@ fmt_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 	finish(run, EXIT_USAGE if ins.failures > 0 else run.output.ret)
 }
 
-// The first option given that only a filter run honours, or "". fmt reads files and writes their own format, so it
-// runs no filter and reshapes neither its input nor its output.
-@(private = "file")
-fmt_refused_option :: proc(o: ^Opts, cli: ^Cli) -> string {
-	switch {
-	case o.raw0:            return "--raw-output0"
-	case o.raw:             return "-j" if o.join else "-r"
-	case cli.compact_given: return "-c"
-	case o.ascii:           return "-a"
-	case o.sort_keys:       return "-S"
-	case cli.color_set:     return "-C"
-	case o.raw_input:       return "-R"
-	case o.null_input:      return "-n"
-	case o.slurp:           return "-s"
-	case o.from_file:       return "-f"
-	case o.seq:             return "--seq"
-	case o.stream_errors:   return "--stream-errors"
-	case o.stream:          return "--stream"
-	case o.exit_status:     return "-e"
-	case o.explain:         return "--explain"
-	case cli.binding_flag != "": return cli.binding_flag
-	// jq's layout of it, newlines without indent, is not one the writer writes.
-	case o.indent == 0:     return "--indent 0"
-	case cli.lib_dirs != nil: return "-L"
-	}
-	return ""
-}
-
 // Each of `ins.files` formatted in turn. `ins.failures` counts the files that did not open, read or write, and the
-// output comes to FMT_EXIT_DIFFERS when --check finds one that differs.
+// output comes to EXIT_INPUT after a file with a fault, else to FMT_EXIT_DIFFERS when --check finds one that differs,
+// which it names.
 @(private = "file")
 fmt_files :: proc(run: ^Run, ins: ^Inputs) {
 	o := &run.opts
 	out := &run.output
 	heap := runtime.heap_allocator()
 	for path in ins.files {
-		f, read := open_file(path)
+		f, read := open_file(path, "fmt")
 		if read {
 			ins.data, read = read_file(f)
 		}
@@ -111,16 +74,20 @@ fmt_files :: proc(run: ^Run, ins: ^Inputs) {
 			continue
 		}
 		ins.name = file_name(path)
-		fmt_text(run, ins)
+		formatted := fmt_text(run, ins)
 		table_end(out)
 		if out.table != nil {
 			out.table = table_start(run)
 		}
 		text := out.buf.buf[:out.buf.cursor]
 		switch {
+		case !formatted:
+			out.ret = EXIT_INPUT
+			flush_some(out, force = true)
 		case o.check:
 			if !bytes.equal(text, ins.data) {
-				out.ret = FMT_EXIT_DIFFERS
+				message.write_stderr("stury: %s is not formatted\n", ins.name)
+				out.ret = max(out.ret, FMT_EXIT_DIFFERS)
 			}
 		case o.in_place:
 			if !bytes.equal(text, ins.data) && !rewrite_file(path, text) {
@@ -135,29 +102,39 @@ fmt_files :: proc(run: ^Run, ins: ^Inputs) {
 	}
 }
 
-// The texts of the open file written, or the run ended at its first fault, after the texts before it. A text written
-// in its own family is built whole when it is the file's one text, else each record is.
+// The texts of the open file written, or the texts before its first fault and the fault told, and false. A text
+// written in its own family, or as a table's rows, is built whole when it is the file's one text, else each record is.
 @(private = "file")
-fmt_text :: proc(run: ^Run, ins: ^Inputs) {
+fmt_text :: proc(run: ^Run, ins: ^Inputs) -> bool {
 	o := &run.opts
 	data := ins.data
 	cells := reads_cells(o)
 	if !cells && json.blank(data, ins.spec.?) {
-		return
+		return true
+	}
+	if msg := header_fault(ins.name, data, ins.as) if cells else ""; msg != "" {
+		message.write_stderr("stury: parse error: %s", msg)
+		return false
 	}
 	heap := runtime.heap_allocator()
 	if !cells && ins.framing == .Concatenated && spine_print(ins, put_fmt) {
-		return
+		return true
 	}
-	if cells == writes_cells(o) && (cells || ins.framing == .Concatenated) {
+	if (cells == writes_cells(o) || !cells) && (cells || ins.framing == .Concatenated) {
 		doc, fault, texts := build_whole(data, ins.source, heap)
 		// A delimited text's fault is told at the record it is in, which the records below reach.
 		if f, bad := fault.?; bad && !cells {
-			fail_text(ins, f)
+			tell_fault(ins, f)
+			return false
 		} else if !bad && !texts {
-			put_document(run, ins, &doc)
+			written := true
+			if cells == writes_cells(o) {
+				written = put_document(run, ins, &doc)
+			} else {
+				emit_rows(run, ins, jq.document_value(doc))
+			}
 			core.destroy(&doc)
-			return
+			return written
 		}
 	}
 	it := records.open(data, ins.as, ins.framing, allocator = heap)
@@ -174,20 +151,40 @@ fmt_text :: proc(run: ^Run, ins: ^Inputs) {
 		doc, fault := jq.judge_build(built, err)
 		if f, bad := fault.?; bad {
 			cells_cut(run, ins, cut)
-			fail_text(ins, f)
+			tell_fault(ins, f)
+			return false
 		}
 		switch {
 		case cells && writes_cells(o):
 			cut = int(rec.at) + len(rec.text)
 		case cells == writes_cells(o):
-			put_document(run, ins, &doc)
-		case:
+			put_document(run, ins, &doc) or_return
+		case cells:
 			emit(&run.output, jq.document_value(doc))
+		case:
+			emit_rows(run, ins, jq.document_value(doc))
 		}
 	}
 	if f, bad := it.fault.?; bad {
 		cells_cut(run, ins, cut)
-		fail_text(ins, f)
+		tell_fault(ins, f)
+		return false
+	}
+	return true
+}
+
+// The text `v` written as a table's rows. A text whose root is an array is a list of rows, as the library's writer
+// takes it, its comments placed as the writer places a document's, and a record is a row.
+@(private = "file")
+emit_rows :: proc(run: ^Run, ins: ^Inputs, v: jq.Value) {
+	if ins.framing != .Concatenated || jq.kind(v) != .Array {
+		emit(&run.output, v)
+		return
+	}
+	table_root(&run.output, v)
+	it := jq.iterate(v)
+	for _, row in jq.next_member(&it) {
+		emit(&run.output, row)
 	}
 }
 
@@ -203,16 +200,16 @@ cells_cut :: proc(run: ^Run, ins: ^Inputs, cut: int) {
 		end = bytes.index_byte(ins.data, '\n') + 1
 	}
 	if doc, fault := jq.build_text(ins.data[:end], ins.as, runtime.heap_allocator()); fault == nil {
-		put_document(run, ins, &doc)
+		_ = put_document(run, ins, &doc)
 	}
 }
 
 // The document `doc` of the open file written by the library's writer in the output's format and layout, and a
-// newline after it unless it ends with one or is empty, as a CSV file with no header is.
+// newline after it unless it ends with one or is empty, as a CSV file with no header is. False, told, when it cannot be.
 @(private = "file")
-put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) {
+put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 	o := &run.opts
-	as := dsv.as(.Csv if o.to == .Csv else .Tsv) if writes_cells(o) else json.as(.Jsonc if writes_comments(o) else .Json, {max_depth = o.max_depth})
+	as := cells_written_as(o) if writes_cells(o) else json.as(.Jsonc if writes_comments(o) else .Json, {max_depth = o.max_depth})
 	out := &run.output
 	text, _, err := core.write(doc, out.layout.opts, as, allocator = context.temp_allocator)
 	if err.kind != .None {
@@ -222,35 +219,40 @@ put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) {
 		} else {
 			message.write_stderr("stury: error: %s: cannot write the value: %v\n", ins.name, err.kind)
 		}
-		finish(run, EXIT_INPUT)
+		return false
 	}
 	write.put_text(&out.buf, string(text))
 	if len(text) > 0 && text[len(text) - 1] != '\n' {
 		jq.put_byte(&out.buf, '\n')
 	}
 	flush_some(out)
+	return true
+}
+
+// Refuses an input `--in-place` cannot rewrite. A temporary file and a rename replace a name with a regular file, so
+// standard input, a symbolic link, a pipe, a device and a directory are refused. `lstat` does not open the path, which
+// would block on a pipe.
+refuse_in_place_inputs :: proc(files: []string) {
+	for path in files {
+		if path == "-" {
+			usage_error("--in-place needs a FILE: it cannot rewrite standard input")
+		}
+		if info, err := os.lstat(path, context.temp_allocator); err == nil && info.type != .Regular {
+			usage_error("--in-place needs a regular file: %s is not one", path)
+		}
+	}
 }
 
 // Replaces `path` with `text` through a temporary file beside it, so a reader sees the old file or the new one.
-@(private = "file")
 rewrite_file :: proc(path: string, text: []byte) -> bool {
 	info, serr := os.stat(path, context.temp_allocator)
 	if serr != nil {
 		return write_failed(path, serr)
 	}
-	// A bare name's dir is "", which create_temp_file reads as the system temp dir, where the rename may cross devices.
-	dir := os.dir(path)
-	f, terr := os.create_temp_file(dir if dir != "" else ".", ".stury-fmt-*.tmp")
-	if terr != nil {
-		return write_failed(path, terr)
+	f, temp, err := create_private_temp(path)
+	if err != nil {
+		return write_failed(path, err)
 	}
-	temp_info, ierr := os.fstat(f, context.temp_allocator)
-	if ierr != nil {
-		os.close(f)
-		return write_failed(path, ierr)
-	}
-	temp := temp_info.fullpath
-	err: os.Error
 	n: int
 	if n, err = os.write(f, text); err == nil && n < len(text) {
 		err = .Short_Write
@@ -271,6 +273,24 @@ rewrite_file :: proc(path: string, text: []byte) -> bool {
 		return write_failed(path, err)
 	}
 	return true
+}
+
+// A new file beside `path` that only its owner may open, so no other user can open it while the text is written,
+// which a mode set after the writes would allow.
+@(private = "file")
+create_private_temp :: proc(path: string) -> (f: ^os.File, name: string, err: os.Error) {
+	// A bare name's dir is "": the file goes in ".", not in the system temp dir, where the rename may cross devices.
+	dir := os.dir(path)
+	digits: [20]byte
+	for _ in 0 ..< 64 {
+		number := strconv.write_uint(digits[:], rand.uint64(), 10)
+		name = strings.concatenate({dir if dir != "" else ".", "/.stury-fmt-", number, ".tmp"}, context.temp_allocator)
+		f, err = os.open(name, {.Read, .Write, .Create, .Excl}, {.Read_User, .Write_User})
+		if err != .Exist {
+			return
+		}
+	}
+	return
 }
 
 @(private = "file")

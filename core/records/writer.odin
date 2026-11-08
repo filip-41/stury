@@ -93,10 +93,11 @@ record :: #force_inline proc(wr: ^Writer, value: rawptr, plan: ^typed.Plan) -> c
 }
 
 // The text a buffer writer wrote since the last take, valid until its next call. The writer then goes on as after a
-// stream's flush, so a later refusal still goes back to its record's start. A stream writer has none.
+// stream's flush, so a later refusal still goes back to its record's start. A stream writer has none, and neither has
+// a writer whose refusal is final or that `writer_end` ended.
 writer_take :: proc(wr: ^Writer) -> []u8 {
 	out := wr.tokens.out
-	if out == nil || out.stream.procedure != nil {
+	if wr.final || out == nil || out.stream.procedure != nil {
 		return nil
 	}
 	text := out.buf[:out.cursor]
@@ -116,10 +117,11 @@ write_text :: proc(wr: ^Writer, text: []u8) -> core.Typed_Error_Kind {
 	return end(wr, t.spell.line(t) if t.spell.line != nil else .None, false)
 }
 
-// Writes `cells` as one row of a delimited text, each as the typed write writes a string. A nil cell is empty and has
-// no quotes. A row that would be an empty line, which reads back as no record, is `.Unwritable`: no cell, one nil cell,
-// and in a format that cannot quote it one empty cell. A writer of another format is `.Unsupported`.
-write_cells :: proc(wr: ^Writer, cells: []Maybe(string)) -> core.Typed_Error_Kind {
+// Writes `cells` as one row of a delimited text, each as the typed write writes its kind, and a string that the
+// writer's handle would read back as another kind under `infer` quoted. A nil cell is empty and has no quotes. A row
+// that would be an empty line, which reads back as no record, is `.Unwritable`: no cell, one nil cell, and in a format
+// that cannot quote it one empty cell. A writer of another format is `.Unsupported`.
+write_cells :: proc(wr: ^Writer, cells: []cw.Scalar) -> core.Typed_Error_Kind {
 	t := &wr.tokens
 	if wr.final {
 		return wr.err.kind
@@ -135,11 +137,7 @@ write_cells :: proc(wr: ^Writer, cells: []Maybe(string)) -> core.Typed_Error_Kin
 	begin(wr)
 	// A flat format takes every scalar in any order, so each cell goes to the format's cell write with no token check.
 	for c in cells {
-		v: cw.Scalar = cw.Tree_Part.Null
-		if s, ok := c.?; ok {
-			v = s
-		}
-		if kind := t.spell.value(t, v); kind != .None {
+		if kind := t.spell.value(t, c); kind != .None {
 			t.err = kind
 			break
 		}

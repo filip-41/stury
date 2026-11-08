@@ -16,9 +16,9 @@
 //   simd_dom               simdjson DOM
 //   simd_dom_read          simdjson DOM, then a visit of every value (string lengths, numbers, bools, nulls)
 //   simd_key               the first object's first key, then one at_key of it per object
-//   simd_get KEY           On-Demand find_field of one root key, and the value's raw text
+//   simd_get KEY [BATCH]   On-Demand find_field of one root key, and the value's raw text. A sample is BATCH calls.
 //   simd_minify            simdjson::minify of the text, which does not read the text's values
-//   simd_doc_write         simdjson::to_string of a parsed DOM element, compact
+//   simd_doc_write         a parsed DOM element written by simdjson's string_builder, compact, into its reused buffer
 //   simd_stream[_nothread] parse_many over an NDJSON text: every document judged and its tape built. The text is
 //                          read in 1 MB batches (simdjson's default), and stage 1 of the next batch runs in a
 //                          thread of its own unless `_nothread`
@@ -440,16 +440,17 @@ static int run_job(const std::string& buffer, const std::string& job) {
             std::cerr << "simdjson dom parse failed: " << e << std::endl;
             return 1;
         }
-        std::string out;
+        // The builder keeps its buffer across clear(), so every call writes into the same bytes.
+        simdjson::internal::string_builder<> sb;
         int64_t ns = median_ns([&]() -> int64_t {
             auto t0 = clk::now();
-            std::string text = simdjson::to_string(root);
+            sb.clear();
+            sb.append(root);
+            std::string_view text = sb.str();
             keep(text);
-            int64_t d = since(t0);
-            // The previous call's text is freed outside the clock, as the other arms free theirs.
-            out = std::move(text);
-            return d;
+            return since(t0);
         });
+        std::string_view out = sb.str();
         return report(in.size(), ns, "out=" + std::to_string(out.size()) + " check=" + std::to_string(fnv_all(out.data(), out.size())));
     }
     if (job == "simd_dom") {
@@ -521,34 +522,35 @@ static int run_job(const std::string& buffer, const std::string& job) {
     return 2;
 }
 
-// Times one On-Demand `find_field` of `key` in the root object. A value's raw text ends at its last byte, so the check
-// folds the bytes every arm's span holds.
-static int simd_get_job(const simdjson::padded_string& in, const std::string& key) {
+// Times one On-Demand `find_field` of `key` in the root object, `batch` calls per sample. A value's raw text ends at its
+// last byte, so the check folds the bytes every arm's span holds.
+static int simd_get_job(const simdjson::padded_string& in, const std::string& key, int batch) {
     simdjson::ondemand::parser parser;
     std::string_view found;
     int64_t ns = median_ns([&] {
         auto t0 = clk::now();
-        std::string_view raw;
-        simdjson::ondemand::document doc;
-        if (!parser.iterate(in).get(doc)) {
-            simdjson::ondemand::value v;
-            if (!doc.find_field(key).get(v) && v.raw_json().get(raw)) raw = {};
+        for (int k = 0; k < batch; k++) {
+            std::string_view raw;
+            simdjson::ondemand::document doc;
+            if (!parser.iterate(in).get(doc)) {
+                simdjson::ondemand::value v;
+                if (!doc.find_field(key).get(v) && v.raw_json().get(raw)) raw = {};
+            }
+            keep(raw);
+            found = raw;
         }
-        keep(raw);
-        int64_t d = since(t0);
-        found = raw;
-        return d;
+        return since(t0);
     });
     while (!found.empty() && (found.back() == ' ' || found.back() == '\n' || found.back() == '\t' || found.back() == '\r'))
         found.remove_suffix(1);
-    return report(in.size(), ns, "check=" + std::to_string(fnv_bytes(CHECK_OFFSET, found.data(), found.size())));
+    return report(in.size(), ns / batch, "check=" + std::to_string(fnv_bytes(CHECK_OFFSET, found.data(), found.size())));
 }
 
 int main(int argc, char* argv[]) {
-    if (argc == 4 && std::string(argv[2]) == "simd_get") {
+    if ((argc == 4 || argc == 5) && std::string(argv[2]) == "simd_get") {
         simdjson::padded_string in;
         if (simdjson::padded_string::load(argv[1]).get(in)) return 1;
-        return simd_get_job(in, argv[3]);
+        return simd_get_job(in, argv[3], argc == 5 ? atoi(argv[4]) : 1);
     }
     if (argc != 3) {
         std::cerr << "Usage: cpp_bench <fixture_path> <mode>" << std::endl;

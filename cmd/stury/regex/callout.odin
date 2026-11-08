@@ -95,25 +95,20 @@ parse_callout :: proc(p: ^Parser) -> ^Node {
 			}
 			c.code = int(i32(c.code)) // Oniguruma's builtin takes it as an int
 		}
-	case "COUNT", "TOTAL_COUNT":
-		c.kind = .Count if name == "COUNT" else .Total_Count
-		if len(args) > 1 || len(args) == 1 && utf8.rune_count(args[0]) != 1 {
+	case "COUNT", "TOTAL_COUNT", "MAX":
+		c.kind = .Count if name == "COUNT" else .Total_Count if name == "TOTAL_COUNT" else .Max
+		at := int(c.kind == .Max) // the argument that gives the type, after MAX's most
+		if at > 0 {
+			if len(args) > 0 && !callout_operand(p, args[0], &c.sides[0]) {
+				return nil
+			}
+			c.type = 'X' // MAX gives back what a failed path counted, where COUNT keeps it
+		}
+		if len(args) < at || len(args) > at + 1 || len(args) == at + 1 && utf8.rune_count(args[at]) != 1 {
 			return fail(p, "invalid callout arg")
 		}
-		if len(args) == 1 {
-			c.type, _ = utf8.decode_rune(transmute([]byte)args[0])
-		}
-	case "MAX":
-		c.kind = .Max
-		if len(args) > 0 && !callout_operand(p, args[0], &c.sides[0]) {
-			return nil
-		}
-		if len(args) < 1 || len(args) > 2 || len(args) == 2 && utf8.rune_count(args[1]) != 1 {
-			return fail(p, "invalid callout arg")
-		}
-		c.type = 'X' // MAX gives back what a failed path counted, where COUNT keeps it
-		if len(args) == 2 {
-			c.type, _ = utf8.decode_rune(transmute([]byte)args[1])
+		if len(args) == at + 1 {
+			c.type, _ = utf8.decode_rune(transmute([]byte)args[at])
 		}
 	case "CMP":
 		c.kind = .Cmp
@@ -125,7 +120,8 @@ parse_callout :: proc(p: ^Parser) -> ^Node {
 		if len(args) != 3 {
 			return fail(p, "invalid callout arg")
 		}
-		c.op = args[1]
+		k, _ := slice.linear_search([]string{"<", "==", "<=", ">", "!=", ">="}, args[1])
+		c.cmp = u8(k + 1)
 	case:
 		return fail(p, "undefined callout name")
 	}

@@ -1,12 +1,10 @@
 package jq
 
 // Natives and generators (`Native_Sink`, `path`, `getpath`, `setpath`, `delpaths`, `limit`, `skip`, `first`, `last`,
-// `isempty`, `range`, `recurse`, `@comment*`). The builtins themselves are here, the ones that read inputs and write
+// `isempty`, `range`, `recurse`). The builtins themselves are here, the ones that read inputs and write
 // messages are in io.odin; the regular-expression ones are in regex_natives.odin.
 
 import "core:math"
-import "core:strings"
-import core_pkg "../../../core"
 
 Native_Sink :: struct {
 	using sink: Sink,
@@ -190,7 +188,7 @@ native_first :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool,
 }
 
 native_last :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	s := Last_Sink{sink = {emit = last_emit}}
+	s := Last_Sink{sink = {emit = last_emit}, keeps = !track}
 	if sig := eval(ip, n.args[0], input, env, track, &s); sig != .Go {
 		return sig
 	}
@@ -260,7 +258,7 @@ native_recurse :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: boo
 		}
 		if k := kind(cur.v); k == .Array || k == .Object {
 			if track && pathless(cur.path) {
-				return fail(ip, "Invalid path expression near attempt to iterate through %s", brief(cur.v))
+				return fail(ip, "Invalid path expression near attempt to iterate through %s", brief(ip, cur.v))
 			}
 			append(&levels, Level{members = iterate(cur.v), array = k == .Array, path = cur.path})
 		}
@@ -311,40 +309,4 @@ recurse_emit :: proc(s: ^Sink, it: Item) -> Signal {
 		return sig
 	}
 	return eval(x.ip, x.n, it, x.env, x.track, s)
-}
-
-// The comments attached to a value of a JSONC document, as stury reads them: `@comment` its `Comment` facts,
-// `@comment_inline` its `Comment_Inline` ones and `@comment_foot` its `Comment_Foot` ones, in source order, each
-// one's text without its markers and a space next to each (`// a` and `/* a */` read "a"). Null when it has none, as
-// any value the filter made has.
-@(private)
-fn_comments :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
-	r, is_ref := v.(Ref)
-	if !is_ref || len(r.doc.facts) == 0 {
-		return nil, .Go
-	}
-	role := core_pkg.Role.Comment
-	switch name {
-	case "@comment_inline":
-		role = .Comment_Inline
-	case "@comment_foot":
-		role = .Comment_Foot
-	}
-	texts: ^Array
-	it := core_pkg.facts_of(r.doc, r.node, role)
-	for body in core_pkg.fact_next(&it) {
-		text := strings.trim_prefix(body, " ")
-		// A block comment's body follows its `/*`, a line comment's its `//`.
-		if at := uintptr(raw_data(body)) - uintptr(raw_data(r.doc.src)); r.doc.src[at - 1] == '*' {
-			text = strings.trim_suffix(text, " ")
-		}
-		if texts == nil {
-			texts = new_array()
-		}
-		append(&texts.items, text)
-	}
-	if texts == nil {
-		return nil, .Go
-	}
-	return texts, .Go
 }

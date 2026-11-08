@@ -32,6 +32,18 @@ compare_failed :: proc(ip: ^Interp, eq: bool) -> Signal {
 
 // With `owned`, `+` and `*` change `a` in place where `a` is or holds a container the set names (modify.odin).
 binary_op :: proc(ip: ^Interp, op: Op, a, b: Value, owned: ^Owned = nil) -> (Value, Signal) {
+	if x, is_number := a.(Number); is_number {
+		if y, both := b.(Number); both {
+			#partial switch op {
+			case .Add:
+				return num(x.f + y.f), .Go
+			case .Sub:
+				return num(x.f - y.f), .Go
+			case .Mul:
+				return num(x.f * y.f), .Go
+			}
+		}
+	}
 	#partial switch op {
 	case .Eq, .Ne, .Lt, .Le, .Gt, .Ge:
 		too_deep = false
@@ -56,16 +68,17 @@ binary_op :: proc(ip: ^Interp, op: Op, a, b: Value, owned: ^Owned = nil) -> (Val
 
 @(private = "file")
 cannot :: proc(ip: ^Interp, a, b: Value, what: string) -> (Value, Signal) {
-	return nil, fail(ip, "%s (%s) and %s (%s) cannot be %s", type_name(a), brief(a), type_name(b), brief(b), what)
+	return nil, fail(ip, "%s (%s) and %s (%s) cannot be %s", type_name(a), brief(ip, a), type_name(b), brief(ip, b), what)
 }
 
+// The sum carries no comments, as any value computed does.
 add :: proc(ip: ^Interp, a, b: Value, owned: ^Owned = nil) -> (Value, Signal) {
 	ka, kb := kind(a), kind(b)
 	switch {
 	case ka == .Null:
-		return b, .Go
+		return plain(b), .Go
 	case kb == .Null, kb == ka && (kb == .Array || kb == .Object) && is_empty(b):
-		return a, .Go // jq appends b's members to a itself, so a path expression keeps a's path
+		return plain(a), .Go // jq appends b's members to a itself, so a path expression keeps a's path
 	case ka == .Number && kb == .Number:
 		x, _ := number_of(a)
 		y, _ := number_of(b)
@@ -78,30 +91,14 @@ add :: proc(ip: ^Interp, a, b: Value, owned: ^Owned = nil) -> (Value, Signal) {
 		}
 		return strings.concatenate({x, y}), .Go
 	case ka == .Array && kb == .Array:
+		r: ^Array
 		if owned != nil {
-			r := owned_copy(a, owned).(^Array)
-			// `. + .` on the state itself is left to the loop, which reads the array as it grows.
-			if x, is_array := b.(^Array); is_array && x != r {
-				append(&r.items, ..x.items[:])
-				return r, .Go
-			}
-			it := iterate(b)
-			for _, m in next_member(&it) {
-				append(&r.items, m)
-			}
-			return r, .Go
+			r = owned_copy(a, owned).(^Array)
+		} else {
+			r = new_array(length_of(a) + length_of(b))
+			append_elements(r, a)
 		}
-		r := new_array(length_of(a) + length_of(b))
-		for v in ([]Value{a, b}) {
-			if x, is_array := v.(^Array); is_array {
-				append(&r.items, ..x.items[:]) // a block copy, not a member at a time
-				continue
-			}
-			it := iterate(v)
-			for _, m in next_member(&it) {
-				append(&r.items, m)
-			}
-		}
+		append_elements(r, b)
 		return r, .Go
 	case ka == .Object && kb == .Object:
 		r := (owned_copy(a, owned) if owned != nil else own(a)).(^Object)
@@ -112,6 +109,20 @@ add :: proc(ip: ^Interp, a, b: Value, owned: ^Owned = nil) -> (Value, Signal) {
 		return r, .Go
 	}
 	return cannot(ip, a, b, "added")
+}
+
+// `v`'s elements onto `r`: a block copy from another array, else a member at a time, so `. + .` on a reduce's own
+// state reads the array as it grows.
+@(private = "file")
+append_elements :: #force_inline proc(r: ^Array, v: Value) {
+	if x, is_array := v.(^Array); is_array && x != r {
+		append(&r.items, ..x.items[:])
+		return
+	}
+	it := iterate(v)
+	for _, m in next_member(&it) {
+		append(&r.items, m)
+	}
 }
 
 // Whether `add` takes `a` and `b` rather than fails.
@@ -179,7 +190,7 @@ multiply :: proc(ip: ^Interp, a, b: Value, owned: ^Owned = nil) -> (Value, Signa
 		return strings.repeat(s, times), .Go
 	case ka == .Object && kb == .Object:
 		if is_empty(b) {
-			return a, .Go // a itself, as `+`
+			return plain(a), .Go // a itself, as `+`
 		}
 		if r := (owned_copy(a, owned) if owned != nil else own(a)).(^Object); merge_into(r, b, owned) {
 			return r, .Go

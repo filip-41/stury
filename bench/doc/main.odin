@@ -6,9 +6,9 @@ package doc
 import "core:fmt"
 import "core:mem"
 import "core:os"
-import "core:slice"
 import "core:time"
 import core "../../core"
+import "../timing"
 import dsv "../../dsv"
 import json "../../json"
 
@@ -74,7 +74,7 @@ number_bits :: proc(num: core.Number) -> u64 {
 // The byte each value adds, matching the other arms' visitors.
 value_tag :: #force_inline proc(kind: core.Kind) -> u8 {
 	switch kind {
-	case .Map:
+	case .Object:
 		return 'o'
 	case .Array:
 		return 'a'
@@ -107,8 +107,8 @@ document_check :: proc(doc: ^core.Document) -> u64 {
 // Each lane is its own out-of-line procedure so one lane's body cannot change another lane's register allocation
 // in a probe that runs exactly one of them. Inlining them into the dispatcher puts every lane in one frame.
 run_lane :: proc(a: ^Arena, lane: string, src: []u8, tsv: bool, dsv_text: bool, spec: json.Spec) -> i64 {
-	times: [10]i64
-	for i in 0 ..< 12 {
+	times: [timing.TIMED]i64
+	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		a.arena.offset = 0
 		start := time.tick_now()
 		switch lane {
@@ -123,12 +123,11 @@ run_lane :: proc(a: ^Arena, lane: string, src: []u8, tsv: bool, dsv_text: bool, 
 			os.exit(2)
 		}
 		d := i64(time.tick_since(start))
-		if i >= 2 {
-			times[i - 2] = d
+		if i >= timing.WARMUP {
+			times[i - timing.WARMUP] = d
 		}
 	}
-	slice.sort(times[:])
-	return (times[4] + times[5]) / 2
+	return timing.median(&times)
 }
 
 lane_build :: #force_no_inline proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
@@ -148,22 +147,23 @@ build :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) -> cor
 	err: core.Document_Error
 	if dsv_text {
 		if tsv {
-			doc, err = dsv.build(src, .Tsv, {}, false, a.alloc)
+			doc, err = dsv.build(src, .Tsv, {}, .Last, a.alloc)
 		} else {
-			doc, err = dsv.build(src, .Csv, {}, false, a.alloc)
+			doc, err = dsv.build(src, .Csv, {}, .Last, a.alloc)
 		}
 	} else {
 		switch spec {
 		case .Json:
-			doc, err = json.build(src, .Json, {}, false, a.alloc)
+			doc, err = json.build(src, .Json, {}, .Last, a.alloc)
 		case .Jsonc:
-			doc, err = json.build(src, .Jsonc, {}, false, a.alloc)
+			doc, err = json.build(src, .Jsonc, {}, .Last, a.alloc)
 		case .Json5:
-			doc, err = json.build(src, .Json5, {}, false, a.alloc)
+			doc, err = json.build(src, .Json5, {}, .Last, a.alloc)
 		}
 	}
 	if err.kind != .None {
-		fmt.eprintln("document error:", err)
+		core.render(os.to_writer(os.stderr), src, err)
+		fmt.eprintln()
 		os.exit(1)
 	}
 	return doc
@@ -285,21 +285,19 @@ long_text_length :: #force_no_inline proc(doc: ^core.Document, i: core.Node_Inde
 	return n, true
 }
 
-// A member lookup that knows the format: each member's key goes through `core.key_equals` directly, with `.Last`
+// A member lookup that knows the format: each member's key goes through `core.key_equals` directly, with `.First`
 // reading as `core.member` does.
 json_member :: proc(doc: ^core.Document, obj: core.Node_Index, name: string) -> (core.Node_Index, bool) {
-	found := core.NO_NODE
 	it := core.children(doc, obj)
 	for {
 		v, ok := core.child_next(&it)
 		if !ok {
-			break
+			return core.NO_NODE, false
 		}
 		if core.key_equals(doc, v - 1, name) {
-			found = v
+			return v, true
 		}
 	}
-	return found, found != core.NO_NODE
 }
 
 key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
@@ -333,7 +331,7 @@ key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 		}
 	} else {
 		for n, i in doc.nodes {
-			if n.kind != .Map {
+			if n.kind != .Object {
 				continue
 			}
 			j := i + 1
@@ -363,19 +361,19 @@ key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 		// the column every record's cell sits at, so each record costs one indexed read.
 		first := core.NO_NODE
 		for n, i in doc.nodes {
-			if (n.kind == .Map || n.kind == .Array) && n.role == .Value && i != 0 {
+			if (n.kind == .Object || n.kind == .Array) && n.role == .Value && i != 0 {
 				first = core.Node_Index(i)
 				break
 			}
 		}
 		col := -1
 		if first != core.NO_NODE {
-			if cell, ok := core.member(&doc, first, name, .Last); ok {
+			if cell, ok := core.member(&doc, first, name, .First); ok {
 				col = int(cell - first - 1)
 			}
 		}
 		for n, i in doc.nodes {
-			if (n.kind == .Map || n.kind == .Array) && n.role == .Value && i != 0 {
+			if (n.kind == .Object || n.kind == .Array) && n.role == .Value && i != 0 {
 				key_objects += 1
 				hit := false
 				if col >= 0 {
@@ -384,7 +382,7 @@ key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 						hit = true
 					}
 				} else {
-					if cell, ok := core.member(&doc, core.Node_Index(i), name, .Last); ok {
+					if cell, ok := core.member(&doc, core.Node_Index(i), name, .First); ok {
 						sink = sink ~ u64(cell)
 						hit = true
 					}
@@ -396,7 +394,7 @@ key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 		}
 	} else {
 		for n, i in doc.nodes {
-			if n.kind == .Map {
+			if n.kind == .Object {
 				key_objects += 1
 				if inline {
 					if f, ok := json_member(&doc, core.Node_Index(i), name); ok {
@@ -404,7 +402,7 @@ key_lookup :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) {
 						key_answers += 1
 					}
 				} else {
-					if f, ok := core.member(&doc, core.Node_Index(i), name, .Last); ok {
+					if f, ok := core.member(&doc, core.Node_Index(i), name, .First); ok {
 						sink = sink ~ u64(f)
 						key_answers += 1
 					}

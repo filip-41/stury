@@ -97,17 +97,22 @@ Interp :: struct {
 	owned:        ^Owned, // the innermost reduce or foreach whose update changes its state in place, or nil
 	text:         Text_Count, // the code-point count a state that grows by `+` resumes from (`length`)
 	recycler:     Input_Recycler,
+	faults:       Fault_Memory,
+	regions:      ^Region, // regions given back (`collect_regioned`)
 }
 
 fail :: proc(ip: ^Interp, format: string, args: ..any) -> Signal {
-	ip.err = message.build(format, ..args)
+	ip.err = message.build(format, ..args, allocator = message_allocator(ip))
+	forget_details(ip)
 	ip.raised += 1
 	return .Fail
 }
 
 // `v` as jq's messages show a value (jv_dump_string_trunc into `size` bytes): compact JSON, cut to fit
-// with "..." and the closing quote or bracket, a long string first cut to 30 characters.
-brief :: proc(v: Value, size := 30) -> string {
+// with "..." and the closing quote or bracket, a long string first cut to 30 characters. Under `ip`, a detail of the
+// message `fail` makes next, which lives until it is made.
+brief :: proc(ip: ^Interp, v: Value, size := 30) -> string {
+	context.allocator = detail_allocator(ip) if ip != nil else context.allocator
 	v := v
 	if text, is_str := string_of(v); is_str && len(text) > size {
 		v = char_slice(&Char_Walk{}, text, 0, size)
@@ -224,10 +229,8 @@ eval :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^S
 			return eval_alt(ip, n, input, env, track, out)
 		case .Try:
 			return eval_try(ip, n, input, env, track, out)
-		case .Reduce:
+		case .Reduce, .Foreach:
 			return eval_reduce(ip, n, input, env, track, out)
-		case .Foreach:
-			return eval_foreach(ip, n, input, env, track, out)
 		case .Def:
 			env = define(ip, n, env)
 			n = n.a
@@ -314,6 +317,12 @@ eval_pipe :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env
 	s := Pipe_Sink{sink = {emit = pipe_emit}, ip = ip, n = n.b, env = env, track = track, out = out}
 	if out == ip.printer && !track && !ip.scope.on {
 		return eval_scoped_outputs(ip, n.a, input, env, &s)
+	}
+	if out.emit == last_emit && !track && keeps_outputs(out) {
+		return eval_kept_outputs(ip, n.a, input, env, &s, (^Last_Sink)(out))
+	}
+	if !track && sources_outputs(out) {
+		return eval_sourced_outputs(ip, n.a, input, env, &s, (^Bind_Sink)(out))
 	}
 	return eval_commas(ip, n.a, input, env, track, &s)
 }
@@ -451,7 +460,7 @@ neg_emit :: proc(s: ^Sink, it: Item) -> Signal {
 	x := (^Neg_Sink)(s)
 	n, ok := number_of(it.v)
 	if !ok {
-		return fail(x.ip, "%s (%s) cannot be negated", type_name(it.v), brief(it.v))
+		return fail(x.ip, "%s (%s) cannot be negated", type_name(it.v), brief(x.ip, it.v))
 	}
 	return emit_made(x.out, it, negate(n), x.track)
 }
@@ -474,13 +483,7 @@ negate :: proc(n: Number) -> Number {
 }
 
 Binary_Sink :: struct {
-	using sink: Sink,
-	ip:         ^Interp,
-	n:          ^Node,
-	input:         Item,
-	env:        ^Env,
-	track:      bool,
-	out:        ^Sink,
+	using node: Node_Sink,
 	rhs:        Value,
 }
 
@@ -513,7 +516,7 @@ binary_single :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: 
 
 // Arithmetic and comparison run the right operand outermost, as jq does. `and` and `or` the left, short-circuiting.
 eval_binary :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool, out: ^Sink) -> Signal {
-	s := Binary_Sink{ip = ip, n = n, input = input, env = env, track = track, out = out}
+	s := Binary_Sink{node = {ip = ip, n = n, input = input, env = env, track = track, out = out}}
 	if n.kind == .Binary {
 		s.sink.emit = binary_rhs_emit
 		return eval(ip, n.b, input, env, false, &s)
@@ -618,6 +621,7 @@ eval_try :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env,
 	if n.b == nil {
 		return .Go
 	}
+	ip.err = caught(ip, ip.err)
 	// the handler runs in the path state jq's backtrack restores, the try's.
 	return eval(ip, n.b, {v = ip.err, path = path_from(input, ip.err) if track else nil}, env, track, out)
 }
@@ -628,7 +632,7 @@ Node_Sink :: struct {
 	using sink: Sink,
 	ip:         ^Interp,
 	n:          ^Node,
-	input:         Item,
+	input:      Item,
 	env:        ^Env,
 	track:      bool,
 	out:        ^Sink,
@@ -649,6 +653,13 @@ Last_Sink :: struct {
 	using sink: Sink,
 	it:         Item,
 	found:      bool,
+	keeps:      bool, // `last(f)`'s: what `f` makes for an output it drops is let go (`eval_kept_outputs`)
+	kept:       bool, // a pipe or binding within `f` lets it go
+}
+
+keeps_outputs :: proc(out: ^Sink) -> bool {
+	l := (^Last_Sink)(out)
+	return l.keeps && !l.kept
 }
 
 last_emit :: proc(s: ^Sink, it: Item) -> Signal {

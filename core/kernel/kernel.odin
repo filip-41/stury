@@ -226,7 +226,6 @@ scan_op :: #force_inline proc "contextless" ($T: Tier, src: []u8, c: u8, s: ^Quo
 
 // Returns the lower of `low` and the lowest level the closes of a block bring `depth` to, counting the opens before
 // each close.
-@(private)
 depth_low :: #force_inline proc "contextless" (low, depth: int, open, close: u64) -> int {
 	low := low
 	if depth - int(intrinsics.count_ones(close)) >= low {

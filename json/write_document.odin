@@ -81,16 +81,9 @@ Emit :: struct {
 }
 
 @(private)
-put_start :: proc(e: ^Emit, out: ^write.Out, src: []u8, doc: ^core.Document, opts: core.Write_Options, local: []Open, depth_cap: int) -> bool {
-	e.out, e.src, e.doc, e.opts, e.cap = out, src, doc, opts, depth_cap
+put_start :: proc(e: ^Emit, out: ^write.Out, src: []u8, doc: ^core.Document, opts: core.Write_Options, local: []Open) {
+	e.out, e.src, e.doc, e.opts, e.cap = out, src, doc, opts, len(local) - 1
 	stack := raw_data(local)
-	if depth_cap >= len(local) {
-		wide, failed := make([]Open, depth_cap + 1, out.allocator)
-		if failed != nil {
-			return false
-		}
-		stack = raw_data(wide)
-	}
 	e.copy = copies_strings(opts)
 	e.hi = V(0x7f) if opts.ascii || opts.escape_del && opts.escape_html else V(0xFF)
 	e.html = {V('\\'), V('\\'), V('\\'), V('\\')}
@@ -114,8 +107,23 @@ put_start :: proc(e: ^Emit, out: ^write.Out, src: []u8, doc: ^core.Document, opt
 	stack[0].end = max(u32)
 	e.c.end = max(u32)
 	e.line_at = write.LINE_ROOM / e.c.unit if opts.pretty && e.c.unit > 0 else max(int)
-	e.c.limit = min(e.line_at, depth_cap)
+	e.c.limit = min(e.line_at, e.cap)
 	resume(e)
+}
+
+// Doubles the stack, for a container about to open past it. Returns false when the allocator refuses.
+@(private, cold)
+put_deepen :: proc(e: ^Emit) -> bool {
+	wide, failed := make([]Open, 2 * e.cap + 1, e.out.allocator)
+	if failed != nil {
+		return false
+	}
+	copy(wide, e.c.stack[:e.cap + 1])
+	if e.cap > core.MAX_DEPTH {
+		free(e.c.stack, e.out.allocator)
+	}
+	e.c.stack, e.cap = raw_data(wide), 2 * e.cap
+	e.c.limit = min(e.line_at, e.cap)
 	return true
 }
 
@@ -263,8 +271,8 @@ rare_row :: proc(e: ^Emit, t: core.Token, i: u32) -> core.Typed_Error_Kind {
 	t := t
 	c := &e.c
 	k := t.kind
-	if k >= .Array && c.top == e.cap {
-		return .Too_Deep
+	if k >= .Array && c.top == e.cap && !put_deepen(e) {
+		return .No_Memory
 	}
 	settle(e)
 	out := e.out
@@ -323,7 +331,7 @@ put_token_string :: proc(out: ^write.Out, src: []u8, doc: ^core.Document, i: cor
 	}
 	s, ok := core.text_clone(doc, i)
 	if !ok {
-		return .Out_Of_Memory
+		return .No_Memory
 	}
 	defer delete(s)
 	return put_string(out, s, opts)
@@ -340,11 +348,11 @@ copies_strings :: #force_inline proc "contextless" (opts: core.Write_Options) ->
 // the facts of `doc` that the target cannot hold, as `commit` does, and is not an error: a document of another format
 // drops all its facts. A document read as JSON or JSONC keeps the spelling of its numbers and strings, and the bytes
 // between them are made again: no whitespace in compact text, and the write options' in pretty text. A document of
-// another format is written through its `text`, each cell what `core.resolve` reads it as. A partial document is written
+// another format is written through its `text`, each cell what `core.kind` reads it as. A partial document is written
 // from the nodes its read kept: the text holds only what the read reached, an array's elements stand next to each other
 // whatever their positions were, and an element that two paths reached through a ring of negative indexes is written
-// once for each. A partial document keeps no comments. A document nested past `MAX_DEPTH` was built under a raised `max_depth` and is
-// written, except one with comments, shared keys or `sort_keys` past 4096 levels, which is `.Too_Deep`.
+// once for each. A partial document keeps no comments. A document nested past `MAX_DEPTH` was built under a raised
+// `max_depth` and is written.
 as :: proc "contextless" (spec: Spec, opts := Options{}) -> core.As {
 	return {spelling = &SPELLING, max_depth = opts.max_depth, spec = u8(spec), tolerate = opts.tolerate, opts = {0 = u8(opts.refuse_non_finite)}}
 }
@@ -365,18 +373,26 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 	if opts.pretty {
 		hint += count * (3 + 8 * (1 if opts.tab else int(opts.indent)))
 	}
-	own := doc.spelling == &SPELLING
-	if doc.partial || document_cold(doc, opts, own, node) {
-		return write_tree(doc, opts, stream, allocator, Spec(as.spec), node, hint)
-	}
 	spill: [write.ROOM_MAX]u8 = ---
 	out: write.Out
 	write.init(&out, &spill, allocator, stream, hint)
-	if dense_route(doc, opts, src, count) {
+	kind: core.Typed_Error_Kind
+	switch {
+	// The tree writes what the row walk does not: a partial document, another format's, comments, sorted keys and JSON5.
+	case doc.partial || doc.spelling != &SPELLING || len(core.subtree_facts(doc, node)) != 0 || opts.sort_keys || Spec(doc.as.spec) == .Json5:
+		dropped, kind = write_tree(doc, opts, &out, Spec(as.spec), node)
+	case dense_route(doc, opts, src, count):
 		write_dense(&out, src)
-		text, err = write.finish((^write.Out)(rawptr(&out)))
-		return
+	case:
+		kind = write_rows(doc, opts, &out, node)
 	}
+	text, err = write.finish((^write.Out)(rawptr(&out)), {kind = kind})
+	return text, 0 if err.kind != .None else dropped, err
+}
+
+// Writes node `node` of `doc` by its rows.
+@(private)
+write_rows :: proc(doc: ^core.Document, opts: core.Write_Options, out: ^write.Out, node: core.Node_Index) -> core.Typed_Error_Kind {
 	// The stack holds the open containers and the sentinel under them.
 	local: [core.MAX_DEPTH + 1]Open = ---
 	// A small source is copied to room past its end, so no row is near enough to the end to take the rare path.
@@ -388,21 +404,14 @@ write_text :: proc(doc: ^core.Document, opts: core.Write_Options, as: core.As, n
 		read = copied[:len(read) + COPY_ROOM]
 	}
 	e: Emit
-	if !put_start(&e, &out, read, doc, opts, local[:], core.reserve_depth(doc.as.max_depth, len(doc.nodes))) {
-		write.destroy(&out)
-		return nil, 0, {kind = .Out_Of_Memory}
-	}
+	put_start(&e, out, read, doc, opts, local[:])
 	// The stack of a document nested past `MAX_DEPTH` is the allocator's.
 	defer if e.cap > core.MAX_DEPTH {
 		free(e.c.stack, e.out.allocator)
 	}
-	if kind := rows(&e, doc, u32(node)); kind != .None {
-		write.destroy(&out)
-		return nil, 0, {kind = kind}
-	}
+	kind := rows(&e, doc, u32(node))
 	settle(&e)
-	text, err = write.finish((^write.Out)(rawptr(&out)))
-	return
+	return kind
 }
 
 // The first row `rows_run` leaves to the rare path because a block copy of it or a later row would load past the source.
@@ -564,7 +573,7 @@ rows_run :: #force_no_inline proc "contextless" (e: ^Emit, i: u32, $P, $O: bool)
 			}
 			// A string's quotes are the bytes around its span. One branch takes a container and a string with an
 			// ill-formed sequence, the kinds past `Plain` being the two with both of these bits.
-			#assert(u8(core.Kind.String) == 4 && u8(core.Kind.Number) < 4 && u8(core.Kind.Plain) == 5 && u8(core.Kind.Array) == 6 && u8(core.Kind.Map) == 7)
+			#assert(u8(core.Kind.String) == 4 && u8(core.Kind.Number) < 4 && u8(core.Kind.Plain) == 5 && u8(core.Kind.Array) == 6 && u8(core.Kind.Object) == 7)
 			quoted := (w >> 2) & 1
 			if ((w & 0xFF) + 2) >> 3 | (quoted & (w >> 18)) != 0 {
 				k := t.kind
@@ -618,18 +627,4 @@ rows_run :: #force_no_inline proc "contextless" (e: ^Emit, i: u32, $P, $O: bool)
 	}
 	e.c = c
 	return i
-}
-
-// Reads `src` as spec `S` and writes it in `S` as `opts` says. A string and a number keep their source spelling.
-// `read.max_depth` bounds the nesting, and a tolerated ill-formed string is written as the reading decodes it. The text is
-// built into a document and written as `core.write` writes it. A text that is not a document of `S` is refused as `.Walk`,
-// with the fault in `inner`.
-format :: proc(src: []u8, $S: Spec, opts := core.Write_Options{}, read := Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
-	doc, err := build_spec(src, S, read, false, allocator)
-	if err.kind != .None {
-		return nil, {kind = .Walk if err.kind == .Walk else .Out_Of_Memory, at = err.at, inner = err.inner}
-	}
-	defer core.destroy(&doc)
-	text, _, werr := write_text(&doc, opts, {spec = u8(S)}, core.ROOT, {}, allocator)
-	return text, werr
 }

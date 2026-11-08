@@ -14,13 +14,11 @@ test, capture, scan, splits, sub or gsub on them. A case differs, or differs as 
 jq_diff.py; SKIP lists what stury differs in on purpose. Each run is held to TIMEOUT seconds of CPU, and the peak RSS of any one is reported.
 """
 
-import os
 import random
 import re
 import resource
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from jq_diff import main
 
 STARTS_SEEN = ("a callout that aborts the search, or a total count read back, sees which starts are tried, "

@@ -14,7 +14,7 @@ Case :: struct {
 	offset: u64,
 }
 
-// The kinds a case names for `Bad_Char` with `Detail.Too_Many` and `Detail.Too_Few`, a record wider or narrower than the first.
+// The kinds a case names for `Bad_Width` with `Detail.Too_Many` and `Detail.Too_Few`, a record wider or narrower than the first.
 TOO_MANY :: core.Fault_Kind(0xff)
 TOO_FEW :: core.Fault_Kind(0xfe)
 
@@ -38,6 +38,8 @@ CSV_CASES := []Case {
 	{"\"a\" ,b\n", .Bad_Char, 3},
 	{"\"abc", .Truncated, 0},
 	{"a,\"b\nc", .Truncated, 2},
+	{"a,\"b\xc3", .Truncated, 2},
+	{"a,\"b\xff", .Bad_Char, 4},
 	{"a,b\n\"\"\"x\n\"\"\",\"y", .Truncated, 13},
 	{"a\rb\n", .Bad_Char, 1},
 	{"a\r", .Bad_Char, 1},
@@ -46,6 +48,8 @@ CSV_CASES := []Case {
 	{"a\xed\xa0\x80\n", .Bad_Char, 1},
 	{"\"\xc3\"\n", .Bad_Char, 1},
 	{"a\xc3", .Truncated, 2},
+	{"\"a\xc3", .Truncated, 0},
+	{"x,\"\xe2\x82", .Truncated, 2},
 	{"a,b\n1\r2,3\n", .Bad_Char, 5},
 }
 
@@ -85,28 +89,19 @@ escapes_at_every_block_byte :: proc(t: ^testing.T) {
 	b: [dynamic]u8
 	defer delete(b)
 	for k in 0 ..< 128 {
-		for letter in ([]u8{'t', 'n', 'r', '0', '\\'}) {
+		for escape, valid in ([]u8{'t', 'n', 'r', '0', '\\', 'x', 'T', '\\' ~ 0x20, 0x80}) {
 			clear(&b)
 			append(&b, "h\n")
 			for _ in 0 ..< k {
 				append(&b, 'a')
 			}
-			append(&b, '\\', letter, '\n')
+			append(&b, '\\', escape, '\n')
 			got := dsv.validate(b[:], .Tsv)
-			if fault, bad := got.?; bad {
-				testing.expectf(t, false, "backslash at %d escapes %c: %v", 2 + k, letter, fault)
-			}
-		}
-		for other in ([]u8{'x', 'T', '\\' ~ 0x20, 0x80}) {
-			clear(&b)
-			append(&b, "h\n")
-			for _ in 0 ..< k {
-				append(&b, 'a')
-			}
-			append(&b, '\\', other, '\n')
-			got := dsv.validate(b[:], .Tsv)
-			if fault, bad := got.?; !bad || fault.kind != .Bad_Escape || fault.at != u64(2 + k) {
-				testing.expectf(t, false, "backslash at %d escapes %#x: %v, want .Bad_Escape at %d", 2 + k, other, got, 2 + k)
+			fault, bad := got.?
+			if valid < 5 {
+				testing.expectf(t, !bad, "backslash at %d escapes %#x: %v", 2 + k, escape, fault)
+			} else if !bad || fault.kind != .Bad_Escape || fault.at != u64(2 + k) {
+				testing.expectf(t, false, "backslash at %d escapes %#x: %v, want .Bad_Escape at %d", 2 + k, escape, got, 2 + k)
 			}
 		}
 	}
@@ -133,7 +128,7 @@ expect_fault :: proc(t: ^testing.T, c: Case, got: Maybe(core.Fault), shift := 0,
 	}
 	kind, detail := c.kind, u8(0)
 	if kind == TOO_MANY || kind == TOO_FEW {
-		kind, detail = .Bad_Char, u8(dsv.Detail.Too_Many if c.kind == TOO_MANY else dsv.Detail.Too_Few)
+		kind, detail = .Bad_Width, u8(dsv.Detail.Too_Many if c.kind == TOO_MANY else dsv.Detail.Too_Few)
 	}
 	// The rule within the kind follows the byte the fault names. A quote byte is a fault only inside an unquoted CSV cell,
 	// and a text cut short ends in a quote's cell or a UTF-8 sequence.
@@ -147,35 +142,13 @@ expect_fault :: proc(t: ^testing.T, c: Case, got: Maybe(core.Fault), shift := 0,
 		case at == '\r':
 			detail = u8(dsv.Detail.Lone_Cr)
 		case at >= 0x80:
-			detail = u8(dsv.Detail.Bad_Utf8)
+			detail = u8(dsv.Detail.Invalid_Utf8)
 		case !tsv:
 			detail = u8(dsv.Detail.After_Quote)
 		}
 	}
 	want := core.Fault{c.offset + u64(shift), &dsv.RULES, kind, detail}
 	return testing.expectf(t, got == want, "%q shifted %d: %v, want %v", c.text, shift, got, want, loc = loc)
-}
-
-// A quote inside an unquoted CSV cell is a bare quote, and a quote after a closing quote is not.
-@(rodata)
-BARE_QUOTE_CASES := []Case {
-	{"a\"b\n", .Bad_Char, 1},
-	{"x\"y\"z\n", .Bad_Char, 1},
-	{"a\"\"b\n", .Bad_Char, 1},
-	{"ab\"", .Bad_Char, 2},
-	{"a\"b,\"c,\"\n", .Bad_Char, 1},
-}
-
-@(test)
-bare_quote_detail :: proc(t: ^testing.T) {
-	for c in BARE_QUOTE_CASES {
-		f, bad := dsv.validate(transmute([]u8)c.text, .Csv).?
-		testing.expectf(t, bad && f.kind == c.kind && f.at == c.offset && f.detail == u8(dsv.Detail.Bare_Quote), "%q: %v", c.text, f)
-		hi, fault := walk(transmute([]u8)c.text, false, false, &struct {}{}, &core.Hook_Regs{}, walktest.regs_hook)
-		testing.expectf(t, fault == f && hi == c.offset, "%q: walk %d %v, validate %v", c.text, hi, fault, f)
-	}
-	f, bad := dsv.validate(transmute([]u8)string("\"a\"b\n"), .Csv).?
-	testing.expectf(t, bad && f.kind == .Bad_Char && f.at == 3 && f.detail == u8(dsv.Detail.After_Quote), "%v", f)
 }
 
 // Each case after 0 to 129 empty lines, which are no records. Every quote, CR, escape and UTF-8 sequence of a case
@@ -293,6 +266,11 @@ COMMENTED := []Tolerated {
 	{{"a\n#\xf0\x9f\x98\n", .Bad_Char, 3}, false, false, {.Invalid_Utf8}},
 	{{"a,b\n1,2\n# x\xe2\x82", .Truncated, 13}, false, false, {.Invalid_Utf8}},
 	{{"a\tb\n# \xc3(\n", .Bad_Char, 6}, true, false, {.Invalid_Utf8}},
+	{{"a\"b,c\n#x\n1,2\n", nil, 0}, false, false, {.Bare_Quote}},
+	{{"a,b\nx\"y,1\n#c\n2,3\n", nil, 0}, false, false, {.Bare_Quote}},
+	// A tolerated bare quote opens no quoted field, so the line after it still starts a comment.
+	{{"y\"\n#,\"\n", nil, 0}, false, false, {.Bare_Quote}},
+	{{"a,b\n1,x\"\n#\"\n2,3\n", nil, 0}, false, false, {.Bare_Quote}},
 }
 
 // Each tolerance, through `validate` and `walk`, after 0 to 129 empty lines so what it accepts falls on every byte of
@@ -346,9 +324,9 @@ tolerated_tokens :: proc(t: ^testing.T) {
 		tokens: []core.Token,
 	}
 	for c in ([]Tokens {
-		{"a,b,c\n1,2\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {6, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
-		{"a,b\n1,2,3\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {4, 0, .Map, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {0, 3, .Plain, .Key, core.SPELLING_DECODE | 16}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
-		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Map, .Value, 0}, {0, 3, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {4, 1, .Plain, .Key, 0}, {8, 3, .Plain, .Value, core.SPELLING_DECODE | core.SPELLING_QUOTED}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
+		{"a,b,c\n1,2\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
+		{"a,b\n1,2,3\n", {.Ragged}, {{0, 0, .Array, .Value, 0}, {4, 0, .Object, .Value, 0}, {0, 1, .Plain, .Key, 0}, {4, 1, .Plain, .Value, 0}, {2, 1, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {0, 3, .Plain, .Key, core.SPELLING_DECODE | 16}, {8, 1, .Plain, .Value, 0}, {9, 1, .End, .Value, 0}, {10, 0, .End, .Value, 0}}},
+		{"a\"b,c\n1,\"2\"", {.Bare_Quote}, {{0, 0, .Array, .Value, 0}, {6, 0, .Object, .Value, 0}, {0, 3, .Plain, .Key, 0}, {6, 1, .Plain, .Value, 0}, {4, 1, .Plain, .Key, 0}, {8, 3, .Plain, .Value, core.SPELLING_DECODE | core.SPELLING_QUOTED}, {11, 0, .End, .Value, 0}, {11, 0, .End, .Value, 0}}},
 	}) {
 		log^ = {}
 		hi, fault := dsv.walk(transmute([]u8)c.text, 0, .Csv, {tolerate = c.tol}, log, &core.Hook_Regs{}, walktest.log_hook)

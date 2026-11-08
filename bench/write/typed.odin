@@ -5,9 +5,9 @@ import "core:fmt"
 import "core:mem"
 import "core:mem/virtual"
 import "core:os"
-import "core:slice"
 import "core:time"
 import core "../../core"
+import "../timing"
 import write "../../core/write"
 import records "../../core/records"
 import json "../../json"
@@ -134,7 +134,7 @@ lane :: proc($T: typeid, src: []u8, pretty: bool) {
 		fmt.eprintln("read:", err)
 		os.exit(1)
 	}
-	plan, perr := json.plan_make(T, {}, context.allocator)
+	plan, perr := json.plan_make(T, plan = {}, allocator = context.allocator)
 	if perr.kind != .None {
 		fmt.eprintln("plan:", perr)
 		os.exit(1)
@@ -142,14 +142,13 @@ lane :: proc($T: typeid, src: []u8, pretty: bool) {
 	output := Fixed_Output{make([]u8, 16 * len(src) + 64 * mem.Kilobyte)}
 	fixed := runtime.Allocator{fixed_output_proc, &output}
 	opts := core.Write_Options{pretty = pretty, indent = 2}
-	ITERS :: 41
-	times: [ITERS]i64
+	times: [timing.TIMED]i64
 	text: []u8
 	// The walk's own scratch, a map's sorted keys among it, comes from an arena emptied after each pass, so the lane's
 	// resident memory is one pass's and not the allocator's lag in returning forty-three.
 	scratch: virtual.Arena
 	_ = virtual.arena_init_growing(&scratch)
-	for i in 0 ..< ITERS + 2 {
+	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		context.allocator = virtual.arena_allocator(&scratch)
 		start := time.tick_now()
 		out, err := write.marshal(value, &plan, opts, fixed)
@@ -160,16 +159,15 @@ lane :: proc($T: typeid, src: []u8, pretty: bool) {
 			os.exit(1)
 		}
 		text = out
-		if i >= 2 {
-			times[i - 2] = d
+		if i >= timing.WARMUP {
+			times[i - timing.WARMUP] = d
 		}
 	}
 	h := CHECK_OFFSET
 	for b in text {
 		h = (h ~ u64(b)) * CHECK_PRIME
 	}
-	slice.sort(times[:])
-	median := times[ITERS / 2]
+	median := timing.median(&times)
 	fmt.printfln("gb_per_s=%.3f best=%.3f ns=%d out=%d check=%d", f64(len(text)) / f64(median), f64(len(text)) / f64(times[0]), median, len(text), h)
 }
 
@@ -185,11 +183,10 @@ records_lane :: proc(src: []u8) {
 	list_plan, _ := json.plan_make([]Log_Record)
 	output := Fixed_Output{make([]u8, 2 * len(src) + 64 * mem.Kilobyte)}
 	fixed := runtime.Allocator{fixed_output_proc, &output}
-	ITERS :: 41
-	times, list_times: [ITERS]i64
+	times, list_times: [timing.TIMED]i64
 	size, list_size: int
 	h := CHECK_OFFSET
-	for i in 0 ..< ITERS + 2 {
+	for i in 0 ..< timing.WARMUP + timing.TIMED {
 		start := time.tick_now()
 		text, err := records.marshal(value.logs, &plan, json.as(.Json), allocator = fixed)
 		d := i64(time.tick_since(start))
@@ -207,20 +204,19 @@ records_lane :: proc(src: []u8) {
 			os.exit(1)
 		}
 		list_size = len(list)
-		if i >= 2 {
-			times[i - 2], list_times[i - 2] = d, ld
+		if i >= timing.WARMUP {
+			times[i - timing.WARMUP], list_times[i - timing.WARMUP] = d, ld
 		}
 	}
-	slice.sort(times[:])
-	slice.sort(list_times[:])
+	median, list_median := timing.median(&times), timing.median(&list_times)
 	fmt.printfln(
 		"gb_per_s=%.3f best=%.3f ns=%d out=%d check=%d list_gb_per_s=%.3f list_best=%.3f",
-		f64(size) / f64(times[ITERS / 2]),
+		f64(size) / f64(median),
 		f64(size) / f64(times[0]),
-		times[ITERS / 2],
+		median,
 		size,
 		h,
-		f64(list_size) / f64(list_times[ITERS / 2]),
+		f64(list_size) / f64(list_median),
 		f64(list_size) / f64(list_times[0]),
 	)
 }

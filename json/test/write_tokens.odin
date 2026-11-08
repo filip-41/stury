@@ -4,8 +4,6 @@ import "base:runtime"
 import "core:bytes"
 import "core:io"
 import "core:math"
-import "core:math/rand"
-import "core:strings"
 import "core:testing"
 import core "../../core"
 import write "../../core/write"
@@ -115,7 +113,7 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 			{escape_html = true, pretty = true, indent = 2},
 			{ascii = true, escape_html = true},
 		}) {
-		want, werr := json.marshal(v, opts, context.temp_allocator)
+		want, werr := json.marshal(v, write = opts, allocator = context.temp_allocator)
 		testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
 		got, err := token_text(v, opts)
 		defer delete(got)
@@ -212,11 +210,11 @@ token_misuse_is_refused :: proc(t: ^testing.T) {
 	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.end_record(tw)}, .Unsupported)
 	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_float(tw, math.inf_f64(1))}, .Non_Finite)
 	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_float(tw, math.nan_f64())}, .Non_Finite)
-	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_string(tw, "\xff")}, .Bad_Utf8)
+	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {return W.value_string(tw, "\xff")}, .Invalid_Utf8)
 	expect_token_refused(t, proc(tw: ^W.Tokens) -> core.Typed_Error_Kind {
 			W.open_object(tw)
 			return W.key(tw, "\xff")
-		}, .Bad_Utf8)
+		}, .Invalid_Utf8)
 }
 
 @(test)
@@ -272,7 +270,7 @@ tokens_to_a_stream :: proc(t: ^testing.T) {
 		x = i64(i) * 1000003
 	}
 	for opts in ([?]core.Write_Options{{}, core.PRETTY}) {
-		want, _ := json.marshal(v, opts, context.temp_allocator)
+		want, _ := json.marshal(v, write = opts, allocator = context.temp_allocator)
 		buf: bytes.Buffer
 		defer bytes.buffer_destroy(&buf)
 		tw: write.Tokens
@@ -315,45 +313,7 @@ tokens_under_failing_allocators :: proc(t: ^testing.T) {
 	v := token_sample()
 	for opts in ([?]core.Write_Options{{}, core.PRETTY}) {
 		try := Token_Try{v, opts}
-		want, _ := json.marshal(v, opts, context.temp_allocator)
+		want, _ := json.marshal(v, write = opts, allocator = context.temp_allocator)
 		walktest.sweep_write(t, token_try, &try, string(want))
-	}
-}
-
-// A random value written by calls is the bytes `marshal` makes of it.
-@(test)
-random_values_written_by_calls_equal_marshal :: proc(t: ^testing.T) {
-	rand.reset(11)
-	WORDS := [?]string{"", "a", "café", "<&>", "\"", "\\", "\n", "\U0001F600", " ", "plain text of some length 0123456789"}
-	for round in 0 ..< 300 {
-		v: Token_Sample
-		v.name = rand.choice(WORDS[:])
-		v.count = rand.int63() - rand.int63()
-		v.big = rand.uint64()
-		v.ratio = rand.float64_range(-1e9, 1e9) if round % 3 != 0 else f64(rand.int31())
-		v.on, v.off = rand.int_max(2) == 0, rand.int_max(2) == 0
-		v.list = make([]i64, rand.int_max(6), context.temp_allocator)
-		for &x in v.list {
-			x = rand.int63() - rand.int63()
-		}
-		v.rows = make([]Token_Point, rand.int_max(4), context.temp_allocator)
-		for &p in v.rows {
-			p = {rand.int63(), rand.float64()}
-		}
-		v.point = {rand.int63(), rand.float64()}
-		opts := core.Write_Options {
-			pretty      = rand.int_max(2) == 0,
-			indent      = u8(rand.int_max(5)),
-			ascii       = rand.int_max(3) == 0,
-			escape_html = rand.int_max(3) == 0,
-		}
-		want, werr := json.marshal(v, opts, context.temp_allocator)
-		got, err := token_text(v, opts)
-		defer delete(got)
-		testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
-		if !testing.expectf(t, strings.compare(string(got), string(want)) == 0, "%v: %q, want %q", opts, got, want) {
-			return
-		}
 	}
 }

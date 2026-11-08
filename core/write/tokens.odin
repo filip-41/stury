@@ -6,11 +6,18 @@ import "core:io"
 import core ".."
 import "../typed"
 
-// One value of a token write: a string, a number, or `.Null`, `.False` or `.True` of the tree.
+// One value of a token write: a string, a number by its value or by its text, or `.Null`, `.False` or `.True` of the
+// tree. A nil value is `.Null`.
 Scalar :: union {
 	string,
 	core.Number,
+	Number_Literal,
 	Tree_Part,
+}
+
+// A number by its text, which must be a JSON number, written as it is.
+Number_Literal :: struct {
+	text: string,
 }
 
 // A format's token spelling, which `core.Spelling.tokens` points at. `tree` is the nested format's punctuation. `value`
@@ -67,12 +74,7 @@ tokens_finish :: proc(t: ^Tokens) -> (bytes: []u8, err: core.Typed_Error) {
 	if t.spell != nil && !(t.first if t.spell.line != nil else t.done) {
 		refuse(t, .Out_Of_Order)
 	}
-	if t.err != .None && t.out.err == .None {
-		destroy(t.out)
-		err.kind = t.err
-	} else {
-		bytes, err = finish(t.out)
-	}
+	bytes, err = finish(t.out, {kind = t.err if t.out.err == .None else .None})
 	if t.spell != nil && t.spell.stop != nil {
 		t.spell.stop(t)
 	}
@@ -113,7 +115,7 @@ key :: proc(t: ^Tokens, name: string) -> core.Typed_Error_Kind {
 	return refuse(t, t.out.err)
 }
 
-// The value calls write a JSON value, or a cell of a flat format. A string that is not UTF-8 is `.Bad_Utf8`, and a float
+// The value calls write a JSON value, or a cell of a flat format. A string that is not UTF-8 is `.Invalid_Utf8`, and a float
 // that is infinite or not a number is `.Non_Finite`. Null is an empty cell.
 value_string :: proc(t: ^Tokens, s: string) -> core.Typed_Error_Kind {return value(t, s)}
 

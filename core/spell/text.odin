@@ -191,6 +191,7 @@ Fault_Kind :: enum u8 {
 	Too_Wide, // json, dsv: the first byte of a token longer than `Token.n` holds, records: of a record past `max_bytes`
 	No_Memory, // json (depth stack past `MAX_DEPTH`), dsv (header's keys, a reader's batch), records (window, pieces): a scratch allocation failed, no byte
 	Bad_Option, // json, dsv, records: a spec, option or framing the format does not take, or a handle with no format, found before any byte is read
+	Bad_Width, // dsv: a record wider than the first, at the delimiter that starts its extra cell, or narrower, at its line end
 }
 
 // Steps over the UTF-8 character whose lead is at `p`, where `p < end` and `*p >= 0x80`. Returns one past the

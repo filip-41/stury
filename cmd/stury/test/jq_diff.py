@@ -24,8 +24,7 @@ import sys
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from jq_suite import as_jq, run_capped
+from harness import as_jq, run_capped
 
 TIMEOUT = 5
 
@@ -373,13 +372,19 @@ def documented(stdin, got, want):
     """Which of docs/cli.md's "Differences from jq" explains stury's answer `got` where jq's is `want`, or None."""
     parse_error = lambda err: b"parse error: " in err
     # A parse error's words and position, in a run's message, in `fromjson`'s, or in the error `input` raises.
+    careted = lambda err: re.sub(rb"(parse error: [^\n]*)\n[^\n]*\n *\^(?=\n)", rb"\1", err)
     unworded = lambda err: re.sub(rb"(parse error: )[^\n]*|(\): )[^\n]*( \(while parsing ')|(\(at <stdin>:\d+\): )[^\n]* at line \d+, column \d+$", rb"\1\2\3\4", err, flags=re.M)
     if not strict_texts(stdin) and parse_error(got[2]) and want[1].startswith(got[1]):
         return "grammar"
     # The same, in a string `fromjson`'s error was caught as.
     caught = lambda out: re.sub(rb'"(?:[^"\\\n]|\\.)*? \(while parsing ', b'"(while parsing ', out)
-    if got[0] == want[0] and caught(got[1]) == caught(want[1]) and unworded(got[2]) == unworded(want[2]):
+    if got[0] == want[0] and caught(got[1]) == caught(want[1]) and unworded(careted(got[2])) == unworded(want[2]):
         return "message"
+    # A filter's error with no input to name has no `(at <unknown>)`, and `input` past the last input says `No more
+    # inputs` where jq prints `break`.
+    unplaced = lambda err: re.sub(rb"jq: error \(at <unknown>\)", b"jq: error", err)
+    if got[:2] == want[:2] and got[2] == unplaced(want[2]).replace(b"): break\n", b"): No more inputs\n").replace(b"error: break\n", b"error: No more inputs\n"):
+        return "unplaced error"
     if got == (want[0], want[1], b"") and re.fullmatch(rb"jq: ignoring parse error: Unfinished abandoned text at EOF at line 1, column 0\n", want[2]):
         return "empty --seq stream"
     return None
@@ -393,13 +398,13 @@ def compare(stury, jq, case, parallel=False):
     if parallel and "timeout" in (got[0], want[0]):
         return "again"
     # `stderr` leaves no newline before an error message, which as_jq looks for.
-    got = (got[0], got[1], re.sub(rb"stury: (?=error \(|parse error)", b"jq: ", as_jq(got[2])))
+    got = (got[0], got[1], re.sub(rb"stury: (?=error[ :(]|parse error)", b"jq: ", as_jq(got[2])))
     if got == want:
         return None
     if documented(stdin, got, want):
         return "documented"
     spelled = run(stury, opts, jq_spelling(prog), jq_spelling(stdin))
-    spelled = (spelled[0], spelled[1], re.sub(rb"stury: (?=error \(|parse error)", b"jq: ", as_jq(spelled[2])))
+    spelled = (spelled[0], spelled[1], re.sub(rb"stury: (?=error[ :(]|parse error)", b"jq: ", as_jq(spelled[2])))
     if spelled == want or documented(stdin, spelled, want):
         return "documented"
     return f"{' '.join(opts)} {prog!r}\n  stdin {stdin!r}\n  stury: exit {got[0]} out {got[1][:300]!r} err {got[2][:300]!r}\n  jq:    exit {want[0]} out {want[1][:300]!r} err {want[2][:300]!r}"

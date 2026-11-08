@@ -36,7 +36,7 @@ read_cells :: #force_inline proc "contextless" ($COMMENTS: bool, w: ^Pass($S, $H
 			}
 			if fault, wide := record_width(w, cells + 1, &width); fault {
 				w.rec_lo, w.cells, w.width = rec_lo, cells, width
-				return core.fault_at(u64(rec_lo), .Bad_Char, u8(Detail.Too_Many if wide else Detail.Too_Few)), true
+				return core.fault_at(u64(rec_lo), .Bad_Width, u8(Detail.Too_Many if wide else Detail.Too_Few)), true
 			}
 			when H == Batch {
 				// A record batch stops past the row that fills it, with the width the next frame checks rows against.
@@ -172,11 +172,11 @@ put_cell :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h
 	return put_value(h, on, hs, base, field_lo, hi, esc, lax, S)
 }
 
-// Opens a record at `rec_lo`, with the `Array` or `Map` its hook tests, and reads the hook's action. Returns true when
+// Opens a record at `rec_lo`, with the `Array` or `Object` its hook tests, and reads the hook's action. Returns true when
 // the hook stopped the walk, and sets `muted` when it passed the record over.
 @(private)
 open_record :: #force_inline proc "contextless" (h: ^$H, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action), hs: ^core.Hook_Regs, rec_lo: u64, no_header: bool, muted: ^bool) -> bool {
-	switch emit(h, on, hs, rec_lo, 0, no_header ? .Array : .Map, .Value, 0) {
+	switch emit(h, on, hs, rec_lo, 0, no_header ? .Array : .Object, .Value, 0) {
 	case .Next, .Keep:
 	case .Skip:
 		muted^ = true
@@ -198,7 +198,7 @@ drop_line :: #force_inline proc "contextless" (m, lf: ^u64, d: u64) {
 // no tokens keeps no position for the fault, so the scan reads its separators.
 @(private, cold)
 wide_fault :: #force_no_inline proc "contextless" (base: []u8, lo, width: int, $S: Spec, delim: u8) -> u64 {
-	return core.fault_at(u64(scan_record(base, lo, width, S, delim).fault_at), .Bad_Char, u8(Detail.Too_Many))
+	return core.fault_at(u64(scan_record(base, lo, width, S, delim).fault_at), .Bad_Width, u8(Detail.Too_Many))
 }
 
 // Emits the cells of a record wider than `width` up to the one that ends at `width`'s delimiter, then returns the fault
@@ -216,7 +216,7 @@ read_wide :: #force_no_inline proc "contextless" ($KEYS: bool, h: ^$H, $on: proc
 	if done {
 		return r
 	}
-	return core.fault_at(u64(pos + int(intrinsics.count_trailing_zeros(last))), .Bad_Char, u8(Detail.Too_Many))
+	return core.fault_at(u64(pos + int(intrinsics.count_trailing_zeros(last))), .Bad_Width, u8(Detail.Too_Many))
 }
 
 // Emits a run of a headed record's cells under `.Ragged` once it reaches the header's width, each after its column's key.
@@ -320,6 +320,9 @@ read_tokens :: #force_inline proc "contextless" ($LAX, $COMMENTS: bool, w: ^Pass
 				}
 			}
 		}
+		// `dd` says a run of cells ended the walk with the result `rr`.
+		rr: u64
+		dd: bool
 		if header {
 			// The header record's cells are written as the `Key` tokens its columns' cells name them by.
 			dm := d
@@ -352,38 +355,25 @@ read_tokens :: #force_inline proc "contextless" ($LAX, $COMMENTS: bool, w: ^Pass
 			if width != 0 && .Ragged not_in w.tolerate && cells + int(intrinsics.count_ones(d)) >= width {
 				return read_wide(false, h, on, hs, base, nil, pos, d, cells, field_lo, width, bs, carry, ill, ill_carry, S), true
 			}
-			rr: u64
-			dd: bool
 			if plain_block {
 				field_lo, cells, rr, dd = values_run(false, false, false, h, on, hs, base, nil, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
 			} else {
 				field_lo, cells, rr, dd = values_run(true, false, false, h, on, hs, base, nil, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
 			}
-			if dd {
-				return rr, true
-			}
 		} else if cells + int(intrinsics.count_ones(d)) >= width {
 			if .Ragged not_in w.tolerate {
 				return read_wide(true, h, on, hs, base, keys, pos, d, cells, field_lo, width, bs, carry, ill, ill_carry, S), true
 			}
-			rr: u64
-			dd: bool
-			if field_lo, cells, rr, dd = read_ragged(h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S); dd {
-				return rr, true
-			}
-		} else {
+			field_lo, cells, rr, dd = read_ragged(h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
+		} else if plain_block {
 			// A data record's run of cells, each after its column's key. The cell's own count is the key's index, and
 			// the run advances that count only.
-			rr: u64
-			dd: bool
-			if plain_block {
-				field_lo, cells, rr, dd = values_run(false, true, false, h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
-			} else {
-				field_lo, cells, rr, dd = values_run(true, true, false, h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
-			}
-			if dd {
-				return rr, true
-			}
+			field_lo, cells, rr, dd = values_run(false, true, false, h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
+		} else {
+			field_lo, cells, rr, dd = values_run(true, true, false, h, on, hs, base, keys, pos, d, field_lo, cells, bs, carry, ill, ill_carry, S)
+		}
+		if dd {
+			return rr, true
 		}
 		if k == 64 {
 			break
@@ -448,7 +438,7 @@ read_tokens :: #force_inline proc "contextless" ($LAX, $COMMENTS: bool, w: ^Pass
 			if wide {
 				return wide_fault(base[:w.n], rec_lo, width, S, w.delim), true
 			}
-			return core.fault_at(u64(hi), .Bad_Char, u8(Detail.Too_Few)), true
+			return core.fault_at(u64(hi), .Bad_Width, u8(Detail.Too_Few)), true
 		}
 		if !muted && !header {
 			if emit(h, on, hs, u64(hi), u32(at + 1 - hi), .End, .Value, 0) == .Stop {
@@ -512,7 +502,7 @@ read_last_tokens :: #force_inline proc "contextless" (w: ^Pass($S, $H), base: [^
 		}
 	}
 	if fault, _ := record_width(w, w.cells + 1, &w.width); fault {
-		return core.fault_at(u64(hi), .Bad_Char, u8(Detail.Too_Few)), true
+		return core.fault_at(u64(hi), .Bad_Width, u8(Detail.Too_Few)), true
 	}
 	if !w.muted {
 		if emit(w.h, on, hs, u64(hi), 0, .End, .Value, 0) == .Stop {

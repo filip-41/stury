@@ -2,15 +2,16 @@
 // A pattern goes: parse.odin (`parse`: source to a tree of Nodes, with Oniguruma's error messages),
 // call.odin (`check_calls`: \g<...> calls checked for endless recursion), compile.odin (`compile`:
 // the tree to a Regex holding a program of Insts), analyze.odin (a look-behind tuned to a fixed length,
-// and the literals a search can skip by), then match.odin (`search`: the backtracking matcher over that
+// and the literals a search can skip by), optimize.odin (Oniguruma's search optimizer), then match.odin (`search`: the backtracking matcher over that
 // program). unicode.odin supplies character classes and case folds to all of them, from the generated
 // unicode_tables.odin.
 package regex
 
 // A pattern's tree as a program for the backtracking matcher (match.odin), with what the search can skip
-// by: a literal every match starts with, one every match holds, a start pinned to \A.
+// by: Oniguruma's optimizer's choice (optimize.odin), a literal every match starts with, the bytes one starts with.
 
 import "core:slice"
+import "core:strings"
 import "core:unicode/utf8"
 
 // The most instructions a program may have: short counted repeats are written out, so many of them would
@@ -28,6 +29,7 @@ Op :: enum u8 {
 	Split_Head, // a greedy loop: go on at pc+1 when the byte at the position is a, on failure at b; otherwise at b
 	Jmp, // to a
 	Save, // slot a = the position (captures, loop marks, and \K as slot 0); b: a group's start, which unsets its end
+	Set, // slot a = the position, kept as the match backs past it: a group's bound Oniguruma writes in place
 	Assert, // Assert_Kind(a); a callout's data at callouts[b]
 	Backref, // the text of one of refs[a]'s groups; b: folded
 	Look, // a look-around or atomic group, Look_Kind(a), ending at the Look_End at b
@@ -69,12 +71,12 @@ Regex :: struct {
 	slots:    int, // two per group with the whole match, then a mark per loop that can match empty
 	longest:   bool, // ONIG_OPTION_FIND_LONGEST: the longest match of all, not the first
 	not_empty: bool, // ONIG_OPTION_FIND_NOT_EMPTY: an empty match is no match
-	anchored: bool, // every match starts at \A
+	opt:      ^Search_Opt, // what Oniguruma's optimizer would have the search skip by, kept apart since a Regex is copied
 	prefix:   string, // every match starts with these bytes
-	required:  string, // every match holds these bytes
 	first:     [4]u64, // with has_first, the bytes a match can start with
 	has_first: bool,
 	calls_or_limits: bool, // holds a subexpression call or an absent operator, whose tracking the match then runs
+	narrowed:  bool, // `opt` bounds the starts the search tries
 }
 
 @(private)
@@ -85,6 +87,7 @@ Compiler :: struct {
 	refs:       [dynamic][]int,
 	groups:     []^Node, // the group nodes by number
 	referenced: []bool, // by group number: a backreference or condition reads it
+	undone:     []bool, // by group number: the match undoes its bounds as it backs past them (`mark_undone`)
 	open:       [dynamic]int, // the groups being emitted, innermost last
 	tuned:      int, // the last group Oniguruma's tune_tree has reached, as a look-behind measures one
 	slots:      int,
@@ -105,12 +108,16 @@ compile :: proc(pattern: string, flags: Flags) -> (re: Regex, err: string) {
 	c := Compiler{slots = 2 * len(names), groups = pat.groups, referenced = pat.referenced}
 	c.called = make([]bool, len(names))
 	c.recursive = make([]bool, len(names))
+	c.undone = slice.clone(c.referenced)
 	if pat.has_calls {
 		if err = check_calls(root, c.groups, c.called, c.recursive); err != "" {
 			return
 		}
 		c.addr = make([]int, len(names))
 		slice.fill(c.addr, -1)
+		slice.fill(c.undone, true)
+	} else {
+		mark_undone(root, c.undone, false)
 	}
 	for g in 1 ..< len(names) {
 		c.groups[g].used = c.referenced[g] || c.called[g]
@@ -131,12 +138,11 @@ compile :: proc(pattern: string, flags: Flags) -> (re: Regex, err: string) {
 		callouts = pat.callouts,
 		names    = names,
 		slots    = c.slots,
-		anchored = starts_at_buffer(root),
+		opt      = new_clone(search_opt(root)),
 	}
 	prefix := make([dynamic]byte)
 	literal_prefix(root, &prefix)
 	re.prefix = string(prefix[:])
-	re.required = required_literal(root)
 	// A callout that ends the search or counts over its starts sees which starts are tried, so the skip is then
 	// held to the one Oniguruma's optimizer makes: none by a class or fold that may take a non-ASCII rune.
 	like_onig := false
@@ -145,6 +151,25 @@ compile :: proc(pattern: string, flags: Flags) -> (re: Regex, err: string) {
 	}
 	empty, known := first_bytes(root, &re.first, like_onig)
 	re.has_first = known && !empty
+	// A string or map the optimizer finds at the start of every match is a skip the prefix and first bytes make
+	// without windows, and they leave no start too near the end for it.
+	o := re.opt
+	if o.dist_min == 0 && o.dist_max == 0 {
+		#partial switch o.kind {
+		case .Exact:
+			if re.prefix == "" {
+				re.prefix = o.exact
+			}
+			if strings.has_prefix(re.prefix, o.exact) {
+				o.kind, o.threshold = .None, 0
+			}
+		case .Map:
+			re.first = re.first & o.set if re.has_first else o.set
+			re.has_first = true
+			o.kind, o.threshold = .None, 0
+		}
+	}
+	re.narrowed = o.kind != .None || o.anchored || o.end != .None || o.threshold > 0
 	for ins in re.insts {
 		re.calls_or_limits ||= ins.op >= .Call
 	}
@@ -282,15 +307,26 @@ add :: proc(c: ^Compiler, op: Op, a: int = 0, b: int = 0) -> int {
 // A character a fold-insensitive comparison sees as only itself.
 @(private)
 literal :: proc(n: ^Node) -> bool {
-	return n.kind == .Char && utf8.valid_rune(n.r) && (!n.fold || fold_next(n.r) == n.r)
+	return n.kind == .Str || n.kind == .Char && utf8.valid_rune(n.r) && (!n.fold || fold_next(n.r) == n.r)
+}
+
+// The bytes of a `literal` node, a Char's written into `buf`.
+@(private)
+literal_text :: proc(n: ^Node, buf: ^[4]byte) -> string {
+	if n.kind == .Str {
+		return n.text
+	}
+	w: int
+	buf^, w = utf8.encode_rune(n.r)
+	return string(buf[:w])
 }
 
 @(private = "file")
-emit_str :: proc(c: ^Compiler, runes: []^Node) {
+emit_str :: proc(c: ^Compiler, run: []^Node) {
 	at := len(c.bytes)
-	for n in runes {
-		buf, w := utf8.encode_rune(n.r)
-		append(&c.bytes, ..buf[:w])
+	for n in run {
+		buf: [4]byte
+		append(&c.bytes, literal_text(n, &buf))
 	}
 	add(c, .Str, at, len(c.bytes) - at)
 }
@@ -302,7 +338,7 @@ emit :: proc(c: ^Compiler, n: ^Node) {
 	}
 	switch n.kind {
 	case .Empty:
-	case .Char:
+	case .Char, .Str:
 		if literal(n) {
 			emit_str(c, {n})
 		} else {
@@ -418,10 +454,35 @@ emit_group :: proc(c: ^Compiler, n: ^Node) {
 		add(c, .Mem_Start, g)
 		emit(c, n.kids[0])
 		add(c, .Mem_End, g)
-	case:
+	case c.undone[g]:
 		add(c, .Save, 2 * g, int(c.referenced[g]))
 		emit(c, n.kids[0])
 		add(c, .Save, 2 * g + 1)
+	case:
+		add(c, .Set, 2 * g)
+		emit(c, n.kids[0])
+		add(c, .Set, 2 * g + 1)
+	}
+}
+
+// The groups whose bounds Oniguruma pushes (its backtrack_mem), so the match undoes them as it backs past: those
+// within an alternative, a condition's branch, a negative look, an absent operator or a repeat of no fixed count.
+// Every other group's MEM_START and MEM_END write its bounds in place, and those a failed try wrote stay.
+@(private = "file")
+mark_undone :: proc(n: ^Node, undone: []bool, within: bool) {
+	within := within
+	#partial switch n.kind {
+	case .Alt, .Cond, .Absent:
+		within = true
+	case .Look:
+		within ||= n.look == .Not_Ahead || n.look == .Not_Behind
+	case .Repeat:
+		within ||= n.min != n.max
+	case .Group:
+		undone[n.group] ||= within
+	}
+	for k in n.kids {
+		mark_undone(k, undone, within)
 	}
 }
 
@@ -435,8 +496,7 @@ emit_absent :: proc(c: ^Compiler, n: ^Node) {
 		add(c, .Limit_Clear)
 		return
 	}
-	saved, at := c.slots, c.slots + 1
-	c.slots += 2
+	saved, at := new_slot(c), new_slot(c)
 	add(c, .Limit_Save, saved)
 	undo := add(c, .Look)
 	first := add(c, .Look)
@@ -491,30 +551,30 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 		emit_counted(c, n)
 		return
 	}
-	for _ in 0 ..< n.min {
+	// A body that can match empty is left once an iteration of it does, as Oniguruma's empty check
+	// leaves it, so `(a*)*` ends.
+	empty := can_be_empty(x)
+	// One least iteration of a body that cannot match empty enters the loop past its Split, as Oniguruma's OP_JUMP
+	// does, rather than as a copy, which nested repeats would double at every level.
+	enter := add(c, .Jmp) if n.min == 1 && !empty else -1
+	for _ in 0 ..< (n.min if enter < 0 else 0) {
 		emit(c, x)
 		if c.err != "" {
 			return
 		}
 	}
-	// A body that can match empty is left once an iteration of it does, as Oniguruma's empty check
-	// leaves it, so `(a*)*` ends.
-	empty := can_be_empty(x)
 	loop := add(c, .Split)
-	mark := -1
-	if empty {
-		mark = c.slots
-		c.slots += 1
-		add(c, .Save, mark)
+	if enter >= 0 {
+		patch(c, enter, loop + 1)
 	}
-	emit(c, x)
-	check := add(c, .Check, mark) if empty else -1
+	mark := new_slot(c) if empty else -1
+	check := emit_body(c, x, mark)
 	add(c, .Jmp, loop)
 	exit := len(c.insts)
 	patch(c, loop, loop + 1 if n.greedy else exit, exit if n.greedy else loop + 1)
 	if empty {
 		patch(c, check, mark, exit)
-	} else if h := head_literal(x); h != nil && h.kind == .Char && !h.fold && utf8.valid_rune(h.r) && n.greedy && n.min <= 1 {
+	} else if h := head_literal(x); h != nil && (h.kind == .Str || h.kind == .Char && !h.fold && utf8.valid_rune(h.r)) && n.greedy && n.min <= 1 {
 		// Oniguruma's OP_PUSH_OR_JUMP_EXACT1: no alternative is kept for an iteration that cannot start (one that
 		// starts with an exact character, no class, no case folding), which its retry limit counts.
 		head, _ := utf8.encode_rune(h.r)
@@ -527,11 +587,7 @@ emit_repeat :: proc(c: ^Compiler, n: ^Node) {
 @(private = "file")
 emit_counted :: proc(c: ^Compiler, n: ^Node) {
 	x := n.kids[0]
-	mark := -1
-	if n.max > 1 && can_be_empty(x) {
-		mark = c.slots
-		c.slots += 1
-	}
+	mark := new_slot(c) if n.max > 1 && can_be_empty(x) else -1
 	splits := make([dynamic]int, context.temp_allocator)
 	checks := make([dynamic]int, context.temp_allocator)
 	start := len(c.insts)
@@ -539,34 +595,21 @@ emit_counted :: proc(c: ^Compiler, n: ^Node) {
 		// A call reuses the slots, so a counter is only kept where no group can be entered again.
 		if i == 1 && c.addr == nil && (len(c.insts) - start) * n.max > COUNTED_WRITTEN_OUT {
 			// The rest in a counter loop: its Count is an exit, as a Split is.
-			slot := c.slots
-			c.slots += 1
+			slot := new_slot(c)
 			add(c, .Count_Reset, slot)
 			loop := add(c, .Count if n.greedy else .Count_Lazy, slot)
 			add(c, .Count, max(n.min - 1, 0), n.max - 1)
 			append(&splits, loop)
-			if mark >= 0 {
-				add(c, .Save, mark)
-			}
-			emit(c, x)
-			if mark >= 0 {
-				append(&checks, add(c, .Check, mark))
-			}
+			append(&checks, emit_body(c, x, mark))
 			add(c, .Count_Next, slot, loop)
 			break
 		}
 		if i >= n.min {
 			append(&splits, add(c, .Split))
 		}
-		if mark >= 0 {
-			add(c, .Save, mark)
-		}
-		emit(c, x)
+		append(&checks, emit_body(c, x, mark))
 		if c.err != "" {
 			return
-		}
-		if mark >= 0 {
-			append(&checks, add(c, .Check, mark))
 		}
 	}
 	if c.err != "" {
@@ -581,8 +624,27 @@ emit_counted :: proc(c: ^Compiler, n: ^Node) {
 		}
 	}
 	for k in checks {
-		patch(c, k, mark, exit)
+		if k >= 0 {
+			patch(c, k, mark, exit)
+		}
 	}
+}
+
+// A loop's body, after a mark and before the check that leaves the loop once an iteration matched empty, or
+// with neither for `mark` -1. The check's index, or -1.
+@(private = "file")
+emit_body :: proc(c: ^Compiler, x: ^Node, mark: int) -> int {
+	if mark >= 0 {
+		add(c, .Save, mark)
+	}
+	emit(c, x)
+	return add(c, .Check, mark) if mark >= 0 else -1
+}
+
+@(private = "file")
+new_slot :: proc(c: ^Compiler) -> int {
+	c.slots += 1
+	return c.slots - 1
 }
 
 // The most instructions a counted repeat is written out to. A longer one runs its body in a counter loop, as

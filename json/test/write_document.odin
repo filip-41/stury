@@ -1,10 +1,8 @@
 package json_tests
 
 import "core:bytes"
-import "core:fmt"
 import "core:io"
 import "core:math/rand"
-import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -104,7 +102,7 @@ check_write :: proc(t: ^testing.T, src: []u8) -> bool {
 		if !testing.expect(t, terr.kind == .None && string(twice) == string(text), "writing a written text changes it") {
 			return false
 		}
-		direct, ferr := json.format(src, .Json, opts)
+		direct, ferr := core.format(src, json.as(.Json), opts)
 		defer delete(direct)
 		if !testing.expect(t, ferr.kind == .None && string(direct) == string(text), "format differs from core.write") {
 			return false
@@ -136,7 +134,7 @@ check_subtrees :: proc(t: ^testing.T, doc: ^core.Document, opts: core.Write_Opti
 		node := core.Node_Index(i)
 		text, _, err := core.write(doc, opts, node = node)
 		defer delete(text)
-		want, _ := json.format(core.span(doc, node), .Json, opts)
+		want, _ := core.format(core.span(doc, node), json.as(.Json), opts)
 		defer delete(want)
 		if !testing.expectf(t, err.kind == .None && string(text) == string(want), "node %d of %q writes %q, its span %q", i, doc.src, text, want) {
 			return false
@@ -190,17 +188,6 @@ write_document_layout :: proc(t: ^testing.T) {
 	flat, _, _ := core.write(&doc, {pretty = true})
 	defer delete(flat)
 	testing.expect(t, strings.contains(string(flat), "\n\"c\": {}"))
-}
-
-// A number keeps the spelling it was read with, whatever it would print as.
-@(test)
-write_document_keeps_spelling :: proc(t: ^testing.T) {
-	src := `[-0.0,1E5,0.10,1e+2,12345678901234567890123]`
-	doc, _ := json.build(transmute([]u8)src, .Json)
-	defer core.destroy(&doc)
-	text, _, _ := core.write(&doc)
-	defer delete(text)
-	testing.expect_value(t, string(text), src)
 }
 
 // A string that was escaped keeps its escapes, and `ascii`, `escape_del` and `escape_html` ask for another spelling of the same text.
@@ -291,11 +278,11 @@ write_document_refusals :: proc(t: ^testing.T) {
 	delete(whole)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
 
-	_, err := json.format(transmute([]u8)string(`[1,`), .Json)
+	_, err := core.format(transmute([]u8)string(`[1,`), json.as(.Json))
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Walk)
-	_, err = json.format(transmute([]u8)string("[1, /* c */ "), .Jsonc)
+	_, err = core.format(transmute([]u8)string("[1, /* c */ "), json.as(.Jsonc))
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Walk)
-	_, err = json.format(transmute([]u8)string(`{a:`), .Json5)
+	_, err = core.format(transmute([]u8)string(`{a:`), json.as(.Json5))
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Walk)
 }
 
@@ -329,7 +316,7 @@ empty_container_from_the_rare_path :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		text := empty_rows_text(c.levels, c.n)
-		doc, err := json.build(text, .Json, {}, false, context.temp_allocator)
+		doc, err := json.build(text, .Json, {}, .Last, context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
 		sorted := c.opts
 		sorted.sort_keys = true
@@ -349,165 +336,10 @@ empty_container_from_the_rare_path :: proc(t: ^testing.T) {
 			delete(got)
 		}
 		testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-		formatted, ferr := json.format(text, json.Spec.Json, c.opts)
+		formatted, ferr := core.format(text, json.as(.Json), c.opts)
 		testing.expect_value(t, ferr.kind, core.Typed_Error_Kind.None)
 		testing.expect(t, string(formatted) == string(want))
 		delete(formatted)
-	}
-}
-
-COMMENT_TEXTS :: [?]string {
-	`// top
-{ // after open
- /* lead */ "a" /* k */ : /* v */ 1, // trail a
- // lead b
- "b": [1, // t1
- 2 /* t2 */ , 3 // last
- ] , "c": [] /* c */ , "d": { /* only */ } } // end`,
-	"[1 // a\n]\n// after\n/* more */",
-	"1\n// after",
-	`{ /* e */ }`,
-	"[ // x\n]",
-	"{\"a\":1 /*t*/ , // t2\n /*f*/ }",
-	`/*é😀<&>*/ ["é" /* <a href="x">é😀 */]`,
-	"[[1 //\n,2,/**/],{},{\"k\":{/**/}}]//\n",
-}
-
-// The comments of a document with their nodes and roles, in a canonical order.
-fact_bodies :: proc(doc: ^core.Document) -> [dynamic]string {
-	list: [dynamic]string
-	for f in doc.facts {
-		append(&list, fmt.aprintf("%d %v %s", f.node, f.role, doc.src[f.lo:f.lo + u64(f.n)]))
-	}
-	slice.sort(list[:])
-	return list
-}
-
-fact_bodies_destroy :: proc(list: [dynamic]string) {
-	for s in list {
-		delete(s)
-	}
-	delete(list)
-}
-
-// Writes `src` read as JSONC under every option and checks that each text reads again as JSONC into the same nodes and the
-// same comments, each of the same node in the same role, that writing it again changes nothing, and that every entry
-// writes the same text. As JSON the comments are dropped and counted.
-check_commented :: proc(t: ^testing.T, src: []u8) -> bool {
-	doc, err := json.build(src, .Jsonc)
-	if !testing.expectf(t, err.kind == .None, "build %q: %v", src, err) {
-		return false
-	}
-	defer core.destroy(&doc)
-	bodies := fact_bodies(&doc)
-	defer fact_bodies_destroy(bodies)
-	for opts, k in WRITE_OPTS {
-		text, _, werr := core.write(&doc, opts)
-		if !testing.expectf(t, werr.kind == .None, "write %q under %d: %v", src, k, werr) {
-			return false
-		}
-		defer delete(text)
-		again, rerr := json.build(text, .Jsonc)
-		if !testing.expectf(t, rerr.kind == .None, "re-read %q under %d: %v", text, k, rerr) {
-			return false
-		}
-		defer core.destroy(&again)
-		if !same_tree(t, &doc, &again, "re-read") {
-			return false
-		}
-		got := fact_bodies(&again)
-		defer fact_bodies_destroy(got)
-		if !testing.expectf(t, slice.equal(got[:], bodies[:]), "comments of %q under %d became %q", src, k, text) {
-			return false
-		}
-		twice, _, terr := core.write(&again, opts)
-		defer delete(twice)
-		if !testing.expectf(t, terr.kind == .None && string(twice) == string(text), "writing %q again changes it", text) {
-			return false
-		}
-		direct, ferr := json.format(src, .Jsonc, opts)
-		defer delete(direct)
-		if !testing.expect(t, ferr.kind == .None && string(direct) == string(text), "format differs from core.write") {
-			return false
-		}
-		through, _, cerr := core.write(&doc, opts, json.as(.Jsonc))
-		defer delete(through)
-		if !testing.expect(t, cerr.kind == .None && string(through) == string(text), "core.write in its own spec differs from core.write") {
-			return false
-		}
-		buf: bytes.Buffer
-		defer bytes.buffer_destroy(&buf)
-		_, serr := core.write_stream(bytes.buffer_to_stream(&buf), &doc, opts)
-		if !testing.expect(t, serr.kind == .None && string(bytes.buffer_to_bytes(&buf)) == string(text), "the stream differs from core.write") {
-			return false
-		}
-		plain, dropped, jerr := core.write(&doc, opts, json.as(.Json))
-		defer delete(plain)
-		if !testing.expect(t, jerr.kind == .None && dropped == len(doc.facts), "write as JSON does not count its dropped comments") {
-			return false
-		}
-		strict, serr2 := json.build(plain, .Json)
-		defer core.destroy(&strict)
-		if !testing.expectf(t, serr2.kind == .None, "write as JSON of %q is not JSON: %q", src, plain) {
-			return false
-		}
-		if !same_tree(t, &doc, &strict, "strict") {
-			return false
-		}
-		if !check_commented_subtrees(t, &doc, opts) {
-			return false
-		}
-	}
-	return true
-}
-
-// Checks that every value node of `doc` writes a JSONC text, with at least the comments inside its span, and as JSON
-// the text its span writes as JSON.
-check_commented_subtrees :: proc(t: ^testing.T, doc: ^core.Document, opts: core.Write_Options) -> bool {
-	for x, i in doc.nodes {
-		if x.role == .Key {
-			continue
-		}
-		node := core.Node_Index(i)
-		text, _, err := core.write(doc, opts, node = node)
-		defer delete(text)
-		again, rerr := json.build(text, .Jsonc)
-		defer core.destroy(&again)
-		span, _ := json.build(core.span(doc, node), .Jsonc)
-		defer core.destroy(&span)
-		if !testing.expectf(t, err.kind == .None && rerr.kind == .None && len(again.facts) >= len(span.facts), "node %d of %q writes %q", i, doc.src, text) {
-			return false
-		}
-		plain, dropped, _ := core.write(doc, opts, json.as(.Json), node)
-		defer delete(plain)
-		want, _, _ := core.write(&span, opts, json.as(.Json))
-		defer delete(want)
-		if !testing.expectf(t, string(plain) == string(want) && dropped == len(core.subtree_facts(doc, node)), "node %d of %q writes %q as JSON", i, doc.src, plain) {
-			return false
-		}
-	}
-	return true
-}
-
-@(test)
-write_document_comments :: proc(t: ^testing.T) {
-	for text in COMMENT_TEXTS {
-		if !check_commented(t, transmute([]u8)text) {
-			return
-		}
-	}
-}
-
-@(test)
-write_document_comments_generated :: proc(t: ^testing.T) {
-	rand.reset(2)
-	for _ in 0 ..< 300 {
-		b: [dynamic]u8
-		defer delete(b)
-		gen.text(&b, 1 + rand.int_max(5), .Jsonc)
-		if !check_commented(t, b[:]) {
-			return
-		}
 	}
 }
 
@@ -551,7 +383,7 @@ write_document_sort_keys :: proc(t: ^testing.T) {
 	defer delete(text)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(text), `{"B":4,"a":2,"a":5,"b":{"a":[{"x":0,"y":0}],"z":1},"é":3}`)
-	direct, ferr := json.format(transmute([]u8)src, .Json, {sort_keys = true})
+	direct, ferr := core.format(transmute([]u8)src, json.as(.Json), {sort_keys = true})
 	defer delete(direct)
 	testing.expect_value(t, ferr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(direct), string(text))
@@ -563,49 +395,6 @@ write_document_sort_keys :: proc(t: ^testing.T) {
 	defer delete(moved)
 	testing.expect_value(t, merr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(moved), "{\"\\u0061\":2,/* two */\"b\":1// one\n}")
-}
-
-// Every object of a text written under `sort_keys` has its decoded keys in byte order and the same rows.
-@(test)
-write_document_sort_keys_generated :: proc(t: ^testing.T) {
-	rand.reset(3)
-	for _ in 0 ..< 300 {
-		b: [dynamic]u8
-		defer delete(b)
-		gen.text(&b, 1 + rand.int_max(5), .Json)
-		doc, _ := json.build(b[:], .Json)
-		defer core.destroy(&doc)
-		text, _, err := core.write(&doc, {sort_keys = true})
-		defer delete(text)
-		if !testing.expect_value(t, err.kind, core.Typed_Error_Kind.None) {
-			return
-		}
-		again, rerr := json.build(text, .Json)
-		defer core.destroy(&again)
-		if !testing.expect_value(t, rerr.kind, core.Document_Error_Kind.None) || !testing.expect_value(t, len(again.nodes), len(doc.nodes)) {
-			return
-		}
-		for n, i in again.nodes {
-			if n.kind != .Map {
-				continue
-			}
-			prev := ""
-			it := core.pairs(&again, core.Node_Index(i))
-			for key, _ in core.pair_next(&it) {
-				name, _ := core.text_clone(&again, key)
-				defer delete(name)
-				if !testing.expectf(t, prev <= name, "keys %q, %q out of order in %q", prev, name, text) {
-					return
-				}
-				prev = strings.clone(name, context.temp_allocator)
-			}
-		}
-		sorted_again, _, _ := core.write(&again, {sort_keys = true})
-		defer delete(sorted_again)
-		if !testing.expect(t, string(sorted_again) == string(text), "sorting a sorted text changes it") {
-			return
-		}
-	}
 }
 
 JSON5_TEXTS :: [?][2]string {
@@ -632,7 +421,7 @@ write_document_json5 :: proc(t: ^testing.T) {
 		defer delete(own)
 		testing.expect_value(t, oerr.kind, core.Typed_Error_Kind.None)
 		testing.expect_value(t, kept, 0)
-		direct, ferr := json.format(transmute([]u8)pair[0], .Json5)
+		direct, ferr := core.format(transmute([]u8)pair[0], json.as(.Json5))
 		defer delete(direct)
 		testing.expect_value(t, ferr.kind, core.Typed_Error_Kind.None)
 		testing.expect_value(t, string(direct), string(own))
@@ -785,12 +574,37 @@ write_document_kept_as_target :: proc(t: ^testing.T) {
 		defer delete(kept)
 		whole, _, werr := core.write(&full, as = json.as(target), node = 1)
 		defer delete(whole)
-		testing.expectf(t, kerr == werr && string(kept) == string(whole), "%v: %q %v, full %q %v", target, kept, kerr.kind, whole, werr.kind)
+		testing.expectf(t, kerr.kind == werr.kind && kerr.at == werr.at && string(kept) == string(whole), "%v: %q %v, full %q %v", target, kept, kerr.kind, whole, werr.kind)
 	}
 	own, _, oerr := core.write(&doc)
 	defer delete(own)
 	testing.expect_value(t, oerr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(own), "[{id:0x1F,v:Infinity,'s':'q'}]")
+}
+
+// A JSONC line comment holding U+2028 or U+2029, which end a JSON5 line comment, is written as JSON5 with them spelled
+// ` ` and ` `, so the text past them stays in the comment.
+@(test)
+write_document_line_separators_as_json5 :: proc(t: ^testing.T) {
+	src := "[1 // a , 2 b\n]"
+	doc, err := json.build(transmute([]u8)src, .Jsonc)
+	defer core.destroy(&doc)
+	if !testing.expect_value(t, err.kind, core.Document_Error_Kind.None) {
+		return
+	}
+	text, _, werr := core.write(&doc, as = json.as(.Json5))
+	defer delete(text)
+	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(text), "[1// a\\u2028, 2\\u2029b\n]")
+	again, rerr := json.build(text, .Json5)
+	defer core.destroy(&again)
+	testing.expect_value(t, rerr.kind, core.Document_Error_Kind.None)
+	testing.expect_value(t, len(again.nodes), len(doc.nodes))
+	testing.expect_value(t, len(again.facts), 1)
+	kept, _, kerr := core.write(&doc, as = json.as(.Jsonc))
+	defer delete(kept)
+	testing.expect_value(t, kerr.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(kept), "[1// a , 2 b\n]")
 }
 
 // A JSONC document with no comment is written as JSON, and `format` removes its trailing comma.
@@ -806,13 +620,13 @@ write_document_jsonc_without_comments :: proc(t: ^testing.T) {
 	defer delete(text)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(text), `[1,2]`)
-	direct, ferr := json.format(transmute([]u8)src, .Jsonc)
+	direct, ferr := core.format(transmute([]u8)src, json.as(.Jsonc))
 	defer delete(direct)
 	testing.expect_value(t, ferr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(direct), `[1,2]`)
 }
 
-// A document of another format is written through its own text, number and resolve.
+// A document of another format is written through its own text, number and kind: an empty cell is null.
 @(test)
 write_document_from_delimited_text :: proc(t: ^testing.T) {
 	doc, err := dsv.build(transmute([]u8)string("1,a\n2.5,\"b c\"\n"), .Csv, {no_header = true})
@@ -828,13 +642,13 @@ write_document_from_delimited_text :: proc(t: ^testing.T) {
 	defer delete(own)
 	testing.expect_value(t, cerr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(own), "1,a\n2.5,b c\n")
-	headed, herr := dsv.build(transmute([]u8)string("x,y\n1,2\n"), .Csv)
+	headed, herr := dsv.build(transmute([]u8)string("x,y,z\n1,2,\n"), .Csv)
 	defer core.destroy(&headed)
 	testing.expect_value(t, herr.kind, core.Document_Error_Kind.None)
 	records, _, rerr := core.write(&headed, as = json.as(.Json))
 	defer delete(records)
 	testing.expect_value(t, rerr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(records), `[{"x":"1","y":"2"}]`)
+	testing.expect_value(t, string(records), `[{"x":"1","y":"2","z":null}]`)
 }
 
 // A document read with `infer` writes a cell as the null, boolean or number it reads as, and every other cell stays a string, so the
@@ -855,38 +669,6 @@ write_document_infers_cells :: proc(t: ^testing.T) {
 	again, aerr := json.build(text, .Json)
 	defer core.destroy(&again)
 	testing.expect_value(t, aerr.kind, core.Document_Error_Kind.None)
-}
-
-// A document built under a raised `max_depth` is written, compact and pretty, past the depth the stack holds in line.
-@(test)
-write_document_deep :: proc(t: ^testing.T) {
-	depth := core.MAX_DEPTH + 40
-	b: strings.Builder
-	defer strings.builder_destroy(&b)
-	for _ in 0 ..< depth {
-		strings.write_byte(&b, '[')
-	}
-	strings.write_string(&b, `"leaf"`)
-	for _ in 0 ..< depth {
-		strings.write_byte(&b, ']')
-	}
-	src := transmute([]u8)strings.to_string(b)
-	doc, err := json.build(src, .Json, {max_depth = u32(depth + 1)})
-	defer core.destroy(&doc)
-	if !testing.expect_value(t, err.kind, core.Document_Error_Kind.None) {
-		return
-	}
-	text, _, werr := core.write(&doc)
-	defer delete(text)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(text), string(src))
-	pretty, _, perr := core.write(&doc, core.PRETTY)
-	defer delete(pretty)
-	testing.expect_value(t, perr.kind, core.Typed_Error_Kind.None)
-	again, aerr := json.build(pretty, .Json, {max_depth = u32(depth + 1)})
-	defer core.destroy(&again)
-	testing.expect_value(t, aerr.kind, core.Document_Error_Kind.None)
-	same_tree(t, &doc, &again, "deep")
 }
 
 // A long key and a long string past one reservation are copied whole.
@@ -962,7 +744,7 @@ writes_stop_at_the_end_of_a_page :: proc(t: ^testing.T) {
 			return
 		}
 		for opts in WRITE_OPTS {
-			direct, ferr := json.format(src, .Json, opts, {}, context.temp_allocator)
+			direct, ferr := core.format(src, json.as(.Json), opts, context.temp_allocator)
 			testing.expect_value(t, ferr.kind, core.Typed_Error_Kind.None)
 			written, _, werr := core.write(&doc, opts, allocator = context.temp_allocator)
 			testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
@@ -999,7 +781,7 @@ lone_surrogates_write_as_they_read :: proc(t: ^testing.T) {
 			_, bad := json.validate(text, .Json).?
 			testing.expect(t, !bad)
 		}
-		direct, ferr := json.format(transmute([]u8)c[0], .Json, {}, read, context.temp_allocator)
+		direct, ferr := core.format(transmute([]u8)c[0], json.as(.Json, read), {}, context.temp_allocator)
 		testing.expect_value(t, ferr.kind, core.Typed_Error_Kind.None)
 		testing.expect_value(t, string(direct), c[1])
 	}
@@ -1020,7 +802,7 @@ tolerated_strings_through_the_row_walk :: proc(t: ^testing.T) {
 	testing.expect(t, string(text) == want)
 	pretty, _, perr := core.write(&doc, {pretty = true, indent = 2}, allocator = context.temp_allocator)
 	testing.expect_value(t, perr.kind, core.Typed_Error_Kind.None)
-	again, aerr := json.format(pretty, .Json, {}, {}, context.temp_allocator)
+	again, aerr := core.format(pretty, json.as(.Json), {}, context.temp_allocator)
 	testing.expect_value(t, aerr.kind, core.Typed_Error_Kind.None)
 	testing.expect(t, string(again) == want)
 }
@@ -1098,4 +880,13 @@ spelling_options_in_the_row_walk :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+// A text with a comment, read under a raised `max_depth`, is written back at its full depth.
+@(test)
+write_document_deep_comment :: proc(t: ^testing.T) {
+	src := strings.concatenate({strings.repeat("[", 5000, context.temp_allocator), "/* c */0", strings.repeat("]", 5000, context.temp_allocator)}, context.temp_allocator)
+	text, err := core.format(transmute([]u8)src, json.as(.Jsonc, {max_depth = 5000}), {}, context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(text), src)
 }

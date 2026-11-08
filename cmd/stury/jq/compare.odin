@@ -277,8 +277,7 @@ equal :: proc(a, b: Value) -> bool {
 	return compare(a, b, eq = true) == 0
 }
 
-// Whether `a` and `b` are one container, not two alike.
-@(private = "file")
+// Whether `a` and `b` are one container or one document node, not two alike.
 same :: proc(a, b: Value) -> bool {
 	#partial switch x in a {
 	case ^Array:
@@ -292,6 +291,9 @@ same :: proc(a, b: Value) -> bool {
 		return ok && x == y
 	case Ref:
 		y, ok := b.(Ref)
+		return ok && x == y
+	case ^Commented:
+		y, ok := b.(^Commented)
 		return ok && x == y
 	}
 	return false

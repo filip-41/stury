@@ -7,6 +7,7 @@ import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
 import write "../../core/write"
+import records "../../core/records"
 import dsv ".."
 import json "../../json"
 import walktest "../../walktest"
@@ -25,128 +26,132 @@ Write_Row :: struct {
 	note:  cstring,
 }
 
-expect_text :: proc(t: ^testing.T, value: any, spec: dsv.Spec, layout: dsv.Options, want: string, loc := #caller_location) {
-	got, err := dsv.marshal(value, spec, layout, {}, context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None, loc)
-	testing.expect_value(t, string(got), want, loc)
+One :: struct {
+	s: string,
 }
 
-expect_refused :: proc(t: ^testing.T, value: any, spec: dsv.Spec, layout: dsv.Options, kind: core.Typed_Error_Kind, loc := #caller_location) -> core.Typed_Error {
-	got, err := dsv.marshal(value, spec, layout, {}, context.temp_allocator)
-	testing.expect_value(t, err.kind, kind, loc)
-	testing.expect(t, got == nil, "a refusal returns no text", loc = loc)
-	return err
+Num :: struct {
+	n: int,
 }
 
+Opt :: struct {
+	s: Maybe(string),
+}
+
+Float :: struct {
+	f: f64,
+}
+
+Write_Case :: struct {
+	value:  any,
+	spec:   dsv.Spec,
+	layout: dsv.Options,
+	want:   string,
+	kind:   core.Typed_Error_Kind, // a refusal, which returns no text
+}
+
+expect_writes :: proc(t: ^testing.T, cases: []Write_Case, loc := #caller_location) {
+	for c in cases {
+		got, err := dsv.marshal(c.value, c.spec, c.layout, write = {}, allocator = context.temp_allocator)
+		testing.expectf(t, err.kind == c.kind && string(got) == c.want, "%v %v %v: %v %q, want %v %q", c.value, c.spec, c.layout, err.kind, got, c.kind, c.want, loc = loc)
+	}
+}
+
+// Struct rows write a header then records, and map and list rows write the union of their keys or their cells. A header
+// is refused where a row has none.
 @(test)
-struct_rows_write_a_header_then_records :: proc(t: ^testing.T) {
+rows_write_a_header_then_records :: proc(t: ^testing.T) {
 	rows := []Write_Row{
 		{id = 1, name = "a", ok = true, score = 1.5, small = 7, may = "m", color = .Blue, note = "n"},
 		{id = -2, name = "", ok = false, score = 1e21, small = 0, color = .Red},
 	}
-	expect_text(t, rows, .Csv, {}, "id,name,ok,score,small,may,color,note\n1,a,true,1.5,7,m,Blue,n\n-2,\"\",false,1e+21,0,,Red,\n")
-	expect_text(t, rows, .Csv, {no_header = true, crlf = true}, "1,a,true,1.5,7,m,Blue,n\r\n-2,\"\",false,1e+21,0,,Red,\r\n")
-}
-
-@(test)
-map_rows_without_a_header_are_refused :: proc(t: ^testing.T) {
-	row := make(map[string]int, allocator = context.temp_allocator)
-	row["a"] = 1
-	rows := []map[string]int{row}
-	expect_refused(t, rows, .Csv, {no_header = true}, .Unsupported)
-	expect_text(t, rows, .Csv, {}, "a\n1\n")
-}
-
-@(test)
-sort_keys_orders_the_columns :: proc(t: ^testing.T) {
-	Two :: struct {b, a: int}
-	rows := []Two{{1, 2}}
-	got, err := dsv.marshal(rows, .Csv, {}, {sort_keys = true}, context.temp_allocator)
+	one := make(map[string]int, allocator = context.temp_allocator)
+	one["a"] = 1
+	maps := make([]map[string]int, 2, context.temp_allocator)
+	maps[0] = make(map[string]int, context.temp_allocator)
+	maps[1] = make(map[string]int, context.temp_allocator)
+	maps[0]["b"], maps[0]["a"], maps[1]["c"] = 1, 2, 3
+	empty := make([]map[string]string, 1, context.temp_allocator)
+	empty[0] = make(map[string]string, context.temp_allocator)
+	empty[0]["k"] = ""
+	expect_writes(t, {
+		{rows, .Csv, {}, "id,name,ok,score,small,may,color,note\n1,a,true,1.5,7,m,Blue,n\n-2,\"\",false,1e+21,0,,Red,\n", .None},
+		{rows, .Csv, {no_header = true, crlf = true}, "1,a,true,1.5,7,m,Blue,n\r\n-2,\"\",false,1e+21,0,,Red,\r\n", .None},
+		{[]map[string]int{one}, .Csv, {no_header = true}, "", .Unsupported},
+		{[]map[string]int{one}, .Csv, {}, "a\n1\n", .None},
+		{[][]int{{1, 2}, {3}}, .Csv, {}, "", .Wrong_Length},
+		{[][]int{{1}, {2, 3}}, .Csv, {tolerate = {.Ragged}}, "1\n2,3\n", .None},
+		{maps, .Csv, {}, "a,b,c\n2,1,\n,,3\n", .None},
+		{empty, .Tsv, {}, "", .Unwritable},
+		{[][]int{{}}, .Csv, {}, "", .Unwritable},
+		{[]int{1, 2}, .Csv, {}, "1,2\n", .None},
+		{[][][]int{}, .Csv, {}, "", .Unsupported},
+		{[]struct {a: []int}{}, .Csv, {}, "", .Unsupported},
+	})
+	got, err := dsv.marshal([]struct {b, a: int}{{1, 2}}, .Csv, {}, write = {sort_keys = true}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(got), "a,b\n2,1\n")
 }
 
+// Each spec writes a cell its own way: CSV quotes what needs it, TSV escapes, Plain refuses what it cannot spell, an empty
+// cell follows the spec, and a comment byte, a byte-order mark or a delimiter at a line's start is guarded.
 @(test)
-csv_quotes_what_needs_it :: proc(t: ^testing.T) {
-	One :: struct {s: string}
-	rows := []One{{"a,b"}, {"q\"q"}, {"l\nl"}, {"plain"}, {"\r"}, {" "}}
-	expect_text(t, rows, .Csv, {no_header = true}, "\"a,b\"\n\"q\"\"q\"\n\"l\nl\"\nplain\n\"\r\"\n \n")
+cells_follow_the_spec :: proc(t: ^testing.T) {
 	long := strings.repeat("x,\"", 700, context.temp_allocator)
-	got, err := dsv.marshal([]One{{long}}, .Csv, {no_header = true}, {}, context.temp_allocator)
+	expect_writes(t, {
+		{[]One{{"a,b"}, {"q\"q"}, {"l\nl"}, {"plain"}, {"\r"}, {" "}}, .Csv, {no_header = true}, "\"a,b\"\n\"q\"\"q\"\n\"l\nl\"\nplain\n\"\r\"\n \n", .None},
+		{[]One{{"a\tb\nc\\d\x00"}}, .Tsv, {no_header = true}, "a\\tb\\nc\\\\d\\0\n", .None},
+		{[]One{{"a\\b\x00"}}, .Plain, {no_header = true}, "a\\b\x00\n", .None},
+		{[]One{{"a,b"}}, .Plain, {}, "", .Unwritable},
+		{[]One{{"a\nb"}}, .Plain, {}, "", .Unwritable},
+		{[]One{{"a;b"}}, .Tsv, {delimiter = ';'}, "", .Unwritable},
+		{[]One{{"a\tb"}}, .Tsv, {no_header = true, delimiter = ';'}, "a\tb\n", .None},
+		{[]struct {a, b: string}{{"", "x"}}, .Tsv, {no_header = true}, "\tx\n", .None},
+		{[]Opt{{""}}, .Tsv, {}, "", .Unwritable},
+		{[]Opt{{""}}, .Csv, {no_header = true}, "\"\"\n", .None},
+		{[]One{{"#x"}}, .Csv, {no_header = true, comment = '#'}, "\"#x\"\n", .None},
+		{[]One{{"a"}, {"#x"}}, .Csv, {no_header = true, comment = '#'}, "a\n\"#x\"\n", .None},
+		{[]One{{"x#"}}, .Csv, {no_header = true, comment = '#'}, "x#\n", .None},
+		{[]One{{"#x"}}, .Plain, {comment = '#'}, "", .Unwritable},
+		{[]One{{"\tx"}}, .Tsv, {no_header = true, delimiter = ';', comment = '\t'}, "\\tx\n", .None},
+		{[]One{{"\xEF\xBB\xBFx"}}, .Csv, {no_header = true}, "\"\xEF\xBB\xBFx\"\n", .None},
+		{[]One{{"\xEF\xBB\xBFx"}}, .Tsv, {no_header = true}, "", .Unwritable},
+		{[]One{{"a"}, {"\xEF\xBB\xBFx"}}, .Csv, {no_header = true}, "a\n\xEF\xBB\xBFx\n", .None},
+		{[]Num{{1}}, .Csv, {no_header = true, delimiter = '1'}, "\"1\"\n", .None},
+		{[]Num{{1}}, .Plain, {delimiter = '1'}, "", .Unwritable},
+		{[]Num{{12}}, .Csv, {no_header = true, comment = '1'}, "\"12\"\n", .None},
+		{[]One{}, .Csv, {delimiter = '"'}, "", .Bad_Option},
+		{[]One{{"\xff"}}, .Csv, {}, "", .Invalid_Utf8},
+		{[]Float{{max(f64) * 2}}, .Csv, {}, "", .Non_Finite},
+	})
+	got, err := dsv.marshal([]One{{long}}, .Csv, {no_header = true}, write = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, len(got), 2 + 700 * 4 + 1)
 }
 
+// A refusal names the row and the field it stopped at.
 @(test)
-tsv_escapes_and_plain_refuses :: proc(t: ^testing.T) {
-	One :: struct {s: string}
-	expect_text(t, []One{{"a\tb\nc\\d\x00"}}, .Tsv, {no_header = true}, "a\\tb\\nc\\\\d\\0\n")
-	expect_text(t, []One{{"a\\b\x00"}}, .Plain, {no_header = true}, "a\\b\x00\n")
-	expect_refused(t, []One{{"a,b"}}, .Plain, {}, .Unwritable)
-	expect_refused(t, []One{{"a\nb"}}, .Plain, {}, .Unwritable)
-	expect_refused(t, []One{{"a;b"}}, .Tsv, {delimiter = ';'}, .Unwritable)
-	expect_text(t, []One{{"a\tb"}}, .Tsv, {no_header = true, delimiter = ';'}, "a\tb\n")
-}
-
-@(test)
-empty_cells_follow_the_spec :: proc(t: ^testing.T) {
-	Pair :: struct {a: string, b: string}
-	Opt :: struct {s: Maybe(string)}
-	expect_text(t, []Pair{{"", "x"}}, .Tsv, {no_header = true}, "\tx\n")
-	expect_refused(t, []Opt{{""}}, .Tsv, {}, .Unwritable)
-	expect_text(t, []Opt{{""}}, .Csv, {no_header = true}, "\"\"\n")
-	err := expect_refused(t, []Opt{{}}, .Csv, {no_header = true}, .Unwritable)
+refusals_name_their_steps :: proc(t: ^testing.T) {
+	_, err := dsv.marshal([]Opt{{}}, .Csv, {no_header = true}, write = {}, allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unwritable)
 	testing.expect_value(t, err.n_steps, u8(1))
-}
-
-@(test)
-comment_and_bom_guards :: proc(t: ^testing.T) {
-	One :: struct {s: string}
-	expect_text(t, []One{{"#x"}}, .Csv, {no_header = true, comment = '#'}, "\"#x\"\n")
-	expect_text(t, []One{{"a"}, {"#x"}}, .Csv, {no_header = true, comment = '#'}, "a\n\"#x\"\n")
-	expect_text(t, []One{{"x#"}}, .Csv, {no_header = true, comment = '#'}, "x#\n")
-	expect_refused(t, []One{{"#x"}}, .Plain, {comment = '#'}, .Unwritable)
-	expect_text(t, []One{{"\tx"}}, .Tsv, {no_header = true, delimiter = ';', comment = '\t'}, "\\tx\n")
-	expect_text(t, []One{{"\xEF\xBB\xBFx"}}, .Csv, {no_header = true}, "\"\xEF\xBB\xBFx\"\n")
-	expect_refused(t, []One{{"\xEF\xBB\xBFx"}}, .Tsv, {no_header = true}, .Unwritable)
-	expect_text(t, []One{{"a"}, {"\xEF\xBB\xBFx"}}, .Csv, {no_header = true}, "a\n\xEF\xBB\xBFx\n")
-	Num :: struct {n: int}
-	expect_text(t, []Num{{1}}, .Csv, {no_header = true, delimiter = '1'}, "\"1\"\n")
-	expect_refused(t, []Num{{1}}, .Plain, {delimiter = '1'}, .Unwritable)
-	expect_text(t, []Num{{12}}, .Csv, {no_header = true, comment = '1'}, "\"12\"\n")
-}
-
-@(test)
-bad_layouts_and_values_are_refused :: proc(t: ^testing.T) {
-	One :: struct {s: string}
-	expect_refused(t, []One{}, .Csv, {delimiter = '"'}, .Bad_Option)
-	expect_refused(t, []One{{"\xff"}}, .Csv, {}, .Bad_Utf8)
-	Float :: struct {f: f64}
-	expect_refused(t, []Float{{max(f64) * 2}}, .Csv, {}, .Non_Finite)
-	expect_refused(t, [][][]int{}, .Csv, {}, .Unsupported)
-	// A list of cells is one row.
-	expect_text(t, []int{1, 2}, .Csv, {}, "1,2\n")
-	Nested :: struct {a: []int}
-	expect_refused(t, []Nested{}, .Csv, {}, .Unsupported)
-	err := expect_refused(t, []Float{{1}, {max(f64) * 2}}, .Csv, {}, .Non_Finite)
+	_, err = dsv.marshal([]Float{{1}, {max(f64) * 2}}, .Csv, {}, write = {}, allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Non_Finite)
 	testing.expect_value(t, err.n_steps, u8(2))
 	testing.expect_value(t, err.steps[0], core.Step(core.Index(1)))
 	testing.expect_value(t, err.steps[1], core.Step(core.Name("f")))
-}
-
-@(test)
-list_and_map_rows_write :: proc(t: ^testing.T) {
-	expect_text(t, [][]int{{1, 2}, {3}}, .Csv, {}, "1,2\n3\n")
-	rows := make([]map[string]int, 2, context.temp_allocator)
-	rows[0] = make(map[string]int, context.temp_allocator)
-	rows[1] = make(map[string]int, context.temp_allocator)
-	rows[0]["b"], rows[0]["a"], rows[1]["c"] = 1, 2, 3
-	expect_text(t, rows, .Csv, {}, "a,b,c\n2,1,\n,,3\n")
-	empty := make([]map[string]string, 1, context.temp_allocator)
-	empty[0] = make(map[string]string, context.temp_allocator)
-	empty[0]["k"] = ""
-	expect_refused(t, empty, .Tsv, {}, .Unwritable)
-	expect_refused(t, [][]int{{}}, .Csv, {}, .Unwritable)
+	// A list row of another width than the first, which a read without `.Ragged` refuses.
+	_, err = dsv.marshal([][]string{{"a", "b"}, {"c", "d"}, {"e"}}, .Csv, {}, write = {}, allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Wrong_Length)
+	testing.expect_value(t, err.n_steps, u8(1))
+	testing.expect_value(t, err.steps[0], core.Step(core.Index(2)))
+	plan, _ := dsv.plan_make([]string, .Csv, allocator = context.temp_allocator)
+	_, err = records.marshal([][]string{{"a"}, {"b", "c"}}, &plan, dsv.as(.Csv), allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Wrong_Length)
+	ragged, _ := dsv.plan_make([]string, .Csv, {tolerate = {.Ragged}}, allocator = context.temp_allocator)
+	text, rerr := records.marshal([][]string{{"a"}, {"b", "c"}}, &ragged, dsv.as(.Csv, {tolerate = {.Ragged}}), allocator = context.temp_allocator)
+	testing.expect_value(t, rerr.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, string(text), "a\nb,c\n")
 }
 
 Hooked :: distinct i32
@@ -157,11 +162,10 @@ hook_stand_ins_are_cells :: proc(t: ^testing.T) {
 	hooks := []typed.Type_Hook{{type = Hooked, write = proc(v: rawptr, _: runtime.Allocator) -> (any, core.Typed_Error_Kind) {
 		return (^i32)(v)^, .None
 	}}}
-	plan, err := dsv.plan_make([]Row, .Csv, {}, {hooks = hooks}, context.temp_allocator)
+	plan, err := dsv.plan_make([]Row, .Csv, {}, plan = {hooks = hooks}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	defer typed.plan_destroy(&plan)
-	rows := []Row{{h = 5, s = Hooked(6)}}
-	got, werr := write.marshal(rows, &plan, {}, context.temp_allocator)
+	got, werr := write.marshal([]Row{{h = 5, s = Hooked(6)}}, &plan, {}, context.temp_allocator)
 	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(got), "h,s\n5,6\n")
 }
@@ -173,7 +177,7 @@ stream_output_matches_buffer :: proc(t: ^testing.T) {
 	for &r, i in rows {
 		r = {i, "a,b"}
 	}
-	want, _ := dsv.marshal(rows, .Csv, {}, {}, context.temp_allocator)
+	want, _ := dsv.marshal(rows, .Csv, {}, write = {}, allocator = context.temp_allocator)
 	b: strings.Builder
 	strings.builder_init(&b, context.temp_allocator)
 	plan, _ := dsv.plan_make([]Row, .Csv, allocator = context.temp_allocator)
@@ -197,17 +201,17 @@ written_text_reads_back :: proc(t: ^testing.T) {
 }
 
 round_trip :: proc(t: ^testing.T, rows: []Write_Row, spec: dsv.Spec, layout: dsv.Options, loc := #caller_location) {
-	text, err := dsv.marshal(rows, spec, layout, {}, context.temp_allocator)
+	text, err := dsv.marshal(rows, spec, layout, write = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None, loc)
 	back: []Write_Row
 	var_err: core.Typed_Error
 	switch spec {
 	case .Csv:
-		var_err = dsv.unmarshal(text, .Csv, &back, {}, layout, context.temp_allocator)
+		var_err = dsv.unmarshal(text, .Csv, &back, read = {}, opts = layout, allocator = context.temp_allocator)
 	case .Tsv:
-		var_err = dsv.unmarshal(text, .Tsv, &back, {}, layout, context.temp_allocator)
+		var_err = dsv.unmarshal(text, .Tsv, &back, read = {}, opts = layout, allocator = context.temp_allocator)
 	case .Plain:
-		var_err = dsv.unmarshal(text, .Plain, &back, {}, layout, context.temp_allocator)
+		var_err = dsv.unmarshal(text, .Plain, &back, read = {}, opts = layout, allocator = context.temp_allocator)
 	}
 	testing.expect_value(t, var_err.kind, core.Typed_Error_Kind.None, loc)
 	testing.expect_value(t, len(back), len(rows), loc)
@@ -221,65 +225,118 @@ round_trip :: proc(t: ^testing.T, rows: []Write_Row, spec: dsv.Spec, layout: dsv
 	}
 }
 
-@(test)
-dsv_document_writes_in_its_spec :: proc(t: ^testing.T) {
-	src := "# c\nid;name\n1;\"a;b\"\n2;\n"
-	doc, err := dsv.build(transmute([]u8)src, .Csv, {delimiter = ';', comment = '#'}, false, context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	got, _, werr := core.write(&doc, {}, allocator = context.temp_allocator)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(got), "id;name\n1;\"a;b\"\n2;\n")
-	tsv, _, terr := core.write(&doc, {}, dsv.as(.Tsv), allocator = context.temp_allocator)
-	testing.expect_value(t, terr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(tsv), "id\tname\n1\ta;b\n2\t\n")
+Source :: enum {
+	Csv,
+	Json,
+	Json5,
+	Jsonc,
 }
 
-// A wide record's columns past the header's last are named by position when the document is written.
-@(test)
-wide_dsv_document_writes_its_positional_names :: proc(t: ^testing.T) {
-	doc, err := dsv.build(transmute([]u8)string("a,b\n1,2,3\n4\n"), .Csv, {tolerate = {.Ragged}}, false, context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	got, _, werr := core.write(&doc, {}, allocator = context.temp_allocator)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(got), "a,b,3\n1,2,3\n4,,\n")
-	js, _, jerr := core.write(&doc, {}, json.as(.Json), allocator = context.temp_allocator)
-	testing.expect_value(t, jerr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(js), `[{"a":"1","b":"2","3":"3"},{"a":"4"}]`)
+Doc_Case :: struct {
+	src:     string,
+	from:    Source,
+	read:    dsv.Options, // of a CSV source
+	opts:    core.Write_Options,
+	as:      Maybe(core.As), // the spec written, the source's own when nil
+	want:    string,
+	kind:    core.Typed_Error_Kind,
+	dropped: int,
 }
 
-@(test)
-json_records_write_as_a_table :: proc(t: ^testing.T) {
-	src := `[{"a":1,"b":"x,y"},{"b":null,"c":true,"a":2.50}]`
-	doc, err := json.build(transmute([]u8)src, .Json, {}, false, context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	got, _, werr := core.write(&doc, {}, dsv.as(.Csv), allocator = context.temp_allocator)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(got), "a,b,c\n1,\"x,y\",\n2.50,,true\n")
-	rows := `[[1,"a"],[2,"b"]]`
-	doc2, _ := json.build(transmute([]u8)rows, .Json, {}, false, context.temp_allocator)
-	got, _, werr = core.write(&doc2, {}, dsv.as(.Tsv), allocator = context.temp_allocator)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(got), "1\ta\n2\tb\n")
-	nested := `[{"a":[1]}]`
-	doc3, _ := json.build(transmute([]u8)nested, .Json, {}, false, context.temp_allocator)
-	_, _, werr = core.write(&doc3, {}, dsv.as(.Csv), allocator = context.temp_allocator)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.Unsupported)
-	scalar := `[1]`
-	doc4, _ := json.build(transmute([]u8)scalar, .Json, {}, false, context.temp_allocator)
-	_, _, werr = core.write(&doc4, {}, dsv.as(.Csv), allocator = context.temp_allocator)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.Unsupported)
+build_source :: proc(c: Doc_Case) -> (core.Document, core.Document_Error) {
+	src := transmute([]u8)c.src
+	switch c.from {
+	case .Csv:   return dsv.build(src, .Csv, c.read, .Last, context.temp_allocator)
+	case .Json:  return json.build(src, .Json, {}, .Last, context.temp_allocator)
+	case .Json5: return json.build(src, .Json5, {}, .Last, context.temp_allocator)
+	case .Jsonc: return json.build(src, .Jsonc, {}, .Last, context.temp_allocator)
+	}
+	return {}, {kind = .Bad_Value}
 }
 
-@(private)
+// A document writes in its own spec or another's: a table takes the union of its records' keys in source order, or sorted,
+// a repeated key keeps its last value and counts the earlier ones as dropped, a wide record's columns past the header's
+// last are named by position, a JSON5 number is written as JSON writes it, and a nested or scalar value or a non-finite
+// number is refused. A text keeps the line end its first row was read with, and a line end in a quoted cell or a comment
+// line is no row's.
+@(test)
+documents_write :: proc(t: ^testing.T) {
+	ragged := dsv.Options{tolerate = {.Ragged}}
+	crlf_cases := []Doc_Case{
+		{src = "a,b\r\n1,2\r\n", want = "a,b\r\n1,2\r\n"},
+		{src = "a,b\n1,2\n", want = "a,b\n1,2\n"},
+		{src = "a,b\r\n", want = "a,b\r\n"},
+		{src = "\"a\r\nb\",c\n1,2\n", want = "\"a\r\nb\",c\n1,2\n"},
+		{src = "a,b\n\"x\r\ny\",2\n", want = "a,b\n\"x\r\ny\",2\n"},
+		{src = "1,2\r\n", read = {no_header = true}, want = "1,2\r\n"},
+		{src = "\"x\r\ny\",2\n3,4\n", read = {no_header = true}, want = "\"x\r\ny\",2\n3,4\n"},
+		{src = "a,b\n", read = {no_header = true}, want = "a,b\n"},
+		{src = "a,b\n", want = "a,b\n"},
+		{src = "#c\r\na,b\n1,2\n", read = {comment = '#'}, want = "#c\na,b\n1,2\n"},
+		{src = "a\r\n1,2\r\n", read = ragged, want = "a,2\r\n1,2\r\n"},
+	}
+	cases := []Doc_Case{
+		{src = "# c\nid;name\n1;\"a;b\"\n2;\n", read = {delimiter = ';', comment = '#'}, want = "# c\nid;name\n1;\"a;b\"\n2;\n"},
+		{src = "# c\nid;name\n1;\"a;b\"\n2;\n", read = {delimiter = ';', comment = '#'}, as = dsv.as(.Tsv), want = "id\tname\n1\ta;b\n2\t\n", dropped = 1},
+		{src = "a,b\n1,2,3\n4\n", read = ragged, want = "a,b,3\n1,2,3\n4,,\n"},
+		{src = "a,b\n1,2,3\n4\n", read = ragged, as = json.as(.Json), want = `[{"a":"1","b":"2","3":"3"},{"a":"4"}]`},
+		{src = "b,a,c,a\n1,2,3,4\n5,6\n", read = ragged, opts = {sort_keys = true}, want = "a,a,b,c\n2,4,1,3\n6,,5,\n"},
+		{src = `[{"b":1,"a":2,"c":3},{"c":4,"a":5}]`, from = .Json, opts = {sort_keys = true}, as = dsv.as(.Csv), want = "a,b,c\n2,1,3\n5,,4\n"},
+		{src = `[{"b":1,"a":2,"c":3},{"c":4,"a":5}]`, from = .Json, as = dsv.as(.Csv), want = "b,a,c\n1,2,3\n,5,4\n"},
+		{src = `[{"a":1,"b":"x,y"},{"b":null,"c":true,"a":2.50}]`, from = .Json, as = dsv.as(.Csv), want = "a,b,c\n1,\"x,y\",\n2.50,,true\n"},
+		{src = `[[1,"a"],[2,"b"]]`, from = .Json, as = dsv.as(.Tsv), want = "1\ta\n2\tb\n"},
+		{src = `[{"a":[1]}]`, from = .Json, as = dsv.as(.Csv), kind = .Unsupported},
+		{src = "[/* c */ {\"a\":[1]}]", from = .Jsonc, as = dsv.as(.Csv), kind = .Unsupported},
+		{src = `[{a:-0x10,b:+1,c:.5,d:5.,e:0X1F,f:1.50}]`, from = .Json5, as = dsv.as(.Csv, {comment = '-'}), want = "a,b,c,d,e,f\n\"-16\",1,0.5,5,31,1.50\n"},
+		{src = `[{a:-0x10,b:+1,c:.5,d:5.,e:0X1F,f:1.50}]`, from = .Json5, as = dsv.as(.Csv, {delimiter = '.'}), want = "a.b.c.d.e.f\n-16.1.\"0.5\".5.31.\"1.50\"\n"},
+		{src = `[[Infinity]]`, from = .Json5, as = dsv.as(.Csv), kind = .Non_Finite},
+		{src = `[1]`, from = .Json, as = dsv.as(.Csv), kind = .Unsupported},
+		{src = `[{"a":1,"a":2,"a":3,"b":4},{"a":5}]`, from = .Json, as = dsv.as(.Csv), want = "a,b\n3,4\n5,\n", dropped = 2},
+		{src = "a,b\n1,\"x,y\"\n", as = dsv.as(.Tsv), want = "a\tb\n1\tx,y\n"},
+		{src = "# c\na\n1\n", read = {comment = '#'}, want = "# c\na\n1\n"},
+	}
+	// A document's comments are written where an edit writes them, with the output's comment byte, and dropped and
+	// counted where the output has no place for them or no comment byte.
+	commented := "#top\na,b\n#one\n1,2\n#two\n3,4\n#foot\n"
+	comment_cases := []Doc_Case{
+		{src = commented, read = {comment = '#'}, want = commented},
+		{src = commented, read = {comment = '#'}, as = dsv.as(.Tsv, {comment = ';'}), want = ";top\na\tb\n;one\n1\t2\n;two\n3\t4\n;foot\n"},
+		{src = commented, read = {comment = '#'}, as = dsv.as(.Csv), want = "a,b\n1,2\n3,4\n", dropped = 4},
+		{src = commented, read = {comment = '#'}, as = dsv.as(.Csv, {comment = '#', no_header = true}), want = "#one\n1,2\n#two\n3,4\n#foot\n", dropped = 1},
+		{src = "#top\na,b\n", read = {comment = '#'}, want = "a,b\n#top\n"},
+		{src = "1\n#two\n2\n#foot\n", read = {comment = '#', no_header = true}, want = "1\n#two\n2\n#foot\n"},
+		{src = "// top\n[ // one\n {\"a\": 1}, /* inline */\n {\"a\": 2 /* cell */}\n// foot\n]\n", from = .Jsonc, as = dsv.as(.Csv, {comment = '#'}), want = "# top\na\n# one\n1\n2\n# foot\n", dropped = 2},
+		{src = "[/* one\ntwo */ {\"a\": 1}]", from = .Jsonc, as = dsv.as(.Csv, {comment = '#'}), want = "a\n1\n", dropped = 1},
+	}
+	// A string cell an inferring read would take for another kind is quoted, and a cell it infers keeps its text.
+	inferred := "a,b,c,d\n1,\"2\",true,\"false\"\n,x,1e2,\"\"\n"
+	infer_cases := []Doc_Case{
+		{src = inferred, read = {infer = true}, want = inferred},
+		{src = inferred, read = {infer = true}, as = dsv.as(.Csv), want = "a,b,c,d\n1,2,true,false\n,x,1e2,\"\"\n"},
+		{src = inferred, as = dsv.as(.Csv, {infer = true}), want = "a,b,c,d\n\"1\",\"2\",\"true\",\"false\"\n,x,\"1e2\",\"\"\n"},
+		{src = "a,b\n1,x\n", as = dsv.as(.Tsv, {infer = true}), kind = .Unwritable},
+		{src = "[{\"a\": \"2\", \"b\": 2, \"c\": \"true\", \"d\": false}]", from = .Json, as = dsv.as(.Csv, {infer = true}), want = "a,b,c,d\n\"2\",2,\"true\",false\n"},
+	}
+	for list in ([4][]Doc_Case{crlf_cases, cases, comment_cases, infer_cases}) {
+		for c in list {
+			doc, err := build_source(c)
+			if !testing.expectf(t, err.kind == .None, "%q: %v", c.src, err) {
+				return
+			}
+			text, dropped, werr := core.write(&doc, c.opts, c.as, allocator = context.temp_allocator)
+			testing.expectf(t, werr.kind == c.kind && string(text) == c.want && dropped == c.dropped, "%q: %v %q with %d dropped, want %v %q with %d", c.src, werr.kind, text, dropped, c.kind, c.want, c.dropped)
+		}
+	}
+}
+
 Marshal_Try :: struct {
 	value: any,
 	opts:  core.Write_Options,
 }
 
-@(private)
 marshal_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
 	m := (^Marshal_Try)(data)
-	text, err := dsv.marshal(m.value, .Csv, {}, m.opts, allocator)
+	text, err := dsv.marshal(m.value, .Csv, {}, write = m.opts, allocator = allocator)
 	return text, err.kind
 }
 
@@ -298,13 +355,12 @@ marshal_under_failing_allocators :: proc(t: ^testing.T) {
 	keyed := []map[string]string{first, second}
 	for c in ([?]Marshal_Try{{rows, {}}, {rows, {sort_keys = true}}, {keyed, {}}}) {
 		c := c
-		want, err := dsv.marshal(c.value, .Csv, {}, c.opts, context.temp_allocator)
+		want, err := dsv.marshal(c.value, .Csv, {}, write = c.opts, allocator = context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		walktest.sweep_write(t, marshal_try, &c, string(want))
 	}
 }
 
-@(private)
 document_try :: proc(data: rawptr, allocator: runtime.Allocator) -> ([]u8, core.Typed_Error_Kind) {
 	text, _, err := core.write((^core.Document)(data), {}, dsv.as(.Csv), allocator = allocator)
 	return text, err.kind
@@ -330,10 +386,9 @@ document_under_failing_allocators :: proc(t: ^testing.T) {
 // A write that succeeds leaves nothing on the temporary allocator, which a caller may never free.
 @(test)
 write_keeps_off_the_temporary_allocator :: proc(t: ^testing.T) {
-	rows := []Sweep_Row{{1, "a"}}
 	f := walktest.Failing_Alloc{inner = context.temp_allocator, fail_at = -1}
 	context.temp_allocator = walktest.failing_allocator(&f)
-	text, err := dsv.marshal(rows, allocator = context.allocator)
+	text, err := dsv.marshal([]Sweep_Row{{1, "a"}}, allocator = context.allocator)
 	defer delete(text)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	doc, derr := json.build(transmute([]u8)string(`[{"a":1}]`), .Json)
@@ -345,25 +400,6 @@ write_keeps_off_the_temporary_allocator :: proc(t: ^testing.T) {
 	testing.expect_value(t, f.n, 0)
 }
 
-// A headed text with no record keeps its header through `core.write`, and an empty table of no header stays empty.
-@(test)
-write_document_header_alone :: proc(t: ^testing.T) {
-	doc, err := dsv.build(transmute([]u8)string("a,b\n"), .Csv)
-	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	text, _, werr := core.write(&doc)
-	defer delete(text)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(text), "a,b\n")
-	bare, berr := dsv.build(transmute([]u8)string("a,b\n"), .Csv, {no_header = true})
-	defer core.destroy(&bare)
-	testing.expect_value(t, berr.kind, core.Document_Error_Kind.None)
-	again, _, aerr := core.write(&bare)
-	defer delete(again)
-	testing.expect_value(t, aerr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(again), "a,b\n")
-}
-
 // An empty column name alone in a header would be a blank line where a spec has no spelling for it, and the first record
 // would read as the header.
 @(test)
@@ -372,48 +408,15 @@ header_of_one_empty_name :: proc(t: ^testing.T) {
 	row[""] = "x"
 	rows := []map[string]string{row}
 	for spec in ([?]dsv.Spec{.Tsv, .Plain}) {
-		_, err := dsv.marshal(rows, spec, {}, {}, context.temp_allocator)
+		_, err := dsv.marshal(rows, spec, {}, write = {}, allocator = context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unwritable)
 	}
-	text, err := dsv.marshal(rows, .Csv, {}, {}, context.temp_allocator)
+	text, err := dsv.marshal(rows, .Csv, {}, write = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	doc, derr := dsv.build(text, .Csv)
 	defer core.destroy(&doc)
 	testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
 	testing.expect_value(t, core.length(&doc, core.ROOT), 1)
-}
-
-// A repeated key keeps its last value, and each earlier one counts as dropped.
-@(test)
-repeated_key_counts_as_dropped :: proc(t: ^testing.T) {
-	doc, err := json.build(transmute([]u8)string(`[{"a":1,"a":2,"a":3,"b":4},{"a":5}]`), .Json)
-	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	text, dropped, werr := core.write(&doc, as = dsv.as(.Csv), allocator = context.temp_allocator)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(text), "a,b\n3,4\n5,\n")
-	testing.expect_value(t, dropped, 2)
-}
-
-// A write of a document keeps the line end its text was read with.
-@(test)
-write_document_keeps_crlf :: proc(t: ^testing.T) {
-	for src in ([?]string{"a,b\r\n1,2\r\n", "a,b\n1,2\n", "a,b\r\n"}) {
-		doc, err := dsv.build(transmute([]u8)src, .Csv)
-		defer core.destroy(&doc)
-		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-		text, _, werr := core.write(&doc)
-		defer delete(text)
-		testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-		testing.expect_value(t, string(text), src)
-	}
-	doc, err := dsv.build(transmute([]u8)string("1,2\r\n"), .Csv, {no_header = true})
-	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	text, _, werr := core.write(&doc)
-	defer delete(text)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
-	testing.expect_value(t, string(text), "1,2\r\n")
 }
 
 // A write that fails counts nothing, whether the document refuses or the stream does.
@@ -422,23 +425,16 @@ failed_write_counts_nothing :: proc(t: ^testing.T) {
 	doc, err := dsv.build(transmute([]u8)string("# c\na\n1\n"), .Csv, {comment = '#'})
 	defer core.destroy(&doc)
 	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
-	nested, nerr := json.build(transmute([]u8)string("[/* c */ {\"a\":[1]}]"), .Jsonc)
-	defer core.destroy(&nested)
-	testing.expect_value(t, nerr.kind, core.Document_Error_Kind.None)
-	_, dropped, werr := core.write(&nested, as = dsv.as(.Csv), allocator = context.temp_allocator)
-	testing.expect_value(t, werr.kind, core.Typed_Error_Kind.Unsupported)
-	testing.expect_value(t, dropped, 0)
-	counted, kept, kerr := core.write(&doc, allocator = context.temp_allocator)
+	counted, dropped, kerr := core.write(&doc, as = dsv.as(.Csv), allocator = context.temp_allocator)
 	testing.expect_value(t, kerr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(counted), "a\n1\n")
-	testing.expect_value(t, kept, 1)
+	testing.expect_value(t, dropped, 1)
 	closed := io.Stream{procedure = refusing_stream}
-	lost, serr := core.write_stream(closed, &doc)
+	lost, serr := core.write_stream(closed, &doc, as = dsv.as(.Csv))
 	testing.expect_value(t, serr.kind, core.Typed_Error_Kind.Write_Failed)
 	testing.expect_value(t, lost, 0)
 }
 
-@(private)
 refusing_stream :: proc(data: rawptr, mode: io.Stream_Mode, p: []u8, offset: i64, whence: io.Seek_From) -> (i64, io.Error) {
 	return 0, .Permission_Denied if mode == .Write else .Unknown
 }
@@ -482,8 +478,8 @@ cells_at_the_end_of_a_page :: proc(t: ^testing.T) {
 			fenced := string(walktest.fence_copy(&fence, body))
 			plain := strings.clone(string(body), context.temp_allocator)
 			for spec in ([?]dsv.Spec{.Csv, .Tsv, .Plain}) {
-				want, werr := dsv.marshal([][]string{{plain}}, spec, {}, {}, context.temp_allocator)
-				got, gerr := dsv.marshal([][]string{{fenced}}, spec, {}, {}, context.temp_allocator)
+				want, werr := dsv.marshal([][]string{{plain}}, spec, {}, write = {}, allocator = context.temp_allocator)
+				got, gerr := dsv.marshal([][]string{{fenced}}, spec, {}, write = {}, allocator = context.temp_allocator)
 				testing.expect_value(t, gerr.kind, werr.kind)
 				testing.expect_value(t, string(got), string(want))
 			}

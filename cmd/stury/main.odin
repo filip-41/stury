@@ -5,6 +5,7 @@ package main
 //	stury [OPTIONS] [FILTER] [FILE...]
 //	stury check [--from format|--seq] [--max-depth n] [FILE...]
 //	stury fmt [--from format] [--to format] [--in-place|--check] [--indent n|--tab] [--max-depth n] [FILE...]
+//	stury edit [--from format|--seq] [--in-place|--check] FILTER [FILE...]
 //
 // FILTER is a jq program, and the output is what jq 1.8 prints for it. The options are listed in HELP_OPTIONS
 // (usage.odin). With no FILE it reads stdin, and with no FILTER it runs `.` unless stdin and stdout are both a
@@ -24,6 +25,7 @@ package main
 //	explain.odin                     --explain's report of the route and the run
 //	check.odin                       `stury check`, which judges the inputs
 //	fmt.odin                         `stury fmt`, which writes the inputs back in the printer's layout
+//	edit.odin                        `stury edit`, which splices the filter's value into the input's bytes
 //	filter.odin                      the jq interpreter over each input
 //	print.odin                       output as jq prints it, and what it comes to (`Output`)
 //	message/                         the text of every message, built from a format and its values (package `message`)
@@ -34,6 +36,7 @@ package main
 
 import "core:os"
 import "core:slice"
+import "core:strings"
 import host "../../host"
 import "jq"
 import "message"
@@ -74,17 +77,18 @@ main :: proc() {
 	set_colors(&run, cli)
 	run.route.on = run.opts.explain
 	o := &run.opts
+	if cli.editing {
+		refuse_edit(o)
+	}
 	refuse_format_clashes(o, &cli)
 	validating := cli.validating
 	switch {
-	case (o.in_place || o.check) && !cli.formatting:
-		usage_error("%s is fmt's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
-	case o.stream && validating:
-		usage_error("--stream makes jq's events of each input; check only judges it")
-	case o.explain && validating:
-		usage_error("--explain reports a filter's route: check has no filter")
-	case o.raw_input && validating:
-		usage_error("check reads JSON texts, not -R's lines")
+	case (o.in_place || o.check) && !cli.formatting && !cli.editing:
+		usage_error("%s is fmt's and edit's: a filter run has no use for it", "--in-place" if o.in_place else "--check")
+	case validating || cli.formatting || cli.editing:
+		if flag := command_refused_option(o, &cli); flag != "" {
+			usage_error("%s has no use with %s: %s", flag, command_name(&cli), "it runs no filter and prints nothing" if validating else "it runs no filter and writes each input's own format" if cli.formatting else "it writes each input back in its own bytes")
+		}
 	}
 	if o.follow {
 		refuse_follow(o, &cli)
@@ -122,8 +126,10 @@ main :: proc() {
 	explain_filter(&run)
 	run.home_module = jq.home_module(&run.ip)
 	ready_interpreter(&run)
+	if cli.editing {
+		edit_main(&run, &cli)
+	}
 	choose_route(&run, text)
-	explain_route(&run)
 	ins := Inputs {
 		source  = input_source(o, cli.json_reading),
 		parsed  = {line = 1},
@@ -131,6 +137,7 @@ main :: proc() {
 		slurp   = o.slurp,
 		run     = &run,
 	}
+	explain_route(&run, ins.framing)
 	if o.follow {
 		catch_stop()
 	}
@@ -160,13 +167,32 @@ compile_errors :: proc(text: string, errors: []jq.Compile_Error) {
 	for e in errors {
 		message.write_stderr("stury: error: %s\n", jq.locate(text, e))
 	}
+	if command := near_command(text); command != "" {
+		message.write_stderr("stury: %s is not a command: did you mean stury %s?\n", text, command)
+	}
 	exit_compile(len(errors))
+}
+
+// The command a filter of one word is a letter or two from, as a mistyped `stury chek FILE` gives, or "".
+@(private = "file")
+near_command :: proc(text: string) -> string {
+	for c in transmute([]byte)text {
+		if c < 'a' || c > 'z' {
+			return ""
+		}
+	}
+	for command in ([]string{"check", "fmt", "edit"}) {
+		if d := strings.levenshtein_distance(text, command, context.temp_allocator); d <= (len(command) - 1) / 2 {
+			return command
+		}
+	}
+	return ""
 }
 
 // jq's count of compile errors, then exit as it does.
 exit_compile :: proc(count: int) -> ! {
 	message.write_stderr("stury: %d compile error%s\n", count, "" if count == 1 else "s")
-	os.exit(EXIT_COMPILE)
+	exit_closing_stdout(EXIT_COMPILE)
 }
 
 // Parse and check the filter and bind its globals, before the interpreter first runs.
@@ -222,5 +248,10 @@ finish :: proc(run: ^Run, code: int) -> ! {
 	table_end(&run.output)
 	flush_some(&run.output, force = true)
 	explain_end(run)
-	os.exit(code)
+	end_if_stopped()
+	// fmt --check and --in-place write nothing to stdout, and do not fail on one that is closed, as check does not.
+	if run.output.held {
+		os.exit(code)
+	}
+	exit_closing_stdout(code)
 }

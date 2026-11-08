@@ -12,6 +12,12 @@ eval_bind :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env
 	if out == ip.printer && !track && !ip.scope.on {
 		return eval_scoped_outputs(ip, n.a, input, env, &s)
 	}
+	if out.emit == last_emit && !track && keeps_outputs(out) {
+		return eval_kept_outputs(ip, n.a, input, env, &s, (^Last_Sink)(out))
+	}
+	if !track && sources_outputs(out) {
+		return eval_sourced_outputs(ip, n.a, input, env, &s, (^Bind_Sink)(out))
+	}
 	return eval_commas(ip, n.a, input, env, false, &s)
 }
 
@@ -30,9 +36,7 @@ bind_head :: #force_no_inline proc(ip: ^Interp, n: ^Node, input: ^Item, env: ^^E
 	pats := n.patterns
 	scope, keys := env^, env^
 	if len(pats) > 1 {
-		for p in pats {
-			scope = bind_nulls(ip, p, scope)
-		}
+		scope = bind_nulls(ip, pats, scope)
 		keys = nil
 		x := Bind_Sink{ip = ip, n = n, input = input^, track = track, out = out}
 		for p in pats[:len(pats) - 1] {
@@ -105,10 +109,7 @@ bind_alternatives :: proc(x: ^Bind_Sink, v: Value, body: proc(x: ^Bind_Sink, e: 
 		b := Binder{ip = x.ip, keys = x.env, base = x.env, x = x, body = body}
 		return bind_each(&b, &Pending{p = pats[0], v = v}, x.env, st)
 	}
-	base := x.env
-	for p in pats {
-		base = bind_nulls(x.ip, p, base)
-	}
+	base := bind_nulls(x.ip, pats, x.env)
 	sig: Signal
 	for p in pats {
 		b := Binder{ip = x.ip, x = x, body = body}
@@ -136,26 +137,15 @@ release_scopes :: proc(ip: ^Interp, env: ^Env, upto: ^Env) {
 	}
 }
 
-bind_nulls :: proc(ip: ^Interp, p: ^Pattern, env: ^Env) -> ^Env {
-	e := env
-	switch p.kind {
-	case .Var:
-		e = bind_var(ip, e, p.name, nil)
-	case .Array:
-		for sub in p.elems {
-			e = bind_nulls(ip, sub, e)
-		}
-	case .Object:
-		for m in p.members {
-			if m.var != "" {
-				e = bind_var(ip, e, m.var, nil)
-			}
-			if m.pattern != nil {
-				e = bind_nulls(ip, m.pattern, e)
-			}
-		}
+// The variables of `pats` bound to null over `env`.
+bind_nulls :: proc(ip: ^Interp, pats: []^Pattern, env: ^Env) -> ^Env {
+	Nulls :: struct {
+		ip:  ^Interp,
+		env: ^Env,
 	}
-	return e
+	b := Nulls{ip, env}
+	each_var(pats, &b, proc(name: string, b: ^Nulls) {b.env = bind_var(b.ip, b.env, name, nil)})
+	return b.env
 }
 
 bind_var :: proc(ip: ^Interp, env: ^Env, name: string, v: Value) -> ^Env {
@@ -243,7 +233,7 @@ bound_since :: proc(env, base: ^Env, name: string) -> bool {
 // A pattern's `v[key]`, and the path state after it in `at` (nil if not tracking).
 pattern_index :: proc(ip: ^Interp, v: Value, key: Value, st: ^Path_State, at: ^Path_State) -> (Value, ^Path_State, Signal) {
 	if st != nil && (st.path == &no_path || !identical(v, st.at)) {
-		return nil, nil, fail(ip, "Invalid path expression near attempt to access element %s of %s", brief(key), brief(v))
+		return nil, nil, fail(ip, "Invalid path expression near attempt to access element %s of %s", brief(ip, key), brief(ip, v))
 	}
 	m, sig := index_value(ip, v, key)
 	if sig != .Go || st == nil {

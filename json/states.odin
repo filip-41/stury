@@ -63,10 +63,10 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		return #must_tail st_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	case .Map:
 		if d >> 1 >= w.depth {
-			return fault(w, hs, p, .Too_Deep)
+			return #must_tail st_deepen(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		w.stack[d >> 1] = u8(d & 1)
-		switch emit(w, on, &hs, .Map, .Value, p, p[1:], 0) {
+		switch emit(w, on, &hs, .Object, .Value, p, p[1:], 0) {
 		case .Next:
 		case .Skip:
 			return #must_tail st_skip(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, on)
@@ -78,7 +78,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 		return #must_tail st_open(p[1:], end, (d | 1) + 2, ind, w, hs.a, hs.b, hs.c, on)
 	case .Array:
 		if d >> 1 >= w.depth {
-			return fault(w, hs, p, .Too_Deep)
+			return #must_tail st_deepen(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		w.stack[d >> 1] = u8(d & 1)
 		switch emit(w, on, &hs, .Array, .Value, p, p[1:], 0) {
@@ -98,7 +98,7 @@ st_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 			return #must_tail st_value_spec(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 	}
-	return fault(w, hs, p, .Bad_Char)
+	return #must_tail st_bad_value(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
 // `p` is where an object's key must start, past whitespace. Reads the key, its colon and the value after it.
@@ -110,7 +110,7 @@ st_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^W
 	}
 	if p[0] != '"' {
 		// A comment run, the object's close after a trailing comma, JSON5's own key, or the fault, all out of line, so
-		// this state compiles none of it.
+		// this state compiles none of it. `describe` names the fault's detail.
 		when FEATURES[S] != {} {
 			return #must_tail st_key_spec(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
@@ -374,6 +374,25 @@ st_open :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 	return #must_tail st_value(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
+// `p` is at an open bracket past the depth the walk checks. Raises the check, or faults at the limit, and opens the
+// bracket again in `st_value`.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_deepen :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	if k := deepen(w); k != .None {
+		return fault(w, {s0, s1, s2}, p, k)
+	}
+	return #must_tail st_value(p, end, d, ind, w, s0, s1, s2, on)
+}
+
+// `st_deepen` for an open bracket in a run, opened again in `st_open_run`.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_deepen_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	if k := deepen(w); k != .None {
+		return fault(w, {s0, s1, s2}, p, k)
+	}
+	return #must_tail st_open_run(p, end, d, ind, w, s0, s1, s2, on)
+}
+
 // `p` is at an open bracket right after another. Pushes the whole run of `[` in this state.
 @(private, enable_target_feature = STATE_FEATURES)
 st_open_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
@@ -381,7 +400,7 @@ st_open_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 	p, d := p, d
 	for {
 		if d >> 1 >= w.depth {
-			return fault(w, hs, p, .Too_Deep)
+			return #must_tail st_deepen_run(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 		w.stack[d >> 1] = u8(d & 1)
 		d = (d | 1) + 1
@@ -432,7 +451,7 @@ st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
 		}
-		return ended(w, hs, p)
+		return fault(w, hs, p, .None)
 	}
 	q := indent_fast(p, end, &ind, .Close)
 	if q == nil {
@@ -468,7 +487,7 @@ st_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: 
 			return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 	}
-	return fault(w, hs, q, .Bad_Char)
+	return #must_tail st_bad_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
 // `st_after_ws` is `st_after` where whitespace follows the value.
@@ -498,7 +517,7 @@ st_after_ws :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 			return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 	}
-	return fault(w, hs, q, .Bad_Char)
+	return #must_tail st_bad_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
 // `p` is right after a comma, at whitespace or the text's end.
@@ -543,6 +562,25 @@ st_bad_literal :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u6
 	return fault(w, hs, q, kind, .Literal if kind == .Bad_Char else .None)
 }
 
+// `p` is where a value must start, at a byte that starts none. The fault's detail is chosen here, so the states that
+// send a fault here compile none of that choice.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_bad_value :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	return fault(w, core.Hook_Regs{s0, s1, s2}, p, .Bad_Char, value_detail(p, end, d))
+}
+
+// `st_bad_key` is `st_bad_value` where an object's key must start.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_bad_key :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	return fault(w, core.Hook_Regs{s0, s1, s2}, p, .Bad_Char, key_detail(p, end))
+}
+
+// `st_bad_after` is `st_bad_value` after a value, at a byte that is no comma and no close of its container.
+@(private, cold, enable_target_feature = STATE_FEATURES)
+st_bad_after :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
+	return fault(w, core.Hook_Regs{s0, s1, s2}, p, .Bad_Char, after_detail(p, d))
+}
+
 // `st_value_spec` is `st_value` for a byte that starts no JSON value, in a spec past RFC 8259. It reads a comment run,
 // a close bracket after a trailing comma, one of JSON5's own starts, or faults. A separate state, so `st_value` compiles
 // none of it.
@@ -573,7 +611,7 @@ st_value_spec :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 			return #must_tail st_number5(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 	}
-	return fault(w, hs, p, .Bad_Char)
+	return #must_tail st_bad_value(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
 // `st_key_spec` is `st_key` for a byte that opens no JSON key, in a spec past RFC 8259. It reads a comment run, the
@@ -590,7 +628,7 @@ st_key_spec :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, 
 		return #must_tail st_close(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	}
 	when .Es5 not_in FEATURES[S] {
-		return fault(w, hs, p, .Bad_Char)
+		return #must_tail st_bad_key(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 	} else {
 		q: [^]u8
 		esc, lax: bool
@@ -654,12 +692,16 @@ st_skip :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^
 st_keep :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64, w: ^Walk($S, $H), s0, s1, s2: u64, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> u64 {
 	hs := core.Hook_Regs{s0, s1, s2}
 	when H == build.Scan && .Comments not_in FEATURES[S] {
-		if build.scan_reserve(w.hooks, int(hs.a) + (intrinsics.ptr_sub(end, p) + int(w.depth)) / 2 + 16) {
+		bytes := intrinsics.ptr_sub(end, p)
+		if build.scan_reserve(w.hooks, int(hs.a) + (bytes + int(min(w.limit, u64(bytes)))) / 2 + 16) {
 			// The builder's walk reads the container as a document's root, as `pass_over` does.
 			parent := d >> 1 - 1
 			regs := hs
-			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack[parent:], &regs, w.depth - parent, w.tier, false, w.tolerate, w.finite, nil, 0}
+			v := Walk(S, build.Builder){w.base, &w.hooks.b, w.stack[parent:], &regs, w.depth - parent, w.tier, false, w.tolerate, w.finite, false, nil, 0, w.limit - parent}
 			r := st_open(p, end, 2 | d & 1, ind, &v, hs.a, hs.b, hs.c, build.builder_hook_plain)
+			if v.owned {
+				drop_stack(v.stack)
+			}
 			if hi, f, _ := core.result_of(r, &RULES); f == nil {
 				q := w.base[hi:]
 				if build.scan_kept(w.hooks, int(regs.c)) {
@@ -756,7 +798,7 @@ st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 				return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 			}
 		}
-		return ended(w, hs, p)
+		return fault(w, hs, p, .None)
 	}
 	q := indent_fast(p, end, &ind, .Close)
 	if q == nil {
@@ -797,7 +839,7 @@ st_after_number :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u
 			return #must_tail st_comments_after(p, end, d, ind, w, hs.a, hs.b, hs.c, on)
 		}
 	}
-	return fault(w, hs, q, .Bad_Char)
+	return #must_tail st_bad_after(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
 }
 
 // `p` is at the first byte of an array element, with the comma and the space or indent after it already read. A
@@ -829,6 +871,12 @@ st_number_run :: #force_no_inline proc "contextless" (p, end: [^]u8, d, ind: u64
 		// `q[1]` and `q[2]` are read only where three bytes remain, so a run that ends at the text's last element passes
 		// the separator to `st_after`.
 		if intrinsics.ptr_sub(end, q) <= 2 || q[0] != ',' {
+			// A close where `,[` follows starts what may be a run of arrays of numbers.
+			when H == core.No_Hooks || H == build.Builder || H == build.Count {
+				if intrinsics.ptr_sub(end, q) > 2 && q[2] == '[' && q[0] == ']' && q[1] == ',' {
+					return #must_tail st_number_blocks(q, end, d, ind, w, hs.a, hs.b, hs.c, on)
+				}
+			}
 			break
 		}
 		r := q[1:]

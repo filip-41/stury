@@ -5,12 +5,14 @@ package write
 
 import "base:intrinsics"
 import "base:runtime"
+import "core:reflect"
 import "core:strings"
 import "../spell"
 import core ".."
 import "../typed"
 
-// Writes a value with no frame of its own: the rarer scalars and a bit set.
+// Writes a value with no frame of its own: the rarer scalars and a bit set. `top` counts the open frames, of which
+// `w.n_ptrs` are pointers' and `any`s', which no depth counts.
 @(private)
 leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest: int, $P: bool, $T: Tree, $put: Put) -> core.Typed_Error_Kind #no_bounds_check {
 	out := &w.out
@@ -35,32 +37,23 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 		}
 		return put(out, p, string(cs), &w.opts)
 	case .Enum:
-		return put_enum(w, m.enum_info, enum_value(m.enum_info, loaded(v, int(m.size))), put)
+		return put_enum(w, m.enum_info, enum_value(m.enum_info, v), put)
 	case .Raw:
-		return put_raw(w, string((^typed.Raw)(v)^), top, T)
+		return put_raw(w, string((^typed.Raw)(v)^), top - w.n_ptrs, T)
 	case .Number_Text:
-		return put_number_text(w, string((^typed.Number_Text)(v)^), top, T)
+		return put_number_text(w, string((^typed.Number_Text)(v)^), top - w.n_ptrs, T)
 	case .Number:
 		return put_number(&w.out, (^core.Number)(v)^)
 	case .Scalar:
-		switch x in (^typed.Scalar)(v)^ {
-		case nil, typed.Null:
-			out.cursor += put_word(p, T[.Null])
-		case bool:
-			out.cursor += put_bool(p, x, T)
-		case i64:
-			out.cursor += spell.i64_text(p, x)
-		case u64:
-			out.cursor += spell.u64_text(p, x)
-		case f64:
-			return put_f64(out, p, x)
-		case typed.Number_Text:
-			return put_number_text(w, string(x), top, T)
-		case string:
-			return put(out, p, x, &w.opts)
+		s := (^typed.Scalar)(v)^
+		if text, is_text := s.(typed.Number_Text); is_text {
+			return put_number_text(w, string(text), top - w.n_ptrs, T)
 		}
+		// Every other arm is written as an `any` of its type.
+		_, k := any_value(w, any{rawptr(v), scalar_type(s)}, T, put)
+		return k
 	case .Bit_Set:
-		return put_bit_set(w, m, v, top, nest, P, T, put)
+		return put_bit_set(w, m, v, top - w.n_ptrs, nest, P, T, put)
 	case:
 		return .Unsupported
 	}
@@ -69,75 +62,54 @@ leaf :: #force_no_inline proc(w: ^Walker, f: ^typed.Field, v: uintptr, top, nest
 
 // The integer of `kind` at `v` as text at `p`, under `spell.INT_ROOM` bytes, and its length.
 int_text :: proc(p: [^]u8, kind: typed.Read_Kind, v: uintptr) -> int {
-	#partial switch kind {
-	case .I8:
-		return spell.i64_text(p, i64((^i8)(v)^))
-	case .I16:
-		return spell.i64_text(p, i64((^i16)(v)^))
-	case .I32:
-		return spell.i64_text(p, i64((^i32)(v)^))
-	case .I64:
+	if kind == .I64 {
 		return spell.i64_text(p, (^i64)(v)^)
+	}
+	if kind < .I64 {
+		return spell.i64_text(p, i64(loaded(v, 1 << (uint(kind) - uint(typed.Read_Kind.I8)), true)))
 	}
 	return spell.u64_text(p, loaded(v, 1 << (uint(kind) - uint(typed.Read_Kind.U8))))
 }
 
-// A finite `x` at `p`, under a reservation of `LEAF_ROOM`.
-@(private)
-put_f64 :: proc(out: ^Out, p: [^]u8, x: f64) -> core.Typed_Error_Kind {
-	if x - x != 0 {
-		return .Non_Finite
-	}
-	out.cursor += spell.f64_text(p, x)
-	return .None
-}
-
-// The `size` bytes at `v`, 8 at most, as an integer, not sign extended.
-loaded :: proc "contextless" (v: uintptr, size: int) -> (bits: u64) {
+// The `size` bytes at `v`, 8 at most, as an integer, sign extended when `signed`.
+loaded :: proc "contextless" (v: uintptr, size: int, signed := false) -> (bits: u64) {
 	runtime.mem_copy_non_overlapping(&bits, rawptr(v), size)
-	return
+	shift := 64 - 8 * uint(size)
+	return u64(i64(bits << shift) >> shift) if signed else bits
 }
 
-// The enum value `bits`, as many bytes wide as the enum, extended as its base type says.
-enum_value :: proc "contextless" (info: ^runtime.Type_Info_Enum, bits: u64) -> i64 {
-	shift := 64 - 8 * uint(info.base.size)
-	if base, ok := runtime.type_info_base(info.base).variant.(runtime.Type_Info_Integer); ok && base.signed {
-		return i64(bits << shift) >> shift
+// The enum value at `v`, as many bytes wide as the enum, extended as its base type says.
+enum_value :: proc "contextless" (info: ^runtime.Type_Info_Enum, v: uintptr) -> i64 {
+	base, _ := runtime.type_info_base(info.base).variant.(runtime.Type_Info_Integer)
+	return i64(loaded(v, info.base.size, base.signed))
+}
+
+// The enum value `value` as `plan` writes it: its member's name, or under `Plan.enums == .Int` its integer, written at
+// `p`, which holds `spell.INT_ROOM` bytes. A value no member has is refused either way, as a read refuses it.
+enum_spelled :: proc(plan: ^typed.Plan, info: ^runtime.Type_Info_Enum, value: i64, p: [^]u8) -> (string, core.Typed_Error_Kind) {
+	k := typed.enum_member(info, value)
+	if k < 0 {
+		return "", .Not_A_Member
 	}
-	return i64(bits)
-}
-
-// The member of `info` that has `value`, or -1.
-enum_member :: proc "contextless" (info: ^runtime.Type_Info_Enum, value: i64) -> int {
-	for x, i in info.values {
-		if i64(x) == value {
-			return i
-		}
+	if plan.enums != .Int {
+		return info.names[k], .None
 	}
-	return -1
-}
-
-// The enum value `value` as an integer, which the enum's base type says how to read.
-enum_int_text :: proc(p: [^]u8, info: ^runtime.Type_Info_Enum, value: i64) -> int {
 	if base, ok := runtime.type_info_base(info.base).variant.(runtime.Type_Info_Integer); ok && !base.signed {
-		return spell.u64_text(p, u64(value))
+		return string(p[:spell.u64_text(p, u64(value))]), .None
 	}
-	return spell.i64_text(p, value)
+	return string(p[:spell.i64_text(p, value)]), .None
 }
 
-// An enum as its name, or as its integer under `Plan.enums == .Int`. A value no member has is refused either way, as a
-// read refuses it.
+// An enum as `enum_spelled` spells it.
 @(private)
 put_enum :: proc(w: ^Walker, info: ^runtime.Type_Info_Enum, value: i64, $put: Put) -> core.Typed_Error_Kind {
-	k := enum_member(info, value)
-	if k < 0 {
-		return .Not_A_Member
-	}
+	p := room(&w.out, LEAF_ROOM)
+	name := enum_spelled(w.plan, info, value, p) or_return
 	if w.plan.enums == .Int {
-		w.out.cursor += enum_int_text(room(&w.out, LEAF_ROOM), info, value)
+		w.out.cursor += len(name)
 		return .None
 	}
-	return put(&w.out, room(&w.out, 18), info.names[k], &w.opts)
+	return put(&w.out, p, name, &w.opts)
 }
 
 // A bit set as an array of its elements in ascending order: an enum's names, or integers. A bit no member stands for is
@@ -276,6 +248,71 @@ put_number :: proc(out: ^Out, n: core.Number) -> core.Typed_Error_Kind {
 	return kind
 }
 
+// Number token text `lit`, of token spelling `spelling`, whose kind is not the format's plain decimal, as a JSON number:
+// a decimal with a sign or a point of its own as JSON writes it (`+1` as `1`, `.5` as `0.5`, `5.` as `5`), and a hex
+// integer as the exact decimal it spells. Any other text, an infinity or a NaN, is `.Non_Finite`.
+put_decimal :: proc(out: ^Out, lit: string, spelling: u16) -> core.Typed_Error_Kind {
+	kind := spelling & core.NUMBER_KIND_MASK
+	p := 1 if lit[0] == '+' || lit[0] == '-' else 0
+	hex := kind != core.NUMBER_DECIMAL && p + 1 < len(lit) && lit[p] == '0' && lit[p + 1] | 0x20 == 'x'
+	if kind != core.NUMBER_DECIMAL && !hex {
+		return .Non_Finite
+	}
+	if lit[0] == '-' {
+		put_byte(out, '-')
+	}
+	if hex {
+		return .None if put_hex_decimal(out, lit[p + 2:]) else .No_Memory
+	}
+	if lit[p] == '.' {
+		put_byte(out, '0')
+	}
+	for k in p ..< len(lit) {
+		if lit[k] != '.' || k + 1 < len(lit) && lit[k + 1] - '0' < 10 {
+			put_byte(out, lit[k])
+		}
+	}
+	return .None
+}
+
+// Writes the hex digits `hex` as the exact decimal integer they spell, at any length, kept in base 10^9 words with the
+// least significant first. Returns false when the words cannot be held.
+@(private)
+put_hex_decimal :: proc(out: ^Out, hex: string) -> bool {
+	BASE :: 1_000_000_000
+	words, failed := make([dynamic]u32, 0, len(hex) / 7 + 1)
+	if failed != nil {
+		return false
+	}
+	defer delete(words)
+	for c in transmute([]u8)hex {
+		carry := u64(spell.HEX_NIBBLE[c])
+		for &w in words {
+			x := u64(w) * 16 + carry
+			w, carry = u32(x % BASE), x / BASE
+		}
+		if carry > 0 {
+			if _, no_word := append(&words, u32(carry)); no_word != nil {
+				return false
+			}
+		}
+	}
+	if len(words) == 0 {
+		put_byte(out, '0')
+		return true
+	}
+	buf: [spell.INT_ROOM]u8
+	put_text(out, string(buf[:spell.u64_text(&buf[0], u64(words[len(words) - 1]))]))
+	#reverse for w in words[:len(words) - 1] {
+		size := spell.u64_text(&buf[0], u64(w))
+		for _ in size ..< 9 {
+			put_byte(out, '0')
+		}
+		put_text(out, string(buf[:size]))
+	}
+	return true
+}
+
 // Writes a member whose name has no key text in the plan, or a long one, through the string writer, up to the colon's end.
 @(cold)
 @(private)
@@ -328,13 +365,16 @@ is_empty :: proc(w: ^Walker, r: ^typed.Field, v: uintptr) -> bool {
 		a := (^any)(v)^
 		return a.id == nil || a.data == nil
 	case .Scalar:
-		switch _ in (^typed.Scalar)(v)^ {
-		case nil, typed.Null:
-			return true
-		case bool, i64, u64, f64, typed.Number_Text, string:
-		}
+		return scalar_type((^typed.Scalar)(v)^) == nil
 	}
 	return false
+}
+
+// The type of the arm `s` holds, nil for none and for `Null`.
+@(private)
+scalar_type :: proc(s: typed.Scalar) -> typeid {
+	id := reflect.union_variant_typeid(s)
+	return nil if id == typeid_of(typed.Null) else id
 }
 
 // The arm the union of meta `m` at `v` holds, nil for none.
@@ -359,7 +399,7 @@ add_entry :: proc(w: ^Walker, name: string, value: uintptr, rec: ^typed.Field, $
 	size := w.keys.cursor - at
 	put_text(&w.keys, name)
 	if _, failed := append(&w.entries, Entry{at = at, size = size, named = len(name), value = value, rec = rec}); failed != nil {
-		return .Out_Of_Memory
+		return .No_Memory
 	}
 	return w.keys.err
 }
@@ -460,7 +500,7 @@ sort_entries :: proc(w: ^Walker, first: int) -> core.Typed_Error_Kind {
 		return .None
 	}
 	if resize(&w.order, n) != nil {
-		return .Out_Of_Memory
+		return .No_Memory
 	}
 	for &e, i in w.entries[first:] {
 		e.text = entry_name(w, e)
@@ -470,7 +510,7 @@ sort_entries :: proc(w: ^Walker, first: int) -> core.Typed_Error_Kind {
 	for it in w.order {
 		if _, failed := append(&w.entries, w.entries[first + int(it.entry)]); failed != nil {
 			resize(&w.entries, first + n)
-			return .Out_Of_Memory
+			return .No_Memory
 		}
 	}
 	copy(w.entries[first:], w.entries[first + n:])
@@ -494,7 +534,7 @@ add_map_entries :: proc(w: ^Walker, f: ^typed.Field, m: ^typed.Meta, v: uintptr,
 	raw := (^runtime.Raw_Map)(v)^
 	info := m.map_info
 	if reserve(&w.entries, len(w.entries) + int(raw.len)) != nil {
-		return .Out_Of_Memory
+		return .No_Memory
 	}
 	ks, vs, hs, _, _ := runtime.map_kvh_data_dynamic(raw, info)
 	rec := elem_of(f)
@@ -517,26 +557,16 @@ add_map_entries :: proc(w: ^Walker, f: ^typed.Field, m: ^typed.Meta, v: uintptr,
 @(private)
 add_key_entry :: proc(w: ^Walker, m: ^typed.Meta, key, value: uintptr, rec: ^typed.Field, $put: Put) -> core.Typed_Error_Kind {
 	text: [spell.INT_ROOM]u8
-	n := 0
+	name: string
 	#partial switch m.key_kind {
 	case .Cstring:
-		cs := (^cstring)(key)^
-		return add_entry(w, string(cs), value, rec, put)
+		name = string((^cstring)(key)^)
 	case .Enum:
-		info := m.enum_info
-		member := enum_value(info, loaded(key, info.base.size))
-		k := enum_member(info, member)
-		if k < 0 {
-			return .Not_A_Member
-		}
-		if w.plan.enums != .Int {
-			return add_entry(w, info.names[k], value, rec, put)
-		}
-		n = enum_int_text(&text[0], info, member)
+		name = enum_spelled(w.plan, m.enum_info, enum_value(m.enum_info, key), &text[0]) or_return
 	case:
-		n = int_text(&text[0], m.key_kind, key)
+		name = string(text[:int_text(&text[0], m.key_kind, key)])
 	}
-	return add_entry(w, string(text[:n]), value, rec, put)
+	return add_entry(w, name, value, rec, put)
 }
 
 // Lists a struct's members, for a struct the loop's member path does not write: under `sort_keys`, with a captured map,
@@ -607,13 +637,13 @@ entry_key :: proc(w: ^Walker, at: int, first: bool, nest: int, $T: Tree) -> (^ty
 
 // Puts `target` on the open path under `rec`, which may be neither on it nor past the depth.
 @(private)
-enter_target :: proc(w: ^Walker, top: int, target: rawptr, rec: ^typed.Field) -> core.Typed_Error_Kind #no_bounds_check {
+enter_target :: proc(w: ^Walker, target: rawptr, rec: ^typed.Field) -> core.Typed_Error_Kind #no_bounds_check {
 	for i in 0 ..< w.n_ptrs {
 		if w.ptrs[i] == {target, rec} {
 			return .Cycle
 		}
 	}
-	if top == core.MAX_DEPTH {
+	if w.n_ptrs == core.MAX_DEPTH {
 		return .Too_Deep
 	}
 	w.ptrs[w.n_ptrs] = {target, rec}
@@ -624,7 +654,7 @@ enter_target :: proc(w: ^Walker, top: int, target: rawptr, rec: ^typed.Field) ->
 // Writes an `any`, or a hook's stand-in, that holds a nil or a scalar, and returns nil. Any other value is left to a frame,
 // and this enters the side plan of its type and returns the record to write it by.
 @(private)
-any_value :: proc(w: ^Walker, a: any, top: int, $T: Tree, $put: Put) -> (rec: ^typed.Field, kind: core.Typed_Error_Kind) {
+any_value :: proc(w: ^Walker, a: any, $T: Tree, $put: Put) -> (rec: ^typed.Field, kind: core.Typed_Error_Kind) {
 	out := &w.out
 	if a.id == nil || a.data == nil {
 		put_text(out, T[.Null])
@@ -644,13 +674,13 @@ any_value :: proc(w: ^Walker, a: any, top: int, $T: Tree, $put: Put) -> (rec: ^t
 		out.cursor += spell.u64_text(p, (^u64)(a.data)^)
 		return nil, .None
 	case typeid_of(f64):
-		return nil, put_f64(out, p, (^f64)(a.data)^)
+		return nil, put_number(out, {transmute(u64)(^f64)(a.data)^, .Float})
 	}
 	side := side_plan(&w.side, w.plan, a.id) or_return
 	first := &side.fields[0]
-	enter_target(w, top, a.data, first) or_return
+	enter_target(w, a.data, first) or_return
 	if _, failed := append(&w.plans, w.plan); failed != nil {
-		return nil, .Out_Of_Memory
+		return nil, .No_Memory
 	}
 	w.plan, w.meta = side, raw_data(side.meta)
 	return first, .None
@@ -665,9 +695,9 @@ side_plan :: proc(side: ^map[typeid]^typed.Plan, parent: ^typed.Plan, T: typeid)
 	allocator := side.allocator
 	p, failed := new(typed.Plan, allocator)
 	if failed != nil {
-		return nil, .Out_Of_Memory
+		return nil, .No_Memory
 	}
-	made, err := typed.plan_make(T, parent.spelling, parent.options, allocator)
+	made, err := typed.plan_build(T, parent.as, parent.options, allocator)
 	if err.kind != .None {
 		free(p, allocator)
 		return nil, err.kind
@@ -677,7 +707,7 @@ side_plan :: proc(side: ^map[typeid]^typed.Plan, parent: ^typed.Plan, T: typeid)
 	if no_slot != nil {
 		typed.plan_destroy(p)
 		free(p, allocator)
-		return nil, .Out_Of_Memory
+		return nil, .No_Memory
 	}
 	slot^ = p
 	return p, .None
@@ -719,40 +749,25 @@ release_walker :: proc(w: ^Walker) {
 @(private)
 refused :: proc(w: ^Walker, open: Frame, top: int, kind: core.Typed_Error_Kind) -> core.Typed_Error_Kind {
 	open := open
-	steps: [core.MAX_ERROR_STEPS]core.Step
-	n := 0
-	note := proc(steps: ^[core.MAX_ERROR_STEPS]core.Step, n: ^int, s: core.Step) {
-		if n^ < core.MAX_ERROR_STEPS {
-			steps[n^] = s
-		}
-		n^ += 1
-	}
+	w.err.n_steps, w.err.truncated = 0, false
 	for i := top + 1; i >= 1; i -= 1 {
 		f := &open if i == top + 1 else &w.frames[i]
 		#partial switch f.mode {
 		case .Members:
 			r := intrinsics.ptr_offset(f.r, -1)
-			note(&steps, &n, core.Name(strings.clone(w.meta[r.meta].name, context.temp_allocator)))
+			typed.path_add(&w.err, core.Name(strings.clone(w.meta[r.meta].name, context.temp_allocator)))
 		case .Elements:
 			if f.left < f.total {
-				note(&steps, &n, core.Index(f.total - f.left - 1))
+				typed.path_add(&w.err, core.Index(f.total - f.left - 1))
 			}
 		case .Entries:
 			if f.left < f.total {
-				e := w.entries[f.at - 1]
-				quote := len(w.plan.spelling.key_open)
-				note(&steps, &n, core.Name(strings.clone(string(w.keys.buf[e.at + quote:][:e.size - 2 * quote]), context.temp_allocator)))
+				typed.path_add(&w.err, core.Name(strings.clone(entry_name(w, w.entries[f.at - 1]), context.temp_allocator)))
 			}
 		case .Side:
 			leave_side(w)
 		}
 	}
-	// The walk went from the innermost step out, so `steps` holds the innermost and reads backward.
-	held := min(n, core.MAX_ERROR_STEPS)
-	w.err.truncated = n > core.MAX_ERROR_STEPS
-	w.err.n_steps = u8(held)
-	for i in 0 ..< held {
-		w.err.steps[i] = steps[held - 1 - i]
-	}
+	typed.path_close(&w.err)
 	return kind
 }

@@ -34,8 +34,7 @@ check_calls :: proc(root: ^Node, groups: []^Node, called, recursive: []bool) -> 
 		empty     = make([]bool, len(groups), context.temp_allocator),
 	}
 	reach(&r, root, true)
-	find_recursion(&r, root, false)
-	return "never ending recursion" if never_ends(&r, root) else ""
+	return "never ending recursion" if find_recursion(&r, root, false) else ""
 }
 
 // Marks the groups a call reaches, from the pattern outside repeats of none (`top`) and from the groups they
@@ -54,77 +53,37 @@ reach :: proc(r: ^Calls, n: ^Node, top: bool) {
 	}
 }
 
-// Whether `n` reaches the group marked mark1 through calls.
+// Marks the groups whose body reaches themselves, in the pattern's order, and whether a called one of them
+// never ends.
 @(private = "file")
-reaches_mark1 :: proc(r: ^Calls, n: ^Node) -> bool {
-	#partial switch n.kind {
-	case .Call:
-		return reaches_mark1(r, n.target)
-	case .Group:
-		g := n.group
-		if r.mark2[g] {
-			return false
-		}
-		if r.mark1[g] {
-			return true
-		}
-		r.mark2[g] = true
-		found := reaches_mark1(r, n.kids[0])
-		r.mark2[g] = false
-		return found
-	}
-	found := false
-	for k in n.kids {
-		found = reaches_mark1(r, k) || found
-	}
-	return found
-}
-
-@(private = "file")
-find_recursion :: proc(r: ^Calls, n: ^Node, in_recursion: bool) {
+find_recursion :: proc(r: ^Calls, n: ^Node, in_recursion: bool) -> (never_ends: bool) {
 	in_recursion := in_recursion
 	if n.kind == .Group {
 		g := n.group
+		r.mark1[g] = true
 		if (r.called[g] || in_recursion) && !r.recursive[g] {
-			r.mark1[g] = true
-			r.recursive[g] = reaches_mark1(r, n.kids[0])
-			r.mark1[g] = false
+			r.recursive[g] = recursion_of(r, n.kids[0], false, true) & EXIST != 0
 		}
+		never_ends = r.recursive[g] && r.called[g] && recursion_of(r, n.kids[0], true) & (MUST | INFINITE) != 0
+		r.mark1[g] = false
 		in_recursion ||= r.recursive[g]
 	}
 	for k in n.kids {
-		find_recursion(r, k, in_recursion)
+		never_ends = never_ends || find_recursion(r, k, in_recursion)
 	}
-}
-
-@(private = "file")
-never_ends :: proc(r: ^Calls, n: ^Node) -> bool {
-	if n.kind == .Group && r.recursive[n.group] && r.called[n.group] {
-		r.mark1[n.group] = true
-		ret := recursion_of(r, n.kids[0], true)
-		r.mark1[n.group] = false
-		if ret & (MUST | INFINITE) != 0 {
-			return true
-		}
-	}
-	for k in n.kids {
-		if never_ends(r, k) {
-			return true
-		}
-	}
-	return false
+	return
 }
 
 // How `n` reaches the group marked mark1: EXIST on some path, MUST on every path, INFINITE before a byte is
-// read (`head`).
+// read (`head`). A repeat of none reaches nothing, but `in_none` for whether a group's body calls itself.
 @(private = "file")
-recursion_of :: proc(r: ^Calls, n: ^Node, head: bool) -> int {
+recursion_of :: proc(r: ^Calls, n: ^Node, head: bool, in_none := false) -> int {
 	#partial switch n.kind {
 	case .Cat:
 		head := head
 		out := 0
 		for k in n.kids {
-			ret := recursion_of(r, k, head)
+			ret := recursion_of(r, k, head, in_none)
 			if ret & INFINITE != 0 {
 				return ret
 			}
@@ -135,7 +94,7 @@ recursion_of :: proc(r: ^Calls, n: ^Node, head: bool) -> int {
 	case .Alt:
 		out, must := 0, MUST
 		for k in n.kids {
-			ret := recursion_of(r, k, head)
+			ret := recursion_of(r, k, head, in_none)
 			if ret & INFINITE != 0 {
 				return ret
 			}
@@ -144,25 +103,25 @@ recursion_of :: proc(r: ^Calls, n: ^Node, head: bool) -> int {
 		}
 		return out | must
 	case .Cond:
-		yes := recursion_of(r, n.kids[0], head)
+		yes := recursion_of(r, n.kids[0], head, in_none)
 		if yes & INFINITE != 0 {
 			return yes
 		}
-		no := recursion_of(r, n.kids[1], head)
+		no := recursion_of(r, n.kids[1], head, in_none)
 		if no & INFINITE != 0 {
 			return no
 		}
 		return yes | no & EXIST if no & MUST != 0 else (yes | no) & EXIST
 	case .Repeat:
-		if n.max == 0 {
+		if n.max == 0 && !in_none {
 			return 0
 		}
-		ret := recursion_of(r, n.kids[0], head)
+		ret := recursion_of(r, n.kids[0], head, in_none)
 		return ret & ~MUST if n.min == 0 else ret
 	case .Look:
-		return recursion_of(r, n.kids[0], head)
+		return recursion_of(r, n.kids[0], head, in_none)
 	case .Call:
-		return recursion_of(r, n.target, head)
+		return recursion_of(r, n.target, head, in_none)
 	case .Group:
 		g := n.group
 		if r.mark2[g] {
@@ -172,7 +131,7 @@ recursion_of :: proc(r: ^Calls, n: ^Node, head: bool) -> int {
 			return EXIST | MUST | INFINITE if head else EXIST | MUST
 		}
 		r.mark2[g] = true
-		ret := recursion_of(r, n.kids[0], head)
+		ret := recursion_of(r, n.kids[0], head, in_none)
 		r.mark2[g] = false
 		return ret
 	case .Absent:
@@ -180,11 +139,11 @@ recursion_of :: proc(r: ^Calls, n: ^Node, head: bool) -> int {
 		if len(n.kids) == 0 {
 			return 0
 		}
-		out := recursion_of(r, n.kids[0], head)
+		out := recursion_of(r, n.kids[0], head, in_none)
 		if out & INFINITE != 0 || len(n.kids) == 1 {
 			return out & ~MUST
 		}
-		ret := recursion_of(r, n.kids[1], head)
+		ret := recursion_of(r, n.kids[1], head, in_none)
 		return ret if ret & INFINITE != 0 else out & ~MUST | ret
 	}
 	return 0
@@ -198,7 +157,7 @@ can_be_empty :: proc(n: ^Node, r: ^Calls = nil) -> bool {
 	switch n.kind {
 	case .Empty, .Assert, .Keep:
 		return true
-	case .Char, .Any, .Class, .Linebreak, .Grapheme:
+	case .Char, .Str, .Any, .Class, .Linebreak, .Grapheme:
 		return false
 	case .Look:
 		return r == nil || n.look != .Atomic || can_be_empty(n.kids[0], r)

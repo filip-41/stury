@@ -129,7 +129,7 @@ any_child :: proc(n: ^Node, data: $T, visit: proc(child: ^^Node, data: T) -> boo
 	return false
 }
 
-@(private = "file")
+// Whether `visit` holds for a key of `p`, in the order `any_child` takes them.
 any_key :: proc(p: ^Pattern, data: $T, visit: proc(child: ^^Node, data: T) -> bool) -> bool {
 	for e in p.elems {
 		if any_key(e, data, visit) {
@@ -142,4 +142,25 @@ any_key :: proc(p: ^Pattern, data: $T, visit: proc(child: ^^Node, data: T) -> bo
 		}
 	}
 	return false
+}
+
+// Each variable `pats` bind, in order, as often as each binds it.
+each_var :: proc(pats: []^Pattern, data: $T, visit: proc(name: string, data: T)) {
+	for p in pats {
+		switch p.kind {
+		case .Var:
+			visit(p.name, data)
+		case .Array:
+			each_var(p.elems, data, visit)
+		case .Object:
+			for m in p.members {
+				if m.var != "" {
+					visit(m.var, data)
+				}
+				if m.pattern != nil {
+					each_var([]^Pattern{m.pattern}, data, visit)
+				}
+			}
+		}
+	}
 }

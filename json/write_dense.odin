@@ -16,6 +16,11 @@ import write "../core/write"
 @(private)
 DENSE_BYTES_PER_NODE :: 26
 
+// The same bound for a source whose first blocks also hold no backslash. A long string that holds escapes is written
+// faster by its rows, which copy the runs between them.
+@(private)
+DENSE_BYTES_PER_NODE_PLAIN :: 128
+
 // The same bound for a source with more blanks, where a block pays a compress for them.
 @(private)
 DENSE_BYTES_PER_NODE_BLANK :: 11
@@ -50,16 +55,16 @@ Dense_State :: struct {
 @(private)
 dense_route :: #force_inline proc "contextless" (doc: ^core.Document, opts: core.Write_Options, src: []u8, nodes: int) -> bool {
 	return !opts.pretty && copies_strings(opts) &&
-		len(src) < DENSE_BYTES_PER_NODE * nodes &&
+		len(src) < DENSE_BYTES_PER_NODE_PLAIN * nodes &&
 		Spec(doc.as.spec) == .Json && doc.as.tolerate == {} && doc.spelling == &SPELLING &&
-		(len(src) < DENSE_BYTES_PER_NODE_BLANK * nodes || dense_sample(src))
+		(len(src) < DENSE_BYTES_PER_NODE_BLANK * nodes || dense_sample(src, nodes))
 }
 
 // Whether the blanks outside strings in the first `DENSE_SEGMENT` bytes of `src` are under a sixteenth of them, counted
-// by running `dense_run` over them. A source that fits in the sample is dense whatever it holds, since counting its blanks
-// costs as much as writing it.
+// by running `dense_run` over them, and, in a source of `DENSE_BYTES_PER_NODE` bytes per node or more, hold no backslash.
+// A source that fits in the sample is dense whatever it holds, since counting its blanks costs as much as writing it.
 @(private)
-dense_sample :: proc "contextless" (src: []u8) -> bool {
+dense_sample :: proc "contextless" (src: []u8, nodes: int) -> bool {
 	if len(src) <= DENSE_SEGMENT {
 		return true
 	}
@@ -67,7 +72,7 @@ dense_sample :: proc "contextless" (src: []u8) -> bool {
 	state: Dense_State
 	hi := min(len(src), DENSE_SEGMENT)
 	kept, _ := dense_run_tier(kernel.tier(), raw_data(scratch[:]), src, 0, hi, &state, .Escapes)
-	return (hi - kept) * 16 < hi
+	return (hi - kept) * 16 < hi && (len(src) < DENSE_BYTES_PER_NODE * nodes || state.escapes == 0)
 }
 
 // Stores the blocks of `src` from `lo` to `hi` without their blanks outside strings, at `out`, which has room for

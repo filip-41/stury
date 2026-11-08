@@ -87,7 +87,9 @@ fault :: proc "c" (sig: posix.Signal, info: ^posix.siginfo_t, _: rawptr) {
 }
 
 // All of `p` written to stdout, as stdio's fwrite does for jq: a short write goes on, EINTR is retried, and EAGAIN
-// (a nonblocking descriptor that is full) waits until it can be written to. Any other error is returned.
+// (a nonblocking descriptor that is full) waits until it can be written to. Any other error is returned. EPIPE is
+// raised as SIGPIPE on this thread first: macOS may give a write's SIGPIPE to another thread after this one sees
+// EPIPE, and the run ends by the signal, as jq's does, unless SIGPIPE is ignored.
 write_stdout :: proc(p: []byte) -> os.Error {
 	p := p
 	for len(p) > 0 {
@@ -102,9 +104,20 @@ write_stdout :: proc(p: []byte) -> os.Error {
 		case .EAGAIN:
 			fd := posix.pollfd{fd = posix.STDOUT_FILENO, events = {.OUT}}
 			posix.poll(&fd, 1, -1)
+		case .EPIPE:
+			posix.raise(.SIGPIPE)
+			return os.Platform_Error(i32(e))
 		case:
 			return os.Platform_Error(i32(e))
 		}
+	}
+	return nil
+}
+
+// Closes stdout, which fails on a descriptor that was not open and on a write the system deferred.
+close_stdout :: proc() -> os.Error {
+	if posix.close(posix.STDOUT_FILENO) != .OK {
+		return os.Platform_Error(i32(posix.errno()))
 	}
 	return nil
 }
@@ -178,9 +191,25 @@ open_input :: proc(path: string) -> (f: ^os.File, err: os.Error) {
 
 // SIGINT and SIGTERM set `stopped`, which a --follow run takes as its file's end.
 catch_stop :: proc() {
-	act := posix.sigaction_t{sa_handler = proc "c" (_: posix.Signal) {sync.atomic_store(&stopped, true)}, sa_flags = {.RESTART}}
+	act := posix.sigaction_t{sa_handler = proc "c" (sig: posix.Signal) {sync.atomic_store(&stopped, i32(sig))}, sa_flags = {.RESTART}}
 	posix.sigaction(.SIGINT, &act, nil)
 	posix.sigaction(.SIGTERM, &act, nil)
+}
+
+// Ends the process by the signal that stopped a --follow run, as the signal ends jq, once its answers are written.
+end_if_stopped :: proc() {
+	if sig := sync.atomic_load(&stopped); sig != 0 {
+		posix.signal(posix.Signal(sig), auto_cast posix.SIG_DFL)
+		posix.raise(posix.Signal(sig))
+	}
+}
+
+// Whether a read of `f` would not wait, found within `wait`: a signal cuts the wait short. A poll that fails for
+// another reason leaves it to the read to tell why.
+read_ready :: proc(f: ^os.File, wait: time.Duration) -> bool {
+	fds := [1]posix.pollfd{{fd = posix.FD(os.fd(f)), events = {.IN}}}
+	n := posix.poll(raw_data(fds[:]), 1, i32(wait / time.Millisecond))
+	return n > 0 || n < 0 && posix.errno() != .EINTR
 }
 
 is_regular_file :: proc(f: ^os.File) -> bool {
@@ -208,28 +237,39 @@ platform_error_text :: proc(e: os.Platform_Error) -> string {
 	return string(posix.strerror(posix.Errno(i32(e))))
 }
 
-// Regular file `f`, from its current offset to its end, mapped read-only: nothing writes into an input. It returns
+// Regular file `f`, from its current offset `at` to its end, mapped read-only: nothing writes into an input. It returns
 // false if it does not map (nothing left, a file system that maps none), and it is to be read. Stdin is mapped too,
 // and left at its end as a read would leave it. The mapping starts at the page before the offset (`unmap_file` finds
 // it again).
-map_file :: proc(f: ^os.File) -> ([]byte, bool) {
+map_file :: proc(f: ^os.File) -> (data: []byte, at: i64, ok: bool) {
 	if !is_regular_file(f) {
-		return nil, false
+		return
 	}
 	fd := posix.FD(os.fd(f))
 	size, err := os.file_size(f)
-	at := posix.lseek(fd, 0, .CUR)
-	if err != nil || at < 0 || i64(int(size)) != size || size <= i64(at) {
-		return nil, false
+	at = i64(posix.lseek(fd, 0, .CUR))
+	if err != nil || at < 0 || i64(int(size)) != size || size <= at {
+		return
 	}
 	page := i64(posix.sysconf(._PAGESIZE))
-	lo := i64(at) / page * page
+	lo := at / page * page
 	p := posix.mmap(nil, uint(size - lo), {.READ}, {.PRIVATE}, fd, posix.off_t(lo))
 	if p == posix.MAP_FAILED {
-		return nil, false
+		return
 	}
 	posix.lseek(fd, posix.off_t(size), .SET)
-	return ([^]byte)(p)[i64(at) - lo:size - lo], true
+	return ([^]byte)(p)[at - lo:size - lo], at, true
+}
+
+// The whole pages of data[from:to], `data` being the mapping of `f` from its offset `at`, and the page data[from] is in,
+// mapped again from `f` in place: the pages read there leave the resident set, and a read of them reads the file
+// again. madvise does not drop a file's pages on macOS.
+map_afresh :: proc(f: ^os.File, data: []byte, at: i64, from, to: int) {
+	page := i64(posix.sysconf(._PAGESIZE))
+	lo, hi := (at + i64(from)) / page * page, (at + i64(to)) / page * page
+	if lo < hi {
+		posix.mmap(rawptr(uintptr(raw_data(data)) + uintptr(lo - at)), uint(hi - lo), {.READ}, {.PRIVATE, .FIXED}, posix.FD(os.fd(f)), posix.off_t(lo))
+	}
 }
 
 unmap_file :: proc(data: []byte) {

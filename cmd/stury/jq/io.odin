@@ -4,14 +4,13 @@ package jq
 // `stderr` and `halt_error`.
 
 import "base:runtime"
-import "core:mem/virtual"
 import "core:os"
 
 // The next input, read into the arena `out` frees it with, if it has one (`item_arena`).
 @(private = "file")
 read_input :: proc(ip: ^Interp, out: ^Sink) -> (Value, string, Parse_Status) {
-	a := item_arena(ip, out)
-	context.allocator = virtual.arena_allocator(a) if a != nil else context.allocator
+	a, ok := item_arena(ip, out)
+	context.allocator = a if ok else context.allocator
 	return ip.inputs.next(ip.inputs.data)
 }
 
@@ -51,7 +50,7 @@ native_inputs :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool
 	if ip.inputs.next == nil {
 		return .Go
 	}
-	if !track && item_arena(ip, out) == nil {
+	if _, arena := item_arena(ip, out); !track && !arena {
 		if sig, recycled := recycled_inputs(ip, input, out); recycled {
 			return sig
 		}
@@ -110,7 +109,7 @@ native_stderr :: proc(ip: ^Interp, n: ^Node, input: Item, env: ^Env, track: bool
 gen_halt_error :: proc(ip: ^Interp, input: Item, args: []Value, track: bool, out: ^Sink) -> Signal {
 	code, ok := number_of(args[0])
 	if !ok {
-		return fail(ip, "%s (%s) halt_error/1: number required", type_name(input.v), brief(input.v))
+		return fail(ip, "%s (%s) halt_error/1: number required", type_name(input.v), brief(ip, input.v))
 	}
 	// jq's main prints a string as it is and null not at all.
 	if s, is_str := string_of(input.v); is_str {

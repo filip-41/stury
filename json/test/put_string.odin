@@ -4,6 +4,7 @@ import "core:bytes"
 import "core:io"
 import "core:math/rand"
 import "core:testing"
+import "core:unicode/utf8"
 import core "../../core"
 import write "../../core/write"
 import json ".."
@@ -11,43 +12,15 @@ import walktest "../../walktest"
 
 // The JSON string writer against a model that goes one byte at a time.
 
-// Returns the length of the valid UTF-8 sequence at the start of `s` and its code point, or 0 for a fault. Written from the
-// table of well-formed byte sequences in RFC 3629, not from the writer's tables.
+// Returns the length of the valid UTF-8 sequence at the start of `s` and its code point, or 0 for a fault. The standard
+// library's decoder is the oracle, not the writer's tables.
 @(private = "file")
 model_decode :: proc(s: []u8) -> (size: int, cp: u32) {
-	at :: proc(s: []u8, i: int, lo, hi: u8) -> bool {
-		return i < len(s) && lo <= s[i] && s[i] <= hi
+	r, w := utf8.decode_rune(s)
+	if r == utf8.RUNE_ERROR && w <= 1 {
+		return 0, 0
 	}
-	b := s[0]
-	switch {
-	case b <= 0x7F:
-		return 1, u32(b)
-	case 0xC2 <= b && b <= 0xDF:
-		if at(s, 1, 0x80, 0xBF) {
-			return 2, u32(b & 0x1F) << 6 | u32(s[1] & 0x3F)
-		}
-	case b == 0xE0 || 0xE1 <= b && b <= 0xEF:
-		lo, hi := u8(0x80), u8(0xBF)
-		if b == 0xE0 {
-			lo = 0xA0
-		} else if b == 0xED {
-			hi = 0x9F
-		}
-		if at(s, 1, lo, hi) && at(s, 2, 0x80, 0xBF) {
-			return 3, u32(b & 0x0F) << 12 | u32(s[1] & 0x3F) << 6 | u32(s[2] & 0x3F)
-		}
-	case 0xF0 <= b && b <= 0xF4:
-		lo, hi := u8(0x80), u8(0xBF)
-		if b == 0xF0 {
-			lo = 0x90
-		} else if b == 0xF4 {
-			hi = 0x8F
-		}
-		if at(s, 1, lo, hi) && at(s, 2, 0x80, 0xBF) && at(s, 3, 0x80, 0xBF) {
-			return 4, u32(b & 0x07) << 18 | u32(s[1] & 0x3F) << 12 | u32(s[2] & 0x3F) << 6 | u32(s[3] & 0x3F)
-		}
-	}
-	return 0, 0
+	return w, u32(r)
 }
 
 @(private = "file")
@@ -133,7 +106,7 @@ check :: proc(t: ^testing.T, s: []u8, loc := #caller_location) {
 			defer delete(all)
 			got := all[lead:] if len(all) >= lead else nil
 			if !ok {
-				testing.expectf(t, kind == .Bad_Utf8, "% x: %v, want Bad_Utf8", s, kind, loc = loc)
+				testing.expectf(t, kind == .Invalid_Utf8, "% x: %v, want Invalid_Utf8", s, kind, loc = loc)
 			} else if !testing.expectf(t, kind == .None && string(got) == string(want[:]), "% x %v: %q (%v), want %q", s, opts, got, kind, want[:], loc = loc) {
 				return
 			}
@@ -221,7 +194,7 @@ invalid_utf8_is_refused_at_every_offset :: proc(t: ^testing.T) {
 				for opts in OPTION_SETS {
 					text, kind := written(s, opts)
 					delete(text)
-					testing.expectf(t, kind == .Bad_Utf8, "% x at %d: %v", piece, before, kind)
+					testing.expectf(t, kind == .Invalid_Utf8, "% x at %d: %v", piece, before, kind)
 				}
 			}
 		}
@@ -279,7 +252,7 @@ valid_text_with_every_escape_writes_through_a_stream :: proc(t: ^testing.T) {
 		testing.expect_value(t, kind, core.Typed_Error_Kind.None)
 		testing.expect(t, string(bytes.buffer_to_bytes(&sink)) == string(want[:]))
 	} else {
-		testing.expect_value(t, kind, core.Typed_Error_Kind.Bad_Utf8)
+		testing.expect_value(t, kind, core.Typed_Error_Kind.Invalid_Utf8)
 	}
 }
 
@@ -335,7 +308,7 @@ strings_at_the_end_of_a_page :: proc(t: ^testing.T) {
 	for n in 0 ..< len(body) {
 		s := string(walktest.fence_copy(&fence, body[:n]))
 		for opts in ([?]core.Write_Options{{}, {ascii = true}, {escape_html = true}, {escape_del = true}}) {
-			text, err := json.marshal(s, opts, context.temp_allocator)
+			text, err := json.marshal(s, write = opts, allocator = context.temp_allocator)
 			testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 			doc, derr := json.build(text, .Json)
 			testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
@@ -358,8 +331,8 @@ a_sequence_cut_at_a_block_end :: proc(t: ^testing.T) {
 					b = 'a'
 				}
 				text[64 * blocks - 1 + shift] = lead
-				_, err := json.marshal(string(text), {}, context.temp_allocator)
-				testing.expect_value(t, err.kind, core.Typed_Error_Kind.Bad_Utf8)
+				_, err := json.marshal(string(text), write = {}, allocator = context.temp_allocator)
+				testing.expect_value(t, err.kind, core.Typed_Error_Kind.Invalid_Utf8)
 			}
 		}
 	}

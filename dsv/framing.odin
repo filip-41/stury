@@ -10,6 +10,7 @@ import core "../core"
 import kernel "../core/kernel"
 import build "../core/build"
 import typed "../core/typed"
+import write "../core/write"
 import records "../core/records"
 
 @(private, rodata)
@@ -48,7 +49,7 @@ Batch_Row :: struct {
 // `split_cap` when the split stopped short of the row's end, and `keys` the header's cells, empty with no header, as
 // tokens of `key_src`. That is the text itself, and on a stream a copy of the header's line, since the window moves. `comb` joins the header's line and a row for a read or a build on a stream.
 // `done` says the text ended or faulted, with the fault in `fault`, given once the batch's rows are. `cols` are the
-// columns a typed read bound, for the plan and read flags beside them.
+// columns a typed read bound, for what `cols_key` holds.
 //
 // On a stream, `moves` is the reader's `moves` as the last call left it, so a different one says the window moved or
 // `pos` came back and the batch is stale. `from` is `pos` where the batch was framed, `past` says a row stood in its
@@ -59,7 +60,7 @@ Batch :: struct {
 	head:      Batch_Row,
 	to:        u64,
 	cells:     [dynamic]core.Token,
-	texts:     [dynamic]Maybe(string),
+	texts:     [dynamic]write.Scalar,
 	keys:      []core.Token,
 	key_src:   []u8,
 	comb:      [dynamic]u8,
@@ -75,8 +76,17 @@ Batch :: struct {
 	done:      bool,
 	fault:     Maybe(core.Fault),
 	cols:      []Column,
-	cols_plan: ^typed.Plan,
-	cols_read: [3]bool,
+	cols_key:  Columns_Key,
+}
+
+// What a typed read's columns were bound for: the plan's field records, which the columns point at, the plan's stamp and
+// the read's flags. A plan made in the place of a destroyed one may hold its records at the same address, and its stamp
+// says whether it was built the same.
+@(private)
+Columns_Key :: struct {
+	fields: rawptr,
+	stamp:  u64,
+	read:   [3]bool,
 }
 
 // Records the record from `lo` to `hi`, the header's line when `header`, and the `width` its check left. The first record
@@ -155,21 +165,19 @@ frame_batch :: proc(it: ^records.Reader, b: ^Batch, $S: Spec, opts: Options) {
 		src, head := it.src, b.head
 		b.key_src, b.head_at = src, it.base + head.at
 		if it.input.procedure != nil {
-			text, err := make([]u8, head.hi - head.at, it.allocator)
+			text, err := slice.clone(src[head.at:head.hi], it.allocator)
 			if err != nil {
 				b.done, b.fault = true, core.Fault{rules = &RULES, kind = .No_Memory}
 				return
 			}
-			copy(text, src[head.at:head.hi])
 			src, head, b.key_src = text, {0, u64(len(text)), head.lax}, text
 		}
 		n, _, ok := split_all(it, b, src, head, S, opts, .Key)
-		keys, err := make([]core.Token, n, it.allocator)
+		keys, err := slice.clone(b.cells[:n], it.allocator)
 		if !ok || err != nil {
 			b.done, b.fault = true, core.Fault{rules = &RULES, kind = .No_Memory}
 			return
 		}
-		copy(keys, b.cells[:n])
 		b.keys = keys
 	}
 }
@@ -301,14 +309,14 @@ joined :: proc(it: ^records.Reader, b: ^Batch, row: Batch_Row) -> (src: []u8, at
 	return b.comb[:], {u64(n), u64(size), row.lax}, true
 }
 
-// Builds `rec`, the row `next` gave last, as a document over the whole input: a `Map` keyed by the header's cells, or an
+// Builds `rec`, the row `next` gave last, as a document over the whole input: an `Object` keyed by the header's cells, or an
 // `Array` with no header. On a stream the document is over the header's line and the row's, which lasts until the next
 // call on the reader, and its offsets count from that text.
 @(private)
 build_row :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 	cells, ok := cells_of(it, rec)
 	if !ok {
-		return {}, {kind = .Bad_Index, at = rec.at}
+		return {}, {kind = .No_Memory if it.fault != nil else .Bad_Index, at = rec.at}
 	}
 	batch := (^Batch)(it.format)
 	keys := batch.keys
@@ -323,7 +331,7 @@ build_row :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.A
 	}
 	b.root_close = at.hi
 	regs := build.BUILDER_REGS
-	regs, _ = build.builder_hook_plain(&b, regs, {kind = .Map if len(keys) > 0 else .Array, role = .Value, lo = at.at})
+	regs, _ = build.builder_hook_plain(&b, regs, {kind = .Object if len(keys) > 0 else .Array, role = .Value, lo = at.at})
 	for t, c in cells {
 		if len(keys) > 0 {
 			regs, _ = build.builder_hook_plain(&b, regs, column_key(keys, c))
@@ -342,7 +350,7 @@ build_row :: proc(it: ^records.Reader, rec: records.Record, allocator: runtime.A
 @(private)
 read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
 	spec, opts := Spec(it.as.spec), options_of(it.as)
-	h := Cells{refuse_repeats = read.refuse_duplicates}
+	h := Cells{refuse_repeats = read.dups == .Refuse}
 	regs, started := typed.read_start(&h.r, it.src, plan, &SPELLING, T, target, read, it.frames, allocator)
 	h.r.ctx.temp_allocator = runtime.arena_allocator(&it.scratch)
 	if started.kind == .None && plan.marshal == nil {
@@ -368,13 +376,13 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 	row := b.rows[b.at - 1]
 	src, at, joinable := joined(it, b, row)
 	if !joinable {
-		err^ = {kind = .Out_Of_Memory}
+		err^ = {kind = .No_Memory}
 		return false
 	}
 	stream := it.input.procedure != nil
 	kept := typed.collected_mark(read.collect)
 	if stream {
-		h.r.src, h.r.base, h.hot_end = src, raw_data(src), u64(max(len(src) - HOT_REACH, 0))
+		h.r.src, h.hot_end = src, u64(max(len(src) - HOT_REACH, 0))
 	}
 	h.r.as.spec = u8(spec)
 	h.no_header = opts.no_header || h.opens == .Array
@@ -382,7 +390,8 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 		h.keys = b.keys
 	}
 	flags := [3]bool{h.r.refuse_unknown, h.r.first_key, h.refuse_repeats}
-	if b.cols_plan == plan && b.cols_read == flags {
+	key := Columns_Key{raw_data(plan.fields), plan.stamp, flags}
+	if b.cols_key == key {
 		h.cols = b.cols
 	}
 	// The text's open is read.
@@ -396,7 +405,7 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 			delete(b.cols, it.allocator)
 			b.cols, _ = make([]Column, len(h.cols), it.allocator)
 			copy(b.cols, h.cols)
-			b.cols_plan, b.cols_read = plan, flags
+			b.cols_key = key
 		}
 	}
 	if action == .Next {

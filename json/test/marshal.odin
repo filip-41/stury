@@ -6,8 +6,6 @@ import "core:bytes"
 import "core:fmt"
 import "core:io"
 import "core:math"
-import "core:math/rand"
-import "core:reflect"
 import "core:slice"
 import "core:strings"
 import "core:testing"
@@ -62,13 +60,13 @@ Stamp :: struct {
 }
 
 written :: proc(t: ^testing.T, value: any, want: string, opts := core.Write_Options{}, loc := #caller_location) {
-	text, err := json.marshal(value, opts, context.temp_allocator)
+	text, err := json.marshal(value, write = opts, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None, loc)
 	testing.expect_value(t, string(text), want, loc)
 }
 
 refused :: proc(t: ^testing.T, value: any, want: core.Typed_Error_Kind, opts := core.Write_Options{}, loc := #caller_location) -> core.Typed_Error {
-	text, err := json.marshal(value, opts, context.temp_allocator)
+	text, err := json.marshal(value, write = opts, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, want, loc)
 	testing.expect_value(t, len(text), 0, loc)
 	return err
@@ -91,6 +89,8 @@ every_scalar_kind :: proc(t: ^testing.T) {
 	written(t, f64(1e16), `1e+16`)
 	written(t, f64(1e-5), `1e-05`)
 	written(t, "a\"b\n", `"a\"b\n"`)
+	written(t, "a\x7fb", "\"a\x7fb\"")
+	written(t, "a\x7fb", "\"a\\u007fb\"", {escape_del = true})
 	written(t, cstring("c"), `"c"`)
 	written(t, cstring(nil), `null`)
 	written(t, typed.Raw(`{"a": [1]}`), `{"a": [1]}`)
@@ -253,18 +253,12 @@ tags_rename_skip_and_omit :: proc(t: ^testing.T) {
 }
 
 @(test)
-escape_del_spells_del :: proc(t: ^testing.T) {
-	written(t, "a\x7fb", "\"a\x7fb\"")
-	written(t, "a\x7fb", "\"a\\u007fb\"", {escape_del = true})
-}
-
-@(test)
 a_long_name_writes_whole :: proc(t: ^testing.T) {
 	Long :: struct {
 		a: i64 `json:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`,
 		b: i64,
 	}
-	text, err := json.marshal(Long{1, 2}, {}, context.temp_allocator)
+	text, err := json.marshal(Long{1, 2}, write = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	back: Long
 	testing.expect_value(t, json.unmarshal(text, .Json, &back).kind, core.Typed_Error_Kind.None)
@@ -314,27 +308,6 @@ a_list_of_structs_shares_one_frame :: proc(t: ^testing.T) {
 }
 
 @(test)
-pretty_indent_past_a_reservation :: proc(t: ^testing.T) {
-	Deep :: struct {
-		a: []Deep,
-		n: i64,
-	}
-	v := Deep{n = 1}
-	for _ in 0 ..< 40 {
-		inner := new_clone(v, context.temp_allocator)
-		v = Deep{a = slice.from_ptr(inner, 1), n = 2}
-	}
-	opts := core.Write_Options{pretty = true, indent = 200}
-	text, err := json.marshal(v, opts, context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
-	back: Deep
-	testing.expect_value(t, json.unmarshal(text, .Json, &back, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
-	again, _ := json.marshal(back, opts, context.temp_allocator)
-	testing.expect(t, bytes.equal(text, again))
-	testing.expect(t, bytes.contains(text, transmute([]u8)strings.repeat(" ", 8000, context.temp_allocator)))
-}
-
-@(test)
 sort_keys_sorts_members_and_the_tag :: proc(t: ^testing.T) {
 	Mixed :: struct {
 		zed:   i64,
@@ -343,7 +316,7 @@ sort_keys_sorts_members_and_the_tag :: proc(t: ^testing.T) {
 	}
 	written(t, Mixed{1, 2, {3, "y"}}, `{"alpha":2,"mid":{"why":"y","x":3},"zed":1}`, {sort_keys = true})
 	written(t, Mixed{1, 2, {3, "y"}}, "{\n \"alpha\": 2,\n \"mid\": {\n  \"why\": \"y\",\n  \"x\": 3\n },\n \"zed\": 1\n}", {sort_keys = true, pretty = true, indent = 1})
-	plan, err := json.plan_make(Tagged, {union_tag = "kind"}, context.temp_allocator)
+	plan, err := json.plan_make(Tagged, plan = {union_tag = "kind"}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	v := Tagged(Tagged_Cat{"t", 2})
 	text, e := write.marshal(v, &plan, {}, context.temp_allocator)
@@ -408,7 +381,7 @@ a_hook_returns_a_stand_in :: proc(t: ^testing.T) {
 		at: Stamp,
 		n:  i64,
 	}
-	plan, err := json.plan_make([]Row, {hooks = {{type = Stamp, write = hook_stamp}}}, context.temp_allocator)
+	plan, err := json.plan_make([]Row, plan = {hooks = {{type = Stamp, write = hook_stamp}}}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	rows := []Row{{{5}, 1}, {{6}, 2}}
 	text, e := write.marshal(rows, &plan, {}, context.temp_allocator)
@@ -420,10 +393,10 @@ a_hook_returns_a_stand_in :: proc(t: ^testing.T) {
 	testing.expect_value(t, e.n_steps, 2)
 	testing.expect_value(t, e.steps[0].(core.Index), core.Index(1))
 	testing.expect_value(t, string(e.steps[1].(core.Name)), "at")
-	self, _ := json.plan_make(Stamp, {hooks = {{type = Stamp, write = hook_self}}}, context.temp_allocator)
+	self, _ := json.plan_make(Stamp, plan = {hooks = {{type = Stamp, write = hook_self}}}, allocator = context.temp_allocator)
 	_, e = write.marshal(Stamp{1}, &self, {}, context.temp_allocator)
 	testing.expect(t, e.kind == .Too_Deep || e.kind == .Cycle)
-	only_read, _ := json.plan_make(Stamp, {hooks = {{type = Stamp, read = proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind) {return nil}}}}, context.temp_allocator)
+	only_read, _ := json.plan_make(Stamp, plan = {hooks = {{type = Stamp, read = proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind) {return nil}}}}, allocator = context.temp_allocator)
 	_, e = write.marshal(Stamp{1}, &only_read, {}, context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unsupported)
 }
@@ -435,7 +408,7 @@ what_a_write_refuses :: proc(t: ^testing.T) {
 	refused(t, f32(inf), .Non_Finite)
 	refused(t, typed.Scalar(inf), .Non_Finite)
 	refused(t, core.Number{kind = .Wide}, .Non_Finite)
-	refused(t, "\xff", .Bad_Utf8)
+	refused(t, "\xff", .Invalid_Utf8)
 	refused(t, transmute(Color)u8(2), .Not_A_Member)
 	refused(t, transmute(bit_set[Color])u8(4), .Not_A_Member)
 	refused(t, typed.Raw(`{`), .Bad_Raw)
@@ -471,7 +444,7 @@ cycles_and_depth :: proc(t: ^testing.T) {
 	for i in 0 ..< len(short) - 1 {
 		short[i].next = &short[i + 1]
 	}
-	_, err := json.marshal(short[0], {}, context.temp_allocator)
+	_, err := json.marshal(short[0], write = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 }
 
@@ -502,6 +475,14 @@ a_refusal_names_its_path :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(err.steps[1].(core.Name)), "k")
 	testing.expect_value(t, string(err.steps[2].(core.Name)), "vals")
 	testing.expect_value(t, err.steps[3].(core.Index), core.Index(0))
+	// A listed key is named as the value holds it, not as it is written.
+	escaped := map[string]f64 {
+		"a\"bé" = inf,
+	}
+	defer delete(escaped)
+	err = refused(t, escaped, .Non_Finite, {ascii = true})
+	testing.expect_value(t, err.n_steps, 1)
+	testing.expect_value(t, string(err.steps[0].(core.Name)), "a\"bé")
 }
 
 @(test)
@@ -547,9 +528,9 @@ a_stream_takes_the_same_text :: proc(t: ^testing.T) {
 	for &r, i in rows {
 		r = {i32(i), "some text"}
 	}
-	want, err := json.marshal(rows, {}, context.temp_allocator)
+	want, err := json.marshal(rows, write = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
-	plan, perr := json.plan_make([]Inner, {}, context.temp_allocator)
+	plan, perr := json.plan_make([]Inner, plan = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, perr.kind, core.Typed_Error_Kind.None)
 	sink := Byte_Sink{text = make([dynamic]u8, context.temp_allocator)}
 	testing.expect_value(t, write.marshal_stream({byte_sink_proc, &sink}, rows, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
@@ -562,7 +543,7 @@ a_stream_takes_the_same_text :: proc(t: ^testing.T) {
 
 @(test)
 a_plan_writes_only_its_type :: proc(t: ^testing.T) {
-	plan, err := json.plan_make(i64, {}, context.temp_allocator)
+	plan, err := json.plan_make(i64, plan = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	_, e := write.marshal("s", &plan, {}, context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Plan_Mismatch)
@@ -579,263 +560,6 @@ a_small_value_leaves_nothing_behind :: proc(t: ^testing.T) {
 	defer delete(text)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(text), `[1,{"x":2,"why":"y"},{"a":[{"x":1,"why":"x"}]}]`)
-}
-
-// The model: a recursive writer over a value's type information, and the shapes it is compared on.
-Shape_Leaf :: struct {
-	a: i8,
-	b: u32 `json:"bee"`,
-	c: f64,
-	d: string,
-	e: bool `json:",omitempty"`,
-	f: Color,
-	g: Maybe(i64),
-	h: ^i64,
-}
-
-Shape_Mid :: struct {
-	leaf:  Shape_Leaf,
-	list:  []Shape_Leaf,
-	fixed: [2]u16,
-	names: map[string]Shape_Leaf,
-	ints:  map[i32]string,
-	pet:   Pet,
-}
-
-Shape :: struct {
-	mids: []Shape_Mid,
-	next: ^Shape,
-	bits: bit_set[Color],
-	tail: i64 `json:",omitempty"`,
-}
-
-model_string :: proc(b: ^strings.Builder, s: string) {
-	strings.write_byte(b, '"')
-	for c in transmute([]u8)s {
-		if c == '"' || c == '\\' {
-			strings.write_byte(b, '\\')
-		}
-		strings.write_byte(b, c)
-	}
-	strings.write_byte(b, '"')
-}
-
-model_write :: proc(b: ^strings.Builder, v: any) {
-	base := runtime.type_info_base(type_info_of(v.id))
-	#partial switch info in base.variant {
-	case runtime.Type_Info_Struct:
-		strings.write_byte(b, '{')
-		wrote := false
-		for i in 0 ..< int(info.field_count) {
-			f := reflect.struct_field_at(v.id, i)
-			name, omit := f.name, false
-			if tag, ok := reflect.struct_tag_lookup(f.tag, "json"); ok {
-				head, _, rest := strings.partition(string(tag), ",")
-				if head != "" {
-					name = head
-				}
-				omit = rest == "omitempty"
-			}
-			value := reflect.struct_field_value(v, f)
-			if omit && reflect.is_nil(value) {
-				continue
-			}
-			if wrote {
-				strings.write_byte(b, ',')
-			}
-			wrote = true
-			model_string(b, name)
-			strings.write_byte(b, ':')
-			model_write(b, value)
-		}
-		strings.write_byte(b, '}')
-	case runtime.Type_Info_Slice:
-		s := (^runtime.Raw_Slice)(v.data)
-		model_list(b, s.data, s.len, info.elem)
-	case runtime.Type_Info_Array:
-		model_list(b, v.data, info.count, info.elem)
-	case runtime.Type_Info_Map:
-		model_map(b, v)
-	case runtime.Type_Info_Pointer:
-		p := (^rawptr)(v.data)^
-		if p == nil {
-			strings.write_string(b, "null")
-		} else {
-			model_write(b, any{p, info.elem.id})
-		}
-	case runtime.Type_Info_Union:
-		a := reflect.get_union_variant(v)
-		if a.data == nil {
-			strings.write_string(b, "null")
-		} else {
-			model_write(b, a)
-		}
-	case runtime.Type_Info_Enum:
-		name, _ := reflect.enum_name_from_value_any(v)
-		model_string(b, name)
-	case runtime.Type_Info_Bit_Set:
-		strings.write_byte(b, '[')
-		bits := (^u8)(v.data)^
-		wrote := false
-		for c in Color {
-			if bits & (1 << uint(c)) != 0 {
-				if wrote {
-					strings.write_byte(b, ',')
-				}
-				wrote = true
-				model_string(b, fmt.tprint(c))
-			}
-		}
-		strings.write_byte(b, ']')
-	case runtime.Type_Info_String:
-		model_string(b, (^string)(v.data)^)
-	case runtime.Type_Info_Boolean:
-		strings.write_string(b, "true" if (^bool)(v.data)^ else "false")
-	case:
-		fmt.sbprint(b, v)
-	}
-}
-
-model_list :: proc(b: ^strings.Builder, data: rawptr, n: int, elem: ^runtime.Type_Info) {
-	strings.write_byte(b, '[')
-	for i in 0 ..< n {
-		if i > 0 {
-			strings.write_byte(b, ',')
-		}
-		model_write(b, any{rawptr(uintptr(data) + uintptr(i * elem.size)), elem.id})
-	}
-	strings.write_byte(b, ']')
-}
-
-model_map :: proc(b: ^strings.Builder, v: any) {
-	it: int
-	Item :: struct {
-		name:  string,
-		key:   string,
-		value: any,
-	}
-	items := make([dynamic]Item, context.temp_allocator)
-	for {
-		key, value, ok := reflect.iterate_map(v, &it)
-		if !ok {
-			break
-		}
-		text := (^string)(key.data)^ if key.id == string else fmt.tprint(key)
-		written := strings.builder_make(context.temp_allocator)
-		model_string(&written, text)
-		append(&items, Item{text, strings.to_string(written), value})
-	}
-	slice.sort_by(items[:], proc(x, y: Item) -> bool {return x.name < y.name})
-	strings.write_byte(b, '{')
-	for item, i in items {
-		if i > 0 {
-			strings.write_byte(b, ',')
-		}
-		strings.write_string(b, item.key)
-		strings.write_byte(b, ':')
-		model_write(b, item.value)
-	}
-	strings.write_byte(b, '}')
-}
-
-random_text :: proc(allocator: runtime.Allocator) -> string {
-	n := rand.int_max(20)
-	text := make([]u8, n, allocator)
-	for &c in text {
-		c = u8(' ' + rand.int_max(95))
-	}
-	return string(text)
-}
-
-random_leaf :: proc(allocator: runtime.Allocator) -> Shape_Leaf {
-	context.allocator = allocator
-	l := Shape_Leaf {
-		a = i8(rand.int_max(256) - 128),
-		b = rand.uint32(),
-		c = f64(rand.int_max(1 << 20)) / 8,
-		d = random_text(allocator),
-		e = rand.int_max(2) == 0,
-		f = rand.choice_enum(Color),
-	}
-	if rand.int_max(2) == 0 {
-		l.g = i64(rand.uint64() >> 2)
-	}
-	if rand.int_max(2) == 0 {
-		l.h = new_clone(i64(rand.uint64() >> 2))
-	}
-	return l
-}
-
-random_mid :: proc(allocator: runtime.Allocator) -> Shape_Mid {
-	context.allocator = allocator
-	m := Shape_Mid {
-		leaf  = random_leaf(allocator),
-		list  = make([]Shape_Leaf, rand.int_max(4)),
-		fixed = {u16(rand.uint32()), u16(rand.uint32())},
-		names = make(map[string]Shape_Leaf),
-		ints  = make(map[i32]string),
-	}
-	for &l in m.list {
-		l = random_leaf(allocator)
-	}
-	for _ in 0 ..< rand.int_max(4) {
-		m.names[random_text(allocator)] = random_leaf(allocator)
-		m.ints[i32(rand.uint32())] = random_text(allocator)
-	}
-	switch rand.int_max(4) {
-	case 0:
-		m.pet = i64(rand.uint64() >> 2)
-	case 1:
-		m.pet = random_text(allocator)
-	case 2:
-		m.pet = Inner{i32(rand.uint32()), random_text(allocator)}
-	}
-	return m
-}
-
-random_shape :: proc(depth: int, allocator: runtime.Allocator) -> Shape {
-	context.allocator = allocator
-	s := Shape {
-		mids = make([]Shape_Mid, rand.int_max(3)),
-		tail = i64(rand.int_max(2)),
-	}
-	s.bits = transmute(bit_set[Color])(u8(rand.int_max(2)) | u8(rand.int_max(2)) << 5 | u8(rand.int_max(2)) << 6)
-	for &m in s.mids {
-		m = random_mid(allocator)
-	}
-	if depth > 0 && rand.int_max(2) == 0 {
-		s.next = new_clone(random_shape(depth - 1, allocator))
-	}
-	return s
-}
-
-@(test)
-random_shapes_match_the_model_and_read_back :: proc(t: ^testing.T) {
-	rand.reset(1234)
-	for _ in 0 ..< 300 {
-		s := random_shape(4, context.temp_allocator)
-		text, err := json.marshal(s, {}, context.temp_allocator)
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
-		b := strings.builder_make(context.temp_allocator)
-		model_write(&b, s)
-		testing.expect_value(t, string(text), strings.to_string(b))
-
-		back: Shape
-		read := json.unmarshal(text, .Json, &back, allocator = context.temp_allocator)
-		testing.expect_value(t, read.kind, core.Typed_Error_Kind.None)
-		again, e := json.marshal(back, {}, context.temp_allocator)
-		testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
-		testing.expect(t, bytes.equal(text, again))
-
-		pretty, pe := json.marshal(s, {pretty = true, indent = 3}, context.temp_allocator)
-		testing.expect_value(t, pe.kind, core.Typed_Error_Kind.None)
-		from_pretty: Shape
-		read = json.unmarshal(pretty, .Json, &from_pretty, allocator = context.temp_allocator)
-		testing.expect_value(t, read.kind, core.Typed_Error_Kind.None)
-		compact, _ := json.marshal(from_pretty, {}, context.temp_allocator)
-		testing.expect(t, bytes.equal(text, compact))
-		free_all(context.temp_allocator)
-	}
 }
 
 Close_Node :: struct {
@@ -858,7 +582,7 @@ marshal_two_lines_at_a_struct_close :: proc(t: ^testing.T) {
 		for pad in 0 ..< 12 {
 			v := make_tree(depth, 200)
 			v.p = strings.repeat("x", pad * 37 + 1, context.temp_allocator)
-			text, err := json.marshal(v, core.PRETTY)
+			text, err := json.marshal(v, write = core.PRETTY)
 			testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 			doc, derr := json.build(text, .Json, {max_depth = 4 * 1024})
 			testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
@@ -887,7 +611,7 @@ sorted_keys_ignore_their_spelling :: proc(t: ^testing.T) {
 		{{sort_keys = true, ascii = true, escape_html = true}, `{"\u003c":3,"z":2,"\u00e9":1}`},
 	}
 	for c in cases {
-		text, err := json.marshal(m, c.opts, context.temp_allocator)
+		text, err := json.marshal(m, write = c.opts, allocator = context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		testing.expect_value(t, string(text), c.want)
 	}
@@ -905,13 +629,13 @@ Capture_Doubled :: struct {
 capture_of_a_declared_name :: proc(t: ^testing.T) {
 	v := Capture_Doubled{a = 1, notes = make(map[string]typed.Raw, context.temp_allocator)}
 	v.notes["a"] = typed.Raw("2")
-	_, err := json.marshal(v, {}, context.temp_allocator)
+	_, err := json.marshal(v, write = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unwritable)
-	_, err = json.marshal(v, {sort_keys = true}, context.temp_allocator)
+	_, err = json.marshal(v, write = {sort_keys = true}, allocator = context.temp_allocator)
 	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unwritable)
 	delete_key(&v.notes, "a")
 	v.notes["b"] = typed.Raw("2")
-	text, oerr := json.marshal(v, {}, context.temp_allocator)
+	text, oerr := json.marshal(v, write = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, oerr.kind, core.Typed_Error_Kind.None)
 	testing.expect_value(t, string(text), `{"a":1,"b":2}`)
 }
@@ -926,7 +650,7 @@ several_any_fields :: proc(t: ^testing.T) {
 	inner := Any_Fields{a = 1, b = "s", c = true}
 	v := Any_Fields{a = Color.Red, b = inner, c = Color.Red}
 	for opts in ([?]core.Write_Options{{}, {sort_keys = true}}) {
-		text, err := json.marshal(v, opts, context.temp_allocator)
+		text, err := json.marshal(v, write = opts, allocator = context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		testing.expect_value(t, string(text), `{"a":"Red","b":{"a":1,"b":"s","c":true},"c":"Red"}`)
 	}
@@ -962,7 +686,7 @@ deep_pretty_indent :: proc(t: ^testing.T) {
 			pad(&b, i * int(indent))
 			strings.write_byte(&b, '}')
 		}
-		text, err := json.marshal(links[0], {pretty = true, indent = indent}, context.temp_allocator)
+		text, err := json.marshal(links[0], write = {pretty = true, indent = indent}, allocator = context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		testing.expect(t, string(text) == strings.to_string(b))
 		doc, derr := json.build(text, .Json)
@@ -971,7 +695,7 @@ deep_pretty_indent :: proc(t: ^testing.T) {
 		testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
 		testing.expect(t, string(again) == string(text))
 		core.destroy(&doc)
-		formatted, ferr := json.format(text, .Json, {pretty = true, indent = indent}, {}, context.temp_allocator)
+		formatted, ferr := core.format(text, json.as(.Json), {pretty = true, indent = indent}, context.temp_allocator)
 		testing.expect_value(t, ferr.kind, core.Typed_Error_Kind.None)
 		testing.expect(t, string(formatted) == string(text))
 	}

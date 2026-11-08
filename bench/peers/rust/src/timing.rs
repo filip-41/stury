@@ -25,6 +25,27 @@ pub fn time_runs<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<(u128, T
     Ok(((times[(TIMED - 1) / 2] + times[TIMED / 2]) / 2, kept.unwrap()))
 }
 
+// Like `time_runs`, with `batch` calls to a sample, each value dropped inside the clock before the next call. Returns the
+// median sample over `batch`, in ns.
+#[allow(dead_code)] // only read.rs
+pub fn time_batches<T>(batch: usize, mut f: impl FnMut() -> Result<T, String>) -> Result<(u128, T), String> {
+    let mut times = Vec::with_capacity(TIMED);
+    let mut kept = None;
+    for i in 0..WARMUP + TIMED {
+        let t0 = Instant::now();
+        for _ in 0..batch {
+            drop(kept.take());
+            kept = Some(f()?);
+        }
+        let ns = t0.elapsed().as_nanos();
+        if i >= WARMUP {
+            times.push(ns);
+        }
+    }
+    times.sort();
+    Ok((((times[(TIMED - 1) / 2] + times[TIMED / 2]) / 2) / batch as u128, kept.unwrap()))
+}
+
 pub fn report(len: usize, ns: u128, extra: &str) {
     println!("gb_per_s={:.4} ns={} {}", len as f64 / ns as f64, ns, extra);
 }

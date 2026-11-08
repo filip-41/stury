@@ -3,7 +3,7 @@
 stury \- JSON and CSV codec with a jq 1.8.2\-compatible command line
 .SH SYNOPSIS
 .B stury
-[\-cCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream|\-\-stream\-errors] [\-\-from format] [\-\-to format] [\-\-grow\-header] [\-\-max\-depth n] [\-\-follow] [\-\-explain] [stury options] <jq filter> [file...]
+[\-bcCMnRrsSaejV] [\-\-tab|\-\-indent n] [\-\-arg name value] [\-\-argjson name value] [\-\-slurpfile name file] [\-\-rawfile name file] [\-f file] [\-L dir] [\-\-seq] [\-\-stream|\-\-stream\-errors] [\-\-from format] [\-\-to format] [\-\-grow\-header] [csv options] [\-\-max\-depth n] [\-\-follow] [\-\-explain] [stury options] <jq filter> [file...]
 .br
 .B stury
 .B check
@@ -14,9 +14,13 @@ fmt
 [\-\-from format] [\-\-to format] [\-\-in\-place|\-\-check] [\-\-indent n|\-\-tab] [\-\-max\-depth n] [file...]
 .br
 .B stury
+edit
+[\-\-from format|\-\-seq] [\-\-in\-place|\-\-check] [\-\-max\-depth n] [\-f file] [\-L dir] [\-\-arg name value] <jq filter> [file...]
+.br
+.B stury
 \-h | \-V | \-\-build\-configuration
 .SH DESCRIPTION
-stury applies a jq 1.8 filter to JSON inputs and gives jq's results and exit codes. Its messages start with stury: and are worded its own way. It accepts all of jq 1.8's options except \-\-run\-tests, a test\-file runner it does not have. The filter language and those options are described in
+stury applies a jq 1.8 filter to JSON inputs and gives jq's results and exit codes. Its messages start with stury: and are worded its own way. It accepts all of jq 1.8's options except \-\-run\-tests, \-\-debug\-dump\-disasm and \-\-debug\-trace, a test\-file runner and bytecode listings it does not have. The filter language and those options are described in
 .BR jq (1).
 This page covers stury's own options and how its input handling differs from jq's.
 .PP
@@ -25,16 +29,29 @@ This page covers stury's own options and how its input handling differs from jq'
 .BR validate )
 validates its inputs, accepting any input that
 .B stury .
-reads without error, and prints nothing when they are valid. It requires at least one JSON text: an empty or whitespace-only input is "No JSON text" and exits 5. It is the subcommand when it is the first argument that is not an option. With no file on a terminal it prints the short usage and exits 2.
+reads without error, and prints nothing when they are valid. Every file is judged, and each file's first fault is reported. It requires at least one JSON text: an empty or whitespace-only input is "No JSON text" and exits 5. It refuses the options fmt refuses, and \-\-indent and \-\-tab. It is the subcommand when it is the first argument that is not an option. With no file on a terminal it prints the short usage and exits 2. \fBstury check \-\-help\fR lists its options.
 .PP
 .B stury fmt
 writes each input back in the printer's layout, or in another format: it runs no filter, reads each file as
 \-\-from and writes it as \-\-to (the same format by default). JSON and JSONC are laid out as stury prints them, comments kept; ndjson is
 one compact value per line. Between these formats only the layout changes: each number, string and key is written
 as it was, and every member of an object is kept, a repeated key included. csv and tsv are a header and one record
-per row, re-spelled by the cell writer, each file a table of its own. A leading byte order mark is not written, and a
-JSONC text with comments nesting past 4096 levels is refused with exit 5. The run is idempotent, and a file already in that layout comes
-back byte for byte.
+per row, re-spelled by the cell writer, each file a table of its own. A leading byte order mark is not written. A JSON text whose root is an array is
+written to csv or tsv as a list of rows. Every file is formatted, and each file's first fault is reported. The run is
+idempotent, and a file already in that layout comes back byte for byte. \fBstury fmt \-\-help\fR lists its options.
+.PP
+.B stury edit
+runs the filter on each input and splices its outputs into the input's own bytes: every byte the edit does not touch
+stays, and the identity run is byte for byte. A value taken from the input keeps its spelling, a built one is written
+by jq's writer, and a new member or element follows its container's line, indent and spacing. Members and elements take
+the output's order, a moved one keeping its bytes and comments. Each input is written back in its own format: JSON,
+JSONC and JSON5 as one text, which takes exactly one output (exit 5 otherwise); CSV and TSV, NDJSON, \-\-seq and \-R
+lines record by record, where a record with no output is dropped, each output past the first is a new record after
+it, and a table's column order, new and dropped columns change the header and every row. \-s runs the filter once on
+the array of the records. A dropped member takes its comments, and of a repeated key the last member is edited.
+Every file is edited, and each file's first fault is reported. \-a, \-S, \-\-indent and \-\-tab write built values; not
+with \-\-to, \-n, \-\-stream, \-\-stream\-errors, \-\-follow, \-r, \-j, \-\-raw\-output0 or \-C.
+\fBstury edit \-\-help\fR lists its options.
 .SH OPTIONS
 .TP
 .BI \-\-from " format"
@@ -47,13 +64,13 @@ Write json (the default), jsonc, ndjson (as \-c), csv or tsv. csv and tsv write 
 With \-\-to csv or tsv, hold the output and write a header of every key in the order first seen (byte order under \-S). Memory holds all the output.
 .TP
 .BI \-\-from " ndjson"
-Read one JSON text per line, and with \-\-to ndjson print compact, one value per line, so \-\-indent, \-\-tab and \-\-seq are refused with it.
+Read one JSON text per line, not with \-R or \-\-seq. \-\-to ndjson prints compact, one value per line, so \-\-indent, \-\-tab and \-\-seq are refused with it.
 .TP
 .BI \-\-from " jsonc"
-Read JSONC (comments and trailing commas), also for \-\-argjson, \-\-jsonargs, \-\-slurpfile (one document per file) and fromjson. Values print with their comments.
+Read JSONC (comments and trailing commas), also for \-\-argjson, \-\-jsonargs, \-\-slurpfile (one document per file) and fromjson. Values print with their comments. Not with \-R, \-\-seq or \-\-stream, and \-\-to jsonc not with \-\-seq.
 .TP
 .BI \-\-from " json5"
-Read JSON5 1.0.0: each input is one text, read as written (comments kept), and numbers print in JSON's spelling. Infinity and NaN end the run, having no JSON value. Read only: not \-\-to json5, nor fmt \-\-in\-place or fmt \-\-check. \-\-argjson, \-\-slurpfile, \-\-jsonargs and fromjson read JSON5.
+Read JSON5 1.0.0: each input is one text, read as written (comments kept), and numbers print in JSON's spelling. Infinity and NaN end the run, having no JSON value. Read only: not \-\-to json5, nor fmt \-\-in\-place or fmt \-\-check. \-\-argjson, \-\-slurpfile, \-\-jsonargs and fromjson read JSON5. Not with \-R, \-\-seq or \-\-stream.
 .TP
 .BI \-\-from " csv"
 Read CSV (RFC 4180). The first record of each file names the fields. Each later record is one input, an object of those names with each cell's text as a string, never a number. An empty cell with no quotes is null and a quoted "" is ""; every empty tsv cell is null. A repeated header name, a record of another width and a fault in the text end the file with NAME:LINE:COLUMN: FAULT and exit 5. A regular file is read whole and a pipe a window at a time, a window holding the longest record. A record of another width is told at the byte where its width is wrong, as having more or fewer fields than the first record. A filter that is only columns (.name, .a, .b, or [.a, .b] under \-c) is printed from the cells in pieces on every core. With \-s the records are one array. Not with \-R, \-\-seq or \-\-stream.
@@ -62,20 +79,50 @@ Read CSV (RFC 4180). The first record of each file names the fields. Each later 
 Read tab\-separated values as \-\-from csv does, with no quoting and the escapes \\t, \\n, \\r, \\0 and \\\\ that jq's @tsv writes.
 .TP
 .B \-\-in\-place
-With \fBfmt\fR, rewrite each file through a temporary file in its directory and a rename. Mode (and owner and group where permitted) are kept; other hard links keep the old bytes. Only when \-\-to is \-\-from; refused with \-\-check, with standard input, and on a non\-regular file (exit 2).
+With \fBfmt\fR or \fBedit\fR, rewrite each file through a temporary file in its directory and a rename. Mode (and owner and group where permitted) are kept; other hard links keep the old bytes. Only when \-\-to is \-\-from; refused with \-\-check, with standard input, and on a non\-regular file (exit 2).
 .TP
 .B \-\-check
-With \fBfmt\fR, write nothing: exit 1 when any file's formatted bytes differ from its bytes, 0 when every file
-is already formatted. A fault still exits 5.
+With \fBfmt\fR or \fBedit\fR, write nothing to stdout: name each file whose formatted or edited bytes differ from
+its bytes on stderr and exit 1, or 0 when none would change. A fault exits 5.
 .TP
 .BI \-\-max\-depth " n"
 Refuse nesting past n levels (default 1024; jq's is 10000).
 .TP
+.BI \-\-delimiter " c"
+With \-\-from csv or tsv, split cells at c, one ASCII character (\et for a tab).
+.TP
+.B \-\-no\-header
+With \-\-from csv or tsv, read the first record as data: each record is an array of its cells.
+.TP
+.BI \-\-comment " c"
+With \-\-from csv or tsv, a line whose first byte is c is no record.
+.TP
+.B \-\-infer
+With \-\-from csv or tsv, an unquoted cell that is exactly a JSON number, true or false reads as that value. A quoted cell stays a string.
+.TP
+.B \-\-ragged
+With \-\-from csv or tsv, read records of any width: a narrower one lacks its missing columns, and a wider one's extra cells are named by their position from 1.
+.TP
+.B \-\-lazy\-quotes
+With \-\-from csv, a quote inside an unquoted cell is text.
+.TP
+.BI \-\-out\-delimiter " c"
+With \-\-to csv or tsv, split written cells at c. A table written as the format read keeps the read's delimiter by default.
+.TP
+.BI \-\-out\-comment " c"
+With \-\-to csv or tsv, start written comment lines with c. A table written from a table keeps the read's comment character by default, and fmt of a table into a table keeps its comment lines when the output has one.
+.TP
+.B \-\-out\-no\-header
+With \-\-to csv or tsv, write no header line.
+.TP
+.B \-\-crlf
+With \-\-to csv or tsv, end each written record with CR LF.
+.TP
 .B \-\-follow
-With one named file, answer each record as it is appended, like tail \-f FILE | stury FILTER without the pipe. It reads NDJSON, \-\-seq, \-R, jq's texts per file, CSV and TSV. A record cut short waits for its delimiter, the output is written after each record, and a file that shrinks is read again from its start with a note on stderr. SIGINT and SIGTERM end the run with the status of the records it answered. Not with standard input, several files, \-s, \-n, \-\-stream, JSONC, JSON5, check or fmt.
+With one named file, answer each record as it is appended, like tail \-f FILE | stury FILTER without the pipe. It reads NDJSON, \-\-seq, \-R, jq's texts per file, CSV and TSV. A record cut short waits for its delimiter, the output is written after each record, and a file that shrinks is read again from its start with a note on stderr. SIGINT and SIGTERM end the run once the answers so far are written, by the signal, as they end jq. Not with standard input, several files, \-s, \-n, \-\-stream, JSONC, JSON5, check or fmt.
 .TP
 .B \-\-explain
-Write the plan the filter runs under and what the run did to stderr, as lines \fBstury: explain: KEY: FACTS\fR of \fBkey=value\fR tokens, and run the filter as without it. The plan: program, input, route (path_scan, columns or interpreter), path or columns or refused (each reason the interpreter answers) and compile_time. The run: run (texts scanned or interpreted, pieces answered on the pool's threads), fallback (the first text the scan handed to the interpreter, and why), run_time and cost. The tokens are explained in docs/cli.md. Not with check or fmt.
+Write how the filter runs and what the run did to stderr, as lines \fBstury: explain: KEY: SENTENCE\fR, and run the filter as without it. Before the run: filter, input, plan (reading only a path, reading only named columns, or building each input), because (each reason an input is built), decides (what the speed and memory follow). After it: ran (inputs read by path and built), threads, fallback (the first input a path plan built after all, and why), time and used (peak memory, bytes read and written). The keys and reasons are listed in docs/cli.md. Not with check or fmt.
 .TP
 .B \-V
 Print stury\- and the version it was built with: a release version, or the short commit hash from a source build (dev outside a checkout).
@@ -84,7 +131,7 @@ A number prints as it was written (1E2 stays 1E2), where jq prints 1E+2. A file 
 .PP
 stury reads strict RFC 8259 JSON. It rejects, with exit 5, these inputs that jq accepts: 01, 1., NaN, nan, Infinity, invalid UTF\-8 in a string, a lone low surrogate escape, a NUL after a value, and nesting past \-\-max\-depth. A parse error names the fault and the position of the byte where it was found. Each file ends its texts, except under \-\-seq. The full list is in docs/cli.md, "Differences from jq".
 .SH EXIT STATUS
-As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error, 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input. \fBfmt \-\-check\fR exits 1 when a file would change.
+As jq: 1 under \-e when the last output is false or null, 2 for a usage or file error or output that cannot be written (a closed stdout included, except under check, fmt \-\-check and fmt \-\-in\-place), 3 for a filter that does not compile, 4 under \-e when there is no output, 5 for invalid input or an error on the last input. \fBfmt \-\-check\fR and \fBedit \-\-check\fR exit 1 when a file would change.
 .SH SEE ALSO
 .BR jq (1),
 docs/cli.md in stury's source.

@@ -1,4 +1,4 @@
 [{"city":"Oslo","population":709000,"lat":59.91,"lon":10.75},{"city":"Ho, Chi Minh","population":null,"lat":10.82,"lon":106.63}]
 true
-2:6: Value does not fit the field's type at [0].population
-1:30: Value does not fit the field's type at [0].population
+2:6: Expected i64, found "lots" at .[0].population
+1:30: Expected i64, found string at .[0].population

@@ -9,23 +9,35 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 
+// A fault or an error renders as `line:col: message`. The example prints it to show the message.
+report :: proc(src: []u8, e: $E) {
+	b: strings.Builder
+	defer strings.builder_destroy(&b)
+	core.render(strings.to_writer(&b), src, e)
+	fmt.println(strings.to_string(b))
+}
+
 main :: proc() {
 	src := transmute([]byte)string("{\n\t\"a\": 1 // one\n}\n")
 
-	if json.validate(src, .Jsonc) != nil {
+	if fault, bad := json.validate(src, .Jsonc).?; bad {
+		report(src, fault)
 		os.exit(1)
 	}
+	// Strict JSON refuses the comment, and the report says where.
 	if fault, bad := json.validate(src, .Json).?; bad {
-		b: strings.Builder
-		defer strings.builder_destroy(&b)
-		core.render(strings.to_writer(&b), src, fault)
-		fmt.println(strings.to_string(b))
+		report(src, fault)
 	}
 
-	a, _ := core.parse_path(".a")
+	a, perr := core.parse_path(".a")
+	if perr.kind != .None {
+		report(nil, perr)
+		os.exit(1)
+	}
 	defer core.path_destroy(&a)
 	out, err := json.set(src, .Jsonc, a, "2")
 	if err.kind != .None {
+		report(src, err)
 		os.exit(1)
 	}
 	defer delete(out)

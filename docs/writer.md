@@ -24,7 +24,7 @@ holds `STREAM_BUFFER` (64 KiB) and `finish` flushes the rest and returns no byte
 
 ## Failure
 
-An allocation or a stream that refuses sets `out.err` to `.Out_Of_Memory` or `.Write_Failed` and keeps it. The buffer is
+An allocation or a stream that refuses sets `out.err` to `.No_Memory` or `.Write_Failed` and keeps it. The buffer is
 freed, and later `room` calls return the `spill` the creator gave `init`, a `ROOM_MAX` array that outlives the output and is discarded, so the writer needs no check at
 each call and tests `out.err` where it can stop. `finish` returns the error.
 
@@ -40,15 +40,17 @@ core.PRETTY :: core.Write_Options{pretty = true, indent = 2}
 
 The zero value writes compact text. `pretty` writes one member or element a line, `indent` is the spaces per level and
 `tab` one tab per level in its place. Pretty with `indent` 0 keeps the line breaks and writes no indent. A field a format
-has no use for is ignored.
+has no use for is ignored: a delimited text reads `sort_keys` alone, and a token write puts keys in the order of its
+calls whatever `sort_keys` says. The typed write, a document's write and the token write of JSON read every other field
+the same way.
 
 ## Errors
 
-A write returns `core.Typed_Error`, the type a typed read returns. Its kinds from `.Bad_Utf8` on are a write's:
+A write returns `core.Typed_Error`, the type a typed read returns. Its kinds from `.Invalid_Utf8` on are a write's:
 
 | Kind | Means |
 |---|---|
-| `.Bad_Utf8` | a string to write is not UTF-8 |
+| `.Invalid_Utf8` | a string to write is not UTF-8 |
 | `.Non_Finite` | a number to write is infinite or not a number |
 | `.Too_Deep` | a value nests past `MAX_DEPTH` |
 | `.Cycle` | a pointer leads back to itself |
@@ -57,15 +59,16 @@ A write returns `core.Typed_Error`, the type a typed read returns. Its kinds fro
 | `.Out_Of_Order` | a token call the text's grammar does not allow next, or a text finished before it is whole |
 | `.Write_Failed` | the stream refused bytes, `cause` holds its `io.Error` |
 
-A write also returns `.Out_Of_Memory`, `.Unsupported`, `.Not_A_Member` and `.Plan_Mismatch` by the reads' meanings.
+A write also returns `.No_Memory`, `.Unsupported`, `.Not_A_Member` and `.Plan_Mismatch` by the reads' meanings.
 `steps` names the value as in a read. `at` is a byte of a source, so a write sets none and `core.render` leaves the
 position out for every kind that names no byte. The codes are `typed.` and the kind, as in `typed.non_finite`.
 
 ## Typed values
 
-`json.marshal(value, opts, allocator)` builds a plan for the call.
-`write.marshal(value, plan, opts, allocator)` and `write.marshal_stream` take one that `json.plan_make` built, which a
-caller with hooks, a union tag or many writes keeps. A plan is one type's, and another value is `.Plan_Mismatch`. The
+`json.marshal(value, spec, opts, write, allocator)` builds a plan for the call: `spec` and `opts` are the format's, `.Json`
+and `{}` by default, and `write` is the `core.Write_Options`. `json.marshal(value, &plan, write, allocator)` and
+`write.marshal_stream` take one that `json.plan_make` built, which a caller with hooks, a union tag or many writes
+keeps. That form is `write.marshal`, so it is the same for every format. A plan is one type's, and another value is `.Plan_Mismatch`. The
 text comes from `allocator`. What lasts only the call, the key text, stand-ins and side plans, comes from
 `context.allocator`.
 
@@ -108,8 +111,9 @@ stand-in value, written as an `any` is. It may allocate from the `allocator` it 
 kind it returns refuses the write. A hook with no `write` is `.Unsupported`. A stand-in of the hook's own type comes back
 to the hook, and the frames that takes end in `.Cycle` or `.Too_Deep`.
 
-Depth counts frames, so a pointer counts as a level, and a text past `core.MAX_DEPTH` is `.Too_Deep`. `Raw` counts its
-own containers with the frames open. A pointer or `any` target seen again by the same record on the open path is
+Depth counts containers, as a read does, so a value a read takes writes back, and a container past `core.MAX_DEPTH` is
+`.Too_Deep`. Pointers and `any`s open on the path count apart, up to `core.MAX_DEPTH` of them. `Raw` counts its own
+containers with those open. A pointer or `any` target seen again by the same record on the open path is
 `.Cycle`, and the scan is linear in the pointers open. The same pointer twice side by side is fine.
 
 A refusal names its path. Nothing tracks one while writing: `refused` reads it from the open frames, the innermost
@@ -122,12 +126,12 @@ core.write           :: proc(doc: ^core.Document, opts := core.Write_Options{}, 
 core.write_stream    :: proc(w: io.Stream, doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (dropped: int, err: core.Typed_Error)
 core.subtree_facts   :: proc(doc: ^core.Document, i: core.Node_Index) -> []core.Fact
 json.as              :: proc(spec: json.Spec, opts := json.Options{}) -> core.As
-dsv.as               :: proc(spec: dsv.Spec, layout := dsv.Options{}) -> core.As
-json.format          :: proc(src: []u8, $S: json.Spec, opts := core.Write_Options{}, read := json.Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
+dsv.as               :: proc(spec: dsv.Spec, opts := dsv.Options{}) -> core.As
+core.format          :: proc(src: []u8, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
 ```
 
 `core.write` writes a document through the `write` slot of the `Spelling` in `as`. A nil `as` is the format and layout the
-document was read in. `json.as(.Jsonc)` and `dsv.as(.Tsv, layout)` name another target, in the same format or in another,
+document was read in. `json.as(.Jsonc)` and `dsv.as(.Tsv, opts)` name another target, in the same format or in another,
 so a JSON document is written as a table and a table as JSON by the target's writer. A target with no spelling or no writer
 is `.Unsupported`. `core.As` is the handle a `Document` holds in `as`.
 
@@ -167,25 +171,28 @@ runs over the source's bytes in 64-byte blocks: `kernel` masks of the quotes, th
 give the bytes inside strings, the blanks outside them are dropped, and `kernel.compress` stores the rest. The block's
 string mask comes from the quotes no backslash escapes, and a byte below 0x21 inside a string can only be a space, which
 stays. The route is one test at entry, with the document read as `.Json` and with no
-tolerance (`as.tolerate` empty), and `ascii`, `escape_html`,
+tolerance (`as.tolerate` empty), and `ascii`, `escape_del`, `escape_html`,
 `respell_strings` and `pretty` off. The test takes a source under 11 bytes per node, and one under 26 bytes per node when the blanks outside strings in
 its first 2 KB are under a sixteenth of those bytes, since each blank costs the dense path a compress and the rows win on
-text of longer tokens. A run of 2 KB starts without the escape mask when the run before met no backslash, and hands
+text of longer tokens, and one under 128 bytes per node when those 2 KB also hold no backslash, since the rows win on long
+strings that hold escapes. A run of 2 KB starts without the escape mask when the run before met no backslash, and hands
 the rest of its bytes to a run with the mask at the first block that holds one, so a text with no backslash pays none. A longer-token document, any other spec and any other option take the rows. The two paths write the same bytes, a
 leading byte order mark is left out by both, and a text nested past `MAX_DEPTH` is written by the dense path with no
 stack. The path has a copy per x86 tier, as the string writer's `wide_run` has, and `kernel.compress` shuffles by a
 table at every tier, since `vpcompressb` needs VBMI2, which the `.V4` tier does not promise.
 
-`json.format` builds a document from the text and writes it as `core.write` does in spec `S`, for every text. A fault in
-the text is `.Walk` with the fault in `inner`.
+`core.format` builds a document from the text as `as` says and writes it as `core.write` does in the same spec, for every
+format. A fault in the text is `.Walk` with the fault in `inner`.
 
-A document with comments (`facts`), `shared_keys`, JSON5 spelling or `sort_keys` is written by `write_tree`, a recursive
-writer that is not on the common case's path: the row walk never sees it, and `document_cold` picks it before the walk.
-The tree writer returns `.Too_Deep` past 4096 levels.
+A document with comments (`facts`), `shared_keys`, JSON5 spelling or `sort_keys` is written by `write_tree`, a writer
+that is not on the common case's path: the row walk never sees it, and `write_text` picks it before the walk. It keeps
+a frame for each open container on a stack that grows with the depth, and writes every depth the document's
+`max_depth` reads.
 
 A comment is written where it was read: before a key on a line of its own, between a key and its value, after a value on
 the value's line, and before a close on a line of its own. A comment after the root stays on a line of its own. A line comment is followed by a
-line break, in compact text too, and compact text ends a value's line before a comment that is not that value's inline comment. Under `ascii` or `escape_html` a comment's text is spelled again with `\uXXXX`. A
+line break, in compact text too, and compact text ends a value's line before a comment that is not that value's inline comment. Under `ascii` or `escape_html` a comment's text is spelled again with `\uXXXX`, and so
+is a U+2028 or U+2029 in a line comment written as JSON5, where either would end the comment. A
 document is written in the spec it was read in, or in the spec `as` names. A target
 that cannot hold a fact drops it, and `dropped` counts the drops, in every format's entry.
 
@@ -195,10 +202,10 @@ as decimal of any length, a leading `+`, a bare `.5` and a trailing `.` as JSON 
 `.Non_Finite`. A `shared_keys` document is written as an array of objects, and a positional record as an object through its
 pairs.
 
-`core.write` writes a partial document from the nodes it kept, as JSON: an array position collapses to the next kept element, and an element reached by two paths in a ring is
-written once for each. A partial
-document keeps no comments. A delimited text with a header is an array of objects, and a headerless one an array of arrays.
-Each cell is a string, or for a text read with `dsv.Options.infer` what `resolve` reads it as: an empty cell is `null`, `true` and `false` are booleans, and
+`core.write` writes a partial document from the nodes it kept, in the target spec as a full build of the same nodes is
+written: an array position collapses to the next kept element, and an element reached by two paths in a ring is written
+once for each. A partial document keeps no comments. A delimited text with a header is an array of objects, and a headerless one an array of arrays.
+Each cell is what `core.kind` reads it as: an empty unquoted cell is `null`, and for a text read with `dsv.Options.infer` `true` and `false` are booleans and
 a cell that is exactly a JSON number is a number in its source spelling. Any other cell, a quoted one included, stays a string, so the
 text is JSON and no value changes.
 The size hint of a document write is its source length, and for pretty text eight levels of
@@ -232,7 +239,7 @@ bytes, as `finish` does for an output that failed. A stream that failed leaves a
 
 - A number, a string and a key are the leaves of the typed write, so a text made by calls is the bytes `marshal` makes of
   the same value, in compact and pretty text and under `ascii` and `escape_html`. A float that is infinite or not a number
-  is `.Non_Finite`, a string that is not UTF-8 is `.Bad_Utf8`, and a container past `core.MAX_DEPTH` levels is `.Too_Deep`.
+  is `.Non_Finite`, a string that is not UTF-8 is `.Invalid_Utf8`, and a container past `core.MAX_DEPTH` levels is `.Too_Deep`.
 - JSON takes one root value. A key with no object open or owed, a value where a key is owed, a close with nothing open or
   between a key and its value, and a second root value are `.Out_Of_Order`, and so is `tokens_finish` inside a container,
   after a key, or before any value. Every JSON spec writes the same text, so `.Json5` and `.Jsonc` write plain JSON.
@@ -265,7 +272,7 @@ records.writer_end   :: proc(wr: ^records.Writer) -> ([]u8, core.Typed_Error)
 records.writer_destroy :: proc(wr: ^records.Writer)
 records.write        :: proc(wr: ^records.Writer, value: any, plan: ^typed.Plan) -> core.Typed_Error_Kind
 records.write_text   :: proc(wr: ^records.Writer, text: []u8) -> core.Typed_Error_Kind
-records.write_cells  :: proc(wr: ^records.Writer, cells: []Maybe(string)) -> core.Typed_Error_Kind
+records.write_cells  :: proc(wr: ^records.Writer, cells: []write.Scalar) -> core.Typed_Error_Kind
 records.marshal        :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
 records.marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}) -> core.Typed_Error
 ```
@@ -279,7 +286,8 @@ records.marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: 
   of the text first: then the row binds its columns and writes no header. Every row takes the plan of the first. A delimited text takes `.Lines` only.
 - `write` takes a plan of the value's type built by the writer's format, else `.Plan_Mismatch`. `write_text` writes the
   caller's text of one record as it is, unjudged. `write_cells` writes a row of a delimited text, each cell as the typed
-  write writes a string: a nil cell is empty, a row that would be an empty line, which is no record, is `.Unwritable`
+  write writes its kind, a `write.Number_Literal` as its text: a nil cell is empty, a string that the handle's `infer`
+  would read back as a number, `true` or `false` is quoted, or `.Unwritable` in TSV, which has no quotes, a row that would be an empty line, which is no record, is `.Unwritable`
   (no cell, one nil cell, and one empty cell where the format cannot quote it), and a BOM at the start of the text is
   quoted. Another format is `.Unsupported`.
 - A refused record leaves no byte when nothing was flushed since it began, and the writer goes on. Otherwise, and on a
@@ -293,10 +301,11 @@ the value's text and one walk entry.
 
 ## Delimited text
 
-`dsv.marshal(value, spec, layout, opts, allocator)` writes a slice or dynamic array of rows, and `write.marshal` takes a plan
-from `dsv.plan_make(T, spec, layout, plan_opts, allocator)`. `layout` is the `dsv.Options` of a read: `delimiter`,
-`comment`, `no_header` and the write's own `crlf`. The spec and the layout ride in `Plan.layout`, so a plan writes one spec and `.Bad_Option` refuses a layout that spec cannot read. `sort_keys` orders a struct row's
-columns.
+`dsv.marshal(value, spec, opts, write, allocator)` writes a slice or dynamic array of rows, and `dsv.marshal(value,
+&plan, write, allocator)` takes a plan from `dsv.plan_make(T, spec, opts, plan, allocator)`. `opts` is the `dsv.Options` of a read: `delimiter`,
+`comment`, `no_header` and the write's own `crlf`. The spec and the options ride in `Plan.as`, so a plan writes one spec
+and `.Bad_Option` refuses options that spec cannot read. `sort_keys` orders a struct row's
+columns, and a document's, as below.
 
 A plan of one row writes a text of that one row. A struct row writes a header of its field names, then a record per element. A list row writes its cells and no header. A
 map row writes the sorted union of its keys as the header and a cell per key, an empty one where a record lacks it, and a
@@ -317,11 +326,17 @@ The rules that keep a text readable:
 - A record that writes no byte would read back as no record, so it is `.Unwritable`. A refusal's path is `[record].field`,
   `[record][cell]` or `[record].key`.
 
-`core.write` with `dsv.as(spec, layout)`, or with no `as` on a dsv document, writes the records of a document.
-A dsv document with no `as` is written in the spec and layout it was read in, with the line end of its first line, and its comments are dropped. A document of another
+`core.write` with `dsv.as(spec, opts)`, or with no `as` on a dsv document, writes the records of a document.
+A dsv document with no `as` is written in the spec and layout it was read in, with the line end of its first row, header or record.
+With a comment byte in the output's options, which a write with no `as` takes from the read, the document's comments are
+written as comment lines where an edit writes them: a comment on the list above the header when a record follows it, one
+on a record above the record, and the list's foot below the last record. A comment with no such place, as one on a cell
+or an inline one, a comment whose body holds a line end, and every comment when the output has no comment byte, is
+dropped and counted in `dropped`. A document of another
 format whose root is an array of objects or of arrays is written through its `text` and spans: the objects' keys in first-seen
-order are the header, null is an empty cell, a number is its source spelling, and a container is `.Unsupported`. A partial
-document is `.Unsupported`.
+order are the header, null is an empty cell, a number is its source spelling, and a container is `.Unsupported`. A JSON5 number JSON does not spell so is written as JSON writes it, `0x10` as `16` and `.5` as `0.5`, and an infinity or NaN is `.Non_Finite`. A partial
+document is `.Unsupported`. `sort_keys` puts the columns in byte order of their names, stable, as the JSON writer orders an
+object's members.
 
 ## Number text
 
@@ -416,18 +431,19 @@ vectors, NEON on arm64 and SSE2 at x86-64-v2. The zmij port multiplies 64-bit wo
 json.put_string :: proc(out: ^write.Out, s: string, opts := core.Write_Options{}) -> core.Typed_Error_Kind
 ```
 
-Writes `s` as a JSON string at the cursor, quotes included. It returns `.Bad_Utf8` when `s` is not UTF-8, and then the
+Writes `s` as a JSON string at the cursor, quotes included. It returns `.Invalid_Utf8` when `s` is not UTF-8, and then the
 output holds a prefix of the string, so a caller that fails the write discards the output. Every string is checked.
 Escapes are `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t` and `\u00xx` in lowercase hex for any other byte below 0x20. DEL
 and every other valid byte are written as they are.
 
 `opts.ascii` writes each rune past U+007F as `\uXXXX`, a surrogate pair past U+FFFF. `opts.escape_html` writes `<`, `>`,
 `&`, U+2028 and U+2029 the same way, and `opts.escape_del` writes DEL as `\u007f`, which `ascii` does as well. A string takes
-`put_escaped`, built for the options in force, under `ascii` or `escape_html` and under `escape_del` when it holds a DEL.
+`put_escaped`, built for the options in force, under `ascii` or `escape_html`.
 It tests a block of the string at a time, copies a block with no stop whole, and goes byte by byte through a block with one. The
 document write keeps these options in its row loop, which tests a string's blocks the same way.
 
-A string without those options takes one of three paths by what it holds:
+A string without those options takes one of three paths by what it holds. Under `escape_del` each path counts DEL as a
+stop, and a 16-byte block that holds one is written through `ESC_SEQ` with DEL's entry replaced:
 
 1. Under 16 bytes, `put_short` loads 16 bytes at the string in one read when that read stays in the string's page,
    otherwise it builds the block from loads inside the string, then tests the block and stores it.

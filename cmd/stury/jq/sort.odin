@@ -385,7 +385,7 @@ sorted_result :: proc(shape: Sort_Shape, items: []Value, ks: []Keyed, order: []i
 fn_sort :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	shape: Sort_Shape = .Unique if name == "unique" else .Sorted
 	if kind(v) != .Array {
-		return nil, fail(ip, "%s (%s) cannot be sorted, as it is not an array", type_name(v), brief(v))
+		return nil, fail(ip, "%s (%s) cannot be sorted, as it is not an array", type_name(v), brief(ip, v))
 	}
 	items := elements(v)
 	// Numbers are sorted from themselves without making their keys first.
@@ -402,7 +402,7 @@ fn_sort :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, S
 
 @(private = "file")
 not_both_arrays :: proc(ip: ^Interp, v, keys: Value) -> Signal {
-	return fail(ip, "%s (%s) and %s (%s) cannot be sorted, as they are not both arrays", type_name(v), brief(v), type_name(keys), brief(keys))
+	return fail(ip, "%s (%s) and %s (%s) cannot be sorted, as they are not both arrays", type_name(v), brief(ip, v), type_name(keys), brief(ip, keys))
 }
 
 Atom_Sink :: struct {
@@ -455,7 +455,7 @@ keys_array :: proc(ks: []Keyed) -> ^Array {
 @(private = "file")
 keyed_elements :: proc(ip: ^Interp, f: ^Node, input: Item, env: ^Env) -> ([]Keyed, Signal) {
 	if k := kind(input.v); k != .Array && k != .Object {
-		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(input.v), brief(input.v))
+		return nil, fail(ip, "Cannot iterate over %s (%s)", type_name(input.v), brief(ip, input.v))
 	}
 	return keys_by(ip, f, input.v, env)
 }
@@ -506,7 +506,7 @@ extreme_by :: proc($want_max: bool) -> Native {
 		}
 		if kind(input.v) != .Array {
 			keys := keys_array(ks)
-			return fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(input.v), brief(input.v), type_name(keys), brief(keys))
+			return fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(input.v), brief(ip, input.v), type_name(keys), brief(ip, keys))
 		}
 		too_deep = false
 		atom_depth = 1
@@ -523,7 +523,7 @@ extreme_by :: proc($want_max: bool) -> Native {
 fn_extreme :: proc(ip: ^Interp, name: string, v: Value, args: []Value) -> (Value, Signal) {
 	want_max := name == "max"
 	if kind(v) != .Array {
-		return nil, fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(v), brief(v), type_name(v), brief(v))
+		return nil, fail(ip, "%s (%s) and %s (%s) cannot be iterated over", type_name(v), brief(ip, v), type_name(v), brief(ip, v))
 	}
 	items := elements(v)
 	too_deep = false
