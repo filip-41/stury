@@ -26,6 +26,20 @@ Log_Record :: struct {
 Logs_Doc :: struct {
 	logs: []Log_Record,
 }
+// `Log_Record` with every member `required`, which the hot read opens like a struct and closes through the check.
+Required_Record :: struct {
+	ts:          string `json:",required"`,
+	level:       string `json:",required"`,
+	service:     string `json:",required"`,
+	msg:         string `json:",required"`,
+	status:      i64 `json:",required"`,
+	bytes:       i64 `json:",required"`,
+	duration_ms: f64 `json:",required"`,
+	id:          string `json:",required"`,
+}
+Required_Logs :: struct {
+	logs: []Required_Record,
+}
 Tweet_Metadata :: struct {
 	result_type, iso_language_code: string,
 }
@@ -223,12 +237,13 @@ main :: proc() {
 	borrow := os.args[2] == "borrow"
 	switch os.args[1] {
 	case "logs": lane(Logs_Doc, src, borrow, false)
+	case "logs_required": lane(Required_Logs, src, borrow, false)
 	case "twitter": lane(Twitter, src, borrow, false)
 	case "citm": lane(CITM, src, borrow, false)
 	case "table": lane([]Table_Row, src, borrow, true)
 	case "text": lane([]Text_Row, src, borrow, true)
 	case:
-		fmt.eprintln("no lane", os.args[1], "(lanes: logs, twitter, citm, table, text)")
+		fmt.eprintln("no lane", os.args[1], "(lanes: logs, logs_required, twitter, citm, table, text)")
 		os.exit(2)
 	}
 }

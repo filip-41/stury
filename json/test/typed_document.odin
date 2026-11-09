@@ -128,16 +128,16 @@ agree_as :: proc(t: ^testing.T, text: string, $S: json.Spec, init: $T, read := t
 	testing.expectf(t, built.kind == .None, "%s: build %v", text, built.kind, loc = loc)
 	a, b := init, init
 	by_text, by_doc := read, read
-	sink_a := typed.Collected{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
-	sink_b := typed.Collected{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
-	if read.collect != nil {
-		by_text.collect, by_doc.collect = &sink_a, &sink_b
+	sink_a := typed.Sink{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
+	sink_b := typed.Sink{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
+	if read.sink != nil {
+		by_text.sink, by_doc.sink = &sink_a, &sink_b
 	}
 	want := json.unmarshal(src, S, &a, &plan, read = by_text, opts = {}, allocator = context.temp_allocator)
 	got := typed.unmarshal(&doc, core.ROOT, &b, &plan, by_doc, context.temp_allocator)
 	errors_agree(t, want, got, text, loc)
 	testing.expectf(t, value_text(a) == value_text(b), "%s: value %v, a document gives %v", text, value_text(a), value_text(b), loc = loc)
-	if read.collect != nil {
+	if read.sink != nil {
 		testing.expectf(t, len(sink_a.errors) == len(sink_b.errors) && sink_a.truncated == sink_b.truncated, "%s: %d errors, a document gives %d", text, len(sink_a.errors), len(sink_b.errors), loc = loc)
 		for i in 0 ..< min(len(sink_a.errors), len(sink_b.errors)) {
 			errors_agree(t, sink_a.errors[i], sink_b.errors[i], text, loc)
@@ -266,10 +266,10 @@ a_collecting_read_reads_past_each_refusal :: proc(t: ^testing.T) {
 		n: string `json:"n,required"`,
 	}
 	collect := typed.Read_Options {
-		collect = &typed.Collected{},
+		sink = &typed.Sink{},
 	}
 	agree(t, `{"a":"no","l":[1,"x",3],"p":{"x":"y","y":2},"q":1}`, S{a = 7}, collect)
-	agree(t, `["a","b","c","d"]`, []i32{}, {collect = &typed.Collected{max_errors = 2}})
+	agree(t, `["a","b","c","d"]`, []i32{}, {sink = &typed.Sink{max_errors = 2}})
 	agree(t, `{"a":1,"l":[1,2],"n":"x"}`, S{}, collect)
 	agree(t, `[{"x":"a"},{"y":"b"},{"x":1}]`, []Pt{}, collect)
 
@@ -277,11 +277,11 @@ a_collecting_read_reads_past_each_refusal :: proc(t: ^testing.T) {
 	doc, built := json.build(transmute([]u8)string(`{"a":"no","l":[1,"x"]}`), json.Spec.Json, allocator = context.temp_allocator)
 	testing.expect_value(t, built.kind, core.Document_Error_Kind.None)
 	plan, _ := json.plan_make(S, allocator = context.temp_allocator)
-	sink := typed.Collected {
+	sink := typed.Sink {
 		errors = make([dynamic]core.Typed_Error, context.temp_allocator),
 	}
 	s: S
-	e := typed.unmarshal(&doc, core.ROOT, &s, &plan, {collect = &sink}, context.temp_allocator)
+	e := typed.unmarshal(&doc, core.ROOT, &s, &plan, {sink = &sink}, context.temp_allocator)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.errors), 3)
 	testing.expect_value(t, sink.errors[0].at, 5)

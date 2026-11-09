@@ -1,6 +1,7 @@
 package dsv_tests
 
 import "core:mem"
+import "core:strings"
 import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
@@ -262,9 +263,9 @@ a_plan_refuses_a_type_no_text_reads :: proc(t: ^testing.T) {
 collecting_reads_past_each_refusal :: proc(t: ^testing.T) {
 	Row :: struct { a: i8, b: i64 }
 	rows: []Row
-	sink: typed.Collected
+	sink: typed.Sink
 	defer delete(sink.errors)
-	e := read_rows("a,b\nx,1\n2,y\n3,4\n", &rows, {collect = &sink})
+	e := read_rows("a,b\nx,1\n2,y\n3,4\n", &rows, {sink = &sink})
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.errors), 2)
 	testing.expect_value(t, len(rows), 3)
@@ -301,4 +302,88 @@ a_refusal_leaves_what_it_allocated_with_the_target :: proc(t: ^testing.T) {
 	}
 	delete(rows, alloc)
 	testing.expect_value(t, len(tracker.allocation_map), 0)
+}
+
+@(test)
+a_required_member_reads_as_any_other :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Row :: struct {
+		a: i32 `csv:"a,required"`,
+		b: i32,
+	}
+	rows: []Row
+	e := dsv.unmarshal(transmute([]u8)string("a,b\n1,2\n3,4\n"), dsv.Spec.Csv, &rows, read = {}, opts = {}, allocator = context.temp_allocator)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, len(rows), 2)
+	rows = nil
+	e = dsv.unmarshal(transmute([]u8)string("a,b\n,2\n"), dsv.Spec.Csv, &rows, read = {}, opts = {}, allocator = context.temp_allocator)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Missing_Field)
+}
+
+@(test)
+a_plans_read_slot_reads_the_rows :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Row :: struct {
+		a, b: i32,
+	}
+	plan, err := dsv.plan_make([]Row, .Csv, allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	testing.expect(t, plan.read != nil && plan.node_read != nil)
+	testing.expect(t, plan.check != nil)
+	rows: []Row
+	e := typed.unmarshal_text(transmute([]u8)string("a,b\n1,2\n"), &rows, []Row, &plan, {}, context.temp_allocator)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, len(rows), 1)
+	testing.expect_value(t, rows[0].b, 2)
+}
+
+@(test)
+a_repeated_header_reads_as_last_by_default :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Row :: struct {
+		a: i32,
+	}
+	src := transmute([]u8)string("a,a\n1,2\n")
+	d, l: []Row
+	_ = dsv.unmarshal(src, dsv.Spec.Csv, &d, read = {}, opts = {}, allocator = context.temp_allocator)
+	_ = dsv.unmarshal(src, dsv.Spec.Csv, &l, read = {dups = .Last}, opts = {}, allocator = context.temp_allocator)
+	testing.expect_value(t, d[0].a, 2)
+	testing.expect_value(t, l[0].a, d[0].a)
+}
+
+@(test)
+a_check_reports_every_missing_column_of_a_row :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Row :: struct {
+		a: i32 `csv:"a,required"`,
+		b: i32 `csv:"b,required"`,
+		c: i32,
+		d: i32 `csv:"d,required"`,
+	}
+	plan, err := dsv.plan_make([]Row, .Csv, dsv.Options{tolerate = {.Ragged}}, allocator = context.temp_allocator)
+	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	text := transmute([]u8)string("a,b,c,d\n1\n2,3,4,5\n6\n")
+	rows: []Row
+	sink: typed.Sink
+	sink.entries.allocator = context.temp_allocator
+	first := typed.check_text(text, &rows, []Row, &plan, {sink = &sink}, context.temp_allocator)
+	testing.expect_value(t, first.kind, core.Typed_Error_Kind.Missing_Field)
+	if !testing.expect_value(t, len(sink.entries), 4) {
+		return
+	}
+	// Each short row names b, then d, and the entries keep the row's order.
+	want := [?]string{"/0/b", "/0/d", "/2/b", "/2/d"}
+	for e, i in sink.entries {
+		testing.expect_value(t, e.kind, core.Typed_Error_Kind.Missing_Field)
+		b := strings.builder_make(context.temp_allocator)
+		core.write_pointer(strings.to_writer(&b), e.path)
+		testing.expect_value(t, strings.to_string(b), want[i])
+	}
+	// A read that does not check stops at the first.
+	rows = nil
+	plain: typed.Sink
+	plain.errors.allocator = context.temp_allocator
+	_ = typed.unmarshal_text(text, &rows, []Row, &plan, {sink = &plain}, context.temp_allocator)
+	testing.expect_value(t, len(plain.errors), 2)
+	typed.sink_destroy(&sink)
 }

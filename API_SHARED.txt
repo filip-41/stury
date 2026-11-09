@@ -116,6 +116,10 @@ utf8_window :: #force_inline proc "contextless" (prev, v: V) -> V
 # core/compose
 push :: proc(d: ^[dynamic]$T, v: T) -> (int, bool)
 push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool)
+# core/rules
+EVERY_KIND :: Kinds{.Null, .Bool, .Integer, .Number, .String, .Array, .Object}
+NONE :: Node_Index(-1)
+description_destroy :: proc(d: ^Description)
 # core/build
 BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}
 Count :: struct { nodes: int, facts: int, depth: int, deepest: int, }
@@ -145,10 +149,10 @@ scan_reserve :: proc "contextless" (h: ^Scan, nodes: int) -> bool
 scan_room :: #force_inline proc "contextless" (h: ^Scan) -> int
 scan_start :: proc(h: ^Scan, src: []u8, as: core.As, paths: []core.Path, read: core.Path_Options, positional: bool, allocator: runtime.Allocator, depth: int, frames: []u64, many := false, state: rawptr = nil, on: proc(state: rawptr, a: core.Token_Answer) -> bool = nil) -> core.Path_Error
 # core/typed
+Check :: struct { using reader: Reader, }
+Format_Reads :: struct { read, check: Text_Read, node_read, node_check: Node_Read, }
 KEY_SIZE_MAX :: 240
-collect_error :: proc(c: ^Collected, e: core.Typed_Error)
-collected_mark :: #force_inline proc(c: ^Collected) -> Collected_Mark
-collected_restore :: proc(c: ^Collected, m: Collected_Mark)
+check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
 enum_member :: proc "contextless" (info: ^runtime.Type_Info_Enum, value: i64) -> int
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field
 grow_frames :: #force_no_inline proc "contextless" (h: ^Reader, have, want: int) -> (int, bool)
@@ -156,18 +160,24 @@ grow_list :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Re
 map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: core.Token, value: ^Field, fresh: bool) -> (slot: rawptr, reason: core.Typed_Error_Kind)
 mark_arm :: proc(dest: uintptr, fld: ^Field, m: ^Meta, arm: int)
 on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
-on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check
+on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
+on_token_check :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
+on_token_check_spelled :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
 on_token_spelled :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
-own_errors :: proc(e: ^core.Typed_Error, c: ^Collected)
+own_errors :: proc(e: ^core.Typed_Error, c: ^Sink)
 path_add :: proc "contextless" (e: ^core.Typed_Error, s: core.Step)
 path_close :: proc "contextless" (e: ^core.Typed_Error)
 plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error)
 plan_mismatch :: proc "contextless" (plan: ^Plan, spelling: ^core.Spelling, T: typeid) -> core.Typed_Error
 read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Error
 read_release :: proc "contextless" (r: ^Reader, frames: []Frame)
-read_start :: proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
+read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
 refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
 refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
+sink_error :: proc(c: ^Sink, e: core.Typed_Error)
+sink_mark :: #force_inline proc(c: ^Sink) -> Sink_Mark
+sink_refusal :: proc(c: ^Sink, e: core.Typed_Error, $wide: bool)
+sink_restore :: proc(c: ^Sink, m: Sink_Mark)
 store_cstring :: proc(h: ^Reader, t: core.Token, dest: uintptr) -> core.Typed_Error_Kind
 store_enum :: proc(h: ^Reader, t: core.Token, info: ^runtime.Type_Info_Enum, dest: uintptr, size: u32) -> core.Typed_Error_Kind
 store_enum_value :: proc(info: ^runtime.Type_Info_Enum, n: core.Number, dest: uintptr, size: u32) -> core.Typed_Error_Kind

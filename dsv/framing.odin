@@ -380,7 +380,7 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 		return false
 	}
 	stream := it.input.procedure != nil
-	kept := typed.collected_mark(read.collect)
+	kept := typed.sink_mark(read.sink)
 	if stream {
 		h.r.src, h.hot_end = src, u64(max(len(src) - HOT_REACH, 0))
 	}
@@ -421,8 +421,8 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 	if stream {
 		// The errors name bytes of the joined text, which the window's own bytes replace.
 		place_error(it, b, row, err)
-		if read.collect != nil {
-			for &e in read.collect.errors[kept.errors:] {
+		if read.sink != nil {
+			for &e in read.sink.errors[kept.errors:] {
 				place_error(it, b, row, &e)
 			}
 		}

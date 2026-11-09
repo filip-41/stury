@@ -33,25 +33,41 @@ unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, re
 	}
 	defer typed.plan_destroy(&plan)
 	err = unmarshal_plan(src, spec, target, &plan, opts, read, allocator)
-	typed.own_errors(&err, read.collect)
+	typed.own_errors(&err, read.sink)
 	return err
 }
 
 @(private)
 unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
+	return read_text(src, spec, opts, target, T, plan, read, allocator, false)
+}
+
+// The plan's `read` and `check` of a whole text under the handle `as`.
+@(private)
+read_text_as :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+	return read_text(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, false)
+}
+
+@(private)
+check_text_as :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+	return read_text(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, true)
+}
+
+@(private)
+read_text :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, $CHECK: bool) -> core.Typed_Error {
 	// A text that nests deeper under a raised `max_depth` grows the frames as it goes.
 	stack: [core.MAX_DEPTH + 2]typed.Frame = ---
 	frames := stack[:]
 	err: core.Typed_Error
 	switch spec {
 	case .Json:
-		read_value(src, 0, u64(len(src)), .Json, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false)
+		read_value(src, 0, u64(len(src)), .Json, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false, CHECK)
 		return err
 	case .Jsonc:
-		read_value(src, 0, u64(len(src)), .Jsonc, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false)
+		read_value(src, 0, u64(len(src)), .Jsonc, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false, CHECK)
 		return err
 	case .Json5:
-		read_value(src, 0, u64(len(src)), .Json5, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false)
+		read_value(src, 0, u64(len(src)), .Json5, target, T, plan, read, opts, frames, allocator, context.temp_allocator, &err, false, CHECK)
 		return err
 	}
 	return {kind = .Bad_Option}
@@ -63,7 +79,7 @@ unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, op
 // copies of it through the record reader's calls cost a record's read more than its tokens. The duplicate check's
 // document lives in an arena on `scratch`, freed before the read, and `scratch` is the read's temp allocator.
 @(private)
-read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Error, $LINE: bool) -> (cold: bool) {
+read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, opts: Options, frames: []typed.Frame, allocator, scratch: runtime.Allocator, err: ^core.Typed_Error, $LINE: bool, $CHECK: bool) -> (cold: bool) {
 	if read.dups == .Refuse && !stray_bom(src[lo:cut], lo, S) {
 		arena := runtime.Arena{backing_allocator = scratch, minimum_block_size = 4096}
 		defer runtime.arena_destroy(&arena)
@@ -72,7 +88,7 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 		if built.kind == .Walk || built.kind == .Duplicate_Key {
 			err^ = {kind = .Walk if built.kind == .Walk else .Duplicate_Key, at = built.at, inner = built.inner}
 			context.allocator = allocator
-			typed.collect_error(read.collect, err^)
+			typed.sink_refusal(read.sink, err^, CHECK)
 			return
 		}
 		if built.kind != .None {
@@ -80,18 +96,30 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 			return
 		}
 	}
-	h: typed.Reader
+	H :: typed.Check when CHECK else typed.Reader
+	h: H
 	walk_opts := opts
-	json_reader(&h, &walk_opts, S)
 	text := src if LINE else src[:cut]
-	regs, started := typed.read_start(&h, text, plan, &SPELLING, T, target, read, frames, allocator)
+	regs: core.Hook_Regs
+	started: core.Typed_Error
+	when CHECK {
+		json_reader(&h.reader, untracked(&walk_opts), S)
+		regs, started = typed.check_start(&h, text, plan, &SPELLING, T, target, read, untracked_frames(frames), allocator)
+	} else {
+		json_reader(&h, &walk_opts, S)
+		regs, started = typed.read_start(&h, text, plan, &SPELLING, T, target, read, frames, allocator)
+	}
 	h.ctx.temp_allocator = scratch
 	if started.kind != .None {
 		err^ = started
 		return
 	}
 	defer typed.read_release(&h, frames)
-	on :: typed.on_token_spelled when S == .Json5 else typed.on_token
+	when CHECK {
+		on :: typed.on_token_check_spelled when S == .Json5 else typed.on_token_check
+	} else {
+		on :: typed.on_token_spelled when S == .Json5 else typed.on_token
+	}
 	fault: Maybe(core.Fault)
 	when LINE {
 		fault, cold = walk_line(src, lo, cut, S, opts, &h, &regs, on)
@@ -103,6 +131,18 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 		err^ = typed.read_end(&h, regs, fault)
 	}
 	return
+}
+
+// A pointer to what outlives the read that holds it, hidden from the stack escape check, which cannot see through the
+// base `Reader` of a `typed.Check` that the pointer stays within the call. Only the `Check` read uses it.
+@(private)
+untracked :: #force_inline proc "contextless" (p: ^$T) -> ^T {
+	return (^T)(uintptr(p))
+}
+
+@(private)
+untracked_frames :: #force_inline proc "contextless" (f: []typed.Frame) -> []typed.Frame {
+	return ([^]typed.Frame)(untracked(raw_data(f)))[:len(f)]
 }
 
 // Points the typed reader `h` at JSON's walk under `opts`, which a union's tag scan walks with.

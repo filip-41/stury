@@ -9,15 +9,16 @@ import "core:io"
 import "core:reflect"
 import "core:strings"
 import core ".."
+import rules "../rules"
 
 // What a value is read as. The kinds up to `F64` are the ones the hook's hot compares take. The rest reach the cold
 // paths, since every hot compare fails for them, so a type that has none of them pays nothing for them.
 Read_Kind :: enum u8 {
 	Never,
 	Struct,
+	Required, // a struct with `required` members, or one that captures unknown members, opened as a struct is
 	Slice,
 	Dynamic,
-	Array,
 	Map,
 	String,
 	Bool,
@@ -31,6 +32,7 @@ Read_Kind :: enum u8 {
 	U64,
 	F32,
 	F64,
+	Array, // placed past `F64` so the numeric kinds keep the values the hook's compares are laid out for
 	Enum,
 	Ptr, // `Meta.whole` for a `Maybe` of a pointer, whose element is replaced where a pointer's is read into
 	Maybe, // holds its element in place, then a tag
@@ -46,9 +48,11 @@ Read_Kind :: enum u8 {
 	Bit_Set,
 	Bit_Elem, // an element of the `Bit_Set` whose block holds it
 	Fixed_List,
-	Required, // a struct with `required` members, or one that captures unknown members
 	Inside, // a token of a value read whole
 }
+
+// The hook's number arm tests `U8 ..= U64` as one aligned block and `I8 ..= I32` and `F32 ..= F64` as ranges.
+#assert(int(Read_Kind.U8) % 4 == 0 && int(Read_Kind.I8) == 8)
 
 // A member's or element's record. `stride` is what a value moves `Hook_Regs.c` by: the element size in a list, 0
 // elsewhere. `first` is a container's starting `Hook_Regs.b`.
@@ -76,6 +80,7 @@ Meta :: struct {
 	read:       Unmarshal_Hook, // a `Hook`'s
 	write:      Marshal_Hook, // a `Hook`'s
 	required:   []i32, // on a struct's `Never` record, the members that must be present
+	required_end: i32, // on a struct's own record, one past its last `required` member: a cursor at or past it has passed every one
 	names:      u64, // a struct's members' `name_bit`s, so most keys it does not hold are known by one test
 	lower:      i64, // a `Bit_Set`'s lowest element
 	count:      u32, // a fixed array's length, a `Fixed_List`'s capacity, a `Bit_Set`'s bit count
@@ -93,6 +98,7 @@ Meta :: struct {
 	zeroed:     bool, // a list's new elements must start zeroed, since their readers may leave bytes unwritten
 	tagged:     bool, // a `Union` that reads objects by `Plan.union_tag`, or such a union's named struct arm
 	no_nil:     bool, // a `Union` that has no nil
+	rule_set:   i32, // 1 + the record's set in `Plan.rule_sets`, 0 for none
 }
 
 // A union's arm: the value classes it takes, its tag value, and its tag name when the tag names it.
@@ -165,6 +171,8 @@ Rename :: enum u8 {
 // arms, and `tag_names` the names that replace the arms' type names.
 Plan_Options :: struct {
 	enums:     Enum_Spelling,
+	// Reads each member's rules from its `model:` tag into the member's record. A read by the plan does not check them.
+	rule_tags: bool,
 	union_tag: string,
 	tag_names: []Tag_Name,
 	hooks:     []Type_Hook,
@@ -192,7 +200,10 @@ Plan :: struct {
 	strings:   [dynamic]string,
 	allocator: runtime.Allocator,
 	// A format whose tokens do not type their values reads a document's node through this, where its plan maker sets it.
-	node_read: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^Plan, read: Read_Options, allocator: runtime.Allocator) -> core.Typed_Error,
+	node_read: Node_Read,
+	// The format's text reads and the check of a node, copied from its `Format_Reads` by `plan_build`.
+	read, check: Text_Read,
+	node_check: Node_Read,
 	// The format's value writer, which holds its spelling compiled in, where its plan maker sets it.
 	marshal:   Marshal_Text,
 	// The options the plan was built with, which its reads and writes take, and so do the plans a write builds for a type
@@ -201,8 +212,11 @@ Plan :: struct {
 	// What `plan_make` refused a plan with, which a read or write given the refused plan returns.
 	err:       core.Typed_Error,
 	// A hash of the type, format and options the plan was built from, so a reader that kept what it bound to one plan's
-	// records can tell a plan built the same at their address from another made there after the first was destroyed.
+	// records can tell a plan built the same at their address from another made there after the first was destroyed. A
+	// description's plan has 0, so a reader binds nothing to one.
 	stamp:     u64,
+	// The rules of members, which `Meta.rule_set` names.
+	rule_sets: []rules.Rules,
 }
 
 // Writes the value of `plan`'s type at `value` as `opts` says, to `stream` when it has a procedure, else to new bytes
@@ -219,13 +233,23 @@ Builder :: struct {
 	p:             ^Plan,
 	fields:        [dynamic]Field,
 	meta:          [dynamic]Meta,
-	blocks:        map[typeid]i32,
+	blocks:        map[Block_Key]i32,
 	ends:          map[i32]i32, // a struct block's `Never` record
 	widest:        int,
 	err:           core.Typed_Error,
 	// The names of the members being filled, outermost first, which a refusal reports as its path.
 	trail:         [TRAIL_MAX]string,
 	depth:         int,
+	rule_sets:     [dynamic]rules.Rules,
+}
+
+// What a block is recorded under for its next use and for a value that holds itself: a type and the rule set its
+// element was given, or for a description plan the table (`rules.Array`, `rules.Object`, `rules.Node`,
+// `Maybe(rules.Node)`) and the index of the block's shape.
+@(private)
+Block_Key :: struct {
+	type: typeid,
+	of:   i32,
 }
 
 // A format's plan maker, which `core.Spelling.plans` points at: `plan_build` and what the format's reads and writes add.
@@ -250,40 +274,71 @@ plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := c
 // plan maker starts from it, and so does a write's plan for a type met in an `any`.
 plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error) {
 	context.allocator = allocator
-	spelling := as.spelling
-	p = {as = as, type = T, key_frame = u32(len(spelling.key_open) + len(spelling.key_close)), allocator = allocator}
-	b := Builder{options = &p.options, p = &p}
-	hooks, no_hooks := make([]Type_Hook, len(opts.hooks))
-	tag_names, no_names := make([]Tag_Name, len(opts.tag_names))
-	p.options = {enums = opts.enums, union_tag = owned_copy(&b, opts.union_tag), rename = opts.rename, hooks = hooks, tag_names = tag_names}
-	copy(hooks, opts.hooks)
-	for &t, i in tag_names {
-		t = {opts.tag_names[i].type, owned_copy(&b, opts.tag_names[i].name)}
-	}
-	defer delete(b.blocks)
-	defer delete(b.ends)
-	// The root's block, then the block a value read whole passes through.
-	if reserve_block(&b, 4, nil) >= 0 {
+	b := plan_start(&p, as, opts)
+	p.type = T
+	if root_block(&b) {
 		fill(&b, 0, type_info_of(T), "", 0, 0)
-		never(&b, 1)
-		never(&b, 2)
-		b.fields[2].kind = .Inside
-		never(&b, 3)
 	}
 	if b.err.kind == .None {
 		refuse_tag_members(&b)
 	}
-	solo, no_solo := make([]Field, 2 * len(b.fields))
-	zero, no_zero := make([]u8, max(b.widest, 1))
-	p.solo, p.zero, p.fields, p.meta = solo, zero, b.fields[:], b.meta[:]
-	if no_hooks != nil || no_names != nil || no_solo != nil || no_zero != nil {
+	err = plan_finish(&b, plan_stamp(T, as, opts))
+	return
+}
+
+// The plan both front ends start from: the format, its typed reads, and the options, which the plan owns.
+@(private)
+plan_start :: proc(p: ^Plan, as: core.As, opts: Plan_Options) -> Builder {
+	spelling := as.spelling
+	p^ = {as = as, key_frame = u32(len(spelling.key_open) + len(spelling.key_close)), allocator = context.allocator}
+	if reads := (^Format_Reads)(spelling.typed); reads != nil {
+		p.read, p.check, p.node_read, p.node_check = reads.read, reads.check, reads.node_read, reads.node_check
+	}
+	b := Builder{options = &p.options, p = p}
+	hooks, no_hooks := make([]Type_Hook, len(opts.hooks))
+	tag_names, no_names := make([]Tag_Name, len(opts.tag_names))
+	p.options = {enums = opts.enums, rule_tags = opts.rule_tags, union_tag = owned_copy(&b, opts.union_tag), rename = opts.rename, hooks = hooks, tag_names = tag_names}
+	copy(hooks, opts.hooks)
+	for &t, i in tag_names {
+		t = {opts.tag_names[i].type, owned_copy(&b, opts.tag_names[i].name)}
+	}
+	if no_hooks != nil || no_names != nil {
 		refuse_plan(&b, .No_Memory)
 	}
+	return b
+}
+
+// Adds the root's block, whose first record the front end fills, then the block a value read whole passes through.
+@(private)
+root_block :: proc(b: ^Builder) -> bool {
+	if reserve_block(b, 4, {}) < 0 {
+		return false
+	}
+	never(b, 1)
+	never(b, 2)
+	b.fields[2].kind = .Inside
+	never(b, 3)
+	return true
+}
+
+// Sets what records find each other by, once every block is filled, or frees the plan with its first refusal in `err`.
+@(private)
+plan_finish :: proc(b: ^Builder, stamp: u64) -> core.Typed_Error {
+	p := b.p
+	delete(b.blocks)
+	delete(b.ends)
+	solo, no_solo := make([]Field, 2 * len(b.fields))
+	zero, no_zero := make([]u8, max(b.widest, 1))
+	p.solo, p.zero, p.fields, p.meta, p.rule_sets = solo, zero, b.fields[:], b.meta[:], b.rule_sets[:]
+	if no_solo != nil || no_zero != nil {
+		refuse_plan(b, .No_Memory)
+	}
 	if b.err.kind != .None {
-		err = b.err
+		err := b.err
 		own_names(&err)
-		plan_destroy(&p)
-		return {err = err}, err
+		plan_destroy(p)
+		p.err = err
+		return err
 	}
 	for i in 0 ..< len(b.fields) {
 		m := &b.meta[i]
@@ -302,8 +357,8 @@ plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := 
 		p.solo[2 * i + 1] = b.fields[1]
 	}
 	p.root = &b.fields[1]
-	p.stamp = plan_stamp(T, as, opts)
-	return
+	p.stamp = stamp
+	return {}
 }
 
 @(private)
@@ -324,7 +379,7 @@ plan_stamp :: proc(T: typeid, as: core.As, opts: Plan_Options) -> u64 {
 	for b in as.opts {
 		mix(&h, u64(b))
 	}
-	mix(&h, u64(opts.enums) | u64(opts.rename) << 8)
+	mix(&h, u64(opts.enums) | u64(opts.rename) << 8 | u64(opts.rule_tags) << 16)
 	text(&h, opts.union_tag)
 	for t in opts.tag_names {
 		mix(&h, transmute(u64)t.type)
@@ -355,15 +410,15 @@ plan_destroy :: proc(p: ^Plan) {
 	delete(p.zero)
 	delete(p.options.hooks)
 	delete(p.options.tag_names)
+	delete(p.rule_sets)
 	p^ = {}
 }
 
-// Adds a block of `n` records and returns its first, or -1 with the plan refused. A block of type `id` is recorded for the
-// next use of the type and for a type that holds itself.
+// Adds a block of `n` records and returns its first, or -1 with the plan refused. The block is recorded under `key`.
 @(private)
-reserve_block :: proc(b: ^Builder, n: int, id: typeid) -> i32 {
+reserve_block :: proc(b: ^Builder, n: int, key: Block_Key) -> i32 {
 	at := len(b.fields)
-	_, slot, _, no_slot := map_entry(&b.blocks, id)
+	_, slot, _, no_slot := map_entry(&b.blocks, key)
 	if no_slot != nil || resize(&b.fields, at + n) != nil || resize(&b.meta, at + n) != nil {
 		refuse_plan(b, .No_Memory)
 		return -1
@@ -459,20 +514,28 @@ refuse_plan :: proc(b: ^Builder, kind: core.Typed_Error_Kind, at := "", text := 
 	path_close(&b.err)
 }
 
+// Adds a member's `name` to the path a refusal reports, and returns the depth that takes it off again.
 @(private)
-fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset, stride: u32) {
+enter :: proc(b: ^Builder, name: string) -> int {
+	depth := b.depth
 	if len(name) > 0 {
 		if b.depth < TRAIL_MAX {
 			b.trail[b.depth] = name
 		}
 		b.depth += 1
 	}
-	defer if len(name) > 0 {
-		b.depth -= 1
-	}
+	return depth
+}
+
+// Fills record `at` for a value of `ti`. `rule_set` is the record's `Meta.rule_set`, which a `Maybe` or a pointer passes to
+// its element.
+@(private)
+fill :: proc(b: ^Builder, at: int, ti: ^runtime.Type_Info, name: string, offset, stride: u32, rule_set := i32(0)) {
+	depth := enter(b, name)
+	defer b.depth = depth
 	base := runtime.type_info_base(ti)
 	f := Field{offset = offset, stride = stride, meta = u32(at)}
-	m := Meta{name = name, type = ti.id, size = u32(base.size), block = -1}
+	m := Meta{name = name, type = ti.id, size = u32(base.size), block = -1, rule_set = rule_set}
 	// A record holds a size, offset, stride or count in 32 bits, and each of them is at most its type's size.
 	if base.size > int(max(u32)) {
 		refuse_plan(b, .Unsupported)
@@ -605,7 +668,8 @@ fill_base :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti, base: ^runtime.Type_Info
 			return
 		}
 		f.kind = .Ptr
-		list(b, m, ti, v.elem, 0)
+		list(b, m, ti, v.elem, 0, m.rule_set)
+		m.rule_set = 0
 	case runtime.Type_Info_Union:
 		fill_union(b, f, m, ti, v)
 	case runtime.Type_Info_Struct:
@@ -656,11 +720,11 @@ fill_bit_set :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v
 	}
 	f.kind = .Bit_Set
 	m.list = true
-	if at, ok := b.blocks[ti.id]; ok {
+	if at, ok := b.blocks[{ti.id, 0}]; ok {
 		m.block = at
 		return
 	}
-	m.block = reserve_block(b, 2, ti.id)
+	m.block = reserve_block(b, 2, {ti.id, 0})
 	if m.block < 0 {
 		return
 	}
@@ -679,10 +743,10 @@ fill_bit_set :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v
 // a `Never` record.
 @(private)
 any_block :: proc(b: ^Builder) -> i32 {
-	if at, ok := b.blocks[typeid_of(any)]; ok {
+	if at, ok := b.blocks[{typeid_of(any), 0}]; ok {
 		return at
 	}
-	at := reserve_block(b, 4, typeid_of(any))
+	at := reserve_block(b, 4, {typeid_of(any), 0})
 	if at < 0 {
 		return -1
 	}
@@ -694,7 +758,7 @@ any_block :: proc(b: ^Builder) -> i32 {
 }
 
 @(private)
-list :: proc(b: ^Builder, m: ^Meta, ti, elem: ^runtime.Type_Info, stride: u32) {
+list :: proc(b: ^Builder, m: ^Meta, ti, elem: ^runtime.Type_Info, stride: u32, rule_set := i32(0)) {
 	base := runtime.type_info_base(elem)
 	m.list = true
 	m.elem_size = u32(base.size)
@@ -706,16 +770,16 @@ list :: proc(b: ^Builder, m: ^Meta, ti, elem: ^runtime.Type_Info, stride: u32) {
 	case:
 		m.zeroed = true
 	}
-	if at, ok := b.blocks[ti.id]; ok {
+	if at, ok := b.blocks[{ti.id, rule_set}]; ok {
 		m.block = at
 		return
 	}
-	m.block = reserve_block(b, 2, ti.id)
+	m.block = reserve_block(b, 2, {ti.id, rule_set})
 	if m.block < 0 {
 		return
 	}
 	never(b, int(m.block) + 1)
-	fill(b, int(m.block), elem, "", 0, stride)
+	fill(b, int(m.block), elem, "", 0, stride, rule_set)
 }
 
 // A union reads a value into the arm its class picks, so no two arms may take one class, except named struct arms under
@@ -731,25 +795,28 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 		if p, is_ptr := elem.variant.(runtime.Type_Info_Pointer); is_ptr && p.elem != nil && m.tag_size == 0 {
 			f.kind = .Ptr
 			m.whole = true
-			list(b, m, ti, p.elem, 0)
+			list(b, m, ti, p.elem, 0, m.rule_set)
+			m.rule_set = 0
 			return
 		}
 		if m.tag_size == 1 {
 			f.kind = .Maybe
-			list(b, m, ti, v.variants[0], 0)
+			list(b, m, ti, v.variants[0], 0, m.rule_set)
+			m.rule_set = 0
 			return
 		}
 	}
-	if at, ok := b.blocks[ti.id]; ok {
+	// The arms take the union's rules, which apply to the value of whichever arm reads it.
+	if at, ok := b.blocks[{ti.id, m.rule_set}]; ok {
 		m.block = at
 	} else {
-		m.block = reserve_block(b, len(v.variants) + 1, ti.id)
+		m.block = reserve_block(b, len(v.variants) + 1, {ti.id, m.rule_set})
 		if m.block < 0 {
 			return
 		}
 		never(b, int(m.block) + len(v.variants))
 		for arm, k in v.variants {
-			fill(b, int(m.block) + k, arm, "", 0, 0)
+			fill(b, int(m.block) + k, arm, "", 0, 0, m.rule_set)
 		}
 	}
 	arms, failed := make([]Arm, len(v.variants))
@@ -774,16 +841,24 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 		}
 	}
 	m.tagged = named >= 2 && len(b.union_tag) > 0
-	taken: bit_set[Value_Class]
-	untagged_objects := 0
 	for &arm, k in m.arms {
 		if m.tagged && len(arm.name) > 0 {
 			b.meta[int(m.block) + k].tagged = true
 		} else {
 			arm.name = ""
-			if .Object in arm.classes {
-				untagged_objects += 1
-			}
+		}
+	}
+	refuse_overlap(b, m)
+}
+
+// Refuses a union two of whose arms take one class of value, except objects that arms named by the union's tag take.
+@(private)
+refuse_overlap :: proc(b: ^Builder, m: ^Meta) {
+	taken: bit_set[Value_Class]
+	untagged_objects := 0
+	for arm in m.arms {
+		if len(arm.name) == 0 && .Object in arm.classes {
+			untagged_objects += 1
 		}
 		if arm.classes & taken - {.Object} != {} {
 			refuse_plan(b, .Ambiguous_Union, text = "two arms read the same kind of value")
@@ -863,6 +938,7 @@ Member :: struct {
 	offset:   uintptr,
 	required: bool,
 	omit:     bool,
+	rule_set: i32,
 }
 
 // A struct's block holds its members, a `Never` record that holds in its `Meta` what is true of every use of the struct,
@@ -870,12 +946,7 @@ Member :: struct {
 // fixed before any member's type is read, so a recursive type meets it whole.
 @(private)
 fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: runtime.Type_Info_Struct) {
-	f.kind = .Struct
-	if at, ok := b.blocks[ti.id]; ok {
-		m.block, m.members = at, b.ends[at] - at
-		if end := &b.meta[b.ends[at]]; len(end.required) > 0 || end.capture >= 0 {
-			f.kind = .Required
-		}
+	if known_struct(b, {ti.id, 0}, f, m) {
 		return
 	}
 	members: [dynamic]Member
@@ -888,50 +959,82 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 				refuse_plan(b, .Unsupported, x.name)
 			}
 		}
+		// A write would leave out what the read then finds missing.
+		if x.required && x.omit {
+			refuse_plan(b, .Unsupported, x.name)
+		}
 	}
 	n := len(members)
-	at := reserve_block(b, n + 1 + (2 if capture != nil else 0), ti.id)
+	at := struct_block(b, {ti.id, 0}, f, m, members[:], capture != nil)
 	if at < 0 {
 		return
 	}
-	_, end_slot, _, no_end := map_entry(&b.ends, at)
-	if no_end != nil {
-		refuse_plan(b, .No_Memory)
-		return
-	}
-	end_slot^ = at + i32(n)
-	m.block, m.members = at, i32(n)
-	end := at + i32(n)
-	never(b, int(end))
-	required: [dynamic]i32
-	for x, i in members {
-		if x.required {
-			// A write would leave out what the read then finds missing.
-			if x.omit {
-				refuse_plan(b, .Unsupported, x.name)
-			}
-			if _, failed := append(&required, i32(i)); failed != nil {
-				refuse_plan(b, .No_Memory)
-			}
-		}
-	}
-	b.meta[end].required = required[:]
 	if c, ok := capture.?; ok {
-		b.meta[end].capture = end + 1
-		never(b, int(end) + 2)
-		fill(b, int(end) + 1, c.type, "", u32(c.offset), 0)
-	}
-	if len(required) > 0 || capture != nil {
+		b.meta[int(at) + n].capture = at + i32(n) + 1
+		fill(b, int(at) + n + 1, c.type, "", u32(c.offset), 0)
 		f.kind = .Required
 	}
 	for x, i in members {
-		fill(b, int(at) + i, x.type, x.name, u32(x.offset), 0)
+		fill(b, int(at) + i, x.type, x.name, u32(x.offset), 0, x.rule_set)
 		r := &b.fields[int(at) + i]
 		r.omit = x.omit
 		if !x.omit && r.n <= KEY_SIZE_MAX && plain_name(x.name) {
 			r.key_size = u8(r.n)
 		}
 	}
+}
+
+// Points `f` at the struct block recorded under `key`, if there is one.
+@(private)
+known_struct :: proc(b: ^Builder, key: Block_Key, f: ^Field, m: ^Meta) -> bool {
+	at, ok := b.blocks[key]
+	if !ok {
+		return false
+	}
+	m.block, m.members = at, b.ends[at] - at
+	end := &b.meta[b.ends[at]]
+	m.required_end = end.required_end
+	f.kind = .Required if len(end.required) > 0 || end.capture >= 0 else .Struct
+	return true
+}
+
+// Adds the block of a struct with `members`, its `Never` record with the members that must be present, and room for a
+// capturing map's record and its `Never` record. Returns the block's first record, or -1 with the plan refused.
+@(private)
+struct_block :: proc(b: ^Builder, key: Block_Key, f: ^Field, m: ^Meta, members: []$M, capture: bool) -> i32 {
+	n := len(members)
+	at := reserve_block(b, n + 1 + (2 if capture else 0), key)
+	if at < 0 {
+		return -1
+	}
+	_, end_slot, _, no_end := map_entry(&b.ends, at)
+	if no_end != nil {
+		refuse_plan(b, .No_Memory)
+		return -1
+	}
+	end := int(at) + n
+	end_slot^ = i32(end)
+	m.block, m.members = at, i32(n)
+	never(b, end)
+	if capture {
+		never(b, end + 2)
+	}
+	required: [dynamic]i32
+	for x, i in members {
+		if x.required {
+			if _, failed := append(&required, i32(i)); failed != nil {
+				refuse_plan(b, .No_Memory)
+			}
+		}
+	}
+	b.meta[end].required = required[:]
+	f.kind = .Struct
+	if len(required) > 0 {
+		f.kind = .Required
+		m.required_end = required[len(required) - 1] + 1
+		b.meta[end].required_end = m.required_end
+	}
+	return at
 }
 
 // Whether a name's written text is its bytes whatever the options of a write: letters, digits, `_` and `-`.
@@ -960,14 +1063,19 @@ lay_out :: proc(b: ^Builder, v: runtime.Type_Info_Struct, base: uintptr, out: ^[
 			continue
 		}
 		_, hooked := hook_of(b, v.types[i].id)
+		// A flattened or capturing member is no value of its own for rules to hold.
+		rule_set := rules_of(b, tag.name, v.tags[i])
 		if inner, is_struct := runtime.type_info_base(v.types[i]).variant.(runtime.Type_Info_Struct); is_struct && v.usings[i] && !tag.named && !hooked && .raw_union not_in inner.flags && inner.soa_kind == .None {
+			if rule_set > 0 {
+				refuse_plan(b, .Bad_Tag, tag.name, "model")
+			}
 			lay_out(b, inner, base + v.offsets[i], out, capture)
 			continue
 		}
-		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit}
+		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit, rule_set}
 		if tag.unknown {
-			if tag.required {
-				refuse_plan(b, .Bad_Tag, tag.name, "required")
+			if tag.required || rule_set > 0 {
+				refuse_plan(b, .Bad_Tag, tag.name, "required" if tag.required else "model")
 			}
 			if v.types[i].id != typeid_of(map[string]Raw) || capture^ != nil {
 				refuse_plan(b, .Unsupported, tag.name)

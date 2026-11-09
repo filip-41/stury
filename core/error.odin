@@ -492,6 +492,20 @@ Typed_Error :: struct {
 	steps:        [MAX_ERROR_STEPS]Step,
 }
 
+// One error a check or a load reports. `start` and `end` are the failing value's first byte and the byte past it in the
+// source (a container the read skips ends at its open token, since the walk passes its close unseen), `record` is the index of the record the read was in
+// (0 for a read of one text), `path` the steps to the value from the root, any depth, and `keyword_path` the steps through
+// the rules that failed it. `operand` is the rule's operand, the limit or the enum. The steps' names are the sink's own
+// copies, freed by `sink_destroy`.
+Error_Entry :: struct {
+	kind:         Typed_Error_Kind,
+	start, end:   u64,
+	record:       i64,
+	path:         []Step,
+	keyword_path: []Step,
+	operand:      Value,
+}
+
 // What a refusal names beside its kind: `.Walk`'s fault in `inner`, what a `.Plan_Mismatch` met in `plans`, and
 // `want` for the other kinds. The three share their bytes, so a reader reads the one its kind names, as `core:fmt` does
 // by the tags.
@@ -726,6 +740,31 @@ write_steps :: proc(w: io.Writer, steps: []Step, whole: bool) -> io.Error {
 			io.write_byte(w, ']') or_return
 		case Descend:
 			io.write_byte(w, '.') or_return
+		}
+	}
+	return nil
+}
+
+// Writes `steps` as a JSON Pointer (RFC 6901): nothing for the root, else `/` and each step's name with `~` and `/` escaped,
+// or its index. A step that names no one member, or all, writes `-`.
+write_pointer :: proc(w: io.Writer, steps: []Step) -> io.Error {
+	for s in steps {
+		io.write_byte(w, '/') or_return
+		switch v in s {
+		case Name:
+			for c in transmute([]u8)string(v) {
+				switch c {
+				case '~': io.write_string(w, "~0") or_return
+				case '/': io.write_string(w, "~1") or_return
+				case: io.write_byte(w, c) or_return
+				}
+			}
+		case Index:
+			io.write_int(w, int(v)) or_return
+		case Index_Or_Name:
+			io.write_int(w, v.index) or_return
+		case All, Slice, Descend:
+			io.write_byte(w, '-') or_return
 		}
 	}
 	return nil

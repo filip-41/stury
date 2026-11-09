@@ -87,7 +87,7 @@ out, err := json.marshal(person, allocator = alloc)  // {"name":"ada","n":1}
 - A repeated key follows `Read_Options.dups`: `.Last` by default, `.First`, or `.Refuse` for an error.
 - `Maybe(T)` and pointers take `null`. Enums read by name, unions by the arm their value picks, and a type in
   `Plan_Options.hooks` is read by your procedure.
-- `Read_Options.collect` reads on after a refused value and gathers every refusal instead of stopping at the first.
+- `Read_Options.sink` reads on after a refused value and gathers every refusal instead of stopping at the first.
 - A program that reads one type many times builds the plan once with `json.plan_make` or `dsv.plan_make`, passes it to
   `unmarshal`, and frees it with `typed.plan_destroy`. There is no global cache.
 

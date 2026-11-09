@@ -1,6 +1,7 @@
 package json_tests
 
 import "base:runtime"
+import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:strings"
@@ -18,7 +19,7 @@ read :: proc(t: ^testing.T, text: string, target: ^$T, opts := typed.Read_Option
 	src := transmute([]u8)text
 	by_doc := target^
 	e := json.unmarshal(src, json.Spec.Json, target, read = opts, opts = {}, allocator = context.temp_allocator)
-	if opts.collect == nil && opts.dups != .Refuse {
+	if opts.sink == nil && opts.dups != .Refuse {
 		plan, planned := json.plan_make(T, allocator = context.temp_allocator)
 		doc, built := json.build(src, json.Spec.Json, allocator = context.temp_allocator)
 		if planned.kind == .None && built.kind == .None {
@@ -99,9 +100,9 @@ refuse_duplicates_reads_the_whole_text_first :: proc(t: ^testing.T) {
 	testing.expect_value(t, e.at, 12)
 	// A collecting read holds what it returns, the text's fault included.
 	for text in ([]string{`{"a":{"b":1,"b":2}}`, `{"a":01}`}) {
-		sink: typed.Collected
+		sink: typed.Sink
 		sink.errors.allocator = context.temp_allocator
-		e = read(t, text, &v, {dups = .Refuse, collect = &sink})
+		e = read(t, text, &v, {dups = .Refuse, sink = &sink})
 		testing.expect_value(t, len(sink.errors), 1)
 		testing.expect_value(t, sink.errors[0].kind, e.kind)
 	}
@@ -119,8 +120,8 @@ a_collecting_read_with_no_errors_allocator_uses_the_reads :: proc(t: ^testing.T)
 	texts := []string{`{"a":"x"}`, `{"a":01}`, `{"a":1,"a":2}`}
 	for text in texts {
 		s: S
-		sink: typed.Collected
-		e := json.unmarshal(transmute([]u8)text, json.Spec.Json, &s, read = {dups = .Refuse, collect = &sink}, opts = {}, allocator = mem.tracking_allocator(&track))
+		sink: typed.Sink
+		e := json.unmarshal(transmute([]u8)text, json.Spec.Json, &s, read = {dups = .Refuse, sink = &sink}, opts = {}, allocator = mem.tracking_allocator(&track))
 		testing.expect(t, e.kind != .None, text)
 		testing.expect_value(t, len(sink.errors), 1)
 		testing.expect(t, sink.errors.allocator.data == &track, text)
@@ -479,11 +480,11 @@ unions_by_class_and_tag :: proc(t: ^testing.T) {
 	// The walk's fault wins over what a broken text makes of the tag.
 	check(t, plan = &plan, text = `{"x":1,}`, want = .Walk)
 	// A collecting read ends at that fault, which it holds once.
-	sink: typed.Collected
+	sink: typed.Sink
 	sink.errors.allocator = context.temp_allocator
 	broken := `{"x":01,"type":"A"}`
 	bv: T
-	be := json.unmarshal(transmute([]u8)broken, json.Spec.Json, &bv, &plan, read = {collect = &sink}, opts = {}, allocator = context.temp_allocator)
+	be := json.unmarshal(transmute([]u8)broken, json.Spec.Json, &bv, &plan, read = {sink = &sink}, opts = {}, allocator = context.temp_allocator)
 	testing.expect_value(t, be.kind, core.Typed_Error_Kind.Walk)
 	testing.expect_value(t, len(sink.errors), 1)
 	// Under `.Refuse` the tag's key is known in a tagged arm only.
@@ -686,13 +687,13 @@ collecting_reads_past_each_refusal :: proc(t: ^testing.T) {
 		p: Point,
 		n: string `json:"n,required"`,
 	}
-	sink := typed.Collected {
+	sink := typed.Sink {
 		errors = make([dynamic]core.Typed_Error, context.temp_allocator),
 	}
 	s := S {
 		a = 7,
 	}
-	e := read(t, `{"a":"no","l":[1,"x",3],"p":{"x":"y","y":2},"q":1}`, &s, {collect = &sink})
+	e := read(t, `{"a":"no","l":[1,"x",3],"p":{"x":"y","y":2},"q":1}`, &s, {sink = &sink})
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.errors), 4)
 	testing.expect_value(t, sink.errors[0].at, 5)
@@ -706,19 +707,19 @@ collecting_reads_past_each_refusal :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.l[2], 3)
 	testing.expect_value(t, s.p.y, 2)
 
-	few := typed.Collected {
+	few := typed.Sink {
 		errors     = make([dynamic]core.Typed_Error, context.temp_allocator),
 		max_errors = 2,
 	}
 	l: []i32
-	read(t, `["a","b","c","d"]`, &l, {collect = &few})
+	read(t, `["a","b","c","d"]`, &l, {sink = &few})
 	testing.expect_value(t, len(few.errors), 2)
 	testing.expect(t, few.truncated)
 	testing.expect_value(t, len(l), 4)
 
 	// The walk still judges a passed-over value.
 	sink.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
-	e = read(t, `{"a":[01]}`, &s, {collect = &sink})
+	e = read(t, `{"a":[01]}`, &s, {sink = &sink})
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, sink.errors[len(sink.errors) - 1].kind, core.Typed_Error_Kind.Walk)
 }
@@ -995,10 +996,10 @@ a_value_a_wrapper_refuses_has_the_wrappers_path :: proc(t: ^testing.T) {
 		},
 		w: Maybe(^Maybe(i32)),
 	}
-	sink: typed.Collected
+	sink: typed.Sink
 	sink.errors.allocator = context.temp_allocator
 	s: S
-	read(t, `{"m":1.5,"p":1.5,"u":1.5,"w":1.5}`, &s, {collect = &sink})
+	read(t, `{"m":1.5,"p":1.5,"u":1.5,"w":1.5}`, &s, {sink = &sink})
 	names := []string{"m", "p", "u", "w"}
 	testing.expect_value(t, len(sink.errors), len(names))
 	for &e, i in sink.errors {
@@ -1036,10 +1037,10 @@ a_collecting_read_leaves_a_wrapper_whose_element_it_refuses :: proc(t: ^testing.
 		w = &kept,
 		u = "keep",
 	}
-	sink: typed.Collected
+	sink: typed.Sink
 	sink.errors.allocator = context.temp_allocator
 	src := `{"m":1.5,"p":[1],"w":"x","u":2.5,"l":[1,2.5],"q":[1,"x"]}`
-	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, read = {collect = &sink}, opts = {}, allocator = alloc)
+	e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, read = {sink = &sink}, opts = {}, allocator = alloc)
 	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.errors), 6)
 	testing.expect_value(t, s.m, 5)
@@ -1179,13 +1180,13 @@ a_one_shot_read_error_names_its_field_after_the_plan_is_gone :: proc(t: ^testing
 		b: i32 `json:"beta"`,
 	}
 	inner := Poison_Free_Alloc{inner = context.temp_allocator}
-	kept: typed.Collected
+	kept: typed.Sink
 	kept.errors.allocator = context.temp_allocator
 	{
 		context.temp_allocator = runtime.Allocator{poison_free_alloc_proc, &inner}
 		s: S
 		src := `{"alpha":"x","beta":"y"}`
-		e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, read = {collect = &kept}, opts = {}, allocator = inner.inner)
+		e := json.unmarshal(transmute([]u8)src, json.Spec.Json, &s, read = {sink = &kept}, opts = {}, allocator = inner.inner)
 		testing.expect_value(t, string(e.steps[0].(core.Name)), "alpha")
 	}
 	testing.expect_value(t, len(kept.errors), 2)
@@ -1266,4 +1267,85 @@ types_the_plan_refuses :: proc(t: ^testing.T) {
 		_, err := json.plan_make(T, plan = {}, allocator = context.temp_allocator)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 	}
+}
+
+@(test)
+required_members_read_in_any_order_past_the_63rd_bit :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Many :: struct {
+		m0, m1, m2, m3, m4, m5, m6, m7, m8, m9: i32 `json:",required"`,
+		m10, m11, m12, m13, m14, m15, m16, m17, m18, m19: i32 `json:",required"`,
+		m20, m21, m22, m23, m24, m25, m26, m27, m28, m29: i32 `json:",required"`,
+		m30, m31, m32, m33, m34, m35, m36, m37, m38, m39: i32 `json:",required"`,
+		m40, m41, m42, m43, m44, m45, m46, m47, m48, m49: i32 `json:",required"`,
+		m50, m51, m52, m53, m54, m55, m56, m57, m58, m59: i32 `json:",required"`,
+		m60, m61, m62, m63, m64, m65, m66, m67, m68, m69: i32 `json:",required"`,
+	}
+	b := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&b, '{')
+	for i := 69; i >= 0; i -= 1 {
+		fmt.sbprintf(&b, `"m%d":%d`, i, i)
+		if i != 0 {
+			strings.write_byte(&b, ',')
+		}
+	}
+	strings.write_byte(&b, '}')
+	v: Many
+	e := read(t, strings.to_string(b), &v)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, v.m0, 0)
+	testing.expect_value(t, v.m69, 69)
+	// The 70th member absent is the one reported.
+	text := strings.to_string(b)
+	cut := strings.index(text, `"m69":69,`)
+	missing := strings.concatenate({text[:cut], text[cut + len(`"m69":69,`):]}, context.temp_allocator)
+	w: Many
+	e = read(t, missing, &w)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Missing_Field)
+	testing.expect_value(t, string(e.steps[e.n_steps - 1].(core.Name)), "m69")
+}
+
+@(test)
+a_required_struct_inside_a_list_inside_a_required_struct :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	Leaf :: struct {
+		x: i32 `json:",required"`,
+	}
+	Mid :: struct {
+		leaves: []Leaf `json:",required"`,
+		tag:    string,
+	}
+	Top :: struct {
+		mids: []Mid `json:",required"`,
+	}
+	v: Top
+	e := read(t, `{"mids":[{"leaves":[{"x":1},{"x":2}],"tag":"a"},{"leaves":[],"tag":"b"}]}`, &v)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, len(v.mids), 2)
+	testing.expect_value(t, v.mids[0].leaves[1].x, 2)
+	w: Top
+	e = read(t, `{"mids":[{"leaves":[{"x":1},{}]}]}`, &w)
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Missing_Field)
+	testing.expect_value(t, e.n_steps, 5)
+}
+
+@(test)
+a_repeated_key_is_refused_inside_a_skipped_value_and_a_list :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	S :: struct {
+		a: i32,
+		l: []Point,
+	}
+	s: S
+	e := read(t, `{"a":1,"skipped":{"k":1,"k":2},"l":[]}`, &s, {dups = .Refuse})
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, e.at, 24)
+	l: S
+	e = read(t, `{"l":[{"x":1,"y":2},{"x":1,"x":3}]}`, &l, {dups = .Refuse})
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, e.at, 27)
+	ok: S
+	e = read(t, `{"l":[{"x":1,"y":2}]}`, &ok, {dups = .Refuse})
+	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	testing.expect_value(t, len(ok.l), 1)
 }

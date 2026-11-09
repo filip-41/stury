@@ -53,7 +53,7 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 		if err.kind == .None {
 			err = read_document(doc, node, T, target, &made, read, allocator)
 		}
-		own_errors(&err, read.collect)
+		own_errors(&err, read.sink)
 		plan_destroy(&made)
 		return err
 	}

@@ -25,6 +25,12 @@ MAX_CHILDREN :: u16(0xFFFF)
 // A node's index in a document's `nodes` array.
 Node_Index :: distinct u32
 
+// A node of a document, the value a rule's operand names.
+Value :: struct {
+	doc:  ^Document,
+	node: Node_Index,
+}
+
 // "No such node": answer on a miss. A node index never takes it.
 NO_NODE :: Node_Index(max(u32))
 // The root value's node is node 0.
@@ -246,10 +252,12 @@ number_digits :: #force_inline proc "contextless" (spelling: u16) -> (frac, sum:
 	return frac, sum | (spelling & NUMBER_EXP) >> 6
 }
 
-// How a read treats an object's repeated keys. `.Last` answers the last, the default, and `.First` the first. `.All`
-// answers each of them, and `.Refuse` fails at a key that repeats one of its object's, at the second key's first byte.
-// A read of one member, as `member` is, picks under `.All` and `.Refuse` as under `.Last`.
+// How a read treats an object's repeated keys. `.Default` is the zero value and takes the format's own policy, which a
+// format whose policy is not `.Last` resolves in its own entry points. `.Last` answers the last and `.First` the first. `.All` answers each of
+// them, and `.Refuse` fails at a key that repeats one of its object's, at the second key's first byte. A read of one
+// member, as `member` is, picks under `.All` and `.Refuse` as under `.Last`.
 Duplicates :: enum u8 {
+	Default,
 	Last,
 	First,
 	All,
@@ -275,7 +283,7 @@ Duplicates :: enum u8 {
 // `stream`, nil for a format with no document writer, see `core.write`. `tokens` is the format's `^write.Token_Spelling`,
 // nil for a format with no token writer. `records` is the format's `^records.Services`, nil for a format with no record
 // reader. `plans` is the format's `typed.Plan_Make`, nil for a format whose plans need nothing past `typed.plan_build`.
-// Each is a `rawptr` since `core/write`, `core/records` and `core/typed` import `core`, and each is cast back to that
+// `typed` is the format's `^typed.Format_Reads`, nil for a format with no typed read. Each pointer is a `rawptr` since `core/write`, `core/records` and `core/typed` import `core`, and each is cast back to that
 // type unchecked, so a format sets them to exactly that type or leaves them nil.
 Spelling :: struct {
 	text:       proc(v: ^Token_View, t: Token, buf: []u8) -> (s: string, ok: bool),
@@ -294,6 +302,7 @@ Spelling :: struct {
 	tokens:     rawptr,
 	records:    rawptr,
 	plans:      rawptr,
+	typed:      rawptr,
 	tag_key:    string,
 	key_open:   string,
 	key_close:  string,

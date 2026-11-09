@@ -98,7 +98,7 @@ Rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: core.No
 // Reads `paths` and `read` into `h`. `many` asks for `$MANY`, and `depth` bounds the frames a `Descend` path opens.
 @(private)
 scan_plan :: proc(h: ^Scan, paths: []core.Path, read: core.Path_Options, depth: int, many: bool, allocator: runtime.Allocator) -> core.Path_Error {
-	h.last = read.dups == .Last || read.dups == .Refuse
+	h.last = read.dups != .First && read.dups != .All
 	h.every_key = read.dups == .All
 	h.stop_early = read.stop_early
 	h.flush = max(int)

@@ -471,34 +471,34 @@ read_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.P
 		#force_inline read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
 		return true
 	}
-	kept := typed.collected_mark(read.collect)
+	kept := typed.sink_mark(read.sink)
 	if it.state[1] != UNFRAMED {
 		read_line(it, rec.at, rec.at + u64(len(rec.text)), target, T, plan, read, allocator, err, S)
 		// A number the walk passed may have been cut short whatever the target makes of it.
 		if _, bad := seq_fault(it, rec, nil).?; !bad || err.kind == .Walk {
 			return true
 		}
-		typed.collected_restore(read.collect, kept)
+		typed.sink_restore(read.sink, kept)
 	}
 	// The record is refused with its `seq_fault`, collected with the read's allocator.
 	f := seq_fault(it, rec, nil).?
 	err^ = {kind = .Walk, at = f.at, inner = f}
 	context.allocator = allocator
-	typed.collect_error(read.collect, err^)
+	typed.sink_error(read.sink, err^)
 	return true
 }
 
 // Reads `it.src[lo:cut]` into `target` in place in the input. When only a read of the text alone tells the answer,
 // that read goes into a scratch value, so `target` keeps what the read in place wrote and allocated, and the errors
-// `read.collect` holds are the ones of the text alone.
+// `read.sink` holds are the ones of the text alone.
 @(private)
 read_line :: proc(it: ^records.Reader, lo, cut: u64, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) {
 	opts := options_of(it.as)
-	kept := typed.collected_mark(read.collect)
-	if !#force_inline read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, true) {
+	kept := typed.sink_mark(read.sink)
+	if !#force_inline read_value(it.src, lo, cut, S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, true, false) {
 		return
 	}
-	typed.collected_restore(read.collect, kept)
+	typed.sink_restore(read.sink, kept)
 	// The scratch value and what its read allocates are dropped with the arena.
 	arena := runtime.Arena{backing_allocator = it.allocator, minimum_block_size = 4096}
 	defer runtime.arena_destroy(&arena)
@@ -509,7 +509,7 @@ read_line :: proc(it: ^records.Reader, lo, cut: u64, target: rawptr, T: typeid, 
 		return
 	}
 	err^ = {}
-	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, scratch_allocator, runtime.arena_allocator(&it.scratch), err, false)
+	read_value(it.src, lo, cut, S, raw_data(scratch), T, plan, read, opts, it.frames, scratch_allocator, runtime.arena_allocator(&it.scratch), err, false, false)
 }
 
 // Reads the next record under `.Concatenated` or `.Entries` into `target` by the framing's own walk. A refusal stops
@@ -522,7 +522,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 		// The duplicate check builds the record's text, so the framing's walk finds its end first.
 		rec, ok := RECORDS.next[it.framing](it)
 		if ok {
-			read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, false)
+			read_value(it.src, rec.at, rec.at + u64(len(rec.text)), S, target, T, plan, read, opts, it.frames, allocator, runtime.arena_allocator(&it.scratch), err, false, false)
 		}
 		return ok
 	}
@@ -537,7 +537,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	defer typed.read_release(&h, it.frames)
 	on :: typed.on_token_spelled when .Es5 in FEATURES[S] else typed.on_token
 	pos, state := it.pos, it.state
-	kept := typed.collected_mark(read.collect)
+	kept := typed.sink_mark(read.sink)
 	_, ok, stopped := frame_walked(it, S, opts, &h, &regs, on)
 	// A walk with a hook reads the comments after a value, so a fault there is past the record, which a walk with no
 	// hook ends where `next` does.
@@ -546,7 +546,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 		_, ok = RECORDS.next[it.framing](it)
 	}
 	if !ok {
-		typed.collected_restore(read.collect, kept)
+		typed.sink_restore(read.sink, kept)
 	} else if h.first.kind != .None {
 		err^ = typed.read_end(&h, regs, nil)
 	}

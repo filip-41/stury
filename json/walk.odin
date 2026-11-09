@@ -496,7 +496,7 @@ at :: #force_inline proc "contextless" (w: ^Walk($S, $H), p: [^]u8) -> u64 {
 // typed read's caller gives as many as its text can nest when that is fewer. `deepen` grows them all.
 @(private)
 depth_held :: #force_inline proc "contextless" (h: ^$H, regs: ^core.Hook_Regs, limit: u64) -> u64 {
-	when H == typed.Reader {
+	when H == typed.Reader || H == typed.Check {
 		return min(limit, core.MAX_DEPTH, u64(len(h.src)) + 16)
 	} else when H == engine.Builder {
 		return min(limit, core.MAX_DEPTH, u64(len(h.stack)) - regs.c)
@@ -515,7 +515,7 @@ deepen :: #force_no_inline proc "contextless" (w: ^Walk($S, $H)) -> core.Fault_K
 		return .Too_Deep
 	}
 	want := min(w.limit, max(2 * w.depth, w.depth + 1))
-	when H == typed.Reader {
+	when H == typed.Reader || H == typed.Check {
 		room, grown := typed.grow_frames(w.hooks, int(w.depth) + 2, int(want) + 2)
 		if !grown {
 			return .No_Memory

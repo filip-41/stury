@@ -517,11 +517,11 @@ expect_read :: proc(t: ^testing.T, src: string, spec: dsv.Spec, opts: dsv.Option
 	listed := T == []string
 	it := records.open(transmute([]u8)src, dsv.as(spec, opts))
 	defer records.close(&it)
-	got_sink, want_sink: typed.Collected
+	got_sink, want_sink: typed.Sink
 	got_read, want_read := read, read
-	if read.collect != nil {
-		got_read.collect = &got_sink
-		want_read.collect = &want_sink
+	if read.sink != nil {
+		got_read.sink = &got_sink
+		want_read.sink = &want_sink
 	}
 	n := 0
 	for {
@@ -578,8 +578,8 @@ rows_read_as_unmarshal :: proc(t: ^testing.T) {
 	gen := rand.default_random_generator(&state)
 	headers := []string{"a,b,c", "b,a,x", "a,a,c", "c,b,\"a\"", "x,y,z", "4,a,b"}
 	breakers := "\",\n1x"
-	sink: typed.Collected
-	reads := []typed.Read_Options{{borrow_strings = true}, {collect = &sink}, {dups = .Refuse}, {unknown = .Refuse}}
+	sink: typed.Sink
+	reads := []typed.Read_Options{{borrow_strings = true}, {sink = &sink}, {dups = .Refuse}, {unknown = .Refuse}}
 	for round in 0 ..< 30 {
 		spec := dsv.Spec(round % 3)
 		header := rand.choice(headers, gen)
@@ -819,13 +819,13 @@ rows_stream_read_as_in_memory :: proc(t: ^testing.T) {
 		mem := records.open(transmute([]u8)src, dsv.as(spec, opts))
 		c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 7}}
 		st := records.open_stream(chunked(&c), dsv.as(spec, opts))
-		ms, ss: typed.Collected
+		ms, ss: typed.Sink
 		ms.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
 		ss.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
 		for {
 			v, w: Required_Record_Row
-			err, more := records.read(&st, &v, &plan, {collect = &ss, unknown = .Refuse}, context.temp_allocator)
-			werr, wmore := records.read(&mem, &w, &plan, {collect = &ms, unknown = .Refuse}, context.temp_allocator)
+			err, more := records.read(&st, &v, &plan, {sink = &ss, unknown = .Refuse}, context.temp_allocator)
+			werr, wmore := records.read(&mem, &w, &plan, {sink = &ms, unknown = .Refuse}, context.temp_allocator)
 			if !more {
 				break
 			}

@@ -33,12 +33,12 @@ SEEN_ON :: u64(1) << 63
 
 // A typed read's options. `dups` picks among a repeated key, `.Refuse` reads the whole text first and refuses a
 // repeated key anywhere in it, and `.All` is `.Bad_Option`, since a field holds one value. `unknown` says what a key the type does not name does. `borrow_strings` makes a string
-// with nothing to decode a slice of `src` in place of a copy. `collect`, when set, reads past a refusal.
+// with nothing to decode a slice of `src` in place of a copy. `sink`, when set, reads past a refusal.
 Read_Options :: struct {
 	dups:           core.Duplicates,
 	unknown:        Unknown_Fields,
 	borrow_strings: bool,
-	collect:        ^Collected,
+	sink:        ^Sink,
 }
 
 // What a key the type does not name does.
@@ -77,6 +77,7 @@ Reader :: struct {
 	borrow:    bool,
 	first_key: bool, // `.First`
 	refuse_unknown: bool,
+	wide:      bool, // a `Check`: the sink takes `core.Error_Entry`s
 	wrap_sp:   u32, // the depth `wrap`'s element is read at, 0 for none
 	// The source, the format and its read, which a token's text and number read through.
 	using view: core.Token_View,
@@ -86,7 +87,7 @@ Reader :: struct {
 	wrap:      ^core.Hook_Regs,
 	ctx:       runtime.Context,
 	first:     core.Typed_Error,
-	collect:   ^Collected,
+	sink:      ^Sink,
 	// Finds the member `Plan.union_tag` of the object at a byte, for a union that reads by its tag.
 	find_tag:  proc(h: ^Reader, at: u64) -> Tag_Scan,
 	// The format's own options, for `find_tag`.
@@ -96,7 +97,7 @@ Reader :: struct {
 // Starts a read of `src` into `target`, a value of `plan`'s type. `frames` holds two more than the walk's
 // depth, for the frame below the root's and the root's. The walk then runs with `r` and the returned registers, and
 // `read_end` ends it.
-read_start :: proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
+read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
 	if plan == nil || plan.spelling != spelling || plan.type != T {
 		err = plan_mismatch(plan, spelling, T)
 		return
@@ -110,7 +111,7 @@ read_start :: proc(r: ^Reader, src: []u8, plan: ^Plan, spelling: ^core.Spelling,
 	// The frame below the root's is read as a parent's and never written past `seen`.
 	frames[0].seen = 0
 	r.frames, r.sp, r.src, r.plan = raw_data(frames), 1, src, plan
-	r.borrow, r.collect = read.borrow_strings, read.collect
+	r.borrow, r.sink = read.borrow_strings, read.sink
 	r.spelling = spelling
 	if read.dups == .All {
 		err.kind = .Bad_Option
@@ -176,7 +177,7 @@ read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> 
 	if f, faulted := fault.?; faulted {
 		context = r.ctx
 		e := core.Typed_Error{kind = .Walk, at = f.at, inner = f}
-		note(r, regs, e)
+		note(r, regs, e, f.at)
 	}
 	// A read ended early gives each open list to its destination.
 	top, child := regs, false
@@ -206,7 +207,17 @@ f32_double_rounds :: #force_inline proc "contextless" (v: f64) -> bool {
 
 // The hook. A value's open takes no call on the hot kinds, and every kind past `F64` fails the compares here and
 // reaches `indirect`.
-on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
+on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return hook(h, regs, t)
+}
+
+// `on_token` for a `Check`.
+on_token_check :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return hook(h, regs, t)
+}
+
+@(private)
+hook :: #force_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
 	if t.role == .Key {
 		return on_key(h, regs, t)
 	}
@@ -218,7 +229,13 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 		h.sp -= 1
 		f := &h.frames[h.sp]
 		owner := field_at(f.b)
-		if owner.kind != .Struct {
+		if owner.kind == .Required {
+			if f.seen != 0 || regs.b < u64(uintptr(owner.first)) + u64(h.plan.meta[owner.meta].required_end) * size_of(Field) {
+				if at := missing_member(h, f, owner, regs, 0); at >= 0 {
+					return refuse_missing(h, f, owner, {f.a, f.b, f.c + u64(owner.stride)}, regs, t, at)
+				}
+			}
+		} else if owner.kind != .Struct {
 			return close_container(h, f, owner, regs, t)
 		}
 		return {f.a, f.b, f.c + u64(owner.stride)}, .Next
@@ -281,7 +298,7 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 		}
 		(^bool)(dest)^ = t.kind == .True
 	case .Object:
-		if fld.kind != .Struct {
+		if fld.kind != .Struct && fld.kind != .Required {
 			return open_map(h, regs, fld, dest, t)
 		}
 		parent := &h.frames[h.sp - 1]
@@ -312,15 +329,25 @@ on_token :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, 
 
 // `on_token` for a spec whose numbers may have a spelling of their own, which the walk does not fold.
 on_token_spelled :: #force_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	if t.kind == .Number && t.role == .Value && t.spelling & core.NUMBER_KIND_MASK != 0 {
-		return spelled_number(h, regs, t)
-	}
-	return on_token(h, regs, t)
+	return hook_spelled(h, regs, t)
+}
+
+// `on_token_spelled` for a `Check`.
+on_token_check_spelled :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return hook_spelled(h, regs, t)
 }
 
 @(private)
-on_token_cold :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
-	return on_token_spelled(h, regs, t)
+hook_spelled :: #force_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	if t.kind == .Number && t.role == .Value && t.spelling & core.NUMBER_KIND_MASK != 0 {
+		return spelled_number(h, regs, t)
+	}
+	return hook(h, regs, t)
+}
+
+@(private)
+on_token_cold :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return hook_spelled(h, regs, t)
 }
 
 // Stores a string token's text: a decoded buffer, or the span as the read keeps one.
@@ -374,10 +401,32 @@ frame_owner :: #force_inline proc "contextless" (f: ^Frame) -> ^Field {
 	return f.owner if wrapper(owner) else owner
 }
 
+// Reports the `required` member `at`, absent from the struct that closes, and under a `Check` every one after it.
+@(cold)
+@(private)
+refuse_missing :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, owner: ^Field, back, regs: core.Hook_Regs, t: core.Token, at: i32) -> (core.Hook_Regs, core.Action) {
+	at := at
+	for at >= 0 {
+		// The struct's frame is reopened for the path, whose last step the name replaces.
+		h.sp += 1
+		r, action := refuse(h, back, core.Typed_Error{kind = .Missing_Field, at = t.lo, steps = {0 = core.Name(h.plan.meta[int(h.plan.meta[owner.meta].block) + int(at)].name)}, n_steps = 1}, t.lo + u64(t.n))
+		h.sp -= 1
+		// A `Check` reports every absent member, a read the first.
+		when H != Check {
+			return r, action
+		}
+		if action == .Stop {
+			return r, action
+		}
+		at = missing_member(h, f, owner, regs, at + 1)
+	}
+	return back, .Next
+}
+
 // Writes the header of the list that closes at `regs.c`, or does what else a container's close does. Reports a refusal.
 @(cold)
 @(private)
-close_container :: #force_no_inline proc "contextless" (h: ^Reader, f: ^Frame, own: ^Field, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
+close_container :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, own: ^Field, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
 	owner := frame_owner(f)
 	back := core.Hook_Regs{f.a, f.b, f.c + u64(own.stride)}
 	#partial switch owner.kind {
@@ -391,19 +440,15 @@ close_container :: #force_no_inline proc "contextless" (h: ^Reader, f: ^Frame, o
 		context = h.ctx
 		lo := u64(uintptr(f.data))
 		if reason := store_whole(h, owner, &h.plan.meta[owner.meta], list_dest(f, owner), f.kind, lo, t.lo + u64(t.n), t); reason != .None {
-			return refuse(h, back, {kind = reason, at = lo})
+			return refuse(h, back, {kind = reason, at = lo}, t.lo + u64(t.n))
 		}
 	case .Required:
-		if at := missing_member(h, f, owner, regs); at >= 0 {
-			// The struct's frame is reopened for the path, whose last step this name replaces.
-			h.sp += 1
-			r, action := refuse(h, back, core.Typed_Error{kind = .Missing_Field, at = t.lo, steps = {0 = core.Name(h.plan.meta[int(h.plan.meta[owner.meta].block) + int(at)].name)}, n_steps = 1})
-			h.sp -= 1
-			return r, action
+		if at := missing_member(h, f, owner, regs, 0); at >= 0 {
+			return refuse_missing(h, f, owner, back, regs, t, at)
 		}
 	case .Array:
 		if regs.c != regs.a {
-			return refuse(h, back, core.Typed_Error{kind = .Wrong_Length, at = t.lo})
+			return refuse(h, back, core.Typed_Error{kind = .Wrong_Length, at = t.lo}, t.lo + u64(t.n))
 		}
 	case .Slice, .Dynamic, .Fixed_List:
 		publish_list(h, f, owner, regs.a, regs.c, false)

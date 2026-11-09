@@ -8,6 +8,7 @@ import "base:runtime"
 import core "../core"
 import compose "../core/compose"
 import build "../core/build"
+import typed "../core/typed"
 import write "../core/write"
 
 // JSON's document holds the walk's tokens over the caller's bytes, read through core's readers and JSON's `SPELLING`.
@@ -34,8 +35,15 @@ EDIT := core.Edit_Spelling {
 SPELLING := core.Spelling {
 	text = text, key_equals = key_equals_decode, number = number, number_f32 = number_f32, build = build_as, validate = validate_as, scan = scan_as,
 	resolve = spelling_resolve, close_end = close_end, query = build.query, edit = &EDIT, write = write_text, tokens = &TOKENS, records = &RECORDS,
-	plans = rawptr(plan_as),
+	plans = rawptr(plan_as), typed = &READS,
 	tag_key = "json", key_open = "\"", key_close = "\":",
+}
+
+// The typed reads of the format, which a plan copies.
+@(rodata)
+@(private)
+READS := typed.Format_Reads {
+	read = read_text_as, check = check_text_as,
 }
 
 // A number's kind fits core's kind bits and leaves bit 0 (`SPELLING_DECODE`) clear.

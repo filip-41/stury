@@ -43,6 +43,7 @@ SPELLING := core.Spelling {
 	number     = spelling_number,
 	build      = build_as,
 	plans      = rawptr(plan_as),
+	typed      = &READS,
 	validate   = proc "contextless" (src: []u8, as: core.As) -> Maybe(core.Fault) {return validate_from(src, as, 0, 0)},
 	scan       = scan_as,
 	resolve    = spelling_resolve,

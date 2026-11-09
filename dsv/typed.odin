@@ -40,8 +40,29 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 		typed.plan_destroy(&p)
 		return {}, err
 	}
-	p.marshal, p.node_read = marshal_text, document_read
+	p.marshal = marshal_text
 	return p, {}
+}
+
+// The typed reads of the format, which a plan copies.
+@(rodata)
+@(private)
+READS := typed.Format_Reads {
+	read      = read_as,
+	check     = check_as,
+	node_read = document_read,
+}
+
+// The plan's `read` of a whole text under the handle `as`.
+@(private)
+read_as :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+	return read_spec(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, false)
+}
+
+// The plan's `check` of a whole text: the read, with every refusal an entry of the sink, and every missing column of a row.
+@(private)
+check_as :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+	return read_spec(src, Spec(as.spec), options_of(as), target, T, plan, read, allocator, true)
 }
 
 @(private)
@@ -52,26 +73,37 @@ unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, re
 	}
 	defer typed.plan_destroy(&plan)
 	err = unmarshal_plan(src, spec, target, &plan, opts, read, allocator)
-	typed.own_errors(&err, read.collect)
+	typed.own_errors(&err, read.sink)
 	return err
 }
 
 @(private)
 unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
-	// Only `plan_make` checks that a type is a list of rows of cells or a row.
-	if plan != nil && plan.marshal == nil && plan.err.kind == .None {
+	return read_spec(src, spec, opts, target, T, plan, read, allocator, false)
+}
+
+// Whether `plan` was made by `typed.plan_make` and not `plan_make`, which alone checks that a type is a list of rows of
+// cells or a row.
+@(private)
+foreign_plan :: proc "contextless" (plan: ^typed.Plan) -> bool {
+	return plan != nil && plan.marshal == nil && plan.err.kind == .None
+}
+
+@(private)
+read_spec :: proc(src: []u8, spec: Spec, opts: Options, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Error {
+	if foreign_plan(plan) {
 		return {kind = .Plan_Mismatch}
 	}
 	switch spec {
-	case .Csv:   return read_text(src, .Csv, T, target, plan, opts, read, allocator)
-	case .Tsv:   return read_text(src, .Tsv, T, target, plan, opts, read, allocator)
-	case .Plain: return read_text(src, .Plain, T, target, plan, opts, read, allocator)
+	case .Csv:   return read_text(src, .Csv, T, target, plan, opts, read, allocator, check)
+	case .Tsv:   return read_text(src, .Tsv, T, target, plan, opts, read, allocator, check)
+	case .Plain: return read_text(src, .Plain, T, target, plan, opts, read, allocator, check)
 	}
 	return {kind = .Bad_Option}
 }
 
 @(private)
-read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
+read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.Plan, opts: Options, read: typed.Read_Options, allocator: runtime.Allocator, check: bool) -> core.Typed_Error {
 	h := Cells{refuse_repeats = read.dups == .Refuse}
 	frames: [ROW_FRAMES]typed.Frame = ---
 	regs, err := typed.read_start(&h.r, src, plan, &SPELLING, T, target, read, frames[:], allocator)
@@ -79,6 +111,7 @@ read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.P
 		return err
 	}
 	h.r.as.spec = u8(S)
+	h.r.wide = check
 	rows_of(&h, plan, len(src))
 	if h.row.kind == .Map && opts.no_header {
 		return {kind = .Unsupported}
@@ -297,21 +330,35 @@ row_token :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 	return regs, action
 }
 
-// Refuses the required field the cursor stands before, at the row's end, and closes the row.
+// Refuses the required field the cursor stands before, and under a check each one after it, at the row's end, and closes
+// the row.
 @(private, cold)
 missing_cell :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Regs, col: ^Column, t: core.Token) -> (core.Hook_Regs, core.Action) {
 	cols := ([^]Column)(col)
-	for !cols[0].required {
-		cols = cols[1:]
-	}
 	regs := regs
 	regs.b = h.past
-	name := h.r.plan.meta[typed.field_at(u64(uintptr(cols[0].rec))).meta].name
-	_, action := typed.refuse(&h.r, regs, {kind = .Missing_Field, at = t.lo, steps = {0 = core.Name(name)}, n_steps = 1})
-	if action == .Stop {
-		return regs, action
+	for {
+		for !cols[0].required {
+			cols = cols[1:]
+		}
+		name := h.r.plan.meta[typed.field_at(u64(uintptr(cols[0].rec))).meta].name
+		_, action := typed.refuse(&h.r, regs, {kind = .Missing_Field, at = t.lo, steps = {0 = core.Name(name)}, n_steps = 1}, t.lo + u64(t.n))
+		if action == .Stop {
+			return regs, action
+		}
+		cols = cols[1:]
+		if !h.r.wide || !cols[0].must {
+			break
+		}
 	}
 	return typed.on_token(&h.r, regs, t)
+}
+
+// The byte past the cell `t` as written, where the entry of a refused cell ends.
+@(private)
+cell_end :: #force_inline proc "contextless" (t: core.Token) -> u64 {
+	_, hi := core.scalar_ends(t)
+	return hi
 }
 
 // A cell no hot read took: an empty cell, a kind or a spelling the hot reads leave out, a cell near the text's end, and
@@ -343,7 +390,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 			if reason == .None {
 				return next, .Next
 			}
-			_, action := typed.refuse(&h.r, at, {kind = reason, at = t.lo})
+			_, action := typed.refuse(&h.r, at, {kind = reason, at = t.lo}, cell_end(t))
 			return next, action
 		}
 		if !h.no_header {
@@ -355,13 +402,13 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 			return next, .Next
 		}
 		at.b = h.past
-		_, action := typed.refuse(&h.r, at, {kind = .Unknown_Field, at = t.lo})
+		_, action := typed.refuse(&h.r, at, {kind = .Unknown_Field, at = t.lo}, cell_end(t))
 		return regs, action
 	}
 	map_row := h.row.kind == .Map
 	if t.n == 0 {
 		if col.required {
-			_, action := typed.refuse(&h.r, at, {kind = .Missing_Field, at = t.lo})
+			_, action := typed.refuse(&h.r, at, {kind = .Missing_Field, at = t.lo}, cell_end(t))
 			return next, action
 		}
 		if map_row {
@@ -377,7 +424,7 @@ cell_cold :: #force_no_inline proc "contextless" (h: ^Cells, regs: core.Hook_Reg
 		slot, reason = typed.map_slot(&h.r, &h.r.plan.meta[h.row.meta], (^runtime.Raw_Map)(f.data), col.name, col.key, typed.field_at(at.b), false)
 		at.c = u64(uintptr(slot))
 		if reason != .None {
-			_, action := typed.refuse(&h.r, at, {kind = reason, at = t.lo})
+			_, action := typed.refuse(&h.r, at, {kind = reason, at = t.lo}, cell_end(t))
 			return next, action
 		}
 	} else if regs.c >= regs.a {

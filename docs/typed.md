@@ -10,7 +10,7 @@ format gives. `core/typed` holds everything format-neutral and names no format.
 - **Record**: the `Field` that reads one member or element.
 - **Target**: the value a read fills.
 - **Refusal**: a value the target does not take, or a text the walk faults on.
-- **Sink**: where a refusal goes. The default stops at the first, and a `Collected` reads on.
+- **Sink**: where a refusal goes. The default stops at the first, and a `Sink` reads on.
 
 ## Entries
 
@@ -196,16 +196,22 @@ refusal holds its elements so far, so all the read allocated is reachable from t
 otherwise not a contract.
 
 ```odin
-Collected :: struct {
+Sink :: struct {
 	errors:     [dynamic]core.Typed_Error,
+	entries:    [dynamic]core.Error_Entry, // what a `check_text` read reports
 	max_errors: int,  // 100 for 0
+	record:     i64,  // the record index an entry takes
 	truncated:  bool, // set past max_errors
 }
 ```
 
-`Read_Options.collect` reads past a refusal. Each goes into `errors`, and the walk passes over the refused value and
+`Read_Options.sink` reads past a refusal. Each goes into `errors`, and the walk passes over the refused value and
 still judges it. A member keeps what it held, and a list's element is zero. A `.Walk` fault ends the read. The returned
-error is the first refusal. The caller frees `errors`, which uses its own allocator, the read's when it has none.
+error is the first refusal. The caller frees the arrays with `sink_destroy`, which use their own allocator, the read's
+when they have none.
+
+`check_text` reads the same way and adds a `core.Error_Entry` to `entries` for each refusal: its byte span, the record,
+and the path of any depth with its names copied. It needs a plan of a format that has a check read.
 
 ## From a document
 

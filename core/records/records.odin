@@ -239,7 +239,7 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	if it.scratch.total_used != 0 {
 		runtime.arena_free_all(&it.scratch)
 	}
-	kept := typed.collected_mark(opts.collect)
+	kept := typed.sink_mark(opts.sink)
 	if it.input.procedure == nil {
 		more = it.services.read(it, target, T, plan, opts, allocator, &err)
 	} else {
@@ -256,7 +256,7 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 			if settle_window(it, more, pos, state) {
 				break
 			}
-			typed.collected_restore(opts.collect, kept)
+			typed.sink_restore(opts.sink, kept)
 			target^ = before
 			if !window_move(it) {
 				return false, {}
@@ -264,8 +264,8 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 		}
 		core.move_typed_error(&err, it.base)
 	}
-	if opts.collect != nil {
-		keep_collected(it, opts.collect, kept.errors)
+	if opts.sink != nil {
+		keep_collected(it, opts.sink, kept.errors)
 	}
 	return
 }
@@ -300,7 +300,7 @@ drop_plan :: proc(it: ^Reader) {
 // Moves the offsets of the errors `c` collected past `from` by the window's base, and copies their names that lie in
 // the reader's scratch, and a stream's source text, to the temp allocator, where a collected error's decoded names live.
 @(private)
-keep_collected :: proc(it: ^Reader, c: ^typed.Collected, from: int) {
+keep_collected :: proc(it: ^Reader, c: ^typed.Sink, from: int) {
 	for &e in c.errors[from:] {
 		core.move_typed_error(&e, it.base)
 		if it.input.procedure != nil && (e.kind == .Wrong_Kind || e.kind == .Out_Of_Range || e.kind == .Not_A_Member) {

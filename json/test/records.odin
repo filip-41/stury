@@ -263,10 +263,10 @@ records_read_in_bounded_memory :: proc(t: ^testing.T) {
 	}
 	it := records.open(few, json.as(.Json))
 	defer records.close(&it)
-	c := typed.Collected{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
+	c := typed.Sink{errors = make([dynamic]core.Typed_Error, context.temp_allocator)}
 	for {
 		v: Number_Record
-		_, more := records.read(&it, &v, &rows, {unknown = .Refuse, collect = &c}, context.temp_allocator)
+		_, more := records.read(&it, &v, &rows, {unknown = .Refuse, sink = &c}, context.temp_allocator)
 		if !more {
 			break
 		}
@@ -464,18 +464,18 @@ records_stream_read :: proc(t: ^testing.T) {
 			mem := records.open(transmute([]u8)src, json.as(spec), framing)
 			c := Chunked{src = transmute([]u8)src, sizes = {1 + round % 5}, fail_at = -1}
 			st := records.open_stream(chunked(&c), json.as(spec), framing)
-			ms, ss: typed.Collected
+			ms, ss: typed.Sink
 			ms.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
 			ss.errors = make([dynamic]core.Typed_Error, context.temp_allocator)
 			for {
 				v, w: Typed_Piece
-				err, more := records.read(&st, &v, &plan, {collect = &ss}, context.temp_allocator)
-				werr, wmore := records.read(&mem, &w, &plan, {collect = &ms}, context.temp_allocator)
+				err, more := records.read(&st, &v, &plan, {sink = &ss}, context.temp_allocator)
+				werr, wmore := records.read(&mem, &w, &plan, {sink = &ms}, context.temp_allocator)
 				if !more {
 					// A record the stream holds is the last one memory reads.
 					if len(st.held) > 0 && wmore {
 						resize(&ms.errors, len(ss.errors))
-						_, wmore = records.read(&mem, &w, &plan, {collect = &ms}, context.temp_allocator)
+						_, wmore = records.read(&mem, &w, &plan, {sink = &ms}, context.temp_allocator)
 					}
 					testing.expectf(t, !wmore && (st.fault == mem.fault || len(st.held) > 0), "%v %v %q: stream ends %v, memory %v %v", framing, spec, src, st.fault, wmore, mem.fault)
 					break
@@ -699,11 +699,11 @@ records_seq_faults_collect_with_the_reads_allocator :: proc(t: ^testing.T) {
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
 	for src in ([]string{" 1\x1e{}", "\x1e3", "\x1e{\"a\":\n"}) {
-		sink: typed.Collected
+		sink: typed.Sink
 		it := records.open(transmute([]u8)src, json.as(.Json), .Seq)
 		for {
 			v: Seq_Target
-			_, more := records.read(&it, &v, &plan, {collect = &sink}, mem.tracking_allocator(&track))
+			_, more := records.read(&it, &v, &plan, {sink = &sink}, mem.tracking_allocator(&track))
 			if !more {
 				break
 			}

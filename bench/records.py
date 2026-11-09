@@ -26,7 +26,7 @@ RUST = os.path.join(BUILD, "rust", "release", "records")
 NDJSON = ["logs.ndjson", "docs.ndjson", "twitter.ndjson"]
 CSV = ["table.csv", "text.csv", "wide.csv"]
 FIXTURES = NDJSON + ["logs.json"] + CSV
-LANES = ["frame", "check", "build", "stream", "read", "write", "cells", "rows", "text"]
+LANES = ["frame", "check", "build", "stream", "read", "refuse", "write", "cells", "rows", "text"]
 # The probe's lanes that run on a pool of 6 threads.
 POOLED = ["threads", "validate", "each"]
 
@@ -56,7 +56,7 @@ TABLES = [
 
 # The lanes that read a record into a type or write a list of them know the fixture's type.
 EXTRA_LANES = {
-    "logs.ndjson": ["build", "stream", "read", "write"],
+    "logs.ndjson": ["build", "stream", "read", "refuse", "write"],
     "docs.ndjson": ["build", "stream"],
     "twitter.ndjson": ["build", "stream"],
     "table.csv": ["cells", "rows", "write"],
