@@ -719,7 +719,7 @@ sweep_write :: proc(t: ^testing.T, try: Write_Try, data: rawptr, want: string, l
 }
 
 // Reads `src` as a built document under the spec a caller passes as `spec`.
-Build :: proc(src: []u8, spec: any) -> (core.Document, core.Document_Error)
+Build :: proc(src: []u8, spec: any) -> (core.Document, core.Error)
 
 // Commits `list`, checks the output against `want`, then builds the output with `build` and `spec`.
 expect_commit :: proc(t: ^testing.T, list: ^core.Edit_List, want: string, build: Build, spec: any) -> bool {
@@ -727,7 +727,7 @@ expect_commit :: proc(t: ^testing.T, list: ^core.Edit_List, want: string, build:
 	defer if len(out) > 0 {
 		delete(out)
 	}
-	if !testing.expectf(t, err.kind == .None, "commit: %v", err) {
+	if !testing.expectf(t, err == nil, "commit: %v", err) {
 		return false
 	}
 	if !testing.expectf(t, string(out) == want, "committed %q, want %q", string(out), want) {
@@ -735,19 +735,19 @@ expect_commit :: proc(t: ^testing.T, list: ^core.Edit_List, want: string, build:
 	}
 	doc, derr := build(out, spec)
 	defer core.destroy(&doc)
-	return testing.expectf(t, derr.kind == .None, "committed text does not read: %v", derr)
+	return testing.expectf(t, derr == nil, "committed text does not read: %v", derr)
 }
 
 // Builds `src` with `build` and `spec`, records `edit` on a list over it, and checks the committed text against `want`.
-check :: proc(t: ^testing.T, src, want: string, build: Build, spec: any, edit: proc(list: ^core.Edit_List) -> core.Document_Error) -> bool {
+check :: proc(t: ^testing.T, src, want: string, build: Build, spec: any, edit: proc(list: ^core.Edit_List) -> core.Error) -> bool {
 	doc, err := build(transmute([]u8)src, spec)
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "%q: %v", src, err) {
+	if !testing.expectf(t, err == nil, "%q: %v", src, err) {
 		return false
 	}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	if e := edit(&list); !testing.expectf(t, e.kind == .None, "%q: record %v", src, e) {
+	if e := edit(&list); !testing.expectf(t, e == nil, "%q: record %v", src, e) {
 		return false
 	}
 	return expect_commit(t, &list, want, build, spec)
@@ -801,7 +801,9 @@ expect_each_law :: proc(t: ^testing.T, pools: []host.Pool, src: []u8, as: core.A
 			delete(p.recs)
 		}
 		delete(g.pieces)
-		if !testing.expectf(t, unique && f == fault && slice.equal(got[:], want[:]), "%v %q at width %d: each %v %v, want %v %v", framing, src, pool.runner.threads + 1, got, f, want, fault) {
+		got_fault, faulted := f.(core.Fault)
+		same_fault := f == nil && fault == nil || faulted && fault == got_fault
+		if !testing.expectf(t, unique && same_fault && slice.equal(got[:], want[:]), "%v %q at width %d: each %v %v, want %v %v", framing, src, pool.runner.threads + 1, got, f, want, fault) {
 			return false
 		}
 	}
@@ -867,4 +869,168 @@ expect_bounded_reads :: proc(t: ^testing.T, few, many: []u8, as: core.As, plan: 
 		}
 	}
 	return true
+}
+
+// Fails unless `err` is the arm that `kind` names with that kind. A `.Walk` is a `core.Fault`, a `.No_Memory` an
+// allocation refused, and a `.Duplicate_Key` a `core.Fault` of that kind or an edit's own `core.Document_Error`.
+expect_kind :: proc(t: ^testing.T, err: core.Error, kind: $K, loc := #caller_location) -> bool {
+	ok: bool
+	switch {
+	case kind == K.None:
+		ok = err == nil
+	case kind == K.Walk:
+		_, ok = err.(core.Fault)
+	case kind == K.No_Memory:
+		_, ok = err.(runtime.Allocator_Error)
+	case kind == K.Duplicate_Key:
+		f, is_fault := err.(core.Fault)
+		_, is_edit := err.(core.Document_Error)
+		ok = is_fault && f.kind == .Duplicate_Key || is_edit
+	case:
+		when K == core.Document_Error_Kind {
+			e, is_arm := err.(core.Document_Error)
+			ok = is_arm && e.kind == kind
+		} else when K == core.Path_Error_Kind {
+			e, is_arm := err.(core.Path_Error)
+			ok = is_arm && e.kind == kind
+		} else {
+			e, is_arm := err.(core.Typed_Error)
+			bare, is_bare := err.(core.Typed_Error_Kind)
+			ok = is_arm && e.kind == kind || is_bare && bare == kind
+		}
+	}
+	return testing.expectf(t, ok, "want %v, got %v", kind, err, loc = loc)
+}
+
+// Fails unless `err` is nil.
+expect_nil :: proc(t: ^testing.T, err: core.Error, loc := #caller_location) -> bool {
+	return testing.expectf(t, err == nil, "want no error, got %v", err, loc = loc)
+}
+
+// The fault that `err` is, nil when it is none, and an allocation refused as the fault `.No_Memory`.
+fault_of :: proc "contextless" (err: core.Error) -> Maybe(core.Fault) {
+	switch e in err {
+	case core.Fault:
+		return e
+	case runtime.Allocator_Error:
+		return core.Fault{kind = .No_Memory}
+	case core.Document_Error, core.Path_Error, core.Typed_Error, core.Typed_Error_Kind:
+		return core.Fault{kind = .No_Memory}
+	case nil:
+	}
+	return nil
+}
+
+// Whether `err` is a `core.Fault` of kind `kind` at byte `at`.
+fault_is :: proc "contextless" (err: core.Error, kind: core.Fault_Kind, at: u64) -> bool {
+	f, ok := err.(core.Fault)
+	return ok && f.kind == kind && f.at == at
+}
+
+// The byte that `err` names, 0 when it names none.
+at_of :: proc "contextless" (err: core.Error) -> u64 {
+	switch e in err {
+	case core.Fault:
+		return e.at
+	case core.Document_Error:
+		return e.at
+	case core.Path_Error:
+		return e.at
+	case core.Typed_Error:
+		return e.at
+	case runtime.Allocator_Error, core.Typed_Error_Kind:
+	case nil:
+	}
+	return 0
+}
+
+// The `Document_Error`, `Path_Error` or `Typed_Error` that `err` holds, zero when it holds another arm. A bare
+// `Typed_Error_Kind` is a `Typed_Error` of that kind.
+document_of :: proc "contextless" (err: core.Error) -> core.Document_Error {
+	e, _ := err.(core.Document_Error)
+	return e
+}
+
+path_of :: proc "contextless" (err: core.Error) -> core.Path_Error {
+	e, _ := err.(core.Path_Error)
+	return e
+}
+
+typed_of :: proc "contextless" (err: core.Error) -> core.Typed_Error {
+	switch e in err {
+	case core.Typed_Error:
+		return e
+	case core.Typed_Error_Kind:
+		return {kind = e}
+	case core.Fault:
+		return {kind = .Duplicate_Key if e.kind == .Duplicate_Key else .Walk, at = e.at, inner = e}
+	case runtime.Allocator_Error:
+		return {kind = .No_Memory}
+	case core.Document_Error, core.Path_Error:
+	case nil:
+	}
+	return {}
+}
+
+// Whether `err` is an allocation refused.
+is_oom :: proc "contextless" (err: core.Error) -> bool {
+	_, ok := err.(runtime.Allocator_Error)
+	return ok
+}
+
+// Whether `err` is a repeated key, a `core.Fault` of that kind or an edit's own.
+is_duplicate :: proc "contextless" (err: core.Error) -> bool {
+	#partial switch e in err {
+	case core.Fault:
+		return e.kind == .Duplicate_Key
+	case core.Document_Error:
+		return e.kind == .Duplicate_Key
+	}
+	return false
+}
+
+// The typed kind that `err` reports: a `core.Fault` is `.Walk`, or `.Duplicate_Key` for a repeated key, and an
+// allocation refused is `.No_Memory`.
+typed_kind :: proc "contextless" (err: core.Error) -> core.Typed_Error_Kind {
+	switch e in err {
+	case core.Typed_Error:
+		return e.kind
+	case core.Typed_Error_Kind:
+		return e
+	case core.Fault:
+		return .Duplicate_Key if e.kind == .Duplicate_Key else .Walk
+	case runtime.Allocator_Error:
+		return .No_Memory
+	case core.Document_Error, core.Path_Error:
+		return .Bad_Option
+	case nil:
+	}
+	return .None
+}
+
+// Whether `a` and `b` are the same refusal: the same arm, kind and byte.
+same_error :: proc "contextless" (a, b: core.Error) -> bool {
+	switch x in a {
+	case nil:
+		return b == nil
+	case core.Fault:
+		y, ok := b.(core.Fault)
+		return ok && x == y
+	case runtime.Allocator_Error:
+		y, ok := b.(runtime.Allocator_Error)
+		return ok && x == y
+	case core.Document_Error:
+		y, ok := b.(core.Document_Error)
+		return ok && x == y
+	case core.Path_Error:
+		y, ok := b.(core.Path_Error)
+		return ok && x == y
+	case core.Typed_Error:
+		y, ok := b.(core.Typed_Error)
+		return ok && x.kind == y.kind && x.at == y.at
+	case core.Typed_Error_Kind:
+		y, ok := b.(core.Typed_Error_Kind)
+		return ok && x == y
+	}
+	return false
 }

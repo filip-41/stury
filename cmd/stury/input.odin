@@ -232,7 +232,7 @@ next_value :: proc(ins: ^Inputs, own: bool) -> (jq.Value, string, jq.Parse_Statu
 		rec: records.Record
 		ok: bool
 		part: core.Document
-		read: core.Path_Error
+		read: core.Error
 		if scanned {
 			rec, part, read, ok = records.scan(&ins.texts, route.path)
 		} else {

@@ -13,7 +13,7 @@ import walktest "../../walktest"
 // a new text. `expect_commit` compares the bytes and reads them back.
 
 @(private = "file")
-read_json :: proc(src: []u8, spec: any) -> (core.Document, core.Document_Error) {
+read_json :: proc(src: []u8, spec: any) -> (core.Document, core.Error) {
 	switch spec.(json.Spec) {
 	case .Json:
 		return json.build(src, .Json)
@@ -22,7 +22,7 @@ read_json :: proc(src: []u8, spec: any) -> (core.Document, core.Document_Error) 
 	case .Json5:
 		return json.build(src, .Json5)
 	}
-	return {}, {kind = .Bad_Value}
+	return {}, core.error_of(core.Document_Error{kind = .Bad_Value})
 }
 
 // Commits `list`, checks the output against `want`, then builds the output as `S` and checks that it reads.
@@ -53,12 +53,12 @@ edit_rows :: proc(t: ^testing.T, $S: json.Spec, rows: []Edit_Row) {
 	for r in rows {
 		doc, err := read_json(transmute([]u8)r.src, S)
 		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "%q: %v", r.src, err) {
+		if !testing.expectf(t, err == nil, "%q: %v", r.src, err) {
 			return
 		}
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		e: core.Document_Error
+		e: core.Error
 		switch r.op {
 		case .Set:
 			e = core.set(&list, r.node, r.text)
@@ -71,7 +71,7 @@ edit_rows :: proc(t: ^testing.T, $S: json.Spec, rows: []Edit_Row) {
 		case .Remove:
 			e = core.remove(&list, r.node)
 		}
-		testing.expect_value(t, e.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, e)
 		expect_commit(t, &list, r.want, S)
 	}
 }
@@ -133,17 +133,17 @@ edit_line_separator_comment_as_json5 :: proc(t: ^testing.T) {
 	want := "{\"s\":\"a b\", // x\\u2028y\\u2029z\n\"a\":2 // w\\u2028\n}"
 	doc, err := json.build(transmute([]u8)src, .Jsonc)
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "%v", err) {
+	if !testing.expectf(t, err == nil, "%v", err) {
 		return
 	}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set(&list, 4, "2").kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, core.set(&list, 4, "2"))
 	out, _, e := core.commit(&list, json.as(.Json5))
 	defer delete(out)
-	testing.expect_value(t, e.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, string(out), want)
-	_, bad := json.validate(out, .Json5).?
+	_, bad := walktest.fault_of(json.validate(out, .Json5)).?
 	testing.expect(t, !bad)
 }
 
@@ -206,13 +206,13 @@ edit_remove :: proc(t: ^testing.T) {
 edit_log_uses_list_allocator :: proc(t: ^testing.T) {
 	doc, err := json.build(transmute([]u8)string(`[1]`), .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	track: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
 	list := core.edit_list_init(&doc, mem.tracking_allocator(&track))
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set(&list, 1, string("2")).kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, core.set(&list, 1, string("2")))
 	testing.expect_value(t, len(track.allocation_map), 2)
 }
 
@@ -223,12 +223,12 @@ edit_mixed :: proc(t: ^testing.T) {
 	{
 		doc, err := json.build(transmute([]u8)string(`{"a":[1,2],"b":{"c":3},"d":[4]}`), .Json)
 		defer core.destroy(&doc)
-		testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.set(&list, 2, string(`[9]`)).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.set(&list, 8, string("30")).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.remove(&list, 10).kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, core.set(&list, 2, string(`[9]`)))
+		walktest.expect_nil(t, core.set(&list, 8, string("30")))
+		walktest.expect_nil(t, core.remove(&list, 10))
 		testing.expect(t, expect_commit(t, &list, `{"a":[9],"b":{"c":30}}`, .Json))
 	}
 	{
@@ -237,8 +237,8 @@ edit_mixed :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.remove(&list, 2).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.remove(&list, 3).kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, core.remove(&list, 2))
+		walktest.expect_nil(t, core.remove(&list, 3))
 		testing.expect(t, expect_commit(t, &list, `[1,4]`, .Json))
 	}
 	{
@@ -247,8 +247,8 @@ edit_mixed :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.remove(&list, 2).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.insert(&list, 0, 1, string("9")).kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, core.remove(&list, 2))
+		walktest.expect_nil(t, core.insert(&list, 0, 1, string("9")))
 		testing.expect(t, expect_commit(t, &list, `[1,9,3]`, .Json))
 	}
 	{
@@ -257,8 +257,8 @@ edit_mixed :: proc(t: ^testing.T) {
 		defer core.destroy(&doc)
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
-		testing.expect_value(t, core.insert(&list, 0, 0, string("7")).kind, core.Document_Error_Kind.None)
-		testing.expect_value(t, core.insert(&list, 0, 0, string("8")).kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, core.insert(&list, 0, 0, string("7")))
+		walktest.expect_nil(t, core.insert(&list, 0, 0, string("8")))
 		testing.expect(t, expect_commit(t, &list, `[7,8,1]`, .Json))
 	}
 }
@@ -286,21 +286,21 @@ edit_reorder :: proc(t: ^testing.T) {
 	for c in cases {
 		doc, err := read_json(transmute([]u8)c.src, c.spec)
 		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "%q: %v", c.src, err) {
+		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) {
 			continue
 		}
 		list := core.edit_list_init(&doc)
 		defer core.edit_list_destroy(&list)
 		if c.set != 0 {
-			testing.expect_value(t, core.set(&list, c.set, c.text).kind, core.Document_Error_Kind.None)
+			walktest.expect_nil(t, core.set(&list, c.set, c.text))
 		}
 		if c.remove != 0 {
-			testing.expect_value(t, core.remove(&list, c.remove).kind, core.Document_Error_Kind.None)
+			walktest.expect_nil(t, core.remove(&list, c.remove))
 		}
 		if c.key != "" {
-			testing.expect_value(t, core.insert(&list, 0, int(core.length(&doc, 0)), c.key, c.text).kind, core.Document_Error_Kind.None)
+			walktest.expect_nil(t, core.insert(&list, 0, int(core.length(&doc, 0)), c.key, c.text))
 		}
-		testing.expect_value(t, core.reorder(&list, 0, c.order).kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, core.reorder(&list, 0, c.order))
 		switch c.spec {
 		case .Json:  expect_commit(t, &list, c.want, .Json)
 		case .Jsonc: expect_commit(t, &list, c.want, .Jsonc)
@@ -317,16 +317,16 @@ edit_reorder :: proc(t: ^testing.T) {
 		if i == 2 {
 			core.remove(&list, 2)
 		}
-		testing.expect_value(t, core.reorder(&list, 0, order).kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, core.reorder(&list, 0, order))
 		out, _, e := core.commit(&list)
-		testing.expectf(t, e.kind == .Bad_Index, "%v: commit %v", order, e.kind)
+		testing.expectf(t, walktest.document_of(e).kind == .Bad_Index, "%v: commit %v", order, e)
 		if len(out) > 0 {
 			delete(out)
 		}
 	}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.reorder(&list, 1, {0}).kind, core.Document_Error_Kind.Wrong_Container)
+	walktest.expect_kind(t, core.reorder(&list, 1, {0}), core.Document_Error_Kind.Wrong_Container)
 }
 
 // The conflicts `commit` refuses: two edits of one node, an edit inside a replaced value, an insert inside a removed
@@ -357,7 +357,7 @@ edit_conflicts :: proc(t: ^testing.T) {
 		list := core.edit_list_init(&doc)
 		ok := true
 		for e in c.edits {
-			res: core.Document_Error
+			res: core.Error
 			switch e.op {
 			case 0:
 				res = core.set(&list, e.node, e.text)
@@ -366,11 +366,11 @@ edit_conflicts :: proc(t: ^testing.T) {
 			case:
 				res = core.remove(&list, e.node)
 			}
-			ok &&= testing.expectf(t, res.kind == .None, "%s: record %v", c.name, res)
+			ok &&= testing.expectf(t, res == nil, "%s: record %v", c.name, res)
 		}
 		if ok {
 			out, _, e := core.commit(&list)
-			testing.expectf(t, e.kind == .Conflicting_Edits, "%s: commit %v", c.name, e.kind)
+			testing.expectf(t, walktest.document_of(e).kind == .Conflicting_Edits, "%s: commit %v", c.name, e)
 			if len(out) > 0 {
 				delete(out)
 			}
@@ -386,18 +386,18 @@ edit_errors :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set(&list, 99, string("1")).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, core.set(&list, 2, string("1 // c")).kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, core.set(&list, 2, string("[1] /* c */")).kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, core.set(&list, 2, string("")).kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, core.insert(&list, 1, 0, string("1")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.insert(&list, 0, 0, string("1")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.insert(&list, 2, 3, string("1")).kind, core.Document_Error_Kind.Bad_Position)
-	testing.expect_value(t, core.insert(&list, 2, -1, string("1")).kind, core.Document_Error_Kind.Bad_Position)
-	testing.expect_value(t, core.insert(&list, 2, 2, string("k"), string("1")).kind, core.Document_Error_Kind.Wrong_Container)
-	testing.expect_value(t, core.remove(&list, 0).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.Bad_Index)
-	testing.expect_value(t, core.remove(&list, 99).kind, core.Document_Error_Kind.Bad_Index)
+	walktest.expect_kind(t, core.set(&list, 99, string("1")), core.Document_Error_Kind.Bad_Index)
+	walktest.expect_kind(t, core.set(&list, 2, string("1 // c")), core.Document_Error_Kind.Bad_Value)
+	walktest.expect_kind(t, core.set(&list, 2, string("[1] /* c */")), core.Document_Error_Kind.Bad_Value)
+	walktest.expect_kind(t, core.set(&list, 2, string("")), core.Document_Error_Kind.Bad_Value)
+	walktest.expect_kind(t, core.insert(&list, 1, 0, string("1")), core.Document_Error_Kind.Wrong_Container)
+	walktest.expect_kind(t, core.insert(&list, 0, 0, string("1")), core.Document_Error_Kind.Wrong_Container)
+	walktest.expect_kind(t, core.insert(&list, 2, 3, string("1")), core.Document_Error_Kind.Bad_Position)
+	walktest.expect_kind(t, core.insert(&list, 2, -1, string("1")), core.Document_Error_Kind.Bad_Position)
+	walktest.expect_kind(t, core.insert(&list, 2, 2, string("k"), string("1")), core.Document_Error_Kind.Wrong_Container)
+	walktest.expect_kind(t, core.remove(&list, 0), core.Document_Error_Kind.Bad_Index)
+	walktest.expect_kind(t, core.remove(&list, 1), core.Document_Error_Kind.Bad_Index)
+	walktest.expect_kind(t, core.remove(&list, 99), core.Document_Error_Kind.Bad_Index)
 	testing.expect_value(t, len(list.edits), 0)
 
 	// JSON5 refuses a comment after a value.
@@ -405,16 +405,16 @@ edit_errors :: proc(t: ^testing.T) {
 	defer core.destroy(&j5)
 	l5 := core.edit_list_init(&j5)
 	defer core.edit_list_destroy(&l5)
-	testing.expect_value(t, core.insert(&l5, 0, 1, string("b"), string("2")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.set(&l5, 2, string("1 /*c*/")).kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, core.set(&l5, 2, string("0x10")).kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, core.insert(&l5, 0, 1, string("b"), string("2")))
+	walktest.expect_kind(t, core.set(&l5, 2, string("1 /*c*/")), core.Document_Error_Kind.Bad_Value)
+	walktest.expect_nil(t, core.set(&l5, 2, string("0x10")))
 
 	// A commit of no edit returns a copy of the source, at a different address.
 	empty := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&empty)
 	out, _, e := core.commit(&empty)
 	defer delete(out)
-	testing.expect_value(t, e.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, string(out), `{"a":[1,2]}`)
 	testing.expect(t, raw_data(out) != raw_data(doc.src))
 }
@@ -433,8 +433,8 @@ edit_document_unchanged :: proc(t: ^testing.T) {
 	defer core.edit_list_destroy(&one)
 	two := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&two)
-	testing.expect_value(t, core.set(&one, 2, string(`[9]`)).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.set(&two, 6, string(`"y"`)).kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, core.set(&one, 2, string(`[9]`)))
+	walktest.expect_nil(t, core.set(&two, 6, string(`"y"`)))
 	testing.expect(t, expect_commit(t, &one, `{"a":[9],"b":"x"}`, .Json))
 	testing.expect(t, expect_commit(t, &two, `{"a":[1,2],"b":"y"}`, .Json))
 
@@ -459,14 +459,14 @@ edit_no_leak :: proc(t: ^testing.T) {
 	src := `{"a":[1,2],"b":{"c":3}}`
 	doc, err := json.build(transmute([]u8)src, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc, allocator = alloc)
-	testing.expect_value(t, core.set(&list, 4, string("9")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.insert(&list, 2, 2, string("3")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.insert(&list, 0, 2, string("d"), string("4")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.remove(&list, 8).kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, core.set(&list, 4, string("9")))
+	walktest.expect_nil(t, core.insert(&list, 2, 2, string("3")))
+	walktest.expect_nil(t, core.insert(&list, 0, 2, string("d"), string("4")))
+	walktest.expect_nil(t, core.remove(&list, 8))
 	out, _, cerr := core.commit(&list, allocator = alloc)
-	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, cerr)
 	delete(out, allocator = alloc)
 	core.edit_list_destroy(&list)
 	testing.expectf(t, len(track.allocation_map) == 0, "%d allocations left", len(track.allocation_map))
@@ -507,11 +507,11 @@ edit_error_codes :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set(&list, 1, string("8")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.set(&list, 1, string("9")).kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, core.set(&list, 1, string("8")))
+	walktest.expect_nil(t, core.set(&list, 1, string("9")))
 	_, _, e := core.commit(&list)
-	testing.expect_value(t, e.kind, core.Document_Error_Kind.Conflicting_Edits)
-	testing.expect_value(t, e.at, u64(1))
+	walktest.expect_kind(t, e, core.Document_Error_Kind.Conflicting_Edits)
+	testing.expect_value(t, walktest.at_of(e), u64(1))
 	strings.builder_reset(&b)
 	core.write_code(strings.to_writer(&b), e)
 	testing.expect_value(t, strings.to_string(b), "document.conflicting_edits")
@@ -525,14 +525,14 @@ edit_error_codes :: proc(t: ^testing.T) {
 edit_value_bom :: proc(t: ^testing.T) {
 	doc, err := json.build(transmute([]u8)string(`[1,2]`), .Jsonc)
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	bom := []u8{0xEF, 0xBB, 0xBF, '2'}
-	testing.expect_value(t, core.set(&list, 1, string(bom)).kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, core.set(&list, 1, "2").kind, core.Document_Error_Kind.None)
+	walktest.expect_kind(t, core.set(&list, 1, string(bom)), core.Document_Error_Kind.Bad_Value)
+	walktest.expect_nil(t, core.set(&list, 1, "2"))
 }
 
 @(private = "file")
@@ -551,14 +551,14 @@ edit_check_policy :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("{\"a\":\"\xff\",\"b\":1}")
 	doc, err := json.build(src, .Json, {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
 	edit := core.Edit_Spelling{value = edit_accepts}
 	doc.spelling = &core.Spelling{edit = &edit, validate = reads_faults}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	if !testing.expect_value(t, core.set(&list, 4, string("2")).kind, core.Document_Error_Kind.None) {
+	if !walktest.expect_nil(t, core.set(&list, 4, string("2"))) {
 		return
 	}
 	out, _, cerr := compose.commit(&list, doc.as.spec, context.allocator)
@@ -575,7 +575,7 @@ edit_tolerated_source :: proc(t: ^testing.T) {
 	src := "{\"a\":\"\xff\",\"b\":1}"
 	doc, err := json.build(transmute([]u8)string(src), .Json, {tolerate = {.Invalid_Utf8}})
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
 	list := core.edit_list_init(&doc)
@@ -583,15 +583,15 @@ edit_tolerated_source :: proc(t: ^testing.T) {
 	// `commit` reads its output with the source's tolerance.
 	for want in ([]string{src, "{\"a\":\"\xff\",\"b\":2}"}) {
 		if want != src {
-			testing.expect_value(t, core.set(&list, 4, string("2")).kind, core.Document_Error_Kind.None)
+			walktest.expect_nil(t, core.set(&list, 4, string("2")))
 		}
 		out, _, cerr := core.commit(&list)
-		if !testing.expectf(t, cerr.kind == .None, "commit: %v", cerr) {
+		if !testing.expectf(t, cerr == nil, "commit: %v", cerr) {
 			return
 		}
 		testing.expect_value(t, string(out), want)
 		read, rerr := json.build(out, .Json, {tolerate = {.Invalid_Utf8}})
-		testing.expectf(t, rerr.kind == .None, "committed text does not read: %v", rerr)
+		testing.expectf(t, rerr == nil, "committed text does not read: %v", rerr)
 		core.destroy(&read)
 		delete(out)
 	}
@@ -628,20 +628,20 @@ edit_inline_comment_survives :: proc(t: ^testing.T) {
 edit_commit_allocator :: proc(t: ^testing.T) {
 	doc, err := json.build(transmute([]u8)string("[1,2,3]"), .Json)
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
 	a := walktest.Failing_Alloc{inner = context.allocator, fail_at = -1}
 	list := core.edit_list_init(&doc, walktest.failing_allocator(&a))
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.set(&list, 1, string("9")).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.insert(&list, 0, 1, string("8")).kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, core.set(&list, 1, string("9")))
+	walktest.expect_nil(t, core.insert(&list, 0, 1, string("8")))
 	a.fail_all = true
 	out, _, cerr := core.commit(&list)
 	defer if len(out) > 0 {
 		delete(out)
 	}
-	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, cerr)
 	testing.expect_value(t, string(out), "[9,8,2,3]")
 }
 
@@ -652,8 +652,8 @@ edit_sibling_remove_and_set :: proc(t: ^testing.T) {
 	defer core.destroy(&doc)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.remove(&list, 1).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.set(&list, 2, string("3")).kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, core.remove(&list, 1))
+	walktest.expect_nil(t, core.set(&list, 2, string("3")))
 	testing.expect(t, expect_commit(t, &list, `[3]`, .Json))
 }
 
@@ -669,24 +669,24 @@ edit_deep_document :: proc(t: ^testing.T) {
 	strings.write_string(&b, strings.repeat("]", depth, context.temp_allocator))
 	doc, err := json.build(transmute([]u8)strings.to_string(b), .Json, {max_depth = 4096})
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	if !testing.expect_value(t, core.set(&list, core.Node_Index(depth), "1").kind, core.Document_Error_Kind.None) {
+	if !walktest.expect_nil(t, core.set(&list, core.Node_Index(depth), "1")) {
 		return
 	}
 	out, _, cerr := core.commit(&list)
 	defer delete(out)
-	if !testing.expectf(t, cerr.kind == .None, "commit: %v", cerr) {
+	if !testing.expectf(t, cerr == nil, "commit: %v", cerr) {
 		return
 	}
 	testing.expect_value(t, len(out), 2 * depth + 1)
 	testing.expect_value(t, out[depth], u8('1'))
 	back, berr := json.build(out, .Json, {max_depth = 4096})
 	defer core.destroy(&back)
-	testing.expectf(t, berr.kind == .None, "read back: %v", berr)
+	testing.expectf(t, berr == nil, "read back: %v", berr)
 	num, num_ok := core.number(&back, core.Node_Index(depth))
 	testing.expect(t, num_ok)
 	testing.expect_value(t, num.kind, core.Number_Kind.Int)
@@ -703,26 +703,26 @@ edit_deep_value :: proc(t: ^testing.T) {
 	}, context.temp_allocator)
 	doc, err := json.build(transmute([]u8)string(`[1]`), .Json, {max_depth = 4096})
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	if !testing.expect_value(t, core.set(&list, 1, deep).kind, core.Document_Error_Kind.None) {
+	if !walktest.expect_nil(t, core.set(&list, 1, deep)) {
 		return
 	}
 	out, _, cerr := core.commit(&list)
 	defer delete(out)
-	testing.expectf(t, cerr.kind == .None, "commit: %v", cerr)
+	testing.expectf(t, cerr == nil, "commit: %v", cerr)
 
 	shallow, serr := json.build(transmute([]u8)string(`[1]`), .Json)
 	defer core.destroy(&shallow)
-	testing.expectf(t, serr.kind == .None, "build: %v", serr)
+	testing.expectf(t, serr == nil, "build: %v", serr)
 	other := core.edit_list_init(&shallow)
 	defer core.edit_list_destroy(&other)
 	e := core.set(&other, 1, deep)
-	testing.expect_value(t, e.kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, e.inner.kind, core.Fault_Kind.Too_Deep)
+	walktest.expect_kind(t, e, core.Document_Error_Kind.Bad_Value)
+	testing.expect_value(t, walktest.document_of(e).inner.kind, core.Fault_Kind.Too_Deep)
 }
 
 // `render` writes the inner fault's message with no position for `.Bad_Value` and `.Bad_Result`, since `inner.at` is a
@@ -736,8 +736,8 @@ render_inner_cause :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	e := core.set(&list, 2, string("[1"))
-	testing.expect_value(t, e.kind, core.Document_Error_Kind.Bad_Value)
-	testing.expect_value(t, e.inner.kind, core.Fault_Kind.Truncated)
+	walktest.expect_kind(t, e, core.Document_Error_Kind.Bad_Value)
+	testing.expect_value(t, walktest.document_of(e).inner.kind, core.Fault_Kind.Truncated)
 	core.render(strings.to_writer(&b), doc.src, e)
 	testing.expect_value(t, strings.to_string(b), "Not one value of the format: Unfinished input at offset 2 of the new text")
 
@@ -746,9 +746,9 @@ render_inner_cause :: proc(t: ^testing.T) {
 	defer core.destroy(&j5)
 	l5 := core.edit_list_init(&j5)
 	defer core.edit_list_destroy(&l5)
-	testing.expect_value(t, core.set(&l5, 2, string("2")).kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, core.set(&l5, 2, string("2")))
 	_, _, ce := core.commit(&l5, json.as(.Json))
-	testing.expect_value(t, ce.kind, core.Document_Error_Kind.Bad_Result)
+	walktest.expect_kind(t, ce, core.Document_Error_Kind.Bad_Result)
 	strings.builder_reset(&b)
 	core.render(strings.to_writer(&b), j5.src, ce)
 	testing.expect_value(t, strings.to_string(b), "The edited text does not read: Object keys must be strings at offset 1 of the edited text")
@@ -760,7 +760,7 @@ splice_spans :: proc(t: ^testing.T) {
 	src := `{"a":"x\ny","b":'q'}`
 	doc, err := build(src, .Json5)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(core.span(&doc, 1)), `"a"`)
 	testing.expect_value(t, string(core.span(&doc, 2)), `"x\ny"`)
 	testing.expect_value(t, string(core.span(&doc, 4)), `'q'`)
@@ -787,7 +787,7 @@ edit_insert_in_removal_run :: proc(t: ^testing.T) {
 		}) {
 		doc, err := json.build(transmute([]u8)c.src, .Json)
 		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "%q: %v", c.src, err) {
+		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) {
 			return
 		}
 		list := core.edit_list_init(&doc)
@@ -806,7 +806,7 @@ edit_insert_in_removal_run :: proc(t: ^testing.T) {
 		defer if len(out) > 0 {
 			delete(out)
 		}
-		testing.expectf(t, cerr.kind == .None && string(out) == c.want, "%q: committed %q (%v), want %q", c.src, out, cerr, c.want)
+		testing.expectf(t, cerr == nil && string(out) == c.want, "%q: committed %q (%v), want %q", c.src, out, cerr, c.want)
 	}
 
 	// The removal takes the comma the insert counted on. The new member stays off the head comment's line, so the
@@ -814,23 +814,23 @@ edit_insert_in_removal_run :: proc(t: ^testing.T) {
 	src := "{\n  \"a\": 1,\n  \"b\": 2,\n  //hc\n  \"c\": 3\n}"
 	doc, err := json.build(transmute([]u8)src, .Jsonc)
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	testing.expect_value(t, core.remove(&list, 4).kind, core.Document_Error_Kind.None)
-	testing.expect_value(t, core.insert(&list, 0, 2, string("x"), string("9")).kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, core.remove(&list, 4))
+	walktest.expect_nil(t, core.insert(&list, 0, 2, string("x"), string("9")))
 	out, _, cerr := core.commit(&list)
 	defer if len(out) > 0 {
 		delete(out)
 	}
-	if !testing.expectf(t, cerr.kind == .None, "multiline: commit %v", cerr) {
+	if !testing.expectf(t, cerr == nil, "multiline: commit %v", cerr) {
 		return
 	}
 	read, rerr := json.build(out, .Jsonc)
 	defer core.destroy(&read)
-	if !testing.expectf(t, rerr.kind == .None, "multiline: committed text does not read: %v in %q", rerr, out) {
+	if !testing.expectf(t, rerr == nil, "multiline: committed text does not read: %v in %q", rerr, out) {
 		return
 	}
 	v, ok := core.member(&read, 0, "c")

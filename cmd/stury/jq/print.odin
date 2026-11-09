@@ -180,7 +180,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 		mem.arena_init(&arena, frame[:])
 		on_heap := size + write.ROOM_MAX > FRAME_TEXT
 		text, _, err := core_pkg.write(r.doc, opts, as, r.node, heap if on_heap else mem.arena_allocator(&arena))
-		if !on_heap && err.kind != .None {
+		if !on_heap && err != nil {
 			on_heap = true
 			text, _, err = core_pkg.write(r.doc, opts, as, r.node, heap)
 		}
@@ -189,7 +189,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 		}
 		write.put_text(p.out, string(text))
 		spill(p)
-		return err.kind == .None
+		return err == nil
 	}
 	p.streamed = false
 	to_out := io.Stream {
@@ -207,7 +207,7 @@ write_node :: proc(p: ^Printer, v: Value) -> bool {
 	}
 	_, err := core_pkg.write_stream(to_out, r.doc, opts, as, r.node, heap)
 	// Only an allocation fails, and the printer walks the value when the writer handed it nothing.
-	return err.kind == .None || p.streamed
+	return err == nil || p.streamed
 }
 
 // `text` in the colour `color`.

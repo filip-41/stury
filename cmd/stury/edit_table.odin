@@ -114,7 +114,7 @@ edit_table :: proc(er: ^Edit_Run, path: string) -> int {
 	}
 	#reverse for rec, i in recs {
 		if !used[i] {
-			if e := core.remove(&list, rec); e.kind != .None {
+			if e := core.remove(&list, rec); e != nil {
 				message.write_stderr("stury: error: %s: %s\n", w.name, edit_error_text(src, e))
 				return EXIT_INPUT
 			}
@@ -449,7 +449,7 @@ edit_table_records :: proc(w0, w: ^Edit_State, placed: []Edit_Placed, final: []s
 
 @(private = "file")
 edit_record_insert :: proc(w: ^Edit_State, at: int, text: string) -> bool {
-	if e := core.insert(w.list, core.ROOT, at, text); e.kind != .None {
+	if e := core.insert(w.list, core.ROOT, at, text); e != nil {
 		message.write_stderr("stury: error: %s: %s\n", w.name, edit_error_text(w.doc.src, e))
 		return false
 	}
@@ -501,7 +501,7 @@ edit_keys :: proc(v: jq.Value) -> []string {
 
 @(private = "file")
 edit_reorder :: proc(w: ^Edit_State, node: core.Node_Index, perm: []u32) -> bool {
-	if e := core.reorder(w.list, node, perm); e.kind != .None {
+	if e := core.reorder(w.list, node, perm); e != nil {
 		message.write_stderr("stury: error: %s: %s\n", w.name, edit_error_text(w.doc.src, e))
 		return false
 	}

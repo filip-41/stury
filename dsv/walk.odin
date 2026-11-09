@@ -137,7 +137,7 @@ walk_keys :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}
 
 // The walk's verdict on `src` for spec `S`, with no hook and after one leading BOM. Whether the first record is a
 // header changes the verdict only under `.Ragged`. It is `core.validate` with `as(spec, opts)`.
-validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault) {
+validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error {
 	return core.validate(src, as(spec, opts))
 }
 
@@ -145,41 +145,41 @@ validate :: #force_inline proc "contextless" (src: []u8, spec: Spec, opts := Opt
 // first record data. `.Refuse` returns an error at a header name that repeats another in the header row. The
 // document borrows `src`, which must outlive it, and `core.destroy` frees the document. It is `core.build` with
 // `as(spec, opts)`.
-build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+build :: #force_inline proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error) {
 	return core.build(src, as(spec, opts), dups, allocator)
 }
 
 // The path reads of `core/build` over the handle. `scan`, `each_answer`, `find` and `set` take `spec` and `opts` and
 // forward to the same names in `core/build` with `as(spec, opts)`.
 @(private)
-scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+scan_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
 	return engine.scan_one(src, as(spec, opts), path, read, allocator)
 }
 
 @(private)
-scan_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+scan_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
 	return engine.scan_many(src, as(spec, opts), paths, read, allocator)
 }
 
 scan :: proc {scan_one, scan_many}
 
 @(private)
-each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+each_answer_one :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
 	return engine.each_answer_one(src, as(spec, opts), path, state, on, read, allocator)
 }
 
 @(private)
-each_answer_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+each_answer_many :: #force_inline proc(src: []u8, spec: Spec, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
 	return engine.each_answer_many(src, as(spec, opts), paths, state, on, read, allocator)
 }
 
 each_answer :: proc {each_answer_one, each_answer_many}
 
-find :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Path_Error) {
+find :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
 	return engine.find(src, as(spec, opts), path, read, allocator)
 }
 
-set :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+set :: #force_inline proc(src: []u8, spec: Spec, path: core.Path, text: string, opts := Options{}, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
 	return engine.set(src, as(spec, opts), path, text, read, allocator)
 }
 

@@ -10,7 +10,7 @@ import "core:os"
 import "core:strings"
 
 // A fault or an error renders as `line:col: message`, with the path when it has one.
-report :: proc(src: []u8, e: $E) {
+report :: proc(src: []u8, e: core.Error) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
 	core.render(strings.to_writer(&b), src, e)
@@ -20,20 +20,20 @@ report :: proc(src: []u8, e: $E) {
 main :: proc() {
 	src := transmute([]byte)string(`{"name":"ada","n":1,"skip":[1,2,3]}`)
 	doc, berr := json.build(src, .Json)
-	if berr.kind != .None {
+	if berr != nil {
 		report(src, berr)
 		os.exit(1)
 	}
 	defer core.destroy(&doc)
 
 	path, perr := core.parse_path(".skip[]")
-	if perr.kind != .None {
+	if perr != nil {
 		report(nil, perr)
 		os.exit(1)
 	}
 	defer core.path_destroy(&path)
 	answers, qerr := core.query(&doc, path)
-	if qerr.kind != .None {
+	if qerr != nil {
 		report(src, qerr)
 		os.exit(1)
 	}

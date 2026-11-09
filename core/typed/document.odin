@@ -22,16 +22,16 @@ import build "../build"
 // `.Refuse`.
 unmarshal :: proc {unmarshal_node, unmarshal_answer}
 
-unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
-	return read_document(doc, node, typeid_of(T), target, plan, read, allocator)
+unmarshal_node :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
+	return core.error_of(read_document(doc, node, typeid_of(T), target, plan, read, allocator))
 }
 
 // Reads the value a path found. An answer that is not `.Found` holds no value, and is `.Bad_Option`.
-unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
+unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error {
 	if answer.outcome != .Found {
-		return {kind = .Bad_Option}
+		return core.error_of(core.Typed_Error{kind = .Bad_Option})
 	}
-	return read_document(doc, answer.node, typeid_of(T), target, plan, read, allocator)
+	return core.error_of(read_document(doc, answer.node, typeid_of(T), target, plan, read, allocator))
 }
 
 // A read's state beside the hook's own: the document, and the node `build.feed_nodes` is giving the hook.
@@ -49,8 +49,13 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 		return {kind = .Bad_Option}
 	}
 	if plan == nil {
-		made, err := plan_make(T, doc.as)
-		if err.kind == .None {
+		made, refusal := plan_make(T, doc.as)
+		err: core.Typed_Error
+		if refused, is_typed := refusal.(core.Typed_Error); is_typed {
+			err = refused
+		} else if refusal != nil {
+			err.kind = .No_Memory
+		} else {
 			err = read_document(doc, node, T, target, &made, read, allocator)
 		}
 		own_errors(&err, read.sink)

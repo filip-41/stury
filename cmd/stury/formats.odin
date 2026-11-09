@@ -146,10 +146,10 @@ refuse_format_clashes :: proc(o: ^Opts, cli: ^Cli) {
 // Refuses a delimiter or comment character that `format` cannot read, as the library's walk refuses it.
 @(private = "file")
 refuse_cell_bytes :: proc(spec: dsv.Spec, opts: dsv.Options, format, delimiter_flag, comment_flag: string) {
-	if _, bad := core.validate(nil, dsv.as(spec, {delimiter = opts.delimiter})).?; bad {
+	if core.validate(nil, dsv.as(spec, {delimiter = opts.delimiter})) != nil {
 		usage_error("%s %q is not a byte %s can separate cells with", delimiter_flag, string([]byte{opts.delimiter}), format)
 	}
-	if _, bad := core.validate(nil, dsv.as(spec, opts)).?; bad {
+	if core.validate(nil, dsv.as(spec, opts)) != nil {
 		usage_error("%s %q is not a byte %s can start a comment line with", comment_flag, string([]byte{opts.comment}), format)
 	}
 }

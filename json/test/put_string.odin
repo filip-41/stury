@@ -309,9 +309,9 @@ strings_at_the_end_of_a_page :: proc(t: ^testing.T) {
 		s := string(walktest.fence_copy(&fence, body[:n]))
 		for opts in ([?]core.Write_Options{{}, {ascii = true}, {escape_html = true}, {escape_del = true}}) {
 			text, err := json.marshal(s, write = opts, allocator = context.temp_allocator)
-			testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+			walktest.expect_nil(t, err)
 			doc, derr := json.build(text, .Json)
-			testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
+			walktest.expect_nil(t, derr)
 			back, ok := core.text_clone(&doc, core.ROOT, context.temp_allocator)
 			core.destroy(&doc)
 			testing.expect(t, ok && back == s)
@@ -332,7 +332,7 @@ a_sequence_cut_at_a_block_end :: proc(t: ^testing.T) {
 				}
 				text[64 * blocks - 1 + shift] = lead
 				_, err := json.marshal(string(text), write = {}, allocator = context.temp_allocator)
-				testing.expect_value(t, err.kind, core.Typed_Error_Kind.Invalid_Utf8)
+				walktest.expect_kind(t, err, core.Typed_Error_Kind.Invalid_Utf8)
 			}
 		}
 	}

@@ -46,12 +46,12 @@ dsv_lane :: proc(src: []u8, name: string, document: bool) {
 
 dsv_rows_lane :: proc($R: typeid, src: []u8) {
 	rows: []R
-	if err := dsv.unmarshal(src, .Csv, &rows, read = {borrow_strings = true}); err.kind != .None {
+	if err := dsv.unmarshal(src, .Csv, &rows, read = {borrow_strings = true}); err != nil {
 		fmt.eprintln("read:", err)
 		os.exit(1)
 	}
 	plan, perr := dsv.plan_make([]R, .Csv)
-	if perr.kind != .None {
+	if perr != nil {
 		fmt.eprintln("plan:", perr)
 		os.exit(1)
 	}
@@ -61,7 +61,7 @@ dsv_rows_lane :: proc($R: typeid, src: []u8) {
 		start := time.tick_now()
 		out, err := write.marshal(rows, &plan, {}, context.allocator)
 		d := i64(time.tick_since(start))
-		if err.kind != .None {
+		if err != nil {
 			fmt.eprintln("write:", err)
 			os.exit(1)
 		}
@@ -79,7 +79,7 @@ dsv_rows_lane :: proc($R: typeid, src: []u8) {
 
 dsv_document_lane :: proc(src: []u8) {
 	doc, derr := dsv.build(src, .Csv, {}, .Last, context.allocator)
-	if derr.kind != .None {
+	if derr != nil {
 		fmt.eprintln("document error:", derr)
 		os.exit(1)
 	}
@@ -89,7 +89,7 @@ dsv_document_lane :: proc(src: []u8) {
 		start := time.tick_now()
 		out, _, err := core.write(&doc)
 		d := i64(time.tick_since(start))
-		if err.kind != .None {
+		if err != nil {
 			fmt.eprintln("write:", err)
 			os.exit(1)
 		}

@@ -212,12 +212,13 @@ put_document :: proc(run: ^Run, ins: ^Inputs, doc: ^core.Document) -> bool {
 	as := cells_written_as(o) if writes_cells(o) else json.as(.Jsonc if writes_comments(o) else .Json, {max_depth = o.max_depth})
 	out := &run.output
 	text, _, err := core.write(doc, out.layout.opts, as, allocator = context.temp_allocator)
-	if err.kind != .None {
+	if err != nil {
 		flush_some(out, force = true)
-		if err.kind == .Too_Deep {
+		kind := write_refusal_kind(err)
+		if kind == .Too_Deep {
 			message.write_stderr("stury: error: %s: nesting this deep is not written in the format it was read in\n", ins.name)
 		} else {
-			message.write_stderr("stury: error: %s: cannot write the value: %v\n", ins.name, err.kind)
+			message.write_stderr("stury: error: %s: cannot write the value: %v\n", ins.name, kind)
 		}
 		return false
 	}
@@ -297,4 +298,18 @@ create_private_temp :: proc(path: string) -> (f: ^os.File, name: string, err: os
 write_failed :: proc(path: string, err: os.Error) -> bool {
 	message.write_stderr("stury: error: Could not write file %s: %s\n", path, strerror(err))
 	return false
+}
+
+// The kind of typed refusal `err`, a write's, which is a typed error or an allocation refused.
+write_refusal_kind :: proc(err: core.Error) -> core.Typed_Error_Kind {
+	switch e in err {
+	case core.Typed_Error:
+		return e.kind
+	case core.Typed_Error_Kind:
+		return e
+	case core.Fault, core.Document_Error, core.Path_Error, runtime.Allocator_Error:
+		return .No_Memory
+	case nil:
+	}
+	return .None
 }

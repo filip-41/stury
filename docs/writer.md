@@ -46,7 +46,7 @@ the same way.
 
 ## Errors
 
-A write returns `core.Typed_Error`, the type a typed read returns. Its kinds from `.Invalid_Utf8` on are a write's:
+A write returns `core.Error`, whose `core.Typed_Error` arm is the type a typed read returns, and a refusal that names no position is the `core.Typed_Error_Kind` arm. Its kinds from `.Invalid_Utf8` on are a write's:
 
 | Kind | Means |
 |---|---|
@@ -122,12 +122,12 @@ A refusal names its path. Nothing tracks one while writing: `refused` reads it f
 ## Documents
 
 ```odin
-core.write           :: proc(doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Typed_Error)
-core.write_stream    :: proc(w: io.Stream, doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (dropped: int, err: core.Typed_Error)
+core.write           :: proc(doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (text: []u8, dropped: int, err: core.Error)
+core.write_stream    :: proc(w: io.Stream, doc: ^core.Document, opts := core.Write_Options{}, as: Maybe(core.As) = nil, node := core.ROOT, allocator := context.allocator) -> (dropped: int, err: core.Error)
 core.subtree_facts   :: proc(doc: ^core.Document, i: core.Node_Index) -> []core.Fact
 json.as              :: proc(spec: json.Spec, opts := json.Options{}) -> core.As
 dsv.as               :: proc(spec: dsv.Spec, opts := dsv.Options{}) -> core.As
-core.format          :: proc(src: []u8, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
+core.format          :: proc(src: []u8, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error)
 ```
 
 `core.write` writes a document through the `write` slot of the `Spelling` in `as`. A nil `as` is the format and layout the
@@ -268,13 +268,13 @@ _, err := records.writer_end(&wr)
 
 ```odin
 records.writer_init  :: proc(wr: ^records.Writer, w: io.Stream, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error_Kind
-records.writer_end   :: proc(wr: ^records.Writer) -> ([]u8, core.Typed_Error)
+records.writer_end   :: proc(wr: ^records.Writer) -> ([]u8, core.Error)
 records.writer_destroy :: proc(wr: ^records.Writer)
 records.write        :: proc(wr: ^records.Writer, value: any, plan: ^typed.Plan) -> core.Typed_Error_Kind
 records.write_text   :: proc(wr: ^records.Writer, text: []u8) -> core.Typed_Error_Kind
 records.write_cells  :: proc(wr: ^records.Writer, cells: []write.Scalar) -> core.Typed_Error_Kind
-records.marshal        :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error)
-records.marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}) -> core.Typed_Error
+records.marshal        :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error)
+records.marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}) -> core.Error
 ```
 
 - A record of JSON is the value's text, as `write.marshal` writes it, and LF. `.Seq` also puts 0x1E before it. `.Lines`

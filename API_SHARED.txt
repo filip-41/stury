@@ -78,11 +78,11 @@ number_spelling :: #force_inline proc "contextless" (kind: u16, int_digits, frac
 own_reads :: proc(doc: ^Document) -> runtime.Allocator_Error
 pair_next :: #force_inline proc(it: ^Pair_Iter) -> (key, val: Node_Index, ok: bool)
 path_error :: proc(e: Document_Error) -> Path_Error
-reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Document_Error
+reorder :: proc(list: ^Edit_List, container: Node_Index, order: []u32) -> Error
 reserve_depth :: #force_inline proc "contextless" (max_depth: u32, n: int) -> int
 result_of :: #force_inline proc "contextless" (r: u64, rules: ^Rules) -> (hi: u64, fault: Maybe(Fault), stopped: bool)
 scalar_ends :: #force_inline proc "contextless" (t: Token) -> (lo, hi: u64)
-set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []string, padded := false) -> Document_Error
+set_facts :: proc(list: ^Edit_List, node: Node_Index, role: Role, texts: []string, padded := false) -> Error
 subtree_facts :: proc(doc: ^Document, i: Node_Index) -> []Fact
 text_clone :: proc(doc: ^Document, i: Node_Index, allocator := context.allocator) -> (s: string, ok: bool)
 text_spelling :: #force_inline proc "contextless" (escaped, lax: bool) -> u16

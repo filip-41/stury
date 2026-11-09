@@ -34,8 +34,11 @@ JSON are `max_depth`, `tolerate` and `refuse_non_finite`, and for dsv `no_header
 ## Errors
 
 An error is a value with a `kind` and the byte it concerns, allocated nowhere: a text it names is a view of the input,
-the path's text or the plan. `err.kind != .None` is the test. The types are `core.Fault` (a text broke the grammar, from `validate`), `core.Document_Error`,
-`core.Path_Error`, `core.Typed_Error` (a read or write of an Odin value) and the path edit errors.
+the path's text or the plan. `err != nil` is the test, and `or_return` passes it up. Every call of the
+library returns one union, `core.Error`, whose arms are `core.Fault` (a text broke the grammar, from `validate`, a build, a
+scan or a read), `runtime.Allocator_Error` (an allocation was refused), `core.Document_Error` (an edit or a commit was
+refused), `core.Path_Error`, `core.Typed_Error` (a read or write of an Odin value) and `core.Typed_Error_Kind` (a write
+refused with no position). `core.error_of` is the one place a concrete error becomes the union.
 
 `core.render(writer, src, err)` writes any of them as `line:col: message`, with `at path` for a typed error. A path
 error's position is in the path's text, which it holds. Pass `nil` for `src` when the error has no text, such as a
@@ -52,7 +55,7 @@ report :: proc(src: []u8, e: $E) {
 
 ## Validate
 
-`json.validate(src, .Json)` judges a text without allocating and returns `Maybe(core.Fault)`.
+`json.validate(src, .Json)` judges a text without allocating and returns a `core.Error`, a `core.Fault` or nil.
 
 ```odin
 if fault, bad := json.validate(src, .Json).?; bad {
@@ -73,7 +76,7 @@ shows that `.Json` refuses a comment that `.Jsonc` takes:
 
 ```odin
 person: Person
-if err := json.unmarshal(src, .Json, &person, allocator = alloc); err.kind != .None {
+if err := json.unmarshal(src, .Json, &person, allocator = alloc); err != nil {
 	report(src, err)
 }
 out, err := json.marshal(person, allocator = alloc)  // {"name":"ada","n":1}
@@ -224,7 +227,7 @@ is this call.
 
 ```odin
 out, err := core.format(src, json.as(.Json), core.PRETTY)
-if err.kind != .None {
+if err != nil {
 	report(src, err)
 	return
 }

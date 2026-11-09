@@ -9,6 +9,7 @@ import rules "../../core/rules"
 import typed "../../core/typed"
 import json ".."
 import model "../../core/model"
+import walktest "../../walktest"
 
 // A type's description, `describe(plan)`, and the plan built from it, `plan_of`, agree on the plan's shape.
 
@@ -235,11 +236,11 @@ a_plan_of_a_types_description_has_the_types_plan_shape :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		plan, planned := json.plan_make(c.type, plan = c.opts, allocator = context.temp_allocator)
-		testing.expect_value(t, planned.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, planned)
 		d, described := model.describe(&plan, context.temp_allocator)
-		testing.expect_value(t, described.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, described)
 		again, built := typed.plan_of(&d, json.as(.Json), c.opts, context.temp_allocator)
-		testing.expect_value(t, built.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, built)
 		want, got := project(&plan), project(&again)
 		testing.expectf(t, want == got, "%v:\nplan        %s\ndescription %s", c.type, want, got)
 	}
@@ -273,7 +274,7 @@ two_members_of_one_type_with_different_rules_get_two_blocks :: proc(t: ^testing.
 	defer free_all(context.temp_allocator)
 	plain, _ := json.plan_make(Ruled, allocator = context.temp_allocator)
 	plan, planned := json.plan_make(Ruled, plan = {rule_tags = true}, allocator = context.temp_allocator)
-	testing.expect_value(t, planned.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, planned)
 	block :: proc(p: ^typed.Plan, member: i32) -> i32 {
 		return p.meta[p.meta[0].block + member].block
 	}
@@ -319,7 +320,7 @@ a_model_tag_it_cannot_hold_refuses_the_plan :: proc(t: ^testing.T) {
 	}
 	for T in ([?]typeid{Past_Max, Signed, Leading_Zero, Flattened, Capture}) {
 		_, err := json.plan_make(T, plan = {rule_tags = true}, allocator = context.temp_allocator)
-		testing.expectf(t, err.kind == .Bad_Tag, "%v: %v", T, err.kind)
+		testing.expectf(t, walktest.typed_kind(err) == .Bad_Tag, "%v: %v", T, err)
 	}
 }
 
@@ -330,15 +331,15 @@ describe_and_plan_of_free_what_they_allocate :: proc(t: ^testing.T) {
 	d, _ := model.describe(&plan)
 	defer rules.description_destroy(&d)
 	again, built := typed.plan_of(&d, json.as(.Json))
-	testing.expect_value(t, built.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, built)
 	typed.plan_destroy(&again)
 	_, empty := typed.plan_of(&rules.Description{}, json.as(.Json))
-	testing.expect_value(t, empty.kind, core.Typed_Error_Kind.Bad_Option)
+	walktest.expect_kind(t, empty, core.Typed_Error_Kind.Bad_Option)
 	arms := [2]rules.Node_Index{1, 2}
 	objects := rules.Description{}
 	defer delete(objects.nodes)
 	append(&objects.nodes, rules.Node{kinds = rules.EVERY_KIND, any_of = arms[:], array = -1, object = -1})
 	append(&objects.nodes, rules.Node{kinds = {.Object}, array = -1, object = -1}, rules.Node{kinds = {.Object}, array = -1, object = -1})
 	_, ambiguous := typed.plan_of(&objects, json.as(.Json))
-	testing.expect_value(t, ambiguous.kind, core.Typed_Error_Kind.Ambiguous_Union)
+	walktest.expect_kind(t, ambiguous, core.Typed_Error_Kind.Ambiguous_Union)
 }

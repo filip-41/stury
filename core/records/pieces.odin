@@ -205,8 +205,8 @@ fan :: proc(runner: ^core.Runner, task: proc(arg: rawptr), arg: rawptr) {
 // fault's `at`, which a thread started before the fault was found, may give records that are no records of the text.
 // The caller drops what tasks found at or past that byte. What they found before it is each record `next` gives there,
 // once.
-each :: #force_inline proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> Maybe(core.Fault) {
-	return each_piece(src, as, framing, cast(proc(data: rawptr, piece: ^Reader, k: int) -> bool)task, data, runner, at)
+each :: #force_inline proc(src: []u8, as: core.As, framing: core.Framing, task: proc(data: ^$D, piece: ^Reader, k: int) -> bool, data: ^D, runner: ^core.Runner = nil, at: u64 = 0) -> core.Error {
+	return core.error_of(each_piece(src, as, framing, cast(proc(data: rawptr, piece: ^Reader, k: int) -> bool)task, data, runner, at))
 }
 
 // `each`'s pieces: piece 0 runs from the text's start and piece k past it from the first cut in slice k - 1 of the text
@@ -371,7 +371,7 @@ build :: proc {build_record, build_whole}
 // calling thread, which gives its refusal. `pieces`, when given, is set to the pieces a joined build cut, and left
 // alone by a build on the calling thread.
 @(private)
-build_whole :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Document_Error) {
+build_whole :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, allocator := context.allocator, runner: ^core.Runner = nil, pieces: ^int = nil) -> (core.Document, core.Error) {
 	services := (^Services)(as.spelling.records) if as.spelling != nil else nil
 	if runner != nil && runner.threads > 0 && services != nil && services.build_next != nil && u64(len(src)) >= 4 * SLICE {
 		whole, framing, at := services.whole(src, as)
@@ -398,7 +398,7 @@ build_whole :: proc(src: []u8, as: core.As, dups := core.Duplicates.Last, alloca
 				if pieces != nil {
 					pieces^ = len(job.pieces)
 				}
-				return doc, {}
+				return doc, nil
 			}
 		}
 		delete(job.nodes, allocator)
@@ -542,7 +542,7 @@ join :: proc(src: []u8, as: core.As, job: ^Build_Job, allocator: runtime.Allocat
 		array += 1
 	}
 	array -= 1
-	if err.kind != .None || array < 0 || frame.nodes[array].kind != .Array || frame.nodes[array].n != 1 || len(frame.facts) > 0 {
+	if err != nil || array < 0 || frame.nodes[array].kind != .Array || frame.nodes[array].n != 1 || len(frame.facts) > 0 {
 		return
 	}
 	if len(frame.nodes) + n > len(job.nodes) {

@@ -91,11 +91,11 @@ name in `core/build` with `as(spec, opts)`, so a caller who reads one format imp
 straight after the paths.
 
 ```odin
-build.scan  :: proc(src: []u8, as: core.As, paths: core.Path | []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error)
-scan        :: proc(src: []u8, spec: Spec, paths: core.Path | []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error)
-find        :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Path_Error)
-each_answer :: proc(src: []u8, spec: Spec, paths: core.Path | []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error
-core.query  :: proc(doc: ^core.Document, paths: core.Path | []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Path_Error)
+build.scan  :: proc(src: []u8, as: core.As, paths: core.Path | []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error)
+scan        :: proc(src: []u8, spec: Spec, paths: core.Path | []core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error)
+find        :: proc(src: []u8, spec: Spec, path: core.Path, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error)
+each_answer :: proc(src: []u8, spec: Spec, paths: core.Path | []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, opts := Options{}, read := core.Path_Options{}, allocator := context.allocator) -> core.Error
+core.query  :: proc(doc: ^core.Document, paths: core.Path | []core.Path, read := core.Query_Options{}, allocator := context.allocator) -> (answers: []core.Answer, err: core.Error)
 set         :: proc(src: []u8, spec: Spec, path: core.Path, text: string, read := core.Query_Options{}, opts := Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error)
 ```
 
@@ -223,8 +223,7 @@ after the container's last member, by name, and on a name no path looked for is 
 answer and a commit in one call. A path that ends in a `Name` inserts it where it is missing, as `set_member` does, and
 one that ends in an `Index` equal to its array's length appends there. A `?` on that last step passes a container not
 of its kind. A missing parent is `Bad_Index` with the reason `.No_Parent`, a container not of the last step's kind
-`.Not_Object` or `.Not_Array`, and an index past the length `Bad_Position`. The error is a `Path_Edit_Error` with one `kind`: `.Path` for the read of the path,
-with `path` set, and `.Edit` for the build, the edit and the commit, with `edit` set.
+`.Not_Object` or `.Not_Array`, and an index past the length `Bad_Position`. The error is a `core.Error`: a `Path_Error` for the read of the path and a `Document_Error` for the build, the edit and the commit.
 
 `commit` refuses a partial document with `Bad_Index`, since it holds neither the members a commit composes nor their
 comments.
@@ -288,9 +287,7 @@ format. A missing value or a wrong kind is an answer's outcome, not an error. `p
 path a `Bad_Path` or a step's `Over_Capacity` names. A `Bad_Path` says why in `reason`, a `Path_Reason` such as
 `.Unclosed_Bracket` or `.Pointer_Text`, and one that `parse_path` or `parse_pointer` refused holds the text in `text`.
 
-`at` is a byte of the path's text for `Bad_Path` and of the source for `Walk` and `Duplicate_Key`. `Path_Edit_Error` has one `kind`: `.Path` holds the read's error in `path`, and `.Edit` the build's, the edit's or the
-commit's in `edit`. `core.render` and `core.write_code` take a `Path_Error` or a `Path_Edit_Error`, and `render` takes
-the source, as for every error. A `Bad_Path` renders in its own text, `1:3: Invalid path ".a[": `[` is not closed`, and
+`at` is a byte of the path's text for `Bad_Path` and of the source for `Walk` and `Duplicate_Key`. `core.render` and `core.write_code` take a `core.Error`, and `render` takes the source, as for every error. A `Bad_Path` renders in its own text, `1:3: Invalid path ".a[": `[` is not closed`, and
 one from a `Path` of step literals without a position, `Invalid path: a step is unset`.
 
 ## A container's end

@@ -110,11 +110,11 @@ expect_answer :: proc(t: ^testing.T, src: []u8, spec: json.Spec, kind: core.Faul
 validate_spec :: proc(src: []u8, spec: json.Spec) -> (core.Fault, bool) {
 	switch spec {
 	case .Json:
-		return json.validate(src, .Json).?
+		return walktest.fault_of(json.validate(src, .Json)).?
 	case .Jsonc:
-		return json.validate(src, .Jsonc).?
+		return walktest.fault_of(json.validate(src, .Jsonc)).?
 	case .Json5:
-		return json.validate(src, .Json5).?
+		return walktest.fault_of(json.validate(src, .Json5)).?
 	}
 	return {}, true
 }

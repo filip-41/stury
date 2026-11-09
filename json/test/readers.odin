@@ -8,7 +8,7 @@ import walktest "../../walktest"
 
 // Reading a built document: its nodes and spans, the readers, duplicate keys, facts, and the faults a build reports.
 
-build :: proc(src: string, $S: json.Spec, opts := json.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Document_Error) {
+build :: proc(src: string, $S: json.Spec, opts := json.Options{}, dups := core.Duplicates.Last) -> (core.Document, core.Error) {
 	return json.build(transmute([]u8)src, S, opts, dups)
 }
 
@@ -19,7 +19,7 @@ node_layout :: proc(t: ^testing.T) {
 	src := `{"a":[1,2],"b":{}}`
 	doc, err := build(src, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, len(doc.nodes), 7)
 	if len(doc.nodes) != 7 {
 		return
@@ -55,7 +55,7 @@ root_close_reader :: proc(t: ^testing.T) {
 	cases := []string{`"x"`, `42`, `true`, `null`}
 	for src in cases {
 		doc, err := build(src, .Json)
-		if !testing.expectf(t, err.kind == .None, "scalar %q: %v", src, err) {
+		if !testing.expectf(t, err == nil, "scalar %q: %v", src, err) {
 			core.destroy(&doc)
 			continue
 		}
@@ -66,7 +66,7 @@ root_close_reader :: proc(t: ^testing.T) {
 
 	doc, err := build("[1]  ", .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, doc.root_close, 3)
 	testing.expect_value(t, string(core.span(&doc, core.ROOT)), "[1]")
 }
@@ -86,13 +86,13 @@ line_separators_in_comments :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		doc: core.Document
-		err: core.Document_Error
+		err: core.Error
 		switch c.spec {
 		case .Json:  doc, err = build(c.src, .Json)
 		case .Jsonc: doc, err = build(c.src, .Jsonc)
 		case .Json5: doc, err = build(c.src, .Json5)
 		}
-		if !testing.expectf(t, err.kind == .None, "%v %q: %v", c.spec, c.src, err) {
+		if !testing.expectf(t, err == nil, "%v %q: %v", c.spec, c.src, err) {
 			core.destroy(&doc)
 			continue
 		}
@@ -134,14 +134,14 @@ check_spans :: proc(t: ^testing.T, src: []u8, $S: json.Spec) -> bool {
 	if fault == nil && log.n == 0 {
 		// A text with no value is no document: the walk reads it as a stream would, and `build` refuses it with
 		// `.Truncated` at the text's end.
-		return testing.expectf(t, err.kind == .Walk && err.inner.kind == .Truncated && err.inner.at == u64(len(src)), "%v %q: build %v", S, string(src), err)
+		return testing.expectf(t, walktest.fault_of(err) != nil && (walktest.fault_of(err).? or_else core.Fault{}).kind == .Truncated && (walktest.fault_of(err).? or_else core.Fault{}).at == u64(len(src)), "%v %q: build %v", S, string(src), err)
 	}
 	// `build` returns the fault `validate` returns for the same text, trailing bytes included.
-	want, bad := json.validate(src, S).?
+	want, bad := walktest.fault_of(json.validate(src, S)).?
 	if bad {
-		return testing.expectf(t, err.kind == .Walk && err.inner.kind == want.kind && err.inner.at == want.at, "%v %q: build %v, validate %v", S, string(src), err, want)
+		return testing.expectf(t, walktest.fault_of(err) != nil && (walktest.fault_of(err).? or_else core.Fault{}).kind == want.kind && (walktest.fault_of(err).? or_else core.Fault{}).at == want.at, "%v %q: build %v, validate %v", S, string(src), err, want)
 	}
-	if !testing.expectf(t, err.kind == .None, "%v %q: build %v", S, string(src), err) {
+	if !testing.expectf(t, err == nil, "%v %q: build %v", S, string(src), err) {
 		return false
 	}
 	return walktest.check_containers(t, &doc, log.tokens[:log.n])
@@ -154,7 +154,7 @@ readers_refuse_containers :: proc(t: ^testing.T) {
 	buf: [8]u8
 	doc, err := build(`{"a":[1]}`, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	_, ok := core.text(&doc, 0, buf[:])
 	testing.expect(t, !ok)
 	testing.expect(t, !core.key_equals(&doc, 0, "a"))
@@ -171,7 +171,7 @@ readers_refuse_containers :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 
 	doc, err = build(`["123"]`, .Json)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect(t, !is_number(&doc, 1))
 }
 
@@ -181,7 +181,7 @@ readers_refuse_containers :: proc(t: ^testing.T) {
 child_at_reader :: proc(t: ^testing.T) {
 	doc, err := build(`["a","b","c"]`, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	for i in 0 ..< 3 {
 		v, ok := core.child_at(&doc, 0, i)
 		testing.expect(t, ok)
@@ -202,7 +202,7 @@ child_at_reader :: proc(t: ^testing.T) {
 
 	// A nested member makes `child_at` walk, and an `Object` value's key node is at `value - 1`.
 	doc, err = build(`{"a":1,"b":[2,3],"c":{"d":4}}`, .Json)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	it := core.children(&doc, 0)
 	k := 0
 	for {
@@ -223,7 +223,7 @@ child_at_reader :: proc(t: ^testing.T) {
 
 	// An `Object` whose members are one key and one value each uses the index path at a stride of 2, values 2, 4 and 6.
 	doc, err = build(`{"a":1,"b":2,"c":3}`, .Json)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	values := []core.Node_Index{2, 4, 6}
 	for w, i in values {
 		got, has := core.child_at(&doc, 0, i)
@@ -237,7 +237,7 @@ child_at_reader :: proc(t: ^testing.T) {
 
 	// A nested `Array` is walked, each member's `n` giving the next step.
 	doc, err = build(`[[1],[2,3],[]]`, .Json)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	want := []core.Node_Index{1, 3, 6}
 	for w, i in want {
 		got, has := core.child_at(&doc, 0, i)
@@ -254,7 +254,7 @@ child_at_reader :: proc(t: ^testing.T) {
 index_children_reader :: proc(t: ^testing.T) {
 	doc, err := build(`[{"a":1},{"a":[2,3]},{"b":{"c":4}},5,[],{"d":[{"e":6},{"e":7}]}]`, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	want: [6]core.Node_Index
 	it := core.children(&doc, 0)
 	for k in 0 ..< 6 {
@@ -311,7 +311,7 @@ index_children_reader :: proc(t: ^testing.T) {
 children_from_reader :: proc(t: ^testing.T) {
 	doc, err := build(`[{"a":1},[2,3],"c",{"d":{"e":4}},5]`, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	want: [5]core.Node_Index
 	it := core.children(&doc, 0)
 	for k in 0 ..< 5 {
@@ -343,7 +343,7 @@ children_from_reader :: proc(t: ^testing.T) {
 
 	// An inline-key `Object` from member 1 yields the value after the second key, then the rest.
 	doc, err = build(`{"a":[1],"b":2,"c":{"d":3}}`, .Json)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	tail := core.children_from(&doc, 0, 1)
 	v, more := core.child_next(&tail)
 	testing.expect(t, more)
@@ -384,7 +384,7 @@ child_at_saturated :: proc(t: ^testing.T) {
 		strings.write_string(&b, c.close)
 		doc, err := build(strings.to_string(b), .Json)
 		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "%s: %v", c.open, err) {
+		if !testing.expectf(t, err == nil, "%s: %v", c.open, err) {
 			continue
 		}
 		last := core.NO_NODE
@@ -413,7 +413,7 @@ readers_refuse_no_node :: proc(t: ^testing.T) {
 	buf: [8]u8
 	doc, err := build(`{"a":1}`, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	i := core.NO_NODE
 	testing.expect_value(t, core.kind(&doc, i), core.Kind.Null)
 	testing.expect_value(t, core.length(&doc, i), 0)
@@ -434,7 +434,7 @@ readers_refuse_no_node :: proc(t: ^testing.T) {
 readers :: proc(t: ^testing.T) {
 	doc, err := build(`[]`, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, core.length(&doc, 0), 0)
 	empty := core.children(&doc, 0)
 	_, ok := core.child_next(&empty)
@@ -442,7 +442,7 @@ readers :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 
 	doc, err = build(`[[[]]]`, .Json)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, core.length(&doc, 0), 1)
 	testing.expect_value(t, core.length(&doc, 1), 1)
 	testing.expect_value(t, core.length(&doc, 2), 0)
@@ -455,7 +455,7 @@ readers :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 
 	doc, err = build(`1`, .Json)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, core.kind(&doc, 0), core.Kind.Number)
 	testing.expect_value(t, core.length(&doc, 0), 0)
 	testing.expect_value(t, string(core.span(&doc, 0)), "1")
@@ -465,7 +465,7 @@ readers :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 
 	doc, err = build(`[-0, 2.5, 18446744073709551615, 1e400, "1"]`, .Json)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	x, is_float := core.float_value(&doc, 1)
 	testing.expect(t, is_float && x == 0 && 1 / x < 0)
 	x, is_float = core.float_value(&doc, 2)
@@ -486,7 +486,7 @@ duplicates :: proc(t: ^testing.T) {
 	src := `{"a":1,"a":2,"b":3}`
 	doc, err := build(src, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	v, ok := core.member(&doc, 0, "a", .First)
 	testing.expect(t, ok)
 	testing.expect_value(t, v, 2)
@@ -505,17 +505,17 @@ duplicates :: proc(t: ^testing.T) {
 	core.destroy(&doc)
 
 	doc, err = build(src, .Json, {}, .Refuse)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
-	testing.expect_value(t, err.at, 7)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, walktest.at_of(err), 7)
 	testing.expect_value(t, len(doc.nodes), 0)
 
 	// `"\u0061"` and `"a"` are the same key, so a refusing build fails at the later key's byte, 12.
 	doc, err = build(`{"\u0061":1,"a":2}`, .Json, {}, .Refuse)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
-	testing.expect_value(t, err.at, 12)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, walktest.at_of(err), 12)
 
 	doc, err = build(`{"\u0061":1,"b":2}`, .Json, {}, .Refuse)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	defer core.destroy(&doc)
 	v, ok = core.member(&doc, 0, "a")
 	testing.expect(t, ok)
@@ -528,14 +528,14 @@ duplicates :: proc(t: ^testing.T) {
 refuse_repeat_before_fault :: proc(t: ^testing.T) {
 	// The root's second `""` is at byte 6, and the comma after the colon is the fault at byte 8.
 	doc, err := build(`{"":0,"":,}`, .Json, {}, .Refuse)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
-	testing.expect_value(t, err.at, 6)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, walktest.at_of(err), 6)
 	testing.expect_value(t, len(doc.nodes), 0)
 
 	// A closed inner object finds its own repeat first, at byte 15. The root's repeat at byte 6 is earlier.
 	doc, err = build(`{"":0,"":{"":1,"":2},x}`, .Json, {}, .Refuse)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
-	testing.expect_value(t, err.at, 6)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, walktest.at_of(err), 6)
 	testing.expect_value(t, len(doc.nodes), 0)
 }
 
@@ -557,8 +557,8 @@ member_nested_keys :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		doc, err := build(c.text, .Json)
-		testing.expectf(t, err.kind == .None, "%q: %v", c.text, err)
-		if err.kind != .None {
+		testing.expectf(t, err == nil, "%q: %v", c.text, err)
+		if err != nil {
 			return
 		}
 		last, ok := core.member(&doc, 0, c.name)
@@ -595,8 +595,8 @@ facts :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		doc, err := build(c.text, .Jsonc)
-		testing.expectf(t, err.kind == .None, "%q: %v", c.text, err)
-		if err.kind != .None {
+		testing.expectf(t, err == nil, "%q: %v", c.text, err)
+		if err != nil {
 			continue
 		}
 		got: [dynamic]core.Role
@@ -625,17 +625,17 @@ facts :: proc(t: ^testing.T) {
 errors :: proc(t: ^testing.T) {
 	src := `{`
 	doc, err := build(src, .Json)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Walk)
-	testing.expect_value(t, err.inner.at, 1)
-	testing.expect_value(t, err.inner.kind, core.Fault_Kind.Truncated)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Walk)
+	testing.expect_value(t, (walktest.fault_of(err).? or_else core.Fault{}).at, 1)
+	testing.expect_value(t, (walktest.fault_of(err).? or_else core.Fault{}).kind, core.Fault_Kind.Truncated)
 	testing.expect_value(t, len(doc.nodes), 0)
 	b := strings.builder_make(context.temp_allocator)
 	core.render(strings.to_writer(&b), transmute([]u8)src, err)
 	testing.expect_value(t, strings.to_string(b), "1:2: Unfinished input")
 
 	doc, err = build(`{"a":1,"a":2}`, .Json, {}, .Refuse)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
-	testing.expect_value(t, err.at, 7)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, walktest.at_of(err), 7)
 	strings.builder_reset(&b)
 	core.render(strings.to_writer(&b), transmute([]u8)string(`{"a":1,"a":2}`), err)
 	testing.expect_value(t, strings.to_string(b), "1:8: Duplicate key")
@@ -645,8 +645,8 @@ errors :: proc(t: ^testing.T) {
 @(test)
 json5_duplicates :: proc(t: ^testing.T) {
 	doc, err := build(`{a:1,a:2}`, .Json5, {}, .Refuse)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
-	testing.expect_value(t, err.at, 5)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, walktest.at_of(err), 5)
 	testing.expect_value(t, len(doc.nodes), 0)
 }
 
@@ -656,7 +656,7 @@ json5_duplicates :: proc(t: ^testing.T) {
 json5_facts :: proc(t: ^testing.T) {
 	doc, err := build("{/* h */ a: 1 // i\n}", .Json5)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	facts := core.facts_of(&doc, 2, .Comment)
 	_, head := core.fact_next(&facts)
 	more := core.facts_of(&doc, 2, .Comment_Inline)
@@ -719,13 +719,13 @@ check_0x1e :: proc(t: ^testing.T, src: []u8, spec: json.Spec, text: string) -> b
 }
 
 check_0x1e_one :: proc(t: ^testing.T, src: []u8, $S: json.Spec, text: string) -> bool {
-	want, bad := json.validate(src, S).?
+	want, bad := walktest.fault_of(json.validate(src, S)).?
 	doc, err := json.build(src, S)
 	defer core.destroy(&doc)
 	if bad {
-		return testing.expectf(t, err.kind == .Walk && err.inner.kind == want.kind && err.inner.at == want.at, "%v %q: build %v, validate %v", S, text, err, want)
+		return testing.expectf(t, walktest.fault_of(err) != nil && (walktest.fault_of(err).? or_else core.Fault{}).kind == want.kind && (walktest.fault_of(err).? or_else core.Fault{}).at == want.at, "%v %q: build %v, validate %v", S, text, err, want)
 	}
-	return testing.expectf(t, err.kind == .None, "%v %q: %v", S, text, err)
+	return testing.expectf(t, err == nil, "%v %q: %v", S, text, err)
 }
 
 
@@ -736,7 +736,7 @@ spelling_complete :: proc(t: ^testing.T) {
 	src := []u8{'1'}
 	doc, err := json.build(src, .Json)
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "build: %v", err) {
+	if !testing.expectf(t, err == nil, "build: %v", err) {
 		return
 	}
 	s := doc.spelling
@@ -750,8 +750,8 @@ spelling_complete :: proc(t: ^testing.T) {
 @(test)
 refuse_with_comment :: proc(t: ^testing.T) {
 	doc, err := build(`{"a":1,"a":2 /* c */}`, .Jsonc, {}, .Refuse)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Duplicate_Key)
-	testing.expect_value(t, err.at, 7)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Duplicate_Key)
+	testing.expect_value(t, walktest.at_of(err), 7)
 	testing.expect_value(t, len(doc.nodes), 0)
 }
 
@@ -762,7 +762,7 @@ refuse_with_comment :: proc(t: ^testing.T) {
 text_refuses_containers :: proc(t: ^testing.T) {
 	doc, err := build(`[[0],[1,2,3],{"k":1},7,"s"]`, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	buf: [8]u8
 	// Node 0 is an array of 5 children, node 1 of 1, node 3 of 3, node 7 an object of 1 member, and
 	// `len(doc.nodes)` is past the last node.
@@ -787,7 +787,7 @@ pairs_iteration :: proc(t: ^testing.T) {
 	// Nested container values: array and object values step over their subtree.
 	doc, err := build(`{"a":[1,2],"b":{"c":3},"d":4}`, .Json)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	it := core.pairs(&doc, 0)
 	buf: [32]u8
 	k1, v1, ok1 := core.pair_next(&it)
@@ -805,7 +805,7 @@ pairs_iteration :: proc(t: ^testing.T) {
 	// Empty object: returns empty iterator.
 	empty_doc, eerr := build(`{}`, .Json)
 	defer core.destroy(&empty_doc)
-	testing.expect_value(t, eerr.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, eerr)
 	eit := core.pairs(&empty_doc, 0)
 	_, _, eok := core.pair_next(&eit)
 	testing.expect(t, !eok)
@@ -813,7 +813,7 @@ pairs_iteration :: proc(t: ^testing.T) {
 	// Duplicate keys: both pairs are yielded in source order.
 	dup_doc, derr := build(`{"k":1,"k":2}`, .Json)
 	defer core.destroy(&dup_doc)
-	testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, derr)
 	dit := core.pairs(&dup_doc, 0)
 	dk1, dv1, dok1 := core.pair_next(&dit)
 	ds1, _ := core.text(&dup_doc, dk1, buf[:])
@@ -827,7 +827,7 @@ pairs_iteration :: proc(t: ^testing.T) {
 	// Non-Map containers and scalars: Array, scalar, or out of range index yields empty iterator.
 	arr_doc, aerr := build(`[1,2,{"x":3}]`, .Json)
 	defer core.destroy(&arr_doc)
-	testing.expect_value(t, aerr.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, aerr)
 	ait := core.pairs(&arr_doc, 0)
 	_, _, aok := core.pair_next(&ait)
 	testing.expect(t, !aok)

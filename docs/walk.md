@@ -57,8 +57,8 @@ Options  :: struct { ... }     // what a walk receives at run time
 Detail   :: enum u8 { None, ... }   // the format's own rules, in `Fault.detail`
 RULES    : core.Rules             // each rule's code and message, in rodata
 walk     :: proc "contextless" (src: []u8, lo: u64, $S: Spec, opts := Options{}, h: ^$H, regs: ^core.Hook_Regs, $on: proc "contextless" (h: ^H, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)) -> (hi: u64, fault: Maybe(core.Fault))
-validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> Maybe(core.Fault)
-build    :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Document_Error)
+validate :: proc "contextless" (src: []u8, spec: Spec, opts := Options{}) -> core.Error
+build    :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last, allocator := context.allocator) -> (core.Document, core.Error)
 ```
 
 The walks share one signature, and dsv's `build` writes the header's cells into a private key buffer: `walk` allocates
@@ -84,7 +84,7 @@ That loop reads an NDJSON stream: each walk returns one past the document it rea
 `regs` the caller keeps returns the hook's registers from one walk to the next.
 
 `build` runs the value layer: it passes `walk` one of `core/build`'s builder hooks, `build.builder_hook` for a spec
-with comments, and returns the document of nodes and facts, or a `Document_Error`. `Document_Error.at` is the byte the
+with comments, and returns the document of nodes and facts, or a `core.Error`: a `Document_Error` from the document's rules or a `Fault` from the text. `Document_Error.at` is the byte the
 error names, 0 for a kind that names none, and `inner` is the walk's fault for `.Walk`. The format's `document.odin` holds one `core.Spelling` table in rodata for all its readings,
 and a reader uses it to decode a string or number without running a second walk.
 
@@ -114,7 +114,7 @@ and a reader uses it to decode a string or number without running a second walk.
 
 ### The document
 
-`build` runs the walk and returns one `core.Document`, or a `core.Document_Error`: the walk's tokens as 16-byte
+`build` runs the walk and returns one `core.Document`, or a `core.Error`: the walk's tokens as 16-byte
 `core.Node`s in preorder, the facts beside them, and a `core.Spelling` table. `document.md` describes the node, the
 document, the readers, the spelling services, the duplicate-key rule, a delimited text as a document, facts, the edit
 list and its commit, and the value layer's errors.

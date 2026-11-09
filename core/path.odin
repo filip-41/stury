@@ -100,19 +100,6 @@ Token_Answer :: struct {
 	outcome: Presence,
 }
 
-Path_Edit_Error_Kind :: enum u8 {
-	None,
-	Path, // the read of the path failed, in `path`
-	Edit, // the build, the edit or the commit failed, in `edit`
-}
-
-// What a path edit can fail with: the read of the path, or the build, the edit and its commit.
-Path_Edit_Error :: struct {
-	kind: Path_Edit_Error_Kind,
-	path: Path_Error,
-	edit: Document_Error,
-}
-
 // The true position of a child a `Partial` container kept, for a container read by position. `Document.kept` holds these,
 // sorted by node.
 Kept_Child :: struct {
@@ -212,32 +199,35 @@ path_destroy :: proc(p: ^Path) {
 // escape and an ill-formed UTF-8 sequence are refused as in one, and its other bytes stand as written. Spaces may stand around the text and inside a
 // wrapper, not inside a path. Text past this subset is refused, so a path means here what it means in jq. A bare name is
 // a jq identifier. `.Bad_Path`'s `at` is a byte of `text`.
-parse_path :: proc(text: string, allocator := context.allocator) -> (path: Path, err: Path_Error) {
-	return parse(text, allocator, false)
+parse_path :: proc(text: string, allocator := context.allocator) -> (path: Path, err: Error) {
+	parsed, refusal := parse(text, allocator, false)
+	return parsed, error_of(refusal)
 }
 
 // Reads an RFC 6901 JSON Pointer: the empty text is the root, and each `/` starts a reference token, in which `~0` is `~`
 // and `~1` is `/`, and an ill-formed UTF-8 sequence is refused. A token that is an array index by the RFC's rule, with no
 // leading zero, is an `Index_Or_Name`.
-parse_pointer :: proc(text: string, allocator := context.allocator) -> (path: Path, err: Path_Error) {
-	return parse(text, allocator, true)
+parse_pointer :: proc(text: string, allocator := context.allocator) -> (path: Path, err: Error) {
+	parsed, refusal := parse(text, allocator, true)
+	return parsed, error_of(refusal)
 }
 
 // Answers `path` over a document built whole, in the order a scan of its text answers, and allocates nothing but the
 // list, which the caller frees with `delete(answers, allocator)`. A partial document cannot say what it does not hold,
 // so it is `.Unsupported`. An `Answer`'s nodes are `doc`'s.
 @(private)
-query_one :: proc(doc: ^Document, path: Path, read := Query_Options{}, allocator := context.allocator) -> (answers: []Answer, err: Path_Error) {
+query_one :: proc(doc: ^Document, path: Path, read := Query_Options{}, allocator := context.allocator) -> (answers: []Answer, err: Error) {
 	return query_many(doc, []Path{path}, read, allocator)
 }
 
 // Answers `paths` over a document built whole, as for one path, each answer tagged with its path's number.
 @(private)
-query_many :: proc(doc: ^Document, paths: []Path, read := Query_Options{}, allocator := context.allocator) -> (answers: []Answer, err: Path_Error) {
+query_many :: proc(doc: ^Document, paths: []Path, read := Query_Options{}, allocator := context.allocator) -> (answers: []Answer, err: Error) {
 	if doc == nil || doc.spelling == nil || doc.spelling.query == nil {
-		return nil, {kind = .Unsupported}
+		return nil, error_of(Path_Error{kind = .Unsupported})
 	}
-	return doc.spelling.query(doc, paths, read, allocator)
+	found, refusal := doc.spelling.query(doc, paths, read, allocator)
+	return found, error_of(refusal)
 }
 
 query :: proc {query_one, query_many}

@@ -13,8 +13,9 @@ import typed "../core/typed"
 unmarshal :: proc {unmarshal_once, unmarshal_plan}
 
 // Builds the plan of `T` for spec `spec` read with `opts`, as `typed.plan_make` does. A plan of any spec writes JSON.
-plan_make :: proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
-	return plan_as(T, as(spec, opts), plan, allocator)
+plan_make :: proc(T: typeid, spec := Spec.Json, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error) {
+	made, err := plan_as(T, as(spec, opts), plan, allocator)
+	return made, core.error_of(err)
 }
 
 // The spelling's `plans`.
@@ -26,20 +27,20 @@ plan_as :: proc(T: typeid, as: core.As, opts: typed.Plan_Options, allocator: run
 }
 
 @(private)
-unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
-	plan, err := plan_make(T, spec, opts)
-	if err.kind != .None {
-		return err
+unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	plan, refusal := plan_make(T, spec, opts)
+	if refusal != nil {
+		return refusal
 	}
 	defer typed.plan_destroy(&plan)
-	err = unmarshal_plan(src, spec, target, &plan, opts, read, allocator)
+	err := read_text(src, spec, opts, target, T, &plan, read, allocator, false)
 	typed.own_errors(&err, read.sink)
-	return err
+	return core.error_of(err)
 }
 
 @(private)
-unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
-	return read_text(src, spec, opts, target, T, plan, read, allocator, false)
+unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return core.error_of(read_text(src, spec, opts, target, T, plan, read, allocator, false))
 }
 
 // The plan's `read` and `check` of a whole text under the handle `as`.

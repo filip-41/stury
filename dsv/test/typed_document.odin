@@ -5,6 +5,7 @@ import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
 import dsv ".."
+import walktest "../../walktest"
 
 // The typed read of a built delimited document: a value that reads gives the answer `dsv.unmarshal` gives over the same
 // text, and a refusal the same refusal, for each row form, cell rule and option. A partial document reads what its path
@@ -19,13 +20,13 @@ agree :: proc(t: ^testing.T, src: string, $T: typeid, $S: dsv.Spec, opts := dsv.
 	want_err := dsv.unmarshal(bytes, S, &want, read = read, opts = opts, allocator = context.temp_allocator)
 	doc, built := dsv.build(bytes, S, opts, .Last, context.temp_allocator)
 	defer core.destroy(&doc)
-	if built.kind != .None {
+	if built != nil {
 		// A text the walk faults on builds no document.
-		testing.expectf(t, want_err.kind == .Walk, "%q: no document, but the text read as %v", src, want_err, loc = loc)
+		testing.expectf(t, walktest.fault_of(want_err) != nil, "%q: no document, but the text read as %v", src, want_err, loc = loc)
 		return
 	}
 	plan, planned := dsv.plan_make(T, .Csv, allocator = context.temp_allocator)
-	testing.expect_value(t, planned.kind, core.Typed_Error_Kind.None, loc)
+	walktest.expect_nil(t, planned, loc)
 	got_err := typed.unmarshal(&doc, core.ROOT, &got, &plan, read, context.temp_allocator)
 	testing.expectf(t, fmt.tprintf("%v", got_err) == fmt.tprintf("%v", want_err), "%q: text %v, document %v", src, want_err, got_err, loc = loc)
 	testing.expectf(t, fmt.tprintf("%v", got) == fmt.tprintf("%v", want), "%q: text %v, document %v", src, want, got, loc = loc)
@@ -37,10 +38,10 @@ agree :: proc(t: ^testing.T, src: string, $T: typeid, $S: dsv.Spec, opts := dsv.
 agree_maps :: proc(t: ^testing.T, src: string, loc := #caller_location) {
 	bytes := transmute([]u8)src
 	want, got: []map[string]i64
-	testing.expect_value(t, dsv.unmarshal(bytes, .Csv, &want, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None, loc)
+	walktest.expect_nil(t, dsv.unmarshal(bytes, .Csv, &want, allocator = context.temp_allocator), loc)
 	doc, _ := dsv.build(bytes, .Csv, allocator = context.temp_allocator)
 	plan, _ := dsv.plan_make([]map[string]i64, .Csv, allocator = context.temp_allocator)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &got, &plan, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None, loc)
+	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &got, &plan, allocator = context.temp_allocator), loc)
 	testing.expect_value(t, len(got), len(want), loc)
 	for row, i in want {
 		testing.expect_value(t, len(got[i]), len(row), loc)
@@ -143,10 +144,10 @@ Pair :: struct {
 scan_rows :: proc(t: ^testing.T, src, path: string, $S: dsv.Spec, T: typeid, opts := dsv.Options{}, loc := #caller_location) -> (doc: core.Document) {
 	parsed, perr := core.parse_path(path)
 	defer core.path_destroy(&parsed)
-	testing.expect_value(t, perr.kind, core.Path_Error_Kind.None, loc)
-	err: core.Path_Error
+	walktest.expect_nil(t, perr, loc)
+	err: core.Error
 	doc, err = dsv.scan(transmute([]u8)src, S, parsed, opts = opts, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Path_Error_Kind.None, loc)
+	walktest.expect_nil(t, err, loc)
 	return
 }
 
@@ -158,31 +159,31 @@ a_partial_document_reads_what_its_path_kept :: proc(t: ^testing.T) {
 	// A cell kept by name binds to the field its key names, and the root lists the records the path kept.
 	doc := scan_rows(t, headed, ".[1].name", .Csv, []Pair)
 	e := typed.unmarshal(&doc, core.ROOT, &rows, &plan, {borrow_strings = true}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, len(rows), 1)
 	testing.expect_value(t, rows[0], Pair{0, "bob"})
 	// A cell kept by position has its header cell beside it.
 	doc = scan_rows(t, headed, ".[1][0]", .Csv, []Pair)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {}, context.temp_allocator))
 	testing.expect_value(t, rows[0], Pair{2, ""})
 	// A record kept whole reads as a list of that one row, and as the same row the whole text gives.
 	doc = scan_rows(t, headed, ".[1]", .Csv, []Pair)
-	testing.expect_value(t, typed.unmarshal(&doc, doc.answers[0], &rows, &plan, {borrow_strings = true}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, typed.unmarshal(&doc, doc.answers[0], &rows, &plan, {borrow_strings = true}, context.temp_allocator))
 	testing.expect_value(t, len(rows), 1)
 	testing.expect_value(t, rows[0], Pair{2, "bob"})
 	doc = scan_rows(t, headed, ".[]", .Csv, []Pair)
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {borrow_strings = true}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {borrow_strings = true}, context.temp_allocator))
 	testing.expect_value(t, len(rows), 2)
 	testing.expect_value(t, rows[0], Pair{1, "ann"})
 	lists: [][]string
 	list_plan, _ := dsv.plan_make([][]string, .Csv, allocator = context.temp_allocator)
 	doc = scan_rows(t, headed, ".[1]", .Csv, [][]string)
-	testing.expect_value(t, typed.unmarshal(&doc, doc.answers[0], &lists, &list_plan, {borrow_strings = true}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, typed.unmarshal(&doc, doc.answers[0], &lists, &list_plan, {borrow_strings = true}, context.temp_allocator))
 	testing.expect_value(t, len(lists), 1)
 	testing.expect_value(t, lists[0][1], "bob")
 	// A cell reads in no plan.
 	doc = scan_rows(t, headed, ".[1].name", .Csv, []Pair)
-	testing.expect_value(t, typed.unmarshal(&doc, doc.answers[0], &rows, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Unsupported)
+	walktest.expect_kind(t, typed.unmarshal(&doc, doc.answers[0], &rows, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Unsupported)
 	free_all(context.temp_allocator)
 }
 
@@ -193,16 +194,16 @@ a_partial_document_with_no_header_reads_a_cell_it_did_not_keep_as_absent :: proc
 	rows: []Row
 	plan, _ := dsv.plan_make([]Row, .Csv, allocator = context.temp_allocator)
 	doc := scan_rows(t, src, ".[1][1]", .Csv, []Row, {no_header = true})
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {borrow_strings = true}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {borrow_strings = true}, context.temp_allocator))
 	testing.expect_value(t, len(rows), 1)
 	testing.expect_value(t, rows[0], Row{0, "bob"})
 	doc = scan_rows(t, src, ".[1]", .Csv, []Row, {no_header = true})
-	testing.expect_value(t, typed.unmarshal(&doc, doc.answers[0], &rows, &plan, {borrow_strings = true}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, typed.unmarshal(&doc, doc.answers[0], &rows, &plan, {borrow_strings = true}, context.temp_allocator))
 	testing.expect_value(t, rows[0], Row{2, "bob"})
 	lists: [][]string
 	list_plan, _ := dsv.plan_make([][]string, .Csv, allocator = context.temp_allocator)
 	doc = scan_rows(t, src, ".[1][1]", .Csv, [][]string, {no_header = true})
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &lists, &list_plan, {borrow_strings = true}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, typed.unmarshal(&doc, core.ROOT, &lists, &list_plan, {borrow_strings = true}, context.temp_allocator))
 	testing.expect_value(t, len(lists), 1)
 	testing.expect_value(t, len(lists[0]), 2)
 	testing.expect_value(t, lists[0][0], "")
@@ -216,14 +217,14 @@ a_document_read_refuses_what_a_text_read_cannot_take :: proc(t: ^testing.T) {
 	doc, _ := dsv.build(src, .Csv, allocator = context.temp_allocator)
 	plan, _ := dsv.plan_make([]Pair, .Csv, allocator = context.temp_allocator)
 	rows: []Pair
-	testing.expect_value(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {dups = .Refuse}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
+	walktest.expect_kind(t, typed.unmarshal(&doc, core.ROOT, &rows, &plan, {dups = .Refuse}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
 	// The header row's cells are keys, and a cell is no row.
-	testing.expect_value(t, typed.unmarshal(&doc, 2, &rows, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Bad_Option)
-	testing.expect_value(t, typed.unmarshal(&doc, 5, &rows, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Unsupported)
+	walktest.expect_kind(t, typed.unmarshal(&doc, 2, &rows, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Bad_Option)
+	walktest.expect_kind(t, typed.unmarshal(&doc, 5, &rows, &plan, {}, context.temp_allocator), core.Typed_Error_Kind.Unsupported)
 	headless, _ := dsv.build(src, .Csv, {no_header = true}, allocator = context.temp_allocator)
 	maps: []map[string]string
 	map_plan, _ := dsv.plan_make([]map[string]string, .Csv, allocator = context.temp_allocator)
-	testing.expect_value(t, typed.unmarshal(&headless, core.ROOT, &maps, &map_plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.Unsupported)
+	walktest.expect_kind(t, typed.unmarshal(&headless, core.ROOT, &maps, &map_plan, {}, context.temp_allocator), core.Typed_Error_Kind.Unsupported)
 	free_all(context.temp_allocator)
 }
 
@@ -240,11 +241,11 @@ a_plan_not_made_by_dsv_refuses_a_document :: proc(t: ^testing.T) {
 	testing.expect_value(t, planned.kind, core.Typed_Error_Kind.None)
 	rows: []Row
 	e := typed.unmarshal(&doc, core.ROOT, &rows, &plan, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Plan_Mismatch)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Plan_Mismatch)
 	testing.expect_value(t, len(rows), 0)
 	e = dsv.unmarshal(transmute([]u8)src, .Csv, &rows, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Plan_Mismatch)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Plan_Mismatch)
 	e = typed.unmarshal(&doc, core.ROOT, &rows, nil, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, len(rows), 1)
 }

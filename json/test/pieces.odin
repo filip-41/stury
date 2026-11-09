@@ -22,9 +22,9 @@ WIDTHS :: [?]int{1, 2, 6, 18}
 @(private = "file")
 whole_fault :: proc(src: []u8, spec: json.Spec) -> Maybe(core.Fault) {
 	switch spec {
-	case .Json:  return json.validate(src, .Json)
-	case .Jsonc: return json.validate(src, .Jsonc)
-	case .Json5: return json.validate(src, .Json5)
+	case .Json:  return walktest.fault_of(json.validate(src, .Json))
+	case .Jsonc: return walktest.fault_of(json.validate(src, .Jsonc))
+	case .Json5: return walktest.fault_of(json.validate(src, .Json5))
 	}
 	return nil
 }
@@ -237,7 +237,7 @@ records_validate_a_spine :: proc(t: ^testing.T) {
 	deep := json.as(.Json)
 	deep.max_depth = 2
 	src := transmute([]u8)texts[1]
-	testing.expect_value(t, records.validate_parallel(src, deep), json.validate(src, .Json, {max_depth = 2}))
+	testing.expect_value(t, records.validate_parallel(src, deep), walktest.fault_of(json.validate(src, .Json, {max_depth = 2})))
 }
 
 // The bytes of a piece as `core/records` reads it: a text shorter than four is built on one thread.
@@ -256,7 +256,7 @@ expect_build_law :: proc(t: ^testing.T, pools: []host.Pool, src: string, as: cor
 		pieces: int
 		got, err := records.build(text, as, .Refuse if refuse else .Last, runner = &pool.runner, pieces = &pieces)
 		defer core.destroy(&got)
-		same := err == want_err && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close
+		same := walktest.same_error(err, want_err) && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close
 		if !testing.expectf(t, same, "%q at width %d: %v, want %v", src[:min(len(src), 200)], pool.runner.threads + 1, err, want_err) {
 			return false
 		}
@@ -350,8 +350,8 @@ records_build_under_a_failing_allocator :: proc(t: ^testing.T) {
 			f := walktest.Failing_Alloc{inner = context.allocator, fail_at = at, fail_on = hold}
 			pieces: int
 			got, err := records.build(src, strict, allocator = walktest.failing_allocator(&f), runner = &pool.runner, pieces = &pieces)
-			same := err.kind == .None && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close
-			testing.expectf(t, same || err.kind == .No_Memory, "allocation %d, later ones too %v: %v, %d counts of %d", at, hold, err, len(got.counts), len(want.counts))
+			same := err == nil && slice.equal(got.nodes, want.nodes) && slice.equal(got.counts, want.counts) && got.root_close == want.root_close
+			testing.expectf(t, same || walktest.is_oom(err), "allocation %d, later ones too %v: %v, %d counts of %d", at, hold, err, len(got.counts), len(want.counts))
 			core.destroy(&got)
 			if f.n <= at {
 				break

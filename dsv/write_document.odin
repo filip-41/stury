@@ -24,16 +24,17 @@ import write "../core/write"
 marshal :: proc {marshal_once, write.marshal}
 
 @(private)
-marshal_once :: proc(value: any, spec := Spec.Csv, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+marshal_once :: proc(value: any, spec := Spec.Csv, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
 	if value.id == nil || value.data == nil {
-		return nil, {kind = .Plan_Mismatch}
+		return nil, core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
 	}
-	plan, err := plan_make(value.id, spec, opts)
-	if err.kind != .None {
-		return nil, err
+	plan, refusal := plan_make(value.id, spec, opts)
+	if refusal != nil {
+		return nil, refusal
 	}
 	defer typed.plan_destroy(&plan)
-	return plan.marshal(&plan, value.data, write, {}, allocator)
+	text, err := plan.marshal(&plan, value.data, write, {}, allocator)
+	return text, core.error_of(err)
 }
 
 // The handle of a delimited text of `spec` read or written with `opts`, which holds the delimiter `spec` reads when

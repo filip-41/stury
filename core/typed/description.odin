@@ -7,7 +7,7 @@ import rules "../rules"
 // nothing: its type is nil, and each record's kind reads what its node takes. A struct block is shared by the uses of
 // one object block, a list block by those of one array block, a union block by those of one node. `d` must outlive the
 // plan, whose names are its strings.
-plan_of :: proc(d: ^rules.Description, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Typed_Error) {
+plan_of :: proc(d: ^rules.Description, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (p: Plan, err: core.Error) {
 	context.allocator = allocator
 	b := plan_start(&p, as, opts)
 	if d.root < 0 || int(d.root) >= len(d.nodes) {
@@ -15,8 +15,7 @@ plan_of :: proc(d: ^rules.Description, as: core.As, opts := Plan_Options{}, allo
 	} else if root_block(&b) {
 		fill_node(&b, d, 0, d.root, "")
 	}
-	err = plan_finish(&b, 0)
-	return
+	return p, core.error_of(plan_finish(&b, 0))
 }
 
 // Fills record `at` for a use of node `at_node` named `name`, which reads the node's null when `null` is set and else

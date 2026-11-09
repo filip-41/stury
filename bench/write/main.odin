@@ -110,7 +110,7 @@ put_all :: #force_no_inline proc(out: ^write.Out, strs: []string) -> core.Typed_
 // The decoded value of every string in the file, in document order, and their total size.
 strings_of :: proc(src: []u8) -> (strs: []string, total: int) {
 	doc, derr := json.build(src, .Json, {}, .Last, context.allocator)
-	if derr.kind != .None {
+	if derr != nil {
 		fmt.eprintln("document error:", derr)
 		os.exit(1)
 	}

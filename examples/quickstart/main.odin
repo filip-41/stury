@@ -17,7 +17,7 @@ Person :: struct {
 }
 
 // A fault or an error renders as `line:col: message`, with the path when it has one.
-report :: proc(src: []u8, e: $E) {
+report :: proc(src: []u8, e: core.Error) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
 	core.render(strings.to_writer(&b), src, e)
@@ -34,7 +34,7 @@ main :: proc() {
 		}
 		src = data
 	}
-	if fault, bad := json.validate(src, .Json).?; bad {
+	if fault := json.validate(src, .Json); fault != nil {
 		report(src, fault)
 		os.exit(1)
 	}
@@ -48,12 +48,12 @@ main :: proc() {
 	alloc := virtual.arena_allocator(&arena)
 
 	person: Person
-	if err := json.unmarshal(src, .Json, &person, allocator = alloc); err.kind != .None {
+	if err := json.unmarshal(src, .Json, &person, allocator = alloc); err != nil {
 		report(src, err)
 		os.exit(1)
 	}
 	out, err := json.marshal(person, allocator = alloc)
-	if err.kind != .None {
+	if err != nil {
 		report(nil, err)
 		os.exit(1)
 	}

@@ -197,15 +197,16 @@ next :: #force_inline proc(it: ^Reader) -> (Record, bool) {
 // the reader's memory is refused. When a refused record's value runs past its end, `target` may hold values read past
 // it. A name the read decoded for `err`, and a stream's source text in it, lasts until the next call on `it`, and one
 // in a collected error as long as the caller's temp allocator.
-read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (err: core.Typed_Error, more: bool) {
-	more, err = read_record(it, target, plan, opts, allocator)
-	if !more && err.kind != .None {
+read :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts := typed.Read_Options{}, allocator := context.allocator) -> (err: core.Error, more: bool) {
+	refusal: core.Typed_Error
+	more, refusal = read_record(it, target, plan, opts, allocator)
+	if !more && refusal.kind != .None {
 		if it.fault == nil {
-			it.fault = core.Fault{kind = .No_Memory if err.kind == .No_Memory else .Bad_Option}
+			it.fault = core.Fault{kind = .No_Memory if refusal.kind == .No_Memory else .Bad_Option}
 		}
 		more = true
 	}
-	return
+	return core.error_of(refusal), more
 }
 
 @(private)
@@ -216,7 +217,12 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 	plan := plan
 	if plan == nil {
 		if it.plan == nil || it.plan.type != T {
-			if err = reader_plan(it, T); err.kind != .None {
+			if refusal := reader_plan(it, T); refusal != nil {
+				// A plan is refused as a `Typed_Error`, or for memory.
+				err = {kind = .No_Memory}
+				if typed_refusal, is_typed := refusal.(core.Typed_Error); is_typed {
+					err = typed_refusal
+				}
 				return false, err
 			}
 		}
@@ -272,20 +278,20 @@ read_record :: proc(it: ^Reader, target: ^$T, plan: ^typed.Plan, opts: typed.Rea
 
 // Replaces the reader's plan with one of `T`.
 @(private)
-reader_plan :: proc(it: ^Reader, T: typeid) -> core.Typed_Error {
+reader_plan :: proc(it: ^Reader, T: typeid) -> core.Error {
 	drop_plan(it)
 	made, err := typed.plan_make(T, it.as, allocator = it.allocator)
-	if err.kind != .None {
+	if err != nil {
 		return err
 	}
 	p, failed := new(typed.Plan, it.allocator)
 	if failed != nil {
 		typed.plan_destroy(&made)
-		return {kind = .No_Memory}
+		return failed
 	}
 	p^ = made
 	it.plan = p
-	return {}
+	return nil
 }
 
 @(private)
@@ -324,32 +330,30 @@ keep_collected :: proc(it: ^Reader, c: ^typed.Sink, from: int) {
 // a fault in `it.fault`, or when the reader's memory is refused. A record whose text does not read returns true and its
 // error, and the next read goes on after it. A stream, and a format with no `scan` service, build the record and
 // query it, where `read.stop_early` and `.Refuse` do not apply.
-scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec: Record, doc: core.Document, err: core.Path_Error, more: bool) {
+scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec: Record, doc: core.Document, err: core.Error, more: bool) {
 	if it.fault != nil {
 		return
 	}
 	if it.scan == nil {
 		failed: runtime.Allocator_Error
 		if it.scan, failed = new(Scanned, it.allocator); failed != nil {
-			return {}, {}, {kind = .No_Memory}, false
+			return {}, {}, failed, false
 		}
 	}
 	s := it.scan
 	if it.services != nil && it.services.scan != nil && it.input.procedure == nil {
-		rec, err, more = it.services.scan(it, &s.h, &s.last, path, read)
+		walked, refusal, ok := it.services.scan(it, &s.h, &s.last, path, read)
 		// A record that fails before its walk leaves `last` and its buffers for the next.
-		return rec, s.last if err.kind == .None else {}, err, more
+		return walked, s.last if refusal.kind == .None else {}, core.error_of(refusal), ok
 	}
 	core.destroy(&s.last)
 	delete(s.answers, it.allocator)
 	s.answers = nil
 	if rec, more = next(it); more {
-		built: core.Document_Error
-		if s.last, built = build(it, rec, it.allocator); built.kind == .None {
+		if s.last, err = build(it, rec, it.allocator); err == nil {
 			s.answers, err = core.query(&s.last, path, {dups = read.dups}, it.allocator)
 			s.last.answers = s.answers
 		}
-		err = core.path_error(built) if built.kind != .None else err
 	}
 	return rec, s.last, err, more
 }
@@ -358,11 +362,12 @@ scan :: proc(it: ^Reader, path: core.Path, read := core.Path_Options{}) -> (rec:
 // an error from the input's first byte. The nodes' offsets index the document's `src`, which is JSON's record text and
 // dsv's input. A streamed record's document lives until the next call on `it`.
 @(private)
-build_record :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (core.Document, core.Document_Error) {
+build_record :: proc(it: ^Reader, rec: Record, allocator := context.allocator) -> (core.Document, core.Error) {
 	if it.services == nil || it.services.build == nil {
-		return {}, {kind = .Bad_Index}
+		return {}, core.error_of(core.Document_Error{kind = .Bad_Index})
 	}
-	return it.services.build(it, rec, allocator)
+	doc, err := it.services.build(it, rec, allocator)
+	return doc, core.error_of(err)
 }
 
 // Returns the index of the first column `name` names, or -1 when none does or the format has no named columns. It may

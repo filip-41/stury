@@ -276,8 +276,8 @@ edit_commit :: proc(w: ^Edit_State, src, text: []u8, base: u64) -> (out: []u8, o
 		return text, false, true
 	}
 	committed, dropped, cerr := core.commit(w.list, allocator = runtime.heap_allocator())
-	if cerr.kind != .None {
-		core.move_document_error(&cerr, base)
+	if cerr != nil {
+		cerr = moved_error(cerr, base)
 		message.write_stderr("stury: error: %s: %s\n", w.name, edit_error_text(src, cerr))
 		return nil, false, false
 	}
@@ -730,4 +730,21 @@ edit_lines :: proc(er: ^Edit_Run, path: string) -> int {
 		}
 	}
 	return edit_publish(er.run, path, src, edit_join_end(&join, r.spans[:]))
+}
+
+// The refusal `err` of an edit in a text that starts `by` bytes into the file.
+moved_error :: proc(err: core.Error, by: u64) -> core.Error {
+	switch e in err {
+	case core.Document_Error:
+		moved := e
+		core.move_document_error(&moved, by)
+		return moved
+	case core.Fault:
+		moved := e
+		moved.at += by
+		return moved
+	case core.Path_Error, core.Typed_Error, core.Typed_Error_Kind, runtime.Allocator_Error:
+	case nil:
+	}
+	return err
 }

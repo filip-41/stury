@@ -30,17 +30,17 @@ check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, spelling: ^core.Spelling,
 }
 
 // Reads `src` into `target` as the plan's format does, `.Plan_Mismatch` when the plan has no read.
-unmarshal_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Typed_Error {
+unmarshal_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error {
 	if plan == nil || plan.read == nil {
-		return plan_mismatch(plan, nil, T)
+		return core.error_of(plan_mismatch(plan, nil, T))
 	}
-	return plan.read(src, plan.as, target, T, plan, read, allocator)
+	return core.error_of(plan.read(src, plan.as, target, T, plan, read, allocator))
 }
 
 // Reads `src` into `target` as `unmarshal_text` does, with every refusal in `read.sink.entries`. Returns the first.
-check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Typed_Error {
+check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error {
 	if plan == nil || plan.check == nil {
-		return plan_mismatch(plan, nil, T)
+		return core.error_of(plan_mismatch(plan, nil, T))
 	}
-	return plan.check(src, plan.as, target, T, plan, read, allocator)
+	return core.error_of(plan.check(src, plan.as, target, T, plan, read, allocator))
 }

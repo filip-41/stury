@@ -430,7 +430,7 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 		rec: records.Record
 		more: bool
 		part: core.Document
-		read: core.Path_Error
+		read: core.Error
 		if scanned {
 			rec, part, read, more = records.scan(it, r.route.path)
 		} else {
@@ -486,7 +486,7 @@ piece_task :: proc(ps: ^Pieces, it: ^records.Reader, k: int) -> bool {
 
 // Answers one record of a piece, as the serial route does, or returns false with what it printed left to be undone.
 @(private = "file")
-piece_record :: proc(r: ^Run, it: ^records.Reader, rec: records.Record, part: ^core.Document, read: core.Path_Error, scanned: bool, plain: core.As) -> bool {
+piece_record :: proc(r: ^Run, it: ^records.Reader, rec: records.Record, part: ^core.Document, read: core.Error, scanned: bool, plain: core.As) -> bool {
 	o := &r.output
 	cells := reads_cells(&r.opts)
 	if cells && r.route.columns != nil {
@@ -1033,5 +1033,5 @@ put_fmt :: proc(run: ^Run, doc: ^core.Document, out: ^write.Out) -> bool {
 	}
 	text, _, err := core.write(doc, run.output.layout.opts, json.as(.Json, {max_depth = run.opts.max_depth}), allocator = context.temp_allocator)
 	write.put_text(out, string(text))
-	return err.kind == .None
+	return err == nil
 }

@@ -6,6 +6,7 @@ import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
 import json ".."
+import walktest "../../walktest"
 
 // The `Check` read: the typed read that reports every refusal as a `core.Error_Entry` with the full path.
 
@@ -34,14 +35,14 @@ Shape :: struct {
 @(private = "file")
 both :: proc(t: ^testing.T, text: string, $T: typeid, spec: json.Spec, loc := #caller_location) -> (sink: typed.Sink, first: core.Typed_Error) {
 	plan, planned := json.plan_make(T, spec, allocator = context.temp_allocator)
-	testing.expect_value(t, planned.kind, core.Typed_Error_Kind.None, loc = loc)
+	walktest.expect_nil(t, planned, loc = loc)
 	src := transmute([]u8)text
 	mine, theirs: T
 	sink.entries.allocator = context.temp_allocator
 	sink.errors.allocator = context.temp_allocator
-	first = typed.check_text(src, &mine, T, &plan, {sink = &sink}, context.temp_allocator)
+	first = walktest.typed_of(typed.check_text(src, &mine, T, &plan, {sink = &sink}, context.temp_allocator))
 	want := json.unmarshal(src, spec, &theirs, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
-	testing.expectf(t, first.kind == want.kind && first.at == want.at, "%s: check gave %v at %d, unmarshal %v at %d", text, first.kind, first.at, want.kind, want.at, loc = loc)
+	testing.expectf(t, first.kind == walktest.typed_kind(want) && first.at == walktest.at_of(want), "%s: check gave %v at %d, unmarshal %v at %d", text, first.kind, first.at, want, walktest.at_of(want), loc = loc)
 	if first.kind == .None {
 		testing.expectf(t, fmt.tprint(mine) == fmt.tprint(theirs), "%s: check read %v, unmarshal %v", text, mine, theirs, loc = loc)
 	}
@@ -158,7 +159,7 @@ a_check_stops_adding_at_max_errors :: proc(t: ^testing.T) {
 	sink.entries.allocator = context.temp_allocator
 	sink.max_errors = 2
 	first := typed.check_text(transmute([]u8)string(`[1,"a","b","c"]`), &v, []i32, &plan, {sink = &sink}, context.temp_allocator)
-	testing.expect_value(t, first.kind, core.Typed_Error_Kind.Wrong_Kind)
+	walktest.expect_kind(t, first, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.entries), 2)
 	testing.expect(t, sink.truncated)
 	typed.sink_destroy(&sink)
@@ -196,11 +197,11 @@ a_plans_read_slot_is_unmarshal :: proc(t: ^testing.T) {
 	text := `{"a":1,"name":"x","list":[1,2],"inner":{"n":3}}`
 	e1 := typed.unmarshal_text(transmute([]u8)text, &a, Shape, &plan, {}, context.temp_allocator)
 	e2 := json.unmarshal(transmute([]u8)text, json.Spec.Json, &b, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, e1.kind, e2.kind)
+	testing.expect_value(t, walktest.typed_kind(e1), walktest.typed_kind(e2))
 	testing.expect_value(t, fmt.tprint(a), fmt.tprint(b))
 	none: typed.Plan
 	e3 := typed.unmarshal_text(nil, &a, Shape, &none, {})
-	testing.expect_value(t, e3.kind, core.Typed_Error_Kind.Plan_Mismatch)
+	walktest.expect_kind(t, e3, core.Typed_Error_Kind.Plan_Mismatch)
 }
 
 @(test)
@@ -211,7 +212,7 @@ a_check_under_refuse_reports_a_duplicate_key_as_an_entry :: proc(t: ^testing.T) 
 	sink.entries.allocator = context.temp_allocator
 	v: Shape
 	first := typed.check_text(transmute([]u8)string(`{"a":1,"a":2}`), &v, Shape, &plan, {dups = .Refuse, sink = &sink}, context.temp_allocator)
-	testing.expect_value(t, first.kind, core.Typed_Error_Kind.Duplicate_Key)
+	walktest.expect_kind(t, first, core.Typed_Error_Kind.Duplicate_Key)
 	testing.expect_value(t, len(sink.entries), 1)
 	testing.expect_value(t, len(sink.errors), 0)
 }
@@ -284,7 +285,7 @@ a_check_refuses_a_union_as_unmarshal_does :: proc(t: ^testing.T) {
 	// By tag, through a plan that names the tag's key.
 	for spec in SPECS {
 		plan, planned := json.plan_make(struct{ u: Tagged }, spec, plan = {union_tag = "type"}, allocator = context.temp_allocator)
-		testing.expect_value(t, planned.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, planned)
 		cases := [?]struct{ text: string, kind: core.Typed_Error_Kind, path: string }{
 			{`{"u":{"x":1}}`, .Missing_Tag, "/u"},
 			{`{"u":{"type":"C"}}`, .Not_A_Member, "/u"},
@@ -296,7 +297,7 @@ a_check_refuses_a_union_as_unmarshal_does :: proc(t: ^testing.T) {
 			sink.entries.allocator = context.temp_allocator
 			want := json.unmarshal(transmute([]u8)c.text, spec, &v, &plan, read = {}, opts = {}, allocator = context.temp_allocator)
 			first := typed.check_text(transmute([]u8)c.text, &v, struct{ u: Tagged }, &plan, {sink = &sink}, context.temp_allocator)
-			testing.expectf(t, first.kind == c.kind && want.kind == c.kind && first.at == want.at, "%s: check %v at %d, unmarshal %v at %d", c.text, first.kind, first.at, want.kind, want.at)
+			testing.expectf(t, walktest.typed_kind(first) == c.kind && walktest.typed_kind(want) == c.kind && walktest.at_of(first) == walktest.at_of(want), "%s: check %v at %d, unmarshal %v at %d", c.text, first, walktest.at_of(first), want, walktest.at_of(want))
 			if testing.expect(t, len(sink.entries) >= 1, c.text) {
 				testing.expect_value(t, sink.entries[0].kind, c.kind)
 				testing.expect_value(t, pointer_of(sink.entries[0]), c.path)

@@ -1,5 +1,6 @@
 package core
 
+import "base:runtime"
 import "core:io"
 import "core:reflect"
 import spell "./spell"
@@ -53,6 +54,7 @@ KIND_RULES := [Fault_Kind]Rule {
 	.No_Memory     = {"no_memory", "Out of memory"},
 	.Bad_Option    = {"bad_option", "Invalid option"},
 	.Bad_Width     = {"bad_width", "Record width differs from the first record"},
+	.Duplicate_Key = {"duplicate_key", "Duplicate key"},
 }
 
 // Returns the `Rule` for `f`: `f.rules.details[f.detail]` when `detail` is nonzero, `rules` is set and the index is
@@ -418,30 +420,6 @@ render_path :: proc(w: io.Writer, src: []u8, e: Path_Error, lines: ^Lines = nil)
 	return err
 }
 
-// Writes `e`'s code: the path error's or the document error's, by `e.kind`.
-@(private)
-write_edit_code :: proc(w: io.Writer, e: Path_Edit_Error) -> io.Error {
-	#partial switch e.kind {
-	case .Path:
-		return write_path_code(w, e.path)
-	case .Edit:
-		return write_document_code(w, e.edit)
-	}
-	return write_coded(w, "", "none")
-}
-
-// Writes the rendered line of `e`, as `render_path` for a path error and `render_document` for an edit's.
-@(private)
-render_edit :: proc(w: io.Writer, src: []u8, e: Path_Edit_Error, lines: ^Lines = nil) -> io.Error {
-	#partial switch e.kind {
-	case .Path:
-		return render_path(w, src, e.path, lines)
-	case .Edit:
-		return render_document(w, src, e.edit, lines)
-	}
-	return write_coded(w, "", "No error")
-}
-
 // How a typed read or write refuses. `.None` is no error. The kinds from `Invalid_Utf8` on are a write's, and none of them
 // names a byte of a source.
 Typed_Error_Kind :: enum u8 {
@@ -800,6 +778,124 @@ write_step_name :: proc(w: io.Writer, name: string) -> io.Error {
 	return io.write_byte(w, '"')
 }
 
-// `write_code` writes an error's code, `render` writes its rendered line.
-write_code :: proc {write_fault_code, write_document_code, write_path_code, write_edit_code, write_typed_code}
-render :: proc {render_fault, render_document, render_path, render_edit, render_typed}
+// What a public procedure returns when it fails, nil when it does not. The arms are disjoint by cause: a `Fault` is a
+// text that does not read, whichever call found it, and `runtime.Allocator_Error` is an allocation refused. The structs
+// hold what is theirs: a refused edit or document call, a refused path, a refused typed read or write.
+// `Typed_Error_Kind` is what the token writer returns once a token.
+Error :: union {
+	Fault,
+	runtime.Allocator_Error,
+	Document_Error,
+	Path_Error,
+	Typed_Error,
+	Typed_Error_Kind,
+}
+
+// Makes the `Error` of a concrete error: nil for the kind `.None`, the inner `Fault` for `.Walk`, an out of memory
+// for `.No_Memory`, a `Fault` for `.Duplicate_Key`, else the struct itself. A struct that is assigned to an `Error`
+// by hand is not nil when its kind is `.None`, so every public procedure returns through this one. `edit` says a
+// `Document_Error` is an edit's own refusal, whose `.Duplicate_Key` is a commit's named cell that its record holds and
+// no fault of a text.
+error_of :: proc "contextless" (e: $E, edit := false) -> Error {
+	when E == Fault {
+		#partial switch e.kind {
+		case .None:
+			return nil
+		case .No_Memory:
+			return runtime.Allocator_Error.Out_Of_Memory
+		}
+		return e
+	} else when E == Maybe(Fault) {
+		if f, ok := e.?; ok {
+			return error_of(f)
+		}
+		return nil
+	} else when E == Document_Error {
+		#partial switch e.kind {
+		case .None:
+			return nil
+		case .Walk:
+			return error_of(e.inner)
+		case .No_Memory:
+			return runtime.Allocator_Error.Out_Of_Memory
+		case .Duplicate_Key:
+			if !edit {
+				return Fault{at = e.at, kind = .Duplicate_Key}
+			}
+		}
+		return e
+	} else when E == Path_Error {
+		#partial switch e.kind {
+		case .None:
+			return nil
+		case .Walk:
+			return error_of(e.inner)
+		case .No_Memory:
+			return runtime.Allocator_Error.Out_Of_Memory
+		case .Duplicate_Key:
+			return Fault{at = e.at, kind = .Duplicate_Key}
+		}
+		return e
+	} else when E == Typed_Error {
+		#partial switch e.kind {
+		case .None:
+			return nil
+		case .Walk:
+			return error_of(e.inner)
+		case .No_Memory:
+			return runtime.Allocator_Error.Out_Of_Memory
+		case .Duplicate_Key:
+			return Fault{at = e.at, kind = .Duplicate_Key}
+		}
+		return e
+	} else {
+		#panic("error_of takes a Fault, a Maybe(Fault), a Document_Error, a Path_Error or a Typed_Error")
+	}
+}
+
+// Writes `err`'s code, as `json.literal`, `document.bad_index`, `path.bad_path` or `typed.wrong_kind`. A `Fault`'s is
+// its rule's, prefixed by its format when it has one, and an allocation refused is `no_memory`. Nil writes nothing.
+write_code :: proc(w: io.Writer, err: Error) -> io.Error {
+	switch e in err {
+	case Fault:
+		return write_fault_code(w, e)
+	case runtime.Allocator_Error:
+		return write_coded(w, "", KIND_RULES[.No_Memory].code if e == .Out_Of_Memory else "allocator_error")
+	case Document_Error:
+		return write_document_code(w, e)
+	case Path_Error:
+		return write_path_code(w, e)
+	case Typed_Error:
+		return write_typed_code(w, e)
+	case Typed_Error_Kind:
+		return write_typed_code(w, Typed_Error{kind = e})
+	}
+	return nil
+}
+
+// Writes the rendered line of `err` in `src`, as `line:col: message`, with `at path` after a typed error's. A
+// `Typed_Error_Kind` renders as a `Typed_Error` of that kind, and an allocation refused as out of memory. `lines` is as in
+// `render_fault`. Nil writes nothing.
+render :: proc(w: io.Writer, src: []u8, err: Error, lines: ^Lines = nil) -> io.Error {
+	switch e in err {
+	case Fault:
+		return render_fault(w, src, e, lines)
+	case runtime.Allocator_Error:
+		if e == .Out_Of_Memory {
+			_, werr := io.write_string(w, KIND_RULES[.No_Memory].message)
+			return werr
+		}
+		io.write_string(w, "Allocator error: ") or_return
+		_, werr := io.write_string(w, reflect.enum_string(e))
+		return werr
+	case Document_Error:
+		return render_document(w, src, e, lines)
+	case Path_Error:
+		return render_path(w, src, e, lines)
+	case Typed_Error:
+		return render_typed(w, src, e, lines)
+	case Typed_Error_Kind:
+		return render_typed(w, src, Typed_Error{kind = e}, lines)
+	}
+	return nil
+}

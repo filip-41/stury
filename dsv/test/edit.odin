@@ -1,5 +1,6 @@
 package dsv_tests
 
+import "base:runtime"
 import "core:mem"
 import "core:strings"
 import "core:testing"
@@ -77,7 +78,7 @@ fact :: proc(node: core.Node_Index, role: core.Role, text: string) -> Op {
 }
 
 @(private = "file")
-apply :: proc(list: ^core.Edit_List, op: Op) -> core.Document_Error {
+apply :: proc(list: ^core.Edit_List, op: Op) -> core.Error {
 	switch op.kind {
 	case .Set:
 		return core.set(list, op.node, op.a)
@@ -112,26 +113,26 @@ expect_edits :: proc(t: ^testing.T, cases: []Edit_Case) {
 run_edit :: proc(t: ^testing.T, c: Edit_Case) -> bool {
 	doc, err := build_any(c.src, c.spec, c.opts)
 	defer core.destroy(&doc)
-	if !testing.expectf(t, err.kind == .None, "%q: build %v", c.src, err) {
+	if !testing.expectf(t, err == nil, "%q: build %v", c.src, err) {
 		return false
 	}
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	got: core.Document_Error
+	got: core.Error
 	for op in c.ops {
-		if got = apply(&list, op); got.kind != .None {
+		if got = apply(&list, op); got != nil {
 			break
 		}
 	}
 	out: []u8
 	dropped: int
-	if got.kind == .None {
+	if got == nil {
 		out, dropped, got = core.commit(&list)
 	}
 	defer if len(out) > 0 {
 		delete(out)
 	}
-	if !testing.expectf(t, got.kind == c.fail, "%q %v: %v, want %v", c.src, c.ops, got, c.fail) || c.fail != .None {
+	if !testing.expectf(t, (c.fail == .None ? got == nil : walktest.expect_kind(t, got, c.fail)), "%q %v: %v, want %v", c.src, c.ops, got, c.fail) || c.fail != .None {
 		return c.fail != .None
 	}
 	if !testing.expectf(t, string(out) == c.want && dropped == c.dropped, "%q %v: committed %q with %d dropped, want %q with %d", c.src, c.ops, out, dropped, c.want, c.dropped) {
@@ -139,7 +140,7 @@ run_edit :: proc(t: ^testing.T, c: Edit_Case) -> bool {
 	}
 	back, berr := build_any(string(out), c.spec, c.opts)
 	defer core.destroy(&back)
-	return testing.expectf(t, berr.kind == .None, "committed %q does not read: %v", out, berr)
+	return testing.expectf(t, berr == nil, "committed %q does not read: %v", out, berr)
 }
 
 @(private = "file")
@@ -244,7 +245,7 @@ edit_wide_record :: proc(t: ^testing.T) {
 	})
 	doc, err := dsv.build(transmute([]u8)string("abc,de\n1,2,3\n"), .Csv, RAGGED)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(core.span(&doc, doc.shared_keys)), "abc,de\n")
 }
 
@@ -392,11 +393,11 @@ set_and_remove_of_a_cell :: proc(t: ^testing.T) {
 			if !set_first {
 				first, second = second, first
 			}
-			testing.expect_value(t, apply(&list, first).kind, core.Document_Error_Kind.None)
-			testing.expect_value(t, apply(&list, second).kind, core.Document_Error_Kind.None)
+			walktest.expect_nil(t, apply(&list, first))
+			walktest.expect_nil(t, apply(&list, second))
 			out, _, e := core.commit(&list)
 			delete(out)
-			testing.expectf(t, e.kind == .Conflicting_Edits && e.at == 2, "%q set first %v: %v", text, set_first, e)
+			testing.expectf(t, walktest.document_of(e).kind == .Conflicting_Edits && walktest.at_of(e) == 2, "%q set first %v: %v", text, set_first, e)
 		}
 	}
 }
@@ -417,13 +418,13 @@ edit_no_leak :: proc(t: ^testing.T) {
 	alloc := mem.tracking_allocator(&track)
 	doc, err := dsv.build(transmute([]u8)string("a,b\n1,2\n3,4\n"), .Csv)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc, allocator = alloc)
 	for op in ([]Op{put(5, "9"), ins(core.ROOT, 2, "7,8"), put(6, "9")}) {
-		testing.expect_value(t, apply(&list, op).kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, apply(&list, op))
 	}
 	out, _, cerr := core.commit(&list, allocator = alloc)
-	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, cerr)
 	delete(out, allocator = alloc)
 	core.edit_list_destroy(&list)
 	testing.expectf(t, len(track.allocation_map) == 0, "%d allocations left", len(track.allocation_map))
@@ -442,11 +443,11 @@ edit_out_of_memory :: proc(t: ^testing.T) {
 		f.n = 0
 		f.fail_at = fail_at
 		e := core.insert(&list, core.ROOT, 1, string("7,8"))
-		if e.kind == .No_Memory {
+		if _, oom := e.(runtime.Allocator_Error); oom {
 			testing.expect_value(t, len(list.edits), 0)
 			continue
 		}
-		testing.expect_value(t, e.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, e)
 		landed = true
 		break
 	}
@@ -457,10 +458,10 @@ edit_out_of_memory :: proc(t: ^testing.T) {
 		f.n = 0
 		f.fail_at = fail_at
 		out, _, e := core.commit(&list, allocator = alloc)
-		if e.kind == .No_Memory {
+		if _, oom := e.(runtime.Allocator_Error); oom {
 			continue
 		}
-		testing.expect_value(t, e.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, e)
 		testing.expect_value(t, string(out), "a,b\n1,2\n7,8\n")
 		delete(out, allocator = alloc)
 		committed = true
@@ -478,7 +479,7 @@ fact_spec_change_refused :: proc(t: ^testing.T) {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	out, _, err := core.commit(&list, dsv.as(.Tsv))
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.Bad_Spec)
+	walktest.expect_kind(t, err, core.Document_Error_Kind.Bad_Spec)
 	testing.expect(t, out == nil)
 }
 

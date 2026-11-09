@@ -39,9 +39,9 @@ writer_init :: proc(wr: ^Writer, w: io.Stream, as: core.As, framing := core.Fram
 
 // Ends the writer and returns its error, and for a buffer writer the text, which the caller owns. Every later call is
 // `.Out_Of_Order`.
-writer_end :: proc(wr: ^Writer) -> ([]u8, core.Typed_Error) {
+writer_end :: proc(wr: ^Writer) -> ([]u8, core.Error) {
 	if wr.tokens.spell == nil {
-		return nil, wr.err
+		return nil, core.error_of(wr.err)
 	}
 	if wr.final {
 		wr.tokens.err = wr.err.kind
@@ -49,11 +49,11 @@ writer_end :: proc(wr: ^Writer) -> ([]u8, core.Typed_Error) {
 	text, err := cw.tokens_finish(&wr.tokens)
 	wr.tokens.spell = nil
 	if wr.final {
-		return nil, wr.err
+		return nil, core.error_of(wr.err)
 	}
 	// The tokens are freed: every later call is out of order.
 	wr.final, wr.err = true, {kind = .Out_Of_Order}
-	return text, err
+	return text, core.error_of(err)
 }
 
 // Frees what a writer holds when `writer_end` did not run, and flushes nothing. After `writer_end` it does nothing.
@@ -148,18 +148,18 @@ write_cells :: proc(wr: ^Writer, cells: []cw.Scalar) -> core.Typed_Error_Kind {
 
 // Writes `list` as records, each by `plan`, a plan of the element type, into new bytes from `allocator`. The first
 // refused element is the error, with no text.
-marshal :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+marshal :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
 	return marshal_to(list, plan, as, framing, opts, {}, allocator)
 }
 
 // `marshal` to `w`, as the text is made. On a refusal `w` may hold a prefix of the text.
-marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}) -> core.Typed_Error {
+marshal_stream :: proc(w: io.Stream, list: []$E, plan: ^typed.Plan, as: core.As, framing := core.Framing.Lines, opts := core.Write_Options{}) -> core.Error {
 	_, err := marshal_to(list, plan, as, framing, opts, w, context.allocator)
 	return err
 }
 
 @(private)
-marshal_to :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing: core.Framing, opts: core.Write_Options, stream: io.Stream, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+marshal_to :: proc(list: []$E, plan: ^typed.Plan, as: core.As, framing: core.Framing, opts: core.Write_Options, stream: io.Stream, allocator := context.allocator) -> ([]u8, core.Error) {
 	wr: Writer = ---
 	if writer_init(&wr, stream, as, framing, opts, allocator) == .None && mismatched(&wr, E, plan) {
 		wr.err, wr.final = {kind = .Plan_Mismatch}, true

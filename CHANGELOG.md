@@ -121,6 +121,13 @@
   (`core.Path_Reason`, `core.Edit_Reason`), which render names.
 - A typed refusal names the type wanted and the value found (`Expected i64, found "lots" at .[0].population`), the tag
   flag a field does not take, and the formats of a plan that does not match its read.
+- Every public call that returned a `Fault`, `Document_Error`, `Path_Error`, `Path_Edit_Error` or `Typed_Error` returns
+  `core.Error`, a union of those types, `runtime.Allocator_Error` and `Typed_Error_Kind`, so `or_return` passes any of
+  them up and `err != nil` is the test. `core.error_of` makes the union from a concrete error. A refused allocation is
+  `runtime.Allocator_Error.Out_Of_Memory`, a walk's fault is the `Fault` arm, and a repeated key met by a build, read
+  or scan is `Fault{kind = .Duplicate_Key}`. `core.render` and `core.write_code` take an `Error`, and `Path_Edit_Error`,
+  `render_edit` and `write_edit_code` are gone. A repeated key under `.Refuse` in a path edit has the code
+  `duplicate_key`.
 
 ### Bench
 

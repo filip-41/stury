@@ -114,8 +114,8 @@ lane :: proc($T: typeid, src: []u8, borrow: bool, $DSV: bool) {
 	} else {
 		plan, err := json.plan_make(T)
 	}
-	if err.kind != .None {
-		fmt.eprintln(err.kind)
+	if err != nil {
+		fmt.eprintln(err)
 		os.exit(1)
 	}
 	read := typed.Read_Options {
@@ -133,7 +133,7 @@ lane :: proc($T: typeid, src: []u8, borrow: bool, $DSV: bool) {
 			e := json.unmarshal(src, .Json, &d, &plan, read = read, opts = {}, allocator = alloc)
 		}
 		elapsed := i64(time.tick_since(t0))
-		if e.kind != .None {
+		if e != nil {
 			core.render(os.to_writer(os.stderr), src, e)
 			fmt.eprintln()
 			os.exit(1)

@@ -61,7 +61,7 @@ build :: proc(src: []u8) -> int {
 	n := 0
 	for rec in records.next(&it) {
 		doc, err := records.build(&it, rec)
-		n += int(err.kind != .None)
+		n += int(err != nil)
 		core.destroy(&doc)
 	}
 	return n
@@ -186,7 +186,7 @@ load :: proc(src: []u8, as: core.As, plan: ^typed.Plan, list: ^[dynamic]$T, dups
 	n := 0
 	v: T
 	for err in records.read(&it, &v, plan, {borrow_strings = true, dups = dups}) {
-		n += int(err.kind != .None)
+		n += int(err != nil)
 		if list != nil {
 			append(list, v)
 		}
@@ -209,7 +209,7 @@ write :: proc(list: []$T, plan: ^typed.Plan) -> int {
 	text, err := records.marshal(list, plan, handle, allocator = virtual.arena_allocator(&output))
 	written = len(text)
 	virtual.arena_free_all(&output)
-	return int(err.kind != .None)
+	return int(err != nil)
 }
 
 write_logs :: proc(_: []u8) -> int { return write(logs_list[:], &log_plan) }

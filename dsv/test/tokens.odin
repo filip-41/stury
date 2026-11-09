@@ -341,7 +341,7 @@ fault_sentences :: proc(t: ^testing.T) {
 	}
 	b := strings.builder_make(context.temp_allocator)
 	for c in cases {
-		f, bad := dsv.validate(transmute([]u8)c.text, .Csv).?
+		f, bad := walktest.fault_of(dsv.validate(transmute([]u8)c.text, .Csv)).?
 		strings.builder_reset(&b)
 		core.render(strings.to_writer(&b), transmute([]u8)c.text, f)
 		testing.expectf(t, bad && strings.to_string(b) == c.line, "%q: %q, want %q", c.text, strings.to_string(b), c.line)

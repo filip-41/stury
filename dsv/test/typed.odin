@@ -6,6 +6,7 @@ import "core:testing"
 import core "../../core"
 import typed "../../core/typed"
 import dsv ".."
+import walktest "../../walktest"
 
 // The typed read of a delimited text: each cell rule, each row form, each refusal, the collecting sink and who owns what
 // a failed read leaves.
@@ -30,15 +31,15 @@ Required_Row :: struct {
 	b: string,
 }
 
-read_rows :: proc(src: string, target: ^$T, read := typed.Read_Options{}) -> core.Typed_Error {
+read_rows :: proc(src: string, target: ^$T, read := typed.Read_Options{}) -> core.Error {
 	read := read
 	read.borrow_strings = true
 	return dsv.unmarshal(transmute([]u8)src, .Csv, target, read = read, opts = {}, allocator = context.temp_allocator)
 }
 
-expect_refusal :: proc(t: ^testing.T, e: core.Typed_Error, kind: core.Typed_Error_Kind, at: u64, loc := #caller_location) {
-	testing.expect_value(t, e.kind, kind, loc)
-	testing.expect_value(t, e.at, at, loc)
+expect_refusal :: proc(t: ^testing.T, e: core.Error, kind: core.Typed_Error_Kind, at: u64, loc := #caller_location) {
+	walktest.expect_kind(t, e, kind, loc)
+	testing.expect_value(t, walktest.at_of(e), at, loc)
 }
 
 // U+FFFD spells three bytes for the one it replaces, so the decode outgrows the cell.
@@ -48,7 +49,7 @@ tolerated_ill_formed_cell_outgrows_its_span :: proc(t: ^testing.T) {
 	rows: []Row
 	src := "a\n\xfe\n"
 	e := dsv.unmarshal(transmute([]u8)src, .Csv, &rows, read = {}, opts = {tolerate = {.Invalid_Utf8}}, allocator = context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, len(rows), 1)
 	testing.expect_value(t, rows[0].a, "�")
 }
@@ -58,7 +59,7 @@ cells_read_by_their_field :: proc(t: ^testing.T) {
 	src := "id,small,name,ok,score,ratio,may,text,color,note\n-5,+7,\"a,b\",true,1.5,2.25,3,x,Blue,n\n"
 	rows: []Cell_Row
 	e := read_rows(src, &rows)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, len(rows), 1)
 	r := rows[0]
 	testing.expect_value(t, r.id, -5)
@@ -76,7 +77,7 @@ cells_read_by_their_field :: proc(t: ^testing.T) {
 @(test)
 an_unquoted_empty_cell_is_absent :: proc(t: ^testing.T) {
 	rows: []Cell_Row
-	testing.expect_value(t, read_rows("id,name,may,text\n,,,\n,\"\",,\"\"\n", &rows).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read_rows("id,name,may,text\n,,,\n,\"\",,\"\"\n", &rows))
 	testing.expect_value(t, len(rows), 2)
 	testing.expect_value(t, rows[0].id, 0)
 	_, some := rows[0].text.?
@@ -92,7 +93,7 @@ an_unquoted_empty_cell_is_absent :: proc(t: ^testing.T) {
 a_quoted_number_reads_and_a_doubled_quote_is_one :: proc(t: ^testing.T) {
 	Row :: struct { n: i64, s: string }
 	rows: []Row
-	testing.expect_value(t, read_rows("n,s\n\"12\",\"a\"\"b\"\"\"\n", &rows).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read_rows("n,s\n\"12\",\"a\"\"b\"\"\"\n", &rows))
 	testing.expect_value(t, rows[0].n, 12)
 	testing.expect_value(t, rows[0].s, `a"b"`)
 }
@@ -125,7 +126,7 @@ repeated_and_unknown_columns :: proc(t: ^testing.T) {
 		if c.kind == .None {
 			testing.expectf(t, len(rows) == 1 && rows[0].a == c.a, "%q: %v", c.src, rows)
 		} else if c.kind == .Unknown_Field {
-			testing.expect_value(t, string(e.steps[0].(core.Name)), "zz")
+			testing.expect_value(t, string(walktest.typed_of(e).steps[0].(core.Name)), "zz")
 		}
 	}
 }
@@ -136,27 +137,28 @@ repeated_and_unknown_columns :: proc(t: ^testing.T) {
 @(test)
 a_wide_record_names_its_cells_by_position :: proc(t: ^testing.T) {
 	Row :: struct { a: i64, three: i64 `csv:"3"` }
-	read :: proc(src: string, rows: ^[]Row, read := typed.Read_Options{}) -> core.Typed_Error {
+	read :: proc(src: string, rows: ^[]Row, read := typed.Read_Options{}) -> core.Error {
 		return dsv.unmarshal(transmute([]u8)src, .Csv, rows, read = read, opts = {tolerate = {.Ragged}}, allocator = context.temp_allocator)
 	}
 	rows: []Row
-	testing.expect_value(t, read("a,b\n1,2,3\n4\n5,6,7,8\n", &rows).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read("a,b\n1,2,3\n4\n5,6,7,8\n", &rows))
 	testing.expect_value(t, len(rows), 3)
 	testing.expect(t, rows[0] == {1, 3} && rows[1] == {4, 0} && rows[2] == {5, 7})
 	expect_refusal(t, read("a\n1,2\n", &rows, {unknown = .Refuse}), .Unknown_Field, 0)
 	src := "3,a\n1,2\n4,5,6\n"
-	testing.expect_value(t, read(src, &rows).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read(src, &rows))
 	testing.expect(t, rows[0].three == 1 && rows[1].three == 6)
-	testing.expect_value(t, read(src, &rows, {dups = .First}).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read(src, &rows, {dups = .First}))
 	testing.expect(t, rows[0].three == 1 && rows[1].three == 4)
 	expect_refusal(t, read(src, &rows, {dups = .Refuse}), .Duplicate_Key, 0)
 	expect_refusal(t, read("3,a\n1,2\n4,5,x\n", &rows, {dups = .First}), .Wrong_Kind, 12)
 	e := dsv.unmarshal(transmute([]u8)string("a,b\n1,2,3\n"), .Csv, &rows, read = {}, opts = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Walk)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Walk)
 	maps: []map[string]i64
 	e = dsv.unmarshal(transmute([]u8)string("rap\r\n1,x\r\n"), .Csv, &maps, read = {}, opts = {tolerate = {.Ragged}}, allocator = context.temp_allocator)
 	expect_refusal(t, e, .Wrong_Kind, 7)
-	testing.expect(t, e.n_steps == 2 && e.steps[1] == core.Step(core.Name("2")))
+	detail := walktest.typed_of(e)
+	testing.expect(t, detail.n_steps == 2 && detail.steps[1] == core.Step(core.Name("2")))
 }
 
 @(test)
@@ -165,9 +167,9 @@ refusals_name_the_row_and_the_field :: proc(t: ^testing.T) {
 	rows: []Row
 	e := read_rows("a,b\n1,true\nx,true\n", &rows)
 	expect_refusal(t, e, .Wrong_Kind, 11)
-	testing.expect_value(t, e.n_steps, 2)
-	testing.expect_value(t, i64(e.steps[0].(core.Index)), 1)
-	testing.expect_value(t, string(e.steps[1].(core.Name)), "a")
+	testing.expect_value(t, walktest.typed_of(e).n_steps, 2)
+	testing.expect_value(t, i64(walktest.typed_of(e).steps[0].(core.Index)), 1)
+	testing.expect_value(t, string(walktest.typed_of(e).steps[1].(core.Name)), "a")
 	expect_refusal(t, read_rows("a\n128\n", &rows), .Out_Of_Range, 2)
 	expect_refusal(t, read_rows("b\nTrue\n", &rows), .Wrong_Kind, 2)
 	expect_refusal(t, read_rows("c\n1e\n", &rows), .Wrong_Kind, 2)
@@ -183,39 +185,39 @@ a_required_field_refuses_at_the_header_or_the_cell :: proc(t: ^testing.T) {
 	rows: []Required_Row
 	e := read_rows("b\nx\n", &rows)
 	expect_refusal(t, e, .Missing_Field, 0)
-	testing.expect_value(t, string(e.steps[0].(core.Name)), "a")
+	testing.expect_value(t, string(walktest.typed_of(e).steps[0].(core.Name)), "a")
 	// A required column's absence wins over a fault in the first record.
 	expect_refusal(t, read_rows("b\n\"", &rows), .Missing_Field, 0)
 	e = read_rows("b,a\nx,1\ny,\n", &rows)
 	expect_refusal(t, e, .Missing_Field, 10)
-	testing.expect_value(t, i64(e.steps[0].(core.Index)), 1)
+	testing.expect_value(t, i64(walktest.typed_of(e).steps[0].(core.Index)), 1)
 	// In the columns' own order too, since the check at a row's close counts the row's members.
-	testing.expect_value(t, read_rows("b,a\ny,\"2\"", &rows).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read_rows("b,a\ny,\"2\"", &rows))
 	testing.expect_value(t, rows[0].a, 2)
 }
 
 @(test)
 list_and_map_rows :: proc(t: ^testing.T) {
 	lists: [][]string
-	testing.expect_value(t, read_rows("a,b\n1,\n", &lists).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read_rows("a,b\n1,\n", &lists))
 	testing.expect_value(t, len(lists), 2)
 	testing.expect_value(t, lists[0][1], "b")
 	testing.expect_value(t, lists[1][1], "")
 	maybes: [][]Maybe(i32)
-	testing.expect_value(t, read_rows("1,\n", &maybes).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read_rows("1,\n", &maybes))
 	_, some := maybes[0][1].?
 	testing.expect(t, !some)
 	maps: []map[string]string
-	testing.expect_value(t, read_rows("a,\"b\"\"\"\n1,\n", &maps).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read_rows("a,\"b\"\"\"\n1,\n", &maps))
 	testing.expect_value(t, maps[0]["a"], "1")
 	_, has := maps[0][`b"`]
 	testing.expect(t, !has)
 	ints: []map[string]i64
 	e := read_rows("\"a\"\nx\n", &ints)
 	expect_refusal(t, e, .Wrong_Kind, 4)
-	testing.expect_value(t, string(e.steps[1].(core.Name)), "a")
+	testing.expect_value(t, string(walktest.typed_of(e).steps[1].(core.Name)), "a")
 	e = dsv.unmarshal(transmute([]u8)string("1\n"), .Csv, &ints, read = {}, opts = {no_header = true}, allocator = context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unsupported)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Unsupported)
 }
 
 @(test)
@@ -223,10 +225,10 @@ the_specs_spell_their_cells :: proc(t: ^testing.T) {
 	Row :: struct { a: string, b: i64 }
 	rows: []Row
 	src := "a\tb\nx\\ty\t1\n"
-	testing.expect_value(t, dsv.unmarshal(transmute([]u8)src, .Tsv, &rows, read = {}, opts = {}, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, dsv.unmarshal(transmute([]u8)src, .Tsv, &rows, read = {}, opts = {}, allocator = context.temp_allocator))
 	testing.expect_value(t, rows[0].a, "x\ty")
 	plain := "a,b\n\"x\",1\n"
-	testing.expect_value(t, dsv.unmarshal(transmute([]u8)plain, .Plain, &rows, read = {}, opts = {}, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, dsv.unmarshal(transmute([]u8)plain, .Plain, &rows, read = {}, opts = {}, allocator = context.temp_allocator))
 	testing.expect_value(t, rows[0].a, `"x"`)
 }
 
@@ -235,7 +237,7 @@ no_header_reads_fields_in_order :: proc(t: ^testing.T) {
 	Row :: struct { a: i64, b: string }
 	rows: []Row
 	e := dsv.unmarshal(transmute([]u8)string("1,x\n2,y\n"), .Csv, &rows, read = {borrow_strings = true}, opts = {no_header = true}, allocator = context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, len(rows), 2)
 	testing.expect_value(t, rows[1].b, "y")
 }
@@ -244,9 +246,9 @@ no_header_reads_fields_in_order :: proc(t: ^testing.T) {
 a_text_with_no_record_keeps_or_empties_the_target :: proc(t: ^testing.T) {
 	Row :: struct { a: i64 }
 	keep := []Row{{1}}
-	testing.expect_value(t, read_rows("", &keep).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read_rows("", &keep))
 	testing.expect_value(t, len(keep), 1)
-	testing.expect_value(t, read_rows("a\n", &keep).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, read_rows("a\n", &keep))
 	testing.expect_value(t, len(keep), 0)
 }
 
@@ -255,7 +257,7 @@ a_plan_refuses_a_type_no_text_reads :: proc(t: ^testing.T) {
 	Nested :: struct { a: []int }
 	for id in ([]typeid{int, []^int, []Nested, []map[int]string, [][][]int}) {
 		_, e := dsv.plan_make(id, .Csv, allocator = context.temp_allocator)
-		testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unsupported)
+		walktest.expect_kind(t, e, core.Typed_Error_Kind.Unsupported)
 	}
 }
 
@@ -266,7 +268,7 @@ collecting_reads_past_each_refusal :: proc(t: ^testing.T) {
 	sink: typed.Sink
 	defer delete(sink.errors)
 	e := read_rows("a,b\nx,1\n2,y\n3,4\n", &rows, {sink = &sink})
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(sink.errors), 2)
 	testing.expect_value(t, len(rows), 3)
 	testing.expect_value(t, rows[0].b, 1)
@@ -285,7 +287,7 @@ a_refusal_leaves_what_it_allocated_with_the_target :: proc(t: ^testing.T) {
 	alloc := mem.tracking_allocator(&tracker)
 	rows: []Row
 	e := dsv.unmarshal(transmute([]u8)string("name,n\n\"a\"\"b\",1\ncopy,2\nz,x\n"), .Csv, &rows, read = {}, opts = {}, allocator = alloc)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Wrong_Kind)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Wrong_Kind)
 	testing.expect_value(t, len(rows), 3)
 	for r in rows {
 		delete(r.name, alloc)
@@ -313,11 +315,11 @@ a_required_member_reads_as_any_other :: proc(t: ^testing.T) {
 	}
 	rows: []Row
 	e := dsv.unmarshal(transmute([]u8)string("a,b\n1,2\n3,4\n"), dsv.Spec.Csv, &rows, read = {}, opts = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, len(rows), 2)
 	rows = nil
 	e = dsv.unmarshal(transmute([]u8)string("a,b\n,2\n"), dsv.Spec.Csv, &rows, read = {}, opts = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Missing_Field)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Missing_Field)
 }
 
 @(test)
@@ -327,12 +329,12 @@ a_plans_read_slot_reads_the_rows :: proc(t: ^testing.T) {
 		a, b: i32,
 	}
 	plan, err := dsv.plan_make([]Row, .Csv, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect(t, plan.read != nil && plan.node_read != nil)
 	testing.expect(t, plan.check != nil)
 	rows: []Row
 	e := typed.unmarshal_text(transmute([]u8)string("a,b\n1,2\n"), &rows, []Row, &plan, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, len(rows), 1)
 	testing.expect_value(t, rows[0].b, 2)
 }
@@ -361,13 +363,13 @@ a_check_reports_every_missing_column_of_a_row :: proc(t: ^testing.T) {
 		d: i32 `csv:"d,required"`,
 	}
 	plan, err := dsv.plan_make([]Row, .Csv, dsv.Options{tolerate = {.Ragged}}, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	text := transmute([]u8)string("a,b,c,d\n1\n2,3,4,5\n6\n")
 	rows: []Row
 	sink: typed.Sink
 	sink.entries.allocator = context.temp_allocator
 	first := typed.check_text(text, &rows, []Row, &plan, {sink = &sink}, context.temp_allocator)
-	testing.expect_value(t, first.kind, core.Typed_Error_Kind.Missing_Field)
+	walktest.expect_kind(t, first, core.Typed_Error_Kind.Missing_Field)
 	if !testing.expect_value(t, len(sink.entries), 4) {
 		return
 	}

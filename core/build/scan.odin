@@ -373,7 +373,7 @@ query :: proc(doc: ^core.Document, paths: []core.Path, read := core.Query_Option
 // in that its container lacks is inserted there, an `Index` the path ends in that is its array's length appends, and a
 // `?` on either passes a container that is not of its kind. A missing parent is `.Bad_Index`, and an index past the
 // length `.Bad_Position`.
-set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
 	list := core.edit_list_init(doc, allocator)
 	defer core.edit_list_destroy(&list)
 	// A `Name` or an `Index` at the end is set through its container, so that a missing name or element is told from a
@@ -399,10 +399,10 @@ set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := 
 	answers, qerr := query(doc, []core.Path{read_path}, read, allocator)
 	defer delete(answers, allocator)
 	if qerr.kind != .None {
-		return nil, {kind = .Path, path = qerr}
+		return nil, core.error_of(qerr)
 	}
 	for a in answers {
-		e := core.Document_Error{kind = .Bad_Index, reason = .No_Parent}
+		e := core.error_of(core.Document_Error{kind = .Bad_Index, reason = .No_Parent})
 		switch {
 		case a.outcome == .Found && (!(named || indexed) || whole):
 			e = core.set(&list, a.node, text)
@@ -414,26 +414,26 @@ set_answers :: proc(doc: ^core.Document, path: core.Path, text: string, read := 
 		case named && whole && a.outcome == .Missing && doc.nodes[a.owner].kind == .Object:
 			e = core.set_member(&list, a.owner, string(name), text, read.dups)
 		case a.outcome == .Found && doc.nodes[a.node].kind != .Null:
-			e.reason = .Not_Object
+			e = core.error_of(core.Document_Error{kind = .Bad_Index, reason = .Not_Object})
 		}
 		// `?` drops the step a container not of its kind cannot take, as a read of the whole path does.
-		if optional && (e.reason == .Not_Object || e.reason == .Not_Array) {
+		if refusal, refused := e.(core.Document_Error); refused && optional && (refusal.reason == .Not_Object || refusal.reason == .Not_Array) {
 			continue
 		}
-		if e.kind != .None {
-			return nil, {kind = .Edit, edit = e}
+		if e != nil {
+			return nil, e
 		}
 	}
 	committed, _, e := core.commit(&list, allocator = allocator)
-	if e.kind != .None {
-		return nil, {kind = .Edit, edit = e}
+	if e != nil {
+		return nil, e
 	}
-	return committed, {}
+	return committed, nil
 }
 
 // Sets element `k` of `arr`, counted from the end when negative, or appends at its length.
 @(private = "file")
-set_element :: proc(list: ^core.Edit_List, arr: core.Node_Index, k: int, text: string) -> core.Document_Error {
+set_element :: proc(list: ^core.Edit_List, arr: core.Node_Index, k: int, text: string) -> core.Error {
 	n := core.length(list.doc, arr)
 	k := k + n if k < 0 else k
 	v, presence := core.element_of(list.doc, arr, k)
@@ -441,12 +441,15 @@ set_element :: proc(list: ^core.Edit_List, arr: core.Node_Index, k: int, text: s
 	case .Found:
 		return core.set(list, v, text)
 	case .Wrong_Kind:
-		return {kind = .Bad_Index, reason = .Not_Array}
+		return core.error_of(core.Document_Error{kind = .Bad_Index, reason = .Not_Array})
 	case .Not_Loaded:
-		return {kind = .Bad_Index, reason = .Not_Loaded}
+		return core.error_of(core.Document_Error{kind = .Bad_Index, reason = .Not_Loaded})
 	case .Missing:
 	}
-	return core.insert(list, arr, k, text) if k == n else {kind = .Bad_Position}
+	if k != n {
+		return core.error_of(core.Document_Error{kind = .Bad_Position})
+	}
+	return core.insert(list, arr, k, text)
 }
 
 // A `$MANY` read's re-walk of the value at node `at` of a built document.
@@ -458,42 +461,43 @@ replay_rewalk :: proc "contextless" (h: ^Scan, s: ^core.Hook_Regs, lo: u64, at: 
 
 // Answers `paths` over the whole document `doc`, which a read under `.Refuse` built with the error `built`, and
 // gives it its answers. On an error `doc` is destroyed, or empty when the build failed.
-query_built :: proc(doc: ^core.Document, built: core.Document_Error, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Path_Error) {
-	if built.kind != .None {
-		return {}, core.path_error(built)
+query_built :: proc(doc: ^core.Document, built: core.Error, paths: []core.Path, read: core.Path_Options) -> (core.Document, core.Error) {
+	if built != nil {
+		return {}, built
 	}
 	answers, e := query(doc, paths, {read.dups}, doc.allocator)
 	if e.kind == .None {
 		defer delete(answers, doc.allocator)
 		doc.answers, doc.kept, doc.missing = answers, nil, nil
 		if core.own_reads(doc) == nil {
-			return doc^, {}
+			return doc^, nil
 		}
 		e = {kind = .No_Memory}
 	}
 	core.destroy(doc)
-	return {}, e
+	return {}, core.error_of(e)
 }
 
 // Reads `path` over `src` as `as` says, into a partial document holding what the path reached and `Document.answers` in
 // text order, through the format's `Spelling.scan`. Everything the walk passes is still judged, unless `read.stop_early`
 // ends it. `core.destroy` frees the document, which borrows `src`. Under `.Refuse` the document holds the
 // whole text. A handle with no format's scan is `.Unsupported`.
-scan_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+scan_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
 	return scan_many(src, as, []core.Path{path}, read, allocator)
 }
 
 // Reads up to 64 `paths` in one read, as `scan_one`. An answer's `path` is its path's number, and the answers of all the
 // paths are in one text order.
-scan_many :: proc(src: []u8, as: core.As, paths: []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Path_Error) {
+scan_many :: proc(src: []u8, as: core.As, paths: []core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (core.Document, core.Error) {
 	if read.dups == .Refuse {
 		built, e := core.build(src, as, .Refuse, allocator)
 		return query_built(&built, e, paths, read)
 	}
 	if as.spelling == nil || as.spelling.scan == nil {
-		return {}, {kind = .Unsupported}
+		return {}, core.error_of(core.Path_Error{kind = .Unsupported})
 	}
-	return as.spelling.scan(src, as, paths, read, nil, nil, allocator)
+	doc, err := as.spelling.scan(src, as, paths, read, nil, nil, allocator)
+	return doc, core.error_of(err)
 }
 
 scan :: proc {scan_one, scan_many}
@@ -503,23 +507,23 @@ scan :: proc {scan_one, scan_many}
 // through a `Name` waits for that `Name`'s container to close there, and `.First` gives each as soon as it is read.
 // Answers come in the order they are known, and a path with a `Descend` or a negative index that has a limit gives them
 // all at the end. `.Refuse` reads the whole text first, so a fault there comes before any answer.
-each_answer_many :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+each_answer_many :: proc(src: []u8, as: core.As, paths: []core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
 	if read.dups == .Refuse {
 		built, e := core.build(src, as, .Refuse, allocator)
 		core.destroy(&built)
-		if e.kind != .None {
-			return core.path_error(e)
+		if e != nil {
+			return e
 		}
 	}
 	if as.spelling == nil || as.spelling.scan == nil {
-		return {kind = .Unsupported}
+		return core.error_of(core.Path_Error{kind = .Unsupported})
 	}
 	doc, err := as.spelling.scan(src, as, paths, read, state, on, allocator)
 	core.destroy(&doc)
-	return err
+	return core.error_of(err)
 }
 
-each_answer_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Path_Error {
+each_answer_one :: #force_inline proc(src: []u8, as: core.As, path: core.Path, state: rawptr, on: proc(state: rawptr, a: core.Token_Answer) -> bool, read := core.Path_Options{}, allocator := context.allocator) -> core.Error {
 	return each_answer_many(src, as, []core.Path{path}, state, on, read, allocator)
 }
 
@@ -527,7 +531,7 @@ each_answer :: proc {each_answer_one, each_answer_many}
 
 // Reads the first answer of `path`, as `scan` with a limit of one. A path that gives none, as `.[]` of an empty array,
 // answers `.Missing` with `owner` `NO_NODE`.
-find :: proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Path_Error) {
+find :: proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{}, allocator := context.allocator) -> (doc: core.Document, answer: core.Answer, err: core.Error) {
 	one := path
 	one.limit = min(path.limit.? or_else 1, 1)
 	doc, err = scan_one(src, as, one, read, allocator)
@@ -539,11 +543,11 @@ find :: proc(src: []u8, as: core.As, path: core.Path, read := core.Path_Options{
 // and a commit. A `Name` the path ends in that its container lacks is inserted after the container's last member. The
 // result is the new text, which the caller frees with `allocator`. `read.dups` picks among a repeated key as `query`
 // does, sets each repeat under `.All`, and under `.Refuse` fails the build at one.
-set :: proc(src: []u8, as: core.As, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Path_Edit_Error) {
+set :: proc(src: []u8, as: core.As, path: core.Path, text: string, read := core.Query_Options{}, allocator := context.allocator) -> (out: []u8, err: core.Error) {
 	doc, berr := core.build(src, as, read.dups, allocator)
 	defer core.destroy(&doc)
-	if berr.kind != .None {
-		return nil, {kind = .Edit, edit = berr}
+	if berr != nil {
+		return nil, berr
 	}
 	return set_answers(&doc, path, text, read, allocator)
 }

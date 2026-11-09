@@ -71,16 +71,17 @@ marshal :: proc {marshal_once, write.marshal}
 
 // A nil `any` has no type to plan and is written as null.
 @(private)
-marshal_once :: proc(value: any, spec := Spec.Json, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+marshal_once :: proc(value: any, spec := Spec.Json, opts := Options{}, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
 	v := value
 	nothing: any
 	if v.id == nil || v.data == nil {
 		v = any{&nothing, typeid_of(any)}
 	}
-	plan, err := plan_make(v.id, spec, opts, allocator = context.allocator)
-	if err.kind != .None {
-		return nil, err
+	plan, refusal := plan_make(v.id, spec, opts, allocator = context.allocator)
+	if refusal != nil {
+		return nil, refusal
 	}
 	defer typed.plan_destroy(&plan)
-	return plan.marshal(&plan, v.data, write, {}, allocator)
+	text, err := plan.marshal(&plan, v.data, write, {}, allocator)
+	return text, core.error_of(err)
 }

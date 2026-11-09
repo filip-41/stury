@@ -26,7 +26,7 @@ fact_read_lines :: proc(t: ^testing.T) {
 	}) {
 		doc, err := dsv.build(transmute([]u8)c.src, .Csv, {comment = c.comment})
 		defer core.destroy(&doc)
-		if !testing.expectf(t, err.kind == .None, "%q: %v", c.src, err) || !walktest.body(t, &doc, c.node, c.role, c.body) {
+		if !testing.expectf(t, err == nil, "%q: %v", c.src, err) || !walktest.body(t, &doc, c.node, c.role, c.body) {
 			return
 		}
 	}

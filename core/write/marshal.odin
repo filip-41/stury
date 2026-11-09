@@ -130,20 +130,21 @@ Walker :: struct {
 // Writes `value` by `plan`, which a format built, as `write` says. `plan` must be of `value`'s type, and the bytes are
 // the caller's. A nil `value` writes the format's null only through a plan of its type. Each format's `marshal` takes
 // this form beside the one that builds a plan for the call.
-marshal :: proc(value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Typed_Error) {
+marshal :: proc(value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> ([]u8, core.Error) {
 	if err := check_value(value, plan); err.kind != .None {
-		return nil, err
+		return nil, core.error_of(err)
 	}
-	return plan.marshal(plan, value.data, write, {}, allocator)
+	text, err := plan.marshal(plan, value.data, write, {}, allocator)
+	return text, core.error_of(err)
 }
 
 // `marshal` to `w`, as the text is made. On a refusal `w` may hold a prefix of the text.
-marshal_stream :: proc(w: io.Stream, value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> core.Typed_Error {
+marshal_stream :: proc(w: io.Stream, value: any, plan: ^typed.Plan, write := core.Write_Options{}, allocator := context.allocator) -> core.Error {
 	if err := check_value(value, plan); err.kind != .None {
-		return err
+		return core.error_of(err)
 	}
 	_, err := plan.marshal(plan, value.data, write, w, allocator)
-	return err
+	return core.error_of(err)
 }
 
 @(private)

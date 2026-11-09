@@ -81,19 +81,19 @@ commit :: proc(list: ^core.Edit_List, spec: u8, allocator: runtime.Allocator) ->
 reads_as_source :: proc(doc: ^core.Document, out: []u8, spec: u8) -> core.Document_Error {
 	strict := doc.as
 	strict.spec, strict.tolerate = spec, {}
-	f, faulted := core.validate(out, strict).?
+	f, faulted := strict.spelling.validate(out, strict).?
 	if !faulted {
 		return {}
 	}
 	tolerant := strict
 	tolerant.tolerate = ~bit_set[core.Tolerance; u8]{}
-	if g, still := core.validate(out, tolerant).?; still {
+	if g, still := tolerant.spelling.validate(out, tolerant).?; still {
 		return {kind = .Bad_Result, inner = g}
 	}
 	if spec != doc.as.spec {
 		return {kind = .Bad_Result, inner = f}
 	}
-	if _, src_bad := core.validate(doc.src, strict).?; !src_bad {
+	if _, src_bad := strict.spelling.validate(doc.src, strict).?; !src_bad {
 		return {kind = .Bad_Result, inner = f}
 	}
 	return {}

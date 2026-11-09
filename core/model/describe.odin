@@ -1,6 +1,7 @@
 // Models: an Odin type with rules, read, checked and written by its plan.
 package model
 
+import "base:runtime"
 import "core:strconv"
 import "core:strings"
 import core ".."
@@ -12,12 +13,11 @@ import typed "../typed"
 // node's blocks. A number's range is its node's `minimum` and `maximum`, a fixed array's length its item counts, a map's
 // integer or enum keys its object's `keys`, and a member's `model:` rules sit on its edge. The description borrows the
 // plan's names, so the plan must outlive it.
-describe :: proc(plan: ^typed.Plan, allocator := context.allocator) -> (d: rules.Description, err: core.Typed_Error) {
+describe :: proc(plan: ^typed.Plan, allocator := context.allocator) -> (d: rules.Description, err: core.Error) {
 	context.allocator = allocator
 	d.allocator = allocator
 	if plan.type == nil {
-		err.kind = .Bad_Option
-		return
+		return d, core.error_of(core.Typed_Error{kind = .Bad_Option})
 	}
 	r := Reading{plan = plan, d = &d}
 	defer delete(r.nodes)
@@ -25,9 +25,9 @@ describe :: proc(plan: ^typed.Plan, allocator := context.allocator) -> (d: rules
 	d.root = node_of(&r, 0)
 	if r.failed {
 		rules.description_destroy(&d)
-		err.kind = .No_Memory
+		return d, runtime.Allocator_Error.Out_Of_Memory
 	}
-	return
+	return d, nil
 }
 
 @(private)

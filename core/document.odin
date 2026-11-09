@@ -954,20 +954,21 @@ number :: #force_inline proc(doc: ^Document, i: Node_Index) -> (Number, bool) {
 // `.Refuse` fails at a key that repeats one of its object's, and every other `dups` builds every member. The document
 // borrows `src`, which must outlive it, and `destroy` frees it. A handle with no format's build returns `.Bad_Spec`, and
 // on any error the document is the zero value.
-build :: proc(src: []u8, as: As, dups := Duplicates.Last, allocator := context.allocator) -> (Document, Document_Error) {
+build :: proc(src: []u8, as: As, dups := Duplicates.Last, allocator := context.allocator) -> (Document, Error) {
 	if as.spelling == nil || as.spelling.build == nil {
-		return {}, {kind = .Bad_Spec}
+		return {}, error_of(Document_Error{kind = .Bad_Spec})
 	}
-	return as.spelling.build(src, as, dups == .Refuse, allocator)
+	doc, err := as.spelling.build(src, as, dups == .Refuse, allocator)
+	return doc, error_of(err)
 }
 
 // Judges `src` as `as` says without building or allocating. Returns the first fault, or nil for a text that reads. A
 // handle with no format's validate faults `.Bad_Option` at byte 0.
-validate :: proc "contextless" (src: []u8, as: As) -> Maybe(Fault) {
+validate :: proc "contextless" (src: []u8, as: As) -> Error {
 	if as.spelling == nil || as.spelling.validate == nil {
-		return Fault{kind = .Bad_Option}
+		return error_of(Fault{kind = .Bad_Option})
 	}
-	return as.spelling.validate(src, as)
+	return error_of(as.spelling.validate(src, as))
 }
 
 // Returns the `i64` an `Int` node writes. Returns false for any other number.

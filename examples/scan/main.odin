@@ -10,7 +10,7 @@ import "core:os"
 import "core:strings"
 
 // A fault or an error renders as `line:col: message`, with the path when it has one.
-report :: proc(src: []u8, e: $E) {
+report :: proc(src: []u8, e: core.Error) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
 	core.render(strings.to_writer(&b), src, e)
@@ -22,7 +22,7 @@ main :: proc() {
 
 	// The path text is parsed once. The path owns its steps, and borrows the text.
 	second_tag, perr := core.parse_path(".tags[1]")
-	if perr.kind != .None {
+	if perr != nil {
 		report(nil, perr)
 		os.exit(1)
 	}
@@ -30,7 +30,7 @@ main :: proc() {
 
 	// One walk answers one path and stops at the answer. The document holds the nodes the answer needs and borrows `src`.
 	doc, answer, err := json.find(src, .Json, second_tag)
-	if err.kind != .None {
+	if err != nil {
 		report(src, err)
 		os.exit(1)
 	}
@@ -44,13 +44,13 @@ main :: proc() {
 
 	// A path with `[]` gives one answer per value it reaches, in text order.
 	every_tag, eerr := core.parse_path(".tags[]")
-	if eerr.kind != .None {
+	if eerr != nil {
 		report(nil, eerr)
 		os.exit(1)
 	}
 	defer core.path_destroy(&every_tag)
 	tags, serr := json.scan(src, .Json, every_tag)
-	if serr.kind != .None {
+	if serr != nil {
 		report(src, serr)
 		os.exit(1)
 	}

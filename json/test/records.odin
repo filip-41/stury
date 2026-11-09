@@ -104,7 +104,7 @@ records_scan_a_stream :: proc(t: ^testing.T) {
 		if !more {
 			break
 		}
-		testing.expect_value(t, err.kind, core.Path_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		append(&got, fmt.tprint(doc.answers[0].outcome, string(core.span(&doc, doc.answers[0].node))))
 	}
 	testing.expect_value(t, fmt.tprint(got[:]), `["Found 1", "Missing ", "Found [3]"]`)
@@ -172,7 +172,7 @@ records_frame_and_place :: proc(t: ^testing.T) {
 	defer typed.plan_destroy(&kp)
 	name: string
 	kerr := json.unmarshal(transmute([]u8)keys[1], .Json, &name, &kp, read = {}, opts = {}, allocator = context.temp_allocator)
-	testing.expect(t, kerr.kind == .None && name == `b"c`)
+	testing.expect(t, kerr == nil && name == `b"c`)
 	flat := json.as(.Json)
 	flat.max_depth = 1
 	faults, _ = records.check(transmute([]u8)string("[1, 2]"), flat, .Entries, context.temp_allocator)
@@ -285,9 +285,9 @@ records_read_checks_the_plan_once :: proc(t: ^testing.T) {
 		defer records.close(&it)
 		v: struct{ a: int }
 		err, more := records.read(&it, &v, &plan)
-		testing.expectf(t, more && err.kind == .Plan_Mismatch && it.pos == core.text_start(it.src, 0), "%v: %v %v", framing, more, err.kind)
+		testing.expectf(t, more && walktest.typed_kind(err) == .Plan_Mismatch && it.pos == core.text_start(it.src, 0), "%v: %v %v", framing, more, err)
 		err, more = records.read(&it, &v, &plan)
-		testing.expectf(t, !more && err.kind == .None && it.fault != nil, "%v: then %v %v", framing, more, err.kind)
+		testing.expectf(t, !more && err == nil && it.fault != nil, "%v: then %v %v", framing, more, err)
 	}
 	// With no plan the reader builds one of the type and keeps it.
 	it := records.open(transmute([]u8)string("{\"a\":1}\n{\"a\":2}\n"), json.as(.Json))
@@ -295,7 +295,7 @@ records_read_checks_the_plan_once :: proc(t: ^testing.T) {
 	v: struct{ a: int }
 	sum := 0
 	for err in records.read(&it, &v, nil) {
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		sum += v.a
 	}
 	testing.expect_value(t, sum, 3)
@@ -309,16 +309,16 @@ records_build_places_faults :: proc(t: ^testing.T) {
 	defer records.close(&it)
 	rec, _ := records.next(&it)
 	doc, err := records.build(&it, rec, context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	path, _ := core.parse_path(".a[1]", context.temp_allocator)
 	answers, _ := core.query(&doc, path, allocator = context.temp_allocator)
 	testing.expect_value(t, len(answers), 1)
 	rec, _ = records.next(&it)
 	_, err = records.build(&it, rec, context.temp_allocator)
-	testing.expect_value(t, err, core.Document_Error{kind = .Walk, at = 15, inner = {at = 15, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Unmatched_Brace)}})
+	testing.expect_value(t, walktest.fault_of(err), Maybe(core.Fault)(core.Fault{at = 15, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Unmatched_Brace)}))
 	rec, _ = records.next(&it)
 	_, err = records.build(&it, rec, context.temp_allocator)
-	testing.expect_value(t, err, core.Document_Error{kind = .Walk, at = 17, inner = {at = 17, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Expected_Value)}})
+	testing.expect_value(t, walktest.fault_of(err), Maybe(core.Fault)(core.Fault{at = 17, rules = &json.RULES, kind = .Bad_Char, detail = u8(json.Detail.Expected_Value)}))
 }
 
 // An input that gives at most `sizes[i % len(sizes)]` bytes on its `i`-th read, a random count up to 16 when `sizes`
@@ -453,7 +453,7 @@ records_stream_as_in_memory :: proc(t: ^testing.T) {
 records_stream_read :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
 	plan, perr := json.plan_make(Typed_Piece)
-	testing.expect_value(t, perr.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, perr)
 	defer typed.plan_destroy(&plan)
 	state := rand.create(4)
 	gen := rand.default_random_generator(&state)
@@ -480,7 +480,7 @@ records_stream_read :: proc(t: ^testing.T) {
 					testing.expectf(t, !wmore && (st.fault == mem.fault || len(st.held) > 0), "%v %v %q: stream ends %v, memory %v %v", framing, spec, src, st.fault, wmore, mem.fault)
 					break
 				}
-				if !testing.expectf(t, wmore && error_text(err, 0) == error_text(werr, 0) && (err.kind != .None || fmt.tprint(v) == fmt.tprint(w)), "%v %v %q: read %v %s, memory %v %s", framing, spec, src, v, error_text(err, 0), w, error_text(werr, 0)) {
+				if !testing.expectf(t, wmore && error_text(walktest.typed_of(err), 0) == error_text(walktest.typed_of(werr), 0) && (err != nil || fmt.tprint(v) == fmt.tprint(w)), "%v %v %q: read %v %s, memory %v %s", framing, spec, src, v, error_text(walktest.typed_of(err), 0), w, error_text(walktest.typed_of(werr), 0)) {
 					return
 				}
 			}
@@ -682,7 +682,7 @@ read_seq_piece :: proc(g: ^Seq_Pieces, piece: ^records.Reader, k: int) -> bool {
 		if !more {
 			break
 		}
-		append(&p.faults, Maybe(core.Fault)(err.inner) if err.kind == .Walk else nil)
+		append(&p.faults, walktest.fault_of(err))
 	}
 	sync.guard(&g.lock)
 	append(&g.pieces, p)
@@ -749,7 +749,7 @@ records_seq_reads_frame_as_build :: proc(t: ^testing.T) {
 		it := records.open(src, as, .Seq)
 		for rec in records.next(&it) {
 			doc, err := records.build(&it, rec)
-			append(&ways[0], Maybe(core.Fault)(err.inner) if err.kind == .Walk else nil)
+			append(&ways[0], walktest.fault_of(err))
 			core.destroy(&doc)
 		}
 		records.close(&it)
@@ -760,7 +760,7 @@ records_seq_reads_frame_as_build :: proc(t: ^testing.T) {
 			if !more {
 				break
 			}
-			append(&ways[1], Maybe(core.Fault)(err.inner) if err.kind == .Walk else nil)
+			append(&ways[1], walktest.fault_of(err))
 		}
 		records.close(&it)
 		it = records.open(src, as, .Seq)
@@ -769,7 +769,7 @@ records_seq_reads_frame_as_build :: proc(t: ^testing.T) {
 			if !more {
 				break
 			}
-			append(&ways[2], Maybe(core.Fault)(err.inner) if err.kind == .Walk else nil)
+			append(&ways[2], walktest.fault_of(err))
 		}
 		records.close(&it)
 		g := Seq_Pieces{plan = &plan}

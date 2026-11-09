@@ -114,13 +114,13 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 			{ascii = true, escape_html = true},
 		}) {
 		want, werr := json.marshal(v, write = opts, allocator = context.temp_allocator)
-		testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, werr)
 		got, err := token_text(v, opts)
 		defer delete(got)
 		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
 		testing.expectf(t, string(got) == string(want), "%v: %q, want %q", opts, got, want)
 		doc, derr := json.build(got, .Json)
-		testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, derr)
 		core.destroy(&doc)
 	}
 }

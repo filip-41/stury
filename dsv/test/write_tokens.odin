@@ -74,11 +74,11 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 		want, werr := dsv.marshal(rows, c.spec, c.layout, write = {}, allocator = context.temp_allocator)
 		got, err := token_rows(rows, c.spec, c.layout)
 		defer delete(got)
-		testing.expect_value(t, err.kind, werr.kind)
+		testing.expect_value(t, err.kind, walktest.typed_kind(werr))
 		testing.expectf(t, string(got) == string(want), "%v %v: %q, want %q", c.spec, c.layout, got, want)
-		if werr.kind == .None {
+		if werr == nil {
 			doc: core.Document
-			derr: core.Document_Error
+			derr: core.Error
 			switch c.spec {
 			case .Csv:
 				doc, derr = dsv.build(got, .Csv, c.layout)
@@ -87,7 +87,7 @@ tokens_equal_marshal :: proc(t: ^testing.T) {
 			case .Plain:
 				doc, derr = dsv.build(got, .Plain, c.layout)
 			}
-			testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
+			walktest.expect_nil(t, derr)
 			core.destroy(&doc)
 		}
 	}

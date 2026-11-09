@@ -13,6 +13,7 @@ import core "../../core"
 import typed "../../core/typed"
 import write "../../core/write"
 import json ".."
+import walktest "../../walktest"
 
 Color :: enum u8 {
 	Red,
@@ -61,13 +62,13 @@ Stamp :: struct {
 
 written :: proc(t: ^testing.T, value: any, want: string, opts := core.Write_Options{}, loc := #caller_location) {
 	text, err := json.marshal(value, write = opts, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None, loc)
+	walktest.expect_nil(t, err, loc)
 	testing.expect_value(t, string(text), want, loc)
 }
 
-refused :: proc(t: ^testing.T, value: any, want: core.Typed_Error_Kind, opts := core.Write_Options{}, loc := #caller_location) -> core.Typed_Error {
+refused :: proc(t: ^testing.T, value: any, want: core.Typed_Error_Kind, opts := core.Write_Options{}, loc := #caller_location) -> core.Error {
 	text, err := json.marshal(value, write = opts, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, want, loc)
+	walktest.expect_kind(t, err, want, loc)
 	testing.expect_value(t, len(text), 0, loc)
 	return err
 }
@@ -259,9 +260,9 @@ a_long_name_writes_whole :: proc(t: ^testing.T) {
 		b: i64,
 	}
 	text, err := json.marshal(Long{1, 2}, write = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	back: Long
-	testing.expect_value(t, json.unmarshal(text, .Json, &back).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, json.unmarshal(text, .Json, &back))
 	testing.expect_value(t, back, Long{1, 2})
 }
 
@@ -302,9 +303,9 @@ a_list_of_structs_shares_one_frame :: proc(t: ^testing.T) {
 	written(t, rows, "[\n  {\n    \"a\": 1,\n    \"b\": [],\n    \"c\": 0.5\n  },\n  {\n    \"a\": 2,\n    \"b\": [\n      {}\n    ],\n    \"c\": 1.5\n  }\n]", p)
 	rows[1].c = math.inf_f64(1)
 	e := refused(t, rows, .Non_Finite)
-	testing.expect_value(t, e.n_steps, 2)
-	testing.expect_value(t, e.steps[0].(core.Index), core.Index(1))
-	testing.expect_value(t, string(e.steps[1].(core.Name)), "c")
+	testing.expect_value(t, walktest.typed_of(e).n_steps, 2)
+	testing.expect_value(t, walktest.typed_of(e).steps[0].(core.Index), core.Index(1))
+	testing.expect_value(t, string(walktest.typed_of(e).steps[1].(core.Name)), "c")
 }
 
 @(test)
@@ -317,15 +318,15 @@ sort_keys_sorts_members_and_the_tag :: proc(t: ^testing.T) {
 	written(t, Mixed{1, 2, {3, "y"}}, `{"alpha":2,"mid":{"why":"y","x":3},"zed":1}`, {sort_keys = true})
 	written(t, Mixed{1, 2, {3, "y"}}, "{\n \"alpha\": 2,\n \"mid\": {\n  \"why\": \"y\",\n  \"x\": 3\n },\n \"zed\": 1\n}", {sort_keys = true, pretty = true, indent = 1})
 	plan, err := json.plan_make(Tagged, plan = {union_tag = "kind"}, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	v := Tagged(Tagged_Cat{"t", 2})
 	text, e := write.marshal(v, &plan, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, string(text), `{"kind":"Tagged_Cat","name":"t","age":2}`)
 	text, e = write.marshal(v, &plan, {sort_keys = true}, context.temp_allocator)
 	testing.expect_value(t, string(text), `{"age":2,"kind":"Tagged_Cat","name":"t"}`)
 	back: Tagged
-	testing.expect_value(t, json.unmarshal(text, .Json, &back, &plan, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, json.unmarshal(text, .Json, &back, &plan, allocator = context.temp_allocator))
 	testing.expect_value(t, back.(Tagged_Cat).age, 2)
 }
 
@@ -342,7 +343,7 @@ captured_members_follow_the_declared_ones :: proc(t: ^testing.T) {
 	defer delete(v.rest)
 	written(t, v, `{"a":1,"b":2,"z":[1]}`)
 	back: Open
-	testing.expect_value(t, json.unmarshal(transmute([]u8)string(`{"z":[1],"a":1,"b":2}`), .Json, &back, allocator = context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, json.unmarshal(transmute([]u8)string(`{"z":[1],"a":1,"b":2}`), .Json, &back, allocator = context.temp_allocator))
 	written(t, back, `{"a":1,"b":2,"z":[1]}`)
 }
 
@@ -382,23 +383,23 @@ a_hook_returns_a_stand_in :: proc(t: ^testing.T) {
 		n:  i64,
 	}
 	plan, err := json.plan_make([]Row, plan = {hooks = {{type = Stamp, write = hook_stamp}}}, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	rows := []Row{{{5}, 1}, {{6}, 2}}
 	text, e := write.marshal(rows, &plan, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, string(text), `[{"at":"t5","n":1},{"at":"t6","n":2}]`)
 	rows[1].at.seconds = -1
 	_, e = write.marshal(rows, &plan, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Bad_Raw)
-	testing.expect_value(t, e.n_steps, 2)
-	testing.expect_value(t, e.steps[0].(core.Index), core.Index(1))
-	testing.expect_value(t, string(e.steps[1].(core.Name)), "at")
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Bad_Raw)
+	testing.expect_value(t, walktest.typed_of(e).n_steps, 2)
+	testing.expect_value(t, walktest.typed_of(e).steps[0].(core.Index), core.Index(1))
+	testing.expect_value(t, string(walktest.typed_of(e).steps[1].(core.Name)), "at")
 	self, _ := json.plan_make(Stamp, plan = {hooks = {{type = Stamp, write = hook_self}}}, allocator = context.temp_allocator)
 	_, e = write.marshal(Stamp{1}, &self, {}, context.temp_allocator)
-	testing.expect(t, e.kind == .Too_Deep || e.kind == .Cycle)
+	testing.expect(t, walktest.typed_kind(e) == .Too_Deep || walktest.typed_kind(e) == .Cycle)
 	only_read, _ := json.plan_make(Stamp, plan = {hooks = {{type = Stamp, read = proc(v: typed.Hook_Value, dest: rawptr, allocator: runtime.Allocator) -> Maybe(core.Typed_Error_Kind) {return nil}}}}, allocator = context.temp_allocator)
 	_, e = write.marshal(Stamp{1}, &only_read, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Unsupported)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Unsupported)
 }
 
 @(test)
@@ -445,7 +446,7 @@ cycles_and_depth :: proc(t: ^testing.T) {
 		short[i].next = &short[i + 1]
 	}
 	_, err := json.marshal(short[0], write = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 }
 
 @(test)
@@ -461,28 +462,28 @@ a_refusal_names_its_path :: proc(t: ^testing.T) {
 	inf := math.inf_f64(1)
 	d := Doc{rows = {{"a", {1}}, {"b", {2, 3, inf}}}}
 	err := refused(t, d, .Non_Finite)
-	testing.expect_value(t, err.n_steps, 4)
-	testing.expect_value(t, string(err.steps[0].(core.Name)), "rows")
-	testing.expect_value(t, err.steps[1].(core.Index), core.Index(1))
-	testing.expect_value(t, string(err.steps[2].(core.Name)), "vals")
-	testing.expect_value(t, err.steps[3].(core.Index), core.Index(2))
+	testing.expect_value(t, walktest.typed_of(err).n_steps, 4)
+	testing.expect_value(t, string(walktest.typed_of(err).steps[0].(core.Name)), "rows")
+	testing.expect_value(t, walktest.typed_of(err).steps[1].(core.Index), core.Index(1))
+	testing.expect_value(t, string(walktest.typed_of(err).steps[2].(core.Name)), "vals")
+	testing.expect_value(t, walktest.typed_of(err).steps[3].(core.Index), core.Index(2))
 	d.rows = nil
 	d.table = {"k" = {"c", {inf}}}
 	defer delete(d.table)
 	err = refused(t, d, .Non_Finite)
-	testing.expect_value(t, err.n_steps, 4)
-	testing.expect_value(t, string(err.steps[0].(core.Name)), "table")
-	testing.expect_value(t, string(err.steps[1].(core.Name)), "k")
-	testing.expect_value(t, string(err.steps[2].(core.Name)), "vals")
-	testing.expect_value(t, err.steps[3].(core.Index), core.Index(0))
+	testing.expect_value(t, walktest.typed_of(err).n_steps, 4)
+	testing.expect_value(t, string(walktest.typed_of(err).steps[0].(core.Name)), "table")
+	testing.expect_value(t, string(walktest.typed_of(err).steps[1].(core.Name)), "k")
+	testing.expect_value(t, string(walktest.typed_of(err).steps[2].(core.Name)), "vals")
+	testing.expect_value(t, walktest.typed_of(err).steps[3].(core.Index), core.Index(0))
 	// A listed key is named as the value holds it, not as it is written.
 	escaped := map[string]f64 {
 		"a\"bé" = inf,
 	}
 	defer delete(escaped)
 	err = refused(t, escaped, .Non_Finite, {ascii = true})
-	testing.expect_value(t, err.n_steps, 1)
-	testing.expect_value(t, string(err.steps[0].(core.Name)), "a\"bé")
+	testing.expect_value(t, walktest.typed_of(err).n_steps, 1)
+	testing.expect_value(t, string(walktest.typed_of(err).steps[0].(core.Name)), "a\"bé")
 }
 
 @(test)
@@ -497,9 +498,9 @@ a_deep_refusal_keeps_the_innermost_steps :: proc(t: ^testing.T) {
 	}
 	chain[19].x = math.inf_f64(1)
 	err := refused(t, chain[0], .Non_Finite)
-	testing.expect(t, err.truncated)
-	testing.expect_value(t, int(err.n_steps), core.MAX_ERROR_STEPS)
-	testing.expect_value(t, string(err.steps[core.MAX_ERROR_STEPS - 1].(core.Name)), "x")
+	testing.expect(t, walktest.typed_of(err).truncated)
+	testing.expect_value(t, int(walktest.typed_of(err).n_steps), core.MAX_ERROR_STEPS)
+	testing.expect_value(t, string(walktest.typed_of(err).steps[core.MAX_ERROR_STEPS - 1].(core.Name)), "x")
 }
 
 Byte_Sink :: struct {
@@ -529,24 +530,24 @@ a_stream_takes_the_same_text :: proc(t: ^testing.T) {
 		r = {i32(i), "some text"}
 	}
 	want, err := json.marshal(rows, write = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	plan, perr := json.plan_make([]Inner, plan = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, perr.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, perr)
 	sink := Byte_Sink{text = make([dynamic]u8, context.temp_allocator)}
-	testing.expect_value(t, write.marshal_stream({byte_sink_proc, &sink}, rows, &plan, {}, context.temp_allocator).kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, write.marshal_stream({byte_sink_proc, &sink}, rows, &plan, {}, context.temp_allocator))
 	testing.expect(t, bytes.equal(sink.text[:], want))
 	failing := Byte_Sink{text = make([dynamic]u8, context.temp_allocator), fail_at = 100000}
 	e := write.marshal_stream({byte_sink_proc, &failing}, rows, &plan, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Write_Failed)
-	testing.expect_value(t, e.cause, io.Error.Unknown)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Write_Failed)
+	testing.expect_value(t, walktest.typed_of(e).cause, io.Error.Unknown)
 }
 
 @(test)
 a_plan_writes_only_its_type :: proc(t: ^testing.T) {
 	plan, err := json.plan_make(i64, plan = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	_, e := write.marshal("s", &plan, {}, context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.Plan_Mismatch)
+	walktest.expect_kind(t, e, core.Typed_Error_Kind.Plan_Mismatch)
 }
 
 @(test)
@@ -558,7 +559,7 @@ a_small_value_leaves_nothing_behind :: proc(t: ^testing.T) {
 	v := []any{i64(1), Inner{2, "y"}, m}
 	text, err := json.marshal(v)
 	defer delete(text)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	testing.expect_value(t, string(text), `[1,{"x":2,"why":"y"},{"a":[{"x":1,"why":"x"}]}]`)
 }
 
@@ -583,11 +584,11 @@ marshal_two_lines_at_a_struct_close :: proc(t: ^testing.T) {
 			v := make_tree(depth, 200)
 			v.p = strings.repeat("x", pad * 37 + 1, context.temp_allocator)
 			text, err := json.marshal(v, write = core.PRETTY)
-			testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+			walktest.expect_nil(t, err)
 			doc, derr := json.build(text, .Json, {max_depth = 4 * 1024})
-			testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
+			walktest.expect_nil(t, derr)
 			again, _, werr := core.write(&doc, core.PRETTY)
-			testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+			walktest.expect_nil(t, werr)
 			testing.expect(t, string(again) == string(text))
 			delete(again)
 			core.destroy(&doc)
@@ -612,7 +613,7 @@ sorted_keys_ignore_their_spelling :: proc(t: ^testing.T) {
 	}
 	for c in cases {
 		text, err := json.marshal(m, write = c.opts, allocator = context.temp_allocator)
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		testing.expect_value(t, string(text), c.want)
 	}
 }
@@ -630,13 +631,13 @@ capture_of_a_declared_name :: proc(t: ^testing.T) {
 	v := Capture_Doubled{a = 1, notes = make(map[string]typed.Raw, context.temp_allocator)}
 	v.notes["a"] = typed.Raw("2")
 	_, err := json.marshal(v, write = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unwritable)
+	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
 	_, err = json.marshal(v, write = {sort_keys = true}, allocator = context.temp_allocator)
-	testing.expect_value(t, err.kind, core.Typed_Error_Kind.Unwritable)
+	walktest.expect_kind(t, err, core.Typed_Error_Kind.Unwritable)
 	delete_key(&v.notes, "a")
 	v.notes["b"] = typed.Raw("2")
 	text, oerr := json.marshal(v, write = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, oerr.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, oerr)
 	testing.expect_value(t, string(text), `{"a":1,"b":2}`)
 }
 
@@ -651,7 +652,7 @@ several_any_fields :: proc(t: ^testing.T) {
 	v := Any_Fields{a = Color.Red, b = inner, c = Color.Red}
 	for opts in ([?]core.Write_Options{{}, {sort_keys = true}}) {
 		text, err := json.marshal(v, write = opts, allocator = context.temp_allocator)
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		testing.expect_value(t, string(text), `{"a":"Red","b":{"a":1,"b":"s","c":true},"c":"Red"}`)
 	}
 }
@@ -687,16 +688,16 @@ deep_pretty_indent :: proc(t: ^testing.T) {
 			strings.write_byte(&b, '}')
 		}
 		text, err := json.marshal(links[0], write = {pretty = true, indent = indent}, allocator = context.temp_allocator)
-		testing.expect_value(t, err.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, err)
 		testing.expect(t, string(text) == strings.to_string(b))
 		doc, derr := json.build(text, .Json)
-		testing.expect_value(t, derr.kind, core.Document_Error_Kind.None)
+		walktest.expect_nil(t, derr)
 		again, _, werr := core.write(&doc, {pretty = true, indent = indent}, allocator = context.temp_allocator)
-		testing.expect_value(t, werr.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, werr)
 		testing.expect(t, string(again) == string(text))
 		core.destroy(&doc)
 		formatted, ferr := core.format(text, json.as(.Json), {pretty = true, indent = indent}, context.temp_allocator)
-		testing.expect_value(t, ferr.kind, core.Typed_Error_Kind.None)
+		walktest.expect_nil(t, ferr)
 		testing.expect(t, string(formatted) == string(text))
 	}
 }

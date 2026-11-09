@@ -11,7 +11,7 @@ import "core:os"
 import "core:strings"
 
 // A fault or an error renders as `line:col: message`, with the path when it has one.
-report :: proc(src: []u8, e: $E) {
+report :: proc(src: []u8, e: core.Error) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
 	core.render(strings.to_writer(&b), src, e)
@@ -23,13 +23,13 @@ main :: proc() {
 
 	// The new value is JSON text, which the edit checks before it is spliced in.
 	name, perr := core.parse_path(".name")
-	if perr.kind != .None {
+	if perr != nil {
 		report(nil, perr)
 		os.exit(1)
 	}
 	defer core.path_destroy(&name)
 	out, err := json.set(src, .Json, name, `"grace"`)
-	if err.kind != .None {
+	if err != nil {
 		report(src, err)
 		os.exit(1)
 	}
@@ -38,7 +38,7 @@ main :: proc() {
 
 	// Several edits on one document: each is checked as it is recorded, and one commit applies them.
 	doc, berr := json.build(src, .Json)
-	if berr.kind != .None {
+	if berr != nil {
 		report(src, berr)
 		os.exit(1)
 	}
@@ -46,16 +46,16 @@ main :: proc() {
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	tags, _ := core.member(&doc, core.ROOT, "tags")
-	if serr := core.set_member(&list, core.ROOT, "n", "1"); serr.kind != .None {
+	if serr := core.set_member(&list, core.ROOT, "n", "1"); serr != nil {
 		report(src, serr)
 		os.exit(1)
 	}
-	if rerr := core.remove(&list, tags); rerr.kind != .None {
+	if rerr := core.remove(&list, tags); rerr != nil {
 		report(src, rerr)
 		os.exit(1)
 	}
 	committed, _, cerr := core.commit(&list)
-	if cerr.kind != .None {
+	if cerr != nil {
 		report(src, cerr)
 		os.exit(1)
 	}

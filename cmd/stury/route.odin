@@ -84,12 +84,12 @@ choose_route :: proc(run: ^Run, text: string) {
 		return
 	}
 	path, perr := core.parse_path(text)
-	if perr.kind == .None && !slice.any_of_proc(path.steps, is_unscanned) {
+	if perr == nil && !slice.any_of_proc(path.steps, is_unscanned) {
 		r.scanning = stops == {}
 		r.path = path
 		return
 	}
-	r.whys += {.Not_Path} if perr.kind == .None else selected_path(run, text)
+	r.whys += {.Not_Path} if perr == nil else selected_path(run, text)
 	// `select` under JSONC or JSON5 is the interpreter's.
 	if FORMATS[o.from].spec != .Json {
 		r.whys += {.Dialect_Select}
@@ -131,7 +131,7 @@ selected_path :: proc(run: ^Run, text: string) -> bit_set[Route_Why] {
 		}
 	}
 	path, perr := core.parse_path(text[cmp.a.loc.start:cmp.a.loc.end])
-	if perr.kind != .None || path.limit != nil || len(path.steps) == 0 {
+	if perr != nil || path.limit != nil || len(path.steps) == 0 {
 		return {.Select_Path}
 	}
 	run.route.path = path
@@ -147,11 +147,11 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 	doc: core.Document
 	answers: []core.Answer
 	root := [1]core.Answer{{node = core.ROOT, outcome = .Found}}
-	err: core.Path_Error
+	err: core.Error
 	if !scans(route.path) {
 		fault: Maybe(core.Fault)
 		if doc, fault = jq.build_text(data, r, context.temp_allocator); fault != nil {
-			err.kind = .Walk
+			err = core.error_of(fault)
 		} else if len(route.path.steps) == 0 && route.path.limit == nil {
 			answers = root[:] // `.`
 		} else {
@@ -166,7 +166,7 @@ answer_path :: proc(run: ^Run, data: []byte, r: core.As) -> bool {
 // Answers the scanned filter over the record `rec`, as `answer_path` does a text: from `part`, the path's read of it
 // that ended with `read`, when `scanned`. A record that opens with a byte order mark past the input's first byte is the
 // interpreter's, since a build of its text alone passes over the mark that the record's own build judges.
-answer_record :: proc(run: ^Run, rec: records.Record, part: ^core.Document, read: core.Path_Error, scanned: bool, r: core.As) -> bool {
+answer_record :: proc(run: ^Run, rec: records.Record, part: ^core.Document, read: core.Error, scanned: bool, r: core.As) -> bool {
 	if scanned {
 		return answer(run, part, part.answers, read, rec.text, r)
 	}
@@ -185,13 +185,13 @@ scans :: proc(path: core.Path) -> bool {
 
 // Prints the outputs of the scanned filter from `answers` of `doc`, which the path read of the text `data` gave with
 // `err`. Returns false, with nothing printed, when the text is the interpreter's.
-answer :: proc(run: ^Run, doc: ^core.Document, answers: []core.Answer, err: core.Path_Error, data: []byte, r: core.As) -> bool {
+answer :: proc(run: ^Run, doc: ^core.Document, answers: []core.Answer, err: core.Error, data: []byte, r: core.As) -> bool {
 	// What a text builds lives in the temp arena and is emptied after it, so a run over many texts holds one text's at a
 	// time.
 	defer free_all(context.temp_allocator)
 	route := &run.route
 	switch {
-	case err.kind != .None:
+	case err != nil:
 		explain_fallback(route, .Bad_Text)
 		return false
 	case slice.any_of_proc(answers, proc(a: core.Answer) -> bool {return a.outcome == .Wrong_Kind}):

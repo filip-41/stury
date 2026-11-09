@@ -16,18 +16,18 @@ format gives. `core/typed` holds everything format-neutral and names no format.
 
 ```odin
 json.unmarshal :: proc {unmarshal_once, unmarshal_plan}
-unmarshal_once :: proc(src: []u8, spec: json.Spec, target: ^$T, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error
-unmarshal_plan :: proc(src: []u8, spec: json.Spec, target: ^$T, plan: ^typed.Plan, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error
+unmarshal_once :: proc(src: []u8, spec: json.Spec, target: ^$T, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
+unmarshal_plan :: proc(src: []u8, spec: json.Spec, target: ^$T, plan: ^typed.Plan, opts := json.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 
-json.plan_make  :: proc(T: typeid, spec := json.Spec.Json, opts := json.Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error)
-typed.plan_make :: proc(T: typeid, as: core.As, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error)
+json.plan_make  :: proc(T: typeid, spec := json.Spec.Json, opts := json.Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
+typed.plan_make :: proc(T: typeid, as: core.As, opts := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
 typed.plan_destroy :: proc(p: ^typed.Plan)
 
 dsv.unmarshal :: proc {unmarshal_once, unmarshal_plan}
-unmarshal_once :: proc(src: []u8, spec: dsv.Spec, target: ^$T, opts := dsv.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error
-unmarshal_plan :: proc(src: []u8, spec: dsv.Spec, target: ^$T, plan: ^typed.Plan, opts := dsv.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error
+unmarshal_once :: proc(src: []u8, spec: dsv.Spec, target: ^$T, opts := dsv.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
+unmarshal_plan :: proc(src: []u8, spec: dsv.Spec, target: ^$T, plan: ^typed.Plan, opts := dsv.Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error
 
-dsv.plan_make :: proc(T: typeid, spec := dsv.Spec.Csv, opts := dsv.Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error)
+dsv.plan_make :: proc(T: typeid, spec := dsv.Spec.Csv, opts := dsv.Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error)
 ```
 
 `S` is `.Json`, `.Jsonc` or `.Json5`, or for dsv `.Csv`, `.Tsv` or `.Plain`, and `opts` the walk's own options, as for
@@ -37,8 +37,8 @@ A built document is read by one call for every format, in `core/typed`:
 
 ```odin
 typed.unmarshal :: proc {unmarshal_node, unmarshal_answer}
-unmarshal_node   :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error
-unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Typed_Error
+unmarshal_node   :: proc(doc: ^core.Document, node: core.Node_Index, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
+unmarshal_answer :: proc(doc: ^core.Document, answer: core.Answer, target: ^$T, plan: ^Plan, read := Read_Options{}, allocator := context.allocator) -> core.Error
 ```
 
 See From a document below.

@@ -15,7 +15,7 @@ import "core:strings"
 import "core:sync"
 
 // A fault or an error renders as `line:col: message`. The example prints it to show the message.
-report :: proc(src: []u8, e: $E) {
+report :: proc(src: []u8, e: core.Error) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
 	core.render(strings.to_writer(&b), src, e)
@@ -67,7 +67,7 @@ main :: proc() {
 		}
 		return true
 	}
-	if fault, bad := records.each(lines, as, .Lines, count, &total, &pool.runner).?; bad {
+	if fault := records.each(lines, as, .Lines, count, &total, &pool.runner); fault != nil {
 		report(lines, fault)
 		os.exit(1)
 	}

@@ -5,6 +5,7 @@ package jq
 // library's sentence.
 
 import "base:intrinsics"
+import "base:runtime"
 import "core:bytes"
 import "core:simd"
 import "core:strings"
@@ -32,13 +33,15 @@ build_text :: proc(src: []byte, r: core_pkg.As, allocator := context.allocator) 
 }
 
 // A build's document `doc`, or the fault its error `err` tells.
-judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Document_Error) -> (core_pkg.Document, Maybe(core_pkg.Fault)) {
-	switch err.kind {
-	case .None:
+judge_build :: proc(doc: core_pkg.Document, err: core_pkg.Error) -> (core_pkg.Document, Maybe(core_pkg.Fault)) {
+	switch e in err {
+	case nil:
 		return doc, nil
-	case .Walk:
-		return {}, err.inner
-	case .Duplicate_Key, .No_Memory, .Bad_Index, .Bad_Position, .Wrong_Container, .Bad_Value, .Bad_Fact, .Bad_Width, .Bad_Spec, .Conflicting_Edits, .Bad_Result:
+	case core_pkg.Fault:
+		if e.kind != .Duplicate_Key {
+			return {}, e
+		}
+	case runtime.Allocator_Error, core_pkg.Document_Error, core_pkg.Path_Error, core_pkg.Typed_Error, core_pkg.Typed_Error_Kind:
 	}
 	return {}, core_pkg.Fault{kind = .No_Memory}
 }

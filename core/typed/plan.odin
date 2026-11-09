@@ -259,15 +259,17 @@ Plan_Make :: #type proc(T: typeid, as: core.As, opts: Plan_Options, allocator: r
 // cannot take is an error, with the path to it, and the plan is then the zero value with that error in `err`. `opts`'s
 // strings and slices are read here only. A format with no plan maker gets `plan_build`'s plan, and a nil spelling is
 // `.Bad_Option`.
-plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, core.Typed_Error) {
+plan_make :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := context.allocator) -> (Plan, core.Error) {
 	if as.spelling == nil {
 		err := core.Typed_Error{kind = .Bad_Option}
-		return {err = err}, err
+		return {err = err}, core.error_of(err)
 	}
 	if as.spelling.plans != nil {
-		return (Plan_Make)(as.spelling.plans)(T, as, opts, allocator)
+		made, err := (Plan_Make)(as.spelling.plans)(T, as, opts, allocator)
+		return made, core.error_of(err)
 	}
-	return plan_build(T, as, opts, allocator)
+	made, err := plan_build(T, as, opts, allocator)
+	return made, core.error_of(err)
 }
 
 // The plan of `T` for format `as` with nothing a format adds: no writer and no document read of its own. A format's

@@ -502,8 +502,8 @@ edit_replace :: proc(w: ^Edit_State, node: core.Node_Index, text: string) -> boo
 
 // Whether an edit was recorded, with its refusal in `w.err` when not.
 @(private = "file")
-edit_check :: proc(w: ^Edit_State, e: core.Document_Error) -> bool {
-	if e.kind != .None {
+edit_check :: proc(w: ^Edit_State, e: core.Error) -> bool {
+	if e != nil {
 		w.err = edit_error_text(w.doc.src, e)
 		return false
 	}
@@ -680,7 +680,7 @@ edit_cell_of :: proc(w: ^Edit_State, v: jq.Value, at: u64) -> (text: string, ok:
 		return "", false
 	}
 	out, verr := records.writer_end(&wr)
-	if verr.kind != .None {
+	if verr != nil {
 		w.err = edit_cell_refusal(cell, false)
 		return "", false
 	}
@@ -715,7 +715,7 @@ edit_key_text :: proc(w: ^Edit_State, key: core.Node_Index) -> (string, bool) {
 	return core.text_clone(w.doc, key, context.temp_allocator)
 }
 
-edit_error_text :: proc(src: []u8, e: core.Document_Error) -> string {
+edit_error_text :: proc(src: []u8, e: core.Error) -> string {
 	b := strings.builder_make(context.temp_allocator)
 	core.render(strings.to_writer(&b), src, e)
 	return strings.to_string(b)

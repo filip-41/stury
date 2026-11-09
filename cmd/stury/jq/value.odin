@@ -175,7 +175,7 @@ node_number :: proc(doc: ^core_pkg.Document, i: core_pkg.Node_Index) -> Number {
 	if doc.nodes[i].kind == .Number && doc.nodes[i].spelling & core_pkg.NUMBER_KIND_MASK != 0 {
 		// A number JSON cannot write has no literal and prints as computed.
 		text, _, err := core_pkg.write(doc, {}, json.as(.Json), i)
-		lit = string(text) if err.kind == .None else ""
+		lit = string(text) if err == nil else ""
 	}
 	return Number{f = f, lit = lit}
 }

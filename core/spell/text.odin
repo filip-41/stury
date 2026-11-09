@@ -192,6 +192,7 @@ Fault_Kind :: enum u8 {
 	No_Memory, // json (depth stack past `MAX_DEPTH`), dsv (header's keys, a reader's batch), records (window, pieces): a scratch allocation failed, no byte
 	Bad_Option, // json, dsv, records: a spec, option or framing the format does not take, or a handle with no format, found before any byte is read
 	Bad_Width, // dsv: a record wider than the first, at the delimiter that starts its extra cell, or narrower, at its line end
+	Duplicate_Key, // json, dsv: a build, a read or a scan under `.Refuse` met a key that repeats one of its object's, at the second key's first byte. No walk raises it: the library makes it from the refusal
 }
 
 // Steps over the UTF-8 character whose lead is at `p`, where `p < end` and `*p >= 0x80`. Returns one past the

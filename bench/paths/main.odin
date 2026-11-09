@@ -33,7 +33,7 @@ fold :: proc(doc: ^core.Document, answers: []core.Answer) -> u64 {
 // One call of `scan` or `stop`. The answers are folded only where `want_check` is set, which is outside the clock.
 scan_call :: proc(src: []byte, paths: []core.Path, read: core.Path_Options, want_check: bool) -> u64 {
 	doc, err := json.scan(src, .Json, paths, read = read)
-	if err.kind != .None {
+	if err != nil {
 		fmt.eprintln("scan:", err)
 		os.exit(1)
 	}
@@ -51,7 +51,7 @@ query_call :: proc(built: ^core.Document, src: []byte, paths: []core.Path, want_
 		doc = &own
 	}
 	answers, err := core.query(doc, paths)
-	if err.kind != .None {
+	if err != nil {
 		fmt.eprintln("query:", err)
 		os.exit(1)
 	}
@@ -86,7 +86,7 @@ main :: proc() {
 	paths := make([]core.Path, len(texts))
 	for text, i in texts {
 		p, err := core.parse_path(text)
-		if err.kind != .None {
+		if err != nil {
 			fmt.eprintln("bad path", text)
 			os.exit(1)
 		}
@@ -122,7 +122,7 @@ main :: proc() {
 
 build_document :: proc(src: []byte) -> core.Document {
 	doc, err := json.build(src, .Json)
-	if err.kind != .None {
+	if err != nil {
 		fmt.eprintln("build:", err)
 		os.exit(1)
 	}

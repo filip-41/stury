@@ -194,7 +194,7 @@ header_fault :: proc(name: string, data: []byte, as: core.As) -> string {
 		return ""
 	}
 	doc, err := records.build(&it, rec, context.temp_allocator)
-	if err.kind != .None {
+	if err != nil {
 		return ""
 	}
 	msg, twice := repeated_header(name, data, &doc)

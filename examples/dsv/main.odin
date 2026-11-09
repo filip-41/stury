@@ -22,7 +22,7 @@ City :: struct {
 }
 
 // An error renders as `line:col: message at path`.
-report :: proc(src: []u8, e: $E) {
+report :: proc(src: []u8, e: core.Error) {
 	b: strings.Builder
 	defer strings.builder_destroy(&b)
 	core.render(strings.to_writer(&b), src, e)
@@ -34,22 +34,22 @@ main :: proc() {
 	defer free_all(context.temp_allocator)
 	src := transmute([]byte)string("City,population,lat,lon\nOslo,709000,59.91,10.75\n\"Ho, Chi Minh\",,10.82,106.63\n")
 	cities: []City
-	if err := dsv.unmarshal(src, .Csv, &cities, allocator = context.temp_allocator); err.kind != .None {
+	if err := dsv.unmarshal(src, .Csv, &cities, allocator = context.temp_allocator); err != nil {
 		report(src, err)
 		os.exit(1)
 	}
 	fmt.println(cities[1].name, cities[1].population) // Ho, Chi Minh nil
 
 	out, err := dsv.marshal(cities)
-	if err.kind != .None {
+	if err != nil {
 		report(nil, err)
 		os.exit(1)
 	}
 	fmt.print(string(out)) // src again: "Ho, Chi Minh" keeps its quotes and the absent population stays empty
 
 	bad := transmute([]byte)string("City,population,lat,lon\nOslo,lots,59.91,10.75\n")
-	if err := dsv.unmarshal(bad, .Csv, &cities, allocator = context.temp_allocator); err.kind != .None {
-		report(bad, err) // 2:6: Expected i64, found "lots" at .[0].population
+	if bad_err := dsv.unmarshal(bad, .Csv, &cities, allocator = context.temp_allocator); bad_err != nil {
+		report(bad, bad_err) // 2:6: Expected i64, found "lots" at .[0].population
 	}
 
 	dialects(&cities)
@@ -60,7 +60,7 @@ main :: proc() {
 // A Spec and Options read other delimited text through the same calls.
 dialects :: proc(cities: ^[]City) {
 	tsv := transmute([]byte)string("City\tpopulation\tlat\tlon\nOslo\t709000\t59.91\t10.75\n")
-	if err := dsv.unmarshal(tsv, .Tsv, cities, allocator = context.temp_allocator); err.kind != .None {
+	if err := dsv.unmarshal(tsv, .Tsv, cities, allocator = context.temp_allocator); err != nil {
 		report(tsv, err)
 		os.exit(1)
 	}
@@ -69,7 +69,7 @@ dialects :: proc(cities: ^[]City) {
 	// No header: column k is the struct's field k. A semicolon delimiter, and lines starting with # skipped.
 	plain := transmute([]byte)string("# name;population;lat;lon\nOslo;709000;59.91;10.75\n")
 	layout := dsv.Options{no_header = true, delimiter = ';', comment = '#'}
-	if err := dsv.unmarshal(plain, .Csv, cities, opts = layout, allocator = context.temp_allocator); err.kind != .None {
+	if err := dsv.unmarshal(plain, .Csv, cities, opts = layout, allocator = context.temp_allocator); err != nil {
 		report(plain, err)
 		os.exit(1)
 	}
@@ -80,7 +80,7 @@ dialects :: proc(cities: ^[]City) {
 // building a document. An edit returns the text with only the targeted bytes changed.
 document_and_edits :: proc(src: []byte) {
 	doc, derr := dsv.build(src, .Csv)
-	if derr.kind != .None {
+	if derr != nil {
 		report(src, derr)
 		os.exit(1)
 	}
@@ -94,7 +94,7 @@ document_and_edits :: proc(src: []byte) {
 	city, _ := core.parse_path(".[1].City")
 	defer core.path_destroy(&city)
 	fdoc, answer, ferr := dsv.find(src, .Csv, city)
-	if ferr.kind != .None {
+	if ferr != nil {
 		report(src, ferr)
 		os.exit(1)
 	}
@@ -109,7 +109,7 @@ document_and_edits :: proc(src: []byte) {
 	population, _ := core.parse_path(".[0].population")
 	defer core.path_destroy(&population)
 	edited, eerr := dsv.set(src, .Csv, population, "710000")
-	if eerr.kind != .None {
+	if eerr != nil {
 		report(src, eerr)
 		os.exit(1)
 	}
@@ -121,12 +121,12 @@ document_and_edits :: proc(src: []byte) {
 	// Edits on a document are recorded on a list and applied by one commit.
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
-	if ierr := core.insert(&list, core.ROOT, 2, "Bergen,,60.39,5.32"); ierr.kind != .None {
+	if ierr := core.insert(&list, core.ROOT, 2, "Bergen,,60.39,5.32"); ierr != nil {
 		report(src, ierr)
 		os.exit(1)
 	}
 	added, _, aerr := core.commit(&list)
-	if aerr.kind != .None {
+	if aerr != nil {
 		report(src, aerr)
 		os.exit(1)
 	}
@@ -137,7 +137,7 @@ document_and_edits :: proc(src: []byte) {
 	every, _ := core.parse_path(".[].population")
 	defer core.path_destroy(&every)
 	cells, qerr := core.query(&doc, every)
-	if qerr.kind != .None {
+	if qerr != nil {
 		report(src, qerr)
 		os.exit(1)
 	}
@@ -145,13 +145,13 @@ document_and_edits :: proc(src: []byte) {
 	dropping := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&dropping)
 	for c in cells {
-		if rerr := core.remove(&dropping, c.node); rerr.kind != .None {
+		if rerr := core.remove(&dropping, c.node); rerr != nil {
 			report(src, rerr)
 			os.exit(1)
 		}
 	}
 	trimmed, _, rerr := core.commit(&dropping)
-	if rerr.kind != .None {
+	if rerr != nil {
 		report(src, rerr)
 		os.exit(1)
 	}
@@ -171,8 +171,8 @@ streaming :: proc(src: []byte) {
 	for rec in records.next(&rr) {
 		fmt.println(rec.at, len(rec.text), string(rec.text)) // 24 and Oslo's row, then 48: the header is no record
 	}
-	if fault, bad := rr.fault.?; bad {
-		report(src, fault)
+	if fault := rr.fault; fault != nil {
+		report(src, fault.?)
 		os.exit(1)
 	}
 
@@ -189,7 +189,7 @@ streaming :: proc(src: []byte) {
 		}
 		return true
 	}
-	if fault, bad := records.each(src, as, .Lines, count, &rows, &pool.runner).?; bad {
+	if fault := records.each(src, as, .Lines, count, &rows, &pool.runner); fault != nil {
 		report(src, fault)
 		os.exit(1)
 	}
@@ -206,7 +206,7 @@ streaming :: proc(src: []byte) {
 		os.exit(1)
 	}
 	line, werr := records.writer_end(&wr)
-	if werr.kind != .None {
+	if werr != nil {
 		report(nil, werr)
 		os.exit(1)
 	}

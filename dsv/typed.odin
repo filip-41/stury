@@ -21,8 +21,9 @@ unmarshal :: proc {unmarshal_once, unmarshal_plan}
 // Builds the plan of `T` for dsv's spelling, as `typed.plan_make` does, and refuses a `T` that is no list of rows and no
 // row. A write by the plan is of spec `spec` with the delimiter, comment byte, `no_header`, `crlf` and `.Ragged` of
 // `opts`, and `.Bad_Option` when the spec cannot spell them. A read takes its spec and options at the call.
-plan_make :: proc(T: typeid, spec := Spec.Csv, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Typed_Error) {
-	return plan_as(T, as(spec, opts), plan, allocator)
+plan_make :: proc(T: typeid, spec := Spec.Csv, opts := Options{}, plan := typed.Plan_Options{}, allocator := context.allocator) -> (typed.Plan, core.Error) {
+	made, err := plan_as(T, as(spec, opts), plan, allocator)
+	return made, core.error_of(err)
 }
 
 // The spelling's `plans`.
@@ -66,20 +67,20 @@ check_as :: proc(src: []u8, as: core.As, target: rawptr, T: typeid, plan: ^typed
 }
 
 @(private)
-unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
-	plan, err := plan_make(T, spec)
-	if err.kind != .None {
-		return err
+unmarshal_once :: proc(src: []u8, spec: Spec, target: ^$T, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	plan, refusal := plan_make(T, spec)
+	if refusal != nil {
+		return refusal
 	}
 	defer typed.plan_destroy(&plan)
-	err = unmarshal_plan(src, spec, target, &plan, opts, read, allocator)
+	err := read_spec(src, spec, opts, target, T, &plan, read, allocator, false)
 	typed.own_errors(&err, read.sink)
-	return err
+	return core.error_of(err)
 }
 
 @(private)
-unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Typed_Error {
-	return read_spec(src, spec, opts, target, T, plan, read, allocator, false)
+unmarshal_plan :: proc(src: []u8, spec: Spec, target: ^$T, plan: ^typed.Plan, opts := Options{}, read := typed.Read_Options{}, allocator := context.allocator) -> core.Error {
+	return core.error_of(read_spec(src, spec, opts, target, T, plan, read, allocator, false))
 }
 
 // Whether `plan` was made by `typed.plan_make` and not `plan_make`, which alone checks that a type is a list of rows of

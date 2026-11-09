@@ -29,7 +29,7 @@ main :: proc() {
 	suffix := os.args[1]
 	dsv_text := has_suffix(suffix, ".csv") || has_suffix(suffix, ".tsv")
 	doc: core.Document
-	derr: core.Document_Error
+	derr: core.Error
 	switch {
 	case has_suffix(suffix, ".tsv"):
 		doc, derr = dsv.build(src, .Tsv)
@@ -43,7 +43,7 @@ main :: proc() {
 		doc, derr = json.build(src, .Json)
 	}
 	defer core.destroy(&doc)
-	if derr.kind != .None {
+	if derr != nil {
 		fmt.eprintln("build:", derr)
 		os.exit(1)
 	}
@@ -67,7 +67,7 @@ main :: proc() {
 	for k in 0 ..< n {
 		// Spreads the edits over the whole file, so their order in the log is not their order in the source.
 		node := nodes[k * len(nodes) / max(n, 1)]
-		if e := core.set(&list, node, text); e.kind != .None {
+		if e := core.set(&list, node, text); e != nil {
 			fmt.eprintln("set:", e)
 			os.exit(1)
 		}
@@ -79,7 +79,7 @@ main :: proc() {
 		start = time.tick_now()
 		next, _, cerr := core.commit(&list)
 		d := time.tick_since(start)
-		if cerr.kind != .None {
+		if cerr != nil {
 			fmt.eprintln("commit:", cerr)
 			os.exit(1)
 		}

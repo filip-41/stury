@@ -7,6 +7,7 @@ import "core:testing"
 import core ".."
 import dsv "../../dsv"
 import json "../../json"
+import walktest "../../walktest"
 
 // A commit to JSON refuses a delimited document before it splices, since a table is another format family.
 @(test)
@@ -14,11 +15,11 @@ json_commit_refuses_table :: proc(t: ^testing.T) {
 	src := transmute([]u8)string("a\n1\n")
 	doc, err := dsv.build(src, .Csv)
 	defer core.destroy(&doc)
-	testing.expect_value(t, err.kind, core.Document_Error_Kind.None)
+	walktest.expect_nil(t, err)
 	list := core.edit_list_init(&doc)
 	defer core.edit_list_destroy(&list)
 	out, _, cerr := core.commit(&list, json.as(.Json))
-	testing.expect_value(t, cerr.kind, core.Document_Error_Kind.Bad_Spec)
+	walktest.expect_kind(t, cerr, core.Document_Error_Kind.Bad_Spec)
 	testing.expect(t, out == nil)
 }
 
@@ -27,13 +28,13 @@ json_commit_refuses_table :: proc(t: ^testing.T) {
 format_serves_every_format :: proc(t: ^testing.T) {
 	table, terr := core.format(transmute([]u8)string("a,b\n1,\"x\"\n"), dsv.as(.Csv))
 	defer delete(table)
-	testing.expect_value(t, terr.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, terr)
 	testing.expect_value(t, string(table), "a,b\n1,x\n")
 	text, jerr := core.format(transmute([]u8)string(`{a: [1,],}`), json.as(.Json5), core.PRETTY)
 	defer delete(text)
-	testing.expect_value(t, jerr.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, jerr)
 	_, none := core.format(transmute([]u8)string(`1`), core.As{})
-	testing.expect_value(t, none.kind, core.Typed_Error_Kind.Unsupported)
+	walktest.expect_kind(t, none, core.Typed_Error_Kind.Unsupported)
 }
 
 // A pointer writes a name with `~` and `/` escaped, an index in digits, and a step with no one place as `-`.
@@ -61,16 +62,16 @@ default_duplicates_read_as_last :: proc(t: ^testing.T) {
 	by_default, by_last: S
 	src := transmute([]u8)string(`{"a":1,"a":2}`)
 	e := json.unmarshal(src, json.Spec.Json, &by_default, read = {}, opts = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	e = json.unmarshal(src, json.Spec.Json, &by_last, read = {dups = .Last}, opts = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, e.kind, core.Typed_Error_Kind.None)
+	walktest.expect_nil(t, e)
 	testing.expect_value(t, by_default.a, 2)
 	testing.expect_value(t, by_last, by_default)
 	csv := transmute([]u8)string("a,a\n1,2\n")
 	d1, d2: S
 	e = dsv.unmarshal(csv, dsv.Spec.Csv, &d1, read = {}, opts = {}, allocator = context.temp_allocator)
 	e2 := dsv.unmarshal(csv, dsv.Spec.Csv, &d2, read = {dups = .Last}, opts = {}, allocator = context.temp_allocator)
-	testing.expect_value(t, e.kind, e2.kind)
+	testing.expect_value(t, e == nil, e2 == nil)
 	testing.expect_value(t, d1, d2)
 }
 

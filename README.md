@@ -99,12 +99,12 @@ main :: proc() {
 	alloc := virtual.arena_allocator(&arena)
 
 	person: Person
-	if err := json.unmarshal(src, .Json, &person, allocator = alloc); err.kind != .None {
+	if err := json.unmarshal(src, .Json, &person, allocator = alloc); err != nil {
 		report(src, err)
 		os.exit(1)
 	}
 	out, err := json.marshal(person, allocator = alloc)
-	if err.kind != .None {
+	if err != nil {
 		report(nil, err)
 		os.exit(1)
 	}

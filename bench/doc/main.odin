@@ -144,7 +144,7 @@ lane_key :: #force_no_inline proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spe
 
 build :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) -> core.Document {
 	doc: core.Document
-	err: core.Document_Error
+	err: core.Error
 	if dsv_text {
 		if tsv {
 			doc, err = dsv.build(src, .Tsv, {}, .Last, a.alloc)
@@ -161,7 +161,7 @@ build :: proc(a: ^Arena, src: []u8, tsv, dsv_text: bool, spec: json.Spec) -> cor
 			doc, err = json.build(src, .Json5, {}, .Last, a.alloc)
 		}
 	}
-	if err.kind != .None {
+	if err != nil {
 		core.render(os.to_writer(os.stderr), src, err)
 		fmt.eprintln()
 		os.exit(1)

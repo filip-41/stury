@@ -130,12 +130,12 @@ fixed_output_proc :: proc(data: rawptr, mode: runtime.Allocator_Mode, size, alig
 
 lane :: proc($T: typeid, src: []u8, pretty: bool) {
 	value: T
-	if err := json.unmarshal(src, .Json, &value); err.kind != .None {
+	if err := json.unmarshal(src, .Json, &value); err != nil {
 		fmt.eprintln("read:", err)
 		os.exit(1)
 	}
 	plan, perr := json.plan_make(T, plan = {}, allocator = context.allocator)
-	if perr.kind != .None {
+	if perr != nil {
 		fmt.eprintln("plan:", perr)
 		os.exit(1)
 	}
@@ -154,7 +154,7 @@ lane :: proc($T: typeid, src: []u8, pretty: bool) {
 		out, err := write.marshal(value, &plan, opts, fixed)
 		d := i64(time.tick_since(start))
 		virtual.arena_free_all(&scratch)
-		if err.kind != .None {
+		if err != nil {
 			fmt.eprintln("write:", err)
 			os.exit(1)
 		}
@@ -175,7 +175,7 @@ lane :: proc($T: typeid, src: []u8, pretty: bool) {
 // the same list, which writes it as one array, under `list_`. GB/s counts output bytes.
 records_lane :: proc(src: []u8) {
 	value: Logs
-	if err := json.unmarshal(src, .Json, &value); err.kind != .None {
+	if err := json.unmarshal(src, .Json, &value); err != nil {
 		fmt.eprintln("read:", err)
 		os.exit(1)
 	}
@@ -199,7 +199,7 @@ records_lane :: proc(src: []u8) {
 		start = time.tick_now()
 		list, lerr := write.marshal(value.logs, &list_plan, {}, fixed)
 		ld := i64(time.tick_since(start))
-		if err.kind != .None || lerr.kind != .None {
+		if err != nil || lerr != nil {
 			fmt.eprintln("write:", err, lerr)
 			os.exit(1)
 		}

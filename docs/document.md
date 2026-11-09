@@ -107,7 +107,7 @@ is a slice of `src`. A decoded text is `buf` or an allocation from the reader's 
 ```odin
 core.build :: proc(src: []u8, as: As, dups := Duplicates.Last,
 	allocator := context.allocator) -> (Document, Document_Error)
-core.validate :: proc "contextless" (src: []u8, as: As) -> Maybe(Fault)
+core.validate :: proc "contextless" (src: []u8, as: As) -> Error
 json.build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last,
 	allocator := context.allocator) -> (core.Document, core.Document_Error)
 dsv.build :: proc(src: []u8, spec: Spec, opts := Options{}, dups := core.Duplicates.Last,
@@ -462,7 +462,7 @@ JSON's key check reads the text as the only member of `{text:0}` and requires th
 ### A commit
 
 ```odin
-commit :: proc(list: ^Edit_List, as: Maybe(As) = nil, allocator := context.allocator) -> (out: []u8, dropped: int, err: Document_Error)
+commit :: proc(list: ^Edit_List, as: Maybe(As) = nil, allocator := context.allocator) -> (out: []u8, dropped: int, err: Error)
 ```
 
 `core.commit` writes the output in the document's own spec, or in the spec of `as`, such as `json.as(.Json)` for a

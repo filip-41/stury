@@ -241,9 +241,9 @@ documents_one_walk_each :: proc(t: ^testing.T) {
 	}
 	_, fault = json.walk(transmute([]u8)string(" \x1e x"), 0, .Json, {}, log, &core.Hook_Regs{}, walktest.log_hook)
 	testing.expect_value(t, fault, core.Fault{3, &json.RULES, .Bad_Char, u8(json.Detail.Literal)})
-	testing.expect_value(t, json.validate(transmute([]u8)string("\x1e1"), .Json), core.Fault{0, &json.RULES, .Bad_Char, u8(json.Detail.Control_Char)})
-	testing.expect_value(t, json.validate(transmute([]u8)string("1 2"), .Json), core.Fault{2, &json.RULES, .Bad_Char, u8(json.Detail.Trailing)})
-	testing.expect_value(t, json.validate(transmute([]u8)string(" \n"), .Json), core.Fault{2, &json.RULES, .Truncated, 0})
+	testing.expect_value(t, walktest.fault_of(json.validate(transmute([]u8)string("\x1e1"), .Json)), core.Fault{0, &json.RULES, .Bad_Char, u8(json.Detail.Control_Char)})
+	testing.expect_value(t, walktest.fault_of(json.validate(transmute([]u8)string("1 2"), .Json)), core.Fault{2, &json.RULES, .Bad_Char, u8(json.Detail.Trailing)})
+	testing.expect_value(t, walktest.fault_of(json.validate(transmute([]u8)string(" \n"), .Json)), core.Fault{2, &json.RULES, .Truncated, 0})
 }
 
 // Returns true if a token's span holds what its kind says and its spelling matches. For a string, the spelling says
@@ -380,7 +380,7 @@ skip_past_comments :: proc(t: ^testing.T) {
 	// The skipped value keeps its depth, so the third bracket is `Too_Deep`.
 	deep := transmute([]u8)string("{\"a\": /* c */ [[1]]}")
 	_, fault = json.walk(deep, 0, .Jsonc, {max_depth = 2}, log, &core.Hook_Regs{}, skip_keys)
-	testing.expect_value(t, fault, json.validate(deep, .Jsonc, {max_depth = 2}))
+	testing.expect_value(t, fault, walktest.fault_of(json.validate(deep, .Jsonc, {max_depth = 2})))
 	testing.expect_value(t, fault, core.Fault{15, &json.RULES, .Too_Deep, 0})
 }
 
