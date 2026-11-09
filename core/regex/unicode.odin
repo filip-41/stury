@@ -1,3 +1,4 @@
+#+private
 package regex
 
 // Oniguruma's Unicode character types under UTF-8, `\w`, `\d`, `\s`, the POSIX brackets and `\p{...}`, from
@@ -57,11 +58,15 @@ is_word :: proc(r: rune) -> bool {
 
 // `\p{name}`'s type: a name compared as Oniguruma compares them, without case, spaces, `_` or `-`.
 named_prop :: proc(name: string) -> (it: Prop_Item, ok: bool) {
-	b := strings.builder_make(context.temp_allocator)
+	buf: [64]byte // no property name is longer
+	b := strings.builder_from_bytes(buf[:])
 	for c in name {
 		if c != ' ' && c != '_' && c != '-' {
 			strings.write_rune(&b, unicode.to_lower(c))
 		}
+	}
+	if len(name) > len(buf) {
+		return
 	}
 	names, k := PROPERTY_NAMES, 0
 	for each in strings.split_iterator(&names, "\x00") {
@@ -71,6 +76,42 @@ named_prop :: proc(name: string) -> (it: Prop_Item, ok: bool) {
 		k += 1
 	}
 	return
+}
+
+// ECMA's `\p{...}` type for `name`, compared as written: a binary property or a General_Category value, or
+// `General_Category=`, `gc=`, `Script=` or `sc=` and a value.
+ecma_prop :: proc(name: string) -> (it: Prop_Item, ok: bool) {
+	kind, value := "", name
+	if eq := strings.index_byte(name, '='); eq >= 0 {
+		kind, value = name[:eq], name[eq + 1:]
+		switch kind {
+		case "General_Category":
+			kind = "gc"
+		case "Script":
+			kind = "sc"
+		}
+	}
+	names, k := ECMA_NAMES, 0
+	for each in strings.split_iterator(&names, "\x00") {
+		at := strings.index_byte(each, '=')
+		if each[at + 1:] == value && (each[:max(at, 0)] == kind || kind == "" && each[:max(at, 0)] == "gc") {
+			return {table = ECMA_NAME_TABLES[k]}, true
+		}
+		k += 1
+	}
+	return
+}
+
+// A group name ECMA takes: an identifier, of ID_Start, `$` and `_`, then ID_Continue, `$`, ZWNJ and ZWJ.
+ecma_identifier :: proc(name: string) -> bool {
+	start, _ := named_prop("ID_Start")
+	part, _ := named_prop("ID_Continue")
+	for r, i in name {
+		if r != '$' && r != '_' && !in_table(int(start.table if i == 0 else part.table), r) && (i == 0 || r != 0x200C && r != 0x200D) {
+			return false
+		}
+	}
+	return true
 }
 
 // The rune `r`'s case-fold class as one rune, so two runes fold alike when their classes are the same rune.

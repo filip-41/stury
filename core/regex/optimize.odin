@@ -1,3 +1,4 @@
+#+private
 package regex
 
 // Oniguruma's search optimizer as jq's build runs it (optimize_nodes and set_optimize_info_from_tree in regcomp.c,

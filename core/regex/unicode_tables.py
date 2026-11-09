@@ -7,9 +7,11 @@ Oniguruma's own tables hold (Unicode 16.0 in Oniguruma 6.9.10), which neither Py
 scripts) nor core:unicode (Unicode 17) gives. The names are those Oniguruma's name table holds, as it
 compares them (lower case, no space, `_` or `-`): the strings of its library that jq accepts as `\\p{...}`.
 The case folds are read alike: the characters `(?i)\\x{...}` matches alone, for each cased character.
+The names ECMA-262 takes in `\\p{...}` are those PropertyValueAliases.txt spells that Node accepts, each
+on the table of an alias's Oniguruma name: Unicode 16's characters, where Node may have a later Unicode's.
 
-Run from the repository root, with jq 1.8.2 on PATH and its libonig:
-    python3 cmd/stury/regex/unicode_tables.py [/opt/homebrew/opt/oniguruma/lib/libonig.dylib]
+Run from the repository root, with jq 1.8.2 and Node on PATH and jq's libonig:
+    python3 core/regex/unicode_tables.py [/opt/homebrew/opt/oniguruma/lib/libonig.dylib]
 """
 import json
 import pathlib
@@ -17,10 +19,12 @@ import re
 import struct
 import subprocess
 import sys
+import urllib.request
 
 OUT = pathlib.Path(__file__).with_name("unicode_tables.odin")
 BLOBS = OUT.with_name("tables")
 LIBONIG = sys.argv[1] if len(sys.argv) > 1 else "/opt/homebrew/opt/oniguruma/lib/libonig.dylib"
+ALIASES = "https://www.unicode.org/Public/17.0.0/ucd/PropertyValueAliases.txt"
 
 # The types stury names apart from `\p{...}`: the escapes and the POSIX brackets, by the pattern that
 # matches one character of each.
@@ -117,6 +121,51 @@ def multi_folds(folds):
     return [(c, [canon.get(ord(x), ord(x)) for x in f] + [0] * (3 - len(f))) for c, f in multi]
 
 
+# The characters of each \p{...} spelling Node's RegExp takes under "u", as SCAN gives them.
+NODE_SCAN = r"""
+const all = [], out = {};
+for (let c = 0; c < 0x110000; c++) if (c < 0xD800 || c > 0xDFFF) all.push(String.fromCodePoint(c));
+const text = all.join("");
+for (const name of JSON.parse(require("fs").readFileSync(0, "utf8"))) {
+  let re;
+  try { re = new RegExp("\\p{" + name + "}+", "gu"); } catch { continue; }
+  out[name] = [...text.matchAll(re)].map(m => [m[0].codePointAt(0), [...m[0]].pop().codePointAt(0)]);
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def ecma_names(found):
+    """ECMA's \\p{...} names: General_Category values bare or after `gc=`, scripts after `sc=` and binary
+    properties bare, each with the Oniguruma name of its first alias that has one."""
+    aliases, prop = {}, None
+    for line in urllib.request.urlopen(ALIASES).read().decode().splitlines():
+        if m := re.match(r"# (\w+) \((\w+)\)$", line):
+            prop = m.groups()
+        fields = [f.strip() for f in line.split("#")[0].split(";")]
+        if fields[0] in ("gc", "sc"):
+            aliases |= {f"{fields[0]}={v}": fields[1:] for v in fields[1:]}
+        elif prop and fields[0] == prop[1] and fields[1] == "N":
+            aliases |= {v: prop for v in prop}
+    aliases |= {v: [v] for v in ("Any", "ASCII", "Assigned")}
+    p = subprocess.run(["node", "-e", NODE_SCAN], input=json.dumps([*aliases]).encode(), capture_output=True,
+                       check=True)
+    points = lambda ranges: {c for lo, hi in ranges for c in range(lo, hi + 1)}
+    unassigned = points(found["cn"])
+    chosen, refused, differ = [], [], []
+    for spelling, ranges in json.loads(p.stdout).items():
+        onig = [n for a in aliases[spelling] if (n := a.lower().replace("_", "")) in found]
+        if not onig:
+            refused.append(spelling)
+            continue
+        chosen.append((spelling, onig[0]))
+        if d := len((points(found[onig[0]]) ^ points(ranges)) - unassigned):
+            differ.append(f"{spelling} {d}")
+    print(f"ECMA \\p names: {len(chosen)}; no table: {' '.join(sorted(refused))}")
+    print(f"characters assigned in Unicode 16 that Node's Unicode reads otherwise: {', '.join(sorted(differ))}")
+    return chosen
+
+
 def main():
     v = subprocess.run(["jq", "--version"], capture_output=True, text=True).stdout.strip()
     if v != "jq-1.8.2":
@@ -144,6 +193,7 @@ def main():
     folds = fold_orbits(found)
     multi = multi_folds(folds)
     named = [(n, table_of(n)) for n in names]
+    ecma = [(s, table_of(n)) for s, n in ecma_names(found)]
     types = {k: table_of("type " + k) for k in [*TYPES, *GRAPHEME] if k not in derived}
     types["grapheme_extend"] = table_of("graphemeextend")
     posix = [(k, "TABLE_CLASS_WORD" if k == "word" else table_of("posix " + k)) for k in POSIX]
@@ -173,6 +223,8 @@ def main():
         "tables": struct.pack(f"<{len(starts)}H", *starts),
         "names": b"".join(n.encode() + b"\0" for n, _ in named),
         "name_tables": struct.pack(f"<{len(named)}H", *(t for _, t in named)),
+        "ecma_names": b"".join(n.encode() + b"\0" for n, _ in ecma),
+        "ecma_name_tables": struct.pack(f"<{len(ecma)}H", *(t for _, t in ecma)),
         "folds": struct.pack(f"<{len(folds)}Q", *(c << 2 * FOLD_BITS | n << FOLD_BITS | f for c, n, f in folds)),
         "multi_folds": struct.pack(f"<{4 * len(multi)}I", *(x for c, f in multi for x in (c, *f))),
         "errors": b"".join(e.encode() + b"\0" for e in jq(ERRORS, None)),
@@ -180,6 +232,7 @@ def main():
     for name, data in blobs.items():
         (BLOBS / f"{name}.bin").write_bytes(data)
     out = [
+        "#+private",
         "package regex",
         "",
         "// Generated by unicode_tables.py from jq 1.8.2 and Oniguruma 6.9.10 (Unicode 16.0). Do not edit.",
@@ -197,6 +250,11 @@ def main():
         "// The `\\p{...}` names in order, as Oniguruma compares them, each ended by a NUL, and each one's table.",
         'PROPERTY_NAMES :: #load("tables/names.bin", string)',
         '@(rodata) PROPERTY_NAME_TABLES := #load("tables/name_tables.bin", []u16)',
+        "",
+        "// ECMA-262's `\\p{...}` names as it spells them, General_Category values as `gc=` and scripts as `sc=`, each",
+        "// ended by a NUL, and each one's table.",
+        'ECMA_NAMES :: #load("tables/ecma_names.bin", string)',
+        '@(rodata) ECMA_NAME_TABLES := #load("tables/ecma_name_tables.bin", []u16)',
         "",
         "// The POSIX brackets `[:name:]` and their tables.",
         "@(rodata)",

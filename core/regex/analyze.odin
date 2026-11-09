@@ -1,3 +1,4 @@
+#+private
 package regex
 
 // What the compiler learns of a tree besides its program: a look-behind's body tuned to a fixed
@@ -430,6 +431,20 @@ fixed_length :: proc(c: ^Compiler, n: ^Node, referred := false, untuned := false
 	case .Linebreak, .Grapheme, .Absent:
 	}
 	return 0, false
+}
+
+// The least group number in `n`, 0 for none.
+@(private)
+first_group :: proc(n: ^Node) -> int {
+	if n.kind == .Group && n.group > 0 {
+		return n.group // a group's number is less than those inside it
+	}
+	for k in n.kids {
+		if g := first_group(k); g > 0 {
+			return g
+		}
+	}
+	return 0
 }
 
 // The greatest group number in `n`, 0 for none.

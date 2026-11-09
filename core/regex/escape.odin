@@ -1,3 +1,4 @@
+#+private
 package regex
 
 // Escapes at `\` outside a class and the single-character escapes a class shares.
@@ -15,6 +16,9 @@ parse_escape :: proc(p: ^Parser) -> ^Node {
 	}
 	c := peek(p)
 	p.i += 1
+	if p.flags.ecma {
+		return ecma_escape(p, c)
+	}
 	switch c {
 	case 'w', 'W', 'd', 'D', 's', 'S':
 		return prop_node(escape_prop(c))
@@ -75,6 +79,74 @@ parse_escape :: proc(p: ^Parser) -> ^Node {
 	p.i = esc
 	r, _, ok := parse_char_escape(p, false)
 	return char_node(p, r) if ok else nil
+}
+
+// After `\` and `c` outside a class, under ECMA.
+@(private = "file")
+ecma_escape :: proc(p: ^Parser, c: byte) -> ^Node {
+	switch c {
+	case 'b':
+		return assert_node(.Ascii_Boundary)
+	case 'B':
+		return assert_node(.Not_Ascii_Boundary)
+	case 'd', 'D', 'w', 'W', 's', 'S':
+		set, negated := escape_set(c)
+		return class_node(set, negated)
+	case 'p', 'P':
+		it, ok := parse_property(p, c == 'P')
+		return prop_node(it) if ok else nil
+	case 'k', '1' ..= '9':
+		return fail(p, "back references are not supported")
+	}
+	r, ok := ecma_char(p, c)
+	return char_node(p, r) if ok else nil
+}
+
+// The character of an ECMA escape after `\` and its letter `c`: \t \n \v \f \r \0 \cX \xHH, \uHHHH or a pair of
+// them for a surrogate pair, \u{H...}, or an escaped syntax character. A lone surrogate is a character no text holds.
+@(private)
+ecma_char :: proc(p: ^Parser, c: byte) -> (r: rune, ok: bool) {
+	if k := strings.index_byte("tnvfr", c); k >= 0 {
+		controls := "\t\n\v\f\r"
+		return rune(controls[k]), true
+	}
+	switch c {
+	case '0':
+		if digit(peek(p)) >= 10 {
+			return 0, true
+		}
+	case 'c':
+		if x := peek(p) | 0x20; x >= 'a' && x <= 'z' {
+			p.i += 1
+			return rune(x - 0x60), true
+		}
+	case 'x':
+		if v, n := number(p.src, &p.i, 0xFF, 16, 2); n == 2 {
+			return rune(v), true
+		}
+	case 'u':
+		if peek(p) == '{' {
+			p.i += 1
+			v, n := number(p.src, &p.i, utf8.MAX_RUNE + 1, 16)
+			if n > 0 && v <= utf8.MAX_RUNE && peek(p) == '}' {
+				p.i += 1
+				return rune(v), true
+			}
+		} else if v, n := number(p.src, &p.i, 0xFFFF, 16, 4); n == 4 {
+			j := p.i + 2
+			if low, m := number(p.src, &j, 0xFFFF, 16, 4); v >> 10 == 0x36 && peek(p) == '\\' && peek(p, 1) == 'u' && m == 4 && low >> 10 == 0x37 {
+				p.i = j
+				v = 0x10000 + (v - 0xD800) << 10 + low - 0xDC00
+			}
+			return rune(v), true
+		}
+	case:
+		if escaped_punctuation(c, true) {
+			return rune(c), true
+		}
+	}
+	fail(p, "invalid escape")
+	return
 }
 
 // At `<` or `'` after \k: `\k<name>`, `\k<n>` or `\k<-n>`.

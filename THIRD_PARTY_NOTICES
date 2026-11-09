@@ -5,9 +5,9 @@ LICENSE beside the files they cover; those are named rather than copied.
 ----------------------------------------------------------------------------------------------------
 Oniguruma — https://github.com/kkos/oniguruma
 
-    cmd/stury/regex/tables/*.bin and cmd/stury/regex/unicode_tables.odin hold Oniguruma 6.9.10's
+    core/regex/tables/*.bin and core/regex/unicode_tables.odin hold Oniguruma 6.9.10's
     character-property and case-folding tables (Unicode 16.0), read out of its library through jq 1.8.2 by
-    cmd/stury/regex/unicode_tables.py.
+    core/regex/unicode_tables.py.
 
 Oniguruma LICENSE
 -----------------

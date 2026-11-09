@@ -1,14 +1,15 @@
 package jq
 
-// jq's regular expressions (`test`, `match`, `capture`, `scan`, `split/2`, `sub`, `gsub`) on cmd/stury/regex,
+// jq's regular expressions (`test`, `match`, `capture`, `scan`, `split/2`, `sub`, `gsub`) on core/regex,
 // which matches as Oniguruma does under jq's options. Offsets and lengths count characters as jq 1.8.2
 // counts them, which a global search makes odd: after an empty match it goes on one byte later, which may
 // be inside a character.
 
+import "base:runtime"
 import "core:mem/virtual"
 import "core:slice"
 import "core:strings"
-import "../regex"
+import "../../../core/regex"
 
 Regex :: struct {
 	re:     regex.Regex,
@@ -55,18 +56,22 @@ compile_regex :: proc(ip: ^Interp, pattern: string, flags: Value) -> (r: Regex, 
 }
 
 // The regexes the thread compiled, kept for later calls since a filter compiles its patterns for every input. An
-// entry is never replaced, so a regex stays whole while a caller reads it. Past the cap, and for long patterns, a
-// regex is compiled for its call alone.
+// entry is never replaced, so a regex stays whole while a caller reads it. Past the caps, and for long patterns, a
+// regex is compiled for its call alone, and so is one whose program would take the arena past CACHED_BYTES, which
+// its entry remembers.
 @(private = "file")
 CACHED_REGEXES :: 64
 @(private = "file")
 CACHED_PATTERN_BYTES :: 1024
+@(private = "file")
+CACHED_BYTES :: 64 << 20
 
 @(private = "file")
 Cached_Regex :: struct {
 	pattern: string,
 	opts:    regex.Flags,
 	re:      regex.Regex,
+	big:     bool,
 }
 
 @(private = "file", thread_local)
@@ -81,6 +86,9 @@ cached_compile :: proc(pattern: string, opts: regex.Flags) -> (regex.Regex, stri
 	c := &regex_cache
 	for &e in c.entries {
 		if e.pattern == pattern && e.opts == opts {
+			if e.big {
+				return regex.compile(pattern, opts)
+			}
 			return e.re, ""
 		}
 	}
@@ -93,9 +101,9 @@ cached_compile :: proc(pattern: string, opts: regex.Flags) -> (regex.Regex, stri
 		}
 		c.ready = true
 	}
+	// A pattern that does not compile leaves nothing in the arena. Its message is the caller's.
 	caller := context.allocator
 	context.allocator = virtual.arena_allocator(&c.arena)
-	// A pattern that does not compile leaves nothing in the arena. Its message is the caller's.
 	mark := virtual.arena_temp_begin(&c.arena)
 	re, err := regex.compile(pattern, opts)
 	if err != "" {
@@ -103,9 +111,25 @@ cached_compile :: proc(pattern: string, opts: regex.Flags) -> (regex.Regex, stri
 		virtual.arena_temp_end(mark)
 		return {}, err
 	}
+	if c.arena.total_used > CACHED_BYTES {
+		virtual.arena_temp_end(mark)
+		append(&c.entries, Cached_Regex{strings.clone(pattern), opts, {}, true})
+		context.allocator = caller
+		return regex.compile(pattern, opts)
+	}
 	virtual.arena_temp_ignore(mark)
-	append(&c.entries, Cached_Regex{strings.clone(pattern), opts, re})
+	append(&c.entries, Cached_Regex{strings.clone(pattern), opts, re, false})
 	return re, ""
+}
+
+// The matcher's stack and slots, kept for the thread's next search and held in the heap, which no input's arena frees.
+@(private = "file", thread_local)
+regex_scratch: regex.Scratch
+
+@(private = "file")
+search :: proc(re: ^regex.Regex, s: string, at: int, found: []int) -> (bool, string) {
+	context.allocator = runtime.heap_allocator()
+	return regex.search(re, s, at, found, &regex_scratch)
 }
 
 // Every match of `r` in `s`, or the first when `r` is not global.
@@ -115,7 +139,7 @@ matches :: proc(ip: ^Interp, r: ^Regex, s: string) -> (out: []Match, sig: Signal
 	found := buf[:width] if width <= len(buf) else make(Match, width, context.temp_allocator)
 	bounds: [dynamic]int
 	for at := 0; at <= len(s); {
-		ok, err := regex.search(&r.re, s, at, found)
+		ok, err := search(&r.re, s, at, found)
 		if err != "" {
 			delete(bounds)
 			return nil, fail(ip, "Regex failure: %s", err)

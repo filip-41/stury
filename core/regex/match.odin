@@ -5,17 +5,21 @@ package regex
 // backtracks at one start (ONIG_DEFAULT_RETRY_LIMIT_IN_MATCH), and its stack is capped where Oniguruma's
 // would grow without bound.
 
-import "base:runtime"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:unicode/utf8"
 
+@(private)
 MAX_RETRIES :: 10_000_000 // ONIG_DEFAULT_RETRY_LIMIT_IN_MATCH; past it the match errors, as Oniguruma's does
+@(private)
 MAX_STACK :: 1 << 23 // entries, 24 bytes each
-KEEP_STACK :: 1 << 16 // entries: a backtrack stack grown past this is freed after the search rather than kept
+@(private)
+KEEP_BYTES :: 1 << 20 // scratch grown past this is freed after the search rather than kept
+@(private)
 MAX_CALL_NEST :: 20 // Oniguruma's subexp_call_nest_counter limit as jq builds it, a group in place counted
 
-@(private = "file")
+@(private)
 Entry_Kind :: enum u8 {
 	Branch, // resume at pc, position a
 	Restore, // slot a had value b
@@ -34,20 +38,33 @@ Entry_Kind :: enum u8 {
 @(private = "file")
 KEPT :: bit_set[Entry_Kind]{.Restore, .Retract, .Call_Frame, .Return, .Mem_Start, .Mem_End, .Limit}
 
-@(private = "file")
+@(private)
 Entry :: struct {
 	kind: Entry_Kind,
 	pc:   i32,
 	a, b: int,
 }
 
-// The matcher's stack and slots, kept for the thread's next search. A search finishes before the caller
-// runs anything that could search again.
-@(private = "file", thread_local)
-scratch: struct {
+// The matcher's stack and slots, which a caller keeps for its next search and no two searches share at once. The zero
+// value is ready: it takes its memory from the context allocator on first use and gives it back in `scratch_destroy`.
+Scratch :: struct {
 	stack:  [dynamic]Entry,
 	slots:  [dynamic]int,
 	counts: [dynamic]int,
+	seen:   [dynamic]u64, // a linear search's visited pairs, one bit per instruction and position
+	good:   [dynamic]u64, // the pairs inside a look-ahead whose body is known to match from there
+	log:    [dynamic]u32, // the pairs first visited on the way through the look-aheads being matched
+	resumes: int, // the alternatives the last linear search resumed, which its program and text bound
+}
+
+scratch_destroy :: proc(scratch: ^Scratch) {
+	delete(scratch.stack)
+	delete(scratch.slots)
+	delete(scratch.counts)
+	delete(scratch.seen)
+	delete(scratch.good)
+	delete(scratch.log)
+	scratch^ = {}
 }
 
 @(private = "file")
@@ -67,28 +84,76 @@ Matcher :: struct {
 	limit:    int, // the end of the text the match reads to, short of its end within an absent operator
 	depth:    int, // calls not returned from
 	behind:   Grapheme_Behind,
+	seen, good: []u64, // under `Regex.linear`, good for a program with a look-ahead
+	log:      ^[dynamic]u32,
+	looking:  int, // the look-aheads being matched, under `Regex.linear`
+	room:     int, // under `Regex.linear`, the bytes the stack and the log may take beside the sets
 }
 
 // The first match of `re` in `s` at or after byte `start`, with its groups' byte bounds in `caps` (2 per group with
 // the whole match; -1 for a group that did not take part), or Oniguruma's message when the search gave up.
-search :: proc(re: ^Regex, s: string, start: int, caps: []int) -> (found: bool, err: string) {
-	if scratch.stack == nil {
-		scratch.stack = make([dynamic]Entry, 0, 64, runtime.heap_allocator())
-	}
-	if scratch.slots == nil {
-		scratch.slots = make([dynamic]int, 0, 16, runtime.heap_allocator())
-		scratch.counts = make([dynamic]int, 0, 4, runtime.heap_allocator())
-	}
-	defer if cap(scratch.stack) > KEEP_STACK { // a deep search's stack is not kept for the next
-		delete(scratch.stack)
-		scratch.stack = nil
-	}
+search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string) {
+	defer shrink(&scratch.stack)
 	resize(&scratch.slots, re.slots)
 	resize(&scratch.counts, len(re.callouts))
 	m := Matcher{re = re, s = s, start = start, slots = scratch.slots[:], counts = scratch.counts[:], stack = &scratch.stack, caps = caps, best_len = -1, limit = len(s)}
 	for &n in m.counts {
 		n = 0
 	}
+	// The visited set is bounded by the text, so the retry limit and the jq stack cap give way to the one memory cap. The
+	// set holds across starts, so the jq options that make a pair's outcome depend on the start run without it, as does a
+	// jq program whose set would pass the cap.
+	linear := re.linear && !re.longest && !re.not_empty
+	words: int
+	if linear {
+		words = ((int(re.rows[len(re.insts)]) if re.rows != nil else len(re.insts)) * (len(s) + 1) + 63) / 64
+		m.room = MAX_BYTES - words * 8 * (2 if re.owner != nil else 1)
+		if m.room < 0 && re.ecma {
+			return false, MEMORY_ERROR
+		}
+		linear = m.room >= 0
+	}
+	if linear {
+		resize(&scratch.seen, words)
+		slice.zero(scratch.seen[:])
+		m.seen = scratch.seen[:]
+		if re.owner != nil {
+			resize(&scratch.good, words)
+			slice.zero(scratch.good[:])
+			m.good = scratch.good[:]
+		}
+		clear(&scratch.log)
+		m.log = &scratch.log
+	}
+	defer if linear {
+		shrink(&scratch.seen)
+		shrink(&scratch.good)
+		shrink(&scratch.log)
+	}
+	defer scratch.resumes = m.retries
+	switch {
+	case re.calls_or_limits:
+		return try_starts(&m, true, false)
+	case linear:
+		return try_starts(&m, false, true)
+	}
+	return try_starts(&m, false, false)
+}
+
+// Frees a deep search's array rather than keep it for the next.
+@(private = "file")
+shrink :: proc(a: ^[dynamic]$T) {
+	if cap(a) * size_of(T) > KEEP_BYTES {
+		allocator := a.allocator
+		delete(a^)
+		a^ = nil
+		a.allocator = allocator
+	}
+}
+
+@(private = "file")
+try_starts :: proc(m: ^Matcher, $EXT, $SET: bool) -> (found: bool, err: string) {
+	re, s, start := m.re, m.s, m.start
 	first, last, limit, high := start, len(s), len(s), INFINITE_LEN
 	if re.narrowed {
 		ok: bool
@@ -126,7 +191,7 @@ search :: proc(re: ^Regex, s: string, start: int, caps: []int) -> (found: bool, 
 			if at > end {
 				break
 			}
-			if re.calls_or_limits ? run(&m, at, true) : run(&m, at, false) {
+			if run(m, at, EXT, SET) {
 				return true, ""
 			}
 			if m.err != "" {
@@ -222,17 +287,75 @@ step :: #force_inline proc(re: ^Regex, ins: Inst, s: string, pos: int) -> int {
 	return -1
 }
 
+// The visited set's row of instruction `pc` at `pos`, past its first one for each loop around it whose iteration has
+// matched nothing up to `pos` (`Regex.rows`). Those loops are the innermost ones, since an iteration began no earlier
+// than the one around it.
+@(private = "file")
+row_of :: #force_inline proc(m: ^Matcher, pc, pos: int) -> int {
+	re := m.re
+	if re.rows == nil {
+		return pc
+	}
+	row := int(re.rows[pc])
+	for l := re.loop_of[pc]; l >= 0 && m.slots[re.loops[l][0]] == pos; l = re.loops[l][1] {
+		row += 1
+	}
+	return row
+}
+
+// Marks the pair of `row` at `pos` as visited, or returns false when it already was. A pair visited inside a
+// look-ahead is logged, for `settle`.
+@(private = "file")
+first_visit :: #force_inline proc(m: ^Matcher, row, pos: int) -> bool {
+	bit := row * (len(m.s) + 1) + pos
+	word, mask := bit >> 6, u64(1) << (u64(bit) & 63)
+	if m.seen[word] & mask != 0 {
+		return false
+	}
+	m.seen[word] |= mask
+	if m.looking > 0 {
+		append(m.log, u32(bit))
+	}
+	return true
+}
+
+@(private = "file")
+in_good :: #force_inline proc(m: ^Matcher, row, pos: int) -> bool {
+	bit := row * (len(m.s) + 1) + pos
+	return m.good[bit >> 6] & (1 << (u64(bit) & 63)) != 0
+}
+
+// A look-ahead's body matched: the pairs on the path it took match from there too, to whichever look-ahead reaches them
+// next, and the log goes back to where the look-ahead began.
+@(private = "file")
+settle :: proc(m: ^Matcher, bar: Entry) {
+	for bit in m.log[bar.b:] {
+		m.good[bit >> 6] |= 1 << (u64(bit) & 63)
+	}
+	resize(m.log, int(bar.b))
+	m.looking -= 1
+}
+
 @(private = "file")
 push :: #force_inline proc(m: ^Matcher, e: Entry) {
 	append(m.stack, e)
 }
 
-// Pushes an entry the stack is capped for, or ends the search with Oniguruma's error.
+// Pushes an entry the stack is capped for, or ends the search with Oniguruma's error, or under the set the memory error
+// once the stack and the log may take more than the room beside the sets: an array's capacity is at most twice its
+// length, and the log grows by at most a program's length between two pushes.
 @(private = "file")
-push_branch :: #force_inline proc(m: ^Matcher, e: Entry) -> bool {
-	if len(m.stack) >= MAX_STACK {
-		m.err = "match-stack limit over"
-		return false
+push_branch :: #force_inline proc(m: ^Matcher, e: Entry, $SET: bool) -> bool {
+	when SET {
+		if 2 * (len(m.stack) * size_of(Entry) + len(m.log) * size_of(u32)) >= m.room {
+			m.err = MEMORY_ERROR
+			return false
+		}
+	} else {
+		if len(m.stack) >= MAX_STACK {
+			m.err = "match-stack limit over"
+			return false
+		}
 	}
 	append(m.stack, e)
 	return true
@@ -240,7 +363,7 @@ push_branch :: #force_inline proc(m: ^Matcher, e: Entry) -> bool {
 
 // Runs the program from `at`: true on a match (written to m.caps), false on none or on an error in m.err.
 @(private = "file")
-run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
+run :: proc(m: ^Matcher, at: int, $EXT, $SET: bool) -> bool {
 	re, s := m.re, m.s
 	insts := re.insts
 	slots := m.slots
@@ -254,7 +377,11 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 		}
 	}
 	clear(m.stack)
-	m.retries = 0
+	when SET {
+		m.looking = 0
+	} else {
+		m.retries = 0
+	}
 	when EXT {
 		m.limit, m.depth = len(m.s), 0
 	}
@@ -263,7 +390,24 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 	for {
 		ins := insts[pc]
 		ok := true
+		when SET {
+			if row := row_of(m, pc, pos); !first_visit(m, row, pos) {
+				// A pair a look-ahead's body is known to match from carries on at the body's end, with the body's groups
+				// unset, which ECMA would have set.
+				ins = {op = .Seen}
+				if m.good != nil && in_good(m, row, pos) {
+					look := int(re.owner[pc])
+					if unset := insts[look + 1]; unset.op == .Unset {
+						unset_slots(m, unset)
+					}
+					pc = int(insts[look].b)
+					ins = insts[pc]
+				}
+			}
+		}
 		switch ins.op {
+		case .Seen:
+			ok = false
 		case .Match:
 			if re.not_empty && pos == at {
 				ok = false
@@ -306,14 +450,14 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 			pos = next
 			pc += 1
 		case .Split:
-			push_branch(m, {kind = .Branch, pc = ins.b, a = pos}) or_return
+			push_branch(m, {kind = .Branch, pc = ins.b, a = pos, b = len(m.log) when SET else 0}, SET) or_return
 			pc = int(ins.a)
 		case .Split_Head:
 			if pos >= len(s) || s[pos] != byte(ins.a) {
 				pc = int(ins.b)
 				continue
 			}
-			push_branch(m, {kind = .Branch, pc = ins.b, a = pos}) or_return
+			push_branch(m, {kind = .Branch, pc = ins.b, a = pos, b = len(m.log) when SET else 0}, SET) or_return
 			pc += 1
 		case .Jmp:
 			pc = int(ins.a)
@@ -355,7 +499,10 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 			pos = next
 			pc += 1
 		case .Look:
-			push(m, {kind = .Barrier, pc = i32(pc), a = pos})
+			push(m, {kind = .Barrier, pc = i32(pc), a = pos, b = len(m.log) when SET else 0})
+			when SET {
+				m.looking += 1
+			}
 			pc += 1
 		case .Look_End:
 			k := len(m.stack) - 1
@@ -363,6 +510,9 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 				k -= 1
 			}
 			bar := m.stack[k]
+			when SET {
+				settle(m, bar)
+			}
 			switch Look_Kind(insts[bar.pc].a) {
 			case .Not_Ahead, .Not_Behind:
 				// The body matched, so the assertion fails: undo the body and fail past it.
@@ -397,7 +547,16 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 			}
 			pc += 1
 		case .Check:
-			pc = int(ins.b) if slots[ins.a] == pos else pc + 1
+			if slots[ins.a] != pos {
+				pc += 1
+			} else if ins.b >= 0 {
+				pc = int(ins.b)
+			} else {
+				ok = false
+			}
+		case .Unset:
+			unset_slots(m, ins)
+			pc += 1
 		case .Cond:
 			pc = pc + 1 if slots[2 * ins.a + 1] >= 0 else int(ins.b)
 		case .Linebreak:
@@ -433,10 +592,24 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 				}
 			} else {
 				lo := p
+				// Under the set an unbounded repeat marks the stops past where it began in its body's row, which `run`
+				// never visits, and walks no further than a stop an earlier walk marked: that walk tries the stops from
+				// there. Past where it began, no loop's iteration has matched nothing, so the row is the first.
+				when SET {
+					if ins.b < 0 && p > pos && !first_visit(m, row_of(m, pc + 1, p), p) {
+						ok = false
+						break
+					}
+				}
 				for ins.b < 0 || count < int(ins.b) {
 					next := step(re, one, s, p)
 					if next < 0 {
 						break
+					}
+					when SET {
+						if ins.b < 0 && !first_visit(m, row_of(m, pc + 1, next), next) {
+							break
+						}
 					}
 					p = next
 					count += 1
@@ -466,7 +639,7 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 				pc = int(ins.b)
 				break
 			}
-			push_branch(m, {kind = .Branch, pc = ins.b if ins.op == .Count else i32(pc + 2), a = pos}) or_return
+			push_branch(m, {kind = .Branch, pc = ins.b if ins.op == .Count else i32(pc + 2), a = pos}, SET) or_return
 			pc = pc + 2 if ins.op == .Count else int(ins.b)
 		case .Count_Next:
 			push(m, {kind = .Restore, a = int(ins.a), b = slots[ins.a]})
@@ -481,12 +654,22 @@ run :: proc(m: ^Matcher, at: int, $EXT: bool) -> bool {
 			}
 		}
 		if !ok {
-			if !backtrack(m, &pc, &pos, EXT) {
+			if !backtrack(m, &pc, &pos, EXT, SET) {
 				return false
 			}
 			when EXT {
 				s = m.s[:m.limit]
 			}
+		}
+	}
+}
+
+@(private = "file")
+unset_slots :: proc(m: ^Matcher, ins: Inst) {
+	for k in ins.a ..< ins.b {
+		if m.slots[k] >= 0 {
+			push(m, {kind = .Restore, a = int(k), b = m.slots[k]})
+			m.slots[k] = -1
 		}
 	}
 }
@@ -583,11 +766,15 @@ undo :: #force_inline proc(m: ^Matcher, e: Entry, $EXT: bool) {
 
 // Resumes at the latest alternative, undoing the captures made since. It returns false when none is left.
 @(private = "file")
-backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT: bool) -> bool {
+backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT, $SET: bool) -> bool {
 	for len(m.stack) > 0 {
 		e := pop(m.stack)
 		#partial switch e.kind {
 		case .Barrier:
+			when SET {
+				resize(m.log, int(e.b))
+				m.looking -= 1
+			}
 			look := m.re.insts[e.pc]
 			if k := Look_Kind(look.a); k == .Not_Ahead || k == .Not_Behind {
 				pc^, pos^ = int(look.b) + 1, e.a
@@ -595,6 +782,9 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT: bool) -> bool {
 			}
 			continue
 		case .Branch:
+			when SET {
+				resize(m.log, int(e.b))
+			}
 			pc^, pos^ = int(e.pc), e.a
 		case .Give_Back:
 			// Back a character, but a repeat that began inside a character stepped a byte at a time until the next
@@ -617,6 +807,11 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT: bool) -> bool {
 			if next < 0 {
 				continue
 			}
+			when SET {
+				if rep.b < 0 && !first_visit(m, row_of(m, int(e.pc) + 1, next), next) { // as a greedy repeat marks its stops
+					continue
+				}
+			}
 			if rep.b < 0 || e.b + 1 < int(rep.b) {
 				push(m, {kind = .Take_More, pc = e.pc, a = next, b = e.b + 1})
 			}
@@ -626,9 +821,11 @@ backtrack :: proc(m: ^Matcher, pc, pos: ^int, $EXT: bool) -> bool {
 			continue
 		}
 		m.retries += 1
-		if m.retries > MAX_RETRIES {
-			m.err = "retry-limit-in-match over"
-			return false
+		when !SET {
+			if m.retries > MAX_RETRIES {
+				m.err = "retry-limit-in-match over"
+				return false
+			}
 		}
 		return true
 	}
@@ -659,7 +856,7 @@ callout :: proc(m: ^Matcher, i: int) -> (ok: bool, end: bool) {
 			count^ += 1
 		}
 		if c.type != '>' {
-			if !push_branch(m, {kind = .Retract, a = i}) {
+			if !push_branch(m, {kind = .Retract, a = i}, false) {
 				return false, true
 			}
 		}
@@ -672,7 +869,7 @@ callout :: proc(m: ^Matcher, i: int) -> (ok: bool, end: bool) {
 		x, y := operand(m, c.sides[0]), operand(m, c.sides[1])
 		return c.cmp & (1 if x < y else 2 if x == y else 4) != 0, false
 	case .Begin_Buf, .End_Buf, .Semi_End_Buf, .Begin_Line, .End_Line, .Word_Boundary, .Not_Word_Boundary,
-	     .Search_Start, .Fail, .Mismatch, .Skip:
+	     .Search_Start, .Ascii_Boundary, .Not_Ascii_Boundary, .Fail, .Mismatch, .Skip:
 	}
 	return true, false
 }
@@ -744,6 +941,10 @@ assert_at :: proc(m: ^Matcher, kind: Assert_Kind, pos: int) -> bool {
 			after = is_word(r)
 		}
 		return (before != after) == (kind == .Word_Boundary)
+	case .Ascii_Boundary, .Not_Ascii_Boundary:
+		before := pos > 0 && s[pos - 1] < 0x80 && is_word(rune(s[pos - 1]))
+		after := pos < len(s) && s[pos] < 0x80 && is_word(rune(s[pos]))
+		return (before != after) == (kind == .Ascii_Boundary)
 	case .Search_Start:
 		return pos == m.start
 	case .Skip:

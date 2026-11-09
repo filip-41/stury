@@ -1,3 +1,4 @@
+#+private
 package regex
 
 // Callouts in a pattern, `(*NAME[tag]{args})`, as Oniguruma parses them.

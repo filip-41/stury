@@ -1,3 +1,4 @@
+#+private
 package regex
 
 // Subexpression calls \g<...> as Oniguruma tunes them before it compiles, each resolved to its group by the
@@ -28,10 +29,10 @@ check_calls :: proc(root: ^Node, groups: []^Node, called, recursive: []bool) -> 
 		groups    = groups,
 		called    = called,
 		recursive = recursive,
-		mark1     = make([]bool, len(groups), context.temp_allocator),
-		mark2     = make([]bool, len(groups), context.temp_allocator),
-		measured  = make([]bool, len(groups), context.temp_allocator),
-		empty     = make([]bool, len(groups), context.temp_allocator),
+		mark1     = make([]bool, len(groups)),
+		mark2     = make([]bool, len(groups)),
+		measured  = make([]bool, len(groups)),
+		empty     = make([]bool, len(groups)),
 	}
 	reach(&r, root, true)
 	return "never ending recursion" if find_recursion(&r, root, false) else ""

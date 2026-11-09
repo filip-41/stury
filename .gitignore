@@ -18,7 +18,7 @@ __pycache__/
 *.log
 *.out
 *.bin
-!/cmd/stury/regex/tables/*.bin
+!/core/regex/tables/*.bin
 *.dmp
 
 # Editor and OS droppings

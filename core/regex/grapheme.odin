@@ -1,3 +1,4 @@
+#+private
 package regex
 
 // \X's extended grapheme clusters, which the matcher steps over.

@@ -1,8 +1,13 @@
+#+private
 package regex
 
 // Oniguruma's pattern syntax as jq compiles it (ONIG_SYNTAX_PERL_NT, UTF-8, ONIG_OPTION_CAPTURE_GROUP),
-// parsed into a tree. An error is Oniguruma's own message, which jq prints after "Regex failure: ".
+// parsed into a tree. An error is Oniguruma's own message, which jq prints after "Regex failure: ". Under
+// `Flags.ecma` the grammar is ECMA-262's with the `u` flag, as a JSON Schema's `pattern` uses it, and back references
+// and look-behind are refused: with neither, a program's outcome at an instruction and a position does not depend on
+// the way it got there, which the linear search relies on (match.odin).
 
+import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
 
@@ -43,6 +48,8 @@ Assert_Kind :: enum u8 {
 	Word_Boundary,
 	Not_Word_Boundary,
 	Search_Start, // \G
+	Ascii_Boundary, // ECMA's \b: a boundary of ASCII word characters
+	Not_Ascii_Boundary,
 	// The callouts, last.
 	Fail, // (*FAIL)
 	Mismatch, // (*MISMATCH): no match at this start
@@ -104,10 +111,6 @@ Node :: struct {
 	name:       string, // Backref or Cond by name, until resolved
 	callout:    ^Callout, // a callout of data
 	target:     ^Node, // Call's group, once resolved (`resolve_calls`)
-}
-
-Flags :: struct {
-	fold, extend, dotall, multiline: bool,
 }
 
 // A pattern's tree with what the parser learns of it on the way.
@@ -237,7 +240,8 @@ parse_cat :: proc(p: ^Parser) -> ^Node {
 			add(&first, &cat, run)
 			continue
 		}
-		head := p.head && strings.has_prefix(p.src[p.i:], "(?:")
+		// ECMA repeats any group, whatever it holds.
+		head := (p.head || p.flags.ecma) && strings.has_prefix(p.src[p.i:], "(?:")
 		quoted := strings.has_prefix(p.src[p.i:], `\Q`)
 		p.head = false
 		atom := parse_atom(p)
@@ -284,12 +288,17 @@ plain_run :: proc(p: ^Parser) -> ^Node {
 		w := 0
 		switch c := p.src[end]; c {
 		case '\\':
-			if end + 1 >= len(p.src) || !escaped_punctuation(p.src[end + 1]) {
+			if end + 1 >= len(p.src) || !escaped_punctuation(p.src[end + 1], p.flags.ecma) {
 				break scan
 			}
 			w = 2
 		case '(', ')', '[', '.', '^', '$', '|', '*', '+', '?', '{':
 			break scan
+		case ']', '}':
+			if p.flags.ecma {
+				break scan
+			}
+			fallthrough
 		case:
 			r: rune
 			if r, w = utf8.decode_rune_in_string(p.src[end:]); r == utf8.RUNE_ERROR {
@@ -332,9 +341,13 @@ plain_run :: proc(p: ^Parser) -> ^Node {
 	return n
 }
 
-// Whether `\c` is the character c itself, as an escaped ASCII character other than a letter or digit is.
-@(private = "file")
-escaped_punctuation :: proc(c: byte) -> bool {
+// Whether `\c` is the character c itself, as an escaped ASCII character other than a letter or digit is, and under
+// ECMA only a syntax character or `/`.
+@(private)
+escaped_punctuation :: proc(c: byte, ecma: bool) -> bool {
+	if ecma {
+		return strings.index_byte(`^$\.*+?()[]{}|/`, c) >= 0
+	}
 	switch c {
 	case 'a' ..= 'z', 'A' ..= 'Z', '0' ..= '9':
 		return false
@@ -396,9 +409,14 @@ parse_quantifiers :: proc(p: ^Parser, atom: ^Node) -> ^Node {
 		if peek(p) == '?' && !at_end(p) {
 			rep.greedy = false
 			p.i += 1
+		} else if p.flags.ecma { // one quantifier, which a second one after it cannot repeat
+			return rep
 		} else if peek(p) == '+' && !at_end(p) { // PERL_NT's PLUS_POSSESSIVE_INTERVAL too: `a{1,2}+`
 			rep.possessive = true
 			p.i += 1
+		}
+		if p.flags.ecma {
+			return rep
 		}
 		if atom.kind == .Repeat && !atom.bag && !atom.possessive {
 			reduce_nested(rep)
@@ -521,18 +539,20 @@ digit :: proc(c: byte) -> int {
 	return 16
 }
 
-// `{n}`, `{n,}` or `{n,m}` at `{`, read past when it is one. Anything else leaves `{` a literal.
+// `{n}`, `{n,}` or `{n,m}` at `{`, read past when it is one. Anything else leaves `{` a literal, and is an error under
+// ECMA, whose counts have no bound: a count past an i32 is taken as the most an i32 holds.
 @(private = "file")
 parse_interval :: proc(p: ^Parser) -> (lo, hi: int, ok: bool) {
 	j := p.i + 1
 	digits: int
-	if lo, digits = number(p.src, &j, MAX_REPEAT + 1); digits == 0 {
+	most := int(max(i32)) if p.flags.ecma else MAX_REPEAT + 1
+	if lo, digits = number(p.src, &j, most); digits == 0 {
 		return
 	}
 	hi = lo
 	if j < len(p.src) && p.src[j] == ',' {
 		j += 1
-		if hi, digits = number(p.src, &j, MAX_REPEAT + 1); digits == 0 {
+		if hi, digits = number(p.src, &j, most); digits == 0 {
 			hi = -1
 		}
 	}
@@ -541,7 +561,7 @@ parse_interval :: proc(p: ^Parser) -> (lo, hi: int, ok: bool) {
 	}
 	p.i = j + 1
 	switch {
-	case lo > MAX_REPEAT || hi > MAX_REPEAT:
+	case !p.flags.ecma && (lo > MAX_REPEAT || hi > MAX_REPEAT):
 		fail(p, "too big number for repeat range")
 	case hi >= 0 && hi < lo:
 		fail(p, "upper is smaller than lower in repeat range")
@@ -588,6 +608,9 @@ parse_atom :: proc(p: ^Parser) -> ^Node {
 		return parse_class(p)
 	case '.':
 		p.i += 1
+		if p.flags.ecma {
+			return class_node(LINE_TERMINATORS[:], true)
+		}
 		n := new_node(.Any)
 		n.dotall = p.flags.dotall
 		return n
@@ -596,7 +619,7 @@ parse_atom :: proc(p: ^Parser) -> ^Node {
 		return assert_node(.Begin_Line if p.flags.multiline else .Begin_Buf)
 	case '$':
 		p.i += 1
-		return assert_node(.End_Line if p.flags.multiline else .Semi_End_Buf)
+		return assert_node(.End_Line if p.flags.multiline else .End_Buf if p.flags.ecma else .Semi_End_Buf)
 	case '\\':
 		return parse_escape(p)
 	case '*', '+', '?':
@@ -606,15 +629,22 @@ parse_atom :: proc(p: ^Parser) -> ^Node {
 		if _, _, ok := parse_interval(p); ok {
 			return fail(p, "target of repeat operator is not specified")
 		}
+		if p.flags.ecma {
+			return fail(p, "invalid pattern character")
+		}
 		p.i = save + 1
 		return char_node(p, '{')
+	case '}', ']':
+		if p.flags.ecma {
+			return fail(p, "invalid pattern character")
+		}
 	}
 	r, w := utf8.decode_rune_in_string(p.src[p.i:])
 	p.i += w
 	return char_node(p, r)
 }
 
-@(private = "file")
+@(private)
 expect_close :: proc(p: ^Parser, body: ^Node) -> ^Node {
 	if p.err != "" {
 		return nil
@@ -652,7 +682,7 @@ capture_node :: proc(p: ^Parser, name: string) -> ^Node {
 @(private = "file")
 parse_group :: proc(p: ^Parser) -> ^Node {
 	p.i += 1
-	if peek(p) == '*' && !at_end(p) {
+	if peek(p) == '*' && !at_end(p) && !p.flags.ecma {
 		return parse_callout(p)
 	}
 	if peek(p) != '?' || at_end(p) {
@@ -664,6 +694,9 @@ parse_group :: proc(p: ^Parser) -> ^Node {
 	}
 	c := peek(p)
 	p.i += 1
+	if p.flags.ecma && strings.index_byte(":=!<", c) < 0 {
+		return fail(p, "invalid group")
+	}
 	switch c {
 	case ':':
 		return expect_close(p, parse_alt(p))
@@ -675,6 +708,9 @@ parse_group :: proc(p: ^Parser) -> ^Node {
 		return look_node(p, .Atomic)
 	case '<', '\'':
 		if c == '<' && (peek(p) == '=' || peek(p) == '!') {
+			if p.flags.ecma {
+				return fail(p, "look-behind is not supported")
+			}
 			p.i += 1
 			return look_node(p, .Behind if p.src[p.i - 1] == '=' else .Not_Behind)
 		}
@@ -698,11 +734,12 @@ parse_group :: proc(p: ^Parser) -> ^Node {
 	return parse_options(p)
 }
 
-// A group's name up to `close`, which must not be empty or start with a digit.
+// A group's name up to `close`, which must not be empty or start with a digit, and under ECMA is an identifier no
+// other group has.
 @(private = "file")
 group_name :: proc(p: ^Parser, close: byte) -> (string, bool) {
 	name, ok := read_name(p, close)
-	if ok && name[0] >= '0' && name[0] <= '9' {
+	if ok && (name[0] >= '0' && name[0] <= '9' || p.flags.ecma && (!ecma_identifier(name) || slice.contains(p.names[:], name))) {
 		fail(p, strings.concatenate({"invalid group name <", name, ">"}))
 		return "", false
 	}

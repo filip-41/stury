@@ -35,6 +35,11 @@ unicode_escape :: #force_inline proc "contextless" (e: [^]u8, room: int) -> (r: 
 utf8_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (q: [^]u8, kind: Fault_Kind)
 utf8_lax_char :: #force_inline proc "contextless" (p, end: [^]u8) -> (spelled: [4]u8, size: int, q: [^]u8)
 utf8_subpart :: #force_inline proc "contextless" (p, end: [^]u8) -> [^]u8
+# core/regex
+Flags :: struct { fold, extend, dotall, multiline, ecma: bool, }
+Regex :: struct { insts: []Inst, bytes: string, classes: []^Class, refs: [][]int, callouts: []^Callout, names: []string, slots: int, longest: bool, not_empty: bool, opt: ^Search_Opt, prefix: string, first: [4]u64, has_first: bool, calls_or_limits: bool, narrowed: bool, ecma: bool, linear: bool, owner: []i32, loops: [][2]i32, loop_of: []i32, rows: []i32, }
+compile :: proc(pattern: string, flags: Flags, allocator := context.allocator) -> (re: Regex, err: string)
+search :: proc(re: ^Regex, s: string, start: int, caps: []int, scratch: ^Scratch) -> (found: bool, err: string)
 # core
 AT_NO_BYTE :: bit_set[Fault_Kind]{.None, .No_Memory, .Bad_Option}
 FAULT_REACH :: 16

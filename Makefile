@@ -17,8 +17,8 @@ endif
 .DEFAULT_GOAL := gate
 
 # The library packages, and the test packages that read them.
-LIB_PKGS  := core/spell core host core/kernel core/compose core/rules core/build core/typed core/write core/records core/model json dsv
-TEST_PKGS := core/spell/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test
+LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/rules core/build core/typed core/write core/records core/model json dsv
+TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test
 # The packages the tests share, checked by `lint` and built through their imports.
 SUPPORT_PKGS := walktest bench/timing
 # The benchmark programs, which `lint` and the gate compile.
@@ -48,7 +48,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite test-x86 test-wide test-asan test-tsan test-f32 lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers bench-cli fixtures surface \
+.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite ecma-diff test-x86 test-wide test-asan test-tsan test-f32 lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers bench-cli fixtures surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The bench lanes' probes and peers, and the fixtures they read. BENCH_CC, BENCH_CXX and BENCH_CARGO name the compilers
@@ -88,6 +88,7 @@ help:
 	@echo "make test-lib     the library suites (-j runs the compiles at once)"
 	@echo "make test-one P=<package> T=<test>   one test"
 	@echo "make test-cli, test-jq, test-examples, diff   the CLI and examples"
+	@echo "make ecma-diff    core/regex's ECMA patterns against Node's RegExp (needs node on PATH)"
 	@echo "make lint         vet and surface checks on every target; lint-man, lint-fixtures the docs"
 	@echo "make api-write    regenerate API.txt and API_SHARED.txt after a public change"
 	@echo "make test-asan, test-tsan, test-x86, test-wide, test-f32   sanitizers, x86 tiers, binary32"
@@ -146,6 +147,10 @@ diff-suite: build-cli
 $(DIFF_SEED_TARGETS): diff-seed-%: build-cli
 	python3 cmd/stury/test/jq_diff.py $(BUILD)/stury --seed=$*
 	python3 cmd/stury/test/regex_diff.py $(BUILD)/stury --seed=$*
+
+# core/regex's ECMA patterns against Node's RegExp. Without node on PATH it says so and compares nothing.
+ecma-diff:
+	python3 cmd/stury/test/ecma_diff.py --odin $(ODIN)
 
 $(TEST_MINIMAL): $(BUILD)/test/minimal/%:
 	@mkdir -p $(@D)

@@ -47,7 +47,7 @@ def odin_problem(odin):
 
 # The library packages, and the order imports of them take. json and dsv share the last rank.
 PACKAGES = makefile_list("LIB_PKGS")
-RANK = {"core/spell": 0, "core": 1, "host": 2, "core/kernel": 2, "core/compose": 2, "core/rules": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "core/records": 6, "json": 7, "dsv": 7, "core/model": 8}
+RANK = {"core/spell": 0, "core/regex": 0, "core": 1, "host": 2, "core/kernel": 2, "core/compose": 2, "core/rules": 2, "core/build": 3, "core/typed": 4, "core/write": 5, "core/records": 6, "json": 7, "dsv": 7, "core/model": 8}
 FORMATS = {"json", "dsv"}
 
 # core's format-neutral packages name no format's concept in their code. core/kernel is left out: its tables are a byte

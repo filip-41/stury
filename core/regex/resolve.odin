@@ -1,3 +1,4 @@
+#+private
 package regex
 
 // What the parser checks once the whole pattern is read: callout tags, named and numbered references, and calls.

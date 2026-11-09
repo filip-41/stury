@@ -5,6 +5,9 @@ MAX_NUMBER_DIGITS :: 256
 MAX_NUMBER_SCALE :: 4096
 Number :: struct { bits: u64, kind: Number_Kind, }
 Number_Kind :: enum u8 { Int, Uint, Float, Wide, }
+# core/regex
+Scratch :: struct { stack: [dynamic]Entry, slots: [dynamic]int, counts: [dynamic]int, seen: [dynamic]u64, good: [dynamic]u64, log: [dynamic]u32, resumes: int, }
+scratch_destroy :: proc(scratch: ^Scratch)
 # core
 Action :: enum u8 { Next, Skip, Keep, Stop, }
 All :: struct {}

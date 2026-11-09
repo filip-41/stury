@@ -1,9 +1,11 @@
+#+private
 package regex
 
 // Bracket classes, the character properties they hold, and the POSIX classes inside them.
 
 import "core:slice"
 import "core:strings"
+import "core:unicode/utf8"
 
 // A bracket class, or one of the escapes \w \d \s \p{...} as a class of one type.
 Class :: struct {
@@ -12,6 +14,40 @@ Class :: struct {
 	negated: bool,
 	fold:    bool,
 	ascii:   [2]u64, // the answer for each ASCII rune, filled in by the compiler
+}
+
+@(private, rodata)
+LINE_TERMINATORS := [?][2]rune{{'\n', '\n'}, {'\r', '\r'}, {0x2028, 0x2029}}
+@(private = "file", rodata)
+ECMA_DIGIT := [?][2]rune{{'0', '9'}}
+@(private = "file", rodata)
+ECMA_WORD := [?][2]rune{{'0', '9'}, {'A', 'Z'}, {'_', '_'}, {'a', 'z'}}
+// White space and line terminators: U+0085 is not one, U+FEFF is.
+@(private = "file", rodata)
+ECMA_SPACE := [?][2]rune {
+	{9, 13}, {' ', ' '}, {0xA0, 0xA0}, {0x1680, 0x1680}, {0x2000, 0x200A}, {0x2028, 0x2029}, {0x202F, 0x202F},
+	{0x205F, 0x205F}, {0x3000, 0x3000}, {0xFEFF, 0xFEFF},
+}
+
+// ECMA's \d \w \s, which do not read Unicode, and whether the capital letter negates them.
+@(private)
+escape_set :: proc(c: byte) -> ([][2]rune, bool) {
+	switch c | 0x20 {
+	case 'd':
+		return ECMA_DIGIT[:], c == 'D'
+	case 'w':
+		return ECMA_WORD[:], c == 'W'
+	}
+	return ECMA_SPACE[:], c == 'S'
+}
+
+@(private)
+class_node :: proc(ranges: [][2]rune, negated: bool) -> ^Node {
+	n := new_node(.Class)
+	n.class = new(Class)
+	n.class.negated = negated
+	append(&n.class.ranges, ..ranges)
+	return n
 }
 
 @(private)
@@ -25,10 +61,14 @@ escape_prop :: proc(c: byte) -> Prop_Item {
 	return {table = TABLE_SPACE, neg = c == 'S'}
 }
 
-// At `{` after \p or \P.
+// At `{` after \p or \P, which under ECMA must be there.
 @(private)
 parse_property :: proc(p: ^Parser, neg: bool) -> (Prop_Item, bool) {
 	end := strings.index_byte(p.src[p.i:], '}')
+	if p.flags.ecma && (peek(p) != '{' || end < 0) {
+		fail(p, "invalid character property name")
+		return {}, false
+	}
 	if end < 0 {
 		fail(p, "end pattern with unmatched parenthesis")
 		return {}, false
@@ -36,11 +76,12 @@ parse_property :: proc(p: ^Parser, neg: bool) -> (Prop_Item, bool) {
 	name := p.src[p.i + 1:p.i + end]
 	p.i += end + 1
 	inner := name
-	caret := strings.has_prefix(name, "^")
+	caret := !p.flags.ecma && strings.has_prefix(name, "^")
 	if caret {
 		inner = name[1:]
 	}
-	it, ok := named_prop(inner)
+	lookup := ecma_prop if p.flags.ecma else named_prop
+	it, ok := lookup(inner)
 	if !ok {
 		fail(p, strings.concatenate({"invalid character property name {", name, "}"}))
 		return {}, false
@@ -49,7 +90,7 @@ parse_property :: proc(p: ^Parser, neg: bool) -> (Prop_Item, bool) {
 	return it, true
 }
 
-// At `[`: a bracket class. Classes do not nest and `&&` is literal, as under ONIG_SYNTAX_PERL_NT.
+// At `[`: a bracket class. Classes do not nest and `&&` is literal, as under ONIG_SYNTAX_PERL_NT and ECMA's `u`.
 @(private)
 parse_class :: proc(p: ^Parser) -> ^Node {
 	p.i += 1
@@ -61,8 +102,8 @@ parse_class :: proc(p: ^Parser) -> ^Node {
 		cls.negated = true
 		p.i += 1
 	}
-	// A `]` first is a character, which may start a range (`[]-a]`).
-	leading := peek(p) == ']' && !at_end(p)
+	// A `]` first is a character, which may start a range (`[]-a]`), but under ECMA ends an empty class.
+	leading := peek(p) == ']' && !at_end(p) && !p.flags.ecma
 	if leading && strings.index_byte(p.src[p.i + 1:], ']') < 0 {
 		return fail(p, "empty char-class")
 	}
@@ -76,22 +117,25 @@ parse_class :: proc(p: ^Parser) -> ^Node {
 			return n
 		}
 		leading = false
-		lo, it, is_prop, lo_lone, ok := class_item(p)
+		lo, is_set, lo_lone, ok := class_item(p, cls)
+		ranged := peek(p) == '-' && p.i + 1 < len(p.src) && peek(p, 1) != ']'
 		if !ok {
 			return nil
 		}
-		if is_prop {
-			append(&cls.props, it)
+		if is_set && ranged && p.flags.ecma {
+			return fail(p, "char-class value at end of range")
+		}
+		if is_set {
 			continue
 		}
 		hi, hi_lone := lo, lo_lone
-		if peek(p) == '-' && p.i + 1 < len(p.src) && peek(p, 1) != ']' {
+		if ranged {
 			p.i += 1
-			hi_r, _, hi_prop, hi_r_lone, hi_ok := class_item(p)
+			hi_r, hi_set, hi_r_lone, hi_ok := class_item(p, cls)
 			if !hi_ok {
 				return nil
 			}
-			if hi_prop {
+			if hi_set {
 				return fail(p, "char-class value at end of range")
 			}
 			if hi_r < lo {
@@ -136,33 +180,67 @@ parse_posix :: proc(p: ^Parser) -> (it: Prop_Item, matched: bool) {
 	return {table = POSIX_TABLES[k], neg = neg}, true
 }
 
-// One member of a class: a character, a byte that starts none (`lone`), or a type (\w, \p{...}, [:name:]), where
-// a word is a POSIX word.
+// One member of a class: a character, a byte that starts none (`lone`), or a set added to `cls` (`is_set`): a type
+// (\w, \p{...}, [:name:]), where a word is a POSIX word, or under ECMA \w \d \s as ranges.
 @(private = "file")
-class_item :: proc(p: ^Parser) -> (r: rune, it: Prop_Item, is_prop: bool, lone: bool, ok: bool) {
-	if peek(p) == '[' && peek(p, 1) == ':' {
+class_item :: proc(p: ^Parser, cls: ^Class) -> (r: rune, is_set: bool, lone: bool, ok: bool) {
+	if peek(p) == '[' && peek(p, 1) == ':' && !p.flags.ecma {
 		if posix, matched := parse_posix(p); matched {
-			return 0, posix, true, false, p.err == ""
+			append(&cls.props, posix)
+			return 0, true, false, p.err == ""
 		}
 	}
 	if peek(p) == '\\' && p.i + 1 < len(p.src) {
-		switch c := peek(p, 1); c {
+		c := peek(p, 1)
+		p.i += 2
+		switch c {
 		case 'w', 'W', 'd', 'D', 's', 'S':
-			p.i += 2
-			return 0, class_word(escape_prop(c)), true, false, true
+			if p.flags.ecma {
+				add_ecma_set(&cls.ranges, c)
+			} else {
+				append(&cls.props, class_word(escape_prop(c)))
+			}
+			return 0, true, false, true
 		case 'p', 'P':
-			if peek(p, 2) == '{' {
-				p.i += 2
+			if peek(p) == '{' || p.flags.ecma {
+				it: Prop_Item
 				it, ok = parse_property(p, c == 'P')
-				return 0, class_word(it), true, false, ok
+				append(&cls.props, class_word(it))
+				return 0, true, false, ok
 			}
 		case 'b':
-			p.i += 2
-			return 0x08, {}, false, false, true
+			return 0x08, false, false, true
+		case '-':
+			if p.flags.ecma {
+				return '-', false, false, true
+			}
 		}
+		if p.flags.ecma {
+			r, ok = ecma_char(p, c)
+			return
+		}
+		p.i -= 2
 	}
 	r, lone, ok = parse_char_escape(p, true)
-	return r, {}, false, lone, ok
+	return
+}
+
+// ECMA's \d \w \s or a capital in a class, as ranges.
+@(private = "file")
+add_ecma_set :: proc(ranges: ^[dynamic][2]rune, c: byte) {
+	set, negated := escape_set(c)
+	if !negated {
+		append(ranges, ..set)
+		return
+	}
+	next := rune(0)
+	for g in set {
+		if g[0] > next {
+			append(ranges, [2]rune{next, g[0] - 1})
+		}
+		next = g[1] + 1
+	}
+	append(ranges, [2]rune{next, utf8.MAX_RUNE})
 }
 
 @(private = "file")
