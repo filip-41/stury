@@ -1,19 +1,21 @@
 package schema
 
 import "base:runtime"
-import "core:strings"
 import core "../"
 import "../rules"
 import "../typed"
 import "../records"
 
-// What a check of a root array's entries on the threads of a pool needs: the plan an entry is checked with, the keyword
-// steps a check of the whole array puts before an entry's own, and the array's item counts, which the entries'
-// number is judged by.
+// What a check of a root array's entries on the threads of a pool needs: the plan an entry is checked with, the path and
+// keyword steps a check of the whole array puts before an entry's own, and the array's item counts, which the entries'
+// number is judged by, with `counts`, the plan of the array that judges them alone over the arrays it is made from. The path
+// is a placeholder for the entry's index.
 @(private)
 Elements :: struct {
 	plan:   typed.Plan,
-	prefix: []core.Step,
+	counts: typed.Plan,
+	arrays: [dynamic]rules.Array,
+	outer:  typed.Outer,
 	min:    u64,
 	max:    Maybe(u64),
 }
@@ -43,10 +45,13 @@ elements_of :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads, alloc
 	}
 	view := d^
 	view.root = a.items
-	e := new(Elements, allocator)
+	e, made := new(Elements, allocator)
+	if made != nil {
+		return nil
+	}
 	planned: core.Error
 	e.plan, planned = typed.plan_of(&view, as, reads, {checking = true}, allocator)
-	if planned != nil || e.plan.check == nil || e.plan.held {
+	if planned != nil || e.plan.check == nil {
 		if planned == nil {
 			typed.plan_destroy(&e.plan)
 		}
@@ -54,11 +59,37 @@ elements_of :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads, alloc
 		return nil
 	}
 	e.min, e.max = n.rules.min_items, n.rules.max_items
-	e.prefix = make([]core.Step, hops + 1, allocator)
-	for i in 0 ..< hops {
-		e.prefix[i] = core.Name("$ref")
+	if e.min > 0 || e.max != nil {
+		// The array with its entries passed, whose check says only that its count fails.
+		e.arrays.allocator = allocator
+		if _, grown := append(&e.arrays, ..d.arrays[:]); grown != nil {
+			elements_destroy(e, allocator)
+			return nil
+		}
+		e.arrays[n.array].items = rules.NONE
+		counted := d^
+		counted.arrays = e.arrays
+		counts, counted_err := typed.plan_of(&counted, as, reads, {checking = true}, allocator)
+		if counted_err != nil {
+			elements_destroy(e, allocator)
+			return nil
+		}
+		e.counts = counts
 	}
-	e.prefix[hops] = core.Name("items")
+	path, pathed := make([]core.Step, 1, allocator)
+	words, worded := make([]core.Step, hops + 1, allocator)
+	if pathed != nil || worded != nil {
+		delete(path, allocator)
+		delete(words, allocator)
+		elements_destroy(e, allocator)
+		return nil
+	}
+	path[0] = core.Index(0)
+	for i in 0 ..< hops {
+		words[i] = core.Name("$ref")
+	}
+	words[hops] = core.Name("items")
+	e.outer = {path, words}
 	return e
 }
 
@@ -66,76 +97,65 @@ elements_of :: proc(c: ^Compiled, as: core.As, reads: ^typed.Format_Reads, alloc
 elements_destroy :: proc(e: ^Elements, allocator: runtime.Allocator) {
 	if e != nil {
 		typed.plan_destroy(&e.plan)
-		delete(e.prefix, allocator)
+		typed.plan_destroy(&e.counts)
+		delete(e.arrays)
+		delete(e.outer.path, allocator)
+		delete(e.outer.words, allocator)
 		free(e, allocator)
 	}
 }
 
 // Checks `src` as one text on the threads of `runner` when it is an array whose entries are checked alone. False when it is
-// not, or when the answer is the one-pass check's to give: a text that does not parse, an array whose count fails, and a
-// failure with no sink to hold where it is.
+// not, which includes an object that holds the array, or when the answer is the one-pass check's to give: a text that does
+// not parse. A failing entry's path starts with its index, as the one pass has it.
 @(private)
 check_elements :: proc(b: ^Bound, src: []u8, sink: ^typed.Sink, runner: ^core.Runner) -> (err: core.Error, done: bool) {
 	e := b.elements
 	whole, at, cut := records.entries_of(src, b.plan.as)
-	if !cut {
+	if !cut || at != 0 {
 		return
 	}
 	mark := typed.sink_mark(sink)
-	count, failure, ended := records.check_each(src, whole, .Entries, check_element, e, sink, runner, at)
-	most, limited := e.max.?
-	counted := u64(count) >= e.min && (!limited || u64(count) <= most)
-	if ended || !counted || sink == nil && failure.kind != .None || sink != nil && !nest(sink, mark.entries, e.prefix) {
+	count, failure, fatal, failed := records.check_each(src, whole, .Entries, &e.plan, &e.outer, sink, runner, at)
+	if fatal.kind != .None {
 		typed.sink_restore(sink, mark)
 		return
 	}
-	failure.n_steps = 0
-	return core.error_of(failure), true
-}
-
-// An entry of a root array, checked alone.
-@(private)
-check_element :: proc(data: rawptr, text: []u8, sink: ^typed.Sink) -> core.Typed_Error {
-	e := (^Elements)(data)
-	return check_text(&e.plan, text, sink)
-}
-
-// Moves the entries of `sink` from `first` one level in, as the check of the whole array reports them: the entry's index
-// is the first step of its path, and `prefix` leads its keywords. False when memory ran out.
-@(private)
-nest :: proc(sink: ^typed.Sink, first: int, prefix: []core.Step) -> bool {
-	allocator := sink.entries.allocator
-	for &e in sink.entries[first:] {
-		path, words := make([]core.Step, len(e.path) + 1, allocator), make([]core.Step, len(prefix) + len(e.keyword_path), allocator)
-		if path == nil || words == nil {
-			return false
+	// The entries took the placeholder of their index, which their record is.
+	if sink != nil {
+		for &entry in sink.entries[mark.entries:] {
+			entry.path[0], entry.record = core.Index(entry.record), 0
 		}
-		path[0] = core.Index(e.record)
-		copy(path[1:], e.path)
-		for s, i in prefix {
-			words[i] = core.Name(strings.clone(string(s.(core.Name)), allocator))
-		}
-		copy(words[len(prefix):], e.keyword_path)
-		delete(e.path, allocator)
-		delete(e.keyword_path, allocator)
-		e.path, e.keyword_path, e.record = path, words, 0
 	}
-	return true
+	if failure.kind != .None {
+		if int(failure.n_steps) < core.MAX_ERROR_STEPS {
+			copy(failure.steps[1:], failure.steps[:failure.n_steps])
+			failure.steps[0] = core.Index(failed)
+			failure.n_steps += 1
+		} else {
+			failure.truncated = true
+		}
+	}
+	most, limited := e.max.?
+	if (u64(count) < e.min || limited && u64(count) > most) && (sink != nil || failure.kind == .None) {
+		// The count is the array's own failure, after those of its entries.
+		counted := outcome(core.error_of(check_text(&e.counts, src, sink)), sink)
+		if failure.kind == .None || sink.fatal.kind != .None {
+			return counted, true
+		}
+	}
+	return core.error_of(failure), true
 }
 
 // Checks each record of `src`, NDJSON or RFC 7464 under `framing`, against the schema `b` is bound to, on the threads of
 // `runner` when it is given. Every failure goes to `sink` with its record's index in `record`, up to its `max_errors`,
-// and the result is the first failure, or the fault that ends the records after the failures before it. With no sink the
-// check stops at the first failure. A sink with an allocator of its own is checked on this thread.
-check_records :: proc(b: ^Bound, src: []u8, framing := core.Framing.Lines, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> core.Error {
-	if b.plan.check == nil || b.plan.held {
-		return core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
+// and the result is the fault that ends the records when there is one, else the first failure. With no sink the check
+// stops at the first failure. The result's first value is the number of records read. A sink with an allocator of its own is checked on this thread.
+check_records :: proc(b: ^Bound, src: []u8, framing := core.Framing.Lines, sink: ^typed.Sink = nil, runner: ^core.Runner = nil) -> (count: i64, err: core.Error) {
+	if b.plan.check == nil {
+		return 0, core.error_of(core.Typed_Error{kind = .Plan_Mismatch})
 	}
-	_, failure, _ := records.check_each(src, b.plan.as, framing, check_record, b, sink, runner)
-	return core.error_of(failure)
-}
-
-@(private)
-check_record :: proc(data: rawptr, text: []u8, sink: ^typed.Sink) -> core.Typed_Error {
-	return check_text(&(^Bound)(data).plan, text, sink)
+	failure, fatal: core.Typed_Error
+	count, failure, fatal, _ = records.check_each(src, b.plan.as, framing, &b.plan, nil, sink, runner)
+	return count, core.error_of(fatal if fatal.kind != .None else failure)
 }

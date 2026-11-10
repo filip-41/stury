@@ -7,12 +7,14 @@ package main
 
 import "base:runtime"
 import "core:os"
+import "core:path/filepath"
 import "core:strings"
 import core "../../core"
 import "../../core/typed"
 import "../../core/write"
 import "../../core/schema"
 import json "../../json"
+import "message"
 
 Report_Kind :: enum {
 	Lines,
@@ -38,10 +40,13 @@ Schema_Check :: struct {
 	bound:    schema.Bound,
 }
 
+// What a schema check of one input found. A fault is the plain check's to tell, and a refusal is anything else that
+// stopped the check without a failure to tell.
 Verdict :: enum {
 	Valid,
 	Invalid,
 	Fault,
+	Refused,
 }
 
 // Takes the schema option `args[i]` and its parameter.
@@ -99,9 +104,10 @@ schema_open :: proc(s: Schema_Options, src: Source) -> ^Schema_Check {
 	if err != nil {
 		usage_error("--schema %s: %s", s.file, edit_error_text(sc.text, err))
 	}
+	refs := s.refs if s.refs != "" else filepath.dir(s.file)
 	opts := schema.Options {
 		format_assert = s.format_assert,
-		resolver = {root = s.refs, as = json.as(.Json)},
+		resolver = {root = refs, as = json.as(.Json)},
 	}
 	if sc.compiled, err = schema.compile(&sc.doc, core.ROOT, opts); err != nil {
 		usage_error("--schema %s: %s", s.file, edit_error_text(sc.text, err))
@@ -112,35 +118,55 @@ schema_open :: proc(s: Schema_Options, src: Source) -> ^Schema_Check {
 	return sc
 }
 
-// Judges `data`, the file `name`, against the schema and tells what it finds. A fault is left for `check_text` to tell.
-schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, data: []byte, src: Source, runner: ^core.Runner) -> Verdict {
+// Judges `data`, the file `name`, against the schema and tells what it finds. `named` puts the file's name in a report.
+// A fault is left for the plain check to tell, and is returned for the case it finds nothing.
+schema_judge :: proc(sc: ^Schema_Check, s: Schema_Options, name: string, named: bool, data: []byte, src: Source, runner: ^core.Runner) -> (Verdict, core.Error) {
 	sink := typed.Sink {
 		max_errors = s.max_errors,
 		entries    = make([dynamic]core.Error_Entry, runtime.heap_allocator()),
 	}
 	defer typed.sink_destroy(&sink)
-	by_record := src.framing != .Concatenated
-	err := schema.check_records(&sc.bound, data, src.framing, &sink, runner) if by_record else schema.check(&sc.bound, data, &sink, runner)
-	if err == nil {
+	records, err := check_input(sc, data, src, runner, &sink)
+	by_record := src.framing != .Concatenated || records > 1
+	file := name if named else ""
+	#partial switch _ in err {
+	case nil:
+		if records == 0 {
+			return .Fault, nil
+		}
 		if s.report == .Basic {
-			report(sc, s, sink.entries[:], false)
+			report(sc, s, file, sink.entries[:], false)
 		}
-		return .Valid
-	}
-	for e in sink.entries {
-		if e.kind == .Walk {
-			return .Fault
+		return .Valid, nil
+	case core.Fault:
+		return .Fault, err
+	case core.Typed_Failure:
+		if len(sink.entries) > 0 {
+			if s.report == .Lines {
+				told(name, data, sink.entries[:])
+			} else {
+				report(sc, s, file, sink.entries[:], by_record, sink.truncated)
+			}
+			return .Invalid, nil
 		}
 	}
-	if len(sink.entries) == 0 {
-		return .Fault
+	message.write_stderr("stury: %s: %s\n", name, edit_error_text(data, err))
+	return .Refused, err
+}
+
+// Checks `data` by its records, or as one text when the framing is concatenated and it is one, and returns how many
+// records it read. A concatenated text that does not check as one is read again value by value.
+@(private = "file")
+check_input :: proc(sc: ^Schema_Check, data: []byte, src: Source, runner: ^core.Runner, sink: ^typed.Sink) -> (records: i64, err: core.Error) {
+	if src.framing != .Concatenated {
+		return schema.check_records(&sc.bound, data, src.framing, sink, runner)
 	}
-	if s.report == .Lines {
-		told(name, data, sink.entries[:])
-	} else {
-		report(sc, s, sink.entries[:], by_record, sink.truncated)
+	err = schema.check(&sc.bound, data, sink, runner)
+	if _, parse := err.(core.Fault); !parse {
+		return 1, err
 	}
-	return .Invalid
+	typed.sink_restore(sink, {})
+	return schema.check_records(&sc.bound, data, .Concatenated, sink, runner)
 }
 
 // Tells each entry of the file `name` on standard error, one to a line.
@@ -159,12 +185,12 @@ told :: proc(name: string, data: []byte, entries: []core.Error_Entry) {
 
 // Writes the basic output or the problem document of `entries` and a newline to standard output.
 @(private = "file")
-report :: proc(sc: ^Schema_Check, s: Schema_Options, entries: []core.Error_Entry, records: bool, truncated := false) {
+report :: proc(sc: ^Schema_Check, s: Schema_Options, file: string, entries: []core.Error_Entry, records: bool, truncated := false) {
 	t: write.Tokens
 	write.tokens_init(&t, json.as(.Json), {}, context.temp_allocator)
-	r := write.Report{uri = sc.compiled.description.uri, records = records, truncated = truncated}
+	r := write.Report{file = file, records = records, truncated = truncated}
 	if s.report == .Basic {
-		write.write_basic(&t, entries, r)
+		schema.write_basic(&t, entries, sc.compiled.description.uri, r)
 	} else {
 		write.write_problem(&t, entries, {title = "Invalid input", status = 422}, r)
 	}

@@ -247,11 +247,11 @@ entry, is checked on all cores and tells what a serial check tells.
 
 | Flag | Effect |
 | --- | --- |
-| `--schema-ref DIR` | The directory a reference to a `file:` URI may read from. Without it no file is read. |
+| `--schema-ref DIR` | The directory a reference to a `file:` URI may read from. The default is the schema file's directory. A schema with an `$id` resolves a relative reference against that `$id`, so its `file:` references need an `$id` that is one. |
 | `--format-assert` | `format` fails an input, where it otherwise only annotates. |
 | `--max-errors N` | Keep at most `N` failures of an input (default 100). The basic output and the problem document say `"truncated": true` when more were left out. |
-| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file, `{"valid":true}` for a valid one. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers; with records, the instance location starts with the record's index. |
-| `--report problem` | Write an RFC 9457 problem document of each failing input on stdout: `title`, `status` 422 and `errors` of `pointer`, `code` and `message`. |
+| `--report basic` | Write the JSON Schema basic output of each input on stdout, one line a file, `{"valid":true}` for a valid one. Each error unit has `"valid":false`. With several files each line starts with a `file` member naming its file. `keywordLocation`, `absoluteKeywordLocation` (where the schema has an `$id` and the keywords did not pass a `$ref`) and `instanceLocation` are JSON Pointers; with records, the instance location starts with the record's index. |
+| `--report problem` | Write an RFC 9457 problem document of each failing input on stdout: `title`, `status` 422 and `errors` of `pointer`, `code` and `message`. A missing member is named in its message, and its pointer is the member's. With several files the document starts with a `file` member. |
 | `--report lines` | The default. |
 
 A schema that does not read, compile or bind, or a keyword the check does not judge, is a usage error (exit 2) naming it.

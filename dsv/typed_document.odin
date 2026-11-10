@@ -164,7 +164,7 @@ document_cell :: proc(d: ^Document_Cells, regs: core.Hook_Regs, t: core.Token, a
 	}
 	out, action := regs, core.Action.Next
 	if d.fill {
-		k := kept_position(d, at)
+		k := kept_position(d.doc, &d.kept, at)
 		for ; d.pos < k; d.pos += 1 {
 			out, action = on_cell(h, out, {kind = .Plain, role = .Value, lo = t.lo})
 			if action != .Next {
@@ -179,13 +179,13 @@ document_cell :: proc(d: ^Document_Cells, regs: core.Hook_Regs, t: core.Token, a
 // The true position `Document.kept` gives the child at `at` of a record, or -1 for a cell kept by name. The nodes of a
 // replay come in order, so one cursor serves them all.
 @(private)
-kept_position :: proc "contextless" (d: ^Document_Cells, at: core.Node_Index) -> int {
-	kept := d.doc.kept
-	for d.kept < len(kept) && kept[d.kept].node < at {
-		d.kept += 1
+kept_position :: proc "contextless" (doc: ^core.Document, cursor: ^int, at: core.Node_Index) -> int {
+	kept := doc.kept
+	for cursor^ < len(kept) && kept[cursor^].node < at {
+		cursor^ += 1
 	}
-	if d.kept < len(kept) && kept[d.kept].node == at {
-		return int(kept[d.kept].index)
+	if cursor^ < len(kept) && kept[cursor^].node == at {
+		return int(kept[cursor^].index)
 	}
 	return -1
 }

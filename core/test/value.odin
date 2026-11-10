@@ -1,11 +1,15 @@
 // The readers of a value over its two forms, a built value and a node, and the typed bridges to a built value.
 package core_test
 
+import "core:fmt"
+import "core:strings"
 import "core:testing"
+import "core:time"
 import core ".."
 import typed "../typed"
 import write "../write"
 import json "../../json"
+import dsv "../../dsv"
 import walktest "../../walktest"
 
 // What each reader answers for one text, which a node of the text and its built value must both give.
@@ -208,4 +212,64 @@ built_object_follows_duplicates :: proc(t: ^testing.T) {
 	k, _ := core.member(first, "k")
 	testing.expect_value(t, k.(f64), 1)
 	testing.expect_value(t, core.length(core.built_value(root, .Last)), 2)
+}
+
+// Literals of one double that differ past its digits hash apart, so a uniqueness check pairs none of them.
+@(test)
+distinct_literals_of_one_double_hash_apart :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	seen := make(map[u64]bool)
+	zeros := strings.repeat("0", 20)
+	start := time.now()
+	for i in 1 ..= 2000 {
+		lit := fmt.tprintf("0.1%s1%04d", zeros, i)
+		seen[core.hash(core.number_text(lit))] = true
+	}
+	testing.expect_value(t, len(seen), 2000)
+	testing.expect(t, time.since(start) < time.Second)
+}
+
+// Spellings of one value hash alike, a shortest-form literal like its double.
+@(test)
+shortest_and_long_spellings_hash_alike :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	same := [?][]string{{"0.1", "0.10", "1e-1", "0.1000"}, {"0.30000000000000004", "3.0000000000000004e-1"}, {"5e-324", "0.5e-323"}}
+	for group in same {
+		first := core.Value(core.number_text(group[0]))
+		for spelling in group {
+			v := core.Value(core.number_text(spelling))
+			testing.expectf(t, core.equal(first, v) && core.hash(first) == core.hash(v), "%s and %s", group[0], spelling)
+		}
+	}
+	// Past decNumber's range a literal reads as its double, so these are equal.
+	far := [?][2]string{{"1e-2000000000", "2e-2000000000"}, {"1e-2000000000", "0"}, {"1e1000000000", "2e1000000000"}}
+	for pair in far {
+		x, y := core.Value(core.number_text(pair[0])), core.Value(core.number_text(pair[1]))
+		testing.expectf(t, core.equal(x, y) && core.hash(x) == core.hash(y), "%s and %s", pair[0], pair[1])
+	}
+	testing.expect(t, core.hash(core.number_text("0.30000000000000004")) == core.hash(core.Value(0.30000000000000004)))
+	testing.expect(t, core.hash(core.number_text("0.1")) == core.hash(core.Value(0.1)))
+}
+
+// A delimited cell hashes as the number an int operand makes it, and objects hash alike in any key order.
+@(test)
+cell_and_key_order_hash_alike :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	doc, err := core.build(transmute([]u8)string("a\n7\n"), dsv.as(.Csv))
+	defer core.destroy(&doc)
+	walktest.expect_nil(t, err)
+	row, _ := core.doc_child_at(&doc, core.ROOT, 0)
+	cell, _ := core.doc_child_at(&doc, row, 0)
+	testing.expect(t, core.hash(core.Node_Ref{&doc, cell}, like = core.Value(f64(7))) == core.hash(core.Value(f64(7))))
+	a, aerr := core.build(transmute([]u8)string(`{"x":1.0,"y":[0.10]}`), json.as(.Json))
+	defer core.destroy(&a)
+	b, berr := core.build(transmute([]u8)string(`{"y":[1e-1],"x":1}`), json.as(.Json))
+	defer core.destroy(&b)
+	walktest.expect_nil(t, aerr)
+	walktest.expect_nil(t, berr)
+	na, nb := core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT}
+	testing.expect(t, core.equal(na, nb) && core.hash(na) == core.hash(nb))
 }

@@ -136,6 +136,9 @@ Framing_Services :: struct {
 	ends:   [core.Framing]u8,
 }
 
+// What `Record_Docs.check_run` calls after each record it checks.
+Record_Visit :: #type proc(data: rawptr, rec: Record, first: core.Typed_Error) -> bool
+
 // What a reader reads of a record's value, in its format's rodata, which `core.Services.docs` points at. It is apart
 // from the framing so that a program that only frames or judges records links no read, build or scan.
 Record_Docs :: struct {
@@ -151,6 +154,11 @@ Record_Docs :: struct {
 	// `next`, and the record's nodes written to `b` by the walk that frames it, with the offsets of `it.src`. nil for a
 	// format whose whole text `build` reads on one thread.
 	build_next: proc(it: ^Reader, b: ^engine.Builder, regs: ^core.Hook_Regs) -> (Record, bool),
+	// `next` and a check by `plan` of each record to the end of the reader's records, by the walk that frames it, with
+	// every offset from the input's first byte, calling `visit` after each with the record and the first failure the check
+	// found, whose kind is `.None` for none. `visit` returns false to end the run. A sink in `read` counts the records in its
+	// `record`. nil for a format that checks a record by its text alone.
+	check_run: proc(it: ^Reader, plan: ^typed.Plan, read: typed.Read_Options, visit: Record_Visit, data: rawptr),
 	// A format's with named columns, nil for another.
 	column: proc(it: ^Reader, name: string) -> int,
 	cell:   proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool),

@@ -23,6 +23,9 @@ record_docs :: proc "contextless" ($S: Spec) -> ^records.Record_Docs {
 		read = proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool {
 			return read_spec(it, target, T, plan, read, allocator, err, S)
 		},
+		check_run = proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, visit: records.Record_Visit, data: rawptr) {
+			check_run_spec(it, plan, read, visit, data, S)
+		},
 		build = proc(it: ^records.Reader, rec: records.Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error) {
 			return build_record_spec(it, rec, allocator, S)
 		},

@@ -45,10 +45,10 @@ bind_text :: proc(t: ^testing.T, s: ^Bound_Schema, text: string, draft := schema
 
 // The basic output of `entries` as JSON text.
 @(private = "file")
-basic_text :: proc(entries: []core.Error_Entry, r := write.Report{}) -> string {
+basic_text :: proc(entries: []core.Error_Entry, uri := "", r := write.Report{}) -> string {
 	tw: write.Tokens
 	write.tokens_init(&tw, json.as(.Json), {}, context.temp_allocator)
-	write.write_basic(&tw, entries, r)
+	schema.write_basic(&tw, entries, uri, r)
 	text, _ := write.tokens_finish(&tw)
 	return string(text)
 }
@@ -161,7 +161,7 @@ schema_output_tests :: proc(t: ^testing.T) {
 					data, _ := core.member(&doc, test, "data")
 					sink: typed.Sink
 					schema.check(&b, core.span(&doc, data), &sink)
-					text := basic_text(sink.entries[:], {uri = c.description.uri, truncated = sink.truncated})
+					text := basic_text(sink.entries[:], c.description.uri, {truncated = sink.truncated})
 					got, _ := enc.parse(transmute([]u8)text, .JSON, true)
 					want := parsed.(enc.Array)[g].(enc.Object)["tests"].(enc.Array)[j].(enc.Object)["output"].(enc.Object)["basic"]
 					testing.expectf(t, holds(want, got), "%s %s: %s", entry.dir, name, text)
@@ -190,8 +190,8 @@ schema_report_locations :: proc(t: ^testing.T) {
 	}
 	sink: typed.Sink
 	schema.check(&s.b, transmute([]u8)string(`{"a~/b": [1, "x"], "c": 9}`), &sink)
-	want := `{"valid":false,"errors":[{"keywordLocation":"/properties/a~0~1b/items/type","absoluteKeywordLocation":"https://example.com/s#/properties/a~0~1b/items/type","instanceLocation":"/a~0~1b/1","error":"Value is not of the allowed type"},{"keywordLocation":"/properties/c/$ref/maximum","instanceLocation":"/c","error":"Number is above the maximum"}]}`
-	testing.expect_value(t, basic_text(sink.entries[:], {uri = s.c.description.uri}), want)
+	want := `{"valid":false,"errors":[{"valid":false,"keywordLocation":"/properties/a~0~1b/items/type","absoluteKeywordLocation":"https://example.com/s#/properties/a~0~1b/items/type","instanceLocation":"/a~0~1b/1","error":"Value is not of the allowed type"},{"valid":false,"keywordLocation":"/properties/c/$ref/maximum","instanceLocation":"/c","error":"Number is above the maximum"}]}`
+	testing.expect_value(t, basic_text(sink.entries[:], s.c.description.uri), want)
 	for &e in sink.entries {
 		e.record = 4
 	}
@@ -248,6 +248,10 @@ expect_pieces_law :: proc(t: ^testing.T, pools: []host.Pool, b: ^schema.Bound, t
 		if !testing.expectf(t, schema.valid(b, src, &pool.runner) == (first == nil), "%q at width %d: verdict", text, pool.runner.threads + 1) {
 			return false
 		}
+		// With no sink the failure is the one pass's, with its path.
+		if !testing.expectf(t, fmt.tprintf("%v", schema.check(b, src, nil, &pool.runner)) == fmt.tprintf("%v", schema.check(b, src)), "%q at width %d: first failure", text, pool.runner.threads + 1) {
+			return false
+		}
 	}
 	return true
 }
@@ -257,6 +261,7 @@ ARRAY_SCHEMAS := [?]string {
 	`{"type": "array", "items": {"type": "object", "properties": {"a": {"type": "integer", "minimum": 2}}, "required": ["a"]}, "minItems": 2, "maxItems": 6}`,
 	`{"$ref": "#/$defs/list", "$defs": {"list": {"type": "array", "items": {"$ref": "#/$defs/item"}}, "item": {"type": "string", "maxLength": 2}}}`,
 	`{"items": {"type": "integer"}}`,
+	`{"items": {"anyOf": [{"type": "integer"}, {"type": "string", "maxLength": 2}]}, "maxItems": 5}`,
 }
 
 @(private = "file", rodata)
@@ -293,12 +298,14 @@ schema_check_pieces_equal_one_pass :: proc(t: ^testing.T) {
 				strings.write_string(&b, ",\n" if k < n - 1 else "")
 			}
 			strings.write_byte(&b, ']')
-			src := strings.to_string(b)
-			for cut in 0 ..= len(src) {
-				_, _, pooled := records.entries_of(transmute([]u8)src[:cut], s.b.plan.as)
-				engaged += int(pooled)
-				if !expect_pieces_law(t, pools[:], &s.b, src[:cut]) {
-					return
+			// The same entries in an array that an object holds, which is no root array.
+			for src in ([]string{strings.to_string(b), fmt.tprintf(`{{"a": %s}}`, strings.to_string(b))}) {
+				for cut in 0 ..= len(src) {
+					_, _, pooled := records.entries_of(transmute([]u8)src[:cut], s.b.plan.as)
+					engaged += int(pooled)
+					if !expect_pieces_law(t, pools[:], &s.b, src[:cut]) {
+						return
+					}
 				}
 			}
 		}
@@ -328,7 +335,7 @@ schema_check_records_equal_each_record :: proc(t: ^testing.T) {
 	if !bind_text(t, &s, `{"type": "object", "properties": {"a": {"type": "integer", "minimum": 2}, "b": {"maxLength": 2}}, "required": ["a"], "additionalProperties": false}`) {
 		return
 	}
-	lines := []string{`{"a": 5}`, `{"a": 1, "b": "xyz"}`, `{"b": "x"}`, `{"a": 3, "z": 1}`, `7`, `{"a": 9}`, `{"a": }`, `{"a": 1}`}
+	lines := []string{`{"a": 5}`, `{"a": 1, "b": "xyz"}`, `{"b": "x"}`, `{"a": 3, "z": 1}`, `7`, `{"a": 9}`, `{"a": 1, "b": "xyz",}`, `{"a": 1}`}
 	for upto in 0 ..= len(lines) {
 		b := strings.builder_make()
 		for l in lines[:upto] {
@@ -357,10 +364,51 @@ schema_check_records_equal_each_record :: proc(t: ^testing.T) {
 		}
 		for &pool in pools {
 			got: typed.Sink
-			err := schema.check_records(&s.b, transmute([]u8)src, .Lines, &got, &pool.runner)
+			_, err := schema.check_records(&s.b, transmute([]u8)src, .Lines, &got, &pool.runner)
 			testing.expectf(t, same_entries(want.entries[:], got.entries[:]), "%d lines at width %d: %v, want %v", upto, pool.runner.threads + 1, got.entries, want.entries)
 			testing.expectf(t, (err == nil) == (len(want.entries) == 0), "%d lines at width %d: %v", upto, pool.runner.threads + 1, err)
+			_, is_fault := err.(core.Fault)
+			testing.expectf(t, is_fault == (upto >= 7), "%d lines at width %d: the fault is the result: %v", upto, pool.runner.threads + 1, err)
 			typed.sink_destroy(&got)
+			// A limit that keeps one entry keeps no fault out of the result.
+			limited := typed.Sink{max_errors = 1}
+			_, err = schema.check_records(&s.b, transmute([]u8)src, .Lines, &limited, &pool.runner)
+			_, is_fault = err.(core.Fault)
+			testing.expectf(t, is_fault == (upto >= 7), "%d lines, one entry, at width %d: %v", upto, pool.runner.threads + 1, err)
+			typed.sink_destroy(&limited)
 		}
+	}
+}
+
+// A held plan's records are checked one by one on a thread, and values one after another are records.
+@(test)
+schema_check_records_held_and_concatenated :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	s: Bound_Schema
+	if !bind_text(t, &s, `{"type": "object", "properties": {"a": {"type": "integer"}}}`) {
+		return
+	}
+	// A schema failure and a fault in one record end the records with the fault.
+	got: typed.Sink
+	count, err := schema.check_records(&s.b, transmute([]u8)string("{\"a\":\"x\",}\n{\"a\":\"y\"}\n"), .Lines, &got)
+	_, is_fault := err.(core.Fault)
+	testing.expectf(t, is_fault && count == 1, "%v after %d records", err, count)
+	for e in got.entries {
+		testing.expectf(t, e.record == 0, "a record past the fault: %v", got.entries)
+	}
+	typed.sink_destroy(&got)
+	got = {}
+	// Values one after another.
+	count, err = schema.check_records(&s.b, transmute([]u8)string(`{"a": 1} {"a": "x"} 7`), .Concatenated, &got)
+	testing.expectf(t, count == 3 && err != nil && len(got.entries) == 2, "%d records, %v, %v", count, err, got.entries)
+	typed.sink_destroy(&got)
+	// A property named `$ref` is not a reference.
+	own: Bound_Schema
+	if bind_text(t, &own, `{"$id": "http://e.com/s", "type": "object", "properties": {"$ref": {"type": "integer"}}}`) {
+		one: typed.Sink
+		schema.check(&own.b, transmute([]u8)string(`{"$ref": "x"}`), &one)
+		testing.expect(t, basic_text(one.entries[:], own.c.description.uri) != "" && strings.contains(basic_text(one.entries[:], own.c.description.uri), "absoluteKeywordLocation"))
+		typed.sink_destroy(&one)
 	}
 }

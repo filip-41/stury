@@ -223,3 +223,185 @@ check_document_agrees_with_text :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// Whether `text` passes `schema_text` read by `handle`, judged as the text and as the document built from it.
+@(private = "file")
+verdicts :: proc(schema_text, text: string, handle: core.As) -> (by_text, by_doc: bool) {
+	schema_doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json), allocator = context.temp_allocator)
+	c, _ := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}}, context.temp_allocator)
+	b, berr := schema.bind(&c, handle)
+	defer schema.unbind(&b)
+	if berr != nil {
+		return false, false
+	}
+	built, _ := core.build(transmute([]u8)text, handle, allocator = context.temp_allocator)
+	return schema.check(&b, transmute([]u8)text, nil) == nil, schema.check_node(&b, &built, core.ROOT, nil) == nil
+}
+
+// Whether the four ways to judge `csv` agree on `valid`: as CSV and as TSV, by text and by document.
+@(private = "file")
+expect_verdict :: proc(t: ^testing.T, schema_text, csv: string, valid: bool, loc := #caller_location) {
+	tabs, _ := strings.replace_all(csv, ",", "\t", context.temp_allocator)
+	for handle, i in ([2]core.As{dsv.as(.Csv), dsv.as(.Tsv)}) {
+		by_text, by_doc := verdicts(schema_text, csv if i == 0 else tabs, handle)
+		testing.expectf(t, by_text == valid && by_doc == valid, "%s over %q: text %v, document %v, want %v", schema_text, csv, by_text, by_doc, valid, loc = loc)
+	}
+}
+
+// Every applicator judges a row's cells in step, over a text and over a document, in CSV and in TSV.
+@(test)
+check_applicators :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		items, csv: string,
+		valid:      bool,
+	} {
+		{`{"allOf": [{"required": ["a"]}, {"properties": {"a": {"type": "integer"}}}]}`, "a\n1\n", true},
+		{`{"allOf": [{"required": ["a"]}, {"properties": {"a": {"type": "integer"}}}]}`, "a\nx\n", false},
+		{`{"allOf": [{"required": ["a"]}, {"properties": {"a": {"type": "integer"}}}]}`, "b\n1\n", false},
+		{`{"properties": {"a": {"allOf": [{"minimum": 3}, {"maximum": 9}]}}}`, "a\n+5\n", true},
+		{`{"properties": {"a": {"allOf": [{"minimum": 3}, {"maximum": 9}]}}}`, "a\n10\n", false},
+		{`{"anyOf": [{"required": ["a"]}, {"required": ["b"]}]}`, "a,b\n,2\n", true},
+		{`{"anyOf": [{"required": ["a"]}, {"required": ["b"]}]}`, "c\n1\n", false},
+		{`{"properties": {"a": {"anyOf": [{"type": "integer"}, {"type": "boolean"}]}}}`, "a\ntrue\n", true},
+		{`{"properties": {"a": {"anyOf": [{"type": "integer"}, {"type": "boolean"}]}}}`, "a\nx\n", false},
+		{`{"oneOf": [{"required": ["a"]}, {"required": ["b"]}]}`, "a,b\n1,\n", true},
+		{`{"oneOf": [{"required": ["a"]}, {"required": ["b"]}]}`, "a,b\n1,2\n", false},
+		{`{"properties": {"a": {"oneOf": [{"type": "integer"}, {"minimum": 3}]}}}`, "a\n5\n", false},
+		{`{"properties": {"a": {"oneOf": [{"type": "integer"}, {"minimum": 3}]}}}`, "a\n3.5\n", true},
+		{`{"not": {"required": ["b"]}}`, "a\n1\n", true},
+		{`{"not": {"required": ["b"]}}`, "a,b\n1,2\n", false},
+		{`{"properties": {"a": {"not": {"type": "boolean"}}}}`, "a\ntrue\n", false},
+		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a,b\n1,2\n", true},
+		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a,b\n1,\n", false},
+		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a,c\n,3\n", true},
+		{`{"if": {"required": ["a"]}, "then": {"required": ["b"]}, "else": {"required": ["c"]}}`, "a\n,\n", false},
+		{`{"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}, "$defs": {"n": {"type": "integer"}}}`, "a\n+5\n", true},
+		{`{"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}, "$defs": {"n": {"type": "integer"}}}`, "a\n1\n", false},
+		{`{"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}, "$defs": {"n": {"type": "integer"}}}`, "a\nx\n", false},
+		{`{"enum": [{"a": 1}, {"a": 2}]}`, "a\n+1\n", true},
+		{`{"enum": [{"a": 1}, {"a": 2}]}`, "a\n3\n", false},
+		{`{"properties": {"a": {"const": 1}}, "unevaluatedProperties": false}`, "a\n1\n", true},
+		{`{"properties": {"a": {"const": 1}}, "unevaluatedProperties": false}`, "a,b\n1,2\n", false},
+	}
+	for c in cases {
+		schema_text := strings.concatenate({`{"type": "array", "items": `, c.items, `}`}, context.temp_allocator)
+		if strings.contains(c.items, "$defs") {
+			schema_text = strings.concatenate({`{"type": "array", "$defs": {"n": {"type": "integer"}}, "items": {"properties": {"a": {"$ref": "#/$defs/n", "minimum": 3}}}}`}, context.temp_allocator)
+		}
+		expect_verdict(t, schema_text, c.csv, c.valid)
+	}
+	// An applicator on the whole table sees its records.
+	expect_verdict(t, `{"allOf": [{"type": "array", "minItems": 2}, {"type": "array", "items": {"required": ["a"]}}]}`, "a\n1\n2\n", true)
+	expect_verdict(t, `{"allOf": [{"type": "array", "minItems": 2}]}`, "a\n1\n", false)
+	expect_verdict(t, `{"const": [{"a": 1}, {"a": 2}]}`, "a\n1\n+2\n", true)
+	expect_verdict(t, `{"const": [{"a": 1}, {"a": 2}]}`, "a\n1\n3\n", false)
+}
+
+// `patternProperties` judges the columns whose name it matches, and `additionalProperties` the others.
+@(test)
+check_pattern_properties :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	open := `{"type": "array", "items": {"patternProperties": {"^x": {"type": "integer"}}}}`
+	closed := `{"type": "array", "items": {"patternProperties": {"^x": {"type": "integer"}}, "additionalProperties": false}}`
+	typed_rest := `{"type": "array", "items": {"properties": {"y": {"type": "boolean"}}, "patternProperties": {"^x": {"type": "integer"}}, "additionalProperties": {"type": "string", "maxLength": 1}}}`
+	expect_verdict(t, open, "x1,y\n5,z\n", true)
+	expect_verdict(t, open, "x1,x2\n5,q\n", false)
+	expect_verdict(t, closed, "x1,x2\n5,6\n", true)
+	expect_verdict(t, closed, "x1,y\n5,z\n", false)
+	expect_verdict(t, closed, "x1,x2\n5,q\n", false)
+	expect_verdict(t, typed_rest, "x1,y,z\n5,true,k\n", true)
+	expect_verdict(t, typed_rest, "x1,y,z\n5,true,kk\n", false)
+	expect_verdict(t, typed_rest, "x1,y,z\n5,maybe,k\n", false)
+}
+
+// A scalar `const` and the same value in a container agree on a cell: the operand's kind decides how the cell reads.
+@(test)
+check_scalar_and_wrapped_const_agree :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	cases := [?]struct {
+		cell:  string,
+		valid: bool,
+	}{{"5", true}, {"+5", true}, {"5.0", true}, {"007", false}, {"x", false}, {"6", false}}
+	for c in cases {
+		csv := strings.concatenate({"a\n", c.cell, "\n"}, context.temp_allocator)
+		expect_verdict(t, `{"type": "array", "items": {"properties": {"a": {"const": 5}}}}`, csv, c.valid)
+		expect_verdict(t, `{"type": "array", "items": {"const": {"a": 5}}}`, csv, c.valid)
+		expect_verdict(t, `{"type": "array", "items": {"enum": [{"a": 5}, {"a": 6.5}]}}`, csv, c.valid)
+		expect_verdict(t, `{"const": [{"a": 5}]}`, csv, c.valid)
+	}
+	for c in ([?]struct {
+		cell:  string,
+		valid: bool,
+	}{{"true", true}, {"false", false}, {"x", false}}) {
+		csv := strings.concatenate({"a\n", c.cell, "\n"}, context.temp_allocator)
+		expect_verdict(t, `{"type": "array", "items": {"properties": {"a": {"const": true}}}}`, csv, c.valid)
+		expect_verdict(t, `{"type": "array", "items": {"const": {"a": true}}}`, csv, c.valid)
+	}
+	// A quoted cell has no TSV spelling, and reads as the number its operand's kind asks for.
+	for schema_text in ([?]string{`{"type": "array", "items": {"properties": {"a": {"const": 5}}}}`, `{"type": "array", "items": {"const": {"a": 5}}}`}) {
+		by_text, by_doc := verdicts(schema_text, "a\n\"5\"\n", dsv.as(.Csv))
+		testing.expectf(t, by_text && by_doc, "%s: text %v document %v", schema_text, by_text, by_doc)
+	}
+	// A string operand keeps the cell a string, a null one reads an unquoted `null`.
+	expect_verdict(t, `{"type": "array", "items": {"const": {"a": "5"}}}`, "a\n5\n", true)
+	expect_verdict(t, `{"type": "array", "items": {"const": {"a": "5"}}}`, "a\n+5\n", false)
+	expect_verdict(t, `{"type": "array", "items": {"const": {"a": null}}}`, "a\nnull\n", true)
+	expect_verdict(t, `{"type": "array", "items": {"const": {"a": null}}}`, "a\n\"null\"\n", false)
+}
+
+// A document a path left partial is judged by the records it kept, as the text of those records is.
+@(test)
+check_partial_document :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	judge :: proc(schema_text, text, path: string, opts := dsv.Options{}) -> bool {
+		schema_doc, _ := core.build(transmute([]u8)schema_text, json.as(.Json), allocator = context.temp_allocator)
+		c, _ := schema.compile(&schema_doc, core.ROOT, {resolver = {as = json.as(.Json)}}, context.temp_allocator)
+		b, berr := schema.bind(&c, dsv.as(.Csv, opts))
+		defer schema.unbind(&b)
+		parsed, _ := core.parse_path(path)
+		defer core.path_destroy(&parsed)
+		doc, _ := dsv.scan(transmute([]u8)text, .Csv, parsed, opts = opts, allocator = context.temp_allocator)
+		return berr == nil && schema.check_node(&b, &doc, core.ROOT, nil) == nil
+	}
+	table := "a,b\n1,2\n5,\n"
+	// A cell kept by name is a record of that one column.
+	each_a := `{"type": "array", "items": {"properties": {"a": {"const": 5}}, "required": ["a"]}}`
+	testing.expect(t, judge(each_a, table, ".[1].a"))
+	testing.expect(t, !judge(each_a, table, ".[0].a"))
+	// A record kept whole keeps its empty cell absent.
+	any_of := `{"type": "array", "items": {"anyOf": [{"required": ["a"]}, {"required": ["b"]}], "oneOf": [{"required": ["b"]}, {"not": {"required": ["b"]}}]}}`
+	testing.expect(t, judge(any_of, table, ".[1]"))
+	only_b := `{"type": "array", "items": {"required": ["b"]}}`
+	testing.expect(t, !judge(only_b, table, ".[1]"))
+	testing.expect(t, judge(only_b, table, ".[0]"))
+	testing.expect(t, !judge(only_b, table, ".[]"))
+	// A record kept by position reads the cells before it as empty ones.
+	rows := `{"type": "array", "items": {"type": "array", "prefixItems": [{"type": "null"}, {"const": "bob"}]}}`
+	testing.expect(t, judge(rows, "1,ann\n2,bob\n", ".[1][1]", {no_header = true}))
+	testing.expect(t, !judge(rows, "1,ann\n2,bob\n", ".[0][1]", {no_header = true}))
+}
+
+// `core.equal` and `core.hash` read a cell as the kind of the value it is set against, so equal values share a hash.
+@(test)
+check_equal_and_hash_retype_cells :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	operand_doc, _ := core.build(transmute([]u8)string(`{"a": 5, "b": true, "c": null, "d": "x"}`), json.as(.Json), allocator = context.temp_allocator)
+	operand := core.Node_Ref{&operand_doc, core.ROOT}
+	cases := [?]struct {
+		cells: string,
+		equal: bool,
+	}{{"a,b,c,d\n+5,true,null,x\n", true}, {"a,b,c,d\n5.0,true,null,x\n", true}, {"a,b,c,d\n007,true,null,x\n", false}, {"a,b,c,d\n5,TRUE,null,x\n", false}, {"a,b,c,d\n5,true,nul,x\n", false}, {"a,b,c,d\n5,true,\"null\",x\n", false}, {"a,b,c,d\n5,true,null,y\n", false}}
+	for c in cases {
+		doc, _ := core.build(transmute([]u8)c.cells, dsv.as(.Csv), allocator = context.temp_allocator)
+		it := core.children(&doc, core.ROOT)
+		record, _ := core.child_next(&it)
+		cell := core.Node_Ref{&doc, record}
+		testing.expectf(t, core.equal(cell, operand) == c.equal, "%q", c.cells)
+		testing.expectf(t, core.equal(operand, cell) == c.equal, "%q", c.cells)
+		if c.equal {
+			testing.expectf(t, core.hash(cell, like = operand) == core.hash(operand), "%q", c.cells)
+		}
+	}
+}

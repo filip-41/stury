@@ -15,6 +15,11 @@ header column keeps its last cell, or its first under `first`, and `refuse` refu
 ragged row names an extra cell by its 1-based position. A text may use CRLF, start with a byte order mark, and a TSV cell
 may hold the escapes `\t \n \r \0 \\`, which make it a string.
 
+Applicators are generated so that every arm of one reads a cell alike: a cell's arms (allOf, anyOf, oneOf, not, if, a `$ref`
+beside keywords) share one `type` and no operand, so one JSON value stands for the cell, read by the first arm. A row's arms
+(`required` under allOf, anyOf, oneOf, not, if) read no cell. A `patternProperties` node reads its column's cells by the
+pattern's node, and a container `const` or `enum` reads a column's cells by the kinds of its operands at that column.
+
 jsonschema judges each row against the schema's `items` and the array against the rest. A case must give the same rows
 as the probe: the rows that fail, with `-` for a failure no row holds. A text that breaks the table's width without
 `ragged`, and a refused repeat, are held to a refusal alone, as the probe stops at them.
@@ -145,12 +150,45 @@ def read_cell(cell, quoted, node):
     return value
 
 
+def reading_node(node):
+    """The node whose kinds read a cell the node judges: an applicator's first arm, whose arms share one reading."""
+    if not isinstance(node, dict):
+        return node
+    for key in ("allOf", "anyOf", "oneOf"):
+        if key in node:
+            return node[key][0]
+    if "not" in node:
+        return node["not"]
+    if "if" in node:
+        return node["if"]
+    return node
+
+
+def column_node(items, name):
+    """The node that reads column `name`'s cells: its property, the pattern it matches, the operands of a container
+    `const` or `enum` at that column, else `additionalProperties`."""
+    props = items.get("properties", {})
+    if name in props:
+        return reading_node(props[name])
+    for pattern, node in items.get("patternProperties", {}).items():
+        if re.search(pattern, name):
+            return reading_node(node)
+    if "const" in items and name in items["const"]:
+        return {"const": items["const"][name]}
+    if "enum" in items:
+        operands = [o[name] for o in items["enum"] if name in o]
+        if operands:
+            return {"enum": operands}
+    extra = items.get("additionalProperties", True)
+    return extra if isinstance(extra, dict) else True
+
+
 def instance(case, schema):
     """The rows of the case's text as JSON values, or None for a text the probe refuses without naming rows."""
     rows = table(case["text"], case["spec"])
     items = schema.get("items", {})
     if case["no_header"]:
-        node = items.get("items", {})
+        node = reading_node(items.get("items", {}))
         return [[None if c == "" and not q else read_cell(c, q, node) for c, q in r] for r in rows]
     if not rows:
         return []
@@ -161,8 +199,6 @@ def instance(case, schema):
     for j, name in enumerate(names):
         if name not in keep or case["dups"] != "first":
             keep[name] = j
-    props = items.get("properties", {})
-    extra = items.get("additionalProperties", True)
     out = []
     for r in rows[1:]:
         if len(r) != len(names) and not case["ragged"]:
@@ -172,7 +208,7 @@ def instance(case, schema):
             name = names[j] if j < len(names) else str(j + 1)
             if j < len(names) and keep[name] != j or c == "" and not q:
                 continue
-            row[name] = read_cell(c, q, props[name] if name in props else extra if isinstance(extra, dict) else True)
+            row[name] = read_cell(c, q, column_node(items, name))
         out.append(row)
     return out
 
@@ -183,7 +219,7 @@ def expected(case):
     if rows is None:
         return "I"
     validator = jsonschema.Draft202012Validator
-    own = validator(schema.get("items", {}))
+    own = validator({"$defs": schema.get("$defs", {}), **schema.get("items", {})})
     rest = validator({k: v for k, v in schema.items() if k != "items"})
     bad = sorted(i for i, r in enumerate(rows) if not own.is_valid(r))
     if not rest.is_valid(rows):
@@ -208,24 +244,110 @@ PROPERTIES = [
 ESCAPES = ["a\\tb", "\\n", "5\\0", "\\\\", "x\\r"]
 
 
+GROUPS = {
+    "integer": [{"minimum": 1}, {"maximum": 5}, {"exclusiveMinimum": 0}, {"multipleOf": 2}, {}],
+    "number": [{"minimum": 0}, {"maximum": 2.5}, {"multipleOf": 0.5}, {}],
+    "string": [{"maxLength": 2}, {"minLength": 2}, {"pattern": "^[a-z]+$"}, {}],
+    "boolean": [{}],
+}
+
+
+def cell_arms(rng, n=2):
+    kind = rng.choice(sorted(GROUPS))
+    return [{"type": kind, **rng.choice(GROUPS[kind])} for _ in range(n)]
+
+
+def cell_node(rng, defs):
+    """A node of a cell judged by arms that read it alike."""
+    arms = cell_arms(rng, 3)
+    form = rng.choice(["allOf", "anyOf", "oneOf", "not", "if", "ref"])
+    if form == "not":
+        return {"not": arms[0]}
+    if form == "if":
+        node = {"if": arms[0], "then": arms[1]}
+        if rng.random() < 0.6:
+            node["else"] = arms[2]
+        return node
+    if form == "ref":
+        name = "d%d" % len(defs)
+        defs[name] = arms[0]
+        return {"$ref": "#/$defs/" + name, "type": arms[1]["type"], **{k: v for k, v in arms[1].items() if k != "type"}}
+    return {form: arms[: rng.randint(1, 3)]}
+
+
+def row_arms(rng, columns):
+    """A row's arms, which read no cell: they ask which members the row has."""
+    names = sorted(set(columns) | {"z"})
+    def need():
+        return {"required": sorted(rng.sample(names, rng.randint(1, min(2, len(names)))))}
+    form = rng.choice(["allOf", "anyOf", "oneOf", "not", "if", "dependentRequired", "dependentSchemas"])
+    if form == "not":
+        return {"not": need()}
+    if form == "if":
+        node = {"if": need(), "then": need()}
+        if rng.random() < 0.6:
+            node["else"] = need()
+        return node
+    if form == "dependentRequired":
+        return {"dependentRequired": {rng.choice(names): need()["required"]}}
+    if form == "dependentSchemas":
+        return {"dependentSchemas": {rng.choice(names): need()}}
+    return {form: [need() for _ in range(rng.randint(1, 3))]}
+
+
+POOLS = [[1, 2, 5, 2.5], ["x", "5"], [True, False], [None]]
+
+
+def operand_row(rng, columns, kinds):
+    """An object whose value at each column is of the kind `kinds` fixes for it, so that the operands of one enum read a
+    column's cell alike."""
+    row = {}
+    for c in sorted(set(columns)):
+        if rng.random() >= 0.2:
+            row[c] = rng.choice(kinds[c])
+    return row
+
+
 def generate(rng, spec):
     columns = [rng.choice("abcd") for _ in range(rng.randint(1, 4))]
     if rng.random() < 0.7:
         columns = list(dict.fromkeys(columns))
+    mode = rng.choice(["properties"] * 5 + ["cells", "cells", "rows", "rows", "patterns", "patterns", "const", "enum"])
+    defs = {}
     props = {c: rng.choice(PROPERTIES) for c in set(columns)}
     row = {"properties": props}
-    if rng.random() < 0.4:
+    if mode == "cells":
+        props = {c: cell_node(rng, defs) if rng.random() < 0.7 else rng.choice(PROPERTIES) for c in set(columns)}
+        row = {"properties": props}
+    elif mode == "rows":
+        row.update(row_arms(rng, columns))
+    elif mode == "patterns":
+        letters = rng.sample("abcd", rng.randint(1, 2))
+        patterns = {rng.choice(["^%s$", "^%s"]) % l: rng.choice([cell_node(rng, defs), rng.choice(PROPERTIES)]) for l in letters}
+        row = {"properties": {c: p for c, p in props.items() if c not in letters}, "patternProperties": patterns}
+    elif mode == "const":
+        row = {"const": operand_row(rng, columns, {c: rng.choice(POOLS) for c in set(columns)})}
+    elif mode == "enum":
+        kinds = {c: rng.choice(POOLS) for c in set(columns)}
+        row = {"enum": [operand_row(rng, columns, kinds) for _ in range(rng.randint(2, 3))]}
+    if mode in ("properties", "cells", "rows", "patterns") and rng.random() < 0.4:
         row["required"] = sorted(rng.sample(sorted(set(columns)), rng.randint(1, len(set(columns)))))
     extra = rng.choice([None, None, False, {"type": "string"}, {"type": "integer"}])
-    if extra is not None:
+    if extra is not None and mode in ("properties", "cells", "rows", "patterns"):
         row["additionalProperties"] = extra
-    if rng.random() < 0.2:
+    if mode in ("properties", "cells", "rows", "patterns") and rng.random() < 0.2:
         row["minProperties"] = rng.randint(1, 3)
-    if rng.random() < 0.2:
+    if mode in ("properties", "cells", "rows", "patterns") and rng.random() < 0.2:
         row["maxProperties"] = rng.randint(1, 3)
     root = {"type": "array", "items": row}
+    if defs:
+        root["$defs"] = defs
     if rng.random() < 0.15:
         root["minItems"] = rng.randint(1, 3)
+    if rng.random() < 0.1:
+        root["allOf"] = [{"minItems": rng.randint(1, 3)}, {"maxItems": rng.randint(2, 4)}]
+    if rng.random() < 0.05:
+        root["anyOf"] = [{"minItems": 2}, {"maxItems": 1}]
     def cell():
         r = rng.random()
         if r < 0.15:
@@ -253,8 +375,11 @@ def generate(rng, spec):
 
 
 def generate_headless(rng, spec):
-    leaf = rng.choice(PROPERTIES)
+    defs = {}
+    leaf = cell_node(rng, defs) if rng.random() < 0.4 else rng.choice(PROPERTIES)
     root = {"type": "array", "items": {"type": "array", "items": leaf}}
+    if defs:
+        root["$defs"] = defs
     delim = "\t" if spec == "tsv" else ","
     width = rng.randint(1, 3)
     lines = []

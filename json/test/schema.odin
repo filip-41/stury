@@ -4,6 +4,7 @@ import "core:log"
 import "core:mem"
 import "core:mem/virtual"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import core "../../core"
@@ -20,6 +21,22 @@ SUITE :: #directory + "conformance/JSON-Schema-Test-Suite/tests/"
 
 @(private = "file")
 FIXTURES :: #directory + "schema"
+
+// The remote documents the suite's runners serve at `REMOTE_URL`, which a read takes as files under its root.
+@(private = "file")
+REMOTES :: #directory + "conformance/JSON-Schema-Test-Suite/remotes"
+
+@(private = "file")
+REMOTE_URL :: "http://localhost:1234/"
+
+// The suite file at `path` with its remote documents named by `file:` URIs.
+@(private = "file")
+served_suite :: proc(path: string) -> []u8 {
+	bytes, _ := os.read_entire_file_from_path(path, context.allocator)
+	full, _ := os.get_absolute_path(REMOTES, context.allocator)
+	text, _ := strings.replace_all(string(bytes), REMOTE_URL, strings.concatenate({"file://", full, "/"}))
+	return transmute([]u8)text
+}
 
 @(private = "file", rodata)
 SUITE_DRAFTS := [?]struct {
@@ -341,29 +358,33 @@ schema_binds_shapes :: proc(t: ^testing.T) {
 // a sink.
 @(test)
 schema_suite_checks :: proc(t: ^testing.T) {
-	bound, cases, wrong, format_cases := 0, 0, 0, 0
+	bound, cases, wrong, format_cases, read_total, left_out := 0, 0, 0, 0, 0, 0
+	unread := make(map[string]int, context.temp_allocator)
 	refused := make(map[string]int, context.temp_allocator)
 	for entry in SUITE_DRAFTS {
 		w := os.walker_create_path(strings.concatenate({SUITE, entry.dir}, context.temp_allocator))
 		defer os.walker_destroy(&w)
 		for info in os.walker_walk(&w) {
-			// Draft 7's content assertions and the later drafts' `dependencies` are optional behaviour the check leaves out.
-			if info.type != .Regular || !strings.has_suffix(info.name, ".json") || strings.has_suffix(info.fullpath, "optional/content.json") || strings.has_suffix(info.fullpath, "optional/dependencies-compatibility.json") {
+			if info.type != .Regular || !strings.has_suffix(info.name, ".json") {
 				continue
 			}
 			arena: virtual.Arena
 			_ = virtual.arena_init_growing(&arena)
 			defer virtual.arena_destroy(&arena)
 			context.allocator = virtual.arena_allocator(&arena)
-			bytes, _ := os.read_entire_file_from_path(info.fullpath, context.allocator)
+			bytes := served_suite(info.fullpath)
 			doc, _ := core.build(bytes, json.as(.Json))
 			groups := core.children(&doc, core.ROOT)
 			// The format suites run with `format` asserting, since a format is an annotation unless asked to assert.
 			in_formats := strings.contains(info.fullpath, "optional/format/")
+			// Draft 7's content assertions and the later drafts' `dependencies` are optional behaviour the check leaves out.
+			optional_out := strings.has_suffix(info.fullpath, "optional/content.json") || strings.has_suffix(info.fullpath, "optional/dependencies-compatibility.json")
 			for group in core.child_next(&groups) {
 				node, _ := core.member(&doc, group, "schema")
-				c, err := schema.compile(&doc, node, {format_assert = in_formats, resolver = {as = json.as(.Json), draft = entry.draft}})
+				read_total += 1
+				c, err := schema.compile(&doc, node, {format_assert = in_formats, resolver = {as = json.as(.Json), draft = entry.draft, root = REMOTES}})
 				if err != nil {
+					unread[strings.clone(refused_keyword(err), context.temp_allocator)] += 1
 					continue
 				}
 				b, berr := schema.bind(&c, json.as(.Json))
@@ -388,6 +409,10 @@ schema_suite_checks :: proc(t: ^testing.T) {
 					cases += 1
 					format_cases += int(in_formats)
 					if from_node != valid || from_text != valid || from_sink != valid {
+						if optional_out {
+							left_out += 1
+							continue
+						}
 						wrong += 1
 						about, _ := core.member(&doc, test, "description")
 						text, _ := core.text_clone(&doc, about)
@@ -397,10 +422,13 @@ schema_suite_checks :: proc(t: ^testing.T) {
 			}
 		}
 	}
+	for keyword, n in unread {
+		log.infof("read refused %s: %d", keyword, n)
+	}
 	for keyword, n in refused {
 		log.infof("check refused %s: %d", keyword, n)
 	}
-	log.infof("suite checks: %d schemas bound, %d cases (%d of formats), %d wrong", bound, cases, format_cases, wrong)
+	log.infof("suite checks: %d schemas, %d bound, %d cases (%d of formats, %d of left-out optional behaviour judged as annotations), %d wrong", read_total, bound, cases, format_cases, left_out, wrong)
 	testing.expect_value(t, wrong, 0)
 }
 
@@ -520,7 +548,7 @@ schema_check_reports_arms :: proc(t: ^testing.T) {
 		core.render_entry(strings.to_stream(&out), src, e)
 		strings.write_byte(&out, '\n')
 	}
-	testing.expect_value(t, strings.to_string(out), "1:7: Number is below the minimum at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n1:1: Value passes a subschema it must fail (.not)\n1:16: Value is not of the allowed type at .xy (.patternProperties.\"^x\".type)\n1:1: Required member \"q\" is missing (.dependentRequired)\n")
+	testing.expect_value(t, strings.to_string(out), "1:7: Number is below the minimum at .a (.properties.a.allOf[0].minimum)\n1:7: Value passes none of the subschemas at .a (.properties.a.anyOf)\n1:16: Value is not of the allowed type at .xy (.patternProperties.\"^x\".type)\n1:26: Elements are not unique at .l (.properties.l.uniqueItems)\n1:26: Too few elements or members at .l (.properties.l.contains)\n1:1: No value is allowed here (.not)\n1:1: Required member \"q\" is missing (.dependentRequired)\n")
 }
 
 // A failing property name reports its keyword under `propertyNames` at the object, a `false` there allows no name, and a
@@ -773,7 +801,6 @@ schema_check_verdicts :: proc(t: ^testing.T) {
 		{`{"const": "x", "enum": ["y"]}`, `"y"`, false},
 		{`{"const": "x", "enum": ["x", "y"]}`, `"x"`, true},
 		{`{"const": "x", "enum": ["x", "y"]}`, `"y"`, false},
-		{`{"allOf": [{"$ref": "#"}]}`, `2`, false},
 		{`{"patternProperties": {"^a": {"type": "string"}}, "properties": {"ab": {"maxLength": 1}}, "additionalProperties": false}`, `{"ab": "x"}`, true},
 		{`{"patternProperties": {"^a": {"type": "string"}}, "properties": {"ab": {"maxLength": 1}}, "additionalProperties": false}`, `{"ab": 1}`, false},
 		{`{"patternProperties": {"^a": {"type": "string"}}, "properties": {"ab": {"maxLength": 1}}, "additionalProperties": false}`, `{"ac": "xy", "b": 1}`, false},
@@ -985,6 +1012,10 @@ same_schema :: proc(a, b: ^rules.Description, from_a, from_b: rules.Node_Index, 
 		{opt(x.unevaluated_items), opt(y.unevaluated_items)},
 		{opt(x.unevaluated_properties), opt(y.unevaluated_properties)},
 		{opt(x.ref), opt(y.ref)},
+		{opt(x.dynamic_ref), opt(y.dynamic_ref)},
+	}
+	if anchor_names(a, i) != anchor_names(b, j) {
+		return false
 	}
 	for p in pairs {
 		if !same_schema(a, b, p[0], p[1], seen, with_rules) {
@@ -1041,6 +1072,19 @@ same_schema :: proc(a, b: ^rules.Description, from_a, from_b: rules.Node_Index, 
 	return same_schema(a, b, ox.additional, oy.additional, seen, with_rules) && same_schema(a, b, ox.keys, oy.keys, seen, with_rules)
 }
 
+// The dynamic anchor names of node `i`, joined, where the written `_recursive` is the read `$recursive`.
+@(private = "file")
+anchor_names :: proc(d: ^rules.Description, i: rules.Node_Index) -> string {
+	names := make([dynamic]string, context.temp_allocator)
+	for x in d.anchors {
+		if x.node == i {
+			append(&names, strings.trim_left(x.name, "$_"))
+		}
+	}
+	slice.sort(names[:])
+	return strings.join(names[:], " ", context.temp_allocator)
+}
+
 // The node a `$ref` with at most rules beside it reaches, which judges as the reference does, with those rules added to
 // `extra`.
 @(private = "file")
@@ -1088,7 +1132,7 @@ written_back :: proc(t: ^testing.T, d: ^rules.Description, doc: ^core.Document) 
 	return back, text, ""
 }
 
-// Every schema of the suite that reads and has no dynamic reference or draft 4 integer writes and reads back as itself,
+// Every schema of the suite that reads and has no draft 4 integer writes and reads back as itself,
 // and the written schema judges every instance as the schema did, text and document alike, with formats asserted on both
 // sides where the suite asserts them. Verdicts under applicators wait for 5b, which the check does not judge yet, so a
 // schema that does not bind is counted and compared by shape only.
@@ -1100,20 +1144,20 @@ schema_write_reads_back_to_the_suite_schemas :: proc(t: ^testing.T) {
 		w := os.walker_create_path(strings.concatenate({SUITE, entry.dir}, context.temp_allocator))
 		defer os.walker_destroy(&w)
 		for info in os.walker_walk(&w) {
-			if info.type != .Regular || !strings.has_suffix(info.name, ".json") || strings.has_suffix(info.fullpath, "optional/content.json") || strings.has_suffix(info.fullpath, "optional/dependencies-compatibility.json") {
+			if info.type != .Regular || !strings.has_suffix(info.name, ".json") {
 				continue
 			}
 			arena: virtual.Arena
 			_ = virtual.arena_init_growing(&arena)
 			defer virtual.arena_destroy(&arena)
 			context.allocator = virtual.arena_allocator(&arena)
-			bytes, _ := os.read_entire_file_from_path(info.fullpath, context.allocator)
+			bytes := served_suite(info.fullpath)
 			doc, _ := core.build(bytes, json.as(.Json))
 			groups := core.children(&doc, core.ROOT)
 			in_formats := strings.contains(info.fullpath, "optional/format/")
 			for group in core.child_next(&groups) {
 				node, _ := core.member(&doc, group, "schema")
-				c, err := schema.compile(&doc, node, {format_assert = in_formats, resolver = {as = json.as(.Json), draft = entry.draft}})
+				c, err := schema.compile(&doc, node, {format_assert = in_formats, resolver = {as = json.as(.Json), draft = entry.draft, root = REMOTES}})
 				if err != nil {
 					skips["read"] += 1
 					continue
@@ -1122,7 +1166,7 @@ schema_write_reads_back_to_the_suite_schemas :: proc(t: ^testing.T) {
 				back, text, refused := written_back(t, c.description, &back_doc)
 				if refused != "" {
 					skips[refused] += 1
-					testing.expectf(t, refused == "$dynamicRef" || refused == "integer", "%s: refused %s", info.fullpath[len(SUITE):], refused)
+					testing.expectf(t, refused == "integer", "%s: refused %s", info.fullpath[len(SUITE):], refused)
 					continue
 				}
 				written += 1
@@ -1253,7 +1297,6 @@ schema_write_refuses_what_it_cannot_spell :: proc(t: ^testing.T) {
 		text, keyword: string,
 		draft:         schema.Draft,
 	} {
-		{`{"$dynamicRef": "#x", "$dynamicAnchor": "x"}`, "$dynamicRef", .D2020_12},
 		{`{"type": "integer"}`, "integer", .D04},
 	}
 	for c in cases {
@@ -1263,6 +1306,25 @@ schema_write_refuses_what_it_cannot_spell :: proc(t: ^testing.T) {
 		f, _ := werr.(core.Typed_Failure)
 		testing.expectf(t, f.kind == .Unsupported && f.want.text == c.keyword, "%s: %v", c.text, werr)
 	}
+}
+
+// A dynamic reference is written with the `$id` of its resource and the anchors that make it dynamic, and the text reads
+// back as the schema that reached the extension's anchor.
+@(test)
+schema_write_spells_dynamic_references :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	text := `{"$id": "https://x/ext", "$dynamicAnchor": "n", "$ref": "base", "maxProperties": 1, "$defs": {"base": {"$id": "base", "$dynamicAnchor": "n", "properties": {"kid": {"$dynamicRef": "#n"}}}}}`
+	d, _, doc, err := read_text(text)
+	defer core.destroy(&doc)
+	testing.expect(t, err == nil)
+	back_doc: core.Document
+	back, written, refused := written_back(t, &d, &back_doc)
+	defer core.destroy(&back_doc)
+	testing.expect_value(t, refused, "")
+	testing.expect(t, strings.contains(string(written), "\"$dynamicRef\":\"https://schema.invalid/r"))
+	seen: Pairs
+	testing.expect(t, same_schema(&d, back.description, d.root, back.description.root, &seen, true))
 }
 
 // A JSON5 schema's numbers are written as JSON numbers, and one that is not finite is refused naming its keyword.
@@ -1434,4 +1496,144 @@ markup_attributes_survive_an_edit :: proc(t: ^testing.T) {
 	defer delete(written)
 	testing.expect(t, werr == nil)
 	testing.expect_value(t, string(written), `{"price":"5","n":1}`)
+}
+
+// A held value is judged in step with the read at any depth the walk takes, an arm that nests without end is a schema
+// error, and a run's own limit stops the check rather than reading as the arm's failure.
+@(test)
+schema_check_holds_deep_values :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	nested :: proc(depth: int, inner: string) -> string {
+		b := strings.builder_make(context.temp_allocator)
+		for _ in 0 ..< depth {
+			strings.write_byte(&b, '[')
+		}
+		strings.write_string(&b, inner)
+		for _ in 0 ..< depth {
+			strings.write_byte(&b, ']')
+		}
+		return strings.to_string(b)
+	}
+	arrays :: `{"allOf": [{"$ref": "#/$defs/i"}], "$defs": {"i": {"type": "array", "items": {"$ref": "#/$defs/i"}}}}`
+	recursive :: `{"allOf": [{}], "items": {"$ref": "#"}}`
+	any_tree :: `{"$defs": {"s": {"anyOf": [{"type": "integer"}, {"type": "array", "items": {"$ref": "#/$defs/s"}}]}}, "not": {"$ref": "#/$defs/s"}}`
+	// The members reach an object eight and more deep under a `patternProperties` or a `oneOf` arm.
+	gateway :: `{"properties": {"e": {"items": {"$ref": "#/$defs/end"}}}, "$defs": {"end": {"properties": {"b": {"items": {"properties": {"x": {"properties": {"m": {"$ref": "#/$defs/m"}}}}}}}, "patternProperties": {"^@": {}}}, "m": {"properties": {"g": {"properties": {"l": {"items": {"$ref": "#/$defs/m"}}}}}}}}`
+	pages :: `{"properties": {"app": {"properties": {"pages": {"oneOf": [{"items": {"$ref": "#/$defs/p"}}]}}}}, "$defs": {"p": {"properties": {"pages": {"items": {"$ref": "#/$defs/p"}}}}}}`
+	// Each level's `unevaluatedProperties` reads the in-place `allOf` once, whatever the depth below it.
+	children :: `{"$defs": {"n": {"allOf": [{"$ref": "#/$defs/t"}], "unevaluatedProperties": false}, "t": {"type": "object", "properties": {"data": true, "children": {"type": "array", "items": {"$ref": "#/$defs/n"}}}}}, "$ref": "#/$defs/n"}`
+	tree :: proc(depth: int, leaf: string) -> string {
+		b := strings.builder_make(context.temp_allocator)
+		for _ in 0 ..< depth {
+			strings.write_string(&b, `{"children": [`)
+		}
+		strings.write_string(&b, leaf)
+		for _ in 0 ..< depth {
+			strings.write_string(&b, "]}")
+		}
+		return strings.to_string(b)
+	}
+	cases := [?]struct {
+		schema, text: string,
+		valid:        bool,
+		keyword:      string,
+	} {
+		{arrays, nested(8, ""), true, ""},
+		{arrays, nested(64, ""), true, ""},
+		{arrays, nested(1000, ""), true, ""},
+		{recursive, nested(8, ""), true, ""},
+		{recursive, nested(64, ""), true, ""},
+		{recursive, nested(1000, ""), true, ""},
+		{any_tree, nested(256, "1"), false, "not"},
+		{any_tree, nested(600, "1"), false, "not"},
+		{any_tree, nested(600, `"a"`), true, ""},
+		{gateway, `{"e": [{"b": [{"x": {"m": {"g": {"l": [{"r": {"q": {"h": {}}}}]}}}}]}]}`, true, ""},
+		{pages, `{"app": {"pages": [{"pages": [{"pages": [{"pages": [{}]}]}]}]}}`, true, ""},
+		{`{"allOf": [{"minimum": 3}], "properties": {"a": {"$ref": "#/allOf/0", "type": "integer"}}}`, `1`, false, "minimum"},
+		{`{"enum": [[1]], "const": [2]}`, `[1]`, false, "enum"},
+		{`{"enum": [[1]], "const": [2]}`, `[2]`, false, "enum"},
+		{`{"uniqueItems": true}`, `[{"a": 1, "b": [2]}, {"b": [2.0], "a": 1}]`, false, "uniqueItems"},
+		{`{"uniqueItems": true}`, `[{"a": 1}, {"a": 2}, [1], 1, "1", true]`, true, ""},
+		{children, tree(8, `{"data": 1}`), true, ""},
+		{children, tree(64, `{"data": 1}`), true, ""},
+		{children, tree(64, `{"data": 1, "x": 2}`), false, "unevaluatedProperties"},
+	}
+	for c in cases {
+		ch, err := checked_make(c.schema)
+		testing.expect(t, err == nil, c.schema)
+		if err == nil {
+			doc, _ := core.build(transmute([]u8)c.text, json.as(.Json))
+			for from_node in ([?]bool{false, true}) {
+				sink: typed.Sink
+				first := schema.check_node(&ch.bound, &doc, core.ROOT, &sink) if from_node else schema.check(&ch.bound, transmute([]u8)c.text, &sink)
+				testing.expectf(t, (first == nil) == c.valid && (len(sink.entries) == 0) == c.valid, "%s: %v %v", c.schema, first, len(sink.entries))
+				if !c.valid && len(sink.entries) > 0 {
+					words := sink.entries[0].keyword_path
+					testing.expect_value(t, words[len(words) - 1], core.Step(core.Name(c.keyword)))
+				}
+				typed.sink_destroy(&sink)
+			}
+			core.destroy(&doc)
+		}
+		checked_destroy(ch)
+	}
+	// The `$ref` path of the case above is the arm's own, not the first site that reached the node.
+	ch, _ := checked_make(cases[11].schema)
+	sink: typed.Sink
+	schema.check(&ch.bound, transmute([]u8)string(`1`), &sink)
+	testing.expect_value(t, len(sink.entries[0].keyword_path), 3)
+	testing.expect_value(t, sink.entries[0].keyword_path[0], core.Step(core.Name("allOf")))
+	typed.sink_destroy(&sink)
+	checked_destroy(ch)
+	// Many distinct elements are told apart by their hashes.
+	many := strings.builder_make(context.temp_allocator)
+	strings.write_byte(&many, '[')
+	for i in 0 ..< 5000 {
+		if i > 0 {
+			strings.write_byte(&many, ',')
+		}
+		strings.write_int(&many, i)
+	}
+	strings.write_byte(&many, ']')
+	ch, _ = checked_make(`{"uniqueItems": true}`)
+	testing.expect(t, schema.valid(&ch.bound, transmute([]u8)strings.to_string(many)))
+	checked_destroy(ch)
+	// An applicator that reaches its own node with no member or element between is refused when it compiles.
+	doc, _ := core.build(transmute([]u8)string(`{"$defs": {"a": {"allOf": [{"$ref": "#/$defs/a"}]}}, "$ref": "#/$defs/a"}`), json.as(.Json))
+	defer core.destroy(&doc)
+	c, cerr := schema.compile(&doc, core.ROOT, {resolver = {as = json.as(.Json)}})
+	testing.expect(t, cerr != nil)
+	if cerr == nil {
+		schema.destroy(&c)
+	}
+	// So is one that reaches it through a `$dynamicRef`.
+	for text in ([?]string{`{"$dynamicAnchor": "a", "allOf": [{"$dynamicRef": "#a"}]}`, `{"$dynamicAnchor": "a", "if": true, "else": {"$dynamicRef": "#a"}}`}) {
+		dyn, _ := core.build(transmute([]u8)text, json.as(.Json))
+		dc, derr := schema.compile(&dyn, core.ROOT, {resolver = {as = json.as(.Json)}})
+		testing.expect(t, derr != nil, text)
+		if derr == nil {
+			schema.destroy(&dc)
+		}
+		core.destroy(&dyn)
+	}
+}
+
+// A fault in the text under a held value names the place in the text, as it does with no arm.
+@(test)
+schema_check_faults_inside_held_values :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	ch, err := checked_make(`{"items": {"type": "integer"}, "allOf": [{}]}`)
+	testing.expect(t, err == nil)
+	defer checked_destroy(ch)
+	sink: typed.Sink
+	defer typed.sink_destroy(&sink)
+	first := schema.check(&ch.bound, transmute([]u8)string(`[1, 01]`), &sink)
+	testing.expect(t, first != nil)
+	testing.expect_value(t, len(sink.entries), 1)
+	if len(sink.entries) == 1 {
+		testing.expect_value(t, len(sink.entries[0].path), 1)
+		if len(sink.entries[0].path) == 1 {
+			testing.expect_value(t, sink.entries[0].path[0], core.Step(core.Index(1)))
+		}
+	}
 }

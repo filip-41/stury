@@ -171,21 +171,6 @@ description_destroy :: proc(d: ^Description) {
 	d^ = {}
 }
 
-// The first keyword a node of `d` holds that a check of `d` does not judge yet, "" for none.
-unjudged :: proc(d: ^Description) -> string {
-	for &n in d.nodes {
-		switch {
-		case n.dynamic_ref != nil:
-			return "$dynamicRef"
-		case n.unevaluated_items != nil:
-			return "unevaluatedItems"
-		case n.unevaluated_properties != nil:
-			return "unevaluatedProperties"
-		}
-	}
-	return ""
-}
-
 // Whether `n` is a `$ref` and nothing else, which judges a value as the node it reaches does.
 ref_only :: proc(n: ^Node) -> bool {
 	return n.ref != nil && n.kinds == EVERY_KIND && n.rules == {} && n.array < 0 && n.object < 0 && !n.has_enum && n.const_of == nil && len(n.any_of) == 0 && len(n.all_of) == 0 && len(n.one_of) == 0 && n.not == nil && n.cond == {} && n.dynamic_ref == nil && n.unevaluated_items == nil && n.unevaluated_properties == nil

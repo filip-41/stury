@@ -32,13 +32,18 @@ plan_of :: proc(d: ^rules.Description, as: core.As, reads: ^Format_Reads = nil, 
 			fill_node(&b, d, 0, d.root, "")
 		}
 	}
-	if opts.checking && resize(&b.uses, len(b.meta)) != nil {
-		refuse_plan(&b, .No_Memory)
+	if opts.checking {
+		for u in b.uses {
+			if len(u.applies) > 0 {
+				p.fork = fork_record(&b)
+				break
+			}
+		}
+		if resize(&b.uses, len(b.meta)) != nil {
+			refuse_plan(&b, .No_Memory)
+		}
 	}
 	p.leaves, p.uses = b.leaves[:], b.uses[:]
-	for u in p.uses {
-		p.held ||= len(u.applies) > 0
-	}
 	return p, core.error_of(plan_finish(&b, description_stamp(d, as, opts)))
 }
 
@@ -67,15 +72,15 @@ fill_node :: proc(b: ^Builder, d: ^rules.Description, at: int, at_node: rules.No
 		f.kind = .Any
 	case null && .Null in kinds:
 		f.kind = .Maybe
-		node_list(b, d, {typeid_of(Maybe(rules.Node)), i32(at_node)}, at_node, &m, false)
+		node_list(b, d, {typeid_of(Maybe(rules.Node)), i32(at_node), 0}, at_node, &m, false)
 	case leaf == {.Object} && n.object >= 0 && (len(o.members) > 0 || o.additional == rules.NONE):
-		node_struct(b, d, {typeid_of(rules.Object), n.object}, o, &f, &m)
+		node_struct(b, d, {typeid_of(rules.Object), n.object, 0}, o, &f, &m)
 	case leaf == {.Object}:
 		f.kind = .Map
-		node_list(b, d, {typeid_of(rules.Object), n.object}, o.additional, &m)
+		node_list(b, d, {typeid_of(rules.Object), n.object, 0}, o.additional, &m)
 	case leaf == {.Array}:
 		f.kind = .Slice
-		node_list(b, d, {typeid_of(rules.Array), n.array}, d.arrays[n.array].items if n.array >= 0 else rules.NONE, &m)
+		node_list(b, d, {typeid_of(rules.Array), n.array, 0}, d.arrays[n.array].items if n.array >= 0 else rules.NONE, &m)
 	case leaf == {.Bool}:
 		f.kind = .Bool
 	case leaf == {.Integer}:
@@ -110,9 +115,13 @@ node_struct :: proc(b: ^Builder, d: ^rules.Description, key: Block_Key, o: rules
 // an array's prefix and items records a block its uses share.
 @(private)
 fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, at: int, use: rules.Node_Index, name: string, edge: rules.Rules, site: []core.Step, bare := false) {
-	depth := enter(b, name)
-	defer b.depth = depth
+	depth, scope := enter(b, name), b.scope
+	defer b.depth, b.scope = depth, scope
 	node, refs := reached(d, use)
+	for x, hop := use, 0; x != rules.NONE && hop <= refs; hop += 1 {
+		enter_scope(b, d, arena, x)
+		x = d.nodes[x].ref.? or_else node
+	}
 	f := Field{meta = u32(at)}
 	m := Meta{name = name, block = -1, capture = -1}
 	u: Use
@@ -142,11 +151,11 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 			if len(o.patterns) > 0 {
 				o.additional = rules.NONE
 			}
-			if !known_struct(b, {typeid_of(rules.Object), n.object}, &f, &m) && struct_block(b, {typeid_of(rules.Object), n.object}, &f, &m, o.members, false) >= 0 {
+			if !known_struct(b, {typeid_of(rules.Object), n.object, b.scope}, &f, &m) && struct_block(b, {typeid_of(rules.Object), n.object, b.scope}, &f, &m, o.members, false) >= 0 {
 				checked_members(b, d, arena, m.block, o)
 			}
 			if o.additional != rules.NONE {
-				u.additional = checked_block(b, d, arena, {typeid_of(Maybe(rules.Object)), n.object}, nil, o.additional, ADDITIONAL)
+				u.additional = checked_block(b, d, arena, {typeid_of(Maybe(rules.Object)), n.object, b.scope}, nil, o.additional, ADDITIONAL)
 			}
 			if keys, _ := reached(d, o.keys); keys != rules.NONE && holds(d, keys, {}) {
 				refuse_plan(b, .Unsupported, text = "propertyNames")
@@ -156,14 +165,14 @@ fill_checked :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocato
 		}
 		if .Array in n.kinds {
 			a := d.arrays[n.array] if n.array >= 0 else rules.Array{items = rules.NONE}
-			u.items = checked_block(b, d, arena, {typeid_of(rules.Array), n.array}, a.prefix, a.items, ITEMS)
+			u.items = checked_block(b, d, arena, {typeid_of(rules.Array), n.array, b.scope}, a.prefix, a.items, ITEMS)
 			items, _ := reached(d, a.items)
 			u.inside = len(a.prefix) > 0 || items != rules.NONE
 		}
 	}
 	// A container of a kind the node reads no block for opens on the block that reads nothing, so its close judges it.
 	if m.block < 0 || u.items == 0 {
-		nothing := checked_block(b, d, arena, {typeid_of(rules.Array), -1}, nil, rules.NONE, ITEMS)
+		nothing := checked_block(b, d, arena, {typeid_of(rules.Array), -1, 0}, nil, rules.NONE, ITEMS)
 		m.block = nothing if m.block < 0 else m.block
 		u.items = nothing if u.items == 0 else u.items
 	}
@@ -209,6 +218,78 @@ reached :: proc(d: ^rules.Description, node: rules.Node_Index) -> (rules.Node_In
 		node = d.nodes[node].ref.?
 	}
 	return node, hops
+}
+
+// A dynamic scope: the resource with dynamic anchors entered last, under the scope `outer`, 0 for the scope of none.
+@(private)
+Scope :: struct {
+	outer:    i32,
+	resource: rules.Node_Index,
+}
+
+// Enters the resource of `node` when it has a dynamic anchor of a name no resource of the scope has, the only entry
+// that can change what a `$dynamicRef` reaches.
+@(private)
+enter_scope :: proc(b: ^Builder, d: ^rules.Description, arena: runtime.Allocator, node: rules.Node_Index) {
+	if node == rules.NONE || len(d.anchors) == 0 {
+		return
+	}
+	if len(b.scopes) == 0 {
+		b.scopes.allocator = arena
+		append(&b.scopes, Scope{resource = rules.NONE})
+	}
+	resource := d.nodes[node].resource
+	fresh := false
+	for x in d.anchors {
+		if x.resource == resource && !bound(b, d, x.name) {
+			fresh = true
+		}
+	}
+	if !fresh {
+		return
+	}
+	for x, i in b.scopes {
+		if x == {b.scope, resource} {
+			b.scope = i32(i)
+			return
+		}
+	}
+	append(&b.scopes, Scope{b.scope, resource})
+	b.scope = i32(len(b.scopes) - 1)
+}
+
+// Whether a resource of the scope has a dynamic anchor named `name`.
+@(private)
+bound :: proc(b: ^Builder, d: ^rules.Description, name: string) -> bool {
+	for at := b.scope; at != 0; at = b.scopes[at].outer {
+		for x in d.anchors {
+			if x.name == name && x.resource == b.scopes[at].resource {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The node a `$dynamicRef` that first reaches `node` judges by in the current scope: the dynamic anchor of the same name in
+// the outermost resource that has one, else `node`.
+@(private)
+dynamic_target :: proc(b: ^Builder, d: ^rules.Description, node: rules.Node_Index) -> rules.Node_Index {
+	name, named := "", false
+	for x in d.anchors {
+		if x.node == node {
+			name, named = x.name, true
+		}
+	}
+	target := node
+	for at := b.scope; named && at != 0; at = b.scopes[at].outer {
+		for x in d.anchors {
+			if x.name == name && x.resource == b.scopes[at].resource {
+				target = x.node
+			}
+		}
+	}
+	return target
 }
 
 // The `Meta.rule_set` of the leaf of `n` with `edge` added, 0 when it judges nothing.
@@ -287,7 +368,7 @@ node_union :: proc(b: ^Builder, d: ^rules.Description, at_node: rules.Node_Index
 		return -1
 	}
 	m.arms, m.no_nil = made, count == len(all)
-	key := Block_Key{typeid_of(rules.Node), i32(at_node)}
+	key := Block_Key{typeid_of(rules.Node), i32(at_node), 0}
 	at, known := b.blocks[key]
 	if !known {
 		at = reserve_block(b, count + 1, key)

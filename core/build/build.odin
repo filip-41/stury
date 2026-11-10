@@ -209,6 +209,11 @@ builder_hook_plain :: #force_inline proc "contextless" (h: ^Builder, s: core.Hoo
 	return builder_step(false, false, false, false, h, s, t)
 }
 
+// Stores tokens with no facts and a capacity test, for a build fed tokens one at a time with no reservation.
+builder_hook_grow :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {
+	return builder_step(false, true, false, false, h, s, t)
+}
+
 // Stores tokens with no facts, with the duplicate-key test compiled in, for a build that refuses repeats.
 // `builder_hook_plain` compiles the test out.
 builder_hook_plain_refuse :: #force_inline proc "contextless" (h: ^Builder, s: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) {

@@ -10,6 +10,7 @@ package dsv
 
 import "base:runtime"
 import core "../core"
+import build "../core/build"
 import typed "../core/typed"
 
 @(private)
@@ -140,63 +141,89 @@ check_cells :: proc(src: []u8, $S: Spec, target: rawptr, T: typeid, plan: ^typed
 	return typed.read_end(&h.c, regs, fault)
 }
 
-// The plan's `node_check` of the record `node` of `doc`, or of the root as a list of its records. A header is the table's,
-// so a partial document, whose records name their own columns, is refused. A cell reaches the check as a `Plain` of its
-// text whatever kind the document gave it, as the text's cells do, with an empty cell for a `null`.
+// A check of a document: the cells' state beside the document and the position of the next kept cell of a record read by
+// position.
+@(private)
+Check_Document :: struct {
+	cells:      Check_Cells,
+	doc:        ^core.Document,
+	kept:       int, // the first of `Document.kept` that may name a node not yet read
+	pos:        int, // the position of the next cell of a record read by position
+	positional: bool, // the rows are lists, so a record a path left partial names its cells by position
+	fill:       bool, // the record being fed is partial and positional
+}
+
+// The plan's `node_check` of the record `node` of `doc`, or of the root as a list of its records, fed by
+// `build.feed_nodes` with the cell step. A cell reaches the check as a `Plain` of its text whatever kind the document gave
+// it, as the text's cells do, with an empty cell for a `null`. A partial document names its columns beside each cell it
+// kept, or by position, where a cell it did not keep is an empty one.
 @(private)
 document_check :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, target: rawptr, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator) -> core.Typed_Error {
-	root := node == core.ROOT
-	if doc.partial || !root && doc.nodes[node].kind <= .Plain {
+	if node != core.ROOT && doc.nodes[node].kind <= .Plain {
 		return {kind = .Unsupported}
 	}
-	h := Check_Cells{dups = read.dups}
+	d := Check_Document{doc = doc, cells = {dups = read.dups}, positional = options_of(doc.as).no_header}
+	h := &d.cells
 	frames: [ROW_FRAMES]typed.Frame = ---
 	regs, err := typed.check_start(&h.c, doc.src, untracked(plan), doc.as, T, target, read, untracked_frames(frames[:]), allocator)
 	if err.kind != .None {
 		return err
 	}
-	header := core.header_of(doc)
-	if header != 0 {
+	if core.header_of(doc) != 0 {
 		h.keys = header_keys(doc)
 		h.drop = make([]bool, len(h.keys), context.temp_allocator)
 		defer delete(h.drop, context.temp_allocator)
 	}
-	action := core.Action.Next
-	if root {
-		regs, action = on_check_cell(&h, regs, {kind = .Array, role = .Value, lo = doc.nodes[0].lo})
-	}
-	to := u32(node) + doc.nodes[node].n
-	for i := u32(node) + u32(root); i < to && action != .Stop; i += doc.nodes[i].n {
-		if doc.nodes[i].role == .Key {
-			continue
-		}
-		rec := doc.nodes[i]
-		rec.role = .Value
-		if regs, action = on_check_cell(&h, regs, rec); action == .Stop {
-			break
-		}
-		for c in i + 1 ..< i + rec.n {
-			cell := doc.nodes[c]
-			if cell.kind == .Number || cell.kind == .True || cell.kind == .False {
-				cell.spelling = 0
-			}
-			cell.kind = .Plain
-			if header != 0 {
-				if regs, action = on_check_cell(&h, regs, doc.nodes[int(header) + 1 + int(c - i - 1)]); action == .Stop {
-					break
-				}
-			}
-			if regs, action = on_check_cell(&h, regs, cell); action == .Stop {
-				break
-			}
-		}
-		if action != .Stop {
-			end := doc.readers.close_end(doc, core.Node_Index(i))
-			regs, action = on_check_cell(&h, regs, {kind = .End, role = .Value, lo = end - u64(len(line_end_before(doc.src, end))), n = u32(len(line_end_before(doc.src, end)))})
-		}
-	}
-	if root && action != .Stop {
-		regs, _ = on_check_cell(&h, regs, {kind = .End, role = .Value, lo = u64(len(doc.src))})
+	// A row holds scalars, so the replay never nests past the root and a record.
+	ends: [2 * 4]u32 = ---
+	if !build.feed_nodes(doc, u32(node), u32(node) + doc.nodes[node].n, &d, &regs, ends[:], check_step, check_keyed, build.no_deepen, true) {
+		return {kind = .No_Memory}
 	}
 	return typed.read_end(&h.c, regs, nil)
+}
+
+// A token of the replay as the text's walk gives it to `on_check_cell`: a cell is a `Plain` of its text, a partial
+// record's cells before the one it kept are empty, and an `End` stands at its record's line end.
+@(private)
+check_step :: proc "contextless" (d: ^Check_Document, regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
+	t := t
+	switch {
+	case t.role == .Key:
+	case t.kind == .End:
+		if at == core.ROOT {
+			t.lo, t.n = u64(len(d.doc.src)), 0
+		} else {
+			context = d.cells.c.ctx
+			end := d.doc.readers.close_end(d.doc, at)
+			t.n = u32(len(line_end_before(d.doc.src, end)))
+			t.lo = end - u64(t.n)
+		}
+	case t.kind == .Object || t.kind == .Array:
+		d.pos, d.fill = 0, t.role == .Partial && d.positional
+		t.role = .Value
+	case:
+		regs, action := regs, core.Action.Next
+		if d.fill {
+			k := kept_position(d.doc, &d.kept, at)
+			for ; d.pos < k && action == .Next; d.pos += 1 {
+				regs, action = on_check_cell(&d.cells, regs, {kind = .Plain, role = .Value, lo = t.lo})
+			}
+			d.pos += 1
+		}
+		if t.kind == .Number || t.kind == .True || t.kind == .False {
+			t.spelling = 0
+		}
+		t.kind = .Plain
+		if action != .Next {
+			return regs, action
+		}
+		return on_check_cell(&d.cells, regs, t)
+	}
+	return on_check_cell(&d.cells, regs, t)
+}
+
+// The header's cell above the value at node `i` of the record `open`.
+@(private)
+check_keyed :: proc "contextless" (d: ^Check_Document, _: core.Hook_Regs, i, open: core.Node_Index) -> (core.Node_Index, bool) {
+	return core.header_of(d.doc) + 1 + (i - open - 1), d.doc.nodes[open].kind == .Object
 }

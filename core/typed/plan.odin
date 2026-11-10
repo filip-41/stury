@@ -114,7 +114,7 @@ Use :: struct {
 	step:                    bool, // a prefix record, which moves the cursor on to the next element's
 	inside:                  bool,
 	node:                    Markup_Node, // the node of a markup element a member record reads
-	// A held record's arms, which judge its value from the document a check reads, empty for any other record.
+	// A held record's arms, which judge its value as the check reads it, empty for any other record.
 	applies:                 []Apply,
 }
 
@@ -252,8 +252,9 @@ Plan :: struct {
 	leaves:    []rules.Leaf,
 	// A description's plan's `Use` of each record, by its `Meta` index.
 	uses:      []Use,
-	// A description's plan with a held record, whose check of a text checks the document the text builds.
-	held:      bool,
+	// A description's plan's record that reads every value inside a held value, which hands it to the held value's
+	// runs, 0 for a plan with no held record.
+	fork:      i32,
 	// What `leaves` and `uses` allocate: patterns, enum keys, keyword steps and the uses.
 	arena:     ^virtual.Arena,
 }
@@ -285,15 +286,20 @@ Builder :: struct {
 	rule_sets:     [dynamic]rules.Rules,
 	leaves:        [dynamic]rules.Leaf,
 	uses:          [dynamic]Use,
+	// The dynamic scope the record being filled is in, an index of `scopes`, and what `evaluates` made per node and scope.
+	scope:         i32,
+	scopes:        [dynamic]Scope,
+	evaluated:     map[Block_Key]^Evaluates,
 }
 
 // What a block is recorded under for its next use and for a value that holds itself: a type and the rule set its
 // element was given, or for a description plan the table (`rules.Array`, `rules.Object`, `rules.Node`,
-// `Maybe(rules.Node)`) and the index of the block's shape.
+// `Maybe(rules.Node)`) and the index of the block's shape, with the dynamic scope it was filled in.
 @(private)
 Block_Key :: struct {
-	type: typeid,
-	of:   i32,
+	type:  typeid,
+	of:    i32,
+	scope: i32,
 }
 
 // A format's plan maker, which `core.Services.plans` points at: `plan_build` and what the format's reads and writes add.
@@ -848,11 +854,11 @@ fill_bit_set :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v
 	}
 	f.kind = .Bit_Set
 	m.list = true
-	if at, ok := b.blocks[{ti.id, 0}]; ok {
+	if at, ok := b.blocks[{ti.id, 0, 0}]; ok {
 		m.block = at
 		return
 	}
-	m.block = reserve_block(b, 2, {ti.id, 0})
+	m.block = reserve_block(b, 2, {ti.id, 0, 0})
 	if m.block < 0 {
 		return
 	}
@@ -871,10 +877,10 @@ fill_bit_set :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v
 // a `Never` record.
 @(private)
 any_block :: proc(b: ^Builder) -> i32 {
-	if at, ok := b.blocks[{typeid_of(any), 0}]; ok {
+	if at, ok := b.blocks[{typeid_of(any), 0, 0}]; ok {
 		return at
 	}
-	at := reserve_block(b, 4, {typeid_of(any), 0})
+	at := reserve_block(b, 4, {typeid_of(any), 0, 0})
 	if at < 0 {
 		return -1
 	}
@@ -898,11 +904,11 @@ list :: proc(b: ^Builder, m: ^Meta, ti, elem: ^runtime.Type_Info, stride: u32, r
 	case:
 		m.zeroed = true
 	}
-	if at, ok := b.blocks[{ti.id, rule_set}]; ok {
+	if at, ok := b.blocks[{ti.id, rule_set, 0}]; ok {
 		m.block = at
 		return
 	}
-	m.block = reserve_block(b, 2, {ti.id, rule_set})
+	m.block = reserve_block(b, 2, {ti.id, rule_set, 0})
 	if m.block < 0 {
 		return
 	}
@@ -935,10 +941,10 @@ fill_union :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: 
 		}
 	}
 	// The arms take the union's rules, which apply to the value of whichever arm reads it.
-	if at, ok := b.blocks[{ti.id, m.rule_set}]; ok {
+	if at, ok := b.blocks[{ti.id, m.rule_set, 0}]; ok {
 		m.block = at
 	} else {
-		m.block = reserve_block(b, len(v.variants) + 1, {ti.id, m.rule_set})
+		m.block = reserve_block(b, len(v.variants) + 1, {ti.id, m.rule_set, 0})
 		if m.block < 0 {
 			return
 		}
@@ -1074,7 +1080,7 @@ Member :: struct {
 // fixed before any member's type is read, so a recursive type meets it whole.
 @(private)
 fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v: runtime.Type_Info_Struct) {
-	if known_struct(b, {ti.id, 0}, f, m) {
+	if known_struct(b, {ti.id, 0, 0}, f, m) {
 		return
 	}
 	members: [dynamic]Member
@@ -1093,7 +1099,7 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 		}
 	}
 	n := len(members)
-	at := struct_block(b, {ti.id, 0}, f, m, members[:], capture != nil)
+	at := struct_block(b, {ti.id, 0, 0}, f, m, members[:], capture != nil)
 	if at < 0 {
 		return
 	}

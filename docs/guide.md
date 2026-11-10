@@ -77,7 +77,7 @@ shows that `.Json` refuses a comment that `.Jsonc` takes:
 `core/schema` compiles a JSON Schema (drafts 4 to 2020-12) once and binds it to a format. `schema.check` judges a text
 and puts every failure in a `typed.Sink`, each with its position, its path and the keywords that failed it. With a
 `core.Runner`, a long text of records (`schema.check_records`) or an array at the root whose rules apply to each entry
-is checked on its threads, with the entries a serial check gives. `write.write_basic` and `write.write_problem` write the
+is checked on its threads, with the entries a serial check gives. `schema.write_basic` and `write.write_problem` write the
 entries as the JSON Schema basic output or an RFC 9457 problem document.
 
 ```odin

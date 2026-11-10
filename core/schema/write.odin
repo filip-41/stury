@@ -10,9 +10,10 @@ import "../write"
 
 // Writes `d` as a 2020-12 JSON Schema in the format `as`. A node that is used twice, or that a `$ref` reaches, goes to
 // `$defs` under its name in `d` or `n<index>` and is referred to, so a shared or recursive node is written once, with
-// the rules a member adds beside its `$ref`. A description with a dynamic reference, an operand the format cannot spell
-// and a draft 4 integer are `.Unsupported`, naming the keyword in `want.text`. A `format` is written as `format`, so a
-// reader must assert formats, with `Options.format_assert`, to judge them.
+// the rules a member adds beside its `$ref`. A description with dynamic anchors writes each of its schema resources under
+// an `$id` of its own, so a `$dynamicRef` reaches the anchors it reached, and refers to every node by an absolute URI. An
+// operand the format cannot spell and a draft 4 integer are `.Unsupported`, naming the keyword in `want.text`. A `format`
+// is written as `format`, so a reader must assert formats, with `Options.format_assert`, to judge them.
 write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, allocator := context.allocator) -> (text: []u8, err: core.Error) {
 	uses, e := make([]u8, len(d.nodes), allocator)
 	refs: []string
@@ -29,7 +30,22 @@ write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, 
 	}
 	defer delete(w.uses, allocator)
 	defer delete(w.refs, allocator)
+	w.anchored = len(d.anchors) > 0
 	count(&w, d.root, false)
+	for x in d.anchors {
+		count(&w, x.node, true)
+	}
+	// A node written under a resource's `$defs` needs the resource written, as a definition of the root.
+	for changed := w.anchored; changed; {
+		changed = false
+		for u, j in w.uses {
+			resource := d.nodes[j].resource
+			if u == 2 && resource != d.root && w.uses[resource] != 2 {
+				count(&w, resource, true)
+				changed = true
+			}
+		}
+	}
 	if w.refused != "" {
 		return nil, core.error_of(core.Typed_Error{kind = .Unsupported, want = {text = w.refused}})
 	}
@@ -46,23 +62,8 @@ write :: proc(d: ^rules.Description, as: core.As, opts := core.Write_Options{}, 
 	} else {
 		write.open_object(&w.t)
 		put(&w, "$schema", "https://json-schema.org/draft/2020-12/schema")
-		body(&w, root, root.rules)
-		defs := false
-		for u, j in w.uses {
-			if u != 2 || rules.Node_Index(j) == d.root {
-				continue
-			}
-			if !defs {
-				key(&w, "$defs")
-				write.open_object(&w.t)
-				defs = true
-			}
-			write.key(&w.t, w.refs[j][len(DEFS):])
-			node(&w, rules.Node_Index(j), {})
-		}
-		if defs {
-			write.close(&w.t)
-		}
+		body(&w, d.root, root, root.rules)
+		put_defs(&w, d.root)
 		write.close(&w.t)
 	}
 	terr: core.Typed_Error
@@ -85,6 +86,7 @@ Writer :: struct {
 	refs:    []string, // per node reached twice, the reference to it
 	keyword: string, // the keyword being written, which stops at the first refusal
 	refused: string, // the first keyword the description holds that no schema spells
+	anchored: bool, // the description has dynamic anchors, so every resource has an `$id` and every reference is absolute
 }
 
 // Counts how each node is reached. A node's children are counted once.
@@ -99,9 +101,7 @@ count :: proc(w: ^Writer, i: rules.Node_Index, by_ref: bool) {
 		return
 	}
 	n := &w.d.nodes[i]
-	if n.dynamic_ref != nil {
-		refuse(w, "$dynamicRef")
-	}
+	count(w, n.dynamic_ref.? or_else rules.NONE, true)
 	if n.integer_spelled {
 		refuse(w, "integer")
 	}
@@ -173,10 +173,61 @@ plain_name :: proc(name: string) -> bool {
 	return true
 }
 
-// The text of a reference to node `i`.
+// The text of a reference to node `i`. A node of a description with dynamic anchors is reached through the `$id` of its
+// resource, since the base of a reference is the resource it is in.
 @(private = "file")
 ref_to :: proc(w: ^Writer, i: rules.Node_Index) -> string {
-	return "#" if i == w.d.root else w.refs[i]
+	if !w.anchored {
+		return "#" if i == w.d.root else w.refs[i]
+	}
+	if w.d.nodes[i].resource == i {
+		return id_of(i)
+	}
+	return strings.concatenate({id_of(w.d.nodes[i].resource), w.refs[i]}, context.temp_allocator)
+}
+
+// A 2019-09 recursive anchor is named `$recursive`, which an anchor of 2020-12 cannot be.
+@(private = "file")
+anchor_name :: proc(name: string) -> string {
+	return strings.concatenate({"_", name[1:]}, context.temp_allocator) if strings.has_prefix(name, "$") else name
+}
+
+@(private = "file")
+id_of :: proc(resource: rules.Node_Index) -> string {
+	return strings.concatenate({"https://schema.invalid/r", int_text(int(resource))}, context.temp_allocator)
+}
+
+// The node that holds the definition of node `j`: the root, or in a description with dynamic anchors the root of the
+// resource of `j`, since a reference by name stays in the resource it is read in. A resource root is a definition of the
+// root.
+@(private = "file")
+home_of :: proc(w: ^Writer, j: rules.Node_Index) -> rules.Node_Index {
+	if !w.anchored || w.d.nodes[j].resource == j {
+		return w.d.root
+	}
+	return w.d.nodes[j].resource
+}
+
+// The `$defs` of `owner`: the nodes reached twice that it holds.
+@(private = "file")
+put_defs :: proc(w: ^Writer, owner: rules.Node_Index) {
+	opened := false
+	for u, j in w.uses {
+		at := rules.Node_Index(j)
+		if u != 2 || at == owner || at == w.d.root || home_of(w, at) != owner {
+			continue
+		}
+		if !opened {
+			key(w, "$defs")
+			write.open_object(&w.t)
+			opened = true
+		}
+		write.key(&w.t, w.refs[j][len(DEFS):])
+		node(w, at, {})
+	}
+	if opened {
+		write.close(&w.t)
+	}
 }
 
 // A schema for node `i`: a reference when the node is shared, with the rules `extra` that a use adds beside it, else
@@ -211,13 +262,26 @@ node :: proc(w: ^Writer, i: rules.Node_Index, extra: rules.Rules) {
 	if clash != "" {
 		refuse(w, clash)
 	}
-	body(w, n, rl)
+	body(w, i, n, rl)
+	if w.anchored && n.resource == i {
+		put_defs(w, i)
+	}
 	write.close(&w.t)
 }
 
 // The keywords of `n` with its rules `rl`, in the open object.
 @(private = "file")
-body :: proc(w: ^Writer, n: ^rules.Node, rl: rules.Rules) {
+body :: proc(w: ^Writer, i: rules.Node_Index, n: ^rules.Node, rl: rules.Rules) {
+	if w.anchored {
+		if n.resource == i {
+			put(w, "$id", id_of(i))
+		}
+		for x in w.d.anchors {
+			if x.node == i {
+				put(w, "$dynamicAnchor", anchor_name(x.name))
+			}
+		}
+	}
 	if n.kinds != rules.EVERY_KIND {
 		key(w, "type")
 		many := card(n.kinds) > 1
@@ -235,6 +299,14 @@ body :: proc(w: ^Writer, n: ^rules.Node, rl: rules.Rules) {
 	}
 	if ref, ok := n.ref.?; ok {
 		put(w, "$ref", ref_to(w, ref))
+	}
+	if target, ok := n.dynamic_ref.?; ok {
+		for x in w.d.anchors {
+			if x.node == target {
+				put(w, "$dynamicRef", strings.concatenate({id_of(x.resource), "#", anchor_name(x.name)}, context.temp_allocator))
+				break
+			}
+		}
 	}
 	if n.has_enum {
 		key(w, "enum")

@@ -123,6 +123,9 @@ compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max
 	}
 	ka, kb := value_kind(a), value_kind(b)
 	if ka != kb {
+		if c, read := compare_plain(a, ka, b, kb); read {
+			return c
+		}
 		return -1 if ka < kb else 1
 	}
 	#partial switch ka {
@@ -195,6 +198,65 @@ compare :: proc(a, b: Value, depth := 0, eq := false, too_deep: ^bool = nil, max
 		}
 	}
 	return 0
+}
+
+// The kind and the double a cell `v`, a `Plain` node of a delimited text, reads as against a value of kind `like`, by the cell
+// rule of a schema: a number operand reads the text, quotes cut, with the loose grammar, a boolean one `true` and `false`, and a
+// null one an unquoted `null`. `ok` is false for a value that is no such cell or whose text does not read so, which stays
+// the string its format gives it.
+@(private = "file")
+plain_reading :: proc(v: Value, like: Kind) -> (kind: Kind, f: f64, ok: bool) {
+	r, is_node := plain(v).(Node_Ref)
+	if !is_node || int(r.node) >= len(r.doc.nodes) || r.doc.nodes[r.node].kind != .Plain {
+		return
+	}
+	n := r.doc.nodes[r.node]
+	buf: [64]u8
+	text, got := doc_text(r.doc, r.node, buf[:])
+	if !got {
+		return
+	}
+	#partial switch like {
+	case .Number:
+		if num, _, _, loose := spell.number_loose(transmute([]u8)text, 0, u64(len(text))); loose {
+			return .Number, number_f64(num, text), true
+		}
+	case .True, .False:
+		if text == "true" || text == "false" {
+			return .True if text == "true" else .False, 0, true
+		}
+	case .Null:
+		if text == "null" && n.spelling & SPELLING_QUOTED == 0 {
+			return .Null, 0, true
+		}
+	}
+	return
+}
+
+// The order of `a` and `b` whose kinds differ, when one is a cell that reads as the other's kind. `read` is false otherwise.
+@(private = "file")
+compare_plain :: proc(a: Value, ka: Kind, b: Value, kb: Kind) -> (order: int, read: bool) {
+	if kind, x, ok := plain_reading(a, kb); ok {
+		if kind != kb {
+			return -1 if kind < kb else 1, true
+		}
+		if kind == .Number {
+			y, _, _ := double_of(b)
+			return -1 if x < y else (1 if x > y else 0), true
+		}
+		return 0, true
+	}
+	if kind, y, ok := plain_reading(b, ka); ok {
+		if kind != ka {
+			return -1 if ka < kind else 1, true
+		}
+		if kind == .Number {
+			x, _, _ := double_of(a)
+			return -1 if x < y else (1 if x > y else 0), true
+		}
+		return 0, true
+	}
+	return 0, false
 }
 
 // Whether `a` and `b` are equal: `compare` with `eq` gives 0.
@@ -393,14 +455,33 @@ string_text :: proc(v: Value) -> string {
 	return ""
 }
 
-// A hash of `v` that two equal values share: a number's is its double's, so two literals of one double share it.
-hash :: proc(v: Value, seed := u64(0xcbf29ce484222325)) -> u64 {
+// A hash of `v` that two equal values share: a number's is its double's when its literal is that double's shortest decimal, and
+// its exact decimal otherwise, so literals of one double that `equal` tells apart seldom share it. With `like`
+// the value `v` is to be equal to, a cell reads as `like`'s kind as `compare` reads it, and a container's members read as
+// the members of `like` at their keys or positions.
+hash :: proc(v: Value, seed := u64(0xcbf29ce484222325), like: Value = nil) -> u64 {
 	h := seed
 	k := value_kind(v)
+	f: f64
+	if like != nil && k != value_kind(like) {
+		if kind, x, ok := plain_reading(v, value_kind(like)); ok {
+			k, f = kind, x
+		}
+	}
 	h = mix(h, u64(k))
 	#partial switch k {
 	case .Number:
-		f, _, _ := double_of(v)
+		if f == 0 {
+			digits: string
+			f, digits, _ = double_of(v)
+			// A literal of at most DBL_DIG characters inside the normal range is its double's shortest decimal.
+			if a := abs(f); digits != "" && !(len(digits) <= 15 && a > 1e-300 && a < 1e300) {
+				// Out of decNumber's range `compare` reads the doubles, so the hash does too.
+				if d, in_range := decimal_in_range(digits); in_range && !shortest_of_double(d, f) {
+					return mix_decimal(h, d)
+				}
+			}
+		}
 		h = mix(h, transmute(u64)(f + 0)) // + 0: -0 and 0 are one number
 	case .String:
 		s := string_text(v)
@@ -409,9 +490,10 @@ hash :: proc(v: Value, seed := u64(0xcbf29ce484222325)) -> u64 {
 		}
 		h = mix(h, u64(len(s)))
 	case .Array:
-		it := value_children(v)
+		it, other := value_children(v), value_children(like) if value_kind(like) == .Array else Value_Iter{}
 		for m in value_child_next(&it) {
-			h = mix(h, hash(m, seed))
+			twin, _ := value_child_next(&other)
+			h = mix(h, hash(m, seed, twin))
 		}
 	case .Object:
 		// The members are summed, so their order does not count. A repeated key counts once, with its last value.
@@ -419,11 +501,47 @@ hash :: proc(v: Value, seed := u64(0xcbf29ce484222325)) -> u64 {
 		members := sorted_members(v)
 		defer delete(members)
 		for m in members {
-			sum += mix(hash(m.key, seed), hash(m.val, seed))
+			twin: Value
+			if value_kind(like) == .Object {
+				twin, _ = value_member(like, m.key)
+			}
+			sum += mix(hash(m.key, seed), hash(m.val, seed, twin))
 		}
 		h = mix(h, sum)
 	}
 	return h
+}
+
+// The hash `h` mixed with the exact value of `d`, whose digits carry no leading or trailing zero.
+@(private = "file")
+mix_decimal :: proc(seed: u64, d: spell.Decimal) -> u64 {
+	h := mix(seed, u64(d.neg) | u64(d.saturated) << 1)
+	for b in transmute([]u8)d.head {
+		h = mix(h, u64(b))
+	}
+	h = mix(h, 0x2e)
+	for b in transmute([]u8)d.tail {
+		h = mix(h, u64(b))
+	}
+	return mix(h, u64(d.point))
+}
+
+// Whether decimal `d`, a literal read as the double `f`, is the shortest decimal that double reads back from.
+@(private = "file")
+shortest_of_double :: proc(d: spell.Decimal, f: f64) -> bool {
+	if d.head == "" {
+		return true
+	}
+	if d.saturated || math.is_inf(f) || f == 0 {
+		return false
+	}
+	if a := abs(f); len(d.head) + len(d.tail) <= 15 && a > 1e-300 && a < 1e300 {
+		return true // at most DBL_DIG digits
+	}
+	buf: [spell.F64_ROOM]u8
+	short := spell.decimal_of(string(buf[:spell.f64_text(&buf[0], f)]))
+	order, exact := spell.decimal_compare(d, short)
+	return exact && order == 0
 }
 
 @(private = "file")

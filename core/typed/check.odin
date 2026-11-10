@@ -14,14 +14,22 @@ Check :: struct {
 	using reader: Reader,
 	// The keyword steps a failure's path takes after its value's use site, before the rule's keyword.
 	after:        []core.Step,
-	// What the path and the keyword path of a check of a held value start with, nil for a check of the whole value.
-	outer:        ^Outer,
-	// The held values this check is judging one inside the other, which `MAX_HELD` bounds.
+	// The run of an arm this check is, nil for the outermost check, the held value open in it, and the runs it shares.
+	run:          ^Run,
+	fork:         ^Fork,
+	pool:         ^Pool,
+	// The held containers a run took over, innermost first.
+	taken:        ^Fork,
+	// The held values this check's value is judged by one inside the other, which `MAX_HELD` bounds.
 	nest:         int,
+	// What stopped the check past its sink, which stops the checks it is an arm of.
+	fatal:        core.Typed_Error_Kind,
+	// What the path and the keyword path of the outermost check's entries start with, nil for none.
+	outer:        ^Outer,
 }
 
-// The path to a held value and the keyword steps to the subschema it is judged by.
-@(private)
+// The path to a value inside a larger one and the keyword steps to the subschema it is judged by, which a check of that
+// value starts its entries' paths with.
 Outer :: struct {
 	path, words: []core.Step,
 }
@@ -50,7 +58,11 @@ Text_Build :: #type proc(src: []u8, as: core.As, allocator: runtime.Allocator) -
 // Starts a `Check` read, as `read_start` starts a read of the plan's own type. Its sink takes `core.Error_Entry`s.
 check_start :: proc(c: ^Check, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
 	regs, err = read_start(&c.reader, src, plan, as, T, target, read, frames, allocator)
-	c.wide = true
+	c.wide, c.outer = true, read.outer
+	// A check started again over its own pool gives back the held value an earlier record stopped in.
+	if c.fork != nil && c.fork.open {
+		fork_release(c, c.fork)
+	}
 	return
 }
 
@@ -64,19 +76,10 @@ unmarshal_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: 
 
 // Reads `src` into `target` as `unmarshal_text` does, with every refusal in `read.sink.entries`. Returns the first.
 check_text :: proc(src: []u8, target: rawptr, T: typeid, plan: ^Plan, read: Read_Options, allocator := context.allocator) -> core.Error {
-	if plan == nil || plan.check == nil || plan.held && plan.build == nil {
+	if plan == nil || plan.check == nil {
 		return core.error_of(plan_mismatch(plan, nil, T))
 	}
-	if !plan.held {
-		return core.error_of(plan.check(src, plan.as, target, T, plan, read, allocator))
-	}
-	// A held record judges its value from the nodes of the document.
-	doc, err := plan.build(src, plan.as, context.allocator)
-	defer core.destroy(&doc)
-	if err.kind != .None {
-		return core.error_of(err)
-	}
-	return check_document(&doc, core.ROOT, target, T, plan, read, allocator)
+	return core.error_of(plan.check(src, plan.as, target, T, plan, read, allocator))
 }
 
 // The value `t` at a `Checked` record: judges a scalar by the record's leaf, and opens a container a rule reads inside,
@@ -109,13 +112,13 @@ check_value :: #force_inline proc "contextless" (h: ^Check, regs: core.Hook_Regs
 				return next, .Stop
 			}
 		} else if len(u.applies) > 0 {
-			return next, check_held(h, regs, u, t)
+			return fork_value(h, regs, next, u, t)
 		}
 		return next, .Next
 	}
 	if first == nil {
-		if len(u.applies) > 0 && check_held(h, regs, u, t) == .Stop {
-			return next, .Stop
+		if len(u.applies) > 0 {
+			return fork_value(h, regs, next, u, t)
 		}
 		return next, .Skip
 	}
@@ -484,6 +487,9 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 		regs.b = u64(uintptr(&h.plan.fields[u.additional]))
 		return regs, .Next
 	}
+	if len(u.applies) > 0 {
+		return regs, fork_token(h, t)
+	}
 	regs.c += 1
 	return regs, .Skip
 }
@@ -493,6 +499,12 @@ check_key :: proc "contextless" (h: ^Check, regs: core.Hook_Regs, t: core.Token)
 @(cold)
 @(private)
 check_close :: #force_no_inline proc "contextless" (h: ^Check, f: ^Frame, owner: ^Field, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action) #no_bounds_check {
+	if h.taken != nil && h.sp == h.taken.below {
+		return taken_close(h, f, owner, regs, t)
+	}
+	if len(h.plan.uses[owner.meta].applies) > 0 {
+		return fork_close(h, f, regs, t)
+	}
 	m := &h.plan.meta[owner.meta]
 	at := core.Hook_Regs{f.a, f.b, f.c}
 	back := core.Hook_Regs{f.a, f.b + (size_of(Field) if h.plan.uses[owner.meta].step else 0), f.c + 1}

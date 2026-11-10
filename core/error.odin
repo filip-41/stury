@@ -88,14 +88,24 @@ Lines :: struct {
 
 // Returns the line and column of byte `byte_at` in `src`, both counted from 1. A line ends at LF, so CR LF ends one
 // line and a lone CR is a byte of the line. The column counts bytes. `byte_at` may be `len(src)`, and a larger value
-// is clamped to it. When `byte_at` is before `lines.at`, the count restarts at byte 0. A nil `lines` counts from byte
+// is clamped to it. When `byte_at` is before `lines.at`, the count goes back over the bytes between. A nil `lines` counts from byte
 // 0 for this call only.
 locate :: proc "contextless" (src: []u8, byte_at: u64, lines: ^Lines = nil) -> (line, col: u64) {
 	at := min(byte_at, u64(len(src)))
 	fresh: Lines
 	l := lines if lines != nil else &fresh
 	if at < l.at {
-		l^ = {}
+		// Back over the bytes between, so a text read out of order costs the distance and not the text.
+		for i in at ..< l.at {
+			if src[i] == '\n' {
+				l.line -= 1
+			}
+		}
+		l.line_lo = at
+		for l.line_lo > 0 && src[l.line_lo - 1] != '\n' {
+			l.line_lo -= 1
+		}
+		l.at = at
 	}
 	for i in l.at ..< at {
 		if src[i] == '\n' {
@@ -472,7 +482,6 @@ Typed_Error_Kind :: enum u8 {
 	Not_Allowed, // a value where a rule takes none
 	No_Arm, // a value that passes none of a rule's subschemas
 	Many_Arms, // a value that passes more than one of a rule's subschemas, where it takes one
-	Matches_Not, // a value that passes the subschema a rule wants it to fail
 }
 
 // The steps a `Typed_Error` holds.
@@ -611,7 +620,6 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Not_Allowed   = {"not_allowed", "No value is allowed here"},
 	.No_Arm        = {"no_arm", "Value passes none of the subschemas"},
 	.Many_Arms     = {"many_arms", "Value passes more than one subschema"},
-	.Matches_Not   = {"matches_not", "Value passes a subschema it must fail"},
 }
 
 // The messages of a schema check's entries, which name keywords and not a type's fields, where they differ.
@@ -1017,11 +1025,20 @@ render :: proc(w: io.Writer, src: []u8, err: Error, lines: ^Lines = nil) -> io.E
 }
 
 // The message of a check's entry `e`, in a schema's words where the entry has a keyword path and the kind has such words.
-entry_message :: proc(e: Error_Entry) -> string {
-	if len(e.keyword_path) > 0 && SCHEMA_MESSAGES[e.kind] != "" {
-		return SCHEMA_MESSAGES[e.kind]
+// A missing member is named, which only the entry's operand does.
+write_entry_message :: proc(w: io.Writer, e: Error_Entry) -> io.Error {
+	if name, named := e.operand.(string); named && e.kind == .Missing_Field {
+		io.write_string(w, "Required member ") or_return
+		io.write_quoted_string(w, name) or_return
+		io.write_string(w, " is missing") or_return
+		return nil
 	}
-	return TYPED_KIND_RULES[e.kind].message
+	if len(e.keyword_path) > 0 && SCHEMA_MESSAGES[e.kind] != "" {
+		_, err := io.write_string(w, SCHEMA_MESSAGES[e.kind])
+		return err
+	}
+	_, err := io.write_string(w, TYPED_KIND_RULES[e.kind].message)
+	return err
 }
 
 // The stable code of a check's entry `e`, which a problem document and a caller match on.
@@ -1033,13 +1050,7 @@ entry_code :: proc(e: Error_Entry) -> string {
 // it in parentheses and the message in a schema's words where the entry has one. `lines` is as in `render_fault`.
 render_entry :: proc(w: io.Writer, src: []u8, e: Error_Entry, lines: ^Lines = nil) -> io.Error {
 	write_position(w, src, e.start, lines) or_return
-	if name, named := e.operand.(string); named && e.kind == .Missing_Field {
-		io.write_string(w, "Required member ") or_return
-		io.write_quoted_string(w, name) or_return
-		io.write_string(w, " is missing") or_return
-	} else {
-		io.write_string(w, entry_message(e)) or_return
-	}
+	write_entry_message(w, e) or_return
 	if len(e.path) > 0 {
 		io.write_string(w, " at ") or_return
 		write_steps(w, e.path, true) or_return

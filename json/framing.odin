@@ -28,6 +28,7 @@ FRAMING := records.Framing_Services {
 DOCS := records.Record_Docs {
 	scan  = scan_record,
 	read  = read_record,
+	check_run = check_run,
 	build = build_record,
 	build_next = build_next,
 }
@@ -569,6 +570,87 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 		err^ = typed.read_end(&h, regs, nil)
 	}
 	return ok
+}
+
+@(private)
+check_run :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, visit: records.Record_Visit, data: rawptr) {
+	switch Spec(it.as.spec) {
+	case .Json:  check_run_spec(it, plan, read, visit, data, .Json)
+	case .Jsonc: check_run_spec(it, plan, read, visit, data, .Jsonc)
+	case .Json5: check_run_spec(it, plan, read, visit, data, .Json5)
+	}
+}
+
+// Checks the records of `it` under `.Concatenated` or `.Entries` as `Record_Docs.check_run` says. The records are walked in
+// place, once, by the framing walk with the check as its hook. The check's state is made once and set back to its start
+// for each record, except for a plan that holds a value, whose arms leave state in it.
+@(private)
+check_run_spec :: proc(it: ^records.Reader, plan: ^typed.Plan, read: typed.Read_Options, visit: records.Record_Visit, data: rawptr, $S: Spec) {
+	opts := options_of(it.as)
+	if it.framing < .Concatenated || read.dups == .Refuse {
+		it.fault = core.Fault{kind = .Bad_Option}
+		return
+	}
+	on :: typed.on_token_check_spelled when S == .Json5 else typed.on_token_check
+	stack: [core.MAX_DEPTH + 2]typed.Frame = ---
+	frames := untracked_frames(stack[:])
+	walk_opts := opts
+	target: u8
+	h: typed.Check
+	regs, start: core.Hook_Regs
+	renew, held := true, plan.fork != 0
+	for {
+		if renew {
+			// The pool's runs and forks keep no entry's state, so each entry takes them over and temp does not grow per
+			// entry.
+			pool, fork := h.pool, h.fork
+			h = {}
+			h.pool, h.fork = pool, fork
+			json_reader(&h.reader, untracked(&walk_opts), S)
+			started: core.Typed_Error
+			start, started = typed.check_start(&h, it.src, plan, plan.as, nil, &target, read, frames, context.allocator)
+			if started.kind != .None {
+				it.fault = core.Fault{kind = .Bad_Option}
+				return
+			}
+			h.ctx.temp_allocator = context.temp_allocator
+			renew = held
+		} else {
+			h.sp, h.fatal, h.wrap_sp, h.wrap, h.expect = 1, .None, 0, nil, nil
+			h.first.kind = .None
+			h.frames[0].seen = 0
+		}
+		regs = start
+		pos, state := it.pos, it.state
+		kept := typed.sink_mark(read.sink)
+		rec, ok, stopped := frame_walked(it, S, opts, &h, &regs, on)
+		// A walk with a hook reads the comments after a value, so a fault there is past the record, and a walk the hook
+		// stopped did not find its end. The framing's own walk finds where the record ends.
+		if stopped || it.fault != nil {
+			it.pos, it.state, it.fault = pos, state, nil
+			rec, ok = it.services.next[it.framing](it)
+		}
+		first: core.Typed_Error
+		if ok && h.first.kind != .None {
+			first = typed.read_end(&h, regs, nil)
+		}
+		if held {
+			typed.read_release(&h, frames)
+		}
+		if !ok {
+			typed.sink_restore(read.sink, kept)
+			break
+		}
+		if !visit(data, rec, first) {
+			break
+		}
+		if read.sink != nil {
+			read.sink.record += 1
+		}
+	}
+	if !held {
+		typed.read_release(&h, frames)
+	}
 }
 
 // Builds the document of `rec`'s text, under `.Seq` as `seq_fault` frames it. Its offsets in a fault count from the

@@ -16,6 +16,9 @@ Sink :: struct {
 	max_errors: int,
 	record:     i64,
 	truncated:  bool,
+	// The fault that ended a read, which is set whatever `max_errors` kept, so a text that does not parse is never an
+	// entry a limit can drop.
+	fatal:      core.Typed_Error,
 }
 
 // What a collection held before a read, so a read taken back leaves it as it was. A nil collection's is zero.
@@ -23,6 +26,22 @@ Sink_Mark :: struct {
 	errors:    int,
 	entries:   int,
 	truncated: bool,
+}
+
+// How many entries or errors `c` keeps: its `max_errors`, 100 when that is 0.
+sink_limit :: #force_inline proc "contextless" (c: ^Sink) -> int {
+	return c.max_errors if c.max_errors != 0 else 100
+}
+
+// Appends `e` to the entries of `c` unless it holds its limit, which it marks as truncated. Says whether `e` was added,
+// and an error when memory ran out, which is no truncation.
+sink_add :: proc(c: ^Sink, e: core.Error_Entry) -> (added: bool, err: runtime.Allocator_Error) {
+	if len(c.entries) >= sink_limit(c) {
+		c.truncated = true
+		return
+	}
+	_, err = append(&c.entries, e)
+	return err == nil, err
 }
 
 sink_mark :: #force_inline proc(c: ^Sink) -> Sink_Mark {
@@ -38,6 +57,7 @@ sink_restore :: proc(c: ^Sink, m: Sink_Mark) {
 		}
 		resize(&c.entries, m.entries)
 		c.truncated = m.truncated
+		c.fatal = {}
 	}
 }
 
@@ -155,7 +175,7 @@ note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error, end: u64, ke
 	if c == nil {
 		return
 	}
-	if len(c.entries) >= (c.max_errors if c.max_errors != 0 else 100) {
+	if len(c.entries) >= (sink_limit(c)) {
 		c.truncated = true
 		return
 	}
@@ -172,19 +192,20 @@ note :: proc(h: ^Reader, regs: core.Hook_Regs, e: core.Typed_Error, end: u64, ke
 @(private)
 entry_add :: proc(c: ^Sink, e: core.Typed_Error, h: ^Reader, regs: core.Hook_Regs, held: bool, held_step: core.Step, end: u64, keyword: Maybe(string)) -> bool {
 	context.allocator = c.entries.allocator
-	steps := make([dynamic]core.Step, context.temp_allocator)
+	// The paths are built in the sink's allocator and freed, so a sink a held value drops costs nothing that stays.
+	steps, words := make([dynamic]core.Step), make([dynamic]core.Step)
+	defer delete(steps)
+	defer delete(words)
 	if held {
 		append(&steps, held_step)
 	}
 	steps_of(h, regs, held, &steps)
-	words := make([dynamic]core.Step, context.temp_allocator)
 	if word, keyed := keyword.?; keyed && h.plan.checking {
 		ck := (^Check)(h)
-		if ck.outer != nil {
-			#reverse for s in ck.outer.path {
-				append(&steps, s)
-			}
-			append(&words, ..ck.outer.words)
+		if ck.run != nil {
+			run_outer(ck.run, &steps, &words)
+		} else {
+			outer_add(ck, &steps, &words)
 		}
 		for i in 1 ..< h.sp {
 			append(&words, ..h.plan.uses[field_at(h.frames[i].b).meta].site)
@@ -245,7 +266,7 @@ sink_refusal :: proc(c: ^Sink, e: core.Typed_Error, $wide: bool) {
 		if c == nil {
 			return
 		}
-		if len(c.entries) >= (c.max_errors if c.max_errors != 0 else 100) {
+		if len(c.entries) >= (sink_limit(c)) {
 			c.truncated = true
 			return
 		}
@@ -266,7 +287,7 @@ sink_error :: proc(c: ^Sink, e: core.Typed_Error) {
 	if c == nil {
 		return
 	}
-	if len(c.errors) >= (c.max_errors if c.max_errors != 0 else 100) {
+	if len(c.errors) >= (sink_limit(c)) {
 		c.truncated = true
 	} else {
 		append(&c.errors, e)
@@ -282,13 +303,13 @@ path_of :: proc(h: ^Reader, regs: core.Hook_Regs, e: ^core.Typed_Error) {
 	path_close(e)
 }
 
-// Walks the open frames outward from the registers, handing `add_step` each step, innermost first. `skip` drops the
-// step of the innermost frame, which the caller already holds.
+// Walks the open frames outward from the registers, handing `add_step` each step, innermost first, from the frame below
+// `below` when it is set. `skip` drops the step of the innermost frame, which the caller already holds.
 @(private)
-steps_of :: proc(h: ^Reader, regs: core.Hook_Regs, skip_first: bool, out: ^$O) {
+steps_of :: proc(h: ^Reader, regs: core.Hook_Regs, skip_first: bool, out: ^$O, below := 0) {
 	cur := h.wrap^ if int(h.wrap_sp) == h.sp else regs
 	skip := skip_first
-	for i := h.sp - 1; i >= 1; i -= 1 {
+	for i := (below if below > 0 else h.sp) - 1; i >= 1; i -= 1 {
 		f := &h.frames[i]
 		if !skip {
 			if step, ok := step_at(h, f, cur); ok {

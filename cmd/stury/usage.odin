@@ -139,7 +139,7 @@ Options:
       --max-depth n         refuse nesting past n levels (default 1024);
       --schema file         also check each input against a JSON Schema and
                             tell every failure, exit 1;
-      --schema-ref dir      the directory a file reference may read;
+      --schema-ref dir      the directory a file reference may read, the schema's by default;
       --format-assert       make format fail an input;
       --max-errors n        keep at most n failures of an input;
       --report kind         tell failures as lines (default), basic (the JSON

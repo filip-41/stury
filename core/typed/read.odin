@@ -39,6 +39,8 @@ Read_Options :: struct {
 	unknown:        Unknown_Fields,
 	borrow_strings: bool,
 	sink:        ^Sink,
+	// What a `Check`'s entries start their paths with, nil for none.
+	outer:       ^Outer,
 }
 
 // What a key the type does not name does.
@@ -70,6 +72,7 @@ Reader :: struct {
 	expect:    ^Field,
 	mant:      u64,
 	frames:    [^]Frame,
+	home:      [^]Frame, // the frames the read started with, its caller's
 	sp:        int,
 	borrow:    bool,
 	first_key: bool, // `.First`
@@ -107,7 +110,7 @@ read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As
 	r.ctx.allocator = allocator
 	// The frame below the root's is read as a parent's and never written past `seen`.
 	frames[0].seen = 0
-	r.frames, r.sp, r.src, r.plan = raw_data(frames), 1, src, plan
+	r.frames, r.home, r.sp, r.src, r.plan = raw_data(frames), raw_data(frames), 1, src, plan
 	r.borrow, r.sink = read.borrow_strings, read.sink
 	r.view.as = as
 	if read.dups == .All {
@@ -122,8 +125,7 @@ read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As
 // Gives the read room for at least `want` frames in place of the `have` it holds, on the default heap with the frames
 // open, for a walk that nests past those it has. Returns the room, or false when it does not fit in memory. A copy holds
 // the old frames beside the new, so the room grows eightfold, and to as deep as the text can nest once a step would
-// pass half of that. The frames a read starts with are its caller's and at most `MAX_DEPTH + 2`, and `read_release`
-// frees a grown copy.
+// pass half of that. The frames a read starts with are its caller's, and `read_release` frees a grown copy.
 @(cold)
 grow_frames :: #force_no_inline proc "contextless" (h: ^Reader, have, want: int) -> (int, bool) {
 	bound := len(h.src) + 18
@@ -134,7 +136,7 @@ grow_frames :: #force_no_inline proc "contextless" (h: ^Reader, have, want: int)
 	if n <= have {
 		return have, true
 	}
-	grown := have > core.MAX_DEPTH + 2
+	grown := h.frames != h.home
 	wide := runtime.heap_resize(h.frames, n * size_of(Frame)) if grown else runtime.heap_alloc(n * size_of(Frame), false)
 	if wide == nil {
 		return have, false
@@ -171,10 +173,18 @@ plan_mismatch :: proc "contextless" (plan: ^Plan, readers: ^core.Readers, T: typ
 // Ends a read: gives the open lists to their destinations, so what the read allocated is reachable from the target, and
 // returns the first refusal or `fault`.
 read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Error {
+	if r.plan.checking {
+		taken_settle((^Check)(r))
+	}
 	if f, faulted := fault.?; faulted {
 		context = r.ctx
 		e := core.Typed_Error{kind = .Walk, at = f.at, inner = f}
-		note(r, regs, e, f.at)
+		if r.sink != nil {
+			r.sink.fatal = e
+		}
+		if !r.plan.checking || !fault_note((^Check)(r), regs, e) {
+			note(r, regs, e, f.at)
+		}
 	}
 	// A read ended early gives each open list to its destination.
 	top, child := regs, false

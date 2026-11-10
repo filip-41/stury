@@ -47,7 +47,8 @@ pend :: proc(r: ^Reader, sc: Scope, node: rules.Node_Index, site: Site, keyword,
 }
 
 // Resolves every reference the read met. Loading a file reads its resources, whose references join the list. A
-// reference that leads back to its own node through references alone has no value to judge, so it is refused.
+// reference that leads back to its own node through references and in-place subschemas alone judges the same value
+// without end, so it is refused.
 @(private)
 resolve_all :: proc(r: ^Reader) {
 	for k := 0; k < len(r.pending) && r.err == nil; k += 1 {
@@ -65,20 +66,61 @@ resolve_all :: proc(r: ^Reader) {
 			r.d.nodes[p.node].ref = target
 		}
 	}
+	seen := make([]bool, len(r.d.nodes), context.temp_allocator)
+	todo := make([dynamic]rules.Node_Index, context.temp_allocator)
 	for p in r.pending {
-		at := p.node
-		for _ in 0 ..< len(r.d.nodes) {
-			next, has := r.d.nodes[at].ref.?
-			if !has {
-				break
-			}
-			if next == p.node {
+		n := &r.d.nodes[p.node]
+		if n.ref == nil && n.dynamic_ref == nil {
+			continue
+		}
+		slice.fill(seen, false)
+		clear(&todo)
+		in_place(r.d, p.node, &todo)
+		for len(todo) > 0 {
+			at := pop(&todo)
+			if at == p.node {
 				resize(&r.path, 0)
 				append(&r.path, ..p.path)
-				fail(r, p.site, p.keyword, "leads back to itself through references alone")
+				fail(r, p.site, p.keyword, "leads back to itself through references and in-place subschemas alone")
 				return
 			}
-			at = next
+			if !seen[at] {
+				seen[at] = true
+				in_place(r.d, at, &todo)
+			}
+		}
+	}
+}
+
+// Adds to `out` the subschemas that judge the value `node` judges: its references and its in-place applicators. A
+// `$dynamicRef` may reach any dynamic anchor of its target's name.
+@(private)
+in_place :: proc(d: ^rules.Description, node: rules.Node_Index, out: ^[dynamic]rules.Node_Index) {
+	n := &d.nodes[node]
+	if y, has := n.dynamic_ref.?; has {
+		for a in d.anchors {
+			if a.node == y {
+				for b in d.anchors {
+					if b.name == a.name {
+						append(out, b.node)
+					}
+				}
+			}
+		}
+	}
+	for x in ([?]Maybe(rules.Node_Index){n.ref, n.dynamic_ref, n.not, n.cond.test, n.cond.then, n.cond.other}) {
+		if y, has := x.?; has {
+			append(out, y)
+		}
+	}
+	for list in ([?][]rules.Node_Index{n.all_of, n.any_of, n.one_of}) {
+		append(out, ..list)
+	}
+	if n.object >= 0 {
+		for x in d.objects[n.object].dependents {
+			if y, has := x.node.?; has {
+				append(out, y)
+			}
 		}
 	}
 }

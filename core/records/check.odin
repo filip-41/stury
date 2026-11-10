@@ -5,39 +5,40 @@ import "core:sync"
 import core ".."
 import typed "../typed"
 
-// A check of one record's text: adds the failures it finds to `sink`, nil for a verdict only, with offsets from the text's
-// first byte and the record index `sink.record`, and returns the first failure. A `.Walk` failure ends the records. It runs
-// on any thread of a run, so it holds no state of its own.
-Record_Check :: #type proc(data: rawptr, text: []u8, sink: ^typed.Sink) -> core.Typed_Error
-
-// What one piece of a check found: its records' failures, the records it read, the first failure it met and whether it
-// stopped on a `.Walk` failure, which an earlier failure of the piece does not hide.
+// What one piece of a check found: its records' failures, the records it read, the first failure it met and the fault
+// that stopped it, which an earlier failure of the piece does not hide and a limit of entries does not drop.
 @(private)
 Checked :: struct {
 	sink:    typed.Sink,
 	records: i64,
 	failure: core.Typed_Error,
-	ended:   bool,
+	// The index in the piece of the record `failure` is the first failure of.
+	failed:  i64,
+	fatal:   core.Typed_Error,
 }
 
 @(private)
 Check_Job :: struct {
-	check:  Record_Check,
-	data:   rawptr,
+	plan:   ^typed.Plan,
+	outer:  ^typed.Outer,
 	collect: bool,
 	max:    int,
 	allocator: runtime.Allocator,
 	lock:   sync.Mutex,
 	pieces: [dynamic]Checked,
+	// Set when a piece could not keep its result.
+	no_memory: bool,
 }
 
-// Checks each record of `src` read from byte `at` under `framing` by `check`, on the threads of `runner` when it has
+// Checks each record of `src` read from byte `at` under `framing` by `plan`, whose paths and keyword paths start with
+// `outer` when it is given, on the threads of `runner` when it has
 // any, and gives the answer one thread gives. The failures go to `sink` in source order with record indexes counted from
 // the first record, up to its `max_errors`, and with a runner the sink's entries are allocated with the heap, so a sink
 // with an allocator of its own is checked on this thread. The result is the number of records read and the first failure,
-// whose kind is `.None` for none, and whether the records ended on a fault, which is a `.Walk` entry after the failures
-// before it. With no sink the check stops at the first failure.
-check_each :: proc(src: []u8, as: core.As, framing: core.Framing, check: Record_Check, data: rawptr, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0) -> (records: i64, failure: core.Typed_Error, ended: bool) {
+// whose kind is `.None` for none, and the fault the records ended on, whose kind is `.None` for none, which is a `.Walk`
+// or a `.No_Memory` and outranks the failures before it. With no sink the check stops at the first failure. The last result
+// is the index of the record the failure is the first of.
+check_each :: proc(src: []u8, as: core.As, framing: core.Framing, plan: ^typed.Plan, outer: ^typed.Outer, sink: ^typed.Sink = nil, runner: ^core.Runner = nil, at: u64 = 0) -> (records: i64, failure: core.Typed_Error, fatal: core.Typed_Error, failed: i64) {
 	heap := runtime.heap_allocator()
 	runner := runner
 	if sink != nil && sink.entries.allocator.procedure != nil && sink.entries.allocator.procedure != heap.procedure {
@@ -46,7 +47,7 @@ check_each :: proc(src: []u8, as: core.As, framing: core.Framing, check: Record_
 	if sink != nil && sink.entries.allocator.procedure == nil {
 		sink.entries.allocator = heap if runner != nil else context.allocator
 	}
-	job := Check_Job{check = check, data = data, collect = sink != nil, max = sink.max_errors if sink != nil else 0}
+	job := Check_Job{plan = plan, outer = outer, collect = sink != nil, max = sink.max_errors if sink != nil else 0}
 	if sink != nil {
 		job.allocator = sink.entries.allocator
 	}
@@ -68,76 +69,118 @@ check_each :: proc(src: []u8, as: core.As, framing: core.Framing, check: Record_
 				continue
 			}
 			e.record += records
-			if sink == nil || len(sink.entries) >= (sink.max_errors if sink.max_errors != 0 else 100) {
-				if sink != nil {
-					sink.truncated = true
-				}
-				continue
+			added, err := typed.sink_add(sink, e)
+			if err != nil {
+				return records, failure, {kind = .No_Memory}, failed
 			}
-			if _, err := append(&sink.entries, e); err != nil {
-				sink.truncated = true
-				continue
+			if added {
+				e = {}
 			}
-			e = {}
 		}
 		if sink != nil {
 			sink.truncated ||= p.sink.truncated
 		}
+		if failure.kind == .None && p.failure.kind != .None {
+			failure, failed = p.failure, records + p.failed
+		}
 		records += p.records
-		if failure.kind == .None {
-			failure = p.failure
+		if p.fatal.kind != .None {
+			return records, failure, p.fatal, failed
 		}
-		if p.ended {
-			return records, failure, true
-		}
+	}
+	if job.no_memory {
+		return records, failure, {kind = .No_Memory}, failed
 	}
 	if f, bad := fault.?; bad {
 		walk := core.Typed_Error{kind = .Walk, inner = f, at = f.at}
 		failure = walk if failure.kind == .None else failure
-		if sink != nil && len(sink.entries) < (sink.max_errors if sink.max_errors != 0 else 100) {
-			append(&sink.entries, core.Error_Entry{kind = .Walk, start = f.at, end = f.at, record = records})
+		// The entry only places the fault among the failures, the fault itself is returned.
+		if sink != nil {
+			_, _ = typed.sink_add(sink, core.Error_Entry{kind = .Walk, start = f.at, end = f.at, record = records})
 		}
-		return records, failure, true
+		return records, failure, walk, failed
 	}
 	return
+}
+
+// What the visit of a piece's records needs.
+@(private)
+Piece_Run :: struct {
+	job: ^Check_Job,
+	p:   Checked,
 }
 
 // A piece's task: checks its records in order, and keeps what it finds for the merge.
 @(private)
 check_piece :: proc(job: ^Check_Job, it: ^Reader, k: int) -> bool {
-	p := Checked{}
+	run := Piece_Run{job = job}
+	p := &run.p
 	p.sink.max_errors = job.max
 	p.sink.entries.allocator = job.allocator
-	for {
-		rec, more := next(it)
-		if !more {
-			break
-		}
-		first := len(p.sink.entries)
-		p.sink.record = p.records
-		e := job.check(job.data, rec.text, &p.sink if job.collect else nil)
-		for &x in p.sink.entries[first:] {
-			x.start += rec.at
-			x.end += rec.at
-		}
-		p.records += 1
-		if e.kind == .None {
-			continue
-		}
-		core.move_typed_error(&e, rec.at)
-		p.failure = e if p.failure.kind == .None else p.failure
-		p.ended = e.kind == .Walk
-		if !job.collect || p.ended {
-			break
+	sink := &p.sink if job.collect else nil
+	if it.docs != nil && it.docs.check_run != nil && it.framing >= .Concatenated {
+		it.docs.check_run(it, job.plan, {sink = sink, outer = job.outer}, piece_visit, &run)
+	} else {
+		for {
+			rec, more := next(it)
+			if !more {
+				break
+			}
+			first := len(p.sink.entries)
+			p.sink.record = p.records
+			target: u8
+			e := job.plan.check(rec.text, job.plan.as, &target, nil, job.plan, {sink = sink, outer = job.outer}, context.allocator)
+			for &x in p.sink.entries[first:] {
+				x.start += rec.at
+				x.end += rec.at
+			}
+			core.move_typed_error(&e, rec.at)
+			core.move_typed_error(&p.sink.fatal, rec.at)
+			if !piece_note(job, p, e) {
+				break
+			}
 		}
 	}
-	more := p.failure.kind == .None || job.collect && !p.ended
+	more := p.failure.kind == .None || job.collect && p.fatal.kind == .None
 	sync.guard(&job.lock)
 	if k >= len(job.pieces) {
-		resize(&job.pieces, k + 1)
+		if resize(&job.pieces, k + 1) != nil {
+			job.no_memory = true
+			typed.sink_destroy(&p.sink)
+			return false
+		}
 	}
-	job.pieces[k] = p
+	job.pieces[k] = p^
 	return more
+}
+
+@(private)
+piece_visit :: proc(data: rawptr, rec: Record, first: core.Typed_Error) -> bool {
+	run := (^Piece_Run)(data)
+	return piece_note(run.job, &run.p, first)
+}
+
+// Takes in the check of one more record, whose failure `e` and entries are from the input's first byte, and says whether
+// the piece goes on.
+@(private)
+piece_note :: proc(job: ^Check_Job, p: ^Checked, e: core.Typed_Error) -> bool {
+	fatal := p.sink.fatal
+	p.sink.fatal = {}
+	p.records += 1
+	if e.kind == .None {
+		return true
+	}
+	if p.failure.kind == .None {
+		p.failure, p.failed = e, p.records - 1
+	}
+	if fatal.kind == .None && (e.kind == .Walk || e.kind == .No_Memory) {
+		fatal = e
+	}
+	if fatal.kind != .None {
+		p.fatal = fatal
+		return false
+	}
+	return job.collect
 }
 
 // The entries of the root array of `src` as `check_each` reads them, when the array's bulk is cut exactly so that its

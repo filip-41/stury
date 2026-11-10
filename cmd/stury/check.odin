@@ -49,20 +49,23 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 		if len(data) >= POOLED_BYTES {
 			runner = run_pool(run)
 		}
-		verdict := Verdict.Fault
+		verdict, why := Verdict.Fault, core.Error(nil)
 		if sc != nil {
-			verdict = schema_judge(sc, cli.schema, file_name(path), data, src, runner)
+			verdict, why = schema_judge(sc, cli.schema, file_name(path), len(cli.files) > 1, data, src, runner)
 		}
 		switch verdict {
 		case .Valid:
 		case .Invalid:
 			invalid += 1
+		case .Refused:
+			failures += 1
 		case .Fault:
 			if msg := check_text(file_name(path), data, src, o, runner); msg != "" {
 				message.write_stderr("stury: parse error: %s", msg)
 				faults += 1
-			} else if sc != nil {
-				invalid += 1
+			} else if why != nil {
+				message.write_stderr("stury: parse error: %s: %s\n", file_name(path), edit_error_text(data, why))
+				faults += 1
 			}
 		}
 		free_spent({data, mapped})
