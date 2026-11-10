@@ -162,6 +162,7 @@ push_all :: proc(d: ^[dynamic]$T, vs: []T) -> (count: int, ok: bool)
 EVERY_KIND :: Kinds{.Null, .Bool, .Integer, .Number, .String, .Array, .Object}
 NONE :: Node_Index(-1)
 description_destroy :: proc(d: ^Description)
+unjudged :: proc(d: ^Description, format_assert: bool) -> string
 # core/build
 ANSWER_BATCH :: 64
 BUILDER_REGS :: core.Hook_Regs{a = 0, b = u64(core.NO_NODE) << 32, c = 0}

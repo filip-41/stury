@@ -458,6 +458,7 @@ Typed_Error_Kind :: enum u8 {
 	Unwritable, // a value the format cannot spell, the last step names it
 	Out_Of_Order, // a token call the text's grammar does not allow next, or a text finished before it is whole
 	Write_Failed, // the output stream refused bytes, which may have left a prefix in it
+	Bad_Schema, // a schema the reader refuses, `want.text` names the keyword and why, the steps lead to it
 }
 
 // The steps a `Typed_Error` holds.
@@ -536,7 +537,7 @@ Error_Entry :: struct {
 // by the tags.
 Typed_Detail :: struct #raw_union {
 	inner: Fault `raw_union_tag:"kind=Walk"`,
-	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union"`,
+	want:  Typed_Want `raw_union_tag:"kind=Wrong_Kind,kind=Out_Of_Range,kind=Not_A_Member,kind=Bad_Tag,kind=Unsupported,kind=Ambiguous_Union,kind=Bad_Schema"`,
 	plans: Plan_Clash `raw_union_tag:"kind=Plan_Mismatch"`,
 }
 
@@ -582,6 +583,7 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.Unwritable    = {"unwritable", "Value cannot be written in the format"},
 	.Out_Of_Order  = {"out_of_order", "Token written out of order"},
 	.Write_Failed  = {"write_failed", "Output refused the bytes"},
+	.Bad_Schema    = {"bad_schema", "Schema is refused"},
 }
 
 // The kinds that name no byte of a source.
@@ -689,7 +691,7 @@ write_typed_message :: proc(w: io.Writer, e: Typed_Error) -> io.Error {
 			_, err := io.write_string(w, "\" is not one the field takes")
 			return err
 		}
-	case .Unsupported, .Ambiguous_Union:
+	case .Unsupported, .Ambiguous_Union, .Bad_Schema:
 		io.write_string(w, TYPED_KIND_RULES[e.kind].message) or_return
 		if len(e.want.text) > 0 {
 			io.write_string(w, ": ") or_return

@@ -509,15 +509,19 @@ load :: #force_inline proc "contextless" (p: [^]u8) -> Block
 utf8_block :: #force_inline proc "contextless" ($T: Tier, b: Block, s: ^Utf8_State)
 # core/compose
 # core/rules
-Array :: struct { prefix: []Node_Index, items: Node_Index, }
-Description :: struct { nodes: [dynamic]Node, arrays: [dynamic]Array, objects: [dynamic]Object, texts: [dynamic]string, root: Node_Index, allocator: runtime.Allocator, }
+Anchor :: struct { name: string, resource: Node_Index, node: Node_Index, }
+Array :: struct { prefix: []Node_Index, items: Node_Index, contains: Maybe(Node_Index), min_contains: Maybe(u64), max_contains: Maybe(u64), }
+Conditional :: struct { test, then, other: Maybe(Node_Index), }
+Dependent :: struct { name: string, required: []string, node: Maybe(Node_Index), }
+Description :: struct { nodes: [dynamic]Node, arrays: [dynamic]Array, objects: [dynamic]Object, texts: [dynamic]string, anchors: [dynamic]Anchor, root: Node_Index, allocator: runtime.Allocator, }
 Kind :: enum u8 { Null, Bool, Integer, Number, String, Array, Object, }
 Kinds :: bit_set[Kind; u8]
 Member :: struct { name: string, node: Node_Index, rules: Rules, required: bool, }
-Node :: struct { kinds: Kinds, rules: Rules, array: i32, object: i32, any_of: []Node_Index, }
+Node :: struct { kinds: Kinds, rules: Rules, array: i32, object: i32, any_of: []Node_Index, enum_of: []core.Value, const_of: Maybe(core.Value), all_of, one_of: []Node_Index, not: Maybe(Node_Index), cond: Conditional, ref, dynamic_ref: Maybe(Node_Index), unevaluated_items: Maybe(Node_Index), unevaluated_properties: Maybe(Node_Index), resource: Node_Index, }
 Node_Index :: distinct i32
-Object :: struct { members: []Member, additional: Node_Index, keys: Node_Index, }
-Rules :: struct { minimum, maximum: string, exclusive_minimum, exclusive_maximum: bool, min_length, min_items, min_members: u64, max_length, max_items, max_members: Maybe(u64), }
+Object :: struct { members: []Member, additional: Node_Index, keys: Node_Index, patterns: []Pattern, dependents: []Dependent, }
+Pattern :: struct { expression: string, node: Node_Index, }
+Rules :: struct { minimum, maximum: string, multiple_of, pattern, format: string, unique: bool, exclusive_minimum, exclusive_maximum: bool, min_length, min_items, min_members: u64, max_length, max_items, max_members: Maybe(u64), }
 # core/build
 Answer_State :: enum u8 { Fresh, Walking, Done, }
 Builder :: struct { doc: core.Document, stack: []u64, n_facts: int, pending: int, last: core.Node_Index, root_close: u64, wide_node: core.Node_Index, wide_count: u32, wide_more: bool, n_counts: int, refuse: bool, borrowed: bool, err: core.Document_Error, }
@@ -566,3 +570,16 @@ Framing_Services :: struct { next: [core.Framing]proc(it: ^Reader) -> (Record, b
 RULES := core.Rules{"records", {{}, {"too_long", "Record is longer than the limit"}}}
 Record_Docs :: struct { scan: proc(it: ^Reader, h: ^engine.Scan, last: ^core.Document, path: core.Path, read: core.Path_Options) -> (Record, core.Path_Error, bool), read: proc(it: ^Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error) -> bool, build: proc(it: ^Reader, rec: Record, allocator: runtime.Allocator) -> (core.Document, core.Document_Error), build_next: proc(it: ^Reader, b: ^engine.Builder, regs: ^core.Hook_Regs) -> (Record, bool), column: proc(it: ^Reader, name: string) -> int, cell: proc(it: ^Reader, rec: Record, column: int, buf: []u8) -> (string, bool), cells: proc(it: ^Reader, rec: Record, buf: []u8, upto: int) -> ([]cw.Scalar, bool), }
 writer_destroy :: proc(wr: ^Writer)
+# core/schema
+Bound :: struct { plan: typed.Plan, compiled: ^Compiled, }
+Compiled :: struct { description: ^rules.Description, opts: Options, owned: bool, allocator: runtime.Allocator, }
+Draft :: enum u8 { D04, D06, D07, D2019_09, D2020_12, }
+Options :: struct { format_assert: bool, base: string, resolver: Resolver, }
+Resolver :: struct { root: string, as: core.As, draft: Draft, documents: [dynamic]^core.Document, texts: [dynamic][]u8, allocator: runtime.Allocator, }
+bind :: proc(c: ^Compiled, as: core.As, allocator := context.allocator) -> (b: Bound, err: core.Error)
+compile :: proc(doc: ^core.Document, node: core.Node_Index, opts := Options{}, allocator := context.allocator) -> (c: Compiled, err: core.Error)
+compile_description :: proc(d: ^rules.Description, opts := Options{}, allocator := context.allocator) -> Compiled
+destroy :: proc(c: ^Compiled)
+read :: proc(doc: ^core.Document, node: core.Node_Index, base: string, res: ^Resolver, allocator := context.allocator) -> (d: rules.Description, err: core.Error)
+resolver_destroy :: proc(res: ^Resolver)
+unbind :: proc(b: ^Bound)

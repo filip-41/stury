@@ -50,3 +50,39 @@ name = "yyjson"
 version = "0.13.0"
 url = "https://raw.githubusercontent.com/ibireme/yyjson/0.13.0/src/yyjson.c"
 sha256 = "d2d58ef0a3b2267862dc363832c4f3185fd375aea933d5d3419d1a940d6ece2e"
+
+# kind = "schema": schemas and their instances from sourcemeta-research/jsonschema-benchmark at one commit, saved as
+# bench/fixtures/jsonschema-benchmark/<name>/schema.json and instances.jsonl, each pinned by SHA-256. fetch.py also
+# writes schema-noformat.json beside schema.json, the benchmark's own derivation: every `format` keyword of a schema is
+# dropped.
+
+[schema]
+url = "https://raw.githubusercontent.com/sourcemeta-research/jsonschema-benchmark/b1ca49ef92cea8440c795b6ceb72041c14bcd0d7/schemas"
+fixtures = [
+  { name = "geojson", schema = "5456d0bdf070d3b654ee6b78c7d807c2663756931cf9f5e50726ed6241535666", instances = "52f5cb6951d305f26c880b4b415d4c3a96714943e0664bdcc177354ef07a3f5d" },
+  { name = "openapi", schema = "0168dd5fdda780daf644145a282bbbc0ce4828aa6060e7a2610dc70e2052fa4e", instances = "9a93367c39914345d43ec142e210a3e447d2e19a4146beb9ff0bcf57ccb833de" },
+  { name = "draft-04", schema = "3be1c5b70a29bdf764622b842732d25dd793cba45250e67ddfc5e8a8c705fddc", instances = "86ce377648e32903f98d8bd3e4f80d1ae53bb0d13c980e76781a6affe63e9015" },
+  { name = "cmake-presets", schema = "2fd12b293307ecdc3175c6bcb7a982a2bf72c2fea00e5efc7fb79d21778c2dc5", instances = "05bd1c2ec9748d51ba6b2e1cb9de2875d710f15fb8ed1a37eae7b8d33c7c265f" },
+  { name = "helm-chart-lock", schema = "36626d1a6b84dc12e64ff62cb2e27e31d3f6dc93357ee90b45302ca53419d508", instances = "62ca7a69c17f0b6d9de8963104086c70f56df1b216cce6f9a12b2894c291b012" },
+  { name = "cspell", schema = "69f3cfdcee1b75587871768be7b16dc2fffc97851f2033c8b595eafccd22361a", instances = "93de105af962c5c52b18204f3e19e721e50a07c72e881a8be0d63b6e95e3b52d" },
+  { name = "krakend", schema = "3ac99a1080970ab36aaa5e2b75747516576794299a3241932f1ecca9216f4cf1", instances = "fc6a0c111a05d6cbe29d5a19539f20520a7b312018086239bd0c5265404d0d63" },
+  { name = "deno", schema = "93471b2ba7cf6f0aabe1637150e48b9aff6ee2ebbba7bc20b50c9c5774439385", instances = "6e204741f6b64dc47f636621dd1e756a0718a0f6ce62f0472c3b8cb2673c565d" },
+  { name = "code-climate", schema = "a5728a6f807f584f4a805258bd3ed35adb5cc9963584a5d5c5343e183264c09b", instances = "593f02aad9b2dbb70d57fdb3d6b718e43b3dafa017fd66f2a875dff446902aea" },
+  { name = "ansible-meta", schema = "e09cdfae8e4c26015c827268b008fdfafc76a7275b291ffbee75c936bd9fbd78", instances = "ffc60993478c0fcfc25a5da08e92ab141283b8a544a116b33e5a3cbf955b65f9" },
+  { name = "clang-format", schema = "ad4674b348679b1ac7e8feb21a96e76fb8faac7a1c9602816bfa280e95531acc", instances = "a3021c830fe845050be2589454aece9499f9d572229d4e8f8914f45873b55ad1" },
+  { name = "ui5-manifest", schema = "66ad7ceb4fb335ab76d5ec5a2702522c87be08390e8e2aabc82e0c7a463c8f5b", instances = "cde0e068bf1ea51525705b88b20791122ecd73b7d0b2159fcd47d7cdbe2529d9" },
+  { name = "pulumi", schema = "8cdd1ffff43df2a8f4f816412e359624de5eaa60cc68afa20d45ad9488ee1921", instances = "d064ee6b380379d4e4cbe782f7f8792b2db5cd07944e8ff5644e12141370e703" },
+  { name = "aws-cdk", schema = "1b75ef028eb384ad2ff7aba7fa4131457422425b227b6ff369de3a9842ee7bca", instances = "a9581d49d475e99b5d77d445f1d060d9a96269ddef6866942a368710bd24f733" },
+  { name = "babelrc", schema = "e347cbd2d5375be71320da5a4984f70ce9ccd4f905894141845c369dfa37901b", instances = "7f4ddd26a06e0c7e2cab9385abf86264deb670ad875806269b230dbaee9ee92e" },
+]
+
+
+# kind = "archive": a repository archive at one commit, unpacked into build/bench/deps/<name>/ without the paths
+# under `exclude` (directories of its top directory).
+
+[[pin]]
+kind = "archive"
+name = "blaze"
+url = "https://codeload.github.com/sourcemeta/blaze/tar.gz/db923e9b95ec7bcb7b339669fed45b9f1a7f9569"
+sha256 = "168e2156c9ad188237d4822e3da136aef76627e1bef78c4cdce0ba8ceb0c18e2"
+exclude = ["benchmark/e2e", "test", "website", "docs", "doxygen", "assets"]

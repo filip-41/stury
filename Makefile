@@ -17,12 +17,12 @@ endif
 .DEFAULT_GOAL := gate
 
 # The library packages, and the test packages that read them.
-LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/rules core/build core/typed core/write core/records core/model json dsv
+LIB_PKGS  := core/spell core/regex core host core/kernel core/compose core/rules core/build core/typed core/write core/records core/schema core/model json dsv
 TEST_PKGS := core/spell/test core/regex/test host/test core/kernel/test core/test core/write/test core/records/test json/test dsv/test
 # The packages the tests share, checked by `lint` and built through their imports.
 SUPPORT_PKGS := walktest bench/timing
 # The benchmark programs, which `lint` and the gate compile.
-BENCH_PKGS := bench bench/doc bench/editbench bench/paths bench/typed bench/write bench/records
+BENCH_PKGS := bench bench/doc bench/editbench bench/paths bench/typed bench/write bench/records bench/schema
 # The test packages whose loops are compiled for the tier `-define:TIER` names.
 TIER_PKGS := core/kernel/test
 TEST_OPT  := -o:minimal
@@ -48,7 +48,7 @@ X86_TARGETS   := $(foreach o,none speed,$(foreach t,0 1,$(foreach p,$(TEST_PKGS)
 VET := -vet-unused-variables -vet-shadowing -vet-using-stmt -vet-cast -vet-semicolon -vet-tabs -vet-unused-imports -strict-style
 LINT_FLAGS := $(VET) -warnings-as-errors -terse-errors -max-error-count:500
 
-.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite ecma-diff test-x86 test-wide test-asan test-tsan test-f32 lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-write bench-peers bench-cli fixtures surface \
+.PHONY: help check gate build-cli test test-examples test-lib test-one test-cli test-jq diff diff-suite diff-schema ecma-diff test-x86 test-wide test-asan test-tsan test-f32 lint lint-man lint-fixtures api-write bench bench-doc bench-paths bench-typed bench-records bench-schema bench-schema-peers bench-write bench-peers bench-cli fixtures surface \
 	$(TEST_TARGETS) $(ASAN_TARGETS) $(TSAN_TARGETS) $(X86_TARGETS)
 
 # The bench lanes' probes and peers, and the fixtures they read. BENCH_CC, BENCH_CXX and BENCH_CARGO name the compilers
@@ -93,7 +93,8 @@ help:
 	@echo "make api-write    regenerate API.txt and API_SHARED.txt after a public change"
 	@echo "make test-asan, test-tsan, test-x86, test-wide, test-f32   sanitizers, x86 tiers, binary32"
 	@echo "make build-cli    build/stury (OPT=, STURY_VERSION=)"
-	@echo "make bench-doc, bench-paths, bench-typed, bench-records, bench-write, bench-cli   see bench/README.md"
+	@echo "make diff-schema  the schema lane's peers against the Python jsonschema package (needs uv)"
+	@echo "make bench-doc, bench-paths, bench-typed, bench-records, bench-schema, bench-write, bench-cli   see bench/README.md"
 	@echo "ODIN=<path> names the compiler, and needs release $(MIN_ODIN) or later."
 
 # The checks a change can reach, in `tools/gate.py`: `check` while editing, `gate` before a branch lands. `gate` is the
@@ -307,6 +308,38 @@ bench-records: ROUNDS ?= 5
 bench-records: bench-peers
 	$(ODIN) build bench/records -o:speed -out:$(BENCH)/records
 	ROUNDS=$(ROUNDS) python3 bench/records.py $(RECORD_FILES)
+
+# The schema lane's stury probe and the validators whose toolchains are present: Blaze through cmake, jsonschema-rs and
+# boon through cargo. The first Rust build downloads the crates bench/peers/rust-schema/Cargo.lock names, and the Blaze build
+# takes a few minutes.
+bench-schema-peers:
+	@mkdir -p $(BENCH)
+	python3 bench/fetch.py corpus schema archive
+	python3 bench/gen.py logs.json logs.ndjson schema/logs.schema.json schema/twitter.schema.json schema/citm.schema.json \
+		schema/applicator.schema.json schema/applicator.ndjson schema/twitter.json schema/citm.json schema/logs.json >/dev/null
+	$(ODIN) build bench/schema -o:speed -out:$(BENCH)/schema_probe
+	@if command -v cmake >/dev/null && [ -d $(BENCH)/deps/blaze ]; then \
+		cmake -S bench/peers/blaze -B $(BENCH)/blaze -DCMAKE_BUILD_TYPE=Release -DBLAZE_DIR=$(abspath $(BENCH)/deps/blaze) \
+			-DBUILD_SHARED_LIBS=OFF >$(BENCH)/blaze-build.log 2>&1 \
+		&& cmake --build $(BENCH)/blaze --target blaze_bench >>$(BENCH)/blaze-build.log 2>&1 && echo "blaze: built" \
+		|| echo "blaze: build failed, see $(BENCH)/blaze-build.log"; \
+	else echo "blaze: left out (cmake is not on PATH or the Blaze source is missing)"; fi
+	@if command -v $(BENCH_CARGO) >/dev/null; then \
+		CARGO_TARGET_DIR=$(abspath $(BENCH)/rust-schema) $(BENCH_CARGO) build --release --locked \
+			--manifest-path bench/peers/rust-schema/Cargo.toml && echo "jsonschema, boon: built"; \
+	else echo "jsonschema, boon: left out ($(BENCH_CARGO) is not on PATH)"; fi
+
+# The schema lane, stury beside the peers, on the 19 fixtures. ROUNDS and the fixture names in SCHEMA_FIXTURES pass through.
+SCHEMA_FIXTURES ?=
+bench-schema: ROUNDS ?= 5
+bench-schema: bench-schema-peers
+	ROUNDS=$(ROUNDS) python3 bench/schema.py $(SCHEMA_FIXTURES)
+
+# The peers' verdicts, instance by instance, against the Python `jsonschema` package (uv fetches the pinned version, or
+# finds it offline). ORACLE_ARGS=--suite also holds the oracle to the vendored JSON-Schema-Test-Suite.
+ORACLE_ARGS ?=
+diff-schema: bench-schema-peers
+	uv run --offline --no-project --with jsonschema==4.26.0 python3 bench/schema_oracle.py $(ORACLE_ARGS) $(SCHEMA_FIXTURES)
 
 # The peers whose toolchain and sources are present: yyjson, simdjson (threaded, as its document_stream runs stage 1 in a
 # thread of its own), and the Rust binaries (sonic-rs, serde_json, simd-csv). The first Rust build downloads the crates

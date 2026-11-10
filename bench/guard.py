@@ -5,21 +5,28 @@ LOCK is build/bench/timing.lock: one timed job runs at a time. CAP_KB is the liv
 runners (doc.py and the runners built on it) import `locked` and `over_cap`.
 
 As a program, `python3 bench/guard.py COMMAND...` takes the lock, runs COMMAND in a session of its own, kills the whole
-session when any process in it passes the cap, and exits with COMMAND's status. The command line comparisons
-(bench/cli/*.sh) run themselves this way.
+session when any process in it passes the cap, and exits with COMMAND's status. A process in the session that calls
+`locked()` does not wait on the lock the session holds. The command line comparisons (bench/cli/*.sh) run themselves
+this way.
 """
-import contextlib, fcntl, os, signal, subprocess, sys, time
+import contextlib, fcntl, os, re, signal, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BUILD = os.path.normpath(os.path.join(HERE, "..", "build", "bench"))
 LOCK = os.path.join(BUILD, "timing.lock")
 CAP_KB = 1024 * 1024
 POLL_SECONDS = 0.02
+HELD = "BENCH_GUARD_HELD"
+LINUX = sys.platform.startswith("linux")
 
 
 @contextlib.contextmanager
 def locked():
-    """Holds LOCK exclusively for the block, waiting for another timed job to finish."""
+    """Holds LOCK exclusively for the block, waiting for another timed job to finish. A process that guard.py started
+    already holds it, so there the block runs at once: a second flock on LOCK from a child would wait on its parent."""
+    if os.environ.get(HELD):
+        yield
+        return
     os.makedirs(BUILD, exist_ok=True)
     with open(LOCK, "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
@@ -46,11 +53,26 @@ def over_cap(pid):
     return None
 
 
+def count_prefix(events):
+    """The command prefix that makes a child report the hardware counters named in EVENTS (instructions, cycles), on
+    stderr: `perf stat` on Linux, `/usr/bin/time -l` on macOS."""
+    return ["perf", "stat", "-x,", "-e", ",".join(events)] if LINUX else ["/usr/bin/time", "-l"]
+
+
+def counted(err, event):
+    """The count of EVENT (instructions or cycles) in the stderr of a child run under `count_prefix`, else None."""
+    if LINUX:
+        m = re.search(rf"^(\d+),[^,]*,{event}", err, re.M)
+    else:
+        m = re.search(rf"(\d+)\s+{event} {'retired' if event == 'instructions' else 'elapsed'}", err)
+    return int(m.group(1)) if m else None
+
+
 def main(argv):
     if not argv:
         sys.exit("usage: python3 bench/guard.py COMMAND...")
     with locked():
-        child = subprocess.Popen(argv, start_new_session=True)
+        child = subprocess.Popen(argv, start_new_session=True, env={**os.environ, HELD: "1"})
         while child.poll() is None:
             if (offender := over_cap(child.pid)):
                 os.killpg(child.pid, signal.SIGKILL)

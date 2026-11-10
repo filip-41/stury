@@ -155,6 +155,21 @@ JSONTestSuite — https://github.com/nst/JSONTestSuite
     json/test/conformance/JSONTestSuite (the conformance corpus). Its LICENSE and UPSTREAM files ship in
     that directory.
 
+JSON-Schema-Test-Suite — https://github.com/json-schema-org/JSON-Schema-Test-Suite
+
+    json/test/conformance/JSON-Schema-Test-Suite (the schema conformance corpus, MIT, Copyright (c) 2012
+    Julian Berman). Its LICENSE and UPSTREAM files ship in that directory.
+
+Schema benchmark peers — the bench/ harness builds these on the developer's machine; stury carries none of their
+code and its binaries link none of it. bench/fetch.py and bench/peers/rust-schema/Cargo.lock pin them.
+
+    jsonschema (Rust crate 0.60.2, https://github.com/Stranger6667/jsonschema), MIT, Copyright (c) 2020-2026
+    Dmitry Dygalo.
+    boon (Rust crate 0.6.1, https://github.com/santhosh-tekuri/boon), MIT or Apache-2.0, by Santhosh Kumar Tekuri.
+    Blaze (https://github.com/sourcemeta/blaze, archive of commit db923e9b), dual-licensed under the GNU AGPL 3.0
+    or later and a commercial licence by Sourcemeta; the harness only runs it as a separate program.
+    The crates' own dependencies are named, with their licences, by that Cargo.lock.
+
 ----------------------------------------------------------------------------------------------------
 Odin — https://github.com/odin-lang/Odin
 

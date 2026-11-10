@@ -1,0 +1,1 @@
+{"$id": "defs.json", "$defs": {"name": {"type": "string", "minLength": 1}}}

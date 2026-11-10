@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.24)
+project(blaze_bench LANGUAGES CXX)
+
+# BLAZE_DIR is the source bench/fetch.py unpacks (build/bench/deps/blaze). Only the compiler and the evaluator are built.
+set(BLAZE_DIR "" CACHE PATH "Blaze source tree")
+set(BLAZE_COMPILER ON CACHE BOOL "")
+set(BLAZE_EVALUATOR ON CACHE BOOL "")
+set(BLAZE_OUTPUT ON CACHE BOOL "")
+foreach(option TEST CONFIGURATION ALTERSCHEMA CODEGEN CANONICALIZER CONVERT EDITOR BINPACK DOCUMENTATION INSTALL)
+  set(BLAZE_${option} OFF CACHE BOOL "")
+endforeach()
+set(CMAKE_CXX_STANDARD 20)
+include(${BLAZE_DIR}/vendor/core/cmake/Sourcemeta.cmake)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm|aarch64")
+  set(NATIVE -mcpu=native)
+else()
+  set(NATIVE -march=native)
+endif()
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG ${NATIVE}")
+add_subdirectory(${BLAZE_DIR} blaze)
+add_executable(blaze_bench main.cc)
+target_link_libraries(blaze_bench PRIVATE sourcemeta::core::json sourcemeta::core::jsonschema
+  sourcemeta::blaze::compiler sourcemeta::blaze::evaluator sourcemeta::blaze::output)
