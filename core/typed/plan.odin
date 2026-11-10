@@ -102,6 +102,8 @@ Meta :: struct {
 	tagged:     bool, // a `Union` that reads objects by `Plan.union_tag`, or such a union's named struct arm
 	no_nil:     bool, // a `Union` that has no nil
 	access:     Access, // a struct member's, under a model
+	forbid:     bool, // a struct whose model refuses the members it does not name
+	model:      ^Struct_Model, // on a struct's records, what a load does with it, nil for none
 	rule_set:   i32, // 1 + the record's leaf in `Plan.leaves`, and for a type's plan its set in `Plan.rule_sets`, 0 for none
 }
 
@@ -220,7 +222,51 @@ Model_Rules :: struct {
 	// The rules of member `field`, of type `type` and tag `tag`, of struct `owner`. With `owner` nil, of a value of `type`
 	// that no member holds: the root, a list's element, a map's value, a union's arm.
 	member:  proc(m: ^Model_Rules, owner: typeid, field: string, type: typeid, tag: string) -> Member_Rule,
+	// Whether struct `owner` refuses the members it does not name.
+	forbids: proc(m: ^Model_Rules, owner: typeid) -> bool,
 	compile: Rule_Compiler,
+	// What a load's plan records of each struct it lays out, `load_struct` for a load's plan and nil for any other, so
+	// a program that loads no model links none of it.
+	structs: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, members: []Member, layout: ^Struct_Layout),
+	// The rule sets and leaves of the model's plan of the same type, which this plan takes in place of its own, nil for
+	// none. Each of this plan's rule sets is one of them.
+	rule_sets: []rules.Rules,
+	leaves:    []rules.Leaf,
+}
+
+// What a model's plan serves. `Whole` holds every member and serves validate, the schemas and writes, and reads nothing.
+// `Load` leaves out the read_only members and reads only as a check, into a zeroed target, as a model's load does.
+Model_Plan :: enum u8 {
+	None,
+	Whole,
+	Load,
+}
+
+// What a load does with one of a model's structs. At its close it sets the `Fields_Set` at `fields_set` less one, if
+// that is not zero, and gives each member of `defaults` the input left out its default. A key of `read_only` is a
+// read_only member's, which the load skips, or refuses under the struct's `forbid`.
+@(private)
+Struct_Model :: struct {
+	settle:     proc "contextless" (h: ^Reader, sm: ^Struct_Model, f: ^Frame, owner: ^Field, regs: core.Hook_Regs) -> core.Typed_Error_Kind,
+	fields_set: u32,
+	defaults:   []Default,
+	read_only:  []string,
+}
+
+@(private)
+Default :: struct {
+	member: i32,
+	make:   Make_Default,
+	data:   rawptr,
+}
+
+// Writes a member's default at `dest`, which holds the zero value, from `data`, with the load's allocator.
+Make_Default :: #type proc(dest, data: rawptr, allocator: runtime.Allocator) -> runtime.Allocator_Error
+
+// The members a model's load found in the input, one bit each in the order of the load's members. A model refuses a
+// struct that holds one and loads more than 128 members.
+Fields_Set :: struct {
+	bits: [2]u64,
 }
 
 // What a model says of a member or a value. `name` replaces the member's name, "" for none, and `refused` is the item
@@ -232,6 +278,10 @@ Member_Rule :: struct {
 	optional: bool,
 	skip:     bool, // the member is no part of the model
 	access:   Access,
+	extra:    bool, // the member takes the members the struct does not name
+	// What writes the member's default from `data`, nil for none.
+	make:     Make_Default,
+	data:     rawptr,
 	refused:  string,
 }
 
@@ -300,6 +350,7 @@ Plan :: struct {
 	fork:      i32,
 	// What `leaves` and `uses` allocate: patterns, enum keys, keyword steps and the uses.
 	arena:     ^virtual.Arena,
+	model_plan: Model_Plan,
 }
 
 // Writes the value of `plan`'s type at `value` as `opts` says, to `stream` when it has a procedure, else to new bytes
@@ -386,6 +437,12 @@ plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := 
 	context.allocator = allocator
 	b := plan_start(&p, as, opts)
 	p.type = T
+	if b.model != nil {
+		// The same rule sets in the same order, so a record's set names the other plan's leaf.
+		if _, failed := append(&b.rule_sets, ..b.model.rule_sets); failed != nil {
+			refuse_plan(&b, .No_Memory)
+		}
+	}
 	if root_block(&b) {
 		fill(&b, 0, type_info_of(T), "", 0, 0)
 	}
@@ -404,7 +461,12 @@ plan_build :: proc(T: typeid, as: core.As, opts := Plan_Options{}, allocator := 
 	}
 	err = plan_finish(&b, stamp)
 	if err.kind == .None && len(p.rule_sets) > 0 {
-		err = plan_leaves(&p, opts.model.compile)
+		if len(opts.model.leaves) == len(p.rule_sets) {
+			// Borrowed: the model frees this plan with its leaves taken back.
+			p.leaves = opts.model.leaves
+		} else {
+			err = plan_leaves(&p, opts.model.compile)
+		}
 	}
 	p.model = nil
 	return
@@ -436,6 +498,9 @@ plan_leaves :: proc(p: ^Plan, compile: Rule_Compiler) -> core.Typed_Error {
 // Gives `p` its arena, which `plan_destroy` frees, false when it does not fit in memory.
 @(private)
 plan_arena :: proc(p: ^Plan) -> (runtime.Allocator, bool) {
+	if p.arena != nil {
+		return virtual.arena_allocator(p.arena), true
+	}
 	p.arena = new(virtual.Arena)
 	if p.arena == nil || virtual.arena_init_growing(p.arena) != nil {
 		free(p.arena)
@@ -1149,6 +1214,18 @@ Member :: struct {
 	rule_set: i32,
 	access:   Access,
 	alias:    string,
+	make:     Make_Default,
+	data:     rawptr,
+}
+
+// What `lay_out` found of a struct besides its members: the member that captures unknown members, 1 + the offset of
+// its `Fields_Set` with the member's name, and the names a read_only member the plan leaves out is read by.
+@(private)
+Struct_Layout :: struct {
+	capture:    Maybe(Member),
+	fields_set: u32,
+	set_name:   string,
+	read_only:  [dynamic]string,
 }
 
 // A struct's block holds its members, a `Never` record that holds in its `Meta` what is true of every use of the struct,
@@ -1161,8 +1238,10 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	}
 	members: [dynamic]Member
 	defer delete(members)
-	capture: Maybe(Member)
-	lay_out(b, ti.id, v, 0, &members, &capture)
+	layout: Struct_Layout
+	defer delete(layout.read_only)
+	lay_out(b, ti.id, v, 0, &members, &layout)
+	capture := layout.capture
 	for x, i in members {
 		for y in members[:i] {
 			if x.name != y.name {
@@ -1185,6 +1264,19 @@ fill_struct :: proc(b: ^Builder, f: ^Field, m: ^Meta, ti: ^runtime.Type_Info, v:
 	at := struct_block(b, {ti.id, 0, 0}, f, m, members[:], capture != nil)
 	if at < 0 {
 		return
+	}
+	if b.model != nil {
+		forbid := b.model.forbids != nil && b.model.forbids(b.model, ti.id)
+		// A struct that refuses the members it does not name has none to capture.
+		if c, ok := capture.?; ok && forbid {
+			refuse_plan(b, .Bad_Tag, c.name, "extra")
+			b.err.want.type = ti.id
+			return
+		}
+		b.meta[int(at) + n].forbid, m.forbid = forbid, forbid
+		if b.model.structs != nil {
+			b.model.structs(b, ti.id, at, f, m, members[:], &layout)
+		}
 	}
 	if c, ok := capture.?; ok {
 		b.meta[int(at) + n].capture = at + i32(n) + 1
@@ -1211,8 +1303,8 @@ known_struct :: proc(b: ^Builder, key: Block_Key, f: ^Field, m: ^Meta) -> bool {
 	}
 	m.block, m.members = at, b.ends[at] - at
 	end := &b.meta[b.ends[at]]
-	m.required_end = end.required_end
-	f.kind = .Required if len(end.required) > 0 || end.capture >= 0 else .Struct
+	m.required_end, m.model, m.forbid = end.required_end, end.model, end.forbid
+	f.kind = .Required if len(end.required) > 0 || end.capture >= 0 || end.model != nil && end.model.settle != nil else .Struct
 	return true
 }
 
@@ -1271,7 +1363,7 @@ plain_name :: proc(name: string) -> bool {
 // Collects the members of struct `owner`, with a `using` member its tag gives no name flattened into the struct that
 // holds it, as the plan's model says when it has one.
 @(private)
-lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: uintptr, out: ^[dynamic]Member, capture: ^Maybe(Member)) {
+lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: uintptr, out: ^[dynamic]Member, layout: ^Struct_Layout) {
 	for i in 0 ..< int(v.field_count) {
 		tag, bad_flag := field_tag(b, v.names[i], v.tags[i])
 		if len(bad_flag) > 0 {
@@ -1279,6 +1371,10 @@ lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: u
 			return
 		}
 		if !tag.keep {
+			continue
+		}
+		if b.model != nil && v.types[i].id == typeid_of(Fields_Set) {
+			layout.fields_set, layout.set_name = u32(base + v.offsets[i]) + 1, v.names[i]
 			continue
 		}
 		_, hooked := hook_of(b, v.types[i].id)
@@ -1293,12 +1389,21 @@ lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: u
 				return
 			}
 			if model.skip {
+				// A member `-` leaves out is read_write, so this is one the plan leaves out for its role.
+				if model.access == .Read_Only {
+					for name in ([2]string{model.name if len(model.name) > 0 else tag.name, model.alias}) {
+						if len(name) > 0 {
+							append(&layout.read_only, owned_copy(b, name))
+						}
+					}
+				}
 				continue
 			}
 			if len(model.name) > 0 {
 				tag.name = owned_copy(b, model.name)
 			}
-			tag.required ||= !tag.unknown && !model.optional && model.access != .Read_Only
+			tag.unknown ||= model.extra
+			tag.required ||= !tag.unknown && !model.optional && model.make == nil && model.access != .Read_Only
 		}
 		// A flattened or capturing member is no value of its own for rules to hold.
 		rule_set := rule_set_of(b, model.rules) if model.rules != {} else 0
@@ -1306,18 +1411,18 @@ lay_out :: proc(b: ^Builder, owner: typeid, v: runtime.Type_Info_Struct, base: u
 			if rule_set > 0 {
 				refuse_plan(b, .Bad_Tag, tag.name, "model")
 			}
-			lay_out(b, v.types[i].id, inner, base + v.offsets[i], out, capture)
+			lay_out(b, v.types[i].id, inner, base + v.offsets[i], out, layout)
 			continue
 		}
-		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit || model.access == .Write_Only, rule_set, model.access, model.alias}
+		x := Member{tag.name, v.types[i], base + v.offsets[i], tag.required, tag.omit || model.access == .Write_Only, rule_set, model.access, model.alias, model.make, model.data}
 		if tag.unknown {
 			if tag.required || rule_set > 0 {
 				refuse_plan(b, .Bad_Tag, tag.name, "required" if tag.required else "model")
 			}
-			if v.types[i].id != typeid_of(map[string]Raw) || capture^ != nil {
+			if v.types[i].id != typeid_of(map[string]Raw) && v.types[i].id != typeid_of(map[string]core.Value) || layout.capture != nil {
 				refuse_plan(b, .Unsupported, tag.name)
 			}
-			capture^ = x
+			layout.capture = x
 			continue
 		}
 		if _, failed := append(out, x); failed != nil {

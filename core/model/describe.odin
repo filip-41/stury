@@ -143,8 +143,11 @@ node_of :: proc(r: ^Reading, record: i32, ruled := true) -> rules.Node_Index {
 leaf :: proc(r: ^Reading, kind: typed.Read_Kind, m: typed.Meta) -> (n: rules.Node) {
 	n.array, n.object = -1, -1
 	#partial switch kind {
-	case .String, .Cstring:
+	case .String:
 		n.kinds = {.String}
+	case .Cstring:
+		// A nil cstring reads from null and writes as null.
+		n.kinds = {.String, .Null}
 	case .Bool, .Bool_Wide:
 		n.kinds = {.Bool}
 	case .I8 ..= .U64:
@@ -237,8 +240,8 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 		}
 		x := rules.Member{name = r.plan.meta[record].name}
 		if role == .Read_Only && r.direction == .Load {
-			// A load skips the member, so any value passes.
-			x.node = add(r, &r.d.nodes, rules.Node{kinds = rules.EVERY_KIND, array = -1, object = -1})
+			// A load skips the member, so any value passes, or refuses it where the struct forbids what it does not name.
+			x.node = add(r, &r.d.nodes, rules.Node{kinds = {} if m.forbid else rules.EVERY_KIND, array = -1, object = -1})
 		} else {
 			x.node = node_of(r, record, false)
 			folded, _ := target(r.plan, record)
@@ -256,6 +259,9 @@ object_of :: proc(r: ^Reading, m: typed.Meta, is_map: bool) -> i32 {
 		append(&members, x)
 	}
 	r.d.objects[at].members = members[:]
+	if m.forbid && r.direction == .Load {
+		r.d.objects[at].additional = add(r, &r.d.nodes, rules.Node{array = -1, object = -1})
+	}
 	return at
 }
 

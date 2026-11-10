@@ -483,6 +483,7 @@ Typed_Error_Kind :: enum u8 {
 	No_Arm, // a value that passes none of a rule's subschemas
 	Many_Arms, // a value that passes more than one of a rule's subschemas, where it takes one
 	No_Sample, // a description no value passes, or none the bounded search found, `want.text` names the node
+	Read_Only, // a key of a read_only member, which a load refuses where its struct forbids the members it does not name
 }
 
 // The steps a `Typed_Error` holds.
@@ -622,6 +623,7 @@ TYPED_KIND_RULES := [Typed_Error_Kind]Rule {
 	.No_Arm        = {"no_arm", "Value passes none of the subschemas"},
 	.Many_Arms     = {"many_arms", "Value passes more than one subschema"},
 	.No_Sample     = {"no_sample", "No value passes the description"},
+	.Read_Only     = {"read_only", "Field is read only"},
 }
 
 // The messages of a schema check's entries, which name keywords and not a type's fields, where they differ.
@@ -630,6 +632,7 @@ SCHEMA_MESSAGES := #partial [Typed_Error_Kind]string {
 	.Wrong_Kind    = "Value is not of the allowed type",
 	.Not_A_Member  = "Value is not one of the allowed values",
 	.Missing_Field = "Required member is missing",
+	.Bad_Format    = "String is not valid for the asserted format",
 }
 
 // The kinds that name no byte of a source.

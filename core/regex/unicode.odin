@@ -79,7 +79,7 @@ named_prop :: proc(name: string) -> (it: Prop_Item, ok: bool) {
 }
 
 // ECMA's `\p{...}` type for `name`, compared as written: a binary property or a General_Category value, or
-// `General_Category=`, `gc=`, `Script=` or `sc=` and a value.
+// `General_Category=`, `gc=`, `Script=`, `sc=`, `Script_Extensions=` or `scx=` and a value.
 ecma_prop :: proc(name: string) -> (it: Prop_Item, ok: bool) {
 	kind, value := "", name
 	if eq := strings.index_byte(name, '='); eq >= 0 {
@@ -89,6 +89,8 @@ ecma_prop :: proc(name: string) -> (it: Prop_Item, ok: bool) {
 			kind = "gc"
 		case "Script":
 			kind = "sc"
+		case "Script_Extensions":
+			kind = "scx"
 		}
 	}
 	names, k := ECMA_NAMES, 0

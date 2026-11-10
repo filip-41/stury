@@ -128,8 +128,29 @@ object_delete_all :: proc(o: ^Object, gone: map[string]bool) {
 // The value of node `r` as a built value of its own, which outlives the document: a number is a double, but a number
 // whose digits the double does not spell keeps them as a `Number_Text`. An object follows `dups`: `.All` keeps a
 // repeated key in order, `.First` the first and the others the last. With `borrow` a string or key that lies in the
-// document's text stays a slice of it.
+// document's text stays a slice of it. A node that has comments in its document carries them, as `Commented` does.
 built_value :: proc(r: Node_Ref, dups := Duplicates.Last, borrow := false) -> Value {
+	v := built_data(r, dups, borrow)
+	if len(r.doc.facts) == 0 {
+		return v
+	}
+	for role in COMMENT_ROLES {
+		bodies, from := comments(r, role)
+		if from == .None {
+			continue
+		}
+		kept := make([]string, len(bodies))
+		for body, i in bodies {
+			kept[i] = text_kept(r.doc, body, borrow)
+		}
+		delete(bodies)
+		v = noted(v, role, kept)
+	}
+	return v
+}
+
+@(private = "file")
+built_data :: proc(r: Node_Ref, dups: Duplicates, borrow: bool) -> Value {
 	#partial switch doc_kind(r.doc, r.node) {
 	case .False:
 		return false

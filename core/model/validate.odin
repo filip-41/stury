@@ -61,6 +61,10 @@ judged :: proc(j: ^Judging, f: ^typed.Field, at: uintptr) -> rules.Failures {
 	buf: [max(spell.F64_ROOM, spell.INT_ROOM)]u8
 	#partial switch f.kind {
 	case .String, .Cstring:
+		// A nil cstring is null, which a string rule does not judge.
+		if f.kind == .Cstring && (^cstring)(at)^ == nil {
+			return {}
+		}
 		s := string((^cstring)(at)^) if f.kind == .Cstring else (^string)(at)^
 		fails: rules.Failures
 		if l.has_enum && !rules.enum_has(l, .String, s) {

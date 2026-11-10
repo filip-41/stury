@@ -873,6 +873,12 @@ schema_check_verdicts :: proc(t: ^testing.T) {
 		{`{"multipleOf": 0.1}`, `0.3`, true},
 		{`{"multipleOf": 1234567890123456789}`, `2469135780246913578`, true},
 		{`{"multipleOf": 1234567890123456789}`, `2469135780246913579`, false},
+		{`{"multipleOf": 3.0000000000000000001}`, `6.0000000000000000002`, true},
+		{`{"multipleOf": 3.0000000000000000001}`, `6.0000000000000000003`, false},
+		{`{"multipleOf": 3.0000000000000000001}`, `6`, false},
+		{`{"multipleOf": 0.123456789012345678901}`, `0.246913578024691357802`, true},
+		{`{"multipleOf": 0.123456789012345678901}`, `123456789012345678901e-21`, true},
+		{`{"multipleOf": 0.123456789012345678901}`, `0.246913578024691357803`, false},
 		{`{"multipleOf": 3}`, `1e400`, false},
 		{`{"multipleOf": 2}`, `1e400`, true},
 		{`{"pattern": "^\\/[^\\*\\?\\&\\%]*(\\/\\*)?$"}`, `"/a/*"`, true},
@@ -909,7 +915,7 @@ schema_check_verdicts :: proc(t: ^testing.T) {
 @(test)
 schema_bind_refusals :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)
-	for text in ([?]string{`{"multipleOf": 3.0000000000000000001}`, `{"multipleOf": 0.123456789012345678901}`, `{"multipleOf": 1e-1000000000000000000000000000000000}`}) {
+	for text in ([?]string{`{"multipleOf": 1e-1000000000000000000000000000000000}`}) {
 		ch, err := checked_make(text)
 		defer checked_destroy(ch)
 		f, _ := err.(core.Typed_Failure)
@@ -1721,4 +1727,33 @@ schema_check_faults_inside_held_values :: proc(t: ^testing.T) {
 			testing.expect_value(t, sink.entries[0].path[0], core.Step(core.Index(1)))
 		}
 	}
+}
+
+// The annotations beside the rules are read, kept as written and spelled again, and judge nothing.
+@(test)
+schema_keeps_annotations :: proc(t: ^testing.T) {
+	context.allocator = context.temp_allocator
+	defer free_all(context.temp_allocator)
+	text := `{"type": "string", "title": "T", "description": "D", "default": "x", "examples": ["a", "b"], "deprecated": true, "contentEncoding": "base64", "contentMediaType": "text/plain"}`
+	d, _, doc, err := read_text(text)
+	defer core.destroy(&doc)
+	testing.expect(t, err == nil)
+	n := d.nodes[d.root]
+	testing.expect_value(t, n.title, "T")
+	testing.expect_value(t, n.content_encoding, "base64")
+	testing.expect_value(t, n.content_media_type, "text/plain")
+	testing.expect(t, n.deprecated && n.default_of != nil && len(n.examples) == 2)
+	back_doc: core.Document
+	back, written, refused := written_back(t, &d, &back_doc)
+	defer core.destroy(&back_doc)
+	testing.expect_value(t, refused, "")
+	for part in ([?]string{`"title":"T"`, `"default":"x"`, `"examples":["a","b"]`, `"deprecated":true`, `"contentEncoding":"base64"`, `"contentMediaType":"text/plain"`}) {
+		testing.expectf(t, strings.contains(string(written), part), "%s in %s", part, written)
+	}
+	m := back.description.nodes[back.description.root]
+	testing.expect(t, m.title == "T" && m.deprecated && len(m.examples) == 2 && m.default_of != nil)
+	bad, _, bdoc, berr := read_text(`{"title": 1}`)
+	defer core.destroy(&bdoc)
+	_ = bad
+	testing.expect(t, berr != nil)
 }

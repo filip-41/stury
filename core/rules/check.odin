@@ -150,7 +150,7 @@ rules_leaf :: proc(r: Rules, kinds: Kinds, allocator := context.allocator) -> (l
 	l.minimum, l.maximum = bound_of(r.minimum, r.exclusive_minimum), bound_of(r.maximum, r.exclusive_maximum)
 	if r.multiple_of != "" {
 		d := spell.decimal_of(r.multiple_of)
-		if d.saturated || len(d.head) + len(d.tail) > spell.MULTIPLE_DIGITS {
+		if d.saturated || len(d.head) + len(d.tail) > spell.LONG_DIVISOR_DIGITS {
 			return l, "multipleOf"
 		}
 		l.multiple_of = d

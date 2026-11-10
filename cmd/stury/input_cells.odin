@@ -186,17 +186,36 @@ repeated_header :: proc(name: string, data: []byte, doc: ^core.Document) -> (msg
 }
 
 // A header that names a column twice, told with a newline, or "". A header the format refuses is `validate`'s to tell.
+// A text of a header alone has no record to key by it, so its header is read again as the one row of a second copy.
 header_fault :: proc(name: string, data: []byte, as: core.As) -> string {
+	msg, more := header_repeat(name, data, as)
+	if !more && len(data) > 0 {
+		doubled := make([dynamic]u8, 0, 2 * len(data) + 1, context.temp_allocator)
+		append(&doubled, ..data)
+		append(&doubled, '\n')
+		append(&doubled, ..data)
+		msg, _ = header_repeat(name, doubled[:], as)
+	}
+	return msg
+}
+
+// The repeat in the header of the first record of `data` as `header_fault` tells it, and whether `data` has a record.
+@(private = "file")
+header_repeat :: proc(name: string, data: []byte, as: core.As) -> (msg: string, more: bool) {
 	it := records.open(data, as, .Lines, allocator = runtime.heap_allocator())
 	defer records.close(&it)
-	rec, more := records.next(&it)
+	rec: records.Record
+	rec, more = records.next(&it)
 	if !more {
-		return ""
+		return
 	}
 	doc, err := records.build(&it, rec, context.temp_allocator)
 	if err != nil {
-		return ""
+		return
 	}
-	msg, twice := repeated_header(name, data, &doc)
-	return message.build_temp("%s\n", msg) if twice else ""
+	text, twice := repeated_header(name, data, &doc)
+	if twice {
+		msg = message.build_temp("%s\n", text)
+	}
+	return
 }

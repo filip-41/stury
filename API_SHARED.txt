@@ -4,7 +4,7 @@ ESCAPED: [256]u8 = {
 F64_ROOM :: 1 + 17 + 16
 HEX_NIBBLE: [256]u8 = {
 INT_ROOM :: 20
-MULTIPLE_DIGITS :: 19
+LONG_DIVISOR_DIGITS :: 200
 POW10_F64 := [23]f64{
 Pending :: struct { buf: [4]u8, n: u8, at: u8, }
 REPLACEMENT :: [4]u8{0xEF, 0xBF, 0xBD, 0}
@@ -228,6 +228,7 @@ enum_member :: proc "contextless" (info: ^runtime.Type_Info_Enum, value: i64) ->
 field_at :: #force_inline proc "contextless" (b: u64) -> ^Field
 grow_frames :: #force_no_inline proc "contextless" (h: ^Reader, have, want: int) -> (int, bool)
 grow_list :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs) -> (core.Hook_Regs, core.Typed_Error_Kind)
+load_struct :: proc(b: ^Builder, owner: typeid, at: i32, f: ^Field, m: ^Meta, members: []Member, layout: ^Struct_Layout)
 map_slot :: proc(h: ^Reader, m: ^Meta, raw: ^runtime.Raw_Map, key: string, t: core.Token, value: ^Field, fresh: bool) -> (slot: rawptr, reason: core.Typed_Error_Kind)
 mark_arm :: proc(dest: uintptr, fld: ^Field, m: ^Meta, arm: int)
 on_tag_token :: proc "contextless" (s: ^Tag_Scan, regs: core.Hook_Regs, t: core.Token) -> (core.Hook_Regs, core.Action)
@@ -246,7 +247,7 @@ plan_reads :: proc(p: ^Plan, reads: ^Format_Reads)
 pointer_target :: proc "contextless" (target: any) -> (data: rawptr, T: typeid, pointer: bool)
 read_end :: proc(r: ^Reader, regs: core.Hook_Regs, fault: Maybe(core.Fault)) -> core.Typed_Error
 read_release :: proc "contextless" (r: ^Reader, frames: []Frame)
-read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error)
+read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator, judged := true) -> (regs: core.Hook_Regs, err: core.Typed_Error)
 refuse_element :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
 refuse_value :: #force_no_inline proc "contextless" (h: ^Reader, regs_in: core.Hook_Regs, t: core.Token, kind: core.Typed_Error_Kind) -> (core.Hook_Regs, core.Action)
 rejudge :: proc(read: Read_Options, mark: Sink_Mark, own: ^Sink, allocator: runtime.Allocator) -> Read_Options

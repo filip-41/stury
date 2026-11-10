@@ -46,10 +46,16 @@ Element_Read :: struct {
 element_step :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hook_Regs, t: core.Token, at: core.Node_Index) -> (core.Hook_Regs, core.Action) {
 	h := &d.reader
 	fld := field_at(regs.b)
-	if fld.kind != .Checked {
+	// A struct's record reads an element as an object. It collects no repeated child, so a repeat is the struct's.
+	structured := fld.kind == .Struct || fld.kind == .Required
+	if fld.kind != .Checked && !structured {
 		return on_token_check_spelled(h, regs, t)
 	}
-	l, _, prefixed := record_rules(h, fld)
+	l: ^rules.Leaf
+	prefixed: bool
+	if !structured {
+		l, _, prefixed = record_rules(h, fld)
+	}
 	if l != nil && .Object not_in l.kinds && prefixed {
 		return element_children(d, regs, t, at, true)
 	}
@@ -61,7 +67,7 @@ element_step :: proc "contextless" (d: ^Document_Read(Check), regs: core.Hook_Re
 	}
 	context = h.ctx
 	attributes := core.attributes_of(d.doc, at)
-	objects := l != nil && l.kinds & (rules.EVERY_KIND - {.Array}) == {.Object}
+	objects := structured || l != nil && l.kinds & (rules.EVERY_KIND - {.Array}) == {.Object}
 	if _, _, held := core.attribute_next(&attributes); !objects && !held {
 		return on_token_check_spelled(h, regs, t)
 	}
@@ -321,7 +327,7 @@ feed_attributes :: proc(d: ^Document_Read(Check), regs: core.Hook_Regs, at: core
 binds :: proc(h: ^Check, key: core.Token, node: Markup_Node) -> bool {
 	owner := field_at(h.frames[h.sp - 1].b)
 	m := &h.plan.meta[owner.meta]
-	if m.members == 0 {
+	if m.members == 0 || len(h.plan.uses) == 0 {
 		return true
 	}
 	buf: [TEXT_ROOM]u8 = ---
@@ -340,7 +346,7 @@ member_text :: #force_inline proc "contextless" (h: ^Check, owner: ^Field, t: co
 	m := &h.plan.meta[owner.meta]
 	at := ([^]Field)(owner.first)
 	for i in 0 ..< int(m.members) {
-		if h.plan.uses[at[i].meta].node == .Text {
+		if len(h.plan.uses) > 0 && h.plan.uses[at[i].meta].node == .Text {
 			return h.plan.meta[at[i].meta].name, true
 		}
 	}

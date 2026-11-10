@@ -23,7 +23,8 @@ Vocab :: enum u8 {
 	Unevaluated,
 	Validation,
 	Format,
-	// The meta-data vocabulary and the annotations a description keeps: `readOnly`, `writeOnly`, `description` and `xml`.
+	// The meta-data vocabulary and the annotations a description keeps: `readOnly`, `writeOnly`, `description`, `title`,
+	// `default`, `examples`, `deprecated`, the content keywords (a vocabulary of their own in the standard) and `xml`.
 	Meta,
 	// The format-assertion vocabulary, which makes `format` assert.
 	Format_Assert,
@@ -150,6 +151,12 @@ KEYWORDS := [?]Row {
 	{"writeOnly", .Meta, .D07, .D2020_12},
 	{"description", .Meta, .D04, .D2020_12},
 	{"xml", .Meta, .D04, .D2020_12},
+	{"title", .Meta, .D04, .D2020_12},
+	{"default", .Meta, .D04, .D2020_12},
+	{"examples", .Meta, .D06, .D2020_12},
+	{"deprecated", .Meta, .D2019_09, .D2020_12},
+	{"contentEncoding", .Meta, .D07, .D2020_12},
+	{"contentMediaType", .Meta, .D07, .D2020_12},
 }
 
 // Whether `name` is a keyword in `draft` when the dialect's vocabularies include its own.

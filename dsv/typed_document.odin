@@ -40,7 +40,7 @@ document_read :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	d := Document_Cells{doc = doc}
 	h := &d.cells
 	frames: [ROW_FRAMES]typed.Frame = ---
-	regs, err := typed.read_start(&h.r, doc.src, plan, doc.as, T, target, read, frames[:], allocator)
+	regs, err := typed.read_start(&h.r, doc.src, plan, doc.as, T, target, read, frames[:], allocator, false)
 	if err.kind != .None {
 		return err
 	}

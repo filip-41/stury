@@ -45,6 +45,11 @@ indirect :: #force_no_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t
 		reason = store_enum(h, t, m.enum_info, dest, m.size)
 	case .Cstring:
 		reason = store_cstring(h, t, dest)
+		when H == Check {
+			if reason == .None && m.rule_set > 0 && check_rules(h, regs, t, fld, dest) == .Stop {
+				return regs, .Stop
+			}
+		}
 	case .Number_Text:
 		reason = .Wrong_Kind
 		n := (^core.Number_Text)(dest)
@@ -884,6 +889,9 @@ on_key :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook_Regs,
 		return regs, .Next
 	}
 	if t.spelling & core.SPELLING_DECODE != 0 {
+		if t.spelling == TEXT_KEY {
+			return find_member(h, regs, t, f, owner, TEXT_NAME)
+		}
 		return key_decoded(h, regs, t, f, owner)
 	}
 	return find_member(h, regs, t, f, owner, string(raw_data(h.src)[t.lo:][:t.n]))
@@ -932,6 +940,13 @@ unknown_cold :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook
 	regs := regs
 	m := &h.plan.meta[owner.meta]
 	end := &h.plan.meta[int(m.block) + int(m.members)]
+	// A read_only member's key is no unknown member's to capture.
+	if m.model != nil && read_only_key(m, key) {
+		if m.forbid {
+			return refuse(h, regs, {kind = .Read_Only, at = t.lo, steps = {0 = core.Name(key)}, n_steps = 1}, t.lo + u64(t.n))
+		}
+		return regs, .Skip
+	}
 	if end.capture >= 0 {
 		rec := &h.plan.fields[end.capture]
 		if f.seen == 0 {
@@ -942,22 +957,24 @@ unknown_cold :: #force_no_inline proc "contextless" (h: ^Reader, regs: core.Hook
 		slot: rawptr
 		reason: core.Typed_Error_Kind
 		// Under `.First` a repeat of a captured key is read into a scratch value, so it is judged and leaves the first.
-		if captured := (^map[string]Raw)(base + uintptr(rec.offset)); h.first_key && key in captured^ {
-			scratch, no_scratch := runtime.mem_alloc(size_of(Raw), align_of(Raw), context.temp_allocator)
+		captured, info := (^runtime.Raw_Map)(base + uintptr(rec.offset)), h.plan.meta[rec.meta].map_info
+		k := key
+		if h.first_key && runtime.__dynamic_map_get(captured, info, info.key_hasher(&k, runtime.map_seed(captured^)), &k) != nil {
+			scratch, no_scratch := runtime.mem_alloc(int(info.vs.size_of_type), 16, context.temp_allocator)
 			if no_scratch != nil {
 				return refuse(h, regs, {kind = .No_Memory, at = t.lo}, t.lo + u64(t.n))
 			}
 			slot = raw_data(scratch)
 		} else {
-			slot, reason = map_slot(h, &h.plan.meta[rec.meta], (^runtime.Raw_Map)(captured), key, t, field_at(u64(uintptr(rec.first))), false)
+			slot, reason = map_slot(h, &h.plan.meta[rec.meta], captured, key, t, field_at(u64(uintptr(rec.first))), false)
 		}
 		if reason != .None {
-			return refuse(h, regs, {kind = reason, at = t.lo}, t.lo + u64(t.n))
+			return refuse(h, regs, {kind = reason, at = t.lo, steps = {0 = core.Name(key)}, n_steps = 1}, t.lo + u64(t.n))
 		}
 		regs.b, regs.c = u64(uintptr(rec.first)), u64(uintptr(slot))
 		return regs, .Next
 	}
-	if h.refuse_unknown && !(m.tagged && key == h.plan.union_tag) {
+	if (h.refuse_unknown || m.forbid) && !(m.tagged && key == h.plan.union_tag) {
 		return refuse(h, regs, {kind = .Unknown_Field, at = t.lo, steps = {0 = core.Name(key)}, n_steps = 1}, t.lo + u64(t.n))
 	}
 	return regs, .Skip

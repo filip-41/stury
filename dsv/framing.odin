@@ -404,7 +404,7 @@ read_row :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Pl
 read_row_spec :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed.Plan, read: typed.Read_Options, allocator: runtime.Allocator, err: ^core.Typed_Error, $S: Spec) -> bool {
 	opts := options_of(it.as)
 	h := Cells{refuse_repeats = read.dups == .Refuse}
-	regs, started := typed.read_start(&h.r, it.src, plan, it.as, T, target, read, it.frames, allocator)
+	regs, started := typed.read_start(&h.r, it.src, plan, it.as, T, target, read, it.frames, allocator, false)
 	h.r.ctx.temp_allocator = runtime.arena_allocator(&it.scratch)
 	if started.kind == .None && plan.marshal == nil {
 		started.kind = .Plan_Mismatch

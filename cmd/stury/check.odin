@@ -50,7 +50,7 @@ check_main :: proc(run: ^Run, cli: ^Cli) -> ! {
 			runner = run_pool(run)
 		}
 		verdict, why := Verdict.Fault, core.Error(nil)
-		if sc != nil {
+		if sc != nil && !(reads_cells(o) && header_fault(file_name(path), data, src.as) != "") {
 			verdict, why = schema_judge(sc, cli.schema, file_name(path), len(cli.files) > 1, data, src, runner)
 		}
 		switch verdict {

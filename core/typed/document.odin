@@ -109,8 +109,11 @@ read_document :: proc(doc: ^core.Document, node: core.Node_Index, T: typeid, tar
 	// The reader passes as an address, which the stack escape check cannot follow through a `Check`'s base `Reader`. No
 	// refusal holds the reader or its frames.
 	h := (^type_of(d.reader))(uintptr(&d.reader))
-	start :: check_start when CHECK else read_start
-	regs, err = start(h, doc.src, plan, doc.as, T, target, read, frames[:], allocator)
+	when CHECK {
+		regs, err = check_start(h, doc.src, plan, doc.as, T, target, read, frames[:], allocator)
+	} else {
+		regs, err = read_start(h, doc.src, plan, doc.as, T, target, read, frames[:], allocator, false)
+	}
 	if err.kind != .None {
 		return err
 	}

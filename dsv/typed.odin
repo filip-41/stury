@@ -218,7 +218,7 @@ read_text :: proc(src: []u8, $S: Spec, T: typeid, target: rawptr, plan: ^typed.P
 	}
 	h := Cells{refuse_repeats = read.dups == .Refuse}
 	frames: [ROW_FRAMES]typed.Frame = ---
-	regs, err := typed.read_start(&h.r, src, plan, bound_as(S, opts), T, target, read, frames[:], allocator)
+	regs, err := typed.read_start(&h.r, src, plan, bound_as(S, opts), T, target, read, frames[:], allocator, false)
 	if err.kind != .None {
 		return err
 	}

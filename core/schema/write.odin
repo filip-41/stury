@@ -297,8 +297,33 @@ body :: proc(w: ^Writer, i: rules.Node_Index, n: ^rules.Node, rl: rules.Rules) {
 			write.close(&w.t)
 		}
 	}
+	if n.title != "" {
+		put(w, "title", n.title)
+	}
 	if n.description != "" {
 		put(w, "description", n.description)
+	}
+	if v, ok := n.default_of.?; ok {
+		key(w, "default")
+		write.value_of(&w.t, v)
+	}
+	if len(n.examples) > 0 {
+		key(w, "examples")
+		write.open_array(&w.t)
+		for v in n.examples {
+			write.value_of(&w.t, v)
+		}
+		write.close(&w.t)
+	}
+	if n.deprecated {
+		key(w, "deprecated")
+		write.value_bool(&w.t, true)
+	}
+	if n.content_encoding != "" {
+		put(w, "contentEncoding", n.content_encoding)
+	}
+	if n.content_media_type != "" {
+		put(w, "contentMediaType", n.content_media_type)
 	}
 	if ref, ok := n.ref.?; ok {
 		put(w, "$ref", ref_to(w, ref))

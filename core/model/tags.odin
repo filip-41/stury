@@ -74,7 +74,7 @@ subject_of :: proc(ti: ^runtime.Type_Info) -> (s: Subject) {
 }
 
 // Reads a `model:` tag into `r`, for a value of `subject`, and for a member when `member`: items separated by commas,
-// each a flag (`optional`, `read_only`, `write_only`, or `-` alone), `alias=` and a name, a bound (`>=N`, `>N`, `<=N`,
+// each a flag (`optional`, `extra`, `read_only`, `write_only`, or `-` alone), `alias=` and a name, a bound (`>=N`, `>N`, `<=N`,
 // `<N`, a range `A..=B` or `A..<B`), `multiple_of=` and a divisor, the same bounds after `len` on a count of code points,
 // elements or members (`len=N` for one count), `format=` and a format's name, or `pattern=` and an ECMA-262 pattern,
 // which takes the rest of the tag, commas included. Spaces around an item, an operator and an operand are dropped. A
@@ -136,6 +136,9 @@ read_item :: proc(item: string, subject: Subject, member: bool, r: ^typed.Member
 	case item == "-" && member:
 		r.skip = true
 		return !r.optional && r.name == "" && r.access == .Read_Write
+	case item == "extra" && member:
+		r.extra = true
+		return true
 	case (item == "read_only" || item == "write_only") && member:
 		role := typed.Access.Read_Only if item == "read_only" else .Write_Only
 		if r.access != .Read_Write && r.access != role {

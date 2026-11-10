@@ -125,8 +125,10 @@ project :: proc(plan: ^typed.Plan) -> string {
 @(private = "file")
 class :: proc(plan: ^typed.Plan, f: typed.Field, m: typed.Meta) -> (string, bool) {
 	#partial switch f.kind {
-	case .String, .Cstring:
+	case .String:
 		return "str", false
+	case .Cstring:
+		return "str", true
 	case .Bool, .Bool_Wide:
 		return "bool", false
 	case .I8 ..= .U64:
@@ -200,12 +202,15 @@ project_block :: proc(p: ^Projection, m: typed.Meta, union_block: bool) -> strin
 ruled_plan :: proc($T: typeid, enums := typed.Enum_Spelling.Name, reads: ^typed.Format_Reads = nil) -> typed.Plan {
 	reg := model.Registry{naming = {enums = enums}}
 	m, _ := model.compile(&reg, T, reads if reads != nil else json.reads(.Json), context.temp_allocator)
-	return m.plan
+	// The model's plan refuses reads, and these tests read by it to compare the read with the schema.
+	plan := m.plan
+	plan.model_plan = .None
+	return plan
 }
 
 // The load description of a plan under test, through a model that holds it.
 description_of :: proc(plan: ^typed.Plan, allocator := context.allocator) -> (rules.Description, core.Error) {
-	m := model.Model(struct{}){plan^}
+	m := model.Model(struct{}){plan = plan^}
 	return model.schema(&m, .Load, allocator)
 }
 

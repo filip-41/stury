@@ -11,7 +11,11 @@ The names ECMA-262 takes in `\\p{...}` are those PropertyValueAliases.txt spells
 on the table of an alias's Oniguruma name: Unicode 16's characters, where Node may have a later Unicode's.
 
 Run from the repository root, with jq 1.8.2 and Node on PATH and jq's libonig:
-    python3 core/regex/unicode_tables.py [/opt/homebrew/opt/oniguruma/lib/libonig.dylib]
+    python3 core/regex/unicode_tables.py [/opt/homebrew/opt/oniguruma/lib/libonig.dylib [PropertyValueAliases.txt]]
+
+Oniguruma 6.9.10 has no Script_Extensions, Bidi_Mirrored, Changes_When_NFKC_Casefolded or Unicode 17 script, so ECMA's
+spellings for those take Node's ranges (its Unicode). Names Node does not take are left out, so a later PropertyValueAliases
+file only adds spellings Node knows.
 """
 import json
 import pathlib
@@ -24,7 +28,7 @@ import urllib.request
 OUT = pathlib.Path(__file__).with_name("unicode_tables.odin")
 BLOBS = OUT.with_name("tables")
 LIBONIG = sys.argv[1] if len(sys.argv) > 1 else "/opt/homebrew/opt/oniguruma/lib/libonig.dylib"
-ALIASES = "https://www.unicode.org/Public/17.0.0/ucd/PropertyValueAliases.txt"
+ALIASES = sys.argv[2] if len(sys.argv) > 2 else "https://www.unicode.org/Public/17.0.0/ucd/PropertyValueAliases.txt"
 
 # The types stury names apart from `\p{...}`: the escapes and the POSIX brackets, by the pattern that
 # matches one character of each.
@@ -139,12 +143,15 @@ def ecma_names(found):
     """ECMA's \\p{...} names: General_Category values bare or after `gc=`, scripts after `sc=` and binary
     properties bare, each with the Oniguruma name of its first alias that has one."""
     aliases, prop = {}, None
-    for line in urllib.request.urlopen(ALIASES).read().decode().splitlines():
+    text = pathlib.Path(ALIASES).read_bytes() if pathlib.Path(ALIASES).exists() else urllib.request.urlopen(ALIASES).read()
+    for line in text.decode().splitlines():
         if m := re.match(r"# (\w+) \((\w+)\)$", line):
             prop = m.groups()
         fields = [f.strip() for f in line.split("#")[0].split(";")]
         if fields[0] in ("gc", "sc"):
             aliases |= {f"{fields[0]}={v}": fields[1:] for v in fields[1:]}
+            if fields[0] == "sc":
+                aliases |= {f"scx={v}": fields[1:] for v in fields[1:]}
         elif prop and fields[0] == prop[1] and fields[1] == "N":
             aliases |= {v: prop for v in prop}
     aliases |= {v: [v] for v in ("Any", "ASCII", "Assigned")}
@@ -152,18 +159,18 @@ def ecma_names(found):
                        check=True)
     points = lambda ranges: {c for lo, hi in ranges for c in range(lo, hi + 1)}
     unassigned = points(found["cn"])
-    chosen, refused, differ = [], [], []
+    chosen, node_only, differ = [], [], []
     for spelling, ranges in json.loads(p.stdout).items():
-        onig = [n for a in aliases[spelling] if (n := a.lower().replace("_", "")) in found]
+        onig = [] if spelling.startswith("scx=") else [n for a in aliases[spelling] if (n := a.lower().replace("_", "")) in found]
         if not onig:
-            refused.append(spelling)
+            node_only.append((spelling, ranges))
             continue
         chosen.append((spelling, onig[0]))
         if d := len((points(found[onig[0]]) ^ points(ranges)) - unassigned):
             differ.append(f"{spelling} {d}")
-    print(f"ECMA \\p names: {len(chosen)}; no table: {' '.join(sorted(refused))}")
+    print(f"ECMA \\p names: {len(chosen)} on Oniguruma's tables, {len(node_only)} on Node's: {' '.join(s for s, _ in node_only if not s.startswith('scx='))}")
     print(f"characters assigned in Unicode 16 that Node's Unicode reads otherwise: {', '.join(sorted(differ))}")
-    return chosen
+    return chosen, node_only
 
 
 def main():
@@ -193,7 +200,9 @@ def main():
     folds = fold_orbits(found)
     multi = multi_folds(folds)
     named = [(n, table_of(n)) for n in names]
-    ecma = [(s, table_of(n)) for s, n in ecma_names(found)]
+    on_onig, on_node = ecma_names(found)
+    found |= {"node " + s: r for s, r in on_node}
+    ecma = [(s, table_of(n)) for s, n in on_onig] + [(s, table_of("node " + s)) for s, _ in on_node]
     types = {k: table_of("type " + k) for k in [*TYPES, *GRAPHEME] if k not in derived}
     types["grapheme_extend"] = table_of("graphemeextend")
     posix = [(k, "TABLE_CLASS_WORD" if k == "word" else table_of("posix " + k)) for k in POSIX]

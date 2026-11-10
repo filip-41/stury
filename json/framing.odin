@@ -547,7 +547,7 @@ read_framed :: proc(it: ^records.Reader, target: rawptr, T: typeid, plan: ^typed
 	}
 	h: typed.Reader
 	json_reader(&h, &opts, S)
-	regs, started := typed.read_start(&h, it.src, plan, it.as, T, target, read, it.frames, allocator)
+	regs, started := typed.read_start(&h, it.src, plan, it.as, T, target, read, it.frames, allocator, false)
 	h.ctx.temp_allocator = runtime.arena_allocator(&it.scratch)
 	if started.kind != .None {
 		err^ = started

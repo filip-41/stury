@@ -476,7 +476,7 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 	case "const":
 		n.const_of = core.Value(core.Node_Ref{doc, v})
 	case "enum":
-		n.enum_of, n.has_enum = enum_values(r, doc, site), true
+		n.enum_of, n.has_enum = values_of(r, doc, site, name), true
 	case "multipleOf":
 		if text, ok := number_of(r, doc, site, name); ok {
 			if d := spell.decimal_of(text); d.head == "" || d.neg {
@@ -536,6 +536,28 @@ read_keyword :: proc(r: ^Reader, sc: Scope, i: rules.Node_Index, at: core.Node_I
 		if text, ok := string_of(r, doc, v); ok {
 			n.description = keep(r, text)
 		}
+	case "title", "contentEncoding", "contentMediaType":
+		if text, ok := string_of(r, doc, v); ok {
+			switch name {
+			case "title":
+				n.title = keep(r, text)
+			case "contentEncoding":
+				n.content_encoding = keep(r, text)
+			case "contentMediaType":
+				n.content_media_type = keep(r, text)
+			}
+		} else {
+			fail(r, site, name, "must be a string")
+		}
+	case "deprecated":
+		if kind != .True && kind != .False {
+			fail(r, site, name, "must be a boolean")
+		}
+		n.deprecated = kind == .True
+	case "default":
+		n.default_of = core.Value(core.Node_Ref{doc, v})
+	case "examples":
+		n.examples = values_of(r, doc, site, name)
 	case "xml":
 		// OpenAPI's keyword: only the node type is read.
 		if node, has := core.member(doc, v, "nodeType"); has {
@@ -682,9 +704,9 @@ types_of :: proc(r: ^Reader, doc: ^core.Document, site: Site) -> (kinds: rules.K
 
 // The values of the array at `site`, as nodes of the document.
 @(private)
-enum_values :: proc(r: ^Reader, doc: ^core.Document, site: Site) -> []core.Value {
+values_of :: proc(r: ^Reader, doc: ^core.Document, site: Site, name: string) -> []core.Value {
 	if core.kind(doc, site.at) != .Array {
-		fail(r, site, "enum", "must be an array")
+		fail(r, site, name, "must be an array")
 		return nil
 	}
 	out := make([dynamic]core.Value, r.d.allocator)

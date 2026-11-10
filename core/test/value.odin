@@ -273,3 +273,26 @@ cell_and_key_order_hash_alike :: proc(t: ^testing.T) {
 	na, nb := core.Node_Ref{&a, core.ROOT}, core.Node_Ref{&b, core.ROOT}
 	testing.expect(t, core.equal(na, nb) && core.hash(na) == core.hash(nb))
 }
+
+@(test)
+a_built_value_keeps_the_comments_of_its_node :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	context.allocator = context.temp_allocator
+	text := "// top\n{\"a\": /* before */ 1, // after\n\"b\": 2}"
+	doc, err := core.build(transmute([]u8)text, json.as(.Jsonc))
+	walktest.expect_nil(t, err)
+	built := core.built_value(core.Node_Ref{&doc, core.ROOT})
+	node := core.Value(core.Node_Ref{&doc, core.ROOT})
+	for role in core.COMMENT_ROLES {
+		want, _ := core.comments(node, role)
+		got, from := core.comments(built, role)
+		testing.expectf(t, len(got) == len(want) && (len(want) == 0) == (from == .None), "root %v: %v against %v", role, got, want)
+		for body, i in want {
+			testing.expectf(t, got[i] == body, "root %v: %q", role, got[i])
+		}
+	}
+	a, _ := core.member(built, "a")
+	bodies, _ := core.comments(a, .Comment)
+	testing.expectf(t, len(bodies) == 1 && bodies[0] == "before", "member a: %v", bodies)
+	testing.expect(t, core.equal(node, built))
+}

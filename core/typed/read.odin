@@ -109,15 +109,20 @@ Reader :: struct {
 
 // Starts a read of `src` into `target`, a value of `plan`'s type. `frames` holds two more than the walk's
 // depth, for the frame below the root's and the root's. The walk then runs with `r` and the returned registers, and
-// `read_end` ends it.
-read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
-	if plan == nil || !core.same_format(plan.readers, as.readers) || plan.type != T {
+// `read_end` ends it. A read that is no `Check` passes `judged` false.
+read_start :: #force_inline proc(r: ^Reader, src: []u8, plan: ^Plan, as: core.As, T: typeid, target: rawptr, read: Read_Options, frames: []Frame, allocator: runtime.Allocator, judged := true) -> (regs: core.Hook_Regs, err: core.Typed_Error) {
+	// A model's plan reads only as its load does: by the load plan, as a check, which judges the rules, into a zeroed
+	// target.
+	if plan == nil || !core.same_format(plan.readers, as.readers) || plan.type != T || plan.model_plan == .Whole || plan.model_plan == .Load && !judged {
 		err = plan_mismatch(plan, as.readers, T)
 		return
 	}
 	if target == nil {
 		err.kind = .Bad_Option
 		return
+	}
+	if plan.model_plan == .Load {
+		runtime.mem_zero(target, type_info_of(T).size)
 	}
 	r.ctx = context
 	r.ctx.allocator = allocator
@@ -262,6 +267,11 @@ hook :: #force_inline proc "contextless" (h: ^$H, regs: core.Hook_Regs, t: core.
 			if f.seen != 0 || regs.b < u64(uintptr(owner.first)) + u64(h.plan.meta[owner.meta].required_end) * size_of(Field) {
 				if at := missing_member(h, f, owner, regs, 0); at >= 0 {
 					return refuse_missing(h, f, owner, {f.a, f.b, f.c + u64(owner.stride)}, regs, t, at)
+				}
+				if sm := h.plan.meta[owner.meta].model; sm != nil && sm.settle != nil {
+					if kind := sm.settle(h, sm, f, owner, regs); kind != .None {
+						return refuse(h, {f.a, f.b, f.c + u64(owner.stride)}, {kind = kind, at = t.lo}, t.lo + u64(t.n))
+					}
 				}
 			}
 		} else if owner.kind != .Struct {
@@ -478,6 +488,11 @@ close_container :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, own: 
 		}
 	}
 	back := core.Hook_Regs{f.a, f.b, f.c + u64(own.stride)}
+	when H == Check {
+		if h.plan.meta[owner.meta].rule_set > 0 && count_rules(h, f, owner, regs, t) == .Stop {
+			return back, .Stop
+		}
+	}
 	#partial switch owner.kind {
 	case .Raw, .Hook, .Value:
 		// A container inside the value read whole counts in `seen`, with no frame of its own.
@@ -494,6 +509,11 @@ close_container :: #force_no_inline proc "contextless" (h: ^$H, f: ^Frame, own: 
 	case .Required:
 		if at := missing_member(h, f, owner, regs, 0); at >= 0 {
 			return refuse_missing(h, f, owner, back, regs, t, at)
+		}
+		if sm := h.plan.meta[owner.meta].model; sm != nil && sm.settle != nil {
+			if kind := sm.settle(h, sm, f, owner, regs); kind != .None {
+				return refuse(h, back, {kind = kind, at = t.lo}, t.lo + u64(t.n))
+			}
 		}
 	case .Array:
 		if regs.c != regs.a {

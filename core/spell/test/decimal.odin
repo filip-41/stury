@@ -25,7 +25,10 @@ decimals_compare_and_divide_exactly :: proc(t: ^testing.T) {
 		{"0.3", "0.1", 1, true, true},
 		{"0.35", "0.1", 1, false, true},
 		{"7", "0", 1, false, true},
-		{"12345678901234567890123", "100000000000000000007", 1, false, false},
+		{"12345678901234567890123", "100000000000000000007", 1, false, true},
+		{"300000000000000000021", "100000000000000000007", 1, true, true},
+		{"3e30", "100000000000000000007", 1, false, true},
+		{"1e500", "100000000000000000007", 1, false, false},
 	}
 	for c in cases {
 		x, y := spell.decimal_of(c.x), spell.decimal_of(c.y)

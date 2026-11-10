@@ -87,6 +87,24 @@ test_ecma_rules :: proc(t: ^testing.T) {
 		{`(?<\u0061b>x)`, "x", 0, 1, 0, 1}, // a group name may be written with escapes
 		{`\&\%[\&\%]`, "x&%%", 1, 4, -1, -1}, // an escaped ASCII punctuation character is itself
 		{`^\/[^\*\?\&\%]*$`, "/a&", -1, -1, -1, -1},
+		{`\p{Bidi_M}`, "(", 0, 1, -1, -1},
+		{`\p{Bidi_M}`, "a", -1, -1, -1, -1},
+		{`\p{Bidi_Mirrored}`, "\u2208", 0, 3, -1, -1},
+		{`\p{CWKCF}`, "A", 0, 1, -1, -1},
+		{`\p{CWKCF}`, "a", -1, -1, -1, -1},
+		{`\p{CWKCF}`, "\u00a0", 0, 2, -1, -1},
+		{`\p{scx=Common}`, "\u3001", -1, -1, -1, -1},
+		{`\p{sc=Common}`, "\u3001", 0, 3, -1, -1},
+		{`\p{scx=Hira}`, "\u3001", 0, 3, -1, -1},
+		{`\p{Script_Extensions=Latin}`, "\u0363", 0, 2, -1, -1},
+		{`^\p{sc=Beria_Erfe}+$`, "\U00016ea0\U00016ed3", 0, 8, -1, -1},
+		{`\p{sc=Beria_Erfe}`, "\U00016e9f\U00016ed4", -1, -1, -1, -1},
+		{`^\p{sc=Sidetic}+$`, "\U00010940\U00010959", 0, 8, -1, -1},
+		{`\p{sc=Sidetic}`, "\U0001093f\U0001095a", -1, -1, -1, -1},
+		{`^\p{sc=Tai_Yo}+$`, "\U0001e6c0\U0001e6ff", 0, 8, -1, -1},
+		{`\p{sc=Tai_Yo}`, "\U0001e6bf\U0001e700", -1, -1, -1, -1},
+		{`^\p{sc=Tolong_Siki}+$`, "\U00011db0\U00011de9", 0, 8, -1, -1},
+		{`\p{sc=Tolong_Siki}`, "\U00011daf\U00011dea", -1, -1, -1, -1},
 	}
 	for c in cases {
 		f := search(c.pattern, c.text)
@@ -150,7 +168,7 @@ test_regex_jq_group_names :: proc(t: ^testing.T) {
 test_ecma_refusals :: proc(t: ^testing.T) {
 	refused := [?]string {
 		`(a)\1`, `\k<x>`, `(?<x>a)\k<x>`, `(?<=a)b`, `(?<!a)b`, `a{`, `a{2,1}`, `]`, `}`, `\q`, `[b-a]`, `[\d-z]`,
-		`\u{110000}`, `\p{Nope}`, `\p{scx=Latn}`, `\p{letter}`, `\p{Greek}`, `\p{Word}`, `\p{gc=Greek}`, `(?<1>a)`,
+		`\u{110000}`, `\p{Nope}`, `\p{scx=Nope}`, `\p{scx}`, `\p{letter}`, `\p{Greek}`, `\p{Word}`, `\p{gc=Greek}`, `(?<1>a)`,
 		`(?<n>a)(?<n>b)`, `(?=a)*`, `^*`, `a**`, `(a`, `a)`, `(?x)`, `\c1`, `\00`,
 	}
 	for pattern in refused {

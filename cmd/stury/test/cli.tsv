@@ -2234,6 +2234,9 @@ check	["check", "--schema", "s.json", "--from", "ndjson"]	"{\"a\":1}\n7\n"	{"s.j
 check	["check", "--from", "csv", "--schema", "s.json"]	"n,m\n1,x\n2,y\n"	{"s.json": "{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\"}}}}"}	null	null	null	0	""	""
 # check --schema: A table schema counts the rows.
 check	["check", "--from", "csv", "--schema", "s.json"]	"n,m\n1,x\n2,y\n"	{"s.json": "{\"type\":\"array\",\"minItems\":3}"}	null	null	null	1	""	"<stdin>:1:1: Too few elements or members (.minItems)\n"
+check	["check", "--from", "csv", "--schema", "s.json"]	"n,n\n1,2\n"	{"s.json": "{\"type\":\"array\"}"}	null	null	null	5	""	"stury: parse error: <stdin>:1:3: Duplicate header name \"n\"\n"
+check	["check", "--from", "csv"]	"n,n\n"	{}	null	null	null	5	""	"stury: parse error: <stdin>:1:3: Duplicate header name \"n\"\n"
+check	["check", "--from", "csv"]	"n,m\n"	{}	null	null	null	0	""	""
 # check --schema: A schema of one row fails a table, which is an array.
 check	["check", "--from", "csv", "--schema", "s.json"]	"n,m\n1,x\n"	{"s.json": "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\"}}}"}	null	null	null	1	""	"<stdin>:1:1: Value is not of the allowed type (.type)\n"
 # check --schema: The same for tsv.

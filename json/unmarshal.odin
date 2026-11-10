@@ -214,7 +214,7 @@ read_value :: proc(src: []u8, lo, cut: u64, $S: Spec, target: rawptr, T: typeid,
 		regs, started = typed.check_start(&h, text, plan, bound_as(S, opts), T, target, read, untracked_frames(frames), allocator)
 	} else {
 		json_reader(&h, &walk_opts, S)
-		regs, started = typed.read_start(&h, text, plan, bound_as(S, opts), T, target, read, frames, allocator)
+		regs, started = typed.read_start(&h, text, plan, bound_as(S, opts), T, target, read, frames, allocator, false)
 	}
 	h.ctx.temp_allocator = scratch
 	if started.kind != .None {

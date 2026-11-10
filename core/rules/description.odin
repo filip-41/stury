@@ -80,6 +80,13 @@ Node :: struct {
 	resource:               Node_Index,
 	// The node's `description`, which a sample writes as a comment.
 	description:            string,
+	// The annotations a schema holds beside its rules: judged by nothing and written back as they were read.
+	title:                  string,
+	content_encoding:       string,
+	content_media_type:     string,
+	deprecated:             bool,
+	default_of:             Maybe(core.Value),
+	examples:               []core.Value,
 }
 
 // An `if` with its `then` and `else`.
@@ -159,6 +166,7 @@ description_destroy :: proc(d: ^Description) {
 	for n in d.nodes {
 		delete(n.any_of)
 		delete(n.enum_of)
+		delete(n.examples)
 		delete(n.all_of)
 		delete(n.one_of)
 	}

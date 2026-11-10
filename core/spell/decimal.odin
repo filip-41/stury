@@ -96,7 +96,7 @@ decimal_compare :: proc(x, y: Decimal) -> (order: int, exact: bool) {
 	return -mag if x.neg else mag, exact
 }
 
-// The most digits a divisor of `decimal_multiple_of` may have, whose square a u128 holds.
+// The most digits a divisor may have for the u128 route of `decimal_multiple_of`, whose square a u128 holds.
 MULTIPLE_DIGITS :: 19
 
 // Whether `x` is a whole multiple of `y`, for a `y` of at most `MULTIPLE_DIGITS` digits. `exact` is false for a longer
@@ -111,13 +111,16 @@ decimal_multiple_of :: proc(x, y: Decimal) -> (multiple, exact: bool) {
 		return x.head == "", true
 	case x.head == "":
 		return true, true
-	case ny > MULTIPLE_DIGITS:
+	case ny > LONG_DIVISOR_DIGITS:
 		return false, false
 	}
 	// Neither has a trailing zero, so a `y` that ends below `x` leaves a fraction.
 	ex, ey := x.point - i128(len(x.head) + len(x.tail)), y.point - i128(ny)
 	if ex < ey {
 		return false, true
+	}
+	if ny > MULTIPLE_DIGITS {
+		return long_multiple_of(x, y, ex - ey)
 	}
 	m, r := u128(0), u128(0)
 	for s in ([2]string{y.head, y.tail}) {
@@ -138,4 +141,65 @@ decimal_multiple_of :: proc(x, y: Decimal) -> (multiple, exact: bool) {
 		base = base * base % m
 	}
 	return r * pow % m == 0, true
+}
+
+// The most digits a divisor that `long_multiple_of` takes may have, and the most zeros it appends to the dividend.
+LONG_DIVISOR_DIGITS :: 200
+LONG_SHIFT_DIGITS :: 400
+
+// `decimal_multiple_of` for a divisor of more than `MULTIPLE_DIGITS` digits: the remainder of the dividend's digits
+// followed by `shift` zeros, by long division in decimal. The remainder never has more digits than the divisor.
+@(private = "file")
+long_multiple_of :: proc(x, y: Decimal, shift: i128) -> (multiple, exact: bool) {
+	if shift > LONG_SHIFT_DIGITS {
+		return false, false
+	}
+	width := len(y.head) + len(y.tail) + 1
+	m: [LONG_DIVISOR_DIGITS + 1]u8
+	r: [LONG_DIVISOR_DIGITS + 1]u8
+	at := 1
+	for s in ([2]string{y.head, y.tail}) {
+		for c in transmute([]u8)s {
+			m[at] = c - '0'
+			at += 1
+		}
+	}
+	below :: proc(r, m: []u8) -> bool {
+		for i in 0 ..< len(r) {
+			if r[i] != m[i] {
+				return r[i] < m[i]
+			}
+		}
+		return false
+	}
+	step :: proc(r, m: []u8, digit: u8) {
+		copy(r, r[1:])
+		r[len(r) - 1] = digit
+		for !below(r, m) {
+			borrow: i8
+			for i := len(r) - 1; i >= 0; i -= 1 {
+				d := i8(r[i]) - i8(m[i]) - borrow
+				borrow = 0
+				if d < 0 {
+					d += 10
+					borrow = 1
+				}
+				r[i] = u8(d)
+			}
+		}
+	}
+	for s in ([2]string{x.head, x.tail}) {
+		for c in transmute([]u8)s {
+			step(r[:width], m[:width], c - '0')
+		}
+	}
+	for _ in 0 ..< shift {
+		step(r[:width], m[:width], 0)
+	}
+	for d in r[:width] {
+		if d != 0 {
+			return false, true
+		}
+	}
+	return true, true
 }
